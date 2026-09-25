@@ -15,17 +15,17 @@
 #include "gpu/guest_memory.h"
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/vulkan/vk_backend.h"
 #include "gpu/vulkan/vk_capture.h"
 #include "gpu/vulkan/vk_compute_hazard.h"
-#include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
-#include "gpu/vulkan/vk_memory.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_hash.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_perf.h"
 #include "gpu/vulkan/vk_render_target.h"
+#include "gpu/vulkan/vk_rhi.h"
 #include "gpu/vulkan/vk_texture_cache.h"
 #include "gpu/vulkan/vk_trace.h"
 #include "gpu/vulkan/vk_tiling.h"
@@ -89,7 +89,7 @@ DELTA_OPTION(bool, kCsWbAudit, "DELTA_GPU_CS_WB_AUDIT", false);
 // Put compute range buffers in VRAM rather than system RAM, with a host-cached
 // mirror for the staging edges. The GPU reads and writes these every dispatch,
 // and doing that across PCIe was 282 ms of a 457 ms SotC frame. No-op on a UMA
-// part, where one buffer is already both (see FindDeviceMemoryType).
+// part, where one buffer is already both (see SplitVram).
 DELTA_OPTION(bool, kCsVram, "DELTA_GPU_CSVRAM", true);
 DELTA_OPTION(bool, kCsGpuTiling, "DELTA_GPU_CS_GPU_TILING", true);
 // Bind the guest pages of a tiled surface straight into the tiling shader
@@ -208,156 +208,105 @@ static_assert(ComputeInfo::kMaxResources == gcn::kMaxCsResources);
 // layout depend only on the code, so only the descriptor set + push constants +
 // storage buffers are rebuilt per dispatch.
 struct CsPipe {
-  VkPipeline pipe = VK_NULL_HANDLE;
-  VkPipelineLayout layout = VK_NULL_HANDLE;
-  VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+  rhi::Pipeline* pipe = nullptr;
+  rhi::PipelineLayout* layout = nullptr;
+  rhi::BindGroupLayout* set_layout = nullptr;
   u32 num_res = 0;
   int gds_binding = -1;
 };
 
-// The GDS scratchpad: one small device-local buffer for the whole device, which
-// is what the hardware's global data share is. Created on first use and left
-// alone afterwards; the counters in it are the title's to manage.
+// The GDS scratchpad: one small buffer for the whole device, which is what the
+// hardware's global data share is. Created on first use and left alone
+// afterwards; the counters in it are the title's to manage.
 struct GdsBuffer {
-  VkBuffer buf = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
+  rhi::Buffer* buf = nullptr;
   void* map = nullptr;
-  static constexpr VkDeviceSize kBytes = 64 * 1024;
+  static constexpr u64 kBytes = 64 * 1024;
 };
 GdsBuffer g_gds;
 
 std::unordered_map<u64, CsPipe> g_cs_pipes;
 
-// Memory for a buffer the GPU alone touches: VRAM, host visibility irrelevant.
-// Only worth splitting off a host mirror when the device heap is NOT already
-// cheap for the CPU to read. On a UMA part the one buffer serves both sides
-// and FindComputeMemoryType already returns it, so report none here.
-u32 FindDeviceMemoryType(u32 type_bits) {
-  VkPhysicalDeviceMemoryProperties properties;
-  vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &properties);
-  constexpr VkMemoryPropertyFlags kUnified =
-      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-      VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
-  for (u32 i = 0; i < properties.memoryTypeCount; i++)
-    if ((type_bits & (1u << i)) &&
-        (properties.memoryTypes[i].propertyFlags & kUnified) == kUnified)
-      return UINT32_MAX;
-  for (u32 i = 0; i < properties.memoryTypeCount; i++)
-    if ((type_bits & (1u << i)) &&
-        (properties.memoryTypes[i].propertyFlags &
-         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
-      return i;
-  return UINT32_MAX;
+// Every read and write: the dependency the old ALL_COMMANDS/MEMORY barriers
+// expressed.
+constexpr u32 kAccessAll = rhi::kAccessAllRead | rhi::kAccessAllWrite;
+constexpr u32 kAccessComputeRW =
+    rhi::kAccessComputeRead | rhi::kAccessComputeWrite;
+constexpr u32 kAccessCopyRW = rhi::kAccessCopyRead | rhi::kAccessCopyWrite;
+
+// A buffer the GPU alone touches goes to VRAM, with a separate host mirror,
+// only when the device heap is NOT already cheap for the CPU to read. On a UMA
+// part one host-cached buffer serves both sides.
+bool SplitVram() {
+  const bool split = !Device().caps().unified_memory;
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    BASE_LOGI("gpuvk", "cs buffers: {}",
+              split ? "VRAM with a host-cached mirror"
+                    : "one host-cached buffer (unified memory)");
+  }
+  return split;
 }
 
-u32 FindComputeMemoryType(u32 type_bits) {
-  VkPhysicalDeviceMemoryProperties properties;
-  vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &properties);
-  u32 best = UINT32_MAX;
-  int best_score = -1;
-  for (u32 i = 0; i < properties.memoryTypeCount; i++) {
-    if (!(type_bits & (1u << i)))
-      continue;
-    const VkMemoryPropertyFlags flags = properties.memoryTypes[i].propertyFlags;
-    constexpr VkMemoryPropertyFlags kRequired =
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    if ((flags & kRequired) != kRequired)
-      continue;
-    const int score = ((flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? 4 : 0) +
-                      ((flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? 2 : 0);
-    if (score > best_score) {
-      best = i;
-      best_score = score;
-    }
-  }
-  // Report the choice once: reading back from a write-combined heap is ~100
-  // MB/s, which is invisible in the code and obvious in the numbers.
-  static bool logged = false;
-  if (!logged && best != UINT32_MAX) {
-    logged = true;
-    const VkMemoryPropertyFlags f = properties.memoryTypes[best].propertyFlags;
-    BASE_LOGI("gpuvk", "cs staging memory type {}:{}{}{}{}", best,
-              (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? " DEVICE_LOCAL" : "",
-              (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? " HOST_VISIBLE" : "",
-              (f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? " HOST_COHERENT" : "",
-              (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? " HOST_CACHED" : "");
-  }
-  return best == UINT32_MAX
-             ? FindMemoryType(type_bits,
-                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-             : best;
+// kReadback is the host-cached memory the CPU side of compute wants: reading
+// back from a write-combined heap is ~100 MB/s, which is invisible in the code
+// and obvious in the numbers.
+rhi::Buffer* CreateCsBuffer(u64 size, u32 usage, rhi::MemoryKind memory) {
+  rhi::BufferDesc desc;
+  desc.size = size;
+  desc.usage = usage;
+  desc.memory = memory;
+  return Device().CreateBuffer(desc);
 }
 
 // The set-0 layout every compute pipeline over `num_res` guest ranges uses.
-VkDescriptorSetLayout CsSetLayout(u32 num_res,
+rhi::BindGroupLayout* CsSetLayout(u32 num_res,
                                   int gds_binding,
                                   int guest_memory_binding) {
-  VkDescriptorSetLayoutBinding binds[ComputeInfo::kMaxResources + 2];
-  u32 nbind = 0;
+  rhi::BindGroupLayoutDesc desc;
   for (u32 i = 0; i < num_res; i++)
-    binds[nbind++] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                      VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    desc.bindings.push_back(
+        {i, rhi::BindingType::kStorageBuffer, rhi::kStageCompute});
   // The GDS scratchpad sits past the resources; it is ours, not a guest range.
   if (gds_binding >= 0)
-    binds[nbind++] = {static_cast<u32>(gds_binding),
-                      VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                      VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    desc.bindings.push_back({static_cast<u32>(gds_binding),
+                             rhi::BindingType::kStorageBuffer,
+                             rhi::kStageCompute});
   if (guest_memory_binding >= 0)
-    binds[nbind++] = {static_cast<u32>(guest_memory_binding),
-                      VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                      VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-  VkDescriptorSetLayoutCreateInfo sl{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-  sl.bindingCount = nbind;
-  sl.pBindings = binds;
-  VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-  vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr, &layout);
-  return layout;
+    desc.bindings.push_back({static_cast<u32>(guest_memory_binding),
+                             rhi::BindingType::kStorageBuffer,
+                             rhi::kStageCompute});
+  return Device().CreateBindGroupLayout(desc);
 }
 
 // 16 user-data dwords, then one bound (in dwords) per SSBO binding. The bound
 // is what the emitted SSBO accesses clamp to; the SPIR-V block for a compute
 // stage declares the same 16 + 48 shape, 256 B total, the driver max this
 // backend runs against.
-VkPipelineLayout CsPipelineLayout(VkDescriptorSetLayout set_layout) {
-  VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64 * 4};
-  VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  li.setLayoutCount = 1;
-  li.pSetLayouts = &set_layout;
-  li.pushConstantRangeCount = 1;
-  li.pPushConstantRanges = &pcr;
-  VkPipelineLayout layout = VK_NULL_HANDLE;
-  vkCreatePipelineLayout(g_dev.device, &li, nullptr, &layout);
-  return layout;
+rhi::PipelineLayout* CsPipelineLayout(rhi::BindGroupLayout* set_layout) {
+  rhi::PipelineLayoutDesc desc;
+  desc.groups = {set_layout};
+  desc.push_constant_bytes = 64 * 4;
+  desc.push_constant_stages = rhi::kStageCompute;
+  return Device().CreatePipelineLayout(desc);
 }
 
-VkPipeline CreateCsPipeline(VkPipelineLayout layout,
-                            const std::vector<u32>& spirv) {
-  VkShaderModule cs = MakeModule(spirv.data(), spirv.size() * 4);
-  VkComputePipelineCreateInfo pi{
-      VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-  pi.flags = VK_PIPELINE_CREATE_DISPATCH_BASE_BIT;
-  pi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  pi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-  pi.stage.module = cs;
-  pi.stage.pName = "main";
-  pi.layout = layout;
-  VkPipeline pipe = VK_NULL_HANDLE;
-  if (vkCreateComputePipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi,
-                               nullptr, &pipe) != VK_SUCCESS)
-    pipe = VK_NULL_HANDLE;
-  vkDestroyShaderModule(g_dev.device, cs, nullptr);
-  return pipe;
+rhi::Pipeline* CreateCsPipeline(rhi::PipelineLayout* layout,
+                                const std::vector<u32>& spirv) {
+  rhi::ComputePipelineDesc desc;
+  desc.layout = layout;
+  desc.code = rhi::Code(spirv);
+  desc.dispatch_base = true;
+  return Device().CreateComputePipeline(desc);
 }
 
 // Pipelines compiled ahead of their first dispatch (render::PrebuildComputePipeline),
 // by module content and layout shape.
 struct PrebuiltCs {
-  VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
-  VkPipelineLayout layout = VK_NULL_HANDLE;
-  VkPipeline pipe = VK_NULL_HANDLE;
+  rhi::BindGroupLayout* set_layout = nullptr;
+  rhi::PipelineLayout* layout = nullptr;
+  rhi::Pipeline* pipe = nullptr;
 };
 std::mutex g_prebuilt_mutex;
 std::unordered_map<u64, std::shared_future<PrebuiltCs>> g_prebuilt;
@@ -407,7 +356,7 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
     return nullptr;
   cp.layout = CsPipelineLayout(cp.set_layout);
   if (!cp.layout) {
-    vkDestroyDescriptorSetLayout(g_dev.device, cp.set_layout, nullptr);
+    Device().Destroy(cp.set_layout);
     return nullptr;
   }
   if (kCsSyncReport)
@@ -424,33 +373,35 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   NotePipelineBuilt();
   if (!cp.pipe) {
     BASE_LOGI("gpuvk", "compute pipeline failed");
-    vkDestroyPipelineLayout(g_dev.device, cp.layout, nullptr);
-    vkDestroyDescriptorSetLayout(g_dev.device, cp.set_layout, nullptr);
+    Device().Destroy(cp.layout);
+    Device().Destroy(cp.set_layout);
     return nullptr;
   }
-  NameObject(VK_OBJECT_TYPE_PIPELINE, (u64)cp.pipe, "cs %#llx",
-             (unsigned long long)ci.cs_addr);
+  if (Device().caps().debug_labels) {
+    char name[32];
+    std::snprintf(name, sizeof(name), "cs %#llx",
+                  (unsigned long long)ci.cs_addr);
+    Device().SetName(cp.pipe, name);
+  }
   g_cs_pipes[key] = cp;
   return &g_cs_pipes[key];
 }
 
-// Persistent compute staging. Dispatches are serialized behind the fence, so
-// one set of staging buffers (+ descriptor pool + command buffer) is reused
-// across every dispatch: this avoids the per-dispatch
-// vkCreateBuffer/vkAllocateMemory/pool/cmd- buffer churn (~3ms/frame). The
-// buffers are HOST_CACHED so the copy-BACK read after the dispatch hits cache
-// instead of stalling on write-combined memory (which was ~25ms/frame for
-// Doom64's 8 MB atlas: the dominant compute cost).
+// Persistent compute staging. Dispatches are serialized behind the batch, so
+// one set of staging buffers (+ command list) is reused across every
+// dispatch: this avoids the per-dispatch buffer/memory/command-buffer churn
+// (~3ms/frame). The buffers are host-cached so the copy-BACK read after the
+// dispatch hits cache instead of stalling on write-combined memory (which was
+// ~25ms/frame for Doom64's 8 MB atlas: the dominant compute cost).
 struct CsStage {
-  VkBuffer buf = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
+  rhi::Buffer* buf = nullptr;
   void* map = nullptr;
-  VkDeviceSize cap = 0;
+  u64 cap = 0;
 };
 
 CsStage g_cs_stage[ComputeInfo::kMaxResources];
-VkDescriptorPool g_cs_desc_pool = VK_NULL_HANDLE;
-VkCommandBuffer g_cs_cmd = VK_NULL_HANDLE;
+// The open batch's command list.
+rhi::CommandList* g_cs_list = nullptr;
 
 bool BuildCsImageLayouts(const ComputeInfo::Res& res,
                          gcn::TextureLayout32& tiled,
@@ -778,17 +729,15 @@ bool WritebackCsImage(const ComputeInfo::Res& res, const void* src) {
 // LAZILY, only when a draw / DMA / frame boundary needs guest memory to be
 // current (FlushCsWrites), not after every dispatch.
 struct CsRange {
-  VkBuffer buf = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
+  rhi::Buffer* buf = nullptr;
   void* map = nullptr;
-  VkDeviceSize cap = 0;
+  u64 cap = 0;
   // DELTA_GPU_CSVRAM: `buf` is in VRAM (what the shaders bind) and `map` is a
   // separate host-cached mirror, moved across by DMA at the staging edges. The
   // shaders then read and write at VRAM bandwidth instead of over PCIe, which
   // is worth ~6x of the GPU time in a SotC frame; the CPU keeps a cached
   // pointer, which the mapped-VRAM alternative does not.
-  VkBuffer host_buf = VK_NULL_HANDLE;
-  VkDeviceMemory host_mem = VK_NULL_HANDLE;
+  rhi::Buffer* host_buf = nullptr;
   bool device_local = false;
   bool readback_pending = false;  // copy recorded, not yet waited on
   bool mirror_current = false;    // map holds the buffer's contents
@@ -801,11 +750,11 @@ struct CsRange {
   bool pending_batch = false;  // referenced by a batch not yet seen complete
   u64 batch_id = 0;            // that batch (see CsBatchWaitId)
   bool image_staging = false;
-  // Buffer memory IS the guest pages (VK_EXT_external_memory_host): no staging
-  // copy in, no writeback out. See CsRangeImportGuest.
+  // Buffer memory IS the guest pages (an imported host allocation): no
+  // staging copy in, no writeback out. See CsRangeImportGuest.
   bool imported = false;
   u64 imported_base = 0;
-  VkDeviceSize imported_offset = 0;  // base - page-aligned import base
+  u64 imported_offset = 0;  // base - page-aligned import base
   // Staged from a live render-target image rather than guest memory; content
   // changes every frame regardless of the guest bytes, so validity is
   // per-frame (last_rt_frame), never the guest content hash.
@@ -844,34 +793,34 @@ struct TileTable;
 const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
                               const gcn::TextureLayout32& linear,
                               bool packed = false);
-void RecordImageTiling(VkCommandBuffer c,
+void RecordImageTiling(rhi::CommandList* c,
                        const TileTable& t,
-                       VkBuffer tiled,
-                       VkDeviceSize tiled_off,
-                       VkDeviceSize tiled_bytes,
-                       VkBuffer linear,
-                       VkDeviceSize linear_bytes,
+                       rhi::Buffer* tiled,
+                       u64 tiled_off,
+                       u64 tiled_bytes,
+                       rhi::Buffer* linear,
+                       u64 linear_bytes,
                        bool detile,
                        u32 mips = 0,
                        u32 layers = 0,
                        bool depth16 = false);
-VkBuffer AcquireScratch(VkDeviceSize bytes);
+rhi::Buffer* AcquireScratch(u64 bytes);
 // A scratch that already holds revision `seq` of the bytes at `base`+`off`
 // converted with `table`, or a fresh one (`*fresh` says which).
-VkBuffer AcquireView(VkDeviceSize bytes,
-                     u64 base,
-                     VkDeviceSize off,
-                     const TileTable* table,
-                     u64 seq,
-                     bool* fresh);
+rhi::Buffer* AcquireView(u64 bytes,
+                         u64 base,
+                         u64 off,
+                         const TileTable* table,
+                         u64 seq,
+                         bool* fresh);
 // What a scratch holds once the conversion recorded into it has run.
-void StampView(VkBuffer view,
+void StampView(rhi::Buffer* view,
                u64 base,
-               VkDeviceSize off,
+               u64 off,
                const TileTable* table,
                u64 seq);
-bool RecordTruthImport(CsRange& e, u64 base, VkDeviceSize bytes);
-bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size);
+bool RecordTruthImport(CsRange& e, u64 base, u64 bytes);
+bool CsRangeEnsureBuffer(CsRange& e, u64 size);
 void CsBatchBeginImpl();
 void MarkPending(CsRange& e);
 // The linear side of a bridge copy for a truth range (its own buffer holds
@@ -880,10 +829,10 @@ CsRange g_truth_bridge_scratch;
 u64 g_cs_scratch_owner = 0;  // the dispatch or bridge being recorded
 u64 g_cs_scratch_bytes = 0;
 
-// Buffers a frame command buffer reads: destroyed two BeginFrames after
-// retirement, like ReleaseRetiredTextures, once every command buffer that
-// could reference them has been fence-waited.
-std::vector<std::pair<VkBuffer, VkDeviceMemory>> g_cs_frame_retired;
+// Buffers a frame command list reads: destroyed two BeginFrames after
+// retirement, like ReleaseRetiredTextures, once every command list that
+// could reference them has retired.
+std::vector<rhi::Buffer*> g_cs_frame_retired;
 
 bool CsFrameReferenced(const CsRange& e) {
   return e.frame_ref >= 0 && e.frame_ref + 2 > g_frame.num;
@@ -894,12 +843,10 @@ bool CsFrameReferenced(const CsRange& e) {
 // frame, so without this every frame was ~50 buffer+memory pairs allocated
 // and 20-60 ms of driver time.
 struct CsFreeBuffer {
-  VkBuffer buf = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
-  VkBuffer host_buf = VK_NULL_HANDLE;
-  VkDeviceMemory host_mem = VK_NULL_HANDLE;
+  rhi::Buffer* buf = nullptr;
+  rhi::Buffer* host_buf = nullptr;
   void* map = nullptr;
-  VkDeviceSize cap = 0;
+  u64 cap = 0;
   bool device_local = false;
 };
 std::vector<CsFreeBuffer> g_cs_free;
@@ -907,53 +854,29 @@ u64 g_cs_free_bytes = 0, g_cs_recycled_n = 0;
 
 // Move a split range between its host mirror and its VRAM buffer, bracketed by
 // barriers against the dispatches on either side. Recorded rather than
-// submitted, so the caller decides which command buffer carries it.
-void RecordStagingCopy(VkCommandBuffer c,
+// submitted, so the caller decides which command list carries it.
+void RecordStagingCopy(rhi::CommandList* c,
                        CsRange& e,
-                       VkDeviceSize bytes,
+                       u64 bytes,
                        bool to_device) {
   if (!e.device_local || !e.host_buf || !e.buf || !bytes)
     return;
   if (bytes > e.cap)
     bytes = e.cap;
-  VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-  b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  b.buffer = e.buf;
-  b.offset = 0;
-  b.size = VK_WHOLE_SIZE;
   // TRANSFER on both sides, not just compute and host. A batch stages the same
   // range more than once (GTA:SA restages some buffers ~170 times in one cs
   // batch), and a barrier that names only COMPUTE|HOST as its source leaves
   // copy-after-copy on the same buffer unordered. The later copy may then land
   // first and the dispatch reads the OLDER guest snapshot.
-  b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                    VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
-                    VK_ACCESS_TRANSFER_READ_BIT;
-  b.dstAccessMask =
-      to_device ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT;
-  vkCmdPipelineBarrier(
-      c,
-      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT |
-          VK_PIPELINE_STAGE_TRANSFER_BIT,
-      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &b, 0, nullptr);
-  const VkBufferCopy region{0, 0, bytes};
+  c->Barrier(kAccessComputeRW | rhi::kAccessHostWrite | kAccessCopyRW,
+             to_device ? rhi::kAccessCopyWrite : rhi::kAccessCopyRead);
   if (to_device)
-    vkCmdCopyBuffer(c, e.host_buf, e.buf, 1, &region);
+    c->CopyBuffer(e.buf, 0, e.host_buf, 0, bytes);
   else
-    vkCmdCopyBuffer(c, e.buf, e.host_buf, 1, &region);
-  b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                    VK_ACCESS_HOST_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
-                    VK_ACCESS_TRANSFER_READ_BIT;
-  // The readback direction writes host_buf, and nothing above covers it: the
-  // leading barrier is on e.buf, which is that copy's SOURCE.
-  b.buffer = to_device ? e.buf : e.host_buf;
-  vkCmdPipelineBarrier(
-      c, VK_PIPELINE_STAGE_TRANSFER_BIT,
-      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT |
-          VK_PIPELINE_STAGE_TRANSFER_BIT,
-      0, 0, nullptr, 1, &b, 0, nullptr);
+    c->CopyBuffer(e.host_buf, 0, e.buf, 0, bytes);
+  // Global, so it also covers host_buf, which the readback direction writes.
+  c->Barrier(rhi::kAccessCopyWrite,
+             kAccessComputeRW | rhi::kAccessHostRead | kAccessCopyRW);
 }
 
 bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b) {
@@ -987,11 +910,11 @@ bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b) {
 // range. Both bridge directions (StageCsRangeFromRt / UploadCsRangeToRt) use
 // the same lookup, shape checks and barrier recipe.
 struct CsAliasedImage {
-  VkImage image = VK_NULL_HANDLE;
+  rhi::Texture* texture = nullptr;
   u32 w = 0, h = 0;
   u32 elem_bytes = 0;
-  VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-  VkImageLayout submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  u8 aspect = rhi::kAspectColor;
+  rhi::TextureState submitted = rhi::TextureState::kUndefined;
   bool is_depth = false;
   bool is_stencil = false;
   u32 layers = 1;
@@ -1016,65 +939,65 @@ bool FindCsAliasedImage(u64 base,
                         bool prefer_depth = false) {
   if (prefer_depth) {
     auto depth_it = g_depths.find(base);
-    if (depth_it != g_depths.end() && depth_it->second.image) {
+    if (depth_it != g_depths.end() && depth_it->second.texture) {
       DepthTarget& depth = depth_it->second;
       VkImageLayout anchor = depth.submitted_layout;
       if (anchor == VK_IMAGE_LAYOUT_UNDEFINED && for_write &&
           depth.last_frame != g_frame.num)
         anchor = depth.layout;
-      out = {depth.image, depth.w, depth.h, 4, VK_IMAGE_ASPECT_DEPTH_BIT,
-             anchor, true, false, depth.layers};
-      return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
+      out = {depth.texture, depth.w, depth.h, 4, rhi::kAspectDepth,
+             FromVkLayout(anchor), true, false, depth.layers};
+      return out.submitted != rhi::TextureState::kUndefined;
     }
   }
   auto rt_it = g_rts.find(base);
   if (rt_it != g_rts.end()) {
     RTarget& rt = rt_it->second;
-    if (!rt.image || rt.is_depth || (!for_write && !rt.ever_rendered))
+    if (!rt.texture || rt.is_depth || (!for_write && !rt.ever_rendered))
       return false;
     VkImageLayout anchor = rt.submitted_layout;
     if (anchor == VK_IMAGE_LAYOUT_UNDEFINED && for_write &&
         rt.last_frame != g_frame.num)
       anchor = rt.layout;
-    out = {rt.image,
+    out = {rt.texture,
            rt.w,
            rt.h,
            FormatBytes(rt.fmt),
-           VK_IMAGE_ASPECT_COLOR_BIT,
-           anchor,
-            false,
-            false};
-    return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
+           rhi::kAspectColor,
+           FromVkLayout(anchor),
+           false,
+           false};
+    return out.submitted != rhi::TextureState::kUndefined;
   }
   auto depth_it = g_depths.find(base);
   if (depth_it != g_depths.end()) {
     DepthTarget& depth = depth_it->second;
-    if (!depth.image)
+    if (!depth.texture)
       return false;
-    out = {depth.image,
+    out = {depth.texture,
            depth.w,
            depth.h,
            4,  // kDepthFormat == D32_SFLOAT
-           VK_IMAGE_ASPECT_DEPTH_BIT,
-           depth.submitted_layout,
-            true,
-            false,
-            depth.layers};
-    return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
+           rhi::kAspectDepth,
+           FromVkLayout(depth.submitted_layout),
+           true,
+           false,
+           depth.layers};
+    return out.submitted != rhi::TextureState::kUndefined;
   }
   for (auto& [depth_base, depth] : g_depths) {
     (void)depth_base;
-    if (depth.stencil_base != base || !depth.image)
+    if (depth.stencil_base != base || !depth.texture)
       continue;
-    out = {depth.image,
+    out = {depth.texture,
            depth.w,
            depth.h,
            1,
-           VK_IMAGE_ASPECT_STENCIL_BIT,
-           depth.submitted_stencil_layout,
+           rhi::kAspectStencil,
+           FromVkLayout(depth.submitted_stencil_layout),
            false,
            true};
-    return out.submitted_layout != VK_IMAGE_LAYOUT_UNDEFINED;
+    return out.submitted != rhi::TextureState::kUndefined;
   }
   return false;
 }
@@ -1143,46 +1066,19 @@ bool RenderedInOpenChunk(u64 base) {
          g_frame.draws != g_frame.draws_at_chunk;
 }
 
-VkAccessFlags AliasedImageAccess(const CsAliasedImage& img, VkImageLayout l) {
-  if (!img.is_depth && !img.is_stencil)
-    return ColorImageAccess(l);
-  switch (l) {
-    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
-    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
-    case VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL:
-      return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
-    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
-    case VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL:
-    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-      return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-             VK_ACCESS_SHADER_READ_BIT;
-    default:
-      return 0;
-  }
-}
-
-// Aspect-aware ImageBarrier for the bridge's one-shot transfer commands.
-// ALL_COMMANDS stages: these command buffers are submitted alone and
-// fence-waited, so precision buys nothing.
-void AliasedImageBarrier(VkCommandBuffer c,
+// A barrier on the aliased image's aspect over every layer. Global ALL/ALL
+// dependency: these bridge copies run where precision buys nothing.
+void AliasedImageBarrier(rhi::CommandList* c,
                          const CsAliasedImage& img,
-                         VkImageLayout from,
-                         VkImageLayout to,
-                         VkAccessFlags src_a,
-                         VkAccessFlags dst_a) {
-  VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  b.oldLayout = from;
-  b.newLayout = to;
-  b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  b.image = img.image;
-  b.subresourceRange = {img.aspect, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
-  b.srcAccessMask = src_a;
-  b.dstAccessMask = dst_a;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &b);
+                         rhi::TextureState from,
+                         rhi::TextureState to) {
+  rhi::TextureBarrier b;
+  b.texture = img.texture;
+  b.before = from;
+  b.after = to;
+  b.range.aspect = img.aspect;
+  b.range.layers = img.texture->desc().layers;
+  c->Barrier(kAccessAll, kAccessAll, &b, 1);
 }
 
 // How a bridge copy moves texels between a live image and the CS staging
@@ -1258,51 +1154,28 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
 // holds the unpacked floats, and no image<->buffer copy converts between the
 // two in one step.
 struct CsBridgeScratch {
-  VkBuffer buf = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
+  rhi::Buffer* buf = nullptr;
   void* map = nullptr;
-  VkDeviceSize cap = 0;
+  u64 cap = 0;
 };
 CsBridgeScratch g_bridge;
 
-bool EnsureBridgeScratch(VkDeviceSize bytes) {
+bool EnsureBridgeScratch(u64 bytes) {
   if (g_bridge.cap >= bytes)
     return true;
-  if (g_bridge.map)
-    vkUnmapMemory(g_dev.device, g_bridge.mem);
-  if (g_bridge.buf)
-    vkDestroyBuffer(g_dev.device, g_bridge.buf, nullptr);
-  if (g_bridge.mem)
-    vkFreeMemory(g_dev.device, g_bridge.mem, nullptr);
+  Device().Destroy(g_bridge.buf);
   g_bridge = CsBridgeScratch{};
-  const VkDeviceSize cap = (bytes + 0xFFFF) & ~VkDeviceSize(0xFFFF);
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = cap;
-  bi.usage =
-      VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &g_bridge.buf) != VK_SUCCESS) {
-    g_bridge.buf = VK_NULL_HANDLE;
+  const u64 cap = (bytes + 0xFFFF) & ~u64(0xFFFF);
+  g_bridge.buf = CreateCsBuffer(cap, rhi::kBufferCopySrc | rhi::kBufferCopyDst,
+                                rhi::MemoryKind::kReadback);
+  if (!g_bridge.buf)
     return false;
-  }
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, g_bridge.buf, &mr);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = FindComputeMemoryType(mr.memoryTypeBits);
-  if (ai.memoryTypeIndex == UINT32_MAX ||
-      vkAllocateMemory(g_dev.device, &ai, nullptr, &g_bridge.mem) !=
-          VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, g_bridge.buf, nullptr);
-    g_bridge = CsBridgeScratch{};
-    return false;
-  }
-  vkBindBufferMemory(g_dev.device, g_bridge.buf, g_bridge.mem, 0);
-  vkMapMemory(g_dev.device, g_bridge.mem, 0, cap, 0, &g_bridge.map);
+  g_bridge.map = g_bridge.buf->mapped();
   g_bridge.cap = cap;
   return true;
 }
 
-void CsCopyStaging(CsRange& e, VkDeviceSize bytes, bool to_device);
+void CsCopyStaging(CsRange& e, u64 bytes, bool to_device);
 
 // Record one bridge copy (image->buffer or buffer->image), submit and wait.
 // Device is lost: every later submit fails regardless of what it records, so
@@ -1363,9 +1236,9 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     return false;
   if (truth && !CsRangeEnsureBuffer(g_truth_bridge_scratch, res.size))
     return false;
-  const VkBuffer copy_buf = convert   ? g_bridge.buf
-                            : truth   ? g_truth_bridge_scratch.buf
-                                      : e.buf;
+  rhi::Buffer* const copy_buf = convert ? g_bridge.buf
+                                : truth ? g_truth_bridge_scratch.buf
+                                        : e.buf;
   auto* scratch = static_cast<u32*>(g_bridge.map);
   if (convert && to_image) {
     gcn::DetileParallelRows(plan.h, [&](u32 y0, u32 y1) {
@@ -1403,29 +1276,20 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     }
   }
 
-  VkCommandBufferAllocateInfo ca{
-      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ca.commandPool = g_dev.pool;
-  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ca.commandBufferCount = 1;
-  VkCommandBuffer c = VK_NULL_HANDLE;
-  if (vkAllocateCommandBuffers(g_dev.device, &ca, &c) != VK_SUCCESS)
-    return false;
-  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  if (vkBeginCommandBuffer(c, &cbi) != VK_SUCCESS) {
-    vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+  base::String where;
+  base::FormatTo(where, "bridge base={:#x}", (unsigned long long)res.base);
+  if (!QueueCheck(where.c_str())) {
+    BASE_LOGI("gpuvk", "cs {} bridge copy failed: queue check (base={:#x})",
+              to_image ? "upload" : "staging", (unsigned long long)res.base);
+    g_cs_failed = true;
+    Device().ReportDeviceLoss();
     return false;
   }
-  {
-    // A frame chunk submitted just before this may still read the buffer.
-    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    mb.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
-                         nullptr, 0, nullptr);
-  }
+  rhi::CommandList* c = BeginImmediate();
+  if (!c)
+    return false;
+  // A frame chunk submitted just before this may still read the buffer.
+  c->Barrier(kAccessAll, kAccessAll);
   // The dispatch result already lives in VRAM. An ordinary buffer->image copy
   // must read it there, without uploading the identical host readback again.
   // Stencil packing changes the host bytes, and image->buffer staging may have
@@ -1442,114 +1306,66 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     // The retile below covers the whole mip; texels the copy leaves alone
     // must not carry a previous conversion's bytes into the truth.
     if (stencil_truth)
-      vkCmdFillBuffer(c, copy_buf, 0, (s_linear.size + 3) & ~u64(3), 0);
+      c->FillBuffer(copy_buf, 0, (s_linear.size + 3) & ~u64(3), 0);
     else
-      vkCmdFillBuffer(c, copy_buf, level.offset,
-                      layer_bytes * std::max(res.layers, 1u), 0);
-    VkMemoryBarrier cleared{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    cleared.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    cleared.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &cleared, 0,
-                         nullptr, 0, nullptr);
+      c->FillBuffer(copy_buf, level.offset,
+                    layer_bytes * std::max(res.layers, 1u), 0);
+    c->Barrier(rhi::kAccessCopyWrite, rhi::kAccessCopyWrite);
   }
   // Chain from, and restore, the SUBMITTED layout: this copy executes
-  // before the current frame's still-recording barriers, whose oldLayout
-  // chain must stay intact.
-  const VkImageLayout transfer_layout =
-      to_image ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-               : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  const VkAccessFlags transfer_access =
-      to_image ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT;
+  // before the current frame's still-recording barriers, whose layout chain
+  // must stay intact.
+  const rhi::TextureState transfer =
+      to_image ? rhi::TextureState::kCopyDst : rhi::TextureState::kCopySrc;
   if (to_image) {
-    // The buffer was last written by the dispatch (already fence-waited) or
-    // the host; make those writes available to the transfer.
-    VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-    bb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
-    bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bb.buffer = copy_buf;
-    bb.offset = 0;
-    bb.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(
-        c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &bb, 0, nullptr);
+    // The buffer was last written by the dispatch (already waited) or the
+    // host; make those writes available to the transfer.
+    c->Barrier(rhi::kAccessComputeWrite | rhi::kAccessHostWrite,
+               rhi::kAccessCopyRead);
   }
-  AliasedImageBarrier(c, img, img.submitted_layout, transfer_layout,
-                      AliasedImageAccess(img, img.submitted_layout),
-                      transfer_access);
-  VkBufferImageCopy copy{};
-  copy.bufferOffset = (img.is_stencil || convert) ? 0 : level.offset;
-  copy.bufferRowLength = level.pitch;
-  copy.bufferImageHeight = level.stored_height;
+  AliasedImageBarrier(c, img, img.submitted, transfer);
+  rhi::BufferTextureCopy copy;
+  copy.buffer_offset = (img.is_stencil || convert) ? 0 : level.offset;
+  copy.row_length = level.pitch;
+  copy.image_height = level.stored_height;
   if (stencil_truth) {
-    copy.bufferOffset = s_linear.mips[0].offset;
-    copy.bufferRowLength = s_linear.mips[0].pitch;
-    copy.bufferImageHeight = s_linear.mips[0].stored_height;
+    copy.buffer_offset = s_linear.mips[0].offset;
+    copy.row_length = s_linear.mips[0].pitch;
+    copy.image_height = s_linear.mips[0].stored_height;
   }
-  copy.imageSubresource = {img.aspect, 0, 0, plan.layers};
-  copy.imageExtent = {plan.w, plan.h, 1};
+  copy.region.aspect = img.aspect;
+  copy.region.layers = plan.layers;
+  copy.region.width = plan.w;
+  copy.region.height = plan.h;
   if (to_image)
-    vkCmdCopyBufferToImage(c, copy_buf, img.image, transfer_layout, 1, &copy);
+    c->CopyBufferToTexture(img.texture, copy_buf, &copy, 1);
   else
-    vkCmdCopyImageToBuffer(c, img.image, transfer_layout, copy_buf, 1, &copy);
+    c->CopyTextureToBuffer(copy_buf, img.texture, &copy, 1);
   if (truth && !to_image) {
     RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, copy_buf, res.size,
                       /*detile=*/false, 1, std::max(res.layers, 1u),
                       plan.depth16);
     e.mirror_current = false;
   }
-  AliasedImageBarrier(c, img, transfer_layout, img.submitted_layout,
-                      transfer_access,
-                      AliasedImageAccess(img, img.submitted_layout));
-  if (!to_image) {
-    VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-    bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    bb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-    bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bb.buffer = copy_buf;
-    bb.offset = 0;
-    bb.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(
-        c, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
-        nullptr, 1, &bb, 0, nullptr);
-  }
-  const VkResult end_result = vkEndCommandBuffer(c);
-  base::String where;
-  base::FormatTo(where, "bridge base={:#x}", (unsigned long long)res.base);
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1;
-  si.pCommandBuffers = &c;
-  VkResult r = end_result;
-  if (r == VK_SUCCESS && !QueueCheck(where.c_str()))
-    r = VK_ERROR_DEVICE_LOST;
-  if (r == VK_SUCCESS)
-    r = vkResetFences(g_dev.device, 1, &g_dev.fence);
-  if (r == VK_SUCCESS)
-    r = vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence);
-  if (r == VK_SUCCESS)
-    r = vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
+  AliasedImageBarrier(c, img, transfer, img.submitted);
+  if (!to_image)
+    c->Barrier(rhi::kAccessCopyWrite,
+               rhi::kAccessComputeRead | rhi::kAccessHostRead);
+  const bool ok = EndImmediate(c);
   g_out_rt_submits++;
-  vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
-  if (r != VK_SUCCESS) {
+  if (!ok) {
     // A device loss is not a "shape mismatch": the queue is dead and every
     // fallback the caller would keep recording with is already doomed. Latch
     // the failure so the caller stops instead of building more work on a
     // lost device.
-    BASE_LOGI("gpuvk", "cs {} bridge copy failed: {} (base={:#x})",
-              to_image ? "upload" : "staging", (int)r,
-              (unsigned long long)res.base);
-    if (r == VK_ERROR_DEVICE_LOST) {
-      g_cs_failed = true;
-      ReportDeviceFault(g_dev);
-    }
+    BASE_LOGI("gpuvk", "cs {} bridge copy failed (base={:#x})",
+              to_image ? "upload" : "staging", (unsigned long long)res.base);
+    g_cs_failed = true;
+    Device().ReportDeviceLoss();
     return false;
   }
   if (trace::Recording())
-    trace::RecordBridge(to_image ? "upload" : "stage", res.base, img.image,
+    trace::RecordBridge(to_image ? "upload" : "stage", res.base, img.texture,
                         plan.w, plan.h);
   if (img.is_stencil && !truth) {
     auto* packed = static_cast<u8*>(e.map);
@@ -1586,59 +1402,44 @@ bool RunAliasedCopy(const CsAliasedImage& img,
 // buffer<->image copy converts R11G11B10 to the float4 staging layout, and a
 // blit converts any colour format to any other.
 struct BridgeFloatImage {
-  VkImage image = VK_NULL_HANDLE;
-  ImageAllocation allocation;
+  rhi::Texture* texture = nullptr;
   u32 w = 0, h = 0;
 };
 std::vector<BridgeFloatImage> g_bridge_float_images;
 u64 g_in_frame_bridge_n = 0;
 
-bool BlitsBetween(VkFormat a, VkFormat b) {
+bool BlitsBetween(rhi::Format a, rhi::Format b) {
   static std::unordered_map<u64, bool> known;
   const u64 key = (u64(a) << 32) | u64(b);
   auto it = known.find(key);
   if (it != known.end())
     return it->second;
-  constexpr VkFormatFeatureFlags kBoth =
-      VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
-  VkFormatProperties pa{}, pb{};
-  vkGetPhysicalDeviceFormatProperties(g_dev.phys, a, &pa);
-  vkGetPhysicalDeviceFormatProperties(g_dev.phys, b, &pb);
-  const bool ok = (pa.optimalTilingFeatures & kBoth) == kBoth &&
-                  (pb.optimalTilingFeatures & kBoth) == kBoth;
-  return known[key] = ok;
+  return known[key] = Device().SupportsBlit(a, b);
 }
 
-VkImage GetBridgeFloatImage(u32 w, u32 h) {
+rhi::Texture* GetBridgeFloatImage(u32 w, u32 h) {
   for (const BridgeFloatImage& b : g_bridge_float_images)
     if (b.w == w && b.h == h)
-      return b.image;
+      return b.texture;
   if (g_bridge_float_images.size() >= 8)
-    return VK_NULL_HANDLE;
+    return nullptr;
+  rhi::TextureDesc desc;
+  desc.format = rhi::Format::kRGBA32Float;
+  desc.width = w;
+  desc.height = h;
+  desc.usage = rhi::kTextureCopySrc | rhi::kTextureCopyDst;
   BridgeFloatImage b;
-  VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-  ii.imageType = VK_IMAGE_TYPE_2D;
-  ii.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-  ii.extent = {w, h, 1};
-  ii.mipLevels = 1;
-  ii.arrayLayers = 1;
-  ii.samples = VK_SAMPLE_COUNT_1_BIT;
-  ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-  ii.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-  if (vkCreateImage(g_dev.device, &ii, nullptr, &b.image) != VK_SUCCESS)
-    return VK_NULL_HANDLE;
-  if (!g_image_memory.Allocate(g_dev, b.image, b.allocation)) {
-    vkDestroyImage(g_dev.device, b.image, nullptr);
-    return VK_NULL_HANDLE;
-  }
+  b.texture = Device().CreateTexture(desc);
+  if (!b.texture)
+    return nullptr;
   b.w = w;
   b.h = h;
   g_bridge_float_images.push_back(b);
-  return b.image;
+  return b.texture;
 }
 
 // The draw -> compute bridge, recorded at the current point of the frame
-// command buffer instead of submitted and waited on its own: the target's
+// command list instead of submitted and waited on its own: the target's
 // texels go straight into the range's VRAM buffer, which holds linear texels
 // already, so this is one copy (a packed-float target goes through a blit)
 // and nothing touches the host. The chunk is then submitted so the dispatch
@@ -1651,8 +1452,8 @@ DELTA_OPTION(bool, kCsInFrameBridge, "DELTA_GPU_CS_INFRAME_BRIDGE", true);
 // layout the recording has it in.
 struct InFrameTarget {
   CsAliasedImage img;
-  VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
-  VkFormat fmt = VK_FORMAT_UNDEFINED;
+  rhi::TextureState layout = rhi::TextureState::kUndefined;
+  VkFormat fmt = VK_FORMAT_UNDEFINED;  // the target's format key
 };
 
 bool RecordRtStageInFrame(const InFrameTarget& t,
@@ -1662,7 +1463,7 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   const CsAliasedImage& img = t.img;
   if (!kCsInFrameBridge || !g_frame.recording || e.truth || !e.buf ||
       plan.widen || plan.depth16 || plan.layers != 1 || res.layers > 1 ||
-      img.layers != 1 || t.layout == VK_IMAGE_LAYOUT_UNDEFINED)
+      img.layers != 1 || t.layout == rhi::TextureState::kUndefined)
     return false;
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(res, tiled, linear))
@@ -1672,66 +1473,49 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
       static_cast<u64>(level.pitch) * plan.h * res.stage_elem_bytes;
   if (level.offset + copy_bytes > e.cap || res.size > e.cap)
     return false;
-  VkImage float_image = VK_NULL_HANDLE;
+  rhi::Texture* float_image = nullptr;
   if (plan.unpack &&
-      (!BlitsBetween(t.fmt, VK_FORMAT_R32G32B32A32_SFLOAT) ||
+      (!BlitsBetween(FromVkFormat(t.fmt), rhi::Format::kRGBA32Float) ||
        !(float_image = GetBridgeFloatImage(plan.w, plan.h))))
     return false;
   EndRegion();
-  const VkCommandBuffer c = g_frame.cmd;
-  VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-  before.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-  before.dstAccessMask =
-      VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0,
-                       nullptr, 0, nullptr);
-  constexpr VkImageLayout kSrc = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  AliasedImageBarrier(c, img, t.layout, kSrc, AliasedImageAccess(img, t.layout),
-                      VK_ACCESS_TRANSFER_READ_BIT);
+  rhi::CommandList* const c = g_frame.list;
+  c->Barrier(kAccessAll, kAccessCopyRW);
+  constexpr rhi::TextureState kSrc = rhi::TextureState::kCopySrc;
+  AliasedImageBarrier(c, img, t.layout, kSrc);
   // Staging bytes the copy does not reach read as zero, as the host path's
   // cleared mirror did.
   if (level.offset || copy_bytes < res.size || plan.w < level.pitch) {
-    vkCmdFillBuffer(c, e.buf, 0, res.size & ~VkDeviceSize(3), 0);
-    VkMemoryBarrier filled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    filled.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    filled.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &filled, 0,
-                         nullptr, 0, nullptr);
+    c->FillBuffer(e.buf, 0, res.size & ~u64(3), 0);
+    c->Barrier(rhi::kAccessCopyWrite, rhi::kAccessCopyWrite);
   }
-  VkBufferImageCopy copy{};
-  copy.bufferOffset = level.offset;
-  copy.bufferRowLength = level.pitch;
-  copy.bufferImageHeight = level.stored_height;
-  copy.imageSubresource = {img.aspect, 0, 0, 1};
-  copy.imageExtent = {plan.w, plan.h, 1};
+  rhi::BufferTextureCopy copy;
+  copy.buffer_offset = level.offset;
+  copy.row_length = level.pitch;
+  copy.image_height = level.stored_height;
+  copy.region.aspect = img.aspect;
+  copy.region.width = plan.w;
+  copy.region.height = plan.h;
   if (plan.unpack) {
-    VkImageBlit blit{};
-    blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0,
-                                                 0, 1};
-    blit.srcOffsets[1] = blit.dstOffsets[1] = {static_cast<i32>(plan.w),
-                                               static_cast<i32>(plan.h), 1};
-    ImageBarrier(c, float_image, VK_IMAGE_LAYOUT_UNDEFINED,
-                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
-                 VK_ACCESS_TRANSFER_WRITE_BIT);
-    vkCmdBlitImage(c, img.image, kSrc, float_image,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                   VK_FILTER_NEAREST);
-    ImageBarrier(c, float_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kSrc,
-                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-    vkCmdCopyImageToBuffer(c, float_image, kSrc, e.buf, 1, &copy);
+    rhi::TextureRegion region;
+    region.width = plan.w;
+    region.height = plan.h;
+    rhi::TextureBarrier fb;
+    fb.texture = float_image;
+    fb.before = rhi::TextureState::kUndefined;
+    fb.after = rhi::TextureState::kCopyDst;
+    c->Barrier(0, 0, &fb, 1);
+    c->BlitTexture(float_image, region, img.texture, region,
+                   rhi::Filter::kNearest);
+    fb.before = rhi::TextureState::kCopyDst;
+    fb.after = kSrc;
+    c->Barrier(0, 0, &fb, 1);
+    c->CopyTextureToBuffer(e.buf, float_image, &copy, 1);
   } else {
-    vkCmdCopyImageToBuffer(c, img.image, kSrc, e.buf, 1, &copy);
+    c->CopyTextureToBuffer(e.buf, img.texture, &copy, 1);
   }
-  AliasedImageBarrier(c, img, kSrc, t.layout, VK_ACCESS_TRANSFER_READ_BIT,
-                      AliasedImageAccess(img, t.layout));
-  VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-  after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &after, 0,
-                       nullptr, 0, nullptr);
+  AliasedImageBarrier(c, img, kSrc, t.layout);
+  c->Barrier(rhi::kAccessCopyWrite, kAccessAll);
   e.frame_ref = g_frame.num;
   e.mirror_current = false;
   e.readback_pending = false;
@@ -1743,11 +1527,11 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
 // preference FindCsAliasedImage applies), in its recording-time layout.
 bool LiveInFrameTarget(u64 base, bool prefer_depth, InFrameTarget& t) {
   const auto use_depth = [&](const DepthTarget& depth) {
-    if (!depth.image || depth.clear_pending)
+    if (!depth.texture || depth.clear_pending)
       return false;
-    t.img = {depth.image, depth.w, depth.h, 4, VK_IMAGE_ASPECT_DEPTH_BIT,
-             depth.layout, true, false, depth.layers};
-    t.layout = depth.layout;
+    t.layout = FromVkLayout(depth.layout);
+    t.img = {depth.texture, depth.w, depth.h, 4, rhi::kAspectDepth,
+             t.layout, true, false, depth.layers};
     return true;
   };
   if (prefer_depth) {
@@ -1758,11 +1542,11 @@ bool LiveInFrameTarget(u64 base, bool prefer_depth, InFrameTarget& t) {
   auto rt_it = g_rts.find(base);
   if (rt_it != g_rts.end()) {
     const RTarget& rt = rt_it->second;
-    if (!rt.image || rt.is_depth || rt.depth > 1 || !rt.ever_rendered)
+    if (!rt.texture || rt.is_depth || rt.depth > 1 || !rt.ever_rendered)
       return false;
-    t.img = {rt.image, rt.w, rt.h, FormatBytes(rt.fmt),
-             VK_IMAGE_ASPECT_COLOR_BIT, rt.layout};
-    t.layout = rt.layout;
+    t.layout = FromVkLayout(rt.layout);
+    t.img = {rt.texture, rt.w, rt.h, FormatBytes(rt.fmt), rhi::kAspectColor,
+             t.layout};
     t.fmt = rt.fmt;
     return true;
   }
@@ -1792,7 +1576,7 @@ bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
 }
 
 // The reverse: a CS result written to a range that a live render/depth target
-// aliases must also land in the VkImage, because draws sample the image,
+// aliases must also land in the image, because draws sample the image,
 // never guest memory (SotC's exposure/bloom compute writes the adapted scene
 // into an RT the tonemap then samples; its depth downsample writes the
 // half-res depth pyramid). e.buf already holds the linear pixel data the
@@ -1815,7 +1599,7 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
   AliasedCopyPlan plan;
   if (!PlanAliasedCopy(img, e.res, "writes", plan)) {
     // The guest reused this address with an incompatible image layout. The
-    // compute result is current in guest memory, while the old VkImage can no
+    // compute result is current in guest memory, while the old image can no
     // longer represent it; stop resolving subsequent samples to that image.
     if (!img.is_depth) {
       // Losing this flag makes every later sample of that address fall back to
@@ -1837,7 +1621,7 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
     // The copy chained from and restored the anchor, so that is the layout
     // on the GPU now whether or not a frame end had stamped it.
     if (rt.submitted_layout == VK_IMAGE_LAYOUT_UNDEFINED)
-      rt.submitted_layout = img.submitted_layout;
+      rt.submitted_layout = ToVkLayout(img.submitted, img.aspect);
   } else if (!img.is_stencil) {
     // A depth surface a dispatch produced is this frame's content: the first
     // pass to bind it must LOAD it, where an untouched depth target is
@@ -1949,64 +1733,26 @@ std::vector<u64> DirtyRangesOverlapping(u64 base,
 // dispatch retires. SotC spends ~550 ms of a 2 fps frame on that copy in and
 // back out. Needs the guest range page-aligned to the driver's import
 // granularity; callers fall back to staging when this returns false.
-bool CsRangeImportGuest(CsRange& e, u64 base, VkDeviceSize size) {
-  const size_t align = g_dev.host_import_align;
-  if (!g_dev.host_import_available || !align)
+bool CsRangeImportGuest(CsRange& e, u64 base, u64 size) {
+  const rhi::Caps& caps = Device().caps();
+  const u64 align = caps.host_import_alignment;
+  if (!caps.host_import || !align)
     return false;
-  const u64 lo = base & ~(u64)(align - 1);
-  const u64 hi = (base + size + align - 1) & ~(u64)(align - 1);
+  const u64 lo = base & ~(align - 1);
+  const u64 hi = (base + size + align - 1) & ~(align - 1);
   // The shader indexes from the binding, so an unaligned base is fine as long
   // as the descriptor can carry the difference.
-  const VkDeviceSize off = base - lo;
-  if (off % g_dev.storage_buffer_offset_align)
+  const u64 off = base - lo;
+  if (off % caps.storage_offset_alignment)
     return false;
-  VkMemoryHostPointerPropertiesEXT hpp{
-      VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
-  auto fn = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(
-      g_dev.device, "vkGetMemoryHostPointerPropertiesEXT");
-  if (!fn ||
-      fn(g_dev.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-         reinterpret_cast<void*>(lo), &hpp) != VK_SUCCESS ||
-      !hpp.memoryTypeBits)
+  rhi::BufferDesc desc;
+  desc.size = hi - lo;
+  desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
+  desc.host_pointer = reinterpret_cast<void*>(lo);
+  rhi::Buffer* buf = Device().CreateBuffer(desc);
+  if (!buf)
     return false;
-  VkExternalMemoryBufferCreateInfo ebi{
-      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
-  ebi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.pNext = &ebi;
-  bi.size = hi - lo;
-  bi.usage =
-      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  VkBuffer buf = VK_NULL_HANDLE;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &buf) != VK_SUCCESS)
-    return false;
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, buf, &mr);
-  const u32 bits = mr.memoryTypeBits & hpp.memoryTypeBits;
-  if (!bits) {
-    vkDestroyBuffer(g_dev.device, buf, nullptr);
-    return false;
-  }
-  VkImportMemoryHostPointerInfoEXT ihp{
-      VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
-  ihp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-  ihp.pHostPointer = reinterpret_cast<void*>(lo);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.pNext = &ihp;
-  ai.allocationSize = hi - lo;
-  ai.memoryTypeIndex = (u32)__builtin_ctz(bits);
-  VkDeviceMemory mem = VK_NULL_HANDLE;
-  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &mem) != VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, buf, nullptr);
-    return false;
-  }
-  if (vkBindBufferMemory(g_dev.device, buf, mem, 0) != VK_SUCCESS) {
-    vkFreeMemory(g_dev.device, mem, nullptr);
-    vkDestroyBuffer(g_dev.device, buf, nullptr);
-    return false;
-  }
   e.buf = buf;
-  e.mem = mem;
   e.map = reinterpret_cast<void*>(lo);  // already the guest pages
   e.cap = hi - lo;
   e.imported = true;
@@ -2020,30 +1766,14 @@ bool CsRangeImportGuest(CsRange& e, u64 base, VkDeviceSize size) {
 bool EnsureGdsBuffer() {
   if (g_gds.buf)
     return true;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = GdsBuffer::kBytes;
-  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-             VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &g_gds.buf) != VK_SUCCESS) {
-    g_gds.buf = VK_NULL_HANDLE;
+  g_gds.buf = CreateCsBuffer(GdsBuffer::kBytes,
+                             rhi::kBufferStorage | rhi::kBufferCopyDst,
+                             rhi::MemoryKind::kReadback);
+  if (!g_gds.buf)
     return false;
-  }
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, g_gds.buf, &mr);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = FindComputeMemoryType(mr.memoryTypeBits);
-  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &g_gds.mem) != VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, g_gds.buf, nullptr);
-    g_gds.buf = VK_NULL_HANDLE;
-    g_gds.mem = VK_NULL_HANDLE;
-    return false;
-  }
-  vkBindBufferMemory(g_dev.device, g_gds.buf, g_gds.mem, 0);
-  if (vkMapMemory(g_dev.device, g_gds.mem, 0, GdsBuffer::kBytes, 0,
-                   &g_gds.map) != VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, g_gds.buf, nullptr);
-    vkFreeMemory(g_dev.device, g_gds.mem, nullptr);
+  g_gds.map = g_gds.buf->mapped();
+  if (!g_gds.map) {
+    Device().Destroy(g_gds.buf);
     g_gds = {};
     return false;
   }
@@ -2060,14 +1790,8 @@ bool CsReleaseMemory(const CsRange& keep) {
   const auto drop_free_list = [] {
     const bool any = !g_cs_free.empty();
     for (const CsFreeBuffer& f : g_cs_free) {
-      if (f.map)
-        vkUnmapMemory(g_dev.device, f.device_local ? f.host_mem : f.mem);
-      for (VkBuffer b : {f.buf, f.host_buf})
-        if (b)
-          vkDestroyBuffer(g_dev.device, b, nullptr);
-      for (VkDeviceMemory m : {f.mem, f.host_mem})
-        if (m)
-          vkFreeMemory(g_dev.device, m, nullptr);
+      Device().Destroy(f.buf);
+      Device().Destroy(f.host_buf);
     }
     g_cs_free.clear();
     g_cs_free_bytes = 0;
@@ -2096,46 +1820,33 @@ bool CsReleaseMemory(const CsRange& keep) {
   return released || evicted;
 }
 
-bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
+bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
   if (e.buf && e.cap >= size)
     return true;
-  if (e.map && !e.imported) {
-    vkUnmapMemory(g_dev.device, e.device_local ? e.host_mem : e.mem);
-  }
   e.map = nullptr;
   if (CsFrameReferenced(e) || e.pending_batch) {
-    g_cs_frame_retired.emplace_back(e.buf, e.mem);
-    g_cs_frame_retired.emplace_back(e.host_buf, e.host_mem);
+    g_cs_frame_retired.push_back(e.buf);
+    g_cs_frame_retired.push_back(e.host_buf);
     e.frame_ref = -1;
     e.pending_batch = false;
   } else {
-    if (e.buf)
-      vkDestroyBuffer(g_dev.device, e.buf, nullptr);
-    if (e.mem)
-      vkFreeMemory(g_dev.device, e.mem, nullptr);
-    if (e.host_buf)
-      vkDestroyBuffer(g_dev.device, e.host_buf, nullptr);
-    if (e.host_mem)
-      vkFreeMemory(g_dev.device, e.host_mem, nullptr);
+    Device().Destroy(e.buf);
+    Device().Destroy(e.host_buf);
   }
-  e.buf = VK_NULL_HANDLE;
-  e.mem = VK_NULL_HANDLE;
-  e.host_buf = VK_NULL_HANDLE;
-  e.host_mem = VK_NULL_HANDLE;
+  e.buf = nullptr;
+  e.host_buf = nullptr;
   e.device_local = false;
   e.imported = false;
   if (!e.imported)
     g_cs_range_bytes -= e.cap;
   e.cap = 0;
-  VkDeviceSize cap = (size + 0xFFFF) & ~VkDeviceSize(0xFFFF);
+  u64 cap = (size + 0xFFFF) & ~u64(0xFFFF);
   for (size_t i = g_cs_free.size(); i-- > 0;) {
     const CsFreeBuffer& f = g_cs_free[i];
     if (f.cap != cap || f.device_local != static_cast<bool>(kCsVram))
       continue;
     e.buf = f.buf;
-    e.mem = f.mem;
     e.host_buf = f.host_buf;
-    e.host_mem = f.host_mem;
     e.map = f.map;
     e.device_local = f.device_local;
     e.cap = cap;
@@ -2145,73 +1856,34 @@ bool CsRangeEnsureBuffer(CsRange& e, VkDeviceSize size) {
     g_cs_recycled_n++;
     return true;
   }
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = cap;
-  // TRANSFER_DST: RT-backed inputs are staged by an image->buffer copy on the
+  // CopyDst: RT-backed inputs are staged by an image->buffer copy on the
   // queue (StageCsRangeFromRt) instead of a CPU memcpy from guest memory.
-  bi.usage =
-      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  u32 usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
   if (kCsVram)
-    bi.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;  // readback of results
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &e.buf) != VK_SUCCESS) {
-    e.buf = VK_NULL_HANDLE;
+    usage |= rhi::kBufferCopySrc;  // readback of results
+  const bool split = kCsVram && SplitVram();
+  const rhi::MemoryKind memory =
+      split ? rhi::MemoryKind::kDevice : rhi::MemoryKind::kReadback;
+  e.buf = CreateCsBuffer(cap, usage, memory);
+  if (!e.buf && (!CsReleaseMemory(e) ||
+                 !(e.buf = CreateCsBuffer(cap, usage, memory))))
     return false;
-  }
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, e.buf, &mr);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  const u32 device_type =
-      kCsVram ? FindDeviceMemoryType(mr.memoryTypeBits) : UINT32_MAX;
-  ai.memoryTypeIndex = device_type != UINT32_MAX
-                           ? device_type
-                           : FindComputeMemoryType(mr.memoryTypeBits);
-  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &e.mem) != VK_SUCCESS &&
-      (!CsReleaseMemory(e) ||
-       vkAllocateMemory(g_dev.device, &ai, nullptr, &e.mem) != VK_SUCCESS)) {
-    vkDestroyBuffer(g_dev.device, e.buf, nullptr);
-    e.buf = VK_NULL_HANDLE;
-    e.mem = VK_NULL_HANDLE;
-    return false;
-  }
-  vkBindBufferMemory(g_dev.device, e.buf, e.mem, 0);
   // VRAM cannot be mapped usefully (uncached reads are ~100 MB/s), so the CPU
   // side gets its own host-cached buffer and the two are joined by DMA.
-  if (device_type != UINT32_MAX) {
-    VkBufferCreateInfo hi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    hi.size = cap;
-    hi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    VkMemoryRequirements hmr;
-    if (vkCreateBuffer(g_dev.device, &hi, nullptr, &e.host_buf) != VK_SUCCESS) {
-      e.host_buf = VK_NULL_HANDLE;
+  if (split) {
+    e.host_buf = CreateCsBuffer(cap, rhi::kBufferCopySrc | rhi::kBufferCopyDst,
+                                rhi::MemoryKind::kReadback);
+    if (!e.host_buf)
       return false;
-    }
-    vkGetBufferMemoryRequirements(g_dev.device, e.host_buf, &hmr);
-    VkMemoryAllocateInfo hai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    hai.allocationSize = hmr.size;
-    hai.memoryTypeIndex = FindComputeMemoryType(hmr.memoryTypeBits);
-    if (vkAllocateMemory(g_dev.device, &hai, nullptr, &e.host_mem) !=
-        VK_SUCCESS) {
-      vkDestroyBuffer(g_dev.device, e.host_buf, nullptr);
-      e.host_buf = VK_NULL_HANDLE;
-      e.host_mem = VK_NULL_HANDLE;
-      return false;
-    }
-    vkBindBufferMemory(g_dev.device, e.host_buf, e.host_mem, 0);
-    vkMapMemory(g_dev.device, e.host_mem, 0, cap, 0, &e.map);
+    e.map = e.host_buf->mapped();
     e.device_local = true;
   } else {
-    vkMapMemory(g_dev.device, e.mem, 0, cap, 0, &e.map);
+    e.map = e.buf->mapped();
   }
   e.cap = cap;
   g_cs_range_bytes += cap;
   return true;
 }
-
-// Buffers still referenced by the open dispatch batch, freed once its fence
-// signals. See CsRangeRename.
-std::vector<std::pair<VkBuffer, VkDeviceMemory>> g_cs_retired;
 
 // DELTA_GPU_CSRENAME: a CPU write into a range the open batch already reads has
 // to flush that batch and wait on the GPU. SotC's streaming does that 37 times
@@ -2223,22 +1895,17 @@ std::vector<std::pair<VkBuffer, VkDeviceMemory>> g_cs_retired;
 // gpu_dirty/written check. Default OFF: it moves cost into the writeback rather
 // than removing it (SotC gains ~7% overall), and no title that currently
 // renders through the compute path could be used to gate the change.
-bool CsRangeRename(CsRange& e, VkDeviceSize size) {
-  if (e.map) {
-    vkUnmapMemory(g_dev.device, e.device_local ? e.host_mem : e.mem);
-    e.map = nullptr;
-  }
-  if (e.buf || e.mem)
-    g_cs_frame_retired.emplace_back(e.buf, e.mem);
-  if (e.host_buf || e.host_mem)
-    g_cs_frame_retired.emplace_back(e.host_buf, e.host_mem);
+bool CsRangeRename(CsRange& e, u64 size) {
+  e.map = nullptr;
+  if (e.buf)
+    g_cs_frame_retired.push_back(e.buf);
+  if (e.host_buf)
+    g_cs_frame_retired.push_back(e.host_buf);
   e.frame_ref = -1;
   e.pending_batch = false;
   g_cs_range_bytes -= e.cap;
-  e.buf = VK_NULL_HANDLE;
-  e.mem = VK_NULL_HANDLE;
-  e.host_buf = VK_NULL_HANDLE;
-  e.host_mem = VK_NULL_HANDLE;
+  e.buf = nullptr;
+  e.host_buf = nullptr;
   e.device_local = false;
   e.cap = 0;
   return CsRangeEnsureBuffer(e, size);
@@ -2252,27 +1919,18 @@ void CsRangeDestroy(CsRange& e) {
     DropTiledImport(e.res.base);
   if (!e.imported && !CsFrameReferenced(e) && !e.pending_batch && e.buf &&
       e.cap && g_cs_free_bytes + e.cap <= (256ull << 20)) {
-    g_cs_free.push_back({e.buf, e.mem, e.host_buf, e.host_mem, e.map, e.cap,
-                         e.device_local});
+    g_cs_free.push_back({e.buf, e.host_buf, e.map, e.cap, e.device_local});
     g_cs_free_bytes += e.cap;
     g_cs_range_bytes -= e.cap;
     e = CsRange{};
     return;
   }
-  if (e.map && !e.imported)
-    vkUnmapMemory(g_dev.device, e.device_local ? e.host_mem : e.mem);
   if (CsFrameReferenced(e) || e.pending_batch) {
-    g_cs_frame_retired.emplace_back(e.buf, e.mem);
-    g_cs_frame_retired.emplace_back(e.host_buf, e.host_mem);
+    g_cs_frame_retired.push_back(e.buf);
+    g_cs_frame_retired.push_back(e.host_buf);
   } else {
-    if (e.buf)
-      vkDestroyBuffer(g_dev.device, e.buf, nullptr);
-    if (e.mem)
-      vkFreeMemory(g_dev.device, e.mem, nullptr);
-    if (e.host_buf)
-      vkDestroyBuffer(g_dev.device, e.host_buf, nullptr);
-    if (e.host_mem)
-      vkFreeMemory(g_dev.device, e.host_mem, nullptr);
+    Device().Destroy(e.buf);
+    Device().Destroy(e.host_buf);
   }
   g_cs_range_bytes -= e.cap;
   e = CsRange{};
@@ -2281,10 +1939,9 @@ void CsRangeDestroy(CsRange& e) {
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 // A guest range mapped into the device so the GPU addresses it in place.
 struct ImportedRange {
-  VkBuffer buf = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
-  VkDeviceSize offset = 0;  // base - the alignment floor the import starts at
-  u64 bytes = 0;            // usable bytes from `offset`
+  rhi::Buffer* buf = nullptr;
+  u64 offset = 0;  // base - the alignment floor the import starts at
+  u64 bytes = 0;   // usable bytes from `offset`
 };
 std::unordered_map<u64, ImportedRange> g_tiled_imports;
 
@@ -2295,8 +1952,9 @@ std::unordered_map<u64, ImportedRange> g_tiled_imports;
 // DELTA_GPU_CSSYNC report. Cached: the allocate/create pair is far too
 // expensive to repeat per dispatch.
 const ImportedRange* ImportTiledRange(u64 base, u64 bytes) {
-  const size_t align = g_dev.host_import_align;
-  if (!g_dev.host_import_available || !align || !base || !bytes)
+  const rhi::Caps& caps = Device().caps();
+  const u64 align = caps.host_import_alignment;
+  if (!caps.host_import || !align || !base || !bytes)
     return nullptr;
   auto it = g_tiled_imports.find(base);
   if (it != g_tiled_imports.end()) {
@@ -2307,10 +1965,7 @@ const ImportedRange* ImportTiledRange(u64 base, u64 bytes) {
     if (it->second.bytes >= bytes && gpu::IsReadableRangeCached(base, bytes))
       return &it->second;
     // A bigger view of the same base needs a bigger mapping.
-    if (it->second.buf)
-      vkDestroyBuffer(g_dev.device, it->second.buf, nullptr);
-    if (it->second.mem)
-      vkFreeMemory(g_dev.device, it->second.mem, nullptr);
+    Device().Destroy(it->second.buf);
     g_tiled_imports.erase(it);
   }
   // Unbounded caching would pin every surface a title ever converts; these are
@@ -2319,77 +1974,24 @@ const ImportedRange* ImportTiledRange(u64 base, u64 bytes) {
     return nullptr;
   if (!gpu::IsReadableRange(base, bytes))
     return nullptr;
-  const u64 lo = base & ~u64(align - 1);
-  const u64 hi = (base + bytes + align - 1) & ~u64(align - 1);
-  const VkDeviceSize off = base - lo;
-  if (off % g_dev.storage_buffer_offset_align)
+  const u64 lo = base & ~(align - 1);
+  const u64 hi = (base + bytes + align - 1) & ~(align - 1);
+  const u64 off = base - lo;
+  if (off % caps.storage_offset_alignment)
     return nullptr;
-  auto fn = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(
-      g_dev.device, "vkGetMemoryHostPointerPropertiesEXT");
-  VkMemoryHostPointerPropertiesEXT hpp{
-      VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
-  if (!fn ||
-      fn(g_dev.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-         reinterpret_cast<void*>(lo), &hpp) != VK_SUCCESS ||
-      !hpp.memoryTypeBits)
-    return nullptr;
-  VkExternalMemoryBufferCreateInfo ebi{
-      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
-  ebi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.pNext = &ebi;
-  bi.size = hi - lo;
-  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-             VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-             VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  VkBuffer buf = VK_NULL_HANDLE;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &buf) != VK_SUCCESS)
-    return nullptr;
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, buf, &mr);
-  const u32 bits = mr.memoryTypeBits & hpp.memoryTypeBits;
-  if (!bits) {
-    vkDestroyBuffer(g_dev.device, buf, nullptr);
-    return nullptr;
-  }
   // The guest CPU and our own readers touch these pages without any map/unmap
-  // of their own, so nothing here ever issues a vkInvalidateMappedMemoryRanges:
-  // a non-coherent type would hand them stale bytes after every conversion.
-  // Take the first coherent type and decline the import if there is none.
-  VkPhysicalDeviceMemoryProperties mem_props;
-  vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &mem_props);
-  u32 type = UINT32_MAX;
-  for (u32 i = 0; i < mem_props.memoryTypeCount; i++)
-    if ((bits & (1u << i)) && (mem_props.memoryTypes[i].propertyFlags &
-                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-      type = i;
-      break;
-    }
-  if (type == UINT32_MAX) {
-    vkDestroyBuffer(g_dev.device, buf, nullptr);
+  // of their own; an imported buffer's memory is coherent, or the import is
+  // declined.
+  rhi::BufferDesc desc;
+  desc.size = hi - lo;
+  desc.usage =
+      rhi::kBufferStorage | rhi::kBufferCopySrc | rhi::kBufferCopyDst;
+  desc.host_pointer = reinterpret_cast<void*>(lo);
+  rhi::Buffer* buf = Device().CreateBuffer(desc);
+  if (!buf)
     return nullptr;
-  }
-  VkImportMemoryHostPointerInfoEXT ihp{
-      VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
-  ihp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-  ihp.pHostPointer = reinterpret_cast<void*>(lo);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.pNext = &ihp;
-  ai.allocationSize = hi - lo;
-  ai.memoryTypeIndex = type;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
-  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &mem) != VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, buf, nullptr);
-    return nullptr;
-  }
-  if (vkBindBufferMemory(g_dev.device, buf, mem, 0) != VK_SUCCESS) {
-    vkFreeMemory(g_dev.device, mem, nullptr);
-    vkDestroyBuffer(g_dev.device, buf, nullptr);
-    return nullptr;
-  }
   ImportedRange& out = g_tiled_imports[base];
   out.buf = buf;
-  out.mem = mem;
   out.offset = off;
   out.bytes = hi - lo - off;
   return &out;
@@ -2397,29 +1999,27 @@ const ImportedRange* ImportTiledRange(u64 base, u64 bytes) {
 
 
 struct TileTable {
-  VkBuffer buf = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
-  VkDeviceSize bytes = 0;
+  rhi::Buffer* buf = nullptr;
+  u64 bytes = 0;
   std::vector<gcn::ImageTilingParams> params;  // per mip; `detile` patched
   u32 layers = 0;
   bool expanded = false;
 };
 std::unordered_map<u64, TileTable> g_tile_tables;
 
+// The tiling shader, its descriptors pushed into whichever command list
+// records a conversion.
 struct TilingState {
-  CsPipe pipeline;
-  CsPipe push;  // the same shader, descriptors pushed into the command buffer
+  rhi::BindGroupLayout* set_layout = nullptr;
+  rhi::PipelineLayout* layout = nullptr;
+  rhi::Pipeline* pipe = nullptr;
   CsRange buffers[3];
-  VkDescriptorPool pool = VK_NULL_HANDLE;
-  VkDescriptorSet set = VK_NULL_HANDLE;
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  VkFence fence = VK_NULL_HANDLE;
 };
 TilingState g_tiling;
 
 bool InitTiling() {
   auto& s = g_tiling;
-  if (s.fence)
+  if (s.pipe)
     return true;
   static bool attempted = false;
   if (attempted)
@@ -2428,86 +2028,33 @@ bool InitTiling() {
   const auto code = gcn::BuildImageTilingShader();
   if (code.empty())
     return false;
-  VkDescriptorSetLayoutBinding bindings[3];
+  rhi::BindGroupLayoutDesc set;
   for (u32 i = 0; i < 3; i++)
-    bindings[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                   VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-  VkDescriptorSetLayoutCreateInfo sl{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-  sl.bindingCount = 3;
-  sl.pBindings = bindings;
-  VKOK(vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
-                                   &s.pipeline.set_layout));
-  VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                           sizeof(gcn::ImageTilingParams)};
-  VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  pl.setLayoutCount = 1;
-  pl.pSetLayouts = &s.pipeline.set_layout;
-  pl.pushConstantRangeCount = 1;
-  pl.pPushConstantRanges = &push;
-  VKOK(vkCreatePipelineLayout(g_dev.device, &pl, nullptr, &s.pipeline.layout));
-  const VkShaderModule shader = MakeModuleVec(code);
-  VkComputePipelineCreateInfo pi{
-      VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-  pi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  pi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-  pi.stage.module = shader;
-  pi.stage.pName = "main";
-  pi.layout = s.pipeline.layout;
-  const VkResult result = vkCreateComputePipelines(
-      g_dev.device, g_dev.pipeline_cache, 1, &pi, nullptr, &s.pipeline.pipe);
-  if (result == VK_SUCCESS && g_dev.push_descriptor) {
-    VkDescriptorSetLayoutCreateInfo psl = sl;
-    psl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-    VkPipelineLayoutCreateInfo ppl = pl;
-    ppl.pSetLayouts = &s.push.set_layout;
-    VkComputePipelineCreateInfo ppi = pi;
-    if (vkCreateDescriptorSetLayout(g_dev.device, &psl, nullptr,
-                                    &s.push.set_layout) != VK_SUCCESS ||
-        vkCreatePipelineLayout(g_dev.device, &ppl, nullptr, &s.push.layout) !=
-            VK_SUCCESS)
-      s.push.pipe = VK_NULL_HANDLE;
-    else {
-      ppi.layout = s.push.layout;
-      if (vkCreateComputePipelines(g_dev.device, g_dev.pipeline_cache, 1, &ppi,
-                                   nullptr, &s.push.pipe) != VK_SUCCESS)
-        s.push.pipe = VK_NULL_HANDLE;
-    }
-  }
-  vkDestroyShaderModule(g_dev.device, shader, nullptr);
-  VKOK(result);
-  VkDescriptorPoolSize count{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};
-  VkDescriptorPoolCreateInfo pool{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  pool.maxSets = 1;
-  pool.poolSizeCount = 1;
-  pool.pPoolSizes = &count;
-  VKOK(vkCreateDescriptorPool(g_dev.device, &pool, nullptr, &s.pool));
-  VkDescriptorSetAllocateInfo ds{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  ds.descriptorPool = s.pool;
-  ds.descriptorSetCount = 1;
-  ds.pSetLayouts = &s.pipeline.set_layout;
-  VKOK(vkAllocateDescriptorSets(g_dev.device, &ds, &s.set));
-  VkCommandBufferAllocateInfo cb{
-      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  cb.commandPool = g_dev.pool;
-  cb.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  cb.commandBufferCount = 1;
-  VKOK(vkAllocateCommandBuffers(g_dev.device, &cb, &s.cmd));
-  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  VKOK(vkCreateFence(g_dev.device, &fi, nullptr, &s.fence));
-  return true;
+    set.bindings.push_back(
+        {i, rhi::BindingType::kStorageBuffer, rhi::kStageCompute});
+  set.push = true;
+  s.set_layout = Device().CreateBindGroupLayout(set);
+  if (!s.set_layout)
+    return false;
+  rhi::PipelineLayoutDesc layout;
+  layout.groups = {s.set_layout};
+  layout.push_constant_bytes = sizeof(gcn::ImageTilingParams);
+  layout.push_constant_stages = rhi::kStageCompute;
+  s.layout = Device().CreatePipelineLayout(layout);
+  if (!s.layout)
+    return false;
+  rhi::ComputePipelineDesc pipe;
+  pipe.layout = s.layout;
+  pipe.code = rhi::Code(code);
+  s.pipe = Device().CreateComputePipeline(pipe);
+  return s.pipe != nullptr;
 }
 
 void DropTiledImportImpl(u64 base) {
   auto it = g_tiled_imports.find(base);
   if (it == g_tiled_imports.end())
     return;
-  if (it->second.buf)
-    vkDestroyBuffer(g_dev.device, it->second.buf, nullptr);
-  if (it->second.mem)
-    vkFreeMemory(g_dev.device, it->second.mem, nullptr);
+  Device().Destroy(it->second.buf);
   g_tiled_imports.erase(it);
 }
 
@@ -2516,17 +2063,19 @@ bool ConvertGfx10ImageImpl(const gcn::TextureLayout32& tiled,
                            const void* src,
                            void* dst,
                            bool detile,
-                           VkBuffer linear_buffer = VK_NULL_HANDLE) {
+                           rhi::Buffer* linear_buffer = nullptr) {
   const bool expanded =
       (tiled.elem_bytes == 1 || tiled.elem_bytes == 2) && linear.elem_bytes == 4;
-  if (!g_dev.ready || g_cs_failed ||
-      (!expanded && (tiled.elem_bytes < 4 ||
+  if (!g_backend.device || g_cs_failed)
+    return false;
+  const u64 max_range = Device().caps().max_storage_buffer_range;
+  if ((!expanded && (tiled.elem_bytes < 4 ||
                      tiled.elem_bytes != linear.elem_bytes)) ||
       !tiled.layer_stride ||
       linear.tiling_idx != 8 || tiled.layers != linear.layers ||
       tiled.mip_levels != linear.mip_levels ||
-      tiled.size > g_dev.max_storage_buffer_range ||
-      linear.size > g_dev.max_storage_buffer_range || tiled.size > UINT32_MAX ||
+      tiled.size > max_range ||
+      linear.size > max_range || tiled.size > UINT32_MAX ||
       linear.size > UINT32_MAX)
     return false;
   std::vector<u32> table, terms;
@@ -2565,22 +2114,16 @@ bool ConvertGfx10ImageImpl(const gcn::TextureLayout32& tiled,
   // used as a DMA endpoint instead, which keeps the scatter in VRAM and still
   // spares the CPU both copies.
   const bool dma_tiled = imported != nullptr;
-  VkDescriptorBufferInfo infos[3];
-  VkWriteDescriptorSet writes[3];
+  rhi::BindingWrite writes[3];
   for (u32 i = 0; i < 3; i++) {
     const bool bound = i == 1 && linear_buffer;
     if (!bound &&
         (!CsRangeEnsureBuffer(s.buffers[i], sizes[i]) || !s.buffers[i].map))
       return false;
-    infos[i] = {bound ? linear_buffer : s.buffers[i].buf, 0, sizes[i]};
-    writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[i].dstSet = s.set;
-    writes[i].dstBinding = i;
-    writes[i].descriptorCount = 1;
-    writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[i].pBufferInfo = &infos[i];
+    writes[i].binding = i;
+    writes[i].buffer = bound ? linear_buffer : s.buffers[i].buf;
+    writes[i].range = sizes[i];
   }
-  vkUpdateDescriptorSets(g_dev.device, 3, writes, 0, nullptr);
   const u32 input = detile ? 0 : 1, output = detile ? 1 : 0;
   // Whichever half is bound to memory the shader reaches directly needs no
   // copy: the linear side is the caller's own buffer, the tiled side is guest
@@ -2597,78 +2140,43 @@ bool ConvertGfx10ImageImpl(const gcn::TextureLayout32& tiled,
     std::memset(s.buffers[output].map, 0, sizes[output]);
   std::memcpy(s.buffers[2].map, table.data(), sizes[2]);
   g_tile_hin_ns += NowNs() - _t_hin;
-  VKOK(vkResetCommandBuffer(s.cmd, 0));
-  VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  VKOK(vkBeginCommandBuffer(s.cmd, &begin));
-  VkMemoryBarrier reuse{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-  reuse.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-  reuse.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &reuse, 0, nullptr,
-                       0, nullptr);
-  if (dma_tiled) {
-    const VkBufferCopy in_copy{imported->offset, 0, tiled.size};
-    vkCmdCopyBuffer(s.cmd, imported->buf, s.buffers[0].buf, 1, &in_copy);
-  } else if (!input_bound) {
-    RecordStagingCopy(s.cmd, s.buffers[input], sizes[input], true);
-  }
-  RecordStagingCopy(s.cmd, s.buffers[2], sizes[2], true);
+  rhi::CommandList* c = BeginImmediate();
+  if (!c)
+    return false;
+  c->Barrier(kAccessAll, rhi::kAccessCopyWrite);
+  if (dma_tiled)
+    c->CopyBuffer(s.buffers[0].buf, 0, imported->buf, imported->offset,
+                  tiled.size);
+  else if (!input_bound)
+    RecordStagingCopy(c, s.buffers[input], sizes[input], true);
+  RecordStagingCopy(c, s.buffers[2], sizes[2], true);
   // A tiled destination seeded from guest memory must not be cleared after it.
   if (!(output == 0 && dma_tiled) &&
       (output_bound || s.buffers[output].device_local))
-    vkCmdFillBuffer(s.cmd, infos[output].buffer, infos[output].offset,
-                    sizes[output], 0);
-  VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-  before.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-  before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-  vkCmdPipelineBarrier(
-      s.cmd, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0,
-      nullptr);
-  vkCmdBindPipeline(s.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipeline.pipe);
-  vkCmdBindDescriptorSets(s.cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                          s.pipeline.layout, 0, 1, &s.set, 0, nullptr);
+    c->FillBuffer(writes[output].buffer, writes[output].offset, sizes[output],
+                  0);
+  c->Barrier(rhi::kAccessAllWrite, kAccessComputeRW);
+  c->SetPipeline(s.pipe);
+  c->PushBindGroup(0, s.set_layout, writes, 3);
   for (const auto& p : params) {
-    vkCmdPushConstants(s.cmd, s.pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                       sizeof(p), &p);
-    vkCmdDispatch(s.cmd, (p.width * p.words + 63) / 64, p.height, tiled.layers);
+    c->SetPushConstants(0, sizeof(p), &p);
+    c->Dispatch((p.width * p.words + 63) / 64, p.height, tiled.layers);
   }
   if (dma_tiled && !detile) {
-    VkMemoryBarrier to_dma{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    to_dma.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    to_dma.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &to_dma, 0,
-                         nullptr, 0, nullptr);
-    const VkBufferCopy out_copy{0, imported->offset, tiled.size};
-    vkCmdCopyBuffer(s.cmd, s.buffers[0].buf, imported->buf, 1, &out_copy);
+    c->Barrier(rhi::kAccessComputeWrite, rhi::kAccessCopyRead);
+    c->CopyBuffer(imported->buf, imported->offset, s.buffers[0].buf, 0,
+                  tiled.size);
     g_tile_hout_bytes += tiled.size;
   } else if (!output_bound) {
-    RecordStagingCopy(s.cmd, s.buffers[output], sizes[output], false);
+    RecordStagingCopy(c, s.buffers[output], sizes[output], false);
   }
-  VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-  after.srcAccessMask =
-      VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-  after.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT |
-                        VK_ACCESS_SHADER_WRITE_BIT;
-  vkCmdPipelineBarrier(
-      s.cmd,
-      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-      VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-      &after, 0, nullptr, 0, nullptr);
-  VKOK(vkEndCommandBuffer(s.cmd));
-  VKOK(vkResetFences(g_dev.device, 1, &s.fence));
-  VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  submit.commandBufferCount = 1;
-  submit.pCommandBuffers = &s.cmd;
+  c->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+             rhi::kAccessHostRead | kAccessComputeRW);
   const u64 _t_sync = NowNs();
-  VkResult result = vkQueueSubmit(g_dev.queue, 1, &submit, s.fence);
-  if (result == VK_SUCCESS)
-    result = vkWaitForFences(g_dev.device, 1, &s.fence, VK_TRUE, UINT64_MAX);
+  const bool ok = EndImmediate(c);
   g_tile_sync_ns += NowNs() - _t_sync;
-  if (result != VK_SUCCESS) {
-    BASE_LOGI("gpuvk", "image conversion failed: {}", static_cast<int>(result));
+  if (!ok) {
+    BASE_LOGI("gpuvk", "image conversion failed");
     g_cs_failed = true;
     return false;
   }
@@ -2685,16 +2193,6 @@ bool ConvertGfx10ImageImpl(const gcn::TextureLayout32& tiled,
 }
 
 // ---- Tiled-truth ranges (DELTA_GPU_CS_TRUTH) ----
-
-u32 MemoryTypeWith(u32 type_bits, VkMemoryPropertyFlags props) {
-  VkPhysicalDeviceMemoryProperties mp;
-  vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &mp);
-  for (u32 i = 0; i < mp.memoryTypeCount; i++)
-    if ((type_bits & (1u << i)) &&
-        (mp.memoryTypes[i].propertyFlags & props) == props)
-      return i;
-  return UINT32_MAX;
-}
 
 u64 TileTableKey(const gcn::TextureLayout32& t,
                  const gcn::TextureLayout32& l,
@@ -2719,14 +2217,15 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
                         linear.elem_bytes == 4;
   if (packed && (tiled.elem_bytes >= 4 || tiled.elem_bytes != linear.elem_bytes))
     return nullptr;
-  if (!InitTiling() || !g_tiling.push.pipe ||
+  const u64 max_range = Device().caps().max_storage_buffer_range;
+  if (!InitTiling() ||
       (!expanded && !packed &&
        (tiled.elem_bytes < 4 || tiled.elem_bytes != linear.elem_bytes)) ||
       !tiled.layer_stride || linear.tiling_idx != 8 ||
       tiled.layers != linear.layers ||
       tiled.mip_levels != linear.mip_levels ||
-      tiled.size > g_dev.max_storage_buffer_range ||
-      linear.size > g_dev.max_storage_buffer_range || tiled.size > UINT32_MAX ||
+      tiled.size > max_range ||
+      linear.size > max_range || tiled.size > UINT32_MAX ||
       linear.size > UINT32_MAX)
     return nullptr;
   const u64 key = TileTableKey(tiled, linear, packed);
@@ -2759,43 +2258,17 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
   t.layers = tiled.layers;
   t.expanded = expanded;
   t.bytes = table.size() * 4;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = t.bytes;
-  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &t.buf) != VK_SUCCESS) {
-    t.buf = VK_NULL_HANDLE;
-    return nullptr;
-  }
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, t.buf, &mr);
   // Written once by the host, read by every conversion: device-local
   // host-visible memory where the heap offers it, plain host memory otherwise.
-  u32 type = MemoryTypeWith(mr.memoryTypeBits,
-                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  if (type == UINT32_MAX)
-    type = MemoryTypeWith(mr.memoryTypeBits,
-                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = type;
-  void* map = nullptr;
-  if (type == UINT32_MAX ||
-      vkAllocateMemory(g_dev.device, &ai, nullptr, &t.mem) != VK_SUCCESS ||
-      vkBindBufferMemory(g_dev.device, t.buf, t.mem, 0) != VK_SUCCESS ||
-      vkMapMemory(g_dev.device, t.mem, 0, t.bytes, 0, &map) != VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, t.buf, nullptr);
-    t.buf = VK_NULL_HANDLE;
-    if (t.mem) {
-      vkFreeMemory(g_dev.device, t.mem, nullptr);
-      t.mem = VK_NULL_HANDLE;
-    }
-    return nullptr;
+  t.buf = CreateCsBuffer(t.bytes, rhi::kBufferStorage,
+                         rhi::MemoryKind::kUploadDevice);
+  if (t.buf && !t.buf->mapped()) {
+    Device().Destroy(t.buf);
+    t.buf = nullptr;
   }
-  std::memcpy(map, table.data(), t.bytes);
-  vkUnmapMemory(g_dev.device, t.mem);
+  if (!t.buf)
+    return nullptr;
+  std::memcpy(t.buf->mapped(), table.data(), t.bytes);
   return &t;
 }
 
@@ -2803,13 +2276,13 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
 // guest bytes (a range's truth), `linear` the shader's view of them. `mips`
 // and `layers` limit the pass to the leading levels and slices (a bridge
 // copies mip 0 of layer 0 only); 0 means all of them.
-void RecordImageTiling(VkCommandBuffer c,
+void RecordImageTiling(rhi::CommandList* c,
                        const TileTable& t,
-                       VkBuffer tiled,
-                       VkDeviceSize tiled_off,
-                       VkDeviceSize tiled_bytes,
-                       VkBuffer linear,
-                       VkDeviceSize linear_bytes,
+                       rhi::Buffer* tiled,
+                       u64 tiled_off,
+                       u64 tiled_bytes,
+                       rhi::Buffer* linear,
+                       u64 linear_bytes,
                        bool detile,
                        u32 mips,
                        u32 layers,
@@ -2818,51 +2291,30 @@ void RecordImageTiling(VkCommandBuffer c,
   const u32 mip_count =
       mips ? std::min<u32>(mips, t.params.size()) : t.params.size();
   const u32 layer_count = layers ? std::min(layers, t.layers) : t.layers;
-  VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-  before.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                         VK_ACCESS_TRANSFER_READ_BIT |
-                         VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
-  before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                         VK_ACCESS_TRANSFER_WRITE_BIT;
-  vkCmdPipelineBarrier(c,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                           VK_PIPELINE_STAGE_TRANSFER_BIT |
-                           VK_PIPELINE_STAGE_HOST_BIT,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                           VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       0, 1, &before, 0, nullptr, 0, nullptr);
-  vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, s.push.pipe);
-  const VkDescriptorBufferInfo infos[3] = {{tiled, tiled_off, tiled_bytes},
-                                           {linear, 0, linear_bytes},
-                                           {t.buf, 0, t.bytes}};
-  VkWriteDescriptorSet writes[3];
-  for (u32 i = 0; i < 3; i++) {
-    writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    writes[i].dstBinding = i;
-    writes[i].descriptorCount = 1;
-    writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[i].pBufferInfo = &infos[i];
-  }
-  g_dev.push_descriptor_set(c, VK_PIPELINE_BIND_POINT_COMPUTE, s.push.layout,
-                            0, 3, writes);
+  c->Barrier(kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostWrite,
+             kAccessComputeRW | rhi::kAccessCopyWrite);
+  c->SetPipeline(s.pipe);
+  rhi::BindingWrite writes[3];
+  writes[0].binding = 0;
+  writes[0].buffer = tiled;
+  writes[0].offset = tiled_off;
+  writes[0].range = tiled_bytes;
+  writes[1].binding = 1;
+  writes[1].buffer = linear;
+  writes[1].range = linear_bytes;
+  writes[2].binding = 2;
+  writes[2].buffer = t.buf;
+  writes[2].range = t.bytes;
+  c->PushBindGroup(0, s.set_layout, writes, 3);
   for (u32 m = 0; m < mip_count; m++) {
     gcn::ImageTilingParams p = t.params[m];
     p.detile = detile ? 1u : 0u;
     p.depth16 = depth16 ? 1u : 0u;
-    vkCmdPushConstants(c, s.push.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                       sizeof(p), &p);
-    vkCmdDispatch(c, (p.width * p.words + 63) / 64, p.height, layer_count);
+    c->SetPushConstants(0, sizeof(p), &p);
+    c->Dispatch((p.width * p.words + 63) / 64, p.height, layer_count);
   }
-  VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-  after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  after.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                        VK_ACCESS_TRANSFER_READ_BIT |
-                        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                           VK_PIPELINE_STAGE_TRANSFER_BIT |
-                           VK_PIPELINE_STAGE_HOST_BIT,
-                       0, 1, &after, 0, nullptr, 0, nullptr);
+  c->Barrier(rhi::kAccessComputeWrite,
+             kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostRead);
 }
 
 // Transient detiled views. A scratch is reused within the frame as soon as
@@ -2870,27 +2322,26 @@ void RecordImageTiling(VkCommandBuffer c,
 // barriers order the accesses) and never by the dispatch being recorded.
 // A scratch that goes cold is retired through the frame ring.
 struct CsScratch {
-  VkBuffer buf = VK_NULL_HANDLE;
-  VkDeviceMemory mem = VK_NULL_HANDLE;
-  VkDeviceSize cap = 0;
+  rhi::Buffer* buf = nullptr;
+  u64 cap = 0;
   u64 owner = 0;
   int last_frame = -1;
   // The view it holds: which bytes, converted how, at which revision. A
   // later binding of the same unchanged truth reuses it as it is.
   u64 view_base = 0;
-  VkDeviceSize view_off = 0;
+  u64 view_off = 0;
   const TileTable* view_table = nullptr;
   u64 view_seq = 0;
 };
 std::vector<CsScratch> g_cs_scratch;
 u64 g_truth_view_hits = 0;
 
-VkBuffer AcquireView(VkDeviceSize bytes,
-                     u64 base,
-                     VkDeviceSize off,
-                     const TileTable* table,
-                     u64 seq,
-                     bool* fresh) {
+rhi::Buffer* AcquireView(u64 bytes,
+                         u64 base,
+                         u64 off,
+                         const TileTable* table,
+                         u64 seq,
+                         bool* fresh) {
   for (auto& s : g_cs_scratch) {
     if (s.view_base == base && s.view_off == off && s.view_table == table &&
         s.view_seq == seq && s.cap >= bytes) {
@@ -2905,9 +2356,9 @@ VkBuffer AcquireView(VkDeviceSize bytes,
   return AcquireScratch(bytes);
 }
 
-void StampView(VkBuffer view,
+void StampView(rhi::Buffer* view,
                u64 base,
-               VkDeviceSize off,
+               u64 off,
                const TileTable* table,
                u64 seq) {
   for (auto& s : g_cs_scratch)
@@ -2920,7 +2371,7 @@ void StampView(VkBuffer view,
     }
 }
 
-VkBuffer AcquireScratch(VkDeviceSize bytes) {
+rhi::Buffer* AcquireScratch(u64 bytes) {
   int best = -1;
   for (size_t i = 0; i < g_cs_scratch.size(); i++) {
     const auto& s = g_cs_scratch[i];
@@ -2943,7 +2394,7 @@ VkBuffer AcquireScratch(VkDeviceSize bytes) {
   // recycled before the ring is allowed to grow past its budget.
   constexpr u64 kScratchBudget = 512ull << 20;
   CsScratch s;
-  s.cap = (bytes + 0x3FFFFF) & ~VkDeviceSize(0x3FFFFF);
+  s.cap = (bytes + 0x3FFFFF) & ~u64(0x3FFFFF);
   while (!g_cs_scratch.empty() &&
          (g_cs_scratch.size() >= 24 ||
           g_cs_scratch_bytes + s.cap > kScratchBudget)) {
@@ -2955,37 +2406,24 @@ VkBuffer AcquireScratch(VkDeviceSize bytes) {
         coldest = i;
     if (coldest == SIZE_MAX)
       break;
-    g_cs_frame_retired.emplace_back(g_cs_scratch[coldest].buf,
-                                    g_cs_scratch[coldest].mem);
+    g_cs_frame_retired.push_back(g_cs_scratch[coldest].buf);
     g_cs_scratch_bytes -= g_cs_scratch[coldest].cap;
     g_cs_scratch.erase(g_cs_scratch.begin() + coldest);
   }
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = s.cap;
-  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-             VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &s.buf) != VK_SUCCESS)
-    return VK_NULL_HANDLE;
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, s.buf, &mr);
-  u32 type = FindDeviceMemoryType(mr.memoryTypeBits);
-  if (type == UINT32_MAX)
-    type = FindComputeMemoryType(mr.memoryTypeBits);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = type;
-  if (type == UINT32_MAX ||
-      vkAllocateMemory(g_dev.device, &ai, nullptr, &s.mem) != VK_SUCCESS ||
-      vkBindBufferMemory(g_dev.device, s.buf, s.mem, 0) != VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, s.buf, nullptr);
-    if (s.mem)
-      vkFreeMemory(g_dev.device, s.mem, nullptr);
-    return VK_NULL_HANDLE;
-  }
+  s.buf = CreateCsBuffer(
+      s.cap,
+      rhi::kBufferStorage | rhi::kBufferCopySrc | rhi::kBufferCopyDst,
+      SplitVram() ? rhi::MemoryKind::kDevice : rhi::MemoryKind::kReadback);
+  if (!s.buf)
+    return nullptr;
   s.owner = g_cs_scratch_owner;
   s.last_frame = g_frame.num;
-  NameObject(VK_OBJECT_TYPE_BUFFER, (u64)s.buf, "cs scratch %llu KB",
-             (unsigned long long)(s.cap / 1024));
+  if (Device().caps().debug_labels) {
+    char name[48];
+    std::snprintf(name, sizeof(name), "cs scratch %llu KB",
+                  (unsigned long long)(s.cap / 1024));
+    Device().SetName(s.buf, name);
+  }
   if (s.cap >= (64u << 20)) {
     static int n = 0;
     if (n++ < 32)
@@ -3002,34 +2440,14 @@ VkBuffer AcquireScratch(VkDeviceSize bytes) {
 // DMA the guest pages of a truth range straight into its buffer. The pages
 // are read when the batch executes, not now: the same window the tiled
 // import already accepts for conversions.
-bool RecordTruthImport(CsRange& e, u64 base, VkDeviceSize bytes) {
+bool RecordTruthImport(CsRange& e, u64 base, u64 bytes) {
   const ImportedRange* imp = ImportTiledRange(base, bytes);
   if (!imp || !e.buf)
     return false;
   CsBatchBeginImpl();
-  VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-  b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  b.buffer = e.buf;
-  b.offset = 0;
-  b.size = VK_WHOLE_SIZE;
-  b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                    VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-  b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  vkCmdPipelineBarrier(g_cs_cmd,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                           VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &b, 0,
-                       nullptr);
-  const VkBufferCopy region{imp->offset, 0, bytes};
-  vkCmdCopyBuffer(g_cs_cmd, imp->buf, e.buf, 1, &region);
-  b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                    VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-  vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                           VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       0, 0, nullptr, 1, &b, 0, nullptr);
+  g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
+  g_cs_list->CopyBuffer(e.buf, 0, imp->buf, imp->offset, bytes);
+  g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
   MarkPending(e);
   e.mirror_current = false;
   g_truth_import_n++;
@@ -3037,7 +2455,7 @@ bool RecordTruthImport(CsRange& e, u64 base, VkDeviceSize bytes) {
 }
 
 bool TruthAvailable() {
-  return InitTiling() && g_tiling.push.pipe != VK_NULL_HANDLE;
+  return InitTiling();
 }
 #else
 const TileTable* GetTileTable(const gcn::TextureLayout32&,
@@ -3045,19 +2463,17 @@ const TileTable* GetTileTable(const gcn::TextureLayout32&,
                               bool) {
   return nullptr;
 }
-VkBuffer AcquireView(VkDeviceSize, u64, VkDeviceSize, const TileTable*, u64,
-                     bool* fresh) {
+rhi::Buffer* AcquireView(u64, u64, u64, const TileTable*, u64, bool* fresh) {
   *fresh = true;
-  return VK_NULL_HANDLE;
+  return nullptr;
 }
-void StampView(VkBuffer, u64, VkDeviceSize, const TileTable*, u64) {}
-void RecordImageTiling(VkCommandBuffer, const TileTable&, VkBuffer,
-                       VkDeviceSize, VkDeviceSize, VkBuffer, VkDeviceSize,
-                       bool, u32, u32, bool) {}
-VkBuffer AcquireScratch(VkDeviceSize) {
-  return VK_NULL_HANDLE;
+void StampView(rhi::Buffer*, u64, u64, const TileTable*, u64) {}
+void RecordImageTiling(rhi::CommandList*, const TileTable&, rhi::Buffer*, u64,
+                       u64, rhi::Buffer*, u64, bool, u32, u32, bool) {}
+rhi::Buffer* AcquireScratch(u64) {
+  return nullptr;
 }
-bool RecordTruthImport(CsRange&, u64, VkDeviceSize) {
+bool RecordTruthImport(CsRange&, u64, u64) {
   return false;
 }
 bool TruthAvailable() {
@@ -3068,7 +2484,7 @@ bool TruthAvailable() {
 // A resource whose range can be a tiled truth: a gfx10 surface the tiling
 // shader handles, with the shader reading its texels directly or expanded.
 bool TruthEligible(const ComputeInfo::Res& r) {
-  return kCsTruth && kCsVram && g_dev.push_descriptor && r.image_staging &&
+  return kCsTruth && kCsVram && r.image_staging &&
          !r.zero_fill && r.size && r.guest_size &&
          ((r.elem_bytes >= 4 && r.elem_bytes == r.stage_elem_bytes) ||
           ((r.elem_bytes == 1 || r.elem_bytes == 2) &&
@@ -3076,8 +2492,8 @@ bool TruthEligible(const ComputeInfo::Res& r) {
          r.dfmt != 6 && r.dfmt != 35 && r.dfmt != 40 &&
          r.tiling_idx >= gcn::kGfx10TilingBase &&
          !gcn::TilingIsLinear(r.tiling_idx) &&
-         r.guest_size <= g_dev.max_storage_buffer_range &&
-         r.size <= g_dev.max_storage_buffer_range &&
+         r.guest_size <= Device().caps().max_storage_buffer_range &&
+         r.size <= Device().caps().max_storage_buffer_range &&
          r.guest_size <= (768ull << 20) && r.size <= (768ull << 20) &&
          TruthAvailable();
 }
@@ -3128,10 +2544,10 @@ bool ConvertCsRangeImage(const ComputeInfo::Res& res, CsRange& e, bool detile) {
 // trips per frame were ~40% of the whole compute cost.
 bool g_cs_batch_open = false;
 u32 g_cs_batch_count = 0;
-// Batches are submitted without waiting and retired in order as their fences
-// signal; a reader waits for the one batch its range was last recorded into
-// (CsBatchWaitId), and only then. The GPU then executes batch N while the
-// walk records N+1, where a synchronous flush idled both in turn.
+// Batches are submitted without waiting and retired in order as their
+// submissions complete; a reader waits for the one batch its range was last
+// recorded into (CsBatchWaitId), and only then. The GPU then executes batch N
+// while the walk records N+1, where a synchronous flush idled both in turn.
 constexpr u32 kCsBatchRing = 6;
 u64 g_cs_batch_id = 0;       // the open batch
 u64 g_cs_batch_next_id = 1;
@@ -3151,20 +2567,18 @@ struct BatchedDispatch {
   u8 res_write;  // bit i: resource i is written
 };
 std::vector<BatchedDispatch> g_cs_batch_log;
-VkQueryPool g_cs_timestamps = VK_NULL_HANDLE;
+rhi::TimestampPool* g_cs_timestamps = nullptr;
 struct CsGpuTime {
   double ns = 0;
   u64 count = 0;
 };
 std::unordered_map<u64, CsGpuTime> g_cs_gpu_times;
-VkFence g_cs_batch_fence = VK_NULL_HANDLE;
-std::unordered_map<VkBuffer, ComputeBufferAccess> g_cs_batch_access;
+std::unordered_map<rhi::Buffer*, ComputeBufferAccess> g_cs_batch_access;
 
 struct CsBatch {
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  VkFence fence = VK_NULL_HANDLE;
-  VkDescriptorPool pool = VK_NULL_HANDLE;
-  VkQueryPool timestamps = VK_NULL_HANDLE;
+  rhi::CommandList* list = nullptr;
+  rhi::TimestampPool* timestamps = nullptr;
+  u64 submission = 0;  // the device submission carrying it
   u64 id = 0;
   bool submitted = false;
   u32 count = 0;
@@ -3182,47 +2596,22 @@ void MarkPending(CsRange& e) {
 }
 
 bool CsBatchInit() {
-  if (g_cs_batches[0].fence)
+  if (g_cs_batches[0].list)
     return true;
   for (auto& b : g_cs_batches) {
-    VkCommandBufferAllocateInfo ca{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    ca.commandPool = g_dev.pool;
-    ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ca.commandBufferCount = 1;
-    if (vkAllocateCommandBuffers(g_dev.device, &ca, &b.cmd) != VK_SUCCESS)
+    b.list = Device().CreateCommandList();
+    if (!b.list)
       return false;
-    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    if (vkCreateFence(g_dev.device, &fci, nullptr, &b.fence) != VK_SUCCESS)
-      return false;
-    // Sized for a whole batch of dispatches between submits.
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                            256 * ComputeInfo::kMaxResources};
-    VkDescriptorPoolCreateInfo pci{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pci.maxSets = 256;
-    pci.poolSizeCount = 1;
-    pci.pPoolSizes = &ps;
-    if (vkCreateDescriptorPool(g_dev.device, &pci, nullptr, &b.pool) !=
-        VK_SUCCESS)
-      return false;
-    if (kCsSyncReport && g_dev.timestamp_valid_bits) {
-      VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-      qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-      qi.queryCount = 256;  // two timestamps for each of at most 128 dispatches
-      if (vkCreateQueryPool(g_dev.device, &qi, nullptr, &b.timestamps) !=
-          VK_SUCCESS)
-        b.timestamps = VK_NULL_HANDLE;
-    }
+    // Two timestamps for each of at most 128 dispatches.
+    if (kCsSyncReport && Device().caps().timestamps)
+      b.timestamps = Device().CreateTimestampPool(256);
   }
-  g_cs_cmd = g_cs_batches[0].cmd;
-  g_cs_desc_pool = g_cs_batches[0].pool;
-  g_cs_batch_fence = g_cs_batches[0].fence;
+  g_cs_list = g_cs_batches[0].list;
   return true;
 }
 
-void CsBatchLogFault(const CsBatch& b, const char* what, VkResult r) {
-  BASE_LOGI("gpuvk", "cs batch DEVICE FAULT: {}={} id={} n={}", what, (int)r,
+void CsBatchLogFault(const CsBatch& b, const char* what) {
+  BASE_LOGI("gpuvk", "cs batch DEVICE FAULT: {} failed id={} n={}", what,
             (unsigned long long)b.id, b.count);
   for (const auto& d : b.log) {
     base::String res;
@@ -3236,23 +2625,22 @@ void CsBatchLogFault(const CsBatch& b, const char* what, VkResult r) {
               (unsigned long)d.cs_addr, d.groups[0], d.groups[1], d.groups[2],
               d.num_res, res.c_str());
   }
-  ReportDeviceFault(g_dev);
+  Device().ReportDeviceLoss();
   g_cs_failed = true;
 }
 
-// The batch's fence has signaled: what it produced is real now.
+// The batch's submission has completed: what it produced is real now.
 void CsBatchFinalize(CsBatch& b) {
   if (b.timestamps && !b.log.empty()) {
     std::array<u64, 256> stamps{};
     const u32 count = static_cast<u32>(b.log.size());
-    if (vkGetQueryPoolResults(g_dev.device, b.timestamps, 0, count * 2,
-                             count * 2 * sizeof(u64), stamps.data(), sizeof(u64),
-                             VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
-      const u64 mask = UINT64_MAX >> (64 - g_dev.timestamp_valid_bits);
+    if (Device().ReadTimestamps(b.timestamps, 0, count * 2, stamps.data())) {
+      const rhi::Caps& caps = Device().caps();
+      const u64 mask = UINT64_MAX >> (64 - caps.timestamp_bits);
       for (u32 i = 0; i < count; ++i) {
         auto& time = g_cs_gpu_times[b.log[i].cs_addr];
         time.ns += ((stamps[i * 2 + 1] - stamps[i * 2]) & mask) *
-                   double(g_dev.timestamp_period);
+                   caps.timestamp_period_ns;
         ++time.count;
       }
     }
@@ -3281,14 +2669,14 @@ void CsBatchFinalize(CsBatch& b) {
   g_cs_writeback_gen++;
 }
 
-// Retire, in order, every submitted batch whose fence has signaled.
+// Retire, in order, every submitted batch that has completed.
 void CsBatchReap() {
   for (;;) {
     CsBatch* oldest = nullptr;
     for (auto& b : g_cs_batches)
       if (b.submitted && (!oldest || b.id < oldest->id))
         oldest = &b;
-    if (!oldest || vkGetFenceStatus(g_dev.device, oldest->fence) != VK_SUCCESS)
+    if (!oldest || !Device().IsComplete(oldest->submission))
       return;
     CsBatchFinalize(*oldest);
   }
@@ -3303,7 +2691,6 @@ enum CsSyncWhy {
   kSyncScratchGrow,
   kSyncRangeGrow,
   kSyncStageHazard,
-  kSyncDescPool,
   kSyncBatchCap,
   kSyncFrameEnd,
   kSyncChunk,
@@ -3312,7 +2699,7 @@ enum CsSyncWhy {
 };
 const char* const kCsSyncName[kSyncCount] = {
     "imported", "writeback", "scratch-grow", "range-grow",
-    "stage-hazard", "desc-pool", "batch-cap", "frame-end", "chunk",
+    "stage-hazard", "batch-cap", "frame-end", "chunk",
     "ring-full"};
 // The frame's open chunk copies a texture out of a range the open batch
 // writes: the batch has to be on the queue before the chunk is.
@@ -3330,39 +2717,30 @@ void CsBatchBeginImpl() {
   if (b.submitted) {
     // The ring has come round to a batch still in flight.
     const u64 t0 = NowNs();
-    const VkResult r =
-        vkWaitForFences(g_dev.device, 1, &b.fence, VK_TRUE, UINT64_MAX);
-    if (r != VK_SUCCESS)
-      CsBatchLogFault(b, "wait", r);
+    if (!Device().Wait(b.submission))
+      CsBatchLogFault(b, "wait");
     CsBatchFinalize(b);
     g_ns_cs_gpu += NowNs() - t0;
     g_cs_sync_n[kSyncRingFull]++;
     g_cs_sync_ns[kSyncRingFull] += NowNs() - t0;
   }
-  g_cs_cmd = b.cmd;
-  g_cs_desc_pool = b.pool;
+  g_cs_list = b.list;
   g_cs_timestamps = b.timestamps;
-  g_cs_batch_fence = b.fence;
   b.id = g_cs_batch_next_id++;
   g_cs_batch_id = b.id;
-  vkResetCommandBuffer(g_cs_cmd, 0);
-  vkResetDescriptorPool(g_dev.device, g_cs_desc_pool, 0);
-  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(g_cs_cmd, &cbi);
+  g_cs_list->Begin();
   if (g_cs_timestamps)
-    vkCmdResetQueryPool(g_cs_cmd, g_cs_timestamps, 0, 256);
-  CmdBeginLabel(g_cs_cmd, "cs batch (frame %llu)",
-                (unsigned long long)g_frame.num);
+    g_cs_list->ResetTimestamps(g_cs_timestamps, 0, 256);
+  if (Device().caps().debug_labels) {
+    char label[48];
+    std::snprintf(label, sizeof(label), "cs batch (frame %llu)",
+                  (unsigned long long)g_frame.num);
+    g_cs_list->PushLabel(label);
+  }
   if (kCsTexBridge) {
-    // A frame command buffer submitted before this batch may still be copying
+    // A frame command list submitted before this batch may still be copying
     // a bridged texture out of a range the batch overwrites.
-    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    mb.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
-                         nullptr, 0, nullptr);
+    g_cs_list->Barrier(kAccessAll, kAccessAll);
   }
   g_cs_batch_open = true;
 }
@@ -3370,11 +2748,11 @@ void CsBatchBeginImpl() {
 
 // Record the staging move into the batch, and mark the range as referenced by
 // it so a later grow/rename does not pull the buffer out from under the copy.
-void CsCopyStaging(CsRange& e, VkDeviceSize bytes, bool to_device) {
+void CsCopyStaging(CsRange& e, u64 bytes, bool to_device) {
   if (!e.device_local || !e.host_buf || !e.buf || !bytes)
     return;
   CsBatchBeginImpl();
-  RecordStagingCopy(g_cs_cmd, e, bytes, to_device);
+  RecordStagingCopy(g_cs_list, e, bytes, to_device);
   g_cs_batch_access.erase(e.buf);
   MarkPending(e);
   if (to_device)
@@ -3395,25 +2773,22 @@ bool CsBatchSubmit() {
     g_cs_failed = true;
     return false;
   }
-  CmdEndLabel(g_cs_cmd);  // close the "cs batch" scope
+  if (Device().caps().debug_labels)
+    g_cs_list->PopLabel();  // close the "cs batch" scope
   b.count = g_cs_batch_count;
   b.log = std::move(g_cs_batch_log);
   g_cs_batch_log.clear();
-  VkResult r = vkEndCommandBuffer(g_cs_cmd);
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1;
-  si.pCommandBuffers = &g_cs_cmd;
-  if (r == VK_SUCCESS)
-    r = vkResetFences(g_dev.device, 1, &b.fence);
-  if (r == VK_SUCCESS)
-    r = vkQueueSubmit(g_dev.queue, 1, &si, b.fence);
+  g_cs_list->End();
+  // A failed submit returns an id that has already been handed out.
+  const u64 before = Device().LastSubmission();
+  b.submission = Device().Submit(g_cs_list);
   g_cs_batch_open = false;
   g_cs_chunk_needs_batch = false;
   g_cs_batch_count = 0;
   g_cs_batch_access.clear();
   g_cs_submit_n++;
-  if (r != VK_SUCCESS) {
-    CsBatchLogFault(b, "submit", r);
+  if (b.submission <= before) {
+    CsBatchLogFault(b, "submit");
     return false;
   }
   b.submitted = true;
@@ -3437,10 +2812,8 @@ bool CsBatchWaitId(u64 id, CsSyncWhy why) {
         oldest = &b;
     if (!oldest)
       break;
-    const VkResult r =
-        vkWaitForFences(g_dev.device, 1, &oldest->fence, VK_TRUE, UINT64_MAX);
-    if (r != VK_SUCCESS) {
-      CsBatchLogFault(*oldest, "wait", r);
+    if (!Device().Wait(oldest->submission)) {
+      CsBatchLogFault(*oldest, "wait");
       return false;
     }
     CsBatchFinalize(*oldest);
@@ -3748,51 +3121,28 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
 }
 
 // Ensure staging slot i can hold `size` bytes (grow-on-demand, kept mapped).
-bool CsEnsureStage(u32 i, VkDeviceSize size) {
+bool CsEnsureStage(u32 i, u64 size) {
   GPU_BUGCHECK(i < ComputeInfo::kMaxResources, "stage index %u out of bounds",
                i);
   CsStage& s = g_cs_stage[i];
   if (s.buf && s.cap >= size)
     return true;
-  if (s.map) {
-    vkUnmapMemory(g_dev.device, s.mem);
-    s.map = nullptr;
-  }
+  s.map = nullptr;
   // A batch in flight may still bind the old scratch: it outlives the frame.
-  if (s.buf || s.mem)
-    g_cs_frame_retired.emplace_back(s.buf, s.mem);
-  s.buf = VK_NULL_HANDLE;
-  s.mem = VK_NULL_HANDLE;
-  VkDeviceSize cap =
-      (size + 0xFFFFF) & ~VkDeviceSize(0xFFFFF);  // 1 MiB granularity
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = cap;
-  bi.usage =
-      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &s.buf) != VK_SUCCESS) {
-    s.buf = VK_NULL_HANDLE;
+  if (s.buf)
+    g_cs_frame_retired.push_back(s.buf);
+  s.buf = nullptr;
+  const u64 cap = (size + 0xFFFFF) & ~u64(0xFFFFF);  // 1 MiB granularity
+  // Scratch is zeroed by FillBuffer and only ever touched by shaders, so it
+  // wants VRAM and no mapping at all.
+  const bool vram = kCsVram && SplitVram();
+  s.buf = CreateCsBuffer(
+      cap, rhi::kBufferStorage | rhi::kBufferCopyDst,
+      vram ? rhi::MemoryKind::kDevice : rhi::MemoryKind::kReadback);
+  if (!s.buf)
     return false;
-  }
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, s.buf, &mr);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  // Scratch is zeroed by vkCmdFillBuffer and only ever touched by shaders, so
-  // it wants VRAM and no mapping at all.
-  const u32 scratch_device =
-      kCsVram ? FindDeviceMemoryType(mr.memoryTypeBits) : UINT32_MAX;
-  ai.memoryTypeIndex = scratch_device != UINT32_MAX
-                           ? scratch_device
-                           : FindComputeMemoryType(mr.memoryTypeBits);
-  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &s.mem) != VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, s.buf, nullptr);
-    s.buf = VK_NULL_HANDLE;
-    s.mem = VK_NULL_HANDLE;
-    return false;
-  }
-  vkBindBufferMemory(g_dev.device, s.buf, s.mem, 0);
-  if (scratch_device == UINT32_MAX)
-    vkMapMemory(g_dev.device, s.mem, 0, cap, 0, &s.map);
+  if (!vram)
+    s.map = s.buf->mapped();
   s.cap = cap;
   return true;
 }
@@ -3979,16 +3329,18 @@ bool PreserveCsDepthBeforeClear(u64 base) {
 
   DepthTarget& depth = depth_it->second;
   CsRange& range = range_it->second;
-  if (!depth.image || depth.layout == VK_IMAGE_LAYOUT_UNDEFINED || !range.buf ||
-      range.pending_batch || range.gpu_dirty || !range.image_staging)
+  if (!depth.texture || depth.layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+      !range.buf || range.pending_batch || range.gpu_dirty ||
+      !range.image_staging)
     return false;
 
-  CsAliasedImage image{depth.image,
+  const rhi::TextureState old_state = FromVkLayout(depth.layout);
+  CsAliasedImage image{depth.texture,
                        depth.w,
                        depth.h,
                        4,
-                       VK_IMAGE_ASPECT_DEPTH_BIT,
-                       depth.layout,
+                       rhi::kAspectDepth,
+                       old_state,
                        true};
   AliasedCopyPlan plan;
   if (!PlanAliasedCopy(image, range.res, "preserves", plan) || plan.unpack ||
@@ -4004,38 +3356,18 @@ bool PreserveCsDepthBeforeClear(u64 base) {
   if (level.offset + copy_bytes > range.cap)
     return false;
 
-  const VkImageLayout old_layout = depth.layout;
-  AliasedImageBarrier(g_frame.cmd, image, old_layout,
-                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                      AliasedImageAccess(image, old_layout),
-                      VK_ACCESS_TRANSFER_READ_BIT);
-  VkBufferImageCopy copy{};
-  copy.bufferOffset = level.offset;
-  copy.bufferRowLength = level.pitch;
-  copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
-  copy.imageExtent = {plan.w, plan.h, 1};
-  vkCmdCopyImageToBuffer(g_frame.cmd, depth.image,
-                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, range.buf, 1,
-                         &copy);
-
-  VkBufferMemoryBarrier buffer_barrier{
-      VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-  buffer_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  buffer_barrier.dstAccessMask =
-      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-  buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  buffer_barrier.buffer = range.buf;
-  buffer_barrier.offset = 0;
-  buffer_barrier.size = VK_WHOLE_SIZE;
-  vkCmdPipelineBarrier(
-      g_frame.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
-      nullptr, 1, &buffer_barrier, 0, nullptr);
-  AliasedImageBarrier(g_frame.cmd, image,
-                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, old_layout,
-                      VK_ACCESS_TRANSFER_READ_BIT,
-                      AliasedImageAccess(image, old_layout));
+  rhi::CommandList* const list = g_frame.list;
+  AliasedImageBarrier(list, image, old_state, rhi::TextureState::kCopySrc);
+  rhi::BufferTextureCopy copy;
+  copy.buffer_offset = level.offset;
+  copy.row_length = level.pitch;
+  copy.region.aspect = rhi::kAspectDepth;
+  copy.region.width = plan.w;
+  copy.region.height = plan.h;
+  list->CopyTextureToBuffer(range.buf, depth.texture, &copy, 1);
+  list->Barrier(rhi::kAccessCopyWrite,
+                rhi::kAccessComputeRead | rhi::kAccessHostRead);
+  AliasedImageBarrier(list, image, rhi::TextureState::kCopySrc, old_state);
 
   // Compute for frame N runs before graphics N. This graphics-side snapshot
   // is therefore the input for compute N+1, and must suppress that frame's
@@ -4054,18 +3386,12 @@ bool PreserveCsDepthBeforeClear(u64 base) {
 }
 
 // DELTA_GPU_QCHECK=1: before every CS batch is submitted, run an EMPTY
-// command buffer through the same queue and wait for it. The device is lost
+// command list through the same queue and wait for it. The device is lost
 // by whatever ran before the first failing submit, so a checkpoint that
 // fails names PRIOR queue work (graphics draws, an earlier bridge copy) as
 // the fault, and one that succeeds while the batch's own wait fails
 // isolates the batch content. The checkpoint shares the graphics queue, so
 // it runs after everything already recorded there.
-struct QueueCheckpoint {
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  VkFence fence = VK_NULL_HANDLE;
-  bool ready = false;
-};
-QueueCheckpoint g_qcheck;
 DELTA_OPTION(bool, kQueueCheck, "DELTA_GPU_QCHECK", false);
 
 bool QueueCheckArmed() {
@@ -4075,50 +3401,21 @@ bool QueueCheckArmed() {
 bool QueueCheck(const char* where) {
   if (!kQueueCheck)
     return true;
-  if (!g_qcheck.ready) {
-    VkCommandBufferAllocateInfo ai{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    ai.commandPool = g_dev.pool;
-    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ai.commandBufferCount = 1;
-    if (vkAllocateCommandBuffers(g_dev.device, &ai, &g_qcheck.cmd) !=
-        VK_SUCCESS)
-      return true;
-    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    if (vkCreateFence(g_dev.device, &fi, nullptr, &g_qcheck.fence) !=
-        VK_SUCCESS)
-      return true;
-    g_qcheck.ready = true;
-  }
-  VkResult r = vkResetCommandBuffer(g_qcheck.cmd, 0);
-  if (r == VK_SUCCESS) {
-    VkCommandBufferBeginInfo bi{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-    r = vkBeginCommandBuffer(g_qcheck.cmd, &bi);
-    if (r == VK_SUCCESS)
-      r = vkEndCommandBuffer(g_qcheck.cmd);
-  }
-  if (r == VK_SUCCESS)
-    r = vkResetFences(g_dev.device, 1, &g_qcheck.fence);
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1;
-  si.pCommandBuffers = &g_qcheck.cmd;
-  if (r == VK_SUCCESS)
-    r = vkQueueSubmit(g_dev.queue, 1, &si, g_qcheck.fence);
-  if (r == VK_SUCCESS)
-    r = vkWaitForFences(g_dev.device, 1, &g_qcheck.fence, VK_TRUE, UINT64_MAX);
-  if (r != VK_SUCCESS)
-    BASE_LOGI("gpuvk", "queue CHECKPOINT FAILED at {}: {}", where, (int)r);
-  return r == VK_SUCCESS;
+  rhi::CommandList* list = BeginImmediate();
+  if (!list)
+    return true;
+  const bool ok = EndImmediate(list);
+  if (!ok)
+    BASE_LOGI("gpuvk", "queue CHECKPOINT FAILED at {}", where);
+  return ok;
 }
 
 bool CsSupplyTexture(u64 base,
                      const gcn::TextureLayout32& layout,
                      u32 w,
                      u32 h,
-                     VkImage img,
-                     VkImageLayout old_layout,
+                     rhi::Texture* img,
+                     rhi::TextureState state,
                      u64* seq) {
   if (!kCsTexBridge || !kCsVram || g_cs_failed)
     return false;
@@ -4179,19 +3476,20 @@ bool CsSupplyTexture(u64 base,
       e.truth ? GetTileTable(tiled, linear, narrow) : nullptr;
   if (e.truth && !table)
     return declined("tile table");
-  VkBufferImageCopy copies[16]{};
+  rhi::BufferTextureCopy copies[16];
   for (u32 mip = 0; mip < linear.mip_levels; mip++) {
     const auto& level = linear.mips[mip];
     if (level.offset % std::max<u64>(4, r.elem_bytes) ||
         level.width != std::max(w >> mip, 1u) ||
         level.height != std::max(h >> mip, 1u))
       return declined("mip geometry");
-    copies[mip].bufferOffset = level.offset;
-    copies[mip].bufferRowLength = level.pitch;
-    copies[mip].bufferImageHeight = level.stored_height;
-    copies[mip].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0,
-                                    linear.layers};
-    copies[mip].imageExtent = {level.width, level.height, 1};
+    copies[mip].buffer_offset = level.offset;
+    copies[mip].row_length = level.pitch;
+    copies[mip].image_height = level.stored_height;
+    copies[mip].region.mip = mip;
+    copies[mip].region.layers = linear.layers;
+    copies[mip].region.width = level.width;
+    copies[mip].region.height = level.height;
   }
   if (!img)
     return true;
@@ -4199,15 +3497,10 @@ bool CsSupplyTexture(u64 base,
   if (*seq == e.write_seq)
     return true;
   EndRegion();
-  VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-  mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-  mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-  vkCmdPipelineBarrier(g_frame.cmd,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                           VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr,
-                       0, nullptr);
-  VkBuffer src = e.buf;
+  rhi::CommandList* const list = g_frame.list;
+  list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+                rhi::kAccessCopyRead);
+  rhi::Buffer* src = e.buf;
   if (e.truth) {
     g_cs_scratch_owner++;
     bool fresh = true;
@@ -4215,24 +3508,22 @@ bool CsSupplyTexture(u64 base,
     if (!src)
       return false;
     if (fresh) {
-      RecordImageTiling(g_frame.cmd, *table, e.buf, 0, e.guest_bytes, src,
+      RecordImageTiling(list, *table, e.buf, 0, e.guest_bytes, src,
                         linear.size, /*detile=*/true);
       StampView(src, base, 0, table, e.write_seq);
     }
   }
-  ImageBarrier(g_frame.cmd, img, old_layout,
-               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               old_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                   ? VK_ACCESS_SHADER_READ_BIT
-                   : 0,
-               VK_ACCESS_TRANSFER_WRITE_BIT, linear.layers, linear.mip_levels);
-  vkCmdCopyBufferToImage(g_frame.cmd, src, img,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         linear.mip_levels, copies);
-  ImageBarrier(g_frame.cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-               VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-               linear.layers, linear.mip_levels);
+  rhi::TextureBarrier b;
+  b.texture = img;
+  b.before = state;
+  b.after = rhi::TextureState::kCopyDst;
+  b.range.mips = linear.mip_levels;
+  b.range.layers = linear.layers;
+  list->Barrier(0, 0, &b, 1);
+  list->CopyBufferToTexture(img, src, copies, linear.mip_levels);
+  b.before = rhi::TextureState::kCopyDst;
+  b.after = rhi::TextureState::kShaderRead;
+  list->Barrier(0, 0, &b, 1);
   *seq = e.write_seq;
   e.frame_ref = g_frame.num;
   e.chunk_ref = g_frame.chunk_seq;
@@ -4244,7 +3535,7 @@ bool CsSupplyTexture(u64 base,
 }
 
 // The live colour target at `base` takes the truth's pixels on the frame
-// command buffer: detile into a scratch, copy into the image, and leave the
+// command list: detile into a scratch, copy into the image, and leave the
 // image in the layout the recording expects. No writeback, no wait.
 bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   if (!e.truth || !e.gpu_dirty || !e.buf || e.rt_seq == e.write_seq ||
@@ -4256,7 +3547,8 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
     return false;
   ActivateWrittenRtVariant(base, r.width, r.height);
   auto rt_it = g_rts.find(base);
-  if (rt_it == g_rts.end() || !rt_it->second.image || rt_it->second.is_depth)
+  if (rt_it == g_rts.end() || !rt_it->second.texture ||
+      rt_it->second.is_depth)
     return false;
   RTarget& rt = rt_it->second;
   if (rt.w + 8 < r.width || rt.h + 8 < r.height ||
@@ -4270,34 +3562,29 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
     return false;
   g_cs_scratch_owner++;
   bool fresh = true;
-  const VkBuffer scratch =
+  rhi::Buffer* const scratch =
       AcquireView(linear.size, base, 0, table, e.write_seq, &fresh);
   if (!scratch)
     return false;
   EndRegion();
+  rhi::CommandList* const list = g_frame.list;
   // A partial conversion (mip 0, slice 0) is not a whole view: stamp nothing.
   if (fresh)
-    RecordImageTiling(g_frame.cmd, *table, e.buf, 0, e.guest_bytes, scratch,
+    RecordImageTiling(list, *table, e.buf, 0, e.guest_bytes, scratch,
                       linear.size, /*detile=*/true, 1, 1);
-  const VkImageLayout from = rt.layout;
-  ImageBarrier(g_frame.cmd, rt.image, from,
-               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, ColorImageAccess(from),
-               VK_ACCESS_TRANSFER_WRITE_BIT);
+  const rhi::TextureState from = FromVkLayout(rt.layout);
+  TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopyDst);
   const auto& level = linear.mips[0];
-  VkBufferImageCopy copy{};
-  copy.bufferOffset = level.offset;
-  copy.bufferRowLength = level.pitch;
-  copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  copy.imageExtent = {std::min(rt.w, r.width), std::min(rt.h, r.height), 1};
-  vkCmdCopyBufferToImage(g_frame.cmd, scratch, rt.image,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-  const VkImageLayout to = from == VK_IMAGE_LAYOUT_UNDEFINED
-                               ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-                               : from;
-  if (to != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-    ImageBarrier(g_frame.cmd, rt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 to, VK_ACCESS_TRANSFER_WRITE_BIT, ColorImageAccess(to));
-  rt.layout = to;
+  rhi::BufferTextureCopy copy;
+  copy.buffer_offset = level.offset;
+  copy.row_length = level.pitch;
+  copy.region.width = std::min(rt.w, r.width);
+  copy.region.height = std::min(rt.h, r.height);
+  list->CopyBufferToTexture(rt.texture, scratch, &copy, 1);
+  // Back to the layout the recording had it in; a target nothing had laid
+  // out yet stays a copy destination.
+  if (from != rhi::TextureState::kUndefined)
+    TransitionImage(list, rt.texture, rt.layout, from);
   rt.dirty_for_read = true;
   rt.ever_rendered = true;
   rt.last_frame = g_frame.num;
@@ -4323,13 +3610,9 @@ bool CsRefreshRtFromTruth(u64 base) {
 }
 
 void ReleaseRetiredCsBuffers() {
-  static std::vector<std::pair<VkBuffer, VkDeviceMemory>> aged;
-  for (auto& [buf, mem] : aged) {
-    if (buf)
-      vkDestroyBuffer(g_dev.device, buf, nullptr);
-    if (mem)
-      vkFreeMemory(g_dev.device, mem, nullptr);
-  }
+  static std::vector<rhi::Buffer*> aged;
+  for (rhi::Buffer* buf : aged)
+    Device().Destroy(buf);
   aged = std::move(g_cs_frame_retired);
   g_cs_frame_retired.clear();
 }
@@ -4387,12 +3670,7 @@ static bool PrepareGdsTransfer(Renderer& renderer, u32 offset, u32 bytes,
     return false;
   if (read) {
     CsBatchBeginImpl();
-    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier,
-                         0, nullptr, 0, nullptr);
+    g_cs_list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
   }
   return CsBatchFlush(kSyncWriteback);
 }
@@ -4463,7 +3741,7 @@ const ComputeInfo& MergeSameBase(const ComputeInfo& ci, ComputeInfo& merged) {
 void PrebuildComputePipeline(const std::vector<u32>& spirv,
                              u32 num_res,
                              int guest_memory_binding) {
-  if (!g_dev.device || spirv.empty())
+  if (!g_backend.device || spirv.empty())
     return;
   std::promise<PrebuiltCs> done;
   {
@@ -4489,10 +3767,17 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     renderer.state = nullptr;
     return CsDeclined(ci, "1");
   }
-  if (!renderer.available() || !ci.recomp || !ci.recomp->ok || !ci.num_res ||
-      ci.num_res + (ci.recomp->guest_memory_binding >= 0) + (ci.gds_binding >= 0) > g_dev.max_cs_resources)
+  if (!renderer.available() || !ci.recomp || !ci.recomp->ok || !ci.num_res)
     return CsDeclined(ci, "2");
-  VkDescriptorBufferInfo guest_table{};
+  const rhi::Caps& caps = Device().caps();
+  const u32 max_resources =
+      std::min(gcn::kMaxCsResources, caps.max_compute_resources);
+  if (ci.num_res + (ci.recomp->guest_memory_binding >= 0) +
+          (ci.gds_binding >= 0) >
+      max_resources)
+    return CsDeclined(ci, "2");
+  rhi::Buffer* guest_table = nullptr;
+  u64 guest_table_bytes = 0;
   if (ci.recomp->guest_memory_binding >= 0) {
     // Runtime reads follow guest pointers across resources. Retire writes and
     // publish their guest mirrors before exposing those pages to this shader.
@@ -4506,29 +3791,29 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     for (const auto& r : ci.guest_memory)
       if (!FlushCsWritesRange(renderer, r.base, r.size, "guestmem"))
         return CsDeclined(ci, "guest-address-map");
-    if (!PrepareGuestMemory(ci.guest_memory, guest_table, ci.recomp->guest_memory_written))
+    if (!PrepareGuestMemory(ci.guest_memory, guest_table, guest_table_bytes,
+                            ci.recomp->guest_memory_written))
       return CsDeclined(ci, "guest-address-map");
   }
   ScopeCs _cs;
   for (u32 i = 0; i < ci.num_res; i++)
     g_cs_bytes += ci.res[i].size;
   for (u32 i = 0; i < ci.num_res; i++)
-    if (ci.res[i].size > g_dev.max_storage_buffer_range)
+    if (ci.res[i].size > caps.max_storage_buffer_range)
       return CsDeclined(ci, "3");
   for (u32 i = 0; i < ci.num_res; i++) {
     if (ci.res[i].zero_fill)
       continue;
     const u64 guest_bytes =
         ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
-    const VkDeviceSize size =
-        ci.res[i].size ? ((ci.res[i].size + 3) & ~VkDeviceSize(3)) : 4;
+    const u64 size = ci.res[i].size ? ((ci.res[i].size + 3) & ~u64(3)) : 4;
     for (u32 j = 0; j < i; j++) {
       if (ci.res[j].zero_fill || ci.res[j].base != ci.res[i].base)
         continue;
       const u64 other_guest_bytes =
           ci.res[j].guest_size ? ci.res[j].guest_size : ci.res[j].size;
-      const VkDeviceSize other_size =
-          ci.res[j].size ? ((ci.res[j].size + 3) & ~VkDeviceSize(3)) : 4;
+      const u64 other_size =
+          ci.res[j].size ? ((ci.res[j].size + 3) & ~u64(3)) : 4;
       if (size != other_size || guest_bytes != other_guest_bytes ||
           !SameCsResourceShape(ci.res[i], ci.res[j]))
         return CsDeclined(ci, "4");
@@ -4548,42 +3833,21 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   if (!cp)
     return CsDeclined(ci, "5");
 
-  // Persistent command buffer + descriptor pool (created once, reused).
-  if (g_cs_cmd == VK_NULL_HANDLE) {
-    VkCommandBufferAllocateInfo ca{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    ca.commandPool = g_dev.pool;
-    ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ca.commandBufferCount = 1;
-    if (vkAllocateCommandBuffers(g_dev.device, &ca, &g_cs_cmd) != VK_SUCCESS) {
-      g_cs_cmd = VK_NULL_HANDLE;
-      return CsDeclined(ci, "6");
-    }
-  }
-  if (g_cs_batch_fence == VK_NULL_HANDLE) {
+  if (!g_cs_batches[0].list) {
     if (!CsBatchInit())
       return CsDeclined(ci, "8");
     // What an EMPTY submit+wait costs here. SotC spends over half its frame in
-    // fence waits while the GPU sits at 18% utilisation, so the question is
+    // waits while the GPU sits at 18% utilisation, so the question is
     // whether a round trip is inherently expensive on this system or whether
     // the GPU is really doing that work. Measured once, at init.
     if (kCsSyncReport) {
       double total = 0;
+      rhi::CommandList* list = g_cs_batches[0].list;
       for (int i = 0; i < 100; i++) {
-        vkResetCommandBuffer(g_cs_cmd, 0);
-        VkCommandBufferBeginInfo bi{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(g_cs_cmd, &bi);
-        vkEndCommandBuffer(g_cs_cmd);
-        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &g_cs_cmd;
+        list->Begin();
+        list->End();
         const u64 t0 = NowNs();
-        vkResetFences(g_dev.device, 1, &g_cs_batch_fence);
-        vkQueueSubmit(g_dev.queue, 1, &si, g_cs_batch_fence);
-        vkWaitForFences(g_dev.device, 1, &g_cs_batch_fence, VK_TRUE,
-                        UINT64_MAX);
+        Device().Wait(Device().Submit(list));
         total += (NowNs() - t0) / 1e6;
       }
       BASE_LOGI("csbench", "empty submit+wait: {:.3f} ms", total / 100.0);
@@ -4635,20 +3899,20 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   // uses the persistent range buffer for its guest base, staged only when the
   // buffer doesn't already hold current content.
   const u64 _t_in0 = NowNs();
-  VkBuffer bind_buf[ComputeInfo::kMaxResources];
-  VkDeviceSize sz[ComputeInfo::kMaxResources];
-  VkBuffer truth_view[ComputeInfo::kMaxResources] = {};
+  rhi::Buffer* bind_buf[ComputeInfo::kMaxResources];
+  u64 sz[ComputeInfo::kMaxResources];
+  rhi::Buffer* truth_view[ComputeInfo::kMaxResources] = {};
   const TileTable* truth_table[ComputeInfo::kMaxResources] = {};
   // A binding served from a dirty truth that contains it: that range's base,
   // and the binding's byte offset into it.
   u64 parent_base[ComputeInfo::kMaxResources] = {};
-  VkDeviceSize parent_off[ComputeInfo::kMaxResources] = {};
+  u64 parent_off[ComputeInfo::kMaxResources] = {};
   g_cs_scratch_owner++;
   // The shader's view of a truth: the bytes at `off` in `tiled_buf` detiled
   // into a scratch on the batch. Bindings of one dispatch that describe the
   // same surface the same way share the view (a shadow array bound through
   // several descriptors is one 320 MB conversion, not four).
-  auto bind_truth_view = [&](u32 i, VkBuffer tiled_buf, VkDeviceSize off,
+  auto bind_truth_view = [&](u32 i, rhi::Buffer* tiled_buf, u64 off,
                              u64 span, u64 pbase) -> bool {
     gcn::TextureLayout32 tiled, linear;
     const TileTable* table = BuildCsImageLayouts(ci.res[i], tiled, linear)
@@ -4672,14 +3936,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     const u64 seq =
         owner_it != g_cs_ranges.end() ? owner_it->second.write_seq : 0;
     bool fresh = true;
-    const VkBuffer view =
+    rhi::Buffer* const view =
         AcquireView(sz[i], pbase ? pbase : ci.res[i].base, off, table, seq,
                     &fresh);
     if (!view)
       return false;
     if (fresh) {
       CsBatchBeginImpl();
-      RecordImageTiling(g_cs_cmd, *table, tiled_buf, off, span, view, sz[i],
+      RecordImageTiling(g_cs_list, *table, tiled_buf, off, span, view, sz[i],
                         /*detile=*/true);
       g_cs_batch_access.erase(view);
       g_truth_detile_n++;
@@ -4693,7 +3957,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     return true;
   };
   for (u32 i = 0; i < ci.num_res; i++) {
-    sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~VkDeviceSize(3)) : 4;
+    sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~u64(3)) : 4;
     if (ci.res[i].zero_fill) {
       if (!CsEnsureStage(i, sz[i]))
         return CsDeclined(ci, "10");
@@ -4719,7 +3983,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         CsRange& r = f->second;
         if ((!r.truth && r.image_staging) || !r.gpu_dirty || !r.buf ||
             cand > base || base + guest_bytes > cand + r.guest_bytes ||
-            (base - cand) % g_dev.storage_buffer_offset_align)
+            (base - cand) % caps.storage_offset_alignment)
           continue;
         parent = &r;
         pbase = cand;
@@ -4733,30 +3997,13 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         if (s.image_staging && !s.truth) {
           parent = nullptr;
         } else if (s.buf) {
-          const VkDeviceSize n = std::min<VkDeviceSize>(
-              s.size ? s.size : s.cap, static_cast<VkDeviceSize>(guest_bytes));
+          const u64 n =
+              std::min<u64>(s.size ? s.size : s.cap, guest_bytes);
           CsBatchBeginImpl();
-          VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-          mb.srcAccessMask =
-              VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-              VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-          mb.dstAccessMask =
-              VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-          vkCmdPipelineBarrier(g_cs_cmd,
-                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                                   VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0,
-                               nullptr, 0, nullptr);
-          const VkBufferCopy fold{0, base - pbase, n};
-          vkCmdCopyBuffer(g_cs_cmd, s.buf, parent->buf, 1, &fold);
-          mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-          mb.dstAccessMask =
-              VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-              VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-          vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                                   VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               0, 1, &mb, 0, nullptr, 0, nullptr);
+          g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+          g_cs_list->CopyBuffer(parent->buf, base - pbase, s.buf, 0, n);
+          g_cs_list->Barrier(rhi::kAccessCopyWrite,
+                             kAccessComputeRW | kAccessCopyRW);
           g_cs_batch_access.erase(parent->buf);
           UnindexDirtyRange(base, s.guest_bytes);
           s.gpu_dirty = false;
@@ -4768,7 +4015,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         }
       }
       if (parent) {
-        const VkDeviceSize off = base - pbase;
+        const u64 off = base - pbase;
         if (parent->chunk_ref == g_frame.chunk_seq &&
             (ci.res[i].written || ci.res[i].shader_writes) &&
             !CsSplitFrameChunk()) {
@@ -4855,7 +4102,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     const bool same_shape = exact_shape || subset;
     // What the buffer holds: the footprint for a truth, the linear view
     // otherwise. `stage_bytes` > 0: staged as raw guest bytes.
-    const VkDeviceSize foot =
+    const u64 foot =
         (raw_view || truth_sub) ? e.cap : truth_i ? guest_bytes : sz[i];
     const u64 stage_bytes = (raw_view || truth_sub) ? e.guest_bytes
                             : truth_i               ? guest_bytes
@@ -4876,7 +4123,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     // only while the range is not already staged some other way.
     if ((kCsImport || ci.res[i].prefer_import) && !e.buf &&
         !ci.res[i].image_staging && !ci.res[i].zero_fill)
-      CsRangeImportGuest(e, base, static_cast<VkDeviceSize>(sz[i]));
+      CsRangeImportGuest(e, base, sz[i]);
     const bool buffer_reused = e.buf && e.cap >= foot;
     const u64 _ta = NowNs();
     const bool ensured = CsRangeEnsureBuffer(e, foot);
@@ -4884,9 +4131,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     g_in_alloc_n += !buffer_reused;
     if (!ensured)
       return CsDeclined(ci, "14");
-    if (!buffer_reused)
-      NameObject(VK_OBJECT_TYPE_BUFFER, (u64)e.buf, "csbuf %#llx",
-                 (unsigned long long)base);
+    if (!buffer_reused && caps.debug_labels) {
+      char name[32];
+      std::snprintf(name, sizeof(name), "csbuf %#llx",
+                    (unsigned long long)base);
+      Device().SetName(e.buf, name);
+    }
     // A buffer that was just rebuilt holds nothing, whatever the shape
     // bookkeeping says about it.
     bool valid = buffer_reused && same_shape &&
@@ -4894,7 +4144,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (e.imported && same_shape)
       valid = true;  // the buffer IS the guest pages; nothing to copy
     // A read whose base is a live render target must be staged from the
-    // VkImage: the guest bytes under an RT are stale (draws never write them
+    // image: the guest bytes under an RT are stale (draws never write them
     // back), and the image content changes every frame regardless of the
     // guest hash. Attempted at most once per frame per range; a CS-written
     // buffer (gpu_dirty) stays authoritative.
@@ -5117,30 +4367,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       CsRange& s = f->second;
       if (!s.gpu_dirty || !s.buf)
         continue;
-      const VkDeviceSize n = std::min<VkDeviceSize>(
-          s.size ? s.size : s.cap, static_cast<VkDeviceSize>(s.guest_bytes));
+      const u64 n = std::min<u64>(s.size ? s.size : s.cap, s.guest_bytes);
       CsBatchBeginImpl();
-      VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-      mb.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                         VK_ACCESS_TRANSFER_READ_BIT |
-                         VK_ACCESS_TRANSFER_WRITE_BIT;
-      mb.dstAccessMask =
-          VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-      vkCmdPipelineBarrier(g_cs_cmd,
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                               VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0,
-                           nullptr, 0, nullptr);
-      const VkBufferCopy fold{0, folds[k] - base, n};
-      vkCmdCopyBuffer(g_cs_cmd, s.buf, e.buf, 1, &fold);
-      mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-      mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                         VK_ACCESS_TRANSFER_READ_BIT |
-                         VK_ACCESS_TRANSFER_WRITE_BIT;
-      vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                               VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           0, 1, &mb, 0, nullptr, 0, nullptr);
+      g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+      g_cs_list->CopyBuffer(e.buf, folds[k] - base, s.buf, 0, n);
+      g_cs_list->Barrier(rhi::kAccessCopyWrite,
+                         kAccessComputeRW | kAccessCopyRW);
       g_cs_batch_access.erase(e.buf);
       UnindexDirtyRange(folds[k], s.guest_bytes);
       s.gpu_dirty = false;
@@ -5170,115 +4402,58 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (!ci.res[i].zero_fill && !truth_view[i])
       bind_buf[i] =
           g_cs_ranges[parent_base[i] ? parent_base[i] : ci.res[i].base].buf;
-  VkDeviceSize bind_off[ComputeInfo::kMaxResources] = {};
+  u64 bind_off[ComputeInfo::kMaxResources] = {};
 
   g_ns_cs_in += NowNs() - _t_in0;
 
-  // Descriptor set binding the storage buffers (pool lives for a whole batch;
-  // reset happens at batch flush).
-  VkDescriptorSet set;
-  VkDescriptorSetAllocateInfo da{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  da.descriptorPool = g_cs_desc_pool;
-  da.descriptorSetCount = 1;
-  da.pSetLayouts = &cp->set_layout;
-  if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS) {
-    if (!CsBatchSubmit()) {
-      renderer.state = nullptr;
-      return CsDeclined(ci, "19");
-    }
-    CsBatchBeginImpl();
-    da.descriptorPool = g_cs_desc_pool;
-    if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS)
-      return CsDeclined(ci, "20");
-  }
-  VkDescriptorBufferInfo dbi[ComputeInfo::kMaxResources + 2];
-  VkWriteDescriptorSet wr[ComputeInfo::kMaxResources + 2];
+  // The storage buffers, pushed into the batch's command list.
+  rhi::BindingWrite wr[ComputeInfo::kMaxResources + 2];
   for (u32 i = 0; i < ci.num_res; i++)
     bind_off[i] = ci.res[i].zero_fill ? 0
                   : truth_view[i]     ? 0
                   : parent_base[i]    ? parent_off[i]
                                       : g_cs_ranges[ci.res[i].base].imported_offset;
   for (u32 i = 0; i < ci.num_res; i++) {
-    dbi[i] = {bind_buf[i], bind_off[i], sz[i]};
-    wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    wr[i].dstSet = set;
-    wr[i].dstBinding = ci.res[i].binding;
-    wr[i].descriptorCount = 1;
-    wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    wr[i].pBufferInfo = &dbi[i];
+    wr[i].binding = ci.res[i].binding;
+    wr[i].buffer = bind_buf[i];
+    wr[i].offset = bind_off[i];
+    wr[i].range = sz[i];
   }
   u32 nwrite = ci.num_res;
   if (ci.gds_binding >= 0 && EnsureGdsBuffer()) {
-    dbi[nwrite] = {g_gds.buf, 0, GdsBuffer::kBytes};
-    wr[nwrite] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    wr[nwrite].dstSet = set;
-    wr[nwrite].dstBinding = static_cast<u32>(ci.gds_binding);
-    wr[nwrite].descriptorCount = 1;
-    wr[nwrite].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    wr[nwrite].pBufferInfo = &dbi[nwrite];
+    wr[nwrite].binding = static_cast<u32>(ci.gds_binding);
+    wr[nwrite].buffer = g_gds.buf;
+    wr[nwrite].range = GdsBuffer::kBytes;
     nwrite++;
   }
   if (ci.recomp->guest_memory_binding >= 0) {
-    dbi[nwrite] = guest_table;
-    wr[nwrite] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    wr[nwrite].dstSet = set;
-    wr[nwrite].dstBinding = ci.recomp->guest_memory_binding;
-    wr[nwrite].descriptorCount = 1;
-    wr[nwrite].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    wr[nwrite].pBufferInfo = &dbi[nwrite];
+    wr[nwrite].binding = ci.recomp->guest_memory_binding;
+    wr[nwrite].buffer = guest_table;
+    wr[nwrite].range = guest_table_bytes;
     nwrite++;
   }
-  vkUpdateDescriptorSets(g_dev.device, nwrite, wr, 0, nullptr);
 
-  // Record the dispatch into the open batch. Submission + the fence wait
-  // happen at the next flush point, not here.
+  // Record the dispatch into the open batch. Submission + the wait happen at
+  // the next flush point, not here.
   CsBatchBeginImpl();
-  VkBufferMemoryBarrier zero_before[ComputeInfo::kMaxResources];
-  VkBufferMemoryBarrier zero_after[ComputeInfo::kMaxResources];
   u32 zero_count = 0;
   for (u32 i = 0; i < ci.num_res; i++) {
     if (!ci.res[i].zero_fill)
       continue;
-    VkBufferMemoryBarrier& before = zero_before[zero_count];
-    before = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-    before.srcAccessMask =
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    before.buffer = bind_buf[i];
-    before.offset = 0;
-    before.size = sz[i];
-    VkBufferMemoryBarrier& after = zero_after[zero_count++];
-    after = before;
-    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    after.dstAccessMask =
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    zero_count++;
     g_cs_batch_access.erase(bind_buf[i]);
   }
   if (zero_count) {
-    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
-                         zero_count, zero_before, 0, nullptr);
+    g_cs_list->Barrier(kAccessComputeRW, rhi::kAccessCopyWrite);
     for (u32 i = 0; i < ci.num_res; i++)
       if (ci.res[i].zero_fill)
-        vkCmdFillBuffer(g_cs_cmd, bind_buf[i], 0, sz[i], 0);
-    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
-                         zero_count, zero_after, 0, nullptr);
+        g_cs_list->FillBuffer(bind_buf[i], 0, sz[i], 0);
+    g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW);
   }
-  if (ci.gds_binding >= 0) {
-    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
-                         0, nullptr, 0, nullptr);
-  }
-  vkCmdBindPipeline(g_cs_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
-  vkCmdBindDescriptorSets(g_cs_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp->layout,
-                          0, 1, &set, 0, nullptr);
+  if (ci.gds_binding >= 0)
+    g_cs_list->Barrier(rhi::kAccessComputeWrite, kAccessComputeRW);
+  g_cs_list->SetPipeline(cp->pipe);
+  g_cs_list->PushBindGroup(0, cp->set_layout, wr, nwrite);
   // The block is 16 user-data dwords plus 48 bounds; its total is the driver's
   // maxPushConstantsSize (256 B == 64 dwords).
   constexpr u32 kCsPushDwords = 64;
@@ -5292,11 +4467,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   for (u32 i = 0; i < ci.num_res; i++)
     if (bind_buf[i] && ci.res[i].binding < kCsPushDwords - 16)
       pc[16 + ci.res[i].binding] = static_cast<u32>(sz[i] / 4);
-  vkCmdPushConstants(g_cs_cmd, cp->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                     sizeof(pc), pc);
-  VkBufferMemoryBarrier barriers[ComputeInfo::kMaxResources];
-  u32 barrier_count = 0;
-  VkBuffer unique_buffers[ComputeInfo::kMaxResources];
+  g_cs_list->SetPushConstants(0, sizeof(pc), pc);
+  // One barrier covers every hazard the dispatch has against the batch.
+  u32 hazard_src = 0, hazard_dst = 0;
+  rhi::Buffer* unique_buffers[ComputeInfo::kMaxResources];
   bool unique_writes[ComputeInfo::kMaxResources] = {};
   u32 unique_count = 0;
   for (u32 i = 0; i < ci.num_res; i++) {
@@ -5316,48 +4490,36 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     const ComputeBufferAccess current{true, unique_writes[i]};
     const bool hazard = NeedsComputeBarrier(prior, current);
     if (hazard) {
-      VkBufferMemoryBarrier& barrier = barriers[barrier_count++];
-      barrier = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-      barrier.srcAccessMask = (prior.read ? VK_ACCESS_SHADER_READ_BIT : 0) |
-                              (prior.write ? VK_ACCESS_SHADER_WRITE_BIT : 0);
-      barrier.dstAccessMask =
-          VK_ACCESS_SHADER_READ_BIT |
-          (unique_writes[i] ? VK_ACCESS_SHADER_WRITE_BIT : 0);
-      barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-      barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-      barrier.buffer = unique_buffers[i];
-      barrier.offset = 0;
-      barrier.size = VK_WHOLE_SIZE;
+      hazard_src |= (prior.read ? rhi::kAccessComputeRead : 0) |
+                    (prior.write ? rhi::kAccessComputeWrite : 0);
+      hazard_dst |= rhi::kAccessComputeRead |
+                    (unique_writes[i] ? rhi::kAccessComputeWrite : 0);
       prior = {};
     }
     prior.read = true;
     prior.write |= unique_writes[i];
   }
-  if (barrier_count)
-    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
-                         barrier_count, barriers, 0, nullptr);
-  CmdInsertLabel(g_cs_cmd, "dispatch cs=%#llx %ux%ux%u res=%u",
-                 (unsigned long long)ci.cs_addr, ci.groups[0], ci.groups[1],
-                 ci.groups[2], ci.num_res);
-  if (ci.recomp->guest_memory_binding >= 0) {
-    VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    host.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    host.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_HOST_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         1, &host, 0, nullptr, 0, nullptr);
+  if (hazard_src)
+    g_cs_list->Barrier(hazard_src, hazard_dst);
+  if (caps.debug_labels) {
+    char label[96];
+    std::snprintf(label, sizeof(label), "dispatch cs=%#llx %ux%ux%u res=%u",
+                  (unsigned long long)ci.cs_addr, ci.groups[0], ci.groups[1],
+                  ci.groups[2], ci.num_res);
+    g_cs_list->InsertLabel(label);
   }
+  if (ci.recomp->guest_memory_binding >= 0)
+    g_cs_list->Barrier(rhi::kAccessHostWrite, rhi::kAccessComputeRead);
   if (g_cs_timestamps)
-    vkCmdWriteTimestamp(g_cs_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         g_cs_timestamps, g_cs_batch_count * 2);
-  DispatchCheckpoint(g_cs_cmd, ci.cs_addr, false);
-  vkCmdDispatchBase(g_cs_cmd, ci.group_base[0], ci.group_base[1],
-                    ci.group_base[2], ci.groups[0], ci.groups[1], ci.groups[2]);
-  DispatchCheckpoint(g_cs_cmd, ci.cs_addr, true);
+    g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2,
+                              /*start=*/true);
+  DispatchCheckpoint(g_cs_list, ci.cs_addr, false);
+  g_cs_list->DispatchBase(ci.group_base[0], ci.group_base[1], ci.group_base[2],
+                          ci.groups[0], ci.groups[1], ci.groups[2]);
+  DispatchCheckpoint(g_cs_list, ci.cs_addr, true);
   if (g_cs_timestamps)
-    vkCmdWriteTimestamp(g_cs_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                         g_cs_timestamps, g_cs_batch_count * 2 + 1);
+    g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2 + 1,
+                              /*start=*/false);
   // What the dispatch wrote through a detiled view goes back into the truth.
   for (u32 i = 0; i < ci.num_res; i++) {
     if (!truth_view[i] || !ci.res[i].written)
@@ -5375,7 +4537,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                          ? (ci.res[i].guest_size ? ci.res[i].guest_size
                                                  : ci.res[i].size)
                          : it->second.guest_bytes;
-    RecordImageTiling(g_cs_cmd, *truth_table[i], it->second.buf,
+    RecordImageTiling(g_cs_list, *truth_table[i], it->second.buf,
                       parent_off[i], span, truth_view[i], sz[i],
                       /*detile=*/false);
     g_cs_batch_access.erase(it->second.buf);
@@ -5451,12 +4613,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     // Publish physical writes before a CPU consumer or another dispatch can
     // use a stale staged copy. The dirty bitmap identifies actual stores,
     // rather than treating the shader's whole guest pool as overwritten.
-    VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    host.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
     CsBatchBeginImpl();
-    vkCmdPipelineBarrier(g_cs_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0, nullptr, 0, nullptr);
+    g_cs_list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
     if (!CsBatchFlush(kSyncBatchCap))
       return CsDeclined(ci, "guest-writeback");
     // Staged copies of the pages it wrote go out first, so its direct writes
@@ -5568,18 +4726,8 @@ void ReportGpuMemory() {
   const u64 tiling = g_tiling.buffers[0].cap + g_tiling.buffers[1].cap +
                      g_tiling.buffers[2].cap + g_truth_bridge_scratch.cap +
                      g_bridge.cap;
-  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
-  VkPhysicalDeviceMemoryProperties2 props{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &budget};
-  vkGetPhysicalDeviceMemoryProperties2(g_dev.phys, &props);
   u64 heap_used = 0, heap_budget = 0;
-  for (u32 i = 0; i < props.memoryProperties.memoryHeapCount; i++)
-    if (props.memoryProperties.memoryHeaps[i].flags &
-        VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
-      heap_used += budget.heapUsage[i];
-      heap_budget += budget.heapBudget[i];
-    }
+  Device().QueryMemoryBudget(&heap_used, &heap_budget);
   constexpr double kMb = 1024.0 * 1024.0;
   BASE_LOGI("memstat", "f{} device heaps {:.0f}/{:.0f}MB | tex {:.0f}MB "
             "scratch {:.0f}MB tiling {:.0f}MB",

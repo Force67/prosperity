@@ -1,19 +1,19 @@
-/* PS4Delta: guest virtual addresses -> checked Vulkan buffer addresses. */
+/* PS4Delta: guest virtual addresses -> checked device buffer addresses. */
 #include "gpu/vulkan/vk_guest_memory.h"
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstring>
 #include <unordered_map>
-#include "gpu/vulkan/vk_device.h"
+#include <base/logging.h>
+#include "gpu/vulkan/vk_frame.h"
 
 namespace gpu::vk {
 namespace {
 struct Buffer {
-  VkBuffer buffer = VK_NULL_HANDLE;
-  VkDeviceMemory memory = VK_NULL_HANDLE;
+  rhi::Buffer* buffer = nullptr;
   void* mapped = nullptr;
-  VkDeviceAddress address = 0;
+  u64 address = 0;
   u64 size = 0, identity = 0;
   bool imported = false;
 };
@@ -21,102 +21,28 @@ std::unordered_map<u64, Buffer> spans, dirty_spans;
 Buffer table_buffer;
 
 void Destroy(Buffer& b) {
-  if (b.mapped && !b.imported)
-    vkUnmapMemory(g_dev.device, b.memory);
-  if (b.buffer)
-    vkDestroyBuffer(g_dev.device, b.buffer, nullptr);
-  if (b.memory)
-    vkFreeMemory(g_dev.device, b.memory, nullptr);
+  Device().Destroy(b.buffer);
   b = {};
 }
 
 bool Create(Buffer& out, u64 bytes, void* host = nullptr) {
-  VkExternalMemoryBufferCreateInfo external{
-      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
-  external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = bytes;
-  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-             VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-  if (host)
-    bi.pNext = &external;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &out.buffer) != VK_SUCCESS)
-    return false;
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, out.buffer, &mr);
-  u32 bits = mr.memoryTypeBits;
-  if (host) {
-    auto fn = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
-        vkGetDeviceProcAddr(g_dev.device,
-                            "vkGetMemoryHostPointerPropertiesEXT"));
-    VkMemoryHostPointerPropertiesEXT properties{
-        VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
-    if (!fn || mr.size > bytes ||
-        fn(g_dev.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-           host, &properties) != VK_SUCCESS) {
-      Destroy(out);
-      return false;
-    }
-    bits &= properties.memoryTypeBits;
-  }
-  VkPhysicalDeviceMemoryProperties memory;
-  vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &memory);
-  u32 chosen = UINT32_MAX;
-  for (u32 i = 0; i < memory.memoryTypeCount; i++) {
-    const auto flags = memory.memoryTypes[i].propertyFlags;
-    if ((bits & (1u << i)) &&
-        ((flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
-         (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-      chosen = i;
-      if (flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
-        break;
-    }
-  }
-  if (chosen == UINT32_MAX) {
-    Destroy(out);
-    return false;
-  }
-  VkImportMemoryHostPointerInfoEXT imported{
-      VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+  rhi::BufferDesc desc;
+  desc.size = bytes;
+  desc.usage = rhi::kBufferStorage | rhi::kBufferAddress;
+  desc.memory = rhi::MemoryKind::kReadback;
   // These are allocations in this process, not foreign host mappings.
-  imported.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-  imported.pHostPointer = host;
-  VkMemoryAllocateFlagsInfo flags{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
-  flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-  flags.pNext = host ? &imported : nullptr;
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.pNext = &flags;
-  ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = chosen;
-  const VkResult allocated =
-      vkAllocateMemory(g_dev.device, &ai, nullptr, &out.memory);
-  const VkResult bound =
-      allocated == VK_SUCCESS
-          ? vkBindBufferMemory(g_dev.device, out.buffer, out.memory, 0)
-          : allocated;
-  if (bound != VK_SUCCESS) {
-    BASE_LOGI(
-        "gpuvk",
-        "guest mapping allocation size={} imported={} allocate={} bind={}",
-        bytes, host != nullptr, int(allocated), int(bound));
-    Destroy(out);
+  desc.host_pointer = host;
+  out.buffer = Device().CreateBuffer(desc);
+  if (!out.buffer) {
+    BASE_LOGI("gpuvk", "guest mapping allocation size={} imported={} failed",
+              bytes, host != nullptr);
     return false;
   }
   out.imported = host != nullptr;
-  out.mapped = host;
-  if (!host && vkMapMemory(g_dev.device, out.memory, 0, VK_WHOLE_SIZE, 0,
-                           &out.mapped) != VK_SUCCESS) {
-    Destroy(out);
-    return false;
-  }
-  VkBufferDeviceAddressInfo address{
-      VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
-  address.buffer = out.buffer;
-  out.address = vkGetBufferDeviceAddress(g_dev.device, &address);
+  out.mapped = out.buffer->mapped();
+  out.address = out.buffer->address();
   out.size = bytes;
-  if (!out.address) {
+  if (!out.mapped || !out.address) {
     Destroy(out);
     return false;
   }
@@ -125,9 +51,11 @@ bool Create(Buffer& out, u64 bytes, void* host = nullptr) {
 }  // namespace
 
 bool PrepareGuestMemory(std::span<const render::GuestMemoryRange> ranges,
-                        VkDescriptorBufferInfo& table,
+                        rhi::Buffer*& table,
+                        u64& table_bytes,
                         bool writes) {
-  if (!g_dev.buffer_device_address || ranges.empty())
+  const rhi::Caps& caps = Device().caps();
+  if (!caps.buffer_address || ranges.empty())
     return false;
   for (auto it = spans.begin(); it != spans.end();) {
     const bool current =
@@ -150,8 +78,8 @@ bool PrepareGuestMemory(std::span<const render::GuestMemoryRange> ranges,
   for (const auto& range : ranges) {
     Buffer& b = spans[range.base];
     if (!b.buffer) {
-      const u64 align = g_dev.host_import_align;
-      const bool can_import = range.writable && g_dev.host_import_available &&
+      const u64 align = caps.host_import_alignment;
+      const bool can_import = range.writable && caps.host_import &&
                               align && !(range.base % align) &&
                               !(range.size % align);
       if ((!can_import ||
@@ -166,7 +94,7 @@ bool PrepareGuestMemory(std::span<const render::GuestMemoryRange> ranges,
     if (!b.imported)
       std::memcpy(b.mapped, reinterpret_cast<const void*>(range.base),
                   range.size);
-    VkDeviceAddress dirty_address = 0;
+    u64 dirty_address = 0;
     if (writes && range.writable) {
       // Min/max dword indices followed by a bit for every potentially written
       // dword. Imported spans need only invalidation; copied spans need exact
@@ -193,7 +121,8 @@ bool PrepareGuestMemory(std::span<const render::GuestMemoryRange> ranges,
       return false;
   }
   std::memcpy(table_buffer.mapped, entries.data(), bytes);
-  table = {table_buffer.buffer, 0, bytes};
+  table = table_buffer.buffer;
+  table_bytes = bytes;
   return true;
 }
 

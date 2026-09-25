@@ -2030,7 +2030,7 @@ void RecordVariantSwap(u64 base,
   l.Emit();
 }
 
-void RecordBridge(const char* dir, u64 base, VkImage image, u32 w, u32 h) {
+void RecordBridge(const char* dir, u64 base, rhi::Texture* image, u32 w, u32 h) {
   if (!g_recording)
     return;
   Line l("bridge");
@@ -2038,7 +2038,7 @@ void RecordBridge(const char* dir, u64 base, VkImage image, u32 w, u32 h) {
       .Int("after_draw", int(g_draw_seq))
       .Str("dir", dir)
       .Hex("base", base)
-      .Hex("image", reinterpret_cast<u64>(image))
+      .Hex("image", reinterpret_cast<u64>(Native(image)))
       .U("w", w)
       .U("h", h);
   l.Emit();

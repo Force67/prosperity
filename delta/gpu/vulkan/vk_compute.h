@@ -3,26 +3,27 @@
  */
 #pragma once
 
-// What the rest of the Vulkan backend needs from the compute path.
+// What the rest of the renderer needs from the compute path.
 
-#include <vulkan/vulkan.h>
 #include "base/arch.h"
 #include "gpu/gcn/gcn_detile.h"
+#include "gpu/rhi/device.h"
 
 namespace gpu::vk {
 
 // A draw is about to sample the surface at `base` (`w`x`h` texels, guest
-// layout `layout`) through `img`. If a dispatch's output for exactly that
-// surface is sitting in a range buffer, copy it VRAM->image on the frame
-// command buffer and return true; guest memory is then never involved. `seq`
-// is the range revision the image already holds, and a match records nothing.
-// A null `img` only asks whether the range could supply it.
+// layout `layout`) through `img`, which is in `state`. If a dispatch's output
+// for exactly that surface is sitting in a range buffer, copy it VRAM->image
+// on the frame command list, leave the image in kShaderRead and return true;
+// guest memory is then never involved. `seq` is the range revision the image
+// already holds, and a match records nothing. A null `img` only asks whether
+// the range could supply it.
 bool CsSupplyTexture(u64 base,
                      const gcn::TextureLayout32& layout,
                      u32 w,
                      u32 h,
-                     VkImage img,
-                     VkImageLayout old_layout,
+                     rhi::Texture* img,
+                     rhi::TextureState state,
                      u64* seq);
 
 // Destroy range buffers retired two frames ago; called once per BeginFrame.

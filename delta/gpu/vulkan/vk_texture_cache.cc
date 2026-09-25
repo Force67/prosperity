@@ -1145,11 +1145,11 @@ rhi::BindGroup* GetTexture(u64 base,
   // A dispatch's output for this surface still in VRAM is copied straight into
   // the image; the guest bytes under it are stale and stay that way.
   const bool cs_supplies =
-      !is_3d && CsSupplyTexture(base, layout, w, h, VK_NULL_HANDLE,
-                                VK_IMAGE_LAYOUT_UNDEFINED, nullptr);
+      !is_3d && CsSupplyTexture(base, layout, w, h, nullptr,
+                                rhi::TextureState::kUndefined, nullptr);
   if (cs_supplies && image_it != g_tex_images.end()) {
-    if (!CsSupplyTexture(base, layout, w, h, Native(image_it->second.image),
-                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    if (!CsSupplyTexture(base, layout, w, h, image_it->second.image,
+                         rhi::TextureState::kShaderRead,
                          &image_it->second.cs_seq))
       return VK_NULL_HANDLE;
     image_it->second.last_checked_frame = g_frame.num;
@@ -1274,8 +1274,8 @@ rhi::BindGroup* GetTexture(u64 base,
       return nullptr;
     const bool cs_uploaded =
         cs_supplies &&
-        CsSupplyTexture(base, layout, w, h, Native(image_entry.image),
-                        VK_IMAGE_LAYOUT_UNDEFINED, &image_entry.cs_seq);
+        CsSupplyTexture(base, layout, w, h, image_entry.image,
+                        rhi::TextureState::kUndefined, &image_entry.cs_seq);
     if (!cs_uploaded) {  // see the refresh above: hash before the upload
       image_entry.hash = TexHash(base, footprint);
       image_entry.hash_valid = true;

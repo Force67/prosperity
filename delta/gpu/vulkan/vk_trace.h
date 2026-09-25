@@ -15,7 +15,7 @@
 
 
 #include "gpu/render/command.h"
-#include "gpu/rhi/types.h"
+#include "gpu/rhi/device.h"
 
 namespace gpu::vk::trace {
 
@@ -105,7 +105,7 @@ void RecordVariantSwap(u64 base,
 // A compute bridge copy between a live image and the CS staging buffer. It is
 // submitted and waited on its own, outside the frame's command buffer, so no
 // barrier record covers it.
-void RecordBridge(const char* dir, u64 base, VkImage image, u32 w, u32 h);
+void RecordBridge(const char* dir, u64 base, rhi::Texture* image, u32 w, u32 h);
 
 // --- Vulkan-level visibility -----------------------------------------------
 

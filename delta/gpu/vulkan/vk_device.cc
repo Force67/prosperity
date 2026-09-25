@@ -41,7 +41,6 @@ namespace gpu::vk {
 namespace {
 DELTA_OPTION(bool, kCheckpoints, "DELTA_GPU_CHECKPOINTS", false);
 bool g_checkpoints_available = false;
-PFN_vkCmdSetCheckpointNV g_set_checkpoint = nullptr;
 DELTA_OPTION(bool, kShaderCacheOn, "DELTA_GPU_SHADER_CACHE", true);
 DELTA_OPTION(const char*,
              kShaderCacheDirOpt,
@@ -222,15 +221,10 @@ void DrawCheckpoint(rhi::CommandList* list, u32 frame, u32 draw, bool after) {
 }
 
 // Bit 63 tells a dispatch marker from a draw marker.
-void DispatchCheckpoint(VkCommandBuffer cmd, u64 cs_addr, bool after) {
-  if (!g_checkpoints_available || !kCheckpoints)
-    return;
-  if (!g_set_checkpoint)
-    g_set_checkpoint = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
-        vkGetDeviceProcAddr(g_dev.device, "vkCmdSetCheckpointNV"));
-  const uintptr_t marker = (1ull << 63) | ((cs_addr << 1) & ~(1ull << 63)) | u32(after);
-  if (g_set_checkpoint)
-    g_set_checkpoint(cmd, reinterpret_cast<const void*>(marker));
+void DispatchCheckpoint(rhi::CommandList* list, u64 cs_addr, bool after) {
+  if (g_checkpoints_available && kCheckpoints)
+    list->Checkpoint((1ull << 63) | ((cs_addr << 1) & ~(1ull << 63)) |
+                     u32(after));
 }
 
 u32 FindMemoryType(u32 type_bits, VkMemoryPropertyFlags props) {
