@@ -41,6 +41,8 @@
             sdl3
             ffmpeg-headless # H.264 decoding behind the PS5 video API
             shaderc          # runtime GLSL -> SPIR-V for the shader recompiler
+            libepoxy         # GL entry points for the OpenGL backend
+            libglvnd         # libEGL / libOpenGL dispatch for the OpenGL backend
           ];
 
           cmakeFlags = [
@@ -81,6 +83,8 @@
             sdl3
             ffmpeg-headless
             shaderc         # runtime GLSL -> SPIR-V for the shader recompiler
+            libepoxy        # GL entry points for the OpenGL backend (EGL, headless)
+            libglvnd        # libEGL / libOpenGL dispatch
             renderdocPython # frame capture: UI, CLI, and Python replay API
           ];
 
