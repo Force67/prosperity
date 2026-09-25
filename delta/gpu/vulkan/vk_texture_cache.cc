@@ -465,58 +465,6 @@ bool CreateTextureDescriptors() {
   return g_tex.descriptors_ready;
 }
 
-VkDescriptorSet AllocateSamplerSet(VkDescriptorSetLayout layout,
-                                   bool multi,
-                                   VkDescriptorPool& owner) {
-  auto& pools = multi ? g_tex.mtex_pools : g_tex.ds_pools;
-  for (auto it = pools.rbegin(); it != pools.rend(); ++it) {
-    const VkDescriptorPool pool = *it;
-    VkDescriptorSet set;
-    VkDescriptorSetAllocateInfo da{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    da.descriptorPool = pool;
-    da.descriptorSetCount = 1;
-    da.pSetLayouts = &layout;
-    const VkResult result = vkAllocateDescriptorSets(g_dev.device, &da, &set);
-    if (result == VK_SUCCESS) {
-      owner = pool;
-      return set;
-    }
-    if (result != VK_ERROR_OUT_OF_POOL_MEMORY &&
-        result != VK_ERROR_FRAGMENTED_POOL)
-      return VK_NULL_HANDLE;
-  }
-
-  const u32 set_capacity = multi ? 512u : 1024u;
-  VkDescriptorPoolSize sizes[2] = {
-      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-       set_capacity * (multi ? kMaxTex : 1u)},
-      {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, set_capacity * (multi ? kMaxTex : 1u)},
-  };
-  VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  ci.maxSets = set_capacity;
-  ci.poolSizeCount = multi ? 2u : 1u;
-  ci.pPoolSizes = sizes;
-  VkDescriptorPool pool;
-  if (vkCreateDescriptorPool(g_dev.device, &ci, nullptr, &pool) != VK_SUCCESS)
-    return VK_NULL_HANDLE;
-  pools.push_back(pool);
-  VkDescriptorSet set;
-  VkDescriptorSetAllocateInfo da{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  da.descriptorPool = pool;
-  da.descriptorSetCount = 1;
-  da.pSetLayouts = &layout;
-  if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS) {
-    pools.pop_back();
-    vkDestroyDescriptorPool(g_dev.device, pool, nullptr);
-    return VK_NULL_HANDLE;
-  }
-  owner = pool;
-  return set;
-}
-
 rhi::Sampler* SamplerFor(const SamplerKey& key) {
   // DELTA_GPU_DEFSAMPLER: ignore every guest S# and use the default sampler,
   // to tell a mis-decoded sampler apart from a mis-bound image.
@@ -1456,8 +1404,7 @@ rhi::TextureView* TexViewFor(const DrawInfo::DrawTex& t) {
 // diffuse*lightmap shader with a missing map shows the diffuse instead of going
 // black.
 struct MultiTexSet {
-  VkDescriptorSet set = VK_NULL_HANDLE;
-  VkDescriptorPool pool = VK_NULL_HANDLE;
+  rhi::BindGroup* set = nullptr;
 };
 
 struct MultiTexKey {
@@ -1469,7 +1416,7 @@ struct MultiTexKey {
   // other's set was built with (VUID-vkCmdDrawIndexed-format-07753).
   u32 decl_uint = 0, decl_3d = 0;
   TexKey tex[kMaxTex];
-  VkImageView view[kMaxTex] = {};
+  rhi::TextureView* view[kMaxTex] = {};
   VkImageLayout layout[kMaxTex] = {};
   bool storage[kMaxTex] = {};
   bool operator==(const MultiTexKey& o) const {
@@ -1491,7 +1438,7 @@ struct MultiTexKeyHash {
     h = HashWord(h, k.decl_3d);
     for (u32 i = 0; i < k.num_texs; i++) {
       h = HashWord(h, TexKeyHash{}(k.tex[i]));
-      h = HashWord(h, std::hash<VkImageView>{}(k.view[i]));
+      h = HashWord(h, reinterpret_cast<u64>(k.view[i]));
       h = HashWord(h, k.layout[i]);
       h = HashWord(h, k.storage[i]);
     }
@@ -1521,7 +1468,7 @@ void ReleaseRetiredTextures() {
   static std::vector<TexViewEntry> aged_tex_views;
   static std::vector<TexImageEntry> aged_tex_images;
   for (const MultiTexSet& entry : aged_mtex)
-    vkFreeDescriptorSets(g_dev.device, entry.pool, 1, &entry.set);
+    Device().Destroy(entry.set);
   for (const TexEntry& e : aged_tex_sets)
     Device().Destroy(e.set);
   for (const TexViewEntry& e : aged_tex_views)
@@ -1538,10 +1485,10 @@ void ReleaseRetiredTextures() {
   g_retired_tex_images.clear();
 }
 
-VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
-                               VkDescriptorSetLayout set_layout,
+rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
+                               rhi::BindGroupLayout* set_layout,
                                u32 num_bindings,
-                               const VkImageView* resolved_views,
+                               rhi::TextureView* const* resolved_views,
                                const VkImageLayout* resolved_layouts,
                                const VkFormat* resolved_formats,
                                const u64* depth_src) {
@@ -1589,27 +1536,27 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
   if (ci != g_mtex_cache.end())
     return ci->second.set;
   if (g_mtex_cache.size() > 3500)
-    return VK_NULL_HANDLE;
+    return nullptr;
   // DELTA_GPU_FORCEWHITE: bind the 1x1 white default for every sampler
   // (diagnostic). Doom64's world textures are built by compute dispatches we
   // don't execute, so the atlases are all-zero and the alpha-blended world
   // samples transparent-black (= invisible). Forcing white makes the geometry
   // render opaque, proving the 3D transform/raster/depth path works and
   // isolating the blackness to the texture data.
-  VkImageView views[kMaxTex];
+  rhi::TextureView* views[kMaxTex];
   VkImageLayout layouts[kMaxTex];
   // DELTA_GPU_TEXMISS: report every sampler binding that falls back to the 1x1
   // white default (the source of "everything renders white" chains) with the
   // descriptor state that failed to resolve.
   static int tex_miss_logged = 0;
   for (u32 i = 0; i < key.num_texs; i++) {
-    VkImageView v =
-        (i < resolved && !kForceWhite) ? resolved_views[i] : VK_NULL_HANDLE;
+    rhi::TextureView* v =
+        (i < resolved && !kForceWhite) ? resolved_views[i] : nullptr;
     bool arrayed = i < resolved && d.texs[i].arrayed;
     bool is_3d = i < resolved ? d.texs[i].is_3d
                               : (declared(i) && declared(i)->is_3d);
     if (i >= resolved && declared(i) && declared(i)->storage)
-      return VK_NULL_HANDLE;  // as for an unresolved storage binding below
+      return nullptr;  // as for an unresolved storage binding below
     if (kTexMiss && !v && i < resolved && tex_miss_logged < 64) {
       tex_miss_logged++;
       const auto& t = d.texs[i];
@@ -1635,28 +1582,24 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
           (unsigned long)t.src, mem);
     }
     if (d.texs[i].storage && !v)
-      return VK_NULL_HANDLE;
+      return nullptr;
     // A binding the module declared with an integer sampled type cannot take
     // the UNORM default: the numeric types have to match
     // (VUID-vkCmdDrawIndexed-format-07753).
     const bool want_uint = declared(i) && declared(i)->is_uint;
     // Shape AND numeric type: a default that matches one but not the other is
     // the same undefined read the resolved case would have been.
-    VkImageView fallback = Native(
+    rhi::TextureView* fallback =
         is_3d ? (want_uint ? g_tex.white_uint_3d_view : g_tex.white_3d_view)
         : arrayed
             ? (want_uint ? g_tex.white_uint_array_view : g_tex.white_array_view)
-            : (want_uint ? g_tex.white_uint_view : g_tex.white_view));
+            : (want_uint ? g_tex.white_uint_view : g_tex.white_view);
     views[i] = v ? v : fallback;
     layouts[i] =
         v ? resolved_layouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
-  MultiTexSet entry;
-  entry.set = AllocateSamplerSet(set_layout, true, entry.pool);
-  if (!entry.set)
-    return VK_NULL_HANDLE;
-  VkDescriptorImageInfo dii[kMaxTex];
-  VkWriteDescriptorSet wr[kMaxTex];
+  rhi::BindGroupDesc group;
+  group.layout = set_layout;
   for (u32 i = 0; i < key.num_texs; i++) {
     // Past `resolved` there is no T#: d.texs[i] holds whatever the previous
     // draw left there, so nothing about it may be read. Those bindings take a
@@ -1691,26 +1634,26 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
     // supports it, and every colour target and guest texture is the wrong kind.
     // Bind the 1x1 far-plane depth default and keep the comparison, which reads
     // as "nothing occludes this" instead of as undefined.
-    VkImageView view_i = views[i];
-    VkImageLayout layout_i = layouts[i];
+    rhi::BindingWrite w;
+    w.binding = i;
+    w.view = views[i];
+    w.view_state = FromVkLayout(layouts[i]);
     if (have_tex && d.texs[i].depth_compare && !storage_i &&
         !(depth_src && depth_src[i]) && g_tex.depth_default_view) {
-      view_i = Native(g_tex.depth_default_view);
-      layout_i = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+      w.view = g_tex.depth_default_view;
+      w.view_state = rhi::TextureState::kDepthRead;
       sampler.depth_compare = true;
     }
-    dii[i] = {storage_i ? VK_NULL_HANDLE : Native(SamplerFor(sampler)), view_i,
-              layout_i};
-    wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    wr[i].dstSet = entry.set;
-    wr[i].dstBinding = i;
-    wr[i].descriptorCount = 1;
-    wr[i].descriptorType = storage_i
-                               ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
-                               : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wr[i].pImageInfo = &dii[i];
+    if (storage_i)
+      w.view_state = rhi::TextureState::kGeneral;
+    else
+      w.sampler = SamplerFor(sampler);
+    group.writes.push_back(w);
   }
-  vkUpdateDescriptorSets(g_dev.device, key.num_texs, wr, 0, nullptr);
+  MultiTexSet entry;
+  entry.set = Device().CreateBindGroup(group);
+  if (!entry.set)
+    return nullptr;
   g_mtex_cache[key] = entry;
   return entry.set;
 }

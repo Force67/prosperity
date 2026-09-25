@@ -70,14 +70,16 @@ bool IdentitySwizzle(const rhi::Swizzle (&sw)[4]) {
   return true;
 }
 
+}  // namespace
+
 // Transition `texture` from its legacy layout to `state`, keeping the layout
 // field in step. `layers` covers every layer the barrier must reach.
-void Transition(rhi::CommandList* list,
-                rhi::Texture* texture,
-                VkImageLayout& layout,
-                rhi::TextureState state,
-                u8 aspect = rhi::kAspectColor,
-                u32 layers = 1) {
+void TransitionImage(rhi::CommandList* list,
+                     rhi::Texture* texture,
+                     VkImageLayout& layout,
+                     rhi::TextureState state,
+                     u8 aspect,
+                     u32 layers) {
   rhi::TextureBarrier b;
   b.texture = texture;
   b.before = FromVkLayout(layout);
@@ -87,8 +89,6 @@ void Transition(rhi::CommandList* list,
   list->Barrier(0, 0, &b, 1);
   layout = ToVkLayout(state, aspect);
 }
-
-}  // namespace
 
 rhi::TextureView* SampledImageView(rhi::Texture* texture,
                                    rhi::TextureView* identity,
@@ -212,10 +212,10 @@ void ClearNewRt(RTarget& t) {
   if (!list)
     return;
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
-  Transition(list, t.texture, layout, rhi::TextureState::kCopyDst);
+  TransitionImage(list, t.texture, layout, rhi::TextureState::kCopyDst);
   list->ClearTexture(t.texture, rhi::TextureState::kCopyDst, {},
                      rhi::ClearColor{});
-  Transition(list, t.texture, layout, rhi::TextureState::kShaderRead);
+  TransitionImage(list, t.texture, layout, rhi::TextureState::kShaderRead);
   if (EndImmediate(list)) {
     // Submitted and waited, so this layout is the real one on both timelines.
     t.layout = layout;
@@ -497,14 +497,14 @@ rhi::BindGroup* SnapshotRT(RTarget& rt) {
     rt.feedback_image = Native(rt.feedback_texture);
   }
   rhi::CommandList* list = g_frame.list;
-  Transition(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
-  Transition(list, rt.feedback_texture, rt.feedback_layout,
+  TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
+  TransitionImage(list, rt.feedback_texture, rt.feedback_layout,
              rhi::TextureState::kCopyDst);
   rhi::TextureRegion region;
   region.width = rt.w;
   region.height = rt.h;
   list->CopyTexture(rt.feedback_texture, region, rt.texture, region);
-  Transition(list, rt.feedback_texture, rt.feedback_layout,
+  TransitionImage(list, rt.feedback_texture, rt.feedback_layout,
              rhi::TextureState::kShaderRead);
   return rt.feedback_set;
 }
@@ -1199,12 +1199,12 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
   if (!list)
     return false;
   const VkImageLayout old_layout = rt.layout;
-  Transition(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
+  TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
   rhi::BufferTextureCopy copy;
   copy.region.width = rt.w;
   copy.region.height = rt.h;
   list->CopyTextureToBuffer(buf, rt.texture, &copy, 1);
-  Transition(list, rt.texture, rt.layout, FromVkLayout(old_layout));
+  TransitionImage(list, rt.texture, rt.layout, FromVkLayout(old_layout));
   list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
   const bool ok = EndImmediate(list);
   if (!ok ||
@@ -1335,7 +1335,7 @@ bool BeginRegion(const u64* mrt_base,
   g_region.cur_mrt_count = 0;
   for (u32 i = 0; i < mrt_count; i++) {
     RTarget& rt = *targets[i];
-    Transition(g_frame.list, rt.texture, rt.layout,
+    TransitionImage(g_frame.list, rt.texture, rt.layout,
                rhi::TextureState::kColorTarget);
     rt.dirty_for_read = true;
     auto& color = colors[i];
@@ -1444,7 +1444,7 @@ bool BeginRegion(const u64* mrt_base,
     // read-only layout, which is what makes attachment and sampled view legal
     // at the same time. A clear still needs write access, so never both.
     const bool read_only = depth_read_only && !clear_depth;
-    Transition(g_frame.list, dt->texture, dt->layout,
+    TransitionImage(g_frame.list, dt->texture, dt->layout,
                read_only ? rhi::TextureState::kDepthRead
                          : rhi::TextureState::kDepthTarget,
                rhi::kAspectDepth, dt->layers);
@@ -1475,7 +1475,7 @@ bool BeginRegion(const u64* mrt_base,
     g_region.cur_depth_slice = depth_slice;
     if (stencil_base) {
       const bool clear_stencil = !dt->stencil_used_this_frame;
-      Transition(g_frame.list, dt->texture, dt->stencil_layout,
+      TransitionImage(g_frame.list, dt->texture, dt->stencil_layout,
                  rhi::TextureState::kDepthTarget, rhi::kAspectStencil,
                  dt->layers);
       depth_att.stencil = true;
@@ -1494,11 +1494,11 @@ bool BeginRegion(const u64* mrt_base,
     if (colors[i].load != rhi::LoadOp::kClear || (rt.w <= w && rt.h <= h))
       continue;
     const VkImageLayout att = rt.layout;
-    Transition(g_frame.list, rt.texture, rt.layout,
+    TransitionImage(g_frame.list, rt.texture, rt.layout,
                rhi::TextureState::kCopyDst);
     g_frame.list->ClearTexture(rt.texture, rhi::TextureState::kCopyDst, {},
                                colors[i].clear);
-    Transition(g_frame.list, rt.texture, rt.layout, FromVkLayout(att));
+    TransitionImage(g_frame.list, rt.texture, rt.layout, FromVkLayout(att));
     colors[i].load = rhi::LoadOp::kLoad;
   }
   if (dt && (dt->w > w || dt->h > h)) {
@@ -1507,7 +1507,7 @@ bool BeginRegion(const u64* mrt_base,
       if (load != rhi::LoadOp::kClear)
         return;
       const VkImageLayout att = layout;
-      Transition(g_frame.list, dt->texture, layout,
+      TransitionImage(g_frame.list, dt->texture, layout,
                  rhi::TextureState::kCopyDst, aspect, dt->layers);
       rhi::TextureRange range;
       range.aspect = aspect;
@@ -1515,7 +1515,7 @@ bool BeginRegion(const u64* mrt_base,
       g_frame.list->ClearDepthStencil(dt->texture, rhi::TextureState::kCopyDst,
                                       range, depth_att.clear_depth,
                                       depth_att.clear_stencil);
-      Transition(g_frame.list, dt->texture, layout, FromVkLayout(att), aspect,
+      TransitionImage(g_frame.list, dt->texture, layout, FromVkLayout(att), aspect,
                  dt->layers);
       load = rhi::LoadOp::kLoad;
     };

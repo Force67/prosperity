@@ -194,6 +194,15 @@ DepthTarget* GetDepthRT(u64 base,
 // attachment-feedback-loop extension; copy it instead and sample the copy.
 rhi::BindGroup* SnapshotRT(RTarget& rt);
 
+// Transition `texture` from its legacy layout to `state`, keeping the layout
+// field in step. `layers` covers every layer the barrier must reach.
+void TransitionImage(rhi::CommandList* list,
+                     rhi::Texture* texture,
+                     VkImageLayout& layout,
+                     rhi::TextureState state,
+                     u8 aspect = rhi::kAspectColor,
+                     u32 layers = 1);
+
 rhi::TextureView* SampledView(RTarget& rt, u32 swizzle, bool feedback = false);
 // Sampled view reinterpreted into `want` (same texel size) so the numeric type matches
 // the shader's OpTypeImage; `used` returns the format actually created, which the

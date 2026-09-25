@@ -8,6 +8,8 @@
 // surface, since guest frames render offscreen and are read back (see vk_frame).
 
 #include <vulkan/vulkan.h>
+
+#include "gpu/rhi/device.h"
 #include "base/arch.h"
 
 #include <base/logging.h>
@@ -108,7 +110,7 @@ VkShaderModule MakeModuleVec(const std::vector<u32>& spv);
 
 // Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
 void ReportDeviceFault(DeviceState& device);
-void DrawCheckpoint(VkCommandBuffer cmd, u32 frame, u32 draw, bool after);
+void DrawCheckpoint(rhi::CommandList* list, u32 frame, u32 draw, bool after);
 void DispatchCheckpoint(VkCommandBuffer cmd, u64 cs_addr, bool after);
 
 // DELTA_GPU_QCHECK: an empty command buffer through the same queue, waited.

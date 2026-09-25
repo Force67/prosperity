@@ -38,8 +38,6 @@ struct TextureBindings {
   // pools for the per-draw sets, plus a 1x1 white default for any binding we
   // could not resolve, so diffuse*lightmap with a missing map shows the
   // diffuse instead of going black.
-  std::vector<VkDescriptorPool> ds_pools;
-  std::vector<VkDescriptorPool> mtex_pools;
   rhi::Texture* white_img = nullptr;
   // A binding a shader declares as Dim3D cannot be satisfied by a 2D view, so
   // the default has a 1x1x1 volume twin.
@@ -79,11 +77,6 @@ rhi::BindGroup* SampledTextureGroup(
     rhi::Sampler* sampler,
     rhi::TextureState state = rhi::TextureState::kShaderRead);
 
-// A descriptor set from the pool chain, growing it when every pool is full.
-VkDescriptorSet AllocateSamplerSet(VkDescriptorSetLayout layout,
-                                   bool multi,
-                                   VkDescriptorPool& owner);
-
 // Upload (or reuse) a guest texture; returns a group bound to it, or null.
 rhi::BindGroup* GetTexture(u64 base,
                            u32 w,
@@ -111,20 +104,19 @@ rhi::BindGroup* GetTexture(u64 base,
 bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt);
 rhi::TextureView* TexViewFor(const render::DrawInfo::DrawTex& t);
 
-// N-sampler descriptor set (set 0) for a recomp PS. `num_bindings` is what the
-// set layout declares, which is not always what the draw resolved textures for.
-VkDescriptorSet GetMultiTexSet(const render::DrawInfo& d,
-                               VkDescriptorSetLayout set_layout,
+// N-sampler group (set 0) for a recomp PS. `num_bindings` is what the layout
+// declares, which is not always what the draw resolved textures for.
+rhi::BindGroup* GetMultiTexSet(const render::DrawInfo& d,
+                               rhi::BindGroupLayout* set_layout,
                                u32 num_bindings,
-                               const VkImageView* resolved_views,
+                               rhi::TextureView* const* resolved_views,
                                const VkImageLayout* resolved_layouts,
                                // Per binding: the format its view was created
                                // with, or VK_FORMAT_UNDEFINED where the T#
                                // describes it. An integer one may not filter.
                                const VkFormat* resolved_formats,
-                               // Per binding: the depth target it
-                               // resolved to, or 0. A depth
-                               // comparison is only defined on a
+                               // Per binding: the depth target it resolved to,
+                               // or 0. A depth comparison is only defined on a
                                // view whose format supports it.
                                const u64* depth_src = nullptr);
 
