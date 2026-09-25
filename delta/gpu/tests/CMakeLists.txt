@@ -99,3 +99,13 @@ add_delta_test(vk_index_upload_test
 add_delta_test(rhi_conformance_test
   SOURCES rhi_conformance_test.cc
   DEPS delta_gpu)
+
+# Developer tool, not a test: the D3D12 backend's shader path over the
+# recompiler's SPIR-V cache (see the file header for usage).
+if(DELTA_HAVE_D3D12)
+  add_executable(rhi_hlsl_corpus rhi_hlsl_corpus.cc)
+  target_link_libraries(rhi_hlsl_corpus PRIVATE delta_gpu spirv-cross-core)
+  if(NOT WIN32)
+    target_include_directories(rhi_hlsl_corpus PRIVATE ${VKD3D_INCLUDE_DIRS})
+  endif()
+endif()
