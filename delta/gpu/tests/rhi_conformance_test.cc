@@ -932,6 +932,38 @@ TEST_P(RhiConformance, TextureArrays3DAndCubes) {
       << "-Z";
 }
 
+// Sampling an integer texture is a nearest fetch with the sampler's
+// addressing (D3D12 before SM 6.7 emulates it).
+TEST_P(RhiConformance, IntegerTextureSampling) {
+  TextureDesc td;
+  td.format = Format::kR32Uint;
+  td.width = td.height = 2;
+  td.usage = kTextureSampled | kTextureCopyDst;
+  Texture* tex = Own(device_->CreateTexture(td));
+  const u32 texels[4] = {10, 20, 30, 40};
+  Buffer* staging = Upload(texels, sizeof(texels), 0);
+  list_->Begin();
+  TextureBarrier up{tex, TextureState::kUndefined, TextureState::kCopyDst};
+  list_->Barrier(kAccessHostWrite, kAccessCopyRead, &up, 1);
+  BufferTextureCopy c;
+  c.region.width = c.region.height = 2;
+  list_->CopyBufferToTexture(tex, staging, &c, 1);
+  TextureBarrier rd{tex, TextureState::kCopyDst, TextureState::kShaderRead};
+  list_->Barrier(kAccessCopyWrite, kAccessShaderRead, &rd, 1);
+  list_->End();
+  ASSERT_TRUE(device_->Wait(device_->Submit(list_)));
+  TextureView* view = Own(device_->CreateView(tex, {}));
+  auto sample = [&](float u, float v) {
+    return SampleCenter(device_.get(), list_, objects_, Spv(k_x_itex_frag_spv),
+                        view, TextureState::kShaderRead, {u, v, 0, 0});
+  };
+  EXPECT_EQ(sample(0.25f, 0.25f), Rgba(10, 0, 0, 1));
+  EXPECT_EQ(sample(0.75f, 0.25f), Rgba(20, 0, 0, 1));
+  EXPECT_EQ(sample(0.25f, 0.75f), Rgba(30, 0, 0, 1));
+  EXPECT_EQ(sample(0.9f, 0.6f), Rgba(40, 0, 0, 1));
+  EXPECT_EQ(sample(1.3f, 0.1f), Rgba(20, 0, 0, 1)) << "clamped";
+}
+
 TEST_P(RhiConformance, FillUpdateAndCopyBuffer) {
   BufferDesc bd;
   bd.size = 1024;

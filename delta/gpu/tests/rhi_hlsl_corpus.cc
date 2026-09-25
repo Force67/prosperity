@@ -394,7 +394,7 @@ int main(int argc, char** argv) {
 
   std::map<std::string, Stats> stats;
   std::map<std::string, int> lower_fail, dxc_fail, pso_fail;
-  int barycentric = 0, buffer_address = 0, separate = 0;
+  int barycentric = 0, barycentric_read = 0, buffer_address = 0, separate = 0;
   std::mutex mutex;
   std::atomic<size_t> next{0}, done{0};
   auto process = [&](size_t n) {
@@ -417,7 +417,7 @@ int main(int argc, char** argv) {
     }
     LowerOptions o;
     o.stage = m.stage;
-    o.shader_model = std::max(shader_model, m.barycentric ? 61u : 60u);
+    o.shader_model = shader_model;
     if (m.stage == rhi::kStageMesh)
       o.shader_model = std::max(o.shader_model, 65u);
     o.flip_y = m.stage == rhi::kStageVertex || m.stage == rhi::kStageGeometry;
@@ -426,7 +426,16 @@ int main(int argc, char** argv) {
         if (b.type == rhi::BindingType::kStorageBuffer && b.read_only)
           o.read_only_storage.emplace_back(set, b.binding);
     LoweredShader lowered;
-    const bool ok = LowerToHlsl(m.words.data(), m.words.size(), o, &lowered);
+    bool ok = LowerToHlsl(m.words.data(), m.words.size(), o, &lowered);
+    // Barycentrics that are read need SM 6.1: lower for that too, so the
+    // counts show what a device with it would get.
+    bool sm61 = false;
+    if (!ok && lowered.error.find("SM 6.1") != std::string::npos) {
+      o.shader_model = std::max(o.shader_model, 61u);
+      ok = sm61 = LowerToHlsl(m.words.data(), m.words.size(), o, &lowered);
+      std::lock_guard<std::mutex> lock(mutex);
+      barycentric_read++;
+    }
     if (dump || (fails && !ok)) {
       std::lock_guard<std::mutex> lock(mutex);
       if (ok)
@@ -456,13 +465,9 @@ int main(int argc, char** argv) {
     }
     if (!checker)
       return;
-    std::string failure;
-    if (m.barycentric)
-      failure = "barycentrics (device lacks SM 6.1)";
-    else if (m.buffer_address)
-      failure = "buffer device address";
-    else
-      failure = checker->Check(m, dxil);
+    std::string failure = checker->Check(m, dxil);
+    if (sm61 && !failure.empty())
+      failure = "reads barycentrics (SM 6.1), " + failure;
     std::lock_guard<std::mutex> lock(mutex);
     if (failure.empty())
       stats[stage].pso++;
@@ -483,9 +488,10 @@ int main(int argc, char** argv) {
   for (std::thread& t : threads)
     t.join();
 
-  std::printf("%zu modules; %d use barycentrics, %d buffer addresses, %d "
-              "separate images/samplers\n",
-              files.size(), barycentric, buffer_address, separate);
+  std::printf("%zu modules; %d declare barycentrics (%d read them: SM 6.1), "
+              "%d buffer addresses, %d separate images/samplers\n",
+              files.size(), barycentric, barycentric_read, buffer_address,
+              separate);
   std::printf("stage   total  lowered  compiled%s\n", pso ? "  pipeline" : "");
   for (const auto& [name, s] : stats)
     if (pso)

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <regex>
 #include <sstream>
 
@@ -229,12 +230,78 @@ bool PackingFailure(const std::string& message, u32* id) {
   return true;
 }
 
+// Integer textures cannot be sampled before SM 6.7, and sampling one is
+// always nearest: a texel fetch with the sampler's addressing. 2D textures
+// and arrays gather the 2x2 footprint at level 0 and pick the texel the
+// coordinate falls in; other levels, and 3D textures, load the clamped texel.
+void IntegerSampling(std::string& hlsl) {
+  static const std::regex decl(
+      R"((Texture(?:2D|2DArray|3D))<((?:u)?int)4> (\w+) : register)");
+  std::string helpers;
+  std::vector<std::string> done;
+  std::vector<std::string> names;
+  for (auto it = std::sregex_iterator(hlsl.begin(), hlsl.end(), decl);
+       it != std::sregex_iterator(); ++it) {
+    const std::string tex = (*it)[1], base = (*it)[2];
+    names.push_back((*it)[3]);
+    const std::string key = tex + base;
+    if (std::find(done.begin(), done.end(), key) != done.end())
+      continue;
+    done.push_back(key);
+    const std::string t = base + "4";
+    const std::string sig = t + " spvDeltaSampleInt(" + tex + "<" + t +
+                            "> t, SamplerState s, ";
+    if (tex == "Texture3D") {
+      const std::string load =
+          "{ uint w, h, d, n; t.GetDimensions(uint(lod), w, h, d, n); "
+          "int3 p = clamp(int3(floor(c * float3(w, h, d))), 0, "
+          "int3(w, h, d) - 1); return t.Load(int4(p, int(lod))); }\n";
+      helpers += sig + "float3 c, float lod) " + load;
+      helpers += sig + "float3 c) { return spvDeltaSampleInt(t, s, c, 0.0); }\n";
+      helpers += sig +
+                 "float3 c, float3 dx, float3 dy) { return "
+                 "spvDeltaSampleInt(t, s, c, 0.0); }\n";
+      continue;
+    }
+    const bool array = tex == "Texture2DArray";
+    const std::string coord = array ? "float3" : "float2";
+    const std::string dims = array ? "uint w, h, e, n; "
+                                     "t.GetDimensions(uint(lod), w, h, e, n);"
+                                   : "uint w, h, n; "
+                                     "t.GetDimensions(uint(lod), w, h, n);";
+    const std::string texel =
+        array ? "int4(clamp(int2(floor(c.xy * float2(w, h))), 0, "
+                "int2(w, h) - 1), int(c.z + 0.5), int(lod))"
+              : "int3(clamp(int2(floor(c * float2(w, h))), 0, "
+                "int2(w, h) - 1), int(lod))";
+    helpers += sig + coord + " c, float lod) { " + dims +
+               " if (lod >= 0.5) return t.Load(" + texel +
+               "); float2 f = frac(c.xy * float2(w, h) - 0.5); "
+               "uint i = f.y >= 0.5 ? (f.x >= 0.5 ? 1 : 0) : "
+               "(f.x >= 0.5 ? 2 : 3); " +
+               t + " r = t.GatherRed(s, c), g = t.GatherGreen(s, c), "
+               "b = t.GatherBlue(s, c), a = t.GatherAlpha(s, c); "
+               "return " + t + "(r[i], g[i], b[i], a[i]); }\n";
+    helpers += sig + coord +
+               " c) { return spvDeltaSampleInt(t, s, c, 0.0); }\n";
+    helpers += sig + coord +
+               " c, float2 dx, float2 dy) { return "
+               "spvDeltaSampleInt(t, s, c, 0.0); }\n";
+  }
+  for (const std::string& name : names) {
+    const std::regex use("\\b" + name + R"(\.Sample(?:Level|Bias|Grad)?\()");
+    hlsl = std::regex_replace(hlsl, use, "spvDeltaSampleInt(" + name + ", ");
+  }
+  hlsl = helpers + "\n" + hlsl;
+}
+
 // One lowering pass. Blocks in `flatten` become arrays of 16-byte rows,
 // declared inside a cbuffer at the block's register.
 std::string Lower(const u32* words,
                   size_t count,
                   const LowerOptions& options,
                   const std::vector<u32>& flatten,
+                  bool integer_sampling,
                   LoweredShader* out) {
   sc::CompilerHLSL compiler(words, count);
   const spv::ExecutionModel model = compiler.get_execution_model();
@@ -246,7 +313,11 @@ std::string Lower(const u32* words,
   compiler.set_common_options(common);
 
   sc::CompilerHLSL::Options hlsl_options;
-  hlsl_options.shader_model = options.shader_model;
+  // SM 6.7 samples integer textures; below it they are emulated
+  // (IntegerSampling), from the 6.7 form of the code.
+  hlsl_options.shader_model =
+      integer_sampling ? std::max(options.shader_model, 67u)
+                       : options.shader_model;
   hlsl_options.point_size_compat = true;
   hlsl_options.point_coord_compat = true;
   hlsl_options.support_nonzero_base_vertex_base_instance =
@@ -381,6 +452,8 @@ std::string Lower(const u32* words,
        model == spv::ExecutionModelGeometry) &&
       FindStruct(hlsl, "SPIRV_Cross_Output", &begin, &end))
     out->outputs = hlsl.substr(begin, end - begin);
+  if (integer_sampling && options.shader_model < 67)
+    IntegerSampling(hlsl);
   return ExtendedArithmetic(hlsl) + hlsl;
 }
 
@@ -401,17 +474,23 @@ bool LowerToHlsl(const u32* words,
                  LoweredShader* out) {
   const std::vector<u32> patched = PatchSpirvForHlsl(words, count);
   std::vector<u32> flatten;
+  bool integer_sampling = false;
   for (;;) {
     *out = {};
     try {
-      out->hlsl =
-          Lower(patched.data(), patched.size(), options, flatten, out);
+      out->hlsl = Lower(patched.data(), patched.size(), options, flatten,
+                        integer_sampling, out);
       break;
     } catch (const std::exception& e) {
       u32 id;
       if (flatten.size() < 16 && PackingFailure(e.what(), &id) &&
           std::find(flatten.begin(), flatten.end(), id) == flatten.end()) {
         flatten.push_back(id);
+        continue;
+      }
+      if (!integer_sampling &&
+          std::strstr(e.what(), "Sampling non-float textures")) {
+        integer_sampling = true;
         continue;
       }
       out->error = e.what();
