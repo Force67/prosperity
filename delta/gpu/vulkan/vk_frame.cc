@@ -21,6 +21,7 @@
 #include "gpu/vulkan/vk_pipeline_cache.h"
 #include "gpu/vulkan/vk_present.h"
 #include "gpu/vulkan/vk_render_target.h"
+#include "gpu/vulkan/vk_rhi.h"
 #include "gpu/vulkan/vk_texture_cache.h"
 #include "gpu/vulkan/vk_trace.h"
 #include "gpu/vulkan/vk_upload_ring.h"
@@ -94,32 +95,48 @@ DELTA_OPTION(bool, kWantOffscreen, "DELTA_GPU_PRESENT_OFFSCREEN", false);
 
 namespace gpu::vk {
 
-bool CreateFrameSlots() {
-  VkCommandBufferAllocateInfo ca{
-      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ca.commandPool = g_dev.pool;
-  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ca.commandBufferCount = 1;
-  VkFenceCreateInfo fc{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  u32 slot_index = 0;
-  for (auto& slot : g_frame.slots) {
-    VKOK(vkAllocateCommandBuffers(g_dev.device, &ca, &slot.cmd));
-    VKOK(vkCreateFence(g_dev.device, &fc, nullptr, &slot.fence));
-    NameObject(VK_OBJECT_TYPE_COMMAND_BUFFER, (u64)slot.cmd,
-               "frame slot %u", slot_index);
-    NameObject(VK_OBJECT_TYPE_FENCE, (u64)slot.fence, "frame fence %u",
-               slot_index);
-    slot_index++;
-    if (g_dev.timestamp_valid_bits) {
-      VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-      qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-      qi.queryCount = 2;
-      if (vkCreateQueryPool(g_dev.device, &qi, nullptr, &slot.timestamps) !=
-          VK_SUCCESS)
-        slot.timestamps = VK_NULL_HANDLE;
-    }
+namespace {
+std::vector<rhi::CommandList*> g_free_lists;
+
+rhi::CommandList* AcquireList() {
+  if (!g_free_lists.empty()) {
+    rhi::CommandList* list = g_free_lists.back();
+    g_free_lists.pop_back();
+    return list;
   }
-  g_frame.cmd = g_frame.slots[0].cmd;
+  return Device().CreateCommandList();
+}
+}  // namespace
+
+rhi::Device& Device() {
+  return *g_backend.device;
+}
+
+rhi::CommandList* BeginImmediate() {
+  rhi::CommandList* list = AcquireList();
+  if (list)
+    list->Begin();
+  return list;
+}
+
+bool EndImmediate(rhi::CommandList* list) {
+  list->End();
+  const bool ok = Device().Wait(Device().Submit(list));
+  g_free_lists.push_back(list);
+  return ok;
+}
+
+bool CreateFrameSlots() {
+  const bool timestamps = Device().caps().timestamps;
+  for (auto& slot : g_frame.slots) {
+    slot.list = AcquireList();
+    if (!slot.list)
+      return false;
+    if (timestamps)
+      slot.timestamps = Device().CreateTimestampPool(2);
+  }
+  g_frame.list = g_frame.slots[0].list;
+  g_frame.cmd = Native(g_frame.list);
   return true;
 }
 
@@ -145,36 +162,19 @@ void EnsureReadback(u32 w, u32 h, VkFormat fmt) {
               "old_buf={:p}",
               w, h, (int)fmt, (unsigned long long)need,
               (unsigned long long)g_frame.readback_size, g_frame.readback_map,
-              (void*)g_frame.readback);
-  vkDeviceWaitIdle(g_dev.device);
-  if (g_frame.readback_map)
-    vkUnmapMemory(g_dev.device, g_frame.readback_mem);
-  if (g_frame.readback)
-    vkDestroyBuffer(g_dev.device, g_frame.readback, nullptr);
-  if (g_frame.readback_mem)
-    vkFreeMemory(g_dev.device, g_frame.readback_mem, nullptr);
-  g_frame.readback_size = need;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = need;
-  bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  vkCreateBuffer(g_dev.device, &bi, nullptr, &g_frame.readback);
-  VkMemoryRequirements br;
-  vkGetBufferMemoryRequirements(g_dev.device, g_frame.readback, &br);
-  VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ba.allocationSize = br.size;
-  // CPU reads this buffer every frame (the flip) -> prefer HOST_CACHED so reads
-  // hit cache instead of streaming from write-combined memory (the dominant
-  // frame cost).
-  ba.memoryTypeIndex = FindMemoryTypePref(
-      br.memoryTypeBits,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
-          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  vkAllocateMemory(g_dev.device, &ba, nullptr, &g_frame.readback_mem);
-  vkBindBufferMemory(g_dev.device, g_frame.readback, g_frame.readback_mem, 0);
-  vkMapMemory(g_dev.device, g_frame.readback_mem, 0, need, 0,
-              &g_frame.readback_map);
+              static_cast<void*>(g_frame.readback));
+  Device().WaitIdle();
+  Device().Destroy(g_frame.readback);
+  // The CPU reads this buffer every frame (the flip), so it must be host
+  // cached: streaming it out of write-combined memory was the dominant cost.
+  rhi::BufferDesc desc;
+  desc.size = need;
+  desc.usage = rhi::kBufferCopyDst;
+  desc.memory = rhi::MemoryKind::kReadback;
+  desc.name = "frame readback";
+  g_frame.readback = Device().CreateBuffer(desc);
+  g_frame.readback_size = g_frame.readback ? need : 0;
+  g_frame.readback_map = g_frame.readback ? g_frame.readback->mapped() : nullptr;
 }
 
 namespace {
@@ -295,23 +295,10 @@ bool ReportRtContents(FrameSlot& owner) {
     RTarget& rt = *kv.second;
     EnsureReadback(rt.w, rt.h, rt.fmt);
     owner.readback = g_frame.readback;
-    owner.readback_mem = g_frame.readback_mem;
-    owner.readback_map = g_frame.readback_map;
-    owner.readback_size = g_frame.readback_size;
-    VkCommandBufferAllocateInfo ca{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    ca.commandPool = g_dev.pool;
-    ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ca.commandBufferCount = 1;
-    VkCommandBuffer c = VK_NULL_HANDLE;
-    if (vkAllocateCommandBuffers(g_dev.device, &ca, &c) != VK_SUCCESS)
+    rhi::CommandList* list = BeginImmediate();
+    if (!list)
       return false;
-    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(c, &cbi) != VK_SUCCESS) {
-      vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
-      return false;
-    }
+    VkCommandBuffer c = Native(list);
     const VkImageLayout old_layout = rt.layout;
     ImageBarrier(c, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  ColorImageAccess(rt.layout), VK_ACCESS_TRANSFER_READ_BIT);
@@ -320,31 +307,12 @@ bool ReportRtContents(FrameSlot& owner) {
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.imageExtent = {rt.w, rt.h, 1};
     vkCmdCopyImageToBuffer(c, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           g_frame.readback, 1, &copy);
-    const VkResult end_result = vkEndCommandBuffer(c);
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &c;
-    VkResult submit_result = end_result;
-    if (submit_result == VK_SUCCESS)
-      submit_result = vkResetFences(g_dev.device, 1, &g_dev.fence);
-    if (submit_result == VK_SUCCESS)
-      submit_result = vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence);
-    const VkResult wait_result =
-        submit_result == VK_SUCCESS
-            ? vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE,
-                              UINT64_MAX)
-            : submit_result;
-    if (wait_result != VK_SUCCESS) {
-      if (submit_result != VK_SUCCESS) {
-        vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
-        rt.layout = old_layout;
-      }
-      BASE_LOGI("rtstat", "readback submit failed: end={} submit={} wait={}",
-                (int)end_result, (int)submit_result, (int)wait_result);
+                           Native(g_frame.readback), 1, &copy);
+    if (!EndImmediate(list)) {
+      rt.layout = old_layout;
+      BASE_LOGI("rtstat", "readback submit failed");
       return false;
     }
-    vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
     // One texel is FormatBytes(fmt) wide, which is 8 for the RGBA16F targets
     // P.T. lights into. Indexing a u32* by TEXEL walked half a texel at a
     // time, so every other sample read (B,A) where it meant (R,G). Alpha on a
@@ -530,17 +498,8 @@ bool ReportRtContents(FrameSlot& owner) {
     // texel resets or amplifies, and end-of-frame alpha cannot stand in for it:
     // the 33 light draws run in between and only ever lower it.
     if (rt.feedback_image && is_h4) {
-      VkCommandBuffer fc = VK_NULL_HANDLE;
-      VkCommandBufferAllocateInfo fa{
-          VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-      fa.commandPool = g_dev.pool;
-      fa.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-      fa.commandBufferCount = 1;
-      if (vkAllocateCommandBuffers(g_dev.device, &fa, &fc) == VK_SUCCESS) {
-        VkCommandBufferBeginInfo fbi{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        fbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(fc, &fbi);
+      if (rhi::CommandList* flist = BeginImmediate()) {
+        VkCommandBuffer fc = Native(flist);
         const VkImageLayout fold = rt.feedback_layout;
         ImageBarrier(fc, rt.feedback_image, fold,
                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -550,17 +509,11 @@ bool ReportRtContents(FrameSlot& owner) {
         fcp.imageExtent = {rt.w, rt.h, 1};
         vkCmdCopyImageToBuffer(fc, rt.feedback_image,
                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               g_frame.readback, 1, &fcp);
+                               Native(g_frame.readback), 1, &fcp);
         ImageBarrier(fc, rt.feedback_image,
                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, fold,
                      VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
-        if (vkEndCommandBuffer(fc) == VK_SUCCESS) {
-          VkSubmitInfo fsi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-          fsi.commandBufferCount = 1;
-          fsi.pCommandBuffers = &fc;
-          if (vkResetFences(g_dev.device, 1, &g_dev.fence) == VK_SUCCESS &&
-              vkQueueSubmit(g_dev.queue, 1, &fsi, g_dev.fence) == VK_SUCCESS) {
-            vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
+        if (EndImmediate(flist)) {
             u64 fhi = 0, below = 0;
             float fa_min = 1e30f, fa_max = -1e30f, fmax = 0.f;
             double fa_sum = 0.0;
@@ -638,9 +591,7 @@ bool ReportRtContents(FrameSlot& owner) {
                       fhi ? fa_sum / (double)fhi : 0.0, fhi ? fa_max : 0.f,
                       (unsigned long)below, max_x, max_y, at[0], at[1], at[2],
                       at[3], at[3] >= 0.89990f ? "RESET" : "AMPLIFY");
-          }
         }
-        vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &fc);
       }
     }
     // Non-zero bytes in the target's GUEST memory, sampled. A render target's
@@ -757,69 +708,26 @@ bool ReportRtContents(FrameSlot& owner) {
         (!d.used_this_frame && !kGpuRtstatAll))
       continue;
     EnsureReadback(d.w, d.h, VK_FORMAT_R32_SFLOAT);
-    VkCommandBufferAllocateInfo ca{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    ca.commandPool = g_dev.pool;
-    ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ca.commandBufferCount = 1;
-    VkCommandBuffer c = VK_NULL_HANDLE;
-    if (vkAllocateCommandBuffers(g_dev.device, &ca, &c) != VK_SUCCESS)
+    rhi::CommandList* list = BeginImmediate();
+    if (!list)
       continue;
-    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(c, &cbi) != VK_SUCCESS) {
-      vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
-      continue;
-    }
+    VkCommandBuffer c = Native(list);
     const VkImageLayout old_layout = d.layout;
     DepthBarrier(c, d.image, d.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                  VK_ACCESS_TRANSFER_READ_BIT);
-    d.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
     copy.imageExtent = {d.w, d.h, 1};
     vkCmdCopyImageToBuffer(c, d.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           g_frame.readback, 1, &copy);
-    VkSubmitInfo dsi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    dsi.commandBufferCount = 1;
-    dsi.pCommandBuffers = &c;
-    if (vkEndCommandBuffer(c) != VK_SUCCESS ||
-        vkResetFences(g_dev.device, 1, &g_dev.fence) != VK_SUCCESS ||
-        vkQueueSubmit(g_dev.queue, 1, &dsi, g_dev.fence) != VK_SUCCESS ||
-        vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX) !=
-            VK_SUCCESS) {
-      vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
-      d.layout = old_layout;
-      continue;
-    }
-    vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+                           Native(g_frame.readback), 1, &copy);
     // Put it back where the frame left it: this is a diagnostic, and a
     // diagnostic that moves the pipeline's state is a diagnostic that lies.
-    {
-      VkCommandBuffer rc2 = VK_NULL_HANDLE;
-      if (vkAllocateCommandBuffers(g_dev.device, &ca, &rc2) == VK_SUCCESS) {
-        VkCommandBufferBeginInfo rbi{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        rbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(rc2, &rbi) == VK_SUCCESS) {
-          DepthBarrier(rc2, d.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       old_layout, VK_ACCESS_TRANSFER_READ_BIT,
-                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-          if (vkEndCommandBuffer(rc2) == VK_SUCCESS) {
-            VkSubmitInfo rsi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            rsi.commandBufferCount = 1;
-            rsi.pCommandBuffers = &rc2;
-            if (vkResetFences(g_dev.device, 1, &g_dev.fence) == VK_SUCCESS &&
-                vkQueueSubmit(g_dev.queue, 1, &rsi, g_dev.fence) == VK_SUCCESS)
-              vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE,
-                              UINT64_MAX);
-          }
-        }
-        vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &rc2);
-      }
-      d.layout = old_layout;
-    }
+    DepthBarrier(c, d.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, old_layout,
+                 VK_ACCESS_TRANSFER_READ_BIT,
+                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    if (!EndImmediate(list))
+      continue;
     const float* z = static_cast<const float*>(g_frame.readback_map);
     const u64 n = static_cast<u64>(d.w) * d.h;
     const u64 step = n > 16384 ? n / 16384 : 1;
@@ -891,30 +799,16 @@ bool SubmitFrameChunk() {
   FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
   EndRegion();
   CmdEndLabel(g_frame.cmd);
-  if (vkEndCommandBuffer(g_frame.cmd) != VK_SUCCESS)
+  g_frame.list->End();
+  slot.submission = Device().Submit(g_frame.list);
+  slot.chunks.push_back(g_frame.list);
+  rhi::CommandList* next = AcquireList();
+  if (!next)
     return false;
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1;
-  si.pCommandBuffers = &g_frame.cmd;
-  if (vkQueueSubmit(g_dev.queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
-    return false;
-  slot.chunks.push_back(g_frame.cmd);
-  VkCommandBufferAllocateInfo ca{
-      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ca.commandPool = g_dev.pool;
-  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ca.commandBufferCount = 1;
-  VkCommandBuffer next = VK_NULL_HANDLE;
-  if (vkAllocateCommandBuffers(g_dev.device, &ca, &next) != VK_SUCCESS)
-    return false;
-  VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  if (vkBeginCommandBuffer(next, &bi) != VK_SUCCESS) {
-    vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &next);
-    return false;
-  }
-  slot.cmd = next;
-  g_frame.cmd = next;
+  next->Begin();
+  slot.list = next;
+  g_frame.list = next;
+  g_frame.cmd = Native(next);
   g_frame.chunk_seq++;
   g_frame.draws_at_chunk = g_frame.draws;
   CmdBeginLabel(g_frame.cmd, "frame %llu chunk %llu",
@@ -974,11 +868,11 @@ void BeginFrame(Renderer& renderer) {
   // it is what makes lending the buffer instead of copying it safe.
   if (renderer.state)
     renderer.state->presenter.WaitForBorrowed();
-  g_frame.cmd = slot.cmd;
+  g_frame.list = slot.list;
+  g_frame.cmd = Native(slot.list);
   g_frame.readback = slot.readback;
-  g_frame.readback_mem = slot.readback_mem;
-  g_frame.readback_map = slot.readback_map;
-  g_frame.readback_size = slot.readback_size;
+  g_frame.readback_map = slot.readback ? slot.readback->mapped() : nullptr;
+  g_frame.readback_size = slot.readback ? slot.readback->desc().size : 0;
   ResetTextureUploads(g_frame.slot_idx);
   // DELTA_GPU_RINGHWM: what the frame that just ended actually consumed from
   // each per-frame upload ring half, against that half's capacity. A draw
@@ -1070,10 +964,7 @@ void BeginFrame(Renderer& renderer) {
     kv.second.stencil_used_this_frame = false;
   }
 
-  vkResetCommandBuffer(g_frame.cmd, 0);
-  VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(g_frame.cmd, &bi);
+  g_frame.list->Begin();
   CmdBeginLabel(g_frame.cmd, "frame %llu", (unsigned long long)g_frame.num);
   // Clear the shared-LDS scratch every frame: a merged NGG vertex program
   // reads its launch header out of LDS before anything writes it, and the
@@ -1084,9 +975,8 @@ void BeginFrame(Renderer& renderer) {
     vkCmdFillBuffer(g_frame.cmd, g_ring.lds_buf, 0, kLdsScratch,
                     kLdsDump ? kLdsPoison : 0u);
   if (slot.timestamps) {
-    vkCmdResetQueryPool(g_frame.cmd, slot.timestamps, 0, 2);
-    vkCmdWriteTimestamp(g_frame.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                        slot.timestamps, 0);
+    g_frame.list->ResetTimestamps(slot.timestamps, 0, 2);
+    g_frame.list->WriteTimestamp(slot.timestamps, 0);
   }
   g_frame.recording = true;
 }
@@ -1240,7 +1130,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     copy.imageExtent = {rt.w, rt.h, 1};
     vkCmdCopyImageToBuffer(g_frame.cmd, rt.image,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           g_frame.readback, 1, &copy);
+                           Native(g_frame.readback), 1, &copy);
     cur.presentable = true;
     cur.w = rt.w;
     cur.h = rt.h;
@@ -1250,22 +1140,14 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     ScopeNs submit_timer(&g_ns_submit);
     ScopeNs frame_submit_timer(&g_fr_submit);
     if (cur.timestamps)
-      vkCmdWriteTimestamp(g_frame.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                          cur.timestamps, 1);
+      g_frame.list->WriteTimestamp(cur.timestamps, 1);
     CmdEndLabel(g_frame.cmd);  // close the "frame N" scope
-    const VkResult end_result = vkEndCommandBuffer(g_frame.cmd);
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &g_frame.cmd;
-    VkResult submit_result = end_result;
-    if (submit_result == VK_SUCCESS)
-      submit_result = vkResetFences(g_dev.device, 1, &cur.fence);
-    if (submit_result == VK_SUCCESS)
-      submit_result = vkQueueSubmit(g_dev.queue, 1, &si, cur.fence);
-    if (end_result != VK_SUCCESS || submit_result != VK_SUCCESS)
-      BASE_LOGI("gpuvk", "frame submit failed: end={} submit={}",
-                (int)end_result, (int)submit_result);
-    cur.submitted = submit_result == VK_SUCCESS;
+    g_frame.list->End();
+    const u64 before = Device().LastSubmission();
+    cur.submission = Device().Submit(g_frame.list);
+    cur.submitted = cur.submission != before;
+    if (!cur.submitted)
+      BASE_LOGI("gpuvk", "frame submit failed");
   }
   if (!cur.submitted) {
     renderer.state = nullptr;
@@ -1283,9 +1165,6 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   cur.scanout_base = scanout_base;
   // EnsureReadback may have (re)created the aliased buffer; store it back.
   cur.readback = g_frame.readback;
-  cur.readback_mem = g_frame.readback_mem;
-  cur.readback_map = g_frame.readback_map;
-  cur.readback_size = g_frame.readback_size;
 
   // Close an armed capture: this frame is submitted, so its mid-frame
   // snapshots and its final targets can be read back and written out.
@@ -1310,12 +1189,9 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   const bool waited = fin.submitted;
   if (fin.submitted) {
     u64 _tr0 = NowNs();
-    const VkResult fin_wait =
-        vkWaitForFences(g_dev.device, 1, &fin.fence, VK_TRUE, UINT64_MAX);
-    if (fin_wait != VK_SUCCESS) {
-      BASE_LOGI("gpuvk", "frame {} fence DEVICE FAULT: wait={} draws={}",
-                fin.frame_num, (int)fin_wait, fin.frame_draws);
-      ReportDeviceFault(g_dev);
+    if (!Device().Wait(fin.submission)) {
+      BASE_LOGI("gpuvk", "frame {} DEVICE FAULT: draws={}", fin.frame_num,
+                fin.frame_draws);
       renderer.state = nullptr;
       return;
     }
@@ -1324,22 +1200,19 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     g_fr_wait += dt;
     if (fin.timestamps) {
       u64 timestamps[2] = {};
-      if (vkGetQueryPoolResults(g_dev.device, fin.timestamps, 0, 2,
-                                sizeof(timestamps), timestamps,
-                                sizeof(u64),
-                                VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+      if (Device().ReadTimestamps(fin.timestamps, 0, 2, timestamps)) {
         const u64 mask =
             g_dev.timestamp_valid_bits >= 64
                 ? UINT64_MAX
                 : (u64{1} << g_dev.timestamp_valid_bits) - 1;
         const u64 ticks = (timestamps[1] - timestamps[0]) & mask;
         g_ns_gpu_exec += static_cast<u64>(static_cast<double>(ticks) *
-                                               g_dev.timestamp_period);
+                                          Device().caps().timestamp_period_ns);
         g_gpu_exec_samples++;
       }
     }
-    for (VkCommandBuffer c : fin.chunks)
-      vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+    for (rhi::CommandList* c : fin.chunks)
+      g_free_lists.push_back(c);
     fin.chunks.clear();
     fin.submitted = false;
   }
@@ -1369,7 +1242,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // needs no flip. (The old default Y-flip existed only to undo the heuristic
   // composite's upside-down output.)
   static std::vector<u8> flipped;
-  auto* rb = static_cast<u8*>(fin.readback_map);
+  auto* rb = fin.readback ? fin.readback->mapped() : nullptr;
   // DELTA_GPU_RBTRACE: whether the bytes this present is about to show are
   // actually non-zero, and which slot's mapping they came from. "A black window"
   // has two different causes that look identical downstream (the readback
@@ -1388,8 +1261,9 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     BASE_LOGI("rb",
               "present f{} nz={}/{} rt={:#x} {}x{} map={:p}{}",
               fin.frame_num, (unsigned long long)nz, (unsigned long long)sampled,
-              (unsigned long)fin.present_base, fin.w, fin.h, fin.readback_map,
-              fin.readback_map == g_frame.readback_map ? " (bound)" : "");
+              (unsigned long)fin.present_base, fin.w, fin.h,
+              static_cast<void*>(rb),
+              fin.readback == g_frame.readback ? " (bound)" : "");
   }
   u8* pixels;
   // What `pixels` holds. The swapchain takes either order, so a readback that
@@ -1597,6 +1471,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     }
   }
 
+  Device().Maintain();
   SavePipelineCache();
 
   // Runs last: reuses (and clobbers) the readback buffer the present path
