@@ -47,6 +47,36 @@ class Lowerer : public spirv_cross::CompilerGLSL {
     return static_cast<u32>(get_declared_struct_size(get<SPIRType>(type_id)));
   }
 
+  // GLSL's imulExtended/umulExtended take only int/uint operands, which
+  // SPIR-V does not require of OpSMulExtended/OpUMulExtended.
+  void emit_instruction(const spirv_cross::Instruction& instr) override {
+    const auto op = static_cast<spv::Op>(instr.op);
+    if ((op != spv::OpSMulExtended && op != spv::OpUMulExtended) ||
+        instr.length < 4)
+      return CompilerGLSL::emit_instruction(instr);
+    const u32* ops = stream(instr);
+    const SPIRType::BaseType want =
+        op == spv::OpSMulExtended ? SPIRType::Int : SPIRType::UInt;
+    const SPIRType& type = get<SPIRType>(ops[0]);
+    const SPIRType& member = get<SPIRType>(type.member_types[0]);
+    if (member.basetype == want && expression_type(ops[2]).basetype == want &&
+        expression_type(ops[3]).basetype == want)
+      return CompilerGLSL::emit_instruction(instr);
+    SPIRType cast = member;
+    cast.basetype = want;
+    const std::string t = type_to_glsl(cast);
+    const std::string m = type_to_glsl(member);
+    emit_uninitialized_temporary_expression(ops[0], ops[1]);
+    const std::string result = to_expression(ops[1]);
+    const std::string hi = result + "_hi", lo = result + "_lo";
+    statement(t, " ", hi, ", ", lo, ";");
+    statement(op == spv::OpSMulExtended ? "imulExtended(" : "umulExtended(",
+              t, "(", to_unpacked_expression(ops[2]), "), ", t, "(",
+              to_unpacked_expression(ops[3]), "), ", hi, ", ", lo, ");");
+    statement(result, ".", to_member_name(type, 0), " = ", m, "(", lo, ");");
+    statement(result, ".", to_member_name(type, 1), " = ", m, "(", hi, ");");
+  }
+
   // A uniform block std140 cannot express becomes a read-only storage block:
   // GLSL has no std430 uniform blocks.
   void MakeStorageBlock(u32 type_id) {
@@ -264,6 +294,8 @@ bool LowerProgram(const StageCode* stages,
       }
       c.set_common_options(options);
       std::string source = c.compile();
+      // Per-vertex inputs take no interpolation qualifier.
+      ReplaceAll(source, "flat pervertex", "pervertex");
       if (features.nv_barycentric_only &&
           source.find("GL_EXT_fragment_shader_barycentric") !=
               std::string::npos) {
