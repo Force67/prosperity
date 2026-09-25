@@ -15,6 +15,21 @@ if(PkgConfig_FOUND)
   pkg_check_modules(SPIRVHEADERS QUIET SPIRV-Headers)
 endif()
 
+# Optional OpenGL 4.6 rhi backend (opengl/): headless EGL contexts, entry
+# points through libepoxy, SPIR-V lowered to GLSL by the vendored SPIRV-Cross.
+# libEGL/libOpenGL are linked so that epoxy's dlopen finds glvnd's dispatch.
+set(_delta_gl_default OFF)
+if(NOT ANDROID)
+  find_package(OpenGL QUIET COMPONENTS OpenGL EGL)
+  find_path(EPOXY_INCLUDE_DIR epoxy/gl.h)
+  find_library(EPOXY_LIBRARY epoxy)
+  if(OpenGL_OpenGL_FOUND AND OpenGL_EGL_FOUND AND EPOXY_INCLUDE_DIR AND
+     EPOXY_LIBRARY)
+    set(_delta_gl_default ON)
+  endif()
+endif()
+option(DELTA_GPU_OPENGL "Build the OpenGL 4.6 rhi backend" ${_delta_gl_default})
+
 if(ANDROID)
   add_delta_module(gpu DEPS vulkan delta_gfx)
 else()
@@ -49,4 +64,14 @@ if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
   target_compile_definitions(delta_gpu PRIVATE DELTA_HAVE_SPIRV_BACKEND=1)
 else()
   message(STATUS "SPIRV-Tools/Headers not found; direct GCN->SPIR-V backend disabled")
+endif()
+
+file(GLOB _delta_gl_srcs ${CMAKE_CURRENT_SOURCE_DIR}/opengl/*.cc)
+if(DELTA_GPU_OPENGL)
+  target_link_libraries(delta_gpu PRIVATE spirv-cross-glsl ${EPOXY_LIBRARY}
+                        OpenGL::EGL OpenGL::OpenGL)
+  target_include_directories(delta_gpu PRIVATE ${EPOXY_INCLUDE_DIR})
+  target_compile_definitions(delta_gpu PRIVATE DELTA_GPU_OPENGL=1)
+else()
+  set_source_files_properties(${_delta_gl_srcs} PROPERTIES HEADER_FILE_ONLY ON)
 endif()
