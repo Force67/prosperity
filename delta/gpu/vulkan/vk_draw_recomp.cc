@@ -1761,7 +1761,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                 "RECOMP DREW count={} rt={:#x} nv={} multi_tex={}",
                 draw_count, (unsigned long)d.rt_base, nv, (int)rp->multi_tex);
   }
-  CmdInsertLabel(g_frame.cmd, "recomp vs=%#llx ps=%#llx n=%u%s",
+  CmdInsertLabel(g_frame.list, "recomp vs=%#llx ps=%#llx n=%u%s",
                  (unsigned long long)d.vs_addr, (unsigned long long)d.ps_addr,
                  indexed ? d.index_count : d.vertex_count,
                  indexed ? " indexed" : "");

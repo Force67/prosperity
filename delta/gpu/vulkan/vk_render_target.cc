@@ -1158,7 +1158,7 @@ void EndRegion() {
   if (!g_region.open)
     return;
   g_frame.list->EndRenderPass();
-  CmdEndLabel(g_frame.cmd);
+  CmdEndLabel(g_frame.list);
   if (trace::Recording())
     trace::RegionEnd();
   g_region.open = false;
@@ -1553,7 +1553,7 @@ bool BeginRegion(const u64* mrt_base,
     info.depth_clear_value = depth_att.clear_depth;
     trace::RegionBegin(info);
   }
-  CmdBeginLabel(g_frame.cmd, "region rt=%#llx %ux%u mrt=%u depth=%#llx",
+  CmdBeginLabel(g_frame.list, "region rt=%#llx %ux%u mrt=%u depth=%#llx",
                 (unsigned long long)base, w, h, g_region.cur_mrt_count,
                 (unsigned long long)depth_base);
   g_frame.list->BeginRenderPass(pass);

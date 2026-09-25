@@ -298,16 +298,13 @@ bool ReportRtContents(FrameSlot& owner) {
     rhi::CommandList* list = BeginImmediate();
     if (!list)
       return false;
-    VkCommandBuffer c = Native(list);
     const VkImageLayout old_layout = rt.layout;
-    ImageBarrier(c, rt.image, rt.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 ColorImageAccess(rt.layout), VK_ACCESS_TRANSFER_READ_BIT);
-    rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    VkBufferImageCopy copy{};
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageExtent = {rt.w, rt.h, 1};
-    vkCmdCopyImageToBuffer(c, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           Native(g_frame.readback), 1, &copy);
+    TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
+    rhi::BufferTextureCopy copy;
+    copy.region.width = rt.w;
+    copy.region.height = rt.h;
+    list->CopyTextureToBuffer(g_frame.readback, rt.texture, &copy, 1);
+    list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
     if (!EndImmediate(list)) {
       rt.layout = old_layout;
       BASE_LOGI("rtstat", "readback submit failed");
@@ -499,20 +496,17 @@ bool ReportRtContents(FrameSlot& owner) {
     // the 33 light draws run in between and only ever lower it.
     if (rt.feedback_image && is_h4) {
       if (rhi::CommandList* flist = BeginImmediate()) {
-        VkCommandBuffer fc = Native(flist);
         const VkImageLayout fold = rt.feedback_layout;
-        ImageBarrier(fc, rt.feedback_image, fold,
-                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                     VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-        VkBufferImageCopy fcp{};
-        fcp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        fcp.imageExtent = {rt.w, rt.h, 1};
-        vkCmdCopyImageToBuffer(fc, rt.feedback_image,
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               Native(g_frame.readback), 1, &fcp);
-        ImageBarrier(fc, rt.feedback_image,
-                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, fold,
-                     VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+        TransitionImage(flist, rt.feedback_texture, rt.feedback_layout,
+                        rhi::TextureState::kCopySrc);
+        rhi::BufferTextureCopy fcp;
+        fcp.region.width = rt.w;
+        fcp.region.height = rt.h;
+        flist->CopyTextureToBuffer(g_frame.readback, rt.feedback_texture, &fcp,
+                                   1);
+        TransitionImage(flist, rt.feedback_texture, rt.feedback_layout,
+                        FromVkLayout(fold));
+        flist->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
         if (EndImmediate(flist)) {
             u64 fhi = 0, below = 0;
             float fa_min = 1e30f, fa_max = -1e30f, fmax = 0.f;
@@ -708,24 +702,23 @@ bool ReportRtContents(FrameSlot& owner) {
         (!d.used_this_frame && !kGpuRtstatAll))
       continue;
     EnsureReadback(d.w, d.h, VK_FORMAT_R32_SFLOAT);
+    owner.readback = g_frame.readback;
     rhi::CommandList* list = BeginImmediate();
     if (!list)
       continue;
-    VkCommandBuffer c = Native(list);
     const VkImageLayout old_layout = d.layout;
-    DepthBarrier(c, d.image, d.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                 VK_ACCESS_TRANSFER_READ_BIT);
-    VkBufferImageCopy copy{};
-    copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
-    copy.imageExtent = {d.w, d.h, 1};
-    vkCmdCopyImageToBuffer(c, d.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           Native(g_frame.readback), 1, &copy);
+    TransitionImage(list, d.texture, d.layout, rhi::TextureState::kCopySrc,
+                    rhi::kAspectDepth, d.layers);
+    rhi::BufferTextureCopy copy;
+    copy.region.aspect = rhi::kAspectDepth;
+    copy.region.width = d.w;
+    copy.region.height = d.h;
+    list->CopyTextureToBuffer(g_frame.readback, d.texture, &copy, 1);
     // Put it back where the frame left it: this is a diagnostic, and a
     // diagnostic that moves the pipeline's state is a diagnostic that lies.
-    DepthBarrier(c, d.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, old_layout,
-                 VK_ACCESS_TRANSFER_READ_BIT,
-                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    TransitionImage(list, d.texture, d.layout, FromVkLayout(old_layout),
+                    rhi::kAspectDepth, d.layers);
+    list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
     if (!EndImmediate(list))
       continue;
     const float* z = static_cast<const float*>(g_frame.readback_map);
@@ -798,7 +791,7 @@ bool SubmitFrameChunk() {
     return true;
   FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
   EndRegion();
-  CmdEndLabel(g_frame.cmd);
+  CmdEndLabel(g_frame.list);
   g_frame.list->End();
   slot.submission = Device().Submit(g_frame.list);
   slot.chunks.push_back(g_frame.list);
@@ -811,7 +804,7 @@ bool SubmitFrameChunk() {
   g_frame.cmd = Native(next);
   g_frame.chunk_seq++;
   g_frame.draws_at_chunk = g_frame.draws;
-  CmdBeginLabel(g_frame.cmd, "frame %llu chunk %llu",
+  CmdBeginLabel(g_frame.list, "frame %llu chunk %llu",
                 (unsigned long long)g_frame.num,
                 (unsigned long long)g_frame.chunk_seq);
   StampSubmittedLayouts();
@@ -965,7 +958,7 @@ void BeginFrame(Renderer& renderer) {
   }
 
   g_frame.list->Begin();
-  CmdBeginLabel(g_frame.cmd, "frame %llu", (unsigned long long)g_frame.num);
+  CmdBeginLabel(g_frame.list, "frame %llu", (unsigned long long)g_frame.num);
   // Clear the shared-LDS scratch every frame: a merged NGG vertex program
   // reads its launch header out of LDS before anything writes it, and the
   // Private-storage path it replaces was zero initialised. Under
@@ -1094,43 +1087,19 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     RTarget& rt = it->second;
     EnsureReadback(rt.w, rt.h, rt.fmt);
     if (kClearRedTransfer) {
-      VkAccessFlags src_access =
-          rt.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-              ? VK_ACCESS_SHADER_READ_BIT
-          : rt.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-              ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-          : rt.layout == VK_IMAGE_LAYOUT_GENERAL ? VK_ACCESS_SHADER_WRITE_BIT
-                                                 : 0;
-      ImageBarrier(g_frame.cmd, rt.image, rt.layout,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, src_access,
-                   VK_ACCESS_TRANSFER_WRITE_BIT);
-      rt.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-      VkClearColorValue red{{1.0f, 0.0f, 0.0f, 1.0f}};
-      VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-      vkCmdClearColorImage(g_frame.cmd, rt.image, rt.layout, &red, 1, &range);
+      TransitionImage(g_frame.list, rt.texture, rt.layout,
+                      rhi::TextureState::kCopyDst);
+      g_frame.list->ClearTexture(rt.texture, rhi::TextureState::kCopyDst, {},
+                                 rhi::ClearColor{{1.0f, 0.0f, 0.0f, 1.0f}});
     }
-    const VkAccessFlags present_src =
-        rt.layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-            ? VK_ACCESS_TRANSFER_WRITE_BIT
-        : rt.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-            ? VK_ACCESS_TRANSFER_READ_BIT
-        : rt.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-            ? VK_ACCESS_SHADER_READ_BIT
-        : rt.layout == VK_IMAGE_LAYOUT_GENERAL
-            ? VK_ACCESS_SHADER_WRITE_BIT
-            : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    CmdInsertLabel(g_frame.cmd, "present readback rt=%#llx %ux%u",
+    CmdInsertLabel(g_frame.list, "present readback rt=%#llx %ux%u",
                    (unsigned long long)present_base, rt.w, rt.h);
-    ImageBarrier(g_frame.cmd, rt.image, rt.layout,
-                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, present_src,
-                 VK_ACCESS_TRANSFER_READ_BIT);
-    rt.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    VkBufferImageCopy copy{};
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageExtent = {rt.w, rt.h, 1};
-    vkCmdCopyImageToBuffer(g_frame.cmd, rt.image,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           Native(g_frame.readback), 1, &copy);
+    TransitionImage(g_frame.list, rt.texture, rt.layout,
+                    rhi::TextureState::kCopySrc);
+    rhi::BufferTextureCopy copy;
+    copy.region.width = rt.w;
+    copy.region.height = rt.h;
+    g_frame.list->CopyTextureToBuffer(g_frame.readback, rt.texture, &copy, 1);
     cur.presentable = true;
     cur.w = rt.w;
     cur.h = rt.h;
@@ -1141,7 +1110,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     ScopeNs frame_submit_timer(&g_fr_submit);
     if (cur.timestamps)
       g_frame.list->WriteTimestamp(cur.timestamps, 1);
-    CmdEndLabel(g_frame.cmd);  // close the "frame N" scope
+    CmdEndLabel(g_frame.list);  // close the "frame N" scope
     g_frame.list->End();
     const u64 before = Device().LastSubmission();
     cur.submission = Device().Submit(g_frame.list);

@@ -304,7 +304,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   }
   list->SetBlendConstants(d.blend_constants);
   list->SetVertexBuffers(0, 1, &g_ring.vb, &off);
-  CmdInsertLabel(g_frame.cmd, "quad vs=%#llx ps=%#llx n=%u",
+  CmdInsertLabel(g_frame.list, "quad vs=%#llx ps=%#llx n=%u",
                  (unsigned long long)d.vs_addr, (unsigned long long)d.ps_addr,
                  indexed ? d.index_count : nv);
   if (indexed) {
