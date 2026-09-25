@@ -156,3 +156,18 @@ if(DELTA_BUILD_TESTS)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   add_subdirectory(googletest EXCLUDE_FROM_ALL)
 endif()
+
+# --------------------------------------------------------------------------
+# SPIRV-Cross: lowers the recompiler's SPIR-V to GLSL (OpenGL backend) and
+# HLSL (D3D12 backend). Static core + the two emitters, no CLI or tests.
+# --------------------------------------------------------------------------
+set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_MSL OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_CPP OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_REFLECT OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_UTIL OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_FORCE_PIC ON CACHE BOOL "" FORCE)
+add_subdirectory(SPIRV-Cross EXCLUDE_FROM_ALL)
