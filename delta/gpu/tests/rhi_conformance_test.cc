@@ -1393,6 +1393,49 @@ TEST_P(RhiConformance, ScaledVertexFormatAndFan) {
   EXPECT_EQ(px[2 * kW + kW - 3], Rgba(0, 255, 0, 255));
 }
 
+// gl_BaryCoordEXT over a strip: which vertex each weight belongs to, in the
+// even and the odd triangle. D3D12 without SM 6.1 emulates it.
+TEST_P(RhiConformance, FragmentBarycentrics) {
+  if (!device_->caps().fragment_barycentric &&
+      device_->backend() != Backend::kD3D12)
+    GTEST_SKIP() << "no fragment barycentrics";
+  PipelineLayout* layout = Own(QuadLayout(device_.get()));
+  GraphicsPipelineDesc gp = QuadPipeline(layout);
+  gp.fragment = Spv(k_x_bary_frag_spv);
+  Pipeline* pipe = Own(device_->CreateGraphicsPipeline(gp));
+  ASSERT_NE(pipe, nullptr);
+  Texture* t = Target();
+  TextureView* v = View(t);
+  list_->Begin();
+  TextureBarrier b{t, TextureState::kUndefined, TextureState::kColorTarget};
+  list_->Barrier(0, 0, &b, 1);
+  RenderPassDesc rp;
+  rp.color_count = 1;
+  rp.colors[0].view = v;
+  rp.colors[0].load = LoadOp::kClear;
+  rp.width = kW;
+  rp.height = kH;
+  list_->BeginRenderPass(rp);
+  list_->SetPipeline(pipe);
+  YUp(list_);
+  DrawQuad(list_, -1, -1, 1, 1, kRed);
+  list_->EndRenderPass();
+  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  list_->End();
+  // The dominant weight near each corner. The odd triangle of the strip
+  // orders its vertices (1, 3, 2), keeping the winding.
+  auto dominant = [&](u32 x, u32 y) {
+    const u32 p = px[y * kW + x];
+    const u32 r = p & 0xff, g = (p >> 8) & 0xff, bl = (p >> 16) & 0xff;
+    return r > g && r > bl ? 0 : g > bl ? 1 : 2;
+  };
+  EXPECT_EQ(dominant(1, kH - 2), 0) << "vertex 0, bottom left";
+  EXPECT_EQ(dominant(kW - 4, kH - 2), 1) << "vertex 1, bottom right";
+  EXPECT_EQ(dominant(1, 1), 2) << "vertex 2, top left";
+  EXPECT_EQ(dominant(kW - 2, 1), 1) << "vertex 3, top right";
+  EXPECT_EQ(dominant(kW - 2, kH * 3 / 4), 0) << "odd triangle, vertex 1";
+}
+
 TEST_P(RhiConformance, DispatchBase) {
   if (!device_->caps().dispatch_base)
     GTEST_SKIP() << "no dispatch base";

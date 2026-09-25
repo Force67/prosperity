@@ -554,6 +554,10 @@ class D3D12Device final : public rhi::Device {
                     const LowerOptions& options,
                     std::vector<u8>* dxil,
                     LoweredShader* info);
+  // Backend-generated HLSL, cached by text.
+  bool CompileHlsl(const std::string& hlsl,
+                   const char* profile,
+                   std::vector<u8>* dxil);
   bool InitBlit();
 
   rhi::Caps caps_;

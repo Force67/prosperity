@@ -42,6 +42,9 @@ struct LowerOptions {
   u32 swap_rb_inputs = 0;
   // Compute: workgroup ids start at the kGroupBaseRegister constant.
   bool dispatch_base = false;
+  // Fragment: read barycentrics from the DELTABARY / DELTABARYNP varyings
+  // of BarycentricGeometryShader instead of SV_Barycentrics (SM 6.1).
+  bool emulate_barycentrics = false;
   // Storage buffers the layout binds as SRVs, as (set, binding).
   std::vector<std::pair<u32, u32>> read_only_storage;
   // The previous stage's outputs (LoweredShader::outputs). D3D12 links
@@ -77,9 +80,17 @@ class Dxc {
                       std::string* error);
 };
 
+// A pass-through geometry shader for triangles that adds the DELTABARY and
+// DELTABARYNP varyings to the vertex stage's outputs (LoweredShader::outputs):
+// barycentrics on devices without SM 6.1. Its outputs go to *outputs.
+std::string BarycentricGeometryShader(const std::string& vertex_outputs,
+                                      std::string* outputs);
+
 // Rewrites what SPIRV-Cross cannot lower to HLSL into what it can
 // (d3d12_spirv_patch.cc). Returns the input unchanged when nothing applies.
 std::vector<u32> PatchSpirvForHlsl(const u32* words, size_t count);
+// True when the module decorates a variable with this BuiltIn.
+bool DeclaresBuiltIn(const u32* words, size_t count, u32 builtin);
 
 // SPIR-V hash for caches (FNV-1a, 64 bits).
 u64 HashWords(const u32* words, size_t count, u64 seed = 0);

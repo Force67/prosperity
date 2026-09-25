@@ -12,6 +12,7 @@
 #include <cstring>
 #include <regex>
 #include <sstream>
+#include <stdexcept>
 
 namespace gpu::d3d12 {
 
@@ -295,13 +296,38 @@ void IntegerSampling(std::string& hlsl) {
   hlsl = helpers + "\n" + hlsl;
 }
 
+// Constructs above the target shader model that are lowered with the newer
+// model's syntax and then rewritten.
+struct Emulation {
+  bool integer_sampling = false;  // SM 6.7
+  bool barycentrics = false;      // SM 6.1
+};
+
+// SV_Barycentrics inputs become the varyings BarycentricGeometryShader adds.
+void EmulateBarycentrics(std::string& hlsl) {
+  if (hlsl.find("GetAttributeAtVertex") != std::string::npos)
+    throw std::runtime_error("per-vertex fragment inputs need SM 6.1");
+  static const std::regex persp(R"(: SV_Barycentrics[01]?;)");
+  std::string out;
+  std::istringstream in(hlsl);
+  for (std::string line; std::getline(in, line);) {
+    if (line.find("SV_Barycentrics") != std::string::npos)
+      line = std::regex_replace(
+          line, persp,
+          line.find("noperspective") != std::string::npos ? ": DELTABARYNP;"
+                                                          : ": DELTABARY;");
+    out += line + "\n";
+  }
+  hlsl = std::move(out);
+}
+
 // One lowering pass. Blocks in `flatten` become arrays of 16-byte rows,
 // declared inside a cbuffer at the block's register.
 std::string Lower(const u32* words,
                   size_t count,
                   const LowerOptions& options,
                   const std::vector<u32>& flatten,
-                  bool integer_sampling,
+                  const Emulation& emulate,
                   LoweredShader* out) {
   sc::CompilerHLSL compiler(words, count);
   const spv::ExecutionModel model = compiler.get_execution_model();
@@ -313,11 +339,11 @@ std::string Lower(const u32* words,
   compiler.set_common_options(common);
 
   sc::CompilerHLSL::Options hlsl_options;
-  // SM 6.7 samples integer textures; below it they are emulated
-  // (IntegerSampling), from the 6.7 form of the code.
-  hlsl_options.shader_model =
-      integer_sampling ? std::max(options.shader_model, 67u)
-                       : options.shader_model;
+  hlsl_options.shader_model = options.shader_model;
+  if (emulate.integer_sampling)
+    hlsl_options.shader_model = std::max(hlsl_options.shader_model, 67u);
+  if (emulate.barycentrics)
+    hlsl_options.shader_model = std::max(hlsl_options.shader_model, 61u);
   hlsl_options.point_size_compat = true;
   hlsl_options.point_coord_compat = true;
   hlsl_options.support_nonzero_base_vertex_base_instance =
@@ -362,6 +388,8 @@ std::string Lower(const u32* words,
     compiler.flatten_buffer_block(id);
 
   std::string hlsl = compiler.compile();
+  if (emulate.barycentrics && options.shader_model < 61)
+    EmulateBarycentrics(hlsl);
   out->uses_draw_params = compiler.is_hlsl_aux_buffer_binding_used(
       sc::HLSL_AUX_BINDING_BASE_VERTEX_INSTANCE);
 
@@ -452,7 +480,7 @@ std::string Lower(const u32* words,
        model == spv::ExecutionModelGeometry) &&
       FindStruct(hlsl, "SPIRV_Cross_Output", &begin, &end))
     out->outputs = hlsl.substr(begin, end - begin);
-  if (integer_sampling && options.shader_model < 67)
+  if (emulate.integer_sampling && options.shader_model < 67)
     IntegerSampling(hlsl);
   return ExtendedArithmetic(hlsl) + hlsl;
 }
@@ -468,18 +496,38 @@ u64 HashWords(const u32* words, size_t count, u64 seed) {
   return h;
 }
 
+std::string BarycentricGeometryShader(const std::string& vertex_outputs,
+                                      std::string* outputs) {
+  *outputs = vertex_outputs +
+             "    float3 delta_bary : DELTABARY;\n"
+             "    noperspective float3 delta_bary_np : DELTABARYNP;\n";
+  std::string copy;
+  for (const Element& e : ParseElements(vertex_outputs))
+    copy += "        o." + e.name + " = v[i]." + e.name + ";\n";
+  return "struct DeltaIn\n{\n" + vertex_outputs +
+         "};\n\nstruct DeltaOut\n{\n" + *outputs +
+         "};\n\n[maxvertexcount(3)]\n"
+         "void main(triangle DeltaIn v[3], "
+         "inout TriangleStream<DeltaOut> s)\n{\n"
+         "    for (uint i = 0; i < 3; i++)\n    {\n        DeltaOut o;\n" +
+         copy +
+         "        o.delta_bary = float3(i == 0, i == 1, i == 2);\n"
+         "        o.delta_bary_np = o.delta_bary;\n"
+         "        s.Append(o);\n    }\n}\n";
+}
+
 bool LowerToHlsl(const u32* words,
                  size_t count,
                  const LowerOptions& options,
                  LoweredShader* out) {
   const std::vector<u32> patched = PatchSpirvForHlsl(words, count);
   std::vector<u32> flatten;
-  bool integer_sampling = false;
+  Emulation emulate;
   for (;;) {
     *out = {};
     try {
       out->hlsl = Lower(patched.data(), patched.size(), options, flatten,
-                        integer_sampling, out);
+                        emulate, out);
       break;
     } catch (const std::exception& e) {
       u32 id;
@@ -488,9 +536,15 @@ bool LowerToHlsl(const u32* words,
         flatten.push_back(id);
         continue;
       }
-      if (!integer_sampling &&
+      if (!emulate.integer_sampling &&
           std::strstr(e.what(), "Sampling non-float textures")) {
-        integer_sampling = true;
+        emulate.integer_sampling = true;
+        continue;
+      }
+      if (!emulate.barycentrics && options.emulate_barycentrics &&
+          std::strstr(e.what(), "SM 6.1") &&
+          std::strstr(e.what(), "barycentrics")) {
+        emulate.barycentrics = true;
         continue;
       }
       out->error = e.what();

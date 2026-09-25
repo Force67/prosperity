@@ -251,4 +251,19 @@ std::vector<u32> PatchSpirvForHlsl(const u32* words, size_t count) {
   return Patcher(words, count).Run();
 }
 
+bool DeclaresBuiltIn(const u32* words, size_t count, u32 builtin) {
+  for (size_t at = 5; at < count;) {
+    const u32 op = words[at] & 0xffff, n = words[at] >> 16;
+    if (!n)
+      break;
+    if (op == kOpDecorate && n >= 4 && words[at + 2] == kDecorationBuiltIn &&
+        words[at + 3] == builtin)
+      return true;
+    if (op == kOpFunction)
+      break;
+    at += n;
+  }
+  return false;
+}
+
 }  // namespace gpu::d3d12

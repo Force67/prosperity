@@ -297,7 +297,8 @@ bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
   const u32 opts[] = {u32(options.stage),         options.shader_model,
                       u32(options.flip_y),        options.uint_inputs,
                       options.sint_inputs,        options.swap_rb_inputs,
-                      u32(options.dispatch_base)};
+                      u32(options.dispatch_base),
+                      u32(options.emulate_barycentrics)};
   key = HashWords(opts, sizeof(opts) / 4, key);
   for (const auto& [set, binding] : options.read_only_storage) {
     const u32 sb[] = {set, binding};
@@ -327,6 +328,29 @@ bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
   entry.info.hlsl.clear();
   *dxil = entry.dxil;
   *info = entry.info;
+  std::lock_guard<std::mutex> lock(shader_mutex_);
+  shaders_[key] = std::move(entry);
+  return shaders_[key].ok;
+}
+
+bool D3D12Device::CompileHlsl(const std::string& hlsl,
+                              const char* profile,
+                              std::vector<u8>* dxil) {
+  const u64 key = std::hash<std::string>()(hlsl + profile);
+  {
+    std::lock_guard<std::mutex> lock(shader_mutex_);
+    auto it = shaders_.find(key);
+    if (it != shaders_.end()) {
+      *dxil = it->second.dxil;
+      return it->second.ok;
+    }
+  }
+  ShaderEntry entry;
+  std::string error;
+  entry.ok = Dxc::Compile(hlsl, profile, &entry.dxil, &error);
+  if (!entry.ok)
+    BASE_LOGI("gpud3d12", "internal shader failed: {}", error.c_str());
+  *dxil = entry.dxil;
   std::lock_guard<std::mutex> lock(shader_mutex_);
   shaders_[key] = std::move(entry);
   return shaders_[key].ok;
@@ -384,12 +408,28 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
     pipeline->uses_raster = ginfo.uses_raster;
     outputs = ginfo.outputs;
   }
+  // Without SM 6.1, a fragment shader's barycentrics come from a generated
+  // geometry shader (triangles only).
+  constexpr u32 kBaryCoord = 5286, kBaryCoordNoPersp = 5287;
+  const bool barycentrics =
+      !caps_.fragment_barycentric && desc.geometry.empty() &&
+      !desc.fragment.empty() &&
+      TopologyType(desc.topology) == D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE &&
+      desc.topology != rhi::Topology::kTriangleListAdjacency &&
+      (DeclaresBuiltIn(desc.fragment.words, desc.fragment.count, kBaryCoord) ||
+       DeclaresBuiltIn(desc.fragment.words, desc.fragment.count,
+                       kBaryCoordNoPersp));
+  if (barycentrics &&
+      !CompileHlsl(BarycentricGeometryShader(vinfo.outputs, &outputs),
+                   "gs_6_0", &gs))
+    return nullptr;
   if (!desc.fragment.empty()) {
     LowerOptions fo;
     fo.stage = rhi::kStageFragment;
     fo.shader_model = shader_model_;
     fo.read_only_storage = layout->read_only_storage;
     fo.producer_outputs = outputs;
+    fo.emulate_barycentrics = barycentrics;
     if (!CompileStage(desc.fragment, fo, &ps, &pinfo))
       return nullptr;
   }
