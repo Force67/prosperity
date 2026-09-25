@@ -657,7 +657,9 @@ class GlCommandList final : public rhi::CommandList {
   void ResetTimestamps(rhi::TimestampPool* pool,
                        u32 first,
                        u32 count) override;
-  void WriteTimestamp(rhi::TimestampPool* pool, u32 index) override;
+  void WriteTimestamp(rhi::TimestampPool* pool,
+                      u32 index,
+                      bool start) override;
   void PushLabel(const char* label) override;
   void PopLabel() override;
   void InsertLabel(const char* label) override;

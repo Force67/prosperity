@@ -630,7 +630,10 @@ void GlCommandList::ResetTimestamps(rhi::TimestampPool* pool,
   c->count = count;
 }
 
-void GlCommandList::WriteTimestamp(rhi::TimestampPool* pool, u32 index) {
+// glQueryCounter stamps once earlier commands are done, which serves both.
+void GlCommandList::WriteTimestamp(rhi::TimestampPool* pool,
+                                   u32 index,
+                                   bool /*start*/) {
   auto* c = stream_.Add<CmdWriteTimestamp>();
   c->pool = static_cast<GlTimestampPool*>(pool);
   c->first = index;

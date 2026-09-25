@@ -1093,7 +1093,7 @@ TEST_P(RhiConformance, GeometryClearAttachmentTimestamps) {
   TextureBarrier b{t, TextureState::kUndefined, TextureState::kColorTarget};
   list_->Barrier(kAccessHostWrite, kAccessVertexRead, &b, 1);
   if (pool)
-    list_->WriteTimestamp(pool, 0);
+    list_->WriteTimestamp(pool, 0, true);
   list_->BeginRenderPass(ClearPass(v));
   list_->SetPipeline(pipe);
   YUpViewport();
@@ -1104,7 +1104,7 @@ TEST_P(RhiConformance, GeometryClearAttachmentTimestamps) {
   list_->ClearAttachment(0, blue, 0, 0, kAspectColor, 0, 0, 8, 8);
   list_->EndRenderPass();
   if (pool)
-    list_->WriteTimestamp(pool, 1);
+    list_->WriteTimestamp(pool, 1, false);
   std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[32 * kW + 48], green) << "right half";
