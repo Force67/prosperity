@@ -161,6 +161,7 @@ class VulkanCommandList final : public rhi::CommandList {
                    u32 first_instance) override;
   void DrawMeshTasks(u32 x, u32 y, u32 z) override;
   void Dispatch(u32 x, u32 y, u32 z) override;
+  void DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) override;
   void ClearAttachment(u32 attachment,
                        const rhi::ClearColor& color,
                        float depth,
@@ -311,6 +312,8 @@ class VulkanDevice final : public rhi::Device {
   u64 last_cache_write_ns_ = 0;
   size_t last_cache_size_ = 0;
   bool fault_reported_ = false;
+  float max_lod_bias_ = 0.0f;
+  float max_anisotropy_ = 1.0f;
 };
 
 inline VulkanDevice& Impl(rhi::Device* device) {

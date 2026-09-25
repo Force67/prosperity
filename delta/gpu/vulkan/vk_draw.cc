@@ -11,6 +11,7 @@
 #include "base/arch.h"
 
 #include "gpu/vulkan/vk_debug.h"
+#include "gpu/vulkan/vk_rhi.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_draw_recomp.h"
 #include "gpu/vulkan/vk_format.h"
@@ -240,15 +241,15 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
 
   // Upload guest texture (independent of the render region) if not
   // RT-as-texture.
-  VkDescriptorSet tex_set = VK_NULL_HANDLE;
+  rhi::BindGroup* tex_set = nullptr;
   if (d.tex_base && g_quad.tex_pipeline && !rt_as_tex && !d.tex_arrayed &&
       GuestTextureUploadSupported(d.tex_dfmt, d.tex_nfmt))
-    tex_set = GetTexture(
+    tex_set = (GetTexture(
         d.tex_base, d.tex_w, d.tex_h, d.tex_dfmt, d.tex_nfmt, d.tex_tiling,
         d.tex_pitch, d.tex_layers, d.tex_base_array, d.tex_view_layers,
         d.tex_mip_levels, d.tex_base_mip, d.tex_view_mips, d.tex_min_lod,
         d.tex_pow2_pad, d.tex_sampler, d.tex_sampler_valid, false,
-        d.tex_force_lod_zero, d.tex_depth_compare, d.tex_swizzle);
+        d.tex_force_lod_zero, d.tex_depth_compare, d.tex_swizzle));
 
   // Switch render target if this draw targets a different RT than the open
   // region (or the open region is multi-target/has a depth attachment: the
@@ -261,12 +262,9 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     EndRegion();
     if (rt_as_tex) {  // make the sampled RT shader-readable before we render
       auto& src = g_rts[tex_base];
-      if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        ImageBarrier(g_frame.cmd, src.image, src.layout,
-                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                     ColorImageAccess(src.layout), VK_ACCESS_SHADER_READ_BIT);
-        src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-      }
+      if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        TransitionImage(g_frame.list, src.texture, src.layout,
+                        rhi::TextureState::kShaderRead);
     }
     VkFormat rt_format = ColorTargetFormat(d.mrt_info[0]);
     RTarget* rt = GetRT(d.rt_base, RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
@@ -287,44 +285,40 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
 
   g_frame.heuristic++;
   SetGuestViewport(d);
-  VkDeviceSize off = g_ring.vb_offset;
+  rhi::CommandList* list = g_frame.list;
+  const u64 off = g_ring.vb_offset;
   if (tex_set) {
     // Per-draw blend from the guest's CB_BLEND0_CONTROL, real vertex UVs.
-    vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      GetPipeline(true, d.blend_control, d.blend_enable,
+    list->SetPipeline(GetPipeline(true, d.blend_control, d.blend_enable,
                                   ColorTargetFormat(d.mrt_info[0])));
     float pc[17];
     std::memcpy(pc, d.mvp, 64);
     reinterpret_cast<u32*>(pc)[16] =
         0u;  // clipUV: real per-vertex uv/colour
-    vkCmdPushConstants(g_frame.cmd, g_quad.tex_layout,
-                       VK_SHADER_STAGE_VERTEX_BIT, 0, 68, pc);
-    vkCmdBindDescriptorSets(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            g_quad.tex_layout, 0, 1, &tex_set, 0, nullptr);
+    list->SetPushConstants(0, 68, pc);
+    list->SetBindGroup(0, tex_set);
   } else {
-    vkCmdBindPipeline(g_frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      GetPipeline(false, d.blend_control, d.blend_enable,
+    list->SetPipeline(GetPipeline(false, d.blend_control, d.blend_enable,
                                   ColorTargetFormat(d.mrt_info[0])));
-    vkCmdPushConstants(g_frame.cmd, g_quad.layout, VK_SHADER_STAGE_VERTEX_BIT,
-                       0, 64, d.mvp);
+    list->SetPushConstants(0, 64, d.mvp);
   }
-  vkCmdSetBlendConstants(g_frame.cmd, d.blend_constants);
-  vkCmdBindVertexBuffers(g_frame.cmd, 0, 1, &g_ring.vb, &off);
-  CmdInsertLabel(g_frame.cmd, "quad vs=%#llx ps=%#llx n=%u",
+  list->SetBlendConstants(d.blend_constants);
+  list->SetVertexBuffers(0, 1, &g_ring.vb, &off);
+  CmdInsertLabel(g_frame.list, "quad vs=%#llx ps=%#llx n=%u",
                  (unsigned long long)d.vs_addr, (unsigned long long)d.ps_addr,
                  indexed ? d.index_count : nv);
   if (indexed) {
     VkDeviceSize ioff = aligned_ioff;
     CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
                      d.index_type);
-    const VkIndexType vk_index_type =
-        d.index_type == 1 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-    vkCmdBindIndexBuffer(g_frame.cmd, g_ring.ib, ioff, vk_index_type);
-    vkCmdDrawIndexed(g_frame.cmd, d.index_count,
-                     d.instance_count ? d.instance_count : 1, 0, 0, 0);
+    list->SetIndexBuffer(g_ring.ib, ioff,
+                         d.index_type == 1 ? rhi::IndexType::kUint32
+                                           : rhi::IndexType::kUint16);
+    list->DrawIndexed(d.index_count, d.instance_count ? d.instance_count : 1,
+                      0, 0, 0);
     g_ring.ib_offset = ioff + index_bytes;
   } else {
-    vkCmdDraw(g_frame.cmd, nv, d.instance_count ? d.instance_count : 1, 0, 0);
+    list->Draw(nv, d.instance_count ? d.instance_count : 1, 0, 0);
   }
   g_ring.vb_offset += need;
   g_frame.draws++;

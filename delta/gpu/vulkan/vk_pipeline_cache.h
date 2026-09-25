@@ -13,33 +13,34 @@
 #include <unordered_map>
 
 #include "gpu/render/command.h"
+#include "gpu/rhi/device.h"
 
 namespace gpu::vk {
 
 // The heuristic quad path: a coloured and a textured pipeline, plus the
 // per-blend-state variants built on demand.
 struct QuadPipelines {
-  VkPipelineLayout layout = VK_NULL_HANDLE;
-  VkPipeline pipeline = VK_NULL_HANDLE;
-  VkPipelineLayout tex_layout = VK_NULL_HANDLE;
-  VkPipeline tex_pipeline = VK_NULL_HANDLE;
+  rhi::PipelineLayout* layout = nullptr;
+  rhi::Pipeline* pipeline = nullptr;
+  rhi::PipelineLayout* tex_layout = nullptr;
+  rhi::Pipeline* tex_pipeline = nullptr;
   // Keyed by (textured<<0, enable<<1, blend_control<<2), mixed with the format.
-  std::unordered_map<u64, VkPipeline> cache;
+  std::unordered_map<u64, rhi::Pipeline*> cache;
 };
 
 extern QuadPipelines& g_quad;
 
 bool CreatePipeline();
 bool CreateTexPipeline();
-VkPipeline GetPipeline(bool textured,
-                       u32 bc,
-                       bool en,
-                       VkFormat color_format);
+rhi::Pipeline* GetPipeline(bool textured,
+                           u32 bc,
+                           bool en,
+                           VkFormat color_format);
 
 struct RecompPipe {
-  VkPipeline pipe = VK_NULL_HANDLE;
-  VkPipelineLayout layout = VK_NULL_HANDLE;
-  VkDescriptorSetLayout tex_set_layout = VK_NULL_HANDLE;
+  rhi::Pipeline* pipe = nullptr;
+  rhi::PipelineLayout* layout = nullptr;
+  rhi::BindGroupLayout* tex_set_layout = nullptr;
   // Bindings tex_set_layout declares. The shader may declare more samplers than
   // the draw resolved textures for, and every declared binding has to be
   // written or the draw reads a descriptor that was never updated.

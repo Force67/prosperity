@@ -3,6 +3,7 @@
  */
 
 #include "gpu/vulkan/vk_pipeline_cache.h"
+#include "gpu/vulkan/vk_rhi.h"
 #include "base/arch.h"
 
 #include "gpu/gcn/gcn_translate.h"
@@ -13,6 +14,7 @@
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
 #include "gpu/vulkan/vk_format.h"
+#include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_hash.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_render_target.h"
@@ -24,6 +26,7 @@
 #include <cstdlib>
 #include <utility>
 #include <vector>
+#include <iterator>
 
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -130,40 +133,41 @@ namespace gpu::vk {
 
 using render::DrawInfo;
 
-VkStencilOp StencilOp(u32 op) {
+rhi::StencilOp StencilOp(u32 op) {
   switch (op & 0xF) {
     case 1:
-      return VK_STENCIL_OP_ZERO;
+      return rhi::StencilOp::kZero;
     case 2:
     case 3:
     case 4:
-      return VK_STENCIL_OP_REPLACE;
+      return rhi::StencilOp::kReplace;
     case 5:
-      return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+      return rhi::StencilOp::kIncrementClamp;
     case 6:
-      return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+      return rhi::StencilOp::kDecrementClamp;
     case 7:
-      return VK_STENCIL_OP_INVERT;
+      return rhi::StencilOp::kInvert;
     case 8:
-      return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+      return rhi::StencilOp::kIncrementWrap;
     case 9:
-      return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+      return rhi::StencilOp::kDecrementWrap;
     default:
-      return VK_STENCIL_OP_KEEP;
+      return rhi::StencilOp::kKeep;
   }
 }
 
-VkStencilOpState StencilState(const DrawInfo& d, bool back) {
+rhi::StencilFace StencilState(const DrawInfo& d, bool back) {
   const u32 shift = back ? 12 : 0;
   const u32 refmask = back ? d.stencil_refmask_bf : d.stencil_refmask;
-  VkStencilOpState state{};
-  state.failOp = StencilOp(d.stencil_control >> shift);
-  state.passOp = StencilOp(d.stencil_control >> (shift + 4));
-  state.depthFailOp = StencilOp(d.stencil_control >> (shift + 8));
-  state.compareOp = static_cast<VkCompareOp>(
+  rhi::StencilFace state;
+  state.fail = StencilOp(d.stencil_control >> shift);
+  state.pass = StencilOp(d.stencil_control >> (shift + 4));
+  state.depth_fail = StencilOp(d.stencil_control >> (shift + 8));
+  // ZFUNC and STENCILFUNC use the same order as rhi::CompareOp.
+  state.compare = static_cast<rhi::CompareOp>(
       (d.depth_control >> (back ? 20 : 8)) & 0x7);
-  state.compareMask = (refmask >> 8) & 0xFF;
-  state.writeMask = (refmask >> 16) & 0xFF;
+  state.compare_mask = (refmask >> 8) & 0xFF;
+  state.write_mask = (refmask >> 16) & 0xFF;
   state.reference = refmask & 0xFF;
   return state;
 }
@@ -180,139 +184,82 @@ RecompPipe* RecompiledPipelineCache::Store(u64 key, RecompPipe pipeline) {
 // Build a graphics pipeline for the colored (textured=false) or textured quad
 // with the given colour-blend attachment. Shaders + layout selected by
 // `textured`.
-VkPipeline BuildPipeline(bool textured,
-                         VkPipelineColorBlendAttachmentState cba,
-                         VkFormat color_format) {
-  VkShaderModule vs =
-      MakeModule(textured ? tex_vert_spv : quad_vert_spv,
-                 textured ? sizeof(tex_vert_spv) : sizeof(quad_vert_spv));
-  VkShaderModule fs =
-      MakeModule(textured ? tex_frag_spv : quad_frag_spv,
-                 textured ? sizeof(tex_frag_spv) : sizeof(quad_frag_spv));
-  VkPipelineShaderStageCreateInfo stages[2]{};
-  stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-  stages[0].module = vs;
-  stages[0].pName = "main";
-  stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-  stages[1].module = fs;
-  stages[1].pName = "main";
-
+rhi::Pipeline* BuildPipeline(bool textured,
+                             const rhi::BlendAttachment& blend,
+                             VkFormat color_format) {
+  rhi::GraphicsPipelineDesc desc;
+  desc.layout = textured ? g_quad.tex_layout : g_quad.layout;
+  desc.vertex = textured ? rhi::ShaderCode{tex_vert_spv, std::size(tex_vert_spv)}
+                         : rhi::ShaderCode{quad_vert_spv,
+                                           std::size(quad_vert_spv)};
+  desc.fragment = textured
+                      ? rhi::ShaderCode{tex_frag_spv, std::size(tex_frag_spv)}
+                      : rhi::ShaderCode{quad_frag_spv,
+                                        std::size(quad_frag_spv)};
   // Interleaved repacked vertex: pos.xy@0, color.rgba@8, uv.xy@24, stride 32.
-  VkVertexInputBindingDescription bind{0, 32, VK_VERTEX_INPUT_RATE_VERTEX};
-  VkVertexInputAttributeDescription attrs[3] = {
-      {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
-      {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 8},
-      {2, 0, VK_FORMAT_R32G32_SFLOAT, 24},
-  };
-  VkPipelineVertexInputStateCreateInfo vi{
-      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-  vi.vertexBindingDescriptionCount = 1;
-  vi.pVertexBindingDescriptions = &bind;
-  vi.vertexAttributeDescriptionCount = 3;
-  vi.pVertexAttributeDescriptions = attrs;
+  desc.vertex_buffers = {{32, false}};
+  desc.vertex_attributes = {{0, 0, rhi::Format::kRG32Float, 0},
+                            {1, 0, rhi::Format::kRGBA32Float, 8},
+                            {2, 0, rhi::Format::kRG32Float, 24}};
   // GNM draws are indexed triangle LISTS (VGT_PRIMITIVE_TYPE 4); the previous
   // hardcoded strip connected separate sprites into long diagonal triangles.
-  VkPipelineInputAssemblyStateCreateInfo ia{
-      VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-  ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-  VkPipelineViewportStateCreateInfo vp{
-      VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-  vp.viewportCount = 1;
-  vp.scissorCount = 1;
-  VkPipelineRasterizationStateCreateInfo rs{
-      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-  rs.polygonMode = VK_POLYGON_MODE_FILL;
-  rs.cullMode = VK_CULL_MODE_NONE;
-  rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-  rs.lineWidth = 1.0f;
-  VkPipelineMultisampleStateCreateInfo ms{
-      VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-  ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-  VkPipelineDepthStencilStateCreateInfo dss{
-      VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-  VkPipelineColorBlendStateCreateInfo cb{
-      VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-  cb.attachmentCount = 1;
-  cb.pAttachments = &cba;
-  VkDynamicState dyns[3] = {VK_DYNAMIC_STATE_VIEWPORT,
-                            VK_DYNAMIC_STATE_SCISSOR,
-                            VK_DYNAMIC_STATE_BLEND_CONSTANTS};
-  VkPipelineDynamicStateCreateInfo dy{
-      VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-  dy.dynamicStateCount = 3;
-  dy.pDynamicStates = dyns;
-  VkPipelineRenderingCreateInfo rci{
-      VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-  rci.colorAttachmentCount = 1;
-  rci.pColorAttachmentFormats = &color_format;
-  VkGraphicsPipelineCreateInfo pi{
-      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-  pi.pNext = &rci;
-  pi.stageCount = 2;
-  pi.pStages = stages;
-  pi.pVertexInputState = &vi;
-  pi.pInputAssemblyState = &ia;
-  pi.pViewportState = &vp;
-  pi.pRasterizationState = &rs;
-  pi.pMultisampleState = &ms;
-  pi.pDepthStencilState = &dss;
-  pi.pColorBlendState = &cb;
-  pi.pDynamicState = &dy;
-  pi.layout = textured ? g_quad.tex_layout : g_quad.layout;
-  VkPipeline p = VK_NULL_HANDLE;
-  {
-    ScopeNs t(&g_ns_pipe_build);
-    vkCreateGraphicsPipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi,
-                              nullptr, &p);
-  }
-  g_pipe_build_n++;
-  NotePipelineBuilt();
-  vkDestroyShaderModule(g_dev.device, vs, nullptr);
-  vkDestroyShaderModule(g_dev.device, fs, nullptr);
-  return p;
+  desc.topology = rhi::Topology::kTriangleList;
+  desc.color_count = 1;
+  desc.color_formats[0] = FromVkFormat(color_format);
+  desc.blend[0] = blend;
+  desc.name = textured ? "quad textured" : "quad";
+  return Device().CreateGraphicsPipeline(desc);
 }
 
 // Pipeline for a draw's blend state, cached. Returns the default src-alpha
 // pipeline when the per-state build fails so a draw never silently drops.
-VkPipeline GetPipeline(bool textured,
-                       u32 bc,
-                       bool en,
-                       VkFormat color_format) {
+rhi::Pipeline* GetPipeline(bool textured,
+                           u32 bc,
+                           bool en,
+                           VkFormat color_format) {
   u64 key = (textured ? 1ull : 0) | (en ? 2ull : 0) |
                  ((u64)(en ? (bc & 0x7FFFFFFFu) : 0u) << 2);
   key = HashWord(key, color_format);
   auto it = g_quad.cache.find(key);
   if (it != g_quad.cache.end())
     return it->second;
-  VkPipeline p = BuildPipeline(textured, BlendAttachment(bc, en), color_format);
+  rhi::Pipeline* p =
+      BuildPipeline(textured, BlendAttachment(bc, en), color_format);
   if (!p && color_format == kDefaultRtFormat)
     p = textured ? g_quad.tex_pipeline : g_quad.pipeline;
   g_quad.cache[key] = p;
   return p;
 }
 
+namespace {
+
+// Classic src-alpha over (the default quad blend).
+rhi::BlendAttachment SrcAlphaOver(rhi::BlendFactor dst_alpha) {
+  rhi::BlendAttachment b;
+  b.enable = true;
+  b.src_color = rhi::BlendFactor::kSrcAlpha;
+  b.dst_color = rhi::BlendFactor::kOneMinusSrcAlpha;
+  b.src_alpha = rhi::BlendFactor::kOne;
+  b.dst_alpha = dst_alpha;
+  return b;
+}
+
+}  // namespace
+
 bool CreatePipeline() {
   if (g_quad.pipeline)
     return true;
-  VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, 64};  // mat4
-  VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  li.pushConstantRangeCount = 1;
-  li.pPushConstantRanges = &pcr;
-  VKOK(vkCreatePipelineLayout(g_dev.device, &li, nullptr, &g_quad.layout));
+  rhi::PipelineLayoutDesc layout;
+  layout.push_constant_bytes = 64;  // mat4
+  layout.push_constant_stages = rhi::kStageVertex;
+  g_quad.layout = Device().CreatePipelineLayout(layout);
+  if (!g_quad.layout)
+    return false;
   // Default colored pipeline: classic src-alpha (used as the fallback / for
   // draws that don't enable blend the cache builds an opaque one on demand).
-  VkPipelineColorBlendAttachmentState cba{};
-  cba.blendEnable = VK_TRUE;
-  cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-  cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-  cba.colorBlendOp = VK_BLEND_OP_ADD;
-  cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-  cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-  cba.alphaBlendOp = VK_BLEND_OP_ADD;
-  cba.colorWriteMask = 0xF;
-  g_quad.pipeline = BuildPipeline(false, cba, kDefaultRtFormat);
+  g_quad.pipeline =
+      BuildPipeline(false, SrcAlphaOver(rhi::BlendFactor::kZero),
+                    kDefaultRtFormat);
   if (!g_quad.pipeline) {
     BASE_LOGI("gpuvk", "pipeline failed");
     return false;
@@ -325,27 +272,18 @@ bool CreateTexPipeline() {
     return true;
   if (!CreateTextureDescriptors())
     return false;
-  VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0,
-                          68};  // mat4 + clipUV flag
-  VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  li.setLayoutCount = 1;
-  li.pSetLayouts = &g_tex.ds_layout;
-  li.pushConstantRangeCount = 1;
-  li.pPushConstantRanges = &pcr;
-  VKOK(vkCreatePipelineLayout(g_dev.device, &li, nullptr, &g_quad.tex_layout));
-
+  rhi::PipelineLayoutDesc layout;
+  layout.groups = {g_tex.layout};
+  layout.push_constant_bytes = 68;  // mat4 + clipUV flag
+  layout.push_constant_stages = rhi::kStageVertex;
+  g_quad.tex_layout = Device().CreatePipelineLayout(layout);
+  if (!g_quad.tex_layout)
+    return false;
   // Default textured pipeline: src-alpha over (the common sprite blend).
   // Per-draw blend states build their own pipeline on demand via GetPipeline().
-  VkPipelineColorBlendAttachmentState cba{};
-  cba.blendEnable = VK_TRUE;
-  cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-  cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-  cba.colorBlendOp = VK_BLEND_OP_ADD;
-  cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-  cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-  cba.alphaBlendOp = VK_BLEND_OP_ADD;
-  cba.colorWriteMask = 0xF;
-  g_quad.tex_pipeline = BuildPipeline(true, cba, kDefaultRtFormat);
+  g_quad.tex_pipeline = BuildPipeline(
+      true, SrcAlphaOver(rhi::BlendFactor::kOneMinusSrcAlpha),
+      kDefaultRtFormat);
   if (!g_quad.tex_pipeline) {
     BASE_LOGI("gpuvk", "tex pipeline failed");
     return false;
@@ -425,10 +363,10 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     return pipeline;
   RecompPipe rp;
   const bool mesh = !d.recomp->mesh_spirv.empty();
-  if (mesh && (!g_dev.mesh_shader || !g_dev.draw_mesh_tasks))
+  const rhi::Caps& caps = Device().caps();
+  if (mesh && !caps.mesh_shader)
     return nullptr;
-  const VkShaderStageFlags vertex_stage =
-      mesh ? VK_SHADER_STAGE_MESH_BIT_EXT : VK_SHADER_STAGE_VERTEX_BIT;
+  const u32 vertex_stage = mesh ? rhi::kStageMesh : rhi::kStageVertex;
   rp.textured = !d.recomp->ps_texs.empty() || !d.recomp->vs_texs.empty();
   const bool has_storage =
       std::any_of(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
@@ -441,29 +379,21 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // set 0 = texture(s) (or an empty layout when untextured), set 1 = cbuffer
   // UBO. Multi/storage shaders use an exact per-binding descriptor layout;
   // single-sampler shaders retain the shared one-binding layout.
-  VkDescriptorSetLayout set0 =
-      !rp.textured ? g_ring.empty_layout : g_tex.ds_layout;
+  rhi::BindGroupLayout* set0 = !rp.textured ? g_ring.empty_layout : g_tex.layout;
   if (rp.multi_tex) {
-    VkDescriptorSetLayoutBinding bindings[kMaxTex];
+    rhi::BindGroupLayoutDesc desc;
     const u32 n_bind = static_cast<u32>(std::min(n_tex, size_t(kMaxTex)));
     for (u32 i = 0; i < n_bind; i++) {
       const bool is_vs = i >= d.recomp->ps_texs.size();
-      const bool storage =
-          !is_vs && d.recomp->ps_texs[i].storage;
-      bindings[i] = {i,
-                     storage ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
-                             : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                     1,
-                     is_vs ? vertex_stage
-                           : VK_SHADER_STAGE_FRAGMENT_BIT,
-                     nullptr};
+      const bool storage = !is_vs && d.recomp->ps_texs[i].storage;
+      desc.bindings.push_back(
+          {i,
+           storage ? rhi::BindingType::kStorageTexture
+                   : rhi::BindingType::kSampledTexture,
+           is_vs ? vertex_stage : rhi::kStageFragment});
     }
-    VkDescriptorSetLayoutCreateInfo sl{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sl.bindingCount = n_bind;
-    sl.pBindings = bindings;
-    if (vkCreateDescriptorSetLayout(g_dev.device, &sl, nullptr,
-                                    &rp.tex_set_layout) != VK_SUCCESS)
+    rp.tex_set_layout = Device().CreateBindGroupLayout(desc);
+    if (!rp.tex_set_layout)
       return nullptr;
     rp.tex_bindings = n_bind;
     set0 = rp.tex_set_layout;
@@ -473,12 +403,17 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // set is positional: taking it means taking set 2 as well, whether or not
   // the shader reads a raw buffer.
   rp.shared_lds = d.recomp->shared_lds && EnsureLdsScratch();
-  const VkDescriptorSetLayout cbuf_layout = d.recomp->indirect_cbufs
-      ? g_ring.indirect_cbuf_layout : g_ring.ubo_layout;
+  rhi::BindGroupLayout* cbuf_layout = d.recomp->indirect_cbufs
+                                          ? g_ring.indirect_cbuf_layout
+                                          : g_ring.ubo_layout;
   if (!cbuf_layout)
     return nullptr;
-  VkDescriptorSetLayout sls[4] = {set0, cbuf_layout, g_ring.sbo_layout,
-                                  g_ring.lds_layout};
+  rhi::PipelineLayoutDesc layout;
+  layout.groups = {set0, cbuf_layout};
+  if (rp.raw_bufs || rp.shared_lds)
+    layout.groups.push_back(g_ring.sbo_layout);
+  if (rp.shared_lds)
+    layout.groups.push_back(g_ring.lds_layout);
   // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total
   // (the guaranteed minimum push-constant size), plus each stage's own
   // code-address words (VS 128..135, PS 136..143) pushed per draw for
@@ -487,110 +422,58 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // windows interleave (VS owns [0,64) and [128,136), PS [64,128) and
   // [136,144)), so no pair of per-stage ranges can cover that without
   // overlapping, and Vulkan requires a push to name every stage of every range
-  // it overlaps (VUID-vkCmdPushConstants-offset-01796). The per-stage form
-  // pushed the PS user data and the VS code address through a range that did
-  // not name their stage: undefined, and the PS user data is where the shader's
-  // descriptor pointers live. Every push below names both stages; the bytes
-  // written are unchanged.
+  // it overlaps. Every push names both stages.
   const bool pc_base = gpu::gcn::PushCodeBase();
-  const VkPushConstantRange push[1] = {
-      {vertex_stage | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-       mesh ? 160u : pc_base ? 144u : 128u},
-  };
-  VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  li.setLayoutCount = rp.shared_lds ? 4 : (rp.raw_bufs ? 3 : 2);
-  li.pSetLayouts = sls;
-  li.pushConstantRangeCount = 1;
-  li.pPushConstantRanges = push;
-  if (vkCreatePipelineLayout(g_dev.device, &li, nullptr, &rp.layout) !=
-      VK_SUCCESS)
+  layout.push_constant_bytes = mesh ? 160u : pc_base ? 144u : 128u;
+  layout.push_constant_stages = vertex_stage | rhi::kStageFragment;
+  rp.layout = Device().CreatePipelineLayout(layout);
+  if (!rp.layout)
     return nullptr;
 
-  VkShaderModule vs = MakeModuleVec(mesh ? d.recomp->mesh_spirv
-                                       : d.recomp->vs_spirv);
-  VkShaderModule fs = MakeModuleVec(d.recomp->fs_spirv);
+  rhi::GraphicsPipelineDesc pd;
+  pd.layout = rp.layout;
+  pd.mesh = mesh;
+  pd.vertex = rhi::Code(mesh ? d.recomp->mesh_spirv : d.recomp->vs_spirv);
+  pd.fragment = rhi::Code(d.recomp->fs_spirv);
   // RECTLIST is primitive type 17 on GFX7 but 7 on gfx10.3 (PrimitiveType::
   // kRectList; 17 is kRectListLegacy there). Missing the gfx10 number rendered
   // every PS5 fullscreen pass as a single triangle covering half the rect.
   const bool is_rect_list = d.prim_type == 17 || d.prim_type == 7;
-  bool use_gs =
-      !mesh && is_rect_list && !kNoRectGs && g_dev.geometry_shader &&
-      !d.recomp->gs_spirv.empty();
+  bool use_gs = !mesh && is_rect_list && !kNoRectGs && caps.geometry_shader &&
+                !d.recomp->gs_spirv.empty();
   if (d.recomp->guest_gs) {
-    if (!g_dev.geometry_shader)
+    if (!caps.geometry_shader)
       return nullptr;
     use_gs = true;
   }
-  VkShaderModule gs =
-      use_gs ? MakeModuleVec(d.recomp->gs_spirv) : VK_NULL_HANDLE;
-  VkPipelineShaderStageCreateInfo stages[3]{};
-  u32 stage_count = 0;
-  stages[stage_count] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  stages[stage_count].stage = static_cast<VkShaderStageFlagBits>(vertex_stage);
-  stages[stage_count].module = vs;
-  stages[stage_count++].pName = "main";
-  if (use_gs) {
-    stages[stage_count] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    stages[stage_count].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
-    stages[stage_count].module = gs;
-    stages[stage_count++].pName = "main";
-  }
-  stages[stage_count] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  stages[stage_count].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-  stages[stage_count].module = fs;
-  stages[stage_count++].pName = "main";
+  if (use_gs)
+    pd.geometry = rhi::Code(d.recomp->gs_spirv);
 
-  // One Vulkan binding per resolved vertex buffer (single-stream draws stay a
-  // single binding, identical to before); attributes reference their binding.
-  u32 nbind = d.num_vattrs ? std::min(d.num_vbufs, 8u) : 0;
-  VkVertexInputBindingDescription binds[8];
+  // One binding per resolved vertex buffer (single-stream draws stay a single
+  // binding, identical to before); attributes reference their binding.
+  const u32 nbind = d.num_vattrs ? std::min(d.num_vbufs, 8u) : 0;
   for (u32 j = 0; j < nbind; j++)
-    binds[j] = {j, d.vbufs[j].stride,
-                d.vbufs[j].per_instance ? VK_VERTEX_INPUT_RATE_INSTANCE
-                                        : VK_VERTEX_INPUT_RATE_VERTEX};
-  VkVertexInputAttributeDescription attrs[DrawInfo::kMaxVertexAttrs];
+    pd.vertex_buffers.push_back({d.vbufs[j].stride, d.vbufs[j].per_instance});
   for (u32 i = 0; i < d.num_vattrs; i++)
-    attrs[i] = {d.vattrs[i].location, d.vattrs[i].binding,
-                VertexFormat(d.vattrs[i].dfmt, d.vattrs[i].nfmt),
-                d.vattrs[i].offset};
-  VkPipelineVertexInputStateCreateInfo vi{
-      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-  vi.vertexBindingDescriptionCount = nbind;
-  vi.pVertexBindingDescriptions = nbind ? binds : nullptr;
-  vi.vertexAttributeDescriptionCount = d.num_vattrs;
-  vi.pVertexAttributeDescriptions = attrs;
-
-  VkPipelineInputAssemblyStateCreateInfo ia{
-      VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-  ia.topology = PrimitiveTopology(d.prim_type);
-  VkPipelineViewportStateCreateInfo vp{
-      VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-  vp.viewportCount = 1;
-  vp.scissorCount = 1;
-  VkPipelineRasterizationStateCreateInfo rs{
-      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-  rs.polygonMode = VK_POLYGON_MODE_FILL;
+    pd.vertex_attributes.push_back(
+        {d.vattrs[i].location, d.vattrs[i].binding,
+         FromVkFormat(VertexFormat(d.vattrs[i].dfmt, d.vattrs[i].nfmt)),
+         d.vattrs[i].offset});
+  pd.topology = PrimitiveTopology(d.prim_type);
   // Face culling from PA_SU_SC_MODE_CNTL (CULL_FRONT[0]/CULL_BACK[1] map 1:1
-  // onto the Vulkan cull-mode bits). The render region uses a negative-height
-  // (y-up) viewport to match GCN rasterisation, which flips triangle winding in
+  // onto the cull-mode bits). The render region uses a negative-height (y-up)
+  // viewport to match GCN rasterisation, which flips triangle winding in
   // framebuffer space, so the guest's front-face sense is inverted here to
   // compensate. Culling is opt-in (DELTA_GPU_CULL=1) until the winding can be
   // validated against visible 3D geometry; the default stays cull-none so
   // correctly-drawn faces are never dropped.
-  rs.cullMode =
-      kDoCull ? (VkCullModeFlags)(d.cull_mode & 0x3) : VK_CULL_MODE_NONE;
-  rs.frontFace =
-      d.front_ccw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
-  rs.lineWidth = 1.0f;
-  rs.depthClampEnable = kDepthClamp ? VK_TRUE : VK_FALSE;
-  VkPipelineMultisampleStateCreateInfo ms{
-      VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-  ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  pd.cull = kDoCull ? static_cast<rhi::CullMode>(d.cull_mode & 0x3)
+                    : rhi::CullMode::kNone;
+  pd.front_ccw = !d.front_ccw;
+  pd.depth_clamp = kDepthClamp;
   // Depth test/write from DB_DEPTH_CONTROL (only when the draw bound a Z
   // buffer; 2D draws leave depth_base 0 so this stays fully disabled, unchanged
   // from before).
-  VkPipelineDepthStencilStateCreateInfo dss{
-      VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
   if (d.depth_base) {
     const bool per_ps = NoZTestForPs(d.ps_addr);
     const bool skip_ztest = kNoZTest || per_ps;
@@ -607,8 +490,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
                   d.depth_func & 0x7);
       }
     }
-    dss.depthTestEnable =
-        (d.depth_test_enable && !skip_ztest) ? VK_TRUE : VK_FALSE;
+    pd.depth_test = d.depth_test_enable && !skip_ztest;
     const bool no_write = NoZWriteForPs(d.ps_addr);
     if (no_write) {
       static std::vector<u64> said;
@@ -627,10 +509,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
                   (unsigned long long)d.ps_addr, (int)d.depth_write_enable);
       }
     }
-    dss.depthWriteEnable =
-        ((d.depth_write_enable || force_write) && !no_write) ? VK_TRUE
-                                                            : VK_FALSE;
-    dss.depthCompareOp = (VkCompareOp)(d.depth_func & 0x7);  // ZFUNC maps 1:1
+    pd.depth_write = (d.depth_write_enable || force_write) && !no_write;
+    pd.depth_compare = static_cast<rhi::CompareOp>(d.depth_func & 0x7);
     // A depth-prepass title re-draws its geometry with ZFUNC=EQUAL against the
     // depth the prepass laid down. That only works when both passes compute
     // gl_Position bit-identically, which a hardware driver guarantees for one
@@ -640,15 +520,16 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     // EQUAL rejects the whole scene. Widen EQUAL to the direction the prepass
     // wrote, which admits exactly the surface the prepass kept (nothing can be
     // nearer than the nearest surface), so the visible result matches.
-    if (kRelaxDepthEqual && dss.depthCompareOp == VK_COMPARE_OP_EQUAL &&
+    if (kRelaxDepthEqual && pd.depth_compare == rhi::CompareOp::kEqual &&
         !d.depth_write_enable)
-      dss.depthCompareOp = d.depth_clear <= 0.5f
-                               ? VK_COMPARE_OP_GREATER_OR_EQUAL
-                               : VK_COMPARE_OP_LESS_OR_EQUAL;
+      pd.depth_compare = d.depth_clear <= 0.5f
+                             ? rhi::CompareOp::kGreaterEqual
+                             : rhi::CompareOp::kLessEqual;
     if (d.stencil_enable) {
-      dss.stencilTestEnable = VK_TRUE;
-      dss.front = StencilState(d, false);
-      dss.back = d.stencil_backface_enable ? StencilState(d, true) : dss.front;
+      pd.stencil_test = true;
+      pd.stencil_front = StencilState(d, false);
+      pd.stencil_back =
+          d.stencil_backface_enable ? StencilState(d, true) : pd.stencil_front;
     }
   }
   // One blend attachment per bound MRT target, each from its own
@@ -656,20 +537,21 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // blend_control/blend_enable so the single-RT path is unchanged. Targets the
   // PS does not export to are write-masked off so they keep their loaded
   // content.
-  VkPipelineColorBlendAttachmentState cb_att[8];
+  pd.color_count = mrt_n;
   for (u32 i = 0; i < mrt_n; i++) {
     u32 bc = i == 0 ? d.blend_control : d.mrt_blend[i];
     bool en = i == 0 ? d.blend_enable : ((d.mrt_blend_mask >> i) & 1u);
-    // Vulkan forbids blending on an integer attachment, and the hardware
-    // agrees: CB_COLORn_INFO sets BLEND_BYPASS on exactly these targets.
+    // Blending an integer attachment is invalid, and the hardware agrees:
+    // CB_COLORn_INFO sets BLEND_BYPASS on exactly these targets.
     if (IsIntegerColorFormat(ColorTargetFormat(d.mrt_info[i])))
       en = false;
-    cb_att[i] = BlendAttachment(bc, en);
+    pd.blend[i] = BlendAttachment(bc, en);
     // Only exported targets may write, and CB_TARGET_MASK always gates each
     // component, including when the frontend omits CB_SHADER_MASK (AGC).
     if (!kNoMaskDiag)
-      cb_att[i].colorWriteMask = ColorWriteMask(
+      pd.blend[i].write_mask = ColorWriteMask(
           d.target_mask, d.shader_mask, d.recomp->ps_mrt_mask, i);
+    pd.color_formats[i] = FromVkFormat(ColorTargetFormat(d.mrt_info[i]));
   }
   // DELTA_GPU_PIPETRACE: the colour-blend state a pipeline is actually built
   // with, next to the PS's export mask. The two have to agree or an
@@ -682,67 +564,22 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
                 "ps={:#x} mrtN={} psMrtMask={:#x} tmask={:#x} smask={:#x} "
                 "att0: en={} src={} dst={} src_a={} dst_a={} writeMask={:#x}",
                 (unsigned long)d.ps_addr, mrt_n, d.recomp->ps_mrt_mask,
-                d.target_mask, d.shader_mask, cb_att[0].blendEnable,
-                (int)cb_att[0].srcColorBlendFactor,
-                (int)cb_att[0].dstColorBlendFactor,
-                (int)cb_att[0].srcAlphaBlendFactor,
-                (int)cb_att[0].dstAlphaBlendFactor, cb_att[0].colorWriteMask);
+                d.target_mask, d.shader_mask, (int)pd.blend[0].enable,
+                (int)pd.blend[0].src_color, (int)pd.blend[0].dst_color,
+                (int)pd.blend[0].src_alpha, (int)pd.blend[0].dst_alpha,
+                pd.blend[0].write_mask);
   }
-  VkPipelineColorBlendStateCreateInfo cb{
-      VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-  cb.attachmentCount = mrt_n;
-  cb.pAttachments = cb_att;
-  VkDynamicState dyns[3] = {VK_DYNAMIC_STATE_VIEWPORT,
-                            VK_DYNAMIC_STATE_SCISSOR,
-                            VK_DYNAMIC_STATE_BLEND_CONSTANTS};
-  VkPipelineDynamicStateCreateInfo dy{
-      VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-  dy.dynamicStateCount = 3;
-  dy.pDynamicStates = dyns;
-  VkFormat fmts[8];
-  for (u32 i = 0; i < mrt_n; i++)
-    fmts[i] = ColorTargetFormat(d.mrt_info[i]);
-  VkPipelineRenderingCreateInfo rci{
-      VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-  rci.colorAttachmentCount = mrt_n;
-  rci.pColorAttachmentFormats = fmts;
   if (d.depth_base)
-    rci.depthAttachmentFormat = kDepthFormat;
+    pd.depth_format = FromVkFormat(kDepthFormat);
   if (d.stencil_enable)
-    rci.stencilAttachmentFormat = kDepthFormat;
-  VkGraphicsPipelineCreateInfo pi{
-      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-  pi.pNext = &rci;
-  pi.stageCount = stage_count;
-  pi.pStages = stages;
-  pi.pVertexInputState = mesh ? nullptr : &vi;
-  pi.pInputAssemblyState = mesh ? nullptr : &ia;
-  pi.pViewportState = &vp;
-  pi.pRasterizationState = &rs;
-  pi.pMultisampleState = &ms;
-  pi.pDepthStencilState = &dss;
-  pi.pColorBlendState = &cb;
-  pi.pDynamicState = &dy;
-  pi.layout = rp.layout;
-  VkResult r;
-  {
-    ScopeNs t(&g_ns_pipe_build);
-    r = vkCreateGraphicsPipelines(g_dev.device, g_dev.pipeline_cache, 1, &pi,
-                                  nullptr, &rp.pipe);
-  }
-  g_pipe_build_n++;
-  vkDestroyShaderModule(g_dev.device, vs, nullptr);
-  if (gs)
-    vkDestroyShaderModule(g_dev.device, gs, nullptr);
-  vkDestroyShaderModule(g_dev.device, fs, nullptr);
-  if (r != VK_SUCCESS) {
-    BASE_LOGI("gpuvk", "recomp pipeline failed: {}", (int)r);
+    pd.stencil_format = FromVkFormat(kDepthFormat);
+  char name[64];
+  std::snprintf(name, sizeof(name), "recomp vs=%#llx ps=%#llx",
+                (unsigned long long)d.vs_addr, (unsigned long long)d.ps_addr);
+  pd.name = name;
+  rp.pipe = Device().CreateGraphicsPipeline(pd);
+  if (!rp.pipe)
     return nullptr;
-  }
-  NameObject(VK_OBJECT_TYPE_PIPELINE, (u64)rp.pipe,
-             "recomp vs=%#llx ps=%#llx", (unsigned long long)d.vs_addr,
-             (unsigned long long)d.ps_addr);
-  NotePipelineBuilt();
   return g_recomp_cache.Store(key, std::move(rp));
 }
 

@@ -367,6 +367,7 @@ struct GraphicsPipelineDesc {
 struct ComputePipelineDesc {
   PipelineLayout* layout = nullptr;
   ShaderCode code;
+  bool dispatch_base = false;  // dispatched with CommandList::DispatchBase
   const char* name = nullptr;
 };
 
@@ -457,6 +458,7 @@ struct Caps {
   bool host_import = false;
   u64 host_import_alignment = 0;
   bool texture_blit = true;
+  bool dispatch_base = false;
   // One memory type is both device-local and host-cached: a kReadback buffer
   // is as fast for the GPU as kDevice.
   bool unified_memory = false;
@@ -472,6 +474,7 @@ struct Caps {
   u32 uniform_offset_alignment = 256;
   u32 storage_offset_alignment = 256;
   u32 max_texture_size = 16384;
+  u32 max_texture_size_3d = 2048;
   u32 max_compute_resources = 64;
 };
 

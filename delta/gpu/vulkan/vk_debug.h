@@ -10,6 +10,8 @@
 // lines up against DELTA_GPU_* logs by eye.
 
 #include <vulkan/vulkan.h>
+
+#include "gpu/rhi/device.h"
 #include "base/arch.h"
 
 
@@ -37,6 +39,14 @@ void CmdBeginLabel(VkCommandBuffer cmd, const char* fmt, ...)
 void CmdEndLabel(VkCommandBuffer cmd);
 // One-shot marker between commands.
 void CmdInsertLabel(VkCommandBuffer cmd, const char* fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+
+// The same, on an rhi command list; nothing is formatted unless labels reach
+// a tool.
+void CmdBeginLabel(rhi::CommandList* list, const char* fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+void CmdEndLabel(rhi::CommandList* list);
+void CmdInsertLabel(rhi::CommandList* list, const char* fmt, ...)
     __attribute__((format(printf, 2, 3)));
 
 // RAII label region for a scope that records into one command buffer.

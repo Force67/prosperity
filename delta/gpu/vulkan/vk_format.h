@@ -8,6 +8,8 @@
 // to BGRA8. Pure tables: no device state, no caches.
 
 #include <vulkan/vulkan.h>
+
+#include "gpu/rhi/types.h"
 #include "base/arch.h"
 
 
@@ -27,23 +29,23 @@ VkFormat ColorTargetFormat(u32 info);
 // an integer output for one, blending is not allowed on one, and a sampler
 // reading one may not filter. Three rules that all key off this.
 bool IsIntegerColorFormat(VkFormat format);
-VkClearColorValue ColorTargetClearValue(u32 info,
-                                        u32 word0,
-                                        u32 word1);
+rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1);
 VkComponentMapping TextureComponents(u32 swizzle);
+// The same T# DST_SEL as a view swizzle.
+void TextureSwizzle(u32 swizzle, rhi::Swizzle out[4]);
 u32 FormatBytes(VkFormat fmt);
 
-VkBlendFactor BlendFactor(u32 f);
-VkBlendOp BlendOp(u32 f);
-VkPipelineColorBlendAttachmentState BlendAttachment(u32 bc, bool en);
+rhi::BlendFactor BlendFactor(u32 f);
+rhi::BlendOp BlendOp(u32 f);
+rhi::BlendAttachment BlendAttachment(u32 bc, bool en);
 // shader_mask == 0 means the frontend supplies only the recompiler's export
 // mask. The target's per-component write mask still applies independently.
-VkColorComponentFlags ColorWriteMask(u32 target_mask, u32 shader_mask,
+u8 ColorWriteMask(u32 target_mask, u32 shader_mask,
                                      u8 export_mask, u32 target);
 
 VkFormat VertexFormat(u32 dfmt, u32 nfmt);
 u32 VertexFormatBytes(u32 dfmt);
-VkPrimitiveTopology PrimitiveTopology(u32 prim);
+rhi::Topology PrimitiveTopology(u32 prim);
 
 void ReadbackPixelBgra(const u8* src, VkFormat fmt, u8* dst);
 

@@ -4,11 +4,13 @@
 #pragma once
 
 // The frame ring. Two slots let frame N record (and the guest emulate) while
-// frame N-1 still rasterizes; each slot owns a command buffer, a fence, a
-// readback buffer and half of each upload ring. Slot N-1's fence is waited –
+// frame N-1 still rasterizes; each slot owns a command list, a submission id, a
+// readback buffer and half of each upload ring. Slot N-1's submission is waited –
 // and its pixels presented, one frame late: at frame N's EndFrame.
 
 #include <vulkan/vulkan.h>
+
+#include "gpu/rhi/device.h"
 #include <vector>
 #include "base/arch.h"
 
@@ -16,17 +18,14 @@
 namespace gpu::vk {
 
 struct FrameSlot {
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  VkFence fence = VK_NULL_HANDLE;
-  VkQueryPool timestamps = VK_NULL_HANDLE;
-  VkBuffer readback = VK_NULL_HANDLE;
-  VkDeviceMemory readback_mem = VK_NULL_HANDLE;
-  void* readback_map = nullptr;
-  VkDeviceSize readback_size = 0;
-  // Command buffers of this frame submitted early (SubmitFrameChunk), freed
-  // once the slot's fence is waited.
-  std::vector<VkCommandBuffer> chunks;
-  bool submitted = false;    // fence submitted and not yet waited
+  rhi::CommandList* list = nullptr;  // the chunk this slot is recording
+  u64 submission = 0;  // the frame's last submission, waited at finish
+  rhi::TimestampPool* timestamps = nullptr;
+  rhi::Buffer* readback = nullptr;
+  // Chunks of this frame submitted early (SubmitFrameChunk), recycled once
+  // the slot's submission has retired.
+  std::vector<rhi::CommandList*> chunks;
+  bool submitted = false;    // submitted and not yet waited
   bool presentable = false;  // the frame copied pixels into `readback`
   bool present_to_window = false;
   // Metadata of the recorded frame, consumed when it is presented.
@@ -39,11 +38,12 @@ struct FrameSlot {
 };
 
 struct FrameState {
-  // The active slot's command buffer and readback buffer, aliased here so the
-  // recording path does not thread the slot through every call.
+  // The active slot's command list and readback buffer, aliased here so the
+  // recording path does not thread the slot through every call. `cmd` is the
+  // list's native handle, for code that still records Vulkan directly.
+  rhi::CommandList* list = nullptr;
   VkCommandBuffer cmd = VK_NULL_HANDLE;
-  VkBuffer readback = VK_NULL_HANDLE;
-  VkDeviceMemory readback_mem = VK_NULL_HANDLE;
+  rhi::Buffer* readback = nullptr;
   void* readback_map = nullptr;
   VkDeviceSize readback_size = 0;
 
@@ -55,7 +55,7 @@ struct FrameState {
   bool had_room = false;   // this frame sampled a room-sized (~832w) RT
   bool room_bake = false;  // this frame RENDERED into a room-sized RT
 
-  // Which chunk of the frame `cmd` is recording: bumped by SubmitFrameChunk.
+  // Which chunk of the frame `list` is recording: bumped by SubmitFrameChunk.
   // Work recorded against chunk N is on the queue once the sequence passes N.
   u64 chunk_seq = 1;
   u32 draws_at_chunk = 0;  // `draws` when the chunk was opened
@@ -67,6 +67,15 @@ struct FrameState {
 extern FrameState& g_frame;
 
 bool CreateFrameSlots();
+
+// The device the renderer runs on.
+rhi::Device& Device();
+
+// A command list for work the CPU needs finished before it goes on. Record
+// into it, then EndImmediate submits, waits and recycles it; false when the
+// submission failed or the device was lost.
+rhi::CommandList* BeginImmediate();
+bool EndImmediate(rhi::CommandList* list);
 // Pipelined by default; DELTA_GPU_SYNC=1 restores the submit-and-wait frame.
 bool FramePipelined();
 // Grow the active slot's readback buffer to hold one w*h image of `fmt`.

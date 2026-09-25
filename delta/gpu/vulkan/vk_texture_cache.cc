@@ -3,6 +3,7 @@
  */
 
 #include "gpu/vulkan/vk_texture_cache.h"
+#include "gpu/vulkan/vk_rhi.h"
 #include "base/arch.h"
 
 #include "gpu/gpu_check.h"
@@ -187,8 +188,7 @@ struct TexViewKeyHash {
 };
 
 struct TexImageEntry {
-  VkImage image = VK_NULL_HANDLE;
-  ImageAllocation allocation;
+  rhi::Texture* image = nullptr;
   u64 footprint = 0;
   VkDeviceSize allocation_size = 0;
   u64 hash = 0;         // whole-content, from the periodic sweep
@@ -211,17 +211,16 @@ struct TexImageEntry {
 };
 
 struct TexViewEntry {
-  VkImageView view = VK_NULL_HANDLE;
+  rhi::TextureView* view = nullptr;
 };
 struct TexEntry {
-  VkDescriptorSet set = VK_NULL_HANDLE;
-  VkDescriptorPool pool = VK_NULL_HANDLE;
+  rhi::BindGroup* set = nullptr;
 };
 
 std::unordered_map<TexImageKey, TexImageEntry, TexImageKeyHash> g_tex_images;
 std::unordered_map<TexViewKey, TexViewEntry, TexViewKeyHash> g_tex_views;
 std::unordered_map<TexKey, TexEntry, TexKeyHash> g_tex_cache;
-std::unordered_map<SamplerKey, VkSampler, SamplerKeyHash> g_sampler_cache;
+std::unordered_map<SamplerKey, rhi::Sampler*, SamplerKeyHash> g_sampler_cache;
 constexpr u32 kTexturePageShift = 16;
 std::unordered_map<u64, std::vector<TexImageKey>> g_texture_pages;
 u64 g_tex_image_bytes = 0;
@@ -315,7 +314,7 @@ u32 TextureTiling(u32 tiling) {
   return kForceTile >= 0 ? static_cast<u32>(kForceTile.get()) : tiling;
 }
 
-bool UploadTexPixelsImmediate(VkImage img,
+bool UploadTexPixelsImmediate(rhi::Texture* img,
                               u64 base,
                               const gcn::TextureLayout32& layout,
                               u32 texel_w,
@@ -323,327 +322,150 @@ bool UploadTexPixelsImmediate(VkImage img,
                               bool is_3d = false);  // defined below
 void ClearMultiTexCache();
 
-// Put the 1x1 depth default into DEPTH_READ_ONLY_OPTIMAL holding 1.0.
+// Put the 1x1 depth default into kDepthRead holding 1.0.
 void ClearDepthDefaultToFar() {
-  VkCommandBufferAllocateInfo ca{
-      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ca.commandPool = g_dev.pool;
-  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ca.commandBufferCount = 1;
-  VkCommandBuffer c = VK_NULL_HANDLE;
-  if (vkAllocateCommandBuffers(g_dev.device, &ca, &c) != VK_SUCCESS)
+  rhi::CommandList* list = BeginImmediate();
+  if (!list)
     return;
-  VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(c, &bi);
-  VkImageMemoryBarrier b0{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  b0.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  b0.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  b0.image = g_tex.depth_default_img;
-  b0.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-  b0.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  b0.srcQueueFamilyIndex = b0.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &b0);
-  const VkClearDepthStencilValue far{1.0f, 0};
-  const VkImageSubresourceRange sr{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-  vkCmdClearDepthStencilImage(c, g_tex.depth_default_img,
-                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &far, 1,
-                              &sr);
-  VkImageMemoryBarrier b1 = b0;
-  b1.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  b1.newLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-  b1.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  b1.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &b1);
-  vkEndCommandBuffer(c);
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1;
-  si.pCommandBuffers = &c;
-  if (vkResetFences(g_dev.device, 1, &g_dev.fence) == VK_SUCCESS &&
-      vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence) == VK_SUCCESS)
-    vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX);
-  vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &c);
+  rhi::TextureRange range;
+  range.aspect = rhi::kAspectDepth;
+  rhi::TextureBarrier b{g_tex.depth_default_img, rhi::TextureState::kUndefined,
+                        rhi::TextureState::kCopyDst, range};
+  list->Barrier(0, 0, &b, 1);
+  list->ClearDepthStencil(g_tex.depth_default_img, rhi::TextureState::kCopyDst,
+                          range, 1.0f, 0);
+  b.before = rhi::TextureState::kCopyDst;
+  b.after = rhi::TextureState::kDepthRead;
+  list->Barrier(0, 0, &b, 1);
+  EndImmediate(list);
+}
+
+namespace {
+
+rhi::TextureView* MakeView(rhi::Texture* texture,
+                           rhi::ViewDim dim,
+                           rhi::Format format,
+                           bool zero = false) {
+  rhi::TextureViewDesc desc;
+  desc.dim = dim;
+  desc.format = format;
+  if (zero)
+    for (auto& c : desc.swizzle)
+      c = rhi::Swizzle::kZero;
+  return Device().CreateView(texture, desc);
+}
+
+}  // namespace
+
+rhi::BindGroup* SampledTextureGroup(rhi::TextureView* view,
+                                    rhi::Sampler* sampler,
+                                    rhi::TextureState state) {
+  rhi::BindGroupDesc desc;
+  desc.layout = g_tex.layout;
+  rhi::BindingWrite w;
+  w.view = view;
+  w.sampler = sampler;
+  w.view_state = state;
+  desc.writes.push_back(w);
+  return Device().CreateBindGroup(desc);
 }
 
 bool CreateTextureDescriptors() {
   if (g_tex.descriptors_ready)
     return true;
-  if (g_tex.ds_layout)
+  if (g_tex.layout)
     return false;
-  // descriptor set layout: binding 0 = combined image sampler. Both stages see
-  // it: a vertex texture fetch takes its own binding out of the same set.
-  VkDescriptorSetLayoutBinding b{
-      0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-      VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT, nullptr};
-  VkDescriptorSetLayoutCreateInfo dl{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-  dl.bindingCount = 1;
-  dl.pBindings = &b;
-  VKOK(vkCreateDescriptorSetLayout(g_dev.device, &dl, nullptr,
-                                   &g_tex.ds_layout));
+  rhi::Device& device = Device();
+  // Binding 0 = combined image sampler. Both stages see it: a vertex texture
+  // fetch takes its own binding out of the same set.
+  rhi::BindGroupLayoutDesc layout;
+  layout.bindings.push_back({0, rhi::BindingType::kSampledTexture,
+                             rhi::kStageFragment | rhi::kStageVertex});
+  g_tex.layout = device.CreateBindGroupLayout(layout);
+  rhi::SamplerDesc sd;
+  g_tex.sampler = device.CreateSampler(sd);
+  sd.mag = sd.min = rhi::Filter::kNearest;
+  g_tex.sampler_nearest = device.CreateSampler(sd);
+  if (!g_tex.layout || !g_tex.sampler || !g_tex.sampler_nearest)
+    return false;
 
-  constexpr u32 kSinglePoolSets = 1024;
-  constexpr u32 kMultiPoolSets = 512;
-  VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                          kSinglePoolSets};
-  VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  dp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  dp.maxSets = kSinglePoolSets;
-  dp.poolSizeCount = 1;
-  dp.pPoolSizes = &ps;
-  VKOK(vkCreateDescriptorPool(g_dev.device, &dp, nullptr, &g_tex.ds_pool));
-  g_tex.ds_pools.push_back(g_tex.ds_pool);
-
-  VkSamplerCreateInfo sc{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-  sc.magFilter = sc.minFilter = VK_FILTER_LINEAR;
-  sc.addressModeU = sc.addressModeV = sc.addressModeW =
-      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-  VKOK(vkCreateSampler(g_dev.device, &sc, nullptr, &g_tex.sampler));
-  sc.magFilter = sc.minFilter = VK_FILTER_NEAREST;
-  VKOK(vkCreateSampler(g_dev.device, &sc, nullptr, &g_tex.sampler_nearest));
-
-  // Multi-texture path: a 16-binding set-0 layout + a pool, used only by recomp
-  // PS that sample >1 texture (single-texture draws keep the 1-binding
-  // ds_layout/ds_pool).
-  {
-    VkDescriptorSetLayoutBinding mb[kMaxTex];
-    for (u32 i = 0; i < kMaxTex; i++)
-      mb[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-               VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT,
-               nullptr};
-    VkDescriptorSetLayoutCreateInfo ml{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    ml.bindingCount = kMaxTex;
-    ml.pBindings = mb;
-    VKOK(vkCreateDescriptorSetLayout(g_dev.device, &ml, nullptr,
-                                     &g_tex.tex_array_layout));
-    VkDescriptorPoolSize mps[2] = {
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMultiPoolSets * kMaxTex},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMultiPoolSets * kMaxTex},
-    };
-    VkDescriptorPoolCreateInfo mp{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    mp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    mp.maxSets = kMultiPoolSets;
-    mp.poolSizeCount = 2;
-    mp.pPoolSizes = mps;
-    VKOK(vkCreateDescriptorPool(g_dev.device, &mp, nullptr, &g_tex.mtex_pool));
-    g_tex.mtex_pools.push_back(g_tex.mtex_pool);
-
-    // 1x1 white default texture (for unresolved sampler bindings).
-    VkImageCreateInfo wi{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    wi.imageType = VK_IMAGE_TYPE_2D;
-    wi.format = VK_FORMAT_R8G8B8A8_UNORM;
-    wi.extent = {1, 1, 1};
-    wi.mipLevels = 1;
-    wi.arrayLayers = 1;
-    wi.samples = VK_SAMPLE_COUNT_1_BIT;
-    wi.tiling = VK_IMAGE_TILING_OPTIMAL;
-    wi.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    // Mutable so the same texel can also be viewed as R8G8B8A8_UINT: a binding
-    // the module declared as an integer sampler may not take a UNORM view
-    // (VUID-vkCmdDrawIndexed-format-07753), and an unresolved one still has to
-    // get a default.
-    wi.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-    VKOK(vkCreateImage(g_dev.device, &wi, nullptr, &g_tex.white_img));
-    if (!g_image_memory.Allocate(g_dev, g_tex.white_img,
-                                 g_tex.white_allocation)) {
-      vkDestroyImage(g_dev.device, g_tex.white_img, nullptr);
-      g_tex.white_img = VK_NULL_HANDLE;
-      return false;
-    }
-    u32 white = 0xFFFFFFFFu;
-    gcn::TextureLayout32 white_layout;
-    gcn::BuildTextureLayout32(white_layout, 1, 1, 1, 1, 1, 31, false);
-    if (!UploadTexPixelsImmediate(g_tex.white_img,
-                                  reinterpret_cast<u64>(&white),
-                                  white_layout, 1, 1)) {
-      vkDestroyImage(g_dev.device, g_tex.white_img, nullptr);
-      g_image_memory.Free(g_dev, g_tex.white_allocation);
-      g_tex.white_img = VK_NULL_HANDLE;
-      return false;
-    }
-    // Same default for a Dim3D binding, which cannot sample a 2D view.
-    VkImageCreateInfo wi3 = wi;  // mutable too, for the integer twin
-    wi3.imageType = VK_IMAGE_TYPE_3D;
-    VKOK(vkCreateImage(g_dev.device, &wi3, nullptr, &g_tex.white_3d_img));
-    if (!g_image_memory.Allocate(g_dev, g_tex.white_3d_img,
-                                 g_tex.white_3d_allocation)) {
-      vkDestroyImage(g_dev.device, g_tex.white_3d_img, nullptr);
-      g_tex.white_3d_img = VK_NULL_HANDLE;
-      return false;
-    }
-    if (!UploadTexPixelsImmediate(g_tex.white_3d_img,
-                                  reinterpret_cast<u64>(&white),
-                                  white_layout, 1, 1, true)) {
-      vkDestroyImage(g_dev.device, g_tex.white_3d_img, nullptr);
-      g_image_memory.Free(g_dev, g_tex.white_3d_allocation);
-      g_tex.white_3d_img = VK_NULL_HANDLE;
-      return false;
-    }
-    // 1x1 D32 "far plane" for a compare sample that cannot resolve to a real
-    // depth surface (see TextureBindings::depth_default_view).
-    {
-      VkImageCreateInfo di{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-      di.imageType = VK_IMAGE_TYPE_2D;
-      di.format = VK_FORMAT_D32_SFLOAT;
-      di.extent = {1, 1, 1};
-      di.mipLevels = 1;
-      di.arrayLayers = 1;
-      di.samples = VK_SAMPLE_COUNT_1_BIT;
-      di.tiling = VK_IMAGE_TILING_OPTIMAL;
-      di.usage = VK_IMAGE_USAGE_SAMPLED_BIT |
-                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-                 VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-      di.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-      if (vkCreateImage(g_dev.device, &di, nullptr,
-                        &g_tex.depth_default_img) == VK_SUCCESS &&
-          g_image_memory.Allocate(g_dev, g_tex.depth_default_img,
-                                  g_tex.depth_default_allocation)) {
-        VkImageViewCreateInfo dv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        dv.image = g_tex.depth_default_img;
-        dv.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        dv.format = VK_FORMAT_D32_SFLOAT;
-        dv.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-        if (vkCreateImageView(g_dev.device, &dv, nullptr,
-                              &g_tex.depth_default_view) != VK_SUCCESS)
-          g_tex.depth_default_view = VK_NULL_HANDLE;
-        else
-          ClearDepthDefaultToFar();
-      }
-    }
-    VkImageViewCreateInfo wv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    wv.image = g_tex.white_img;
-    wv.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    wv.format = VK_FORMAT_R8G8B8A8_UNORM;
-    wv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.white_view));
-    wv.format = VK_FORMAT_R8G8B8A8_UINT;
-    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.white_uint_view));
-    wv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr,
-                           &g_tex.white_uint_array_view));
-    wv.format = VK_FORMAT_R8G8B8A8_UNORM;
-    wv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-    VKOK(
-        vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.white_array_view));
-    wv.components = {VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO,
-                     VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO};
-    wv.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.zero_view));
-    wv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-    VKOK(
-        vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.zero_array_view));
-    wv.image = g_tex.white_3d_img;
-    wv.viewType = VK_IMAGE_VIEW_TYPE_3D;
-    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.zero_3d_view));
-    wv.components = {};
-    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr, &g_tex.white_3d_view));
-    wv.format = VK_FORMAT_R8G8B8A8_UINT;
-    VKOK(vkCreateImageView(g_dev.device, &wv, nullptr,
-                           &g_tex.white_uint_3d_view));
-    wv.format = VK_FORMAT_R8G8B8A8_UNORM;
-
-    VkDescriptorSetLayout layouts[6] = {
-        g_tex.ds_layout, g_tex.ds_layout, g_tex.ds_layout,
-        g_tex.ds_layout, g_tex.ds_layout, g_tex.ds_layout};
-    VkDescriptorSet sets[6];
-    VkDescriptorSetAllocateInfo wa{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    wa.descriptorPool = g_tex.ds_pool;
-    wa.descriptorSetCount = 6;
-    wa.pSetLayouts = layouts;
-    VKOK(vkAllocateDescriptorSets(g_dev.device, &wa, sets));
-    g_tex.white_set = sets[0];
-    g_tex.white_array_set = sets[1];
-    g_tex.zero_set = sets[2];
-    g_tex.zero_array_set = sets[3];
-    g_tex.white_3d_set = sets[4];
-    g_tex.zero_3d_set = sets[5];
-    VkDescriptorImageInfo infos[6] = {
-        {g_tex.sampler, g_tex.white_view,
-         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {g_tex.sampler, g_tex.white_array_view,
-         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {g_tex.sampler, g_tex.zero_view,
-         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {g_tex.sampler, g_tex.zero_array_view,
-         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {g_tex.sampler, g_tex.white_3d_view,
-         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {g_tex.sampler, g_tex.zero_3d_view,
-         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-    VkWriteDescriptorSet writes[6];
-    for (u32 i = 0; i < 6; i++) {
-      writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-      writes[i].dstSet = sets[i];
-      writes[i].descriptorCount = 1;
-      writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-      writes[i].pImageInfo = &infos[i];
-    }
-    vkUpdateDescriptorSets(g_dev.device, 6, writes, 0, nullptr);
+  // 1x1 white default texture (for unresolved sampler bindings). Mutable so
+  // the same texel can also be viewed as RGBA8_UINT: a binding the module
+  // declared as an integer sampler may not take a UNORM view, and an
+  // unresolved one still has to get a default.
+  rhi::TextureDesc white;
+  white.format = rhi::Format::kRGBA8Unorm;
+  white.usage = rhi::kTextureSampled | rhi::kTextureCopyDst |
+                rhi::kTextureMutableFormat;
+  white.name = "white default";
+  g_tex.white_img = device.CreateTexture(white);
+  // Same default for a Dim3D binding, which cannot sample a 2D view.
+  white.dim = rhi::TextureDim::k3D;
+  white.name = "white default 3d";
+  g_tex.white_3d_img = device.CreateTexture(white);
+  if (!g_tex.white_img || !g_tex.white_3d_img)
+    return false;
+  u32 texel = 0xFFFFFFFFu;
+  gcn::TextureLayout32 white_layout;
+  gcn::BuildTextureLayout32(white_layout, 1, 1, 1, 1, 1, 31, false);
+  if (!UploadTexPixelsImmediate(g_tex.white_img, reinterpret_cast<u64>(&texel),
+                                white_layout, 1, 1) ||
+      !UploadTexPixelsImmediate(g_tex.white_3d_img,
+                                reinterpret_cast<u64>(&texel), white_layout, 1,
+                                1, true))
+    return false;
+  // 1x1 D32 "far plane" for a compare sample that cannot resolve to a real
+  // depth surface (see TextureBindings::depth_default_view).
+  rhi::TextureDesc depth;
+  depth.format = rhi::Format::kD32Float;
+  depth.usage = rhi::kTextureSampled | rhi::kTextureDepthTarget |
+                rhi::kTextureCopyDst;
+  depth.name = "depth default";
+  g_tex.depth_default_img = device.CreateTexture(depth);
+  if (g_tex.depth_default_img) {
+    rhi::TextureViewDesc dv;
+    dv.aspect = rhi::kAspectDepth;
+    g_tex.depth_default_view = device.CreateView(g_tex.depth_default_img, dv);
+    if (g_tex.depth_default_view)
+      ClearDepthDefaultToFar();
   }
-  g_tex.descriptors_ready = true;
-  return true;
+  using rhi::Format;
+  using rhi::ViewDim;
+  g_tex.white_view = MakeView(g_tex.white_img, ViewDim::k2D, Format::kRGBA8Unorm);
+  g_tex.white_uint_view =
+      MakeView(g_tex.white_img, ViewDim::k2D, Format::kRGBA8Uint);
+  g_tex.white_uint_array_view =
+      MakeView(g_tex.white_img, ViewDim::k2DArray, Format::kRGBA8Uint);
+  g_tex.white_array_view =
+      MakeView(g_tex.white_img, ViewDim::k2DArray, Format::kRGBA8Unorm);
+  g_tex.zero_view =
+      MakeView(g_tex.white_img, ViewDim::k2D, Format::kRGBA8Unorm, true);
+  g_tex.zero_array_view =
+      MakeView(g_tex.white_img, ViewDim::k2DArray, Format::kRGBA8Unorm, true);
+  g_tex.zero_3d_view =
+      MakeView(g_tex.white_3d_img, ViewDim::k3D, Format::kRGBA8Unorm, true);
+  g_tex.white_3d_view =
+      MakeView(g_tex.white_3d_img, ViewDim::k3D, Format::kRGBA8Unorm);
+  g_tex.white_uint_3d_view =
+      MakeView(g_tex.white_3d_img, ViewDim::k3D, Format::kRGBA8Uint);
+  if (!g_tex.white_view || !g_tex.white_uint_view ||
+      !g_tex.white_uint_array_view || !g_tex.white_array_view ||
+      !g_tex.zero_view || !g_tex.zero_array_view || !g_tex.zero_3d_view ||
+      !g_tex.white_3d_view || !g_tex.white_uint_3d_view)
+    return false;
+  g_tex.white_set = SampledTextureGroup(g_tex.white_view, g_tex.sampler);
+  g_tex.white_array_set = SampledTextureGroup(g_tex.white_array_view, g_tex.sampler);
+  g_tex.zero_set = SampledTextureGroup(g_tex.zero_view, g_tex.sampler);
+  g_tex.zero_array_set = SampledTextureGroup(g_tex.zero_array_view, g_tex.sampler);
+  g_tex.white_3d_set = SampledTextureGroup(g_tex.white_3d_view, g_tex.sampler);
+  g_tex.zero_3d_set = SampledTextureGroup(g_tex.zero_3d_view, g_tex.sampler);
+  g_tex.descriptors_ready = g_tex.white_set && g_tex.white_array_set &&
+                            g_tex.zero_set && g_tex.zero_array_set &&
+                            g_tex.white_3d_set && g_tex.zero_3d_set;
+  return g_tex.descriptors_ready;
 }
 
-VkDescriptorSet AllocateSamplerSet(VkDescriptorSetLayout layout,
-                                   bool multi,
-                                   VkDescriptorPool& owner) {
-  auto& pools = multi ? g_tex.mtex_pools : g_tex.ds_pools;
-  for (auto it = pools.rbegin(); it != pools.rend(); ++it) {
-    const VkDescriptorPool pool = *it;
-    VkDescriptorSet set;
-    VkDescriptorSetAllocateInfo da{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    da.descriptorPool = pool;
-    da.descriptorSetCount = 1;
-    da.pSetLayouts = &layout;
-    const VkResult result = vkAllocateDescriptorSets(g_dev.device, &da, &set);
-    if (result == VK_SUCCESS) {
-      owner = pool;
-      return set;
-    }
-    if (result != VK_ERROR_OUT_OF_POOL_MEMORY &&
-        result != VK_ERROR_FRAGMENTED_POOL)
-      return VK_NULL_HANDLE;
-  }
-
-  const u32 set_capacity = multi ? 512u : 1024u;
-  VkDescriptorPoolSize sizes[2] = {
-      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-       set_capacity * (multi ? kMaxTex : 1u)},
-      {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, set_capacity * (multi ? kMaxTex : 1u)},
-  };
-  VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  ci.maxSets = set_capacity;
-  ci.poolSizeCount = multi ? 2u : 1u;
-  ci.pPoolSizes = sizes;
-  VkDescriptorPool pool;
-  if (vkCreateDescriptorPool(g_dev.device, &ci, nullptr, &pool) != VK_SUCCESS)
-    return VK_NULL_HANDLE;
-  pools.push_back(pool);
-  VkDescriptorSet set;
-  VkDescriptorSetAllocateInfo da{
-      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  da.descriptorPool = pool;
-  da.descriptorSetCount = 1;
-  da.pSetLayouts = &layout;
-  if (vkAllocateDescriptorSets(g_dev.device, &da, &set) != VK_SUCCESS) {
-    pools.pop_back();
-    vkDestroyDescriptorPool(g_dev.device, pool, nullptr);
-    return VK_NULL_HANDLE;
-  }
-  owner = pool;
-  return set;
-}
-
-VkSampler SamplerFor(const SamplerKey& key) {
+rhi::Sampler* SamplerFor(const SamplerKey& key) {
   // DELTA_GPU_DEFSAMPLER: ignore every guest S# and use the default sampler,
   // to tell a mis-decoded sampler apart from a mis-bound image.
   // The default sampler is LINEAR, and an integer-format view may not be
@@ -667,26 +489,24 @@ VkSampler SamplerFor(const SamplerKey& key) {
   auto address_mode = [](u32 mode) {
     switch (mode & 7) {
       case 0:
-        return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        return rhi::AddressMode::kRepeat;
       case 1:
-        return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+        return rhi::AddressMode::kMirroredRepeat;
       case 3:
       case 5:
       case 7:
-        return g_dev.sampler_mirror_clamp
-                   ? VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE
-                   : VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+        return rhi::AddressMode::kMirrorClampToEdge;
       case 4:
       case 6:
-        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        return rhi::AddressMode::kClampToBorder;
       default:
-        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        return rhi::AddressMode::kClampToEdge;
     }
   };
-  VkSamplerCreateInfo ci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-  ci.addressModeU = address_mode(key.raw[0]);
-  ci.addressModeV = address_mode(key.raw[0] >> 3);
-  ci.addressModeW = address_mode(key.raw[0] >> 6);
+  rhi::SamplerDesc ci;
+  ci.address_u = address_mode(key.raw[0]);
+  ci.address_v = address_mode(key.raw[0] >> 3);
+  ci.address_w = address_mode(key.raw[0] >> 6);
   // DELTA_GPU_FORCENEAREST=1: diagnostic only. Force point sampling everywhere,
   // to separate "this pass reads the texel it addresses" from "its 2x2 bilinear
   // footprint straddles a neighbour". A pass that thresholds on what it samples
@@ -694,80 +514,46 @@ VkSampler SamplerFor(const SamplerKey& key) {
   // them from outside the shader.
   u32 mag = kForceNearest ? 0u : (key.raw[2] >> 20) & 3;
   u32 min = kForceNearest ? 0u : (key.raw[2] >> 22) & 3;
-  ci.magFilter = (mag & 1) && !key.integer ? VK_FILTER_LINEAR
-                                           : VK_FILTER_NEAREST;
-  ci.minFilter = (min & 1) && !key.integer ? VK_FILTER_LINEAR
-                                           : VK_FILTER_NEAREST;
+  ci.mag = (mag & 1) && !key.integer ? rhi::Filter::kLinear
+                                     : rhi::Filter::kNearest;
+  ci.min = (min & 1) && !key.integer ? rhi::Filter::kLinear
+                                     : rhi::Filter::kNearest;
   u32 mip_filter = (key.raw[2] >> 26) & 3;
-  ci.mipmapMode = mip_filter == 2 && !key.integer
-                      ? VK_SAMPLER_MIPMAP_MODE_LINEAR
-                      : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  ci.mip = mip_filter == 2 && !key.integer ? rhi::Filter::kLinear
+                                           : rhi::Filter::kNearest;
+  ci.min_lod = ci.max_lod = 0.0f;
   if (mip_filter) {
     u32 min_lod = std::max(key.raw[1] & 0xFFF, key.image_min_lod);
-    ci.minLod = static_cast<float>(min_lod) / 256.0f;
-    ci.maxLod = static_cast<float>((key.raw[1] >> 12) & 0xFFF) / 256.0f;
-    ci.maxLod = std::max(ci.minLod, ci.maxLod);
+    ci.min_lod = static_cast<float>(min_lod) / 256.0f;
+    ci.max_lod = static_cast<float>((key.raw[1] >> 12) & 0xFFF) / 256.0f;
+    ci.max_lod = std::max(ci.min_lod, ci.max_lod);
   }
   if (key.force_lod_zero)
-    ci.minLod = ci.maxLod = 0.0f;
+    ci.min_lod = ci.max_lod = 0.0f;
   if (kForceLod >= 0)
-    ci.minLod = ci.maxLod = static_cast<float>(kForceLod.get());
+    ci.min_lod = ci.max_lod = static_cast<float>(kForceLod.get());
   i32 bias = static_cast<i32>(key.raw[2] << 18) >> 18;
-  VkPhysicalDeviceProperties props;
-  vkGetPhysicalDeviceProperties(g_dev.phys, &props);
-  ci.mipLodBias = std::clamp(static_cast<float>(bias) / 256.0f,
-                             -props.limits.maxSamplerLodBias,
-                             props.limits.maxSamplerLodBias);
+  ci.lod_bias = static_cast<float>(bias) / 256.0f;
   switch ((key.raw[3] >> 30) & 3) {
     case 1:
-      ci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+      ci.border = rhi::BorderColor::kOpaqueBlack;
       break;
     case 2:
-      ci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+      ci.border = rhi::BorderColor::kOpaqueWhite;
       break;
     default:
-      ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+      ci.border = rhi::BorderColor::kTransparentBlack;
       break;
   }
-  ci.compareEnable = key.depth_compare;
-  switch ((key.raw[0] >> 12) & 7) {
-    case 0:
-      ci.compareOp = VK_COMPARE_OP_NEVER;
-      break;
-    case 1:
-      ci.compareOp = VK_COMPARE_OP_LESS;
-      break;
-    case 2:
-      ci.compareOp = VK_COMPARE_OP_EQUAL;
-      break;
-    case 3:
-      ci.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-      break;
-    case 4:
-      ci.compareOp = VK_COMPARE_OP_GREATER;
-      break;
-    case 5:
-      ci.compareOp = VK_COMPARE_OP_NOT_EQUAL;
-      break;
-    case 6:
-      ci.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
-      break;
-    default:
-      ci.compareOp = VK_COMPARE_OP_ALWAYS;
-      break;
-  }
+  ci.compare_enable = key.depth_compare;
+  // DEPTH_COMPARE_FUNC uses the same order as rhi::CompareOp.
+  ci.compare = static_cast<rhi::CompareOp>((key.raw[0] >> 12) & 7);
   // Anisotropy requires LINEAR on both filters, which an integer format has
   // just been denied.
-  if (g_dev.sampler_anisotropy && !key.integer && (mag >= 2 || min >= 2)) {
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(g_dev.phys, &props);
-    ci.anisotropyEnable = VK_TRUE;
-    ci.maxAnisotropy =
-        std::min(static_cast<float>(1u << ((key.raw[0] >> 9) & 7)),
-                 props.limits.maxSamplerAnisotropy);
-  }
-  VkSampler sampler = VK_NULL_HANDLE;
-  if (vkCreateSampler(g_dev.device, &ci, nullptr, &sampler) != VK_SUCCESS)
+  if (!key.integer && (mag >= 2 || min >= 2))
+    ci.max_anisotropy = static_cast<float>(1u << ((key.raw[0] >> 9) & 7));
+  rhi::Sampler* sampler = Device().CreateSampler(ci);
+  if (!sampler)
     return fallback();
   g_sampler_cache.emplace(key, sampler);
   return sampler;
@@ -787,21 +573,23 @@ void PackTexPixels(u8* linear,
                    const gcn::TextureLayout32& layout,
                    u32 texel_w,
                    u32 texel_h,
-                   VkBufferImageCopy* copies,
+                   rhi::BufferTextureCopy* copies,
                    bool is_3d) {
   const u32 elem = layout.elem_bytes;
   const u8* src = reinterpret_cast<const u8*>(base);
   u64 linear_offset = 0;
   for (u32 mip = 0; mip < layout.mip_levels; mip++) {
     const auto& level = layout.mips[mip];
-    copies[mip].bufferOffset = buffer_offset + linear_offset;
-    // A volume's slices are the layout's layers, but Vulkan takes them as one
-    // copy of `depth` z-slices into a single-layer image.
-    copies[mip].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0,
-                                    is_3d ? 1u : layout.layers};
-    copies[mip].imageExtent = {std::max(texel_w >> mip, 1u),
-                               std::max(texel_h >> mip, 1u),
-                               is_3d ? layout.layers : 1u};
+    rhi::BufferTextureCopy& copy = copies[mip];
+    copy = {};
+    copy.buffer_offset = buffer_offset + linear_offset;
+    // A volume's slices are the layout's layers, but the copy takes them as
+    // `depth` z-slices of a single-layer image.
+    copy.region.mip = mip;
+    copy.region.layers = is_3d ? 1u : layout.layers;
+    copy.region.width = std::max(texel_w >> mip, 1u);
+    copy.region.height = std::max(texel_h >> mip, 1u);
+    copy.region.depth = is_3d ? layout.layers : 1u;
     const u64 layer_bytes =
         static_cast<u64>(level.width) * level.height * elem;
     for (u32 layer = 0; layer < layout.layers; layer++) {
@@ -956,7 +744,7 @@ void PackTexPixels(u8* linear,
 }
 
 // One-time initialization upload used before frame recording starts.
-bool UploadTexPixelsImmediate(VkImage img,
+bool UploadTexPixelsImmediate(rhi::Texture* img,
                               u64 base,
                               const gcn::TextureLayout32& layout,
                               u32 texel_w,
@@ -964,105 +752,50 @@ bool UploadTexPixelsImmediate(VkImage img,
                               bool is_3d) {
   const VkDeviceSize sz = TextureLinearBytes(layout);
   const u32 barrier_layers = is_3d ? 1 : layout.layers;
-  VkBuffer stg = VK_NULL_HANDLE;
-  VkDeviceMemory stg_mem = VK_NULL_HANDLE;
-  VkCommandBuffer command = VK_NULL_HANDLE;
-  void* map = nullptr;
-  auto cleanup = [&] {
-    if (map)
-      vkUnmapMemory(g_dev.device, stg_mem);
-    if (command)
-      vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &command);
-    if (stg)
-      vkDestroyBuffer(g_dev.device, stg, nullptr);
-    if (stg_mem)
-      vkFreeMemory(g_dev.device, stg_mem, nullptr);
-  };
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = sz;
-  bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &stg) != VK_SUCCESS)
+  rhi::BufferDesc desc;
+  desc.size = sz;
+  desc.usage = rhi::kBufferCopySrc;
+  desc.memory = rhi::MemoryKind::kUpload;
+  rhi::Buffer* staging = Device().CreateBuffer(desc);
+  if (!staging)
     return false;
-  VkMemoryRequirements br;
-  vkGetBufferMemoryRequirements(g_dev.device, stg, &br);
-  VkMemoryAllocateInfo ba{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ba.allocationSize = br.size;
-  ba.memoryTypeIndex = FindMemoryType(br.memoryTypeBits,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  if (vkAllocateMemory(g_dev.device, &ba, nullptr, &stg_mem) != VK_SUCCESS ||
-      vkBindBufferMemory(g_dev.device, stg, stg_mem, 0) != VK_SUCCESS ||
-      vkMapMemory(g_dev.device, stg_mem, 0, sz, 0, &map) != VK_SUCCESS) {
-    cleanup();
+  rhi::BufferTextureCopy copies[16]{};
+  PackTexPixels(staging->mapped(), 0, base, layout, texel_w, texel_h, copies,
+                is_3d);
+  rhi::CommandList* list = BeginImmediate();
+  if (!list) {
+    Device().Destroy(staging);
     return false;
   }
-
-  VkBufferImageCopy copies[16]{};
-  PackTexPixels(static_cast<u8*>(map), 0, base, layout, texel_w, texel_h,
-                copies, is_3d);
-  vkUnmapMemory(g_dev.device, stg_mem);
-  map = nullptr;
-
-  VkCommandBufferAllocateInfo ca{
-      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ca.commandPool = g_dev.pool;
-  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ca.commandBufferCount = 1;
-  if (vkAllocateCommandBuffers(g_dev.device, &ca, &command) != VK_SUCCESS) {
-    cleanup();
-    return false;
-  }
-  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  if (vkBeginCommandBuffer(command, &cbi) != VK_SUCCESS) {
-    cleanup();
-    return false;
-  }
-  ImageBarrier(command, img, VK_IMAGE_LAYOUT_UNDEFINED,
-               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
-               VK_ACCESS_TRANSFER_WRITE_BIT, barrier_layers,
-               layout.mip_levels);
-  vkCmdCopyBufferToImage(command, stg, img,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         layout.mip_levels, copies);
-  ImageBarrier(command, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-               VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-               barrier_layers, layout.mip_levels);
-  const VkResult end_result = vkEndCommandBuffer(command);
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1;
-  si.pCommandBuffers = &command;
-  u64 _t0 = NowNs();
-  vkResetFences(g_dev.device, 1, &g_dev.fence);
-  const VkResult up_submit =
-      end_result == VK_SUCCESS ? vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence)
-                               : end_result;
-  const VkResult up_wait =
-      up_submit == VK_SUCCESS
-          ? vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX)
-          : up_submit;
-  if (end_result != VK_SUCCESS || up_submit != VK_SUCCESS ||
-      up_wait != VK_SUCCESS) {
+  rhi::TextureRange range;
+  range.mips = layout.mip_levels;
+  range.layers = barrier_layers;
+  rhi::TextureBarrier b{img, rhi::TextureState::kUndefined,
+                        rhi::TextureState::kCopyDst, range};
+  list->Barrier(rhi::kAccessHostWrite, rhi::kAccessCopyRead, &b, 1);
+  list->CopyBufferToTexture(img, staging, copies, layout.mip_levels);
+  b.before = rhi::TextureState::kCopyDst;
+  b.after = rhi::TextureState::kShaderRead;
+  list->Barrier(0, 0, &b, 1);
+  const u64 t0 = NowNs();
+  const bool ok = EndImmediate(list);
+  if (!ok)
     BASE_LOGI("gpuvk",
-              "tex upload DEVICE FAULT: submit={} wait={} "
-              "base={:#x} {}x{} mips={} layers={} bytes={}",
-              (int)up_submit, (int)up_wait, (unsigned long)base,
-              layout.mips[0].width, layout.mips[0].height, layout.mip_levels,
-              layout.layers, (unsigned long long)sz);
-    ReportDeviceFault(g_dev);
-  }
-  u64 _tex_dt = NowNs() - _t0;
-  g_ns_tex_up += _tex_dt;
-  g_fr_tex_up += _tex_dt;
+              "tex upload DEVICE FAULT: base={:#x} {}x{} mips={} layers={} "
+              "bytes={}",
+              (unsigned long)base, layout.mips[0].width,
+              layout.mips[0].height, layout.mip_levels, layout.layers,
+              (unsigned long long)sz);
+  const u64 dt = NowNs() - t0;
+  g_ns_tex_up += dt;
+  g_fr_tex_up += dt;
   g_tex_ups++;
-  cleanup();
-  return end_result == VK_SUCCESS && up_submit == VK_SUCCESS &&
-         up_wait == VK_SUCCESS;
+  Device().Destroy(staging);
+  return ok;
 }
 
-bool RecordTexPixels(VkImage img,
-                     VkImageLayout old_layout,
+bool RecordTexPixels(rhi::Texture* img,
+                     rhi::TextureState old_state,
                      u64 base,
                      const gcn::TextureLayout32& layout,
                      u32 texel_w,
@@ -1075,25 +808,20 @@ bool RecordTexPixels(VkImage img,
                              std::max<u32>(16, layout.elem_bytes), upload))
     return false;
   const u64 start = NowNs();
-  VkBufferImageCopy copies[16]{};
+  rhi::BufferTextureCopy copies[16]{};
   PackTexPixels(upload.map, upload.offset, base, layout, texel_w, texel_h,
                 copies, is_3d);
   EndRegion();
-  const VkAccessFlags source_access =
-      old_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-          ? VK_ACCESS_SHADER_READ_BIT
-          : 0;
-  ImageBarrier(g_frame.cmd, img, old_layout,
-               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, source_access,
-               VK_ACCESS_TRANSFER_WRITE_BIT, barrier_layers,
-               layout.mip_levels);
-  vkCmdCopyBufferToImage(g_frame.cmd, upload.buffer, img,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         layout.mip_levels, copies);
-  ImageBarrier(g_frame.cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-               VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-               barrier_layers, layout.mip_levels);
+  rhi::TextureRange range;
+  range.mips = layout.mip_levels;
+  range.layers = barrier_layers;
+  rhi::TextureBarrier b{img, old_state, rhi::TextureState::kCopyDst, range};
+  g_frame.list->Barrier(0, 0, &b, 1);
+  g_frame.list->CopyBufferToTexture(img, upload.buffer, copies,
+                                    layout.mip_levels);
+  b.before = rhi::TextureState::kCopyDst;
+  b.after = rhi::TextureState::kShaderRead;
+  g_frame.list->Barrier(0, 0, &b, 1);
   const u64 elapsed = NowNs() - start;
   g_ns_tex_up += elapsed;
   g_fr_tex_up += elapsed;
@@ -1176,7 +904,7 @@ bool EvictTextures(u64 bytes, u64 budget) {
 // to it. Cached by guest base; re-uploaded when the guest pixels change (the
 // room art is composed/loaded into the same buffer after the first sample, so a
 // once-only cache would serve a stale black frame).
-VkDescriptorSet GetTexture(u64 base,
+rhi::BindGroup* GetTexture(u64 base,
                            u32 w,
                            u32 h,
                            u32 dfmt,
@@ -1240,12 +968,7 @@ VkDescriptorSet GetTexture(u64 base,
   if (is_3d) {
     // maxImageDimension3D (commonly 2048) applies to every axis of a volume,
     // well below the 2D limits checked above.
-    static u32 max_3d = 0;
-    if (!max_3d) {
-      VkPhysicalDeviceProperties props;
-      vkGetPhysicalDeviceProperties(g_dev.phys, &props);
-      max_3d = props.limits.maxImageDimension3D;
-    }
+    const u32 max_3d = Device().caps().max_texture_size_3d;
     if (!depth || depth > max_3d || w > max_3d || h > max_3d) {
       if (kTexFail) {
         static int n = 0;
@@ -1425,7 +1148,7 @@ VkDescriptorSet GetTexture(u64 base,
       !is_3d && CsSupplyTexture(base, layout, w, h, VK_NULL_HANDLE,
                                 VK_IMAGE_LAYOUT_UNDEFINED, nullptr);
   if (cs_supplies && image_it != g_tex_images.end()) {
-    if (!CsSupplyTexture(base, layout, w, h, image_it->second.image,
+    if (!CsSupplyTexture(base, layout, w, h, Native(image_it->second.image),
                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                          &image_it->second.cs_seq))
       return VK_NULL_HANDLE;
@@ -1493,7 +1216,7 @@ VkDescriptorSet GetTexture(u64 base,
         // a write that lands after the hash reads as a change next sweep.
         e.hash = TexHash(base, footprint);
         g_tex_hash_bytes += footprint;
-        if (!RecordTexPixels(e.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        if (!RecordTexPixels(e.image, rhi::TextureState::kShaderRead,
                              base, layout, w, h, is_3d)) {
           if (kTexFail) {
             static int n = 0;
@@ -1527,48 +1250,40 @@ VkDescriptorSet GetTexture(u64 base,
     image_entry.last_checked_frame = g_frame.num;
     image_entry.last_full_frame = g_frame.num;
     image_entry.last_used_frame = g_frame.num;
-    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    ii.imageType = is_3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
-    ii.format = format;
-    ii.extent = {w, h, is_3d ? depth : 1};
-    ii.mipLevels = mip_levels;
-    ii.arrayLayers = layers;
-    ii.samples = VK_SAMPLE_COUNT_1_BIT;
-    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ii.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    if (vkCreateImage(g_dev.device, &ii, nullptr, &image_entry.image) !=
-        VK_SUCCESS)
-      return VK_NULL_HANDLE;
-    VkMemoryRequirements mr;
-    vkGetImageMemoryRequirements(g_dev.device, image_entry.image, &mr);
     // Budget on LIVE image bytes. Retired images are only destroyed two
     // BeginFrames later (ReleaseRetiredTextures), so actual allocated memory
     // can transiently exceed the budget by up to two frames of retirements;
     // capping allocated bytes instead would make creation fail outright at
     // the budget edge, since eviction cannot free memory mid-frame.
-    if (g_tex_image_bytes + mr.size > kTextureBudget &&
-        (!EvictTextures(mr.size, kTextureBudget) ||
-         g_tex_image_bytes + mr.size > kTextureBudget)) {
-      vkDestroyImage(g_dev.device, image_entry.image, nullptr);
-      return VK_NULL_HANDLE;
-    }
-    if (!g_image_memory.Allocate(g_dev, image_entry.image,
-                                 image_entry.allocation)) {
-      vkDestroyImage(g_dev.device, image_entry.image, nullptr);
-      return VK_NULL_HANDLE;
-    }
+    const u64 bytes = TextureLinearBytes(layout);
+    if (g_tex_image_bytes + bytes > kTextureBudget &&
+        (!EvictTextures(bytes, kTextureBudget) ||
+         g_tex_image_bytes + bytes > kTextureBudget))
+      return nullptr;
+    rhi::TextureDesc td;
+    td.dim = is_3d ? rhi::TextureDim::k3D : rhi::TextureDim::k2D;
+    td.format = FromVkFormat(format);
+    td.width = w;
+    td.height = h;
+    td.depth = is_3d ? depth : 1;
+    td.layers = layers;
+    td.mips = mip_levels;
+    td.usage = rhi::kTextureSampled | rhi::kTextureCopyDst;
+    image_entry.image = Device().CreateTexture(td);
+    if (!image_entry.image)
+      return nullptr;
     const bool cs_uploaded =
-        cs_supplies && CsSupplyTexture(base, layout, w, h, image_entry.image,
-                                       VK_IMAGE_LAYOUT_UNDEFINED,
-                                       &image_entry.cs_seq);
+        cs_supplies &&
+        CsSupplyTexture(base, layout, w, h, Native(image_entry.image),
+                        VK_IMAGE_LAYOUT_UNDEFINED, &image_entry.cs_seq);
     if (!cs_uploaded) {  // see the refresh above: hash before the upload
       image_entry.hash = TexHash(base, footprint);
       image_entry.hash_valid = true;
       g_tex_hash_bytes += footprint;
     }
     if (!cs_uploaded &&
-        !RecordTexPixels(image_entry.image, VK_IMAGE_LAYOUT_UNDEFINED, base,
-                         layout, w, h, is_3d)) {
+        !RecordTexPixels(image_entry.image, rhi::TextureState::kUndefined,
+                         base, layout, w, h, is_3d)) {
       if (kTexFail) {
         static int n = 0;
         if (n++ < 12)
@@ -1576,16 +1291,18 @@ VkDescriptorSet GetTexture(u64 base,
                     (unsigned long)base, w, h, is_3d ? depth : layers,
                     tiling);
       }
-      vkDestroyImage(g_dev.device, image_entry.image, nullptr);
-      g_image_memory.Free(g_dev, image_entry.allocation);
-      return VK_NULL_HANDLE;
+      Device().Destroy(image_entry.image);
+      return nullptr;
     }
-    image_entry.allocation_size = mr.size;
-    NameObject(VK_OBJECT_TYPE_IMAGE, (u64)image_entry.image,
-               "tex %#llx %ux%u mips=%u layers=%u", (unsigned long long)base, w,
-               h, mip_levels, layers);
+    image_entry.allocation_size = bytes;
+    if (Device().caps().debug_labels) {
+      char name[96];
+      std::snprintf(name, sizeof(name), "tex %#llx %ux%u mips=%u layers=%u",
+                    (unsigned long long)base, w, h, mip_levels, layers);
+      Device().SetName(image_entry.image, name);
+    }
     image_it = g_tex_images.emplace(key.image, image_entry).first;
-    g_tex_image_bytes += mr.size;
+    g_tex_image_bytes += bytes;
     RegisterTexturePages(key.image, footprint);
   }
   image_it->second.last_used_frame = g_frame.num;
@@ -1594,52 +1311,43 @@ VkDescriptorSet GetTexture(u64 base,
   if (it != g_tex_cache.end())
     return it->second.set;
   if (g_tex_cache.size() >= 12000)
-    return VK_NULL_HANDLE;
+    return nullptr;
   TexViewKey view_key = TextureViewKey(key);
   auto view_it = g_tex_views.find(view_key);
   if (view_it == g_tex_views.end()) {
     if (g_tex_views.size() >= 12000)
-      return VK_NULL_HANDLE;
+      return nullptr;
     TexViewEntry view_entry;
-    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vci.image = image_it->second.image;
-    vci.viewType = is_3d      ? VK_IMAGE_VIEW_TYPE_3D
-                   : arrayed  ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
-                              : VK_IMAGE_VIEW_TYPE_2D;
-    vci.format = format;
-    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, base_mip, view_mips,
-                            is_3d ? 0u : base_array,
-                            (arrayed && !is_3d) ? view_layers : 1u};
+    rhi::TextureViewDesc vd;
+    vd.dim = is_3d     ? rhi::ViewDim::k3D
+             : arrayed ? rhi::ViewDim::k2DArray
+                       : rhi::ViewDim::k2D;
+    vd.base_mip = base_mip;
+    vd.mips = view_mips;
+    vd.base_layer = is_3d ? 0u : base_array;
+    vd.layers = (arrayed && !is_3d) ? view_layers : 1u;
     // T# DST_SEL: 0 = zero, 1 = one, 4..7 = R/G/B/A. A single-channel mask (a
     // font atlas) selects its coverage into the components the shader reads;
     // without this every glyph samples alpha = 1 and fills solid.
-    vci.components = TextureComponents(view_key.swizzle);
-    if (vkCreateImageView(g_dev.device, &vci, nullptr, &view_entry.view) !=
-        VK_SUCCESS)
-      return VK_NULL_HANDLE;
+    TextureSwizzle(view_key.swizzle, vd.swizzle);
+    view_entry.view = Device().CreateView(image_it->second.image, vd);
+    if (!view_entry.view)
+      return nullptr;
     view_it = g_tex_views.emplace(view_key, view_entry).first;
   }
 
-  TexEntry e;
-  e.set = AllocateSamplerSet(g_tex.ds_layout, false, e.pool);
-  if (!e.set)
-    return VK_NULL_HANDLE;
   // See GetMultiTexSet: a guest texture is never a depth format, so a compare
   // sample of one reads the far-plane default rather than an undefined
   // comparison against a colour view.
   const bool cmp_default = key.sampler.depth_compare && g_tex.depth_default_view;
-  VkDescriptorImageInfo dii{
-      SamplerFor(key.sampler),
+  TexEntry e;
+  e.set = SampledTextureGroup(
       cmp_default ? g_tex.depth_default_view : view_it->second.view,
-      cmp_default ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
-                  : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-  VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-  wr.dstSet = e.set;
-  wr.descriptorCount = 1;
-  wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-  wr.pImageInfo = &dii;
-  vkUpdateDescriptorSets(g_dev.device, 1, &wr, 0, nullptr);
-
+      SamplerFor(key.sampler),
+      cmp_default ? rhi::TextureState::kDepthRead
+                  : rhi::TextureState::kShaderRead);
+  if (!e.set)
+    return nullptr;
   g_tex_cache.emplace(key, e);
   return e.set;
 }
@@ -1652,7 +1360,7 @@ bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt) {
   return GuestTextureFormat(dfmt, nfmt) != VK_FORMAT_UNDEFINED;
 }
 
-VkImageView TexViewFor(const DrawInfo::DrawTex& t) {
+rhi::TextureView* TexViewFor(const DrawInfo::DrawTex& t) {
   // Each exit here leaves the binding on the white fallback, so each one needs
   // to be able to say so (DELTA_GPU_TEXFAIL): an unsupported format and an
   // unmapped surface look identical from the draw side.
@@ -1667,7 +1375,7 @@ VkImageView TexViewFor(const DrawInfo::DrawTex& t) {
                   t.is_3d ? t.depth : t.layers, t.dfmt, t.nfmt, t.tiling,
                   t.mip_levels, (int)t.is_3d, (int)t.arrayed);
     }
-    return VK_NULL_HANDLE;
+    return static_cast<rhi::TextureView*>(nullptr);
   };
   if (!t.base || !t.w || !t.h)
     return fail("degenerate");
@@ -1677,7 +1385,7 @@ VkImageView TexViewFor(const DrawInfo::DrawTex& t) {
                  t.base_array, t.view_layers, t.mip_levels, t.base_mip,
                  t.view_mips, t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid,
                  t.arrayed, t.force_lod_zero, t.depth_compare, t.swizzle,
-                 t.depth, t.is_3d) == VK_NULL_HANDLE)
+                 t.depth, t.is_3d) == nullptr)
     return fail("get-texture");
   TexKey key = TextureKey(
       t.base, t.w, t.h, t.dfmt, t.nfmt, TextureTiling(t.tiling), t.pitch,
@@ -1696,8 +1404,7 @@ VkImageView TexViewFor(const DrawInfo::DrawTex& t) {
 // diffuse*lightmap shader with a missing map shows the diffuse instead of going
 // black.
 struct MultiTexSet {
-  VkDescriptorSet set = VK_NULL_HANDLE;
-  VkDescriptorPool pool = VK_NULL_HANDLE;
+  rhi::BindGroup* set = nullptr;
 };
 
 struct MultiTexKey {
@@ -1709,7 +1416,7 @@ struct MultiTexKey {
   // other's set was built with (VUID-vkCmdDrawIndexed-format-07753).
   u32 decl_uint = 0, decl_3d = 0;
   TexKey tex[kMaxTex];
-  VkImageView view[kMaxTex] = {};
+  rhi::TextureView* view[kMaxTex] = {};
   VkImageLayout layout[kMaxTex] = {};
   bool storage[kMaxTex] = {};
   bool operator==(const MultiTexKey& o) const {
@@ -1731,7 +1438,7 @@ struct MultiTexKeyHash {
     h = HashWord(h, k.decl_3d);
     for (u32 i = 0; i < k.num_texs; i++) {
       h = HashWord(h, TexKeyHash{}(k.tex[i]));
-      h = HashWord(h, std::hash<VkImageView>{}(k.view[i]));
+      h = HashWord(h, reinterpret_cast<u64>(k.view[i]));
       h = HashWord(h, k.layout[i]);
       h = HashWord(h, k.storage[i]);
     }
@@ -1761,19 +1468,13 @@ void ReleaseRetiredTextures() {
   static std::vector<TexViewEntry> aged_tex_views;
   static std::vector<TexImageEntry> aged_tex_images;
   for (const MultiTexSet& entry : aged_mtex)
-    vkFreeDescriptorSets(g_dev.device, entry.pool, 1, &entry.set);
+    Device().Destroy(entry.set);
   for (const TexEntry& e : aged_tex_sets)
-    if (e.set)
-      vkFreeDescriptorSets(g_dev.device, e.pool, 1, &e.set);
+    Device().Destroy(e.set);
   for (const TexViewEntry& e : aged_tex_views)
-    if (e.view)
-      vkDestroyImageView(g_dev.device, e.view, nullptr);
-  for (const TexImageEntry& e : aged_tex_images) {
-    if (e.image)
-      vkDestroyImage(g_dev.device, e.image, nullptr);
-    ImageAllocation allocation = e.allocation;
-    g_image_memory.Free(g_dev, allocation);
-  }
+    Device().Destroy(e.view);
+  for (const TexImageEntry& e : aged_tex_images)
+    Device().Destroy(e.image);
   aged_mtex = std::move(g_retired_mtex);
   aged_tex_sets = std::move(g_retired_tex_sets);
   aged_tex_views = std::move(g_retired_tex_views);
@@ -1784,10 +1485,10 @@ void ReleaseRetiredTextures() {
   g_retired_tex_images.clear();
 }
 
-VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
-                               VkDescriptorSetLayout set_layout,
+rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
+                               rhi::BindGroupLayout* set_layout,
                                u32 num_bindings,
-                               const VkImageView* resolved_views,
+                               rhi::TextureView* const* resolved_views,
                                const VkImageLayout* resolved_layouts,
                                const VkFormat* resolved_formats,
                                const u64* depth_src) {
@@ -1835,27 +1536,27 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
   if (ci != g_mtex_cache.end())
     return ci->second.set;
   if (g_mtex_cache.size() > 3500)
-    return VK_NULL_HANDLE;
+    return nullptr;
   // DELTA_GPU_FORCEWHITE: bind the 1x1 white default for every sampler
   // (diagnostic). Doom64's world textures are built by compute dispatches we
   // don't execute, so the atlases are all-zero and the alpha-blended world
   // samples transparent-black (= invisible). Forcing white makes the geometry
   // render opaque, proving the 3D transform/raster/depth path works and
   // isolating the blackness to the texture data.
-  VkImageView views[kMaxTex];
+  rhi::TextureView* views[kMaxTex];
   VkImageLayout layouts[kMaxTex];
   // DELTA_GPU_TEXMISS: report every sampler binding that falls back to the 1x1
   // white default (the source of "everything renders white" chains) with the
   // descriptor state that failed to resolve.
   static int tex_miss_logged = 0;
   for (u32 i = 0; i < key.num_texs; i++) {
-    VkImageView v =
-        (i < resolved && !kForceWhite) ? resolved_views[i] : VK_NULL_HANDLE;
+    rhi::TextureView* v =
+        (i < resolved && !kForceWhite) ? resolved_views[i] : nullptr;
     bool arrayed = i < resolved && d.texs[i].arrayed;
     bool is_3d = i < resolved ? d.texs[i].is_3d
                               : (declared(i) && declared(i)->is_3d);
     if (i >= resolved && declared(i) && declared(i)->storage)
-      return VK_NULL_HANDLE;  // as for an unresolved storage binding below
+      return nullptr;  // as for an unresolved storage binding below
     if (kTexMiss && !v && i < resolved && tex_miss_logged < 64) {
       tex_miss_logged++;
       const auto& t = d.texs[i];
@@ -1881,14 +1582,14 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
           (unsigned long)t.src, mem);
     }
     if (d.texs[i].storage && !v)
-      return VK_NULL_HANDLE;
+      return nullptr;
     // A binding the module declared with an integer sampled type cannot take
     // the UNORM default: the numeric types have to match
     // (VUID-vkCmdDrawIndexed-format-07753).
     const bool want_uint = declared(i) && declared(i)->is_uint;
     // Shape AND numeric type: a default that matches one but not the other is
     // the same undefined read the resolved case would have been.
-    VkImageView fallback =
+    rhi::TextureView* fallback =
         is_3d ? (want_uint ? g_tex.white_uint_3d_view : g_tex.white_3d_view)
         : arrayed
             ? (want_uint ? g_tex.white_uint_array_view : g_tex.white_array_view)
@@ -1897,12 +1598,8 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
     layouts[i] =
         v ? resolved_layouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
-  MultiTexSet entry;
-  entry.set = AllocateSamplerSet(set_layout, true, entry.pool);
-  if (!entry.set)
-    return VK_NULL_HANDLE;
-  VkDescriptorImageInfo dii[kMaxTex];
-  VkWriteDescriptorSet wr[kMaxTex];
+  rhi::BindGroupDesc group;
+  group.layout = set_layout;
   for (u32 i = 0; i < key.num_texs; i++) {
     // Past `resolved` there is no T#: d.texs[i] holds whatever the previous
     // draw left there, so nothing about it may be read. Those bindings take a
@@ -1937,26 +1634,26 @@ VkDescriptorSet GetMultiTexSet(const DrawInfo& d,
     // supports it, and every colour target and guest texture is the wrong kind.
     // Bind the 1x1 far-plane depth default and keep the comparison, which reads
     // as "nothing occludes this" instead of as undefined.
-    VkImageView view_i = views[i];
-    VkImageLayout layout_i = layouts[i];
+    rhi::BindingWrite w;
+    w.binding = i;
+    w.view = views[i];
+    w.view_state = FromVkLayout(layouts[i]);
     if (have_tex && d.texs[i].depth_compare && !storage_i &&
         !(depth_src && depth_src[i]) && g_tex.depth_default_view) {
-      view_i = g_tex.depth_default_view;
-      layout_i = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+      w.view = g_tex.depth_default_view;
+      w.view_state = rhi::TextureState::kDepthRead;
       sampler.depth_compare = true;
     }
-    dii[i] = {storage_i ? VK_NULL_HANDLE : SamplerFor(sampler), view_i,
-              layout_i};
-    wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    wr[i].dstSet = entry.set;
-    wr[i].dstBinding = i;
-    wr[i].descriptorCount = 1;
-    wr[i].descriptorType = storage_i
-                               ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
-                               : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wr[i].pImageInfo = &dii[i];
+    if (storage_i)
+      w.view_state = rhi::TextureState::kGeneral;
+    else
+      w.sampler = SamplerFor(sampler);
+    group.writes.push_back(w);
   }
-  vkUpdateDescriptorSets(g_dev.device, key.num_texs, wr, 0, nullptr);
+  MultiTexSet entry;
+  entry.set = Device().CreateBindGroup(group);
+  if (!entry.set)
+    return nullptr;
   g_mtex_cache[key] = entry;
   return entry.set;
 }

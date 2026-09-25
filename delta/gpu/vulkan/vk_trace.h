@@ -15,6 +15,7 @@
 
 
 #include "gpu/render/command.h"
+#include "gpu/rhi/types.h"
 
 namespace gpu::vk::trace {
 
@@ -84,6 +85,11 @@ void RecordBarrier(const char* aspect,
                    VkAccessFlags dst_access);
 
 // A CP DMA fill over guest memory (this hardware's clear).
+void RecordBarrier(const char* aspect,
+                   u64 image,
+                   rhi::TextureState from,
+                   rhi::TextureState to);
+
 void RecordMemoryFill(u64 base, u64 bytes, u32 value);
 
 // The live image at `base` changed (see ActivateRtVariant): every later record

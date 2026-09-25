@@ -6,6 +6,7 @@
 #include "base/arch.h"
 
 #include "gpu/vulkan/vk_device.h"
+#include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_trace.h"
 
 #include <dlfcn.h>
@@ -137,6 +138,31 @@ ScopedCmdLabel::ScopedCmdLabel(VkCommandBuffer cmd, const char* fmt, ...)
 ScopedCmdLabel::~ScopedCmdLabel() {
   if (g_begin_label)  // paired: if the begin ran, the end must too
     CmdEndLabel(cmd_);
+}
+
+void CmdBeginLabel(rhi::CommandList* list, const char* fmt, ...) {
+  if (!Device().caps().debug_labels)
+    return;
+  char buf[192];
+  va_list args;
+  va_start(args, fmt);
+  list->PushLabel(Format(buf, fmt, args));
+  va_end(args);
+}
+
+void CmdEndLabel(rhi::CommandList* list) {
+  if (Device().caps().debug_labels)
+    list->PopLabel();
+}
+
+void CmdInsertLabel(rhi::CommandList* list, const char* fmt, ...) {
+  if (!Device().caps().debug_labels)
+    return;
+  char buf[192];
+  va_list args;
+  va_start(args, fmt);
+  list->InsertLabel(Format(buf, fmt, args));
+  va_end(args);
 }
 
 }  // namespace gpu::vk

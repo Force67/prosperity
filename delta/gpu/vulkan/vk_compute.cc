@@ -19,6 +19,7 @@
 #include "gpu/vulkan/vk_compute_hazard.h"
 #include "gpu/vulkan/vk_debug.h"
 #include "gpu/vulkan/vk_device.h"
+#include "gpu/vulkan/vk_memory.h"
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_hash.h"

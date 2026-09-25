@@ -14,6 +14,7 @@
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_png.h"
 #include "gpu/vulkan/vk_render_target.h"
+#include "gpu/vulkan/vk_rhi.h"
 
 #include <sys/stat.h>
 #include <utl/options.h>
@@ -100,9 +101,7 @@ u32 g_validation_messages = 0;
 // Mid-frame readbacks recorded into the frame's own command buffer; drained
 // once the queue is idle at FrameEnd.
 struct Snapshot {
-  VkBuffer buffer = VK_NULL_HANDLE;
-  VkDeviceMemory memory = VK_NULL_HANDLE;
-  void* map = nullptr;
+  rhi::Buffer* buffer = nullptr;
   u64 bytes = 0;
   u32 w = 0, h = 0;
   VkFormat fmt = VK_FORMAT_UNDEFINED;
@@ -706,90 +705,37 @@ u8 ToByte(float v, bool hdr) {
 // One-shot copy of an image to host memory: a private command buffer submitted
 // on the device's diagnostic fence, exactly like the RTSTAT readback. Only a
 // captured frame runs it, so the stall it costs buys a complete answer.
-bool ReadImage(VkImage image,
-               VkImageAspectFlags aspect,
+bool ReadImage(rhi::Texture* image,
+               u8 aspect,
                u32 w,
                u32 h,
                u32 texel_bytes,
-               VkImageLayout layout,
-               VkImageLayout* new_layout,
+               VkImageLayout& layout,
                std::vector<u8>& out) {
   if (!image || !w || !h)
     return false;
-  const VkDeviceSize bytes = VkDeviceSize(w) * h * texel_bytes;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = bytes;
-  bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  VkBuffer buffer = VK_NULL_HANDLE;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &buffer) != VK_SUCCESS)
+  rhi::BufferDesc desc;
+  desc.size = VkDeviceSize(w) * h * texel_bytes;
+  desc.usage = rhi::kBufferCopyDst;
+  desc.memory = rhi::MemoryKind::kReadback;
+  rhi::Buffer* buffer = Device().CreateBuffer(desc);
+  if (!buffer)
     return false;
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, buffer, &mr);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = FindMemoryType(mr.memoryTypeBits,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  VkDeviceMemory memory = VK_NULL_HANDLE;
-  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &memory) != VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, buffer, nullptr);
-    return false;
-  }
-  vkBindBufferMemory(g_dev.device, buffer, memory, 0);
-
-  VkCommandBufferAllocateInfo ca{
-      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ca.commandPool = g_dev.pool;
-  ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ca.commandBufferCount = 1;
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  bool ok = vkAllocateCommandBuffers(g_dev.device, &ca, &cmd) == VK_SUCCESS;
+  rhi::CommandList* list = BeginImmediate();
+  bool ok = list != nullptr;
   if (ok) {
-    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    ok = vkBeginCommandBuffer(cmd, &cbi) == VK_SUCCESS;
+    TransitionImage(list, image, layout, rhi::TextureState::kCopySrc, aspect);
+    rhi::BufferTextureCopy copy;
+    copy.region.aspect = aspect;
+    copy.region.width = w;
+    copy.region.height = h;
+    list->CopyTextureToBuffer(buffer, image, &copy, 1);
+    list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
+    ok = EndImmediate(list);
   }
-  if (ok) {
-    if (aspect == VK_IMAGE_ASPECT_COLOR_BIT)
-      ImageBarrier(cmd, image, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   ColorImageAccess(layout), VK_ACCESS_TRANSFER_READ_BIT);
-    else
-      DepthBarrier(cmd, image, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                   VK_ACCESS_TRANSFER_READ_BIT);
-    VkBufferImageCopy copy{};
-    copy.imageSubresource = {aspect, 0, 0, 1};
-    copy.imageExtent = {w, h, 1};
-    vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           buffer, 1, &copy);
-    ok = vkEndCommandBuffer(cmd) == VK_SUCCESS;
-  }
-  if (ok) {
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd;
-    ok = vkResetFences(g_dev.device, 1, &g_dev.fence) == VK_SUCCESS &&
-         vkQueueSubmit(g_dev.queue, 1, &si, g_dev.fence) == VK_SUCCESS &&
-         vkWaitForFences(g_dev.device, 1, &g_dev.fence, VK_TRUE, UINT64_MAX) ==
-             VK_SUCCESS;
-  }
-  if (ok) {
-    if (new_layout)
-      *new_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    void* map = nullptr;
-    if (vkMapMemory(g_dev.device, memory, 0, bytes, 0, &map) == VK_SUCCESS) {
-      out.resize(bytes);
-      std::memcpy(out.data(), map, bytes);
-      vkUnmapMemory(g_dev.device, memory);
-    } else {
-      ok = false;
-    }
-  }
-  if (cmd)
-    vkFreeCommandBuffers(g_dev.device, g_dev.pool, 1, &cmd);
-  vkDestroyBuffer(g_dev.device, buffer, nullptr);
-  vkFreeMemory(g_dev.device, memory, nullptr);
+  if (ok)
+    out.assign(buffer->mapped(), buffer->mapped() + desc.size);
+  Device().Destroy(buffer);
   return ok;
 }
 
@@ -1311,16 +1257,15 @@ void NoteTexture(const render::DrawInfo::DrawTex& t) {
 
 // --- mid-frame snapshots ---------------------------------------------------
 
-void QueueSnapshot(VkImage image,
-                   VkImageAspectFlags aspect,
+void QueueSnapshot(rhi::Texture* image,
+                   u8 aspect,
                    u32 w,
                    u32 h,
                    VkFormat fmt,
                    u64 base,
                    bool depth,
                    u32 at_draw,
-                   VkImageLayout layout,
-                   VkImageLayout* layout_out) {
+                   VkImageLayout& layout) {
   const u32 texel = depth ? 4 : FormatBytes(fmt);
   if (!image || !w || !h || !texel)
     return;
@@ -1332,44 +1277,21 @@ void QueueSnapshot(VkImage image,
   s.base = base;
   s.depth = depth;
   s.at_draw = at_draw;
-  s.image = image;
-  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bi.size = s.bytes;
-  bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  if (vkCreateBuffer(g_dev.device, &bi, nullptr, &s.buffer) != VK_SUCCESS)
+  s.image = Native(image);
+  rhi::BufferDesc desc;
+  desc.size = s.bytes;
+  desc.usage = rhi::kBufferCopyDst;
+  desc.memory = rhi::MemoryKind::kReadback;
+  s.buffer = Device().CreateBuffer(desc);
+  if (!s.buffer)
     return;
-  VkMemoryRequirements mr;
-  vkGetBufferMemoryRequirements(g_dev.device, s.buffer, &mr);
-  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  ai.allocationSize = mr.size;
-  ai.memoryTypeIndex = FindMemoryType(mr.memoryTypeBits,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  if (vkAllocateMemory(g_dev.device, &ai, nullptr, &s.memory) != VK_SUCCESS) {
-    vkDestroyBuffer(g_dev.device, s.buffer, nullptr);
-    return;
-  }
-  vkBindBufferMemory(g_dev.device, s.buffer, s.memory, 0);
-  vkMapMemory(g_dev.device, s.memory, 0, s.bytes, 0, &s.map);
-
-  if (aspect == VK_IMAGE_ASPECT_COLOR_BIT)
-    ImageBarrier(g_frame.cmd, image, layout,
-                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ColorImageAccess(layout),
-                 VK_ACCESS_TRANSFER_READ_BIT);
-  else
-    DepthBarrier(g_frame.cmd, image, layout,
-                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                 VK_ACCESS_TRANSFER_READ_BIT);
-  if (layout_out)
-    *layout_out = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  VkBufferImageCopy copy{};
-  copy.imageSubresource = {aspect, 0, 0, 1};
-  copy.imageExtent = {w, h, 1};
-  vkCmdCopyImageToBuffer(g_frame.cmd, image,
-                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s.buffer, 1,
-                         &copy);
+  TransitionImage(g_frame.list, image, layout, rhi::TextureState::kCopySrc,
+                  aspect);
+  rhi::BufferTextureCopy copy;
+  copy.region.aspect = aspect;
+  copy.region.width = w;
+  copy.region.height = h;
+  g_frame.list->CopyTextureToBuffer(s.buffer, image, &copy, 1);
   g_snapshots.push_back(s);
 }
 
@@ -1392,36 +1314,36 @@ void SnapshotOpenRegion(u32 draw_index) {
     if (it == g_rts.end())
       continue;
     RTarget& rt = it->second;
-    QueueSnapshot(rt.image, VK_IMAGE_ASPECT_COLOR_BIT, rt.w, rt.h, rt.fmt,
-                  mrt[i], false, draw_index, rt.layout, &rt.layout);
+    QueueSnapshot(rt.texture, rhi::kAspectColor, rt.w, rt.h, rt.fmt, mrt[i],
+                  false, draw_index, rt.layout);
   }
   auto dit = g_depths.find(depth_base);
   if (dit != g_depths.end() && !watch_only) {
     DepthTarget& dt = dit->second;
-    QueueSnapshot(dt.image, VK_IMAGE_ASPECT_DEPTH_BIT, dt.w, dt.h, kDepthFormat,
-                  depth_base, true, draw_index, dt.layout, &dt.layout);
+    QueueSnapshot(dt.texture, rhi::kAspectDepth, dt.w, dt.h, kDepthFormat,
+                  depth_base, true, draw_index, dt.layout);
   }
   const u64 watch = kRtWatch.get();
   if (watch && std::find(mrt, mrt + n, watch) == mrt + n) {
     auto wit = g_rts.find(watch);
     if (wit != g_rts.end())
-      QueueSnapshot(wit->second.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                    wit->second.w, wit->second.h, wit->second.fmt, watch, false,
-                    draw_index, wit->second.layout, &wit->second.layout);
+      QueueSnapshot(wit->second.texture, rhi::kAspectColor, wit->second.w,
+                    wit->second.h, wit->second.fmt, watch, false, draw_index,
+                    wit->second.layout);
   }
 }
 
 void DrainSnapshots() {
   if (g_snapshots.empty())
     return;
-  vkQueueWaitIdle(g_dev.queue);
+  Device().WaitIdle();
   for (Snapshot& s : g_snapshots) {
     char name[256];
     std::snprintf(name, sizeof name, "%s_d%04u_%s_%#llx_%ux%u.png",
                   g_prefix.c_str(), s.at_draw, s.depth ? "depth" : "rt",
                   (unsigned long long)s.base, s.w, s.h);
     PixelStats stats;
-    const auto* bytes = static_cast<const u8*>(s.map);
+    const u8* bytes = s.buffer->mapped();
     const bool ok = s.depth
                         ? WriteDepthPng(name, bytes, s.w, s.h, &stats)
                         : WriteImagePng(name, bytes, s.w, s.h, s.fmt, &stats);
@@ -1439,9 +1361,7 @@ void DrainSnapshots() {
         .Str("file", ok ? name : "")
         .Raw("stats", StatsObj(stats));
     l.Emit();
-    vkUnmapMemory(g_dev.device, s.memory);
-    vkDestroyBuffer(g_dev.device, s.buffer, nullptr);
-    vkFreeMemory(g_dev.device, s.memory, nullptr);
+    Device().Destroy(s.buffer);
   }
   g_snapshots.clear();
 }
@@ -1455,8 +1375,8 @@ void DumpFrameResources() {
       if (!rt.used_this_frame && !rt.ever_rendered)
         continue;
       std::vector<u8> bytes;
-      if (!ReadImage(rt.image, VK_IMAGE_ASPECT_COLOR_BIT, rt.w, rt.h,
-                     FormatBytes(rt.fmt), rt.layout, &rt.layout, bytes))
+      if (!ReadImage(rt.texture, rhi::kAspectColor, rt.w, rt.h,
+                     FormatBytes(rt.fmt), rt.layout, bytes))
         continue;
       // The frame's submission has already stamped submitted_layout; this
       // readback executes after it, so the anchor moves with it.
@@ -1494,8 +1414,8 @@ void DumpFrameResources() {
       if (!dt.used_this_frame)
         continue;
       std::vector<u8> bytes;
-      if (!ReadImage(dt.image, VK_IMAGE_ASPECT_DEPTH_BIT, dt.w, dt.h, 4,
-                     dt.layout, &dt.layout, bytes))
+      if (!ReadImage(dt.texture, rhi::kAspectDepth, dt.w, dt.h, 4, dt.layout,
+                     bytes))
         continue;
       dt.submitted_layout = dt.layout;
       char name[256];
@@ -2055,6 +1975,36 @@ void RecordBarrier(const char* aspect,
       .Str("to", LayoutName(to))
       .Hex("src_access", src_access)
       .Hex("dst_access", dst_access);
+  l.Emit();
+}
+
+void RecordBarrier(const char* aspect,
+                   u64 image,
+                   rhi::TextureState from,
+                   rhi::TextureState to) {
+  if (!g_recording)
+    return;
+  static const char* const kStates[] = {"undefined", "general", "color",
+                                        "depth",     "depth-read", "shader-read",
+                                        "copy-src",  "copy-dst"};
+  std::string name = ObjectName(image);
+  if (name.empty())
+    for (const auto& kv : g_rts)
+      if (reinterpret_cast<u64>(kv.second.image) == image) {
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "rt %#llx",
+                      (unsigned long long)kv.first);
+        name = buf;
+        break;
+      }
+  Line l("barrier");
+  l.U("seq", g_seq++)
+      .Int("after_draw", int(g_draw_seq))
+      .Str("aspect", aspect)
+      .Hex("image", image)
+      .Str("name", name.c_str())
+      .Str("from", kStates[static_cast<int>(from)])
+      .Str("to", kStates[static_cast<int>(to)]);
   l.Emit();
 }
 

@@ -216,16 +216,9 @@ void ReportDeviceFault(DeviceState& device) {
               (unsigned long long)v.vendorFaultData);
 }
 
-void DrawCheckpoint(VkCommandBuffer cmd, u32 frame, u32 draw, bool after) {
-  if (!g_checkpoints_available || !kCheckpoints)
-    return;
-  if (!g_set_checkpoint)
-    g_set_checkpoint = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
-        vkGetDeviceProcAddr(g_dev.device, "vkCmdSetCheckpointNV"));
-  // Opaque integer marker: no host object lifetime or allocation is involved.
-  const uintptr_t marker = ((u64(frame) + 1) << 32) | (u64(draw) << 1) | u32(after);
-  if (g_set_checkpoint)
-    g_set_checkpoint(cmd, reinterpret_cast<const void*>(marker));
+void DrawCheckpoint(rhi::CommandList* list, u32 frame, u32 draw, bool after) {
+  if (g_checkpoints_available && kCheckpoints)
+    list->Checkpoint(((u64(frame) + 1) << 32) | (u64(draw) << 1) | u32(after));
 }
 
 // Bit 63 tells a dispatch marker from a draw marker.
@@ -423,9 +416,7 @@ bool CreateDevice() {
   if (!CreateFrameSlots())
     return false;
 
-  VkPhysicalDeviceProperties props;
-  vkGetPhysicalDeviceProperties(g_dev.phys, &props);
-  if (!CreateUploadRings(props))
+  if (!CreateUploadRings())
     return false;
   return true;
 }

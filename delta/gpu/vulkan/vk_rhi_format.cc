@@ -100,4 +100,30 @@ VkImageLayout ToVkLayout(rhi::TextureState state, u8 aspect) {
   return VK_IMAGE_LAYOUT_GENERAL;
 }
 
+rhi::TextureState FromVkLayout(VkImageLayout layout) {
+  using rhi::TextureState;
+  switch (layout) {
+    case VK_IMAGE_LAYOUT_UNDEFINED:
+      return TextureState::kUndefined;
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+      return TextureState::kColorTarget;
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
+    case VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL:
+      return TextureState::kDepthTarget;
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+    case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
+    case VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL:
+      return TextureState::kDepthRead;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+      return TextureState::kShaderRead;
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+      return TextureState::kCopySrc;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+      return TextureState::kCopyDst;
+    default:
+      return TextureState::kGeneral;
+  }
+}
+
 }  // namespace gpu::vk

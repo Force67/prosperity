@@ -141,6 +141,9 @@ class CommandList : public Object {
                            u32 first_instance) = 0;
   virtual void DrawMeshTasks(u32 x, u32 y, u32 z) = 0;
   virtual void Dispatch(u32 x, u32 y, u32 z) = 0;
+  // Workgroup ids start at (bx, by, bz) (Caps::dispatch_base; the pipeline
+  // needs ComputePipelineDesc::dispatch_base).
+  virtual void DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) = 0;
   // Inside a pass: clear a rectangle of one bound attachment. `attachment`
   // indexes the colours; ~0u means the depth/stencil attachment.
   virtual void ClearAttachment(u32 attachment,
