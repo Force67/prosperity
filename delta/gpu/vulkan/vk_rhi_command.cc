@@ -576,8 +576,12 @@ void VulkanCommandList::ResetTimestamps(rhi::TimestampPool* pool,
                       first, count);
 }
 
-void VulkanCommandList::WriteTimestamp(rhi::TimestampPool* pool, u32 index) {
-  vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+void VulkanCommandList::WriteTimestamp(rhi::TimestampPool* pool,
+                                       u32 index,
+                                       bool start) {
+  vkCmdWriteTimestamp(cmd,
+                      start ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                            : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                       static_cast<VulkanTimestampPool*>(pool)->pool, index);
 }
 

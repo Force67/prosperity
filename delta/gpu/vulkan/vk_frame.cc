@@ -969,7 +969,7 @@ void BeginFrame(Renderer& renderer) {
                              kLdsDump ? kLdsPoison : 0u);
   if (slot.timestamps) {
     g_frame.list->ResetTimestamps(slot.timestamps, 0, 2);
-    g_frame.list->WriteTimestamp(slot.timestamps, 0);
+    g_frame.list->WriteTimestamp(slot.timestamps, 0, true);
   }
   g_frame.recording = true;
 }
@@ -1109,7 +1109,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     ScopeNs submit_timer(&g_ns_submit);
     ScopeNs frame_submit_timer(&g_fr_submit);
     if (cur.timestamps)
-      g_frame.list->WriteTimestamp(cur.timestamps, 1);
+      g_frame.list->WriteTimestamp(cur.timestamps, 1, false);
     CmdEndLabel(g_frame.list);  // close the "frame N" scope
     g_frame.list->End();
     const u64 before = Device().LastSubmission();
