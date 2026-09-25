@@ -19,7 +19,18 @@
 
 namespace gpu::opengl {
 
-enum class SlotKind : u8 { kUniformBuffer, kStorageBuffer, kTexture, kImage };
+// kPointer: a storage buffer past GL's per-stage limit, read through a GPU
+// address (GL_NV_shader_buffer_load); its slot indexes the `delta_ptr`
+// uniform, one uvec4 {address lo, address hi, bytes, 0} per buffer.
+enum class SlotKind : u8 {
+  kUniformBuffer,
+  kStorageBuffer,
+  kTexture,
+  kImage,
+  kPointer,
+};
+constexpr u32 kSlotKinds = 5;
+constexpr char kPointerTable[] = "delta_ptr";
 
 // Push constants that cannot be flattened into a uniform array live in this
 // uniform buffer binding; the groups' uniform buffers start after it.
@@ -44,6 +55,7 @@ struct ProgramInterface {
   std::vector<ResourceSlot> slots;  // sorted by (set, binding)
   std::vector<PushUniform> push_uniforms;
   bool push_ubo = false;  // some stage reads push constants from kPushUboSlot
+  u32 pointer_count = 0;  // entries of kPointerTable
 };
 
 struct GlslFeatures {
@@ -53,6 +65,10 @@ struct GlslFeatures {
   u32 max_storage_buffers = 96;
   u32 max_textures = 192;
   u32 max_images = 8;
+  u32 max_stage_storage_buffers = 16;
+  // GL_NV_shader_buffer_load and GL_NV_gpu_shader5: storage buffers past the
+  // per-stage limit become pointers.
+  bool buffer_pointers = false;
 };
 
 struct StageCode {

@@ -73,7 +73,7 @@ GLuint Name(rhi::Buffer* b) {
 }  // namespace
 
 GlCommandList::GlCommandList(GlDevice& device) : device_(device) {
-  for (u32 k = 0; k < 4; k++)
+  for (u32 k = 0; k < kSlotKinds; k++)
     slot_state_[k].resize(device.slot_limit(static_cast<SlotKind>(k)));
 }
 
@@ -91,6 +91,8 @@ void GlCommandList::Begin() {
   index_dirty_ = true;
   for (auto& slots : slot_state_)
     std::fill(slots.begin(), slots.end(), SlotState{});
+  pointers_dirty_ = true;
+  flushed_pointers_ = nullptr;
   std::fill(std::begin(pass_colors_), std::end(pass_colors_), nullptr);
 }
 
@@ -303,6 +305,22 @@ void GlCommandList::FlushGroup(u32 index, const SlotMap::Group& map) {
         c->sampler = r.sampler;
         break;
       }
+      case SlotKind::kPointer: {
+        const u64 offset =
+            r.offset + (r.dynamic != kNotDynamic ? b.offsets[r.dynamic] : 0);
+        u64 size = r.size;
+        if (r.buffer_size && offset + size > r.buffer_size)
+          size = offset < r.buffer_size ? r.buffer_size - offset : 0;
+        const u64 address = r.address && size ? r.address + offset : 0;
+        const u32 entry[4] = {static_cast<u32>(address),
+                              static_cast<u32>(address >> 32),
+                              static_cast<u32>(address ? size : 0), 0};
+        if (std::memcmp(pointers_[slot.slot], entry, sizeof(entry))) {
+          std::memcpy(pointers_[slot.slot], entry, sizeof(entry));
+          pointers_dirty_ = true;
+        }
+        break;
+      }
       case SlotKind::kImage: {
         SlotState& s = slot_state_[3][slot.slot];
         const u64 where = (u64(r.level) << 32) | u32(r.layer) |
@@ -337,8 +355,17 @@ void GlCommandList::FlushBindings() {
     FlushGroup(i, map->groups[i]);
     g.dirty = false;
   }
-  // Push constants live in the program in GL, so a new program needs them
-  // again even when the data did not change.
+  // The pointer table and push constants are uniforms of the program, so a
+  // new program needs them again even when the data did not change.
+  if (pipeline_->pointer_count &&
+      (pointers_dirty_ || flushed_pointers_ != pipeline_)) {
+    const u32 count = std::min(pipeline_->pointer_count, kMaxPointers);
+    auto* c = stream_.Add<CmdPointers>(count * sizeof(pointers_[0]));
+    c->count = count;
+    std::memcpy(c + 1, pointers_, count * sizeof(pointers_[0]));
+    pointers_dirty_ = false;
+    flushed_pointers_ = pipeline_;
+  }
   if ((pipeline_->push_count || pipeline_->push_ubo) &&
       (push_dirty_ || flushed_push_ != pipeline_)) {
     u32 bytes = pipeline_->push_bytes;

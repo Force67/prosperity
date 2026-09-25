@@ -710,6 +710,14 @@ void Replayer::Execute(const GlCommandList& list) {
       case Op::kPush:
         Push(As<CmdPush>(p));
         break;
+      case Op::kPointers: {
+        const auto& c = As<CmdPointers>(p);
+        if (pipeline_ && pipeline_->pointer_location >= 0)
+          glProgramUniform4uiv(pipeline_->program, pipeline_->pointer_location,
+                               static_cast<GLsizei>(c.count),
+                               reinterpret_cast<const GLuint*>(Payload(c)));
+        break;
+      }
       case Op::kVertexBuffers: {
         const auto& c = As<CmdVertexBuffers>(p);
         glVertexArrayVertexBuffers(Vao(c.input), c.first,

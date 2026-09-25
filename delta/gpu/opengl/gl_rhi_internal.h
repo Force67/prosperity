@@ -39,6 +39,7 @@ constexpr u32 kMaxGroups = 8;
 constexpr u32 kMaxDynamicOffsets = 16;
 constexpr u32 kMaxVertexBuffers = 16;
 constexpr u32 kMaxPushBytes = 256;
+constexpr u32 kMaxPointers = 128;
 constexpr u8 kNotDynamic = 0xff;
 
 struct GlFormat {
@@ -59,6 +60,7 @@ class GlBuffer final : public rhi::Buffer {
   explicit GlBuffer(const rhi::BufferDesc& desc) { desc_ = desc; }
   void set_mapped(u8* p) { mapped_ = p; }
   GLuint name = 0;
+  u64 address = 0;  // GPU address of a storage buffer, for pointer slots
 };
 
 class GlTexture final : public rhi::Texture {
@@ -125,6 +127,7 @@ struct BoundResource {
   u64 offset = 0;
   u64 size = 0;         // bytes from offset
   u64 buffer_size = 0;  // clamps dynamic windows
+  u64 address = 0;
   GLint level = 0;      // storage images
   GLint layer = 0;
   GLboolean layered = GL_TRUE;
@@ -226,6 +229,8 @@ class GlPipeline final : public rhi::Pipeline {
   u32 push_count = 0;
   bool push_ubo = false;
   u32 push_bytes = 0;
+  GLint pointer_location = -1;
+  u32 pointer_count = 0;
 };
 
 class GlTimestampPool final : public rhi::TimestampPool {
@@ -246,6 +251,7 @@ enum class Op : u8 {
   kBindTexture,
   kBindImage,
   kPush,
+  kPointers,
   kVertexBuffers,
   kIndexBuffer,
   kViewport,
@@ -341,6 +347,12 @@ struct CmdPush {  // followed by `bytes` of data
   static constexpr Op kOp = Op::kPush;
   Cmd h;
   u32 bytes;
+};
+
+struct CmdPointers {  // followed by `count` uvec4 entries
+  static constexpr Op kOp = Op::kPointers;
+  Cmd h;
+  u32 count;
 };
 
 struct CmdVertexBuffers {
@@ -685,7 +697,10 @@ class GlCommandList final : public rhi::CommandList {
   GLenum index_type_ = GL_UNSIGNED_SHORT;
   bool index_dirty_ = true;
   // What this list already bound, per GL slot, to drop repeats.
-  std::vector<SlotState> slot_state_[4];
+  std::vector<SlotState> slot_state_[kSlotKinds];
+  u32 pointers_[kMaxPointers][4] = {};
+  bool pointers_dirty_ = true;
+  const GlPipeline* flushed_pointers_ = nullptr;
   const GlView* pass_colors_[8] = {};
   CmdEndPass pass_end_{};
 };
@@ -817,6 +832,7 @@ class GlDevice final : public rhi::Device {
   void WaitLoop();
 
   bool debug_ = false;
+  bool buffer_pointers_ = false;
   EglDevice egl_;
   GlWorker render_;
   GlWorker resource_;
@@ -840,7 +856,7 @@ class GlDevice final : public rhi::Device {
   rhi::Caps caps_;
   std::string device_name_;
   GlslFeatures glsl_;
-  u32 slot_limits_[4] = {};
+  u32 slot_limits_[kSlotKinds] = {};
   u32 format_usage_[static_cast<size_t>(rhi::Format::kCount)] = {};
 
   std::mutex intern_mutex_;

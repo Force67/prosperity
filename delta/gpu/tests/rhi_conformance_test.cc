@@ -404,6 +404,59 @@ TEST_P(RhiConformance, ComputeStorageBufferAndPush) {
   EXPECT_EQ(out[kN - 1], (kN - 1) * 2 + 7);
 }
 
+// Twenty storage buffers in one stage, windows of one buffer: past the
+// per-stage limit of some GL drivers, with an atomic and a runtime length
+// among the ones over it.
+TEST_P(RhiConformance, ManyStorageBuffers) {
+  constexpr u32 kBuffers = 20, kWindow = 256;
+  BufferDesc bd;
+  bd.size = kBuffers * kWindow;
+  bd.usage = kBufferStorage | kBufferCopySrc | kBufferCopyDst;
+  Buffer* buf = Own(device_->CreateBuffer(bd));
+  Buffer* rb = Readback(bd.size);
+  BindGroupLayoutDesc ld;
+  for (u32 i = 0; i < kBuffers; i++)
+    ld.bindings.push_back({i, BindingType::kStorageBuffer, kStageCompute});
+  BindGroupLayout* set0 = Own(device_->CreateBindGroupLayout(ld));
+  PipelineLayoutDesc pl;
+  pl.groups = {set0};
+  ComputePipelineDesc cp;
+  cp.layout = Own(device_->CreatePipelineLayout(pl));
+  cp.code = Spv(k_many_buffers_comp_spv);
+  Pipeline* pipe = Own(device_->CreateComputePipeline(cp));
+  ASSERT_NE(pipe, nullptr);
+  BindGroupDesc gd;
+  gd.layout = set0;
+  for (u32 i = 0; i < kBuffers; i++) {
+    BindingWrite w;
+    w.binding = i;
+    w.buffer = buf;
+    w.offset = i * kWindow;
+    w.range = kWindow;
+    gd.writes.push_back(w);
+  }
+  BindGroup* group = Own(device_->CreateBindGroup(gd));
+
+  list_->Begin();
+  for (u32 i = 0; i < kBuffers; i++)
+    list_->FillBuffer(buf, i * kWindow, kWindow, i);
+  list_->Barrier(kAccessCopyWrite, kAccessShaderRead | kAccessShaderWrite);
+  list_->SetPipeline(pipe);
+  list_->SetBindGroup(0, group);
+  list_->Dispatch(1, 1, 1);
+  list_->Barrier(kAccessShaderWrite, kAccessCopyRead);
+  list_->CopyBuffer(rb, 0, buf, 0, bd.size);
+  list_->Barrier(kAccessCopyWrite, kAccessHostRead);
+  Submit();
+  list_->End();
+  const u32* words = reinterpret_cast<const u32*>(rb->mapped());
+  constexpr u32 kPerWindow = kWindow / 4;
+  EXPECT_EQ(words[19 * kPerWindow + 5], 136u) << "sum of windows 0..16";
+  EXPECT_EQ(words[18 * kPerWindow], 18u + 64) << "atomic";
+  EXPECT_EQ(words[17 * kPerWindow], kPerWindow) << "runtime length";
+  EXPECT_EQ(words[17 * kPerWindow + 1], 17u) << "untouched";
+}
+
 TEST_P(RhiConformance, StorageImageWrite) {
   TextureDesc td;
   td.format = Format::kRGBA8Unorm;

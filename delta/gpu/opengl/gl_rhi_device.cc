@@ -311,6 +311,15 @@ bool GlDevice::InitRenderThread() {
   glsl_.max_storage_buffers = slot_limits_[1];
   glsl_.max_textures = slot_limits_[2];
   glsl_.max_images = slot_limits_[3];
+  slot_limits_[4] = kMaxPointers;
+  glsl_.max_stage_storage_buffers = static_cast<u32>(
+      std::min({GetInt(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS),
+                GetInt(GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS),
+                GetInt(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS),
+                GetInt(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS)}));
+  buffer_pointers_ = epoxy_has_gl_extension("GL_NV_shader_buffer_load") &&
+                     epoxy_has_gl_extension("GL_NV_gpu_shader5");
+  glsl_.buffer_pointers = buffer_pointers_;
   const bool bary_nv =
       epoxy_has_gl_extension("GL_NV_fragment_shader_barycentric");
   const bool bary_ext =
@@ -413,6 +422,13 @@ rhi::Buffer* GlDevice::CreateBuffer(const rhi::BufferDesc& desc) {
     if (map)
       buffer->set_mapped(static_cast<u8*>(
           glMapNamedBufferRange(buffer->name, 0, size, map)));
+    if (buffer_pointers_ && (desc.usage & rhi::kBufferStorage)) {
+      GLuint64EXT address = 0;
+      glMakeNamedBufferResidentNV(buffer->name, GL_READ_WRITE);
+      glGetNamedBufferParameterui64vNV(buffer->name, GL_BUFFER_GPU_ADDRESS_NV,
+                                       &address);
+      buffer->address = address;
+    }
     if (desc.name && debug_)
       glObjectLabel(GL_BUFFER, buffer->name, -1, desc.name);
     ok = glGetError() == GL_NO_ERROR && (!map || buffer->mapped());
@@ -420,7 +436,15 @@ rhi::Buffer* GlDevice::CreateBuffer(const rhi::BufferDesc& desc) {
       glDeleteBuffers(1, &buffer->name);
     glFinish();
   });
-  return ok ? buffer.release() : nullptr;
+  if (!ok)
+    return nullptr;
+  if (buffer->address) {
+    // Residency is per context; the render thread's is the one that counts.
+    render_.Post([name = buffer->name] {
+      glMakeNamedBufferResidentNV(name, GL_READ_WRITE);
+    });
+  }
+  return buffer.release();
 }
 
 rhi::Texture* GlDevice::CreateTexture(const rhi::TextureDesc& desc) {
@@ -627,6 +651,7 @@ void GlDevice::Resolve(const GlBindGroupLayout& layout,
       const auto* b = static_cast<const GlBuffer*>(write.buffer);
       if (b) {
         r.name = b->name;
+        r.address = b->address;
         r.offset = write.offset;
         r.buffer_size = b->desc().size;
         r.size = write.range ? write.range
@@ -745,6 +770,11 @@ rhi::Pipeline* GlDevice::BuildPipeline(const rhi::PipelineLayoutDesc& layout,
   }
   pipeline->slots = InternSlots(layout, program);
   pipeline->push_ubo = program.push_ubo;
+  pipeline->pointer_count = program.pointer_count;
+  if (program.pointer_count > kMaxPointers) {
+    BASE_LOGI("gpugl", "too many storage buffers: {}", program.pointer_count);
+    return nullptr;
+  }
   pipeline->push_bytes = layout.push_constant_bytes;
   compile_.Run([&] {
     const GLuint prog = glCreateProgram();
@@ -796,6 +826,8 @@ rhi::Pipeline* GlDevice::BuildPipeline(const rhi::PipelineLayoutDesc& layout,
       return;
     }
     pipeline->program = prog;
+    if (program.pointer_count)
+      pipeline->pointer_location = glGetUniformLocation(prog, kPointerTable);
     for (const PushUniform& u : program.push_uniforms) {
       GlPipeline::Push& p = pipeline->push[pipeline->push_count++];
       p.location = glGetUniformLocation(prog, u.name.c_str());

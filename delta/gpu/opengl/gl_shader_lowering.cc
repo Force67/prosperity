@@ -6,9 +6,12 @@
 
 #include <spirv_glsl.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <map>
 #include <memory>
+#include <unordered_map>
 
 namespace gpu::opengl {
 
@@ -47,14 +50,71 @@ class Lowerer : public spirv_cross::CompilerGLSL {
     return static_cast<u32>(get_declared_struct_size(get<SPIRType>(type_id)));
   }
 
-  // GLSL's imulExtended/umulExtended take only int/uint operands, which
-  // SPIR-V does not require of OpSMulExtended/OpUMulExtended.
+  // The element type of a block that is one tightly packed runtime array,
+  // which a pointer can stand in for; empty for any other block.
+  std::string PointerElement(u32 type_id) {
+    const SPIRType& t = get<SPIRType>(type_id);
+    if (t.member_types.size() != 1)
+      return {};
+    const u32 member = t.member_types[0];
+    const SPIRType& m = get<SPIRType>(member);
+    if (m.array.size() != 1 || m.array[0] != 0 || m.columns != 1 ||
+        m.width != 32 ||
+        (m.basetype != SPIRType::UInt && m.basetype != SPIRType::Int &&
+         m.basetype != SPIRType::Float) ||
+        get_decoration(member, spv::DecorationArrayStride) != m.vecsize * 4)
+      return {};
+    return type_to_glsl(m);
+  }
+
+  // Reads and writes `var` through entry `index` of the pointer table.
+  void Spill(u32 var, u32 type_id, u32 index) {
+    const std::string name = "DELTA_BUF_" + std::to_string(index);
+    set_name(var, name);
+    const u32 member = get<SPIRType>(type_id).member_types[0];
+    spilled_[var] = {index, get_decoration(member, spv::DecorationArrayStride)};
+    add_header_line("#define " + name + " ((" + PointerElement(type_id) +
+                    "*)packUint2x32(" + kPointerTable + "[" +
+                    std::to_string(index) + "].xy))");
+  }
+
+  void emit_buffer_block(const spirv_cross::SPIRVariable& var) override {
+    if (!spilled_.count(var.self))
+      CompilerGLSL::emit_buffer_block(var);
+  }
+
+  // A spilled block is its array: `ptr[i]`, not `block._m0[i]`.
+  std::string to_member_reference(u32 base,
+                                  const SPIRType& type,
+                                  u32 index,
+                                  bool resolved) override {
+    const spirv_cross::SPIRVariable* var = maybe_get_backing_variable(base);
+    if (var && spilled_.count(var->self))
+      return {};
+    return CompilerGLSL::to_member_reference(base, type, index, resolved);
+  }
+
   void emit_instruction(const spirv_cross::Instruction& instr) override {
     const auto op = static_cast<spv::Op>(instr.op);
+    const u32* ops = stream(instr);
+    if (op == spv::OpArrayLength && instr.length >= 4) {
+      const spirv_cross::SPIRVariable* var = maybe_get_backing_variable(ops[2]);
+      auto it = var ? spilled_.find(var->self) : spilled_.end();
+      if (it != spilled_.end()) {
+        set<spirv_cross::SPIRExpression>(
+            ops[1],
+            spirv_cross::join(type_to_glsl(get<SPIRType>(ops[0])), "(",
+                              kPointerTable, "[", it->second.index, "].z / ",
+                              it->second.stride, "u)"),
+            ops[0], true);
+        return;
+      }
+    }
+    // GLSL's imulExtended/umulExtended take only int/uint operands, which
+    // SPIR-V does not require of OpSMulExtended/OpUMulExtended.
     if ((op != spv::OpSMulExtended && op != spv::OpUMulExtended) ||
         instr.length < 4)
       return CompilerGLSL::emit_instruction(instr);
-    const u32* ops = stream(instr);
     const SPIRType::BaseType want =
         op == spv::OpSMulExtended ? SPIRType::Int : SPIRType::UInt;
     const SPIRType& type = get<SPIRType>(ops[0]);
@@ -86,6 +146,13 @@ class Lowerer : public spirv_cross::CompilerGLSL {
     for (u32 i = 0; i < t.member_types.size(); i++)
       set_member_decoration(type_id, i, spv::DecorationNonWritable);
   }
+
+ private:
+  struct Spilled {
+    u32 index;
+    u32 stride;
+  };
+  std::unordered_map<u32, Spilled> spilled_;
 };
 
 u32 StageOf(spv::ExecutionModel model) {
@@ -125,6 +192,36 @@ u64 Key(u32 set, u32 binding) {
   return (u64(set) << 32) | binding;
 }
 
+// Atomics take a pointer, not an lvalue behind one: atomicAdd(P[i], v)
+// becomes atomicAdd((P + (i)), v) for the spilled buffers.
+void RewritePointerAtomics(std::string& s) {
+  static constexpr char kCall[] = "(DELTA_BUF_";
+  for (size_t at = s.find(kCall); at != std::string::npos;
+       at = s.find(kCall, at + 1)) {
+    size_t word = at;
+    while (word > 0 && (std::isalnum(static_cast<unsigned char>(s[word - 1])) ||
+                        s[word - 1] == '_'))
+      word--;
+    if (s.compare(word, 6, "atomic") != 0)
+      continue;
+    const size_t open = s.find('[', at);
+    if (open == std::string::npos)
+      break;
+    size_t close = open + 1;
+    for (int depth = 1; close < s.size(); close++) {
+      if (s[close] == '[')
+        depth++;
+      else if (s[close] == ']' && --depth == 0)
+        break;
+    }
+    if (close >= s.size())
+      break;
+    const std::string name = s.substr(at + 1, open - at - 1);
+    const std::string index = s.substr(open + 1, close - open - 1);
+    s.replace(at + 1, close - at, "(" + name + " + (" + index + "))");
+  }
+}
+
 void ReplaceAll(std::string& s, const char* from, const char* to) {
   const size_t n = std::strlen(from), m = std::strlen(to);
   for (size_t at = s.find(from); at != std::string::npos;
@@ -157,6 +254,8 @@ struct Stage {
 struct Use {
   SlotKind kind;
   bool demoted = false;
+  bool spillable = true;
+  bool spilled = false;
   u32 slot = 0;
 };
 
@@ -212,6 +311,8 @@ bool LowerProgram(const StageCode* stages,
           if (kind == SlotKind::kUniformBuffer &&
               !s.compiler->Std140(res.base_type_id))
             use.demoted = true;
+          if (s.compiler->PointerElement(res.base_type_id).empty())
+            use.spillable = false;
         }
         return true;
       };
@@ -222,10 +323,48 @@ bool LowerProgram(const StageCode* stages,
         return false;
     }
 
-    u32 next[4] = {kPushUboSlot + 1, 0, 0, 0};
-    const u32 limit[4] = {features.max_uniform_buffers,
-                          features.max_storage_buffers, features.max_textures,
-                          features.max_images};
+    // Storage buffers past the per-stage limit, highest bindings first,
+    // become pointers in every stage.
+    for (Stage& s : parsed) {
+      std::vector<u64> keys;
+      auto collect = [&](const spirv_cross::SmallVector<spirv_cross::Resource>&
+                             list) {
+        for (const auto& res : list) {
+          const u64 key = Key(
+              s.compiler->get_decoration(res.id, spv::DecorationDescriptorSet),
+              s.compiler->get_decoration(res.id, spv::DecorationBinding));
+          const Use& use = uses[key];
+          if (use.kind == SlotKind::kStorageBuffer || use.demoted)
+            keys.push_back(key);
+        }
+      };
+      collect(s.resources.uniform_buffers);
+      collect(s.resources.storage_buffers);
+      std::sort(keys.begin(), keys.end());
+      keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+      size_t kept = keys.size();
+      for (u64 key : keys)
+        if (uses[key].spilled)
+          kept--;
+      for (auto it = keys.rbegin();
+           it != keys.rend() && kept > features.max_stage_storage_buffers;
+           ++it) {
+        Use& use = uses[*it];
+        if (use.spilled || !use.spillable || !features.buffer_pointers)
+          continue;
+        use.spilled = true;
+        kept--;
+      }
+      if (kept > features.max_stage_storage_buffers) {
+        *error = "too many storage buffers in one stage for GL";
+        return false;
+      }
+    }
+
+    u32 next[kSlotKinds] = {kPushUboSlot + 1, 0, 0, 0, 0};
+    const u32 limit[kSlotKinds] = {
+        features.max_uniform_buffers, features.max_storage_buffers,
+        features.max_textures, features.max_images, ~0u};
     for (auto& [key, use] : uses) {
       const u32 set = static_cast<u32>(key >> 32);
       const u32 binding = static_cast<u32>(key);
@@ -234,8 +373,9 @@ bool LowerProgram(const StageCode* stages,
         for (const auto& b : groups[set]->bindings)
           if (b.binding == binding)
             layout = &b;
-      const SlotKind kind =
-          use.demoted ? SlotKind::kStorageBuffer : use.kind;
+      const SlotKind kind = use.spilled   ? SlotKind::kPointer
+                            : use.demoted ? SlotKind::kStorageBuffer
+                                          : use.kind;
       if (!layout || !Accepts(layout->type, use.kind)) {
         *error = "set " + std::to_string(set) + " binding " +
                  std::to_string(binding) + " missing from the layout";
@@ -249,15 +389,28 @@ bool LowerProgram(const StageCode* stages,
       }
       program->slots.push_back({set, binding, kind, use.slot});
     }
+    program->pointer_count = next[static_cast<u32>(SlotKind::kPointer)];
 
     for (Stage& s : parsed) {
       Lowerer& c = *s.compiler;
+      u32 spills = 0;
       auto remap = [&](const spirv_cross::SmallVector<spirv_cross::Resource>&
                            list) {
         for (const auto& res : list) {
           const Use& use = uses[Key(
               c.get_decoration(res.id, spv::DecorationDescriptorSet),
               c.get_decoration(res.id, spv::DecorationBinding))];
+          if (use.spilled) {
+            if (!spills++) {
+              c.require_extension("GL_NV_shader_buffer_load");
+              c.require_extension("GL_NV_gpu_shader5");
+              c.add_header_line(std::string("uniform uvec4 ") + kPointerTable +
+                                "[" + std::to_string(program->pointer_count) +
+                                "];");
+            }
+            c.Spill(res.id, res.base_type_id, use.slot);
+            continue;
+          }
           if (use.demoted)
             c.MakeStorageBlock(res.base_type_id);
           c.unset_decoration(res.id, spv::DecorationDescriptorSet);
@@ -294,6 +447,8 @@ bool LowerProgram(const StageCode* stages,
       }
       c.set_common_options(options);
       std::string source = c.compile();
+      if (spills)
+        RewritePointerAtomics(source);
       // Per-vertex inputs take no interpolation qualifier.
       ReplaceAll(source, "flat pervertex", "pervertex");
       if (features.nv_barycentric_only &&
