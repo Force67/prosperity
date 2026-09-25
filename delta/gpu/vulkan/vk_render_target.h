@@ -181,8 +181,9 @@ u64 RtByteSizeWH(u32 w, u32 h, VkFormat fmt);
 u64 RtByteSize(const RTarget& rt);
 
 RTarget* GetRT(u64 base, u32 w, u32 h, VkFormat fmt, u32 depth = 1);
-// Destroy depth images retired two frames ago (an array outgrew them).
-void ReleaseRetiredDepths();
+// Destroy targets retired two frames ago: depth arrays that were outgrown and
+// colour variants evicted to make room.
+void ReleaseRetiredTargets();
 
 DepthTarget* GetDepthRT(u64 base,
                         u32 w,

@@ -327,6 +327,28 @@ std::unordered_map<u64, std::vector<RTarget>> g_rt_variants;
 constexpr u64 kMaxRtVariantBytes = 32ull << 20;
 constexpr size_t kMaxRtVariants = 256;
 
+std::vector<RTarget> g_retired_rts;
+
+void RetireRt(RTarget& t) {
+  g_retired_rts.push_back(std::move(t));
+  // Cached multi-texture groups may name its views.
+  ClearMultiTexCache();
+}
+
+void DestroyRt(RTarget& t) {
+  rhi::Device& device = Device();
+  for (auto* views : {&t.sampled_views, &t.alias_views,
+                      &t.feedback_sampled_views})
+    for (auto& [key, view] : *views)
+      device.Destroy(view);
+  for (rhi::Object* o :
+       std::initializer_list<rhi::Object*>{t.set, t.feedback_set, t.view,
+                                            t.volume_view, t.feedback_view})
+    device.Destroy(o);
+  device.Destroy(t.feedback_texture);
+  device.Destroy(t.texture);
+}
+
 // Make the image of geometry (w, h, fmt) the live target at `base`, creating it
 // on first use.
 RTarget* ActivateRtVariant(RTarget& live,
@@ -348,6 +370,25 @@ RTarget* ActivateRtVariant(RTarget& live,
     u64 parked_bytes = 0;
     for (const RTarget& v : parked)
       parked_bytes += RtByteSizeWH(v.w, v.h, v.fmt);
+    // Make room by retiring the variants rendered longest ago. Gameface
+    // renders every glyph into one scratch address at the glyph's own size,
+    // so without this the address fills up within a minute and every later
+    // glyph is declined.
+    while (parked.size() >= kMaxRtVariants ||
+           parked_bytes + RtByteSizeWH(w, h, fmt) > kMaxRtVariantBytes) {
+      size_t oldest = parked.size();
+      for (size_t i = 0; i < parked.size(); i++)
+        if (parked[i].last_frame < g_frame.num &&
+            (oldest == parked.size() ||
+             parked[i].last_frame < parked[oldest].last_frame))
+          oldest = i;
+      if (oldest == parked.size())
+        break;
+      parked_bytes -=
+          RtByteSizeWH(parked[oldest].w, parked[oldest].h, parked[oldest].fmt);
+      RetireRt(parked[oldest]);
+      parked.erase(parked.begin() + oldest);
+    }
     if (parked.size() >= kMaxRtVariants ||
         parked_bytes + RtByteSizeWH(w, h, fmt) > kMaxRtVariantBytes) {
       // Never hand back the live target at ITS geometry: the caller opens a
@@ -666,8 +707,13 @@ void RetireDepthTarget(const DepthTarget& t) {
   ClearMultiTexCache();
 }
 
-void ReleaseRetiredDepths() {
+void ReleaseRetiredTargets() {
   // Two BeginFrames of rest, like ReleaseRetiredTextures.
+  static std::vector<RTarget> aged_rts;
+  for (RTarget& t : aged_rts)
+    DestroyRt(t);
+  aged_rts = std::move(g_retired_rts);
+  g_retired_rts.clear();
   static std::vector<DepthTarget> aged;
   for (DepthTarget& t : aged) {
     Device().Destroy(t.set);

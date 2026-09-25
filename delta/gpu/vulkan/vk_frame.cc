@@ -824,7 +824,7 @@ void BeginFrame(Renderer& renderer) {
   // Objects retired two frames ago are past every in-flight command buffer
   // (see ReleaseRetiredTextures) and safe to destroy now.
   ReleaseRetiredTextures();
-  ReleaseRetiredDepths();
+  ReleaseRetiredTargets();
   ReleaseRetiredCsBuffers();
   if (!CreatePipeline())
     return;
