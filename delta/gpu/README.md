@@ -5,6 +5,8 @@ Turns guest GPU command streams into rendered frames.
 ```
 render/         the renderer as its callers see it (command.h, renderer.h)
 vulkan/         the only backend implementing it
+rhi/            the device abstraction backends implement (types.h, device.h)
+opengl/         the OpenGL 4.6 rhi backend (headless EGL, SPIR-V lowered to GLSL)
 gcn/            shared ISA decode + the SPIR-V translator both consoles emit through
 ps4/            PM4 / Liverpool command processor + its GCN specifics
 ps5/            AGC / gfx10.3 command processor + the RDNA2 decoder/emitter
@@ -46,6 +48,28 @@ coherency flushes), and `NoteMemoryFill` for the CP DMA fills a title uses in
 place of a clear packet. `DefaultRenderer()` hands out the process-wide
 instance the command processors drive (the guest-called HLE entry points
 cannot thread a handle); it is the one piece of ambient state at this seam.
+
+## opengl/
+
+An `rhi::Device` on desktop GL 4.6 core, built when libepoxy and glvnd's
+libEGL are found (`DELTA_GPU_OPENGL`).
+
+- Threads: a render thread owns the context that replays command lists and
+  the objects GL does not share (framebuffers, vertex arrays, queries); a
+  resource thread creates buffers, textures and samplers, compile threads
+  link programs, and a waiter thread retires the per-submission fences, all
+  on shared contexts. A command list records a CPU-side stream with every
+  binding resolved to GL names and slots.
+- Conventions match Vulkan: row 0 is the top in memory, clip z is [0, 1], and
+  a negative viewport height (y-up) becomes an upper-left clip origin, with
+  the front face flipped to keep the framebuffer-space winding.
+- Shaders: `gl_shader_lowering` turns SPIR-V into GLSL 4.60 with SPIRV-Cross.
+  Each program gets slots only for the resources it uses; push constants are
+  a flattened uniform array; uniform blocks std140 cannot express become
+  read-only storage blocks; storage buffers past the per-stage limit are read
+  through GPU addresses (`GL_NV_shader_buffer_load`).
+- `tests/rhi_lowering_corpus` runs the lowering over the recompiler's SPIR-V
+  cache and compiles every module with the driver.
 
 ## vulkan/
 
