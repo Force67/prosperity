@@ -99,3 +99,12 @@ add_delta_test(vk_index_upload_test
 add_delta_test(rhi_conformance_test
   SOURCES rhi_conformance_test.cc
   DEPS delta_gpu)
+
+# Developer tool (not a test): lowers the recompiler's SPIR-V cache through the
+# OpenGL backend's GLSL path and compiles it with the driver.
+if(DELTA_GPU_OPENGL)
+  add_executable(rhi_lowering_corpus rhi_lowering_corpus.cc)
+  target_link_libraries(rhi_lowering_corpus PRIVATE delta_gpu spirv-cross-glsl
+                        ${EPOXY_LIBRARY} OpenGL::EGL OpenGL::OpenGL)
+  target_include_directories(rhi_lowering_corpus PRIVATE ${EPOXY_INCLUDE_DIR})
+endif()
