@@ -15,6 +15,29 @@ if(PkgConfig_FOUND)
   pkg_check_modules(SPIRVHEADERS QUIET SPIRV-Headers)
 endif()
 
+# The D3D12 rhi backend (d3d12/): Windows D3D12, or on Linux vkd3d's
+# D3D12-over-Vulkan with the same headers. SPIR-V is lowered to HLSL with the
+# vendored SPIRV-Cross and compiled to DXIL by DXC, which is loaded at run
+# time (dxcompiler.dll ships next to the executable on Windows). Discovered
+# before add_delta_module so tests/ can see the result on a clean configure.
+option(DELTA_GPU_D3D12 "Build the D3D12 rhi backend when its dependencies exist" ON)
+set(DELTA_HAVE_D3D12 OFF)
+if(DELTA_GPU_D3D12 AND NOT ANDROID)
+  if(WIN32)
+    set(DELTA_HAVE_D3D12 ON)
+  elseif(PkgConfig_FOUND)
+    pkg_check_modules(VKD3D QUIET libvkd3d libvkd3d-utils)
+    find_path(DXC_INCLUDE_DIR dxc/dxcapi.h)
+    find_library(DXC_LIBRARY dxcompiler)
+    if(VKD3D_FOUND AND DXC_INCLUDE_DIR AND DXC_LIBRARY)
+      set(DELTA_HAVE_D3D12 ON)
+    endif()
+  endif()
+  if(NOT DELTA_HAVE_D3D12)
+    message(STATUS "vkd3d or DXC not found; the D3D12 rhi backend is disabled")
+  endif()
+endif()
+
 if(ANDROID)
   add_delta_module(gpu DEPS vulkan delta_gfx)
 else()
@@ -49,4 +72,22 @@ if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
   target_compile_definitions(delta_gpu PRIVATE DELTA_HAVE_SPIRV_BACKEND=1)
 else()
   message(STATUS "SPIRV-Tools/Headers not found; direct GCN->SPIR-V backend disabled")
+endif()
+
+if(DELTA_HAVE_D3D12)
+  target_compile_definitions(delta_gpu PRIVATE DELTA_HAVE_D3D12=1)
+  target_link_libraries(delta_gpu PRIVATE spirv-cross-hlsl)
+  if(WIN32)
+    target_link_libraries(delta_gpu PRIVATE d3d12 dxgi dxguid)
+  else()
+    target_include_directories(delta_gpu PRIVATE ${VKD3D_INCLUDE_DIRS}
+                               ${DXC_INCLUDE_DIR})
+    target_link_libraries(delta_gpu PRIVATE ${VKD3D_LINK_LIBRARIES})
+    set_source_files_properties(d3d12/d3d12_dxc.cc PROPERTIES
+      COMPILE_DEFINITIONS "DELTA_DXCOMPILER_PATH=\"${DXC_LIBRARY}\"")
+  endif()
+else()
+  get_target_property(_gpu_srcs delta_gpu SOURCES)
+  list(FILTER _gpu_srcs EXCLUDE REGEX "/d3d12/")
+  set_property(TARGET delta_gpu PROPERTY SOURCES ${_gpu_srcs})
 endif()
