@@ -11,7 +11,6 @@
 #include <cstring>
 #include <map>
 #include <memory>
-#include <tuple>
 #include <unordered_map>
 
 namespace gpu::opengl {
@@ -478,20 +477,24 @@ bool LowerProgram(const StageCode* stages,
         c.AddDispatchBase();
       if (s.stage == rhi::kStageVertex) {
         // Vulkan allows more attribute locations than GL does (16 on some
-        // drivers), and the recompiler leaves gaps: pack them.
-        std::vector<std::tuple<u32, u32, u32>> inputs;
-        for (const auto& res : s.resources.stage_inputs)
-          inputs.push_back({c.get_decoration(res.id, spv::DecorationLocation),
-                            res.id, res.type_id});
-        std::sort(inputs.begin(), inputs.end());
-        u32 next = 0;
-        for (const auto& [location, id, type] : inputs) {
-          const u32 n = c.LocationCount(type);
-          for (u32 k = 0; k < n; k++)
-            program->vertex_locations.push_back({location + k, next + k});
-          c.set_decoration(id, spv::DecorationLocation, next);
-          next += n;
+        // drivers), and the recompiler leaves gaps: pack them, keeping their
+        // order so that multi-location inputs and components sharing a
+        // location stay together.
+        std::map<u32, u32> packed;
+        for (const auto& res : s.resources.stage_inputs) {
+          const u32 location =
+              c.get_decoration(res.id, spv::DecorationLocation);
+          for (u32 k = 0; k < c.LocationCount(res.type_id); k++)
+            packed[location + k] = 0;
         }
+        u32 next = 0;
+        for (auto& [location, attribute] : packed)
+          attribute = next++;
+        for (const auto& res : s.resources.stage_inputs)
+          c.set_decoration(
+              res.id, spv::DecorationLocation,
+              packed[c.get_decoration(res.id, spv::DecorationLocation)]);
+        program->vertex_locations.assign(packed.begin(), packed.end());
         if (next > features.max_vertex_attribs) {
           *error = "too many vertex attributes for GL";
           return false;
