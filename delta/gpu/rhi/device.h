@@ -258,6 +258,15 @@ class Device {
 
   // True when `format` can be used with every TextureUsage bit in `usage`.
   virtual bool SupportsFormat(Format format, u32 usage) const = 0;
+  // True when BlitTexture can read `src` and write `dst`.
+  virtual bool SupportsBlit(Format /*src*/, Format /*dst*/) const {
+    return caps().texture_blit;
+  }
+  // Device-local memory this process uses and the budget the driver grants
+  // it, in bytes; zeros when the backend cannot tell.
+  virtual void QueryMemoryBudget(u64* used, u64* budget) const {
+    *used = *budget = 0;
+  }
 
   // Queue the lists in order. The returned id retires once the GPU has
   // finished them; ids increase and retire in order.

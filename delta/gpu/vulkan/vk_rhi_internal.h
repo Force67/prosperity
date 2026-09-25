@@ -262,6 +262,8 @@ class VulkanDevice final : public rhi::Device {
   void Destroy(rhi::Object* object) override;
   void SetName(rhi::Object* object, const char* name) override;
   bool SupportsFormat(rhi::Format format, u32 usage) const override;
+  bool SupportsBlit(rhi::Format src, rhi::Format dst) const override;
+  void QueryMemoryBudget(u64* used, u64* budget) const override;
   u64 Submit(rhi::CommandList* const* lists, u32 count) override;
   bool IsComplete(u64 submission) override;
   bool Wait(u64 submission, u64 timeout_ns) override;

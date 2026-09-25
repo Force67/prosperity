@@ -27,9 +27,9 @@ VkAccessFlags AccessFor(u32 a) {
     out |= VK_ACCESS_UNIFORM_READ_BIT;
   if (a & rhi::kAccessIndirectRead)
     out |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-  if (a & rhi::kAccessShaderRead)
+  if (a & (rhi::kAccessShaderRead | rhi::kAccessComputeRead))
     out |= VK_ACCESS_SHADER_READ_BIT;
-  if (a & rhi::kAccessShaderWrite)
+  if (a & (rhi::kAccessShaderWrite | rhi::kAccessComputeWrite))
     out |= VK_ACCESS_SHADER_WRITE_BIT;
   if (a & rhi::kAccessCopyRead)
     out |= VK_ACCESS_TRANSFER_READ_BIT;
@@ -57,6 +57,8 @@ VkPipelineStageFlags StagesFor(u32 a, VkPipelineStageFlags shader) {
   if (a & (rhi::kAccessUniformRead | rhi::kAccessShaderRead |
            rhi::kAccessShaderWrite))
     out |= shader;
+  if (a & (rhi::kAccessComputeRead | rhi::kAccessComputeWrite))
+    out |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
   if (a & (rhi::kAccessCopyRead | rhi::kAccessCopyWrite))
     out |= VK_PIPELINE_STAGE_TRANSFER_BIT;
   if (a & (rhi::kAccessHostRead | rhi::kAccessHostWrite))

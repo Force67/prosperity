@@ -687,6 +687,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   caps_.timestamps = lim.timestampComputeAndGraphics &&
                      native.timestamp_valid_bits != 0;
   caps_.timestamp_period_ns = lim.timestampPeriod;
+  caps_.timestamp_bits = native.timestamp_valid_bits;
   caps_.subgroup_size = subgroup.subgroupSize ? subgroup.subgroupSize : 32;
   caps_.max_dynamic_uniform_buffers = lim.maxDescriptorSetUniformBuffersDynamic;
   caps_.max_dynamic_storage_buffers = lim.maxDescriptorSetStorageBuffersDynamic;
@@ -1395,6 +1396,29 @@ bool VulkanDevice::SupportsFormat(rhi::Format format, u32 usage) const {
       !(f & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
     return false;
   return true;
+}
+
+bool VulkanDevice::SupportsBlit(rhi::Format src, rhi::Format dst) const {
+  VkFormatProperties s, d;
+  vkGetPhysicalDeviceFormatProperties(native.phys, ToVkFormat(src), &s);
+  vkGetPhysicalDeviceFormatProperties(native.phys, ToVkFormat(dst), &d);
+  return (s.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
+         (d.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT);
+}
+
+void VulkanDevice::QueryMemoryBudget(u64* used, u64* budget) const {
+  VkPhysicalDeviceMemoryBudgetPropertiesEXT b{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+  VkPhysicalDeviceMemoryProperties2 props{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &b};
+  vkGetPhysicalDeviceMemoryProperties2(native.phys, &props);
+  *used = *budget = 0;
+  for (u32 i = 0; i < props.memoryProperties.memoryHeapCount; i++)
+    if (props.memoryProperties.memoryHeaps[i].flags &
+        VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+      *used += b.heapUsage[i];
+      *budget += b.heapBudget[i];
+    }
 }
 
 u64 VulkanDevice::Submit(rhi::CommandList* const* lists, u32 count) {

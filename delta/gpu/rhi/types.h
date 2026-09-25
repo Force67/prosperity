@@ -213,11 +213,15 @@ enum Access : u32 {
   kAccessHostWrite = 1u << 9,
   kAccessColorWrite = 1u << 10,
   kAccessDepthWrite = 1u << 11,
+  // As kAccessShaderRead/Write, scoped to compute dispatches: a barrier on
+  // these does not wait for (or hold back) graphics shading.
+  kAccessComputeRead = 1u << 12,
+  kAccessComputeWrite = 1u << 13,
   kAccessAllRead = kAccessVertexRead | kAccessIndexRead | kAccessUniformRead |
                    kAccessIndirectRead | kAccessShaderRead | kAccessCopyRead |
-                   kAccessHostRead,
+                   kAccessHostRead | kAccessComputeRead,
   kAccessAllWrite = kAccessShaderWrite | kAccessCopyWrite | kAccessHostWrite |
-                    kAccessColorWrite | kAccessDepthWrite,
+                    kAccessColorWrite | kAccessDepthWrite | kAccessComputeWrite,
 };
 
 // Descriptor bindings. Each backend turns a (set, binding) pair into its own
@@ -465,6 +469,7 @@ struct Caps {
   bool debug_labels = false;  // labels and names reach a tool
   bool timestamps = false;
   double timestamp_period_ns = 1.0;
+  u32 timestamp_bits = 64;  // valid bits: tick differences wrap at this width
   u32 subgroup_size = 32;
   u32 max_dynamic_uniform_buffers = 8;
   u32 max_dynamic_storage_buffers = 4;
