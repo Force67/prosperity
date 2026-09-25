@@ -87,6 +87,12 @@ void TransitionImage(rhi::CommandList* list,
   b.range.aspect = aspect;
   b.range.layers = layers;
   list->Barrier(0, 0, &b, 1);
+  if (trace::Recording())
+    trace::RecordBarrier(aspect == rhi::kAspectColor     ? "color"
+                         : aspect == rhi::kAspectStencil ? "stencil"
+                                                         : "depth",
+                         reinterpret_cast<u64>(Native(texture)), b.before,
+                         state);
   layout = ToVkLayout(state, aspect);
 }
 
