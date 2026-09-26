@@ -31,6 +31,7 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <utl/options.h>
 
@@ -1580,9 +1581,154 @@ bool BuildGfx10AddressTable(const TextureLayout32& layout,
   return true;
 }
 
-void CopyGfx10ImageContents(const TextureLayout32& layout,
-                            const void* src,
-                            void* dst) {
+namespace {
+
+// Liverpool has no address equation here, only the detiler. Detile a surface
+// whose every dword holds its own byte offset, then look for the XOR mask
+// under which the texel addresses split into per-x, per-y and per-slice terms,
+// checked against every texel.
+bool BuildLiverpoolAddressTable(const TextureLayout32& layout,
+                                u32 mip,
+                                std::vector<u32>& terms,
+                                u32& block_mask,
+                                u64& slice_stride) {
+  if (TilingIsGfx10(layout.tiling_idx) || TilingIsLinear(layout.tiling_idx) ||
+      layout.elem_bytes < 4 || mip >= layout.mip_levels ||
+      layout.size > UINT32_MAX)
+    return false;
+  const auto& level = layout.mips[mip];
+  const u32 w = level.width, h = level.height, layers = layout.layers;
+  const u32 words = layout.elem_bytes / 4;
+  if (!w || !h || !layers)
+    return false;
+  std::vector<u32> identity(layout.size / 4);
+  for (size_t i = 0; i < identity.size(); i++)
+    identity[i] = static_cast<u32>(i * 4);
+  std::vector<u32> address(size_t(w) * h * layers);
+  std::vector<u32> texels(size_t(w) * h * words);
+  for (u32 z = 0; z < layers; z++) {
+    if (!DetileTextureMip32(identity.data(), texels.data(), layout, mip, z))
+      return false;
+    for (size_t i = 0; i < size_t(w) * h; i++)
+      address[z * size_t(w) * h + i] =
+          texels[i * words] - static_cast<u32>(level.offset);
+  }
+  const auto at = [&](u32 x, u32 y, u32 z) {
+    return address[(size_t(z) * h + y) * w + x];
+  };
+  if (at(0, 0, 0))
+    return false;
+  const auto explains = [&](u32 mask, u32 step) {
+    const u32 stride = layers > 1 ? at(0, 0, 1) & ~mask : 0;
+    for (u32 z = 0; z < layers; z++) {
+      const u32 zt = at(0, 0, z);
+      if ((zt & ~mask) != z * stride)
+        return false;
+      for (u32 y = 0; y < h; y += step) {
+        const u32 yt = at(0, y, 0);
+        for (u32 x = 0; x < w; x += step) {
+          const u32 xt = at(x, 0, 0);
+          if (at(x, y, z) != z * stride + (xt & ~mask) + (yt & ~mask) +
+                                 ((xt ^ yt ^ zt) & mask))
+            return false;
+        }
+      }
+    }
+    return true;
+  };
+  for (u32 bits = 0; bits < 32; bits++) {
+    const u32 mask = (1u << bits) - 1;
+    if (!explains(mask, 7) || !explains(mask, 1))
+      continue;
+    block_mask = mask;
+    slice_stride = layers > 1 ? at(0, 0, 1) & ~mask : 0;
+    terms.resize(size_t(w) + h + layers);
+    for (u32 x = 0; x < w; x++)
+      terms[x] = at(x, 0, 0);
+    for (u32 y = 0; y < h; y++)
+      terms[w + y] = at(0, y, 0);
+    for (u32 z = 0; z < layers; z++)
+      terms[w + h + z] = at(0, 0, z) & mask;
+    return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+bool BuildSeparableAddressTable(const TextureLayout32& layout,
+                                u32 mip,
+                                std::vector<u32>& terms,
+                                u32& block_mask,
+                                u64& slice_stride) {
+  if (TilingIsGfx10(layout.tiling_idx)) {
+    slice_stride = layout.layer_stride;
+    return layout.layer_stride &&
+           BuildGfx10AddressTable(layout, mip, terms, block_mask);
+  }
+  struct Built {
+    std::vector<u32> terms;
+    u32 mask = 0;
+    u64 stride = 0;
+    bool ok = false;
+  };
+  static std::mutex mutex;
+  static std::unordered_map<u64, Built> built;
+  u64 key = 1469598103934665603ull;
+  for (u64 v : {u64(layout.tiling_idx), u64(layout.elem_bytes),
+                u64(layout.layers), u64(layout.mip_levels), layout.size,
+                u64(mip), layout.mips[mip].offset, u64(layout.mips[mip].width),
+                u64(layout.mips[mip].height), u64(layout.mips[mip].pitch),
+                u64(layout.mips[mip].stored_height)})
+    key = (key ^ v) * 1099511628211ull;
+  std::lock_guard<std::mutex> lock(mutex);
+  auto it = built.find(key);
+  if (it == built.end()) {
+    Built b;
+    b.ok = BuildLiverpoolAddressTable(layout, mip, b.terms, b.mask, b.stride);
+    it = built.emplace(key, std::move(b)).first;
+  }
+  if (!it->second.ok)
+    return false;
+  terms = it->second.terms;
+  block_mask = it->second.mask;
+  slice_stride = it->second.stride;
+  return true;
+}
+
+void CopyImageContents(const TextureLayout32& layout,
+                       const void* src,
+                       void* dst) {
+  if (!TilingIsGfx10(layout.tiling_idx)) {
+    std::vector<u32> terms;
+    for (u32 mip = 0; mip < layout.mip_levels; mip++) {
+      const auto& level = layout.mips[mip];
+      u32 mask;
+      u64 stride;
+      if (!BuildSeparableAddressTable(layout, mip, terms, mask, stride))
+        return;
+      for (u32 layer = 0; layer < layout.layers; layer++) {
+        const u64 base = level.offset + stride * layer;
+        const auto* source = static_cast<const u8*>(src) + base;
+        auto* dest = static_cast<u8*>(dst) + base;
+        const u32 slice = terms[level.width + level.height + layer];
+        DetileParallelWork(
+            level.height, u64(level.width) * level.height, [&](u32 y0, u32 y1) {
+              for (u32 y = y0; y < y1; y++) {
+                const u32 yt = terms[level.width + y];
+                for (u32 x = 0; x < level.width; x++) {
+                  const u32 xt = terms[x];
+                  const u32 offset = (xt & ~mask) + (yt & ~mask) +
+                                     ((xt ^ yt ^ slice) & mask);
+                  std::memcpy(dest + offset, source + offset,
+                              layout.elem_bytes);
+                }
+              }
+            });
+      }
+    }
+    return;
+  }
   Gfx10Addresser addr;
   if (!addr.Init(layout.tiling_idx - kGfx10TilingBase, layout.elem_bytes))
     return;

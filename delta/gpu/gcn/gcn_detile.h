@@ -90,11 +90,21 @@ bool BuildGfx10AddressTable(const TextureLayout32& layout,
                             std::vector<u32>& terms,
                             u32& block_mask);
 
-// Copy only logical texels between matching gfx10 layouts, leaving padding
-// untouched. Whole interior blocks use contiguous copies.
-void CopyGfx10ImageContents(const TextureLayout32& layout,
-                           const void* src,
-                           void* dst);
+// The same terms for any tiled layout with 4-byte or wider elements: gfx10
+// from its equation, Liverpool derived from the detiler and checked against
+// every texel. `slice_stride` is the additive distance between array layers;
+// the per-layer terms carry only the XOR part.
+bool BuildSeparableAddressTable(const TextureLayout32& layout,
+                                u32 mip,
+                                std::vector<u32>& terms,
+                                u32& block_mask,
+                                u64& slice_stride);
+
+// Copy only logical texels between matching tiled layouts, leaving padding
+// untouched. Whole interior gfx10 blocks use contiguous copies.
+void CopyImageContents(const TextureLayout32& layout,
+                       const void* src,
+                       void* dst);
 
 // Full physical layout of a 1-sample 2D/2D-array image with `elem_bytes`-wide elements
 // (2/4 = pixel; 8/16 = BCn block, dims in blocks). Mip-major; each mip holds all array

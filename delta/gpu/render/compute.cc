@@ -1442,8 +1442,10 @@ rhi::Texture* GetBridgeFloatImage(u32 w, u32 h) {
 // command list instead of submitted and waited on its own: the target's
 // texels go straight into the range's VRAM buffer, which holds linear texels
 // already, so this is one copy (a packed-float target goes through a blit)
-// and nothing touches the host. The chunk is then submitted so the dispatch
-// that reads the buffer, recorded into the compute batch, runs after it.
+// and nothing touches the host. A truth range's buffer holds tiled bytes: the
+// copy lands in a scratch and the tiling shader retiles it into the truth.
+// The chunk is then submitted so the dispatch that reads the buffer, recorded
+// into the compute batch, runs after it.
 // Returns false for the shapes it does not cover; the caller then takes the
 // synchronous path.
 DELTA_OPTION(bool, kCsInFrameBridge, "DELTA_GPU_CS_INFRAME_BRIDGE", true);
@@ -1461,9 +1463,10 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
                           CsRange& e,
                           const AliasedCopyPlan& plan) {
   const CsAliasedImage& img = t.img;
-  if (!kCsInFrameBridge || !g_frame.recording || e.truth || !e.buf ||
-      plan.widen || plan.depth16 || plan.layers != 1 || res.layers > 1 ||
-      img.layers != 1 || t.layout == rhi::TextureState::kUndefined)
+  if (!kCsInFrameBridge || !g_frame.recording || !e.buf || plan.widen ||
+      plan.depth16 || plan.layers != 1 || res.layers > 1 || img.layers != 1 ||
+      t.layout == rhi::TextureState::kUndefined ||
+      (e.truth && (plan.unpack || img.is_stencil)))
     return false;
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(res, tiled, linear))
@@ -1471,8 +1474,15 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   const auto& level = linear.mips[0];
   const u64 copy_bytes =
       static_cast<u64>(level.pitch) * plan.h * res.stage_elem_bytes;
-  if (level.offset + copy_bytes > e.cap || res.size > e.cap)
+  const TileTable* table = nullptr;
+  rhi::Buffer* linear_buf = e.buf;
+  if (e.truth) {
+    if (!(table = GetTileTable(tiled, linear)) ||
+        !(linear_buf = AcquireScratch(res.size)))
+      return false;
+  } else if (level.offset + copy_bytes > e.cap || res.size > e.cap) {
     return false;
+  }
   rhi::Texture* float_image = nullptr;
   if (plan.unpack &&
       (!BlitsBetween((t.fmt), rhi::Format::kRGBA32Float) ||
@@ -1486,7 +1496,7 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   // Staging bytes the copy does not reach read as zero, as the host path's
   // cleared mirror did.
   if (level.offset || copy_bytes < res.size || plan.w < level.pitch) {
-    c->FillBuffer(e.buf, 0, res.size & ~u64(3), 0);
+    c->FillBuffer(linear_buf, 0, res.size & ~u64(3), 0);
     c->Barrier(rhi::kAccessCopyWrite, rhi::kAccessCopyWrite);
   }
   rhi::BufferTextureCopy copy;
@@ -1510,10 +1520,13 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
     fb.before = rhi::TextureState::kCopyDst;
     fb.after = kSrc;
     c->Barrier(0, 0, &fb, 1);
-    c->CopyTextureToBuffer(e.buf, float_image, &copy, 1);
+    c->CopyTextureToBuffer(linear_buf, float_image, &copy, 1);
   } else {
-    c->CopyTextureToBuffer(e.buf, img.texture, &copy, 1);
+    c->CopyTextureToBuffer(linear_buf, img.texture, &copy, 1);
   }
+  if (table)
+    RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, linear_buf,
+                      res.size, /*detile=*/false, 1, 1);
   AliasedImageBarrier(c, img, kSrc, t.layout);
   c->Barrier(rhi::kAccessCopyWrite, kAccessAll);
   e.frame_ref = g_frame.num;
@@ -2071,7 +2084,6 @@ bool ConvertGfx10ImageImpl(const gcn::TextureLayout32& tiled,
   const u64 max_range = Device().caps().max_storage_buffer_range;
   if ((!expanded && (tiled.elem_bytes < 4 ||
                      tiled.elem_bytes != linear.elem_bytes)) ||
-      !tiled.layer_stride ||
       linear.tiling_idx != 8 || tiled.layers != linear.layers ||
       tiled.mip_levels != linear.mip_levels ||
       tiled.size > max_range ||
@@ -2084,13 +2096,13 @@ bool ConvertGfx10ImageImpl(const gcn::TextureLayout32& tiled,
     const auto& t = tiled.mips[mip];
     const auto& l = linear.mips[mip];
     u32 mask;
+    u64 stride;
     if (t.width != l.width || t.height != l.height ||
-        !gcn::BuildGfx10AddressTable(tiled, mip, terms, mask))
+        !gcn::BuildSeparableAddressTable(tiled, mip, terms, mask, stride))
       return false;
     params.push_back({t.width, t.height, linear.elem_bytes / 4,
                       static_cast<u32>(table.size()), mask,
-                      static_cast<u32>(t.offset),
-                      static_cast<u32>(tiled.layer_stride),
+                      static_cast<u32>(t.offset), static_cast<u32>(stride),
                       static_cast<u32>(l.offset / 4), l.pitch,
                       l.pitch * l.stored_height * (linear.elem_bytes / 4),
                       detile ? 1u : 0u, tiled.elem_bytes});
@@ -2185,7 +2197,7 @@ bool ConvertGfx10ImageImpl(const gcn::TextureLayout32& tiled,
     ParallelCopy(dst, s.buffers[output].map, sizes[output]);
     g_tile_hout_bytes += sizes[output];
   } else if (!detile && !dma_tiled) {
-    gcn::CopyGfx10ImageContents(tiled, s.buffers[output].map, dst);
+    gcn::CopyImageContents(tiled, s.buffers[output].map, dst);
     g_tile_hout_bytes += tiled.size;
   }
   g_tile_hout_ns += NowNs() - _t_hout;
@@ -2221,8 +2233,7 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
   if (!InitTiling() ||
       (!expanded && !packed &&
        (tiled.elem_bytes < 4 || tiled.elem_bytes != linear.elem_bytes)) ||
-      !tiled.layer_stride || linear.tiling_idx != 8 ||
-      tiled.layers != linear.layers ||
+      linear.tiling_idx != 8 || tiled.layers != linear.layers ||
       tiled.mip_levels != linear.mip_levels ||
       tiled.size > max_range ||
       linear.size > max_range || tiled.size > UINT32_MAX ||
@@ -2240,13 +2251,14 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
     const auto& tm = tiled.mips[mip];
     const auto& lm = linear.mips[mip];
     u32 mask;
+    u64 stride;
     if (tm.width != lm.width || tm.height != lm.height ||
-        !gcn::BuildGfx10AddressTable(tiled, mip, terms, mask))
+        !gcn::BuildSeparableAddressTable(tiled, mip, terms, mask, stride))
       return nullptr;
     const u32 words = packed ? 1u : linear.elem_bytes / 4;
     t.params.push_back(
         {tm.width, tm.height, words, static_cast<u32>(table.size()), mask,
-         static_cast<u32>(tm.offset), static_cast<u32>(tiled.layer_stride),
+         static_cast<u32>(tm.offset), static_cast<u32>(stride),
          static_cast<u32>(packed ? lm.offset : lm.offset / 4), lm.pitch,
          packed ? lm.pitch * lm.stored_height * linear.elem_bytes
                 : lm.pitch * lm.stored_height * words,
@@ -2481,8 +2493,37 @@ bool TruthAvailable() {
 }
 #endif
 
-// A resource whose range can be a tiled truth: a gfx10 surface the tiling
-// shader handles, with the shader reading its texels directly or expanded.
+// The tiling shader handles every gfx10 swizzle, and a Liverpool layout once
+// its address terms are shown to be separable (4-byte and wider texels).
+bool GpuTileable(const ComputeInfo::Res& r) {
+  if (r.tiling_idx >= gcn::kGfx10TilingBase)
+    return true;
+  if (r.elem_bytes < 4 || r.elem_bytes != r.stage_elem_bytes)
+    return false;
+  static std::unordered_map<u64, bool> known;
+  u64 key = 1469598103934665603ull;
+  for (u64 v : {u64(r.tiling_idx), u64(r.width), u64(r.height), u64(r.pitch),
+                u64(r.layers), u64(r.mip_levels), u64(r.elem_bytes),
+                u64(r.dfmt), u64(r.pow2_pad), r.guest_size, r.size})
+    key = (key ^ v) * 1099511628211ull;
+  auto [it, inserted] = known.try_emplace(key, false);
+  if (!inserted)
+    return it->second;
+  gcn::TextureLayout32 tiled, linear;
+  if (!BuildCsImageLayouts(r, tiled, linear))
+    return false;
+  std::vector<u32> terms;
+  u32 mask;
+  u64 stride;
+  for (u32 mip = 0; mip < tiled.mip_levels; mip++)
+    if (!gcn::BuildSeparableAddressTable(tiled, mip, terms, mask, stride))
+      return false;
+  it->second = true;
+  return true;
+}
+
+// A resource whose range can be a tiled truth: a surface the tiling shader
+// handles, with the shader reading its texels directly or expanded.
 bool TruthEligible(const ComputeInfo::Res& r) {
   return kCsTruth && kCsVram && r.image_staging &&
          !r.zero_fill && r.size && r.guest_size &&
@@ -2490,12 +2531,11 @@ bool TruthEligible(const ComputeInfo::Res& r) {
           ((r.elem_bytes == 1 || r.elem_bytes == 2) &&
            r.stage_elem_bytes == 4)) &&
          r.dfmt != 6 && r.dfmt != 35 && r.dfmt != 40 &&
-         r.tiling_idx >= gcn::kGfx10TilingBase &&
          !gcn::TilingIsLinear(r.tiling_idx) &&
          r.guest_size <= Device().caps().max_storage_buffer_range &&
          r.size <= Device().caps().max_storage_buffer_range &&
          r.guest_size <= (768ull << 20) && r.size <= (768ull << 20) &&
-         TruthAvailable();
+         TruthAvailable() && GpuTileable(r);
 }
 
 // Defined either side of the backend guard: CsRangeDestroy runs whether or not
@@ -2514,8 +2554,8 @@ bool CanGpuTile(const ComputeInfo::Res& res, const CsRange& e) {
          ((res.elem_bytes >= 4 && res.elem_bytes == res.stage_elem_bytes) ||
           ((res.elem_bytes == 1 || res.elem_bytes == 2) &&
            res.stage_elem_bytes == 4)) && res.dfmt != 35 &&
-         res.dfmt != 40 && res.tiling_idx >= gcn::kGfx10TilingBase &&
-         !gcn::TilingIsLinear(res.tiling_idx);
+         res.dfmt != 40 && !gcn::TilingIsLinear(res.tiling_idx) &&
+         GpuTileable(res);
 }
 
 bool ConvertCsRangeImage(const ComputeInfo::Res& res, CsRange& e, bool detile) {
