@@ -55,7 +55,7 @@ DELTA_OPTION(int, kWantW, "DELTA_GPU_PRESENT_RTW", 0);
 DELTA_OPTION(int, kWantH, "DELTA_GPU_PRESENT_RTH", 0);
 DELTA_OPTION(u64, kWantAddr, "DELTA_GPU_PRESENT_ADDR", 0);
 DELTA_OPTION(int, kFlipMode, "DELTA_GPU_FLIP", 0);
-DELTA_OPTION(bool, kCsLazyFlush, "DELTA_GPU_CS_LAZY_FLUSH", false);
+DELTA_OPTION(bool, kCsLazyFlush, "DELTA_GPU_CS_LAZY_FLUSH", true);
 DELTA_OPTION(int, kSnapAt, "DELTA_GPU_SNAP", 0);
 DELTA_OPTION(u32, kLdsDump, "DELTA_GPU_LDSDUMP", 0);
 constexpr u32 kLdsPoison = 0xCDCDCDCD;
@@ -1004,16 +1004,13 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   BufferCacheEndFrame();
   if (!renderer.available() || !g_frame.recording)
     return;
-  // Bound CS-write staleness for guest CPU readers. Only a device fault (the
-  // flush nulls renderer.state) is fatal; a range that could not be written
-  // back just stays stale, as it always did.
-  // DELTA_GPU_CS_LAZY_FLUSH=1 drops this blanket flush and leaves the writeback
-  // to the targeted FlushCsWritesRange calls the guest readers already make
-  // (textures, vertex/index data, constant buffers, CP DMA sources). It exists
-  // because SotC's async compute writes back whole 4 MiB material arenas EVERY
-  // frame whether anything reads them or not: 80 ms of memcpy in a 1.3 fps
-  // frame. The risk is a guest CPU read that goes through none of those hooks
-  // seeing a stale range.
+  // Compute results stay on the GPU: guest memory catches up when one of our
+  // own readers asks (FlushCsWritesRange from textures, vertex/index data,
+  // constant buffers, descriptors, CP DMA and indirect arguments), or when a
+  // range goes idle. Writing every dirty range back at every frame end was
+  // ~95 MB a frame in GTA:SA and 80 ms in SotC, for a guest CPU that almost
+  // never reads them. DELTA_GPU_CS_LAZY_FLUSH=0 restores the blanket
+  // writeback for a title whose CPU code does read compute output directly.
   if (!FlushCsWritesFrameEnd(renderer, !kCsLazyFlush) &&
       !renderer.available()) {
     g_frame.recording = false;

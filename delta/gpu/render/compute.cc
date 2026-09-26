@@ -1607,6 +1607,11 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
   CsAliasedImage img;
   if (!e.image_staging)
     return true;
+  // The frame list already copied this revision into the target
+  // (CsRefreshRtInFrame); uploading it again would paint over whatever was
+  // rendered into it since.
+  if (e.rt_seq == e.write_seq)
+    return true;
   // A base rendered at several geometries: the dispatch names which one it
   // writes, and only the live image answers to the address.
   ActivateWrittenRtVariant(base, e.res.width, e.res.height);
@@ -3552,17 +3557,27 @@ bool CsSupplyTexture(u64 base,
   // not. A live target's address belongs to the render-target path.
   if (r.width != w || r.height != h)
     return declined("extent");
-  if (r.layers != layout.layers || r.mip_levels != layout.mip_levels)
+  // A texture may name fewer layers than the dispatch's view of the same
+  // memory (a cube read as its six faces of an eight-slice array): checked
+  // against the tiled layouts below.
+  if (r.layers < layout.layers || r.mip_levels != layout.mip_levels)
     return declined("layers/mips");
-  // A truth's narrow texels come out packed by the tiling shader; every
-  // other converted staging (11/11/10 unpacked, BCn decoded) has no image
-  // the copy could land in.
+  // A truth's narrow texels come out packed by the tiling shader. An 11/11/10
+  // surface is staged unpacked to RGBA32F: it goes through a float image and
+  // a blit, which packs it. Every other converted staging (BCn decoded, widened
+  // 8/16-bit) has no image the copy could land in.
   const bool narrow = e.truth && r.elem_bytes < 4 && r.stage_elem_bytes == 4;
-  if (r.dfmt == 6 || r.dfmt == 35 || r.dfmt == 40 ||
-      (!narrow && r.elem_bytes != r.stage_elem_bytes))
+  const bool unpacked = r.dfmt == 6 && !e.truth && r.stage_elem_bytes == 16 &&
+                        r.mip_levels == 1 && r.layers == 1;
+  if ((r.dfmt == 6 && !unpacked) || r.dfmt == 35 || r.dfmt == 40 ||
+      (!narrow && !unpacked && r.elem_bytes != r.stage_elem_bytes))
     return declined("converted staging");
   if (r.elem_bytes != layout.elem_bytes)
     return declined("texel size");
+  if (unpacked &&
+      ((img && !BlitsBetween(rhi::Format::kRGBA32Float, img->desc().format)) ||
+       !GetBridgeFloatImage(w, h)))
+    return declined("no blit");
   // A live target answers for its own geometry only; a view of the same
   // memory at another size (a 2432x1368 upscale over a 1080p target's pages)
   // is this range's.
@@ -3575,6 +3590,13 @@ bool CsSupplyTexture(u64 base,
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(r, tiled, linear) || linear.layer_stride)
     return declined("layout");
+  // Fewer layers than the view: only when every level of the texture starts
+  // where the view's does (layers sit inside each level on Liverpool), so the
+  // texture's layers are the view's first ones.
+  if (layout.layers != r.layers)
+    for (u32 mip = 0; mip < layout.mip_levels; mip++)
+      if (layout.mips[mip].offset != tiled.mips[mip].offset)
+        return declined("layer subset");
   if (narrow && !gcn::BuildTextureLayout32(linear, r.width, r.height, r.pitch,
                                            r.layers, r.mip_levels, 8,
                                            r.pow2_pad, r.elem_bytes))
@@ -3594,7 +3616,7 @@ bool CsSupplyTexture(u64 base,
     copies[mip].row_length = level.pitch;
     copies[mip].image_height = level.stored_height;
     copies[mip].region.mip = mip;
-    copies[mip].region.layers = linear.layers;
+    copies[mip].region.layers = layout.layers;
     copies[mip].region.width = level.width;
     copies[mip].region.height = level.height;
   }
@@ -3625,9 +3647,28 @@ bool CsSupplyTexture(u64 base,
   b.before = state;
   b.after = rhi::TextureState::kCopyDst;
   b.range.mips = linear.mip_levels;
-  b.range.layers = linear.layers;
+  b.range.layers = layout.layers;
   list->Barrier(0, 0, &b, 1);
-  list->CopyBufferToTexture(img, src, copies, linear.mip_levels);
+  if (unpacked) {
+    // RGBA32F texels into the float image, then a blit packs them into the
+    // texture's 11/11/10.
+    rhi::Texture* float_image = GetBridgeFloatImage(w, h);
+    rhi::TextureBarrier fb;
+    fb.texture = float_image;
+    fb.before = rhi::TextureState::kUndefined;
+    fb.after = rhi::TextureState::kCopyDst;
+    list->Barrier(0, 0, &fb, 1);
+    list->CopyBufferToTexture(float_image, src, copies, 1);
+    fb.before = rhi::TextureState::kCopyDst;
+    fb.after = rhi::TextureState::kCopySrc;
+    list->Barrier(0, 0, &fb, 1);
+    rhi::TextureRegion region;
+    region.width = w;
+    region.height = h;
+    list->BlitTexture(img, region, float_image, region, rhi::Filter::kNearest);
+  } else {
+    list->CopyBufferToTexture(img, src, copies, linear.mip_levels);
+  }
   b.before = rhi::TextureState::kCopyDst;
   b.after = rhi::TextureState::kShaderRead;
   list->Barrier(0, 0, &b, 1);
@@ -3706,12 +3747,15 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
 // command list: detile into a scratch, copy into the image, and leave the
 // image in the layout the recording expects. No writeback, no wait.
 bool CsRefreshRtInFrame(u64 base, CsRange& e) {
-  if (!e.truth || !e.gpu_dirty || !e.buf || e.rt_seq == e.write_seq ||
-      !g_frame.recording)
+  if ((!e.truth && !e.image_staging) || !e.gpu_dirty || !e.buf ||
+      e.rt_seq == e.write_seq || !g_frame.recording)
     return false;
   const ComputeInfo::Res& r = e.res;
+  // A linear staging holds the texels as they are, except 11/11/10, which is
+  // staged unpacked to RGBA32F and packed again by a blit.
+  const bool unpacked = !e.truth && r.dfmt == 6 && r.stage_elem_bytes == 16;
   if (r.mip_levels != 1 || r.layers != 1 ||
-      r.elem_bytes != r.stage_elem_bytes)
+      (!unpacked && r.elem_bytes != r.stage_elem_bytes))
     return false;
   ActivateWrittenRtVariant(base, r.width, r.height);
   auto rt_it = g_rts.find(base);
@@ -3723,22 +3767,31 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
       FormatBytes(rt.fmt) != r.elem_bytes)
     return false;
   gcn::TextureLayout32 tiled, linear;
-  const TileTable* table = BuildCsImageLayouts(r, tiled, linear)
-                               ? GetTileTable(tiled, linear)
-                               : nullptr;
-  if (!table)
+  if (!BuildCsImageLayouts(r, tiled, linear))
     return false;
-  g_cs_scratch_owner++;
-  bool fresh = true;
-  rhi::Buffer* const scratch =
-      AcquireView(linear.size, base, 0, table, e.write_seq, &fresh);
-  if (!scratch)
+  const u32 w = std::min(rt.w, r.width), h = std::min(rt.h, r.height);
+  rhi::Texture* float_image = nullptr;
+  if (unpacked && (!BlitsBetween(rhi::Format::kRGBA32Float, rt.fmt) ||
+                   !(float_image = GetBridgeFloatImage(w, h))))
     return false;
+  rhi::Buffer* src = e.buf;
+  bool fresh = false;
+  const TileTable* table = nullptr;
+  if (e.truth) {
+    if (!(table = GetTileTable(tiled, linear)))
+      return false;
+    g_cs_scratch_owner++;
+    fresh = true;
+    if (!(src = AcquireView(linear.size, base, 0, table, e.write_seq, &fresh)))
+      return false;
+  }
   EndRegion();
   rhi::CommandList* const list = g_frame.list;
+  list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+                rhi::kAccessCopyRead);
   // A partial conversion (mip 0, slice 0) is not a whole view: stamp nothing.
   if (fresh)
-    RecordImageTiling(list, *table, e.buf, 0, e.guest_bytes, scratch,
+    RecordImageTiling(list, *table, e.buf, 0, e.guest_bytes, src,
                       linear.size, /*detile=*/true, 1, 1);
   const rhi::TextureState from = rt.layout;
   TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopyDst);
@@ -3746,9 +3799,26 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   rhi::BufferTextureCopy copy;
   copy.buffer_offset = level.offset;
   copy.row_length = level.pitch;
-  copy.region.width = std::min(rt.w, r.width);
-  copy.region.height = std::min(rt.h, r.height);
-  list->CopyBufferToTexture(rt.texture, scratch, &copy, 1);
+  copy.region.width = w;
+  copy.region.height = h;
+  if (unpacked) {
+    rhi::TextureBarrier fb;
+    fb.texture = float_image;
+    fb.before = rhi::TextureState::kUndefined;
+    fb.after = rhi::TextureState::kCopyDst;
+    list->Barrier(0, 0, &fb, 1);
+    list->CopyBufferToTexture(float_image, src, &copy, 1);
+    fb.before = rhi::TextureState::kCopyDst;
+    fb.after = rhi::TextureState::kCopySrc;
+    list->Barrier(0, 0, &fb, 1);
+    rhi::TextureRegion region;
+    region.width = w;
+    region.height = h;
+    list->BlitTexture(rt.texture, region, float_image, region,
+                      rhi::Filter::kNearest);
+  } else {
+    list->CopyBufferToTexture(rt.texture, src, &copy, 1);
+  }
   // Back to the layout the recording had it in; a target nothing had laid
   // out yet stays a copy destination.
   if (from != rhi::TextureState::kUndefined)
@@ -3771,7 +3841,7 @@ bool CsRefreshRtFromTruth(u64 base) {
   if (it == g_cs_ranges.end())
     return false;
   CsRange& e = it->second;
-  if (!e.truth || !e.gpu_dirty)
+  if ((!e.truth && !e.image_staging) || !e.gpu_dirty)
     return false;
   // Already holds this revision: nothing to flush either.
   return e.rt_seq == e.write_seq || CsRefreshRtInFrame(base, e);
@@ -4974,6 +5044,31 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
       } else {
         ++it;
       }
+    }
+  }
+  if (!writeback) {
+    // A range nothing has used for a while is evicted, and its buffer holds
+    // the only copy of what a dispatch wrote: write that back first.
+    for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
+      CsRange& e = it->second;
+      if (e.pending_batch || CsFrameReferenced(e) ||
+          e.last_used_frame + 60 >= g_frame.num) {
+        ++it;
+        continue;
+      }
+      if (e.gpu_dirty) {
+        g_wb_why["idle"]++;
+        g_wb_why_bytes += e.size;
+        if (!CsRangeFlushOne(it->first, e)) {
+          if (g_cs_failed) {
+            renderer.state = nullptr;
+            return false;
+          }
+          ++it;
+          continue;
+        }
+      }
+      it = EraseCsRange(it);
     }
   }
   // The frame's command buffer may copy out of these ranges (CsSupplyTexture)
