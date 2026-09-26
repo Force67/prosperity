@@ -5,6 +5,7 @@ Turns guest GPU command streams into rendered frames.
 ```
 render/         the renderer as its callers see it (command.h, renderer.h)
 vulkan/         the only backend implementing it
+d3d12/          rhi::Device on Direct3D 12 (vkd3d's D3D12 on Linux)
 gcn/            shared ISA decode + the SPIR-V translator both consoles emit through
 ps4/            PM4 / Liverpool command processor + its GCN specifics
 ps5/            AGC / gfx10.3 command processor + the RDNA2 decoder/emitter
@@ -78,6 +79,39 @@ scanout address and hands the pixels to the window (or to a PPM, headless).
 The heuristic quad path in `vk_draw` predates the recompiler and is still the
 fallback for draws `vk_draw_recomp` declines; `DELTA_GPU_DECLINES=1` reports why
 draws are still landing there.
+
+## d3d12/
+
+`rhi::Device` on Direct3D 12, written as Windows D3D12 and built on Linux
+against vkd3d (D3D12 over Vulkan), which is where `rhi_conformance_test` runs
+it. Optional: `DELTA_GPU_D3D12`, on when vkd3d and DXC are found.
+
+| unit | hides |
+|---|---|
+| `d3d12_device` | device, queue and fence, resources, views, samplers, bind groups |
+| `d3d12_pipeline` | root signatures, pipeline states, the shader cache, the blit pass |
+| `d3d12_command` | command lists: state tracking, binding, copies, clears, draws |
+| `d3d12_shader` | SPIR-V -> HLSL (SPIRV-Cross) and its fix-ups, HLSL -> DXIL (`d3d12_dxc`) |
+| `d3d12_spirv_patch` | SPIR-V rewrites for what SPIRV-Cross cannot express in HLSL |
+| `d3d12_format` | `rhi::Format` -> DXGI |
+
+What differs from Vulkan and how it is bridged:
+
+- Viewports: a D3D12 viewport is Vulkan's y-up one. A negative Vulkan height
+  maps straight across; a positive one flips clip-space y in the last vertex
+  stage through a root constant. Screen positions, and so facing, match.
+- Binding: one root signature per pipeline layout, a descriptor table (plus a
+  sampler table) per group with register = binding and space = set, dynamic
+  uniform buffers as root CBVs, push constants as root constants. Groups are
+  copied into a shader-visible ring owned in chunks by each command list.
+- State: textures take the caller's before/after states; buffers are tracked
+  per command list from COMMON, since they decay there between
+  `ExecuteCommandLists` calls and each list is executed in its own.
+- Stage linkage: D3D12 matches signatures by register, so a consumer's inputs
+  are rewritten to the producer's element order.
+- Below shader model 6.1 barycentrics come from a generated geometry shader;
+  below 6.7 integer textures are sampled by gather. `tests/rhi_hlsl_corpus`
+  runs the recompiler's SPIR-V cache through all of this.
 
 ## ps4/
 

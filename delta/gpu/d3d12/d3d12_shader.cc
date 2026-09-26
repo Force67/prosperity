@@ -390,6 +390,9 @@ std::string Lower(const u32* words,
   std::string hlsl = compiler.compile();
   if (emulate.barycentrics && options.shader_model < 61)
     EmulateBarycentrics(hlsl);
+  if (options.shader_model < 61 &&
+      hlsl.find("GetAttributeAtVertex") != std::string::npos)
+    throw std::runtime_error("per-vertex fragment inputs need SM 6.1");
   out->uses_draw_params = compiler.is_hlsl_aux_buffer_binding_used(
       sc::HLSL_AUX_BINDING_BASE_VERTEX_INSTANCE);
 

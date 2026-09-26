@@ -426,13 +426,12 @@ int main(int argc, char** argv) {
         if (b.type == rhi::BindingType::kStorageBuffer && b.read_only)
           o.read_only_storage.emplace_back(set, b.binding);
     LoweredShader lowered;
-    bool ok = LowerToHlsl(m.words.data(), m.words.size(), o, &lowered);
-    // Barycentrics that are read need SM 6.1: lower for that too, so the
-    // counts show what a device with it would get.
-    bool sm61 = false;
-    if (!ok && lowered.error.find("SM 6.1") != std::string::npos) {
-      o.shader_model = std::max(o.shader_model, 61u);
-      ok = sm61 = LowerToHlsl(m.words.data(), m.words.size(), o, &lowered);
+    // As the backend on a device without SM 6.1: barycentrics that are read
+    // come from a generated geometry shader.
+    o.emulate_barycentrics = o.shader_model < 61;
+    const bool ok = LowerToHlsl(m.words.data(), m.words.size(), o, &lowered);
+    const bool sm61 = lowered.hlsl.find(": DELTABARY") != std::string::npos;
+    if (sm61) {
       std::lock_guard<std::mutex> lock(mutex);
       barycentric_read++;
     }
@@ -467,7 +466,7 @@ int main(int argc, char** argv) {
       return;
     std::string failure = checker->Check(m, dxil);
     if (sm61 && !failure.empty())
-      failure = "reads barycentrics (SM 6.1), " + failure;
+      failure = "emulated barycentrics, " + failure;
     std::lock_guard<std::mutex> lock(mutex);
     if (failure.empty())
       stats[stage].pso++;
@@ -488,7 +487,7 @@ int main(int argc, char** argv) {
   for (std::thread& t : threads)
     t.join();
 
-  std::printf("%zu modules; %d declare barycentrics (%d read them: SM 6.1), "
+  std::printf("%zu modules; %d declare barycentrics (%d read them, emulated), "
               "%d buffer addresses, %d separate images/samplers\n",
               files.size(), barycentric, barycentric_read, buffer_address,
               separate);
