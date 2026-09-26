@@ -72,17 +72,20 @@ bool IdentitySwizzle(const rhi::Swizzle (&sw)[4]) {
 
 }  // namespace
 
-// Transition `texture` from its legacy layout to `state`, keeping the layout
-// field in step. `layers` covers every layer the barrier must reach.
+// Transition `texture` from `current` to `state` and record the new state.
+// `layers` covers every layer the barrier must reach.
 void TransitionImage(rhi::CommandList* list,
                      rhi::Texture* texture,
-                     VkImageLayout& layout,
+                     rhi::TextureState& current,
                      rhi::TextureState state,
                      u8 aspect,
                      u32 layers) {
+  // A depth or stencil plane that is sampled is in the read-only depth state.
+  if (aspect != rhi::kAspectColor && state == rhi::TextureState::kShaderRead)
+    state = rhi::TextureState::kDepthRead;
   rhi::TextureBarrier b;
   b.texture = texture;
-  b.before = FromVkLayout(layout);
+  b.before = current;
   b.after = state;
   b.range.aspect = aspect;
   b.range.layers = layers;
@@ -91,9 +94,8 @@ void TransitionImage(rhi::CommandList* list,
     trace::RecordBarrier(aspect == rhi::kAspectColor     ? "color"
                          : aspect == rhi::kAspectStencil ? "stencil"
                                                          : "depth",
-                         reinterpret_cast<u64>(Native(texture)), b.before,
-                         state);
-  layout = ToVkLayout(state, aspect);
+                         reinterpret_cast<u64>(texture), b.before, state);
+  current = state;
 }
 
 rhi::TextureView* SampledImageView(rhi::Texture* texture,
@@ -217,7 +219,7 @@ void ClearNewRt(RTarget& t) {
   rhi::CommandList* list = BeginImmediate();
   if (!list)
     return;
-  VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  rhi::TextureState layout = rhi::TextureState::kUndefined;
   TransitionImage(list, t.texture, layout, rhi::TextureState::kCopyDst);
   list->ClearTexture(t.texture, rhi::TextureState::kCopyDst, {},
                      rhi::ClearColor{});
@@ -277,7 +279,6 @@ bool CreateRtImage(RTarget& t,
   t.texture = Device().CreateTexture(td);
   if (!t.texture)
     return false;
-  t.image = Native(t.texture);
   rhi::TextureViewDesc vd;
   vd.dim = depth > 1 ? rhi::ViewDim::k2DArray : rhi::ViewDim::k2D;
   vd.layers = depth;
@@ -285,7 +286,6 @@ bool CreateRtImage(RTarget& t,
   if (!t.view) {
     Device().Destroy(t.texture);
     t.texture = nullptr;
-    t.image = VK_NULL_HANDLE;
     return false;
   }
   if (depth > 1) {
@@ -419,7 +419,8 @@ RTarget* ActivateRtVariant(RTarget& live,
   }
   std::swap(live, *alt);
   if (trace::Recording())
-    trace::RecordVariantSwap(base, alt->image, alt->w, alt->h, live.image,
+    trace::RecordVariantSwap(base, reinterpret_cast<u64>(alt->texture), alt->w,
+                             alt->h, reinterpret_cast<u64>(live.texture),
                              live.w, live.h);
   // BeginFrame's per-frame reset only walks the live targets, so one that slept
   // through a frame boundary catches up here.
@@ -541,7 +542,6 @@ rhi::BindGroup* SnapshotRT(RTarget& rt) {
       rt.feedback_texture = nullptr;
       return nullptr;
     }
-    rt.feedback_image = Native(rt.feedback_texture);
   }
   rhi::CommandList* list = g_frame.list;
   TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
@@ -594,7 +594,6 @@ bool CreateDepthImage(DepthTarget& t,
   t.texture = Device().CreateTexture(td);
   if (!t.texture)
     return false;
-  t.image = Native(t.texture);
   rhi::TextureViewDesc vd;
   vd.aspect = rhi::kAspectDepth;
   t.view = Device().CreateView(t.texture, vd);
@@ -1220,7 +1219,7 @@ void EndRegion() {
 
 bool WriteRtToGuest(u64 base, u32 tile_mode) {
   auto it = g_rts.find(base);
-  if (it == g_rts.end() || !it->second.image || it->second.depth > 1)
+  if (it == g_rts.end() || !it->second.texture || it->second.depth > 1)
     return false;
   RTarget& rt = it->second;
   const u32 elem = FormatBytes(rt.fmt);
@@ -1250,13 +1249,13 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
   rhi::CommandList* list = BeginImmediate();
   if (!list)
     return false;
-  const VkImageLayout old_layout = rt.layout;
+  const rhi::TextureState old_layout = rt.layout;
   TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
   rhi::BufferTextureCopy copy;
   copy.region.width = rt.w;
   copy.region.height = rt.h;
   list->CopyTextureToBuffer(buf, rt.texture, &copy, 1);
-  TransitionImage(list, rt.texture, rt.layout, FromVkLayout(old_layout));
+  TransitionImage(list, rt.texture, rt.layout, old_layout);
   list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
   const bool ok = EndImmediate(list);
   if (!ok ||
@@ -1545,20 +1544,20 @@ bool BeginRegion(const u64* mrt_base,
     RTarget& rt = *targets[i];
     if (colors[i].load != rhi::LoadOp::kClear || (rt.w <= w && rt.h <= h))
       continue;
-    const VkImageLayout att = rt.layout;
+    const rhi::TextureState att = rt.layout;
     TransitionImage(g_frame.list, rt.texture, rt.layout,
                rhi::TextureState::kCopyDst);
     g_frame.list->ClearTexture(rt.texture, rhi::TextureState::kCopyDst, {},
                                colors[i].clear);
-    TransitionImage(g_frame.list, rt.texture, rt.layout, FromVkLayout(att));
+    TransitionImage(g_frame.list, rt.texture, rt.layout, att);
     colors[i].load = rhi::LoadOp::kLoad;
   }
   if (dt && (dt->w > w || dt->h > h)) {
-    const auto clear_aspect = [&](rhi::LoadOp& load, VkImageLayout& layout,
+    const auto clear_aspect = [&](rhi::LoadOp& load, rhi::TextureState& layout,
                                   u8 aspect) {
       if (load != rhi::LoadOp::kClear)
         return;
-      const VkImageLayout att = layout;
+      const rhi::TextureState att = layout;
       TransitionImage(g_frame.list, dt->texture, layout,
                  rhi::TextureState::kCopyDst, aspect, dt->layers);
       rhi::TextureRange range;
@@ -1567,7 +1566,7 @@ bool BeginRegion(const u64* mrt_base,
       g_frame.list->ClearDepthStencil(dt->texture, rhi::TextureState::kCopyDst,
                                       range, depth_att.clear_depth,
                                       depth_att.clear_stencil);
-      TransitionImage(g_frame.list, dt->texture, layout, FromVkLayout(att), aspect,
+      TransitionImage(g_frame.list, dt->texture, layout, att, aspect,
                  dt->layers);
       load = rhi::LoadOp::kLoad;
     };

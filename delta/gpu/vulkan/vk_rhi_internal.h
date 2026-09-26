@@ -275,6 +275,10 @@ class VulkanDevice final : public rhi::Device {
                       u64* out) override;
   void Maintain() override;
   void ReportDeviceLoss() override;
+  // RenderDoc names a Vulkan device by its instance's dispatch pointer.
+  void* CaptureHandle() const override {
+    return *reinterpret_cast<void**>(native.instance);
+  }
 
   // Fills `write` for one binding; `info` storage must outlive the update.
   void FillWrite(VkDescriptorType type,
@@ -316,6 +320,7 @@ class VulkanDevice final : public rhi::Device {
   u64 last_cache_write_ns_ = 0;
   size_t last_cache_size_ = 0;
   bool fault_reported_ = false;
+  VkDebugUtilsMessengerEXT messenger_ = VK_NULL_HANDLE;
   float max_lod_bias_ = 0.0f;
   float max_anisotropy_ = 1.0f;
 };

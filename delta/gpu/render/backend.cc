@@ -25,7 +25,9 @@ std::unique_ptr<rhi::Device> CreateBackendDevice(
       vk::VulkanOptions vo;
       vo.gpu_filter = options.gpu_filter;
       vo.debug_utils = options.debug_labels;
-      vo.validation_layer = options.validation_layer;
+      vo.validation_layer =
+          options.validation ? "VK_LAYER_KHRONOS_validation" : nullptr;
+      vo.on_message = options.on_message;
       vo.sync_validation = options.sync_validation;
       vo.checkpoints = options.checkpoints;
       vo.pipeline_cache_path = cache.empty() ? nullptr : cache.c_str();

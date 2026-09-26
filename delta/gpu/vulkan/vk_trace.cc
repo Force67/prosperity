@@ -95,7 +95,6 @@ int g_frames_left = 0;
 int g_armed_frame = 0;  // resolved frame number once a trigger fires
 bool g_finished = false;
 u64 g_start_ns = 0;
-VkDebugUtilsMessengerEXT g_messenger = VK_NULL_HANDLE;
 u32 g_validation_messages = 0;
 
 // Mid-frame readbacks recorded into the frame's own command buffer; drained
@@ -108,7 +107,7 @@ struct Snapshot {
   u64 base = 0;
   bool depth = false;
   u32 at_draw = 0;
-  VkImage image = VK_NULL_HANDLE;
+  rhi::Texture* image = nullptr;
 };
 std::vector<Snapshot> g_snapshots;
 
@@ -533,32 +532,24 @@ const char* FormatName(VkFormat fmt) {
   }
 }
 
-const char* LayoutName(VkImageLayout layout) {
+const char* LayoutName(rhi::TextureState layout) {
   switch (layout) {
-    case VK_IMAGE_LAYOUT_UNDEFINED:
+    case rhi::TextureState::kUndefined:
       return "UNDEFINED";
-    case VK_IMAGE_LAYOUT_GENERAL:
+    case rhi::TextureState::kGeneral:
       return "GENERAL";
-    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+    case rhi::TextureState::kColorTarget:
       return "COLOR_ATTACHMENT";
-    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+    case rhi::TextureState::kDepthTarget:
       return "DS_ATTACHMENT";
-    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+    case rhi::TextureState::kDepthRead:
       return "DS_READ_ONLY";
-    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+    case rhi::TextureState::kShaderRead:
       return "SHADER_READ_ONLY";
-    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+    case rhi::TextureState::kCopySrc:
       return "TRANSFER_SRC";
-    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+    case rhi::TextureState::kCopyDst:
       return "TRANSFER_DST";
-    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
-      return "DEPTH_ATTACHMENT";
-    case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
-      return "DEPTH_READ_ONLY";
-    case VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL:
-      return "STENCIL_ATTACHMENT";
-    case VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL:
-      return "STENCIL_READ_ONLY";
     default:
       return "OTHER";
   }
@@ -710,7 +701,7 @@ bool ReadImage(rhi::Texture* image,
                u32 w,
                u32 h,
                u32 texel_bytes,
-               VkImageLayout& layout,
+               rhi::TextureState& layout,
                std::vector<u8>& out) {
   if (!image || !w || !h)
     return false;
@@ -1265,7 +1256,7 @@ void QueueSnapshot(rhi::Texture* image,
                    u64 base,
                    bool depth,
                    u32 at_draw,
-                   VkImageLayout& layout) {
+                   rhi::TextureState& layout) {
   const u32 texel = depth ? 4 : FormatBytes(fmt);
   if (!image || !w || !h || !texel)
     return;
@@ -1277,7 +1268,7 @@ void QueueSnapshot(rhi::Texture* image,
   s.base = base;
   s.depth = depth;
   s.at_draw = at_draw;
-  s.image = Native(image);
+  s.image = image;
   rhi::BufferDesc desc;
   desc.size = s.bytes;
   desc.usage = rhi::kBufferCopyDst;
@@ -1393,7 +1384,7 @@ void DumpFrameResources() {
           .Str("kind", "rt")
           .Str("when", "frame-end")
           .Hex("base", kv.first)
-          .Hex("image", reinterpret_cast<u64>(rt.image))
+          .Hex("image", reinterpret_cast<u64>(rt.texture))
           .U("w", rt.w)
           .U("h", rt.h)
           .Str("format", FormatName(rt.fmt))
@@ -1473,43 +1464,6 @@ void DumpFrameResources() {
 
 // --- validation ------------------------------------------------------------
 
-VKAPI_ATTR VkBool32 VKAPI_CALL
-ValidationCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-                   VkDebugUtilsMessageTypeFlagsEXT,
-                   const VkDebugUtilsMessengerCallbackDataEXT* data,
-                   void*) {
-  const char* level =
-      severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT     ? "error"
-      : severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT ? "warning"
-      : severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT    ? "info"
-                                                                   : "verbose";
-  g_validation_messages++;
-  // The active label stack is what names the guest draw: vk_debug opens
-  // "frame N" / "region rt=..." / "recomp vs=... ps=..." around every command.
-  std::string labels;
-  for (u32 i = 0; i < data->cmdBufLabelCount; i++) {
-    if (!labels.empty())
-      labels += " > ";
-    labels += data->pCmdBufLabels[i].pLabelName;
-  }
-  BASE_LOGI("vkval", "{} f{} draw#{} [{}] {}: {}", level,
-            g_frame.num, g_frame.draws, labels.c_str(),
-            data->pMessageIdName ? data->pMessageIdName : "?",
-            data->pMessage ? data->pMessage : "");
-  if (g_recording) {
-    Line l("validation");
-    l.U("seq", g_seq++)
-        .Str("severity", level)
-        .Int("draw", int(g_draw_seq))
-        .Int("frame_draw", int(g_frame.draws))
-        .Str("id", data->pMessageIdName ? data->pMessageIdName : "")
-        .Str("labels", labels.c_str())
-        .Str("message", data->pMessage ? data->pMessage : "");
-    l.Emit();
-  }
-  return VK_FALSE;
-}
-
 }  // namespace
 
 // --- public ----------------------------------------------------------------
@@ -1528,37 +1482,24 @@ const char* ValidationLayerName() {
   return "VK_LAYER_KHRONOS_validation";
 }
 
-void InstallValidationMessenger(VkInstance instance) {
-  if (!WantValidation() || !instance || g_messenger)
-    return;
-  auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
-      vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
-  if (!create) {
-    BASE_LOGI("vkval",
-              "validation requested but the layer is not loaded "
-              "(is VK_LAYER_PATH set?)");
-    return;
+void OnDeviceMessage(const char* level,
+                     const char* id,
+                     const char* labels,
+                     const char* message) {
+  g_validation_messages++;
+  BASE_LOGI("vkval", "{} f{} draw#{} [{}] {}: {}", level, g_frame.num,
+            g_frame.draws, labels, id, message);
+  if (g_recording) {
+    Line l("validation");
+    l.U("seq", g_seq++)
+        .Str("severity", level)
+        .Int("draw", int(g_draw_seq))
+        .Int("frame_draw", int(g_frame.draws))
+        .Str("id", id)
+        .Str("labels", labels)
+        .Str("message", message);
+    l.Emit();
   }
-  VkDebugUtilsMessengerCreateInfoEXT ci{
-      VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
-  ci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                       VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-  ci.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                   VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                   VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-  ci.pfnUserCallback = ValidationCallback;
-  create(instance, &ci, nullptr, &g_messenger);
-  BASE_LOGI("vkval", "validation layer active");
-}
-
-void DestroyValidationMessenger(VkInstance instance) {
-  if (!g_messenger || !instance)
-    return;
-  auto destroy = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
-      vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
-  if (destroy)
-    destroy(instance, g_messenger, nullptr);
-  g_messenger = VK_NULL_HANDLE;
 }
 
 bool NamesWanted() {
@@ -1566,7 +1507,7 @@ bool NamesWanted() {
   return want;
 }
 
-void RegisterObjectName(VkObjectType, u64 handle, const char* name) {
+void RegisterObjectName(u64 handle, const char* name) {
   if (!handle || !name)
     return;
   NameTable()[handle] = name;
@@ -1944,39 +1885,6 @@ void RecordDispatch(const render::ComputeInfo& ci) {
   l.Emit();
 }
 
-void RecordBarrier(const char* aspect,
-                   VkImage image,
-                   VkImageLayout from,
-                   VkImageLayout to,
-                   VkAccessFlags src_access,
-                   VkAccessFlags dst_access) {
-  if (!g_recording)
-    return;
-  // Name the image after the guest resource it holds. The RT and depth caches
-  // are the authority; anything else falls back to the debug-utils name.
-  std::string name = ObjectName(reinterpret_cast<u64>(image));
-  if (name.empty()) {
-    for (const auto& kv : g_rts)
-      if (kv.second.image == image) {
-        char buf[64];
-        std::snprintf(buf, sizeof buf, "rt %#llx",
-                      (unsigned long long)kv.first);
-        name = buf;
-        break;
-      }
-  }
-  Line l("barrier");
-  l.U("seq", g_seq++)
-      .Int("after_draw", int(g_draw_seq))
-      .Str("aspect", aspect)
-      .Hex("image", reinterpret_cast<u64>(image))
-      .Str("resource", name.c_str())
-      .Str("from", LayoutName(from))
-      .Str("to", LayoutName(to))
-      .Hex("src_access", src_access)
-      .Hex("dst_access", dst_access);
-  l.Emit();
-}
 
 void RecordBarrier(const char* aspect,
                    u64 image,
@@ -1984,13 +1892,10 @@ void RecordBarrier(const char* aspect,
                    rhi::TextureState to) {
   if (!g_recording)
     return;
-  static const char* const kStates[] = {"undefined", "general", "color",
-                                        "depth",     "depth-read", "shader-read",
-                                        "copy-src",  "copy-dst"};
   std::string name = ObjectName(image);
   if (name.empty())
     for (const auto& kv : g_rts)
-      if (reinterpret_cast<u64>(kv.second.image) == image) {
+      if (reinterpret_cast<u64>(kv.second.texture) == image) {
         char buf[64];
         std::snprintf(buf, sizeof buf, "rt %#llx",
                       (unsigned long long)kv.first);
@@ -2003,16 +1908,16 @@ void RecordBarrier(const char* aspect,
       .Str("aspect", aspect)
       .Hex("image", image)
       .Str("name", name.c_str())
-      .Str("from", kStates[static_cast<int>(from)])
-      .Str("to", kStates[static_cast<int>(to)]);
+      .Str("from", LayoutName(from))
+      .Str("to", LayoutName(to));
   l.Emit();
 }
 
 void RecordVariantSwap(u64 base,
-                       VkImage from,
+                       u64 from,
                        u32 from_w,
                        u32 from_h,
-                       VkImage to,
+                       u64 to,
                        u32 to_w,
                        u32 to_h) {
   if (!g_recording)
@@ -2021,16 +1926,16 @@ void RecordVariantSwap(u64 base,
   l.U("seq", g_seq++)
       .Int("after_draw", int(g_draw_seq))
       .Hex("base", base)
-      .Hex("from_image", reinterpret_cast<u64>(from))
+      .Hex("from_image", from)
       .U("from_w", from_w)
       .U("from_h", from_h)
-      .Hex("to_image", reinterpret_cast<u64>(to))
+      .Hex("to_image", to)
       .U("to_w", to_w)
       .U("to_h", to_h);
   l.Emit();
 }
 
-void RecordBridge(const char* dir, u64 base, rhi::Texture* image, u32 w, u32 h) {
+void RecordBridge(const char* dir, u64 base, u64 image, u32 w, u32 h) {
   if (!g_recording)
     return;
   Line l("bridge");
@@ -2038,7 +1943,7 @@ void RecordBridge(const char* dir, u64 base, rhi::Texture* image, u32 w, u32 h) 
       .Int("after_draw", int(g_draw_seq))
       .Str("dir", dir)
       .Hex("base", base)
-      .Hex("image", reinterpret_cast<u64>(Native(image)))
+      .Hex("image", image)
       .U("w", w)
       .U("h", h);
   l.Emit();

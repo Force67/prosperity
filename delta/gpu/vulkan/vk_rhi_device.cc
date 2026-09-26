@@ -25,6 +25,30 @@ namespace {
 constexpr VkDeviceSize kImageBlockSize = 256ull * 1024 * 1024;
 constexpr u32 kSetsPerPool = 1024;
 
+// Forwards a validation message with the command label stack that names the
+// guest work which provoked it.
+VKAPI_ATTR VkBool32 VKAPI_CALL
+MessageCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                VkDebugUtilsMessageTypeFlagsEXT,
+                const VkDebugUtilsMessengerCallbackDataEXT* data,
+                void* user) {
+  using Sink = void (*)(const char*, const char*, const char*, const char*);
+  const char* level =
+      severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT     ? "error"
+      : severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT ? "warning"
+                                                                   : "info";
+  std::string labels;
+  for (u32 i = 0; i < data->cmdBufLabelCount; i++) {
+    if (!labels.empty())
+      labels += " > ";
+    labels += data->pCmdBufLabels[i].pLabelName;
+  }
+  reinterpret_cast<Sink>(user)(
+      level, data->pMessageIdName ? data->pMessageIdName : "?",
+      labels.c_str(), data->pMessage ? data->pMessage : "");
+  return VK_FALSE;
+}
+
 bool HasExtension(const std::vector<VkExtensionProperties>& exts,
                   const char* name) {
   for (const auto& e : exts)
@@ -439,8 +463,22 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
         vkGetInstanceProcAddr(inst, "vkCmdInsertDebugUtilsLabelEXT"));
     caps_.debug_labels = set_object_name != nullptr;
   }
-  if (options.on_instance)
-    options.on_instance(native.instance);
+  if (options.on_message && ic.enabledLayerCount && debug_utils) {
+    auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+        vkGetInstanceProcAddr(native.instance,
+                              "vkCreateDebugUtilsMessengerEXT"));
+    VkDebugUtilsMessengerCreateInfoEXT mi{
+        VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+    mi.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                         VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    mi.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                     VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                     VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    mi.pfnUserCallback = MessageCallback;
+    mi.pUserData = reinterpret_cast<void*>(options.on_message);
+    if (create)
+      create(native.instance, &mi, nullptr, &messenger_);
+  }
 
   // Prefer a real GPU over a software rasteriser: discrete > integrated >
   // virtual > CPU, unless the filter names one.
@@ -567,10 +605,15 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
       props.pNext = &native.mesh_limits;
       vkGetPhysicalDeviceProperties2(phys, &props);
-      caps_.mesh_max_output_vertices =
-          native.mesh_limits.maxMeshOutputVertices;
-      caps_.mesh_max_output_primitives =
-          native.mesh_limits.maxMeshOutputPrimitives;
+      const auto& ml = native.mesh_limits;
+      caps_.mesh.max_threads = ml.maxMeshWorkGroupInvocations;
+      caps_.mesh.max_threads_x = ml.maxMeshWorkGroupSize[0];
+      caps_.mesh.max_shared_bytes = ml.maxMeshSharedMemorySize;
+      caps_.mesh.max_output_vertices = ml.maxMeshOutputVertices;
+      caps_.mesh.max_output_primitives = ml.maxMeshOutputPrimitives;
+      caps_.mesh.max_groups[0] = ml.maxMeshWorkGroupCount[0];
+      caps_.mesh.max_groups[1] = ml.maxMeshWorkGroupCount[1];
+      caps_.mesh.max_total_groups = ml.maxMeshWorkGroupTotalCount;
     }
   }
 

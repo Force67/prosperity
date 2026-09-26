@@ -256,13 +256,13 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   // heuristic path renders to a single color attachment with no depth).
   const bool transition_source =
       rt_as_tex &&
-      g_rts[tex_base].layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      g_rts[tex_base].layout != rhi::TextureState::kShaderRead;
   if (g_region.cur_rt != d.rt_base || g_region.cur_mrt_count != 1 ||
       g_region.cur_depth != 0 || transition_source) {
     EndRegion();
     if (rt_as_tex) {  // make the sampled RT shader-readable before we render
       auto& src = g_rts[tex_base];
-      if (src.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+      if (src.layout != rhi::TextureState::kShaderRead)
         TransitionImage(g_frame.list, src.texture, src.layout,
                         rhi::TextureState::kShaderRead);
     }
@@ -280,7 +280,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     }
   }
   if (rt_as_tex &&
-      g_rts[tex_base].layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+      g_rts[tex_base].layout == rhi::TextureState::kShaderRead)
     tex_set = g_rts[tex_base].set;
 
   g_frame.heuristic++;

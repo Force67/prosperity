@@ -16,7 +16,6 @@
 #include "gpu/vulkan/vk_device.h"
 #include "base/arch.h"
 #include "gpu/vulkan/vk_frame.h"
-#include "gpu/vulkan/vk_memory.h"
 #include "gpu/vulkan/vk_pipeline_cache.h"
 #include "gpu/vulkan/vk_present.h"
 #include "gpu/vulkan/vk_render_target.h"
@@ -30,12 +29,10 @@ namespace gpu::render {
 
 struct BackendState {
   rhi::Device* device = nullptr;
-  vk::DeviceState vk_device;
   vk::FrameState frame;
   vk::UploadRings rings;
   vk::QuadPipelines quad;
   vk::RecompiledPipelineCache recompiled_pipelines;
-  vk::ImageMemoryPool image_memory;
   vk::TextureBindings tex;
 
   // Render targets keyed by guest address + the guest-page -> target index.
@@ -43,10 +40,6 @@ struct BackendState {
   std::unordered_map<u64, vk::RTarget> rts;
   std::unordered_map<u64, vk::DepthTarget> depths;
   std::unordered_map<u64, std::vector<u64>> rt_pages;
-
-  // Dynamic rendering entry points (core in 1.3, KHR on older drivers).
-  PFN_vkCmdBeginRenderingKHR cmd_begin_rendering = nullptr;
-  PFN_vkCmdEndRenderingKHR cmd_end_rendering = nullptr;
 
   // Declared last so its worker stops before the device-owned state above is
   // destroyed during process teardown.

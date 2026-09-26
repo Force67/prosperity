@@ -110,7 +110,7 @@ rhi::BindGroup* GetMultiTexSet(const render::DrawInfo& d,
                                rhi::BindGroupLayout* set_layout,
                                u32 num_bindings,
                                rhi::TextureView* const* resolved_views,
-                               const VkImageLayout* resolved_layouts,
+                               const rhi::TextureState* resolved_layouts,
                                // Per binding: the format its view was created
                                // with, or VK_FORMAT_UNDEFINED where the T#
                                // describes it. An integer one may not filter.

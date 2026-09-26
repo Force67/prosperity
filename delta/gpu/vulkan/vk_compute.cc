@@ -7,6 +7,7 @@
 // recorded into one batched command buffer, and their writes land back in guest
 // memory lazily, only when something needs guest memory to be current.
 
+#include "gpu/vulkan/vk_compute.h"
 #include "gpu/vulkan/vk_guest_memory.h"
 #include "gpu/render/renderer.h"
 #include "base/arch.h"
@@ -370,7 +371,6 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
               double(NowNs() - started) / 1e6);
 
   g_pipe_build_n++;
-  NotePipelineBuilt();
   if (!cp.pipe) {
     BASE_LOGI("gpuvk", "compute pipeline failed");
     Device().Destroy(cp.layout);
@@ -941,12 +941,12 @@ bool FindCsAliasedImage(u64 base,
     auto depth_it = g_depths.find(base);
     if (depth_it != g_depths.end() && depth_it->second.texture) {
       DepthTarget& depth = depth_it->second;
-      VkImageLayout anchor = depth.submitted_layout;
-      if (anchor == VK_IMAGE_LAYOUT_UNDEFINED && for_write &&
+      rhi::TextureState anchor = depth.submitted_layout;
+      if (anchor == rhi::TextureState::kUndefined && for_write &&
           depth.last_frame != g_frame.num)
         anchor = depth.layout;
       out = {depth.texture, depth.w, depth.h, 4, rhi::kAspectDepth,
-             FromVkLayout(anchor), true, false, depth.layers};
+             anchor, true, false, depth.layers};
       return out.submitted != rhi::TextureState::kUndefined;
     }
   }
@@ -955,8 +955,8 @@ bool FindCsAliasedImage(u64 base,
     RTarget& rt = rt_it->second;
     if (!rt.texture || rt.is_depth || (!for_write && !rt.ever_rendered))
       return false;
-    VkImageLayout anchor = rt.submitted_layout;
-    if (anchor == VK_IMAGE_LAYOUT_UNDEFINED && for_write &&
+    rhi::TextureState anchor = rt.submitted_layout;
+    if (anchor == rhi::TextureState::kUndefined && for_write &&
         rt.last_frame != g_frame.num)
       anchor = rt.layout;
     out = {rt.texture,
@@ -964,7 +964,7 @@ bool FindCsAliasedImage(u64 base,
            rt.h,
            FormatBytes(rt.fmt),
            rhi::kAspectColor,
-           FromVkLayout(anchor),
+           anchor,
            false,
            false};
     return out.submitted != rhi::TextureState::kUndefined;
@@ -979,7 +979,7 @@ bool FindCsAliasedImage(u64 base,
            depth.h,
            4,  // kDepthFormat == D32_SFLOAT
            rhi::kAspectDepth,
-           FromVkLayout(depth.submitted_layout),
+           depth.submitted_layout,
            true,
            false,
            depth.layers};
@@ -994,7 +994,7 @@ bool FindCsAliasedImage(u64 base,
            depth.h,
            1,
            rhi::kAspectStencil,
-           FromVkLayout(depth.submitted_stencil_layout),
+           depth.submitted_stencil_layout,
            false,
            true};
     return out.submitted != rhi::TextureState::kUndefined;
@@ -1365,7 +1365,8 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     return false;
   }
   if (trace::Recording())
-    trace::RecordBridge(to_image ? "upload" : "stage", res.base, img.texture,
+    trace::RecordBridge(to_image ? "upload" : "stage", res.base,
+                        reinterpret_cast<u64>(img.texture),
                         plan.w, plan.h);
   if (img.is_stencil && !truth) {
     auto* packed = static_cast<u8*>(e.map);
@@ -1529,7 +1530,7 @@ bool LiveInFrameTarget(u64 base, bool prefer_depth, InFrameTarget& t) {
   const auto use_depth = [&](const DepthTarget& depth) {
     if (!depth.texture || depth.clear_pending)
       return false;
-    t.layout = FromVkLayout(depth.layout);
+    t.layout = depth.layout;
     t.img = {depth.texture, depth.w, depth.h, 4, rhi::kAspectDepth,
              t.layout, true, false, depth.layers};
     return true;
@@ -1544,7 +1545,7 @@ bool LiveInFrameTarget(u64 base, bool prefer_depth, InFrameTarget& t) {
     const RTarget& rt = rt_it->second;
     if (!rt.texture || rt.is_depth || rt.depth > 1 || !rt.ever_rendered)
       return false;
-    t.layout = FromVkLayout(rt.layout);
+    t.layout = rt.layout;
     t.img = {rt.texture, rt.w, rt.h, FormatBytes(rt.fmt), rhi::kAspectColor,
              t.layout};
     t.fmt = rt.fmt;
@@ -1620,8 +1621,8 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
     rt.last_frame = g_frame.num;
     // The copy chained from and restored the anchor, so that is the layout
     // on the GPU now whether or not a frame end had stamped it.
-    if (rt.submitted_layout == VK_IMAGE_LAYOUT_UNDEFINED)
-      rt.submitted_layout = ToVkLayout(img.submitted, img.aspect);
+    if (rt.submitted_layout == rhi::TextureState::kUndefined)
+      rt.submitted_layout = img.submitted;
   } else if (!img.is_stencil) {
     // A depth surface a dispatch produced is this frame's content: the first
     // pass to bind it must LOAD it, where an untouched depth target is
@@ -3329,12 +3330,12 @@ bool PreserveCsDepthBeforeClear(u64 base) {
 
   DepthTarget& depth = depth_it->second;
   CsRange& range = range_it->second;
-  if (!depth.texture || depth.layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+  if (!depth.texture || depth.layout == rhi::TextureState::kUndefined ||
       !range.buf || range.pending_batch || range.gpu_dirty ||
       !range.image_staging)
     return false;
 
-  const rhi::TextureState old_state = FromVkLayout(depth.layout);
+  const rhi::TextureState old_state = depth.layout;
   CsAliasedImage image{depth.texture,
                        depth.w,
                        depth.h,
@@ -3572,7 +3573,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   if (fresh)
     RecordImageTiling(list, *table, e.buf, 0, e.guest_bytes, scratch,
                       linear.size, /*detile=*/true, 1, 1);
-  const rhi::TextureState from = FromVkLayout(rt.layout);
+  const rhi::TextureState from = rt.layout;
   TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopyDst);
   const auto& level = linear.mips[0];
   rhi::BufferTextureCopy copy;

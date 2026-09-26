@@ -17,8 +17,12 @@ namespace gpu::render {
 struct BackendOptions {
   const char* gpu_filter = nullptr;  // adapter name substring
   bool debug_labels = false;
-  const char* validation_layer = nullptr;
+  bool validation = false;  // the API's validation layer, when it has one
   bool sync_validation = false;
+  // Receives validation and driver messages: severity, message id, the
+  // active label stack, text.
+  void (*on_message)(const char*, const char*, const char*, const char*) =
+      nullptr;
   bool checkpoints = false;
   // Directory for driver pipeline caches; null disables them.
   const char* cache_dir = nullptr;

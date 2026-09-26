@@ -3,128 +3,18 @@
  */
 #pragma once
 
-// The Vulkan device the renderer owns: instance, adapter, queue, command pool,
-// and the driver limits and features every other unit reads. There is no
-// surface, since guest frames render offscreen and are read back (see vk_frame).
+// Bring-up of the device the renderer runs on (on the backend DELTA_GPU_BACKEND
+// names), and the progress markers that locate a device loss.
 
-#include <vulkan/vulkan.h>
-
-#include "gpu/rhi/device.h"
 #include "base/arch.h"
-
-#include <base/logging.h>
-
-#include <cstdio>
-#include <vector>
+#include "gpu/rhi/device.h"
 
 namespace gpu::vk {
 
-// Bail out of the enclosing bool-returning creation function on a Vulkan error.
-#define VKOK(x)                                                     \
-  do {                                                              \
-    VkResult _r = (x);                                              \
-    if (_r != VK_SUCCESS) {                                         \
-      BASE_LOGI("gpuvk", "{} failed: {}", #x, (int)_r); \
-      return false;                                                 \
-    }                                                               \
-  } while (0)
-
-struct DeviceState {
-  bool ready = false;
-  VkInstance instance = VK_NULL_HANDLE;
-  VkPhysicalDevice phys = VK_NULL_HANDLE;
-  VkDevice device = VK_NULL_HANDLE;
-  u32 qfam = 0;
-  VkQueue queue = VK_NULL_HANDLE;
-  VkCommandPool pool = VK_NULL_HANDLE;
-  VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
-  // Dedicated to one-time initialization and diagnostic aux submits.
-  VkFence fence = VK_NULL_HANDLE;
-  u32 max_cs_resources = 0;
-  VkDeviceSize max_storage_buffer_range = 0;
-  float timestamp_period = 0.0f;
-  u32 timestamp_valid_bits = 0;
-  bool sampler_anisotropy = false;
-  // Per-attachment blend state is only legal with this enabled.
-  bool independent_blend = false;
-  bool sampler_mirror_clamp = false;
-  bool geometry_shader = false;
-  bool mesh_shader = false;
-  PFN_vkCmdDrawMeshTasksEXT draw_mesh_tasks = nullptr;
-  VkPhysicalDeviceMeshShaderPropertiesEXT mesh_limits{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
-  bool storage_image_write_without_format = false;
-  bool host_import_available = false;
-  bool buffer_device_address = false;
-  size_t host_import_align = 0;
-  size_t storage_buffer_offset_align = 16;
-  bool device_fault_available = false;
-  // VK_KHR_push_descriptor: descriptors written into the command buffer, so
-  // a pass recorded into any command buffer needs no pool that outlives it.
-  bool push_descriptor = false;
-  PFN_vkCmdPushDescriptorSetKHR push_descriptor_set = nullptr;
-  // VK_KHR_fragment_shader_barycentric: lets a PS read the three per-vertex
-  // values of an attribute, which v_interp_mov_f32's P10/P20 parameters need.
-  bool barycentric_available = false;
-  bool device_fault_reported = false;
-};
-
-extern DeviceState& g_dev;
-
-// Dynamic rendering (core in 1.3, KHR on older drivers), resolved at device
-// creation: the renderer records no render passes.
-extern PFN_vkCmdBeginRenderingKHR& g_cmd_begin_rendering;
-extern PFN_vkCmdEndRenderingKHR& g_cmd_end_rendering;
-
+// Create the device, the frame ring and the upload rings.
 bool CreateDevice();
 
-u32 FindMemoryType(u32 type_bits, VkMemoryPropertyFlags props);
-u32 FindMemoryTypePref(u32 type_bits,
-                            VkMemoryPropertyFlags pref,
-                            VkMemoryPropertyFlags req);
-VkAccessFlags ColorImageAccess(VkImageLayout layout);
-
-void ImageBarrier(VkCommandBuffer c,
-                  VkImage img,
-                  VkImageLayout from,
-                  VkImageLayout to,
-                  VkAccessFlags src_a,
-                  VkAccessFlags dst_a,
-                  u32 layers = 1,
-                  u32 mip_levels = 1);
-void DepthBarrier(VkCommandBuffer c,
-                  VkImage img,
-                  VkImageLayout from,
-                  VkImageLayout to,
-                  VkAccessFlags src_a,
-                  VkAccessFlags dst_a);
-void StencilBarrier(VkCommandBuffer c,
-                    VkImage img,
-                    VkImageLayout from,
-                    VkImageLayout to,
-                    VkAccessFlags src_a,
-                    VkAccessFlags dst_a);
-
-VkShaderModule MakeModule(const u32* spv, size_t bytes);
-VkShaderModule MakeModuleVec(const std::vector<u32>& spv);
-
-// Ask the driver what the GPU actually faulted on (VK_EXT_device_fault).
-void ReportDeviceFault(DeviceState& device);
 void DrawCheckpoint(rhi::CommandList* list, u32 frame, u32 draw, bool after);
 void DispatchCheckpoint(rhi::CommandList* list, u64 cs_addr, bool after);
-
-// DELTA_GPU_QCHECK: an empty command buffer through the same queue, waited.
-// A failure names the queue work that ran BEFORE this point as the device
-// loss, so the first failing checkpoint brackets the faulting op even when
-// the failing submit itself carries no work at all.
-bool QueueCheck(const char* where);
-bool QueueCheckArmed();
-
-// Persist the driver's pipeline cache. Called once a frame rather than at exit:
-// the runner SIGKILLs the emulator, so an atexit hook would never fire on the
-// runs that matter. Writes only once a burst of pipeline builds has settled.
-void SavePipelineCache(bool force = false);
-// Call after every pipeline creation; defers the save past the burst.
-void NotePipelineBuilt();
 
 }  // namespace gpu::vk

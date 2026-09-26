@@ -40,4 +40,9 @@ bool CsRefreshRtFromTruth(u64 base);
 // writes to it first, or they land over the new bytes.
 void CsForgetGuestRange(u64 base, u64 bytes);
 
+// DELTA_GPU_QCHECK: an empty submission through the same queue, waited. A
+// failure names the queue work that ran BEFORE this point as the device loss.
+bool QueueCheck(const char* where);
+bool QueueCheckArmed();
+
 }  // namespace gpu::vk

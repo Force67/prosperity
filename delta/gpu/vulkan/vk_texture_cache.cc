@@ -18,7 +18,6 @@
 #include "gpu/vulkan/vk_format.h"
 #include "gpu/vulkan/vk_frame.h"
 #include "gpu/vulkan/vk_hash.h"
-#include "gpu/vulkan/vk_memory.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_render_target.h"
 #include "gpu/vulkan/vk_upload_ring.h"
@@ -1417,7 +1416,7 @@ struct MultiTexKey {
   u32 decl_uint = 0, decl_3d = 0;
   TexKey tex[kMaxTex];
   rhi::TextureView* view[kMaxTex] = {};
-  VkImageLayout layout[kMaxTex] = {};
+  rhi::TextureState layout[kMaxTex] = {};
   bool storage[kMaxTex] = {};
   bool operator==(const MultiTexKey& o) const {
     if (num_texs != o.num_texs || decl_uint != o.decl_uint ||
@@ -1439,7 +1438,7 @@ struct MultiTexKeyHash {
     for (u32 i = 0; i < k.num_texs; i++) {
       h = HashWord(h, TexKeyHash{}(k.tex[i]));
       h = HashWord(h, reinterpret_cast<u64>(k.view[i]));
-      h = HashWord(h, k.layout[i]);
+      h = HashWord(h, static_cast<u64>(k.layout[i]));
       h = HashWord(h, k.storage[i]);
     }
     return static_cast<size_t>(h);
@@ -1489,7 +1488,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
                                rhi::BindGroupLayout* set_layout,
                                u32 num_bindings,
                                rhi::TextureView* const* resolved_views,
-                               const VkImageLayout* resolved_layouts,
+                               const rhi::TextureState* resolved_layouts,
                                const VkFormat* resolved_formats,
                                const u64* depth_src) {
   ScopeNs _set_timer(&g_ns_tex_set);
@@ -1544,7 +1543,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
   // render opaque, proving the 3D transform/raster/depth path works and
   // isolating the blackness to the texture data.
   rhi::TextureView* views[kMaxTex];
-  VkImageLayout layouts[kMaxTex];
+  rhi::TextureState layouts[kMaxTex];
   // DELTA_GPU_TEXMISS: report every sampler binding that falls back to the 1x1
   // white default (the source of "everything renders white" chains) with the
   // descriptor state that failed to resolve.
@@ -1596,7 +1595,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
             : (want_uint ? g_tex.white_uint_view : g_tex.white_view);
     views[i] = v ? v : fallback;
     layouts[i] =
-        v ? resolved_layouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        v ? resolved_layouts[i] : rhi::TextureState::kShaderRead;
   }
   rhi::BindGroupDesc group;
   group.layout = set_layout;
@@ -1637,7 +1636,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
     rhi::BindingWrite w;
     w.binding = i;
     w.view = views[i];
-    w.view_state = FromVkLayout(layouts[i]);
+    w.view_state = layouts[i];
     if (have_tex && d.texs[i].depth_compare && !storage_i &&
         !(depth_src && depth_src[i]) && g_tex.depth_default_view) {
       w.view = g_tex.depth_default_view;

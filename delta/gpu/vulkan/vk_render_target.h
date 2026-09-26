@@ -24,14 +24,12 @@ namespace gpu::vk {
 // the address page table and render-to-texture/MRT just work.
 struct RTarget {
   rhi::Texture* texture = nullptr;
-  VkImage image = VK_NULL_HANDLE;  // Native(texture), for code still on Vulkan
   rhi::TextureView* view = nullptr;
   rhi::BindGroup* set = nullptr;  // for sampling this RT as a texture
   // Sampling an image while it is also a color attachment needs a feedback
   // loop the APIs do not all have. Keep a lazy copy instead so the shader
   // reads the attachment contents as they existed before the draw.
   rhi::Texture* feedback_texture = nullptr;
-  VkImage feedback_image = VK_NULL_HANDLE;  // Native(feedback_texture)
   rhi::TextureView* feedback_view = nullptr;
   rhi::BindGroup* feedback_set = nullptr;
   std::unordered_map<u32, rhi::TextureView*> sampled_views;
@@ -39,7 +37,7 @@ struct RTarget {
   // swizzle | format<<16. See SampledViewAs.
   std::unordered_map<u32, rhi::TextureView*> alias_views;
   std::unordered_map<u32, rhi::TextureView*> feedback_sampled_views;
-  VkImageLayout feedback_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  rhi::TextureState feedback_layout = rhi::TextureState::kUndefined;
   u32 w = 0, h = 0;
   // Slices of a target a GS renders layered (gl_Layer). Such a target is a 3D
   // image: `view` is then the 2D-array attachment view over every slice and
@@ -49,7 +47,7 @@ struct RTarget {
   VkFormat fmt =
       VK_FORMAT_B8G8R8A8_UNORM;  // identity: addr alone doesn't pin format
   bool is_depth = false;         // depth/stencil attachment (MRT/depth task)
-  VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  rhi::TextureState layout = rhi::TextureState::kUndefined;
   // Rendered into since the last barrier that made it readable. A later draw
   // sampling this target needs an execution/memory dependency even when the
   // layout already matches, or it reads what was there BEFORE those writes –
@@ -59,7 +57,7 @@ struct RTarget {
   // tracks the recording timeline, which runs ahead: a mid-frame submission (compute
   // staging an RT-backed CS input) must chain from and restore the submitted state,
   // never `layout`.
-  VkImageLayout submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  rhi::TextureState submitted_layout = rhi::TextureState::kUndefined;
   bool used_this_frame = false;
   u32 draws = 0;      // draws into this RT this frame
   int last_frame = -1000;  // frame number this RT was last rendered into
@@ -112,7 +110,6 @@ extern std::unordered_map<u64, RTarget>& g_rts;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
 struct DepthTarget {
   rhi::Texture* texture = nullptr;
-  VkImage image = VK_NULL_HANDLE;  // Native(texture), for code still on Vulkan
   rhi::TextureView* view = nullptr;  // depth-only sampled view
   // Stencil-plane sampled view, made on demand. A deferred renderer reads the
   // stencil plane as an R8_UINT texture to recover the material id it wrote
@@ -133,8 +130,8 @@ struct DepthTarget {
   // actually owns, which is not the image size when the guest binds a
   // half-resolution depth buffer to a full-resolution pass.
   u32 guest_w = 0, guest_h = 0;
-  VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
-  VkImageLayout stencil_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  rhi::TextureState layout = rhi::TextureState::kUndefined;
+  rhi::TextureState stencil_layout = rhi::TextureState::kUndefined;
   u64 stencil_base = 0;
   // Rendered into since the last barrier that made it readable. A later draw
   // sampling this target needs an execution/memory dependency even when the
@@ -142,8 +139,8 @@ struct DepthTarget {
   // which is how SotC's composite sampled its scene target and got black.
   bool dirty_for_read = false;
   // See RTarget::submitted_layout: the anchor for mid-frame copies.
-  VkImageLayout submitted_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-  VkImageLayout submitted_stencil_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  rhi::TextureState submitted_layout = rhi::TextureState::kUndefined;
+  rhi::TextureState submitted_stencil_layout = rhi::TextureState::kUndefined;
   u64 render_serial = 0;
   int last_frame = -1000;
   bool used_this_frame = false;
@@ -195,11 +192,11 @@ DepthTarget* GetDepthRT(u64 base,
 // attachment-feedback-loop extension; copy it instead and sample the copy.
 rhi::BindGroup* SnapshotRT(RTarget& rt);
 
-// Transition `texture` from its legacy layout to `state`, keeping the layout
-// field in step. `layers` covers every layer the barrier must reach.
+// Transition `texture` from `current` to `state` and record the new state.
+// `layers` covers every layer the barrier must reach.
 void TransitionImage(rhi::CommandList* list,
                      rhi::Texture* texture,
-                     VkImageLayout& layout,
+                     rhi::TextureState& current,
                      rhi::TextureState state,
                      u8 aspect = rhi::kAspectColor,
                      u32 layers = 1);

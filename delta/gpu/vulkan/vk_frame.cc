@@ -136,7 +136,6 @@ bool CreateFrameSlots() {
       slot.timestamps = Device().CreateTimestampPool(2);
   }
   g_frame.list = g_frame.slots[0].list;
-  g_frame.cmd = Native(g_frame.list);
   return true;
 }
 
@@ -214,9 +213,8 @@ int RdocFrame() {
   return kRdocFrame;
 }
 
-// RenderDoc identifies a Vulkan device by its instance's dispatch pointer.
 void* RdocDevice() {
-  return *reinterpret_cast<void**>(g_dev.instance);
+  return Device().CaptureHandle();
 }
 // DELTA_GPU_RTSTAT: every 200th frame, read back each render target used this
 // frame and report how many sampled texels are non-zero. RTSTAT_FRAME selects a
@@ -298,7 +296,7 @@ bool ReportRtContents(FrameSlot& owner) {
     rhi::CommandList* list = BeginImmediate();
     if (!list)
       return false;
-    const VkImageLayout old_layout = rt.layout;
+    const rhi::TextureState old_layout = rt.layout;
     TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
     rhi::BufferTextureCopy copy;
     copy.region.width = rt.w;
@@ -494,9 +492,9 @@ bool ReportRtContents(FrameSlot& owner) {
     // rgb/(1-alpha)) that mid-frame alpha is the number that decides whether a
     // texel resets or amplifies, and end-of-frame alpha cannot stand in for it:
     // the 33 light draws run in between and only ever lower it.
-    if (rt.feedback_image && is_h4) {
+    if (rt.feedback_texture && is_h4) {
       if (rhi::CommandList* flist = BeginImmediate()) {
-        const VkImageLayout fold = rt.feedback_layout;
+        const rhi::TextureState fold = rt.feedback_layout;
         TransitionImage(flist, rt.feedback_texture, rt.feedback_layout,
                         rhi::TextureState::kCopySrc);
         rhi::BufferTextureCopy fcp;
@@ -505,7 +503,7 @@ bool ReportRtContents(FrameSlot& owner) {
         flist->CopyTextureToBuffer(g_frame.readback, rt.feedback_texture, &fcp,
                                    1);
         TransitionImage(flist, rt.feedback_texture, rt.feedback_layout,
-                        FromVkLayout(fold));
+                        fold);
         flist->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
         if (EndImmediate(flist)) {
             u64 fhi = 0, below = 0;
@@ -698,7 +696,7 @@ bool ReportRtContents(FrameSlot& owner) {
     // is allowed to DISCARD the image, so reading one to report on it would
     // destroy the thing being measured, and it did, every RTSTAT run,
     // which quietly invalidated depth readings taken with it.
-    if (!d.image || !d.w || !d.h || d.layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+    if (!d.texture || !d.w || !d.h || d.layout == rhi::TextureState::kUndefined ||
         (!d.used_this_frame && !kGpuRtstatAll))
       continue;
     EnsureReadback(d.w, d.h, VK_FORMAT_R32_SFLOAT);
@@ -706,7 +704,7 @@ bool ReportRtContents(FrameSlot& owner) {
     rhi::CommandList* list = BeginImmediate();
     if (!list)
       continue;
-    const VkImageLayout old_layout = d.layout;
+    const rhi::TextureState old_layout = d.layout;
     TransitionImage(list, d.texture, d.layout, rhi::TextureState::kCopySrc,
                     rhi::kAspectDepth, d.layers);
     rhi::BufferTextureCopy copy;
@@ -716,7 +714,7 @@ bool ReportRtContents(FrameSlot& owner) {
     list->CopyTextureToBuffer(g_frame.readback, d.texture, &copy, 1);
     // Put it back where the frame left it: this is a diagnostic, and a
     // diagnostic that moves the pipeline's state is a diagnostic that lies.
-    TransitionImage(list, d.texture, d.layout, FromVkLayout(old_layout),
+    TransitionImage(list, d.texture, d.layout, old_layout,
                     rhi::kAspectDepth, d.layers);
     list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
     if (!EndImmediate(list))
@@ -801,7 +799,6 @@ bool SubmitFrameChunk() {
   next->Begin();
   slot.list = next;
   g_frame.list = next;
-  g_frame.cmd = Native(next);
   g_frame.chunk_seq++;
   g_frame.draws_at_chunk = g_frame.draws;
   CmdBeginLabel(g_frame.list, "frame %llu chunk %llu",
@@ -862,7 +859,6 @@ void BeginFrame(Renderer& renderer) {
   if (renderer.state)
     renderer.state->presenter.WaitForBorrowed();
   g_frame.list = slot.list;
-  g_frame.cmd = Native(slot.list);
   g_frame.readback = slot.readback;
   g_frame.readback_map = slot.readback ? slot.readback->mapped() : nullptr;
   g_frame.readback_size = slot.readback ? slot.readback->desc().size : 0;
@@ -1170,10 +1166,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     if (fin.timestamps) {
       u64 timestamps[2] = {};
       if (Device().ReadTimestamps(fin.timestamps, 0, 2, timestamps)) {
-        const u64 mask =
-            g_dev.timestamp_valid_bits >= 64
-                ? UINT64_MAX
-                : (u64{1} << g_dev.timestamp_valid_bits) - 1;
+        const u32 bits = Device().caps().timestamp_bits;
+        const u64 mask = bits >= 64 ? UINT64_MAX : (u64{1} << bits) - 1;
         const u64 ticks = (timestamps[1] - timestamps[0]) & mask;
         g_ns_gpu_exec += static_cast<u64>(static_cast<double>(ticks) *
                                           Device().caps().timestamp_period_ns);
@@ -1441,7 +1435,6 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   }
 
   Device().Maintain();
-  SavePipelineCache();
 
   // Runs last: reuses (and clobbers) the readback buffer the present path
   // above already consumed, so the presenter has to be done reading it. It

@@ -286,6 +286,8 @@ class Device {
 
   // Once a frame: lets the backend persist caches and trim pools.
   virtual void Maintain() {}
+  // What a frame-capture tool (RenderDoc) identifies this device by.
+  virtual void* CaptureHandle() const { return nullptr; }
   // After a failed Wait: log what the backend knows about the device loss.
   virtual void ReportDeviceLoss() {}
 };

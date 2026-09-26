@@ -451,8 +451,15 @@ struct Caps {
   const char* device_name = "";
   bool geometry_shader = false;
   bool mesh_shader = false;
-  u32 mesh_max_output_vertices = 0;
-  u32 mesh_max_output_primitives = 0;
+  struct MeshLimits {
+    u32 max_threads = 0;  // invocations per workgroup
+    u32 max_threads_x = 0;
+    u32 max_shared_bytes = 0;
+    u32 max_output_vertices = 0;
+    u32 max_output_primitives = 0;
+    u32 max_groups[2] = {};  // per dispatch dimension
+    u32 max_total_groups = 0;
+  } mesh;
   bool fragment_barycentric = false;
   bool independent_blend = false;
   bool sampler_anisotropy = false;

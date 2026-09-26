@@ -39,10 +39,8 @@ struct FrameSlot {
 
 struct FrameState {
   // The active slot's command list and readback buffer, aliased here so the
-  // recording path does not thread the slot through every call. `cmd` is the
-  // list's native handle, for code that still records Vulkan directly.
+  // recording path does not thread the slot through every call.
   rhi::CommandList* list = nullptr;
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
   rhi::Buffer* readback = nullptr;
   void* readback_map = nullptr;
   VkDeviceSize readback_size = 0;

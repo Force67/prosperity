@@ -23,8 +23,9 @@ struct VulkanOptions {
   bool checkpoints = false;  // VK_NV_device_diagnostic_checkpoints
   // Where the driver's pipeline cache blob persists; empty disables it.
   const char* pipeline_cache_path = nullptr;
-  // Called once the instance exists, e.g. to install a debug messenger.
-  void (*on_instance)(VkInstance instance) = nullptr;
+  // Receives validation-layer messages: severity, id, label stack, text.
+  void (*on_message)(const char*, const char*, const char*, const char*) =
+      nullptr;
 };
 
 // Null when no usable device exists. Call from a plain host thread: some ICDs

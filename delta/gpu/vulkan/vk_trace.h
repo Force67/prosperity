@@ -10,7 +10,6 @@
 // is a query over the capture (tools/gpu_capture.py), not a new build. Keyed by GUEST
 // addresses, the module's vocabulary. No-ops (one branch) unless a capture records.
 
-#include <vulkan/vulkan.h>
 #include "base/arch.h"
 
 
@@ -57,7 +56,7 @@ struct DrawBindings {
   const u64* tex_feedback = nullptr;  // resolved to a feedback copy
   const u64* tex_depth = nullptr;     // resolved to a depth target
   const u64* tex_storage = nullptr;   // bound as a storage image
-  const void* const* tex_guest = nullptr;  // VkImageView of a guest upload
+  const void* const* tex_guest = nullptr;  // view of a guest upload
   u32 tex_count = 0;
   u32 cbuf_mask = 0;    // bit i: cbuffer binding i staged real memory
   u32 rawbuf_mask = 0;  // bit i: set-2 binding i staged real memory
@@ -77,12 +76,6 @@ void RecordDispatch(const render::ComputeInfo& dispatch);
 
 // Every layout transition the backend records, named after the guest resource
 // the image holds.
-void RecordBarrier(const char* aspect,
-                   VkImage image,
-                   VkImageLayout from,
-                   VkImageLayout to,
-                   VkAccessFlags src_access,
-                   VkAccessFlags dst_access);
 
 // A CP DMA fill over guest memory (this hardware's clear).
 void RecordBarrier(const char* aspect,
@@ -95,17 +88,17 @@ void RecordMemoryFill(u64 base, u64 bytes, u32 value);
 // The live image at `base` changed (see ActivateRtVariant): every later record
 // naming that base is about a different VkImage than the ones before it.
 void RecordVariantSwap(u64 base,
-                       VkImage from,
+                       u64 from,
                        u32 from_w,
                        u32 from_h,
-                       VkImage to,
+                       u64 to,
                        u32 to_w,
                        u32 to_h);
 
 // A compute bridge copy between a live image and the CS staging buffer. It is
 // submitted and waited on its own, outside the frame's command buffer, so no
 // barrier record covers it.
-void RecordBridge(const char* dir, u64 base, rhi::Texture* image, u32 w, u32 h);
+void RecordBridge(const char* dir, u64 base, u64 image, u32 w, u32 h);
 
 // --- Vulkan-level visibility -----------------------------------------------
 
@@ -116,14 +109,18 @@ bool WantValidation();
 // Whether to ask the layer for synchronization validation as well.
 bool WantSyncValidation();
 const char* ValidationLayerName();
-void InstallValidationMessenger(VkInstance instance);
-void DestroyValidationMessenger(VkInstance instance);
+// A message the device's validation layer raised; the active label stack
+// names the guest draw that provoked it.
+void OnDeviceMessage(const char* level,
+                     const char* id,
+                     const char* labels,
+                     const char* message);
 
 // Object-name registry: vk_debug names objects after the guest resource they stand for;
 // kept host-side too so a barrier or validation line can say "rt 0x8142f00000 1920x1080"
 // with no capture attached. Populated only when a capture is armed or validation runs.
 bool NamesWanted();
-void RegisterObjectName(VkObjectType type, u64 handle, const char* name);
+void RegisterObjectName(u64 handle, const char* name);
 // "" when the handle was never named.
 const char* ObjectName(u64 handle);
 
