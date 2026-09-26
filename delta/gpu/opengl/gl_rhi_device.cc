@@ -301,31 +301,17 @@ bool GlDevice::InitRenderThread() {
     return false;
   device_name_ = egl_.renderer;
 
-  slot_limits_[0] = static_cast<u32>(GetInt(GL_MAX_UNIFORM_BUFFER_BINDINGS));
-  slot_limits_[1] =
-      static_cast<u32>(GetInt(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS));
-  slot_limits_[2] =
-      static_cast<u32>(GetInt(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS));
-  slot_limits_[3] = static_cast<u32>(GetInt(GL_MAX_IMAGE_UNITS));
-  glsl_.max_uniform_buffers = slot_limits_[0];
-  glsl_.max_storage_buffers = slot_limits_[1];
-  glsl_.max_textures = slot_limits_[2];
-  glsl_.max_images = slot_limits_[3];
-  glsl_.max_vertex_attribs = static_cast<u32>(GetInt(GL_MAX_VERTEX_ATTRIBS));
+  glsl_ = QueryGlslFeatures();
+  slot_limits_[0] = glsl_.max_uniform_buffers;
+  slot_limits_[1] = glsl_.max_storage_buffers;
+  slot_limits_[2] = glsl_.max_textures;
+  slot_limits_[3] = glsl_.max_images;
   slot_limits_[4] = kMaxPointers;
-  glsl_.max_stage_storage_buffers = static_cast<u32>(
-      std::min({GetInt(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS),
-                GetInt(GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS),
-                GetInt(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS),
-                GetInt(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS)}));
-  buffer_pointers_ = epoxy_has_gl_extension("GL_NV_shader_buffer_load") &&
-                     epoxy_has_gl_extension("GL_NV_gpu_shader5");
-  glsl_.buffer_pointers = buffer_pointers_;
+  buffer_pointers_ = glsl_.buffer_pointers;
   const bool bary_nv =
       epoxy_has_gl_extension("GL_NV_fragment_shader_barycentric");
   const bool bary_ext =
       epoxy_has_gl_extension("GL_EXT_fragment_shader_barycentric");
-  glsl_.nv_barycentric_only = bary_nv && !bary_ext;
 
   caps_.backend = rhi::Backend::kOpenGL;
   caps_.device_name = device_name_.c_str();

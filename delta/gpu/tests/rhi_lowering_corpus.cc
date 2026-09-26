@@ -278,18 +278,7 @@ int main(int argc, char** argv) {
     if (features_ready)
       return;
     features_ready = true;
-    features.nv_barycentric_only =
-        epoxy_has_gl_extension("GL_NV_fragment_shader_barycentric") &&
-        !epoxy_has_gl_extension("GL_EXT_fragment_shader_barycentric");
-    GLint v = 0;
-    glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS, &v);
-    features.max_uniform_buffers = static_cast<u32>(v);
-    glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &v);
-    features.max_storage_buffers = static_cast<u32>(v);
-    glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &v);
-    features.max_textures = static_cast<u32>(v);
-    glGetIntegerv(GL_MAX_IMAGE_UNITS, &v);
-    features.max_images = static_cast<u32>(v);
+    features = QueryGlslFeatures();
   });
   std::atomic<size_t> done{0};
   for (u32 i = 0; i < contexts.size(); i++)

@@ -77,6 +77,7 @@ struct GlslFeatures {
   // GL_NV_shader_buffer_load and GL_NV_gpu_shader5: storage buffers past the
   // per-stage limit become pointers.
   bool buffer_pointers = false;
+  bool khr_subgroup = false;  // GL_KHR_shader_subgroup
 };
 
 struct StageCode {

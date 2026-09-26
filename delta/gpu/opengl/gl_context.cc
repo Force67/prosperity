@@ -7,6 +7,7 @@
 #include <epoxy/gl.h>
 #include <pthread.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace gpu::opengl {
@@ -87,6 +88,32 @@ EGLContext CreateGlContext(EGLDisplay display, EGLContext share, bool debug) {
                           debug ? EGL_TRUE : EGL_FALSE,
                           EGL_NONE};
   return eglCreateContext(display, EGL_NO_CONFIG_KHR, share, attrs);
+}
+
+GlslFeatures QueryGlslFeatures() {
+  auto get = [](GLenum pname) {
+    GLint v = 0;
+    glGetIntegerv(pname, &v);
+    return static_cast<u32>(std::max(v, 0));
+  };
+  GlslFeatures f;
+  f.nv_barycentric_only =
+      epoxy_has_gl_extension("GL_NV_fragment_shader_barycentric") &&
+      !epoxy_has_gl_extension("GL_EXT_fragment_shader_barycentric");
+  f.max_uniform_buffers = get(GL_MAX_UNIFORM_BUFFER_BINDINGS);
+  f.max_storage_buffers = get(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS);
+  f.max_textures = get(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
+  f.max_images = get(GL_MAX_IMAGE_UNITS);
+  f.max_stage_storage_buffers =
+      std::min({get(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS),
+                get(GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS),
+                get(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS),
+                get(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS)});
+  f.max_vertex_attribs = get(GL_MAX_VERTEX_ATTRIBS);
+  f.buffer_pointers = epoxy_has_gl_extension("GL_NV_shader_buffer_load") &&
+                      epoxy_has_gl_extension("GL_NV_gpu_shader5");
+  f.khr_subgroup = epoxy_has_gl_extension("GL_KHR_shader_subgroup");
+  return f;
 }
 
 void GlWorker::Start(EGLDisplay display,

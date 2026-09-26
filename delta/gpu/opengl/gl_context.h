@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "base/arch.h"
+#include "gpu/opengl/gl_shader_lowering.h"
 
 namespace gpu::opengl {
 
@@ -31,6 +32,9 @@ bool OpenEglDevice(const char* filter, EglDevice* out);
 
 // A surfaceless GL 4.6 core context sharing objects with `share`.
 EGLContext CreateGlContext(EGLDisplay display, EGLContext share, bool debug);
+
+// What the lowering may use, from the current context.
+GlslFeatures QueryGlslFeatures();
 
 // Threads that each keep their own context current and drain one FIFO of
 // tasks between them.

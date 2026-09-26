@@ -87,6 +87,18 @@ class Lowerer : public spirv_cross::CompilerGLSL {
                     std::to_string(index) + "].xy))");
   }
 
+  // GLSL for GL_KHR_shader_subgroup is the same as Vulkan's; SPIRV-Cross
+  // only knows that it is, not that GL has it.
+  void emit_subgroup_op(const spirv_cross::Instruction& instr) override {
+    if (!khr_subgroup_ || is_supported_subgroup_op_in_opengl(
+                              static_cast<spv::Op>(instr.op), stream(instr)))
+      return CompilerGLSL::emit_subgroup_op(instr);
+    options.vulkan_semantics = true;
+    CompilerGLSL::emit_subgroup_op(instr);
+    options.vulkan_semantics = false;
+  }
+  void set_khr_subgroup(bool on) { khr_subgroup_ = on; }
+
   void AddDispatchBase() {
     dispatch_base_ = true;
     add_header_line(std::string("uniform uvec3 ") + kDispatchBase + ";");
@@ -178,6 +190,7 @@ class Lowerer : public spirv_cross::CompilerGLSL {
   };
   std::unordered_map<u32, Spilled> spilled_;
   bool dispatch_base_ = false;
+  bool khr_subgroup_ = false;
 };
 
 u32 StageOf(spv::ExecutionModel model) {
@@ -501,6 +514,7 @@ bool LowerProgram(const StageCode* stages,
         }
       }
       c.set_common_options(options);
+      c.set_khr_subgroup(features.khr_subgroup);
       std::string source = c.compile();
       if (spills)
         RewritePointerAtomics(source);
