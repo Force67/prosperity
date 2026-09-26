@@ -108,3 +108,13 @@ if(DELTA_GPU_OPENGL)
                         ${EPOXY_LIBRARY} OpenGL::EGL OpenGL::OpenGL)
   target_include_directories(rhi_lowering_corpus PRIVATE ${EPOXY_INCLUDE_DIR})
 endif()
+
+# Developer tool, not a test: the D3D12 backend's shader path over the
+# recompiler's SPIR-V cache (see the file header for usage).
+if(DELTA_HAVE_D3D12)
+  add_executable(rhi_hlsl_corpus rhi_hlsl_corpus.cc)
+  target_link_libraries(rhi_hlsl_corpus PRIVATE delta_gpu spirv-cross-core)
+  if(NOT WIN32)
+    target_include_directories(rhi_hlsl_corpus PRIVATE ${VKD3D_INCLUDE_DIRS})
+  endif()
+endif()

@@ -11,6 +11,16 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
+        # vkd3d 2.0 runs DXIL (shader model 6) through vkd3d-shader; nixpkgs
+        # still ships 1.19.
+        vkd3d = pkgs.vkd3d.overrideAttrs (old: rec {
+          version = "2.0";
+          src = pkgs.fetchurl {
+            url = "https://dl.winehq.org/vkd3d/source/vkd3d-${version}.tar.xz";
+            hash = "sha256-mtKbsjaAgYakfsZuhTsh5vylm53GKpR0sF1ePtonEO8=";
+          };
+        });
+
         renderdocPython = pkgs.renderdoc.overrideAttrs (old: {
           cmakeFlags = (old.cmakeFlags or [ ]) ++ [
             "-DENABLE_PYRENDERDOC=TRUE"
@@ -43,6 +53,10 @@
             shaderc          # runtime GLSL -> SPIR-V for the shader recompiler
             libepoxy         # GL entry points for the OpenGL backend
             libglvnd         # libEGL / libOpenGL dispatch for the OpenGL backend
+            # The D3D12 rhi backend: vkd3d implements D3D12 over Vulkan, DXC
+            # compiles the lowered HLSL to DXIL.
+            directx-shader-compiler
+            vkd3d           # the 2.0 override above (let outranks with)
           ];
 
           cmakeFlags = [
@@ -86,6 +100,9 @@
             libepoxy        # GL entry points for the OpenGL backend (EGL, headless)
             libglvnd        # libEGL / libOpenGL dispatch
             renderdocPython # frame capture: UI, CLI, and Python replay API
+            # D3D12 rhi backend: D3D12 over Vulkan, and HLSL -> DXIL.
+            directx-shader-compiler
+            vkd3d           # the 2.0 override above (let outranks with)
           ];
 
           shellHook = ''
@@ -149,6 +166,9 @@
                 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH''${LD_LIBRARY_PATH:+:}$nvdir:${pkgs.xorg.libX11}/lib:${pkgs.xorg.libXext}/lib:${pkgs.xorg.libxcb}/lib:${pkgs.libglvnd}/lib"
               fi
             fi
+            # vkd3d dlopens libvulkan.so.1 by name, and the nix loader is on no
+            # default search path: without this the D3D12 backend finds no device.
+            export LD_LIBRARY_PATH="${pkgs.vulkan-loader}/lib''${LD_LIBRARY_PATH:+:}$LD_LIBRARY_PATH"
           '';
         };
       });

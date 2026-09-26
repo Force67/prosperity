@@ -10,6 +10,9 @@
 #if DELTA_GPU_OPENGL
 #include "gpu/opengl/gl_rhi.h"
 #endif
+#if DELTA_HAVE_D3D12
+#include "gpu/d3d12/d3d12_rhi.h"
+#endif
 
 namespace gpu::render {
 
@@ -18,6 +21,9 @@ std::vector<rhi::Backend> CompiledBackends() {
     rhi::Backend::kVulkan,
 #if DELTA_GPU_OPENGL
     rhi::Backend::kOpenGL,
+#endif
+#if DELTA_HAVE_D3D12
+    rhi::Backend::kD3D12,
 #endif
   };
 }
@@ -47,6 +53,15 @@ std::unique_ptr<rhi::Device> CreateBackendDevice(
       go.gpu_filter = options.gpu_filter;
       go.debug = options.debug_labels;
       return opengl::CreateOpenGLDevice(go);
+    }
+#endif
+#if DELTA_HAVE_D3D12
+    case rhi::Backend::kD3D12: {
+      d3d12::D3D12Options d3;
+      d3.gpu_filter = options.gpu_filter;
+      d3.debug_layer = options.validation;
+      d3.debug_labels = options.debug_labels;
+      return d3d12::CreateD3D12Device(d3);
     }
 #endif
     default:

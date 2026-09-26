@@ -3,10 +3,11 @@
 Turns guest GPU command streams into rendered frames.
 
 ```
-render/         the renderer as its callers see it (command.h, renderer.h)
-vulkan/         the only backend implementing it
+render/         the guest renderer, on the rhi alone (public: command.h, renderer.h)
 rhi/            the device abstraction backends implement (types.h, device.h)
-opengl/         the OpenGL 4.6 rhi backend (headless EGL, SPIR-V lowered to GLSL)
+vulkan/         rhi::Device on Vulkan (SPIR-V consumed as is)
+opengl/         rhi::Device on OpenGL 4.6 (headless EGL, SPIR-V lowered to GLSL)
+d3d12/          rhi::Device on Direct3D 12 (vkd3d's D3D12 on Linux, SPIR-V lowered to HLSL)
 gcn/            shared ISA decode + the SPIR-V translator both consoles emit through
 ps4/            PM4 / Liverpool command processor + its GCN specifics
 ps5/            AGC / gfx10.3 command processor + the RDNA2 decoder/emitter
@@ -17,19 +18,21 @@ gpu_perf.h      the frame-time counters and clock every unit in the module feeds
 tests/          unit tests + the layering check
 ```
 
-Dependencies run one way: `ps4/` and `ps5/` depend on `gcn/` and `render/`, `vulkan/` depends
-on `render/` (plus the `gcn/` recompiled-program and detile types it consumes),
-and `render/` includes nothing in this module, though `command.h` does
-forward-declare `gcn::Recompiled`/`gcn::RecompiledCs`, so the seam is
-backend-free, not recompiler-free. A command processor decodes guest packets
-into an `render::DrawInfo` or `render::ComputeInfo` and calls the entry points in
-`render/renderer.h`; it never names a graphics API type, and never includes
-anything from `vulkan/`.
+Dependencies run one way: `ps4/` and `ps5/` depend on `gcn/` and `render/`;
+`render/` depends on `rhi/` (plus the `gcn/` recompiled-program, resource and
+detile types it consumes); each backend depends on `rhi/` alone and knows
+nothing of guests. `render/backend.cc` is the one unit that names the
+backends, through their factory headers. A command processor decodes guest
+packets into a `render::DrawInfo` or `render::ComputeInfo` and calls the entry
+points in `render/renderer.h`; nothing above `rhi/` names a graphics API type.
+
+SPIR-V is the shader IR throughout: the recompiler emits it, Vulkan consumes
+it, and the other backends lower it (SPIRV-Cross) when a pipeline is created.
+`DELTA_GPU_BACKEND` (`vulkan`, `opengl`, `d3d12`) picks the backend at start.
 
 The public surface is `render/` plus the two `cmd_processor.h` entry headers the
 HLE submit paths call (`gpu/ps4/cmd_processor.h`, `gpu/ps5/cmd_processor.h`).
-Everything else is internal, so a second backend can be added without touching
-a caller. Note this is enforced by `tests/check_layering.py` at test time, not
+Everything else is internal. Note this is enforced by `tests/check_layering.py` at test time, not
 by the build: every module shares one include root, so an out-of-bounds
 include compiles and only `gpu_layering` rejects it.
 
@@ -48,6 +51,54 @@ coherency flushes), and `NoteMemoryFill` for the CP DMA fills a title uses in
 place of a clear packet. `DefaultRenderer()` hands out the process-wide
 instance the command processors drive (the guest-called HLE entry points
 cannot thread a handle); it is the one piece of ambient state at this seam.
+
+Behind it, one unit per decision, roughly in dependency order:
+
+| unit | hides |
+|---|---|
+| `renderer_state` | the whole renderer state as one value behind `render::BackendState` |
+| `backend` / `device` | backend choice and bring-up, the frame's command list, checkpoints |
+| `guest_format` | every guest encoding -> `rhi` mapping (surface, vertex, blend, topology) |
+| `hash` | key mixing and the guest-memory content fingerprint |
+| `guest_memory_table` | which guest pages are imported as GPU memory |
+| `index_upload` | guest index decoding (8-bit widened to 16) and the upload element policy |
+| `upload_ring` | how per-draw vertices, indices and constants reach the GPU each frame |
+| `texture_cache` | guest textures: descriptors, upload, revalidation, retirement |
+| `render_target` | render targets keyed by guest address, the address -> image page table, the rendering region |
+| `pipeline_cache` | which pipeline a given piece of guest state needs |
+| `compute` | the GPU-resident compute working set and lazy writeback to guest memory |
+| `compute_hazard` | the buffer-hazard predicate deciding when a dispatch batch needs a barrier |
+| `draw_recomp` | running the game's own recompiled VS/PS for a draw |
+| `draw` | the draw entry point and the heuristic quad fallback |
+| `frame` | the two-slot frame ring, readback and presentation of a finished frame |
+| `perf` | reporting `gpu_perf.h`'s counters: the FPS line and the on-screen overlay |
+| `labels` / `trace` | debug labels and names for capture tools, the barrier and message trace |
+| `capture` / `present` / `png` | frames out to disk / to the window |
+
+Rendering is offscreen: there is no swapchain on the device. Each draw renders
+into the image for its `rt_base`, and `EndFrame` reads back the target at the
+scanout address and hands the pixels to the window (or to a PPM, headless).
+
+The heuristic quad path in `draw` predates the recompiler and is still the
+fallback for draws `draw_recomp` declines; `DELTA_GPU_DECLINES=1` reports why
+draws are still landing there.
+
+## rhi/
+
+A Vulkan-shaped device interface: explicit texture states and barriers, bind
+groups with dynamic offsets and push layouts, push constants, dynamic
+rendering, and submission ids that retire in order. `Caps` reports what a
+backend can do; the renderer checks it rather than the backend.
+`tests/rhi_conformance_test` runs every scenario against each compiled backend.
+
+## vulkan/
+
+| unit | hides |
+|---|---|
+| `vk_rhi_device` | instance/device selection, features, memory, resources, pipelines, submission |
+| `vk_rhi_command` | command lists: barriers, rendering, binding, copies, draws |
+| `vk_rhi_format` | `rhi::Format` <-> Vulkan |
+| `vk_memory_span` | aligned free-span suballocation of pooled image memory |
 
 ## opengl/
 
@@ -69,39 +120,41 @@ libEGL are found (`DELTA_GPU_OPENGL`).
   read-only storage blocks; storage buffers past the per-stage limit are read
   through GPU addresses (`GL_NV_shader_buffer_load`).
 - `tests/rhi_lowering_corpus` runs the lowering over the recompiler's SPIR-V
-  cache and compiles every module with the driver.
+  cache and compiles every module with the driver. The driver's compiler can
+  take several GB on one large shader, so the tool defaults to one thread.
 
-## vulkan/
+## d3d12/
 
-One unit per decision, roughly in dependency order:
+`rhi::Device` on Direct3D 12, written as Windows D3D12 and built on Linux
+against vkd3d (D3D12 over Vulkan), which is where `rhi_conformance_test` runs
+it. Optional: `DELTA_GPU_D3D12`, on when vkd3d and DXC are found.
 
 | unit | hides |
 |---|---|
-| `vk_backend` | the whole backend state as one value behind `render::BackendState` |
-| `vk_device` | instance/adapter/queue selection, memory types, barriers, shader modules |
-| `vk_format` | every guest encoding -> Vulkan mapping (surface, vertex, blend, topology, readback) |
-| `vk_hash` | key mixing and the guest-memory content fingerprint |
-| `vk_memory_span` / `vk_memory` | aligned free-span suballocation, and device-local image memory pooled with it |
-| `vk_index_upload` | guest index decoding (8-bit widened to 16) and the upload element policy |
-| `vk_upload_ring` | how per-draw vertices, indices and constants reach the GPU each frame |
-| `vk_texture_cache` | guest textures as images: descriptors, upload, revalidation, retirement |
-| `vk_render_target` | render targets keyed by guest address, the address -> image page table, the rendering region |
-| `vk_pipeline_cache` | which pipeline a given piece of guest state needs |
-| `vk_compute` | the GPU-resident compute working set and lazy writeback to guest memory |
-| `vk_compute_hazard` | the buffer-hazard predicate deciding when a dispatch batch needs a barrier |
-| `vk_draw_recomp` | running the game's own recompiled VS/PS for a draw |
-| `vk_draw` | the draw entry point and the heuristic quad fallback |
-| `vk_frame` | the two-slot frame ring, readback and presentation of a finished frame |
-| `vk_perf` | reporting `gpu_perf.h`'s counters: the FPS line and the on-screen overlay |
-| `vk_capture` / `vk_present` | frames out to disk / to the window |
+| `d3d12_device` | device, queue and fence, resources, views, samplers, bind groups |
+| `d3d12_pipeline` | root signatures, pipeline states, the shader cache, the blit pass |
+| `d3d12_command` | command lists: state tracking, binding, copies, clears, draws |
+| `d3d12_shader` | SPIR-V -> HLSL (SPIRV-Cross) and its fix-ups, HLSL -> DXIL (`d3d12_dxc`) |
+| `d3d12_spirv_patch` | SPIR-V rewrites for what SPIRV-Cross cannot express in HLSL |
+| `d3d12_format` | `rhi::Format` -> DXGI |
 
-Rendering is offscreen: there is no swapchain on this device. Each draw renders
-into the image for its `rt_base`, and `EndFrame` reads back the target at the
-scanout address and hands the pixels to the window (or to a PPM, headless).
+What differs from Vulkan and how it is bridged:
 
-The heuristic quad path in `vk_draw` predates the recompiler and is still the
-fallback for draws `vk_draw_recomp` declines; `DELTA_GPU_DECLINES=1` reports why
-draws are still landing there.
+- Viewports: a D3D12 viewport is Vulkan's y-up one. A negative Vulkan height
+  maps straight across; a positive one flips clip-space y in the last vertex
+  stage through a root constant. Screen positions, and so facing, match.
+- Binding: one root signature per pipeline layout, a descriptor table (plus a
+  sampler table) per group with register = binding and space = set, dynamic
+  uniform buffers as root CBVs, push constants as root constants. Groups are
+  copied into a shader-visible ring owned in chunks by each command list.
+- State: textures take the caller's before/after states; buffers are tracked
+  per command list from COMMON, since they decay there between
+  `ExecuteCommandLists` calls and each list is executed in its own.
+- Stage linkage: D3D12 matches signatures by register, so a consumer's inputs
+  are rewritten to the producer's element order.
+- Below shader model 6.1 barycentrics come from a generated geometry shader;
+  below 6.7 integer textures are sampled by gather. `tests/rhi_hlsl_corpus`
+  runs the recompiler's SPIR-V cache through all of this.
 
 ## ps4/
 
@@ -169,9 +222,9 @@ is what the `DELTA_GPU_*` printf switches were standing in for.
 ## Debugging a frame in RenderDoc
 
 Launch the emulator under RenderDoc with `DELTA_RDOC_FRAME=N`: rendering is
-offscreen (no swapchain on this device), so vk_frame brackets guest frame N
-with an explicit capture instead of relying on a present boundary. With a
-capture tool attached `VK_EXT_debug_utils` lights up (`vk_debug`) and the
+offscreen (no swapchain on the device), so `render/frame` brackets guest
+frame N with an explicit capture instead of relying on a present boundary.
+With a capture tool attached debug labels light up (`render/labels`) and the
 capture is self-describing, everything keyed by guest addresses so it lines up
 with the `DELTA_GPU_*` logs:
 
@@ -193,7 +246,7 @@ enforced by the local `.clang-format` / `.clang-tidy` (naming) and by
 - Types `CamelCase`; functions `CamelCase()`; variables, struct members and
   parameters `snake_case` (private class members would take a trailing `_`);
   constants `kCamelCase`; mutable globals `g_snake_case`; macros `UPPER_CASE`.
-- Every include is spelled from the delta root (`gpu/vulkan/vk_device.h`),
+- Every include is spelled from the delta root (`gpu/render/frame.h`),
   including inside the module. No extra include roots.
 - Directory dependencies are one-way and machine-checked; the module's public
   surface is `render/` plus the two `cmd_processor.h` entry headers. Everything
