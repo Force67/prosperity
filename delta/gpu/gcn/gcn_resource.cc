@@ -1365,12 +1365,16 @@ TImage DecodeTImage(const u32* p) {
   // same way, and the MIMG path has already selected the face by the time the
   // address reaches the hardware. Leaving type 11 out made every PS4 cubemap
   // descriptor invalid, so the sample fell back to the 1x1 white default.
+  // A cube's DEPTH counts cubes, not faces (a two-cube array has DEPTH 1 and
+  // twelve faces). With POW2_PAD the faces are padded like array slices: a
+  // mipmapped cube stores eight slices a level, which is why a dispatch that
+  // builds its mip chain views the same memory as an eight-slice array.
   if (t.type == 13 || t.type == 12 || t.type == 11) {
     t.layers = (p[4] & 0x1FFF) + 1;
+    if (t.type == 11)
+      t.layers *= 6;
     if (t.pow2_pad)
       t.layers = NextPow2(t.layers);
-    if (t.type == 11)
-      t.layers = std::max<u32>(t.layers, 6);
     t.base_array = p[5] & 0x1FFF;
     t.view_layers = 0;
     const u32 last_array = (p[5] >> 13) & 0x1FFF;

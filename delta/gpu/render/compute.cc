@@ -3622,6 +3622,14 @@ bool CsSupplyTexture(u64 base,
   }
   if (!img)
     return true;
+  // A volume's layers are its depth slices.
+  const bool volume = img->desc().dim == rhi::TextureDim::k3D;
+  if (volume) {
+    if (linear.mip_levels != 1)
+      return false;
+    copies[0].region.depth = copies[0].region.layers;
+    copies[0].region.layers = 1;
+  }
   e.last_used_frame = g_frame.num;
   if (*seq == e.write_seq)
     return true;
@@ -3647,7 +3655,7 @@ bool CsSupplyTexture(u64 base,
   b.before = state;
   b.after = rhi::TextureState::kCopyDst;
   b.range.mips = linear.mip_levels;
-  b.range.layers = layout.layers;
+  b.range.layers = volume ? 1 : layout.layers;
   list->Barrier(0, 0, &b, 1);
   if (unpacked) {
     // RGBA32F texels into the float image, then a blit packs them into the

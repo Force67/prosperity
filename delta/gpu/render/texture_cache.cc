@@ -1143,8 +1143,9 @@ rhi::BindGroup* GetTexture(u64 base,
   // A dispatch's output for this surface still in VRAM is copied straight into
   // the image; the guest bytes under it are stale and stay that way.
   const bool cs_supplies =
-      !is_3d && CsSupplyTexture(base, layout, w, h, nullptr,
-                                rhi::TextureState::kUndefined, nullptr);
+      (!is_3d || mip_levels == 1) &&
+      CsSupplyTexture(base, layout, w, h, nullptr,
+                      rhi::TextureState::kUndefined, nullptr);
   if (cs_supplies && image_it != g_tex_images.end()) {
     if (!CsSupplyTexture(base, layout, w, h, image_it->second.image,
                          rhi::TextureState::kShaderRead,
