@@ -228,7 +228,7 @@ Result Process(const std::string& path,
 int main(int argc, char** argv) {
   std::string dir;
   std::string dump_dir;
-  u32 threads = 6;
+  u32 threads = 1;
   size_t limit = ~size_t(0);
   for (int i = 1; i < argc; i++) {
     if (!std::strcmp(argv[i], "--threads") && i + 1 < argc)
