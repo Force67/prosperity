@@ -4,7 +4,7 @@
  * On-screen overlay content (Dear ImGui): the keyboard->DualSense legend. This
  * file only builds the ImDrawData; overlay_vk.cpp rasterises it through a
  * Vulkan pipeline. Frame timings and this process's CPU/GPU/RAM/VRAM use are
- * drawn by the GPU perf overlay instead (gpu/vulkan/vk_perf.cc).
+ * drawn by the GPU perf overlay instead (gpu/render/perf.cc).
  */
 #ifndef __ANDROID__
 

@@ -163,7 +163,7 @@ struct DrawInfo {
     // behind it: whether the slot is zero, stale, or never the shader's.
     u64 src = 0;
   };
-  static constexpr u32 kMaxDrawTextures = 64;  // == gpu::vk::kMaxTex
+  static constexpr u32 kMaxDrawTextures = 64;  // == gpu::render::kMaxTex
   DrawTex texs[kMaxDrawTextures];
   u32 num_texs = 0;
 

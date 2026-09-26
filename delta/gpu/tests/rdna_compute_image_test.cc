@@ -10,7 +10,7 @@
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
-#include "gpu/vulkan/vk_tiling.h"
+#include "gpu/render/tiling.h"
 
 namespace {
 TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
@@ -48,7 +48,7 @@ TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
         }
       }
       std::vector<u8> actual(linear.size, 0x5a);
-      ASSERT_TRUE(gpu::vk::ConvertGfx10Image(tiled, linear, source.data(),
+      ASSERT_TRUE(gpu::render::ConvertGfx10Image(tiled, linear, source.data(),
                                              actual.data(), true));
       ASSERT_EQ(actual, expected);
       for (size_t i = 0; i < actual.size(); i++)
@@ -71,7 +71,7 @@ TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
               mip, layer));
         }
       }
-      ASSERT_TRUE(gpu::vk::ConvertGfx10Image(tiled, linear, actual.data(),
+      ASSERT_TRUE(gpu::render::ConvertGfx10Image(tiled, linear, actual.data(),
                                              retiled.data(), false));
       ASSERT_EQ(retiled, reference);
     }

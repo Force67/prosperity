@@ -32,7 +32,6 @@ ALLOWED = {
     'rhi': ('gpu/rhi/',),
     # The renderer runs on rhi/ alone; backend.cc is the one unit that names
     # the backends, through each one's factory header.
-    'render': ('gpu/render/', 'gpu/rhi/', 'gpu/vulkan/vk_rhi.h'),
     # The shared ISA decode + SPIR-V translator both consoles emit through. It
     # is the bottom of the recompiler stack, so it may not reach back up into a
     # console's command processor.
@@ -41,21 +40,24 @@ ALLOWED = {
     # gpu/ps4/pm4.h: AGC command streams are PM4-framed, the packet framing
     # header is shared with the PS4 path.
     'ps5': ('gpu/ps5/', 'gpu/gcn/', 'gpu/ps4/pm4.h', 'gpu/render/', *ROOT_HEADERS),
-    # The gcn allowance is the three headers the backend actually consumes (the
-    # recompiled-program types, the resource sharps and the detiler), not the
-    # directory: a backend reaching into the decoder or spirv/ internals is a
-    # layering bug.
-    'vulkan': ('gpu/vulkan/', 'gpu/rhi/', 'gpu/render/', 'gpu/shaders/',
-               *ROOT_HEADERS,
+    # The guest renderer: API-free, on the rhi. The gcn allowance is the three
+    # headers it consumes (recompiled-program types, resource sharps, the
+    # detiler), not the directory. Backends are reachable only through their
+    # factory headers, which backend.cc alone includes.
+    'render': ('gpu/render/', 'gpu/rhi/', 'gpu/shaders/', *ROOT_HEADERS,
                'gpu/gcn/gcn_translate.h', 'gpu/gcn/gcn_detile.h',
-               'gpu/gcn/gcn_resource.h'),
+               'gpu/gcn/gcn_resource.h', 'gpu/vulkan/vk_rhi.h',
+               'gpu/opengl/gl_rhi.h', 'gpu/d3d12/d3d12_rhi.h'),
+    # A backend implements the rhi and knows nothing of guests.
+    'vulkan': ('gpu/vulkan/', 'gpu/rhi/', *ROOT_HEADERS),
     'tests': ('gpu/',),
     'shaders': (),
     # The module root depends on nothing in the module but itself.
     '': ROOT_HEADERS,
 }
 
-PUBLIC = ('gpu/render/', 'gpu/ps4/cmd_processor.h', 'gpu/ps5/cmd_processor.h')
+PUBLIC = ('gpu/render/renderer.h', 'gpu/render/command.h',
+          'gpu/ps4/cmd_processor.h', 'gpu/ps5/cmd_processor.h')
 
 # Developer harnesses that test a gpu internal directly, the same role as
 # gpu/tests/. They are not emulator code and nothing links them, so the public

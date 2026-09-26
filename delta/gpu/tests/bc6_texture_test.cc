@@ -4,9 +4,10 @@
 
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/render/renderer.h"
-#include "gpu/vulkan/vk_device.h"
-#include "gpu/vulkan/vk_format.h"
-#include "gpu/vulkan/vk_texture_cache.h"
+#include "gpu/render/device.h"
+#include "gpu/render/frame.h"
+#include "gpu/render/guest_format.h"
+#include "gpu/render/texture_cache.h"
 
 // The renderer links the PS4 command processor; this test issues no EOPs.
 extern "C" void prosperity_gpu_end_of_pipe() {}
@@ -24,12 +25,12 @@ TEST(Bc6Texture, ObservedHdrBackgroundDescriptorIsValid) {
     EXPECT_EQ(image.height, 2048u);
     EXPECT_EQ(image.dfmt, 40u);
     EXPECT_EQ(image.nfmt, format == 179 ? 0u : 1u);
-    const auto host = gpu::vk::GuestTextureFormat(image.dfmt, image.nfmt);
-    EXPECT_EQ(host, format == 179 ? VK_FORMAT_BC6H_UFLOAT_BLOCK
-                                  : VK_FORMAT_BC6H_SFLOAT_BLOCK);
-    EXPECT_TRUE(gpu::vk::FormatBlockCompressed(host));
-    EXPECT_TRUE(gpu::vk::GuestFormatBlockCompressed(image.dfmt));
-    EXPECT_EQ(gpu::vk::GuestFormatElemBytes(image.dfmt), 16u);
+    const auto host = gpu::render::GuestTextureFormat(image.dfmt, image.nfmt);
+    EXPECT_EQ(host, format == 179 ? gpu::rhi::Format::kBC6HUfloat
+                                  : gpu::rhi::Format::kBC6HSfloat);
+    EXPECT_TRUE(gpu::render::FormatBlockCompressed(host));
+    EXPECT_TRUE(gpu::render::GuestFormatBlockCompressed(image.dfmt));
+    EXPECT_EQ(gpu::render::GuestFormatElemBytes(image.dfmt), 16u);
   }
 }
 
@@ -37,21 +38,20 @@ TEST(Bc6Texture, NativeUploadsSupportSignedUnsignedTiledMipArrays) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  VkPhysicalDeviceFeatures features{};
-  vkGetPhysicalDeviceFeatures(gpu::vk::g_dev.phys, &features);
-  if (!features.textureCompressionBC)
+  if (!gpu::render::Device().SupportsFormat(gpu::rhi::Format::kBC6HUfloat,
+                                            gpu::rhi::kTextureSampled))
     GTEST_SKIP() << "Device does not support BC textures";
-  ASSERT_TRUE(gpu::vk::CreateTextureDescriptors());
+  ASSERT_TRUE(gpu::render::CreateTextureDescriptors());
   // Zero BC6 blocks encode black. Separate allocations avoid cache aliasing.
   alignas(65536) static std::array<std::array<u8, 1048576>, 4> images{};
   u32 allocation = 0;
   for (u32 nfmt : {0u, 1u}) {
     for (u32 tiling : {8u, 0x109u}) {
-      const auto set = gpu::vk::GetTexture(
+      const auto set = gpu::render::GetTexture(
           reinterpret_cast<u64>(images[allocation++].data()),
           16, 8, 40, nfmt, tiling, 16, 2, 0, 2, 3, 0, 3,
           0, false, nullptr, false, true);
-      EXPECT_NE(set, VK_NULL_HANDLE) << "nfmt=" << nfmt << " tiling=" << tiling;
+      EXPECT_NE(set, nullptr) << "nfmt=" << nfmt << " tiling=" << tiling;
     }
   }
 }

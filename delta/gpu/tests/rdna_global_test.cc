@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <vector>
+
+#include <base/option.h>
 #ifdef OS_LINUX
 #include <sys/mman.h>
 #endif
@@ -12,7 +15,7 @@
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/shader_cache.h"
-#include "gpu/vulkan/vk_device.h"
+#include "gpu/render/device.h"
 
 namespace {
 class RdnaGlobal : public testing::Test {
@@ -342,13 +345,18 @@ TEST_F(RdnaGlobal, FullVectorAddressAndStoreThenLoadAlias) {
 TEST_F(RdnaGlobal, ConcurrentByteStoresPreserveOtherBytesAndCopiedWriteback) {
   // Anonymous imports are rebuilt each dispatch. Force the copy path and
   // verify that its dirty bitmap writes back precisely the changed words.
-  const bool imports = gpu::vk::g_dev.host_import_available;
-  gpu::vk::g_dev.host_import_available = false;
+  base::OptionBase* import = nullptr;
+  base::OptionBase::VisitAll([&](const base::OptionBase* option) {
+    if (std::strcmp(option->name(), "DELTA_GPU_GUEST_IMPORT") == 0)
+      import = const_cast<base::OptionBase*>(option);
+  });
+  ASSERT_NE(import, nullptr);
+  ASSERT_TRUE(import->SetFromString("0"));
   auto& dest = PageForDispatch();
   Mov(1, 0x44);
   Global(0x18, 0, 1, 2);
   Run(0, reinterpret_cast<u64>(dest.data()), 63);
-  gpu::vk::g_dev.host_import_available = imports;
+  import->Reset();
   for (u32 i = 0; i < 15; ++i)
     EXPECT_EQ(dest[i], 0x44444444);
   EXPECT_EQ(dest[15], 0xa5444444);

@@ -62,11 +62,11 @@ if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
   add_delta_test(rdna_bvh_test
     SOURCES rdna_bvh_test.cc
     DEPS delta_gpu)
-  add_delta_test(vk_draw_test
-    SOURCES vk_draw_test.cc
+  add_delta_test(render_draw_test
+    SOURCES render_draw_test.cc
     DEPS delta_gpu)
-  target_include_directories(vk_draw_test PRIVATE ${SPIRVHEADERS_INCLUDE_DIRS})
-  set_tests_properties(vk_draw_test PROPERTIES
+  target_include_directories(render_draw_test PRIVATE ${SPIRVHEADERS_INCLUDE_DIRS})
+  set_tests_properties(render_draw_test PROPERTIES
     ENVIRONMENT "SDL_VIDEODRIVER=offscreen;DELTA_GPU_NOPRESENT=1;DELTA_GPU_SNAPEVERY=1000000;DELTA_GPU_SNAPEVERY_MAX=0")
 endif()
 
@@ -76,23 +76,23 @@ add_delta_test(vk_memory_span_test
     ../vulkan/vk_memory_span.cc
   DEPS delta_deps)
 
-add_delta_test(vk_color_mask_test
-  SOURCES vk_color_mask_test.cc
+add_delta_test(render_color_mask_test
+  SOURCES render_color_mask_test.cc
   DEPS delta_gpu)
 
 add_delta_test(bc6_texture_test
   SOURCES bc6_texture_test.cc
   DEPS delta_gpu)
 
-add_delta_test(vk_compute_hazard_test
+add_delta_test(render_compute_hazard_test
   SOURCES
-    vk_compute_hazard_test.cc
+    render_compute_hazard_test.cc
   DEPS delta_deps)
 
-add_delta_test(vk_index_upload_test
+add_delta_test(render_index_upload_test
   SOURCES
-    vk_index_upload_test.cc
-    ../vulkan/vk_index_upload.cc
+    render_index_upload_test.cc
+    ../render/index_upload.cc
   DEPS delta_deps)
 
 # Needs a GPU: every backend without a usable device is skipped.
