@@ -84,6 +84,7 @@ struct StageCode {
   u32 stage = 0;  // rhi::ShaderStage bit
   rhi::ShaderCode code;
   bool dispatch_base = false;  // compute: offset by kDispatchBase
+  bool strip_order = false;    // fragment: drawn as a triangle strip
 };
 
 // Lowers the stages of one program against `groups` (indexed by set; null

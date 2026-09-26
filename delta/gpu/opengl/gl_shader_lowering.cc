@@ -11,6 +11,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <regex>
 #include <unordered_map>
 
 namespace gpu::opengl {
@@ -267,6 +268,42 @@ void ReplaceAll(std::string& s, const char* from, const char* to) {
     s.replace(at, n, to);
 }
 
+// GL orders the vertices of an odd triangle in a strip (i+1, i, i+2), Vulkan
+// (i, i+2, i+1): remap the barycentrics and per-vertex inputs to Vulkan's.
+void ReorderStripVertices(std::string& s) {
+  static const std::regex decl(
+      R"((layout\(location = \d+\) (?:flat )?pervertexEXT in )(\w+) (\w+)\[3\];)");
+  std::string globals, init;
+  std::smatch m;
+  for (auto from = s.cbegin(); std::regex_search(from, s.cend(), m, decl);) {
+    const std::string type = m[2], name = m[3];
+    globals += type + " " + name + "[3];\n";
+    init += "    " + name + " = delta_odd ? " + type + "[3](" + name +
+            "_strip[1], " + name + "_strip[2], " + name + "_strip[0]) : " +
+            name + "_strip;\n";
+    const size_t at = m.position(0) + (from - s.cbegin());
+    const std::string replaced =
+        m[1].str() + type + " " + name + "_strip[3];\n";
+    s.replace(at, m.length(0) + 1, replaced);
+    from = s.cbegin() + at + replaced.size();
+  }
+  for (const char* builtin : {"gl_BaryCoordEXT", "gl_BaryCoordNoPerspEXT"}) {
+    if (s.find(builtin) == std::string::npos)
+      continue;
+    const std::string local = std::string("delta_") + (builtin + 3);
+    ReplaceAll(s, builtin, local.c_str());
+    globals += "vec3 " + local + ";\n";
+    init += "    " + local + " = delta_odd ? " + builtin + ".yzx : " +
+            builtin + ";\n";
+  }
+  const size_t main = s.find("void main()\n{\n");
+  if (init.empty() || main == std::string::npos)
+    return;
+  s.insert(main + 14,
+           "    bool delta_odd = (gl_PrimitiveID & 1) != 0;\n" + init);
+  s.insert(main, globals + "\n");
+}
+
 bool Accepts(rhi::BindingType type, SlotKind kind) {
   switch (type) {
     case rhi::BindingType::kUniformBuffer:
@@ -286,6 +323,7 @@ bool Accepts(rhi::BindingType type, SlotKind kind) {
 struct Stage {
   u32 stage = 0;
   bool dispatch_base = false;
+  bool strip_order = false;
   std::unique_ptr<Lowerer> compiler;
   spirv_cross::ShaderResources resources;
 };
@@ -319,6 +357,8 @@ bool LowerProgram(const StageCode* stages,
       s.stage = StageOf(s.compiler->get_execution_model());
       s.dispatch_base =
           stages[i].dispatch_base && s.stage == rhi::kStageCompute;
+      s.strip_order =
+          stages[i].strip_order && s.stage == rhi::kStageFragment;
       if (!s.stage || s.stage != stages[i].stage) {
         *error = "unsupported or mismatched execution model";
         return false;
@@ -520,6 +560,8 @@ bool LowerProgram(const StageCode* stages,
         RewritePointerAtomics(source);
       // Per-vertex inputs take no interpolation qualifier.
       ReplaceAll(source, "flat pervertex", "pervertex");
+      if (s.strip_order)
+        ReorderStripVertices(source);
       if (features.nv_barycentric_only &&
           source.find("GL_EXT_fragment_shader_barycentric") !=
               std::string::npos) {

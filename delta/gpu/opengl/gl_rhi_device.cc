@@ -862,7 +862,9 @@ rhi::Pipeline* GlDevice::CreateGraphicsPipeline(
   if (!desc.geometry.empty())
     stages[count++] = {rhi::kStageGeometry, desc.geometry};
   if (!desc.fragment.empty())
-    stages[count++] = {rhi::kStageFragment, desc.fragment};
+    stages[count++] = {rhi::kStageFragment, desc.fragment, false,
+                       desc.topology == rhi::Topology::kTriangleStrip &&
+                           desc.geometry.empty()};
 
   for (size_t i = 0; i < desc.vertex_buffers.size(); i++)
     pipeline->strides[i] = desc.vertex_buffers[i].stride;
