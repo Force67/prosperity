@@ -347,6 +347,11 @@ bool LowerProgram(const StageCode* stages,
                   std::string* error) {
   *program = {};
   glsl->clear();
+  for (u32 i = 0; i < count; i++)
+    if (stages[i].code.count * 4 > kMaxModuleBytes) {
+      *error = "module too large for GL";
+      return false;
+    }
   try {
     std::vector<Stage> parsed(count);
     std::map<u64, Use> uses;

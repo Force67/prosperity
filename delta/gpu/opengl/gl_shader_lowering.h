@@ -87,6 +87,10 @@ struct StageCode {
   bool strip_order = false;    // fragment: drawn as a triangle strip
 };
 
+// Past about this much SPIR-V the driver's compiler (NVIDIA's at least) fails
+// on program length, after minutes and several GB for the largest modules.
+inline constexpr size_t kMaxModuleBytes = 640 * 1024;
+
 // Lowers the stages of one program against `groups` (indexed by set; null
 // entries are empty sets). On success `glsl` holds one source per stage, in
 // order. A resource missing from the layout, or bound as another type, fails.
