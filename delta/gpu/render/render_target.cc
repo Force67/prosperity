@@ -1092,6 +1092,29 @@ void NoteRawWrite(u64 base, u64 bytes) {
   }
 }
 
+bool OverlapsLiveTarget(u64 base, u64 bytes) {
+  const u64 end = base + bytes;
+  const auto hits = [&](u64 at, u64 n) { return at < end && base < at + n; };
+  const auto depth_bytes = [](const DepthTarget& d) {
+    return u64(d.w) * d.h * 4 * std::max(1u, d.layers);
+  };
+  for (const auto& [at, rt] : g_rts)
+    if (hits(at, RtByteSize(rt)))
+      return true;
+  for (const auto& [at, variants] : g_rt_variants)
+    for (const RTarget& rt : variants)
+      if (hits(at, RtByteSize(rt)))
+        return true;
+  for (const auto& [at, d] : g_depths)
+    if (hits(at, depth_bytes(d)))
+      return true;
+  for (const auto& [at, variants] : g_depth_variants)
+    for (const DepthTarget& d : variants)
+      if (hits(at, depth_bytes(d)))
+        return true;
+  return false;
+}
+
 bool ActivateWrittenRtVariant(u64 base, u32 w, u32 h) {
   if (!base || !w || !h)
     return false;
@@ -1349,6 +1372,7 @@ bool BeginRegion(const u64* mrt_base,
     if (!CsRefreshRtFromTruth(mrt_base[i]))
       render::FlushCsWritesRange(render::DefaultRenderer(), mrt_base[i],
                               RtByteSize(*targets[i]), "rt-bind");
+    targets[i]->cb_info = mrt_info[i];
     if (mrt_dcc_base && mrt_dcc_base[i]) {
       targets[i]->dcc_base = mrt_dcc_base[i];
       targets[i]->dcc_is_cmask = meta_cmask;
@@ -1647,23 +1671,32 @@ void NoteMemoryFill(Renderer& renderer,
     // buffer update that happens to overlap.
     if (base > rt_base || end < rt_end)
       return;
+    // The fill repeats one dword, so each texel holds that dword pattern in
+    // the target's own guest format: decode it the way a fast-clear word is.
+    // Reading it as four 8-bit channels made a float target (UE4's exposure
+    // targets) clear to garbage, and the scene blew out from there on. A
+    // target never bound as colour has no known encoding; zero is zero in all
+    // of them, anything else reloads from the guest bytes instead.
+    if (rt.cb_info) {
+      rt.clear_value = ColorTargetClearValue(rt.cb_info, value, value);
+    } else if (value == 0) {
+      rt.clear_value = rhi::ClearColor{};
+    } else {
+      rt.ever_rendered = false;
+      return;
+    }
     rt.clear_pending = true;
     rt.clear_src = "memory-fill";
-    // The fill value is one dword of the target's own format. Unpacking every
-    // format is not worth it: a clear is almost always zero (black), and a
-    // non-zero fill lands as its 8-bit-per-channel reading.
-    const float inv = 1.0f / 255.0f;
-    rt.clear_value.f[0] = ((value >> 0) & 0xFF) * inv;
-    rt.clear_value.f[1] = ((value >> 8) & 0xFF) * inv;
-    rt.clear_value.f[2] = ((value >> 16) & 0xFF) * inv;
-    rt.clear_value.f[3] = ((value >> 24) & 0xFF) * inv;
     static int n = 0;
     if (kGpuFilltrace && n++ < kGpuFilltrace)
       BASE_LOGI("fill",
-                "f{} draw#{} RT {:#x} cleared by fill {:08x} (base={:#x} {} "
-                "bytes)",
-                g_frame.num, g_frame.draws, (unsigned long)rt_base, value,
-                (unsigned long)base, (unsigned long)bytes);
+                "f{} draw#{} RT {:#x} {}x{} {} info={:#x} cleared by fill "
+                "{:08x} -> ({}, {}, {}, {}) (base={:#x} {} bytes)",
+                g_frame.num, g_frame.draws, (unsigned long)rt_base, rt.w,
+                rt.h, rhi::FormatName(rt.fmt), rt.cb_info, value,
+                rt.clear_value.f[0], rt.clear_value.f[1], rt.clear_value.f[2],
+                rt.clear_value.f[3], (unsigned long)base,
+                (unsigned long)bytes);
   };
   for (auto& kv : g_rts) {
     note(kv.second, kv.first);

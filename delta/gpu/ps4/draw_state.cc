@@ -705,10 +705,11 @@ u32 IntAttrMask(const gcn::Recompiled& rc,
 void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
                             const u32* user_data,
                             const std::shared_ptr<const gcn::Program>& program,
+                            u64 code_base,
                             bool vertex_stage,
                             render::DrawInfo& d,
                             bool& resolved_vs_cbuf) {
-  auto resolved = gcn::ResolveCbuffers(program, user_data);
+  auto resolved = gcn::ResolveCbuffers(program, user_data, code_base);
   for (const auto& cb : cbufs) {
     if (cb.binding >= std::size(d.cbufs))
       continue;
@@ -749,12 +750,14 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
 void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
                        const u32* user_data,
                        const std::shared_ptr<const gcn::Program>& program,
+                       u64 code_base,
                        const char* stage,
                        u64 vs_addr,
                        render::DrawInfo& d) {
   if (buffers.empty())
     return;
-  const auto resolved = gcn::ResolveShaderBuffers(program, buffers, user_data);
+  const auto resolved =
+      gcn::ResolveShaderBuffers(program, buffers, user_data, code_base);
   for (size_t i = 0; i < buffers.size(); i++) {
     const gcn::ShaderBuffer& sb = buffers[i];
     if (sb.binding >= render::DrawInfo::kMaxBuffers)
@@ -854,7 +857,7 @@ RecompStatus ResolveRecompiledShaders(
   const u32* pud = regs.At(mmSPI_SHADER_USER_DATA_PS_0);
   const auto vs_prog = gcn::CachedProgram(vs_addr, 4096);
   const auto direct_vbs =
-      gcn::ResolveDirectVertexBuffers(vs_prog, rc->attrs, vud);
+      gcn::ResolveDirectVertexBuffers(vs_prog, rc->attrs, vud, vs_addr);
 
   gcn::VBuffer attr_vbs[render::DrawInfo::kMaxVertexAttrs];
   u32 attr_count = 0;
@@ -901,28 +904,29 @@ RecompStatus ResolveRecompiledShaders(
   }
 
   bool resolved_vs_cbuf = false;
-  ResolveCbufferBindings(rc->vs_cbufs, vud, vs_prog, true, d, resolved_vs_cbuf);
+  ResolveCbufferBindings(rc->vs_cbufs, vud, vs_prog, vs_addr, true, d,
+                         resolved_vs_cbuf);
   const auto ps_program =
       ps_prog ? ps_prog
               : (IsGuestAddress(ps_addr) ? gcn::CachedProgram(ps_addr, 4096)
                                          : nullptr);
   if (ps_program)
-    ResolveCbufferBindings(rc->ps_cbufs, pud, ps_program, false, d,
+    ResolveCbufferBindings(rc->ps_cbufs, pud, ps_program, ps_addr, false, d,
                            resolved_vs_cbuf);
   if (gs && !rc->gs_cbufs.empty())
     ResolveCbufferBindings(
         rc->gs_cbufs, regs.At(mmSPI_SHADER_USER_DATA_GS_0),
-        gcn::CachedProgram(reinterpret_cast<u64>(gs->gs_code), 4096), false,
-        d, resolved_vs_cbuf);
+        gcn::CachedProgram(reinterpret_cast<u64>(gs->gs_code), 4096),
+        reinterpret_cast<u64>(gs->gs_code), false, d, resolved_vs_cbuf);
   for (const auto& cb : rc->vs_cbufs)
     d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
   for (const auto& cb : rc->gs_cbufs)
     d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
   for (const auto& cb : rc->ps_cbufs)
     d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
-  ResolveRawBuffers(rc->vs_bufs, vud, vs_prog, "vs", vs_addr, d);
+  ResolveRawBuffers(rc->vs_bufs, vud, vs_prog, vs_addr, "vs", vs_addr, d);
   if (ps_program)
-    ResolveRawBuffers(rc->ps_bufs, pud, ps_program, "ps", vs_addr, d);
+    ResolveRawBuffers(rc->ps_bufs, pud, ps_program, ps_addr, "ps", vs_addr, d);
 
   d.vs_addr = vs_addr;
   d.ps_addr = ps_addr;
@@ -962,6 +966,7 @@ bool BuildDrawInfo(render::Renderer& renderer,
                    const Regs& regs,
                    const DrawPacket& packet,
                    render::DrawInfo& d) {
+  const gcn::ScalarReplayScope replays;
   d.prim_type = regs[mmVGT_PRIMITIVE_TYPE];
   gcn::GsPipeline gs;
   const bool has_gs = ResolveGsPipeline(regs, d.prim_type, gs);

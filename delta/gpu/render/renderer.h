@@ -105,6 +105,12 @@ void NoteMemoryFill(Renderer& renderer,
                     u64 bytes,
                     u32 value);
 
+// Fill guest memory with one dword on the CPU, as the command stream orders
+// it (a CP DMA fill, or a compute fill kernel run here instead of on the GPU):
+// compute writes still pending under it land first, every cached copy of it is
+// retired, and NoteMemoryFill sees it.
+void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
+
 // Does `addr` fall inside a compute staging range, i.e. guest memory the renderer
 // snapshots and copies back? A guest fault on memory the guest alone should own
 // wants that answered on the spot: the crash handler asks, so a corrupted heap

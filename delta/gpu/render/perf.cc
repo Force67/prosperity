@@ -6,6 +6,8 @@
 #include "base/arch.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/render/perf.h"
+#include "gpu/render/buffer_cache.h"
+#include "gpu/write_tracker.h"
 
 #include "gfx/gfx.h"
 #include "gfx/overlay.h"
@@ -401,18 +403,30 @@ void ReportFps() {
                 g_tex_hash_bytes / f / 1e6, g_ns_tex_probe / f / 1e6,
                 g_tex_probe_n / f, g_ns_tex_lookup / f / 1e6,
                 g_tex_lookup_n / f);
-    if (kDrawProf)
+    if (kDrawProf) {
+      // The guest write tracker's side of the ring copies it saves.
+      const WriteTracker& t = GuestWriteTracker();
+      static u64 collects = 0, pages = 0, collect_ns = 0;
       BASE_LOGI("drawprof2",
                 "per-frame texset={:.2f}ms x{:.0f} region={:.2f}ms "
                 "csflush={:.2f}ms builddraw={:.2f}ms x{:.0f} "
                 "gfxpres={:.2f}ms borrowwait={:.2f}ms | ring vb={:.1f}MB "
-                "ib={:.1f}MB cb={:.1f}MB raw={:.1f}MB",
+                "ib={:.1f}MB cb={:.1f}MB raw={:.1f}MB | track armed={:.0f}MB "
+                "runs={} collect={:.2f}ms x{:.0f} written={:.0f}p | kept={:.0f}MB "
+                "+{:.1f}MB/f",
                 g_ns_tex_set / f / 1e6, g_tex_set_n / f, g_ns_region / f / 1e6,
                 g_ns_cs_flush / f / 1e6, g_ns_build_draw / f / 1e6,
                 g_build_draw_n / f, g_ns_gfx_present / f / 1e6,
                 g_ns_borrow_wait / f / 1e6, g_ring_vb_bytes / f / 1e6,
                 g_ring_ib_bytes / f / 1e6, g_ring_cb_bytes / f / 1e6,
-                g_ring_raw_bytes / f / 1e6);
+                g_ring_raw_bytes / f / 1e6, t.armed_bytes() / 1e6, t.runs(),
+                (t.collect_ns() - collect_ns) / f / 1e6,
+                (t.collects() - collects) / f, (t.written_pages() - pages) / f,
+                CachedBufferBytes() / 1e6, g_vb_kept_bytes / f / 1e6);
+      collects = t.collects();
+      pages = t.written_pages();
+      collect_ns = t.collect_ns();
+    }
     CsSyncReport(f);
     // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
     // cost).
@@ -439,6 +453,7 @@ void ReportFps() {
     g_frame_hitch_n = 0;
     g_ns_gfx_present = g_ns_borrow_wait = 0;
     g_ring_vb_bytes = g_ring_ib_bytes = g_ring_cb_bytes = g_ring_raw_bytes = 0;
+    g_vb_kept_bytes = 0;
     g_cs_stage_bytes = 0;
     g_cs_wb_bytes_written = g_cs_wb_bytes_total = 0;
     gcn::g_ns_recomp = 0;

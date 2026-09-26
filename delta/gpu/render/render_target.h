@@ -96,6 +96,9 @@ struct RTarget {
   bool dcc_clear_pending = false;
   bool dcc_code_known = false;  // an immediate fill carried its value
   u32 dcc_clear_code = 0;
+  // CB_COLORn_INFO of the last bind as a colour target (0: never bound): the
+  // guest format a fill over the surface is encoded in.
+  u32 cb_info = 0;
 };
 
 // The live target at each guest address. An address the guest renders to at
@@ -244,6 +247,8 @@ void NoteSurfaceWrite(u64 base, u64 bytes);
 // sample must read the memory (Astro Bot reuses its UI target's pages for an
 // exposure texel).
 void NoteRawWrite(u64 base, u64 bytes);
+// Whether [base, base+bytes) touches a live colour or depth target's surface.
+bool OverlapsLiveTarget(u64 base, u64 bytes);
 
 // A dispatch is about to write `base` at geometry (w, h): make that
 // geometry's image the live one so the write lands where a later sample at

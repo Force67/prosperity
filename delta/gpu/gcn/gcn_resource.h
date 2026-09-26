@@ -100,6 +100,17 @@ struct MimgBindingPlan {
 MimgBindingPlan PlanMimgBindings(const Program& program,
                                  const u8* reachable = nullptr);
 
+// While one is open, the resolvers below share one replay of a program's
+// scalar code per user data and code base, instead of each replaying it. Open
+// one around a single draw: guest memory may change between draws.
+class ScalarReplayScope {
+ public:
+  ScalarReplayScope();
+  ~ScalarReplayScope();
+  ScalarReplayScope(const ScalarReplayScope&) = delete;
+  ScalarReplayScope& operator=(const ScalarReplayScope&) = delete;
+};
+
 // Recover the image(s) a PS references by tracking s_load_dwordx4/x8/x16 of
 // descriptor tables out of the user-data SGPRs. Preserves MIMG order (set-0 binding
 // order); unresolved entries carry valid=false. Pass CachedProgram(): it keys a
@@ -125,7 +136,8 @@ inline u64 CbufKey(u32 base_sgpr, bool pointer, u32 version) {
 // at the point of load.
 std::unordered_map<u64, VBuffer> ResolveCbuffers(
     const std::shared_ptr<const Program>& program,
-    const u32* user_data);
+    const u32* user_data,
+    u64 code_base = 0);
 
 // Resolve attributes fetched by MUBUF in the main VS: the descriptor SGPRs may start
 // as inline user data or be overwritten by an SMRD load, so capture each V# from the
@@ -133,7 +145,8 @@ std::unordered_map<u64, VBuffer> ResolveCbuffers(
 std::vector<VBuffer> ResolveDirectVertexBuffers(
     const std::shared_ptr<const Program>& program,
     const std::vector<ShaderAttr>& attrs,
-    const u32* user_data);
+    const u32* user_data,
+    u64 code_base = 0);
 
 // Resolve the live V# behind each raw MUBUF buffer (see ShaderBuffer): same replay
 // as ResolveDirectVertexBuffers, captured at the consuming instruction.
@@ -141,7 +154,8 @@ std::vector<VBuffer> ResolveDirectVertexBuffers(
 std::vector<VBuffer> ResolveShaderBuffers(
     const std::shared_ptr<const Program>& program,
     const std::vector<ShaderBuffer>& buffers,
-    const u32* user_data);
+    const u32* user_data,
+    u64 code_base = 0);
 
 // Replay a compute shader's uniform scalar descriptor loads and capture each
 // planned V#/T#/pointer at the instruction where it is consumed. This resolves

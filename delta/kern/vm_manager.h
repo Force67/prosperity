@@ -46,6 +46,12 @@ struct pageInfo {
       : ptr(p), size(s), prot(mp), sceProt(sp), reserved(rsv) {}
 };
 
+// Told about every range whose mapping changes (mapped over, or dropped), so a
+// cache of guest memory above the kernel can forget it. Installed by the
+// composition root; called with the VM lock held, from any thread.
+using MappingChangedHook = void (*)(u64 base, u64 bytes);
+void setMappingChangedHook(MappingChangedHook hook);
+
 class vmManager {
 public:
   vmManager(procInfo &);

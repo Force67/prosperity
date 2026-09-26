@@ -3,6 +3,8 @@
  */
 
 #include "gpu/render/frame.h"
+#include "gpu/render/buffer_cache.h"
+#include "gpu/write_tracker.h"
 #include "base/arch.h"
 
 #include "gfx/gfx.h"
@@ -998,6 +1000,8 @@ void WatchGuestMem() {
 
 void EndFrame(Renderer& renderer, u64 scanout_base) {
   WatchGuestMem();
+  GuestWriteTracker().EndFrame();
+  BufferCacheEndFrame();
   if (!renderer.available() || !g_frame.recording)
     return;
   // Bound CS-write staleness for guest CPU readers. Only a device fault (the

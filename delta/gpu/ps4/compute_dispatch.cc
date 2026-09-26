@@ -9,6 +9,7 @@
 #include "base/arch.h"
 
 #include <algorithm>
+#include <cstring>
 #include <unordered_set>
 
 #include <base/logging.h>
@@ -22,6 +23,7 @@
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/shader_cache.h"
+#include "gpu/render/render_target.h"
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
@@ -189,6 +191,55 @@ ComputeShaderState ComputeStateOf(const Regs& regs) {
 }
 }  // namespace
 
+// The SDK's buffer fill kernel: 64 threads a group, and thread i stores the
+// first dword of the constant buffer at s[4:7] to element i of the V# at
+// s[0:3], bounded by its num_records. UE4 clears CMASK and HTILE with it
+// several times a frame and the next bind reads the result back; on the GPU
+// that is a dispatch and a fence wait for 16 KB. Run here it is a memset,
+// for metadata and plain buffers; a fill over a render target stays on the
+// GPU.
+constexpr u32 kFillKernel[] = {
+    0xbeeb03ff, 0x00000009, 0xc2020500, 0x8f6a8608, 0xd2ba0000,
+    0x0401006a, 0xbf8c007f, 0x7e020204, 0xd1a80004, 0x00020002,
+    0xe0102000, 0x80000100, 0xbf810000};
+
+DELTA_OPTION(bool, kCpuFill, "DELTA_GPU_CPU_FILL", true);
+
+bool RunFillKernelOnCpu(render::Renderer& renderer,
+                        u64 cs_addr,
+                        const u32 groups[3],
+                        const u32 threads[3],
+                        u32 user_sgpr,
+                        u32 tgid_enable,
+                        const u32* user_data) {
+  if (!kCpuFill || threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
+      groups[1] != 1 || groups[2] != 1 || user_sgpr != 8 ||
+      !(tgid_enable & 1) || !IsMappedGuestRange(cs_addr, sizeof(kFillKernel)) ||
+      std::memcmp(reinterpret_cast<const void*>(cs_addr), kFillKernel,
+                  sizeof(kFillKernel)))
+    return false;
+  const gcn::VBuffer dst = gcn::DecodeVBuffer(user_data);
+  const gcn::VBuffer src = gcn::DecodeVBuffer(user_data + 4);
+  // A plain dword array: no swizzle (V# word 1 bit 31), no ADD_TID (word 3
+  // bit 23), 32-bit elements of an integer or float format.
+  const bool raw_dwords = !(user_data[1] >> 31) && !(user_data[3] & (1u << 23));
+  if (!raw_dwords || dst.stride != 4 || dst.dfmt != 4 ||
+      (dst.nfmt != 4 && dst.nfmt != 5 && dst.nfmt != 7))
+    return false;
+  const u64 bytes = std::min<u64>(u64(groups[0]) * 64, dst.num_records) * 4;
+  // A surface's image is refreshed from the compute range the GPU path
+  // leaves behind; a CPU fill under a live target would never reach it.
+  if (!bytes || !IsMappedGuestRange(dst.base, bytes) ||
+      !IsMappedGuestRange(src.base, 4) ||
+      render::OverlapsLiveTarget(dst.base, bytes))
+    return false;
+  render::FlushCsWritesRange(renderer, src.base, 4, "fill");
+  u32 value;
+  std::memcpy(&value, reinterpret_cast<const void*>(src.base), 4);
+  render::ApplyMemoryFill(renderer, dst.base, bytes, value);
+  return true;
+}
+
 void PrefetchComputeDispatch(const Regs& regs) {
   const ComputeShaderState state = ComputeStateOf(regs);
   if (!kNoCs && IsGuestAddress(state.cs_addr) && state.thread_x &&
@@ -227,6 +278,9 @@ void DispatchCompute(render::Renderer& renderer,
     return;
   }
   if (kNoCs || !renderer.available())
+    return;
+  if (RunFillKernelOnCpu(renderer, cs_addr, groups, threads, user_sgpr,
+                         tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0)))
     return;
 
   const gcn::RecompiledCs& rc =

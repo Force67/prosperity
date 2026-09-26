@@ -79,7 +79,9 @@ u32 GraphicsStages() {
 
 bool CreateUploadRings() {
   const rhi::Caps& caps = Device().caps();
-  g_ring.vb = HostBuffer(VbRingBytes(), rhi::kBufferVertex, "vertex ring",
+  g_ring.vb = HostBuffer(VbRingBytes(),
+                         rhi::kBufferVertex | rhi::kBufferCopyDst,
+                         "vertex ring",
                          &g_ring.vb_map);
   g_ring.ib = HostBuffer(kIbRing, rhi::kBufferIndex, "index ring",
                          &g_ring.ib_map);
@@ -169,7 +171,9 @@ bool EnsureCbufRing() {
     return g_ring.ubo_map != nullptr;
   g_ring.ubo_bytes = UboRingBytes();
   g_ring.ubo_buf =
-      HostBuffer(UboRingBytes(), rhi::kBufferUniform | rhi::kBufferStorage,
+      HostBuffer(UboRingBytes(),
+                 rhi::kBufferUniform | rhi::kBufferStorage |
+                     rhi::kBufferCopyDst,
                  "cbuffer ring", &g_ring.ubo_map);
   if (!g_ring.ubo_buf)
     return false;
@@ -253,7 +257,9 @@ bool EnsureRawBufferRing() {
     return true;
   if (!g_ring.sbo_layout)
     return false;
-  g_ring.sbo_buf = HostBuffer(kSboRing, rhi::kBufferStorage, "raw buffer ring",
+  g_ring.sbo_buf = HostBuffer(kSboRing,
+                              rhi::kBufferStorage | rhi::kBufferCopyDst,
+                              "raw buffer ring",
                               &g_ring.sbo_map);
   if (!g_ring.sbo_buf)
     return false;

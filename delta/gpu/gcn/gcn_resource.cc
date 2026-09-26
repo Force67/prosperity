@@ -1023,7 +1023,229 @@ const ScalarPassInfo& CachedScalarInfo(
   return cache.emplace(program.get(), std::move(e)).first->second.info;
 }
 
+// The registers one descriptor consumer reads, as the walk had them there: an
+// SMRD's descriptor before it steps, a MIMG's T# and S#, a MUBUF's or MTBUF's
+// V#. A draw resolves textures, cbuffers, raw and vertex buffers out of the
+// same program and user data, and each of those used to replay the whole
+// program on its own: seven walks a draw, the largest single cost of building
+// one.
+struct ScalarConsumer {
+  u32 index = 0;    // into CachedScalarInfo(program).insts
+  u32 version = 0;  // DescriptorVersions of an SMRD's descriptor, at it
+  u8 first[2] = {};
+  u8 count[2] = {};
+  u8 known[2] = {};  // bit i: first[w] + i was known
+  u32 value[2][8] = {};
+  u64 src = 0;  // where first[0] was loaded from
+};
+
+bool IsSmrdConsumer(const Inst& inst) {
+  if (inst.enc != Enc::kSmrd)
+    return false;
+  const u32 op = DecodeSmrd(inst.raw[0]).op;
+  return op <= 0x04 || (op >= 0x08 && op <= 0x0c);
+}
+
+bool IsResourceConsumer(const Inst& inst) {
+  return inst.enc == Enc::kMimg || inst.enc == Enc::kMubuf ||
+         inst.enc == Enc::kMtbuf;
+}
+
+// A consumer's registers with ScalarEval's face, so one resolver body reads
+// either. Asking for anything the snapshot did not capture sets `uncovered`
+// and reads as unknown; the resolver then replays the program itself.
+class ConsumerRegs {
+ public:
+  struct Sgprs {
+    const ConsumerRegs* regs;
+    const u32& operator[](u32 s) const { return regs->Reg(s); }
+  };
+  struct Srcs {
+    const ConsumerRegs* regs;
+    u64 operator[](u32 s) const {
+      if (s == regs->c_.first[0])
+        return regs->c_.src;
+      *regs->uncovered_ = true;
+      return 0;
+    }
+  };
+
+  ConsumerRegs(const ScalarConsumer& c, bool* uncovered)
+      : c_(c), uncovered_(uncovered) {}
+
+  bool AllKnown(u32 s, u32 n) const {
+    for (u32 w = 0; w < 2; w++) {
+      if (s < c_.first[w] || s + n > u32(c_.first[w]) + c_.count[w])
+        continue;
+      const u32 bits = ((1u << n) - 1) << (s - c_.first[w]);
+      return (c_.known[w] & bits) == bits;
+    }
+    *uncovered_ = true;
+    return false;
+  }
+  u64 Ptr(u32 s) const {
+    return (static_cast<u64>(sgpr[s + 1] & 0xFFFF) << 32) | sgpr[s];
+  }
+
+  Sgprs sgpr{this};
+  Srcs src{this};
+  bool trace = false;
+
+ private:
+  const u32& Reg(u32 s) const {
+    static const u32 kZero = 0;
+    for (u32 w = 0; w < 2; w++)
+      if (s >= c_.first[w] && s < u32(c_.first[w]) + c_.count[w])
+        return c_.value[w][s - c_.first[w]];
+    *uncovered_ = true;
+    return kZero;
+  }
+
+  const ScalarConsumer& c_;
+  bool* uncovered_;
+};
+
+void Capture(ScalarConsumer& c, u32 w, u32 first, u32 count,
+             const ScalarEval& eval) {
+  count = std::min<u32>(count, ScalarEval::kRegs - std::min<u32>(first, ScalarEval::kRegs));
+  c.first[w] = static_cast<u8>(first);
+  c.count[w] = static_cast<u8>(count);
+  for (u32 i = 0; i < count; i++) {
+    c.value[w][i] = eval.sgpr[first + i];
+    if (eval.known[first + i])
+      c.known[w] |= static_cast<u8>(1u << i);
+  }
+}
+
+void BuildReplay(const std::vector<Inst>& insts,
+                 const u32* user_data,
+                 u64 code_base,
+                 std::vector<ScalarConsumer>& out) {
+  out.clear();
+  ScalarEval eval(user_data, code_base);
+  DescriptorVersions versions;
+  for (u32 i = 0; i < insts.size(); i++) {
+    const Inst& inst = insts[i];
+    if (IsSmrdConsumer(inst)) {
+      const Smrd sm = DecodeSmrd(inst.raw[0]);
+      ScalarConsumer& c = out.emplace_back();
+      c.index = i;
+      c.version = versions.Of(sm.sbase * 2, sm.op <= 0x04 ? 2 : 4);
+      Capture(c, 0, sm.sbase * 2, 4, eval);
+    }
+    versions.Note(inst);
+    eval.Step(inst);
+    if (!IsResourceConsumer(inst))
+      continue;
+    ScalarConsumer& c = out.emplace_back();
+    c.index = i;
+    const u32 srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+    Capture(c, 0, srsrc, inst.enc == Enc::kMimg ? 8 : 4, eval);
+    if (inst.enc == Enc::kMimg)
+      Capture(c, 1, ((inst.raw[1] >> 21) & 0x1F) * 4, 4, eval);
+    c.src = srsrc < ScalarEval::kRegs ? eval.src[srsrc] : 0;
+  }
+}
+
+struct SharedReplays {
+  struct Entry {
+    // Pinned: a caller's temporary may be the only other owner, and a freed
+    // program's address can come back as another program within the draw.
+    std::shared_ptr<const Program> program;
+    u64 code_base = 0;
+    u32 user_data[16] = {};
+    std::vector<ScalarConsumer> consumers;
+  };
+  u32 depth = 0;
+  u32 used = 0;
+  std::vector<Entry> entries;  // kept across scopes for their capacity
+};
+thread_local SharedReplays g_replays;
+DELTA_OPTION(bool, kSharedReplay, "DELTA_GPU_SHARED_REPLAY", true);
+
+const std::vector<ScalarConsumer>* SharedReplay(
+    const std::shared_ptr<const Program>& program,
+    const u32* user_data,
+    u64 code_base) {
+  if (!g_replays.depth)
+    return nullptr;
+  for (u32 i = 0; i < g_replays.used; i++) {
+    const auto& e = g_replays.entries[i];
+    if (e.program == program && e.code_base == code_base &&
+        !std::memcmp(e.user_data, user_data, sizeof(e.user_data)))
+      return &e.consumers;
+  }
+  if (g_replays.used == g_replays.entries.size())
+    g_replays.entries.emplace_back();
+  auto& e = g_replays.entries[g_replays.used++];
+  e.program = program;
+  e.code_base = code_base;
+  std::memcpy(e.user_data, user_data, sizeof(e.user_data));
+  BuildReplay(CachedScalarInfo(program).insts, user_data, code_base,
+              e.consumers);
+  return &e.consumers;
+}
+
+// Calls consume(inst, regs, version) at every descriptor consumer of the
+// program, in order: before an SMRD steps, after a MIMG/MUBUF/MTBUF. Reads
+// the draw's shared replay when a ScalarReplayScope is open, unless `own`;
+// false when that replay could not answer (replay again with `own`).
+template <typename Fn>
+bool ForEachConsumer(const std::shared_ptr<const Program>& program,
+                     const u32* user_data,
+                     u64 code_base,
+                     bool own,
+                     bool trace,
+                     Fn&& consume) {
+  const auto* replay = own || trace || kGpuEudtrace || !kSharedReplay
+                           ? nullptr
+                           : SharedReplay(program, user_data, code_base);
+  const auto& insts = CachedScalarInfo(program).insts;
+  if (replay) {
+    bool uncovered = false;
+    for (const ScalarConsumer& c : *replay) {
+      ConsumerRegs regs(c, &uncovered);
+      consume(insts[c.index], regs, c.version);
+      if (uncovered) {
+        static int logged = 0;
+        if (logged++ < 4)
+          BASE_LOGI("replay", "consumer at pc={:#x} read past its snapshot",
+                    insts[c.index].pc);
+        return false;
+      }
+    }
+    return true;
+  }
+  ScalarEval eval(user_data, code_base);
+  eval.trace |= trace;
+  DescriptorVersions versions;
+  for (const Inst& inst : insts) {
+    if (IsSmrdConsumer(inst)) {
+      const Smrd sm = DecodeSmrd(inst.raw[0]);
+      const u32 version = versions.Of(sm.sbase * 2, sm.op <= 0x04 ? 2 : 4);
+      versions.Note(inst);
+      consume(inst, eval, version);
+      eval.Step(inst);
+      continue;
+    }
+    versions.Note(inst);
+    eval.Step(inst);
+    if (IsResourceConsumer(inst))
+      consume(inst, eval, 0u);
+  }
+  return true;
+}
+
 }  // namespace
+
+ScalarReplayScope::ScalarReplayScope() {
+  if (!g_replays.depth++)
+    g_replays.used = 0;
+}
+
+ScalarReplayScope::~ScalarReplayScope() {
+  g_replays.depth--;
+}
 
 MimgBindingPlan PlanMimgBindings(const Program& program,
                                  const u8* reachable) {
@@ -1249,16 +1471,16 @@ std::vector<TImage> TrackTextures(
   // Step the scalar register file across the program; at each MIMG read the
   // live T#/S# straight out of the resolved SGPRs. Inline user data, a single
   // indirect load, and nested EUD chains all land here identically.
-  ScalarEval eval(ps_user_data, code_base);
-  eval.trace |= trace;
-
-  for (const Inst& inst : cached.insts) {
-    eval.Step(inst);
+  // The debugging knobs below read registers the shared replay does not keep.
+  const bool own = trace || kGpuEudtrace || kTwatch || kNullWatch ||
+                   kNullDis || kTscan || kArenaProbe || kSotcCompositeRt ||
+                   kTexSrc;
+  const auto consume = [&](const Inst& inst, auto& eval, u32) {
     if (inst.enc != Enc::kMimg)
-      continue;
+      return;
     const auto plan_it = plan.binding_by_pc.find(inst.pc);
     if (plan_it == plan.binding_by_pc.end())
-      continue;  // unreachable
+      return;  // unreachable
     const u32 binding = plan_it->second;
     const u32 word1 = inst.raw[1];
     const u32 srsrc = ((word1 >> 16) & 0x1F) * 4;  // T# base SGPR
@@ -1282,7 +1504,7 @@ std::vector<TImage> TrackTextures(
         std::memcpy(entry.sampler, sampler, sizeof(entry.sampler));
         entry.sampler_valid = true;
       }
-      continue;
+      return;
     }
 
     TImage t;
@@ -1542,13 +1764,20 @@ std::vector<TImage> TrackTextures(
                   t.height, t.pitch, t.dfmt, t.nfmt, t.tiling_idx);
     }
     result.push_back(t);
+  };
+  if (!ForEachConsumer(ps_program, ps_user_data, code_base, own, trace,
+                       consume)) {
+    result.clear();
+    ForEachConsumer(ps_program, ps_user_data, code_base, true, trace,
+                    consume);
   }
   return result;
 }
 
 std::unordered_map<u64, VBuffer> ResolveCbuffers(
     const std::shared_ptr<const Program>& program,
-    const u32* user_data) {
+    const u32* user_data,
+    u64 code_base) {
   std::unordered_map<u64, VBuffer> result;
   if (!program || !user_data)
     return result;
@@ -1575,40 +1804,36 @@ std::unordered_map<u64, VBuffer> ResolveCbuffers(
         ScanForQuadColumns(kSoaScan.get());
     }
   }
-  ScalarEval eval(user_data);
-  DescriptorVersions versions;
-  for (const Inst& inst : CachedScalarInfo(program).insts) {
-    // Decode the pointer/V# from the PRE-step register state: an SMRD whose
-    // destination overlaps its own source (s_buffer_load_dword s4, s[4:7])
-    // clobbers the V#'s base dword in Step, and decoding afterwards turns the
-    // loaded constant into the address (Tomb Raider's UI globals cbuf decoded
-    // as base 0x803f800000, the 1.0f it had just loaded).
-    const bool smrd = inst.enc == Enc::kSmrd;
-    const Smrd s = smrd ? DecodeSmrd(inst.raw[0]) : Smrd{};
-    const bool candidate =
-        smrd && !(s.op > 0x0c || (s.op > 0x04 && s.op < 0x08));
-    // s_load_dword{,x2..x16} / s_buffer_load_dword{,x2..x16}.
+  const auto consume = [&](const Inst& inst, auto& eval, u32 version) {
+    // Decoded from the PRE-step register state (ForEachConsumer calls before
+    // an SMRD steps): an SMRD whose destination overlaps its own source
+    // (s_buffer_load_dword s4, s[4:7]) clobbers the V#'s base dword, and
+    // decoding afterwards turns the loaded constant into the address (Tomb
+    // Raider's UI globals cbuf decoded as base 0x803f800000, the 1.0f it had
+    // just loaded).
+    if (inst.enc != Enc::kSmrd)
+      return;
     // s_load addresses a raw 2-dword pointer, s_buffer_load a 4-dword V#.
+    const Smrd s = DecodeSmrd(inst.raw[0]);
     const bool pointer = s.op <= 0x04;
     const u32 base = s.sbase * 2;
-    const u64 key = CbufKey(base, pointer, versions.Of(base, pointer ? 2 : 4));
-    versions.Note(inst);
-    const bool known = candidate && eval.AllKnown(base, pointer ? 2 : 4);
+    const u64 key = CbufKey(base, pointer, version);
+    if (result.count(key) || !eval.AllKnown(base, pointer ? 2 : 4))
+      return;
     VBuffer v{};
-    if (known) {
-      if (pointer)
-        v.base = eval.Ptr(base);  // size comes from the shader's plan
-      else
-        v = DecodeVBuffer(&eval.sgpr[base]);
-    }
-    eval.Step(inst);
-    if (!candidate || result.count(key) || !known)
-      continue;
+    if (pointer)
+      v.base = eval.Ptr(base);  // size comes from the shader's plan
+    else
+      v = DecodeVBuffer(&eval.sgpr[base]);
     result.emplace(key, v);
     if (eval.trace)
       BASE_LOGI("eud", "cbuf s{} -> base={:#x} stride={} nrec={}",
                 base, static_cast<unsigned long>(v.base), v.stride,
                 v.num_records);
+  };
+  if (!ForEachConsumer(program, user_data, code_base, false, false, consume)) {
+    result.clear();
+    ForEachConsumer(program, user_data, code_base, true, false, consume);
   }
   return result;
 }
@@ -1616,16 +1841,15 @@ std::unordered_map<u64, VBuffer> ResolveCbuffers(
 std::vector<VBuffer> ResolveDirectVertexBuffers(
     const std::shared_ptr<const Program>& program,
     const std::vector<ShaderAttr>& attrs,
-    const u32* user_data) {
+    const u32* user_data,
+    u64 code_base) {
   std::vector<VBuffer> result(attrs.size());
   if (!program || !user_data || attrs.empty())
     return result;
 
-  ScalarEval eval(user_data);
-  for (const Inst& inst : CachedScalarInfo(program).insts) {
-    eval.Step(inst);
+  const auto consume = [&](const Inst& inst, auto& eval, u32) {
     if (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf)
-      continue;
+      return;
     for (size_t i = 0; i < attrs.size(); i++) {
       const ShaderAttr& attr = attrs[i];
       if (!attr.direct_fetch || attr.use_pc != inst.pc ||
@@ -1651,6 +1875,10 @@ std::vector<VBuffer> ResolveDirectVertexBuffers(
                   eval.sgpr[attr.table_sgpr + 3], data[0], data[1], data[2]);
       }
     }
+  };
+  if (!ForEachConsumer(program, user_data, code_base, false, false, consume)) {
+    std::fill(result.begin(), result.end(), VBuffer{});
+    ForEachConsumer(program, user_data, code_base, true, false, consume);
   }
   return result;
 }
@@ -1658,16 +1886,15 @@ std::vector<VBuffer> ResolveDirectVertexBuffers(
 std::vector<VBuffer> ResolveShaderBuffers(
     const std::shared_ptr<const Program>& program,
     const std::vector<ShaderBuffer>& buffers,
-    const u32* user_data) {
+    const u32* user_data,
+    u64 code_base) {
   std::vector<VBuffer> result(buffers.size());
   if (!program || !user_data || buffers.empty())
     return result;
 
-  ScalarEval eval(user_data);
-  for (const Inst& inst : CachedScalarInfo(program).insts) {
-    eval.Step(inst);
+  const auto consume = [&](const Inst& inst, auto& eval, u32) {
     if (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf)
-      continue;
+      return;
     for (size_t i = 0; i < buffers.size(); i++) {
       const ShaderBuffer& buffer = buffers[i];
       if (buffer.use_pc != inst.pc || !eval.AllKnown(buffer.srsrc_sgpr, 4))
@@ -1695,6 +1922,10 @@ std::vector<VBuffer> ResolveShaderBuffers(
                   eval.sgpr[buffer.srsrc_sgpr + 3]);
       }
     }
+  };
+  if (!ForEachConsumer(program, user_data, code_base, false, false, consume)) {
+    std::fill(result.begin(), result.end(), VBuffer{});
+    ForEachConsumer(program, user_data, code_base, true, false, consume);
   }
   return result;
 }

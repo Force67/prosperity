@@ -26,6 +26,14 @@ bool CsSupplyTexture(u64 base,
                      rhi::TextureState state,
                      u64* seq);
 
+// The buffer counterpart. When [base, base+bytes) lies inside one range a
+// dispatch wrote and has not written back, CsBufferRevision is its write
+// revision (0 otherwise) and CsSupplyBuffer copies it VRAM->`dst`+`dst_off`
+// on the frame command list, leaving guest memory stale on purpose: a draw
+// reading a dispatch's output then costs no readback and no wait.
+u64 CsBufferRevision(u64 base, u64 bytes);
+bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
+
 // Destroy range buffers retired two frames ago; called once per BeginFrame.
 void ReleaseRetiredCsBuffers();
 

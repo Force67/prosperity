@@ -6,6 +6,7 @@
  */
 
 #include "gpu/ps4/cmd_processor.h"
+#include "gpu/write_tracker.h"
 #include <base/logging.h>
 #include "base/arch.h"
 
@@ -325,11 +326,7 @@ void HandleDmaData(render::Renderer& renderer,
   // the renderer clear any target it covers.
   if (!kNoCopy && src_sel == 2 && dst_is_memory && bytes &&
       bytes <= 0x8000000u && addressable(dst) && addressable(dst + bytes)) {
-    const u32 fill = body[1];
-    u32* words = reinterpret_cast<u32*>(dst);
-    for (u32 k = 0; k < bytes / 4; k++)
-      words[k] = fill;
-    render::NoteMemoryFill(renderer, dst, bytes, fill);
+    render::ApplyMemoryFill(renderer, dst, bytes, body[1]);
     copied = true;
   }
   TraceDmaData(control, body[5] & ~0x1fffffu, src_sel, dst_sel, src, dst, bytes,
@@ -894,6 +891,10 @@ void StartRendererOnce(render::Renderer& renderer) {
     return;
   g_renderer_started = true;
   render::Init(renderer);
+  // PS4 memory is mapped once per address (no aliases), so the CPU writes the
+  // tracker sees are all of them: the draw path may keep guest copies across
+  // submissions.
+  GuestWriteTracker().Enable();
   // The resource replay reads descriptor tables out of guest memory a compute
   // dispatch may still own; it is below the renderer, so it cannot ask itself.
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {

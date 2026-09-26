@@ -3,6 +3,7 @@
  */
 
 #include "gpu/render/draw_recomp.h"
+#include "gpu/render/buffer_cache.h"
 #include "base/arch.h"
 
 #include "gpu/guest_memory.h"
@@ -15,6 +16,7 @@
 #include "gpu/render/guest_format.h"
 #include "gpu/render/frame.h"
 #include "gpu/gpu_perf.h"
+#include "gpu/write_tracker.h"
 #include "gpu/render/index_upload.h"
 #include "gpu/render/pipeline_cache.h"
 #include "gpu/render/render_target.h"
@@ -23,6 +25,7 @@
 #include "gpu/render/upload_ring.h"
 
 #include <algorithm>
+#include <iterator>
 #include <chrono>
 #include <atomic>
 #include <cstdio>
@@ -113,11 +116,16 @@ inline bool Decline(DeclineReason r) {
 // A cached copy is current iff nothing has made its guest range stale since the
 // copy: entries are stamped with render::CsWritebackGeneration() (compute results
 // landing in guest memory bump it) and refused when a GPU-dirty compute range
-// overlaps the key (dirty means a writeback is still
-// owed). The cache lives one submission (see RollFrame): CPU rewrites of the
-// same address inside one have no announcement to hook, and titles
-// ring-allocate their dynamic data so a rewritten buffer arrives at a new
-// address. DELTA_GPU_RING_DEDUP=0 restores copy-per-draw for A/B.
+// overlaps the key (dirty means a writeback is still owed). Such an entry lives
+// one submission (see RollFrame): the title may legally rewrite a buffer in
+// place between two of its submits, and nothing announces a CPU write.
+//
+// A TRACKED entry lives the frame (the ring slot's lifetime) instead: its pages
+// are armed in the guest write tracker before the copy, and every write the
+// tracker reports drops the entries it overlaps (SyncGuestWrites). GTA:SA
+// submits ~65 command buffers a frame and ~80% of its ~470 MB/frame of vertex
+// and raw-buffer copies repeated a window an earlier submission already
+// copied. DELTA_GPU_RING_DEDUP=0 restores copy-per-draw for A/B.
 struct StageCacheKey {
   u64 base;
   u32 salt;  // index type for the IB cache, 0 elsewhere
@@ -130,24 +138,48 @@ struct StageCacheKeyHash {
   }
 };
 
+DELTA_OPTION(bool, kRingTrack, "DELTA_GPU_RING_TRACK", true);
+
+bool TrackingGuestWrites() {
+  return kRingTrack && gpu::GuestWriteTracker().enabled();
+}
+
+// Arms the guest pages a copy is about to read. Called before the copy, so a
+// write racing it is reported rather than lost.
+bool ArmForCache(u64 base, u64 bytes) {
+  return TrackingGuestWrites() && gpu::GuestWriteTracker().Arm(base, bytes);
+}
+
 struct StageCache {
   struct Entry {
     u64 off;
     u64 bytes;
     u64 gen;
+    u32 dcb;
+    bool tracked;
   };
+  static constexpr u32 kBlockShift = 16;
   std::unordered_map<StageCacheKey, Entry, StageCacheKeyHash> map;
+  // Tracked keys by the 64 KiB blocks they cover. May hold keys since dropped
+  // or re-inserted: Invalidate rechecks each against the map.
+  std::unordered_map<u64, std::vector<StageCacheKey>> blocks;
   int frame = -1;
   u32 dcb = 0;
 
-  // One command buffer submission, not one frame: the submit returns with its
-  // work done as far as the guest can tell, so the title may legally rewrite a
-  // buffer in place for its next submission within the same frame.
+  bool Live(const Entry& e) const {
+    return e.tracked ||
+           (e.dcb == dcb && e.gen == render::CsWritebackGeneration());
+  }
   void RollFrame() {
-    if (frame != g_frame.num || dcb != render::g_dcb_n) {
+    if (frame != g_frame.num) {
       frame = g_frame.num;
       dcb = render::g_dcb_n;
       map.clear();
+      blocks.clear();
+    } else if (dcb != render::g_dcb_n) {
+      dcb = render::g_dcb_n;
+      if (!TrackingGuestWrites())
+        map.clear();
     }
   }
   // Returns the cached ring offset, or -1 when absent/stale. A COPY THAT
@@ -157,28 +189,94 @@ struct StageCache {
   // draw: GTA:SA indexes one 200k-vertex buffer, each draw reaching a few
   // hundred vertices further than the last, and re-copied ~2.4 MB per draw
   // until the per-frame ring ran out and the rest of the world was declined.
-  u64 Find(u64 base, u64 bytes, u32 salt = 0) {
-    RollFrame();
-    const auto it = map.find({base, salt});
-    if (it == map.end() || it->second.bytes < bytes ||
-        it->second.gen != render::CsWritebackGeneration() ||
-        render::CsRangeDirtyOverlapping(base, bytes))
-      return u64(-1);
-    return it->second.off;
-  }
+  u64 Find(u64 base, u64 bytes, u32 salt = 0);
   // Record a copy made at the CURRENT generation, called after the range was
   // flushed (or was never compute-written), never before. A shorter copy never
   // replaces a longer live one: it would answer requests it does not cover.
-  void Insert(u64 base, u64 bytes, u32 salt, u64 off) {
+  void Insert(u64 base, u64 bytes, u32 salt, u64 off, bool tracked = false) {
     RollFrame();
-    auto& e = map[{base, salt}];
-    if (e.gen == render::CsWritebackGeneration() && e.bytes >= bytes)
+    const StageCacheKey key{base, salt};
+    auto& e = map[key];
+    if (e.bytes >= bytes && Live(e))
       return;
-    e = {off, bytes, render::CsWritebackGeneration()};
+    e = {off, bytes, render::CsWritebackGeneration(), dcb, tracked};
+    if (tracked)
+      for (u64 b = base >> kBlockShift; b <= (base + bytes - 1) >> kBlockShift;
+           b++)
+        blocks[b].push_back(key);
+  }
+  void Invalidate(u64 first, u64 end) {
+    const auto drop = [&](const std::vector<StageCacheKey>& keys) {
+      for (const StageCacheKey& key : keys) {
+        auto it = map.find(key);
+        if (it != map.end() && key.base < end &&
+            first < key.base + it->second.bytes)
+          map.erase(it);
+      }
+    };
+    // A remapped reservation can span gigabytes: walk the smaller side.
+    const u64 first_block = first >> kBlockShift;
+    const u64 last_block = (end - 1) >> kBlockShift;
+    if (last_block - first_block + 1 > blocks.size()) {
+      for (const auto& [block, keys] : blocks)
+        if (block >= first_block && block <= last_block)
+          drop(keys);
+      return;
+    }
+    for (u64 b = first_block; b <= last_block; b++)
+      if (auto found = blocks.find(b); found != blocks.end())
+        drop(found->second);
   }
 };
 
 StageCache g_vb_staged, g_ib_staged, g_ubo_staged, g_sbo_staged;
+
+// Windows CsSupplyBuffer copied into the raw ring this frame, by guest base:
+// reused while the range's revision holds, a fresh ring slot otherwise (the
+// old one may still be read by an earlier draw of the same command list).
+struct GpuStaged {
+  u64 off = 0;
+  u64 bytes = 0;
+  u64 rev = 0;
+  int frame = -1;
+};
+std::unordered_map<u64, GpuStaged> g_sbo_gpu;
+
+// Drops every tracked entry the guest has written since the last call. Runs
+// when a new submission starts and whenever compute results have landed in
+// guest memory, which are CPU writes the tracker reports like any other.
+void SyncGuestWrites() {
+  static int frame = -1;
+  static u32 dcb = 0;
+  static u64 gen = 0;
+  static std::vector<gpu::WriteTracker::Range> written;
+  if (!TrackingGuestWrites() ||
+      (frame == g_frame.num && dcb == render::g_dcb_n &&
+       gen == render::CsWritebackGeneration()))
+    return;
+  frame = g_frame.num;
+  dcb = render::g_dcb_n;
+  gen = render::CsWritebackGeneration();
+  written.clear();
+  gpu::GuestWriteTracker().Collect(written);
+  for (const auto& [first, end] : written) {
+    InvalidateCachedBuffers(first, end);
+    g_vb_staged.Invalidate(first, end);
+    g_ib_staged.Invalidate(first, end);
+    g_sbo_staged.Invalidate(first, end);
+  }
+}
+
+u64 StageCache::Find(u64 base, u64 bytes, u32 salt) {
+  RollFrame();
+  SyncGuestWrites();
+  const auto it = map.find({base, salt});
+  if (it == map.end() || it->second.bytes < bytes || !Live(it->second) ||
+      render::CsRangeDirtyOverlapping(base, bytes))
+    return u64(-1);
+  return it->second.off;
+}
+
 
 DELTA_OPTION(bool, kRingDedup, "DELTA_GPU_RING_DEDUP", true);
 
@@ -845,6 +943,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   const u32 nbind = d.num_vattrs ? std::min(d.num_vbufs, 8u) : 0;
   u64 bind_off[8] = {}, bind_size[8] = {};
   u64 vb_cached[8] = {};
+  // Bindings served from the cross-frame buffer cache (buffer set).
+  CachedBuffer vb_kept[8] = {};
   u64 vneed = 0;
   for (u32 j = 0; j < nbind; j++) {
     if (d.vbufs[j].stride) {
@@ -862,6 +962,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           rec = std::max(
               rec, d.vattrs[a].offset + VertexFormatBytes(d.vattrs[a].dfmt));
       bind_size[j] = rec;
+    }
+    vb_cached[j] = u64(-1);
+    if (kRingDedup && bind_size[j] && TrackingGuestWrites()) {
+      SyncGuestWrites();
+      if (FindCachedBuffer(reinterpret_cast<u64>(d.vbufs[j].data),
+                           bind_size[j], vb_kept[j]))
+        continue;
     }
     vb_cached[j] =
         kRingDedup && bind_size[j]
@@ -1180,6 +1287,42 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
   }
 
+  // Raw windows a dispatch wrote and still holds in VRAM: copied into the ring
+  // on the GPU, before the pass opens, instead of read back through guest
+  // memory below (a fence wait and a readback each). GTA:SA reads one 4 MiB
+  // compute output this way six times a frame.
+  u64 raw_gpu_off[kRawBufBindings];
+  std::fill(std::begin(raw_gpu_off), std::end(raw_gpu_off), u64(-1));
+  if (rp->raw_bufs && EnsureRawBufferRing()) {
+    for (u32 i = 0; i < kRawBufBindings; i++) {
+      const auto& rb = d.bufs[i];
+      const u32 want = std::min(rb.size, kRawBufWindow);
+      const u64 rev = want ? CsBufferRevision(rb.base, want) : 0;
+      if (!rev)
+        continue;
+      GpuStaged& staged = g_sbo_gpu[rb.base];
+      if (staged.frame == g_frame.num && staged.rev == rev &&
+          staged.bytes >= want) {
+        raw_gpu_off[i] = staged.off;
+        continue;
+      }
+      const u64 off = (g_ring.sbo_offset + g_ring.sbo_align - 1) &
+                      ~(u64)(g_ring.sbo_align - 1);
+      const u64 reserve = rb.size > kRawBufWindow
+                              ? g_ring.sbo_stride
+                              : ((want + g_ring.sbo_align - 1) &
+                                 ~(u64)(g_ring.sbo_align - 1));
+      if (off + reserve > g_ring.sbo_end || off + kRawBufWindow > kSboRing ||
+          !CsSupplyBuffer(rb.base, want, g_ring.sbo_buf, off))
+        continue;  // the guest-memory path below takes it
+      if (want < reserve)
+        std::memset(g_ring.sbo_map + off + want, 0,
+                    static_cast<size_t>(reserve - want));
+      g_ring.sbo_offset = off + reserve;
+      staged = {off, want, rev, g_frame.num};
+      raw_gpu_off[i] = off;
+    }
+  }
   u64 voff = g_ring.vb_offset, ioff = aligned_ioff;
 
   // Switch render target. Re-begin when the primary target or the MRT count
@@ -1649,6 +1792,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // the plain map this replaced, a window whose range a dispatch has
       // rewritten since it was staged (generation moved, or dirty right now)
       // is re-copied instead of served stale.
+      if (raw_gpu_off[i] != u64(-1)) {
+        sbo_dyn[i] = static_cast<u32>(raw_gpu_off[i]);
+        rawbuf_mask |= 1u << i;
+        continue;
+      }
       const u64 cached = g_sbo_staged.Find(rb.base, want);
       if (cached != u64(-1)) {
         sbo_dyn[i] = static_cast<u32>(cached);
@@ -1678,6 +1826,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       if (!FlushCsWritesRange(renderer, rb.base, want, "raw"))
         return Decline(kNoRecomp);
       u8* dst = g_ring.sbo_map + off;
+      const bool tracked = ArmForCache(rb.base, want);
       std::memcpy(dst, reinterpret_cast<const void*>(rb.base), want);
       g_ring_raw_bytes += want;
       // Zero the reservation's tail so a read just past the payload is zero,
@@ -1687,7 +1836,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         std::memset(dst + want, 0, static_cast<size_t>(reserve - want));
       g_ring.sbo_offset = off + reserve;
       sbo_dyn[i] = static_cast<u32>(off);
-      g_sbo_staged.Insert(rb.base, want, 0, off);
+      g_sbo_staged.Insert(rb.base, want, 0, off, tracked);
       rawbuf_mask |= 1u << i;
     }
     // One dynamic offset per dynamic descriptor the SET actually holds, which
@@ -1718,34 +1867,47 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // cbuffer decision has succeeded. Bindings served by the per-frame cache
   // were copied by an earlier draw and only rebind.
   for (u32 j = 0; j < nbind; j++) {
-    if (!bind_size[j] || vb_cached[j] != u64(-1))
+    if (!bind_size[j] || vb_cached[j] != u64(-1) || vb_kept[j].buffer)
       continue;
     if (!FlushCsWritesRange(renderer,
                             reinterpret_cast<u64>(d.vbufs[j].data),
                             bind_size[j], "vb"))
       return Decline(kNoRecomp);
+    const bool tracked =
+        ArmForCache(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j]);
+    // Armed pages are watched from here on: keep the copy past this frame.
+    if (tracked && kRingDedup &&
+        CacheGuestBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
+                         vb_kept[j])) {
+      g_vb_kept_bytes += bind_size[j];
+      continue;
+    }
     std::memcpy(g_ring.vb_map + voff + bind_off[j], d.vbufs[j].data,
                 (size_t)bind_size[j]);
     g_ring_vb_bytes += bind_size[j];
     if (kRingDedup)
       g_vb_staged.Insert(reinterpret_cast<u64>(d.vbufs[j].data),
-                         bind_size[j], 0, voff + bind_off[j]);
+                         bind_size[j], 0, voff + bind_off[j], tracked);
   }
   if (indexed && ib_cached == u64(-1)) {
+    const bool tracked =
+        ArmForCache(reinterpret_cast<u64>(d.index_data),
+                    u64(d.index_count) * (d.index_type == 1 ? 4 : 2));
     CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
                      d.index_type);
     g_ring_ib_bytes += index_bytes;
     if (kRingDedup)
       g_ib_staged.Insert(reinterpret_cast<u64>(d.index_data), index_bytes,
-                         1u + d.index_type, ioff);
+                         1u + d.index_type, ioff, tracked);
   }
   if (nbind) {
     rhi::Buffer* bufs[8];
     u64 offs[8];
     for (u32 j = 0; j < nbind; j++) {
-      bufs[j] = g_ring.vb;
-      offs[j] = vb_cached[j] != u64(-1) ? vb_cached[j]
-                                                 : voff + bind_off[j];
+      bufs[j] = vb_kept[j].buffer ? vb_kept[j].buffer : g_ring.vb;
+      offs[j] = vb_kept[j].buffer         ? vb_kept[j].offset
+                : vb_cached[j] != u64(-1) ? vb_cached[j]
+                                          : voff + bind_off[j];
     }
     list->SetVertexBuffers(0, nbind, bufs, offs);
   }

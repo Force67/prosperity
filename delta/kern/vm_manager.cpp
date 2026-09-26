@@ -76,10 +76,22 @@ void vmManager::punchHoleLocked(u8 *p, size_t s) {
   }
 }
 
+namespace {
+MappingChangedHook g_mappingChanged = nullptr;
+
+void mappingChanged(u8 *ptr, size_t size) {
+  if (g_mappingChanged)
+    g_mappingChanged(reinterpret_cast<u64>(ptr), size);
+}
+}  // namespace
+
+void setMappingChangedHook(MappingChangedHook hook) { g_mappingChanged = hook; }
+
 void vmManager::add(u8 *ptr, size_t size, mprot prot, u32 sceProt,
                     bool reserved) {
   std::lock_guard lock(vmlock);
   punchHoleLocked(ptr, size);
+  mappingChanged(ptr, size);
   rtPages.emplace_back(ptr, size, prot, sceProt, reserved);
 }
 
@@ -87,6 +99,7 @@ void vmManager::addDirect(u8 *ptr, size_t size, mprot prot,
                           u32 sceProt, u64 physOffset) {
   std::lock_guard lock(vmlock);
   punchHoleLocked(ptr, size);
+  mappingChanged(ptr, size);
   rtPages.emplace_back(ptr, size, prot, sceProt, false);
   rtPages.back().physOffset = physOffset;
   rtPages.back().hasPhys = true;
@@ -95,6 +108,7 @@ void vmManager::addDirect(u8 *ptr, size_t size, mprot prot,
 void vmManager::remove(u8 *ptr, size_t size) {
   std::lock_guard lock(vmlock);
   punchHoleLocked(ptr, size);
+  mappingChanged(ptr, size);
 }
 
 pageInfo *vmManager::get(u8 *ptr) {
