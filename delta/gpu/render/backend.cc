@@ -7,11 +7,19 @@
 #include <string>
 
 #include "gpu/vulkan/vk_rhi.h"
+#if DELTA_GPU_OPENGL
+#include "gpu/opengl/gl_rhi.h"
+#endif
 
 namespace gpu::render {
 
 std::vector<rhi::Backend> CompiledBackends() {
-  return {rhi::Backend::kVulkan};
+  return {
+    rhi::Backend::kVulkan,
+#if DELTA_GPU_OPENGL
+    rhi::Backend::kOpenGL,
+#endif
+  };
 }
 
 std::unique_ptr<rhi::Device> CreateBackendDevice(
@@ -33,6 +41,14 @@ std::unique_ptr<rhi::Device> CreateBackendDevice(
       vo.pipeline_cache_path = cache.empty() ? nullptr : cache.c_str();
       return vk::CreateVulkanDevice(vo);
     }
+#if DELTA_GPU_OPENGL
+    case rhi::Backend::kOpenGL: {
+      opengl::OpenGLOptions go;
+      go.gpu_filter = options.gpu_filter;
+      go.debug = options.debug_labels;
+      return opengl::CreateOpenGLDevice(go);
+    }
+#endif
     default:
       return nullptr;
   }

@@ -1,0 +1,16 @@
+#version 450
+// More storage buffers than OpenGL allows per stage on some drivers.
+layout(local_size_x = 64) in;
+#define BUF(n) layout(set = 0, binding = n) buffer B##n { uint v[]; } b##n;
+BUF(0) BUF(1) BUF(2) BUF(3) BUF(4) BUF(5) BUF(6) BUF(7) BUF(8) BUF(9)
+BUF(10) BUF(11) BUF(12) BUF(13) BUF(14) BUF(15) BUF(16) BUF(17) BUF(18)
+BUF(19)
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  b19.v[i] = b0.v[i] + b1.v[i] + b2.v[i] + b3.v[i] + b4.v[i] + b5.v[i] +
+             b6.v[i] + b7.v[i] + b8.v[i] + b9.v[i] + b10.v[i] + b11.v[i] +
+             b12.v[i] + b13.v[i] + b14.v[i] + b15.v[i] + b16.v[i];
+  atomicAdd(b18.v[0], 1u);
+  if (i == 0)
+    b17.v[0] = uint(b17.v.length());
+}

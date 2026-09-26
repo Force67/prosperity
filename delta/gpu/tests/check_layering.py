@@ -9,6 +9,7 @@ Rules enforced (see delta/gpu/README.md):
   vulkan/  may include gpu/vulkan/, gpu/render/, gpu/shaders/,
            gpu/guest_memory.h, gpu/gcn/ (recompiled-program types only), never
            a command processor or register file
+  opengl/  may include gpu/opengl/, gpu/rhi/ and the root check/perf headers
   tests/   may include anything in gpu/
 Module-root headers (gpu/guest_memory.h, gpu/gpu_check.h, gpu/gpu_perf.h) are
 reachable from every directory and themselves include nothing in the module.
@@ -30,8 +31,6 @@ ROOT_HEADERS = ('gpu/guest_memory.h', 'gpu/gpu_check.h', 'gpu/gpu_perf.h')
 
 ALLOWED = {
     'rhi': ('gpu/rhi/',),
-    # The renderer runs on rhi/ alone; backend.cc is the one unit that names
-    # the backends, through each one's factory header.
     # The shared ISA decode + SPIR-V translator both consoles emit through. It
     # is the bottom of the recompiler stack, so it may not reach back up into a
     # console's command processor.
@@ -50,6 +49,7 @@ ALLOWED = {
                'gpu/opengl/gl_rhi.h', 'gpu/d3d12/d3d12_rhi.h'),
     # A backend implements the rhi and knows nothing of guests.
     'vulkan': ('gpu/vulkan/', 'gpu/rhi/', *ROOT_HEADERS),
+    'opengl': ('gpu/opengl/', 'gpu/rhi/', *ROOT_HEADERS),
     'tests': ('gpu/',),
     'shaders': (),
     # The module root depends on nothing in the module but itself.
