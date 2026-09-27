@@ -42,7 +42,7 @@
             pkg-config
           ];
 
-          # capstone, fmtlib, zlib, xbyak, equilibrium are vendored as
+          # capstone, zlib, xbyak, equilibrium are vendored as
           # submodules, so we do not bring system copies into the closure.
           # The graphics layer needs Vulkan + SDL3 (window/present).
           buildInputs = with pkgs; [
