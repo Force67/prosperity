@@ -61,8 +61,8 @@ DELTA_OPTION(bool, kShmAudioTrace, "DELTA_SHM_AUDIO_TRACE", false);
 
 namespace krnl {
 
-using ppt = utl::pageProtection;
-using alt = utl::allocationType;
+using ppt = utl::PageProtection;
+using alt = utl::AllocationType;
 
 // Floor of the guest address arena; below sit the round 64 GiB slots titles
 // MAP_FIXED their direct/flexible pools into.
@@ -86,7 +86,7 @@ base::Vector<ReleasedRange> g_released;
 void noteGuestReleased(u8 *ptr, size_t size) {
   if (!ptr || !size)
     return;
-  utl::forgetMemoryMapping(ptr, size);
+  utl::ForgetMemoryMapping(ptr, size);
   const uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
   base::LockGuard<base::Mutex> lk(g_releasedLock);
   for (auto &r : g_released) {
@@ -103,7 +103,7 @@ void noteGuestReleased(u8 *ptr, size_t size) {
 void noteGuestTaken(u8 *ptr, size_t size) {
   if (!ptr || !size)
     return;
-  utl::forgetMemoryMapping(ptr, size);
+  utl::ForgetMemoryMapping(ptr, size);
   const uintptr_t lo = reinterpret_cast<uintptr_t>(ptr), hi = lo + size;
   base::LockGuard<base::Mutex> lk(g_releasedLock);
   for (auto it = g_released.begin(); it != g_released.end();) {
@@ -159,7 +159,7 @@ u8 *allocLowGuest(size_t size, size_t align) {
     void *p = ::mmap(reinterpret_cast<void *>(base), size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == reinterpret_cast<void *>(base)) {
-      utl::trackMemoryMapping(p, size);
+      utl::TrackMemoryMapping(p, size);
       if (kAllocTrace)
         BASE_LOGI("lowalloc", "{:#x} +{:#x}", (unsigned long)base,
                   (unsigned long)size);
@@ -470,7 +470,7 @@ u8 *shmMap(shmObject *shm, size_t size, size_t offset) {
     if (!b.base)
       return reinterpret_cast<u8 *>(-1);
     b.size = need;
-    proc::getActive()->getVma().add(b.base, need, ppt::w);
+    proc::getActive()->getVma().add(b.base, need, ppt::kW);
   }
   if (!b.base || offset > b.size)
     return reinterpret_cast<u8 *>(-1);
@@ -582,7 +582,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
       auto *m = static_cast<device *>(obj)->map(addr, size, prot, flags, offset);
       if (m != reinterpret_cast<u8 *>(-1)) {
         proc->getVma().add(
-            m, size, static_cast<ppt>(prot & static_cast<u32>(ppt::rwx)),
+            m, size, static_cast<ppt>(prot & static_cast<u32>(ppt::kRwx)),
             prot);
         return m;
       }
@@ -614,20 +614,20 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
       void *want = addr;
       if (flags & mFlags::stack)
         want = static_cast<u8 *>(addr) - size;
-      ptr = utl::allocMem(want, size, ppt::w, alt::reservecommit);
+      ptr = utl::AllocMem(want, size, ppt::kW, alt::kReservecommit);
       if (!ptr)
-        ptr = utl::allocMem(want, size, ppt::w, alt::commit);  // maybe pre-reserved
+        ptr = utl::AllocMem(want, size, ppt::kW, alt::kCommit);  // maybe pre-reserved
     } else if (inUserStack) {
-      ptr = utl::allocMem(addr, size, ppt::w, alt::commit);
-    } else if (utl::allocMem(addr, size, ppt::w, alt::reserve)) {
+      ptr = utl::AllocMem(addr, size, ppt::kW, alt::kCommit);
+    } else if (utl::AllocMem(addr, size, ppt::kW, alt::kReserve)) {
       // A hint must never alias an existing mapping; reservecommit would clobber
       // it (a guest TLS hint destroyed a loaded module on Android).
-      ptr = utl::allocMem(addr, size, ppt::w, alt::commit);
+      ptr = utl::AllocMem(addr, size, ppt::kW, alt::kCommit);
     } else if (wasGuestReleased(static_cast<u8 *>(addr), size) &&
                !proc->getVma().overlaps(static_cast<u8 *>(addr), size)) {
       // The probe only fails here because we kept the pages of a guest-unmapped
       // range; the address is free as far as the guest is concerned.
-      ptr = utl::allocMem(addr, size, ppt::w, alt::reservecommit);
+      ptr = utl::AllocMem(addr, size, ppt::kW, alt::kReservecommit);
     }
   }
   // No usable hint (or it was taken): pick a low (<2^40) address the guest's
@@ -639,7 +639,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
 
   // Track the guest-requested prot so VirtualQuery reports the truth; host pages
   // stay rwx (FEX reads guest memory directly, no protection faults delivered).
-  auto gprot = static_cast<ppt>(prot & static_cast<u32>(ppt::rwx));
+  auto gprot = static_cast<ppt>(prot & static_cast<u32>(ppt::kRwx));
 
   // No zero-fill: every path above already returns kernel-zeroed anonymous
   // pages; self-fill faulted in multi-GiB pools (Minecraft, 43 GiB RSS).
@@ -669,7 +669,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
     proc->getVma().add(static_cast<u8 *>(ptr), size, gprot, prot,
                        voidReserve);
 
-  utl::protectMem(static_cast<void *>(ptr), size, ppt::rwx);
+  utl::ProtectMem(static_cast<void *>(ptr), size, ppt::kRwx);
 
   // DELTA_GNMAP_TRACE: log mappings in the GNM/GPU aperture to pin how the AGC
   // ring buffers are mapped and by whom (coherency with guest PM4 writes is
@@ -732,7 +732,7 @@ int PS4ABI sys_mprotect(u8 *addr, size_t len, int prot) {
   const u32 sceProt = static_cast<u32>(prot) & 0x37;
   proc->getVma().protectRange(reinterpret_cast<u8 *>(base), span,
                               static_cast<ppt>(sceProt &
-                                               static_cast<u32>(ppt::rwx)),
+                                               static_cast<u32>(ppt::kRwx)),
                               sceProt);
   return 0;
 }
@@ -787,7 +787,7 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
         backing->base = allocLowGuest(backing->size);
         if (backing->base) {
           std::memset(backing->base, 0, backing->size);
-          proc->getVma().add(backing->base, backing->size, ppt::w);
+          proc->getVma().add(backing->base, backing->size, ppt::kW);
         }
         BASE_LOGI("shm_open", "auto-provide system shm '{}' size={:#x}",
                   name.c_str(), backing->size);
@@ -885,7 +885,7 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
     std::memcpy(nb, b.base, b.size);  // grow before first mmap: preserve contents
   b.base = nb;
   b.size = want;
-  proc->getVma().add(b.base, want, ppt::w);
+  proc->getVma().add(b.base, want, ppt::kW);
   shmAudioTrace("sized", shm->shmName, b.base, want, 0);
   shmAudioPoison(shm->shmName, b.base, want);
   // The LLE audio regions become consumable here; the base can MOVE on a later

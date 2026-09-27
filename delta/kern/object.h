@@ -54,7 +54,7 @@ public:
   // What diagnostics call this object. Devices are opened by name, so the
   // opener is the only place that knows it.
   void setName(base::StringRef n) { name = base::String(n.data(), n.size()); }
-  const base::String &getName() const { return name; }
+  const base::String &GetName() const { return name; }
 
 protected:
   oType otype;
@@ -66,9 +66,9 @@ private:
   base::Atomic<i32> refCount;
 };
 
-template <typename T> utl::object_ref<T> retain_object(T *ptr) {
+template <typename T> utl::ObjectRef<T> retain_object(T *ptr) {
   if (ptr)
     ptr->retain();
-  return utl::object_ref<T>(ptr);
+  return utl::ObjectRef<T>(ptr);
 }
 }

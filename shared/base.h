@@ -10,26 +10,26 @@
 
 #define NAKED __attribute__((naked))
 #define PACKED __attribute__((packed))
-#define PS4ABI __attribute__((sysv_abi)) //, cdecl))
+#define PS4ABI __attribute__((sysv_abi))  //, cdecl))
 #define NORETURN __attribute__((noreturn))
 #define F_INLINE __attribute__((always_inline))
 
-#define bswap16 __builtin_bswap16
-#define bswap32 __builtin_bswap32
-#define bswap64 __builtin_bswap64
+#define BSWAP16 __builtin_bswap16
+#define BSWAP32 __builtin_bswap32
+#define BSWAP64 __builtin_bswap64
 
-#define rotr16 __builtin_rotateright16
-#define rotr32 __builtin_rotateright32
-#define rotr64 __builtin_rotateright64
+#define ROTR16 __builtin_rotateright16
+#define ROTR32 __builtin_rotateright32
+#define ROTR64 __builtin_rotateright64
 
-#define rotl16 __builtin_rotateleft16
-#define rotl32 __builtin_rotateleft32
-#define rotl64 __builtin_rotateleft64
+#define ROTL16 __builtin_rotateleft16
+#define ROTL32 __builtin_rotateleft32
+#define ROTL64 __builtin_rotateleft64
 
 #ifdef _WIN32
-#define dbg_break() __debugbreak()
+#define DBG_BREAK() __debugbreak()
 #else
-#define dbg_break() __builtin_trap()
+#define DBG_BREAK() __builtin_trap()
 
 // MSVC intrinsics that the codebase relies on but POSIX/clang doesn't ship.
 // Map them onto portable equivalents so we don't have to scatter ifdefs.
@@ -55,7 +55,8 @@
 // returns 0 on success, errno on failure; *fp is set on success, nulled
 // otherwise.
 static inline int fopen_s(std::FILE** fp, const char* path, const char* mode) {
-  if (!fp) return 22 /*EINVAL*/;
+  if (!fp)
+    return 22 /*EINVAL*/;
   *fp = std::fopen(path, mode);
   return *fp ? 0 : 1;
 }
@@ -73,7 +74,7 @@ static inline int fopen_s(std::FILE** fp, const char* path, const char* mode) {
 #define bswap32 _byteswap_ulong
 #define bswap64 _byteswap_uint64
 
-#define dbg_break() DebugBreak()
+#define DBG_BREAK() DebugBreak()
 
 #endif
 
@@ -85,6 +86,7 @@ static inline int fopen_s(std::FILE** fp, const char* path, const char* mode) {
 
 #define POW2_MASK (align - static_cast<T>(1))
 
-template <typename T> inline T align_up(const T addr, const T align) {
+template <typename T>
+inline T AlignUp(const T addr, const T align) {
   return (addr + POW2_MASK) & ~POW2_MASK;
 }

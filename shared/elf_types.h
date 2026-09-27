@@ -11,9 +11,12 @@
 
 #include "base/arch.h"
 
+// ELF and SCE spec names keep their canonical spelling.
+// NOLINTBEGIN(readability-identifier-naming)
+
 enum ELFDynTag {
-  DT_NULL,   //< end of dyn section
-  DT_NEEDED, //< required library
+  DT_NULL,    //< end of dyn section
+  DT_NEEDED,  //< required library
   DT_PLTRELSZ,
   DT_PLTGOT,
   DT_HASH,
@@ -107,11 +110,11 @@ enum ElfRelType { R_X86_64_JUMP_SLOT = 7 };
 enum ElfFlags { PF_X = 1, PF_W = 2, PF_R = 4, PF_MASKPROC = 0xF0000000 };
 
 enum ELFTypeSCE : u16 {
-  ET_SCE_EXEC = 0xfe00,    // PS4 Executable
-  ET_SCE_DYNEXEC = 0xfe10, // PS4 Main module
-  ET_SCE_RELEXEC = 0xfe04, // PS4 Relocatable PRX
-  ET_SCE_STUBLIB = 0xfe0c, // PS4 Stub library
-  ET_SCE_DYNAMIC = 0xfe18, // PS4 Dynamic PRX
+  ET_SCE_EXEC = 0xfe00,     // PS4 Executable
+  ET_SCE_DYNEXEC = 0xfe10,  // PS4 Main module
+  ET_SCE_RELEXEC = 0xfe04,  // PS4 Relocatable PRX
+  ET_SCE_STUBLIB = 0xfe0c,  // PS4 Stub library
+  ET_SCE_DYNAMIC = 0xfe18,  // PS4 Dynamic PRX
 };
 
 static constexpr u32 ELF_MAGIC = 0x464C457F;
@@ -119,16 +122,16 @@ static constexpr u16 ELF_MACHINE_X86_64 = 0x3E;
 
 struct ELFHeader {
   u32 magic;
-  u8 ident[12]; // < actually 16
-  ELFTypeSCE type;   //< sony custom
+  u8 ident[12];     // < actually 16
+  ELFTypeSCE type;  //< sony custom
   u16 machine;
   u32 version;
   u64 entry;
-  u64 phoff; //< program header offset
-  u64 shoff; //< does sometimes not exist
+  u64 phoff;  //< program header offset
+  u64 shoff;  //< does sometimes not exist
   u32 flags;
   u16 ehsize;
-  u16 phentsize; //< size in bytes of entries in pg table
+  u16 phentsize;  //< size in bytes of entries in pg table
   u16 phnum;
   u16 shentsize;
   u16 shnum;
@@ -136,8 +139,8 @@ struct ELFHeader {
 };
 
 struct ELFPgHeader {
-  u32 type;  //< data info
-  u32 flags; //< memory protection flags
+  u32 type;   //< data info
+  u32 flags;  //< memory protection flags
   u64 offset;
   u64 vaddr;
   u64 paddr;
@@ -172,26 +175,26 @@ struct ElfSym {
 static_assert(sizeof(ELFPgHeader) == 56, "Elf program header size mismatch");
 static_assert(sizeof(ELFHeader) == 64, "Elf header size mismatch");
 
-inline const char *ElfTypeToString(u32 type) {
+inline const char* ElfTypeToString(u32 type) {
   switch (type) {
-  case ET_SCE_EXEC:
-    return "Executable";
-  case ET_SCE_DYNEXEC:
-    return "Main module";
-  case ET_SCE_RELEXEC:
-    return "Relocatable PRX";
-  case ET_SCE_STUBLIB:
-    return "Stub library";
-  case ET_SCE_DYNAMIC:
-    return "Dynamic PRX";
-  default:
-    return "Unknown";
+    case ET_SCE_EXEC:
+      return "Executable";
+    case ET_SCE_DYNEXEC:
+      return "Main module";
+    case ET_SCE_RELEXEC:
+      return "Relocatable PRX";
+    case ET_SCE_STUBLIB:
+      return "Stub library";
+    case ET_SCE_DYNAMIC:
+      return "Dynamic PRX";
+    default:
+      return "Unknown";
   }
 }
 
-inline const char *SegTypeToString(u32 type) {
-#define AS_STR(idx)                                                            \
-  if (type == idx)                                                             \
+inline const char* SegTypeToString(u32 type) {
+#define AS_STR(idx) \
+  if (type == idx)  \
     return #idx;
 
   AS_STR(PT_LOAD)
@@ -218,7 +221,7 @@ inline const char *SegTypeToString(u32 type) {
 }
 
 #define ELF64_R_SYM(i) ((i) >> 32)
-#define ELF64_R_TYPE(i) ((i)&0xffffffff)
+#define ELF64_R_TYPE(i) ((i) & 0xffffffff)
 
 /* Relocation types for AMD x86-64 architecture */
 #define R_X86_64_NONE 0      /* No reloc */
@@ -240,17 +243,17 @@ inline const char *SegTypeToString(u32 type) {
 #define R_X86_64_DTPMOD64 16 /* ID of module containing symbol */
 #define R_X86_64_DTPOFF64 17 /* Offset in module's TLS block */
 #define R_X86_64_TPOFF64 18  /* Offset in initial TLS block */
-#define R_X86_64_TLSGD                                                         \
-  19 /* 32 bit signed PC relative offset                                       \
-                                                 to two GOT entries for GD     \
+#define R_X86_64_TLSGD                                                     \
+  19 /* 32 bit signed PC relative offset                                   \
+                                                 to two GOT entries for GD \
         symbol */
 #define R_X86_64_TLSLD                                                                             \
   20                         /* 32 bit signed PC relative offset                                   \
                                                                          to two GOT entries for LD \
                                 symbol */
 #define R_X86_64_DTPOFF32 21 /* Offset in TLS block */
-#define R_X86_64_GOTTPOFF                                                      \
-  22                           /* 32 bit signed PC relative offset             \
+#define R_X86_64_GOTTPOFF                                          \
+  22                           /* 32 bit signed PC relative offset \
                                                                            to GOT entry for IE symbol */
 #define R_X86_64_TPOFF32 23    /* Offset in initial TLS block */
 #define R_X86_64_PC64 24       /* PC relative 64 bit */
@@ -276,8 +279,9 @@ inline const char *SegTypeToString(u32 type) {
 #define ELF32_ST_TYPE(x) ELF_ST_TYPE(x)
 #define ELF64_ST_BIND(x) ELF_ST_BIND(x)
 #define ELF64_ST_TYPE(x) ELF_ST_TYPE(x)
-#define ELF_ST_VISIBILITY(o) ((o)&0x3)
+#define ELF_ST_VISIBILITY(o) ((o) & 0x3)
 
 #define STB_LOCAL 0
 #define STB_GLOBAL 1
 #define STB_WEAK 2
+// NOLINTEND(readability-identifier-naming)

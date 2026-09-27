@@ -571,8 +571,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
 #else
       const char *kind = g_wprotRegs.load() ? "access" : "write";
 #endif
-      if (const uintptr_t probe = utl::writeWatchValueProbe();
-          probe && utl::isMemoryRangeMapped(reinterpret_cast<void *>(probe), 8))
+      if (const uintptr_t probe = utl::WriteWatchValueProbe();
+          probe && utl::IsMemoryRangeMapped(reinterpret_cast<void *>(probe), 8))
         BASE_LOGI("wprot", "{} {:#x} from {} | probe {:#x} = {:#x}", kind,
                   (unsigned long long)at, sym, (unsigned long)probe,
                   (unsigned long long)*reinterpret_cast<u64 *>(probe));
@@ -590,7 +590,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       // A consumer's other pointer (where it puts what it just read) is only
       // visible in its registers at the access; a value probe follows one word,
       // and the word's SOURCE (a memcpy's rsi) is the next hop.
-      if (g_wprotRegs.load() || utl::writeWatchValueProbe()) {
+      if (g_wprotRegs.load() || utl::WriteWatchValueProbe()) {
         const u64 *g = nullptr;
 #if defined(__x86_64__)
         u64 xg[16];
@@ -631,23 +631,23 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
           // as rdi=dest/rsi=src/rcx=len, so the same word in the SOURCE is
           // rsi + (probe - rdi). Re-aim there: one hop towards the producer.
           enum { C_RCX = 1, C_RSI = 6, C_RDI = 7 };
-          const uintptr_t probe = utl::writeWatchValueProbe();
-          if (exact && probe && utl::writeWatchChaseLeft()) {
+          const uintptr_t probe = utl::WriteWatchValueProbe();
+          if (exact && probe && utl::WriteWatchChaseLeft()) {
             const u64 rdi = g[C_RDI], rsi = g[C_RSI], rcx = g[C_RCX];
             const bool looks_like_copy =
                 rdi && rsi && rcx && probe >= rdi && probe - rdi < rcx;
             const uintptr_t src = rsi + (probe - rdi);
             if (looks_like_copy &&
-                utl::isMemoryRangeMapped(reinterpret_cast<void *>(src), 8)) {
-              utl::writeWatchChaseTook();
+                utl::IsMemoryRangeMapped(reinterpret_cast<void *>(src), 8)) {
+              utl::WriteWatchChaseTook();
               BASE_LOGI("wprot",
                         "chase: probe {:#x} came from {:#x} (copy {:#x} <- "
                         "{:#x} len {:#x}); watching the source",
                         (unsigned long)probe, (unsigned long)src,
                         (unsigned long)rdi, (unsigned long)rsi,
                         (unsigned long)rcx);
-              utl::setWriteWatchValueProbe(src);
-              utl::armWriteWatch(src, 8, 200);
+              utl::SetWriteWatchValueProbe(src);
+              utl::ArmWriteWatch(src, 8, 200);
             }
           }
 #endif
@@ -812,7 +812,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
         uintptr_t p = (uintptr_t)gr[REG_RDI];
         for (int o = 0; o < g_fnArgsNoffs[i] && n > 0; o++) {
           uintptr_t at = p + g_fnArgsOffs[i][o];
-          if (!utl::isMemoryRangeMapped(reinterpret_cast<void *>(at), 8)) {
+          if (!utl::IsMemoryRangeMapped(reinterpret_cast<void *>(at), 8)) {
             n += std::snprintf(m + n, sizeof(m) - n, " +%#lx=<unmapped>",
                                (unsigned long)g_fnArgsOffs[i][o]);
             p = 0;
@@ -822,7 +822,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
           n += std::snprintf(m + n, sizeof(m) - n, " +%#lx->%#lx",
                              (unsigned long)g_fnArgsOffs[i][o], (unsigned long)p);
         }
-        if (n > 0 && p && utl::isMemoryRangeMapped(reinterpret_cast<void *>(p), 64)) {
+        if (n > 0 && p && utl::IsMemoryRangeMapped(reinterpret_cast<void *>(p), 64)) {
           n += std::snprintf(m + n, sizeof(m) - n, " *=");
           const auto *w = reinterpret_cast<const u32 *>(p);
           for (int j = 0; j < 12 && n > 0 && n < (int)sizeof(m) - 12; j++)

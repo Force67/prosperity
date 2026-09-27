@@ -62,7 +62,7 @@ bool proc::create(const base::String &path, bool fromVfs) {
   LOG_ASSERT(vmem.init());
 
   /*reserve slot for main module*/
-  auto first = utl::make_ref<smodule>(this);
+  auto first = utl::MakeRef<smodule>(this);
   first->getInfo().handle = 0;
 
   modules.emplace_back(first);
@@ -135,7 +135,7 @@ modulePtr proc::loadModule(base::StringRef name) {
   if (mod)
     return mod;
 
-  auto lib = utl::make_ref<smodule>(this);
+  auto lib = utl::MakeRef<smodule>(this);
   lib->getInfo().handle = handleCounter;
   handleCounter++;
 
@@ -175,7 +175,7 @@ modulePtr proc::loadModule(base::StringRef name) {
             base::String hp(dir);
             hp += sname.c_str();
             hp += ext;
-            if (utl::File(hp, utl::fileMode::read).IsOpen() &&
+            if (utl::File(hp, utl::FileMode::kRead).IsOpen() &&
                 lib->fromFile(hp)) {
               ok = true;
               break;
@@ -242,8 +242,8 @@ modulePtr proc::loadModule(base::StringRef name) {
   else
     hostRel.append(name.data(), name.length());
   hostRel += ".sprx";
-  base::String hostPath = utl::make_abs_path(hostRel);
-  if (utl::File(hostPath, utl::fileMode::read).IsOpen()) {
+  base::String hostPath = utl::MakeAbsPath(hostRel);
+  if (utl::File(hostPath, utl::FileMode::kRead).IsOpen()) {
     if (lib->fromFile(hostPath)) {
       if (isPs4GnmDriver)
         lib->getInfo().name = sname;

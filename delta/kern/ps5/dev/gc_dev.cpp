@@ -105,14 +105,14 @@ static inline bool gpuAddr(u64 a) {
 // a submit arg. Plenty of those words look like GPU addresses without being
 // mapped, so the range check alone is not enough to read through one.
 static inline bool gpuReadable(u64 a, size_t n) {
-  return gpuAddr(a) && utl::isMemoryRangeMapped(reinterpret_cast<void *>(a), n);
+  return gpuAddr(a) && utl::IsMemoryRangeMapped(reinterpret_cast<void *>(a), n);
 }
 
 // Command buffers need not live in the GPU aperture (the video decoder builds
 // one in any allocation it owns); mapped-and-in-guest-map is the honest test.
 static inline bool guestReadable(u64 a, size_t n) {
   return a >= 0x10000ull && a < 0x1000000000000ull &&
-         utl::isMemoryRangeMapped(reinterpret_cast<void *>(a), n);
+         utl::IsMemoryRangeMapped(reinterpret_cast<void *>(a), n);
 }
 
 // Span of ACQ ring windows named in 0xC0408121 submits, learned at run time, so

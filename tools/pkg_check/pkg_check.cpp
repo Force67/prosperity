@@ -15,7 +15,7 @@
 #include <base/strings/xstring.h>
 
 int main(int argc, char **argv) {
-  utl::createLogger(true);
+  utl::CreateLogger(true);
   if (argc < 2) {
     std::printf("usage: pkg_check <game.pkg> [out.elf]\n");
     return 1;
@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
     auto elf = crypto::self2elf(buf.data(), buf.size());
     if (!elf.empty()) {
       const char *out = argc > 2 ? argv[2] : "eboot_native.elf";
-      utl::File f(base::String(out), utl::fileMode::write);
+      utl::File f(base::String(out), utl::FileMode::kWrite);
       f.Write(elf.data(), elf.size());
       std::printf("wrote %s (%zu bytes)\n", out, elf.size());
     } else {

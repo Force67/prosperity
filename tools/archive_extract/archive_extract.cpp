@@ -20,7 +20,7 @@
 #include <base/time/time.h>
 
 int main(int argc, char **argv) {
-  utl::createLogger(true);
+  utl::CreateLogger(true);
   if (argc < 2) {
     std::printf("usage: archive_extract <game.rar> [<relpath> <out>]\n"
                 "       archive_extract <game.rar> --bench <relpath>\n");
@@ -77,7 +77,7 @@ int main(int argc, char **argv) {
       std::printf("read failed\n");
       return 1;
     }
-    utl::File out(base::String(argv[3]), utl::fileMode::write);
+    utl::File out(base::String(argv[3]), utl::FileMode::kWrite);
     out.Write(buf.data(), static_cast<size_t>(n));
     std::printf("wrote %s (%lld bytes)\n", argv[3], (long long)n);
     return 0;

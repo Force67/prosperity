@@ -29,54 +29,52 @@
    THE SOFTWARE.
 */
 
-
 namespace utl {
-class init_function {
-public:
-  using callback_t = void (*)();
+class InitFunction {
+ public:
+  using CallbackT = void (*)();
 
-private:
-  init_function *next_{nullptr};
-  callback_t callback_{nullptr};
+ private:
+  InitFunction* next_{nullptr};
+  CallbackT callback_{nullptr};
 
-  init_function(init_function *&parent, callback_t callback) noexcept;
+  InitFunction(InitFunction*& parent, CallbackT callback) noexcept;
 
-public:
-  init_function(callback_t callback) noexcept;
-  init_function(init_function &parent, callback_t callback) noexcept;
+ public:
+  InitFunction(CallbackT callback) noexcept;
+  InitFunction(InitFunction& parent, CallbackT callback) noexcept;
 
-  init_function(const init_function &) = delete;
-  init_function(init_function &&) = delete;
+  InitFunction(const InitFunction&) = delete;
+  InitFunction(InitFunction&&) = delete;
 
-  static init_function *&ROOT() noexcept;
+  static InitFunction*& ROOT() noexcept;
 
-  static mem_size init();
+  static mem_size Init();
 };
 
-inline init_function::init_function(init_function *&parent,
-                                    callback_t callback) noexcept
-    : next_(parent),
-      callback_(callback) {
+inline InitFunction::InitFunction(InitFunction*& parent,
+                                  CallbackT callback) noexcept
+    : next_(parent), callback_(callback) {
   parent = this;
 }
 
-inline init_function::init_function(callback_t callback) noexcept
-    : init_function(ROOT(), callback) {}
+inline InitFunction::InitFunction(CallbackT callback) noexcept
+    : InitFunction(ROOT(), callback) {}
 
-inline init_function::init_function(init_function &parent,
-                                    callback_t callback) noexcept
-    : init_function(parent.next_, callback) {}
+inline InitFunction::InitFunction(InitFunction& parent,
+                                  CallbackT callback) noexcept
+    : InitFunction(parent.next_, callback) {}
 
-inline init_function *&init_function::ROOT() noexcept {
-  static init_function *root{nullptr};
+inline InitFunction*& InitFunction::ROOT() noexcept {
+  static InitFunction* root{nullptr};
 
   return root;
 }
 
-inline mem_size init_function::init() {
+inline mem_size InitFunction::Init() {
   mem_size total = 0;
 
-  for (init_function *i = ROOT(); i;) {
+  for (InitFunction* i = ROOT(); i;) {
     if (i->callback_) {
       i->callback_();
       i->callback_ = nullptr;
@@ -84,7 +82,7 @@ inline mem_size init_function::init() {
       ++total;
     }
 
-    init_function *j = i->next_;
+    InitFunction* j = i->next_;
     i->next_ = nullptr;
     i = j;
   }
@@ -93,4 +91,4 @@ inline mem_size init_function::init() {
 
   return total;
 }
-} // namespace mem
+}  // namespace utl

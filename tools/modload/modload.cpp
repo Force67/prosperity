@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  utl::createLogger(true);
+  utl::CreateLogger(true);
 
   krnl::proc proc;  // ctor registers itself as the active process
   if (!proc.getVma().init()) {
@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  auto mod = utl::make_ref<krnl::smodule>(&proc);
+  auto mod = utl::MakeRef<krnl::smodule>(&proc);
   mod->getInfo().handle = 0;
 
   std::printf("[modload] loading %s ...\n", argv[1]);

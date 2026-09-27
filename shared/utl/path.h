@@ -8,9 +8,9 @@
  * in the root of the source tree.
  */
 
-#include <base/strings/xstring.h>
+#include "base/strings/xstring.h"
 
 namespace utl {
-base::StringW make_abs_path(const base::StringW &relative);
-base::String make_abs_path(const base::String &relative);
-}
+base::StringW MakeAbsPath(const base::StringW& relative);
+base::String MakeAbsPath(const base::String& relative);
+}  // namespace utl

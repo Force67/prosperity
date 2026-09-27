@@ -748,7 +748,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           continue;
         const auto& vb = d.vbufs[attr.binding];
         const auto* p = static_cast<const u8*>(vb.data);
-        if (!p || !utl::isMemoryRangeMapped(p + attr.offset, 4))
+        if (!p || !utl::IsMemoryRangeMapped(p + attr.offset, 4))
           continue;
         u32 c0 = 0;
         std::memcpy(&c0, p + attr.offset, 4);
@@ -761,9 +761,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                   "stride {}), it currently reads 00000000",
                   (unsigned long)at, (unsigned long)d.rt_base,
                   d.vertex_count, vb.stride);
-        utl::setWriteWatchValueProbe(at);
-        utl::setWriteWatchChase(4);
-        if (!utl::armWriteWatch(at & ~0xFFFull, 0x1000, 200))
+        utl::SetWriteWatchValueProbe(at);
+        utl::SetWriteWatchChase(4);
+        if (!utl::ArmWriteWatch(at & ~0xFFFull, 0x1000, 200))
           BASE_LOGI("uiwatch", "no armer registered");
         break;
       }

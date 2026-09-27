@@ -422,7 +422,7 @@ i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
     base::LockGuard<base::Mutex> lk(rawMutex_);
     if (!rawFile_.Exists())
       return -1;
-    rawFile_.Seek(entry.dataOffset + u64(off), utl::seekMode::seek_set);
+    rawFile_.Seek(entry.dataOffset + u64(off), utl::SeekMode::kSeekSet);
     return rawFile_.Read(buf, size_t(len)) == u64(len) ? len : -1;
   }
 

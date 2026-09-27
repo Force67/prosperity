@@ -1822,9 +1822,9 @@ void TrackTextures(base::Vector<TImage>& result,
                   static_cast<unsigned long>(root),
                   static_cast<unsigned long>(eval.src[srsrc]));
         // +0x18 is the slot the chain read the table pointer from.
-        utl::setWriteWatchValueProbe(static_cast<uintptr_t>(root) + 0x18);
-        utl::setWriteWatchChase(4);  // follow it back up to four copies
-        if (!utl::armWriteWatch(static_cast<uintptr_t>(root), 64, 200))
+        utl::SetWriteWatchValueProbe(static_cast<uintptr_t>(root) + 0x18);
+        utl::SetWriteWatchChase(4);  // follow it back up to four copies
+        if (!utl::ArmWriteWatch(static_cast<uintptr_t>(root), 64, 200))
           BASE_LOGI("nullwatch", "no armer registered");
       }
     }

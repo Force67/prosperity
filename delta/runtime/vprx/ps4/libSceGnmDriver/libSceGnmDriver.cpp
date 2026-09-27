@@ -62,7 +62,7 @@ extern "C" void prosperity_gc_submit(const void *descArray, u32 descCount) {
   // dropped loudly, not dereferenced. SotC's debug menu produced a submit
   // whose descPtr pointed at unmapped host space and SIGSEGV'd the CP.
   if (descCount > 4096 ||
-      !utl::isMemoryRangeMapped(descArray, descCount * 16ull)) {
+      !utl::IsMemoryRangeMapped(descArray, descCount * 16ull)) {
     static int warned = 0;
     if (warned++ < 8)
       BASE_LOGI("gc", "DROPPED bad submit descArray={:p} count={}", descArray,
@@ -74,7 +74,7 @@ extern "C" void prosperity_gc_submit(const void *descArray, u32 descCount) {
   // dropped loudly, not dereferenced. SotC's debug menu produced a submit
   // whose descPtr pointed at unmapped host space and SIGSEGV'd the CP.
   if (descCount > 4096 ||
-      !utl::isMemoryRangeMapped(descArray, descCount * 16ull)) {
+      !utl::IsMemoryRangeMapped(descArray, descCount * 16ull)) {
     static int warned = 0;
     if (warned++ < 8)
       BASE_LOGI("gc", "DROPPED bad submit descArray={:p} count={}", descArray,
@@ -101,7 +101,7 @@ extern "C" void prosperity_gc_submit(const void *descArray, u32 descCount) {
                 i, e[0], e[1], e[2], e[3], (unsigned long)addr, bytes);
     if (!addr || !bytes)
       continue;
-    if (!utl::isMemoryRangeMapped(reinterpret_cast<const void *>(addr),
+    if (!utl::IsMemoryRangeMapped(reinterpret_cast<const void *>(addr),
                                   bytes)) {
       static int warned = 0;
       if (warned++ < 8)

@@ -70,7 +70,7 @@ bool smodule::fromFile(const base::String &path) {
 
   if (diskHeader.magic == ELF_MAGIC &&
       diskHeader.machine == ELF_MACHINE_X86_64) {
-    file.Seek(0, utl::seekMode::seek_set);
+    file.Seek(0, utl::SeekMode::kSeekSet);
 
     auto sz = file.GetSize();
     data = base::MakeUnique<u8[]>(static_cast<mem_size>(sz));
@@ -552,7 +552,7 @@ bool smodule::mapImage() {
     if (p->type == PT_LOAD || p->type == PT_SCE_RELRO) {
       u64 align = p->align ? p->align : 0x1000;
       u64 base = elf->type == ET_SCE_EXEC ? p->vaddr : p->paddr;
-      u64 end = align_up(base + p->memsz, align);
+      u64 end = AlignUp(base + p->memsz, align);
       if (end > codeSize)
         codeSize = end;
     }
@@ -588,23 +588,23 @@ bool smodule::mapImage() {
     info.ripZoneSize = base::Max<size_t>(info.ripZoneSize, codeSize - loVaddr);
     size_t span = (codeSize - loVaddr) + info.ripZoneSize;
 
-    void *got = utl::allocMem(reinterpret_cast<void *>(loVaddr), span,
-                              utl::pageProtection::w,
-                              utl::allocationType::reserve);
+    void *got = utl::AllocMem(reinterpret_cast<void *>(loVaddr), span,
+                              utl::PageProtection::kW,
+                              utl::AllocationType::kReserve);
     if (!got || reinterpret_cast<uintptr_t>(got) != loVaddr) {
       LOG_ERROR("mapImage: could not reserve fixed-exec range at {:#x} (+{:#x})",
                 loVaddr, span);
       return false;
     }
-    utl::allocMem(reinterpret_cast<void *>(loVaddr), span,
-                  utl::pageProtection::w, utl::allocationType::commit);
+    utl::AllocMem(reinterpret_cast<void *>(loVaddr), span,
+                  utl::PageProtection::kW, utl::AllocationType::kCommit);
 
     info.base = nullptr;  // zero load bias: image lives at its absolute vaddrs
     info.codeSize = codeSize;
     info.ripZone = reinterpret_cast<u8 *>(codeSize);  // base(0) + codeSize
 
     std::memset(info.ripZone, 0xCC, info.ripZoneSize);
-    utl::protectMem(info.ripZone, info.ripZoneSize, utl::pageProtection::rwx);
+    utl::ProtectMem(info.ripZone, info.ripZoneSize, utl::PageProtection::kRwx);
   } else {
     // ASLR off: fixed sequential bases so a guest crash reproduces at the same
     // address while the boot is being worked on; switch to kernel-chosen later.
@@ -618,9 +618,9 @@ bool smodule::mapImage() {
     constexpr size_t moduleSlot = eight_gb;
     static uintptr_t s_nextBase = 0x0000200000000000ull;
 #endif
-    info.base = static_cast<u8 *>(utl::allocMem(
+    info.base = static_cast<u8 *>(utl::AllocMem(
         reinterpret_cast<void *>(s_nextBase), moduleSlot,
-        utl::pageProtection::w, utl::allocationType::reserve));
+        utl::PageProtection::kW, utl::AllocationType::kReserve));
     s_nextBase += moduleSlot;
 
     if (!info.base)
@@ -632,14 +632,14 @@ bool smodule::mapImage() {
     info.ripZoneSize = base::Max<size_t>(info.ripZoneSize, codeSize);
 
     // immediately take module memory + rip Zone memory
-    utl::allocMem(info.base, codeSize + info.ripZoneSize, utl::pageProtection::w,
-                  utl::allocationType::commit);
+    utl::AllocMem(info.base, codeSize + info.ripZoneSize, utl::PageProtection::kW,
+                  utl::AllocationType::kCommit);
 
     info.codeSize = codeSize;
     info.ripZone = info.base + codeSize;
 
     std::memset(info.ripZone, 0xCC, info.ripZoneSize);
-    utl::protectMem(info.ripZone, info.ripZoneSize, utl::pageProtection::rwx);
+    utl::ProtectMem(info.ripZone, info.ripZoneSize, utl::PageProtection::kRwx);
   }
 
   // map data
@@ -703,24 +703,24 @@ bool smodule::mapImage() {
         // execute-without-read), writable rw, else r. PS4 handling unchanged.
         if (ps5) {
           if (op & PF_X)
-            return utl::pageProtection::rx;
+            return utl::PageProtection::kRx;
           if (op & PF_W)
-            return utl::pageProtection::w;
-          return utl::pageProtection::r;
+            return utl::PageProtection::kW;
+          return utl::PageProtection::kR;
         }
         switch (op) {
         case (PF_R | PF_X):
-          return utl::pageProtection::rx;
+          return utl::PageProtection::kRx;
         case (PF_R | PF_W):
-          return utl::pageProtection::w;
+          return utl::PageProtection::kW;
         case (PF_R):
-          return utl::pageProtection::r;
+          return utl::PageProtection::kR;
         default:
-          return utl::pageProtection::priv;
+          return utl::PageProtection::kPriv;
         }
       };
 
-      utl::protectMem(getAddress<void>(s->vaddr), s->filesz, trans_perm(perm));
+      utl::ProtectMem(getAddress<void>(s->vaddr), s->filesz, trans_perm(perm));
     }
   }
 

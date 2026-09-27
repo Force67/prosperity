@@ -1,195 +1,202 @@
-#include "base/arch.h"
 #include <unistd.h>
+#include "base/arch.h"
 
-#include <base/atomic.h>
-#include <base/containers/vector.h>
-#include <base/logging.h>
-#include <base/memory/move.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/format.h>
-#include <base/strings/string_ref.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/threading/thread.h>
-#include <base/time/time.h>
+#include "base/atomic.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/memory/move.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/format.h"
+#include "base/strings/string_ref.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
+#include "base/time/time.h"
 
-#include "logger.h"
-#include "threadsafe_queue.h"
+#include "logger/logger.h"
+#include "logger/threadsafe_queue.h"
 
 namespace utl {
 
-static base::Atomic<bool> g_logSilenced{false};
+static base::Atomic<bool> g_log_silenced{false};
 // Any address unique to the calling thread names it.
 static mem_size ThisThread() {
   static thread_local char tag;
   return reinterpret_cast<mem_size>(&tag);
 }
-static base::Atomic<mem_size> g_dumpingThread{0};
-void silenceLogging() {
-  g_dumpingThread.store(ThisThread(), base::memory_order_relaxed);
-  g_logSilenced.store(true, base::memory_order_relaxed);
+static base::Atomic<mem_size> g_dumping_thread{0};
+void SilenceLogging() {
+  g_dumping_thread.store(ThisThread(), base::memory_order_relaxed);
+  g_log_silenced.store(true, base::memory_order_relaxed);
 }
 
 class LogRegistry {
-  base::Mutex writing_lock;
-  base::UniquePointer<base::Thread> backend_thread;
-  base::Vector<base::UniquePointer<logBase>> sinks;
-  Common::MPSCQueue<logEntry> pending;
-  base::TimeTicks time_origin;
+  base::Mutex writing_lock_;
+  base::UniquePointer<base::Thread> backend_thread_;
+  base::Vector<base::UniquePointer<LogBase>> sinks_;
+  common::MPSCQueue<LogEntry> pending_;
+  base::TimeTicks time_origin_;
 
-public:
-  LogRegistry(LogRegistry const &) = delete;
-  const LogRegistry &operator=(LogRegistry const &) = delete;
+ public:
+  LogRegistry(LogRegistry const&) = delete;
+  const LogRegistry& operator=(LogRegistry const&) = delete;
 
-  static LogRegistry &Instance() {
+  static LogRegistry& Instance() {
     static LogRegistry backend;
     return backend;
   }
 
   LogRegistry() {
-    time_origin = base::TimeTicks::Now();
+    time_origin_ = base::TimeTicks::Now();
 
-    backend_thread = base::MakeUnique<base::Thread>("log", [this] {
-      logEntry entry;
-      auto write_logs = [&](logEntry &e) {
-        base::LockGuard<base::Mutex> lock{writing_lock};
-        for (auto &sink : sinks) {
-          sink->write(e);
-        }
-      };
+    backend_thread_ = base::MakeUnique<base::Thread>(
+        "log",
+        [this] {
+          LogEntry entry;
+          auto write_logs = [&](LogEntry& e) {
+            base::LockGuard<base::Mutex> lock{writing_lock_};
+            for (auto& sink : sinks_) {
+              sink->Write(e);
+            }
+          };
 
-      while (true) {
-        entry = pending.PopWait();
+          while (true) {
+            entry = pending_.PopWait();
 
-        if (entry.final_entry)
-          break;
+            if (entry.final_entry)
+              break;
 
-        write_logs(entry);
-      }
+            write_logs(entry);
+          }
 
-      // drain (cap to avoid spinning forever during teardown)
-      constexpr int MAX_LOGS_TO_WRITE = 100;
-      int logs_written = 0;
-      while (logs_written++ < MAX_LOGS_TO_WRITE && pending.Pop(entry)) {
-        write_logs(entry);
-      }
-    }, /*start_now=*/true);
+          // drain (cap to avoid spinning forever during teardown)
+          constexpr int kMaxLogsToWrite = 100;
+          int logs_written = 0;
+          while (logs_written++ < kMaxLogsToWrite && pending_.Pop(entry)) {
+            write_logs(entry);
+          }
+        },
+        /*start_now=*/true);
   }
 
   ~LogRegistry() {
-    logEntry entry;
+    LogEntry entry;
     entry.final_entry = true;
-    pending.Push(entry);
-    backend_thread->Join();
+    pending_.Push(entry);
+    backend_thread_->Join();
   }
 
-  void AddEntry(logLevel lvl, u32 line, const char *func,
-                base::String msg) {
-    logEntry entry{};
-    entry.timestamp = base::TimeTicks::Now() - time_origin;
+  void AddEntry(LogLevel lvl, u32 line, const char* func, base::String msg) {
+    LogEntry entry{};
+    entry.timestamp = base::TimeTicks::Now() - time_origin_;
     entry.log_level = lvl;
     entry.line_num = line;
     entry.function = base::String(func);
     entry.message = base::move(msg);
 
-    if (g_logSilenced.load(base::memory_order_relaxed)) {
+    if (g_log_silenced.load(base::memory_order_relaxed)) {
       // The crash handler stopped the backend thread so nothing races its
       // report on stderr, but the report itself comes through here, so the
       // dumping thread has to write its own lines, synchronously.
-      if (g_dumpingThread.load(base::memory_order_relaxed) != ThisThread())
+      if (g_dumping_thread.load(base::memory_order_relaxed) != ThisThread())
         return;
-      base::String out = formatLogEntry(entry);
+      base::String out = FormatLogEntry(entry);
       ssize_t w = ::write(2, out.c_str(), out.size());
       w = ::write(2, "\n", 1);
       (void)w;
       return;
     }
 
-    pending.Push(entry);
+    pending_.Push(entry);
   }
 
-  logBase *AddSink(base::UniquePointer<logBase> sink) {
-    base::LockGuard<base::Mutex> lock{writing_lock};
-    auto *raw = sink.Get_UseOnlyIfYouKnowWhatYouareDoing();
-    sinks.push_back(base::move(sink));
+  LogBase* AddSink(base::UniquePointer<LogBase> sink) {
+    base::LockGuard<base::Mutex> lock{writing_lock_};
+    auto* raw = sink.Get_UseOnlyIfYouKnowWhatYouareDoing();
+    sinks_.push_back(base::move(sink));
     return raw;
   }
 
   void RemoveSink(base::StringRef name) {
-    base::LockGuard<base::Mutex> lock{writing_lock};
+    base::LockGuard<base::Mutex> lock{writing_lock_};
     // base::Vector lacks base::RemoveIf; do it inline.
-    auto* it = sinks.begin();
-    auto* dst = sinks.begin();
-    for (; it != sinks.end(); ++it) {
-      if (name != base::StringRef((*it)->getName())) {
-        if (dst != it) *dst = base::move(*it);
+    auto* it = sinks_.begin();
+    auto* dst = sinks_.begin();
+    for (; it != sinks_.end(); ++it) {
+      if (name != base::StringRef((*it)->GetName())) {
+        if (dst != it)
+          *dst = base::move(*it);
         ++dst;
       }
     }
-    while (sinks.end() != dst) sinks.pop_back();
+    while (sinks_.end() != dst)
+      sinks_.pop_back();
   }
 
-  logBase *GetSink(base::StringRef name) {
-    for (auto &sink : sinks) {
-      if (name == base::StringRef(sink->getName()))
+  LogBase* GetSink(base::StringRef name) {
+    for (auto& sink : sinks_) {
+      if (name == base::StringRef(sink->GetName()))
         return sink.Get_UseOnlyIfYouKnowWhatYouareDoing();
     }
     return nullptr;
   }
 };
 
-const char *GetLevelName(logLevel log_level) {
-#define LVL(x)                                                                 \
-  case logLevel::x:                                                            \
-    return #x
+const char* GetLevelName(LogLevel log_level) {
   switch (log_level) {
-    LVL(Trace);
-    LVL(Debug);
-    LVL(Info);
-    LVL(Warning);
-    LVL(Error);
-    LVL(Critical);
-    default: break;
+    case LogLevel::kTrace:
+      return "Trace";
+    case LogLevel::kDebug:
+      return "Debug";
+    case LogLevel::kInfo:
+      return "Info";
+    case LogLevel::kWarning:
+      return "Warning";
+    case LogLevel::kError:
+      return "Error";
+    case LogLevel::kCritical:
+      return "Critical";
+    default:
+      break;
   }
-#undef LVL
   return nullptr;
 }
 
-base::String formatLogEntry(const logEntry &entry) {
+base::String FormatLogEntry(const LogEntry& entry) {
   const i64 us = entry.timestamp.InMicroseconds();
   u32 time_seconds = static_cast<u32>(us / 1000000);
   u32 time_fractional = static_cast<u32>(us % 1000000);
 
-  const char *level_name = GetLevelName(entry.log_level);
+  const char* level_name = GetLevelName(entry.log_level);
 
   return base::Format("[{:4d}.{:06d}] <{}> {}:{}: {}", time_seconds,
                       time_fractional, level_name, entry.function,
                       entry.line_num, entry.message);
 }
 
-logBase *addLogSink(base::UniquePointer<logBase> sink) {
+LogBase* AddLogSink(base::UniquePointer<LogBase> sink) {
   return LogRegistry::Instance().AddSink(base::move(sink));
 }
 
-void addLogMsg(logLevel lvl, u32 line, const char *func, base::String msg) {
+void AddLogMsg(LogLevel lvl, u32 line, const char* func, base::String msg) {
   LogRegistry::Instance().AddEntry(lvl, line, func, base::move(msg));
 }
 
-logBase *getLogSink(base::StringRef name) {
+LogBase* GetLogSink(base::StringRef name) {
   return LogRegistry::Instance().GetSink(name);
 }
 
-void routeBaseLogging() {
+void RouteBaseLogging() {
   base::SetLogHandler(
-      [](void *, const char *channel, base::LogLevel level, const char *msg) {
-        static constexpr logLevel kLevels[] = {
-            logLevel::Trace, logLevel::Debug, logLevel::Info,
-            logLevel::Warning, logLevel::Error, logLevel::Critical};
+      [](void*, const char* channel, base::LogLevel level, const char* msg) {
+        static constexpr LogLevel kLevels[] = {
+            LogLevel::kTrace,   LogLevel::kDebug, LogLevel::kInfo,
+            LogLevel::kWarning, LogLevel::kError, LogLevel::kCritical};
         const auto i = static_cast<mem_size>(level);
         // The channel goes in the message as [channel], which is the form
         // these lines are grepped by; the function column names the bridge.
-        fmtLogMsg(i < _countof(kLevels) ? kLevels[i] : logLevel::Info, 0,
+        FmtLogMsg(i < _countof(kLevels) ? kLevels[i] : LogLevel::kInfo, 0,
                   "base", "[{}] {}", channel ? channel : "?", msg ? msg : "");
       },
       nullptr);

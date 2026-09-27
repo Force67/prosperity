@@ -126,7 +126,7 @@ void vprx_init() {
   for (auto *a : vprx_anchors)
     sum += *a;
   (void)sum;
-  utl::init_function::init();
+  utl::InitFunction::Init();
 }
 
 void vprx_reg(const modInfo *info) { vprxTable.push_back(info); }
@@ -358,11 +358,11 @@ void encode_nid(const char *name, u8 *x) {
   u8 sha[20]{};
   sha1_context ctx;
 
-  sha1_starts(&ctx);
-  sha1_update(&ctx, reinterpret_cast<const u8 *>(name), std::strlen(name));
-  sha1_update(&ctx, reinterpret_cast<const u8 *>(suffix),
+  Sha1Starts(&ctx);
+  Sha1Update(&ctx, reinterpret_cast<const u8 *>(name), std::strlen(name));
+  Sha1Update(&ctx, reinterpret_cast<const u8 *>(suffix),
               std::strlen(suffix));
-  sha1_finish(&ctx, sha);
+  Sha1Finish(&ctx, sha);
 
   /*the rest is ignored*/
   u64 target = *(u64 *)(&sha);

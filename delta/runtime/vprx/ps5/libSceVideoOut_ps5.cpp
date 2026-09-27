@@ -384,7 +384,7 @@ int PS4ABI vSubmitFlipEop(int, int bufferIndex, int, i64 flipArg,
   }
   // PS5 always presents through the AGC command processor's render target.
   prosperity_agc_flip(scanout);
-  if (utl::isMemoryRangeMapped(eopLabel, sizeof(u64)))
+  if (utl::IsMemoryRangeMapped(eopLabel, sizeof(u64)))
     *static_cast<volatile u64 *>(eopLabel) = 1;
   g_port.flipCount.fetch_add(1);
   if (eqHandle >= 0)

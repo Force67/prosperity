@@ -127,7 +127,7 @@ int PS4ABI sys_netgetsockinfo(i32 fd, void *info, i32 n, i32 flags) {
     return -SysError::eINVAL;
 
   const size_t span = sizeof(sceNetSockInfo) * static_cast<size_t>(n);
-  if (!utl::isMemoryRangeMapped(info, span))
+  if (!utl::IsMemoryRangeMapped(info, span))
     return -SysError::eFAULT;
   std::memset(info, 0, span);
 

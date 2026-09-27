@@ -259,7 +259,7 @@ void codeLift::emit_fsbase(u8 *base) {
   // tail access raw is worse than ideal but far better than scribbling past the
   // zone into the next module; in practice the zone is sized so this never trips.
   const auto stubSize = gen.getSize() + 5;
-  const auto alignedSize = align_up<size_t>(stubSize, 8);
+  const auto alignedSize = AlignUp<size_t>(stubSize, 8);
   if (ripEnd && ripPointer + alignedSize > ripEnd)
     return;
 

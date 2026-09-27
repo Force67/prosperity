@@ -174,7 +174,7 @@ public:
   RawSource(utl::File &f, u64 base) : f_(f), base_(base) {}
   void read(u64 off, u64 len, u8 *dst) override {
     std::memset(dst, 0, len); // zero-fill short reads past EOF
-    f_.Seek(base_ + off, utl::seekMode::seek_set);
+    f_.Seek(base_ + off, utl::SeekMode::kSeekSet);
     f_.Read(dst, len);
   }
 
@@ -331,7 +331,7 @@ struct PkgImpl {
   base::HashMap<base::String, base::String> filesCI;
   bool valid = false;
 
-  explicit PkgImpl(const base::String &path) : pkg(path, utl::fileMode::read) {
+  explicit PkgImpl(const base::String &path) : pkg(path, utl::FileMode::kRead) {
     if (!pkg.Exists() || !pkg.IsOpen()) {
       LOG_ERROR("pkg: cannot open {}", path.c_str());
       return;
@@ -348,7 +348,7 @@ struct PkgImpl {
 
   bool getEkpfs(u8 out[32]) {
     auto R = [&](u64 o, u64 n, u8 *dst) {
-      pkg.Seek(o, utl::seekMode::seek_set);
+      pkg.Seek(o, utl::SeekMode::kSeekSet);
       pkg.Read(dst, n);
     };
     u8 tmp[4];
@@ -529,7 +529,7 @@ struct PkgImpl {
     // Standard fpkg PFS image offset. Read the header field when it looks sane,
     // else fall back to the well-known constant pkg_extract.py hardcodes.
     u8 off[8];
-    pkg.Seek(0x410, utl::seekMode::seek_set);
+    pkg.Seek(0x410, utl::SeekMode::kSeekSet);
     pkg.Read(off, 8);
     u64 pfsOff = (static_cast<u64>(be32(off)) << 32) | be32(off + 4);
     if (pfsOff < 0x1000 || pfsOff >= pkg.GetSize())
@@ -668,7 +668,7 @@ struct PkgImpl {
       return false;
     base::LockGuard<base::Mutex> lk(io);
     auto R = [&](u64 o, u64 n, u8 *dst) {
-      pkg.Seek(o, utl::seekMode::seek_set);
+      pkg.Seek(o, utl::SeekMode::kSeekSet);
       pkg.Read(dst, n);
     };
     u8 tmp[4];

@@ -21,7 +21,7 @@ constexpr i32 kSize = i32(0x811d0101), kPointer = i32(0x811d0102);
 constexpr i32 kHandle = i32(0x811d0103), kConfig = i32(0x811d0104);
 constexpr i32 kFrame = i32(0x811d0109), kDecode = i32(0x811d0200);
 bool Readable(const void* p, u64 bytes) {
-  return p && bytes && utl::isMemoryRangeMapped(p, bytes);
+  return p && bytes && utl::IsMemoryRangeMapped(p, bytes);
 }
 template<class T> bool Sized(const T* p) { return Readable(p, sizeof(T)) && p->size == sizeof(T); }
 bool ValidConfig(const Config* c) {

@@ -195,7 +195,7 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
     // on error anyway; answering the same keeps the reply honest.
     std::memset(bin->data, 0, bin->size);
     // The wrapper returns this int32 to its caller when the syscall succeeds.
-    if (result && utl::isMemoryRangeMapped(result, sizeof(u32)))
+    if (result && utl::IsMemoryRangeMapped(result, sizeof(u32)))
       *static_cast<u32 *>(result) = 0;
     return 0;
   }
@@ -210,7 +210,7 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
     char sym[256];
     symbolize(reinterpret_cast<uintptr_t>(_ReturnAddress()), sym, sizeof(sym));
     BASE_LOGI("regmgr", "  called from {}", sym);
-    if (value && utl::isMemoryRangeMapped(value, type < 64 ? type : 64)) {
+    if (value && utl::IsMemoryRangeMapped(value, type < 64 ? type : 64)) {
       base::String words;
       const auto *w = static_cast<const u32 *>(value);
       for (u64 i = 0; i * 4 < type && i < 16; i++)
@@ -220,7 +220,7 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
   }
   // Same reasoning as the op-25 unknown-key path: a caller that reads the
   // result despite the error should see zero rather than stack garbage.
-  if (result && utl::isMemoryRangeMapped(result, sizeof(u32)))
+  if (result && utl::IsMemoryRangeMapped(result, sizeof(u32)))
     *static_cast<u32 *>(result) = 0;
   return 0x800D0203;
 }

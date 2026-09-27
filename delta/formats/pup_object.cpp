@@ -167,7 +167,7 @@ base::String pupReader::extractAll(const base::String &outDir,
     bool compressed = (e.flags & 0x8u) != 0;
 
     base::Vector<u8> raw;
-    file.Seek(e.offset, utl::seekMode::seek_set);
+    file.Seek(e.offset, utl::SeekMode::kSeekSet);
     if (!file.Read(raw, static_cast<size_t>(e.sizeCompressed))) {
       failed++;
       appendLine(summary, "  [%u] read failed\n", id);
@@ -198,7 +198,7 @@ base::String pupReader::extractAll(const base::String &outDir,
     if (!outPath.empty() && outPath.back() != '/')
       outPath += "/";
     outPath += fname;
-    utl::File out(outPath, utl::fileMode::write);
+    utl::File out(outPath, utl::FileMode::kWrite);
     if (!out.IsOpen()) {
       failed++;
       appendLine(summary, "  [%u] %s: cannot write\n", id, fname);
@@ -246,7 +246,7 @@ bool pupReader::extractPS5Segment(const pup_entry &e, size_t idx,
   bool blocked = ps5Compressed(e.flags) && ps5Blocked(e.flags);
 
   auto readAt = [&](u64 off, base::Vector<u8> &buf, size_t n) {
-    file.Seek(off, utl::seekMode::seek_set);
+    file.Seek(off, utl::SeekMode::kSeekSet);
     return file.Read(buf, n);
   };
 
@@ -312,7 +312,7 @@ bool pupReader::extractPS5Segment(const pup_entry &e, size_t idx,
   if (!outPath.empty() && outPath.back() != '/')
     outPath += "/";
   outPath += fname;
-  utl::File out(outPath, utl::fileMode::write);
+  utl::File out(outPath, utl::FileMode::kWrite);
   if (!out.IsOpen()) {
     appendLine(summary, "  [%u] %s: cannot write\n", id, fname);
     return false;

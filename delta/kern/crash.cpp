@@ -99,7 +99,7 @@ void backtrace(uintptr_t rbp) {
       break;
   // A thread parked deep in host code has no frame chain at rbp; the walk
   // faulted reading it, fatal from the SIGUSR1 probe asking a live run.
-    if (!utl::isMemoryRangeMapped(reinterpret_cast<void *>(rbp),
+    if (!utl::IsMemoryRangeMapped(reinterpret_cast<void *>(rbp),
                                   2 * sizeof(uintptr_t)))
       break;
     auto *frame = reinterpret_cast<uintptr_t *>(rbp);
@@ -428,7 +428,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     for (;;) pause();  // park until the first thread's _Exit ends the process
   }
   s_dumper.store(self);
-  utl::silenceLogging();  // stop the async log thread racing us on stderr
+  utl::SilenceLogging();  // stop the async log thread racing us on stderr
 
   probe::onFatal();
 
@@ -747,7 +747,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
         {"rbx", (u64)gr[REG_RBX]}, {"r12", (u64)gr[REG_R12]}};
     for (const auto &o : objs) {
       if (o.v < 0x1000000000ull || o.v >= 0x20000000000ull ||
-          !utl::isMemoryRangeMapped(reinterpret_cast<const void *>(o.v), 128))
+          !utl::IsMemoryRangeMapped(reinterpret_cast<const void *>(o.v), 128))
         continue;
       const auto *q = reinterpret_cast<const u64 *>(o.v);
       base::String words;
@@ -1234,7 +1234,7 @@ void installSigAltStack() {
 void installCrashHandler() {
   // Let layers that cannot reach the kernel arm a watch: the GPU only learns
   // the address worth watching while a draw is being processed.
-  utl::setWriteWatchArmer([](uintptr_t addr, size_t bytes, unsigned everyMs) {
+  utl::SetWriteWatchArmer([](uintptr_t addr, size_t bytes, unsigned everyMs) {
     probe::startWriteWatch(addr, bytes, everyMs);
   });
   struct sigaction sa = {};

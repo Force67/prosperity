@@ -40,11 +40,11 @@ u32 g_count = 0; // filled slots, saturating at kLines
 bool g_visible = true;
 bool g_attached = false;
 
-class LogPanelSink final : public utl::logBase {
+class LogPanelSink final : public utl::LogBase {
 public:
-  const char *getName() override { return "overlayLog"; }
+  const char *GetName() override { return "overlayLog"; }
 
-  void write(const utl::logEntry &entry) override {
+  void Write(const utl::LogEntry &entry) override {
     const char *text = entry.message.c_str();
     const size_t length =
         base::Min<size_t>(entry.message.length(), kLineChars - 1);
@@ -60,16 +60,16 @@ public:
 };
 
 ImU32 LevelColour(u8 level) {
-  switch (static_cast<utl::logLevel>(level)) {
-  case utl::logLevel::Trace:
+  switch (static_cast<utl::LogLevel>(level)) {
+  case utl::LogLevel::kTrace:
     return IM_COL32(140, 140, 140, 255);
-  case utl::logLevel::Debug:
+  case utl::LogLevel::kDebug:
     return IM_COL32(120, 200, 255, 255);
-  case utl::logLevel::Warning:
+  case utl::LogLevel::kWarning:
     return IM_COL32(255, 210, 100, 255);
-  case utl::logLevel::Error:
+  case utl::LogLevel::kError:
     return IM_COL32(255, 110, 110, 255);
-  case utl::logLevel::Critical:
+  case utl::LogLevel::kCritical:
     return IM_COL32(255, 130, 255, 255);
   default:
     return IM_COL32(225, 225, 225, 255);
@@ -82,7 +82,7 @@ void overlayLogAttach() {
   if (g_attached)
     return;
   g_attached = true;
-  utl::addLogSink(base::MakeUnique<LogPanelSink>());
+  utl::AddLogSink(base::MakeUnique<LogPanelSink>());
 }
 
 void overlayLogBuild(u32 w, u32 h) {

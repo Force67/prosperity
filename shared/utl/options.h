@@ -8,27 +8,33 @@
 
 #pragma once
 
-#include <base/option.h>
+#include "base/option.h"
 
 // Every runtime knob is a base::Option whose name doubles as the environment
-// variable it reads, so DELTA_GPU_TRACE=1 in the environment, +DELTA_GPU_TRACE=1
-// in an options file and the same on the command line all set one option.
-// Declare it at namespace scope in the file that reads it (never as a function
-// local: initOptions can only fill options that already registered):
+// variable it reads, so DELTA_GPU_TRACE=1 in the environment,
+// +DELTA_GPU_TRACE=1 in an options file and the same on the command line all
+// set one option. Declare it at namespace scope in the file that reads it
+// (never as a function local: InitOptions can only fill options that already
+// registered):
 //
 //   namespace {
-//   DELTA_OPTION(bool, kGpuTrace, "DELTA_GPU_TRACE", false, "trace PM4 packets");
+//   DELTA_OPTION(bool, kGpuTrace, "DELTA_GPU_TRACE", false, "trace PM4
+//   packets");
 //   }
 //
 // The description is optional. Options an unrelated module also reads belong in
 // that module's header as an extern instead of being declared twice.
-#define DELTA_OPTION(type, var, name, default_value, ...)                      \
-  base::Option<type> var { name, default_value, name, "" __VA_ARGS__ }
+#define DELTA_OPTION(type, var, name, default_value, ...) \
+  base::Option<type> var {                                \
+    name, default_value, name, "" __VA_ARGS__             \
+  }
 
 // The same for an option a header declares: one instance across the whole
 // program, so it registers once however many files include it.
-#define DELTA_OPTION_INLINE(type, var, name, default_value, ...)               \
-  inline base::Option<type> var { name, default_value, name, "" __VA_ARGS__ }
+#define DELTA_OPTION_INLINE(type, var, name, default_value, ...) \
+  inline base::Option<type> var {                                \
+    name, default_value, name, "" __VA_ARGS__                    \
+  }
 
 namespace utl {
 
@@ -37,21 +43,21 @@ namespace utl {
 // wins. Consumes the arguments it handles (--options=, --dump-options, +Name=)
 // so the caller's own parsing never sees them. Call once at startup, before
 // anything reads an option.
-void initOptions(int &argc, char **argv);
+void InitOptions(int& argc, char** argv);
 
 // The same, for hosts that have no command line of their own (the Android
 // activity). Options come from the environment and DELTA_OPTIONS.
-void initOptions();
+void InitOptions();
 
 // Applies a single options file. `optional` is for the paths we probe rather
 // than the ones someone asked for: a missing file then passes without a word.
-bool loadOptionFile(const char *path, bool optional = false);
+bool LoadOptionFile(const char* path, bool optional = false);
 
 // Applies the settings shipped for a title: game_profiles/<title id>.txt next
 // to the binary (or under DELTA_DATA_DIR). Call it once the title id is known.
 // A profile only fills in options nothing else has set, so it never overrides
 // the environment, an options file or the command line. DELTA_PROFILE names a
 // file to use instead, or "off" to boot the title with no profile at all.
-void loadGameProfile(const char *titleId);
+void LoadGameProfile(const char* title_id);
 
-} // namespace utl
+}  // namespace utl

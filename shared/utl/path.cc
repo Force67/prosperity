@@ -6,18 +6,18 @@
  * in the root of the source tree.
  */
 
-#include <utl/path.h>
+#include "utl/path.h"
 
 #ifdef _WIN32
 #include <Windows.h>
-#include <cwchar>
 #include <cstring>
+#include <cwchar>
 #else
+#include <unistd.h>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
-#include <unistd.h>
-#include <utl/options.h>
+#include "utl/options.h"
 
 namespace {
 DELTA_OPTION(const char*, kDataDir, "DELTA_DATA_DIR", nullptr);
@@ -30,13 +30,14 @@ DELTA_OPTION(const char*, kDataDir, "DELTA_DATA_DIR", nullptr);
 namespace utl {
 
 #ifdef _WIN32
-base::StringW make_abs_path(const base::StringW &rel) {
+base::StringW MakeAbsPath(const base::StringW& rel) {
   static base::StringW filePath;
   if (filePath.empty()) {
     wchar_t buf[MAX_PATH]{};
     GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    wchar_t *dirPtr = std::wcsrchr(buf, L'\\');
-    if (dirPtr) dirPtr[1] = L'\0';
+    wchar_t* dirPtr = std::wcsrchr(buf, L'\\');
+    if (dirPtr)
+      dirPtr[1] = L'\0';
     filePath = base::StringW(buf);
   }
 
@@ -44,40 +45,45 @@ base::StringW make_abs_path(const base::StringW &rel) {
   out += rel;
 
   // backslashes everywhere
-  for (auto &c : out) if (c == L'/') c = L'\\';
+  for (auto& c : out)
+    if (c == L'/')
+      c = L'\\';
   return out;
 }
 
-base::String make_abs_path(const base::String &rel) {
+base::String MakeAbsPath(const base::String& rel) {
   static base::String filePath;
   if (filePath.empty()) {
     char buf[MAX_PATH]{};
     GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    char *dirPtr = std::strrchr(buf, '\\');
-    if (dirPtr) dirPtr[1] = '\0';
+    char* dirPtr = std::strrchr(buf, '\\');
+    if (dirPtr)
+      dirPtr[1] = '\0';
     filePath = base::String(buf);
   }
 
   base::String out = filePath;
   out += rel;
 
-  for (auto &c : out) if (c == '/') c = '\\';
+  for (auto& c : out)
+    if (c == '/')
+      c = '\\';
   return out;
 }
 
 #else  // POSIX
 
-static const base::String& exe_dir() {
-  static base::String filePath;
-  if (filePath.empty()) {
+static const base::String& ExeDir() {
+  static base::String file_path;
+  if (file_path.empty()) {
     // DELTA_DATA_DIR overrides where modules/ and host assets live. The Android
     // app sets it to the activity's external files dir; the binary itself sits
     // in a read-only lib/ dir, so /proc/self/exe is no use there.
     if (const char* dd = kDataDir; dd && *dd) {
-      filePath = base::String(dd);
-      if (filePath.back() != '/')
-        filePath += "/";
-      return filePath;
+      file_path = base::String(dd);
+      if (file_path.back() != '/')
+        file_path += "/";
+      return file_path;
     }
     char buf[PATH_MAX]{};
     ssize_t n = ::readlink("/proc/self/exe", buf, PATH_MAX - 1);
@@ -86,22 +92,22 @@ static const base::String& exe_dir() {
       char* slash = std::strrchr(buf, '/');
       if (slash)
         slash[1] = '\0';
-      filePath = base::String(buf);
+      file_path = base::String(buf);
     } else {
-      filePath = base::String("./");
+      file_path = base::String("./");
     }
   }
-  return filePath;
+  return file_path;
 }
 
-base::String make_abs_path(const base::String &rel) {
-  base::String out = exe_dir();
+base::String MakeAbsPath(const base::String& rel) {
+  base::String out = ExeDir();
   out += rel;
   return out;
 }
 
-base::StringW make_abs_path(const base::StringW &rel) {
-  const auto& dir = exe_dir();
+base::StringW MakeAbsPath(const base::StringW& rel) {
+  const auto& dir = ExeDir();
   base::StringW out;
   out.reserve(static_cast<base::StringW::size_type>(dir.size() + rel.size()));
   for (const char* p = dir.c_str(); *p; ++p)

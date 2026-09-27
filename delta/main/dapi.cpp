@@ -42,7 +42,7 @@ static bool verifyViablity() {
   constexpr size_t one_mb = 1024ull * 1024ull;
   constexpr size_t eight_gb = 8ull * 1024ull * one_mb;
 
-  if (utl::getAvailableMem() < eight_gb) {
+  if (utl::GetAvailableMem() < eight_gb) {
     LOG_ERROR("Your system doesn't have enough physical memory to run " FXNAME);
     return false;
   }
@@ -137,14 +137,14 @@ EXPORT int dcoreMain(int argc, char **argv) {
   // produced it.
   prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
 #endif
-  utl::createLogger(true);
-  utl::routeBaseLogging();
+  utl::CreateLogger(true);
+  utl::RouteBaseLogging();
   // Before anything logs: the on-screen panel shows the tail of the log, and
   // the boot lines are the ones worth seeing before a title even presents.
   gfx::overlayLogAttach();
   // Before anything else: every subsystem below reads its knobs from here, and
   // most latch the value the first time they run.
-  utl::initOptions(argc, argv);
+  utl::InitOptions(argc, argv);
   // Bring the render Vulkan device up NOW, before any guest memory is mapped:
   // initialized lazily (first Gnm submit), the NVIDIA driver fails its
   // in-process setup once the guest's huge MAP_FIXED mappings exist

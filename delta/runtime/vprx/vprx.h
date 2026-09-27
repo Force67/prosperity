@@ -50,7 +50,7 @@ static const runtime::modInfo info_##tname{                                    \
       (runtime::funcInfo *)&functions,                                         \
       (sizeof(functions) / sizeof(runtime::funcInfo)), #tname};                \
   \
-static utl::init_function init_##tname(                                        \
+static utl::InitFunction init_##tname(                                        \
       []() { runtime::vprx_reg(&info_##tname); })
 
 // Register a PS5-only NID alias table under the module name `tname`. Same shape
@@ -61,5 +61,5 @@ static const runtime::modInfo info_ps5_##tname{                                \
       (runtime::funcInfo *)&functions,                                         \
       (sizeof(functions) / sizeof(runtime::funcInfo)), #tname};                \
   \
-static utl::init_function init_ps5_##tname(                                    \
+static utl::InitFunction init_ps5_##tname(                                    \
       []() { runtime::vprx_reg_ps5(&info_ps5_##tname); })

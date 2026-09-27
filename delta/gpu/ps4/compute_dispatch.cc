@@ -167,7 +167,7 @@ ResourceRange ResolveBufferResource(u64 cs_addr,
     out.size = kZeroFillBytes;
   } else if (out.size > kMaxResource) {
     const u64 declared = out.size;
-    out.size = utl::mappedMemoryPrefix(reinterpret_cast<const void*>(out.base),
+    out.size = utl::MappedMemoryPrefix(reinterpret_cast<const void*>(out.base),
                                        kMaxUnboundedBuffer);
     if (trace)
       TraceCsWindowedBuffer(cs_addr, res.binding, declared, out.size);

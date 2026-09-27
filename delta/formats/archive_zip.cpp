@@ -58,7 +58,7 @@ constexpr u16 kMethodDeflate = 8;
 class ZipBackend final : public ArchiveBackend {
 public:
   explicit ZipBackend(const base::String &path)
-      : file_(path, utl::fileMode::read) {}
+      : file_(path, utl::FileMode::kRead) {}
 
   ~ZipBackend() override {
     for (auto &s : sess_)
@@ -284,7 +284,7 @@ private:
   };
 
   bool pread(u64 off, void *dst, u64 len) {
-    file_.Seek(off, utl::seekMode::seek_set);
+    file_.Seek(off, utl::SeekMode::kSeekSet);
     return file_.Read(dst, len) == len;
   }
 

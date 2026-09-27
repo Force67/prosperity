@@ -262,7 +262,7 @@ const volatile u32* WaitRegMemTarget(const u32* body) {
     // Only where we are the producer. A poll on a word nothing of ours writes
     // can never be satisfied, and waiting out its timeout is pure loss.
     if (IsGuestAddress(address) && g_fence_labels.Contains(address) &&
-        utl::isMemoryRangeMapped(reinterpret_cast<const void*>(address), 4))
+        utl::IsMemoryRangeMapped(reinterpret_cast<const void*>(address), 4))
       return reinterpret_cast<const volatile u32*>(address);
     return nullptr;
   }
@@ -450,7 +450,7 @@ void HandleEventWrite(const u32* body, u32 count) {
   constexpr u32 kRenderBackends = 8;
   const u64 span = static_cast<u64>(kRenderBackends) * 16;
   if (!IsGuestRange(address, span) ||
-      !utl::isMemoryRangeMapped(reinterpret_cast<const void*>(address), span))
+      !utl::IsMemoryRangeMapped(reinterpret_cast<const void*>(address), span))
     return;
   static base::Atomic<u64> samples{0};
   const u64 value = (1ull << 63) | (samples.fetch_add(1) + 1);
@@ -596,7 +596,7 @@ bool ResolveIndirectBuffer(const u32* body,
   if (!IsGuestRange(address, bytes))
     return false;
   const void* p = reinterpret_cast<const void*>(address);
-  if (!utl::isMemoryRangeMapped(p, bytes))
+  if (!utl::IsMemoryRangeMapped(p, bytes))
     return false;
   // A queued DMA or WRITE_DATA may still be writing the chained commands.
   if (GuestRenderQueue().PendingWriteOverlaps(address, bytes))

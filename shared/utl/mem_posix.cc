@@ -6,15 +6,14 @@
  * in the root of the source tree.
  */
 
-#include "mem.h"
+#include "utl/mem.h"
 
 #include <sys/mman.h>
 #include <unistd.h>
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 
 namespace utl {
 
@@ -29,7 +28,7 @@ struct MappingRegistry {
   u64 next_identity = 0;
 };
 MappingRegistry& MappingState() {
-  // allocMem can be called while another translation unit initializes.
+  // AllocMem can be called while another translation unit initializes.
   static MappingRegistry state;
   return state;
 }
@@ -54,7 +53,7 @@ void ForgetMapping(MappingRegistry& state, uintptr_t begin, uintptr_t end) {
 }
 }  // namespace
 
-void trackMemoryMapping(void* addr, size_t len) {
+void TrackMemoryMapping(void* addr, size_t len) {
   const uintptr_t base = reinterpret_cast<uintptr_t>(addr);
   if (!base || !len || len > UINTPTR_MAX - base)
     return;
@@ -64,7 +63,7 @@ void trackMemoryMapping(void* addr, size_t len) {
   state.mappings.emplace(base, Mapping{base + len, ++state.next_identity});
 }
 
-void forgetMemoryMapping(void* addr, size_t len) {
+void ForgetMemoryMapping(void* addr, size_t len) {
   const uintptr_t base = reinterpret_cast<uintptr_t>(addr);
   if (!base || !len || len > UINTPTR_MAX - base)
     return;
@@ -73,7 +72,7 @@ void forgetMemoryMapping(void* addr, size_t len) {
   ForgetMapping(state, base, base + len);
 }
 
-u64 memoryMappingIdentity(const void* addr, size_t len) {
+u64 MemoryMappingIdentity(const void* addr, size_t len) {
   uintptr_t base = reinterpret_cast<uintptr_t>(addr);
   if (!base || !len || len > UINTPTR_MAX - base)
     return 0;
@@ -96,83 +95,89 @@ u64 memoryMappingIdentity(const void* addr, size_t len) {
   return hash ? hash : 1;
 }
 
-static int protection_ToPosix(pageProtection prot) {
+static int ProtectionToPosix(PageProtection prot) {
   switch (prot) {
-  case pageProtection::priv:
-    return PROT_NONE;
-  case pageProtection::r:
-    return PROT_READ;
-  case pageProtection::w:
-    return PROT_READ | PROT_WRITE;
-  case pageProtection::rx:
-    return PROT_READ | PROT_EXEC;
-  case pageProtection::rwx:
-    return PROT_READ | PROT_WRITE | PROT_EXEC;
-  default:
-    __builtin_trap();
-    return 0;
+    case PageProtection::kPriv:
+      return PROT_NONE;
+    case PageProtection::kR:
+      return PROT_READ;
+    case PageProtection::kW:
+      return PROT_READ | PROT_WRITE;
+    case PageProtection::kRx:
+      return PROT_READ | PROT_EXEC;
+    case PageProtection::kRwx:
+      return PROT_READ | PROT_WRITE | PROT_EXEC;
+    default:
+      __builtin_trap();
+      return 0;
   }
 }
 
-void* allocMem(void* preferredAddr, size_t length, pageProtection prot,
-               allocationType type) {
+void* AllocMem(void* preferred_addr,
+               size_t length,
+               PageProtection prot,
+               AllocationType type) {
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
   int posix_prot;
 
-  if (type == allocationType::reserve) {
+  if (type == AllocationType::kReserve) {
     // reserve: mapped but inaccessible, and don't clobber an existing mapping
     posix_prot = PROT_NONE;
-    if (preferredAddr)
+    if (preferred_addr)
       flags |= MAP_FIXED_NOREPLACE;
   } else {
     // commit: overlay a sub-range of the reservation. has to be MAP_FIXED –
     // MAP_FIXED_NOREPLACE hits EEXIST and the page stays unwritable.
-    posix_prot = protection_ToPosix(prot);
-    if (preferredAddr)
+    posix_prot = ProtectionToPosix(prot);
+    if (preferred_addr)
       flags |= MAP_FIXED;
   }
 
-  void* p = ::mmap(preferredAddr, length, posix_prot, flags, -1, 0);
+  void* p = ::mmap(preferred_addr, length, posix_prot, flags, -1, 0);
   if (p == MAP_FAILED)
     return nullptr;
-  trackMemoryMapping(p, length);
+  TrackMemoryMapping(p, length);
   return p;
 }
 
-void freeMem(void* addr) {
+void FreeMem(void* addr) {
   // Without size we can't unmap precisely; this matches the Win32 semantic
   // of "release the whole reservation" only loosely. Callers that care must
   // track size externally.
   ::munmap(addr, 0);
 }
 
-bool protectMem(void* addr, size_t len, pageProtection prot) {
-  return ::mprotect(addr, len, protection_ToPosix(prot)) == 0;
+bool ProtectMem(void* addr, size_t len, PageProtection prot) {
+  return ::mprotect(addr, len, ProtectionToPosix(prot)) == 0;
 }
 
-bool isMemoryRangeMapped(const void *addr, size_t len) {
-  if (!addr || !len) return false;
+bool IsMemoryRangeMapped(const void* addr, size_t len) {
+  if (!addr || !len)
+    return false;
   const uintptr_t begin = reinterpret_cast<uintptr_t>(addr);
-  if (len > UINTPTR_MAX - begin) return false;
+  if (len > UINTPTR_MAX - begin)
+    return false;
   const long page_size_raw = ::sysconf(_SC_PAGE_SIZE);
-  if (page_size_raw <= 0) return false;
+  if (page_size_raw <= 0)
+    return false;
   const uintptr_t page_size = static_cast<uintptr_t>(page_size_raw);
   const uintptr_t first = begin & ~(page_size - 1);
   const uintptr_t last = (begin + len - 1) & ~(page_size - 1);
   const size_t pages = static_cast<size_t>((last - first) / page_size + 1);
   base::Vector<unsigned char> residency(pages);
-  return ::mincore(reinterpret_cast<void *>(first), pages * page_size,
+  return ::mincore(reinterpret_cast<void*>(first), pages * page_size,
                    residency.data()) == 0;
 }
 
-size_t mappedMemoryPrefix(const void *addr, size_t maxLen) {
-  if (!addr || !maxLen) return 0;
-  size_t mapped = 0, remaining = maxLen;
+size_t MappedMemoryPrefix(const void* addr, size_t max_len) {
+  if (!addr || !max_len)
+    return 0;
+  size_t mapped = 0, remaining = max_len;
   while (remaining) {
     const size_t probe = mapped + remaining / 2 + remaining % 2;
-    if (isMemoryRangeMapped(addr, probe)) {
+    if (IsMemoryRangeMapped(addr, probe)) {
       mapped = probe;
-      remaining = maxLen - mapped;
+      remaining = max_len - mapped;
     } else {
       remaining = probe - mapped - 1;
     }
@@ -180,7 +185,7 @@ size_t mappedMemoryPrefix(const void *addr, size_t maxLen) {
   return mapped;
 }
 
-size_t getAvailableMem() {
+size_t GetAvailableMem() {
   long pages = ::sysconf(_SC_PHYS_PAGES);
   long page_size = ::sysconf(_SC_PAGE_SIZE);
   if (pages <= 0 || page_size <= 0)
@@ -197,22 +202,32 @@ uintptr_t g_write_watch_probe = 0;
 unsigned g_write_watch_chase = 0;
 }  // namespace
 
-void setWriteWatchChase(unsigned hops) { g_write_watch_chase = hops; }
-unsigned writeWatchChaseLeft() { return g_write_watch_chase; }
-void writeWatchChaseTook() {
+void SetWriteWatchChase(unsigned hops) {
+  g_write_watch_chase = hops;
+}
+unsigned WriteWatchChaseLeft() {
+  return g_write_watch_chase;
+}
+void WriteWatchChaseTook() {
   if (g_write_watch_chase)
     g_write_watch_chase--;
 }
 
-void setWriteWatchValueProbe(uintptr_t addr) { g_write_watch_probe = addr; }
-uintptr_t writeWatchValueProbe() { return g_write_watch_probe; }
+void SetWriteWatchValueProbe(uintptr_t addr) {
+  g_write_watch_probe = addr;
+}
+uintptr_t WriteWatchValueProbe() {
+  return g_write_watch_probe;
+}
 
-void setWriteWatchArmer(WriteWatchArmer fn) { g_write_watch_armer = fn; }
+void SetWriteWatchArmer(WriteWatchArmer fn) {
+  g_write_watch_armer = fn;
+}
 
-bool armWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs) {
+bool ArmWriteWatch(uintptr_t addr, size_t bytes, unsigned every_ms) {
   if (!g_write_watch_armer || !addr || !bytes)
     return false;
-  g_write_watch_armer(addr, bytes, everyMs);
+  g_write_watch_armer(addr, bytes, every_ms);
   return true;
 }
 }  // namespace utl

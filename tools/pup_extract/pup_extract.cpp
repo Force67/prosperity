@@ -9,7 +9,7 @@
 #include <base/strings/xstring.h>
 
 int main(int argc, char **argv) {
-  utl::createLogger(true);
+  utl::CreateLogger(true);
   if (argc < 3) {
     std::printf("usage: pup_extract <firmware.PUP[.dec]> <out_dir>\n");
     return 1;

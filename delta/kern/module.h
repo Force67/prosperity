@@ -108,7 +108,7 @@ public:
 
   inline bool isDynlib() { return elf->type == ET_SCE_DYNAMIC; }
 
-  /*traits -> object_ref TODO: properly implement*/
+  /*traits -> ObjectRef TODO: properly implement*/
   void release(){};
   void retain(){};
 

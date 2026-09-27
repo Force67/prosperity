@@ -12,7 +12,7 @@
 #include "base/arch.h"
 
 namespace krnl {
-// BSD/PS4 mmap prot bits (matches PROT_* and utl::pageProtection's bit layout).
+// BSD/PS4 mmap prot bits (matches PROT_* and utl::PageProtection's bit layout).
 enum mprotFlags : u32 { none = 0, read = 1, write = 2, exec = 4 };
 
 enum mFlags : u32 {

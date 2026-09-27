@@ -9,83 +9,96 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
 
-#include "logger.h"
-#include <base/strings/string_ref.h>
+#include "base/strings/string_ref.h"
+#include "logger/logger.h"
 
 namespace utl {
 
-class fileOut final : public logBase {
-  FILE* handle{nullptr};
-  size_t bytes_written{0};
+class FileOut final : public LogBase {
+  FILE* handle_{nullptr};
+  size_t bytes_written_{0};
 
  public:
-  explicit fileOut(const base::String& filename) {
-    handle = std::fopen(filename.c_str(), "w");
+  explicit FileOut(const base::String& filename) {
+    handle_ = std::fopen(filename.c_str(), "w");
   }
 
-  void close() {
-    if (handle) {
-      std::fclose(handle);
-      handle = nullptr;
+  void Close() {
+    if (handle_) {
+      std::fclose(handle_);
+      handle_ = nullptr;
     }
   }
 
-  const char* getName() override { return "fileOut"; }
+  const char* GetName() override { return "fileOut"; }
 
-  void write(const logEntry& entry) override {
-    constexpr mem_size MAX_BYTES_WRITTEN = 50 * 1024L * 1024L;
+  void Write(const LogEntry& entry) override {
+    constexpr mem_size kMaxBytesWritten = 50 * 1024L * 1024L;
 
-    if (!handle || bytes_written > MAX_BYTES_WRITTEN)
+    if (!handle_ || bytes_written_ > kMaxBytesWritten)
       return;
 
-    auto msg = formatLogEntry(entry);
+    auto msg = FormatLogEntry(entry);
     msg.push_back('\n');
-    bytes_written += std::fwrite(static_cast<const void*>(msg.c_str()),
-                                 msg.length(), 1, handle);
+    bytes_written_ += std::fwrite(static_cast<const void*>(msg.c_str()),
+                                  msg.length(), 1, handle_);
 
-    if (entry.log_level >= logLevel::Error) {
-      std::fflush(handle);
+    if (entry.log_level >= LogLevel::kError) {
+      std::fflush(handle_);
     }
   }
 };
 
-class conOut_Posix final : public logBase {
+class ConOutPosix final : public LogBase {
  public:
-  const char* getName() override { return "conOut"; }
+  const char* GetName() override { return "conOut"; }
 
-  void write(const logEntry& entry) override {
+  void Write(const LogEntry& entry) override {
     const char* color = "";
     const char* reset = "\x1b[0m";
     switch (entry.log_level) {
-      case logLevel::Trace:    color = "\x1b[90m"; break;
-      case logLevel::Debug:    color = "\x1b[36m"; break;
-      case logLevel::Info:     color = "\x1b[37m"; break;
-      case logLevel::Warning:  color = "\x1b[93m"; break;
-      case logLevel::Error:    color = "\x1b[91m"; break;
-      case logLevel::Critical: color = "\x1b[95m"; break;
-      default: break;
+      case LogLevel::kTrace:
+        color = "\x1b[90m";
+        break;
+      case LogLevel::kDebug:
+        color = "\x1b[36m";
+        break;
+      case LogLevel::kInfo:
+        color = "\x1b[37m";
+        break;
+      case LogLevel::kWarning:
+        color = "\x1b[93m";
+        break;
+      case LogLevel::kError:
+        color = "\x1b[91m";
+        break;
+      case LogLevel::kCritical:
+        color = "\x1b[95m";
+        break;
+      default:
+        break;
     }
-    auto str = formatLogEntry(entry);
+    auto str = FormatLogEntry(entry);
     std::fprintf(stderr, "%s%s%s\n", color, str.c_str(), reset);
   }
 };
 
-void createLogger(bool createConsole) {
-  if (createConsole) {
-    addLogSink(base::MakeUnique<conOut_Posix>());
+void CreateLogger(bool create_console) {
+  if (create_console) {
+    AddLogSink(base::MakeUnique<ConOutPosix>());
   }
 
   base::String log_path(FXNAME);
   log_path.append(".log");
-  addLogSink(base::MakeUnique<fileOut>(log_path));
+  AddLogSink(base::MakeUnique<FileOut>(log_path));
 
   std::atexit([]() {
-    auto* sink = static_cast<fileOut*>(getLogSink(base::StringRef("fileOut")));
+    auto* sink = static_cast<FileOut*>(GetLogSink(base::StringRef("fileOut")));
     if (sink)
-      sink->close();
+      sink->Close();
   });
 }
 

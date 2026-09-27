@@ -31,13 +31,13 @@ if (file.IsOpen()) {
         file.Read(entries);
 
         for (auto& e : entries) {
-                file.Seek(e.offset, utl::seekMode::seek_set);
+                file.Seek(e.offset, utl::SeekMode::kSeekSet);
 
                 base::Vector<u8> data(e.fileSize);
                 file.Read(data);
 
                 utl::File out(converter.from_bytes(e.fileName),
-utl::fileMode::write); if (out.IsOpen()) { out.Write(data);
+utl::FileMode::Write); if (out.IsOpen()) { out.Write(data);
                 }
         }
 }

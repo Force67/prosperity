@@ -11,6 +11,9 @@
 
 #include "base/arch.h"
 
+// ELF and SCE spec names keep their canonical spelling.
+// NOLINTBEGIN(readability-identifier-naming)
+
 // increments by 0x10 for each new
 // revision
 enum class SELFProductType : u8 {
@@ -18,18 +21,18 @@ enum class SELFProductType : u8 {
   K = 0xC,
   SL = 0xF,
   SM = 0xE,
-  SELF = 0x8, //< applies to EBOOT, ELF and SELF
-  SPRX = 0x9  //< applies to SPRX, SDLL and SEXE
+  SELF = 0x8,  //< applies to EBOOT, ELF and SELF
+  SPRX = 0x9   //< applies to SPRX, SDLL and SEXE
 };
 
 enum class SELFContentType : u8 { SELF = 1, PUP = 4 };
 
 enum SegFlags {
-  SF_ORDR = 0x1,   //< ordered?
-  SF_ENCR = 0x2,   //< encrypted
-  SF_SIGN = 0x4,   //< signed
-  SF_DFLG = 0x8,   //< deflated
-  SF_BFLG = 0x800, //< block segment
+  SF_ORDR = 0x1,    //< ordered?
+  SF_ENCR = 0x2,    //< encrypted
+  SF_SIGN = 0x4,    //< signed
+  SF_DFLG = 0x8,    //< deflated
+  SF_BFLG = 0x800,  //< block segment
 };
 
 static constexpr u32 SELF_MAGIC = 0x1D3D154F;
@@ -53,13 +56,13 @@ struct SELFHeader {
   u16 pad;
 
   u16 headerSize;
-  u16 metaSize; // < sce Special
-  u32 sizeSELF; // < unrounded img size
+  u16 metaSize;  // < sce Special
+  u32 sizeSELF;  // < unrounded img size
   u32 fileSize;
 
   u16 numSegments;
-  u16 flags; //< always 0x22
-  u32 pad2;  //<alignment
+  u16 flags;  //< always 0x22
+  u32 pad2;   //<alignment
 };
 
 struct SELFSegmentTable {
@@ -87,12 +90,13 @@ struct SCESpecial {
 
 // similar to MS PDB_CODEVIEW
 struct SCEComment {
-  u32 magic; // "PATH"
+  u32 magic;  // "PATH"
   u32 unk;
-  u32 pathLength; // length of the following path
+  u32 pathLength;  // length of the following path
 };
 
 static_assert(sizeof(SELFHeader) == 32, "header size mismatch");
 static_assert(sizeof(SELFSegmentTable) == 32, "segment table size mismatch");
 
 #define SCE_OK 0
+// NOLINTEND(readability-identifier-naming)

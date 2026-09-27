@@ -127,8 +127,8 @@ static void investigateRetTrace(proc &pr) {
       p = endp;
     }
     auto *c = base + off;
-    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                    0x1000, utl::pageProtection::rwx);
+    utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x1000, utl::PageProtection::kRwx);
     const bool isTest = c[0] == 0x85 && c[1] == 0xc0;
     if ((c[0] == 0x89 && c[1] == 0xc3) || isTest) {
       c[0] = 0xCC;
@@ -172,8 +172,8 @@ static void investigateFnWatch(smodule &m) {
       p = endp;
     }
     auto *c = base + off;
-    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                    0x1000, utl::pageProtection::rwx);
+    utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x1000, utl::PageProtection::kRwx);
     if (c[0] == 0x55) {
       c[0] = 0xCC;
       setFnWatch(reinterpret_cast<uintptr_t>(c), label);
@@ -326,8 +326,8 @@ static void applyGuestPatches(smodule &m) {
     }
     p = h;
     auto *c = base + off;
-    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                    0x2000, utl::pageProtection::rwx);
+    utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x2000, utl::PageProtection::kRwx);
     std::memcpy(c, bytes, (size_t)n);
     LOG_INFO("guestpatch: {} byte(s) at eboot+{:#x}", n, off);
   }
@@ -363,8 +363,8 @@ static void investigateFnArgs(smodule &m) {
       p = endp;
     }
     auto *c = base + off;
-    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                    0x1000, utl::pageProtection::rwx);
+    utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x1000, utl::PageProtection::kRwx);
     if (c[0] == 0x55) {
       c[0] = 0xCC;
       setFnArgs(reinterpret_cast<uintptr_t>(c), label, offs, noffs);
@@ -385,8 +385,8 @@ static void investigateFnArgs(smodule &m) {
 static void forceSotcPayload(smodule &m) {
   u8 *base = m.getInfo().base;
   auto rwx = [](u8 *p) {
-    utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(p) & ~0xFFFull),
-                    0x1000, utl::pageProtection::rwx);
+    utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(p) & ~0xFFFull),
+                    0x1000, utl::PageProtection::kRwx);
   };
   if (kSotcForcePayload) {
     u8 *je = base + 0x14c00a;  // `74 07` je +9 (return null) in accessor 0x14c000
@@ -709,8 +709,8 @@ void onProcessCreated(proc &p, smodule &mainModule, bool ps5) {
         if (noForce) break;
         u8 *c = base8 + g.off;
         if (c[0] == 0x74 && c[1] == g.b1) {  // je 0x55365d
-          utl::protectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                          0x1000, utl::pageProtection::rwx);
+          utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                          0x1000, utl::PageProtection::kRwx);
           c[0] = 0x90;  // NOP the bail so the chain runs the Shape-Renderer install
           c[1] = 0x90;
         }

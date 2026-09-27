@@ -145,9 +145,9 @@ base::String resolve(const char *path) {
 }
 
 namespace {
-// Adapts a VirtualFile to utl::fileBase so it can flow through fileDevice and
+// Adapts a VirtualFile to utl::FileBase so it can flow through fileDevice and
 // the rest of the file machinery like a real file. Read-only.
-struct PfsFileStream final : utl::fileBase {
+struct PfsFileStream final : utl::FileBase {
   base::UniquePointer<VirtualFile> vf;
   u64 pos = 0;
 
@@ -179,10 +179,10 @@ struct PfsFileStream final : utl::fileBase {
     return reported;
   }
   u64 Write(const void *, size_t) override { return 0; }
-  u64 Seek(i64 off, utl::seekMode whence) override {
-    i64 np = whence == utl::seekMode::seek_set
+  u64 Seek(i64 off, utl::SeekMode whence) override {
+    i64 np = whence == utl::SeekMode::kSeekSet
                      ? off
-                     : whence == utl::seekMode::seek_cur
+                     : whence == utl::SeekMode::kSeekCur
                            ? static_cast<i64>(pos) + off
                            : static_cast<i64>(vf->size()) + off;
     if (np < 0)
@@ -192,7 +192,7 @@ struct PfsFileStream final : utl::fileBase {
   }
   u64 Tell() override { return pos; }
   u64 GetSize() override { return static_cast<u64>(vf->size()); }
-  utl::native_handle GetNativeHandle() override { return nullptr; }
+  utl::NativeHandle GetNativeHandle() override { return nullptr; }
   bool IsOpen() override { return true; }
 };
 
@@ -338,11 +338,11 @@ utl::File openRead(const char *path) {
   // its real name and the decrypted ELF beside it as "<name>.esbak". Prefer the
   // decrypted one; we have no SELF crypto.
   base::String host = fixHostCase(joinHost(m.host, rest));
-  utl::File esbak(host + ".esbak", utl::fileMode::read);
+  utl::File esbak(host + ".esbak", utl::FileMode::kRead);
   if (esbak.Exists() && esbak.IsOpen())
     return esbak;
 
-  utl::File f(host, utl::fileMode::read);
+  utl::File f(host, utl::FileMode::kRead);
   if (!f.Exists() || !f.IsOpen())
     return utl::File();
   if (kOpenTrace)

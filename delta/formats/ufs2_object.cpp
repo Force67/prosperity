@@ -89,7 +89,7 @@ struct Ufs2Impl {
   bool readAt(u64 off, void *buf, size_t n) {
     if (off + n > imageSize)
       return false;
-    file.Seek(off, utl::seekMode::seek_set);
+    file.Seek(off, utl::SeekMode::kSeekSet);
     return file.Read(buf, n) == n;
   }
 

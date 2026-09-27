@@ -165,18 +165,18 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
     int filled = 0;
     for (uintptr_t a = lo; a < hi; a += kPage) {
       void *pg = reinterpret_cast<void *>(a);
-      if (!utl::allocMem(pg, kPage, utl::pageProtection::w,
-                         utl::allocationType::reserve))
+      if (!utl::AllocMem(pg, kPage, utl::PageProtection::kW,
+                         utl::AllocationType::kReserve))
         continue;  // page already mapped -> leave it (guard / live stack)
-      void *c = utl::allocMem(pg, kPage, utl::pageProtection::w,
-                              utl::allocationType::commit);
+      void *c = utl::AllocMem(pg, kPage, utl::PageProtection::kW,
+                              utl::AllocationType::kCommit);
       if (c) {
-        utl::protectMem(c, kPage, utl::pageProtection::rwx);
+        utl::ProtectMem(c, kPage, utl::PageProtection::kRwx);
         // Only register pages the VMA doesn't know; re-adding would fragment
         // the stack's existing entry.
         if (!proc->getVma().get(static_cast<u8 *>(c)))
           proc->getVma().add(static_cast<u8 *>(c), kPage,
-                             utl::pageProtection::w);
+                             utl::PageProtection::kW);
         filled++;
       }
     }

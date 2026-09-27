@@ -296,10 +296,10 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
     if (kGcAcb && args && args->ringSizeLog2Dw < 31) {
       const u32 ring_size_dw = 1u << args->ringSizeLog2Dw;
       const u64 ring_bytes = static_cast<u64>(ring_size_dw) * 4;
-      if (ring_size_dw >= 2 && utl::isMemoryRangeMapped(
+      if (ring_size_dw >= 2 && utl::IsMemoryRangeMapped(
                                    reinterpret_cast<const void*>(args->ringBase),
                                    ring_bytes) &&
-          utl::isMemoryRangeMapped(reinterpret_cast<const void*>(args->readPtr),
+          utl::IsMemoryRangeMapped(reinterpret_cast<const void*>(args->readPtr),
                                    sizeof(u32))) {
         base::LockGuard lock(computeMutex);
         ComputeQueue* slot = nullptr;
@@ -380,7 +380,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
             if (!q.mapped)
               continue;
             const auto *ring = reinterpret_cast<const u32 *>(q.ringBase);
-            const bool readable = utl::isMemoryRangeMapped(ring, 16);
+            const bool readable = utl::IsMemoryRangeMapped(ring, 16);
             BASE_LOGI("acbcensus",
                       "{}/{}/{} read={:#x} ring={:08x} {:08x} {:08x} "
                       "{:08x}{}",
@@ -425,7 +425,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
           prosperity_gc_submit_acb(commands.data(), available * 4);
         }
         entry.readOffsetDw = next;
-        if (utl::isMemoryRangeMapped(reinterpret_cast<const void*>(entry.readPtr),
+        if (utl::IsMemoryRangeMapped(reinterpret_cast<const void*>(entry.readPtr),
                                      sizeof(u32)))
           *reinterpret_cast<u32*>(entry.readPtr) = next;
         break;
@@ -507,7 +507,7 @@ void gcDevice::ringDoorbell(u32 ringId, u32 writeOffsetDw) {
 void gcDevice::drainQueues(u32 budget_dw) {
   for (ComputeQueue &q : computeQueues) {
     if (!q.mapped || !q.ringSizeDw ||
-        !utl::isMemoryRangeMapped(reinterpret_cast<const void *>(q.ringBase),
+        !utl::IsMemoryRangeMapped(reinterpret_cast<const void *>(q.ringBase),
                                   static_cast<u64>(q.ringSizeDw) * 4))
       continue;
     const auto *ring = reinterpret_cast<const u32 *>(q.ringBase);
@@ -522,7 +522,7 @@ void gcDevice::drainQueues(u32 budget_dw) {
         break;
       const u64 addr = (static_cast<u64>(w[2] & 0xFF) << 32) | w[1];
       const u32 dw = w[3] & 0xFFFFF;
-      if (!dw || !utl::isMemoryRangeMapped(reinterpret_cast<const void *>(addr),
+      if (!dw || !utl::IsMemoryRangeMapped(reinterpret_cast<const void *>(addr),
                                            static_cast<u64>(dw) * 4))
         break;
       prosperity_gc_submit_acb(w, sizeof(w));
@@ -531,7 +531,7 @@ void gcDevice::drainQueues(u32 budget_dw) {
     }
     if (consumed) {
       q.readOffsetDw = off;
-      if (utl::isMemoryRangeMapped(reinterpret_cast<const void *>(q.readPtr),
+      if (utl::IsMemoryRangeMapped(reinterpret_cast<const void *>(q.readPtr),
                                    sizeof(u32)))
         *reinterpret_cast<u32 *>(q.readPtr) = off;
       if (kGcTrace)

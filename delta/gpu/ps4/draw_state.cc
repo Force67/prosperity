@@ -189,7 +189,7 @@ void ResolveIndexBuffer(render::Renderer& renderer,
     // first yields the stale zeros the buffer was allocated with.
     FlushForWalkRead(renderer, args, need, "indirect");
     const bool mapped =
-        utl::isMemoryRangeMapped(reinterpret_cast<const void*>(args), need);
+        utl::IsMemoryRangeMapped(reinterpret_cast<const void*>(args), need);
     u32 a[5] = {};
     if (mapped)
       std::memcpy(a, reinterpret_cast<const void*>(args), need);
@@ -201,7 +201,7 @@ void ResolveIndexBuffer(render::Renderer& renderer,
         const u32 index_bytes = packet.index_type == 1 ? 4 : 2;
         const u64 base =
             packet.index_base + static_cast<u64>(a[2]) * index_bytes;
-        if (utl::isMemoryRangeMapped(
+        if (utl::IsMemoryRangeMapped(
                 reinterpret_cast<const void*>(base),
                 static_cast<u64>(a[0]) * index_bytes)) {
           d.index_data = reinterpret_cast<const void*>(base);

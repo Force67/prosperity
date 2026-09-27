@@ -18,8 +18,8 @@
 namespace krnl {
 struct procInfo;
 
-using mprot = utl::pageProtection;
-using alloct = utl::allocationType;
+using mprot = utl::PageProtection;
+using alloct = utl::AllocationType;
 
 struct pageInfo {
   u8 *ptr;
@@ -89,7 +89,7 @@ public:
   void forEachGpuAperturePage(void (*fn)(void *, u8 *, size_t),
                               void *ctx) const;
 
-  u8 *mapMemory(u8 *preference, size_t size, utl::pageProtection);
+  u8 *mapMemory(u8 *preference, size_t size, utl::PageProtection);
   void unmapRtMemory(u8 *);
 
 private:

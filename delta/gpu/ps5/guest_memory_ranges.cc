@@ -42,7 +42,7 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
         addresses.begin(), addresses.end(),
         [&](u64 address) { return address >= begin && address < end; });
     const auto add_range = [&](u64 lo, u64 hi) {
-      const u64 backing = inode ? identity : utl::memoryMappingIdentity(
+      const u64 backing = inode ? identity : utl::MemoryMappingIdentity(
           reinterpret_cast<const void*>(lo), hi - lo);
       // Separate file-backed and tracked anonymous identity domains, and
       // invalidate imports if the mapping's write permission changes.
