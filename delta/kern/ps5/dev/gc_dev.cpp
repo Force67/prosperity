@@ -7,7 +7,6 @@
  * PS5 command processor (gpu/ps5).
  */
 
-#include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -18,13 +17,13 @@
 
 #include <sys/mman.h>
 
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 
 #include "gc_dev.h"
 #include "kern/ps4/dev/dma_dev.h"  // dmemBackingFd/Size (shared physical dmem store)
 #include "kern/proc.h"
 #include "kern/lv2/sys_mem.h"  // allocLowGuest, mFlags
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/threading/thread.h>
 #include <base/atomic.h>
 #include <base/containers/map.h>
@@ -105,14 +104,14 @@ static inline bool gpuAddr(u64 a) {
 // a submit arg. Plenty of those words look like GPU addresses without being
 // mapped, so the range check alone is not enough to read through one.
 static inline bool gpuReadable(u64 a, size_t n) {
-  return gpuAddr(a) && utl::IsMemoryRangeMapped(reinterpret_cast<void *>(a), n);
+  return gpuAddr(a) && host_memory::IsMemoryRangeMapped(reinterpret_cast<void *>(a), n);
 }
 
 // Command buffers need not live in the GPU aperture (the video decoder builds
 // one in any allocation it owns); mapped-and-in-guest-map is the honest test.
 static inline bool guestReadable(u64 a, size_t n) {
   return a >= 0x10000ull && a < 0x1000000000000ull &&
-         utl::IsMemoryRangeMapped(reinterpret_cast<void *>(a), n);
+         host_memory::IsMemoryRangeMapped(reinterpret_cast<void *>(a), n);
 }
 
 // Span of ACQ ring windows named in 0xC0408121 submits, learned at run time, so

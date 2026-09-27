@@ -8,7 +8,7 @@
  * at any point, so a caller only learns the difference by timing.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 
 namespace krnl {

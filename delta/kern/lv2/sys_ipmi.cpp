@@ -4,7 +4,7 @@
  * syscall 622: the kernel side of IPMI. The manager and the services it routes
  * to live in kern/ipmi; this is only the syscall boundary.
  */
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 
 #include "kern/ipmi/ipmi.h"

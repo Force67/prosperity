@@ -17,7 +17,7 @@
 #include <base/strings/xstring.h>
 #include <base/memory/unique_pointer.h>
 
-namespace utl {
+namespace io {
 class File;
 }
 

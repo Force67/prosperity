@@ -1,4 +1,3 @@
-#include <base.h>
 #include "base/arch.h"
 
 #include "deci_stdin_dev.h"

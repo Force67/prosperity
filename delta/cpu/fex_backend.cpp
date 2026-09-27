@@ -7,7 +7,7 @@
  */
 #if defined(DELTA_BACKEND_FEX)
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -41,7 +41,7 @@
 #include "kern/lv2/dispatch.h"
 #include "kern/module.h"
 #include "kern/proc.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/atomic.h>
 #include <base/containers/pair.h>
 #include <base/containers/set.h>

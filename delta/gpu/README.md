@@ -186,7 +186,7 @@ tool for anything that fits in one frame.
 Its output goes through `BASE_LOGI` on a channel named after the tag the probe
 has always printed (`[drawpkt]`, `[csres]`), so lines grep as before,
 `base::SetChannelMinLevel` can silence one probe, and delivery is the async
-sink `utl::routeBaseLogging` installs at startup. Tracing on the submit thread
+sink `logger::RouteBaseLogging` installs at startup. Tracing on the submit thread
 with `fprintf` distorted the frame timings the traces exist to explain.
 
 ## ps5/

@@ -10,6 +10,7 @@
  * empty set), which is enough to get titles past startup.
  */
 
+#include "guest_abi.h"
 #include "../../vprx.h"
 #include "base/arch.h"
 

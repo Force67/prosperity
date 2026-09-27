@@ -10,7 +10,7 @@
 // The Orbis syscall table: id -> handler. Prospero reuses all of it below
 // 0x2a5 and adds its own rows on top (see lv2/ps5/table.cpp).
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 
 #include "kern/lv2/dispatch.h"

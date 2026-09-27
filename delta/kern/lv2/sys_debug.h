@@ -8,6 +8,5 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
 
 namespace krnl {}

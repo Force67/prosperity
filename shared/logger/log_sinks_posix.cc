@@ -15,14 +15,14 @@
 #include "base/strings/string_ref.h"
 #include "logger/logger.h"
 
-namespace utl {
+namespace logger {
 
-class FileOut final : public LogBase {
+class FileSink final : public LogSink {
   FILE* handle_{nullptr};
   size_t bytes_written_{0};
 
  public:
-  explicit FileOut(const base::String& filename) {
+  explicit FileSink(const base::String& filename) {
     handle_ = std::fopen(filename.c_str(), "w");
   }
 
@@ -52,7 +52,7 @@ class FileOut final : public LogBase {
   }
 };
 
-class ConOutPosix final : public LogBase {
+class ConsoleSink final : public LogSink {
  public:
   const char* GetName() override { return "conOut"; }
 
@@ -88,18 +88,18 @@ class ConOutPosix final : public LogBase {
 
 void CreateLogger(bool create_console) {
   if (create_console) {
-    AddLogSink(base::MakeUnique<ConOutPosix>());
+    AddLogSink(base::MakeUnique<ConsoleSink>());
   }
 
   base::String log_path(FXNAME);
   log_path.append(".log");
-  AddLogSink(base::MakeUnique<FileOut>(log_path));
+  AddLogSink(base::MakeUnique<FileSink>(log_path));
 
   std::atexit([]() {
-    auto* sink = static_cast<FileOut*>(GetLogSink(base::StringRef("fileOut")));
+    auto* sink = static_cast<FileSink*>(GetLogSink(base::StringRef("fileOut")));
     if (sink)
       sink->Close();
   });
 }
 
-}  // namespace utl
+}  // namespace logger

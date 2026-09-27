@@ -10,7 +10,7 @@
 
 #include "base/arch.h"
 
-#include <utl/file.h>
+#include <io/file.h>
 
 #include "device.h"
 #include <base/strings/xstring.h>
@@ -60,7 +60,7 @@ public:
   bool openWritable(const base::String &hostPath, bool create, bool truncate);
 
   // Back this device with an already-opened file (e.g. a virtual VFS stream).
-  bool adopt(utl::File &&file);
+  bool adopt(io::File &&file);
 
   bool isRegularFile() const override { return true; }
 
@@ -82,7 +82,7 @@ public:
   int fstat(void *stat) override;
 
 private:
-  utl::File file_;
+  io::File file_;
   bool open_ = false;
   bool writable_ = false;  // opened for writing (savedata)
   bool seq_ = false;       // manifest sequential-read mode

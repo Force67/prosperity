@@ -7,9 +7,9 @@
  * in the root of the source tree.
  */
 
-#include "utl/file.h"
+#include "io/file.h"
 #include <cstdio>
-#include "base.h"
+#include <cstring>
 #include "base/algorithm.h"
 #include "base/arch.h"
 #include "base/math/value_bounds.h"
@@ -17,7 +17,7 @@
 #include "base/memory/unique_pointer.h"
 #include "base/strings/xstring.h"
 
-namespace utl {
+namespace io {
 namespace {
 // file on disk impl
 class PhysFile final : public FileBase {
@@ -42,7 +42,7 @@ class PhysFile final : public FileBase {
     else if (mode == FileMode::kAppend)
       mode_str = "ab+";
 
-    fopen_s(&fptr_, name.c_str(), mode_str);
+    fptr_ = std::fopen(name.c_str(), mode_str);
 
     // Cache the initial size for any mode that opens an existing file (read or
     // read-write); the write/create/trunc modes start empty.
@@ -202,4 +202,4 @@ File::File(base::UniquePointer<FileBase>&& base) : file_(base::move(base)) {}
 File::~File() {
   Close();
 }
-}  // namespace utl
+}  // namespace io

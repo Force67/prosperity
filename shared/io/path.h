@@ -10,7 +10,7 @@
 
 #include "base/strings/xstring.h"
 
-namespace utl {
+namespace io {
 base::StringW MakeAbsPath(const base::StringW& relative);
 base::String MakeAbsPath(const base::String& relative);
-}  // namespace utl
+}  // namespace io

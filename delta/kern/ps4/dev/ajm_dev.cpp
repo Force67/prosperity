@@ -6,7 +6,6 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -14,7 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "ajm_dev.h"
-#include <utl/options.h>
+#include <options/options.h>
 
 namespace {
 DELTA_OPTION(const char *, kAjmResult, "DELTA_AJM_RESULT", nullptr);

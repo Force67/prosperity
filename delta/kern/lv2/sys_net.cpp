@@ -1,6 +1,6 @@
 // Copyright (C) Force67 2019
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <cstdio>
@@ -22,8 +22,8 @@ constexpr i32 kSceSockDgramP2p = 6;
 }  // namespace
 #include "kern/crash.h"
 #include <cstring>
-#include <utl/mem.h>
-#include <utl/options.h>
+#include <host_memory/host_memory.h>
+#include <options/options.h>
 
 namespace {
 DELTA_OPTION(bool, kNetTrace, "DELTA_NET_TRACE", false);
@@ -127,7 +127,7 @@ int PS4ABI sys_netgetsockinfo(i32 fd, void *info, i32 n, i32 flags) {
     return -SysError::eINVAL;
 
   const size_t span = sizeof(sceNetSockInfo) * static_cast<size_t>(n);
-  if (!utl::IsMemoryRangeMapped(info, span))
+  if (!host_memory::IsMemoryRangeMapped(info, span))
     return -SysError::eFAULT;
   std::memset(info, 0, span);
 

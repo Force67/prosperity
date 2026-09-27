@@ -7,6 +7,7 @@
  * registration just flips a flag and queries report an empty, all-locked set.
  */
 
+#include "guest_abi.h"
 #include "libSceNpTrophy.h"
 #include "base/arch.h"
 
@@ -16,7 +17,7 @@
 
 #include <base/logging.h>
 
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/containers/array.h>
 #include <base/threading/lock_guard.h>
 #include <base/threading/mutex.h>

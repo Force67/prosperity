@@ -15,7 +15,7 @@ namespace formats {
 /*
 
 
-utl::File file(converter.from_bytes(argv[1]));
+io::File file(converter.from_bytes(argv[1]));
 if (file.IsOpen()) {
         PUPHeader pup{};
         file.Read(pup);
@@ -31,17 +31,17 @@ if (file.IsOpen()) {
         file.Read(entries);
 
         for (auto& e : entries) {
-                file.Seek(e.offset, utl::SeekMode::kSeekSet);
+                file.Seek(e.offset, io::SeekMode::kSeekSet);
 
                 base::Vector<u8> data(e.fileSize);
                 file.Read(data);
 
-                utl::File out(converter.from_bytes(e.fileName),
-utl::FileMode::Write); if (out.IsOpen()) { out.Write(data);
+                io::File out(converter.from_bytes(e.fileName),
+io::FileMode::Write); if (out.IsOpen()) { out.Write(data);
                 }
         }
 }
 */
 
-bool slb2Object::load(utl::File &) { return true; }
+bool slb2Object::load(io::File &) { return true; }
 } // namespace formats

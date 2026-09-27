@@ -14,7 +14,8 @@
  * Everything else in libSceIme stays LLE.
  */
 
-#include "../vprx.h"  // PS4ABI (via <base.h>), MODULE_INIT_PS5
+#include "guest_abi.h"
+#include "../vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 #include "base/arch.h"
 
 

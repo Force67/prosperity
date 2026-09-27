@@ -6,6 +6,7 @@
  * HLE libSceGnmDriver: GPU submission entry points. See libSceGnmDriver.cpp.
  */
 
+#include "guest_abi.h"
 #include "../../vprx.h"
 #include "base/arch.h"
 

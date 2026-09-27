@@ -17,10 +17,11 @@
  * to ding-dong, no EOP to wait on, and no Garlic write-combine buffer to flush.
  */
 
+#include "guest_abi.h"
 #include "libSceGnmDriver.h"
 #include "base/arch.h"
-#include <utl/mem.h>
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
+#include <host_memory/host_memory.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -28,7 +29,7 @@
 #include <base/logging.h>
 
 #include "gpu/ps4/cmd_processor.h"
-#include <utl/options.h>
+#include <options/options.h>
 
 namespace {
 DELTA_OPTION(bool, kDingDong, "DELTA_GPU_DINGDONG", false);
@@ -62,7 +63,7 @@ extern "C" void prosperity_gc_submit(const void *descArray, u32 descCount) {
   // dropped loudly, not dereferenced. SotC's debug menu produced a submit
   // whose descPtr pointed at unmapped host space and SIGSEGV'd the CP.
   if (descCount > 4096 ||
-      !utl::IsMemoryRangeMapped(descArray, descCount * 16ull)) {
+      !host_memory::IsMemoryRangeMapped(descArray, descCount * 16ull)) {
     static int warned = 0;
     if (warned++ < 8)
       BASE_LOGI("gc", "DROPPED bad submit descArray={:p} count={}", descArray,
@@ -74,7 +75,7 @@ extern "C" void prosperity_gc_submit(const void *descArray, u32 descCount) {
   // dropped loudly, not dereferenced. SotC's debug menu produced a submit
   // whose descPtr pointed at unmapped host space and SIGSEGV'd the CP.
   if (descCount > 4096 ||
-      !utl::IsMemoryRangeMapped(descArray, descCount * 16ull)) {
+      !host_memory::IsMemoryRangeMapped(descArray, descCount * 16ull)) {
     static int warned = 0;
     if (warned++ < 8)
       BASE_LOGI("gc", "DROPPED bad submit descArray={:p} count={}", descArray,
@@ -101,7 +102,7 @@ extern "C" void prosperity_gc_submit(const void *descArray, u32 descCount) {
                 i, e[0], e[1], e[2], e[3], (unsigned long)addr, bytes);
     if (!addr || !bytes)
       continue;
-    if (!utl::IsMemoryRangeMapped(reinterpret_cast<const void *>(addr),
+    if (!host_memory::IsMemoryRangeMapped(reinterpret_cast<const void *>(addr),
                                   bytes)) {
       static int warned = 0;
       if (warned++ < 8)

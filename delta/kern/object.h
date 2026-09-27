@@ -9,7 +9,7 @@
  */
 
 #include "base/arch.h"
-#include <utl/object_ref.h>
+#include <kern/object_ref.h>
 
 #include <base/containers/vector.h>
 #include <base/strings/string_ref.h>
@@ -66,9 +66,9 @@ private:
   base::Atomic<i32> refCount;
 };
 
-template <typename T> utl::ObjectRef<T> retain_object(T *ptr) {
+template <typename T> krnl::ObjectRef<T> retain_object(T *ptr) {
   if (ptr)
     ptr->retain();
-  return utl::ObjectRef<T>(ptr);
+  return krnl::ObjectRef<T>(ptr);
 }
 }

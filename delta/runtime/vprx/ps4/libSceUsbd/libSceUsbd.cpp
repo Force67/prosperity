@@ -1,3 +1,4 @@
+#include "guest_abi.h"
 #include "libSceUsbd.h"
 #include "base/arch.h"
 

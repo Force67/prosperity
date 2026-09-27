@@ -10,6 +10,7 @@
  * exception to the keep-PRX-LLE rule.
  */
 
+#include "guest_abi.h"
 #include "../../vprx.h"
 #include "base/arch.h"
 

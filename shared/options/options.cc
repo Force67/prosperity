@@ -6,17 +6,17 @@
  * in the root of the source tree.
  */
 
-#include "utl/options.h"
+#include "options/options.h"
 
 #include <cstring>
 
 #include "base/option_file.h"
 #include "base/strings/xstring.h"
 
+#include "io/path.h"
 #include "logger/logger.h"
-#include "utl/path.h"
 
-namespace utl {
+namespace options {
 namespace {
 
 DELTA_OPTION(const char*,
@@ -46,7 +46,7 @@ void Report(const char* path, const base::OptionFileResult& result) {
     LOG_WARNING("options: {} has {} unusable entries", path, result.invalid);
 }
 
-void LoadOptionFileList(const char* list) {
+void LoadFileList(const char* list) {
   base::String path;
   for (const char* p = list;; ++p) {
     if (*p && *p != ',') {
@@ -54,7 +54,7 @@ void LoadOptionFileList(const char* list) {
       continue;
     }
     if (!path.empty())
-      LoadOptionFile(path.c_str());
+      LoadFile(path.c_str());
     path.clear();
     if (!*p)
       return;
@@ -80,7 +80,7 @@ bool MatchFlag(const char* arg, const char* flag, const char** value) {
 
 }  // namespace
 
-bool LoadOptionFile(const char* path, bool optional) {
+bool LoadFile(const char* path, bool optional) {
   const auto result = base::ApplyOptionFile(base::Path(path));
   if (!result.read) {
     if (!optional)
@@ -107,7 +107,7 @@ void LoadGameProfile(const char* title_id) {
     base::String rel("game_profiles/");
     rel += title_id;
     rel += ".txt";
-    path = MakeAbsPath(rel);
+    path = io::MakeAbsPath(rel);
   }
 
   const auto result = base::ApplyOptionFile(base::Path(path.c_str()),
@@ -119,15 +119,15 @@ void LoadGameProfile(const char* title_id) {
   Report(path.c_str(), result);
 }
 
-void InitOptions() {
+void Init() {
   base::InitOptionsFromEnv();
 
   if (const char* list = kOptionFiles)
-    LoadOptionFileList(list);
+    LoadFileList(list);
 }
 
-void InitOptions(int& argc, char** argv) {
-  InitOptions();
+void Init(int& argc, char** argv) {
+  Init();
 
   int kept = 1;
   for (int i = 1; i < argc; ++i) {
@@ -136,7 +136,7 @@ void InitOptions(int& argc, char** argv) {
 
     if (MatchFlag(arg, "--options", &value)) {
       if (*value)
-        LoadOptionFileList(value);
+        LoadFileList(value);
       else
         LOG_WARNING("options: --options needs a path (--options=delta.txt)");
       continue;
@@ -167,4 +167,4 @@ void InitOptions(int& argc, char** argv) {
   }
 }
 
-}  // namespace utl
+}  // namespace options

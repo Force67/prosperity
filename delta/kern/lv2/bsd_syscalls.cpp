@@ -9,7 +9,7 @@
 
 #include "kern/proc.h"
 #include "kern/crash.h"
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 #include <cstdint>
 
 namespace krnl {
@@ -17,14 +17,14 @@ void symbolize(uintptr_t addr, char *out, size_t n);
 }
 #include "base/arch.h"
 #include "error_table.h"
-#include <base.h>
+#include <guest_abi.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <logger/logger.h>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/atomic.h>
 #include <base/strings/xstring.h>
 #include <base/threading/lock_guard.h>
@@ -36,17 +36,17 @@ DELTA_OPTION(bool, kQuietGuest, "DELTA_QUIET_GUEST", false);
 
 namespace krnl {
 int PS4ABI sys_exit() {
-  __debugbreak();
+  __builtin_trap();
   return 0;
 }
 
 int PS4ABI sys_rfork() {
-  __debugbreak();
+  __builtin_trap();
   return 0;
 }
 
 int PS4ABI sys_execve() {
-  __debugbreak();
+  __builtin_trap();
   return 0;
 }
 
@@ -195,7 +195,7 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
     // on error anyway; answering the same keeps the reply honest.
     std::memset(bin->data, 0, bin->size);
     // The wrapper returns this int32 to its caller when the syscall succeeds.
-    if (result && utl::IsMemoryRangeMapped(result, sizeof(u32)))
+    if (result && host_memory::IsMemoryRangeMapped(result, sizeof(u32)))
       *static_cast<u32 *>(result) = 0;
     return 0;
   }
@@ -208,9 +208,9 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
   // that library rather than guessed from the op number.
   {
     char sym[256];
-    symbolize(reinterpret_cast<uintptr_t>(_ReturnAddress()), sym, sizeof(sym));
+    symbolize(reinterpret_cast<uintptr_t>(__builtin_return_address(0)), sym, sizeof(sym));
     BASE_LOGI("regmgr", "  called from {}", sym);
-    if (value && utl::IsMemoryRangeMapped(value, type < 64 ? type : 64)) {
+    if (value && host_memory::IsMemoryRangeMapped(value, type < 64 ? type : 64)) {
       base::String words;
       const auto *w = static_cast<const u32 *>(value);
       for (u64 i = 0; i * 4 < type && i < 16; i++)
@@ -220,7 +220,7 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
   }
   // Same reasoning as the op-25 unknown-key path: a caller that reads the
   // result despite the error should see zero rather than stack garbage.
-  if (result && utl::IsMemoryRangeMapped(result, sizeof(u32)))
+  if (result && host_memory::IsMemoryRangeMapped(result, sizeof(u32)))
     *static_cast<u32 *>(result) = 0;
   return 0x800D0203;
 }

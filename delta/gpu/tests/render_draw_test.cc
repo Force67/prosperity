@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <cstring>
 #include <gtest/gtest.h>
-#include <utl/options.h>
+#include <options/options.h>
 
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gcn/spirv/spv_emit.h"
@@ -29,7 +29,7 @@ extern "C" void prosperity_gpu_end_of_pipe() {}
 extern "C" bool prosperity_ps5_is_display_buffer(u64) { return false; }
 
 TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -85,7 +85,7 @@ TEST(RdnaResources, RepeatedDescriptorLoadsReuseTextureBindings) {
 // for the renderer lifetime, matching the production shader cache.
 
 TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
@@ -167,7 +167,7 @@ TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
 }
 
 TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
@@ -220,7 +220,7 @@ TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
 }
 
 TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
@@ -271,7 +271,7 @@ TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
 }
 
 TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
@@ -359,7 +359,7 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
 }
 
 TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
@@ -422,7 +422,7 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
 }
 
 TEST(VkDraw, SplitNggUserWindowsAndHighPixelRegistersRemainDistinct) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
@@ -499,7 +499,7 @@ TEST(VkDraw, GeometryResourceReplayUsesSystemUserDataAddress) {
 }
 
 TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -542,7 +542,7 @@ TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
 }
 
 TEST(VkDraw, PixelShaderUsesDppOperand) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -576,7 +576,7 @@ TEST(VkDraw, PixelShaderUsesDppOperand) {
 }
 
 TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -642,7 +642,7 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
 }
 
 TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
@@ -716,7 +716,7 @@ TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
 }
 
 TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -774,7 +774,7 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
 }
 
 TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -827,7 +827,7 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
 }
 
 TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -893,7 +893,7 @@ TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
 }
 
 TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -954,7 +954,7 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
 }
 
 TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -1015,7 +1015,7 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
 }
 
 TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().fragment_barycentric)
     GTEST_SKIP() << "Fragment barycentrics are required";
@@ -1080,7 +1080,7 @@ TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
 }
 
 TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -1132,7 +1132,7 @@ TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
 }
 
 TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -1191,7 +1191,7 @@ TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
 }
 
 TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -1245,7 +1245,7 @@ TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
 }
 
 TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -1334,7 +1334,7 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
 }
 
 TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
-  utl::InitOptions();
+  options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";

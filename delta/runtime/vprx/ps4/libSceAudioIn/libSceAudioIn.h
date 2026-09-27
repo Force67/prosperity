@@ -6,6 +6,7 @@
  * silence and status calls report an open, idle device.
  */
 
+#include "guest_abi.h"
 #include "../../vprx.h"
 #include "base/arch.h"
 

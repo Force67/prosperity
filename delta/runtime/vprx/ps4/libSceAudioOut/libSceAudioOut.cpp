@@ -74,6 +74,7 @@
  * 44% denormal garbage.
  */
 
+#include "guest_abi.h"
 #include "libSceAudioOut.h"
 #include "base/arch.h"
 
@@ -87,7 +88,7 @@
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
 
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/containers/vector.h>
 #include <base/threading/lock_guard.h>
 #include <base/threading/mutex.h>

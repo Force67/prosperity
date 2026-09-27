@@ -27,8 +27,8 @@
 #include <base/strings/xstring.h>
 
 #include <logger/logger.h>
-#include <utl/file.h>
-#include <utl/options.h>
+#include <io/file.h>
+#include <options/options.h>
 #include <base/containers/map.h>
 #include <base/containers/vector.h>
 #include <base/math/value_bounds.h>
@@ -171,15 +171,15 @@ struct DataSource {
 // Bottom of the chain: a window into the host pkg file at a fixed base offset.
 class RawSource : public DataSource {
 public:
-  RawSource(utl::File &f, u64 base) : f_(f), base_(base) {}
+  RawSource(io::File &f, u64 base) : f_(f), base_(base) {}
   void read(u64 off, u64 len, u8 *dst) override {
     std::memset(dst, 0, len); // zero-fill short reads past EOF
-    f_.Seek(base_ + off, utl::SeekMode::kSeekSet);
+    f_.Seek(base_ + off, io::SeekMode::kSeekSet);
     f_.Read(dst, len);
   }
 
 private:
-  utl::File &f_;
+  io::File &f_;
   u64 base_;
 };
 
@@ -319,7 +319,7 @@ private:
 
 // ----------------------------------------------------------------------------
 struct PkgImpl {
-  utl::File pkg;
+  io::File pkg;
   base::Mutex io;
   base::Vector<base::UniquePointer<DataSource>> nodes;
   DataSource *inner = nullptr;
@@ -331,7 +331,7 @@ struct PkgImpl {
   base::HashMap<base::String, base::String> filesCI;
   bool valid = false;
 
-  explicit PkgImpl(const base::String &path) : pkg(path, utl::FileMode::kRead) {
+  explicit PkgImpl(const base::String &path) : pkg(path, io::FileMode::kRead) {
     if (!pkg.Exists() || !pkg.IsOpen()) {
       LOG_ERROR("pkg: cannot open {}", path.c_str());
       return;
@@ -348,7 +348,7 @@ struct PkgImpl {
 
   bool getEkpfs(u8 out[32]) {
     auto R = [&](u64 o, u64 n, u8 *dst) {
-      pkg.Seek(o, utl::SeekMode::kSeekSet);
+      pkg.Seek(o, io::SeekMode::kSeekSet);
       pkg.Read(dst, n);
     };
     u8 tmp[4];
@@ -529,7 +529,7 @@ struct PkgImpl {
     // Standard fpkg PFS image offset. Read the header field when it looks sane,
     // else fall back to the well-known constant pkg_extract.py hardcodes.
     u8 off[8];
-    pkg.Seek(0x410, utl::SeekMode::kSeekSet);
+    pkg.Seek(0x410, io::SeekMode::kSeekSet);
     pkg.Read(off, 8);
     u64 pfsOff = (static_cast<u64>(be32(off)) << 32) | be32(off + 4);
     if (pfsOff < 0x1000 || pfsOff >= pkg.GetSize())
@@ -668,7 +668,7 @@ struct PkgImpl {
       return false;
     base::LockGuard<base::Mutex> lk(io);
     auto R = [&](u64 o, u64 n, u8 *dst) {
-      pkg.Seek(o, utl::SeekMode::kSeekSet);
+      pkg.Seek(o, io::SeekMode::kSeekSet);
       pkg.Read(dst, n);
     };
     u8 tmp[4];

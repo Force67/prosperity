@@ -9,7 +9,7 @@
 
 #include "kern/proc.h"
 #include "kern/lv2/sys_mem.h"
-#include <utl/options.h>
+#include <options/options.h>
 
 namespace {
 DELTA_OPTION(bool, kProcparamTrace, "DELTA_PROCPARAM_TRACE", false);

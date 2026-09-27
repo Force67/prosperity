@@ -8,7 +8,7 @@
  * in the root of the source tree.
  */
 
-#include <utl/file.h>
+#include <io/file.h>
 #include "base/arch.h"
 
 namespace formats {
@@ -30,7 +30,7 @@ struct slb2_entry {
 
 class slb2Object {
 public:
-  bool load(utl::File &);
+  bool load(io::File &);
 
 private:
   slb2_header header{};

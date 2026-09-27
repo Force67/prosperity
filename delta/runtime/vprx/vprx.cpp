@@ -16,7 +16,7 @@
 #include <cstring>
 
 #include "kern/proc.h"
-#include <utl/options.h>
+#include <options/options.h>
 
 namespace {
 DELTA_OPTION(const char *, kHleLibs, "DELTA_HLE", nullptr);
@@ -126,7 +126,7 @@ void vprx_init() {
   for (auto *a : vprx_anchors)
     sum += *a;
   (void)sum;
-  utl::InitFunction::Init();
+  runtime::InitFunction::Init();
 }
 
 void vprx_reg(const modInfo *info) { vprxTable.push_back(info); }

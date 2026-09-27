@@ -7,7 +7,7 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -27,7 +27,7 @@
 #include <cstdio>
 
 #include <ctime>
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/algorithm.h>
 #include <base/containers/set.h>
 #include <base/threading/lock_guard.h>
@@ -539,8 +539,8 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
 
   /*for sceKernelGetLibkernelTextLocation*/
 
-  BASE_LOGI("sysctl", "sysctl referenced by {:p}", _ReturnAddress());
-  called_in(_ReturnAddress());
+  BASE_LOGI("sysctl", "sysctl referenced by {:p}", __builtin_return_address(0));
+  called_in(__builtin_return_address(0));
   // SCOUT: log the unhandled mib and soft-fail (ENOENT) instead of trapping so
   // the guest can decide how to cope, and we can see what it queries next.
   base::String mib;

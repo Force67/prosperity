@@ -14,7 +14,7 @@
 #include <cstring>
 
 #include "file_dev.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/strings/xstring.h>
 
 namespace {
@@ -37,7 +37,7 @@ fileDevice::fileDevice(objectTable &objects) : device(objects) {}
 
 bool fileDevice::open(const base::String &hostPath, u32 /*flags*/) {
   // Read-only: the disc image is immutable.
-  utl::File tmp(hostPath, utl::FileMode::kRead);
+  io::File tmp(hostPath, io::FileMode::kRead);
   // Exists() only means a PhysFile object was constructed; IsOpen() means the
   // underlying fopen actually succeeded. Without the IsOpen() check a missing
   // file would register an fd whose later read fread()s a null FILE* and faults.
@@ -52,19 +52,19 @@ bool fileDevice::openWritable(const base::String &hostPath, bool create,
                               bool truncate) {
   // Probe existence (open-read then close) to pick the fopen mode: an existing
   // file opens rb+ (keep contents), else wb+ when creating.
-  utl::File probe(hostPath, utl::FileMode::kRead);
+  io::File probe(hostPath, io::FileMode::kRead);
   const bool exists = probe.Exists() && probe.IsOpen();
   probe.Close();
 
-  utl::FileMode mode;
+  io::FileMode mode;
   if (truncate || (!exists && create))
-    mode = utl::FileMode::kCreate;  // wb+ : create/truncate, read+write
+    mode = io::FileMode::kCreate;  // wb+ : create/truncate, read+write
   else if (exists)
-    mode = utl::FileMode::kReadWrite;  // rb+ : keep contents, read+write
+    mode = io::FileMode::kReadWrite;  // rb+ : keep contents, read+write
   else
     return false;  // open-existing for write, but absent and no create
 
-  utl::File f(hostPath, mode);
+  io::File f(hostPath, mode);
   if (!f.Exists() || !f.IsOpen())
     return false;
   file_.Reset(f.GetBase());
@@ -87,7 +87,7 @@ i64 fileDevice::write(const void *buf, size_t n) {
   return static_cast<i64>(n);
 }
 
-bool fileDevice::adopt(utl::File &&file) {
+bool fileDevice::adopt(io::File &&file) {
   if (!file.Exists())
     return false;
   file_.Reset(file.GetBase());
@@ -99,7 +99,7 @@ i64 fileDevice::read(void *buf, size_t n) {
   if (!open_)
     return -SysError::eBADF;
   if (seq_)
-    file_.Seek(static_cast<i64>(seqPos_), utl::SeekMode::kSeekSet);
+    file_.Seek(static_cast<i64>(seqPos_), io::SeekMode::kSeekSet);
   i64 r = static_cast<i64>(file_.Read(buf, n));
   if (seq_ && r > 0)
     seqPos_ += static_cast<u64>(r);
@@ -139,17 +139,17 @@ i64 fileDevice::lseek(i64 off, int whence) {
       return -SysError::eNXIO;
     }
     i64 r = (whence == 3) ? off : sz;  // SEEK_DATA: off; SEEK_HOLE: EOF
-    file_.Seek(r, utl::SeekMode::kSeekSet);
+    file_.Seek(r, io::SeekMode::kSeekSet);
     if (kOpenTrace)
       BASE_LOGI("lseek", "whence={} off={} sz={} -> {}", whence,
                 (long long)off, (long long)sz, (long long)r);
     return r;
   }
-  utl::SeekMode mode = utl::SeekMode::kSeekSet;
+  io::SeekMode mode = io::SeekMode::kSeekSet;
   if (whence == 1)
-    mode = utl::SeekMode::kSeekCur;
+    mode = io::SeekMode::kSeekCur;
   else if (whence == 2)
-    mode = utl::SeekMode::kSeekEnd;
+    mode = io::SeekMode::kSeekEnd;
   file_.Seek(off, mode);
   i64 pos = static_cast<i64>(file_.Tell());
   if (kRdall) {
@@ -181,16 +181,16 @@ i64 fileDevice::readAt(void *buf, size_t n, i64 off) {
   if (!open_)
     return -SysError::eBADF;
   if (seq_) {  // ignore the bogus offset; serve in order from the cursor
-    file_.Seek(static_cast<i64>(seqPos_), utl::SeekMode::kSeekSet);
+    file_.Seek(static_cast<i64>(seqPos_), io::SeekMode::kSeekSet);
     i64 r = static_cast<i64>(file_.Read(buf, n));
     if (r > 0)
       seqPos_ += static_cast<u64>(r);
     return r;
   }
   u64 saved = file_.Tell();
-  file_.Seek(off, utl::SeekMode::kSeekSet);
+  file_.Seek(off, io::SeekMode::kSeekSet);
   i64 r = static_cast<i64>(file_.Read(buf, n));
-  file_.Seek(static_cast<i64>(saved), utl::SeekMode::kSeekSet);
+  file_.Seek(static_cast<i64>(saved), io::SeekMode::kSeekSet);
   if (r >= 16 && kFileReadTrace) {
     auto *b = static_cast<const u8 *>(buf);
     if (b[0] == 'T' && b[1] == 'A' && b[2] == 'F' && b[3] == 'S') {

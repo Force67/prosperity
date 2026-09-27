@@ -10,7 +10,7 @@
 #include <ucontext.h>
 
 #include <logger/logger.h>
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 
 #include "kern/lv2/sys_dynlib.h"
 #include "kern/module.h"
@@ -113,7 +113,7 @@ static void forceReturn0(krnl::proc& proc, const char* mod, u32 off) {
   u8* p = m->getInfo().base + off;
   // mprotect needs a page-aligned base.
   auto page = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(p) & ~0xFFFull);
-  utl::ProtectMem(page, 0x1000, utl::PageProtection::kRwx);
+  host_memory::ProtectMem(page, 0x1000, host_memory::PageProtection::kRwx);
   p[0] = 0x31;  // xor eax, eax
   p[1] = 0xC0;
   p[2] = 0xC3;  // ret
@@ -136,7 +136,7 @@ static void patchTlsGetAddr(krnl::proc& proc) {
   }
   auto* p = reinterpret_cast<u8*>(addr);
   auto page = reinterpret_cast<void*>(addr & ~0xFFFull);
-  utl::ProtectMem(page, 0x2000, utl::PageProtection::kRwx);
+  host_memory::ProtectMem(page, 0x2000, host_memory::PageProtection::kRwx);
   p[0] = 0x48;  // movabs rax, imm64
   p[1] = 0xB8;
   *reinterpret_cast<u64*>(p + 2) =
@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);  // don't lose scout prints on crash
   installCrashHandler();
 
-  utl::CreateLogger(true);
+  logger::CreateLogger(true);
 
   // Mount /app0 onto the directory the main module lives in, so the game's
   // runtime file opens resolve to the extracted disc image.

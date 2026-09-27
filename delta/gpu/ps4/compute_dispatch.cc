@@ -12,8 +12,8 @@
 #include <cstring>
 
 #include <base/logging.h>
-#include <utl/mem.h>
-#include <utl/options.h>
+#include <host_memory/host_memory.h>
+#include <options/options.h>
 
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_detile.h"
@@ -167,7 +167,7 @@ ResourceRange ResolveBufferResource(u64 cs_addr,
     out.size = kZeroFillBytes;
   } else if (out.size > kMaxResource) {
     const u64 declared = out.size;
-    out.size = utl::MappedMemoryPrefix(reinterpret_cast<const void*>(out.base),
+    out.size = host_memory::MappedMemoryPrefix(reinterpret_cast<const void*>(out.base),
                                        kMaxUnboundedBuffer);
     if (trace)
       TraceCsWindowedBuffer(cs_addr, res.binding, declared, out.size);

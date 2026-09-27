@@ -7,6 +7,7 @@
  * out-pointer get specific handlers in libfmod_api.cpp.
  */
 
+#include "guest_abi.h"
 #include "libfmod.h"
 #include "base/arch.h"
 

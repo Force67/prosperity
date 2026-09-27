@@ -19,7 +19,7 @@
 #include <base/logging.h>
 
 #include "vfs.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/containers/map.h>
 #include <base/memory/move.h>
 #include <base/memory/shared_pointer.h>
@@ -145,9 +145,9 @@ base::String resolve(const char *path) {
 }
 
 namespace {
-// Adapts a VirtualFile to utl::FileBase so it can flow through fileDevice and
+// Adapts a VirtualFile to io::FileBase so it can flow through fileDevice and
 // the rest of the file machinery like a real file. Read-only.
-struct PfsFileStream final : utl::FileBase {
+struct PfsFileStream final : io::FileBase {
   base::UniquePointer<VirtualFile> vf;
   u64 pos = 0;
 
@@ -179,10 +179,10 @@ struct PfsFileStream final : utl::FileBase {
     return reported;
   }
   u64 Write(const void *, size_t) override { return 0; }
-  u64 Seek(i64 off, utl::SeekMode whence) override {
-    i64 np = whence == utl::SeekMode::kSeekSet
+  u64 Seek(i64 off, io::SeekMode whence) override {
+    i64 np = whence == io::SeekMode::kSeekSet
                      ? off
-                     : whence == utl::SeekMode::kSeekCur
+                     : whence == io::SeekMode::kSeekCur
                            ? static_cast<i64>(pos) + off
                            : static_cast<i64>(vf->size()) + off;
     if (np < 0)
@@ -192,7 +192,7 @@ struct PfsFileStream final : utl::FileBase {
   }
   u64 Tell() override { return pos; }
   u64 GetSize() override { return static_cast<u64>(vf->size()); }
-  utl::NativeHandle GetNativeHandle() override { return nullptr; }
+  io::NativeHandle GetNativeHandle() override { return nullptr; }
   bool IsOpen() override { return true; }
 };
 
@@ -282,9 +282,9 @@ static base::String overlayPath(const char *guestPath) {
   return p;
 }
 
-utl::File openRead(const char *path) {
+io::File openRead(const char *path) {
   if (!path)
-    return utl::File();
+    return io::File();
 
   if (kOpenTrace)
     BASE_LOGI("open", "{}", path);
@@ -297,7 +297,7 @@ utl::File openRead(const char *path) {
       const char *sep = std::strchr(p, ',');
       base::String pat(p, sep ? size_t(sep - p) : std::strlen(p));
       if (!pat.empty() && std::strstr(path, pat.c_str()))
-        return utl::File();
+        return io::File();
       p = sep ? sep + 1 : p + pat.size();
     }
   }
@@ -306,7 +306,7 @@ utl::File openRead(const char *path) {
   path = norm.c_str();
 
   if (base::String ov = overlayPath(path); !ov.empty()) {
-    utl::File f(ov);
+    io::File f(ov);
     if (f.IsOpen()) {
       if (kOpenTrace)
         BASE_LOGI("open", "  -> overlay {}", ov.c_str());
@@ -317,14 +317,14 @@ utl::File openRead(const char *path) {
   size_t len = 0;
   mountPoint m;
   if (!findMount(path, false, m, len))
-    return utl::File();
+    return io::File();
 
   const char *rest = path + len;
   if (m.provider) {
     auto vf = m.provider->open(rest);
     if (!vf)
-      return utl::File();
-    utl::File out(base::MakeUnique<PfsFileStream>(base::move(vf)));
+      return io::File();
+    io::File out(base::MakeUnique<PfsFileStream>(base::move(vf)));
     // DELTA_OPEN_TRACE: also report the size we hand back. A file that opens OK
     // but reports size 0 (e.g. a >4 GiB member whose size truncated) makes the
     // resource loader hang forever with {payload=0, err=0} (SotC world container).
@@ -338,13 +338,13 @@ utl::File openRead(const char *path) {
   // its real name and the decrypted ELF beside it as "<name>.esbak". Prefer the
   // decrypted one; we have no SELF crypto.
   base::String host = fixHostCase(joinHost(m.host, rest));
-  utl::File esbak(host + ".esbak", utl::FileMode::kRead);
+  io::File esbak(host + ".esbak", io::FileMode::kRead);
   if (esbak.Exists() && esbak.IsOpen())
     return esbak;
 
-  utl::File f(host, utl::FileMode::kRead);
+  io::File f(host, io::FileMode::kRead);
   if (!f.Exists() || !f.IsOpen())
-    return utl::File();
+    return io::File();
   if (kOpenTrace)
     BASE_LOGI("opensz", "{} -> size={} (host)", path,
               (unsigned long long)f.GetSize());
@@ -396,7 +396,7 @@ bool stat(const char *path, i64 &size, bool &isDir) {
   path = norm.c_str();
 
   if (base::String ov = overlayPath(path); !ov.empty()) {
-    utl::File f(ov);
+    io::File f(ov);
     if (f.IsOpen()) {
       size = static_cast<i64>(f.GetSize());
       return true;

@@ -16,6 +16,7 @@
  * call fails, so a title comes up in Japanese unless we answer.
  */
 
+#include "guest_abi.h"
 #include "../../vprx.h"
 #include "base/arch.h"
 

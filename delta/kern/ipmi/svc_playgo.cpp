@@ -11,11 +11,10 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <base.h>
 
 #include "kern/vfs.h"
 #include "services.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/containers/vector.h>
 
 namespace {
@@ -40,7 +39,7 @@ constexpr u32 kMaxChunks = 0x3e8;
 enum { kLocusNotDownloaded = 0, kLocusLocalSlow = 2, kLocusLocalFast = 3 };
 
 bool readAll(const char *path, base::Vector<char> &out) {
-  utl::File f = vfs::openRead(path);
+  io::File f = vfs::openRead(path);
   if (!f.Exists())
     return false;
   const u64 size = f.GetSize();
@@ -130,7 +129,7 @@ u32 chunkCount() {
     return cached;
   }
   cached = 0x50;
-  utl::File f = vfs::openRead("/app0/sce_sys/playgo-chunk.dat");
+  io::File f = vfs::openRead("/app0/sce_sys/playgo-chunk.dat");
   u8 hdr[0x10] = {};
   if (f.Exists() && f.Read(hdr, sizeof(hdr)) == sizeof(hdr) &&
       hdr[0] == 'p' && hdr[1] == 'g' && hdr[2] == 'd') {

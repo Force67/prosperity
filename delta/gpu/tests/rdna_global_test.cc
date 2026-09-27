@@ -8,7 +8,7 @@
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/guest_memory_ranges.h"
-#include "utl/mem.h"
+#include "host_memory/host_memory.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/shader_cache.h"
@@ -438,12 +438,12 @@ TEST_F(RdnaGlobal, TrackedAnonymousMappingReuseAndReplacement) {
   constexpr size_t size = 65536;
   // Leave guard space so /proc/maps cannot merge this allocation with an
   // unrelated anonymous allocation. Keep it alive while Vulkan imports it.
-  void* reservation = utl::AllocMem(nullptr, size * 3,
-      utl::PageProtection::kPriv, utl::AllocationType::kReserve);
+  void* reservation = host_memory::AllocMem(nullptr, size * 3,
+      host_memory::PageProtection::kPriv, host_memory::AllocationType::kReserve);
   ASSERT_NE(reservation, nullptr);
   const u64 base = (reinterpret_cast<u64>(reservation) + size - 1) & ~(size - 1);
-  auto* source = static_cast<u32*>(utl::AllocMem(reinterpret_cast<void*>(base),
-      size, utl::PageProtection::kW, utl::AllocationType::kCommit));
+  auto* source = static_cast<u32*>(host_memory::AllocMem(reinterpret_cast<void*>(base),
+      size, host_memory::PageProtection::kW, host_memory::AllocationType::kCommit));
   ASSERT_NE(source, nullptr);
   gpu::ps5::NoteGpuPool(base, size);
   const auto identity = [&] {
@@ -463,8 +463,8 @@ TEST_F(RdnaGlobal, TrackedAnonymousMappingReuseAndReplacement) {
     ASSERT_EQ(dest[0], value);
     ASSERT_EQ(identity(), first);
   }
-  ASSERT_EQ(utl::AllocMem(source, size, utl::PageProtection::kW,
-      utl::AllocationType::kCommit), source);
+  ASSERT_EQ(host_memory::AllocMem(source, size, host_memory::PageProtection::kW,
+      host_memory::AllocationType::kCommit), source);
   ASSERT_NE(identity(), first);
   source[0] = 0xaabbccdd;
   Run(base, reinterpret_cast<u64>(dest.data()));
@@ -473,19 +473,19 @@ TEST_F(RdnaGlobal, TrackedAnonymousMappingReuseAndReplacement) {
 
 TEST(MemoryMappingIdentity, PartialReplacementAndUntrackedGaps) {
   auto* base = reinterpret_cast<u8*>(0x12300000000ull);
-  utl::TrackMemoryMapping(base, 0x10000);
-  const u64 original = utl::MemoryMappingIdentity(base, 0x10000);
+  host_memory::TrackMemoryMapping(base, 0x10000);
+  const u64 original = host_memory::MemoryMappingIdentity(base, 0x10000);
   ASSERT_NE(original, 0);
-  utl::TrackMemoryMapping(base + 0x4000, 0x4000);
-  EXPECT_NE(utl::MemoryMappingIdentity(base, 0x10000), original);
-  EXPECT_NE(utl::MemoryMappingIdentity(base, 0x4000), 0);
-  EXPECT_NE(utl::MemoryMappingIdentity(base + 0x8000, 0x8000), 0);
-  utl::ForgetMemoryMapping(base + 0x4000, 0x4000);
-  EXPECT_EQ(utl::MemoryMappingIdentity(base, 0x10000), 0);
-  EXPECT_EQ(utl::MemoryMappingIdentity(base + 0x4000, 4), 0);
-  EXPECT_NE(utl::MemoryMappingIdentity(base + 0x8000, 0x8000), 0);
-  utl::ForgetMemoryMapping(base, 0x10000);
-  EXPECT_EQ(utl::MemoryMappingIdentity(base, 4), 0);
+  host_memory::TrackMemoryMapping(base + 0x4000, 0x4000);
+  EXPECT_NE(host_memory::MemoryMappingIdentity(base, 0x10000), original);
+  EXPECT_NE(host_memory::MemoryMappingIdentity(base, 0x4000), 0);
+  EXPECT_NE(host_memory::MemoryMappingIdentity(base + 0x8000, 0x8000), 0);
+  host_memory::ForgetMemoryMapping(base + 0x4000, 0x4000);
+  EXPECT_EQ(host_memory::MemoryMappingIdentity(base, 0x10000), 0);
+  EXPECT_EQ(host_memory::MemoryMappingIdentity(base + 0x4000, 4), 0);
+  EXPECT_NE(host_memory::MemoryMappingIdentity(base + 0x8000, 0x8000), 0);
+  host_memory::ForgetMemoryMapping(base, 0x10000);
+  EXPECT_EQ(host_memory::MemoryMappingIdentity(base, 4), 0);
 }
 
 TEST_F(RdnaGlobal, ReadOnlyMappingRejectsStoresButAllowsLoads) {

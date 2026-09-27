@@ -20,7 +20,7 @@
 #include <string>
 
 #include <base/logging.h>
-#include <utl/file.h>
+#include <io/file.h>
 
 // UnRAR's API speaks std::wstring and throws std::bad_alloc: both stay at
 // its boundary. Its Min/Max macros would rewrite base::Min/Max.
@@ -307,7 +307,7 @@ private:
   base::SharedPointer<RarSession> startSession(u64 headerOff);
 
   std::wstring pathW_;
-  utl::File rawFile_;     // stored (method 0) entries are read directly
+  io::File rawFile_;     // stored (method 0) entries are read directly
   base::Mutex rawMutex_;   // guards rawFile_'s seek+read
   base::Mutex cacheMutex_; // guards sessions_ (MRU front)
   base::Vector<base::SharedPointer<RarSession>> sessions_;  // MRU first
@@ -422,7 +422,7 @@ i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
     base::LockGuard<base::Mutex> lk(rawMutex_);
     if (!rawFile_.Exists())
       return -1;
-    rawFile_.Seek(entry.dataOffset + u64(off), utl::SeekMode::kSeekSet);
+    rawFile_.Seek(entry.dataOffset + u64(off), io::SeekMode::kSeekSet);
     return rawFile_.Read(buf, size_t(len)) == u64(len) ? len : -1;
   }
 
@@ -481,7 +481,7 @@ i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
 } // namespace
 
 base::UniquePointer<ArchiveBackend> openRarBackend(const base::String &path) {
-  utl::File f(path);
+  io::File f(path);
   if (!f.Exists() || !f.IsOpen())
     return nullptr;
   u8 magic[8]{};

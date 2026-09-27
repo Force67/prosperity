@@ -2,14 +2,14 @@
 
 // Copyright (C) Force67 2019
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <cstring>
 #include <cstdlib>
 #include "sys_generic.h"
 #include "kern/proc.h"
-#include <utl/options.h>
+#include <options/options.h>
 
 namespace {
 DELTA_OPTION(bool, kIoctlTrace, "DELTA_IOCTL_TRACE", false);

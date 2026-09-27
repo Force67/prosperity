@@ -7,12 +7,12 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
 #include "base/arch.h"
+#include "base/math/alignment.h"
 #include <base/logging.h>
 #include <sys/mman.h>
-#include <utl/file.h>
-#include <utl/mem.h>
+#include <io/file.h>
+#include <host_memory/host_memory.h>
 
 #if defined(DELTA_BACKEND_NATIVE)
 #include "runtime/code_lift.h"
@@ -26,7 +26,7 @@
 #include "proc.h"
 #include "kern/probe/probe.h"
 #include "vfs.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/threading/thread.h>
 #include <base/containers/vector.h>
 #include <base/math/value_bounds.h>
@@ -58,7 +58,7 @@ smodule::smodule(proc *process) : process(process) {
 }
 
 bool smodule::fromFile(const base::String &path) {
-  utl::File file(path);
+  io::File file(path);
   if (!file.IsOpen()) {
     // missing dep on disk; fail soft so the caller can keep going
     LOG_ERROR("smodule: cannot open {}", path.c_str());
@@ -70,7 +70,7 @@ bool smodule::fromFile(const base::String &path) {
 
   if (diskHeader.magic == ELF_MAGIC &&
       diskHeader.machine == ELF_MACHINE_X86_64) {
-    file.Seek(0, utl::SeekMode::kSeekSet);
+    file.Seek(0, io::SeekMode::kSeekSet);
 
     auto sz = file.GetSize();
     data = base::MakeUnique<u8[]>(static_cast<mem_size>(sz));
@@ -85,7 +85,7 @@ bool smodule::fromFile(const base::String &path) {
 }
 
 bool smodule::fromVfs(const base::String &guestPath) {
-  utl::File f = vfs::openRead(guestPath.c_str());
+  io::File f = vfs::openRead(guestPath.c_str());
   if (!f.Exists()) {
     LOG_ERROR("smodule: cannot open vfs path {}", guestPath.c_str());
     return false;
@@ -145,7 +145,7 @@ bool smodule::fromMem(base::UniquePointer<u8[]> data) {
 
   if (!mapImage()) {
     LOG_ERROR("smodule: Failed to map image");
-    __debugbreak();
+    __builtin_trap();
     return false;
   }
 
@@ -552,7 +552,7 @@ bool smodule::mapImage() {
     if (p->type == PT_LOAD || p->type == PT_SCE_RELRO) {
       u64 align = p->align ? p->align : 0x1000;
       u64 base = elf->type == ET_SCE_EXEC ? p->vaddr : p->paddr;
-      u64 end = AlignUp(base + p->memsz, align);
+      u64 end = base::Align<u64>(base + p->memsz, align);
       if (end > codeSize)
         codeSize = end;
     }
@@ -588,23 +588,23 @@ bool smodule::mapImage() {
     info.ripZoneSize = base::Max<size_t>(info.ripZoneSize, codeSize - loVaddr);
     size_t span = (codeSize - loVaddr) + info.ripZoneSize;
 
-    void *got = utl::AllocMem(reinterpret_cast<void *>(loVaddr), span,
-                              utl::PageProtection::kW,
-                              utl::AllocationType::kReserve);
+    void *got = host_memory::AllocMem(reinterpret_cast<void *>(loVaddr), span,
+                              host_memory::PageProtection::kW,
+                              host_memory::AllocationType::kReserve);
     if (!got || reinterpret_cast<uintptr_t>(got) != loVaddr) {
       LOG_ERROR("mapImage: could not reserve fixed-exec range at {:#x} (+{:#x})",
                 loVaddr, span);
       return false;
     }
-    utl::AllocMem(reinterpret_cast<void *>(loVaddr), span,
-                  utl::PageProtection::kW, utl::AllocationType::kCommit);
+    host_memory::AllocMem(reinterpret_cast<void *>(loVaddr), span,
+                  host_memory::PageProtection::kW, host_memory::AllocationType::kCommit);
 
     info.base = nullptr;  // zero load bias: image lives at its absolute vaddrs
     info.codeSize = codeSize;
     info.ripZone = reinterpret_cast<u8 *>(codeSize);  // base(0) + codeSize
 
     std::memset(info.ripZone, 0xCC, info.ripZoneSize);
-    utl::ProtectMem(info.ripZone, info.ripZoneSize, utl::PageProtection::kRwx);
+    host_memory::ProtectMem(info.ripZone, info.ripZoneSize, host_memory::PageProtection::kRwx);
   } else {
     // ASLR off: fixed sequential bases so a guest crash reproduces at the same
     // address while the boot is being worked on; switch to kernel-chosen later.
@@ -618,9 +618,9 @@ bool smodule::mapImage() {
     constexpr size_t moduleSlot = eight_gb;
     static uintptr_t s_nextBase = 0x0000200000000000ull;
 #endif
-    info.base = static_cast<u8 *>(utl::AllocMem(
+    info.base = static_cast<u8 *>(host_memory::AllocMem(
         reinterpret_cast<void *>(s_nextBase), moduleSlot,
-        utl::PageProtection::kW, utl::AllocationType::kReserve));
+        host_memory::PageProtection::kW, host_memory::AllocationType::kReserve));
     s_nextBase += moduleSlot;
 
     if (!info.base)
@@ -632,14 +632,14 @@ bool smodule::mapImage() {
     info.ripZoneSize = base::Max<size_t>(info.ripZoneSize, codeSize);
 
     // immediately take module memory + rip Zone memory
-    utl::AllocMem(info.base, codeSize + info.ripZoneSize, utl::PageProtection::kW,
-                  utl::AllocationType::kCommit);
+    host_memory::AllocMem(info.base, codeSize + info.ripZoneSize, host_memory::PageProtection::kW,
+                  host_memory::AllocationType::kCommit);
 
     info.codeSize = codeSize;
     info.ripZone = info.base + codeSize;
 
     std::memset(info.ripZone, 0xCC, info.ripZoneSize);
-    utl::ProtectMem(info.ripZone, info.ripZoneSize, utl::PageProtection::kRwx);
+    host_memory::ProtectMem(info.ripZone, info.ripZoneSize, host_memory::PageProtection::kRwx);
   }
 
   // map data
@@ -703,24 +703,24 @@ bool smodule::mapImage() {
         // execute-without-read), writable rw, else r. PS4 handling unchanged.
         if (ps5) {
           if (op & PF_X)
-            return utl::PageProtection::kRx;
+            return host_memory::PageProtection::kRx;
           if (op & PF_W)
-            return utl::PageProtection::kW;
-          return utl::PageProtection::kR;
+            return host_memory::PageProtection::kW;
+          return host_memory::PageProtection::kR;
         }
         switch (op) {
         case (PF_R | PF_X):
-          return utl::PageProtection::kRx;
+          return host_memory::PageProtection::kRx;
         case (PF_R | PF_W):
-          return utl::PageProtection::kW;
+          return host_memory::PageProtection::kW;
         case (PF_R):
-          return utl::PageProtection::kR;
+          return host_memory::PageProtection::kR;
         default:
-          return utl::PageProtection::kPriv;
+          return host_memory::PageProtection::kPriv;
         }
       };
 
-      utl::ProtectMem(getAddress<void>(s->vaddr), s->filesz, trans_perm(perm));
+      host_memory::ProtectMem(getAddress<void>(s->vaddr), s->filesz, trans_perm(perm));
     }
   }
 

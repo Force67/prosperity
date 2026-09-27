@@ -10,6 +10,7 @@
  * game boots; no sound plays. See libfmod.cpp.
  */
 
+#include "guest_abi.h"
 #include "../../vprx.h"
 #include "base/arch.h"
 

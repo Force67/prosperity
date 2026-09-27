@@ -14,7 +14,7 @@
 // variable it reads, so DELTA_GPU_TRACE=1 in the environment,
 // +DELTA_GPU_TRACE=1 in an options file and the same on the command line all
 // set one option. Declare it at namespace scope in the file that reads it
-// (never as a function local: InitOptions can only fill options that already
+// (never as a function local: Init can only fill options that already
 // registered):
 //
 //   namespace {
@@ -36,22 +36,22 @@
     name, default_value, name, "" __VA_ARGS__                    \
   }
 
-namespace utl {
+namespace options {
 
 // Applies the environment, then the options files named by --options=<path> or
 // DELTA_OPTIONS, then '+Name=Value' arguments, in that order: the later source
 // wins. Consumes the arguments it handles (--options=, --dump-options, +Name=)
 // so the caller's own parsing never sees them. Call once at startup, before
 // anything reads an option.
-void InitOptions(int& argc, char** argv);
+void Init(int& argc, char** argv);
 
 // The same, for hosts that have no command line of their own (the Android
 // activity). Options come from the environment and DELTA_OPTIONS.
-void InitOptions();
+void Init();
 
 // Applies a single options file. `optional` is for the paths we probe rather
 // than the ones someone asked for: a missing file then passes without a word.
-bool LoadOptionFile(const char* path, bool optional = false);
+bool LoadFile(const char* path, bool optional = false);
 
 // Applies the settings shipped for a title: game_profiles/<title id>.txt next
 // to the binary (or under DELTA_DATA_DIR). Call it once the title id is known.
@@ -60,4 +60,4 @@ bool LoadOptionFile(const char* path, bool optional = false);
 // file to use instead, or "off" to boot the title with no profile at all.
 void LoadGameProfile(const char* title_id);
 
-}  // namespace utl
+}  // namespace options

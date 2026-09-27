@@ -11,7 +11,8 @@
  * libSceVideoOut here. NIDs decoded from the PPSA03311 (Isaac) eboot import table.
  */
 
-#include "../vprx.h"  // PS4ABI (via <base.h>), MODULE_INIT_PS5
+#include "guest_abi.h"
+#include "../vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 #include "base/arch.h"
 
 #include <cstdio>
@@ -23,10 +24,10 @@
 #include "gfx/gfx.h"
 #include "kern/proc.h"
 #include "kern/lv2/sys_event.h"
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 
 #include "kern/lv2/sys_mem.h"  // allocLowGuest
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/atomic.h>
 #include <base/threading/lock_guard.h>
 #include <base/threading/mutex.h>
@@ -384,7 +385,7 @@ int PS4ABI vSubmitFlipEop(int, int bufferIndex, int, i64 flipArg,
   }
   // PS5 always presents through the AGC command processor's render target.
   prosperity_agc_flip(scanout);
-  if (utl::IsMemoryRangeMapped(eopLabel, sizeof(u64)))
+  if (host_memory::IsMemoryRangeMapped(eopLabel, sizeof(u64)))
     *static_cast<volatile u64 *>(eopLabel) = 1;
   g_port.flipCount.fetch_add(1);
   if (eqHandle >= 0)

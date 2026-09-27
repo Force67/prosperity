@@ -17,6 +17,7 @@
  * SceCommonDialogStatus: NONE=0, INITIALIZED=1, RUNNING=2, FINISHED=3.
  */
 
+#include "guest_abi.h"
 #include "libSceSaveDataDialog.h"
 #include "base/arch.h"
 

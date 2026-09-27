@@ -15,7 +15,7 @@
 
 #include "dcore.h"
 #include <logger/logger.h>
-#include <utl/file.h>
+#include <io/file.h>
 
 #include <gfx/gfx.h>
 #include <gpu/ps4/cmd_processor.h>
@@ -32,7 +32,7 @@
 #include "formats/archive_object.h"
 #include "formats/pup_object.h"
 #include "formats/title_metadata.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/containers/vector.h>
 #include <base/memory/move.h>
 #include <base/memory/unique_pointer.h>
@@ -80,7 +80,7 @@ using formats::sfoGetU32;
 
 bool readHostFile(const base::String &path, u64 maxSize,
                   base::Vector<u8> &out) {
-  utl::File file(base::String(path.c_str()), utl::FileMode::kRead);
+  io::File file(base::String(path.c_str()), io::FileMode::kRead);
   if (!file.IsOpen())
     return false;
   const u64 size = file.GetSize();
@@ -143,10 +143,10 @@ void deltaCore::boot(const base::String &xdir) {
   // treating it as a PS4 app dir loses both the title id and the platform.
   const bool isPs4AppDir =
       !isPkg && !isFfpkg && !isArchive &&
-      utl::File(base::String(appSfo.c_str()), utl::FileMode::kRead).IsOpen();
+      io::File(base::String(appSfo.c_str()), io::FileMode::kRead).IsOpen();
   const bool isPs5AppDir =
       !isPkg && !isFfpkg && !isArchive && !isPs4AppDir &&
-      utl::File(base::String(appJson.c_str()), utl::FileMode::kRead).IsOpen();
+      io::File(base::String(appJson.c_str()), io::FileMode::kRead).IsOpen();
   const bool isAppDir = isPs4AppDir || isPs5AppDir;
   bool isPs5Archive = false;
   base::String mainModule = path;
@@ -270,7 +270,7 @@ void deltaCore::boot(const base::String &xdir) {
   // The title is known now, so the settings we ship for it can fill in
   // everything the environment / an options file / the command line didn't.
   // Before the guest starts: the knobs below and in the boot thread latch.
-  utl::LoadGameProfile(krnl::vfs::titleId().c_str());
+  options::LoadGameProfile(krnl::vfs::titleId().c_str());
 
   // These all boot from an /app0 mount rather than a bare host path.
   const bool mounted = isPkg || isFfpkg || isAppDir || isArchive;

@@ -6,7 +6,7 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -23,7 +23,7 @@
 #include "sys_event.h"
 
 #include "kern/crash.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/threading/thread.h>
 #include <base/atomic.h>
 #include <base/containers/pair.h>

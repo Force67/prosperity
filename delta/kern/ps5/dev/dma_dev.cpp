@@ -7,7 +7,6 @@
  * rely on. Placed in the low (<2^40) guest aperture the GPU pointers reference.
  */
 
-#include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <cstdio>
@@ -20,7 +19,7 @@
 #include "kern/guest_vaspace.h"
 #include "kern/proc.h"
 #include "kern/lv2/sys_mem.h"  // allocLowGuest, mFlags
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/containers/map.h>
 #include <base/containers/vector.h>
 #include <base/math/value_bounds.h>

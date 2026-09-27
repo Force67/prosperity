@@ -11,7 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 
 #include "proc.h"
 #include "vm_manager.h"
@@ -23,7 +23,7 @@ vmManager::vmManager(procInfo &info) : pinfo(info) {}
 
 vmManager::~vmManager() {
   if (pinfo.userStack)
-    utl::FreeMem(pinfo.userStack);
+    host_memory::FreeMem(pinfo.userStack);
 
   pinfo.userStack = nullptr;
 }
@@ -31,8 +31,8 @@ vmManager::~vmManager() {
 bool vmManager::init() {
   /*reserve address space for the user stack*/
   pinfo.userStack = static_cast<u8 *>(
-      utl::AllocMem(nullptr, pinfo.userStackSize, utl::PageProtection::kPriv,
-                    utl::AllocationType::kReserve));
+      host_memory::AllocMem(nullptr, pinfo.userStackSize, host_memory::PageProtection::kPriv,
+                    host_memory::AllocationType::kReserve));
 
   return pinfo.userStack;
 }
@@ -180,11 +180,11 @@ void vmManager::forEachGpuAperturePage(void (*fn)(void *, u8 *, size_t),
 }
 
 u8 *vmManager::mapMemory(u8 *preference, size_t size,
-                              utl::PageProtection prot) {
-  const auto allocType = utl::AllocationType::kReservecommit;
+                              host_memory::PageProtection prot) {
+  const auto allocType = host_memory::AllocationType::kReservecommit;
 
   void *ptr =
-      utl::AllocMem(static_cast<void *>(preference), size, prot, allocType);
+      host_memory::AllocMem(static_cast<void *>(preference), size, prot, allocType);
   if (ptr) {
     return static_cast<u8 *>(ptr);
   }

@@ -6,11 +6,11 @@
 #include <cstring>
 
 #include <base/logging.h>
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 
 #include "kern/proc.h"
 #include "kern/lv2/sys_mem.h"
-#include <utl/options.h>
+#include <options/options.h>
 
 namespace {
 DELTA_OPTION(const char *, kCtorPrepend, "DELTA_PS5_CTOR_PREPEND", nullptr);
@@ -44,8 +44,8 @@ void maybePrependCtor(proc &p) {
   u8 *listTop = lea + 7 + disp;
   u64 *slot = reinterpret_cast<u64 *>(listTop + 8);
 
-  utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(slot) & ~0xFFFull),
-                  0x2000, utl::PageProtection::kRwx);
+  host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(slot) & ~0xFFFull),
+                  0x2000, host_memory::PageProtection::kRwx);
   if (*slot) {
     BASE_LOGI("ctorprobe", "slot above the list is not free ({:#x})",
               (unsigned long)*slot);
@@ -64,11 +64,11 @@ void maybePrependCtor(proc &p) {
   std::memcpy(shim + i, &target, 8); i += 8;
   shim[i++] = 0xFF; shim[i++] = 0xD0;              // call rax
   shim[i++] = 0xC3;                                // ret
-  utl::ProtectMem(shim, 0x1000, utl::PageProtection::kRwx);
+  host_memory::ProtectMem(shim, 0x1000, host_memory::PageProtection::kRwx);
   *slot = reinterpret_cast<u64>(shim);
 
-  utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(lea) & ~0xFFFull),
-                  0x2000, utl::PageProtection::kRwx);
+  host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(lea) & ~0xFFFull),
+                  0x2000, host_memory::PageProtection::kRwx);
   *reinterpret_cast<i32 *>(lea + 3) = disp + 8;
 
   BASE_LOGI("ctorprobe",

@@ -8,12 +8,12 @@
  * in the root of the source tree.
  */
 
-#include <utl/file.h>
+#include <io/file.h>
 #include "base/arch.h"
 #include <base/containers/vector.h>
 #include <base/strings/xstring.h>
 
-namespace utl {
+namespace io {
 class File;
 }
 
@@ -80,7 +80,7 @@ private:
   bool extractPS5Segment(const pup_entry &, size_t idx,
                          const base::String &outDir, base::String &summary);
 
-  utl::File file;
+  io::File file;
   pup_header header{};
   base::Vector<pup_entry> entries;
   bool isPS5 = false;

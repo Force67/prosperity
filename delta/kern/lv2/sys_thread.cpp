@@ -7,7 +7,7 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -23,14 +23,14 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 
 #include "kern/crash.h"
 #include "kern/module.h"
 #include "kern/proc.h"
 #include "cpu/cpu_backend.h"
 #include "sys_thread.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/threading/thread.h>
 #include <base/algorithm.h>
 #include <base/atomic.h>
@@ -165,18 +165,18 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
     int filled = 0;
     for (uintptr_t a = lo; a < hi; a += kPage) {
       void *pg = reinterpret_cast<void *>(a);
-      if (!utl::AllocMem(pg, kPage, utl::PageProtection::kW,
-                         utl::AllocationType::kReserve))
+      if (!host_memory::AllocMem(pg, kPage, host_memory::PageProtection::kW,
+                         host_memory::AllocationType::kReserve))
         continue;  // page already mapped -> leave it (guard / live stack)
-      void *c = utl::AllocMem(pg, kPage, utl::PageProtection::kW,
-                              utl::AllocationType::kCommit);
+      void *c = host_memory::AllocMem(pg, kPage, host_memory::PageProtection::kW,
+                              host_memory::AllocationType::kCommit);
       if (c) {
-        utl::ProtectMem(c, kPage, utl::PageProtection::kRwx);
+        host_memory::ProtectMem(c, kPage, host_memory::PageProtection::kRwx);
         // Only register pages the VMA doesn't know; re-adding would fragment
         // the stack's existing entry.
         if (!proc->getVma().get(static_cast<u8 *>(c)))
           proc->getVma().add(static_cast<u8 *>(c), kPage,
-                             utl::PageProtection::kW);
+                             host_memory::PageProtection::kW);
         filled++;
       }
     }

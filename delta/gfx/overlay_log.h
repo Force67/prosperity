@@ -11,7 +11,7 @@
  * draw list (one rect plus one AddText per line, clipped rather than measured),
  * so its cost does not depend on how much is being logged.
  *
- * It shows what goes through utl's logger, which is LOG_* plus the base
+ * It shows what goes through the shared logger, which is LOG_* plus the base
  * channels routed into it. Most of the emulator's console output is a direct
  * fprintf to stderr and does not pass through here, so the panel is a subset of
  * the terminal, not a mirror of it.

@@ -17,7 +17,7 @@
 #include "logger/logger.h"
 #include "logger/threadsafe_queue.h"
 
-namespace utl {
+namespace logger {
 
 static base::Atomic<bool> g_log_silenced{false};
 // Any address unique to the calling thread names it.
@@ -34,8 +34,8 @@ void SilenceLogging() {
 class LogRegistry {
   base::Mutex writing_lock_;
   base::UniquePointer<base::Thread> backend_thread_;
-  base::Vector<base::UniquePointer<LogBase>> sinks_;
-  common::MPSCQueue<LogEntry> pending_;
+  base::Vector<base::UniquePointer<LogSink>> sinks_;
+  logger::MPSCQueue<LogEntry> pending_;
   base::TimeTicks time_origin_;
 
  public:
@@ -111,7 +111,7 @@ class LogRegistry {
     pending_.Push(entry);
   }
 
-  LogBase* AddSink(base::UniquePointer<LogBase> sink) {
+  LogSink* AddSink(base::UniquePointer<LogSink> sink) {
     base::LockGuard<base::Mutex> lock{writing_lock_};
     auto* raw = sink.Get_UseOnlyIfYouKnowWhatYouareDoing();
     sinks_.push_back(base::move(sink));
@@ -134,7 +134,7 @@ class LogRegistry {
       sinks_.pop_back();
   }
 
-  LogBase* GetSink(base::StringRef name) {
+  LogSink* GetSink(base::StringRef name) {
     for (auto& sink : sinks_) {
       if (name == base::StringRef(sink->GetName()))
         return sink.Get_UseOnlyIfYouKnowWhatYouareDoing();
@@ -175,7 +175,7 @@ base::String FormatLogEntry(const LogEntry& entry) {
                       entry.line_num, entry.message);
 }
 
-LogBase* AddLogSink(base::UniquePointer<LogBase> sink) {
+LogSink* AddLogSink(base::UniquePointer<LogSink> sink) {
   return LogRegistry::Instance().AddSink(base::move(sink));
 }
 
@@ -183,7 +183,7 @@ void AddLogMsg(LogLevel lvl, u32 line, const char* func, base::String msg) {
   LogRegistry::Instance().AddEntry(lvl, line, func, base::move(msg));
 }
 
-LogBase* GetLogSink(base::StringRef name) {
+LogSink* GetLogSink(base::StringRef name) {
   return LogRegistry::Instance().GetSink(name);
 }
 
@@ -202,4 +202,4 @@ void RouteBaseLogging() {
       nullptr);
 }
 
-}  // namespace utl
+}  // namespace logger

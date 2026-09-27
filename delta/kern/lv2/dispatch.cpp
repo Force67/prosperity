@@ -7,7 +7,7 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <cstdlib>
@@ -57,7 +57,7 @@ moduleInfo *called_in(void *addr) {
 
 int PS4ABI lv2_stub_syscall() {
 #ifdef _MSC_VER
-  void *ret = _ReturnAddress();
+  void *ret = __builtin_return_address(0);
 #else
   void *ret = __builtin_return_address(0);
 #endif
@@ -76,7 +76,7 @@ int PS4ABI lv2_stub_syscall() {
 
 int PS4ABI lv2_unmapped_syscall() {
 #ifdef _MSC_VER
-  void *ret = _ReturnAddress();
+  void *ret = __builtin_return_address(0);
 #else
   void *ret = __builtin_return_address(0);
 #endif

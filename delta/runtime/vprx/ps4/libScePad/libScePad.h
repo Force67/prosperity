@@ -4,6 +4,7 @@
 
 // This file was generated on 10/12/2019
 
+#include "guest_abi.h"
 #include "../../vprx.h"
 
 #pragma warning(push, 0)

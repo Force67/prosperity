@@ -58,7 +58,7 @@ bool RecompileComputeSpirv(const u32*,
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/gcn/spirv/translator.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/algorithm.h>
 #include <base/containers/map.h>
 #include <base/containers/pair.h>

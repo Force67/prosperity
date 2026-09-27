@@ -1,5 +1,5 @@
 #pragma once
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 
 namespace runtime::video {

@@ -11,7 +11,7 @@
 #include <cstring>
 
 #include <base/logging.h>
-#include <utl/options.h>
+#include <options/options.h>
 
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_translate.h"

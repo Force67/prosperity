@@ -29,7 +29,7 @@
    THE SOFTWARE.
 */
 
-namespace utl {
+namespace runtime {
 class InitFunction {
  public:
   using CallbackT = void (*)();
@@ -91,4 +91,4 @@ inline mem_size InitFunction::Init() {
 
   return total;
 }
-}  // namespace utl
+}  // namespace runtime

@@ -6,7 +6,7 @@
 #include <cstdio>
 
 #include <logger/logger.h>
-#include <utl/file.h>
+#include <io/file.h>
 
 #include "formats/ufs2_object.h"
 #include <base/algorithm.h>
@@ -14,7 +14,7 @@
 #include <base/strings/xstring.h>
 
 int main(int argc, char **argv) {
-  utl::CreateLogger(true);
+  logger::CreateLogger(true);
   if (argc < 2) {
     std::printf("usage: ffpkg_extract <game.ffpkg> [<relpath> <out>]\n");
     return 1;
@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
       std::printf("read failed\n");
       return 1;
     }
-    utl::File out(base::String(argv[3]), utl::FileMode::kWrite);
+    io::File out(base::String(argv[3]), io::FileMode::kWrite);
     out.Write(buf.data(), static_cast<size_t>(n));
     std::printf("wrote %s (%lld bytes)\n", argv[3], (long long)n);
     return 0;

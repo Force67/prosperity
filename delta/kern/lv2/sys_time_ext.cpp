@@ -6,7 +6,7 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 
 #include <cstdlib>
@@ -16,7 +16,7 @@
 #include "error_table.h"
 #include "sys_time.h"
 #include "sys_time_ext.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/atomic.h>
 
 namespace {

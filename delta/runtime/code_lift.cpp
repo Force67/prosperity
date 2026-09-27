@@ -12,8 +12,8 @@
 // guest code runs through the FEXCore JIT instead (see delta/cpu/fex_backend).
 #if defined(DELTA_BACKEND_NATIVE)
 
-#include <base.h>
 #include "base/arch.h"
+#include "base/math/alignment.h"
 #include <base/logging.h>
 #include <cstdio>
 #include <xbyak.h>
@@ -23,7 +23,7 @@
 
 #include "kern/lv2/dispatch.h"
 #include "kern/proc.h"
-#include <utl/options.h>
+#include <options/options.h>
 
 namespace {
 DELTA_OPTION(bool, kSysliftTrace, "DELTA_SYSLIFT_TRACE", false);
@@ -59,7 +59,7 @@ static Xbyak::Operand::Code capstone_to_xbyak(x86_reg reg) {
     CASE_N(14)
     CASE_N(15)
   }
-  __debugbreak();
+  __builtin_trap();
   return Xbyak::Operand::Code::RAX;
 #undef CASE_N
 #undef CASE_R
@@ -158,7 +158,7 @@ bool codeLift::transform(u8 *data, size_t size, u64 base) {
           } else if (operand.mem.segment == X86_REG_DS ||
                      operand.mem.segment == X86_REG_ES ||
                      operand.mem.segment == X86_REG_GS) {
-            //__debugbreak();
+            //__builtin_trap();
           }
         }
       }
@@ -259,7 +259,7 @@ void codeLift::emit_fsbase(u8 *base) {
   // tail access raw is worse than ideal but far better than scribbling past the
   // zone into the next module; in practice the zone is sized so this never trips.
   const auto stubSize = gen.getSize() + 5;
-  const auto alignedSize = AlignUp<size_t>(stubSize, 8);
+  const auto alignedSize = base::Align<size_t>(stubSize, 8);
   if (ripEnd && ripPointer + alignedSize > ripEnd)
     return;
 

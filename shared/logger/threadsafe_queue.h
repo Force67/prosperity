@@ -14,7 +14,7 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 
-namespace common {
+namespace logger {
 template <typename T>
 class SPSCQueue {
  public:
@@ -146,4 +146,4 @@ class MPSCQueue {
   SPSCQueue<T> spsc_queue_;
   base::Mutex write_lock_;
 };
-}  // namespace common
+}  // namespace logger

@@ -8,13 +8,12 @@
 
 #include <sys/mman.h>
 #include "base/arch.h"
-#include <base.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
-#include <utl/file.h>
-#include <utl/mem.h>
-#include <utl/path.h>
+#include <io/file.h>
+#include <host_memory/host_memory.h>
+#include <io/path.h>
 
 #include "crash.h"
 #include "module.h"
@@ -34,7 +33,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/strings/string_ref.h>
 
 namespace {
@@ -62,7 +61,7 @@ bool proc::create(const base::String &path, bool fromVfs) {
   LOG_ASSERT(vmem.init());
 
   /*reserve slot for main module*/
-  auto first = utl::MakeRef<smodule>(this);
+  auto first = krnl::MakeRef<smodule>(this);
   first->getInfo().handle = 0;
 
   modules.emplace_back(first);
@@ -135,7 +134,7 @@ modulePtr proc::loadModule(base::StringRef name) {
   if (mod)
     return mod;
 
-  auto lib = utl::MakeRef<smodule>(this);
+  auto lib = krnl::MakeRef<smodule>(this);
   lib->getInfo().handle = handleCounter;
   handleCounter++;
 
@@ -175,7 +174,7 @@ modulePtr proc::loadModule(base::StringRef name) {
             base::String hp(dir);
             hp += sname.c_str();
             hp += ext;
-            if (utl::File(hp, utl::FileMode::kRead).IsOpen() &&
+            if (io::File(hp, io::FileMode::kRead).IsOpen() &&
                 lib->fromFile(hp)) {
               ok = true;
               break;
@@ -242,8 +241,8 @@ modulePtr proc::loadModule(base::StringRef name) {
   else
     hostRel.append(name.data(), name.length());
   hostRel += ".sprx";
-  base::String hostPath = utl::MakeAbsPath(hostRel);
-  if (utl::File(hostPath, utl::FileMode::kRead).IsOpen()) {
+  base::String hostPath = io::MakeAbsPath(hostRel);
+  if (io::File(hostPath, io::FileMode::kRead).IsOpen()) {
     if (lib->fromFile(hostPath)) {
       if (isPs4GnmDriver)
         lib->getInfo().name = sname;

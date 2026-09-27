@@ -17,8 +17,9 @@
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
-#include <utl/mem.h>
-#include <utl/options.h>
+#include <host_memory/host_memory.h>
+#include "write_watch/write_watch.h"
+#include <options/options.h>
 #include <base/algorithm.h>
 #include <base/containers/map.h>
 #include <base/containers/set.h>
@@ -1810,7 +1811,7 @@ void TrackTextures(base::Vector<TImage>& result,
     // descriptor, so the guest instruction that wrote that pointer names
     // itself. The address is not knowable until a draw is processed (it moves
     // every run), which is why the arm
-    // goes through utl rather than an env var parsed at startup.
+    // goes through write_watch rather than an env var parsed at startup.
     if (kNullWatch && t.null_descriptor) {
       static bool armed = false;
       const u64 root = UserDataPointer(ps_user_data, 0);
@@ -1822,9 +1823,9 @@ void TrackTextures(base::Vector<TImage>& result,
                   static_cast<unsigned long>(root),
                   static_cast<unsigned long>(eval.src[srsrc]));
         // +0x18 is the slot the chain read the table pointer from.
-        utl::SetWriteWatchValueProbe(static_cast<uintptr_t>(root) + 0x18);
-        utl::SetWriteWatchChase(4);  // follow it back up to four copies
-        if (!utl::ArmWriteWatch(static_cast<uintptr_t>(root), 64, 200))
+        write_watch::SetValueProbe(static_cast<uintptr_t>(root) + 0x18);
+        write_watch::SetChase(4);  // follow it back up to four copies
+        if (!write_watch::Arm(static_cast<uintptr_t>(root), 64, 200))
           BASE_LOGI("nullwatch", "no armer registered");
       }
     }

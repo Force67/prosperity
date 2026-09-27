@@ -4,12 +4,13 @@
  * Prospero system-information syscalls. See sys_info.h.
  */
 
+#include "guest_abi.h"
 #include "kern/lv2/ps5/sys_info.h"
 
 #include <base/logging.h>
 #include <cstring>
 #include <base/strings/string_ref.h>
-#include <utl/options.h>
+#include <options/options.h>
 
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_info.h"

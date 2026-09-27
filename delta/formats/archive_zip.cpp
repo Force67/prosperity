@@ -18,7 +18,7 @@
 #include <zlib.h>
 
 #include <logger/logger.h>
-#include <utl/file.h>
+#include <io/file.h>
 #include <base/containers/map.h>
 #include <base/containers/vector.h>
 #include <base/math/value_bounds.h>
@@ -58,7 +58,7 @@ constexpr u16 kMethodDeflate = 8;
 class ZipBackend final : public ArchiveBackend {
 public:
   explicit ZipBackend(const base::String &path)
-      : file_(path, utl::FileMode::kRead) {}
+      : file_(path, io::FileMode::kRead) {}
 
   ~ZipBackend() override {
     for (auto &s : sess_)
@@ -284,7 +284,7 @@ private:
   };
 
   bool pread(u64 off, void *dst, u64 len) {
-    file_.Seek(off, utl::SeekMode::kSeekSet);
+    file_.Seek(off, io::SeekMode::kSeekSet);
     return file_.Read(dst, len) == len;
   }
 
@@ -390,7 +390,7 @@ private:
     s.open = false;
   }
 
-  utl::File file_;
+  io::File file_;
   base::Mutex mtx_;
   u64 fileSize_ = 0;
   u64 cdOff_ = 0, cdSize_ = 0, cdCount_ = 0;

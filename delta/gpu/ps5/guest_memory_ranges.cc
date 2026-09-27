@@ -1,7 +1,7 @@
 #include "gpu/ps5/guest_memory_ranges.h"
 #include <cstdio>
 #include "gpu/ps5/guest_address.h"
-#include "utl/mem.h"
+#include "host_memory/host_memory.h"
 #include <base/algorithm.h>
 #include <base/containers/vector.h>
 #include <base/math/value_bounds.h>
@@ -42,7 +42,7 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
         addresses.begin(), addresses.end(),
         [&](u64 address) { return address >= begin && address < end; });
     const auto add_range = [&](u64 lo, u64 hi) {
-      const u64 backing = inode ? identity : utl::MemoryMappingIdentity(
+      const u64 backing = inode ? identity : host_memory::MemoryMappingIdentity(
           reinterpret_cast<const void*>(lo), hi - lo);
       // Separate file-backed and tracked anonymous identity domains, and
       // invalidate imports if the mapping's write permission changes.

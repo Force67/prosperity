@@ -11,6 +11,7 @@
  * present the scanout to the window and deliver the flip event.
  */
 
+#include "guest_abi.h"
 #include "../../vprx.h"
 #include "base/arch.h"
 

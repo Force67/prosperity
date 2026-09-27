@@ -39,7 +39,7 @@ i32 hostGuestFsOffset();
 i32 hostFsScratchOffset();
 
 /*TODO: modulePtr is misused in places; audit the refs*/
-using modulePtr = utl::ObjectRef<smodule>;
+using modulePtr = krnl::ObjectRef<smodule>;
 
 class proc {
   friend class smodule;

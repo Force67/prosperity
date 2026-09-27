@@ -6,7 +6,7 @@
  * in the root of the source tree.
  */
 
-#include "utl/path.h"
+#include "io/path.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -17,7 +17,7 @@
 #include <climits>
 #include <cstdlib>
 #include <cstring>
-#include "utl/options.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(const char*, kDataDir, "DELTA_DATA_DIR", nullptr);
@@ -27,7 +27,7 @@ DELTA_OPTION(const char*, kDataDir, "DELTA_DATA_DIR", nullptr);
 #endif
 #endif
 
-namespace utl {
+namespace io {
 
 #ifdef _WIN32
 base::StringW MakeAbsPath(const base::StringW& rel) {
@@ -118,4 +118,4 @@ base::StringW MakeAbsPath(const base::StringW& rel) {
 
 #endif
 
-}  // namespace utl
+}  // namespace io

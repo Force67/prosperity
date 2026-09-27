@@ -5,6 +5,7 @@
  * for the client/server rationale and the Orbis struct layouts referenced here.
  */
 
+#include "guest_abi.h"
 #include <base/environment_variables.h>
 #include "base/arch.h"
 #include <base/logging.h>
@@ -18,7 +19,7 @@
 #include <unistd.h>
 
 #include "kern/vfs.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/algorithm.h>
 #include <base/containers/vector.h>
 #include <base/strings/xstring.h>

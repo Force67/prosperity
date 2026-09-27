@@ -1,10 +1,9 @@
 // Copyright (C) 2019 Force67
 
-#include <base.h>
 #include <logger/logger.h>
-#include <utl/mem.h>
-#include <utl/options.h>
-#include <utl/path.h>
+#include <host_memory/host_memory.h>
+#include <options/options.h>
+#include <io/path.h>
 #if defined(DELTA_BACKEND_NATIVE)
 #include <xbyak_util.h>
 #endif
@@ -42,7 +41,7 @@ static bool verifyViablity() {
   constexpr size_t one_mb = 1024ull * 1024ull;
   constexpr size_t eight_gb = 8ull * 1024ull * one_mb;
 
-  if (utl::GetAvailableMem() < eight_gb) {
+  if (host_memory::GetAvailableMem() < eight_gb) {
     LOG_ERROR("Your system doesn't have enough physical memory to run " FXNAME);
     return false;
   }
@@ -129,7 +128,7 @@ static void win32PostInit() {
 }
 #endif
 
-EXPORT int dcoreMain(int argc, char **argv) {
+extern "C" __attribute__((visibility("default"))) int dcoreMain(int argc, char **argv) {
 #if defined(__linux__)
   // Let a debugger attach to a run that is already going. Under the default
   // yama ptrace_scope=1 only an ancestor may attach, and a stuck title is
@@ -137,14 +136,14 @@ EXPORT int dcoreMain(int argc, char **argv) {
   // produced it.
   prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
 #endif
-  utl::CreateLogger(true);
-  utl::RouteBaseLogging();
+  logger::CreateLogger(true);
+  logger::RouteBaseLogging();
   // Before anything logs: the on-screen panel shows the tail of the log, and
   // the boot lines are the ones worth seeing before a title even presents.
   gfx::overlayLogAttach();
   // Before anything else: every subsystem below reads its knobs from here, and
   // most latch the value the first time they run.
-  utl::InitOptions(argc, argv);
+  options::Init(argc, argv);
   // Bring the render Vulkan device up NOW, before any guest memory is mapped:
   // initialized lazily (first Gnm submit), the NVIDIA driver fails its
   // in-process setup once the guest's huge MAP_FIXED mappings exist

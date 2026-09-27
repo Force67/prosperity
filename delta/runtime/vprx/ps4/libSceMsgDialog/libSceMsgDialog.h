@@ -6,6 +6,7 @@
  * HLE libSceMsgDialog. See libSceMsgDialog.cpp.
  */
 
+#include "guest_abi.h"
 #include "../../vprx.h"
 #include "base/arch.h"
 

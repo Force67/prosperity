@@ -6,14 +6,14 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <cstdlib>
 #include <ctime>
 
 #include "error_table.h"
 #include "sys_time.h"
-#include <utl/options.h>
+#include <options/options.h>
 
 namespace {
 DELTA_OPTION(long, kTimeScale, "DELTA_TIMESCALE", 1);

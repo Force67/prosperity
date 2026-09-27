@@ -11,7 +11,7 @@
 #include "base/arch.h"
 
 #include <base/strings/xstring.h>
-#include <utl/file.h>
+#include <io/file.h>
 #include <base/containers/vector.h>
 #include <base/memory/shared_pointer.h>
 #include <base/memory/unique_pointer.h>
@@ -88,7 +88,7 @@ void mountVirtual(const char *guestPrefix,
 // Open a guest path for reading, resolving both host and virtual mounts.
 // Returns an empty File (Exists() == false) if nothing matches / the file is
 // absent; otherwise a File ready to read.
-utl::File openRead(const char *guestPath);
+io::File openRead(const char *guestPath);
 
 // Stat a guest path across host and virtual mounts. Returns false if absent.
 bool stat(const char *guestPath, i64 &size, bool &isDir);

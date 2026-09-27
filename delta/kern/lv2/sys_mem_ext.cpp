@@ -9,10 +9,10 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include <base/logging.h>
 #include <logger/logger.h>
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -26,7 +26,7 @@
 #include "kern/ps5/dev/dma_dev.h"
 #include "sys_mem.h"      // shared enums + sys_mmap (dmem maps delegate to it)
 #include "sys_mem_ext.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/atomic.h>
 
 namespace {
@@ -37,7 +37,7 @@ DELTA_OPTION(bool, kVqTrace, "DELTA_VQ_TRACE", false);
 namespace krnl {
 
 // Our VM is a flat host-backed low arena, never compacted: the HOST pages stay
-// mapped (utl::FreeMem takes no length; stale pointers read stable garbage instead
+// mapped (host_memory::FreeMem takes no length; stale pointers read stable garbage instead
 // of faulting). The BOOKKEEPING must still be released: titles churn VA and key
 // allocator state off VirtualQuery's [start,end), so dead VMA entries report stale
 // bounds.
@@ -348,7 +348,7 @@ int PS4ABI sys_batch_map(u32 /*handle*/, u32 /*flags*/,
                          static_cast<off_t>(op.offset));
         if (p != MAP_FAILED) {
           pr->getVma().add(reinterpret_cast<u8 *>(p), op.length,
-                           utl::PageProtection::kW);
+                           host_memory::PageProtection::kW);
           break;
         }
       }
@@ -419,7 +419,7 @@ i64 PS4ABI sys_mmap_dmem(void *addr, size_t len, int prot, int flags,
                      static_cast<off_t>(physOffset));
     if (p != MAP_FAILED) {
       proc::getActive()->getVma().addDirect(reinterpret_cast<u8 *>(p), len,
-                                            utl::PageProtection::kW,
+                                            host_memory::PageProtection::kW,
                                             static_cast<u32>(prot),
                                             static_cast<u64>(physOffset));
       return reinterpret_cast<i64>(p);
@@ -434,7 +434,7 @@ i64 PS4ABI sys_mmap_dmem(void *addr, size_t len, int prot, int flags,
   // Still direct memory as far as the guest is concerned: it keys its own heap
   // map off the physical offset the query reports back.
   if (physOffset >= 0)
-    proc::getActive()->getVma().addDirect(p, len, utl::PageProtection::kW,
+    proc::getActive()->getVma().addDirect(p, len, host_memory::PageProtection::kW,
                                           static_cast<u32>(prot),
                                           static_cast<u64>(physOffset));
   return reinterpret_cast<i64>(p);

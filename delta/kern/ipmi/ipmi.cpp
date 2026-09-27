@@ -9,16 +9,15 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <base.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 
 #include "ipmi.h"
 #include "kern/crash.h"
 #include "services.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/threading/thread.h>
 #include <base/atomic.h>
 #include <base/containers/map.h>
@@ -71,7 +70,7 @@ constexpr u32 kInDescWords = 2;
 constexpr u32 kOutDescWords = 3;
 
 bool readable(const void *p, u64 n) {
-  return p && n && n <= kMaxBuffer && utl::IsMemoryRangeMapped(p, n);
+  return p && n && n <= kMaxBuffer && host_memory::IsMemoryRangeMapped(p, n);
 }
 
 // ---------------------------------------------------------------- clients
@@ -125,7 +124,7 @@ const char *payloadServiceName(const void *in, u64 insize) {
     if (v <= 0x10000) // nulls and small inline ints are never pointers
       continue;
     auto *s = reinterpret_cast<const char *>(v);
-    if (!utl::IsMemoryRangeMapped(s, 4) || std::strncmp(s, "Sce", 3) != 0)
+    if (!host_memory::IsMemoryRangeMapped(s, 4) || std::strncmp(s, "Sce", 3) != 0)
       continue;
     int n = 3;
     bool printable = true;
@@ -218,7 +217,7 @@ void dumpInvoke(u32 kid, const char *svc, const InvokeRequest *req) {
             req->numOut);
   auto descriptors = [](const char *tag, const u64 *d, u32 n,
                         u32 stride) {
-    if (!utl::IsMemoryRangeMapped(d, n * stride * 8))
+    if (!host_memory::IsMemoryRangeMapped(d, n * stride * 8))
       return;
     for (u32 i = 0; i < n; i++) {
       base::String line;
@@ -389,7 +388,7 @@ void Invocation::replyEmpty() {
 
 void Invocation::setResult(i32 v) {
   auto *r = static_cast<InvokeRequest *>(req_);
-  if (utl::IsMemoryRangeMapped(r->result, sizeof(*r->result)))
+  if (host_memory::IsMemoryRangeMapped(r->result, sizeof(*r->result)))
     *r->result = v;
 }
 
@@ -487,7 +486,7 @@ int managerCall(u32 op, u32 kid, void *out, void *in,
       std::memcpy(&words[0], b + 24, sizeof(words[0]));
       std::memcpy(&words[1], b + 32, sizeof(words[1]));
       for (u32 *w : words)
-        if (utl::IsMemoryRangeMapped(w, sizeof(*w)))
+        if (host_memory::IsMemoryRangeMapped(w, sizeof(*w)))
           *w = 0;
     }
     setResult(0);
@@ -500,7 +499,7 @@ int managerCall(u32 op, u32 kid, void *out, void *in,
     if (in && insize >= sizeof(u64)) {
       u32 *status = nullptr;
       std::memcpy(&status, in, sizeof(status));
-      if (utl::IsMemoryRangeMapped(status, sizeof(*status)))
+      if (host_memory::IsMemoryRangeMapped(status, sizeof(*status)))
         *status = 0;
     }
     setResult(0);

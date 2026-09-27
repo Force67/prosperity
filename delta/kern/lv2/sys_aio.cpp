@@ -11,12 +11,13 @@
  * IO thread of its own.
  */
 
+#include "guest_abi.h"
 #include "sys_aio.h"
 
 
 #include <base/logging.h>
-#include <utl/mem.h>
-#include <utl/options.h>
+#include <host_memory/host_memory.h>
+#include <options/options.h>
 
 #include "error_table.h"
 #include "sys_vfs_ext.h"
@@ -86,7 +87,7 @@ int runRequest(u32 cmd, AioRequest &req) {
               (long long)req.offset, req.nbyte, (long long)done);
   const int err = done < 0 ? static_cast<int>(-done) : 0;
   if (req.result &&
-      utl::IsMemoryRangeMapped(req.result, sizeof(AioResult))) {
+      host_memory::IsMemoryRangeMapped(req.result, sizeof(AioResult))) {
     auto *out = static_cast<AioResult *>(req.result);
     out->returnValue = done;
     out->state = err ? kStateAborted : kStateCompleted;
@@ -101,7 +102,7 @@ int reportIds(const u32 *ids, u32 num, int *errs, bool erase) {
   base::LockGuard<base::Mutex> lock(g_mutex);
   for (u32 i = 0; i < num; i++) {
     int err = 0;
-    if (ids && utl::IsMemoryRangeMapped(ids + i, sizeof(u32))) {
+    if (ids && host_memory::IsMemoryRangeMapped(ids + i, sizeof(u32))) {
       auto it = g_requests.find(ids[i]);
       if (it != g_requests.end()) {
         err = it->second;
@@ -109,7 +110,7 @@ int reportIds(const u32 *ids, u32 num, int *errs, bool erase) {
           g_requests.erase(it);
       }
     }
-    if (errs && utl::IsMemoryRangeMapped(errs + i, sizeof(int)))
+    if (errs && host_memory::IsMemoryRangeMapped(errs + i, sizeof(int)))
       errs[i] = err;
   }
   return 0;
@@ -121,7 +122,7 @@ int PS4ABI sys_aio_submit_cmd(u32 cmd, void *reqs, u32 num, u32 prio,
                               u32 *ids) {
   if (!reqs || !num)
     return -SysError::eINVAL;
-  if (!utl::IsMemoryRangeMapped(reqs, sizeof(AioRequest) * num))
+  if (!host_memory::IsMemoryRangeMapped(reqs, sizeof(AioRequest) * num))
     return -SysError::eFAULT;
   auto *req = static_cast<AioRequest *>(reqs);
 
@@ -130,7 +131,7 @@ int PS4ABI sys_aio_submit_cmd(u32 cmd, void *reqs, u32 num, u32 prio,
   // per request there overruns its stack.
   const bool multi = (cmd & kCmdMulti) != 0;
   const u32 idCount = multi ? num : 1;
-  if (!ids || !utl::IsMemoryRangeMapped(ids, sizeof(u32) * idCount))
+  if (!ids || !host_memory::IsMemoryRangeMapped(ids, sizeof(u32) * idCount))
     return -SysError::eFAULT;
 
   int worst = 0;

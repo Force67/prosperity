@@ -3,7 +3,7 @@
 #include <cstdio>
 
 #include <logger/logger.h>
-#include <utl/object_ref.h>
+#include <kern/object_ref.h>
 
 #include "kern/module.h"
 #include "kern/proc.h"
@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  utl::CreateLogger(true);
+  logger::CreateLogger(true);
 
   krnl::proc proc;  // ctor registers itself as the active process
   if (!proc.getVma().init()) {
@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  auto mod = utl::MakeRef<krnl::smodule>(&proc);
+  auto mod = krnl::MakeRef<krnl::smodule>(&proc);
   mod->getInfo().handle = 0;
 
   std::printf("[modload] loading %s ...\n", argv[1]);

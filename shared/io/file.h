@@ -19,7 +19,7 @@
 #include "base/meta/traits.h"
 #include "base/strings/xstring.h"
 
-namespace utl {
+namespace io {
 // Use void* uniformly: on Windows we stash the HANDLE, on POSIX we stash
 // either a FILE* or nullptr. Callers that actually need an int fd can
 // reach down to the FILE* themselves.
@@ -203,4 +203,4 @@ File MakeStream(T&& container = T{}) {
       base::MakeUnique<ContainerStream<T>>(base::forward<T>(container)));
   return result;
 }
-}  // namespace utl
+}  // namespace io

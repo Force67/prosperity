@@ -12,8 +12,8 @@
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
-#include <utl/mem.h>
-#include <utl/options.h>
+#include <host_memory/host_memory.h>
+#include <options/options.h>
 
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_disasm.h"
@@ -237,7 +237,7 @@ void MaybeArmRootWriteWatch(const Regs& regs,
   const u64 root =
       (static_cast<u64>(user_data[1] & 0xFFFF) << 32) | user_data[0];
   if (!IsGuestAddress(root) ||
-      !utl::IsMemoryRangeMapped(reinterpret_cast<const void*>(root), 64))
+      !host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(root), 64))
     return;
   armed = true;
   constexpr size_t kRootSize = 64;
@@ -854,7 +854,7 @@ void TraceVertexAttrs(const render::DrawInfo& d) {
     const auto* p = static_cast<const u8*>(vb.data);
     constexpr u32 kBytes = 8;  // covers every <=64-bit attribute format
     base::String v0;
-    if (p && utl::IsMemoryRangeMapped(p + attr.offset, kBytes))
+    if (p && host_memory::IsMemoryRangeMapped(p + attr.offset, kBytes))
       for (u32 b = 0; b < kBytes; b++)
         base::FormatTo(v0, "{:02x}", p[attr.offset + b]);
     else
@@ -1327,7 +1327,7 @@ void TraceCsResource(u64 cs_addr,
   u64 nonzero = 0;
   if (base && guest_size && guest_size <= (1u << 24) &&
       IsGuestRange(base, guest_size) &&
-      utl::IsMemoryRangeMapped(reinterpret_cast<const void*>(base),
+      host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(base),
                                guest_size)) {
     const u8* p = reinterpret_cast<const u8*>(base);
     for (u64 i = 0; i < guest_size; i++)

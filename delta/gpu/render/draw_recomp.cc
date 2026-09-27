@@ -32,8 +32,9 @@
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
-#include <utl/mem.h>
-#include <utl/options.h>
+#include <host_memory/host_memory.h>
+#include "write_watch/write_watch.h"
+#include <options/options.h>
 #include <base/containers/unordered_map.h>
 #include <base/algorithm.h>
 #include <base/atomic.h>
@@ -748,7 +749,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           continue;
         const auto& vb = d.vbufs[attr.binding];
         const auto* p = static_cast<const u8*>(vb.data);
-        if (!p || !utl::IsMemoryRangeMapped(p + attr.offset, 4))
+        if (!p || !host_memory::IsMemoryRangeMapped(p + attr.offset, 4))
           continue;
         u32 c0 = 0;
         std::memcpy(&c0, p + attr.offset, 4);
@@ -761,9 +762,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                   "stride {}), it currently reads 00000000",
                   (unsigned long)at, (unsigned long)d.rt_base,
                   d.vertex_count, vb.stride);
-        utl::SetWriteWatchValueProbe(at);
-        utl::SetWriteWatchChase(4);
-        if (!utl::ArmWriteWatch(at & ~0xFFFull, 0x1000, 200))
+        write_watch::SetValueProbe(at);
+        write_watch::SetChase(4);
+        if (!write_watch::Arm(at & ~0xFFFull, 0x1000, 200))
           BASE_LOGI("uiwatch", "no armer registered");
         break;
       }

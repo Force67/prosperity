@@ -10,14 +10,14 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include "base/arch.h"
-#include <base.h>
+#include <guest_abi.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
-#include <utl/file.h>
-#include <utl/mem.h>
-#include <utl/options.h>
-#include <utl/path.h>
+#include <io/file.h>
+#include <host_memory/host_memory.h>
+#include <options/options.h>
+#include <io/path.h>
 
 #include "cpu/cpu_backend.h"
 #include "kern/crash.h"
@@ -889,8 +889,8 @@ template <int N> static void PS4ABI allocLockLeaveT() { allocLockLeaveAt(N); }
 void installInternalHook(u8 *base, u32 off, u32 prologueLen,
                          u32 hookId, const char *name) {
   u8 *target = base + off;
-  utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(target) & ~0xFFFull),
-                  0x2000, utl::PageProtection::kRwx);
+  host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(target) & ~0xFFFull),
+                  0x2000, host_memory::PageProtection::kRwx);
   uintptr_t tramp = cpu::makeGuestTrampoline(target, prologueLen, target + prologueLen);
   if (!tramp) { LOG_WARNING("jobtrace: trampoline failed for {}", name); return; }
   uintptr_t wrap = cpu::makeGuestReturnHook(reinterpret_cast<void *>(tramp), hookId,
@@ -910,8 +910,8 @@ void installInternalHook(u8 *base, u32 off, u32 prologueLen,
 static void installAllocLockHook(u8 *base, u32 off, u32 prologueLen,
                                  const char *name, void *enterFn, void *leaveFn) {
   u8 *target = base + off;
-  utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(target) & ~0xFFFull),
-                  0x2000, utl::PageProtection::kRwx);
+  host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(target) & ~0xFFFull),
+                  0x2000, host_memory::PageProtection::kRwx);
   uintptr_t tramp = cpu::makeGuestTrampoline(target, prologueLen, target + prologueLen);
   if (!tramp) { LOG_WARNING("alloclock: trampoline failed for {}", name); return; }
   uintptr_t wrap = cpu::makeGuestLockWrapper(reinterpret_cast<void *>(tramp),
@@ -1055,8 +1055,8 @@ void investigateDcbGate(smodule &m) {
   };
   for (auto &pt : pts) {
     auto *c = base + pt.off;
-    utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                    0x1000, utl::PageProtection::kRwx);
+    host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x1000, host_memory::PageProtection::kRwx);
     if (c[0] == 0x55) {
       c[0] = 0xCC;
       setOrderTrace(reinterpret_cast<uintptr_t>(c), pt.label);
@@ -1075,8 +1075,8 @@ void investigateDcbGate(smodule &m) {
   };
   for (auto &r : rets) {
     auto *c = base + r.off;
-    utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                    0x1000, utl::PageProtection::kRwx);
+    host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x1000, host_memory::PageProtection::kRwx);
     if (c[0] == 0x89 && c[1] == 0xc3) {
       c[0] = 0xCC;
       setRetTrace(reinterpret_cast<uintptr_t>(c), r.label);
@@ -1156,9 +1156,9 @@ void bringUpRebirthSurfaceRegistry(smodule &m) {
       reinterpret_cast<u64>(buckets);
 
   u8 *ctor = base + kCtorZeroOff;
-  utl::ProtectMem(
+  host_memory::ProtectMem(
       reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(ctor) & ~0xFFFull),
-      0x1000, utl::PageProtection::kRwx);
+      0x1000, host_memory::PageProtection::kRwx);
   std::memset(ctor, 0x90, 11); // NOP the ctor's null-write
 
   LOG_INFO("rebirth surface-registry: installed empty buckets@{} -> [+{:#x}]",
@@ -1211,9 +1211,9 @@ void bringUpRebirthEbootRegistry(smodule &m) {
       reinterpret_cast<u64>(buckets);
 
   u8 *ctor = base + kCtorZeroOff;
-  utl::ProtectMem(
+  host_memory::ProtectMem(
       reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(ctor) & ~0xFFFull),
-      0x1000, utl::PageProtection::kRwx);
+      0x1000, host_memory::PageProtection::kRwx);
   std::memset(ctor, 0x90, 11); // NOP the ctor's null-write
 
   LOG_INFO("rebirth eboot-registry: installed empty buckets@{} -> [+{:#x}]",
@@ -1290,8 +1290,8 @@ void patchVideoOutDiag(smodule &m) {
   if (kVoOplog) {
     uintptr_t thunk = cpu::makeHostThunk(reinterpret_cast<void *>(&voOpMapLog));
     u8 *o = m.getInfo().base + 0x1020;
-    utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(o) & ~0xFFFull),
-                    0x2000, utl::PageProtection::kRwx);
+    host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(o) & ~0xFFFull),
+                    0x2000, host_memory::PageProtection::kRwx);
     o[0] = 0x48; o[1] = 0xb8;                       // mov rax, imm64
     *reinterpret_cast<u64 *>(o + 2) = thunk;
     o[10] = 0xff; o[11] = 0xe0;                     // jmp rax
@@ -1302,8 +1302,8 @@ void patchVideoOutDiag(smodule &m) {
   // (config-validate op). If Open then progresses, op@0x580's return was a gate.
   if (kVoSkip580) {
     u8 *c = m.getInfo().base + 0xaeb8;  // js 0xef09 after the op call
-    utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                    0x2000, utl::PageProtection::kRwx);
+    host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x2000, host_memory::PageProtection::kRwx);
     if (c[0] == 0x78) {  // js rel8
       c[0] = 0x90; c[1] = 0x90;
       BASE_LOGI("votest", "nop'd op@0x580 error-js @ +0xaeb8");
@@ -1322,8 +1322,8 @@ void patchVideoOutDiag(smodule &m) {
     if (!std::strstr(list, fn.name))
       continue;
     u8 *c = base + fn.off;
-    utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                    0x2000, utl::PageProtection::kRwx);
+    host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                    0x2000, host_memory::PageProtection::kRwx);
     c[0] = 0xb8; c[1] = fn.ret; c[2] = 0; c[3] = 0; c[4] = 0;  // mov eax, imm32
     c[5] = 0xc3;                                               // ret
     BASE_LOGI("vopatch", "libSceVideoOut!{} -> return {}", fn.name, fn.ret);
@@ -1338,8 +1338,8 @@ static void forceReturn0(proc &p, const char *mod, u32 off) {
   if (!m)
     return;
   u8 *c = m->getInfo().base + off;
-  utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                  0x1000, utl::PageProtection::kRwx);
+  host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                  0x1000, host_memory::PageProtection::kRwx);
   c[0] = 0x31;  // xor eax, eax
   c[1] = 0xC0;
   c[2] = 0xC3;  // ret
@@ -1351,8 +1351,8 @@ static void forceGetterOk(proc &p, const char *mod, u32 off, u32 val) {
   if (!m)
     return;
   u8 *c = m->getInfo().base + off;
-  utl::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-                  0x1000, utl::PageProtection::kRwx);
+  host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
+                  0x1000, host_memory::PageProtection::kRwx);
   c[0] = 0xC7; c[1] = 0x06;  // mov dword [rsi], imm32
   std::memcpy(c + 2, &val, 4);
   c[6] = 0x31; c[7] = 0xC0;  // xor eax, eax
@@ -1370,8 +1370,8 @@ void applyBootPatches(proc &p) {
   if (auto k = p.getModule(base::StringRef("libkernel"))) {
     if (uintptr_t a = k->getSymbolByNid("vNe1w4diLCs")) {
       auto *c = reinterpret_cast<u8 *>(a);
-      utl::ProtectMem(reinterpret_cast<void *>(a & ~0xFFFull), 0x2000,
-                      utl::PageProtection::kRwx);
+      host_memory::ProtectMem(reinterpret_cast<void *>(a & ~0xFFFull), 0x2000,
+                      host_memory::PageProtection::kRwx);
       c[0] = 0x48;  // movabs rax, imm64
       c[1] = 0xB8;
       *reinterpret_cast<u64 *>(c + 2) =
@@ -1388,8 +1388,8 @@ void applyBootPatches(proc &p) {
   if (auto k = p.getModule(base::StringRef("libkernel"))) {
     if (uintptr_t a = k->getSymbolByNid("vNe1w4diLCs")) {
       auto *c = reinterpret_cast<u8 *>(a);
-      utl::ProtectMem(reinterpret_cast<void *>(a & ~0xFFFull), 0x2000,
-                      utl::PageProtection::kRwx);
+      host_memory::ProtectMem(reinterpret_cast<void *>(a & ~0xFFFull), 0x2000,
+                      host_memory::PageProtection::kRwx);
       c[0] = 0xB8; // mov eax, imm32
       *reinterpret_cast<u32 *>(c + 1) = cpu::kTlsGetAddrSyscall;
       c[5] = 0x0F; // syscall
@@ -1409,8 +1409,8 @@ void applyBootPatches(proc &p) {
       u64 addr = std::strtoull(cur, &cur, 0);
       if (addr) {
         auto *c = reinterpret_cast<u8 *>(addr);
-        utl::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
-                        utl::PageProtection::kRwx);
+        host_memory::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                        host_memory::PageProtection::kRwx);
         c[0] = 0xCC; // int3 -> SIGTRAP -> crash handler dump
         LOG_INFO("DELTA_TRAP_VADDR: planted int3 @ {:#x}", addr);
       }
@@ -1430,8 +1430,8 @@ void applyBootPatches(proc &p) {
     // deref page 0); a real entry is a guest .text vaddr (>= 64 KiB).
     if (addr >= 0x10000) {
       auto *c = reinterpret_cast<u8 *>(addr);
-      utl::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
-                      utl::PageProtection::kRwx);
+      host_memory::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                      host_memory::PageProtection::kRwx);
       if (c[0] == 0x55) {  // push rbp
         c[0] = 0xCC;       // int3
         setAllocTrace(addr, minB);
@@ -1468,8 +1468,8 @@ void applyBootPatches(proc &p) {
       }
       if (addr >= 0x10000) {
         auto *c = reinterpret_cast<u8 *>(addr);
-        utl::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
-                        utl::PageProtection::kRwx);
+        host_memory::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                        host_memory::PageProtection::kRwx);
         if (c[0] == 0x55) { c[0] = 0xCC; setHeapProf(addr, countOnly);
           LOG_INFO("DELTA_HEAP_PROF: hooked alloc entry {:#x}", addr);
         } else {
@@ -1483,8 +1483,8 @@ void applyBootPatches(proc &p) {
     u64 addr = std::strtoull(ct, nullptr, 0);
     if (addr) {
       auto *c = reinterpret_cast<u8 *>(addr);
-      utl::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
-                      utl::PageProtection::kRwx);
+      host_memory::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                      host_memory::PageProtection::kRwx);
       if (c[0] == 0x55) { c[0] = 0xCC; setCntTrace(addr); }
     }
   }
@@ -1492,8 +1492,8 @@ void applyBootPatches(proc &p) {
     u64 addr = std::strtoull(ft, nullptr, 0);
     if (addr) {
       auto *c = reinterpret_cast<u8 *>(addr);
-      utl::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
-                      utl::PageProtection::kRwx);
+      host_memory::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                      host_memory::PageProtection::kRwx);
       if (c[0] == 0x55) { c[0] = 0xCC; setFatalTrace(addr); }
     }
   }
@@ -1505,8 +1505,8 @@ void applyBootPatches(proc &p) {
       u64 addr = std::strtoull(s, &end, 0);
       if (addr) {
         auto *c = reinterpret_cast<u8 *>(addr);
-        utl::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
-                        utl::PageProtection::kRwx);
+        host_memory::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                        host_memory::PageProtection::kRwx);
         if (c[0] == 0x55) { c[0] = 0xCC; setHdrTrace(addr); }
       }
       s = (end && *end == ',') ? end + 1 : (end ? end : s + 1);
@@ -1517,8 +1517,8 @@ void applyBootPatches(proc &p) {
     u64 addr = std::strtoull(ro, nullptr, 0);
     if (addr) {
       auto *c = reinterpret_cast<u8 *>(addr);
-      utl::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
-                      utl::PageProtection::kRwx);
+      host_memory::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                      host_memory::PageProtection::kRwx);
       if (c[0] == 0x55) { c[0] = 0xCC; setRdoffFix(addr); }
     }
   }
@@ -1529,8 +1529,8 @@ void applyBootPatches(proc &p) {
       u64 addr = std::strtoull(s2, &end, 0);
       if (addr) {
         auto *c = reinterpret_cast<u8 *>(addr);
-        utl::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
-                        utl::PageProtection::kRwx);
+        host_memory::ProtectMem(reinterpret_cast<void *>(addr & ~0xFFFull), 0x1000,
+                        host_memory::PageProtection::kRwx);
         if (c[0] == 0x55) { c[0] = 0xCC; setSkipFn(addr); }
       }
       s2 = (end && *end == ',') ? end + 1 : (end ? end : s2 + 1);

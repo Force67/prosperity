@@ -29,7 +29,6 @@
 
 #include "guest_vaspace.h"
 
-#include <base.h>
 #include <logger/logger.h>
 
 #include <sys/mman.h>

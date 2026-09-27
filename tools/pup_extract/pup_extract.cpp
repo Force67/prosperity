@@ -3,13 +3,13 @@
 #include <cstdio>
 
 #include <logger/logger.h>
-#include <utl/file.h>
+#include <io/file.h>
 
 #include "formats/pup_object.h"
 #include <base/strings/xstring.h>
 
 int main(int argc, char **argv) {
-  utl::CreateLogger(true);
+  logger::CreateLogger(true);
   if (argc < 3) {
     std::printf("usage: pup_extract <firmware.PUP[.dec]> <out_dir>\n");
     return 1;

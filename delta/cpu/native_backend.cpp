@@ -8,7 +8,7 @@
  */
 #if defined(DELTA_BACKEND_NATIVE)
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <csetjmp>
 #include "cpu_backend.h"

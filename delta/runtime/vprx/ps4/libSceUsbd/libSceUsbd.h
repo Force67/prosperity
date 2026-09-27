@@ -1,4 +1,5 @@
 #pragma once
+#include "guest_abi.h"
 #include "../../vprx.h"
 #include "base/arch.h"
 

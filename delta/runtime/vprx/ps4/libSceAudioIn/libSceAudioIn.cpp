@@ -2,6 +2,7 @@
  * HLE libSceAudioIn.
  */
 
+#include "guest_abi.h"
 #include "libSceAudioIn.h"
 #include "base/arch.h"
 

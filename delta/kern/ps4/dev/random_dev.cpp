@@ -2,7 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-#include <base.h>
 #include "base/arch.h"
 #include <cstdio>
 #include <cstdlib>
@@ -11,7 +10,7 @@
 
 #include "file_dev.h" // fillStat / kSceFileMode*
 #include "random_dev.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/math/value_bounds.h>
 
 namespace {

@@ -7,7 +7,7 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include "kern/crash.h"
@@ -16,7 +16,7 @@
 #include <cstring>
 #include <logger/logger.h>
 
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 #include "cpu/cpu_backend.h"
 #include "kern/module.h"
 #include "kern/proc.h"
@@ -26,7 +26,7 @@
 
 #include "sys_mem.h"
 #include <runtime/vprx/vprx.h>
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/containers/map.h>
 #include <base/containers/set.h>
 #include <base/containers/vector.h>

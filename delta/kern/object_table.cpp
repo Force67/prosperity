@@ -1,5 +1,6 @@
 
-#include <base.h>
+#include <cstring>
+
 #include "base/arch.h"
 #include "object_table.h"
 #include <logger/logger.h>

@@ -10,6 +10,7 @@
  * skipped and it proceeds straight to the menu. No frames are produced.
  */
 
+#include "guest_abi.h"
 #include "../../vprx.h"
 #include "base/arch.h"
 

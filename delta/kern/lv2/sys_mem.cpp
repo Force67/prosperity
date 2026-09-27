@@ -6,12 +6,12 @@
 
 #include <cstdio>
 #include "base/arch.h"
-#include <base.h>
+#include <guest_abi.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
 #include <logger/logger.h>
-#include <utl/mem.h>
+#include <host_memory/host_memory.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -26,7 +26,7 @@
 #include "kern/thread_names.h"
 #include "error_table.h"
 #include "sys_mem.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/atomic.h>
 #include <base/containers/map.h>
 #include <base/containers/vector.h>
@@ -61,8 +61,8 @@ DELTA_OPTION(bool, kShmAudioTrace, "DELTA_SHM_AUDIO_TRACE", false);
 
 namespace krnl {
 
-using ppt = utl::PageProtection;
-using alt = utl::AllocationType;
+using ppt = host_memory::PageProtection;
+using alt = host_memory::AllocationType;
 
 // Floor of the guest address arena; below sit the round 64 GiB slots titles
 // MAP_FIXED their direct/flexible pools into.
@@ -86,7 +86,7 @@ base::Vector<ReleasedRange> g_released;
 void noteGuestReleased(u8 *ptr, size_t size) {
   if (!ptr || !size)
     return;
-  utl::ForgetMemoryMapping(ptr, size);
+  host_memory::ForgetMemoryMapping(ptr, size);
   const uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
   base::LockGuard<base::Mutex> lk(g_releasedLock);
   for (auto &r : g_released) {
@@ -103,7 +103,7 @@ void noteGuestReleased(u8 *ptr, size_t size) {
 void noteGuestTaken(u8 *ptr, size_t size) {
   if (!ptr || !size)
     return;
-  utl::ForgetMemoryMapping(ptr, size);
+  host_memory::ForgetMemoryMapping(ptr, size);
   const uintptr_t lo = reinterpret_cast<uintptr_t>(ptr), hi = lo + size;
   base::LockGuard<base::Mutex> lk(g_releasedLock);
   for (auto it = g_released.begin(); it != g_released.end();) {
@@ -159,7 +159,7 @@ u8 *allocLowGuest(size_t size, size_t align) {
     void *p = ::mmap(reinterpret_cast<void *>(base), size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == reinterpret_cast<void *>(base)) {
-      utl::TrackMemoryMapping(p, size);
+      host_memory::TrackMemoryMapping(p, size);
       if (kAllocTrace)
         BASE_LOGI("lowalloc", "{:#x} +{:#x}", (unsigned long)base,
                   (unsigned long)size);
@@ -614,20 +614,20 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
       void *want = addr;
       if (flags & mFlags::stack)
         want = static_cast<u8 *>(addr) - size;
-      ptr = utl::AllocMem(want, size, ppt::kW, alt::kReservecommit);
+      ptr = host_memory::AllocMem(want, size, ppt::kW, alt::kReservecommit);
       if (!ptr)
-        ptr = utl::AllocMem(want, size, ppt::kW, alt::kCommit);  // maybe pre-reserved
+        ptr = host_memory::AllocMem(want, size, ppt::kW, alt::kCommit);  // maybe pre-reserved
     } else if (inUserStack) {
-      ptr = utl::AllocMem(addr, size, ppt::kW, alt::kCommit);
-    } else if (utl::AllocMem(addr, size, ppt::kW, alt::kReserve)) {
+      ptr = host_memory::AllocMem(addr, size, ppt::kW, alt::kCommit);
+    } else if (host_memory::AllocMem(addr, size, ppt::kW, alt::kReserve)) {
       // A hint must never alias an existing mapping; reservecommit would clobber
       // it (a guest TLS hint destroyed a loaded module on Android).
-      ptr = utl::AllocMem(addr, size, ppt::kW, alt::kCommit);
+      ptr = host_memory::AllocMem(addr, size, ppt::kW, alt::kCommit);
     } else if (wasGuestReleased(static_cast<u8 *>(addr), size) &&
                !proc->getVma().overlaps(static_cast<u8 *>(addr), size)) {
       // The probe only fails here because we kept the pages of a guest-unmapped
       // range; the address is free as far as the guest is concerned.
-      ptr = utl::AllocMem(addr, size, ppt::kW, alt::kReservecommit);
+      ptr = host_memory::AllocMem(addr, size, ppt::kW, alt::kReservecommit);
     }
   }
   // No usable hint (or it was taken): pick a low (<2^40) address the guest's
@@ -669,7 +669,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
     proc->getVma().add(static_cast<u8 *>(ptr), size, gprot, prot,
                        voidReserve);
 
-  utl::ProtectMem(static_cast<void *>(ptr), size, ppt::kRwx);
+  host_memory::ProtectMem(static_cast<void *>(ptr), size, ppt::kRwx);
 
   // DELTA_GNMAP_TRACE: log mappings in the GNM/GPU aperture to pin how the AGC
   // ring buffers are mapped and by whom (coherency with guest PM4 writes is
@@ -702,7 +702,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
               "mmap {:p}, {:x}, prot={:x} flags={:x} fd={} off={:#x}, {:p} -> "
               "{:p}",
               addr, size, prot, flags, static_cast<int>(fd), offset,
-              _ReturnAddress(), ptr);
+              __builtin_return_address(0), ptr);
 
   // Returned address = base + (offset & 0x3FFF), FreeBSD mmap semantics;
   // MAP_STACK returns the region top, like vm_map_stack.

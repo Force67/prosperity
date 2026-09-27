@@ -8,10 +8,10 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <cstdint> // uintptr_t
-#include <utl/options.h>
+#include <options/options.h>
 
 namespace krnl {
 

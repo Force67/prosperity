@@ -7,7 +7,7 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <cstdlib>
@@ -29,7 +29,7 @@
 #include "kern/vfs.h"
 #include "sys_vfs.h" // sys_open (sys_openat delegates to it)
 #include "sys_vfs_ext.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/containers/map.h>
 #include <base/strings/xstring.h>
 #include <base/threading/lock_guard.h>

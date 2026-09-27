@@ -6,7 +6,7 @@
  * in the root of the source tree.
  */
 
-#include "utl/mem.h"
+#include "host_memory/host_memory.h"
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -15,7 +15,7 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 
-namespace utl {
+namespace host_memory {
 
 namespace {
 struct Mapping {
@@ -193,41 +193,4 @@ size_t GetAvailableMem() {
   return static_cast<size_t>(pages) * static_cast<size_t>(page_size);
 }
 
-}  // namespace utl
-
-namespace utl {
-namespace {
-WriteWatchArmer g_write_watch_armer = nullptr;
-uintptr_t g_write_watch_probe = 0;
-unsigned g_write_watch_chase = 0;
-}  // namespace
-
-void SetWriteWatchChase(unsigned hops) {
-  g_write_watch_chase = hops;
-}
-unsigned WriteWatchChaseLeft() {
-  return g_write_watch_chase;
-}
-void WriteWatchChaseTook() {
-  if (g_write_watch_chase)
-    g_write_watch_chase--;
-}
-
-void SetWriteWatchValueProbe(uintptr_t addr) {
-  g_write_watch_probe = addr;
-}
-uintptr_t WriteWatchValueProbe() {
-  return g_write_watch_probe;
-}
-
-void SetWriteWatchArmer(WriteWatchArmer fn) {
-  g_write_watch_armer = fn;
-}
-
-bool ArmWriteWatch(uintptr_t addr, size_t bytes, unsigned every_ms) {
-  if (!g_write_watch_armer || !addr || !bytes)
-    return false;
-  g_write_watch_armer(addr, bytes, every_ms);
-  return true;
-}
-}  // namespace utl
+}  // namespace host_memory

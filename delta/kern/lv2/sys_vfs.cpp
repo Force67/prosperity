@@ -7,7 +7,7 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <unistd.h>
@@ -48,8 +48,8 @@
 #include "sys_vfs_ext.h"
 #include "sys_vfs.h"
 
-#include <utl/object_ref.h>
-#include <utl/options.h>
+#include <kern/object_ref.h>
+#include <options/options.h>
 #include <base/threading/thread.h>
 #include <base/algorithm.h>
 #include <base/atomic.h>
@@ -252,7 +252,7 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
   }
 
   // Regular file: resolve through the VFS (host + virtual mounts).
-  utl::File vf = vfs::openRead(path);
+  io::File vf = vfs::openRead(path);
   if (!vf.Exists()) {
     if (kVfsTrace)
       BASE_LOGI("open", "  -> ENOENT {}", path);

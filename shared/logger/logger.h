@@ -2,8 +2,6 @@
 
 #include "base/arch.h"
 
-#include "base.h"
-
 #include "base/memory/unique_pointer.h"
 #include "base/strings/format.h"
 #include "base/strings/string_ref.h"
@@ -12,7 +10,7 @@
 
 // log impl is heavily influenced & based on the yuzu logger
 
-namespace utl {
+namespace logger {
 enum class LogLevel : u8 {
   kTrace,
   kDebug,
@@ -38,9 +36,9 @@ struct LogEntry {
   LogEntry& operator=(const LogEntry& o) = default;
 };
 
-class LogBase {
+class LogSink {
  public:
-  virtual ~LogBase() = default;
+  virtual ~LogSink() = default;
 
   virtual const char* GetName() { return "Unknown"; }
 
@@ -48,8 +46,8 @@ class LogBase {
 };
 
 base::String FormatLogEntry(const LogEntry& entry);
-LogBase* AddLogSink(base::UniquePointer<LogBase> sink);
-LogBase* GetLogSink(base::StringRef name);
+LogSink* AddLogSink(base::UniquePointer<LogSink> sink);
+LogSink* GetLogSink(base::StringRef name);
 void AddLogMsg(LogLevel lvl, u32 line, const char* func, base::String msg);
 
 void CreateLogger(bool with_console = false);
@@ -79,35 +77,41 @@ inline void FmtLogMsg(LogLevel lvl,
                       const base::String& text) {
   AddLogMsg(lvl, line, func, text);
 }
-}  // namespace utl
+}  // namespace logger
 
 #ifdef _DEBUG
-#define LOG_TRACE(...) \
-  ::utl::FmtLogMsg(::utl::LogLevel::kTrace, __LINE__, __func__, __VA_ARGS__)
+#define LOG_TRACE(...)                                                \
+  ::logger::FmtLogMsg(::logger::LogLevel::kTrace, __LINE__, __func__, \
+                      __VA_ARGS__)
 #else
 #define LOG_TRACE(fmt, ...) (void(0))
 #endif
 
-#define LOG_DEBUG(...) \
-  ::utl::FmtLogMsg(::utl::LogLevel::kDebug, __LINE__, __func__, __VA_ARGS__)
-#define LOG_INFO(...) \
-  ::utl::FmtLogMsg(::utl::LogLevel::kInfo, __LINE__, __func__, __VA_ARGS__)
-#define LOG_WARNING(...) \
-  ::utl::FmtLogMsg(::utl::LogLevel::kWarning, __LINE__, __func__, __VA_ARGS__)
-#define LOG_ERROR(...) \
-  ::utl::FmtLogMsg(::utl::LogLevel::kError, __LINE__, __func__, __VA_ARGS__)
-#define LOG_CRITICAL(...) \
-  ::utl::FmtLogMsg(::utl::LogLevel::kCritical, __LINE__, __func__, __VA_ARGS__)
-#define LOG_ASSERT(expression)                                      \
-  do {                                                              \
-    if (!(expression)) {                                            \
-      ::utl::FmtLogMsg(::utl::LogLevel::kError, __LINE__, __func__, \
-                       "assertion failed at " #expression);         \
-      __debugbreak();                                               \
-    }                                                               \
-                                                                    \
+#define LOG_DEBUG(...)                                                \
+  ::logger::FmtLogMsg(::logger::LogLevel::kDebug, __LINE__, __func__, \
+                      __VA_ARGS__)
+#define LOG_INFO(...)                                                \
+  ::logger::FmtLogMsg(::logger::LogLevel::kInfo, __LINE__, __func__, \
+                      __VA_ARGS__)
+#define LOG_WARNING(...)                                                \
+  ::logger::FmtLogMsg(::logger::LogLevel::kWarning, __LINE__, __func__, \
+                      __VA_ARGS__)
+#define LOG_ERROR(...)                                                \
+  ::logger::FmtLogMsg(::logger::LogLevel::kError, __LINE__, __func__, \
+                      __VA_ARGS__)
+#define LOG_CRITICAL(...)                                                \
+  ::logger::FmtLogMsg(::logger::LogLevel::kCritical, __LINE__, __func__, \
+                      __VA_ARGS__)
+#define LOG_ASSERT(expression)                                            \
+  do {                                                                    \
+    if (!(expression)) {                                                  \
+      ::logger::FmtLogMsg(::logger::LogLevel::kError, __LINE__, __func__, \
+                          "assertion failed at " #expression);            \
+      __builtin_trap();                                                   \
+    }                                                                     \
+                                                                          \
   } while (0)
 
-#define LOG_UNIMPLEMENTED                                       \
-  ::utl::FmtLogMsg(::utl::LogLevel::kError, __LINE__, __func__, \
-                   "Unimplemented function")
+#define LOG_UNIMPLEMENTED                                             \
+  ::logger::FmtLogMsg(::logger::LogLevel::kError, __LINE__, __func__, \
+                      "Unimplemented function")

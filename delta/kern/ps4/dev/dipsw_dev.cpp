@@ -7,7 +7,6 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <cstdio>

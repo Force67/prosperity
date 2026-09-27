@@ -18,8 +18,8 @@
 
 #include <base/environment_variables.h>
 #include <base/logging.h>
-#include <utl/file.h>
-#include <utl/options.h>
+#include <io/file.h>
+#include <options/options.h>
 #include <base/containers/map.h>
 #include <base/containers/vector.h>
 #include <base/math/value_bounds.h>
@@ -116,7 +116,7 @@ struct Reader {
 
 bool loadIndexCache(const base::String &path, const char *backend,
                     base::Vector<ArchiveEntry> &out) {
-  utl::File f(base::String(path.c_str()), utl::FileMode::kRead);
+  io::File f(base::String(path.c_str()), io::FileMode::kRead);
   if (!f.IsOpen())
     return false;
   const u64 size = f.GetSize();
@@ -192,7 +192,7 @@ void saveIndexCache(const base::String &path, const char *backend,
     put32(buf, e.crc);
   }
 
-  utl::File f(base::String(path.c_str()), utl::FileMode::kWrite);
+  io::File f(base::String(path.c_str()), io::FileMode::kWrite);
   if (!f.IsOpen()) {
     BASE_LOGW("archive", "could not write index cache {}", path.c_str());
     return;
@@ -268,7 +268,7 @@ struct ArchiveImpl {
       return;
     }
 
-    utl::File probe(path, utl::FileMode::kRead);
+    io::File probe(path, io::FileMode::kRead);
     const u64 archiveSize = probe.IsOpen() ? probe.GetSize() : 0;
     probe.Close();
     const base::String cache = indexCachePath(path.c_str(), archiveSize);

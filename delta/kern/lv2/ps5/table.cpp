@@ -14,7 +14,7 @@
 // FreeBSD-11 / Sony additions 0x2a6..0x2d2. Those are named + stubbed below from
 // the authoritative PS4/PS5 syscall map. Enumerate with DELTA_PS5_SYSTRACE.
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 #include <cstring>
@@ -26,7 +26,7 @@
 #include "kern/lv2/sys_info.h"
 #include "kern/module.h"
 #include "kern/proc.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/containers/set.h>
 
 namespace {

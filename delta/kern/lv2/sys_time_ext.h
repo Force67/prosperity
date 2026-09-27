@@ -2,7 +2,7 @@
 
 // Copyright (C) Force67 2019
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 
 #include "sys_time.h"

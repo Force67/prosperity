@@ -7,7 +7,7 @@
  * in the root of the source tree.
  */
 
-#include <base.h>
+#include <guest_abi.h>
 #include "base/arch.h"
 #include <base/logging.h>
 
@@ -18,7 +18,7 @@
 #include "sys_mem.h"
 #include "sys_sce_misc.h"
 #include "kern/proc.h"
-#include <utl/options.h>
+#include <options/options.h>
 #include <base/atomic.h>
 
 namespace {

@@ -9,9 +9,10 @@
  * the rest of libSceAppContent stays LLE.
  */
 
+#include "guest_abi.h"
 #include <base/environment_variables.h>
 #include "base/arch.h"
-#include "../vprx.h"  // PS4ABI (via <base.h>), MODULE_INIT_PS5
+#include "../vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 
 #include <cstdio>
 #include <cstdlib>
@@ -66,7 +67,7 @@ int PS4ABI appContentInitialize(const void *, u32 *bootParam) {
 // parser: the file is a flat object of "key": value pairs.
 i32 userDefinedParam(u32 n) {
   static const base::String json = [] {
-    utl::File f = krnl::vfs::openRead("/app0/sce_sys/param.json");
+    io::File f = krnl::vfs::openRead("/app0/sce_sys/param.json");
     if (!f.IsOpen())
       return base::String();
     base::String s(static_cast<size_t>(f.GetSize()), '\0');

@@ -27,7 +27,7 @@
 #include "gfx/gfx.h"
 #include "gfx/gfx_android.h"
 #include <logger/logger.h>
-#include <utl/options.h>
+#include <options/options.h>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "prosperity", __VA_ARGS__)
 
@@ -163,8 +163,8 @@ extern "C" void android_main(android_app *app) {
   redirectStdioToLogcat();
   krnl::reserveGuestVaSpace();  // claim guest-fixed ranges first (no-op on Android)
   cpu::earlyInit();  // reserve the FEX heap before any large guest mapping
-  utl::CreateLogger(true);
-  utl::RouteBaseLogging();
+  logger::CreateLogger(true);
+  logger::RouteBaseLogging();
 
   AppState state;
   const char *ext = app->activity->externalDataPath;
@@ -173,11 +173,11 @@ extern "C" void android_main(android_app *app) {
 
   // The activity has no command line of its own, so the knobs come from the
   // environment plus an options.txt pushed next to the modules and the game.
-  utl::InitOptions();
+  options::Init();
   base::SetOptionValue("DELTA_DATA_DIR", state.dataDir.c_str());
   base::String optionFile = state.dataDir;
   optionFile.append("/options.txt");
-  utl::LoadOptionFile(optionFile.c_str(), /*optional=*/true);
+  options::LoadFile(optionFile.c_str(), /*optional=*/true);
 
   app->userData = &state;
   app->onAppCmd = onCmd;

@@ -17,8 +17,8 @@
 #include <cstring>
 
 #include <base/logging.h>
-#include <utl/file.h>
-#include <utl/options.h>
+#include <io/file.h>
+#include <options/options.h>
 #include <base/containers/map.h>
 #include <base/containers/vector.h>
 #include <base/math/value_bounds.h>
@@ -60,7 +60,7 @@ bool dbg() {
 } // namespace
 
 struct Ufs2Impl {
-  utl::File file;
+  io::File file;
   u64 imageSize = 0;
   bool ok = false;
 
@@ -89,7 +89,7 @@ struct Ufs2Impl {
   bool readAt(u64 off, void *buf, size_t n) {
     if (off + n > imageSize)
       return false;
-    file.Seek(off, utl::SeekMode::kSeekSet);
+    file.Seek(off, io::SeekMode::kSeekSet);
     return file.Read(buf, n) == n;
   }
 
