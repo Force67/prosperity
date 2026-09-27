@@ -18,7 +18,7 @@ c++ -std=c++20 -DDELTA_HAVE_SPIRV_BACKEND=1 \
   "$G/gcn/gcn_resource.cc" \
   "$G/gcn/gcn_disasm.cc" \
   "$G/gcn/gcn_audit.cc" \
-  shared/utl/mem_posix.cpp \
+  shared/utl/mem_posix.cc \
   "$G/gcn/spirv/gcn_spirv.cc" \
   "$G/gcn/spirv/translate_alu.cc" \
   "$G/gcn/spirv/translate_neo.cc" \
