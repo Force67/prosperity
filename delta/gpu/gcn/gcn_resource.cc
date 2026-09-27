@@ -11,6 +11,7 @@
 #include "gpu/guest_memory.h"
 
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -951,6 +952,15 @@ struct ScalarEval {
   }
 };
 
+// One step of a program's compiled replay (see PlanReplay).
+struct ReplayOp {
+  u32 index = 0;    // into ScalarPassInfo::insts
+  u32 version = 0;  // DescriptorVersions of an SMRD consumer's descriptor
+  bool capture_before = false;  // an SMRD consumer
+  bool step = false;
+  bool capture_after = false;  // a MIMG/MUBUF/MTBUF consumer
+};
+
 // Per-program analysis reused across draws: the MIMG binding plan plus the
 // subset of instructions the scalar walk actually consumes (descriptor-chain
 // scalar ops, SMRD loads, MIMG/MUBUF uses). The resolvers run once per
@@ -962,7 +972,12 @@ struct ScalarEval {
 struct ScalarPassInfo {
   MimgBindingPlan plan;
   std::vector<Inst> insts;  // program-order subset relevant to ScalarEval users
+  std::vector<ReplayOp> replay;
+  std::vector<ReplayOp> full_replay;  // every step, for DELTA_GPU_REPLAY_CHECK
 };
+
+std::vector<ReplayOp> PlanReplay(const std::vector<Inst>& insts, bool prune);
+DELTA_OPTION(bool, kReplayCheck, "DELTA_GPU_REPLAY_CHECK", false);
 
 // The vector instructions the walk has to see: the lane-spill pair that moves
 // pointers between the scalar file and a VGPR's lanes, and the forms whose
@@ -1041,6 +1056,9 @@ const ScalarPassInfo& CachedScalarInfo(
         inst.enc == Enc::kMtbuf || VectorTouchesScalarFile(inst))
       e.info.insts.push_back(inst);
   }
+  e.info.replay = PlanReplay(e.info.insts, true);
+  if (kReplayCheck)
+    e.info.full_replay = PlanReplay(e.info.insts, false);
   return cache.emplace(program.get(), std::move(e)).first->second.info;
 }
 
@@ -1131,41 +1149,226 @@ void Capture(ScalarConsumer& c, u32 w, u32 first, u32 count,
   count = std::min<u32>(count, ScalarEval::kRegs - std::min<u32>(first, ScalarEval::kRegs));
   c.first[w] = static_cast<u8>(first);
   c.count[w] = static_cast<u8>(count);
+  // An unknown register's value is whatever the walk left there, and that
+  // differs between the pruned and the full replay; neither is meaningful.
   for (u32 i = 0; i < count; i++) {
-    c.value[w][i] = eval.sgpr[first + i];
-    if (eval.known[first + i])
+    if (eval.known[first + i]) {
+      c.value[w][i] = eval.sgpr[first + i];
       c.known[w] |= static_cast<u8>(1u << i);
+    }
   }
 }
 
+u32 ResourceSgpr(const Inst& inst) {
+  return ((inst.raw[1] >> 16) & 0x1F) * 4;
+}
+
+u32 SamplerSgpr(const Inst& inst) {
+  return ((inst.raw[1] >> 21) & 0x1F) * 4;
+}
+
+using SgprSet = std::bitset<ScalarEval::kRegs>;
+
+void AddRange(SgprSet& set, u32 first, u32 count) {
+  for (u32 i = first; i < first + count && i < ScalarEval::kRegs; i++)
+    set.set(i);
+}
+
+void AddSource(SgprSet& set, u32 field) {
+  if (field <= 127)
+    set.set(field);
+}
+
+// What ScalarEval::Step does to the register file, statically: the SGPRs it
+// reads, the ones it always overwrites (Set or Clear), and the ones an SMRD or
+// a readlane may also stamp with a source address. `keep` marks writelane,
+// whose spill slots the liveness does not track. Must mirror Step;
+// DELTA_GPU_REPLAY_CHECK compares a pruned replay against a full one.
+struct StepEffects {
+  SgprSet reads, writes, sources;
+  bool keep = false;
+};
+
+StepEffects EffectsOf(const Inst& inst) {
+  StepEffects e;
+  const u32 w = inst.raw[0], op = inst.opcode;
+  switch (inst.enc) {
+    case Enc::kSop1: {
+      const u32 sdst = (w >> 16) & 0x7F, ssrc0 = w & 0xFF;
+      if (op == 0x03 || op == 0x04)
+        AddSource(e.reads, ssrc0);
+      if (op == 0x04 && ssrc0 <= 126)
+        e.reads.set(ssrc0 + 1);
+      AddRange(e.writes, sdst, Sop1DestIs64(op) ? 2 : 1);
+      return e;
+    }
+    case Enc::kSopk: {
+      const u32 sdst = (w >> 16) & 0x7F;
+      if ((op >= 0x03 && op <= 0x0e) || op == 0x11 || op == 0x13 || op == 0x15)
+        return e;
+      if (op == 0x0f || op == 0x10)
+        e.reads.set(sdst);
+      e.writes.set(sdst);
+      return e;
+    }
+    case Enc::kSop2:
+      AddSource(e.reads, w & 0xFF);
+      AddSource(e.reads, (w >> 8) & 0xFF);
+      AddRange(e.writes, (w >> 16) & 0x7F, Sop2DestIs64(op) ? 2 : 1);
+      return e;
+    case Enc::kVop1:
+    case Enc::kVop2:
+    case Enc::kVop3: {
+      const bool vop1 = inst.enc == Enc::kVop1, vop2 = inst.enc == Enc::kVop2;
+      const bool vop3 = inst.enc == Enc::kVop3;
+      const u32 w1 = inst.raw[1];
+      const u32 dst = vop3 ? (w & 0xFF) : ((w >> 17) & 0xFF);
+      const u32 src0 = vop3 ? (w1 & 0x1FF) : (w & 0x1FF);
+      const u32 src1 = vop3 ? ((w1 >> 9) & 0x1FF) : ((w >> 9) & 0xFF);
+      if ((vop2 && op == 0x02) || (vop3 && op == 0x102)) {  // writelane
+        AddSource(e.reads, src0);
+        AddSource(e.reads, src1);
+        e.keep = true;
+      } else if ((vop2 && op == 0x01) || (vop3 && op == 0x101) ||
+                 (vop1 && op == 0x02) || (vop3 && op == 0x182)) {
+        if (!(vop1 || op == 0x182))  // readlane names its lane
+          AddSource(e.reads, src1);
+        AddRange(e.writes, dst, 1);
+        AddRange(e.sources, dst, 1);
+      } else if (vop3 && (op < 0x100 || Vop3bWritesSdst(op))) {
+        AddRange(e.writes, op < 0x100 ? dst : ((w >> 8) & 0x7F), 2);
+      }
+      return e;
+    }
+    case Enc::kSmrd: {
+      const Smrd s = DecodeSmrd(w);
+      const bool buffer_load = s.op >= 0x08 && s.op <= 0x0c;
+      if (s.op > 0x04 && !buffer_load)
+        return e;
+      AddRange(e.reads, s.sbase * 2, buffer_load ? 4 : 2);
+      const SmrdOffset so = DecodeSmrdOffset(inst);
+      if (so.in_sgpr && so.sgpr < ScalarEval::kRegs)
+        e.reads.set(so.sgpr);
+      const u32 dwords = buffer_load ? (1u << (s.op - 0x08)) : (1u << s.op);
+      AddRange(e.writes, s.sdst, dwords);
+      AddRange(e.sources, s.sdst, dwords);
+      return e;
+    }
+    default:
+      return e;
+  }
+}
+
+// Compile a program's replay once: which instructions capture a consumer,
+// the descriptor version each SMRD consumer reads (static: it depends only on
+// program order), and, when pruning, only the steps whose results reach a
+// capture. Most SMRDs load cbuffer constants for vector code the walk never
+// sees; a pruned replay neither reads nor flushes their memory.
+std::vector<ReplayOp> PlanReplay(const std::vector<Inst>& insts, bool prune) {
+  std::vector<ReplayOp> ops(insts.size());
+  DescriptorVersions versions;
+  for (u32 i = 0; i < insts.size(); i++) {
+    const Inst& inst = insts[i];
+    ops[i].index = i;
+    if (IsSmrdConsumer(inst)) {
+      const Smrd sm = DecodeSmrd(inst.raw[0]);
+      ops[i].capture_before = true;
+      ops[i].version = versions.Of(sm.sbase * 2, sm.op <= 0x04 ? 2 : 4);
+    }
+    versions.Note(inst);
+    ops[i].capture_after = IsResourceConsumer(inst);
+  }
+  // Backward liveness over the linear replay: a value is live when a later
+  // capture or kept step reads it before something overwrites it. Source
+  // addresses are only stamped conditionally, so nothing kills them.
+  SgprSet live, live_sources;
+  for (u32 i = static_cast<u32>(insts.size()); i-- > 0;) {
+    const Inst& inst = insts[i];
+    ReplayOp& op = ops[i];
+    if (op.capture_after) {
+      const u32 srsrc = ResourceSgpr(inst);
+      AddRange(live, srsrc, inst.enc == Enc::kMimg ? 8 : 4);
+      if (inst.enc == Enc::kMimg)
+        AddRange(live, SamplerSgpr(inst), 4);
+      AddRange(live_sources, srsrc, 1);
+    }
+    const StepEffects e = EffectsOf(inst);
+    op.step = !prune || e.keep || (e.writes & live).any() ||
+              (e.sources & live_sources).any();
+    if (op.step) {
+      live &= ~e.writes;
+      live |= e.reads;
+    }
+    if (op.capture_before)
+      AddRange(live, DecodeSmrd(inst.raw[0]).sbase * 2, 4);
+  }
+  std::erase_if(ops, [](const ReplayOp& op) {
+    return !op.step && !op.capture_before && !op.capture_after;
+  });
+  return ops;
+}
+
 void BuildReplay(const std::vector<Inst>& insts,
+                 const std::vector<ReplayOp>& plan,
                  const u32* user_data,
                  u64 code_base,
                  std::vector<ScalarConsumer>& out) {
   out.clear();
   ScalarEval eval(user_data, code_base);
-  DescriptorVersions versions;
-  for (u32 i = 0; i < insts.size(); i++) {
-    const Inst& inst = insts[i];
-    if (IsSmrdConsumer(inst)) {
-      const Smrd sm = DecodeSmrd(inst.raw[0]);
+  for (const ReplayOp& op : plan) {
+    const Inst& inst = insts[op.index];
+    if (op.capture_before) {
       ScalarConsumer& c = out.emplace_back();
-      c.index = i;
-      c.version = versions.Of(sm.sbase * 2, sm.op <= 0x04 ? 2 : 4);
-      Capture(c, 0, sm.sbase * 2, 4, eval);
+      c.index = op.index;
+      c.version = op.version;
+      Capture(c, 0, DecodeSmrd(inst.raw[0]).sbase * 2, 4, eval);
     }
-    versions.Note(inst);
-    eval.Step(inst);
-    if (!IsResourceConsumer(inst))
+    if (op.step)
+      eval.Step(inst);
+    if (!op.capture_after)
       continue;
     ScalarConsumer& c = out.emplace_back();
-    c.index = i;
-    const u32 srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+    c.index = op.index;
+    const u32 srsrc = ResourceSgpr(inst);
     Capture(c, 0, srsrc, inst.enc == Enc::kMimg ? 8 : 4, eval);
     if (inst.enc == Enc::kMimg)
-      Capture(c, 1, ((inst.raw[1] >> 21) & 0x1F) * 4, 4, eval);
+      Capture(c, 1, SamplerSgpr(inst), 4, eval);
     c.src = srsrc < ScalarEval::kRegs ? eval.src[srsrc] : 0;
   }
+}
+
+bool SameConsumer(const ScalarConsumer& a, const ScalarConsumer& b) {
+  if (a.index != b.index || a.version != b.version || a.src != b.src)
+    return false;
+  for (u32 w = 0; w < 2; w++)
+    if (a.first[w] != b.first[w] || a.count[w] != b.count[w] ||
+        a.known[w] != b.known[w] ||
+        std::memcmp(a.value[w], b.value[w], sizeof(a.value[w])))
+      return false;
+  return true;
+}
+
+// DELTA_GPU_REPLAY_CHECK: the pruned replay must capture exactly what
+// stepping every instruction does.
+void CheckReplay(const ScalarPassInfo& info,
+                 const u32* user_data,
+                 u64 code_base,
+                 const std::vector<ScalarConsumer>& pruned) {
+  thread_local std::vector<ScalarConsumer> full;
+  BuildReplay(info.insts, info.full_replay, user_data, code_base, full);
+  bool same = full.size() == pruned.size();
+  for (u32 i = 0; same && i < full.size(); i++)
+    same = SameConsumer(full[i], pruned[i]);
+  static u64 checked = 0, mismatched = 0;
+  checked++;
+  if (!same && mismatched++ < 16)
+    BASE_LOGW("replay", "pruned replay differs from the full one ({} vs {} "
+              "consumers, {} of {} steps kept)",
+              pruned.size(), full.size(), info.replay.size(),
+              info.full_replay.size());
+  if (checked % 100000 == 0)
+    BASE_LOGI("replay", "checked {} replays, {} mismatched", checked,
+              mismatched);
 }
 
 struct SharedReplays {
@@ -1202,8 +1405,10 @@ const std::vector<ScalarConsumer>* SharedReplay(
   e.program = program;
   e.code_base = code_base;
   std::memcpy(e.user_data, user_data, sizeof(e.user_data));
-  BuildReplay(CachedScalarInfo(program).insts, user_data, code_base,
-              e.consumers);
+  const ScalarPassInfo& info = CachedScalarInfo(program);
+  BuildReplay(info.insts, info.replay, user_data, code_base, e.consumers);
+  if (kReplayCheck)
+    CheckReplay(info, user_data, code_base, e.consumers);
   return &e.consumers;
 }
 
