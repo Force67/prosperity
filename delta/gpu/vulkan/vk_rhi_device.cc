@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <thread>
 
 #include <base/logging.h>
 #include <unistd.h>
@@ -1528,8 +1529,16 @@ bool VulkanDevice::ReadTimestamps(rhi::TimestampPool* pool,
 void VulkanDevice::SavePipelineCache(bool force) {
   if (pipeline_cache_path_.empty() || !native.pipeline_cache)
     return;
-  // A save rewrites the whole blob on the submit thread, and a long-lived
-  // cache is hundreds of MB: wait for a compile burst to end (or a minute).
+  if (force) {
+    while (cache_saving_.load())
+      std::this_thread::yield();
+  } else if (cache_saving_.load()) {
+    return;
+  }
+  // A long-lived cache is hundreds of MB (GTA:SA's is 500): wait for a
+  // compile burst to end (or a minute), and serialize and write it off the
+  // thread that ends the frame. Inline, one save stalled a frame 0.7-7 s,
+  // and the title's hang detector fires at 10.
   const u64 now = NowNs();
   const u64 last_build = last_pipeline_build_ns_.load();
   if (!force && last_build <= last_cache_write_ns_)
@@ -1537,19 +1546,31 @@ void VulkanDevice::SavePipelineCache(bool force) {
   if (!force && now - last_build < 3000000000ull &&
       now - last_cache_write_ns_ < 60000000000ull)
     return;
+  last_cache_write_ns_ = now;
+  if (force) {
+    WritePipelineCache(true);
+    return;
+  }
+  cache_saving_.store(true);
+  std::thread([this] {
+    WritePipelineCache(false);
+    cache_saving_.store(false);
+  }).detach();
+}
+
+void VulkanDevice::WritePipelineCache(bool force) {
   size_t size = 0;
   if (vkGetPipelineCacheData(native.device, native.pipeline_cache, &size,
                              nullptr) != VK_SUCCESS ||
       !size)
     return;
-  last_cache_write_ns_ = now;
   if (!force && size == last_cache_size_)
     return;
+  last_cache_size_ = size;
   std::vector<u8> blob(size);
   if (vkGetPipelineCacheData(native.device, native.pipeline_cache, &size,
                              blob.data()) != VK_SUCCESS)
     return;
-  last_cache_size_ = size;
   // Write-then-rename: the runner SIGKILLs the emulator, and a torn blob
   // would cost the next run its whole cache.
   const std::string tmp =

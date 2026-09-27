@@ -306,6 +306,7 @@ class VulkanDevice final : public rhi::Device {
  private:
   VkDescriptorPool GrowSetPool();
   void SavePipelineCache(bool force);
+  void WritePipelineCache(bool force);
 
   rhi::Caps caps_;
   std::string device_name_;
@@ -319,6 +320,8 @@ class VulkanDevice final : public rhi::Device {
   std::atomic<u64> last_pipeline_build_ns_{0};
   u64 last_cache_write_ns_ = 0;
   size_t last_cache_size_ = 0;
+  // A periodic save runs on a thread of its own; a forced one waits for it.
+  std::atomic<bool> cache_saving_{false};
   bool fault_reported_ = false;
   VkDebugUtilsMessengerEXT messenger_ = VK_NULL_HANDLE;
   float max_lod_bias_ = 0.0f;
