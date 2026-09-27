@@ -68,6 +68,16 @@ u64 TexHash(u64 base, u64 bytes) {
   return h ^ (bytes << 1);
 }
 
+u64 TexHashSerial(u64 base, u64 bytes) {
+  if (bytes < 2 * kHashChunk)
+    return TexHashRange(base, bytes);
+  u64 h = 1469598103934665603ull;
+  for (u64 off = 0; off < bytes; off += kHashChunk)
+    h = (h ^ TexHashRange(base + off, std::min(kHashChunk, bytes - off))) *
+        kHashPrime;
+  return h ^ (bytes << 1);
+}
+
 u64 TexSampleHash(u64 base, u64 bytes) {
   constexpr u64 kPrime = 1099511628211ull;
   if (bytes <= 16384)

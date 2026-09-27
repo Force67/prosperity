@@ -1224,6 +1224,7 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
 void EndRegion() {
   if (!g_region.open)
     return;
+  PassProfEnd();
   g_frame.list->EndRenderPass();
   CmdEndLabel(g_frame.list);
   if (trace::Recording())
@@ -1625,6 +1626,7 @@ bool BeginRegion(const u64* mrt_base,
                 (unsigned long long)base, w, h, g_region.cur_mrt_count,
                 (unsigned long long)depth_base);
   g_frame.list->BeginRenderPass(pass);
+  PassProfBegin(mrt_count ? mrt_base[0] : depth_base);
   g_region.open = true;
   g_region.depth_read_only = depth_base && depth_read_only;
   // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too.

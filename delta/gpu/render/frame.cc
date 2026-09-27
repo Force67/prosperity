@@ -29,6 +29,7 @@
 
 #include <dlfcn.h>
 #include <algorithm>
+#include <unordered_map>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -127,6 +128,82 @@ bool EndImmediate(rhi::CommandList* list) {
   return ok;
 }
 
+namespace {
+DELTA_OPTION(bool, kPassProf, "DELTA_GPU_PASSPROF", false);
+constexpr u32 kMaxProfiledPasses = 4096;
+u32 g_pass_open = ~0u;  // mark index of the open region, or none
+u32 g_pass_draws_at_open = 0;
+
+struct PassTotal {
+  double ns = 0;
+  u64 passes = 0, draws = 0;
+};
+std::unordered_map<u64, PassTotal> g_pass_totals;
+u32 g_pass_frames = 0;
+
+// Once the slot's submission has retired: fold its passes into the totals and
+// report the heaviest targets every 120 frames.
+void CollectPassTimes(FrameSlot& slot) {
+  if (!slot.pass_timestamps || slot.pass_marks.empty())
+    return;
+  const u32 n = static_cast<u32>(slot.pass_marks.size());
+  std::vector<u64> stamps(n * 2);
+  if (Device().ReadTimestamps(slot.pass_timestamps, 0, n * 2, stamps.data())) {
+    const rhi::Caps& caps = Device().caps();
+    const u64 mask =
+        caps.timestamp_bits >= 64 ? UINT64_MAX : (u64{1} << caps.timestamp_bits) - 1;
+    for (u32 i = 0; i < n; i++) {
+      PassTotal& t = g_pass_totals[slot.pass_marks[i].target];
+      t.ns += ((stamps[i * 2 + 1] - stamps[i * 2]) & mask) *
+              caps.timestamp_period_ns;
+      t.passes++;
+      t.draws += slot.pass_marks[i].draws;
+    }
+  }
+  slot.pass_marks.clear();
+  if (++g_pass_frames < 120)
+    return;
+  std::vector<std::pair<u64, PassTotal>> sorted(g_pass_totals.begin(),
+                                                g_pass_totals.end());
+  std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+    return a.second.ns > b.second.ns;
+  });
+  double total = 0;
+  for (const auto& [target, t] : sorted)
+    total += t.ns;
+  BASE_LOGI("passprof", "regions {:.2f} ms/frame over {} targets",
+            total / g_pass_frames / 1e6, sorted.size());
+  for (size_t i = 0; i < sorted.size() && i < 16; i++) {
+    const PassTotal& t = sorted[i].second;
+    BASE_LOGI("passprof", "  {:#x} {:.2f} ms/f  passes={:.1f}/f draws={:.0f}/f",
+              (unsigned long long)sorted[i].first, t.ns / g_pass_frames / 1e6,
+              double(t.passes) / g_pass_frames, double(t.draws) / g_pass_frames);
+  }
+  g_pass_totals.clear();
+  g_pass_frames = 0;
+}
+}  // namespace
+
+void PassProfBegin(u64 target) {
+  FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
+  if (!slot.pass_timestamps || slot.pass_marks.size() >= kMaxProfiledPasses)
+    return;
+  g_pass_open = static_cast<u32>(slot.pass_marks.size());
+  g_pass_draws_at_open = g_frame.draws;
+  slot.pass_marks.push_back({target, 0});
+  g_frame.list->WriteTimestamp(slot.pass_timestamps, g_pass_open * 2, true);
+}
+
+void PassProfEnd() {
+  if (g_pass_open == ~0u)
+    return;
+  FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
+  slot.pass_marks[g_pass_open].draws = g_frame.draws - g_pass_draws_at_open;
+  g_frame.list->WriteTimestamp(slot.pass_timestamps, g_pass_open * 2 + 1,
+                               false);
+  g_pass_open = ~0u;
+}
+
 bool CreateFrameSlots() {
   const bool timestamps = Device().caps().timestamps;
   for (auto& slot : g_frame.slots) {
@@ -135,6 +212,8 @@ bool CreateFrameSlots() {
       return false;
     if (timestamps)
       slot.timestamps = Device().CreateTimestampPool(2);
+    if (timestamps && kPassProf)
+      slot.pass_timestamps = Device().CreateTimestampPool(kMaxProfiledPasses * 2);
   }
   g_frame.list = g_frame.slots[0].list;
   return true;
@@ -967,6 +1046,11 @@ void BeginFrame(Renderer& renderer) {
     g_frame.list->ResetTimestamps(slot.timestamps, 0, 2);
     g_frame.list->WriteTimestamp(slot.timestamps, 0, true);
   }
+  if (slot.pass_timestamps) {
+    g_frame.list->ResetTimestamps(slot.pass_timestamps, 0,
+                                  kMaxProfiledPasses * 2);
+    slot.pass_marks.clear();
+  }
   g_frame.recording = true;
 }
 
@@ -998,10 +1082,37 @@ void WatchGuestMem() {
   }
 }
 
+namespace {
+// A frame end slow enough to stall the title (its hang detector fires at
+// 10 s) says which phase took the time.
+struct EndFramePhases {
+  u64 start = NowNs(), last = start;
+  u64 ns[6] = {};
+  void Mark(int phase) {
+    const u64 now = NowNs();
+    ns[phase] += now - last;
+    last = now;
+  }
+  ~EndFramePhases() {
+    if (NowNs() - start < 300'000'000)
+      return;
+    BASE_LOGW("gpuvk",
+              "slow frame end {} ms: tracker {} buffers {} cs-flush {} "
+              "record+submit {} gpu-wait {} present+maintain {}",
+              (NowNs() - start) / 1'000'000, ns[0] / 1'000'000,
+              ns[1] / 1'000'000, ns[2] / 1'000'000, ns[3] / 1'000'000,
+              ns[4] / 1'000'000, (NowNs() - last + ns[5]) / 1'000'000);
+  }
+};
+}  // namespace
+
 void EndFrame(Renderer& renderer, u64 scanout_base) {
+  EndFramePhases phases;
   WatchGuestMem();
   GuestWriteTracker().EndFrame();
+  phases.Mark(0);
   BufferCacheEndFrame();
+  phases.Mark(1);
   if (!renderer.available() || !g_frame.recording)
     return;
   // Compute results stay on the GPU: guest memory catches up when one of our
@@ -1017,6 +1128,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     return;
   }
   g_frame.recording = false;
+  phases.Mark(2);
   ReportFps();
   ScopeNs end_timer(&g_ns_end);
   EndRegion();  // close any open region
@@ -1151,6 +1263,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     g_frame.slot_idx ^= 1;
   FrameSlot& fin = g_frame.slots[finish_idx];
   const bool waited = fin.submitted;
+  phases.Mark(3);
   if (fin.submitted) {
     u64 _tr0 = NowNs();
     if (!Device().Wait(fin.submission)) {
@@ -1173,6 +1286,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
         g_gpu_exec_samples++;
       }
     }
+    phases.Mark(4);
+    CollectPassTimes(fin);
     for (rhi::CommandList* c : fin.chunks)
       g_free_lists.push_back(c);
     fin.chunks.clear();

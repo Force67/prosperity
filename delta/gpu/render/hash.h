@@ -15,6 +15,9 @@ inline u64 HashWord(u64 h, u64 v) {
 }
 
 u64 TexHash(u64 base, u64 bytes);
+// The same value computed on the calling thread only, for callers that are
+// themselves pool workers.
+u64 TexHashSerial(u64 base, u64 bytes);
 // Length plus 256 evenly spaced 64-byte windows: a fixed ~16 KB read whatever
 // the surface's size, so it can be checked every frame where TexHash cannot.
 // It can miss a write that falls between every window, which is why it guards

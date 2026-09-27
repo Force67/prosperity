@@ -20,6 +20,14 @@ struct FrameSlot {
   rhi::CommandList* list = nullptr;  // the chunk this slot is recording
   u64 submission = 0;  // the frame's last submission, waited at finish
   rhi::TimestampPool* timestamps = nullptr;
+  // DELTA_GPU_PASSPROF: a timestamp pair per render region; mark i owns
+  // queries 2i and 2i+1.
+  struct PassMark {
+    u64 target;
+    u32 draws;
+  };
+  rhi::TimestampPool* pass_timestamps = nullptr;
+  std::vector<PassMark> pass_marks;
   rhi::Buffer* readback = nullptr;
   // Chunks of this frame submitted early (SubmitFrameChunk), recycled once
   // the slot's submission has retired.
@@ -75,6 +83,10 @@ rhi::CommandList* BeginImmediate();
 bool EndImmediate(rhi::CommandList* list);
 // Pipelined by default; DELTA_GPU_SYNC=1 restores the submit-and-wait frame.
 bool FramePipelined();
+// DELTA_GPU_PASSPROF: time the render region about to open, keyed by its
+// first target; PassProfEnd closes it. No-ops when the knob is off.
+void PassProfBegin(u64 target);
+void PassProfEnd();
 // Grow the active slot's readback buffer to hold one w*h image of `fmt`.
 void EnsureReadback(u32 w, u32 h, rhi::Format fmt);
 
