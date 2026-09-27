@@ -4,7 +4,7 @@
 #pragma once
 
 // Shared between the two probe translation units: the generic guest-code
-// probes in probe.cpp and the per-title bring-up patches in probe_title.cpp.
+// probes in probe.cc and the per-title bring-up patches in probe_title.cc.
 // Not part of the probe interface: kern calls probe.h, nothing else.
 
 #include "base/arch.h"
@@ -15,7 +15,7 @@ class smodule;
 
 namespace probe {
 
-// probe_title.cpp, armed from onProcessCreated / onModuleLoaded / onBeforeStart.
+// probe_title.cc, armed from onProcessCreated / onModuleLoaded / onBeforeStart.
 void bringUpRebirthEbootRegistry(smodule &m);
 void bringUpRebirthSurfaceRegistry(smodule &m);
 void patchVideoOutDiag(smodule &m);

@@ -28,7 +28,7 @@ void installCrashHandler();
 void symbolize(uintptr_t addr, char *out, size_t n);
 
 // Print the calling thread's guest call sites by scanning its stack for return
-// addresses inside a loaded module (see crash.cpp).
+// addresses inside a loaded module (see crash.cc).
 void guestStackTrace(const char *tag, int maxFrames);
 
 // Walk a frame-pointer chain and symbolize each return address. Only works on

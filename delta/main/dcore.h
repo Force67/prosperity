@@ -8,7 +8,7 @@
  * in the root of the source tree.
  */
 
-#include <kern/proc.h>
+#include <kern/process.h>
 
 #include <base/containers/vector.h>
 #include <base/strings/xstring.h>

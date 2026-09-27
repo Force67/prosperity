@@ -1124,7 +1124,7 @@ void EndFrame(u64 scanout_base) {
 
 }  // namespace gpu::ps5
 
-// LLE submit bridge: the kernel /dev/gc AGC ioctls (gc_dev.cpp) forward the DCB
+// LLE submit bridge: the kernel /dev/gc AGC ioctls (gc_dev.cc) forward the DCB
 // here, mirroring prosperity_gc_submit on the PS4 path.
 extern "C" void prosperity_agc_submit(u64 dcb_base, u32 size_bytes) {
   gpu::ps5::SubmitDcb(reinterpret_cast<const void*>(dcb_base), size_bytes);

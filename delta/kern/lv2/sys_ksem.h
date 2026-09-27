@@ -16,7 +16,7 @@ namespace krnl {
 // counting semaphores keyed by an integer semid_t handed out by ksem_init /
 // ksem_open, distinct from the SCE "osem" syscalls (549+). They were
 // null_handler stubs, so sem_wait() never blocked and consumers raced their
-// producers. We back them with a self-contained registry (see the .cpp); the
+// producers. We back them with a self-contained registry (see the .cc); the
 // kObject path is intentionally avoided since ksem ids are plain ints, not
 // object-table handles.
 

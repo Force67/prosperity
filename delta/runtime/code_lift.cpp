@@ -23,7 +23,7 @@
 #include <logger/logger.h>
 
 #include "kern/lv2/dispatch.h"
-#include "kern/proc.h"
+#include "kern/process.h"
 #include <options/options.h>
 
 namespace {

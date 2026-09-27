@@ -38,7 +38,7 @@ int PS4ABI lv2_stub_syscall();
 // An id no table row covers at all.
 int PS4ABI lv2_unmapped_syscall();
 
-const char *syscall_getname(u32 idx); // name_table.cpp
+const char *syscall_getname(u32 idx); // name_table.cc
 void dumpSyscallHist();
 
 // Classifies a raw handler return as an errno or a result; see the definition.

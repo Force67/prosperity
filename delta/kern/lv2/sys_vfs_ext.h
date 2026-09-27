@@ -14,7 +14,7 @@
 namespace krnl {
 // Extra VFS-adjacent syscall handlers (access/stat-family, fcntl, dup, the
 // scatter/gather read/write ops, poll/select stubs and the soft directory
-// mutation stubs). Kept separate from sys_vfs.cpp to avoid touching that file.
+// mutation stubs). Kept separate from sys_vfs.cc to avoid touching that file.
 
 int PS4ABI sys_access(const char *path, int mode);
 int PS4ABI sys_faccessat(int fd, const char *path, int mode, int flag);
@@ -71,6 +71,6 @@ int PS4ABI sys_closefrom(u32 lowfd);
 
 // DELTA_QARBUF diagnostic: flag fds opened on a *.qar archive so sys_pread can
 // report where the streamed texture data lands (a GPU-mapped 0x81xx region vs a
-// low staging buffer). Set from sys_vfs.cpp at open time.
+// low staging buffer). Set from sys_vfs.cc at open time.
 void markQarFd(u32 fd, bool v);
 } // namespace krnl

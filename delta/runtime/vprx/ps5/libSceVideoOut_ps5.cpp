@@ -22,7 +22,7 @@
 #include <base/logging.h>
 
 #include "host/window.h"
-#include "kern/proc.h"
+#include "kern/process.h"
 #include "kern/lv2/sys_event.h"
 #include <host_memory/host_memory.h>
 

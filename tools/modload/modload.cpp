@@ -6,7 +6,7 @@
 #include <kern/object_ref.h>
 
 #include "kern/module.h"
-#include "kern/proc.h"
+#include "kern/process.h"
 #include <base/strings/xstring.h>
 
 int main(int argc, char** argv) {

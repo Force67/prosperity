@@ -27,7 +27,7 @@ int PS4ABI systemServiceParamGetInt(i32 paramId, i32 *value) {
 }
 
 // sceLncUtilGetAppStatus {appId, _, state}: state 4 = running in foreground (the PS4
-// query answers the same in svc_lnc.cpp). The PS5 LLE path reads a zeroed reply from
+// query answers the same in svc_lnc.cc). The PS5 LLE path reads a zeroed reply from
 // a SceLncService method we don't implement, and sceNpWebApi2Initialize returns
 // 0x8055c102 unless state is 4 or 5 (Demon's Souls' Crossgen init verifies it).
 int PS4ABI lncUtilGetAppStatus(u32 *status) {

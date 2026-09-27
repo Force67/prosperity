@@ -14,7 +14,7 @@
 
 #include "kern/lv2/sys_dynlib.h"
 #include "kern/module.h"
-#include "kern/proc.h"
+#include "kern/process.h"
 #include "kern/vfs.h"
 
 #include <base/strings/string_ref.h>

@@ -8,7 +8,7 @@
  * in the root of the source tree.
  */
 
-#include "proc.h"
+#include "process.h"
 #include "base/arch.h"
 #include <elf_types.h>
 #include <sce_types.h>

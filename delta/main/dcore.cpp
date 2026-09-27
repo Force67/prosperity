@@ -24,7 +24,7 @@
 #include <kern/ps4/audio_sink.h>
 #include <kern/ps4/hardware_mode.h>
 #include <kern/crash.h>
-#include <kern/vm_manager.h>
+#include <kern/vm_map.h>
 #include <kern/probe/probe_arm.h>
 #include <kern/vfs.h>
 #include <kern/vfs_providers.h>

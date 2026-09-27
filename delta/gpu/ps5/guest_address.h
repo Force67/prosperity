@@ -44,7 +44,7 @@ inline constexpr u64 kGpuEnd = 0x10000000000ull;
 // ...and the pools a title actually maps, since the band is only ever a guess. Astro Bot
 // fixed-maps its GPU pools at 12-25 GiB, under the 64 GiB floor, so every submit naming
 // one was dropped and the title waited forever on the fence they'd have written. The
-// kernel notes each dmem mapping (kern/ps5/dev/dma_dev.cpp).
+// kernel notes each dmem mapping (kern/ps5/dev/dma_dev.cc).
 inline constexpr u32 kMaxNotedPools = 128;
 
 struct NotedPools {

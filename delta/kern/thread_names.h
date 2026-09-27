@@ -1,7 +1,7 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
  *
- * See thread_names.cpp: carries guest sys_mname stack tags onto host threads
+ * See thread_names.cc: carries guest sys_mname stack tags onto host threads
  * (pthread names), so the wait probe / gdb / perf can attribute threads.
  */
 

@@ -58,15 +58,15 @@
  * sceKernelSetEventFlag(mixEvf, 1<<idx). Pace it at grain/48000 s per block and
  * the guest's Output blocks in the same way real hardware paces it.
  *
- * That daemon EXISTS: kern/ps4/audio_daemon.cpp, which consumes the regions and
+ * That daemon EXISTS: kern/ps4/audio_daemon.cc, which consumes the regions and
  * feeds the same gfx_audio sink this shim uses. It starts only when the real
  * module creates the control block, so it can never double up with this file.
  * Under DELTA_LLE=libSceAudioOut Isaac now streams both ports in real time with
  * peaks in the same range as this shim's (see that file's header).
  *
  * Verified end to end against Isaac with the research harness in
- * kern/lv2/sys_mem.cpp (DELTA_SHM_AUDIO_PROBE, plus DELTA_AUDIOMIX_ACK in
- * sys_event_flag.cpp): performing exactly the above makes Isaac stream
+ * kern/lv2/sys_mem.cc (DELTA_SHM_AUDIO_PROBE, plus DELTA_AUDIOMIX_ACK in
+ * sys_event_flag.cc): performing exactly the above makes Isaac stream
  * continuously on port 7 (bpf=4, type=0, 2ch, 48000, grain 512) with a live
  * signal whose peak climbs like the HLE reference. Decoding the block as
  * interleaved int16 is confirmed statistically, not assumed: per-channel lag-1

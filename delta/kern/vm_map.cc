@@ -1,0 +1,203 @@
+
+/*
+ * PS4Delta : PS4 emulation and research project
+ *
+ * Copyright 2019-2020 Force67.
+ * For information regarding licensing see LICENSE
+ * in the root of the source tree.
+ */
+
+#include "base/arch.h"
+#include <cstdlib>
+#include <cstring>
+
+#include <host_memory/host_memory.h>
+
+#include "process.h"
+#include "vm_map.h"
+#include <base/algorithm.h>
+#include <base/threading/lock_guard.h>
+
+namespace krnl {
+vmManager::vmManager(procInfo &info) : pinfo(info) {}
+
+vmManager::~vmManager() {
+  if (pinfo.userStack)
+    host_memory::FreeMem(pinfo.userStack);
+
+  pinfo.userStack = nullptr;
+}
+
+bool vmManager::init() {
+  /*reserve address space for the user stack*/
+  pinfo.userStack = static_cast<u8 *>(
+      host_memory::AllocMem(nullptr, pinfo.userStackSize, host_memory::PageProtection::kPriv,
+                    host_memory::AllocationType::kReserve));
+
+  return pinfo.userStack;
+}
+
+// Erase [p, p+s) from the interval set, splitting straddlers. Caller holds
+// vmlock. Keeps entries DISJOINT, which is what makes get() unambiguous: the
+// guest keys real bookkeeping (SotC's streaming-heap trackers) off the exact
+// [start, end) sceKernelVirtualQuery reports, so the newest mapping of a range
+// must win and stale overlaps must not shadow it.
+void vmManager::punchHoleLocked(u8 *p, size_t s) {
+  u8 *end = p + s;
+  for (size_t i = 0; i < rtPages.size();) {
+    pageInfo &e = rtPages[i];
+    u8 *eEnd = e.ptr + e.size;
+    if (eEnd <= p || e.ptr >= end) {  // disjoint
+      ++i;
+      continue;
+    }
+    if (e.ptr >= p && eEnd <= end) {  // fully covered: drop
+      rtPages.erase(rtPages.begin() + i);
+      continue;
+    }
+    if (e.ptr < p && eEnd > end) {  // strictly contains: split into two
+      pageInfo tail(end, static_cast<size_t>(eEnd - end), e.prot, e.sceProt,
+                    e.reserved);
+      tail.name = e.name;
+      tail.hasPhys = e.hasPhys;
+      tail.physOffset = e.physOffset + static_cast<size_t>(end - e.ptr);
+      e.size = static_cast<size_t>(p - e.ptr);
+      rtPages.emplace_back(tail);  // append; disjointness keeps get() correct
+      ++i;
+      continue;
+    }
+    if (e.ptr < p) {  // overlaps our head from below: truncate its tail
+      e.size = static_cast<size_t>(p - e.ptr);
+    } else {          // overlaps our tail from above: advance its head
+      e.size = static_cast<size_t>(eEnd - end);
+      e.physOffset += static_cast<size_t>(end - e.ptr);
+      e.ptr = end;
+    }
+    ++i;
+  }
+}
+
+namespace {
+MappingChangedHook g_mappingChanged = nullptr;
+
+void mappingChanged(u8 *ptr, size_t size) {
+  if (g_mappingChanged)
+    g_mappingChanged(reinterpret_cast<u64>(ptr), size);
+}
+}  // namespace
+
+void setMappingChangedHook(MappingChangedHook hook) { g_mappingChanged = hook; }
+
+void vmManager::add(u8 *ptr, size_t size, mprot prot, u32 sceProt,
+                    bool reserved) {
+  base::LockGuard lock(vmlock);
+  punchHoleLocked(ptr, size);
+  mappingChanged(ptr, size);
+  rtPages.emplace_back(ptr, size, prot, sceProt, reserved);
+}
+
+void vmManager::addDirect(u8 *ptr, size_t size, mprot prot,
+                          u32 sceProt, u64 physOffset) {
+  base::LockGuard lock(vmlock);
+  punchHoleLocked(ptr, size);
+  mappingChanged(ptr, size);
+  rtPages.emplace_back(ptr, size, prot, sceProt, false);
+  rtPages.back().physOffset = physOffset;
+  rtPages.back().hasPhys = true;
+}
+
+void vmManager::remove(u8 *ptr, size_t size) {
+  base::LockGuard lock(vmlock);
+  punchHoleLocked(ptr, size);
+  mappingChanged(ptr, size);
+}
+
+pageInfo *vmManager::get(u8 *ptr) {
+  base::LockGuard lock(vmlock);
+  // The kernel resolves the region *containing* an address, not just one that
+  // starts there: sceKernelVirtualQuery / QueryMemoryProtection / mname all pass
+  // interior pointers. Match by range so those report the right region.
+  auto it = base::FindIf(rtPages.begin(), rtPages.end(), [&ptr](const auto &page) {
+    return ptr >= page.ptr && ptr < page.ptr + page.size;
+  });
+
+  if (it != rtPages.end())
+    return &*it;
+
+  return nullptr;
+}
+
+bool vmManager::overlaps(u8 *ptr, size_t size) const {
+  base::LockGuard lock(vmlock);
+  u8 *end = ptr + size;
+  for (const auto &page : rtPages) {
+    if (ptr < page.ptr + page.size && page.ptr < end)
+      return true;
+  }
+  return false;
+}
+
+void vmManager::protectRange(u8 *ptr, size_t size, mprot prot,
+                             u32 sceProt) {
+  base::LockGuard lock(vmlock);
+  u8 *end = ptr + size;
+  for (auto &page : rtPages)
+    if (ptr < page.ptr + page.size && page.ptr < end) {
+      page.prot = prot;
+      page.sceProt = sceProt;
+    }
+}
+
+void vmManager::setRangeName(u8 *ptr, size_t size, const char *name) {
+  base::LockGuard lock(vmlock);
+  u8 *end = ptr + size;
+  // The kernel (vm_map_set_name) allocates the name storage per entry; mirror
+  // that with a strdup'd copy so the field outlives the caller's buffer. The
+  // VMA never frees entry names, so repeated naming leaks a small string each
+  // time. Names are handed out rarely (thread stacks), so that is fine.
+  if (!name)
+    return;
+  size_t n = strlen(name);
+  char *copy = static_cast<char *>(std::malloc(n + 1));
+  if (!copy)
+    return;
+  std::memcpy(copy, name, n + 1);
+  for (auto &page : rtPages)
+    if (ptr < page.ptr + page.size && page.ptr < end)
+      page.name = copy;
+}
+
+void vmManager::forEachGpuAperturePage(void (*fn)(void *, u8 *, size_t),
+                                       void *ctx) const {
+  base::LockGuard lock(vmlock);
+  for (const auto &page : rtPages) {
+    auto a = reinterpret_cast<u64>(page.ptr);
+    // Same range as gpu/ps5's GpuAddr(): everything allocLowGuest() can hand
+    // out, from the lowest fixed-mapped pool slot to the 2^40 user ceiling.
+    if (a >= 0x1000000000ull && a < 0x10000000000ull)
+      fn(ctx, page.ptr, page.size);  // callback caps how much of a big pool it sweeps
+  }
+}
+
+u8 *vmManager::mapMemory(u8 *preference, size_t size,
+                              host_memory::PageProtection prot) {
+  const auto allocType = host_memory::AllocationType::kReservecommit;
+
+  void *ptr =
+      host_memory::AllocMem(static_cast<void *>(preference), size, prot, allocType);
+  if (ptr) {
+    return static_cast<u8 *>(ptr);
+  }
+
+  return nullptr;
+}
+
+void vmManager::unmapRtMemory(u8 *ptr) {
+  base::LockGuard lock(vmlock);
+  auto iter =
+      base::FindIf(rtPages.begin(), rtPages.end(),
+                   [&ptr](const auto &page) { return page.ptr == ptr; });
+
+  rtPages.erase(iter);
+}
+} // namespace krnl

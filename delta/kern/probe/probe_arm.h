@@ -4,7 +4,7 @@
 #pragma once
 
 // Arming the guest-code trap probes, and the seam the crash handler offers them
-// every signal through (see probe_trap.cpp). Formerly in crash.h, whose other 23
+// every signal through (see probe_trap.cc). Formerly in crash.h, whose other 23
 // functions have nothing to do with crashing. Inert until a DELTA_* option arms it.
 
 #include "base/arch.h"
@@ -79,13 +79,13 @@ void setFnWatch(uintptr_t addr, const char *label);
 void startFnWatchPrinter();
 
 // DELTA_GUEST_POPCNT=<hex addr>:<hex bytes>[:<ms>]: report a guest bitmap's
-// population count, and its first/last set bit, on an interval (see crash.cpp).
+// population count, and its first/last set bit, on an interval (see crash.cc).
 // Tells a map that drains from one that was never filled, which a single dump
 // at the crash cannot.
 void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs);
 
 // DELTA_GUEST_WPROT=<addr>:<bytes>[:<ms>]: write-protect a guest range once mapped
-// and report the instruction behind every write (see crash.cpp). DELTA_GUEST_RPROT
+// and report the instruction behind every write (see crash.cc). DELTA_GUEST_RPROT
 // traps reads too, naming the consumer rather than the producer.
 void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
                      bool trapReads = false, bool singleStep = false);
@@ -96,13 +96,13 @@ void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
 void startWriteHist(uintptr_t addr, size_t bytes, unsigned everyMs);
 
 // DELTA_GUEST_SUMWATCH=<slot>:<off>:<stride>:<count>[:<ms>]: watch a set of u32
-// counters behind a guest pointer slot (see crash.cpp).
+// counters behind a guest pointer slot (see crash.cc).
 void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
                           unsigned everyMs);
 
 // DELTA_POOLMAP=<hex addr>:<hex bytes>[:<ms>]: occupancy map of a large guest
 // pool, by resident page rather than by read, so a multi-GB video pool can be
-// surveyed without faulting it in (see crash.cpp).
+// surveyed without faulting it in (see crash.cc).
 void startPoolMap(uintptr_t addr, size_t bytes, unsigned everyMs);
 
 // DELTA_POOLMAP=all[:<ms>]: the same survey over every guest mapping.
@@ -110,7 +110,7 @@ void startPoolCensus(unsigned everyMs);
 
 // DELTA_MEMDUMP=<hex addr>:<hex bytes>:<ms>:<path>[,...]: write a guest range to
 // a host file once the title has settled, so its contents can be identified
-// offline (see crash.cpp).
+// offline (see crash.cc).
 void startMemDump(uintptr_t addr, size_t bytes, unsigned afterMs,
                   const char *path);
 

@@ -5,7 +5,7 @@
 # executable.
 
 # Include root shared by every module so cross-module includes resolve, e.g.
-# <kern/proc.h> -> delta/kern/proc.h, "runtime/vprx/vprx.h" -> delta/runtime/...
+# <kern/process.h> -> delta/kern/process.h, "runtime/vprx/vprx.h" -> delta/runtime/...
 set(DELTA_ROOT ${CMAKE_CURRENT_SOURCE_DIR} CACHE INTERNAL "delta module include root")
 
 # Foundation every module links: the shared utility library (which itself

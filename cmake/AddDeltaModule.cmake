@@ -2,7 +2,7 @@
 #
 # Every subsystem under delta/ is a module: a static library `delta_<name>`
 # built from the sources in its directory, sharing one include root (DELTA_ROOT)
-# so cross-module includes like <kern/proc.h> resolve, and optionally carrying a
+# so cross-module includes like <kern/process.h> resolve, and optionally carrying a
 # tests/ subdirectory of GoogleTest unit tests registered with CTest.
 include_guard(GLOBAL)
 

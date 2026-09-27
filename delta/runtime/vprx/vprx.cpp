@@ -15,7 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "kern/proc.h"
+#include "kern/process.h"
 #include <options/options.h>
 
 namespace {
@@ -213,7 +213,7 @@ static bool libListed(const char *list, const char *lib) {
 //  - libSceAudioOut LLE was silent: the real module needs no /dev node, it
 //    hands blocks to the system audio daemon over POSIX shm and waits on a
 //    named event flag, so with no daemon it wrote into nothing and no crash/fps
-//    check could see it. That daemon is now hosted (kern/ps4/audio_daemon.cpp);
+//    check could see it. That daemon is now hosted (kern/ps4/audio_daemon.cc);
 //    the lesson stands for every module whose LLE partner is a system service.
 //  - The common dialogs (libSceSaveDataDialog, libSceMsgDialog) LLE forward to
 //    a ShellUI daemon that kern/ipmi does not stand in for yet, so their status

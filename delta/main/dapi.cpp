@@ -26,7 +26,7 @@
 #include "cpu/backend.h"
 #include "host/overlay_log.h"
 #include "gpu/render/renderer.h"
-#include "kern/guest_vaspace.h"
+#include "kern/guest_va_space.h"
 #include <base/threading/thread.h>
 
 static bool verifyViablity() {
