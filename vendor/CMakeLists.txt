@@ -57,10 +57,10 @@ target_include_directories(xbyak INTERFACE
 # --------------------------------------------------------------------------
 # equilibrium BASE: STL replacement library
 #
-# We compile a minimal subset: the headers used by PS4Delta
-# (containers/vector.h, strings/xstring.h, memory/unique_pointer.h) plus
-# the runtime objects those headers transitively need (check / logging /
-# format), and the filesystem layer base::Option's file loader reads through.
+# We compile the subset PS4Delta uses in place of the STL: containers,
+# strings, threads, locks, time and random, plus the runtime objects those
+# need (check / logging / format) and the filesystem layer base::Option's
+# file loader reads through.
 # Everything else in equilibrium pulls in mimalloc / tracy / googletest, which
 # we do not need here.
 # --------------------------------------------------------------------------
@@ -80,6 +80,14 @@ add_library(eq_base STATIC
   equilibrium/base/filesystem/posix/path_posix.cc
   equilibrium/base/filesystem/linux/scoped_file_linux.cc
   equilibrium/base/text/code_convert.cc
+  equilibrium/base/random/random.cc
+  equilibrium/base/random/random_posix.cc
+  equilibrium/base/threading/condition_variable_linux.cc
+  equilibrium/base/threading/spinning_mutex.cc
+  equilibrium/base/threading/thread.cc
+  equilibrium/base/threading/thread_posix.cc
+  equilibrium/base/time/time.cc
+  equilibrium/base/time/time_posix.cc
 )
 target_include_directories(eq_base PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/equilibrium
