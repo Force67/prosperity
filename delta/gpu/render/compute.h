@@ -48,6 +48,18 @@ bool CsRefreshRtFromTruth(u64 base);
 // writes to it first, or they land over the new bytes.
 void CsForgetGuestRange(u64 base, u64 bytes);
 
+// Hands every guest CPU write the write tracker saw since the last call to
+// whatever keeps a copy of guest memory: the draw path's staging caches and
+// the compute ranges. Call before trusting either.
+void CollectGuestWrites();
+// The same, at most once a submission: a CPU write inside one cannot be
+// ordered against its dispatches anyway.
+void CollectGuestWritesForSubmission();
+
+// The guest CPU wrote [first, end). Ranges staged from it re-read it, and a
+// range still holding dispatch output keeps those bytes out of its writeback.
+void CsNoteGuestWrites(u64 first, u64 end);
+
 // DELTA_GPU_QCHECK: an empty submission through the same queue, waited. A
 // failure names the queue work that ran BEFORE this point as the device loss.
 bool QueueCheck(const char* where);

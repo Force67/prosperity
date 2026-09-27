@@ -366,7 +366,7 @@ void ReportFps() {
                      "(in={:.2f} gpu={:.2f} out={:.2f} stage={:.1f}x{:.1f}MB "
                      "flush={:.1f}) "
                      "sh={:.2f}ms x{:.1f} dcb={:.2f}ms x{:.1f} (lock={:.2f}ms) "
-                     "wb={:.0f}% draws={:.0f} (decl={:.0f})",
+                     "wb={:.0f}% wbconf={:.1f} draws={:.0f} (decl={:.0f})",
               frames / dt, g_ns_draw / f / 1e6, g_ns_end / f / 1e6,
               g_ns_readback / f / 1e6,
               g_gpu_exec_samples ? g_ns_gpu_exec / g_gpu_exec_samples / 1e6 : 0.0,
@@ -380,7 +380,7 @@ void ReportFps() {
               g_cs_wb_bytes_total ? 100.0 * double(g_cs_wb_bytes_written) /
                                         double(g_cs_wb_bytes_total)
                                   : 0.0,
-              g_win_draws / f, g_win_declines / f);
+              g_cs_wb_conflicts / f, g_win_draws / f, g_win_declines / f);
     // Stutter, said out loud. Always on when it happens: the average above
     // reports a window that contained a 400 ms frame as merely slow, and the
     // whole point of the shader work is the frames this line counts.
@@ -455,7 +455,7 @@ void ReportFps() {
     g_ring_vb_bytes = g_ring_ib_bytes = g_ring_cb_bytes = g_ring_raw_bytes = 0;
     g_vb_kept_bytes = 0;
     g_cs_stage_bytes = 0;
-    g_cs_wb_bytes_written = g_cs_wb_bytes_total = 0;
+    g_cs_wb_bytes_written = g_cs_wb_bytes_total = g_cs_wb_conflicts = 0;
     gcn::g_ns_recomp = 0;
     gcn::g_recomp_n = 0;
     gcn::g_ns_spv_val = gcn::g_ns_spv_opt = 0;

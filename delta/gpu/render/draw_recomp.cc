@@ -255,7 +255,6 @@ void SyncGuestWrites() {
   static int frame = -1;
   static u32 dcb = 0;
   static u64 gen = 0;
-  static std::vector<gpu::WriteTracker::Range> written;
   if (!TrackingGuestWrites() ||
       (frame == g_frame.num && dcb == render::g_dcb_n &&
        gen == render::CsWritebackGeneration()))
@@ -263,14 +262,7 @@ void SyncGuestWrites() {
   frame = g_frame.num;
   dcb = render::g_dcb_n;
   gen = render::CsWritebackGeneration();
-  written.clear();
-  gpu::GuestWriteTracker().Collect(written);
-  for (const auto& [first, end] : written) {
-    InvalidateCachedBuffers(first, end);
-    g_vb_staged.Invalidate(first, end);
-    g_ib_staged.Invalidate(first, end);
-    g_sbo_staged.Invalidate(first, end);
-  }
+  CollectGuestWrites();
 }
 
 const StageCache::Entry* StageCache::Find(u64 base, u64 bytes, u32 salt) {
@@ -296,8 +288,35 @@ bool IsReadableThisFrame(u64 base, u32 size) {
 
 }  // namespace
 
+namespace {
+int g_collect_frame = -1;
+u32 g_collect_dcb = 0;
+}  // namespace
+
+void CollectGuestWrites() {
+  static std::vector<gpu::WriteTracker::Range> written;
+  if (!gpu::GuestWriteTracker().enabled())
+    return;
+  g_collect_frame = g_frame.num;
+  g_collect_dcb = render::g_dcb_n;
+  written.clear();
+  gpu::GuestWriteTracker().Collect(written);
+  for (const auto& [first, end] : written) {
+    InvalidateCachedBuffers(first, end);
+    g_vb_staged.Invalidate(first, end);
+    g_ib_staged.Invalidate(first, end);
+    g_sbo_staged.Invalidate(first, end);
+    CsNoteGuestWrites(first, end);
+  }
+}
+
 void NoteGuestRemap(u64 base, u64 bytes) {
   gpu::NoteGuestRemap(base, bytes);
+}
+
+void CollectGuestWritesForSubmission() {
+  if (g_collect_frame != g_frame.num || g_collect_dcb != render::g_dcb_n)
+    CollectGuestWrites();
 }
 
 static_assert(render::DrawInfo::kMaxBuffers == kRawBufBindings,
@@ -1180,9 +1199,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // UploadCsRangeToRt); guest-upload textures already get this from the
       // texture cache.
       // A sample at another size than the live target reads the memory,
-      // which the texture cache takes from the compute range itself.
-      const bool samples_target = base && g_rts.count(base) &&
-                                  g_rts[base].w == t.w && g_rts[base].h == t.h;
+      // which the texture cache takes from the compute range itself. Except
+      // that the draw binds the live image below whatever the size: with
+      // write tracking, ranges stay dirty long enough for that to show.
+      const bool samples_target =
+          base && g_rts.count(base) &&
+          ((g_rts[base].w == t.w && g_rts[base].h == t.h) ||
+           CsTracksGuestWrites());
       if (samples_target && !CsRefreshRtFromTruth(base))
         FlushCsWritesRange(renderer, base,
                            u64(g_rts[base].w) * g_rts[base].h * 8, "rt-tex");

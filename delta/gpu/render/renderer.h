@@ -85,6 +85,10 @@ bool FlushCsWritesRange(Renderer& renderer,
 // reads stays in VRAM, and the open dispatch batch is submitted so the frame's
 // own command buffer lands behind it. `writeback` false submits only.
 bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback);
+// Compute ranges see guest CPU writes (DELTA_GPU_CS_TRACK and a working write
+// tracker), so a writeback never lands over newer CPU data and a reader need
+// only flush the ranges it touches.
+bool CsTracksGuestWrites();
 
 // CP transfers address the same 64 KiB GDS allocation as shader DS operations.
 // Offsets and lengths are bytes; transfers wait for preceding compute work.

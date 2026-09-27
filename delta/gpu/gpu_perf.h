@@ -53,6 +53,9 @@ extern u64 g_cs_stage_bytes;
 // dispatch actually changed. The gap is memory the CPU owns and we were
 // reverting (see CsRangeFlushOne).
 extern u64 g_cs_wb_bytes_written, g_cs_wb_bytes_total;
+// 64-byte blocks a dispatch wrote that the guest CPU had rewritten since: the
+// writeback kept the CPU's bytes.
+extern u64 g_cs_wb_conflicts;
 
 // Per-frame accumulators (ns), reset when a frame's sample is pushed.
 extern u64 g_fr_draw, g_fr_submit, g_fr_wait, g_fr_present, g_fr_tex_up;

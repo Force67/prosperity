@@ -30,6 +30,7 @@ u32 g_tex_ups = 0;
 u32 g_cs_stage_n = 0, g_cs_flush_n = 0;
 u64 g_cs_stage_bytes = 0;
 u64 g_cs_wb_bytes_written = 0, g_cs_wb_bytes_total = 0;
+u64 g_cs_wb_conflicts = 0;
 u64 g_fr_draw = 0, g_fr_submit = 0, g_fr_wait = 0, g_fr_present = 0,
          g_fr_tex_up = 0;
 

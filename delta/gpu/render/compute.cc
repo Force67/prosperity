@@ -133,6 +133,12 @@ DELTA_OPTION(bool, kFrameChunks, "DELTA_GPU_FRAME_CHUNKS", true);
 DELTA_OPTION(u64, kCsFlushTrace, "DELTA_GPU_CSFLUSHTRACE", 0);
 DELTA_OPTION(bool, kCsSyncReport, "DELTA_GPU_CSSYNC", false);
 DELTA_OPTION(bool, kCsEagerReadback, "DELTA_GPU_CS_EAGER_READBACK", true);
+// Off by default: with the CP DMA flush narrowed, ranges a dispatch rewrites
+// every frame stay dirty indefinitely, and GTA:SA then shows ghosted
+// post-processing (DELTA_GPU_CS_AGED lists those ranges). Some reader of them
+// still misses its flush; the global DMA flush hides it.
+DELTA_OPTION(bool, kCsTrack, "DELTA_GPU_CS_TRACK", false);
+DELTA_OPTION(bool, kCsAged, "DELTA_GPU_CS_AGED", false);
 DELTA_OPTION(bool, kGpuCsgpuVerbose, "DELTA_GPU_CSGPU_VERBOSE", false);
 u64 g_cs_image_staged = 0;
 }  // namespace
@@ -792,6 +798,11 @@ struct CsRange {
   // with the dispatch that writes it, so the reader finds the mirror current
   // instead of paying a submit and a wait for the copy alone.
   bool cpu_reader = false;
+  // Guest CPU writes into the range while it held dispatch output that is
+  // not written back (CsNoteGuestWrites), page aligned and coalesced. They
+  // came after the dispatch, so they win over its output.
+  std::vector<std::pair<u64, u64>> cpu_writes;
+  int dirty_frame = -1;  // frame the range last went dirty
 };
 
 bool CsSplitFrameChunk();
@@ -3073,8 +3084,11 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
       return false;
     NoteGuestWrite(base, e.guest_bytes);
     e.gpu_dirty = false;
+    e.cpu_writes.clear();
     return true;
   }
+  if (CsTracksGuestWrites())
+    CollectGuestWritesForSubmission();
   // Results live in VRAM: pull them into the host mirror on the same batch that
   // produced them, so the one fence wait covers the dispatch and the copy.
   // Already-recorded readbacks (CsStageReadbacks) skip this.
@@ -3118,6 +3132,41 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
                 (unsigned long long)e.res.size);
   }
   const u64 _t_wb = NowNs();
+  // A range with a shadow merges the guest's writes word by word below. Any
+  // other writeback covers whole pages, so with write tracking the pages the
+  // CPU wrote since the dispatch are set aside here and put back after it.
+  // Without it, a report can be of our own earlier writeback.
+  const u64 linear_n =
+      e.guest_bytes ? std::min<u64>(e.size, e.guest_bytes) : e.size;
+  const bool merges = (!e.image_staging || e.truth) && !kCsWbFull &&
+                      !e.rt_sourced && e.shadow_valid &&
+                      e.shadow.size() >= linear_n;
+  struct KeptPages {
+    std::vector<std::pair<u64, u64>> spans;
+    std::vector<u8> bytes;
+    ~KeptPages() {
+      u64 off = 0;
+      for (const auto& [first, end] : spans) {
+        std::memcpy(reinterpret_cast<void*>(first), bytes.data() + off,
+                    end - first);
+        off += end - first;
+      }
+    }
+  } kept;
+  if (!merges && CsTracksGuestWrites()) {
+    const u64 footprint_end = base + (e.guest_bytes ? e.guest_bytes : e.size);
+    for (const auto& [first, end] : e.cpu_writes) {
+      const u64 lo = std::max(first, base), hi = std::min(end, footprint_end);
+      if (lo >= hi)
+        continue;
+      kept.spans.emplace_back(lo, hi);
+      const u64 at = kept.bytes.size();
+      kept.bytes.resize(at + (hi - lo));
+      std::memcpy(kept.bytes.data() + at, reinterpret_cast<const void*>(lo),
+                  hi - lo);
+    }
+  }
+  bool adopted = !kept.spans.empty();
   // DELTA_GPU_CS_SKIP_RETILE: an image the GPU refresh below can carry needs no
   // CPU retile into guest memory. Only readers that go through guest memory
   // (the texture cache's own upload, a CP DMA, the guest CPU) lose anything,
@@ -3182,7 +3231,12 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
     // Guest-sourced linear ranges only: a range staged from a live render
     // target exists precisely so the writeback can publish that image into
     // guest memory, so "the dispatch did not write it" must not stop it there.
-    if (!kCsWbFull && !e.rt_sourced && e.shadow_valid && e.shadow.size() >= n) {
+    //
+    // A block the CPU also changed since stage-in (guest != shadow) keeps the
+    // CPU's bytes even where the shader wrote it: the dispatch ran before the
+    // CPU write, and a title that reuses a compute buffer's memory for its
+    // descriptor tables otherwise gets old dispatch output over them.
+    if (merges) {
       auto* src = static_cast<u8*>(e.map);
       u8* shd = e.shadow.data();
       auto* dst = reinterpret_cast<u8*>(base);
@@ -3197,38 +3251,51 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
       const u32 chunks =
           static_cast<u32>((blocks + kMergeBlocksPerChunk - 1) /
                            kMergeBlocksPerChunk);
-      std::vector<u64> chunk_wrote(chunks, 0);
+      struct ChunkCounts {
+        u64 wrote = 0, adopted = 0, conflicts = 0;
+      };
+      std::vector<ChunkCounts> counts(chunks);
       gcn::DetileParallelWork(chunks, blocks * 64, [&](u32 c0, u32 c1) {
         for (u32 c = c0; c < c1; c++) {
           const u64 first = u64(c) * kMergeBlocksPerChunk;
           const u64 last = std::min<u64>(first + kMergeBlocksPerChunk, blocks);
-          u64 local = 0;
+          ChunkCounts local;
           for (u64 b = first; b < last; b++) {
             const u64 o = b * 64;
-            if (std::memcmp(src + o, shd + o, 64) != 0) {
-              std::memcpy(dst + o, src + o, 64);
-              std::memcpy(shd + o, src + o, 64);
-              local += 64;
-            } else {
+            const bool gpu = std::memcmp(src + o, shd + o, 64) != 0;
+            const bool cpu = std::memcmp(dst + o, shd + o, 64) != 0;
+            if (cpu) {
               std::memcpy(src + o, dst + o, 64);
               std::memcpy(shd + o, dst + o, 64);
+              local.adopted += 64;
+              local.conflicts += gpu;
+            } else if (gpu) {
+              std::memcpy(dst + o, src + o, 64);
+              std::memcpy(shd + o, src + o, 64);
+              local.wrote += 64;
             }
           }
-          chunk_wrote[c] = local;
+          counts[c] = local;
         }
       });
-      for (const u64 w : chunk_wrote)
-        wrote += w;
+      u64 adopted_bytes = 0;
+      for (const ChunkCounts& c : counts) {
+        wrote += c.wrote;
+        adopted_bytes += c.adopted;
+        g_cs_wb_conflicts += c.conflicts;
+      }
       for (; off < n; off++) {
-        if (src[off] != shd[off]) {
+        if (dst[off] != shd[off]) {
+          src[off] = dst[off];
+          shd[off] = dst[off];
+          adopted_bytes++;
+        } else if (src[off] != shd[off]) {
           dst[off] = src[off];
           shd[off] = src[off];
           wrote++;
-        } else {
-          src[off] = dst[off];
-          shd[off] = dst[off];
         }
       }
+      adopted |= adopted_bytes != 0;
       g_cs_wb_bytes_written += wrote;
       g_cs_wb_bytes_total += n;
       if (kCsWbAudit && wrote != n) {
@@ -3286,9 +3353,21 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
   // Guest memory just changed under any staged copy of it: retire the draw
   // path's per-frame staging cache entries (they validate against this).
   g_cs_writeback_gen++;
+  // Our own writes to the range are reported like the guest's; take them now
+  // so the next dispatch does not read them as CPU writes after it.
+  if (CsTracksGuestWrites())
+    CollectGuestWrites();
   e.gpu_dirty = false;
-  e.hash = TexHash(base, e.guest_bytes);
-  e.last_validated_frame = g_frame.num;
+  e.cpu_writes.clear();
+  if (adopted) {
+    // The buffer lacks the CPU's bytes now in guest memory: stage it again
+    // before anything runs on it.
+    e.hash = 0;
+    e.last_validated_frame = -1;
+  } else {
+    e.hash = TexHash(base, e.guest_bytes);
+    e.last_validated_frame = g_frame.num;
+  }
   g_out_tail_ns += NowNs() - _t_inv;
   return true;
 }
@@ -3985,6 +4064,55 @@ void CsForgetGuestRange(u64 base, u64 bytes) {
   }
 }
 
+bool CsTracksGuestWrites() {
+  return kCsTrack && GuestWriteTracker().enabled();
+}
+
+void CsNoteGuestWrites(u64 first, u64 end) {
+  // Untracked, the tracker also reports our own writebacks wherever a draw
+  // cache armed the pages, and acting on those costs more than it saves.
+  if (!CsTracksGuestWrites() || g_cs_range_blocks.empty() || first >= end)
+    return;
+  thread_local std::vector<u64> bases;
+  bases.clear();
+  // A remapped reservation can span gigabytes: walk the smaller side.
+  const u64 first_block = first >> kCsRangeBlockShift;
+  const u64 last_block = (end - 1) >> kCsRangeBlockShift;
+  if (last_block - first_block + 1 > g_cs_range_blocks.size()) {
+    for (const auto& [block, list] : g_cs_range_blocks)
+      if (block >= first_block && block <= last_block)
+        bases.insert(bases.end(), list.begin(), list.end());
+  } else {
+    for (u64 b = first_block; b <= last_block; b++)
+      if (auto found = g_cs_range_blocks.find(b);
+          found != g_cs_range_blocks.end())
+        bases.insert(bases.end(), found->second.begin(), found->second.end());
+  }
+  for (u64 range_base : bases) {
+    auto found = g_cs_ranges.find(range_base);
+    if (found == g_cs_ranges.end())
+      continue;
+    CsRange& e = found->second;
+    const u64 range_end = RangeEnd(range_base, e.guest_bytes);
+    if (range_base >= end || first >= range_end)
+      continue;
+    if (!e.gpu_dirty) {
+      // Hash it again at the next use rather than trusting this frame's
+      // check: the write may be our own writeback, which leaves it current.
+      e.last_validated_frame = -1;
+      continue;
+    }
+    const u64 lo = std::max(first, range_base), hi = std::min(end, range_end);
+    if (!e.cpu_writes.empty() && e.cpu_writes.back().second >= lo &&
+        e.cpu_writes.back().first <= hi) {
+      auto& last = e.cpu_writes.back();
+      last = {std::min(last.first, lo), std::max(last.second, hi)};
+    } else {
+      e.cpu_writes.emplace_back(lo, hi);
+    }
+  }
+}
+
 }  // namespace gpu::render
 
 namespace gpu::render {
@@ -4124,6 +4252,17 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   }
   if (!renderer.available() || !ci.recomp || !ci.recomp->ok || !ci.num_res)
     return CsDeclined(ci, "2");
+  // Only a range still holding dispatch output needs the guest's latest
+  // writes before this runs; the rest revalidate against guest memory.
+  if (CsTracksGuestWrites()) {
+    for (u32 i = 0; i < ci.num_res; i++) {
+      const auto found = g_cs_ranges.find(ci.res[i].base);
+      if (found != g_cs_ranges.end() && found->second.gpu_dirty) {
+        CollectGuestWritesForSubmission();
+        break;
+      }
+    }
+  }
   const rhi::Caps& caps = Device().caps();
   const u32 max_resources =
       std::min(gcn::kMaxCsResources, caps.max_compute_resources);
@@ -4429,6 +4568,15 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       g_in_overlap_ns += NowNs() - _to;
     }
     CsRange& e = g_cs_ranges[base];
+    // The guest CPU wrote the range while it held dispatch output: merge the
+    // two before running on it again, or this dispatch reads around the
+    // CPU's bytes and a later writeback puts old values over them.
+    if (e.gpu_dirty && !e.cpu_writes.empty()) {
+      g_wb_why["cpu-write"]++;
+      g_wb_why_bytes += e.size;
+      if (!CsRangeFlushOne(base, e) && g_cs_failed)
+        return CsDeclined(ci, "24");
+    }
     // A truth range is its guest footprint: the same footprint is the same
     // bytes whatever the descriptor makes of them, and a plain-buffer view
     // inside it binds those bytes directly.
@@ -4597,6 +4745,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         }
       }
       if (!rt_attempt || !e.rt_sourced) {
+        // Armed before the copy, so a write racing it is reported.
+        if (ci.res[i].written && CsTracksGuestWrites())
+          GuestWriteTracker().Arm(base, hash_bytes);
+        e.cpu_writes.clear();
         bool gpu_staged = false;
         if (stage_bytes) {
           g_truth_stage_bytes += stage_bytes;
@@ -4748,6 +4900,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       if (!e.gpu_dirty) {
         IndexDirtyRange(base, e.guest_bytes);
         e.gpu_dirty = true;
+        e.dirty_frame = g_frame.num;
       }
       e.write_seq++;
       BumpTextureEpoch();
@@ -4951,8 +5104,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     auto it = g_cs_ranges.find(dirty_base);
     if (it == g_cs_ranges.end())
       continue;
-    if (!it->second.gpu_dirty)
+    if (!it->second.gpu_dirty) {
       IndexDirtyRange(dirty_base, it->second.guest_bytes);
+      it->second.dirty_frame = g_frame.num;
+    }
     it->second.gpu_dirty = true;
     it->second.write_seq++;
     BumpTextureEpoch();
@@ -5160,6 +5315,25 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
       } else {
         ++it;
       }
+    }
+  }
+  // DELTA_GPU_CS_AGED: ranges holding dispatch output no reader has asked for
+  // in over two frames, i.e. what a blanket writeback would publish and the
+  // lazy model does not.
+  if (kCsAged && g_frame.num % 120 == 0) {
+    u32 logged = 0;
+    for (const auto& [base, e] : g_cs_ranges) {
+      if (!e.gpu_dirty || e.dirty_frame >= g_frame.num - 2 || logged++ >= 24)
+        continue;
+      BASE_LOGI("csaged",
+                "base={:#x} +{:#x} age={} truth={} img={} {}x{} layers={} "
+                "dfmt={} tiling={} rt={} rtseq={} cpu_reader={} used={}",
+                (unsigned long)base, (unsigned long)e.guest_bytes,
+                g_frame.num - e.dirty_frame, (int)e.truth,
+                (int)e.image_staging, e.res.width, e.res.height, e.res.layers,
+                e.res.dfmt, e.res.tiling_idx, (int)CsAliasedBase(base),
+                (int)(e.rt_seq == e.write_seq), (int)e.cpu_reader,
+                g_frame.num - e.last_used_frame);
     }
   }
   if (!writeback) {

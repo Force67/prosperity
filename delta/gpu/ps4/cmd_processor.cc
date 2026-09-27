@@ -38,6 +38,7 @@ DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
 // Record draws on a renderer thread of their own (see render_queue.h).
 DELTA_OPTION(bool, kRenderThread, "DELTA_GPU_RENDER_THREAD", true);
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
+DELTA_OPTION(bool, kFenceFlush, "DELTA_GPU_CS_FENCE_FLUSH", true);
 DELTA_OPTION(bool, kPrefetchShaders, "DELTA_GPU_PREFETCH_SHADERS", true);
 }  // namespace
 
@@ -163,6 +164,10 @@ void WriteEventLabel(const char* packet,
                      u32 data_sel,
                      u64 value,
                      u32 int_sel = 0) {
+  // The guest CPU reads a dispatch's output once it sees a fence behind it:
+  // those results go to guest memory before the fence does.
+  if (data_sel && kFenceFlush && render::CsTracksGuestWrites())
+    render::FlushCsWrites(render::DefaultRenderer());
   if (data_sel == 1)
     WriteLabel(address, value, false);
   else if (data_sel == 2)
@@ -322,13 +327,18 @@ void HandleDmaData(render::Renderer& renderer,
       bytes <= 0x1000000u && src != dst && addressable(src) &&
       addressable(src + bytes) && addressable(dst) &&
       addressable(dst + bytes)) {
-    // src may be CS-written; land pending writes first. Copy even if the flush
-    // fails: a possibly-stale source beats silently dropping the copy.
-    // All of them, not just src and dst: GTA:SA issues ~300 of these a frame,
-    // and that keeps lazy writeback short. Narrowed, dirty ranges outlived
-    // the guest's reuse of their memory and a late writeback put old compute
-    // output over fresh descriptor tables.
-    render::FlushCsWrites(renderer);
+    // src may be CS-written; land pending writes first, and those under dst
+    // before the copy lands over them. Copy even if the flush fails: a
+    // possibly-stale source beats silently dropping the copy. Unless compute
+    // ranges track guest writes (DELTA_GPU_CS_TRACK), every range is flushed:
+    // GTA:SA issues ~300 of these a frame, which keeps lazy writeback short,
+    // and some reader of long-dirty ranges depends on that.
+    if (render::CsTracksGuestWrites()) {
+      render::FlushCsWritesRange(renderer, src, bytes, "dma");
+      render::FlushCsWritesRange(renderer, dst, bytes, "dma");
+    } else {
+      render::FlushCsWrites(renderer);
+    }
     std::memcpy(reinterpret_cast<void*>(dst),
                 reinterpret_cast<const void*>(src), bytes);
     copied = true;
