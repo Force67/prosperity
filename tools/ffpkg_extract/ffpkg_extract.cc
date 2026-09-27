@@ -2,18 +2,18 @@
 // Ufs2Filesystem reader.
 //   ffpkg_extract <game.ffpkg>                     list every file
 //   ffpkg_extract <game.ffpkg> <relpath> <out>     extract one file
-#include "base/arch.h"
 #include <cstdio>
+#include "base/arch.h"
 
-#include <logger/logger.h>
-#include <io/file.h>
+#include "io/file.h"
+#include "logger/logger.h"
 
+#include "base/algorithm.h"
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 #include "formats/ufs2_filesystem.h"
-#include <base/algorithm.h>
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   logger::CreateLogger(true);
   if (argc < 2) {
     std::printf("usage: ffpkg_extract <game.ffpkg> [<relpath> <out>]\n");
@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
   }
 
   if (argc >= 4) {
-    const auto *node = fs.Find(argv[2]);
+    const auto* node = fs.Find(argv[2]);
     if (!node) {
       std::printf("%s: not found\n", argv[2]);
       return 1;
@@ -48,8 +48,8 @@ int main(int argc, char **argv) {
   fs.Paths(paths);
   base::Sort(paths.begin(), paths.end());
   u64 total = 0;
-  for (const auto &p : paths) {
-    const auto *node = fs.Find(p.c_str());
+  for (const auto& p : paths) {
+    const auto* node = fs.Find(p.c_str());
     u64 sz = node ? node->size : 0;
     total += sz;
     std::printf("%12llu  %s\n", (unsigned long long)sz, p.c_str());

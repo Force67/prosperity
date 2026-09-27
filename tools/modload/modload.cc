@@ -2,12 +2,12 @@
 // prints what came out. Usage: modload <module.sprx>
 #include <cstdio>
 
-#include <logger/logger.h>
-#include <kern/object_ref.h>
+#include "kern/object_ref.h"
+#include "logger/logger.h"
 
+#include "base/strings/xstring.h"
 #include "kern/module.h"
 #include "kern/process.h"
-#include <base/strings/xstring.h>
 
 int main(int argc, char** argv) {
   if (argc < 2) {

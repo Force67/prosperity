@@ -4,21 +4,21 @@
  *
  *   nix develop -c bash tools/build_astro_cs_probe.sh <cs addr hex>
  */
-#include "base/arch.h"
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include "base/arch.h"
 
-#include "guest_memory.h"
-#include "gcn/gcn_detile.h"
-#include "gcn/gcn_disasm.h"
-#include "ps5/rdna/rdna_resource.h"
-#include "ps5/rdna/rdna_compute.h"
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
+#include "gpu/gcn/gcn_detile.h"
+#include "gpu/gcn/gcn_disasm.h"
+#include "gpu/guest_memory.h"
+#include "gpu/ps5/rdna/rdna_compute.h"
+#include "gpu/ps5/rdna/rdna_resource.h"
 
 namespace {
 
@@ -86,7 +86,8 @@ void MapVa(u64 va, u64 bytes) {
     close(fd);
     return;
   }
-  std::printf("VA %#llx (module va %#llx) not in any LOAD\n", (unsigned long long)va, (unsigned long long)(va - kEbootBase));
+  std::printf("VA %#llx (module va %#llx) not in any LOAD\n",
+              (unsigned long long)va, (unsigned long long)(va - kEbootBase));
   std::exit(1);
 }
 
@@ -127,8 +128,8 @@ int main(int argc, char** argv) {
     std::printf("  %4llu: %s\n", (unsigned long long)i, line.c_str());
   }
 
-  const gpu::gcn::RecompiledCs rc = gpu::rdna::RecompileCompute(
-      base, 64, 1, 1, 0, 0, 0);
+  const gpu::gcn::RecompiledCs rc =
+      gpu::rdna::RecompileCompute(base, 64, 1, 1, 0, 0, 0);
   std::printf("recompiled ok=%d spirv=%zu resources=%zu gds=%d\n", (int)rc.ok,
               rc.spirv.size(), rc.resources.size(), (int)rc.gds_binding);
   for (const auto& r : rc.resources) {
@@ -140,9 +141,7 @@ int main(int argc, char** argv) {
   }
 
   base::Vector<u32> ud(16, 0);
-  const auto resolved =
-      gpu::rdna::ResolveBuffers(base, ud.data(),
-                                16, 0);
+  const auto resolved = gpu::rdna::ResolveBuffers(base, ud.data(), 16, 0);
   std::printf("\n== descriptors ResolveBuffers found at use PCs ==\n");
   for (const auto& [pc, br] : resolved) {
     if (!br.descriptor_valid) {
@@ -150,8 +149,8 @@ int main(int argc, char** argv) {
                   (unsigned long long)br.base);
       continue;
     }
-    std::printf("  pc=%u base=%#llx dwords=%u:", pc, (unsigned long long)br.base,
-                br.descriptor_dwords);
+    std::printf("  pc=%u base=%#llx dwords=%u:", pc,
+                (unsigned long long)br.base, br.descriptor_dwords);
     for (u32 i = 0; i < br.descriptor_dwords && i < 8; i++)
       std::printf(" %08x", br.descriptor[i]);
     std::printf("\n");

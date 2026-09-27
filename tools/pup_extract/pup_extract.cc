@@ -2,13 +2,13 @@
 // native PupReader. Usage: pup_extract <fw.PUP.dec> <out_dir>
 #include <cstdio>
 
-#include <logger/logger.h>
-#include <io/file.h>
+#include "io/file.h"
+#include "logger/logger.h"
 
+#include "base/strings/xstring.h"
 #include "formats/pup_reader.h"
-#include <base/strings/xstring.h>
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   logger::CreateLogger(true);
   if (argc < 3) {
     std::printf("usage: pup_extract <firmware.PUP[.dec]> <out_dir>\n");

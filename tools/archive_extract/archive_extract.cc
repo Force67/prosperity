@@ -5,25 +5,26 @@
 //   archive_extract <game.rar>                     list every file
 //   archive_extract <game.rar> <relpath> <out>     extract one file
 //   archive_extract <game.rar> --bench <relpath>   time a streaming read
-#include "base/arch.h"
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include "base/arch.h"
 
-#include <logger/logger.h>
-#include <io/file.h>
+#include "io/file.h"
+#include "logger/logger.h"
 
+#include "base/algorithm.h"
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
+#include "base/time/time.h"
 #include "formats/archive_filesystem.h"
-#include <base/algorithm.h>
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
-#include <base/time/time.h>
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   logger::CreateLogger(true);
   if (argc < 2) {
-    std::printf("usage: archive_extract <game.rar> [<relpath> <out>]\n"
-                "       archive_extract <game.rar> --bench <relpath>\n");
+    std::printf(
+        "usage: archive_extract <game.rar> [<relpath> <out>]\n"
+        "       archive_extract <game.rar> --bench <relpath>\n");
     return 1;
   }
 
@@ -35,11 +36,10 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::printf("opened via %s backend in %lld ms\n", fs.BackendName(),
-              (long long)(
-                  t1 - t0).InMilliseconds());
+              (long long)(t1 - t0).InMilliseconds());
 
   if (argc >= 4 && std::strcmp(argv[2], "--bench") == 0) {
-    const auto *node = fs.Find(argv[3]);
+    const auto* node = fs.Find(argv[3]);
     if (!node) {
       std::printf("%s: not found\n", argv[3]);
       return 1;
@@ -57,8 +57,7 @@ int main(int argc, char **argv) {
       off += n;
       total += n;
     }
-    const double secs =
-        (base::TimeTicks::Now() - start).InSecondsF();
+    const double secs = (base::TimeTicks::Now() - start).InSecondsF();
     std::printf("streamed %lld / %llu bytes in %.2f s (%.1f MB/s)\n",
                 (long long)total, (unsigned long long)node->size, secs,
                 secs > 0 ? total / secs / (1 << 20) : 0.0);
@@ -66,7 +65,7 @@ int main(int argc, char **argv) {
   }
 
   if (argc >= 4) {
-    const auto *node = fs.Find(argv[2]);
+    const auto* node = fs.Find(argv[2]);
     if (!node) {
       std::printf("%s: not found\n", argv[2]);
       return 1;
@@ -87,8 +86,8 @@ int main(int argc, char **argv) {
   fs.Paths(paths);
   base::Sort(paths.begin(), paths.end());
   u64 total = 0;
-  for (const auto &p : paths) {
-    const auto *node = fs.Find(p.c_str());
+  for (const auto& p : paths) {
+    const auto* node = fs.Find(p.c_str());
     const u64 sz = node ? node->size : 0;
     total += sz;
     std::printf("%12llu  %s\n", (unsigned long long)sz, p.c_str());

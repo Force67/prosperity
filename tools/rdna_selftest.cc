@@ -11,27 +11,27 @@
  * regression check for the decoder + recompiler until submission is unblocked.
  */
 
-#include "base/arch.h"
-#include <cstdio>
-#include <cstring>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <cstdio>
+#include <cstring>
+#include "base/arch.h"
 
-#include "guest_memory.h"
-#include "gcn/gcn_detile.h"
-#include "gcn/spirv/spv_post.h"
-#include "ps5/rdna/rdna_decode.h"
-#include "ps5/rdna/rdna_resource.h"
-#include "ps5/rdna/rdna_translate.h"
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
+#include "gpu/gcn/gcn_detile.h"
+#include "gpu/gcn/spirv/spv_post.h"
+#include "gpu/guest_memory.h"
+#include "gpu/ps5/rdna/rdna_decode.h"
+#include "gpu/ps5/rdna/rdna_resource.h"
+#include "gpu/ps5/rdna/rdna_translate.h"
 
 using gpu::gcn::Enc;
 
 namespace {
 
 int g_failures = 0;
-void expect(bool cond, const char *what) {
+void expect(bool cond, const char* what) {
   std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what);
   if (!cond)
     g_failures++;
@@ -39,8 +39,8 @@ void expect(bool cond, const char *what) {
 
 // True if the SPIR-V word stream contains an instruction with the given opcode.
 // Each instruction's first word packs wordCount[31:16] | opcode[15:0].
-bool hasOpcode(const base::Vector<u32> &spv, u32 opcode) {
-  size_t i = 5; // skip the 5-word module header
+bool hasOpcode(const base::Vector<u32>& spv, u32 opcode) {
+  size_t i = 5;  // skip the 5-word module header
   while (i < spv.size()) {
     const u32 wc = spv[i] >> 16;
     if (wc == 0)
@@ -52,7 +52,7 @@ bool hasOpcode(const base::Vector<u32> &spv, u32 opcode) {
   return false;
 }
 
-bool hasExtInst(const base::Vector<u32> &spv, u32 instruction) {
+bool hasExtInst(const base::Vector<u32>& spv, u32 instruction) {
   size_t i = 5;
   while (i < spv.size()) {
     const u32 wc = spv[i] >> 16;
@@ -69,7 +69,7 @@ bool hasExtInst(const base::Vector<u32> &spv, u32 instruction) {
 // True if the module decorates any id with BuiltIn `builtin` (OpDecorate == 71,
 // Decoration BuiltIn == 11, then the BuiltIn enum). Used to prove a PS input
 // VGPR was seeded from a Vulkan built-in (gl_FragCoord == 15).
-bool hasBuiltin(const base::Vector<u32> &spv, u32 builtin) {
+bool hasBuiltin(const base::Vector<u32>& spv, u32 builtin) {
   size_t i = 5;
   while (i < spv.size()) {
     const u32 wc = spv[i] >> 16;
@@ -83,7 +83,7 @@ bool hasBuiltin(const base::Vector<u32> &spv, u32 builtin) {
   return false;
 }
 
-bool hasVariableStorage(const base::Vector<u32> &spv, u32 storage) {
+bool hasVariableStorage(const base::Vector<u32>& spv, u32 storage) {
   size_t i = 5;
   while (i < spv.size()) {
     const u32 wc = spv[i] >> 16;
@@ -109,14 +109,18 @@ u32 vop2(u32 op, u32 vdst, u32 src0, u32 vsrc1) {
 }
 // VOP3: word0 [31:26]=0x35, op[25:16], clamp[15], abs[10:8], vdst[7:0];
 // word1: neg[31:29], src2[26:18], src1[17:9], src0[8:0].
-void vop3(base::Vector<u32> &out, u32 op, u32 vdst, u32 s0,
-          u32 s1, u32 s2) {
+void vop3(base::Vector<u32>& out, u32 op, u32 vdst, u32 s0, u32 s1, u32 s2) {
   out.push_back((0x35u << 26) | ((op & 0x3FF) << 16) | (vdst & 0xFF));
   out.push_back(((s2 & 0x1FF) << 18) | ((s1 & 0x1FF) << 9) | (s0 & 0x1FF));
 }
 
-void vop3b(base::Vector<u32> &out, u32 op, u32 vdst,
-           u32 sdst, u32 s0, u32 s1, u32 s2 = 0) {
+void vop3b(base::Vector<u32>& out,
+           u32 op,
+           u32 vdst,
+           u32 sdst,
+           u32 s0,
+           u32 s1,
+           u32 s2 = 0) {
   out.push_back((0x35u << 26) | ((op & 0x3FF) << 16) | ((sdst & 0x7F) << 8) |
                 (vdst & 0xFF));
   out.push_back(((s2 & 0x1FF) << 18) | ((s1 & 0x1FF) << 9) | (s0 & 0x1FF));
@@ -128,8 +132,14 @@ u32 vopc(u32 op, u32 src0, u32 vsrc1) {
 }
 // EXP: [31:26]=0x3E, done[11], compr[10], target[9:4], en[3:0]; word1 = 4
 // VGPRs.
-void exp(base::Vector<u32> &out, u32 target, u32 en, bool done,
-         u32 v0, u32 v1, u32 v2, u32 v3) {
+void exp(base::Vector<u32>& out,
+         u32 target,
+         u32 en,
+         bool done,
+         u32 v0,
+         u32 v1,
+         u32 v2,
+         u32 v3) {
   out.push_back((0x3Eu << 26) | ((done ? 1u : 0u) << 11) |
                 ((target & 0x3F) << 4) | (en & 0xF));
   out.push_back((v0 & 0xFF) | ((v1 & 0xFF) << 8) | ((v2 & 0xFF) << 16) |
@@ -140,8 +150,12 @@ u32 sopp(u32 op, u32 simm) {
   return (0x17Fu << 23) | ((op & 0x7F) << 16) | (simm & 0xFFFF);
 }
 // SMEM: [31:26]=0x3D, op[25:18], sdst[12:6], sbase[5:0]; word1 imm[20:0].
-void smem(base::Vector<u32> &out, u32 op, u32 sdst,
-          u32 sbase, u32 imm, u32 soffset = 125) {
+void smem(base::Vector<u32>& out,
+          u32 op,
+          u32 sdst,
+          u32 sbase,
+          u32 imm,
+          u32 soffset = 125) {
   out.push_back((0x3Du << 26) | ((op & 0xFF) << 18) | ((sdst & 0x7F) << 6) |
                 (sbase & 0x3F));
   out.push_back(((soffset & 0x7F) << 25) | (imm & 0x1FFFFF));
@@ -152,8 +166,12 @@ u32 sop1(u32 op, u32 sdst, u32 ssrc) {
          (ssrc & 0xFF);
 }
 
-void sop2(base::Vector<u32> &out, u32 op, u32 sdst,
-          u32 ssrc0, u32 ssrc1, u32 literal = 0) {
+void sop2(base::Vector<u32>& out,
+          u32 op,
+          u32 sdst,
+          u32 ssrc0,
+          u32 ssrc1,
+          u32 literal = 0) {
   out.push_back((0x2u << 30) | ((op & 0x7F) << 23) | ((sdst & 0x7F) << 16) |
                 ((ssrc1 & 0xFF) << 8) | (ssrc0 & 0xFF));
   if (ssrc0 == 255 || ssrc1 == 255)
@@ -173,8 +191,13 @@ u32 sopk(u32 op, u32 sdst, u32 simm) {
 // MIMG (NSA=0, 64-bit): word0 [31:26]=0x3C, op[24:18], da[14], dmask[11:8],
 // op[7] at bit 0; word1 ssamp[25:21], srsrc[20:16], vdata[15:8], vaddr[7:0].
 // srsrc/ssamp are the SGPR index >> 2 (4-SGPR-aligned).
-void mimg(base::Vector<u32> &out, u32 op, u32 dmask,
-          u32 vdata, u32 vaddr, u32 srsrc, u32 ssamp,
+void mimg(base::Vector<u32>& out,
+          u32 op,
+          u32 dmask,
+          u32 vdata,
+          u32 vaddr,
+          u32 srsrc,
+          u32 ssamp,
           u32 dim = 1) {
   out.push_back((0x3Cu << 26) | ((op & 0x7F) << 18) | ((dmask & 0xF) << 8) |
                 ((dim & 0x7) << 3) | ((op >> 7) & 1));
@@ -186,21 +209,31 @@ void mimg(base::Vector<u32> &out, u32 op, u32 dmask,
 // seg[15:14], lds[13], dlc[12], offset[11:0]; word1 vdst[31:24], saddr[22:16],
 // data[15:8], addr[7:0]. seg 0 = flat, 1 = scratch, 2 = global; saddr 0x7d is
 // NULL (no scalar base).
-void flat(base::Vector<u32> &out, u32 op, u32 seg, u32 vdst,
-          u32 addr, u32 data, u32 saddr, u32 offset = 0) {
+void flat(base::Vector<u32>& out,
+          u32 op,
+          u32 seg,
+          u32 vdst,
+          u32 addr,
+          u32 data,
+          u32 saddr,
+          u32 offset = 0) {
   out.push_back((0x37u << 26) | ((op & 0x7F) << 18) | ((seg & 0x3) << 14) |
                 (offset & 0xFFF));
   out.push_back(((vdst & 0xFF) << 24) | ((saddr & 0x7F) << 16) |
                 ((data & 0xFF) << 8) | (addr & 0xFF));
 }
 
-void mubuf(base::Vector<u32> &out, u32 op, u32 srsrc) {
+void mubuf(base::Vector<u32>& out, u32 op, u32 srsrc) {
   out.push_back((0x38u << 26) | ((op & 0x7F) << 18) | (1u << 13));
   out.push_back((128u << 24) | (((srsrc / 4) & 0x1F) << 16));
 }
 
-void mtbuf(base::Vector<u32> &out, u32 op, u32 format,
-           u32 vdata, u32 vaddr, u32 srsrc) {
+void mtbuf(base::Vector<u32>& out,
+           u32 op,
+           u32 format,
+           u32 vdata,
+           u32 vaddr,
+           u32 srsrc) {
   out.push_back((0x3Au << 26) | ((format & 0x7F) << 19) | ((op & 0x07) << 16) |
                 (1u << 13));
   out.push_back((128u << 24) | (((op >> 3) & 1) << 21) |
@@ -210,24 +243,23 @@ void mtbuf(base::Vector<u32> &out, u32 op, u32 format,
 
 // VOP3P with canonical componentwise selectors: low result uses low sources,
 // high result uses high sources.
-void vop3p(base::Vector<u32> &out, u32 op, u32 vdst, u32 s0,
-           u32 s1, u32 s2) {
+void vop3p(base::Vector<u32>& out, u32 op, u32 vdst, u32 s0, u32 s1, u32 s2) {
   out.push_back((0x33u << 26) | ((op & 0x7F) << 16) | (1u << 14) |
                 (vdst & 0xFF));
   out.push_back((3u << 27) | ((s2 & 0x1FF) << 18) | ((s1 & 0x1FF) << 9) |
                 (s0 & 0x1FF));
 }
 
-constexpr u32 kInline0 = 128;  // integer/float 0
-constexpr u32 kInline1f = 242; // float 1.0
+constexpr u32 kInline0 = 128;   // integer/float 0
+constexpr u32 kInline1f = 242;  // float 1.0
 constexpr u32 kEndpgm = 1;
 
-} // namespace
+}  // namespace
 
 int main() {
   u32 user_data[32] = {};
   const auto unmapped =
-      gpu::rdna::Recompile(reinterpret_cast<const u32 *>(0x4000000000ull),
+      gpu::rdna::Recompile(reinterpret_cast<const u32*>(0x4000000000ull),
                            nullptr, user_data, user_data);
   expect(!unmapped.ok, "unmapped shader address is rejected");
 
@@ -242,9 +274,9 @@ int main() {
     const gpu::gcn::Program prog =
         gpu::rdna::Decode(code.data(), (u32)code.size());
     expect(prog.size() == 4, "decoded 4 instructions");
-    expect(prog.size() >= 1 && prog[0].enc == Enc::kVop1 &&
-               prog[0].opcode == 0x01,
-           "inst0 is VOP1 v_mov_b32");
+    expect(
+        prog.size() >= 1 && prog[0].enc == Enc::kVop1 && prog[0].opcode == 0x01,
+        "inst0 is VOP1 v_mov_b32");
     expect(prog.size() >= 3 && prog[2].enc == Enc::kExp && prog[2].size == 2,
            "inst2 is EXP (2 dwords)");
     expect(prog.size() >= 4 && prog[3].enc == Enc::kSopp && prog[3].opcode == 1,
@@ -267,23 +299,24 @@ int main() {
   {
     // Procedural VS: position = (0,0,0,1).
     base::Vector<u32> vs;
-    vs.push_back(vop1(0x01, 0, 8));         // v0 = VS user SGPR s8
-    vs.push_back(vop1(0x01, 1, kInline0));  // v1 = 0.0
-    vs.push_back(vop1(0x01, 2, kInline0));  // v2 = 0.0
-    vs.push_back(vop1(0x01, 3, kInline1f)); // v3 = 1.0
+    vs.push_back(vop1(0x01, 0, 8));          // v0 = VS user SGPR s8
+    vs.push_back(vop1(0x01, 1, kInline0));   // v1 = 0.0
+    vs.push_back(vop1(0x01, 2, kInline0));   // v2 = 0.0
+    vs.push_back(vop1(0x01, 3, kInline1f));  // v3 = 1.0
     exp(vs, /*POS0*/ 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
     // PS: color = (1,1,1,1) -> MRT0. (v_add_f32 exercises VOP2.)
     base::Vector<u32> ps;
-    ps.push_back(vop1(0x01, 0, 0));            // v0 = PS user SGPR s0
-    ps.push_back(vop2(0x03, 1, kInline1f, 0)); // v1 = 1.0 + v0 = 2.0 (VOP2 add)
-    ps.push_back(vop1(0x01, 2, kInline1f));    // v2 = 1.0
-    ps.push_back(vop1(0x01, 3, kInline1f));    // v3 = 1.0
+    ps.push_back(vop1(0x01, 0, 0));  // v0 = PS user SGPR s0
+    ps.push_back(
+        vop2(0x03, 1, kInline1f, 0));        // v1 = 1.0 + v0 = 2.0 (VOP2 add)
+    ps.push_back(vop1(0x01, 2, kInline1f));  // v2 = 1.0
+    ps.push_back(vop1(0x01, 3, kInline1f));  // v3 = 1.0
     exp(ps, /*MRT0*/ 0, 0xF, true, 0, 0, 2, 3);
     ps.push_back(sopp(kEndpgm, 0));
 
-    u32 user_data[16] = {0}; // no fetch shader -> procedural path
+    u32 user_data[16] = {0};  // no fetch shader -> procedural path
     gpu::gcn::Recompiled r =
         gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
     expect(r.ok, "VS+PS recompiled ok");
@@ -312,8 +345,8 @@ int main() {
     fetch.push_back(sop1(0x20, 0, 0));
     const size_t fetch_bytes = fetch.size() * sizeof(u32);
     const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
-    void *fetch_memory =
-        mmap(reinterpret_cast<void *>(0x1000100000ull), page_size,
+    void* fetch_memory =
+        mmap(reinterpret_cast<void*>(0x1000100000ull), page_size,
              PROT_READ | PROT_WRITE,
              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     expect(fetch_memory != MAP_FAILED, "mapped standalone fetch shader page");
@@ -360,11 +393,11 @@ int main() {
     base::Vector<u32> vs;
     smem(vs, /*s_buffer_load_dwordx4*/ 0x0A, /*sdst s4*/ 4,
          /*sbase sgpr2*/ 1, 0);
-    vs.push_back(vop1(0x01, 0, 4));         // v0 = s4 (cbuffer dword 0)
-    vs.push_back(vop1(0x01, 1, kInline1f)); // v1 = 1.0
-    vs.push_back(vop1(0x01, 2, kInline0));  // v2 = 0.0
-    vs.push_back(vop1(0x01, 3, kInline1f)); // v3 = 1.0
-    vop3(vs, /*v_fma_f32*/ 0x14b, 0, 256, 257, 258); // v0 = v0*v1 + v2
+    vs.push_back(vop1(0x01, 0, 4));          // v0 = s4 (cbuffer dword 0)
+    vs.push_back(vop1(0x01, 1, kInline1f));  // v1 = 1.0
+    vs.push_back(vop1(0x01, 2, kInline0));   // v2 = 0.0
+    vs.push_back(vop1(0x01, 3, kInline1f));  // v3 = 1.0
+    vop3(vs, /*v_fma_f32*/ 0x14b, 0, 256, 257, 258);  // v0 = v0*v1 + v2
     exp(vs, /*POS0*/ 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
@@ -451,8 +484,9 @@ int main() {
     //   global_load_dword   v1,     v1, s[48:49] offset:12
     //   global_load_dwordx3 v[4:6], v4, s[48:49]
     //   global_load_dwordx4 v[4:7], v4, s[48:49] offset:16
-    base::Vector<u32> real{0xdc30800cu, 0x01300001u, 0xdc3c8000u, 0x04300004u,
-                          0xdc388010u, 0x04300004u, sopp(kEndpgm, 0)};
+    base::Vector<u32> real{0xdc30800cu,     0x01300001u, 0xdc3c8000u,
+                           0x04300004u,     0xdc388010u, 0x04300004u,
+                           sopp(kEndpgm, 0)};
     const gpu::gcn::Program prog =
         gpu::rdna::Decode(real.data(), (u32)real.size());
     expect(prog.size() == 4, "three FLAT instructions decode as 2 dwords each");
@@ -471,8 +505,7 @@ int main() {
     exp(ps, /*MRT0*/ 0, 0xF, true, 4, 5, 6, 7);
     ps.push_back(sopp(kEndpgm, 0));
     u32 ud[32] = {};
-    gpu::gcn::Recompiled g =
-        gpu::rdna::Recompile(vs.data(), ps.data(), ud, ud);
+    gpu::gcn::Recompiled g = gpu::rdna::Recompile(vs.data(), ps.data(), ud, ud);
     expect(g.ok, "global_load through a scalar base recompiles");
     expect(g.ps_bufs.size() == 1,
            "loads sharing one scalar base share one set-2 binding");
@@ -553,11 +586,12 @@ int main() {
     vs.push_back(sopp(kEndpgm, 0));
     u32 ud[32] = {};
 
-    for (const u32 op : {/*andn1_saveexec_b64*/ 0x37u, /*orn1_b64*/ 0x38u,
-                         /*andn1_wrexec_b64*/ 0x39u, /*andn2_wrexec_b64*/ 0x3au,
-                         /*and_saveexec_b32*/ 0x3cu, /*xnor_saveexec_b32*/ 0x43u,
-                         /*andn1_saveexec_b32*/ 0x44u,
-                         /*andn2_wrexec_b32*/ 0x47u}) {
+    for (const u32 op :
+         {/*andn1_saveexec_b64*/ 0x37u, /*orn1_b64*/ 0x38u,
+          /*andn1_wrexec_b64*/ 0x39u, /*andn2_wrexec_b64*/ 0x3au,
+          /*and_saveexec_b32*/ 0x3cu, /*xnor_saveexec_b32*/ 0x43u,
+          /*andn1_saveexec_b32*/ 0x44u,
+          /*andn2_wrexec_b32*/ 0x47u}) {
       base::Vector<u32> ps;
       ps.push_back(sop1(op, /*s20*/ 20, /*s8*/ 8));
       ps.push_back(vop1(0x01, 0, 20));
@@ -668,12 +702,12 @@ int main() {
     vs.push_back(sopp(kEndpgm, 0));
 
     base::Vector<u32> ps;
-    ps.push_back(vop1(0x01, 0, kInline0));  // v0 = 0.0
-    ps.push_back(vop1(0x01, 1, kInline1f)); // v1 = 1.0
-    ps.push_back(vopc(0x01, 256, 257));     // v_cmp_lt_f32 v0,v1 -> VCC
-    ps.push_back(vop2(0x01, 2, 256, 257));  // v_cndmask v2 = VCC ? v1 : v0
-    ps.push_back(vop2(0x25, 3, 256, 257));  // v_add_nc_u32 v3 = v0 + v1
-    ps.push_back(vopc(0x11, 256, 257));     // v_cmpx_lt_f32 updates EXEC only
+    ps.push_back(vop1(0x01, 0, kInline0));   // v0 = 0.0
+    ps.push_back(vop1(0x01, 1, kInline1f));  // v1 = 1.0
+    ps.push_back(vopc(0x01, 256, 257));      // v_cmp_lt_f32 v0,v1 -> VCC
+    ps.push_back(vop2(0x01, 2, 256, 257));   // v_cndmask v2 = VCC ? v1 : v0
+    ps.push_back(vop2(0x25, 3, 256, 257));   // v_add_nc_u32 v3 = v0 + v1
+    ps.push_back(vopc(0x11, 256, 257));      // v_cmpx_lt_f32 updates EXEC only
     ps.push_back(vop2(0x28, 4, 256, 257));  // v_add_co_ci_u32 masks VCC by EXEC
     exp(ps, 0, 0xF, true, 2, 2, 3, 4);
     ps.push_back(sopp(kEndpgm, 0));
@@ -700,19 +734,19 @@ int main() {
     vs.push_back(sopp(kEndpgm, 0));
 
     base::Vector<u32> ps;
-    ps.push_back(vop1(0x01, 0, kInline0));              // v0 = 0
-    ps.push_back(vop1(0x01, 1, kInline1f));             // v1 = 1.0 bits
-    vop3(ps, /*v_add_nc_i32*/ 0x37F, 4, 256, 257, 0);   // v4 = v0 + v1
-    vop3(ps, /*v_sub_nc_i32*/ 0x376, 5, 256, 257, 0);   // v5 = v0 - v1
-    vop3b(ps, /*v_add_co_u32*/ 0x30F, 6, 20, 256, 257); // v6, s20 = v0 + v1
+    ps.push_back(vop1(0x01, 0, kInline0));               // v0 = 0
+    ps.push_back(vop1(0x01, 1, kInline1f));              // v1 = 1.0 bits
+    vop3(ps, /*v_add_nc_i32*/ 0x37F, 4, 256, 257, 0);    // v4 = v0 + v1
+    vop3(ps, /*v_sub_nc_i32*/ 0x376, 5, 256, 257, 0);    // v5 = v0 - v1
+    vop3b(ps, /*v_add_co_u32*/ 0x30F, 6, 20, 256, 257);  // v6, s20 = v0 + v1
     vop3b(ps, /*v_add_co_ci_u32*/ 0x128, 13, 22, 256, 257,
-          106); // v13, s22 = v0 + v1 + VCC
-    vop3(ps, /*v_add3_u32*/ 0x36D, 7, 256, 257, 260);      // v7 = v0+v1+v4
-    vop3(ps, /*v_lshl_or_b32*/ 0x36F, 8, 256, 257, 260);   // v8 = (v0<<v1)|v4
-    vop3(ps, /*v_lshl_add_u32*/ 0x346, 9, 256, 257, 260);  // v9 = (v0<<v1)+v4
-    vop3(ps, /*v_add_lshl_u32*/ 0x347, 10, 256, 257, 260); // v10 = (v0+v1)<<v4
-    vop3(ps, /*v_or3_b32*/ 0x372, 11, 256, 257, 260);      // v11 = v0|v1|v4
-    vop3(ps, /*v_and_or_b32*/ 0x371, 12, 256, 257, 260);   // v12 = (v0&v1)|v4
+          106);  // v13, s22 = v0 + v1 + VCC
+    vop3(ps, /*v_add3_u32*/ 0x36D, 7, 256, 257, 260);       // v7 = v0+v1+v4
+    vop3(ps, /*v_lshl_or_b32*/ 0x36F, 8, 256, 257, 260);    // v8 = (v0<<v1)|v4
+    vop3(ps, /*v_lshl_add_u32*/ 0x346, 9, 256, 257, 260);   // v9 = (v0<<v1)+v4
+    vop3(ps, /*v_add_lshl_u32*/ 0x347, 10, 256, 257, 260);  // v10 = (v0+v1)<<v4
+    vop3(ps, /*v_or3_b32*/ 0x372, 11, 256, 257, 260);       // v11 = v0|v1|v4
+    vop3(ps, /*v_and_or_b32*/ 0x371, 12, 256, 257, 260);    // v12 = (v0&v1)|v4
     exp(ps, 0, 0xF, true, 7, 8, 11, 12);
     ps.push_back(sopp(kEndpgm, 0));
 
@@ -748,8 +782,8 @@ int main() {
         gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
     expect(!r.ok, "unsupported RDNA instruction rejects recompilation");
 
-    for (const u32 op : {0x00u, 0x15u, 0x17u, 0x19u, 0x1fu, 0x20u, 0x21u,
-                              0x22u, 0x23u, 0x24u}) {
+    for (const u32 op : {0x00u, 0x15u, 0x17u, 0x19u, 0x1fu, 0x20u, 0x21u, 0x22u,
+                         0x23u, 0x24u}) {
       ps.clear();
       ps.push_back(vop2(op, 0, 256, 0));
       ps.push_back(sopp(kEndpgm, 0));
@@ -854,7 +888,7 @@ int main() {
 
     ps.clear();
     vop3p(ps, /*v_pk_add_f16*/ 0x0F, 0, 256, 257, 0);
-    ps[0] |= 1u << 15; // CLAMP
+    ps[0] |= 1u << 15;  // CLAMP
     ps.push_back(sopp(kEndpgm, 0));
     const gpu::gcn::Recompiled vop3p_modifier =
         gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
@@ -922,8 +956,8 @@ int main() {
     base::Vector<u32> ps;
     smem(ps, /*s_load_dwordx8 T#*/ 0x03, /*sdst s8*/ 8, /*sbase s0*/ 0, 0);
     smem(ps, /*s_load_dwordx4 S#*/ 0x02, /*sdst s16*/ 16, /*sbase s2*/ 1, 0);
-    ps.push_back(vop1(0x01, 0, kInline0)); // v0 = u = 0.0
-    ps.push_back(vop1(0x01, 1, kInline0)); // v1 = v = 0.0
+    ps.push_back(vop1(0x01, 0, kInline0));  // v0 = u = 0.0
+    ps.push_back(vop1(0x01, 1, kInline0));  // v1 = v = 0.0
     mimg(ps, /*image_sample*/ 0x20, /*dmask*/ 0xF, /*vdata v0*/ 0,
          /*vaddr v0*/ 0,
          /*srsrc s8>>2*/ 2, /*ssamp s16>>2*/ 4);
@@ -988,11 +1022,11 @@ int main() {
     vs.push_back(sopp(kEndpgm, 0));
 
     base::Vector<u32> ps;
-    ps.push_back(vop1(0x01, 0, kInline1f)); // v0 = two f16 lanes (bit pattern)
-    ps.push_back(vop1(0x01, 1, kInline1f)); // v1
-    vop3p(ps, /*v_pk_mul_f16*/ 0x10, 4, 256, 257, 0);   // v4 = v0 .* v1
-    vop3p(ps, /*v_pk_add_f16*/ 0x0F, 5, 256, 257, 0);   // v5 = v0 .+ v1
-    vop3p(ps, /*v_pk_fma_f16*/ 0x0E, 6, 256, 257, 260); // v6 = v0.*v1 .+ v4
+    ps.push_back(vop1(0x01, 0, kInline1f));  // v0 = two f16 lanes (bit pattern)
+    ps.push_back(vop1(0x01, 1, kInline1f));  // v1
+    vop3p(ps, /*v_pk_mul_f16*/ 0x10, 4, 256, 257, 0);    // v4 = v0 .* v1
+    vop3p(ps, /*v_pk_add_f16*/ 0x0F, 5, 256, 257, 0);    // v5 = v0 .+ v1
+    vop3p(ps, /*v_pk_fma_f16*/ 0x0E, 6, 256, 257, 260);  // v6 = v0.*v1 .+ v4
     exp(ps, 0, 0xF, true, 4, 5, 6, 4);
     ps.push_back(sopp(kEndpgm, 0));
 
@@ -1022,10 +1056,10 @@ int main() {
     vs.push_back(sopp(kEndpgm, 0));
 
     base::Vector<u32> ps;
-    ps.push_back(vop1(0x01, 0, kInline0));  // v0
-    ps.push_back(vop1(0x01, 1, kInline1f)); // v1
-    ps.push_back(vopc(0xC9, 256, 257));     // v_cmp_lt_f16 v0,v1 -> VCC
-    ps.push_back(vop2(0x01, 2, 256, 257));  // v_cndmask v2 = VCC ? v1 : v0
+    ps.push_back(vop1(0x01, 0, kInline0));   // v0
+    ps.push_back(vop1(0x01, 1, kInline1f));  // v1
+    ps.push_back(vopc(0xC9, 256, 257));      // v_cmp_lt_f16 v0,v1 -> VCC
+    ps.push_back(vop2(0x01, 2, 256, 257));   // v_cndmask v2 = VCC ? v1 : v0
     exp(ps, 0, 0xF, true, 2, 2, 2, 2);
     ps.push_back(sopp(kEndpgm, 0));
 
@@ -1058,7 +1092,7 @@ int main() {
 
     base::Vector<u32> ps;
     ps.push_back(
-        vop2(0x03, 0, 256 + 2, 3)); // v0 = v2 + v3 (reads seeded frag x/y)
+        vop2(0x03, 0, 256 + 2, 3));  // v0 = v2 + v3 (reads seeded frag x/y)
     exp(ps, 0, 0xF, true, 0, 0, 0, 0);
     ps.push_back(sopp(kEndpgm, 0));
 
@@ -1080,17 +1114,16 @@ int main() {
     // 256x128 2D texture at 0x800000000. width-1=255 -> d1[31:30]|d2[11:0];
     // height-1=127 -> d2[27:14]; type=9 (2D) -> d3[31:28].
     u32 d[8] = {0};
-    d[0] = 0x08000000; // base_units[31:0] (base = <<8)
+    d[0] = 0x08000000;  // base_units[31:0] (base = <<8)
     d[1] =
-        (255u & 0x3u) << 30 | (56u << 20); // width-1 low 2 bits, fmt 8888UNORM
+        (255u & 0x3u) << 30 | (56u << 20);  // width-1 low 2 bits, fmt 8888UNORM
     d[2] = ((255u >> 2) & 0xFFF) | (127u << 14);
-    d[3] = 9u << 28; // type = 2D
+    d[3] = 9u << 28;  // type = 2D
     gpu::gcn::TImage t = gpu::rdna::DecodeTImage(d);
     expect(t.base == 0x800000000ull, "T# base decodes (256-byte units << 8)");
     expect(t.width == 256 && t.height == 128, "T# 256x128 dimensions decode");
     expect(t.type == 9 && !t.arrayed, "T# type 2D, non-arrayed");
-    expect(t.mip_levels == 1 &&
-               t.tiling_idx == gpu::gcn::kGfx10TilingBase,
+    expect(t.mip_levels == 1 && t.tiling_idx == gpu::gcn::kGfx10TilingBase,
            "T# single mip, linear");
     expect(t.dfmt == 10 && t.nfmt == 0, "T# fmt 56 -> 8_8_8_8 UNORM");
     expect(t.pitch == 256, "T# linear pitch 256B-row-aligned");
@@ -1100,8 +1133,8 @@ int main() {
     d[1] = (255u & 0x3u) << 30 | (50u << 20);
     t = gpu::rdna::DecodeTImage(d);
     expect(t.dfmt == 9, "T# fmt 50 -> 2_10_10_10");
-    d[3] = (12u << 28); // 2D array
-    d[4] = 1u << 13;    // Pitch[13], not Depth.
+    d[3] = (12u << 28);  // 2D array
+    d[4] = 1u << 13;     // Pitch[13], not Depth.
     t = gpu::rdna::DecodeTImage(d);
     expect(t.layers == 1, "T# pitch bit does not extend array depth");
     d[4] = 1u << 14;
@@ -1136,8 +1169,8 @@ int main() {
     // which knows the element size the staging path actually chose.
     expect(t.dfmt == 13 && t.pitch == t.width,
            "T# RGB32 leaves row alignment to the layout");
-    d[1] = (255u & 0x3u) << 30 | (130u << 20); // fmt 8_8_8_8_SRGB
-    d[3] = (9u << 28) | (25u << 20);           // sw_mode 64KB_S_X (tiled)
+    d[1] = (255u & 0x3u) << 30 | (130u << 20);  // fmt 8_8_8_8_SRGB
+    d[3] = (9u << 28) | (25u << 20);            // sw_mode 64KB_S_X (tiled)
     t = gpu::rdna::DecodeTImage(d);
     expect(t.dfmt == 10 && t.nfmt == 9, "T# fmt 130 -> 8_8_8_8 SRGB");
     expect(t.tiling_idx > 0x40, "T# gfx10 tiled mode maps out of GCN range");
@@ -1146,35 +1179,33 @@ int main() {
   std::printf("== RDNA2 resource resolution ==\n");
   {
     const long page_size = sysconf(_SC_PAGESIZE);
-    void *memory =
+    void* memory =
         mmap(nullptr, static_cast<size_t>(page_size), PROT_READ | PROT_WRITE,
              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     expect(memory != MAP_FAILED, "mapped descriptor test page");
     if (memory != MAP_FAILED) {
-      expect(
-          gpu::IsReadableRange(reinterpret_cast<u64>(memory), page_size),
-          "readable guest mappings pass range validation");
-      void *reserved = mmap(nullptr, static_cast<size_t>(page_size), PROT_NONE,
+      expect(gpu::IsReadableRange(reinterpret_cast<u64>(memory), page_size),
+             "readable guest mappings pass range validation");
+      void* reserved = mmap(nullptr, static_cast<size_t>(page_size), PROT_NONE,
                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-      expect(reserved != MAP_FAILED &&
-                 !gpu::IsReadableRange(reinterpret_cast<u64>(reserved),
-                                       page_size),
-             "PROT_NONE guest reservations fail range validation");
+      expect(
+          reserved != MAP_FAILED &&
+              !gpu::IsReadableRange(reinterpret_cast<u64>(reserved), page_size),
+          "PROT_NONE guest reservations fail range validation");
       if (reserved != MAP_FAILED)
         munmap(reserved, static_cast<size_t>(page_size));
-      auto *words = static_cast<u32 *>(memory);
+      auto* words = static_cast<u32*>(memory);
       const u64 texture_base = reinterpret_cast<u64>(memory);
-      auto writeImage = [&](u32 *d) {
+      auto writeImage = [&](u32* d) {
         std::memset(d, 0, 8 * sizeof(u32));
         const u64 base_units = texture_base >> 8;
         d[0] = static_cast<u32>(base_units);
-        d[1] =
-            static_cast<u32>(base_units >> 32) | (3u << 30) | (56u << 20);
+        d[1] = static_cast<u32>(base_units >> 32) | (3u << 30) | (56u << 20);
         d[2] = 3u << 14;
         d[3] = 9u << 28;
       };
 
-      u32 *table = words + 64;
+      u32* table = words + 64;
       writeImage(table + 4);
       expect(gpu::IsReadableRange(reinterpret_cast<u64>(table + 4),
                                   8 * sizeof(u32)),
@@ -1185,8 +1216,8 @@ int main() {
       user_data[9] = static_cast<u32>(table_address >> 32);
 
       base::Vector<u32> dynamic;
-      dynamic.push_back(sopk(0x00, 106, 16)); // s_movk_i32 s106, 16
-      smem(dynamic, 0x03, 0, 4, 0, 106); // s_load_dwordx8 s[0:7], s[8:9], s106
+      dynamic.push_back(sopk(0x00, 106, 16));  // s_movk_i32 s106, 16
+      smem(dynamic, 0x03, 0, 4, 0, 106);  // s_load_dwordx8 s[0:7], s[8:9], s106
       mimg(dynamic, 0x00, 0xF, 0, 0, 0, 0);
       dynamic.push_back(sopp(kEndpgm, 0));
       const auto dynamic_textures =
@@ -1236,8 +1267,8 @@ int main() {
 
       base::Vector<u32> reachable_image;
       reachable_image.push_back(sopp(/*s_branch*/ 0x02, 2));
-      mimg(reachable_image, 0x00, 0xF, 0, 0, 0, 0); // unreachable T# at s0
-      mimg(reachable_image, 0x00, 0xF, 0, 0, 4, 0); // live T# at s16
+      mimg(reachable_image, 0x00, 0xF, 0, 0, 0, 0);  // unreachable T# at s0
+      mimg(reachable_image, 0x00, 0xF, 0, 0, 4, 0);  // live T# at s16
       reachable_image.push_back(sopp(kEndpgm, 0));
       const auto reachable_image_program = gpu::rdna::ReachableProgram(
           gpu::rdna::Decode(reachable_image.data(),
@@ -1258,9 +1289,8 @@ int main() {
       versioned_images.push_back(sop1(/*s_mov_b32*/ 0x03, 16, 20));
       mimg(versioned_images, 0x00, 0xF, 0, 0, 4, 0);
       versioned_images.push_back(sopp(kEndpgm, 0));
-      const auto versioned_image_program =
-          gpu::rdna::Decode(versioned_images.data(),
-                            static_cast<u32>(versioned_images.size()));
+      const auto versioned_image_program = gpu::rdna::Decode(
+          versioned_images.data(), static_cast<u32>(versioned_images.size()));
       const auto versioned_image_plan =
           gpu::rdna::RdnaPlanMimg(versioned_image_program);
       expect(versioned_image_plan.binding_srsrc.size() == 2,
@@ -1281,15 +1311,14 @@ int main() {
       expect(!unshifted_cbufs.count(0),
              "GS roots below s8 do not alias user data");
 
-      u32 *vertex_table = words + 128;
-      u32 *selected_vb = vertex_table + 4;
+      u32* vertex_table = words + 128;
+      u32* selected_vb = vertex_table + 4;
       const u64 vertex_base = reinterpret_cast<u64>(words + 192);
       selected_vb[0] = static_cast<u32>(vertex_base);
       selected_vb[1] = static_cast<u32>(vertex_base >> 32) | (20u << 16);
       selected_vb[2] = 6;
       selected_vb[3] = 64u << 12;
-      const u64 vertex_table_address =
-          reinterpret_cast<u64>(vertex_table);
+      const u64 vertex_table_address = reinterpret_cast<u64>(vertex_table);
       gs_user_data[0] = static_cast<u32>(vertex_table_address);
       gs_user_data[1] = static_cast<u32>(vertex_table_address >> 32);
       base::Vector<u32> vertex_fetch;
