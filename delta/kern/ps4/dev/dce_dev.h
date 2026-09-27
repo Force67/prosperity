@@ -5,8 +5,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 u32 DceCurrentBuffer();
 i64 DceCurrentFlipArg();
@@ -41,4 +41,4 @@ class DceDevice : public Device {
   // UINT64_MAX on failure.
   u64 PoolAlloc(u64 bytes);
 };
-}  // namespace krnl
+}  // namespace kern

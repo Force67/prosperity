@@ -20,7 +20,7 @@ namespace {
 DELTA_OPTION(u32, kPlaygoChunks, "DELTA_PLAYGO_CHUNKS", 0);
 }  // namespace
 
-namespace krnl::ipmi {
+namespace kern::ipmi {
 namespace {
 
 enum {
@@ -197,4 +197,4 @@ Service& PlayGoService() {
   return g_play_go;
 }
 
-}  // namespace krnl::ipmi
+}  // namespace kern::ipmi

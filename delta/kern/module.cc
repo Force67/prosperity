@@ -47,8 +47,8 @@ DELTA_OPTION(bool, kImplibTrace, "DELTA_IMPLIB_TRACE", false);
 DELTA_OPTION(bool, kRelocTrace, "DELTA_RELOC_TRACE", false);
 }  // namespace
 
-namespace krnl {
-Smodule::Smodule(Proc* process) : process_(process) {
+namespace kern {
+Module::Module(Process* process) : process_(process) {
   /*-1 = no tls used*/
   info_.handle = -1;
   info_.tls_slot = -1;
@@ -57,7 +57,7 @@ Smodule::Smodule(Proc* process) : process_(process) {
   info_.rip_zone_size = process->GetEnv().rip_zone_size;
 }
 
-bool Smodule::FromFile(const base::String& path) {
+bool Module::FromFile(const base::String& path) {
   io::File file(path);
   if (!file.IsOpen()) {
     // missing dep on disk; fail soft so the caller can keep going
@@ -84,7 +84,7 @@ bool Smodule::FromFile(const base::String& path) {
   return false;
 }
 
-bool Smodule::FromVfs(const base::String& guest_path) {
+bool Module::FromVfs(const base::String& guest_path) {
   io::File f = vfs::OpenRead(guest_path.c_str());
   if (!f.Exists()) {
     LOG_ERROR("smodule: cannot open vfs path {}", guest_path.c_str());
@@ -136,7 +136,7 @@ bool Smodule::FromVfs(const base::String& guest_path) {
   return FromMem(base::move(out));
 }
 
-bool Smodule::FromMem(base::UniquePointer<u8[]> data) {
+bool Module::FromMem(base::UniquePointer<u8[]> data) {
   this->data_ = base::move(data);
 
   elf_ = GetOffset<ELFHeader>(0);
@@ -187,13 +187,13 @@ bool Smodule::FromMem(base::UniquePointer<u8[]> data) {
   return true;
 }
 
-bool Smodule::Unload() {
+bool Module::Unload() {
   data_ = {};
 
   return true;
 }
 
-void Smodule::DigestDynamic() {
+void Module::DigestDynamic() {
   const auto* dyn_s = GetSegment(ElfSegType::PT_DYNAMIC);
   if (!dyn_s)
     return;
@@ -327,7 +327,7 @@ void Smodule::DigestDynamic() {
 // mapped image (unlike PS4's DT_SCE_* offsets into PT_SCE_DYNLIBDATA).
 // Symbol/reloc format is identical, so ResolveImports/applyRelocations are
 // reused unchanged.
-void Smodule::DigestDynamicPs5(const ELFPgHeader* dyn_s) {
+void Module::DigestDynamicPs5(const ELFPgHeader* dyn_s) {
   ELFDyn* dynamics = GetOffset<ELFDyn>(dyn_s->offset);
   const int count = static_cast<int>(dyn_s->filesz / sizeof(ELFDyn));
 
@@ -452,7 +452,7 @@ static void StartNoExecWatch() {
   (void)kOnce;
 }
 
-void Smodule::PlantGuestBreakpoints() {
+void Module::PlantGuestBreakpoints() {
   StartNoExecWatch();
   const char* spec = kGuestBrk;
   if (!spec)
@@ -500,7 +500,7 @@ void Smodule::PlantGuestBreakpoints() {
 // DELTA_MODCHECK=<name>: watch a module's read-only segments for corruption; a
 // moving digest means something scribbled on the image (libcohtml's V8
 // snapshot).
-void Smodule::StartModuleWatch() {
+void Module::StartModuleWatch() {
   const char* want = kModCheck;
   if (!want || info_.name.find(want) == base::String::npos)
     return;
@@ -545,7 +545,7 @@ void Smodule::StartModuleWatch() {
   });
 }
 
-bool Smodule::MapImage() {
+bool Module::MapImage() {
   // size is the highest segment end, not the sum: segments map at their paddr,
   // which can be sparse, so summing under-reserves and a later segment ends up
   // writing into the unmapped part of the reservation.
@@ -672,7 +672,7 @@ bool Smodule::MapImage() {
   // PS5 (Prospero) marks its code segments PF_X only (no PF_R), unlike PS4's
   // PF_R|PF_X. Both the lifter gate and the page-protection map must account
   // for that; gate the relaxation to PS5 so PS4 handling is unchanged.
-  const bool ps5 = process_->GetPlatform() == Proc::Platform::kPs5;
+  const bool ps5 = process_->GetPlatform() == Process::Platform::kPs5;
 
   // Lift code (x86 host only). The lifter rewrites syscall/int/fs reads
   // in place so raw guest x86-64 runs natively. On aarch64 the FEXCore JIT
@@ -743,7 +743,7 @@ bool Smodule::MapImage() {
   return true;
 }
 
-bool Smodule::SetupTls() {
+bool Module::SetupTls() {
   auto* p = GetSegment(PT_TLS);
   // Only modules with a real TLS template get an index; empty PT_TLS (memsz 0)
   // would inflate indices away from libkernel's dense numbering.
@@ -776,7 +776,7 @@ static bool DecodeNid(const char* name, u64& lid, u64& mid) {
   return true;
 }
 
-bool Smodule::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
+bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
   // PS5: impLibs/impModules aren't populated, so resolve by global NID across
   // all loaded modules. LLE only: PS4 HLE stubs must not hijack a Prospero
   // import.
@@ -924,7 +924,7 @@ bool Smodule::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
 }
 
 /*invoked by sys_dynlib_process_needed_and_relocate*/
-bool Smodule::ResolveImports() {
+bool Module::ResolveImports() {
   /*unpatched functioncall*/
   uintptr_t addr_bad_call = 0;
   if (auto kmod = process_->GetModule("libkernel"))
@@ -1004,7 +1004,7 @@ bool Smodule::ResolveImports() {
 }
 
 /*invoked by sys_dynlib_process_needed_and_relocate*/
-bool Smodule::ApplyRelocations() {
+bool Module::ApplyRelocations() {
   if (relocated_)
     return true;
   relocated_ = true;
@@ -1073,7 +1073,7 @@ bool Smodule::ApplyRelocations() {
   return true;
 }
 
-uintptr_t Smodule::GetSymbol(u64 nid) {
+uintptr_t Module::GetSymbol(u64 nid) {
   // are there any overrides for me?
   auto imp = runtime::vprx_get(info_.name.c_str(), nid);
   if (imp != 0)
@@ -1104,7 +1104,7 @@ uintptr_t Smodule::GetSymbol(u64 nid) {
   return 0;
 }
 
-uintptr_t Smodule::GetExport(u64 nid) {
+uintptr_t Module::GetExport(u64 nid) {
   for (u32 i = 0; i < num_symbols_; i++) {
     const auto* s = &symbols_[i];
     if (!s->st_value)
@@ -1117,7 +1117,7 @@ uintptr_t Smodule::GetExport(u64 nid) {
   return 0;
 }
 
-uintptr_t Smodule::GetSymbolFullName(const char* name) {
+uintptr_t Module::GetSymbolFullName(const char* name) {
   // no export hash table (module exports nothing)
   if (!hashes_ || !symbols_ || !strtab_.ptr)
     return 0;
@@ -1165,7 +1165,7 @@ uintptr_t Smodule::GetSymbolFullName(const char* name) {
   return 0;
 }
 
-uintptr_t Smodule::GetSymbol2(const char* name) {
+uintptr_t Module::GetSymbol2(const char* name) {
   for (u32 i = 0; i < num_symbols_; i++) {
     const auto* s = &symbols_[i];
 
@@ -1182,7 +1182,7 @@ uintptr_t Smodule::GetSymbol2(const char* name) {
   return 0;
 }
 
-uintptr_t Smodule::GetSymbolByNid(const char* nid) {
+uintptr_t Module::GetSymbolByNid(const char* nid) {
   for (u32 i = 0; i < num_symbols_; i++) {
     const auto* s = &symbols_[i];
 
@@ -1199,7 +1199,7 @@ uintptr_t Smodule::GetSymbolByNid(const char* nid) {
 }
 
 // taken from idc's "uplift" project
-void Smodule::InstallEhFrame() {
+void Module::InstallEhFrame() {
   const auto* p = GetSegment(PT_GNU_EH_FRAME);
   if (!p)
     return;  // no eh_frame_hdr segment
@@ -1295,7 +1295,7 @@ void Smodule::InstallEhFrame() {
       (terminated ? data_buffer_end : image_end) - data_buffer);
 }
 
-void Smodule::LogDbgInfo() {
+void Module::LogDbgInfo() {
   for (u16 i = 0; i < elf_->phnum; i++) {
     auto s = &segments_[i];
     switch (s->type) {
@@ -1352,4 +1352,4 @@ void Smodule::LogDbgInfo() {
     }
   }
 }
-}  // namespace krnl
+}  // namespace kern

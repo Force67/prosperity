@@ -690,7 +690,7 @@ int RunLight(HidSource& src, void* data, bool reset) {
 
 }  // namespace
 
-namespace krnl {
+namespace kern {
 HidDevice::HidDevice(ObjectTable& objects) : Device(objects) {}
 
 i32 HidDevice::Ioctl(u32 cmd, void* data) {
@@ -746,4 +746,4 @@ int HidDevice::Fstat(void* stat) {
   FillStat(*reinterpret_cast<SceKernelStat*>(stat), 0x2000, 0);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

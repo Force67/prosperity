@@ -17,13 +17,13 @@
 #include "kern/object.h"
 #include "kern/object_table.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 class Device : public Object {
  public:
   inline Device(ObjectTable& objects)
-      : Object(objects, Object::OType::kDevice) {}
+      : Object(objects, Object::Type::kDevice) {}
 
   virtual bool Init(const char*, u32, u32) { return true; }
 
@@ -79,4 +79,4 @@ class Device : public Object {
   // Directory enumeration (FreeBSD dirents). Non-directories aren't one.
   virtual i64 Getdents(void*, size_t) { return -SysError::eNOTDIR; }
 };
-}  // namespace krnl
+}  // namespace kern

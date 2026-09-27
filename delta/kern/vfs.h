@@ -16,7 +16,7 @@
 #include "base/strings/xstring.h"
 #include "io/file.h"
 
-namespace krnl::vfs {
+namespace kern::vfs {
 // One entry in a directory listing.
 struct DirEntry {
   base::String name;
@@ -108,4 +108,4 @@ const base::String& TitleId();
 // and let the count-setter fill the header buffer with correct data).
 void CacheFile(const base::String& key, base::Vector<u8> data);
 const base::Vector<u8>* GetCachedFile(const char* key);
-}  // namespace krnl::vfs
+}  // namespace kern::vfs

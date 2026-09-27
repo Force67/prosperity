@@ -23,7 +23,7 @@
 // Resolve a host address to "<module>+0x<off> (<seg>)" by scanning the loaded
 // module images, so a guest fault points straight at a guest module offset.
 static void symbolize(uintptr_t addr, char* out, size_t n) {
-  auto* proc = krnl::Proc::GetActive();
+  auto* proc = kern::Process::GetActive();
   if (proc) {
     for (auto& mod : proc->GetModuleList()) {
       auto& mi = mod->GetInfo();
@@ -69,7 +69,7 @@ static void crashHandler(int sig, siginfo_t* si, void* ucv) {
   // Dump the guest TLS state so we can see why __tls_get_addr returns null.
   // TCB = fs base; DTV = *(TCB+8); DTV[0]=generation, per-module block pointers
   // at DTV+0x10 + id*8 (see libkernel __tls_get_addr at 0x289c0).
-  if (auto* proc = krnl::Proc::GetActive()) {
+  if (auto* proc = kern::Process::GetActive()) {
     auto* tcb = reinterpret_cast<u64*>(proc->GetEnv().fs_base);
     std::fprintf(stderr, "  --- TLS ---\n  tcb(fs)=%p\n", (void*)tcb);
     if (tcb) {
@@ -106,7 +106,7 @@ static void InstallCrashHandler() {
 // SCOUT: patch a guest function to `xor eax,eax; ret` (return 0). Used to step
 // over libkernel-internal validation that rejects our externally-loaded module
 // set, so we can see how much further the boot gets.
-static void forceReturn0(krnl::Proc& proc, const char* mod, u32 off) {
+static void forceReturn0(kern::Process& proc, const char* mod, u32 off) {
   auto m = proc.GetModule(base::StringRef(mod));
   if (!m)
     return;
@@ -125,7 +125,7 @@ static void forceReturn0(krnl::Proc& proc, const char* mod, u32 off) {
 // leaves DTV entries null, so general-dynamic __thread access faults; ours
 // hands back a real per-module block. Overwrites the entry with
 // `movabs rax, &fn; jmp rax`.
-static void patchTlsGetAddr(krnl::Proc& proc) {
+static void patchTlsGetAddr(kern::Process& proc) {
   auto k = proc.GetModule(base::StringRef("libkernel"));
   if (!k)
     return;
@@ -140,7 +140,7 @@ static void patchTlsGetAddr(krnl::Proc& proc) {
   p[0] = 0x48;  // movabs rax, imm64
   p[1] = 0xB8;
   *reinterpret_cast<u64*>(p + 2) =
-      reinterpret_cast<u64>(&krnl::GuestTlsGetAddr);
+      reinterpret_cast<u64>(&kern::GuestTlsGetAddr);
   p[10] = 0xFF;  // jmp rax
   p[11] = 0xE0;
   std::printf("[modexec] patched libkernel __tls_get_addr @%p -> host HLE\n", p);
@@ -163,11 +163,11 @@ int main(int argc, char** argv) {
     base::String p(argv[1]);
     auto slash = p.find_last_of('/');
     base::String dir = slash == base::String::npos ? "." : p.substr(0, slash);
-    krnl::vfs::Mount("/app0", dir.c_str());
+    kern::vfs::Mount("/app0", dir.c_str());
     std::printf("[modexec] mounted /app0 -> %s\n", dir.c_str());
   }
 
-  krnl::Proc proc;
+  kern::Process proc;
 
   // stage 1: load. create() preloads libkernel + libSceLibcInternal, then the
   // main module and its DT_NEEDED tree.
@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
   // stage 2: resolve imports + relocate every module (what guest libkernel
   // triggers via syscall 599 at startup).
   std::printf("[modexec] === stage 2: relocate ===\n");
-  int rc = krnl::sys_dynlib_process_needed_and_relocate();
+  int rc = kern::sys_dynlib_process_needed_and_relocate();
   std::printf("[modexec] relocate -> %d\n", rc);
   if (rc != 0)
     return 3;

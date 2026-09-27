@@ -13,7 +13,7 @@
 
 #include "base/arch.h"
 
-namespace krnl::ps4 {
+namespace kern::ps4 {
 
 struct AudioSink {
   int (*open)(u32 freq, u32 channels, int is_float) = nullptr;
@@ -25,4 +25,4 @@ struct AudioSink {
 void SetAudioSink(const AudioSink& sink);
 const AudioSink& GetAudioSink();
 
-}  // namespace krnl::ps4
+}  // namespace kern::ps4

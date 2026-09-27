@@ -28,7 +28,7 @@ DELTA_OPTION(u64, kPs5Cores, "DELTA_PS5_CORES", 0);
 DELTA_OPTION(u32, kProc55, "DELTA_PS5_PROC55", 1);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 
 // A PS5 grants the title seven of eight Zen 2 cores (a PS4: six of eight).
 // Engines size their worker pool from the set bits, and Bluepoint's BPE job
@@ -132,4 +132,4 @@ int PS4ABI Ps5Sysctl(int* name,
   return sys_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
 }
 
-}  // namespace krnl
+}  // namespace kern

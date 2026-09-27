@@ -3,8 +3,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // /dev/pfsctldev: the PFS filesystem control channel (format/compact/backup).
 // System-only; games never open it. Registers so an open succeeds; commands
@@ -17,4 +17,4 @@ class PfsctlDevice : public Device {
   i64 Lseek(i64, int) override;
   int Fstat(void* stat) override;
 };
-}  // namespace krnl
+}  // namespace kern

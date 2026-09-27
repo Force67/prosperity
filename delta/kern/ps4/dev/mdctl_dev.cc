@@ -6,7 +6,7 @@
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/mdctl_dev.h"
 
-namespace krnl {
+namespace kern {
 namespace {
 // md_ioctl commands (FreeBSD MDIOC*).
 constexpr u32 kMdAttach = 0xc1c06d00;
@@ -75,4 +75,4 @@ int MdctlDevice::Fstat(void* stat) {
   FillStat(*reinterpret_cast<SceKernelStat*>(stat), 0x2000, 0);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

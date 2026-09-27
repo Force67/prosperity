@@ -20,10 +20,10 @@ class HidDevice : public ::testing::Test {
   // A device registers itself in the object table it is handed, which then owns
   // it, so it has to be built the way the kernel builds one. But that table is
   // the whole of what it needs, so no process is involved.
-  HidDevice() : dev_(*new krnl::HidDevice(objects_)) {}
+  HidDevice() : dev_(*new kern::HidDevice(objects_)) {}
 
-  krnl::ObjectTable objects_;
-  krnl::HidDevice& dev_;
+  kern::ObjectTable objects_;
+  kern::HidDevice& dev_;
 };
 
 // The read commands request up to 16 reports (controller: 64), but the real
@@ -83,12 +83,12 @@ TEST_F(HidDevice, UnknownIoctlZeroesAnOutBuffer) {
 }
 
 TEST_F(HidDevice, ReportsItselfAsACharacterDevice) {
-  krnl::SceKernelStat st;
+  kern::SceKernelStat st;
   std::memset(&st, 0xAA, sizeof(st));
   EXPECT_EQ(dev_.Fstat(&st), 0);
   EXPECT_EQ(st.st_mode & 0xF000, 0x2000);  // S_IFCHR
   EXPECT_EQ(st.st_size, 0);
-  EXPECT_EQ(dev_.Fstat(nullptr), -static_cast<int>(krnl::SysError::eFAULT));
+  EXPECT_EQ(dev_.Fstat(nullptr), -static_cast<int>(kern::SysError::eFAULT));
 }
 
 }  // namespace

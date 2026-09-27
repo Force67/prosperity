@@ -17,7 +17,7 @@ namespace {
 DELTA_OPTION(bool, kArndZero, "DELTA_ARND_ZERO", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 namespace {
 // DELTA_ARND_ZERO already exists for the sysctl entropy path; honour it here
 // too so a run can be made deterministic end to end.
@@ -77,4 +77,4 @@ int RandomDevice::Fstat(void* stat) {
   FillStat(*reinterpret_cast<SceKernelStat*>(stat), 0x2000 /*S_IFCHR*/, 0);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

@@ -12,7 +12,7 @@
 #include "base/arch.h"
 #include "guest_abi.h"
 
-namespace krnl {
+namespace kern {
 
 int PS4ABI Ps5CpusetGetaffinity(int level,
                                 int which,
@@ -27,4 +27,4 @@ int PS4ABI Ps5Sysctl(int* name,
                      const void* newp,
                      size_t newlen);
 
-}  // namespace krnl
+}  // namespace kern

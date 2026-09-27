@@ -50,7 +50,7 @@ extern "C" u64 prosperity_ps5_scanout_base() {
   return g_currentScanout.load(base::memory_order_relaxed);
 }
 
-using namespace krnl;
+using namespace kern;
 
 namespace {
 
@@ -118,7 +118,7 @@ VideoPort g_port;  // dedicated PS5 port state
 // write host .bss.
 u64 *videoLabels() {
   static u64 *labels =
-      reinterpret_cast<u64 *>(krnl::AllocLowGuest(16 * sizeof(u64)));
+      reinterpret_cast<u64 *>(kern::AllocLowGuest(16 * sizeof(u64)));
   return labels;
 }
 
@@ -142,10 +142,10 @@ bool ensureGfx(u32 w, u32 h) {
 }
 
 Equeue *findEqueue(int handle) {
-  auto *p = Proc::GetActive();
+  auto *p = Process::GetActive();
   if (!p) return nullptr;
   auto *obj = p->GetObjTable().Get(static_cast<u32>(handle));
-  if (!obj || obj->type() != Object::OType::kEqueue) return nullptr;
+  if (!obj || obj->type() != Object::Type::kEqueue) return nullptr;
   return static_cast<Equeue *>(obj);
 }
 
@@ -446,7 +446,6 @@ extern "C" bool prosperity_ps5_is_display_buffer(u64 addr) {
       return true;
   return false;
 }
-
 
 static const runtime::funcInfo functions[] = {
     {0x529DFA3D393AF3B1, (void *)&vOpen},                  // Up36PTk687E

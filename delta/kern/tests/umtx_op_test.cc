@@ -43,7 +43,7 @@ TEST(UmtxOp, WakeHonorsRequestedCount) {
   for (size_t i = 0; i < results.size(); ++i) {
     waiters.push_back(base::MakeUnique<JoinedThread>("waiter", [&, i] {
       ready.fetch_add(1);
-      results[i] = krnl::sys_umtx_op(&word, 15, 0, nullptr, &timeout);
+      results[i] = kern::sys_umtx_op(&word, 15, 0, nullptr, &timeout);
       returned.fetch_add(1);
     }));
   }
@@ -51,19 +51,19 @@ TEST(UmtxOp, WakeHonorsRequestedCount) {
   ASSERT_TRUE(WaitFor(ready, 4));
   base::SleepForMilliseconds(20);
 
-  EXPECT_EQ(krnl::sys_umtx_op(&word, 16, 1, nullptr, nullptr), 0);
+  EXPECT_EQ(kern::sys_umtx_op(&word, 16, 1, nullptr, nullptr), 0);
   ASSERT_TRUE(WaitFor(returned, 1));
   base::SleepForMilliseconds(20);
   EXPECT_EQ(returned.load(), 1);
 
   // FreeBSD 9 wakes one waiter for a zero count as a consequence of its queue
   // loop, even though normal callers use positive counts.
-  EXPECT_EQ(krnl::sys_umtx_op(&word, 16, 0, nullptr, nullptr), 0);
+  EXPECT_EQ(kern::sys_umtx_op(&word, 16, 0, nullptr, nullptr), 0);
   ASSERT_TRUE(WaitFor(returned, 2));
   base::SleepForMilliseconds(20);
   EXPECT_EQ(returned.load(), 2);
 
-  EXPECT_EQ(krnl::sys_umtx_op(&word, 16, 2, nullptr, nullptr), 0);
+  EXPECT_EQ(kern::sys_umtx_op(&word, 16, 2, nullptr, nullptr), 0);
   ASSERT_TRUE(WaitFor(returned, 4));
   for (int result : results)
     EXPECT_EQ(result, 0);
@@ -73,8 +73,8 @@ TEST(UmtxOp, WakeBeforeWaitIsLost) {
   u32 word = 0;
   GuestTimespec timeout{0, 30'000'000};
 
-  EXPECT_EQ(krnl::sys_umtx_op(&word, 16, 1, nullptr, nullptr), 0);
-  EXPECT_EQ(krnl::sys_umtx_op(&word, 15, 0, nullptr, &timeout), -60);
+  EXPECT_EQ(kern::sys_umtx_op(&word, 16, 1, nullptr, nullptr), 0);
+  EXPECT_EQ(kern::sys_umtx_op(&word, 15, 0, nullptr, &timeout), -60);
 }
 
 TEST(UmtxOp, BucketCollisionDoesNotReleaseAnotherAddress) {
@@ -90,24 +90,24 @@ TEST(UmtxOp, BucketCollisionDoesNotReleaseAnotherAddress) {
 
   JoinedThread first_waiter("first", [&] {
     ready.fetch_add(1);
-    first_result = krnl::sys_umtx_op(first, 15, 0, nullptr, &timeout);
+    first_result = kern::sys_umtx_op(first, 15, 0, nullptr, &timeout);
     first_returned.store(1);
   });
   JoinedThread collision_waiter("collision", [&] {
     ready.fetch_add(1);
-    collision_result = krnl::sys_umtx_op(collision, 15, 0, nullptr, &timeout);
+    collision_result = kern::sys_umtx_op(collision, 15, 0, nullptr, &timeout);
     collision_returned.store(1);
   });
 
   ASSERT_TRUE(WaitFor(ready, 2));
   base::SleepForMilliseconds(20);
 
-  EXPECT_EQ(krnl::sys_umtx_op(first, 16, 1, nullptr, nullptr), 0);
+  EXPECT_EQ(kern::sys_umtx_op(first, 16, 1, nullptr, nullptr), 0);
   ASSERT_TRUE(WaitFor(first_returned, 1));
   base::SleepForMilliseconds(20);
   EXPECT_EQ(collision_returned.load(), 0);
 
-  EXPECT_EQ(krnl::sys_umtx_op(collision, 16, 1, nullptr, nullptr), 0);
+  EXPECT_EQ(kern::sys_umtx_op(collision, 16, 1, nullptr, nullptr), 0);
   ASSERT_TRUE(WaitFor(collision_returned, 1));
   EXPECT_EQ(first_result, 0);
   EXPECT_EQ(collision_result, 0);

@@ -25,7 +25,7 @@ namespace {
 DELTA_OPTION(bool, kDceTrace, "DELTA_DCE_TRACE", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 DceDevice::DceDevice(ObjectTable& objects) : Device(objects) {}
 
 // Monotonic ns timestamp + a wall-clock ~60 Hz vblank counter. The GameMaker
@@ -80,7 +80,7 @@ static bool DceTrace() {
 // (the native backend runs handlers on the guest stack) to pin which wrapper
 // issued each ioctl.
 static void PrintVideoOutCaller() {
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   if (!proc)
     return;
   uintptr_t vbase = 0, vsize = 0;
@@ -344,4 +344,4 @@ i32 DceDevice::Ioctl(u32 cmd, void* data) {
     BASE_LOGI("dce", "UNHANDLED ioctl {:#x} -> 0", cmd);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

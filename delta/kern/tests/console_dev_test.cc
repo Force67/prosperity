@@ -19,10 +19,10 @@ class ConsoleDevice : public ::testing::Test {
   // A device registers itself in the object table it is handed, which then owns
   // it, so it has to be built the way the kernel builds one. But that table is
   // the whole of what it needs, so no process is involved.
-  ConsoleDevice() : dev_(*new krnl::ConsoleDevice(objects_)) {}
+  ConsoleDevice() : dev_(*new kern::ConsoleDevice(objects_)) {}
 
-  krnl::ObjectTable objects_;
-  krnl::ConsoleDevice& dev_;
+  kern::ObjectTable objects_;
+  kern::ConsoleDevice& dev_;
 };
 
 TEST_F(ConsoleDevice, ReadsReportEndOfFile) {
@@ -41,13 +41,13 @@ TEST_F(ConsoleDevice, WriteReportsEveryByteConsumed) {
 }
 
 TEST_F(ConsoleDevice, ReportsItselfAsACharacterDevice) {
-  krnl::SceKernelStat st;
+  kern::SceKernelStat st;
   std::memset(&st, 0xAA, sizeof(st));
   EXPECT_EQ(dev_.Fstat(&st), 0);
   EXPECT_EQ(st.st_mode & 0xF000, 0x2000);  // S_IFCHR
   EXPECT_EQ(st.st_size, 0);
   // A null out-pointer is the caller's fault, not a crash.
-  EXPECT_EQ(dev_.Fstat(nullptr), -static_cast<int>(krnl::SysError::eFAULT));
+  EXPECT_EQ(dev_.Fstat(nullptr), -static_cast<int>(kern::SysError::eFAULT));
 }
 
 // A tty getter has to leave a defined value behind: the caller reads the buffer

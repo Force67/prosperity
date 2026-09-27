@@ -16,8 +16,8 @@
 #include "base/threading/mutex.h"
 #include "kern/object.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // SCE kernel semaphore ("osem"): a counting semaphore threads wait on (taking N
 // units) and others post to. Like the event flag, this is a core sync
@@ -77,4 +77,4 @@ int PS4ABI sys_osem_wait(int id, int need, u32* timeout_us);
 int PS4ABI sys_osem_trywait(int id, int need);
 int PS4ABI sys_osem_post(int id, int count);
 int PS4ABI sys_osem_cancel(int id, int set_count, int* num_waiters);
-}  // namespace krnl
+}  // namespace kern

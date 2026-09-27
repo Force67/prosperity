@@ -5,7 +5,7 @@
 #include "base/atomic.h"
 #include "options/options.h"
 
-namespace krnl::ps4 {
+namespace kern::ps4 {
 
 DELTA_OPTION(bool, kNeoMode, "DELTA_PS4_NEO", false);
 
@@ -49,4 +49,4 @@ const char* GnmDriverModule() {
   return IsNeoMode() ? "libSceGnmDriverForNeoMode" : "libSceGnmDriver";
 }
 
-}  // namespace krnl::ps4
+}  // namespace kern::ps4

@@ -21,7 +21,7 @@
 
 #include "kern/ipmi/services.h"
 
-namespace krnl::ipmi {
+namespace kern::ipmi {
 namespace {
 
 // Same id the HLE shim reports. 1 is the first real user on retail; 0 would be
@@ -52,4 +52,4 @@ Service& UserService() {
   return g_user_service;
 }
 
-}  // namespace krnl::ipmi
+}  // namespace kern::ipmi

@@ -10,8 +10,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/dma_dev.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // Forget the direct-memory mapping recorded at this VA range. sys_munmap calls
 // it so an explicit unmap-then-map reads as a fresh allocation, while a map
@@ -24,4 +24,4 @@ class DmaDevicePs5 : public DmaDevice {
 
   u8* Map(void*, size_t, u32, u32, size_t) override;
 };
-}  // namespace krnl
+}  // namespace kern

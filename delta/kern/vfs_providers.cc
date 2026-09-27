@@ -40,7 +40,7 @@ using formats::SfoGet;
 using formats::SfoGetU32;
 
 // Bridges a PkgFilesystem into the kernel VFS as an on-demand virtual mount.
-class PkgProvider : public krnl::vfs::VirtualProvider {
+class PkgProvider : public kern::vfs::VirtualProvider {
  public:
   explicit PkgProvider(const base::String& path) : fs_(path) {
     if (const char* sub = kPkgLs) {
@@ -139,11 +139,11 @@ class PkgProvider : public krnl::vfs::VirtualProvider {
       buf.resize(static_cast<size_t>(n));
       size_t start = (p[0] == '/') ? 1 : 0;
       base::String key = p.substr(start, p.size() - start - sl);
-      krnl::vfs::CacheFile(key, base::move(buf));
+      kern::vfs::CacheFile(key, base::move(buf));
     }
   }
 
-  base::UniquePointer<krnl::vfs::VirtualFile> Open(const char* rel) override {
+  base::UniquePointer<kern::vfs::VirtualFile> Open(const char* rel) override {
     MaybeDump();
     const auto* node = fs_.Find(rel);
     if (!node)
@@ -176,7 +176,7 @@ class PkgProvider : public krnl::vfs::VirtualProvider {
     size = static_cast<i64>(node->size);
     return true;
   }
-  bool List(const char* rel, base::Vector<krnl::vfs::DirEntry>& out) override {
+  bool List(const char* rel, base::Vector<kern::vfs::DirEntry>& out) override {
     // Build "prefix/" so we match only paths inside this directory. Root ("" or
     // "/") -> "/". The pkg stores absolute paths with a leading '/'.
     base::String prefix(rel ? rel : "");
@@ -203,7 +203,7 @@ class PkgProvider : public krnl::vfs::VirtualProvider {
   }
 
  private:
-  struct PkgFile : krnl::vfs::VirtualFile {
+  struct PkgFile : kern::vfs::VirtualFile {
     formats::PkgFilesystem* fs;
     formats::PkgFilesystem::Node node;
     PkgFile(formats::PkgFilesystem* f, const formats::PkgFilesystem::Node& n)
@@ -220,12 +220,12 @@ class PkgProvider : public krnl::vfs::VirtualProvider {
 // Bridges a UFS2 (*.ffpkg) game backup into the kernel VFS. The files inside
 // are already decrypted, so this is a straight filesystem mount (no crypto
 // chain).
-class Ufs2Provider : public krnl::vfs::VirtualProvider {
+class Ufs2Provider : public kern::vfs::VirtualProvider {
  public:
   explicit Ufs2Provider(const base::String& path) : fs_(path) {}
   bool valid() const { return fs_.Valid(); }
 
-  base::UniquePointer<krnl::vfs::VirtualFile> Open(const char* rel) override {
+  base::UniquePointer<kern::vfs::VirtualFile> Open(const char* rel) override {
     const auto* node = fs_.Find(rel);
     if (!node)
       return nullptr;
@@ -238,7 +238,7 @@ class Ufs2Provider : public krnl::vfs::VirtualProvider {
     size = static_cast<i64>(node->size);
     return true;
   }
-  bool List(const char* rel, base::Vector<krnl::vfs::DirEntry>& out) override {
+  bool List(const char* rel, base::Vector<kern::vfs::DirEntry>& out) override {
     base::String prefix(rel ? rel : "");
     while (!prefix.empty() && prefix.back() == '/')
       prefix.pop_back();
@@ -301,7 +301,7 @@ class Ufs2Provider : public krnl::vfs::VirtualProvider {
     return JsonGetString(ParamJson(), key);
   }
 
-  struct Ufs2File : krnl::vfs::VirtualFile {
+  struct Ufs2File : kern::vfs::VirtualFile {
     formats::Ufs2Filesystem* fs;
     formats::Ufs2Filesystem::Node node;
     Ufs2File(formats::Ufs2Filesystem* f, const formats::Ufs2Filesystem::Node& n)
@@ -319,12 +319,12 @@ class Ufs2Provider : public krnl::vfs::VirtualProvider {
 // the pkg and ufs2 providers, but the archive holds an ordinary extracted app
 // tree, so the only work beyond decompression is reading the metadata out of it
 // to tell a PS4 title from a PS5 one.
-class ArchiveProvider : public krnl::vfs::VirtualProvider {
+class ArchiveProvider : public kern::vfs::VirtualProvider {
  public:
   explicit ArchiveProvider(const base::String& path) : fs_(path) {}
   bool valid() const { return fs_.Valid(); }
 
-  base::UniquePointer<krnl::vfs::VirtualFile> Open(const char* rel) override {
+  base::UniquePointer<kern::vfs::VirtualFile> Open(const char* rel) override {
     const auto* node = fs_.Find(rel);
     if (!node)
       return nullptr;
@@ -337,7 +337,7 @@ class ArchiveProvider : public krnl::vfs::VirtualProvider {
     size = static_cast<i64>(node->size);
     return true;
   }
-  bool List(const char* rel, base::Vector<krnl::vfs::DirEntry>& out) override {
+  bool List(const char* rel, base::Vector<kern::vfs::DirEntry>& out) override {
     base::Vector<formats::ArchiveFilesystem::Child> children;
     if (!fs_.List(rel, children))
       return false;
@@ -396,7 +396,7 @@ class ArchiveProvider : public krnl::vfs::VirtualProvider {
     return base::String(reinterpret_cast<const char*>(js.data()), js.size());
   }
 
-  struct ArchiveFile : krnl::vfs::VirtualFile {
+  struct ArchiveFile : kern::vfs::VirtualFile {
     formats::ArchiveFilesystem* fs;
     formats::ArchiveFilesystem::Node node;
     ArchiveFile(formats::ArchiveFilesystem* f,
@@ -413,7 +413,7 @@ class ArchiveProvider : public krnl::vfs::VirtualProvider {
 
 }  // namespace
 
-namespace krnl::vfs {
+namespace kern::vfs {
 
 namespace {
 // Every container answers the same questions; only the accessors differ.
@@ -469,4 +469,4 @@ TitleMount MountArchive(const base::String& path, bool want_icon) {
   return m;
 }
 
-}  // namespace krnl::vfs
+}  // namespace kern::vfs

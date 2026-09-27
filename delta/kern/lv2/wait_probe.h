@@ -8,7 +8,7 @@
 
 #pragma once
 
-namespace krnl {
+namespace kern {
 
 void WaitProbeEnter(const char* what, long a0, long a1);
 void WaitProbeExit();
@@ -26,4 +26,4 @@ struct WaitProbe {
   ~WaitProbe();
 };
 
-}  // namespace krnl
+}  // namespace kern

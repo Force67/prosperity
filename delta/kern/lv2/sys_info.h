@@ -11,7 +11,7 @@
 #include "base/arch.h"
 #include "guest_abi.h"
 
-namespace krnl {
+namespace kern {
 int PS4ABI sys_is_in_sandbox();
 int PS4ABI sys_cpuset_getaffinity(int level,
                                   int which,
@@ -26,4 +26,7 @@ int PS4ABI sys_sysctl(int* name,
                       const void* newp,
                       size_t newlen);
 int PS4ABI sys_get_proc_type_info(void* oinfo);
-}  // namespace krnl
+
+int PS4ABI sys_uuidgen(u8* store, int count);
+
+}  // namespace kern

@@ -18,7 +18,7 @@
 #include "kern/process.h"
 #include "kern/ps4/dev/socket_dev.h"
 
-namespace krnl {
+namespace kern {
 namespace {
 
 // FreeBSD address families, as the guest sees them.
@@ -176,13 +176,13 @@ i32 SocketDevice::Ioctl(u32 command, void* args) {
 }
 
 SocketDevice* FdToSocket(u32 fd) {
-  auto* p = Proc::GetActive();
+  auto* p = Process::GetActive();
   if (!p)
     return nullptr;
   auto* obj = p->GetObjTable().Get(fd);
-  if (!obj || obj->type() != Object::OType::kDevice)
+  if (!obj || obj->type() != Object::Type::kDevice)
     return nullptr;
   return dynamic_cast<SocketDevice*>(static_cast<Device*>(obj));
 }
 
-}  // namespace krnl
+}  // namespace kern

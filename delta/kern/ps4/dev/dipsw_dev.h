@@ -11,8 +11,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 class DipswDevice : public Device {
  public:
@@ -20,4 +20,4 @@ class DipswDevice : public Device {
 
   i32 Ioctl(u32 command, void* args) override;
 };
-}  // namespace krnl
+}  // namespace kern

@@ -9,7 +9,7 @@
 
 #include <cstddef>
 
-namespace krnl {
+namespace kern {
 
 // Called by the CPU backend when a guest thread starts running on the calling
 // host thread; names the host thread from the stack's VMA tag if present.
@@ -20,4 +20,4 @@ void UnregisterGuestThreadStack();
 // thread whose registered stack overlaps the tagged range.
 void NameThreadsForRange(const void* ptr, size_t len, const char* name);
 
-}  // namespace krnl
+}  // namespace kern

@@ -8,7 +8,7 @@
 #include "kern/object_table.h"
 #include "logger/logger.h"
 
-namespace krnl {
+namespace kern {
 ObjectTable::ObjectTable() {}
 
 ObjectTable::~ObjectTable() {
@@ -204,4 +204,4 @@ Object* ObjectTable::Get(u32 handle) {
 
   return nullptr;
 }
-}  // namespace krnl
+}  // namespace kern

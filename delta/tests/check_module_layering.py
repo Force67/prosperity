@@ -50,7 +50,7 @@ GRANDFATHERED = {
     # module info and the fatal handler. That is one interface (a host-services
     # client the backend is handed) inverted the wrong way. Removing it means
     # declaring that client in cpu/ and having kern install it, the same shape
-    # as krnl::setCsRangeDescriber and krnl::ps4::setAudioSink.
+    # as kern::setCsRangeDescriber and kern::ps4::setAudioSink.
     ('kern', 'cpu'),
     ('cpu', 'kern'),
     # kern -> runtime is the loader asking vprx to resolve an HLE import and

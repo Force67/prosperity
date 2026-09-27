@@ -33,13 +33,17 @@
 #include "kern/crash.h"
 #include "kern/guest_va_space.h"
 #include "kern/lv2/error_table.h"
+#include "kern/lv2/stub_log.h"
 #include "kern/lv2/sys_mem.h"
 #include "kern/process.h"
 #include "kern/ps4/audio_daemon.h"
+#include "kern/ps4/dev/dma_dev.h"  // DmemBackingFd/Size (shared physical dmem store)
+#include "kern/ps5/dev/dma_dev.h"
 #include "kern/thread_names.h"
 #include "options/options.h"
 
 namespace {
+DELTA_OPTION(bool, kBlockpoolTrace, "DELTA_BLOCKPOOL_TRACE", false);
 DELTA_OPTION(const char*, kShmFilter, "DELTA_SHM_AUDIO_FILTER", nullptr);
 DELTA_OPTION(const char*, kShmPoison, "DELTA_SHM_AUDIO_POISON", nullptr);
 DELTA_OPTION(const char*,
@@ -62,7 +66,7 @@ DELTA_OPTION(bool, kShmAudioDumpDelta, "DELTA_SHM_AUDIO_DUMP_DELTA", false);
 DELTA_OPTION(bool, kShmAudioTrace, "DELTA_SHM_AUDIO_TRACE", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 
 using Ppt = host_memory::PageProtection;
 using Alt = host_memory::AllocationType;
@@ -486,7 +490,7 @@ void ShmAudioDumpMaybeStart() {
 class ShmObject : public Object {
  public:
   ShmObject(ObjectTable& objects, base::String nm, ShmRef b)
-      : Object(objects, Object::OType::kShm),
+      : Object(objects, Object::Type::kShm),
         shm_name(base::move(nm)),
         backing(base::move(b)) {}
   base::String shm_name;  // diagnostics / audio protocol key
@@ -504,7 +508,7 @@ u8* ShmMap(ShmObject* shm, size_t size, size_t offset) {
     if (!b.base)
       return reinterpret_cast<u8*>(-1);
     b.size = need;
-    Proc::GetActive()->GetVma().Add(b.base, need, Ppt::kW);
+    Process::GetActive()->GetVma().Add(b.base, need, Ppt::kW);
   }
   if (!b.base || offset > b.size)
     return reinterpret_cast<u8*>(-1);
@@ -517,7 +521,7 @@ u8* ShmMap(ShmObject* shm, size_t size, size_t offset) {
 
 u8* PS4ABI
 sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   if (!proc)
     return reinterpret_cast<u8*>(-1);
 
@@ -605,13 +609,13 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
   bool dmem_map = false;
   if (fd != -1) {
     auto* obj = proc->GetObjTable().Get(fd);
-    if (obj && obj->type() == Object::OType::kDevice &&
+    if (obj && obj->type() == Object::Type::kDevice &&
         static_cast<Device*>(obj)->IsDirectMemory())
       dmem_map = true;
     if (kMmapfdTrace)
       BASE_LOGI("mmapfd", "fd={} addr={:p} size={:#x} off={:#x} objType={}", fd,
                 addr, size, offset, obj ? (int)obj->type() : -1);
-    if (obj && obj->type() == Object::OType::kShm) {
+    if (obj && obj->type() == Object::Type::kShm) {
       // Every mapper of this shm shares the backing (sized by ftruncate).
       return ShmMap(static_cast<ShmObject*>(obj), size, offset);
     }
@@ -689,7 +693,7 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
   // mapping keeps zeros past the file's end.
   if (fd != static_cast<u32>(-1)) {
     if (auto* o = proc->GetObjTable().Get(fd))
-      if (o->type() == Object::OType::kDevice) {
+      if (o->type() == Object::Type::kDevice) {
         // The kernel hands back base + (offset & 0x3FFF), so the fill starts at
         // the page-aligned offset for that contract to hold.
         const i64 file_off = static_cast<i64>(offset & ~size_t(0x3FFF));
@@ -728,7 +732,7 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
         if (!ret)
           break;
         char sym[160];
-        krnl::Symbolize(reinterpret_cast<uintptr_t>(ret), sym, sizeof(sym));
+        kern::Symbolize(reinterpret_cast<uintptr_t>(ret), sym, sizeof(sym));
         base::FormatTo(callers, " [{}]", sym);
         fp = frame[0];
         if (reinterpret_cast<uintptr_t>(fp) < 0x10000)
@@ -754,7 +758,7 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
 }
 
 int PS4ABI sys_mprotect(u8* addr, size_t len, int prot) {
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   if (!proc)
     return -SysError::eINVAL;
 
@@ -795,7 +799,7 @@ bool IsAbsentServiceChannel(const char* name) {
 }
 
 int PS4ABI sys_shm_open(const char* path, u32 flags, u16 mode) {
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   if (!proc || !path)
     return -SysError::eINVAL;
 
@@ -882,11 +886,11 @@ int PS4ABI sys_shm_unlink(const char* path) {
 // so sys_fstat's fdToDevice path can't size them). Returns SIZE_MAX if `fd`
 // isn't a shm, so the caller falls through to the normal path.
 size_t ShmFstatSize(u32 fd) {
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   if (!proc)
     return SIZE_MAX;
   auto* obj = proc->GetObjTable().Get(fd);
-  if (!obj || obj->type() != Object::OType::kShm)
+  if (!obj || obj->type() != Object::Type::kShm)
     return SIZE_MAX;
   auto* shm = static_cast<ShmObject*>(obj);
   base::LockGuard<base::Mutex> lk(g_shm_mutex);
@@ -894,7 +898,7 @@ size_t ShmFstatSize(u32 fd) {
 }
 
 int PS4ABI sys_ftruncate(u32 fd, i64 length) {
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   if (!proc || length < 0)
     return -SysError::eINVAL;
   auto* obj = proc->GetObjTable().Get(fd);
@@ -902,7 +906,7 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
     return -SysError::eBADF;
   // The kernel dispatches to the file type's truncate method; a type without
   // one (e.g. a device) is EINVAL, not EBADF.
-  if (obj->type() != Object::OType::kShm)
+  if (obj->type() != Object::Type::kShm)
     return -SysError::eINVAL;
 
   auto* shm = static_cast<ShmObject*>(obj);
@@ -939,7 +943,7 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
 }
 
 int PS4ABI sys_mname(u8* ptr, size_t len, const char* name, void*) {
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   if (!proc)
     return -SysError::eINVAL;
 
@@ -1049,4 +1053,576 @@ int PS4ABI sys_dmem_container(u32 op) {
   current.store(op);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern
+
+namespace {
+DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
+DELTA_OPTION(bool, kVqTrace, "DELTA_VQ_TRACE", false);
+}  // namespace
+
+namespace kern {
+
+// Our VM is a flat host-backed low arena, never compacted: the HOST pages stay
+// mapped (host_memory::FreeMem takes no length; stale pointers read stable
+// garbage instead of faulting). The BOOKKEEPING must still be released: titles
+// churn VA and key allocator state off VirtualQuery's [start,end), so dead VMA
+// entries report stale bounds.
+int PS4ABI sys_munmap(void* addr, size_t len) {
+  static base::Atomic<bool> warned{false};
+  if (!warned.exchange(true))
+    LOG_WARNING(
+        "sys_munmap: host pages are retained (first was {} +{:#x}); "
+        "only the VMA bookkeeping is released",
+        static_cast<const void*>(addr), len);
+  if (auto* proc = Process::GetActive(); proc && addr && len) {
+    AudioDaemonForgetRange(addr, len);
+    // Exception to "keep the host pages": a whole PROT_NONE reservation holds
+    // no data and leaving it mapped makes the next reservation there relocate.
+    // V8 reserves padded, frees, re-reserves exact; a stale pointer into the
+    // padding should fault where the mistake is.
+    auto* region = proc->GetVma().Get(static_cast<u8*>(addr));
+    if (region && region->ptr == addr && region->size == len &&
+        region->sce_prot == 0)
+      ::munmap(addr, len);
+    proc->GetVma().Remove(static_cast<u8*>(addr), len);
+    NoteGuestReleased(static_cast<u8*>(addr), len);
+    ForgetDmemVa(static_cast<u8*>(addr), len);
+  }
+  return 0;
+}
+
+// The guest libc allocates through mmap, so the brk is unused. A benign 0 keeps
+// any stray caller satisfied without handing it a usable region.
+i64 PS4ABI sys_obreak(void*) {
+  return 0;
+}
+i64 PS4ABI sys_sbrk(intptr_t) {
+  return 0;
+}
+
+// Anonymous host memory has no file backing, so there is nothing to flush.
+int PS4ABI sys_msync(void*, size_t, int) {
+  return 0;
+}
+
+int PS4ABI sys_madvise(void*, size_t, int) {
+  return 0;
+}
+
+// The guest arena is fully committed and never pages out: report MINCORE_INCORE
+// per page so a residency probe sees the truth.
+int PS4ABI sys_mincore(void* addr, size_t len, char* vec) {
+  if (!vec)
+    return -SysError::eFAULT;
+  size_t pages = (len + 0x3FFF) >> 14;
+  std::memset(vec, 0x01 /*MINCORE_INCORE*/, pages);
+  return 0;
+}
+
+// All our pages are committed host memory that never pages out, so locking is a
+// no-op.
+int PS4ABI sys_mlock(const void*, size_t) {
+  return 0;
+}
+int PS4ABI sys_munlock(const void*, size_t) {
+  return 0;
+}
+int PS4ABI sys_mlockall(int) {
+  return 0;
+}
+int PS4ABI sys_munlockall() {
+  return 0;
+}
+
+// minherit only matters across fork(), which we don't model.
+int PS4ABI sys_minherit(void*, size_t, int) {
+  return 0;
+}
+
+// sceKernelQueryMemoryProtection(addr, &start, &end, &prot). The libkernel
+// wrapper passes one scratch struct as arg2 for the kernel to fill, then
+// distributes: {start@0, end@8, prot@0x10}, per the wrapper at libkernel
+// 0x17ef0 (prot masked 0x37). Unmapped addr = the EACCES the wrapper
+// translates.
+int PS4ABI sys_query_memory_protection(void* addr, void* info) {
+  auto* proc = Process::GetActive();
+  if (!proc || !info)
+    return -SysError::eINVAL;
+  auto* region = proc->GetVma().Get(static_cast<u8*>(addr));
+  if (!region)
+    return -SysError::eACCES;
+
+  auto* qp = static_cast<u8*>(info);
+  std::memset(qp, 0, 0x18);
+  void* start = region->ptr;
+  void* end = region->ptr + region->size;
+  // Full SCE prot (with GPU bits) if we kept it, else the host r/w/x bits.
+  u32 prot =
+      region->sce_prot ? region->sce_prot : static_cast<u32>(region->prot);
+  std::memcpy(qp + 0x00, &start, sizeof(void*));
+  std::memcpy(qp + 0x08, &end, sizeof(void*));
+  std::memcpy(qp + 0x10, &prot, sizeof(u32));
+  return 0;
+}
+
+// The host's own view of an address, for ranges the guest VMA never recorded.
+struct HostMapping {
+  u64 start = 0;
+  u64 end = 0;
+  u32 prot = 0;  // SCE r/w/x bits, 0 when the address is not mapped at all
+};
+
+HostMapping HostMappingOf(const void* addr) {
+  HostMapping out;
+  const u64 want = reinterpret_cast<u64>(addr);
+  std::FILE* f = std::fopen("/proc/self/maps", "re");
+  if (!f)
+    return out;
+  char line[512];
+  while (std::fgets(line, sizeof(line), f)) {
+    unsigned long long lo = 0, hi = 0;
+    char perms[8] = {};
+    if (std::sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) != 3)
+      continue;
+    if (want < lo || want >= hi)
+      continue;
+    out.start = lo;
+    out.end = hi;
+    out.prot = (perms[0] == 'r' ? 1u : 0u) | (perms[1] == 'w' ? 2u : 0u) |
+               (perms[2] == 'x' ? 4u : 0u);
+    break;
+  }
+  std::fclose(f);
+  return out;
+}
+
+// sceKernelVirtualQuery(addr, flags, info, size); layout verified against the
+// consumer at libkernel 0x2b9d0 (size 0x48, name at +0x21):
+// 0x00 start 0x08 end 0x10 offset 0x18 protection 0x1C memoryType
+// 0x20 bits (flexible/direct/stack/pooled/committed) 0x21 char[32] name.
+// Our anon low-arena maps are flexible and committed.
+int PS4ABI sys_virtual_query(const void* addr,
+                             int /*flags*/,
+                             void* info,
+                             size_t info_size) {
+  auto* proc = Process::GetActive();
+  if (!proc || !info || info_size == 0)
+    return -SysError::eINVAL;
+
+  std::memset(info, 0, info_size);
+  auto* region =
+      proc->GetVma().Get(const_cast<u8*>(static_cast<const u8*>(addr)));
+  if (!region) {
+    // Memory we allocated outside the guest VMA is still guest-used memory: a
+    // library validating a caller's buffer with this call must not hear
+    // "unmapped". libSce Videodec2 does exactly that, answering every AvPlayer
+    // call with ARGUMENT_POINTER (Astro Bot's title screen sat behind a video
+    // that never started).
+    if (const HostMapping host = HostMappingOf(addr); host.prot) {
+      auto* vq = static_cast<u8*>(info);
+      std::memcpy(vq + 0x00, &host.start, sizeof(u64));
+      std::memcpy(vq + 0x08, &host.end, sizeof(u64));
+      std::memcpy(vq + 0x10, &host.start, sizeof(u64));
+      if (info_size >= 0x1C + sizeof(int)) {
+        // Host PROT_READ/WRITE happen to be SCE's CPU bits, but a host mapping
+        // carries no GPU bits, and a library validating hardware-bound buffers
+        // demands them. libSceVdecCore (+0x17c50) rejects any range without
+        // prot & 0x30 (error 5, why Astro Bot's intro video never decoded). The
+        // guest is identity-mapped for our GPU: report the GPU bits alongside
+        // the CPU ones.
+        int prot = static_cast<int>(host.prot);
+        if (prot & 0x1)
+          prot |= 0x10;  // GPU read
+        if (prot & 0x2)
+          prot |= 0x20;          // GPU write
+        const int mem_type = 0;  // WB_ONION, like any other CPU mapping
+        std::memcpy(vq + 0x18, &prot, sizeof(int));
+        std::memcpy(vq + 0x1C, &mem_type, sizeof(int));
+      }
+      if (info_size >= 0x21)
+        vq[0x20] = 0x01 | 0x10;  // flexible + committed
+      if (kVqTrace)
+        BASE_LOGI("vq", "addr={:p} host mapping [{:#x}..{:#x}) prot={:#x}",
+                  addr, (unsigned long long)host.start,
+                  (unsigned long long)host.end, host.prot);
+      return 0;
+    }
+    // Worth seeing: a caller that walks its own heap this way reads the zeroed
+    // struct as "not committed" and silently skips the range.
+    if (kVqTrace)
+      BASE_LOGI("vq", "addr={:p} NOT MAPPED", addr);
+    return -SysError::eACCES;
+  }
+
+  // A region with NO protection at all is a reservation, and a title committing
+  // sub-ranges inside one left us reporting the outer entry (Astro Bot's
+  // decoder buffer sits in a 1.9 GiB reservation; libSceVdecCore wants prot &
+  // 0x2/0x30). If the host has accessible pages there, that mapping is the
+  // truth; an untouched PROT_NONE reservation still reads uncommitted.
+  if (!region->sce_prot && !static_cast<u32>(region->prot)) {
+    if (const HostMapping host = HostMappingOf(addr); host.prot) {
+      auto* vq = static_cast<u8*>(info);
+      std::memcpy(vq + 0x00, &host.start, sizeof(u64));
+      std::memcpy(vq + 0x08, &host.end, sizeof(u64));
+      std::memcpy(vq + 0x10, &host.start, sizeof(u64));
+      if (info_size >= 0x1C + sizeof(int)) {
+        int prot = static_cast<int>(host.prot);
+        if (prot & 0x1)
+          prot |= 0x10;  // GPU read: guest memory is identity-mapped for us
+        if (prot & 0x2)
+          prot |= 0x20;          // GPU write
+        const int mem_type = 0;  // WB_ONION
+        std::memcpy(vq + 0x18, &prot, sizeof(int));
+        std::memcpy(vq + 0x1C, &mem_type, sizeof(int));
+      }
+      if (info_size >= 0x21)
+        vq[0x20] = 0x01 | 0x10;  // flexible + committed
+      if (kVqTrace)
+        BASE_LOGI("vq",
+                  "addr={:p} committed inside a reservation: "
+                  "[{:#x}..{:#x}) prot={:#x}",
+                  addr, (unsigned long long)host.start,
+                  (unsigned long long)host.end, host.prot);
+      return 0;
+    }
+  }
+
+  auto* vq = static_cast<u8*>(info);
+  void* start = region->ptr;
+  void* end = region->ptr + region->size;
+  std::memcpy(vq + 0x00, &start, sizeof(void*));
+  std::memcpy(vq + 0x08, &end, sizeof(void*));
+  // +0x10 = the region's direct-memory offset, exact for /dev/dmem ranges: SotC
+  // turns (offset + addr - start) into a 64 KiB heap-map block index and marks
+  // nothing when out of range. Elsewhere we have no dmem pool
+  // (identity-mapped), but libSceVideoOut rejects a scanout buffer unless the
+  // offset shares the VA's low 16 bits (tiling alignment), so report the VA
+  // there; zero failed every scanout register.
+  u64 offset =
+      region->has_phys ? region->phys_offset : reinterpret_cast<u64>(start);
+  std::memcpy(vq + 0x10, &offset, sizeof(u64));
+  // GPU-accessible memory (guest asked bits 0x10/0x20) is direct/physical in
+  // SCE terms: report WC_GARLIC (memType 3) + direct bit, what libSceVideoOut
+  // checks before registering a scanout buffer; plain CPU memory stays flexible
+  // WB_ONION.
+  bool gpu = (region->sce_prot & 0x30) != 0;
+  // For direct memory, the reservation's type is the truth (titles route
+  // addresses to heaps by it); inferring GARLIC from GPU prot bits made a CPU
+  // heap mapped GPU-visible look like the GPU one.
+  int mem_type = region->has_phys ? DmemTypeForOffset(region->phys_offset) : -1;
+  if (mem_type < 0)
+    mem_type = gpu ? 3 : 0;  // 3 = SCE_KERNEL_WC_GARLIC, 0 = WB_ONION
+  if (info_size >= 0x1C + sizeof(int)) {
+    int prot = region->sce_prot ? static_cast<int>(region->sce_prot)
+                                : static_cast<int>(region->prot);
+    std::memcpy(vq + 0x18, &prot, sizeof(int));
+    std::memcpy(vq + 0x1C, &mem_type, sizeof(int));
+  }
+  if (kVqTrace)
+    BASE_LOGI("vq",
+              "addr={:p} region=[{:p}..{:p}) sceProt={:#x} memType={} rsv={} "
+              "off={:#x}{}",
+              addr, start, end, region->sce_prot, mem_type,
+              region->reserved ? 1 : 0, (unsigned long long)offset,
+              region->has_phys ? " (dmem)" : "");
+  if (info_size >= 0x21) {
+    // flexible(0x01) | direct(0x02, GPU mem) | committed(0x10). A MAP_VOID
+    // reservation is none of these; titles branch on isCommitted to decide
+    // whether a range still needs a real commit.
+    vq[0x20] = region->reserved
+                   ? 0x00
+                   : (0x01 | 0x10 | ((gpu || region->has_phys) ? 0x02 : 0x00));
+    if (region->name) {
+      size_t n = std::strlen(region->name);
+      if (n > 31)
+        n = 31;
+      std::memcpy(vq + 0x21, region->name, n);
+      vq[0x21 + n] = '\0';
+    }
+  }
+  return 0;
+}
+
+// sceKernelBatchMap/2: a list of dmem map/unmap/protect ops in one call. Entry
+// layout (libkernel wrapper): 0x00 start 0x08 offset (MAP_DIRECT) 0x10 length
+// 0x18 protection 0x19 memoryType 0x1c operation; ops 0 MAP_DIRECT, 1 UNMAP,
+// 2 PROTECT, 3 MAP_FLEXIBLE, 4 TYPE_PROTECT. The maps must really commit at
+// `start`: SotC batch-maps its GPU pools, and the old ignore-stub left PM4
+// referencing never-backed VAs, faulting the submit.
+int PS4ABI sys_batch_map(u32 /*handle*/,
+                         u32 /*flags*/,
+                         void* entries,
+                         int count,
+                         int* processed) {
+  struct BatchMapEntry {
+    u64 start;
+    u64 offset;
+    u64 length;
+    u8 prot;
+    u8 type;
+    u16 pad;
+    u32 operation;
+  };
+  static_assert(sizeof(BatchMapEntry) == 0x20, "batch-map entry is 32 bytes");
+
+  auto* e = static_cast<BatchMapEntry*>(entries);
+  int done = 0;
+  for (; e && done < count; done++) {
+    const auto& op = e[done];
+    if (kDmemTrace)
+      BASE_LOGI("dmem",
+                "batch[{}/{}] op={} start={:#x} off={:#x} len={:#x} prot={:#x} "
+                "type={}",
+                done, count, op.operation, (unsigned long long)op.start,
+                (unsigned long long)op.offset, (unsigned long long)op.length,
+                op.prot, op.type);
+    switch (op.operation) {
+      case 0:  // MAP_DIRECT: back the VA with the shared dmem store at
+               // op.offset, MAP_FLEXIBLE: no physical offset, so map the shared
+               // dmem backing (syscall 628 semantics): every VA mapping it
+               // aliases the same bytes. Skyrim maps GPU pools this way then
+               // waits on a GPU-written label; private pages never see it.
+      case 3: {  // MAP_FLEXIBLE: no physical offset, plain anonymous memory
+        if (!op.start || !op.length) {
+          if (processed)
+            *processed = done;
+          return -SysError::eINVAL;
+        }
+        auto* pr = Process::GetActive();
+        // Sharing the dmem backing is NOT safe for PS4 yet: SotC maps one
+        // physical offset at 1664 successive VAs and never releases, so a
+        // shared store aliases every historical mapping at once and the title's
+        // memory dissolves (measured twice, both times SotC stopped rendering
+        // even its intro). Needs understanding of what the guest does with that
+        // offset first.
+        const bool ps5 = pr && pr->GetPlatform() == Process::Platform::kPs5;
+        const int fd = (op.operation == 0 && ps5) ? DmemBackingFd() : -1;
+        if (fd >= 0 && op.offset + op.length <= DmemBackingSize()) {
+          void* p = ::mmap(reinterpret_cast<void*>(op.start), op.length,
+                           PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
+                           static_cast<off_t>(op.offset));
+          if (p != MAP_FAILED) {
+            pr->GetVma().Add(reinterpret_cast<u8*>(p), op.length,
+                             host_memory::PageProtection::kW);
+            break;
+          }
+        }
+        u8* p =
+            sys_mmap(reinterpret_cast<void*>(op.start), op.length, op.prot,
+                     MFlags::kFixed | MFlags::kAnon, static_cast<u32>(-1), 0);
+        if (IsErrnoPtr(p)) {
+          if (processed)
+            *processed = done;
+          return -SysError::eNOMEM;
+        }
+        break;
+      }
+      case 1:  // UNMAP: host pages retained, bookkeeping released (see
+               // sys_munmap)
+        if (auto* pr = Process::GetActive(); pr && op.start && op.length)
+          pr->GetVma().Remove(reinterpret_cast<u8*>(op.start), op.length);
+        break;
+      case 2:  // PROTECT / TYPE_PROTECT: our flat arena stays permissive; the
+      case 4:  // title only narrows protections it already owns
+        break;
+      default:
+        LOG_WARNING("sys_batch_map: unknown op {} (entry {})", op.operation,
+                    done);
+        break;
+    }
+  }
+  if (processed)
+    *processed = done;
+  return 0;
+}
+
+// sys_set_vm_container (559): arg == -1 returns the current vm container id;
+// arg 0 or 1 selects it (requires privilege). The kernel validates: unsigned
+// (arg+1) > 2 is EINVAL, and arg > 1 is EINVAL. We track the id (default 0).
+int PS4ABI sys_set_vm_container(u32 op) {
+  static base::Atomic<u32> current{0};
+  if (op == 0xFFFFFFFFu)
+    return static_cast<int>(current.load());
+  if (op > 1)
+    return -SysError::eINVAL;
+  current.store(op);
+  return 0;
+}
+
+// sceKernelMapDirectMemory (628). Real ABI (libkernel 01.14.00): rdi=VA hint,
+// rsi=len, rdx=prot, rcx=flags (0x10 = FIXED),
+// r8=packed(alignShift<<24|memType), r9=directMemoryStart (the PHYSICAL offset
+// from AllocateMainDirectMemory). The physical offset is the source of truth:
+// map the VA to the shared dmem backing at that offset (MAP_SHARED) so a
+// CPU-written command buffer and the GPU's view alias the same bytes (without
+// it the CP read all-zero DCBs). Falls back to anonymous memory; returns the
+// mapped VA.
+i64 PS4ABI sys_mmap_dmem(void* addr,
+                         size_t len,
+                         int prot,
+                         int flags,
+                         i64 /*packed*/,
+                         i64 phys_offset) {
+  const bool fixed_req = (flags & 0x10) != 0;
+  auto* active = Process::GetActive();
+  const bool ps5 = active && active->GetPlatform() == Process::Platform::kPs5;
+  const int fd = ps5 ? DmemBackingFd() : -1;  // see the batch-map note above
+  if (kDmemTrace)
+    BASE_LOGI("dmem",
+              "map628 va={:p} len={:#x} prot={:#x} flags={:#x} physOff={:#x} "
+              "fixed={}",
+              addr, len, prot, flags, (unsigned long long)phys_offset,
+              fixed_req ? 1 : 0);
+  if (fd >= 0 && phys_offset >= 0 &&
+      static_cast<u64>(phys_offset) + len <= DmemBackingSize()) {
+    const int mflags = MAP_SHARED | (fixed_req ? MAP_FIXED : 0);
+    void* p = ::mmap(addr, len, PROT_READ | PROT_WRITE, mflags, fd,
+                     static_cast<off_t>(phys_offset));
+    if (p != MAP_FAILED) {
+      Process::GetActive()->GetVma().AddDirect(
+          reinterpret_cast<u8*>(p), len, host_memory::PageProtection::kW,
+          static_cast<u32>(prot), static_cast<u64>(phys_offset));
+      return reinterpret_cast<i64>(p);
+    }
+  }
+  // Fallback: plain anonymous mapping (loses aliasing but keeps the region
+  // live).
+  u8* p = sys_mmap(addr, len, PROT_READ | PROT_WRITE,
+                   MFlags::kAnon | (fixed_req ? MFlags::kFixed : 0),
+                   static_cast<u32>(-1), 0);
+  if (IsErrnoPtr(p))
+    return -SysError::eNOMEM;
+  // Still direct memory as far as the guest is concerned: it keys its own heap
+  // map off the physical offset the query reports back.
+  if (phys_offset >= 0)
+    Process::GetActive()->GetVma().AddDirect(
+        p, len, host_memory::PageProtection::kW, static_cast<u32>(prot),
+        static_cast<u64>(phys_offset));
+  return reinterpret_cast<i64>(p);
+}
+
+int PS4ABI sys_cpuset(void*, int, int, i64, size_t, void*) {
+  return 0;
+}
+
+int PS4ABI sys_extend_page_table_pool() {
+  return 0;
+}
+
+i64 PS4ABI sys_get_vm_map_timestamp() {
+  return 0;
+}
+
+int PS4ABI sys_get_map_statistics(void* info) {
+  if (info)
+    std::memset(info, 0, 0x40);
+  return 0;
+}
+
+// Thread stacks live in the leaked flat arena, so freeing one is a no-op.
+int PS4ABI sys_free_stack(void*, size_t) {
+  return 0;
+}
+
+// The JIT shm object the guest later mmaps to hold generated code. The real
+// syscall returns an fd; we return an RWX anonymous region instead, so a guest
+// that maps the result by fd (mmap(fd)) will NOT see this region. Loud once
+// because that mismatch breaks runtime code generation if a title relies on it.
+i64 PS4ABI sys_jitshm_create(size_t len, u32 flags) {
+  (void)flags;
+  static base::Atomic<bool> once{false};
+  LogOnce(once,
+          "jitshm_create returns a raw RWX region, not an fd; JIT may break");
+  return (i64)sys_mmap(nullptr, len, 7 /*rwx*/, 0x1000 /*anon*/, -1, 0);
+}
+
+int PS4ABI sys_jitshm_alias() {
+  return -SysError::eOPNOTSUPP;
+}
+
+int PS4ABI sys_get_paging_stats_of_all_threads() {
+  return 0;
+}
+int PS4ABI sys_get_paging_stats_of_all_objects() {
+  return 0;
+}
+
+int PS4ABI sys_get_resident_count() {
+  return 0;
+}
+int PS4ABI sys_get_resident_fmem_count() {
+  return 0;
+}
+
+// Physically-contiguous shared memory; we don't back it, so deny and let the
+// guest fall back to ordinary memory.
+int PS4ABI sys_physhm_open() {
+  return -SysError::eOPNOTSUPP;
+}
+int PS4ABI sys_physhm_unlink() {
+  return 0;
+}
+
+int PS4ABI sys_set_phys_fmem_limit() {
+  return 0;
+}
+
+int PS4ABI sys_get_kernel_mem_statistics(void* out) {
+  if (out)
+    std::memset(out, 0, 0x40);
+  return 0;
+}
+
+// Carve a mapping out of a block pool. We don't model pools, so back it with a
+// plain anonymous RW region of the requested length. Logged once because the
+// pool handle and any accounting it implies are ignored.
+i64 PS4ABI sys_blockpool_map(i64 pool, size_t len, u32 prot, u32 flags) {
+  (void)pool;
+  (void)prot;
+  (void)flags;
+  static base::Atomic<bool> once{false};
+  LogOnce(once, "blockpool_map backs the pool with a plain anon region");
+  return (i64)sys_mmap(nullptr, len, 3 /*rw*/, 0x1000 /*anon*/, -1, 0);
+}
+
+int PS4ABI sys_blockpool_unmap() {
+  return 0;
+}
+i64 PS4ABI sys_blockpool_batch(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5) {
+  if (kBlockpoolTrace) {
+    BASE_LOGI("blockpool_batch",
+              "a0={:#x} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x}",
+              (unsigned long long)a0, (unsigned long long)a1,
+              (unsigned long long)a2, (unsigned long long)a3,
+              (unsigned long long)a4, (unsigned long long)a5);
+    // a1 commonly points at the command array; dump a few 64-bit words.
+    if (a1 > 0x10000) {
+      auto* w = reinterpret_cast<u64*>(a1);
+      BASE_LOGI("blockpool_batch",
+                "  cmd[0..7]: {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+                (unsigned long long)w[0], (unsigned long long)w[1],
+                (unsigned long long)w[2], (unsigned long long)w[3],
+                (unsigned long long)w[4], (unsigned long long)w[5],
+                (unsigned long long)w[6], (unsigned long long)w[7]);
+    }
+  }
+  return 0;
+}
+
+int PS4ABI sys_get_page_table_stats() {
+  return 0;
+}
+
+// The PS4 uses a 16 KiB page size.
+int PS4ABI sys_getpagesize() {
+  return 16384;
+}
+
+// sys_blockpool_open (653): descriptor for the flexible-memory block pool.
+// Unmodelled; the boot caller never feeds it to blockpool_map/mmap, so return a
+// fixed positive non-stdio handle.
+int PS4ABI sys_blockpool_open() {
+  return 0x4000;
+}
+
+}  // namespace kern

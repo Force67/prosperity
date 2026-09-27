@@ -4,7 +4,7 @@
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/zero_dev.h"
 
-namespace krnl {
+namespace kern {
 ZeroDevice::ZeroDevice(ObjectTable& objects) : Device(objects) {}
 
 i64 ZeroDevice::Read(void* buf, size_t len) {
@@ -26,4 +26,4 @@ int ZeroDevice::Fstat(void* stat) {
   FillStat(*reinterpret_cast<SceKernelStat*>(stat), 0x2000, 0);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

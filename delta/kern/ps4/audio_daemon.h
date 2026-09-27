@@ -25,7 +25,7 @@
 #include <cstddef>
 #include "base/arch.h"
 
-namespace krnl {
+namespace kern {
 
 // Called from the POSIX-shm syscalls whenever a named region gets or changes
 // its host backing (`base` = null means the name went away). Names that are not
@@ -37,4 +37,4 @@ void AudioDaemonNoticeShm(const char* name, u8* base, size_t size);
 // Waits for any consumer access in progress to finish.
 void AudioDaemonForgetRange(const void* base, size_t size);
 
-}  // namespace krnl
+}  // namespace kern

@@ -6,7 +6,7 @@
 #include "kern/ps4/dev/authmgr_dev.h"
 #include "kern/ps4/dev/file_dev.h"
 
-namespace krnl {
+namespace kern {
 AuthmgrDevice::AuthmgrDevice(ObjectTable& objects) : Device(objects) {}
 
 i32 AuthmgrDevice::Ioctl(u32 cmd, void* data) {
@@ -38,4 +38,4 @@ int AuthmgrDevice::Fstat(void* stat) {
   FillStat(*reinterpret_cast<SceKernelStat*>(stat), 0x2000, 0);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

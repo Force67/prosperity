@@ -153,7 +153,7 @@ extern "C" __attribute__((visibility("default"))) int dcoreMain(int argc, char *
   gpu::render::Init(gpu::render::DefaultRenderer());
   // Claim the addresses the guest MAP_FIXEDs before anything host-side can be
   // handed them, in particular before the CPU backend reserves its JIT heap.
-  krnl::ReserveGuestVaSpace();
+  kern::ReserveGuestVaSpace();
   cpu::EarlyInit(); // segregate guest/JIT memory before guest modules map
 
   if (!verifyViablity())

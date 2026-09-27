@@ -32,6 +32,8 @@
 #include "base/threading/thread.h"
 #include "base/time/time.h"
 #include "kern/crash.h"
+#include "kern/lv2/error_table.h"
+#include "kern/lv2/stub_log.h"
 #include "options/options.h"
 
 namespace {
@@ -42,7 +44,7 @@ DELTA_OPTION(long, kEopPumpMs, "DELTA_PS5_EOPPUMP", 0);
 DELTA_OPTION(bool, kIdent0Vblank, "DELTA_PS5_IDENT0_VBLANK", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 // All live equeues, so the vblank pump can fan flip events to every one of them
 // without knowing which equeue a given flip event was registered on.
 static base::Mutex g_eq_reg_m;
@@ -213,7 +215,7 @@ void NoteFlip() {
 }
 
 Equeue::Equeue(ObjectTable& objects, const char* nm)
-    : Object(objects, OType::kEqueue) {
+    : Object(objects, Type::kEqueue) {
   if (nm)
     name_ = nm;
   base::LockGuard<base::Mutex> lk(g_eq_reg_m);
@@ -509,13 +511,13 @@ void TriggerAllEqueues(i64 ident, i16 filter, i64 data) {
 }
 
 int PS4ABI sys_kqueue() {
-  auto* eq = new Equeue(Proc::GetActive()->GetObjTable(), nullptr);
+  auto* eq = new Equeue(Process::GetActive()->GetObjTable(), nullptr);
   BASE_LOGI("kqueue", "-> fd={}", eq->handle());
   return eq->handle();
 }
 
 int PS4ABI sys_kqueueex(const char* name, int flags) {
-  auto* eq = new Equeue(Proc::GetActive()->GetObjTable(), name);
+  auto* eq = new Equeue(Process::GetActive()->GetObjTable(), name);
   BASE_LOGI("kqueueex", "name={} flags={:#x} -> fd={}", name ? name : "(null)",
             flags, eq->handle());
   return eq->handle();
@@ -527,8 +529,8 @@ int PS4ABI sys_kevent(int kq,
                       kevent_t* eventlist,
                       int nevents,
                       const ktimespec* to) {
-  auto* obj = Proc::GetActive()->GetObjTable().Get(kq);
-  if (!obj || obj->type() != Object::OType::kEqueue) {
+  auto* obj = Process::GetActive()->GetObjTable().Get(kq);
+  if (!obj || obj->type() != Object::Type::kEqueue) {
     BASE_LOGI("kevent", "bad kq fd={}", kq);
     return -SysError::eBADF;
   }
@@ -556,4 +558,29 @@ int PS4ABI sys_kevent(int kq,
   }
   return r;
 }
-}  // namespace krnl
+
+// Event-port objects for kqueue-style delivery; unrouted, so return a fixed
+// handle and swallow trigger/delete. Logged once: a title waiting on an eport
+// event we never deliver stalls, and this trace explains it. Kernel eport
+// (~0x60 bytes): name, mtx, cv, waiter list, open-count, attr; trigger sets the
+// pattern and broadcasts; named eports share across processes (attr bit 0x100).
+int PS4ABI sys_eport_create() {
+  static base::Atomic<bool> once{false};
+  LogOnce(once,
+          "eport_create returns a fake handle; events are never delivered");
+  return 0x3001;
+}
+int PS4ABI sys_eport_delete() {
+  return 0;
+}
+int PS4ABI sys_eport_trigger() {
+  return 0;
+}
+int PS4ABI sys_eport_open() {
+  return 0x3001;
+}
+int PS4ABI sys_eport_close() {
+  return 0;
+}
+
+}  // namespace kern

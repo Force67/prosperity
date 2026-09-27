@@ -13,7 +13,7 @@
 #include "base/arch.h"
 #include "base/logging.h"
 
-namespace krnl {
+namespace kern {
 DipswDevice::DipswDevice(ObjectTable& objects) : Device(objects) {}
 
 /* dipsw_dev_ioctl */
@@ -47,4 +47,4 @@ i32 DipswDevice::Ioctl(u32 cmd, void* data) {
 
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

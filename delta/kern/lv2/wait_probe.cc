@@ -27,16 +27,15 @@
 #include "base/threading/thread.h"
 #include "base/time/time.h"
 #include "kern/crash.h"
+#include "kern/lv2/sys_thread.h"
 
-namespace krnl {
-const u32* CurrentGuestTidPtr();  // sys_thread.cc: this thread's guest tid
-}
+namespace kern {}
 
 namespace {
 DELTA_OPTION(bool, kWaitProbe, "DELTA_WAIT_PROBE", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 namespace {
 
 struct Parked {
@@ -56,7 +55,7 @@ long SelfTid() {
 }
 
 unsigned CurrentGuestTid() {
-  const u32* p = krnl::CurrentGuestTidPtr();
+  const u32* p = kern::CurrentGuestTidPtr();
   return p ? *p : 0;
 }
 
@@ -165,4 +164,4 @@ WaitProbe::~WaitProbe() {
     WaitProbeExit();
 }
 
-}  // namespace krnl
+}  // namespace kern

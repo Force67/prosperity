@@ -9,21 +9,21 @@
 
 #include "base/arch.h"
 
-namespace krnl {
-class Proc;
-class Smodule;
+namespace kern {
+class Process;
+class Module;
 
 namespace probe {
 
 // probe_title.cc, armed from OnProcessCreated / OnModuleLoaded / OnBeforeStart.
-void BringUpRebirthEbootRegistry(Smodule& m);
-void BringUpRebirthSurfaceRegistry(Smodule& m);
-void PatchVideoOutDiag(Smodule& m);
-void InvestigateDcbGate(Smodule& m);
-void InstallAllocLock(Smodule& m);
-void InstallMatTrace(Smodule& m);
-void InstallJobTrace(Smodule& m);
-void ApplyBootPatches(Proc& p);
+void BringUpRebirthEbootRegistry(Module& m);
+void BringUpRebirthSurfaceRegistry(Module& m);
+void PatchVideoOutDiag(Module& m);
+void InvestigateDcbGate(Module& m);
+void InstallAllocLock(Module& m);
+void InstallMatTrace(Module& m);
+void InstallJobTrace(Module& m);
+void ApplyBootPatches(Process& p);
 
 }  // namespace probe
-}  // namespace krnl
+}  // namespace kern

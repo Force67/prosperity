@@ -13,7 +13,7 @@
 #include "guest_abi.h"
 #include "options/options.h"
 
-namespace krnl {
+namespace kern {
 
 // Syscall dispatch, shared by the Orbis (lv2/ps4) and Prospero (lv2/ps5)
 // tables. A table only maps an id to a C handler; how that handler is entered,
@@ -47,6 +47,12 @@ extern "C" u32 SyscallErrno(u64 raw);
 // DELTA_SCHIST per-id call counter. The native trampoline increments it, so a
 // backend that emits no trampoline has to do so itself.
 extern base::Option<bool> g_sc_hist;
-}  // namespace krnl
+
+struct ModuleInfo;
+
+// The loaded module whose image contains `addr`, or null.
+ModuleInfo* CalledIn(void* addr);
+
+}  // namespace kern
 
 extern "C" u64 g_sys_hist[1024];

@@ -27,18 +27,18 @@ namespace {
 int PS4ABI kernelMapNamedFlexibleAligned(void **addrOut, size_t len, int prot,
                                          size_t align, const char *name) {
   if (!addrOut || !len)
-    return krnl::SysError::eINVAL;
+    return kern::SysError::eINVAL;
 
   if (align < 0x4000)
     align = 0x4000;
 
-  auto *base = krnl::sys_mmap(nullptr, len + align, static_cast<u32>(prot),
-                              krnl::MFlags::kAnon, static_cast<u32>(-1), 0);
-  if (krnl::IsErrnoPtr(base))
-    return krnl::SysError::eNOMEM;
+  auto *base = kern::sys_mmap(nullptr, len + align, static_cast<u32>(prot),
+                              kern::MFlags::kAnon, static_cast<u32>(-1), 0);
+  if (kern::IsErrnoPtr(base))
+    return kern::SysError::eNOMEM;
 
   auto addr = (reinterpret_cast<uintptr_t>(base) + align - 1) & ~(align - 1);
-  krnl::sys_mname(reinterpret_cast<u8 *>(addr), len, name, nullptr);
+  kern::sys_mname(reinterpret_cast<u8 *>(addr), len, name, nullptr);
 
   *addrOut = reinterpret_cast<void *>(addr);
   return 0;

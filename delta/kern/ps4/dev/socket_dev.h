@@ -15,7 +15,7 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
+namespace kern {
 
 class SocketDevice : public Device {
  public:
@@ -55,4 +55,4 @@ class SocketDevice : public Device {
 // The socket behind an fd, or null when it isn't one.
 SocketDevice* FdToSocket(u32 fd);
 
-}  // namespace krnl
+}  // namespace kern

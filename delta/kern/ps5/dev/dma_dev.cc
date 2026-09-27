@@ -39,7 +39,7 @@ DELTA_OPTION(bool, kNoCarry, "DELTA_DMEM_NOCARRY", false);
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_note_aperture(u64 base, u64 size);
 
-namespace krnl {
+namespace kern {
 
 namespace {
 // What each VA currently maps, so a re-map of direct memory the guest already
@@ -167,4 +167,4 @@ u8* DmaDevicePs5::Map(void* addr,
               offset, len, addr, (int)fixed, p);
   return reinterpret_cast<u8*>(p);
 }
-}  // namespace krnl
+}  // namespace kern

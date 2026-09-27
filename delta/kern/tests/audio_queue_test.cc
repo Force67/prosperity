@@ -19,7 +19,7 @@ struct Queue {
     return value;
   }
   u32 Take() {
-    return krnl::ps5::ConsumeAudioOut2Block(memory.data(), memory.size());
+    return kern::ps5::ConsumeAudioOut2Block(memory.data(), memory.size());
   }
   Queue() {
     Set(0x1c88, 256u);
@@ -52,11 +52,11 @@ TEST(AudioOut2Queue, SequenceNumbersRemain64BitAndWrap) {
 
 TEST(AudioOut2Queue, InvalidOrIncompleteControlDoesNotGrant) {
   Queue q;
-  EXPECT_EQ(krnl::ps5::ConsumeAudioOut2Block(nullptr, 0), 0u);
+  EXPECT_EQ(kern::ps5::ConsumeAudioOut2Block(nullptr, 0), 0u);
   q.Set(0x1c80, u64{4});  // Impossible occupancy for a three-block ring.
   EXPECT_EQ(q.Take(), 0u);
   q.Set(0x1c80, u64{1});
-  EXPECT_EQ(krnl::ps5::ConsumeAudioOut2Block(q.memory.data(), 0x2504), 0u);
+  EXPECT_EQ(kern::ps5::ConsumeAudioOut2Block(q.memory.data(), 0x2504), 0u);
   q.Set(0x1c88, 0u);
   EXPECT_EQ(q.Take(), 0u);
   q.Set(0x1c88, 257u);

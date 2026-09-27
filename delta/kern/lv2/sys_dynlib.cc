@@ -42,7 +42,7 @@ DELTA_OPTION(bool, kProcparamTrace, "DELTA_PROCPARAM_TRACE", false);
 DELTA_OPTION(bool, kVoLleFix, "DELTA_VO_LLE_FIX", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 int PS4ABI sys_dynlib_dlopen(const char*) {
   /* devkit-only; retail titles never call it */
   return -SysError::eNOSYS;
@@ -54,7 +54,7 @@ int PS4ABI sys_dynlib_get_info(u32 handle, dynlib_info* dyn_info) {
   if (dyn_info->size != sizeof(*dyn_info))
     return -SysError::eINVAL;
 
-  auto mod = Proc::GetActive()->GetModule(handle);
+  auto mod = Process::GetActive()->GetModule(handle);
   if (!mod)
     return -SysError::eSRCH;
 
@@ -86,7 +86,7 @@ int PS4ABI sys_dynlib_get_info_ex(u32 handle,
   if (dyn_info->size != sizeof(*dyn_info))
     return -SysError::eINVAL;
 
-  auto mod = Proc::GetActive()->GetModule(handle);
+  auto mod = Process::GetActive()->GetModule(handle);
   if (!mod)
     return -SysError::eSRCH;
 
@@ -135,7 +135,7 @@ int PS4ABI sys_dynlib_get_info_ex(u32 handle,
 }
 
 int PS4ABI sys_dynlib_dlsym(u32 handle, const char* sym_name, void** sym) {
-  auto mod = Proc::GetActive()->GetModule(handle);
+  auto mod = Process::GetActive()->GetModule(handle);
   if (!mod)
     return -1;
 
@@ -171,7 +171,7 @@ int PS4ABI sys_dynlib_dlsym(u32 handle, const char* sym_name, void** sym) {
 }
 
 int PS4ABI sys_dynlib_get_obj_member(u32 handle, u8 index, void** value) {
-  auto mod = Proc::GetActive()->GetModule(handle);
+  auto mod = Process::GetActive()->GetModule(handle);
   if (!mod)
     return -SysError::eSRCH;
 
@@ -197,7 +197,7 @@ int PS4ABI sys_dynlib_get_obj_member(u32 handle, u8 index, void** value) {
 }
 
 int PS4ABI sys_dynlib_get_proc_param(void** data, size_t* size) {
-  auto mod = Proc::GetActive()->GetModuleList()[0];
+  auto mod = Process::GetActive()->GetModuleList()[0];
   if (mod) {
     auto& info = mod->GetInfo();
 
@@ -216,7 +216,7 @@ int PS4ABI sys_dynlib_get_proc_param(void** data, size_t* size) {
 }
 
 int PS4ABI sys_dynlib_get_list(u32* handles, size_t max_count, size_t* count) {
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   auto& list = proc->GetModuleList();
 
   // The real kernel loads each PRX's needed modules first, so its list is
@@ -225,9 +225,9 @@ int PS4ABI sys_dynlib_get_list(u32* handles, size_t max_count, size_t* count) {
   // PrxStart ran before libSceHttp's init, got 0x80431001, left its NP context
   // null. Emit dependency-first (postorder over DT_SCE_NEEDED_MODULE), main
   // module up front.
-  base::Vector<Smodule*> sorted;
-  base::HashSet<Smodule*> visited;
-  base::Function<void(Smodule*)> visit = [&](Smodule* m) {
+  base::Vector<Module*> sorted;
+  base::HashSet<Module*> visited;
+  base::Function<void(Module*)> visit = [&](Module* m) {
     if (!visited.insert(m).second)
       return;
     for (auto& dep : m->NeededObjects()) {
@@ -308,8 +308,8 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
   // run fine (Demon's Souls' Crossgen init asserts 0x0112 load-start succeeds,
   // chaining libSceHttp2/NpManager/NpWebApi2; libSceSsl2 has no PS5 module,
   // degrades to not-found).
-  auto* proc = Proc::GetActive();
-  const bool is_ps5 = proc->GetPlatform() == krnl::Proc::Platform::kPs5;
+  auto* proc = Process::GetActive();
+  const bool is_ps5 = proc->GetPlatform() == kern::Process::Platform::kPs5;
   bool skip_init = false;
   for (auto* s : kLoadOk) {
     if (std::strcmp(name.c_str(), s) == 0) {
@@ -469,7 +469,7 @@ void* PS4ABI GuestTlsGetAddr(tls_index* ti) {
   if (it != t_blocks.end())
     return it->second + ti->offset;
 
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   for (auto& mod : proc->GetModuleList()) {
     auto& info = mod->GetInfo();
     if (info.tls_slot != ti->module_id)
@@ -489,7 +489,7 @@ void* PS4ABI GuestTlsGetAddr(tls_index* ti) {
 }
 
 int PS4ABI sys_dynlib_process_needed_and_relocate() {
-  auto& list = Proc::GetActive()->GetModuleList();
+  auto& list = Process::GetActive()->GetModuleList();
   for (auto& mod : list) {
     LOG_ASSERT(mod);
 
@@ -502,4 +502,57 @@ int PS4ABI sys_dynlib_process_needed_and_relocate() {
 
   return 0;
 }
-}  // namespace krnl
+
+// sys_dl_get_list/get_info: gated on a debugger/coredump/syscore process; a
+// retail title gets EPERM (the dbglogger system process is the only legitimate
+// enumerator). Arg block {pid@0, ids[]@8, max@16, count@24}.
+int PS4ABI sys_dl_get_list() {
+  return -SysError::ePERM;
+}
+
+// Kernel arg block: {pid@0, handle@8, info@16}; fills a 0xA50-byte module-info
+// struct. Same debugger gate, same EPERM for a title.
+int PS4ABI sys_dl_get_info() {
+  return -SysError::ePERM;
+}
+
+// The kernel's sys_dl_notify_event returns ENOSYS unconditionally: dynlib
+// event delivery to a debugger is not wired on the console either.
+int PS4ABI sys_dl_notify_event() {
+  return -SysError::eNOSYS;
+}
+
+int PS4ABI sys_dynlib_dlclose() {
+  return 0;
+}
+int PS4ABI sys_dynlib_prepare_dlclose() {
+  return 0;
+}
+
+// Same debugger gate as sys_dl_get_list/get_info; arg block is
+// {pid@0, handle@8, meta@16, metasize@24, sizeOut@32}.
+int PS4ABI sys_dl_get_metadata() {
+  return -SysError::ePERM;
+}
+
+int PS4ABI sys_dynlib_get_info_for_libdbg() {
+  return 0;
+}
+int PS4ABI sys_dynlib_get_list_for_libdbg() {
+  return 0;
+}
+int PS4ABI sys_dynlib_get_list2() {
+  return 0;
+}
+int PS4ABI sys_dynlib_get_info2() {
+  return 0;
+}
+
+// sys_dynlib_do_copy_relocations (596): processes R_X86_64_COPY relocations for
+// the main executable. Our loader already resolves data relocations when it
+// maps each module, so there is nothing extra to copy here; return success.
+int PS4ABI sys_dynlib_do_copy_relocations() {
+  return 0;
+}
+
+}  // namespace kern

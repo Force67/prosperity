@@ -3,8 +3,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // /dev/sceGp: the general-purpose accelerator (GPU) media queue. System-only;
 // games reach the GPU through the gc device. Registers so an open succeeds;
@@ -17,4 +17,4 @@ class SceGpDevice : public Device {
   i64 Lseek(i64, int) override;
   int Fstat(void* stat) override;
 };
-}  // namespace krnl
+}  // namespace kern

@@ -97,7 +97,7 @@ DELTA_OPTION(bool, kAudioTrace, "DELTA_AUDIO_TRACE", false);
 DELTA_OPTION(bool, kAudiomixAck, "DELTA_AUDIOMIX_ACK", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 namespace {
 
 constexpr size_t kCtlHdr = 0x20;
@@ -514,9 +514,9 @@ void AudioDaemonNoticeShm(const char* name, u8* base, size_t size) {
   base::SpawnDetachedThread("audio_daemon", DaemonMain);
 }
 
-}  // namespace krnl
+}  // namespace kern
 
-namespace krnl::ps4 {
+namespace kern::ps4 {
 namespace {
 AudioSink g_sink;
 }
@@ -526,4 +526,4 @@ void SetAudioSink(const AudioSink& sink) {
 const AudioSink& GetAudioSink() {
   return g_sink;
 }
-}  // namespace krnl::ps4
+}  // namespace kern::ps4

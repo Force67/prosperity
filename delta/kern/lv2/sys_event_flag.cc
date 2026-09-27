@@ -38,13 +38,13 @@ DELTA_OPTION(bool, kWaitProbe, "DELTA_WAIT_PROBE", false);
 DELTA_OPTION(bool, kEvfStack, "DELTA_EVF_STACK", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 // Named event flags, so evf_open(name) finds the one evf_create(name) made.
 static base::Mutex g_ef_reg_m;
 static base::HashMap<base::String, EventFlag*> g_ef_by_name;
 
 EventFlag::EventFlag(ObjectTable& objects, const char* nm, u64 init, u64 sticky)
-    : Object(objects, OType::kEventflag), bits_(init), sticky_(sticky) {
+    : Object(objects, Type::kEventflag), bits_(init), sticky_(sticky) {
   if (nm && *nm) {
     name_ = nm;
     base::LockGuard<base::Mutex> lk(g_ef_reg_m);
@@ -178,8 +178,8 @@ bool EvfSetByNameSubstr(const char* substr, u64 bits) {
 }
 
 static EventFlag* FromId(int id) {
-  auto* obj = Proc::GetActive()->GetObjTable().Get(id);
-  if (!obj || obj->type() != Object::OType::kEventflag)
+  auto* obj = Process::GetActive()->GetObjTable().Get(id);
+  if (!obj || obj->type() != Object::Type::kEventflag)
     return nullptr;
   return static_cast<EventFlag*>(obj);
 }
@@ -251,7 +251,7 @@ int PS4ABI sys_evf_create(const char* name, u32 attr, u64 init_pattern) {
     return -SysError::eINVAL;
   }
   auto* ef =
-      new EventFlag(Proc::GetActive()->GetObjTable(), name, init_pattern);
+      new EventFlag(Process::GetActive()->GetObjTable(), name, init_pattern);
   BASE_LOGI("evf", "create '{}' attr={:#x} init={:#x} -> id={}",
             name ? name : "", attr, (unsigned long long)init_pattern,
             ef->handle());
@@ -307,7 +307,8 @@ int PS4ABI sys_evf_open(const char* name) {
   // here both producer and consumer just open by name, so creating on first
   // open gives them a shared flag and the sync actually works.
   u64 seed = SystemFlagInit(name);
-  auto* ef = new EventFlag(Proc::GetActive()->GetObjTable(), name, seed, seed);
+  auto* ef =
+      new EventFlag(Process::GetActive()->GetObjTable(), name, seed, seed);
   BASE_LOGI("evf", "open '{}' (auto-created) -> id={}", name ? name : "",
             ef->handle());
   return ef->handle();
@@ -322,7 +323,7 @@ int PS4ABI sys_evf_delete(int id) {
     if (!ef->fname().empty())
       g_ef_by_name.erase(ef->fname().c_str());
   }
-  Proc::GetActive()->GetObjTable().Release(id);
+  Process::GetActive()->GetObjTable().Release(id);
   return 0;
 }
 
@@ -459,4 +460,4 @@ int PS4ABI sys_evf_cancel(int id, u64 pattern, int* num_waiters) {
   EvfTrace("cancel", id, ef, pattern, 0, 0, 0);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

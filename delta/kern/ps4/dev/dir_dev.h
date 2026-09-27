@@ -14,7 +14,7 @@
 #include "kern/ps4/dev/device.h"
 #include "kern/vfs.h"
 
-namespace krnl {
+namespace kern {
 // A directory opened by the guest (e.g. /app0/resources). Holds a snapshot of
 // its immediate children and serves them through getdents; fstat reports it as
 // a directory. Games open a dir then enumerate it to find their resources.
@@ -30,4 +30,4 @@ class DirDevice : public Device {
   base::Vector<vfs::DirEntry> entries_;
   size_t cursor_ = 0;
 };
-}  // namespace krnl
+}  // namespace kern

@@ -11,7 +11,7 @@
 #include "base/arch.h"
 #include "guest_abi.h"
 
-namespace krnl {
+namespace kern {
 // FreeBSD POSIX kernel semaphores (ksem_*). These are the libc/pthread-backing
 // counting semaphores keyed by an integer semid_t handed out by ksem_init /
 // ksem_open, distinct from the SCE "osem" syscalls (549+). They were
@@ -39,4 +39,4 @@ int PS4ABI sys_ksem_trywait(int id);
 int PS4ABI sys_ksem_timedwait(int id, const struct ksem_timespec* abstime);
 int PS4ABI sys_ksem_getvalue(int id, int* val);
 int PS4ABI sys_ksem_destroy(int id);
-}  // namespace krnl
+}  // namespace kern

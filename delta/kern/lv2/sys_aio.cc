@@ -23,13 +23,14 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "kern/lv2/error_table.h"
-#include "kern/lv2/sys_vfs_ext.h"
+#include "kern/lv2/stub_log.h"
+#include "kern/lv2/sys_vfs.h"
 
 namespace {
 DELTA_OPTION(bool, kAioTrace, "DELTA_AIO_TRACE", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 namespace {
 
 // SceKernelAioRWRequest.
@@ -178,4 +179,26 @@ int PS4ABI sys_aio_multi_cancel(u32* ids, u32 num, int* errs) {
   return ReportIds(ids, num, errs, false);
 }
 
-}  // namespace krnl
+// We don't model async IO. Failing with eOPNOTSUPP makes guests fall back to
+// synchronous IO. Every AIO entry point funnels here, so the log can't name
+// which one; pair it with FEX_SCTRACE to attribute the call.
+int PS4ABI sys_aio_unsupported() {
+  static base::Atomic<int> n{0};
+  int c = ++n;
+  if (kAioTrace && c <= 200)
+    BASE_LOGI("aio", "unsupported call #{}", c);
+  else {
+    static base::Atomic<bool> once{false};
+    LogOnce(once, "aio unsupported; guest should fall back to sync IO");
+  }
+  return -SysError::eOPNOTSUPP;
+}
+
+int PS4ABI sys_get_bio_usage_all() {
+  return 0;
+}
+int PS4ABI sys_aio_init() {
+  return 0;
+}
+
+}  // namespace kern

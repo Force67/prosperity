@@ -34,16 +34,16 @@ namespace {
 DELTA_OPTION(bool, kScerrTrace, "DELTA_SCERR_TRACE", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 
-// Read by the stub handlers and the trampoline alike, so it is a krnl symbol
+// Read by the stub handlers and the trampoline alike, so it is a kern symbol
 // rather than a file-local one.
 DELTA_OPTION(bool, g_sc_hist, "DELTA_SCHIST", false);
 
 ModuleInfo* CalledIn(void* addr) {
   uintptr_t addrsafe = (uintptr_t)addr;
 
-  for (auto& mod : Proc::GetActive()->GetModuleList()) {
+  for (auto& mod : Process::GetActive()->GetModuleList()) {
     auto& info = mod->GetInfo();
 
     if (addrsafe <= (uintptr_t)(info.base + info.code_size) &&
@@ -293,8 +293,8 @@ static int PS4ABI sys_apr_unavailable() {
 uintptr_t Lv2Lookup(u32 sid) {
   // PS5 titles route to the Prospero table (FreeBSD 11 ABI); never the Orbis
   // one.
-  auto* pr = Proc::GetActive();
-  if (pr && pr->GetPlatform() == Proc::Platform::kPs5) {
+  auto* pr = Process::GetActive();
+  if (pr && pr->GetPlatform() == Process::Platform::kPs5) {
     if (sid >= 0x2bc && sid <= 0x2c0)  // apr_submit..apr_ctrl
       return Lv2Trampoline(reinterpret_cast<const void*>(&sys_apr_unavailable),
                            sid);
@@ -302,4 +302,4 @@ uintptr_t Lv2Lookup(u32 sid) {
   }
   return Lv2Get(sid);
 }
-}  // namespace krnl
+}  // namespace kern

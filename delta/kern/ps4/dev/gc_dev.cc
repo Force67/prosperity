@@ -44,12 +44,12 @@ DELTA_OPTION(u32, kGcTraceMax, "DELTA_GC_TRACE_MAX", 0);
 // (see prosperity_gc_submit in libSceGnmDriver.cpp).
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe() {
-  krnl::NoteGpuEndOfPipe();
+  kern::NoteGpuEndOfPipe();
 }
 // NOLINTEND(readability-identifier-naming)
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe_ctx(u64 ctx) {
-  krnl::NoteGpuEndOfPipeCtx(ctx);
+  kern::NoteGpuEndOfPipeCtx(ctx);
 }
 // NOLINTEND(readability-identifier-naming)
 
@@ -67,7 +67,7 @@ extern "C" void prosperity_gc_flip(u64 scanout_base,
 // NOTE: the PS5 AGC /dev/gc protocol lives in a separate device,
 // kern/ps5/dev/gc_dev.cc (GcDevicePs5); this file is PS4 GNM only.
 
-namespace krnl {
+namespace kern {
 GcDevice::GcDevice(ObjectTable& objects) : Device(objects) {}
 
 bool GcDevice::Init(const char*, u32, u32) {
@@ -80,7 +80,7 @@ static void CompleteFlipLabels(u64 flip_ptr) {
   // The flip arg block is caller-controlled; not every title passes a pointer
   // here (layout varies by GnmDriver revision). Never dereference a value that
   // isn't a mapped guest VA.
-  auto* pr = Proc::GetActive();
+  auto* pr = Process::GetActive();
   if (!pr || !pr->GetVma().Get(reinterpret_cast<u8*>(flip_ptr)))
     return;
 
@@ -109,7 +109,7 @@ static void CompleteFlipLabels(u64 flip_ptr) {
 static void PrintGuestCaller() {
   if (!kGcCaller)
     return;
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   if (!proc)
     return;
   auto* sp = reinterpret_cast<uintptr_t*>(__builtin_frame_address(0));
@@ -245,7 +245,7 @@ i32 GcDevice::Ioctl(u32 cmd, void* data) {
                         // is a mapped guest VA.
       u64 ptr = static_cast<u64*>(data) ? *static_cast<u64*>(data) : 0;
       if (ptr) {
-        auto* pr = Proc::GetActive();
+        auto* pr = Process::GetActive();
         if (pr && pr->GetVma().Get(reinterpret_cast<u8*>(ptr)))
           *reinterpret_cast<u32*>(ptr) = 0;
       }
@@ -602,7 +602,7 @@ u8* GcDevice::Map(void*, size_t size, u32, u32, size_t offset) {
     return pool + offset;
   return reinterpret_cast<u8*>(-1);
 }
-}  // namespace krnl
+}  // namespace kern
 
 // sceGnmDingDong(ringId, offset) publishes a queue's write pointer. The real
 // driver writes it into its /dev/gc mapping, so no ioctl announces it; draining
@@ -611,8 +611,8 @@ u8* GcDevice::Map(void*, size_t size, u32, u32, size_t offset) {
 // doorbell.
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gc_dingdong(u32 ring_id, u32 offset_dw) {
-  base::LockGuard lock(krnl::GcDevice::g_compute_mutex);
-  krnl::GcDevice::RingDoorbell(ring_id, offset_dw);
+  base::LockGuard lock(kern::GcDevice::g_compute_mutex);
+  kern::GcDevice::RingDoorbell(ring_id, offset_dw);
 }
 // NOLINTEND(readability-identifier-naming)
 
@@ -620,7 +620,7 @@ extern "C" void prosperity_gc_dingdong(u32 ring_id, u32 offset_dw) {
 extern "C" void prosperity_gc_drain_acb(u32 budget_dw) {
   if (!budget_dw)
     return;
-  base::LockGuard lock(krnl::GcDevice::g_compute_mutex);
-  krnl::GcDevice::DrainQueues(budget_dw);
+  base::LockGuard lock(kern::GcDevice::g_compute_mutex);
+  kern::GcDevice::DrainQueues(budget_dw);
 }
 // NOLINTEND(readability-identifier-naming)

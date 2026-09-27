@@ -11,8 +11,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 class DmaDevice : public Device {
  public:
@@ -39,4 +39,4 @@ int DmemBackingFd();
 // reservation covering a physical offset, or -1 when none does.
 int DmemTypeForOffset(u64 off);
 u64 DmemBackingSize();
-}  // namespace krnl
+}  // namespace kern

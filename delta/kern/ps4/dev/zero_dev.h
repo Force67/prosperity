@@ -3,8 +3,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // /dev/zero: reads return zero-filled buffers, writes discard. Used to back
 // anonymous mmap fallbacks and as a source of zero pages.
@@ -17,4 +17,4 @@ class ZeroDevice : public Device {
   i64 Lseek(i64, int) override;
   int Fstat(void* stat) override;
 };
-}  // namespace krnl
+}  // namespace kern

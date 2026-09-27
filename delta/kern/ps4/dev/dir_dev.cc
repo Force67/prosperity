@@ -14,7 +14,7 @@
 #include "kern/ps4/dev/dir_dev.h"
 #include "kern/ps4/dev/file_dev.h"
 
-namespace krnl {
+namespace kern {
 // FreeBSD dirent (PS4 is FreeBSD 9, pre-ino64): 8-byte header + name, each
 // record padded to an 8-byte boundary.
 struct fbsd_dirent {  // NOLINT(readability-identifier-naming): guest ABI name
@@ -60,4 +60,4 @@ int DirDevice::Fstat(void* stat) {
 i64 DirDevice::Read(void*, size_t) {
   return -SysError::eISDIR;
 }
-}  // namespace krnl
+}  // namespace kern

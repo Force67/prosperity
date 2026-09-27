@@ -50,6 +50,8 @@
 #include "cpu/backend.h"
 #include "kern/crash.h"
 #include "kern/lv2/dispatch.h"
+#include "kern/lv2/sys_dynlib.h"
+#include "kern/lv2/sys_thread.h"
 #include "kern/module.h"
 #include "kern/process.h"
 #include "options/options.h"
@@ -66,12 +68,6 @@ DELTA_OPTION(bool, kFexSctrace, "FEX_SCTRACE", false);
 DELTA_OPTION(bool, kHleTrace, "DELTA_HLE_TRACE", false);
 DELTA_OPTION(bool, kWatchdog, "DELTA_WATCHDOG", false);
 }  // namespace
-
-namespace krnl {
-struct tls_index;  // NOLINT(readability-identifier-naming): guest ABI name
-void* PS4ABI GuestTlsGetAddr(tls_index* ti);  // HLE dynamic-TLS resolver
-const u32* CurrentGuestTidPtr();  // this thread's guest tid TLS addr
-}  // namespace krnl
 
 namespace cpu {
 
@@ -398,7 +394,7 @@ static void StartWatchdog() {
                 continue;
               BASE_LOGI("watchdog",
                         "      sc {:3} {:<18} ({:#x},{:#x},{:#x},{:#x}) -> {:#x}",
-                        e.id, krnl::SyscallGetname(e.id),
+                        e.id, kern::SyscallGetname(e.id),
                         (unsigned long long)e.a0, (unsigned long long)e.a1,
                         (unsigned long long)e.a2, (unsigned long long)e.a3,
                         (unsigned long long)e.ret);
@@ -424,7 +420,7 @@ static void StartWatchdog() {
                     u32 oid = 0;
                     if (ot && opos) {
                       const TraceEvt &le = ot[(opos - 1) % kTraceRing];
-                      if (le.kind == 's') { oid = le.id; osc = krnl::SyscallGetname(le.id); oa0 = le.a0; oa1 = le.a1; }
+                      if (le.kind == 's') { oid = le.id; osc = kern::SyscallGetname(le.id); oa0 = le.a0; oa1 = le.a1; }
                     }
                     BASE_LOGI("watchdog",
                               "      ^^ OWNER is watchdog tid={} rip={:#x} scN={} last: sc {} {} ({:#x},{:#x})",
@@ -488,8 +484,8 @@ class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
 
     // Dynamic-TLS bridge: patched __tls_get_addr issues this magic syscall.
     if (num == kTlsGetAddrSyscall) {
-      u64 r = reinterpret_cast<u64>(krnl::GuestTlsGetAddr(
-          reinterpret_cast<krnl::tls_index*>(args->Argument[1])));
+      u64 r = reinterpret_cast<u64>(kern::GuestTlsGetAddr(
+          reinterpret_cast<kern::tls_index*>(args->Argument[1])));
       if (g_ctx_ptr) {
         u32 ef = g_ctx_ptr->ReconstructCompactedEFLAGS(frame->Thread, false,
                                                        nullptr, 0);
@@ -565,14 +561,14 @@ class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
       return ret;
     }
 
-    const uintptr_t handler = krnl::Lv2Lookup(num);
+    const uintptr_t handler = kern::Lv2Lookup(num);
     if (!handler)
       return 0;
 
     // Optional syscall trace: FEX_SCTRACE=1.
     if (kFexSctrace)
       BASE_LOGI("sc", "{:3} {:<22} ({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
-                num, krnl::SyscallGetname(num), args->Argument[1],
+                num, kern::SyscallGetname(num), args->Argument[1],
                 args->Argument[2], args->Argument[3], args->Argument[4],
                 args->Argument[5], args->Argument[6]);
 
@@ -581,7 +577,7 @@ class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
     using Fn = u64(PS4ABI*)(u64, u64, u64, u64, u64, u64);
     auto fn = reinterpret_cast<Fn>(handler);
     // The native x86 bsd trampoline normally counts this; count here too.
-    if (krnl::g_sc_hist)
+    if (kern::g_sc_hist)
       g_sys_hist[num & 1023]++;
     t_last_syscall = num;
     t_in_syscall = true;
@@ -597,7 +593,7 @@ class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
           nullptr};
     u64 ret = fn(args->Argument[1], args->Argument[2], args->Argument[3],
                  args->Argument[4], args->Argument[5], args->Argument[6]);
-    const u32 error = krnl::SyscallErrno(ret);
+    const u32 error = kern::SyscallErrno(ret);
     if (error)
       ret = error;
     ev.ret = ret;
@@ -649,7 +645,7 @@ static u64 PS4ABI GuestFnReturnExit() {
 
 class FexBackend final : public Backend {
  public:
-  void OnImageMapped(krnl::ModuleInfo& info) override {
+  void OnImageMapped(kern::ModuleInfo& info) override {
     EnsureInit();
     base::LockGuard lk(g_range_mutex);
     g_ranges.push_back({reinterpret_cast<u64>(info.base), info.code_size});
@@ -772,11 +768,11 @@ class FexBackend final : public Backend {
   void RunGuestThread(void* handle) override {
     auto* h = static_cast<FexThread*>(handle);
     t_cur_thread = h->thread;
-    krnl::InstallSigAltStack();  // fatal handler must survive a blown guest
+    kern::InstallSigAltStack();  // fatal handler must survive a blown guest
                                  // stack
     // Re-assert the fatal handler: FEXCore init may have registered its own
     // SIGSEGV/SIGILL handlers; sigaction is idempotent.
-    krnl::InstallCrashHandler();
+    kern::InstallCrashHandler();
     FEXCore::Allocator::RegisterTLSData(
         h->thread);  // FEX per-thread registration
     StartWatchdog();
@@ -799,7 +795,7 @@ class FexBackend final : public Backend {
     {
       base::LockGuard lk(g_live_mutex);
       g_live.push_back({h->thread, my_id, t_trace, &t_trace_pos,
-                        krnl::CurrentGuestTidPtr(), &t_in_syscall,
+                        kern::CurrentGuestTidPtr(), &t_in_syscall,
                         &t_sample_gen, &t_sample_rip, &t_sample_ns,
                         static_cast<pid_t>(::syscall(SYS_gettid))});
     }
@@ -1391,7 +1387,7 @@ void DumpThreadTrace(void* file_star) {
     const TraceEvt& e = t_trace[(start + i) % kTraceRing];
     if (e.kind == 's') {
       std::fprintf(f, "  sc  %3u %-22s (%#llx,%#llx,%#llx,%#llx) -> %#llx\n",
-                   e.id, krnl::SyscallGetname(e.id), (unsigned long long)e.a0,
+                   e.id, kern::SyscallGetname(e.id), (unsigned long long)e.a0,
                    (unsigned long long)e.a1, (unsigned long long)e.a2,
                    (unsigned long long)e.a3, (unsigned long long)e.ret);
     } else if (e.kind == 'h') {

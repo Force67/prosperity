@@ -11,7 +11,7 @@
 #include <capstone/capstone.h>
 #include "base/arch.h"
 
-namespace krnl {
+namespace kern {
 struct procEnv;
 }
 

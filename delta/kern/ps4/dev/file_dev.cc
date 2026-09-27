@@ -23,7 +23,7 @@ DELTA_OPTION(bool, kOpenTrace, "DELTA_OPEN_TRACE", false);
 DELTA_OPTION(bool, kRdall, "DELTA_RDALL", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 void FillStat(SceKernelStat& out, u16 mode, i64 size) {
   std::memset(&out, 0, sizeof(out));
   out.st_mode = mode;
@@ -213,4 +213,4 @@ int FileDevice::Fstat(void* stat) {
            static_cast<i64>(file_.GetSize()));
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

@@ -3,8 +3,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // /dev/usbctl: the USB host-controller control channel. System-only; games
 // reach input through pad/libkernel. Registers so an open succeeds; commands
@@ -17,4 +17,4 @@ class UsbctlDevice : public Device {
   i64 Lseek(i64, int) override;
   int Fstat(void* stat) override;
 };
-}  // namespace krnl
+}  // namespace kern

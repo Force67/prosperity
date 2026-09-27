@@ -17,7 +17,7 @@ namespace {
 DELTA_OPTION(bool, kQuietGuest, "DELTA_QUIET_GUEST", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 ConsoleDevice::ConsoleDevice(ObjectTable& objects) : Device(objects) {}
 
 bool ConsoleDevice::Init(const char*, u32, u32) {
@@ -111,4 +111,4 @@ i32 ConsoleDevice::Ioctl(u32 cmd, void* data) {
     }
   }
 }
-}  // namespace krnl
+}  // namespace kern

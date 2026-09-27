@@ -3,7 +3,7 @@
 #include "base/arch.h"
 #include "options/options.h"
 
-namespace krnl::ps4 {
+namespace kern::ps4 {
 
 enum class HardwareMode { kBase, kNeo };
 
@@ -23,4 +23,4 @@ u32 CpuMode();
 bool IsNeoMode();
 const char* GnmDriverModule();
 
-}  // namespace krnl::ps4
+}  // namespace kern::ps4

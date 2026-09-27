@@ -1,4 +1,4 @@
-// Loads one module (a decrypted SCE-dynamic ELF) through krnl::Smodule and
+// Loads one module (a decrypted SCE-dynamic ELF) through kern::Module and
 // prints what came out. Usage: modload <module.sprx>
 #include <cstdio>
 
@@ -17,13 +17,13 @@ int main(int argc, char** argv) {
 
   logger::CreateLogger(true);
 
-  krnl::Proc proc;  // ctor registers itself as the active process
+  kern::Process proc;  // ctor registers itself as the active process
   if (!proc.GetVma().Init()) {
     std::printf("[modload] vma init failed\n");
     return 1;
   }
 
-  auto mod = krnl::MakeRef<krnl::Smodule>(&proc);
+  auto mod = kern::MakeRef<kern::Module>(&proc);
   mod->GetInfo().handle = 0;
 
   std::printf("[modload] loading %s ...\n", argv[1]);

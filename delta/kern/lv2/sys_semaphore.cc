@@ -22,6 +22,7 @@
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_mem.h"
 #include "kern/lv2/sys_semaphore.h"
+#include "kern/lv2/sys_thread.h"
 #include "kern/process.h"
 #include "options/options.h"
 
@@ -36,8 +37,7 @@ DELTA_OPTION(u32, kOsemTrace, "DELTA_OSEM_TRACE", 0);
 DELTA_OPTION(u32, kOsemMaxWaitMs, "DELTA_OSEM_MAXWAIT", 0);
 }  // namespace
 
-namespace krnl {
-const u32* CurrentGuestTidPtr();  // sys_thread.cc: this thread's guest tid
+namespace kern {
 
 static void OsemTrace(const char* what, int id, int n, int count) {
   // 1 traces every semaphore; any other value traces just that id.
@@ -52,7 +52,7 @@ static base::Mutex g_sem_reg_m;
 static base::HashMap<base::String, Semaphore*> g_sem_by_name;
 
 Semaphore::Semaphore(ObjectTable& objects, const char* nm, int init, int max)
-    : Object(objects, OType::kSemaphore),
+    : Object(objects, Type::kSemaphore),
       count_(init),
       max_count_(max),
       init_count_(init) {
@@ -132,14 +132,14 @@ int Semaphore::Cancel(int set_count, int* num_waiters) {
 }
 
 static Semaphore* FromId(int id) {
-  auto* obj = Proc::GetActive()->GetObjTable().Get(id);
-  if (!obj || obj->type() != Object::OType::kSemaphore)
+  auto* obj = Process::GetActive()->GetObjTable().Get(id);
+  if (!obj || obj->type() != Object::Type::kSemaphore)
     return nullptr;
   return static_cast<Semaphore*>(obj);
 }
 
 int PS4ABI sys_osem_create(const char* name, u32 attr, int init, int max) {
-  auto* s = new Semaphore(Proc::GetActive()->GetObjTable(), name, init, max);
+  auto* s = new Semaphore(Process::GetActive()->GetObjTable(), name, init, max);
   BASE_LOGI("osem", "create '{}' attr={:#x} init={} max={} -> id={}",
             name ? name : "", attr, init, max, s->handle());
   return s->handle();
@@ -155,7 +155,7 @@ int PS4ABI sys_osem_open(const char* name) {
   // Auto-create unknown named semaphores (a system service makes them on real
   // hw); creating on first open gives producer+consumer a shared one.
   auto* s =
-      new Semaphore(Proc::GetActive()->GetObjTable(), name, 0, 0x7fffffff);
+      new Semaphore(Process::GetActive()->GetObjTable(), name, 0, 0x7fffffff);
   BASE_LOGI("osem", "open '{}' (auto-created) -> id={}", name ? name : "",
             s->handle());
   return s->handle();
@@ -170,7 +170,7 @@ int PS4ABI sys_osem_delete(int id) {
     if (!s->fname().empty())
       g_sem_by_name.erase(s->fname().c_str());
   }
-  Proc::GetActive()->GetObjTable().Release(id);
+  Process::GetActive()->GetObjTable().Release(id);
   return 0;
 }
 
@@ -224,4 +224,4 @@ int PS4ABI sys_osem_cancel(int id, int set_count, int* num_waiters) {
     return -SysError::eSRCH;
   return s->Cancel(set_count, num_waiters);
 }
-}  // namespace krnl
+}  // namespace kern

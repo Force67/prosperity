@@ -174,7 +174,7 @@ bool codeLift::transform(u8 *data, size_t size, u64 base) {
 }
 
 void codeLift::emit_syscall(u8 *base, u32 idx) {
-  auto address = krnl::Lv2Lookup(idx);
+  auto address = kern::Lv2Lookup(idx);
   if (kSysliftTrace)
     BASE_LOGI("syslift", "site={:p} idx={} -> trampoline={:#x}", (void *)base,
               idx, (unsigned long)address);

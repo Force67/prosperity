@@ -11,7 +11,7 @@
 #include "base/arch.h"
 #include "guest_abi.h"
 
-namespace krnl {
+namespace kern {
 struct proc_param {  // NOLINT(readability-identifier-naming): guest ABI name
   u64 length;
   u32 magic;
@@ -86,4 +86,18 @@ int PS4ABI sys_dynlib_unload_prx(u32 handle);
 // HLE __tls_get_addr; libkernel's export is patched to this. (See impl.)
 struct tls_index;  // NOLINT(readability-identifier-naming): guest ABI name
 void* PS4ABI GuestTlsGetAddr(tls_index* ti);
-}  // namespace krnl
+
+int PS4ABI sys_dl_get_list();
+int PS4ABI sys_dl_get_info();
+int PS4ABI sys_dl_notify_event();
+int PS4ABI sys_dynlib_dlclose();
+int PS4ABI sys_dynlib_prepare_dlclose();
+int PS4ABI sys_dl_get_metadata();
+int PS4ABI sys_dynlib_get_info_for_libdbg();
+int PS4ABI sys_dynlib_get_list_for_libdbg();
+int PS4ABI sys_dynlib_get_list2();
+int PS4ABI sys_dynlib_get_info2();
+
+int PS4ABI sys_dynlib_do_copy_relocations();
+
+}  // namespace kern

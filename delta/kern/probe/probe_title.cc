@@ -43,6 +43,7 @@
 #include "base/threading/recursive_mutex.h"
 #include "base/threading/thread.h"
 #include "base/time/time.h"
+#include "kern/lv2/sys_thread.h"
 
 namespace {
 DELTA_OPTION(bool, kVoForceConnect, "DELTA_VO_FORCE_CONNECT", false);
@@ -77,11 +78,9 @@ DELTA_OPTION(bool, kVoSkip580, "DELTA_VO_SKIP_580", false);
 DELTA_OPTION(bool, kVoWatch, "DELTA_VO_WATCH", false);
 }  // namespace
 
-namespace krnl {
-const u32* CurrentGuestTidPtr();  // sys_thread.cc: this thread's guest tid
-}
+namespace kern {}
 
-namespace krnl::probe {
+namespace kern::probe {
 
 namespace {
 base::Atomic<u64> g_job_claims{0}, g_job_fails{0};
@@ -1010,7 +1009,7 @@ static void InstallAllocLockHook(u8* base,
 // 14, each stopping before the function's first rip-relative load:
 //   0x12820 alloc: ends at 17;  0x12af0 free: ends at 15;  0x48a70 insert: ends
 //   at 16
-void InstallAllocLock(Smodule& m) {
+void InstallAllocLock(Module& m) {
   if (!kSotcAllocLock && !kSotcTreeWatch && !kSotcTreeWalk && !kSotcHeapRoute)
     return;
   u8* base = m.GetInfo().base;
@@ -1097,7 +1096,7 @@ void InstallAllocLock(Smodule& m) {
 // DELTA_SOTC_MATTRACE: name the blocks "Material Param Update" fills. Hooks the
 // dispatch builder (block = its 4th arg, rcx, a local of the caller). Prologue
 // cut 17; all five args in registers, nothing read at positive rbp offsets.
-void InstallMatTrace(Smodule& m) {
+void InstallMatTrace(Module& m) {
   if (!kSotcMatTrace)
     return;
   InstallInternalHook(m.GetInfo().base, 0x16eb90, 17, 13,
@@ -1110,7 +1109,7 @@ void InstallMatTrace(Smodule& m) {
                       "DispatchDirectEmit(0x883870)");
 }
 
-void InstallJobTrace(Smodule& m) {
+void InstallJobTrace(Module& m) {
   if (!kJobTrace)
     return;
   u8* base = m.GetInfo().base;
@@ -1128,7 +1127,7 @@ void InstallJobTrace(Smodule& m) {
     InstallInternalHook(base, 0x38d40, 20, 12, "DoClaimJob(0x38d40)");
 }
 
-void InvestigateDcbGate(Smodule& m) {
+void InvestigateDcbGate(Module& m) {
   if (!kPs5Dcbwatch)
     return;
   u8* base = m.GetInfo().base;
@@ -1182,7 +1181,7 @@ void InvestigateDcbGate(Smodule& m) {
   }
   // Identify the imports 0x69e720 calls by symbolizing their resolved GOT slots
   // (imports are already bound at this point).
-  auto* p = Proc::GetActive();
+  auto* p = Process::GetActive();
   struct {
     u32 got;
     const char* nid;
@@ -1243,7 +1242,7 @@ void InvestigateDcbGate(Smodule& m) {
 // 0x1e7e09 find). Hand it a zeroed 0x20*0x20-byte bucket array up front, point
 // the registry at it, and NOP the ctor's null-write (offsets from the decrypted
 // rebirth.elf).
-void BringUpRebirthSurfaceRegistry(Smodule& m) {
+void BringUpRebirthSurfaceRegistry(Module& m) {
   u8* base = m.GetInfo().base;
   constexpr u32 kRegistryOff = 0x687a90;  // bucket-array base pointer
   constexpr u32 kCtorZeroOff =
@@ -1293,7 +1292,7 @@ void BringUpRebirthSurfaceRegistry(Smodule& m) {
 // empty bucket array
 // + NOP the ctor write, guarded by exact ctor bytes so another PS5 title's
 // eboot is untouched. (Offsets from the decrypted eboot.)
-void BringUpRebirthEbootRegistry(Smodule& m) {
+void BringUpRebirthEbootRegistry(Module& m) {
   u8* base = m.GetInfo().base;
   constexpr u32 kRegistryOff = 0x985458;  // bucket-array base pointer
   constexpr u32 kCtorZeroOff =
@@ -1329,7 +1328,7 @@ void BringUpRebirthEbootRegistry(Smodule& m) {
 // display
 // config (count/idx/cfg stride 0x140) during the natural flow, to pin what it
 // fails to set (Open needs the connected state f0==4).
-static void WatchVideoOutState(Smodule& m) {
+static void WatchVideoOutState(Module& m) {
   if (!kVoWatch)
     return;
   u8* base = m.GetInfo().base;
@@ -1396,7 +1395,7 @@ VoOpMapLog(u64 a1, u64 user_id, u64 bus_type, u64 index, u64 param, u64 a6) {
   return 0;
 }
 
-void PatchVideoOutDiag(Smodule& m) {
+void PatchVideoOutDiag(Module& m) {
   WatchVideoOutState(m);
   if (kVoOplog) {
     uintptr_t thunk = cpu::MakeHostThunk(reinterpret_cast<void*>(&VoOpMapLog));
@@ -1461,7 +1460,7 @@ void PatchVideoOutDiag(Smodule& m) {
 
 // Patch a guest function to `xor eax,eax; ret`. Steps over libkernel-internal
 // validation that rejects our externally-loaded module set (11.00 offsets).
-static void ForceReturn0(Proc& p, const char* mod, u32 off) {
+static void ForceReturn0(Process& p, const char* mod, u32 off) {
   auto m = p.GetModule(base::StringRef(mod));
   if (!m)
     return;
@@ -1475,7 +1474,7 @@ static void ForceReturn0(Proc& p, const char* mod, u32 off) {
 }
 
 // Patch a (rdi=paramId, rsi=int* out) getter to `*out = val; return 0`.
-static void ForceGetterOk(Proc& p, const char* mod, u32 off, u32 val) {
+static void ForceGetterOk(Process& p, const char* mod, u32 off, u32 val) {
   auto m = p.GetModule(base::StringRef(mod));
   if (!m)
     return;
@@ -1493,7 +1492,7 @@ static void ForceGetterOk(Proc& p, const char* mod, u32 off, u32 val) {
 
 // Boot patches applied before entering the guest, needed by every boot path
 // (modexec and the real pkg boot), not just the modexec harness.
-void ApplyBootPatches(Proc& p) {
+void ApplyBootPatches(Process& p) {
   // Redirect libkernel's __tls_get_addr (NID vNe1w4diLCs) to our per-thread
   // HLE; its own dynamic-TLS allocator leaves DTV entries null. NATIVE ONLY:
   // the patch jumps a host pointer, which under the FEXCore JIT is ARM code
@@ -1517,7 +1516,7 @@ void ApplyBootPatches(Proc& p) {
 #else  // DELTA_BACKEND_FEX
   // FEX path: a host jump is invalid inside the x86 JIT, so patch the export to
   // a tiny `mov eax, <magic>; syscall; ret` stub that the FEX syscall handler
-  // bridges to krnl::GuestTlsGetAddr (tls_index ptr arrives in rdi).
+  // bridges to kern::GuestTlsGetAddr (tls_index ptr arrives in rdi).
   if (auto k = p.getModule(base::StringRef("libkernel"))) {
     if (uintptr_t a = k->getSymbolByNid("vNe1w4diLCs")) {
       auto* c = reinterpret_cast<u8*>(a);
@@ -1706,4 +1705,4 @@ void ApplyBootPatches(Proc& p) {
   ForceGetterOk(p, "libSceAppContentUtil", 0x1630,
                 3);  // sceAppContentAppParamGetInt
 }
-}  // namespace krnl::probe
+}  // namespace kern::probe

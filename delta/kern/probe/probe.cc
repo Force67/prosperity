@@ -35,6 +35,7 @@
 #include "base/strings/string_ref.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
+#include "kern/lv2/sys_thread.h"
 
 namespace {
 DELTA_OPTION(const char*, kFnWatch, "DELTA_FNWATCH", nullptr);
@@ -60,11 +61,9 @@ DELTA_OPTION(const char*, kMemDump, "DELTA_MEMDUMP", nullptr);
 DELTA_OPTION(bool, kSotcSkipWorldwait, "DELTA_SOTC_SKIP_WORLDWAIT", false);
 }  // namespace
 
-namespace krnl {
-const u32* CurrentGuestTidPtr();  // sys_thread.cc: this thread's guest tid
-}
+namespace kern {}
 
-namespace krnl::probe {
+namespace kern::probe {
 
 static void ProbeFiosPaths();
 
@@ -81,12 +80,12 @@ static void InvestigateWriteWatch();
 static void InvestigateWriteHist();
 static void InvestigatePoolMap();
 static void InvestigateMemDump();
-static void InvestigateRetTrace(Proc&);
+static void InvestigateRetTrace(Process&);
 
 // DELTA_RETTRACE="[module+]hexoff:label,...": return-value trace at each
 // `mov ebx,eax` / `test eax,eax` after a call, eboot-relative unless a module
 // is named, so a failure can be followed into the system module reporting it.
-static void InvestigateRetTrace(Proc& pr) {
+static void InvestigateRetTrace(Process& pr) {
   const char* e = kRetTrace;
   if (!e)
     return;
@@ -145,14 +144,14 @@ static void InvestigateRetTrace(Proc& pr) {
   }
 }
 
-static void InvestigateFnWatch(Smodule& m) {
+static void InvestigateFnWatch(Module& m) {
   InvestigatePopcnt();
   InvestigateSumWatch();
   InvestigateWriteWatch();
   InvestigateWriteHist();
   InvestigatePoolMap();
   InvestigateMemDump();
-  InvestigateRetTrace(*Proc::GetActive());
+  InvestigateRetTrace(*Process::GetActive());
   const char* e = kFnWatch;
   if (!e)
     return;
@@ -308,7 +307,7 @@ static void InvestigateSumWatch() {
 // DELTA_GUEST_PATCH="hexoff=hexbytes,...": overwrite guest code/data at an
 // eboot offset. For bisecting a wedge: NOP out a poll and see whether the
 // thread behind it is the only thing blocked, without waiting for the real fix.
-static void ApplyGuestPatches(Smodule& m) {
+static void ApplyGuestPatches(Module& m) {
   const char* e = kGuestPatch;
   if (!e)
     return;
@@ -343,7 +342,7 @@ static void ApplyGuestPatches(Smodule& m) {
 // DELTA_FNARGS="hexoff[+o1+o2...]:label,...": arm an int3 at each guest
 // function entry (first byte must be push rbp) that logs rdi and walks the
 // offset chain from it. See SetFnArgs in crash.h.
-static void InvestigateFnArgs(Smodule& m) {
+static void InvestigateFnArgs(Module& m) {
   const char* e = kFnArgs;
   if (!e)
     return;
@@ -392,7 +391,7 @@ static void InvestigateFnArgs(Smodule& m) {
 // thread on [op+0x98]==0xb. [ldr+0x90] IS allocated pre-read, so NOP the `je 74
 // 07` -> `90 90`: the accessor always returns that buffer; an empty container
 // should parse as 0 entries. Env- gated EXPERIMENT, not a shipped fix.
-static void ForceSotcPayload(Smodule& m) {
+static void ForceSotcPayload(Module& m) {
   u8* base = m.GetInfo().base;
   auto rwx = [](u8* p) {
     host_memory::ProtectMem(
@@ -719,9 +718,9 @@ static void ProbeFiosPaths() {
 
 // ---- the interface kern calls ---------------------------------------------
 
-void OnProcessCreated(Proc& p, Smodule& main_module, bool ps5) {
+void OnProcessCreated(Process& p, Module& main_module, bool ps5) {
   (void)p;
-  Smodule* first = &main_module;
+  Module* first = &main_module;
   // Engine bring-up: give Isaac's surface-name registry valid empty storage so
   // main-init doesn't deref a null bucket array (self-gated by ctor signature).
   // DELTA_GUEST_NULLGUARD="<hexoff>:<rax|rsi>:<len>[,...]": recover a guest
@@ -735,13 +734,13 @@ void OnProcessCreated(Proc& p, Smodule& main_module, bool ps5) {
       if (!endp || *endp != ':')
         break;
       const char* r = endp + 1;
-      const krnl::GuardReg reg =
-          (*r == 's') ? krnl::GuardReg::rsi : krnl::GuardReg::rax;
+      const kern::GuardReg reg =
+          (*r == 's') ? kern::GuardReg::rsi : kern::GuardReg::rax;
       const char* c = std::strchr(r, ':');
       if (!c)
         break;
       const int len = (int)std::strtol(c + 1, const_cast<char**>(&p), 10);
-      krnl::SetNullGuard(
+      kern::SetNullGuard(
           reinterpret_cast<uintptr_t>(first->GetInfo().base) + off, reg, len);
       LOG_INFO("nullguard: armed eboot+{:#x} len={}", off, len);
       while (*p == ',' || *p == ' ')
@@ -758,10 +757,10 @@ void OnProcessCreated(Proc& p, Smodule& main_module, bool ps5) {
       auto* base8 = first->GetInfo().base;
       auto eb = reinterpret_cast<uintptr_t>(base8);
       // movzx esi,[rdi+rcx*2+0x2e] (glyph cmap count), rdi==0
-      krnl::SetNullGuard(eb + 0x5cab56, krnl::GuardReg::rsi, 5);
+      kern::SetNullGuard(eb + 0x5cab56, kern::GuardReg::rsi, 5);
       // mov rax,[rax+0x28]; mov rax,[rax+0x18] (chained font-object load),
       // rax==0
-      krnl::SetNullGuard(eb + 0x5c7c53, krnl::GuardReg::rax, 8);
+      kern::SetNullGuard(eb + 0x5c7c53, kern::GuardReg::rax, 8);
       // ROOT FIX: the renderer-init chain 0x5535d0 bails at its gates when
       // VOInit (gate C, 0x58fb10) returns false in our env, skipping the
       // Shape-Renderer install at 0x55361b and leaving *(0x9854f0) null, the
@@ -805,14 +804,14 @@ void OnProcessCreated(Proc& p, Smodule& main_module, bool ps5) {
   // fiosTraceLogger); at proc::create the /app0 PFS provider isn't mounted yet.
 }
 
-void OnModuleLoaded(Smodule& m, base::StringRef name) {
+void OnModuleLoaded(Module& m, base::StringRef name) {
   if (name == base::StringRef("rebirth"))
     BringUpRebirthSurfaceRegistry(m);
   else if (name == base::StringRef("libSceVideoOut"))
     PatchVideoOutDiag(m);
 }
 
-void OnBeforeStart(Proc& p) {
+void OnBeforeStart(Process& p) {
   ApplyBootPatches(p);
 }
 
@@ -820,4 +819,4 @@ uintptr_t WrapImport(const char* nid_name, uintptr_t real_addr) {
   return MaybeWrapFiosImport(nid_name, real_addr);
 }
 
-}  // namespace krnl::probe
+}  // namespace kern::probe

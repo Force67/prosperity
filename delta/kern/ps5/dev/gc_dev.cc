@@ -77,7 +77,7 @@ static void TraceFlip(const char* site, u64 base) {
     BASE_LOGI("flip", "{} present={:#x}", site, (unsigned long)base);
 }
 
-namespace krnl {
+namespace kern {
 GcDevicePs5::GcDevicePs5(ObjectTable& objects) : Device(objects) {}
 
 bool GcDevicePs5::Init(const char*, u32, u32) {
@@ -486,7 +486,7 @@ i32 GcDevicePs5::Ioctl(u32 cmd, void* data) {
               BASE_LOGI("agc", "{}", line.c_str());
             }
           }
-          if (auto* pr = Proc::GetActive()) {
+          if (auto* pr = Process::GetActive()) {
             int hits = 0;
             pr->GetVma().ForEachGpuAperturePage(ScanPagePm4, &hits);
             if (!hits)
@@ -907,4 +907,4 @@ u8* GcDevicePs5::Map(void* addr,
               p);
   return reinterpret_cast<u8*>(p);
 }
-}  // namespace krnl
+}  // namespace kern

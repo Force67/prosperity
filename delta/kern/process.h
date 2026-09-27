@@ -19,35 +19,35 @@
 #include "kern/ps4/dev/device.h"
 #include "kern/vm_map.h"
 
-namespace krnl {
-struct ProcInfo {
+namespace kern {
+struct ProcessInfo {
   u32 rip_zone_size = 5 * 1024;
   u8* user_stack = nullptr;
   size_t user_stack_size = 20 * 1024 * 1024;
   void* fs_base = nullptr;
 };
 
-class Smodule;
+class Module;
 class Object;
 
 /*TODO: ModulePtr is misused in places; audit the refs*/
-using ModulePtr = krnl::ObjectRef<Smodule>;
+using ModulePtr = kern::ObjectRef<Module>;
 
-class Proc {
-  friend class Smodule;
+class Process {
+  friend class Module;
 
  public:
   using ModuleList = base::Vector<ModulePtr>;
 
   enum class Platform { kPs4, kPs5 };
 
-  Proc();
+  Process();
   // Load the process. When fromVfs is set, path is a guest VFS path (e.g.
   // "/app0/eboot.bin") loaded through the mount table; otherwise a host file.
   bool Create(const base::String&, bool from_vfs = false);
   void Start();
 
-  static Proc* GetActive();
+  static Process* GetActive();
 
   inline ModuleList& GetModuleList() { return modules_; }
   inline ObjectTable& GetObjTable() { return objects_; }
@@ -56,8 +56,8 @@ class Proc {
   ModulePtr GetModule(base::StringRef);
   ModulePtr GetModule(u32);
 
-  inline VmManager& GetVma() { return vmem_; }
-  inline ProcInfo& GetEnv() { return env_; }
+  inline VmMap& GetVma() { return vmem_; }
+  inline ProcessInfo& GetEnv() { return env_; }
 
   Platform GetPlatform() const { return plat_; }
   void SetPlatform(Platform p) { plat_ = p; }
@@ -69,8 +69,8 @@ class Proc {
   void SetSdkVersion(u32 v) { sdk_version_ = v; }
 
  private:
-  VmManager vmem_;
-  ProcInfo env_;
+  VmMap vmem_;
+  ProcessInfo env_;
   Platform plat_ = Platform::kPs4;
   u32 sdk_version_ = 0;
   ModuleList modules_;
@@ -84,4 +84,4 @@ class Proc {
   u16 NextFreeTls() { return tls_counter_++; }
 };
 
-}  // namespace krnl
+}  // namespace kern

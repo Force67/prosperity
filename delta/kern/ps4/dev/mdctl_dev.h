@@ -3,8 +3,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // /dev/mdctl: the memory-disk controller. The kernel opens it only to attach
 // ".md" root-filesystem images at boot; games never do. The emulator has no
@@ -17,4 +17,4 @@ class MdctlDevice : public Device {
   i64 Lseek(i64, int) override;
   int Fstat(void* stat) override;
 };
-}  // namespace krnl
+}  // namespace kern

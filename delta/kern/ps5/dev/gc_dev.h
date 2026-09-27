@@ -9,8 +9,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"  // shared abstract device base
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 class GcDevicePs5 : public Device {
  public:
@@ -20,4 +20,4 @@ class GcDevicePs5 : public Device {
   i32 Ioctl(u32 command, void* args) override;
   u8* Map(void*, size_t, u32, u32, size_t) override;
 };
-}  // namespace krnl
+}  // namespace kern

@@ -27,7 +27,7 @@
 #include "base/threading/thread.h"
 #include "kern/ipmi/services.h"
 
-namespace krnl::ipmi {
+namespace kern::ipmi {
 namespace {
 
 enum { kDrainNotification = 0x32 };
@@ -50,4 +50,4 @@ Service& ArbitratorIpcService() {
   return g_arbitrator_ipc;
 }
 
-}  // namespace krnl::ipmi
+}  // namespace kern::ipmi

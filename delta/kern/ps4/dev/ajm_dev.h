@@ -11,8 +11,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // /dev/ajm: the PS4 audio-decoder (AJM) management device. libSceAjm opens it
 // during init (FMOD on PS4 routes its decoding through AJM). We don't decode
@@ -26,4 +26,4 @@ class AjmDevice : public Device {
   AjmDevice(ObjectTable&);
   i32 Ioctl(u32 command, void* args) override;
 };
-}  // namespace krnl
+}  // namespace kern

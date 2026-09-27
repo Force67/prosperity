@@ -20,22 +20,22 @@
 #include "base/arch.h"
 #include "base/strings/string_ref.h"
 
-namespace krnl {
-class Proc;
-class Smodule;
+namespace kern {
+class Process;
+class Module;
 
 namespace probe {
 
 // The main module is loaded and its imports are resolved, but the guest has not
 // run yet. Arms the generic probes and the PS5 bring-up patches.
-void OnProcessCreated(Proc& p, Smodule& main, bool ps5);
+void OnProcessCreated(Process& p, Module& main, bool ps5);
 
 // A shared module finished loading. `name` is the requested module name, which
 // is what the per-title patches key off.
-void OnModuleLoaded(Smodule& m, base::StringRef name);
+void OnModuleLoaded(Module& m, base::StringRef name);
 
 // About to enter the guest entry point.
-void OnBeforeStart(Proc& p);
+void OnBeforeStart(Process& p);
 
 // Called from smodule::ResolveImports for each PLT import. Returns a guest
 // wrapper around `realAddr` that traces the libSceFios2 whole-file APIs when
@@ -44,4 +44,4 @@ void OnBeforeStart(Proc& p);
 uintptr_t WrapImport(const char* nid_name, uintptr_t real_addr);
 
 }  // namespace probe
-}  // namespace krnl
+}  // namespace kern

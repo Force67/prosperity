@@ -7,8 +7,8 @@
 #include "base/threading/mutex.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 class GcDevice : public Device {
  public:
@@ -53,4 +53,4 @@ class GcDevice : public Device {
   static base::Array<ComputeQueue, 64> g_compute_queues;
   static base::Mutex g_compute_mutex;
 };
-}  // namespace krnl
+}  // namespace kern

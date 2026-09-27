@@ -34,31 +34,31 @@
 #include <cstdlib>
 #include <cstring>
 #include "base/strings/string_ref.h"
+#include "kern/lv2/sys_thread.h"
 #include "options/options.h"
 
 namespace {
 DELTA_OPTION(const char*, kPs5Modules, "DELTA_PS5_MODULES", nullptr);
 }  // namespace
 
-namespace krnl {
-const u32* CurrentGuestTidPtr();  // sys_thread.cc: this thread's guest tid
+namespace kern {
 
-static Proc* g_active_proc{nullptr};
+static Process* g_active_proc{nullptr};
 
 // The guest fs base (TLS) and how the guest entry is run are backend-specific
 // (see delta/cpu): native uses a host thread_local + direct call, FEX uses the
 // FEXCore CPUState + JIT. cpu::SetThreadFsBase() is defined by the active
 // backend.
 
-Proc::Proc() : vmem_(env_) {
+Process::Process() : vmem_(env_) {
   g_active_proc = this;
 }
 
-Proc* Proc::GetActive() {
+Process* Process::GetActive() {
   return g_active_proc;
 }
 
-bool Proc::Create(const base::String& path, bool from_vfs) {
+bool Process::Create(const base::String& path, bool from_vfs) {
   /*register HLE prx overrides*/
   runtime::vprx_init();
 
@@ -66,7 +66,7 @@ bool Proc::Create(const base::String& path, bool from_vfs) {
   LOG_ASSERT(vmem_.Init());
 
   /*reserve slot for main module*/
-  auto first = krnl::MakeRef<Smodule>(this);
+  auto first = kern::MakeRef<Module>(this);
   first->GetInfo().handle = 0;
 
   modules_.emplace_back(first);
@@ -104,7 +104,7 @@ bool Proc::Create(const base::String& path, bool from_vfs) {
 
   return true;
 }
-ModulePtr Proc::GetModule(base::StringRef name) {
+ModulePtr Process::GetModule(base::StringRef name) {
   for (auto& mod : modules_) {
     // module name is base::String, compare via c_str.
     if (name == base::StringRef(mod->GetInfo().name))
@@ -113,7 +113,7 @@ ModulePtr Proc::GetModule(base::StringRef name) {
   return {nullptr};
 }
 
-ModulePtr Proc::GetModule(u32 handle) {
+ModulePtr Process::GetModule(u32 handle) {
   for (auto& mod : modules_) {
     if (mod->GetInfo().handle == handle)
       return mod;
@@ -128,7 +128,7 @@ ModulePtr Proc::GetModule(u32 handle) {
 // is meant to get its storage lazily when the renderer registers the base
 // surfaces
 // ("Floor Surface"/"Wall Surface"). That renderer path is gated on the Gnm->
-ModulePtr Proc::LoadModule(base::StringRef name) {
+ModulePtr Process::LoadModule(base::StringRef name) {
   const bool is_ps4_gnm_driver =
       plat_ == Platform::kPs4 &&
       (name == base::StringRef("libSceGnmDriver") ||
@@ -140,7 +140,7 @@ ModulePtr Proc::LoadModule(base::StringRef name) {
   if (mod)
     return mod;
 
-  auto lib = krnl::MakeRef<Smodule>(this);
+  auto lib = kern::MakeRef<Module>(this);
   lib->GetInfo().handle = handle_counter_;
   handle_counter_++;
 
@@ -266,7 +266,7 @@ ModulePtr Proc::LoadModule(base::StringRef name) {
   LOG_ERROR("unable to load module {}", sname.c_str());
   return nullptr;
 }
-void Proc::Start() {
+void Process::Start() {
   LOG_ASSERT(modules_[1]->GetInfo().name == "libkernel");
 
   InstallCrashHandler();
@@ -303,4 +303,4 @@ void Proc::Start() {
   cpu::GetBackend().EnterGuest(reinterpret_cast<uintptr_t>(kinfo.entry), stack,
                                fsbase);
 }
-}  // namespace krnl
+}  // namespace kern

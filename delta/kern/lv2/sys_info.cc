@@ -31,6 +31,9 @@
 #include "base/containers/set.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
+#include "kern/lv2/dispatch.h"
+#include "kern/lv2/sys_budget.h"
+#include "kern/lv2/sys_info.h"
 #include "options/options.h"
 
 // Declared unconditionally: read unconditionally below. They used to sit behind
@@ -41,7 +44,7 @@ DELTA_OPTION(bool, kSotc7core, "DELTA_SOTC_7CORE", false);
 DELTA_OPTION(bool, kSysctlCaller, "DELTA_SYSCTL_CALLER", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 
 // The guest TSC. machdep.tsc_freq must match the rate the guest's rdtsc
 // actually advances or every libkernel timer runs at the wrong speed. Native
@@ -74,9 +77,6 @@ static u64 GuestTscFreq() {
   return u64(1600000000);  // FEX emulates rdtsc; PS4 invariant TSC rate
 #endif
 }
-int sys_budget_get_ptype();
-
-ModuleInfo* CalledIn(void* addr);
 
 // The oid names we have already reported as unhandled, so a polling caller
 // cannot flood the log. Guarded because sysctl runs on any guest thread.
@@ -171,11 +171,11 @@ int PS4ABI sys_sysctl(int* name,
   // thread's static TLS from the small internal arena instead of mmap'ing,
   // which a 2 MiB PT_TLS (Skyrim) overflows.
   else if (name[0] == 1 && name[1] == 14 && name[2] == 36 && namelen >= 3 &&
-           Proc::GetActive()->GetPlatform() == Proc::Platform::kPs5) {
+           Process::GetActive()->GetPlatform() == Process::Platform::kPs5) {
     if (oldp && oldlenp) {
       std::memset(oldp, 0, *oldlenp);
       if (*oldlenp >= sizeof(u32))
-        *reinterpret_cast<u32*>(oldp) = Proc::GetActive()->GetSdkVersion();
+        *reinterpret_cast<u32*>(oldp) = Process::GetActive()->GetSdkVersion();
     }
     return 0;
   }
@@ -186,7 +186,7 @@ int PS4ABI sys_sysctl(int* name,
   // 100% CPU. libkernel defaults the value to 0 when the getter fails, so 0 is
   // safe.
   else if (name[0] == 1 && name[1] == 14 && name[2] == 68 && namelen >= 3 &&
-           Proc::GetActive()->GetPlatform() == Proc::Platform::kPs5) {
+           Process::GetActive()->GetPlatform() == Process::Platform::kPs5) {
     if (oldp && oldlenp) {
       std::memset(oldp, 0, *oldlenp);
       if (*oldlenp >= 2 * sizeof(u32))
@@ -201,7 +201,7 @@ int PS4ABI sys_sysctl(int* name,
   // nothing, and abort the first thread ('Invalid TCB initialization'). The
   // third count reserves a second arena below 0xf_c2000000 (0 skips).
   else if (name[0] == 1 && name[1] == 14 && name[2] == 69 && namelen >= 3 &&
-           Proc::GetActive()->GetPlatform() == Proc::Platform::kPs5) {
+           Process::GetActive()->GetPlatform() == Process::Platform::kPs5) {
     struct TlsArenaInfo {
       u64 size;
       u32 version;
@@ -217,7 +217,7 @@ int PS4ABI sys_sysctl(int* name,
     // The secondary block holds the thread's copy of the static TLS image, so
     // it has to fit every loaded module's PT_TLS at once.
     size_t tls = 0;
-    for (auto& m : Proc::GetActive()->GetModuleList())
+    for (auto& m : Process::GetActive()->GetModuleList())
       tls += m->GetInfo().tls_size_mem + m->GetInfo().tlsalign;
     constexpr size_t kPage = 0x4000;
     size_t tls_pages = (tls + 0xFFFF + kPage - 1) / kPage;
@@ -245,7 +245,7 @@ int PS4ABI sys_sysctl(int* name,
   // the fixed ScePthread heap until bad_alloc. Answer zeroed + success (like
   // .35). PS5-only.
   else if (name[0] == 1 && name[1] == 14 && name[2] == 79 && namelen >= 3 &&
-           Proc::GetActive()->GetPlatform() == Proc::Platform::kPs5) {
+           Process::GetActive()->GetPlatform() == Process::Platform::kPs5) {
     if (oldp && oldlenp) {
       std::memset(oldp, 0, *oldlenp);
     }
@@ -256,7 +256,7 @@ int PS4ABI sys_sysctl(int* name,
   // main loop stalls in it while it errors. The getter zeroes most of the
   // struct itself, so all-zero is in-band.
   else if (name[0] == 1 && name[1] == 61 && namelen == 2 &&
-           Proc::GetActive()->GetPlatform() == Proc::Platform::kPs5) {
+           Process::GetActive()->GetPlatform() == Process::Platform::kPs5) {
     if (oldp && oldlenp)
       std::memset(oldp, 0, *oldlenp);
     return 0;
@@ -264,7 +264,7 @@ int PS4ABI sys_sysctl(int* name,
 
   // kern.userstack
   else if (name[0] == 1 && name[1] == 33 && namelen == 2) {
-    auto& info = Proc::GetActive()->GetEnv();
+    auto& info = Process::GetActive()->GetEnv();
     *static_cast<void**>(oldp) = info.user_stack + info.user_stack_size;
     BASE_LOGI("sysctl", "userstack -> base {:p}, end {:p}", info.user_stack,
               oldp);
@@ -354,8 +354,8 @@ int PS4ABI sys_sysctl(int* name,
   else if (name[0] == 0x1337 && name[1] == 6 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(u32)) {
       u32 v = 0x05050001;
-      if (const auto* active = Proc::GetActive();
-          active && active->GetPlatform() == Proc::Platform::kPs5 &&
+      if (const auto* active = Process::GetActive();
+          active && active->GetPlatform() == Process::Platform::kPs5 &&
           active->GetSdkVersion())
         v = active->GetSdkVersion();
       *reinterpret_cast<u32*>(oldp) = v;
@@ -373,9 +373,9 @@ int PS4ABI sys_sysctl(int* name,
   // 0x840fcx. PS5-only oid.
   else if (name[0] == 0x1337 && name[1] == 7 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(u32)) {
-      const auto* active = Proc::GetActive();
+      const auto* active = Process::GetActive();
       *reinterpret_cast<u32*>(oldp) =
-          active && active->GetPlatform() == Proc::Platform::kPs5
+          active && active->GetPlatform() == Process::Platform::kPs5
               ? 0x840fd0
               : ps4::GetHardwareModeProfile().main_soc_id;
       *oldlenp = sizeof(u32);
@@ -584,4 +584,27 @@ int PS4ABI sys_sysctl(int* name,
   }
   return -SysError::eNOENT;
 }
-}  // namespace krnl
+
+// sys_uuidgen (392): fill `store` with `count` version-4 UUIDs (FreeBSD's
+// struct uuid is 16 bytes). Demon's Souls generates one while bringing up its
+// resource system; the old stub returned success without writing the buffer,
+// and the engine's I/O layer crashed on the uninitialised id.
+int PS4ABI sys_uuidgen(u8* store, int count) {
+  if (!store)
+    return -SysError::eFAULT;
+  if (count < 1 || count > 2048)
+    return -SysError::eINVAL;
+  static base::Atomic<u64> seq{1};
+  for (int i = 0; i < count; i++) {
+    u8* p = store + i * 16;
+    u64 a = seq.fetch_add(1) * 0x9E3779B97F4A7C15ull;
+    u64 b = a * 0xBF58476D1CE4E5B9ull ^ (a >> 31);
+    std::memcpy(p, &a, 8);
+    std::memcpy(p + 8, &b, 8);
+    p[7] = (p[7] & 0x0F) | 0x40;  // version 4
+    p[8] = (p[8] & 0x3F) | 0x80;  // variant 10x
+  }
+  return 0;
+}
+
+}  // namespace kern

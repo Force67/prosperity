@@ -34,6 +34,7 @@
 #include "base/atomic.h"
 #include "cpu/backend.h"
 #include "host_memory/host_memory.h"
+#include "kern/lv2/sys_thread.h"
 #include "kern/module.h"
 #include "kern/process.h"
 #include "kern/vfs.h"
@@ -57,7 +58,7 @@ DELTA_OPTION(bool, kRdoffNofix, "DELTA_RDOFF_NOFIX", false);
 DELTA_OPTION(bool, kRdoffTrace, "DELTA_RDOFF_TRACE", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 
 namespace {
 CsRangeDescriber g_cs_range_describer = nullptr;
@@ -69,11 +70,10 @@ static bool DescribeCsRange(u64 addr, char* out, size_t n) {
   return g_cs_range_describer && g_cs_range_describer(addr, out, n);
 }
 
-const u32* CurrentGuestTidPtr();  // sys_thread.cc: this thread's guest tid
 // Resolve a host address to "<module>+0x<off> (<seg>)" by scanning loaded
 // module images, so a guest fault points straight at a guest module offset.
 void Symbolize(uintptr_t addr, char* out, size_t n) {
-  if (auto* proc = Proc::GetActive()) {
+  if (auto* proc = Process::GetActive()) {
     for (auto& mod : proc->GetModuleList()) {
       auto& mi = mod->GetInfo();
       auto* t = mi.text_seg.addr;
@@ -1356,4 +1356,4 @@ void InstallCrashHandler() {
   sigaction(SIGUSR1, &pa, nullptr);
 #endif
 }
-}  // namespace krnl
+}  // namespace kern

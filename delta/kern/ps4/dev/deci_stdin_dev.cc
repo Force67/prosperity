@@ -3,7 +3,7 @@
 #include "kern/ps4/dev/deci_stdin_dev.h"
 #include "kern/ps4/dev/file_dev.h"
 
-namespace krnl {
+namespace kern {
 DeciStdinDevice::DeciStdinDevice(ObjectTable& objects) : Device(objects) {}
 
 i64 DeciStdinDevice::Read(void*, size_t) {
@@ -22,4 +22,4 @@ int DeciStdinDevice::Fstat(void* stat) {
   FillStat(*reinterpret_cast<SceKernelStat*>(stat), 0x2000, 0);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

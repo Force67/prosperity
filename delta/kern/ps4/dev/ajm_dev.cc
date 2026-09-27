@@ -20,7 +20,7 @@ DELTA_OPTION(const char*, kAjmResult, "DELTA_AJM_RESULT", nullptr);
 DELTA_OPTION(bool, kAjmTrace, "DELTA_AJM_TRACE", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 AjmDevice::AjmDevice(ObjectTable& objects) : Device(objects) {}
 
 // AJM ioctls (sizes encoded in the command). We don't decode audio; we only
@@ -114,4 +114,4 @@ i32 AjmDevice::Ioctl(u32 cmd, void* data) {
   }
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

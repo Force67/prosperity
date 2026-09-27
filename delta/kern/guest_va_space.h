@@ -10,7 +10,7 @@
 
 #include <cstddef>
 
-namespace krnl {
+namespace kern {
 
 // Reserve every known guest-fixed range PROT_NONE. Call once, as early as
 // possible, before the CPU backend reserves its JIT heap and before any guest
@@ -22,4 +22,4 @@ void ReserveGuestVaSpace();
 // range is guest-owned, and our placeholder is the only thing occupying it.
 bool IsGuestReservedVa(const void* addr, size_t len);
 
-}  // namespace krnl
+}  // namespace kern

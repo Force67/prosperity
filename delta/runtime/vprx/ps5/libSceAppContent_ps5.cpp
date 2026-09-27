@@ -39,7 +39,7 @@ base::String tempHostDir() {
   base::String root =
       base::String(home.empty() ? "." : (const char *)home.c_str()) +
       "/.prosperity/appcontent";
-  const base::String &title = krnl::vfs::TitleId();
+  const base::String &title = kern::vfs::TitleId();
   return root + "/" + (title.empty() ? base::String("APPCONTENT") : title) +
          "/temp0";
 }
@@ -67,7 +67,7 @@ int PS4ABI appContentInitialize(const void *, u32 *bootParam) {
 // parser: the file is a flat object of "key": value pairs.
 i32 userDefinedParam(u32 n) {
   static const base::String json = [] {
-    io::File f = krnl::vfs::OpenRead("/app0/sce_sys/param.json");
+    io::File f = kern::vfs::OpenRead("/app0/sce_sys/param.json");
     if (!f.IsOpen())
       return base::String();
     base::String s(static_cast<size_t>(f.GetSize()), '\0');
@@ -100,7 +100,7 @@ int PS4ABI appContentTemporaryDataMount2(u32 /*option*/, void *mountPoint) {
     return -1;
   const base::String host = tempHostDir();
   makeHostDirs(host);
-  krnl::vfs::MountWritable(kTempPoint, host.c_str());
+  kern::vfs::MountWritable(kTempPoint, host.c_str());
   std::memset(mountPoint, 0, 16);
   std::memcpy(mountPoint, kTempPoint, sizeof(kTempPoint));
   return 0;

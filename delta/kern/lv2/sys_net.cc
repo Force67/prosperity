@@ -20,7 +20,6 @@ constexpr i32 kBsdAfInet6 = 28;
 constexpr i32 kBsdSockDgram = 2;
 constexpr i32 kSceSockDgramP2p = 6;
 }  // namespace
-#include <cstring>
 #include "host_memory/host_memory.h"
 #include "kern/crash.h"
 #include "options/options.h"
@@ -59,7 +58,7 @@ struct SceNetSockInfo {
 };
 }  // namespace
 
-namespace krnl {
+namespace kern {
 int PS4ABI sys_netcontrol(u32 fd, u32 op, void* buffer, u32 size) {
   if (kNetTrace)
     BASE_LOGI("netctl", "fd={} op={:#x} buf={:p} size={}", (int)fd, op, buffer,
@@ -102,7 +101,7 @@ int PS4ABI sys_socket(i32 domain, i32 type, i32 protocol) {
     int fd = ::socket(host_domain, SOCK_DGRAM, 0);
     if (fd >= 0) {
       auto* dev =
-          new SocketDevice(Proc::GetActive()->GetObjTable(), fd, domain);
+          new SocketDevice(Process::GetActive()->GetObjTable(), fd, domain);
       dev->SetName("socket");  // so a diagnostic can say what it landed on
       BASE_LOGI("net", "socket(domain={} type={}) -> fd={} (host {})", domain,
                 type, dev->handle(), fd);
@@ -203,4 +202,18 @@ i64 PS4ABI sys_recvfrom(i32 fd,
   auto* s = FdToSocket(fd);
   return s ? s->Recvfrom(buf, len, flags, from, fromlen) : -SysError::eBADF;
 }
-}  // namespace krnl
+
+int PS4ABI sys_setsockopt() {
+  return 0;
+}
+
+int PS4ABI sys_getsockopt(int fd, int level, int name, void* val, u32* len) {
+  (void)fd;
+  (void)level;
+  (void)name;
+  if (val && len && *len >= 4)
+    *reinterpret_cast<int*>(val) = 0;
+  return 0;
+}
+
+}  // namespace kern

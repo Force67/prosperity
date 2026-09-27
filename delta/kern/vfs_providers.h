@@ -12,7 +12,7 @@
 // gets back the mount plus the handful of title facts the boot path needs.
 //
 // This lives in kern rather than delta_formats because a provider implements
-// krnl::vfs::VirtualProvider, and formats depends on nothing in delta (worth
+// kern::vfs::VirtualProvider, and formats depends on nothing in delta (worth
 // keeping, since it is the module whose tests stand alone). It lives here
 // rather than in main because choosing how a container becomes a guest
 // filesystem is a decision, and the composition root holds wiring.
@@ -25,7 +25,7 @@
 #include "base/memory/shared_pointer.h"
 #include "kern/vfs.h"
 
-namespace krnl::vfs {
+namespace kern::vfs {
 
 struct TitleMount {
   // Null when the container could not be opened; nothing else is then set.
@@ -49,4 +49,4 @@ TitleMount MountPkg(const base::String& path, bool want_icon);
 TitleMount MountFfpkg(const base::String& path, bool want_icon);
 TitleMount MountArchive(const base::String& path, bool want_icon);
 
-}  // namespace krnl::vfs
+}  // namespace kern::vfs

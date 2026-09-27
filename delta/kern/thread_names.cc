@@ -27,7 +27,7 @@
 #include "base/threading/mutex.h"
 #include "kern/process.h"
 
-namespace krnl {
+namespace kern {
 namespace {
 
 struct StackEntry {
@@ -59,7 +59,7 @@ void RegisterGuestThreadStack(const void* stack, size_t size) {
   }
   // The creating thread usually tags the stack before starting the thread;
   // pick that tag up now.
-  if (auto* proc = Proc::GetActive()) {
+  if (auto* proc = Process::GetActive()) {
     auto* info =
         proc->GetVma().Get(const_cast<u8*>(static_cast<const u8*>(stack)));
     if (info && info->name)
@@ -102,4 +102,4 @@ void NameThreadsForRange(const void* ptr, size_t len, const char* name) {
   }
 }
 
-}  // namespace krnl
+}  // namespace kern

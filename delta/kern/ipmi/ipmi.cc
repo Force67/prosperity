@@ -34,7 +34,7 @@ DELTA_OPTION(bool, kIpmiHist, "DELTA_IPMI_HIST", false);
 DELTA_OPTION(bool, kIpmiTrace, "DELTA_IPMI_TRACE", false);
 }  // namespace
 
-namespace krnl::ipmi {
+namespace kern::ipmi {
 namespace {
 
 // Manager command numbers (libSceIpmi op -> syscall 622).
@@ -542,4 +542,4 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
   }
 }
 
-}  // namespace krnl::ipmi
+}  // namespace kern::ipmi

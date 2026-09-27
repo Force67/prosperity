@@ -15,7 +15,7 @@
 #include "base/strings/xstring.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
+namespace kern {
 // FreeBSD-style stat the PS4 returns (SceKernelStat, 0x78 bytes), filled from
 // vn_stat. Without privilege 0x2AC the kernel zeroes
 // st_dev/ino/nlink/uid/gid/rdev/flags/gen/ lspare/birthtim; we zero the whole
@@ -90,4 +90,4 @@ class FileDevice : public Device {
   bool seq_ = false;       // manifest sequential-read mode
   u64 seqPos_ = 0;         // internal read cursor for seq_ mode
 };
-}  // namespace krnl
+}  // namespace kern

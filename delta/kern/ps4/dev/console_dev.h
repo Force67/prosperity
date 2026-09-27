@@ -3,8 +3,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // /dev/console: the system debug tty. A title's debug output lands here the
 // way it would on the host console: writes go to stdout, reads report EOF
@@ -21,4 +21,4 @@ class ConsoleDevice : public Device {
   int Fstat(void* stat) override;
   i32 Ioctl(u32 cmd, void* data) override;
 };
-}  // namespace krnl
+}  // namespace kern

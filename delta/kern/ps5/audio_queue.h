@@ -4,7 +4,7 @@
 
 #include "base/arch.h"
 
-namespace krnl::ps5 {
+namespace kern::ps5 {
 
 // AudioOut2 container layout in firmware 01.14.00. The producer publishes one
 // 64-bit sequence number per grain, shared by every channel port. The daemon
@@ -29,4 +29,4 @@ inline u32 ConsumeAudioOut2Block(u8* memory, size_t size) {
   return frames;
 }
 
-}  // namespace krnl::ps5
+}  // namespace kern::ps5

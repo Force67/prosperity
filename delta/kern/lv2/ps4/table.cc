@@ -15,53 +15,25 @@
 
 #include "kern/lv2/dispatch.h"
 #include "kern/lv2/sys_aio.h"
+#include "kern/lv2/sys_budget.h"
 #include "kern/lv2/sys_debug.h"
 #include "kern/lv2/sys_dynlib.h"
 #include "kern/lv2/sys_event.h"
 #include "kern/lv2/sys_event_flag.h"
 #include "kern/lv2/sys_generic.h"
 #include "kern/lv2/sys_info.h"
+#include "kern/lv2/sys_ipmi.h"
 #include "kern/lv2/sys_ksem.h"
 #include "kern/lv2/sys_mem.h"
-#include "kern/lv2/sys_mem_ext.h"
 #include "kern/lv2/sys_net.h"
 #include "kern/lv2/sys_procid.h"
-#include "kern/lv2/sys_sce_misc.h"
+#include "kern/lv2/sys_regmgr.h"
 #include "kern/lv2/sys_semaphore.h"
 #include "kern/lv2/sys_thread.h"
-#include "kern/lv2/sys_thread_ext.h"
 #include "kern/lv2/sys_time.h"
-#include "kern/lv2/sys_time_ext.h"
 #include "kern/lv2/sys_vfs.h"
-#include "kern/lv2/sys_vfs_ext.h"
 
-namespace krnl {
-
-int sys_write(u32 fd, const void* buf, size_t nbytes);
-int sys_sigprocmask(int, const int*, int*);
-int sys_sigaction(int sig, const void* act, void* oact);
-int sys_regmgr_call(u32 op, u32 id, void* result, void* value, u64 type);
-
-int PS4ABI
-sys_ipmimgr_call(u32 op, u32 kid, void* out, void* in, u64 insize, u64 arg6);
-
-int sys_randomized_path(const char* set_path, char* out, size_t* out_len);
-int PS4ABI sys_uuidgen(u8* store, int count);
-int sys_workaround8849();
-int sys_blockpool_open();
-int sys_dynlib_do_copy_relocations();
-
-int sys_namedobj_create(const char* name, void* arg2, u32 arg3);
-int sys_namedobj_delete();
-
-int sys_budget_get_ptype();
-
-int sys_getpid();
-int sys_exit();
-int sys_rfork();
-int sys_execve();
-
-int PS4ABI sys_sysarch(int num, void* args);
+namespace kern {
 
 struct SyscallReg {
   u32 id;
@@ -709,4 +681,4 @@ uintptr_t Lv2Get(u32 sid) {
   }
   return Lv2Trampoline(handler, sid);
 }
-}  // namespace krnl
+}  // namespace kern

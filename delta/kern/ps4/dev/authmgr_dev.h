@@ -3,8 +3,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // /dev/authmgr: the authentication manager. Maintains the EE-kc key table
 // (content-id -> 32-byte key) the secure processor uses for license checks,
@@ -18,4 +18,4 @@ class AuthmgrDevice : public Device {
   i64 Lseek(i64, int) override;
   int Fstat(void* stat) override;
 };
-}  // namespace krnl
+}  // namespace kern

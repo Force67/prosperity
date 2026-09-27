@@ -34,7 +34,7 @@ namespace {
 DELTA_OPTION(bool, kPs5SysTrace, "DELTA_PS5_SYSTRACE", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 
 // stub handlers (BSD convention applied by the trampoline)
 static int PS4ABI Ps5Ok() {
@@ -119,7 +119,7 @@ static const Ps5Sys kPs5Extra[] = {
 static int PS4ABI Ps5DynlibGetObjMember(u32 handle, u8 index, void** value) {
   if (index != 8)
     return sys_dynlib_get_obj_member(handle, index, value);
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   auto mod = proc->GetModule(handle);
   if (!mod)
     return -SysError::eSRCH;
@@ -183,4 +183,4 @@ uintptr_t Lv2GetPs5(u32 sid) {
   // Base FreeBSD/Orbis syscall: reuse the shared handler + trampoline.
   return Lv2Get(sid);
 }
-}  // namespace krnl
+}  // namespace kern

@@ -20,8 +20,8 @@ namespace {
 DELTA_OPTION(bool, kObjTrace, "DELTA_OBJ_TRACE", false);
 }  // namespace
 
-namespace krnl {
-Object::Object(ObjectTable& objects, OType type)
+namespace kern {
+Object::Object(ObjectTable& objects, Type type)
     : otype_(type), objects_(objects) {
   u32 temp = 0;
   objects.Add(this, temp);
@@ -52,4 +52,4 @@ void Object::RetainHandle() {
 void Object::ReleaseHandle() {
   objects_.Release(handle_collection_[0]);
 }
-}  // namespace krnl
+}  // namespace kern

@@ -10,7 +10,7 @@
 #include "base/threading/recursive_mutex.h"
 #include "kern/object.h"
 
-namespace krnl {
+namespace kern {
 class Object;
 
 class ObjectTable {
@@ -44,4 +44,4 @@ class ObjectTable {
   u32 last_free_entry_ = 0;
   Entry* table_ = nullptr;
 };
-}  // namespace krnl
+}  // namespace kern

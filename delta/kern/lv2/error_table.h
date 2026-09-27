@@ -5,7 +5,7 @@
 
 #include "base/arch.h"
 
-namespace krnl {
+namespace kern {
 enum SysError : u64 {
   // FreeBSD errno spelling.
   // NOLINTBEGIN(readability-identifier-naming)

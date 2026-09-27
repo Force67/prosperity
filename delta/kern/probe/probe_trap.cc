@@ -47,6 +47,7 @@
 #include "base/strings/xstring.h"
 #include "base/threading/thread.h"
 #include "host_memory/host_memory.h"
+#include "kern/lv2/sys_thread.h"
 #include "options/options.h"
 #include "write_watch/write_watch.h"
 
@@ -66,11 +67,9 @@ DELTA_OPTION(bool, kRdoffNofix, "DELTA_RDOFF_NOFIX", false);
 DELTA_OPTION(bool, kRdoffTrace, "DELTA_RDOFF_TRACE", false);
 }  // namespace
 
-namespace krnl {
-const u32* CurrentGuestTidPtr();  // sys_thread.cc: this thread's guest tid
-}
+namespace kern {}
 
-namespace krnl::probe {
+namespace kern::probe {
 
 // DELTA_HEAP_PROF: dump the top allocation sites (defined below).
 extern uintptr_t g_heap_prof_addr;
@@ -1624,4 +1623,4 @@ void StartFnWatchPrinter() {
   });
 }
 
-}  // namespace krnl::probe
+}  // namespace kern::probe

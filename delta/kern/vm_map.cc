@@ -18,17 +18,17 @@
 #include "kern/process.h"
 #include "kern/vm_map.h"
 
-namespace krnl {
-VmManager::VmManager(ProcInfo& info) : pinfo_(info) {}
+namespace kern {
+VmMap::VmMap(ProcessInfo& info) : pinfo_(info) {}
 
-VmManager::~VmManager() {
+VmMap::~VmMap() {
   if (pinfo_.user_stack)
     host_memory::FreeMem(pinfo_.user_stack);
 
   pinfo_.user_stack = nullptr;
 }
 
-bool VmManager::Init() {
+bool VmMap::Init() {
   /*reserve address space for the user stack*/
   pinfo_.user_stack = static_cast<u8*>(host_memory::AllocMem(
       nullptr, pinfo_.user_stack_size, host_memory::PageProtection::kPriv,
@@ -42,7 +42,7 @@ bool VmManager::Init() {
 // guest keys real bookkeeping (SotC's streaming-heap trackers) off the exact
 // [start, end) sceKernelVirtualQuery reports, so the newest mapping of a range
 // must win and stale overlaps must not shadow it.
-void VmManager::PunchHoleLocked(u8* p, size_t s) {
+void VmMap::PunchHoleLocked(u8* p, size_t s) {
   u8* end = p + s;
   for (size_t i = 0; i < rt_pages_.size();) {
     PageInfo& e = rt_pages_[i];
@@ -90,22 +90,18 @@ void SetMappingChangedHook(MappingChangedHook hook) {
   g_mapping_changed = hook;
 }
 
-void VmManager::Add(u8* ptr,
-                    size_t size,
-                    Mprot prot,
-                    u32 sce_prot,
-                    bool reserved) {
+void VmMap::Add(u8* ptr, size_t size, Mprot prot, u32 sce_prot, bool reserved) {
   base::LockGuard lock(vmlock_);
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
   rt_pages_.emplace_back(ptr, size, prot, sce_prot, reserved);
 }
 
-void VmManager::AddDirect(u8* ptr,
-                          size_t size,
-                          Mprot prot,
-                          u32 sce_prot,
-                          u64 phys_offset) {
+void VmMap::AddDirect(u8* ptr,
+                      size_t size,
+                      Mprot prot,
+                      u32 sce_prot,
+                      u64 phys_offset) {
   base::LockGuard lock(vmlock_);
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
@@ -114,13 +110,13 @@ void VmManager::AddDirect(u8* ptr,
   rt_pages_.back().has_phys = true;
 }
 
-void VmManager::Remove(u8* ptr, size_t size) {
+void VmMap::Remove(u8* ptr, size_t size) {
   base::LockGuard lock(vmlock_);
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
 }
 
-PageInfo* VmManager::Get(u8* ptr) {
+PageInfo* VmMap::Get(u8* ptr) {
   base::LockGuard lock(vmlock_);
   // The kernel resolves the region *containing* an address, not just one that
   // starts there: sceKernelVirtualQuery / QueryMemoryProtection / mname all
@@ -136,7 +132,7 @@ PageInfo* VmManager::Get(u8* ptr) {
   return nullptr;
 }
 
-bool VmManager::Overlaps(u8* ptr, size_t size) const {
+bool VmMap::Overlaps(u8* ptr, size_t size) const {
   base::LockGuard lock(vmlock_);
   u8* end = ptr + size;
   for (const auto& page : rt_pages_) {
@@ -146,7 +142,7 @@ bool VmManager::Overlaps(u8* ptr, size_t size) const {
   return false;
 }
 
-void VmManager::ProtectRange(u8* ptr, size_t size, Mprot prot, u32 sce_prot) {
+void VmMap::ProtectRange(u8* ptr, size_t size, Mprot prot, u32 sce_prot) {
   base::LockGuard lock(vmlock_);
   u8* end = ptr + size;
   for (auto& page : rt_pages_)
@@ -156,7 +152,7 @@ void VmManager::ProtectRange(u8* ptr, size_t size, Mprot prot, u32 sce_prot) {
     }
 }
 
-void VmManager::SetRangeName(u8* ptr, size_t size, const char* name) {
+void VmMap::SetRangeName(u8* ptr, size_t size, const char* name) {
   base::LockGuard lock(vmlock_);
   u8* end = ptr + size;
   // The kernel (vm_map_set_name) allocates the name storage per entry; mirror
@@ -175,8 +171,8 @@ void VmManager::SetRangeName(u8* ptr, size_t size, const char* name) {
       page.name = copy;
 }
 
-void VmManager::ForEachGpuAperturePage(void (*fn)(void*, u8*, size_t),
-                                       void* ctx) const {
+void VmMap::ForEachGpuAperturePage(void (*fn)(void*, u8*, size_t),
+                                   void* ctx) const {
   base::LockGuard lock(vmlock_);
   for (const auto& page : rt_pages_) {
     auto a = reinterpret_cast<u64>(page.ptr);
@@ -188,9 +184,9 @@ void VmManager::ForEachGpuAperturePage(void (*fn)(void*, u8*, size_t),
   }
 }
 
-u8* VmManager::MapMemory(u8* preference,
-                         size_t size,
-                         host_memory::PageProtection prot) {
+u8* VmMap::MapMemory(u8* preference,
+                     size_t size,
+                     host_memory::PageProtection prot) {
   const auto alloc_type = host_memory::AllocationType::kReservecommit;
 
   void* ptr = host_memory::AllocMem(static_cast<void*>(preference), size, prot,
@@ -202,7 +198,7 @@ u8* VmManager::MapMemory(u8* preference,
   return nullptr;
 }
 
-void VmManager::UnmapRtMemory(u8* ptr) {
+void VmMap::UnmapRtMemory(u8* ptr) {
   base::LockGuard lock(vmlock_);
   auto iter =
       base::FindIf(rt_pages_.begin(), rt_pages_.end(),
@@ -210,4 +206,4 @@ void VmManager::UnmapRtMemory(u8* ptr) {
 
   rt_pages_.erase(iter);
 }
-}  // namespace krnl
+}  // namespace kern

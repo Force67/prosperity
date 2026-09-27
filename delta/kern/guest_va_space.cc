@@ -35,7 +35,7 @@
 
 #include <sys/mman.h>
 
-namespace krnl {
+namespace kern {
 namespace {
 
 struct Range {
@@ -115,4 +115,4 @@ bool IsGuestReservedVa(const void* addr, size_t len) {
   return false;
 }
 
-}  // namespace krnl
+}  // namespace kern

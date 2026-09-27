@@ -4,7 +4,7 @@
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/null_dev.h"
 
-namespace krnl {
+namespace kern {
 NullDevice::NullDevice(ObjectTable& objects) : Device(objects) {}
 
 i64 NullDevice::Read(void*, size_t) {
@@ -23,4 +23,4 @@ int NullDevice::Fstat(void* stat) {
   FillStat(*reinterpret_cast<SceKernelStat*>(stat), 0x2000, 0);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

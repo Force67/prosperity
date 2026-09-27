@@ -23,7 +23,7 @@
 #include "kern/lv2/sys_ksem.h"
 #include "kern/process.h"
 
-namespace krnl {
+namespace kern {
 // A single FreeBSD POSIX kernel semaphore. Its own mutex/cv so different ksems
 // never contend on a global lock while a thread sits blocked in wait().
 struct KSem {
@@ -209,4 +209,4 @@ int PS4ABI sys_ksem_destroy(int id) {
   delete s;
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

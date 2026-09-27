@@ -20,8 +20,8 @@ namespace io {
 class File;
 }
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 struct ModuleSeg {
   u8* addr;
   u32 size;
@@ -67,11 +67,11 @@ struct ModuleInfo {
   u8 fingerprint[20];
 };
 
-class Smodule {
-  friend class Proc;
+class Module {
+  friend class Process;
 
  public:
-  explicit Smodule(Proc*);
+  explicit Module(Process*);
 
   bool FromFile(const base::String&);
   // Load a module from a guest VFS path (host or virtual mount). Converts a
@@ -157,7 +157,7 @@ class Smodule {
   base::UniquePointer<u8[]> data_;
 
  private:
-  Proc* process_;
+  Process* process_;
   ELFHeader* elf_;
   ELFPgHeader* segments_;
 
@@ -209,4 +209,4 @@ class Smodule {
   u32 unresolved_imports_ = 0;
   bool imports_bound_ = false;
 };
-}  // namespace krnl
+}  // namespace kern

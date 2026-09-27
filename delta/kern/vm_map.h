@@ -15,8 +15,8 @@
 #include "base/threading/mutex.h"
 #include "host_memory/host_memory.h"
 
-namespace krnl {
-struct ProcInfo;
+namespace kern {
+struct ProcessInfo;
 
 using Mprot = host_memory::PageProtection;
 using Alloct = host_memory::AllocationType;
@@ -52,10 +52,10 @@ struct PageInfo {
 using MappingChangedHook = void (*)(u64 base, u64 bytes);
 void SetMappingChangedHook(MappingChangedHook hook);
 
-class VmManager {
+class VmMap {
  public:
-  VmManager(ProcInfo&);
-  ~VmManager();
+  VmMap(ProcessInfo&);
+  ~VmMap();
 
   bool Init();
   void Add(u8* ptr,
@@ -96,7 +96,7 @@ class VmManager {
  private:
   void PunchHoleLocked(u8* ptr, size_t size);
 
-  ProcInfo& pinfo_;
+  ProcessInfo& pinfo_;
 
   // guards the page lists against concurrent sys_mmap from guest threads.
   mutable base::Mutex vmlock_;
@@ -107,4 +107,4 @@ class VmManager {
   base::Vector<PageInfo> code_pages_;
   base::Vector<PageInfo> rt_pages_;
 };
-}  // namespace krnl
+}  // namespace kern

@@ -35,7 +35,7 @@ DELTA_OPTION(bool, kVoNostomp, "DELTA_VO_NOSTOMP", false);
 // vk::endFrame (gpu/ps5/cmd_processor.cpp).
 extern "C" void prosperity_agc_flip(u64 scanoutBase);
 
-using namespace krnl;
+using namespace kern;
 
 namespace {
 
@@ -159,7 +159,7 @@ u64 *videoLabels() {
   base::LockGuard<base::Mutex> lk(g_mtx);
   if (!g_port.labels)
     g_port.labels =
-        reinterpret_cast<u64 *>(krnl::AllocLowGuest(16 * sizeof(u64)));
+        reinterpret_cast<u64 *>(kern::AllocLowGuest(16 * sizeof(u64)));
   return g_port.labels;
 }
 base::Atomic<bool> g_gfxUp{false};
@@ -188,11 +188,11 @@ bool ensureGfx(u32 w, u32 h) {
 }
 
 Equeue *findEqueue(int handle) {
-  auto *p = Proc::GetActive();
+  auto *p = Process::GetActive();
   if (!p)
     return nullptr;
   auto *obj = p->GetObjTable().Get(static_cast<u32>(handle));
-  if (!obj || obj->type() != Object::OType::kEqueue)
+  if (!obj || obj->type() != Object::Type::kEqueue)
     return nullptr;
   return static_cast<Equeue *>(obj);
 }
@@ -488,8 +488,8 @@ int PS4ABI sceVideoOutSubmitFlipEop(int handle, int bufferIndex, int flipMode,
   // matching `scanout`, falling back to the last RT rendered when it isn't one.
   // On PS5 the frame was rendered by the AGC command processor (gpu::ps5), so
   // route the present there; the PS4 Gnm path uses gpu::ps4::EndFrame.
-  auto *active = Proc::GetActive();
-  if (active && active->GetPlatform() == Proc::Platform::kPs5)
+  auto *active = Process::GetActive();
+  if (active && active->GetPlatform() == Process::Platform::kPs5)
     prosperity_agc_flip(scanout);
   else
     gpu::ps4::EndFrame(scanout);

@@ -9,7 +9,7 @@
 
 #include "base/arch.h"
 
-namespace krnl {
+namespace kern {
 struct NameNode {
   u32 id;
   const char* name;
@@ -652,4 +652,4 @@ const char* SyscallGetname(u32 idx) {
 
   return nullptr;
 }
-}  // namespace krnl
+}  // namespace kern

@@ -15,9 +15,9 @@ namespace {
 DELTA_OPTION(bool, kIoctlTrace, "DELTA_IOCTL_TRACE", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 int PS4ABI sys_ioctl(u32 fd, u32 cmd, void* data) {
-  auto* proc = Proc::GetActive();
+  auto* proc = Process::GetActive();
   if (!proc)
     return -1;
 
@@ -39,4 +39,4 @@ int PS4ABI sys_ioctl(u32 fd, u32 cmd, void* data) {
   }
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

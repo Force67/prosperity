@@ -19,7 +19,7 @@
 #include <cstddef>
 #include "base/arch.h"
 
-namespace krnl::ipmi {
+namespace kern::ipmi {
 
 // One sceIpmiClientInvokeSyncMethod call as a service sees it. Every buffer
 // points into guest memory and every descriptor comes from the guest, so the
@@ -68,4 +68,4 @@ struct Service {
 // sys_ipmimgr_call's body: decode the manager op and dispatch.
 int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize);
 
-}  // namespace krnl::ipmi
+}  // namespace kern::ipmi

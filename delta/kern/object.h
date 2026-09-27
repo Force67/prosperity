@@ -16,15 +16,15 @@
 #include "base/strings/string_ref.h"
 #include "base/strings/xstring.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 class ObjectTable;
 
 class Object {
  public:
   using HandleList = base::Vector<u32>;
 
-  enum class OType {
+  enum class Type {
     kFile,
     kDevice,
     kEqueue,
@@ -33,7 +33,7 @@ class Object {
     kShm,
   };
 
-  explicit Object(ObjectTable&, OType);
+  explicit Object(ObjectTable&, Type);
   // Must be virtual: derived devices add virtual methods, so without a virtual
   // dtor the Object subobject sits past the vptr (offset 8) and `delete this`
   // in release() would free an interior pointer (invalid free) and skip the
@@ -45,7 +45,7 @@ class Object {
   void RetainHandle();
   void ReleaseHandle();
 
-  OType type() const { return otype_; }
+  Type type() const { return otype_; }
 
   HandleList& handles() { return handle_collection_; }
 
@@ -57,7 +57,7 @@ class Object {
   const base::String& GetName() const { return name_; }
 
  protected:
-  OType otype_;
+  Type otype_;
   ObjectTable& objects_;
   base::String name_;
 
@@ -67,9 +67,9 @@ class Object {
 };
 
 template <typename T>
-krnl::ObjectRef<T> RetainObject(T* ptr) {
+kern::ObjectRef<T> RetainObject(T* ptr) {
   if (ptr)
     ptr->retain();
-  return krnl::ObjectRef<T>(ptr);
+  return kern::ObjectRef<T>(ptr);
 }
-}  // namespace krnl
+}  // namespace kern

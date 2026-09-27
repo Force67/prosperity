@@ -13,7 +13,7 @@
 #include <cstdint>
 #include "base/arch.h"
 
-namespace krnl::probe {
+namespace kern::probe {
 
 // Offered every signal before the crash reporter looks at it. True means a
 // probe owned this trap and the guest must be resumed rather than dumped.
@@ -140,4 +140,4 @@ void SetFnArgs(uintptr_t addr,
                const char* label,
                const u64* offsets,
                int noffsets);
-}  // namespace krnl::probe
+}  // namespace kern::probe

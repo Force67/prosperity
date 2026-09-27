@@ -7,9 +7,11 @@
 #include "base/arch.h"
 #include "guest_abi.h"
 
+#include "kern/lv2/sys_ipmi.h"
+
 #include "kern/ipmi/ipmi.h"
 
-namespace krnl {
+namespace kern {
 
 int PS4ABI
 sys_ipmimgr_call(u32 op, u32 kid, void* out, void* in, u64 insize, u64 arg6) {
@@ -17,4 +19,4 @@ sys_ipmimgr_call(u32 op, u32 kid, void* out, void* in, u64 insize, u64 arg6) {
   return ipmi::ManagerCall(op, kid, out, in, insize);
 }
 
-}  // namespace krnl
+}  // namespace kern

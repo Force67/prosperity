@@ -18,8 +18,8 @@
 #include "base/time/time.h"
 #include "kern/object.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // FreeBSD/SCE kevent (SceKernelEvent), 0x20 bytes. The game reads ident/data
 // to learn which flip completed and udata to find its own context.
@@ -133,4 +133,11 @@ int PS4ABI sys_kevent(int kq,
                       kevent_t* eventlist,
                       int nevents,
                       const ktimespec* to);
-}  // namespace krnl
+
+int PS4ABI sys_eport_create();
+int PS4ABI sys_eport_delete();
+int PS4ABI sys_eport_trigger();
+int PS4ABI sys_eport_open();
+int PS4ABI sys_eport_close();
+
+}  // namespace kern

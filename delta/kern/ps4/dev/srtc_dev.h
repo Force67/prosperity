@@ -3,8 +3,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // /dev/srtc: the secure real-time clock. System-only (ShellUI/Diag); games read
 // time through clock_gettime/gettimeofday. Registers so an open succeeds;
@@ -17,4 +17,4 @@ class SrtcDevice : public Device {
   i64 Lseek(i64, int) override;
   int Fstat(void* stat) override;
 };
-}  // namespace krnl
+}  // namespace kern

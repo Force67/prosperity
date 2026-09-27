@@ -5,7 +5,7 @@
 #include "base/arch.h"
 #include "guest_abi.h"
 
-namespace krnl {
+namespace kern {
 int PS4ABI sys_netcontrol(u32 fd, u32 op, void* buffer, u32 size);
 int PS4ABI sys_socketex(const char* name, i32 domain, i32 type, i32 protocol);
 int PS4ABI sys_socket(i32 domain, i32 type, i32 protocol);
@@ -28,4 +28,7 @@ i64 PS4ABI sys_recvfrom(i32 fd,
                         void* from,
                         u32* fromlen);
 
-}  // namespace krnl
+int PS4ABI sys_setsockopt();
+int PS4ABI sys_getsockopt(int fd, int level, int name, void* val, u32* len);
+
+}  // namespace kern

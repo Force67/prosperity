@@ -18,8 +18,8 @@
 #include "base/threading/mutex.h"
 #include "kern/object.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // Kernel event-flag attr / wait-mode bits. The attr is a persistent default
 // stored on the object; the mode is supplied per wait/trywait call. Both share
@@ -119,4 +119,4 @@ int PS4ABI sys_evf_trywait(int id, u64 pattern, u32 mode, u64* result);
 int PS4ABI sys_evf_set(int id, u64 bits);
 int PS4ABI sys_evf_clear(int id, u64 bits);
 int PS4ABI sys_evf_cancel(int id, u64 pattern, int* num_waiters);
-}  // namespace krnl
+}  // namespace kern

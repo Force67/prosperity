@@ -14,7 +14,7 @@
 
 #include "kern/ipmi/services.h"
 
-namespace krnl::ipmi {
+namespace kern::ipmi {
 namespace {
 
 enum {
@@ -66,4 +66,4 @@ Service& NpWebService() {
   return g_np_web;
 }
 
-}  // namespace krnl::ipmi
+}  // namespace kern::ipmi

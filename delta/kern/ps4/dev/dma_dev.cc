@@ -30,7 +30,7 @@ DELTA_OPTION(bool, kDmemCaller, "DELTA_DMEM_CALLER", false);
 DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
 }  // namespace
 
-namespace krnl {
+namespace kern {
 DmaDevice::DmaDevice(ObjectTable& objects) : Device(objects) {}
 
 // PS4 direct ("physical") memory model: a title allocates a physical range
@@ -55,8 +55,8 @@ constexpr u64 kDmemTotalPs5 = 0x320000000ull;  // 12.5 GiB
 u64 DmemTotal() {
   if (kDmemTotalOverride)
     return kDmemTotalOverride;
-  auto* p = Proc::GetActive();
-  if (p && p->GetPlatform() == Proc::Platform::kPs5)
+  auto* p = Process::GetActive();
+  if (p && p->GetPlatform() == Process::Platform::kPs5)
     return kDmemTotalPs5;
   return kDmemTotal;
 }
@@ -314,7 +314,7 @@ i32 DmaDevice::IoctlImpl(u32 cmd, void* data) {
                   (unsigned long long)len, (unsigned long long)a[4],
                   (unsigned long long)align);
         auto* sp = reinterpret_cast<uintptr_t*>(__builtin_frame_address(0));
-        auto* pr = Proc::GetActive();
+        auto* pr = Process::GetActive();
         int shown = 0;
         for (int i = 0; i < 4096 && shown < 12; i++) {
           uintptr_t v = sp[i];
@@ -428,4 +428,4 @@ u8* DmaDevice::Map(void* addr, size_t len, u32, u32 flags, size_t offset) {
               offset, len, addr, (flags & MFlags::kFixed) ? 1 : 0);
   return reinterpret_cast<u8*>(-1);
 }
-}  // namespace krnl
+}  // namespace kern

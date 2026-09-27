@@ -3,8 +3,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 // /dev/deci_stdin: the debugger tty input channel. Each opener gets a private
 // line buffer that a privileged writer can fill; reads drain it. The emulator
@@ -18,4 +18,4 @@ class DeciStdinDevice : public Device {
   i64 Lseek(i64, int) override;
   int Fstat(void* stat) override;
 };
-}  // namespace krnl
+}  // namespace kern

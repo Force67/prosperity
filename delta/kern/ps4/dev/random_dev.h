@@ -19,8 +19,8 @@
 #include "base/arch.h"
 #include "kern/ps4/dev/device.h"
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 
 class RandomDevice : public Device {
  public:
@@ -31,4 +31,4 @@ class RandomDevice : public Device {
   int Fstat(void* stat) override;
   i32 Ioctl(u32 command, void* args) override;
 };
-}  // namespace krnl
+}  // namespace kern

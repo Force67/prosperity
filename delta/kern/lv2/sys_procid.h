@@ -11,7 +11,7 @@
 #include "base/arch.h"
 #include "guest_abi.h"
 
-namespace krnl {
+namespace kern {
 // Process / credential identity.
 int PS4ABI sys_getppid();
 int PS4ABI sys_getuid();
@@ -63,4 +63,28 @@ int PS4ABI sys_rtprio(int function, u32 pid, void* rtprio);
 
 // Process waiting.
 int PS4ABI sys_wait4(u32 pid, int* status, int options, void* rusage);
-}  // namespace krnl
+
+int PS4ABI sys_suspend_process();
+int PS4ABI sys_resume_process();
+int PS4ABI sys_prepare_to_suspend_process();
+int PS4ABI sys_prepare_to_resume_process();
+int PS4ABI sys_process_terminate();
+int PS4ABI sys_suspend_system();
+int PS4ABI sys_sandbox_path(const char* path);
+int PS4ABI sys_is_development_mode();
+int PS4ABI sys_get_self_auth_info(const char* path, void* out);
+int PS4ABI sys_get_sdk_compiled_version();
+int PS4ABI sys_app_state_change();
+int PS4ABI sys_getgroups(int gidsetlen, u32* gidset);
+int PS4ABI sys_setgroups();
+int PS4ABI sys_sigqueue();
+int PS4ABI sys_abort2(const char* msg, int nargs, void** args);
+
+int PS4ABI sys_exit();
+int PS4ABI sys_rfork();
+int PS4ABI sys_execve();
+int PS4ABI sys_sigprocmask(int how, const int* set, int* oset);
+int PS4ABI sys_sigaction(int sig, const void* act, void* oact);
+int PS4ABI sys_getpid();
+
+}  // namespace kern

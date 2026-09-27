@@ -36,7 +36,7 @@ DELTA_OPTION(bool, kPreadZeropad, "DELTA_PREAD_ZEROPAD", false);
 DELTA_OPTION(const char*, kVfsOverlay, "DELTA_VFS_OVERLAY", nullptr);
 }  // namespace
 
-namespace krnl::vfs {
+namespace kern::vfs {
 struct MountPoint {
   base::String guest;
   base::String host;                              // host mount
@@ -502,4 +502,4 @@ bool ListDir(const char* path, base::Vector<DirEntry>& out) {
   closedir(d);
   return true;
 }
-}  // namespace krnl::vfs
+}  // namespace kern::vfs

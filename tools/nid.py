@@ -47,7 +47,7 @@ WORDS = """Get Set Is Has Check Query Read Write Load Store Open Close Create
 Destroy Init Initialize Finalize Term Terminate Enable Disable Start Stop
 Config Setting Settings Registry Reg Mgr Value Param Parameter Flag Flags
 Mode State Status Info Information Type Kind Id Index Key Name Path
-System Kernel Process Proc Thread Fiber Memory Mem Heap Pool Alloc Free
+System Kernel Process Process Thread Fiber Memory Mem Heap Pool Alloc Free
 Debug Dev Devkit Retail Prospero Orbis Neo Base Pro Model Hardware Hw
 Feature Features Capability Cap Support Supported Available Avail Budget
 Sdk Version Ver Revision Rev Build Firmware Fw Update Boot Sandbox

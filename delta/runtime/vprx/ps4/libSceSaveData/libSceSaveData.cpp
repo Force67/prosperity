@@ -147,7 +147,7 @@ base::String saveRoot() {
 // per-title layout still works and never produces an empty path component.
 const base::String &titleTag() {
   static const base::String tag = [] {
-    base::String t = krnl::vfs::TitleId();
+    base::String t = kern::vfs::TitleId();
     if (g_trace())
       BASE_LOGI("savedata", "title id = {}",
                 t.empty() ? "(fallback SAVEDATA)" : t.c_str());
@@ -196,7 +196,7 @@ int unmountPoint(const void *mountPoint) {
   base::LockGuard<base::Mutex> lk(g_mtx);
   for (auto it = g_slots.begin(); it != g_slots.end(); ++it) {
     if (it->point == point) {
-      krnl::vfs::Unmount(point);
+      kern::vfs::Unmount(point);
       g_slots.erase(it);
       return kOk;
     }
@@ -330,7 +330,7 @@ int doMount(const char *dir_name, u32 mode, void *result) {
   base::LockGuard<base::Mutex> lk(g_mtx);
   char point[16];
   std::snprintf(point, sizeof(point), "/savedata%d", g_nextSlot++);
-  krnl::vfs::MountWritable(point, host.c_str());  // creates the host dir
+  kern::vfs::MountWritable(point, host.c_str());  // creates the host dir
   g_slots.push_back({point, host, readOnly});
 
   if (result) {

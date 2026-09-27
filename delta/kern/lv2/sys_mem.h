@@ -11,7 +11,7 @@
 #include "base/arch.h"
 #include "guest_abi.h"
 
-namespace krnl {
+namespace kern {
 // BSD/PS4 mmap prot bits (matches PROT_* and host_memory::PageProtection's bit
 // layout).
 enum MprotFlags : u32 { kNone = 0, kRead = 1, kWrite = 2, kExec = 4 };
@@ -65,4 +65,63 @@ size_t ShmFstatSize(u32 fd);
 
 /*direct memory access*/
 int PS4ABI sys_dmem_container(u32 op);
-}  // namespace krnl
+}  // namespace kern
+
+namespace kern {
+/* POSIX-ish memory lifecycle (we run on a flat host-backed VM; teardown is a
+ * no-op since the host reclaims everything at process exit) */
+int PS4ABI sys_munmap(void* addr, size_t len);
+i64 PS4ABI sys_obreak(void* addr);
+i64 PS4ABI sys_sbrk(intptr_t incr);
+int PS4ABI sys_msync(void* addr, size_t len, int flags);
+int PS4ABI sys_madvise(void* addr, size_t len, int behav);
+int PS4ABI sys_mincore(void* addr, size_t len, char* vec);
+int PS4ABI sys_mlock(const void* addr, size_t len);
+int PS4ABI sys_munlock(const void* addr, size_t len);
+int PS4ABI sys_mlockall(int how);
+int PS4ABI sys_munlockall();
+int PS4ABI sys_minherit(void* addr, size_t len, int inherit);
+
+/* Sony memory-introspection syscalls */
+int PS4ABI sys_query_memory_protection(void* addr, void* info);
+int PS4ABI sys_virtual_query(const void* addr,
+                             int flags,
+                             void* info,
+                             size_t info_size);
+
+/* Sony direct-memory / vm-map management (largely stubbed) */
+int PS4ABI
+sys_batch_map(u32 handle, u32 flags, void* entries, int count, int* processed);
+int PS4ABI sys_set_vm_container(u32 container);
+i64 PS4ABI sys_mmap_dmem(void* addr,
+                         size_t len,
+                         int prot,
+                         int flags,
+                         i64 packed,
+                         i64 phys_offset);
+int PS4ABI
+sys_cpuset(void* out, int level, int which, i64 id, size_t size, void* mask);
+int PS4ABI sys_extend_page_table_pool();
+i64 PS4ABI sys_get_vm_map_timestamp();
+int PS4ABI sys_get_map_statistics(void* info);
+int PS4ABI sys_free_stack(void* addr, size_t len);
+
+i64 PS4ABI sys_jitshm_create(size_t len, u32 flags);
+int PS4ABI sys_jitshm_alias();
+int PS4ABI sys_get_paging_stats_of_all_threads();
+int PS4ABI sys_get_paging_stats_of_all_objects();
+int PS4ABI sys_get_resident_count();
+int PS4ABI sys_get_resident_fmem_count();
+int PS4ABI sys_physhm_open();
+int PS4ABI sys_physhm_unlink();
+int PS4ABI sys_set_phys_fmem_limit();
+int PS4ABI sys_get_kernel_mem_statistics(void* out);
+i64 PS4ABI sys_blockpool_map(i64 pool, size_t len, u32 prot, u32 flags);
+int PS4ABI sys_blockpool_unmap();
+i64 PS4ABI sys_blockpool_batch(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+int PS4ABI sys_get_page_table_stats();
+int PS4ABI sys_getpagesize();
+
+int PS4ABI sys_blockpool_open();
+
+}  // namespace kern

@@ -2,7 +2,7 @@
 
 #include "kern/object_table.h"
 
-using krnl::ObjectTable;
+using kern::ObjectTable;
 
 // A freshly constructed table owns nothing, so every lookup or mutation against
 // an unknown handle must fail instead of crashing or returning garbage.

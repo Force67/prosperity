@@ -6,7 +6,7 @@
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/npdrm_dev.h"
 
-namespace krnl {
+namespace kern {
 NpdrmDevice::NpdrmDevice(ObjectTable& objects) : Device(objects) {}
 
 i32 NpdrmDevice::Ioctl(u32 cmd, void* data) {
@@ -29,4 +29,4 @@ int NpdrmDevice::Fstat(void* stat) {
   FillStat(*reinterpret_cast<SceKernelStat*>(stat), 0x2000, 0);
   return 0;
 }
-}  // namespace krnl
+}  // namespace kern

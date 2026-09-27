@@ -12,7 +12,7 @@
  * in the root of the source tree.
  */
 
-namespace krnl {
+namespace kern {
 // Describes the compute-shader range covering a guest address, when the crash
 // dump is walking an allocator structure the GPU also touches. Registered by
 // the composition root: the answer lives in delta_gpu and kern may not name it.
@@ -65,4 +65,4 @@ void SetNullGuard(uintptr_t addr, GuardReg reg, int insn_len);
 // (a stack-overflow fault would otherwise be undeliverable -> silent core).
 // Must be called on every guest thread before it enters the JIT.
 void InstallSigAltStack();
-}  // namespace krnl
+}  // namespace kern

@@ -21,7 +21,7 @@
 // privileged paths we don't model. No real OS state behind these; setters
 // accept, getters report the fixed fake identity.
 
-namespace krnl {
+namespace kern {
 static constexpr int kGamePid = 0x1337;
 
 // A finite open-file ceiling the guest can size fd tables / fd_sets against.
@@ -269,4 +269,130 @@ int PS4ABI sys_rtprio(int function, u32 pid, void* rtprio) {
 int PS4ABI sys_wait4(u32 pid, int* status, int options, void* rusage) {
   return -SysError::eCHILD;
 }
-}  // namespace krnl
+
+// We run a single process and never freeze it.
+int PS4ABI sys_suspend_process() {
+  return 0;
+}
+int PS4ABI sys_resume_process() {
+  return 0;
+}
+int PS4ABI sys_prepare_to_suspend_process() {
+  return 0;
+}
+int PS4ABI sys_prepare_to_resume_process() {
+  return 0;
+}
+int PS4ABI sys_process_terminate() {
+  return 0;
+}
+int PS4ABI sys_suspend_system() {
+  return 0;
+}
+
+// sys_sandbox_path is a SETTER: the system process hands in the title's sandbox
+// root. System ucred only; a game gets EPERM on hardware, and we have no
+// per-title jail, so deny exactly as hardware would.
+int PS4ABI sys_sandbox_path(const char* path) {
+  (void)path;
+  return -SysError::ePERM;
+}
+
+// The kernel returns boot_parameter(0): 1 on dev/kit firmware, 0 on retail.
+// We run retail, so 0 is the accurate answer.
+int PS4ABI sys_is_development_mode() {
+  return 0;
+}
+
+// Reads the SceSelfAuthInfo (0x88 / 136 bytes) from the calling process's SELF
+// and copies it to `out`. The first arg is the SELF path; we don't parse SELF
+// headers, so we synthesise a non-privileged application identity instead.
+int PS4ABI sys_get_self_auth_info(const char* path, void* out) {
+  (void)path;
+  if (!out)
+    return 0;
+  std::memset(out, 0, 136);
+  auto* p = reinterpret_cast<u64*>(out);
+  p[0] = 0x3100000000000001ull;  // auth_id: regular application
+  p[2] = 0x2000038000000000ull;  // capability bits
+  p[4] = 0x4000400040000000ull;  // attributes / shared
+  return 0;
+}
+
+// The SDK version the title was compiled against. 5.05 matches kern.sdk_version
+// reported via sysctl in sys_info.cc.
+int PS4ABI sys_get_sdk_compiled_version() {
+  return 0x05050001;
+}
+
+int PS4ABI sys_app_state_change() {
+  return 0;
+}
+
+// Report membership in a single group (gid 1). A zero-length query returns just
+// the count.
+int PS4ABI sys_getgroups(int gidsetlen, u32* gidset) {
+  if (gidsetlen >= 1 && gidset)
+    gidset[0] = 1;
+  return 1;
+}
+
+int PS4ABI sys_setgroups() {
+  return 0;
+}
+
+int PS4ABI sys_sigqueue() {
+  return 0;
+}
+
+// The real syscall terminates the process with a diagnostic. We log the message
+// and continue rather than killing boot.
+int PS4ABI sys_abort2(const char* msg, int nargs, void** args) {
+  (void)nargs;
+  (void)args;
+  BASE_LOGI("abort2", "{}", msg ? msg : "(null)");
+  return 0;
+}
+
+int PS4ABI sys_exit() {
+  __builtin_trap();
+  return 0;
+}
+
+int PS4ABI sys_rfork() {
+  __builtin_trap();
+  return 0;
+}
+
+int PS4ABI sys_execve() {
+  __builtin_trap();
+  return 0;
+}
+
+// We deliver no signals, so the mask is inert; still, a caller that saves the
+// old mask here to restore it later must not read uninitialised memory. The
+// FreeBSD sigset_t is 16 bytes (4x uint32). Report an empty old mask.
+int PS4ABI sys_sigprocmask(int how, const int* set, int* oset) {
+  (void)how;
+  (void)set;
+  if (oset)
+    std::memset(oset, 0, 16);
+  return 0;
+}
+
+// Likewise report "no previous handler" rather than leaving the caller's oldact
+// buffer uninitialised. struct sigaction on amd64 is 32 bytes (handler pointer
+// + flags + 16-byte sa_mask, padded).
+int PS4ABI sys_sigaction(int sig, const void* act, void* oact) {
+  (void)sig;
+  (void)act;
+  if (oact)
+    std::memset(oact, 0, 32);
+  return 0;
+}
+
+int PS4ABI sys_getpid() {
+  return 0x1337;
+}
+
+}  // namespace kern

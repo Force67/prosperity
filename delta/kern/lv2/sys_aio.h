@@ -11,7 +11,7 @@
 #include "base/arch.h"
 #include "guest_abi.h"
 
-namespace krnl {
+namespace kern {
 
 // 669: sceKernelAioSubmitRead/WriteCommands[Multiple]. cmd selects read/write
 // and whether each request gets its own id.
@@ -27,4 +27,8 @@ int PS4ABI sys_aio_multi_poll(u32* ids, u32 num, int* errs);
 int PS4ABI sys_aio_multi_delete(u32* ids, u32 num, int* errs);
 int PS4ABI sys_aio_multi_cancel(u32* ids, u32 num, int* errs);
 
-}  // namespace krnl
+int PS4ABI sys_aio_unsupported();
+int PS4ABI sys_get_bio_usage_all();
+int PS4ABI sys_aio_init();
+
+}  // namespace kern

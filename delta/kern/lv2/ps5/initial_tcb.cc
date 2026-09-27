@@ -15,7 +15,7 @@ namespace {
 DELTA_OPTION(bool, kProcparamTrace, "DELTA_PROCPARAM_TRACE", false);
 }  // namespace
 
-namespace krnl::ps5 {
+namespace kern::ps5 {
 namespace {
 
 // amd64 TCB, as libkernel reads it through fs.
@@ -44,12 +44,12 @@ constexpr size_t kMutexQueues[] = {0x1a0, 0x1b0};
 // thread; libkernel replaces both at its own init.
 u64 MakeInitialTcb() {
   size_t tls = 0x10000;  // slack for modules whose PT_TLS we have not seen yet
-  if (auto* p = Proc::GetActive())
+  if (auto* p = Process::GetActive())
     for (auto& m : p->GetModuleList())
       if (m)
         tls += (m->GetInfo().tls_size_mem + 0xFFF) & ~size_t(0xFFF);
 
-  u8* block = krnl::AllocLowGuest(tls + kTcbSize + kThreadSize);
+  u8* block = kern::AllocLowGuest(tls + kTcbSize + kThreadSize);
   if (!block)
     return 0;
   std::memset(block, 0, tls + kTcbSize + kThreadSize);
@@ -71,4 +71,4 @@ u64 MakeInitialTcb() {
   return reinterpret_cast<u64>(tcb);
 }
 
-}  // namespace krnl::ps5
+}  // namespace kern::ps5

@@ -1,10 +1,10 @@
 #pragma once
 
-namespace krnl {
-class Proc;
+namespace kern {
+class Process;
 }
 
-namespace krnl::ps5 {
+namespace kern::ps5 {
 
 // DIAGNOSTIC ONLY, not a fix, and off unless DELTA_PS5_CTOR_PREPEND is set.
 //
@@ -12,6 +12,6 @@ namespace krnl::ps5 {
 // before every static initializer. Used to answer "if subsystem X were already
 // constructed, how much further would this title boot?" without guessing at the
 // real trigger. DELTA_PS5_CTOR_PREPEND=<hex offset into the main module>.
-void MaybePrependCtor(Proc& p);
+void MaybePrependCtor(Process& p);
 
-}  // namespace krnl::ps5
+}  // namespace kern::ps5

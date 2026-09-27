@@ -8,7 +8,7 @@
 #include "base/memory/move.h"
 #include "base/meta/traits.h"
 
-namespace krnl {
+namespace kern {
 template <typename T>
 class ObjectRef {
  public:
@@ -100,4 +100,4 @@ template <class _Ty, class... _Types>
 ObjectRef<_Ty> MakeRef(_Types&&... args) {
   return ObjectRef<_Ty>(new _Ty(base::forward<_Types>(args)...));
 }
-}  // namespace krnl
+}  // namespace kern

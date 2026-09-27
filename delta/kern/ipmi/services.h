@@ -11,7 +11,7 @@
 #include "base/arch.h"
 #include "kern/ipmi/ipmi.h"
 
-namespace krnl::ipmi {
+namespace kern::ipmi {
 
 // The one running title's appId, as ShellCore would have assigned it. It leaks
 // into guest-visible state in two places that must agree: the SceLncService
@@ -27,4 +27,4 @@ Service& UserService();
 Service& LncService();
 Service& ArbitratorIpcService();
 
-}  // namespace krnl::ipmi
+}  // namespace kern::ipmi
