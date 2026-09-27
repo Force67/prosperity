@@ -37,9 +37,10 @@ struct Block {
 };
 
 struct Entry {
+  u64 base = 0;
   u32 block = 0;
   u64 offset = 0;
-  u64 bytes = 0;
+  u64 bytes = 0;  // 0 = a free handle
   int last_used = 0;
 };
 
@@ -51,8 +52,14 @@ struct Retired {
 };
 
 std::vector<Block> g_blocks;
-std::unordered_map<u64, Entry> g_entries;  // by guest base
-std::unordered_map<u64, std::vector<u64>> g_index;  // 64 KiB block -> bases
+// Copies live in a pool addressed by handle: the idle sweep walks one vector,
+// and the index holds handles instead of keys to look up again.
+std::vector<Entry> g_pool;
+std::vector<u32> g_free_handles;
+std::unordered_map<u64, u32> g_by_base;
+// 64 KiB block -> handles. May hold handles since dropped or reused: every
+// hit is checked against the entry it names now.
+std::unordered_map<u64, std::vector<u32>> g_index;
 std::vector<Retired> g_retired;
 u64 g_live_bytes = 0;
 
@@ -113,26 +120,35 @@ bool Allocate(u64 bytes, u32& block_index, u64& offset) {
   return true;
 }
 
-void Retire(const Entry& e) {
+// Releases the copy behind `handle` once no in-flight frame reads it.
+void Drop(u32 handle) {
+  Entry& e = g_pool[handle];
   g_retired.push_back({e.block, e.offset,
                        (e.bytes + kAlign - 1) & ~(kAlign - 1), g_frame.num});
   g_live_bytes -= e.bytes;
+  g_by_base.erase(e.base);
+  e.bytes = 0;
+  g_free_handles.push_back(handle);
 }
 
-void Index(u64 base, u64 bytes) {
-  for (u64 b = base >> kIndexShift; b <= (base + bytes - 1) >> kIndexShift; b++)
-    g_index[b].push_back(base);
+void Index(u32 handle) {
+  const Entry& e = g_pool[handle];
+  for (u64 b = e.base >> kIndexShift; b <= (e.base + e.bytes - 1) >> kIndexShift;
+       b++)
+    g_index[b].push_back(handle);
 }
 
 }  // namespace
 
 bool FindCachedBuffer(u64 base, u64 bytes, CachedBuffer& out) {
-  auto it = g_entries.find(base);
-  if (it == g_entries.end() || it->second.bytes < bytes ||
-      CsRangeDirtyOverlapping(base, bytes))
+  auto it = g_by_base.find(base);
+  if (it == g_by_base.end())
     return false;
-  it->second.last_used = g_frame.num;
-  out = {g_blocks[it->second.block].buffer, it->second.offset};
+  Entry& e = g_pool[it->second];
+  if (e.bytes < bytes || CsRangeDirtyOverlapping(base, bytes))
+    return false;
+  e.last_used = g_frame.num;
+  out = {g_blocks[e.block].buffer, e.offset};
   return true;
 }
 
@@ -143,30 +159,34 @@ bool CacheGuestBuffer(u64 base, u64 bytes, CachedBuffer& out) {
   u64 offset;
   if (!Allocate(bytes, block, offset))
     return false;
-  if (auto old = g_entries.find(base); old != g_entries.end()) {
-    Retire(old->second);
-    g_entries.erase(old);
-  }
+  if (auto old = g_by_base.find(base); old != g_by_base.end())
+    Drop(old->second);
   std::memcpy(g_blocks[block].map + offset, reinterpret_cast<const void*>(base),
               bytes);
-  g_entries[base] = {block, offset, bytes, g_frame.num};
+  u32 handle;
+  if (!g_free_handles.empty()) {
+    handle = g_free_handles.back();
+    g_free_handles.pop_back();
+  } else {
+    handle = static_cast<u32>(g_pool.size());
+    g_pool.emplace_back();
+  }
+  g_pool[handle] = {base, block, offset, bytes, g_frame.num};
+  g_by_base[base] = handle;
   g_live_bytes += bytes;
-  Index(base, bytes);
+  Index(handle);
   out = {g_blocks[block].buffer, offset};
   return true;
 }
 
 void InvalidateCachedBuffers(u64 first, u64 end) {
-  if (g_entries.empty() || end <= first)
+  if (g_by_base.empty() || end <= first)
     return;
-  const auto drop = [&](const std::vector<u64>& bases) {
-    for (u64 base : bases) {
-      auto it = g_entries.find(base);
-      if (it == g_entries.end() || base >= end ||
-          first >= base + it->second.bytes)
-        continue;
-      Retire(it->second);
-      g_entries.erase(it);
+  const auto drop = [&](const std::vector<u32>& handles) {
+    for (u32 handle : handles) {
+      const Entry& e = g_pool[handle];
+      if (e.bytes && e.base < end && first < e.base + e.bytes)
+        Drop(handle);
     }
   };
   // A remapped reservation can span gigabytes: walk the smaller side.
@@ -184,14 +204,14 @@ void InvalidateCachedBuffers(u64 first, u64 end) {
 }
 
 void BufferCacheEndFrame() {
-  for (auto it = g_entries.begin(); it != g_entries.end();) {
-    if (it->second.last_used + kIdleFrames < g_frame.num) {
-      Retire(it->second);
-      it = g_entries.erase(it);
-    } else {
-      ++it;
-    }
-  }
+  // An idle copy may outstay kIdleFrames by this much: the sweep over every
+  // copy is too costly for every frame.
+  constexpr int kSweepFrames = 16;
+  if (g_frame.num % kSweepFrames == 0)
+    for (u32 handle = 0; handle < g_pool.size(); handle++)
+      if (g_pool[handle].bytes &&
+          g_pool[handle].last_used + kIdleFrames < g_frame.num)
+        Drop(handle);
   std::erase_if(g_retired, [](const Retired& r) {
     if (r.frame + kRetireFrames > g_frame.num)
       return false;
@@ -202,8 +222,9 @@ void BufferCacheEndFrame() {
   // now and then instead of unindexing each drop.
   if (g_frame.num % 64 == 0) {
     g_index.clear();
-    for (const auto& [base, e] : g_entries)
-      Index(base, e.bytes);
+    for (u32 handle = 0; handle < g_pool.size(); handle++)
+      if (g_pool[handle].bytes)
+        Index(handle);
   }
 }
 
