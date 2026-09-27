@@ -2,9 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_disasm.h"
-#include <base/strings/xstring.h>
 
 namespace {
 
@@ -17,8 +17,8 @@ gpu::gcn::Inst DecodeOne(const u32* code,
 }
 
 base::String Name(gpu::gcn::Enc enc,
-                 u32 opcode,
-                 gpu::gcn::IsaMode mode = gpu::gcn::IsaMode::kBase) {
+                  u32 opcode,
+                  gpu::gcn::IsaMode mode = gpu::gcn::IsaMode::kBase) {
   gpu::gcn::Inst inst;
   inst.isa = mode;
   inst.enc = enc;
@@ -111,7 +111,7 @@ TEST(GcnDisasm, BaseDsInventoryNames) {
     u32 opcode;
     const char* name;
   };
-  static const Case cases[] = {
+  static const Case kCases[] = {
       {0x60, "ds_add_rtn_u64"},        {0x61, "ds_sub_rtn_u64"},
       {0x62, "ds_rsub_rtn_u64"},       {0x63, "ds_inc_rtn_u64"},
       {0x64, "ds_dec_rtn_u64"},        {0x65, "ds_min_rtn_i64"},
@@ -142,7 +142,7 @@ TEST(GcnDisasm, BaseDsInventoryNames) {
       {0xfe, "ds_read_b96"},           {0xff, "ds_read_b128"},
   };
 
-  for (const Case& c : cases)
+  for (const Case& c : kCases)
     EXPECT_EQ(Name(gpu::gcn::Enc::kDs, c.opcode), c.name) << c.opcode;
 }
 
@@ -183,8 +183,7 @@ TEST(GcnDisasm, MixedScalarOperandWidthsAndSpecialForms) {
   const u32 setpc[] = {0xbe802002};
   EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(setpc, 1)), "s_setpc_b64 s[2:3]");
 
-  const u32 setreg[] = {(0xbu << 28) | (0x15u << 23) | 0x1234u,
-                             0x89abcdef};
+  const u32 setreg[] = {(0xbu << 28) | (0x15u << 23) | 0x1234u, 0x89abcdef};
   EXPECT_EQ(gpu::gcn::DisasmInst(DecodeOne(setreg, 2)),
             "s_setreg_imm32_b32 0x1234, 0x89abcdef");
 
@@ -304,38 +303,38 @@ TEST(GcnDisasm, NeoFp16MadLiteralOrder) {
 }
 
 TEST(GcnDisasm, NeoVopcSixteenBitFamilies) {
-  static const char* const int_cond[] = {"lt", "eq", "le", "gt", "ne", "ge"};
+  static const char* const kIntCond[] = {"lt", "eq", "le", "gt", "ne", "ge"};
   for (u32 i = 0; i < 6; i++) {
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0x89 + i, gpu::gcn::IsaMode::kNeo),
-              base::String("v_cmp_") + int_cond[i] + "_i16");
+              base::String("v_cmp_") + kIntCond[i] + "_i16");
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0x99 + i, gpu::gcn::IsaMode::kNeo),
-              base::String("v_cmpx_") + int_cond[i] + "_i16");
+              base::String("v_cmpx_") + kIntCond[i] + "_i16");
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0xa9 + i, gpu::gcn::IsaMode::kNeo),
-              base::String("v_cmp_") + int_cond[i] + "_u16");
+              base::String("v_cmp_") + kIntCond[i] + "_u16");
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0xb9 + i, gpu::gcn::IsaMode::kNeo),
-              base::String("v_cmpx_") + int_cond[i] + "_u16");
+              base::String("v_cmpx_") + kIntCond[i] + "_u16");
   }
   EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0x8f, gpu::gcn::IsaMode::kNeo),
             "v_cmp_class_f16");
   EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0x9f, gpu::gcn::IsaMode::kNeo),
             "v_cmpx_class_f16");
 
-  static const char* const float_cond[] = {
+  static const char* const kFloatCond[] = {
       "f", "lt",  "eq",  "le",  "gt",  "lg",  "ge",  "o",
       "u", "nge", "nlg", "ngt", "nle", "neq", "nlt", "tru"};
   for (u32 i = 0; i < 16; i++) {
     const u32 cmp = (i < 8 ? 0xc8 : 0xe0) + i;
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, cmp, gpu::gcn::IsaMode::kNeo),
-              base::String("v_cmp_") + float_cond[i] + "_f16");
+              base::String("v_cmp_") + kFloatCond[i] + "_f16");
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, cmp + 0x10, gpu::gcn::IsaMode::kNeo),
-              base::String("v_cmpx_") + float_cond[i] + "_f16");
+              base::String("v_cmpx_") + kFloatCond[i] + "_f16");
   }
 }
 
 TEST(GcnDisasm, NeoVop3OpSelAndModifiers) {
-  constexpr u32 op = 0x340;  // v_mad_u16
+  constexpr u32 kOp = 0x340;  // v_mad_u16
   const u32 code[] = {
-      (0x34u << 26) | ((op & 0x1ff) << 17) | ((op >> 9) << 16) | 4u |
+      (0x34u << 26) | ((kOp & 0x1ff) << 17) | ((kOp >> 9) << 16) | 4u |
           (0xdu << 12) | (1u << 11) | (1u << 8),
       261u | (262u << 9) | (263u << 18) | (1u << 30) | (1u << 27),
   };

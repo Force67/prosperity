@@ -19,23 +19,23 @@ namespace gpu::gcn {
 // sets r.ok). Returns r.ok. When the backend is compiled out
 // (no SPIRV-Tools/Headers) this always declines.
 bool RecompileSpirv(const u32* vs_code,
-                     const u32* ps_code,
-                     const u32* vs_user_data,
-                     const u32* ps_user_data,
-                     u32 ps_input_ena,
-                     const u32* ps_in_cntl,
-                     u32 ps_num_interp,
-                     u32 tex_3d_mask,
-                     u32 tex_1d_mask,
-                     u32 tex_uint_mask,
-                     u32 mrt_uint_mask,
-                     u32 mrt_bound_mask,
-                     bool gl_clip_space,
-                     const GsPipeline* gs,
-                     u32 int_attr_mask,
-                     u32 col_format,
-                     u32 tex_cube_mask,
-                     Recompiled& r);
+                    const u32* ps_code,
+                    const u32* vs_user_data,
+                    const u32* ps_user_data,
+                    u32 ps_input_ena,
+                    const u32* ps_in_cntl,
+                    u32 ps_num_interp,
+                    u32 tex_3d_mask,
+                    u32 tex_1d_mask,
+                    u32 tex_uint_mask,
+                    u32 mrt_uint_mask,
+                    u32 mrt_bound_mask,
+                    bool gl_clip_space,
+                    const GsPipeline* gs,
+                    u32 int_attr_mask,
+                    u32 col_format,
+                    u32 tex_cube_mask,
+                    Recompiled& r);
 
 // Translate a compute shader into r (GLCompute SPIR-V + resource plan).
 // lds_dwords is the raw COMPUTE_PGM_RSRC2.LDS_SIZE field (128-dword granules).

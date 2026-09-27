@@ -8,14 +8,14 @@
 #include <pthread.h>
 
 #include <cstring>
-#include <base/containers/vector.h>
-#include <base/functional/function.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/strings/xstring.h>
-#include <base/threading/condition_variable.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
+#include "base/containers/vector.h"
+#include "base/functional/function.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/strings/xstring.h"
+#include "base/threading/condition_variable.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 
 namespace gpu::opengl {
 
@@ -31,8 +31,7 @@ int Probe(EGLDisplay display, const char* filter, base::String* renderer) {
     return -1;
   int score = -1;
   if (eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
-    const char* name =
-        reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+    const char* name = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     *renderer = name ? name : "";
     score = 2;
     if (strstr(renderer->c_str(), "llvmpipe") ||
@@ -113,9 +112,9 @@ GlslFeatures QueryGlslFeatures() {
   f.max_images = get(GL_MAX_IMAGE_UNITS);
   f.max_stage_storage_buffers =
       base::Min({get(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS),
-                get(GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS),
-                get(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS),
-                get(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS)});
+                 get(GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS),
+                 get(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS),
+                 get(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS)});
   f.max_vertex_attribs = get(GL_MAX_VERTEX_ATTRIBS);
   f.buffer_pointers = epoxy_has_gl_extension("GL_NV_shader_buffer_load") &&
                       epoxy_has_gl_extension("GL_NV_gpu_shader5");

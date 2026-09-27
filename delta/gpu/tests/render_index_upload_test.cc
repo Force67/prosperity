@@ -1,5 +1,5 @@
-#include "gpu/render/index_upload.h"
 #include "base/arch.h"
+#include "gpu/render/index_upload.h"
 
 #include <gtest/gtest.h>
 

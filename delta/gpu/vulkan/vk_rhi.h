@@ -7,30 +7,32 @@
 
 #include <vulkan/vulkan.h>
 
-
 #include "base/arch.h"
+#include "base/memory/unique_pointer.h"
 #include "gpu/rhi/device.h"
-#include <base/memory/unique_pointer.h>
 
 namespace gpu::vk {
 
 struct VulkanOptions {
   // Substring of the adapter name to prefer (DELTA_VK_GPU).
   const char* gpu_filter = nullptr;
-  bool debug_utils = false;  // names + labels for capture tools
+  bool debug_utils = false;                // names + labels for capture tools
   const char* validation_layer = nullptr;  // enable this layer when present
   bool sync_validation = false;
   bool checkpoints = false;  // VK_NV_device_diagnostic_checkpoints
   // Where the driver's pipeline cache blob persists; empty disables it.
   const char* pipeline_cache_path = nullptr;
   // Receives validation-layer messages: severity, id, label stack, text.
-  void (*on_message)(const char*, const char*, const char*, const char*) =
-      nullptr;
+  void (*on_message)(const char*,
+                     const char*,
+                     const char*,
+                     const char*) = nullptr;
 };
 
 // Null when no usable device exists. Call from a plain host thread: some ICDs
 // misbehave on a guest thread.
-base::UniquePointer<rhi::Device> CreateVulkanDevice(const VulkanOptions& options);
+base::UniquePointer<rhi::Device> CreateVulkanDevice(
+    const VulkanOptions& options);
 
 // The native objects behind the abstraction, for code that has not moved onto
 // it yet. Each takes an object the Vulkan device created.

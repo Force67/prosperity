@@ -1,6 +1,7 @@
 // Generated from rhi_shaders/ by glslc; do not edit.
 #pragma once
 #include "base/arch.h"
+// NOLINTBEGIN(readability-identifier-naming): generated
 static const u32 k_tri_vert_spv[] = 
 {0x07230203,0x00010500,0x000d000b,0x00000031,
 0x00000000,0x00020011,0x00000001,0x0006000b,
@@ -838,3 +839,4 @@ static const u32 k_high_locations_vert_spv[] =
 0x0000001e,0x00000012,0x00000014,0x0003003e,
 0x0000001e,0x0000001d,0x000100fd,0x00010038}
 ;
+// NOLINTEND(readability-identifier-naming)

@@ -14,21 +14,21 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <base/strings/xstring.h>
-#include <host_memory/host_memory.h>
+#include "base/algorithm.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/memory/shared_pointer.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "base/time/time.h"
+#include "host_memory/host_memory.h"
+#include "options/options.h"
 #include "write_watch/write_watch.h"
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/containers/map.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/memory/shared_pointer.h>
-#include <base/time/time.h>
-#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kGpuEudfail, "DELTA_GPU_EUDFAIL", false);
@@ -58,7 +58,6 @@ namespace gpu::gcn {
 void (*g_flush_guest_range)(u64 address, u64 bytes) = nullptr;
 
 namespace {
-
 
 constexpr u64 kGuestLo = 0x1000000000ull;
 constexpr u64 kGuestHi = 0x20000000000ull;
@@ -109,7 +108,8 @@ u64 ScanForDescriptor(u64 want_base) {
         first_valid = at;
       BASE_LOGI("tscan",
                 "hit at={:#x} {}x{} pitch={} dfmt={} nfmt={} "
-                "valid={:d} raw={:08x}/{:08x}/{:08x}/{:08x}/{:08x}/{:08x}/{:08x}/{:08x}",
+                "valid={:d} "
+                "raw={:08x}/{:08x}/{:08x}/{:08x}/{:08x}/{:08x}/{:08x}/{:08x}",
                 static_cast<unsigned long>(at), t.width, t.height, t.pitch,
                 t.dfmt, t.nfmt, t.valid, p[i], p[i + 1], p[i + 2], p[i + 3],
                 p[i + 4], p[i + 5], p[i + 6], p[i + 7]);
@@ -397,8 +397,8 @@ void PollNullDescriptors() {
               (unsigned long)s.draw_seen, p[0], p[1], p[2], p[3],
               (unsigned long)(g_track_draws - s.draw_seen));
   }
-  BASE_LOGI("twatch", "{} of {} null sites later filled, {} still zero",
-            filled, static_cast<unsigned>(g_null_sites.size()), still_zero);
+  BASE_LOGI("twatch", "{} of {} null sites later filled, {} still zero", filled,
+            static_cast<unsigned>(g_null_sites.size()), still_zero);
 }
 
 // SMRD operand fields (GFX7).
@@ -440,12 +440,11 @@ u32 NextPow2(u32 v) {
 // inline user data), plus the access-type bits that select a distinct Vulkan
 // binding (arrayed / depth-compare / gather-lz). Packs into one dword-pair key.
 u64 MimgDescriptorKey(u32 srsrc,
-                           u32 ssamp,
-                           u32 load_rsrc,
-                           u32 load_samp,
-                           u32 flags) {
-  return (static_cast<u64>(srsrc) << 0) |
-         (static_cast<u64>(ssamp) << 8) |
+                      u32 ssamp,
+                      u32 load_rsrc,
+                      u32 load_samp,
+                      u32 flags) {
+  return (static_cast<u64>(srsrc) << 0) | (static_cast<u64>(ssamp) << 8) |
          (static_cast<u64>(load_rsrc & 0xFFFF) << 16) |
          (static_cast<u64>(load_samp & 0xFFFF) << 32) |
          (static_cast<u64>(flags) << 48);
@@ -724,10 +723,10 @@ struct ScalarEval {
           Clear(sdst);
           Clear(sdst + 1);
         }
-      } else if (inst.opcode == 0x1f) {  // s_getpc_b64: address of the NEXT inst
+      } else if (inst.opcode ==
+                 0x1f) {  // s_getpc_b64: address of the NEXT inst
         if (code_base) {
-          const u64 pc =
-              code_base + static_cast<u64>(inst.pc + inst.size) * 4;
+          const u64 pc = code_base + static_cast<u64>(inst.pc + inst.size) * 4;
           Set(sdst, static_cast<u32>(pc));
           Set(sdst + 1, static_cast<u32>(pc >> 32));
         } else {
@@ -748,8 +747,7 @@ struct ScalarEval {
     if (inst.enc == Enc::kSopk) {
       const u32 w = inst.raw[0];
       const u32 sdst = (w >> 16) & 0x7F;
-      const u32 simm =
-          static_cast<u32>(static_cast<i32>(static_cast<i16>(w)));
+      const u32 simm = static_cast<u32>(static_cast<i32>(static_cast<i16>(w)));
       switch (inst.opcode) {
         case 0x00:  // s_movk_i32
           Set(sdst, simm);
@@ -907,8 +905,9 @@ struct ScalarEval {
       Clear(s.sdst + i);
     if (!base_known || !offset_known) {
       if (kGpuEudfail)
-        BASE_LOGI("eudfail", "s_load x{} s{} <- s{}: base_known={} off_known={}",
-                  dwords, s.sdst, base, base_known, offset_known);
+        BASE_LOGI("eudfail",
+                  "s_load x{} s{} <- s{}: base_known={} off_known={}", dwords,
+                  s.sdst, base, base_known, offset_known);
       return;
     }
     if (byte_off > UINT64_MAX - table)
@@ -977,7 +976,8 @@ struct ReplayOp {
 // shader rewrite yields a new Program from CachedProgram -> a new entry.
 struct ScalarPassInfo {
   MimgBindingPlan plan;
-  base::Vector<Inst> insts;  // program-order subset relevant to ScalarEval users
+  base::Vector<Inst>
+      insts;  // program-order subset relevant to ScalarEval users
   base::Vector<ReplayOp> replay;
   base::Vector<ReplayOp> full_replay;  // every step, for DELTA_GPU_REPLAY_CHECK
 };
@@ -1040,8 +1040,8 @@ const ScalarPassInfo& CachedScalarInfo(
   // longer holds (only the pin here keeps it alive). Clearing the lot at 512
   // re-planned every live shader each frame.
   if (cache.size() > 4096) {
-    base::EraseIf(cache,
-                  [](const auto& kv) { return kv.second.pin.use_count() == 1; });
+    base::EraseIf(
+        cache, [](const auto& kv) { return kv.second.pin.use_count() == 1; });
     if (cache.size() > 16384)
       cache.clear();
   }
@@ -1150,9 +1150,13 @@ class ConsumerRegs {
   bool* uncovered_;
 };
 
-void Capture(ScalarConsumer& c, u32 w, u32 first, u32 count,
+void Capture(ScalarConsumer& c,
+             u32 w,
+             u32 first,
+             u32 count,
              const ScalarEval& eval) {
-  count = base::Min<u32>(count, ScalarEval::kRegs - base::Min<u32>(first, ScalarEval::kRegs));
+  count = base::Min<u32>(
+      count, ScalarEval::kRegs - base::Min<u32>(first, ScalarEval::kRegs));
   c.first[w] = static_cast<u8>(first);
   c.count[w] = static_cast<u8>(count);
   // An unknown register's value is whatever the walk left there, and that
@@ -1177,7 +1181,7 @@ struct SgprSet {
   static constexpr u32 kWords = (ScalarEval::kRegs + 63) / 64;
   u64 words[kWords] = {};
 
-  void set(u32 i) { words[i / 64] |= 1ull << (i % 64); }
+  void Set(u32 i) { words[i / 64] |= 1ull << (i % 64); }
   bool Intersects(const SgprSet& other) const {
     for (u32 i = 0; i < kWords; i++)
       if (words[i] & other.words[i])
@@ -1196,12 +1200,12 @@ struct SgprSet {
 
 void AddRange(SgprSet& set, u32 first, u32 count) {
   for (u32 i = first; i < first + count && i < ScalarEval::kRegs; i++)
-    set.set(i);
+    set.Set(i);
 }
 
 void AddSource(SgprSet& set, u32 field) {
   if (field <= 127)
-    set.set(field);
+    set.Set(field);
 }
 
 // What ScalarEval::Step does to the register file, statically: the SGPRs it
@@ -1223,7 +1227,7 @@ StepEffects EffectsOf(const Inst& inst) {
       if (op == 0x03 || op == 0x04)
         AddSource(e.reads, ssrc0);
       if (op == 0x04 && ssrc0 <= 126)
-        e.reads.set(ssrc0 + 1);
+        e.reads.Set(ssrc0 + 1);
       AddRange(e.writes, sdst, Sop1DestIs64(op) ? 2 : 1);
       return e;
     }
@@ -1232,8 +1236,8 @@ StepEffects EffectsOf(const Inst& inst) {
       if ((op >= 0x03 && op <= 0x0e) || op == 0x11 || op == 0x13 || op == 0x15)
         return e;
       if (op == 0x0f || op == 0x10)
-        e.reads.set(sdst);
-      e.writes.set(sdst);
+        e.reads.Set(sdst);
+      e.writes.Set(sdst);
       return e;
     }
     case Enc::kSop2:
@@ -1273,7 +1277,7 @@ StepEffects EffectsOf(const Inst& inst) {
       AddRange(e.reads, s.sbase * 2, buffer_load ? 4 : 2);
       const SmrdOffset so = DecodeSmrdOffset(inst);
       if (so.in_sgpr && so.sgpr < ScalarEval::kRegs)
-        e.reads.set(so.sgpr);
+        e.reads.Set(so.sgpr);
       const u32 dwords = buffer_load ? (1u << (s.op - 0x08)) : (1u << s.op);
       AddRange(e.writes, s.sdst, dwords);
       AddRange(e.sources, s.sdst, dwords);
@@ -1387,7 +1391,8 @@ void CheckReplay(const ScalarPassInfo& info,
   static u64 checked = 0, mismatched = 0;
   checked++;
   if (!same && mismatched++ < 16)
-    BASE_LOGW("replay", "pruned replay differs from the full one ({} vs {} "
+    BASE_LOGW("replay",
+              "pruned replay differs from the full one ({} vs {} "
               "consumers, {} of {} steps kept)",
               pruned.size(), full.size(), info.replay.size(),
               info.full_replay.size());
@@ -1498,8 +1503,7 @@ ScalarReplayScope::~ScalarReplayScope() {
   g_replays.depth--;
 }
 
-MimgBindingPlan PlanMimgBindings(const Program& program,
-                                 const u8* reachable) {
+MimgBindingPlan PlanMimgBindings(const Program& program, const u8* reachable) {
   MimgBindingPlan plan;
   // Track, per SGPR range, the index of the last SMRD instruction covering it.
   struct Load {
@@ -1541,16 +1545,15 @@ MimgBindingPlan PlanMimgBindings(const Program& program,
     const bool sampling = op >= 0x20;
     const bool storage = op == 0x08 || op == 0x09;
     const u32 ssamp = sampling ? ((w1 >> 21) & 0x1F) * 4 : 0xFF;
-    const u32 flags =
-        (((w0 >> 14) & 1) << 0) |                      // DA
-        (((op == 0x28 || op == 0x2f) ? 1 : 0) << 1) |  // dref
-        ((op == 0x47 ? 1 : 0) << 2) |                  // gather4_lz
-        (static_cast<u32>(storage) << 3);
+    const u32 flags = (((w0 >> 14) & 1) << 0) |                      // DA
+                      (((op == 0x28 || op == 0x2f) ? 1 : 0) << 1) |  // dref
+                      ((op == 0x47 ? 1 : 0) << 2) |  // gather4_lz
+                      (static_cast<u32>(storage) << 3);
     const u64 key =
         MimgDescriptorKey(srsrc, ssamp, covering_load(srsrc, 8),
                           sampling ? covering_load(ssamp, 4) : 0xFFFE, flags);
-    const auto [it, inserted] = binding_of.emplace(
-        key, static_cast<u32>(plan.binding_srsrc.size()));
+    const auto [it, inserted] =
+        binding_of.emplace(key, static_cast<u32>(plan.binding_srsrc.size()));
     if (inserted) {
       plan.binding_srsrc.push_back(srsrc);
       plan.binding_storage.push_back(storage);
@@ -1570,8 +1573,8 @@ VBuffer DecodeVBuffer(const u32* p) {
   // The base is 44 bits, not 48: the top nibble of word 1 is reserved, and
   // Shadow of the Colossus leaves it non-zero on its per-object vertex pools.
   // Reading it as address put them at 0x7080_xxxxxxxx, about 124 TB and far
-  // outside a PS4 process' ~1 TB address space, so every descriptor carrying that
-  // nibble was rejected as out of range and read back as zero.
+  // outside a PS4 process' ~1 TB address space, so every descriptor carrying
+  // that nibble was rejected as out of range and read back as zero.
   return {
       .base = (static_cast<u64>(p[1] & 0xFFF) << 32) | p[0],
       .stride = (p[1] >> 16) & 0x3FFF,
@@ -1591,8 +1594,7 @@ TImage DecodeTImage(const u32* p) {
   //  [4] depth[12:0]; pitch[26:13]
   //  [5] base_array[12:0]; last_array[25:13]
   TImage t;
-  t.null_descriptor =
-      base::AllOf(p, p + 8, [](u32 word) { return word == 0; });
+  t.null_descriptor = base::AllOf(p, p + 8, [](u32 word) { return word == 0; });
   t.base = ((static_cast<u64>(p[1] & 0x3F) << 32) | p[0]) << 8;
   t.min_lod = (p[1] >> 8) & 0xFFF;
   t.dfmt = (p[1] >> 20) & 0x3F;
@@ -1679,7 +1681,7 @@ void TrackVertexBuffers(base::Vector<VBuffer>& result,
       continue;
     const Smrd s = DecodeSmrd(inst.raw[0]);
     if (s.op != 0x02)
-      continue;                              // s_load_dwordx4 (a 4-dword V#)
+      continue;                         // s_load_dwordx4 (a 4-dword V#)
     const u32 base_sgpr = s.sbase * 2;  // user_data index of the table ptr
     if (base_sgpr + 1 >= 16)
       continue;
@@ -1699,8 +1701,8 @@ void TrackVertexBuffers(base::Vector<VBuffer>& result,
                   "VB sbase=sgpr{} table={:#x} off={} -> base={:#x} "
                   "stride={} nrec={} dfmt={} nfmt={}",
                   base_sgpr, static_cast<unsigned long>(table), byte_off,
-                  static_cast<unsigned long>(v.base), v.stride,
-                  v.num_records, v.dfmt, v.nfmt);
+                  static_cast<unsigned long>(v.base), v.stride, v.num_records,
+                  v.dfmt, v.nfmt);
       result.push_back(v);
     }
   }
@@ -1728,9 +1730,8 @@ void TrackTextures(base::Vector<TImage>& result,
   // live T#/S# straight out of the resolved SGPRs. Inline user data, a single
   // indirect load, and nested EUD chains all land here identically.
   // The debugging knobs below read registers the shared replay does not keep.
-  const bool own = trace || kGpuEudtrace || kTwatch || kNullWatch ||
-                   kNullDis || kTscan || kArenaProbe || kSotcCompositeRt ||
-                   kTexSrc;
+  const bool own = trace || kGpuEudtrace || kTwatch || kNullWatch || kNullDis ||
+                   kTscan || kArenaProbe || kSotcCompositeRt || kTexSrc;
   const auto consume = [&](const Inst& inst, auto& eval, u32) {
     if (inst.enc != Enc::kMimg)
       return;
@@ -1838,16 +1839,15 @@ void TrackTextures(base::Vector<TImage>& result,
                   "(SRT root {:#x})",
                   static_cast<unsigned long>(code_base), binding,
                   static_cast<unsigned long>(eval.src[srsrc]),
-                  static_cast<unsigned long>(
-                      UserDataPointer(ps_user_data, 0)));
+                  static_cast<unsigned long>(UserDataPointer(ps_user_data, 0)));
         DisassembleAt(code_base, "nulldis.PS");
       }
     }
     if (kTscan && t.null_descriptor) {
       static bool scanned = false;
       static const auto kScanStart = base::TimeTicks::Now();
-      const bool due = (
-                           base::TimeTicks::Now() - kScanStart).InSeconds() >= kTscanAfter;
+      const bool due =
+          (base::TimeTicks::Now() - kScanStart).InSeconds() >= kTscanAfter;
       if (!scanned && due) {
         scanned = true;
         BASE_LOGI("tscan",
@@ -1895,21 +1895,19 @@ void TrackTextures(base::Vector<TImage>& result,
         static int announced = 0;
         if (announced < 8) {
           announced++;
-          BASE_LOGI("arena",
-                    "substituted {:#x} -> {:#x} (arena{:+d}) {}x{}",
+          BASE_LOGI("arena", "substituted {:#x} -> {:#x} (arena{:+d}) {}x{}",
                     static_cast<unsigned long>(at),
-                    static_cast<unsigned long>(probe), slot, t.width,
-                    t.height);
+                    static_cast<unsigned long>(probe), slot, t.width, t.height);
           // Disassemble the shader that produced the biased pointer once: a
           // constant arena bias is most likely an address our linear scalar
           // replay computed down a path the real wave would not have taken.
           static bool dumped = false;
           if (!dumped) {
             dumped = true;
-            BASE_LOGI("arena", "SRT root = {:#x}, T# read at {:#x}",
-                      static_cast<unsigned long>(
-                          UserDataPointer(ps_user_data, 0)),
-                      static_cast<unsigned long>(at));
+            BASE_LOGI(
+                "arena", "SRT root = {:#x}, T# read at {:#x}",
+                static_cast<unsigned long>(UserDataPointer(ps_user_data, 0)),
+                static_cast<unsigned long>(at));
             DisassembleAt(code_base, "arena.PS");
           }
         }
@@ -1959,12 +1957,13 @@ void TrackTextures(base::Vector<TImage>& result,
     if (eval.trace)
       BASE_LOGI("eud",
                 "MIMG pc={:#x} bind={} srsrc=s{} known={:d} at={:#x} "
-                "base={:#x} {}x{} valid={:d} raw={:08x}/{:08x}/{:08x}/{:08x}/{:08x}/{:08x}/"
+                "base={:#x} {}x{} valid={:d} "
+                "raw={:08x}/{:08x}/{:08x}/{:08x}/{:08x}/{:08x}/"
                 "{:08x}/{:08x}",
                 inst.pc, binding, srsrc, image_ok,
                 static_cast<unsigned long>(eval.src[srsrc]),
-                static_cast<unsigned long>(t.base), t.width, t.height,
-                t.valid, image_ok ? eval.sgpr[srsrc + 0] : 0,
+                static_cast<unsigned long>(t.base), t.width, t.height, t.valid,
+                image_ok ? eval.sgpr[srsrc + 0] : 0,
                 image_ok ? eval.sgpr[srsrc + 1] : 0,
                 image_ok ? eval.sgpr[srsrc + 2] : 0,
                 image_ok ? eval.sgpr[srsrc + 3] : 0,
@@ -1988,7 +1987,7 @@ void TrackTextures(base::Vector<TImage>& result,
     }
     // MIMG DA, or a cube: sampled as the 2D array of its faces.
     t.arrayed = (inst.raw[0] & 0x4000) != 0 || t.type == 11;
-    t.force_lod_zero = op == 0x47;            // IMAGE_GATHER4_LZ
+    t.force_lod_zero = op == 0x47;  // IMAGE_GATHER4_LZ
     t.depth_compare = op == 0x28 || op == 0x2f;
     t.storage = op == 0x08 || op == 0x09;
     if (t.valid) {
@@ -2002,8 +2001,8 @@ void TrackTextures(base::Vector<TImage>& result,
           pitch_ne++;
         if ((++n % 4000) == 0) {
           base::String line;
-          base::FormatTo(line, "n={} pitch!=width={}:",
-                         static_cast<unsigned long>(n),
+          base::FormatTo(line,
+                         "n={} pitch!=width={}:", static_cast<unsigned long>(n),
                          static_cast<unsigned long>(pitch_ne));
           for (int i = 0; i < 32; i++)
             if (hist[i])
@@ -2015,16 +2014,15 @@ void TrackTextures(base::Vector<TImage>& result,
         BASE_LOGI("gcnres",
                   "T# (sgpr{}) base={:#x} {}x{} pitch={} "
                   "dfmt={} nfmt={} tiling={}",
-                  srsrc, static_cast<unsigned long>(t.base), t.width,
-                  t.height, t.pitch, t.dfmt, t.nfmt, t.tiling_idx);
+                  srsrc, static_cast<unsigned long>(t.base), t.width, t.height,
+                  t.pitch, t.dfmt, t.nfmt, t.tiling_idx);
     }
     result.push_back(t);
   };
   if (!ForEachConsumer(ps_program, ps_user_data, code_base, own, trace,
                        consume)) {
     result.clear();
-    ForEachConsumer(ps_program, ps_user_data, code_base, true, trace,
-                    consume);
+    ForEachConsumer(ps_program, ps_user_data, code_base, true, trace, consume);
   }
   return;
 }
@@ -2048,9 +2046,9 @@ void ResolveCbuffers(CbufList& result,
   // should have named exists by then, and the sweep costs a full pass over
   // every mapped guest page.
   if ((kMemFind && *kMemFind) || kSoaScan) {
-    static const auto epoch = base::TimeTicks::Now();
+    static const auto kEpoch = base::TimeTicks::Now();
     static bool swept = false;
-    if (!swept && (base::TimeTicks::Now() - epoch).InSecondsF() > 60.0) {
+    if (!swept && (base::TimeTicks::Now() - kEpoch).InSecondsF() > 60.0) {
       swept = true;
       if (kMemFind && *kMemFind)
         ScanForDwords(kMemFind);
@@ -2081,9 +2079,8 @@ void ResolveCbuffers(CbufList& result,
       v = DecodeVBuffer(&eval.sgpr[base]);
     result.emplace_back(key, v);
     if (eval.trace)
-      BASE_LOGI("eud", "cbuf s{} -> base={:#x} stride={} nrec={}",
-                base, static_cast<unsigned long>(v.base), v.stride,
-                v.num_records);
+      BASE_LOGI("eud", "cbuf s{} -> base={:#x} stride={} nrec={}", base,
+                static_cast<unsigned long>(v.base), v.stride, v.num_records);
   };
   if (!ForEachConsumer(program, user_data, code_base, false, false, consume)) {
     result.clear();
@@ -2092,11 +2089,12 @@ void ResolveCbuffers(CbufList& result,
   return;
 }
 
-void ResolveDirectVertexBuffers(base::Vector<VBuffer>& result,
-                                const base::SharedPointer<const Program>& program,
-                                const base::Vector<ShaderAttr>& attrs,
-                                const u32* user_data,
-                                u64 code_base) {
+void ResolveDirectVertexBuffers(
+    base::Vector<VBuffer>& result,
+    const base::SharedPointer<const Program>& program,
+    const base::Vector<ShaderAttr>& attrs,
+    const u32* user_data,
+    u64 code_base) {
   result.assign(attrs.size(), VBuffer{});
   if (!program || !user_data || attrs.empty())
     return;
@@ -2120,11 +2118,10 @@ void ResolveDirectVertexBuffers(base::Vector<VBuffer>& result,
                   "nrec={} fmt={}/{} inst={}/{} ioff={} "
                   "V#={:08x}/{:08x}/{:08x}/{:08x} data={:08x}/{:08x}/{:08x}",
                   i, inst.pc, attr.table_sgpr,
-                  static_cast<unsigned long>(result[i].base),
-                  result[i].stride, result[i].num_records, result[i].dfmt,
-                  result[i].nfmt, attr.inst_dfmt, attr.inst_nfmt,
-                  inst.raw[0] & 0xFFF, eval.sgpr[attr.table_sgpr],
-                  eval.sgpr[attr.table_sgpr + 1],
+                  static_cast<unsigned long>(result[i].base), result[i].stride,
+                  result[i].num_records, result[i].dfmt, result[i].nfmt,
+                  attr.inst_dfmt, attr.inst_nfmt, inst.raw[0] & 0xFFF,
+                  eval.sgpr[attr.table_sgpr], eval.sgpr[attr.table_sgpr + 1],
                   eval.sgpr[attr.table_sgpr + 2],
                   eval.sgpr[attr.table_sgpr + 3], data[0], data[1], data[2]);
       }
@@ -2163,8 +2160,7 @@ void ResolveShaderBuffers(base::Vector<VBuffer>& result,
              << 32) |
             eval.sgpr[buffer.srsrc_sgpr];
         BASE_LOGI("eud", "rawbuf{} 48-bit base would be {:#x}, mapped={}", i,
-                  static_cast<unsigned long>(wide),
-                  (int)GuestRange(wide, 16));
+                  static_cast<unsigned long>(wide), (int)GuestRange(wide, 16));
         BASE_LOGI("eud",
                   "rawbuf{} pc={:#x} s{} -> base={:#x} stride={} "
                   "nrec={} V#={:08x}/{:08x}/{:08x}/{:08x}",
@@ -2199,9 +2195,7 @@ void ResolveCsResources(base::Vector<ResolvedCsResource>& result,
     for (const CsResource& resource : plan.resources) {
       if (resource.use_pc != inst.pc || resource.binding >= result.size())
         continue;
-      const u32 dwords = resource.kind == 1   ? 8
-                              : resource.kind == 2 ? 2
-                                                   : 4;
+      const u32 dwords = resource.kind == 1 ? 8 : resource.kind == 2 ? 2 : 4;
       if (!eval.AllKnown(resource.base_sgpr, dwords))
         continue;
       ResolvedCsResource& resolved = result[resource.binding];

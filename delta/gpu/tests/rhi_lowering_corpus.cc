@@ -9,24 +9,24 @@
 
 #include <epoxy/gl.h>
 
+#include <dirent.h>
+#include <sys/stat.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <dirent.h>
-#include <sys/stat.h>
 
+#include "base/algorithm.h"
 #include "base/arch.h"
+#include "base/atomic.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 #include "gpu/opengl/gl_context.h"
 #include "gpu/opengl/gl_shader_lowering.h"
-#include <base/algorithm.h>
-#include <base/atomic.h>
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
 
 namespace {
 
@@ -288,8 +288,7 @@ int main(int argc, char** argv) {
   base::Atomic<size_t> next{0};
   base::Vector<EGLContext> contexts;
   for (u32 i = 0; i < base::Max(threads, 1u); i++)
-    contexts.push_back(
-        CreateGlContext(device.display, EGL_NO_CONTEXT, false));
+    contexts.push_back(CreateGlContext(device.display, EGL_NO_CONTEXT, false));
   base::Mutex features_mutex;
   bool features_ready = false;
   GlWorker workers;
@@ -345,8 +344,7 @@ int main(int argc, char** argv) {
         skips[base::String(StageName(r.stage)) + ": " + r.reason]++;
         continue;
     }
-    const base::String key =
-        base::String(StageName(r.stage)) + ": " + r.reason;
+    const base::String key = base::String(StageName(r.stage)) + ": " + r.reason;
     reasons[key]++;
     example.emplace(key, files[i]);
   }

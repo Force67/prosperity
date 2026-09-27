@@ -1,8 +1,8 @@
 #pragma once
+#include "base/containers/span.h"
+#include "base/containers/vector.h"
 #include "gpu/render/command.h"
 #include "gpu/rhi/device.h"
-#include <base/containers/vector.h>
-#include <base/containers/span.h>
 
 namespace gpu::render {
 // Caller must retire the preceding compute batch before updating this table.

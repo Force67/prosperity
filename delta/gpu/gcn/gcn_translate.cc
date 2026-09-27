@@ -13,8 +13,8 @@
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/gcn/spirv/gcn_spirv.h"
 
-#include <base/algorithm.h>
-#include <base/time/time.h>
+#include "base/algorithm.h"
+#include "base/time/time.h"
 
 namespace gpu::gcn {
 
@@ -69,31 +69,30 @@ void SetHostSubgroupSize(u32 lanes) {
 }
 
 Recompiled Recompile(const u32* vs_code,
-                      const u32* ps_code,
-                      const u32* vs_user_data,
-                      const u32* ps_user_data,
-                      u32 ps_input_ena,
-                      const u32* ps_in_cntl,
-                      u32 ps_num_interp,
-                      u32 tex_3d_mask,
-                      u32 tex_1d_mask,
-                      u32 tex_uint_mask,
-                      u32 mrt_uint_mask,
-                      u32 mrt_bound_mask,
-                      bool gl_clip_space,
-                      const GsPipeline* gs,
-                      u32 int_attr_mask,
-                      u32 col_format,
-                      u32 tex_cube_mask) {
+                     const u32* ps_code,
+                     const u32* vs_user_data,
+                     const u32* ps_user_data,
+                     u32 ps_input_ena,
+                     const u32* ps_in_cntl,
+                     u32 ps_num_interp,
+                     u32 tex_3d_mask,
+                     u32 tex_1d_mask,
+                     u32 tex_uint_mask,
+                     u32 mrt_uint_mask,
+                     u32 mrt_bound_mask,
+                     bool gl_clip_space,
+                     const GsPipeline* gs,
+                     u32 int_attr_mask,
+                     u32 col_format,
+                     u32 tex_cube_mask) {
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
     return r;
   const u64 t0 = NowNs();
   RecompileSpirv(vs_code, ps_code, vs_user_data, ps_user_data, ps_input_ena,
-                 ps_in_cntl, ps_num_interp,
-                 tex_3d_mask, tex_1d_mask, tex_uint_mask, mrt_uint_mask,
-                 mrt_bound_mask,
-                 gl_clip_space, gs, int_attr_mask, col_format, tex_cube_mask, r);
+                 ps_in_cntl, ps_num_interp, tex_3d_mask, tex_1d_mask,
+                 tex_uint_mask, mrt_uint_mask, mrt_bound_mask, gl_clip_space,
+                 gs, int_attr_mask, col_format, tex_cube_mask, r);
   g_ns_recomp += NowNs() - t0;
   g_recomp_n++;
   return r;

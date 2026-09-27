@@ -3,16 +3,16 @@
  */
 
 #include "gpu/render/render_target.h"
-#include "gpu/gpu_perf.h"
 #include "base/arch.h"
+#include "gpu/gpu_perf.h"
 
-#include "gpu/render/renderer.h"
-#include "gpu/render/compute.h"
-#include "gpu/render/labels.h"
-#include "gpu/render/device.h"
 #include "gpu/guest_memory.h"
-#include "gpu/render/guest_format.h"
+#include "gpu/render/compute.h"
+#include "gpu/render/device.h"
 #include "gpu/render/frame.h"
+#include "gpu/render/guest_format.h"
+#include "gpu/render/labels.h"
+#include "gpu/render/renderer.h"
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/trace.h"
 
@@ -21,17 +21,17 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <base/strings/xstring.h>
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/atomic.h>
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/containers/hash_map.h>
+#include "base/algorithm.h"
+#include "base/atomic.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "options/options.h"
 
 namespace {
 // DELTA_GPU_CLEARTRACE=<n>: print up to n clear-opening lines. A small cap only
@@ -129,7 +129,9 @@ rhi::TextureView* SampledImageView(rhi::Texture* texture,
 // Sampled view of a colour target in `want` rather than the target's own
 // format, when the two are the same size (so the reinterpretation is legal and
 // the bytes line up). Falls back to the target's format when they are not.
-rhi::TextureView* SampledViewAs(RTarget& rt, u32 swizzle, rhi::Format want,
+rhi::TextureView* SampledViewAs(RTarget& rt,
+                                u32 swizzle,
+                                rhi::Format want,
                                 rhi::Format* used) {
   const auto own = [&](rhi::TextureView* v) {
     if (used)
@@ -248,8 +250,8 @@ bool CreateRtImage(RTarget& t,
   // RT address on the PS5 path) would otherwise feed the driver an invalid
   // image and hard-crash it.
   if (w > 8192 || h > 8192 || fmt == rhi::Format::kUndefined) {
-    BASE_LOGI("gpuvk", "skip bad RT {:#x} {}x{} fmt={}", (unsigned long)base,
-              w, h, (int)fmt);
+    BASE_LOGI("gpuvk", "skip bad RT {:#x} {}x{} fmt={}", (unsigned long)base, w,
+              h, (int)fmt);
     return false;
   }
   t.w = w;
@@ -302,8 +304,8 @@ bool CreateRtImage(RTarget& t,
   if (g_tex.descriptors_ready && depth == 1)
     t.set = SampledTextureGroup(t.view, g_tex.sampler);
   ClearNewRt(t);
-  BASE_LOGI("gpuvk", "new RT {:#x} {}x{}x{} fmt={}", (unsigned long)base, w,
-            h, depth, (int)fmt);
+  BASE_LOGI("gpuvk", "new RT {:#x} {}x{}x{} fmt={}", (unsigned long)base, w, h,
+            depth, (int)fmt);
   if (Device().caps().debug_labels) {
     char name[64];
     std::snprintf(name, sizeof(name), "rt %#lx %ux%u fmt=%d",
@@ -341,13 +343,12 @@ void RetireRt(RTarget& t) {
 
 void DestroyRt(RTarget& t) {
   rhi::Device& device = Device();
-  for (auto* views : {&t.sampled_views, &t.alias_views,
-                      &t.feedback_sampled_views})
+  for (auto* views :
+       {&t.sampled_views, &t.alias_views, &t.feedback_sampled_views})
     for (auto& [key, view] : *views)
       device.Destroy(view);
-  for (rhi::Object* o :
-       std::initializer_list<rhi::Object*>{t.set, t.feedback_set, t.view,
-                                            t.volume_view, t.feedback_view})
+  for (rhi::Object* o : std::initializer_list<rhi::Object*>{
+           t.set, t.feedback_set, t.view, t.volume_view, t.feedback_view})
     device.Destroy(o);
   device.Destroy(t.feedback_texture);
   device.Destroy(t.texture);
@@ -461,8 +462,8 @@ bool ActivateVolumeRt(u64 base, u32 w, u32 h, u32 depth) {
     const auto parked = g_rt_variants.find(base);
     if (parked == g_rt_variants.end())
       return false;
-    const auto alt = base::FindIf(parked->second.begin(), parked->second.end(),
-                                  matches);
+    const auto alt =
+        base::FindIf(parked->second.begin(), parked->second.end(), matches);
     if (alt == parked->second.end() ||
         !ActivateRtVariant(live, base, w, h, alt->fmt, depth))
       return false;
@@ -550,13 +551,13 @@ rhi::BindGroup* SnapshotRT(RTarget& rt) {
   rhi::CommandList* list = g_frame.list;
   TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
   TransitionImage(list, rt.feedback_texture, rt.feedback_layout,
-             rhi::TextureState::kCopyDst);
+                  rhi::TextureState::kCopyDst);
   rhi::TextureRegion region;
   region.width = rt.w;
   region.height = rt.h;
   list->CopyTexture(rt.feedback_texture, region, rt.texture, region);
   TransitionImage(list, rt.feedback_texture, rt.feedback_layout,
-             rhi::TextureState::kShaderRead);
+                  rhi::TextureState::kShaderRead);
   return rt.feedback_set;
 }
 
@@ -660,8 +661,8 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
     DepthTarget t;
     // A variant that replaces the live one at the same geometry only because
     // it needs more layers keeps the larger count.
-    const u32 want = live.w == w && live.h == h ? base::Max(layers, live.layers)
-                                                : layers;
+    const u32 want =
+        live.w == w && live.h == h ? base::Max(layers, live.layers) : layers;
     if (!CreateDepthImage(t, base, w, h, stencil_base, want))
       return covers(&live);
     BASE_LOGI("gpuvk",
@@ -748,11 +749,7 @@ rhi::TextureView* DepthLayerView(DepthTarget& t, u32 layer) {
   return view ? view : t.attachment_view;
 }
 
-DepthTarget* GetDepthRT(u64 base,
-                        u32 w,
-                        u32 h,
-                        u64 stencil_base,
-                        u32 layers) {
+DepthTarget* GetDepthRT(u64 base, u32 w, u32 h, u64 stencil_base, u32 layers) {
   auto it = g_depths.find(base);
   if (it != g_depths.end()) {
     DepthTarget& live = it->second;
@@ -940,15 +937,15 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
     // an address its full-resolution one does, and the sample falls through to
     // guest memory, which for a depth buffer is empty.
     u64 span = depth.guest_w && depth.guest_h
-                        ? (u64)depth.guest_w * depth.guest_h * 4
-                        : RtByteSizeWH(depth.w, depth.h, kDepthFormat);
+                   ? (u64)depth.guest_w * depth.guest_h * 4
+                   : RtByteSizeWH(depth.w, depth.h, kDepthFormat);
     bool dim_match = (!w || !h) || (depth.w == w && depth.h == h);
     const auto parked = g_depth_variants.find(base);
     if (parked != g_depth_variants.end())
       for (const DepthTarget& v : parked->second) {
         span = base::Max(span, v.guest_w && v.guest_h
-                                  ? (u64)v.guest_w * v.guest_h * 4
-                                  : RtByteSizeWH(v.w, v.h, kDepthFormat));
+                                   ? (u64)v.guest_w * v.guest_h * 4
+                                   : RtByteSizeWH(v.w, v.h, kDepthFormat));
         if (w && h && v.w == w && v.h == h)
           dim_match = true;
       }
@@ -1032,7 +1029,8 @@ void ResolveHtileClear(DepthTarget& dt, u64 base, float depth_clear) {
   dt.htile_clear_pending = false;
   u32 code = dt.htile_clear_code;
   if (!dt.htile_code_known) {
-    render::FlushCsWritesRange(render::DefaultRenderer(), dt.htile_base, 4, "htile");
+    render::FlushCsWritesRange(render::DefaultRenderer(), dt.htile_base, 4,
+                               "htile");
     if (!gpu::IsReadableRange(dt.htile_base, 4))
       return;
     std::memcpy(&code, reinterpret_cast<const void*>(dt.htile_base), 4);
@@ -1177,7 +1175,8 @@ void NoteCmaskBind(RTarget& rt) {
   const u64 bytes = base::Max<u64>(4, (u64(rt.w) * rt.h) / 128);
   if (!gpu::IsReadableRangeCached(rt.dcc_base, bytes))
     return;
-  render::FlushCsWritesRange(render::DefaultRenderer(), rt.dcc_base, 4, "cmask");
+  render::FlushCsWritesRange(render::DefaultRenderer(), rt.dcc_base, 4,
+                             "cmask");
   auto* cmask = reinterpret_cast<u32*>(rt.dcc_base);
   if (*cmask & 0xF)
     return;
@@ -1193,7 +1192,8 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
   rt.dcc_clear_pending = false;
   u32 code = rt.dcc_clear_code;
   if (!rt.dcc_code_known) {
-    render::FlushCsWritesRange(render::DefaultRenderer(), rt.dcc_base, 4, "cmask");
+    render::FlushCsWritesRange(render::DefaultRenderer(), rt.dcc_base, 4,
+                               "cmask");
     if (!gpu::IsReadableRangeCached(rt.dcc_base, 4))
       return;
     std::memcpy(&code, reinterpret_cast<const void*>(rt.dcc_base), 4);
@@ -1216,11 +1216,10 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
   if (kClearTrace) {
     static int n = 0;
     if (n++ < kClearTrace)
-      BASE_LOGI("clear",
-                "f{} draw#{} RT {:#x} {}x{} DCC {:#x} code={:08x} -> {}",
-                g_frame.num, g_frame.draws, (unsigned long)base, rt.w, rt.h,
-                (unsigned long)rt.dcc_base, code,
-                clear ? "clear" : "not a clear");
+      BASE_LOGI(
+          "clear", "f{} draw#{} RT {:#x} {}x{} DCC {:#x} code={:08x} -> {}",
+          g_frame.num, g_frame.draws, (unsigned long)base, rt.w, rt.h,
+          (unsigned long)rt.dcc_base, code, clear ? "clear" : "not a clear");
   }
 }
 
@@ -1273,7 +1272,7 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
   }
   void* map = buf->mapped();
   render::FlushCsWritesRange(render::DefaultRenderer(), base, layout.size,
-                          "rt-write-through");
+                             "rt-write-through");
   rhi::CommandList* list = BeginImmediate();
   if (!list)
     return false;
@@ -1286,9 +1285,8 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
   TransitionImage(list, rt.texture, rt.layout, old_layout);
   list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
   const bool ok = EndImmediate(list);
-  if (!ok ||
-      !gcn::RetileTextureMip32(map, reinterpret_cast<void*>(base), layout, 0,
-                               0))
+  if (!ok || !gcn::RetileTextureMip32(map, reinterpret_cast<void*>(base),
+                                      layout, 0, 0))
     return false;
   InvalidateTexRange(base, layout.size);
   CsForgetGuestRange(base, layout.size);
@@ -1327,12 +1325,12 @@ bool BeginRegion(const u64* mrt_base,
                  const u32* mrt_info,
                  u32 mrt_count,
                  u32 w,
-                  u32 h,
-                  u64 depth_base,
-                  float depth_clear,
-                  u64 stencil_base,
-                  u8 stencil_clear,
-                  bool depth_read_only,
+                 u32 h,
+                 u64 depth_base,
+                 float depth_clear,
+                 u64 stencil_base,
+                 u8 stencil_clear,
+                 bool depth_read_only,
                  u32 depth_w,
                  u32 depth_h,
                  const u32* mrt_surf_w,
@@ -1343,16 +1341,15 @@ bool BeginRegion(const u64* mrt_base,
                  u32 depth_slice,
                  u32 layers,
                  bool meta_cmask) {
-  ScopeNs _region_timer(&g_ns_region);
+  ScopeNs region_timer(&g_ns_region);
   // DELTA_GPU_QCHECK also gates this path: a checkpoint that fails here names
   // the DRAWS that ran before this region as the device loss, which is the
   // attribution the compute-side checkpoints cannot reach.
   if (QueueCheckArmed()) {
     char where[64];
-    std::snprintf(where, sizeof(where), "region draw#%u rt=%#llx f%u",
-                  g_frame.draws,
-                  (unsigned long long)(mrt_count ? mrt_base[0] : 0),
-                  g_frame.num);
+    std::snprintf(
+        where, sizeof(where), "region draw#%u rt=%#llx f%u", g_frame.draws,
+        (unsigned long long)(mrt_count ? mrt_base[0] : 0), g_frame.num);
     if (!QueueCheck(where))
       return false;
   }
@@ -1377,7 +1374,7 @@ bool BeginRegion(const u64* mrt_base,
     // A dispatch wrote these pixels since the image last saw them.
     if (!CsRefreshRtFromTruth(mrt_base[i]))
       render::FlushCsWritesRange(render::DefaultRenderer(), mrt_base[i],
-                              RtByteSize(*targets[i]), "rt-bind");
+                                 RtByteSize(*targets[i]), "rt-bind");
     targets[i]->cb_info = mrt_info[i];
     if (mrt_dcc_base && mrt_dcc_base[i]) {
       targets[i]->dcc_base = mrt_dcc_base[i];
@@ -1416,7 +1413,7 @@ bool BeginRegion(const u64* mrt_base,
   for (u32 i = 0; i < mrt_count; i++) {
     RTarget& rt = *targets[i];
     TransitionImage(g_frame.list, rt.texture, rt.layout,
-               rhi::TextureState::kColorTarget);
+                    rhi::TextureState::kColorTarget);
     rt.dirty_for_read = true;
     auto& color = colors[i];
     color.view = rt.view;
@@ -1427,8 +1424,8 @@ bool BeginRegion(const u64* mrt_base,
     // than its clear.
     // DELTA_GPU_FRAMECLEAR=<base>: force this target to load CLEAR on the FIRST
     // region of each frame (not every region, which would wipe a pass before a
-    // later one in the same frame reads it). Setting clear_pending from EndFrame
-    // does not work, it never reaches this gate.
+    // later one in the same frame reads it). Setting clear_pending from
+    // EndFrame does not work, it never reaches this gate.
     if (kFrameClearRt && mrt_base[i] == (u64)kFrameClearRt) {
       static int cleared_frame = -1;
       if (cleared_frame != g_frame.num) {
@@ -1441,22 +1438,19 @@ bool BeginRegion(const u64* mrt_base,
     if (kLazyClear) {
       // DELTA_GPU_CLEARTRACE: which draw opens a region with a clear, and to
       // what.
-      if (kClearTrace &&
-          (rt.clear_pending || !rt.ever_rendered)) {
+      if (kClearTrace && (rt.clear_pending || !rt.ever_rendered)) {
         static int n = 0;
         if (n++ < kClearTrace)
           BASE_LOGI("clear",
                     "f{} draw#{} RT {:#x} {}x{} loadOp=CLEAR value=({} {} {} "
                     "{}) pending={}({}) ever={}",
                     g_frame.num, g_frame.draws, (unsigned long)mrt_base[i],
-                    rt.w, rt.h, rt.clear_value.f[0],
-                    rt.clear_value.f[1], rt.clear_value.f[2],
-                    rt.clear_value.f[3], (int)rt.clear_pending,
-                    rt.clear_src, (int)rt.ever_rendered);
+                    rt.w, rt.h, rt.clear_value.f[0], rt.clear_value.f[1],
+                    rt.clear_value.f[2], rt.clear_value.f[3],
+                    (int)rt.clear_pending, rt.clear_src, (int)rt.ever_rendered);
       }
-      color.load = (rt.clear_pending || !rt.ever_rendered)
-                       ? rhi::LoadOp::kClear
-                       : rhi::LoadOp::kLoad;
+      color.load = (rt.clear_pending || !rt.ever_rendered) ? rhi::LoadOp::kClear
+                                                           : rhi::LoadOp::kLoad;
     } else
       color.load =
           rt.used_this_frame ? rhi::LoadOp::kLoad : rhi::LoadOp::kClear;
@@ -1525,9 +1519,9 @@ bool BeginRegion(const u64* mrt_base,
     // at the same time. A clear still needs write access, so never both.
     const bool read_only = depth_read_only && !clear_depth;
     TransitionImage(g_frame.list, dt->texture, dt->layout,
-               read_only ? rhi::TextureState::kDepthRead
-                         : rhi::TextureState::kDepthTarget,
-               rhi::kAspectDepth, dt->layers);
+                    read_only ? rhi::TextureState::kDepthRead
+                              : rhi::TextureState::kDepthTarget,
+                    rhi::kAspectDepth, dt->layers);
     depth_att.view = DepthLayerView(*dt, depth_slice);
     depth_att.depth = true;
     depth_att.read_only = read_only;
@@ -1556,8 +1550,8 @@ bool BeginRegion(const u64* mrt_base,
     if (stencil_base) {
       const bool clear_stencil = !dt->stencil_used_this_frame;
       TransitionImage(g_frame.list, dt->texture, dt->stencil_layout,
-                 rhi::TextureState::kDepthTarget, rhi::kAspectStencil,
-                 dt->layers);
+                      rhi::TextureState::kDepthTarget, rhi::kAspectStencil,
+                      dt->layers);
       depth_att.stencil = true;
       depth_att.stencil_load =
           clear_stencil ? rhi::LoadOp::kClear : rhi::LoadOp::kLoad;
@@ -1575,7 +1569,7 @@ bool BeginRegion(const u64* mrt_base,
       continue;
     const rhi::TextureState att = rt.layout;
     TransitionImage(g_frame.list, rt.texture, rt.layout,
-               rhi::TextureState::kCopyDst);
+                    rhi::TextureState::kCopyDst);
     g_frame.list->ClearTexture(rt.texture, rhi::TextureState::kCopyDst, {},
                                colors[i].clear);
     TransitionImage(g_frame.list, rt.texture, rt.layout, att);
@@ -1588,7 +1582,7 @@ bool BeginRegion(const u64* mrt_base,
         return;
       const rhi::TextureState att = layout;
       TransitionImage(g_frame.list, dt->texture, layout,
-                 rhi::TextureState::kCopyDst, aspect, dt->layers);
+                      rhi::TextureState::kCopyDst, aspect, dt->layers);
       rhi::TextureRange range;
       range.aspect = aspect;
       range.base_layer = depth_slice;
@@ -1596,7 +1590,7 @@ bool BeginRegion(const u64* mrt_base,
                                       range, depth_att.clear_depth,
                                       depth_att.clear_stencil);
       TransitionImage(g_frame.list, dt->texture, layout, att, aspect,
-                 dt->layers);
+                      dt->layers);
       load = rhi::LoadOp::kLoad;
     };
     clear_aspect(depth_att.depth_load, dt->layout, rhi::kAspectDepth);
@@ -1653,8 +1647,7 @@ bool BeginRegion(const u64* mrt_base,
   if (kRegTrace && w < 1280)
     BASE_LOGI("reg", "f{} begin RT {:#x} {}x{} mrt={} clear={}", g_frame.num,
               (unsigned long)base, w, h, g_region.cur_mrt_count,
-              g_region.cur_mrt_count &&
-                  colors[0].load == rhi::LoadOp::kClear);
+              g_region.cur_mrt_count && colors[0].load == rhi::LoadOp::kClear);
   return true;
 }
 
@@ -1662,10 +1655,7 @@ bool BeginRegion(const u64* mrt_base,
 
 namespace gpu::render {
 
-void NoteMemoryFill(Renderer& renderer,
-                    u64 base,
-                    u64 bytes,
-                    u32 value) {
+void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
   if (!renderer.available() || !bytes)
     return;
   if (trace::Recording())
@@ -1699,11 +1689,10 @@ void NoteMemoryFill(Renderer& renderer,
       BASE_LOGI("fill",
                 "f{} draw#{} RT {:#x} {}x{} {} info={:#x} cleared by fill "
                 "{:08x} -> ({}, {}, {}, {}) (base={:#x} {} bytes)",
-                g_frame.num, g_frame.draws, (unsigned long)rt_base, rt.w,
-                rt.h, rhi::FormatName(rt.fmt), rt.cb_info, value,
-                rt.clear_value.f[0], rt.clear_value.f[1], rt.clear_value.f[2],
-                rt.clear_value.f[3], (unsigned long)base,
-                (unsigned long)bytes);
+                g_frame.num, g_frame.draws, (unsigned long)rt_base, rt.w, rt.h,
+                rhi::FormatName(rt.fmt), rt.cb_info, value, rt.clear_value.f[0],
+                rt.clear_value.f[1], rt.clear_value.f[2], rt.clear_value.f[3],
+                (unsigned long)base, (unsigned long)bytes);
   };
   for (auto& kv : g_rts) {
     note(kv.second, kv.first);

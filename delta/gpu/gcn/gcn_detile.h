@@ -17,21 +17,21 @@
  * layout path; nothing in the Liverpool range can reach it.
  */
 
-#include "base/arch.h"
 #include <cstddef>
-#include <base/containers/array.h>
-#include <base/containers/vector.h>
-#include <base/functional/function.h>
+#include "base/arch.h"
+#include "base/containers/array.h"
+#include "base/containers/vector.h"
+#include "base/functional/function.h"
 
 namespace gpu::gcn {
 
-// Split [0, rows) into chunks and run fn(y0, y1) across a persistent worker pool,
-// joining before return; single fn(0, rows) when MT is off or the workload is tiny.
-// DELTA_GPU_DETILE_THREADS sets the lane count (including the caller). Pool owned by
-// this module; callers get a plain blocking call, no synchronization. Used for 8-row
-// microtile bands and the staging paths' row-major converts; one region at a time.
-void DetileParallelRows(u32 rows,
-                        const base::Function<void(u32, u32)>& fn);
+// Split [0, rows) into chunks and run fn(y0, y1) across a persistent worker
+// pool, joining before return; single fn(0, rows) when MT is off or the
+// workload is tiny. DELTA_GPU_DETILE_THREADS sets the lane count (including the
+// caller). Pool owned by this module; callers get a plain blocking call, no
+// synchronization. Used for 8-row microtile bands and the staging paths'
+// row-major converts; one region at a time.
+void DetileParallelRows(u32 rows, const base::Function<void(u32, u32)>& fn);
 
 // As above, but the caller states how much work the units carry (bytes or
 // texels) instead of the row heuristic. A few dozen block rows of a 4K surface
@@ -62,7 +62,7 @@ struct TextureMipLayout32 {
   u32 height = 0;
   u32 pitch = 0;  // storage dimensions after tile-mode alignment
   u32 stored_height = 0;
-  u32 thickness = 1;    // slices interleaved in each thick microtile
+  u32 thickness = 1;         // slices interleaved in each thick microtile
   bool macro_tiled = false;  // false for linear and mip-downgraded 1D tiling
   // gfx10 packs its small mips into one shared block; these place this level
   // inside it. Zero for level 0 and for every Liverpool surface.
@@ -106,10 +106,10 @@ void CopyImageContents(const TextureLayout32& layout,
                        const void* src,
                        void* dst);
 
-// Full physical layout of a 1-sample 2D/2D-array image with `elem_bytes`-wide elements
-// (2/4 = pixel; 8/16 = BCn block, dims in blocks). Mip-major; each mip holds all array
-// layers; later macro-tiled mips downgrade to 1D microtile when they stop spanning a
-// macro tile.
+// Full physical layout of a 1-sample 2D/2D-array image with `elem_bytes`-wide
+// elements (2/4 = pixel; 8/16 = BCn block, dims in blocks). Mip-major; each mip
+// holds all array layers; later macro-tiled mips downgrade to 1D microtile when
+// they stop spanning a macro tile.
 bool BuildTextureLayout32(TextureLayout32& out,
                           u32 width,
                           u32 height,

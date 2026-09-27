@@ -188,10 +188,7 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d);
 
 // DELTA_GPU_TRACE: the register state behind a draw, plus a one-time probe of
 // the shader binaries, their user data and the descriptor tables they point at.
-void TraceDrawRegisters(const Regs& regs,
-                        u32 op,
-                        const u32* body,
-                        u32 count);
+void TraceDrawRegisters(const Regs& regs, u32 op, const u32* body, u32 count);
 
 // --- compute ---------------------------------------------------------------
 
@@ -243,10 +240,7 @@ void TraceCsResource(u64 cs_addr,
                      const gcn::TImage& image,
                      u32 elem_bytes,
                      u32 stage_elem_bytes);
-void TraceCsInvalidRange(u64 cs_addr,
-                         u32 binding,
-                         u64 base,
-                         u64 guest_size);
+void TraceCsInvalidRange(u64 cs_addr, u32 binding, u64 base, u64 guest_size);
 void TraceCsDispatch(u64 cs_addr, bool executed, u32 num_resources);
 
 // --- the packet stream -----------------------------------------------------
@@ -304,10 +298,7 @@ void TraceAddrWatch(const char* packet,
                     u32 max_lines);
 
 // DELTA_GPU_EOPTRACE: every completion label this command processor writes.
-void TraceLabelWrite(const char* packet,
-                     u64 addr,
-                     u32 data_sel,
-                     u64 value);
+void TraceLabelWrite(const char* packet, u64 addr, u32 data_sel, u64 value);
 // EOS carries no DATA_SEL, so it reports one field fewer.
 void TraceEosLabel(u64 addr, u32 value);
 void TraceDataWrite(u64 addr, u32 dwords, u32 first_dword);
@@ -317,10 +308,7 @@ void TraceDataWrite(u64 addr, u32 dwords, u32 first_dword);
 void TraceUnhandledOpcode(u32 op, u32 count);
 
 // DELTA_GPU_IBTRACE: chained indirect buffers, followed or skipped.
-void TraceIndirectBuffer(u32 position,
-                         u32 depth,
-                         u32 words,
-                         bool followed);
+void TraceIndirectBuffer(u32 position, u32 depth, u32 words, bool followed);
 
 // DELTA_GPU_COUNTERTRACE: the CE/DE counter packets.
 void TraceCounter(const char* packet, u64 value);
@@ -328,11 +316,7 @@ void TraceWaitOnCeCounter(u32 wanted, u64 ce_counter);
 
 // A type-1 header, which is a genuine desync. Reported under DELTA_GPU_DESYNC,
 // or unconditionally while a submission is being dumped packet by packet.
-void TraceDesync(u32 position,
-                 u32 words,
-                 u32 type,
-                 u32 hdr,
-                 bool force);
+void TraceDesync(u32 position, u32 words, u32 type, u32 hdr, bool force);
 
 // --- submissions -----------------------------------------------------------
 
@@ -347,9 +331,7 @@ void TraceSubmit(const void* dcb,
                  u64 draws_so_far);
 // After a dumped walk: how far it got, plus a brute scan for draw opcodes the
 // walker may have desynced past.
-void TraceDcbWalkResult(const u32* dcb,
-                        u32 words,
-                        u32 words_walked);
+void TraceDcbWalkResult(const u32* dcb, u32 words, u32 words_walked);
 // DELTA_GPU_DCBSTAT: what the command stream is made of and which handler owns
 // the time. DELTA_GPU_OPHIST: the cumulative histogram, once, deep into a run.
 void TraceDcbStat(u32 words);

@@ -3,15 +3,15 @@
  */
 #pragma once
 
-// The frame debugger: one armed guest frame recorded, in order, into one machine-
-// readable file. The ~150 DELTA_GPU_* printf switches each answer one question, cost
-// a recompile when it changes, and cap at an arbitrary line count; this records every
-// region/draw/dispatch/barrier/validation message with full state, so a new question
-// is a query over the capture (tools/gpu_capture.py), not a new build. Keyed by GUEST
-// addresses, the module's vocabulary. No-ops (one branch) unless a capture records.
+// The frame debugger: one armed guest frame recorded, in order, into one
+// machine- readable file. The ~150 DELTA_GPU_* printf switches each answer one
+// question, cost a recompile when it changes, and cap at an arbitrary line
+// count; this records every region/draw/dispatch/barrier/validation message
+// with full state, so a new question is a query over the capture
+// (tools/gpu_capture.py), not a new build. Keyed by GUEST addresses, the
+// module's vocabulary. No-ops (one branch) unless a capture records.
 
 #include "base/arch.h"
-
 
 #include "gpu/render/command.h"
 #include "gpu/rhi/device.h"
@@ -52,10 +52,10 @@ void RegionEnd();
 // to guest memory reads what no draw ever wrote, and only the draw path
 // knows it, so it is passed in rather than recomputed.
 struct DrawBindings {
-  const u64* tex_color = nullptr;     // resolved to a live colour RT
-  const u64* tex_feedback = nullptr;  // resolved to a feedback copy
-  const u64* tex_depth = nullptr;     // resolved to a depth target
-  const u64* tex_storage = nullptr;   // bound as a storage image
+  const u64* tex_color = nullptr;          // resolved to a live colour RT
+  const u64* tex_feedback = nullptr;       // resolved to a feedback copy
+  const u64* tex_depth = nullptr;          // resolved to a depth target
+  const u64* tex_storage = nullptr;        // bound as a storage image
   const void* const* tex_guest = nullptr;  // view of a guest upload
   u32 tex_count = 0;
   u32 cbuf_mask = 0;    // bit i: cbuffer binding i staged real memory
@@ -116,9 +116,10 @@ void OnDeviceMessage(const char* level,
                      const char* labels,
                      const char* message);
 
-// Object-name registry: vk_debug names objects after the guest resource they stand for;
-// kept host-side too so a barrier or validation line can say "rt 0x8142f00000 1920x1080"
-// with no capture attached. Populated only when a capture is armed or validation runs.
+// Object-name registry: vk_debug names objects after the guest resource they
+// stand for; kept host-side too so a barrier or validation line can say "rt
+// 0x8142f00000 1920x1080" with no capture attached. Populated only when a
+// capture is armed or validation runs.
 bool NamesWanted();
 void RegisterObjectName(u64 handle, const char* name);
 // "" when the handle was never named.

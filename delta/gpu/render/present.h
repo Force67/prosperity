@@ -9,12 +9,12 @@
 
 #include "base/arch.h"
 
+#include "base/containers/vector.h"
+#include "base/memory/unique_pointer.h"
+#include "base/threading/condition_variable.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
 #include "host/window.h"
-#include <base/containers/vector.h>
-#include <base/threading/condition_variable.h>
-#include <base/threading/mutex.h>
-#include <base/memory/unique_pointer.h>
-#include <base/threading/thread.h>
 
 namespace gpu::render {
 
@@ -26,9 +26,13 @@ class LatestFramePresenter {
   LatestFramePresenter(const LatestFramePresenter&) = delete;
   LatestFramePresenter& operator=(const LatestFramePresenter&) = delete;
 
-  void Present(const u8* pixels, u32 w, u32 h,
+  void Present(const u8* pixels,
+               u32 w,
+               u32 h,
                host::PixelFormat fmt = host::PixelFormat::kBgra8);
-  void Present(base::Vector<u8>&& pixels, u32 w, u32 h,
+  void Present(base::Vector<u8>&& pixels,
+               u32 w,
+               u32 h,
                host::PixelFormat fmt = host::PixelFormat::kBgra8);
   // Block until a lent buffer has been copied out, for a caller that is about
   // to write over the one it lent.
@@ -43,7 +47,7 @@ class LatestFramePresenter {
   base::Mutex mutex_;
   base::ConditionVariable ready_;
   base::ConditionVariable released_;  // a lent buffer has been copied out
-  base::Vector<u8> pending_pixels_;  // tight pitch, pending_fmt_; latest wins
+  base::Vector<u8> pending_pixels_;   // tight pitch, pending_fmt_; latest wins
   // Set instead of pending_pixels_ when the caller lends us its buffer: the
   // presenter thread copies out of it, under the lock, before releasing it.
   const u8* pending_src_ = nullptr;

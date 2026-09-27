@@ -2,14 +2,14 @@
 
 #include <gtest/gtest.h>
 
+#include "base/containers/array.h"
+#include "base/containers/vector.h"
+#include "base/memory/move.h"
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/rdna/rdna_translate.h"
-#include <base/containers/vector.h>
-#include <base/memory/move.h>
-#include <base/containers/array.h>
 
 namespace {
 
@@ -113,8 +113,8 @@ TEST(RdnaSpirv, NoColorExportDoesNotSynthesizeWhiteOutput) {
   const u32 vs[64] = {kEndPgm};
   const u32 no_export[64] = {kEndPgm};
   const u32 null_export[64] = {0xf8000890, 0, kEndPgm};
-  const u32 color_export[64] = {
-      0x7e0002f2, 0xf800080f, 0, kEndPgm};  // v0=1; exp mrt0 v0,v0,v0,v0
+  const u32 color_export[64] = {0x7e0002f2, 0xf800080f, 0,
+                                kEndPgm};  // v0=1; exp mrt0 v0,v0,v0,v0
   for (const u32* ps : {no_export, null_export, color_export}) {
     gpu::rdna::NextProgramGeneration();
     const auto result = gpu::rdna::Recompile(vs, ps, user_data, user_data);
@@ -227,8 +227,7 @@ TEST(GcnSpirv, RejectsUnsupportedNeoForms) {
 // two subgroups and the read races the write.
 class WaveScope {
  public:
-  explicit WaveScope(u32 lanes)
-      : old_(gpu::gcn::HostSubgroupSize()) {
+  explicit WaveScope(u32 lanes) : old_(gpu::gcn::HostSubgroupSize()) {
     gpu::gcn::SetHostSubgroupSize(lanes);
   }
   ~WaveScope() { gpu::gcn::SetHostSubgroupSize(old_); }
@@ -241,10 +240,9 @@ class WaveScope {
 constexpr u32 kDsWrite0 = 0xd8340000, kDsWrite1 = 0x00000000;
 constexpr u32 kDsRead0 = 0xd8d80000, kDsRead1 = 0x01000000;
 
-gpu::gcn::LdsBarrierPlan PlanBarriers(base::Vector<u32> code,
-                                      u32 threads) {
-  const gpu::gcn::Program p = gpu::gcn::Decode(code.data(),
-                                               (u32)code.size(), false);
+gpu::gcn::LdsBarrierPlan PlanBarriers(base::Vector<u32> code, u32 threads) {
+  const gpu::gcn::Program p =
+      gpu::gcn::Decode(code.data(), (u32)code.size(), false);
   const base::Vector<u8> reach = gpu::gcn::ComputeReachability(p);
   return gpu::gcn::PlanLdsBarriers(p, reach.data(), threads);
 }
@@ -258,7 +256,7 @@ TEST(GcnSpirv, Wave64LdsBarriersAreReinsertedOnlyWhereNeeded) {
 
   // Straight-line write-then-read: one barrier, immediately before the read.
   const base::Vector<u32> raw{kDsWrite0, kDsWrite1, kDsRead0, kDsRead1,
-                                  kEndPgm};
+                              kEndPgm};
   const gpu::gcn::LdsBarrierPlan plan = PlanBarriers(raw, 64);
   ASSERT_EQ(plan.at.size(), 1u);
   EXPECT_EQ(plan.at[0], 1u);  // instruction index of the ds_read
@@ -281,11 +279,9 @@ TEST(GcnSpirv, BranchyWave64LdsSyncsPerDispatchIteration) {
   const WaveScope split(32);
   // write ; if(execz) skip a second write ; read
   const base::Vector<u32> code{
-      kDsWrite0, kDsWrite1,
-      0xbf880002,  // s_cbranch_execz pc+2 -> the read
       kDsWrite0,  kDsWrite1,
-      kDsRead0,   kDsRead1,
-      kEndPgm,
+      0xbf880002,  // s_cbranch_execz pc+2 -> the read
+      kDsWrite0,  kDsWrite1, kDsRead0, kDsRead1, kEndPgm,
   };
   const gpu::gcn::LdsBarrierPlan plan = PlanBarriers(code, 64);
   // A branchy shader gets wave-uniform control flow, which puts every
@@ -298,11 +294,9 @@ TEST(GcnSpirv, BranchyWave64LdsSyncsPerDispatchIteration) {
 
 TEST(GcnSpirv, OnlyTheEntryBlockIsAUniformPointInABranchyShader) {
   base::Vector<u32> code{
-      kDsWrite0, kDsWrite1,
-      0xbf880002,  // s_cbranch_execz
       kDsWrite0,  kDsWrite1,
-      kDsRead0,   kDsRead1,
-      kEndPgm,
+      0xbf880002,  // s_cbranch_execz
+      kDsWrite0,  kDsWrite1, kDsRead0, kDsRead1, kEndPgm,
   };
   const gpu::gcn::Program p =
       gpu::gcn::Decode(code.data(), (u32)code.size(), false);
@@ -315,7 +309,7 @@ TEST(GcnSpirv, OnlyTheEntryBlockIsAUniformPointInABranchyShader) {
 
   // With no branches at all every point is uniform.
   const base::Vector<u32> flat{kDsWrite0, kDsWrite1, kDsRead0, kDsRead1,
-                                   kEndPgm};
+                               kEndPgm};
   const gpu::gcn::Program fp =
       gpu::gcn::Decode(flat.data(), (u32)flat.size(), false);
   for (u8 u : gpu::gcn::UniformPoints(fp))
@@ -393,11 +387,10 @@ TEST(GcnSpirv, PlansScalarLoadedCbufferDescriptor) {
   const IsaScope base(gpu::gcn::IsaMode::kBase);
   const u32 code[] = {
       0xbeeb03ff, 0x00000002,  // Shader footer starts at dword 6.
-      0xc08e0104,  // s_load_dwordx4 s[28:31], s[0:1], 0x4
-      0xc28c1d08,  // s_buffer_load_dwordx4 s[24:27], s[28:31], 0x8
-      0xc2d41d00,  // s_buffer_load_dwordx8 s[40:47], s[28:31], 0x0
-      kEndPgm,
-      0x5362724f, 0x00726468,  // "OrbShdr"
+      0xc08e0104,              // s_load_dwordx4 s[28:31], s[0:1], 0x4
+      0xc28c1d08,              // s_buffer_load_dwordx4 s[24:27], s[28:31], 0x8
+      0xc2d41d00,              // s_buffer_load_dwordx8 s[40:47], s[28:31], 0x0
+      kEndPgm,    0x5362724f, 0x00726468,  // "OrbShdr"
   };
   const u32 user_data[16] = {};
   const auto recompiled =
@@ -414,8 +407,8 @@ TEST(GcnSpirv, SeedsPixelPositionFromFragCoord) {
   const IsaScope base(gpu::gcn::IsaMode::kBase);
   const u32 vs[] = {kEndPgm};
   const u32 ps[] = {
-      0x7e080f02,           // v_cvt_u32_f32 v4, v2
-      0x7e0a0f03,           // v_cvt_u32_f32 v5, v3
+      0x7e080f02,              // v_cvt_u32_f32 v4, v2
+      0x7e0a0f03,              // v_cvt_u32_f32 v5, v3
       0xf800000f, 0x07060504,  // exp mrt0 v4, v5, v6, v7
       kEndPgm,
   };

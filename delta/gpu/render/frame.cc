@@ -3,29 +3,29 @@
  */
 
 #include "gpu/render/frame.h"
+#include "base/arch.h"
 #include "gpu/render/buffer_cache.h"
 #include "gpu/write_tracker.h"
-#include "base/arch.h"
 
-#include "host/window.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/gpu_perf.h"
 #include "gpu/guest_memory.h"
-#include "gpu/render/renderer.h"
-#include "gpu/render/renderer_state.h"
 #include "gpu/render/capture.h"
 #include "gpu/render/compute.h"
-#include "gpu/render/labels.h"
 #include "gpu/render/device.h"
 #include "gpu/render/draw_recomp.h"
 #include "gpu/render/guest_format.h"
-#include "gpu/gpu_perf.h"
+#include "gpu/render/labels.h"
 #include "gpu/render/perf.h"
 #include "gpu/render/pipeline_cache.h"
 #include "gpu/render/present.h"
 #include "gpu/render/render_target.h"
+#include "gpu/render/renderer.h"
+#include "gpu/render/renderer_state.h"
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/trace.h"
 #include "gpu/render/upload_ring.h"
+#include "host/window.h"
 
 #include <dlfcn.h>
 #include <cmath>
@@ -34,17 +34,17 @@
 #include <cstring>
 #include <limits>
 
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <base/strings/xstring.h>
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/containers/hash_map.h>
+#include "base/algorithm.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(bool, kGpuSync, "DELTA_GPU_SYNC", false);
@@ -154,8 +154,9 @@ void CollectPassTimes(FrameSlot& slot) {
   base::Vector<u64> stamps(n * 2);
   if (Device().ReadTimestamps(slot.pass_timestamps, 0, n * 2, stamps.data())) {
     const rhi::Caps& caps = Device().caps();
-    const u64 mask =
-        caps.timestamp_bits >= 64 ? UINT64_MAX : (u64{1} << caps.timestamp_bits) - 1;
+    const u64 mask = caps.timestamp_bits >= 64
+                         ? UINT64_MAX
+                         : (u64{1} << caps.timestamp_bits) - 1;
     for (u32 i = 0; i < n; i++) {
       PassTotal& t = g_pass_totals[slot.pass_marks[i].target];
       t.ns += ((stamps[i * 2 + 1] - stamps[i * 2]) & mask) *
@@ -182,7 +183,8 @@ void CollectPassTimes(FrameSlot& slot) {
     const PassTotal& t = sorted[i].second;
     BASE_LOGI("passprof", "  {:#x} {:.2f} ms/f  passes={:.1f}/f draws={:.0f}/f",
               (unsigned long long)sorted[i].first, t.ns / g_pass_frames / 1e6,
-              double(t.passes) / g_pass_frames, double(t.draws) / g_pass_frames);
+              double(t.passes) / g_pass_frames,
+              double(t.draws) / g_pass_frames);
   }
   g_pass_totals.clear();
   g_pass_frames = 0;
@@ -218,7 +220,8 @@ bool CreateFrameSlots() {
     if (timestamps)
       slot.timestamps = Device().CreateTimestampPool(2);
     if (timestamps && kPassProf)
-      slot.pass_timestamps = Device().CreateTimestampPool(kMaxProfiledPasses * 2);
+      slot.pass_timestamps =
+          Device().CreateTimestampPool(kMaxProfiledPasses * 2);
   }
   g_frame.list = g_frame.slots[0].list;
   return true;
@@ -258,25 +261,29 @@ void EnsureReadback(u32 w, u32 h, rhi::Format fmt) {
   desc.name = "frame readback";
   g_frame.readback = Device().CreateBuffer(desc);
   g_frame.readback_size = g_frame.readback ? need : 0;
-  g_frame.readback_map = g_frame.readback ? g_frame.readback->mapped() : nullptr;
+  g_frame.readback_map =
+      g_frame.readback ? g_frame.readback->mapped() : nullptr;
 }
 
 namespace {
 
 // DELTA_RDOC_FRAME=N: bracket frame N's guest rendering with a RenderDoc
 // capture. DELTA_RDOC_EXIT=1 exits once the capture has been written. The guest
-// draws run on this device, which owns no swapchain (the compositor presents the
-// read-back pixels from its own device), so a capture taken at a present
+// draws run on this device, which owns no swapchain (the compositor presents
+// the read-back pixels from its own device), so a capture taken at a present
 // boundary only ever catches that final blit. The frame has to be marked
 // explicitly, and the instance named, or RenderDoc picks the wrong device.
 // RENDERDOC_API_1_0_0 is append-only, so these entry indices hold in every
 // version; the ones in between are options and keybind setters we do not use.
+// RenderDoc API layout and member names (renderdoc_app.h).
+// NOLINTBEGIN(readability-identifier-naming)
 struct RdocApi {
   void* entry0[19];
   void (*StartFrameCapture)(void* dev, void* wnd);
   u32 (*IsFrameCapturing)();
   u32 (*EndFrameCapture)(void* dev, void* wnd);
 };
+// NOLINTEND(readability-identifier-naming)
 
 RdocApi* GetRdocApi() {
   static RdocApi* api = []() -> RdocApi* {
@@ -312,8 +319,8 @@ bool ReportRtContents(FrameSlot& owner) {
   if (kLdsDump && g_ring.lds_map &&
       g_frame.num % base::Max(1, kRtStatEvery.get()) == 0) {
     const u32* dw = reinterpret_cast<const u32*>(g_ring.lds_map);
-    const u32 n = base::Min<u32>(kLdsDump.get(),
-                                (u32)(kLdsScratch / sizeof(u32)));
+    const u32 n =
+        base::Min<u32>(kLdsDump.get(), (u32)(kLdsScratch / sizeof(u32)));
     char line[1024];
     int at = 0;
     u32 nonzero = 0;
@@ -357,7 +364,7 @@ bool ReportRtContents(FrameSlot& owner) {
   // reported in one run and absent from the next, with nothing to say it had
   // been dropped.
   const size_t max_scored = base::Max(1, kRtStatMax.get());
-  base::Vector<base::Pair<u64, RTarget*> > order;
+  base::Vector<base::Pair<u64, RTarget*>> order;
   for (auto& kv : g_rts)
     if (kv.second.used_this_frame || (kGpuRtstatAll && kv.second.ever_rendered))
       order.emplace_back(kv.first, &kv.second);
@@ -408,8 +415,8 @@ bool ReportRtContents(FrameSlot& owner) {
     const u32 chans = is_h4 ? 4u : (is_h2 ? 2u : (bpp >= 4 ? 4u : bpp));
     const u64 n = static_cast<u64>(rt.w) * rt.h;
     const u64 step = n > 16384 ? n / 16384 : 1;
-    u64 nz = 0, rgb_nz = 0, samples = 0, nan_half = 0, inf_half = 0,
-             hot = 0, a_nz = 0;
+    u64 nz = 0, rgb_nz = 0, samples = 0, nan_half = 0, inf_half = 0, hot = 0,
+        a_nz = 0;
     double a_sum = 0.0;
     double luma_sum = 0.0;
     // The HDR magnitude, which the buckets cannot show: they all collapse into
@@ -457,8 +464,7 @@ bool ReportRtContents(FrameSlot& owner) {
       bool finite = true;
       for (u32 c = 0; c < chans; c++) {
         if (is_half) {
-          const u32 h =
-              (u32)t[2 * c] | ((u32)t[2 * c + 1] << 8);
+          const u32 h = (u32)t[2 * c] | ((u32)t[2 * c + 1] << 8);
           // Inf and NaN share the exponent; only the mantissa tells them apart,
           // so counting NaN alone reports nothing for a buffer full of Inf –
           // and an Inf in an HDR target reads downstream as a clipped
@@ -555,12 +561,13 @@ bool ReportRtContents(FrameSlot& owner) {
           const u8* t8 = px8 + q * bpp;
           float c4[4];
           for (u32 k = 0; k < 4; k++)
-            c4[k] = half_val((u32)t8[2 * k] |
-                             ((u32)t8[2 * k + 1] << 8));
+            c4[k] = half_val((u32)t8[2 * k] | ((u32)t8[2 * k + 1] << 8));
           const float l = base::Max({c4[0], c4[1], c4[2]});
           u8 px3[3];
           if (l > 100.f) {
-            px3[0] = 255; px3[1] = 0; px3[2] = 0;
+            px3[0] = 255;
+            px3[1] = 0;
+            px3[2] = 0;
           } else {
             const float g = l <= 0.f ? 0.f : std::log10(1.f + l * 9.f);
             const int v8 = (int)(base::Min(1.f, g) * 255.f);
@@ -587,87 +594,83 @@ bool ReportRtContents(FrameSlot& owner) {
         fcp.region.height = rt.h;
         flist->CopyTextureToBuffer(g_frame.readback, rt.feedback_texture, &fcp,
                                    1);
-        TransitionImage(flist, rt.feedback_texture, rt.feedback_layout,
-                        fold);
+        TransitionImage(flist, rt.feedback_texture, rt.feedback_layout, fold);
         flist->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
         if (EndImmediate(flist)) {
-            u64 fhi = 0, below = 0;
-            float fa_min = 1e30f, fa_max = -1e30f, fmax = 0.f;
-            double fa_sum = 0.0;
-            for (u64 i = 0; i < n; i += step) {
-              const u8* t8 = px8 + i * bpp;
-              float c4[4];
+          u64 fhi = 0, below = 0;
+          float fa_min = 1e30f, fa_max = -1e30f, fmax = 0.f;
+          double fa_sum = 0.0;
+          for (u64 i = 0; i < n; i += step) {
+            const u8* t8 = px8 + i * bpp;
+            float c4[4];
+            for (u32 k = 0; k < 4; k++)
+              c4[k] = half_val((u32)t8[2 * k] | ((u32)t8[2 * k + 1] << 8));
+            const float l = base::Max({c4[0], c4[1], c4[2]});
+            fmax = base::Max(fmax, l);
+            if (l > 100.f) {
+              fhi++;
+              fa_sum += c4[3];
+              fa_min = base::Min(fa_min, c4[3]);
+              fa_max = base::Max(fa_max, c4[3]);
+              if (c4[3] < 0.89990f)
+                below++;
+            }
+          }
+          // AT the texel that ran away in the target. The aggregate above
+          // is conditioned on feedback texels over 100, and there are none,
+          // so it says nothing about the one texel that matters. This is the
+          // number that decides reset (alpha >= 0.89990) vs amplify.
+          float at[4] = {0, 0, 0, 0};
+          {
+            const u64 idx = (u64)max_y * rt.w + (u64)max_x;
+            if (idx < n) {
+              const u8* t8 = px8 + idx * bpp;
               for (u32 k = 0; k < 4; k++)
-                c4[k] = half_val((u32)t8[2 * k] |
-                                 ((u32)t8[2 * k + 1] << 8));
-              const float l = base::Max({c4[0], c4[1], c4[2]});
-              fmax = base::Max(fmax, l);
-              if (l > 100.f) {
-                fhi++;
-                fa_sum += c4[3];
-                fa_min = base::Min(fa_min, c4[3]);
-                fa_max = base::Max(fa_max, c4[3]);
-                if (c4[3] < 0.89990f)
-                  below++;
-              }
+                at[k] = half_val((u32)t8[2 * k] | ((u32)t8[2 * k + 1] << 8));
             }
-            // AT the texel that ran away in the target. The aggregate above
-            // is conditioned on feedback texels over 100, and there are none,
-            // so it says nothing about the one texel that matters. This is the
-            // number that decides reset (alpha >= 0.89990) vs amplify.
-            float at[4] = {0, 0, 0, 0};
-            {
-              const u64 idx =
-                  (u64)max_y * rt.w + (u64)max_x;
-              if (idx < n) {
-                const u8* t8 = px8 + idx * bpp;
+          }
+          // A PICTURE of where the runaway texels are. Every aggregate so
+          // far (count, bounding box, percentiles) is compatible with several
+          // different mechanisms; the arrangement usually is not. Written
+          // from the feedback readback, which is already non-perturbing –
+          // DELTA_GPU_RTDUMP is not (see the profile).
+          if (kFbDump) {
+            char fp[256];
+            std::snprintf(fp, sizeof(fp), "%s/fb_%lx.ppm", DumpDir(),
+                          (unsigned long)kv.first);
+            if (FILE* pf = std::fopen(fp, "wb")) {
+              std::fprintf(pf, "P6\n%u %u\n255\n", rt.w, rt.h);
+              for (u64 q = 0; q < (u64)rt.w * rt.h; q++) {
+                const u8* t8 = px8 + q * bpp;
+                float c4[4];
                 for (u32 k = 0; k < 4; k++)
-                  at[k] = half_val((u32)t8[2 * k] |
-                                   ((u32)t8[2 * k + 1] << 8));
-              }
-            }
-            // A PICTURE of where the runaway texels are. Every aggregate so
-            // far (count, bounding box, percentiles) is compatible with several
-            // different mechanisms; the arrangement usually is not. Written
-            // from the feedback readback, which is already non-perturbing –
-            // DELTA_GPU_RTDUMP is not (see the profile).
-            if (kFbDump) {
-              char fp[256];
-              std::snprintf(fp, sizeof(fp), "%s/fb_%lx.ppm", DumpDir(),
-                            (unsigned long)kv.first);
-              if (FILE* pf = std::fopen(fp, "wb")) {
-                std::fprintf(pf, "P6\n%u %u\n255\n", rt.w, rt.h);
-                for (u64 q = 0; q < (u64)rt.w * rt.h; q++) {
-                  const u8* t8 = px8 + q * bpp;
-                  float c4[4];
-                  for (u32 k = 0; k < 4; k++)
-                    c4[k] = half_val((u32)t8[2 * k] |
-                                     ((u32)t8[2 * k + 1] << 8));
-                  const float l = base::Max({c4[0], c4[1], c4[2]});
-                  u8 px3[3];
-                  if (l > 100.f) {  // runaway: flag red
-                    px3[0] = 255; px3[1] = 0; px3[2] = 0;
-                  } else {  // else log-scaled grey so structure is visible
-                    const float g = l <= 0.f ? 0.f
-                                             : std::log10(1.f + l * 9.f);
-                    const int v8 = (int)(base::Min(1.f, g) * 255.f);
-                    px3[0] = px3[1] = px3[2] = (u8)v8;
-                  }
-                  std::fwrite(px3, 1, 3, pf);
+                  c4[k] = half_val((u32)t8[2 * k] | ((u32)t8[2 * k + 1] << 8));
+                const float l = base::Max({c4[0], c4[1], c4[2]});
+                u8 px3[3];
+                if (l > 100.f) {  // runaway: flag red
+                  px3[0] = 255;
+                  px3[1] = 0;
+                  px3[2] = 0;
+                } else {  // else log-scaled grey so structure is visible
+                  const float g = l <= 0.f ? 0.f : std::log10(1.f + l * 9.f);
+                  const int v8 = (int)(base::Min(1.f, g) * 255.f);
+                  px3[0] = px3[1] = px3[2] = (u8)v8;
                 }
-                std::fclose(pf);
-                BASE_LOGI("rtstat-fb", "wrote {}", fp);
+                std::fwrite(px3, 1, 3, pf);
               }
+              std::fclose(pf);
+              BASE_LOGI("rtstat-fb", "wrote {}", fp);
             }
-            BASE_LOGI("rtstat-fb",
-                      "{:#x} max={:.4g} hi100={} fbA={:.4g}/{:.4g}/{:.4g} "
-                      "below0.8999={} at({},{})={:.4g},{:.4g},{:.4g} "
-                      "a={:.4g} {}",
-                      (unsigned long)kv.first, fmax, (unsigned long)fhi,
-                      fhi ? fa_min : 0.f,
-                      fhi ? fa_sum / (double)fhi : 0.0, fhi ? fa_max : 0.f,
-                      (unsigned long)below, max_x, max_y, at[0], at[1], at[2],
-                      at[3], at[3] >= 0.89990f ? "RESET" : "AMPLIFY");
+          }
+          BASE_LOGI("rtstat-fb",
+                    "{:#x} max={:.4g} hi100={} fbA={:.4g}/{:.4g}/{:.4g} "
+                    "below0.8999={} at({},{})={:.4g},{:.4g},{:.4g} "
+                    "a={:.4g} {}",
+                    (unsigned long)kv.first, fmax, (unsigned long)fhi,
+                    fhi ? fa_min : 0.f, fhi ? fa_sum / (double)fhi : 0.0,
+                    fhi ? fa_max : 0.f, (unsigned long)below, max_x, max_y,
+                    at[0], at[1], at[2], at[3],
+                    at[3] >= 0.89990f ? "RESET" : "AMPLIFY");
         }
       }
     }
@@ -692,32 +695,29 @@ bool ReportRtContents(FrameSlot& owner) {
       size_t i = (size_t)(q * (double)(lums.size() - 1));
       return lums[i];
     };
-    BASE_LOGI("rtstat",
-              "f{} RT {:#x} {}x{} draws={} nz={} rgbnz={}/{} anz={} amean={:.4g} "
-              "mean={} "
-              "tone={}/{}/{}/{}/{}/{}/{}/{} hot={} nan={} inf={} "
-              "max={:.4g}@{},{}(a={:.4g}) hi100={} hibox={},{}-{},{} "
-              "hiA={:.4g}/{:.4g}/{:.4g} p99={:.4g} p999={:.4g} guestnz={}/{} "
-              "vs={:#x} ps={:#x} cb={:#x} rb={:#x} vals={:08x} {:08x} {:08x} "
-              "{:08x}",
-              g_frame.num, (unsigned long)kv.first, rt.w, rt.h, rt.draws,
-              (unsigned long)nz, (unsigned long)rgb_nz, (unsigned long)samples,
-              (unsigned long)a_nz, samples ? a_sum / (double)samples : 0.0,
-              (unsigned long)(samples ? luma_sum / (double)samples * 255.0
-                                      : 0.0),
-              (unsigned long)tone[0], (unsigned long)tone[1],
-              (unsigned long)tone[2], (unsigned long)tone[3],
-              (unsigned long)tone[4], (unsigned long)tone[5],
-              (unsigned long)tone[6], (unsigned long)tone[7], (unsigned long)hot,
-              (unsigned long)nan_half, (unsigned long)inf_half, lum_max, max_x,
-              max_y, a_at_max, (unsigned long)hi, hi ? hx0 : 0, hi ? hy0 : 0,
-              hx1, hy1, hi ? hi_a_min : 0.f,
-              hi ? hi_a_sum / (double)hi : 0.0, hi ? hi_a_max : 0.f,
-              pct(0.99), pct(0.999), (unsigned long)guest_nz,
-              (unsigned long)guest_bytes, (unsigned long)rt.last_vs,
-              (unsigned long)rt.last_ps, rt.last_cbuf_mask,
-              rt.last_rawbuf_mask, distinct[0], distinct[1], distinct[2],
-              distinct[3]);
+    BASE_LOGI(
+        "rtstat",
+        "f{} RT {:#x} {}x{} draws={} nz={} rgbnz={}/{} anz={} amean={:.4g} "
+        "mean={} "
+        "tone={}/{}/{}/{}/{}/{}/{}/{} hot={} nan={} inf={} "
+        "max={:.4g}@{},{}(a={:.4g}) hi100={} hibox={},{}-{},{} "
+        "hiA={:.4g}/{:.4g}/{:.4g} p99={:.4g} p999={:.4g} guestnz={}/{} "
+        "vs={:#x} ps={:#x} cb={:#x} rb={:#x} vals={:08x} {:08x} {:08x} "
+        "{:08x}",
+        g_frame.num, (unsigned long)kv.first, rt.w, rt.h, rt.draws,
+        (unsigned long)nz, (unsigned long)rgb_nz, (unsigned long)samples,
+        (unsigned long)a_nz, samples ? a_sum / (double)samples : 0.0,
+        (unsigned long)(samples ? luma_sum / (double)samples * 255.0 : 0.0),
+        (unsigned long)tone[0], (unsigned long)tone[1], (unsigned long)tone[2],
+        (unsigned long)tone[3], (unsigned long)tone[4], (unsigned long)tone[5],
+        (unsigned long)tone[6], (unsigned long)tone[7], (unsigned long)hot,
+        (unsigned long)nan_half, (unsigned long)inf_half, lum_max, max_x, max_y,
+        a_at_max, (unsigned long)hi, hi ? hx0 : 0, hi ? hy0 : 0, hx1, hy1,
+        hi ? hi_a_min : 0.f, hi ? hi_a_sum / (double)hi : 0.0,
+        hi ? hi_a_max : 0.f, pct(0.99), pct(0.999), (unsigned long)guest_nz,
+        (unsigned long)guest_bytes, (unsigned long)rt.last_vs,
+        (unsigned long)rt.last_ps, rt.last_cbuf_mask, rt.last_rawbuf_mask,
+        distinct[0], distinct[1], distinct[2], distinct[3]);
     // DELTA_GPU_RTSTAT_DIS: disassemble the pixel shader that produced a
     // NaN-poisoned half-float target. Guest shader addresses differ from run to
     // run, so the shader has to be named in the same run that observed the NaN.
@@ -769,19 +769,19 @@ bool ReportRtContents(FrameSlot& owner) {
   if (!kGpuDbStat)
     depth_list.clear();
   else if (kGpuDbStat != 1)
-    depth_list.erase(
-        base::RemoveIf(depth_list.begin(), depth_list.end(),
-                       [](const base::Pair<u64, DepthTarget*>& e) {
-                         return e.first != (u64)kGpuDbStat;
-                       }),
-        depth_list.end());
+    depth_list.erase(base::RemoveIf(depth_list.begin(), depth_list.end(),
+                                    [](const base::Pair<u64, DepthTarget*>& e) {
+                                      return e.first != (u64)kGpuDbStat;
+                                    }),
+                     depth_list.end());
   for (auto& entry : depth_list) {
     DepthTarget& d = *entry.second;
     // Never touch a target still in UNDEFINED: a barrier out of that layout
     // is allowed to DISCARD the image, so reading one to report on it would
     // destroy the thing being measured, and it did, every RTSTAT run,
     // which quietly invalidated depth readings taken with it.
-    if (!d.texture || !d.w || !d.h || d.layout == rhi::TextureState::kUndefined ||
+    if (!d.texture || !d.w || !d.h ||
+        d.layout == rhi::TextureState::kUndefined ||
         (!d.used_this_frame && !kGpuRtstatAll))
       continue;
     EnsureReadback(d.w, d.h, rhi::Format::kR32Float);
@@ -799,8 +799,8 @@ bool ReportRtContents(FrameSlot& owner) {
     list->CopyTextureToBuffer(g_frame.readback, d.texture, &copy, 1);
     // Put it back where the frame left it: this is a diagnostic, and a
     // diagnostic that moves the pipeline's state is a diagnostic that lies.
-    TransitionImage(list, d.texture, d.layout, old_layout,
-                    rhi::kAspectDepth, d.layers);
+    TransitionImage(list, d.texture, d.layout, old_layout, rhi::kAspectDepth,
+                    d.layers);
     list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
     if (!EndImmediate(list))
       continue;
@@ -830,8 +830,8 @@ bool ReportRtContents(FrameSlot& owner) {
       base::Vector<u8> bgra(n * 4);
       for (u64 i = 0; i < n; i++) {
         const float t = (z[i] - lo) / (hi - lo);
-        const u8 g = static_cast<u8>(
-            base::Min(255.f, base::Max(0.f, t * 255.f)));
+        const u8 g =
+            static_cast<u8>(base::Min(255.f, base::Max(0.f, t * 255.f)));
         bgra[i * 4 + 0] = g;
         bgra[i * 4 + 1] = g;
         bgra[i * 4 + 2] = g;
@@ -960,8 +960,7 @@ void BeginFrame(Renderer& renderer) {
     const u64 used_vb = g_ring.vb_offset - prev_vb;
     const u64 used_ib = g_ring.ib_offset - prev_ib;
     const u64 used_ubo = g_ring.ubo_offset - prev_ubo;
-    const u64 used_sbo =
-        g_ring.sbo_map ? g_ring.sbo_offset - prev_sbo : 0;
+    const u64 used_sbo = g_ring.sbo_map ? g_ring.sbo_offset - prev_sbo : 0;
     peak_vb = base::Max(peak_vb, used_vb);
     peak_ib = base::Max(peak_ib, used_ib);
     peak_ubo = base::Max(peak_ubo, used_ubo);
@@ -970,8 +969,7 @@ void BeginFrame(Renderer& renderer) {
       BASE_LOGI("ringhwm",
                 "f{} draws={} vb={}K/{}K(peak {}K) ib={}K/{}K(peak {}K) "
                 "ubo={}K/{}K(peak {}K) sbo={}K/{}K(peak {}K)",
-                g_frame.num, g_frame.draws,
-                (unsigned long long)(used_vb >> 10),
+                g_frame.num, g_frame.draws, (unsigned long long)(used_vb >> 10),
                 (unsigned long long)((VbRingBytes() / 2) >> 10),
                 (unsigned long long)(peak_vb >> 10),
                 (unsigned long long)(used_ib >> 10),
@@ -1006,7 +1004,7 @@ void BeginFrame(Renderer& renderer) {
       std::memset(g_ring.ubo_map + UboRingBytes() / 2, 0, kCbufWindow);
     }
     g_ring.ubo_offset = ubo_base + ((kCbufWindow + g_ring.ubo_align - 1) &
-                                   ~(u64)(g_ring.ubo_align - 1));
+                                    ~(u64)(g_ring.ubo_align - 1));
   }
   // Raw-buffer ring: same slot split and same permanently-zero window 0, which
   // is where a binding whose descriptor did not resolve points.
@@ -1270,14 +1268,14 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   const bool waited = fin.submitted;
   phases.Mark(3);
   if (fin.submitted) {
-    u64 _tr0 = NowNs();
+    u64 tr0 = NowNs();
     if (!Device().Wait(fin.submission)) {
       BASE_LOGI("gpuvk", "frame {} DEVICE FAULT: draws={}", fin.frame_num,
                 fin.frame_draws);
       renderer.state = nullptr;
       return;
     }
-    u64 dt = NowNs() - _tr0;
+    u64 dt = NowNs() - tr0;
     g_ns_readback += dt;
     g_fr_wait += dt;
     if (fin.timestamps) {
@@ -1326,12 +1324,13 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   static base::Vector<u8> flipped;
   auto* rb = fin.readback ? fin.readback->mapped() : nullptr;
   // DELTA_GPU_RBTRACE: whether the bytes this present is about to show are
-  // actually non-zero, and which slot's mapping they came from. "A black window"
-  // has two different causes that look identical downstream (the readback
-  // failing, or the target genuinely being black), and every consumer below
-  // (present, WritePpm, SNAP) inherits the answer silently. `nz` separates them
-  // in one line. The presented slot's map differing from the currently bound
-  // one is NORMAL: presentation runs one frame behind recording.
+  // actually non-zero, and which slot's mapping they came from. "A black
+  // window" has two different causes that look identical downstream (the
+  // readback failing, or the target genuinely being black), and every consumer
+  // below (present, WritePpm, SNAP) inherits the answer silently. `nz`
+  // separates them in one line. The presented slot's map differing from the
+  // currently bound one is NORMAL: presentation runs one frame behind
+  // recording.
   static const bool kRbTrace2 = std::getenv("DELTA_GPU_RBTRACE") != nullptr;
   if (kRbTrace2) {
     u64 nz = 0, sampled = 0;
@@ -1340,11 +1339,10 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     // channels rather than reporting on one of them.
     for (size_t i = 0; rb && i < n; i += 4099, sampled++)
       nz += rb[i] != 0;
-    BASE_LOGI("rb",
-              "present f{} nz={}/{} rt={:#x} {}x{} map={:p}{}",
-              fin.frame_num, (unsigned long long)nz, (unsigned long long)sampled,
-              (unsigned long)fin.present_base, fin.w, fin.h,
-              static_cast<void*>(rb),
+    BASE_LOGI("rb", "present f{} nz={}/{} rt={:#x} {}x{} map={:p}{}",
+              fin.frame_num, (unsigned long long)nz,
+              (unsigned long long)sampled, (unsigned long)fin.present_base,
+              fin.w, fin.h, static_cast<void*>(rb),
               fin.readback == g_frame.readback ? " (bound)" : "");
   }
   u8* pixels;
@@ -1382,7 +1380,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // The dump writers below read BGRA, and the perf overlay draws BGRA into the
   // buffer it is given. Both are off by default, so an RGBA readback is
   // converted here only when one of them is actually about to run.
-  const auto toBgra = [&]() {
+  const auto to_bgra = [&]() {
     if (pixel_fmt == host::PixelFormat::kBgra8)
       return;
     flipped.resize(static_cast<size_t>(fin.w) * fin.h * 4);
@@ -1428,7 +1426,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
         kSnapMinIdx ? (int)fin.frame_max_idx : (int)fin.frame_draws;
     char p[256];
     std::snprintf(p, sizeof p, "%s/gpu_snap.ppm", DumpDir());
-    toBgra();
+    to_bgra();
     WritePpm(p, pixels, fin.w, fin.h);
     if (FILE* alpha = std::fopen("/tmp/gpu_snap_alpha.pgm", "wb")) {
       std::fprintf(alpha, "P5\n%u %u\n255\n", fin.w, fin.h);
@@ -1436,8 +1434,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
         std::fputc(pixels[i * 4 + 3], alpha);
       std::fclose(alpha);
     }
-    BASE_LOGI("snap",
-              "wrote {} (f{} {}x{} draws={} rt={:#x} scanout={:#x})", p,
+    BASE_LOGI("snap", "wrote {} (f{} {}x{} draws={} rt={:#x} scanout={:#x})", p,
               fin.frame_num, fin.w, fin.h, fin.frame_draws,
               (unsigned long)fin.present_base, (unsigned long)fin.scanout_base);
     snapped = true;
@@ -1451,7 +1448,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
       fin.frame_draws > 20 && fin.frame_num - seq_last_frame >= 250) {
     char p[256];
     std::snprintf(p, sizeof p, "%s/seq_%02d.ppm", DumpDir(), seq_done);
-    toBgra();
+    to_bgra();
     WritePpm(p, pixels, fin.w, fin.h);
     BASE_LOGI("snapseq", "{} -> f{} draws={}", seq_done, fin.frame_num,
               fin.frame_draws);
@@ -1468,7 +1465,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
       fin.frame_num - every_last >= kSnapEvery) {
     char p[256];
     std::snprintf(p, sizeof(p), "%s/every_%03d.ppm", DumpDir(), every_done);
-    toBgra();
+    to_bgra();
     WritePpm(p, pixels, fin.w, fin.h);
     BASE_LOGI("snapevery", "{} -> f{} draws={}", every_done, fin.frame_num,
               fin.frame_draws);
@@ -1485,13 +1482,13 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     char p[256], tmp[256];
     std::snprintf(p, sizeof(p), "%s/gpu_room.ppm", DumpDir());
     std::snprintf(tmp, sizeof(tmp), "%s/gpu_room.tmp", DumpDir());
-    toBgra();
+    to_bgra();
     WritePpm(tmp, pixels, fin.w, fin.h);
     std::rename(tmp, p);
   }
   if (g_dump && fin.frame_num >= 1000 && fin.frame_num % 2000 == 0 &&
       fin.frame_draws > 0) {
-    toBgra();
+    to_bgra();
     DumpPpm(pixels, fin.w, fin.h);
   }
   // Rolling latest-frame capture (uncapped) so late transitions (menu/gameplay)
@@ -1499,16 +1496,15 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   if (g_dump && fin.frame_num % kLatestEvery == 0 && fin.frame_draws > 0) {
     char latest[256];
     std::snprintf(latest, sizeof(latest), "%s/gpu_latest.ppm", DumpDir());
-    toBgra();
+    to_bgra();
     WritePpm(latest, pixels, fin.w, fin.h);
   }
   if (g_dump && fin.frame_num % 200 == 0) {
-    BASE_LOGI(
-        "gpuvk",
-        "frame {} draws={} heuristic={} rt={:#x} {}x{}  scanout={:#x}",
-        fin.frame_num, fin.frame_draws, g_frame.heuristic,
-        (unsigned long)fin.present_base, fin.w, fin.h,
-        (unsigned long)fin.scanout_base);
+    BASE_LOGI("gpuvk",
+              "frame {} draws={} heuristic={} rt={:#x} {}x{}  scanout={:#x}",
+              fin.frame_num, fin.frame_draws, g_frame.heuristic,
+              (unsigned long)fin.present_base, fin.w, fin.h,
+              (unsigned long)fin.scanout_base);
     for (auto& kv : g_rts)
       if (kv.second.used_this_frame)
         BASE_LOGI("gpuvk", "   RT {:#x} {}x{} draws={}{}",
@@ -1518,8 +1514,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   }
   // Perf overlay, drawn into the presented buffer only: the PPM capture
   // paths above already consumed `pixels`, so dumps stay clean.
-  DrawPerfOverlay(pixels, fin.w, fin.h,
-                  pixel_fmt == host::PixelFormat::kRgba8);
+  DrawPerfOverlay(pixels, fin.w, fin.h, pixel_fmt == host::PixelFormat::kRgba8);
   // DELTA_GPU_OVERLAY_DUMP: one post-overlay ppm (visual check of the overlay
   // itself, which the clean capture paths above deliberately exclude).
   static bool overlay_dumped = false;
@@ -1527,7 +1522,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     overlay_dumped = true;
     char p[256];
     std::snprintf(p, sizeof p, "%s/gpu_overlay.ppm", DumpDir());
-    toBgra();
+    to_bgra();
     WritePpm(p, pixels, fin.w, fin.h);
     BASE_LOGI("overlay", "wrote {}", p);
   }

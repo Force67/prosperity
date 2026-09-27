@@ -5,13 +5,13 @@
 #include "gpu/render/present.h"
 #include "base/arch.h"
 
-#include "host/window.h"
 #include "gpu/gpu_perf.h"
+#include "host/window.h"
 
-#include <base/containers/vector.h>
-#include <base/memory/move.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
+#include "base/containers/vector.h"
+#include "base/memory/move.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 
 namespace gpu::render {
 
@@ -27,8 +27,8 @@ LatestFramePresenter::~LatestFramePresenter() {
 
 void LatestFramePresenter::StartLocked() {
   if (!thread_)
-    thread_ = base::MakeUnique<base::Thread>("present", [this] { Run(); },
-                                             true);
+    thread_ =
+        base::MakeUnique<base::Thread>("present", [this] { Run(); }, true);
 }
 
 void LatestFramePresenter::Run() {
@@ -55,10 +55,10 @@ void LatestFramePresenter::Run() {
     }
     pending_ = false;
     lock.unlock();
-    const u64 _tp = NowNs();
+    const u64 tp = NowNs();
     if (host::Ensure("prosperity", w, h) && host::PumpEvents())
       host::Present(src, w, h, w * 4, fmt);
-    g_ns_gfx_present += NowNs() - _tp;
+    g_ns_gfx_present += NowNs() - tp;
     lock.lock();
     if (pending_src_ == src) {
       pending_src_ = nullptr;
@@ -102,10 +102,10 @@ void LatestFramePresenter::Present(base::Vector<u8>&& pixels,
 }
 
 void LatestFramePresenter::WaitForBorrowed() {
-  const u64 _t0 = NowNs();
+  const u64 t0 = NowNs();
   base::UniqueLock<base::Mutex> lock(mutex_);
   released_.Wait(lock, [this] { return !pending_src_ || stopping_; });
-  g_ns_borrow_wait += NowNs() - _t0;
+  g_ns_borrow_wait += NowNs() - t0;
 }
 
 void LatestFramePresenter::Stop() {

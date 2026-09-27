@@ -6,20 +6,20 @@
 
 #include <cstring>
 
-#include <base/logging.h>
+#include "base/logging.h"
 
+#include "base/algorithm.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/functional/function.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/time/time.h"
 #include "gpu/opengl/gl_rhi_internal.h"
-#include <base/algorithm.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/functional/function.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/time/time.h>
 
 namespace gpu::opengl {
 
@@ -34,8 +34,8 @@ void GLAPIENTRY OnDebugMessage(GLenum /*source*/,
                                const void* /*user*/) {
   if (severity == GL_DEBUG_SEVERITY_NOTIFICATION)
     return;
-  BASE_LOGI("gpugl", "{}: {}",
-            type == GL_DEBUG_TYPE_ERROR ? "error" : "debug", message);
+  BASE_LOGI("gpugl", "{}: {}", type == GL_DEBUG_TYPE_ERROR ? "error" : "debug",
+            message);
 }
 
 base::Function<void()> ContextInit(bool debug) {
@@ -55,15 +55,15 @@ GLint GetInt(GLenum pname) {
 }
 
 GLenum ToGlCompare(rhi::CompareOp op) {
-  static constexpr GLenum kOps[] = {GL_NEVER,   GL_LESS,     GL_EQUAL,
-                                    GL_LEQUAL,  GL_GREATER,  GL_NOTEQUAL,
-                                    GL_GEQUAL,  GL_ALWAYS};
+  static constexpr GLenum kOps[] = {GL_NEVER,  GL_LESS,    GL_EQUAL,
+                                    GL_LEQUAL, GL_GREATER, GL_NOTEQUAL,
+                                    GL_GEQUAL, GL_ALWAYS};
   return kOps[static_cast<u32>(op) & 7];
 }
 
 GLenum ToGlStencilOp(rhi::StencilOp op) {
-  static constexpr GLenum kOps[] = {GL_KEEP,   GL_ZERO,      GL_REPLACE,
-                                    GL_INCR,   GL_DECR,      GL_INVERT,
+  static constexpr GLenum kOps[] = {GL_KEEP,      GL_ZERO,     GL_REPLACE,
+                                    GL_INCR,      GL_DECR,     GL_INVERT,
                                     GL_INCR_WRAP, GL_DECR_WRAP};
   return kOps[static_cast<u32>(op) & 7];
 }
@@ -286,8 +286,8 @@ bool GlDevice::Init(const OpenGLOptions& options) {
   for (u32 i = 0; i < base::Max(options.compile_threads, 1u); i++)
     compile.push_back(CreateGlContext(display, root, debug_));
   waiter_context_ = CreateGlContext(display, root, false);
-  bool contexts = resource[0] != EGL_NO_CONTEXT &&
-                  waiter_context_ != EGL_NO_CONTEXT;
+  bool contexts =
+      resource[0] != EGL_NO_CONTEXT && waiter_context_ != EGL_NO_CONTEXT;
   for (EGLContext c : compile)
     contexts = contexts && c != EGL_NO_CONTEXT;
   if (!contexts) {
@@ -300,8 +300,8 @@ bool GlDevice::Init(const OpenGLOptions& options) {
   }
   resource_.Start(display, resource, "gl-resource", ContextInit(debug_));
   compile_.Start(display, compile, "gl-compile", ContextInit(debug_));
-  waiter_ = base::MakeUnique<base::Thread>("gl-fence", [this] { WaitLoop(); },
-                                           true);
+  waiter_ =
+      base::MakeUnique<base::Thread>("gl-fence", [this] { WaitLoop(); }, true);
   BASE_LOGI("gpugl", "device: {}", device_name_.c_str());
   return true;
 }
@@ -341,14 +341,14 @@ bool GlDevice::InitRenderThread() {
   caps_.subgroup_size = epoxy_has_gl_extension("GL_KHR_shader_subgroup")
                             ? static_cast<u32>(GetInt(GL_SUBGROUP_SIZE_KHR))
                             : 32;
-  const u32 ubo_blocks = static_cast<u32>(
-      base::Min({GetInt(GL_MAX_VERTEX_UNIFORM_BLOCKS),
-                GetInt(GL_MAX_FRAGMENT_UNIFORM_BLOCKS),
-                GetInt(GL_MAX_COMPUTE_UNIFORM_BLOCKS)}));
+  const u32 ubo_blocks =
+      static_cast<u32>(base::Min({GetInt(GL_MAX_VERTEX_UNIFORM_BLOCKS),
+                                  GetInt(GL_MAX_FRAGMENT_UNIFORM_BLOCKS),
+                                  GetInt(GL_MAX_COMPUTE_UNIFORM_BLOCKS)}));
   const u32 ssbo_blocks = static_cast<u32>(
       base::Min({GetInt(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS),
-                GetInt(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS),
-                GetInt(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS)}));
+                 GetInt(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS),
+                 GetInt(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS)}));
   caps_.max_dynamic_uniform_buffers = ubo_blocks > 1 ? ubo_blocks - 1 : 0;
   caps_.max_dynamic_storage_buffers = ssbo_blocks;
   caps_.max_storage_buffers_per_stage = ssbo_blocks;
@@ -361,8 +361,7 @@ bool GlDevice::InitRenderThread() {
   caps_.storage_offset_alignment =
       static_cast<u32>(GetInt(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT));
   caps_.max_texture_size = static_cast<u32>(GetInt(GL_MAX_TEXTURE_SIZE));
-  caps_.max_texture_size_3d =
-      static_cast<u32>(GetInt(GL_MAX_3D_TEXTURE_SIZE));
+  caps_.max_texture_size_3d = static_cast<u32>(GetInt(GL_MAX_3D_TEXTURE_SIZE));
   glGetFloatv(GL_MAX_TEXTURE_LOD_BIAS, &max_lod_bias_);
   glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &max_anisotropy_);
   caps_.max_compute_resources =
@@ -418,12 +417,13 @@ rhi::Buffer* GlDevice::CreateBuffer(const rhi::BufferDesc& desc) {
         storage |= GL_CLIENT_STORAGE_BIT;
         break;
     }
-    const GLsizeiptr size = static_cast<GLsizeiptr>(base::Max<u64>(desc.size, 4));
+    const GLsizeiptr size =
+        static_cast<GLsizeiptr>(base::Max<u64>(desc.size, 4));
     glCreateBuffers(1, &buffer->name);
     glNamedBufferStorage(buffer->name, size, nullptr, storage | map);
     if (map)
-      buffer->set_mapped(static_cast<u8*>(
-          glMapNamedBufferRange(buffer->name, 0, size, map)));
+      buffer->SetMapped(
+          static_cast<u8*>(glMapNamedBufferRange(buffer->name, 0, size, map)));
     if (buffer_pointers_ && (desc.usage & rhi::kBufferStorage)) {
       GLuint64EXT address = 0;
       glMakeNamedBufferResidentNV(buffer->name, GL_READ_WRITE);
@@ -507,9 +507,8 @@ rhi::TextureView* GlDevice::CreateView(rhi::Texture* texture,
                                        const rhi::TextureViewDesc& desc) {
   auto* t = static_cast<GlTexture*>(texture);
   auto view = base::MakeUnique<GlView>(texture, desc);
-  view->format = desc.format == rhi::Format::kUndefined
-                     ? texture->desc().format
-                     : desc.format;
+  view->format = desc.format == rhi::Format::kUndefined ? texture->desc().format
+                                                        : desc.format;
   view->internal = ToGl(view->format).internal;
   if (!view->internal)
     return nullptr;
@@ -564,7 +563,8 @@ rhi::Sampler* GlDevice::CreateSampler(const rhi::SamplerDesc& desc) {
       const bool mag = linear_ok && desc.mag == rhi::Filter::kLinear;
       const bool min = linear_ok && desc.min == rhi::Filter::kLinear;
       const bool mip = linear_ok && desc.mip == rhi::Filter::kLinear;
-      glSamplerParameteri(s, GL_TEXTURE_MAG_FILTER, mag ? GL_LINEAR : GL_NEAREST);
+      glSamplerParameteri(s, GL_TEXTURE_MAG_FILTER,
+                          mag ? GL_LINEAR : GL_NEAREST);
       glSamplerParameteri(
           s, GL_TEXTURE_MIN_FILTER,
           min ? (mip ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST)
@@ -572,9 +572,9 @@ rhi::Sampler* GlDevice::CreateSampler(const rhi::SamplerDesc& desc) {
       glSamplerParameteri(s, GL_TEXTURE_WRAP_S, ToGlAddress(desc.address_u));
       glSamplerParameteri(s, GL_TEXTURE_WRAP_T, ToGlAddress(desc.address_v));
       glSamplerParameteri(s, GL_TEXTURE_WRAP_R, ToGlAddress(desc.address_w));
-      glSamplerParameterf(s, GL_TEXTURE_LOD_BIAS,
-                          base::Clamp(desc.lod_bias, -max_lod_bias_,
-                                     max_lod_bias_));
+      glSamplerParameterf(
+          s, GL_TEXTURE_LOD_BIAS,
+          base::Clamp(desc.lod_bias, -max_lod_bias_, max_lod_bias_));
       glSamplerParameterf(s, GL_TEXTURE_MIN_LOD, desc.min_lod);
       glSamplerParameterf(s, GL_TEXTURE_MAX_LOD, desc.max_lod);
       if (linear_ok && desc.max_anisotropy > 1.0f)
@@ -703,8 +703,8 @@ const SlotMap* GlDevice::InternSlots(const rhi::PipelineLayoutDesc& layout,
       map->groups.resize(s.set + 1);
     SlotMap::Group& g = map->groups[s.set];
     g.layout = static_cast<const GlBindGroupLayout*>(layout.groups[s.set]);
-    g.slots.push_back({s.binding, g.layout->Position(s.binding), s.kind,
-                       s.slot});
+    g.slots.push_back(
+        {s.binding, g.layout->Position(s.binding), s.kind, s.slot});
   }
   for (const SlotMap::Group& g : map->groups) {
     AppendBytes(key, g.layout);
@@ -722,15 +722,14 @@ const SlotMap* GlDevice::InternSlots(const rhi::PipelineLayoutDesc& layout,
   return &*it->second;
 }
 
-VertexInput* GlDevice::InternVertexInput(
-    const rhi::GraphicsPipelineDesc& desc,
-    const ProgramInterface& program) {
+VertexInput* GlDevice::InternVertexInput(const rhi::GraphicsPipelineDesc& desc,
+                                         const ProgramInterface& program) {
   auto input = base::MakeUnique<VertexInput>();
   for (const rhi::VertexAttribute& a : desc.vertex_attributes) {
     // Attributes the shader does not read are left disabled.
-    auto it = base::FindIf(program.vertex_locations.begin(),
-                           program.vertex_locations.end(),
-                           [&](const auto& m) { return m.first == a.location; });
+    auto it = base::FindIf(
+        program.vertex_locations.begin(), program.vertex_locations.end(),
+        [&](const auto& m) { return m.first == a.location; });
     if (it == program.vertex_locations.end())
       continue;
     const GlFormat& f = ToGl(a.format);
@@ -883,9 +882,9 @@ rhi::Pipeline* GlDevice::CreateGraphicsPipeline(
   RasterState& r = pipeline->raster;
   r.primitive_restart = desc.primitive_restart;
   r.cull = desc.cull != rhi::CullMode::kNone;
-  r.cull_face = desc.cull == rhi::CullMode::kFront       ? GL_FRONT
+  r.cull_face = desc.cull == rhi::CullMode::kFront          ? GL_FRONT
                 : desc.cull == rhi::CullMode::kFrontAndBack ? GL_FRONT_AND_BACK
-                                                             : GL_BACK;
+                                                            : GL_BACK;
   r.front_ccw = desc.front_ccw;
   r.depth_clamp = desc.depth_clamp;
   r.depth_test = desc.depth_test;
@@ -922,7 +921,8 @@ rhi::Pipeline* GlDevice::CreateComputePipeline(
   pipeline->compute = true;
   const StageCode stage{rhi::kStageCompute, desc.code, desc.dispatch_base};
   const auto* layout = static_cast<GlPipelineLayout*>(desc.layout);
-  return BuildPipeline(layout->desc(), &stage, 1, nullptr, gpu::rhi::Release(pipeline));
+  return BuildPipeline(layout->desc(), &stage, 1, nullptr,
+                       gpu::rhi::Release(pipeline));
 }
 
 rhi::TimestampPool* GlDevice::CreateTimestampPool(u32 count) {
@@ -1036,8 +1036,7 @@ u64 GlDevice::Submit(rhi::CommandList* const* lists, u32 count) {
 void GlDevice::WaitLoop() {
   pthread_setname_np(pthread_self(), "gl-fence");
   eglBindAPI(EGL_OPENGL_API);
-  eglMakeCurrent(egl_.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                 waiter_context_);
+  eglMakeCurrent(egl_.display, EGL_NO_SURFACE, EGL_NO_SURFACE, waiter_context_);
   while (true) {
     base::Pair<u64, GLsync> fence;
     {
@@ -1063,8 +1062,7 @@ void GlDevice::WaitLoop() {
     }
     completed_cv_.NotifyAll();
   }
-  eglMakeCurrent(egl_.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                 EGL_NO_CONTEXT);
+  eglMakeCurrent(egl_.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
   eglReleaseThread();
 }
 
@@ -1103,7 +1101,8 @@ bool GlDevice::ReadTimestamps(rhi::TimestampPool* pool,
   return true;
 }
 
-base::UniquePointer<rhi::Device> CreateOpenGLDevice(const OpenGLOptions& options) {
+base::UniquePointer<rhi::Device> CreateOpenGLDevice(
+    const OpenGLOptions& options) {
   auto device = base::MakeUnique<GlDevice>();
   if (!device->Init(options))
     return nullptr;

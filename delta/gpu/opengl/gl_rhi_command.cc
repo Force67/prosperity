@@ -4,11 +4,11 @@
 
 #include <cstring>
 
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
 #include "gpu/opengl/gl_rhi_internal.h"
-#include <base/containers/array.h>
-#include <base/algorithm.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
 
 namespace gpu::opengl {
 
@@ -77,7 +77,7 @@ GLuint Name(rhi::Buffer* b) {
 
 GlCommandList::GlCommandList(GlDevice& device) : device_(device) {
   for (u32 k = 0; k < kSlotKinds; k++)
-    slot_state_[k].resize(device.slot_limit(static_cast<SlotKind>(k)));
+    slot_state_[k].resize(device.SlotLimit(static_cast<SlotKind>(k)));
 }
 
 void GlCommandList::Begin() {
@@ -96,7 +96,8 @@ void GlCommandList::Begin() {
     base::Fill(slots.begin(), slots.end(), SlotState{});
   pointers_dirty_ = true;
   flushed_pointers_ = nullptr;
-  base::Fill(pass_colors_, pass_colors_ + base::ArraySize(pass_colors_), nullptr);
+  base::Fill(pass_colors_, pass_colors_ + base::ArraySize(pass_colors_),
+             nullptr);
 }
 
 void GlCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
@@ -211,7 +212,8 @@ void GlCommandList::PushBindGroup(u32 index,
 void GlCommandList::SetPushConstants(u32 offset, u32 bytes, const void* data) {
   if (offset >= kMaxPushBytes)
     return;
-  std::memcpy(push_data_ + offset, data, base::Min(bytes, kMaxPushBytes - offset));
+  std::memcpy(push_data_ + offset, data,
+              base::Min(bytes, kMaxPushBytes - offset));
   push_dirty_ = true;
 }
 
@@ -234,8 +236,8 @@ void GlCommandList::SetIndexBuffer(rhi::Buffer* buffer,
     index_dirty_ = true;
   index_buffer_ = name;
   index_offset_ = offset;
-  index_type_ = type == rhi::IndexType::kUint32 ? GL_UNSIGNED_INT
-                                                : GL_UNSIGNED_SHORT;
+  index_type_ =
+      type == rhi::IndexType::kUint32 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
 }
 
 void GlCommandList::SetViewport(float x,
@@ -296,9 +298,9 @@ void GlCommandList::FlushGroup(u32 index, const SlotMap::Group& map) {
     switch (slot.kind) {
       case SlotKind::kUniformBuffer:
       case SlotKind::kStorageBuffer:
-        BindBuffer(slot.kind, slot.slot, r,
-                   r.offset + (r.dynamic != kNotDynamic ? b.offsets[r.dynamic]
-                                                        : 0));
+        BindBuffer(
+            slot.kind, slot.slot, r,
+            r.offset + (r.dynamic != kNotDynamic ? b.offsets[r.dynamic] : 0));
         break;
       case SlotKind::kTexture: {
         SlotState& s = slot_state_[static_cast<u32>(slot.kind)][slot.slot];
@@ -330,8 +332,8 @@ void GlCommandList::FlushGroup(u32 index, const SlotMap::Group& map) {
       }
       case SlotKind::kImage: {
         SlotState& s = slot_state_[static_cast<u32>(slot.kind)][slot.slot];
-        const u64 where = (u64(r.level) << 32) | u32(r.layer) |
-                          (u64(r.layered) << 63);
+        const u64 where =
+            (u64(r.level) << 32) | u32(r.layer) | (u64(r.layered) << 63);
         if (s.name == r.name && s.offset == where && s.size == r.format)
           break;
         s = {r.name, 0, where, r.format};
@@ -394,8 +396,7 @@ void GlCommandList::FlushVertexInput(bool indexed) {
       std::memcmp(flushed_strides_, pipeline_->strides,
                   sizeof(flushed_strides_))) {
     flushed_input_ = input;
-    std::memcpy(flushed_strides_, pipeline_->strides,
-                sizeof(flushed_strides_));
+    std::memcpy(flushed_strides_, pipeline_->strides, sizeof(flushed_strides_));
     vertex_dirty_ = (1u << count) - 1;
     index_dirty_ = true;
   }
@@ -450,8 +451,8 @@ void GlCommandList::DrawIndexed(u32 index_count,
   c->vertex_offset = vertex_offset;
   c->first_instance = first_instance;
   c->type = index_type_;
-  c->offset =
-      index_offset_ + u64(first_index) * (index_type_ == GL_UNSIGNED_INT ? 4 : 2);
+  c->offset = index_offset_ +
+              u64(first_index) * (index_type_ == GL_UNSIGNED_INT ? 4 : 2);
 }
 
 void GlCommandList::DrawMeshTasks(u32 /*x*/, u32 /*y*/, u32 /*z*/) {}
@@ -460,12 +461,7 @@ void GlCommandList::Dispatch(u32 x, u32 y, u32 z) {
   DispatchBase(0, 0, 0, x, y, z);
 }
 
-void GlCommandList::DispatchBase(u32 bx,
-                                 u32 by,
-                                 u32 bz,
-                                 u32 x,
-                                 u32 y,
-                                 u32 z) {
+void GlCommandList::DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) {
   if (!pipeline_ || !pipeline_->compute)
     return;
   FlushBindings();

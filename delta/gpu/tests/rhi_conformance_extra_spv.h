@@ -1,6 +1,7 @@
 // Generated from rhi_shaders/extra/ by glslc; do not edit.
 #pragma once
 #include "base/arch.h"
+// NOLINTBEGIN(readability-identifier-naming): generated
 static const u32 k_x_bary_frag_spv[] = {
     0x07230203, 0x00010500, 0x000d000b, 0x00000013, 0x00000000, 0x00020011,
     0x00000001, 0x00020011, 0x000014a4, 0x000a000a, 0x5f565053, 0x5f52484b,
@@ -674,3 +675,4 @@ static const u32 k_x_varyings_vert_spv[] = {
     0x0003003e, 0x0000002d, 0x0000002e, 0x0003003e, 0x00000030, 0x00000032,
     0x000100fd, 0x00010038,
 };
+// NOLINTEND(readability-identifier-naming)

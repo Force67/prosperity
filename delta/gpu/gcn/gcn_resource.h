@@ -15,12 +15,12 @@
 
 #include "base/arch.h"
 
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/memory/shared_pointer.h"
 #include "gpu/gcn/gcn_decode.h"
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/memory/shared_pointer.h>
-#include <base/containers/hash_map.h>
 
 namespace gpu::gcn {
 
@@ -53,23 +53,23 @@ struct TImage {
   u32 min_lod = 0;      // T# MIN_LOD clamp in U4.8 fixed-point
   u32 dfmt = 0;
   u32 nfmt = 0;
-  u32 type = 0;        // SQ_RSRC_IMG_* (8/12 = 1D, 9 = 2D, 10 = 3D, 13 = 2D array)
+  u32 type = 0;  // SQ_RSRC_IMG_* (8/12 = 1D, 9 = 2D, 10 = 3D, 13 = 2D array)
   u32 tiling_idx = 0;  // 8/31 = linear; everything else is tiled
   // T# DST_SEL_X/Y/Z/W: which source channel (or constant) each sampled
   // component reads. 0=0, 1=1, 4=R, 5=G, 6=B, 7=A. A single-channel mask (a
   // font atlas) is declared with its coverage selected into the components the
   // shader reads; ignoring that samples alpha as 1 and fills every glyph solid.
   u32 dst_sel[4] = {4, 5, 6, 7};
-  u32 sampler[4] = {};  // S# used by the sampling MIMG instruction
-  bool pow2_pad = false;     // pad physical mip dims/layers to powers of two
+  u32 sampler[4] = {};    // S# used by the sampling MIMG instruction
+  bool pow2_pad = false;  // pad physical mip dims/layers to powers of two
   bool sampler_valid = false;
-  bool is_3d = false;           // SQ_RSRC_IMG_3D: sampled with a w coordinate
-  bool is_1d = false;           // SQ_RSRC_IMG_1D[_ARRAY]: x (+layer) only
-  bool arrayed = false;         // MIMG DA bit: address carries an array layer
-  bool force_lod_zero = false;  // gather4_lz: implicit gather clamped to mip 0
-  bool depth_compare = false;   // MIMG _C uses the sampler's compare function
-  bool storage = false;         // image_store target
-  bool null_descriptor = false; // all-zero T# samples transparent zero
+  bool is_3d = false;            // SQ_RSRC_IMG_3D: sampled with a w coordinate
+  bool is_1d = false;            // SQ_RSRC_IMG_1D[_ARRAY]: x (+layer) only
+  bool arrayed = false;          // MIMG DA bit: address carries an array layer
+  bool force_lod_zero = false;   // gather4_lz: implicit gather clamped to mip 0
+  bool depth_compare = false;    // MIMG _C uses the sampler's compare function
+  bool storage = false;          // image_store target
+  bool null_descriptor = false;  // all-zero T# samples transparent zero
   bool valid = false;
   u64 src = 0;  // guest address dword 0 was s_loaded from (0 = user data)
 };
@@ -89,8 +89,8 @@ TImage DecodeTImage(const u32* dwords);
 
 // Sampler-binding plan: MIMGs referencing the same descriptor (same SGPRs, same
 // producer, same access) share one binding, numbered in first-appearance order.
-// Contract between the recompiler's set-0 declarations and TrackTextures, so they
-// cannot drift.
+// Contract between the recompiler's set-0 declarations and TrackTextures, so
+// they cannot drift.
 struct MimgBindingPlan {
   // MIMG instruction pc -> binding id.
   base::HashMap<u32, u32> binding_by_pc;
@@ -114,22 +114,23 @@ class ScalarReplayScope {
 };
 
 // Recover the image(s) a PS references by tracking s_load_dwordx4/x8/x16 of
-// descriptor tables out of the user-data SGPRs. Preserves MIMG order (set-0 binding
-// order); unresolved entries carry valid=false. Pass CachedProgram(): it keys a
-// per-program cache of plan + scalar-relevant subset, skipping re-planning per draw.
-// code_base resolves s_getpc_b64 against a table embedded after the code; 0 = unknown.
-void TrackTextures(
-    base::Vector<TImage>& out,
-    const base::SharedPointer<const Program>& ps_program,
-    const u32* ps_user_data,
-    bool trace = false,
-    u64 code_base = 0);
+// descriptor tables out of the user-data SGPRs. Preserves MIMG order (set-0
+// binding order); unresolved entries carry valid=false. Pass CachedProgram():
+// it keys a per-program cache of plan + scalar-relevant subset, skipping
+// re-planning per draw. code_base resolves s_getpc_b64 against a table embedded
+// after the code; 0 = unknown.
+void TrackTextures(base::Vector<TImage>& out,
+                   const base::SharedPointer<const Program>& ps_program,
+                   const u32* ps_user_data,
+                   bool trace = false,
+                   u64 code_base = 0);
 
 // A cbuffer as the translator binds it: the SGPR its descriptor sits in, the
 // kind of descriptor (one SGPR can hold a flat pointer for one load and a V#
 // for another), and which load filled it (DescriptorVersions).
 inline u64 CbufKey(u32 base_sgpr, bool pointer, u32 version) {
-  return (static_cast<u64>(version) << 32) | base_sgpr | (pointer ? 0x100u : 0u);
+  return (static_cast<u64>(version) << 32) | base_sgpr |
+         (pointer ? 0x100u : 0u);
 }
 
 // Resolve the live descriptor behind each cbuffer, following the same extended-
@@ -145,15 +146,15 @@ inline const VBuffer* FindCbuf(const CbufList& list, u64 key) {
       return &v;
   return nullptr;
 }
-void ResolveCbuffers(
-    CbufList& out,
-    const base::SharedPointer<const Program>& program,
-    const u32* user_data,
-    u64 code_base = 0);
+void ResolveCbuffers(CbufList& out,
+                     const base::SharedPointer<const Program>& program,
+                     const u32* user_data,
+                     u64 code_base = 0);
 
-// Resolve attributes fetched by MUBUF in the main VS: the descriptor SGPRs may start
-// as inline user data or be overwritten by an SMRD load, so capture each V# from the
-// scalar state live at its MUBUF. Index-aligned with attrs; unresolved zeroed.
+// Resolve attributes fetched by MUBUF in the main VS: the descriptor SGPRs may
+// start as inline user data or be overwritten by an SMRD load, so capture each
+// V# from the scalar state live at its MUBUF. Index-aligned with attrs;
+// unresolved zeroed.
 void ResolveDirectVertexBuffers(
     base::Vector<VBuffer>& out,
     const base::SharedPointer<const Program>& program,
@@ -161,15 +162,14 @@ void ResolveDirectVertexBuffers(
     const u32* user_data,
     u64 code_base = 0);
 
-// Resolve the live V# behind each raw MUBUF buffer (see ShaderBuffer): same replay
-// as ResolveDirectVertexBuffers, captured at the consuming instruction.
+// Resolve the live V# behind each raw MUBUF buffer (see ShaderBuffer): same
+// replay as ResolveDirectVertexBuffers, captured at the consuming instruction.
 // Index-aligned with `buffers`; unresolved zeroed.
-void ResolveShaderBuffers(
-    base::Vector<VBuffer>& out,
-    const base::SharedPointer<const Program>& program,
-    const base::Vector<ShaderBuffer>& buffers,
-    const u32* user_data,
-    u64 code_base = 0);
+void ResolveShaderBuffers(base::Vector<VBuffer>& out,
+                          const base::SharedPointer<const Program>& program,
+                          const base::Vector<ShaderBuffer>& buffers,
+                          const u32* user_data,
+                          u64 code_base = 0);
 
 // Replay a compute shader's uniform scalar descriptor loads and capture each
 // planned V#/T#/pointer at the instruction where it is consumed. This resolves

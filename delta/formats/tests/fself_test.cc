@@ -1,5 +1,5 @@
-// Synthetic SELF -> ELF round trip for formats::FselfToElf. Mirrors the layout the
-// real fake-pkg eboots use, without needing a pkg fixture.
+// Synthetic SELF -> ELF round trip for formats::FselfToElf. Mirrors the layout
+// the real fake-pkg eboots use, without needing a pkg fixture.
 #include <cstring>
 #include "base/arch.h"
 

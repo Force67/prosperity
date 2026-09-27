@@ -6,32 +6,32 @@
 #include "base/arch.h"
 
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/gpu_perf.h"
+#include "gpu/render/device.h"
+#include "gpu/render/frame.h"
+#include "gpu/render/guest_format.h"
+#include "gpu/render/hash.h"
+#include "gpu/render/labels.h"
+#include "gpu/render/render_target.h"
+#include "gpu/render/texture_cache.h"
+#include "gpu/render/upload_ring.h"
 #include "gpu/shaders/quad_frag_spv.h"
 #include "gpu/shaders/quad_vert_spv.h"
 #include "gpu/shaders/tex_frag_spv.h"
 #include "gpu/shaders/tex_vert_spv.h"
-#include "gpu/render/labels.h"
-#include "gpu/render/device.h"
-#include "gpu/render/guest_format.h"
-#include "gpu/render/frame.h"
-#include "gpu/render/hash.h"
-#include "gpu/gpu_perf.h"
-#include "gpu/render/render_target.h"
-#include "gpu/render/texture_cache.h"
-#include "gpu/render/upload_ring.h"
 
 #include <cstdio>
 #include <cstdlib>
 
-#include <base/containers/array.h>
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <base/strings/xstring.h>
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(bool, kDoCull, "DELTA_GPU_CULL", false);
@@ -53,21 +53,23 @@ DELTA_OPTION(bool, kRelaxDepthEqual, "DELTA_GPU_RELAX_ZEQUAL", true);
 DELTA_OPTION(bool, kNoZTest, "DELTA_GPU_NOZTEST", false);
 // DELTA_GPU_NOZTEST_PS=<ps guest addr>: the same, for ONE pass. NOZTEST is a
 // blunt instrument: it disables the depth test on every pipeline, so a frame
-// that improves under it has told you only that SOME depth test was responsible,
-// and every other pass is now drawing over everything at the same time. Naming
-// one shader answers the question the blunt version cannot: whether THIS pass is
-// being rejected by the comparison, or is computing nothing to begin with.
+// that improves under it has told you only that SOME depth test was
+// responsible, and every other pass is now drawing over everything at the same
+// time. Naming one shader answers the question the blunt version cannot:
+// whether THIS pass is being rejected by the comparison, or is computing
+// nothing to begin with.
 DELTA_OPTION(const char*, kNoZTestPs, "DELTA_GPU_NOZTEST_PS", nullptr);
-// DELTA_GPU_NOZWRITE_PS=<list>: the twin of the above for depth WRITES. The pair
-// separates the two things a depth-tested, depth-writing pass can get wrong:
-// disabling the TEST asks whether the pass is being rejected by what it reads
-// from the plane; disabling the WRITE asks whether what it puts INTO the plane
-// is what breaks a later pass. Neither question is answerable from the other.
+// DELTA_GPU_NOZWRITE_PS=<list>: the twin of the above for depth WRITES. The
+// pair separates the two things a depth-tested, depth-writing pass can get
+// wrong: disabling the TEST asks whether the pass is being rejected by what it
+// reads from the plane; disabling the WRITE asks whether what it puts INTO the
+// plane is what breaks a later pass. Neither question is answerable from the
+// other.
 DELTA_OPTION(const char*, kNoZWritePs, "DELTA_GPU_NOZWRITE_PS", nullptr);
 // DELTA_GPU_ZWRITE_PS=<list>: force depth WRITE ON for named shaders. The point
 // is measurement, not correctness: a pass that only ever READS the depth plane
-// leaves no trace of the z it computed, so there is no way to find out where its
-// geometry actually lands. Force its write, turn its test off with
+// leaves no trace of the z it computed, so there is no way to find out where
+// its geometry actually lands. Force its write, turn its test off with
 // DELTA_GPU_NOZTEST_PS so every fragment gets through, and the depth plane then
 // holds that pass's own z for you to read back. It corrupts the plane for
 // everything downstream, so it is a probe and nothing else.
@@ -99,30 +101,30 @@ base::Vector<u64> ParsePsList(const char* e, const char* tag) {
 }
 
 bool NoZTestForPs(u64 ps) {
-  static const base::Vector<u64> list = ParsePsList(kNoZTestPs, "nozps");
-  if (list.empty() || !ps)
+  static const base::Vector<u64> kList = ParsePsList(kNoZTestPs, "nozps");
+  if (kList.empty() || !ps)
     return false;
-  for (u64 v : list)
+  for (u64 v : kList)
     if (v == ps)
       return true;
   return false;
 }
 
 bool NoZWriteForPs(u64 ps) {
-  static const base::Vector<u64> list = ParsePsList(kNoZWritePs, "nozwps");
-  if (list.empty() || !ps)
+  static const base::Vector<u64> kList = ParsePsList(kNoZWritePs, "nozwps");
+  if (kList.empty() || !ps)
     return false;
-  for (u64 v : list)
+  for (u64 v : kList)
     if (v == ps)
       return true;
   return false;
 }
 
 bool ForceZWriteForPs(u64 ps) {
-  static const base::Vector<u64> list = ParsePsList(kZWritePs, "zwps");
-  if (list.empty() || !ps)
+  static const base::Vector<u64> kList = ParsePsList(kZWritePs, "zwps");
+  if (kList.empty() || !ps)
     return false;
-  for (u64 v : list)
+  for (u64 v : kList)
     if (v == ps)
       return true;
   return false;
@@ -164,8 +166,8 @@ rhi::StencilFace StencilState(const DrawInfo& d, bool back) {
   state.pass = StencilOp(d.stencil_control >> (shift + 4));
   state.depth_fail = StencilOp(d.stencil_control >> (shift + 8));
   // ZFUNC and STENCILFUNC use the same order as rhi::CompareOp.
-  state.compare = static_cast<rhi::CompareOp>(
-      (d.depth_control >> (back ? 20 : 8)) & 0x7);
+  state.compare =
+      static_cast<rhi::CompareOp>((d.depth_control >> (back ? 20 : 8)) & 0x7);
   state.compare_mask = (refmask >> 8) & 0xFF;
   state.write_mask = (refmask >> 16) & 0xFF;
   state.reference = refmask & 0xFF;
@@ -189,13 +191,12 @@ rhi::Pipeline* BuildPipeline(bool textured,
                              rhi::Format color_format) {
   rhi::GraphicsPipelineDesc desc;
   desc.layout = textured ? g_quad.tex_layout : g_quad.layout;
-  desc.vertex = textured ? rhi::ShaderCode{tex_vert_spv, base::ArraySize(tex_vert_spv)}
-                         : rhi::ShaderCode{quad_vert_spv,
-                                           base::ArraySize(quad_vert_spv)};
-  desc.fragment = textured
-                      ? rhi::ShaderCode{tex_frag_spv, base::ArraySize(tex_frag_spv)}
-                      : rhi::ShaderCode{quad_frag_spv,
-                                        base::ArraySize(quad_frag_spv)};
+  desc.vertex =
+      textured ? rhi::ShaderCode{tex_vert_spv, base::ArraySize(tex_vert_spv)}
+               : rhi::ShaderCode{quad_vert_spv, base::ArraySize(quad_vert_spv)};
+  desc.fragment =
+      textured ? rhi::ShaderCode{tex_frag_spv, base::ArraySize(tex_frag_spv)}
+               : rhi::ShaderCode{quad_frag_spv, base::ArraySize(quad_frag_spv)};
   // Interleaved repacked vertex: pos.xy@0, color.rgba@8, uv.xy@24, stride 32.
   desc.vertex_buffers = {{32, false}};
   desc.vertex_attributes = {{0, 0, rhi::Format::kRG32Float, 0},
@@ -218,7 +219,7 @@ rhi::Pipeline* GetPipeline(bool textured,
                            bool en,
                            rhi::Format color_format) {
   u64 key = (textured ? 1ull : 0) | (en ? 2ull : 0) |
-                 ((u64)(en ? (bc & 0x7FFFFFFFu) : 0u) << 2);
+            ((u64)(en ? (bc & 0x7FFFFFFFu) : 0u) << 2);
   key = HashWord(key, static_cast<u64>(color_format));
   auto it = g_quad.cache.find(key);
   if (it != g_quad.cache.end())
@@ -257,9 +258,8 @@ bool CreatePipeline() {
     return false;
   // Default colored pipeline: classic src-alpha (used as the fallback / for
   // draws that don't enable blend the cache builds an opaque one on demand).
-  g_quad.pipeline =
-      BuildPipeline(false, SrcAlphaOver(rhi::BlendFactor::kZero),
-                    kDefaultRtFormat);
+  g_quad.pipeline = BuildPipeline(false, SrcAlphaOver(rhi::BlendFactor::kZero),
+                                  kDefaultRtFormat);
   if (!g_quad.pipeline) {
     BASE_LOGI("gpuvk", "pipeline failed");
     return false;
@@ -281,9 +281,9 @@ bool CreateTexPipeline() {
     return false;
   // Default textured pipeline: src-alpha over (the common sprite blend).
   // Per-draw blend states build their own pipeline on demand via GetPipeline().
-  g_quad.tex_pipeline = BuildPipeline(
-      true, SrcAlphaOver(rhi::BlendFactor::kOneMinusSrcAlpha),
-      kDefaultRtFormat);
+  g_quad.tex_pipeline =
+      BuildPipeline(true, SrcAlphaOver(rhi::BlendFactor::kOneMinusSrcAlpha),
+                    kDefaultRtFormat);
   if (!g_quad.tex_pipeline) {
     BASE_LOGI("gpuvk", "tex pipeline failed");
     return false;
@@ -301,15 +301,13 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // an FNV prime so it spreads across the whole 64-bit space, away from the
   // blend/stride bits).
   u32 dstate = (d.depth_base ? 1u : 0u) | (d.depth_test_enable ? 2u : 0u) |
-                    (d.depth_write_enable ? 4u : 0u) |
-                    ((d.depth_func & 7u) << 3) | ((d.prim_type & 0x1Fu) << 6) |
-                    ((d.cull_mode & 3u) << 11) |
-                    (d.front_ccw ? 0u : (1u << 13));
-  u64 key =
-      d.vs_addr * 0x9e3779b97f4a7c15ull ^ d.ps_addr ^
-      ((u64)(d.blend_enable ? (d.blend_control & 0x7FFFFFFFu) : 0) << 1) ^
-      ((u64)d.vertex_stride << 33) ^ ((u64)mrt_n << 60) ^
-      ((u64)dstate * 0x100000001b3ull);
+               (d.depth_write_enable ? 4u : 0u) | ((d.depth_func & 7u) << 3) |
+               ((d.prim_type & 0x1Fu) << 6) | ((d.cull_mode & 3u) << 11) |
+               (d.front_ccw ? 0u : (1u << 13));
+  u64 key = d.vs_addr * 0x9e3779b97f4a7c15ull ^ d.ps_addr ^
+            ((u64)(d.blend_enable ? (d.blend_control & 0x7FFFFFFFu) : 0) << 1) ^
+            ((u64)d.vertex_stride << 33) ^ ((u64)mrt_n << 60) ^
+            ((u64)dstate * 0x100000001b3ull);
   // The MODULE, not the code address. A pipeline embeds the shader modules it
   // was created with, and the recompiler builds a different module for the same
   // code whenever a descriptor-derived mask differs (tex_3d, tex_1d, tex_uint,
@@ -349,8 +347,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // vice versa) for the same shader pair.
   key = HashWord(key, d.num_vbufs);
   for (u32 j = 0; j < d.num_vbufs; j++)
-    key = HashWord(key, d.vbufs[j].stride |
-                            (d.vbufs[j].per_instance ? 1ull << 32 : 0));
+    key = HashWord(
+        key, d.vbufs[j].stride | (d.vbufs[j].per_instance ? 1ull << 32 : 0));
   for (u32 i = 0; i < d.num_vattrs; i++) {
     key = HashWord(key, d.vattrs[i].location);
     key = HashWord(key, d.vattrs[i].binding);
@@ -379,18 +377,18 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   // set 0 = texture(s) (or an empty layout when untextured), set 1 = cbuffer
   // UBO. Multi/storage shaders use an exact per-binding descriptor layout;
   // single-sampler shaders retain the shared one-binding layout.
-  rhi::BindGroupLayout* set0 = !rp.textured ? g_ring.empty_layout : g_tex.layout;
+  rhi::BindGroupLayout* set0 =
+      !rp.textured ? g_ring.empty_layout : g_tex.layout;
   if (rp.multi_tex) {
     rhi::BindGroupLayoutDesc desc;
     const u32 n_bind = static_cast<u32>(base::Min(n_tex, size_t(kMaxTex)));
     for (u32 i = 0; i < n_bind; i++) {
       const bool is_vs = i >= d.recomp->ps_texs.size();
       const bool storage = !is_vs && d.recomp->ps_texs[i].storage;
-      desc.bindings.push_back(
-          {i,
-           storage ? rhi::BindingType::kStorageTexture
-                   : rhi::BindingType::kSampledTexture,
-           is_vs ? vertex_stage : rhi::kStageFragment});
+      desc.bindings.push_back({i,
+                               storage ? rhi::BindingType::kStorageTexture
+                                       : rhi::BindingType::kSampledTexture,
+                               is_vs ? vertex_stage : rhi::kStageFragment});
     }
     rp.tex_set_layout = Device().CreateBindGroupLayout(desc);
     if (!rp.tex_set_layout)
@@ -484,10 +482,11 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       static base::Vector<u64> said;
       if (base::Find(said.begin(), said.end(), d.ps_addr) == said.end()) {
         said.push_back(d.ps_addr);
-        BASE_LOGI("nozps",
-                  "depth test disabled for ps={:#x} (test_enable was {}, func {})",
-                  (unsigned long long)d.ps_addr, (int)d.depth_test_enable,
-                  d.depth_func & 0x7);
+        BASE_LOGI(
+            "nozps",
+            "depth test disabled for ps={:#x} (test_enable was {}, func {})",
+            (unsigned long long)d.ps_addr, (int)d.depth_test_enable,
+            d.depth_func & 0x7);
       }
     }
     pd.depth_test = d.depth_test_enable && !skip_ztest;
@@ -522,9 +521,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     // nearer than the nearest surface), so the visible result matches.
     if (kRelaxDepthEqual && pd.depth_compare == rhi::CompareOp::kEqual &&
         !d.depth_write_enable)
-      pd.depth_compare = d.depth_clear <= 0.5f
-                             ? rhi::CompareOp::kGreaterEqual
-                             : rhi::CompareOp::kLessEqual;
+      pd.depth_compare = d.depth_clear <= 0.5f ? rhi::CompareOp::kGreaterEqual
+                                               : rhi::CompareOp::kLessEqual;
     if (d.stencil_enable) {
       pd.stencil_test = true;
       pd.stencil_front = StencilState(d, false);
@@ -549,15 +547,14 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     // Only exported targets may write, and CB_TARGET_MASK always gates each
     // component, including when the frontend omits CB_SHADER_MASK (AGC).
     if (!kNoMaskDiag)
-      pd.blend[i].write_mask = ColorWriteMask(
-          d.target_mask, d.shader_mask, d.recomp->ps_mrt_mask, i);
+      pd.blend[i].write_mask = ColorWriteMask(d.target_mask, d.shader_mask,
+                                              d.recomp->ps_mrt_mask, i);
     pd.color_formats[i] = (ColorTargetFormat(d.mrt_info[i]));
   }
   // DELTA_GPU_PIPETRACE: the colour-blend state a pipeline is actually built
   // with, next to the PS's export mask. The two have to agree or an
   // attachment is silently write-masked off (or written unblended).
-  if (kGpuPipetrace &&
-      (kGpuPipetrace == 1 || d.ps_addr == kGpuPipetrace)) {
+  if (kGpuPipetrace && (kGpuPipetrace == 1 || d.ps_addr == kGpuPipetrace)) {
     static int n = 0;
     if (n++ < 24)
       BASE_LOGI("pipe",

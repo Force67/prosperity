@@ -15,23 +15,22 @@
 
 #include <epoxy/gl.h>
 
-
 #include "base/arch.h"
+#include "base/atomic.h"
+#include "base/containers/deque.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
+#include "base/threading/condition_variable.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
 #include "gpu/opengl/gl_context.h"
 #include "gpu/opengl/gl_rhi.h"
 #include "gpu/opengl/gl_shader_lowering.h"
 #include "gpu/rhi/device.h"
-#include <base/atomic.h>
-#include <base/containers/deque.h>
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/threading/condition_variable.h>
-#include <base/threading/mutex.h>
-#include <base/threading/thread.h>
-#include <base/containers/hash_map.h>
 
 namespace gpu::opengl {
 
@@ -58,7 +57,7 @@ class GlView;
 class GlBuffer final : public rhi::Buffer {
  public:
   explicit GlBuffer(const rhi::BufferDesc& desc) { desc_ = desc; }
-  void set_mapped(u8* p) { mapped_ = p; }
+  void SetMapped(u8* p) { mapped_ = p; }
   GLuint name = 0;
   u64 address = 0;  // GPU address of a storage buffer, for pointer slots
 };
@@ -128,7 +127,7 @@ struct BoundResource {
   u64 size = 0;         // bytes from offset
   u64 buffer_size = 0;  // clamps dynamic windows
   u64 address = 0;
-  GLint level = 0;      // storage images
+  GLint level = 0;  // storage images
   GLint layer = 0;
   GLboolean layered = GL_TRUE;
   GLenum format = 0;
@@ -309,7 +308,7 @@ struct CmdBeginPass {
 struct CmdEndPass {
   static constexpr Op kOp = Op::kEndPass;
   Cmd h;
-  u8 discard_mask;   // colours with StoreOp::kDontCare
+  u8 discard_mask;  // colours with StoreOp::kDontCare
   i32 x, y;
   u32 width, height;
 };
@@ -654,12 +653,8 @@ class GlCommandList final : public rhi::CommandList {
                u32 dst_access,
                const rhi::TextureBarrier* textures,
                u32 num_textures) override;
-  void ResetTimestamps(rhi::TimestampPool* pool,
-                       u32 first,
-                       u32 count) override;
-  void WriteTimestamp(rhi::TimestampPool* pool,
-                      u32 index,
-                      bool start) override;
+  void ResetTimestamps(rhi::TimestampPool* pool, u32 first, u32 count) override;
+  void WriteTimestamp(rhi::TimestampPool* pool, u32 index, bool start) override;
   void PushLabel(const char* label) override;
   void PopLabel() override;
   void InsertLabel(const char* label) override;
@@ -777,7 +772,8 @@ class Replayer {
   u8 pass_read_only_ = 0;  // rhi::Aspect planes the pass must not write
 };
 
-// ---- device ------------------------------------------------------------------
+// ---- device
+// ------------------------------------------------------------------
 
 class GlDevice final : public rhi::Device {
  public:
@@ -822,7 +818,7 @@ class GlDevice final : public rhi::Device {
                const rhi::BindingWrite& write,
                BoundResource* out) const;
   // Slot counts per SlotKind, for the lists' shadow state.
-  u32 slot_limit(SlotKind kind) const {
+  u32 SlotLimit(SlotKind kind) const {
     return slot_limits_[static_cast<u32>(kind)];
   }
 

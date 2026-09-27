@@ -13,14 +13,14 @@
 // Only for programmer invariants. Anything a guest title can trigger with bad
 // packet data must stay an error path, never a check.
 
-#include <base/logging.h>
 #include <cstdlib>
+#include "base/logging.h"
 
-#define GPU_BUGCHECK(expression, ...)                                         \
-  do {                                                                        \
-    if (!(expression)) {                                                      \
+#define GPU_BUGCHECK(expression, ...)                                          \
+  do {                                                                         \
+    if (!(expression)) {                                                       \
       BASE_LOGI("gpu", "BUGCHECK {}:{}: {}", __FILE__, __LINE__, #expression); \
-      __VA_OPT__(BASE_LOGI("gpu", "  " __VA_ARGS__);)                         \
-      std::abort();                                                           \
-    }                                                                         \
+      __VA_OPT__(BASE_LOGI("gpu", "  " __VA_ARGS__);)                          \
+      std::abort();                                                            \
+    }                                                                          \
   } while (0)

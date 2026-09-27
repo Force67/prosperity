@@ -1,6 +1,6 @@
 #pragma once
+#include "base/containers/vector.h"
 #include "gpu/render/command.h"
-#include <base/containers/vector.h>
 
 namespace gpu::ps5 {
 // Readable mappings inside the GPU pools, plus mappings containing explicit

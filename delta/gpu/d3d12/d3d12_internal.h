@@ -17,19 +17,18 @@
  * 2048-entry shader-visible sampler heap.
  */
 
-
 #include "base/arch.h"
 #include "gpu/d3d12/d3d12_rhi.h"
 #include "gpu/d3d12/d3d12_shader.h"
 #include "gpu/rhi/device.h"
 
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
+#include "base/threading/mutex.h"
 #include "gpu/d3d12/d3d12_api.h"
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
-#include <base/threading/mutex.h>
-#include <base/containers/hash_map.h>
 
 namespace gpu::d3d12::impl {
 
@@ -69,7 +68,8 @@ struct CpuRange {
 
 class CpuDescriptorPool {
  public:
-  void Init(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type,
+  void Init(ID3D12Device* device,
+            D3D12_DESCRIPTOR_HEAP_TYPE type,
             u32 page_size);
   void Shutdown();
   bool Allocate(u32 count, CpuRange* out);
@@ -96,7 +96,7 @@ class CpuDescriptorPool {
 class D3D12Buffer final : public rhi::Buffer {
  public:
   explicit D3D12Buffer(const rhi::BufferDesc& desc) { desc_ = desc; }
-  void set_mapped(u8* p) { mapped_ = p; }
+  void SetMapped(u8* p) { mapped_ = p; }
   ID3D12Resource* resource = nullptr;
   D3D12_GPU_VIRTUAL_ADDRESS va = 0;
   u64 alloc_size = 0;
@@ -144,9 +144,9 @@ struct GroupEntry {
   u32 binding = 0;
   rhi::BindingType type = rhi::BindingType::kSampledTexture;
   bool read_only = false;
-  u32 slot = 0;              // in the CBV/SRV/UAV table
-  u32 sampler_slot = ~0u;    // in the sampler table
-  u32 dynamic_index = ~0u;   // in SetBindGroup's offsets
+  u32 slot = 0;             // in the CBV/SRV/UAV table
+  u32 sampler_slot = ~0u;   // in the sampler table
+  u32 dynamic_index = ~0u;  // in SetBindGroup's offsets
 };
 
 class D3D12BindGroupLayout final : public rhi::BindGroupLayout {
@@ -155,7 +155,7 @@ class D3D12BindGroupLayout final : public rhi::BindGroupLayout {
     desc_ = desc;
   }
   const GroupEntry* Find(u32 binding) const;
-  base::Vector<GroupEntry> entries;  // desc().bindings order
+  base::Vector<GroupEntry> entries;   // desc().bindings order
   base::Vector<u32> dynamic_entries;  // entry index per dynamic index
   u32 table_size = 0;
   u32 sampler_count = 0;
@@ -170,7 +170,7 @@ struct BufferUse {
 class D3D12BindGroup final : public rhi::BindGroup {
  public:
   D3D12BindGroupLayout* layout = nullptr;
-  CpuRange table;  // CPU-only copy of every table slot
+  CpuRange table;              // CPU-only copy of every table slot
   base::Vector<u32> samplers;  // sampler ids by sampler slot
   // Per dynamic index: the buffer and the write's own offset/range.
   base::Vector<rhi::BindingWrite> dynamic;
@@ -348,12 +348,8 @@ class D3D12CommandList final : public rhi::CommandList {
                u32 dst_access,
                const rhi::TextureBarrier* textures,
                u32 num_textures) override;
-  void ResetTimestamps(rhi::TimestampPool* pool,
-                       u32 first,
-                       u32 count) override;
-  void WriteTimestamp(rhi::TimestampPool* pool,
-                      u32 index,
-                      bool start) override;
+  void ResetTimestamps(rhi::TimestampPool* pool, u32 first, u32 count) override;
+  void WriteTimestamp(rhi::TimestampPool* pool, u32 index, bool start) override;
   void PushLabel(const char* label) override;
   void PopLabel() override;
   void InsertLabel(const char* label) override;
@@ -410,7 +406,9 @@ class D3D12CommandList final : public rhi::CommandList {
                          D3D12Buffer* buffer,
                          const rhi::BufferTextureCopy& region,
                          bool to_texture);
-  CpuRange AttachmentView(D3D12Texture* texture, u32 mip, u32 layer,
+  CpuRange AttachmentView(D3D12Texture* texture,
+                          u32 mip,
+                          u32 layer,
                           bool depth);
   void ClearByCopy(D3D12Texture* texture,
                    const rhi::TextureRange& range,
@@ -501,11 +499,17 @@ class D3D12Device final : public rhi::Device {
   void ReportDeviceLoss() override;
 
   // Buffer views into a CPU descriptor (d3d12_device.cc).
-  void WriteCbv(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12Buffer* buffer,
-                u64 offset, u64 range);
-  void WriteRawView(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12Buffer* buffer,
-                    u64 offset, u64 range, bool uav);
-  void WriteNull(D3D12_CPU_DESCRIPTOR_HANDLE dst, rhi::BindingType type,
+  void WriteCbv(D3D12_CPU_DESCRIPTOR_HANDLE dst,
+                D3D12Buffer* buffer,
+                u64 offset,
+                u64 range);
+  void WriteRawView(D3D12_CPU_DESCRIPTOR_HANDLE dst,
+                    D3D12Buffer* buffer,
+                    u64 offset,
+                    u64 range,
+                    bool uav);
+  void WriteNull(D3D12_CPU_DESCRIPTOR_HANDLE dst,
+                 rhi::BindingType type,
                  bool read_only);
   // The view's DSV; variant bit 0 = read-only depth, bit 1 = stencil.
   D3D12_CPU_DESCRIPTOR_HANDLE Dsv(D3D12View* view, u32 variant);
@@ -524,7 +528,8 @@ class D3D12Device final : public rhi::Device {
                                            u32* cached,
                                            u64* generation);
 
-  ID3D12Resource* CreateBufferResource(u64 size, D3D12_HEAP_TYPE heap,
+  ID3D12Resource* CreateBufferResource(u64 size,
+                                       D3D12_HEAP_TYPE heap,
                                        D3D12_RESOURCE_FLAGS flags,
                                        D3D12_RESOURCE_STATES state);
   D3D12_RESOURCE_STATES TextureState(const D3D12Texture* texture,
@@ -538,7 +543,7 @@ class D3D12Device final : public rhi::Device {
   ID3D12CommandQueue* queue = nullptr;
   ID3D12DescriptorHeap* ring_heap = nullptr;
   ID3D12DescriptorHeap* sampler_heap = nullptr;
-  CpuDescriptorPool views;     // CBV/SRV/UAV
+  CpuDescriptorPool views;  // CBV/SRV/UAV
   CpuDescriptorPool rtvs;
   CpuDescriptorPool dsvs;
   CpuDescriptorPool samplers;  // CPU copies of each unique sampler
@@ -574,7 +579,7 @@ class D3D12Device final : public rhi::Device {
 
   base::Mutex sampler_mutex_;
   base::Map<base::String, u32> sampler_ids_;  // packed desc -> id
-  base::Vector<CpuRange> sampler_cpu_;       // by id
+  base::Vector<CpuRange> sampler_cpu_;        // by id
   base::Map<base::Vector<u32>, u32> sampler_tables_;
   u32 sampler_heap_used_ = 0;
   u64 sampler_generation_ = 1;

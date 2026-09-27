@@ -38,11 +38,12 @@ struct NggConfig {
 bool HasNggTransfer(const u32* code);
 bool HasNggPrimitiveExports(const u32* code);
 
-// Recompile an RDNA2 VS+PS pair (guest pointers + per-stage user SGPRs, used for the
-// fetch-shader pointer). On gfx10.3 the "VS" is the merged ES/GS NGG program (GS SH
-// block). ps_input_ena fixes the PS input-VGPR layout (frag-coord/face) read directly,
-// not via v_interp; gl_clip_space selects the guest's clip convention (the VS remaps z
-// from [-w,w] to Vulkan's [0,w]). r.ok = false on unsupported features.
+// Recompile an RDNA2 VS+PS pair (guest pointers + per-stage user SGPRs, used
+// for the fetch-shader pointer). On gfx10.3 the "VS" is the merged ES/GS NGG
+// program (GS SH block). ps_input_ena fixes the PS input-VGPR layout
+// (frag-coord/face) read directly, not via v_interp; gl_clip_space selects the
+// guest's clip convention (the VS remaps z from [-w,w] to Vulkan's [0,w]). r.ok
+// = false on unsupported features.
 gpu::gcn::Recompiled Recompile(const u32* vs_code,
                                const u32* ps_code,
                                const u32* vs_user_data,
@@ -57,10 +58,11 @@ gpu::gcn::Recompiled Recompile(const u32* vs_code,
                                u32 ps_num_interp = 0,
                                const NggConfig* ngg = nullptr);
 
-// What the fetch pointer contributes to module identity: a hash of the attribute plan,
-// 0 when it parses to none. NOT a code hash: the two user-data dwords it comes from
-// hold a plain per-draw constant in some titles (Dead Cells: fading alpha), so hashing
-// bytes makes every draw a fresh module and the title recompiles forever.
+// What the fetch pointer contributes to module identity: a hash of the
+// attribute plan, 0 when it parses to none. NOT a code hash: the two user-data
+// dwords it comes from hold a plain per-draw constant in some titles (Dead
+// Cells: fading alpha), so hashing bytes makes every draw a fresh module and
+// the title recompiles forever.
 u64 FetchPlanHash(u64 fetch_addr);
 
 }  // namespace gpu::rdna

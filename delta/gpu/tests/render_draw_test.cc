@@ -1,32 +1,36 @@
+#include <gtest/gtest.h>
 #include <algorithm>
 #include <cstring>
-#include <gtest/gtest.h>
-#include <options/options.h>
+#include "options/options.h"
 
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/bit_cast.h"
+#include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gcn/spirv/spv_emit.h"
 #include "gpu/gcn/spirv/spv_post.h"
-#include "gpu/ps5/rdna/rdna_translate.h"
+#include "gpu/ps5/compute_dispatch.h"
+#include "gpu/ps5/draw_state.h"
+#include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
-#include "gpu/ps5/compute_dispatch.h"
-#include "gpu/ps5/guest_address.h"
+#include "gpu/ps5/rdna/rdna_translate.h"
 #include "gpu/ps5/shader_cache.h"
-#include "gpu/ps5/draw_state.h"
-#include "gpu/render/renderer.h"
 #include "gpu/render/device.h"
 #include "gpu/render/draw_recomp.h"
 #include "gpu/render/frame.h"
+#include "gpu/render/renderer.h"
 #include "gpu/render/upload_ring.h"
-#include <base/algorithm.h>
-#include <base/containers/array.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/bit_cast.h>
-#include <base/strings/xstring.h>
 
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe() {}
-extern "C" bool prosperity_ps5_is_display_buffer(u64) { return false; }
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+extern "C" bool prosperity_ps5_is_display_buffer(u64) {
+  return false;
+}
 
 TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
   options::Init();
@@ -45,8 +49,9 @@ TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
   gpu::render::BeginFrame(renderer);
   const auto capacity = gpu::render::UboRingBytes();
   EXPECT_EQ(capacity,
-            base::Min<u64>(512ull << 20,
-                          gpu::render::Device().caps().max_storage_buffer_range * 2));
+            base::Min<u64>(
+                512ull << 20,
+                gpu::render::Device().caps().max_storage_buffer_range * 2));
   ASSERT_NE(gpu::render::g_ring.ubo_map, nullptr);
   EXPECT_GE(gpu::render::g_ring.ubo_buf->desc().size, capacity);
   // Later option changes cannot move offsets beyond the existing allocation.
@@ -59,25 +64,30 @@ TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
 TEST(RdnaResources, RepeatedDescriptorLoadsReuseTextureBindings) {
   base::Vector<u32> code;
   for (u32 i = 0; i < 32; ++i) {
-    code.insert(code.end(), {0xf408040e, 0xfa000030,  // s_load s[16:19], s[28:29], 48
-                              0xf09c0108, 0x00040f05});  // sample with s[16:23]
+    code.insert(code.end(),
+                {0xf408040e, 0xfa000030,    // s_load s[16:19], s[28:29], 48
+                 0xf09c0108, 0x00040f05});  // sample with s[16:23]
   }
   code.push_back(0xbf810000);
-  const auto plan = gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
+  const auto plan =
+      gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
   EXPECT_EQ(plan.binding_srsrc.size(), 1u);
   EXPECT_EQ(plan.binding_by_pc.size(), 32u);
 
   // A changed table pointer or offset must keep the samples distinct.
   code.insert(code.begin() + 4, 0xbe9c0381);  // s_mov_b32 s28, 1
-  auto changed = gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
+  auto changed =
+      gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
   EXPECT_EQ(changed.binding_srsrc.size(), 2u);
   code[6] = 0xfa000040;
-  changed = gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
+  changed =
+      gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
   EXPECT_EQ(changed.binding_srsrc.size(), 3u);
 
   // A memory-writing shader cannot assume a repeated load sees the same data.
   code.insert(code.end() - 1, {0xf0200108, 0x00000400});  // image_store
-  changed = gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
+  changed =
+      gpu::rdna::RdnaPlanMimg(gpu::rdna::Decode(code.data(), code.size()));
   EXPECT_EQ(changed.binding_srsrc.size(), 33u);
 }
 
@@ -89,10 +99,10 @@ TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
-  const u32 vs[64] = {0x7e000280, 0x7e0202f2,
-                      0xf80008cf, 0x01000000, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000};
+  const u32 vs[64] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                      0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   const u32 user_data[32]{};
   static auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
@@ -105,34 +115,37 @@ TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
   const auto fc = [&](float v) { return m.ConstF32(v); };
   const Id uv3 = m.TypeVec(u, 3);
   const Id group = m.Variable(m.TypePointer(spv::StorageClass::Input, uv3),
-                             spv::StorageClass::Input);
+                              spv::StorageClass::Input);
   m.Decorate(group, spv::Decoration::BuiltIn,
              {static_cast<u32>(spv::BuiltIn::WorkgroupId)});
-  const Id pos = m.Variable(
-      m.TypePointer(spv::StorageClass::Output, m.TypeArray(v4, 3)),
-      spv::StorageClass::Output);
+  const Id pos =
+      m.Variable(m.TypePointer(spv::StorageClass::Output, m.TypeArray(v4, 3)),
+                 spv::StorageClass::Output);
   m.Decorate(pos, spv::Decoration::BuiltIn,
              {static_cast<u32>(spv::BuiltIn::Position)});
-  const Id prim = m.Variable(
-      m.TypePointer(spv::StorageClass::Output, m.TypeArray(uv3, 1)),
-      spv::StorageClass::Output);
+  const Id prim =
+      m.Variable(m.TypePointer(spv::StorageClass::Output, m.TypeArray(uv3, 1)),
+                 spv::StorageClass::Output);
   m.Decorate(prim, spv::Decoration::BuiltIn,
              {static_cast<u32>(spv::BuiltIn::PrimitiveTriangleIndicesEXT)});
-  const Id main = m.BeginFunction(m.TypeVoid(), m.TypeFunction(m.TypeVoid(), {}));
+  const Id main =
+      m.BeginFunction(m.TypeVoid(), m.TypeFunction(m.TypeVoid(), {}));
   const Id gx = m.CompositeExtract(u, m.Load(uv3, group), 0);
   const Id offset = m.Emit(spv::Op::OpFSub, f,
-                          {m.Emit(spv::Op::OpConvertUToF, f, {gx}), fc(.5f)});
+                           {m.Emit(spv::Op::OpConvertUToF, f, {gx}), fc(.5f)});
   m.EmitVoid(spv::Op::OpSetMeshOutputsEXT, {uc(3), uc(1)});
   for (u32 i = 0; i < 3; ++i) {
     const float x[] = {-.4f, .4f, 0.f}, y[] = {-.5f, -.5f, .5f};
-    const Id p = m.CompositeConstruct(v4,
-        {m.Emit(spv::Op::OpFAdd, f, {offset, fc(x[i])}), fc(y[i]), fc(0), fc(1)});
-    m.Store(m.AccessChain(m.TypePointer(spv::StorageClass::Output, v4),
-                          pos, {uc(i)}), p);
+    const Id p = m.CompositeConstruct(
+        v4, {m.Emit(spv::Op::OpFAdd, f, {offset, fc(x[i])}), fc(y[i]), fc(0),
+             fc(1)});
+    m.Store(m.AccessChain(m.TypePointer(spv::StorageClass::Output, v4), pos,
+                          {uc(i)}),
+            p);
   }
-  m.Store(m.AccessChain(m.TypePointer(spv::StorageClass::Output, uv3),
-                        prim, {uc(0)}),
-           m.CompositeConstruct(uv3, {uc(0), uc(1), uc(2)}));
+  m.Store(m.AccessChain(m.TypePointer(spv::StorageClass::Output, uv3), prim,
+                        {uc(0)}),
+          m.CompositeConstruct(uv3, {uc(0), uc(1), uc(2)}));
   m.ReturnVoid();
   m.EndFunction();
   m.EntryPoint(spv::ExecutionModel::MeshEXT, main, "main", {group, pos, prim});
@@ -141,7 +154,8 @@ TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
   m.ExecMode(main, spv::ExecutionMode::OutputPrimitivesEXT, {1});
   m.ExecMode(main, spv::ExecutionMode::OutputTrianglesEXT, {});
   base::String error;
-  ASSERT_TRUE(gpu::gcn::spirv::Finalize(m.Assemble(), &program.mesh_spirv, &error))
+  ASSERT_TRUE(
+      gpu::gcn::spirv::Finalize(m.Assemble(), &program.mesh_spirv, &error))
       << error.c_str();
   program.vs_spirv.clear();
   alignas(65536) static base::Array<u8, 65536> target{};
@@ -171,10 +185,9 @@ TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
-  const u32 es[64] = {
-      0x34000a82,              // v0 = ES vertex ID * 4
-      0xd8340000, 0x00000500,  // LDS[v0] = ES vertex ID
-      0xbe802006};             // s_setpc_b64 s[6:7] -> separately bound GS
+  const u32 es[64] = {0x34000a82,              // v0 = ES vertex ID * 4
+                      0xd8340000, 0x00000500,  // LDS[v0] = ES vertex ID
+                      0xbe802006};  // s_setpc_b64 s[6:7] -> separately bound GS
   const u32 gs[64] = {
       0xd8d80000, 0x02000000,  // v2 = LDS[primitive vertex offset]
       0x7e000d02,              // v0 = float(v2)
@@ -185,22 +198,21 @@ TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
       0xf80008cf, 0x03020100,  // POS0
       0x7e0802ff, 0x00200400,  // packed triangle indices 0, 1, 2
       0xbefe0481,              // only lane zero exports the primitive
-      0xf8000941, 0x00000004,
-      0xbefe04c1,
+      0xf8000941, 0x00000004, 0xbefe04c1,
       0xbefc03ff, 0x00001003,  // allocation: 3 vertices, 1 primitive
       0xbf900009, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   const u32 user_data[32]{};
   const gpu::rdna::NggConfig cfg{gs, 64, 3, 3, 1, 128};
-  static const auto program = gpu::rdna::Recompile(es, ps, user_data, user_data,
-                                            0, false, 0, 0, nullptr, 0, &cfg);
-  ASSERT_TRUE(program.ok);
-  ASSERT_FALSE(program.mesh_spirv.empty());
-  ASSERT_TRUE(program.vs_spirv.empty());
+  static const auto kProgram = gpu::rdna::Recompile(
+      es, ps, user_data, user_data, 0, false, 0, 0, nullptr, 0, &cfg);
+  ASSERT_TRUE(kProgram.ok);
+  ASSERT_FALSE(kProgram.mesh_spirv.empty());
+  ASSERT_TRUE(kProgram.vs_spirv.empty());
   alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
-  draw.recomp = &program;
+  draw.recomp = &kProgram;
   draw.prim_type = 1;
   draw.vertex_count = 3;
   draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
@@ -234,24 +246,23 @@ TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
       0xf80008cf, 0x03020100,  // POS0
       0x7e0802ff, 0x00200400,  // packed triangle indices 0, 1, 2
       0xbefe0481,              // only lane zero exports the primitive
-      0xf8000941, 0x00000004,
-      0xbefe04c1,
+      0xf8000941, 0x00000004, 0xbefe04c1,
       0xbefc03ff, 0x00001003,  // allocation: 3 vertices, 1 primitive
       0xbf900009, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   const u32 user_data[32]{};
   const gpu::rdna::NggConfig cfg{gs, 64, 3, 3, 1, 128, 0, false};
-  static const auto program = gpu::rdna::Recompile(gs, ps, user_data, user_data,
-                                            0, false, 0, 0, nullptr, 0, &cfg);
-  ASSERT_TRUE(program.ok);
+  static const auto kProgram = gpu::rdna::Recompile(
+      gs, ps, user_data, user_data, 0, false, 0, 0, nullptr, 0, &cfg);
+  ASSERT_TRUE(kProgram.ok);
   EXPECT_TRUE(gpu::rdna::HasNggPrimitiveExports(gs));
   EXPECT_FALSE(gpu::rdna::HasNggTransfer(gs));
-  ASSERT_FALSE(program.mesh_spirv.empty());
-  ASSERT_TRUE(program.vs_spirv.empty());
+  ASSERT_FALSE(kProgram.mesh_spirv.empty());
+  ASSERT_TRUE(kProgram.vs_spirv.empty());
   alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
-  draw.recomp = &program;
+  draw.recomp = &kProgram;
   draw.prim_type = 1;
   draw.vertex_count = 3;
   draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
@@ -284,63 +295,79 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
     code[pc++] = (op << 25) | (dst << 17) | (other << 9) | src;
   };
   const auto literal = [&](u32 op, u32 dst, u32 value, u32 other) {
-    v2(op, dst, 255, other); code[pc++] = value;
+    v2(op, dst, 255, other);
+    code[pc++] = value;
   };
   // Four output vertices and two triangles for each independent input point.
   // v0 initially carries local_id*4, v5 carries group_base+local_id.
-  v2(0x16, 1, 130, 0);             // local_id
-  v2(0x16, 2, 130, 1);             // local input = local_id / 4
-  v2(0x26, 3, 261, 1);             // group base = v5 - local_id
-  v2(0x25, 3, 258, 3);             // global input point
-  v2(0x1b, 4, 129, 1);             // corner x bit
+  v2(0x16, 1, 130, 0);  // local_id
+  v2(0x16, 2, 130, 1);  // local input = local_id / 4
+  v2(0x26, 3, 261, 1);  // group base = v5 - local_id
+  v2(0x25, 3, 258, 3);  // global input point
+  v2(0x1b, 4, 129, 1);  // corner x bit
   v2(0x16, 5, 129, 1);
-  v2(0x1b, 5, 129, 5);             // corner y bit
+  v2(0x1b, 5, 129, 5);  // corner y bit
   v1(6, 10, 259);
-  literal(8, 10, 0x3e800000, 10);   // x = input*.25 - .75
+  literal(8, 10, 0x3e800000, 10);  // x = input*.25 - .75
   literal(3, 10, 0xbf400000, 10);
   v1(6, 4, 260);
-  literal(8, 4, 0x3e000000, 4);     // quad width .125
+  literal(8, 4, 0x3e000000, 4);  // quad width .125
   v2(3, 10, 260, 10);
   v1(6, 11, 261);
-  v2(8, 11, 240, 11);              // quad height .5
+  v2(8, 11, 240, 11);  // quad height .5
   literal(3, 11, 0xbe800000, 11);
-  v1(1, 12, 128); v1(1, 13, 242);
-  code[pc++] = 0xf80008cf; code[pc++] = 0x0d0c0b0a;
+  v1(1, 12, 128);
+  v1(1, 13, 242);
+  code[pc++] = 0xf80008cf;
+  code[pc++] = 0x0d0c0b0a;
   v2(0x16, 6, 129, 1);
-  v2(0x1a, 6, 130, 6);             // primitive's vertex base
-  v2(0x1b, 7, 129, 1);             // triangle within quad
+  v2(0x1a, 6, 130, 6);  // primitive's vertex base
+  v2(0x1b, 7, 129, 1);  // triangle within quad
   v2(0x1a, 8, 129, 7);
   v2(0x25, 8, 262, 8);
-  v2(0x25, 8, 129, 8);             // i1 = base + 1 + triangle*2
-  v2(0x25, 9, 130, 6);             // i2 = base + 2
-  v2(0x25, 6, 263, 6);             // i0 = base + triangle
-  v2(0x1a, 8, 138, 8); v2(0x1a, 9, 148, 9);
-  v2(0x1c, 6, 264, 6); v2(0x1c, 6, 265, 6);
-  code[pc++] = 0xf8000941; code[pc++] = 6;
-  v1(1, 8, 3); literal(0x1b, 8, 255, 8); // live input count from wave info
-  v2(0x1a, 9, 130, 8); v2(0x1a, 8, 141, 8);
+  v2(0x25, 8, 129, 8);  // i1 = base + 1 + triangle*2
+  v2(0x25, 9, 130, 6);  // i2 = base + 2
+  v2(0x25, 6, 263, 6);  // i0 = base + triangle
+  v2(0x1a, 8, 138, 8);
+  v2(0x1a, 9, 148, 9);
+  v2(0x1c, 6, 264, 6);
+  v2(0x1c, 6, 265, 6);
+  code[pc++] = 0xf8000941;
+  code[pc++] = 6;
+  v1(1, 8, 3);
+  literal(0x1b, 8, 255, 8);  // live input count from wave info
+  v2(0x1a, 9, 130, 8);
+  v2(0x1a, 8, 141, 8);
   v2(0x1c, 9, 264, 9);
-  v1(2, 0, 265);                   // M0 = vertices | (primitives << 12)
-  code[pc++] = 0xbefc0300; code[pc++] = 0xbf900009; code[pc++] = 0xbf810000;
-  const u32 ps[4096] = {0x7e0002f2, 0x7e020280,
-                        0xf800080f, 0x00010100, 0xbf810000};
+  v1(2, 0, 265);  // M0 = vertices | (primitives << 12)
+  code[pc++] = 0xbefc0300;
+  code[pc++] = 0xbf900009;
+  code[pc++] = 0xbf810000;
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                        0xbf810000};
   const u32 user_data[32]{};
-  const u32 batches[] = {6, 2, 4}; // one group, three groups, partial final group
+  const u32 batches[] = {6, 2,
+                         4};  // one group, three groups, partial final group
   static base::Array<gpu::gcn::Recompiled, 3> programs;
   alignas(65536) static base::Array<base::Array<u8, 65536>, 3> targets{};
   base::Array<u8, 64 * 16 * 4> reference{};
   for (u32 i = 0; i < 3; ++i) {
     SCOPED_TRACE(batches[i]);
-    const gpu::rdna::NggConfig cfg{code.data(), 64, batches[i], batches[i] * 4,
-                                    batches[i] * 2, 128, 0, false};
-    programs[i] = gpu::rdna::Recompile(code.data(), ps, user_data, user_data,
-                                       0, false, 0, 0, nullptr, 0, &cfg);
+    const gpu::rdna::NggConfig cfg{
+        code.data(),    64,  batches[i], batches[i] * 4,
+        batches[i] * 2, 128, 0,          false};
+    programs[i] = gpu::rdna::Recompile(code.data(), ps, user_data, user_data, 0,
+                                       false, 0, 0, nullptr, 0, &cfg);
     ASSERT_TRUE(programs[i].ok);
     gpu::render::DrawInfo draw;
-    draw.recomp = &programs[i]; draw.prim_type = 1; draw.vertex_count = 6;
+    draw.recomp = &programs[i];
+    draw.prim_type = 1;
+    draw.vertex_count = 6;
     draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[i].data());
-    draw.rt_w = 64; draw.rt_h = 16;
-    draw.mrt_count = draw.mrt_bound_mask = 1; draw.mrt_info[0] = 10u << 2;
+    draw.rt_w = 64;
+    draw.rt_h = 16;
+    draw.mrt_count = draw.mrt_bound_mask = 1;
+    draw.mrt_info[0] = 10u << 2;
     gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
     const u32 slot_index = gpu::render::g_frame.slot_idx;
@@ -353,8 +380,10 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
       EXPECT_EQ(pixels[(8 * 64 + 10 + q * 8) * 4], 255);
       EXPECT_EQ(pixels[(8 * 64 + 14 + q * 8) * 4], 0);
     }
-    if (!i) base::CopyN(pixels, reference.size(), reference.begin());
-    else EXPECT_TRUE(std::equal(reference.begin(), reference.end(), pixels));
+    if (!i)
+      base::CopyN(pixels, reference.size(), reference.begin());
+    else
+      EXPECT_TRUE(std::equal(reference.begin(), reference.end(), pixels));
   }
 }
 
@@ -372,38 +401,39 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
     gs[pc++] = 0xf4200004;  // s_buffer_load_dword s0, s[8:11], offset
     gs[pc++] = 0xfa000000 | (window * gpu::gcn::kCbufDwords * 4);
   }
-  const u32 body[] = {
-      0xd8d80000, 0x02000000, 0x7e000d02,
-      0x100000f0, 0x060000f1, 0x06000000,  // x += s0
-      0x7e0202f1, 0x7e0602f0, 0x7d840481, 0x02020701,
-      0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100,
-      0x7e0802ff, 0x00200400, 0xbefe0481, 0xf8000941, 0x00000004,
-      0xbefe04c1, 0xbefc03ff, 0x00001003, 0xbf900009, 0xbf810000};
+  const u32 body[] = {0xd8d80000, 0x02000000, 0x7e000d02, 0x100000f0,
+                      0x060000f1, 0x06000000,  // x += s0
+                      0x7e0202f1, 0x7e0602f0, 0x7d840481, 0x02020701,
+                      0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100,
+                      0x7e0802ff, 0x00200400, 0xbefe0481, 0xf8000941,
+                      0x00000004, 0xbefe04c1, 0xbefc03ff, 0x00001003,
+                      0xbf900009, 0xbf810000};
   base::Copy(body, body + base::ArraySize(body), gs.begin() + pc);
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   const u32 user_data[32]{};
   const gpu::rdna::NggConfig cfg{gs.data(), 64, 3, 3, 1, 128};
-  static const auto program = gpu::rdna::Recompile(es, ps, user_data, user_data,
-                                            0, false, 4, 0, nullptr, 0, &cfg);
-  ASSERT_TRUE(program.ok);
-  ASSERT_EQ(program.vs_cbufs.size(), 17u);
-  ASSERT_TRUE(program.indirect_cbufs);
+  static const auto kProgram = gpu::rdna::Recompile(
+      es, ps, user_data, user_data, 0, false, 4, 0, nullptr, 0, &cfg);
+  ASSERT_TRUE(kProgram.ok);
+  ASSERT_EQ(kProgram.vs_cbufs.size(), 17u);
+  ASSERT_TRUE(kProgram.indirect_cbufs);
   static base::Array<float, 17 * gpu::gcn::kCbufDwords> constants{};
   alignas(65536) static base::Array<base::Array<u8, 65536>, 3> targets{};
   for (u32 frame = 0; frame < 3; ++frame) {
     constants[16 * gpu::gcn::kCbufDwords] = frame == 1 ? .5f : -.5f;
     gpu::render::DrawInfo draw;
-    draw.recomp = &program;
+    draw.recomp = &kProgram;
     draw.prim_type = 1;
     draw.vertex_count = 3;
-    for (const auto& cb : program.vs_cbufs) {
+    for (const auto& cb : kProgram.vs_cbufs) {
       draw.cbufs[cb.binding] = {
           reinterpret_cast<u64>(constants.data() + cb.first_dword),
           cb.num_dwords * 4};
       draw.num_cbufs = base::Max(draw.num_cbufs, cb.binding + 1);
     }
-    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[frame].data());
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[frame].data());
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
@@ -426,41 +456,39 @@ TEST(VkDraw, SplitNggUserWindowsAndHighPixelRegistersRemainDistinct) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
-  const u32 es[64] = {
-      0x34000a83,              // v0 = vertex ID * 8
-      0x7e0c0208,              // v6 = ES user data in s8
-      0xd8340000, 0x00000500,  // LDS[v0] = vertex ID
-      0xd8340004, 0x00000600,  // LDS[v0+4] = ES offset
-      0xbe802006};
-  const u32 gs[64] = {
-      0x34000a83,              // address matching the ES record
-      0xd8d80000, 0x02000000,
-      0xd8d80004, 0x06000000,
-      0x7e000d02, 0x100000f0, 0x060000f1,
-      0x06000000, 0x06000106,  // x += GS user s0 + offset written by ES
-      0x7e0202f1, 0x7e0602f0, 0x7d840481, 0x02020701,
-      0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100,
-      0x7e0802ff, 0x00200400, 0xbefe0481, 0xf8000941, 0x00000004,
-      0xbefe04c1, 0xbefc03ff, 0x00001003, 0xbf900009, 0xbf810000};
-  const u32 ps[64] = {
-      0x7e00021d,              // red = user s29, beyond the old push window
-      0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
+  const u32 es[64] = {0x34000a83,              // v0 = vertex ID * 8
+                      0x7e0c0208,              // v6 = ES user data in s8
+                      0xd8340000, 0x00000500,  // LDS[v0] = vertex ID
+                      0xd8340004, 0x00000600,  // LDS[v0+4] = ES offset
+                      0xbe802006};
+  const u32 gs[64] = {0x34000a83,  // address matching the ES record
+                      0xd8d80000, 0x02000000, 0xd8d80004, 0x06000000,
+                      0x7e000d02, 0x100000f0, 0x060000f1, 0x06000000,
+                      0x06000106,  // x += GS user s0 + offset written by ES
+                      0x7e0202f1, 0x7e0602f0, 0x7d840481, 0x02020701,
+                      0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100,
+                      0x7e0802ff, 0x00200400, 0xbefe0481, 0xf8000941,
+                      0x00000004, 0xbefe04c1, 0xbefc03ff, 0x00001003,
+                      0xbf900009, 0xbf810000};
+  const u32 ps[64] = {0x7e00021d,  // red = user s29, beyond the old push window
+                      0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
   u32 user_data[32]{};
-  user_data[0] = 0x3e800000; // ES contributes +.25; GS changes independently
+  user_data[0] = 0x3e800000;  // ES contributes +.25; GS changes independently
   const gpu::rdna::NggConfig cfg{gs, 64, 3, 3, 1, 128};
-  static const auto program = gpu::rdna::Recompile(es, ps, user_data, user_data,
-                                            0, false, 4, 30, nullptr, 0, &cfg);
-  ASSERT_TRUE(program.ok);
+  static const auto kProgram = gpu::rdna::Recompile(
+      es, ps, user_data, user_data, 0, false, 4, 30, nullptr, 0, &cfg);
+  ASSERT_TRUE(kProgram.ok);
   alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   for (u32 frame = 0; frame < 2; ++frame) {
     gpu::render::DrawInfo draw;
-    draw.recomp = &program;
+    draw.recomp = &kProgram;
     draw.prim_type = 1;
     draw.vertex_count = 3;
     draw.vs_user_data[0] = user_data[0];
     draw.gs_user_data_addr = frame ? 0xbe800000 : 0x3e800000;
     draw.ps_user_data[29] = frame ? 0x3f000000 : 0x3f800000;
-    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[frame].data());
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[frame].data());
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
@@ -472,25 +500,24 @@ TEST(VkDraw, SplitNggUserWindowsAndHighPixelRegistersRemainDistinct) {
     ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
     ASSERT_TRUE(slot.presentable);
     const auto* pixels = slot.readback->mapped();
-    EXPECT_NEAR(pixels[(8 * 16 + (frame ? 8 : 12)) * 4],
-                 frame ? 128 : 255, 1);
+    EXPECT_NEAR(pixels[(8 * 16 + (frame ? 8 : 12)) * 4], frame ? 128 : 255, 1);
     EXPECT_EQ(pixels[(8 * 16 + 4) * 4], 0);
   }
 }
 
 TEST(VkDraw, GeometryResourceReplayUsesSystemUserDataAddress) {
   // The vertex user window contains a V#, while s0:s1 names a different table.
-  const u32 code[64] = {0xf4080200, 0xfa000000, // s_load_dwordx4 s8, s0, 0
-                        0xf4200304, 0xfa000000, // s_buffer_load s12, s8, 0
+  const u32 code[64] = {0xf4080200, 0xfa000000,  // s_load_dwordx4 s8, s0, 0
+                        0xf4200304, 0xfa000000,  // s_buffer_load s12, s8, 0
                         0xbf810000};
-  static const u32 values[2] = {0x12345678, 0x87654321};
-  const u64 base = reinterpret_cast<u64>(values);
+  static const u32 kValues[2] = {0x12345678, 0x87654321};
+  const u64 base = reinterpret_cast<u64>(kValues);
   const u32 descriptor[4] = {static_cast<u32>(base),
-                            static_cast<u32>(base >> 32) | (4u << 16),
-                            2, 0x0004dfac};
+                             static_cast<u32>(base >> 32) | (4u << 16), 2,
+                             0x0004dfac};
   const u32 user_data[4] = {0, 0, 0, 0};
-  const auto resources = gpu::rdna::ResolveBuffers(code, user_data, 4, 8,
-      5, reinterpret_cast<u64>(descriptor));
+  const auto resources = gpu::rdna::ResolveBuffers(
+      code, user_data, 4, 8, 5, reinterpret_cast<u64>(descriptor));
   ASSERT_TRUE(resources.count(0));
   ASSERT_TRUE(resources.count(2));
   EXPECT_EQ(resources.at(0).base, reinterpret_cast<u64>(descriptor));
@@ -504,25 +531,26 @@ TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {0x7e00021f, 0x7e0202ff, 0x3d800000,
-                      0x7e040280, 0x7e0602f2,
-                      0xf80008cf, 0x03020100, 0xbf810000}; // x = s31 (user23)
-  const u32 ps[64] = {0x7e00021d, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000}; // red = s29
+                      0x7e040280, 0x7e0602f2, 0xf80008cf,
+                      0x03020100, 0xbf810000};  // x = s31 (user23)
+  const u32 ps[64] = {0x7e00021d, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};  // red = s29
   const u32 user_data[32]{};
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data,
-                                            0, false, 24, 30);
-  ASSERT_TRUE(program.ok);
-  ASSERT_TRUE(program.indirect_cbufs);
-  ASSERT_TRUE(program.mesh_spirv.empty());
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data, 0, false, 24, 30);
+  ASSERT_TRUE(kProgram.ok);
+  ASSERT_TRUE(kProgram.indirect_cbufs);
+  ASSERT_TRUE(kProgram.mesh_spirv.empty());
   alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   for (u32 frame = 0; frame < 2; ++frame) {
     gpu::render::DrawInfo draw;
-    draw.recomp = &program;
+    draw.recomp = &kProgram;
     draw.prim_type = 1;
     draw.vertex_count = 1;
     draw.vs_user_data[23] = frame ? 0xbee00000 : 0x3f100000;
     draw.ps_user_data[29] = frame ? 0x3f000000 : 0x3f800000;
-    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[frame].data());
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[frame].data());
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
@@ -548,16 +576,16 @@ TEST(VkDraw, PixelShaderUsesDppOperand) {
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {0x7e0002ff, 0x3d800000, 0x7e040280, 0x7e0602f2,
                       0xf80008cf, 0x03020000, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, // v0 = 1
-                      0x7e0002fa, 0xff00e400, // v0 = quad_perm[0,1,2,3](v0)
+  const u32 ps[64] = {0x7e0002f2,              // v0 = 1
+                      0x7e0002fa, 0xff00e400,  // v0 = quad_perm[0,1,2,3](v0)
                       0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
   const u32 user_data[32]{};
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data,
-                                                  0, false, 0, 0);
-  ASSERT_TRUE(program.ok);
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data, 0, false, 0, 0);
+  ASSERT_TRUE(kProgram.ok);
   alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
-  draw.recomp = &program;
+  draw.recomp = &kProgram;
   draw.prim_type = 1;
   draw.vertex_count = 1;
   draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
@@ -580,7 +608,9 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  struct Case { u32 select, unused, input, expected; };
+  struct Case {
+    u32 select, unused, input, expected;
+  };
   // Convert 1234.75 to 1234 (0x4d2), or -1.75 to -1. Expected packed
   // values independently check placement, padding, sign extension and merging.
   const Case cases[] = {
@@ -597,28 +627,29 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
   const u32 vs[64] = {0x7e0002ff, 0x3d800000, 0x7e040280, 0x7e0602f2,
                       0xf80008cf, 0x03020000, 0xbf810000};
   static base::Array<gpu::gcn::Recompiled, base::ArraySize(cases) * 2> programs;
-  alignas(65536) static base::Array<base::Array<u8, 65536>, base::ArraySize(cases) * 2> targets{};
+  alignas(65536) static base::Array<base::Array<u8, 65536>,
+                                    base::ArraySize(cases) * 2>
+      targets{};
   for (u32 i = 0; i < programs.size(); ++i) {
     const auto& c = cases[i % base::ArraySize(cases)];
     const bool binary = i >= base::ArraySize(cases);
     SCOPED_TRACE(i);
-    u32 ps[64] = {0x7e000200, 0x7e020201}; // old bits and float input
+    u32 ps[64] = {0x7e000200, 0x7e020201};  // old bits and float input
     u32 pc = 2;
     if (binary) {
-      ps[pc++] = 0x7e021101; // convert v1 to integer before the binary op
-      ps[pc++] = 0x7e040280; // v2 = 0
+      ps[pc++] = 0x7e021101;  // convert v1 to integer before the binary op
+      ps[pc++] = 0x7e040280;  // v2 = 0
     }
-    ps[pc++] = binary ? 0x3a0004f9 : 0x7e0010f9; // XOR or CVT with SDWA
+    ps[pc++] = binary ? 0x3a0004f9 : 0x7e0010f9;  // XOR or CVT with SDWA
     ps[pc++] = 0x00060001 | (c.select << 8) | (c.unused << 11) |
                (binary ? 0x06000000 : 0);
-    const u32 tail[] = {
-        0x7d840002,              // compare packed integer result with s2
-        0x7e0402f2, 0x02000480,  // red = result matches ? 1 : 0
-        0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
+    const u32 tail[] = {0x7d840002,  // compare packed integer result with s2
+                        0x7e0402f2, 0x02000480,  // red = result matches ? 1 : 0
+                        0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
     base::CopyN(tail, base::ArraySize(tail), ps + pc);
     const u32 user_data[32] = {0xabcdef12, c.input, c.expected};
-    programs[i] = gpu::rdna::Recompile(vs, ps, user_data, user_data,
-                                       0, false, 0, 3);
+    programs[i] =
+        gpu::rdna::Recompile(vs, ps, user_data, user_data, 0, false, 0, 3);
     ASSERT_TRUE(programs[i].ok);
     gpu::render::DrawInfo draw;
     draw.recomp = &programs[i];
@@ -654,8 +685,7 @@ TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
       0xbf068000,              // s_cmp_eq_u32 s0, 0
       0xbf850003,              // wave zero jumps to the negative offset
       0xbe8403f0,              // s4 = .5
-      0xbf820002,
-      0xbf800000,
+      0xbf820002, 0xbf800000,
       0xbe8403f1,              // s4 = -.5
       0xbf800000,              // join
       0xbf8a0000,              // both waves must reach the same barrier
@@ -677,25 +707,24 @@ TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
       0x06000108,              // v0 += rank correction
       0x7e0202f1, 0x7e0602f0,  // y = -.5 / .5
       0x7d8404a1, 0x02020701,  // y = lane == 33 ? .5 : -.5
-      0x7e040280, 0x7e0602f2,
-      0xf80008cf, 0x03020100,
-      0x7e0802ff, 0x02208420,  // triangle 32, 33, 34
+      0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100, 0x7e0802ff,
+      0x02208420,              // triangle 32, 33, 34
       0x7e0c02ff, 0x06218460,  // triangle 96, 97, 98
       0x7d840a81,              // ES vertex ID v5 == 1
       0x02080d04,              // choose connectivity for output primitive 1
-      0xf8000941, 0x00000004,
-      0xbefc03ff, 0x00002063,  // 99 vertices, 2 primitives
+      0xf8000941, 0x00000004, 0xbefc03ff, 0x00002063,  // 99 vertices, 2
+                                                       // primitives
       0xbf900009, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   const u32 user_data[32]{};
   const gpu::rdna::NggConfig cfg{gs, 128, 99, 128, 2, 128};
-  static const auto program = gpu::rdna::Recompile(es, ps, user_data, user_data,
-                                            0, false, 0, 0, nullptr, 0, &cfg);
-  ASSERT_TRUE(program.ok);
+  static const auto kProgram = gpu::rdna::Recompile(
+      es, ps, user_data, user_data, 0, false, 0, 0, nullptr, 0, &cfg);
+  ASSERT_TRUE(kProgram.ok);
   alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
-  draw.recomp = &program;
+  draw.recomp = &kProgram;
   draw.prim_type = 1;
   draw.vertex_count = 99;
   draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
@@ -724,26 +753,27 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
   // in two instances should cover four separate points, one per quadrant.
   const u32 vs[64] = {
       0x7e280d05, 0x7e2a0d08,  // v20=float(v5), v21=float(v8)
-      0xf4080404, 0,          // s_load_dwordx4 s[16:19], s[8:9], 0
-      0xe0002000, 0x80040505, // buffer_load_format_x v5, v5, s[16:19], 0
-      0x062828f1, 0x062a2af1, // v20+=-0.5, v21+=-0.5
-      0x7e2c0280,             // v22=0
-      0xf80008cf, 0x05161514, // position=(v20,v21,v22,v5)
+      0xf4080404, 0,           // s_load_dwordx4 s[16:19], s[8:9], 0
+      0xe0002000, 0x80040505,  // buffer_load_format_x v5, v5, s[16:19], 0
+      0x062828f1, 0x062a2af1,  // v20+=-0.5, v21+=-0.5
+      0x7e2c0280,              // v22=0
+      0xf80008cf, 0x05161514,  // position=(v20,v21,v22,v5)
       0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   const base::Array<float, 2> vertices = {1.f, 1.f};
   const u64 vb = reinterpret_cast<u64>(vertices.data());
   const u32 descriptor[4] = {u32(vb), u32(vb >> 32) | (4u << 16), 2,
-                            0x21014fac};
+                             0x21014fac};
   const u64 table = reinterpret_cast<u64>(descriptor);
   const u32 user_data[32] = {u32(table), u32(table >> 32)};
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
-  ASSERT_TRUE(program.ok);
-  ASSERT_EQ(program.attrs.size(), 1u);
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(kProgram.ok);
+  ASSERT_EQ(kProgram.attrs.size(), 1u);
   alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
-  draw.recomp = &program;
+  draw.recomp = &kProgram;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
   draw.prim_type = 1;
@@ -752,7 +782,7 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
   draw.vertex_data = vertices.data();
   draw.vertex_stride = 4;
   draw.vbufs[0] = {vertices.data(), 4, 2};
-  draw.vattrs[0] = {0, 0, 0, 1, 4, 7}; // R32_FLOAT
+  draw.vattrs[0] = {0, 0, 0, 1, 4, 7};  // R32_FLOAT
   draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
   draw.rt_w = draw.rt_h = 16;
   draw.mrt_count = draw.mrt_bound_mask = 1;
@@ -780,23 +810,24 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {
       0xf4080404, 0xfa000000,  // s[16:19] = descriptor from s[8:9]
-      0xe0302000, 0x80040005,  // v0 = buffer[vertex ID], using descriptor stride
-      0x7e020280, 0x7e040280, 0x7e0602f2,
-      0xf80008cf, 0x03020100, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000};
+      0xe0302000, 0x80040005,  // v0 = buffer[vertex ID], using descriptor
+                               // stride
+      0x7e020280, 0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100, 0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   const base::Array<float, 4> vertices = {-.5f, 99.f, .5f, 99.f};
   const u64 vb = reinterpret_cast<u64>(vertices.data());
   const u32 descriptor[4] = {u32(vb), u32(vb >> 32) | (8u << 16), 2,
-                            0x21014fac};
+                             0x21014fac};
   const u64 table = reinterpret_cast<u64>(descriptor);
   const u32 user_data[32] = {u32(table), u32(table >> 32)};
   gpu::rdna::NextProgramGeneration();
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
-  ASSERT_TRUE(program.ok);
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(kProgram.ok);
   alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
-  draw.recomp = &program;
+  draw.recomp = &kProgram;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
   base::CopyN(user_data, 32, draw.vs_user_data);
@@ -831,11 +862,11 @@ TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  alignas(256) static const u32 vs[4096] = {
-      0x7e000280, 0x7e020280, 0x7e0402ff, 0x3f400000,
-      0x7e0602f2, 0xf80008cf, 0x03020100, 0xbf810000};
-  alignas(256) static const u32 ps[4096] = {
-      0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
+  alignas(256) static const u32 kVs[4096] = {0x7e000280, 0x7e020280, 0x7e0402ff,
+                                             0x3f400000, 0x7e0602f2, 0xf80008cf,
+                                             0x03020100, 0xbf810000};
+  alignas(256) static const u32 kPs[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f,
+                                             0x00010100, 0xbf810000};
   alignas(65536) static base::Array<u8, 65536> target{}, depth{};
   using namespace gpu::ps5;
   Regs regs;
@@ -844,8 +875,8 @@ TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
     regs[reg] = u32(value >> 8);
     regs[reg + 1] = u32(value >> 40);
   };
-  address(mmSPI_SHADER_PGM_LO_ES, vs);
-  address(mmSPI_SHADER_PGM_LO_PS, ps);
+  address(mmSPI_SHADER_PGM_LO_ES, kVs);
+  address(mmSPI_SHADER_PGM_LO_PS, kPs);
   regs[mmVGT_PRIMITIVE_TYPE] = 1;
   regs[mmCB_TARGET_MASK] = 15;
   regs[mmCB_COLOR0_BASE] = u32(reinterpret_cast<u64>(target.data()) >> 8);
@@ -853,7 +884,8 @@ TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
   regs[mmCB_COLOR0_INFO] = 10u << 2;
   regs[mmCB_COLOR0_ATTRIB2] = (15u << 14) | 15;
   regs[mmPA_CL_CLIP_CNTL] = 1u << 19;
-  regs[mmPA_CL_VPORT_XSCALE] = regs[mmPA_CL_VPORT_XOFFSET] = base::BitCast<u32>(8.f);
+  regs[mmPA_CL_VPORT_XSCALE] = regs[mmPA_CL_VPORT_XOFFSET] =
+      base::BitCast<u32>(8.f);
   regs[mmPA_CL_VPORT_YSCALE] = base::BitCast<u32>(-8.f);
   regs[mmPA_CL_VPORT_YOFFSET] = base::BitCast<u32>(8.f);
   regs[mmDB_Z_INFO] = 3;
@@ -875,7 +907,8 @@ TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
   gpu::render::BeginFrame(renderer);
   ASSERT_TRUE(gpu::render::DrawRecomp(renderer, clear));
   regs[mmDB_RENDER_CONTROL] = 0;
-  regs[mmDB_DEPTH_CONTROL] = (1u << 4) | 6;  // LESS: .75 passes only after clear=1
+  regs[mmDB_DEPTH_CONTROL] =
+      (1u << 4) | 6;  // LESS: .75 passes only after clear=1
   gpu::render::DrawInfo point;
   ASSERT_TRUE(BuildDrawInfo(regs, packet, point));
   ASSERT_FALSE(point.depth_clear_draw);
@@ -900,19 +933,19 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
   // Inline V# at s[8:11], indexed by v5. The instruction requests float4
   // even though the descriptor advertises R32_UINT. Padding must not become
   // vertex data, and changing the stride must work with the same module.
-  const u32 vs[64] = {0xea6b2000, 0x80020005,
-                      0xf80008cf, 0x03020100, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000};
+  const u32 vs[64] = {0xea6b2000, 0x80020005, 0xf80008cf, 0x03020100,
+                      0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   base::Array<float, 32> vertices;
   const u64 vb = reinterpret_cast<u64>(vertices.data());
-  u32 user_data[32] = {u32(vb), u32(vb >> 32) | (32u << 16), 2,
-                       0x21014fac};
+  u32 user_data[32] = {u32(vb), u32(vb >> 32) | (32u << 16), 2, 0x21014fac};
   gpu::rdna::NextProgramGeneration();
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
-  ASSERT_TRUE(program.ok);
-  ASSERT_TRUE(program.attrs.empty());
-  ASSERT_EQ(program.vs_bufs.size(), 1u);
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(kProgram.ok);
+  ASSERT_TRUE(kProgram.attrs.empty());
+  ASSERT_EQ(kProgram.vs_bufs.size(), 1u);
   alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   for (u32 pass = 0; pass < 2; ++pass) {
     const u32 stride = pass ? 48 : 32;
@@ -924,7 +957,7 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
     base::Copy(right.begin(), right.end(), vertices.begin() + stride / 4);
     user_data[1] = u32(vb >> 32) | (stride << 16);
     gpu::render::DrawInfo draw;
-    draw.recomp = &program;
+    draw.recomp = &kProgram;
     draw.vs_addr = reinterpret_cast<u64>(vs);
     draw.ps_addr = reinterpret_cast<u64>(ps);
     base::CopyN(user_data, 32, draw.vs_user_data);
@@ -932,7 +965,8 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
     draw.vertex_count = 2;
     draw.bufs[0] = {vb, sizeof(vertices)};
     draw.num_bufs = 1;
-    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[pass].data());
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[pass].data());
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
@@ -961,25 +995,25 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
   const u32 vs[64] = {
       0xf4100204, 0xfa000000,  // s[8:23] = four descriptors from s[8:9]
       0xf4200804, 0xfa000000,  // a scalar load uses the first descriptor
-      0xe0302000, 0x80040005,  // v0 = buffer[vertex ID], using descriptor stride
-      0x7e020280, 0x7e040280, 0x7e0602f2,
-      0xf80008cf, 0x03020100, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000};
+      0xe0302000, 0x80040005,  // v0 = buffer[vertex ID], using descriptor
+                               // stride
+      0x7e020280, 0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100, 0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   const base::Array<float, 4> vertices = {-.5f, 99.f, .5f, 99.f};
   const u64 vb = reinterpret_cast<u64>(vertices.data());
   const u32 descriptor[16] = {
-      u32(vb), u32(vb >> 32) | (8u << 16), 2, 0x21014fac,
-      0, 0, 0, 0,
+      u32(vb), u32(vb >> 32) | (8u << 16), 2, 0x21014fac, 0, 0, 0, 0,
       u32(vb), u32(vb >> 32) | (8u << 16), 2, 0x21014fac};
   const u64 table = reinterpret_cast<u64>(descriptor);
   const u32 user_data[32] = {u32(table), u32(table >> 32)};
   gpu::rdna::NextProgramGeneration();
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
-  ASSERT_TRUE(program.ok);
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(kProgram.ok);
   alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
-  draw.recomp = &program;
+  draw.recomp = &kProgram;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
   base::CopyN(user_data, 32, draw.vs_user_data);
@@ -988,7 +1022,7 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
   draw.bufs[0] = {vb, sizeof(vertices)};
   draw.num_bufs = 1;
   const auto resources = gpu::rdna::ResolveBuffers(vs, user_data, 32, 8);
-  for (const auto& cb : program.vs_cbufs) {
+  for (const auto& cb : kProgram.vs_cbufs) {
     ASSERT_TRUE(resources.count(cb.use_pc));
     draw.cbufs[cb.binding] = {resources.at(cb.use_pc).base + cb.first_dword * 4,
                               cb.num_dwords * 4};
@@ -1017,50 +1051,59 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
 TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
   options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
-  if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().fragment_barycentric)
+  if (!gpu::render::Init(renderer) ||
+      !gpu::render::Device().caps().fragment_barycentric)
     GTEST_SKIP() << "Fragment barycentrics are required";
-  static const u32 vs[4096] = {
+  static const u32 kVs[4096] = {
       0xe0382000, 0x80020005,  // position.xyz + packed attribute, indexed by v5
-      0x7e0802f2, 0xf80008cf, 0x04020100,
-      0xf8000201, 0x00000003, 0xbf810000};
-  static const u32 ps[4096] = {
+      0x7e0802f2, 0xf80008cf, 0x04020100, 0xf8000201, 0x00000003, 0xbf810000};
+  static const u32 kPs[4096] = {
       0xc8020002, 0xc8060000, 0xc80a0001,  // P0, P10, P20
-      0x7e0602f2, 0x7e0e0280,
-      0x7d840000, 0x02080680,  // v4 = first vertex matches s0
+      0x7e0602f2, 0x7e0e0280, 0x7d840000,
+      0x02080680,              // v4 = first vertex matches s0
       0x7d840201, 0x020a0680,  // v5 = second vertex matches s1
       0x7d840402, 0x020c0680,  // v6 = third vertex matches s2
       0xf800080f, 0x03060504, 0xbf810000};
-  struct Vertex { float x, y, z; u32 packed; };
+  struct Vertex {
+    float x, y, z;
+    u32 packed;
+  };
   const Vertex vertices[] = {{-.75f, -.75f, 0, 0x3f800123},
-                            {.75f, -.75f, 0, 0x7fc0ffff},
-                            {0, .75f, 0, 0xabcdef12}};
+                             {.75f, -.75f, 0, 0x7fc0ffff},
+                             {0, .75f, 0, 0xabcdef12}};
   const u64 vb = reinterpret_cast<u64>(vertices);
   const u32 vs_ud[32] = {u32(vb), u32(vb >> 32) | (16u << 16), 3, 0x21014fac};
-  const u32 ps_ud[32] = {vertices[0].packed, vertices[1].packed, vertices[2].packed};
+  const u32 ps_ud[32] = {vertices[0].packed, vertices[1].packed,
+                         vertices[2].packed};
   alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   const gpu::gcn::Recompiled* previous = nullptr;
   for (u32 passthrough = 0; passthrough < 2; ++passthrough) {
     const u32 input_control[32] = {passthrough ? 0x420u : 0u};
-    const auto& program = gpu::ps5::GetGraphicsShader({
-        .vs_addr = reinterpret_cast<u64>(vs), .ps_addr = reinterpret_cast<u64>(ps),
-        .vs_user_sgprs = 4, .ps_user_sgprs = 3,
-        .ps_in_cntl = input_control, .ps_num_interp = 1,
-        .vs_user_data = vs_ud, .ps_user_data = ps_ud});
+    const auto& program =
+        gpu::ps5::GetGraphicsShader({.vs_addr = reinterpret_cast<u64>(kVs),
+                                     .ps_addr = reinterpret_cast<u64>(kPs),
+                                     .vs_user_sgprs = 4,
+                                     .ps_user_sgprs = 3,
+                                     .ps_in_cntl = input_control,
+                                     .ps_num_interp = 1,
+                                     .vs_user_data = vs_ud,
+                                     .ps_user_data = ps_ud});
     ASSERT_TRUE(program.ok);
     if (previous)
       EXPECT_NE(&program, previous) << "Interpolation mode changes the shader";
     previous = &program;
     gpu::render::DrawInfo draw;
     draw.recomp = &program;
-    draw.vs_addr = reinterpret_cast<u64>(vs);
-    draw.ps_addr = reinterpret_cast<u64>(ps);
+    draw.vs_addr = reinterpret_cast<u64>(kVs);
+    draw.ps_addr = reinterpret_cast<u64>(kPs);
     base::CopyN(vs_ud, 32, draw.vs_user_data);
     base::CopyN(ps_ud, 32, draw.ps_user_data);
     draw.prim_type = 4;
     draw.vertex_count = 3;
     draw.bufs[0] = {vb, sizeof(vertices)};
     draw.num_bufs = 1;
-    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[passthrough].data());
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[passthrough].data());
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
@@ -1084,22 +1127,23 @@ TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  const u32 vs[64] = {0x7e000280, 0x7e0202f2,
-                      0xf80008cf, 0x01000000, 0xbf810000};
+  const u32 vs[64] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                      0xbf810000};
   const u32 ps[64] = {
-      0x7e000284,                        // v0 = byte offset 4
+      0x7e000284,  // v0 = byte offset 4
       0xe8001004 | (56u << 19) | (3u << 16), 0x88020000,
       // tbuffer_load_format_xyzw v[0:3], v0, s[8:11], 8 offen offset:4
       0xf800080f, 0x03020100, 0xbf810000};
   const u32 data[8] = {0, 0, 0, 0, 0xffff8040, 0, 0, 0};
   const u64 base = reinterpret_cast<u64>(data);
   const u32 user_data[32] = {u32(base), u32(base >> 32), sizeof(data), 0x14fac};
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
-  ASSERT_TRUE(program.ok);
-  ASSERT_EQ(program.ps_bufs.size(), 1u);
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(kProgram.ok);
+  ASSERT_EQ(kProgram.ps_bufs.size(), 1u);
   alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
-  draw.recomp = &program;
+  draw.recomp = &kProgram;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
   base::CopyN(user_data, 32, draw.ps_user_data);
@@ -1136,21 +1180,23 @@ TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  const u32 vs[64] = {0x7e000280, 0x7e0202f2,
-                      0xf80008cf, 0x01000000, 0xbf810000};
+  const u32 vs[64] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                      0xbf810000};
   const u32 ps[64] = {
       0x7e0002f0, 0xf09c0f00, 0x00400400,  // sample_lz 1D at x=.5
-      0xbefc03ff, 256,                    // M0 = 256
+      0xbefc03ff, 256,                     // M0 = 256
       0xdac00000, 0x00000400,              // spill red at M0 + lane*4
-      0xbefc0380,                         // M0 = 0
+      0xbefc0380,                          // M0 = 0
       0xdac40100, 0x00000000,              // reload with offset:256
       0xf800080f, 0x07060500, 0xbf810000};
   const u32 user_data[32]{};
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
-  ASSERT_TRUE(program.ok);
-  alignas(65536) static base::Array<u8, 65536> texture{64, 128, 255, 255}, target{};
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(kProgram.ok);
+  alignas(65536) static base::Array<u8, 65536> texture{64, 128, 255, 255},
+      target{};
   gpu::render::DrawInfo draw;
-  draw.recomp = &program;
+  draw.recomp = &kProgram;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
   draw.prim_type = draw.vertex_count = 1;
@@ -1197,26 +1243,26 @@ TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
     GTEST_SKIP() << "A Vulkan device is required";
   const u32 vs[64] = {
       0xd5690000, 0x00020aff, 0x001fffff,  // v0 = vertex ID * (2M - 1)
-      0x4a000081,                        // v0 += 1
-      0xe0302000, 0x80020000,  // v0 = raw buffer s[8:11][v0]
-      0x7e020280, 0x7e040280, 0x7e0602f2,
-      0xf80008cf, 0x03020100, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                      0xf800080f, 0x00010100, 0xbf810000};
+      0x4a000081,                          // v0 += 1
+      0xe0302000, 0x80020000,              // v0 = raw buffer s[8:11][v0]
+      0x7e020280, 0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100, 0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   base::Vector<float> vertices(4 * 1024 * 1024);
   const u32 indices[] = {1, 2 * 1024 * 1024, u32(vertices.size() - 1)};
   const float positions[] = {-.5625f, .0625f, .5625f};
   for (u32 i = 0; i < 3; ++i)
     vertices[indices[i]] = positions[i];
   const u64 vb = reinterpret_cast<u64>(vertices.data());
-  const u32 user_data[32] = {
-      u32(vb), u32(vb >> 32) | (4u << 16), u32(vertices.size()), 0x21014fac};
+  const u32 user_data[32] = {u32(vb), u32(vb >> 32) | (4u << 16),
+                             u32(vertices.size()), 0x21014fac};
   gpu::rdna::NextProgramGeneration();
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
-  ASSERT_TRUE(program.ok);
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(kProgram.ok);
   alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
-  draw.recomp = &program;
+  draw.recomp = &kProgram;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
   base::CopyN(user_data, 32, draw.vs_user_data);
@@ -1250,30 +1296,33 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   // A procedural point at the origin, shaded opaque red.
-  const u32 vs[64] = {0x7e000280, 0x7e0202f2,
-                       0xf80008cf, 0x01000000, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280,
-                       0xf800080f, 0x00010100, 0xbf810000};
+  const u32 vs[64] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                      0xbf810000};
+  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   const u32 user_data[32] = {};
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
-  ASSERT_TRUE(program.ok);
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(kProgram.ok);
   alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   const u16 index = 0;
   for (u32 indexed = 0; indexed < 2; ++indexed) {
     gpu::render::DrawInfo draw;
-    draw.recomp = &program;
+    draw.recomp = &kProgram;
     draw.vs_addr = reinterpret_cast<u64>(vs);
     draw.ps_addr = reinterpret_cast<u64>(ps);
     draw.prim_type = 1;
     draw.vertex_count = indexed ? 0 : 1;
     draw.index_data = indexed ? &index : nullptr;
     draw.index_count = indexed ? 1 : 0;
-    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[indexed].data());
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[indexed].data());
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;  // RGBA8_UNORM
     gpu::render::BeginFrame(renderer);
-    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw)) << "indexed=" << indexed;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw))
+        << "indexed=" << indexed;
     const u32 slot_index = gpu::render::g_frame.slot_idx;
     gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::render::g_frame.slots[slot_index];
@@ -1293,10 +1342,10 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
     // this must bridge the actual GPU image in both directions.
     alignas(256) static base::Array<u32, 4096> cs{};
     const base::Array<u32, 10> code = {
-        0x7e020287,               // v1 = row 7
-        0xf0000f08, 0x00000400,   // image_load v[4:7], v[0:1], s[0:7]
+        0x7e020287,              // v1 = row 7
+        0xf0000f08, 0x00000400,  // image_load v[4:7], v[0:1], s[0:7]
         0x7e100304, 0x7e080305, 0x7e0a0308,  // swap v4/v5 through v8
-        0xf0200f08, 0x00000400,   // image_store v[4:7], v[0:1], s[0:7]
+        0xf0200f08, 0x00000400,  // image_store v[4:7], v[0:1], s[0:7]
         0xbf810000, 0};
     base::Copy(code.begin(), code.end(), cs.begin());
     gpu::rdna::NextProgramGeneration();
@@ -1339,30 +1388,34 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   // A half-red point in an R8/R16 target, whose guest bytes remain zero.
-  const u32 vs[64] = {0x7e000280, 0x7e0202f2,
-                       0xf80008cf, 0x01000000, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f0, 0x7e020280,
-                       0xf800080f, 0x00010100, 0xbf810000};
+  const u32 vs[64] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                      0xbf810000};
+  const u32 ps[64] = {0x7e0002f0, 0x7e020280, 0xf800080f, 0x00010100,
+                      0xbf810000};
   const u32 user_data[32] = {};
-  static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
-  ASSERT_TRUE(program.ok);
+  static const auto kProgram =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(kProgram.ok);
   alignas(65536) static base::Array<base::Array<u8, 65536>, 3> targets{};
   for (u32 format_index = 0; format_index < 3; ++format_index) {
     gpu::render::DrawInfo draw;
-    draw.recomp = &program;
+    draw.recomp = &kProgram;
     draw.vs_addr = reinterpret_cast<u64>(vs);
     draw.ps_addr = reinterpret_cast<u64>(ps);
     draw.prim_type = 1;
     draw.vertex_count = 1;
     draw.index_data = nullptr;
     draw.index_count = 0;
-    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[format_index].data());
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[format_index].data());
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
-    draw.mrt_info[0] = ((format_index ? 2u : 1u) << 2) |
-                       (format_index == 2 ? 7u << 8 : 0);  // R8/R16_UNORM, R16_FLOAT
+    draw.mrt_info[0] =
+        ((format_index ? 2u : 1u) << 2) |
+        (format_index == 2 ? 7u << 8 : 0);  // R8/R16_UNORM, R16_FLOAT
     gpu::render::BeginFrame(renderer);
-    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw)) << "format=" << format_index;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw))
+        << "format=" << format_index;
     const u32 slot_index = gpu::render::g_frame.slot_idx;
     gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::render::g_frame.slots[slot_index];
@@ -1371,7 +1424,8 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
     ASSERT_NE(slot.readback, nullptr);
     const auto* pixels = slot.readback->mapped();
     const auto red = [&](const u8* data, u32 i) -> u32 {
-      if (!format_index) return data[i];
+      if (!format_index)
+        return data[i];
       u16 value;
       std::memcpy(&value, data + i * 2, 2);
       return value;
@@ -1388,10 +1442,10 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
     // Halve the live red channel in compute, then present the modified image.
     alignas(256) static base::Array<u32, 4096> cs{};
     const base::Array<u32, 7> code = {
-        0x7e020287,               // v1 = row 7
-        0xf0000108, 0x00000400,   // image_load v4, v[0:1], s[0:7]
+        0x7e020287,              // v1 = row 7
+        0xf0000108, 0x00000400,  // image_load v4, v[0:1], s[0:7]
         0x100808f0,              // v_mul_f32 v4, 0.5, v4
-        0xf0200108, 0x00000400,   // image_store v4, v[0:1], s[0:7]
+        0xf0200108, 0x00000400,  // image_store v4, v[0:1], s[0:7]
         0xbf810000};
     base::Copy(code.begin(), code.end(), cs.begin());
     gpu::rdna::NextProgramGeneration();
@@ -1406,7 +1460,12 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
     regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 8 << 1;
     const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
     regs[ud] = draw.rt_base >> 8;
-    regs[ud + 1] = ((draw.rt_base >> 40) & 0xff) | ((format_index == 2 ? 13u : format_index ? 7u : 1u) << 20) | (3u << 30);
+    regs[ud + 1] = ((draw.rt_base >> 40) & 0xff) |
+                   ((format_index == 2 ? 13u
+                     : format_index    ? 7u
+                                       : 1u)
+                    << 20) |
+                   (3u << 30);
     regs[ud + 2] = 3 | (15u << 14);
     regs[ud + 3] = 0x90000fac;  // 2D, LINEAR
     gpu::render::BeginFrame(renderer);

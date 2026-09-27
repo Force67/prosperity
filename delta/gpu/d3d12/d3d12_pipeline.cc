@@ -6,16 +6,16 @@
 
 #include <cstring>
 
-#include <base/logging.h>
+#include "base/logging.h"
 
+#include "base/containers/vector.h"
+#include "base/hashing/hash.h"
+#include "base/memory/move.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 #include "gpu/d3d12/d3d12_internal.h"
-#include <base/containers/vector.h>
-#include <base/memory/move.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/hashing/hash.h>
 
 namespace gpu::d3d12::impl {
 
@@ -173,17 +173,16 @@ ID3D12RootSignature* D3D12Device::SerializeRoot(
   ID3DBlob* error = nullptr;
   if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1,
                                          &blob, &error))) {
-    BASE_LOGI("gpud3d12", "root signature: {}",
-              error ? static_cast<const char*>(error->GetBufferPointer())
-                    : "failed");
+    BASE_LOGI(
+        "gpud3d12", "root signature: {}",
+        error ? static_cast<const char*>(error->GetBufferPointer()) : "failed");
     SafeRelease(error);
     return nullptr;
   }
   ID3D12RootSignature* root = nullptr;
-  if (FAILED(device->CreateRootSignature(0, blob->GetBufferPointer(),
-                                         blob->GetBufferSize(),
-                                         IID_ID3D12RootSignature,
-                                         reinterpret_cast<void**>(&root))))
+  if (FAILED(device->CreateRootSignature(
+          0, blob->GetBufferPointer(), blob->GetBufferSize(),
+          IID_ID3D12RootSignature, reinterpret_cast<void**>(&root))))
     root = nullptr;
   SafeRelease(blob);
   SafeRelease(error);
@@ -298,11 +297,11 @@ bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
                                base::Vector<u8>* dxil,
                                LoweredShader* info) {
   u64 key = HashWords(code.words, code.count, code.count);
-  const u32 opts[] = {u32(options.stage),         options.shader_model,
-                      u32(options.flip_y),        options.uint_inputs,
-                      options.sint_inputs,        options.swap_rb_inputs,
-                      u32(options.dispatch_base),
-                      u32(options.emulate_barycentrics)};
+  const u32 opts[] = {
+      u32(options.stage),         options.shader_model,
+      u32(options.flip_y),        options.uint_inputs,
+      options.sint_inputs,        options.swap_rb_inputs,
+      u32(options.dispatch_base), u32(options.emulate_barycentrics)};
   key = HashWords(opts, sizeof(opts) / 4, key);
   for (const auto& [set, binding] : options.read_only_storage) {
     const u32 sb[] = {set, binding};
@@ -325,8 +324,8 @@ bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
   entry.ok = LowerToHlsl(code.words, code.count, options, &entry.info);
   base::String error = entry.info.error;
   if (entry.ok)
-    entry.ok = Dxc::Compile(entry.info.hlsl, entry.info.profile, &entry.dxil,
-                            &error);
+    entry.ok =
+        Dxc::Compile(entry.info.hlsl, entry.info.profile, &entry.dxil, &error);
   if (!entry.ok)
     BASE_LOGI("gpud3d12", "shader ({:#x}) failed: {}", key, error.c_str());
   entry.info.hlsl.clear();
@@ -425,8 +424,8 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
        DeclaresBuiltIn(desc.fragment.words, desc.fragment.count,
                        kBaryCoordNoPersp));
   if (barycentrics &&
-      !CompileHlsl(BarycentricGeometryShader(vinfo.outputs, &outputs),
-                   "gs_6_0", &gs))
+      !CompileHlsl(BarycentricGeometryShader(vinfo.outputs, &outputs), "gs_6_0",
+                   &gs))
     return nullptr;
   if (!desc.fragment.empty()) {
     LowerOptions fo;
@@ -555,8 +554,8 @@ bool D3D12Device::InitBlit() {
     const base::String source = kBlitHlsl;
     const base::String decl = base::String(" ") + entry + "(";
     const mem_size at = source.find(decl);
-    const base::String text = source.substr(0, at) + " main(" +
-                              source.substr(at + decl.size());
+    const base::String text =
+        source.substr(0, at) + " main(" + source.substr(at + decl.size());
     return Dxc::Compile(text, profile, out, &error);
   };
   if (!compile("vs", "vs_6_0", &blit_vs_) ||
@@ -572,8 +571,8 @@ bool D3D12Device::InitBlit() {
   params[1].DescriptorTable = {1, &range};
   D3D12_STATIC_SAMPLER_DESC samplers[2]{};
   for (u32 i = 0; i < 2; i++) {
-    samplers[i].Filter = i ? D3D12_FILTER_MIN_MAG_MIP_LINEAR
-                           : D3D12_FILTER_MIN_MAG_MIP_POINT;
+    samplers[i].Filter =
+        i ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_POINT;
     samplers[i].AddressU = samplers[i].AddressV = samplers[i].AddressW =
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     samplers[i].MaxLOD = 1000.0f;

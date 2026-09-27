@@ -16,11 +16,10 @@
  * bytes are readable right now and costs a syscall. Ask this one first.
  */
 
-
 #include "base/arch.h"
-#include <base/atomic.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
+#include "base/atomic.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 
 namespace gpu::ps5 {
 
@@ -34,17 +33,19 @@ inline bool IsGuestAddress(u64 address) {
   return address >= kGuestBase && address < kGuestEnd;
 }
 
-// GPU aperture: from the lowest slot a title fixed-maps a pool at (64 GiB) to the 2^40
-// user ceiling. Isaac's AGC pool sits ~0x80_xx.., Skyrim's command buffers ~0x10_xx..,
-// but bigger titles run past either (Minecraft's bgfx buffers at 0x89_xx..; an earlier
-// 0x81 ceiling silently dropped every submit naming one).
+// GPU aperture: from the lowest slot a title fixed-maps a pool at (64 GiB) to
+// the 2^40 user ceiling. Isaac's AGC pool sits ~0x80_xx.., Skyrim's command
+// buffers ~0x10_xx.., but bigger titles run past either (Minecraft's bgfx
+// buffers at 0x89_xx..; an earlier 0x81 ceiling silently dropped every submit
+// naming one).
 inline constexpr u64 kGpuBase = 0x1000000000ull;
 inline constexpr u64 kGpuEnd = 0x10000000000ull;
 
-// ...and the pools a title actually maps, since the band is only ever a guess. Astro Bot
-// fixed-maps its GPU pools at 12-25 GiB, under the 64 GiB floor, so every submit naming
-// one was dropped and the title waited forever on the fence they'd have written. The
-// kernel notes each dmem mapping (kern/ps5/dev/dma_dev.cc).
+// ...and the pools a title actually maps, since the band is only ever a guess.
+// Astro Bot fixed-maps its GPU pools at 12-25 GiB, under the 64 GiB floor, so
+// every submit naming one was dropped and the title waited forever on the fence
+// they'd have written. The kernel notes each dmem mapping
+// (kern/ps5/dev/dma_dev.cc).
 inline constexpr u32 kMaxNotedPools = 128;
 
 struct NotedPools {

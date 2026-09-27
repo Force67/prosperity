@@ -4,28 +4,27 @@
 
 #include "gpu/render/backend.h"
 
-
 #include "gpu/vulkan/vk_rhi.h"
 #if DELTA_GPU_OPENGL
 #include "gpu/opengl/gl_rhi.h"
 #endif
 #if DELTA_HAVE_D3D12
+#include "base/containers/vector.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
 #include "gpu/d3d12/d3d12_rhi.h"
-#include <base/containers/vector.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
 #endif
 
 namespace gpu::render {
 
 base::Vector<rhi::Backend> CompiledBackends() {
   return {
-    rhi::Backend::kVulkan,
+      rhi::Backend::kVulkan,
 #if DELTA_GPU_OPENGL
-    rhi::Backend::kOpenGL,
+      rhi::Backend::kOpenGL,
 #endif
 #if DELTA_HAVE_D3D12
-    rhi::Backend::kD3D12,
+      rhi::Backend::kD3D12,
 #endif
   };
 }

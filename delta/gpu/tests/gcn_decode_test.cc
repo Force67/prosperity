@@ -2,8 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include "base/containers/vector.h"
 #include "gpu/gcn/gcn_decode.h"
-#include <base/containers/vector.h>
 
 namespace {
 
@@ -85,9 +85,9 @@ TEST(GcnDecode, SopkSetregImmediateConsumesTrailingDword) {
 }
 
 TEST(GcnDecode, NeoVop3UsesSplitTenthOpcodeBit) {
-  constexpr u32 op = 0x36d;  // v_add3_u32
+  constexpr u32 kOp = 0x36d;  // v_add3_u32
   const u32 code[] = {
-      (0x34u << 26) | ((op & 0x1ff) << 17) | ((op >> 9) << 16),
+      (0x34u << 26) | ((kOp & 0x1ff) << 17) | ((kOp >> 9) << 16),
       0,
   };
 
@@ -98,21 +98,21 @@ TEST(GcnDecode, NeoVop3UsesSplitTenthOpcodeBit) {
 
   ASSERT_EQ(base.size(), 1u);
   ASSERT_EQ(neo.size(), 1u);
-  EXPECT_EQ(base[0].opcode, op & 0x1ff);
-  EXPECT_EQ(neo[0].opcode, op);
+  EXPECT_EQ(base[0].opcode, kOp & 0x1ff);
+  EXPECT_EQ(neo[0].opcode, kOp);
   EXPECT_EQ(neo[0].isa, gpu::gcn::IsaMode::kNeo);
 }
 
 TEST(GcnDecode, NeoVop3pIsASeparateEncoding) {
-  constexpr u32 op = 0x20;  // v_mad_mix_f32
-  const u32 code[] = {(0x33u << 26) | (op << 16), 0};
+  constexpr u32 kOp = 0x20;  // v_mad_mix_f32
+  const u32 code[] = {(0x33u << 26) | (kOp << 16), 0};
 
   const gpu::gcn::Program program =
       gpu::gcn::Decode(code, 2, false, gpu::gcn::IsaMode::kNeo);
 
   ASSERT_EQ(program.size(), 1u);
   EXPECT_EQ(program[0].enc, gpu::gcn::Enc::kVop3p);
-  EXPECT_EQ(program[0].opcode, op);
+  EXPECT_EQ(program[0].opcode, kOp);
   EXPECT_EQ(program[0].size, 2u);
 }
 
@@ -164,7 +164,7 @@ TEST(GcnDecode, NeoFp16MadVop2ConsumesMandatoryLiteral) {
 
 TEST(GcnDecode, TruncatedMultiwordFormsBecomeUnknown) {
   const u32 vop3[] = {(0x34u << 26) | (0x303u & 0x1ff) << 17 |
-                           (0x303u >> 9) << 16};
+                      (0x303u >> 9) << 16};
   const u32 sdwa[] = {(0x3fu << 25) | (0x50u << 9) | 249u};
   const u32 literal[] = {(0x37u << 25) | 256u};
 

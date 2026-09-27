@@ -5,22 +5,22 @@
 #include <cstdio>
 #include <cstring>
 
-#include <base/logging.h>
 #include <unistd.h>
+#include "base/logging.h"
 
+#include "base/algorithm.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
 #include "gpu/gpu_check.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_rhi_internal.h"
-#include <base/threading/thread.h>
-#include <base/algorithm.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/strings/format.h>
 
 namespace gpu::vk {
 
@@ -52,8 +52,8 @@ MessageCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     labels += data->pCmdBufLabels[i].pLabelName;
   }
   reinterpret_cast<Sink>(user)(
-      level, data->pMessageIdName ? data->pMessageIdName : "?",
-      labels.c_str(), data->pMessage ? data->pMessage : "");
+      level, data->pMessageIdName ? data->pMessageIdName : "?", labels.c_str(),
+      data->pMessage ? data->pMessage : "");
   return VK_FALSE;
 }
 
@@ -320,7 +320,8 @@ bool ImageAllocator::Allocate(VulkanDevice& device,
   if (type == UINT32_MAX)
     type = device.FindMemoryType(mr.memoryTypeBits, 0);
 
-  if (!dedicated.requiresDedicatedAllocation && mr.size <= kImageBlockSize / 2) {
+  if (!dedicated.requiresDedicatedAllocation &&
+      mr.size <= kImageBlockSize / 2) {
     base::LockGuard<base::Mutex> lock(mutex_);
     auto try_block = [&](Block& block) {
       u64 offset = 0;
@@ -735,15 +736,14 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   caps_.host_import_alignment = host.minImportedHostPointerAlignment;
   caps_.texture_blit = true;
   caps_.dispatch_base = true;
-  caps_.timestamps = lim.timestampComputeAndGraphics &&
-                     native.timestamp_valid_bits != 0;
+  caps_.timestamps =
+      lim.timestampComputeAndGraphics && native.timestamp_valid_bits != 0;
   caps_.timestamp_period_ns = lim.timestampPeriod;
   caps_.timestamp_bits = native.timestamp_valid_bits;
   caps_.subgroup_size = subgroup.subgroupSize ? subgroup.subgroupSize : 32;
   caps_.max_dynamic_uniform_buffers = lim.maxDescriptorSetUniformBuffersDynamic;
   caps_.max_dynamic_storage_buffers = lim.maxDescriptorSetStorageBuffersDynamic;
-  caps_.max_storage_buffers_per_stage =
-      lim.maxPerStageDescriptorStorageBuffers;
+  caps_.max_storage_buffers_per_stage = lim.maxPerStageDescriptorStorageBuffers;
   caps_.max_push_constant_bytes = lim.maxPushConstantsSize;
   caps_.max_storage_buffer_range = lim.maxStorageBufferRange;
   caps_.uniform_offset_alignment =
@@ -758,7 +758,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   max_anisotropy_ = lim.maxSamplerAnisotropy;
   caps_.max_compute_resources =
       base::Min(lim.maxPerStageDescriptorStorageBuffers,
-               lim.maxDescriptorSetStorageBuffers);
+                lim.maxDescriptorSetStorageBuffers);
   constexpr VkMemoryPropertyFlags kUnified =
       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
@@ -821,8 +821,8 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
   VkImportMemoryHostPointerInfoEXT import{
       VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
   u32 type = UINT32_MAX;
-  constexpr VkMemoryPropertyFlags kHost =
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  constexpr VkMemoryPropertyFlags kHost = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
   if (desc.host_pointer) {
     static PFN_vkGetMemoryHostPointerPropertiesEXT get_props =
         reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
@@ -891,18 +891,17 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
     return nullptr;
   }
   if (desc.host_pointer) {
-    buffer->set_mapped(static_cast<u8*>(desc.host_pointer));
+    buffer->SetMapped(static_cast<u8*>(desc.host_pointer));
   } else if (desc.memory != rhi::MemoryKind::kDevice) {
     void* p = nullptr;
-    if (vkMapMemory(dev, buffer->memory, 0, VK_WHOLE_SIZE, 0, &p) ==
-        VK_SUCCESS)
-      buffer->set_mapped(static_cast<u8*>(p));
+    if (vkMapMemory(dev, buffer->memory, 0, VK_WHOLE_SIZE, 0, &p) == VK_SUCCESS)
+      buffer->SetMapped(static_cast<u8*>(p));
   }
   if (address) {
     VkBufferDeviceAddressInfo info{
         VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
     info.buffer = buffer->buffer;
-    buffer->set_address(vkGetBufferDeviceAddress(dev, &info));
+    buffer->SetAddress(vkGetBufferDeviceAddress(dev, &info));
   }
   if (desc.name)
     SetName(&*buffer, desc.name);
@@ -942,8 +941,7 @@ rhi::Texture* VulkanDevice::CreateTexture(const rhi::TextureDesc& desc) {
     ii.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
   if (desc.usage & rhi::kTextureArrayCompatible)
     ii.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
-  if (vkCreateImage(native.device, &ii, nullptr, &texture->image) !=
-      VK_SUCCESS)
+  if (vkCreateImage(native.device, &ii, nullptr, &texture->image) != VK_SUCCESS)
     return nullptr;
   if (!images_.Allocate(*this, texture->image, texture->allocation)) {
     vkDestroyImage(native.device, texture->image, nullptr);
@@ -965,15 +963,14 @@ rhi::TextureView* VulkanDevice::CreateView(rhi::Texture* texture,
   VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vi.image = tex->image;
   vi.viewType = ToVkViewType(desc.dim);
-  vi.format = ToVkFormat(desc.format == rhi::Format::kUndefined
-                             ? texture->desc().format
-                             : desc.format);
+  vi.format =
+      ToVkFormat(desc.format == rhi::Format::kUndefined ? texture->desc().format
+                                                        : desc.format);
   vi.components = {ToVkSwizzle(desc.swizzle[0]), ToVkSwizzle(desc.swizzle[1]),
                    ToVkSwizzle(desc.swizzle[2]), ToVkSwizzle(desc.swizzle[3])};
   vi.subresourceRange = {ToVkAspect(desc.aspect), desc.base_mip, desc.mips,
                          desc.base_layer, desc.layers};
-  if (vkCreateImageView(native.device, &vi, nullptr, &view->view) !=
-      VK_SUCCESS)
+  if (vkCreateImageView(native.device, &vi, nullptr, &view->view) != VK_SUCCESS)
     return nullptr;
   return gpu::rhi::Release(view);
 }
@@ -998,9 +995,9 @@ rhi::Sampler* VulkanDevice::CreateSampler(const rhi::SamplerDesc& desc) {
   si.mipLodBias = base::Clamp(desc.lod_bias, -max_lod_bias_, max_lod_bias_);
   si.minLod = desc.min_lod;
   si.maxLod = desc.max_lod;
-  si.anisotropyEnable =
-      desc.max_anisotropy > 1.0f && caps_.sampler_anisotropy ? VK_TRUE
-                                                             : VK_FALSE;
+  si.anisotropyEnable = desc.max_anisotropy > 1.0f && caps_.sampler_anisotropy
+                            ? VK_TRUE
+                            : VK_FALSE;
   si.maxAnisotropy = base::Min(desc.max_anisotropy, max_anisotropy_);
   si.compareEnable = desc.compare_enable ? VK_TRUE : VK_FALSE;
   si.compareOp = ToVkCompare(desc.compare);
@@ -1060,8 +1057,7 @@ VkDescriptorPool VulkanDevice::GrowSetPool() {
   pi.poolSizeCount = sizeof(sizes) / sizeof(sizes[0]);
   pi.pPoolSizes = sizes;
   VkDescriptorPool pool = VK_NULL_HANDLE;
-  if (vkCreateDescriptorPool(native.device, &pi, nullptr, &pool) !=
-      VK_SUCCESS)
+  if (vkCreateDescriptorPool(native.device, &pi, nullptr, &pool) != VK_SUCCESS)
     return VK_NULL_HANDLE;
   set_pools_.push_back(pool);
   return pool;
@@ -1081,9 +1077,9 @@ void VulkanDevice::FillWrite(VkDescriptorType type,
     case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: {
       auto* view = static_cast<VulkanView*>(in.view);
       image.imageView = view ? view->view : VK_NULL_HANDLE;
-      image.sampler =
-          in.sampler ? static_cast<VulkanSampler*>(in.sampler)->sampler
-                     : VK_NULL_HANDLE;
+      image.sampler = in.sampler
+                          ? static_cast<VulkanSampler*>(in.sampler)->sampler
+                          : VK_NULL_HANDLE;
       image.imageLayout =
           type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
               ? VK_IMAGE_LAYOUT_GENERAL
@@ -1093,9 +1089,8 @@ void VulkanDevice::FillWrite(VkDescriptorType type,
       break;
     }
     default:
-      buffer.buffer =
-          in.buffer ? static_cast<VulkanBuffer*>(in.buffer)->buffer
-                    : VK_NULL_HANDLE;
+      buffer.buffer = in.buffer ? static_cast<VulkanBuffer*>(in.buffer)->buffer
+                                : VK_NULL_HANDLE;
       buffer.offset = in.offset;
       buffer.range = in.range ? in.range : VK_WHOLE_SIZE;
       write.pBufferInfo = &buffer;
@@ -1334,9 +1329,9 @@ rhi::Pipeline* VulkanDevice::CreateComputePipeline(
   auto pipeline = base::MakeUnique<VulkanPipeline>();
   pipeline->layout = layout;
   pipeline->bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
-  const VkResult r = vkCreateComputePipelines(
-      native.device, native.pipeline_cache, 1, &ci, nullptr,
-      &pipeline->pipeline);
+  const VkResult r =
+      vkCreateComputePipelines(native.device, native.pipeline_cache, 1, &ci,
+                               nullptr, &pipeline->pipeline);
   vkDestroyShaderModule(native.device, module, nullptr);
   if (r != VK_SUCCESS) {
     BASE_LOGI("gpuvk", "compute pipeline failed: {}", (int)r);
@@ -1353,8 +1348,7 @@ rhi::TimestampPool* VulkanDevice::CreateTimestampPool(u32 count) {
   VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
   qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
   qi.queryCount = count;
-  if (vkCreateQueryPool(native.device, &qi, nullptr, &pool->pool) !=
-      VK_SUCCESS)
+  if (vkCreateQueryPool(native.device, &qi, nullptr, &pool->pool) != VK_SUCCESS)
     return nullptr;
   pool->count = count;
   return gpu::rhi::Release(pool);
@@ -1442,8 +1436,7 @@ bool VulkanDevice::SupportsFormat(rhi::Format format, u32 usage) const {
   if ((usage & rhi::kTextureDepthTarget) &&
       !(f & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
     return false;
-  if ((usage & rhi::kTextureCopySrc) &&
-      !(f & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
+  if ((usage & rhi::kTextureCopySrc) && !(f & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
       !(f & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
     return false;
   return true;
@@ -1634,9 +1627,8 @@ void VulkanDevice::ReportDeviceLoss() {
   info.pVendorInfos = vendors.data();
   counts.vendorBinarySize = 0;
   get_fault(dev, &counts, &info);
-  BASE_LOGI("gpuvk", "device fault: '{}' addrs={} vendor={}",
-            info.description, counts.addressInfoCount,
-            counts.vendorInfoCount);
+  BASE_LOGI("gpuvk", "device fault: '{}' addrs={} vendor={}", info.description,
+            counts.addressInfoCount, counts.vendorInfoCount);
   for (const auto& a : addrs)
     BASE_LOGI("gpuvk", "  fault addr type={} va={:#x} prec={:#x}",
               (int)a.addressType, (unsigned long long)a.reportedAddress,
@@ -1649,7 +1641,8 @@ void VulkanDevice::ReportDeviceLoss() {
 
 }  // namespace rhi_impl
 
-base::UniquePointer<rhi::Device> CreateVulkanDevice(const VulkanOptions& options) {
+base::UniquePointer<rhi::Device> CreateVulkanDevice(
+    const VulkanOptions& options) {
   auto device = base::MakeUnique<VulkanDevice>();
   if (!device->Init(options))
     return nullptr;

@@ -299,12 +299,12 @@ int PS4ABI sceGnmSubmitAndFlipCommandBuffers(u32 count,
   // Present the render target that this flip displays (the guest scanout
   // buffer).
   gpu::ps4::EndFrame(
-// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+      // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
       prosperity_videoout_buffer(static_cast<int>(display_buffer_index)));
-// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
+  // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
   prosperity_videoout_set_flip(static_cast<int>(display_buffer_index),
                                flip_arg);
-// NOLINTEND(readability-identifier-naming)
+  // NOLINTEND(readability-identifier-naming)
   return 0;
 }
 
@@ -324,12 +324,12 @@ sceGnmSubmitAndFlipCommandBuffersForWorkload(u32 workload,
   DumpPm4(dcb_gpu_addrs, dcb_sizes, count);
   ProcessDcbs(dcb_gpu_addrs, dcb_sizes, ccb_gpu_addrs, ccb_sizes, count);
   gpu::ps4::EndFrame(
-// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+      // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
       prosperity_videoout_buffer(static_cast<int>(display_buffer_index)));
-// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
+  // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
   prosperity_videoout_set_flip(static_cast<int>(display_buffer_index),
                                flip_arg);
-// NOLINTEND(readability-identifier-naming)
+  // NOLINTEND(readability-identifier-naming)
   return 0;
 }
 
@@ -349,7 +349,7 @@ int PS4ABI sceGnmDingDong(u32 ring_id, u32 offset) {
   static int n = 0;
   if (kDingDong && n++ < 20)
     BASE_LOGI("gnm", "sceGnmDingDong ring={} offset={:#x}", ring_id, offset);
-// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+  // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
   prosperity_gc_dingdong(ring_id, offset);
   return 0;
 }

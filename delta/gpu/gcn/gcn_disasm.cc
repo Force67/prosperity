@@ -11,9 +11,9 @@
 
 #include <cstdio>
 
-#include <base/strings/to_string.h>
-#include <base/logging.h>
-#include <base/strings/xstring.h>
+#include "base/logging.h"
+#include "base/strings/to_string.h"
+#include "base/strings/xstring.h"
 
 namespace gpu::gcn {
 namespace {
@@ -79,10 +79,10 @@ base::String VRange(u32 base, u32 count) {
 // Full source-operand field (SSRC/SRC encoding: SGPRs, inline constants,
 // literal, VGPRs).
 base::String Src(u32 field,
-                const Inst& inst,
-                u32 count = 1,
-                bool allow_lds_direct = false,
-                bool allow_literal = false) {
+                 const Inst& inst,
+                 u32 count = 1,
+                 bool allow_lds_direct = false,
+                 bool allow_literal = false) {
   if (field <= 127)
     return SRange(field, count);
   if (field == 128)
@@ -957,10 +957,7 @@ const char* SdwaUnusedName(u32 value) {
   return kUnused[value & 3];
 }
 
-base::String CompactSource(const Inst& inst,
-                          u32 index,
-                          u32 vsrc1,
-                          u32 count) {
+base::String CompactSource(const Inst& inst, u32 index, u32 vsrc1, u32 count) {
   const u32 m = inst.raw[1];
   if (inst.extension == InstExtension::kSdwa) {
     const bool scalar = index == 0 ? ((m >> 23) & 1) : ((m >> 31) & 1);
@@ -1047,8 +1044,8 @@ base::String DppControlName(u32 ctrl) {
 base::String DppControls(const Inst& inst) {
   const u32 m = inst.raw[1];
   base::String s = " " + DppControlName((m >> 8) & 0x1ff) +
-                  " row_mask:" + Hex((m >> 28) & 0xf) +
-                  " bank_mask:" + Hex((m >> 24) & 0xf);
+                   " row_mask:" + Hex((m >> 28) & 0xf) +
+                   " bank_mask:" + Hex((m >> 24) & 0xf);
   if ((m >> 19) & 1)
     s += " bound_ctrl:1";
   if ((m >> 18) & 1)
@@ -1201,7 +1198,7 @@ base::String OperandsSmrd(const Inst& inst) {
   const u32 off = w & 0xFF;
   const bool buffer = inst.opcode >= 8;
   base::String s = SRange(sdst, SmrdCount(inst.opcode)) + ", " +
-                  SRange(sbase, buffer ? 4 : 2) + ", ";
+                   SRange(sbase, buffer ? 4 : 2) + ", ";
   if (imm)
     s += Hex(off);  // dword offset
   else if (off == 255)
@@ -1249,8 +1246,8 @@ base::String OperandsVop2(const Inst& inst) {
   // takes inline constants too: printing it as a register name turns "lane 4"
   // into "s132" and reads as a live scalar the shader never had.
   const base::String src1 = inst.opcode == 0x01 || inst.opcode == 0x02
-                               ? Src(vsrc1, inst, 1)
-                               : CompactSource(inst, 1, vsrc1, 1);
+                                ? Src(vsrc1, inst, 1)
+                                : CompactSource(inst, 1, vsrc1, 1);
   const u32 vdst = (w >> 17) & 0xff;
   base::String s = (inst.opcode == 0x01 ? SName(vdst) : VRange(vdst, 1)) + ", ";
   if (inst.opcode >= 0x25 && inst.opcode <= 0x2a)
@@ -1493,8 +1490,8 @@ base::String OperandsVintrp(const Inst& inst) {
 base::String OperandsDs(const Inst& inst) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const u32 off0 = w & 0xFF, off1 = (w >> 8) & 0xFF, gds = (w >> 17) & 1;
-  const u32 addr = w1 & 0xFF, d0 = (w1 >> 8) & 0xFF,
-                 d1 = (w1 >> 16) & 0xFF, vdst = (w1 >> 24) & 0xFF;
+  const u32 addr = w1 & 0xFF, d0 = (w1 >> 8) & 0xFF, d1 = (w1 >> 16) & 0xFF,
+            vdst = (w1 >> 24) & 0xFF;
   const u32 op = inst.opcode;
   if (op == 0x14)
     return gds ? "gds" : "";
@@ -1645,14 +1642,13 @@ base::String OperandsMimg(const Inst& inst) {
   const u32 vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
   const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
   const u32 ssamp = ((w1 >> 21) & 0x1F) * 4;
-  u32 n =
-      inst.opcode >= 0x40 && inst.opcode <= 0x5f ? 4 : PopCount4(dmask);
+  u32 n = inst.opcode >= 0x40 && inst.opcode <= 0x5f ? 4 : PopCount4(dmask);
   if (!n)
     n = 1;
   if (tfe)
     n++;
   base::String s = VRange(vdata, n) + ", " + VRange(vaddr, 1) + ", " +
-                  SRange(srsrc, r128 ? 4 : 8);
+                   SRange(srsrc, r128 ? 4 : 8);
   if (inst.opcode >= 0x20)  // sample/gather ops also name an S#
     s += ", " + SRange(ssamp, 4);
   s += " dmask:" + Hex(dmask);
@@ -1697,8 +1693,7 @@ base::String OperandsExp(const Inst& inst) {
 base::String OperandsFlat(const Inst& inst) {
   const u32 w = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
   const bool glc = (w >> 16) & 1, slc = (w >> 17) & 1, tfe = (w1 >> 23) & 1;
-  const u32 addr = w1 & 0xff, data = (w1 >> 8) & 0xff,
-                 vdst = (w1 >> 24) & 0xff;
+  const u32 addr = w1 & 0xff, data = (w1 >> 8) & 0xff, vdst = (w1 >> 24) & 0xff;
   const u32 count = MubufCount(op);
   const bool load = op >= 0x08 && op <= 0x0f;
   const bool store = op == 0x18 || op == 0x1a || (op >= 0x1c && op <= 0x1f);
@@ -1788,19 +1783,19 @@ base::String Mnemonic(const Inst& inst) {
       if (inst.isa == IsaMode::kNeo && op >= 8 && op < 16) {
         static const char* const kD16Fmt[] = {"x", "xy", "xyz", "xyzw"};
         return base::String(op < 12 ? "tbuffer_load_format_d16_"
-                                   : "tbuffer_store_format_d16_") +
+                                    : "tbuffer_store_format_d16_") +
                kD16Fmt[op & 3];
       }
       if (op < 4)
         return base::String("tbuffer_load_format_") + (op == 0   ? "x"
-                                                      : op == 1 ? "xy"
-                                                      : op == 2 ? "xyz"
-                                                                : "xyzw");
+                                                       : op == 1 ? "xy"
+                                                       : op == 2 ? "xyz"
+                                                                 : "xyzw");
       if (op < 8)
         return base::String("tbuffer_store_format_") + (op == 4   ? "x"
-                                                       : op == 5 ? "xy"
-                                                       : op == 6 ? "xyz"
-                                                                 : "xyzw");
+                                                        : op == 5 ? "xy"
+                                                        : op == 6 ? "xyz"
+                                                                  : "xyzw");
       return Fallback("mtbuf", op);
     case Enc::kMimg:
       return MimgName(op);

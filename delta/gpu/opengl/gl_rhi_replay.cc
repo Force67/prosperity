@@ -5,11 +5,11 @@
 #include <cmath>
 #include <cstring>
 
-#include <base/logging.h>
+#include "base/logging.h"
 
+#include "base/algorithm.h"
+#include "base/math/value_bounds.h"
 #include "gpu/opengl/gl_rhi_internal.h"
-#include <base/algorithm.h>
-#include <base/math/value_bounds.h>
 
 namespace gpu::opengl {
 
@@ -170,8 +170,7 @@ void Replayer::SetScissorTest(bool enable) {
 }
 
 void Replayer::SetScissor(i32 x, i32 y, u32 width, u32 height) {
-  const i32 want[4] = {x, y, static_cast<i32>(width),
-                       static_cast<i32>(height)};
+  const i32 want[4] = {x, y, static_cast<i32>(width), static_cast<i32>(height)};
   if (std::memcmp(want, gl_scissor_, sizeof(want))) {
     glScissorIndexed(0, x, y, static_cast<GLsizei>(width),
                      static_cast<GLsizei>(height));
@@ -265,8 +264,7 @@ void Replayer::BeginPass(const CmdBeginPass& c) {
       if (c.clear_mask & (1u << i))
         ClearFramebuffer(fbo, i, c.kinds[i], c.clear[i]);
     if (c.depth_clear)
-      ClearDepthStencilFbo(fbo, c.depth_clear, c.clear_depth,
-                           c.clear_stencil);
+      ClearDepthStencilFbo(fbo, c.depth_clear, c.clear_depth, c.clear_stencil);
   }
 }
 
@@ -472,17 +470,21 @@ void Replayer::BufferToTexture(const CmdBufferTexture& c, bool upload) {
       upload ? GL_UNPACK_IMAGE_HEIGHT : GL_PACK_IMAGE_HEIGHT;
   if (fi.compressed) {
     const bool u = upload;
-    glPixelStorei(u ? GL_UNPACK_COMPRESSED_BLOCK_WIDTH
-                    : GL_PACK_COMPRESSED_BLOCK_WIDTH, 4);
-    glPixelStorei(u ? GL_UNPACK_COMPRESSED_BLOCK_HEIGHT
-                    : GL_PACK_COMPRESSED_BLOCK_HEIGHT, 4);
-    glPixelStorei(u ? GL_UNPACK_COMPRESSED_BLOCK_DEPTH
-                    : GL_PACK_COMPRESSED_BLOCK_DEPTH, 1);
-    glPixelStorei(u ? GL_UNPACK_COMPRESSED_BLOCK_SIZE
-                    : GL_PACK_COMPRESSED_BLOCK_SIZE, fi.bytes);
+    glPixelStorei(
+        u ? GL_UNPACK_COMPRESSED_BLOCK_WIDTH : GL_PACK_COMPRESSED_BLOCK_WIDTH,
+        4);
+    glPixelStorei(
+        u ? GL_UNPACK_COMPRESSED_BLOCK_HEIGHT : GL_PACK_COMPRESSED_BLOCK_HEIGHT,
+        4);
+    glPixelStorei(
+        u ? GL_UNPACK_COMPRESSED_BLOCK_DEPTH : GL_PACK_COMPRESSED_BLOCK_DEPTH,
+        1);
+    glPixelStorei(
+        u ? GL_UNPACK_COMPRESSED_BLOCK_SIZE : GL_PACK_COMPRESSED_BLOCK_SIZE,
+        fi.bytes);
   }
-  const auto* regions = reinterpret_cast<const rhi::BufferTextureCopy*>(
-      Payload(c));
+  const auto* regions =
+      reinterpret_cast<const rhi::BufferTextureCopy*>(Payload(c));
   for (u32 i = 0; i < c.count; i++) {
     const rhi::BufferTextureCopy& r = regions[i];
     const rhi::TextureRegion& g = r.region;
@@ -522,21 +524,20 @@ void Replayer::BufferToTexture(const CmdBufferTexture& c, bool upload) {
       continue;
     }
     if (fi.compressed) {
-      const GLsizei size = static_cast<GLsizei>(
-          ((w + 3) / 4) * ((h + 3) / 4) * d * fi.bytes);
+      const GLsizei size =
+          static_cast<GLsizei>(((w + 3) / 4) * ((h + 3) / 4) * d * fi.bytes);
       if (t.target == GL_TEXTURE_2D)
-        glCompressedTextureSubImage2D(t.name, mip, x, y, w, h, t.internal,
-                                      size, offset);
+        glCompressedTextureSubImage2D(t.name, mip, x, y, w, h, t.internal, size,
+                                      offset);
       else
-        glCompressedTextureSubImage3D(t.name, mip, x, y, z, w, h, d,
-                                      t.internal, size, offset);
+        glCompressedTextureSubImage3D(t.name, mip, x, y, z, w, h, d, t.internal,
+                                      size, offset);
     } else if (t.target == GL_TEXTURE_1D) {
       glTextureSubImage1D(t.name, mip, x, w, format, type, offset);
     } else if (t.target == GL_TEXTURE_1D_ARRAY || t.target == GL_TEXTURE_2D) {
       glTextureSubImage2D(t.name, mip, x, y, w, h, format, type, offset);
     } else {
-      glTextureSubImage3D(t.name, mip, x, y, z, w, h, d, format, type,
-                          offset);
+      glTextureSubImage3D(t.name, mip, x, y, z, w, h, d, format, type, offset);
     }
   }
 }
@@ -598,9 +599,9 @@ void Replayer::Blit(const CmdBlit& c) {
   const GLenum point = (planes & rhi::kAspectColor) ? GL_COLOR_ATTACHMENT0
                                                     : DepthAttachment(planes);
   const bool is_3d = c.src->target == GL_TEXTURE_3D;
-  const u32 slices =
-      is_3d ? base::Min(c.src_region.depth, c.dst_region.depth)
-            : base::Min(c.src_region.layers, c.dst_region.layers);
+  const u32 slices = is_3d
+                         ? base::Min(c.src_region.depth, c.dst_region.depth)
+                         : base::Min(c.src_region.layers, c.dst_region.layers);
   SetScissorTest(false);
   ResetMasks();
   const rhi::TextureRegion& s = c.src_region;
@@ -611,12 +612,12 @@ void Replayer::Blit(const CmdBlit& c) {
         c.dst->target == GL_TEXTURE_3D ? d.z + i : d.base_layer + i;
     AttachScratch(scratch_read_, point, c.src, s.mip, src_layer);
     AttachScratch(scratch_draw_, point, c.dst, d.mip, dst_layer);
-    glBlitNamedFramebuffer(
-        scratch_read_, scratch_draw_, s.x, s.y,
-        s.x + static_cast<GLint>(s.width), s.y + static_cast<GLint>(s.height),
-        d.x, d.y, d.x + static_cast<GLint>(d.width),
-        d.y + static_cast<GLint>(d.height), mask,
-        mask == GL_COLOR_BUFFER_BIT ? c.filter : GL_NEAREST);
+    glBlitNamedFramebuffer(scratch_read_, scratch_draw_, s.x, s.y,
+                           s.x + static_cast<GLint>(s.width),
+                           s.y + static_cast<GLint>(s.height), d.x, d.y,
+                           d.x + static_cast<GLint>(d.width),
+                           d.y + static_cast<GLint>(d.height), mask,
+                           mask == GL_COLOR_BUFFER_BIT ? c.filter : GL_NEAREST);
   }
   DetachScratch(scratch_read_);
   DetachScratch(scratch_draw_);
@@ -744,8 +745,7 @@ void Replayer::Execute(const GlCommandList& list) {
         // clip origin over the same, positive, rectangle.
         const bool upper = c.height < 0;
         if (upper != upper_left_) {
-          glClipControl(upper ? GL_UPPER_LEFT : GL_LOWER_LEFT,
-                        GL_ZERO_TO_ONE);
+          glClipControl(upper ? GL_UPPER_LEFT : GL_LOWER_LEFT, GL_ZERO_TO_ONE);
           upper_left_ = upper;
         }
         glViewportIndexedf(0, c.x, upper ? c.y + c.height : c.y, c.width,
@@ -872,18 +872,18 @@ void Replayer::Execute(const GlCommandList& list) {
         break;
       }
       case Op::kPushLabel:
-        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1,
-                         reinterpret_cast<const char*>(
-                             Payload(As<CmdPushLabel>(p))));
+        glPushDebugGroup(
+            GL_DEBUG_SOURCE_APPLICATION, 0, -1,
+            reinterpret_cast<const char*>(Payload(As<CmdPushLabel>(p))));
         break;
       case Op::kPopLabel:
         glPopDebugGroup();
         break;
       case Op::kInsertLabel:
-        glDebugMessageInsert(GL_DEBUG_SOURCE_APPLICATION, GL_DEBUG_TYPE_MARKER,
-                             0, GL_DEBUG_SEVERITY_NOTIFICATION, -1,
-                             reinterpret_cast<const char*>(
-                                 Payload(As<CmdInsertLabel>(p))));
+        glDebugMessageInsert(
+            GL_DEBUG_SOURCE_APPLICATION, GL_DEBUG_TYPE_MARKER, 0,
+            GL_DEBUG_SEVERITY_NOTIFICATION, -1,
+            reinterpret_cast<const char*>(Payload(As<CmdInsertLabel>(p))));
         break;
     }
   }

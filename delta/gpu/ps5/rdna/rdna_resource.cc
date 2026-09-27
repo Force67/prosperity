@@ -15,17 +15,17 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <base/logging.h>
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/containers/array.h>
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/shared_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/containers/hash_map.h>
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/shared_pointer.h"
+#include "base/strings/xstring.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
@@ -298,10 +298,12 @@ struct ScalarEval {
       // independently of their vertex user window. Preserve the older root
       // alias for callers which do not supply that system register pair.
       if (system_user_data_addr || user_sgprs >= 2) {
-        sgpr[0] = system_user_data_addr ? static_cast<u32>(system_user_data_addr)
-                                      : user_data[0];
-        sgpr[1] = system_user_data_addr ? static_cast<u32>(system_user_data_addr >> 32)
-                                      : user_data[1];
+        sgpr[0] = system_user_data_addr
+                      ? static_cast<u32>(system_user_data_addr)
+                      : user_data[0];
+        sgpr[1] = system_user_data_addr
+                      ? static_cast<u32>(system_user_data_addr >> 32)
+                      : user_data[1];
         known[0] = known[1] = true;
       }
     }
@@ -408,8 +410,7 @@ struct ScalarEval {
   void Step(const Inst& inst) {
     cur_pc = inst.pc;
     if (inst.enc == Enc::kSop1) {
-      const u32 sdst = (inst.raw[0] >> 16) & 0x7F,
-                     ssrc = inst.raw[0] & 0xFF;
+      const u32 sdst = (inst.raw[0] >> 16) & 0x7F, ssrc = inst.raw[0] & 0xFF;
       if (inst.opcode == 0x03) {
         u32 value;
         if (Source(ssrc, inst.literal, value))
@@ -446,8 +447,7 @@ struct ScalarEval {
           if (kDbg) {
             static int n = 0;
             if (n++ < 20)
-              BASE_LOGI("restrace",
-                        "cselect pc={:#x} clears s{} (scc unknown)",
+              BASE_LOGI("restrace", "cselect pc={:#x} clears s{} (scc unknown)",
                         inst.pc, sdst);
           }
           ClearDest(sdst, 0);
@@ -455,8 +455,7 @@ struct ScalarEval {
             ClearDest(sdst, 1);
           return;
         }
-        const u32 source =
-            scc ? inst.raw[0] & 0xFF : (inst.raw[0] >> 8) & 0xFF;
+        const u32 source = scc ? inst.raw[0] & 0xFF : (inst.raw[0] >> 8) & 0xFF;
         u32 value;
         if (Source(source, inst.literal, value)) {
           SetDest(sdst, 0, value);
@@ -533,11 +532,10 @@ struct ScalarEval {
         }
         const u64 wide = a | (static_cast<u64>(a_hi) << 32);
         const u32 n = b & 63;
-        const u64 r =
-            inst.opcode == 0x1F  ? wide << n
-            : inst.opcode == 0x21
-                ? wide >> n
-                : static_cast<u64>(static_cast<i64>(wide) >> n);
+        const u64 r = inst.opcode == 0x1F ? wide << n
+                      : inst.opcode == 0x21
+                          ? wide >> n
+                          : static_cast<u64>(static_cast<i64>(wide) >> n);
         SetDest(sdst, 0, static_cast<u32>(r));
         SetDest(sdst, 1, static_cast<u32>(r >> 32));
         scc = r != 0;
@@ -671,8 +669,8 @@ struct ScalarEval {
     if (inst.enc == Enc::kSopk) {
       const u32 sdst = (inst.raw[0] >> 16) & 0x7F;
       const u32 imm = inst.raw[0] & 0xFFFF;
-      const u32 simm = static_cast<u32>(
-          static_cast<i32>(static_cast<i16>(imm)));
+      const u32 simm =
+          static_cast<u32>(static_cast<i32>(static_cast<i16>(imm)));
       if (inst.opcode == 0x00) {
         SetDest(sdst, 0, simm);
       } else if (inst.opcode == 0x02) {
@@ -784,7 +782,7 @@ struct ScalarEval {
         case 0x0d:
           scc = ((a >> (b & 31)) & 1) != 0;
           break;
-        case 0x12:  // s_cmp_eq_u64
+        case 0x12:    // s_cmp_eq_u64
         case 0x13: {  // s_cmp_lg_u64
           u32 a_hi, b_hi;
           if (!SourceHi(inst.raw[0] & 0xFF, a_hi) ||
@@ -814,9 +812,8 @@ struct ScalarEval {
     const u64 base = base_known ? Ptr(smem.sbase) : 0;
     u32 soffset = 0;
     const bool offset_known = Source(smem.soffset, 0, soffset);
-    const i64 immediate = buffer
-                                  ? static_cast<i64>(inst.raw[1] & 0xFFFFF)
-                                  : static_cast<i64>(smem.offset);
+    const i64 immediate = buffer ? static_cast<i64>(inst.raw[1] & 0xFFFFF)
+                                 : static_cast<i64>(smem.offset);
     const i64 byte_offset =
         static_cast<i64>(soffset & ~3u) + (immediate & ~i64{3});
     for (u32 i = 0; i < dwords; i++)
@@ -832,8 +829,7 @@ struct ScalarEval {
                     inst.pc, smem.sdst, smem.sdst + dwords - 1, smem.sbase,
                     (int)known[smem.sbase], (int)known[smem.sbase + 1],
                     clear_pc[smem.sbase], clear_pc[smem.sbase + 1],
-                    sgpr[smem.sbase], sgpr[smem.sbase + 1],
-                    (int)offset_known);
+                    sgpr[smem.sbase], sgpr[smem.sbase + 1], (int)offset_known);
       }
       return;
     }
@@ -1052,8 +1048,8 @@ ScalarWrites PossibleScalarWrites(const Inst& inst, bool scc_trusted) {
 }
 
 ScalarReplayPlan::Loss ScalarReplayPlan::LossAt(u32 sgpr,
-                                               u32 dwords,
-                                               u32 use_index) const {
+                                                u32 dwords,
+                                                u32 use_index) const {
   if (sgpr + dwords > kRegs)
     return kUnmodelled;
   // EXEC is seeded with a fictional one-lane mask, not read from the dispatch.
@@ -1249,7 +1245,8 @@ void BuildBlockDominators(const Program& program, ScalarReplayPlan& plan) {
                         ? pred
                         : intersect(pred, candidate);
       }
-      if (candidate != ScalarReplayPlan::kNoBlock && plan.idom[b] != candidate) {
+      if (candidate != ScalarReplayPlan::kNoBlock &&
+          plan.idom[b] != candidate) {
         plan.idom[b] = candidate;
         changed = true;
       }
@@ -1261,8 +1258,7 @@ void BuildBlockDominators(const Program& program, ScalarReplayPlan& plan) {
 // same value behind on every iteration, so the replay's single walk holds the
 // wave's value after all. This is how a shader that reloads a descriptor from
 // the same user-data table inside its loop stays resolvable.
-void MarkLoopInvariantWrites(const Program& program,
-                             ScalarReplayPlan& plan) {
+void MarkLoopInvariantWrites(const Program& program, ScalarReplayPlan& plan) {
   for (ScalarReplayPlan::Write& write : plan.writes) {
     u32 begin = 0, end = 0;
     bool in_loop = false;
@@ -1339,13 +1335,13 @@ MimgBindingPlan RdnaPlanMimg(const Program& program) {
   // times; assigning a new binding each time exceeds the hardware interface.
   // Only reuse loads in programs without memory writes, and include the
   // address registers' versions so a changed table pointer stays distinct.
-  const bool read_only = base::NoneOf(program.begin(), program.end(), [](const Inst& i) {
-    return (i.enc == Enc::kSmrd && i.opcode >= 0x10) ||
-           (i.enc == Enc::kMubuf && i.opcode >= 4) ||
-           (i.enc == Enc::kMtbuf && i.opcode >= 4) ||
-           i.enc == Enc::kFlat ||
-           (i.enc == Enc::kMimg && i.opcode >= 8 && i.opcode < 0x20);
-  });
+  const bool read_only =
+      base::NoneOf(program.begin(), program.end(), [](const Inst& i) {
+        return (i.enc == Enc::kSmrd && i.opcode >= 0x10) ||
+               (i.enc == Enc::kMubuf && i.opcode >= 4) ||
+               (i.enc == Enc::kMtbuf && i.opcode >= 4) || i.enc == Enc::kFlat ||
+               (i.enc == Enc::kMimg && i.opcode >= 8 && i.opcode < 0x20);
+      });
   base::Map<base::Array<u32, 4>, u32> descriptor_loads;
   for (const Inst& inst : program) {
     if (inst.enc == Enc::kMimg) {
@@ -1390,9 +1386,9 @@ MimgBindingPlan RdnaPlanMimg(const Program& program) {
     if (read_only && inst.enc == Enc::kSmrd && inst.opcode <= 4) {
       const Smem load = DecodeSmem(inst);
       if (load.soffset == 125) {
-        const base::Array<u32, 4> key = {
-            inst.raw[0], inst.raw[1], versions[load.sbase],
-            versions[load.sbase + 1]};
+        const base::Array<u32, 4> key = {inst.raw[0], inst.raw[1],
+                                         versions[load.sbase],
+                                         versions[load.sbase + 1]};
         value_version = descriptor_loads.emplace(key, generation).first->second;
       }
     }
@@ -1466,8 +1462,8 @@ bool PlausibleVBuffer(const VBuffer& v) {
 TImage DecodeTImage(const u32* d, bool r128) {
   TImage t;
   const u32 descriptor_dwords = r128 ? 4 : 8;
-  t.null_descriptor = base::AllOf(
-      d, d + descriptor_dwords, [](u32 word) { return word == 0; });
+  t.null_descriptor =
+      base::AllOf(d, d + descriptor_dwords, [](u32 word) { return word == 0; });
   const u64 base_units = d[0] | (static_cast<u64>(d[1] & 0xFF) << 32);
   t.base = base_units << 8;
   t.min_lod = (d[1] >> 8) & 0xFFF;
@@ -1517,17 +1513,16 @@ TImage DecodeTImage(const u32* d, bool r128) {
   if (kGpuSwcensus) {
     static u32 seen[64] = {};
     if (sw_mode < 64 && seen[sw_mode]++ == 0)
-      BASE_LOGI("swcensus", "sw_mode={} first seen ({}x{} gfmt={})",
-                sw_mode, t.width, t.height, gfmt);
+      BASE_LOGI("swcensus", "sw_mode={} first seen ({}x{} gfmt={})", sw_mode,
+                t.width, t.height, gfmt);
     static u32 seen_sel[4096] = {};
     const u32 packed = (t.dst_sel[0]) | (t.dst_sel[1] << 3) |
-                            (t.dst_sel[2] << 6) | (t.dst_sel[3] << 9);
+                       (t.dst_sel[2] << 6) | (t.dst_sel[3] << 9);
     if (packed < 4096 && seen_sel[packed]++ == 0)
-      BASE_LOGI(
-          "swcensus",
-          "dst_sel = {},{},{},{} (word3={:08x}) on {}x{} gfmt={}",
-          t.dst_sel[0], t.dst_sel[1], t.dst_sel[2], t.dst_sel[3], d[3], t.width,
-          t.height, gfmt);
+      BASE_LOGI("swcensus",
+                "dst_sel = {},{},{},{} (word3={:08x}) on {}x{} gfmt={}",
+                t.dst_sel[0], t.dst_sel[1], t.dst_sel[2], t.dst_sel[3], d[3],
+                t.width, t.height, gfmt);
   }
   // gfx10 swizzle modes have their own address equations rather than the
   // Liverpool ones; BuildTextureLayout32 applies the 256-byte linear row
@@ -1547,8 +1542,8 @@ TImage DecodeTImage(const u32* d, bool r128) {
       BASE_LOGI("agc",
                 "T# base={:#x} {}x{} gfmt={} sw={} type={} mips={} -> "
                 "dfmt={} nfmt={} tiling={} pitch={}",
-                (unsigned long)t.base, t.width, t.height, gfmt, sw_mode,
-                t.type, t.mip_levels, t.dfmt, t.nfmt, t.tiling_idx, t.pitch);
+                (unsigned long)t.base, t.width, t.height, gfmt, sw_mode, t.type,
+                t.mip_levels, t.dfmt, t.nfmt, t.tiling_idx, t.pitch);
     }
   }
   u32 max_levels = 1;
@@ -1575,19 +1570,20 @@ TImage DecodeTImage(const u32* d, bool r128) {
 
 bool CanAccessLinearIntegerImage(const TImage& t) {
   return t.valid && t.tiling_idx == gcn::kGfx10TilingBase &&
-      t.mip_levels == 1 && (t.type == 8 || t.type == 9 || t.type == 12 || t.type == 13) &&
-      (t.nfmt == 4 || t.nfmt == 5) &&
-      (t.dfmt == 1 || t.dfmt == 3 || t.dfmt == 4 || t.dfmt == 5 ||
-       t.dfmt == 10 || t.dfmt == 11 || t.dfmt == 12 || t.dfmt == 14) &&
-      // R8/RG8 signed formats are outside the current image emitter's set.
-      !((t.dfmt == 1 || t.dfmt == 3) && t.nfmt == 5);
+         t.mip_levels == 1 &&
+         (t.type == 8 || t.type == 9 || t.type == 12 || t.type == 13) &&
+         (t.nfmt == 4 || t.nfmt == 5) &&
+         (t.dfmt == 1 || t.dfmt == 3 || t.dfmt == 4 || t.dfmt == 5 ||
+          t.dfmt == 10 || t.dfmt == 11 || t.dfmt == 12 || t.dfmt == 14) &&
+         // R8/RG8 signed formats are outside the current image emitter's set.
+         !((t.dfmt == 1 || t.dfmt == 3) && t.nfmt == 5);
 }
 
 base::Vector<TImage> TrackTextures(const u32* ps_code,
-                                  const u32* pud,
-                                  u32 user_sgprs,
-                                  u32 ud_base,
-                                  u64 system_user_data_addr) {
+                                   const u32* pud,
+                                   u32 user_sgprs,
+                                   u32 ud_base,
+                                   u64 system_user_data_addr) {
   base::Vector<TImage> out;
   if (!ps_code || !pud || !InGuest(reinterpret_cast<u64>(ps_code)))
     return out;
@@ -1595,20 +1591,21 @@ base::Vector<TImage> TrackTextures(const u32* ps_code,
   const Program& prog = *prog_ref;
   // The plan is a pure function of the program, so the cached program's own
   // identity says whether a cached plan still describes it.
-  static base::HashMap<u64, base::Pair<base::SharedPointer<const Program>,
-                                           MimgBindingPlan>>
+  static base::HashMap<
+      u64, base::Pair<base::SharedPointer<const Program>, MimgBindingPlan>>
       plan_cache;
   const u64 code_addr = reinterpret_cast<u64>(ps_code);
   auto plan_it = plan_cache.find(code_addr);
   if (plan_it == plan_cache.end() || plan_it->second.first != prog_ref) {
     if (plan_cache.size() > 512)
       plan_cache.clear();
-    plan_it = plan_cache
-                  .insert_or_assign(
-                      code_addr,
-                      base::Pair<base::SharedPointer<const Program>,
-                                 MimgBindingPlan>{prog_ref, RdnaPlanMimg(prog)})
-                  .first;
+    plan_it =
+        plan_cache
+            .insert_or_assign(
+                code_addr,
+                base::Pair<base::SharedPointer<const Program>, MimgBindingPlan>{
+                    prog_ref, RdnaPlanMimg(prog)})
+            .first;
   }
   const MimgBindingPlan& plan = plan_it->second.second;
   out.resize(plan.binding_srsrc.size());
@@ -1707,11 +1704,12 @@ base::Vector<TImage> TrackTextures(const u32* ps_code,
   return out;
 }
 
-base::HashMap<u32, BufferResource> ResolveBuffers(
-    const u32* code,
-    const u32* user_data,
-    u32 user_sgprs,
-    u32 user_sgpr_base, u32 max_dwords, u64 system_user_data_addr) {
+base::HashMap<u32, BufferResource> ResolveBuffers(const u32* code,
+                                                  const u32* user_data,
+                                                  u32 user_sgprs,
+                                                  u32 user_sgpr_base,
+                                                  u32 max_dwords,
+                                                  u64 system_user_data_addr) {
   base::HashMap<u32, BufferResource> out;
   if (!code || !user_data || !InGuest(reinterpret_cast<u64>(code)))
     return out;

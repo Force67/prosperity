@@ -9,24 +9,24 @@
 
 #include <cstring>
 
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <base/strings/xstring.h>
-#include <host_memory/host_memory.h>
-#include <options/options.h>
+#include "base/logging.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "host_memory/host_memory.h"
+#include "options/options.h"
 
+#include "base/algorithm.h"
+#include "base/atomic.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/time/time.h"
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/pm4.h"
-#include <base/algorithm.h>
-#include <base/atomic.h>
-#include <base/containers/map.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/time/time.h>
-#include <base/containers/hash_map.h>
 
 // Each probe logs on its own channel, named after the tag it has always
 // printed, so the lines still grep as [drawpkt], [csres] and so on, and one
@@ -220,9 +220,7 @@ void SetWriteWatch(WriteWatchFn watch) {
   g_write_watch = watch;
 }
 
-void MaybeArmRootWriteWatch(const Regs& regs,
-                            u64 ps_addr,
-                            u32 frame) {
+void MaybeArmRootWriteWatch(const Regs& regs, u64 ps_addr, u32 frame) {
   static bool armed = false;
   if (armed || !g_write_watch || (!kRootWprotPs && !kRootWprotHash))
     return;
@@ -236,8 +234,8 @@ void MaybeArmRootWriteWatch(const Regs& regs,
   const u32* user_data = UserData(regs, mmSPI_SHADER_USER_DATA_PS_0);
   const u64 root =
       (static_cast<u64>(user_data[1] & 0xFFFF) << 32) | user_data[0];
-  if (!IsGuestAddress(root) ||
-      !host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(root), 64))
+  if (!IsGuestAddress(root) || !host_memory::IsMemoryRangeMapped(
+                                   reinterpret_cast<const void*>(root), 64))
     return;
   armed = true;
   constexpr size_t kRootSize = 64;
@@ -275,8 +273,7 @@ void TraceFirstTexturedPs(const Regs& regs, u64 ps_addr) {
   static bool probed = false;
   if (!kTrace || probed || !IsGuestAddress(ps_addr))
     return;
-  const auto program =
-      gcn::Decode(reinterpret_cast<const u32*>(ps_addr), 256);
+  const auto program = gcn::Decode(reinterpret_cast<const u32*>(ps_addr), 256);
   int n_mimg = 0, n_smrd = 0;
   for (const auto& inst : program) {
     if (inst.enc == gcn::Enc::kMimg)
@@ -459,8 +456,8 @@ void TraceDepthBaseWatch(const Regs& regs) {
   static int n = 0;
   const u32 want = static_cast<u32>((u64)kDbWatch >> 8);
   const u32 db_regs[] = {mmDB_Z_READ_BASE, mmDB_STENCIL_READ_BASE,
-                              mmDB_Z_WRITE_BASE, mmDB_STENCIL_WRITE_BASE,
-                              mmDB_HTILE_DATA_BASE};
+                         mmDB_Z_WRITE_BASE, mmDB_STENCIL_WRITE_BASE,
+                         mmDB_HTILE_DATA_BASE};
   for (u32 reg : db_regs)
     if (regs[reg] == want && n++ < 8)
       BASE_LOGI("dbwatch", "reg {:#x} == {:#x} (shifted {:#x})", reg,
@@ -529,8 +526,8 @@ void TraceShaderCacheMiss(u64 vs_addr,
     base::HashSet<u64> fetches, states;
   };
   static base::HashMap<u64, Seen> seen;  // by content pair
-  static u32 n_new = 0, n_addr = 0, n_fetch = 0, n_ena = 0, n_3d = 0,
-                  n_1d = 0, n_none = 0, n_total = 0;
+  static u32 n_new = 0, n_addr = 0, n_fetch = 0, n_ena = 0, n_3d = 0, n_1d = 0,
+             n_none = 0, n_total = 0;
   const u64 pair = vs_hash ^ (ps_hash * 0x9e3779b97f4a7c15ull);
   n_total++;
   auto it = seen.find(pair);
@@ -817,8 +814,7 @@ void TraceSpriteDraw(const render::DrawInfo& d) {
     base::String vertices;
     for (u32 v = 0; v < base::Min(d.vertex_count, 3u); v++) {
       const u8* raw = static_cast<const u8*>(binding.data) +
-                           static_cast<size_t>(v) * binding.stride +
-                           attr.offset;
+                      static_cast<size_t>(v) * binding.stride + attr.offset;
       if (attr.dfmt == 10) {
         base::FormatTo(vertices, " v{}=[{:.3f} {:.3f} {:.3f} {:.3f}]", v,
                        raw[0] / 255.f, raw[1] / 255.f, raw[2] / 255.f,
@@ -910,12 +906,10 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
     };
     int on_r = 0, on_c = 0, on_rfz = 0, on_cfz = 0,
         count = d.index_count < 64 ? d.index_count : 64;
-    const u16* i16 = (d.index_type == 0)
-                              ? static_cast<const u16*>(d.index_data)
-                              : nullptr;
-    const u32* i32 = (d.index_type == 1)
-                              ? static_cast<const u32*>(d.index_data)
-                              : nullptr;
+    const u16* i16 =
+        (d.index_type == 0) ? static_cast<const u16*>(d.index_data) : nullptr;
+    const u32* i32 =
+        (d.index_type == 1) ? static_cast<const u32*>(d.index_data) : nullptr;
     float first_r[4] = {0}, first_c[4] = {0};
     auto onscreen = [](float* o) {
       if (o[3] <= 0.0001f)
@@ -991,8 +985,8 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
   // invisible.
   if (IsGuestAddress(d.tex_base) && d.tex_w && d.tex_h) {
     const u32* tp = reinterpret_cast<const u32*>(d.tex_base);
-    u64 total = (u64)d.tex_w * d.tex_h,
-             step = total > 4096 ? total / 4096 : 1, a_nz = 0, rgb_nz = 0;
+    u64 total = (u64)d.tex_w * d.tex_h, step = total > 4096 ? total / 4096 : 1,
+        a_nz = 0, rgb_nz = 0;
     for (u64 i = 0; i < total; i += step) {
       u32 px = tp[i];
       if (px >> 24)
@@ -1006,8 +1000,7 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
   }
   // The PS's texture-load pattern: SMRD (op/sdst/sbase/imm/off) + MIMG srsrc,
   // plus the first user-data dwords, to see how the T#s are loaded.
-  auto ps_insts =
-      gcn::Decode(reinterpret_cast<const u32*>(d.ps_addr), 4096);
+  auto ps_insts = gcn::Decode(reinterpret_cast<const u32*>(d.ps_addr), 4096);
   const u32* pud = UserData(regs, mmSPI_SHADER_USER_DATA_PS_0);
   BASE_LOGI("geom", "  ps_ud=[{}]", HexRun(pud, 8).c_str());
   for (const auto& inst : ps_insts) {
@@ -1025,16 +1018,14 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
   // the VS uses) against the heuristic cbuf above.
   if (!IsGuestAddress(d.vs_addr))
     return;
-  auto vs_insts =
-      gcn::Decode(reinterpret_cast<const u32*>(d.vs_addr), 4096);
+  auto vs_insts = gcn::Decode(reinterpret_cast<const u32*>(d.vs_addr), 4096);
   const u32* vud = UserData(regs, mmSPI_SHADER_USER_DATA_VS_0);
   BASE_LOGI("geom", "  vs_ud=[{}]", HexRun(vud, 8).c_str());
   int shown = 0;
   for (const auto& inst : vs_insts) {
     if (inst.enc != gcn::Enc::kSmrd || shown >= 6)
       continue;
-    const u32 w = inst.raw[0], op = (w >> 22) & 0x1F,
-                   sbase = (w >> 9) & 0x3F;
+    const u32 w = inst.raw[0], op = (w >> 22) & 0x1F, sbase = (w >> 9) & 0x3F;
     const bool imm = (w >> 8) & 1;
     const u32 off = w & 0xFF;
     shown++;
@@ -1141,8 +1132,7 @@ void DumpDescriptorTable(const char* tag, u64 ptr) {
                 k * 4, (unsigned long)b, stride, t[k + 2], t[k + 3]);
     // T# heuristic: dword2 has width-1[0:13], height-1[14:27]
     const u64 tb = ((u64)(t[k + 1] & 0xFFFFFF) << 32) | t[k];
-    const u32 w = (t[k + 2] & 0x3FFF) + 1,
-                   h = ((t[k + 2] >> 14) & 0x3FFF) + 1;
+    const u32 w = (t[k + 2] & 0x3FFF) + 1, h = ((t[k + 2] >> 14) & 0x3FFF) + 1;
     if (IsGuestAddress(tb) && w > 4 && w <= 8192 && h > 4 && h <= 8192)
       BASE_LOGI("gpu", "    +{:02x} T#? base={:#x} {}x{} dfmt={:#x}", k * 4,
                 (unsigned long)tb, w, h, (t[k + 1] >> 20) & 0x3F);
@@ -1151,10 +1141,7 @@ void DumpDescriptorTable(const char* tag, u64 ptr) {
 
 }  // namespace
 
-void TraceDrawRegisters(const Regs& regs,
-                        u32 op,
-                        const u32* body,
-                        u32 count) {
+void TraceDrawRegisters(const Regs& regs, u32 op, const u32* body, u32 count) {
   if (!kTrace)
     return;
   const u64 vs = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS);
@@ -1328,7 +1315,7 @@ void TraceCsResource(u64 cs_addr,
   if (base && guest_size && guest_size <= (1u << 24) &&
       IsGuestRange(base, guest_size) &&
       host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(base),
-                               guest_size)) {
+                                       guest_size)) {
     const u8* p = reinterpret_cast<const u8*>(base);
     for (u64 i = 0; i < guest_size; i++)
       nonzero += p[i] != 0;
@@ -1343,10 +1330,7 @@ void TraceCsResource(u64 cs_addr,
             stage_elem_bytes, (unsigned long)nonzero);
 }
 
-void TraceCsInvalidRange(u64 cs_addr,
-                         u32 binding,
-                         u64 base,
-                         u64 guest_size) {
+void TraceCsInvalidRange(u64 cs_addr, u32 binding, u64 base, u64 guest_size) {
   BASE_LOGI("csres", "cs={:#x} bind={} invalid range base={:#x} size={:#x}",
             (unsigned long)cs_addr, binding, (unsigned long)base,
             (unsigned long)guest_size);
@@ -1518,10 +1502,7 @@ void TraceAddrWatch(const char* packet,
             (unsigned long)dst, (unsigned long)bytes, first_dword);
 }
 
-void TraceLabelWrite(const char* packet,
-                     u64 addr,
-                     u32 data_sel,
-                     u64 value) {
+void TraceLabelWrite(const char* packet, u64 addr, u32 data_sel, u64 value) {
   if (!kEopTrace)
     return;
   BASE_LOGI("eop", "{} addr={:#x} sel={} val={:#x}", packet,
@@ -1551,10 +1532,7 @@ void TraceUnhandledOpcode(u32 op, u32 count) {
               (unsigned long long)(n + 1));
 }
 
-void TraceIndirectBuffer(u32 position,
-                         u32 depth,
-                         u32 words,
-                         bool followed) {
+void TraceIndirectBuffer(u32 position, u32 depth, u32 words, bool followed) {
   if (!kIbTrace)
     return;
   if (followed)
@@ -1576,11 +1554,7 @@ void TraceWaitOnCeCounter(u32 wanted, u64 ce_counter) {
             (unsigned long long)ce_counter);
 }
 
-void TraceDesync(u32 position,
-                 u32 words,
-                 u32 type,
-                 u32 hdr,
-                 bool force) {
+void TraceDesync(u32 position, u32 words, u32 type, u32 hdr, bool force) {
   if (!force && !kDesyncTrace)
     return;
   BASE_LOGI("gpu", "  @{:<5}/{} STOP type{} hdr={:#x}", position, words, type,
@@ -1618,9 +1592,7 @@ void TraceSubmit(const void* dcb,
               size_bytes, words, static_cast<const u32*>(dcb)[0]);
 }
 
-void TraceDcbWalkResult(const u32* dcb,
-                        u32 words,
-                        u32 words_walked) {
+void TraceDcbWalkResult(const u32* dcb, u32 words, u32 words_walked) {
   BASE_LOGI("gpu", "=== big dcb walk done: {}/{} words ===", words_walked,
             words);
   // Brute-scan the whole buffer for draw-opcode headers (in case the walker

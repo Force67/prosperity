@@ -7,15 +7,14 @@
 
 #include <vulkan/vulkan.h>
 
-
 #include "base/arch.h"
+#include "base/atomic.h"
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
+#include "base/threading/mutex.h"
 #include "gpu/rhi/device.h"
 #include "gpu/vulkan/vk_memory_span.h"
 #include "gpu/vulkan/vk_rhi.h"
-#include <base/atomic.h>
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
-#include <base/threading/mutex.h>
 
 namespace gpu::vk::rhi_impl {
 
@@ -50,8 +49,8 @@ class VulkanBuffer final : public rhi::Buffer {
   VulkanBuffer(const rhi::BufferDesc& desc) { desc_ = desc; }
   VkBuffer buffer = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
-  void set_mapped(u8* p) { mapped_ = p; }
-  void set_address(u64 a) { address_ = a; }
+  void SetMapped(u8* p) { mapped_ = p; }
+  void SetAddress(u64 a) { address_ = a; }
 };
 
 class VulkanTexture final : public rhi::Texture {
@@ -78,9 +77,7 @@ class VulkanSampler final : public rhi::Sampler {
 
 class VulkanBindGroupLayout final : public rhi::BindGroupLayout {
  public:
-  VulkanBindGroupLayout(const rhi::BindGroupLayoutDesc& desc) {
-    desc_ = desc;
-  }
+  VulkanBindGroupLayout(const rhi::BindGroupLayoutDesc& desc) { desc_ = desc; }
   VkDescriptorSetLayout layout = VK_NULL_HANDLE;
   // Per binding: the descriptor type, in desc().bindings order.
   base::Vector<VkDescriptorType> types;
@@ -214,12 +211,8 @@ class VulkanCommandList final : public rhi::CommandList {
                u32 dst_access,
                const rhi::TextureBarrier* textures,
                u32 num_textures) override;
-  void ResetTimestamps(rhi::TimestampPool* pool,
-                       u32 first,
-                       u32 count) override;
-  void WriteTimestamp(rhi::TimestampPool* pool,
-                      u32 index,
-                      bool start) override;
+  void ResetTimestamps(rhi::TimestampPool* pool, u32 first, u32 count) override;
+  void WriteTimestamp(rhi::TimestampPool* pool, u32 index, bool start) override;
   void PushLabel(const char* label) override;
   void PopLabel() override;
   void InsertLabel(const char* label) override;

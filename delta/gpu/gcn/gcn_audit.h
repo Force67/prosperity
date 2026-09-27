@@ -26,12 +26,12 @@
  * All hooks are no-ops unless one of the env vars is set.
  */
 
-#include "base/arch.h"
 #include <cstdio>
+#include "base/arch.h"
 
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_decode.h"
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
 
 namespace gpu::gcn {
 
@@ -42,9 +42,7 @@ bool ShaderDumpEnabled();
 
 // Begin collecting for one stage translation ("vs" / "ps" / "cs").
 // `program` must stay alive until AuditEnd.
-void AuditBegin(const char* stage,
-                const u32* code,
-                const Program& program);
+void AuditBegin(const char* stage, const u32* code, const Program& program);
 
 // Bracket the emission of one instruction; `spirv_words` is how many function
 // body words it produced.

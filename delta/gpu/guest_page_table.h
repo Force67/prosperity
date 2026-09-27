@@ -4,8 +4,7 @@
 #pragma once
 
 #include "base/arch.h"
-#include <base/atomic.h>
-
+#include "base/atomic.h"
 
 namespace gpu {
 

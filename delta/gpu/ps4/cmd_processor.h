@@ -16,8 +16,8 @@
  */
 
 #include <cstddef>
-#include "base/arch.h"
 #include <cstdint>
+#include "base/arch.h"
 
 namespace gpu::ps4 {
 

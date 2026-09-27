@@ -11,10 +11,9 @@
  * with SPIRV-Cross and compiled to DXIL with DXC when a pipeline is created.
  */
 
-
 #include "base/arch.h"
+#include "base/memory/unique_pointer.h"
 #include "gpu/rhi/device.h"
-#include <base/memory/unique_pointer.h>
 
 namespace gpu::d3d12 {
 

@@ -1,12 +1,12 @@
-#include <base/option_file.h>
-#include "base/arch.h"
 #include <cstdio>
 #include <cstdlib>
+#include "base/arch.h"
+#include "base/option_file.h"
 
 #include <gtest/gtest.h>
 
+#include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_audit.h"
-#include <base/strings/xstring.h>
 
 namespace {
 
@@ -108,7 +108,8 @@ TEST_F(GcnAuditTest, VintrpP2IsNotHiddenAsAnExpectedNoOp) {
   gpu::gcn::AuditEnd(nullptr);
 
   const base::String report = ReportString();
-  EXPECT_NE(report.find("v_interp_p2_f32"), base::String::npos) << report.c_str();
+  EXPECT_NE(report.find("v_interp_p2_f32"), base::String::npos)
+      << report.c_str();
 }
 
 }  // namespace

@@ -6,17 +6,16 @@
  * vkd3d's, so no D3D12 header may be included here.
  */
 
-
 #include "gpu/d3d12/d3d12_shader.h"
 
 #if defined(_WIN32)
-#include <windows.h>
 #include <dxcapi.h>
+#include <windows.h>
 #else
 #include <dlfcn.h>
 #include <dxc/dxcapi.h>
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 #endif
 
 #ifndef DELTA_DXCOMPILER_PATH
@@ -64,8 +63,8 @@ DxcCreateInstanceProc LoadLibraryEntry() {
 }  // namespace
 
 bool Dxc::Load() {
-  static const bool once = ([] { g_create = LoadLibraryEntry(); }(), true);
-  (void)once;
+  static const bool kOnce = ([] { g_create = LoadLibraryEntry(); }(), true);
+  (void)kOnce;
   return g_create && Local().compiler;
 }
 
@@ -82,12 +81,13 @@ bool Dxc::Compile(const base::String& hlsl,
   for (char c : profile)
     wprofile += static_cast<wchar_t>(c);
   // HLSL 2018: SPIRV-Cross relies on its component-wise vector ternary.
-  LPCWSTR args[] = {L"-E",  L"main", L"-T",          wprofile.c_str(),
-                    L"-HV", L"2018", L"-Qstrip_debug", L"-O3"};
+  LPCWSTR args[] = {L"-E",   L"main",          L"-T", wprofile.c_str(), L"-HV",
+                    L"2018", L"-Qstrip_debug", L"-O3"};
   DxcBuffer source{hlsl.data(), hlsl.size(), DXC_CP_UTF8};
   IDxcResult* result = nullptr;
-  HRESULT hr = tc.compiler->Compile(&source, args, sizeof(args) / sizeof(args[0]),
-                                    nullptr, IID_PPV_ARGS(&result));
+  HRESULT hr =
+      tc.compiler->Compile(&source, args, sizeof(args) / sizeof(args[0]),
+                           nullptr, IID_PPV_ARGS(&result));
   if (FAILED(hr) || !result) {
     *error = "DXC Compile failed";
     return false;
@@ -97,7 +97,8 @@ bool Dxc::Compile(const base::String& hlsl,
   IDxcBlobUtf8* errors = nullptr;
   result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
   if (errors && errors->GetStringLength())
-    *error = base::String(errors->GetStringPointer(), errors->GetStringLength());
+    *error =
+        base::String(errors->GetStringPointer(), errors->GetStringLength());
   if (errors)
     errors->Release();
   bool ok = false;

@@ -16,7 +16,8 @@ u32 g_cs_count = 0;
 u64 g_win_draws = 0, g_win_declines = 0;
 u64 g_ns_dr_pre = 0, g_ns_dr_pipe = 0, g_ns_dr_tex = 0, g_ns_dr_bind = 0;
 u64 g_ns_tex_hash = 0, g_tex_hash_bytes = 0, g_ns_tex_probe = 0;
-u64 g_tex_hash_n = 0, g_tex_probe_n = 0, g_ns_tex_lookup = 0, g_tex_lookup_n = 0;
+u64 g_tex_hash_n = 0, g_tex_probe_n = 0, g_ns_tex_lookup = 0,
+    g_tex_lookup_n = 0;
 u64 g_ns_tex_set = 0, g_tex_set_n = 0, g_ns_region = 0, g_ns_cs_flush = 0;
 u64 g_ns_build_draw = 0, g_build_draw_n = 0;
 u64 g_ns_pipe_build = 0, g_pipe_build_n = 0;
@@ -32,6 +33,6 @@ u64 g_cs_stage_bytes = 0;
 u64 g_cs_wb_bytes_written = 0, g_cs_wb_bytes_total = 0;
 u64 g_cs_wb_conflicts = 0;
 u64 g_fr_draw = 0, g_fr_submit = 0, g_fr_wait = 0, g_fr_present = 0,
-         g_fr_tex_up = 0;
+    g_fr_tex_up = 0;
 
 }  // namespace gpu

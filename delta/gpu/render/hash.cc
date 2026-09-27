@@ -7,8 +7,8 @@
 #include "gpu/gcn/gcn_detile.h"
 
 #include <cstring>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
 
 namespace gpu::render {
 
@@ -27,7 +27,7 @@ u64 TexHashRange(u64 base, u64 bytes) {
   const u64* w = reinterpret_cast<const u64*>(base);
   const u64 nw = bytes / 8;
   u64 h0 = 1469598103934665603ull, h1 = 0x9e3779b97f4a7c15ull,
-           h2 = 0xc2b2ae3d27d4eb4full, h3 = 0x165667b19e3779f9ull;
+      h2 = 0xc2b2ae3d27d4eb4full, h3 = 0x165667b19e3779f9ull;
   u64 i = 0;
   for (; i + 4 <= nw; i += 4) {
     h0 = (h0 ^ w[i + 0]) * kPrime;
@@ -39,8 +39,7 @@ u64 TexHashRange(u64 base, u64 bytes) {
     h0 = (h0 ^ w[i]) * kPrime;
   if (const u64 tail = bytes & 7) {
     u64 last = 0;
-    std::memcpy(&last, reinterpret_cast<const u8*>(base) + bytes - tail,
-                tail);
+    std::memcpy(&last, reinterpret_cast<const u8*>(base) + bytes - tail, tail);
     h1 = (h1 ^ last) * kPrime;
   }
   u64 h = ((h0 * kPrime + h1) * kPrime + h2) * kPrime + h3;

@@ -1,23 +1,23 @@
 #include <gtest/gtest.h>
 #include <cstring>
 
-#include <base/option.h>
+#include "base/option.h"
 #ifdef OS_LINUX
 #include <sys/mman.h>
 #endif
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/guest_memory_ranges.h"
-#include "host_memory/host_memory.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/shader_cache.h"
 #include "gpu/render/device.h"
-#include <base/algorithm.h>
-#include <base/containers/array.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
+#include "host_memory/host_memory.h"
 
 namespace {
 class RdnaGlobal : public testing::Test {
@@ -35,26 +35,26 @@ class RdnaGlobal : public testing::Test {
     page.fill(0xa5a5a5a5);
     return page;
   }
-  base::Vector<u32> program;
-  base::Array<u32, 3> group_start{}, group_end{1, 1, 1};
-  u32 tgid_enable = 0, initiator = 1, lds_size = 0;
+  base::Vector<u32> program_;
+  base::Array<u32, 3> group_start_{}, group_end_{1, 1, 1};
+  u32 tgid_enable_ = 0, initiator_ = 1, lds_size_ = 0;
   void Mov(u32 vgpr, u32 value) {
-    program.push_back(0x7e0002ff | vgpr << 17);
-    program.push_back(value);
+    program_.push_back(0x7e0002ff | vgpr << 17);
+    program_.push_back(value);
   }
   void Global(u32 op, u32 addr, u32 data, u32 scalar, i32 offset = 0) {
-    program.push_back(0xdc008000 | op << 18 | (u32(offset) & 0xfff));
-    program.push_back(addr | scalar << 16 | data << (op >= 0x18 ? 8 : 24));
+    program_.push_back(0xdc008000 | op << 18 | (u32(offset) & 0xfff));
+    program_.push_back(addr | scalar << 16 | data << (op >= 0x18 ? 8 : 24));
   }
   void Run(u64 src, u64 dst, u32 threads = 1) {
     alignas(256) static base::Array<u32, 16384> code{};
     code.fill(0);
-    base::Copy(program.begin(), program.end(), code.begin());
-    code[program.size()] = 0xbf810000;
+    base::Copy(program_.begin(), program_.end(), code.begin());
+    code[program_.size()] = 0xbf810000;
     gpu::rdna::NextProgramGeneration();
-    const auto cs =
-        gpu::rdna::RecompileCompute(code.data(), threads, 1, 1, 4, tgid_enable,
-                                    lds_size, false, (initiator & (1u << 15)) != 0);
+    const auto cs = gpu::rdna::RecompileCompute(code.data(), threads, 1, 1, 4,
+                                                tgid_enable_, lds_size_, false,
+                                                (initiator_ & (1u << 15)) != 0);
     ASSERT_TRUE(cs.ok);
     gpu::ps5::Regs regs;
     const u64 address = reinterpret_cast<u64>(code.data());
@@ -64,15 +64,16 @@ class RdnaGlobal : public testing::Test {
     regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
     regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
     regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] =
-        (4 << 1) | (tgid_enable << 7) | (lds_size << 15);
+        (4 << 1) | (tgid_enable_ << 7) | (lds_size_ << 15);
     for (u32 axis = 0; axis < 3; ++axis)
-      regs[gpu::ps5::mmCOMPUTE_START_X + axis] = group_start[axis];
+      regs[gpu::ps5::mmCOMPUTE_START_X + axis] = group_start_[axis];
     const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
     regs[ud] = src;
     regs[ud + 1] = src >> 32;
     regs[ud + 2] = dst;
     regs[ud + 3] = dst >> 32;
-    const u32 launch[] = {group_end[0], group_end[1], group_end[2], initiator};
+    const u32 launch[] = {group_end_[0], group_end_[1], group_end_[2],
+                          initiator_};
     gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, launch, 4);
     ASSERT_TRUE(gpu::render::FlushCsWrites(gpu::render::DefaultRenderer()));
   }
@@ -80,15 +81,15 @@ class RdnaGlobal : public testing::Test {
 
 TEST_F(RdnaGlobal, InactiveLaneCannotOverwriteSharedMemory) {
   auto& dest = PageForDispatch();
-  lds_size = 1;
+  lds_size_ = 1;
   Mov(0, 0);
   Mov(2, 17);
-  program.insert(program.end(), {0xd8340000, 0x00000200});  // LDS[0] = 17
+  program_.insert(program_.end(), {0xd8340000, 0x00000200});  // LDS[0] = 17
   Mov(2, 0x3f800000);
-  program.push_back(0xbefe0480);  // s_mov_b64 exec, 0
-  program.insert(program.end(), {0xd8340000, 0x00000200});  // inactive store
-  program.push_back(0xbefe04c1);  // s_mov_b64 exec, -1
-  program.insert(program.end(), {0xd8d80000, 0x02000000});  // v2 = LDS[0]
+  program_.push_back(0xbefe0480);  // s_mov_b64 exec, 0
+  program_.insert(program_.end(), {0xd8340000, 0x00000200});  // inactive store
+  program_.push_back(0xbefe04c1);  // s_mov_b64 exec, -1
+  program_.insert(program_.end(), {0xd8d80000, 0x02000000});  // v2 = LDS[0]
   Global(0x1c, 0, 2, 2);
   Run(0, reinterpret_cast<u64>(dest.data()));
   EXPECT_EQ(dest[0], 17u);
@@ -100,11 +101,11 @@ TEST_F(RdnaGlobal, MadAndMacScaleOutputBeforeClamping) {
     for (u32 omod = 0; omod < 4; ++omod) {
       const u32 result = 4 + (op == 0x141 ? 0 : 4) + omod;
       Mov(result, 0x3f000000);  // MAC accumulator = .5
-      Mov(1, 0x40000000);     // source 0 = 2
-      Mov(2, 0x3f000000);     // source 1 = .5
-      Mov(3, 0x3f000000);     // MAD source 2 = .5
-      program.push_back(0xd4008000 | (op << 16) | result);
-      program.push_back(257 | (258 << 9) | (259 << 18) | (omod << 27));
+      Mov(1, 0x40000000);       // source 0 = 2
+      Mov(2, 0x3f000000);       // source 1 = .5
+      Mov(3, 0x3f000000);       // MAD source 2 = .5
+      program_.push_back(0xd4008000 | (op << 16) | result);
+      program_.push_back(257 | (258 << 9) | (259 << 18) | (omod << 27));
     }
   }
   Mov(0, 0);
@@ -124,14 +125,14 @@ TEST_F(RdnaGlobal, TypedComputeLoadDecodesRdnaFormat) {
   source[3] = 0x3f800000;
   // Inline V# at s[4:7], byte offsets v1 = lane * 8. R32G32_FLOAT
   // is GFX10 format 64, not the GCN DFMT/NFMT occupying those bits.
-  program = {0xbe840300, 0xbe850301, 0xbe8603a0, 0xbe870380,
-             0x34020083, 0xe8001000 | (64u << 19) | (1u << 16),
-             0x80010401};
+  program_ = {0xbe840300, 0xbe850301, 0xbe8603a0,
+              0xbe870380, 0x34020083, 0xe8001000 | (64u << 19) | (1u << 16),
+              0x80010401};
   Global(0x1d, 1, 4, 2);
   for (u32 format : {64u, 77u}) {
     // A two-component read is also legal with an RGBA32 format: it does not
     // require the instruction to request all four stored components.
-    program[5] = 0xe8001000 | (format << 19) | (1u << 16);
+    program_[5] = 0xe8001000 | (format << 19) | (1u << 16);
     Run(reinterpret_cast<u64>(source.data()),
         reinterpret_cast<u64>(dest.data()), 2);
     for (u32 i = 0; i < 4; ++i)
@@ -146,8 +147,8 @@ TEST_F(RdnaGlobal, GdsCounterUsesM0BaseAndReturnsPreOperationValue) {
   ASSERT_TRUE(gpu::render::WriteGds(renderer, 0xc70, &initial, 4));
   ASSERT_TRUE(gpu::render::FillGds(renderer, 0x10, 4, 99));
   // M0={base=0xc60,size=32}; append and consume the counter at +0x10.
-  program = {0xbefc03ff, 0x0c600020, 0xd8fa0010, 0x02000000,
-               0xd8f60010, 0x03000000};
+  program_ = {0xbefc03ff, 0x0c600020, 0xd8fa0010,
+              0x02000000, 0xd8f60010, 0x03000000};
   Mov(0, 0);
   Global(0x1c, 0, 2, 2);
   Global(0x1c, 0, 3, 2, 4);
@@ -164,17 +165,18 @@ TEST_F(RdnaGlobal, GdsCounterUsesM0BaseAndReturnsPreOperationValue) {
 
 TEST_F(RdnaGlobal, MaskBitCountsUseGuestWaveLaneAcrossHostSubgroups) {
   auto& dest = PageForDispatch();
-  program = {0xd7650003, 0x000100c1,  // v_mbcnt_lo v3, -1, 0
-             0xd7660003, 0x000206c1,  // v_mbcnt_hi v3, -1, v3
-             0x34000082};            // v0 = local thread ID * 4
+  program_ = {0xd7650003, 0x000100c1,  // v_mbcnt_lo v3, -1, 0
+              0xd7660003, 0x000206c1,  // v_mbcnt_hi v3, -1, v3
+              0x34000082};             // v0 = local thread ID * 4
   Global(0x1c, 0, 3, 2);
   // Reuse identical code and group size; the dispatch flag must distinguish
   // cached modules when changing wave width and then switching back.
   for (u32 width : {64u, 32u, 64u}) {
-    initiator = 1 | (width == 32 ? 1u << 15 : 0);
+    initiator_ = 1 | (width == 32 ? 1u << 15 : 0);
     Run(0, reinterpret_cast<u64>(dest.data()), 128);
     for (u32 lane = 0; lane < 128; ++lane)
-      EXPECT_EQ(dest[lane], lane % width) << "width=" << width << " lane=" << lane;
+      EXPECT_EQ(dest[lane], lane % width)
+          << "width=" << width << " lane=" << lane;
   }
 }
 
@@ -182,21 +184,21 @@ TEST_F(RdnaGlobal, GdsCountersBroadcastAcrossBothHalvesOfEachWave) {
   auto& renderer = gpu::render::DefaultRenderer();
   auto& dest = PageForDispatch();
   const u64 mask = (8ull << 32) | 5u;  // Three active lanes per guest wave.
-  program = {0xbefc03ff, 0x0c600020, 0x34000082};
+  program_ = {0xbefc03ff, 0x0c600020, 0x34000082};
   Mov(2, 99);
   Mov(3, 99);
-  program.insert(program.end(), {0xbefe0400,  // exec = s[0:1]
-                                 0xd8fa0010, 0x02000000,
-                                 0xd8f60010, 0x03000000,
-                                 0xbefe04c1});
+  program_.insert(program_.end(),
+                  {0xbefe0400,  // exec = s[0:1]
+                   0xd8fa0010, 0x02000000, 0xd8f60010, 0x03000000, 0xbefe04c1});
   Global(0x1c, 0, 2, 2);
   Global(0x1c, 0, 3, 2, 512);
   // Include a partially populated final wave, for both dispatch wave sizes.
   for (const auto [width, threads] :
        {base::Pair{64u, 128u}, base::Pair{64u, 70u}, base::Pair{32u, 80u}}) {
-    SCOPED_TRACE(testing::Message() << "width=" << width << " threads=" << threads);
+    SCOPED_TRACE(testing::Message()
+                 << "width=" << width << " threads=" << threads);
     ASSERT_TRUE(gpu::render::FillGds(renderer, 0xc70, 4, 17));
-    initiator = 1 | (width == 32 ? 1u << 15 : 0);
+    initiator_ = 1 | (width == 32 ? 1u << 15 : 0);
     Run(mask, reinterpret_cast<u64>(dest.data()), threads);
     base::Vector<base::Pair<u32, u32>> allocations, consumptions;
     u32 total = 0;
@@ -238,11 +240,11 @@ TEST_F(RdnaGlobal, LiteralExecMasksSelectBothHalvesOfWave64) {
   const u64 mask = (8ull << 32) | 5u;  // lanes 0, 2 and 35
   for (bool save : {false, true}) {
     dest.fill(0xa5a5a5a5);
-    program.clear();
-    program.push_back(0x34000082);  // v0 = local thread ID * 4
+    program_.clear();
+    program_.push_back(0x34000082);  // v0 = local thread ID * 4
     Mov(2, 17);
     // s[0:1] contains the literal mask, supplied through user data.
-    program.push_back(save ? 0xbe862400 : 0xbefe0400);
+    program_.push_back(save ? 0xbe862400 : 0xbefe0400);
     Global(0x1c, 0, 2, 2);
     Run(mask, reinterpret_cast<u64>(dest.data()), 64);
     for (u32 lane = 0; lane < 64; ++lane)
@@ -255,11 +257,11 @@ TEST_F(RdnaGlobal, CompareMaskControlsUpperWaveLanesAndConditionalMoves) {
   auto& dest = PageForDispatch();
   Mov(2, 1);
   Mov(3, 17);
-  program.push_back(0x7d8400a3);  // v_cmp_eq_u32 vcc, 35, v0
-  program.push_back(0x02040702);  // v_cndmask_b32 v2, v2, v3, vcc
-  program.push_back(0x34000082);  // v0 = thread ID * 4
+  program_.push_back(0x7d8400a3);  // v_cmp_eq_u32 vcc, 35, v0
+  program_.push_back(0x02040702);  // v_cndmask_b32 v2, v2, v3, vcc
+  program_.push_back(0x34000082);  // v0 = thread ID * 4
   Global(0x1c, 0, 2, 2);
-  program.push_back(0xbefe046a);  // s_mov_b64 exec, vcc
+  program_.push_back(0xbefe046a);  // s_mov_b64 exec, vcc
   Global(0x1c, 0, 3, 2, 256);
   Run(0, reinterpret_cast<u64>(dest.data()), 64);
   for (u32 lane = 0; lane < 64; ++lane) {
@@ -270,31 +272,31 @@ TEST_F(RdnaGlobal, CompareMaskControlsUpperWaveLanesAndConditionalMoves) {
 
 TEST_F(RdnaGlobal, DispatchStartsUseExclusiveEndsAndPreserveWorkgroupIds) {
   auto& dest = PageForDispatch();
-  program.push_back(0x7e000204);  // v_mov_b32 v0, s4 (workgroup ID)
-  program.push_back(0x34000082);  // v_lshlrev_b32 v0, 2, v0
-  program.push_back(0x7e040204);  // v_mov_b32 v2, s4
+  program_.push_back(0x7e000204);  // v_mov_b32 v0, s4 (workgroup ID)
+  program_.push_back(0x34000082);  // v_lshlrev_b32 v0, 2, v0
+  program_.push_back(0x7e040204);  // v_mov_b32 v2, s4
   Global(0x1c, 0, 2, 2);
   for (u32 axis = 0; axis < 3; ++axis) {
-    tgid_enable = 1u << axis;
-    group_start = {0, 0, 0};
-    group_end = {1, 1, 1};
-    group_start[axis] = 3;
-    group_end[axis] = 6;
-    initiator = 1;
+    tgid_enable_ = 1u << axis;
+    group_start_ = {0, 0, 0};
+    group_end_ = {1, 1, 1};
+    group_start_[axis] = 3;
+    group_end_[axis] = 6;
+    initiator_ = 1;
     dest.fill(0xa5a5a5a5);
     Run(0, reinterpret_cast<u64>(dest.data()));
     for (u32 i = 0; i < 8; ++i)
       ASSERT_EQ(dest[i], i >= 3 && i < 6 ? i : 0xa5a5a5a5) << axis << ':' << i;
 
-    initiator = 5;  // FORCE_START_AT_000 ignores the START registers.
+    initiator_ = 5;  // FORCE_START_AT_000 ignores the START registers.
     Run(0, reinterpret_cast<u64>(dest.data()));
     for (u32 i = 0; i < 8; ++i)
       ASSERT_EQ(dest[i], i < 6 ? i : 0xa5a5a5a5) << axis << ':' << i;
 
-    initiator = 1;
+    initiator_ = 1;
     dest.fill(0xa5a5a5a5);
     for (u32 end : {2u, 3u}) {
-      group_end[axis] = end;
+      group_end_[axis] = end;
       Run(0, reinterpret_cast<u64>(dest.data()));
       for (u32 i = 0; i < 8; ++i)
         ASSERT_EQ(dest[i], 0xa5a5a5a5) << axis << ':' << i;
@@ -393,9 +395,9 @@ TEST_F(RdnaGlobal, SignedSubwordLoadsAndConcurrentHalfwordStores) {
   EXPECT_EQ(dest[1], 0xffffff80);
   EXPECT_EQ(dest[2], 0x8001);
   EXPECT_EQ(dest[3], 0xffff8001);
-  program.clear();
+  program_.clear();
   auto& half = PageForDispatch();
-  program.push_back(0x34000081);  // v_lshlrev_b32 v0, 1, v0
+  program_.push_back(0x34000081);  // v_lshlrev_b32 v0, 1, v0
   Mov(1, 0x1234);
   Global(0x1a, 0, 1, 2);
   Run(0, reinterpret_cast<u64>(half.data()), 31);
@@ -407,8 +409,8 @@ TEST_F(RdnaGlobal, SignedSubwordLoadsAndConcurrentHalfwordStores) {
 
 TEST_F(RdnaGlobal, InactiveLanesCannotStore) {
   auto& dest = PageForDispatch();
-  program.push_back(0xd4d2007e);  // v_cmpx_eq_u32 v0, 0
-  program.push_back(0x00010100);
+  program_.push_back(0xd4d2007e);  // v_cmpx_eq_u32 v0, 0
+  program_.push_back(0x00010100);
   Mov(1, 0x44);
   Global(0x18, 0, 1, 2);
   Run(0, reinterpret_cast<u64>(dest.data()), 4);
@@ -418,34 +420,37 @@ TEST_F(RdnaGlobal, InactiveLanesCannotStore) {
 
 TEST_F(RdnaGlobal, AddressesBeyondTheOldSixtyFourMiBWindow) {
   alignas(65536) static base::Array<u32, (65 * 1024 * 1024) / 4> data{};
-  constexpr u32 offset = 64 * 1024 * 1024 + 32;
-  data[offset / 4] = 0xa5a5a5a5;
+  constexpr u32 kOffset = 64 * 1024 * 1024 + 32;
+  data[kOffset / 4] = 0xa5a5a5a5;
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(data.data()), sizeof(data));
-  Mov(3, offset);
+  Mov(3, kOffset);
   Mov(1, 0x76543210);
   Global(0x1c, 3, 1, 2);
   Global(0x0c, 3, 2, 2);
   Mov(3, 0);
   Global(0x1c, 3, 2, 2);
   Run(0, reinterpret_cast<u64>(data.data()));
-  EXPECT_EQ(data[offset / 4], 0x76543210);
+  EXPECT_EQ(data[kOffset / 4], 0x76543210);
   EXPECT_EQ(data[0], 0x76543210);
-  EXPECT_EQ(data[offset / 4 + 1], 0);
+  EXPECT_EQ(data[kOffset / 4 + 1], 0);
 }
 
 #ifdef OS_LINUX
 TEST_F(RdnaGlobal, TrackedAnonymousMappingReuseAndReplacement) {
-  constexpr size_t size = 65536;
+  constexpr size_t kSize = 65536;
   // Leave guard space so /proc/maps cannot merge this allocation with an
   // unrelated anonymous allocation. Keep it alive while Vulkan imports it.
-  void* reservation = host_memory::AllocMem(nullptr, size * 3,
-      host_memory::PageProtection::kPriv, host_memory::AllocationType::kReserve);
+  void* reservation = host_memory::AllocMem(
+      nullptr, kSize * 3, host_memory::PageProtection::kPriv,
+      host_memory::AllocationType::kReserve);
   ASSERT_NE(reservation, nullptr);
-  const u64 base = (reinterpret_cast<u64>(reservation) + size - 1) & ~(size - 1);
-  auto* source = static_cast<u32*>(host_memory::AllocMem(reinterpret_cast<void*>(base),
-      size, host_memory::PageProtection::kW, host_memory::AllocationType::kCommit));
+  const u64 base =
+      (reinterpret_cast<u64>(reservation) + kSize - 1) & ~(kSize - 1);
+  auto* source = static_cast<u32*>(host_memory::AllocMem(
+      reinterpret_cast<void*>(base), kSize, host_memory::PageProtection::kW,
+      host_memory::AllocationType::kCommit));
   ASSERT_NE(source, nullptr);
-  gpu::ps5::NoteGpuPool(base, size);
+  gpu::ps5::NoteGpuPool(base, kSize);
   const auto identity = [&] {
     for (const auto& range : gpu::ps5::GuestMemoryRanges({}))
       if (range.base <= base && base < range.base + range.size)
@@ -463,8 +468,10 @@ TEST_F(RdnaGlobal, TrackedAnonymousMappingReuseAndReplacement) {
     ASSERT_EQ(dest[0], value);
     ASSERT_EQ(identity(), first);
   }
-  ASSERT_EQ(host_memory::AllocMem(source, size, host_memory::PageProtection::kW,
-      host_memory::AllocationType::kCommit), source);
+  ASSERT_EQ(
+      host_memory::AllocMem(source, kSize, host_memory::PageProtection::kW,
+                            host_memory::AllocationType::kCommit),
+      source);
   ASSERT_NE(identity(), first);
   source[0] = 0xaabbccdd;
   Run(base, reinterpret_cast<u64>(dest.data()));
@@ -514,8 +521,8 @@ TEST_F(RdnaGlobal, DecoderXor3PreservesIntegerBitsAndAliasedOperands) {
   Mov(1, 0xffff8001);
   Mov(2, 0xf0f00f0f);
   Mov(3, 0x80808080);
-  program.push_back(0xd5780001);
-  program.push_back(257 | (258 << 9) | (259 << 18));
+  program_.push_back(0xd5780001);
+  program_.push_back(257 | (258 << 9) | (259 << 18));
   Global(0x1c, 0, 1, 2);
   Run(0, reinterpret_cast<u64>(dest.data()));
   EXPECT_EQ(dest[0], 0xffff8001u ^ 0xf0f00f0fu ^ 0x80808080u);
@@ -523,13 +530,14 @@ TEST_F(RdnaGlobal, DecoderXor3PreservesIntegerBitsAndAliasedOperands) {
 
 TEST_F(RdnaGlobal, DecoderCodeAndHashExtendBeyondSixteenKiB) {
   auto& dest = PageForDispatch();
-  program.assign(5001, 0xbf800000);
-  program[0] = 0xbf820000 | 5000;  // jump over padding to the tail
+  program_.assign(5001, 0xbf800000);
+  program_[0] = 0xbf820000 | 5000;  // jump over padding to the tail
   Mov(1, 123);
   Global(0x1c, 0, 1, 2);
   Run(0, reinterpret_cast<u64>(dest.data()));
   EXPECT_EQ(dest[0], 123);
-  program[5002] = 456;  // changing only the late tail must invalidate the cache
+  program_[5002] =
+      456;  // changing only the late tail must invalidate the cache
   Run(0, reinterpret_cast<u64>(dest.data()));
   EXPECT_EQ(dest[0], 456);
 }
@@ -539,6 +547,8 @@ namespace gpu::render {
 u64 g_ns_dcb = 0, g_ns_dcb_lock = 0;
 u32 g_submit_queue = 0, g_dcb_n = 0;
 }  // namespace gpu::render
+// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" bool prosperity_ps5_is_display_buffer(u64) {
   return false;
 }
+// NOLINTEND(readability-identifier-naming)

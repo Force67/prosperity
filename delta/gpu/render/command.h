@@ -11,11 +11,11 @@
  * Addresses are guest addresses (identity-mapped, host-readable).
  */
 
-#include "base/arch.h"
 #include <cstddef>
 #include <cstring>
-#include <base/containers/vector.h>
-#include <base/meta/traits.h>
+#include "base/arch.h"
+#include "base/containers/vector.h"
+#include "base/meta/traits.h"
 
 namespace gpu::gcn {
 struct Recompiled;
@@ -24,9 +24,10 @@ struct RecompiledCs;
 
 namespace gpu::render {
 
-// One vertex attribute for the recompiled-shader path: where the recompiled VS reads
-// input `location` from within a vertex buffer binding (binding indexes
-// DrawInfo::vbufs; interleaved attributes share a binding, separate streams don't).
+// One vertex attribute for the recompiled-shader path: where the recompiled VS
+// reads input `location` from within a vertex buffer binding (binding indexes
+// DrawInfo::vbufs; interleaved attributes share a binding, separate streams
+// don't).
 struct VertexAttr {
   u32 location = 0;
   u32 binding = 0;    // index into DrawInfo::vbufs
@@ -41,9 +42,9 @@ struct VertexAttr {
 // the renderer's vertex ring and bound for the draw.
 struct VertexBinding {
   const void* data = nullptr;  // guest base of this binding's vertex data
-  u32 stride = 0;         // bytes per record
-  u32 num_records = 0;    // records available in the source buffer
-  bool per_instance = false;  // one record per instance, not per vertex
+  u32 stride = 0;              // bytes per record
+  u32 num_records = 0;         // records available in the source buffer
+  bool per_instance = false;   // one record per instance, not per vertex
 };
 
 // Per-draw inputs extracted by the command processor (resource-tracked from the
@@ -55,17 +56,16 @@ struct DrawInfo {
   u32 pos_offset = 0;     // byte offset of the float2 position
   u32 prim_type = 0;      // VGT_PRIMITIVE_TYPE (4 = triangle list)
 
-  // Index buffer (DRAW_INDEX_2); non-null means indexed (type: 0=16, 1=32, 2=8 bit).
-  // Without one the draw is sequential (DRAW_INDEX_AUTO).
+  // Index buffer (DRAW_INDEX_2); non-null means indexed (type: 0=16, 1=32, 2=8
+  // bit). Without one the draw is sequential (DRAW_INDEX_AUTO).
   const void* index_data = nullptr;
   u32 index_count = 0;
   u32 index_type = 0;
-  u32 instance_count =
-      1;  // from IT_NUM_INSTANCES (tilemaps draw instanced)
+  u32 instance_count = 1;  // from IT_NUM_INSTANCES (tilemaps draw instanced)
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-  // Legacy transform fields for heuristic rendering, mirroring the first resolved
-  // VS cbuffer; recompiled shaders use cbufs[] (set 1, bindings 0..7). mvp[] stays
-  // binding 0's fallback when the VS descriptor cannot be resolved.
+  // Legacy transform fields for heuristic rendering, mirroring the first
+  // resolved VS cbuffer; recompiled shaders use cbufs[] (set 1, bindings 0..7).
+  // mvp[] stays binding 0's fallback when the VS descriptor cannot be resolved.
   u64 cbuf_base = 0;
   u32 cbuf_size = 0;
   struct DrawCbuf {
@@ -74,14 +74,14 @@ struct DrawInfo {
   };
   DrawCbuf cbufs[64];
   u32 num_cbufs = 0;
-  // Raw MUBUF buffers the recompiled VS/PS read by hand (skinning palette, instance
-  // table, self-indexed vertex data), each staged into a set-2 storage window with
-  // binding == index. Empty when the vertex-input state covers every fetch.
+  // Raw MUBUF buffers the recompiled VS/PS read by hand (skinning palette,
+  // instance table, self-indexed vertex data), each staged into a set-2 storage
+  // window with binding == index. Empty when the vertex-input state covers
+  // every fetch.
   static constexpr u32 kMaxBuffers = 16;
   struct DrawBuffer {
     u64 base = 0;
-    u32 size =
-        0;  // bytes the descriptor describes (may exceed the window)
+    u32 size = 0;  // bytes the descriptor describes (may exceed the window)
   };
   DrawBuffer bufs[kMaxBuffers];
   u32 num_bufs = 0;
@@ -94,11 +94,12 @@ struct DrawInfo {
   u64 rt_array_base = 0;
   u32 rt_tile_mode = 0;
   u32 rt_w = 0,
-           rt_h = 0;  // render-target dimensions (shared by all MRT targets)
+      rt_h = 0;  // render-target dimensions (shared by all MRT targets)
 
-  // Multiple render targets (CB_COLOR0..7); mrt_base[0] mirrors rt_base. A target is
-  // bound when its CB_TARGET_MASK nibble, CB_COLORn_INFO format and base are valid;
-  // mrt_info preserves the format so attachments match the guest surface.
+  // Multiple render targets (CB_COLOR0..7); mrt_base[0] mirrors rt_base. A
+  // target is bound when its CB_TARGET_MASK nibble, CB_COLORn_INFO format and
+  // base are valid; mrt_info preserves the format so attachments match the
+  // guest surface.
   u64 mrt_base[8] = {0};
   u32 mrt_info[8] = {0};
   u32 mrt_count = 0;
@@ -113,23 +114,21 @@ struct DrawInfo {
   const void* uv_data = nullptr;
   u32 uv_stride = 0;
   u32 uv_offset = 0;  // byte offset of the float2 uv within the vertex
-  u32 color_offset =
-      0xFFFFFFFFu;  // byte offset of float3 color; ~0 = white
+  u32 color_offset = 0xFFFFFFFFu;  // byte offset of float3 color; ~0 = white
   u64 tex_base = 0;
   u32 tex_w = 0, tex_h = 0;
   u32 tex_dfmt = 0, tex_nfmt = 0;
-  u32 tex_tiling = 8;       // T# tiling_index (8/31 = linear; else tiled)
-  u32 tex_pitch = 0;        // T# surface pitch in pixels (0 = use tex_w)
-  u32 tex_depth = 1;        // slices of a volume image (1 = not 3D)
-  u32 tex_layers = 1;       // physical layers in the image allocation
-  u32 tex_base_array = 0;   // first layer exposed by the image view
-  u32 tex_view_layers = 1;  // layers exposed by the image view
-  u32 tex_mip_levels = 1;   // physical mip levels in the image allocation
-  u32 tex_base_mip = 0;     // first mip exposed by the image view
-  u32 tex_view_mips = 1;    // mip levels exposed by the image view
-  u32 tex_min_lod = 0;      // T# MIN_LOD clamp in U4.8 fixed-point
-  u32 tex_sampler[4] =
-      {};                     // guest sampler descriptor for this MIMG binding
+  u32 tex_tiling = 8;         // T# tiling_index (8/31 = linear; else tiled)
+  u32 tex_pitch = 0;          // T# surface pitch in pixels (0 = use tex_w)
+  u32 tex_depth = 1;          // slices of a volume image (1 = not 3D)
+  u32 tex_layers = 1;         // physical layers in the image allocation
+  u32 tex_base_array = 0;     // first layer exposed by the image view
+  u32 tex_view_layers = 1;    // layers exposed by the image view
+  u32 tex_mip_levels = 1;     // physical mip levels in the image allocation
+  u32 tex_base_mip = 0;       // first mip exposed by the image view
+  u32 tex_view_mips = 1;      // mip levels exposed by the image view
+  u32 tex_min_lod = 0;        // T# MIN_LOD clamp in U4.8 fixed-point
+  u32 tex_sampler[4] = {};    // guest sampler descriptor for this MIMG binding
   bool tex_pow2_pad = false;  // physical mip dimensions/layers use POW2_PAD
   bool tex_sampler_valid = false;
   bool tex_arrayed = false;  // MIMG DA: shader consumes a layer coordinate
@@ -174,16 +173,17 @@ struct DrawInfo {
   // factors/functions to a pipeline (cached per unique state).
   u32 blend_control = 0;
   bool blend_enable = false;
-  // Per-MRT blend (CB_BLENDn_CONTROL + enable mask); [0]/bit0 mirror the single-RT
-  // fields, and an MRT draw gets each target's own blend instead of target 0's.
+  // Per-MRT blend (CB_BLENDn_CONTROL + enable mask); [0]/bit0 mirror the
+  // single-RT fields, and an MRT draw gets each target's own blend instead of
+  // target 0's.
   u32 mrt_blend[8] = {0};
   u32 mrt_blend_mask = 0;
   // CB_BLEND_RED/GREEN/BLUE/ALPHA, the operand of the CONSTANT_* blend
   // factors. Left at zero these turn a constant-blended pass black, which is
   // indistinguishable from a shader that computed nothing.
   float blend_constants[4] = {0.f, 0.f, 0.f, 0.f};
-  // CB_TARGET_MASK (MRT0 = bits[3:0]) + CB_COLOR_CONTROL MODE [6:4], honoured as the
-  // colour write mask so a draw the game masks off writes nothing.
+  // CB_TARGET_MASK (MRT0 = bits[3:0]) + CB_COLOR_CONTROL MODE [6:4], honoured
+  // as the colour write mask so a draw the game masks off writes nothing.
   u32 target_mask = 0xF;
   // CB_SHADER_MASK: which channels of each target the PS actually exports. The
   // hardware writes a channel only when this and target_mask both enable it,
@@ -193,27 +193,26 @@ struct DrawInfo {
   u32 col_format = 0;
   u32 color_control = 0;
 
-  // Depth/stencil: valid depth_base + depth_valid binds a depth attachment keyed by
-  // depth_base; 2D titles leave it 0 (unchanged path).
+  // Depth/stencil: valid depth_base + depth_valid binds a depth attachment
+  // keyed by depth_base; 2D titles leave it 0 (unchanged path).
   u64 depth_base = 0;
   // DB_HTILE_DATA_BASE: the depth surface's compression metadata. A write
   // over it is the depth fast clear (see NoteDccWrite).
   u64 depth_htile_base = 0;
-  u32 depth_slice = 0;  // array layer of depth_base this draw renders into
-  bool depth_valid = false;         // DB_Z_INFO format != 0
+  u32 depth_slice = 0;       // array layer of depth_base this draw renders into
+  bool depth_valid = false;  // DB_Z_INFO format != 0
   bool depth_test_enable = false;   // DB_DEPTH_CONTROL Z_ENABLE
   bool depth_write_enable = false;  // DB_DEPTH_CONTROL Z_WRITE_ENABLE
-  u32 depth_func =
-      7;  // DB_DEPTH_CONTROL ZFUNC (maps 1:1 to the compare op)
+  u32 depth_func = 7;  // DB_DEPTH_CONTROL ZFUNC (maps 1:1 to the compare op)
   float depth_clear = 1.0f;  // DB_DEPTH_CLEAR (fast-clear value)
   // DB_RENDER_CONTROL clear bits: this "draw" is a hardware fill of the
   // depth/stencil plane with the clear value, not geometry.
   bool depth_clear_draw = false;
   bool stencil_clear_draw = false;
   u32 render_control = 0;  // raw DB_RENDER_CONTROL, for diagnosis
-  // The Z surface's OWN padded geometry (DB_DEPTH_SIZE), not the colour target's:
-  // a half-resolution depth on a full pass, sized from the colour target, swallows
-  // unrelated addresses in the sampled-address page table.
+  // The Z surface's OWN padded geometry (DB_DEPTH_SIZE), not the colour
+  // target's: a half-resolution depth on a full pass, sized from the colour
+  // target, swallows unrelated addresses in the sampled-address page table.
   u32 depth_w = 0, depth_h = 0;
   u64 stencil_base = 0;
   bool stencil_enable = false;
@@ -229,11 +228,11 @@ struct DrawInfo {
   // backend leaves the target holding the previous frame (SotC accumulated one
   // fullscreen pass per frame until its value tracked the frame counter).
   bool is_clear_rect = false;
-  // The rectangle a fast clear covers, from the generic scissor; a GNM fast clear
-  // has no vertex attributes, so this is the ONLY size hint (a partial clear
-  // treated as whole-attachment erases everything else in the target).
-  // MRT0's real surface geometry from CB_COLOR0_PITCH/SLICE TILE_MAX; the screen
-  // scissor is the DRAWN region and can be a fraction of the surface.
+  // The rectangle a fast clear covers, from the generic scissor; a GNM fast
+  // clear has no vertex attributes, so this is the ONLY size hint (a partial
+  // clear treated as whole-attachment erases everything else in the target).
+  // MRT0's real surface geometry from CB_COLOR0_PITCH/SLICE TILE_MAX; the
+  // screen scissor is the DRAWN region and can be a fraction of the surface.
   u32 rt_surf_w = 0, rt_surf_h = 0;
   // The same, per bound target. MRT slots can have different geometries, and
   // the image each one needs is its own surface, not the drawn region.
@@ -242,8 +241,9 @@ struct DrawInfo {
   // and y in the high half of each word. This is the per-DRAW scissor.
   u32 scissor_tl = 0, scissor_br = 0;
   u32 clear_tl = 0, clear_br = 0;
-  // The other two scissors (hardware intersects three); a title leaving the generic
-  // one at reset (P.T.: (0,0)-(0,0) every fast clear) is pinned by the others.
+  // The other two scissors (hardware intersects three); a title leaving the
+  // generic one at reset (P.T.: (0,0)-(0,0) every fast clear) is pinned by the
+  // others.
   u32 clear_window_tl = 0, clear_window_br = 0;
   u32 clear_screen_tl = 0, clear_screen_br = 0;
   u32 mrt_clear_word[8][2] = {};
@@ -258,8 +258,8 @@ struct DrawInfo {
   // Primitive-setup: raster topology + face culling, from VGT_PRIMITIVE_TYPE
   // and PA_SU_SC_MODE_CNTL. 2D titles draw triangle lists with no culling
   // (unchanged).
-  u32 cull_mode = 0;  // PA_SU_SC_MODE_CNTL: CULL_FRONT[0] CULL_BACK[1]
-  bool front_ccw = true;   // FACE[2] == 0
+  u32 cull_mode = 0;      // PA_SU_SC_MODE_CNTL: CULL_FRONT[0] CULL_BACK[1]
+  bool front_ccw = true;  // FACE[2] == 0
 
   // XY viewport transform from PA_CL_VPORT_0_*.
   float viewport_x_scale = 0, viewport_x_offset = 0;
@@ -268,9 +268,10 @@ struct DrawInfo {
   // depth-sampling pass the wrong numbers, not just a shifted test.
   float viewport_z_scale = 1.0f, viewport_z_offset = 0.0f;
 
-  // Recompiled-shader path: non-null recomp runs the game's actual VS/PS instead of
-  // the heuristic quad; vertex_data/stride is the raw interleaved buffer, vattrs
-  // the inputs, mvp the pushed constant buffer, tex_base the sampler.
+  // Recompiled-shader path: non-null recomp runs the game's actual VS/PS
+  // instead of the heuristic quad; vertex_data/stride is the raw interleaved
+  // buffer, vattrs the inputs, mvp the pushed constant buffer, tex_base the
+  // sampler.
   u64 vs_addr = 0, ps_addr = 0;  // pipeline cache key
   // gfx10.3 merged NGG: both half addresses the draw programmed, and which one
   // vs_addr picked. Captured so a pass that never rasterizes can name the half
@@ -281,9 +282,9 @@ struct DrawInfo {
   u32 vs_user_data[32] = {};
   u32 ps_user_data[32] = {};
   const gcn::Recompiled* recomp = nullptr;
-  // Vulkan guarantees 16 vertex input attributes; stopping at 8 left later inputs
-  // with no Location (VUID-VkGraphicsPipelineCreateInfo-Input-07904) reading
-  // undefined.
+  // Vulkan guarantees 16 vertex input attributes; stopping at 8 left later
+  // inputs with no Location (VUID-VkGraphicsPipelineCreateInfo-Input-07904)
+  // reading undefined.
   static constexpr u32 kMaxVertexAttrs = 16;
   u32 num_vattrs = 0;
   u32 num_vbufs = 0;
@@ -294,7 +295,8 @@ struct DrawInfo {
   DrawTex texs[kMaxDrawTextures];
   VertexAttr vattrs[kMaxVertexAttrs];
   // Vertex buffer bindings; vbufs[0] mirrors vertex_data/stride so the single-
-  // binding fast path is unchanged; a multi-stream draw fills one per distinct V#.
+  // binding fast path is unchanged; a multi-stream draw fills one per distinct
+  // V#.
   VertexBinding vbufs[8];
 
   // Everything but the dense tables back to its default.
@@ -308,10 +310,10 @@ inline void DrawInfo::Reset() {
   std::memcpy(static_cast<void*>(this), &kDefault, offsetof(DrawInfo, texs));
 }
 
-// A compute dispatch resolved by the command processor: the recompiled CS, the live
-// guest memory ranges its descriptors point at, and the raw user data (pushed).
-// The renderer stages each range into a storage buffer, runs the dispatch, and
-// copies written ranges back for the graphics texture path.
+// A compute dispatch resolved by the command processor: the recompiled CS, the
+// live guest memory ranges its descriptors point at, and the raw user data
+// (pushed). The renderer stages each range into a storage buffer, runs the
+// dispatch, and copies written ranges back for the graphics texture path.
 struct GuestMemoryRange {
   u64 base = 0, size = 0;
   // Backing identity (file offset or tracked allocation), invalidates remaps.
@@ -365,9 +367,9 @@ struct ComputeInfo {
 // how many it walked. The console-specific processors write these and the
 // renderer's per-frame report reads them, so neither has to include the other.
 extern u64 g_ns_dcb, g_ns_dcb_lock;
-// The AGC queue whose ring the command processor walks (0 = not via a ring), for
-// frame capture: out-of-order work across queues is otherwise indistinguishable
-// from work that is simply wrong.
+// The AGC queue whose ring the command processor walks (0 = not via a ring),
+// for frame capture: out-of-order work across queues is otherwise
+// indistinguishable from work that is simply wrong.
 extern u32 g_submit_queue;
 extern u32 g_dcb_n;
 

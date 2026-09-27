@@ -7,21 +7,21 @@
 #include "gpu/gcn/gcn_audit.h"
 #include "base/arch.h"
 
+#include <sys/stat.h>
 #include <cstdlib>
 #include <cstring>
-#include <sys/stat.h>
 
-#include <base/logging.h>
+#include "base/logging.h"
 
+#include "base/algorithm.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/memory/move.h"
+#include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_disasm.h"
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/memory/move.h>
-#include <base/strings/xstring.h>
-#include <base/containers/hash_map.h>
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(const char*, kShAudit, "DELTA_GPU_SHAUDIT", nullptr);
@@ -148,8 +148,7 @@ void WriteDumpFiles(const ShaderRecord& rec,
   // an investigation dead once already. Address first so the files sort by it.
   char stem[256];
   std::snprintf(stem, sizeof(stem), "%s/%s_%llx_%016llx", dir,
-                rec.stage.c_str(),
-                static_cast<unsigned long long>(rec.guest),
+                rec.stage.c_str(), static_cast<unsigned long long>(rec.guest),
                 static_cast<unsigned long long>(rec.hash));
 
   // Raw bytecode.
@@ -160,7 +159,8 @@ void WriteDumpFiles(const ShaderRecord& rec,
   // Unoptimized SPIR-V (with OpLine pc markers when the translator saw the
   // dump env).
   if (spirv && !spirv->empty()) {
-    if (std::FILE* f = std::fopen((base::String(stem) + ".spv").c_str(), "wb")) {
+    if (std::FILE* f =
+            std::fopen((base::String(stem) + ".spv").c_str(), "wb")) {
       std::fwrite(spirv->data(), 4, spirv->size(), f);
       std::fclose(f);
     }
@@ -226,18 +226,16 @@ void WriteDumpFiles(const ShaderRecord& rec,
 }  // namespace
 
 bool ShaderDebugEnabled() {
-  static const bool enabled = DumpDir() != nullptr || AuditEnv() != nullptr;
-  return enabled;
+  static const bool kEnabled = DumpDir() != nullptr || AuditEnv() != nullptr;
+  return kEnabled;
 }
 
 bool ShaderDumpEnabled() {
-  static const bool enabled = DumpDir() != nullptr;
-  return enabled;
+  static const bool kEnabled = DumpDir() != nullptr;
+  return kEnabled;
 }
 
-void AuditBegin(const char* stage,
-                const u32* code,
-                const Program& program) {
+void AuditBegin(const char* stage, const u32* code, const Program& program) {
   if (!ShaderDebugEnabled())
     return;
   if (!g_atexit_registered) {

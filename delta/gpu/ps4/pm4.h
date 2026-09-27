@@ -17,12 +17,7 @@ namespace gpu {
 // https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/cikd.h
 
 // PM4 packet type is the top 2 bits of the header dword.
-enum class Pm4Type : u32 {
-  kType0 = 0,
-  kType1 = 1,
-  kType2 = 2,
-  kType3 = 3
-};
+enum class Pm4Type : u32 { kType0 = 0, kType1 = 1, kType2 = 2, kType3 = 3 };
 
 inline Pm4Type Pm4TypeOf(u32 hdr) {
   return static_cast<Pm4Type>(hdr >> 30);
@@ -65,8 +60,8 @@ enum Pm4It : u32 {
   IT_DRAW_INDEX_INDIRECT = 0x25,
   IT_WAIT_REG_MEM = 0x3C,
   IT_INDIRECT_BUFFER = 0x3F,
-  // Const-buffer indirect (the CE stream variant of IT_INDIRECT_BUFFER). This is
-  // the opcode Gnm's CCB descriptors (header 0xC0023300) carry.
+  // Const-buffer indirect (the CE stream variant of IT_INDIRECT_BUFFER). This
+  // is the opcode Gnm's CCB descriptors (header 0xC0023300) carry.
   IT_INDIRECT_BUFFER_CNST = 0x33,
   IT_COPY_DATA = 0x40,
   IT_EVENT_WRITE = 0x46,

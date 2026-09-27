@@ -14,17 +14,11 @@
 namespace gpu::render {
 
 // 8 bits per channel, 4 channels, tightly packed, top row first.
-bool WritePngRgba8(const char* path,
-                   const u8* rgba,
-                   u32 width,
-                   u32 height);
+bool WritePngRgba8(const char* path, const u8* rgba, u32 width, u32 height);
 
 // 16 bits per channel (host byte order in, big-endian in the file), 4 channels.
 // The lossless form for an HDR target: no exposure choice is baked in.
-bool WritePngRgba16(const char* path,
-                    const u16* rgba,
-                    u32 width,
-                    u32 height);
+bool WritePngRgba16(const char* path, const u16* rgba, u32 width, u32 height);
 
 // Raw zlib stream (deflate + header + adler32), exposed for the PNG writers
 // and for the unit test that round-trips it. Returns bytes written into `out`,

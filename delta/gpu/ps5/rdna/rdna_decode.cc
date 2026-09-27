@@ -10,11 +10,11 @@
 #include "base/arch.h"
 
 #include <cstdio>
-#include <base/algorithm.h>
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/memory/shared_pointer.h>
-#include <base/containers/hash_map.h>
+#include "base/algorithm.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/memory/shared_pointer.h"
 
 namespace gpu::rdna {
 namespace {
@@ -175,8 +175,7 @@ u32 BaseSize(Enc e, u32 w) {
     case Enc::kExp:
       return 2;
     case Enc::kMimg: {
-      u32 nsa =
-          (w >> 1) & 0x3;  // NSA (non-sequential address) extra dwords
+      u32 nsa = (w >> 1) & 0x3;  // NSA (non-sequential address) extra dwords
       return 2 + nsa;
     }
     default:
@@ -293,8 +292,7 @@ base::Vector<u8> ComputeRdnaReachability(const Program& program) {
     if (kind == 1 || kind == 2) {
       const i32 simm = static_cast<i16>(inst.raw[0] & 0xffff);
       starts.push_back(static_cast<u32>(static_cast<i32>(inst.pc) +
-                                             static_cast<i32>(inst.size) +
-                                             simm));
+                                        static_cast<i32>(inst.size) + simm));
     }
   }
   base::Sort(starts.begin(), starts.end());
@@ -335,9 +333,8 @@ base::Vector<u8> ComputeRdnaReachability(const Program& program) {
         break;
       }
       const i32 simm = static_cast<i16>(inst.raw[0] & 0xffff);
-      const u32 target =
-          static_cast<u32>(static_cast<i32>(inst.pc) +
-                                static_cast<i32>(inst.size) + simm);
+      const u32 target = static_cast<u32>(static_cast<i32>(inst.pc) +
+                                          static_cast<i32>(inst.size) + simm);
       if (target < max_pc)
         worklist.push_back(block_of(target));
       if (kind == 2)
@@ -523,7 +520,7 @@ void NextProgramGeneration() {
 }
 
 base::SharedPointer<const Program> CachedReachableProgram(const u32* code,
-                                                      u32 max_dwords) {
+                                                          u32 max_dwords) {
   struct Entry {
     u64 hash = 0;
     u32 hashed_dwords = 0;

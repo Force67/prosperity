@@ -8,19 +8,18 @@
 #include "gpu/ps5/shader_cache.h"
 #include "base/arch.h"
 
-
+#include "gpu/gpu_perf.h"
 #include "gpu/ps5/cmd_trace.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/rdna/rdna_translate.h"
-#include "gpu/gpu_perf.h"
 
-#include <base/logging.h>
-#include <options/options.h>
-#include <base/containers/array.h>
-#include <base/containers/map.h>
-#include <base/containers/hash_map.h>
-#include <base/hashing/hash.h>
+#include "base/containers/array.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/hashing/hash.h"
+#include "base/logging.h"
+#include "options/options.h"
 
 namespace gpu::ps5 {
 namespace {
@@ -121,7 +120,8 @@ u64 CodeHash(u64 addr, u32 max_dwords) {
 // and only the fields themselves say which one is.
 DELTA_OPTION(bool, kShMiss, "DELTA_GPU_SHMISS", false);
 
-void ReportMiss(const GraphicsKey& key, const GraphicsShaderState& state,
+void ReportMiss(const GraphicsKey& key,
+                const GraphicsShaderState& state,
                 size_t cache_size) {
   if (!kShMiss)
     return;
@@ -145,8 +145,7 @@ void ReportMiss(const GraphicsKey& key, const GraphicsShaderState& state,
 }  // namespace
 
 const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
-  static base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>
-      cache;
+  static base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash> cache;
   GraphicsKey key{CodeHash(state.vs_addr, 4096),
                   CodeHash(state.ps_addr, 4096),
                   rdna::FetchPlanHash(state.fetch_addr),
@@ -157,9 +156,9 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
   key.gl_clip = state.gl_clip;
   if (state.ngg.gs_code) {
     key.gs = CodeHash(reinterpret_cast<u64>(state.ngg.gs_code), 4096);
-    key.ngg = {state.ngg.threads, state.ngg.input_primitives,
-                state.ngg.max_vertices, state.ngg.max_primitives,
-                state.ngg.lds_dwords, state.ngg.separate_es};
+    key.ngg = {state.ngg.threads,      state.ngg.input_primitives,
+               state.ngg.max_vertices, state.ngg.max_primitives,
+               state.ngg.lds_dwords,   state.ngg.separate_es};
   }
   if (state.ps_in_cntl)
     for (u32 i = 0; i < state.ps_num_interp && i < 32; i++)
@@ -173,17 +172,16 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
   const RecompTimer timer;
   const gcn::Recompiled& rc =
       cache
-          .emplace(key,
-                   rdna::Recompile(
-                       reinterpret_cast<const u32*>(state.vs_addr),
-                       state.ps_addr
-                           ? reinterpret_cast<const u32*>(state.ps_addr)
-                           : nullptr,
-                       state.vs_user_data, state.ps_user_data,
-                       state.ps_input_ena, state.gl_clip, state.vs_user_sgprs,
-                       state.ps_user_sgprs, state.ps_in_cntl,
-                       state.ps_num_interp,
-                       state.ngg.gs_code ? &state.ngg : nullptr))
+          .emplace(
+              key,
+              rdna::Recompile(
+                  reinterpret_cast<const u32*>(state.vs_addr),
+                  state.ps_addr ? reinterpret_cast<const u32*>(state.ps_addr)
+                                : nullptr,
+                  state.vs_user_data, state.ps_user_data, state.ps_input_ena,
+                  state.gl_clip, state.vs_user_sgprs, state.ps_user_sgprs,
+                  state.ps_in_cntl, state.ps_num_interp,
+                  state.ngg.gs_code ? &state.ngg : nullptr))
           .first->second;
   TraceRecompileDone(rc.ok);
   // A shader we cannot recompile drops its draw entirely, which is
@@ -195,28 +193,28 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
 }
 
 const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
-  static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>
-      cache;
-  const ComputeKey key{CodeHash(state.cs_addr, rdna::ComputeCodeDwords(reinterpret_cast<const u32*>(state.cs_addr))),
-                       state.thread_x,
-                       state.thread_y,
-                       state.thread_z,
-                       state.user_sgpr,
-                       state.tgid_enable,
-                       state.lds_dwords,
-                       state.trap_present,
-                       state.wave32};
+  static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash> cache;
+  const ComputeKey key{
+      CodeHash(state.cs_addr, rdna::ComputeCodeDwords(
+                                  reinterpret_cast<const u32*>(state.cs_addr))),
+      state.thread_x,
+      state.thread_y,
+      state.thread_z,
+      state.user_sgpr,
+      state.tgid_enable,
+      state.lds_dwords,
+      state.trap_present,
+      state.wave32};
   auto it = cache.find(key);
   if (it != cache.end())
     return it->second;
   const RecompTimer timer;
   return cache
-      .emplace(key,
-               rdna::RecompileCompute(
-                   reinterpret_cast<const u32*>(state.cs_addr), state.thread_x,
-                   state.thread_y, state.thread_z, state.user_sgpr,
-                   state.tgid_enable, state.lds_dwords, state.trap_present,
-                   state.wave32))
+      .emplace(key, rdna::RecompileCompute(
+                        reinterpret_cast<const u32*>(state.cs_addr),
+                        state.thread_x, state.thread_y, state.thread_z,
+                        state.user_sgpr, state.tgid_enable, state.lds_dwords,
+                        state.trap_present, state.wave32))
       .first->second;
 }
 

@@ -7,14 +7,13 @@
 #include "gpu/ps5/reg_state.h"
 #include "base/arch.h"
 
+#include "options/options.h"
 
-#include <options/options.h>
-
+#include "base/math/value_bounds.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps5/cmd_trace.h"
 #include "gpu/ps5/guest_address.h"
-#include <base/math/value_bounds.h>
 
 namespace {
 DELTA_OPTION(bool, kNoBlendState, "DELTA_AGC_NOBLENDSTATE", false);
@@ -57,8 +56,8 @@ bool EndsWithBlendArray(const u32* p, u32 num_pairs) {
   return true;
 }
 
-// A type-1 block always ENDS with the blend object, and that object's fields sit
-// at a constant distance from the block's end: over every shape this title
+// A type-1 block always ENDS with the blend object, and that object's fields
+// sit at a constant distance from the block's end: over every shape this title
 // submits (245/114/82/78 pairs, and a 21-entry partial) CB_TARGET_MASK is at
 // pairs-23 and CB_BLEND0_CONTROL at pairs-24, followed by two spares, the
 // per-target array and five more. The object is truncatable: a shorter tail
@@ -83,9 +82,9 @@ BlendObject ReadBlendObject(Regs& regs,
   const bool context = !kNoBlendState && base == kContextRegBase;
   const bool array_only = context && num_pairs >= 21 && num_pairs < 24 &&
                           prev_pairs && EndsWithBlendArray(p, num_pairs);
-  blend.present = context && num_pairs >= 24 && EndsWithBlendArray(p, num_pairs);
-  blend.has_mask =
-      blend.present && (p[(num_pairs - 23) * 2] & (1u << 28)) != 0;
+  blend.present =
+      context && num_pairs >= 24 && EndsWithBlendArray(p, num_pairs);
+  blend.has_mask = blend.present && (p[(num_pairs - 23) * 2] & (1u << 28)) != 0;
   if (blend.has_mask) {
     regs[mmCB_BLEND0_CONTROL] = (p[(num_pairs - 24) * 2] & (1u << 28))
                                     ? p[(num_pairs - 24) * 2 + 1]
@@ -97,13 +96,11 @@ BlendObject ReadBlendObject(Regs& regs,
     const u32 joined = prev_pairs + num_pairs;
     const u32* q = reinterpret_cast<const u32*>(prev_addr);
     if (joined >= 24 && joined - 24 < prev_pairs &&
-        gpu::IsReadableRange(prev_addr,
-                             static_cast<u64>(prev_pairs) * 2 * 4)) {
+        gpu::IsReadableRange(prev_addr, static_cast<u64>(prev_pairs) * 2 * 4)) {
       blend.applied = (q[(joined - 23) * 2] & (1u << 28)) != 0;
       if (blend.applied) {
-        regs[mmCB_BLEND0_CONTROL] = (q[(joined - 24) * 2] & (1u << 28))
-                                        ? q[(joined - 24) * 2 + 1]
-                                        : 0;
+        regs[mmCB_BLEND0_CONTROL] =
+            (q[(joined - 24) * 2] & (1u << 28)) ? q[(joined - 24) * 2 + 1] : 0;
         regs[mmCB_TARGET_MASK] = q[(joined - 23) * 2 + 1];
       }
     }

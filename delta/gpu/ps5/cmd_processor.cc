@@ -10,11 +10,21 @@
 
 #include <cstring>
 
-#include <base/meta/traits.h>
-#include <base/logging.h>
-#include <options/options.h>
+#include "base/logging.h"
+#include "base/meta/traits.h"
+#include "options/options.h"
 
+#include "base/containers/array.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/time/time.h"
 #include "gpu/gcn/gcn_resource.h"
+#include "gpu/gpu_perf.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps5/agc_regs.h"
@@ -26,16 +36,6 @@
 #include "gpu/ps5/reg_state.h"
 #include "gpu/render/command.h"
 #include "gpu/render/renderer.h"
-#include "gpu/gpu_perf.h"
-#include <base/containers/array.h>
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/time/time.h>
-#include <base/strings/format.h>
 
 namespace {
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
@@ -134,8 +134,7 @@ bool IsLabelAddress(u64 address) {
 // immediate data (which is 0 for these). Our submit is synchronous, so any
 // advancing non-zero value reads as "already complete".
 u64 GpuClockTimestamp() {
-  return static_cast<u64>(
-      (base::TickClock::NowNs()));
+  return static_cast<u64>((base::TickClock::NowNs()));
 }
 
 // Our submit is synchronous: every draw in the buffer is finished by the time
@@ -155,7 +154,9 @@ void WriteLabel(u64 address, u64 value, bool is_64bit) {
 // libSceAgcDriver turns that into an event on the equeue sceAgcAddEqEvent
 // registered, and a consumer that never polls its label (the video decoder
 // parks in sceKernelWaitEqueue) makes no progress without it.
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe();
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe_ctx(u64 context_id);
 
 // The label write shared by EOP and RELEASE_MEM, which encode DATA_SEL the same
@@ -171,8 +172,8 @@ void WriteEventLabel(u64 address,
     // A window narrow enough to be one object is reported in full: sampling it
     // cannot show which write was the last one.
     if (kLabelWatchSize <= 0x10000 || n++ < 4096 || n % 256 == 0)
-      BASE_LOGI("agclabel", "{:#x} sel={} int={} value={:#x} ctx={:#x}", address,
-                data_sel, int_sel, value, context_id);
+      BASE_LOGI("agclabel", "{:#x} sel={} int={} value={:#x} ctx={:#x}",
+                address, data_sel, int_sel, value, context_id);
   }
   // A fence packet whose write we skip is a waiter that never wakes, so say so
   // rather than passing over it: sel 0 asks for no write at all, but an address
@@ -200,6 +201,7 @@ void WriteEventLabel(u64 address,
                 address);
   }
   if (int_sel)
+    // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
     prosperity_gpu_end_of_pipe_ctx(context_id ? context_id : value);
 }
 
@@ -223,8 +225,7 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
   const bool src_is_memory = src_sel == 0 || src_sel == 3;
   const bool dst_is_memory = dst_sel == 0 || dst_sel == 3;
   if (MemWatchHit(dst, bytes))
-    BASE_LOGI("memwatch",
-              "DMA_DATA control={:#x} src={:#x} dst={:#x} bytes={}",
+    BASE_LOGI("memwatch", "DMA_DATA control={:#x} src={:#x} dst={:#x} bytes={}",
               control, (unsigned long)src, (unsigned long)dst, bytes);
   // The sel bits report "memory" even for GDS/register targets, which are not
   // mapped in our address space and would segfault; every real guest
@@ -239,21 +240,24 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
     // dispatch arguments; dropping them makes those counts grow every frame.
     if (dst_sel == 1 && dst < 65536 && bytes <= 65536 - dst) {
       if (src_sel == 2)
-        copied = render::FillGds(renderer, static_cast<u32>(dst), bytes, body[1]);
+        copied =
+            render::FillGds(renderer, static_cast<u32>(dst), bytes, body[1]);
       else if (src_is_memory && gpu::IsReadableRange(src, bytes) &&
                render::FlushCsWritesRange(renderer, src, bytes, "dma"))
         copied = render::WriteGds(renderer, static_cast<u32>(dst),
-                                reinterpret_cast<const void*>(src), bytes);
+                                  reinterpret_cast<const void*>(src), bytes);
       else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src) {
         base::Vector<u8> data(bytes);
-        copied = render::ReadGds(renderer, static_cast<u32>(src), data.data(), bytes) &&
-                 render::WriteGds(renderer, static_cast<u32>(dst), data.data(), bytes);
+        copied = render::ReadGds(renderer, static_cast<u32>(src), data.data(),
+                                 bytes) &&
+                 render::WriteGds(renderer, static_cast<u32>(dst), data.data(),
+                                  bytes);
       }
     } else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src &&
                dst_is_memory && gpu::IsReadableRange(dst, bytes) &&
                render::FlushCsWritesRange(renderer, dst, bytes, "dma")) {
       copied = render::ReadGds(renderer, static_cast<u32>(src),
-                             reinterpret_cast<void*>(dst), bytes);
+                               reinterpret_cast<void*>(dst), bytes);
     }
     TraceDmaData(control, src, dst, bytes, copied);
     return;
@@ -267,8 +271,8 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
     copied = true;
   }
   // src_sel 2 = the packet's own dword, repeated: a fill. That is how a title
-  // clears a surface, since there is no clear packet, so apply it to guest memory
-  // and let the renderer clear any target it covers.
+  // clears a surface, since there is no clear packet, so apply it to guest
+  // memory and let the renderer clear any target it covers.
   if (!kNoCopy && src_sel == 2 && dst_is_memory && bytes &&
       bytes <= 0x8000000u && addressable(dst) && addressable(dst + bytes)) {
     const u32 fill = body[1];
@@ -293,22 +297,37 @@ template <typename T>
 T AtomicMemOp(u32 op, T dst, T src, T cmp) {
   using S = base::conditional_t<sizeof(T) == 8, i64, i32>;
   switch (op) {
-    case 1: case 9:  // fcmpswap: compare as floats
+    case 1:
+    case 9:  // fcmpswap: compare as floats
       return dst == cmp ? src : dst;
-    case 2: case 10: case 17:  // fmin, smin (a float compares as a signed int)
+    case 2:
+    case 10:
+    case 17:  // fmin, smin (a float compares as a signed int)
       return static_cast<S>(src) < static_cast<S>(dst) ? src : dst;
-    case 3: case 11: case 19:
+    case 3:
+    case 11:
+    case 19:
       return static_cast<S>(src) > static_cast<S>(dst) ? src : dst;
-    case 7: return src;
-    case 8: return dst == cmp ? src : dst;
-    case 15: return dst + src;
-    case 16: return dst - src;
-    case 21: return dst & src;
-    case 22: return dst | src;
-    case 23: return dst ^ src;
-    case 24: return dst >= src ? T(0) : dst + 1;
-    case 25: return (dst == 0 || dst > src) ? src : dst - 1;
-    default: return dst;
+    case 7:
+      return src;
+    case 8:
+      return dst == cmp ? src : dst;
+    case 15:
+      return dst + src;
+    case 16:
+      return dst - src;
+    case 21:
+      return dst & src;
+    case 22:
+      return dst | src;
+    case 23:
+      return dst ^ src;
+    case 24:
+      return dst >= src ? T(0) : dst + 1;
+    case 25:
+      return (dst == 0 || dst > src) ? src : dst - 1;
+    default:
+      return dst;
   }
 }
 
@@ -338,18 +357,24 @@ void HandleAtomicMem(const u32* body, u32 count) {
     auto* p = reinterpret_cast<volatile u64*>(address);
     const u64 dst = *p;
     u64 r;
-    if (base_op == 18) r = src < dst ? src : dst;
-    else if (base_op == 20) r = src > dst ? src : dst;
-    else r = AtomicMemOp<u64>(base_op, dst, src, cmp);
+    if (base_op == 18)
+      r = src < dst ? src : dst;
+    else if (base_op == 20)
+      r = src > dst ? src : dst;
+    else
+      r = AtomicMemOp<u64>(base_op, dst, src, cmp);
     *p = r;
   } else {
     auto* p = reinterpret_cast<volatile u32*>(address);
     const u32 dst = *p;
     const u32 s32 = static_cast<u32>(src), c32 = static_cast<u32>(cmp);
     u32 r;
-    if (base_op == 18) r = s32 < dst ? s32 : dst;
-    else if (base_op == 20) r = s32 > dst ? s32 : dst;
-    else r = AtomicMemOp<u32>(base_op, dst, s32, c32);
+    if (base_op == 18)
+      r = s32 < dst ? s32 : dst;
+    else if (base_op == 20)
+      r = s32 > dst ? s32 : dst;
+    else
+      r = AtomicMemOp<u32>(base_op, dst, s32, c32);
     *p = r;
   }
 }
@@ -365,7 +390,8 @@ void HandleClearState(const u32* body, u32 count) {
     return;
   const u32 cmd = body[0] & 0x3;
   if (cmd == 1 || cmd == 3) {
-    std::memcpy(g_queue->pushed_context.data(), g_queue->regs.At(kContextRegBase),
+    std::memcpy(g_queue->pushed_context.data(),
+                g_queue->regs.At(kContextRegBase),
                 g_queue->pushed_context.size() * sizeof(u32));
     g_queue->context_pushed = true;
   } else if (cmd == 2 && g_queue->context_pushed) {
@@ -401,8 +427,8 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
   if (function == 0 || !IsLabelAddress(address) ||
       !gpu::IsReadableRange(address, wide ? 8 : 4))
     return true;
-  if (!render::FlushCsWritesRange(render::DefaultRenderer(), address, wide ? 8 : 4,
-                               "label"))
+  if (!render::FlushCsWritesRange(render::DefaultRenderer(), address,
+                                  wide ? 8 : 4, "label"))
     return false;
   u64 value;
   if (wide)
@@ -411,13 +437,20 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
     value = *reinterpret_cast<const volatile u32*>(address);
   value &= mask;
   switch (function) {
-    case 1: return value < ref;
-    case 2: return value <= ref;
-    case 3: return value == ref;
-    case 4: return value != ref;
-    case 5: return value >= ref;
-    case 6: return value > ref;
-    default: return true;
+    case 1:
+      return value < ref;
+    case 2:
+      return value <= ref;
+    case 3:
+      return value == ref;
+    case 4:
+      return value != ref;
+    case 5:
+      return value >= ref;
+    case 6:
+      return value > ref;
+    default:
+      return true;
   }
 }
 
@@ -438,8 +471,8 @@ bool StallOnWait(u32 op, const u32* body, u32 count) {
   }
   if (now - g_queue->stall.wait_since >= base::Seconds(5)) {
     BASE_LOGW("agc", "queue {} waitOnAddress {:#x} ref={:#x} remains pending",
-              render::g_submit_queue,
-              (unsigned long)address, (unsigned long)ref);
+              render::g_submit_queue, (unsigned long)address,
+              (unsigned long)ref);
     g_queue->stall.wait_since = now;
   }
   return true;
@@ -479,8 +512,7 @@ void HandleEventWriteEop(const u32* body, u32 count) {
   const u64 value = static_cast<u64>(body[3]) |
                     (static_cast<u64>(count >= 5 ? body[4] : 0) << 32);
   // INT_SEL is two bits here; RELEASE_MEM widens it to three, EOP does not.
-  WriteEventLabel(address, (body[2] >> 29) & 0x7, value,
-                  (body[2] >> 24) & 0x3);
+  WriteEventLabel(address, (body[2] >> 29) & 0x7, value, (body[2] >> 24) & 0x3);
 }
 
 // body: eventCtrl, selBits, addrLo, addrHi, dataLo, dataHi
@@ -493,8 +525,8 @@ void HandleReleaseMem(const u32* body, u32 count) {
                     (static_cast<u64>(count >= 6 ? body[5] : 0) << 32);
   // DW6 is INT_CTXID: the id the title tags its submit with and matches the
   // interrupt against.
-  WriteEventLabel(address, (body[1] >> 29) & 0x7, value,
-                  (body[1] >> 24) & 0x7, count >= 7 ? body[6] : 0);
+  WriteEventLabel(address, (body[1] >> 29) & 0x7, value, (body[1] >> 24) & 0x7,
+                  count >= 7 ? body[6] : 0);
 }
 
 // body: eventCtrl, addrLo, addrHi+cmd, data
@@ -528,16 +560,16 @@ void HandleCopyData(const u32* body, u32 count) {
       !IsLabelAddress(dst) || !gpu::IsReadableRange(dst, bytes))
     return;
   u64 value = 0;
-  if (src_sel == 9 || src_sel == 18) {         // GPU clock / system clock
+  if (src_sel == 9 || src_sel == 18) {  // GPU clock / system clock
     value = GpuClockTimestamp();
-  } else if (src_sel == 10 || src_sel == 11) { // immediate, in the packet
+  } else if (src_sel == 10 || src_sel == 11) {  // immediate, in the packet
     value = src;
   } else if (is_memory(src_sel)) {
     if (!IsLabelAddress(src) || !gpu::IsReadableRange(src, bytes))
       return;
     std::memcpy(&value, reinterpret_cast<const void*>(src), bytes);
   } else {
-    return;                                    // a register we do not model
+    return;  // a register we do not model
   }
   if (bytes == 8)
     *reinterpret_cast<volatile u64*>(dst) = value;
@@ -561,7 +593,7 @@ void HandleEventWrite(const u32* body, u32 count) {
   if (event_type != 0x39 || event_index != 1)
     return;
   const u64 address = body[1] | (static_cast<u64>(body[2]) << 32);
-  constexpr u32 kBlocks = 16;              // one begin/end pair per DB
+  constexpr u32 kBlocks = 16;  // one begin/end pair per DB
   constexpr u64 kBytes = kBlocks * 2 * sizeof(u64);
   if (!address || (address & 7) || !IsLabelAddress(address) ||
       !gpu::IsReadableRange(address, kBytes))
@@ -601,14 +633,16 @@ void HandleDispatchIndirect(render::Renderer& renderer,
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
   const u32 groups[4] = {a[0], a[1], a[2], count >= 2 ? body[count - 1] : 5};
-  if (groups[0] > (1u << 20) || groups[1] > (1u << 20) || groups[2] > (1u << 20)) {
+  if (groups[0] > (1u << 20) || groups[1] > (1u << 20) ||
+      groups[2] > (1u << 20)) {
     static u32 reported = 0;
     if (reported++ < 16)
-      BASE_LOGW("agc", "indirect dispatch cs={:#x} args={:#x} packet={:p} count={} "
-                        "body=[{:#x} {:#x} {:#x}] groups=[{:#x} {:#x} {:#x}]",
-                g_queue->regs.ShaderAddr(mmCOMPUTE_PGM_LO),
-                args, body, count, body[0], count >= 2 ? body[1] : 0,
-                count >= 3 ? body[2] : 0, groups[0], groups[1], groups[2]);
+      BASE_LOGW("agc",
+                "indirect dispatch cs={:#x} args={:#x} packet={:p} count={} "
+                "body=[{:#x} {:#x} {:#x}] groups=[{:#x} {:#x} {:#x}]",
+                g_queue->regs.ShaderAddr(mmCOMPUTE_PGM_LO), args, body, count,
+                body[0], count >= 2 ? body[1] : 0, count >= 3 ? body[2] : 0,
+                groups[0], groups[1], groups[2]);
   }
   if (!groups[0] || !groups[1] || !groups[2])
     return;
@@ -618,11 +652,12 @@ void HandleDispatchIndirect(render::Renderer& renderer,
 // IT_DRAW_INDIRECT / IT_DRAW_INDEX_INDIRECT: same as the direct forms with the
 // counts read from the argument buffer. Rebuilding the direct packet keeps one
 // draw path rather than a second one that would drift from it.
-void HandleDrawIndirect(render::Renderer& renderer,
-                        u32 op,
-                        const u32* body,
-                        u32 count,
-                        void (*issue)(render::Renderer&, u32, const u32*, u32)) {
+void HandleDrawIndirect(
+    render::Renderer& renderer,
+    u32 op,
+    const u32* body,
+    u32 count,
+    void (*issue)(render::Renderer&, u32, const u32*, u32)) {
   if (count < 1)
     return;
   const bool indexed = op == 0x25;
@@ -635,7 +670,9 @@ void HandleDrawIndirect(render::Renderer& renderer,
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
   if (a[1] > (1u << 20))
-    BASE_LOGW("agc", "indirect draw op={:#x} args={:#x} packet={:p} words=[{:#x} {:#x} {:#x} {:#x} {:#x}]",
+    BASE_LOGW("agc",
+              "indirect draw op={:#x} args={:#x} packet={:p} words=[{:#x} "
+              "{:#x} {:#x} {:#x} {:#x}]",
               op, args, body, a[0], a[1], a[2], a[3], indexed ? a[4] : 0);
   if (!a[0] || !a[1])
     return;
@@ -753,8 +790,9 @@ u32 Walk(render::Renderer& renderer,
         // The dwords either side of the desync, so the packet that mis-sized
         // itself can be identified rather than guessed at.
         base::String line;
-        base::FormatTo(line, "type-{} header {:#x} at dword {}/{} of {:p}, "
-                             "resyncing; packets in:",
+        base::FormatTo(line,
+                       "type-{} header {:#x} at dword {}/{} of {:p}, "
+                       "resyncing; packets in:",
                        static_cast<u32>(type), hdr, i, words, (const void*)p);
         const u32 seen = trail_n < 32 ? trail_n : 32;
         for (u32 k = 0; k < seen; k++) {
@@ -801,7 +839,7 @@ u32 Walk(render::Renderer& renderer,
     if (dump)
       TraceDcbPacket(i, op, body, count);
     switch (op) {
-      case IT_INDIRECT_BUFFER:  // baseLo, baseHi, sizeDwords(+flags)
+      case IT_INDIRECT_BUFFER:         // baseLo, baseHi, sizeDwords(+flags)
       case IT_INDIRECT_BUFFER_CNST: {  // the AGC constant/Cue chain, which
                                        // carries the pipeline shader setup
         if (count < 3)
@@ -809,11 +847,11 @@ u32 Walk(render::Renderer& renderer,
         const u64 ib = (static_cast<u64>(body[1] & 0xFFFF) << 32) | body[0];
         const u32 ib_words = body[2] & 0xFFFFF;
         // Bounds-guard: a sane size, in the guest map, actually readable. The
-        // GPU aperture is deliberately NOT required, since the video decoder builds
-        // its command buffers in its own allocation (0x6_0000_0000 for Astro
-        // Bot, well under the aperture floor), and skipping those left its
-        // completion fence one submit short forever, so the decode thread spun
-        // holding the lock the whole player waits on.
+        // GPU aperture is deliberately NOT required, since the video decoder
+        // builds its command buffers in its own allocation (0x6_0000_0000 for
+        // Astro Bot, well under the aperture floor), and skipping those left
+        // its completion fence one submit short forever, so the decode thread
+        // spun holding the lock the whole player waits on.
         const bool follow =
             ib_words && ib_words <= 0x40000 && IsGuestAddress(ib) &&
             gpu::IsReadableRange(ib, static_cast<u64>(ib_words) * sizeof(u32));
@@ -955,7 +993,8 @@ u32 Walk(render::Renderer& renderer,
         break;
       case IT_NUM_INSTANCES:
         if (count && body[0] > (1u << 20))
-          BASE_LOGW("agc", "NUM_INSTANCES packet={:p} value={:#x}", body, body[0]);
+          BASE_LOGW("agc", "NUM_INSTANCES packet={:p} value={:#x}", body,
+                    body[0]);
         g_queue->index.num_instances = (count >= 1 && body[0]) ? body[0] : 1;
         break;
       case IT_DISPATCH_DIRECT:
@@ -971,8 +1010,8 @@ u32 Walk(render::Renderer& renderer,
       case 0x11: {  // SET_BASE
         if (count < 3 || (body[0] & 0xF) != 1)
           break;
-        const u64 base = (body[1] & ~0x7ull) |
-                         (static_cast<u64>(body[2] & 0xFFFF) << 32);
+        const u64 base =
+            (body[1] & ~0x7ull) | (static_cast<u64>(body[2] & 0xFFFF) << 32);
         if ((hdr >> 1) & 0x3)
           g_queue->dispatch_indirect_base = base;
         else
@@ -1042,7 +1081,8 @@ void StartRendererOnce(render::Renderer& renderer) {
   // dispatch may still own, and it sits below the renderer, so it cannot ask
   // for the flush itself.
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
-    render::FlushCsWritesRange(render::DefaultRenderer(), address, bytes, "srt");
+    render::FlushCsWritesRange(render::DefaultRenderer(), address, bytes,
+                               "srt");
   };
 }
 
@@ -1126,12 +1166,15 @@ void EndFrame(u64 scanout_base) {
 
 // LLE submit bridge: the kernel /dev/gc AGC ioctls (gc_dev.cc) forward the DCB
 // here, mirroring prosperity_gc_submit on the PS4 path.
+// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_agc_submit(u64 dcb_base, u32 size_bytes) {
   gpu::ps5::SubmitDcb(reinterpret_cast<const void*>(dcb_base), size_bytes);
 }
+// NOLINTEND(readability-identifier-naming)
 
 // The same, carrying a tag the frame capture records on every draw and
 // dispatch of the buffer (an ioctl submit's descriptor index and flags).
+// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
                                              u32 size_bytes,
                                              u32 tag) {
@@ -1139,30 +1182,39 @@ extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
   gpu::ps5::SubmitDcb(reinterpret_cast<const void*>(dcb_base), size_bytes);
   gpu::render::g_submit_queue = 0;
 }
+// NOLINTEND(readability-identifier-naming)
 
 // The ring form: returns how many dwords were consumed. Fewer than submitted
 // means the walk stalled on a wait the memory does not satisfy yet; hand the
 // rest in again on a later poll, starting at the returned dword.
+// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" u32 prosperity_agc_submit_ring(u64 dcb_base,
                                           u32 size_bytes,
                                           u32 queue) {
   return gpu::ps5::SubmitDcbRing(reinterpret_cast<const void*>(dcb_base),
                                  size_bytes, queue);
 }
+// NOLINTEND(readability-identifier-naming)
 
 // PS5 flip bridge: the shared dce/VideoOut flip path calls this when the active
 // process is PS5, so the frame the AGC submit rendered is read back and
-// presented through render::EndFrame (mirrors prosperity_gc_flip on the PS4 path).
+// presented through render::EndFrame (mirrors prosperity_gc_flip on the PS4
+// path). NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_agc_flip(u64 scanout_base) {
   gpu::ps5::EndFrame(scanout_base);
 }
+// NOLINTEND(readability-identifier-naming)
 
 // GPU aperture bridge: the kernel tells us where the title mapped its direct
 // memory, so a packet naming a pool outside the assumed band is still followed.
+// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_note_aperture(u64 base, u64 size) {
   gpu::ps5::NoteGpuPool(base, size);
 }
+// NOLINTEND(readability-identifier-naming)
 
+// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" int prosperity_gpu_is_aperture(u64 address) {
   return gpu::ps5::IsGpuAddress(address) ? 1 : 0;
 }
+// NOLINTEND(readability-identifier-naming)

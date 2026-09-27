@@ -27,7 +27,7 @@ u32 ComputeCodeDwords(const u32* code) {
   }
   return lo;
 }
-}
+}  // namespace gpu::rdna
 
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 namespace gpu::rdna {
@@ -44,6 +44,17 @@ RecompileCompute(const u32*, u32, u32, u32, u32, u32, u32, bool, bool) {
 #include <cstdlib>
 #include <cstring>
 
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "base/strings/format.h"
+#include "base/strings/to_string.h"
+#include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/gcn/spirv/translator.h"
@@ -51,18 +62,7 @@ RecompileCompute(const u32*, u32, u32, u32, u32, u32, u32, bool, bool) {
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/rdna/rdna_emit.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
-#include <base/strings/to_string.h>
-#include <base/logging.h>
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/containers/array.h>
-#include <base/containers/map.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/strings/xstring.h>
-#include <base/strings/format.h>
-#include <base/containers/hash_map.h>
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(bool, kGpuSpirvNoopt, "DELTA_GPU_SPIRV_NOOPT", false);
@@ -186,8 +186,8 @@ bool PlanResources(const Program& program,
   };
   base::Vector<BindingKey> keys;
   u32 index = 0;  // instruction index of the use being planned
-  const auto resource = [&](u32 pc, u32 base_sgpr, u32 dwords,
-                            u8 kind, bool written, u32 min_bytes) {
+  const auto resource = [&](u32 pc, u32 base_sgpr, u32 dwords, u8 kind,
+                            bool written, u32 min_bytes) {
     if (base_sgpr + dwords > 136) {
       gpu::gcn::WarnUnsupported("cs.descriptor-range.rdna", base_sgpr);
       return false;
@@ -351,7 +351,8 @@ bool PlanResources(const Program& program,
         }
         if (!resource(inst.pc, srsrc, 8, 1, store, 0))
           return false;
-        (op == 0 || op == 8 ? image_candidates : staged_images).insert(bind[inst.pc]);
+        (op == 0 || op == 8 ? image_candidates : staged_images)
+            .insert(bind[inst.pc]);
         auto& image = r.resources[bind[inst.pc]];
         if (!store && version[srsrc]) {
           const u32 writer = version[srsrc] - 1;
@@ -376,7 +377,8 @@ bool PlanResources(const Program& program,
                 continue;
               const u32 amount = (shift.raw[0] >> 8) & 255;
               if (shift.enc == Enc::kSop2 && shift.opcode == 0x1e &&
-                  amount >= 128 && amount <= 192 && ((amount - 128) & 31) >= 5 &&
+                  amount >= 128 && amount <= 192 &&
+                  ((amount - 128) & 31) >= 5 &&
                   replay.block_of[previous] == replay.block_of[writer])
                 image.image_table_pc = load.pc;
               break;
@@ -393,7 +395,8 @@ bool PlanResources(const Program& program,
         const u32 op = inst.opcode;
         const u32 saddr = (w1 >> 16) & 0x7f;
         const bool load = op >= 0x08 && op <= 0x0f;
-        const bool store = op == 0x18 || op == 0x1a || (op >= 0x1c && op <= 0x1f);
+        const bool store =
+            op == 0x18 || op == 0x1a || (op >= 0x1c && op <= 0x1f);
         if (seg != 2 || (saddr >= 104 && saddr != 125) || (!load && !store)) {
           gpu::gcn::WarnUnsupported("flat.cs.rdna", op, w, w1);
           return false;
@@ -419,24 +422,30 @@ bool PlanResources(const Program& program,
     r.gds_binding = static_cast<int>(r.resources.size());
   // Reuse the guest-address capability only in shaders that already require
   // it. Ordinary image shaders retain their portable staged implementation.
-  const bool has_runtime = base::AnyOf(r.resources.begin(), r.resources.end(),
-      [](const CsResource& res) { return res.runtime_address; });
+  const bool has_runtime =
+      base::AnyOf(r.resources.begin(), r.resources.end(),
+                  [](const CsResource& res) { return res.runtime_address; });
   for (u32 binding : image_candidates) {
     auto& image = r.resources[binding];
     image.base_mip_only = !staged_images.count(binding);
     image.runtime_image = has_runtime && image.base_mip_only;
   }
   if (base::AnyOf(r.resources.begin(), r.resources.end(),
-                  [](const CsResource& res) { return res.runtime_address || res.runtime_image; })) {
+                  [](const CsResource& res) {
+                    return res.runtime_address || res.runtime_image;
+                  })) {
     // Traversal follows pointers through scalar tables before reaching a BVH.
     // All read-only raw resources in this shader use their live GPU address.
     const bool writes = base::AnyOf(r.resources.begin(), r.resources.end(),
-        [](const CsResource& res) { return res.runtime_address && res.written; });
+                                    [](const CsResource& res) {
+                                      return res.runtime_address && res.written;
+                                    });
     for (CsResource& res : r.resources)
       if (res.kind != 1 && (!res.written || writes))
         res.runtime_address = true;
     for (const CsResource& res : r.resources)
-      r.guest_memory_written |= (res.runtime_address || res.runtime_image) && res.written;
+      r.guest_memory_written |=
+          (res.runtime_address || res.runtime_image) && res.written;
     r.guest_memory_binding = r.resources.size() + (uses_gds ? 1 : 0);
   }
   return true;
@@ -464,7 +473,7 @@ void EmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
   base::Vector<Id> values;
   for (u32 k = 0; k < n; k++)
     values.push_back(gpu::gcn::CsSsboLoad(t, sc, static_cast<u32>(b),
-                                         t.Add(dword0, t.U32(k))));
+                                          t.Add(dword0, t.U32(k))));
   for (u32 k = 0; k < n; k++)
     t.SetSdst(smem.sdst, k, values[k]);
 }
@@ -516,9 +525,8 @@ Id ToFloat(Translator& t, Id u) {
 
 // Move a normalised coordinate by whole texels of the sampled level.
 Id StepTexels(Translator& t, Id coord, Id texels, Id extent) {
-  return t.m.Bitcast(t.t_u,
-                     t.FAdd(t.m.Bitcast(t.t_f, coord),
-                            t.FDiv(texels, ToFloat(t, extent))));
+  return t.m.Bitcast(t.t_u, t.FAdd(t.m.Bitcast(t.t_f, coord),
+                                   t.FDiv(texels, ToFloat(t, extent))));
 }
 
 // The gfx10.3 sample forms the shared emitter has no model for, expressed with
@@ -551,13 +559,12 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
     address[i] = address[i + prefix];
   // The 1D forms park the LOD one component earlier; they do not reach a
   // compute sampler in practice, so the extents follow the 2D placement.
-  const Id lod =
-      explicit_lod
-          ? t.m.Emit(spv::Op::OpConvertFToU, t.t_u,
-                     {t.Ext2(GLSLstd450FMax,
-                             t.m.Bitcast(t.t_f, address[da ? 3 : 2]),
-                             t.F32(0.f))})
-          : t.U32(0);
+  const Id lod = explicit_lod
+                     ? t.m.Emit(spv::Op::OpConvertFToU, t.t_u,
+                                {t.Ext2(GLSLstd450FMax,
+                                        t.m.Bitcast(t.t_f, address[da ? 3 : 2]),
+                                        t.F32(0.f))})
+                     : t.U32(0);
 
   Inst plain = inst;
   plain.opcode = explicit_lod ? 0x24u : 0x27u;
@@ -587,11 +594,11 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
     const u32 component = dmask & (~dmask + 1u);
     // gather4 reports the footprint counter-clockwise from its lower left:
     // (x0,y1) (x1,y1) (x1,y0) (x0,y0).
-    static const float step[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
+    static const float kStep[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
     for (u32 tap = 0; tap < 4; tap++) {
       base::Array<Id, 8> tapped = address;
-      tapped[0] = StepTexels(t, tapped[0], t.F32(step[tap][0]), extent.width);
-      tapped[1] = StepTexels(t, tapped[1], t.F32(step[tap][1]), extent.height);
+      tapped[0] = StepTexels(t, tapped[0], t.F32(kStep[tap][0]), extent.width);
+      tapped[1] = StepTexels(t, tapped[1], t.F32(kStep[tap][1]), extent.height);
       Inst one = plain;
       one.raw[0] = (plain.raw[0] & ~(0xFu << 8)) | (component << 8);
       one.raw[1] = (w1 & ~0xFF00u) | (((vdata + tap) & 0xFF) << 8);
@@ -608,19 +615,19 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
   // first destination register.
   const Id func = t.And(t.Shr(t.Sg(ssamp), t.U32(13)), t.U32(0x7));
   static const spv::Op kCompare[8] = {
-      spv::Op::OpFOrdEqual,        // 0 never, selected away below
-      spv::Op::OpFOrdLessThan,     spv::Op::OpFOrdEqual,
+      spv::Op::OpFOrdEqual,  // 0 never, selected away below
+      spv::Op::OpFOrdLessThan,      spv::Op::OpFOrdEqual,
       spv::Op::OpFOrdLessThanEqual, spv::Op::OpFOrdGreaterThan,
-      spv::Op::OpFOrdNotEqual,     spv::Op::OpFOrdGreaterThanEqual,
-      spv::Op::OpFOrdEqual,        // 7 always, selected away below
+      spv::Op::OpFOrdNotEqual,      spv::Op::OpFOrdGreaterThanEqual,
+      spv::Op::OpFOrdEqual,  // 7 always, selected away below
   };
   for (u32 tap = 0; tap < (gather ? 4u : 1u); tap++) {
     const Id depth = t.m.Bitcast(t.t_f, t.Vg(vdata + tap));
     Id pass = t.m.ConstBool(false);
     for (u32 f = 1; f < 8; f++) {
-      const Id value = f == 7 ? t.m.ConstBool(true)
-                              : t.m.Emit(kCompare[f], t.t_bool,
-                                         {reference, depth});
+      const Id value =
+          f == 7 ? t.m.ConstBool(true)
+                 : t.m.Emit(kCompare[f], t.t_bool, {reference, depth});
       pass = t.m.Emit(spv::Op::OpSelect, t.t_bool,
                       {t.Eq(func, t.U32(f)), value, pass});
     }
@@ -651,7 +658,8 @@ bool NeedsWaveLockstep(const Program& program) {
   u32 lds = 0;
   for (const Inst& inst : program) {
     lds |= LdsAccess(inst);
-    if (inst.enc == Enc::kVop3 && (inst.opcode == 0x365 || inst.opcode == 0x366))
+    if (inst.enc == Enc::kVop3 &&
+        (inst.opcode == 0x365 || inst.opcode == 0x366))
       return true;  // v_mbcnt
     if (inst.enc == Enc::kSop1 && inst.opcode >= 0x0d && inst.opcode <= 0x16)
       return true;  // s_bcnt / s_ff / s_flbit
@@ -687,7 +695,8 @@ bool TranslateCs(const Program& program,
   // Astro Bot's world map skips a dozen dispatches that way.
   bool uses_lane_id = false;
   for (const Inst& inst : program)
-    if ((inst.enc == Enc::kDs && (inst.opcode == 0x35 || inst.opcode == 0xb3)) ||
+    if ((inst.enc == Enc::kDs &&
+         (inst.opcode == 0x35 || inst.opcode == 0xb3)) ||
         (inst.enc == Enc::kVop3 &&
          (inst.opcode == 0x377 || inst.opcode == 0x378)) ||
         inst.extension == gpu::gcn::InstExtension::kDpp ||
@@ -699,7 +708,8 @@ bool TranslateCs(const Program& program,
 
   t.rdna_sources = true;
   sc.wave_lockstep = sc.lds_sync = !wave32 &&
-      gpu::gcn::WaveSplitsAcrossSubgroups() && NeedsWaveLockstep(program);
+                                   gpu::gcn::WaveSplitsAcrossSubgroups() &&
+                                   NeedsWaveLockstep(program);
   t.wave_size = wave32 ? 32 : 64;
   t.full_wave_masks = sc.wave_lockstep;
   t.InitTypes();
@@ -740,12 +750,12 @@ bool TranslateCs(const Program& program,
     // Counters return one pre-operation value to the entire guest wave,
     // including when it spans two host subgroups. The CFG only enables this
     // exchange channel at points where the whole workgroup can synchronize.
-    t.xchg_lanes = base::Max(num_thread_x, 1u) *
-                   base::Max(num_thread_y, 1u) * base::Max(num_thread_z, 1u);
+    t.xchg_lanes = base::Max(num_thread_x, 1u) * base::Max(num_thread_y, 1u) *
+                   base::Max(num_thread_z, 1u);
     const Id exchange = t.m.TypeArray(t.t_u, t.xchg_lanes * 2 + 1);
-    t.xchg_var = t.m.Variable(
-        t.m.TypePointer(spv::StorageClass::Workgroup, exchange),
-        spv::StorageClass::Workgroup);
+    t.xchg_var =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Workgroup, exchange),
+                     spv::StorageClass::Workgroup);
     t.m.Name(t.xchg_var, "wave_exchange");
   }
 
@@ -796,9 +806,8 @@ bool TranslateCs(const Program& program,
     sc.subgroup_local_id =
         t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_u),
                      spv::StorageClass::Input);
-    t.m.Decorate(
-        sc.subgroup_local_id, spv::Decoration::BuiltIn,
-        {static_cast<u32>(spv::BuiltIn::SubgroupLocalInvocationId)});
+    t.m.Decorate(sc.subgroup_local_id, spv::Decoration::BuiltIn,
+                 {static_cast<u32>(spv::BuiltIn::SubgroupLocalInvocationId)});
     iface.push_back(sc.subgroup_local_id);
   }
 
@@ -826,8 +835,8 @@ bool TranslateCs(const Program& program,
   t.lane_masks = true;
   const Id local_index = t.Add(
       t.Vg(0), t.Mul(t.U32(base::Max(num_thread_x, 1u)),
-                    t.Add(t.Vg(1), t.Mul(t.U32(base::Max(num_thread_y, 1u)),
-                                         t.Vg(2)))));
+                     t.Add(t.Vg(1), t.Mul(t.U32(base::Max(num_thread_y, 1u)),
+                                          t.Vg(2)))));
   t.mask_lane_id = t.And(local_index, t.U32(t.wave_size - 1));
   t.xchg_index = local_index;
   t.wave_base = t.And(local_index, t.U32(~(t.wave_size - 1)));
@@ -876,8 +885,8 @@ static bool EmitCsMemoryUnpredicated(Translator& t,
       u32 dfmt = 0, nfmt = 0;
       DecodeBufferFormat((inst.raw[0] >> 19) & 0x7f, dfmt, nfmt);
       Inst lowered = inst;
-      lowered.raw[0] = (inst.raw[0] & ~(0x7fu << 19)) |
-                       (dfmt << 19) | (nfmt << 23);
+      lowered.raw[0] =
+          (inst.raw[0] & ~(0x7fu << 19)) | (dfmt << 19) | (nfmt << 23);
       gpu::gcn::EmitCsMtbuf(t, lowered, sc);
       return true;
     }
@@ -954,8 +963,7 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
       (inst.enc == Enc::kMtbuf && op >= 0x04 && op <= 0x07) ||
       (inst.enc == Enc::kMimg &&
        (op == 0x08 || op == 0x09 || (op >= 0x0f && op <= 0x1b))) ||
-      (inst.enc == Enc::kDs && op != 0x35 &&
-       !(op >= 0x36 && op <= 0x38) &&
+      (inst.enc == Enc::kDs && op != 0x35 && !(op >= 0x36 && op <= 0x38) &&
        !(op >= 0x76 && op <= 0x78) && op != 0xfe && op != 0xff);
   if (!writes || !t.predicate_vector)
     return EmitCsMemoryUnpredicated(t, inst, sc);
@@ -1019,8 +1027,9 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
   // Use the same content-addressed optimizer cache as graphics. Large native
   // decoder kernels otherwise repeat legalization on every game launch.
   const bool no_opt = NoOpt();
-  const bool valid = no_opt ? gpu::gcn::spirv::Validate(spv_bin, &err)
-                            : gpu::gcn::spirv::Finalize(spv_bin, &tmp.spirv, &err);
+  const bool valid = no_opt
+                         ? gpu::gcn::spirv::Validate(spv_bin, &err)
+                         : gpu::gcn::spirv::Finalize(spv_bin, &tmp.spirv, &err);
   if (!valid) {
     BASE_LOGI("rdnacs", "CS invalid @{:p}: {}",
               static_cast<const void*>(cs_code), err.c_str());

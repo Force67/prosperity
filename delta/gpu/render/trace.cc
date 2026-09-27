@@ -10,29 +10,29 @@
 #include "gpu/guest_memory.h"
 #include "gpu/render/capture.h"
 #include "gpu/render/device.h"
-#include "gpu/render/guest_format.h"
 #include "gpu/render/frame.h"
+#include "gpu/render/guest_format.h"
 #include "gpu/render/png.h"
 #include "gpu/render/render_target.h"
 
 #include <sys/stat.h>
-#include <options/options.h>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "options/options.h"
 
-#include <base/containers/array.h>
-#include <base/logging.h>
-#include <base/algorithm.h>
-#include <base/containers/map.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/strings/xstring.h>
-#include <base/time/time.h>
-#include <base/containers/hash_map.h>
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "base/strings/xstring.h"
+#include "base/time/time.h"
 
 namespace {
 // Arming. Any one of these turns the debugger on; everything else follows.
@@ -148,9 +148,10 @@ u64 NowNs() {
 // --- arming ----------------------------------------------------------------
 
 bool Armed() {
-  static const bool armed = kCaptureFrame.get() > 0 ||
-                            kCaptureAfter.get() > 0.f || kCaptureBusy.get() > 0;
-  return armed;
+  static const bool kArmed = kCaptureFrame.get() > 0 ||
+                             kCaptureAfter.get() > 0.f ||
+                             kCaptureBusy.get() > 0;
+  return kArmed;
 }
 
 // A comma list of draw indices, "every:N", or "all".
@@ -160,7 +161,7 @@ struct SnapshotPlan {
   base::Vector<u32> at;
 };
 const SnapshotPlan& Plan() {
-  static const SnapshotPlan plan = [] {
+  static const SnapshotPlan kPlan = [] {
     SnapshotPlan p;
     const char* spec = kCaptureAt;
     if (!spec || !*spec)
@@ -183,7 +184,7 @@ const SnapshotPlan& Plan() {
     }
     return p;
   }();
-  return plan;
+  return kPlan;
 }
 
 bool SnapshotWanted(u32 draw_index) {
@@ -196,11 +197,12 @@ bool SnapshotWanted(u32 draw_index) {
 }
 
 bool DumpWanted(const char* what) {
-  static const base::String spec = kCaptureDump.get() ? kCaptureDump.get() : "";
-  if (spec.find("none") != base::String::npos)
+  static const base::String kSpec =
+      kCaptureDump.get() ? kCaptureDump.get() : "";
+  if (kSpec.find("none") != base::String::npos)
     return false;
-  return spec.find("all") != base::String::npos ||
-         spec.find(what) != base::String::npos;
+  return kSpec.find("all") != base::String::npos ||
+         kSpec.find(what) != base::String::npos;
 }
 
 // --- JSON ------------------------------------------------------------------
@@ -441,7 +443,6 @@ u64 SpirvHash(const base::Vector<u32>& spirv) {
 
 // --- format names / decode -------------------------------------------------
 
-
 const char* LayoutName(rhi::TextureState layout) {
   switch (layout) {
     case rhi::TextureState::kUndefined:
@@ -506,10 +507,7 @@ float PackedUfloat(u32 value, u32 mantissa_bits) {
 
 // True when the texel is a floating-point (HDR) encoding, i.e. the exposure
 // knob applies. Fills rgba with the raw channel values.
-bool DecodeTexel(const u8* src,
-                 rhi::Format fmt,
-                 float rgba[4],
-                 bool* is_hdr) {
+bool DecodeTexel(const u8* src, rhi::Format fmt, float rgba[4], bool* is_hdr) {
   u32 packed;
   *is_hdr = false;
   switch (fmt) {
@@ -756,9 +754,7 @@ bool WriteDepthPng(const base::String& path,
   return WritePngRgba8(path.c_str(), rgba.data(), w, h);
 }
 
-void WriteRawSidecar(const base::String& path,
-                     const u8* src,
-                     u64 bytes) {
+void WriteRawSidecar(const base::String& path, const u8* src, u64 bytes) {
   if (!kCaptureRaw)
     return;
   if (std::FILE* f = std::fopen((path + ".raw").c_str(), "wb")) {
@@ -881,10 +877,7 @@ bool DecodeBlock(u32 dfmt, const u8* block, u8 rgba[16][4]) {
 }
 
 // One linear (already de-tiled) element -> RGBA8.
-bool DecodeGuestTexel(u32 dfmt,
-                      u32 nfmt,
-                      const u8* src,
-                      u8 out[4]) {
+bool DecodeGuestTexel(u32 dfmt, u32 nfmt, const u8* src, u8 out[4]) {
   u32 packed;
   switch (dfmt) {
     case 1:  // 8
@@ -966,8 +959,7 @@ bool DecodeGuestTexel(u32 dfmt,
     case 12: {  // 16_16_16_16
       const auto* h = reinterpret_cast<const u16*>(src);
       for (int i = 0; i < 4; i++)
-        out[i] =
-            nfmt == 7 ? ToByte(HalfToFloat(h[i]), i < 3) : u8(h[i] >> 8);
+        out[i] = nfmt == 7 ? ToByte(HalfToFloat(h[i]), i < 3) : u8(h[i] >> 8);
       return true;
     }
     case 14: {  // 32_32_32_32 float
@@ -993,15 +985,15 @@ bool DumpGuestTexture(const TexKey& t,
   const u32 ew = compressed ? (t.w + 3) / 4 : t.w;
   const u32 eh = compressed ? (t.h + 3) / 4 : t.h;
   const u32 epitch = compressed ? ((t.pitch ? t.pitch : t.w) + 3) / 4
-                                     : (t.pitch ? t.pitch : t.w);
+                                : (t.pitch ? t.pitch : t.w);
   if (!t.w || !t.h) {
     *reason = "empty";
     return false;
   }
   gcn::TextureLayout32 layout;
-  if (!gcn::BuildTextureLayout32(layout, ew, eh, epitch, base::Max(1u, t.layers),
-                                 base::Max(1u, t.mips), t.tiling, t.pow2_pad,
-                                 elem)) {
+  if (!gcn::BuildTextureLayout32(layout, ew, eh, epitch,
+                                 base::Max(1u, t.layers), base::Max(1u, t.mips),
+                                 t.tiling, t.pow2_pad, elem)) {
     *reason = "layout";
     return false;
   }
@@ -1020,8 +1012,7 @@ bool DumpGuestTexture(const TexKey& t,
     for (u32 by = 0; by < eh; by++) {
       for (u32 bx = 0; bx < ew; bx++) {
         u8 block[16][4];
-        if (!DecodeBlock(t.dfmt,
-                         linear.data() + (u64(by) * ew + bx) * elem,
+        if (!DecodeBlock(t.dfmt, linear.data() + (u64(by) * ew + bx) * elem,
                          block)) {
           *reason = "format";
           return false;
@@ -1031,8 +1022,7 @@ bool DumpGuestTexture(const TexKey& t,
             const u32 px = bx * 4 + x, py = by * 4 + y;
             if (px >= t.w || py >= t.h)
               continue;
-            std::memcpy(&rgba[(u64(py) * t.w + px) * 4], block[y * 4 + x],
-                        4);
+            std::memcpy(&rgba[(u64(py) * t.w + px) * 4], block[y * 4 + x], 4);
           }
         }
       }
@@ -1067,8 +1057,8 @@ base::String ShaderObj(u64 addr, const base::Vector<u32>* spirv) {
 }
 
 base::String TexObj(u32 index,
-                   const render::DrawInfo::DrawTex& t,
-                   const DrawBindings* b) {
+                    const render::DrawInfo::DrawTex& t,
+                    const DrawBindings* b) {
   Obj o;
   o.U("i", index);
   o.Hex("base", t.base);
@@ -1131,9 +1121,8 @@ base::String TexObj(u32 index,
   const u32 elem = GuestFormatElemBytes(t.dfmt);
   const bool compressed = GuestFormatBlockCompressed(t.dfmt);
   const u64 stride = t.pitch ? t.pitch : t.w;
-  const u64 bytes = compressed
-                             ? ((stride + 3) / 4) * ((t.h + 3ull) / 4) * elem
-                             : stride * t.h * elem;
+  const u64 bytes = compressed ? ((stride + 3) / 4) * ((t.h + 3ull) / 4) * elem
+                               : stride * t.h * elem;
   o.Raw("guest", GuestObj(t.base, bytes ? bytes : 4));
   o.Raw("descriptor_src", GuestObj(t.src, 32));
   return o.Done();
@@ -1344,14 +1333,13 @@ void DumpFrameResources() {
       // dfmt 4 float carries its display scale in the name: the image is
       // meaningless without it (see DecodeGuestTexel case 4).
       if (t.dfmt == 4 && t.nfmt == 7) {
-        std::snprintf(name, sizeof name,
-                      "%s_tex_%#llx_%ux%u_d%u_n%u_x%g.png", g_prefix.c_str(),
-                      (unsigned long long)t.base, t.w, t.h, t.dfmt, t.nfmt,
-                      (double)kR32Scale);
+        std::snprintf(name, sizeof name, "%s_tex_%#llx_%ux%u_d%u_n%u_x%g.png",
+                      g_prefix.c_str(), (unsigned long long)t.base, t.w, t.h,
+                      t.dfmt, t.nfmt, (double)kR32Scale);
       } else
-      std::snprintf(name, sizeof name, "%s_tex_%#llx_%ux%u_d%u_n%u.png",
-                    g_prefix.c_str(), (unsigned long long)t.base, t.w, t.h,
-                    t.dfmt, t.nfmt);
+        std::snprintf(name, sizeof name, "%s_tex_%#llx_%ux%u_d%u_n%u.png",
+                      g_prefix.c_str(), (unsigned long long)t.base, t.w, t.h,
+                      t.dfmt, t.nfmt);
       const char* reason = "";
       const bool ok = DumpGuestTexture(t, name, &reason);
       Line l("dump");
@@ -1379,13 +1367,13 @@ void DumpFrameResources() {
 // --- public ----------------------------------------------------------------
 
 bool WantValidation() {
-  static const bool want = kValidate.get() || kSyncValidate.get();
-  return want;
+  static const bool kWant = kValidate.get() || kSyncValidate.get();
+  return kWant;
 }
 
 bool WantSyncValidation() {
-  static const bool want = kSyncValidate.get();
-  return want;
+  static const bool kWant = kSyncValidate.get();
+  return kWant;
 }
 
 const char* ValidationLayerName() {
@@ -1413,8 +1401,8 @@ void OnDeviceMessage(const char* level,
 }
 
 bool NamesWanted() {
-  static const bool want = Armed() || WantValidation();
-  return want;
+  static const bool kWant = Armed() || WantValidation();
+  return kWant;
 }
 
 void RegisterObjectName(u64 handle, const char* name) {
@@ -1590,9 +1578,8 @@ void RecordDraw(const render::DrawInfo& d,
     o.Hex("base", reinterpret_cast<u64>(d.vbufs[i].data));
     o.U("stride", d.vbufs[i].stride);
     o.U("records", d.vbufs[i].num_records);
-    o.Raw("guest",
-          GuestObj(reinterpret_cast<u64>(d.vbufs[i].data),
-                   u64(d.vbufs[i].stride) * d.vbufs[i].num_records));
+    o.Raw("guest", GuestObj(reinterpret_cast<u64>(d.vbufs[i].data),
+                            u64(d.vbufs[i].stride) * d.vbufs[i].num_records));
     vbufs.Add(o);
   }
   Arr vattrs;
@@ -1794,7 +1781,6 @@ void RecordDispatch(const render::ComputeInfo& ci) {
       .Raw("user_data", ud.Done());
   l.Emit();
 }
-
 
 void RecordBarrier(const char* aspect,
                    u64 image,

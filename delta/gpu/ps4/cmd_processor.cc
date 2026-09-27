@@ -6,19 +6,28 @@
  */
 
 #include "gpu/ps4/cmd_processor.h"
+#include "base/arch.h"
+#include "base/logging.h"
 #include "gpu/ps4/render_queue.h"
 #include "gpu/write_tracker.h"
-#include <base/logging.h>
-#include "base/arch.h"
 
 #include <cstring>
 
-#include <host_memory/host_memory.h>
-#include <options/options.h>
+#include "host_memory/host_memory.h"
+#include "options/options.h"
 
+#include "base/atomic.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
+#include "base/time/time.h"
 #include "gpu/gcn/gcn_decode.h"
-#include "gpu/guest_memory.h"
 #include "gpu/gcn/gcn_resource.h"
+#include "gpu/guest_memory.h"
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/ps4/compute_dispatch.h"
 #include "gpu/ps4/draw_state.h"
@@ -26,15 +35,6 @@
 #include "gpu/ps4/liverpool.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/render/renderer.h"
-#include <base/threading/thread.h>
-#include <base/atomic.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/time/time.h>
-#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
@@ -70,8 +70,8 @@ u32 g_presented_frames = 0;
 
 // Latched by the IT_* packets that precede a draw and consumed by it.
 struct IndexState {
-  u32 type = 0;  // VGT_DMA_INDEX_TYPE[1:0]: 0 = 16-bit, 1 = 32-bit
-  u64 base = 0;  // IT_INDEX_BASE (DRAW_INDEX_2 carries its own)
+  u32 type = 0;           // VGT_DMA_INDEX_TYPE[1:0]: 0 = 16-bit, 1 = 32-bit
+  u64 base = 0;           // IT_INDEX_BASE (DRAW_INDEX_2 carries its own)
   u64 indirect_base = 0;  // IT_SET_BASE(1): where indirect args live
   u32 num_instances = 1;  // IT_NUM_INSTANCES, for the following draw(s)
 };
@@ -135,8 +135,7 @@ void WriteLabel(u64 address, u64 value, bool is_64bit) {
   if (is_64bit)
     *reinterpret_cast<volatile u64*>(address) = value;
   else
-    *reinterpret_cast<volatile u32*>(address) =
-        static_cast<u32>(value);
+    *reinterpret_cast<volatile u32*>(address) = static_cast<u32>(value);
 }
 
 // EOP/RELEASE_MEM DATA_SEL 3 (GPU clock) and 4 (system clock) tell the GPU to
@@ -147,8 +146,7 @@ void WriteLabel(u64 address, u64 value, bool is_64bit) {
 // reads as "already complete". Without this Doom64's per-frame submit-done wait
 // (a spin with a hard 2s timeout) burns the full 2s every frame -> ~0.5 fps.
 u64 GpuClockTimestamp() {
-  return static_cast<u64>(
-      (base::TickClock::NowNs()));
+  return static_cast<u64>((base::TickClock::NowNs()));
 }
 
 // INT_SEL asks the CP to raise an end-of-pipe interrupt once the write lands
@@ -156,6 +154,7 @@ u64 GpuClockTimestamp() {
 // the graphics-core equeue event a title's fence bookkeeping runs off, so the
 // label write alone is only half the packet. GTA:SA's async-compute ring is
 // RELEASE_MEM with INT_SEL=3 throughout.
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe();
 
 // The label write shared by EOP and RELEASE_MEM, which encode DATA_SEL the same
@@ -177,6 +176,7 @@ void WriteEventLabel(const char* packet,
     WriteLabel(address, GpuClockTimestamp(), true);
   TraceLabelWrite(packet, address, data_sel, value);
   if (int_sel)
+    // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
     prosperity_gpu_end_of_pipe();
 }
 
@@ -262,7 +262,8 @@ const volatile u32* WaitRegMemTarget(const u32* body) {
     // Only where we are the producer. A poll on a word nothing of ours writes
     // can never be satisfied, and waiting out its timeout is pure loss.
     if (IsGuestAddress(address) && g_fence_labels.Contains(address) &&
-        host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(address), 4))
+        host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(address),
+                                         4))
       return reinterpret_cast<const volatile u32*>(address);
     return nullptr;
   }
@@ -282,8 +283,7 @@ void HandleWaitRegMem(const u32* body, u32 count) {
   // Bounded, because a producer can still be one we dropped and an unbounded
   // poll would hang the title outright. Yield rather than spin: the thread that
   // will satisfy this needs the core.
-  const auto deadline =
-      base::TimeTicks::Now() + base::Microseconds(200);
+  const auto deadline = base::TimeTicks::Now() + base::Microseconds(200);
   bool timed_out = false;
   while (!passes(*polled)) {
     if (base::TimeTicks::Now() >= deadline) {
@@ -300,18 +300,14 @@ void HandleWaitRegMem(const u32* body, u32 count) {
 // addresses stay zero and the 3D world samples blank textures. ctrl word:
 // SRC_SEL[30:29], DST_SEL[21:20]; sel 0/3 = memory address, 2 = immediate data
 // (a fill, not a copy); only true mem->mem is copied.
-void HandleDmaData(render::Renderer& renderer,
-                   const u32* body,
-                   u32 count) {
+void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
   if (count < 6)
     return;
   const u32 control = body[0];
   const u32 src_sel = (control >> 29) & 0x3;
   const u32 dst_sel = (control >> 20) & 0x3;
-  const u64 src =
-      (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
-  const u64 dst =
-      (static_cast<u64>(body[4] & 0xFFFF) << 32) | body[3];
+  const u64 src = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
+  const u64 dst = (static_cast<u64>(body[4] & 0xFFFF) << 32) | body[3];
   const u32 bytes = body[5] & 0x1FFFFF;
   const bool src_is_memory = src_sel == 0 || src_sel == 3;
   const bool dst_is_memory = dst_sel == 0 || dst_sel == 3;
@@ -345,8 +341,8 @@ void HandleDmaData(render::Renderer& renderer,
     copied = true;
   }
   // src_sel 2 = the packet's own dword, repeated: a fill. GNM clears surfaces
-  // and their CMASK/HTILE metadata this way, so apply it to guest memory and let
-  // the renderer clear any target it covers.
+  // and their CMASK/HTILE metadata this way, so apply it to guest memory and
+  // let the renderer clear any target it covers.
   if (!kNoCopy && src_sel == 2 && dst_is_memory && bytes &&
       bytes <= 0x8000000u && addressable(dst) && addressable(dst + bytes)) {
     render::ApplyMemoryFill(renderer, dst, bytes, body[1]);
@@ -373,8 +369,7 @@ void HandleWriteData(const u32* body, u32 count) {
   const u64 address =
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
   const u32 dwords = count - 3;
-  if (IsLabelAddress(address) &&
-      IsLabelAddress(address + (u64)dwords * 4)) {
+  if (IsLabelAddress(address) && IsLabelAddress(address + (u64)dwords * 4)) {
     std::memcpy(reinterpret_cast<void*>(address), &body[3], (size_t)dwords * 4);
     g_fence_labels.Note(address);
   }
@@ -391,9 +386,8 @@ void HandleEventWriteEop(const u32* body, u32 count) {
     return;
   const u64 address =
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
-  const u64 value =
-      static_cast<u64>(body[3]) |
-      (static_cast<u64>(count >= 5 ? body[4] : 0) << 32);
+  const u64 value = static_cast<u64>(body[3]) |
+                    (static_cast<u64>(count >= 5 ? body[4] : 0) << 32);
   WriteEventLabel("EOP", address, (body[2] >> 29) & 0x7, value,
                   (body[2] >> 24) & 0x3);
 }
@@ -408,9 +402,8 @@ void HandleReleaseMem(const u32* body, u32 count) {
     return;
   const u64 address =
       (static_cast<u64>(body[3] & 0xFFFF) << 32) | (body[2] & ~0x3u);
-  const u64 value =
-      static_cast<u64>(body[4]) |
-      (static_cast<u64>(count >= 6 ? body[5] : 0) << 32);
+  const u64 value = static_cast<u64>(body[4]) |
+                    (static_cast<u64>(count >= 6 ? body[5] : 0) << 32);
   WriteEventLabel("RELEASE_MEM", address, (body[1] >> 29) & 0x7, value,
                   (body[1] >> 24) & 0x7);
 }
@@ -450,7 +443,8 @@ void HandleEventWrite(const u32* body, u32 count) {
   constexpr u32 kRenderBackends = 8;
   const u64 span = static_cast<u64>(kRenderBackends) * 16;
   if (!IsGuestRange(address, span) ||
-      !host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(address), span))
+      !host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(address),
+                                        span))
     return;
   static base::Atomic<u64> samples{0};
   const u64 value = (1ull << 63) | (samples.fetch_add(1) + 1);
@@ -589,8 +583,7 @@ bool ResolveIndirectBuffer(const u32* body,
   out_dwords = 0;
   if (count < 3)
     return false;
-  const u64 address =
-      (static_cast<u64>(body[1] & 0xFF) << 32) | body[0];
+  const u64 address = (static_cast<u64>(body[1] & 0xFF) << 32) | body[0];
   const u32 dwords = body[2] & 0xFFFFF;
   const u64 bytes = static_cast<u64>(dwords) * 4;
   if (!IsGuestRange(address, bytes))
@@ -607,18 +600,15 @@ bool ResolveIndirectBuffer(const u32* body,
 }
 
 u32 WalkDcb(render::Renderer& renderer,
-                 const u32* p,
-                 u32 words,
-                 u32 depth,
-                 bool dump);
+            const u32* p,
+            u32 words,
+            u32 depth,
+            bool dump);
 
 // Walk one CCB (CE stream), recursing into any chained indirect buffers at
 // `depth`. The CE runs ahead of the draw engine: it fills its on-chip RAM and
 // dumps it to the guest memory the DE's draws then read as constant buffers.
-void WalkCcb(render::Renderer& renderer,
-             const u32* p,
-             u32 words,
-             u32 depth) {
+void WalkCcb(render::Renderer& renderer, const u32* p, u32 words, u32 depth) {
   u32 i = 0;
   while (i < words) {
     const u32 hdr = p[i];
@@ -661,9 +651,9 @@ void WalkCcb(render::Renderer& renderer,
           static int shown = 0;
           if (CeTraceOn() && shown < 6) {
             shown++;
-            BASE_LOGI("ce", "load raw count={} body={:08x} {:08x} {:08x} {:08x}",
-                      count, body[0], body[1], body[2],
-                      count > 3 ? body[3] : 0u);
+            BASE_LOGI(
+                "ce", "load raw count={} body={:08x} {:08x} {:08x} {:08x}",
+                count, body[0], body[1], body[2], count > 3 ? body[3] : 0u);
           }
         }
         const u64 address =
@@ -674,12 +664,11 @@ void WalkCcb(render::Renderer& renderer,
         if (in_guest && fits)
           g_const_ram.Write(offset, reinterpret_cast<const void*>(address),
                             dwords);
-        TraceConstRam(
-            "load", offset, dwords, address,
-            !in_guest ? "addr-not-guest"
-            : !fits   ? "off+n>ceram"
-                      : "ok",
-            in_guest ? *reinterpret_cast<const u32*>(address) : 0);
+        TraceConstRam("load", offset, dwords, address,
+                      !in_guest ? "addr-not-guest"
+                      : !fits   ? "off+n>ceram"
+                                : "ok",
+                      in_guest ? *reinterpret_cast<const u32*>(address) : 0);
         break;
       }
       case IT_DUMP_CONST_RAM:
@@ -730,10 +719,10 @@ void WalkCcb(render::Renderer& renderer,
 // chained IT_INDIRECT_BUFFER at `depth`. Returns the walk position (dwords
 // consumed) so the top-level caller can report how far it got.
 u32 WalkDcb(render::Renderer& renderer,
-                 const u32* p,
-                 u32 words,
-                 u32 depth,
-                 bool dump) {
+            const u32* p,
+            u32 words,
+            u32 depth,
+            bool dump) {
   const bool time_packets = WantPacketCost();
   u32 i = 0;
   while (i < words) {
@@ -775,9 +764,8 @@ u32 WalkDcb(render::Renderer& renderer,
     const u32 count = Pm4Count(hdr);  // body dword count
     const u32* body = &p[i + 1];
     NotePacket(op);
-    const auto op_start = time_packets
-                              ? base::TimeTicks::Now()
-                              : base::TimeTicks{};
+    const auto op_start =
+        time_packets ? base::TimeTicks::Now() : base::TimeTicks{};
     if (dump)
       TraceDcbPacket(i, op, count);
     if (i + 1 + count > words)
@@ -805,8 +793,7 @@ u32 WalkDcb(render::Renderer& renderer,
         break;
       case IT_INDEX_BASE:  // index buffer base (byte address) lo/hi
         if (count >= 2)
-          g_index.base =
-              (static_cast<u64>(body[1] & 0xFF) << 32) | body[0];
+          g_index.base = (static_cast<u64>(body[1] & 0xFF) << 32) | body[0];
         break;
       case IT_SET_BASE:
         // base_index 1 = DRAW_INDIRECT_BASE: where the indirect draws read
@@ -900,8 +887,8 @@ u32 WalkDcb(render::Renderer& renderer,
         break;
     }
     if (time_packets)
-      NotePacketCost(op, ((
-                             base::TimeTicks::Now() - op_start).InMicroseconds() * 1000));
+      NotePacketCost(
+          op, ((base::TimeTicks::Now() - op_start).InMicroseconds() * 1000));
     i += 1 + count;
   }
   return i;
@@ -978,11 +965,10 @@ void PrefetchWalk(Regs& regs, const u32* p, u32 words, u32 depth) {
 // second submit thread blocked behind the first is time the guest is stalled on
 // us either way.
 struct ScopedWalkTimer {
-  base::TimeTicks start =
-      base::TimeTicks::Now();
+  base::TimeTicks start = base::TimeTicks::Now();
   ~ScopedWalkTimer() {
-    render::g_ns_dcb += ((
-                         base::TimeTicks::Now() - start).InMicroseconds() * 1000);
+    render::g_ns_dcb +=
+        ((base::TimeTicks::Now() - start).InMicroseconds() * 1000);
     render::g_dcb_n++;
   }
 };
@@ -1053,8 +1039,8 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   // one says "make the walk faster", the other "stop serialising the threads".
   const auto lock_start = base::TimeTicks::Now();
   base::LockGuard<base::Mutex> lock(g_mutex);
-  render::g_ns_dcb_lock += ((
-                            base::TimeTicks::Now() - lock_start).InMicroseconds() * 1000);
+  render::g_ns_dcb_lock +=
+      ((base::TimeTicks::Now() - lock_start).InMicroseconds() * 1000);
 
   render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);

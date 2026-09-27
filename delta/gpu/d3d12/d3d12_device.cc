@@ -4,21 +4,21 @@
 
 #include <cstring>
 
-#include <base/logging.h>
+#include "base/logging.h"
 
 // The IID constants are defined here and only here (dxguid on Windows).
 #if !defined(_WIN32)
 #define INITGUID
 #endif
+#include "base/algorithm.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 #include "gpu/d3d12/d3d12_internal.h"
-#include <base/algorithm.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
 
 namespace gpu::d3d12 {
 
@@ -84,9 +84,15 @@ base::String PackSampler(const rhi::SamplerDesc& d) {
   auto put = [&](const void* p, size_t n) {
     key.append(static_cast<const char*>(p), n);
   };
-  const u8 e[] = {u8(d.mag),       u8(d.min),       u8(d.mip),
-                  u8(d.address_u), u8(d.address_v), u8(d.address_w),
-                  u8(d.compare_enable), u8(d.compare), u8(d.border)};
+  const u8 e[] = {u8(d.mag),
+                  u8(d.min),
+                  u8(d.mip),
+                  u8(d.address_u),
+                  u8(d.address_v),
+                  u8(d.address_w),
+                  u8(d.compare_enable),
+                  u8(d.compare),
+                  u8(d.border)};
   put(e, sizeof(e));
   put(&d.lod_bias, 4);
   put(&d.min_lod, 4);
@@ -143,9 +149,8 @@ bool CpuDescriptorPool::Allocate(u32 count, CpuRange* out) {
   hd.Type = type_;
   hd.NumDescriptors = page_size_;
   Page page;
-  if (FAILED(device_->CreateDescriptorHeap(&hd, IID_ID3D12DescriptorHeap,
-                                           reinterpret_cast<void**>(
-                                               &page.heap))))
+  if (FAILED(device_->CreateDescriptorHeap(
+          &hd, IID_ID3D12DescriptorHeap, reinterpret_cast<void**>(&page.heap))))
     return false;
   page.start = page.heap->GetCPUDescriptorHandleForHeapStart();
   page.free[0] = page_size_;
@@ -230,13 +235,12 @@ bool D3D12Device::Init(const D3D12Options& options) {
     base::String name;
     for (const WCHAR* c = ad.Description; *c; c++)
       name += *c < 128 ? static_cast<char>(*c) : '?';
-    const bool wanted =
-        !(ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
-        (!options.gpu_filter || name.find(options.gpu_filter) != base::String::npos);
-    if (wanted &&
-        SUCCEEDED(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0,
-                                    IID_ID3D12Device,
-                                    reinterpret_cast<void**>(&device))))
+    const bool wanted = !(ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+                        (!options.gpu_filter ||
+                         name.find(options.gpu_filter) != base::String::npos);
+    if (wanted && SUCCEEDED(D3D12CreateDevice(
+                      adapter, D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device,
+                      reinterpret_cast<void**>(&device))))
       device_name_ = name;
     adapter->Release();
   }
@@ -257,8 +261,7 @@ bool D3D12Device::Init(const D3D12Options& options) {
     device = nullptr;
   if (device) {
     VkPhysicalDeviceProperties props{};
-    vkGetPhysicalDeviceProperties(vkd3d_get_vk_physical_device(device),
-                                  &props);
+    vkGetPhysicalDeviceProperties(vkd3d_get_vk_physical_device(device), &props);
     device_name_ = base::String("vkd3d: ") + props.deviceName;
   }
 #endif
@@ -274,8 +277,8 @@ bool D3D12Device::Init(const D3D12Options& options) {
     BASE_LOGI("gpud3d12", "device has no shader model 6");
     return false;
   }
-  shader_model_ = (sm.HighestShaderModel >> 4) * 10 +
-                  (sm.HighestShaderModel & 0xf);
+  shader_model_ =
+      (sm.HighestShaderModel >> 4) * 10 + (sm.HighestShaderModel & 0xf);
   D3D12_FEATURE_DATA_D3D12_OPTIONS1 o1{};
   device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &o1, sizeof(o1));
   D3D12_FEATURE_DATA_D3D12_OPTIONS3 o3{};
@@ -309,10 +312,9 @@ bool D3D12Device::Init(const D3D12Options& options) {
   sd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
   sd.NumDescriptors = kSamplerHeapSize;
   sd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-  if (!ring_heap ||
-      FAILED(device->CreateDescriptorHeap(
-          &sd, IID_ID3D12DescriptorHeap,
-          reinterpret_cast<void**>(&sampler_heap))))
+  if (!ring_heap || FAILED(device->CreateDescriptorHeap(
+                        &sd, IID_ID3D12DescriptorHeap,
+                        reinterpret_cast<void**>(&sampler_heap))))
     return false;
   ring_cpu_ = ring_heap->GetCPUDescriptorHandleForHeapStart();
   ring_gpu_ = ring_heap->GetGPUDescriptorHandleForHeapStart();
@@ -349,9 +351,8 @@ bool D3D12Device::Init(const D3D12Options& options) {
   debug_labels = options.debug_labels;
   caps_.timestamps = frequency != 0;
   caps_.timestamp_period_ns = frequency ? 1e9 / double(frequency) : 1.0;
-  caps_.subgroup_size = o1.WaveOps && o1.WaveLaneCountMin
-                            ? o1.WaveLaneCountMin
-                            : 32;
+  caps_.subgroup_size =
+      o1.WaveOps && o1.WaveLaneCountMin ? o1.WaveLaneCountMin : 32;
   caps_.max_dynamic_uniform_buffers = 8;
   caps_.max_dynamic_storage_buffers = 4;
   caps_.max_storage_buffers_per_stage = 64;
@@ -365,16 +366,15 @@ bool D3D12Device::Init(const D3D12Options& options) {
   caps_.dispatch_base = true;  // an id offset in the lowered shader
   caps_.max_compute_resources = 64;
   caps_.texture_blit = InitBlit();
-  BASE_LOGI("gpud3d12", "device: {} (shader model {}.{})",
-            device_name_.c_str(), shader_model_ / 10, shader_model_ % 10);
+  BASE_LOGI("gpud3d12", "device: {} (shader model {}.{})", device_name_.c_str(),
+            shader_model_ / 10, shader_model_ % 10);
   return true;
 }
 
-ID3D12Resource* D3D12Device::CreateBufferResource(
-    u64 size,
-    D3D12_HEAP_TYPE heap,
-    D3D12_RESOURCE_FLAGS flags,
-    D3D12_RESOURCE_STATES state) {
+ID3D12Resource* D3D12Device::CreateBufferResource(u64 size,
+                                                  D3D12_HEAP_TYPE heap,
+                                                  D3D12_RESOURCE_FLAGS flags,
+                                                  D3D12_RESOURCE_STATES state) {
   D3D12_HEAP_PROPERTIES hp{};
   hp.Type = heap;
   D3D12_RESOURCE_DESC rd{};
@@ -431,7 +431,7 @@ rhi::Buffer* D3D12Device::CreateBuffer(const rhi::BufferDesc& desc) {
     const D3D12_RANGE none{0, 0};
     if (SUCCEEDED(buffer->resource->Map(
             0, heap == D3D12_HEAP_TYPE_UPLOAD ? &none : nullptr, &p)))
-      buffer->set_mapped(static_cast<u8*>(p));
+      buffer->SetMapped(static_cast<u8*>(p));
   }
   if (desc.name)
     SetName(&*buffer, desc.name);
@@ -446,19 +446,17 @@ rhi::Texture* D3D12Device::CreateTexture(const rhi::TextureDesc& desc) {
   auto texture = base::MakeUnique<D3D12Texture>(desc);
   const bool depth = info.is_depth || info.is_stencil;
   D3D12_RESOURCE_DESC rd{};
-  rd.Dimension = desc.dim == rhi::TextureDim::k1D
-                     ? D3D12_RESOURCE_DIMENSION_TEXTURE1D
-                 : desc.dim == rhi::TextureDim::k3D
-                     ? D3D12_RESOURCE_DIMENSION_TEXTURE3D
-                     : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  rd.Dimension =
+      desc.dim == rhi::TextureDim::k1D   ? D3D12_RESOURCE_DIMENSION_TEXTURE1D
+      : desc.dim == rhi::TextureDim::k3D ? D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                         : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   rd.Width = desc.width;
   rd.Height = desc.dim == rhi::TextureDim::k1D ? 1 : desc.height;
   rd.DepthOrArraySize = static_cast<UINT16>(
       desc.dim == rhi::TextureDim::k3D ? desc.depth : desc.layers);
   rd.MipLevels = static_cast<UINT16>(desc.mips);
-  rd.Format = depth || (desc.usage & rhi::kTextureMutableFormat)
-                  ? fi.typeless
-                  : fi.format;
+  rd.Format = depth || (desc.usage & rhi::kTextureMutableFormat) ? fi.typeless
+                                                                 : fi.format;
   rd.SampleDesc.Count = 1;
   rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
   if (depth) {
@@ -468,8 +466,8 @@ rhi::Texture* D3D12Device::CreateTexture(const rhi::TextureDesc& desc) {
     // BlitTexture can draw into a copy destination.
     D3D12_FEATURE_DATA_FORMAT_SUPPORT fs{fi.format};
     const bool renderable =
-        SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
-                                              &fs, sizeof(fs))) &&
+        SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs,
+                                              sizeof(fs))) &&
         (fs.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET);
     if ((desc.usage & rhi::kTextureColorTarget) ||
         (renderable && (desc.usage & rhi::kTextureCopyDst)))
@@ -545,7 +543,7 @@ rhi::TextureView* D3D12Device::CreateView(rhi::Texture* texture,
       case rhi::ViewDim::k2DArray:
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
         sv.Texture2DArray = {desc.base_mip, desc.mips, desc.base_layer,
-                             desc.layers, plane, 0.0f};
+                             desc.layers,   plane,     0.0f};
         break;
       case rhi::ViewDim::kCube:
         if (desc.base_layer == 0) {
@@ -675,15 +673,15 @@ rhi::Sampler* D3D12Device::CreateSampler(const rhi::SamplerDesc& desc) {
   sd.AddressV = ToAddress(desc.address_v);
   sd.AddressW = ToAddress(desc.address_w);
   sd.MipLODBias = base::Clamp(desc.lod_bias, D3D12_MIP_LOD_BIAS_MIN,
-                             D3D12_MIP_LOD_BIAS_MAX);
-  sd.MaxAnisotropy =
-      aniso ? base::Min<u32>(D3D12_MAX_MAXANISOTROPY,
-                            static_cast<u32>(desc.max_anisotropy))
-            : 1u;
+                              D3D12_MIP_LOD_BIAS_MAX);
+  sd.MaxAnisotropy = aniso
+                         ? base::Min<u32>(D3D12_MAX_MAXANISOTROPY,
+                                          static_cast<u32>(desc.max_anisotropy))
+                         : 1u;
   sd.ComparisonFunc = static_cast<D3D12_COMPARISON_FUNC>(
       desc.compare_enable ? u32(desc.compare) + 1 : 1);
-  const float border = desc.border == rhi::BorderColor::kOpaqueWhite ? 1.0f
-                                                                      : 0.0f;
+  const float border =
+      desc.border == rhi::BorderColor::kOpaqueWhite ? 1.0f : 0.0f;
   sd.BorderColor[0] = sd.BorderColor[1] = sd.BorderColor[2] = border;
   sd.BorderColor[3] =
       desc.border == rhi::BorderColor::kTransparentBlack ? 0.0f : 1.0f;
@@ -777,9 +775,9 @@ rhi::BindGroupLayout* D3D12Device::CreateBindGroupLayout(
       layout->dynamic_entries.push_back(i);
   }
   base::Sort(layout->dynamic_entries.begin(), layout->dynamic_entries.end(),
-            [&](u32 a, u32 b) {
-              return layout->entries[a].binding < layout->entries[b].binding;
-            });
+             [&](u32 a, u32 b) {
+               return layout->entries[a].binding < layout->entries[b].binding;
+             });
   for (u32 d = 0; d < layout->dynamic_entries.size(); d++)
     layout->entries[layout->dynamic_entries[d]].dynamic_index = d;
   return gpu::rhi::Release(layout);
@@ -943,12 +941,12 @@ void D3D12Device::UpdateBindGroup(rhi::BindGroup* bind_group,
       case rhi::BindingType::kStorageBufferDynamic:
         group->dynamic[e->dynamic_index] = w;
         group->uses[index] = {
-            buffer,
-            e->type == rhi::BindingType::kUniformBufferDynamic
-                ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
-            : e->read_only ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
-                           : D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+            buffer, e->type == rhi::BindingType::kUniformBufferDynamic
+                        ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
+                    : e->read_only
+                        ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                        : D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
         break;
     }
   }
@@ -962,9 +960,9 @@ rhi::TimestampPool* D3D12Device::CreateTimestampPool(u32 count) {
   if (FAILED(device->CreateQueryHeap(&qd, IID_ID3D12QueryHeap,
                                      reinterpret_cast<void**>(&pool->heap))))
     return nullptr;
-  pool->readback = CreateBufferResource(u64(count) * 8, D3D12_HEAP_TYPE_READBACK,
-                                        D3D12_RESOURCE_FLAG_NONE,
-                                        D3D12_RESOURCE_STATE_COPY_DEST);
+  pool->readback = CreateBufferResource(
+      u64(count) * 8, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
+      D3D12_RESOURCE_STATE_COPY_DEST);
   void* p = nullptr;
   if (!pool->readback || FAILED(pool->readback->Map(0, nullptr, &p))) {
     SafeRelease(pool->heap);
@@ -1081,8 +1079,9 @@ D3D12_RESOURCE_STATES D3D12Device::TextureState(const D3D12Texture* texture,
       return D3D12_RESOURCE_STATE_DEPTH_WRITE;
     case rhi::TextureState::kDepthRead:
       return D3D12_RESOURCE_STATE_DEPTH_READ |
-             ((texture->desc().usage & rhi::kTextureSampled) ? kRead
-                                                             : D3D12_RESOURCE_STATE_COMMON);
+             ((texture->desc().usage & rhi::kTextureSampled)
+                  ? kRead
+                  : D3D12_RESOURCE_STATE_COMMON);
     case rhi::TextureState::kShaderRead:
       return kRead;
     case rhi::TextureState::kCopySrc:
@@ -1125,8 +1124,8 @@ bool D3D12Device::Wait(u64 submission, u64 timeout_ns) {
 #if defined(_WIN32)
   HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (SUCCEEDED(fence_->SetEventOnCompletion(submission, event)))
-    done = WaitForSingleObject(event, ms == ~0u ? INFINITE : ms) ==
-           WAIT_OBJECT_0;
+    done =
+        WaitForSingleObject(event, ms == ~0u ? INFINITE : ms) == WAIT_OBJECT_0;
   CloseHandle(event);
 #else
   HANDLE event = vkd3d_create_event();
@@ -1166,7 +1165,8 @@ void D3D12Device::ReportDeviceLoss() {
 
 }  // namespace impl
 
-base::UniquePointer<rhi::Device> CreateD3D12Device(const D3D12Options& options) {
+base::UniquePointer<rhi::Device> CreateD3D12Device(
+    const D3D12Options& options) {
   auto device = base::MakeUnique<D3D12Device>();
   if (!device->Init(options))
     return nullptr;

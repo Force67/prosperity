@@ -3,20 +3,20 @@
  */
 #pragma once
 
-#include <sys/syscall.h>
-#include "base/arch.h"
-#include "gpu/guest_page_table.h"
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
 #include <limits>
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/containers/hash_map.h>
+#include "base/arch.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "gpu/guest_page_table.h"
 
 namespace gpu {
 
@@ -46,14 +46,14 @@ inline bool IsReadableMapping(u64 address, u64 bytes) {
 inline bool IsReadableRange(u64 address, u64 bytes) {
   if (!bytes || address > std::numeric_limits<u64>::max() - bytes)
     return false;
-  static const long page_size = sysconf(_SC_PAGESIZE);
-  if (page_size <= 0)
+  static const long kPageSize = sysconf(_SC_PAGESIZE);
+  if (kPageSize <= 0)
     return false;
   // getpid() is a real syscall on Linux and this asks the same answer every
   // time; the probe below is already three of them.
-  static const pid_t self = getpid();
+  static const pid_t kSelf = getpid();
 
-  const u64 page = static_cast<u64>(page_size);
+  const u64 page = static_cast<u64>(kPageSize);
   const u64 end = address + bytes;
 
   // Read-probe the first and last page. This is what catches a range that is
@@ -71,7 +71,7 @@ inline bool IsReadableRange(u64 address, u64 bytes) {
   for (u32 attempt = 0; attempt < 2 && read != static_cast<ssize_t>(count);
        attempt++) {
     do {
-      read = syscall(SYS_process_vm_readv, self, &local, 1, remote, count, 0);
+      read = syscall(SYS_process_vm_readv, kSelf, &local, 1, remote, count, 0);
     } while (read < 0 && errno == EINTR);
   }
   if (read != static_cast<ssize_t>(count))
@@ -112,10 +112,12 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
   constexpr u64 kPageShift = GuestPageTable::kPageShift;
   // Longer spans go through the exact-address cache below.
   constexpr u64 kMaxPagedSpan = 64;
-  const u32 gen = static_cast<u32>(MemoryGeneration()) & ~GuestPageTable::kUnreadable;
-  const bool paged = bytes && address <= std::numeric_limits<u64>::max() - bytes &&
-                     ((address + bytes - 1) >> kPageShift) - (address >> kPageShift) <
-                         kMaxPagedSpan;
+  const u32 gen =
+      static_cast<u32>(MemoryGeneration()) & ~GuestPageTable::kUnreadable;
+  const bool paged =
+      bytes && address <= std::numeric_limits<u64>::max() - bytes &&
+      ((address + bytes - 1) >> kPageShift) - (address >> kPageShift) <
+          kMaxPagedSpan;
   const u64 first = address >> kPageShift;
   const u64 last = paged ? (address + bytes - 1) >> kPageShift : 0;
   GuestPageTable& table = GuestPages();

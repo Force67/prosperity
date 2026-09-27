@@ -4,7 +4,7 @@
 
 #include "gpu/opengl/gl_shader_lowering.h"
 
-#include <base/strings/format.h>
+#include "base/strings/format.h"
 
 #include <spirv_glsl.hpp>
 
@@ -29,7 +29,8 @@ class Lowerer : public spirv_cross::CompilerGLSL {
   bool Std140(u32 type_id) {
     const SPIRType& t = get<SPIRType>(type_id);
     return buffer_is_packing_standard(t, spirv_cross::BufferPackingStd140) ||
-           buffer_is_packing_standard(t, spirv_cross::BufferPackingStd140EnhancedLayout);
+           buffer_is_packing_standard(
+               t, spirv_cross::BufferPackingStd140EnhancedLayout);
   }
 
   // 'f', 'i' or 'u' when every scalar in the block has that type.
@@ -100,7 +101,7 @@ class Lowerer : public spirv_cross::CompilerGLSL {
     CompilerGLSL::emit_subgroup_op(instr);
     options.vulkan_semantics = false;
   }
-  void set_khr_subgroup(bool on) { khr_subgroup_ = on; }
+  void SetKhrSubgroup(bool on) { khr_subgroup_ = on; }
 
   void AddDispatchBase() {
     dispatch_base_ = true;
@@ -169,8 +170,8 @@ class Lowerer : public spirv_cross::CompilerGLSL {
     const std::string result = to_expression(ops[1]);
     const std::string hi = result + "_hi", lo = result + "_lo";
     statement(t, " ", hi, ", ", lo, ";");
-    statement(op == spv::OpSMulExtended ? "imulExtended(" : "umulExtended(",
-              t, "(", to_unpacked_expression(ops[2]), "), ", t, "(",
+    statement(op == spv::OpSMulExtended ? "imulExtended(" : "umulExtended(", t,
+              "(", to_unpacked_expression(ops[2]), "), ", t, "(",
               to_unpacked_expression(ops[3]), "), ", hi, ", ", lo, ");");
     statement(result, ".", to_member_name(type, 0), " = ", m, "(", lo, ");");
     statement(result, ".", to_member_name(type, 1), " = ", m, "(", hi, ");");
@@ -273,16 +274,16 @@ void ReplaceAll(std::string& s, const char* from, const char* to) {
 // GL orders the vertices of an odd triangle in a strip (i+1, i, i+2), Vulkan
 // (i, i+2, i+1): remap the barycentrics and per-vertex inputs to Vulkan's.
 void ReorderStripVertices(std::string& s) {
-  static const std::regex decl(
+  static const std::regex kDecl(
       R"((layout\(location = \d+\) (?:flat )?pervertexEXT in )(\w+) (\w+)\[3\];)");
   std::string globals, init;
   std::smatch m;
-  for (auto from = s.cbegin(); std::regex_search(from, s.cend(), m, decl);) {
+  for (auto from = s.cbegin(); std::regex_search(from, s.cend(), m, kDecl);) {
     const std::string type = m[2], name = m[3];
     globals += type + " " + name + "[3];\n";
     init += "    " + name + " = delta_odd ? " + type + "[3](" + name +
-            "_strip[1], " + name + "_strip[2], " + name + "_strip[0]) : " +
-            name + "_strip;\n";
+            "_strip[1], " + name + "_strip[2], " + name +
+            "_strip[0]) : " + name + "_strip;\n";
     const size_t at = m.position(0) + (from - s.cbegin());
     const std::string replaced =
         m[1].str() + type + " " + name + "_strip[3];\n";
@@ -295,8 +296,8 @@ void ReorderStripVertices(std::string& s) {
     const std::string local = std::string("delta_") + (builtin + 3);
     ReplaceAll(s, builtin, local.c_str());
     globals += "vec3 " + local + ";\n";
-    init += "    " + local + " = delta_odd ? " + builtin + ".yzx : " +
-            builtin + ";\n";
+    init += "    " + local + " = delta_odd ? " + builtin + ".yzx : " + builtin +
+            ";\n";
   }
   const size_t main = s.find("void main()\n{\n");
   if (init.empty() || main == std::string::npos)
@@ -359,13 +360,12 @@ bool LowerProgram(const StageCode* stages,
     std::map<u64, Use> uses;
     for (u32 i = 0; i < count; i++) {
       Stage& s = parsed[i];
-      s.compiler = std::make_unique<Lowerer>(stages[i].code.words,
-                                             stages[i].code.count);
+      s.compiler =
+          std::make_unique<Lowerer>(stages[i].code.words, stages[i].code.count);
       s.stage = StageOf(s.compiler->get_execution_model());
       s.dispatch_base =
           stages[i].dispatch_base && s.stage == rhi::kStageCompute;
-      s.strip_order =
-          stages[i].strip_order && s.stage == rhi::kStageFragment;
+      s.strip_order = stages[i].strip_order && s.stage == rhi::kStageFragment;
       if (!s.stage || s.stage != stages[i].stage) {
         *error = "unsupported or mismatched execution model";
         return false;
@@ -383,27 +383,28 @@ bool LowerProgram(const StageCode* stages,
         *error = "unsupported resource type";
         return false;
       }
-      auto note = [&](const spirv_cross::SmallVector<spirv_cross::Resource>&
-                          list,
-                      SlotKind kind) {
-        for (const auto& res : list) {
-          const u32 set = s.compiler->get_decoration(
-              res.id, spv::DecorationDescriptorSet);
-          const u32 binding =
-              s.compiler->get_decoration(res.id, spv::DecorationBinding);
-          Use& use = uses.try_emplace(Key(set, binding), Use{kind}).first->second;
-          if (use.kind != kind) {
-            *error = "one binding used as two resource kinds";
-            return false;
-          }
-          if (kind == SlotKind::kUniformBuffer &&
-              !s.compiler->Std140(res.base_type_id))
-            use.demoted = true;
-          if (s.compiler->PointerElement(res.base_type_id).empty())
-            use.spillable = false;
-        }
-        return true;
-      };
+      auto note =
+          [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list,
+              SlotKind kind) {
+            for (const auto& res : list) {
+              const u32 set = s.compiler->get_decoration(
+                  res.id, spv::DecorationDescriptorSet);
+              const u32 binding =
+                  s.compiler->get_decoration(res.id, spv::DecorationBinding);
+              Use& use =
+                  uses.try_emplace(Key(set, binding), Use{kind}).first->second;
+              if (use.kind != kind) {
+                *error = "one binding used as two resource kinds";
+                return false;
+              }
+              if (kind == SlotKind::kUniformBuffer &&
+                  !s.compiler->Std140(res.base_type_id))
+                use.demoted = true;
+              if (s.compiler->PointerElement(res.base_type_id).empty())
+                use.spillable = false;
+            }
+            return true;
+          };
       if (!note(r.uniform_buffers, SlotKind::kUniformBuffer) ||
           !note(r.storage_buffers, SlotKind::kStorageBuffer) ||
           !note(r.sampled_images, SlotKind::kTexture) ||
@@ -415,17 +416,18 @@ bool LowerProgram(const StageCode* stages,
     // become pointers in every stage.
     for (Stage& s : parsed) {
       std::vector<u64> keys;
-      auto collect = [&](const spirv_cross::SmallVector<spirv_cross::Resource>&
-                             list) {
-        for (const auto& res : list) {
-          const u64 key = Key(
-              s.compiler->get_decoration(res.id, spv::DecorationDescriptorSet),
-              s.compiler->get_decoration(res.id, spv::DecorationBinding));
-          const Use& use = uses[key];
-          if (use.kind == SlotKind::kStorageBuffer || use.demoted)
-            keys.push_back(key);
-        }
-      };
+      auto collect =
+          [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list) {
+            for (const auto& res : list) {
+              const u64 key = Key(
+                  s.compiler->get_decoration(res.id,
+                                             spv::DecorationDescriptorSet),
+                  s.compiler->get_decoration(res.id, spv::DecorationBinding));
+              const Use& use = uses[key];
+              if (use.kind == SlotKind::kStorageBuffer || use.demoted)
+                keys.push_back(key);
+            }
+          };
       collect(s.resources.uniform_buffers);
       collect(s.resources.storage_buffers);
       std::sort(keys.begin(), keys.end());
@@ -485,9 +487,9 @@ bool LowerProgram(const StageCode* stages,
       auto remap = [&](const spirv_cross::SmallVector<spirv_cross::Resource>&
                            list) {
         for (const auto& res : list) {
-          const Use& use = uses[Key(
-              c.get_decoration(res.id, spv::DecorationDescriptorSet),
-              c.get_decoration(res.id, spv::DecorationBinding))];
+          const Use& use =
+              uses[Key(c.get_decoration(res.id, spv::DecorationDescriptorSet),
+                       c.get_decoration(res.id, spv::DecorationBinding))];
           if (use.spilled) {
             if (!spills++) {
               c.require_extension("GL_NV_shader_buffer_load");
@@ -563,7 +565,7 @@ bool LowerProgram(const StageCode* stages,
         }
       }
       c.set_common_options(options);
-      c.set_khr_subgroup(features.khr_subgroup);
+      c.SetKhrSubgroup(features.khr_subgroup);
       std::string source = c.compile();
       if (spills)
         RewritePointerAtomics(source);

@@ -11,11 +11,11 @@
 
 #include "base/arch.h"
 
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/containers/hash_map.h>
 
 namespace gpu::rdna {
 
@@ -80,11 +80,12 @@ struct ScalarWrite {
   u32 count = 0;
 };
 
-// SGPRs an SOP1 writes, from the gfx10 opcode table (LLVM SOP1_Real_gfx10). RDNA
-// renumbered the block: the 64-bit saveexec family stays at 0x24-0x2b, gfx10 adds
-// wave32 forms at 0x3c-0x47 and four more 64-bit ones at 0x37-0x3b (incl.
-// s_andn1_saveexec_b64, used by Demon's Souls' G-buffer shaders). Reading one as a
-// single-dword write leaves the second SGPR passing for live user data.
+// SGPRs an SOP1 writes, from the gfx10 opcode table (LLVM SOP1_Real_gfx10).
+// RDNA renumbered the block: the 64-bit saveexec family stays at 0x24-0x2b,
+// gfx10 adds wave32 forms at 0x3c-0x47 and four more 64-bit ones at 0x37-0x3b
+// (incl. s_andn1_saveexec_b64, used by Demon's Souls' G-buffer shaders).
+// Reading one as a single-dword write leaves the second SGPR passing for live
+// user data.
 inline u32 Sop1WriteDwords(u32 op) {
   switch (op) {
     case 0x03:  // s_mov_b32
@@ -154,9 +155,8 @@ inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
   if (inst.enc == Enc::kSop1) {
     const u32 count = Sop1WriteDwords(inst.opcode);
     const u32 sdst = (inst.raw[0] >> 16) & 0x7F;
-    return sdst == 125 || !count
-               ? ScalarWrite{}
-               : ScalarWrite{.first = sdst, .count = count};
+    return sdst == 125 || !count ? ScalarWrite{}
+                                 : ScalarWrite{.first = sdst, .count = count};
   }
   if (inst.enc == Enc::kSop2) {
     const bool wide =
@@ -172,10 +172,10 @@ inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
   return {};
 }
 
-// Every SGPR an instruction may write, over-approximated; `exact` when ScalarEval
-// reproduces the value or clears the register. Wider than DecodeScalarWrite (which
-// covers scalar ALU only), so a clobbered register doesn't pass for user data;
-// scc_trusted gates s_cselect exactness.
+// Every SGPR an instruction may write, over-approximated; `exact` when
+// ScalarEval reproduces the value or clears the register. Wider than
+// DecodeScalarWrite (which covers scalar ALU only), so a clobbered register
+// doesn't pass for user data; scc_trusted gates s_cselect exactness.
 struct ScalarWrites {
   struct Range {
     u32 first = 0;
@@ -187,11 +187,11 @@ struct ScalarWrites {
 ScalarWrites PossibleScalarWrites(const gpu::gcn::Inst& inst,
                                   bool scc_trusted = false);
 
-// SGPRs whose live value ResolveBuffers reproduces faithfully: the replay walks in
-// order, so a use sees the LAST write before it; that is the wave's value only if
-// the write dominates the use, runs once per path, and ScalarEval models it. A
-// descriptor built from a register failing any of the three is declined, with the
-// reason reported.
+// SGPRs whose live value ResolveBuffers reproduces faithfully: the replay walks
+// in order, so a use sees the LAST write before it; that is the wave's value
+// only if the write dominates the use, runs once per path, and ScalarEval
+// models it. A descriptor built from a register failing any of the three is
+// declined, with the reason reported.
 struct ScalarReplayPlan {
   static constexpr u32 kRegs = 136;
   enum Loss : u8 {
@@ -221,9 +221,10 @@ struct ScalarReplayPlan {
   base::Vector<BackEdge> back_edges;
   base::Vector<u32> targets;
   bool indirect = false;  // s_setpc: control may reach anywhere from anywhere
-  // Dominators, not "a branch lands between": a descriptor is routinely built in one
-  // if-arm and used at the join. The question is whether the write DOMINATES the use
-  // (Astro Bot's frame is largely compute; the blunt test declined its biggest passes).
+  // Dominators, not "a branch lands between": a descriptor is routinely built
+  // in one if-arm and used at the join. The question is whether the write
+  // DOMINATES the use (Astro Bot's frame is largely compute; the blunt test
+  // declined its biggest passes).
   static constexpr u32 kNoBlock = ~0u;
   base::Vector<u32> block_of;  // instruction index -> block id
   base::Vector<u32> idom;      // block id -> immediate dominator (entry: self)
@@ -278,13 +279,13 @@ VBuffer DecodeVBuffer(const u32* dwords);
 bool PlausibleVBuffer(const VBuffer& v);
 
 // Resolve the live T#/S# each MIMG samples, in binding order. user_sgprs is
-// SPI_SHADER_PGM_RSRC2_*.USER_SGPR: a descriptor inline beyond that window is not
-// user data, just whatever the previous draw left in those registers.
+// SPI_SHADER_PGM_RSRC2_*.USER_SGPR: a descriptor inline beyond that window is
+// not user data, just whatever the previous draw left in those registers.
 base::Vector<gpu::gcn::TImage> TrackTextures(const u32* ps_code,
-                                            const u32* ps_user_data,
-                                            u32 user_sgprs,
-                                            u32 ud_base = 0,
-                                            u64 system_user_data_addr = 0);
+                                             const u32* ps_user_data,
+                                             u32 user_sgprs,
+                                             u32 ud_base = 0,
+                                             u64 system_user_data_addr = 0);
 
 // Resolve buffer bases and complete V#s at their consuming instruction PCs.
 base::HashMap<u32, BufferResource> ResolveBuffers(

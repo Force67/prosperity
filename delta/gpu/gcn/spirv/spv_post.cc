@@ -11,7 +11,7 @@
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gpu_perf.h"
 
-#include <base/logging.h>
+#include "base/logging.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -32,20 +32,20 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <options/options.h>
-#include <base/threading/thread.h>
-#include <base/containers/deque.h>
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/functional/function.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/memory/shared_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/threading/condition_variable.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/containers/hash_map.h>
+#include "base/containers/deque.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/functional/function.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/memory/shared_pointer.h"
+#include "base/strings/xstring.h"
+#include "base/threading/condition_variable.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
+#include "options/options.h"
 
 namespace gpu::gcn::spirv {
 
@@ -65,8 +65,8 @@ DELTA_OPTION(u32, kOptLevel, "DELTA_GPU_SPIRV_OPT", 2);
 base::Vector<u32> Optimize(const base::Vector<u32>& spv) {
   if (kOptLevel == 0)
     return spv;
-  const auto env = spv.size() > 1 && spv[1] >= 0x00010400u
-                       ? SPV_ENV_VULKAN_1_2 : SPV_ENV_VULKAN_1_1;
+  const auto env = spv.size() > 1 && spv[1] >= 0x00010400u ? SPV_ENV_VULKAN_1_2
+                                                           : SPV_ENV_VULKAN_1_1;
   spvtools::Optimizer opt(env);
   opt.SetMessageConsumer([](spv_message_level_t lvl, const char*,
                             const spv_position_t&, const char* msg) {
@@ -84,8 +84,8 @@ base::Vector<u32> Optimize(const base::Vector<u32>& spv) {
 }
 
 bool Validate(const base::Vector<u32>& spv, base::String* err) {
-  const auto env = spv.size() > 1 && spv[1] >= 0x00010400u
-                       ? SPV_ENV_VULKAN_1_2 : SPV_ENV_VULKAN_1_1;
+  const auto env = spv.size() > 1 && spv[1] >= 0x00010400u ? SPV_ENV_VULKAN_1_2
+                                                           : SPV_ENV_VULKAN_1_1;
   spv_context ctx = spvContextCreate(env);
   spv_diagnostic diag = nullptr;
   spv_const_binary_t bin{spv.data(), spv.size()};
@@ -128,7 +128,7 @@ u64 HashWords(const base::Vector<u32>& w) {
 
 // The cache directory, created on first use. Empty means "no cache".
 const base::String& CacheDir() {
-  static const base::String dir = [] {
+  static const base::String kDir = [] {
     if (!kShaderCache)
       return base::String();
     base::String d;
@@ -147,7 +147,7 @@ const base::String& CacheDir() {
         ::mkdir(d.substr(0, i).c_str(), 0755);
     return d;
   }();
-  return dir;
+  return kDir;
 }
 
 base::String EntryPath(u64 key) {

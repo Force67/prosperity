@@ -9,8 +9,7 @@
  */
 
 #include "base/arch.h"
-#include <base/containers/vector.h>
-
+#include "base/containers/vector.h"
 
 namespace gpu::rhi {
 
@@ -23,38 +22,88 @@ const char* BackendName(Backend backend);
 enum class Format : u16 {
   kUndefined,
   // 8-bit channels
-  kR8Unorm, kR8Snorm, kR8Uint, kR8Sint, kR8Uscaled, kR8Sscaled,
-  kRG8Unorm, kRG8Snorm, kRG8Uint, kRG8Sint, kRG8Uscaled, kRG8Sscaled,
-  kRGBA8Unorm, kRGBA8Snorm, kRGBA8Uint, kRGBA8Sint, kRGBA8Uscaled,
-  kRGBA8Sscaled, kRGBA8Srgb,
-  kBGRA8Unorm, kBGRA8Srgb,
+  kR8Unorm,
+  kR8Snorm,
+  kR8Uint,
+  kR8Sint,
+  kR8Uscaled,
+  kR8Sscaled,
+  kRG8Unorm,
+  kRG8Snorm,
+  kRG8Uint,
+  kRG8Sint,
+  kRG8Uscaled,
+  kRG8Sscaled,
+  kRGBA8Unorm,
+  kRGBA8Snorm,
+  kRGBA8Uint,
+  kRGBA8Sint,
+  kRGBA8Uscaled,
+  kRGBA8Sscaled,
+  kRGBA8Srgb,
+  kBGRA8Unorm,
+  kBGRA8Srgb,
   // 16-bit channels
-  kR16Unorm, kR16Snorm, kR16Uint, kR16Sint, kR16Uscaled, kR16Sscaled,
+  kR16Unorm,
+  kR16Snorm,
+  kR16Uint,
+  kR16Sint,
+  kR16Uscaled,
+  kR16Sscaled,
   kR16Float,
-  kRG16Unorm, kRG16Snorm, kRG16Uint, kRG16Sint, kRG16Uscaled, kRG16Sscaled,
+  kRG16Unorm,
+  kRG16Snorm,
+  kRG16Uint,
+  kRG16Sint,
+  kRG16Uscaled,
+  kRG16Sscaled,
   kRG16Float,
-  kRGBA16Unorm, kRGBA16Snorm, kRGBA16Uint, kRGBA16Sint, kRGBA16Uscaled,
-  kRGBA16Sscaled, kRGBA16Float,
+  kRGBA16Unorm,
+  kRGBA16Snorm,
+  kRGBA16Uint,
+  kRGBA16Sint,
+  kRGBA16Uscaled,
+  kRGBA16Sscaled,
+  kRGBA16Float,
   // 32-bit channels
-  kR32Uint, kR32Sint, kR32Float,
-  kRG32Uint, kRG32Sint, kRG32Float,
+  kR32Uint,
+  kR32Sint,
+  kR32Float,
+  kRG32Uint,
+  kRG32Sint,
+  kRG32Float,
   kRGB32Float,
-  kRGBA32Uint, kRGBA32Sint, kRGBA32Float,
+  kRGBA32Uint,
+  kRGBA32Sint,
+  kRGBA32Float,
   // Packed
-  kB10G11R11Float,     // R in the low bits (DXGI R11G11B10_FLOAT)
-  kA2B10G10R10Unorm,   // R in the low bits (DXGI R10G10B10A2_UNORM)
-  kA2R10G10B10Unorm,   // B in the low bits
+  kB10G11R11Float,    // R in the low bits (DXGI R11G11B10_FLOAT)
+  kA2B10G10R10Unorm,  // R in the low bits (DXGI R10G10B10A2_UNORM)
+  kA2R10G10B10Unorm,  // B in the low bits
   // Block compressed
-  kBC1Unorm, kBC1Srgb, kBC2Unorm, kBC2Srgb, kBC3Unorm, kBC3Srgb,
-  kBC4Unorm, kBC4Snorm, kBC5Unorm, kBC5Snorm, kBC6HUfloat, kBC6HSfloat,
-  kBC7Unorm, kBC7Srgb,
+  kBC1Unorm,
+  kBC1Srgb,
+  kBC2Unorm,
+  kBC2Srgb,
+  kBC3Unorm,
+  kBC3Srgb,
+  kBC4Unorm,
+  kBC4Snorm,
+  kBC5Unorm,
+  kBC5Snorm,
+  kBC6HUfloat,
+  kBC6HSfloat,
+  kBC7Unorm,
+  kBC7Srgb,
   // Depth / stencil
-  kD32Float, kD32FloatS8Uint, kS8Uint,
+  kD32Float,
+  kD32FloatS8Uint,
+  kS8Uint,
   kCount,
 };
 
 struct FormatInfo {
-  u8 bytes = 0;         // per texel, or per 4x4 block when compressed
+  u8 bytes = 0;  // per texel, or per 4x4 block when compressed
   u8 channels = 0;
   bool compressed = false;
   bool is_integer = false;  // Uint/Sint: never filtered, never blended
@@ -72,14 +121,14 @@ enum ShaderStage : u32 {
   kStageFragment = 1u << 2,
   kStageCompute = 1u << 3,
   kStageMesh = 1u << 4,
-  kStageAllGraphics = kStageVertex | kStageGeometry | kStageFragment |
-                      kStageMesh,
+  kStageAllGraphics =
+      kStageVertex | kStageGeometry | kStageFragment | kStageMesh,
 };
 
 // Where the memory of a buffer lives.
 enum class MemoryKind : u8 {
-  kDevice,    // device-local, no host mapping
-  kUpload,    // host-visible, write-combined; for CPU writes the GPU reads
+  kDevice,  // device-local, no host mapping
+  kUpload,  // host-visible, write-combined; for CPU writes the GPU reads
   // As kUpload, but in device-local memory where the host can map it.
   kUploadDevice,
   kReadback,  // host-visible, cached; for GPU writes the CPU reads
@@ -137,7 +186,13 @@ struct TextureDesc {
 };
 
 enum class ViewDim : u8 {
-  k1D, k1DArray, k2D, k2DArray, kCube, kCubeArray, k3D,
+  k1D,
+  k1DArray,
+  k2D,
+  k2DArray,
+  kCube,
+  kCubeArray,
+  k3D,
 };
 
 enum Aspect : u8 {
@@ -161,14 +216,26 @@ struct TextureViewDesc {
 
 enum class Filter : u8 { kNearest, kLinear };
 enum class AddressMode : u8 {
-  kRepeat, kMirroredRepeat, kClampToEdge, kClampToBorder, kMirrorClampToEdge,
+  kRepeat,
+  kMirroredRepeat,
+  kClampToEdge,
+  kClampToBorder,
+  kMirrorClampToEdge,
 };
 enum class CompareOp : u8 {
-  kNever, kLess, kEqual, kLessEqual, kGreater, kNotEqual, kGreaterEqual,
+  kNever,
+  kLess,
+  kEqual,
+  kLessEqual,
+  kGreater,
+  kNotEqual,
+  kGreaterEqual,
   kAlways,
 };
 enum class BorderColor : u8 {
-  kTransparentBlack, kOpaqueBlack, kOpaqueWhite,
+  kTransparentBlack,
+  kOpaqueBlack,
+  kOpaqueWhite,
 };
 
 struct SamplerDesc {
@@ -188,11 +255,11 @@ struct SamplerDesc {
 // Resource states. A texture is in exactly one per subresource at any point
 // of the recording; the caller names both sides of each transition.
 enum class TextureState : u8 {
-  kUndefined,     // contents may be discarded
-  kGeneral,       // storage image reads/writes, or any mixed use
+  kUndefined,  // contents may be discarded
+  kGeneral,    // storage image reads/writes, or any mixed use
   kColorTarget,
-  kDepthTarget,   // depth/stencil writable
-  kDepthRead,     // depth/stencil bound read-only, and/or sampled
+  kDepthTarget,  // depth/stencil writable
+  kDepthRead,    // depth/stencil bound read-only, and/or sampled
   kShaderRead,
   kCopySrc,
   kCopyDst,
@@ -282,21 +349,47 @@ struct PipelineLayoutDesc {
 };
 
 enum class Topology : u8 {
-  kPointList, kLineList, kLineStrip, kTriangleList, kTriangleStrip,
-  kTriangleFan, kLineListAdjacency, kTriangleListAdjacency,
+  kPointList,
+  kLineList,
+  kLineStrip,
+  kTriangleList,
+  kTriangleStrip,
+  kTriangleFan,
+  kLineListAdjacency,
+  kTriangleListAdjacency,
 };
 enum class CullMode : u8 { kNone, kFront, kBack, kFrontAndBack };
 enum class BlendFactor : u8 {
-  kZero, kOne, kSrcColor, kOneMinusSrcColor, kDstColor, kOneMinusDstColor,
-  kSrcAlpha, kOneMinusSrcAlpha, kDstAlpha, kOneMinusDstAlpha,
-  kConstantColor, kOneMinusConstantColor, kConstantAlpha,
-  kOneMinusConstantAlpha, kSrcAlphaSaturate, kSrc1Color, kOneMinusSrc1Color,
-  kSrc1Alpha, kOneMinusSrc1Alpha,
+  kZero,
+  kOne,
+  kSrcColor,
+  kOneMinusSrcColor,
+  kDstColor,
+  kOneMinusDstColor,
+  kSrcAlpha,
+  kOneMinusSrcAlpha,
+  kDstAlpha,
+  kOneMinusDstAlpha,
+  kConstantColor,
+  kOneMinusConstantColor,
+  kConstantAlpha,
+  kOneMinusConstantAlpha,
+  kSrcAlphaSaturate,
+  kSrc1Color,
+  kOneMinusSrc1Color,
+  kSrc1Alpha,
+  kOneMinusSrc1Alpha,
 };
 enum class BlendOp : u8 { kAdd, kSubtract, kReverseSubtract, kMin, kMax };
 enum class StencilOp : u8 {
-  kKeep, kZero, kReplace, kIncrementClamp, kDecrementClamp, kInvert,
-  kIncrementWrap, kDecrementWrap,
+  kKeep,
+  kZero,
+  kReplace,
+  kIncrementClamp,
+  kDecrementClamp,
+  kInvert,
+  kIncrementWrap,
+  kDecrementWrap,
 };
 
 struct BlendAttachment {
@@ -334,7 +427,7 @@ struct VertexAttribute {
 // the pipeline is created, against the pipeline's layout.
 struct ShaderCode {
   const u32* words = nullptr;
-  mem_size count = 0;  // in words
+  mem_size count = 0;                        // in words
   bool empty() const { return count == 0; }  // NOLINT: accessor
 };
 
@@ -397,9 +490,9 @@ struct DepthAttachment {
   LoadOp stencil_load = LoadOp::kLoad;
   float clear_depth = 1.0f;
   u8 clear_stencil = 0;
-  bool depth = true;    // the view's depth plane is attached
-  bool stencil = false;  // the view's stencil plane is attached
-  bool read_only = false;          // depth plane
+  bool depth = true;       // the view's depth plane is attached
+  bool stencil = false;    // the view's stencil plane is attached
+  bool read_only = false;  // depth plane
   bool stencil_read_only = false;
 };
 

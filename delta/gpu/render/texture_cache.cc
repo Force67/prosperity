@@ -5,41 +5,41 @@
 #include "gpu/render/texture_cache.h"
 #include "base/arch.h"
 
-#include "gpu/gpu_check.h"
-#include "gpu/guest_memory.h"
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_translate.h"
-#include "gpu/render/renderer.h"
+#include "gpu/gpu_check.h"
+#include "gpu/gpu_perf.h"
+#include "gpu/guest_memory.h"
 #include "gpu/render/capture.h"
 #include "gpu/render/compute.h"
-#include "gpu/render/labels.h"
 #include "gpu/render/device.h"
-#include "gpu/render/guest_format.h"
 #include "gpu/render/frame.h"
+#include "gpu/render/guest_format.h"
 #include "gpu/render/hash.h"
-#include "gpu/gpu_perf.h"
+#include "gpu/render/labels.h"
 #include "gpu/render/render_target.h"
+#include "gpu/render/renderer.h"
 #include "gpu/render/upload_ring.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <base/strings/xstring.h>
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/time/time.h>
-#include <base/containers/hash_map.h>
+#include "base/algorithm.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/time/time.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(int, kForceTile, "DELTA_GPU_FORCETILE", -1);
@@ -294,9 +294,9 @@ TexKey TextureKey(u64 base,
   if (mip_levels && base_mip < mip_levels)
     view_mips = base::Min(view_mips, mip_levels - base_mip);
   TexKey key;
-  key.image = {base,   w,          h,
-               tiling, pitch,      layers,
-               depth,  mip_levels, GuestTextureFormat(dfmt, nfmt),
+  key.image = {base,     w,          h,
+               tiling,   pitch,      layers,
+               depth,    mip_levels, GuestTextureFormat(dfmt, nfmt),
                pow2_pad, is_3d};
   key.base_array = base_array;
   key.view_layers = view_layers;
@@ -407,8 +407,8 @@ bool CreateTextureDescriptors() {
   // unresolved one still has to get a default.
   rhi::TextureDesc white;
   white.format = rhi::Format::kRGBA8Unorm;
-  white.usage = rhi::kTextureSampled | rhi::kTextureCopyDst |
-                rhi::kTextureMutableFormat;
+  white.usage =
+      rhi::kTextureSampled | rhi::kTextureCopyDst | rhi::kTextureMutableFormat;
   white.name = "white default";
   g_tex.white_img = device.CreateTexture(white);
   // Same default for a Dim3D binding, which cannot sample a 2D view.
@@ -430,8 +430,8 @@ bool CreateTextureDescriptors() {
   // depth surface (see TextureBindings::depth_default_view).
   rhi::TextureDesc depth;
   depth.format = rhi::Format::kD32Float;
-  depth.usage = rhi::kTextureSampled | rhi::kTextureDepthTarget |
-                rhi::kTextureCopyDst;
+  depth.usage =
+      rhi::kTextureSampled | rhi::kTextureDepthTarget | rhi::kTextureCopyDst;
   depth.name = "depth default";
   g_tex.depth_default_img = device.CreateTexture(depth);
   if (g_tex.depth_default_img) {
@@ -443,7 +443,8 @@ bool CreateTextureDescriptors() {
   }
   using rhi::Format;
   using rhi::ViewDim;
-  g_tex.white_view = MakeView(g_tex.white_img, ViewDim::k2D, Format::kRGBA8Unorm);
+  g_tex.white_view =
+      MakeView(g_tex.white_img, ViewDim::k2D, Format::kRGBA8Unorm);
   g_tex.white_uint_view =
       MakeView(g_tex.white_img, ViewDim::k2D, Format::kRGBA8Uint);
   g_tex.white_uint_array_view =
@@ -466,9 +467,11 @@ bool CreateTextureDescriptors() {
       !g_tex.white_3d_view || !g_tex.white_uint_3d_view)
     return false;
   g_tex.white_set = SampledTextureGroup(g_tex.white_view, g_tex.sampler);
-  g_tex.white_array_set = SampledTextureGroup(g_tex.white_array_view, g_tex.sampler);
+  g_tex.white_array_set =
+      SampledTextureGroup(g_tex.white_array_view, g_tex.sampler);
   g_tex.zero_set = SampledTextureGroup(g_tex.zero_view, g_tex.sampler);
-  g_tex.zero_array_set = SampledTextureGroup(g_tex.zero_array_view, g_tex.sampler);
+  g_tex.zero_array_set =
+      SampledTextureGroup(g_tex.zero_array_view, g_tex.sampler);
   g_tex.white_3d_set = SampledTextureGroup(g_tex.white_3d_view, g_tex.sampler);
   g_tex.zero_3d_set = SampledTextureGroup(g_tex.zero_3d_view, g_tex.sampler);
   g_tex.descriptors_ready = g_tex.white_set && g_tex.white_array_set &&
@@ -522,14 +525,14 @@ rhi::Sampler* SamplerFor(const SamplerKey& key) {
   // DELTA_GPU_FORCENEAREST=1: diagnostic only. Force point sampling everywhere,
   // to separate "this pass reads the texel it addresses" from "its 2x2 bilinear
   // footprint straddles a neighbour". A pass that thresholds on what it samples
-  // behaves completely differently under the two, and nothing else distinguishes
-  // them from outside the shader.
+  // behaves completely differently under the two, and nothing else
+  // distinguishes them from outside the shader.
   u32 mag = kForceNearest ? 0u : (key.raw[2] >> 20) & 3;
   u32 min = kForceNearest ? 0u : (key.raw[2] >> 22) & 3;
-  ci.mag = (mag & 1) && !key.integer ? rhi::Filter::kLinear
-                                     : rhi::Filter::kNearest;
-  ci.min = (min & 1) && !key.integer ? rhi::Filter::kLinear
-                                     : rhi::Filter::kNearest;
+  ci.mag =
+      (mag & 1) && !key.integer ? rhi::Filter::kLinear : rhi::Filter::kNearest;
+  ci.min =
+      (min & 1) && !key.integer ? rhi::Filter::kLinear : rhi::Filter::kNearest;
   u32 mip_filter = (key.raw[2] >> 26) & 3;
   ci.mip = mip_filter == 2 && !key.integer ? rhi::Filter::kLinear
                                            : rhi::Filter::kNearest;
@@ -602,16 +605,15 @@ void PackTexPixels(u8* linear,
     copy.region.width = base::Max(texel_w >> mip, 1u);
     copy.region.height = base::Max(texel_h >> mip, 1u);
     copy.region.depth = is_3d ? layout.layers : 1u;
-    const u64 layer_bytes =
-        static_cast<u64>(level.width) * level.height * elem;
+    const u64 layer_bytes = static_cast<u64>(level.width) * level.height * elem;
     for (u32 layer = 0; layer < layout.layers; layer++) {
       u8* dst = linear + linear_offset + layer * layer_bytes;
       if (!kNoDetile) {
         gcn::DetileTextureMip32(src, dst, layout, mip, layer);
       } else {
-        const u8* level_src = src + level.offset +
-                                   static_cast<u64>(layer) * level.pitch *
-                                       level.stored_height * elem;
+        const u8* level_src =
+            src + level.offset +
+            static_cast<u64>(layer) * level.pitch * level.stored_height * elem;
         for (u32 y = 0; y < level.height; y++)
           std::memcpy(dst + static_cast<size_t>(y) * level.width * elem,
                       level_src + static_cast<size_t>(y) * level.pitch * elem,
@@ -700,8 +702,7 @@ void PackTexPixels(u8* linear,
                     texel_w, texel_h);
       if (FILE* lf = std::fopen(lp, "wb")) {
         std::fprintf(lf, "P6\n%u %u\n255\n", texel_w, texel_h);
-        const u8* lp8 =
-            linear + static_cast<u64>(l) * texel_w * texel_h * 4;
+        const u8* lp8 = linear + static_cast<u64>(l) * texel_w * texel_h * 4;
         for (u64 i = 0; i < static_cast<u64>(texel_w) * texel_h; i++) {
           std::fputc(lp8[i * 4], lf);
           std::fputc(lp8[i * 4 + 1], lf);
@@ -746,8 +747,7 @@ void PackTexPixels(u8* linear,
         std::fclose(alpha);
       }
     }
-    BASE_LOGI("texupload",
-              "{} base={:#x} {}x{} rgb={} alpha={}/{} -> {}",
+    BASE_LOGI("texupload", "{} base={:#x} {}x{} rgb={} alpha={}/{} -> {}",
               dump_upload_count, (unsigned long)base, texel_w, texel_h,
               (unsigned long)rgb_nonzero, (unsigned long)alpha_nonzero,
               (unsigned long)pixels, path);
@@ -795,9 +795,8 @@ bool UploadTexPixelsImmediate(rhi::Texture* img,
     BASE_LOGI("gpuvk",
               "tex upload DEVICE FAULT: base={:#x} {}x{} mips={} layers={} "
               "bytes={}",
-              (unsigned long)base, layout.mips[0].width,
-              layout.mips[0].height, layout.mip_levels, layout.layers,
-              (unsigned long long)sz);
+              (unsigned long)base, layout.mips[0].width, layout.mips[0].height,
+              layout.mip_levels, layout.layers, (unsigned long long)sz);
   const u64 dt = NowNs() - t0;
   g_ns_tex_up += dt;
   g_fr_tex_up += dt;
@@ -894,9 +893,8 @@ bool EvictTextures(u64 bytes, u64 budget) {
       old.push_back({entry.last_used_frame, key});
   if (old.empty())
     return false;
-  base::Sort(old.begin(), old.end(), [](const auto& a, const auto& b) {
-    return a.first < b.first;
-  });
+  base::Sort(old.begin(), old.end(),
+             [](const auto& a, const auto& b) { return a.first < b.first; });
   const u64 want_bytes = budget - base::Min(budget, budget / 16 + bytes);
   const size_t want_count = kMaxTextureImages - kMaxTextureImages / 16;
   u64 live_bytes = g_tex_image_bytes;
@@ -981,7 +979,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
                                             u32 depth,
                                             bool is_3d,
                                             TexKey& key_out) {
-  ScopeNs _lookup_timer(&g_ns_tex_lookup);
+  ScopeNs lookup_timer(&g_ns_tex_lookup);
   g_tex_lookup_n++;
   constexpr u64 kMaxTextureBytes = 256ull * 1024 * 1024;
   // DELTA_GPU_TEXWATCH=<base>: the head of one texture's guest memory, once per
@@ -1005,9 +1003,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
             break;
           }
       base::String line;
-      base::FormatTo(line, "f{} {:#x} {}x{}x{} span={} first_nz={}:",
-                     g_frame.num, (unsigned long)base, w, h, depth,
-                     (unsigned long)span,
+      base::FormatTo(line,
+                     "f{} {:#x} {}x{}x{} span={} first_nz={}:", g_frame.num,
+                     (unsigned long)base, w, h, depth, (unsigned long)span,
                      first_nz == span ? -1L : (long)first_nz);
       for (u32 i = 0; i < 32; i++)
         base::FormatTo(line, " {:02x}", p[i]);
@@ -1070,8 +1068,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     return nullptr;
   const u32 lw = bc ? (w + 3) / 4 : w;
   const u32 lh = bc ? (h + 3) / 4 : h;
-  const u32 lpitch =
-      bc ? ((pitch ? pitch : w) + 3) / 4 : (pitch ? pitch : w);
+  const u32 lpitch = bc ? ((pitch ? pitch : w) + 3) / 4 : (pitch ? pitch : w);
   gcn::TextureLayout32 layout;
   // DELTA_GPU_TEXFAIL: why a guest texture declines to upload. Skyrim's font
   // atlas fell out here and every glyph then sampled the white default, which
@@ -1082,10 +1079,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     if (kTexFail) {
       static int n = 0;
       if (n++ < 12)
-        BASE_LOGI("texfail",
-                  "layout {:#x} {}x{} pitch={} tiling={} elem={} mips={}",
-                  (unsigned long)base, w, h, lpitch, tiling, elem_bytes,
-                  mip_levels);
+        BASE_LOGI(
+            "texfail", "layout {:#x} {}x{} pitch={} tiling={} elem={} mips={}",
+            (unsigned long)base, w, h, lpitch, tiling, elem_bytes, mip_levels);
     }
     return nullptr;
   }
@@ -1117,8 +1113,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     Cell& c = tbl[base];
     c = {w, h, dfmt, nfmt, tiling, mip_levels, footprint, c.binds + 1};
     const auto now = base::TimeTicks::Now();
-    if ((now - last).InSeconds() >=
-        kTexCensus) {
+    if ((now - last).InSeconds() >= kTexCensus) {
       last = now;
       BASE_LOGI("texcensus", "{} surfaces", tbl.size());
       for (const auto& kv : tbl) {
@@ -1146,19 +1141,20 @@ static rhi::TextureView* ResolveTextureView(u64 base,
                    depth_compare, swizzle, depth, is_3d);
   // DELTA_GPU_TEXRAW: write each large texture's raw tiled footprint, with its
   // layout in the name, so a swizzle can be worked out offline.
-  if (kTexRaw && w >= 256 && h >= 128 && gpu::IsReadableRange(base, footprint)) {
+  if (kTexRaw && w >= 256 && h >= 128 &&
+      gpu::IsReadableRange(base, footprint)) {
     static int rawn = 0;
     static base::HashSet<u64> raw_seen;
     if (rawn < 12 && raw_seen.insert(static_cast<u64>(w) << 32 | h).second) {
       char p[320];
-      std::snprintf(p, sizeof(p), "%s/raw_%02d_%ux%u_pitch%u_sh%u_tile%u_e%u.bin",
-                    DumpDir(), rawn++, w, h, layout.mips[0].pitch,
+      std::snprintf(p, sizeof(p),
+                    "%s/raw_%02d_%ux%u_pitch%u_sh%u_tile%u_e%u.bin", DumpDir(),
+                    rawn++, w, h, layout.mips[0].pitch,
                     layout.mips[0].stored_height, tiling, elem_bytes);
       if (FILE* f = std::fopen(p, "wb")) {
         std::fwrite(reinterpret_cast<const void*>(base), 1, footprint, f);
         std::fclose(f);
-        BASE_LOGI("texraw", "{} ({} bytes)", p,
-                  (unsigned long long)footprint);
+        BASE_LOGI("texraw", "{} ({} bytes)", p, (unsigned long long)footprint);
       }
     }
   }
@@ -1171,8 +1167,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     static int tdn = 0;
     if (tdn < 16) {
       const u32* px = reinterpret_cast<const u32*>(base);
-      u64 cnt = (u64)w * h, nz = 0,
-               step = cnt > 8192 ? cnt / 8192 : 1;
+      u64 cnt = (u64)w * h, nz = 0, step = cnt > 8192 ? cnt / 8192 : 1;
       for (u64 i = 0; i < cnt; i += step)
         if (px[i] & 0x00FFFFFFu)
           nz++;
@@ -1190,8 +1185,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
         }
         std::fclose(f);
       }
-      BASE_LOGI("texdump", "{} base={:#x} {}x{} nonzero={}/8192",
-                tdn, (unsigned long)base, w, h, (unsigned long)nz);
+      BASE_LOGI("texdump", "{} base={:#x} {}x{} nonzero={}/8192", tdn,
+                (unsigned long)base, w, h, (unsigned long)nz);
       tdn++;
     }
   }
@@ -1210,8 +1205,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     image_it->second.last_checked_frame = g_frame.num;
     image_it->second.hash_valid = false;
   }
-  if (!cs_supplies &&
-      !render::FlushCsWritesRange(render::DefaultRenderer(), base, footprint, "tex"))
+  if (!cs_supplies && !render::FlushCsWritesRange(render::DefaultRenderer(),
+                                                  base, footprint, "tex"))
     return nullptr;
   static int prevalidated_frame = -1;
   if (kTexPrevalidate && prevalidated_frame != g_frame.num) {
@@ -1226,12 +1221,12 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     // Mapping probes are syscall-heavy. Perform one alongside the
     // once-per-frame content validation rather than on every draw that reuses
     // this image.
-    const u64 _t_probe = NowNs();
-    const bool _readable = pre ? image_it->second.pre_readable
-                               : gpu::IsReadableRange(base, footprint);
-    g_ns_tex_probe += NowNs() - _t_probe;
+    const u64 t_probe = NowNs();
+    const bool readable = pre ? image_it->second.pre_readable
+                              : gpu::IsReadableRange(base, footprint);
+    g_ns_tex_probe += NowNs() - t_probe;
     g_tex_probe_n++;
-    if (!_readable) {
+    if (!readable) {
       // The commonest way a binding ends up on the white fallback, and until
       // now the only silent one: the descriptor is fine, the memory behind it
       // just is not mapped (yet).
@@ -1241,12 +1236,12 @@ static rhi::TextureView* ResolveTextureView(u64 base,
           BASE_LOGI("texfail",
                     "unmapped {:#x} {}x{}x{} tiling={} mips={} "
                     "footprint={}",
-                    (unsigned long)base, w, h, is_3d ? depth : layers,
-                    tiling, mip_levels, (unsigned long)footprint);
+                    (unsigned long)base, w, h, is_3d ? depth : layers, tiling,
+                    mip_levels, (unsigned long)footprint);
       }
       return nullptr;
     }
-    const u64 _t_hash = NowNs();
+    const u64 t_hash = NowNs();
     // A brand new image takes its reference hash at the upload below.
     if (image_it != g_tex_images.end()) {
       TexImageEntry& e = image_it->second;
@@ -1258,9 +1253,10 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       const u64 sample = pre ? e.pre_sample : TexSampleHash(base, footprint);
       g_tex_hash_bytes += base::Min<u64>(footprint, 16384);
       bool changed = sample != e.sample_hash;
-      if (!changed &&
-          g_frame.num - e.last_full_frame >= static_cast<int>(e.check_interval)) {
-        const u64 hsh = pre && e.pre_full ? e.pre_hash : TexHash(base, footprint);
+      if (!changed && g_frame.num - e.last_full_frame >=
+                          static_cast<int>(e.check_interval)) {
+        const u64 hsh =
+            pre && e.pre_full ? e.pre_hash : TexHash(base, footprint);
         g_tex_hash_bytes += footprint;
         // With no reference hash the sweep has nothing to compare against, and
         // the windowed check has already said the surface is holding still –
@@ -1280,8 +1276,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
         // a write that lands after the hash reads as a change next sweep.
         e.hash = TexHash(base, footprint);
         g_tex_hash_bytes += footprint;
-        if (!RecordTexPixels(e.image, rhi::TextureState::kShaderRead,
-                             base, layout, w, h, is_3d)) {
+        if (!RecordTexPixels(e.image, rhi::TextureState::kShaderRead, base,
+                             layout, w, h, is_3d)) {
           if (kTexFail) {
             static int n = 0;
             if (n++ < 12)
@@ -1289,7 +1285,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
                         (unsigned long)base, w, h, is_3d ? depth : layers,
                         tiling);
           }
-          g_ns_tex_hash += NowNs() - _t_hash;
+          g_ns_tex_hash += NowNs() - t_hash;
           return nullptr;
         }
         e.hash_valid = true;
@@ -1298,7 +1294,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
         e.check_interval = 1;
       }
     }
-    g_ns_tex_hash += NowNs() - _t_hash;
+    g_ns_tex_hash += NowNs() - t_hash;
     g_tex_hash_n++;
   }
   if (image_it == g_tex_images.end()) {
@@ -1346,14 +1342,13 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       g_tex_hash_bytes += footprint;
     }
     if (!cs_uploaded &&
-        !RecordTexPixels(image_entry.image, rhi::TextureState::kUndefined,
-                         base, layout, w, h, is_3d)) {
+        !RecordTexPixels(image_entry.image, rhi::TextureState::kUndefined, base,
+                         layout, w, h, is_3d)) {
       if (kTexFail) {
         static int n = 0;
         if (n++ < 12)
           BASE_LOGI("texfail", "upload {:#x} {}x{}x{} tiling={}",
-                    (unsigned long)base, w, h, is_3d ? depth : layers,
-                    tiling);
+                    (unsigned long)base, w, h, is_3d ? depth : layers, tiling);
       }
       Device().Destroy(image_entry.image);
       return nullptr;
@@ -1441,13 +1436,13 @@ rhi::BindGroup* GetTexture(u64 base,
   // See GetMultiTexSet: a guest texture is never a depth format, so a compare
   // sample of one reads the far-plane default rather than an undefined
   // comparison against a colour view.
-  const bool cmp_default = key.sampler.depth_compare && g_tex.depth_default_view;
+  const bool cmp_default =
+      key.sampler.depth_compare && g_tex.depth_default_view;
   TexEntry e;
-  e.set = SampledTextureGroup(
-      cmp_default ? g_tex.depth_default_view : view,
-      SamplerFor(key.sampler),
-      cmp_default ? rhi::TextureState::kDepthRead
-                  : rhi::TextureState::kShaderRead);
+  e.set = SampledTextureGroup(cmp_default ? g_tex.depth_default_view : view,
+                              SamplerFor(key.sampler),
+                              cmp_default ? rhi::TextureState::kDepthRead
+                                          : rhi::TextureState::kShaderRead);
   if (!e.set)
     return nullptr;
   g_tex_cache.emplace(key, e);
@@ -1658,7 +1653,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
                                const rhi::TextureState* resolved_layouts,
                                const rhi::Format* resolved_formats,
                                const u64* depth_src) {
-  ScopeNs _set_timer(&g_ns_tex_set);
+  ScopeNs set_timer(&g_ns_tex_set);
   g_tex_set_n++;
   // What the draw resolved, and what the layout declares. A shader may declare
   // more samplers than the draw tracked textures for, and a binding left
@@ -1696,8 +1691,8 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
     rhi::TextureView* v =
         (i < resolved && !kForceWhite) ? resolved_views[i] : nullptr;
     bool arrayed = i < resolved && d.texs[i].arrayed;
-    bool is_3d = i < resolved ? d.texs[i].is_3d
-                              : (declared(i) && declared(i)->is_3d);
+    bool is_3d =
+        i < resolved ? d.texs[i].is_3d : (declared(i) && declared(i)->is_3d);
     if (i >= resolved && declared(i) && declared(i)->storage)
       return nullptr;  // as for an unresolved storage binding below
     if (kTexMiss && !v && i < resolved && tex_miss_logged < 64) {
@@ -1713,16 +1708,15 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
         std::snprintf(mem, sizeof(mem), " [%08x %08x %08x %08x]", w[0], w[1],
                       w[2], w[3]);
       }
-      BASE_LOGI(
-          "texmiss",
-          "ps={:#x} bind={} base={:#x} {}x{} dfmt={} nfmt={} "
-          "tiling={} layers={} mips={} arrayed={} 3d={} decl={} uint={} "
-          "src={:#x}{}",
-          (unsigned long)d.ps_addr, i, (unsigned long)t.base, t.w, t.h,
-          t.dfmt, t.nfmt, t.tiling, t.layers, t.mip_levels, (int)t.arrayed,
-          (int)t.is_3d, (int)(declared(i) != nullptr),
-          (int)(declared(i) && declared(i)->is_uint),
-          (unsigned long)t.src, mem);
+      BASE_LOGI("texmiss",
+                "ps={:#x} bind={} base={:#x} {}x{} dfmt={} nfmt={} "
+                "tiling={} layers={} mips={} arrayed={} 3d={} decl={} uint={} "
+                "src={:#x}{}",
+                (unsigned long)d.ps_addr, i, (unsigned long)t.base, t.w, t.h,
+                t.dfmt, t.nfmt, t.tiling, t.layers, t.mip_levels,
+                (int)t.arrayed, (int)t.is_3d, (int)(declared(i) != nullptr),
+                (int)(declared(i) && declared(i)->is_uint),
+                (unsigned long)t.src, mem);
     }
     if (d.texs[i].storage && !v)
       return nullptr;
@@ -1738,8 +1732,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
             ? (want_uint ? g_tex.white_uint_array_view : g_tex.white_array_view)
             : (want_uint ? g_tex.white_uint_view : g_tex.white_view);
     views[i] = v ? v : fallback;
-    layouts[i] =
-        v ? resolved_layouts[i] : rhi::TextureState::kShaderRead;
+    layouts[i] = v ? resolved_layouts[i] : rhi::TextureState::kShaderRead;
   }
   thread_local rhi::BindingWrite writes[kMaxTex];
   for (u32 i = 0; i < key.num_texs; i++) {

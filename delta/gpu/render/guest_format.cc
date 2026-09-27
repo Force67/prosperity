@@ -9,10 +9,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <base/logging.h>
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/math/value_bounds.h>
+#include "base/algorithm.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "options/options.h"
 
 namespace {
 // A colour target whose NUMBER_TYPE is UINT/SINT holds packed bits, not a
@@ -57,8 +57,7 @@ float HalfToFloat(u16 value) {
 u8 Unorm8(float value) {
   if (!std::isfinite(value))
     return 0;
-  return static_cast<u8>(
-      std::lround(base::Clamp(value, 0.0f, 1.0f) * 255.0f));
+  return static_cast<u8>(std::lround(base::Clamp(value, 0.0f, 1.0f) * 255.0f));
 }
 
 float PackedUfloat(u32 value, u32 mantissa_bits) {
@@ -135,8 +134,7 @@ rhi::Format GuestTextureFormat(u32 dfmt, u32 nfmt) {
     return rhi::Format::kRGBA8Srgb;
   // Block-compressed (IMG_DATA_FORMAT_BC1..BC7 = 35..41); sampled natively.
   if (dfmt == 35)
-    return nfmt == 9 ? rhi::Format::kBC1Srgb
-                     : rhi::Format::kBC1Unorm;
+    return nfmt == 9 ? rhi::Format::kBC1Srgb : rhi::Format::kBC1Unorm;
   if (dfmt == 36)
     return nfmt == 9 ? rhi::Format::kBC2Srgb : rhi::Format::kBC2Unorm;
   if (dfmt == 37)
@@ -338,8 +336,9 @@ rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
   const auto unmapped = [&](const char* what) {
     static int n = 0;
     if (n++ < 8)
-      BASE_LOGI("gpuvk", "clear word: unmapped {} (info={:#x} dfmt={} nfmt={} "
-                         "words {:08x} {:08x}), clearing to opaque black",
+      BASE_LOGI("gpuvk",
+                "clear word: unmapped {} (info={:#x} dfmt={} nfmt={} "
+                "words {:08x} {:08x}), clearing to opaque black",
                 what, info, dfmt, nfmt, word0, word1);
     return rhi::ClearColor{{0.0f, 0.0f, 0.0f, 1.0f}};
   };
@@ -386,8 +385,7 @@ rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
     default:
       return unmapped("colour format");
   }
-  const u64 packed =
-      static_cast<u64>(word0) | static_cast<u64>(word1) << 32;
+  const u64 packed = static_cast<u64>(word0) | static_cast<u64>(word1) << 32;
   rhi::ClearColor out{};
   // Seed opaque: a format with fewer than four components never writes alpha,
   // and a transparent target is a hole in a deferred composite.
@@ -408,10 +406,9 @@ rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
         out.f[i] = static_cast<float>(raw) / static_cast<float>(mask);
         break;
       case 1:  // SNORM
-        out.f[i] =
-            base::Max(static_cast<float>(SignExtend(raw, bits)) /
-                         static_cast<float>((1u << (bits - 1)) - 1),
-                     -1.0f);
+        out.f[i] = base::Max(static_cast<float>(SignExtend(raw, bits)) /
+                                 static_cast<float>((1u << (bits - 1)) - 1),
+                             -1.0f);
         break;
       case 4:  // UINT
         out.u[i] = raw;
@@ -435,7 +432,6 @@ rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
   }
   return out;
 }
-
 
 void TextureSwizzle(u32 swizzle, rhi::Swizzle out[4]) {
   for (u32 i = 0; i < 4; i++) {
@@ -580,8 +576,10 @@ rhi::BlendOp BlendOp(u32 f) {
   }
 }
 
-u8 ColorWriteMask(u32 target_mask, u32 shader_mask,
-                                     u8 export_mask, u32 target) {
+u8 ColorWriteMask(u32 target_mask,
+                  u32 shader_mask,
+                  u8 export_mask,
+                  u32 target) {
   if (target >= 8 || !(export_mask & (1u << target)))
     return 0;
   u32 mask = (target_mask >> (4 * target)) & 0xF;
@@ -704,7 +702,7 @@ rhi::Format VertexFormat(u32 dfmt, u32 nfmt) {
       return rhi::Format::kA2R10G10B10Unorm;  // 10_10_10_2
     case 9:
       return rhi::Format::kA2B10G10R10Unorm;  // 2_10_10_10
-    case 10:                                      // 8_8_8_8
+    case 10:                                  // 8_8_8_8
       switch (nfmt) {
         case 1:
           return rhi::Format::kRGBA8Snorm;

@@ -1,16 +1,16 @@
 #include <algorithm>
-#include "base/arch.h"
 #include <cstring>
 #include <thread>
+#include "base/arch.h"
 
 #include <gtest/gtest.h>
-#include <base/memory/unique_pointer.h>
-#include <base/threading/thread.h>
+#include "base/memory/unique_pointer.h"
+#include "base/threading/thread.h"
 
+#include "base/algorithm.h"
+#include "base/atomic.h"
+#include "base/containers/vector.h"
 #include "gpu/gcn/gcn_detile.h"
-#include <base/algorithm.h>
-#include <base/atomic.h>
-#include <base/containers/vector.h>
 
 namespace {
 
@@ -22,32 +22,30 @@ struct SplitMode {
 };
 
 u64 ExpectedTiledOffset(const SplitMode& mode,
-                             u32 x,
-                             u32 y,
-                             u32 layer,
-                             u32 pitch,
-                             u32 height) {
+                        u32 x,
+                        u32 y,
+                        u32 layer,
+                        u32 pitch,
+                        u32 height) {
   constexpr u32 kNumPipes = 8;
   constexpr u32 kNumBanks = 16;
 
-  const u32 pixel_index = (x & 1) | ((y & 1) << 1) |
-                               (((x >> 1) & 1) << 2) | (((y >> 1) & 1) << 3) |
-                               (((x >> 2) & 1) << 4) | (((y >> 2) & 1) << 5);
+  const u32 pixel_index = (x & 1) | ((y & 1) << 1) | (((x >> 1) & 1) << 2) |
+                          (((y >> 1) & 1) << 3) | (((x >> 2) & 1) << 4) |
+                          (((y >> 2) & 1) << 5);
   u32 element_offset = pixel_index * sizeof(u32);
   const u32 tile_split_slice = element_offset / mode.tile_split_bytes;
   element_offset %= mode.tile_split_bytes;
 
   const u32 slices_per_tile = 256 / mode.tile_split_bytes;
   const u32 macro_pitch = 8 * kNumPipes * mode.macro_aspect;
-  const u32 macro_height =
-      8 * mode.bank_height * kNumBanks / mode.macro_aspect;
+  const u32 macro_height = 8 * mode.bank_height * kNumBanks / mode.macro_aspect;
   const u32 macro_tile_bytes = mode.tile_split_bytes * (macro_pitch / 8) *
-                                    (macro_height / 8) /
-                                    (kNumPipes * kNumBanks);
+                               (macro_height / 8) / (kNumPipes * kNumBanks);
   const u32 macro_tiles_per_row = pitch / macro_pitch;
   const u64 macro_tile_offset =
       static_cast<u64>((y / macro_height) * macro_tiles_per_row +
-                            x / macro_pitch) *
+                       x / macro_pitch) *
       macro_tile_bytes;
   const u32 macro_tiles_per_slice =
       macro_tiles_per_row * (height / macro_height);
@@ -63,8 +61,8 @@ u64 ExpectedTiledOffset(const SplitMode& mode,
   const u32 tile_x = x >> 3;
   const u32 tile_y = y >> 3;
   const u32 pipe = ((tile_x & 1) ^ (tile_y & 1) ^ ((tile_x >> 1) & 1)) |
-                        ((((tile_x >> 1) & 1) ^ ((tile_y >> 1) & 1)) << 1) |
-                        ((((tile_x >> 2) & 1) ^ ((tile_y >> 2) & 1)) << 2);
+                   ((((tile_x >> 1) & 1) ^ ((tile_y >> 1) & 1)) << 1) |
+                   ((((tile_x >> 2) & 1) ^ ((tile_y >> 2) & 1)) << 2);
 
   const u32 bank_x = tile_x / kNumPipes;
   const u32 bank_y = tile_y / mode.bank_height;
@@ -111,9 +109,8 @@ void VerifySplitMode(const SplitMode& mode) {
       }
     }
   }
-  ASSERT_EQ(
-      base::Count(occupied.begin(), occupied.end(), true),
-      occupied.size());
+  ASSERT_EQ(base::Count(occupied.begin(), occupied.end(), true),
+            occupied.size());
 
   base::Vector<u32> linear(static_cast<size_t>(width) * height);
   base::Vector<u32> expected(linear.size());
@@ -218,7 +215,7 @@ TEST(GcnDetile, AllModesAndElementWidthsMatchReferenceDigest) {
       for (u32 mip = 0; mip < layout.mip_levels; ++mip) {
         const auto& level = layout.mips[mip];
         base::Vector<u8> linear(static_cast<size_t>(level.width) *
-                                    level.height * elem);
+                                level.height * elem);
         for (u32 layer = 0; layer < layout.layers; ++layer) {
           ASSERT_TRUE(gpu::gcn::DetileTextureMip32(tiled.data(), linear.data(),
                                                    layout, mip, layer));
@@ -230,11 +227,10 @@ TEST(GcnDetile, AllModesAndElementWidthsMatchReferenceDigest) {
       for (u32 mip = 0; mip < layout.mip_levels; ++mip) {
         const auto& level = layout.mips[mip];
         base::Vector<u8> linear(static_cast<size_t>(level.width) *
-                                    level.height * elem);
+                                level.height * elem);
         for (u32 layer = 0; layer < layout.layers; ++layer) {
           for (size_t i = 0; i < linear.size(); ++i)
-            linear[i] =
-                static_cast<u8>((i * 157u + layer * 17u + mip) & 255u);
+            linear[i] = static_cast<u8>((i * 157u + layer * 17u + mip) & 255u);
           ASSERT_TRUE(gpu::gcn::RetileTextureMip32(linear.data(), tiled.data(),
                                                    layout, mip, layer));
         }
@@ -246,14 +242,15 @@ TEST(GcnDetile, AllModesAndElementWidthsMatchReferenceDigest) {
 }
 
 // Every address the separable terms produce agrees with the detiler, for each
-// layout they are offered for; and the macro modes compute targets use get them.
+// layout they are offered for; and the macro modes compute targets use get
+// them.
 TEST(GcnDetile, SeparableTermsMatchTheDetiler) {
   struct Shape {
     u32 width, height, pitch, layers, mips;
   };
   u32 macro_ok = 0;
-  for (const Shape& shape : {Shape{1680, 948, 1680, 1, 1},
-                             Shape{263, 137, 271, 3, 4}}) {
+  for (const Shape& shape :
+       {Shape{1680, 948, 1680, 1, 1}, Shape{263, 137, 271, 3, 4}}) {
     for (u32 tiling = 0; tiling <= 26; ++tiling) {
       for (u32 elem : {4u, 8u, 16u}) {
         gpu::gcn::TextureLayout32 layout;
@@ -285,13 +282,13 @@ TEST(GcnDetile, SeparableTermsMatchTheDetiler) {
                 const u32 xt = terms[x], yt = terms[level.width + y];
                 const u64 at = level.offset + stride * layer + (xt & ~mask) +
                                (yt & ~mask) + ((xt ^ yt ^ zt) & mask);
-                ASSERT_EQ(std::memcmp(&tiled[at],
-                                      &linear[(size_t(y) * level.width + x) *
-                                              elem],
-                                      elem),
-                          0)
-                    << "tiling " << tiling << " elem " << elem << " mip "
-                    << mip << " layer " << layer << " at " << x << "," << y;
+                ASSERT_EQ(
+                    std::memcmp(&tiled[at],
+                                &linear[(size_t(y) * level.width + x) * elem],
+                                elem),
+                    0)
+                    << "tiling " << tiling << " elem " << elem << " mip " << mip
+                    << " layer " << layer << " at " << x << "," << y;
               }
           }
         }
@@ -324,9 +321,9 @@ TEST(GcnDetile, PitchedTransfersLeaveLinearPaddingUntouched) {
                                                   kRowBytes, layout, 0, 0));
   for (u32 y = 0; y < kHeight; ++y) {
     const size_t row = static_cast<size_t>(y) * kRowBytes;
-    EXPECT_EQ(std::memcmp(source.data() + row, result.data() + row,
-                          kWidth * kElem),
-              0);
+    EXPECT_EQ(
+        std::memcmp(source.data() + row, result.data() + row, kWidth * kElem),
+        0);
     EXPECT_TRUE(base::AllOf(result.begin() + row + kWidth * kElem,
                             result.begin() + row + kRowBytes,
                             [](u8 value) { return value == 0xee; }));
@@ -339,8 +336,8 @@ TEST(GcnDetile, ByteWritebackRoundTripsAcrossMipsLayersAndPaddedRows) {
   for (u32 tiling : {8u, 14u, 31u, 0x11bu}) {
     SCOPED_TRACE(tiling);
     gpu::gcn::TextureLayout32 layout;
-    ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(
-        layout, 263, 137, 271, 2, 4, tiling, false, 1));
+    ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(layout, 263, 137, 271, 2, 4,
+                                               tiling, false, 1));
     base::Vector<u8> tiled(layout.size, 0xa5);
     for (u32 mip = 0; mip < layout.mip_levels; ++mip) {
       const auto& level = layout.mips[mip];
@@ -388,18 +385,21 @@ TEST(GcnDetile, ConcurrentRepeatedRegionsFinishEveryRowBeforeReturning) {
   base::Atomic<u32> failures{0};
   base::Vector<base::UniquePointer<base::Thread>> callers;
   for (u32 caller = 0; caller < 4; caller++) {
-    callers.push_back(base::MakeUnique<base::Thread>("caller", [&] {
-      for (u32 iteration = 0; iteration < 500; iteration++) {
-        base::Vector<base::Atomic<u32>> rows(128);
-        gpu::gcn::DetileParallelRows(rows.size(), [&](u32 first, u32 last) {
-          for (u32 row = first; row < last; row++)
-            rows[row].fetch_add(1, base::memory_order_relaxed);
-        });
-        for (const auto& row : rows)
-          if (row.load(base::memory_order_relaxed) != 1)
-            failures.fetch_add(1, base::memory_order_relaxed);
-      }
-    }, true));
+    callers.push_back(base::MakeUnique<base::Thread>(
+        "caller",
+        [&] {
+          for (u32 iteration = 0; iteration < 500; iteration++) {
+            base::Vector<base::Atomic<u32>> rows(128);
+            gpu::gcn::DetileParallelRows(rows.size(), [&](u32 first, u32 last) {
+              for (u32 row = first; row < last; row++)
+                rows[row].fetch_add(1, base::memory_order_relaxed);
+            });
+            for (const auto& row : rows)
+              if (row.load(base::memory_order_relaxed) != 1)
+                failures.fetch_add(1, base::memory_order_relaxed);
+          }
+        },
+        true));
   }
   for (auto& caller : callers)
     caller->Join();

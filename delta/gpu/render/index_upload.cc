@@ -6,7 +6,7 @@
 #include "base/arch.h"
 
 #include <cstring>
-#include <base/math/value_bounds.h>
+#include "base/math/value_bounds.h"
 
 namespace gpu::render {
 
@@ -18,9 +18,7 @@ u32 UploadedIndexElementBytes(u32 index_type) {
   return index_type == 1 ? 4 : 2;
 }
 
-u32 MaxGuestIndex(const void* source,
-                       u32 count,
-                       u32 index_type) {
+u32 MaxGuestIndex(const void* source, u32 count, u32 index_type) {
   u32 maximum = 0;
   if (index_type == 1) {
     const auto* indices = static_cast<const u32*>(source);

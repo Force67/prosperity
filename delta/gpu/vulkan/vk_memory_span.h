@@ -6,7 +6,7 @@
 // Aligned free-span allocation used inside one Vulkan device-memory block.
 
 #include "base/arch.h"
-#include <base/containers/vector.h>
+#include "base/containers/vector.h"
 
 namespace gpu::vk {
 

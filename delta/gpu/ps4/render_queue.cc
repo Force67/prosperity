@@ -8,21 +8,21 @@
 
 #include <pthread.h>
 
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <options/options.h>
-#include <base/atomic.h>
-#include <base/containers/map.h>
-#include <base/functional/function.h>
-#include <base/memory/move.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/time/time.h>
-#include <base/algorithm.h>
-#include <base/threading/condition_variable.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/threading/thread.h>
+#include "base/algorithm.h"
+#include "base/atomic.h"
+#include "base/containers/map.h"
+#include "base/functional/function.h"
+#include "base/logging.h"
+#include "base/memory/move.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "base/threading/condition_variable.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
+#include "base/time/time.h"
+#include "options/options.h"
 
 namespace gpu::ps4 {
 
@@ -44,8 +44,9 @@ void RenderQueue::Start(render::Renderer& renderer) {
   renderer_ = &renderer;
   commands_ = base::MakeUnique<Command[]>(kCommands);
   draws_ = base::MakeUnique<render::DrawInfo[]>(kDrawSlots);
-  thread_ = base::MakeUnique<base::Thread>("gpu-render", [this] { Run(); },
-                                          /*start_now=*/true);
+  thread_ = base::MakeUnique<base::Thread>(
+      "gpu-render", [this] { Run(); },
+      /*start_now=*/true);
   running_ = true;
 }
 
@@ -120,7 +121,9 @@ void RenderQueue::Drain(const char* why) {
 void RenderQueue::Wake(base::ConditionVariable& cv) {
   // Through the lock: a waiter between its check and its sleep holds it, so
   // the change it missed cannot also miss it.
-  { base::LockGuard<base::Mutex> lock(wake_mutex_); }
+  {
+    base::LockGuard<base::Mutex> lock(wake_mutex_);
+  }
   cv.NotifyAll();
 }
 
@@ -133,17 +136,16 @@ void RenderQueue::WaitDone(const base::Atomic<u64>& done,
   const auto start = base::TimeTicks::Now();
   {
     base::UniqueLock<base::Mutex> lock(wake_mutex_);
-    walk_wake_.Wait(lock, [&] {
-      return done.load(base::memory_order_acquire) >= target;
-    });
+    walk_wake_.Wait(
+        lock, [&] { return done.load(base::memory_order_acquire) >= target; });
   }
   const auto waited = base::TimeTicks::Now() - start;
   if (waited > base::Milliseconds(500)) {
     static const char* const kKinds[] = {"draw", "begin-frame", "end-frame",
                                          "call"};
     BASE_LOGW("gpuq", "walk waited {} ms for {}; renderer thread last ran {}",
-              (waited).InMilliseconds(),
-              what, kKinds[running_kind_.load() & 3]);
+              (waited).InMilliseconds(), what,
+              kKinds[running_kind_.load() & 3]);
   }
 }
 
@@ -180,8 +182,7 @@ void RenderQueue::Run() {
     const auto took = base::TimeTicks::Now() - started;
     if (took > base::Milliseconds(500))
       BASE_LOGW("gpuq", "renderer thread spent {} ms in one {} command",
-                (took).InMilliseconds(),
-                static_cast<int>(c.kind));
+                (took).InMilliseconds(), static_cast<int>(c.kind));
     done_.store(tail + 1, base::memory_order_release);
     Wake(walk_wake_);
   }

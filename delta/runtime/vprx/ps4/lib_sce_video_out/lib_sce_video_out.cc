@@ -526,7 +526,7 @@ int PS4ABI sceVideoOutSubmitFlipEop(int handle,
   // so route the present there; the PS4 Gnm path uses gpu::ps4::EndFrame.
   auto* active = Process::GetActive();
   if (active && active->GetPlatform() == Process::Platform::kPs5)
-// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+    // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
     prosperity_agc_flip(scanout);
   else
     gpu::ps4::EndFrame(scanout);

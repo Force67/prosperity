@@ -10,10 +10,9 @@
 
 #include "base/arch.h"
 
-
+#include "base/containers/vector.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/rhi/device.h"
-#include <base/containers/vector.h>
 
 namespace gpu::render {
 
@@ -55,15 +54,13 @@ u64 VbRingBytes();
 // what remains unique, at host-visible memory cost only.
 constexpr u64 kIbRing =
     128ull * 1024 * 1024;  // per-frame index ring (32-bit), see kVbRing
-constexpr u64 kUboRing =
-    256ull * 1024 * 1024;  // per-frame recomp cbuffer ring
+constexpr u64 kUboRing = 256ull * 1024 * 1024;  // per-frame recomp cbuffer ring
 // DELTA_GPU_UBORING_MB changes the total budget (half per frame slot).
 // Heavy scenes can require more unique constant windows than the default.
 // Latched on the first frame, after the title profile has loaded.
 u64 UboRingBytes();
 constexpr u32 kCbufWindow = gpu::gcn::kCbufDwords * 4;
-constexpr u32 kCbufBindings =
-    gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
+constexpr u32 kCbufBindings = gpu::gcn::kMaxCbufBindings;  // set-1 UBO bindings
 // Raw-buffer ring: the windows a recompiled shader's hand-written MUBUF loads
 // read from, at set-2 bindings 0..kRawBufBindings-1; the device's dynamic
 // storage buffer limit determines how many bindings are available.
@@ -115,9 +112,9 @@ struct UploadRings {
   rhi::Buffer* sbo_buf = nullptr;
   u8* sbo_map = nullptr;
   u64 sbo_offset = 0, sbo_end = kSboRing;
-  // Bindings actually created, = min(device dynamic-SSBO limit, kRawBufBindings).
-  // The recompiler is told this via gcn::SetMaxGfxBuffers so it never plans a
-  // binding the layout does not have.
+  // Bindings actually created, = min(device dynamic-SSBO limit,
+  // kRawBufBindings). The recompiler is told this via gcn::SetMaxGfxBuffers so
+  // it never plans a binding the layout does not have.
   u32 sbo_count = gpu::gcn::kMinGfxBuffers;
   u32 sbo_align = 256;
   u64 sbo_stride = kRawBufWindow;

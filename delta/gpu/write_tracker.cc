@@ -5,7 +5,6 @@
 
 #include "gpu/guest_page_table.h"
 
-
 #if defined(__linux__)
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -14,17 +13,18 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-#include <base/containers/array.h>
-#include <base/algorithm.h>
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/threading/lock_guard.h>
-#include <base/time/time.h>
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/threading/lock_guard.h"
+#include "base/time/time.h"
 #endif
 
-#if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)
+#if defined(__linux__) && defined(PAGEMAP_SCAN) && \
+    defined(UFFD_FEATURE_WP_ASYNC)
 #define DELTA_HAVE_WRITE_TRACKER 1
 #endif
 
@@ -88,8 +88,8 @@ u64 EraseRun(base::Map<u64, u64>& runs, u64 first, u64 end) {
 
 // The parts of [first, end) no run covers.
 base::Vector<base::Pair<u64, u64>> Gaps(const base::Map<u64, u64>& runs,
-                                      u64 first,
-                                      u64 end) {
+                                        u64 first,
+                                        u64 end) {
   base::Vector<base::Pair<u64, u64>> gaps;
   auto it = runs.upper_bound(first);
   if (it != runs.begin() && base::Prev(it)->second > first)
@@ -131,8 +131,8 @@ bool WriteTracker::Enable() {
   api.api = UFFD_API;
   api.features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED;
   const int pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
-  if (ioctl(uffd, UFFDIO_API, &api) || !(api.features & UFFD_FEATURE_WP_ASYNC) ||
-      pagemap < 0) {
+  if (ioctl(uffd, UFFDIO_API, &api) ||
+      !(api.features & UFFD_FEATURE_WP_ASYNC) || pagemap < 0) {
     close(uffd);
     if (pagemap >= 0)
       close(pagemap);
@@ -151,7 +151,8 @@ bool WriteTracker::Register(u64 first, u64 end) {
     const u64 wide_lo = lo & ~(kRegisterAlign - 1);
     const u64 wide_hi = (hi + kRegisterAlign - 1) & ~(kRegisterAlign - 1);
     bool registered = false;
-    for (const auto& [a, b] : {base::Pair{wide_lo, wide_hi}, base::Pair{lo, hi}}) {
+    for (const auto& [a, b] :
+         {base::Pair{wide_lo, wide_hi}, base::Pair{lo, hi}}) {
       uffdio_register reg{};
       reg.range.start = a;
       reg.range.len = b - a;
@@ -352,7 +353,8 @@ void WriteTracker::Collect(base::Vector<Range>& out) {
   faults_at_scan_ = faults;
   GuestPageTable& table = GuestPages();
   for (size_t i = first_new; i < out.size(); i++)
-    for (u64 page = PageDown(out[i].first); page < out[i].second; page += kPage) {
+    for (u64 page = PageDown(out[i].first); page < out[i].second;
+         page += kPage) {
       written_pages_++;
       GuestPageTable::Page* p = table.At(page);
       if (!p)
@@ -365,8 +367,7 @@ void WriteTracker::Collect(base::Vector<Range>& out) {
       }
       p->reports++;
     }
-  collect_ns_ += ((
-                     base::TimeTicks::Now() - t0).InMicroseconds() * 1000);
+  collect_ns_ += ((base::TimeTicks::Now() - t0).InMicroseconds() * 1000);
 }
 
 void WriteTracker::NoteWrite(u64 base, u64 bytes) {

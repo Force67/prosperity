@@ -143,9 +143,10 @@ base::String SaveRoot() {
          "/.prosperity/savedata";
 }
 
-// The booted title's tag for the save root. the launcher parses TITLE_ID from the
-// pkg's (outer) param.sfo; fall back to "SAVEDATA" when it can't be determined
-// so per-title layout still works and never produces an empty path component.
+// The booted title's tag for the save root. the launcher parses TITLE_ID from
+// the pkg's (outer) param.sfo; fall back to "SAVEDATA" when it can't be
+// determined so per-title layout still works and never produces an empty path
+// component.
 const base::String& TitleTag() {
   static const base::String kTag = [] {
     base::String t = kern::vfs::TitleId();

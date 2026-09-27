@@ -17,9 +17,8 @@
 
 #include "base/arch.h"
 
-
+#include "base/memory/shared_pointer.h"
 #include "gpu/gcn/gcn_decode.h"
-#include <base/memory/shared_pointer.h>
 
 namespace gpu::rdna {
 
@@ -38,9 +37,7 @@ u32 Vop3SourceCount(Enc enc, u32 op);
 // length, stop_at_endpgm stops at the first program-ending instruction. Pass
 // false only when the caller has a real code bound and needs blocks after an
 // early-out s_endpgm.
-Program Decode(const u32* code,
-               u32 max_dwords,
-               bool stop_at_endpgm = true);
+Program Decode(const u32* code, u32 max_dwords, bool stop_at_endpgm = true);
 
 // Recover the real code length (in dwords) from the trailing ShaderBinaryInfo
 // footer the AGC toolchain appends. The locator matches PS4: the code begins
@@ -56,18 +53,20 @@ Program DecodeShader(const u32* code, u32 max_dwords);
 // original PCs for branch and resource-plan lookup.
 Program ReachableProgram(const Program& program);
 
-// Shared, cached ReachableProgram(DecodeShader(...)) for the per-draw resource walks:
-// TrackTextures and ResolveBuffers each decoded the same shader, up to 16 KB of ISA
-// three times per draw (5.4 ms/frame in Dead Cells). Keyed by address, revalidated
-// against a code hash at most once per generation; shared_ptr survives eviction.
-// Not thread-safe: callers hold the command-processor lock.
+// Shared, cached ReachableProgram(DecodeShader(...)) for the per-draw resource
+// walks: TrackTextures and ResolveBuffers each decoded the same shader, up to
+// 16 KB of ISA three times per draw (5.4 ms/frame in Dead Cells). Keyed by
+// address, revalidated against a code hash at most once per generation;
+// shared_ptr survives eviction. Not thread-safe: callers hold the
+// command-processor lock.
 base::SharedPointer<const Program> CachedReachableProgram(const u32* code,
-                                                      u32 max_dwords);
+                                                          u32 max_dwords);
 
-// Hash of the shader's CODE (footer-declared length, else up to the first ending
-// instruction), which is what identifies it for the module cache: AGC titles hand the
-// same program out of a rotating pool, so an address names a different shader per frame
-// and an address-keyed cache recompiles forever. Revalidated once per generation.
+// Hash of the shader's CODE (footer-declared length, else up to the first
+// ending instruction), which is what identifies it for the module cache: AGC
+// titles hand the same program out of a rotating pool, so an address names a
+// different shader per frame and an address-keyed cache recompiles forever.
+// Revalidated once per generation.
 u64 CachedCodeHash(const u32* code, u32 max_dwords);
 
 // Advance the revalidation generation; called once per frame. Repeat lookups

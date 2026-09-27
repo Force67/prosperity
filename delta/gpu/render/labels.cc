@@ -8,7 +8,7 @@
 #include <cstdarg>
 #include <cstdio>
 
-#include <options/options.h>
+#include "options/options.h"
 
 #include "gpu/render/frame.h"
 #include "gpu/render/trace.h"
@@ -31,7 +31,7 @@ const char* Format(char (&buf)[192], const char* fmt, va_list args) {
 }  // namespace
 
 bool WantDebugUtils() {
-  static const bool want = [] {
+  static const bool kWant = [] {
     if (kMarkers.overridden())
       return kMarkers.get();
     // The validation layer consumes labels too: they are what names the guest
@@ -40,7 +40,7 @@ bool WantDebugUtils() {
       return true;
     return dlopen("librenderdoc.so", RTLD_NOW | RTLD_NOLOAD) != nullptr;
   }();
-  return want;
+  return kWant;
 }
 
 void CmdBeginLabel(rhi::CommandList* list, const char* fmt, ...) {

@@ -1,21 +1,22 @@
 
 #include <gtest/gtest.h>
 
+#include "base/containers/array.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
-#include "gpu/render/renderer.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/guest_format.h"
+#include "gpu/render/renderer.h"
 #include "gpu/render/texture_cache.h"
-#include <base/containers/array.h>
 
 // The renderer links the PS4 command processor; this test issues no EOPs.
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe() {}
 
 TEST(Bc6Texture, ObservedHdrBackgroundDescriptorIsValid) {
   // Astro's actual background texture, previously rejected into white.
-  u32 descriptor[8] = {
-      0x8096fe00, 0xcb300000, 0x01ffc3ff, 0x909003ac, 0, 0, 0, 0};
+  u32 descriptor[8] = {0x8096fe00, 0xcb300000, 0x01ffc3ff, 0x909003ac,
+                       0,          0,          0,          0};
   for (u32 format : {179u, 180u}) {
     descriptor[1] = (descriptor[1] & ~(0x1ffu << 20)) | (format << 20);
     const auto image = gpu::rdna::DecodeTImage(descriptor, false);
@@ -48,9 +49,8 @@ TEST(Bc6Texture, NativeUploadsSupportSignedUnsignedTiledMipArrays) {
   for (u32 nfmt : {0u, 1u}) {
     for (u32 tiling : {8u, 0x109u}) {
       const auto set = gpu::render::GetTexture(
-          reinterpret_cast<u64>(images[allocation++].data()),
-          16, 8, 40, nfmt, tiling, 16, 2, 0, 2, 3, 0, 3,
-          0, false, nullptr, false, true);
+          reinterpret_cast<u64>(images[allocation++].data()), 16, 8, 40, nfmt,
+          tiling, 16, 2, 0, 2, 3, 0, 3, 0, false, nullptr, false, true);
       EXPECT_NE(set, nullptr) << "nfmt=" << nfmt << " tiling=" << tiling;
     }
   }

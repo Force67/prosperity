@@ -11,28 +11,28 @@
 
 #include <spirv_cross.hpp>
 
+#include <dirent.h>
+#include <sys/stat.h>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <dirent.h>
-#include <sys/stat.h>
 
+#include "base/algorithm.h"
 #include "base/arch.h"
+#include "base/atomic.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
 #include "gpu/d3d12/d3d12_internal.h"
 #include "gpu/d3d12/d3d12_shader.h"
 #include "gpu/render/backend.h"
-#include <base/algorithm.h>
-#include <base/atomic.h>
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/threading/thread.h>
 
 namespace {
 
@@ -51,7 +51,8 @@ struct Module {
   bool buffer_address = false;
   base::Map<u32, base::Vector<rhi::BindingLayout>> sets;
   u32 push_bytes = 0;
-  base::Vector<base::Pair<u32, rhi::Format>> inputs;  // vertex: location, format
+  base::Vector<base::Pair<u32, rhi::Format>>
+      inputs;  // vertex: location, format
   base::Vector<base::Pair<u32, DXGI_FORMAT>> outputs;  // fragment targets
   bool writes_depth = false;
   u32 separate = 0;  // separate images/samplers the rhi cannot bind
@@ -89,8 +90,8 @@ base::Vector<u32> ReadWords(const base::String& path) {
 
 rhi::Format AttributeFormat(const sc::SPIRType& t) {
   static const rhi::Format kFloat[] = {
-      rhi::Format::kR32Float, rhi::Format::kRG32Float,
-      rhi::Format::kRGB32Float, rhi::Format::kRGBA32Float};
+      rhi::Format::kR32Float, rhi::Format::kRG32Float, rhi::Format::kRGB32Float,
+      rhi::Format::kRGBA32Float};
   static const rhi::Format kUint[] = {
       rhi::Format::kR32Uint, rhi::Format::kRG32Uint, rhi::Format::kRGBA32Uint,
       rhi::Format::kRGBA32Uint};
@@ -167,19 +168,19 @@ bool Reflect(const base::Vector<u32>& words, Module* m, base::String* error) {
           c.get_declared_struct_size(c.get_type(res.base_type_id)));
     for (const sc::Resource& res : r.stage_inputs)
       if (m->stage == rhi::kStageVertex)
-        m->inputs.emplace_back(c.get_decoration(res.id, spv::DecorationLocation),
-                               AttributeFormat(c.get_type(res.type_id)));
+        m->inputs.emplace_back(
+            c.get_decoration(res.id, spv::DecorationLocation),
+            AttributeFormat(c.get_type(res.type_id)));
     for (const sc::Resource& res : r.stage_outputs) {
       if (m->stage != rhi::kStageFragment)
         continue;
       const sc::SPIRType& t = c.get_type(res.type_id);
-      const DXGI_FORMAT f = t.basetype == sc::SPIRType::UInt
-                                ? DXGI_FORMAT_R32G32B32A32_UINT
-                            : t.basetype == sc::SPIRType::Int
-                                ? DXGI_FORMAT_R32G32B32A32_SINT
-                                : DXGI_FORMAT_R32G32B32A32_FLOAT;
-      m->outputs.emplace_back(
-          c.get_decoration(res.id, spv::DecorationLocation), f);
+      const DXGI_FORMAT f =
+          t.basetype == sc::SPIRType::UInt  ? DXGI_FORMAT_R32G32B32A32_UINT
+          : t.basetype == sc::SPIRType::Int ? DXGI_FORMAT_R32G32B32A32_SINT
+                                            : DXGI_FORMAT_R32G32B32A32_FLOAT;
+      m->outputs.emplace_back(c.get_decoration(res.id, spv::DecorationLocation),
+                              f);
     }
     for (const sc::BuiltInResource& b : r.builtin_outputs)
       if (b.builtin == spv::BuiltInFragDepth)
@@ -234,8 +235,8 @@ class PsoChecker {
 
  private:
   base::String Build(const Module& m,
-                    const base::Vector<u8>& dxil,
-                    base::Vector<rhi::Object*>& objects) {
+                     const base::Vector<u8>& dxil,
+                     base::Vector<rhi::Object*>& objects) {
     rhi::PipelineLayoutDesc pl;
     u32 sets = 0;
     for (const auto& [s, bindings] : m.sets)
@@ -299,7 +300,8 @@ class PsoChecker {
     for (const auto& [location, format] : m.outputs)
       if (location < 8) {
         pd.RTVFormats[location] = format;
-        pd.NumRenderTargets = base::Max<UINT>(pd.NumRenderTargets, location + 1);
+        pd.NumRenderTargets =
+            base::Max<UINT>(pd.NumRenderTargets, location + 1);
         pd.BlendState.RenderTarget[location].RenderTargetWriteMask = 0xF;
       }
     for (UINT i = 0; i < pd.NumRenderTargets; i++)
@@ -388,7 +390,8 @@ int main(int argc, char** argv) {
   }
   if (inputs.empty()) {
     const char* home = std::getenv("HOME");
-    inputs.push_back(base::String(home ? home : ".") + "/.cache/ps4delta/spirv");
+    inputs.push_back(base::String(home ? home : ".") +
+                     "/.cache/ps4delta/spirv");
   }
   base::Vector<base::String> files;
   for (const base::String& p : inputs) {
@@ -464,8 +467,7 @@ int main(int argc, char** argv) {
       if (ok)
         std::printf("// %s\n%s\n", files[n].c_str(), lowered.hlsl.c_str());
       else
-        std::printf("%s: lower: %s\n", files[n].c_str(),
-                    lowered.error.c_str());
+        std::printf("%s: lower: %s\n", files[n].c_str(), lowered.error.c_str());
     }
     if (!ok) {
       base::LockGuard<base::Mutex> lock(mutex);
@@ -501,20 +503,23 @@ int main(int argc, char** argv) {
   };
   base::Vector<base::UniquePointer<base::Thread>> threads;
   for (u32 t = 0; t < jobs; t++)
-    threads.push_back(base::MakeUnique<base::Thread>("corpus", [&] {
-      for (size_t n; (n = next++) < files.size();) {
-        process(n);
-        if (++done % 1000 == 0)
-          std::fprintf(stderr, "%zu / %zu\n", done.load(), files.size());
-      }
-    }, true));
+    threads.push_back(base::MakeUnique<base::Thread>(
+        "corpus",
+        [&] {
+          for (size_t n; (n = next++) < files.size();) {
+            process(n);
+            if (++done % 1000 == 0)
+              std::fprintf(stderr, "%zu / %zu\n", done.load(), files.size());
+          }
+        },
+        true));
   for (auto& t : threads)
     t->Join();
 
-  std::printf("%zu modules; %d declare barycentrics (%d read them, emulated), "
-              "%d buffer addresses, %d separate images/samplers\n",
-              files.size(), barycentric, barycentric_read, buffer_address,
-              separate);
+  std::printf(
+      "%zu modules; %d declare barycentrics (%d read them, emulated), "
+      "%d buffer addresses, %d separate images/samplers\n",
+      files.size(), barycentric, barycentric_read, buffer_address, separate);
   std::printf("stage   total  lowered  compiled%s\n", pso ? "  pipeline" : "");
   for (const auto& [name, s] : stats)
     if (pso)

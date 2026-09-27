@@ -15,9 +15,9 @@
  */
 
 #include "base/arch.h"
-#include <base/containers/vector.h>
-#include <base/functional/function.h>
-#include <base/strings/xstring.h>
+#include "base/containers/vector.h"
+#include "base/functional/function.h"
+#include "base/strings/xstring.h"
 
 namespace gpu::gcn::spirv {
 

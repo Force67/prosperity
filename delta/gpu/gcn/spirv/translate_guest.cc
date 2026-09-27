@@ -1,7 +1,7 @@
 /* PS4Delta: checked guest-address reads and writes for runtime compute. */
 #ifdef DELTA_HAVE_SPIRV_BACKEND
+#include "base/containers/vector.h"
 #include "gpu/gcn/spirv/translator.h"
-#include <base/containers/vector.h>
 
 namespace gpu::gcn {
 namespace {
@@ -369,7 +369,11 @@ void EmitGuestGlobal(Translator& t, const Inst& inst, StageContext& sc) {
     t.m.OpenBlock(active_done);
   }
 }
-void CsGuestStoreMasked(Translator& t, StageContext& sc, Id guest, Id value, Id mask) {
+void CsGuestStoreMasked(Translator& t,
+                        StageContext& sc,
+                        Id guest,
+                        Id value,
+                        Id mask) {
   const Id address = CsGuestAddress(t, sc, guest, t.U32(4), true);
   const Id valid = NonNull(t, address);
   const Id access = t.m.NewBlock(), done = t.m.NewBlock();
@@ -379,13 +383,16 @@ void CsGuestStoreMasked(Translator& t, StageContext& sc, Id guest, Id value, Id 
   const Id ptr = PhysicalPointer(t, address);
   const Id scope = t.U32(static_cast<u32>(spv::Scope::Device)), zero = t.U32(0);
   const Id initial = t.m.Emit(spv::Op::OpAtomicLoad, t.t_u, {ptr, scope, zero});
-  const Id header = t.m.NewBlock(), retry = t.m.NewBlock(), complete = t.m.NewBlock();
+  const Id header = t.m.NewBlock(), retry = t.m.NewBlock(),
+           complete = t.m.NewBlock();
   const Id returned = t.m.Alloc();
   t.m.Branch(header);
   t.m.OpenBlock(header);
-  const Id expected = t.m.Emit(spv::Op::OpPhi, t.t_u, {initial, access, returned, retry});
+  const Id expected =
+      t.m.Emit(spv::Op::OpPhi, t.t_u, {initial, access, returned, retry});
   const Id replacement = t.Or(t.And(expected, t.Not(mask)), t.And(value, mask));
-  t.m.EmitVoid(spv::Op::OpAtomicCompareExchange,
+  t.m.EmitVoid(
+      spv::Op::OpAtomicCompareExchange,
       {t.t_u, returned, ptr, scope, zero, zero, replacement, expected});
   const Id success = t.Eq(returned, expected);
   t.m.LoopMerge(complete, retry);
@@ -401,73 +408,95 @@ namespace {
 struct LinearImage {
   Translator& t;
   u32 sgpr;
-  Id field(u32 word, u32 shift, u32 mask) {
+  Id Field(u32 word, u32 shift, u32 mask) {
     return t.And(t.Shr(t.Sg(sgpr + word), t.U32(shift)), t.U32(mask));
   }
-  Id any(Id value, std::initializer_list<u32> options) {
+  Id Any(Id value, std::initializer_list<u32> options) {
     Id result = t.m.ConstBool(false);
     for (u32 option : options)
-      result = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {result, t.Eq(value, t.U32(option))});
+      result = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
+                        {result, t.Eq(value, t.U32(option))});
     return result;
   }
 };
-}
+}  // namespace
 
 Id CsLinearImageEligible(Translator& t, const Inst& inst) {
   LinearImage im{t, ((inst.raw[1] >> 16) & 31) * 4};
-  const Id format = im.field(1, 20, 511), type = im.field(3, 28, 15);
-  Id valid = im.any(format, {5, 18, 20, 21, 27, 28, 60, 61, 62, 63, 69, 70, 75, 76});
-  valid = t.LAnd(valid, im.any(type, {8, 9, 12, 13}));
-  valid = t.LAnd(valid, t.IsZero(im.field(3, 12, 0x1fff))); // mip 0, SW_LINEAR
-  valid = t.LAnd(valid, t.IsZero(im.field(5, 4, 15))); // one physical mip
+  const Id format = im.Field(1, 20, 511), type = im.Field(3, 28, 15);
+  Id valid =
+      im.Any(format, {5, 18, 20, 21, 27, 28, 60, 61, 62, 63, 69, 70, 75, 76});
+  valid = t.LAnd(valid, im.Any(type, {8, 9, 12, 13}));
+  valid = t.LAnd(valid, t.IsZero(im.Field(3, 12, 0x1fff)));  // mip 0, SW_LINEAR
+  valid = t.LAnd(valid, t.IsZero(im.Field(5, 4, 15)));       // one physical mip
   valid = t.LAnd(valid, t.IsZero(t.And(t.Sg(im.sgpr + 4), t.U32(0xe000c000))));
-  const Id array_ok = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
-      {t.Ult(type, t.U32(12)), t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool,
-          {im.field(4, 16, 8191), im.field(4, 0, 8191)})});
+  const Id array_ok =
+      t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
+               {t.Ult(type, t.U32(12)),
+                t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool,
+                         {im.Field(4, 16, 8191), im.Field(4, 0, 8191)})});
   return t.LAnd(valid, array_ok);
 }
 
-void EmitCsLinearImage(Translator& t, const Inst& inst, StageContext& sc,
+void EmitCsLinearImage(Translator& t,
+                       const Inst& inst,
+                       StageContext& sc,
                        const Id* address) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const bool store = ((w >> 18) & 127) == 8;
   const u32 dmask = (w >> 8) & 15, vdata = (w1 >> 8) & 255;
   LinearImage im{t, ((w1 >> 16) & 31) * 4};
-  const auto coord = [&](u32 i) { return address ? address[i] : t.Vg((w1 & 255) + i); };
-  const Id format = im.field(1, 20, 511), type = im.field(3, 28, 15);
-  const Id bits = t.SelectB(im.any(format, {5, 18, 60, 61}), t.U32(8),
-      t.SelectB(im.any(format, {27, 28, 69, 70}), t.U32(16), t.U32(32)));
-  const Id channels = t.SelectB(im.any(format, {5, 20, 21}), t.U32(1),
-      t.SelectB(im.any(format, {18, 27, 28, 62, 63}), t.U32(2), t.U32(4)));
+  const auto coord = [&](u32 i) {
+    return address ? address[i] : t.Vg((w1 & 255) + i);
+  };
+  const Id format = im.Field(1, 20, 511), type = im.Field(3, 28, 15);
+  const Id bits = t.SelectB(
+      im.Any(format, {5, 18, 60, 61}), t.U32(8),
+      t.SelectB(im.Any(format, {27, 28, 69, 70}), t.U32(16), t.U32(32)));
+  const Id channels = t.SelectB(
+      im.Any(format, {5, 20, 21}), t.U32(1),
+      t.SelectB(im.Any(format, {18, 27, 28, 62, 63}), t.U32(2), t.U32(4)));
   const Id component_bytes = t.Shr(bits, t.U32(3));
   const Id texel_bytes = t.Mul(component_bytes, channels);
-  const Id width = t.Add(t.Or(im.field(1, 30, 3), t.Shl(im.field(2, 0, 4095), t.U32(2))), t.U32(1));
-  const Id height = t.Add(im.field(2, 14, 16383), t.U32(1));
-  const Id one_d = im.any(type, {8, 12});
-  const Id arrayed = im.any(type, {12, 13});
+  const Id width =
+      t.Add(t.Or(im.Field(1, 30, 3), t.Shl(im.Field(2, 0, 4095), t.U32(2))),
+            t.U32(1));
+  const Id height = t.Add(im.Field(2, 14, 16383), t.U32(1));
+  const Id one_d = im.Any(type, {8, 12});
+  const Id arrayed = im.Any(type, {12, 13});
   const Id x = coord(0), y = t.SelectB(one_d, t.U32(0), coord(1));
-  const Id layer = t.SelectB(arrayed,
-      t.Add(im.field(4, 16, 8191), t.SelectB(one_d, coord(1), coord(2))), t.U32(0));
-  const Id layers = t.SelectB(arrayed, t.Add(im.field(4, 0, 8191), t.U32(1)), t.U32(1));
+  const Id layer = t.SelectB(
+      arrayed,
+      t.Add(im.Field(4, 16, 8191), t.SelectB(one_d, coord(1), coord(2))),
+      t.U32(0));
+  const Id layers =
+      t.SelectB(arrayed, t.Add(im.Field(4, 0, 8191), t.U32(1)), t.U32(1));
   const Id rows = t.SelectB(one_d, t.U32(1), height);
-  const Id pitch = t.And(t.Add(t.Mul(width, texel_bytes), t.U32(255)), t.U32(~255u));
+  const Id pitch =
+      t.And(t.Add(t.Mul(width, texel_bytes), t.U32(255)), t.U32(~255u));
   const Id wide = t.m.TypeInt(64, false);
-  const Id base = t.m.Emit(spv::Op::OpShiftLeftLogical, wide,
-      {Pair(t, t.Sg(im.sgpr), im.field(1, 0, 255)), t.U32(8)});
+  const Id base =
+      t.m.Emit(spv::Op::OpShiftLeftLogical, wide,
+               {Pair(t, t.Sg(im.sgpr), im.Field(1, 0, 255)), t.U32(8)});
   // Compute in 64 bits: an array view can cover several GiB of decoder frames.
-  const Id row = t.m.Emit(spv::Op::OpIAdd, wide,
-      {t.m.Emit(spv::Op::OpIMul, wide, {Wide(t, layer), Wide(t, rows)}), Wide(t, y)});
-  const Id offset = t.m.Emit(spv::Op::OpIAdd, wide,
-      {t.m.Emit(spv::Op::OpIMul, wide, {row, Wide(t, pitch)}),
-       Wide(t, t.Mul(x, texel_bytes))});
+  const Id row = t.m.Emit(
+      spv::Op::OpIAdd, wide,
+      {t.m.Emit(spv::Op::OpIMul, wide, {Wide(t, layer), Wide(t, rows)}),
+       Wide(t, y)});
+  const Id offset =
+      t.m.Emit(spv::Op::OpIAdd, wide,
+               {t.m.Emit(spv::Op::OpIMul, wide, {row, Wide(t, pitch)}),
+                Wide(t, t.Mul(x, texel_bytes))});
   const Id pixel = t.m.Emit(spv::Op::OpIAdd, wide, {base, offset});
-  Id valid = t.LAnd(t.Ult(x, width), t.LAnd(t.Ult(y, rows), t.Ult(layer, layers)));
+  Id valid =
+      t.LAnd(t.Ult(x, width), t.LAnd(t.Ult(y, rows), t.Ult(layer, layers)));
   valid = t.LAnd(valid, t.LaneActive(t.Exec()));
   // Keep sources intact when VDATA overlaps the coordinates.
   Id source[4] = {}, result[4] = {};
   u32 packed = 0;
   for (u32 c = 0; c < 4; ++c)
-    if (dmask & (1u << c)) source[c] = t.Vg(vdata + packed++);
+    if (dmask & (1u << c))
+      source[c] = t.Vg(vdata + packed++);
   const Id access = t.m.NewBlock(), done = t.m.NewBlock();
   const Id from = t.m.CurrentBlock();
   t.m.SelectionMerge(done);
@@ -475,8 +504,9 @@ void EmitCsLinearImage(Translator& t, const Inst& inst, StageContext& sc,
   t.m.OpenBlock(access);
   const Id value_mask = t.Shr(t.U32(~0u), t.Sub(t.U32(32), bits));
   for (u32 c = 0; c < 4; ++c) {
-    if (!(dmask & (1u << c))) continue;
-    const Id selector = store ? t.U32(c + 4) : im.field(3, c * 3, 7);
+    if (!(dmask & (1u << c)))
+      continue;
+    const Id selector = store ? t.U32(c + 4) : im.Field(3, c * 3, 7);
     const Id channel = t.Sub(selector, t.U32(4));
     const Id channel_valid = t.Ult(channel, channels);
     const Id channel_from = t.m.CurrentBlock();
@@ -484,15 +514,17 @@ void EmitCsLinearImage(Translator& t, const Inst& inst, StageContext& sc,
     t.m.SelectionMerge(component_done);
     t.m.BranchConditional(channel_valid, component, component_done);
     t.m.OpenBlock(component);
-    const Id guest = t.m.Emit(spv::Op::OpIAdd, wide,
-        {pixel, Wide(t, t.Mul(channel, component_bytes))});
+    const Id guest =
+        t.m.Emit(spv::Op::OpIAdd, wide,
+                 {pixel, Wide(t, t.Mul(channel, component_bytes))});
     const Id low = t.m.Emit(spv::Op::OpUConvert, t.t_u, {guest});
     const Id aligned = t.m.Emit(spv::Op::OpBitwiseAnd, wide,
-        {guest, Pair(t, t.U32(~3u), t.U32(~0u))});
+                                {guest, Pair(t, t.U32(~3u), t.U32(~0u))});
     const Id shift = t.Mul(t.And(low, t.U32(3)), t.U32(8));
     Id value = 0;
     if (store) {
-      CsGuestStoreMasked(t, sc, aligned, t.Shl(source[c], shift), t.Shl(value_mask, shift));
+      CsGuestStoreMasked(t, sc, aligned, t.Shl(source[c], shift),
+                         t.Shl(value_mask, shift));
     } else {
       const Id physical = CsGuestAddress(t, sc, aligned, t.U32(4));
       const Id mapped = NonNull(t, physical), mapped_from = t.m.CurrentBlock();
@@ -500,13 +532,15 @@ void EmitCsLinearImage(Translator& t, const Inst& inst, StageContext& sc,
       t.m.SelectionMerge(read_done);
       t.m.BranchConditional(mapped, read, read_done);
       t.m.OpenBlock(read);
-      const Id raw = t.And(t.Shr(CsPhysicalLoad(t, physical), shift), value_mask);
+      const Id raw =
+          t.And(t.Shr(CsPhysicalLoad(t, physical), shift), value_mask);
       t.m.Branch(read_done);
       t.m.OpenBlock(read_done);
-      value = t.m.Emit(spv::Op::OpPhi, t.t_u, {raw, read, t.U32(0), mapped_from});
+      value =
+          t.m.Emit(spv::Op::OpPhi, t.t_u, {raw, read, t.U32(0), mapped_from});
       const Id sign_shift = t.Sub(t.U32(32), bits);
-      value = t.SelectB(im.any(format, {21, 28, 61, 63, 70, 76}),
-          t.Sar(t.Shl(value, sign_shift), sign_shift), value);
+      value = t.SelectB(im.Any(format, {21, 28, 61, 63, 70, 76}),
+                        t.Sar(t.Shl(value, sign_shift), sign_shift), value);
     }
     const Id component_end = t.m.CurrentBlock();
     t.m.Branch(component_done);
@@ -515,8 +549,9 @@ void EmitCsLinearImage(Translator& t, const Inst& inst, StageContext& sc,
       // Phi operands must be defined in their corresponding predecessor.
       // Use zero here; constant-one selectors are applied after the merge.
       result[c] = t.m.Emit(spv::Op::OpPhi, t.t_u,
-          {value, component_end, t.U32(0), channel_from});
-      const Id fallback = t.SelectB(t.Eq(selector, t.U32(1)), t.U32(1), t.U32(0));
+                           {value, component_end, t.U32(0), channel_from});
+      const Id fallback =
+          t.SelectB(t.Eq(selector, t.U32(1)), t.U32(1), t.U32(0));
       result[c] = t.SelectB(channel_valid, result[c], fallback);
     }
   }
@@ -527,10 +562,12 @@ void EmitCsLinearImage(Translator& t, const Inst& inst, StageContext& sc,
     Id merged[4] = {};
     for (u32 c = 0; c < 4; ++c)
       if (dmask & (1u << c))
-        merged[c] = t.m.Emit(spv::Op::OpPhi, t.t_u, {result[c], access_end, t.U32(0), from});
+        merged[c] = t.m.Emit(spv::Op::OpPhi, t.t_u,
+                             {result[c], access_end, t.U32(0), from});
     packed = 0;
     for (u32 c = 0; c < 4; ++c)
-      if (dmask & (1u << c)) t.SetVg(vdata + packed++, merged[c]);
+      if (dmask & (1u << c))
+        t.SetVg(vdata + packed++, merged[c]);
   }
 }
 }  // namespace gpu::gcn

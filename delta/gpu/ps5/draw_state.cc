@@ -10,23 +10,23 @@
 
 #include <cstring>
 
-#include <base/containers/array.h>
-#include <base/logging.h>
-#include <options/options.h>
+#include "base/containers/array.h"
+#include "base/logging.h"
+#include "options/options.h"
 
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/gpu_perf.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps5/cmd_trace.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/shader_cache.h"
-#include "gpu/gpu_perf.h"
-#include <base/containers/map.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
@@ -188,8 +188,7 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
   binding.vs_user_data = gs_populated ? gs_user_data : es_user_data;
   binding.ps_user_data = regs.At(mmSPI_SHADER_USER_DATA_PS_0);
   TraceUserData(gs_user_data, es_user_data);
-  TraceVsUserData(binding.vs_addr, gs_user_data, es_user_data,
-                  gs_populated);
+  TraceVsUserData(binding.vs_addr, gs_user_data, es_user_data, gs_populated);
 
   if (!IsGuestAddress(binding.vs_addr) || !IsGuestAddress(binding.ps_addr))
     RecoverShaderAddresses(regs, binding);
@@ -207,8 +206,9 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
 // the V#'s num_records, a shared ~210k-record ring, so they all tripped the
 // vertex-count cap and were dropped.
 void ResolveIndexBuffer(const DrawPacket& packet, render::DrawInfo& d) {
-  const u64 index_size =
-      packet.index_type == 1 ? 4 : packet.index_type == 2 ? 1 : 2;
+  const u64 index_size = packet.index_type == 1   ? 4
+                         : packet.index_type == 2 ? 1
+                                                  : 2;
   const u32* body = packet.body;
   if (packet.op == IT_DRAW_INDEX_OFFSET_2 && packet.count >= 3 &&
       packet.index_base) {
@@ -340,10 +340,9 @@ void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
   // the logo and world that followed it.
   d.depth_clear_draw = (d.render_control & 1u) != 0;
   const u32 z_info = kNoDepth ? 0 : regs[mmDB_Z_INFO];
-  const u64 z_base =
-      ((static_cast<u64>(regs[mmDB_Z_WRITE_BASE_HI]) << 32) |
-       regs[mmDB_Z_WRITE_BASE])
-      << 8;
+  const u64 z_base = ((static_cast<u64>(regs[mmDB_Z_WRITE_BASE_HI]) << 32) |
+                      regs[mmDB_Z_WRITE_BASE])
+                     << 8;
   d.depth_valid = (z_info & 0x3) != 0;
   if (!d.depth_valid || !IsGuestAddress(z_base) ||
       !((control & 1u) || ((control >> 1) & 1u) || ((control >> 2) & 1u))) {
@@ -353,10 +352,9 @@ void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
   d.depth_base = z_base;
   // SLICE_START: the array layer this pass renders (shadow cascades).
   d.depth_slice = regs[mmDB_DEPTH_VIEW] & 0x7FF;
-  const u64 htile =
-      ((static_cast<u64>(regs[mmDB_HTILE_DATA_BASE_HI]) << 32) |
-       regs[mmDB_HTILE_DATA_BASE])
-      << 8;
+  const u64 htile = ((static_cast<u64>(regs[mmDB_HTILE_DATA_BASE_HI]) << 32) |
+                     regs[mmDB_HTILE_DATA_BASE])
+                    << 8;
   if (IsGuestAddress(htile))
     d.depth_htile_base = htile;
   d.depth_test_enable = (control >> 1) & 1u;
@@ -511,9 +509,9 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
     u32 dfmt = vb.dfmt, nfmt = vb.nfmt;
     if (attr_res[i]->inst_format)
       rdna::DecodeBufferFormat(attr_res[i]->inst_format, dfmt, nfmt);
-    d.vattrs[d.num_vattrs++] = {attr_res[i]->location,  b,
-                                static_cast<u32>(off),  attr_res[i]->num_comps,
-                                dfmt,                   nfmt};
+    d.vattrs[d.num_vattrs++] = {
+        attr_res[i]->location,  b,    static_cast<u32>(off),
+        attr_res[i]->num_comps, dfmt, nfmt};
   }
 
   if (!d.num_vbufs)
@@ -600,8 +598,8 @@ void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
         base = it->second.descriptor[0] |
                (static_cast<u64>(it->second.descriptor[1] & 0xFFFF) << 32);
       else if (const u32 s = sb.srsrc_sgpr - kRawBufTag; s + 1 < user_sgprs)
-        base = user_data[s] |
-               (static_cast<u64>(user_data[s + 1] & 0xFFFF) << 32);
+        base =
+            user_data[s] | (static_cast<u64>(user_data[s + 1] & 0xFFFF) << 32);
       const bool ok = IsGuestAddress(base) &&
                       gpu::IsReadableRangeCached(base, kRawBufWindow);
       TraceRawBufBinding(vertex_stage, sb.binding, sb.use_pc, sb.srsrc_sgpr,
@@ -617,11 +615,9 @@ void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
       vb = rdna::DecodeVBuffer(it->second.descriptor);
     else if (sb.srsrc_sgpr + 3 < user_sgprs)
       vb = rdna::DecodeVBuffer(&user_data[sb.srsrc_sgpr]);
-    const u64 bytes =
-        vb.stride ? static_cast<u64>(vb.stride) * vb.num_records
-                  : vb.num_records;
-    const bool ok =
-        IsGuestAddress(vb.base) && bytes && bytes <= 0xFFFFFFFFull;
+    const u64 bytes = vb.stride ? static_cast<u64>(vb.stride) * vb.num_records
+                                : vb.num_records;
+    const bool ok = IsGuestAddress(vb.base) && bytes && bytes <= 0xFFFFFFFFull;
     TraceRawBufBinding(vertex_stage, sb.binding, sb.use_pc, sb.srsrc_sgpr,
                        it != resources.end() && it->second.descriptor_valid,
                        vb.base, ok ? bytes : 0);
@@ -641,8 +637,8 @@ void ResolvePsTextures(u64 ps_addr,
                        const u32* ps_user_data,
                        u32 ps_user_sgprs,
                        render::DrawInfo& d) {
-  const auto texs = rdna::TrackTextures(
-      reinterpret_cast<const u32*>(ps_addr), ps_user_data, ps_user_sgprs);
+  const auto texs = rdna::TrackTextures(reinterpret_cast<const u32*>(ps_addr),
+                                        ps_user_data, ps_user_sgprs);
   if (texs.empty())
     return;
   // The single-texture render path reads the legacy tex* mirror of texs[0], so
@@ -687,29 +683,29 @@ void FillDrawTex(u32 slot, const gcn::TImage& s, render::DrawInfo& d) {
   render::DrawInfo::DrawTex& dt = d.texs[slot];
   dt = {};
   TraceRejectedTexture(slot, s);
-    dt.base = s.valid ? s.base : 0;
-    dt.w = s.width;
-    dt.h = s.height;
-    dt.tiling = s.tiling_idx;
-    dt.pitch = s.pitch;
-    dt.dfmt = s.dfmt;
-    dt.nfmt = s.nfmt;
-    dt.layers = s.layers;
-    dt.depth = s.depth;
-    dt.base_array = s.base_array;
-    dt.view_layers = s.view_layers;
-    dt.mip_levels = s.mip_levels;
-    dt.base_mip = s.base_mip;
-    dt.view_mips = s.view_mips;
-    dt.min_lod = s.min_lod;
-    std::memcpy(dt.sampler, s.sampler, sizeof(dt.sampler));
-    dt.sampler_valid = s.sampler_valid;
-    dt.arrayed = s.arrayed;
-    dt.is_3d = s.is_3d;
-    dt.force_lod_zero = s.force_lod_zero;
-    dt.depth_compare = s.depth_compare;
-    dt.storage = s.storage;
-    dt.null_descriptor = s.null_descriptor;
+  dt.base = s.valid ? s.base : 0;
+  dt.w = s.width;
+  dt.h = s.height;
+  dt.tiling = s.tiling_idx;
+  dt.pitch = s.pitch;
+  dt.dfmt = s.dfmt;
+  dt.nfmt = s.nfmt;
+  dt.layers = s.layers;
+  dt.depth = s.depth;
+  dt.base_array = s.base_array;
+  dt.view_layers = s.view_layers;
+  dt.mip_levels = s.mip_levels;
+  dt.base_mip = s.base_mip;
+  dt.view_mips = s.view_mips;
+  dt.min_lod = s.min_lod;
+  std::memcpy(dt.sampler, s.sampler, sizeof(dt.sampler));
+  dt.sampler_valid = s.sampler_valid;
+  dt.arrayed = s.arrayed;
+  dt.is_3d = s.is_3d;
+  dt.force_lod_zero = s.force_lod_zero;
+  dt.depth_compare = s.depth_compare;
+  dt.storage = s.storage;
+  dt.null_descriptor = s.null_descriptor;
   dt.swizzle = PackDstSel(s);
 }
 
@@ -762,9 +758,9 @@ void AppendStageTextures(u64 code,
                          u32 ud_base,
                          render::DrawInfo& d,
                          u64 system_user_data_addr = 0) {
-  const auto texs = rdna::TrackTextures(reinterpret_cast<const u32*>(code),
-                                        user_data, user_sgprs, ud_base,
-                                        system_user_data_addr);
+  const auto texs =
+      rdna::TrackTextures(reinterpret_cast<const u32*>(code), user_data,
+                          user_sgprs, ud_base, system_user_data_addr);
   for (size_t i = 0;
        i < texs.size() && d.num_texs < render::DrawInfo::kMaxDrawTextures; i++)
     FillDrawTex(d.num_texs++, texs[i], d);
@@ -773,8 +769,9 @@ void AppendStageTextures(u64 code,
 
 // Recompile the VS/PS pair (cached) and resolve the live vertex-attribute
 // buffers, constant buffers and textures from the RDNA2 descriptors in user
-// data. Leaves d.recomp null when the draw cannot run, which the caller reports.
-// `shader_attrs` is how many attributes the shader wanted, for that report.
+// data. Leaves d.recomp null when the draw cannot run, which the caller
+// reports. `shader_attrs` is how many attributes the shader wanted, for that
+// report.
 void ResolveRecompiledShaders(const Regs& regs,
                               const ShaderBinding& binding,
                               render::DrawInfo& d,
@@ -791,11 +788,11 @@ void ResolveRecompiledShaders(const Regs& regs,
   const u32 ps_user_sgprs = UserSgprCount(regs[mmSPI_SHADER_PGM_RSRC2_PS]);
   // Fetch-shader pointer (a heuristic default: GS user data[0..1]; the AGC
   // input-usage table is authoritative and a follow-up).
-  const u64 fetch = vs_user_sgprs >= 2
-                        ? (static_cast<u64>(binding.vs_user_data[1] & 0xFFFF)
-                           << 32) |
-                              binding.vs_user_data[0]
-                        : 0;
+  const u64 fetch =
+      vs_user_sgprs >= 2
+          ? (static_cast<u64>(binding.vs_user_data[1] & 0xFFFF) << 32) |
+                binding.vs_user_data[0]
+          : 0;
 
   NoteDrawDetail();
   if (!kRecompOn || !IsGuestAddress(binding.vs_addr) ||
@@ -807,17 +804,19 @@ void ResolveRecompiledShaders(const Regs& regs,
     return;
 
   rdna::NggConfig ngg;
-  const u64 gs_user_data_addr = regs[mmSPI_SHADER_USER_DATA_ADDR_LO_GS] |
+  const u64 gs_user_data_addr =
+      regs[mmSPI_SHADER_USER_DATA_ADDR_LO_GS] |
       (static_cast<u64>(regs[mmSPI_SHADER_USER_DATA_ADDR_HI_GS]) << 32);
   const auto* es_code = reinterpret_cast<const u32*>(binding.es_addr);
-  const bool point_ngg = d.prim_type == 1 && !d.index_count &&
-                         binding.vs_addr == binding.es_addr;
-  const bool split_ngg = point_ngg && binding.es_addr != binding.gs_addr &&
+  const bool point_ngg =
+      d.prim_type == 1 && !d.index_count && binding.vs_addr == binding.es_addr;
+  const bool split_ngg =
+      point_ngg && binding.es_addr != binding.gs_addr &&
       IsGuestAddress(binding.gs_addr) &&
       gpu::IsReadableRangeCached(binding.gs_addr, kMaxShaderBytes) &&
       rdna::HasNggTransfer(es_code);
-  const bool unified_ngg = point_ngg && !split_ngg &&
-                          rdna::HasNggPrimitiveExports(es_code);
+  const bool unified_ngg =
+      point_ngg && !split_ngg && rdna::HasNggPrimitiveExports(es_code);
   if (split_ngg || unified_ngg) {
     // In a point-input geometry pipeline each input primitive is one ES
     // vertex. The register limits bound the expanded vertices and triangles;
@@ -827,18 +826,26 @@ void ResolveRecompiledShaders(const Regs& regs,
     // Point primitives are independent, and NGG programs already handle a
     // partial final group. Use smaller input batches to fit Vulkan's guaranteed
     // 128 mesh invocations; DrawMeshTasks still covers every input primitive.
-    const u32 per_input = base::Max({1u, vertices_per_input, primitives_per_input});
-    const u32 inputs = base::Min((regs[mmVGT_GS_ONCHIP_CNTL] >> 11) & 0x7ff,
-                                128u / per_input);
+    const u32 per_input =
+        base::Max({1u, vertices_per_input, primitives_per_input});
+    const u32 inputs =
+        base::Min((regs[mmVGT_GS_ONCHIP_CNTL] >> 11) & 0x7ff, 128u / per_input);
     const u32 vertices = inputs * vertices_per_input;
     const u32 primitives = inputs * primitives_per_input;
     const u32 lds = ((regs[mmSPI_SHADER_PGM_RSRC2_GS] >> 19) & 0xff) * 128;
-    if (inputs && vertices && primitives && lds &&
-        vertices <= 256 && primitives <= 256) {
-      const u32 threads = (base::Max({inputs, vertices, primitives}) + 63) & ~63u;
-      ngg = {split_ngg ? reinterpret_cast<const u32*>(binding.gs_addr) : es_code,
-               threads, inputs, vertices, primitives, lds, gs_user_data_addr,
-               split_ngg};
+    if (inputs && vertices && primitives && lds && vertices <= 256 &&
+        primitives <= 256) {
+      const u32 threads =
+          (base::Max({inputs, vertices, primitives}) + 63) & ~63u;
+      ngg = {
+          split_ngg ? reinterpret_cast<const u32*>(binding.gs_addr) : es_code,
+          threads,
+          inputs,
+          vertices,
+          primitives,
+          lds,
+          gs_user_data_addr,
+          split_ngg};
     }
   }
   const gcn::Recompiled& rc = GetGraphicsShader(
@@ -864,10 +871,9 @@ void ResolveRecompiledShaders(const Regs& regs,
   // user_data[N-udBase] for both attributes and cbuffers. Defaults to 8 (the
   // observed merged-NGG layout); DELTA_PS5_UDBASE overrides.
   // TODO: derive from RSRC2.
-  const ResolvedBuffers vs_resources =
-      rdna::ResolveBuffers(reinterpret_cast<const u32*>(binding.vs_addr),
-                           binding.vs_user_data, vs_user_sgprs, kUdBase, 4096,
-                           ngg.gs_code ? gs_user_data_addr : 0);
+  const ResolvedBuffers vs_resources = rdna::ResolveBuffers(
+      reinterpret_cast<const u32*>(binding.vs_addr), binding.vs_user_data,
+      vs_user_sgprs, kUdBase, 4096, ngg.gs_code ? gs_user_data_addr : 0);
   TraceAttrPlan(rc.attrs.size(), vs_user_sgprs, vs_resources.size(),
                 binding.vs_user_data);
   BindVertexAttributes(rc, vs_resources, binding.vs_user_data, vs_user_sgprs,
@@ -891,19 +897,19 @@ void ResolveRecompiledShaders(const Regs& regs,
   // flush.
   const ResolvedBuffers ps_resources =
       binding.ps_addr
-          ? rdna::ResolveBuffers(
-                reinterpret_cast<const u32*>(binding.ps_addr),
-                binding.ps_user_data, ps_user_sgprs)
+          ? rdna::ResolveBuffers(reinterpret_cast<const u32*>(binding.ps_addr),
+                                 binding.ps_user_data, ps_user_sgprs)
           : ResolvedBuffers{};
   if (!good) {
     d.num_vattrs = 0;
     return;
   }
-  const ResolvedBuffers gs_resources = rc.mesh_spirv.empty()
-      ? ResolvedBuffers{}
-      : rdna::ResolveBuffers(ngg.gs_code,
-                              binding.vs_user_data, vs_user_sgprs, kUdBase,
-                              4096, gs_user_data_addr);
+  const ResolvedBuffers gs_resources =
+      rc.mesh_spirv.empty()
+          ? ResolvedBuffers{}
+          : rdna::ResolveBuffers(ngg.gs_code, binding.vs_user_data,
+                                 vs_user_sgprs, kUdBase, 4096,
+                                 gs_user_data_addr);
   ResolveCbufferBindings(rc.vs_cbufs, vs_resources, true, binding.vs_addr, d,
                          &gs_resources);
   ResolveRawBuffers(rc.vs_bufs, vs_resources, binding.vs_user_data,
@@ -923,10 +929,11 @@ void ResolveRecompiledShaders(const Regs& regs,
   // order the renderer reads them back in. Its user data starts at s8: the
   // merged NGG stage is launched there.
   if (!rc.vs_texs.empty()) {
-    AppendStageTextures(rc.mesh_spirv.empty() ? binding.vs_addr
-                                             : reinterpret_cast<u64>(ngg.gs_code),
-                         binding.vs_user_data, vs_user_sgprs, 8,
-                        d, rc.mesh_spirv.empty() ? 0 : gs_user_data_addr);
+    AppendStageTextures(rc.mesh_spirv.empty()
+                            ? binding.vs_addr
+                            : reinterpret_cast<u64>(ngg.gs_code),
+                        binding.vs_user_data, vs_user_sgprs, 8, d,
+                        rc.mesh_spirv.empty() ? 0 : gs_user_data_addr);
     ReconcileTextureDims(rc.vs_texs, vs_tex_slot, d);
   }
   d.vs_addr = binding.vs_addr;
@@ -942,7 +949,7 @@ void ResolveRecompiledShaders(const Regs& regs,
 bool BuildDrawInfo(const Regs& regs,
                    const DrawPacket& packet,
                    render::DrawInfo& d) {
-  ScopeNs _build_timer(&g_ns_build_draw);
+  ScopeNs build_timer(&g_ns_build_draw);
   g_build_draw_n++;
   const ShaderBinding binding = ResolveShaderBinding(regs);
   TraceShaderListing(binding.vs_addr);

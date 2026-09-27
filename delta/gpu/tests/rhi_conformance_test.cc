@@ -9,15 +9,15 @@
 #include <cstring>
 
 #include "base/arch.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
 #include "gpu/render/backend.h"
 #include "gpu/rhi/device.h"
-#include "gpu/tests/rhi_conformance_spv.h"
 #include "gpu/tests/rhi_conformance_extra_spv.h"
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/strings/format.h>
+#include "gpu/tests/rhi_conformance_spv.h"
 
 namespace {
 
@@ -38,8 +38,7 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
     // exhausts the driver after a few dozen tests.
     static base::Map<Backend, Device*> devices;
     Device*& shared = devices[GetParam()];
-    if (!shared)
-      {
+    if (!shared) {
       auto created = gpu::render::CreateBackendDevice(GetParam());
       shared = gpu::rhi::Release(created);
     }
@@ -219,8 +218,8 @@ TEST_P(RhiConformance, TriangleOrientationMrtUboPush) {
   BindGroupLayoutDesc empty;
   BindGroupLayout* set0 = Own(device_->CreateBindGroupLayout(empty));
   BindGroupLayoutDesc ubo_desc;
-  ubo_desc.bindings.push_back({0, BindingType::kUniformBufferDynamic,
-                               kStageVertex});
+  ubo_desc.bindings.push_back(
+      {0, BindingType::kUniformBufferDynamic, kStageVertex});
   BindGroupLayout* set1 = Own(device_->CreateBindGroupLayout(ubo_desc));
   PipelineLayoutDesc pl;
   pl.groups = {set0, set1};
@@ -241,8 +240,8 @@ TEST_P(RhiConformance, TriangleOrientationMrtUboPush) {
   ASSERT_NE(pipe, nullptr);
 
   // pos.xy, rgba: covers x in [-1,1], y in [0,1] (before the push offset).
-  const float verts[] = {-1.0f, 0.0f, 1, 0, 0, 1, 3.0f, 0.0f, 1, 0, 0, 1,
-                         -1.0f, 2.0f, 1, 0, 0, 1};
+  const float verts[] = {-1.0f, 0.0f, 1, 0,     0,    1, 3.0f, 0.0f, 1,
+                         0,     0,    1, -1.0f, 2.0f, 1, 0,    0,    1};
   Buffer* vb = Upload(verts, sizeof(verts), kBufferVertex);
   // Two 256-byte windows; the draw binds the second, a unit tint.
   base::Vector<float> ubo(128, 0.0f);
@@ -620,9 +619,9 @@ TEST_P(RhiConformance, CullWindingFollowsViewport) {
   ASSERT_NE(pipe, nullptr);
   const u32 red = Rgba(255, 0, 0, 255);
   // Left: counter-clockwise in clip space (y up). Right: clockwise.
-  const Vertex verts[] = {
-      {-0.9f, -0.5f, 0, red}, {-0.1f, -0.5f, 0, red}, {-0.5f, 0.5f, 0, red},
-      {0.1f, -0.5f, 0, red},  {0.5f, 0.5f, 0, red},   {0.9f, -0.5f, 0, red}};
+  const Vertex verts[] = {{-0.9f, -0.5f, 0, red}, {-0.1f, -0.5f, 0, red},
+                          {-0.5f, 0.5f, 0, red},  {0.1f, -0.5f, 0, red},
+                          {0.5f, 0.5f, 0, red},   {0.9f, -0.5f, 0, red}};
   Buffer* vb = Upload(verts, sizeof(verts), kBufferVertex);
   Buffer* inst = Instances({0, 0});
   Texture* up = Target();
@@ -702,15 +701,23 @@ TEST_P(RhiConformance, DepthStencilBlendIndexed) {
 
   const u32 red = Rgba(255, 0, 0, 255), green = Rgba(0, 255, 0, 255),
             blue = Rgba(0, 0, 255, 255);
-  const Vertex verts[] = {
-      // Skipped by the vertex offset.
-      {9, 9, 0, 0}, {9, 9, 0, 0}, {9, 9, 0, 0}, {9, 9, 0, 0},
-      // Left half at z 0.5.
-      {-1, -1, 0.5f, red}, {0, -1, 0.5f, red}, {0, 1, 0.5f, red},
-      {-1, 1, 0.5f, red},
-      // Full screen at z 0.8, then at z 0.1.
-      {-1, -1, 0.8f, green}, {3, -1, 0.8f, green}, {-1, 3, 0.8f, green},
-      {-1, -1, 0.1f, blue}, {3, -1, 0.1f, blue}, {-1, 3, 0.1f, blue}};
+  const Vertex verts[] = {// Skipped by the vertex offset.
+                          {9, 9, 0, 0},
+                          {9, 9, 0, 0},
+                          {9, 9, 0, 0},
+                          {9, 9, 0, 0},
+                          // Left half at z 0.5.
+                          {-1, -1, 0.5f, red},
+                          {0, -1, 0.5f, red},
+                          {0, 1, 0.5f, red},
+                          {-1, 1, 0.5f, red},
+                          // Full screen at z 0.8, then at z 0.1.
+                          {-1, -1, 0.8f, green},
+                          {3, -1, 0.8f, green},
+                          {-1, 3, 0.8f, green},
+                          {-1, -1, 0.1f, blue},
+                          {3, -1, 0.1f, blue},
+                          {-1, 3, 0.1f, blue}};
   const u16 indices[] = {0, 1, 2, 0, 2, 3};
   Buffer* vb = Upload(verts, sizeof(verts), kBufferVertex);
   Buffer* ib = Upload(indices, sizeof(indices), kBufferIndex);
@@ -776,9 +783,8 @@ TEST_P(RhiConformance, InstancingAndScaledAttributes) {
   Pipeline* pipe = Own(device_->CreateGraphicsPipeline(PosPipeline(layout)));
   ASSERT_NE(pipe, nullptr);
   const u32 white = Rgba(255, 255, 255, 255);
-  const Vertex verts[] = {{0.3f, 0.3f, 0, white},
-                          {0.7f, 0.3f, 0, white},
-                          {0.5f, 0.7f, 0, white}};
+  const Vertex verts[] = {
+      {0.3f, 0.3f, 0, white}, {0.7f, 0.3f, 0, white}, {0.5f, 0.7f, 0, white}};
   Buffer* vb = Upload(verts, sizeof(verts), kBufferVertex);
   Buffer* inst = Instances({0, 0, -1, 0, 0, -1});
   Texture* t = Target();
@@ -932,8 +938,8 @@ TEST_P(RhiConformance, ViewsSwizzleBgraAnd3DSlice) {
       {t0, TextureState::kUndefined, TextureState::kColorTarget},
       {t1, TextureState::kUndefined, TextureState::kColorTarget}};
   ready[0].range.layers = 2;
-  list_->Barrier(kAccessCopyWrite, kAccessShaderRead | kAccessColorWrite,
-                 ready, 5);
+  list_->Barrier(kAccessCopyWrite, kAccessShaderRead | kAccessColorWrite, ready,
+                 5);
   TextureView* sources[2] = {layer_view, bgra_view};
   TextureView* targets[2] = {v0, v1};
   for (int i = 0; i < 2; i++) {
@@ -1109,8 +1115,7 @@ TEST_P(RhiConformance, BufferOpsAndTextureCopies) {
   EXPECT_EQ(win[5], 16u + 4 + 2);
   EXPECT_EQ(win[8], 16u + 8 + 1) << "one row length on";
   EXPECT_EQ(*reinterpret_cast<const u32*>(plain_rb->mapped()), marker);
-  EXPECT_FLOAT_EQ(reinterpret_cast<const float*>(depth_rb->mapped())[5],
-                  0.25f);
+  EXPECT_FLOAT_EQ(reinterpret_cast<const float*>(depth_rb->mapped())[5], 0.25f);
   if (bc)
     EXPECT_EQ(std::memcmp(bc_rb->mapped(), blocks, sizeof(blocks)), 0);
 }
@@ -1209,9 +1214,8 @@ void DrawQuad(CommandList* list,
               float y1,
               const float (&color)[4],
               float z = 0.0f) {
-  QuadPush p{{x0, y0, x1, y1},
-             {color[0], color[1], color[2], color[3]},
-             {z, 0, 0, 0}};
+  QuadPush p{
+      {x0, y0, x1, y1}, {color[0], color[1], color[2], color[3]}, {z, 0, 0, 0}};
   list->SetPushConstants(0, sizeof(p), &p);
   list->Draw(4, 1, 0, 0);
 }
@@ -1510,7 +1514,8 @@ u32 SampleCenter(Device* device,
 
 u8 SrgbToLinear(u8 c) {
   const double v = c / 255.0;
-  const double l = v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+  const double l =
+      v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
   return static_cast<u8>(l * 255.0 + 0.5);
 }
 
@@ -1625,8 +1630,7 @@ TEST_P(RhiConformance, TextureArrays3DAndCubes) {
                     const float (&coord)[4]) {
     return SampleCenter(device_, list_, objects_, fs, v, s, coord);
   };
-  EXPECT_EQ(sample(Spv(k_tex_frag_spv), layer1_view, {0, 0, 0, 0}),
-            texels[1])
+  EXPECT_EQ(sample(Spv(k_tex_frag_spv), layer1_view, {0, 0, 0, 0}), texels[1])
       << "2D view of layer 1";
   EXPECT_EQ(sample(Spv(k_x_texarray_frag_spv), array_view, {0, 0, 0, 0}),
             texels[0]);
@@ -1669,8 +1673,8 @@ TEST_P(RhiConformance, IntegerTextureSampling) {
   ASSERT_TRUE(device_->Wait(device_->Submit(list_)));
   TextureView* view = Own(device_->CreateView(tex, {}));
   auto sample = [&](float u, float v) {
-    return SampleCenter(device_, list_, objects_, Spv(k_x_itex_frag_spv),
-                        view, TextureState::kShaderRead, {u, v, 0, 0});
+    return SampleCenter(device_, list_, objects_, Spv(k_x_itex_frag_spv), view,
+                        TextureState::kShaderRead, {u, v, 0, 0});
   };
   EXPECT_EQ(sample(0.25f, 0.25f), Rgba(10, 0, 0, 1));
   EXPECT_EQ(sample(0.75f, 0.25f), Rgba(20, 0, 0, 1));
@@ -1860,8 +1864,8 @@ TEST_P(RhiConformance, GeometryShaderOrientation) {
   gp.color_formats[0] = Format::kRGBA8Unorm;
   Pipeline* pipe = Own(device_->CreateGraphicsPipeline(gp));
   ASSERT_NE(pipe, nullptr);
-  const float verts[] = {-1.0f, 0.0f, 1, 0, 0, 1, 3.0f, 0.0f, 1, 0, 0, 1,
-                         -1.0f, 2.0f, 1, 0, 0, 1};
+  const float verts[] = {-1.0f, 0.0f, 1, 0,     0,    1, 3.0f, 0.0f, 1,
+                         0,     0,    1, -1.0f, 2.0f, 1, 0,    0,    1};
   Buffer* vb = Upload(verts, sizeof(verts), kBufferVertex);
   const float tint[4] = {1, 1, 1, 1};
   Buffer* ub = Upload(tint, sizeof(tint), kBufferUniform);
@@ -1907,20 +1911,20 @@ TEST_P(RhiConformance, GeometryShaderOrientation) {
 // Tightly packed and oddly pitched buffer layouts, at offsets no copy
 // engine aligns for.
 TEST_P(RhiConformance, UnalignedTextureCopies) {
-  constexpr u32 w = 5, h = 3;
+  constexpr u32 kW = 5, kH = 3;
   TextureDesc td;
   td.format = Format::kRGBA8Unorm;
-  td.width = w;
-  td.height = h;
+  td.width = kW;
+  td.height = kH;
   td.usage = kTextureCopySrc | kTextureCopyDst;
   Texture* tex = Own(device_->CreateTexture(td));
-  u32 data[1 + w * h];
+  u32 data[1 + kW * kH];
   data[0] = 0;
-  for (u32 y = 0; y < h; y++)
-    for (u32 x = 0; x < w; x++)
-      data[1 + y * w + x] = Rgba(u8(x * 10), u8(y * 10), 7, 255);
+  for (u32 y = 0; y < kH; y++)
+    for (u32 x = 0; x < kW; x++)
+      data[1 + y * kW + x] = Rgba(u8(x * 10), u8(y * 10), 7, 255);
   Buffer* staging = Upload(data, sizeof(data), 0);
-  Buffer* tight = Readback(w * h * 4);
+  Buffer* tight = Readback(kW * kH * 4);
   Buffer* pitched = Readback(512);
   std::memset(pitched->mapped(), 0, 512);
   list_->Begin();
@@ -1928,8 +1932,8 @@ TEST_P(RhiConformance, UnalignedTextureCopies) {
   list_->Barrier(kAccessHostWrite, kAccessCopyRead, &up, 1);
   BufferTextureCopy c;
   c.buffer_offset = 4;
-  c.region.width = w;
-  c.region.height = h;
+  c.region.width = kW;
+  c.region.height = kH;
   list_->CopyBufferToTexture(tex, staging, &c, 1);
   TextureBarrier src{tex, TextureState::kCopyDst, TextureState::kCopySrc};
   list_->Barrier(kAccessCopyWrite, kAccessCopyRead, &src, 1);
@@ -1946,11 +1950,11 @@ TEST_P(RhiConformance, UnalignedTextureCopies) {
   list_->Barrier(kAccessCopyWrite, kAccessHostRead);
   Submit();
   list_->End();
-  EXPECT_EQ(std::memcmp(tight->mapped(), data + 1, w * h * 4), 0);
+  EXPECT_EQ(std::memcmp(tight->mapped(), data + 1, kW * kH * 4), 0);
   const u32* p = reinterpret_cast<const u32*>(pitched->mapped() + 12);
   for (u32 r = 0; r < 2; r++)
     for (u32 x = 0; x < 3; x++)
-      EXPECT_EQ(p[r * 7 + x], data[1 + (1 + r) * w + 1 + x])
+      EXPECT_EQ(p[r * 7 + x], data[1 + (1 + r) * kW + 1 + x])
           << "row " << r << " col " << x;
   EXPECT_EQ(p[3], 0u) << "past the copied row";
 }

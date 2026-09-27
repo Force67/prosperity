@@ -10,10 +10,10 @@
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 
-#include "gpu/gcn/spirv/translator.h"
 #include "base/arch.h"
-#include <base/containers/set.h>
-#include <base/containers/hash_map.h>
+#include "base/containers/hash_map.h"
+#include "base/containers/set.h"
+#include "gpu/gcn/spirv/translator.h"
 
 namespace gpu::gcn {
 namespace {
@@ -109,8 +109,9 @@ void SaveExec(Translator& t,
   if (t.lane_masks || t.wave_masks) {
     const Id old_lo = t.Sg(126), old_hi = t.Sg(127);
     const Id new_lo = CombineExec(t, kind, old_lo, src);
-    const Id new_hi = wide ? CombineExec(t, kind, old_hi,
-                                          src_hi ? src_hi : t.U32(0)) : old_hi;
+    const Id new_hi =
+        wide ? CombineExec(t, kind, old_hi, src_hi ? src_hi : t.U32(0))
+             : old_hi;
     t.SetSdst(sdst, 0, write_modified ? new_lo : old_lo);
     if (wide)
       t.SetSdst(sdst, 1, write_modified ? new_hi : old_hi);
@@ -617,15 +618,14 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x25: {  // s_bfm_b64: ((1 << width) - 1) << offset, 64 bits wide
       const Id width = t.And(a, t.U32(63)), off = t.And(b, t.U32(63));
       const Id w_wide = t.Uge(width, t.U32(32));
-      const Id lo_ones = t.SelectB(
-          w_wide, t.U32(0xFFFFFFFFu),
-          t.Sub(t.Shl(t.U32(1), t.And(width, t.U32(31))), t.U32(1)));
-      const Id hi_ones =
-          t.SelectB(w_wide,
-                    t.Sub(t.Shl(t.U32(1), t.And(t.Sub(width, t.U32(32)),
-                                                t.U32(31))),
-                          t.U32(1)),
-                    t.U32(0));
+      const Id lo_ones =
+          t.SelectB(w_wide, t.U32(0xFFFFFFFFu),
+                    t.Sub(t.Shl(t.U32(1), t.And(width, t.U32(31))), t.U32(1)));
+      const Id hi_ones = t.SelectB(
+          w_wide,
+          t.Sub(t.Shl(t.U32(1), t.And(t.Sub(width, t.U32(32)), t.U32(31))),
+                t.U32(1)),
+          t.U32(0));
       const Id n_lo = t.And(off, t.U32(31)), o_wide = t.Uge(off, t.U32(32));
       const Id inv = t.And(t.Sub(t.U32(32), n_lo), t.U32(31));
       const Id cross = t.SelectB(t.IsZero(off), t.U32(0), t.Shr(lo_ones, inv));
@@ -791,7 +791,7 @@ void EmitSopc(Translator& t, const Inst& inst) {
       c = t.IsNonZero(t.And(t.Shr(a, b), t.U32(1)));
       break;
     }
-    case 0x12:  // RDNA s_cmp_eq_u64
+    case 0x12:    // RDNA s_cmp_eq_u64
     case 0x13: {  // RDNA s_cmp_lg_u64
       if (!t.rdna_sources) {
         WarnUnsupported("sopc", op);
@@ -817,8 +817,8 @@ void EmitSopk(Translator& t, const Inst& inst) {
   const u32 w = inst.raw[0];
   const u32 op = inst.opcode, sdst = (w >> 16) & 0x7F;
   const u32 simm_bits = w & 0xFFFF;
-  const u32 sext = static_cast<u32>(
-      static_cast<i32>(static_cast<i16>(simm_bits)));
+  const u32 sext =
+      static_cast<u32>(static_cast<i32>(static_cast<i16>(simm_bits)));
   const Id imm_i = t.U32(sext);       // sign-extended immediate
   const Id imm_u = t.U32(simm_bits);  // zero-extended immediate
 
@@ -909,8 +909,7 @@ void EmitSopk(Translator& t, const Inst& inst) {
 }
 
 // ---- SGPR spills parked in a VGPR's lanes -----------------------------------
-base::HashSet<u32> PlanLaneSpills(const Program& program,
-                                            const u8* reachable) {
+base::HashSet<u32> PlanLaneSpills(const Program& program, const u8* reachable) {
   base::HashSet<u32> spills;
   u32 index = 0;
   for (const Inst& inst : program) {
@@ -944,7 +943,8 @@ bool EmitLaneSpill(Translator& t,
     // Publish into the slot array, then report NOT consumed so the general
     // lowering still updates the VGPR itself: a stage that has a lane index
     // keeps exactly the behaviour it had, and this is purely additive.
-    t.StorePrivate(t.SpillAt(dst, t.SrcRaw(src1, literal)), t.SrcRaw(src0, literal));
+    t.StorePrivate(t.SpillAt(dst, t.SrcRaw(src1, literal)),
+                   t.SrcRaw(src0, literal));
     return false;
   }
   return false;
@@ -983,7 +983,8 @@ Id ReadFirstLane(Translator& t, Id value) {
     const Id lo = t.Sg(126), hi = t.Sg(127);
     const Id first_lo = t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {lo});
     const Id first_hi = t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {hi});
-    const Id first = t.SelectB(t.IsNonZero(lo), first_lo,
+    const Id first = t.SelectB(
+        t.IsNonZero(lo), first_lo,
         t.SelectB(t.IsNonZero(hi), t.Add(first_hi, t.U32(32)), t.U32(0)));
     return t.WaveExchange(value, first);
   }
@@ -993,10 +994,10 @@ Id ReadFirstLane(Translator& t, Id value) {
   const Id active = t.LaneActive(t.Exec());
   const Id ballot = t.m.Emit(spv::Op::OpGroupNonUniformBallot,
                              t.m.TypeVec(t.t_u, 4), {scope, active});
-  const Id any = t.m.Emit(spv::Op::OpGroupNonUniformAny, t.t_bool,
-                          {scope, active});
-  const Id first = t.m.Emit(spv::Op::OpGroupNonUniformBallotFindLSB, t.t_u,
-                            {scope, ballot});
+  const Id any =
+      t.m.Emit(spv::Op::OpGroupNonUniformAny, t.t_bool, {scope, active});
+  const Id first =
+      t.m.Emit(spv::Op::OpGroupNonUniformBallotFindLSB, t.t_u, {scope, ballot});
   // Half-uniform: the first active lane of THIS subgroup, or lane 0.
   const Id half = t.SubgroupShuffle(value, t.SelectB(any, first, t.U32(0)));
   if (!WaveSplitsAcrossSubgroups())
@@ -1018,12 +1019,7 @@ Id ReadFirstLane(Translator& t, Id value) {
 }
 
 // ---- VOP1 -------------------------------------------------------------------
-void EmitVop1(Translator& t,
-              u32 op,
-              u32 vdst,
-              Id s0,
-              bool clamp,
-              u32 omod) {
+void EmitVop1(Translator& t, u32 op, u32 vdst, Id s0, bool clamp, u32 omod) {
   const auto set_f = [&](Id f) {
     f = ApplyOutputModifier(t, f, omod);
     t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
@@ -1043,10 +1039,9 @@ void EmitVop1(Translator& t,
       break;  // v_mov_b32
     case 0x02:
       t.SetSg(vdst, ReadFirstLane(t, u0));
-      break;  // v_readfirstlane_b32
+      break;    // v_readfirstlane_b32
     case 0x05:  // v_cvt_f32_i32
-      set_f(t.m.Emit(spv::Op::OpConvertSToF, t.t_f,
-                     {t.m.Bitcast(t.t_i, s0)}));
+      set_f(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {t.m.Bitcast(t.t_i, s0)}));
       break;
     case 0x06:
       set_f(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {u0}));
@@ -1113,13 +1108,13 @@ void EmitVop1(Translator& t,
       break;  // v_floor_f32
     case 0x25:
       set_f(t.Ext1(GLSLstd450Exp2, s0));
-      break;  // v_exp_f32
+      break;    // v_exp_f32
     case 0x26:  // v_log_clamp_f32 = ClampInfToFltMax(Log2(x))
       set_f(t.ClampInfToFltMax(t.Ext1(GLSLstd450Log2, s0)));
       break;
     case 0x27:
       set_f(t.Ext1(GLSLstd450Log2, s0));
-      break;  // v_log_f32
+      break;    // v_log_f32
     case 0x28:  // v_rcp_clamp_f32 = ClampInfToFltMax(Rcp(x))
       set_f(t.ClampInfToFltMax(t.FDiv(t.F32(1.0f), s0)));
       break;
@@ -1129,7 +1124,7 @@ void EmitVop1(Translator& t,
     case 0x2a:
     case 0x2b:
       set_f(t.FDiv(t.F32(1.0f), s0));
-      break;  // v_rcp[_iflag]_f32
+      break;    // v_rcp[_iflag]_f32
     case 0x2c:  // v_rsq_clamp_f32 = ClampInfToFltMax(Rsqrt(x)). The old FMin
                 // against FLT_MAX also turned a NaN result into +FLT_MAX, since
                 // GLSL FMin returns the non-NaN operand.
@@ -1192,7 +1187,9 @@ void EmitVop2(Translator& t,
     f = ApplyOutputModifier(t, f, omod);
     t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
   };
-  const auto set_u = [&](Id u) { t.SetVg(vdst, u); };  // OMOD ignored: see EmitVop1
+  const auto set_u = [&](Id u) {
+    t.SetVg(vdst, u);
+  };  // OMOD ignored: see EmitVop1
   const Id u0 = t.m.Bitcast(t.t_u, s0), u1 = t.m.Bitcast(t.t_u, s1);
   const Id i0 = t.m.Bitcast(t.t_i, s0), i1 = t.m.Bitcast(t.t_i, s1);
   const auto mul24_hi = [&](spv::Op wide_mul, Id a, Id b) {
@@ -1214,8 +1211,9 @@ void EmitVop2(Translator& t,
       // write publishes and no cross-lane channel is needed. Not SetVg: a lane
       // write is not EXEC-predicated.
       const Id keep = t.m.Load(t.t_u, t.VgPtr(vdst));
-      t.StorePrivate(t.VgPtr(vdst),
-                t.SelectB(t.Eq(t.WaveLane(), t.And(u1, t.U32(63))), u0, keep));
+      t.StorePrivate(
+          t.VgPtr(vdst),
+          t.SelectB(t.Eq(t.WaveLane(), t.And(u1, t.U32(63))), u0, keep));
       break;
     }
     case 0x03:
@@ -1344,9 +1342,9 @@ void EmitVop2(Translator& t,
           op == 0x23
               ? t.SelectB(lo_half, t.Sub(t.Shl(t.U32(1), lane), t.U32(1)),
                           t.U32(0xFFFFFFFFu))
-              : t.SelectB(lo_half, t.U32(0),
-                          t.Sub(t.Shl(t.U32(1), t.Sub(lane, t.U32(32))),
-                                t.U32(1)));
+              : t.SelectB(
+                    lo_half, t.U32(0),
+                    t.Sub(t.Shl(t.U32(1), t.Sub(lane, t.U32(32))), t.U32(1)));
       set_u(t.Add(t.PopCount(t.And(u0, mask)), u1));
       break;
     }
@@ -1411,9 +1409,9 @@ void EmitVop2(Translator& t,
     }
     case 0x31: {  // v_cvt_pk_i16_i32: {i16(S1), i16(S0)}, signed-saturating
       const auto sat = [&](Id v) {
-        const Id c = t.m.ExtInst(
-            t.t_i, GLSLstd450SClamp,
-            {v, t.m.ConstI32(-32768), t.m.ConstI32(32767)});
+        const Id c =
+            t.m.ExtInst(t.t_i, GLSLstd450SClamp,
+                        {v, t.m.ConstI32(-32768), t.m.ConstI32(32767)});
         return t.And(t.m.Bitcast(t.t_u, c), t.U32(0xFFFFu));
       };
       set_u(t.Or(sat(i0), t.Shl(sat(i1), t.U32(16))));
@@ -1433,23 +1431,23 @@ namespace {
 // Float predicate for the low opcode nibble (F/LT/EQ/LE/GT/LG/GE/O/U/NGE/NLG/
 // NGT/NLE/NEQ/NLT/TRU). Returns 0 for none (F handled by caller).
 Id FloatPredicate(Translator& t, u32 lo, Id a, Id b) {
-  const auto F = [&](spv::Op o) { return t.m.Emit(o, t.t_bool, {a, b}); };
+  const auto f = [&](spv::Op o) { return t.m.Emit(o, t.t_bool, {a, b}); };
   const auto is_nan = [&](Id x) {
     return t.m.Emit(spv::Op::OpIsNan, t.t_bool, {x});
   };
   switch (lo) {
     case 1:
-      return F(spv::Op::OpFOrdLessThan);
+      return f(spv::Op::OpFOrdLessThan);
     case 2:
-      return F(spv::Op::OpFOrdEqual);
+      return f(spv::Op::OpFOrdEqual);
     case 3:
-      return F(spv::Op::OpFOrdLessThanEqual);
+      return f(spv::Op::OpFOrdLessThanEqual);
     case 4:
-      return F(spv::Op::OpFOrdGreaterThan);
+      return f(spv::Op::OpFOrdGreaterThan);
     case 5:
-      return F(spv::Op::OpFOrdNotEqual);  // LG
+      return f(spv::Op::OpFOrdNotEqual);  // LG
     case 6:
-      return F(spv::Op::OpFOrdGreaterThanEqual);
+      return f(spv::Op::OpFOrdGreaterThanEqual);
     case 7:  // O: neither operand NaN
       return t.m.Emit(
           spv::Op::OpLogicalNot, t.t_bool,
@@ -1457,17 +1455,17 @@ Id FloatPredicate(Translator& t, u32 lo, Id a, Id b) {
     case 8:  // U: either operand NaN
       return t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is_nan(a), is_nan(b)});
     case 9:
-      return F(spv::Op::OpFUnordLessThan);  // NGE
+      return f(spv::Op::OpFUnordLessThan);  // NGE
     case 10:
-      return F(spv::Op::OpFUnordEqual);  // NLG
+      return f(spv::Op::OpFUnordEqual);  // NLG
     case 11:
-      return F(spv::Op::OpFUnordLessThanEqual);  // NGT
+      return f(spv::Op::OpFUnordLessThanEqual);  // NGT
     case 12:
-      return F(spv::Op::OpFUnordGreaterThan);  // NLE
+      return f(spv::Op::OpFUnordGreaterThan);  // NLE
     case 13:
-      return F(spv::Op::OpFUnordNotEqual);  // NEQ
+      return f(spv::Op::OpFUnordNotEqual);  // NEQ
     case 14:
-      return F(spv::Op::OpFUnordGreaterThanEqual);  // NLT
+      return f(spv::Op::OpFUnordGreaterThanEqual);  // NLT
     case 15:
       return t.m.ConstBool(true);  // TRU
     default:
@@ -1478,24 +1476,24 @@ Id FloatPredicate(Translator& t, u32 lo, Id a, Id b) {
 // Integer predicate for the low 3 bits (F/LT/EQ/LE/GT/NE/GE/T).
 Id IntPredicate(Translator& t, u32 lo, bool is_signed, Id a, Id b) {
   const Id ai = t.m.Bitcast(t.t_i, a), bi = t.m.Bitcast(t.t_i, b);
-  const auto S = [&](spv::Op o) { return t.m.Emit(o, t.t_bool, {ai, bi}); };
-  const auto U = [&](spv::Op o) { return t.m.Emit(o, t.t_bool, {a, b}); };
+  const auto s = [&](spv::Op o) { return t.m.Emit(o, t.t_bool, {ai, bi}); };
+  const auto u = [&](spv::Op o) { return t.m.Emit(o, t.t_bool, {a, b}); };
   switch (lo) {
     case 1:
-      return is_signed ? S(spv::Op::OpSLessThan) : U(spv::Op::OpULessThan);
+      return is_signed ? s(spv::Op::OpSLessThan) : u(spv::Op::OpULessThan);
     case 2:
       return t.Eq(a, b);
     case 3:
-      return is_signed ? S(spv::Op::OpSLessThanEqual)
-                       : U(spv::Op::OpULessThanEqual);
+      return is_signed ? s(spv::Op::OpSLessThanEqual)
+                       : u(spv::Op::OpULessThanEqual);
     case 4:
-      return is_signed ? S(spv::Op::OpSGreaterThan)
-                       : U(spv::Op::OpUGreaterThan);
+      return is_signed ? s(spv::Op::OpSGreaterThan)
+                       : u(spv::Op::OpUGreaterThan);
     case 5:
       return t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {a, b});
     case 6:
-      return is_signed ? S(spv::Op::OpSGreaterThanEqual)
-                       : U(spv::Op::OpUGreaterThanEqual);
+      return is_signed ? s(spv::Op::OpSGreaterThanEqual)
+                       : u(spv::Op::OpUGreaterThanEqual);
     case 7:
       return t.m.ConstBool(true);
     default:
@@ -1529,32 +1527,36 @@ Id U64Eq(Translator& t, Dword2 a, Dword2 b) {
 }
 // Lexicographic on (hi, lo); only the high half's comparison differs in sign.
 Id U64Lt(Translator& t, Dword2 a, Dword2 b) {
-  return LOr(t, t.Ult(a.hi, b.hi),
-             t.LAnd(t.Eq(a.hi, b.hi), t.Ult(a.lo, b.lo)));
+  return LOr(t, t.Ult(a.hi, b.hi), t.LAnd(t.Eq(a.hi, b.hi), t.Ult(a.lo, b.lo)));
 }
 Id I64Lt(Translator& t, Dword2 a, Dword2 b) {
   return LOr(t, Slt32(t, a.hi, b.hi),
              t.LAnd(t.Eq(a.hi, b.hi), t.Ult(a.lo, b.lo)));
 }
 
-Id Int64Predicate(Translator& t,
-                  u32 lo,
-                  bool is_signed,
-                  Dword2 a,
-                  Dword2 b) {
+Id Int64Predicate(Translator& t, u32 lo, bool is_signed, Dword2 a, Dword2 b) {
   const auto lt = [&](Dword2 x, Dword2 y) {
     return is_signed ? I64Lt(t, x, y) : U64Lt(t, x, y);
   };
   switch (lo) {
-    case 0: return t.m.ConstBool(false);
-    case 1: return lt(a, b);
-    case 2: return U64Eq(t, a, b);
-    case 3: return LOr(t, lt(a, b), U64Eq(t, a, b));
-    case 4: return lt(b, a);
-    case 5: return LNot(t, U64Eq(t, a, b));
-    case 6: return LNot(t, lt(a, b));
-    case 7: return t.m.ConstBool(true);
-    default: return 0;
+    case 0:
+      return t.m.ConstBool(false);
+    case 1:
+      return lt(a, b);
+    case 2:
+      return U64Eq(t, a, b);
+    case 3:
+      return LOr(t, lt(a, b), U64Eq(t, a, b));
+    case 4:
+      return lt(b, a);
+    case 5:
+      return LNot(t, U64Eq(t, a, b));
+    case 6:
+      return LNot(t, lt(a, b));
+    case 7:
+      return t.m.ConstBool(true);
+    default:
+      return 0;
   }
 }
 
@@ -1575,38 +1577,54 @@ Dword2 F64OrderKey(Translator& t, Dword2 x) {
           t.SelectB(neg, t.Not(x.hi), t.Xor(x.hi, t.U32(0x80000000u)))};
 }
 Id F64Eq(Translator& t, Dword2 a, Dword2 b) {
-  return t.LAnd(LNot(t, LOr(t, F64IsNan(t, a), F64IsNan(t, b))),
-                LOr(t, U64Eq(t, a, b),
-                    t.LAnd(F64IsZero(t, a), F64IsZero(t, b))));
+  return t.LAnd(
+      LNot(t, LOr(t, F64IsNan(t, a), F64IsNan(t, b))),
+      LOr(t, U64Eq(t, a, b), t.LAnd(F64IsZero(t, a), F64IsZero(t, b))));
 }
 // The order key would rank -0.0 below +0.0, so equal zeroes are excluded.
 Id F64Lt(Translator& t, Dword2 a, Dword2 b) {
-  return t.LAnd(
-      LNot(t, LOr(t, F64IsNan(t, a), F64IsNan(t, b))),
-      t.LAnd(U64Lt(t, F64OrderKey(t, a), F64OrderKey(t, b)),
-             LNot(t, t.LAnd(F64IsZero(t, a), F64IsZero(t, b)))));
+  return t.LAnd(LNot(t, LOr(t, F64IsNan(t, a), F64IsNan(t, b))),
+                t.LAnd(U64Lt(t, F64OrderKey(t, a), F64OrderKey(t, b)),
+                       LNot(t, t.LAnd(F64IsZero(t, a), F64IsZero(t, b)))));
 }
 
 Id Float64Predicate(Translator& t, u32 lo, Dword2 a, Dword2 b) {
   const Id nan = LOr(t, F64IsNan(t, a), F64IsNan(t, b));
   switch (lo) {
-    case 0: return t.m.ConstBool(false);                        // F
-    case 1: return F64Lt(t, a, b);                              // LT
-    case 2: return F64Eq(t, a, b);                              // EQ
-    case 3: return LOr(t, F64Lt(t, a, b), F64Eq(t, a, b));      // LE
-    case 4: return F64Lt(t, b, a);                              // GT
-    case 5: return t.LAnd(LNot(t, nan), LNot(t, F64Eq(t, a, b)));  // LG
-    case 6: return LOr(t, F64Lt(t, b, a), F64Eq(t, a, b));      // GE
-    case 7: return LNot(t, nan);                                // O
-    case 8: return nan;                                         // U
-    case 9: return LOr(t, nan, F64Lt(t, a, b));                 // NGE
-    case 10: return LOr(t, nan, F64Eq(t, a, b));                // NLG
-    case 11: return LOr(t, nan, LOr(t, F64Lt(t, a, b), F64Eq(t, a, b)));  // NGT
-    case 12: return LOr(t, nan, F64Lt(t, b, a));                // NLE
-    case 13: return LNot(t, F64Eq(t, a, b));                    // NEQ
-    case 14: return LOr(t, nan, LOr(t, F64Lt(t, b, a), F64Eq(t, a, b)));  // NLT
-    case 15: return t.m.ConstBool(true);                        // TRU
-    default: return 0;
+    case 0:
+      return t.m.ConstBool(false);  // F
+    case 1:
+      return F64Lt(t, a, b);  // LT
+    case 2:
+      return F64Eq(t, a, b);  // EQ
+    case 3:
+      return LOr(t, F64Lt(t, a, b), F64Eq(t, a, b));  // LE
+    case 4:
+      return F64Lt(t, b, a);  // GT
+    case 5:
+      return t.LAnd(LNot(t, nan), LNot(t, F64Eq(t, a, b)));  // LG
+    case 6:
+      return LOr(t, F64Lt(t, b, a), F64Eq(t, a, b));  // GE
+    case 7:
+      return LNot(t, nan);  // O
+    case 8:
+      return nan;  // U
+    case 9:
+      return LOr(t, nan, F64Lt(t, a, b));  // NGE
+    case 10:
+      return LOr(t, nan, F64Eq(t, a, b));  // NLG
+    case 11:
+      return LOr(t, nan, LOr(t, F64Lt(t, a, b), F64Eq(t, a, b)));  // NGT
+    case 12:
+      return LOr(t, nan, F64Lt(t, b, a));  // NLE
+    case 13:
+      return LNot(t, F64Eq(t, a, b));  // NEQ
+    case 14:
+      return LOr(t, nan, LOr(t, F64Lt(t, b, a), F64Eq(t, a, b)));  // NLT
+    case 15:
+      return t.m.ConstBool(true);  // TRU
+    default:
+      return 0;
   }
 }
 
@@ -1721,7 +1739,9 @@ void EmitVop3(Translator& t,
     f = ApplyOutputModifier(t, f, omod);
     t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
   };
-  const auto set_u = [&](Id u) { t.SetVg(vdst, u); };  // OMOD ignored: see EmitVop1
+  const auto set_u = [&](Id u) {
+    t.SetVg(vdst, u);
+  };  // OMOD ignored: see EmitVop1
 
   if (op < 0x100) {  // VOPC in VOP3 form: predicate written to sgpr[vdst]
     // OMOD applies only to instructions with a float OUTPUT; a VOPC writes a

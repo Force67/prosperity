@@ -69,9 +69,10 @@ void NoteRegBlock(u32 base,
                   u32 num_pairs);
 
 // DELTA_AGC_REGSTAT>=2: a whole state block, entry by entry (>=3 trades the
-// full dump for a non-zero digest of ten times as many blocks, so a steady-state
-// frame's state stream fits in one run). DELTA_AGC_REGSTAT_FROM=<draw> skips
-// the init blocks and starts at the draw the frame is made of.
+// full dump for a non-zero digest of ten times as many blocks, so a
+// steady-state frame's state stream fits in one run).
+// DELTA_AGC_REGSTAT_FROM=<draw> skips the init blocks and starts at the draw
+// the frame is made of.
 void TraceRegBlock(u32 base, u64 address, u32 num_pairs, u32 mode);
 
 // DELTA_AGC_REGSTAT: the entry a colour-target bind was anchored on.
@@ -229,9 +230,7 @@ void TraceCsUnsupportedImage(u64 cs_addr,
                              u32 binding,
                              const gcn::TImage& image,
                              const u32* descriptor);
-void TraceCsNoLinearStaging(u64 cs_addr,
-                            u32 binding,
-                            const gcn::TImage& image);
+void TraceCsNoLinearStaging(u64 cs_addr, u32 binding, const gcn::TImage& image);
 void TraceCsInvalidRange(u64 cs_addr,
                          const gcn::CsResource& res,
                          u64 base,

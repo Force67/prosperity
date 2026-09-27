@@ -7,17 +7,17 @@
 // guest vertices into pos/colour/uv and draw them with a fixed shader pair) for
 // draws that path cannot run.
 
-#include "gpu/render/renderer.h"
 #include "base/arch.h"
+#include "gpu/render/renderer.h"
 
-#include "gpu/render/labels.h"
-#include "gpu/render/device.h"
-#include "gpu/render/draw_recomp.h"
-#include "gpu/render/guest_format.h"
-#include "gpu/render/frame.h"
-#include "gpu/render/index_upload.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/guest_memory.h"
+#include "gpu/render/device.h"
+#include "gpu/render/draw_recomp.h"
+#include "gpu/render/frame.h"
+#include "gpu/render/guest_format.h"
+#include "gpu/render/index_upload.h"
+#include "gpu/render/labels.h"
 #include "gpu/render/pipeline_cache.h"
 #include "gpu/render/render_target.h"
 #include "gpu/render/texture_cache.h"
@@ -27,10 +27,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <base/logging.h>
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/optional.h>
+#include "base/algorithm.h"
+#include "base/logging.h"
+#include "base/optional.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(int, kMaxDraw, "DELTA_GPU_MAXDRAW", -1);
@@ -116,8 +116,8 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   ScopeNs frame_draw_timer(&g_fr_draw);
   g_win_draws++;
   if (d.index_data && d.index_count) {
-    const u64 index_bytes = static_cast<u64>(d.index_count) *
-                                 GuestIndexElementBytes(d.index_type);
+    const u64 index_bytes =
+        static_cast<u64>(d.index_count) * GuestIndexElementBytes(d.index_type);
     if (!FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.index_data),
                             index_bytes))
       return;
@@ -136,15 +136,15 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   if (kDrawTraceAll) {
     static u32 traced = 0;
     if (traced++ < 100)
-      BASE_LOGI("dt", "f{} rt={:#x} count={} indexed={} nv={} mrt={} mask={:#x} "
-                      "psmask={:#x} prim={} vp=[{:.1f} {:.1f} {:.1f} {:.1f}] "
-                      "depth={:#x} handled={:d}",
+      BASE_LOGI("dt",
+                "f{} rt={:#x} count={} indexed={} nv={} mrt={} mask={:#x} "
+                "psmask={:#x} prim={} vp=[{:.1f} {:.1f} {:.1f} {:.1f}] "
+                "depth={:#x} handled={:d}",
                 g_frame.num, (unsigned long)d.rt_base, d.vertex_count,
                 d.index_count, d.num_vattrs, d.mrt_count, d.target_mask,
                 d.recomp ? d.recomp->ps_mrt_mask : 0, d.prim_type,
                 d.viewport_x_scale, d.viewport_x_offset, d.viewport_y_scale,
-                d.viewport_y_offset, (unsigned long)d.depth_base,
-                recompiled);
+                d.viewport_y_offset, (unsigned long)d.depth_base, recompiled);
   }
   if (recompiled)
     return;
@@ -178,17 +178,16 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     nv = max_index + 1;
   }
   if (nv < 3 || nv > 200000u)
-    return;                                   // sane cap
+    return;  // sane cap
   if (!IsReadableRange(reinterpret_cast<u64>(d.vertex_data),
                        static_cast<u64>(nv) * d.vertex_stride))
     return;
   u64 need = (u64)nv * 32;  // pos.xy + color.rgba + uv.xy
   if (g_ring.vb_offset + need > g_ring.vb_end)
     return;  // ring full this frame
-  const u64 index_bytes =
-      indexed ? static_cast<u64>(d.index_count) *
-                    UploadedIndexElementBytes(d.index_type)
-              : 0;
+  const u64 index_bytes = indexed ? static_cast<u64>(d.index_count) *
+                                        UploadedIndexElementBytes(d.index_type)
+                                  : 0;
   const u64 index_align = d.index_type == 1 ? 4 : 2;
   const u64 aligned_ioff =
       (g_ring.ib_offset + index_align - 1) & ~(index_align - 1);
@@ -256,8 +255,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   // region (or the open region is multi-target/has a depth attachment: the
   // heuristic path renders to a single color attachment with no depth).
   const bool transition_source =
-      rt_as_tex &&
-      g_rts[tex_base].layout != rhi::TextureState::kShaderRead;
+      rt_as_tex && g_rts[tex_base].layout != rhi::TextureState::kShaderRead;
   if (g_region.cur_rt != d.rt_base || g_region.cur_mrt_count != 1 ||
       g_region.cur_depth != 0 || transition_source) {
     EndRegion();
@@ -268,8 +266,9 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
                         rhi::TextureState::kShaderRead);
     }
     rhi::Format rt_format = ColorTargetFormat(d.mrt_info[0]);
-    RTarget* rt = GetRT(d.rt_base, RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
-                        RtSurfaceExtent(d.mrt_surf_h[0], d.rt_h, 64), rt_format);
+    RTarget* rt =
+        GetRT(d.rt_base, RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
+              RtSurfaceExtent(d.mrt_surf_h[0], d.rt_h, 64), rt_format);
     if (!rt) {
       g_frame.draws++;
       return;
@@ -280,8 +279,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
       return;
     }
   }
-  if (rt_as_tex &&
-      g_rts[tex_base].layout == rhi::TextureState::kShaderRead)
+  if (rt_as_tex && g_rts[tex_base].layout == rhi::TextureState::kShaderRead)
     tex_set = g_rts[tex_base].set;
 
   g_frame.heuristic++;
@@ -294,8 +292,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
                                   ColorTargetFormat(d.mrt_info[0])));
     float pc[17];
     std::memcpy(pc, d.mvp, 64);
-    reinterpret_cast<u32*>(pc)[16] =
-        0u;  // clipUV: real per-vertex uv/colour
+    reinterpret_cast<u32*>(pc)[16] = 0u;  // clipUV: real per-vertex uv/colour
     list->SetPushConstants(0, 68, pc);
     list->SetBindGroup(0, tex_set);
   } else {
@@ -312,11 +309,11 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     u64 ioff = aligned_ioff;
     CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
                      d.index_type);
-    list->SetIndexBuffer(g_ring.ib, ioff,
-                         d.index_type == 1 ? rhi::IndexType::kUint32
-                                           : rhi::IndexType::kUint16);
-    list->DrawIndexed(d.index_count, d.instance_count ? d.instance_count : 1,
-                      0, 0, 0);
+    list->SetIndexBuffer(
+        g_ring.ib, ioff,
+        d.index_type == 1 ? rhi::IndexType::kUint32 : rhi::IndexType::kUint16);
+    list->DrawIndexed(d.index_count, d.instance_count ? d.instance_count : 1, 0,
+                      0, 0);
     g_ring.ib_offset = ioff + index_bytes;
   } else {
     list->Draw(nv, d.instance_count ? d.instance_count : 1, 0, 0);

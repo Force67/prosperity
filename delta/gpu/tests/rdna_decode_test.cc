@@ -2,8 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include "base/containers/array.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
-#include <base/containers/array.h>
 
 namespace {
 
@@ -19,11 +19,7 @@ u32 Sopk(u32 op) {
   return (0xBu << 28) | (op << 23);
 }
 
-void Vop3(u32* out,
-          u32 op,
-          u32 src0,
-          u32 src1,
-          u32 src2) {
+void Vop3(u32* out, u32 op, u32 src0, u32 src1, u32 src2) {
   out[0] = (0x35u << 26) | (op << 16);
   out[1] = src0 | (src1 << 9) | (src2 << 18);
 }
@@ -237,11 +233,10 @@ TEST(RdnaDecode, OrderedEndpgmAndCodeEndTerminateAppropriately) {
 
 TEST(RdnaDecode, DisabledDebugBranchesDoNotReachIndirectTrapStubs) {
   for (u32 opcode = 0x17; opcode <= 0x1a; ++opcode) {
-    const u32 code[] = {
-        (0x17fu << 23) | (opcode << 16) | 1u,
-        0xbf810000,  // normal exit
-        0xbe802100,  // debug-only s_swappc_b64 s[0:1], s[0:1]
-        0xdeadbeef}; // non-executable footer
+    const u32 code[] = {(0x17fu << 23) | (opcode << 16) | 1u,
+                        0xbf810000,   // normal exit
+                        0xbe802100,   // debug-only s_swappc_b64 s[0:1], s[0:1]
+                        0xdeadbeef};  // non-executable footer
     const auto reachable = gpu::rdna::ReachableProgram(
         gpu::rdna::Decode(code, base::ArraySize(code), false));
     ASSERT_EQ(reachable.size(), 2u) << "debug opcode " << opcode;

@@ -10,9 +10,9 @@
 #include "base/arch.h"
 
 #include <cstring>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 
 namespace gpu::gcn::spirv {
 
@@ -133,8 +133,7 @@ Id Module::TypeStruct(const base::Vector<Id>& members) {
   return id;
 }
 Id Module::TypePointer(spv::StorageClass sc, Id pointee) {
-  const u64 k =
-      Key(CacheKind::kPointer, pointee, static_cast<u64>(sc));
+  const u64 k = Key(CacheKind::kPointer, pointee, static_cast<u64>(sc));
   Id id;
   if (Lookup(k, id))
     return id;
@@ -165,8 +164,8 @@ Id Module::TypeImage(Id sampled_type,
                      spv::ImageFormat fmt) {
   const Id id = Alloc();
   Instr(types_consts_, spv::Op::OpTypeImage,
-        {id, sampled_type, static_cast<u32>(dim), depth, arrayed, ms,
-         sampled, static_cast<u32>(fmt)});
+        {id, sampled_type, static_cast<u32>(dim), depth, arrayed, ms, sampled,
+         static_cast<u32>(fmt)});
   return id;
 }
 Id Module::TypeSampledImage(Id image_type) {
@@ -328,13 +327,14 @@ void Module::PhysicalStorageBuffers() {
          static_cast<u32>(spv::MemoryModel::GLSL450)});
 }
 
-Id Module::BeginFunction(Id ret_type, Id fn_type,
+Id Module::BeginFunction(Id ret_type,
+                         Id fn_type,
                          const base::Vector<Id>& parameter_types,
                          base::Vector<Id>* parameter_ids) {
   const Id fn = Alloc();
   Instr(fn_body_, spv::Op::OpFunction,
-        {ret_type, fn,
-         static_cast<u32>(spv::FunctionControlMask::MaskNone), fn_type});
+        {ret_type, fn, static_cast<u32>(spv::FunctionControlMask::MaskNone),
+         fn_type});
   for (Id type : parameter_types) {
     const Id id = Alloc();
     Instr(fn_body_, spv::Op::OpFunctionParameter, {type, id});
@@ -400,10 +400,7 @@ Id Module::CompositeExtract(Id type, Id composite, u32 index) {
 Id Module::CompositeConstruct(Id type, const base::Vector<Id>& parts) {
   return Emit(spv::Op::OpCompositeConstruct, type, parts);
 }
-Id Module::VectorShuffle(Id type,
-                         Id a,
-                         Id b,
-                         const base::Vector<u32>& comps) {
+Id Module::VectorShuffle(Id type, Id a, Id b, const base::Vector<u32>& comps) {
   const Id id = Alloc();
   base::Vector<u32> ops{type, id, a, b};
   ops.insert(ops.end(), comps.begin(), comps.end());
@@ -412,9 +409,9 @@ Id Module::VectorShuffle(Id type,
 }
 
 void Module::SelectionMerge(Id merge_block) {
-  EmitVoid(spv::Op::OpSelectionMerge,
-           {merge_block,
-            static_cast<u32>(spv::SelectionControlMask::MaskNone)});
+  EmitVoid(
+      spv::Op::OpSelectionMerge,
+      {merge_block, static_cast<u32>(spv::SelectionControlMask::MaskNone)});
 }
 void Module::LoopMerge(Id merge_block, Id continue_block) {
   EmitVoid(spv::Op::OpLoopMerge,
@@ -452,9 +449,9 @@ base::Vector<u32> Module::Assemble() const {
   base::Vector<u32> out;
   out.push_back(spv::MagicNumber);  // 0x07230203
   out.push_back(version_);
-  out.push_back(0);                 // generator (0 = unknown)
-  out.push_back(bound_);            // id bound
-  out.push_back(0);                 // schema
+  out.push_back(0);       // generator (0 = unknown)
+  out.push_back(bound_);  // id bound
+  out.push_back(0);       // schema
   const auto append = [&](const base::Vector<u32>& s) {
     out.insert(out.end(), s.begin(), s.end());
   };

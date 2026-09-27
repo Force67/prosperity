@@ -1,12 +1,12 @@
 #include "gpu/gcn/gcn_translate.h"
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
-#include <base/logging.h>
+#include <spirv/unified1/GLSL.std.450.h>
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/strings/xstring.h"
 #include "gpu/gcn/spirv/spv_emit.h"
 #include "gpu/gcn/spirv/spv_post.h"
-#include <spirv/unified1/GLSL.std.450.h>
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
 
 namespace gpu::gcn {
 
@@ -92,8 +92,8 @@ base::Vector<u32> BuildImageTilingShader() {
   // Packed narrow texels on the linear side (param 12): byte addressing with
   // the offset and stride given in bytes, and a lane shift inside the dword.
   const Id is_packed = m.Emit(Op::OpINotEqual, m.TypeBool(), {param(12), c(0)});
-  const Id lin_byte = add(add(param(7), mul(z, param(9))),
-                          mul(add(mul(y, param(8)), x), elem));
+  const Id lin_byte =
+      add(add(param(7), mul(z, param(9))), mul(add(mul(y, param(8)), x), elem));
   const Id linear = m.Emit(
       Op::OpSelect, u,
       {is_packed, op(Op::OpShiftRightLogical, lin_byte, c(2)), linear_dw});
@@ -108,15 +108,14 @@ base::Vector<u32> BuildImageTilingShader() {
   m.SelectionMerge(copied);
   m.BranchConditional(direction, detile, retile);
   m.OpenBlock(detile);
-  const Id raw_texel =
-      op(Op::OpBitwiseAnd,
-         op(Op::OpShiftRightLogical, m.Load(u, at(0, tiled)), shift),
-         value_mask);
-  const Id unorm_to_float = m.Emit(
-      Op::OpBitcast, u,
-      {m.Emit(Op::OpFMul, f,
-              {m.Emit(Op::OpConvertUToF, f, {raw_texel}),
-               m.ConstF32(1.0f / 65535.0f)})});
+  const Id raw_texel = op(
+      Op::OpBitwiseAnd,
+      op(Op::OpShiftRightLogical, m.Load(u, at(0, tiled)), shift), value_mask);
+  const Id unorm_to_float =
+      m.Emit(Op::OpBitcast, u,
+             {m.Emit(Op::OpFMul, f,
+                     {m.Emit(Op::OpConvertUToF, f, {raw_texel}),
+                      m.ConstF32(1.0f / 65535.0f)})});
   const Id texel =
       m.Emit(Op::OpSelect, u, {is_depth16, unorm_to_float, raw_texel});
   const Id pk_store = m.NewBlock(), plain_store = m.NewBlock(),
@@ -124,12 +123,13 @@ base::Vector<u32> BuildImageTilingShader() {
   m.SelectionMerge(det_done);
   m.BranchConditional(is_packed, pk_store, plain_store);
   m.OpenBlock(pk_store);
-  m.Emit(Op::OpAtomicAnd, u,
-         {at(1, linear), c(1), c(0),
-          m.Emit(Op::OpNot, u,
-                 {op(Op::OpShiftLeftLogical, value_mask, lshift)})});
-  m.Emit(Op::OpAtomicOr, u,
-         {at(1, linear), c(1), c(0), op(Op::OpShiftLeftLogical, texel, lshift)});
+  m.Emit(
+      Op::OpAtomicAnd, u,
+      {at(1, linear), c(1), c(0),
+       m.Emit(Op::OpNot, u, {op(Op::OpShiftLeftLogical, value_mask, lshift)})});
+  m.Emit(
+      Op::OpAtomicOr, u,
+      {at(1, linear), c(1), c(0), op(Op::OpShiftLeftLogical, texel, lshift)});
   m.Branch(det_done);
   m.OpenBlock(plain_store);
   m.Store(at(1, linear), texel);
@@ -140,26 +140,27 @@ base::Vector<u32> BuildImageTilingShader() {
   const Id raw_value =
       op(Op::OpShiftRightLogical, m.Load(u, at(1, linear)), lshift);
   const Id depth = m.Emit(Op::OpBitcast, f, {raw_value});
-  const Id clamped = m.ExtInst(f, GLSLstd450FClamp,
-                               {depth, m.ConstF32(0.f), m.ConstF32(1.f)});
-  const Id float_to_unorm = m.Emit(
-      Op::OpConvertFToU, u,
-      {m.Emit(Op::OpFAdd, f,
-              {m.Emit(Op::OpFMul, f, {clamped, m.ConstF32(65535.f)}),
-               m.ConstF32(0.5f)})});
-  const Id value = op(Op::OpBitwiseAnd,
-                      m.Emit(Op::OpSelect, u,
-                             {is_depth16, float_to_unorm, raw_value}),
-                      value_mask);
+  const Id clamped =
+      m.ExtInst(f, GLSLstd450FClamp, {depth, m.ConstF32(0.f), m.ConstF32(1.f)});
+  const Id float_to_unorm =
+      m.Emit(Op::OpConvertFToU, u,
+             {m.Emit(Op::OpFAdd, f,
+                     {m.Emit(Op::OpFMul, f, {clamped, m.ConstF32(65535.f)}),
+                      m.ConstF32(0.5f)})});
+  const Id value =
+      op(Op::OpBitwiseAnd,
+         m.Emit(Op::OpSelect, u, {is_depth16, float_to_unorm, raw_value}),
+         value_mask);
   const Id packed = m.NewBlock(), direct = m.NewBlock(), stored = m.NewBlock();
   m.SelectionMerge(stored);
   m.BranchConditional(narrow, packed, direct);
   m.OpenBlock(packed);
   // Neighbouring narrow texels share a dword: clear this texel's lanes, then
   // set them. Bytes no texel maps to (padding) are never touched.
-  m.Emit(Op::OpAtomicAnd, u,
-         {at(0, tiled), c(1), c(0),
-          m.Emit(Op::OpNot, u, {op(Op::OpShiftLeftLogical, value_mask, shift)})});
+  m.Emit(
+      Op::OpAtomicAnd, u,
+      {at(0, tiled), c(1), c(0),
+       m.Emit(Op::OpNot, u, {op(Op::OpShiftLeftLogical, value_mask, shift)})});
   m.Emit(Op::OpAtomicOr, u,
          {at(0, tiled), c(1), c(0),
           op(Op::OpShiftLeftLogical, op(Op::OpBitwiseAnd, value, value_mask),

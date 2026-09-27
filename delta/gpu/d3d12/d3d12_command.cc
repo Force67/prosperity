@@ -4,15 +4,15 @@
 
 #include <cstring>
 
-#include <base/logging.h>
+#include "base/logging.h"
 
+#include "base/algorithm.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 #include "gpu/d3d12/d3d12_internal.h"
-#include <base/algorithm.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
 
 namespace gpu::d3d12::impl {
 
@@ -36,15 +36,13 @@ bool IsRead(D3D12_RESOURCE_STATES s) {
 // A colour for ClearRenderTargetView, which converts floats to the format.
 void ClearFloats(rhi::Format format, const rhi::ClearColor& c, float out[4]) {
   const rhi::FormatInfo& fi = rhi::GetFormatInfo(format);
-  const bool sint = fi.is_integer && (format == rhi::Format::kR8Sint ||
-                                      format == rhi::Format::kRG8Sint ||
-                                      format == rhi::Format::kRGBA8Sint ||
-                                      format == rhi::Format::kR16Sint ||
-                                      format == rhi::Format::kRG16Sint ||
-                                      format == rhi::Format::kRGBA16Sint ||
-                                      format == rhi::Format::kR32Sint ||
-                                      format == rhi::Format::kRG32Sint ||
-                                      format == rhi::Format::kRGBA32Sint);
+  const bool sint =
+      fi.is_integer &&
+      (format == rhi::Format::kR8Sint || format == rhi::Format::kRG8Sint ||
+       format == rhi::Format::kRGBA8Sint || format == rhi::Format::kR16Sint ||
+       format == rhi::Format::kRG16Sint || format == rhi::Format::kRGBA16Sint ||
+       format == rhi::Format::kR32Sint || format == rhi::Format::kRG32Sint ||
+       format == rhi::Format::kRGBA32Sint);
   for (u32 i = 0; i < 4; i++)
     out[i] = !fi.is_integer ? c.f[i]
              : sint         ? static_cast<float>(c.i[i])
@@ -81,10 +79,9 @@ bool D3D12CommandList::Init() {
   if (FAILED(dev->CreateCommandAllocator(
           D3D12_COMMAND_LIST_TYPE_DIRECT, IID_ID3D12CommandAllocator,
           reinterpret_cast<void**>(&allocator))) ||
-      FAILED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                    allocator, nullptr,
-                                    IID_ID3D12GraphicsCommandList,
-                                    reinterpret_cast<void**>(&cmd))))
+      FAILED(dev->CreateCommandList(
+          0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
+          IID_ID3D12GraphicsCommandList, reinterpret_cast<void**>(&cmd))))
     return false;
   cmd->Close();
   D3D12_DESCRIPTOR_HEAP_DESC hd{};
@@ -106,9 +103,9 @@ void D3D12CommandList::ReleaseTransient() {
   upload_block_ = 0;
   // Keep the largest scratch buffer for the next recording.
   base::Sort(scratch_.begin(), scratch_.end(),
-            [](const UploadBlock& a, const UploadBlock& b) {
-              return a.size > b.size;
-            });
+             [](const UploadBlock& a, const UploadBlock& b) {
+               return a.size > b.size;
+             });
   while (scratch_.size() > 1) {
     SafeRelease(scratch_.back().resource);
     scratch_.pop_back();
@@ -243,8 +240,8 @@ void D3D12CommandList::Require(D3D12Buffer* buffer,
                                D3D12_RESOURCE_STATES state) {
   if (!buffer || buffer->fixed_state)
     return;
-  auto it = buffer_states_.try_emplace(buffer, D3D12_RESOURCE_STATE_COMMON)
-                .first;
+  auto it =
+      buffer_states_.try_emplace(buffer, D3D12_RESOURCE_STATE_COMMON).first;
   D3D12_RESOURCE_STATES& cur = it->second;
   if (cur == state)
     return;
@@ -262,8 +259,8 @@ void D3D12CommandList::Require(D3D12Buffer* buffer,
 
 void D3D12CommandList::RequireScratch(ID3D12Resource* scratch,
                                       D3D12_RESOURCE_STATES state) {
-  auto it = scratch_states_.try_emplace(scratch, D3D12_RESOURCE_STATE_COMMON)
-                .first;
+  auto it =
+      scratch_states_.try_emplace(scratch, D3D12_RESOURCE_STATE_COMMON).first;
   Transition(scratch, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, it->second,
              state);
   it->second = state;
@@ -289,8 +286,7 @@ void D3D12CommandList::TransitionTexture(D3D12Texture* texture,
           continue;
         D3D12_RESOURCE_STATES& cur = texture->states[sub];
         const D3D12_RESOURCE_STATES from = before ? *before : cur;
-        if (from == after &&
-            after == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        if (from == after && after == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
           uav_barrier = true;
         Transition(texture->resource, sub, from, after);
         cur = after;
@@ -322,8 +318,7 @@ void D3D12CommandList::Barrier(u32 src_access,
     if (t.before == rhi::TextureState::kUndefined) {
       TransitionTexture(tex, t.range, after);
     } else {
-      const D3D12_RESOURCE_STATES before =
-          device_.TextureState(tex, t.before);
+      const D3D12_RESOURCE_STATES before = device_.TextureState(tex, t.before);
       TransitionTexture(tex, t.range, after, &before);
     }
   }
@@ -332,8 +327,7 @@ void D3D12CommandList::Barrier(u32 src_access,
 void D3D12CommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
   FlushBarriers();
   pass_color_count_ = base::Min(pass.color_count, 8u);
-  const D3D12_RECT area{pass.x, pass.y,
-                        pass.x + static_cast<LONG>(pass.width),
+  const D3D12_RECT area{pass.x, pass.y, pass.x + static_cast<LONG>(pass.width),
                         pass.y + static_cast<LONG>(pass.height)};
   for (u32 i = 0; i < pass_color_count_; i++)
     pass_rtvs_[i] = View(pass.colors[i].view)->rtv.cpu;
@@ -341,8 +335,8 @@ void D3D12CommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
   pass_has_dsv_ = d.view != nullptr;
   if (pass_has_dsv_) {
     D3D12View* v = View(d.view);
-    pass_dsv_ = device_.Dsv(
-        v, (d.read_only ? 1 : 0) | (d.stencil_read_only ? 2 : 0));
+    pass_dsv_ =
+        device_.Dsv(v, (d.read_only ? 1 : 0) | (d.stencil_read_only ? 2 : 0));
     pass_dsv_clear_ = device_.Dsv(v, 0);
   }
   cmd->OMSetRenderTargets(pass_color_count_, pass_rtvs_, FALSE,
@@ -360,9 +354,8 @@ void D3D12CommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
   }
   if (pass_has_dsv_) {
     const u32 flags =
-        (d.depth && d.depth_load == rhi::LoadOp::kClear
-             ? D3D12_CLEAR_FLAG_DEPTH
-             : 0) |
+        (d.depth && d.depth_load == rhi::LoadOp::kClear ? D3D12_CLEAR_FLAG_DEPTH
+                                                        : 0) |
         (d.stencil && d.stencil_load == rhi::LoadOp::kClear
              ? D3D12_CLEAR_FLAG_STENCIL
              : 0);
@@ -371,8 +364,8 @@ void D3D12CommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
                                  static_cast<D3D12_CLEAR_FLAGS>(flags),
                                  d.clear_depth, d.clear_stencil, 1, &area);
   }
-  viewport_ = {float(pass.x), float(pass.y), float(pass.width),
-               float(pass.height), 0.0f, 1.0f};
+  viewport_ = {float(pass.x),      float(pass.y), float(pass.width),
+               float(pass.height), 0.0f,          1.0f};
   scissor_ = area;
   cmd->RSSetViewports(1, &viewport_);
   cmd->RSSetScissorRects(1, &scissor_);
@@ -396,12 +389,13 @@ void D3D12CommandList::SetPipeline(rhi::Pipeline* pipeline) {
   }
 }
 
-void D3D12CommandList::BindTable(u32 index,
-                                 D3D12BindGroupLayout* layout,
-                                 D3D12_GPU_DESCRIPTOR_HANDLE table,
-                                 D3D12_GPU_DESCRIPTOR_HANDLE samplers,
-                                 base::Vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv,
-                                 base::Vector<BufferUse> uses) {
+void D3D12CommandList::BindTable(
+    u32 index,
+    D3D12BindGroupLayout* layout,
+    D3D12_GPU_DESCRIPTOR_HANDLE table,
+    D3D12_GPU_DESCRIPTOR_HANDLE samplers,
+    base::Vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv,
+    base::Vector<BufferUse> uses) {
   if (index >= 8)
     return;
   BoundGroup& g = groups_[index];
@@ -533,9 +527,9 @@ void D3D12CommandList::PushBindGroup(u32 index,
   }
   for (size_t i = 0; i < layout->entries.size(); i++)
     if (!written[i])
-      device_.WriteNull({cpu.ptr + size_t(layout->entries[i].slot) *
-                                       device_.view_increment},
-                        layout->entries[i].type, layout->entries[i].read_only);
+      device_.WriteNull(
+          {cpu.ptr + size_t(layout->entries[i].slot) * device_.view_increment},
+          layout->entries[i].type, layout->entries[i].read_only);
   D3D12_GPU_DESCRIPTOR_HANDLE samplers{};
   if (layout->sampler_count)
     samplers = device_.SamplerTable(sampler_ids, nullptr, nullptr);
@@ -679,8 +673,7 @@ void D3D12CommandList::FlushState(bool compute) {
         cmd->SetGraphicsRootDescriptorTable(rg.sampler_table, g.samplers);
       for (size_t d = 0; d < rg.root_cbv.size() && d < g.root_cbv.size(); d++)
         if (rg.root_cbv[d] >= 0)
-          cmd->SetGraphicsRootConstantBufferView(rg.root_cbv[d],
-                                                 g.root_cbv[d]);
+          cmd->SetGraphicsRootConstantBufferView(rg.root_cbv[d], g.root_cbv[d]);
     }
   }
 
@@ -700,9 +693,8 @@ void D3D12CommandList::FlushState(bool compute) {
       ib.SizeInBytes = static_cast<UINT>(
           index_buffer_->desc().size -
           base::Min(index_offset_, index_buffer_->desc().size));
-      ib.Format = index_type_ == rhi::IndexType::kUint32
-                      ? DXGI_FORMAT_R32_UINT
-                      : DXGI_FORMAT_R16_UINT;
+      ib.Format = index_type_ == rhi::IndexType::kUint32 ? DXGI_FORMAT_R32_UINT
+                                                         : DXGI_FORMAT_R16_UINT;
       cmd->IASetIndexBuffer(&ib);
       index_dirty_ = false;
     }
@@ -833,9 +825,9 @@ void D3D12CommandList::ClearAttachment(u32 attachment,
       cmd->ClearRenderTargetView(pass_rtvs_[attachment], color.f, 1, &rect);
     return;
   }
-  const u32 flags = ((aspect & rhi::kAspectDepth) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
-                    ((aspect & rhi::kAspectStencil) ? D3D12_CLEAR_FLAG_STENCIL
-                                                    : 0);
+  const u32 flags =
+      ((aspect & rhi::kAspectDepth) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
+      ((aspect & rhi::kAspectStencil) ? D3D12_CLEAR_FLAG_STENCIL : 0);
   if (pass_has_dsv_ && flags)
     cmd->ClearDepthStencilView(pass_dsv_clear_,
                                static_cast<D3D12_CLEAR_FLAGS>(flags), depth,
@@ -877,8 +869,8 @@ void D3D12CommandList::CopyBufferTexture(D3D12Texture* texture,
   for (u32 layer = 0; layer < r.layers; layer++) {
     const u32 sub = texture->Subresource(r.mip, r.base_layer + layer, plane);
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
-    device_.device->GetCopyableFootprints(&rd, sub, 1, 0, &fp, nullptr,
-                                          nullptr, nullptr);
+    device_.device->GetCopyableFootprints(&rd, sub, 1, 0, &fp, nullptr, nullptr,
+                                          nullptr);
     const DXGI_FORMAT format = fp.Footprint.Format;
     D3D12_TEXTURE_COPY_LOCATION tex{};
     tex.pResource = texture->resource;
@@ -886,9 +878,12 @@ void D3D12CommandList::CopyBufferTexture(D3D12Texture* texture,
     tex.SubresourceIndex = sub;
     const u64 offset = c.buffer_offset + layer * layer_pitch;
     const D3D12_BOX box{0, 0, 0, r.width, r.height, r.depth};
-    const D3D12_BOX tex_box{UINT(r.x),           UINT(r.y),
-                            UINT(r.z),           UINT(r.x) + r.width,
-                            UINT(r.y) + r.height, UINT(r.z) + r.depth};
+    const D3D12_BOX tex_box{UINT(r.x),
+                            UINT(r.y),
+                            UINT(r.z),
+                            UINT(r.x) + r.width,
+                            UINT(r.y) + r.height,
+                            UINT(r.z) + r.depth};
     // Depth/stencil copies are whole subresources in D3D12.
     const D3D12_BOX* src_box = depth_format ? nullptr : &box;
     const D3D12_BOX* tex_src_box = depth_format ? nullptr : &tex_box;
@@ -897,8 +892,7 @@ void D3D12CommandList::CopyBufferTexture(D3D12Texture* texture,
     buf.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     buf.PlacedFootprint.Footprint.Format = format;
     buf.PlacedFootprint.Footprint.Depth = r.depth;
-    const bool pitch_ok =
-        row_pitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT == 0;
+    const bool pitch_ok = row_pitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT == 0;
     if (pitch_ok && offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT == 0) {
       buf.pResource = buffer->resource;
       buf.PlacedFootprint.Offset = offset;
@@ -919,28 +913,27 @@ void D3D12CommandList::CopyBufferTexture(D3D12Texture* texture,
     }
 
     // Repack through scratch memory with D3D12's pitch and placement.
-    const u64 pitch = pitch_ok ? row_pitch
-                               : AlignUp(row_bytes,
-                                         D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+    const u64 pitch =
+        pitch_ok ? row_pitch
+                 : AlignUp(row_bytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
     const u64 scratch_slice = pitch * copy_rows;
     const UploadAlloc s = AllocateScratch(scratch_slice * r.depth);
     if (!s.resource)
       return;
     buf.pResource = s.resource;
     buf.PlacedFootprint.Offset = s.offset;
-    buf.PlacedFootprint.Footprint.Width =
-        (r.width + block - 1) / block * block;
+    buf.PlacedFootprint.Footprint.Width = (r.width + block - 1) / block * block;
     buf.PlacedFootprint.Footprint.Height = copy_rows * block;
     buf.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(pitch);
     auto rows_copy = [&](bool into_scratch) {
       if (pitch == row_pitch && copy_rows == rows) {
         const u64 bytes = slice_pitch * (r.depth - 1) + row_pitch * copy_rows;
         if (into_scratch)
-          cmd->CopyBufferRegion(s.resource, s.offset, buffer->resource,
-                                offset, bytes);
+          cmd->CopyBufferRegion(s.resource, s.offset, buffer->resource, offset,
+                                bytes);
         else
-          cmd->CopyBufferRegion(buffer->resource, offset, s.resource,
-                                s.offset, bytes);
+          cmd->CopyBufferRegion(buffer->resource, offset, s.resource, s.offset,
+                                bytes);
         return;
       }
       for (u32 z = 0; z < r.depth; z++)
@@ -1020,8 +1013,8 @@ void D3D12CommandList::CopyTexture(rhi::Texture* dst,
                         UINT(src_region.x) + src_region.width,
                         UINT(src_region.y) + src_region.height,
                         UINT(src_region.z) + src_region.depth};
-    cmd->CopyTextureRegion(&to, dst_region.x, dst_region.y, dst_region.z,
-                           &from, fi.is_depth || fi.is_stencil ? nullptr : &box);
+    cmd->CopyTextureRegion(&to, dst_region.x, dst_region.y, dst_region.z, &from,
+                           fi.is_depth || fi.is_stencil ? nullptr : &box);
   }
 }
 
@@ -1087,8 +1080,7 @@ void D3D12CommandList::BlitTexture(rhi::Texture* dst,
   const u32 src_h = base::Max(1u, s->desc().height >> src_region.mip);
   const D3D12_RESOURCE_STATES copy_src = D3D12_RESOURCE_STATE_COPY_SOURCE;
   const D3D12_RESOURCE_STATES copy_dst = D3D12_RESOURCE_STATE_COPY_DEST;
-  const D3D12_RESOURCE_STATES read =
-      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+  const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
   for (u32 layer = 0; layer < src_region.layers; layer++) {
     const rhi::TextureRange sr{rhi::kAspectColor, src_region.mip, 1,
                                src_region.base_layer + layer, 1};
@@ -1106,8 +1098,8 @@ void D3D12CommandList::BlitTexture(rhi::Texture* dst,
     sv.Format = Dxgi(s->desc().format).format;
     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Texture2DArray = {src_region.mip, 1, src_region.base_layer + layer, 1,
-                         0, 0.0f};
+    sv.Texture2DArray = {
+        src_region.mip, 1, src_region.base_layer + layer, 1, 0, 0.0f};
     device_.device->CreateShaderResourceView(s->resource, &sv, cpu);
     const CpuRange rtv =
         AttachmentView(d, dst_region.mip, dst_region.base_layer + layer, false);
@@ -1116,9 +1108,12 @@ void D3D12CommandList::BlitTexture(rhi::Texture* dst,
     cmd->SetPipelineState(pso);
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->OMSetRenderTargets(1, &rtv.cpu, FALSE, nullptr);
-    const D3D12_VIEWPORT vp{float(dst_region.x),     float(dst_region.y),
-                            float(dst_region.width), float(dst_region.height),
-                            0.0f,                    1.0f};
+    const D3D12_VIEWPORT vp{float(dst_region.x),
+                            float(dst_region.y),
+                            float(dst_region.width),
+                            float(dst_region.height),
+                            0.0f,
+                            1.0f};
     const D3D12_RECT rect{dst_region.x, dst_region.y,
                           dst_region.x + LONG(dst_region.width),
                           dst_region.y + LONG(dst_region.height)};
@@ -1188,16 +1183,15 @@ void D3D12CommandList::ClearTexture(rhi::Texture* texture,
       const D3D12_CPU_DESCRIPTOR_HANDLE local{
           cpu_scratch_->GetCPUDescriptorHandleForHeapStart().ptr +
           size_t(cpu_scratch_next_++ % kCpuScratch) * device_.view_increment};
-      device_.device->CreateUnorderedAccessView(t->resource, nullptr, &uv,
-                                                cpu);
+      device_.device->CreateUnorderedAccessView(t->resource, nullptr, &uv, cpu);
       device_.device->CreateUnorderedAccessView(t->resource, nullptr, &uv,
                                                 local);
       if (integer)
-        cmd->ClearUnorderedAccessViewUint(gpu, local, t->resource, color.u,
-                                          0, nullptr);
+        cmd->ClearUnorderedAccessViewUint(gpu, local, t->resource, color.u, 0,
+                                          nullptr);
       else
-        cmd->ClearUnorderedAccessViewFloat(gpu, local, t->resource, color.f,
-                                           0, nullptr);
+        cmd->ClearUnorderedAccessViewFloat(gpu, local, t->resource, color.f, 0,
+                                           nullptr);
     }
     TransitionTexture(t, range, cur, &uav);
     return;
@@ -1213,22 +1207,20 @@ void D3D12CommandList::ClearByCopy(D3D12Texture* texture,
   const rhi::Format format = texture->desc().format;
   const rhi::FormatInfo& fi = rhi::GetFormatInfo(format);
   if (fi.compressed || fi.bytes != fi.channels * 4u) {
-    BASE_LOGI("gpud3d12", "cannot clear a {} texture",
-              rhi::FormatName(format));
+    BASE_LOGI("gpud3d12", "cannot clear a {} texture", rhi::FormatName(format));
     return;
   }
   for (u32 mip = 0; mip < range.mips; mip++) {
     const rhi::TextureDesc& d = texture->desc();
     const u32 w = base::Max(1u, d.width >> (range.base_mip + mip));
     const u32 h = base::Max(1u, d.height >> (range.base_mip + mip));
-    const u32 depth =
-        d.dim == rhi::TextureDim::k3D
-            ? base::Max(1u, d.depth >> (range.base_mip + mip))
-            : 1u;
-    const u64 pitch = AlignUp(u64(w) * fi.bytes,
-                              D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
-    const UploadAlloc a = AllocateUpload(pitch * h * depth,
-                                         D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+    const u32 depth = d.dim == rhi::TextureDim::k3D
+                          ? base::Max(1u, d.depth >> (range.base_mip + mip))
+                          : 1u;
+    const u64 pitch =
+        AlignUp(u64(w) * fi.bytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+    const UploadAlloc a = AllocateUpload(
+        pitch * h * depth, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
     if (!a.cpu)
       return;
     for (u64 row = 0; row < u64(h) * depth; row++)
@@ -1244,9 +1236,8 @@ void D3D12CommandList::ClearByCopy(D3D12Texture* texture,
       D3D12_TEXTURE_COPY_LOCATION to{};
       to.pResource = texture->resource;
       to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-      to.SubresourceIndex =
-          texture->Subresource(range.base_mip + mip, range.base_layer + layer,
-                               0);
+      to.SubresourceIndex = texture->Subresource(range.base_mip + mip,
+                                                 range.base_layer + layer, 0);
       cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
     }
   }
@@ -1275,8 +1266,8 @@ void D3D12CommandList::ClearDepthStencil(rhi::Texture* texture,
                                           range.base_layer + layer, true);
       if (dsv.valid() && flags)
         cmd->ClearDepthStencilView(dsv.cpu,
-                                   static_cast<D3D12_CLEAR_FLAGS>(flags),
-                                   depth, stencil, 0, nullptr);
+                                   static_cast<D3D12_CLEAR_FLAGS>(flags), depth,
+                                   stencil, 0, nullptr);
     }
   TransitionTexture(t, all, cur, &write);
 }

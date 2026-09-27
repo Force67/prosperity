@@ -12,25 +12,25 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <base/strings/xstring.h>
-#include <options/options.h>
+#include "base/logging.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "options/options.h"
 
+#include "base/atomic.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/set.h"
+#include "base/math/value_bounds.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
-#include <base/threading/thread.h>
-#include <base/atomic.h>
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/set.h>
-#include <base/math/value_bounds.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(u64, kBlkFrom, "DELTA_AGC_REGSTAT_FROM", 0);
@@ -63,6 +63,7 @@ DELTA_OPTION(bool, kOpCensus, "DELTA_AGC_OPCENSUS", false);
 
 // Whether the target of a draw is a buffer the title registered for display,
 // which is what makes "thousands of draws, black frame" readable.
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" bool prosperity_ps5_is_display_buffer(u64 addr);
 
 namespace gpu::ps5 {
@@ -127,7 +128,8 @@ base::String Words(const u32* p, u32 count);
 
 // sh_<address>.bin in the working directory, for an offline disassembler.
 void WriteShaderFile(u64 address) {
-  if (!IsGuestAddress(address) || !gpu::IsReadableRange(address, kMaxShaderBytes))
+  if (!IsGuestAddress(address) ||
+      !gpu::IsReadableRange(address, kMaxShaderBytes))
     return;
   char path[64];
   std::snprintf(path, sizeof(path), "sh_%llx.bin", (unsigned long long)address);
@@ -148,11 +150,10 @@ void DumpProgram(const char* what, u64 address) {
   BASE_LOGI("agc", "{} {:#x}: {} insts", what, address, prog.size());
   for (const auto& in : prog) {
     base::String line;
-    base::FormatTo(line, "  pc={:04x} {:<6} op={:#05x} {:08x}", in.pc,
-                   kEncName[static_cast<u32>(in.enc) < 19
-                                ? static_cast<u32>(in.enc)
-                                : 0],
-                   in.opcode, in.raw[0]);
+    base::FormatTo(
+        line, "  pc={:04x} {:<6} op={:#05x} {:08x}", in.pc,
+        kEncName[static_cast<u32>(in.enc) < 19 ? static_cast<u32>(in.enc) : 0],
+        in.opcode, in.raw[0]);
     if (in.size >= 2)
       base::FormatTo(line, " {:08x}", in.raw[1]);
     if (in.has_literal)
@@ -196,9 +197,9 @@ void NoteRegisterWrite(const char* source, u32 reg, u32 value) {
   // A title that programs its shader state at offsets we do not read leaves the
   // ones we do read at zero, and then every descriptor the vertex stage names
   // resolves against nothing.
-  if (kAgcShcensus && value && reg >= kShRegBase &&
-      reg < kShRegBase + 0x300) {
-    static base::Map<u32, base::Pair<u64, u32>> hist;  // offset -> {count, last}
+  if (kAgcShcensus && value && reg >= kShRegBase && reg < kShRegBase + 0x300) {
+    static base::Map<u32, base::Pair<u64, u32>>
+        hist;  // offset -> {count, last}
     static base::Mutex lock;
     static u64 dumps = 0;
     base::LockGuard<base::Mutex> lk(lock);
@@ -343,9 +344,11 @@ void NoteRegBlock(u32 base,
     BASE_LOGI("regstat",
               "{} calls={} short={} badaddr={} unreadable={} nopairs={} "
               "applied={}",
-              k == 0 ? "context" : k == 1 ? "sh" : "uconfig", s_stat[k].calls,
-              s_stat[k].short_pkt, s_stat[k].bad_addr, s_stat[k].unreadable,
-              s_stat[k].no_pairs, s_stat[k].applied);
+              k == 0   ? "context"
+              : k == 1 ? "sh"
+                       : "uconfig",
+              s_stat[k].calls, s_stat[k].short_pkt, s_stat[k].bad_addr,
+              s_stat[k].unreadable, s_stat[k].no_pairs, s_stat[k].applied);
 }
 
 void TraceRegBlock(u32 base, u64 address, u32 num_pairs, u32 mode) {
@@ -391,7 +394,8 @@ void TraceColorBaseWrite(u32 reg,
     return;
   static int n = 0;
   if (n++ < 60)
-    BASE_LOGI("agc", "CB0 {} <- {:08x}  (pair {}/{} from {:#x}, raw off {:08x})",
+    BASE_LOGI("agc",
+              "CB0 {} <- {:08x}  (pair {}/{} from {:#x}, raw off {:08x})",
               reg == mmCB_COLOR0_BASE ? "BASE" : "INFO", value, pair, num_pairs,
               address, offset_dword);
 }
@@ -411,7 +415,7 @@ void NoteDrawSeen() {
   g_draws_seen.fetch_add(1, base::memory_order_relaxed);
   if (!kGpuDrawcensus)
     return;
-  static const bool started = [] {
+  static const bool kStarted = [] {
     base::SpawnDetachedThread("cmd_trace", [] {
       for (;;) {
         base::SleepForMilliseconds((15) * 1000);
@@ -422,7 +426,7 @@ void NoteDrawSeen() {
     });
     return true;
   }();
-  (void)started;
+  (void)kStarted;
 }
 
 u64 DrawsSeen() {
@@ -443,8 +447,10 @@ void NoteDrawIssued(const render::DrawInfo& d) {
     BASE_LOGI("drawcensus",
               "rt {:#x} {}x{} display={} mrt={} depth={} prim={} vcount={}",
               d.rt_base, d.rt_w, d.rt_h,
+              // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
               prosperity_ps5_is_display_buffer(d.rt_base), d.mrt_count,
               d.depth_valid, d.prim_type, d.vertex_count);
+  // NOLINTEND(readability-identifier-naming)
 }
 
 void NoteDrawDropped(const render::DrawInfo& d,
@@ -723,8 +729,7 @@ void TraceRawBufBinding(bool vertex_stage,
             "  {} rawbuf{} use_pc={:#x} srsrc={} replay={} -> base={:#x} "
             "bytes={} {}{}",
             vertex_stage ? "vs" : "ps", binding, use_pc, srsrc_sgpr,
-            (int)replayed, base, bytes, bytes ? "" : "(UNBOUND)",
-            head.c_str());
+            (int)replayed, base, bytes, bytes ? "" : "(UNBOUND)", head.c_str());
 }
 
 void TraceCbufBinding(bool vertex_stage,
@@ -823,18 +828,17 @@ void TraceVertexDump(const render::DrawInfo& d,
     BASE_LOGI("agc", "    vtx[+{:02}] u={:08x} f={}", o, u, f);
   }
   const float* m = d.mvp;
-  BASE_LOGI("agc", "  mvp=[{} {} {} {} / {} {} {} {} / {} {} {} {} / {} {} {} {}]",
+  BASE_LOGI("agc",
+            "  mvp=[{} {} {} {} / {} {} {} {} / {} {} {} {} / {} {} {} {}]",
             m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10],
             m[11], m[12], m[13], m[14], m[15]);
   // The VS loads its real vertex V# via SMEM from a pointer in GS user data
   // [4..7]; follow each one level to locate the vertex source.
   for (int k = 4; k <= 6; k += 2) {
-    const u64 p =
-        (static_cast<u64>(vs_user_data[k + 1] & 0xFFFF) << 32) |
-        vs_user_data[k];
+    const u64 p = (static_cast<u64>(vs_user_data[k + 1] & 0xFFFF) << 32) |
+                  vs_user_data[k];
     const int dwords = k == 4 ? 32 : 8;
-    if (!IsGpuAddress(p) ||
-        !gpu::IsReadableRange(p, dwords * sizeof(u32)))
+    if (!IsGpuAddress(p) || !gpu::IsReadableRange(p, dwords * sizeof(u32)))
       continue;  // user data holds non-pointers too
     const u32* pw = reinterpret_cast<const u32*>(p);
     base::String line;
@@ -914,13 +918,14 @@ void TraceBeginFrame() {
 void TraceDrawSubmit(const render::DrawInfo& d) {
   if (!Detail())
     return;
-  BASE_LOGI("agc",
-            "DL draw#{} render::Draw num_vattrs={} rt={:#x} tmask={:#x} cc={:#x} "
-            "blend={} dv={} db={:#x} dt={} dw={} df={} ntex={} tex0={:#x}",
-            CurrentDraw(), d.num_vattrs, d.rt_base, d.target_mask,
-            d.color_control, d.blend_enable, d.depth_valid, d.depth_base,
-            d.depth_test_enable, d.depth_write_enable, d.depth_func, d.num_texs,
-            d.num_texs ? d.texs[0].base : 0);
+  BASE_LOGI(
+      "agc",
+      "DL draw#{} render::Draw num_vattrs={} rt={:#x} tmask={:#x} cc={:#x} "
+      "blend={} dv={} db={:#x} dt={} dw={} df={} ntex={} tex0={:#x}",
+      CurrentDraw(), d.num_vattrs, d.rt_base, d.target_mask, d.color_control,
+      d.blend_enable, d.depth_valid, d.depth_base, d.depth_test_enable,
+      d.depth_write_enable, d.depth_func, d.num_texs,
+      d.num_texs ? d.texs[0].base : 0);
   for (u32 i = 0; i < d.num_texs; i++)
     BASE_LOGI("agc",
               "  DL tex{} base={:#x} {}x{} dfmt={} nfmt={} tiling={} pitch={}",
@@ -984,8 +989,9 @@ void NoteDispatch(u64 cs_addr, const u32 threads[3], u32 rsrc2) {
       break;
     base::FormatTo(line, " {:#x}", a);
   }
-  BASE_LOGI("cs", "dispatches={} valid={} unique={}:{} rsrc2={:08x} "
-                  "tg=[{} {} {}]",
+  BASE_LOGI("cs",
+            "dispatches={} valid={} unique={}:{} rsrc2={:08x} "
+            "tg=[{} {} {}]",
             n_total, n_valid, seen.size(), line.c_str(), rsrc2, threads[0],
             threads[1], threads[2]);
 }
@@ -1055,11 +1061,11 @@ void TraceCsUnsupported(u64 cs_addr,
 
 void TraceCsUnresolved(u64 cs_addr, const gcn::CsResource& res, u32 ud_dwords) {
   if (CsReport())
-    BASE_LOGI("csgpu",
-              "CS @{:#x} bind={} kind={} s{} pc={:#x} has no resolved descriptor "
-              "({} user-data dwords); dispatch skipped",
-              cs_addr, res.binding, res.kind, res.base_sgpr, res.use_pc,
-              ud_dwords);
+    BASE_LOGI(
+        "csgpu",
+        "CS @{:#x} bind={} kind={} s{} pc={:#x} has no resolved descriptor "
+        "({} user-data dwords); dispatch skipped",
+        cs_addr, res.binding, res.kind, res.base_sgpr, res.use_pc, ud_dwords);
 }
 
 void TraceCsUnsupportedImage(u64 cs_addr,
@@ -1103,8 +1109,9 @@ void TraceCsInvalidRange(u64 cs_addr,
 
 void TraceCsTooManyResources(u64 cs_addr, u32 max_resources) {
   if (CsReport())
-    BASE_LOGI("csgpu", "CS @{:#x} needs more than {} resources, dispatch "
-                       "skipped",
+    BASE_LOGI("csgpu",
+              "CS @{:#x} needs more than {} resources, dispatch "
+              "skipped",
               cs_addr, max_resources);
 }
 
@@ -1143,7 +1150,7 @@ void NoteOpcode(u32 op) {
   g_op_hist[op & 0xFF]++;
   if (!kOpCensus)
     return;
-  static const bool started = [] {
+  static const bool kStarted = [] {
     base::SpawnDetachedThread("cmd_trace", [] {
       for (;;) {
         base::SleepForMilliseconds((15) * 1000);
@@ -1153,7 +1160,7 @@ void NoteOpcode(u32 op) {
     });
     return true;
   }();
-  (void)started;
+  (void)kStarted;
 }
 
 void NoteSkippedOpcode(u32 op, const char* why) {
@@ -1243,7 +1250,8 @@ void TraceIndirectBuffer(u64 address, u32 words, bool followed) {
     return;
   const u64 n = ok.load() + skipped.load();
   if ((n % 2000) == 1)
-    BASE_LOGI("walkstat", "indirect buffers: followed={} refused={} (last {:#x} x{} dw {})",
+    BASE_LOGI("walkstat",
+              "indirect buffers: followed={} refused={} (last {:#x} x{} dw {})",
               (unsigned long long)ok.load(), (unsigned long long)skipped.load(),
               (unsigned long)address, words, followed ? "ok" : "REFUSED");
 }
@@ -1302,8 +1310,9 @@ bool TraceSubmit(const void* dcb, u32 size_bytes, u32 words, u64 submission) {
     return false;
   dumped++;
   const u32* w = static_cast<const u32*>(dcb);
-  BASE_LOGI("agc", "=== dcb walk #{} (size={} words={} hdr0={:#x}) ===",
-            submission, size_bytes, words, w[0]);
+  BASE_LOGI("agc",
+            "=== dcb walk #{} (size={} words={} hdr0={:#x}) ===", submission,
+            size_bytes, words, w[0]);
   const u32 raw_n = base::Min(words, 100u);  // enough of a big draw buffer
   base::String raw;
   base::FormatTo(raw, "  raw[0..{}]:{}", raw_n, Words(w, raw_n).c_str());
@@ -1330,14 +1339,14 @@ void TraceRegShadowScan() {
   static u64 submits = 0;
   constexpr u64 kShadowAddress = 0x8002860000ull;
   constexpr u64 kShadowBytes = 0x200000;
-  if (++submits != 2000 ||
-      !gpu::IsReadableRange(kShadowAddress, kShadowBytes))
+  if (++submits != 2000 || !gpu::IsReadableRange(kShadowAddress, kShadowBytes))
     return;
   const u32* sh = reinterpret_cast<const u32*>(kShadowAddress);
   int shown = 0;
   for (u32 w = 0; w < (kShadowBytes / 4) && shown < 16; w += 2) {
     const u32 lo = sh[w], hi = sh[w + 1];
-    const u64 a = (static_cast<u64>(lo) << 8) | (static_cast<u64>(hi & 0xFF) << 40);
+    const u64 a =
+        (static_cast<u64>(lo) << 8) | (static_cast<u64>(hi & 0xFF) << 40);
     if (IsGpuAddress(a)) {
       BASE_LOGI("agc", "  SHADOW+{:#x} lo={:08x} hi={:08x} -> addr {:#x}",
                 w * 4, lo, hi, a);

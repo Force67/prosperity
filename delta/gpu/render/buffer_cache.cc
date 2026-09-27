@@ -5,16 +5,16 @@
 
 #include <cstring>
 
-#include <options/options.h>
+#include "options/options.h"
 
+#include "base/algorithm.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/memory/move.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/renderer.h"
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/memory/move.h>
-#include <base/containers/hash_map.h>
-#include <base/algorithm.h>
 
 namespace gpu::render {
 namespace {
@@ -123,8 +123,8 @@ bool Allocate(u64 bytes, u32& block_index, u64& offset) {
 // Releases the copy behind `handle` once no in-flight frame reads it.
 void Drop(u32 handle) {
   Entry& e = g_pool[handle];
-  g_retired.push_back({e.block, e.offset,
-                       (e.bytes + kAlign - 1) & ~(kAlign - 1), g_frame.num});
+  g_retired.push_back(
+      {e.block, e.offset, (e.bytes + kAlign - 1) & ~(kAlign - 1), g_frame.num});
   g_live_bytes -= e.bytes;
   g_by_base.erase(e.base);
   e.bytes = 0;
@@ -133,8 +133,8 @@ void Drop(u32 handle) {
 
 void Index(u32 handle) {
   const Entry& e = g_pool[handle];
-  for (u64 b = e.base >> kIndexShift; b <= (e.base + e.bytes - 1) >> kIndexShift;
-       b++)
+  for (u64 b = e.base >> kIndexShift;
+       b <= (e.base + e.bytes - 1) >> kIndexShift; b++)
     g_index[b].push_back(handle);
 }
 

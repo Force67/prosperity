@@ -10,18 +10,17 @@
 
 #include "base/arch.h"
 
-
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
 #include "gpu/render/command.h"
 #include "gpu/rhi/device.h"
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/containers/hash_map.h>
 
 namespace gpu::render {
 
-// One resource-model unit: a render target keyed by guest base address that also
-// samples as a texture, so RT-bind and texture-sample resolve to the same image via
-// the address page table and render-to-texture/MRT just work.
+// One resource-model unit: a render target keyed by guest base address that
+// also samples as a texture, so RT-bind and texture-sample resolve to the same
+// image via the address page table and render-to-texture/MRT just work.
 struct RTarget {
   rhi::Texture* texture = nullptr;
   rhi::TextureView* view = nullptr;
@@ -53,15 +52,15 @@ struct RTarget {
   // layout already matches, or it reads what was there BEFORE those writes –
   // which is how SotC's composite sampled its scene target and got black.
   bool dirty_for_read = false;
-  // Layout once the last SUBMITTED work executes (stamped at EndFrame). `layout`
-  // tracks the recording timeline, which runs ahead: a mid-frame submission (compute
-  // staging an RT-backed CS input) must chain from and restore the submitted state,
-  // never `layout`.
+  // Layout once the last SUBMITTED work executes (stamped at EndFrame).
+  // `layout` tracks the recording timeline, which runs ahead: a mid-frame
+  // submission (compute staging an RT-backed CS input) must chain from and
+  // restore the submitted state, never `layout`.
   rhi::TextureState submitted_layout = rhi::TextureState::kUndefined;
   bool used_this_frame = false;
-  u32 draws = 0;      // draws into this RT this frame
-  int last_frame = -1000;  // frame number this RT was last rendered into
-  u64 render_serial = 0;   // g_render_serial when last bound for writing
+  u32 draws = 0;             // draws into this RT this frame
+  int last_frame = -1000;    // frame number this RT was last rendered into
+  u64 render_serial = 0;     // g_render_serial when last bound for writing
   bool accumulated = false;  // the last draw into it blended dst * ONE
   bool clear_pending =
       false;  // a fullscreen black clear was requested; applied lazily
@@ -150,10 +149,10 @@ struct DepthTarget {
   bool stencil_used_this_frame = false;
   bool clear_pending = false;
   float clear_value = 1.0f;
-  // DB_HTILE_DATA_BASE of the last draw that bound this target + whether something
-  // overwrote it since. A known HTILE base is cleared by those writes alone, not on
-  // every first bind: the guest's frame does not line up with ours (Astro Bot's depth
-  // prepass lands a frame early).
+  // DB_HTILE_DATA_BASE of the last draw that bound this target + whether
+  // something overwrote it since. A known HTILE base is cleared by those writes
+  // alone, not on every first bind: the guest's frame does not line up with
+  // ours (Astro Bot's depth prepass lands a frame early).
   u64 htile_base = 0;
   bool htile_clear_pending = false;
   bool htile_code_known = false;
@@ -171,9 +170,10 @@ extern base::HashMap<u64, base::Vector<DepthTarget>> g_depth_variants;
 // ActivateRtVariant); only the one in g_rts answers to the address.
 extern base::HashMap<u64, base::Vector<RTarget>> g_rt_variants;
 
-// Address -> image page table, the resource model's core: a 64 KiB guest page maps to
-// the RT bases whose footprint covers it, so a sampled address resolves to every
-// overlapping live image in O(pages). Pages hold lists (aliased/double-buffered RTs).
+// Address -> image page table, the resource model's core: a 64 KiB guest page
+// maps to the RT bases whose footprint covers it, so a sampled address resolves
+// to every overlapping live image in O(pages). Pages hold lists
+// (aliased/double-buffered RTs).
 constexpr u32 kRtPageShift = 16;  // 64 KiB
 extern base::HashMap<u64, base::Vector<u64>>& g_rt_pages;
 
@@ -205,16 +205,18 @@ void TransitionImage(rhi::CommandList* list,
                      u32 layers = 1);
 
 rhi::TextureView* SampledView(RTarget& rt, u32 swizzle, bool feedback = false);
-// Sampled view reinterpreted into `want` (same texel size) so the numeric type matches
-// the shader's OpTypeImage; `used` returns the format actually created, which the
-// caller needs to decide whether the binding may be filtered.
-rhi::TextureView* SampledViewAs(RTarget& rt, u32 swizzle, rhi::Format want,
+// Sampled view reinterpreted into `want` (same texel size) so the numeric type
+// matches the shader's OpTypeImage; `used` returns the format actually created,
+// which the caller needs to decide whether the binding may be filtered.
+rhi::TextureView* SampledViewAs(RTarget& rt,
+                                u32 swizzle,
+                                rhi::Format want,
                                 rhi::Format* used = nullptr);
 rhi::TextureView* SampledView(DepthTarget& depth, u32 swizzle);
 
-// Resolve a sampled guest address to its live image (0 = none), making the variant
-// matching the sampled geometry live when the current one cannot serve the sample.
-// True if a usable target is live at `base` afterwards.
+// Resolve a sampled guest address to its live image (0 = none), making the
+// variant matching the sampled geometry live when the current one cannot serve
+// the sample. True if a usable target is live at `base` afterwards.
 bool ActivateSampledRtVariant(u64 base, u32 w, u32 h);
 // Make the volume at `base` a GS rendered layered the live target, when it is
 // exactly the w x h x depth a 3D T# describes and has been rendered.
@@ -233,20 +235,21 @@ rhi::TextureView* StencilSampledView(DepthTarget& depth);
 // same-frame clear destroys it. No-op when no compute range aliases the target.
 bool PreserveCsDepthBeforeClear(u64 base);
 
-// A dispatch/DMA write of `bytes` at `base` covering a live target's DCC metadata IS
-// that target's fast clear (the hardware reads the clear code from the metadata and
-// never touches pixels); turned into the lazy clear at the next bind. `fill` = the
-// dword when the packet carries it; a compute write is read back at the next bind.
+// A dispatch/DMA write of `bytes` at `base` covering a live target's DCC
+// metadata IS that target's fast clear (the hardware reads the clear code from
+// the metadata and never touches pixels); turned into the lazy clear at the
+// next bind. `fill` = the dword when the packet carries it; a compute write is
+// read back at the next bind.
 void NoteDccWrite(u64 base, u64 bytes, const u32* fill);
 
 // A dispatch wrote the pixels of any target overlapping `base`: an earlier DCC
 // fast clear of it no longer describes its content.
 void NoteSurfaceWrite(u64 base, u64 bytes);
 
-// A dispatch wrote `bytes` at `base` through a raw buffer, so guest memory under any
-// overlapping target is now newer than its image: until a draw renders again, a
-// sample must read the memory (Astro Bot reuses its UI target's pages for an
-// exposure texel).
+// A dispatch wrote `bytes` at `base` through a raw buffer, so guest memory
+// under any overlapping target is now newer than its image: until a draw
+// renders again, a sample must read the memory (Astro Bot reuses its UI
+// target's pages for an exposure texel).
 void NoteRawWrite(u64 base, u64 bytes);
 // Whether [base, base+bytes) touches a live colour or depth target's surface.
 bool OverlapsLiveTarget(u64 base, u64 bytes);
@@ -270,8 +273,8 @@ struct RenderRegion {
   u32 cur_depth_slice = 0;
   u32 cur_layers = 1;
   u64 cur_stencil = 0;
-  u64 last_rt = 0;    // last RT rendered to (present fallback)
-  u64 first_rt = 0;   // first colour RT created (diagnostic selector)
+  u64 last_rt = 0;   // last RT rendered to (present fallback)
+  u64 first_rt = 0;  // first colour RT created (diagnostic selector)
   u64 busiest_rt = 0;
   u32 busiest_rt_draws = 0;
   bool open = false;
@@ -290,22 +293,22 @@ bool BeginRegion(const u64* mrt_base,
                  const u32* mrt_info,
                  u32 mrt_count,
                  u32 w,
-                  u32 h,
-                  u64 depth_base = 0,
-                  float depth_clear = 1.0f,
-                  u64 stencil_base = 0,
-                  u8 stencil_clear = 0,
-                  bool depth_read_only = false,
-                  u32 depth_w = 0,
-                  u32 depth_h = 0,
-                  const u32* mrt_surf_w = nullptr,
-                  const u32* mrt_surf_h = nullptr,
-                  const u64* mrt_dcc_base = nullptr,
-                  const u32 (*mrt_clear_word)[2] = nullptr,
-                  u64 depth_htile_base = 0,
-                  u32 depth_slice = 0,
-                  u32 layers = 1,
-                  bool meta_cmask = false);
+                 u32 h,
+                 u64 depth_base = 0,
+                 float depth_clear = 1.0f,
+                 u64 stencil_base = 0,
+                 u8 stencil_clear = 0,
+                 bool depth_read_only = false,
+                 u32 depth_w = 0,
+                 u32 depth_h = 0,
+                 const u32* mrt_surf_w = nullptr,
+                 const u32* mrt_surf_h = nullptr,
+                 const u64* mrt_dcc_base = nullptr,
+                 const u32 (*mrt_clear_word)[2] = nullptr,
+                 u64 depth_htile_base = 0,
+                 u32 depth_slice = 0,
+                 u32 layers = 1,
+                 bool meta_cmask = false);
 
 // The extent an attachment's image needs: its own surface geometry when that is
 // believable, else the region the pass draws into.

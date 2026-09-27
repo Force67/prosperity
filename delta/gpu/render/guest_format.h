@@ -7,10 +7,8 @@
 // into their Vulkan equivalents, plus the conversion of a readback texel back
 // to BGRA8. Pure tables: no device state, no caches.
 
-
-#include "gpu/rhi/types.h"
 #include "base/arch.h"
-
+#include "gpu/rhi/types.h"
 
 namespace gpu::render {
 
@@ -38,8 +36,7 @@ rhi::BlendOp BlendOp(u32 f);
 rhi::BlendAttachment BlendAttachment(u32 bc, bool en);
 // shader_mask == 0 means the frontend supplies only the recompiler's export
 // mask. The target's per-component write mask still applies independently.
-u8 ColorWriteMask(u32 target_mask, u32 shader_mask,
-                                     u8 export_mask, u32 target);
+u8 ColorWriteMask(u32 target_mask, u32 shader_mask, u8 export_mask, u32 target);
 
 rhi::Format VertexFormat(u32 dfmt, u32 nfmt);
 u32 VertexFormatBytes(u32 dfmt);

@@ -29,7 +29,7 @@
 #include "base/arch.h"
 #include "gpu/rhi/types.h"
 
-#include <base/memory/unique_pointer.h>
+#include "base/memory/unique_pointer.h"
 
 namespace gpu::rhi {
 
@@ -194,10 +194,7 @@ class CommandList : public Object {
                                  float depth,
                                  u8 stencil) = 0;
   // Fill with a repeating 32-bit value; the buffer needs kBufferCopyDst.
-  virtual void FillBuffer(Buffer* buffer,
-                          u64 offset,
-                          u64 bytes,
-                          u32 value) = 0;
+  virtual void FillBuffer(Buffer* buffer, u64 offset, u64 bytes, u32 value) = 0;
   // Small inline write (<= 64 KiB), ordered with the list's other work.
   virtual void UpdateBuffer(Buffer* buffer,
                             u64 offset,
@@ -227,7 +224,7 @@ class Device {
  public:
   virtual ~Device() = default;
 
-  virtual const Caps& caps() const = 0;  // NOLINT: accessor
+  virtual const Caps& caps() const = 0;               // NOLINT: accessor
   Backend backend() const { return caps().backend; }  // NOLINT: accessor
 
   virtual Buffer* CreateBuffer(const BufferDesc& desc) = 0;

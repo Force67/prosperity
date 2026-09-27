@@ -37,7 +37,8 @@ const char* StagePrefix(rhi::ShaderStage stage) {
   }
 }
 
-bool Replace(std::string& text, const std::string& from,
+bool Replace(std::string& text,
+             const std::string& from,
              const std::string& to) {
   bool any = false;
   for (size_t at = text.find(from); at != std::string::npos;
@@ -200,8 +201,10 @@ std::string ExtendedArithmetic(const std::string& hlsl) {
              " d = x - y; borrow = ((~x & y) | (~(x ^ y) & d)) >> 31; "
              "return d; }\n";
     const std::string mul =
-        "{ " + u + " xl = x & 0xffffu, xh = x >> 16, yl = y & 0xffffu, "
-        "yh = y >> 16; " + u + " lh = xl * yh, hl = xh * yl; " + u +
+        "{ " + u +
+        " xl = x & 0xffffu, xh = x >> 16, yl = y & 0xffffu, "
+        "yh = y >> 16; " +
+        u + " lh = xl * yh, hl = xh * yl; " + u +
         " mid = ((xl * yl) >> 16) + (lh & 0xffffu) + (hl & 0xffffu); "
         "msb = xh * yh + (lh >> 16) + (hl >> 16) + (mid >> 16); "
         "lsb = x * y; }\n";
@@ -211,9 +214,9 @@ std::string ExtendedArithmetic(const std::string& hlsl) {
              " msb, out " + u + " lsb) " + mul;
     if (hlsl.find("imulExtended(") != std::string::npos)
       out += "void imulExtended(" + i + " x, " + i + " y, out " + i +
-             " msb, out " + i + " lsb) { " + u + " hi, lo; umulExtended(" +
-             u + "(x), " + u + "(y), hi, lo); msb = " + i + "(hi - (x < 0 ? " +
-             u + "(y) : 0u) - (y < 0 ? " + u + "(x) : 0u)); lsb = " + i +
+             " msb, out " + i + " lsb) { " + u + " hi, lo; umulExtended(" + u +
+             "(x), " + u + "(y), hi, lo); msb = " + i + "(hi - (x < 0 ? " + u +
+             "(y) : 0u) - (y < 0 ? " + u + "(x) : 0u)); lsb = " + i +
              "(lo); }\n";
   }
   return out;
@@ -226,8 +229,8 @@ bool PackingFailure(const std::string& message, u32* id) {
   if (at == std::string::npos ||
       message.find("cannot be expressed") == std::string::npos)
     return false;
-  *id = static_cast<u32>(std::strtoul(message.c_str() + at + key.size(),
-                                      nullptr, 10));
+  *id = static_cast<u32>(
+      std::strtoul(message.c_str() + at + key.size(), nullptr, 10));
   return true;
 }
 
@@ -236,12 +239,12 @@ bool PackingFailure(const std::string& message, u32* id) {
 // and arrays gather the 2x2 footprint at level 0 and pick the texel the
 // coordinate falls in; other levels, and 3D textures, load the clamped texel.
 void IntegerSampling(std::string& hlsl) {
-  static const std::regex decl(
+  static const std::regex kDecl(
       R"((Texture(?:2D|2DArray|3D))<((?:u)?int)4> (\w+) : register)");
   std::string helpers;
   std::vector<std::string> done;
   std::vector<std::string> names;
-  for (auto it = std::sregex_iterator(hlsl.begin(), hlsl.end(), decl);
+  for (auto it = std::sregex_iterator(hlsl.begin(), hlsl.end(), kDecl);
        it != std::sregex_iterator(); ++it) {
     const std::string tex = (*it)[1], base = (*it)[2];
     names.push_back((*it)[3]);
@@ -250,15 +253,16 @@ void IntegerSampling(std::string& hlsl) {
       continue;
     done.push_back(key);
     const std::string t = base + "4";
-    const std::string sig = t + " spvDeltaSampleInt(" + tex + "<" + t +
-                            "> t, SamplerState s, ";
+    const std::string sig =
+        t + " spvDeltaSampleInt(" + tex + "<" + t + "> t, SamplerState s, ";
     if (tex == "Texture3D") {
       const std::string load =
           "{ uint w, h, d, n; t.GetDimensions(uint(lod), w, h, d, n); "
           "int3 p = clamp(int3(floor(c * float3(w, h, d))), 0, "
           "int3(w, h, d) - 1); return t.Load(int4(p, int(lod))); }\n";
       helpers += sig + "float3 c, float lod) " + load;
-      helpers += sig + "float3 c) { return spvDeltaSampleInt(t, s, c, 0.0); }\n";
+      helpers +=
+          sig + "float3 c) { return spvDeltaSampleInt(t, s, c, 0.0); }\n";
       helpers += sig +
                  "float3 c, float3 dx, float3 dy) { return "
                  "spvDeltaSampleInt(t, s, c, 0.0); }\n";
@@ -280,11 +284,13 @@ void IntegerSampling(std::string& hlsl) {
                "); float2 f = frac(c.xy * float2(w, h) - 0.5); "
                "uint i = f.y >= 0.5 ? (f.x >= 0.5 ? 1 : 0) : "
                "(f.x >= 0.5 ? 2 : 3); " +
-               t + " r = t.GatherRed(s, c), g = t.GatherGreen(s, c), "
+               t +
+               " r = t.GatherRed(s, c), g = t.GatherGreen(s, c), "
                "b = t.GatherBlue(s, c), a = t.GatherAlpha(s, c); "
-               "return " + t + "(r[i], g[i], b[i], a[i]); }\n";
-    helpers += sig + coord +
-               " c) { return spvDeltaSampleInt(t, s, c, 0.0); }\n";
+               "return " +
+               t + "(r[i], g[i], b[i], a[i]); }\n";
+    helpers +=
+        sig + coord + " c) { return spvDeltaSampleInt(t, s, c, 0.0); }\n";
     helpers += sig + coord +
                " c, float2 dx, float2 dy) { return "
                "spvDeltaSampleInt(t, s, c, 0.0); }\n";
@@ -307,15 +313,15 @@ struct Emulation {
 void EmulateBarycentrics(std::string& hlsl) {
   if (hlsl.find("GetAttributeAtVertex") != std::string::npos)
     throw std::runtime_error("per-vertex fragment inputs need SM 6.1");
-  static const std::regex persp(R"(: SV_Barycentrics[01]?;)");
+  static const std::regex kPersp(R"(: SV_Barycentrics[01]?;)");
   std::string out;
   std::istringstream in(hlsl);
   for (std::string line; std::getline(in, line);) {
     if (line.find("SV_Barycentrics") != std::string::npos)
-      line = std::regex_replace(
-          line, persp,
-          line.find("noperspective") != std::string::npos ? ": DELTABARYNP;"
-                                                          : ": DELTABARY;");
+      line = std::regex_replace(line, kPersp,
+                                line.find("noperspective") != std::string::npos
+                                    ? ": DELTABARYNP;"
+                                    : ": DELTABARY;");
     out += line + "\n";
   }
   hlsl = std::move(out);
@@ -357,14 +363,12 @@ std::string Lower(const u32* words,
   push.cbv = {kInternalSpace, kPushRegister};
   compiler.add_hlsl_resource_binding(push);
   compiler.set_hlsl_aux_buffer_binding(
-      sc::HLSL_AUX_BINDING_BASE_VERTEX_INSTANCE, kDrawRegister,
-      kInternalSpace);
+      sc::HLSL_AUX_BINDING_BASE_VERTEX_INSTANCE, kDrawRegister, kInternalSpace);
 
   if (model == spv::ExecutionModelGLCompute) {
     const sc::VariableID id = compiler.remap_num_workgroups_builtin();
     if (id) {
-      compiler.set_decoration(id, spv::DecorationDescriptorSet,
-                              kInternalSpace);
+      compiler.set_decoration(id, spv::DecorationDescriptorSet, kInternalSpace);
       compiler.set_decoration(id, spv::DecorationBinding, kDispatchRegister);
       out->uses_workgroup_count = true;
     }
@@ -374,11 +378,10 @@ std::string Lower(const u32* words,
   for (const sc::Resource& r : resources.storage_buffers) {
     const u32 set = compiler.get_decoration(r.id, spv::DecorationDescriptorSet);
     const u32 binding = compiler.get_decoration(r.id, spv::DecorationBinding);
-    const bool srv =
-        std::find(options.read_only_storage.begin(),
-                  options.read_only_storage.end(),
-                  base::Pair<u32, u32>{set, binding}) !=
-        options.read_only_storage.end();
+    const bool srv = std::find(options.read_only_storage.begin(),
+                               options.read_only_storage.end(),
+                               base::Pair<u32, u32>{set, binding}) !=
+                     options.read_only_storage.end();
     if (srv)
       compiler.set_decoration(r.id, spv::DecorationNonWritable);
     else
@@ -403,21 +406,22 @@ std::string Lower(const u32* words,
       name = compiler.get_fallback_name(type);
     const bool is_push =
         compiler.get_storage_class(id) == spv::StorageClassPushConstant;
-    const u32 reg = is_push ? kPushRegister
-                            : compiler.get_decoration(id, spv::DecorationBinding);
+    const u32 reg = is_push
+                        ? kPushRegister
+                        : compiler.get_decoration(id, spv::DecorationBinding);
     const u32 space =
         is_push ? kInternalSpace
                 : compiler.get_decoration(id, spv::DecorationDescriptorSet);
-    static const std::regex decl(R"(uniform (\w+) (\w+)\[(\d+)\];)");
+    static const std::regex kDecl(R"(uniform (\w+) (\w+)\[(\d+)\];)");
     std::smatch m;
     std::string::const_iterator from = hlsl.cbegin();
-    while (std::regex_search(from, hlsl.cend(), m, decl)) {
+    while (std::regex_search(from, hlsl.cend(), m, kDecl)) {
       if (m[2] == name) {
         const std::string block = "cbuffer DeltaFlat_" + name +
                                   " : register(b" + std::to_string(reg) +
                                   ", space" + std::to_string(space) +
-                                  ")\n{\n    " + m[1].str() + " " + name +
-                                  "[" + m[3].str() + "];\n};";
+                                  ")\n{\n    " + m[1].str() + " " + name + "[" +
+                                  m[3].str() + "];\n};";
         const size_t at = m.position(0) + (from - hlsl.cbegin());
         hlsl.replace(at, m.length(0), block);
         break;
@@ -454,8 +458,7 @@ std::string Lower(const u32* words,
               (i < 2 ? ", " : ")");
     Replace(hlsl, "gl_WorkGroupID = stage_input.gl_WorkGroupID;",
             "gl_WorkGroupID = stage_input.gl_WorkGroupID + delta_group_base;");
-    Replace(hlsl,
-            "gl_GlobalInvocationID = stage_input.gl_GlobalInvocationID;",
+    Replace(hlsl, "gl_GlobalInvocationID = stage_input.gl_GlobalInvocationID;",
             "gl_GlobalInvocationID = stage_input.gl_GlobalInvocationID + "
             "delta_group_base * " +
                 size + ";");
@@ -472,8 +475,8 @@ std::string Lower(const u32* words,
                "\n{\n    float4 delta_unused : TEXCOORD31;\n};\n\n" + hlsl;
     // SPIRV-Cross copies gl_in[].gl_Position into gl_PositionIn but still
     // reads the GLSL name.
-    static const std::regex gl_in(R"(gl_in\[([^\]]+)\]\.gl_Position)");
-    hlsl = std::regex_replace(hlsl, gl_in, "gl_PositionIn[$1]");
+    static const std::regex kGlIn(R"(gl_in\[([^\]]+)\]\.gl_Position)");
+    hlsl = std::regex_replace(hlsl, kGlIn, "gl_PositionIn[$1]");
   }
   if (model == spv::ExecutionModelFragment ||
       model == spv::ExecutionModelGeometry)
@@ -512,16 +515,17 @@ base::String BarycentricGeometryShader(const base::String& vertex_outputs_in,
   std::string copy;
   for (const Element& e : ParseElements(vertex_outputs))
     copy += "        o." + e.name + " = v[i]." + e.name + ";\n";
-  const std::string gs = "struct DeltaIn\n{\n" + vertex_outputs +
-         "};\n\nstruct DeltaOut\n{\n" + *outputs +
-         "};\n\n[maxvertexcount(3)]\n"
-         "void main(triangle DeltaIn v[3], "
-         "inout TriangleStream<DeltaOut> s)\n{\n"
-         "    for (uint i = 0; i < 3; i++)\n    {\n        DeltaOut o;\n" +
-         copy +
-         "        o.delta_bary = float3(i == 0, i == 1, i == 2);\n"
-         "        o.delta_bary_np = o.delta_bary;\n"
-         "        s.Append(o);\n    }\n}\n";
+  const std::string gs =
+      "struct DeltaIn\n{\n" + vertex_outputs + "};\n\nstruct DeltaOut\n{\n" +
+      *outputs +
+      "};\n\n[maxvertexcount(3)]\n"
+      "void main(triangle DeltaIn v[3], "
+      "inout TriangleStream<DeltaOut> s)\n{\n"
+      "    for (uint i = 0; i < 3; i++)\n    {\n        DeltaOut o;\n" +
+      copy +
+      "        o.delta_bary = float3(i == 0, i == 1, i == 2);\n"
+      "        o.delta_bary_np = o.delta_bary;\n"
+      "        s.Append(o);\n    }\n}\n";
   *outputs_out = base::String(outputs->c_str(), outputs->size());
   return base::String(gs.c_str(), gs.size());
 }
@@ -536,8 +540,8 @@ bool LowerToHlsl(const u32* words,
   for (;;) {
     *out = {};
     try {
-      const std::string hlsl = Lower(patched.data(), patched.size(), options,
-                                     flatten, emulate, out);
+      const std::string hlsl =
+          Lower(patched.data(), patched.size(), options, flatten, emulate, out);
       out->hlsl = base::String(hlsl.c_str(), hlsl.size());
       break;
     } catch (const std::exception& e) {

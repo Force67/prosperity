@@ -12,20 +12,19 @@
  * same numbers.
  */
 
-
 #include "base/arch.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 #include "gpu/rhi/types.h"
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
 
 namespace gpu::d3d12 {
 
 constexpr u32 kInternalSpace = 1000;
-constexpr u32 kPushRegister = 0;      // push constants
-constexpr u32 kRasterRegister = 1;    // float y_sign, for the viewport flip
-constexpr u32 kDrawRegister = 2;      // int base_vertex, base_instance
-constexpr u32 kDispatchRegister = 3;  // uint3 workgroup count
+constexpr u32 kPushRegister = 0;       // push constants
+constexpr u32 kRasterRegister = 1;     // float y_sign, for the viewport flip
+constexpr u32 kDrawRegister = 2;       // int base_vertex, base_instance
+constexpr u32 kDispatchRegister = 3;   // uint3 workgroup count
 constexpr u32 kGroupBaseRegister = 4;  // uint3 first workgroup id
 
 struct LowerOptions {
@@ -57,7 +56,7 @@ struct LoweredShader {
   base::String hlsl;
   base::String outputs;  // the stage's output signature, for the next stage
   base::String profile;  // "vs_6_0", ...
-  bool uses_draw_params = false;    // reads kDrawRegister
+  bool uses_draw_params = false;      // reads kDrawRegister
   bool uses_workgroup_count = false;  // reads kDispatchRegister
   bool uses_raster = false;           // reads kRasterRegister
   base::String error;
@@ -84,7 +83,7 @@ class Dxc {
 // DELTABARYNP varyings to the vertex stage's outputs (LoweredShader::outputs):
 // barycentrics on devices without SM 6.1. Its outputs go to *outputs.
 base::String BarycentricGeometryShader(const base::String& vertex_outputs,
-                                      base::String* outputs);
+                                       base::String* outputs);
 
 // Rewrites what SPIRV-Cross cannot lower to HLSL into what it can
 // (d3d12_spirv_patch.cc). Returns the input unchanged when nothing applies.

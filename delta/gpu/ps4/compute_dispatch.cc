@@ -6,15 +6,19 @@
  */
 
 #include "gpu/ps4/compute_dispatch.h"
-#include "gpu/guest_memory.h"
 #include "base/arch.h"
+#include "gpu/guest_memory.h"
 
 #include <cstring>
 
-#include <base/logging.h>
-#include <host_memory/host_memory.h>
-#include <options/options.h>
+#include "base/logging.h"
+#include "host_memory/host_memory.h"
+#include "options/options.h"
 
+#include "base/containers/hash_map.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_resource.h"
@@ -24,10 +28,6 @@
 #include "gpu/ps4/render_queue.h"
 #include "gpu/ps4/shader_cache.h"
 #include "gpu/render/render_target.h"
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
@@ -145,8 +145,7 @@ ResourceRange ResolveBufferResource(u64 cs_addr,
                                     bool trace) {
   ResourceRange out;
   if (res.kind == 2) {  // scalar-load pointer into an SRT/descriptor table
-    out.base =
-        (static_cast<u64>(descriptor[1] & 0xFFFF) << 32) | descriptor[0];
+    out.base = (static_cast<u64>(descriptor[1] & 0xFFFF) << 32) | descriptor[0];
     out.size = res.min_bytes;
     if (!IsMappedGuestRange(out.base, 1)) {
       out.zero_fill = true;
@@ -167,8 +166,8 @@ ResourceRange ResolveBufferResource(u64 cs_addr,
     out.size = kZeroFillBytes;
   } else if (out.size > kMaxResource) {
     const u64 declared = out.size;
-    out.size = host_memory::MappedMemoryPrefix(reinterpret_cast<const void*>(out.base),
-                                       kMaxUnboundedBuffer);
+    out.size = host_memory::MappedMemoryPrefix(
+        reinterpret_cast<const void*>(out.base), kMaxUnboundedBuffer);
     if (trace)
       TraceCsWindowedBuffer(cs_addr, res.binding, declared, out.size);
   }
@@ -201,10 +200,10 @@ ComputeShaderState ComputeStateOf(const Regs& regs) {
 // that is a dispatch and a fence wait for 16 KB. Run here it is a memset,
 // for metadata and plain buffers; a fill over a render target stays on the
 // GPU.
-constexpr u32 kFillKernel[] = {
-    0xbeeb03ff, 0x00000009, 0xc2020500, 0x8f6a8608, 0xd2ba0000,
-    0x0401006a, 0xbf8c007f, 0x7e020204, 0xd1a80004, 0x00020002,
-    0xe0102000, 0x80000100, 0xbf810000};
+constexpr u32 kFillKernel[] = {0xbeeb03ff, 0x00000009, 0xc2020500, 0x8f6a8608,
+                               0xd2ba0000, 0x0401006a, 0xbf8c007f, 0x7e020204,
+                               0xd1a80004, 0x00020002, 0xe0102000, 0x80000100,
+                               0xbf810000};
 
 DELTA_OPTION(bool, kCpuFill, "DELTA_GPU_CPU_FILL", true);
 
@@ -256,16 +255,14 @@ void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
                      u32 count) {
-  const u32 groups[3] = {count >= 1 ? body[0] : 0,
-                              count >= 2 ? body[1] : 0,
-                              count >= 3 ? body[2] : 0};
-  const u64 cs_addr =
-      (static_cast<u64>(regs[mmCOMPUTE_PGM_HI] & 0xFF) << 32 |
-       regs[mmCOMPUTE_PGM_LO])
-      << 8;
+  const u32 groups[3] = {count >= 1 ? body[0] : 0, count >= 2 ? body[1] : 0,
+                         count >= 3 ? body[2] : 0};
+  const u64 cs_addr = (static_cast<u64>(regs[mmCOMPUTE_PGM_HI] & 0xFF) << 32 |
+                       regs[mmCOMPUTE_PGM_LO])
+                      << 8;
   const u32 threads[3] = {regs[mmCOMPUTE_NUM_THREAD_X] & 0xFFFF,
-                               regs[mmCOMPUTE_NUM_THREAD_Y] & 0xFFFF,
-                               regs[mmCOMPUTE_NUM_THREAD_Z] & 0xFFFF};
+                          regs[mmCOMPUTE_NUM_THREAD_Y] & 0xFFFF,
+                          regs[mmCOMPUTE_NUM_THREAD_Z] & 0xFFFF};
   const u32 rsrc2 = regs[mmCOMPUTE_PGM_RSRC2];
   const u32 user_sgpr = (rsrc2 >> 1) & 0x1F;   // num_user_regs [37:33]
   const u32 tgid_enable = (rsrc2 >> 7) & 0x7;  // tgid_enable [41:39]

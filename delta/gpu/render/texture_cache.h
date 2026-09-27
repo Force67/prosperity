@@ -10,16 +10,15 @@
 
 #include "base/arch.h"
 
-
 #include "gpu/render/command.h"
 #include "gpu/rhi/device.h"
 
 namespace gpu::render {
 
-// Sampler bindings a recompiled PS may consume in one draw. SOTTR's lighting pass
-// declares 23 and a shader needing more is declined outright, so this is a rendering
-// cliff, not a tuning knob; 24 sits far inside every driver's reported
-// maxPerStageDescriptorSampledImages (Vulkan guarantees only 16).
+// Sampler bindings a recompiled PS may consume in one draw. SOTTR's lighting
+// pass declares 23 and a shader needing more is declined outright, so this is a
+// rendering cliff, not a tuning knob; 24 sits far inside every driver's
+// reported maxPerStageDescriptorSampledImages (Vulkan guarantees only 16).
 constexpr u32 kMaxTex = 64;
 
 // Descriptor infrastructure shared by every sampled image (guest textures,

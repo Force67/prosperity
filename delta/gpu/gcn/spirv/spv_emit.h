@@ -19,11 +19,11 @@
 #include "base/arch.h"
 
 #include <spirv/unified1/spirv.hpp11>
-#include <base/containers/map.h>
-#include <base/containers/pair.h>
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
-#include <base/containers/hash_map.h>
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/pair.h"
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 
 namespace gpu::gcn::spirv {
 
@@ -112,7 +112,8 @@ class Module {
 
   // ---- function + block construction ----
   // Begin a function (emits OpFunction + the entry OpLabel); returns the fn id.
-  Id BeginFunction(Id ret_type, Id fn_type,
+  Id BeginFunction(Id ret_type,
+                   Id fn_type,
                    const base::Vector<Id>& parameter_types = {},
                    base::Vector<Id>* parameter_ids = nullptr);
   Id NewBlock();             // allocate a label id (not yet opened)
@@ -181,9 +182,7 @@ class Module {
   }
 
   void PutWord(base::Vector<u32>& sec, u32 w) { sec.push_back(w); }
-  void Instr(base::Vector<u32>& sec,
-             spv::Op op,
-             const base::Vector<u32>& ops);
+  void Instr(base::Vector<u32>& sec, spv::Op op, const base::Vector<u32>& ops);
   void PutString(base::Vector<u32>& sec, const base::String& s);
 
   u32 bound_ = 1;

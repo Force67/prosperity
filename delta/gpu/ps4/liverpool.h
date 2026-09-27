@@ -16,7 +16,7 @@
  */
 
 #include "base/arch.h"
-#include <base/containers/array.h>
+#include "base/containers/array.h"
 
 namespace gpu {
 
@@ -56,9 +56,9 @@ constexpr u32 mmPA_SC_WINDOW_SCISSOR_TL = 0xA081;
 constexpr u32 mmPA_SC_WINDOW_SCISSOR_BR = 0xA082;
 constexpr u32 mmPA_SC_GENERIC_SCISSOR_TL = 0xA090;
 constexpr u32 mmPA_SC_GENERIC_SCISSOR_BR = 0xA091;
-// Viewport 0 scale/offset (float). DB_RENDER_CONTROL clear/copy/resummarize bits: a
-// draw with a clear bit set is not a draw; the hardware fills the plane with
-// DB_DEPTH_CLEAR / DB_STENCIL_CLEAR over the rect and ignores the shader.
+// Viewport 0 scale/offset (float). DB_RENDER_CONTROL clear/copy/resummarize
+// bits: a draw with a clear bit set is not a draw; the hardware fills the plane
+// with DB_DEPTH_CLEAR / DB_STENCIL_CLEAR over the rect and ignores the shader.
 constexpr u32 mmDB_RENDER_CONTROL = 0xA000;
 constexpr u32 mmPA_CL_VPORT_XSCALE = 0xA10F;
 constexpr u32 mmPA_CL_VPORT_XOFFSET = 0xA110;
@@ -168,9 +168,7 @@ struct Regs {
   base::Array<u32, kRegFileSize> data{};
 
   u32& operator[](u32 off) { return data[off]; }
-  u32 operator[](u32 off) const {
-    return off < kRegFileSize ? data[off] : 0;
-  }
+  u32 operator[](u32 off) const { return off < kRegFileSize ? data[off] : 0; }
 
   // The register run starting at `off`, for the blocks read as arrays: the
   // 16-dword user-data SGPRs a shader's descriptors hang off, and the float
@@ -185,8 +183,7 @@ struct Regs {
     return ((hi << 32) | lo) << 8;
   }
   u64 CbColorBase(int rt = 0) const {
-    return static_cast<u64>(data[mmCB_COLOR0_BASE + rt * kCbColorStride])
-           << 8;
+    return static_cast<u64>(data[mmCB_COLOR0_BASE + rt * kCbColorStride]) << 8;
   }
 };
 

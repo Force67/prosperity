@@ -22,12 +22,11 @@
 #include <cstddef>
 #include "base/arch.h"
 
-
 // Spelled from the delta root, the one include convention the layering check
 // (tests/check_layering.py) accepts; all modules share that include root, so
 // internal headers are kept private by the check, not by the build.
+#include "base/containers/vector.h"
 #include "gpu/render/command.h"
-#include <base/containers/vector.h>
 
 namespace gpu::render {
 
@@ -108,10 +107,7 @@ bool CsRangeDirtyOverlapping(u64 base, u64 bytes);
 // A CP DMA immediate fill over guest memory. When the range covers a live
 // render target that is how the title clears it (there is no clear packet on
 // this hardware), so the target takes a pending clear with the filled value.
-void NoteMemoryFill(Renderer& renderer,
-                    u64 base,
-                    u64 bytes,
-                    u32 value);
+void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
 
 // Fill guest memory with one dword on the CPU, as the command stream orders
 // it (a CP DMA fill, or a compute fill kernel run here instead of on the GPU):
@@ -119,12 +115,12 @@ void NoteMemoryFill(Renderer& renderer,
 // retired, and NoteMemoryFill sees it.
 void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
 
-// Does `addr` fall inside a compute staging range, i.e. guest memory the renderer
-// snapshots and copies back? A guest fault on memory the guest alone should own
-// wants that answered on the spot: the crash handler asks, so a corrupted heap
-// word can be attributed to (or cleared of) the compute writeback without a
-// second run. Returns false if no range covers it; otherwise fills `out` with
-// the range's base, size and staging state.
+// Does `addr` fall inside a compute staging range, i.e. guest memory the
+// renderer snapshots and copies back? A guest fault on memory the guest alone
+// should own wants that answered on the spot: the crash handler asks, so a
+// corrupted heap word can be attributed to (or cleared of) the compute
+// writeback without a second run. Returns false if no range covers it;
+// otherwise fills `out` with the range's base, size and staging state.
 bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size);
 
 // The kernel's mapping-changed hook: the guest mapped or unmapped
@@ -132,9 +128,9 @@ bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size);
 void NoteGuestRemap(u64 base, u64 bytes);
 
 // The process-wide renderer instance the command processors drive. The
-// composition root (main/main.cc) Init()s it once; the HLE submit paths reach it
-// through this accessor because the guest-called entry points cannot thread a
-// handle. The single point of ambient state at this seam.
+// composition root (main/main.cc) Init()s it once; the HLE submit paths reach
+// it through this accessor because the guest-called entry points cannot thread
+// a handle. The single point of ambient state at this seam.
 Renderer& DefaultRenderer();
 
 }  // namespace gpu::render

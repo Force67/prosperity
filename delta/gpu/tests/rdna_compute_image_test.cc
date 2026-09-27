@@ -3,16 +3,16 @@
 
 #include <gtest/gtest.h>
 
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/bit_cast.h"
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/render/tiling.h"
-#include <base/algorithm.h>
-#include <base/containers/array.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/bit_cast.h>
 
 namespace {
 TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
@@ -40,8 +40,7 @@ TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
               l.offset + u64(layer) * l.pitch * l.stored_height * stage_elem;
           base::Vector<u8> tight(u64(l.width) * l.height * elem);
           ASSERT_TRUE(gpu::gcn::DetileTextureMip32Pitched(
-              source.data(), tight.data(), l.width * elem, tiled,
-              mip, layer));
+              source.data(), tight.data(), l.width * elem, tiled, mip, layer));
           for (u32 y = 0; y < l.height; y++)
             for (u32 x = 0; x < l.width; x++)
               std::memcpy(expected.data() + offset +
@@ -51,7 +50,7 @@ TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
       }
       base::Vector<u8> actual(linear.size, 0x5a);
       ASSERT_TRUE(gpu::render::ConvertGfx10Image(tiled, linear, source.data(),
-                                             actual.data(), true));
+                                                 actual.data(), true));
       ASSERT_EQ(actual, expected);
       for (size_t i = 0; i < actual.size(); i++)
         actual[i] ^= 0x97;
@@ -64,17 +63,17 @@ TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
           base::Vector<u8> tight(u64(l.width) * l.height * elem);
           for (u32 y = 0; y < l.height; y++)
             for (u32 x = 0; x < l.width; x++)
-              std::memcpy(tight.data() + (u64(y) * l.width + x) * elem,
-                          actual.data() + offset +
-                              (u64(y) * l.pitch + x) * stage_elem,
-                          elem);
+              std::memcpy(
+                  tight.data() + (u64(y) * l.width + x) * elem,
+                  actual.data() + offset + (u64(y) * l.pitch + x) * stage_elem,
+                  elem);
           ASSERT_TRUE(gpu::gcn::RetileTextureMip32Pitched(
-              tight.data(), l.width * elem, reference.data(), tiled,
-              mip, layer));
+              tight.data(), l.width * elem, reference.data(), tiled, mip,
+              layer));
         }
       }
       ASSERT_TRUE(gpu::render::ConvertGfx10Image(tiled, linear, actual.data(),
-                                             retiled.data(), false));
+                                                 retiled.data(), false));
       ASSERT_EQ(retiled, reference);
     }
   }
@@ -92,20 +91,20 @@ TEST_P(RdnaComputeImage, Raw32LoadStorePreservesUnwrittenChannels) {
 
   // Distinct guest allocations prevent the backend's per-frame resource
   // cache from treating a later test's CPU initialization as unchanged data.
-  alignas(65536) static base::Array<base::Array<u32, 16384>, 6> sources{}, dests{};
+  alignas(65536) static base::Array<base::Array<u32, 16384>, 6> sources{},
+      dests{};
   const u32 format = GetParam();
   const u32 allocation = format < 65 ? format - 62 : format - 72;
   auto& source = sources[allocation];
   auto& dest = dests[allocation];
   alignas(256) static base::Array<u32, 4096> code{};
-  constexpr base::Array<u32, 12> values = {
-      0x3e800000, 0xc0000000, 0x40800000, 0x3f800000,
-      0x3f000000, 0xbf800000, 0x41000000, 0x3f800000,
-      0x3f400000, 0xc0400000, 0x41800000, 0x3f800000};
-  base::Copy(values.begin(), values.end(), source.begin());
-  constexpr u32 untouched = 0x3f123456;
+  constexpr base::Array<u32, 12> kValues = {
+      0x3e800000, 0xc0000000, 0x40800000, 0x3f800000, 0x3f000000, 0xbf800000,
+      0x41000000, 0x3f800000, 0x3f400000, 0xc0400000, 0x41800000, 0x3f800000};
+  base::Copy(kValues.begin(), kValues.end(), source.begin());
+  constexpr u32 kUntouched = 0x3f123456;
   const u32 channels = format < 65 ? 2 : 4;
-  dest.fill(untouched);
+  dest.fill(kUntouched);
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(source.data()), sizeof(source));
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(dest.data()), sizeof(dest));
 
@@ -131,7 +130,7 @@ TEST_P(RdnaComputeImage, Raw32LoadStorePreservesUnwrittenChannels) {
     const u64 address = reinterpret_cast<u64>(memory);
     regs[first] = address >> 8;
     regs[first + 1] = ((address >> 40) & 0xff) | (format << 20) | (2u << 30);
-    regs[first + 2] = 0;  // width=3, height=1
+    regs[first + 2] = 0;           // width=3, height=1
     regs[first + 3] = 0x80000fac;  // 1D, linear, RGBA
   };
   descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0, source.data());
@@ -140,17 +139,18 @@ TEST_P(RdnaComputeImage, Raw32LoadStorePreservesUnwrittenChannels) {
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
   ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   for (u32 x = 0; x < 3; x++) {
-    EXPECT_EQ(dest[x * channels], values[x * channels]) << "texel " << x;
-    EXPECT_EQ(dest[x * channels + 1], untouched) << "texel " << x;
+    EXPECT_EQ(dest[x * channels], kValues[x * channels]) << "texel " << x;
+    EXPECT_EQ(dest[x * channels + 1], kUntouched) << "texel " << x;
     if (channels == 4) {
-      EXPECT_EQ(dest[x * 4 + 2], values[x * 4 + 1]) << "texel " << x;
-      EXPECT_EQ(dest[x * 4 + 3], untouched) << "texel " << x;
+      EXPECT_EQ(dest[x * 4 + 2], kValues[x * 4 + 1]) << "texel " << x;
+      EXPECT_EQ(dest[x * 4 + 3], kUntouched) << "texel " << x;
     }
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(RgAndRgbaUintSintFloat, RdnaComputeImage,
-                        testing::Values(62u, 63u, 64u, 75u, 76u, 77u));
+INSTANTIATE_TEST_SUITE_P(RgAndRgbaUintSintFloat,
+                         RdnaComputeImage,
+                         testing::Values(62u, 63u, 64u, 75u, 76u, 77u));
 
 TEST(RdnaComputeImageConversion, R8UnormStoreWritesBackByteImage) {
   auto& renderer = gpu::render::DefaultRenderer();
@@ -166,8 +166,10 @@ TEST(RdnaComputeImageConversion, R8UnormStoreWritesBackByteImage) {
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(source.data()), sizeof(source));
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(dest.data()), sizeof(dest));
   code[0] = 0x7e020280;  // v1=0
-  code[1] = 0xf0000100; code[2] = 0x00000400;  // image_load R32_FLOAT
-  code[3] = 0xf0200100; code[4] = 0x00020400;  // image_store R8_UNORM
+  code[1] = 0xf0000100;
+  code[2] = 0x00000400;  // image_load R32_FLOAT
+  code[3] = 0xf0200100;
+  code[4] = 0x00020400;  // image_store R8_UNORM
   code[5] = 0xbf810000;
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -205,11 +207,13 @@ TEST(RdnaComputeImageConversion, LargeNarrowStoresPreserveUntouchedTexels) {
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()), sizeof(memory));
   alignas(256) static base::Array<u32, 4096> code{};
   code[0] = 0x7e020280;  // v1=0
-  code[1] = 0xf0000108; code[2] = 0x00000400;  // image_load 2D
-  code[3] = 0xf0200108; code[4] = 0x00020400;  // image_store 2D
+  code[1] = 0xf0000108;
+  code[2] = 0x00000400;  // image_load 2D
+  code[3] = 0xf0200108;
+  code[4] = 0x00020400;  // image_store 2D
   code[5] = 0xbf810000;
   gpu::rdna::NextProgramGeneration();
-  constexpr u32 width = 257, height = 256;
+  constexpr u32 kWidth = 257, kHeight = 256;
   for (u32 elem : {1u, 2u}) {
     auto& source = memory[(elem - 1) * 2];
     auto& dest = memory[(elem - 1) * 2 + 1];
@@ -217,17 +221,17 @@ TEST(RdnaComputeImageConversion, LargeNarrowStoresPreserveUntouchedTexels) {
     std::memcpy(source.data(), values, sizeof(values));
     dest.fill(0xa5);
     gpu::gcn::TextureLayout32 layout;
-    ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(
-        layout, width, height, width, 1, 1, 0x118, false, elem));
+    ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(layout, kWidth, kHeight, kWidth,
+                                               1, 1, 0x118, false, elem));
     ASSERT_LE(layout.size, dest.size());
-    base::Vector<u8> tight(u64(width) * height * elem, 0xa5);
+    base::Vector<u8> tight(u64(kWidth) * kHeight * elem, 0xa5);
     const u32 expected_values[] = {0, elem == 1 ? 255u : 65535u,
-                                     elem == 1 ? 128u : 32768u};
+                                   elem == 1 ? 128u : 32768u};
     for (u32 x = 0; x < 3; x++)
       std::memcpy(tight.data() + x * elem, &expected_values[x], elem);
     base::Vector<u8> expected(dest.begin(), dest.end());
-    ASSERT_TRUE(gpu::gcn::RetileTextureMip32(
-        tight.data(), expected.data(), layout, 0, 0));
+    ASSERT_TRUE(gpu::gcn::RetileTextureMip32(tight.data(), expected.data(),
+                                             layout, 0, 0));
     gpu::ps5::Regs regs;
     const u64 pc = reinterpret_cast<u64>(code.data());
     regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
@@ -241,13 +245,13 @@ TEST(RdnaComputeImageConversion, LargeNarrowStoresPreserveUntouchedTexels) {
       const u64 address = reinterpret_cast<u64>(data);
       regs[first] = address >> 8;
       regs[first + 1] = ((address >> 40) & 0xff) | (format << 20) |
-                        (((width - 1) & 3) << 30);
-      regs[first + 2] = ((width - 1) >> 2) | ((height - 1) << 14);
+                        (((kWidth - 1) & 3) << 30);
+      regs[first + 2] = ((kWidth - 1) >> 2) | ((kHeight - 1) << 14);
       regs[first + 3] = 0x90000fac | (swizzle << 20);
     };
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0, source.data(), 22, 0);
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, dest.data(),
-                elem == 1 ? 1 : 7, 24);
+               elem == 1 ? 1 : 7, 24);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
     ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
@@ -276,11 +280,11 @@ TEST_P(RdnaR16Unorm, MipArrayLoadAndClampedStorePreserveAdjacentTexels) {
       gpu::gcn::BuildTextureLayout32(layout32, 4, 2, 4, 2, 3, 0x100, false, 4));
   ASSERT_LE(layout16.size, packed.size());
   const base::Array<u16, 8> values = {0,     1,     32768, 65535,
-                                     16384, 49151, 42,    60000};
+                                      16384, 49151, 42,    60000};
   const base::Array<float, 8> input = {-1.f, 2.f, .5f,  .25f,
-                                      0.f,  1.f, .75f, .125f};
+                                       0.f,  1.f, .75f, .125f};
   const base::Array<u16, 8> sentinel = {0xa5a5, 0xa5a5, 0xa5a5, 0xa5a5,
-                                       0xa5a5, 0xa5a5, 0xa5a5, 0xa5a5};
+                                        0xa5a5, 0xa5a5, 0xa5a5, 0xa5a5};
   for (u32 mip = 0; mip < 3; ++mip) {
     for (u32 layer = 0; layer < 2; ++layer) {
       ASSERT_TRUE(gpu::gcn::RetileTextureMip32(values.data(), packed.data(),
@@ -340,7 +344,7 @@ TEST_P(RdnaR16Unorm, MipArrayLoadAndClampedStorePreserveAdjacentTexels) {
       ASSERT_TRUE(gpu::gcn::DetileTextureMip32(stored.data(), output.data(),
                                                layout16, mip, layer));
       const base::Array<u16, 8> expected = {0, 65535, 32768, 0xa5a5,
-                                           0, 65535, 49151, 0xa5a5};
+                                            0, 65535, 49151, 0xa5a5};
       for (u32 i = 0; i < base::Max(4u >> mip, 1u) * base::Max(2u >> mip, 1u);
            ++i) {
         if (i % 4 != 3)
@@ -434,7 +438,8 @@ TEST_P(RdnaBc6Image, HdrLoadAndCubeSamplePreserveBlocksMipsAndLayers) {
           0xf0900f18, 0x00800408,  // image_sample_l cube
           0xf0200f28, 0x00020400,  // image_store 2D array
           0xbf810000};
-      base::Copy(sample_code, sample_code + base::ArraySize(sample_code), code.begin());
+      base::Copy(sample_code, sample_code + base::ArraySize(sample_code),
+                 code.begin());
       gpu::rdna::NextProgramGeneration();
     }
     regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = dim;
@@ -493,20 +498,23 @@ TEST(RdnaComputeImageConversion, Rgba16UnormLoadAndMaskedClampedStore) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
-  alignas(65536) static base::Array<u32, 16384> packed{}, floats{}, result{}, output{};
+  alignas(65536) static base::Array<u32, 16384> packed{}, floats{}, result{},
+      output{};
   packed[0] = 0xffff0000;
   packed[2] = 0x80004000;
   packed[4] = 0x0001ffff;
   result.fill(0x12345678);
   output.fill(0x76543210);
-  const base::Array<float, 12> values = {
-      -1.f, 2.f, 0.f, 0.f, 0.5f, 0.25f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f};
+  const base::Array<float, 12> values = {-1.f, 2.f, 0.f, 0.f, 0.5f, 0.25f,
+                                         0.f,  0.f, 1.f, 0.f, 0.f,  0.f};
   for (u32 i = 0; i < values.size(); i++)
     floats[i] = base::BitCast<u32>(values[i]);
   alignas(256) static base::Array<u32, 4096> code{};
   code[0] = 0x7e020280;
-  code[1] = 0xf0000f00; code[2] = 0x00000400;
-  code[3] = 0xf0200500; code[4] = 0x00020400;
+  code[1] = 0xf0000f00;
+  code[2] = 0x00000400;
+  code[3] = 0xf0200500;
+  code[4] = 0x00020400;
   code[5] = 0xbf810000;
   gpu::rdna::NextProgramGeneration();
   const auto transfer = [&](const void* src, u32 sfmt, void* dst, u32 dfmt) {
@@ -542,8 +550,8 @@ TEST(RdnaComputeImageConversion, Rgba16UnormLoadAndMaskedClampedStore) {
     EXPECT_EQ(result[x * 4 + 3], 0x12345678u);
   }
   ASSERT_TRUE(transfer(floats.data(), 77, output.data(), 65));
-  const base::Array<u32, 6> expected = {
-      0x76540000, 0x7654ffff, 0x76548000, 0x76544000, 0x7654ffff, 0x76540000};
+  const base::Array<u32, 6> expected = {0x76540000, 0x7654ffff, 0x76548000,
+                                        0x76544000, 0x7654ffff, 0x76540000};
   for (u32 i = 0; i < expected.size(); i++)
     EXPECT_EQ(output[i], expected[i]) << "dword " << i;
 }
@@ -558,16 +566,18 @@ TEST(RdnaComputeAlu, Scalar64CompareUsesHighDwordAndInlineSignExtension) {
   u32 pc_dw = 0;
   const auto compare = [&](u32 op, u32 a, u32 b, u32 dst) {
     code[pc_dw++] = 0xbf000000 | (op << 16) | (b << 8) | a;
-    code[pc_dw++] = 0x85108081;  // s_cselect_b32 s16, 1, 0
+    code[pc_dw++] = 0x85108081;                // s_cselect_b32 s16, 1, 0
     code[pc_dw++] = 0x7e000210 | (dst << 17);  // v_mov_b32 vdst, s16
   };
-  compare(0x12, 8, 10, 4);   // same low half, different high half
+  compare(0x12, 8, 10, 4);  // same low half, different high half
   compare(0x13, 8, 10, 5);
   compare(0x12, 12, 193, 6);  // -1 inline is sign extended to 64 bits
   compare(0x13, 12, 193, 7);
   // The VCC-targeting SDWA compare must not invalidate the output T# in s0.
-  code[pc_dw++] = 0x7c041ef9; code[pc_dw++] = 0x86860080;
-  code[pc_dw++] = 0xf0200f00; code[pc_dw++] = 0x00000400;
+  code[pc_dw++] = 0x7c041ef9;
+  code[pc_dw++] = 0x86860080;
+  code[pc_dw++] = 0xf0200f00;
+  code[pc_dw++] = 0x00000400;
   code[pc_dw++] = 0xbf810000;
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -644,12 +654,11 @@ TEST(RdnaComputeAlu, HalfPrecisionOpsSelectHalvesAndPackResults) {
   // v_max3_f16 v8, v1, v2, v3 op_sel:[0,0,0,1]
   // image_store v4/v5/v6/v8 at x = 0..3
   const u32 shader[] = {
-      0x7e0202ff, 0x40003c00, 0x7e0402ff, 0x42004400, 0x7e0602ff,
-      0x3800bc00, 0x7e0c02ff, 0xabcd0000, 0x64080501, 0xd7513805,
-      0x040e0501, 0x740c04f9, 0x05051401, 0xd7544008, 0x040e0501,
-      0x7e0e0280, 0xf0200100, 0x00000407, 0x7e0e0281, 0xf0200100,
-      0x00000507, 0x7e0e0282, 0xf0200100, 0x00000607, 0x7e0e0283,
-      0xf0200100, 0x00000807, 0xbf810000};
+      0x7e0202ff, 0x40003c00, 0x7e0402ff, 0x42004400, 0x7e0602ff, 0x3800bc00,
+      0x7e0c02ff, 0xabcd0000, 0x64080501, 0xd7513805, 0x040e0501, 0x740c04f9,
+      0x05051401, 0xd7544008, 0x040e0501, 0x7e0e0280, 0xf0200100, 0x00000407,
+      0x7e0e0281, 0xf0200100, 0x00000507, 0x7e0e0282, 0xf0200100, 0x00000607,
+      0x7e0e0283, 0xf0200100, 0x00000807, 0xbf810000};
   base::Copy(shader, shader + base::ArraySize(shader), code.begin());
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -684,11 +693,11 @@ TEST(RdnaComputeAlu, LockstepWaveBranchesOnFullExecMask) {
   // An LDS round trip makes this a lock-step wave. Then, as a tiled lighting
   // shader does: exec = !(x >= 40 || 1 <= 0) through an SGPR-source SDWA
   // compare and s_nor_b64, skip on execz, store x + 1 for the lanes left.
-  const u32 shader[] = {
-      0x34020082, 0xd8340000, 0x00000001, 0xbf8cc07f, 0xd8d80000,
-      0x02000001, 0xbe8c03a8, 0xbe8d0381, 0x7e060280, 0x7d8606f9,
-      0x06868a0d, 0x7d86000c, 0x8dea0a6a, 0xbefe046a, 0xbf880003,
-      0x4a080481, 0xf0200100, 0x00000400, 0xbf810000};
+  const u32 shader[] = {0x34020082, 0xd8340000, 0x00000001, 0xbf8cc07f,
+                        0xd8d80000, 0x02000001, 0xbe8c03a8, 0xbe8d0381,
+                        0x7e060280, 0x7d8606f9, 0x06868a0d, 0x7d86000c,
+                        0x8dea0a6a, 0xbefe046a, 0xbf880003, 0x4a080481,
+                        0xf0200100, 0x00000400, 0xbf810000};
   base::Copy(shader, shader + base::ArraySize(shader), code.begin());
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -724,7 +733,8 @@ TEST(RdnaComputeAlu, BitfieldMaskWrapsWidthAndOffset) {
     code[pc_dw++] = 0xd7630000 | (4 + i);
     code[pc_dw++] = (8 + i * 2) | ((9 + i * 2) << 9);
   }
-  code[pc_dw++] = 0xf0200f00; code[pc_dw++] = 0x00000400;
+  code[pc_dw++] = 0xf0200f00;
+  code[pc_dw++] = 0x00000400;
   code[pc_dw++] = 0xbf810000;
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -759,17 +769,18 @@ TEST(RdnaComputeAlu, FmaMixSelectsPrecisionHalvesAndSourceModifiers) {
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(dest.data()), sizeof(dest));
   u32 pc_dw = 0;
-  const auto mix = [&](u32 dst, u32 a, u32 b, u32 c,
-                       u32 half, u32 select, u32 abs, u32 neg, bool clamp) {
+  const auto mix = [&](u32 dst, u32 a, u32 b, u32 c, u32 half, u32 select,
+                       u32 abs, u32 neg, bool clamp) {
     code[pc_dw++] = 0xcc200000 | dst | (abs << 8) | (select << 11) |
-                      ((half & 4) << 12) | (u32(clamp) << 15);
+                    ((half & 4) << 12) | (u32(clamp) << 15);
     code[pc_dw++] = a | (b << 9) | (c << 18) | ((half & 3) << 27) | (neg << 29);
   };
-  mix(4, 8, 9, 10, 6, 6, 0, 4, false);  // 2*3 - 1 = 5
-  mix(5, 8, 9, 10, 6, 0, 2, 0, false);  // 2*abs(-4) - 2 = 6
+  mix(4, 8, 9, 10, 6, 6, 0, 4, false);    // 2*3 - 1 = 5
+  mix(5, 8, 9, 10, 6, 0, 2, 0, false);    // 2*abs(-4) - 2 = 6
   mix(6, 8, 242, 240, 0, 0, 0, 0, true);  // clamp(2*1 + .5) = 1
   mix(7, 242, 9, 10, 6, 6, 0, 4, false);  // 1*3 - 1 = 2
-  code[pc_dw++] = 0xf0200f00; code[pc_dw++] = 0x00000400;
+  code[pc_dw++] = 0xf0200f00;
+  code[pc_dw++] = 0x00000400;
   code[pc_dw++] = 0xbf810000;
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -804,10 +815,10 @@ TEST(RdnaComputeAlu, FmaMixHalfResultsPreserveTheOtherHalf) {
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(dest.data()), sizeof(dest));
   u32 pc_dw = 0;
-  const auto mix = [&](u32 op, u32 dst, u32 a, u32 b, u32 c,
-                       u32 half, u32 select, u32 abs, u32 neg, bool clamp) {
-    code[pc_dw++] = 0xcc000000 | (op << 16) | dst | (abs << 8) | (select << 11) |
-                      ((half & 4) << 12) | (u32(clamp) << 15);
+  const auto mix = [&](u32 op, u32 dst, u32 a, u32 b, u32 c, u32 half,
+                       u32 select, u32 abs, u32 neg, bool clamp) {
+    code[pc_dw++] = 0xcc000000 | (op << 16) | dst | (abs << 8) |
+                    (select << 11) | ((half & 4) << 12) | (u32(clamp) << 15);
     code[pc_dw++] = a | (b << 9) | (c << 18) | ((half & 3) << 27) | (neg << 29);
   };
   for (u32 dst = 4; dst <= 7; dst++) {
@@ -819,7 +830,8 @@ TEST(RdnaComputeAlu, FmaMixHalfResultsPreserveTheOtherHalf) {
   mix(0x21, 6, 8, 242, 240, 0, 0, 0, 0, true);
   mix(0x22, 6, 242, 9, 10, 6, 6, 0, 4, false);
   mix(0x22, 7, 8, 242, 240, 0, 0, 0, 0, true);
-  code[pc_dw++] = 0xf0200f00; code[pc_dw++] = 0x00000400;
+  code[pc_dw++] = 0xf0200f00;
+  code[pc_dw++] = 0x00000400;
   code[pc_dw++] = 0xbf810000;
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -841,7 +853,8 @@ TEST(RdnaComputeAlu, FmaMixHalfResultsPreserveTheOtherHalf) {
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
   ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
-  const base::Array<u32, 4> expected = {0x12344500, 0x46005678, 0x40003c00, 0x3c005678};
+  const base::Array<u32, 4> expected = {0x12344500, 0x46005678, 0x40003c00,
+                                        0x3c005678};
   for (u32 i = 0; i < expected.size(); i++)
     EXPECT_EQ(dest[i], expected[i]);
 }
@@ -863,15 +876,18 @@ TEST(RdnaComputeAlu, PermlaneSelectsRowsAndHonorsInactiveLanes) {
     code[pc_dw++] = 0x12345678;
   }
   // Only even lanes execute; the reversed selectors always fetch odd lanes.
-  code[pc_dw++] = 0xbefe03ff; code[pc_dw++] = 0x55555555;
-  code[pc_dw++] = 0xbeff03ff; code[pc_dw++] = 0x55555555;
+  code[pc_dw++] = 0xbefe03ff;
+  code[pc_dw++] = 0x55555555;
+  code[pc_dw++] = 0xbeff03ff;
+  code[pc_dw++] = 0x55555555;
   permute(0x377, 4, 1);
   permute(0x378, 5, 1);
   permute(0x378, 6, 0);
   permute(0x378, 7, 2);
   code[pc_dw++] = 0xbefe03c1;
   code[pc_dw++] = 0xbeff03c1;
-  code[pc_dw++] = 0xf0200f00; code[pc_dw++] = 0x00000400;
+  code[pc_dw++] = 0xf0200f00;
+  code[pc_dw++] = 0x00000400;
   code[pc_dw++] = 0xbf810000;
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -896,7 +912,8 @@ TEST(RdnaComputeAlu, PermlaneSelectsRowsAndHonorsInactiveLanes) {
   for (u32 lane = 0; lane < 64; lane++) {
     const u32 selected = (lane & ~15u) | (15 - (lane & 15));
     EXPECT_EQ(dest[lane * 4], (lane & 1) ? 0x12345678 : selected) << lane;
-    EXPECT_EQ(dest[lane * 4 + 1], (lane & 1) ? 0x12345678 : (selected ^ 16)) << lane;
+    EXPECT_EQ(dest[lane * 4 + 1], (lane & 1) ? 0x12345678 : (selected ^ 16))
+        << lane;
     EXPECT_EQ(dest[lane * 4 + 2], 0x12345678) << lane;
     EXPECT_EQ(dest[lane * 4 + 3], (lane & 1) ? 0x12345678 : 0u) << lane;
   }
@@ -910,12 +927,13 @@ TEST(RdnaComputeAlu, DppRowXmaskKeepsEachExchangeInsideItsRow) {
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(dest.data()), sizeof(dest));
   u32 pc_dw = 0;
-  constexpr base::Array<u32, 4> masks = {0, 4, 7, 15};
-  for (u32 i = 0; i < masks.size(); i++) {
+  constexpr base::Array<u32, 4> kMasks = {0, 4, 7, 15};
+  for (u32 i = 0; i < kMasks.size(); i++) {
     code[pc_dw++] = 0x7e0002fa | ((4 + i) << 17);
-    code[pc_dw++] = 0xff080000 | ((0x160 + masks[i]) << 8);
+    code[pc_dw++] = 0xff080000 | ((0x160 + kMasks[i]) << 8);
   }
-  code[pc_dw++] = 0xf0200f00; code[pc_dw++] = 0x00000400;
+  code[pc_dw++] = 0xf0200f00;
+  code[pc_dw++] = 0x00000400;
   code[pc_dw++] = 0xbf810000;
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -938,10 +956,9 @@ TEST(RdnaComputeAlu, DppRowXmaskKeepsEachExchangeInsideItsRow) {
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
   ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   for (u32 lane = 0; lane < 64; lane++)
-    for (u32 i = 0; i < masks.size(); i++)
-      EXPECT_EQ(dest[lane * 4 + i], lane ^ masks[i]) << lane << ":" << i;
+    for (u32 i = 0; i < kMasks.size(); i++)
+      EXPECT_EQ(dest[lane * 4 + i], lane ^ kMasks[i]) << lane << ":" << i;
 }
-
 
 TEST(RdnaComputeImage, GatherOffsetAndCompareUseFourDepthTaps) {
   auto& renderer = gpu::render::DefaultRenderer();
@@ -967,11 +984,13 @@ TEST(RdnaComputeImage, GatherOffsetAndCompareUseFourDepthTaps) {
       mov(4, base::BitCast<u32>(3.f / 16));
     mov(compare ? 5 : 4, base::BitCast<u32>(0.4f));
     mov(compare ? 6 : 5, base::BitCast<u32>(0.4f));
-    code[n++] = 0xbe9803ff; code[n++] = func << 13;
+    code[n++] = 0xbe9803ff;
+    code[n++] = func << 13;
     const u32 op = compare ? 0x5f : func == 8 ? 0x57 : 0x47;
     code[n++] = 0xf0000108 | (op << 18);
     code[n++] = (func == 9 ? 4 : 3) | (8 << 8) | (6 << 21);
-    code[n++] = 0xf0200f00; code[n++] = 0x00020800;
+    code[n++] = 0xf0200f00;
+    code[n++] = 0x00020800;
     code[n++] = 0xbf810000;
     gpu::rdna::NextProgramGeneration();
     gpu::ps5::Regs regs;
@@ -995,12 +1014,12 @@ TEST(RdnaComputeImage, GatherOffsetAndCompareUseFourDepthTaps) {
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
     ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
-    constexpr base::Array<u32, 4> taps = {6, 7, 3, 2};
-    for (u32 i = 0; i < taps.size(); i++) {
-      const u32 depth = taps[i] + (func == 9 ? 3 : 0);
-      const base::Array<bool, 8> pass = {
-          false, 3 < depth, 3 == depth, 3 <= depth,
-          3 > depth, 3 != depth, 3 >= depth, true};
+    constexpr base::Array<u32, 4> kTaps = {6, 7, 3, 2};
+    for (u32 i = 0; i < kTaps.size(); i++) {
+      const u32 depth = kTaps[i] + (func == 9 ? 3 : 0);
+      const base::Array<bool, 8> pass = {false,      3 < depth, 3 == depth,
+                                         3 <= depth, 3 > depth, 3 != depth,
+                                         3 >= depth, true};
       const float expected = compare ? (pass[func] ? 1.f : 0.f) : depth / 16.f;
       EXPECT_FLOAT_EQ(base::BitCast<float>(dest[i]), expected)
           << "compare " << func << " tap " << i;
@@ -1015,18 +1034,17 @@ TEST(RdnaComputeImageConversion, SrgbReadAndUnormMipWriteShareStorage) {
   alignas(65536) static base::Array<u8, 65536> image{};
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::gcn::TextureLayout32 layout;
-  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(layout, 8, 8, 8, 1, 4,
-                                             0x11b, false, 4));
+  ASSERT_TRUE(
+      gpu::gcn::BuildTextureLayout32(layout, 8, 8, 8, 1, 4, 0x11b, false, 4));
   ASSERT_LE(layout.size, image.size());
   base::Array<u32, 64> pixels;
   pixels.fill(0xff408080);
-  ASSERT_TRUE(gpu::gcn::RetileTextureMip32(pixels.data(), image.data(),
-                                            layout, 0, 0));
+  ASSERT_TRUE(
+      gpu::gcn::RetileTextureMip32(pixels.data(), image.data(), layout, 0, 0));
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(image.data()), image.size());
-  const u32 shader[] = {
-      0xf0000f08, 0x00000400,  // image_load from s[0:7]
-      0xf0200f08, 0x00020400,  // image_store through s[8:15]
-      0xbf810000};
+  const u32 shader[] = {0xf0000f08, 0x00000400,  // image_load from s[0:7]
+                        0xf0200f08, 0x00020400,  // image_store through s[8:15]
+                        0xbf810000};
   base::Copy(shader, shader + base::ArraySize(shader), code.begin());
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -1041,8 +1059,8 @@ TEST(RdnaComputeImageConversion, SrgbReadAndUnormMipWriteShareStorage) {
   for (u32 view = 0; view < 2; view++) {
     const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0 + view * 8;
     regs[ud] = address >> 8;
-    regs[ud + 1] = ((address >> 40) & 0xff) |
-                     ((view ? 56 : 130) << 20) | (3u << 30);
+    regs[ud + 1] =
+        ((address >> 40) & 0xff) | ((view ? 56 : 130) << 20) | (3u << 30);
     regs[ud + 2] = 1 | (7 << 14);
     regs[ud + 3] = 0x91b00fac | (view << 12) | (view << 16);
     regs[ud + 5] = 3 << 4;
@@ -1052,10 +1070,10 @@ TEST(RdnaComputeImageConversion, SrgbReadAndUnormMipWriteShareStorage) {
   ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
   base::Array<u32, 64> base{};
   base::Array<u32, 16> mip{};
-  ASSERT_TRUE(gpu::gcn::DetileTextureMip32(image.data(), base.data(),
-                                            layout, 0, 0));
-  ASSERT_TRUE(gpu::gcn::DetileTextureMip32(image.data(), mip.data(),
-                                            layout, 1, 0));
+  ASSERT_TRUE(
+      gpu::gcn::DetileTextureMip32(image.data(), base.data(), layout, 0, 0));
+  ASSERT_TRUE(
+      gpu::gcn::DetileTextureMip32(image.data(), mip.data(), layout, 1, 0));
   EXPECT_EQ(base, pixels);
   for (u32 pixel : mip) {
     EXPECT_NEAR(pixel & 255, 55, 1);
@@ -1065,11 +1083,13 @@ TEST(RdnaComputeImageConversion, SrgbReadAndUnormMipWriteShareStorage) {
   }
 }
 
-TEST(RdnaComputeImageConversion, SrgbLoadsAndFilteringDecodeRgbBeforeInterpolation) {
+TEST(RdnaComputeImageConversion,
+     SrgbLoadsAndFilteringDecodeRgbBeforeInterpolation) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  alignas(65536) static base::Array<base::Array<u32, 16384>, 3> inputs{}, outputs{};
+  alignas(65536) static base::Array<base::Array<u32, 16384>, 3> inputs{},
+      outputs{};
   alignas(256) static base::Array<u32, 4096> code{};
   for (u32 run = 0; run < 3; ++run) {
     auto& input = inputs[run];
@@ -1081,12 +1101,12 @@ TEST(RdnaComputeImageConversion, SrgbLoadsAndFilteringDecodeRgbBeforeInterpolati
     code.fill(0);
     u32 pc = 0;
     if (run) {
-      code[pc++] = 0x7e0002ff; // x = .25 (texel 0) or .5 (between texels)
+      code[pc++] = 0x7e0002ff;  // x = .25 (texel 0) or .5 (between texels)
       code[pc++] = base::BitCast<u32>(run == 1 ? .25f : .5f);
     }
     code[pc++] = 0x7e020280;
-    code[pc++] = run ? 0xf09c0f00 : 0xf0000f00; // sample_lz / load
-    code[pc++] = 0x00600400; // sampler s[12:15] (sample only)
+    code[pc++] = run ? 0xf09c0f00 : 0xf0000f00;  // sample_lz / load
+    code[pc++] = 0x00600400;  // sampler s[12:15] (sample only)
     code[pc++] = 0xe0780000;
     code[pc++] = 0x80020400;
     code[pc++] = 0xbf810000;
@@ -1103,7 +1123,7 @@ TEST(RdnaComputeImageConversion, SrgbLoadsAndFilteringDecodeRgbBeforeInterpolati
     const u64 src = reinterpret_cast<u64>(input.data());
     regs[ud] = src >> 8;
     regs[ud + 1] = ((src >> 40) & 255) | (130u << 20) | (1u << 30);
-    regs[ud + 3] = 0x80000fac; // two texels, 1D linear
+    regs[ud + 3] = 0x80000fac;  // two texels, 1D linear
     const u64 dst = reinterpret_cast<u64>(output.data());
     regs[ud + 8] = dst;
     regs[ud + 9] = (dst >> 32) & 0xffff;
@@ -1112,26 +1132,30 @@ TEST(RdnaComputeImageConversion, SrgbLoadsAndFilteringDecodeRgbBeforeInterpolati
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
     ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
-    const base::Array<float, 4> expected = run == 2
-        ? base::Array<float, 4>{.5f, .5f, .5f, 128.f / 255.f}
-        : base::Array<float, 4>{.2158605f, .2158605f, 10.f / (255.f * 12.92f), 64.f / 255.f};
+    const base::Array<float, 4> expected =
+        run == 2 ? base::Array<float, 4>{.5f, .5f, .5f, 128.f / 255.f}
+                 : base::Array<float, 4>{.2158605f, .2158605f,
+                                         10.f / (255.f * 12.92f), 64.f / 255.f};
     for (u32 i = 0; i < 4; ++i)
       EXPECT_NEAR(base::BitCast<float>(output[i]), expected[i], 1e-6f)
           << "run=" << run << " channel=" << i;
   }
 }
 
-
-TEST(RdnaComputeImageConversion, DecoderRg16IntegerLoadsSignExtendBothComponents) {
+TEST(RdnaComputeImageConversion,
+     DecoderRg16IntegerLoadsSignExtendBothComponents) {
   auto& renderer = gpu::render::DefaultRenderer();
-  if (!gpu::render::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
-  alignas(65536) static base::Array<base::Array<u32, 16384>, 2> sources{}, outputs{};
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "Vulkan is required";
+  alignas(65536) static base::Array<base::Array<u32, 16384>, 2> sources{},
+      outputs{};
   alignas(256) static base::Array<u32, 16384> code{};
   const u32 program[] = {0x7e020280, 0xf0000300, 0x00000400,
-                        0xe0740000, 0x80020400, 0xbf810000};
+                         0xe0740000, 0x80020400, 0xbf810000};
   base::Copy(program, program + base::ArraySize(program), code.begin());
   for (u32 run = 0; run < 2; ++run) {
-    auto& source = sources[run]; auto& output = outputs[run];
+    auto& source = sources[run];
+    auto& output = outputs[run];
     source[0] = 0x8001ffff;
     output.fill(0xa5a5a5a5);
     gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(source.data()), sizeof(source));
@@ -1146,10 +1170,11 @@ TEST(RdnaComputeImageConversion, DecoderRg16IntegerLoadsSignExtendBothComponents
     regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
     regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 12 << 1;
     const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
-    const u64 src = reinterpret_cast<u64>(source.data()), dst = reinterpret_cast<u64>(output.data());
+    const u64 src = reinterpret_cast<u64>(source.data()),
+              dst = reinterpret_cast<u64>(output.data());
     regs[ud] = src >> 8;
     regs[ud + 1] = ((src >> 40) & 255) | ((27 + run) << 20);
-    regs[ud + 3] = 0x8000002c; // 1D RG integer image
+    regs[ud + 3] = 0x8000002c;  // 1D RG integer image
     regs[ud + 8] = dst;
     regs[ud + 9] = (dst >> 32) & 0xffff;
     regs[ud + 10] = 8;
@@ -1165,8 +1190,10 @@ TEST(RdnaComputeImageConversion, DecoderRg16IntegerLoadsSignExtendBothComponents
 
 TEST(RdnaComputeImageConversion, DecoderRg16IntegerStoresPackComponents) {
   auto& renderer = gpu::render::DefaultRenderer();
-  if (!gpu::render::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
-  alignas(65536) static base::Array<base::Array<u32, 16384>, 4> sources{}, outputs{};
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "Vulkan is required";
+  alignas(65536) static base::Array<base::Array<u32, 16384>, 4> sources{},
+      outputs{};
   alignas(256) static base::Array<u32, 16384> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(sources.data()), sizeof(sources));
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(outputs.data()), sizeof(outputs));
@@ -1183,8 +1210,9 @@ TEST(RdnaComputeImageConversion, DecoderRg16IntegerStoresPackComponents) {
     source[5] = 32767;
     output.fill(0xa5a51234);
     const u32 program[] = {
-        0x7e020280, 0xf0000300, 0x00000400,
-        0xf0200000 | ((green_only ? 2u : 3u) << 8), 0x00020400, 0xbf810000};
+        0x7e020280, 0xf0000300,
+        0x00000400, 0xf0200000 | ((green_only ? 2u : 3u) << 8),
+        0x00020400, 0xbf810000};
     base::Copy(program, program + base::ArraySize(program), code.begin());
     gpu::rdna::NextProgramGeneration();
     gpu::ps5::Regs regs;
@@ -1201,44 +1229,57 @@ TEST(RdnaComputeImageConversion, DecoderRg16IntegerStoresPackComponents) {
       regs[first + 1] = ((address >> 40) & 255) | (format << 20) | (2u << 30);
       regs[first + 3] = 0x8000002c;  // width 3, linear 1D RG
     };
-    descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0, source.data(), signed_format ? 63 : 62);
-    descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, output.data(), signed_format ? 28 : 27);
+    descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0, source.data(),
+               signed_format ? 63 : 62);
+    descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, output.data(),
+               signed_format ? 28 : 27);
     const u32 launch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
     ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     for (u32 x = 0; x < 3; ++x) {
       const u32 red = green_only ? 0x1234 : source[x * 2] & 0xffff;
       const u32 green = source[x * 2 + (green_only ? 0 : 1)] & 0xffff;
-      EXPECT_EQ(output[x], red | (green << 16)) << "run " << run << " texel " << x;
+      EXPECT_EQ(output[x], red | (green << 16))
+          << "run " << run << " texel " << x;
     }
     EXPECT_EQ(output[3], 0xa5a51234);
   }
 }
 
-TEST(RdnaComputeImageConversion, DecoderPackedIntegersRoundTripWithoutNormalization) {
+TEST(RdnaComputeImageConversion,
+     DecoderPackedIntegersRoundTripWithoutNormalization) {
   auto& renderer = gpu::render::DefaultRenderer();
-  if (!gpu::render::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
-  struct Case { u32 format, channels, bits; bool is_signed; };
-  constexpr Case cases[] = {{5, 1, 8, false}, {18, 2, 8, false},
-      {60, 4, 8, false}, {61, 4, 8, true},
-      {69, 4, 16, false}, {70, 4, 16, true}};
-  struct Storage { base::Array<u32, 16384> source, packed, result; };
-  alignas(65536) static base::Array<Storage, 2 * base::ArraySize(cases)> storage{};
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "Vulkan is required";
+  struct Case {
+    u32 format, channels, bits;
+    bool is_signed;
+  };
+  constexpr Case kCases[] = {{5, 1, 8, false},   {18, 2, 8, false},
+                             {60, 4, 8, false},  {61, 4, 8, true},
+                             {69, 4, 16, false}, {70, 4, 16, true}};
+  struct Storage {
+    base::Array<u32, 16384> source, packed, result;
+  };
+  alignas(65536) static base::Array<Storage, 2 * base::ArraySize(kCases)>
+      storage{};
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(storage.data()), sizeof(storage));
   for (u32 run = 0; run < storage.size(); ++run) {
-    const auto c = cases[run % base::ArraySize(cases)];
-    const bool physical = run >= base::ArraySize(cases);
+    const auto c = kCases[run % base::ArraySize(kCases)];
+    const bool physical = run >= base::ArraySize(kCases);
     auto& s = storage[run];
     const u32 mask = (1u << c.bits) - 1;
-    const u32 values[] = {mask, 1u << (c.bits - 1), 0, 127, 1, 42, mask - 1,
-                         17, 63, 128, 2, (1u << (c.bits - 1)) - 1};
+    const u32 values[] = {
+        mask, 1u << (c.bits - 1),      0, 127, 1, 42, mask - 1, 17, 63, 128,
+        2,    (1u << (c.bits - 1)) - 1};
     base::Copy(values, values + base::ArraySize(values), s.source.begin());
     s.packed.fill(0xa5a5a5a5);
     s.result.fill(0xa5a5a5a5);
     for (u32 pass = 0; pass < 2; ++pass) {
-      const u32 program[] = {0x7e020280, 0xf0000f00, 0x00000400,
-          0xf0200000 | ((pass ? 15u : (1u << c.channels) - 1) << 8),
+      const u32 program[] = {
+          0x7e020280, 0xf0000f00,
+          0x00000400, 0xf0200000 | ((pass ? 15u : (1u << c.channels) - 1) << 8),
           0x00020400, 0xbf810000};
       // A checked GLOBAL read gives the second set the same guest-address
       // capability as the native decoder. Address zero safely reads zero.
@@ -1248,7 +1289,8 @@ TEST(RdnaComputeImageConversion, DecoderPackedIntegersRoundTripWithoutNormalizat
         base::Copy(prefix, prefix + base::ArraySize(prefix), code.begin());
         offset = base::ArraySize(prefix);
       }
-      base::Copy(program, program + base::ArraySize(program), code.begin() + offset);
+      base::Copy(program, program + base::ArraySize(program),
+                 code.begin() + offset);
       gpu::rdna::NextProgramGeneration();
       gpu::ps5::Regs regs;
       const u64 pc = reinterpret_cast<u64>(code.data());
@@ -1262,11 +1304,13 @@ TEST(RdnaComputeImageConversion, DecoderPackedIntegersRoundTripWithoutNormalizat
         const u64 address = reinterpret_cast<u64>(memory);
         regs[first] = address >> 8;
         regs[first + 1] = ((address >> 40) & 255) | (format << 20) | (2u << 30);
-        regs[first + 3] = 0x80000fac; // width 3, linear 1D RGBA
+        regs[first + 3] = 0x80000fac;  // width 3, linear 1D RGBA
       };
       const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
-      descriptor(ud, pass ? s.packed.data() : s.source.data(), pass ? c.format : 76);
-      descriptor(ud + 8, pass ? s.result.data() : s.packed.data(), pass ? 76 : c.format);
+      descriptor(ud, pass ? s.packed.data() : s.source.data(),
+                 pass ? c.format : 76);
+      descriptor(ud + 8, pass ? s.result.data() : s.packed.data(),
+                 pass ? 76 : c.format);
       const u32 launch[] = {1, 1, 1, 1};
       gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
       ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
@@ -1274,10 +1318,11 @@ TEST(RdnaComputeImageConversion, DecoderPackedIntegersRoundTripWithoutNormalizat
     for (u32 x = 0; x < 3; ++x) {
       for (u32 channel = 0; channel < c.channels; ++channel) {
         u32 expected = values[x * 4 + channel] & mask;
-        if (c.is_signed && (expected & (1u << (c.bits - 1)))) expected |= ~mask;
+        if (c.is_signed && (expected & (1u << (c.bits - 1))))
+          expected |= ~mask;
         EXPECT_EQ(s.result[x * 4 + channel], expected)
-            << "format " << c.format << " physical " << physical
-            << " texel " << x << " channel " << channel;
+            << "format " << c.format << " physical " << physical << " texel "
+            << x << " channel " << channel;
       }
     }
     EXPECT_EQ(s.result[12], 0xa5a5a5a5);
@@ -1286,9 +1331,11 @@ TEST(RdnaComputeImageConversion, DecoderPackedIntegersRoundTripWithoutNormalizat
   }
 }
 
-TEST(RdnaComputeImageConversion, LinearIntegerViewsShareWritesWithinOneDispatch) {
+TEST(RdnaComputeImageConversion,
+     LinearIntegerViewsShareWritesWithinOneDispatch) {
   auto& renderer = gpu::render::DefaultRenderer();
-  if (!gpu::render::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "Vulkan is required";
   alignas(65536) static base::Array<base::Array<u32, 16384>, 2> memory{};
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()), sizeof(memory));
@@ -1297,15 +1344,25 @@ TEST(RdnaComputeImageConversion, LinearIntegerViewsShareWritesWithinOneDispatch)
     memory[0][1] = 0xdeadbeef;
     memory[1].fill(0xa5a5a5a5);
     const u64 dst = reinterpret_cast<u64>(memory[1].data());
-    const u32 program[] = {
-        0x7e0002ff, reverse ? 5u : 1u, 0x7e020280,
-        0x7e0802ff, reverse ? 0x66u : 0x12345678u,
-        0xf0200100, 0x00000400, // store through s[0:7]
-        0x7e0402ff, reverse ? 1u : 5u, 0x7e060280,
-        0xf0000100, 0x00020502, // read the same word through s[8:15]
-        0x7e2802ff, u32(dst), 0x7e2a02ff, u32(dst >> 32),
-        0xdc708000, 0x007d0514, // GLOBAL store v5 through v[20:21]
-        0xbf810000};
+    const u32 program[] = {0x7e0002ff,
+                           reverse ? 5u : 1u,
+                           0x7e020280,
+                           0x7e0802ff,
+                           reverse ? 0x66u : 0x12345678u,
+                           0xf0200100,
+                           0x00000400,  // store through s[0:7]
+                           0x7e0402ff,
+                           reverse ? 1u : 5u,
+                           0x7e060280,
+                           0xf0000100,
+                           0x00020502,  // read the same word through s[8:15]
+                           0x7e2802ff,
+                           u32(dst),
+                           0x7e2a02ff,
+                           u32(dst >> 32),
+                           0xdc708000,
+                           0x007d0514,  // GLOBAL store v5 through v[20:21]
+                           0xbf810000};
     base::Copy(program, program + base::ArraySize(program), code.begin());
     gpu::rdna::NextProgramGeneration();
     gpu::ps5::Regs regs;
@@ -1320,7 +1377,8 @@ TEST(RdnaComputeImageConversion, LinearIntegerViewsShareWritesWithinOneDispatch)
       const u64 base = reinterpret_cast<u64>(memory[0].data());
       const u32 last = byte ? 7 : 1;
       regs[first] = base >> 8;
-      regs[first + 1] = ((base >> 40) & 255) | ((byte ? 5u : 20u) << 20) | ((last & 3) << 30);
+      regs[first + 1] =
+          ((base >> 40) & 255) | ((byte ? 5u : 20u) << 20) | ((last & 3) << 30);
       regs[first + 2] = last >> 2;
       regs[first + 3] = 0x80000004;
     };
@@ -1336,14 +1394,17 @@ TEST(RdnaComputeImageConversion, LinearIntegerViewsShareWritesWithinOneDispatch)
   }
 }
 
-TEST(RdnaComputeImageConversion, LinearIntegerArraysRespectRowsLayersAndBounds) {
+TEST(RdnaComputeImageConversion,
+     LinearIntegerArraysRespectRowsLayersAndBounds) {
   auto& renderer = gpu::render::DefaultRenderer();
-  if (!gpu::render::Init(renderer)) GTEST_SKIP() << "Vulkan is required";
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "Vulkan is required";
   alignas(65536) static base::Array<base::Array<u32, 16384>, 2> memory{};
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()), sizeof(memory));
-  const u32 program[] = {0x7e280280, 0x7e2a0280, 0xdc308000, 0x147d0014,
-      0xf0000128, 0x00000400, 0xf0200128, 0x00020400, 0xbf810000};
+  const u32 program[] = {0x7e280280, 0x7e2a0280, 0xdc308000,
+                         0x147d0014, 0xf0000128, 0x00000400,
+                         0xf0200128, 0x00020400, 0xbf810000};
   base::Copy(program, program + base::ArraySize(program), code.begin());
   auto* source = reinterpret_cast<u8*>(memory[0].data());
   for (u32 layer = 0; layer < 2; ++layer)
@@ -1371,9 +1432,10 @@ TEST(RdnaComputeImageConversion, LinearIntegerArraysRespectRowsLayersAndBounds) 
       const u64 base = reinterpret_cast<u64>(memory[image].data());
       const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0 + image * 8;
       regs[ud] = base >> 8;
-      regs[ud + 1] = ((base >> 40) & 255) | ((image ? 20u : 5u) << 20) | (2u << 30);
-      regs[ud + 2] = 1 | (2u << 14); // 7 x 3
-      regs[ud + 3] = 0xd0000004; // 2D array, R
+      regs[ud + 1] =
+          ((base >> 40) & 255) | ((image ? 20u : 5u) << 20) | (2u << 30);
+      regs[ud + 2] = 1 | (2u << 14);  // 7 x 3
+      regs[ud + 3] = 0xd0000004;      // 2D array, R
       regs[ud + 4] = 1 | (base_layer << 16);
     }
     const u32 launch[] = {1, 1, 1, 1};
@@ -1383,7 +1445,8 @@ TEST(RdnaComputeImageConversion, LinearIntegerArraysRespectRowsLayersAndBounds) 
   }
 }
 
-TEST(RdnaComputeImageConversion, AstroBc6CubeArrayStagingExceedsRawBufferLimit) {
+TEST(RdnaComputeImageConversion,
+     AstroBc6CubeArrayStagingExceedsRawBufferLimit) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -1393,10 +1456,10 @@ TEST(RdnaComputeImageConversion, AstroBc6CubeArrayStagingExceedsRawBufferLimit) 
   alignas(65536) static base::Array<u32, 16384> output{};
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::gcn::TextureLayout32 blocks, pixels;
-  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(blocks, 64, 64, 64, 192, 9,
-                                           0x105, false, 16));
-  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(pixels, 256, 256, 256, 192, 9,
-                                           8, false, 16));
+  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(blocks, 64, 64, 64, 192, 9, 0x105,
+                                             false, 16));
+  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(pixels, 256, 256, 256, 192, 9, 8,
+                                             false, 16));
   ASSERT_EQ(blocks.size, input.size());
   ASSERT_EQ(pixels.size, 0x100b0000u);
   base::Array<u8, 16> encoded{};
@@ -1407,16 +1470,18 @@ TEST(RdnaComputeImageConversion, AstroBc6CubeArrayStagingExceedsRawBufferLimit) 
   };
   put(3, 5);
   for (u32 endpoint = 0; endpoint < 2; ++endpoint) {
-    put(0, 10); put(512, 10); put(1023, 10);
+    put(0, 10);
+    put(512, 10);
+    put(1023, 10);
   }
-  ASSERT_TRUE(gpu::gcn::RetileTextureMip32(encoded.data(), input.data(),
-                                         blocks, 8, 191));
+  ASSERT_TRUE(gpu::gcn::RetileTextureMip32(encoded.data(), input.data(), blocks,
+                                           8, 191));
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(input.data()), input.size());
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(output.data()), sizeof(output));
   const u32 program[] = {
-      0x7e020280, 0x7e0402ff, 191, // y=0, face=191
-      0xf0000f28, 0x00000400,     // image_load RGBA, 2D array
-      0xe0780000, 0x80020400,     // buffer_store RGBA to s[8:11]
+      0x7e020280, 0x7e0402ff, 191,  // y=0, face=191
+      0xf0000f28, 0x00000400,       // image_load RGBA, 2D array
+      0xe0780000, 0x80020400,       // buffer_store RGBA to s[8:11]
       0xbf810000};
   base::Copy(program, program + base::ArraySize(program), code.begin());
   gpu::rdna::NextProgramGeneration();
@@ -1458,7 +1523,7 @@ TEST(RdnaComputeImageConversion, Bc1LoadsRespectTilingMipsLayersAndSrgb) {
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(inputs.data()), sizeof(inputs));
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(output.data()), sizeof(output));
-  constexpr u16 colors[] = {0xf800, 0x07e0, 0x001f, 0x8410};
+  constexpr u16 kColors[] = {0xf800, 0x07e0, 0x001f, 0x8410};
   for (u32 variant = 0; variant < 4; variant++) {
     auto& input = inputs[variant];
     const u32 tile = variant & 1 ? 9 : 0;
@@ -1471,18 +1536,16 @@ TEST(RdnaComputeImageConversion, Bc1LoadsRespectTilingMipsLayersAndSrgb) {
       for (u32 layer = 0; layer < 2; layer++) {
         base::Array<u64, 4> encoded{};
         for (u32 b = 0; b < 4; b++)
-          encoded[b] = colors[(mip + layer + b) % 4];
+          encoded[b] = kColors[(mip + layer + b) % 4];
         ASSERT_TRUE(gpu::gcn::RetileTextureMip32(encoded.data(), input.data(),
-                                                  blocks, mip, layer));
+                                                 blocks, mip, layer));
       }
     for (u32 mip = 0; mip < 4; mip++)
       for (u32 layer = 0; layer < 2; layer++) {
         const u32 xy = mip ? 0 : 5;
-        const u32 shader[] = {
-            0x7e0802ff, xy, 0x7e0a02ff, xy, 0x7e0c02ff, layer,
-            0xf0000f28, 0x00000804,
-            0xe0780000, 0x80020800,
-            0xbf810000};
+        const u32 shader[] = {0x7e0802ff, xy,         0x7e0a02ff, xy,
+                              0x7e0c02ff, layer,      0xf0000f28, 0x00000804,
+                              0xe0780000, 0x80020800, 0xbf810000};
         base::Copy(shader, shader + base::ArraySize(shader), code.begin());
         gpu::rdna::NextProgramGeneration();
         gpu::ps5::Regs regs;
@@ -1496,7 +1559,8 @@ TEST(RdnaComputeImageConversion, Bc1LoadsRespectTilingMipsLayersAndSrgb) {
         const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
         const u64 src = reinterpret_cast<u64>(input.data());
         regs[ud] = src >> 8;
-        regs[ud + 1] = ((src >> 40) & 255) | ((srgb ? 170 : 169) << 20) | (3u << 30);
+        regs[ud + 1] =
+            ((src >> 40) & 255) | ((srgb ? 170 : 169) << 20) | (3u << 30);
         regs[ud + 2] = 1 | (7 << 14);
         regs[ud + 3] = 0xd0000fac | (tile << 20) | (mip << 12) | (mip << 16);
         regs[ud + 4] = 1;
@@ -1509,15 +1573,16 @@ TEST(RdnaComputeImageConversion, Bc1LoadsRespectTilingMipsLayersAndSrgb) {
         const u32 dispatch[] = {1, 1, 1, 1};
         gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
         ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
-        const u16 color = colors[(mip + layer + (mip ? 0 : 3)) % 4];
+        const u16 color = kColors[(mip + layer + (mip ? 0 : 3)) % 4];
         const u32 rgb[] = {((color >> 11) * 527 + 23) >> 6,
                            (((color >> 5) & 63) * 259 + 33) >> 6,
                            ((color & 31) * 527 + 23) >> 6};
         for (u32 c = 0; c < 4; c++) {
           float expected = c < 3 ? rgb[c] / 255.f : 1.f;
           if (srgb && c < 3)
-            expected = expected <= .04045f ? expected / 12.92f
-                : std::pow((expected + .055f) / 1.055f, 2.4f);
+            expected = expected <= .04045f
+                           ? expected / 12.92f
+                           : std::pow((expected + .055f) / 1.055f, 2.4f);
           EXPECT_NEAR(base::BitCast<float>(output[c]), expected, 0.00001f)
               << "variant " << variant << " mip " << mip << " layer " << layer;
         }
@@ -1537,12 +1602,12 @@ TEST(RdnaComputeImageConversion, LargeShadowArrayReadsPastRawBufferLimit) {
                                              0x118, false, 4));
   ASSERT_EQ(layout.size, input.size());
   base::Vector<u32> pixels(1024 * 1024, base::BitCast<u32>(0.75f));
-  ASSERT_TRUE(gpu::gcn::RetileTextureMip32(pixels.data(), input.data(), layout, 0, 79));
+  ASSERT_TRUE(
+      gpu::gcn::RetileTextureMip32(pixels.data(), input.data(), layout, 0, 79));
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(input.data()), input.size());
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(output.data()), sizeof(output));
-  const u32 shader[] = {0x7e020280, 0x7e0402ff, 79,
-                         0xf0000128, 0x00000400,
-                         0xe0700000, 0x80020400, 0xbf810000};
+  const u32 shader[] = {0x7e020280, 0x7e0402ff, 79,         0xf0000128,
+                        0x00000400, 0xe0700000, 0x80020400, 0xbf810000};
   base::Copy(shader, shader + base::ArraySize(shader), code.begin());
   gpu::rdna::NextProgramGeneration();
   gpu::ps5::Regs regs;
@@ -1571,12 +1636,14 @@ TEST(RdnaComputeImageConversion, LargeShadowArrayReadsPastRawBufferLimit) {
   EXPECT_FLOAT_EQ(base::BitCast<float>(output[0]), 0.75f);
 }
 
-TEST(RdnaComputeImageConversion, UniformDescriptorTablePreservesDynamicCubeSelection) {
+TEST(RdnaComputeImageConversion,
+     UniformDescriptorTablePreservesDynamicCubeSelection) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   alignas(65536) static base::Array<u32, 16384> texture{};
-  alignas(65536) static base::Array<base::Array<u32, 16384>, 3> tables{}, outputs{};
+  alignas(65536) static base::Array<base::Array<u32, 16384>, 3> tables{},
+      outputs{};
   alignas(256) static base::Array<u32, 4096> code{};
   for (u32 face = 0; face < 6; face++)
     texture[face * 64] = base::BitCast<u32>((face + 1) * .25f);
@@ -1584,9 +1651,14 @@ TEST(RdnaComputeImageConversion, UniformDescriptorTablePreservesDynamicCubeSelec
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(tables.data()), sizeof(tables));
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(outputs.data()), sizeof(outputs));
   const u64 image = reinterpret_cast<u64>(texture.data());
-  const base::Array<u32, 8> descriptor = {
-      u32(image >> 8), u32((image >> 40) & 255) | (22 << 20), 0,
-      0xb0000fac, 5, 0, 0, 0};
+  const base::Array<u32, 8> descriptor = {u32(image >> 8),
+                                          u32((image >> 40) & 255) | (22 << 20),
+                                          0,
+                                          0xb0000fac,
+                                          5,
+                                          0,
+                                          0,
+                                          0};
   for (u32 variant = 0; variant < 3; variant++) {
     auto& table = tables[variant];
     auto& output = outputs[variant];
@@ -1596,15 +1668,21 @@ TEST(RdnaComputeImageConversion, UniformDescriptorTablePreservesDynamicCubeSelec
       table[8]++;  // Different entries cannot be folded to a single image.
     output[0] = output[1] = output[2] = 0xdeadbeef;
     const u32 shader[] = {
-        0x7e0a0210,             // v5 = workgroup ID in s16
-        0x7ed40505,             // s106 = readfirstlane(v5)
-        variant == 2 ? 0x8f16846a : 0x8f16856a, // s22 = index << 4 or 5
-        0xf42c0004, 0x2c000000, // s[0:7] = table at s[8:11] + s22
-        0x7e1002ff, base::BitCast<u32>(1.5f),
-        0x7e1202ff, base::BitCast<u32>(1.5f),
-        0x7e140d05, 0x7e160280, // face = float(v5), LOD = 0
-        0xf0900118, 0x00e00408, // sample the selected cube, sampler s[28:31]
-        0xe0702000, 0x80030405, // output indexed by workgroup
+        0x7e0a0210,                              // v5 = workgroup ID in s16
+        0x7ed40505,                              // s106 = readfirstlane(v5)
+        variant == 2 ? 0x8f16846a : 0x8f16856a,  // s22 = index << 4 or 5
+        0xf42c0004,
+        0x2c000000,  // s[0:7] = table at s[8:11] + s22
+        0x7e1002ff,
+        base::BitCast<u32>(1.5f),
+        0x7e1202ff,
+        base::BitCast<u32>(1.5f),
+        0x7e140d05,
+        0x7e160280,  // face = float(v5), LOD = 0
+        0xf0900118,
+        0x00e00408,  // sample the selected cube, sampler s[28:31]
+        0xe0702000,
+        0x80030405,  // output indexed by workgroup
         0xbf810000};
     base::Copy(shader, shader + base::ArraySize(shader), code.begin());
     gpu::rdna::NextProgramGeneration();
@@ -1645,26 +1723,34 @@ TEST(RdnaComputeImageConversion, PlainStoresValidateOnlyTheAccessedMip) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  alignas(65536) static base::Array<base::Array<u32, 2 * 1024 * 1024>, 5> images{};
+  alignas(65536) static base::Array<base::Array<u32, 2 * 1024 * 1024>, 5>
+      images{};
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(images.data()), sizeof(images));
   gpu::gcn::TextureLayout32 layout;
-  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(layout, 512, 512, 512, 1, 9,
-                                             0x109, false, 16));
+  ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(layout, 512, 512, 512, 1, 9, 0x109,
+                                             false, 16));
   ASSERT_LE(layout.size, sizeof(images[0]));
-  constexpr u32 levels[] = {0, 3, 8, 9, 0};
-  constexpr u32 values[] = {0x01234567, 0x89abcdef, 0xfedcba98, 0x76543210};
+  constexpr u32 kLevels[] = {0, 3, 8, 9, 0};
+  constexpr u32 kValues[] = {0x01234567, 0x89abcdef, 0xfedcba98, 0x76543210};
   for (u32 variant = 0; variant < 5; variant++) {
     auto& image = images[variant];
     image.fill(0xdeadbeef);
-    const u32 mip = levels[variant];
+    const u32 mip = kLevels[variant];
     const bool explicit_mip = variant == 4;
-    const u32 shader[] = {
-        0x7e020280, 0x7e040280,
-        0x7e0802ff, values[0], 0x7e0a02ff, values[1],
-        0x7e0c02ff, values[2], 0x7e0e02ff, values[3],
-        explicit_mip ? 0xf0240f08u : 0xf0200f08u, 0x00000400,
-        0xbf810000};
+    const u32 shader[] = {0x7e020280,
+                          0x7e040280,
+                          0x7e0802ff,
+                          kValues[0],
+                          0x7e0a02ff,
+                          kValues[1],
+                          0x7e0c02ff,
+                          kValues[2],
+                          0x7e0e02ff,
+                          kValues[3],
+                          explicit_mip ? 0xf0240f08u : 0xf0200f08u,
+                          0x00000400,
+                          0xbf810000};
     base::Copy(shader, shader + base::ArraySize(shader), code.begin());
     gpu::rdna::NextProgramGeneration();
     gpu::ps5::Regs regs;
@@ -1686,13 +1772,18 @@ TEST(RdnaComputeImageConversion, PlainStoresValidateOnlyTheAccessedMip) {
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
     ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     for (u32 level = 0; level < layout.mip_levels; level++) {
-      base::Vector<u32> pixels(layout.mips[level].width * layout.mips[level].height * 4);
-      ASSERT_TRUE(gpu::gcn::DetileTextureMip32(image.data(), pixels.data(), layout, level, 0));
+      base::Vector<u32> pixels(layout.mips[level].width *
+                               layout.mips[level].height * 4);
+      ASSERT_TRUE(gpu::gcn::DetileTextureMip32(image.data(), pixels.data(),
+                                               layout, level, 0));
       for (u32 c = 0; c < 4; c++)
-        EXPECT_EQ(pixels[c], level == mip && !explicit_mip ? values[c] : 0xdeadbeefu)
+        EXPECT_EQ(pixels[c],
+                  level == mip && !explicit_mip ? kValues[c] : 0xdeadbeefu)
             << "variant " << variant << " mip " << level;
-      EXPECT_EQ(pixels.back(), pixels.size() == 4 && level == mip && !explicit_mip
-                                   ? values[3] : 0xdeadbeefu);
+      EXPECT_EQ(pixels.back(),
+                pixels.size() == 4 && level == mip && !explicit_mip
+                    ? kValues[3]
+                    : 0xdeadbeefu);
     }
   }
 }
@@ -1702,5 +1793,8 @@ TEST(RdnaComputeImageConversion, PlainStoresValidateOnlyTheAccessedMip) {
 namespace gpu::render {
 u64 g_ns_dcb = 0, g_ns_dcb_lock = 0;
 u32 g_submit_queue = 0, g_dcb_n = 0;
+}  // namespace gpu::render
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+extern "C" bool prosperity_ps5_is_display_buffer(u64) {
+  return false;
 }
-extern "C" bool prosperity_ps5_is_display_buffer(u64) { return false; }

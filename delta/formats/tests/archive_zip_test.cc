@@ -180,14 +180,15 @@ base::Vector<u8> Pattern(size_t n, u32 seed) {
 }
 
 const formats::ArchiveEntry* Find(const base::Vector<formats::ArchiveEntry>& es,
-                              const char* path) {
+                                  const char* path) {
   for (const auto& e : es)
     if (e.path == path)
       return &e;
   return nullptr;
 }
 
-base::Vector<u8> ReadAll(formats::ArchiveBackend& b, const formats::ArchiveEntry& e) {
+base::Vector<u8> ReadAll(formats::ArchiveBackend& b,
+                         const formats::ArchiveEntry& e) {
   base::Vector<u8> v(e.size);
   EXPECT_EQ(b.ExtractRange(e, v.data(), 0, e.size), static_cast<i64>(e.size));
   return v;

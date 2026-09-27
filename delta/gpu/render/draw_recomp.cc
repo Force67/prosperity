@@ -3,46 +3,46 @@
  */
 
 #include "gpu/render/draw_recomp.h"
-#include "gpu/render/buffer_cache.h"
 #include "base/arch.h"
+#include "gpu/render/buffer_cache.h"
 
-#include "gpu/guest_memory.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
-#include "gpu/render/renderer.h"
-#include "gpu/render/labels.h"
+#include "gpu/gpu_perf.h"
+#include "gpu/guest_memory.h"
 #include "gpu/render/compute.h"
 #include "gpu/render/device.h"
-#include "gpu/render/guest_format.h"
 #include "gpu/render/frame.h"
-#include "gpu/gpu_perf.h"
-#include "gpu/write_tracker.h"
+#include "gpu/render/guest_format.h"
 #include "gpu/render/index_upload.h"
+#include "gpu/render/labels.h"
 #include "gpu/render/pipeline_cache.h"
 #include "gpu/render/render_target.h"
+#include "gpu/render/renderer.h"
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/trace.h"
 #include "gpu/render/upload_ring.h"
+#include "gpu/write_tracker.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
-#include <base/containers/array.h>
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <base/strings/xstring.h>
-#include <host_memory/host_memory.h>
+#include "base/algorithm.h"
+#include "base/atomic.h"
+#include "base/containers/array.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/unordered_map.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "base/time/time.h"
+#include "host_memory/host_memory.h"
+#include "options/options.h"
 #include "write_watch/write_watch.h"
-#include <options/options.h>
-#include <base/containers/unordered_map.h>
-#include <base/algorithm.h>
-#include <base/atomic.h>
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/time/time.h>
-#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kNoWipe, "DELTA_GPU_NOWIPE", true);
@@ -119,11 +119,11 @@ inline bool Decline(DeclineReason r) {
 // guest bytes already staged this frame is byte-identical on repeat, so stage
 // it once.
 // A cached copy is current iff nothing has made its guest range stale since the
-// copy: entries are stamped with render::CsWritebackGeneration() (compute results
-// landing in guest memory bump it) and refused when a GPU-dirty compute range
-// overlaps the key (dirty means a writeback is still owed). Such an entry lives
-// one submission (see RollFrame): the title may legally rewrite a buffer in
-// place between two of its submits, and nothing announces a CPU write.
+// copy: entries are stamped with render::CsWritebackGeneration() (compute
+// results landing in guest memory bump it) and refused when a GPU-dirty compute
+// range overlaps the key (dirty means a writeback is still owed). Such an entry
+// lives one submission (see RollFrame): the title may legally rewrite a buffer
+// in place between two of its submits, and nothing announces a CPU write.
 //
 // A TRACKED entry lives the frame (the ring slot's lifetime) instead: its pages
 // are armed in the guest write tracker before the copy, and every write the
@@ -174,9 +174,8 @@ struct StageCache {
   u32 dcb = 0;
 
   bool Live(const Entry& e) const {
-    return e.bytes &&
-           (e.tracked ||
-            (e.dcb == dcb && e.gen == render::CsWritebackGeneration()));
+    return e.bytes && (e.tracked || (e.dcb == dcb &&
+                                     e.gen == render::CsWritebackGeneration()));
   }
   void RollFrame() {
     if (frame != g_frame.num) {
@@ -201,7 +200,11 @@ struct StageCache {
   // Record a copy made at the CURRENT generation, called after the range was
   // flushed (or was never compute-written), never before. A shorter copy never
   // replaces a longer live one: it would answer requests it does not cover.
-  void Insert(u64 base, u64 bytes, u32 salt, u64 off, bool tracked = false,
+  void Insert(u64 base,
+              u64 bytes,
+              u32 salt,
+              u64 off,
+              bool tracked = false,
               u32 max_index = ~0u) {
     RollFrame();
     const StageCacheKey key{base, salt};
@@ -280,7 +283,6 @@ const StageCache::Entry* StageCache::Find(u64 base, u64 bytes, u32 salt) {
 u64 StagedOffset(const StageCache::Entry* e) {
   return e ? e->off : u64(-1);
 }
-
 
 DELTA_OPTION(bool, kRingDedup, "DELTA_GPU_RING_DEDUP", true);
 
@@ -401,10 +403,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     BASE_LOGI("whydrop",
               "draw#{} ps={:#x} vs={:#x} rt={:#x} mrt={} tex={:#x} "
               "prim={} cnt={}",
-              g_frame.draws, (unsigned long)d.ps_addr,
-              (unsigned long)d.vs_addr, (unsigned long)d.rt_base,
-              d.mrt_count, (unsigned long)d.tex_base, d.prim_type,
-              d.index_data ? d.index_count : d.vertex_count);
+              g_frame.draws, (unsigned long)d.ps_addr, (unsigned long)d.vs_addr,
+              (unsigned long)d.rt_base, d.mrt_count, (unsigned long)d.tex_base,
+              d.prim_type, d.index_data ? d.index_count : d.vertex_count);
   // The primitive topology determines assembly, not whether vertices execute.
   // Point/line draws can have fewer than three vertices, and an incomplete
   // triangle still runs its vertex shader (which may write storage buffers).
@@ -416,9 +417,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       BASE_LOGI("dt",
                 "enter recomp count={} rt={:#x} tex={:#x} num_texs={} "
                 "num_vattrs={} ok={}",
-                draw_count, (unsigned long)d.rt_base,
-                (unsigned long)d.tex_base, d.num_texs, d.num_vattrs,
-                d.recomp ? d.recomp->ok : 0);
+                draw_count, (unsigned long)d.rt_base, (unsigned long)d.tex_base,
+                d.num_texs, d.num_vattrs, d.recomp ? d.recomp->ok : 0);
   }
   // DB_RENDER_CONTROL clear. The guest issues a RECT_LIST with no vertex
   // buffers and no pixel shader, and the hardware fills the depth/stencil
@@ -427,14 +427,15 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // shader's z instead, which for P.T. is one packet that flattened the whole
   // scene depth it had just rendered, and every pass that samples that depth
   // (its SSAO first) then had nothing to read.
-  if ((d.depth_clear_draw || d.stencil_clear_draw) && d.depth_base && draw_count) {
+  if ((d.depth_clear_draw || d.stencil_clear_draw) && d.depth_base &&
+      draw_count) {
     // Clear commands can retain the preceding pass's shader and textures.
     // Resolve attachments before any sampling checks or shader uploads.
     if (!BeginRegion(d.mrt_base, d.mrt_info, d.mrt_count, d.rt_w, d.rt_h,
                      d.depth_base, d.depth_clear, d.stencil_base,
-                     d.stencil_clear, false, DepthW(d), DepthH(d),
-                     d.mrt_surf_w, d.mrt_surf_h, d.mrt_dcc_base,
-                     d.mrt_clear_word, d.depth_htile_base, d.depth_slice))
+                     d.stencil_clear, false, DepthW(d), DepthH(d), d.mrt_surf_w,
+                     d.mrt_surf_h, d.mrt_dcc_base, d.mrt_clear_word,
+                     d.depth_htile_base, d.depth_slice))
       return true;
     const u8 aspect = (d.depth_clear_draw ? rhi::kAspectDepth : 0u) |
                       (d.stencil_clear_draw ? rhi::kAspectStencil : 0u);
@@ -465,8 +466,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
   const bool mesh = !d.recomp->mesh_spirv.empty();
   const rhi::Caps& caps = Device().caps();
-  if (mesh && (!caps.mesh_shader || !d.recomp->mesh_input_primitives ||
-               indexed))
+  if (mesh &&
+      (!caps.mesh_shader || !d.recomp->mesh_input_primitives || indexed))
     return Decline(kNoRecomp);
   if (mesh) {
     const auto& limits = caps.mesh;
@@ -498,11 +499,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                 (unsigned long)d.ps_addr, (unsigned long)d.tex_base,
                 d.index_count, d.vertex_count, d.target_mask,
                 d.recomp->ps_texs.size(),
-                (size_t)base::CountIf(d.recomp->ps_texs.begin(),
-                                      d.recomp->ps_texs.end(),
-                                      [](const gcn::ShaderTex& t) {
-                                        return t.storage;
-                                      }));
+                (size_t)base::CountIf(
+                    d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
+                    [](const gcn::ShaderTex& t) { return t.storage; }));
     WhyDrop(d, "no-target");
     g_frame.draws++;
     return true;
@@ -518,20 +517,18 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // DELTA_GPU_TEXFORCE also has to cover the single-texture path, or it
   // silently does nothing for exactly the blit-shaped draws that path exists
   // for, and a diagnostic that quietly no-ops reads as a negative result.
-  const bool force_white_tex =
-      kTexForce && tex_base == (u64)kTexForce;
+  const bool force_white_tex = kTexForce && tex_base == (u64)kTexForce;
   if (force_white_tex)
     tex_base = 0;
   // Render targets are plain 2D images, so only a plain 2D binding may resolve
   // to one. An array or volume binding declared a sampler type no render target
   // can satisfy.
-  const bool tex_rt_eligible = !d.tex_arrayed && !d.tex_is_3d &&
-                               !GuestFormatBlockCompressed(d.tex_dfmt);
+  const bool tex_rt_eligible =
+      !d.tex_arrayed && !d.tex_is_3d && !GuestFormatBlockCompressed(d.tex_dfmt);
   if (tex_base && tex_rt_eligible && !g_rts.count(tex_base) &&
       !g_depths.count(tex_base)) {
     bool depth_format = d.tex_dfmt == 4 && d.tex_nfmt == 7;
-    u64 r =
-        depth_format ? ResolveSampledDepth(tex_base, d.tex_w, d.tex_h) : 0;
+    u64 r = depth_format ? ResolveSampledDepth(tex_base, d.tex_w, d.tex_h) : 0;
     if (!r)
       r = ResolveSampledRT(tex_base, d.tex_w, d.tex_h);
     if (!r && !depth_format)
@@ -541,17 +538,16 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
   bool color_as_tex = tex_rt_eligible && tex_base && tex_base != d.rt_base &&
                       g_rts.count(tex_base);
-  bool feedback_as_tex = tex_rt_eligible && tex_base &&
-                         tex_base == d.rt_base && g_rts.count(tex_base) &&
-                         g_rts[tex_base].ever_rendered;
+  bool feedback_as_tex = tex_rt_eligible && tex_base && tex_base == d.rt_base &&
+                         g_rts.count(tex_base) && g_rts[tex_base].ever_rendered;
   // A deferred-lighting pass binds the scene depth buffer AND samples it to
   // rebuild world position. That is legal in Vulkan whenever the pass cannot
   // write depth: the image sits in DEPTH_READ_ONLY_OPTIMAL and serves as both
   // attachment and sampled image. Declining it instead sent SotC's whole
   // lighting pass down the heuristic quad path, which produced nothing.
-  const bool depth_self_read = tex_rt_eligible && tex_base &&
-                               tex_base == d.depth_base &&
-                               !d.depth_write_enable && g_depths.count(tex_base);
+  const bool depth_self_read =
+      tex_rt_eligible && tex_base && tex_base == d.depth_base &&
+      !d.depth_write_enable && g_depths.count(tex_base);
   bool depth_as_tex = tex_rt_eligible && tex_base &&
                       (tex_base != d.depth_base || depth_self_read) &&
                       g_depths.count(tex_base);
@@ -566,13 +562,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // produce stale.
     static int n = 0;
     if (kSelfTrace && n++ < 20)
-      BASE_LOGI(
-          "self",
-          "draw#{} ps={:#x} rt={:#x} tex={:#x} depth={:#x} dtest={} "
-          "dwrite={} ntex={}",
-          g_frame.draws, (unsigned long)d.ps_addr, (unsigned long)d.rt_base,
-          (unsigned long)tex_base, (unsigned long)d.depth_base,
-          (int)d.depth_test_enable, (int)d.depth_write_enable, d.num_texs);
+      BASE_LOGI("self",
+                "draw#{} ps={:#x} rt={:#x} tex={:#x} depth={:#x} dtest={} "
+                "dwrite={} ntex={}",
+                g_frame.draws, (unsigned long)d.ps_addr,
+                (unsigned long)d.rt_base, (unsigned long)tex_base,
+                (unsigned long)d.depth_base, (int)d.depth_test_enable,
+                (int)d.depth_write_enable, d.num_texs);
     return Decline(kSelf);
   }
   // Indexed draws derive the copied vertex range from their indices.
@@ -594,10 +590,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     return Decline(kNoRecomp);
   };
   u32 nv = d.vertex_count;
-  const u64 index_bytes =
-      indexed ? static_cast<u64>(d.index_count) *
-                    UploadedIndexElementBytes(d.index_type)
-              : 0;
+  const u64 index_bytes = indexed ? static_cast<u64>(d.index_count) *
+                                        UploadedIndexElementBytes(d.index_type)
+                                  : 0;
   if (indexed) {
     const StageCache::Entry* staged =
         kRingDedup ? g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
@@ -706,17 +701,17 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       if (kClearTrace) {
         static int n = 0;
         if (n++ < kClearTrace)
-          BASE_LOGI("clear",
-                    "f{} draw#{} rect RT {:#x} info={:#x} cc={:#x} mode={} gen="
-                    "({},{})-({},{}) win={:#x}/{:#x} scr={:#x}/{:#x} target={}x{} "
-                    "CLEAR_WORD {:08x} {:08x} -> ({:g} {:g} {:g} {:g})",
-                    g_frame.num, g_frame.draws,
-                    (unsigned long)d.mrt_base[i], d.mrt_info[i],
-                    d.color_control, (d.color_control >> 4) & 7u, cx0, cy0,
-                    cx1, cy1, d.clear_window_tl, d.clear_window_br,
-                    d.clear_screen_tl, d.clear_screen_br, d.rt_w, d.rt_h,
-                    d.mrt_clear_word[i][0], d.mrt_clear_word[i][1],
-                    clear.f[0], clear.f[1], clear.f[2], clear.f[3]);
+          BASE_LOGI(
+              "clear",
+              "f{} draw#{} rect RT {:#x} info={:#x} cc={:#x} mode={} gen="
+              "({},{})-({},{}) win={:#x}/{:#x} scr={:#x}/{:#x} target={}x{} "
+              "CLEAR_WORD {:08x} {:08x} -> ({:g} {:g} {:g} {:g})",
+              g_frame.num, g_frame.draws, (unsigned long)d.mrt_base[i],
+              d.mrt_info[i], d.color_control, (d.color_control >> 4) & 7u, cx0,
+              cy0, cx1, cy1, d.clear_window_tl, d.clear_window_br,
+              d.clear_screen_tl, d.clear_screen_br, d.rt_w, d.rt_h,
+              d.mrt_clear_word[i][0], d.mrt_clear_word[i][1], clear.f[0],
+              clear.f[1], clear.f[2], clear.f[3]);
       }
     }
     if (d.depth_base) {
@@ -760,8 +755,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         BASE_LOGI("uiwatch",
                   "arming on UI colour {:#x} (rt={:#x}, {} verts, "
                   "stride {}), it currently reads 00000000",
-                  (unsigned long)at, (unsigned long)d.rt_base,
-                  d.vertex_count, vb.stride);
+                  (unsigned long)at, (unsigned long)d.rt_base, d.vertex_count,
+                  vb.stride);
         write_watch::SetValueProbe(at);
         write_watch::SetChase(4);
         if (!write_watch::Arm(at & ~0xFFFull, 0x1000, 200))
@@ -815,8 +810,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }();
     static int vtx_n = 0;
     if (kVtxRt && d.rt_base == kVtxRt && vtx_n < 40 &&
-        (
-            base::TimeTicks::Now() - kVtxStart).InSeconds() >= kVtxAfter) {
+        (base::TimeTicks::Now() - kVtxStart).InSeconds() >= kVtxAfter) {
       vtx_n++;
       base::String line;
       base::FormatTo(line, "f{} draw#{} rt={:#x} nv={} stride={} attrs={}",
@@ -828,18 +822,17 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                        va.location, va.dfmt, va.nfmt, va.num_comps, va.offset,
                        va.binding);
         const auto& vb = d.vbufs[va.binding];
-        const u64 avail =
-            static_cast<u64>(vb.stride) * vb.num_records;
+        const u64 avail = static_cast<u64>(vb.stride) * vb.num_records;
         if (vb.data && avail >= va.offset + sizeof(u32) * 4) {
           const auto* p = static_cast<const u8*>(vb.data) + va.offset;
           u32 w[4] = {};
           std::memcpy(w, p, sizeof(w));
-          base::FormatTo(line, " raw={:08x} {:08x} {:08x} {:08x} f={:g} {:g} {:g} {:g}",
-                         w[0], w[1], w[2], w[3],
-                         *reinterpret_cast<const float*>(&w[0]),
-                         *reinterpret_cast<const float*>(&w[1]),
-                         *reinterpret_cast<const float*>(&w[2]),
-                         *reinterpret_cast<const float*>(&w[3]));
+          base::FormatTo(
+              line, " raw={:08x} {:08x} {:08x} {:08x} f={:g} {:g} {:g} {:g}",
+              w[0], w[1], w[2], w[3], *reinterpret_cast<const float*>(&w[0]),
+              *reinterpret_cast<const float*>(&w[1]),
+              *reinterpret_cast<const float*>(&w[2]),
+              *reinterpret_cast<const float*>(&w[3]));
         }
       }
       BASE_LOGI("vtx", "{}", line.c_str());
@@ -868,8 +861,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
   if (kNoWipe && float_pos && d.vertex_data && d.num_vattrs &&
       d.recomp->ps_texs.empty() && nv <= 8) {
-    u32 cdst = (d.blend_control >> 8) & 0x1F,
-             csrc = d.blend_control & 0x1F;
+    u32 cdst = (d.blend_control >> 8) & 0x1F, csrc = d.blend_control & 0x1F;
     bool replace = d.blend_enable && csrc == 1 && cdst == 0;
     if (replace) {
       const auto* vb = static_cast<const u8*>(d.vertex_data);
@@ -913,11 +905,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       bool fullscreen_black =
           near_black && (nx1 - nx0) >= 1.8f && (ny1 - ny0) >= 1.8f;
       if (fullscreen_black && kLazyClear2) {
-        RTarget* rt =
-            d.rt_base ? GetRT(d.rt_base, RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
-                              RtSurfaceExtent(d.mrt_surf_h[0], d.rt_h, 64),
-                              ColorTargetFormat(d.mrt_info[0]))
-                      : nullptr;
+        RTarget* rt = d.rt_base
+                          ? GetRT(d.rt_base,
+                                  RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
+                                  RtSurfaceExtent(d.mrt_surf_h[0], d.rt_h, 64),
+                                  ColorTargetFormat(d.mrt_info[0]))
+                          : nullptr;
         if (rt) {
           // Counted, not sampled.
           if (kClearTrace) {
@@ -926,14 +919,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
               BASE_LOGI("clear",
                         "lazyclear-heuristic #{} rt={:#x} mrt={} "
                         "mrt1={:#x}",
-                        (unsigned long long)n.load(),
-                        (unsigned long)d.rt_base, d.mrt_count,
+                        (unsigned long long)n.load(), (unsigned long)d.rt_base,
+                        d.mrt_count,
                         (unsigned long)(d.mrt_count > 1 ? d.mrt_base[1] : 0));
           }
           rt->clear_pending = true;
           rt->clear_src = "lazyclear-heuristic";
-          std::memcpy(rt->clear_value.f, clear_color,
-                      sizeof(clear_color));
+          std::memcpy(rt->clear_value.f, clear_color, sizeof(clear_color));
           // Which draws this heuristic decided were clears. It reclassifies a
           // fullscreen near-black draw as a clear and suppresses it, so a
           // legitimate dark fullscreen layer disappears AND takes the target's
@@ -943,12 +935,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
             if (n++ < kClearTrace)
               BASE_LOGI("clear",
                         "f{} draw#{} LAZYCLEAR-HEURISTIC RT {:#x} "
-                        "vs={:#x} ps={:#x} color=({:g} {:g} {:g} {:g}) blend={}/{:#x}",
-                        g_frame.num, g_frame.draws,
-                        (unsigned long)d.rt_base, (unsigned long)d.vs_addr,
-                        (unsigned long)d.ps_addr, clear_color[0],
-                        clear_color[1], clear_color[2], clear_color[3],
-                        (int)d.blend_enable, d.blend_control);
+                        "vs={:#x} ps={:#x} color=({:g} {:g} {:g} {:g}) "
+                        "blend={}/{:#x}",
+                        g_frame.num, g_frame.draws, (unsigned long)d.rt_base,
+                        (unsigned long)d.vs_addr, (unsigned long)d.ps_addr,
+                        clear_color[0], clear_color[1], clear_color[2],
+                        clear_color[3], (int)d.blend_enable, d.blend_control);
           }
         }
         // This draw also performs the guest's reverse-Z clear (depth write
@@ -992,9 +984,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   u64 vneed = 0;
   for (u32 j = 0; j < nbind; j++) {
     if (d.vbufs[j].stride) {
-      const u32 records = d.vbufs[j].per_instance
-                              ? base::Max(1u, d.instance_count)
-                              : nv;
+      const u32 records =
+          d.vbufs[j].per_instance ? base::Max(1u, d.instance_count) : nv;
       bind_size[j] = (u64)records * d.vbufs[j].stride;
     } else {
       // Stride-0 (constant) binding: upload a single record large enough to
@@ -1010,8 +1001,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     vb_cached[j] = u64(-1);
     if (kRingDedup && bind_size[j] && TrackingGuestWrites()) {
       SyncGuestWrites();
-      if (FindCachedBuffer(reinterpret_cast<u64>(d.vbufs[j].data),
-                           bind_size[j], vb_kept[j]))
+      if (FindCachedBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
+                           vb_kept[j]))
         continue;
     }
     vb_cached[j] =
@@ -1089,13 +1080,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // The fallback has to match the dimensionality the shader declared for this
     // binding, or the descriptor write is a type mismatch.
     if (!tex_set)
-      tex_set = d.tex_null_descriptor
-                    ? (d.tex_is_3d      ? g_tex.zero_3d_set
-                       : d.tex_arrayed  ? g_tex.zero_array_set
-                                        : g_tex.zero_set)
-                    : (d.tex_is_3d     ? g_tex.white_3d_set
-                       : d.tex_arrayed ? g_tex.white_array_set
-                                       : g_tex.white_set);
+      tex_set = d.tex_null_descriptor ? (d.tex_is_3d     ? g_tex.zero_3d_set
+                                         : d.tex_arrayed ? g_tex.zero_array_set
+                                                         : g_tex.zero_set)
+                                      : (d.tex_is_3d     ? g_tex.white_3d_set
+                                         : d.tex_arrayed ? g_tex.white_array_set
+                                                         : g_tex.white_set);
     if (!tex_set)
       return Decline(kGuestTex);
   }
@@ -1145,8 +1135,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // Render targets are plain 2D images, so only a plain 2D binding may
       // resolve to one. An array or volume binding declared a sampler type no
       // render target can satisfy.
-      const bool rt_eligible = !t.arrayed && !t.is_3d &&
-                               !GuestFormatBlockCompressed(t.dfmt);
+      const bool rt_eligible =
+          !t.arrayed && !t.is_3d && !GuestFormatBlockCompressed(t.dfmt);
       // One base can hold several render-target geometries, and only the live
       // one answers to the address. Pick the variant this sample is asking for
       // before deciding what the binding resolves to, but never while the
@@ -1161,8 +1151,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
       if (base && rt_eligible && !g_rts.count(base) && !g_depths.count(base)) {
         bool depth_format = t.dfmt == 4 && t.nfmt == 7;
-        u64 resolved =
-            depth_format ? ResolveSampledDepth(base, t.w, t.h) : 0;
+        u64 resolved = depth_format ? ResolveSampledDepth(base, t.w, t.h) : 0;
         if (!resolved)
           resolved = ResolveSampledRT(base, t.w, t.h);
         if (!resolved && !depth_format)
@@ -1236,9 +1225,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
             rhi::TextureState::kDepthRead;
       } else {
         multi_views[i] = !t.storage && t.null_descriptor
-                             ? (t.is_3d      ? g_tex.zero_3d_view
-                                : t.arrayed  ? g_tex.zero_array_view
-                                             : g_tex.zero_view)
+                             ? (t.is_3d     ? g_tex.zero_3d_view
+                                : t.arrayed ? g_tex.zero_array_view
+                                            : g_tex.zero_view)
                              : TexViewFor(t);
         if (multi_views[i] && t.null_descriptor)
           multi_layouts[i] = rhi::TextureState::kShaderRead;
@@ -1252,15 +1241,14 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       static int n = 0;
       if (n++ < 24) {
         for (u32 i = 0; i < multi_n; i++)
-          BASE_LOGI("bind",
-                    "ps={:#x} b{} base={:#x} {}x{} -> {}",
-                    (unsigned long)d.ps_addr, i,
-                    (unsigned long)d.texs[i].base, d.texs[i].w, d.texs[i].h,
-                    multi_storage[i]  ? "storage"
+          BASE_LOGI("bind", "ps={:#x} b{} base={:#x} {}x{} -> {}",
+                    (unsigned long)d.ps_addr, i, (unsigned long)d.texs[i].base,
+                    d.texs[i].w, d.texs[i].h,
+                    multi_storage[i]    ? "storage"
                     : multi_feedback[i] ? "feedback"
-                    : multi_color[i]  ? "rt-color"
-                    : multi_depth[i]  ? "rt-depth"
-                                      : "GUEST-TEXTURE");
+                    : multi_color[i]    ? "rt-color"
+                    : multi_depth[i]    ? "rt-depth"
+                                        : "GUEST-TEXTURE");
       }
     }
     // A shader may sample an image through one binding and write the same image
@@ -1278,16 +1266,16 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
 
   // DELTA_GPU_TEXBIND=<frame>: how each sampler of each draw resolved, be it
   // a live render target, a depth target, guest memory, or the 1x1 white
-  // default. A post-processing chain that samples its own previous target reads zero the
-  // moment one of those lands on guest memory.
+  // default. A post-processing chain that samples its own previous target reads
+  // zero the moment one of those lands on guest memory.
   {
     // A frame NUMBER is not reproducible across runs (the intro's length
     // varies), so this arms at the first frame at or after it and stops on a
     // line budget rather than at a frame boundary.
     static int texbind_lines = 0;
-    const bool texbind =
-        kTexBindFrame >= 0 && (int)g_frame.num >= kTexBindFrame &&
-        texbind_lines < 600 && (texbind_lines++, true);
+    const bool texbind = kTexBindFrame >= 0 &&
+                         (int)g_frame.num >= kTexBindFrame &&
+                         texbind_lines < 600 && (texbind_lines++, true);
     if (texbind)
       BASE_LOGI("blend",
                 "f{} draw#{} rt={:#x} vs={:#x} ps={:#x} blend={} ctl={:#x} "
@@ -1352,10 +1340,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
       const u64 off = (g_ring.sbo_offset + g_ring.sbo_align - 1) &
                       ~(u64)(g_ring.sbo_align - 1);
-      const u64 reserve = rb.size > kRawBufWindow
-                              ? g_ring.sbo_stride
-                              : ((want + g_ring.sbo_align - 1) &
-                                 ~(u64)(g_ring.sbo_align - 1));
+      const u64 reserve =
+          rb.size > kRawBufWindow
+              ? g_ring.sbo_stride
+              : ((want + g_ring.sbo_align - 1) & ~(u64)(g_ring.sbo_align - 1));
       if (off + reserve > g_ring.sbo_end || off + kRawBufWindow > kSboRing ||
           !CsSupplyBuffer(rb.base, want, g_ring.sbo_buf, off))
         continue;  // the guest-memory path below takes it
@@ -1394,10 +1382,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           ? multi_transition_source
           : feedback_as_tex ||
                 (color_as_tex &&
-                 g_rts[tex_base].layout !=
-                     rhi::TextureState::kShaderRead) ||
-                (depth_as_tex && g_depths[tex_base].layout !=
-                                     rhi::TextureState::kDepthRead);
+                 g_rts[tex_base].layout != rhi::TextureState::kShaderRead) ||
+                (depth_as_tex &&
+                 g_depths[tex_base].layout != rhi::TextureState::kDepthRead);
   bool pending_depth_clear = d.depth_base && g_depths.count(d.depth_base) &&
                              g_depths[d.depth_base].clear_pending;
   // Any binding of this draw that names the bound depth buffer forces the depth
@@ -1409,25 +1396,23 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // The pipeline carried the format the region was opened with; a draw that
   // re-binds the same base at a different format or extent (Astro's post chain
   // recycles a target as B10G11R11 then R16G16B16A16) needs a NEW region, or
-  // the pipeline and the attachment disagree, and the validation layer flags the
-  // pairing and the pixels are interpreted in the wrong format.
+  // the pipeline and the attachment disagree, and the validation layer flags
+  // the pairing and the pixels are interpreted in the wrong format.
   bool mrt_sig_changed =
       g_region.cur_area_w != d.rt_w || g_region.cur_area_h != d.rt_h;
   for (u32 i = 0; i < mrt_n && !mrt_sig_changed; i++)
     mrt_sig_changed =
         g_region.cur_fmt[i] != (u32)ColorTargetFormat(d.mrt_info[i]) ||
-        g_region.cur_w[i] !=
-            RtSurfaceExtent(d.mrt_surf_w[i], d.rt_w, 256) ||
+        g_region.cur_w[i] != RtSurfaceExtent(d.mrt_surf_w[i], d.rt_w, 256) ||
         g_region.cur_h[i] != RtSurfaceExtent(d.mrt_surf_h[i], d.rt_h, 64);
-  bool restart_region = g_region.cur_rt != d.rt_base ||
-                         g_region.cur_mrt_count != mrt_n ||
-                         g_region.cur_depth != d.depth_base ||
-                         g_region.cur_depth_slice != d.depth_slice ||
-                         g_region.cur_layers != d.rt_layers ||
-                         g_region.cur_stencil != d.stencil_base ||
-                         g_region.depth_read_only != samples_bound_depth ||
-                         mrt_sig_changed || transition_source ||
-                         pending_depth_clear;
+  bool restart_region =
+      g_region.cur_rt != d.rt_base || g_region.cur_mrt_count != mrt_n ||
+      g_region.cur_depth != d.depth_base ||
+      g_region.cur_depth_slice != d.depth_slice ||
+      g_region.cur_layers != d.rt_layers ||
+      g_region.cur_stencil != d.stencil_base ||
+      g_region.depth_read_only != samples_bound_depth || mrt_sig_changed ||
+      transition_source || pending_depth_clear;
   if (restart_region) {
     EndRegion();
     if (!rp->multi_tex && color_as_tex && transition_source) {
@@ -1438,8 +1423,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       if (kTint) {
         TransitionImage(g_frame.list, src.texture, src.layout,
                         rhi::TextureState::kCopyDst);
-        g_frame.list->ClearTexture(src.texture, rhi::TextureState::kCopyDst,
-                                   {}, rhi::ClearColor{{0.f, 0.f, 1.f, 1.f}});
+        g_frame.list->ClearTexture(src.texture, rhi::TextureState::kCopyDst, {},
+                                   rhi::ClearColor{{0.f, 0.f, 1.f, 1.f}});
       }
       if (src.layout != rhi::TextureState::kShaderRead)
         TransitionImage(g_frame.list, src.texture, src.layout,
@@ -1474,9 +1459,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
             if (src.layout != rhi::TextureState::kCopyDst)
               TransitionImage(g_frame.list, src.texture, src.layout,
                               rhi::TextureState::kCopyDst);
-            g_frame.list->ClearTexture(
-                src.texture, rhi::TextureState::kCopyDst, {},
-                rhi::ClearColor{{0.f, 0.f, 1.f, 1.f}});
+            g_frame.list->ClearTexture(src.texture, rhi::TextureState::kCopyDst,
+                                       {},
+                                       rhi::ClearColor{{0.f, 0.f, 1.f, 1.f}});
           }
           const rhi::TextureState desired = multi_layouts[i];
           if (kBindTrace && d.ps_addr == (u64)kBindTrace) {
@@ -1490,16 +1475,15 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                         (int)restart_region);
           }
           if (src.layout != desired || src.dirty_for_read) {
-            TransitionImage(g_frame.list, src.texture, src.layout,
-                            desired);
+            TransitionImage(g_frame.list, src.texture, src.layout, desired);
             src.dirty_for_read = false;
           }
         } else if (multi_stencil_src[i]) {
           auto& src = g_depths[multi_stencil_src[i]];
           if (src.stencil_layout != rhi::TextureState::kDepthRead)
             TransitionImage(g_frame.list, src.texture, src.stencil_layout,
-                            rhi::TextureState::kDepthRead,
-                            rhi::kAspectStencil, src.layers);
+                            rhi::TextureState::kDepthRead, rhi::kAspectStencil,
+                            src.layers);
         } else if (multi_depth[i]) {
           auto& src = g_depths[multi_depth[i]];
           if (src.layout != rhi::TextureState::kDepthRead)
@@ -1537,14 +1521,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           // created with: Vulkan requires the view's numeric type to match the
           // shader's sampled type, and the two disagree whenever a pass renders
           // a plane as UNORM that a later shader reads as UINT (or vice versa).
-          multi_views[i] = SampledViewAs(
-              g_rts[multi_color[i]], d.texs[i].swizzle,
-              GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt),
-              &multi_formats[i]);
+          multi_views[i] =
+              SampledViewAs(g_rts[multi_color[i]], d.texs[i].swizzle,
+                            GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt),
+                            &multi_formats[i]);
           multi_layouts[i] = rhi::TextureState::kShaderRead;
         } else if (multi_stencil_src[i]) {
-          multi_views[i] =
-              StencilSampledView(g_depths[multi_stencil_src[i]]);
+          multi_views[i] = StencilSampledView(g_depths[multi_stencil_src[i]]);
           multi_layouts[i] = rhi::TextureState::kDepthRead;
           multi_formats[i] = rhi::Format::kS8Uint;
         } else if (multi_depth[i]) {
@@ -1555,24 +1538,24 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
       tex_set =
           GetMultiTexSet(d, rp->tex_set_layout, rp->tex_bindings, multi_views,
-                         multi_layouts, multi_formats,
-                         multi_depth);
+                         multi_layouts, multi_formats, multi_depth);
       if (!tex_set)
         return Decline(kGuestTex);
     }
     RTarget* rt =
-        d.rt_base ? GetRT(d.rt_base, RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
-                          RtSurfaceExtent(d.mrt_surf_h[0], d.rt_h, 64),
-                          ColorTargetFormat(d.mrt_info[0]), d.rt_layers)
-                  : nullptr;
+        d.rt_base
+            ? GetRT(d.rt_base, RtSurfaceExtent(d.mrt_surf_w[0], d.rt_w, 256),
+                    RtSurfaceExtent(d.mrt_surf_h[0], d.rt_h, 64),
+                    ColorTargetFormat(d.mrt_info[0]), d.rt_layers)
+            : nullptr;
     if (d.rt_base && !rt)
       return true;  // RT cap hit: treat as handled (dropped)
     if (!BeginRegion(d.mrt_base, d.mrt_info, mrt_n, d.rt_w, d.rt_h,
-                      d.depth_base, d.depth_clear, d.stencil_base,
-                      d.stencil_clear, samples_bound_depth, DepthW(d),
-                      DepthH(d), d.mrt_surf_w, d.mrt_surf_h, d.mrt_dcc_base,
-                      d.mrt_clear_word, d.depth_htile_base, d.depth_slice,
-                      d.rt_layers, d.mrt_meta_cmask))
+                     d.depth_base, d.depth_clear, d.stencil_base,
+                     d.stencil_clear, samples_bound_depth, DepthW(d), DepthH(d),
+                     d.mrt_surf_w, d.mrt_surf_h, d.mrt_dcc_base,
+                     d.mrt_clear_word, d.depth_htile_base, d.depth_slice,
+                     d.rt_layers, d.mrt_meta_cmask))
       return true;
   }
   if (rp->multi_tex) {
@@ -1588,13 +1571,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
               SampledView(g_rts[multi_feedback[i]], d.texs[i].swizzle, true);
           multi_formats[i] = g_rts[multi_feedback[i]].fmt;
         } else if (multi_color[i]) {
-          multi_views[i] = SampledViewAs(
-              g_rts[multi_color[i]], d.texs[i].swizzle,
-              GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt),
-              &multi_formats[i]);
-        } else if (multi_stencil_src[i]) {
           multi_views[i] =
-              StencilSampledView(g_depths[multi_stencil_src[i]]);
+              SampledViewAs(g_rts[multi_color[i]], d.texs[i].swizzle,
+                            GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt),
+                            &multi_formats[i]);
+        } else if (multi_stencil_src[i]) {
+          multi_views[i] = StencilSampledView(g_depths[multi_stencil_src[i]]);
           multi_layouts[i] = rhi::TextureState::kDepthRead;
           multi_formats[i] = rhi::Format::kS8Uint;
         } else if (multi_depth[i]) {
@@ -1605,8 +1587,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
       tex_set =
           GetMultiTexSet(d, rp->tex_set_layout, rp->tex_bindings, multi_views,
-                         multi_layouts, multi_formats,
-                         multi_depth);
+                         multi_layouts, multi_formats, multi_depth);
     }
     if (!tex_set)
       return Decline(kGuestTex);
@@ -1631,9 +1612,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // In the T#'s own format, as the multi-texture path does: the swizzle
     // is written against the guest's memory order, which a BGRA target's
     // native view has already undone (GTA:SA's final copy swapped R and B).
-    views[0] = SampledViewAs(src, d.tex_swizzle,
-                             GuestTextureFormat(d.tex_dfmt, d.tex_nfmt),
-                             &formats[0]);
+    views[0] =
+        SampledViewAs(src, d.tex_swizzle,
+                      GuestTextureFormat(d.tex_dfmt, d.tex_nfmt), &formats[0]);
     layouts[0] = rhi::TextureState::kShaderRead;
     tex_set =
         GetMultiTexSet(d, g_tex.layout, 1, views, layouts, formats, nullptr);
@@ -1649,8 +1630,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     layouts[0] = rhi::TextureState::kDepthRead;
     const u64 depth_only[kMaxTex] = {tex_base};
     rhi::Format formats[kMaxTex] = {};
-    tex_set = GetMultiTexSet(d, g_tex.layout, 1, views, layouts, formats,
-                             depth_only);
+    tex_set =
+        GetMultiTexSet(d, g_tex.layout, 1, views, layouts, formats, depth_only);
     if (!tex_set)
       return Decline(kMidRegion);
   }
@@ -1670,7 +1651,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   list->SetPushConstants(0, 64, d.vs_user_data);
   list->SetPushConstants(64, 64, d.ps_user_data);
   if (mesh) {
-    const u32 mesh_draw[4] = {draw_count, base::Max(d.instance_count, 1u), 0, 0};
+    const u32 mesh_draw[4] = {draw_count, base::Max(d.instance_count, 1u), 0,
+                              0};
     list->SetPushConstants(144, 16, mesh_draw);
   }
   if (gpu::gcn::PushCodeBase()) {
@@ -1679,9 +1661,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // different addresses so each stage gets its own words (the shared-offset
     // mistake the user-data pushes already made once).
     const u32 vs_base[2] = {static_cast<u32>(d.vs_addr),
-                                 static_cast<u32>(d.vs_addr >> 32)};
+                            static_cast<u32>(d.vs_addr >> 32)};
     const u32 ps_base[2] = {static_cast<u32>(d.ps_addr),
-                                 static_cast<u32>(d.ps_addr >> 32)};
+                            static_cast<u32>(d.ps_addr >> 32)};
     list->SetPushConstants(128, 8, vs_base);
     list->SetPushConstants(136, 8, ps_base);
   }
@@ -1689,10 +1671,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // Vulkan requires one dynamic offset for every dynamic descriptor in the set
   // layout.
   const bool indirect_cbufs = d.recomp->indirect_cbufs;
-  const u32 cbuf_count = indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
-                                       : kCbufBindings;
-  u64 cb_off = (g_ring.ubo_offset + g_ring.ubo_align - 1) &
-                        ~(u64)(g_ring.ubo_align - 1);
+  const u32 cbuf_count =
+      indirect_cbufs ? gpu::gcn::kIndirectCbufBindings : kCbufBindings;
+  u64 cb_off =
+      (g_ring.ubo_offset + g_ring.ubo_align - 1) & ~(u64)(g_ring.ubo_align - 1);
   u64 cb_stride = g_ring.ubo_stride;
   if (cb_off + cb_stride * (cbuf_count + (indirect_cbufs ? 1 : 0)) >
       g_ring.ubo_end) {
@@ -1726,8 +1708,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     if (have_cbuf) {
       const u32 planned = cb.size < kCbufWindow ? cb.size : kCbufWindow;
       const u64 page_end = (cb.base + 0x1000) & ~u64{0xFFF};
-      const u32 avail = static_cast<u32>(
-          base::Min<u64>(kCbufWindow, page_end - cb.base));
+      const u32 avail =
+          static_cast<u32>(base::Min<u64>(kCbufWindow, page_end - cb.base));
       cache_n = kTightCbuf ? planned : base::Max(planned, avail);
       if (kRingDedup) {
         const u64 cached = StagedOffset(g_ubo_staged.Find(cb.base, cache_n));
@@ -1791,8 +1773,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     dyn_off[i] = static_cast<u32>(next);
     // Packed, not one window per binding: GTA:SA binds ~15000 cbuffers a
     // frame, and a 16 KiB stride exhausted the ring after ~8000 of them.
-    next = (next + n + g_ring.ubo_align - 1) &
-           ~(u64)(g_ring.ubo_align - 1);
+    next = (next + n + g_ring.ubo_align - 1) & ~(u64)(g_ring.ubo_align - 1);
   }
   if (indirect_cbufs) {
     const u64 slot_base = g_frame.slot_idx * (UboRingBytes() / 2);
@@ -1800,11 +1781,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     for (u32 i = 0; i < cbuf_count; ++i)
       if (dyn_off[i])
         offsets[i] = static_cast<u32>((dyn_off[i] - slot_base) / sizeof(u32));
-    std::memcpy(offsets + gpu::gcn::kIndirectCbufBindings,
-                 d.vs_user_data, sizeof(d.vs_user_data));
-    std::memcpy(offsets + gpu::gcn::kIndirectCbufBindings + 32,
-                 d.ps_user_data, sizeof(d.ps_user_data));
-    offsets[gpu::gcn::kIndirectGsUserDataAddr] = static_cast<u32>(d.gs_user_data_addr);
+    std::memcpy(offsets + gpu::gcn::kIndirectCbufBindings, d.vs_user_data,
+                sizeof(d.vs_user_data));
+    std::memcpy(offsets + gpu::gcn::kIndirectCbufBindings + 32, d.ps_user_data,
+                sizeof(d.ps_user_data));
+    offsets[gpu::gcn::kIndirectGsUserDataAddr] =
+        static_cast<u32>(d.gs_user_data_addr);
     offsets[gpu::gcn::kIndirectGsUserDataAddr + 1] =
         static_cast<u32>(d.gs_user_data_addr >> 32);
     std::memcpy(g_ring.ubo_map + next, offsets, sizeof(offsets));
@@ -1848,7 +1830,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         continue;
       }
       const u64 off = (g_ring.sbo_offset + g_ring.sbo_align - 1) &
-                               ~(u64)(g_ring.sbo_align - 1);
+                      ~(u64)(g_ring.sbo_align - 1);
       // A resource SMALLER than the window takes only what it needs. Reserving
       // a whole window for each turned GTA:SA's world (three buffers a draw,
       // ~50 KB between them) into 3 MiB of ring per draw, so the frame ran
@@ -1859,9 +1841,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // next resource.
       const bool truncated = rb.size > kRawBufWindow;
       const u64 reserve =
-          truncated ? g_ring.sbo_stride
-                    : ((want + g_ring.sbo_align - 1) &
-                       ~(u64)(g_ring.sbo_align - 1));
+          truncated
+              ? g_ring.sbo_stride
+              : ((want + g_ring.sbo_align - 1) & ~(u64)(g_ring.sbo_align - 1));
       // The descriptor's range is a whole window wherever the dynamic offset
       // lands, so the window must fit in the BUFFER even when the reservation
       // is short and even in the second frame slot.
@@ -1897,8 +1879,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                   "draw#{} vs={:#x} nbufs={} staged={:#x} "
                   "sizes={}/{}/{}/{}",
                   g_frame.draws, (unsigned long)d.vs_addr, d.num_bufs,
-                  rawbuf_mask, d.bufs[0].size, d.bufs[1].size,
-                  d.bufs[2].size, d.bufs[3].size);
+                  rawbuf_mask, d.bufs[0].size, d.bufs[1].size, d.bufs[2].size,
+                  d.bufs[3].size);
     }
   }
   if (tex_set)
@@ -1913,8 +1895,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   for (u32 j = 0; j < nbind; j++) {
     if (!bind_size[j] || vb_cached[j] != u64(-1) || vb_kept[j].buffer)
       continue;
-    if (!FlushCsWritesRange(renderer,
-                            reinterpret_cast<u64>(d.vbufs[j].data),
+    if (!FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.vbufs[j].data),
                             bind_size[j], "vb"))
       return Decline(kNoRecomp);
     const bool tracked =
@@ -1930,8 +1911,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                 (size_t)bind_size[j]);
     g_ring_vb_bytes += bind_size[j];
     if (kRingDedup)
-      g_vb_staged.Insert(reinterpret_cast<u64>(d.vbufs[j].data),
-                         bind_size[j], 0, voff + bind_off[j], tracked);
+      g_vb_staged.Insert(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
+                         0, voff + bind_off[j], tracked);
   }
   if (indexed && ib_cached == u64(-1)) {
     const bool tracked =
@@ -1962,8 +1943,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   if (kDrawTrace && draw_count >= 300) {
     static int n = 0;
     if (n++ < 40)
-      BASE_LOGI("dt",
-                "RECOMP DREW count={} rt={:#x} nv={} multi_tex={}",
+      BASE_LOGI("dt", "RECOMP DREW count={} rt={:#x} nv={} multi_tex={}",
                 draw_count, (unsigned long)d.rt_base, nv, (int)rp->multi_tex);
   }
   CmdInsertLabel(g_frame.list, "recomp vs=%#llx ps=%#llx n=%u%s",
@@ -1979,14 +1959,14 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     list->DrawMeshTasks((draw_count - 1) / d.recomp->mesh_input_primitives + 1,
                         d.instance_count ? d.instance_count : 1, 1);
   else if (indexed)
-    list->DrawIndexed(d.index_count, d.instance_count ? d.instance_count : 1,
-                      0, 0, 0);
+    list->DrawIndexed(d.index_count, d.instance_count ? d.instance_count : 1, 0,
+                      0, 0);
   else
     list->Draw(d.vertex_count, d.instance_count ? d.instance_count : 1, 0, 0);
   DrawCheckpoint(g_frame.list, g_frame.num, g_frame.draws, true);
   // DELTA_GPU_DRAWSEQ=<n>: the first n draws of the run in record order, with
-  // the frame they belong to, since the per-frame filters cannot show that a pass
-  // and the pass that reads it landed in different frames.
+  // the frame they belong to, since the per-frame filters cannot show that a
+  // pass and the pass that reads it landed in different frames.
   {
     static int seq = 0;
     if (seq < kSeqN) {
@@ -2003,16 +1983,16 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     const bool all = kWant == 1;
     // DELTA_GPU_DRAWRT_FRAME=N: only this frame, so the graph is a steady-state
     // frame rather than the opening composites.
-    // DELTA_GPU_DRAWRT_BUSY=N: only frames that reach N draws, for screens whose
-    // frame number moves between runs.
-    // With a frame filter the output is bounded by that frame's draw count, so
-    // the whole graph can be printed; without one, cap it. A composite target
-    // takes tens of draws per frame and the ones that decide its final content
-    // are the LAST few, so a low cap never reaches the part that decides what
-    // is presented. Printing the whole graph needs ONE frame, and a frame
-    // number is not reproducible across runs while a draw count is: with
-    // DRAWRT=1 and a busy threshold, latch onto the first frame that reaches it
-    // and print all of that frame, from its first draw.
+    // DELTA_GPU_DRAWRT_BUSY=N: only frames that reach N draws, for screens
+    // whose frame number moves between runs. With a frame filter the output is
+    // bounded by that frame's draw count, so the whole graph can be printed;
+    // without one, cap it. A composite target takes tens of draws per frame and
+    // the ones that decide its final content are the LAST few, so a low cap
+    // never reaches the part that decides what is presented. Printing the whole
+    // graph needs ONE frame, and a frame number is not reproducible across runs
+    // while a draw count is: with DRAWRT=1 and a busy threshold, latch onto the
+    // first frame that reaches it and print all of that frame, from its first
+    // draw.
     static int latched = 0;
     if (all && kBusy && !kWantFrame && !latched && (int)g_frame.draws >= kBusy)
       latched = g_frame.num + 1;  // this one is already half gone
@@ -2022,22 +2002,19 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // it writes: a deferred light draw lands on the same address as the base
     // pass, and the target filter cannot separate them.
     if (kWant && (all || g_region.cur_rt == kWant || d.ps_addr == kWant) &&
-        shown < cap &&
-        (!want_frame || (int)g_frame.num == want_frame) &&
+        shown < cap && (!want_frame || (int)g_frame.num == want_frame) &&
         (latched || (int)g_frame.draws >= kBusy)) {
       shown++;
       BASE_LOGI("drawrt",
                 "f{} #{} rt={:#x} {}x{} indexed={} vcount={} "
                 "icount={} inst={} prim={} tmask={:#x} num_vbufs={} stride={} "
                 "mrt={} vp={:g},{:g} scale {:g},{:g} off vs={:#x} ps={:#x}",
-                g_frame.num, g_frame.draws,
-                (unsigned long)g_region.cur_rt, d.rt_w, d.rt_h, (int)indexed,
-                d.vertex_count, d.index_count, d.instance_count,
-                d.prim_type, d.target_mask,
-                d.num_vbufs, d.vertex_stride, d.mrt_count,
-                d.viewport_x_scale, d.viewport_y_scale, d.viewport_x_offset,
-                d.viewport_y_offset, (unsigned long)d.vs_addr,
-                (unsigned long)d.ps_addr);
+                g_frame.num, g_frame.draws, (unsigned long)g_region.cur_rt,
+                d.rt_w, d.rt_h, (int)indexed, d.vertex_count, d.index_count,
+                d.instance_count, d.prim_type, d.target_mask, d.num_vbufs,
+                d.vertex_stride, d.mrt_count, d.viewport_x_scale,
+                d.viewport_y_scale, d.viewport_x_offset, d.viewport_y_offset,
+                (unsigned long)d.vs_addr, (unsigned long)d.ps_addr);
       BASE_LOGI("drawrt",
                 " blend en={} ctrl={:#x} tmask={:#x} surf={}x{} "
                 "zscale={:g} zoff={:g} scissor=({},{})-({},{})",
@@ -2050,8 +2027,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // NUMBER_TYPE decide whether the hardware clamps a write at 1.0 or keeps
       // it, which is the difference between a highlight and a blown one.
       for (u32 m = 0; m < d.mrt_count && m < 8; m++)
-        BASE_LOGI("drawrt",
-                  " mrt{} base={:#x} info={:#x} fmt={} ntype={}", m,
+        BASE_LOGI("drawrt", " mrt{} base={:#x} info={:#x} fmt={} ntype={}", m,
                   (unsigned long)d.mrt_base[m], d.mrt_info[m],
                   (d.mrt_info[m] >> 2) & 0x1F, (d.mrt_info[m] >> 8) & 0x7);
       // Every bound target's own CB_BLENDn_CONTROL. An MRT pass whose second
@@ -2064,14 +2040,15 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                   (unsigned long)d.mrt_base[m]);
       // Whether this pass writes depth, and into what, decides whether a later
       // depth-sampling pass has anything to read.
-      BASE_LOGI("drawrt",
-                " depth base={:#x} valid={} test={} write={} "
-                "func={} clear={:g} stencil={} cleardraw={}/{} rc={:#x} sbase={:#x}",
-                (unsigned long)d.depth_base, (int)d.depth_valid,
-                (int)d.depth_test_enable, (int)d.depth_write_enable,
-                d.depth_func, d.depth_clear, (int)d.stencil_enable,
-                (int)d.depth_clear_draw, (int)d.stencil_clear_draw,
-                d.render_control, (unsigned long)d.stencil_base);
+      BASE_LOGI(
+          "drawrt",
+          " depth base={:#x} valid={} test={} write={} "
+          "func={} clear={:g} stencil={} cleardraw={}/{} rc={:#x} sbase={:#x}",
+          (unsigned long)d.depth_base, (int)d.depth_valid,
+          (int)d.depth_test_enable, (int)d.depth_write_enable, d.depth_func,
+          d.depth_clear, (int)d.stencil_enable, (int)d.depth_clear_draw,
+          (int)d.stencil_clear_draw, d.render_control,
+          (unsigned long)d.stencil_base);
       // A single-texture pipeline never fills the multi_* arrays (it binds
       // through color_as_tex/depth_as_tex below), so reading them here would
       // report every such draw as a MISS that resolved fine.
@@ -2095,8 +2072,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // a shader with several image_samples that took the single-texture path
       // reads only the first, and the trace would look identical to a genuine
       // one-texture blit.
-      BASE_LOGI("drawrt", " texs={} multi={} n={}",
-                d.recomp->ps_texs.size(), (int)rp->multi_tex, multi_n);
+      BASE_LOGI("drawrt", " texs={} multi={} n={}", d.recomp->ps_texs.size(),
+                (int)rp->multi_tex, multi_n);
       for (u32 i = 0; i < shown_n; i++) {
         const auto& t = d.texs[i];
         if (!t.base) {
@@ -2110,27 +2087,25 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                   " tex{} mips={} basemip={} viewmips={} "
                   "minlod={} layers={} arr={} lod0={} cmp={} sto={} "
                   "swz={:#x} smp={} {:08x} {:08x} {:08x} {:08x}",
-                  i, t.mip_levels, t.base_mip, t.view_mips, t.min_lod,
-                  t.layers, (int)t.arrayed, (int)t.force_lod_zero,
-                  (int)t.depth_compare, (int)t.storage, t.swizzle,
-                  (int)t.sampler_valid, t.sampler[0], t.sampler[1],
-                  t.sampler[2], t.sampler[3]);
+                  i, t.mip_levels, t.base_mip, t.view_mips, t.min_lod, t.layers,
+                  (int)t.arrayed, (int)t.force_lod_zero, (int)t.depth_compare,
+                  (int)t.storage, t.swizzle, (int)t.sampler_valid, t.sampler[0],
+                  t.sampler[1], t.sampler[2], t.sampler[3]);
         if (t.src && gpu::IsReadableRange(t.src, 32)) {
           const u32* tw = reinterpret_cast<const u32*>(t.src);
           BASE_LOGI("drawrt",
                     " tex{} T# src={:#x} [{:08x} {:08x} {:08x} {:08x} "
                     "{:08x} {:08x} {:08x} {:08x}]",
-                    i, (unsigned long)t.src, tw[0], tw[1], tw[2], tw[3],
-                    tw[4], tw[5], tw[6], tw[7]);
+                    i, (unsigned long)t.src, tw[0], tw[1], tw[2], tw[3], tw[4],
+                    tw[5], tw[6], tw[7]);
         }
         const bool resolved_guest =
             rp->multi_tex ? multi_views[i] != nullptr : legacy_resolved;
-        BASE_LOGI("drawrt",
-                  " tex{} {:#x} {}x{} dfmt={} tiling={} -> {}{:#x}",
+        BASE_LOGI("drawrt", " tex{} {:#x} {}x{} dfmt={} tiling={} -> {}{:#x}",
                   i, (unsigned long)t.base, t.w, t.h, t.dfmt, t.tiling,
-                  rc[i]           ? "rt "
-                  : rf[i]         ? "fb "
-                  : rd[i]         ? "depth "
+                  rc[i]            ? "rt "
+                  : rf[i]          ? "fb "
+                  : rd[i]          ? "depth "
                   : resolved_guest ? "guest "
                                    : "MISS ",
                   (unsigned long)(rc[i]   ? rc[i]
@@ -2146,13 +2121,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         if (resolved_guest && !rc[i] && !rf[i] && !rd[i] &&
             g_rts.count(t.base)) {
           const auto& rt = g_rts[t.base];
-          BASE_LOGI("drawrt",
-                    " tex{} GUEST-OVER-RT: live={}x{} "
-                    "ever_rendered={} variants={}",
-                    i, rt.w, rt.h, (int)rt.ever_rendered,
-                    g_rt_variants.count(t.base)
-                        ? g_rt_variants[t.base].size()
-                        : 0);
+          BASE_LOGI(
+              "drawrt",
+              " tex{} GUEST-OVER-RT: live={}x{} "
+              "ever_rendered={} variants={}",
+              i, rt.w, rt.h, (int)rt.ever_rendered,
+              g_rt_variants.count(t.base) ? g_rt_variants[t.base].size() : 0);
         }
         if (!rc[i] && !rf[i] && !rd[i] && !resolved_guest) {
           auto rt = g_rts.find(t.base);
@@ -2265,8 +2239,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         // one attribute and say nothing about the positions.
         base::String head;
         for (u32 off = 0; off < 0x600 && off + 16 <= rb.size; off += 0x180) {
-          const auto* f =
-              reinterpret_cast<const float*>(rb.base + off);
+          const auto* f = reinterpret_cast<const float*>(rb.base + off);
           base::FormatTo(head, " +{:#x}={:g},{:g},{:g},{:g}", off, f[0], f[1],
                          f[2], f[3]);
         }
@@ -2300,8 +2273,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
       // Only the slots this draw actually declared: the rest are unused
       // array entries, and reporting them buries the one that matters.
-      for (u32 c = 0; c < base::Min<u32>(d.num_cbufs, kCbufBindings);
-           c++) {
+      for (u32 c = 0; c < base::Min<u32>(d.num_cbufs, kCbufBindings); c++) {
         const auto& cb = d.cbufs[c];
         if (!gpu::IsReadableRange(cb.base, base::Min(cb.size, 192u))) {
           // Say so rather than skipping: a silently absent binding reads as a
@@ -2316,11 +2288,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         }
         const u32* w = reinterpret_cast<const u32*>(cb.base);
         base::String line;
-        base::FormatTo(line, " cb{} {:#x} sz={}:", c,
-                       (unsigned long)cb.base, cb.size);
+        base::FormatTo(line, " cb{} {:#x} sz={}:", c, (unsigned long)cb.base,
+                       cb.size);
         // Sixteen, not eight: with the window walk below starting at 0x40,
-        // eight would leave bytes 32..63 unprintable, and P.T.'s draw #38 scales its
-        // whole extinction by a scalar at byte 44.
+        // eight would leave bytes 32..63 unprintable, and P.T.'s draw #38
+        // scales its whole extinction by a scalar at byte 44.
         for (u32 k = 0; k < 16 && k * 4 < cb.size; k++)
           base::FormatTo(line, " {:g}", *reinterpret_cast<const float*>(&w[k]));
         // A shader loads its constants with s_buffer_load at whatever offset
@@ -2331,9 +2303,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         // 208-byte buffer).
         for (u32 off = 0x40u; off + 4 <= cb.size; off += 0x40u) {
           base::FormatTo(line, "\n  @{:#x}:", off);
-          for (u32 k = off / 4; k < off / 4 + 16 && k * 4 + 4 <= cb.size;
-               k++)
-            base::FormatTo(line, " {:g}", *reinterpret_cast<const float*>(&w[k]));
+          for (u32 k = off / 4; k < off / 4 + 16 && k * 4 + 4 <= cb.size; k++)
+            base::FormatTo(line, " {:g}",
+                           *reinterpret_cast<const float*>(&w[k]));
         }
         BASE_LOGI("drawrt", "{}", line.c_str());
       }

@@ -8,16 +8,15 @@
 #include "gpu/ps4/shader_cache.h"
 #include "base/arch.h"
 
-
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/hashing/hash.h"
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/render/renderer.h"
-#include <base/containers/map.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/containers/hash_map.h>
-#include <base/hashing/hash.h>
 
 namespace gpu::ps4 {
 namespace {
@@ -42,7 +41,8 @@ struct GraphicsKey {
   u32 mrt_bound_mask = 0xFF;
   bool gl_clip = false;
   bool neo = false;
-  // ES and GS code plus the GS registers the modules bake in; zero without a GS.
+  // ES and GS code plus the GS registers the modules bake in; zero without a
+  // GS.
   u64 es = 0, gs = 0, gs_shape = 0;
   u32 int_attr_mask = 0;
   u32 col_format = 0;
@@ -148,18 +148,16 @@ GraphicsKey GraphicsKeyOf(const GraphicsShaderState& state) {
   if (const gcn::GsPipeline* gs = state.gs) {
     key.es = gcn::CachedCodeHash(reinterpret_cast<u64>(gs->es_code), 4096);
     key.gs = gcn::CachedCodeHash(reinterpret_cast<u64>(gs->gs_code), 4096);
-    for (u32 v : {gs->es_user_sgprs, gs->gs_user_sgprs, gs->input_prim,
-                  gs->out_prim, gs->max_vert_out, gs->esgs_dwords,
-                  gs->gsvs_dwords, gs->instances})
+    for (u32 v :
+         {gs->es_user_sgprs, gs->gs_user_sgprs, gs->input_prim, gs->out_prim,
+          gs->max_vert_out, gs->esgs_dwords, gs->gsvs_dwords, gs->instances})
       MixHash(key.gs_shape, v);
   }
   return key;
 }
 
-base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>&
-GraphicsCache() {
-  static base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>
-      cache;
+base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>& GraphicsCache() {
+  static base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash> cache;
   return cache;
 }
 
@@ -170,11 +168,10 @@ gcn::Recompiled RecompileGraphics(const Regs& regs,
       reinterpret_cast<const u32*>(state.ps_addr),
       regs.At(mmSPI_SHADER_USER_DATA_VS_0),
       regs.At(mmSPI_SHADER_USER_DATA_PS_0), state.ps_input_ena,
-      state.honour_ps_in_cntl ? state.ps_in_cntl : nullptr,
-      state.ps_num_interp, state.tex_3d_mask, state.tex_1d_mask,
-      state.tex_uint_mask, state.mrt_uint_mask, state.mrt_bound_mask,
-      state.gl_clip, state.gs, state.int_attr_mask, state.col_format,
-      state.tex_cube_mask);
+      state.honour_ps_in_cntl ? state.ps_in_cntl : nullptr, state.ps_num_interp,
+      state.tex_3d_mask, state.tex_1d_mask, state.tex_uint_mask,
+      state.mrt_uint_mask, state.mrt_bound_mask, state.gl_clip, state.gs,
+      state.int_attr_mask, state.col_format, state.tex_cube_mask);
 }
 
 }  // namespace
@@ -214,10 +211,8 @@ ComputeKey ComputeKeyOf(const ComputeShaderState& state) {
           state.lds_dwords, gcn::DefaultIsaMode() == gcn::IsaMode::kNeo};
 }
 
-base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>&
-ComputeCache() {
-  static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>
-      cache;
+base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>& ComputeCache() {
+  static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash> cache;
   return cache;
 }
 
@@ -254,8 +249,9 @@ void PrefetchComputeShader(const ComputeShaderState& state) {
   // dispatch alone takes the driver half a minute.
   if (rc.ok)
     gcn::spirv::PrefetchThen(
-        rc.spirv, [n = static_cast<u32>(rc.resources.size()),
-                   guest = rc.guest_memory_binding](const base::Vector<u32>& spv) {
+        rc.spirv,
+        [n = static_cast<u32>(rc.resources.size()),
+         guest = rc.guest_memory_binding](const base::Vector<u32>& spv) {
           render::PrebuildComputePipeline(spv, n, guest);
         });
 #endif

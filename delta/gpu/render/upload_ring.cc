@@ -14,10 +14,10 @@
 #include <cstring>
 #include <limits>
 
-#include <base/logging.h>
-#include <options/options.h>
-#include <base/algorithm.h>
-#include <base/math/value_bounds.h>
+#include "base/algorithm.h"
+#include "base/logging.h"
+#include "base/math/value_bounds.h"
+#include "options/options.h"
 
 namespace {
 // DELTA_GPU_LDSDUMP=<dwords>: host-visible shared-LDS scratch, dumped after a
@@ -40,21 +40,20 @@ u64 UboRingBytes() {
 }
 
 u64 VbRingBytes() {
-  static const u64 bytes = [] {
+  static const u64 kBytes = [] {
     const char* e = std::getenv("DELTA_GPU_VBRING_MB");
     const long mb = e ? std::atol(e) : 0;
     if (mb <= 0)
       return kVbRing;
     return static_cast<u64>(mb) * 1024 * 1024;
   }();
-  return bytes;
+  return kBytes;
 }
 
 namespace {
 
 // A persistently mapped host buffer, or null.
-rhi::Buffer* HostBuffer(u64 bytes, u32 usage, const char* name,
-                        u8** map) {
+rhi::Buffer* HostBuffer(u64 bytes, u32 usage, const char* name, u8** map) {
   rhi::BufferDesc desc;
   desc.size = bytes;
   desc.usage = usage;
@@ -80,23 +79,23 @@ u32 GraphicsStages() {
 
 bool CreateUploadRings() {
   const rhi::Caps& caps = Device().caps();
-  g_ring.vb = HostBuffer(VbRingBytes(),
-                         rhi::kBufferVertex | rhi::kBufferCopyDst,
-                         "vertex ring",
-                         &g_ring.vb_map);
-  g_ring.ib = HostBuffer(kIbRing, rhi::kBufferIndex, "index ring",
-                         &g_ring.ib_map);
+  g_ring.vb =
+      HostBuffer(VbRingBytes(), rhi::kBufferVertex | rhi::kBufferCopyDst,
+                 "vertex ring", &g_ring.vb_map);
+  g_ring.ib =
+      HostBuffer(kIbRing, rhi::kBufferIndex, "index ring", &g_ring.ib_map);
   if (!g_ring.vb || !g_ring.ib)
     return false;
   // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
   g_ring.ubo_align = base::Max(caps.uniform_offset_alignment, 1u);
   if (caps.max_dynamic_uniform_buffers < kCbufBindings)
-    BASE_LOGI("gpuvk", "only {}/{} dynamic UBOs available; set 1 is an "
-                       "out-of-spec layout on this device and a cbuffer may "
-                       "silently read zero",
+    BASE_LOGI("gpuvk",
+              "only {}/{} dynamic UBOs available; set 1 is an "
+              "out-of-spec layout on this device and a cbuffer may "
+              "silently read zero",
               caps.max_dynamic_uniform_buffers, kCbufBindings);
-  g_ring.ubo_stride = (kCbufWindow + g_ring.ubo_align - 1) &
-                      ~(u64)(g_ring.ubo_align - 1);
+  g_ring.ubo_stride =
+      (kCbufWindow + g_ring.ubo_align - 1) & ~(u64)(g_ring.ubo_align - 1);
   // kMaxCbufBindings, not 8: a shader pair whose constant buffers exceed the
   // cap is planned only up to it, and every s_buffer_load from a dropped base
   // emits nothing, leaving its destination SGPRs zero. Skyrim's UI shaders
@@ -134,9 +133,10 @@ bool CreateUploadRings() {
   g_ring.sbo_count =
       base::Min<u32>(caps.max_dynamic_storage_buffers, kRawBufBindings);
   if (g_ring.sbo_count < gpu::gcn::kMinGfxBuffers) {
-    BASE_LOGI("gpuvk", "only {} dynamic storage buffers available, below "
-                       "the floor of {}: shaders reading raw buffers will "
-                       "decline",
+    BASE_LOGI("gpuvk",
+              "only {} dynamic storage buffers available, below "
+              "the floor of {}: shaders reading raw buffers will "
+              "decline",
               g_ring.sbo_count, gpu::gcn::kMinGfxBuffers);
     g_ring.sbo_count = gpu::gcn::kMinGfxBuffers;
   }
@@ -152,14 +152,13 @@ bool CreateUploadRings() {
             gpu::gcn::WaveSplitsAcrossSubgroups()
                 ? " (a GCN wave spans several)"
                 : "");
-  g_ring.sbo_stride = (kRawBufWindow + g_ring.sbo_align - 1) &
-                      ~(u64)(g_ring.sbo_align - 1);
+  g_ring.sbo_stride =
+      (kRawBufWindow + g_ring.sbo_align - 1) & ~(u64)(g_ring.sbo_align - 1);
   rhi::BindGroupLayoutDesc sbo;
   for (u32 i = 0; i < g_ring.sbo_count; i++)
-    sbo.bindings.push_back(
-        {i, rhi::BindingType::kStorageBufferDynamic,
-         rhi::kStageVertex | rhi::kStageFragment |
-             (caps.mesh_shader ? rhi::kStageMesh : 0u)});
+    sbo.bindings.push_back({i, rhi::BindingType::kStorageBufferDynamic,
+                            rhi::kStageVertex | rhi::kStageFragment |
+                                (caps.mesh_shader ? rhi::kStageMesh : 0u)});
   g_ring.sbo_layout = Device().CreateBindGroupLayout(sbo);
   return g_ring.sbo_layout != nullptr;
 }
@@ -171,16 +170,15 @@ bool EnsureCbufRing() {
   if (g_ring.ubo_buf)
     return g_ring.ubo_map != nullptr;
   g_ring.ubo_bytes = UboRingBytes();
-  g_ring.ubo_buf =
-      HostBuffer(UboRingBytes(),
-                 rhi::kBufferUniform | rhi::kBufferStorage |
-                     rhi::kBufferCopyDst,
-                 "cbuffer ring", &g_ring.ubo_map);
+  g_ring.ubo_buf = HostBuffer(
+      UboRingBytes(),
+      rhi::kBufferUniform | rhi::kBufferStorage | rhi::kBufferCopyDst,
+      "cbuffer ring", &g_ring.ubo_map);
   if (!g_ring.ubo_buf)
     return false;
   std::memset(g_ring.ubo_map, 0, UboRingBytes());
-  g_ring.ubo_stride = (kCbufWindow + g_ring.ubo_align - 1) &
-                      ~(u64)(g_ring.ubo_align - 1);
+  g_ring.ubo_stride =
+      (kCbufWindow + g_ring.ubo_align - 1) & ~(u64)(g_ring.ubo_align - 1);
 
   rhi::BindGroupDesc set;
   set.layout = g_ring.ubo_layout;
@@ -232,7 +230,8 @@ bool EnsureLdsScratch() {
   rhi::BufferDesc desc;
   desc.size = kLdsScratch;
   desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
-  desc.memory = kLdsDump ? rhi::MemoryKind::kReadback : rhi::MemoryKind::kDevice;
+  desc.memory =
+      kLdsDump ? rhi::MemoryKind::kReadback : rhi::MemoryKind::kDevice;
   desc.name = "shared lds";
   g_ring.lds_buf = Device().CreateBuffer(desc);
   if (!g_ring.lds_buf)
@@ -258,10 +257,9 @@ bool EnsureRawBufferRing() {
     return true;
   if (!g_ring.sbo_layout)
     return false;
-  g_ring.sbo_buf = HostBuffer(kSboRing,
-                              rhi::kBufferStorage | rhi::kBufferCopyDst,
-                              "raw buffer ring",
-                              &g_ring.sbo_map);
+  g_ring.sbo_buf =
+      HostBuffer(kSboRing, rhi::kBufferStorage | rhi::kBufferCopyDst,
+                 "raw buffer ring", &g_ring.sbo_map);
   if (!g_ring.sbo_buf)
     return false;
   std::memset(g_ring.sbo_map, 0, kSboRing);
@@ -300,8 +298,7 @@ bool AllocateTextureUpload(u32 slot,
                (unsigned long long)alignment);
   auto& blocks = g_ring.texture_uploads[slot];
   for (auto& block : blocks) {
-    const u64 aligned =
-        (block.offset + alignment - 1) & ~(alignment - 1);
+    const u64 aligned = (block.offset + alignment - 1) & ~(alignment - 1);
     if (aligned <= block.capacity && bytes <= block.capacity - aligned) {
       slice = {block.buffer, aligned, block.map + aligned};
       block.offset = aligned + bytes;
@@ -317,8 +314,8 @@ bool AllocateTextureUpload(u32 slot,
     capacity *= 2;
   }
   TextureUploadBlock block;
-  block.buffer = HostBuffer(capacity, rhi::kBufferCopySrc, "texture upload",
-                            &block.map);
+  block.buffer =
+      HostBuffer(capacity, rhi::kBufferCopySrc, "texture upload", &block.map);
   if (!block.buffer)
     return false;
   block.capacity = capacity;

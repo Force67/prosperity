@@ -12,9 +12,16 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <host_memory/host_memory.h>
-#include <options/options.h>
+#include "host_memory/host_memory.h"
+#include "options/options.h"
 
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/shared_pointer.h"
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
@@ -22,13 +29,6 @@
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps4/shader_cache.h"
-#include <base/containers/array.h>
-#include <base/algorithm.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/shared_pointer.h>
-#include <base/containers/hash_map.h>
 
 namespace {
 
@@ -71,11 +71,25 @@ u32 CbFormatBytes(u32 format) {
   switch (format) {
     case 1:
       return 1;
-    case 2: case 3: case 16: case 17: case 18: case 19:
+    case 2:
+    case 3:
+    case 16:
+    case 17:
+    case 18:
+    case 19:
       return 2;
-    case 4: case 5: case 6: case 7: case 8: case 9: case 10: case 20: case 21:
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 8:
+    case 9:
+    case 10:
+    case 20:
+    case 21:
       return 4;
-    case 11: case 12:
+    case 11:
+    case 12:
       return 8;
     case 14:
       return 16;
@@ -162,8 +176,7 @@ void ResolveIndexBuffer(render::Renderer& renderer,
 
   // DRAW_INDEX_2 (5 dwords): maxSize, baseLo, baseHi, index_count, initiator.
   if (op == IT_DRAW_INDEX_2 && count >= 4) {
-    const u64 base =
-        (static_cast<u64>(body[2] & 0xFF) << 32) | body[1];
+    const u64 base = (static_cast<u64>(body[2] & 0xFF) << 32) | body[1];
     const u32 index_count = body[3];
     const bool accepted =
         IsGuestAddress(base) && index_count && index_count <= kMaxElementCount;
@@ -188,8 +201,8 @@ void ResolveIndexBuffer(render::Renderer& renderer,
     // written back lazily, so reading guest memory without flushing that range
     // first yields the stale zeros the buffer was allocated with.
     FlushForWalkRead(renderer, args, need, "indirect");
-    const bool mapped =
-        host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(args), need);
+    const bool mapped = host_memory::IsMemoryRangeMapped(
+        reinterpret_cast<const void*>(args), need);
     u32 a[5] = {};
     if (mapped)
       std::memcpy(a, reinterpret_cast<const void*>(args), need);
@@ -225,10 +238,10 @@ void ResolveIndexBuffer(render::Renderer& renderer,
     const u32 index_bytes = packet.index_type == 1 ? 4 : 2;
     const u64 base =
         packet.index_base + static_cast<u64>(index_offset) * index_bytes;
-    const bool accepted = packet.index_base && index_count &&
-                          index_count <= kMaxElementCount &&
-                          gpu::IsReadableRangeCached(
-                              base, static_cast<u64>(index_count) * index_bytes);
+    const bool accepted =
+        packet.index_base && index_count && index_count <= kMaxElementCount &&
+        gpu::IsReadableRangeCached(base,
+                                   static_cast<u64>(index_count) * index_bytes);
     TraceIndexOffsetArgs(body[0], index_offset, index_count, packet.index_base,
                          base, packet.index_type, accepted);
     if (accepted) {
@@ -248,9 +261,9 @@ void ResolveIndexBuffer(render::Renderer& renderer,
 // identity. Kept as raw register bits rather than a VkFormat: this layer must
 // not depend on the backend.
 u32 ResolveRenderTargets(const Regs& regs,
-                              render::DrawInfo& d,
-                              u64 vs_addr,
-                              u64 ps_addr) {
+                         render::DrawInfo& d,
+                         u64 vs_addr,
+                         u64 ps_addr) {
   d.rt_w = FbWidth(regs);
   d.rt_h = FbHeight(regs);
   d.scissor_tl = regs[mmPA_SC_VPORT_SCISSOR_0_TL];
@@ -376,8 +389,7 @@ void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
   const u32 z_info = kNoDepth ? 0 : regs[mmDB_Z_INFO];
   const u32 stencil_info = kNoDepth ? 0 : regs[mmDB_STENCIL_INFO];
   const u64 z_base = static_cast<u64>(regs[mmDB_Z_WRITE_BASE]) << 8;
-  const u64 stencil_base =
-      static_cast<u64>(regs[mmDB_STENCIL_WRITE_BASE]) << 8;
+  const u64 stencil_base = static_cast<u64>(regs[mmDB_STENCIL_WRITE_BASE]) << 8;
   TraceDepthState(regs, z_info);
 
   const u32 render_control = regs[mmDB_RENDER_CONTROL];
@@ -505,12 +517,13 @@ void ResolveHeuristicSources(const u32* vud,
 
 // The images the pixel shader samples, in its set-0 binding order. Returns the
 // decoded program, which the recompiled path reuses.
-base::SharedPointer<const gcn::Program> ResolvePsTextures(render::Renderer& renderer,
-                                                      const Regs& regs,
-                                                      u64 ps_addr,
-                                                      u32 frame,
-                                                      render::DrawInfo& d,
-                                                      TextureMasks& masks) {
+base::SharedPointer<const gcn::Program> ResolvePsTextures(
+    render::Renderer& renderer,
+    const Regs& regs,
+    u64 ps_addr,
+    u32 frame,
+    render::DrawInfo& d,
+    TextureMasks& masks) {
   if (!IsGuestAddress(ps_addr))
     return nullptr;
   if (kPreflushResources) {
@@ -606,9 +619,9 @@ bool ShaderSkipped(u64 vs_addr, u64 ps_addr) {
     return list;
   }();
   return !kSkipped.empty() && (base::Find(kSkipped.begin(), kSkipped.end(),
-                                         vs_addr) != kSkipped.end() ||
+                                          vs_addr) != kSkipped.end() ||
                                base::Find(kSkipped.begin(), kSkipped.end(),
-                                         ps_addr) != kSkipped.end());
+                                          ps_addr) != kSkipped.end());
 }
 
 // Group the attributes' V#s into vertex bindings. Attributes that interleave in
@@ -656,8 +669,7 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
     const gcn::ShaderAttr& a = rc.attrs[i];
     const gcn::VBuffer& vb = attr_vbs[i];
     const u32 binding = attr_binding[i];
-    const u64 offset =
-        vb.base - reinterpret_cast<u64>(d.vbufs[binding].data);
+    const u64 offset = vb.base - reinterpret_cast<u64>(d.vbufs[binding].data);
     // Strided bindings must keep every attribute inside one record; a stride-0
     // (constant) binding has no record extent to bound.
     if (d.vbufs[binding].stride && offset >= d.vbufs[binding].stride)
@@ -666,9 +678,8 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
     // hardware ignores the V#'s; only untyped fetches read it.
     const u32 dfmt = a.inst_dfmt ? a.inst_dfmt : vb.dfmt;
     const u32 nfmt = a.inst_dfmt ? a.inst_nfmt : vb.nfmt;
-    d.vattrs[d.num_vattrs++] = {
-        a.location,  binding, static_cast<u32>(offset),
-        a.num_comps, dfmt,    nfmt};
+    d.vattrs[d.num_vattrs++] = {a.location,  binding, static_cast<u32>(offset),
+                                a.num_comps, dfmt,    nfmt};
   }
 
   // vertex_data/vertex_stride mirror the first per-vertex (strided) binding for
@@ -711,13 +722,14 @@ u32 IntAttrMask(const gcn::Recompiled& rc,
 // chains (FOX loads the V# through an extended-user-data pointer, so it is not
 // sitting directly in user data at cb.ud_sgpr). Bindings are assigned by the
 // translator and shared across both stages in descriptor set 1.
-void ResolveCbufferBindings(const base::Vector<gcn::ShaderCbuf>& cbufs,
-                            const u32* user_data,
-                            const base::SharedPointer<const gcn::Program>& program,
-                            u64 code_base,
-                            bool vertex_stage,
-                            render::DrawInfo& d,
-                            bool& resolved_vs_cbuf) {
+void ResolveCbufferBindings(
+    const base::Vector<gcn::ShaderCbuf>& cbufs,
+    const u32* user_data,
+    const base::SharedPointer<const gcn::Program>& program,
+    u64 code_base,
+    bool vertex_stage,
+    render::DrawInfo& d,
+    bool& resolved_vs_cbuf) {
   thread_local gcn::CbufList resolved;
   gcn::ResolveCbuffers(resolved, program, user_data, code_base);
   for (const auto& cb : cbufs) {
@@ -733,8 +745,7 @@ void ResolveCbufferBindings(const base::Vector<gcn::ShaderCbuf>& cbufs,
       vb = gcn::DecodeVBuffer(&user_data[cb.ud_sgpr]);  // inline V#
     // An s_load table carries no size; the shader's own highest read bounds the
     // window.
-    u64 bytes =
-        vb.stride ? (u64)vb.stride * vb.num_records : vb.num_records;
+    u64 bytes = vb.stride ? (u64)vb.stride * vb.num_records : vb.num_records;
     if (cb.pointer)
       bytes = (u64)cb.num_dwords * 4;
     if (!IsGuestRange(vb.base, bytes) || bytes > 0xFFFFFFFFull)
@@ -816,8 +827,8 @@ GraphicsShaderState ShaderStateOf(const Regs& regs,
   // screen over a main menu that was otherwise drawing correctly.
   // DELTA_GPU_PSCNTL_APPLY=0 goes back to the identity, =<ps addr> applies the
   // mapping to one shader (Isaac/Undertale/Doom64 are unchanged either way).
-  state.honour_ps_in_cntl = kCntlApply != 0 && (kCntlApply == 1 ||
-                                                ps_addr == (u64)kCntlApply);
+  state.honour_ps_in_cntl =
+      kCntlApply != 0 && (kCntlApply == 1 || ps_addr == (u64)kCntlApply);
   state.ps_num_interp = regs[mmSPI_PS_IN_CONTROL] & 0x3F;
   state.tex_3d_mask = masks.tex_3d;
   state.tex_1d_mask = masks.tex_1d;
@@ -996,8 +1007,7 @@ bool BuildDrawInfo(render::Renderer& renderer,
   TraceDrawOpcode(packet.op, d.prim_type, auto_vertex_count);
 
   ResolveIndexBuffer(renderer, packet, d);
-  const u32 mrt_uint_mask =
-      ResolveRenderTargets(regs, d, vs_addr, ps_addr);
+  const u32 mrt_uint_mask = ResolveRenderTargets(regs, d, vs_addr, ps_addr);
   ResolveColorState(regs, ps_addr, d);
   ResolveDepthState(regs, d);
   ResolveRasterState(regs, d);
@@ -1011,8 +1021,8 @@ bool BuildDrawInfo(render::Renderer& renderer,
   ResolveVsTextures(vud, vs_addr, d, masks);
 
   const RecompStatus status = ResolveRecompiledShaders(
-      regs, vs_addr, vud, has_gs ? &gs : nullptr, ps_addr, fetch_addr, ps_prog, masks, mrt_uint_mask,
-      d.mrt_bound_mask, d);
+      regs, vs_addr, vud, has_gs ? &gs : nullptr, ps_addr, fetch_addr, ps_prog,
+      masks, mrt_uint_mask, d.mrt_bound_mask, d);
   if (auto_vertex_count && auto_vertex_count <= kMaxElementCount)
     d.vertex_count = auto_vertex_count;
   // CB_COLOR0_VIEW.SLICE_MAX[23:13]: the slices a layered pass can reach.
@@ -1038,8 +1048,7 @@ void PrefetchDrawShaders(const Regs& regs) {
   if (!kRecompOn)
     return;
   gcn::GsPipeline gs;
-  const bool has_gs =
-      ResolveGsPipeline(regs, regs[mmVGT_PRIMITIVE_TYPE], gs);
+  const bool has_gs = ResolveGsPipeline(regs, regs[mmVGT_PRIMITIVE_TYPE], gs);
   const u64 vs_addr = has_gs ? regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES)
                              : regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS);
   const u64 ps_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);

@@ -10,12 +10,12 @@
 
 #include <cstdio>
 #include <cstring>
-#include <base/algorithm.h>
-#include <base/atomic.h>
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/memory/shared_pointer.h>
-#include <base/containers/hash_map.h>
+#include "base/algorithm.h"
+#include "base/atomic.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/memory/shared_pointer.h"
 
 namespace gpu::gcn {
 namespace {
@@ -378,8 +378,7 @@ base::Vector<u8> ComputeReachability(const Program& program) {
     if (kind == 1 || kind == 2) {
       const i32 simm = static_cast<i16>(inst.raw[0] & 0xFFFF);
       starts.push_back(static_cast<u32>(static_cast<i32>(inst.pc) +
-                                             static_cast<i32>(inst.size) +
-                                             simm));
+                                        static_cast<i32>(inst.size) + simm));
     }
   }
   base::Sort(starts.begin(), starts.end());
@@ -425,9 +424,8 @@ base::Vector<u8> ComputeReachability(const Program& program) {
         break;
       }
       const i32 simm = static_cast<i16>(inst.raw[0] & 0xFFFF);
-      const u32 target =
-          static_cast<u32>(static_cast<i32>(inst.pc) +
-                                static_cast<i32>(inst.size) + simm);
+      const u32 target = static_cast<u32>(static_cast<i32>(inst.pc) +
+                                          static_cast<i32>(inst.size) + simm);
       if (target < max_pc)
         worklist.push_back(block_of(target));
       if (kind == 2)
@@ -451,8 +449,7 @@ void NextProgramCacheGeneration() {
   g_prog_cache_generation++;
 }
 
-base::SharedPointer<const Program> CachedProgram(u64 addr,
-                                             u32 max_dwords) {
+base::SharedPointer<const Program> CachedProgram(u64 addr, u32 max_dwords) {
   struct Entry {
     u64 hash = 0;
     u32 hashed_dwords = 0;

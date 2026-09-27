@@ -10,27 +10,27 @@
 
 #include <cstring>
 
-#include <base/logging.h>
-#include <options/options.h>
+#include "base/logging.h"
+#include "options/options.h"
 
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps5/cmd_trace.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/guest_memory_ranges.h"
-#include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
+#include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/shader_cache.h"
-#include <base/algorithm.h>
-#include <base/containers/array.h>
-#include <base/containers/map.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/strings/xstring.h>
-#include <base/strings/format.h>
-#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
@@ -83,15 +83,16 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   // layout, without requiring unused levels advertised by LAST_LEVEL.
   const gcn::TImage t = rdna::DecodeTImage(descriptor);
   const bool r8 = t.dfmt == 1 && (t.nfmt == 0 || t.nfmt == 4);
-  const bool rgba8 = t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 4 || t.nfmt == 5 ||
-                                     (t.nfmt == 9 && !res.written));
+  const bool rgba8 =
+      t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 4 || t.nfmt == 5 ||
+                       (t.nfmt == 9 && !res.written));
   const bool r32 = t.dfmt == 4 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   const bool rg16f = t.dfmt == 5 && t.nfmt == 7;
   const bool rg16i = t.dfmt == 5 && (t.nfmt == 4 || t.nfmt == 5);
   const bool r16 = t.dfmt == 2 && (t.nfmt == 0 || t.nfmt == 7);
   const bool rg8 = t.dfmt == 3 && (t.nfmt == 0 || t.nfmt == 4);
   const bool rgba16 = t.dfmt == 12 && (t.nfmt == 0 || t.nfmt == 4 ||
-                                      t.nfmt == 5 || t.nfmt == 7);
+                                       t.nfmt == 5 || t.nfmt == 7);
   const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
   // 32_32: two full dwords per texel, so it stages unchanged like the other
   // 32-bit-per-channel forms, just twice as wide.
@@ -110,28 +111,30 @@ ResourceRange ResolveImageResource(u64 cs_addr,
                    (t.mip_levels == 1 || (!(t.width & (t.width - 1)) &&
                                           !(t.height & (t.height - 1))));
   const bool compressed = bc1 || bc6;
-  out.elem_bytes = (block128 || bc6)  ? 16u
+  out.elem_bytes = (block128 || bc6)         ? 16u
                    : (rgba16 || rg32 || bc1) ? 8u
-                   : (r16 || rg8)     ? 2u
-                   : r8               ? 1u
-                                      : 4u;
-  out.stage_elem_bytes =
-      (r11g11b10f || bc6) ? 16u : bc1 ? 4u : base::Max(out.elem_bytes, 4u);
+                   : (r16 || rg8)            ? 2u
+                   : r8                      ? 1u
+                                             : 4u;
+  out.stage_elem_bytes = (r11g11b10f || bc6) ? 16u
+                         : bc1               ? 4u
+                                             : base::Max(out.elem_bytes, 4u);
 
   // type 10 is a volume: DecodeTImage already reports its depth as layers and
   // the shared emitter addresses 3D slice-major, so it stages like the 2D
   // forms.
   const bool supported_type = t.type >= 8 && t.type <= 13;
-  const bool supported_format = r8 || rgba8 || r32 || rg16f || rg16i || r16 || rg8 ||
-                                rgba16 || r11g11b10f || rg32 || block128 || compressed;
+  const bool supported_format = r8 || rgba8 || r32 || rg16f || rg16i || r16 ||
+                                rg8 || rgba16 || r11g11b10f || rg32 ||
+                                block128 || compressed;
   gcn::TextureLayout32 layout;
   if (!supported_type || !supported_format ||
       !gcn::TilingSupported(t.tiling_idx) || !t.valid ||
-      !gcn::BuildTextureLayout32(layout, compressed ? (t.width + 3) / 4 : t.width,
-                                 compressed ? (t.height + 3) / 4 : t.height,
-                                 compressed ? (t.pitch + 3) / 4 : t.pitch, t.layers,
-                                 t.mip_levels, t.tiling_idx, t.pow2_pad,
-                                 out.elem_bytes)) {
+      !gcn::BuildTextureLayout32(
+          layout, compressed ? (t.width + 3) / 4 : t.width,
+          compressed ? (t.height + 3) / 4 : t.height,
+          compressed ? (t.pitch + 3) / 4 : t.pitch, t.layers, t.mip_levels,
+          t.tiling_idx, t.pow2_pad, out.elem_bytes)) {
     // One descriptor we cannot stage used to skip the whole dispatch, taking
     // every other binding's work with it. Hand this one zeros instead and let
     // the rest of the shader run.
@@ -189,8 +192,8 @@ ResourceRange ResolveBufferResource(const gcn::CsResource& res,
   }
   const rdna::VBuffer v = rdna::DecodeVBuffer(descriptor);
   out.base = v.base;
-  out.size = v.stride ? static_cast<u64>(v.stride) * v.num_records
-                      : v.num_records;
+  out.size =
+      v.stride ? static_cast<u64>(v.stride) * v.num_records : v.num_records;
   out.size = base::Max<u64>(out.size, res.min_bytes);
   return out;
 }
@@ -226,7 +229,7 @@ void DispatchCompute(render::Renderer& renderer,
                      const u32* body,
                      u32 count) {
   u32 groups[3] = {count >= 1 ? body[0] : 0, count >= 2 ? body[1] : 0,
-                         count >= 3 ? body[2] : 0};
+                   count >= 3 ? body[2] : 0};
   const u32 initiator = count >= 4 ? body[3] : 5;
   u32 group_base[3] = {};
   if (!(initiator & 4))
@@ -251,11 +254,13 @@ void DispatchCompute(render::Renderer& renderer,
                 (unsigned long long)cs_addr);
   if (kCsProbe && std::strstr(probe_buf, kCsProbe)) {
     base::String line;
-    base::FormatTo(line, "cs={:#x} groups=[{} {} {}] base=[{} {} {}] init={:#x} tg=[{} {} {}] "
-                        "user_sgpr={} rsrc2={:#x} ud:",
-                   cs_addr, groups[0], groups[1], groups[2], group_base[0],
-                   group_base[1], group_base[2], initiator, threads[0],
-                   threads[1], threads[2], user_sgpr, rsrc2);
+    base::FormatTo(
+        line,
+        "cs={:#x} groups=[{} {} {}] base=[{} {} {}] init={:#x} tg=[{} {} {}] "
+        "user_sgpr={} rsrc2={:#x} ud:",
+        cs_addr, groups[0], groups[1], groups[2], group_base[0], group_base[1],
+        group_base[2], initiator, threads[0], threads[1], threads[2], user_sgpr,
+        rsrc2);
     const u32* ud = regs.At(mmCOMPUTE_USER_DATA_0);
     for (int k = 0; k < 16; k++)
       base::FormatTo(line, " {:08x}", ud[k]);
@@ -297,7 +302,8 @@ void DispatchCompute(render::Renderer& renderer,
   ci.groups[0] = groups[0];
   ci.groups[1] = groups[1];
   ci.groups[2] = groups[2];
-  base::Copy(group_base, group_base + base::ArraySize(group_base), ci.group_base);
+  base::Copy(group_base, group_base + base::ArraySize(group_base),
+             ci.group_base);
   ci.recomp = &rc;
   for (int k = 0; k < 16; k++)
     ci.user_data[k] = ud[k];
@@ -315,8 +321,9 @@ void DispatchCompute(render::Renderer& renderer,
       for (const auto& r : rc.resources) {
         const auto it = resolved.find(r.use_pc);
         base::String line;
-        base::FormatTo(line, "binding={} kind={} s{} pc={:#x} dynamic={} desc:",
-                       r.binding, r.kind, r.base_sgpr, r.use_pc, r.runtime_address);
+        base::FormatTo(
+            line, "binding={} kind={} s{} pc={:#x} dynamic={} desc:", r.binding,
+            r.kind, r.base_sgpr, r.use_pc, r.runtime_address);
         if (it != resolved.end() && it->second.descriptor_valid)
           for (u32 i = 0; i < it->second.descriptor_dwords; i++)
             base::FormatTo(line, " {:08x}", it->second.descriptor[i]);
@@ -336,8 +343,10 @@ void DispatchCompute(render::Renderer& renderer,
         continue;
       const auto it = resolved.find(r.use_pc);
       if (it != resolved.end() && it->second.descriptor_valid) {
-        const u64 base = r.runtime_image ? rdna::DecodeTImage(it->second.descriptor).base
-            : ResolveBufferResource(r, it->second.descriptor).base;
+        const u64 base =
+            r.runtime_image
+                ? rdna::DecodeTImage(it->second.descriptor).base
+                : ResolveBufferResource(r, it->second.descriptor).base;
         if (base)
           bases.push_back(base);
       }
@@ -371,13 +380,15 @@ void DispatchCompute(render::Renderer& renderer,
     } else if (r.inline_user_data && r.base_sgpr + dwords <= ud_dwords) {
       desc = &ud[r.base_sgpr];
     } else if (r.image_table_pc == ~0u ||
-               !(desc = ResolveUniformImageTable(r, resolved, table_descriptor))) {
+               !(desc =
+                     ResolveUniformImageTable(r, resolved, table_descriptor))) {
       TraceCsUnresolved(cs_addr, r, ud_dwords);
       return;
     }
 
     ResourceRange range;
-    if (r.runtime_image && rdna::CanAccessLinearIntegerImage(rdna::DecodeTImage(desc))) {
+    if (r.runtime_image &&
+        rdna::CanAccessLinearIntegerImage(rdna::DecodeTImage(desc))) {
       auto& out = ci.res[ci.num_res++];
       out.binding = r.binding;
       out.size = 16;
@@ -426,7 +437,8 @@ void DispatchCompute(render::Renderer& renderer,
     if (!range.zero_fill &&
         (range.size < r.min_bytes ||
          range.size > (range.image_staging ? kMaxImageStaging : max_resource) ||
-         range.guest_size > (range.image_staging ? kMaxImageStaging : max_resource) ||
+         range.guest_size >
+             (range.image_staging ? kMaxImageStaging : max_resource) ||
          (r.written && !kCsAnyMem && !IsGpuAddress(range.base)) ||
          !gpu::IsReadableRange(range.base, range.guest_size))) {
       TraceCsInvalidRange(cs_addr, r, range.base, range.guest_size);

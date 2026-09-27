@@ -5,14 +5,12 @@
 
 // The frame ring. Two slots let frame N record (and the guest emulate) while
 // frame N-1 still rasterizes; each slot owns a command list, a submission id, a
-// readback buffer and half of each upload ring. Slot N-1's submission is waited –
-// and its pixels presented, one frame late: at frame N's EndFrame.
+// readback buffer and half of each upload ring. Slot N-1's submission is waited
+// – and its pixels presented, one frame late: at frame N's EndFrame.
 
-
-#include "gpu/rhi/device.h"
 #include "base/arch.h"
-#include <base/containers/vector.h>
-
+#include "base/containers/vector.h"
+#include "gpu/rhi/device.h"
 
 namespace gpu::render {
 

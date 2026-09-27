@@ -2,16 +2,16 @@
 
 #include <gtest/gtest.h>
 
+#include "base/algorithm.h"
+#include "base/containers/array.h"
+#include "base/containers/span.h"
+#include "base/containers/vector.h"
+#include "base/memory/bit_cast.h"
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/shader_cache.h"
-#include <base/containers/span.h>
-#include <base/algorithm.h>
-#include <base/containers/array.h>
-#include <base/containers/vector.h>
-#include <base/memory/bit_cast.h>
 
 namespace {
 constexpr u32 kInvalid = 0xffffffff;
@@ -30,22 +30,22 @@ class RdnaBvh : public testing::Test {
   }
   // Every dispatch owns distinct guest memory; the renderer can cache inputs.
   base::Array<u32, 4> Run(const base::Array<u32, 48>& nodes,
-                         u32 ptr,
-                         base::Array<float, 3> origin = {0, 0, 0},
-                         base::Array<float, 3> direction = {0, 0, 1},
-                         bool sort = true,
-                         bool wide = false,
-                         bool nsa = false,
-                         bool a16 = false,
-                         u32 last_node = 2,
-                         u32 high = 0,
-                         float extent = 100,
-                         u32 grow = 0,
-                         u32 extra_bindings = 0,
-                         base::Span<const u32> epilogue = {},
-                         bool runtime = false,
-                         bool changing = false,
-                         bool indirect = false) {
+                          u32 ptr,
+                          base::Array<float, 3> origin = {0, 0, 0},
+                          base::Array<float, 3> direction = {0, 0, 1},
+                          bool sort = true,
+                          bool wide = false,
+                          bool nsa = false,
+                          bool a16 = false,
+                          u32 last_node = 2,
+                          u32 high = 0,
+                          float extent = 100,
+                          u32 grow = 0,
+                          u32 extra_bindings = 0,
+                          base::Span<const u32> epilogue = {},
+                          bool runtime = false,
+                          bool changing = false,
+                          bool indirect = false) {
     alignas(65536) static base::Array<base::Array<u32, 16384>, 256> memory{};
     static u32 allocation = 0;
     auto& source = memory.at(allocation++);
@@ -81,8 +81,8 @@ class RdnaBvh : public testing::Test {
       args[6 + shift] = 0x7c003c00;
       args[7 + shift] = 0x3c007c00;
     }
-    constexpr base::Array<u32, 12> registers = {0,  61, 65, 66, 68, 62,
-                                               64, 67, 69, 70, 71, 72};
+    constexpr base::Array<u32, 12> kRegisters = {0,  61, 65, 66, 68, 62,
+                                                 64, 67, 69, 70, 71, 72};
     const u32 count = (a16 ? 8 : 11) + shift;
     u32 pc = 0;
     if (extra_bindings) {
@@ -104,7 +104,7 @@ class RdnaBvh : public testing::Test {
       code[pc++] = 0xfa000000;
     }
     for (u32 i = 0; i < count; i++) {
-      code[pc++] = 0x7e0002ff | ((nsa ? registers[i] : i) << 17);
+      code[pc++] = 0x7e0002ff | ((nsa ? kRegisters[i] : i) << 17);
       code[pc++] = args[i];
     }
     if (runtime) {
@@ -116,7 +116,7 @@ class RdnaBvh : public testing::Test {
     code[pc++] = a16 ? 1u << 30 : 0;
     if (nsa) {
       for (u32 i = 1; i < count; i++)
-        code[pc + (i - 1) / 4] |= registers[i] << (((i - 1) % 4) * 8);
+        code[pc + (i - 1) / 4] |= kRegisters[i] << (((i - 1) % 4) * 8);
       pc += 3;
     }
     for (u32 word : epilogue)
@@ -170,7 +170,8 @@ class RdnaBvh : public testing::Test {
       regs[ud + 9] = pointers >> 32;
     }
     const u32 dispatch[] = {1, 1, 1, 1};
-    gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, dispatch, 4);
+    gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, dispatch,
+                              4);
     EXPECT_TRUE(gpu::render::FlushCsWrites(gpu::render::DefaultRenderer()));
     if (changing) {
       EXPECT_EQ(
@@ -298,7 +299,8 @@ TEST_F(RdnaBvh, DynamicRawBuffersAndScalarPointersWithoutBvh) {
     regs[ud + 8] = src;
     regs[ud + 9] = src >> 32;
     const u32 dispatch[] = {1, 1, 1, 1};
-    gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, dispatch, 4);
+    gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, dispatch,
+                              4);
     ASSERT_TRUE(gpu::render::FlushCsWrites(gpu::render::DefaultRenderer()));
     for (u32 i = 0; i < 4; ++i)
       EXPECT_EQ(output[i], scalar || i < 2 ? input[i] : 0u);
@@ -392,7 +394,7 @@ TEST_F(RdnaBvh,
 
 TEST(RdnaBvhCompile, RejectsUnsupportedControlFields) {
   alignas(256) base::Array<u32, 4096> code = {0xf1989f01, 0, 0xe0780000,
-                                             0x80010000, 0xbf810000};
+                                              0x80010000, 0xbf810000};
   for (u32 bit : {3u, 8u, 12u, 15u, 16u, 17u}) {
     code[0] = 0xf1989f01 ^ (1u << bit);
     EXPECT_FALSE(gpu::rdna::RecompileCompute(code.data(), 1, 1, 1, 8, 0, 0).ok);
@@ -416,7 +418,7 @@ TEST(RdnaBvhCompile, LaneDependentBvhDescriptorRequiresRuntimeBinding) {
 
 TEST(RdnaBvhCompile, TrapHandlerStateIsPartOfTheShaderCacheKey) {
   alignas(256) static base::Array<u32, 4096> code = {0xbf920001, 0xe0780000,
-                                                    0x80010000, 0xbf810000};
+                                                     0x80010000, 0xbf810000};
   gpu::ps5::ComputeShaderState state;
   state.cs_addr = reinterpret_cast<u64>(code.data());
   state.thread_x = state.thread_y = state.thread_z = 1;
@@ -429,13 +431,13 @@ TEST(RdnaBvhCompile, TrapHandlerStateIsPartOfTheShaderCacheKey) {
 }
 
 TEST_F(RdnaBvh, AllCompressedTrianglesAndBarycentricRotations) {
-  constexpr u32 slots[4][3] = {{0, 1, 2}, {1, 3, 2}, {2, 3, 4}, {2, 4, 0}};
-  constexpr float vertices[3][3] = {{0, 0, 5}, {2, 0, 5}, {0, 2, 5}};
+  constexpr u32 kSlots[4][3] = {{0, 1, 2}, {1, 3, 2}, {2, 3, 4}, {2, 4, 0}};
+  constexpr float kVertices[3][3] = {{0, 0, 5}, {2, 0, 5}, {0, 2, 5}};
   for (u32 type = 0; type < 4; type++) {
     base::Array<u32, 48> nodes{};
     for (u32 v = 0; v < 3; v++)
       for (u32 c = 0; c < 3; c++)
-        nodes[16 + slots[type][v] * 3 + c] = Bits(vertices[v][c]);
+        nodes[16 + kSlots[type][v] * 3 + c] = Bits(kVertices[v][c]);
     for (u32 rotation = 0; rotation < 3; rotation++) {
       const u32 i = (1 + rotation) % 3, j = (2 + rotation) % 3;
       nodes[31] = (i | (j << 2)) << (type * 8);
@@ -465,6 +467,8 @@ namespace gpu::render {
 u64 g_ns_dcb = 0, g_ns_dcb_lock = 0;
 u32 g_submit_queue = 0, g_dcb_n = 0;
 }  // namespace gpu::render
+// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" bool prosperity_ps5_is_display_buffer(u64) {
   return false;
 }
+// NOLINTEND(readability-identifier-naming)

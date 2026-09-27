@@ -2,8 +2,8 @@
  * PS4Delta : PS4 Pro/Neo shader instructions from the Sony Neo ISA delta.
  */
 
-#include "gpu/gcn/spirv/translator.h"
 #include "base/arch.h"
+#include "gpu/gcn/spirv/translator.h"
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 
@@ -549,8 +549,7 @@ bool EmitNeoVopc(Translator& t,
 bool EmitNeoVop3(Translator& t, const Inst& inst) {
   const u32 w = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
   const u32 vdst = w & 0xff, op_sel = (w >> 12) & 0xf;
-  const u32 fields[3] = {w1 & 0x1ff, (w1 >> 9) & 0x1ff,
-                              (w1 >> 18) & 0x1ff};
+  const u32 fields[3] = {w1 & 0x1ff, (w1 >> 9) & 0x1ff, (w1 >> 18) & 0x1ff};
   const u32 neg = (w1 >> 29) & 7, abs = (w >> 8) & 7;
   const u32 omod = (w1 >> 27) & 3;
   if (op == 0x18a || op == 0x18b) {
@@ -849,8 +848,7 @@ bool EmitNeoVop3(Translator& t, const Inst& inst) {
 
 bool EmitNeoVop3p(Translator& t, const Inst& inst) {
   const u32 w = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
-  const u32 fields[3] = {w1 & 0x1ff, (w1 >> 9) & 0x1ff,
-                              (w1 >> 18) & 0x1ff};
+  const u32 fields[3] = {w1 & 0x1ff, (w1 >> 9) & 0x1ff, (w1 >> 18) & 0x1ff};
   const u32 op_sel = (w >> 11) & 7;
   const u32 op_sel_hi = ((w1 >> 27) & 3) | (((w >> 14) & 1) << 2);
   const u32 neg_lo = (w1 >> 29) & 7, neg_hi = (w >> 8) & 7;

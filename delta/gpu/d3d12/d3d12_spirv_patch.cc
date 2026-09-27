@@ -9,10 +9,9 @@
  *     FindUMsb and selects.
  */
 
-
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 #include "gpu/d3d12/d3d12_shader.h"
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
 
 namespace gpu::d3d12 {
 
@@ -127,7 +126,7 @@ class Patcher {
       switch (op) {
         case kOpExtInstImport:
           if (n >= 4 && !base::String(reinterpret_cast<const char*>(w + 2))
-                            .compare(0, 12, "GLSL.std.450"))
+                             .compare(0, 12, "GLSL.std.450"))
             glsl_ = w[1];
           break;
         case kOpEntryPoint:
@@ -200,7 +199,10 @@ class Patcher {
   }
 
   // result = the lowest (highest) set bit of a uvec4 ballot.
-  void EmitFind(base::Vector<u32>& out, bool lsb, u32 type, u32 result,
+  void EmitFind(base::Vector<u32>& out,
+                bool lsb,
+                u32 type,
+                u32 result,
                 u32 value) {
     u32 comp[4], bit[4];
     for (u32 i = 0; i < 4; i++) {

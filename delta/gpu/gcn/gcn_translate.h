@@ -8,8 +8,8 @@
 
 #include "base/arch.h"
 
+#include "base/containers/vector.h"
 #include "gpu/gcn/gcn_decode.h"
-#include <base/containers/vector.h>
 
 namespace gpu::gcn {
 
@@ -26,15 +26,15 @@ inline constexpr u32 kLdsTrashDword = kLdsWaves * kLdsMaxDwords - 1;
 
 // A vertex attribute recovered from the VS fetch shader, in semantic order.
 struct ShaderAttr {
-  u32 location = 0;        // GLSL `in` location == semantic index
-  u32 num_comps = 0;       // 1..4 (from the buffer_load_format opcode)
-  u32 table_sgpr = 0;      // fetch-table pointer or direct V# base SGPR
-  u32 vbuf_dword_off = 0;  // dword offset of this attr's V# in the table
-  bool direct_fetch = false;    // MUBUF is in the main VS, not a fetch shader
+  u32 location = 0;           // GLSL `in` location == semantic index
+  u32 num_comps = 0;          // 1..4 (from the buffer_load_format opcode)
+  u32 table_sgpr = 0;         // fetch-table pointer or direct V# base SGPR
+  u32 vbuf_dword_off = 0;     // dword offset of this attr's V# in the table
+  bool direct_fetch = false;  // MUBUF is in the main VS, not a fetch shader
   u32 inst_format = 0;  // gfx10 typed-fetch buffer format; 0 = use the V#'s
-  u32 use_pc = ~0u;  // direct/inline fetch MUBUF pc for scalar replay
+  u32 use_pc = ~0u;     // direct/inline fetch MUBUF pc for scalar replay
   u32 inst_offset = 0;  // field separator when RDNA packs attrs into one V#
-  u32 inst_dfmt = 0;  // MTBUF typed-fetch format; 0 = untyped, use the V#
+  u32 inst_dfmt = 0;    // MTBUF typed-fetch format; 0 = untyped, use the V#
   u32 inst_nfmt = 0;
   // The fetch indexes it by an instance id (v1..v3), not the vertex id (v0).
   bool per_instance = false;
@@ -53,13 +53,16 @@ constexpr u32 kCbufDwords = 4096;
 // A constant buffer a shader stage reads (s_buffer_load). Bound as a UBO.
 struct ShaderCbuf {
   u32 binding = 0;
-  u32 ud_sgpr = 0;  // user-data dword index of the 4-dword V# / chain root
+  u32 ud_sgpr = 0;     // user-data dword index of the 4-dword V# / chain root
   u32 num_dwords = 0;  // dwords the window spans (UBO size)
-  u32 first_dword = 0;  // window start, for staging one cbuf wider than kCbufDwords
-  u32 chain_len = 0;  // RDNA2 SRT chain: 0 = direct V#, else root ptr + chain_off derefs
+  u32 first_dword =
+      0;  // window start, for staging one cbuf wider than kCbufDwords
+  u32 chain_len =
+      0;  // RDNA2 SRT chain: 0 = direct V#, else root ptr + chain_off derefs
   u32 chain_off[3] = {};
   u32 use_pc = ~0u;  // RDNA consumer used for draw-time scalar replay
-  bool pointer = false;  // 2-dword flat pointer via s_load (SRT), not a 4-dword V#
+  bool pointer =
+      false;  // 2-dword flat pointer via s_load (SRT), not a 4-dword V#
   // DescriptorVersions of the descriptor at ud_sgpr (GCN): the pc of the scalar
   // load that last filled it, or ~0u for user data.
   u32 version = ~0u;
@@ -70,7 +73,8 @@ struct ShaderCbuf {
 // property via SetMaxGfxBuffers(), planned at the floor until then.
 constexpr u32 kMaxGfxBuffers = 16;
 constexpr u32 kMinGfxBuffers = 4;  // the Vulkan floor
-constexpr u32 kGfxBufferDwords = 4 * 1024 * 1024;  // 16 MiB (Astro Bot scene buffers)
+constexpr u32 kGfxBufferDwords =
+    4 * 1024 * 1024;  // 16 MiB (Astro Bot scene buffers)
 
 // Planner-visible cap, in [kMinGfxBuffers, kMaxGfxBuffers].
 u32 MaxGfxBuffers();
@@ -91,7 +95,8 @@ inline bool WaveSplitsAcrossSubgroups() {
 // Barriers a 64-thread group can omit on GCN but a split host subgroup needs.
 struct LdsBarrierPlan {
   base::Vector<u32> at;  // barrier points in straight-line shaders
-  bool lockstep = false;  // branchy shaders: barrier per dispatch-loop iteration
+  bool lockstep =
+      false;  // branchy shaders: barrier per dispatch-loop iteration
 };
 LdsBarrierPlan PlanLdsBarriers(const Program& program,
                                const u8* reachable,
@@ -113,11 +118,12 @@ struct ShaderBuffer {
 // set 0; binding order == MIMG order (matches TrackTextures).
 struct ShaderTex {
   u32 binding = 0;
-  u32 ud_sgpr = 0;  // PS user-data dword index of the 8-dword T#
+  u32 ud_sgpr = 0;       // PS user-data dword index of the 8-dword T#
   bool storage = false;  // image_store binding rather than a sampled image
   bool is_3d = false;    // volume image (T# type SQ_RSRC_IMG_3D)
   bool is_1d = false;    // 1D image (T# type SQ_RSRC_IMG_1D[_ARRAY])
-  bool is_uint = false;  // integer sampled type; even the fallback binding must match
+  bool is_uint =
+      false;  // integer sampled type; even the fallback binding must match
 };
 
 // A legacy ES -> GS pipeline (VGT_SHADER_STAGES_EN.GS_EN). The vertex slot then
@@ -141,25 +147,26 @@ struct GsPipeline {
 struct Recompiled {
   bool ok = false;
   bool guest_gs = false;  // gs_spirv is the guest's GS, bound for every prim
-  bool writes_layer = false;  // the GS picks the target slice (gl_Layer)
-  base::Vector<u32> vs_spirv;  // emitted directly from GCN
-  base::Vector<u32> mesh_spirv;  // merged NGG geometry, replaces VS/GS
+  bool writes_layer = false;      // the GS picks the target slice (gl_Layer)
+  base::Vector<u32> vs_spirv;     // emitted directly from GCN
+  base::Vector<u32> mesh_spirv;   // merged NGG geometry, replaces VS/GS
   u32 mesh_input_primitives = 1;  // input primitives consumed per workgroup
   u32 mesh_threads = 0, mesh_shared_bytes = 0;
   u32 mesh_vertices = 0, mesh_primitives = 0;
   bool indirect_cbufs = false;
   base::Vector<u32> gs_spirv;  // fixed RECTLIST expansion stage
   base::Vector<u32> fs_spirv;
-  base::Vector<ShaderAttr> attrs;     // vertex inputs
-  base::Vector<ShaderCbuf> vs_cbufs;  // VS UBOs (set 1, binding = .binding)
-  base::Vector<ShaderCbuf> gs_cbufs;  // guest GS UBOs, numbered after the VS's
-  base::Vector<ShaderCbuf> ps_cbufs;  // PS UBOs (set 1, binding = .binding)
+  base::Vector<ShaderAttr> attrs;      // vertex inputs
+  base::Vector<ShaderCbuf> vs_cbufs;   // VS UBOs (set 1, binding = .binding)
+  base::Vector<ShaderCbuf> gs_cbufs;   // guest GS UBOs, numbered after the VS's
+  base::Vector<ShaderCbuf> ps_cbufs;   // PS UBOs (set 1, binding = .binding)
   base::Vector<ShaderBuffer> vs_bufs;  // VS raw buffers (set 2, = .binding)
   base::Vector<ShaderBuffer> ps_bufs;  // PS raw buffers (set 2, = .binding)
-  base::Vector<ShaderTex> ps_texs;    // PS samplers (set 0, binding = .binding)
-  base::Vector<ShaderTex> vs_texs;  // vertex texture fetch, numbered after ps_texs
-  u32 num_params = 0;           // VS->PS interpolants (locations 0..n-1)
-  u8 ps_mrt_mask = 0;           // bit n set = PS exports MRT color n
+  base::Vector<ShaderTex> ps_texs;  // PS samplers (set 0, binding = .binding)
+  base::Vector<ShaderTex>
+      vs_texs;              // vertex texture fetch, numbered after ps_texs
+  u32 num_params = 0;       // VS->PS interpolants (locations 0..n-1)
+  u8 ps_mrt_mask = 0;       // bit n set = PS exports MRT color n
   bool shared_lds = false;  // VS LDS lives in the set-3 per-wave buffer
 };
 
@@ -178,23 +185,24 @@ constexpr u32 kColFormatUnknown = 0xFFFFFFFFu;
 // cannot see (3D/1D/uint); they change emitted types, so they key the cache.
 // int_attr_mask: bit n = vertex input location n has a narrow UINT V# format,
 // bit 16+n a narrow SINT one (see TranslateVs).
-Recompiled Recompile(const u32* vs_code,
-                      const u32* ps_code,
-                      const u32* vs_user_data,
-                      const u32* ps_user_data,
-                      u32 ps_input_ena = 0,
-                      const u32* ps_in_cntl = nullptr,
-                      u32 ps_num_interp = 0,
-                      u32 tex_3d_mask = 0,
-                      u32 tex_1d_mask = 0,
-                      u32 tex_uint_mask = 0,
-                      u32 mrt_uint_mask = 0,
-                      u32 mrt_bound_mask = 0xFF,  // bit n = pass binds colour n; rest dropped
-                      bool gl_clip_space = false,
-                      const GsPipeline* gs = nullptr,
-                      u32 int_attr_mask = 0,
-                      u32 col_format = kColFormatUnknown,
-                      u32 tex_cube_mask = 0);
+Recompiled Recompile(
+    const u32* vs_code,
+    const u32* ps_code,
+    const u32* vs_user_data,
+    const u32* ps_user_data,
+    u32 ps_input_ena = 0,
+    const u32* ps_in_cntl = nullptr,
+    u32 ps_num_interp = 0,
+    u32 tex_3d_mask = 0,
+    u32 tex_1d_mask = 0,
+    u32 tex_uint_mask = 0,
+    u32 mrt_uint_mask = 0,
+    u32 mrt_bound_mask = 0xFF,  // bit n = pass binds colour n; rest dropped
+    bool gl_clip_space = false,
+    const GsPipeline* gs = nullptr,
+    u32 int_attr_mask = 0,
+    u32 col_format = kColFormatUnknown,
+    u32 tex_cube_mask = 0);
 
 // A CS memory resource; base_sgpr/use_pc locate the possibly-SRT-chained
 // descriptor for the command processor to resolve at dispatch.
@@ -203,17 +211,20 @@ struct CsResource {
   u32 use_pc = 0;     // representative instruction consuming it
   u32 binding = 0;    // storage-buffer binding (set 0)
   u8 kind = 0;  // 0 = buffer V#, 1 = image T#, 2 = scalar pointer, 3 = BVH T#
-  bool written = false;    // dispatch writes it -> copy back to guest
-  bool read = false;  // written-only resources skip the staging upload (SotC fills)
+  bool written = false;  // dispatch writes it -> copy back to guest
+  bool read =
+      false;  // written-only resources skip the staging upload (SotC fills)
   u32 min_bytes = 0;  // lower bound on size from immediate offsets
-  bool runtime_address = false;  // base resolved on GPU via the guest-address map
+  bool runtime_address =
+      false;                   // base resolved on GPU via the guest-address map
   bool runtime_image = false;  // linear integer storage shared across views
-  u32 image_table_pc = ~0u;  // s_buffer_load_dwordx8 selecting this image
+  u32 image_table_pc = ~0u;    // s_buffer_load_dwordx8 selecting this image
   bool inline_user_data = false;
   bool base_mip_only = false;
 };
 
-// A recompiled compute shader; the cache key includes workgroup shape + RSRC2 state.
+// A recompiled compute shader; the cache key includes workgroup shape + RSRC2
+// state.
 struct RecompiledCs {
   bool ok = false;
   base::Vector<u32> spirv;
@@ -246,7 +257,8 @@ struct ImageTilingParams {
 
 base::Vector<u32> BuildImageTilingShader();
 
-// Diagnostic: disassemble the shader at a guest address (they move between runs).
+// Diagnostic: disassemble the shader at a guest address (they move between
+// runs).
 void DisassembleAt(u64 code_address, const char* tag);
 
 }  // namespace gpu::gcn

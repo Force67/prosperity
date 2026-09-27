@@ -7,12 +7,12 @@
  */
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 
+#include "base/containers/array.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
 #include "gpu/gcn/spirv/translator.h"
-#include <base/containers/array.h>
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/containers/hash_map.h>
 
 namespace gpu::gcn {
 namespace {
@@ -84,10 +84,10 @@ bool ParseCopyShader(const Program& program,
       case Enc::kSopk: {
         const u32 sdst = (w >> 16) & 0x7F;
         if (sdst < 128)
-          sgpr[sdst] = inst.opcode == 0x00  // s_movk_i32
-                           ? Value{Value::kConst, static_cast<u32>(
-                                                      static_cast<i16>(w))}
-                           : Value{};
+          sgpr[sdst] =
+              inst.opcode == 0x00  // s_movk_i32
+                  ? Value{Value::kConst, static_cast<u32>(static_cast<i16>(w))}
+                  : Value{};
         break;
       }
       case Enc::kSop1: {
@@ -187,8 +187,8 @@ void EmitGsRingAccess(Translator& t, const Inst& inst, StageContext& sc) {
   if (RingDwordOp(inst, kBufferLoadDword)) {
     const Id vertex = t.UMin(t.And(t.Shr(address, t.U32(2)), t.U32(63)),
                              t.U32(sc.gs_input_verts - 1));
-    const Id comp = t.UMin(t.Shr(address, t.U32(8)),
-                           t.U32(sc.es_ring_vec4s * 4 - 1));
+    const Id comp =
+        t.UMin(t.Shr(address, t.U32(8)), t.U32(sc.es_ring_vec4s * 4 - 1));
     const Id ptr = t.m.AccessChain(
         t.m.TypePointer(spv::StorageClass::Input, t.t_u), sc.es_ring,
         {vertex, t.Shr(comp, t.U32(2)), t.And(comp, t.U32(3))});
@@ -239,8 +239,8 @@ void WriteGsVertex(Translator& t, StageContext& sc, Id vertex) {
   if (wrote_pos) {
     if (sc.gl_clip)
       pos[2] = t.FMul(t.FAdd(pos[2], pos[3]), t.F32(0.5f));
-    t.m.Store(sc.pos_out, t.m.CompositeConstruct(t.t_v4, {pos[0], pos[1],
-                                                          pos[2], pos[3]}));
+    t.m.Store(sc.pos_out,
+              t.m.CompositeConstruct(t.t_v4, {pos[0], pos[1], pos[2], pos[3]}));
   }
   for (const auto& [p, c] : params) {
     sc.max_param = base::Max(sc.max_param, p + 1);
@@ -249,9 +249,9 @@ void WriteGsVertex(Translator& t, StageContext& sc, Id vertex) {
   }
   if (layer) {
     if (!sc.layer_out) {
-      sc.layer_out = t.m.Variable(
-          t.m.TypePointer(spv::StorageClass::Output, t.t_i),
-          spv::StorageClass::Output);
+      sc.layer_out =
+          t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_i),
+                       spv::StorageClass::Output);
       t.m.Decorate(sc.layer_out, spv::Decoration::BuiltIn,
                    {static_cast<u32>(spv::BuiltIn::Layer)});
       sc.iface->push_back(sc.layer_out);

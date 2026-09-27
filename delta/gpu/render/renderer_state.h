@@ -3,8 +3,8 @@
  */
 #pragma once
 
-// The whole Vulkan backend state as one value. render::Renderer::state points at
-// this; render::BackendState is opaque to everyone outside gpu/vulkan.
+// The whole Vulkan backend state as one value. render::Renderer::state points
+// at this; render::BackendState is opaque to everyone outside gpu/vulkan.
 //
 // The backend is single-instance today: g_backend is the one BackendState, and
 // the per-subsystem names the implementation uses (g_dev, g_frame, ...) are
@@ -12,19 +12,18 @@
 // needs from the BackendState& / Renderer& it is handed instead of naming an
 // alias; the aliases exist so the existing code can migrate incrementally.
 
-#include "gpu/rhi/device.h"
-#include "gpu/render/device.h"
 #include "base/arch.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/pipeline_cache.h"
 #include "gpu/render/present.h"
 #include "gpu/render/render_target.h"
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/upload_ring.h"
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/containers/hash_map.h>
-
+#include "gpu/rhi/device.h"
 
 namespace gpu::render {
 

@@ -1,12 +1,12 @@
 #include "gpu/ps5/guest_memory_ranges.h"
 #include <cstdio>
+#include "base/algorithm.h"
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 #include "gpu/ps5/guest_address.h"
 #include "host_memory/host_memory.h"
-#include <base/algorithm.h>
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
 
 namespace gpu::ps5 {
 base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
@@ -42,14 +42,18 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
         addresses.begin(), addresses.end(),
         [&](u64 address) { return address >= begin && address < end; });
     const auto add_range = [&](u64 lo, u64 hi) {
-      const u64 backing = inode ? identity : host_memory::MemoryMappingIdentity(
-          reinterpret_cast<const void*>(lo), hi - lo);
+      const u64 backing = inode
+                              ? identity
+                              : host_memory::MemoryMappingIdentity(
+                                    reinterpret_cast<const void*>(lo), hi - lo);
       // Separate file-backed and tracked anonymous identity domains, and
       // invalidate imports if the mapping's write permission changes.
-      const u64 key = backing ? ((backing ^ (inode ? 1ull : 2ull)) *
-                                1099511628211ull ^ u64(perm[1])) : 0;
-      result.push_back({lo, hi - lo, key ? key : (backing ? 1ull : 0ull),
-                        perm[1] == 'w'});
+      const u64 key =
+          backing ? ((backing ^ (inode ? 1ull : 2ull)) * 1099511628211ull ^
+                     u64(perm[1]))
+                  : 0;
+      result.push_back(
+          {lo, hi - lo, key ? key : (backing ? 1ull : 0ull), perm[1] == 'w'});
     };
     if (explicit_address) {
       add_range(begin, end);
@@ -64,7 +68,7 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
   }
   std::fclose(maps);
   base::Sort(result.begin(), result.end(),
-            [](auto& a, auto& b) { return a.base < b.base; });
+             [](auto& a, auto& b) { return a.base < b.base; });
   base::Vector<render::GuestMemoryRange> unique;
   for (auto range : result) {
     if (!unique.empty()) {

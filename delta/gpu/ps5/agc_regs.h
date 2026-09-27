@@ -19,7 +19,7 @@
  */
 
 #include "base/arch.h"
-#include <base/containers/array.h>
+#include "base/containers/array.h"
 
 namespace gpu::ps5 {
 
@@ -125,7 +125,7 @@ constexpr u32 mmSPI_VS_OUT_CONFIG = 0xA1B1;  // # of VS output params
 // SPI_PS_INPUT_CNTL_0..31: OFFSET[4:0] names which VS parameter export each PS
 // input slot reads. Only defined below NUM_INTERP.
 constexpr u32 mmSPI_PS_INPUT_CNTL_0 = 0xA191;
-constexpr u32 mmSPI_PS_INPUT_ENA = 0xA1B3;   // interpolants the PS reads
+constexpr u32 mmSPI_PS_INPUT_ENA = 0xA1B3;  // interpolants the PS reads
 constexpr u32 mmSPI_PS_INPUT_ADDR = 0xA1B4;
 constexpr u32 mmSPI_PS_IN_CONTROL = 0xA1B6;  // NUM_INTERP
 constexpr u32 mmSPI_SHADER_POS_FORMAT = 0xA1C3;
@@ -165,8 +165,7 @@ constexpr u32 mmSPI_SHADER_PGM_RSRC1_GS = 0x2C8A;
 constexpr u32 mmSPI_SHADER_PGM_RSRC2_GS = 0x2C8B;
 constexpr u32 mmSPI_SHADER_USER_DATA_GS_0 =
     0x2C8C;  // 32 user-data SGPRs (0x8C..0xAB)
-constexpr u32 mmSPI_SHADER_PGM_LO_ES =
-    0x2CC8;  // ES front half (== GS addr)
+constexpr u32 mmSPI_SHADER_PGM_LO_ES = 0x2CC8;  // ES front half (== GS addr)
 constexpr u32 mmSPI_SHADER_PGM_HI_ES = 0x2CC9;
 constexpr u32 mmSPI_SHADER_USER_DATA_ES_0 = 0x2CCC;
 
@@ -189,9 +188,7 @@ struct Regs {
   base::Array<u32, kRegFileSize> data{};
 
   u32& operator[](u32 off) { return data[off]; }
-  u32 operator[](u32 off) const {
-    return off < kRegFileSize ? data[off] : 0;
-  }
+  u32 operator[](u32 off) const { return off < kRegFileSize ? data[off] : 0; }
 
   // A run of registers as a pointer: the user-data windows a shader stage is
   // launched with are read that way, and the file is flat, so they are

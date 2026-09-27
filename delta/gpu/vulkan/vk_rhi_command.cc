@@ -236,9 +236,8 @@ void VulkanCommandList::SetBindGroup(u32 index,
                                      const u32* dynamic_offsets,
                                      u32 num_offsets) {
   VkDescriptorSet set = static_cast<VulkanBindGroup*>(group)->set;
-  vkCmdBindDescriptorSets(cmd, pipeline_->bind_point,
-                          pipeline_->layout->layout, index, 1, &set,
-                          num_offsets, dynamic_offsets);
+  vkCmdBindDescriptorSets(cmd, pipeline_->bind_point, pipeline_->layout->layout,
+                          index, 1, &set, num_offsets, dynamic_offsets);
 }
 
 void VulkanCommandList::PushBindGroup(u32 index,
@@ -261,8 +260,7 @@ void VulkanCommandList::PushBindGroup(u32 index,
           type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         if (type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
           type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        device_.FillWrite(type, writes[i], vk_writes[n], images[n],
-                          buffers[n]);
+        device_.FillWrite(type, writes[i], vk_writes[n], images[n], buffers[n]);
         n++;
         break;
       }
@@ -305,9 +303,8 @@ void VulkanCommandList::PushBindGroup(u32 index,
   for (u32 i = 0; i < n; i++)
     vk_writes[i].dstSet = set;
   vkUpdateDescriptorSets(dev, n, vk_writes, 0, nullptr);
-  vkCmdBindDescriptorSets(cmd, pipeline_->bind_point,
-                          pipeline_->layout->layout, index, 1, &set, 0,
-                          nullptr);
+  vkCmdBindDescriptorSets(cmd, pipeline_->bind_point, pipeline_->layout->layout,
+                          index, 1, &set, 0, nullptr);
 }
 
 void VulkanCommandList::SetPushConstants(u32 offset,
@@ -370,8 +367,8 @@ void VulkanCommandList::DrawIndexed(u32 index_count,
                                     u32 first_index,
                                     i32 vertex_offset,
                                     u32 first_instance) {
-  vkCmdDrawIndexed(cmd, index_count, instance_count, first_index,
-                   vertex_offset, first_instance);
+  vkCmdDrawIndexed(cmd, index_count, instance_count, first_index, vertex_offset,
+                   first_instance);
 }
 
 void VulkanCommandList::DrawMeshTasks(u32 x, u32 y, u32 z) {
@@ -484,10 +481,10 @@ void VulkanCommandList::BlitTexture(rhi::Texture* dst,
   b.dstOffsets[1] = {dst_region.x + static_cast<i32>(dst_region.width),
                      dst_region.y + static_cast<i32>(dst_region.height),
                      dst_region.z + static_cast<i32>(dst_region.depth)};
-  vkCmdBlitImage(cmd, Tex(src)->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 Tex(dst)->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
-                 filter == rhi::Filter::kLinear ? VK_FILTER_LINEAR
-                                                : VK_FILTER_NEAREST);
+  vkCmdBlitImage(
+      cmd, Tex(src)->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      Tex(dst)->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+      filter == rhi::Filter::kLinear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
 }
 
 void VulkanCommandList::ClearTexture(rhi::Texture* texture,
@@ -557,8 +554,7 @@ void VulkanCommandList::Barrier(u32 src_access,
         VK_QUEUE_FAMILY_IGNORED;
     ib[i].image = Tex(t.texture)->image;
     ib[i].subresourceRange = {ToVkAspect(t.range.aspect), t.range.base_mip,
-                              t.range.mips, t.range.base_layer,
-                              t.range.layers};
+                              t.range.mips, t.range.base_layer, t.range.layers};
   }
   if (!src_stages)
     src_stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
@@ -574,8 +570,8 @@ void VulkanCommandList::Barrier(u32 src_access,
 void VulkanCommandList::ResetTimestamps(rhi::TimestampPool* pool,
                                         u32 first,
                                         u32 count) {
-  vkCmdResetQueryPool(cmd, static_cast<VulkanTimestampPool*>(pool)->pool,
-                      first, count);
+  vkCmdResetQueryPool(cmd, static_cast<VulkanTimestampPool*>(pool)->pool, first,
+                      count);
 }
 
 void VulkanCommandList::WriteTimestamp(rhi::TimestampPool* pool,

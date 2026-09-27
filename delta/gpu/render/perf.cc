@@ -2,24 +2,24 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-#include "gpu/render/command.h"
+#include "gpu/render/perf.h"
 #include "base/arch.h"
 #include "gpu/gpu_perf.h"
-#include "gpu/render/perf.h"
 #include "gpu/render/buffer_cache.h"
+#include "gpu/render/command.h"
 #include "gpu/write_tracker.h"
 
-#include "host/window.h"
-#include "host/overlay.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "host/overlay.h"
+#include "host/window.h"
 
+#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unistd.h>
-#include <base/logging.h>
-#include <options/options.h>
-#include <base/time/time.h>
+#include "base/logging.h"
+#include "base/time/time.h"
+#include "options/options.h"
 
 namespace gpu::render {
 
@@ -36,7 +36,6 @@ DELTA_OPTION(u32, kHitchMs, "DELTA_GPU_HITCH_MS", 40);
 float g_frame_worst_ms = 0;
 u32 g_frame_hitch_n = 0;
 
-
 // Rolling per-frame stage history for the overlay graph (~4s at 60 fps).
 struct StageSample {
   float rec, sub, gpu, prs, tex, oth, wall;  // ms
@@ -51,7 +50,8 @@ int g_stage_hist_pos = 0, g_stage_hist_count = 0;
 // whatever else happens to be running. CPU is utime+stime from
 // /proc/self/stat, RSS the resident pages from /proc/self/statm.
 struct ProcStats {
-  float cpuPct = 0;  // whole process; exceeds 100 when several threads are busy
+  float cpu_pct =
+      0;        // whole process; exceeds 100 when several threads are busy
   u64 rss = 0;  // bytes
 };
 ProcStats g_proc;
@@ -69,7 +69,8 @@ void RefreshProcStats() {
     const size_t n = std::fread(buf, 1, sizeof buf - 1, f);
     std::fclose(f);
     buf[n] = 0;
-    // comm (field 2) can contain spaces and parens, so start after the last ')'.
+    // comm (field 2) can contain spaces and parens, so start after the last
+    // ')'.
     if (const char* p = std::strrchr(buf, ')')) {
       unsigned long ut = 0, st = 0;
       int field = 3;
@@ -87,7 +88,7 @@ void RefreshProcStats() {
   if (last_ns && hz > 0 && jiffies >= last_jiffies) {
     const double dt = (now - last_ns) / 1e9;
     const double busy = double(jiffies - last_jiffies) / hz;
-    g_proc.cpuPct = dt > 0 ? float(busy / dt * 100.0) : 0.0f;
+    g_proc.cpu_pct = dt > 0 ? float(busy / dt * 100.0) : 0.0f;
   }
   last_jiffies = jiffies;
   last_ns = now;
@@ -106,21 +107,20 @@ const u8* OvGlyph(char c) {
     char c;
     u8 rows[5];
   };
-  static const Glyph f[] = {
+  static const Glyph kF[] = {
       {'0', {7, 5, 5, 5, 7}}, {'1', {2, 6, 2, 2, 7}}, {'2', {7, 1, 7, 4, 7}},
       {'3', {7, 1, 7, 1, 7}}, {'4', {5, 5, 7, 1, 1}}, {'5', {7, 4, 7, 1, 7}},
       {'6', {7, 4, 7, 5, 7}}, {'7', {7, 1, 1, 2, 2}}, {'8', {7, 5, 7, 5, 7}},
       {'9', {7, 5, 7, 1, 7}}, {'.', {0, 0, 0, 0, 2}}, {'%', {5, 1, 2, 4, 5}},
-      {'A', {7, 5, 7, 5, 5}},
-      {'B', {6, 5, 6, 5, 6}}, {'C', {7, 4, 4, 4, 7}}, {'D', {6, 5, 5, 5, 6}},
-      {'E', {7, 4, 7, 4, 7}}, {'F', {7, 4, 7, 4, 4}}, {'G', {7, 4, 5, 5, 7}},
-      {'H', {5, 5, 7, 5, 5}}, {'I', {7, 2, 2, 2, 7}}, {'L', {4, 4, 4, 4, 7}},
-      {'M', {5, 7, 7, 5, 5}}, {'N', {5, 7, 7, 7, 5}}, {'O', {7, 5, 5, 5, 7}},
-      {'P', {7, 5, 7, 4, 4}}, {'R', {7, 5, 6, 5, 5}}, {'S', {7, 4, 7, 1, 7}},
-      {'T', {7, 2, 2, 2, 2}}, {'U', {5, 5, 5, 5, 7}}, {'V', {5, 5, 5, 5, 2}},
-      {'W', {5, 5, 7, 7, 5}}, {'X', {5, 5, 2, 5, 5}},
+      {'A', {7, 5, 7, 5, 5}}, {'B', {6, 5, 6, 5, 6}}, {'C', {7, 4, 4, 4, 7}},
+      {'D', {6, 5, 5, 5, 6}}, {'E', {7, 4, 7, 4, 7}}, {'F', {7, 4, 7, 4, 4}},
+      {'G', {7, 4, 5, 5, 7}}, {'H', {5, 5, 7, 5, 5}}, {'I', {7, 2, 2, 2, 7}},
+      {'L', {4, 4, 4, 4, 7}}, {'M', {5, 7, 7, 5, 5}}, {'N', {5, 7, 7, 7, 5}},
+      {'O', {7, 5, 5, 5, 7}}, {'P', {7, 5, 7, 4, 4}}, {'R', {7, 5, 6, 5, 5}},
+      {'S', {7, 4, 7, 1, 7}}, {'T', {7, 2, 2, 2, 2}}, {'U', {5, 5, 5, 5, 7}},
+      {'V', {5, 5, 5, 5, 2}}, {'W', {5, 5, 7, 7, 5}}, {'X', {5, 5, 2, 5, 5}},
   };
-  for (const Glyph& gl : f)
+  for (const Glyph& gl : kF)
     if (gl.c == c)
       return gl.rows;
   return nullptr;  // unknown/space -> blank
@@ -131,20 +131,14 @@ const u8* OvGlyph(char c) {
 // wants them the other way round; every colour reaches the buffer through here.
 bool g_overlay_rgba = false;
 
-inline void OvFill(u8* b,
-                   u32 w,
-                   u32 h,
-                   int x,
-                   int y,
-                   int fw,
-                   int fh,
-                   u32 bgra) {
+inline void
+OvFill(u8* b, u32 w, u32 h, int x, int y, int fw, int fh, u32 bgra) {
   if (x < 0 || y < 0)
     return;
-  const u32 col = g_overlay_rgba ? ((bgra & 0xFF00FF00u) |
-                                    ((bgra & 0xFFu) << 16) |
-                                    ((bgra >> 16) & 0xFFu))
-                                 : bgra;
+  const u32 col = g_overlay_rgba
+                      ? ((bgra & 0xFF00FF00u) | ((bgra & 0xFFu) << 16) |
+                         ((bgra >> 16) & 0xFFu))
+                      : bgra;
   for (int yy = y; yy < y + fh && yy < (int)h; yy++) {
     u32* row = reinterpret_cast<u32*>(b + (size_t)yy * w * 4);
     for (int xx = x; xx < x + fw && xx < (int)w; xx++)
@@ -176,34 +170,30 @@ void OvText(u8* b,
 // breakdown of the frame, and reading them next to the graph invited the two to
 // be compared. gpuMs/wallMs is our own GPU time as a share of the frame; VRAM
 // is the driver's per-process estimate.
-void DrawResourcePanel(u8* bgra,
-                       u32 w,
-                       u32 h,
-                       float gpuMs,
-                       float wallMs) {
+void DrawResourcePanel(u8* bgra, u32 w, u32 h, float gpu_ms, float wall_ms) {
   RefreshProcStats();
-  u64 vramUsed = 0, vramTotal = 0;
-  host::QueryVram(vramUsed, vramTotal);
+  u64 vram_used = 0, vram_total = 0;
+  host::QueryVram(vram_used, vram_total);
   constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
-  const float gpuPct =
-      wallMs > 0.01f ? (gpuMs / wallMs * 100.0f > 100.0f ? 100.0f
-                                                         : gpuMs / wallMs * 100.0f)
-                     : 0.0f;
+  const float gpu_pct = wall_ms > 0.01f ? (gpu_ms / wall_ms * 100.0f > 100.0f
+                                               ? 100.0f
+                                               : gpu_ms / wall_ms * 100.0f)
+                                        : 0.0f;
   const struct {
     u32 col;
     const char* fmt;
     double val;
   } kUse[4] = {
-      {0xFF5AC8B4, "CPU %5.0f%%", g_proc.cpuPct},
-      {0xFFE69632, "GPU %5.0f%%", gpuPct},
+      {0xFF5AC8B4, "CPU %5.0f%%", g_proc.cpu_pct},
+      {0xFFE69632, "GPU %5.0f%%", gpu_pct},
       {0xFF5AA0E6, "RAM %5.2f GB", g_proc.rss / kGiB},
-      {0xFFD2A0F0, "VRAM %4.2f GB", vramUsed / kGiB},
+      {0xFFD2A0F0, "VRAM %4.2f GB", vram_used / kGiB},
   };
   constexpr int kRowH = 14, kSwatch = 8, kTextX = 14;
   constexpr int kPanelW = 14 + 13 * 8 + 6;  // swatch + widest row + padding
   const int x0 = (int)w - kPanelW - 10, y0 = 10;
-  const int panelH = kRowH * 4 + 4;
-  for (int yy = y0 - 4; yy < y0 + panelH && yy < (int)h; yy++) {
+  const int panel_h = kRowH * 4 + 4;
+  for (int yy = y0 - 4; yy < y0 + panel_h && yy < (int)h; yy++) {
     if (yy < 0)
       continue;
     u32* row = reinterpret_cast<u32*>(bgra + (size_t)yy * w * 4);
@@ -359,70 +349,73 @@ void ReportFps() {
   double dt = (now - last).InSecondsF();
   if (dt >= 2.0) {
     double f = frames ? frames : 1;
-    BASE_LOGI("fps", "{:.1f} fps | per-frame gpu-code: draw={:.2f}ms end={:.2f}ms "
-                     "(wait={:.2f}ms exec={:.2f}ms "
-                     "submit={:.2f}ms present={:.2f}ms) texup={:.2f}ms x{:.1f} "
-                     "cs={:.2f}ms x{:.1f} "
-                     "(in={:.2f} gpu={:.2f} out={:.2f} stage={:.1f}x{:.1f}MB "
-                     "flush={:.1f}) "
-                     "sh={:.2f}ms x{:.1f} dcb={:.2f}ms x{:.1f} (lock={:.2f}ms) "
-                     "wb={:.0f}% wbconf={:.1f} draws={:.0f} (decl={:.0f})",
-              frames / dt, g_ns_draw / f / 1e6, g_ns_end / f / 1e6,
-              g_ns_readback / f / 1e6,
-              g_gpu_exec_samples ? g_ns_gpu_exec / g_gpu_exec_samples / 1e6 : 0.0,
-              g_ns_submit / f / 1e6, g_ns_present / f / 1e6, g_ns_tex_up / f / 1e6,
-              g_tex_ups / f, g_ns_cs / f / 1e6, g_cs_count / f, g_ns_cs_in / f / 1e6,
-              g_ns_cs_gpu / f / 1e6, g_ns_cs_out / f / 1e6, g_cs_stage_n / f,
-              g_cs_stage_bytes / f / 1e6, g_cs_flush_n / f,
-              gcn::g_ns_recomp / f / 1e6, gcn::g_recomp_n / f,
-              render::g_ns_dcb / f / 1e6, render::g_dcb_n / f,
-              render::g_ns_dcb_lock / f / 1e6,
-              g_cs_wb_bytes_total ? 100.0 * double(g_cs_wb_bytes_written) /
-                                        double(g_cs_wb_bytes_total)
-                                  : 0.0,
-              g_cs_wb_conflicts / f, g_win_draws / f, g_win_declines / f);
+    BASE_LOGI(
+        "fps",
+        "{:.1f} fps | per-frame gpu-code: draw={:.2f}ms end={:.2f}ms "
+        "(wait={:.2f}ms exec={:.2f}ms "
+        "submit={:.2f}ms present={:.2f}ms) texup={:.2f}ms x{:.1f} "
+        "cs={:.2f}ms x{:.1f} "
+        "(in={:.2f} gpu={:.2f} out={:.2f} stage={:.1f}x{:.1f}MB "
+        "flush={:.1f}) "
+        "sh={:.2f}ms x{:.1f} dcb={:.2f}ms x{:.1f} (lock={:.2f}ms) "
+        "wb={:.0f}% wbconf={:.1f} draws={:.0f} (decl={:.0f})",
+        frames / dt, g_ns_draw / f / 1e6, g_ns_end / f / 1e6,
+        g_ns_readback / f / 1e6,
+        g_gpu_exec_samples ? g_ns_gpu_exec / g_gpu_exec_samples / 1e6 : 0.0,
+        g_ns_submit / f / 1e6, g_ns_present / f / 1e6, g_ns_tex_up / f / 1e6,
+        g_tex_ups / f, g_ns_cs / f / 1e6, g_cs_count / f, g_ns_cs_in / f / 1e6,
+        g_ns_cs_gpu / f / 1e6, g_ns_cs_out / f / 1e6, g_cs_stage_n / f,
+        g_cs_stage_bytes / f / 1e6, g_cs_flush_n / f,
+        gcn::g_ns_recomp / f / 1e6, gcn::g_recomp_n / f,
+        render::g_ns_dcb / f / 1e6, render::g_dcb_n / f,
+        render::g_ns_dcb_lock / f / 1e6,
+        g_cs_wb_bytes_total ? 100.0 * double(g_cs_wb_bytes_written) /
+                                  double(g_cs_wb_bytes_total)
+                            : 0.0,
+        g_cs_wb_conflicts / f, g_win_draws / f, g_win_declines / f);
     // Stutter, said out loud. Always on when it happens: the average above
     // reports a window that contained a 400 ms frame as merely slow, and the
     // whole point of the shader work is the frames this line counts.
     if (g_frame_hitch_n || g_pipe_build_n)
-      BASE_LOGI("hitch",
-                "worst={:.0f}ms over{}ms={} | pipe={:.0f}ms x{} recomp={:.0f}ms "
-                "x{} (val={:.0f}ms opt={:.0f}ms spv {}hit/{}miss)",
-                g_frame_worst_ms, (u32)kHitchMs, g_frame_hitch_n,
-                g_ns_pipe_build / 1e6, g_pipe_build_n, gcn::g_ns_recomp / 1e6,
-                gcn::g_recomp_n, gcn::g_ns_spv_val / 1e6,
-                gcn::g_ns_spv_opt / 1e6, gcn::g_spv_hit_n, gcn::g_spv_miss_n);
+      BASE_LOGI(
+          "hitch",
+          "worst={:.0f}ms over{}ms={} | pipe={:.0f}ms x{} recomp={:.0f}ms "
+          "x{} (val={:.0f}ms opt={:.0f}ms spv {}hit/{}miss)",
+          g_frame_worst_ms, (u32)kHitchMs, g_frame_hitch_n,
+          g_ns_pipe_build / 1e6, g_pipe_build_n, gcn::g_ns_recomp / 1e6,
+          gcn::g_recomp_n, gcn::g_ns_spv_val / 1e6, gcn::g_ns_spv_opt / 1e6,
+          gcn::g_spv_hit_n, gcn::g_spv_miss_n);
     if (kDrawProf)
-      BASE_LOGI("drawprof",
-                "per-frame pre={:.2f}ms pipe={:.2f}ms tex={:.2f}ms "
-                "bind={:.2f}ms | hash={:.2f}ms x{:.0f} {:.1f}MB "
-                "probe={:.2f}ms x{:.0f} lookup={:.2f}ms x{:.0f}",
-                g_ns_dr_pre / f / 1e6, g_ns_dr_pipe / f / 1e6,
-                g_ns_dr_tex / f / 1e6, g_ns_dr_bind / f / 1e6,
-                g_ns_tex_hash / f / 1e6, g_tex_hash_n / f,
-                g_tex_hash_bytes / f / 1e6, g_ns_tex_probe / f / 1e6,
-                g_tex_probe_n / f, g_ns_tex_lookup / f / 1e6,
-                g_tex_lookup_n / f);
+      BASE_LOGI(
+          "drawprof",
+          "per-frame pre={:.2f}ms pipe={:.2f}ms tex={:.2f}ms "
+          "bind={:.2f}ms | hash={:.2f}ms x{:.0f} {:.1f}MB "
+          "probe={:.2f}ms x{:.0f} lookup={:.2f}ms x{:.0f}",
+          g_ns_dr_pre / f / 1e6, g_ns_dr_pipe / f / 1e6, g_ns_dr_tex / f / 1e6,
+          g_ns_dr_bind / f / 1e6, g_ns_tex_hash / f / 1e6, g_tex_hash_n / f,
+          g_tex_hash_bytes / f / 1e6, g_ns_tex_probe / f / 1e6,
+          g_tex_probe_n / f, g_ns_tex_lookup / f / 1e6, g_tex_lookup_n / f);
     if (kDrawProf) {
       // The guest write tracker's side of the ring copies it saves.
       const WriteTracker& t = GuestWriteTracker();
       static u64 collects = 0, pages = 0, collect_ns = 0;
-      BASE_LOGI("drawprof2",
-                "per-frame texset={:.2f}ms x{:.0f} region={:.2f}ms "
-                "csflush={:.2f}ms builddraw={:.2f}ms x{:.0f} "
-                "gfxpres={:.2f}ms borrowwait={:.2f}ms | ring vb={:.1f}MB "
-                "ib={:.1f}MB cb={:.1f}MB raw={:.1f}MB | track armed={:.0f}MB "
-                "runs={} collect={:.2f}ms x{:.0f} written={:.0f}p | kept={:.0f}MB "
-                "+{:.1f}MB/f",
-                g_ns_tex_set / f / 1e6, g_tex_set_n / f, g_ns_region / f / 1e6,
-                g_ns_cs_flush / f / 1e6, g_ns_build_draw / f / 1e6,
-                g_build_draw_n / f, g_ns_gfx_present / f / 1e6,
-                g_ns_borrow_wait / f / 1e6, g_ring_vb_bytes / f / 1e6,
-                g_ring_ib_bytes / f / 1e6, g_ring_cb_bytes / f / 1e6,
-                g_ring_raw_bytes / f / 1e6, t.armed_bytes() / 1e6, t.runs(),
-                (t.collect_ns() - collect_ns) / f / 1e6,
-                (t.collects() - collects) / f, (t.written_pages() - pages) / f,
-                CachedBufferBytes() / 1e6, g_vb_kept_bytes / f / 1e6);
+      BASE_LOGI(
+          "drawprof2",
+          "per-frame texset={:.2f}ms x{:.0f} region={:.2f}ms "
+          "csflush={:.2f}ms builddraw={:.2f}ms x{:.0f} "
+          "gfxpres={:.2f}ms borrowwait={:.2f}ms | ring vb={:.1f}MB "
+          "ib={:.1f}MB cb={:.1f}MB raw={:.1f}MB | track armed={:.0f}MB "
+          "runs={} collect={:.2f}ms x{:.0f} written={:.0f}p | kept={:.0f}MB "
+          "+{:.1f}MB/f",
+          g_ns_tex_set / f / 1e6, g_tex_set_n / f, g_ns_region / f / 1e6,
+          g_ns_cs_flush / f / 1e6, g_ns_build_draw / f / 1e6,
+          g_build_draw_n / f, g_ns_gfx_present / f / 1e6,
+          g_ns_borrow_wait / f / 1e6, g_ring_vb_bytes / f / 1e6,
+          g_ring_ib_bytes / f / 1e6, g_ring_cb_bytes / f / 1e6,
+          g_ring_raw_bytes / f / 1e6, t.armed_bytes() / 1e6, t.runs(),
+          (t.collect_ns() - collect_ns) / f / 1e6,
+          (t.collects() - collects) / f, (t.written_pages() - pages) / f,
+          CachedBufferBytes() / 1e6, g_vb_kept_bytes / f / 1e6);
       collects = t.collects();
       pages = t.written_pages();
       collect_ns = t.collect_ns();
@@ -431,7 +424,7 @@ void ReportFps() {
     // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
     // cost).
     host::OverlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
-                        float(1000.0 * dt / frames));
+                         float(1000.0 * dt / frames));
     last = now;
     frames = 0;
     g_ns_draw = g_ns_end = g_ns_readback = g_ns_tex_up = 0;

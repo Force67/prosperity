@@ -34,8 +34,8 @@
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 #include <limits>
 
+#include "base/containers/array.h"
 #include "gpu/ps5/rdna/rdna_emit.h"
-#include <base/containers/array.h>
 
 namespace gpu::rdna {
 using gpu::gcn::Id;
@@ -112,28 +112,34 @@ void EmitBvh(Translator& t,
   const bool runtime = sc.cs_runtime_resources.count(binding);
   // Runtime descriptors supply their node extent; the address map separately
   // checks that the entire node has readable backing before any load.
-  const Id bound = runtime ? t.U32(0xffffffff) : gpu::gcn::CsSsboBound(t, sc, binding);
+  const Id bound =
+      runtime ? t.U32(0xffffffff) : gpu::gcn::CsSsboBound(t, sc, binding);
   Id physical = 0;
   if (runtime) {
     const Id wide_type = t.m.TypeInt(64, false);
-    const Id offset64 = t.m.Emit(spv::Op::OpShiftLeftLogical, wide_type,
-        {t.m.Emit(spv::Op::OpUConvert, wide_type, {index}), t.U32(6)});
-    physical = gpu::gcn::CsGuestAddress(t, sc,
+    const Id offset64 =
+        t.m.Emit(spv::Op::OpShiftLeftLogical, wide_type,
+                 {t.m.Emit(spv::Op::OpUConvert, wide_type, {index}), t.U32(6)});
+    physical = gpu::gcn::CsGuestAddress(
+        t, sc,
         t.m.Emit(spv::Op::OpIAdd, wide_type,
-                  {gpu::gcn::CsGuestBase(t, sc, binding), offset64}), t.Mul(words, t.U32(4)));
+                 {gpu::gcn::CsGuestBase(t, sc, binding), offset64}),
+        t.Mul(words, t.U32(4)));
   }
   // Check the entire node before any SSBO load. Generic SSBO loads clamp,
   // which would turn a bad pointer into fabricated geometry here.
   Id valid = t.LAnd(t.Uge(bound, words),
                     t.Ule(index, t.Shr(t.Sub(bound, words), t.U32(4))));
-  valid = t.LAnd(valid, t.Ule(t.Add(index, t.SelectB(box32, t.U32(1), t.U32(0))), desc2));
+  valid = t.LAnd(
+      valid, t.Ule(t.Add(index, t.SelectB(box32, t.U32(1), t.U32(0))), desc2));
   valid = t.LAnd(valid, t.Eq(t.Shr(desc3, t.U32(28)), t.U32(8)));
   valid = t.LAnd(valid, t.Ult(type, t.U32(6)));
   if (wide)
     valid = t.LAnd(valid, t.IsZero(a[1]));
   if (runtime)
-    valid = t.LAnd(valid, t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
-        {physical, t.m.ConstNull(t.m.TypeInt(64, false))}));
+    valid = t.LAnd(valid,
+                   t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
+                            {physical, t.m.ConstNull(t.m.TypeInt(64, false))}));
   const Id invalid = t.U32(0xffffffff);
   for (u32 i = 0; i < 4; i++)
     t.SetVg(dest + i, invalid);
@@ -145,8 +151,10 @@ void EmitBvh(Translator& t,
   const auto load = [&](Id word) {
     if (runtime) {
       const Id wide_type = t.m.TypeInt(64, false);
-      const Id bytes = t.m.Emit(spv::Op::OpUConvert, wide_type, {t.Mul(word, t.U32(4))});
-      return gpu::gcn::CsPhysicalLoad(t, t.m.Emit(spv::Op::OpIAdd, wide_type, {physical, bytes}));
+      const Id bytes =
+          t.m.Emit(spv::Op::OpUConvert, wide_type, {t.Mul(word, t.U32(4))});
+      return gpu::gcn::CsPhysicalLoad(
+          t, t.m.Emit(spv::Op::OpIAdd, wide_type, {physical, bytes}));
     }
     return gpu::gcn::CsSsboLoad(t, sc, binding, t.Add(offset, word));
   };
@@ -256,8 +264,8 @@ void EmitBvh(Translator& t,
     distances[child] = near;
   }
   const Id sort = t.IsNonZero(t.And(desc1, t.U32(0x80000000)));
-  constexpr u32 pairs[5][2] = {{0, 2}, {1, 3}, {0, 1}, {2, 3}, {1, 2}};
-  for (const auto& pair : pairs) {
+  constexpr u32 kPairs[5][2] = {{0, 2}, {1, 3}, {0, 1}, {2, 3}, {1, 2}};
+  for (const auto& pair : kPairs) {
     const u32 a = pair[0], b = pair[1];
     Id swap = t.LAnd(t.IsNonZero(t.Not(children[b])),
                      t.FLt(distances[b], distances[a]));

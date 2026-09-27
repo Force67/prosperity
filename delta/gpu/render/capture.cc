@@ -7,8 +7,8 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <base/logging.h>
-#include <options/options.h>
+#include "base/logging.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(const char*, kDumpDir, "DELTA_GPU_DUMP_DIR", nullptr);
