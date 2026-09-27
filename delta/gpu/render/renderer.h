@@ -123,6 +123,10 @@ void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
 // the range's base, size and staging state.
 bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size);
 
+// The kernel's mapping-changed hook: the guest mapped or unmapped
+// [base, base+bytes), which the guest write tracker must treat as written.
+void NoteGuestRemap(u64 base, u64 bytes);
+
 // The process-wide renderer instance the command processors drive. The
 // composition root (main/dapi) Init()s it once; the HLE submit paths reach it
 // through this accessor because the guest-called entry points cannot thread a

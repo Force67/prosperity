@@ -25,7 +25,6 @@
 #include <gfx/gfx.h>
 #include <gpu/ps4/cmd_processor.h>
 #include <gpu/render/renderer.h>
-#include <gpu/write_tracker.h>
 #include <gfx/gfx_audio.h>
 #include <kern/ps4/audio_sink.h>
 #include <kern/ps4/hardware_mode.h>
@@ -55,7 +54,7 @@ bool deltaCore::init() {
   // sink. The composition root introduces them.
   gpu::ps4::SetWriteWatchCallback(&krnl::probe::startWriteWatch);
   krnl::setCsRangeDescriber(&gpu::render::DescribeCsRangeCovering);
-  krnl::setMappingChangedHook(&gpu::NoteGuestRemap);
+  krnl::setMappingChangedHook(&gpu::render::NoteGuestRemap);
   krnl::ps4::setAudioSink({prosperity_audio_open, prosperity_audio_output,
                            prosperity_audio_volume, prosperity_audio_close});
   return true;

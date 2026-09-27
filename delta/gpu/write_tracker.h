@@ -7,7 +7,6 @@
 
 #include <map>
 #include <mutex>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -58,6 +57,10 @@ class WriteTracker {
 
  private:
   bool Register(u64 first, u64 end);
+  bool AllArmed(u64 first, u64 end) const;
+  // Mirrors armed_ into the guest page table, one run at a time.
+  void MarkArmed(u64 first, u64 end, bool armed);
+  u64 EraseArmed(u64 first, u64 end);
   bool ArmRange(u64 first, u64 end);
   void Disarm(u64 first, u64 end);
   bool Scan(u64 first, u64 end, std::vector<Range>& out);
@@ -71,10 +74,9 @@ class WriteTracker {
   u64 armed_bytes_ = 0;
   std::mutex noted_lock_;
   std::vector<Range> noted_, remapped_;
-  std::unordered_map<u64, u32> hot_;       // page -> reports this frame
-  std::unordered_map<u64, int> volatile_;  // page -> frames left untracked
-  std::unordered_map<u64, int> last_written_;  // page -> frame last reported
-  int frame_ = 0;
+  // Pages reported this frame; their counts live in the guest page table.
+  std::vector<u64> reported_;
+  u32 frame_ = 1;
   u64 collects_ = 0, written_pages_ = 0, collect_ns_ = 0;
   long faults_at_scan_ = -1;
 };

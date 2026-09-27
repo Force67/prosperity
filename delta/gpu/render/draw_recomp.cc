@@ -296,6 +296,10 @@ bool IsReadableThisFrame(u64 base, u32 size) {
 
 }  // namespace
 
+void NoteGuestRemap(u64 base, u64 bytes) {
+  gpu::NoteGuestRemap(base, bytes);
+}
+
 static_assert(render::DrawInfo::kMaxBuffers == kRawBufBindings,
               "the command processor and the raw-buffer ring must agree on "
               "how many set-2 bindings exist");

@@ -29,6 +29,7 @@
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/trace.h"
 #include "gpu/render/tiling.h"
+#include "gpu/guest_page_table.h"
 #include "gpu/write_tracker.h"
 
 #include <algorithm>
@@ -1673,46 +1674,17 @@ std::vector<CsRange*> g_cs_pending;
 u64 g_cs_range_bytes = 0;
 constexpr u32 kCsDirtyPageShift = 16;
 std::unordered_map<u64, std::vector<u64>> g_cs_dirty_pages;
-// How many dirty ranges touch each 64 KiB of guest memory, directly indexed
-// over the guest range: a zero answers "nothing dirty here" without a single
-// hash map lookup, and without the false alarms of a hashed table. The table
-// is reserved, not committed; only blocks near dirty ranges ever get pages.
-// Atomic because the command processor's walk reads it without owning the
-// renderer (CsRangeMaybeDirty); only the owner writes it.
-constexpr u32 kCsDirtyFilterShift = 16;
-// Covers the guests' GPU-visible range; anything above reads as maybe dirty.
-constexpr u64 kCsDirtyFilterBlocks = (1ull << 41) >> kCsDirtyFilterShift;
-
-std::atomic<u16>* DirtyFilter() {
-  static std::atomic<u16>* table = [] {
-    void* p = mmap(nullptr, kCsDirtyFilterBlocks * sizeof(std::atomic<u16>),
-                   PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    return p == MAP_FAILED ? nullptr : static_cast<std::atomic<u16>*>(p);
-  }();
-  return table;
-}
-
+// How many dirty ranges touch each 64 KiB of guest memory lives in the guest
+// page table: a zero answers "nothing dirty here" without a single hash map
+// lookup, and without the false alarms of a hashed table. Atomic because the
+// command processor's walk reads it without owning the renderer
+// (CsRangeMaybeDirty); only the owner writes it.
 void NoteDirtyFilter(u64 base, u64 end, int delta) {
-  std::atomic<u16>* table = DirtyFilter();
-  if (!table)
-    return;
-  const u64 last = std::min((end - 1) >> kCsDirtyFilterShift,
-                            kCsDirtyFilterBlocks - 1);
-  for (u64 b = base >> kCsDirtyFilterShift; b <= last; b++)
-    table[b].fetch_add(static_cast<u16>(delta), std::memory_order_relaxed);
+  GuestPages().AddCsDirty(base, end, delta);
 }
 
 bool DirtyFilterClear(u64 base, u64 end) {
-  std::atomic<u16>* table = DirtyFilter();
-  const u64 first = base >> kCsDirtyFilterShift;
-  const u64 last = (end - 1) >> kCsDirtyFilterShift;
-  if (!table || last >= kCsDirtyFilterBlocks)
-    return false;
-  for (u64 b = first; b <= last; b++)
-    if (table[b].load(std::memory_order_relaxed))
-      return false;
-  return true;
+  return GuestPages().CsClear(base, end);
 }
 // The same bases, once each: what the readback staging walks instead of every
 // range (thousands of them against a few dozen dirty ones).

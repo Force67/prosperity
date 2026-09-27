@@ -3,6 +3,8 @@
  */
 #include "gpu/write_tracker.h"
 
+#include "gpu/guest_page_table.h"
+
 #include <algorithm>
 #include <chrono>
 #include <iterator>
@@ -30,7 +32,7 @@ constexpr u64 kScanGap = 1024 * 1024;
 constexpr u64 kCoalesceGap = 64 * 1024;
 // A page reported this many times in one frame is written continuously.
 constexpr u32 kHotReports = 3;
-constexpr int kVolatileFrames = 600;
+constexpr u32 kVolatileFrames = 600;
 
 u64 PageDown(u64 v) {
   return v & ~(kPage - 1);
@@ -162,10 +164,11 @@ bool WriteTracker::Register(u64 first, u64 end) {
 }
 
 bool WriteTracker::ArmRange(u64 first, u64 end) {
-  if (!volatile_.empty())
-    for (u64 page = first; page < end; page += kPage)
-      if (volatile_.count(page))
-        return false;
+  const GuestPageTable& table = GuestPages();
+  for (u64 page = first; page < end; page += kPage)
+    if (const GuestPageTable::Page* p = table.Find(page);
+        p && p->volatile_until > frame_)
+      return false;
   if (!Register(first, end))
     return false;
   for (const auto& [lo, hi] : Gaps(armed_, first, end)) {
@@ -176,6 +179,7 @@ bool WriteTracker::ArmRange(u64 first, u64 end) {
     if (ioctl(uffd_, UFFDIO_WRITEPROTECT, &wp))
       return false;
     armed_bytes_ += InsertRun(armed_, lo, hi);
+    MarkArmed(lo, hi, true);
   }
   return true;
 }
@@ -184,6 +188,9 @@ bool WriteTracker::Arm(u64 base, u64 bytes) {
   if (uffd_ < 0 || !bytes)
     return false;
   const u64 first = PageDown(base), end = PageUp(base + bytes);
+  // Most calls ask again about pages armed long ago.
+  if (AllArmed(first, end))
+    return true;
   // Close a small gap to a neighbouring armed run: every separate run is a
   // mapping of its own after registration, and the scan pays per mapping
   // (GTA:SA held ~2700 runs, ~10 ms a frame of scans).
@@ -214,7 +221,7 @@ void WriteTracker::Disarm(u64 first, u64 end) {
   uffdio_range range{first, end - first};
   ioctl(uffd_, UFFDIO_UNREGISTER, &range);
   EraseRun(registered_, first, end);
-  armed_bytes_ -= EraseRun(armed_, first, end);
+  armed_bytes_ -= EraseArmed(first, end);
 }
 
 // The walk costs ~0.3 us a mapping in [first, end), registered or not, and a
@@ -277,9 +284,38 @@ void WriteTracker::Drain(std::vector<Range>& out) {
   // A new mapping is not registered, whatever the old one was.
   for (const auto& [first, end] : remapped) {
     EraseRun(registered_, first, end);
-    armed_bytes_ -= EraseRun(armed_, first, end);
+    armed_bytes_ -= EraseArmed(first, end);
     out.emplace_back(first, end);
   }
+}
+
+bool WriteTracker::AllArmed(u64 first, u64 end) const {
+  const GuestPageTable& table = GuestPages();
+  for (u64 page = first; page < end; page += kPage) {
+    const GuestPageTable::Page* p = table.Find(page);
+    if (!p || !p->armed)
+      return false;
+  }
+  return true;
+}
+
+void WriteTracker::MarkArmed(u64 first, u64 end, bool armed) {
+  GuestPageTable& table = GuestPages();
+  for (u64 page = first; page < end; page += kPage)
+    if (GuestPageTable::Page* p = table.At(page))
+      p->armed = armed;
+}
+
+// EraseRun on armed_, clearing only the pages that were armed: a remap can
+// span gigabytes of which a few pages ever were.
+u64 WriteTracker::EraseArmed(u64 first, u64 end) {
+  auto it = armed_.upper_bound(first);
+  if (it != armed_.begin())
+    --it;
+  for (; it != armed_.end() && it->first < end; ++it)
+    if (it->second > first)
+      MarkArmed(std::max(first, it->first), std::min(end, it->second), false);
+  return EraseRun(armed_, first, end);
 }
 
 void WriteTracker::Collect(std::vector<Range>& out) {
@@ -309,10 +345,20 @@ void WriteTracker::Collect(std::vector<Range>& out) {
     }
   }
   faults_at_scan_ = faults;
+  GuestPageTable& table = GuestPages();
   for (size_t i = first_new; i < out.size(); i++)
     for (u64 page = PageDown(out[i].first); page < out[i].second; page += kPage) {
       written_pages_++;
-      hot_[page]++;
+      GuestPageTable::Page* p = table.At(page);
+      if (!p)
+        continue;
+      if (p->report_frame != frame_) {
+        p->previous_report = p->report_frame;
+        p->report_frame = frame_;
+        p->reports = 0;
+        reported_.push_back(page);
+      }
+      p->reports++;
     }
   collect_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(
                      std::chrono::steady_clock::now() - t0)
@@ -336,23 +382,18 @@ void WriteTracker::NoteRemap(u64 base, u64 bytes) {
 void WriteTracker::EndFrame() {
   if (uffd_ < 0)
     return;
-  frame_++;
-  for (auto it = volatile_.begin(); it != volatile_.end();)
-    it = --it->second <= 0 ? volatile_.erase(it) : std::next(it);
   // Written this frame and the one before, or several times in this one: data
   // the title rewrites every frame. A copy of it is good for one submission at
   // most, and keeping it armed costs a fault and a scan every frame.
+  GuestPageTable& table = GuestPages();
   std::vector<u64> demote;
-  for (const auto& [page, reports] : hot_) {
-    int& last = last_written_[page];
-    if (reports >= kHotReports || last == frame_ - 1)
+  for (u64 page : reported_) {
+    const GuestPageTable::Page* p = table.Find(page);
+    if (p && (p->reports >= kHotReports || p->previous_report + 1 == frame_))
       demote.push_back(page);
-    last = frame_;
   }
-  hot_.clear();
-  if (frame_ % 600 == 0)
-    std::erase_if(last_written_,
-                  [&](const auto& kv) { return kv.second < frame_ - 1; });
+  reported_.clear();
+  frame_++;
   std::sort(demote.begin(), demote.end());
   for (size_t i = 0; i < demote.size();) {
     const u64 first = demote[i];
@@ -360,7 +401,8 @@ void WriteTracker::EndFrame() {
     for (++i; i < demote.size() && demote[i] == end; ++i)
       end += kPage;
     for (u64 page = first; page < end; page += kPage)
-      volatile_[page] = kVolatileFrames;
+      if (GuestPageTable::Page* p = table.At(page))
+        p->volatile_until = frame_ + kVolatileFrames;
     Disarm(first, end);
     // Unarmed, its writes go unreported: whoever holds a copy must drop it.
     NoteWrite(first, end - first);

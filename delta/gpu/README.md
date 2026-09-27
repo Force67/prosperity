@@ -13,8 +13,10 @@ ps4/            PM4 / Liverpool command processor + its GCN specifics
 ps5/            AGC / gfx10.3 command processor + the RDNA2 decoder/emitter
 shaders/        prebuilt SPIR-V for the heuristic quad path
 guest_memory.h  safe reads of guest memory shared by both command processors
+guest_page_table.h  per-page state of guest memory, directly indexed
 gpu_check.h     GPU_BUGCHECK: always-on fail-fast checks for module invariants
 gpu_perf.h      the frame-time counters and clock every unit in the module feeds
+write_tracker.h which guest pages the CPU wrote (userfaultfd write protection)
 tests/          unit tests + the layering check
 ```
 

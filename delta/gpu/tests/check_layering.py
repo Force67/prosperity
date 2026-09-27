@@ -10,8 +10,9 @@ Rules enforced (see delta/gpu/README.md):
            gpu/guest_memory.h, gpu/gcn/ (recompiled-program types only), never
            a command processor or register file
   tests/   may include anything in gpu/
-Module-root headers (gpu/guest_memory.h, gpu/gpu_check.h, gpu/gpu_perf.h) are
-reachable from every directory and themselves include nothing in the module.
+Module-root headers (gpu/guest_memory.h, gpu/guest_page_table.h,
+gpu/gpu_check.h, gpu/gpu_perf.h, gpu/write_tracker.h) are reachable from every
+directory and themselves include nothing in the module but each other.
 Outside delta/gpu, only the public surface is reachable:
   gpu/render/*, gpu/ps4/cmd_processor.h, gpu/ps5/cmd_processor.h
 
@@ -26,7 +27,8 @@ GPU = os.path.join(ROOT, 'delta', 'gpu')
 DELTA = os.path.join(ROOT, 'delta')
 
 # Reachable from every directory; they include nothing in the module.
-ROOT_HEADERS = ('gpu/guest_memory.h', 'gpu/gpu_check.h', 'gpu/gpu_perf.h')
+ROOT_HEADERS = ('gpu/guest_memory.h', 'gpu/guest_page_table.h',
+                'gpu/gpu_check.h', 'gpu/gpu_perf.h', 'gpu/write_tracker.h')
 
 ALLOWED = {
     'rhi': ('gpu/rhi/',),
