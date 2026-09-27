@@ -12,9 +12,9 @@
 
 #include <options/options.h>
 
-#include "formats/archive_object.h"
-#include "formats/pkg_object.h"
-#include "formats/ufs2_object.h"
+#include "formats/archive_filesystem.h"
+#include "formats/pkg_filesystem.h"
+#include "formats/ufs2_filesystem.h"
 #include "formats/title_metadata.h"
 #include <base/containers/set.h>
 #include <base/containers/vector.h>

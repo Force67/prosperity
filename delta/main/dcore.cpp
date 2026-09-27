@@ -29,8 +29,8 @@
 #include <kern/vfs.h>
 #include <kern/vfs_providers.h>
 
-#include "formats/archive_object.h"
-#include "formats/pup_object.h"
+#include "formats/archive_filesystem.h"
+#include "formats/pup_reader.h"
 #include "formats/title_metadata.h"
 #include <options/options.h>
 #include <base/containers/vector.h>

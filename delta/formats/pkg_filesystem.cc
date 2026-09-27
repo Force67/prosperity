@@ -9,7 +9,7 @@
 // Ported from tools/pkg_extract/pkg_extract.py: decrypt the PFS of a fake-signed
 // .pkg and inflate the inner PFSC image, exposing files on demand.
 
-#include "pkg_object.h"
+#include "pkg_filesystem.h"
 #include "base/arch.h"
 
 #include <cctype>

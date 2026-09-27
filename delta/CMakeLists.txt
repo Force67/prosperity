@@ -20,7 +20,6 @@ elseif(UNIX)
 endif()
 
 add_subdirectory(cpu)
-add_subdirectory(crypto)
 add_subdirectory(formats)
 add_subdirectory(gfx)
 add_subdirectory(gpu)

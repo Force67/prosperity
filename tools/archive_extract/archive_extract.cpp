@@ -13,7 +13,7 @@
 #include <logger/logger.h>
 #include <io/file.h>
 
-#include "formats/archive_object.h"
+#include "formats/archive_filesystem.h"
 #include <base/algorithm.h>
 #include <base/containers/vector.h>
 #include <base/strings/xstring.h>

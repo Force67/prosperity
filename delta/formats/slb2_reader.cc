@@ -7,7 +7,7 @@
  * in the root of the source tree.
  */
 
-#include "slb2_object.h"
+#include "slb2_reader.h"
 #include "base/arch.h"
 #include <base/containers/vector.h>
 

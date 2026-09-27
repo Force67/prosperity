@@ -7,9 +7,9 @@
 #include <logger/logger.h>
 #include <io/file.h>
 
-#include <crypto/UnSELF.h>
+#include <formats/fself.h>
 
-#include "formats/pkg_object.h"
+#include "formats/pkg_filesystem.h"
 #include <base/algorithm.h>
 #include <base/containers/vector.h>
 #include <base/strings/xstring.h>

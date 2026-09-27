@@ -21,7 +21,7 @@ import sys
 ROOT = sys.argv[1] if len(sys.argv) > 1 else '.'
 DELTA = os.path.join(ROOT, 'delta')
 
-MODULES = ('cpu', 'crypto', 'formats', 'gfx', 'gpu', 'kern', 'main', 'runtime')
+MODULES = ('cpu', 'formats', 'gfx', 'gpu', 'kern', 'main', 'runtime')
 
 # The one-way design. Read down: a module may only include modules below it.
 #
@@ -30,16 +30,14 @@ MODULES = ('cpu', 'crypto', 'formats', 'gfx', 'gpu', 'kern', 'main', 'runtime')
 #   kern        the process model, lv2 syscalls, devices, VFS
 #   gpu         guest command streams -> rendered frames
 #   gfx         the host platform shell (window, input, audio, overlay)
-#   formats     container parsers (pkg, pup, ufs2, archive); depends on nothing
-#   crypto      primitives; depends on nothing
+#   formats     container parsers (pkg, pup, ufs2, archive, fself); depends on nothing
 ALLOWED = {
-    'crypto': (),
     'formats': (),
     'gfx': (),
     'gpu': ('gfx',),
-    'kern': ('crypto', 'formats', 'gpu', 'gfx'),
+    'kern': ('formats', 'gpu', 'gfx'),
     'cpu': (),
-    'runtime': ('kern', 'cpu', 'gpu', 'gfx', 'crypto', 'formats'),
+    'runtime': ('kern', 'cpu', 'gpu', 'gfx', 'formats'),
     'main': MODULES,
 }
 

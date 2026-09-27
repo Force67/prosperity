@@ -20,7 +20,7 @@
 #include "runtime/vprx/vprx.h"
 #include "cpu/cpu_backend.h"
 
-#include <crypto/UnSELF.h>
+#include <formats/fself.h>
 
 #include "module.h"
 #include "proc.h"

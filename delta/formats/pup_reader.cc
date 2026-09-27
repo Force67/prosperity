@@ -8,7 +8,7 @@
  */
 // based off https://github.com/Zer0xFF/ps4-pup-unpacker/blob/master/PUP.cpp
 
-#include "pup_object.h"
+#include "pup_reader.h"
 #include "base/arch.h"
 
 #include <cstdarg>

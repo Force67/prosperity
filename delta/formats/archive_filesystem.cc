@@ -9,7 +9,7 @@
 // decompression. Per-format decoding lives behind ArchiveBackend; everything here is
 // format-agnostic: index cache, wrapper-dir strip, decompressed-file cache.
 
-#include "archive_object.h"
+#include "archive_filesystem.h"
 #include "archive_backend.h"
 
 #include <cstdio>

@@ -5,7 +5,7 @@
 #include <logger/logger.h>
 #include <io/file.h>
 
-#include "formats/pup_object.h"
+#include "formats/pup_reader.h"
 #include <base/strings/xstring.h>
 
 int main(int argc, char **argv) {

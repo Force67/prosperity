@@ -18,8 +18,8 @@
 
 #include <base/strings/xstring.h>
 
-#include "formats/pkg_object.h"
-#include "formats/pup_object.h"
+#include "formats/pkg_filesystem.h"
+#include "formats/pup_reader.h"
 #include <base/containers/vector.h>
 
 namespace {

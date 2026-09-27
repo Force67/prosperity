@@ -9,7 +9,7 @@
 // superblock geometry, inodes and directory entries are parsed; file bytes are
 // read on demand. Field offsets follow sys/ufs/ffs/fs.h and sys/ufs/ufs/dinode.h.
 
-#include "ufs2_object.h"
+#include "ufs2_filesystem.h"
 #include "base/arch.h"
 
 #include <cstdio>

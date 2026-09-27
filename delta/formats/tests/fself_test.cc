@@ -5,7 +5,7 @@
 
 #include <gtest/gtest.h>
 
-#include <crypto/UnSELF.h>
+#include <formats/fself.h>
 #include <elf_types.h>
 #include <sce_types.h>
 #include <base/containers/vector.h>

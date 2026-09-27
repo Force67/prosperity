@@ -8,7 +8,7 @@
 #include <logger/logger.h>
 #include <io/file.h>
 
-#include "formats/ufs2_object.h"
+#include "formats/ufs2_filesystem.h"
 #include <base/algorithm.h>
 #include <base/containers/vector.h>
 #include <base/strings/xstring.h>
