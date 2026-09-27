@@ -555,7 +555,7 @@ fail:
 }
 
 // Set rumble. `large`/`small` are the DS4 motor intensities (0..255).
-void setRumble(hidSource &src, u8 large, u8 small) {
+void SetRumble(hidSource &src, u8 large, u8 small) {
   if (src.uinputFd < 0)
     return;
   if (large == 0 && small == 0 && src.ffId >= 0) {
@@ -643,7 +643,7 @@ int runVibration(hidSource &src, void *data) {
   if (!p)
     return 0;
   openUinput(src);
-  setRumble(src, p[0], p[1]);
+  SetRumble(src, p[0], p[1]);
   return 0;
 }
 

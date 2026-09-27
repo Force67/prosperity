@@ -5,8 +5,10 @@
 
 namespace host {
 
-int OpenAudioPort(u32, u32, int) { return -1; }
-int QueueAudio(int, const void *, u32 frames) {
+int OpenAudioPort(u32, u32, int) {
+  return -1;
+}
+int QueueAudio(int, const void*, u32 frames) {
   return static_cast<int>(frames);
 }
 void SetAudioPortVolume(int, float) {}

@@ -287,11 +287,11 @@ void deltaCore::boot(const base::String &xdir) {
     title += tid.empty() ? base::String("unknown") : tid;
     title += isPs5 ? "] (PS5)" : "] (PS4)";
     LOG_INFO("window title: {}", title.c_str());
-    host::setTitle(title.c_str());
+    host::SetTitle(title.c_str());
   }
 #if defined(__linux__) && !defined(__ANDROID__)
   if (!gameIcon.empty())
-    host::setIcon(gameIcon.data(), gameIcon.size());
+    host::SetIcon(gameIcon.data(), gameIcon.size());
 #endif
   base::SpawnDetachedThread("guest-main", [mainModule = base::move(mainModule), mounted, isPs5, sdkVersion]() {
     auto p = base::MakeUnique<krnl::proc>();

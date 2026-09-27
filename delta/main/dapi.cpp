@@ -140,7 +140,7 @@ extern "C" __attribute__((visibility("default"))) int dcoreMain(int argc, char *
   logger::RouteBaseLogging();
   // Before anything logs: the on-screen panel shows the tail of the log, and
   // the boot lines are the ones worth seeing before a title even presents.
-  host::overlayLogAttach();
+  host::OverlayLogAttach();
   // Before anything else: every subsystem below reads its knobs from here, and
   // most latch the value the first time they run.
   options::Init(argc, argv);

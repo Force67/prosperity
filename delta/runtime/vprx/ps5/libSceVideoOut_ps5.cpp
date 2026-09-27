@@ -131,8 +131,8 @@ bool ensureGfx(u32 w, u32 h) {
   base::LockGuard<base::Mutex> lk(g_mtx);
   st = g_gfxState.load();
   if (st != 0) return st == 1;
-  if (!host::init("prosperity", w, h)) {
-    BASE_LOGI("videoout/ps5", "host::init FAILED (no window this run)");
+  if (!host::Init("prosperity", w, h)) {
+    BASE_LOGI("videoout/ps5", "host::Init FAILED (no window this run)");
     g_gfxState.store(2);
     return false;
   }
@@ -346,9 +346,9 @@ int PS4ABI vSubmitFlip(int, int bufferIndex, int, i64 flipArg) {
     g_port.submitCount.fetch_add(1);
   }
   if (fb && ensureGfx(w, h)) {
-    auto pf = (fmt & 0x2200u) ? host::PixelFormat::rgba8 : host::PixelFormat::bgra8;
-    host::present(fb, w, h, pitch * 4, pf);
-    host::pumpEvents();
+    auto pf = (fmt & 0x2200u) ? host::PixelFormat::kRgba8 : host::PixelFormat::kBgra8;
+    host::Present(fb, w, h, pitch * 4, pf);
+    host::PumpEvents();
   }
   g_port.flipCount.fetch_add(1);
   {

@@ -176,8 +176,8 @@ bool ensureGfx(u32 w, u32 h) {
   st = g_gfxState.load();
   if (st != 0)
     return st == 1;
-  if (!host::init("prosperity", w, h)) {
-    BASE_LOGI("videoout", "host::init FAILED (no window this run)");
+  if (!host::Init("prosperity", w, h)) {
+    BASE_LOGI("videoout", "host::Init FAILED (no window this run)");
     g_gfxState.store(2);
     return false;
   }
@@ -212,9 +212,9 @@ void presentScanout() {
   }
   if (!fb || !ensureGfx(w, h))
     return;
-  auto pf = (fmt & 0x2200u) ? host::PixelFormat::rgba8 : host::PixelFormat::bgra8;
-  host::present(fb, w, h, pitch * 4, pf);
-  host::pumpEvents();
+  auto pf = (fmt & 0x2200u) ? host::PixelFormat::kRgba8 : host::PixelFormat::kBgra8;
+  host::Present(fb, w, h, pitch * 4, pf);
+  host::PumpEvents();
 }
 
 base::Atomic<bool> g_flipPumpStarted{false};
@@ -440,9 +440,9 @@ int PS4ABI sceVideoOutSubmitFlip(int handle, int bufferIndex, int flipMode,
   // guest address is directly readable on the host). Until the Gnm->Vulkan
   // path detiles real GPU output this is the linear scanout contents.
   if (fb && ensureGfx(w, h)) {
-    auto pf = (fmt & 0x2200u) ? host::PixelFormat::rgba8 : host::PixelFormat::bgra8;
-    host::present(fb, w, h, pitch * 4, pf);
-    host::pumpEvents();
+    auto pf = (fmt & 0x2200u) ? host::PixelFormat::kRgba8 : host::PixelFormat::kBgra8;
+    host::Present(fb, w, h, pitch * 4, pf);
+    host::PumpEvents();
   }
 
   // flip "completes" immediately: bump the count and wake the flip equeue.

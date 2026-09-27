@@ -6,16 +6,19 @@
  * the module both already link, rather than owned by either of them.
  */
 
-#include "window.h"
-#include <base/atomic.h>
-
+#include "base/atomic.h"
+#include "host/window.h"
 
 namespace host {
 namespace {
-base::Atomic<bool> g_inGameplay{false};
+base::Atomic<bool> g_in_gameplay{false};
 }
 
-void setInGameplay(bool v) { g_inGameplay.store(v, base::memory_order_relaxed); }
-bool inGameplay() { return g_inGameplay.load(base::memory_order_relaxed); }
+void SetInGameplay(bool v) {
+  g_in_gameplay.store(v, base::memory_order_relaxed);
+}
+bool InGameplay() {
+  return g_in_gameplay.load(base::memory_order_relaxed);
+}
 
 }  // namespace host

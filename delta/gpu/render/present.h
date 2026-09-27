@@ -3,7 +3,7 @@
  */
 #pragma once
 
-// Handing a finished frame to the window. host::present blocks on the window
+// Handing a finished frame to the window. host::Present blocks on the window
 // swapchain and, on a software driver, rasterizes the blit on the CPU, so a
 // dedicated thread owns the window and always shows the newest complete frame.
 
@@ -27,9 +27,9 @@ class LatestFramePresenter {
   LatestFramePresenter& operator=(const LatestFramePresenter&) = delete;
 
   void Present(const u8* pixels, u32 w, u32 h,
-               host::PixelFormat fmt = host::PixelFormat::bgra8);
+               host::PixelFormat fmt = host::PixelFormat::kBgra8);
   void Present(base::Vector<u8>&& pixels, u32 w, u32 h,
-               host::PixelFormat fmt = host::PixelFormat::bgra8);
+               host::PixelFormat fmt = host::PixelFormat::kBgra8);
   // Block until a lent buffer has been copied out, for a caller that is about
   // to write over the one it lent.
   void WaitForBorrowed();
@@ -47,7 +47,7 @@ class LatestFramePresenter {
   // Set instead of pending_pixels_ when the caller lends us its buffer: the
   // presenter thread copies out of it, under the lock, before releasing it.
   const u8* pending_src_ = nullptr;
-  host::PixelFormat pending_fmt_ = host::PixelFormat::bgra8;
+  host::PixelFormat pending_fmt_ = host::PixelFormat::kBgra8;
   u32 width_ = 0;
   u32 height_ = 0;
   bool pending_ = false;

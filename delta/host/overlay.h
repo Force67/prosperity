@@ -14,17 +14,16 @@
 namespace host {
 
 // Create the ImGui context if needed (safe to call repeatedly).
-void overlayEnsureImGui();
+void OverlayEnsureImGui();
 
 // Per-frame perf stats, pushed by the GPU renderer (delta_gpu).
-void overlaySetPerf(float fps, float gpuMs, float frameMs);
+void OverlaySetPerf(float fps, float gpu_ms, float frame_ms);
 
 // Build the overlay ImDrawData at display size (w by h). vram in bytes (0 =
-// unknown). Call once per frame before overlayVkRender.
-void overlayBuildFrame(u32 w, u32 h, u64 vramUsed,
-                       u64 vramTotal);
+// unknown). Call once per frame before OverlayVkRender.
+void OverlayBuildFrame(u32 w, u32 h, u64 vram_used, u64 vram_total);
 
 // Show/hide the overlay (bound to F1 by the window event pump).
-void overlayToggle();
+void OverlayToggle();
 
 }  // namespace host

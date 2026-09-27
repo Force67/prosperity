@@ -4,45 +4,44 @@
  * Host audio output bridge (SDL3). See audio_output.h.
  */
 
-#include "audio_output.h"
 #include "base/arch.h"
-
+#include "host/audio_output.h"
 
 #include <SDL3/SDL.h>
 
 #include <cstdio>
 #include <cstdlib>
-#include <base/logging.h>
-#include <options/options.h>
-#include <base/containers/vector.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/threading/thread.h>
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
+#include "options/options.h"
 
 namespace host {
 
 namespace {
-DELTA_OPTION(const char *, kAudioPcm, "DELTA_AUDIO_PCM", nullptr);
+DELTA_OPTION(const char*, kAudioPcm, "DELTA_AUDIO_PCM", nullptr);
 DELTA_OPTION(bool, kAudioTrace, "DELTA_AUDIO_TRACE", false);
 }  // namespace
 
 namespace {
 
 struct Port {
-  SDL_AudioStream *stream = nullptr;
+  SDL_AudioStream* stream = nullptr;
   u32 channels = 2;
-  int bytesPerSample = 2;  // S16 = 2, F32 = 4
+  int bytes_per_sample = 2;  // S16 = 2, F32 = 4
   float gain = 1.0f;
 };
 
 base::Mutex g_mtx;
 base::Vector<Port> g_ports;
 bool g_init = false;
-u64 g_framesOut = 0;
+u64 g_frames_out = 0;
 
 }  // namespace
 
-int OpenAudioPort(u32 freq, u32 channels, int isFloat) {
+int OpenAudioPort(u32 freq, u32 channels, int is_float) {
   base::LockGuard<base::Mutex> lk(g_mtx);
   if (!g_init) {
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
@@ -52,11 +51,11 @@ int OpenAudioPort(u32 freq, u32 channels, int isFloat) {
     g_init = true;
   }
   SDL_AudioSpec spec{};
-  spec.format = isFloat ? SDL_AUDIO_F32 : SDL_AUDIO_S16;
+  spec.format = is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16;
   spec.channels = static_cast<int>(channels);
   spec.freq = static_cast<int>(freq);
-  SDL_AudioStream *s = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
-                                                 &spec, nullptr, nullptr);
+  SDL_AudioStream* s = SDL_OpenAudioDeviceStream(
+      SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
   if (!s) {
     BASE_LOGI("audio", "open stream failed: {}", SDL_GetError());
     return -1;
@@ -65,12 +64,12 @@ int OpenAudioPort(u32 freq, u32 channels, int isFloat) {
   Port p;
   p.stream = s;
   p.channels = channels;
-  p.bytesPerSample = isFloat ? 4 : 2;
+  p.bytes_per_sample = is_float ? 4 : 2;
   int h = static_cast<int>(g_ports.size());
   g_ports.push_back(p);
   if (kAudioTrace)
     BASE_LOGI("audio", "open h={} {}Hz {}ch {}", h, freq, channels,
-              isFloat ? "f32" : "s16");
+              is_float ? "f32" : "s16");
   return h;
 }
 
@@ -79,12 +78,12 @@ int OpenAudioPort(u32 freq, u32 channels, int isFloat) {
 // and BEFORE any gain/backpressure/drop, so the HLE shim's stream and the LLE
 // daemon's stream can be compared byte-for-byte off-line.
 namespace {
-FILE *pcmFile(int handle, int channels, int bps) {
-  const char *pfx = kAudioPcm;
+FILE* PcmFile(int handle, int channels, int bps) {
+  const char* pfx = kAudioPcm;
   if (!pfx || !*pfx)
     return nullptr;
   static base::Mutex m;
-  static base::Vector<FILE *> fs;
+  static base::Vector<FILE*> fs;
   base::LockGuard<base::Mutex> lk(m);
   if (handle < 0 || handle > 63)
     return nullptr;
@@ -92,43 +91,46 @@ FILE *pcmFile(int handle, int channels, int bps) {
     fs.resize(handle + 1, nullptr);
   if (!fs[handle]) {
     char path[512];
-    std::snprintf(path, sizeof(path), "%s.h%d.c%d.b%d.raw", pfx, handle, channels, bps);
+    std::snprintf(path, sizeof(path), "%s.h%d.c%d.b%d.raw", pfx, handle,
+                  channels, bps);
     fs[handle] = std::fopen(path, "wb");
   }
   return fs[handle];
 }
 }  // namespace
 
-int QueueAudio(int handle, const void *samples, u32 frames) {
+int QueueAudio(int handle, const void* samples, u32 frames) {
   // Snapshot the port under the lock, then run lock-free. SDL stream ops are
-  // thread-safe, but we must NOT hold g_mtx across the backpressure sleep: another
-  // thread opening a port mid-wait reallocs g_ports and dangles the held Port&.
-  SDL_AudioStream *stream;
-  int channels, bytesPerSample;
+  // thread-safe, but we must NOT hold g_mtx across the backpressure sleep:
+  // another thread opening a port mid-wait reallocs g_ports and dangles the
+  // held Port&.
+  SDL_AudioStream* stream;
+  int channels, bytes_per_sample;
   float gain;
   {
     base::LockGuard<base::Mutex> lk(g_mtx);
     if (handle < 0 || handle >= static_cast<int>(g_ports.size()))
       return -1;
-    Port &p = g_ports[handle];
+    Port& p = g_ports[handle];
     if (!p.stream || !samples || !frames)
       return static_cast<int>(frames);
     stream = p.stream;
     channels = p.channels;
-    bytesPerSample = p.bytesPerSample;
+    bytes_per_sample = p.bytes_per_sample;
     gain = p.gain;
   }
-  u32 bytes = frames * channels * static_cast<u32>(bytesPerSample);
-  if (FILE *pf = pcmFile(handle, channels, bytesPerSample)) {
+  u32 bytes = frames * channels * static_cast<u32>(bytes_per_sample);
+  if (FILE* pf = PcmFile(handle, channels, bytes_per_sample)) {
     std::fwrite(samples, 1, bytes, pf);
     std::fflush(pf);
   }
-  // The real sceAudioOutOutput blocks until the previous grain plays, pacing the
-  // audio thread; our queue is non-blocking, so a looping Output (FMOD) pins a core
-  // at 100% and starves the game thread. Block until the queue drains below a small
-  // target, bounded so a headless/stalled device can't hang the thread.
+  // The real sceAudioOutOutput blocks until the previous grain plays, pacing
+  // the audio thread; our queue is non-blocking, so a looping Output (FMOD)
+  // pins a core at 100% and starves the game thread. Block until the queue
+  // drains below a small target, bounded so a headless/stalled device can't
+  // hang the thread.
   const u32 target = bytes * 3;  // keep ~3 buffers of latency
-  int prevQ = -1;
+  int prev_q = -1;
   for (int i = 0; i < 64; i++) {
     int q = SDL_GetAudioStreamQueued(stream);  // thread-safe
     if (q < 0 || static_cast<u32>(q) <= target)
@@ -136,15 +138,16 @@ int QueueAudio(int handle, const void *samples, u32 frames) {
     // Only pace against a device that is actually consuming. If the queue isn't
     // shrinking (no real playback, e.g. headless/no audio device), don't block:
     // otherwise every Output stalls the full cap and drags the caller (and the
-    // game's main thread, via the audio mutex) to a crawl. Drop instead (below).
-    if (prevQ >= 0 && q >= prevQ)
+    // game's main thread, via the audio mutex) to a crawl. Drop instead
+    // (below).
+    if (prev_q >= 0 && q >= prev_q)
       break;
-    prevQ = q;
+    prev_q = q;
     base::SleepForMicroseconds(500);
   }
-  // Bound latency: if the device queue is STILL many buffers deep after the wait
-  // (no real playback to pace against, e.g. headless), drop this buffer rather than
-  // accumulate seconds of delay.
+  // Bound latency: if the device queue is STILL many buffers deep after the
+  // wait (no real playback to pace against, e.g. headless), drop this buffer
+  // rather than accumulate seconds of delay.
   int queued = SDL_GetAudioStreamQueued(stream);
   if (queued >= 0 && static_cast<u32>(queued) < bytes * 8) {
     if (gain >= 0.999f) {
@@ -154,45 +157,57 @@ int QueueAudio(int handle, const void *samples, u32 frames) {
       static thread_local base::Vector<u8> scratch;
       scratch.resize(bytes);
       u32 n = frames * channels;
-      if (bytesPerSample == 4) {
-        const float *src = static_cast<const float *>(samples);
-        float *dst = reinterpret_cast<float *>(scratch.data());
-        for (u32 i = 0; i < n; i++) dst[i] = src[i] * gain;
+      if (bytes_per_sample == 4) {
+        const float* src = static_cast<const float*>(samples);
+        float* dst = reinterpret_cast<float*>(scratch.data());
+        for (u32 i = 0; i < n; i++)
+          dst[i] = src[i] * gain;
       } else {
-        const i16 *src = static_cast<const i16 *>(samples);
-        i16 *dst = reinterpret_cast<i16 *>(scratch.data());
-        for (u32 i = 0; i < n; i++) dst[i] = static_cast<i16>(src[i] * gain);
+        const i16* src = static_cast<const i16*>(samples);
+        i16* dst = reinterpret_cast<i16*>(scratch.data());
+        for (u32 i = 0; i < n; i++)
+          dst[i] = static_cast<i16>(src[i] * gain);
       }
       SDL_PutAudioStreamData(stream, scratch.data(), static_cast<int>(bytes));
     }
   }
-  if (kAudioTrace && ((g_framesOut += frames) % (48000 * 2) < frames)) {
+  if (kAudioTrace && ((g_frames_out += frames) % (48000 * 2) < frames)) {
     // Peak level over this buffer (confirms real audio vs. silence -> tells PCM
     // working from a missing decode upstream).
     float peak = 0.f;
     u32 n = frames * channels;
-    if (bytesPerSample == 4) {
-      const float *s = static_cast<const float *>(samples);
-      for (u32 i = 0; i < n; i++) { float a = s[i] < 0 ? -s[i] : s[i]; if (a > peak) peak = a; }
+    if (bytes_per_sample == 4) {
+      const float* s = static_cast<const float*>(samples);
+      for (u32 i = 0; i < n; i++) {
+        float a = s[i] < 0 ? -s[i] : s[i];
+        if (a > peak)
+          peak = a;
+      }
     } else {
-      const i16 *s = static_cast<const i16 *>(samples);
-      for (u32 i = 0; i < n; i++) { float a = (s[i] < 0 ? -s[i] : s[i]) / 32768.f; if (a > peak) peak = a; }
+      const i16* s = static_cast<const i16*>(samples);
+      for (u32 i = 0; i < n; i++) {
+        float a = (s[i] < 0 ? -s[i] : s[i]) / 32768.f;
+        if (a > peak)
+          peak = a;
+      }
     }
     BASE_LOGI("audio", "h={} ~{} frames out, queued={} peak={:.3f}", handle,
-              (unsigned long)g_framesOut, queued, peak);
+              (unsigned long)g_frames_out, queued, peak);
   }
   return static_cast<int>(frames);
 }
 
 void SetAudioPortVolume(int handle, float gain) {
   base::LockGuard<base::Mutex> lk(g_mtx);
-  if (handle < 0 || handle >= static_cast<int>(g_ports.size())) return;
+  if (handle < 0 || handle >= static_cast<int>(g_ports.size()))
+    return;
   g_ports[handle].gain = gain < 0.f ? 0.f : gain > 1.f ? 1.f : gain;
 }
 
 void CloseAudioPort(int handle) {
   base::LockGuard<base::Mutex> lk(g_mtx);
-  if (handle < 0 || handle >= static_cast<int>(g_ports.size())) return;
+  if (handle < 0 || handle >= static_cast<int>(g_ports.size()))
+    return;
   if (g_ports[handle].stream) {
     SDL_DestroyAudioStream(g_ports[handle].stream);
     g_ports[handle].stream = nullptr;

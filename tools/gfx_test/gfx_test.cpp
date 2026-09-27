@@ -19,12 +19,12 @@ int main() {
   // otherwise runs until the window is closed.
   const u32 maxFrames = kTestFrames;
 
-  if (!host::init("PS4Delta gfx test", 960, 540))
+  if (!host::Init("PS4Delta gfx test", 960, 540))
     return 1;
 
   base::Vector<u32> fb((size_t)W * H);
   u32 t = 0;
-  while (host::pumpEvents()) {
+  while (host::PumpEvents()) {
     if (maxFrames && t >= maxFrames) {
       std::printf("[gfx_test] presented %u frames OK\n", t);
       break;
@@ -39,9 +39,9 @@ int main() {
             0xff000000u | ((u32)b << 16) | ((u32)gch << 8) | r;
       }
     }
-    host::present(fb.data(), W, H, 0, host::PixelFormat::rgba8);
+    host::Present(fb.data(), W, H, 0, host::PixelFormat::kRgba8);
     t++;
   }
-  host::shutdown();
+  host::Shutdown();
   return 0;
 }

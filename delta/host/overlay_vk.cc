@@ -5,30 +5,30 @@
  * (embedded SPIR-V, ImDrawVert layout, alpha blend, dynamic viewport/scissor)
  * draws the overlay's ImDrawData into the swapchain image through a LOAD render
  * pass that also transitions the image from TRANSFER_DST (the frame blit) to
- * PRESENT_SRC, so gfx_vk's present path just calls overlayVkRender.
+ * PRESENT_SRC, so gfx_vk's present path just calls OverlayVkRender.
  */
 
-#include "overlay_vk.h"
+#include "host/overlay_vk.h"
 #include "base/arch.h"
 
 #include <cstdio>
 #include <cstring>
 
-#include <base/logging.h>
+#include "base/logging.h"
 
+#include "base/containers/vector.h"
+#include "host/overlay.h"
+#include "host/overlay_vk_shaders.h"
 #include "imgui.h"
-#include "overlay.h"
-#include "overlay_vk_shaders.h"
-#include <base/containers/vector.h>
 
 namespace host {
 namespace {
 
 struct Frame {
   VkBuffer vtx = VK_NULL_HANDLE, idx = VK_NULL_HANDLE;
-  VkDeviceMemory vtxMem = VK_NULL_HANDLE, idxMem = VK_NULL_HANDLE;
-  VkDeviceSize vtxCap = 0, idxCap = 0;
-  void *vtxMap = nullptr, *idxMap = nullptr;
+  VkDeviceMemory vtx_mem = VK_NULL_HANDLE, idx_mem = VK_NULL_HANDLE;
+  VkDeviceSize vtx_cap = 0, idx_cap = 0;
+  void *vtx_map = nullptr, *idx_map = nullptr;
 };
 
 struct {
@@ -40,26 +40,26 @@ struct {
   VkExtent2D extent{};
 
   VkRenderPass pass = VK_NULL_HANDLE;
-  VkDescriptorSetLayout descLayout = VK_NULL_HANDLE;
-  VkPipelineLayout pipeLayout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout desc_layout = VK_NULL_HANDLE;
+  VkPipelineLayout pipe_layout = VK_NULL_HANDLE;
   VkPipeline pipe = VK_NULL_HANDLE;
-  VkDescriptorPool descPool = VK_NULL_HANDLE;
-  VkDescriptorSet descSet = VK_NULL_HANDLE;
+  VkDescriptorPool desc_pool = VK_NULL_HANDLE;
+  VkDescriptorSet desc_set = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
 
-  VkImage fontImg = VK_NULL_HANDLE;
-  VkDeviceMemory fontMem = VK_NULL_HANDLE;
-  VkImageView fontView = VK_NULL_HANDLE;
+  VkImage font_img = VK_NULL_HANDLE;
+  VkDeviceMemory font_mem = VK_NULL_HANDLE;
+  VkImageView font_view = VK_NULL_HANDLE;
 
   base::Vector<VkImageView> views;
   base::Vector<VkFramebuffer> fbs;
   base::Vector<Frame> frames;
   bool ready = false;
-} v;
+} g_vk;
 
-u32 memType(u32 bits, VkMemoryPropertyFlags props) {
+u32 MemType(u32 bits, VkMemoryPropertyFlags props) {
   VkPhysicalDeviceMemoryProperties mp;
-  vkGetPhysicalDeviceMemoryProperties(v.phys, &mp);
+  vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
   for (u32 i = 0; i < mp.memoryTypeCount; i++)
     if ((bits & (1u << i)) &&
         (mp.memoryTypes[i].propertyFlags & props) == props)
@@ -67,44 +67,46 @@ u32 memType(u32 bits, VkMemoryPropertyFlags props) {
   return 0;
 }
 
-bool makeBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                VkMemoryPropertyFlags props, VkBuffer &buf,
-                VkDeviceMemory &mem) {
+bool MakeBuffer(VkDeviceSize size,
+                VkBufferUsageFlags usage,
+                VkMemoryPropertyFlags props,
+                VkBuffer& buf,
+                VkDeviceMemory& mem) {
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = size;
   bi.usage = usage;
   bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  if (vkCreateBuffer(v.device, &bi, nullptr, &buf) != VK_SUCCESS)
+  if (vkCreateBuffer(g_vk.device, &bi, nullptr, &buf) != VK_SUCCESS)
     return false;
   VkMemoryRequirements req;
-  vkGetBufferMemoryRequirements(v.device, buf, &req);
+  vkGetBufferMemoryRequirements(g_vk.device, buf, &req);
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = req.size;
-  ai.memoryTypeIndex = memType(req.memoryTypeBits, props);
-  if (vkAllocateMemory(v.device, &ai, nullptr, &mem) != VK_SUCCESS)
+  ai.memoryTypeIndex = MemType(req.memoryTypeBits, props);
+  if (vkAllocateMemory(g_vk.device, &ai, nullptr, &mem) != VK_SUCCESS)
     return false;
-  vkBindBufferMemory(v.device, buf, mem, 0);
+  vkBindBufferMemory(g_vk.device, buf, mem, 0);
   return true;
 }
 
-VkShaderModule makeModule(const u32 *code, size_t bytes) {
+VkShaderModule MakeModule(const u32* code, size_t bytes) {
   VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
   ci.codeSize = bytes;
   ci.pCode = code;
   VkShaderModule m = VK_NULL_HANDLE;
-  vkCreateShaderModule(v.device, &ci, nullptr, &m);
+  vkCreateShaderModule(g_vk.device, &ci, nullptr, &m);
   return m;
 }
 
-bool createPipeline() {
+bool CreatePipeline() {
   VkAttachmentDescription att{};
-  att.format = v.format;
+  att.format = g_vk.format;
   att.samples = VK_SAMPLE_COUNT_1_BIT;
-  att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // preserve the blitted frame
+  att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // preserve the blitted frame
   att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
   att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
   att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-  att.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; // after the blit
+  att.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;  // after the blit
   att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
   VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
   VkSubpassDescription sub{};
@@ -125,7 +127,7 @@ bool createPipeline() {
   rp.pSubpasses = &sub;
   rp.dependencyCount = 1;
   rp.pDependencies = &dep;
-  if (vkCreateRenderPass(v.device, &rp, nullptr, &v.pass) != VK_SUCCESS)
+  if (vkCreateRenderPass(g_vk.device, &rp, nullptr, &g_vk.pass) != VK_SUCCESS)
     return false;
 
   VkDescriptorSetLayoutBinding b{};
@@ -137,18 +139,18 @@ bool createPipeline() {
       VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   dl.bindingCount = 1;
   dl.pBindings = &b;
-  vkCreateDescriptorSetLayout(v.device, &dl, nullptr, &v.descLayout);
+  vkCreateDescriptorSetLayout(g_vk.device, &dl, nullptr, &g_vk.desc_layout);
 
   VkPushConstantRange pc{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 4};
   VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   pl.setLayoutCount = 1;
-  pl.pSetLayouts = &v.descLayout;
+  pl.pSetLayouts = &g_vk.desc_layout;
   pl.pushConstantRangeCount = 1;
   pl.pPushConstantRanges = &pc;
-  vkCreatePipelineLayout(v.device, &pl, nullptr, &v.pipeLayout);
+  vkCreatePipelineLayout(g_vk.device, &pl, nullptr, &g_vk.pipe_layout);
 
-  VkShaderModule vs = makeModule(kImguiVertSpv, sizeof(kImguiVertSpv));
-  VkShaderModule fs = makeModule(kImguiFragSpv, sizeof(kImguiFragSpv));
+  VkShaderModule vs = MakeModule(kImguiVertSpv, sizeof(kImguiVertSpv));
+  VkShaderModule fs = MakeModule(kImguiFragSpv, sizeof(kImguiFragSpv));
   VkPipelineShaderStageCreateInfo st[2]{};
   st[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -216,18 +218,18 @@ bool createPipeline() {
   gp.pMultisampleState = &ms;
   gp.pColorBlendState = &cb;
   gp.pDynamicState = &ds;
-  gp.layout = v.pipeLayout;
-  gp.renderPass = v.pass;
-  VkResult r = vkCreateGraphicsPipelines(v.device, VK_NULL_HANDLE, 1, &gp,
-                                         nullptr, &v.pipe);
-  vkDestroyShaderModule(v.device, vs, nullptr);
-  vkDestroyShaderModule(v.device, fs, nullptr);
+  gp.layout = g_vk.pipe_layout;
+  gp.renderPass = g_vk.pass;
+  VkResult r = vkCreateGraphicsPipelines(g_vk.device, VK_NULL_HANDLE, 1, &gp,
+                                         nullptr, &g_vk.pipe);
+  vkDestroyShaderModule(g_vk.device, vs, nullptr);
+  vkDestroyShaderModule(g_vk.device, fs, nullptr);
   return r == VK_SUCCESS;
 }
 
-bool uploadFont() {
-  ImGuiIO &io = ImGui::GetIO();
-  unsigned char *px = nullptr;
+bool UploadFont() {
+  ImGuiIO& io = ImGui::GetIO();
+  unsigned char* px = nullptr;
   int w = 0, h = 0;
   io.Fonts->GetTexDataAsRGBA32(&px, &w, &h);
   const VkDeviceSize bytes = (VkDeviceSize)w * h * 4;
@@ -242,35 +244,35 @@ bool uploadFont() {
   ic.tiling = VK_IMAGE_TILING_OPTIMAL;
   ic.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   ic.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  if (vkCreateImage(v.device, &ic, nullptr, &v.fontImg) != VK_SUCCESS)
+  if (vkCreateImage(g_vk.device, &ic, nullptr, &g_vk.font_img) != VK_SUCCESS)
     return false;
   VkMemoryRequirements req;
-  vkGetImageMemoryRequirements(v.device, v.fontImg, &req);
+  vkGetImageMemoryRequirements(g_vk.device, g_vk.font_img, &req);
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = req.size;
   ai.memoryTypeIndex =
-      memType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  vkAllocateMemory(v.device, &ai, nullptr, &v.fontMem);
-  vkBindImageMemory(v.device, v.fontImg, v.fontMem, 0);
+      MemType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  vkAllocateMemory(g_vk.device, &ai, nullptr, &g_vk.font_mem);
+  vkBindImageMemory(g_vk.device, g_vk.font_img, g_vk.font_mem, 0);
 
   VkBuffer stg;
-  VkDeviceMemory stgMem;
-  makeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+  VkDeviceMemory stg_mem;
+  MakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-             stg, stgMem);
-  void *map = nullptr;
-  vkMapMemory(v.device, stgMem, 0, bytes, 0, &map);
+             stg, stg_mem);
+  void* map = nullptr;
+  vkMapMemory(g_vk.device, stg_mem, 0, bytes, 0, &map);
   std::memcpy(map, px, bytes);
-  vkUnmapMemory(v.device, stgMem);
+  vkUnmapMemory(g_vk.device, stg_mem);
 
   VkCommandBufferAllocateInfo ca{
       VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ca.commandPool = v.pool;
+  ca.commandPool = g_vk.pool;
   ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   ca.commandBufferCount = 1;
   VkCommandBuffer cmd;
-  vkAllocateCommandBuffers(v.device, &ca, &cmd);
+  vkAllocateCommandBuffers(g_vk.device, &ca, &cmd);
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(cmd, &bi);
@@ -282,7 +284,7 @@ bool uploadFont() {
     bar.newLayout = to;
     bar.srcAccessMask = sa;
     bar.dstAccessMask = da;
-    bar.image = v.fontImg;
+    bar.image = g_vk.font_img;
     bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     bar.srcQueueFamilyIndex = bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     vkCmdPipelineBarrier(cmd, ss, dds, 0, 0, nullptr, 0, nullptr, 1, &bar);
@@ -293,7 +295,7 @@ bool uploadFont() {
   VkBufferImageCopy cp{};
   cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   cp.imageExtent = {(u32)w, (u32)h, 1};
-  vkCmdCopyBufferToImage(cmd, stg, v.fontImg,
+  vkCmdCopyBufferToImage(cmd, stg, g_vk.font_img,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
   barrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -304,132 +306,137 @@ bool uploadFont() {
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
   si.pCommandBuffers = &cmd;
-  vkQueueSubmit(v.queue, 1, &si, VK_NULL_HANDLE);
-  vkQueueWaitIdle(v.queue);
-  vkFreeCommandBuffers(v.device, v.pool, 1, &cmd);
-  vkDestroyBuffer(v.device, stg, nullptr);
-  vkFreeMemory(v.device, stgMem, nullptr);
+  vkQueueSubmit(g_vk.queue, 1, &si, VK_NULL_HANDLE);
+  vkQueueWaitIdle(g_vk.queue);
+  vkFreeCommandBuffers(g_vk.device, g_vk.pool, 1, &cmd);
+  vkDestroyBuffer(g_vk.device, stg, nullptr);
+  vkFreeMemory(g_vk.device, stg_mem, nullptr);
 
   VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  iv.image = v.fontImg;
+  iv.image = g_vk.font_img;
   iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
   iv.format = VK_FORMAT_R8G8B8A8_UNORM;
   iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  vkCreateImageView(v.device, &iv, nullptr, &v.fontView);
+  vkCreateImageView(g_vk.device, &iv, nullptr, &g_vk.font_view);
 
   VkSamplerCreateInfo sm{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
   sm.magFilter = sm.minFilter = VK_FILTER_LINEAR;
   sm.addressModeU = sm.addressModeV = sm.addressModeW =
       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-  vkCreateSampler(v.device, &sm, nullptr, &v.sampler);
+  vkCreateSampler(g_vk.device, &sm, nullptr, &g_vk.sampler);
 
   VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
   VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
   dp.maxSets = 1;
   dp.poolSizeCount = 1;
   dp.pPoolSizes = &ps;
-  vkCreateDescriptorPool(v.device, &dp, nullptr, &v.descPool);
+  vkCreateDescriptorPool(g_vk.device, &dp, nullptr, &g_vk.desc_pool);
   VkDescriptorSetAllocateInfo da{
       VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  da.descriptorPool = v.descPool;
+  da.descriptorPool = g_vk.desc_pool;
   da.descriptorSetCount = 1;
-  da.pSetLayouts = &v.descLayout;
-  vkAllocateDescriptorSets(v.device, &da, &v.descSet);
-  VkDescriptorImageInfo dii{v.sampler, v.fontView,
+  da.pSetLayouts = &g_vk.desc_layout;
+  vkAllocateDescriptorSets(g_vk.device, &da, &g_vk.desc_set);
+  VkDescriptorImageInfo dii{g_vk.sampler, g_vk.font_view,
                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
   VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-  wr.dstSet = v.descSet;
+  wr.dstSet = g_vk.desc_set;
   wr.descriptorCount = 1;
   wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
   wr.pImageInfo = &dii;
-  vkUpdateDescriptorSets(v.device, 1, &wr, 0, nullptr);
-  io.Fonts->SetTexID((ImTextureID)(intptr_t)v.descSet);
+  vkUpdateDescriptorSets(g_vk.device, 1, &wr, 0, nullptr);
+  io.Fonts->SetTexID((ImTextureID)(intptr_t)g_vk.desc_set);
   return true;
 }
 
-void destroyMappedBuffer(VkBuffer &buffer, VkDeviceMemory &memory, void *&map) {
+void DestroyMappedBuffer(VkBuffer& buffer, VkDeviceMemory& memory, void*& map) {
   if (map)
-    vkUnmapMemory(v.device, memory);
+    vkUnmapMemory(g_vk.device, memory);
   if (buffer)
-    vkDestroyBuffer(v.device, buffer, nullptr);
+    vkDestroyBuffer(g_vk.device, buffer, nullptr);
   if (memory)
-    vkFreeMemory(v.device, memory, nullptr);
+    vkFreeMemory(g_vk.device, memory, nullptr);
   buffer = VK_NULL_HANDLE;
   memory = VK_NULL_HANDLE;
   map = nullptr;
 }
 
-void destroyFrame(Frame &frame) {
-  destroyMappedBuffer(frame.vtx, frame.vtxMem, frame.vtxMap);
-  destroyMappedBuffer(frame.idx, frame.idxMem, frame.idxMap);
+void DestroyFrame(Frame& frame) {
+  DestroyMappedBuffer(frame.vtx, frame.vtx_mem, frame.vtx_map);
+  DestroyMappedBuffer(frame.idx, frame.idx_mem, frame.idx_map);
   frame = {};
 }
 
-void ensureFrameCapacity(Frame &f, VkDeviceSize vtxBytes,
-                         VkDeviceSize idxBytes) {
-  if (f.vtxCap < vtxBytes) {
-    destroyMappedBuffer(f.vtx, f.vtxMem, f.vtxMap);
-    VkDeviceSize cap = vtxBytes + 4096;
-    makeBuffer(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+void EnsureFrameCapacity(Frame& f,
+                         VkDeviceSize vtx_bytes,
+                         VkDeviceSize idx_bytes) {
+  if (f.vtx_cap < vtx_bytes) {
+    DestroyMappedBuffer(f.vtx, f.vtx_mem, f.vtx_map);
+    VkDeviceSize cap = vtx_bytes + 4096;
+    MakeBuffer(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-               f.vtx, f.vtxMem);
-    vkMapMemory(v.device, f.vtxMem, 0, cap, 0, &f.vtxMap);
-    f.vtxCap = cap;
+               f.vtx, f.vtx_mem);
+    vkMapMemory(g_vk.device, f.vtx_mem, 0, cap, 0, &f.vtx_map);
+    f.vtx_cap = cap;
   }
-  if (f.idxCap < idxBytes) {
-    destroyMappedBuffer(f.idx, f.idxMem, f.idxMap);
-    VkDeviceSize cap = idxBytes + 4096;
-    makeBuffer(cap, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+  if (f.idx_cap < idx_bytes) {
+    DestroyMappedBuffer(f.idx, f.idx_mem, f.idx_map);
+    VkDeviceSize cap = idx_bytes + 4096;
+    MakeBuffer(cap, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-               f.idx, f.idxMem);
-    vkMapMemory(v.device, f.idxMem, 0, cap, 0, &f.idxMap);
-    f.idxCap = cap;
+               f.idx, f.idx_mem);
+    vkMapMemory(g_vk.device, f.idx_mem, 0, cap, 0, &f.idx_map);
+    f.idx_cap = cap;
   }
 }
 
-void destroyFramebuffers() {
-  for (VkFramebuffer fb : v.fbs)
-    vkDestroyFramebuffer(v.device, fb, nullptr);
-  for (VkImageView iv : v.views)
-    vkDestroyImageView(v.device, iv, nullptr);
-  v.fbs.clear();
-  v.views.clear();
+void DestroyFramebuffers() {
+  for (VkFramebuffer fb : g_vk.fbs)
+    vkDestroyFramebuffer(g_vk.device, fb, nullptr);
+  for (VkImageView iv : g_vk.views)
+    vkDestroyImageView(g_vk.device, iv, nullptr);
+  g_vk.fbs.clear();
+  g_vk.views.clear();
 }
 
-} // namespace
+}  // namespace
 
-bool overlayVkInit(VkPhysicalDevice phys, VkDevice device, VkQueue queue,
-                   u32 queueFamily, VkCommandPool pool,
-                   VkFormat swapFormat) {
-  if (v.ready)
+bool OverlayVkInit(VkPhysicalDevice phys,
+                   VkDevice device,
+                   VkQueue queue,
+                   u32 queue_family,
+                   VkCommandPool pool,
+                   VkFormat swap_format) {
+  if (g_vk.ready)
     return true;
-  v.phys = phys;
-  v.device = device;
-  v.queue = queue;
-  v.pool = pool;
-  v.format = swapFormat;
-  overlayEnsureImGui();
-  if (!createPipeline() || !uploadFont()) {
+  g_vk.phys = phys;
+  g_vk.device = device;
+  g_vk.queue = queue;
+  g_vk.pool = pool;
+  g_vk.format = swap_format;
+  OverlayEnsureImGui();
+  if (!CreatePipeline() || !UploadFont()) {
     BASE_LOGI("overlay", "Vulkan backend init failed");
     return false;
   }
-  v.ready = true;
+  g_vk.ready = true;
   return true;
 }
 
-void overlayVkSetSwapchain(const base::Vector<VkImage> &images,
-                           VkExtent2D extent, VkFormat format) {
-  if (!v.device)
+void OverlayVkSetSwapchain(const base::Vector<VkImage>& images,
+                           VkExtent2D extent,
+                           VkFormat format) {
+  if (!g_vk.device)
     return;
-  destroyFramebuffers();
-  for (Frame &frame : v.frames)
-    destroyFrame(frame);
-  v.frames.clear();
-  v.extent = extent;
-  v.format = format;
-  v.frames.resize(images.size());
+  DestroyFramebuffers();
+  for (Frame& frame : g_vk.frames)
+    DestroyFrame(frame);
+  g_vk.frames.clear();
+  g_vk.extent = extent;
+  g_vk.format = format;
+  g_vk.frames.resize(images.size());
   for (VkImage img : images) {
     VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     iv.image = img;
@@ -437,35 +444,36 @@ void overlayVkSetSwapchain(const base::Vector<VkImage> &images,
     iv.format = format;
     iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     VkImageView view = VK_NULL_HANDLE;
-    vkCreateImageView(v.device, &iv, nullptr, &view);
-    v.views.push_back(view);
+    vkCreateImageView(g_vk.device, &iv, nullptr, &view);
+    g_vk.views.push_back(view);
     VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-    fb.renderPass = v.pass;
+    fb.renderPass = g_vk.pass;
     fb.attachmentCount = 1;
     fb.pAttachments = &view;
     fb.width = extent.width;
     fb.height = extent.height;
     fb.layers = 1;
     VkFramebuffer f = VK_NULL_HANDLE;
-    vkCreateFramebuffer(v.device, &fb, nullptr, &f);
-    v.fbs.push_back(f);
+    vkCreateFramebuffer(g_vk.device, &fb, nullptr, &f);
+    g_vk.fbs.push_back(f);
   }
 }
 
-bool overlayVkRender(VkCommandBuffer cmd, u32 imageIndex) {
-  if (!v.ready || imageIndex >= v.fbs.size() || imageIndex >= v.frames.size())
+bool OverlayVkRender(VkCommandBuffer cmd, u32 image_index) {
+  if (!g_vk.ready || image_index >= g_vk.fbs.size() ||
+      image_index >= g_vk.frames.size())
     return false;
-  const ImDrawData *dd = ImGui::GetDrawData();
-  const int fbW = v.extent.width, fbH = v.extent.height;
-  Frame &frame = v.frames[imageIndex];
+  const ImDrawData* dd = ImGui::GetDrawData();
+  const int fb_w = g_vk.extent.width, fb_h = g_vk.extent.height;
+  Frame& frame = g_vk.frames[image_index];
 
   if (dd && dd->TotalVtxCount > 0) {
-    ensureFrameCapacity(frame, dd->TotalVtxCount * sizeof(ImDrawVert),
+    EnsureFrameCapacity(frame, dd->TotalVtxCount * sizeof(ImDrawVert),
                         dd->TotalIdxCount * sizeof(ImDrawIdx));
-    auto *vtx = static_cast<ImDrawVert *>(frame.vtxMap);
-    auto *idx = static_cast<ImDrawIdx *>(frame.idxMap);
+    auto* vtx = static_cast<ImDrawVert*>(frame.vtx_map);
+    auto* idx = static_cast<ImDrawIdx*>(frame.idx_map);
     for (int i = 0; i < dd->CmdListsCount; i++) {
-      const ImDrawList *cl = dd->CmdLists[i];
+      const ImDrawList* cl = dd->CmdLists[i];
       std::memcpy(vtx, cl->VtxBuffer.Data,
                   cl->VtxBuffer.Size * sizeof(ImDrawVert));
       std::memcpy(idx, cl->IdxBuffer.Data,
@@ -476,74 +484,76 @@ bool overlayVkRender(VkCommandBuffer cmd, u32 imageIndex) {
   }
 
   VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-  rp.renderPass = v.pass;
-  rp.framebuffer = v.fbs[imageIndex];
-  rp.renderArea.extent = v.extent;
+  rp.renderPass = g_vk.pass;
+  rp.framebuffer = g_vk.fbs[image_index];
+  rp.renderArea.extent = g_vk.extent;
   vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
   if (dd && dd->TotalVtxCount > 0) {
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, v.pipe);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, v.pipeLayout,
-                            0, 1, &v.descSet, 0, nullptr);
-    VkViewport vpt{0, 0, (float)fbW, (float)fbH, 0, 1};
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_vk.pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            g_vk.pipe_layout, 0, 1, &g_vk.desc_set, 0, nullptr);
+    VkViewport vpt{0, 0, (float)fb_w, (float)fb_h, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vpt);
-    float push[4] = {2.0f / fbW, 2.0f / fbH, -1.0f, -1.0f};
-    vkCmdPushConstants(cmd, v.pipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+    float push[4] = {2.0f / fb_w, 2.0f / fb_h, -1.0f, -1.0f};
+    vkCmdPushConstants(cmd, g_vk.pipe_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
                        sizeof(push), push);
     VkDeviceSize off = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &frame.vtx, &off);
-    vkCmdBindIndexBuffer(cmd, frame.idx, 0,
-                         sizeof(ImDrawIdx) == 2 ? VK_INDEX_TYPE_UINT16
-                                                : VK_INDEX_TYPE_UINT32);
-    int vtxOff = 0, idxOff = 0;
+    vkCmdBindIndexBuffer(
+        cmd, frame.idx, 0,
+        sizeof(ImDrawIdx) == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+    int vtx_off = 0, idx_off = 0;
     for (int i = 0; i < dd->CmdListsCount; i++) {
-      const ImDrawList *cl = dd->CmdLists[i];
-      for (const ImDrawCmd &c : cl->CmdBuffer) {
+      const ImDrawList* cl = dd->CmdLists[i];
+      for (const ImDrawCmd& c : cl->CmdBuffer) {
         VkRect2D sc{};
         sc.offset.x = (i32)(c.ClipRect.x > 0 ? c.ClipRect.x : 0);
         sc.offset.y = (i32)(c.ClipRect.y > 0 ? c.ClipRect.y : 0);
         sc.extent.width = (u32)(c.ClipRect.z - sc.offset.x);
         sc.extent.height = (u32)(c.ClipRect.w - sc.offset.y);
         vkCmdSetScissor(cmd, 0, 1, &sc);
-        vkCmdDrawIndexed(cmd, c.ElemCount, 1, c.IdxOffset + idxOff,
-                         c.VtxOffset + vtxOff, 0);
+        vkCmdDrawIndexed(cmd, c.ElemCount, 1, c.IdxOffset + idx_off,
+                         c.VtxOffset + vtx_off, 0);
       }
-      vtxOff += cl->VtxBuffer.Size;
-      idxOff += cl->IdxBuffer.Size;
+      vtx_off += cl->VtxBuffer.Size;
+      idx_off += cl->IdxBuffer.Size;
     }
   }
   vkCmdEndRenderPass(cmd);
   return true;
 }
 
-void overlayVkShutdown() {
-  if (!v.device)
+void OverlayVkShutdown() {
+  if (!g_vk.device)
     return;
-  vkDeviceWaitIdle(v.device);
-  destroyFramebuffers();
-  for (Frame &frame : v.frames)
-    destroyFrame(frame);
-  if (v.pipe)
-    vkDestroyPipeline(v.device, v.pipe, nullptr);
-  if (v.pipeLayout)
-    vkDestroyPipelineLayout(v.device, v.pipeLayout, nullptr);
-  if (v.descPool)
-    vkDestroyDescriptorPool(v.device, v.descPool, nullptr);
-  if (v.descLayout)
-    vkDestroyDescriptorSetLayout(v.device, v.descLayout, nullptr);
-  if (v.sampler)
-    vkDestroySampler(v.device, v.sampler, nullptr);
-  if (v.fontView)
-    vkDestroyImageView(v.device, v.fontView, nullptr);
-  if (v.fontImg)
-    vkDestroyImage(v.device, v.fontImg, nullptr);
-  if (v.fontMem)
-    vkFreeMemory(v.device, v.fontMem, nullptr);
-  if (v.pass)
-    vkDestroyRenderPass(v.device, v.pass, nullptr);
-  v = {};
+  vkDeviceWaitIdle(g_vk.device);
+  DestroyFramebuffers();
+  for (Frame& frame : g_vk.frames)
+    DestroyFrame(frame);
+  if (g_vk.pipe)
+    vkDestroyPipeline(g_vk.device, g_vk.pipe, nullptr);
+  if (g_vk.pipe_layout)
+    vkDestroyPipelineLayout(g_vk.device, g_vk.pipe_layout, nullptr);
+  if (g_vk.desc_pool)
+    vkDestroyDescriptorPool(g_vk.device, g_vk.desc_pool, nullptr);
+  if (g_vk.desc_layout)
+    vkDestroyDescriptorSetLayout(g_vk.device, g_vk.desc_layout, nullptr);
+  if (g_vk.sampler)
+    vkDestroySampler(g_vk.device, g_vk.sampler, nullptr);
+  if (g_vk.font_view)
+    vkDestroyImageView(g_vk.device, g_vk.font_view, nullptr);
+  if (g_vk.font_img)
+    vkDestroyImage(g_vk.device, g_vk.font_img, nullptr);
+  if (g_vk.font_mem)
+    vkFreeMemory(g_vk.device, g_vk.font_mem, nullptr);
+  if (g_vk.pass)
+    vkDestroyRenderPass(g_vk.device, g_vk.pass, nullptr);
+  g_vk = {};
 }
 
-bool overlayVkReady() { return v.ready && !v.fbs.empty(); }
+bool OverlayVkReady() {
+  return g_vk.ready && !g_vk.fbs.empty();
+}
 
-} // namespace host
+}  // namespace host

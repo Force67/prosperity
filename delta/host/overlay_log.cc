@@ -4,17 +4,17 @@
  * The live log panel. See overlay_log.h.
  */
 
-#include "base/arch.h"
 #include <cstring>
+#include "base/arch.h"
 
-#include <base/memory/unique_pointer.h>
-#include <logger/logger.h>
+#include "base/memory/unique_pointer.h"
+#include "logger/logger.h"
 
+#include "base/math/value_bounds.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "host/overlay_log.h"
 #include "imgui.h"
-#include "overlay_log.h"
-#include <base/math/value_bounds.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
 
 namespace host {
 namespace {
@@ -34,21 +34,21 @@ struct Line {
 // render thread for one snapshot per frame.
 base::Mutex g_mutex;
 Line g_lines[kLines];
-u32 g_next = 0;  // slot the next line goes in
-u32 g_count = 0; // filled slots, saturating at kLines
+u32 g_next = 0;   // slot the next line goes in
+u32 g_count = 0;  // filled slots, saturating at kLines
 bool g_visible = true;
 bool g_attached = false;
 
 class LogPanelSink final : public logger::LogSink {
-public:
-  const char *GetName() override { return "overlayLog"; }
+ public:
+  const char* GetName() override { return "overlayLog"; }
 
-  void Write(const logger::LogEntry &entry) override {
-    const char *text = entry.message.c_str();
+  void Write(const logger::LogEntry& entry) override {
+    const char* text = entry.message.c_str();
     const size_t length =
         base::Min<size_t>(entry.message.length(), kLineChars - 1);
     base::LockGuard<base::Mutex> lock(g_mutex);
-    Line &line = g_lines[g_next];
+    Line& line = g_lines[g_next];
     std::memcpy(line.text, text, length);
     line.text[length] = '\0';
     line.level = static_cast<u8>(entry.log_level);
@@ -60,31 +60,31 @@ public:
 
 ImU32 LevelColour(u8 level) {
   switch (static_cast<logger::LogLevel>(level)) {
-  case logger::LogLevel::kTrace:
-    return IM_COL32(140, 140, 140, 255);
-  case logger::LogLevel::kDebug:
-    return IM_COL32(120, 200, 255, 255);
-  case logger::LogLevel::kWarning:
-    return IM_COL32(255, 210, 100, 255);
-  case logger::LogLevel::kError:
-    return IM_COL32(255, 110, 110, 255);
-  case logger::LogLevel::kCritical:
-    return IM_COL32(255, 130, 255, 255);
-  default:
-    return IM_COL32(225, 225, 225, 255);
+    case logger::LogLevel::kTrace:
+      return IM_COL32(140, 140, 140, 255);
+    case logger::LogLevel::kDebug:
+      return IM_COL32(120, 200, 255, 255);
+    case logger::LogLevel::kWarning:
+      return IM_COL32(255, 210, 100, 255);
+    case logger::LogLevel::kError:
+      return IM_COL32(255, 110, 110, 255);
+    case logger::LogLevel::kCritical:
+      return IM_COL32(255, 130, 255, 255);
+    default:
+      return IM_COL32(225, 225, 225, 255);
   }
 }
 
 }  // namespace
 
-void overlayLogAttach() {
+void OverlayLogAttach() {
   if (g_attached)
     return;
   g_attached = true;
   logger::AddLogSink(base::MakeUnique<LogPanelSink>());
 }
 
-void overlayLogBuild(u32 w, u32 h) {
+void OverlayLogBuild(u32 w, u32 h) {
   if (!g_visible)
     return;
 
@@ -101,13 +101,13 @@ void overlayLogBuild(u32 w, u32 h) {
   if (!count)
     return;
 
-  ImDrawList *dl = ImGui::GetForegroundDrawList();
+  ImDrawList* dl = ImGui::GetForegroundDrawList();
   const float fs = ImGui::GetFontSize();
   const float pad = 6.0f, lh = fs + 2.0f, margin = 10.0f;
-  const float areaW = base::Min(float(w) * 0.42f, 760.0f);
-  const float areaH = pad * 2.0f + lh * count;
-  const ImVec2 tl(float(w) - areaW - margin, float(h) - areaH - margin);
-  const ImVec2 br(tl.x + areaW, tl.y + areaH);
+  const float area_w = base::Min(float(w) * 0.42f, 760.0f);
+  const float area_h = pad * 2.0f + lh * count;
+  const ImVec2 tl(float(w) - area_w - margin, float(h) - area_h - margin);
+  const ImVec2 br(tl.x + area_w, tl.y + area_h);
 
   // Enough dim to read text over a bright frame, with no frame of its own.
   dl->AddRectFilled(tl, br, IM_COL32(0, 0, 0, 110));
@@ -124,6 +124,8 @@ void overlayLogBuild(u32 w, u32 h) {
   dl->PopClipRect();
 }
 
-void overlayLogToggle() { g_visible = !g_visible; }
+void OverlayLogToggle() {
+  g_visible = !g_visible;
+}
 
 }  // namespace host

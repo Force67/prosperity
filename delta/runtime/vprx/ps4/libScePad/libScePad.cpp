@@ -295,7 +295,7 @@ u32 autoSkipButtons() {
   // pause menu) and keep only an occasional Cross to dismiss popups. Never Circle/
   // Down so nothing cancels or moves off the default path. The gameplay signal
   // latches, so a brief pause flash won't restart the mashing.
-  if (host::inGameplay())
+  if (host::InGameplay())
     return 0;
   // DELTA_PAD_AUTOSKIP_STOP=N: stop after N reads; an idle-triggered attract DEMO
   // (Doom64) only plays once input goes quiet, so login passes then the title idles.
@@ -483,7 +483,7 @@ void fillPadState(PadData *d) {
   host::PadKeys k;
   if (kPadAutoskip) {
     buttons = autoSkipButtons();
-  } else if (kPadKeyboard && host::pollKeyboardPad(k)) {
+  } else if (kPadKeyboard && host::PollKeyboardPad(k)) {
     if (k.cross) buttons |= kCross;
     if (k.circle) buttons |= kCircle;
     if (k.square) buttons |= kSquare;
@@ -504,7 +504,7 @@ void fillPadState(PadData *d) {
   // headless run visits multiple rooms (to verify rendering beyond the start room).
   // Cycles direction every ~150 reads (up, right, down, left) on the left stick.
   static u64 g_firstGameplaySeq = 0;
-  if (kPadExplore && kPadAutoskip && host::inGameplay()) {
+  if (kPadExplore && kPadAutoskip && host::InGameplay()) {
     if (!g_firstGameplaySeq) g_firstGameplaySeq = g_readSeq;
     u64 since = g_readSeq - g_firstGameplaySeq;
     // Walk up into the adjacent room and stop near its centre (a short burst), then
@@ -781,7 +781,7 @@ int scePadSetTiltCorrectionState() {
 struct ScePadVibrationParam { u8 largeMotor; u8 smallMotor; };
 int scePadSetVibration(int /*handle*/, const ScePadVibrationParam *param) {
   if (param)
-    host::setRumble(param->largeMotor, param->smallMotor);
+    host::SetRumble(param->largeMotor, param->smallMotor);
   return 0;
 }
 

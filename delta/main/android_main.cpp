@@ -112,7 +112,7 @@ void forwardTouch(AInputEvent *ev) {
   int action = AMotionEvent_getAction(ev);
   int kind = action & AMOTION_EVENT_ACTION_MASK;
   if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_CANCEL) {
-    host::setAndroidTouches(nullptr, 0);  // last finger up
+    host::SetAndroidTouches(nullptr, 0);  // last finger up
     return;
   }
   int upIdx = -1;
@@ -129,7 +129,7 @@ void forwardTouch(AInputEvent *ev) {
     pts[c].y = AMotionEvent_getY(ev, i);
     c++;
   }
-  host::setAndroidTouches(pts, c);
+  host::SetAndroidTouches(pts, c);
 }
 
 void onCmd(android_app *app, i32 cmd) {
@@ -137,12 +137,12 @@ void onCmd(android_app *app, i32 cmd) {
   switch (cmd) {
   case APP_CMD_INIT_WINDOW:
     if (app->window) {
-      host::setAndroidWindow(app->window);
+      host::SetAndroidWindow(app->window);
       bootOnce(s);  // first window: start the emulator (renderer needs a window)
     }
     break;
   case APP_CMD_TERM_WINDOW:
-    host::setAndroidWindow(nullptr);
+    host::SetAndroidWindow(nullptr);
     break;
   default:
     break;

@@ -7,19 +7,19 @@
  * drawn by the GPU perf overlay instead (gpu/render/perf.cc).
  */
 
-#include "base/arch.h"
+#include <unistd.h>
 #include <cfloat>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
-#include <unistd.h>
+#include "base/arch.h"
 
+#include "base/math/value_bounds.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "host/overlay.h"
+#include "host/overlay_log.h"
 #include "imgui.h"
-#include "overlay.h"
-#include "overlay_log.h"
-#include <base/math/value_bounds.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
 
 namespace host {
 namespace {
@@ -27,8 +27,8 @@ namespace {
 bool g_visible = true;
 bool g_inited = false;
 
-base::Mutex g_perfMtx;
-float g_fps = 0, g_gpuMs = 0, g_frameMs = 0;
+base::Mutex g_perf_mtx;
+float g_fps = 0, g_gpu_ms = 0, g_frame_ms = 0;
 
 struct Row {
   const char *key, *button;
@@ -47,73 +47,77 @@ const Row kRows[] = {
     {"Enter / P", "Options  (start)"},
     {"Tab", "Touchpad  (map)"},
 };
-const char *kTitle = "Controls  (F1 to toggle)";
+const char* kTitle = "Controls  (F1 to toggle)";
 
 // ---- drawing helpers (foreground draw list) --------------------------------
-void panelBg(ImDrawList *dl, ImVec2 tl, ImVec2 br) {
+void PanelBg(ImDrawList* dl, ImVec2 tl, ImVec2 br) {
   dl->AddRectFilled(tl, br, IM_COL32(15, 15, 18, 205), 5.0f);
   dl->AddRect(tl, br, IM_COL32(255, 255, 255, 40), 5.0f);
 }
 
-void buildLegend() {
-  ImDrawList *dl = ImGui::GetForegroundDrawList();
-  ImFont *font = ImGui::GetFont();
+void BuildLegend() {
+  ImDrawList* dl = ImGui::GetForegroundDrawList();
+  ImFont* font = ImGui::GetFont();
   const float fs = ImGui::GetFontSize();
   const float pad = 8.0f, gap = fs, lh = fs + 3.0f;
-  float keyW = 0.0f;
-  for (auto &r : kRows)
-    keyW = base::Max(keyW, font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.key).x);
-  float bodyW = 0.0f;
-  for (auto &r : kRows)
-    bodyW = base::Max(bodyW, keyW + gap + font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.button).x);
-  float titleW = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, kTitle).x;
+  float key_w = 0.0f;
+  for (auto& r : kRows)
+    key_w = base::Max(key_w, font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.key).x);
+  float body_w = 0.0f;
+  for (auto& r : kRows)
+    body_w = base::Max(
+        body_w,
+        key_w + gap + font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.button).x);
+  float title_w = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, kTitle).x;
   const ImVec2 o(10.0f, 10.0f);
-  float panelW = base::Max(titleW, bodyW) + pad * 2.0f;
-  float panelH = pad * 2.0f + lh + 4.0f + lh * IM_ARRAYSIZE(kRows);
-  panelBg(dl, o, ImVec2(o.x + panelW, o.y + panelH));
+  float panel_w = base::Max(title_w, body_w) + pad * 2.0f;
+  float panel_h = pad * 2.0f + lh + 4.0f + lh * IM_ARRAYSIZE(kRows);
+  PanelBg(dl, o, ImVec2(o.x + panel_w, o.y + panel_h));
   float x = o.x + pad, y = o.y + pad;
   dl->AddText(ImVec2(x, y), IM_COL32(120, 200, 255, 255), kTitle);
   y += lh + 4.0f;
-  for (auto &r : kRows) {
+  for (auto& r : kRows) {
     dl->AddText(ImVec2(x, y), IM_COL32(255, 235, 150, 255), r.key);
-    dl->AddText(ImVec2(x + keyW + gap, y), IM_COL32(230, 230, 230, 255), r.button);
+    dl->AddText(ImVec2(x + key_w + gap, y), IM_COL32(230, 230, 230, 255),
+                r.button);
     y += lh;
   }
 }
 
 }  // namespace
 
-void overlayEnsureImGui() {
+void OverlayEnsureImGui() {
   if (g_inited)
     return;
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
-  ImGuiIO &io = ImGui::GetIO();
+  ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
   g_inited = true;
 }
 
-void overlaySetPerf(float fps, float gpuMs, float frameMs) {
-  base::LockGuard<base::Mutex> lk(g_perfMtx);
+void OverlaySetPerf(float fps, float gpu_ms, float frame_ms) {
+  base::LockGuard<base::Mutex> lk(g_perf_mtx);
   g_fps = fps;
-  g_gpuMs = gpuMs;
-  g_frameMs = frameMs;
+  g_gpu_ms = gpu_ms;
+  g_frame_ms = frame_ms;
 }
 
-void overlayBuildFrame(u32 w, u32 h, u64 vramUsed,
-                       u64 vramTotal) {
-  overlayEnsureImGui();
-  ImGuiIO &io = ImGui::GetIO();
+void OverlayBuildFrame(u32 w, u32 h, u64 vram_used, u64 vram_total) {
+  OverlayEnsureImGui();
+  ImGuiIO& io = ImGui::GetIO();
   io.DisplaySize = ImVec2((float)w, (float)h);
   io.DeltaTime = 1.0f / 60.0f;
   ImGui::NewFrame();
   if (g_visible)
-    buildLegend();
-  overlayLogBuild(w, h);
+    BuildLegend();
+  OverlayLogBuild(w, h);
   ImGui::Render();
 }
 
-void overlayToggle() { g_visible = !g_visible; }
+void OverlayToggle() {
+  g_visible = !g_visible;
+}
 
 }  // namespace host

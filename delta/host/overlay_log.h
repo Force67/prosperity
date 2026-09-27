@@ -21,13 +21,13 @@
 
 namespace host {
 
-// Start capturing log lines. Idempotent; overlayEnsureImGui does it.
-void overlayLogAttach();
+// Start capturing log lines. Idempotent; OverlayEnsureImGui does it.
+void OverlayLogAttach();
 
 // Draw the panel over a display of `w` by `h`. No-op while hidden or empty.
-void overlayLogBuild(u32 w, u32 h);
+void OverlayLogBuild(u32 w, u32 h);
 
 // Bound to F2 by the window event pump. Visible by default.
-void overlayLogToggle();
+void OverlayLogToggle();
 
 }  // namespace host

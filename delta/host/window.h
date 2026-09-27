@@ -17,48 +17,51 @@
 namespace host {
 
 enum class PixelFormat {
-  rgba8, // R8G8B8A8 unorm, byte order R,G,B,A
-  bgra8, // B8G8R8A8 unorm (PS4 scanout default)
+  kRgba8,  // R8G8B8A8 unorm, byte order R,G,B,A
+  kBgra8,  // B8G8R8A8 unorm (PS4 scanout default)
 };
 
 // Set the window title (title id + platform). Applies immediately if the window
 // already exists, otherwise it overrides the title the creator passes.
-void setTitle(const char *title);
+void SetTitle(const char* title);
 
 // Set PNG artwork for the game window. The desktop backend applies a small
 // emulator badge before using it as the taskbar icon.
-void setIcon(const u8 *png, size_t size);
+void SetIcon(const u8* png, size_t size);
 
 // Device-local memory this process is using, and what it may use. Both 0 when
 // the driver has no VK_EXT_memory_budget (or there is no window at all).
-void queryVram(u64 &used, u64 &total);
+void QueryVram(u64& used, u64& total);
 
 // Create the window, Vulkan device and swapchain. Returns false on failure.
 // Idempotent: returns true immediately if a window already exists.
-bool init(const char *title, u32 width, u32 height);
+bool Init(const char* title, u32 width, u32 height);
 
 // Idempotent bring-up for the presenting thread: create the window on the first
 // call, then report availability. Stops retrying after a failed attempt.
-bool ensure(const char *title, u32 width, u32 height);
+bool Ensure(const char* title, u32 width, u32 height);
 
 // True once a window + swapchain exist (init succeeded and not shut down).
-bool available();
+bool Available();
 
 // True while this backend can create or keep presenting to a window. Unlike
 // available(), this is also true before lazy window initialization.
-bool canPresent();
+bool CanPresent();
 
 // Permanently interrupt presentation for shutdown. Vulkan waits use bounded
 // slices so a presenting worker observes this request before it is joined.
-void requestPresentStop();
+void RequestPresentStop();
 
 // Upload pixels (w by h, srcPitch bytes per row, 0 means w*4) and present them,
 // scaling to the current window size.
-void present(const void *pixels, u32 w, u32 h, u32 srcPitch = 0,
-             PixelFormat fmt = PixelFormat::rgba8);
+void Present(const void* pixels,
+             u32 w,
+             u32 h,
+             u32 src_pitch = 0,
+             PixelFormat fmt = PixelFormat::kRgba8);
 
 // Drain window events. Returns false once the user asks to close the window.
-bool pumpEvents();
+bool PumpEvents();
 
 // Keyboard-to-gamepad state (an optional input adapter). Buttons are booleans
 // and sticks are 0..255 with 128 centred. Maps a WASD/arrows layout to a DS4.
@@ -71,21 +74,21 @@ struct PadKeys {
 };
 // Fill `out` from the current keyboard state. Returns false if no window
 // exists.
-bool pollKeyboardPad(PadKeys &out);
+bool PollKeyboardPad(PadKeys& out);
 
 // Drive haptics on the active controller. large/small are the DS4 motor
 // intensities (0..255). Routed to SDL gamepad rumble (PC) or the device
 // vibrator (Android); a no-op when no haptic device is present.
-void setRumble(u8 largeMotor, u8 smallMotor);
+void SetRumble(u8 large_motor, u8 small_motor);
 
 // Harness signal shared between the GPU renderer and the input layer. The
 // renderer raises it once sustained gameplay (room rendering) is on screen, so
 // the headless autoskip (DELTA_PAD_AUTOSKIP) stops pressing menu buttons and
 // stays in the run instead of bouncing back out through the pause menu. Latches
 // on (a run started).
-void setInGameplay(bool v);
-bool inGameplay();
+void SetInGameplay(bool v);
+bool InGameplay();
 
-void shutdown();
+void Shutdown();
 
-} // namespace host
+}  // namespace host

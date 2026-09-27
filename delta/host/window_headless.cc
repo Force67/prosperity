@@ -13,21 +13,35 @@
  * The on-screen app build (DELTA_ANDROID_APP) uses window_android.cc instead.
  */
 
-#include "window.h"
 #include "base/arch.h"
+#include "host/window.h"
 
 namespace host {
 
-bool init(const char *, u32, u32) { return false; }
-bool ensure(const char *, u32, u32) { return false; }
-bool available() { return false; }
-bool canPresent() { return false; }
-void requestPresentStop() {}
-void present(const void *, u32, u32, u32, PixelFormat) {}
-bool pumpEvents() { return true; }
-bool pollKeyboardPad(PadKeys &) { return false; }
-void setRumble(u8, u8) {}
-void shutdown() {}
-void queryVram(u64 &used, u64 &total) { used = total = 0; }
+bool Init(const char*, u32, u32) {
+  return false;
+}
+bool Ensure(const char*, u32, u32) {
+  return false;
+}
+bool Available() {
+  return false;
+}
+bool CanPresent() {
+  return false;
+}
+void RequestPresentStop() {}
+void Present(const void*, u32, u32, u32, PixelFormat) {}
+bool PumpEvents() {
+  return true;
+}
+bool PollKeyboardPad(PadKeys&) {
+  return false;
+}
+void SetRumble(u8, u8) {}
+void Shutdown() {}
+void QueryVram(u64& used, u64& total) {
+  used = total = 0;
+}
 
-} // namespace host
+}  // namespace host
