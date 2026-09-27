@@ -12,6 +12,7 @@
 // guest code runs through the FEXCore JIT instead (see delta/cpu/fex_backend).
 #if defined(DELTA_BACKEND_NATIVE)
 
+#include "cpu/backend.h"
 #include "base/arch.h"
 #include "base/math/alignment.h"
 #include <base/logging.h>
@@ -252,8 +253,8 @@ void codeLift::emit_fsbase(u8 *base) {
   };
 
   auto fsDisp = static_cast<i32>(mem.mem.disp);
-  fsGen gen(reg, fsDisp, gpr.size, isWrite, krnl::hostGuestFsOffset(),
-            krnl::hostFsScratchOffset());
+  fsGen gen(reg, fsDisp, gpr.size, isWrite, cpu::HostGuestFsOffset(),
+            cpu::HostFsScratchOffset());
 
   // Don't run past the rip-zone (sized to the segment in the loader). Leaving a
   // tail access raw is worse than ideal but far better than scribbling past the

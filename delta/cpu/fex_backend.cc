@@ -76,7 +76,7 @@ const u32* currentGuestTidPtr();  // this thread's guest tid TLS addr
 namespace cpu {
 
 // FEXCore thread on this host thread (1:1); the syscall handler and
-// krnl::setThreadFsBase (same TU) reach the live guest CPUState through it.
+// cpu::SetThreadFsBase (same TU) reach the live guest CPUState through it.
 static thread_local FEXCore::Core::InternalThreadState* t_curThread = nullptr;
 
 // Raw context for the signal-path helpers; owned by FexBackend's unique_ptr.
@@ -647,7 +647,7 @@ static u64 PS4ABI guestFnReturnExit() {
   return 0;  // unreachable (ExitGuestThread longjmps)
 }
 
-class FexBackend final : public ICpuBackend {
+class FexBackend final : public Backend {
  public:
   void OnImageMapped(krnl::moduleInfo& info) override {
     ensureInit();
@@ -1063,7 +1063,7 @@ void EarlyInit() {
   LOG_INFO("fex: reserved internal heap {} +{:#x}", r, kFexHeapSize);
 }
 
-ICpuBackend& backend() {
+Backend& GetBackend() {
   return g_backend;
 }
 
@@ -1479,12 +1479,12 @@ bool TryHandleJitSignal(int sig, void* infop, void* ucv) {
 
 // Guest fs base lives in the current FEXCore thread's CPUState; called via
 // sys_sysarch(AMD64_SET_FSBASE) and on thread spawn.
-namespace krnl {
-void setThreadFsBase(u64 v) {
-  if (cpu::t_curThread)
-    cpu::t_curThread->CurrentFrame->State.fs_cached = v;
+namespace cpu {
+void SetThreadFsBase(u64 v) {
+  if (t_curThread)
+    t_curThread->CurrentFrame->State.fs_cached = v;
 }
-u64 threadFsBase() {
-  return cpu::t_curThread ? cpu::t_curThread->CurrentFrame->State.fs_cached : 0;
+u64 ThreadFsBase() {
+  return t_curThread ? t_curThread->CurrentFrame->State.fs_cached : 0;
 }
-}  // namespace krnl
+}  // namespace cpu

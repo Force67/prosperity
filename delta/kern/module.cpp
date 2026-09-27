@@ -726,7 +726,7 @@ bool smodule::mapImage() {
 
   // Tell the backend the image is in place: native no-op (lifting done above),
   // FEX registers [base, base+codeSize) as an executable range for the JIT.
-  cpu::backend().OnImageMapped(info);
+  cpu::GetBackend().OnImageMapped(info);
 
   return true;
 }

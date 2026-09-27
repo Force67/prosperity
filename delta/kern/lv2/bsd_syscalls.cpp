@@ -7,6 +7,7 @@
  * in the root of the source tree.
  */
 
+#include "cpu/backend.h"
 #include "kern/proc.h"
 #include "kern/crash.h"
 #include <host_memory/host_memory.h>
@@ -99,7 +100,7 @@ int PS4ABI sys_sysarch(int num, void *args) {
   case AMD64_SET_FSBASE: {
     auto fsbase = *static_cast<void **>(args);
     env.fsBase = fsbase;
-    setThreadFsBase(reinterpret_cast<u64>(fsbase));
+    cpu::SetThreadFsBase(reinterpret_cast<u64>(fsbase));
     return 0;
   }
   case AMD64_GET_GSBASE:

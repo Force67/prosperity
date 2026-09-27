@@ -17,6 +17,7 @@
  * whether a fault is fatal at all, not part of tracing guest code.
  */
 
+#include "cpu/backend.h"
 #include "kern/probe/probe_arm.h"
 
 #include "base/arch.h"
@@ -1038,7 +1039,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       // fs accesses); ask the backend for the base the guest's fs:0 resolves to.
       heapProfRecord(
           caller, size,
-          g_heapProfScopeSlot && heapProfScopeDepth(threadFsBase()) == 0);
+          g_heapProfScopeSlot && heapProfScopeDepth(cpu::ThreadFsBase()) == 0);
       g_heapProfHookBytes[i].fetch_add(size, base::memory_order_relaxed);
       g_heapProfHookCalls[i].fetch_add(1, base::memory_order_relaxed);
       gr[REG_RSP] -= 8;  // emulate the displaced `push rbp`

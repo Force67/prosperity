@@ -386,7 +386,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
         uintptr_t a = baseAddr + std::strtoull(p, &end, 0);
         p = end;
         BASE_LOGI("modinit", "running {} init @ +{:#x}", s, a - baseAddr);
-        cpu::backend().RunGuestFunction(a, 0, 0, 0);
+        cpu::GetBackend().RunGuestFunction(a, 0, 0, 0);
         BASE_LOGI("modinit", "{} init @ returned", s);
       }
       // DELTA_VO_LLE_FIX: run libSceVideoOut's lazy init now (0xd530 sets display-config
@@ -397,7 +397,7 @@ int PS4ABI sys_dynlib_load_prx(const char *path, u64 flags, int *pHandle,
       if (kVoLleFix) {
         u8 *base = mod->getInfo().base;
         BASE_LOGI("volle", "running libSceVideoOut ctor (+0xd530)");
-        cpu::backend().RunGuestFunction(baseAddr + 0xd530, 0, 0, 0);
+        cpu::GetBackend().RunGuestFunction(baseAddr + 0xd530, 0, 0, 0);
         i32 idx = *reinterpret_cast<i32 *>(base + 0x1cb40);
         u32 f0c = *reinterpret_cast<u32 *>(base + 0x1cb50);
         BASE_LOGI("volle", "after ctor: idx={} cfg[0].f0={:#x}", idx, f0c);

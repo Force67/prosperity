@@ -45,7 +45,7 @@ ALLOWED = {
 GRANDFATHERED = {
     # delta/CMakeLists.txt declares the static-library cycle these create.
     #
-    # kern -> cpu is proc/module/threads calling cpu::backend() to run guest
+    # kern -> cpu is proc/module/threads calling cpu::GetBackend() to run guest
     # code; cpu -> kern is the FEX backend calling back for syscall dispatch,
     # module info and the fatal handler. That is one interface (a host-services
     # client the backend is handed) inverted the wrong way. Removing it means

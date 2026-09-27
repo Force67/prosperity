@@ -45,9 +45,9 @@ constexpr u32 kTlsGetAddrSyscall = 0x40000001u;
 // Top byte tags the range, low 24 bits are the thunk index.
 constexpr u32 kHostThunkSyscallBase = 0x42000000u;
 
-class ICpuBackend {
+class Backend {
  public:
-  virtual ~ICpuBackend() = default;
+  virtual ~Backend() = default;
 
   // Once per module, after segments are copied and before protections finalize.
   // Native: no-op. FEX: register the executable range with the JIT.
@@ -127,7 +127,7 @@ uintptr_t MakeGuestTrampoline(const void* fn_bytes,
 void EarlyInit();
 
 // The process-wide backend, selected at build time by the host arch.
-ICpuBackend& backend();
+Backend& GetBackend();
 
 // Guest RIP of the guest thread currently running on this host thread, or 0.
 // On FEX this is the live CPUState.rip; on native the host RIP is the guest RIP
@@ -176,5 +176,15 @@ u64 ReconstructGuestRip(u64 host_pc);
 // atomics, which the ARM JIT raises and FEX backpatches). True = handled,
 // resume the adjusted context.
 bool TryHandleJitSignal(int sig, void* info, void* ucontext);
+
+// Set the calling host thread's guest fs base (guest TLS pointer). Called for
+// the main thread (sysarch 129) and for each guest thread we spawn.
+void SetThreadFsBase(u64 fs_base);
+// The calling host thread's guest fs base, 0 when no guest thread runs on it.
+u64 ThreadFsBase();
+// Offsets from the host thread pointer of the guest fs base and of the lifted
+// code's scratch slot. Native only: the lifter bakes them into fs stubs.
+i32 HostGuestFsOffset();
+i32 HostFsScratchOffset();
 
 }  // namespace cpu

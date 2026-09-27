@@ -47,7 +47,7 @@ static proc *g_activeProc{nullptr};
 
 // The guest fs base (TLS) and how the guest entry is run are backend-specific
 // (see delta/cpu): native uses a host thread_local + direct call, FEX uses the
-// FEXCore CPUState + JIT. setThreadFsBase() is defined by the active backend.
+// FEXCore CPUState + JIT. cpu::SetThreadFsBase() is defined by the active backend.
 
 proc::proc() : vmem(env) { g_activeProc = this; }
 
@@ -293,7 +293,7 @@ void proc::start() {
   // PS5 starts with the TCB its kernel would have installed; libkernel reads
   // fs:0x10 before it gets around to setting up its own (see makeInitialTcb).
   const u64 fsbase = plat == platform::ps5 ? ps5::makeInitialTcb() : 0;
-  cpu::backend().EnterGuest(reinterpret_cast<uintptr_t>(kinfo.entry), stack,
+  cpu::GetBackend().EnterGuest(reinterpret_cast<uintptr_t>(kinfo.entry), stack,
                             fsbase);
 }
 }  // namespace krnl

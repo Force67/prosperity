@@ -194,7 +194,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   // our syscall handlers); the guest thread is created on THIS thread as FEX
   // requires, the worker host thread only runs it.
   void *gthread =
-      cpu::backend().CreateGuestThread(reinterpret_cast<uintptr_t>(fn), arg, fsbase);
+      cpu::GetBackend().CreateGuestThread(reinterpret_cast<uintptr_t>(fn), arg, fsbase);
 
   // DELTA_HOST_STACK_MB=<N>: guest workers get an N-MiB native stack; deep BPE
   // streaming jobs blow the 8 MiB glibc default ~9s into LoadInitialWorld.
@@ -224,7 +224,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
       void *gt = c->gthread;
       registerGuestThreadStack(c->stackBase, c->stackSize);
       delete c;
-      cpu::backend().RunGuestThread(gt);
+      cpu::GetBackend().RunGuestThread(gt);
       unregisterGuestThreadStack();
       return nullptr;
     };
@@ -236,7 +236,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
         noteGuestThreadHost(t_tid);
         t_started = started.get();
         registerGuestThreadStack(gsb, gss);
-        cpu::backend().RunGuestThread(gthread);
+        cpu::GetBackend().RunGuestThread(gthread);
         unregisterGuestThreadStack();
       });
     }
@@ -247,7 +247,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
       noteGuestThreadHost(t_tid);
       t_started = started.get();
       registerGuestThreadStack(gsb, gss);
-      cpu::backend().RunGuestThread(gthread);
+      cpu::GetBackend().RunGuestThread(gthread);
       unregisterGuestThreadStack();
     });
   }

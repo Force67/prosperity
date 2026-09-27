@@ -13,9 +13,8 @@
 #include "cpu/backend.h"
 #include "guest_abi.h"
 #include "kern/crash.h"
-#include "kern/proc.h"
 
-namespace krnl {
+namespace cpu {
 
 // Per-thread guest fs base and spill slot used by stackless FS lift stubs.
 __attribute__((tls_model("initial-exec"))) static thread_local u64 t_fsbase = 0;
@@ -29,20 +28,21 @@ static i32 HostTlsOffset(const void* address) {
                           thread_pointer);
 }
 
-i32 hostGuestFsOffset() {
+
+i32 HostGuestFsOffset() {
   return HostTlsOffset(&t_fsbase);
 }
-u64 threadFsBase() {
+u64 ThreadFsBase() {
   return t_fsbase;
 }
-i32 hostFsScratchOffset() {
+i32 HostFsScratchOffset() {
   return HostTlsOffset(&t_fs_scratch);
 }
-void setThreadFsBase(u64 v) {
+void SetThreadFsBase(u64 v) {
   t_fsbase = v;
 }
 
-}  // namespace krnl
+}  // namespace cpu
 
 namespace cpu {
 
@@ -55,7 +55,7 @@ namespace cpu {
 // without touching the guest frames.
 static thread_local std::jmp_buf* t_exit_jmp = nullptr;
 
-class NativeBackend final : public ICpuBackend {
+class NativeBackend final : public Backend {
  public:
   void OnImageMapped(krnl::moduleInfo&) override {
     // Nothing to do: the loader runs the lifter inline (runtime/code_lift),
@@ -80,7 +80,7 @@ class NativeBackend final : public ICpuBackend {
     // (and dumps the guest RIP) when the guest blows or corrupts its own RSP;
     // otherwise the kernel can't deliver SIGSEGV and silently core-dumps.
     krnl::installSigAltStack();
-    krnl::setThreadFsBase(t->fsbase);
+    SetThreadFsBase(t->fsbase);
     auto entry = t->entry;
     auto arg = t->arg;
     delete t;
@@ -137,7 +137,7 @@ uintptr_t MakeGuestTrampoline(const void* fn_bytes,
 
 void EarlyInit() {}  // native: nothing to segregate
 
-ICpuBackend& backend() {
+Backend& GetBackend() {
   static NativeBackend instance;
   return instance;
 }
@@ -148,7 +148,7 @@ u64 CurrentGuestRip() {
 // The guest fs base lives in host TLS on this backend (the lifter's fs stubs
 // read it from there), so it is available to host code without a segment read.
 u64 CurrentGuestFsBase() {
-  return krnl::threadFsBase();
+  return ThreadFsBase();
 }
 void GuestThreadFsBases(base::Vector<u64>& /*out*/) {}  // FEX only
 const u64* CurrentGuestGregs() {
