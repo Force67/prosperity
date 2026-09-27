@@ -13,6 +13,7 @@
  */
 
 #include "base/arch.h"
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -106,10 +107,10 @@ class DescriptorVersions {
   static constexpr u32 kInline = 0xFFFFFFFFu;  // still the user data
 
   u32 Of(u32 sgpr, u32 dwords) const {
-    for (auto it = loads_.rbegin(); it != loads_.rend(); ++it)
-      if (sgpr >= it->sgpr && sgpr + dwords <= it->sgpr + it->dwords)
-        return it->pc;
-    return kInline;
+    if (sgpr >= kSgprs || !len_[sgpr])
+      return kInline;
+    const u32 first = start_[sgpr];
+    return sgpr + dwords <= first + len_[sgpr] ? pc_[sgpr] : kInline;
   }
 
   // Record an SMRD's destination; call after reading the version it consumes.
@@ -124,17 +125,28 @@ class DescriptorVersions {
     if (!n)
       return;
     const u32 sdst = (inst.raw[0] >> 15) & 0x7F;
-    std::erase_if(loads_, [&](const Load& ld) {
-      return sdst < ld.sgpr + ld.dwords && ld.sgpr < sdst + n;
-    });
-    loads_.push_back({sdst, n, inst.pc});
+    const u32 end = std::min(sdst + n, kSgprs);
+    // A load overlapping an older one retires all of it, not just the overlap.
+    for (u32 s = sdst; s < end; s++)
+      if (len_[s]) {
+        const u32 first = start_[s], last = first + len_[s];
+        for (u32 t = first; t < last; t++)
+          len_[t] = 0;
+      }
+    for (u32 s = sdst; s < end; s++) {
+      start_[s] = static_cast<u8>(sdst);
+      len_[s] = static_cast<u8>(n);
+      pc_[s] = inst.pc;
+    }
   }
 
  private:
-  struct Load {
-    u32 sgpr, dwords, pc;
-  };
-  std::vector<Load> loads_;
+  // Loads never overlap once Note has retired the older ones, so each SGPR
+  // names at most one: its first register, length (0 = user data) and pc.
+  static constexpr u32 kSgprs = 128;
+  u8 len_[kSgprs] = {};
+  u8 start_[kSgprs];
+  u32 pc_[kSgprs];
 };
 
 // Decode a GCN program (`code` guest bytecode, `max_dwords` bounds the scan; use

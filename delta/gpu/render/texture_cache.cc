@@ -60,6 +60,8 @@ DELTA_OPTION(int, kForceLod, "DELTA_GPU_FORCELOD", -1);
 // How far the content re-check of a texture that keeps holding still may back
 // off. 1 restores the old every-frame validation.
 DELTA_OPTION(u32, kMaxCheckInterval, "DELTA_GPU_TEXRECHECK", 32);
+DELTA_OPTION(bool, kTexMemo, "DELTA_GPU_TEXMEMO", true);
+DELTA_OPTION(bool, kTexPrevalidate, "DELTA_GPU_TEXPREVALIDATE", true);
 }  // namespace
 
 namespace gpu::render {
@@ -206,6 +208,13 @@ struct TexImageEntry {
   // Revision of the compute range the image was last copied from
   // (CsSupplyTexture); 0 when it holds guest memory.
   u64 cs_seq = 0;
+  // This frame's validation, computed ahead on the worker pool for every image
+  // the last frame used (PrevalidateTextures); pre_frame says for which frame.
+  int pre_frame = -1;
+  bool pre_readable = false;
+  bool pre_full = false;  // pre_hash holds a whole-content hash
+  u64 pre_sample = 0;
+  u64 pre_hash = 0;
 };
 
 struct TexViewEntry {
@@ -834,6 +843,7 @@ using TexImageKeySet = std::unordered_set<TexImageKey, TexImageKeyHash>;
 void RetireTextureImages(const TexImageKeySet& keys) {
   if (keys.empty())
     return;
+  BumpTextureEpoch();
   for (auto set = g_tex_cache.begin(); set != g_tex_cache.end();) {
     if (keys.count(set->first.image)) {
       g_retired_tex_sets.push_back(set->second);
@@ -898,33 +908,74 @@ bool EvictTextures(u64 bytes, u64 budget) {
   return true;
 }
 
-// Upload a guest texture (linear 32bpp RGBA) and return a descriptor set bound
-// to it. Cached by guest base; re-uploaded when the guest pixels change (the
-// room art is composed/loaded into the same buffer after the first sample, so a
-// once-only cache would serve a stale black frame).
-rhi::BindGroup* GetTexture(u64 base,
-                           u32 w,
-                           u32 h,
-                           u32 dfmt,
-                           u32 nfmt,
-                           u32 tiling,
-                           u32 pitch,
-                           u32 layers,
-                           u32 base_array,
-                           u32 view_layers,
-                           u32 mip_levels,
-                           u32 base_mip,
-                           u32 view_mips,
-                           u32 min_lod,
-                           bool pow2_pad,
-                           const u32* sampler,
-                           bool sampler_valid,
-                           bool arrayed,
-                           bool force_lod_zero,
-                           bool depth_compare,
-                           u32 swizzle,
-                           u32 depth,
-                           bool is_3d) {
+// The once-a-frame validation of every image last frame used, as one parallel
+// pass instead of ~1.4k serial cold reads as the draws reach them. It runs at
+// the frame's first texture resolve, a little earlier than the checks it
+// replaces, which are themselves once a frame: a write after it is seen next
+// frame, as one after the first use always was.
+void PrevalidateTextures() {
+  struct Job {
+    TexImageEntry* entry;
+    u64 base;
+    bool full;
+  };
+  static std::vector<Job> jobs;
+  jobs.clear();
+  u64 bytes = 0;
+  for (auto& [key, e] : g_tex_images) {
+    if (e.last_used_frame != g_frame.num - 1 ||
+        e.last_checked_frame == g_frame.num)
+      continue;
+    const bool full =
+        g_frame.num - e.last_full_frame >= static_cast<int>(e.check_interval);
+    jobs.push_back({&e, key.base, full});
+    bytes += full ? e.footprint : std::min<u64>(e.footprint, 16384);
+  }
+  if (jobs.empty())
+    return;
+  gcn::DetileParallelWork(
+      static_cast<u32>(jobs.size()), bytes, [](u32 first, u32 end) {
+        for (u32 i = first; i < end; i++) {
+          const Job& job = jobs[i];
+          TexImageEntry& e = *job.entry;
+          e.pre_readable = gpu::IsReadableRange(job.base, e.footprint);
+          e.pre_full = e.pre_readable && job.full;
+          if (e.pre_readable)
+            e.pre_sample = TexSampleHash(job.base, e.footprint);
+          if (e.pre_full)
+            e.pre_hash = TexHashSerial(job.base, e.footprint);
+        }
+      });
+  for (const Job& job : jobs)
+    job.entry->pre_frame = g_frame.num;
+}
+
+// Uploads/validates the image and returns its view for this binding, or null.
+// `key_out` receives the binding's cache key.
+static rhi::TextureView* ResolveTextureView(u64 base,
+                                            u32 w,
+                                            u32 h,
+                                            u32 dfmt,
+                                            u32 nfmt,
+                                            u32 tiling,
+                                            u32 pitch,
+                                            u32 layers,
+                                            u32 base_array,
+                                            u32 view_layers,
+                                            u32 mip_levels,
+                                            u32 base_mip,
+                                            u32 view_mips,
+                                            u32 min_lod,
+                                            bool pow2_pad,
+                                            const u32* sampler,
+                                            bool sampler_valid,
+                                            bool arrayed,
+                                            bool force_lod_zero,
+                                            bool depth_compare,
+                                            u32 swizzle,
+                                            u32 depth,
+                                            bool is_3d,
+                                            TexKey& key_out) {
   ScopeNs _lookup_timer(&g_ns_tex_lookup);
   g_tex_lookup_n++;
   constexpr u64 kMaxTextureBytes = 256ull * 1024 * 1024;
@@ -1083,11 +1134,11 @@ rhi::BindGroup* GetTexture(u64 base,
       std::fflush(stderr);
     }
   }
-  TexKey key = TextureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers,
-                          base_array, view_layers, mip_levels, base_mip,
-                          view_mips, min_lod, pow2_pad, sampler, sampler_valid,
-                          arrayed, force_lod_zero, depth_compare, swizzle,
-                          depth, is_3d);
+  TexKey& key = key_out;
+  key = TextureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers, base_array,
+                   view_layers, mip_levels, base_mip, view_mips, min_lod,
+                   pow2_pad, sampler, sampler_valid, arrayed, force_lod_zero,
+                   depth_compare, swizzle, depth, is_3d);
   // DELTA_GPU_TEXRAW: write each large texture's raw tiled footprint, with its
   // layout in the name, so a swizzle can be worked out offline.
   if (kTexRaw && w >= 256 && h >= 128 && gpu::IsReadableRange(base, footprint)) {
@@ -1157,13 +1208,22 @@ rhi::BindGroup* GetTexture(u64 base,
   if (!cs_supplies &&
       !render::FlushCsWritesRange(render::DefaultRenderer(), base, footprint, "tex"))
     return nullptr;
+  static int prevalidated_frame = -1;
+  if (kTexPrevalidate && prevalidated_frame != g_frame.num) {
+    prevalidated_frame = g_frame.num;
+    PrevalidateTextures();
+  }
   if (image_it == g_tex_images.end() ||
       image_it->second.last_checked_frame != g_frame.num) {
+    const bool pre = image_it != g_tex_images.end() &&
+                     image_it->second.pre_frame == g_frame.num &&
+                     image_it->second.footprint == footprint;
     // Mapping probes are syscall-heavy. Perform one alongside the
     // once-per-frame content validation rather than on every draw that reuses
     // this image.
     const u64 _t_probe = NowNs();
-    const bool _readable = gpu::IsReadableRange(base, footprint);
+    const bool _readable = pre ? image_it->second.pre_readable
+                               : gpu::IsReadableRange(base, footprint);
     g_ns_tex_probe += NowNs() - _t_probe;
     g_tex_probe_n++;
     if (!_readable) {
@@ -1190,12 +1250,12 @@ rhi::BindGroup* GetTexture(u64 base,
       // The sweep alone would let a guest CPU write sit unnoticed for as long
       // as the interval (nothing calls InvalidateTexRange for those, only
       // compute writeback does), and the windows alone can miss a small one.
-      const u64 sample = TexSampleHash(base, footprint);
+      const u64 sample = pre ? e.pre_sample : TexSampleHash(base, footprint);
       g_tex_hash_bytes += std::min<u64>(footprint, 16384);
       bool changed = sample != e.sample_hash;
       if (!changed &&
           g_frame.num - e.last_full_frame >= static_cast<int>(e.check_interval)) {
-        const u64 hsh = TexHash(base, footprint);
+        const u64 hsh = pre && e.pre_full ? e.pre_hash : TexHash(base, footprint);
         g_tex_hash_bytes += footprint;
         // With no reference hash the sweep has nothing to compare against, and
         // the windowed check has already said the surface is holding still –
@@ -1306,11 +1366,6 @@ rhi::BindGroup* GetTexture(u64 base,
   }
   image_it->second.last_used_frame = g_frame.num;
 
-  auto it = g_tex_cache.find(key);
-  if (it != g_tex_cache.end())
-    return it->second.set;
-  if (g_tex_cache.size() >= 12000)
-    return nullptr;
   TexViewKey view_key = TextureViewKey(key);
   auto view_it = g_tex_views.find(view_key);
   if (view_it == g_tex_views.end()) {
@@ -1334,6 +1389,49 @@ rhi::BindGroup* GetTexture(u64 base,
       return nullptr;
     view_it = g_tex_views.emplace(view_key, view_entry).first;
   }
+  return view_it->second.view;
+}
+
+// Upload a guest texture (linear 32bpp RGBA) and return a descriptor set bound
+// to it. Cached by guest base; re-uploaded when the guest pixels change (the
+// room art is composed/loaded into the same buffer after the first sample, so a
+// once-only cache would serve a stale black frame).
+rhi::BindGroup* GetTexture(u64 base,
+                           u32 w,
+                           u32 h,
+                           u32 dfmt,
+                           u32 nfmt,
+                           u32 tiling,
+                           u32 pitch,
+                           u32 layers,
+                           u32 base_array,
+                           u32 view_layers,
+                           u32 mip_levels,
+                           u32 base_mip,
+                           u32 view_mips,
+                           u32 min_lod,
+                           bool pow2_pad,
+                           const u32* sampler,
+                           bool sampler_valid,
+                           bool arrayed,
+                           bool force_lod_zero,
+                           bool depth_compare,
+                           u32 swizzle,
+                           u32 depth,
+                           bool is_3d) {
+  TexKey key;
+  rhi::TextureView* view = ResolveTextureView(
+      base, w, h, dfmt, nfmt, tiling, pitch, layers, base_array, view_layers,
+      mip_levels, base_mip, view_mips, min_lod, pow2_pad, sampler,
+      sampler_valid, arrayed, force_lod_zero, depth_compare, swizzle, depth,
+      is_3d, key);
+  if (!view)
+    return nullptr;
+  auto it = g_tex_cache.find(key);
+  if (it != g_tex_cache.end())
+    return it->second.set;
+  if (g_tex_cache.size() >= 12000)
+    return nullptr;
 
   // See GetMultiTexSet: a guest texture is never a depth format, so a compare
   // sample of one reads the far-plane default rather than an undefined
@@ -1341,7 +1439,7 @@ rhi::BindGroup* GetTexture(u64 base,
   const bool cmp_default = key.sampler.depth_compare && g_tex.depth_default_view;
   TexEntry e;
   e.set = SampledTextureGroup(
-      cmp_default ? g_tex.depth_default_view : view_it->second.view,
+      cmp_default ? g_tex.depth_default_view : view,
       SamplerFor(key.sampler),
       cmp_default ? rhi::TextureState::kDepthRead
                   : rhi::TextureState::kShaderRead);
@@ -1359,7 +1457,86 @@ bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt) {
   return GuestTextureFormat(dfmt, nfmt) != rhi::Format::kUndefined;
 }
 
+static rhi::TextureView* ResolveTexViewUncached(const DrawInfo::DrawTex& t);
+
+namespace {
+u64 g_tex_epoch = 1;
+
+// The fields of a binding that decide its view; `src` and the rest do not.
+struct TexMemoKey {
+  u64 base;
+  u32 w, h, dfmt, nfmt, tiling, pitch, layers, base_array, view_layers,
+      mip_levels, base_mip, view_mips, min_lod, swizzle, depth;
+  u32 sampler[4];
+  u8 flags;
+  bool operator==(const TexMemoKey&) const = default;
+};
+
+TexMemoKey MemoKeyOf(const DrawInfo::DrawTex& t) {
+  TexMemoKey k;
+  std::memset(&k, 0, sizeof(k));
+  k.base = t.base;
+  k.w = t.w, k.h = t.h, k.dfmt = t.dfmt, k.nfmt = t.nfmt, k.tiling = t.tiling;
+  k.pitch = t.pitch, k.layers = t.layers, k.base_array = t.base_array;
+  k.view_layers = t.view_layers, k.mip_levels = t.mip_levels;
+  k.base_mip = t.base_mip, k.view_mips = t.view_mips, k.min_lod = t.min_lod;
+  k.swizzle = t.swizzle, k.depth = t.depth;
+  std::memcpy(k.sampler, t.sampler, sizeof(k.sampler));
+  k.flags = u8(t.pow2_pad) | u8(t.sampler_valid) << 1 | u8(t.arrayed) << 2 |
+            u8(t.force_lod_zero) << 3 | u8(t.depth_compare) << 4 |
+            u8(t.is_3d) << 5;
+  return k;
+}
+
+// Consecutive draws rebind the same few textures: ~12k lookups a frame over
+// ~1.4k images in GTA:SA. A hit skips the key build, the layout, three map
+// lookups and the compute checks, which can only change their answer at an
+// epoch bump. New frames bump it too, so validation stays once per frame.
+struct TexMemo {
+  TexMemoKey key;
+  u64 epoch = 0;
+  rhi::TextureView* view = nullptr;
+};
+constexpr u32 kTexMemoSlots = 1024;
+TexMemo g_tex_memo[kTexMemoSlots];
+int g_tex_memo_frame = -1;
+
+u32 TexMemoSlot(const TexMemoKey& k) {
+  u64 h = k.base * 0x9E3779B97F4A7C15ull;
+  h ^= (u64(k.w) << 32 | k.h) * 0xC2B2AE3D27D4EB4Full;
+  h ^= (u64(k.dfmt) << 40 | u64(k.nfmt) << 32 | k.sampler[0]) *
+       0x165667B19E3779F9ull;
+  h ^= (u64(k.base_mip) << 32 | k.view_mips | u64(k.flags) << 56) ^
+       (u64(k.sampler[2]) << 16) ^ k.swizzle;
+  return static_cast<u32>(h ^ (h >> 29)) & (kTexMemoSlots - 1);
+}
+}  // namespace
+
+void BumpTextureEpoch() {
+  g_tex_epoch++;
+}
+
+u64 TextureEpoch() {
+  return g_tex_epoch;
+}
+
 rhi::TextureView* TexViewFor(const DrawInfo::DrawTex& t) {
+  if (g_tex_memo_frame != g_frame.num) {
+    g_tex_memo_frame = g_frame.num;
+    g_tex_epoch++;
+  }
+  const TexMemoKey memo_key = MemoKeyOf(t);
+  TexMemo& memo = g_tex_memo[TexMemoSlot(memo_key)];
+  if (kTexMemo && memo.epoch == g_tex_epoch && memo.key == memo_key)
+    return memo.view;
+  rhi::TextureView* view = ResolveTexViewUncached(t);
+  // Failures are not remembered: each exit reports itself when asked to.
+  if (view)
+    memo = {memo_key, g_tex_epoch, view};
+  return view;
+}
+
+static rhi::TextureView* ResolveTexViewUncached(const DrawInfo::DrawTex& t) {
   // Each exit here leaves the binding on the white fallback, so each one needs
   // to be able to say so (DELTA_GPU_TEXFAIL): an unsupported format and an
   // unmapped surface look identical from the draw side.
@@ -1380,21 +1557,13 @@ rhi::TextureView* TexViewFor(const DrawInfo::DrawTex& t) {
     return fail("degenerate");
   if (!GuestTextureUploadSupported(t.dfmt, t.nfmt))
     return fail("format");
-  if (GetTexture(t.base, t.w, t.h, t.dfmt, t.nfmt, t.tiling, t.pitch, t.layers,
-                 t.base_array, t.view_layers, t.mip_levels, t.base_mip,
-                 t.view_mips, t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid,
-                 t.arrayed, t.force_lod_zero, t.depth_compare, t.swizzle,
-                 t.depth, t.is_3d) == nullptr)
-    return fail("get-texture");
-  TexKey key = TextureKey(
-      t.base, t.w, t.h, t.dfmt, t.nfmt, TextureTiling(t.tiling), t.pitch,
-      t.layers, t.base_array, t.view_layers, t.mip_levels, t.base_mip,
-      t.view_mips, t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid, t.arrayed,
-      t.force_lod_zero, t.depth_compare, t.swizzle, t.depth, t.is_3d);
-  auto it = g_tex_views.find(TextureViewKey(key));
-  if (it == g_tex_views.end())
-    return fail("no-view");
-  return it->second.view;
+  TexKey key;
+  rhi::TextureView* view = ResolveTextureView(
+      t.base, t.w, t.h, t.dfmt, t.nfmt, t.tiling, t.pitch, t.layers,
+      t.base_array, t.view_layers, t.mip_levels, t.base_mip, t.view_mips,
+      t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid, t.arrayed,
+      t.force_lod_zero, t.depth_compare, t.swizzle, t.depth, t.is_3d, key);
+  return view ? view : fail("get-texture");
 }
 
 // An N-sampler descriptor set (set 0, bindings 0..kMaxTex-1) for a recomp PS
@@ -1406,25 +1575,21 @@ struct MultiTexSet {
   rhi::BindGroup* set = nullptr;
 };
 
+// Keyed on exactly what the set's descriptors hold: per binding the view (a
+// resolved texture, or the default its declared type calls for), its state and
+// the sampler. Only the first num_texs slots are meaningful; the arrays are
+// left uninitialised so building a key per draw writes only those.
 struct MultiTexKey {
   u32 num_texs = 0;
-  // What the MODULE declared each binding as, which decides the default a
-  // binding takes when nothing resolves, and is not a function of the
-  // textures. Two shaders sampling the same list share a set otherwise, so one
-  // declaring binding 3 as an integer sampler was handed the UNORM default the
-  // other's set was built with (VUID-vkCmdDrawIndexed-format-07753).
-  u32 decl_uint = 0, decl_3d = 0;
-  TexKey tex[kMaxTex];
-  rhi::TextureView* view[kMaxTex] = {};
-  rhi::TextureState layout[kMaxTex] = {};
-  bool storage[kMaxTex] = {};
+  rhi::TextureView* view[kMaxTex];
+  rhi::Sampler* sampler[kMaxTex];
+  rhi::TextureState state[kMaxTex];
   bool operator==(const MultiTexKey& o) const {
-    if (num_texs != o.num_texs || decl_uint != o.decl_uint ||
-        decl_3d != o.decl_3d)
+    if (num_texs != o.num_texs)
       return false;
     for (u32 i = 0; i < num_texs; i++)
-      if (!(tex[i] == o.tex[i]) || view[i] != o.view[i] ||
-          layout[i] != o.layout[i] || storage[i] != o.storage[i])
+      if (view[i] != o.view[i] || sampler[i] != o.sampler[i] ||
+          state[i] != o.state[i])
         return false;
     return true;
   }
@@ -1433,13 +1598,10 @@ struct MultiTexKey {
 struct MultiTexKeyHash {
   size_t operator()(const MultiTexKey& k) const {
     u64 h = HashWord(1469598103934665603ull, k.num_texs);
-    h = HashWord(h, k.decl_uint);
-    h = HashWord(h, k.decl_3d);
     for (u32 i = 0; i < k.num_texs; i++) {
-      h = HashWord(h, TexKeyHash{}(k.tex[i]));
       h = HashWord(h, reinterpret_cast<u64>(k.view[i]));
-      h = HashWord(h, static_cast<u64>(k.layout[i]));
-      h = HashWord(h, k.storage[i]);
+      h = HashWord(h, reinterpret_cast<u64>(k.sampler[i]));
+      h = HashWord(h, static_cast<u64>(k.state[i]));
     }
     return static_cast<size_t>(h);
   }
@@ -1513,29 +1675,6 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
   };
   MultiTexKey key;
   key.num_texs = std::min(std::max(resolved, num_bindings), kMaxTex);
-  for (u32 i = 0; i < key.num_texs; i++) {
-    if (const gcn::ShaderTex* t = declared(i)) {
-      key.decl_uint |= static_cast<u32>(t->is_uint) << i;
-      key.decl_3d |= static_cast<u32>(t->is_3d) << i;
-    }
-    if (i < resolved) {
-      const auto& t = d.texs[i];
-      key.tex[i] = TextureKey(
-          t.base, t.w, t.h, t.dfmt, t.nfmt, TextureTiling(t.tiling), t.pitch,
-          t.layers, t.base_array, t.view_layers, t.mip_levels, t.base_mip,
-          t.view_mips, t.min_lod, t.pow2_pad, t.sampler, t.sampler_valid,
-          t.arrayed, t.force_lod_zero, t.depth_compare, t.swizzle, t.depth,
-          t.is_3d);
-      key.view[i] = resolved_views[i];
-      key.layout[i] = resolved_layouts[i];
-      key.storage[i] = d.texs[i].storage;
-    }
-  }
-  auto ci = g_mtex_cache.find(key);
-  if (ci != g_mtex_cache.end())
-    return ci->second.set;
-  if (g_mtex_cache.size() > 3500)
-    return nullptr;
   // DELTA_GPU_FORCEWHITE: bind the 1x1 white default for every sampler
   // (diagnostic). Doom64's world textures are built by compute dispatches we
   // don't execute, so the atlases are all-zero and the alpha-blended world
@@ -1597,8 +1736,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
     layouts[i] =
         v ? resolved_layouts[i] : rhi::TextureState::kShaderRead;
   }
-  rhi::BindGroupDesc group;
-  group.layout = set_layout;
+  thread_local rhi::BindingWrite writes[kMaxTex];
   for (u32 i = 0; i < key.num_texs; i++) {
     // Past `resolved` there is no T#: d.texs[i] holds whatever the previous
     // draw left there, so nothing about it may be read. Those bindings take a
@@ -1633,7 +1771,8 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
     // supports it, and every colour target and guest texture is the wrong kind.
     // Bind the 1x1 far-plane depth default and keep the comparison, which reads
     // as "nothing occludes this" instead of as undefined.
-    rhi::BindingWrite w;
+    rhi::BindingWrite& w = writes[i];
+    w = {};
     w.binding = i;
     w.view = views[i];
     w.view_state = layouts[i];
@@ -1647,8 +1786,18 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
       w.view_state = rhi::TextureState::kGeneral;
     else
       w.sampler = SamplerFor(sampler);
-    group.writes.push_back(w);
+    key.view[i] = w.view;
+    key.sampler[i] = w.sampler;
+    key.state[i] = w.view_state;
   }
+  auto ci = g_mtex_cache.find(key);
+  if (ci != g_mtex_cache.end())
+    return ci->second.set;
+  if (g_mtex_cache.size() > 3500)
+    return nullptr;
+  rhi::BindGroupDesc group;
+  group.layout = set_layout;
+  group.writes.assign(writes, writes + key.num_texs);
   MultiTexSet entry;
   entry.set = Device().CreateBindGroup(group);
   if (!entry.set)
@@ -1662,6 +1811,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
 void InvalidateTexRange(u64 base, u64 size) {
   if (!size || base > UINT64_MAX - size)
     return;
+  BumpTextureEpoch();
   u64 end = base + size;
   std::vector<TexImageKey> overlap;
   for (u64 page = base >> kTexturePageShift;

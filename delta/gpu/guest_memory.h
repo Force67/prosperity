@@ -127,6 +127,11 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
   constexpr u64 kSlots = 4096;
   constexpr u64 kMaxPagedSpan = 64;
   static thread_local PageSlot pages[kSlots];
+  // Pages proven unreadable this generation. A miss on an unreadable address
+  // falls back to parsing /proc/self/maps (tens of thousands of lines here),
+  // and a replay chasing garbage pointers asks that about thousands of
+  // distinct addresses a frame, most of them on a few dead pages.
+  static thread_local PageSlot bad_pages[kSlots];
   static thread_local u64 seen_generation = 0;
   const u64 gen = MemoryGeneration();
   if (seen_generation != gen) {
@@ -135,6 +140,9 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
   }
   const auto slot = [](u64 page) -> PageSlot& {
     return pages[(page ^ (page >> 12)) & (kSlots - 1)];
+  };
+  const auto bad_slot = [](u64 page) -> PageSlot& {
+    return bad_pages[(page ^ (page >> 12)) & (kSlots - 1)];
   };
   const bool paged = bytes && address <= std::numeric_limits<u64>::max() - bytes &&
                      ((address + bytes - 1) >> kPageShift) - (address >> kPageShift) <
@@ -148,6 +156,9 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
       page++;
     if (page > last)
       return true;
+    for (page = first; page <= last; page++)
+      if (bad_slot(page).page == page && bad_slot(page).generation == gen)
+        return false;
   }
   auto it = cache.find(address);
   if (it != cache.end() && it->second.bytes == bytes)
@@ -158,6 +169,10 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
       slot(page) = {page, gen};
     return true;
   }
+  // Mappings are page granular: a range within one page that is unreadable
+  // means the whole page is.
+  if (!readable && paged && first == last)
+    bad_slot(first) = {first, gen};
   cache[address] = {bytes, gen, readable};
   return readable;
 }

@@ -102,6 +102,11 @@ rhi::BindGroup* GetTexture(u64 base,
                            bool is_3d = false);
 bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt);
 rhi::TextureView* TexViewFor(const render::DrawInfo::DrawTex& t);
+// Anything that can change what a texture binding resolves to (compute
+// writes and writebacks, fills, invalidations, eviction) calls this; it
+// retires TexViewFor's per-binding memo.
+void BumpTextureEpoch();
+u64 TextureEpoch();
 
 // N-sampler group (set 0) for a recomp PS. `num_bindings` is what the layout
 // declares, which is not always what the draw resolved textures for.

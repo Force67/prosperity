@@ -6,6 +6,7 @@
  */
 
 #include "gpu/ps4/compute_dispatch.h"
+#include "gpu/guest_memory.h"
 #include "base/arch.h"
 
 #include <algorithm>
@@ -22,6 +23,7 @@
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/ps4/guest_address.h"
+#include "gpu/ps4/render_queue.h"
 #include "gpu/ps4/shader_cache.h"
 #include "gpu/render/render_target.h"
 
@@ -43,8 +45,7 @@ constexpr u64 kZeroFillBytes = 16;
 
 bool IsMappedGuestRange(u64 address, u64 bytes) {
   return IsGuestRange(address, bytes) &&
-         utl::isMemoryRangeMapped(reinterpret_cast<const void*>(address),
-                                  bytes);
+         gpu::IsReadableRangeCached(address, bytes);
 }
 
 // One resource's live guest range and how it has to be staged.
@@ -230,8 +231,10 @@ bool RunFillKernelOnCpu(render::Renderer& renderer,
   // A surface's image is refreshed from the compute range the GPU path
   // leaves behind; a CPU fill under a live target would never reach it.
   if (!bytes || !IsMappedGuestRange(dst.base, bytes) ||
-      !IsMappedGuestRange(src.base, 4) ||
-      render::OverlapsLiveTarget(dst.base, bytes))
+      !IsMappedGuestRange(src.base, 4))
+    return false;
+  OwnRenderer("fill");
+  if (render::OverlapsLiveTarget(dst.base, bytes))
     return false;
   render::FlushCsWritesRange(renderer, src.base, 4, "fill");
   u32 value;
@@ -307,7 +310,8 @@ void DispatchCompute(render::Renderer& renderer,
     ci.user_data[i] = user_data[i];
 
   const auto cs_program = gcn::CachedProgram(cs_addr, 4096);
-  auto resolved = gcn::ResolveCsResources(*cs_program, rc, user_data);
+  thread_local std::vector<gcn::ResolvedCsResource> resolved;
+  gcn::ResolveCsResources(resolved, *cs_program, rc, user_data);
   // Descriptor chains live in guest memory, which an earlier dispatch may have
   // written, and writebacks are lazy. If any binding failed to resolve, land
   // pending compute writes in guest memory and re-resolve once before falling
@@ -320,9 +324,10 @@ void DispatchCompute(render::Renderer& renderer,
     any_unresolved |=
         r.binding >= resolved.size() || !resolved[r.binding].valid;
   if (any_unresolved) {
+    OwnRenderer("cs-unresolved");
     if (!render::FlushCsWrites(renderer) && !renderer.available())
       return;
-    resolved = gcn::ResolveCsResources(*cs_program, rc, user_data);
+    gcn::ResolveCsResources(resolved, *cs_program, rc, user_data);
   }
 
   const bool trace = ShouldTraceCsResources(cs_addr);
@@ -392,6 +397,9 @@ void DispatchCompute(render::Renderer& renderer,
   if (!ci.num_res)
     return;
 
+  // Dispatches run on the walk: they are few, and what they write is what the
+  // walk's next descriptor reads may need.
+  OwnRenderer("dispatch");
   const bool executed = render::Dispatch(renderer, ci);
   if (trace)
     TraceCsDispatch(cs_addr, executed, ci.num_res);

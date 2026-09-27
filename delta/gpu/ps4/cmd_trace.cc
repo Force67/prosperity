@@ -292,8 +292,9 @@ void TraceFirstTexturedPs(const Regs& regs, u64 ps_addr) {
             (unsigned long)ps_addr, n_mimg, n_smrd);
   const u32* ud = UserData(regs, mmSPI_SHADER_USER_DATA_PS_0);
   LogUserData("gpu", "  PS user_data:", ud);
-  auto texs =
-      gcn::TrackTextures(gcn::CachedProgram(ps_addr, 4096), ud, false, ps_addr);
+  std::vector<gcn::TImage> texs;
+  gcn::TrackTextures(texs, gcn::CachedProgram(ps_addr, 4096), ud, false,
+                     ps_addr);
   BASE_LOGI("gpu", "  TrackTextures -> {}", texs.size());
   if (texs.empty() || !texs[0].valid)
     return;
@@ -647,9 +648,10 @@ void TraceBlitDraw(const Regs& regs,
             regs[mmCB_COLOR0_INFO], regs[mmCB_COLOR0_ATTRIB]);
   if (!IsGuestAddress(ps_addr))
     return;
-  auto texs = gcn::TrackTextures(gcn::CachedProgram(ps_addr, 4096),
-                                 UserData(regs, mmSPI_SHADER_USER_DATA_PS_0),
-                                 false, ps_addr);
+  std::vector<gcn::TImage> texs;
+  gcn::TrackTextures(texs, gcn::CachedProgram(ps_addr, 4096),
+                     UserData(regs, mmSPI_SHADER_USER_DATA_PS_0), false,
+                     ps_addr);
   BASE_LOGI("blit", "  TrackTextures -> {} T#", texs.size());
   for (const auto& t : texs)
     BASE_LOGI("blit",
@@ -1189,7 +1191,8 @@ void TraceDrawRegisters(const Regs& regs,
   if (!IsGuestAddress(fetch))
     return;
   gcn::Disassemble(reinterpret_cast<const u32*>(fetch), 128, "VS.fetch");
-  auto vbs = gcn::TrackVertexBuffers(*gcn::CachedProgram(fetch, 64), vud);
+  std::vector<gcn::VBuffer> vbs;
+  gcn::TrackVertexBuffers(vbs, *gcn::CachedProgram(fetch, 64), vud);
   for (size_t i = 0; i < vbs.size(); i++) {
     const auto& v = vbs[i];
     BASE_LOGI("gpu", "  VB{} base={:#x} stride={} nrec={}", i,

@@ -70,6 +70,10 @@ void PrebuildComputePipeline(const std::vector<u32>& spirv,
 // recording, CP DMA, frame end. No-op when nothing is dirty; returns false when
 // the data could not be made current.
 bool FlushCsWrites(Renderer& renderer);
+// False when no compute result still owed to guest memory can overlap the
+// range. Callable from any thread, without owning the renderer; a true may be
+// a false alarm.
+bool CsRangeMaybeDirty(u64 base, u64 bytes);
 // Flush only dirty ranges overlapping [base, base+bytes), with the same result
 // contract as FlushCsWrites.
 // `why` names the reader for the DELTA_GPU_CSSYNC report.

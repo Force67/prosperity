@@ -6,6 +6,8 @@
 
 #include "gpu/ps4/draw_state.h"
 #include "base/arch.h"
+#include "gpu/guest_memory.h"
+#include "gpu/ps4/render_queue.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -182,7 +184,7 @@ void ResolveIndexBuffer(render::Renderer& renderer,
     // counts a later draw consumes). Compute results stay GPU-resident and are
     // written back lazily, so reading guest memory without flushing that range
     // first yields the stale zeros the buffer was allocated with.
-    render::FlushCsWritesRange(renderer, args, need, "indirect");
+    FlushForWalkRead(renderer, args, need, "indirect");
     const bool mapped =
         utl::isMemoryRangeMapped(reinterpret_cast<const void*>(args), need);
     u32 a[5] = {};
@@ -222,9 +224,8 @@ void ResolveIndexBuffer(render::Renderer& renderer,
         packet.index_base + static_cast<u64>(index_offset) * index_bytes;
     const bool accepted = packet.index_base && index_count &&
                           index_count <= kMaxElementCount &&
-                          utl::isMemoryRangeMapped(
-                              reinterpret_cast<const void*>(base),
-                              static_cast<u64>(index_count) * index_bytes);
+                          gpu::IsReadableRangeCached(
+                              base, static_cast<u64>(index_count) * index_bytes);
     TraceIndexOffsetArgs(body[0], index_offset, index_count, packet.index_base,
                          base, packet.index_type, accepted);
     if (accepted) {
@@ -470,7 +471,8 @@ void ResolveHeuristicSources(const u32* vud,
   }
   if (!fetch_addr)
     return;
-  auto vbs = gcn::TrackVertexBuffers(*gcn::CachedProgram(fetch_addr, 64), vud);
+  thread_local std::vector<gcn::VBuffer> vbs;
+  gcn::TrackVertexBuffers(vbs, *gcn::CachedProgram(fetch_addr, 64), vud);
   if (vbs.empty())
     return;
   d.vertex_data = reinterpret_cast<const void*>(vbs[0].base);
@@ -508,12 +510,15 @@ std::shared_ptr<const gcn::Program> ResolvePsTextures(render::Renderer& renderer
                                                       TextureMasks& masks) {
   if (!IsGuestAddress(ps_addr))
     return nullptr;
-  if (kPreflushResources)
+  if (kPreflushResources) {
+    OwnRenderer();
     render::FlushCsWrites(renderer);
+  }
   auto ps_prog = gcn::CachedProgram(ps_addr, 4096);
   const bool trace = ShouldTraceTextureTracking(frame, ps_addr);
-  auto texs = gcn::TrackTextures(ps_prog, regs.At(mmSPI_SHADER_USER_DATA_PS_0),
-                                 trace, ps_addr);
+  thread_local std::vector<gcn::TImage> texs;
+  gcn::TrackTextures(texs, ps_prog, regs.At(mmSPI_SHADER_USER_DATA_PS_0), trace,
+                     ps_addr);
   if (texs.empty())
     return ps_prog;
 
@@ -569,8 +574,9 @@ void ResolveVsTextures(const u32* vud,
                        TextureMasks& masks) {
   if (!IsGuestAddress(vs_addr))
     return;
-  auto texs = gcn::TrackTextures(gcn::CachedProgram(vs_addr, 4096), vud,
-                                 false, vs_addr);
+  thread_local std::vector<gcn::TImage> texs;
+  gcn::TrackTextures(texs, gcn::CachedProgram(vs_addr, 4096), vud, false,
+                     vs_addr);
   for (const auto& t : texs) {
     if (d.num_texs >= kMaxTrackedTextures)
       break;
@@ -709,14 +715,15 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
                             bool vertex_stage,
                             render::DrawInfo& d,
                             bool& resolved_vs_cbuf) {
-  auto resolved = gcn::ResolveCbuffers(program, user_data, code_base);
+  thread_local gcn::CbufList resolved;
+  gcn::ResolveCbuffers(resolved, program, user_data, code_base);
   for (const auto& cb : cbufs) {
     if (cb.binding >= std::size(d.cbufs))
       continue;
     gcn::VBuffer vb{};
-    auto it = resolved.find(gcn::CbufKey(cb.ud_sgpr, cb.pointer, cb.version));
-    if (it != resolved.end())
-      vb = it->second;  // EUD-resolved V# (handles indirection)
+    if (const gcn::VBuffer* found = gcn::FindCbuf(
+            resolved, gcn::CbufKey(cb.ud_sgpr, cb.pointer, cb.version)))
+      vb = *found;  // EUD-resolved V# (handles indirection)
     else if (cb.pointer && cb.ud_sgpr + 1 < 16)
       vb.base = UserDataPointer(user_data, cb.ud_sgpr);  // flat pointer inline
     else if (!cb.pointer && cb.ud_sgpr + 3 < 16)
@@ -756,8 +763,8 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
                        render::DrawInfo& d) {
   if (buffers.empty())
     return;
-  const auto resolved =
-      gcn::ResolveShaderBuffers(program, buffers, user_data, code_base);
+  thread_local std::vector<gcn::VBuffer> resolved;
+  gcn::ResolveShaderBuffers(resolved, program, buffers, user_data, code_base);
   for (size_t i = 0; i < buffers.size(); i++) {
     const gcn::ShaderBuffer& sb = buffers[i];
     if (sb.binding >= render::DrawInfo::kMaxBuffers)
@@ -856,8 +863,8 @@ RecompStatus ResolveRecompiledShaders(
   d.ps4_neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
   const u32* pud = regs.At(mmSPI_SHADER_USER_DATA_PS_0);
   const auto vs_prog = gcn::CachedProgram(vs_addr, 4096);
-  const auto direct_vbs =
-      gcn::ResolveDirectVertexBuffers(vs_prog, rc->attrs, vud, vs_addr);
+  thread_local std::vector<gcn::VBuffer> direct_vbs;
+  gcn::ResolveDirectVertexBuffers(direct_vbs, vs_prog, rc->attrs, vud, vs_addr);
 
   gcn::VBuffer attr_vbs[render::DrawInfo::kMaxVertexAttrs];
   u32 attr_count = 0;
@@ -1046,9 +1053,9 @@ void PrefetchDrawShaders(const Regs& regs) {
   const u32 mrt_uint_mask = ResolveRenderTargets(regs, d, vs_addr, ps_addr);
   TextureMasks masks;
   if (IsGuestAddress(ps_addr)) {
-    const auto texs = gcn::TrackTextures(
-        gcn::CachedProgram(ps_addr, 4096),
-        regs.At(mmSPI_SHADER_USER_DATA_PS_0), false, ps_addr);
+    thread_local std::vector<gcn::TImage> texs;
+    gcn::TrackTextures(texs, gcn::CachedProgram(ps_addr, 4096),
+                       regs.At(mmSPI_SHADER_USER_DATA_PS_0), false, ps_addr);
     for (u32 i = 0; i < texs.size() && i < kMaxTrackedTextures; i++)
       BindTexture(d, texs[i], i, masks);
     d.num_texs =

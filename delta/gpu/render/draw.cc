@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <base/logging.h>
 #include <utl/options.h>
 
@@ -50,12 +51,12 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     return;
   // DELTA_GPU_SWAPTEX01: bisect a suspected sampler-binding order mismatch by
   // exchanging the first two textures of every multi-texture draw.
-  DrawInfo swapped;
+  std::optional<DrawInfo> swapped;
   if (kSwapTex && d_in.num_texs >= 2) {
     swapped = d_in;
-    std::swap(swapped.texs[0], swapped.texs[1]);
+    std::swap(swapped->texs[0], swapped->texs[1]);
   }
-  const DrawInfo& d_sw = (kSwapTex && d_in.num_texs >= 2) ? swapped : d_in;
+  const DrawInfo& d_sw = swapped ? *swapped : d_in;
   // DELTA_GPU_MAXDRAW=<n> / DELTA_GPU_ONLYDRAW=<n>: build a frame up one draw
   // at a time, or isolate a single one, to see what each pass contributes.
   // DELTA_GPU_ONLYIC=<n>: render only draws with this index count. Draw indices
@@ -87,10 +88,12 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
       if (d_sw.texs[i].base == d_sw.depth_base)
         detach_depth = true;
   }
-  DrawInfo dd;
+  // Copied only when patched: DrawInfo is ~10 KB and this runs every draw.
+  std::optional<DrawInfo> patched_copy;
   const bool patched = kNoDepth || kNoCull || kNoMask || detach_depth;
   if (patched) {
-    dd = d_sw;
+    patched_copy = d_sw;
+    DrawInfo& dd = *patched_copy;
     if (kNoDepth) {
       dd.depth_test_enable = false;
       dd.depth_write_enable = false;
@@ -106,7 +109,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
       dd.depth_test_enable = false;
     }
   }
-  const DrawInfo& d = patched ? dd : d_sw;
+  const DrawInfo& d = patched ? *patched_copy : d_sw;
   if (d.index_count > g_frame.max_idx)
     g_frame.max_idx = d.index_count;
   ScopeNs draw_timer(&g_ns_draw);

@@ -6,6 +6,7 @@
  */
 
 #include "gpu/ps4/cmd_processor.h"
+#include "gpu/ps4/render_queue.h"
 #include "gpu/write_tracker.h"
 #include <base/logging.h>
 #include "base/arch.h"
@@ -34,6 +35,8 @@
 
 namespace {
 DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
+// Record draws on a renderer thread of their own (see render_queue.h).
+DELTA_OPTION(bool, kRenderThread, "DELTA_GPU_RENDER_THREAD", true);
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
 DELTA_OPTION(bool, kPrefetchShaders, "DELTA_GPU_PREFETCH_SHADERS", true);
 }  // namespace
@@ -224,44 +227,49 @@ void SetRegs(u32 base, const u32* body, u32 count) {
 //
 // body: [0] function/space, [1] addr lo or reg offset, [2] addr hi,
 // [3] reference, [4] mask, [5] poll interval.
-void HandleWaitRegMem(const u32* body, u32 count) {
-  if (count < 5)
-    return;
+bool WaitRegMemPasses(const u32* body, u32 polled) {
   const u32 function = body[0] & 0x7;
-  const bool memory_space = ((body[0] >> 4) & 1) != 0;
-  const u32 reference = body[3], mask = body[4];
-  const auto passes = [&](u32 polled) {
-    const u32 a = polled & mask, b = reference & mask;
-    switch (function) {
-      case 1:
-        return a < b;
-      case 2:
-        return a <= b;
-      case 3:
-        return a == b;
-      case 4:
-        return a != b;
-      case 5:
-        return a >= b;
-      case 6:
-        return a > b;
-      default:
-        return true;  // 0 = always, 7 = reserved
-    }
-  };
+  const u32 a = polled & body[4], b = body[3] & body[4];
+  switch (function) {
+    case 1:
+      return a < b;
+    case 2:
+      return a <= b;
+    case 3:
+      return a == b;
+    case 4:
+      return a != b;
+    case 5:
+      return a >= b;
+    case 6:
+      return a > b;
+    default:
+      return true;  // 0 = always, 7 = reserved
+  }
+}
 
-  const volatile u32* polled = nullptr;
-  if (memory_space) {
+// The word a WAIT_REG_MEM polls, or null when it waits on nothing we model.
+const volatile u32* WaitRegMemTarget(const u32* body) {
+  if ((body[0] >> 4) & 1) {
     const u64 address =
         ((static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1]) & ~3ull;
     // Only where we are the producer. A poll on a word nothing of ours writes
     // can never be satisfied, and waiting out its timeout is pure loss.
     if (IsGuestAddress(address) && g_fence_labels.Contains(address) &&
         utl::isMemoryRangeMapped(reinterpret_cast<const void*>(address), 4))
-      polled = reinterpret_cast<const volatile u32*>(address);
-  } else if ((body[1] & 0xFFFF) < kRegFileSize) {
-    polled = &g_regs[body[1] & 0xFFFF];
+      return reinterpret_cast<const volatile u32*>(address);
+    return nullptr;
   }
+  if ((body[1] & 0xFFFF) < kRegFileSize)
+    return &g_regs[body[1] & 0xFFFF];
+  return nullptr;
+}
+
+void HandleWaitRegMem(const u32* body, u32 count) {
+  if (count < 5)
+    return;
+  const volatile u32* polled = WaitRegMemTarget(body);
+  const auto passes = [&](u32 value) { return WaitRegMemPasses(body, value); };
   if (!polled)
     return;
 
@@ -316,6 +324,10 @@ void HandleDmaData(render::Renderer& renderer,
       addressable(dst + bytes)) {
     // src may be CS-written; land pending writes first. Copy even if the flush
     // fails: a possibly-stale source beats silently dropping the copy.
+    // All of them, not just src and dst: GTA:SA issues ~300 of these a frame,
+    // and that keeps lazy writeback short. Narrowed, dirty ranges outlived
+    // the guest's reuse of their memory and a late writeback put old compute
+    // output over fresh descriptor tables.
     render::FlushCsWrites(renderer);
     std::memcpy(reinterpret_cast<void*>(dst),
                 reinterpret_cast<const void*>(src), bytes);
@@ -475,19 +487,74 @@ void HandleDrawPacket(render::Renderer& renderer,
     packet.num_instances = g_index.num_instances;
     packet.frame = frame;
 
-    render::DrawInfo d;
-    const bool renderable = BuildDrawInfo(renderer, g_regs, packet, d);
-    // On the first draw of a frame, and for every draw the renderer sees
-    // including the ones dropped below, so a frame whose draws all decline
-    // still ends (and presents) like any other.
-    if (!g_frame_active) {
-      render::BeginFrame(renderer);
-      g_frame_active = true;
+    RenderQueue& queue = GuestRenderQueue();
+    if (queue.running()) {
+      render::DrawInfo& d = queue.NextDraw();
+      const bool renderable = BuildDrawInfo(renderer, g_regs, packet, d);
+      if (!g_frame_active) {
+        queue.PushBeginFrame();
+        g_frame_active = true;
+      }
+      if (renderable)
+        queue.PushDraw();
+    } else {
+      render::DrawInfo d;
+      const bool renderable = BuildDrawInfo(renderer, g_regs, packet, d);
+      // On the first draw of a frame, and for every draw the renderer sees
+      // including the ones dropped below, so a frame whose draws all decline
+      // still ends (and presents) like any other.
+      if (!g_frame_active) {
+        render::BeginFrame(renderer);
+        g_frame_active = true;
+      }
+      if (renderable)
+        render::Draw(renderer, d);
     }
-    if (renderable)
-      render::Draw(renderer, d);
   }
   TraceDrawRegisters(g_regs, op, body, count);
+}
+
+// A packet that writes guest memory the title waits on (fence labels, query
+// results) runs behind the draws queued ahead of it: the title may reuse what
+// those draws read as soon as it sees the write.
+// `label` is the address the packet writes, noted here so a WAIT_REG_MEM on
+// it knows it is ours before the write has run.
+void InOrder(void (*handle)(const u32*, u32),
+             const u32* body,
+             u32 count,
+             u64 label) {
+  RenderQueue& queue = GuestRenderQueue();
+  if (!queue.running()) {
+    handle(body, count);
+    return;
+  }
+  if (label && IsLabelAddress(label)) {
+    g_fence_labels.Note(label);
+    // Wide enough for EVENT_WRITE's eight 16-byte slots.
+    queue.NotePendingWrite(label, 128);
+  }
+  queue.PushCall([handle, words = std::vector<u32>(body, body + count)] {
+    handle(words.data(), static_cast<u32>(words.size()));
+  });
+}
+
+// The 48-bit address a packet carries as lo, hi dwords at body[at].
+u64 PacketAddress(const u32* body, u32 at) {
+  return ((static_cast<u64>(body[at + 1] & 0xFFFF) << 32) | body[at]) & ~3ull;
+}
+
+// DMA runs behind the queued draws like any other GPU write; the walk only
+// waits for it when it reads what the copy writes.
+void QueueDmaData(render::Renderer& renderer, const u32* body, u32 count) {
+  RenderQueue& queue = GuestRenderQueue();
+  if (!queue.running() || count < 6) {
+    HandleDmaData(renderer, body, count);
+    return;
+  }
+  queue.NotePendingWrite(PacketAddress(body, 3), body[5] & 0x1FFFFF);
+  queue.PushCall([&renderer, words = std::vector<u32>(body, body + count)] {
+    HandleDmaData(renderer, words.data(), static_cast<u32>(words.size()));
+  });
 }
 
 bool IsDraw(u32 op) {
@@ -519,6 +586,9 @@ bool ResolveIndirectBuffer(const u32* body,
   const void* p = reinterpret_cast<const void*>(address);
   if (!utl::isMemoryRangeMapped(p, bytes))
     return false;
+  // A queued DMA or WRITE_DATA may still be writing the chained commands.
+  if (GuestRenderQueue().PendingWriteOverlaps(address, bytes))
+    OwnRenderer("pending-write");
   out = static_cast<const u32*>(p);
   out_dwords = dwords;
   return true;
@@ -737,25 +807,48 @@ u32 WalkDcb(render::Renderer& renderer,
         g_index.num_instances = (count >= 1 && body[0]) ? body[0] : 1;
         break;
       case IT_WAIT_REG_MEM:
+        // A memory poll waits on a label, and the renderer thread reaches it
+        // only after running every command that could write one ahead of it;
+        // a register poll reads the walk's own register file.
+        // What the walk reads after the wait may be what it waits for, and
+        // the producer may be the title's CPU as well as a queued label: wait
+        // here, but only drain the queue when the word is not there yet.
+        if (count >= 5 && GuestRenderQueue().running()) {
+          const volatile u32* polled = WaitRegMemTarget(body);
+          if (polled && GuestRenderQueue().PendingWriteOverlaps(
+                            reinterpret_cast<u64>(polled), 4))
+            OwnRenderer("wait-reg-mem");
+          if (!polled || WaitRegMemPasses(body, *polled))
+            break;
+          OwnRenderer("wait-reg-mem");
+        }
         HandleWaitRegMem(body, count);
         break;
       case IT_DMA_DATA:
-        HandleDmaData(renderer, body, count);
+        QueueDmaData(renderer, body, count);
         break;
       case IT_WRITE_DATA:
-        HandleWriteData(body, count);
+        if (count >= 4)
+          GuestRenderQueue().NotePendingWrite(PacketAddress(body, 1),
+                                              (count - 3) * 4ull);
+        InOrder(HandleWriteData, body, count,
+                count >= 3 ? PacketAddress(body, 1) : 0);
         break;
       case IT_EVENT_WRITE_EOP:
-        HandleEventWriteEop(body, count);
+        InOrder(HandleEventWriteEop, body, count,
+                count >= 3 ? PacketAddress(body, 1) : 0);
         break;
       case IT_RELEASE_MEM:
-        HandleReleaseMem(body, count);
+        InOrder(HandleReleaseMem, body, count,
+                count >= 4 ? PacketAddress(body, 2) : 0);
         break;
       case IT_EVENT_WRITE:
-        HandleEventWrite(body, count);
+        InOrder(HandleEventWrite, body, count,
+                count >= 3 ? PacketAddress(body, 1) & ~7ull : 0);
         break;
       case IT_EVENT_WRITE_EOS:
-        HandleEventWriteEos(body, count);
+        InOrder(HandleEventWriteEos, body, count,
+                count >= 3 ? PacketAddress(body, 1) : 0);
         break;
       case IT_INDIRECT_BUFFER:
       case IT_INDIRECT_BUFFER_CNST: {  // chained buffer (nested CMDBUF)
@@ -898,8 +991,10 @@ void StartRendererOnce(render::Renderer& renderer) {
   // The resource replay reads descriptor tables out of guest memory a compute
   // dispatch may still own; it is below the renderer, so it cannot ask itself.
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
-    render::FlushCsWritesRange(render::DefaultRenderer(), address, bytes, "desc");
+    FlushForWalkRead(render::DefaultRenderer(), address, bytes, "desc");
   };
+  if (kRenderThread && renderer.available())
+    GuestRenderQueue().Start(renderer);
 }
 
 }  // namespace
@@ -922,7 +1017,10 @@ void EndFrame(u64 scanout_base) {
   render::Renderer& renderer = render::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;
-  render::EndFrame(renderer, scanout_base);
+  if (GuestRenderQueue().running())
+    GuestRenderQueue().PushEndFrame(scanout_base);
+  else
+    render::EndFrame(renderer, scanout_base);
   g_frame_active = false;
   g_presented_frames++;
 }

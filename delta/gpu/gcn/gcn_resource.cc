@@ -984,6 +984,9 @@ bool VectorTouchesScalarFile(const Inst& inst) {
   }
 }
 
+// Bumped whenever the cache below may move or drop entries.
+u64 g_scalar_info_gen = 0;
+
 const ScalarPassInfo& CachedScalarInfo(
     const std::shared_ptr<const Program>& program) {
   struct Entry {
@@ -991,9 +994,27 @@ const ScalarPassInfo& CachedScalarInfo(
     ScalarPassInfo info;
   };
   static std::unordered_map<const Program*, Entry> cache;
+  // A draw's resolvers alternate between its VS and PS program.
+  struct Recent {
+    const Program* program = nullptr;
+    const ScalarPassInfo* info = nullptr;
+  };
+  static Recent recent[2];
+  static u64 recent_gen = 0;
+  if (recent_gen != g_scalar_info_gen) {
+    recent_gen = g_scalar_info_gen;
+    recent[0] = recent[1] = {};
+  }
+  for (const Recent& r : recent)
+    if (r.program == program.get())
+      return *r.info;
   auto it = cache.find(program.get());
-  if (it != cache.end())
+  if (it != cache.end()) {
+    recent[1] = recent[0];
+    recent[0] = {program.get(), &it->second.info};
     return it->second.info;
+  }
+  g_scalar_info_gen++;
   // Unbounded-growth backstop: drop entries whose program CachedProgram no
   // longer holds (only the pin here keeps it alive). Clearing the lot at 512
   // re-planned every live shader each frame.
@@ -1412,11 +1433,12 @@ TImage DecodeTImage(const u32* p) {
   return t;
 }
 
-std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
-                                        const u32* vs_user_data) {
-  std::vector<VBuffer> result;
+void TrackVertexBuffers(std::vector<VBuffer>& result,
+                        const Program& fetch_program,
+                        const u32* vs_user_data) {
+  result.clear();
   if (!vs_user_data)
-    return result;
+    return;
 
   // The fetch shader loads each attribute's V# with an s_load_dwordx4 whose
   // SBASE is a user-SGPR pair holding the vertex-buffer-table pointer, at byte
@@ -1452,17 +1474,17 @@ std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
       result.push_back(v);
     }
   }
-  return result;
+  return;
 }
 
-std::vector<TImage> TrackTextures(
-    const std::shared_ptr<const Program>& ps_program,
-    const u32* ps_user_data,
-    bool trace,
-    u64 code_base) {
-  std::vector<TImage> result;
+void TrackTextures(std::vector<TImage>& result,
+                   const std::shared_ptr<const Program>& ps_program,
+                   const u32* ps_user_data,
+                   bool trace,
+                   u64 code_base) {
+  result.clear();
   if (!ps_program || !ps_user_data)
-    return result;
+    return;
 
   if (kTwatch && ++g_track_draws % 4000 == 0)
     PollNullDescriptors();
@@ -1775,16 +1797,16 @@ std::vector<TImage> TrackTextures(
     ForEachConsumer(ps_program, ps_user_data, code_base, true, trace,
                     consume);
   }
-  return result;
+  return;
 }
 
-std::unordered_map<u64, VBuffer> ResolveCbuffers(
-    const std::shared_ptr<const Program>& program,
-    const u32* user_data,
-    u64 code_base) {
-  std::unordered_map<u64, VBuffer> result;
+void ResolveCbuffers(CbufList& result,
+                     const std::shared_ptr<const Program>& program,
+                     const u32* user_data,
+                     u64 code_base) {
+  result.clear();
   if (!program || !user_data)
-    return result;
+    return;
 
   // Mirror TrackTextures: step the scalar register file, and at each
   // s_buffer_load read the live 4-dword V# out of the resolved SGPRs. FOX
@@ -1822,14 +1844,14 @@ std::unordered_map<u64, VBuffer> ResolveCbuffers(
     const bool pointer = s.op <= 0x04;
     const u32 base = s.sbase * 2;
     const u64 key = CbufKey(base, pointer, version);
-    if (result.count(key) || !eval.AllKnown(base, pointer ? 2 : 4))
+    if (FindCbuf(result, key) || !eval.AllKnown(base, pointer ? 2 : 4))
       return;
     VBuffer v{};
     if (pointer)
       v.base = eval.Ptr(base);  // size comes from the shader's plan
     else
       v = DecodeVBuffer(&eval.sgpr[base]);
-    result.emplace(key, v);
+    result.emplace_back(key, v);
     if (eval.trace)
       BASE_LOGI("eud", "cbuf s{} -> base={:#x} stride={} nrec={}",
                 base, static_cast<unsigned long>(v.base), v.stride,
@@ -1839,17 +1861,17 @@ std::unordered_map<u64, VBuffer> ResolveCbuffers(
     result.clear();
     ForEachConsumer(program, user_data, code_base, true, false, consume);
   }
-  return result;
+  return;
 }
 
-std::vector<VBuffer> ResolveDirectVertexBuffers(
-    const std::shared_ptr<const Program>& program,
-    const std::vector<ShaderAttr>& attrs,
-    const u32* user_data,
-    u64 code_base) {
-  std::vector<VBuffer> result(attrs.size());
+void ResolveDirectVertexBuffers(std::vector<VBuffer>& result,
+                                const std::shared_ptr<const Program>& program,
+                                const std::vector<ShaderAttr>& attrs,
+                                const u32* user_data,
+                                u64 code_base) {
+  result.assign(attrs.size(), VBuffer{});
   if (!program || !user_data || attrs.empty())
-    return result;
+    return;
 
   const auto consume = [&](const Inst& inst, auto& eval, u32) {
     if (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf)
@@ -1884,17 +1906,17 @@ std::vector<VBuffer> ResolveDirectVertexBuffers(
     std::fill(result.begin(), result.end(), VBuffer{});
     ForEachConsumer(program, user_data, code_base, true, false, consume);
   }
-  return result;
+  return;
 }
 
-std::vector<VBuffer> ResolveShaderBuffers(
-    const std::shared_ptr<const Program>& program,
-    const std::vector<ShaderBuffer>& buffers,
-    const u32* user_data,
-    u64 code_base) {
-  std::vector<VBuffer> result(buffers.size());
+void ResolveShaderBuffers(std::vector<VBuffer>& result,
+                          const std::shared_ptr<const Program>& program,
+                          const std::vector<ShaderBuffer>& buffers,
+                          const u32* user_data,
+                          u64 code_base) {
+  result.assign(buffers.size(), VBuffer{});
   if (!program || !user_data || buffers.empty())
-    return result;
+    return;
 
   const auto consume = [&](const Inst& inst, auto& eval, u32) {
     if (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf)
@@ -1931,15 +1953,16 @@ std::vector<VBuffer> ResolveShaderBuffers(
     std::fill(result.begin(), result.end(), VBuffer{});
     ForEachConsumer(program, user_data, code_base, true, false, consume);
   }
-  return result;
+  return;
 }
 
-std::vector<ResolvedCsResource> ResolveCsResources(const Program& program,
-                                                   const RecompiledCs& plan,
-                                                   const u32* user_data) {
-  std::vector<ResolvedCsResource> result(plan.resources.size());
+void ResolveCsResources(std::vector<ResolvedCsResource>& result,
+                        const Program& program,
+                        const RecompiledCs& plan,
+                        const u32* user_data) {
+  result.assign(plan.resources.size(), ResolvedCsResource{});
   if (!user_data)
-    return result;
+    return;
 
   ScalarEval eval(user_data);
   for (const Inst& inst : program) {
@@ -1960,7 +1983,7 @@ std::vector<ResolvedCsResource> ResolveCsResources(const Program& program,
     }
     eval.Step(inst);
   }
-  return result;
+  return;
 }
 
 }  // namespace gpu::gcn

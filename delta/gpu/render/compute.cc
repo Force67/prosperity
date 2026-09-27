@@ -32,6 +32,7 @@
 #include "gpu/write_tracker.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <array>
 #include <chrono>
@@ -47,6 +48,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <sys/mman.h>
 
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -1671,9 +1673,51 @@ std::vector<CsRange*> g_cs_pending;
 u64 g_cs_range_bytes = 0;
 constexpr u32 kCsDirtyPageShift = 16;
 std::unordered_map<u64, std::vector<u64>> g_cs_dirty_pages;
+// How many dirty ranges touch each 64 KiB of guest memory, directly indexed
+// over the guest range: a zero answers "nothing dirty here" without a single
+// hash map lookup, and without the false alarms of a hashed table. The table
+// is reserved, not committed; only blocks near dirty ranges ever get pages.
+// Atomic because the command processor's walk reads it without owning the
+// renderer (CsRangeMaybeDirty); only the owner writes it.
+constexpr u32 kCsDirtyFilterShift = 16;
+// Covers the guests' GPU-visible range; anything above reads as maybe dirty.
+constexpr u64 kCsDirtyFilterBlocks = (1ull << 41) >> kCsDirtyFilterShift;
+
+std::atomic<u16>* DirtyFilter() {
+  static std::atomic<u16>* table = [] {
+    void* p = mmap(nullptr, kCsDirtyFilterBlocks * sizeof(std::atomic<u16>),
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    return p == MAP_FAILED ? nullptr : static_cast<std::atomic<u16>*>(p);
+  }();
+  return table;
+}
+
+void NoteDirtyFilter(u64 base, u64 end, int delta) {
+  std::atomic<u16>* table = DirtyFilter();
+  if (!table)
+    return;
+  const u64 last = std::min((end - 1) >> kCsDirtyFilterShift,
+                            kCsDirtyFilterBlocks - 1);
+  for (u64 b = base >> kCsDirtyFilterShift; b <= last; b++)
+    table[b].fetch_add(static_cast<u16>(delta), std::memory_order_relaxed);
+}
+
+bool DirtyFilterClear(u64 base, u64 end) {
+  std::atomic<u16>* table = DirtyFilter();
+  const u64 first = base >> kCsDirtyFilterShift;
+  const u64 last = (end - 1) >> kCsDirtyFilterShift;
+  if (!table || last >= kCsDirtyFilterBlocks)
+    return false;
+  for (u64 b = first; b <= last; b++)
+    if (table[b].load(std::memory_order_relaxed))
+      return false;
+  return true;
+}
 // The same bases, once each: what the readback staging walks instead of every
 // range (thousands of them against a few dozen dirty ones).
-std::unordered_set<u64> g_cs_dirty_bases;
+// Dirty range base -> end of the footprint its index entries cover.
+std::unordered_map<u64, u64> g_cs_dirty_bases;
 // Bumped whenever compute results land in guest memory (writeback or an
 // executed batch of importing dispatches). The draw path's per-frame staging
 // caches stamp entries with this and re-copy when it has moved: a cached
@@ -1685,20 +1729,31 @@ u64 RangeEnd(u64 base, u64 bytes) {
 }
 
 void IndexDirtyRange(u64 base, u64 bytes) {
+  BumpTextureEpoch();
   if (!bytes)
     return;
-  g_cs_dirty_bases.insert(base);
   const u64 end = RangeEnd(base, bytes);
+  u64& indexed = g_cs_dirty_bases[base];
+  if (indexed)
+    NoteDirtyFilter(base, indexed, -1);
+  indexed = std::max(indexed, end);
+  NoteDirtyFilter(base, indexed, 1);
   for (u64 page = base >> kCsDirtyPageShift;
        page <= (end - 1) >> kCsDirtyPageShift; page++)
     g_cs_dirty_pages[page].push_back(base);
 }
 
 void UnindexDirtyRange(u64 base, u64 bytes) {
+  BumpTextureEpoch();
   if (!bytes)
     return;
-  g_cs_dirty_bases.erase(base);
-  const u64 end = RangeEnd(base, bytes);
+  u64 end = RangeEnd(base, bytes);
+  if (auto found = g_cs_dirty_bases.find(base);
+      found != g_cs_dirty_bases.end()) {
+    NoteDirtyFilter(base, found->second, -1);
+    end = std::max(end, found->second);
+    g_cs_dirty_bases.erase(found);
+  }
   for (u64 page = base >> kCsDirtyPageShift;
        page <= (end - 1) >> kCsDirtyPageShift; page++) {
     auto found = g_cs_dirty_pages.find(page);
@@ -1740,6 +1795,44 @@ void UnindexCsRange(u64 base, u64 bytes) {
   }
 }
 
+// Calls fn(other) for every dirty range overlapping [base, base+bytes) until
+// it returns true; a range spanning several index pages may be offered more
+// than once. Allocation free, for the per-draw paths.
+template <typename Fn>
+bool AnyDirtyOverlapping(u64 base, u64 bytes, Fn&& fn) {
+  if (g_cs_dirty_pages.empty() || !bytes)
+    return false;
+  const u64 end = RangeEnd(base, bytes);
+  if (DirtyFilterClear(base, end))
+    return false;
+  const auto hits = [&](u64 other) {
+    auto range = g_cs_ranges.find(other);
+    return range != g_cs_ranges.end() && range->second.gpu_dirty &&
+           other < end && base < RangeEnd(other, range->second.guest_bytes) &&
+           fn(other);
+  };
+  // Same smaller-side walk as DirtyRangesOverlapping, and safe for the same
+  // reason: every candidate's overlap is rechecked exactly.
+  const u64 first_page = base >> kCsDirtyPageShift;
+  const u64 last_page = (end - 1) >> kCsDirtyPageShift;
+  if (last_page - first_page + 1 > g_cs_dirty_pages.size()) {
+    for (const auto& [page, bases] : g_cs_dirty_pages)
+      for (u64 other : bases)
+        if (hits(other))
+          return true;
+    return false;
+  }
+  for (u64 page = first_page; page <= last_page; page++) {
+    auto found = g_cs_dirty_pages.find(page);
+    if (found == g_cs_dirty_pages.end())
+      continue;
+    for (u64 other : found->second)
+      if (hits(other))
+        return true;
+  }
+  return false;
+}
+
 std::vector<u64> DirtyRangesOverlapping(u64 base,
                                              u64 bytes,
                                              u64 exclude = UINT64_MAX) {
@@ -1747,6 +1840,8 @@ std::vector<u64> DirtyRangesOverlapping(u64 base,
   if (!bytes)
     return candidates;
   const u64 end = RangeEnd(base, bytes);
+  if (DirtyFilterClear(base, end))
+    return candidates;
   // Walking the QUERY's pages costs a lookup per 64 KB of it, and a texture is
   // hundreds of pages while the whole dirty index is a handful of entries.
   // Whichever side is smaller gives the same answer, because the filter below
@@ -2956,8 +3051,10 @@ void CsStageReadback(u64 base, CsRange& e, bool all) {
 
 void CsStageReadbacks(bool all = true) {
   // A copy: staging can open a batch, and finalizing an old one may unindex.
-  const std::vector<u64> bases(g_cs_dirty_bases.begin(),
-                               g_cs_dirty_bases.end());
+  std::vector<u64> bases;
+  bases.reserve(g_cs_dirty_bases.size());
+  for (const auto& [base, end] : g_cs_dirty_bases)
+    bases.push_back(base);
   for (u64 base : bases) {
     auto found = g_cs_ranges.find(base);
     if (found != g_cs_ranges.end())
@@ -2979,6 +3076,7 @@ bool CsSplitFrameChunk() {
 // Write one dirty range back to guest memory (retile for images) and re-stamp
 // its hash so the next validation sees guest == buffer.
 bool CsRangeFlushOne(u64 base, CsRange& e) {
+  BumpTextureEpoch();
   if (kCsWbAudit) {
     // Counters, not a sample: the first N flushes are all startup, and the
     // question ("does a tiled-image range ever reach the retile?") is about
@@ -3691,23 +3789,51 @@ bool CsSupplyTexture(u64 base,
 }
 
 DELTA_OPTION(bool, kCsBufBridge, "DELTA_GPU_CS_BUF_BRIDGE", true);
+DELTA_OPTION(bool, kBufMemo, "DELTA_GPU_BUFMEMO", true);
 
 namespace {
 // The one dirty raw range holding all of [base, base+bytes), or null.
+CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base);
+
+// Asked once per raw buffer per draw, and the answer only moves when compute
+// state does, which bumps the texture epoch.
 CsRange* BufferSource(u64 base, u64 bytes, u64* range_base) {
   if (!kCsBufBridge || !kCsVram || g_cs_failed || !bytes ||
       !g_frame.recording)
     return nullptr;
-  const auto dirty = DirtyRangesOverlapping(base, bytes);
-  if (dirty.size() != 1)
+  struct Memo {
+    u64 base = 0, bytes = 0, epoch = 0, range_base = 0;
+    CsRange* range = nullptr;
+  };
+  static Memo memo[512];
+  Memo& m = memo[((base >> 4) ^ (base >> 16) ^ bytes) & 511];
+  const u64 epoch = TextureEpoch();
+  if (!kBufMemo || m.epoch != epoch || m.base != base || m.bytes != bytes) {
+    u64 found_base = 0;
+    CsRange* found = BufferSourceUncached(base, bytes, &found_base);
+    m = {base, bytes, epoch, found_base, found};
+  }
+  *range_base = m.range_base;
+  return m.range;
+}
+
+CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base) {
+  u64 only = 0;
+  const bool several = AnyDirtyOverlapping(base, bytes, [&](u64 other) {
+    if (only && other != only)
+      return true;
+    only = other;
+    return false;
+  });
+  if (several || !only)
     return nullptr;
-  CsRange& e = g_cs_ranges.find(dirty[0])->second;
+  CsRange& e = g_cs_ranges.find(only)->second;
   // Raw bytes only: an image staging or a truth holds another layout.
   const u64 valid = std::min<u64>(e.size, e.guest_bytes);
-  if (!e.buf || e.image_staging || e.truth || e.imported || base < dirty[0] ||
-      base + bytes > dirty[0] + valid)
+  if (!e.buf || e.image_staging || e.truth || e.imported || base < only ||
+      base + bytes > only + valid)
     return nullptr;
-  *range_base = dirty[0];
+  *range_base = only;
   return &e;
 }
 }  // namespace
@@ -3864,6 +3990,7 @@ void ReleaseRetiredCsBuffers() {
 }
 
 void CsForgetGuestRange(u64 base, u64 bytes) {
+  BumpTextureEpoch();
   if (!bytes)
     return;
   const u64 end = RangeEnd(base, bytes);
@@ -4016,6 +4143,7 @@ void PrebuildComputePipeline(const std::vector<u32>& spirv,
 }
 
 bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
+  BumpTextureEpoch();
   ComputeInfo ci_merged;
   const ComputeInfo& ci = MergeSameBase(ci_in, ci_merged);
   if (g_cs_failed) {
@@ -4267,6 +4395,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           s.mirror_current = false;
           MarkPending(s);
           parent->write_seq++;
+          BumpTextureEpoch();
         }
       }
       if (parent) {
@@ -4559,6 +4688,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       }
       e.gpu_dirty = false;
       e.write_seq++;
+      BumpTextureEpoch();
       g_cs_stage_n++;
       g_cs_stage_bytes += sz[i];
       if (kCsSyncReport) {
@@ -4610,6 +4740,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       if (e.guest_bytes != guest_bytes) {
         UnindexCsRange(base, e.guest_bytes);
         IndexCsRange(base, guest_bytes);
+        // Still owed to guest memory: its dirty footprint grows with it, or a
+        // reader of the new part would find nothing to flush.
+        if (e.gpu_dirty)
+          IndexDirtyRange(base, guest_bytes);
       }
       e.guest_bytes = guest_bytes;
       e.image_staging = ci.res[i].image_staging;
@@ -4644,6 +4778,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         e.gpu_dirty = true;
       }
       e.write_seq++;
+      BumpTextureEpoch();
       e.mirror_current = false;
       MarkPending(e);
       g_truth_fold_n++;
@@ -4848,6 +4983,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       IndexDirtyRange(dirty_base, it->second.guest_bytes);
     it->second.gpu_dirty = true;
     it->second.write_seq++;
+    BumpTextureEpoch();
     if (truth_view[i])
       StampView(truth_view[i], dirty_base, parent_off[i], truth_table[i],
                 it->second.write_seq);
@@ -5196,6 +5332,7 @@ bool FlushCsWritesRange(Renderer& renderer,
 }
 
 void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
+  BumpTextureEpoch();
   if (!bytes)
     return;
   FlushCsWritesRange(renderer, base, bytes, "fill");
@@ -5211,38 +5348,12 @@ u64 CsWritebackGeneration() {
   return g_cs_writeback_gen;
 }
 
+bool CsRangeMaybeDirty(u64 base, u64 bytes) {
+  return bytes && !DirtyFilterClear(base, RangeEnd(base, bytes));
+}
+
 bool CsRangeDirtyOverlapping(u64 base, u64 bytes) {
-  if (g_cs_dirty_pages.empty() || !bytes)
-    return false;
-  // Boolean early-out, not DirtyRangesOverlapping: this runs per staging-cache
-  // lookup on the draw path, and building/sorting the candidate vector there
-  // costs more than the memcpy the cache hit saves for small windows.
-  const u64 end = RangeEnd(base, bytes);
-  const auto hits = [&](u64 other) {
-    auto range = g_cs_ranges.find(other);
-    return range != g_cs_ranges.end() && range->second.gpu_dirty &&
-           other < end && base < RangeEnd(other, range->second.guest_bytes);
-  };
-  // Same smaller-side walk as DirtyRangesOverlapping, and safe for the same
-  // reason: every candidate's overlap is rechecked exactly.
-  const u64 first_page = base >> kCsDirtyPageShift;
-  const u64 last_page = (end - 1) >> kCsDirtyPageShift;
-  if (last_page - first_page + 1 > g_cs_dirty_pages.size()) {
-    for (const auto& [page, bases] : g_cs_dirty_pages)
-      for (u64 other : bases)
-        if (hits(other))
-          return true;
-    return false;
-  }
-  for (u64 page = first_page; page <= last_page; page++) {
-    auto found = g_cs_dirty_pages.find(page);
-    if (found == g_cs_dirty_pages.end())
-      continue;
-    for (u64 other : found->second)
-      if (hits(other))
-        return true;
-  }
-  return false;
+  return AnyDirtyOverlapping(base, bytes, [](u64) { return true; });
 }
 
 }  // namespace gpu::render

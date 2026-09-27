@@ -9,9 +9,10 @@
  * decision across ps4/ (draw_state, compute_dispatch, shader_cache, cmd_trace),
  * none of which is reachable from outside gpu/.
  *
- * Submission is synchronous: a submit returns once the whole buffer has been
- * walked, so every fence label the packets ask the GPU to write is complete by
- * the time the walk passes it.
+ * A submit returns once the whole buffer has been walked. The draws it found
+ * are recorded on the renderer thread (render_queue.h), and every fence label
+ * is written there, in order, once the draws ahead of it have read their guest
+ * memory.
  */
 
 #include <cstddef>

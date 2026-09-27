@@ -38,6 +38,7 @@
 #include <utl/mem.h>
 #include <utl/options.h>
 #include <unordered_map>
+#include <base/containers/unordered_map.h>
 
 namespace {
 DELTA_OPTION(bool, kNoWipe, "DELTA_GPU_NOWIPE", true);
@@ -133,8 +134,9 @@ struct StageCacheKey {
 };
 
 struct StageCacheKeyHash {
-  size_t operator()(const StageCacheKey& key) const {
-    return static_cast<size_t>(key.base ^ (key.base >> 32) ^ key.salt);
+  mem_size operator()(const StageCacheKey& key) const {
+    const u64 h = (key.base ^ (u64(key.salt) << 56)) * 0x9E3779B97F4A7C15ull;
+    return static_cast<mem_size>(h ^ (h >> 32));
   }
 };
 
@@ -157,9 +159,12 @@ struct StageCache {
     u64 gen;
     u32 dcb;
     bool tracked;
+    u32 max_index;  // IB cache: the largest index in the copy, or ~0u
   };
   static constexpr u32 kBlockShift = 16;
-  std::unordered_map<StageCacheKey, Entry, StageCacheKeyHash> map;
+  base::UnorderedMap<StageCacheKey, Entry, StageCacheKeyHash> map;
+  // Dropped entries are zeroed rather than erased: base::UnorderedMap can
+  // insert a key twice after an erase leaves a tombstone ahead of it.
   // Tracked keys by the 64 KiB blocks they cover. May hold keys since dropped
   // or re-inserted: Invalidate rechecks each against the map.
   std::unordered_map<u64, std::vector<StageCacheKey>> blocks;
@@ -167,8 +172,9 @@ struct StageCache {
   u32 dcb = 0;
 
   bool Live(const Entry& e) const {
-    return e.tracked ||
-           (e.dcb == dcb && e.gen == render::CsWritebackGeneration());
+    return e.bytes &&
+           (e.tracked ||
+            (e.dcb == dcb && e.gen == render::CsWritebackGeneration()));
   }
   void RollFrame() {
     if (frame != g_frame.num) {
@@ -189,17 +195,18 @@ struct StageCache {
   // draw: GTA:SA indexes one 200k-vertex buffer, each draw reaching a few
   // hundred vertices further than the last, and re-copied ~2.4 MB per draw
   // until the per-frame ring ran out and the rest of the world was declined.
-  u64 Find(u64 base, u64 bytes, u32 salt = 0);
+  const Entry* Find(u64 base, u64 bytes, u32 salt = 0);
   // Record a copy made at the CURRENT generation, called after the range was
   // flushed (or was never compute-written), never before. A shorter copy never
   // replaces a longer live one: it would answer requests it does not cover.
-  void Insert(u64 base, u64 bytes, u32 salt, u64 off, bool tracked = false) {
+  void Insert(u64 base, u64 bytes, u32 salt, u64 off, bool tracked = false,
+              u32 max_index = ~0u) {
     RollFrame();
     const StageCacheKey key{base, salt};
     auto& e = map[key];
     if (e.bytes >= bytes && Live(e))
       return;
-    e = {off, bytes, render::CsWritebackGeneration(), dcb, tracked};
+    e = {off, bytes, render::CsWritebackGeneration(), dcb, tracked, max_index};
     if (tracked)
       for (u64 b = base >> kBlockShift; b <= (base + bytes - 1) >> kBlockShift;
            b++)
@@ -208,10 +215,9 @@ struct StageCache {
   void Invalidate(u64 first, u64 end) {
     const auto drop = [&](const std::vector<StageCacheKey>& keys) {
       for (const StageCacheKey& key : keys) {
-        auto it = map.find(key);
-        if (it != map.end() && key.base < end &&
-            first < key.base + it->second.bytes)
-          map.erase(it);
+        Entry* e = map.find(key);
+        if (e && key.base < end && first < key.base + e->bytes)
+          e->bytes = 0;
       }
     };
     // A remapped reservation can span gigabytes: walk the smaller side.
@@ -267,14 +273,18 @@ void SyncGuestWrites() {
   }
 }
 
-u64 StageCache::Find(u64 base, u64 bytes, u32 salt) {
+const StageCache::Entry* StageCache::Find(u64 base, u64 bytes, u32 salt) {
   RollFrame();
   SyncGuestWrites();
-  const auto it = map.find({base, salt});
-  if (it == map.end() || it->second.bytes < bytes || !Live(it->second) ||
+  const Entry* e = map.find({base, salt});
+  if (!e || e->bytes < bytes || !Live(*e) ||
       render::CsRangeDirtyOverlapping(base, bytes))
-    return u64(-1);
-  return it->second.off;
+    return nullptr;
+  return e;
+}
+
+u64 StagedOffset(const StageCache::Entry* e) {
+  return e ? e->off : u64(-1);
 }
 
 
@@ -559,9 +569,19 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     return Decline(kNoRecomp);
   };
   u32 nv = d.vertex_count;
+  const u64 index_bytes =
+      indexed ? static_cast<u64>(d.index_count) *
+                    UploadedIndexElementBytes(d.index_type)
+              : 0;
   if (indexed) {
+    const StageCache::Entry* staged =
+        kRingDedup ? g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
+                                      index_bytes, 1u + d.index_type)
+                   : nullptr;
     const u32 max_index =
-        MaxGuestIndex(d.index_data, d.index_count, d.index_type);
+        staged && staged->bytes == index_bytes && staged->max_index != ~0u
+            ? staged->max_index
+            : MaxGuestIndex(d.index_data, d.index_count, d.index_type);
     if (max_index >= 200000u)
       return vtx_decline("max-index", max_index);
     nv = max_index + 1;
@@ -972,8 +992,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
     vb_cached[j] =
         kRingDedup && bind_size[j]
-            ? g_vb_staged.Find(reinterpret_cast<u64>(d.vbufs[j].data),
-                               bind_size[j])
+            ? StagedOffset(g_vb_staged.Find(
+                  reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j]))
             : u64(-1);
     if (vb_cached[j] != u64(-1))
       continue;
@@ -999,16 +1019,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
     return Decline(kRing);
   }
-  const u64 index_bytes =
-      indexed ? static_cast<u64>(d.index_count) *
-                    UploadedIndexElementBytes(d.index_type)
-              : 0;
   // The IB cache key carries the index type: CopyGuestIndices widens 16-bit
   // sources, so the same guest bytes at two types are two different uploads.
   const u64 ib_cached =
       kRingDedup && indexed
-          ? g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
-                             index_bytes, 1u + d.index_type)
+          ? StagedOffset(g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
+                                          index_bytes, 1u + d.index_type))
           : u64(-1);
   const u64 index_align = d.index_type == 1 ? 4 : 2;
   const u64 aligned_ioff =
@@ -1686,7 +1702,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           std::min<u64>(kCbufWindow, page_end - cb.base));
       cache_n = kTightCbuf ? planned : std::max(planned, avail);
       if (kRingDedup) {
-        const u64 cached = g_ubo_staged.Find(cb.base, cache_n);
+        const u64 cached = StagedOffset(g_ubo_staged.Find(cb.base, cache_n));
         if (cached != u64(-1)) {
           dyn_off[i] = static_cast<u32>(cached);
           continue;
@@ -1797,7 +1813,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         rawbuf_mask |= 1u << i;
         continue;
       }
-      const u64 cached = g_sbo_staged.Find(rb.base, want);
+      const u64 cached = StagedOffset(g_sbo_staged.Find(rb.base, want));
       if (cached != u64(-1)) {
         sbo_dyn[i] = static_cast<u32>(cached);
         rawbuf_mask |= 1u << i;
@@ -1898,7 +1914,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     g_ring_ib_bytes += index_bytes;
     if (kRingDedup)
       g_ib_staged.Insert(reinterpret_cast<u64>(d.index_data), index_bytes,
-                         1u + d.index_type, ioff, tracked);
+                         1u + d.index_type, ioff, tracked, nv - 1);
   }
   if (nbind) {
     rhi::Buffer* bufs[8];

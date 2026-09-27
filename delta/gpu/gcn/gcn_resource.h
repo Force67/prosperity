@@ -116,7 +116,8 @@ class ScalarReplayScope {
 // order); unresolved entries carry valid=false. Pass CachedProgram(): it keys a
 // per-program cache of plan + scalar-relevant subset, skipping re-planning per draw.
 // code_base resolves s_getpc_b64 against a table embedded after the code; 0 = unknown.
-std::vector<TImage> TrackTextures(
+void TrackTextures(
+    std::vector<TImage>& out,
     const std::shared_ptr<const Program>& ps_program,
     const u32* ps_user_data,
     bool trace = false,
@@ -131,10 +132,19 @@ inline u64 CbufKey(u32 base_sgpr, bool pointer, u32 version) {
 
 // Resolve the live descriptor behind each cbuffer, following the same extended-
 // user-data / SRT chains as TrackTextures: a 4-dword V# (s_buffer_load) or a
-// 2-dword flat pointer (s_load, .base only, no size field). Keyed by CbufKey.
+// 2-dword flat pointer (s_load, .base only, no size field). Keyed by CbufKey;
+// a handful per shader, so a flat list.
 // FOX passes cbuffer descriptors through EUD, so the chain is walked and read
 // at the point of load.
-std::unordered_map<u64, VBuffer> ResolveCbuffers(
+using CbufList = std::vector<std::pair<u64, VBuffer>>;
+inline const VBuffer* FindCbuf(const CbufList& list, u64 key) {
+  for (const auto& [k, v] : list)
+    if (k == key)
+      return &v;
+  return nullptr;
+}
+void ResolveCbuffers(
+    CbufList& out,
     const std::shared_ptr<const Program>& program,
     const u32* user_data,
     u64 code_base = 0);
@@ -142,7 +152,8 @@ std::unordered_map<u64, VBuffer> ResolveCbuffers(
 // Resolve attributes fetched by MUBUF in the main VS: the descriptor SGPRs may start
 // as inline user data or be overwritten by an SMRD load, so capture each V# from the
 // scalar state live at its MUBUF. Index-aligned with attrs; unresolved zeroed.
-std::vector<VBuffer> ResolveDirectVertexBuffers(
+void ResolveDirectVertexBuffers(
+    std::vector<VBuffer>& out,
     const std::shared_ptr<const Program>& program,
     const std::vector<ShaderAttr>& attrs,
     const u32* user_data,
@@ -151,7 +162,8 @@ std::vector<VBuffer> ResolveDirectVertexBuffers(
 // Resolve the live V# behind each raw MUBUF buffer (see ShaderBuffer): same replay
 // as ResolveDirectVertexBuffers, captured at the consuming instruction.
 // Index-aligned with `buffers`; unresolved zeroed.
-std::vector<VBuffer> ResolveShaderBuffers(
+void ResolveShaderBuffers(
+    std::vector<VBuffer>& out,
     const std::shared_ptr<const Program>& program,
     const std::vector<ShaderBuffer>& buffers,
     const u32* user_data,
@@ -164,15 +176,17 @@ struct ResolvedCsResource {
   bool valid = false;
   u32 descriptor[8] = {};
 };
-std::vector<ResolvedCsResource> ResolveCsResources(const Program& program,
-                                                   const RecompiledCs& plan,
-                                                   const u32* user_data);
+void ResolveCsResources(std::vector<ResolvedCsResource>& out,
+                        const Program& program,
+                        const RecompiledCs& plan,
+                        const u32* user_data);
 
 // Given a decoded fetch shader + the 16 VS user-data SGPRs, recover the vertex-
 // attribute buffers in attribute order (the common s_load_dwordx4 from the
 // vertex-buffer table + buffer_load_format pattern).
-std::vector<VBuffer> TrackVertexBuffers(const Program& fetch_program,
-                                        const u32* vs_user_data);
+void TrackVertexBuffers(std::vector<VBuffer>& out,
+                        const Program& fetch_program,
+                        const u32* vs_user_data);
 
 // A descriptor table the replay is about to read may still be sitting in a
 // compute buffer, unwritten-back. The recompiler cannot ask a renderer that
