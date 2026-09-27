@@ -1,9 +1,9 @@
 #include "hardware_mode.h"
 #include "base/arch.h"
 
-#include <atomic>
 #include <cstdlib>
 #include <utl/options.h>
+#include <base/atomic.h>
 
 namespace krnl::ps4 {
 
@@ -13,7 +13,7 @@ namespace {
 
 constexpr HardwareModeProfile kBaseProfile{HardwareMode::base, 0x710f10};
 constexpr HardwareModeProfile kNeoProfile{HardwareMode::neo, 0x740f30};
-std::atomic<u32> g_titleAttributes{0};
+base::Atomic<u32> g_titleAttributes{0};
 
 } // namespace
 
@@ -24,11 +24,11 @@ const HardwareModeProfile &hardwareModeProfile() {
 }
 
 void setTitleAttributes(u32 attributes) {
-  g_titleAttributes.store(attributes, std::memory_order_release);
+  g_titleAttributes.store(attributes, base::memory_order_release);
 }
 
 u32 titleAttributes() {
-  return g_titleAttributes.load(std::memory_order_acquire);
+  return g_titleAttributes.load(base::memory_order_acquire);
 }
 
 u32 cpuMode() {

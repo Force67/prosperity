@@ -14,9 +14,6 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
-#include <functional>
-#include <unordered_map>
-#include <unordered_set>
 #include <logger/logger.h>
 
 #include <utl/mem.h>
@@ -30,6 +27,13 @@
 #include "sys_mem.h"
 #include <runtime/vprx/vprx.h>
 #include <utl/options.h>
+#include <base/containers/map.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/functional/function.h>
+#include <base/strings/string_ref.h>
+#include <base/strings/xstring.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(const char *, kVoInitOff, "DELTA_VO_INIT_OFF", nullptr);
@@ -222,8 +226,8 @@ int PS4ABI sys_dynlib_get_list(u32 *handles, size_t maxCount,
   // ran before libSceHttp's init, got 0x80431001, left its NP context null. Emit
   // dependency-first (postorder over DT_SCE_NEEDED_MODULE), main module up front.
   base::Vector<smodule *> sorted;
-  std::unordered_set<smodule *> visited;
-  std::function<void(smodule *)> visit = [&](smodule *m) {
+  base::HashSet<smodule *> visited;
+  base::Function<void(smodule *)> visit = [&](smodule *m) {
     if (!visited.insert(m).second)
       return;
     for (auto &dep : m->neededObjects()) {
@@ -443,7 +447,7 @@ struct tls_index {
 void *PS4ABI guest_tls_get_addr(tls_index *ti) {
   // per-thread dynamic TLS blocks (module index -> block). Each thread gets its
   // own copy of every module's __thread storage, like a real DTV.
-  static thread_local std::unordered_map<u32, u8 *> t_blocks;
+  static thread_local base::HashMap<u32, u8 *> t_blocks;
 
   auto it = t_blocks.find(ti->module_id);
   if (it != t_blocks.end())

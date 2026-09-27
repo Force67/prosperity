@@ -8,9 +8,6 @@
 #include "gpu/ps5/shader_cache.h"
 #include "base/arch.h"
 
-#include <functional>
-#include <array>
-#include <unordered_map>
 
 #include "gpu/ps5/cmd_trace.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
@@ -20,6 +17,10 @@
 
 #include <base/logging.h>
 #include <utl/options.h>
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/hash_map.h>
+#include <base/hashing/hash.h>
 
 namespace gpu::ps5 {
 namespace {
@@ -41,10 +42,10 @@ struct GraphicsKey {
   u32 ps_input_ena = 0;
   u32 ps_num_interp = 0;
   // Attribute locations and passthrough interpolation mode, in slot order.
-  std::array<u16, 32> ps_param_slot{};
+  base::Array<u16, 32> ps_param_slot{};
   bool gl_clip = false;
   u64 gs = 0;
-  std::array<u32, 6> ngg{};
+  base::Array<u32, 6> ngg{};
 
   bool operator==(const GraphicsKey& other) const = default;
 };
@@ -79,7 +80,7 @@ struct ComputeKey {
 
 struct ComputeKeyHash {
   size_t operator()(const ComputeKey& key) const {
-    u64 h = std::hash<u64>{}(key.code);
+    u64 h = base::Hash<u64>{}(key.code);
     MixHash(h, key.thread_x);
     MixHash(h, key.thread_y);
     MixHash(h, key.thread_z);
@@ -144,7 +145,7 @@ void ReportMiss(const GraphicsKey& key, const GraphicsShaderState& state,
 }  // namespace
 
 const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
-  static std::unordered_map<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>
+  static base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>
       cache;
   GraphicsKey key{CodeHash(state.vs_addr, 4096),
                   CodeHash(state.ps_addr, 4096),
@@ -194,7 +195,7 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
 }
 
 const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
-  static std::unordered_map<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>
+  static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>
       cache;
   const ComputeKey key{CodeHash(state.cs_addr, rdna::ComputeCodeDwords(reinterpret_cast<const u32*>(state.cs_addr))),
                        state.thread_x,

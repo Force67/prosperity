@@ -9,11 +9,10 @@
  */
 
 #include "base/arch.h"
-#include <memory>
-#include <string>
-#include <vector>
 
 #include <base/strings/xstring.h>
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
 
 namespace vfs {
 struct ArchiveImpl;
@@ -53,7 +52,7 @@ public:
 
   // One immediate child of a directory.
   struct Child {
-    std::string name;
+    base::String name;
     bool isDir;
   };
 
@@ -61,16 +60,16 @@ public:
   // like find(). Returns false if the directory holds nothing. The child index is
   // built on first use, since a title that never enumerates should not pay for
   // it (this container has 223k entries).
-  bool list(const char *relPath, std::vector<Child> &out);
+  bool list(const char *relPath, base::Vector<Child> &out);
 
   // Collect every regular-file path in the container (leading '/').
-  void paths(std::vector<std::string> &out) const;
+  void paths(base::Vector<base::String> &out) const;
 
   // Which backend claimed the file ("rar", "zip"), or "" if none did.
   const char *backendName() const;
 
 private:
-  std::unique_ptr<ArchiveImpl> impl_;
+  base::UniquePointer<ArchiveImpl> impl_;
 };
 
 // True if the path's extension is a container ArchiveFilesystem can open. Only

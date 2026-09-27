@@ -5,11 +5,11 @@
 #include "libSceAudioIn.h"
 #include "base/arch.h"
 
-#include <chrono>
 #include <cstring>
-#include <mutex>
-#include <thread>
-#include <vector>
+#include <base/containers/vector.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
 
 namespace {
 
@@ -20,8 +20,8 @@ struct Port {
   bool open = false;
 };
 
-std::mutex g_mtx;
-std::vector<Port> g_ports;
+base::Mutex g_mtx;
+base::Vector<Port> g_ports;
 
 u32 channelsFromParam(u32 param) {
   switch (param & 0xFF) {
@@ -58,7 +58,7 @@ Port *port(i32 handle) {
 }
 
 int openPort(u32 length, u32 freq, u32 param) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   Port p;
   p.grain = length ? length : 256;
   p.channels = channelsFromParam(param);
@@ -71,7 +71,7 @@ int openPort(u32 length, u32 freq, u32 param) {
 int readSilence(i32 handle, void *ptr, u32 sampleBytes = 2) {
   u32 grain, channels, freq;
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     Port *p = port(handle);
     if (!p)
       return -1;
@@ -86,8 +86,7 @@ int readSilence(i32 handle, void *ptr, u32 sampleBytes = 2) {
   // (outside the lock) to grain/freq seconds so the title's capture thread
   // doesn't busy-spin at 100% CPU returning instant silence.
   if (freq)
-    std::this_thread::sleep_for(
-        std::chrono::microseconds(1000000ull * grain / freq));
+    base::SleepForMicroseconds(1000000ull * grain / freq);
   return static_cast<int>(grain);
 }
 
@@ -95,7 +94,7 @@ void fillStatus(i32 handle, void *status) {
   if (!status)
     return;
   std::memset(status, 0, 32);
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   if (Port *p = port(handle)) {
     reinterpret_cast<u32 *>(status)[0] = 1;
     reinterpret_cast<u32 *>(status)[1] = p->grain;
@@ -119,7 +118,7 @@ int PS4ABI sceAudioInInput(i32 handle, void *ptr) {
 }
 
 int PS4ABI sceAudioInClose(i32 handle) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   Port *p = port(handle);
   if (!p)
     return -1;

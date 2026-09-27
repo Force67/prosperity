@@ -9,6 +9,7 @@
 
 #include "slb2_object.h"
 #include "base/arch.h"
+#include <base/containers/vector.h>
 
 namespace formats {
 /*
@@ -26,13 +27,13 @@ if (file.IsOpen()) {
 
         std::printf("Found %d file entries\n", pup.fileCount);
 
-        std::vector<PUPFile> entries(pup.fileCount);
+        base::Vector<PUPFile> entries(pup.fileCount);
         file.Read(entries);
 
         for (auto& e : entries) {
                 file.Seek(e.offset, utl::seekMode::seek_set);
 
-                std::vector<u8> data(e.fileSize);
+                base::Vector<u8> data(e.fileSize);
                 file.Read(data);
 
                 utl::File out(converter.from_bytes(e.fileName),

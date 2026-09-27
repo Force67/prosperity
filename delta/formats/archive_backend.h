@@ -9,11 +9,10 @@
  */
 
 #include "base/arch.h"
-#include <memory>
-#include <string>
-#include <vector>
 
 #include <base/strings/xstring.h>
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
 
 namespace vfs {
 
@@ -21,7 +20,7 @@ namespace vfs {
 // backend-private resume bookkeeping AND the on-disk index cache's content, so a
 // backend must decode an entry from these fields alone.
 struct ArchiveEntry {
-  std::string path;      // archive-relative, '/' separators, no leading slash
+  base::String path;      // archive-relative, '/' separators, no leading slash
   u64 size = 0;          // uncompressed
   u64 packedSize = 0;
   u64 dataOffset = 0;    // backend-private: where the entry's stream begins
@@ -38,7 +37,7 @@ struct ArchiveBackend {
 
   // Walk the container once and append every regular file it holds. Returns
   // false if the container is malformed.
-  virtual bool index(std::vector<ArchiveEntry> &out) = 0;
+  virtual bool index(base::Vector<ArchiveEntry> &out) = 0;
 
   // Decompress [off, off+len) of one entry into buf; bytes produced (clamped, 0 past
   // the end) or -1 on a corrupt stream. Entries are far too large to hold whole (3.6 GB
@@ -54,7 +53,7 @@ struct ArchiveBackend {
 
 // Backend constructors. Each returns nullptr when `path` is not a container of
 // that kind; ArchiveFilesystem sniffs by trying them in turn.
-std::unique_ptr<ArchiveBackend> openRarBackend(const base::String &path);
-std::unique_ptr<ArchiveBackend> openZipBackend(const base::String &path);
+base::UniquePointer<ArchiveBackend> openRarBackend(const base::String &path);
+base::UniquePointer<ArchiveBackend> openZipBackend(const base::String &path);
 
 } // namespace vfs

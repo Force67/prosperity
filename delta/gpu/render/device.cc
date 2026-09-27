@@ -8,8 +8,7 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <string>
-#include <thread>
+#include <base/threading/thread.h>
 
 #include <base/logging.h>
 #include <utl/options.h>
@@ -21,6 +20,7 @@
 #include "gpu/render/frame.h"
 #include "gpu/render/trace.h"
 #include "gpu/render/upload_ring.h"
+#include <base/strings/xstring.h>
 
 namespace {
 DELTA_OPTION(const char*, kBackend, "DELTA_GPU_BACKEND", "vulkan");
@@ -40,18 +40,18 @@ namespace {
 // Where driver pipeline caches live. Same convention as the SPIR-V cache
 // (DELTA_GPU_SHADER_CACHE_DIR, else $XDG_CACHE_HOME/ps4delta, else
 // ~/.cache/ps4delta), and disabled by the same DELTA_GPU_SHADER_CACHE=0.
-std::string PipelineCacheDir() {
+base::String PipelineCacheDir() {
   if (!kShaderCacheOn)
-    return std::string();
-  std::string d;
+    return base::String();
+  base::String d;
   if (kShaderCacheDirOpt && *kShaderCacheDirOpt)
     d = kShaderCacheDirOpt;
   else if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
-    d = std::string(xdg) + "/ps4delta";
+    d = base::String(xdg) + "/ps4delta";
   else if (const char* home = std::getenv("HOME"); home && *home)
-    d = std::string(home) + "/.cache/ps4delta";
+    d = base::String(home) + "/.cache/ps4delta";
   else
-    return std::string();
+    return base::String();
   for (size_t i = 1; i <= d.size(); i++)
     if (i == d.size() || d[i] == '/')
       ::mkdir(d.substr(0, i).c_str(), 0755);
@@ -81,11 +81,13 @@ bool CreateDevice() {
   options.sync_validation = trace::WantSyncValidation();
   options.checkpoints = kCheckpoints;
   options.on_message = trace::OnDeviceMessage;
-  const std::string cache_dir = PipelineCacheDir();
+  const base::String cache_dir = PipelineCacheDir();
   options.cache_dir = cache_dir.empty() ? nullptr : cache_dir.c_str();
   // Lives for the process: tearing a device down during static destruction
   // races the driver's own exit handlers.
-  rhi::Device* device = render::CreateBackendDevice(backend, options).release();
+  auto owned = render::CreateBackendDevice(backend, options);
+  rhi::Device* device = owned.Get_UseOnlyIfYouKnowWhatYouareDoing();
+  owned.ResetUnchecked_UseOnlyIfYouKnowWhatYouareDoing();
   if (!device)
     return false;
   g_backend.device = device;
@@ -122,8 +124,8 @@ bool Init(Renderer& renderer) {
   // vk_icdGetInstanceProcAddr silently fails and enumeration falls back to
   // llvmpipe, a ~30ms/frame software rasteriser on a box with a real GPU.
   bool ok = false;
-  std::thread init_thread([&ok] { ok = CreateDevice(); });
-  init_thread.join();
+  base::Thread init_thread("gpu-init", [&ok] { ok = CreateDevice(); }, true);
+  init_thread.Join();
   if (!ok) {
     BASE_LOGI("gpu", "no usable graphics device; gpu disabled");
     return false;

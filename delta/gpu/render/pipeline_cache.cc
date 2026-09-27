@@ -20,17 +20,18 @@
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/upload_ring.h"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <utility>
-#include <vector>
-#include <iterator>
 
+#include <base/containers/array.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
 
 namespace {
 DELTA_OPTION(bool, kDoCull, "DELTA_GPU_CULL", false);
@@ -75,8 +76,8 @@ DELTA_OPTION(const char*, kZWritePs, "DELTA_GPU_ZWRITE_PS", nullptr);
 // Comma-separated list, because a target is routinely written by more than one
 // pass: P.T.'s light buffers take 34 draws from one shader and 28 from another,
 // and disabling the depth test on either alone proves nothing about the pair.
-std::vector<u64> ParsePsList(const char* e, const char* tag) {
-  std::vector<u64> out;
+base::Vector<u64> ParsePsList(const char* e, const char* tag) {
+  base::Vector<u64> out;
   if (e)
     for (const char* p = e; *p;) {
       while (*p == ',' || *p == ' ')
@@ -98,7 +99,7 @@ std::vector<u64> ParsePsList(const char* e, const char* tag) {
 }
 
 bool NoZTestForPs(u64 ps) {
-  static const std::vector<u64> list = ParsePsList(kNoZTestPs, "nozps");
+  static const base::Vector<u64> list = ParsePsList(kNoZTestPs, "nozps");
   if (list.empty() || !ps)
     return false;
   for (u64 v : list)
@@ -108,7 +109,7 @@ bool NoZTestForPs(u64 ps) {
 }
 
 bool NoZWriteForPs(u64 ps) {
-  static const std::vector<u64> list = ParsePsList(kNoZWritePs, "nozwps");
+  static const base::Vector<u64> list = ParsePsList(kNoZWritePs, "nozwps");
   if (list.empty() || !ps)
     return false;
   for (u64 v : list)
@@ -118,7 +119,7 @@ bool NoZWriteForPs(u64 ps) {
 }
 
 bool ForceZWriteForPs(u64 ps) {
-  static const std::vector<u64> list = ParsePsList(kZWritePs, "zwps");
+  static const base::Vector<u64> list = ParsePsList(kZWritePs, "zwps");
   if (list.empty() || !ps)
     return false;
   for (u64 v : list)
@@ -177,7 +178,7 @@ RecompPipe* RecompiledPipelineCache::Find(u64 key) {
 }
 
 RecompPipe* RecompiledPipelineCache::Store(u64 key, RecompPipe pipeline) {
-  return &pipelines_.emplace(key, std::move(pipeline)).first->second;
+  return &pipelines_.emplace(key, base::move(pipeline)).first->second;
 }
 
 // Build a graphics pipeline for the colored (textured=false) or textured quad
@@ -188,13 +189,13 @@ rhi::Pipeline* BuildPipeline(bool textured,
                              rhi::Format color_format) {
   rhi::GraphicsPipelineDesc desc;
   desc.layout = textured ? g_quad.tex_layout : g_quad.layout;
-  desc.vertex = textured ? rhi::ShaderCode{tex_vert_spv, std::size(tex_vert_spv)}
+  desc.vertex = textured ? rhi::ShaderCode{tex_vert_spv, base::ArraySize(tex_vert_spv)}
                          : rhi::ShaderCode{quad_vert_spv,
-                                           std::size(quad_vert_spv)};
+                                           base::ArraySize(quad_vert_spv)};
   desc.fragment = textured
-                      ? rhi::ShaderCode{tex_frag_spv, std::size(tex_frag_spv)}
+                      ? rhi::ShaderCode{tex_frag_spv, base::ArraySize(tex_frag_spv)}
                       : rhi::ShaderCode{quad_frag_spv,
-                                        std::size(quad_frag_spv)};
+                                        base::ArraySize(quad_frag_spv)};
   // Interleaved repacked vertex: pos.xy@0, color.rgba@8, uv.xy@24, stride 32.
   desc.vertex_buffers = {{32, false}};
   desc.vertex_attributes = {{0, 0, rhi::Format::kRG32Float, 0},
@@ -295,7 +296,7 @@ bool CreateTexPipeline() {
 RecompPipe* GetRecompPipe(const DrawInfo& d) {
   if (d.recomp->ps_texs.size() > kMaxTex)
     return nullptr;
-  u32 mrt_n = std::min(d.mrt_count, 8u);
+  u32 mrt_n = base::Min(d.mrt_count, 8u);
   // Depth + primitive-setup state folded into the pipeline key (mixed through
   // an FNV prime so it spreads across the whole 64-bit space, away from the
   // blend/stride bits).
@@ -368,7 +369,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   const u32 vertex_stage = mesh ? rhi::kStageMesh : rhi::kStageVertex;
   rp.textured = !d.recomp->ps_texs.empty() || !d.recomp->vs_texs.empty();
   const bool has_storage =
-      std::any_of(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
+      base::AnyOf(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
                   [](const gcn::ShaderTex& tex) { return tex.storage; });
   // A vertex texture fetch takes a binding of its own in set 0, so the exact
   // per-binding layout below is the only one that can describe the draw.
@@ -381,7 +382,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   rhi::BindGroupLayout* set0 = !rp.textured ? g_ring.empty_layout : g_tex.layout;
   if (rp.multi_tex) {
     rhi::BindGroupLayoutDesc desc;
-    const u32 n_bind = static_cast<u32>(std::min(n_tex, size_t(kMaxTex)));
+    const u32 n_bind = static_cast<u32>(base::Min(n_tex, size_t(kMaxTex)));
     for (u32 i = 0; i < n_bind; i++) {
       const bool is_vs = i >= d.recomp->ps_texs.size();
       const bool storage = !is_vs && d.recomp->ps_texs[i].storage;
@@ -450,7 +451,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
 
   // One binding per resolved vertex buffer (single-stream draws stay a single
   // binding, identical to before); attributes reference their binding.
-  const u32 nbind = d.num_vattrs ? std::min(d.num_vbufs, 8u) : 0;
+  const u32 nbind = d.num_vattrs ? base::Min(d.num_vbufs, 8u) : 0;
   for (u32 j = 0; j < nbind; j++)
     pd.vertex_buffers.push_back({d.vbufs[j].stride, d.vbufs[j].per_instance});
   for (u32 i = 0; i < d.num_vattrs; i++)
@@ -480,8 +481,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     // produces a null result indistinguishable from a real one, and this
     // title's record is full of exactly that mistake.
     if (per_ps) {
-      static std::vector<u64> said;
-      if (std::find(said.begin(), said.end(), d.ps_addr) == said.end()) {
+      static base::Vector<u64> said;
+      if (base::Find(said.begin(), said.end(), d.ps_addr) == said.end()) {
         said.push_back(d.ps_addr);
         BASE_LOGI("nozps",
                   "depth test disabled for ps={:#x} (test_enable was {}, func {})",
@@ -492,8 +493,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     pd.depth_test = d.depth_test_enable && !skip_ztest;
     const bool no_write = NoZWriteForPs(d.ps_addr);
     if (no_write) {
-      static std::vector<u64> said;
-      if (std::find(said.begin(), said.end(), d.ps_addr) == said.end()) {
+      static base::Vector<u64> said;
+      if (base::Find(said.begin(), said.end(), d.ps_addr) == said.end()) {
         said.push_back(d.ps_addr);
         BASE_LOGI("nozwps", "depth write disabled for ps={:#x} (was {})",
                   (unsigned long long)d.ps_addr, (int)d.depth_write_enable);
@@ -501,8 +502,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     }
     const bool force_write = ForceZWriteForPs(d.ps_addr);
     if (force_write) {
-      static std::vector<u64> said;
-      if (std::find(said.begin(), said.end(), d.ps_addr) == said.end()) {
+      static base::Vector<u64> said;
+      if (base::Find(said.begin(), said.end(), d.ps_addr) == said.end()) {
         said.push_back(d.ps_addr);
         BASE_LOGI("zwps", "depth write FORCED for ps={:#x} (was {})",
                   (unsigned long long)d.ps_addr, (int)d.depth_write_enable);
@@ -579,7 +580,7 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   rp.pipe = Device().CreateGraphicsPipeline(pd);
   if (!rp.pipe)
     return nullptr;
-  return g_recomp_cache.Store(key, std::move(rp));
+  return g_recomp_cache.Store(key, base::move(rp));
 }
 
 }  // namespace gpu::render

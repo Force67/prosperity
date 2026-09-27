@@ -11,13 +11,7 @@
 #include <base/logging.h>
 #include "base/arch.h"
 
-#include <algorithm>
-#include <atomic>
-#include <chrono>
 #include <cstring>
-#include <mutex>
-#include <thread>
-#include <unordered_set>
 
 #include <utl/mem.h>
 #include <utl/options.h>
@@ -32,6 +26,15 @@
 #include "gpu/ps4/liverpool.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/render/renderer.h"
+#include <base/threading/thread.h>
+#include <base/atomic.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
@@ -55,12 +58,12 @@ namespace {
 
 // The register file is the state of one GPU: two submit threads walking it
 // concurrently would interleave one draw's registers with another's.
-std::mutex g_mutex;
+base::Mutex g_mutex;
 // Persistent across submits: Gnm programs a register once and relies on it
 // holding for every later submission.
 Regs g_regs;
-std::atomic<u64> g_total_submits{0};
-std::atomic<u64> g_total_draws{0};
+base::Atomic<u64> g_total_submits{0};
+base::Atomic<u64> g_total_draws{0};
 bool g_renderer_started = false;
 bool g_frame_active = false;
 u32 g_presented_frames = 0;
@@ -97,18 +100,18 @@ class FenceLabels {
   void Note(u64 address) {
     if (!address)
       return;
-    std::lock_guard<std::mutex> lock(mutex_);
+    base::LockGuard<base::Mutex> lock(mutex_);
     if (addresses_.size() < 4096)
       addresses_.insert(address & ~3ull);
   }
   bool Contains(u64 address) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    base::LockGuard<base::Mutex> lock(mutex_);
     return addresses_.count(address & ~3ull) != 0;
   }
 
  private:
-  mutable std::mutex mutex_;
-  std::unordered_set<u64> addresses_;
+  mutable base::Mutex mutex_;
+  base::HashSet<u64> addresses_;
 };
 FenceLabels g_fence_labels;
 
@@ -144,10 +147,8 @@ void WriteLabel(u64 address, u64 value, bool is_64bit) {
 // reads as "already complete". Without this Doom64's per-frame submit-done wait
 // (a spin with a hard 2s timeout) burns the full 2s every frame -> ~0.5 fps.
 u64 GpuClockTimestamp() {
-  using namespace std::chrono;
   return static_cast<u64>(
-      duration_cast<nanoseconds>(steady_clock::now().time_since_epoch())
-          .count());
+      (base::TickClock::NowNs()));
 }
 
 // INT_SEL asks the CP to raise an end-of-pipe interrupt once the write lands
@@ -282,14 +283,14 @@ void HandleWaitRegMem(const u32* body, u32 count) {
   // poll would hang the title outright. Yield rather than spin: the thread that
   // will satisfy this needs the core.
   const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+      base::TimeTicks::Now() + base::Microseconds(200);
   bool timed_out = false;
   while (!passes(*polled)) {
-    if (std::chrono::steady_clock::now() >= deadline) {
+    if (base::TimeTicks::Now() >= deadline) {
       timed_out = true;
       break;
     }
-    std::this_thread::yield();
+    base::YieldCurrentThread();
   }
   TraceWaitRegMem(timed_out);
 }
@@ -451,7 +452,7 @@ void HandleEventWrite(const u32* body, u32 count) {
   if (!IsGuestRange(address, span) ||
       !utl::isMemoryRangeMapped(reinterpret_cast<const void*>(address), span))
     return;
-  static std::atomic<u64> samples{0};
+  static base::Atomic<u64> samples{0};
   const u64 value = (1ull << 63) | (samples.fetch_add(1) + 1);
   for (u32 rb = 0; rb < kRenderBackends; rb++)
     WriteLabel(address + rb * 16, value, true);
@@ -544,7 +545,7 @@ void InOrder(void (*handle)(const u32*, u32),
     // Wide enough for EVENT_WRITE's eight 16-byte slots.
     queue.NotePendingWrite(label, 128);
   }
-  queue.PushCall([handle, words = std::vector<u32>(body, body + count)] {
+  queue.PushCall([handle, words = base::Vector<u32>(body, body + count)] {
     handle(words.data(), static_cast<u32>(words.size()));
   });
 }
@@ -563,7 +564,7 @@ void QueueDmaData(render::Renderer& renderer, const u32* body, u32 count) {
     return;
   }
   queue.NotePendingWrite(PacketAddress(body, 3), body[5] & 0x1FFFFF);
-  queue.PushCall([&renderer, words = std::vector<u32>(body, body + count)] {
+  queue.PushCall([&renderer, words = base::Vector<u32>(body, body + count)] {
     HandleDmaData(renderer, words.data(), static_cast<u32>(words.size()));
   });
 }
@@ -757,7 +758,7 @@ u32 WalkDcb(render::Renderer& renderer,
       // command buffer that used type-0.
       const u32 count = Pm4Count(hdr);
       const u32 base = Pm4Type0Reg(hdr);  // absolute register offset
-      const u32 available = std::min(count, words - i - 1);
+      const u32 available = base::Min(count, words - i - 1);
       for (u32 k = 0; k < available; k++)
         if (base + k < kRegFileSize)
           g_regs[base + k] = p[i + 1 + k];
@@ -775,8 +776,8 @@ u32 WalkDcb(render::Renderer& renderer,
     const u32* body = &p[i + 1];
     NotePacket(op);
     const auto op_start = time_packets
-                              ? std::chrono::steady_clock::now()
-                              : std::chrono::steady_clock::time_point{};
+                              ? base::TimeTicks::Now()
+                              : base::TimeTicks{};
     if (dump)
       TraceDcbPacket(i, op, count);
     if (i + 1 + count > words)
@@ -899,9 +900,8 @@ u32 WalkDcb(render::Renderer& renderer,
         break;
     }
     if (time_packets)
-      NotePacketCost(op, std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now() - op_start)
-                             .count());
+      NotePacketCost(op, ((
+                             base::TimeTicks::Now() - op_start).InMicroseconds() * 1000));
     i += 1 + count;
   }
   return i;
@@ -978,12 +978,11 @@ void PrefetchWalk(Regs& regs, const u32* p, u32 words, u32 depth) {
 // second submit thread blocked behind the first is time the guest is stalled on
 // us either way.
 struct ScopedWalkTimer {
-  std::chrono::steady_clock::time_point start =
-      std::chrono::steady_clock::now();
+  base::TimeTicks start =
+      base::TimeTicks::Now();
   ~ScopedWalkTimer() {
-    render::g_ns_dcb += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                         std::chrono::steady_clock::now() - start)
-                         .count();
+    render::g_ns_dcb += ((
+                         base::TimeTicks::Now() - start).InMicroseconds() * 1000);
     render::g_dcb_n++;
   }
 };
@@ -1015,12 +1014,12 @@ void SetWriteWatchCallback(WriteWatchCallback callback) {
 }
 
 void SetPs4NeoMode(bool enabled) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  base::LockGuard<base::Mutex> lock(g_mutex);
   gcn::SetDefaultIsaMode(enabled ? gcn::IsaMode::kNeo : gcn::IsaMode::kBase);
 }
 
 void EndFrame(u64 scanout_base) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  base::LockGuard<base::Mutex> lock(g_mutex);
   // New frame -> shader code may have been rewritten; let CachedProgram
   // revalidate each address once next frame instead of once per draw.
   gcn::NextProgramCacheGeneration();
@@ -1039,7 +1038,7 @@ void EndFrame(u64 scanout_base) {
 void SubmitCcb(const void* ccb, u32 size_bytes) {
   if (!ccb || size_bytes < 4)
     return;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  base::LockGuard<base::Mutex> lock(g_mutex);
   const u32 words = size_bytes / 4;
   TraceCcbSubmit(size_bytes, words);
   WalkCcb(render::DefaultRenderer(), static_cast<const u32*>(ccb), words, 0);
@@ -1052,11 +1051,10 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   ScopedWalkTimer timer;
   // Time the wait for the lock apart from the walk: they mean opposite things,
   // one says "make the walk faster", the other "stop serialising the threads".
-  const auto lock_start = std::chrono::steady_clock::now();
-  std::lock_guard<std::mutex> lock(g_mutex);
-  render::g_ns_dcb_lock += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now() - lock_start)
-                            .count();
+  const auto lock_start = base::TimeTicks::Now();
+  base::LockGuard<base::Mutex> lock(g_mutex);
+  render::g_ns_dcb_lock += ((
+                            base::TimeTicks::Now() - lock_start).InMicroseconds() * 1000);
 
   render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);

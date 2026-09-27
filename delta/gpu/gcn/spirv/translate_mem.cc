@@ -17,11 +17,18 @@
 
 #include <initializer_list>
 #include "base/arch.h"
-#include <algorithm>
 
 #include "gpu/gcn/gcn_audit.h"
 #include "gpu/gcn/spirv/translator.h"
 #include <utl/options.h>
+#include <base/strings/to_string.h>
+#include <base/algorithm.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(float, kDebugUv, "DELTA_GPU_DEBUGUV", 0.f);
@@ -284,7 +291,7 @@ struct BufferFormat {
 
 // 2 bits per DATA_FORMAT: component width (0 = not a plain 8/16/32 format,
 // 1 = 8, 2 = 16, 3 = 32 bits), and component count - 1.
-constexpr u32 FormatLut(std::initializer_list<std::pair<u32, u32>> v) {
+constexpr u32 FormatLut(std::initializer_list<base::Pair<u32, u32>> v) {
   u32 lut = 0;
   for (const auto& [dfmt, code] : v)
     lut |= code << (dfmt * 2);
@@ -400,7 +407,7 @@ u32 SmrdDwordCount(u32 op) {
 
 void EmitCbufSmrd(Translator& t,
                   const Inst& inst,
-                  const std::unordered_map<u32, u32>& bindings) {
+                  const base::HashMap<u32, u32>& bindings) {
   const u32 w = inst.raw[0], n = SmrdDwordCount(inst.opcode);
   const u32 sdst = (w >> 15) & 0x7F, base_sgpr = ((w >> 9) & 0x3F) * 2;
   const auto it = bindings.find(inst.pc);
@@ -419,15 +426,15 @@ void EmitCbufSmrd(Translator& t,
 
 bool PlanCbufs(const Program& program,
                u32 first_binding,
-               std::vector<ShaderCbuf>& cbufs,
-               std::unordered_map<u32, u32>& bindings,
+               base::Vector<ShaderCbuf>& cbufs,
+               base::HashMap<u32, u32>& bindings,
                const u8* reachable,
                u32 max_bindings) {
   // One binding per descriptor, not per SGPR: GTA:SA's radar material reloads
   // s[20:23] with a second V#, and the load through the second one read the
   // first one's constants (its alpha test then discarded the whole map).
   DescriptorVersions versions;
-  std::unordered_map<u64, u32> by_key;
+  base::HashMap<u64, u32> by_key;
   u32 index = 0;
   for (const Inst& inst : program) {
     if (reachable && !reachable[index]) {
@@ -469,7 +476,7 @@ bool PlanCbufs(const Program& program,
     const u32 end = so.in_sgpr ? 256 : so.dwords + n;
     for (ShaderCbuf& cb : cbufs)
       if (cb.binding == it->second)
-        cb.num_dwords = std::max(cb.num_dwords, end);
+        cb.num_dwords = base::Max(cb.num_dwords, end);
   }
   return true;
 }
@@ -580,7 +587,7 @@ void EmitMimg(Translator& t,
                                   spv::StorageClass::UniformConstant);
       t.m.Decorate(var, spv::Decoration::DescriptorSet, {0});
       t.m.Decorate(var, spv::Decoration::Binding, {bind});
-      t.m.Name(var, "img" + std::to_string(bind));
+      t.m.Name(var, "img" + base::ToString(bind));
       sc.tex_vars[bind] = var;
       sc.tex_types[bind] = type_idx;
     }
@@ -634,7 +641,7 @@ void EmitMimg(Translator& t,
                                 spv::StorageClass::UniformConstant);
     t.m.Decorate(var, spv::Decoration::DescriptorSet, {0});
     t.m.Decorate(var, spv::Decoration::Binding, {bind + sc.tex_binding_base});
-    t.m.Name(var, "tex" + std::to_string(bind + sc.tex_binding_base));
+    t.m.Name(var, "tex" + base::ToString(bind + sc.tex_binding_base));
     sc.tex_vars[bind] = var;
     sc.tex_types[bind] = type_idx;
   }
@@ -773,8 +780,8 @@ void EmitMimg(Translator& t,
       c[i] = scaled(i);
     return t.m.CompositeConstruct(
         t.m.TypeVec(t.t_f, deriv_dims),
-        deriv_dims == 2 ? std::vector<Id>{c[0], c[1]}
-                        : std::vector<Id>{c[0], c[1], c[2]});
+        deriv_dims == 2 ? base::Vector<Id>{c[0], c[1]}
+                        : base::Vector<Id>{c[0], c[1], c[2]});
   };
 
   Id texel;
@@ -929,9 +936,9 @@ u32 GfxMtbufLoadDwords(u32 opcode) {
 
 void PlanGfxBuffers(const Program& program,
                     u32 first_binding,
-                    const std::unordered_set<u32>* claimed,
-                    std::vector<ShaderBuffer>& buffers,
-                    std::unordered_map<u32, u32>& bindings,
+                    const base::HashSet<u32>* claimed,
+                    base::Vector<ShaderBuffer>& buffers,
+                    base::HashMap<u32, u32>& bindings,
                     const u8* reachable) {
   // Which scalar load last wrote each SGPR range, so a descriptor quad that is
   // reloaded with a second V# gets a second binding instead of silently
@@ -941,7 +948,7 @@ void PlanGfxBuffers(const Program& program,
     u32 dwords;
     u32 version;
   };
-  std::vector<ScalarLoad> loads;
+  base::Vector<ScalarLoad> loads;
   const auto descriptor_version = [&](u32 sgpr) {
     for (auto it = loads.rbegin(); it != loads.rend(); ++it)
       if (sgpr >= it->sgpr && sgpr + 4 <= it->sgpr + it->dwords)
@@ -949,7 +956,7 @@ void PlanGfxBuffers(const Program& program,
     return UINT32_MAX;  // inline user data
   };
 
-  std::unordered_map<u64, u32> binding_by_descriptor;
+  base::HashMap<u64, u32> binding_by_descriptor;
   u32 index = 0;
   for (const Inst& inst : program) {
     const u32 inst_idx = index++;
@@ -961,7 +968,7 @@ void PlanGfxBuffers(const Program& program,
       if (!n)
         continue;
       const u32 sdst = (w >> 15) & 0x7F;
-      loads.erase(std::remove_if(loads.begin(), loads.end(),
+      loads.erase(base::RemoveIf(loads.begin(), loads.end(),
                                  [&](const ScalarLoad& ld) {
                                    return sdst < ld.sgpr + ld.dwords &&
                                           ld.sgpr < sdst + n;
@@ -1082,20 +1089,20 @@ bool PlanCsResources(const Program& program,
                      const u8* reachable,
                      u32 lds_dwords,
                      RecompiledCs& r,
-                     std::unordered_map<u32, u32>& bind) {
+                     base::HashMap<u32, u32>& bind) {
   struct ScalarLoad {
     u32 sgpr;
     u32 dwords;
     u32 version;
   };
-  std::vector<ScalarLoad> loads;
+  base::Vector<ScalarLoad> loads;
   const auto descriptor_version = [&](u32 sgpr, u32 dwords) {
     for (auto it = loads.rbegin(); it != loads.rend(); ++it)
       if (sgpr >= it->sgpr && sgpr + dwords <= it->sgpr + it->dwords)
         return it->version;
     return UINT32_MAX;  // inline user data
   };
-  std::unordered_map<u64, u32> resource_by_version;
+  base::HashMap<u64, u32> resource_by_version;
   const auto resource = [&](u32 pc, u32 base_sgpr, u32 dwords,
                             u8 kind, bool written, u32 min_bytes,
                             bool read = true) {
@@ -1145,7 +1152,7 @@ bool PlanCsResources(const Program& program,
                       /*read=*/true))
           return false;
         const u32 sdst = (w >> 15) & 0x7F;
-        loads.erase(std::remove_if(loads.begin(), loads.end(),
+        loads.erase(base::RemoveIf(loads.begin(), loads.end(),
                                    [&](const auto& ld) {
                                      return sdst < ld.sgpr + ld.dwords &&
                                             ld.sgpr < sdst + n;
@@ -1262,7 +1269,7 @@ void EmitGdsCounter(Translator& t, const Inst& inst, StageContext& sc) {
     t.m.BranchConditional(is_leader, leader, merge);
     t.m.OpenBlock(leader);
     Id count = t.U32(0);
-    for (u32 lane = 0; lane < std::min(t.xchg_lanes, t.wave_size); ++lane) {
+    for (u32 lane = 0; lane < base::Min(t.xchg_lanes, t.wave_size); ++lane) {
       const Id at = t.Add(t.wave_base, t.U32(lane));
       const Id safe_at = t.UMin(at, t.U32(t.xchg_lanes - 1));
       const Id active = t.m.Load(t.t_u, t.XchgAt(safe_at));
@@ -2341,17 +2348,17 @@ u32 GraphicsLdsDwords(const Program& program, const u8* reachable) {
       case 55:  // pair forms: two byte offsets, each scaled by the element size
       case 78:
       case 119:
-        reach = std::max(w & 0xFF, (w >> 8) & 0xFF) * 8u;
+        reach = base::Max(w & 0xFF, (w >> 8) & 0xFF) * 8u;
         break;
       case 15:
       case 56:  // ...and the st64 forms stride 64 elements per unit
-        reach = std::max(w & 0xFF, (w >> 8) & 0xFF) * 8u * 64u;
+        reach = base::Max(w & 0xFF, (w >> 8) & 0xFF) * 8u * 64u;
         break;
       default:
         reach = w & 0xFFFF;  // single form: one 16-bit byte offset
         break;
     }
-    max_bytes = std::max(max_bytes, reach);
+    max_bytes = base::Max(max_bytes, reach);
   }
   // Keyed on whether any DS instruction exists, not on the largest offset: a
   // shader whose accesses all sit at offset 0 still needs the array.
@@ -2360,7 +2367,7 @@ u32 GraphicsLdsDwords(const Program& program, const u8* reachable) {
   // Plus the per-lane span the address itself can carry (a 64-lane wave, one
   // dword each) and room for the widest element.
   const u32 dwords = (max_bytes + 64u * 4u + 8u) / 4u;
-  return std::min(dwords, 4096u);
+  return base::Min(dwords, 4096u);
 }
 
 void EmitDs(Translator& t, const Inst& inst, StageContext& sc) {

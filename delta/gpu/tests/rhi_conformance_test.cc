@@ -7,16 +7,17 @@
 
 #include <cmath>
 #include <cstring>
-#include <map>
-#include <memory>
-#include <string>
-#include <vector>
 
 #include "base/arch.h"
 #include "gpu/render/backend.h"
 #include "gpu/rhi/device.h"
 #include "gpu/tests/rhi_conformance_spv.h"
 #include "gpu/tests/rhi_conformance_extra_spv.h"
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/strings/format.h>
 
 namespace {
 
@@ -35,11 +36,14 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
     // One device per backend for the whole run, never destroyed: the Vulkan
     // backend leaves its VkDevice to process exit, and a device per test
     // exhausts the driver after a few dozen tests.
-    static std::map<Backend, Device*> devices;
+    static base::Map<Backend, Device*> devices;
     Device*& shared = devices[GetParam()];
     if (!shared)
-      shared = gpu::render::CreateBackendDevice(GetParam()).release();
-    device_.reset(shared);
+      {
+      auto created = gpu::render::CreateBackendDevice(GetParam());
+      shared = gpu::rhi::Release(created);
+    }
+    device_ = shared;
     if (!device_)
       GTEST_SKIP() << BackendName(GetParam()) << " unavailable";
     list_ = device_->CreateCommandList();
@@ -52,7 +56,7 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
     for (Object* o : objects_)
       device_->Destroy(o);
     device_->Destroy(list_);
-    device_.release();  // NOLINT: owned by SetUp's table
+    device_ = nullptr;
   }
 
   template <typename T>
@@ -100,7 +104,7 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
   }
 
   // Copy a kW x kH RGBA8 target (in `state`) to host memory.
-  std::vector<u32> ReadPixels(Texture* t, TextureState state) {
+  base::Vector<u32> ReadPixels(Texture* t, TextureState state) {
     Buffer* rb = Readback(kW * kH * 4);
     TextureBarrier b{t, state, TextureState::kCopySrc};
     list_->Barrier(0, 0, &b, 1);
@@ -111,7 +115,7 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
     list_->Barrier(kAccessCopyWrite, kAccessHostRead);
     list_->End();
     EXPECT_TRUE(device_->Wait(device_->Submit(list_)));
-    std::vector<u32> px(kW * kH);
+    base::Vector<u32> px(kW * kH);
     std::memcpy(px.data(), rb->mapped(), px.size() * 4);
     list_->Begin();
     return px;
@@ -158,7 +162,7 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
   }
 
   // Offsets in whole clip-space units, two per instance.
-  Buffer* Instances(std::vector<i16> offsets) {
+  Buffer* Instances(base::Vector<i16> offsets) {
     return Upload(offsets.data(), offsets.size() * 2, kBufferVertex);
   }
 
@@ -177,9 +181,9 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
     return rp;
   }
 
-  std::unique_ptr<Device> device_;
+  Device* device_ = nullptr;  // owned by SetUp's table
   CommandList* list_ = nullptr;
-  std::vector<Object*> objects_;
+  base::Vector<Object*> objects_;
 };
 
 TEST_P(RhiConformance, ClearByLoadOp) {
@@ -197,7 +201,7 @@ TEST_P(RhiConformance, ClearByLoadOp) {
   rp.height = kH;
   list_->BeginRenderPass(rp);
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[0], Rgba(255, 0, 255, 255));
   EXPECT_EQ(px[kW * kH - 1], Rgba(255, 0, 255, 255));
@@ -241,7 +245,7 @@ TEST_P(RhiConformance, TriangleOrientationMrtUboPush) {
                          -1.0f, 2.0f, 1, 0, 0, 1};
   Buffer* vb = Upload(verts, sizeof(verts), kBufferVertex);
   // Two 256-byte windows; the draw binds the second, a unit tint.
-  std::vector<float> ubo(128, 0.0f);
+  base::Vector<float> ubo(128, 0.0f);
   ubo[0] = ubo[1] = ubo[2] = ubo[3] = 9.0f;
   ubo[64] = 1.0f;
   ubo[65] = 1.0f;
@@ -286,8 +290,8 @@ TEST_P(RhiConformance, TriangleOrientationMrtUboPush) {
   list_->SetVertexBuffers(0, 1, &vb, &zero);
   list_->Draw(3, 1, 0, 0);
   list_->EndRenderPass();
-  std::vector<u32> p0 = ReadPixels(t0, TextureState::kColorTarget);
-  std::vector<u32> p1 = ReadPixels(t1, TextureState::kColorTarget);
+  base::Vector<u32> p0 = ReadPixels(t0, TextureState::kColorTarget);
+  base::Vector<u32> p1 = ReadPixels(t1, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(p0[4 * kW + 4], Rgba(255, 0, 0, 255)) << "top row not covered";
   EXPECT_EQ(p0[(kH - 4) * kW + 4], 0u) << "bottom row covered";
@@ -358,7 +362,7 @@ TEST_P(RhiConformance, SampledTextureUpload) {
   list_->SetBindGroup(0, group);
   list_->Draw(3, 1, 0, 0);
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[2 * kW + 2], texels[0]) << "top-left";
   EXPECT_EQ(px[2 * kW + kW - 3], texels[1]) << "top-right";
@@ -367,7 +371,7 @@ TEST_P(RhiConformance, SampledTextureUpload) {
 
 TEST_P(RhiConformance, ComputeStorageBufferAndPush) {
   constexpr u32 kN = 256;
-  std::vector<u32> data(kN);
+  base::Vector<u32> data(kN);
   for (u32 i = 0; i < kN; i++)
     data[i] = i;
   BufferDesc bd;
@@ -551,7 +555,7 @@ TEST_P(RhiConformance, StorageImageWrite) {
   list_->SetPipeline(pipe);
   list_->SetBindGroup(0, group);
   list_->Dispatch(kW / 8, kH / 8, 1);
-  std::vector<u32> px = ReadPixels(t, TextureState::kGeneral);
+  base::Vector<u32> px = ReadPixels(t, TextureState::kGeneral);
   list_->End();
   EXPECT_EQ(px[3 * kW + 5], Rgba(5, 3, 0, 255));
   EXPECT_EQ(px[60 * kW + 40], Rgba(40, 60, 0, 255));
@@ -596,7 +600,7 @@ TEST_P(RhiConformance, CopyClearAndBlit) {
     bdst.height = 16;
     list_->BlitTexture(b, bdst, a, bsrc, Filter::kNearest);
   }
-  std::vector<u32> px = ReadPixels(b, TextureState::kCopyDst);
+  base::Vector<u32> px = ReadPixels(b, TextureState::kCopyDst);
   list_->End();
   EXPECT_EQ(px[0], Rgba(255, 0, 0, 255));
   EXPECT_EQ(px[10 * kW + 10], Rgba(0, 255, 0, 255));
@@ -643,8 +647,8 @@ TEST_P(RhiConformance, CullWindingFollowsViewport) {
     list_->Draw(6, 1, 0, 0);
     list_->EndRenderPass();
   }
-  std::vector<u32> pu = ReadPixels(up, TextureState::kColorTarget);
-  std::vector<u32> pd = ReadPixels(down, TextureState::kColorTarget);
+  base::Vector<u32> pu = ReadPixels(up, TextureState::kColorTarget);
+  base::Vector<u32> pd = ReadPixels(down, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(pu[32 * kW + 16], red) << "y-up: front face culled";
   EXPECT_EQ(pu[32 * kW + 48], 0u) << "y-up: back face drawn";
@@ -750,7 +754,7 @@ TEST_P(RhiConformance, DepthStencilBlendIndexed) {
   copies[1].buffer_offset = kW * kH * 4;
   list_->CopyTextureToBuffer(depth_rb, depth, &copies[0], 1);
   list_->CopyTextureToBuffer(depth_rb, depth, &copies[1], 1);
-  std::vector<u32> px = ReadPixels(color, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(color, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[32 * kW + 8], Rgba(255, 0, 255, 255)) << "left";
   EXPECT_EQ(px[32 * kW + 56], green) << "right";
@@ -788,7 +792,7 @@ TEST_P(RhiConformance, InstancingAndScaledAttributes) {
   BindVertices(vb, inst);
   list_->Draw(3, 2, 0, 1);
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[17 * kW + 48], 0u) << "instance 0 drawn";
   EXPECT_EQ(px[17 * kW + 16], white) << "instance 1";
@@ -821,7 +825,7 @@ TEST_P(RhiConformance, HighAttributeLocations) {
   BindVertices(vb, inst);
   list_->Draw(3, 1, 0, 0);
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[32 * kW + 32], cyan);
 }
@@ -955,8 +959,8 @@ TEST_P(RhiConformance, ViewsSwizzleBgraAnd3DSlice) {
   vc.row_length = vc.image_height = 1;
   vc.region.depth = 2;
   list_->CopyTextureToBuffer(vol_rb, vol, &vc, 1);
-  std::vector<u32> p0 = ReadPixels(t0, TextureState::kColorTarget);
-  std::vector<u32> p1 = ReadPixels(t1, TextureState::kColorTarget);
+  base::Vector<u32> p0 = ReadPixels(t0, TextureState::kColorTarget);
+  base::Vector<u32> p1 = ReadPixels(t1, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(p0[2 * kW + 2], Rgba(30, 20, 10, 255)) << "swizzled layer 1";
   EXPECT_EQ(p1[2 * kW + 2], Rgba(3, 2, 1, 4)) << "BGRA memory order";
@@ -1150,7 +1154,7 @@ TEST_P(RhiConformance, GeometryClearAttachmentTimestamps) {
   list_->EndRenderPass();
   if (pool)
     list_->WriteTimestamp(pool, 1, false);
-  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[32 * kW + 48], green) << "right half";
   EXPECT_EQ(px[32 * kW + 16], 0u) << "left half";
@@ -1260,7 +1264,7 @@ TEST_P(RhiConformance, DepthTestAndReadback) {
   TextureView* dv = View(depth);
   Texture* color = Target();
   TextureView* cv = View(color);
-  PipelineLayout* layout = Own(QuadLayout(device_.get()));
+  PipelineLayout* layout = Own(QuadLayout(device_));
   GraphicsPipelineDesc gp = QuadPipeline(layout);
   gp.depth_format = Format::kD32Float;
   gp.depth_test = gp.depth_write = true;
@@ -1300,7 +1304,7 @@ TEST_P(RhiConformance, DepthTestAndReadback) {
   c.region.width = kW;
   c.region.height = kH;
   list_->CopyTextureToBuffer(rb, depth, &c, 1);
-  std::vector<u32> px = ReadPixels(color, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(color, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[32 * kW + 8], Rgba(0, 0, 255, 255)) << "nearer quad";
   EXPECT_EQ(px[32 * kW + 56], Rgba(255, 0, 0, 255)) << "farther quad won";
@@ -1323,7 +1327,7 @@ TEST_P(RhiConformance, StencilMask) {
   TextureView* dsv = Own(device_->CreateView(ds, vd));
   Texture* color = Target();
   TextureView* cv = View(color);
-  PipelineLayout* layout = Own(QuadLayout(device_.get()));
+  PipelineLayout* layout = Own(QuadLayout(device_));
   GraphicsPipelineDesc mark = QuadPipeline(layout);
   mark.depth_format = mark.stencil_format = Format::kD32FloatS8Uint;
   mark.stencil_test = true;
@@ -1364,7 +1368,7 @@ TEST_P(RhiConformance, StencilMask) {
   list_->SetPipeline(test_pipe);
   DrawQuad(list_, -1, -1, 1, 1, kGreen);
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(color, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(color, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[32 * kW + 8], Rgba(0, 255, 0, 255)) << "stencil pass";
   EXPECT_EQ(px[32 * kW + 56], 0u) << "stencil fail";
@@ -1373,7 +1377,7 @@ TEST_P(RhiConformance, StencilMask) {
 TEST_P(RhiConformance, BlendAndConstants) {
   Texture* color = Target();
   TextureView* cv = View(color);
-  PipelineLayout* layout = Own(QuadLayout(device_.get()));
+  PipelineLayout* layout = Own(QuadLayout(device_));
   GraphicsPipelineDesc alpha = QuadPipeline(layout);
   alpha.blend[0].enable = true;
   alpha.blend[0].src_color = BlendFactor::kSrcAlpha;
@@ -1406,19 +1410,19 @@ TEST_P(RhiConformance, BlendAndConstants) {
   list_->SetBlendConstants(k);
   DrawQuad(list_, 0, -1, 1, 1, {1, 1, 1, 1});
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(color, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(color, TextureState::kColorTarget);
   list_->End();
   EXPECT_TRUE(Near(px[32 * kW + 8], Rgba(64, 0, 191, 64)))
-      << std::hex << px[32 * kW + 8];
+      << base::Format("{:#x}", px[32 * kW + 8]).c_str();
   EXPECT_TRUE(Near(px[32 * kW + 56], Rgba(128, 64, 255, 128)))
-      << std::hex << px[32 * kW + 56];
+      << base::Format("{:#x}", px[32 * kW + 56]).c_str();
 }
 
 // Draws a fullscreen triangle sampling `view` with `fragment` into a fresh
 // target and returns its centre texel.
 u32 SampleCenter(Device* device,
                  CommandList* list,
-                 std::vector<Object*>& objects,
+                 base::Vector<Object*>& objects,
                  const ShaderCode& fragment,
                  TextureView* view,
                  TextureState view_state,
@@ -1539,13 +1543,13 @@ TEST_P(RhiConformance, ViewSwizzleAndFormatAlias) {
                            Own(device_->CreateView(tex, alias))};
   u32 got[3];
   for (int i = 0; i < 3; i++)
-    got[i] = SampleCenter(device_.get(), list_, objects_, Spv(k_tex_frag_spv),
+    got[i] = SampleCenter(device_, list_, objects_, Spv(k_tex_frag_spv),
                           views[i], TextureState::kShaderRead, {0, 0, 0, 0});
   EXPECT_EQ(got[0], texel);
   EXPECT_EQ(got[1], Rgba(192, 128, 64, 255));
   EXPECT_TRUE(Near(got[2], Rgba(SrgbToLinear(64), SrgbToLinear(128),
                                 SrgbToLinear(192), 255)))
-      << std::hex << got[2];
+      << base::Format("{:#x}", got[2]).c_str();
 }
 
 TEST_P(RhiConformance, TextureArrays3DAndCubes) {
@@ -1619,7 +1623,7 @@ TEST_P(RhiConformance, TextureArrays3DAndCubes) {
   const TextureState s = TextureState::kShaderRead;
   auto sample = [&](const ShaderCode& fs, TextureView* v,
                     const float (&coord)[4]) {
-    return SampleCenter(device_.get(), list_, objects_, fs, v, s, coord);
+    return SampleCenter(device_, list_, objects_, fs, v, s, coord);
   };
   EXPECT_EQ(sample(Spv(k_tex_frag_spv), layer1_view, {0, 0, 0, 0}),
             texels[1])
@@ -1665,7 +1669,7 @@ TEST_P(RhiConformance, IntegerTextureSampling) {
   ASSERT_TRUE(device_->Wait(device_->Submit(list_)));
   TextureView* view = Own(device_->CreateView(tex, {}));
   auto sample = [&](float u, float v) {
-    return SampleCenter(device_.get(), list_, objects_, Spv(k_x_itex_frag_spv),
+    return SampleCenter(device_, list_, objects_, Spv(k_x_itex_frag_spv),
                         view, TextureState::kShaderRead, {u, v, 0, 0});
   };
   EXPECT_EQ(sample(0.25f, 0.25f), Rgba(10, 0, 0, 1));
@@ -1772,7 +1776,7 @@ TEST_P(RhiConformance, DrawParameters) {
   list_->SetIndexBuffer(index, 0, IndexType::kUint16);
   list_->DrawIndexed(3, 1, 0, 5, 3);
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(color, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(color, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[12], Rgba(2, 1, 0, 255));
   EXPECT_EQ(px[14], Rgba(4, 1, 0, 255));
@@ -1785,7 +1789,7 @@ TEST_P(RhiConformance, DrawParameters) {
 // A counter-clockwise quad in y-up clip space faces front through a y-up
 // viewport and back through a y-down one, which also puts +y at the bottom.
 TEST_P(RhiConformance, CullingAndViewportDirection) {
-  PipelineLayout* layout = Own(QuadLayout(device_.get()));
+  PipelineLayout* layout = Own(QuadLayout(device_));
   GraphicsPipelineDesc none = QuadPipeline(layout);
   GraphicsPipelineDesc back = none;
   back.cull = CullMode::kBack;
@@ -1795,7 +1799,7 @@ TEST_P(RhiConformance, CullingAndViewportDirection) {
   ASSERT_NE(none_pipe, nullptr);
   ASSERT_NE(back_pipe, nullptr);
   Texture* t[3] = {Target(), Target(), Target()};
-  std::vector<u32> px[3];
+  base::Vector<u32> px[3];
   for (int i = 0; i < 3; i++) {
     TextureView* v = View(t[i]);
     list_->Begin();
@@ -1894,7 +1898,7 @@ TEST_P(RhiConformance, GeometryShaderOrientation) {
   list_->SetVertexBuffers(0, 1, &vb, &zero);
   list_->Draw(3, 1, 0, 0);
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[4 * kW + 4], Rgba(0, 0, 255, 255)) << "top row, swizzled";
   EXPECT_EQ(px[(kH - 4) * kW + 4], 0u) << "bottom row covered";
@@ -1953,7 +1957,7 @@ TEST_P(RhiConformance, UnalignedTextureCopies) {
 
 TEST_P(RhiConformance, StorageBindingsAndSubgroups) {
   constexpr u32 kN = 128;
-  std::vector<u32> input(kN);
+  base::Vector<u32> input(kN);
   for (u32 i = 0; i < kN; i++)
     input[i] = i + 1;
   BufferDesc bd;
@@ -1964,7 +1968,7 @@ TEST_P(RhiConformance, StorageBindingsAndSubgroups) {
   bd.usage = kBufferStorage | kBufferCopySrc;
   Buffer* dst = Own(device_->CreateBuffer(bd));
   Buffer* staging = Upload(input.data(), kN * 4, 0);
-  std::vector<u32> ubo(64, 0);
+  base::Vector<u32> ubo(64, 0);
   ubo[0] = 3;
   Buffer* ub = Upload(ubo.data(), 256, kBufferUniform);
   Buffer* rb = Readback(1024);
@@ -2050,7 +2054,7 @@ TEST_P(RhiConformance, VaryingSubset) {
   YUp(list_);
   list_->Draw(3, 1, 0, 0);
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[32 * kW + 32], Rgba(0, 255, 0, 255));
 }
@@ -2097,7 +2101,7 @@ TEST_P(RhiConformance, ScaledVertexFormatAndFan) {
   list_->SetVertexBuffers(0, 1, &vb, &zero);
   list_->Draw(4, 1, 0, 0);
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
   EXPECT_EQ(px[2 * kW + 2], Rgba(0, 255, 0, 255));
   EXPECT_EQ(px[(kH - 3) * kW + kW - 3], Rgba(0, 255, 0, 255));
@@ -2110,7 +2114,7 @@ TEST_P(RhiConformance, FragmentBarycentrics) {
   if (!device_->caps().fragment_barycentric &&
       device_->backend() != Backend::kD3D12)
     GTEST_SKIP() << "no fragment barycentrics";
-  PipelineLayout* layout = Own(QuadLayout(device_.get()));
+  PipelineLayout* layout = Own(QuadLayout(device_));
   GraphicsPipelineDesc gp = QuadPipeline(layout);
   gp.fragment = Spv(k_x_bary_frag_spv);
   Pipeline* pipe = Own(device_->CreateGraphicsPipeline(gp));
@@ -2131,7 +2135,7 @@ TEST_P(RhiConformance, FragmentBarycentrics) {
   YUp(list_);
   DrawQuad(list_, -1, -1, 1, 1, kRed);
   list_->EndRenderPass();
-  std::vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
+  base::Vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
   // The dominant weight near each corner. The odd triangle of the strip
   // orders its vertices (1, 3, 2), keeping the winding.

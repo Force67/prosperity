@@ -5,16 +5,17 @@
  */
 #ifndef __ANDROID__
 
-#include <algorithm>
 #include "base/arch.h"
 #include <cstring>
-#include <mutex>
 
 #include <base/memory/unique_pointer.h>
 #include <logger/logger.h>
 
 #include "imgui.h"
 #include "overlay_log.h"
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace gfx {
 namespace {
@@ -32,7 +33,7 @@ struct Line {
 
 // Held by the logger's backend thread for one memcpy per line, and by the
 // render thread for one snapshot per frame.
-std::mutex g_mutex;
+base::Mutex g_mutex;
 Line g_lines[kLines];
 u32 g_next = 0;  // slot the next line goes in
 u32 g_count = 0; // filled slots, saturating at kLines
@@ -46,8 +47,8 @@ public:
   void write(const utl::logEntry &entry) override {
     const char *text = entry.message.c_str();
     const size_t length =
-        std::min<size_t>(entry.message.length(), kLineChars - 1);
-    std::lock_guard<std::mutex> lock(g_mutex);
+        base::Min<size_t>(entry.message.length(), kLineChars - 1);
+    base::LockGuard<base::Mutex> lock(g_mutex);
     Line &line = g_lines[g_next];
     std::memcpy(line.text, text, length);
     line.text[length] = '\0';
@@ -91,7 +92,7 @@ void overlayLogBuild(u32 w, u32 h) {
   Line lines[kLines];
   u32 count = 0;
   {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    base::LockGuard<base::Mutex> lock(g_mutex);
     count = g_count;
     // Oldest first: the newest line ends up at the bottom, nearest the corner.
     const u32 oldest = g_count == kLines ? g_next : 0;
@@ -104,7 +105,7 @@ void overlayLogBuild(u32 w, u32 h) {
   ImDrawList *dl = ImGui::GetForegroundDrawList();
   const float fs = ImGui::GetFontSize();
   const float pad = 6.0f, lh = fs + 2.0f, margin = 10.0f;
-  const float areaW = std::min(float(w) * 0.42f, 760.0f);
+  const float areaW = base::Min(float(w) * 0.42f, 760.0f);
   const float areaH = pad * 2.0f + lh * count;
   const ImVec2 tl(float(w) - areaW - margin, float(h) - areaH - margin);
   const ImVec2 br(tl.x + areaW, tl.y + areaH);

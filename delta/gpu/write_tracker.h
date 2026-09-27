@@ -4,11 +4,11 @@
 #pragma once
 
 #include "base/arch.h"
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/threading/mutex.h>
 
-#include <map>
-#include <mutex>
-#include <utility>
-#include <vector>
 
 namespace gpu {
 
@@ -25,7 +25,7 @@ namespace gpu {
 // announced with NoteWrite.
 class WriteTracker {
  public:
-  using Range = std::pair<u64, u64>;  // [first, end), page aligned
+  using Range = base::Pair<u64, u64>;  // [first, end), page aligned
 
   // False when the host cannot track writes; every other call is then a no-op.
   bool Enable();
@@ -37,7 +37,7 @@ class WriteTracker {
 
   // Appends every armed range written (or remapped) since the last call, and
   // arms it again. Announced writes are included.
-  void Collect(std::vector<Range>& out);
+  void Collect(base::Vector<Range>& out);
 
   // Thread safe. A write the tracker cannot see (another mapping, a device).
   void NoteWrite(u64 base, u64 bytes);
@@ -63,19 +63,19 @@ class WriteTracker {
   u64 EraseArmed(u64 first, u64 end);
   bool ArmRange(u64 first, u64 end);
   void Disarm(u64 first, u64 end);
-  bool Scan(u64 first, u64 end, std::vector<Range>& out);
-  void Drain(std::vector<Range>& out);
+  bool Scan(u64 first, u64 end, base::Vector<Range>& out);
+  void Drain(base::Vector<Range>& out);
   static long MinorFaults();
 
   int uffd_ = -1;
   int pagemap_ = -1;
-  std::map<u64, u64> armed_;       // first -> end, coalesced
-  std::map<u64, u64> registered_;  // first -> end, coalesced
+  base::Map<u64, u64> armed_;       // first -> end, coalesced
+  base::Map<u64, u64> registered_;  // first -> end, coalesced
   u64 armed_bytes_ = 0;
-  std::mutex noted_lock_;
-  std::vector<Range> noted_, remapped_;
+  base::Mutex noted_lock_;
+  base::Vector<Range> noted_, remapped_;
   // Pages reported this frame; their counts live in the guest page table.
-  std::vector<u64> reported_;
+  base::Vector<u64> reported_;
   u32 frame_ = 1;
   u64 collects_ = 0, written_pages_ = 0, collect_ns_ = 0;
   long faults_at_scan_ = -1;

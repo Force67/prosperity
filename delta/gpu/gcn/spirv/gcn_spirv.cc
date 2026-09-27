@@ -47,13 +47,11 @@ bool RecompileComputeSpirv(const u32*,
 }  // namespace gpu::gcn
 #else
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <string_view>
-#include <string>
-#include <unordered_set>
 
+#include <cstring>
+#include <base/strings/to_string.h>
 #include <base/logging.h>
 
 #include "gpu/gcn/gcn_audit.h"
@@ -61,6 +59,17 @@ bool RecompileComputeSpirv(const u32*,
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/gcn/spirv/translator.h"
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/strings/string_ref.h>
+#include <base/strings/xstring.h>
+#include <base/containers/hash_map.h>
+#include <base/hashing/hash.h>
 
 namespace {
 DELTA_OPTION(u32, kCfgMaxIter, "DELTA_GPU_CFG_MAXITER", 16384);
@@ -159,7 +168,7 @@ bool ProbeThisPs(const Translator& t) {
 }
 
 thread_local bool g_had_unsupported = false;
-thread_local std::string g_unsupported_ops;
+thread_local base::String g_unsupported_ops;
 
 // The VOPC opcode families whose operands are 64-bit register pairs: f64
 // (0x20-0x3f) and its signalling twin V_CMPS (0x60-0x7f), i64 (0xa0-0xbf),
@@ -182,7 +191,7 @@ bool HadUnsupported() {
 // Which ops made the shader currently being translated unsupported. The
 // warn-once dedup hides everything after the first shader that hit a given op,
 // so a later shader's rejection is otherwise unattributable.
-const std::string& UnsupportedOps() {
+const base::String& UnsupportedOps() {
   return g_unsupported_ops;
 }
 
@@ -196,9 +205,9 @@ bool TraceEnabled() {
 // were dropped entirely for it.
 void NoteApproximated(const char* enc, u32 op) {
   AuditNote(enc, op);
-  static std::unordered_set<u64> seen;
+  static base::HashSet<u64> seen;
   const u64 key =
-      static_cast<u64>(std::hash<std::string_view>{}(enc)) ^
+      base::HashBytes(enc, std::strlen(enc)) ^
       (static_cast<u64>(op) << 40);
   if (seen.size() > 512 || !seen.insert(key).second)
     return;
@@ -210,7 +219,7 @@ void WarnUnsupported(const char* enc, u32 op, u32 w0, u32 w1) {
   {
     char one[64];
     std::snprintf(one, sizeof(one), "%s:%#x", enc, op);
-    if (g_unsupported_ops.find(one) == std::string::npos) {
+    if (g_unsupported_ops.find(one) == base::String::npos) {
       if (!g_unsupported_ops.empty())
         g_unsupported_ops += ' ';
       g_unsupported_ops += one;
@@ -219,9 +228,9 @@ void WarnUnsupported(const char* enc, u32 op, u32 w0, u32 w1) {
   // Every event feeds the audit (per-shader, per-pc attribution); the
   // warn-once dedup below only limits the stderr flood.
   AuditNote(enc, op);
-  static std::unordered_set<u64> seen;
+  static base::HashSet<u64> seen;
   const u64 key =
-      static_cast<u64>(std::hash<std::string_view>{}(enc)) ^
+      base::HashBytes(enc, std::strlen(enc)) ^
       (static_cast<u64>(op) << 40);
   if (seen.size() > 512 || !seen.insert(key).second)
     return;
@@ -268,7 +277,7 @@ Id PsInputVar(Translator& t, StageContext& sc, u32 attr) {
   t.m.Decorate(v, spv::Decoration::Location, {loc});
   if (sc.flat_attrs && sc.flat_attrs->count(attr))
     t.m.Decorate(v, spv::Decoration::Flat);
-  t.m.Name(v, "in_attr" + std::to_string(attr));
+  t.m.Name(v, "in_attr" + base::ToString(attr));
   sc.iface->push_back(v);
   sc.in_vars[loc] = v;
   return v;
@@ -277,9 +286,9 @@ Id PsInputVar(Translator& t, StageContext& sc, u32 attr) {
 // Attributes any reachable v_interp_mov_f32 reads as P10 (VSRC 0) or P20
 // (VSRC 1). Collected before emission because declaring the input decides its
 // storage shape, and that must be settled before the first read of it.
-std::unordered_set<u32> PlanPerVertexAttrs(const Program& program,
+base::HashSet<u32> PlanPerVertexAttrs(const Program& program,
                                                 const u8* reachable) {
-  std::unordered_set<u32> out;
+  base::HashSet<u32> out;
   for (size_t i = 0; i < program.size(); i++) {
     const Inst& inst = program[i];
     if (inst.enc != Enc::kVintrp || (reachable && !reachable[i]))
@@ -364,7 +373,7 @@ VgprWrite VgprDestOf(const Inst& inst) {
 // statically known target at all.
 bool CollectLabels(const Program& program,
                    const u8* reachable,
-                   std::unordered_set<u32>& labels) {
+                   base::HashSet<u32>& labels) {
   for (size_t i = 0; i < program.size(); i++) {
     const Inst& inst = program[i];
     if (reachable && !reachable[i])
@@ -389,7 +398,7 @@ bool CollectLabels(const Program& program,
 // a label (some other path could reach `use` with a different value).
 int NearestVgprDef(const Program& program,
                    const u8* reachable,
-                   const std::unordered_set<u32>& labels,
+                   const base::HashSet<u32>& labels,
                    size_t use,
                    u32 reg) {
   for (size_t i = use; i-- > 0;) {
@@ -435,10 +444,10 @@ bool IsLaneChainStep(const Inst& inst,
 // The pcs of the DS instructions whose address is provably the lane's own
 // slot, i.e. `v_mbcnt_{hi,lo}(-1) << 2`. Operand fields: 193 = the inline
 // constant -1, 130 = 2, 128 = 0.
-std::unordered_set<u32> PlanDsOwnLane(const Program& program,
+base::HashSet<u32> PlanDsOwnLane(const Program& program,
                                            const u8* reachable) {
-  std::unordered_set<u32> out;
-  std::unordered_set<u32> labels;
+  base::HashSet<u32> out;
+  base::HashSet<u32> labels;
   if (!CollectLabels(program, reachable, labels))
     return out;
   for (size_t i = 0; i < program.size(); i++) {
@@ -490,7 +499,7 @@ Id PsPerVertexVar(Translator& t, StageContext& sc, u32 attr) {
   t.m.Decorate(v, spv::Decoration::PerVertexKHR);
   if (sc.flat_attrs && sc.flat_attrs->count(attr))
     t.m.Decorate(v, spv::Decoration::Flat);
-  t.m.Name(v, "in_attr" + std::to_string(attr) + "_pv");
+  t.m.Name(v, "in_attr" + base::ToString(attr) + "_pv");
   sc.iface->push_back(v);
   sc.pervertex_vars[loc] = v;
   return v;
@@ -649,7 +658,7 @@ Id VsParamOut(Translator& t, StageContext& sc, u32 p) {
     t.m.Decorate(v, spv::Decoration::Location, {p});
   if (!sc.is_mesh && sc.flat_attrs && sc.flat_attrs->count(p))
     t.m.Decorate(v, spv::Decoration::Flat);
-  t.m.Name(v, "out_param" + std::to_string(p));
+  t.m.Name(v, "out_param" + base::ToString(p));
   if (!sc.is_mesh)
     sc.iface->push_back(v);
   sc.param_outs[p] = v;
@@ -677,7 +686,7 @@ Id PsColorOut(Translator& t, StageContext& sc, u32 target) {
   const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, type),
                             spv::StorageClass::Output, init);
   t.m.Decorate(v, spv::Decoration::Location, {target});
-  t.m.Name(v, "mrt" + std::to_string(target));
+  t.m.Name(v, "mrt" + base::ToString(target));
   sc.iface->push_back(v);
   sc.color_outs[target] = v;
   sc.r->ps_mrt_mask |= static_cast<u8>(1u << target);
@@ -791,8 +800,8 @@ struct FetchAttr {
   u32 index_vgpr = 0;
 };
 
-std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
-  std::vector<FetchAttr> out;
+base::Vector<FetchAttr> ParseFetch(u64 fetch_addr) {
+  base::Vector<FetchAttr> out;
   if (!InGuest(fetch_addr))
     return out;
   const auto* code = reinterpret_cast<const u32*>(fetch_addr);
@@ -800,7 +809,7 @@ std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
   struct Load {
     u32 table_sgpr, dword_off;
   };
-  std::unordered_map<u32, Load> loads;
+  base::HashMap<u32, Load> loads;
   u32 semantic = 0;
   for (const Inst& inst : program) {
     const u32 w = inst.raw[0];
@@ -1189,6 +1198,11 @@ void CapturePsVgprs(Translator& t, const Inst& inst) {
 // SPIR-V word counts expose instructions that silently emitted nothing, and
 // with DELTA_GPU_SHDUMP each instruction's ops are preceded by an OpLine
 // whose line number is the GCN pc (visible in spirv-dis / RenderDoc).
+bool SortedContains(const base::Vector<u32>& sorted, u32 value) {
+  const u32* at = base::LowerBound(sorted.begin(), sorted.end(), value);
+  return at != sorted.end() && *at == value;
+}
+
 void EmitInstAudited(Translator& t,
                      const Inst& inst,
                      u32 index,
@@ -1199,8 +1213,7 @@ void EmitInstAudited(Translator& t,
                             sc.uniform_readfirstlane[index];
   // A barrier the guest compiler was entitled to omit (see PlanLdsBarriers).
   if (!sc.lds_barrier_at.empty() &&
-      std::binary_search(sc.lds_barrier_at.begin(), sc.lds_barrier_at.end(),
-                         index))
+      SortedContains(sc.lds_barrier_at, index))
     t.m.EmitVoid(spv::Op::OpControlBarrier,
                  {t.U32(2), t.U32(2), t.U32(0x108)});
   if (!ShaderDebugEnabled()) {
@@ -1249,7 +1262,7 @@ int BranchKind(const Inst& inst) {
 }
 
 bool HasControlFlow(const Program& program) {
-  return std::any_of(program.begin(), program.end(), [](const Inst& inst) {
+  return base::AnyOf(program.begin(), program.end(), [](const Inst& inst) {
     const int k = BranchKind(inst);
     return k >= 1 && k <= 7;
   });
@@ -1303,8 +1316,8 @@ u32 BranchInverts(int kind) {
 
 // Block leaders under the same rule EmitCfg uses: entry, every branch target,
 // the slot after a branch.
-std::vector<u32> BlockStarts(const Program& program, u32 max_pc) {
-  std::vector<u32> leaders{0};
+base::Vector<u32> BlockStarts(const Program& program, u32 max_pc) {
+  base::Vector<u32> leaders{0};
   for (const Inst& inst : program) {
     const int k = BranchKind(inst);
     if (k == 0)
@@ -1317,9 +1330,9 @@ std::vector<u32> BlockStarts(const Program& program, u32 max_pc) {
                                               simm));
     }
   }
-  std::sort(leaders.begin(), leaders.end());
-  leaders.erase(std::unique(leaders.begin(), leaders.end()), leaders.end());
-  std::vector<u32> starts;
+  base::Sort(leaders.begin(), leaders.end());
+  leaders.erase(base::Unique(leaders.begin(), leaders.end()), leaders.end());
+  base::Vector<u32> starts;
   for (u32 l : leaders)
     if (l < max_pc)
       starts.push_back(l);
@@ -1446,9 +1459,9 @@ void VgprWrites(const Inst& in, u32& first, u32& count) {
   }
 }
 
-std::vector<u8> ProvenUniformReadFirstLane(const Program& program,
+base::Vector<u8> ProvenUniformReadFirstLane(const Program& program,
                                                 const u8* reachable) {
-  std::vector<u8> proven(program.size(), 0);
+  base::Vector<u8> proven(program.size(), 0);
   bool uni[256];
   for (u32 i = 0; i < 256; i++)
     uni[i] = true;
@@ -1608,18 +1621,18 @@ std::vector<u8> ProvenUniformReadFirstLane(const Program& program,
 
 }  // namespace
 
-std::vector<u8> UniformPoints(const Program& program) {
+base::Vector<u8> UniformPoints(const Program& program) {
   // Straight-line: one block, run once by everyone.
   if (!HasControlFlow(program))
-    return std::vector<u8>(program.size(), 1);
+    return base::Vector<u8>(program.size(), 1);
   // Under the dispatch loop only the entry block has a fixed iteration (the
   // first) for every invocation. Everything after it may be reached on
   // different iterations by different invocations.
   const u32 max_pc =
       program.empty() ? 0 : program.back().pc + program.back().size;
-  const std::vector<u32> starts = BlockStarts(program, max_pc);
+  const base::Vector<u32> starts = BlockStarts(program, max_pc);
   const u32 first_end = starts.size() > 1 ? starts[1] : max_pc;
-  std::vector<u8> at(program.size(), 0);
+  base::Vector<u8> at(program.size(), 0);
   for (u32 i = 0; i < program.size(); i++)
     at[i] = program[i].pc < first_end;
   return at;
@@ -1678,7 +1691,7 @@ void EmitCfg(Translator& t,
              const u8* reachable = nullptr) {
   const u32 max_pc =
       program.empty() ? 0 : program.back().pc + program.back().size;
-  const std::vector<u32> starts = BlockStarts(program, max_pc);
+  const base::Vector<u32> starts = BlockStarts(program, max_pc);
   const u32 num_blocks = static_cast<u32>(starts.size());
   const u32 kExit = num_blocks;
   const auto block_of = [&](u32 pc) -> u32 {
@@ -1698,7 +1711,7 @@ void EmitCfg(Translator& t,
   const Id cont = t.m.NewBlock(), merge = t.m.NewBlock();
   const Id exit_blk = t.m.NewBlock();
   const Id lockstep_blk = t.m.NewBlock();
-  std::vector<Id> case_labels(num_blocks);
+  base::Vector<Id> case_labels(num_blocks);
   for (Id& l : case_labels)
     l = t.m.NewBlock();
 
@@ -1804,7 +1817,7 @@ void EmitCfg(Translator& t,
     state = t.SelectB(over, t.U32(kExit), state);
   }
   t.m.SelectionMerge(merge_sel);
-  std::vector<std::pair<u32, Id> > cases;
+  base::Vector<base::Pair<u32, Id> > cases;
   for (u32 i = 0; i < num_blocks; i++)
     cases.push_back({i, case_labels[i]});
   t.m.Switch(state, exit_blk, cases);  // default (incl. EXIT state) -> exit
@@ -1899,7 +1912,7 @@ bool UsesDsSwizzle(const Program& program, const u8* reachable) {
   return false;
 }
 
-void EnableDsSwizzle(Translator& t, StageContext& sc, std::vector<Id>& iface) {
+void EnableDsSwizzle(Translator& t, StageContext& sc, base::Vector<Id>& iface) {
   t.m.Capability(spv::Capability::GroupNonUniform);
   t.m.Capability(spv::Capability::GroupNonUniformShuffle);
   sc.subgroup_local_id =
@@ -1941,9 +1954,9 @@ bool NeedsIndirectCbufs(const std::initializer_list<const Program*> programs) {
   for (const Program* program : programs) {
     if (!program || program->empty())
       continue;
-    const std::vector<u8> reachable = ComputeReachability(*program);
-    std::vector<ShaderCbuf> cbufs;
-    std::unordered_map<u32, u32> bindings;
+    const base::Vector<u8> reachable = ComputeReachability(*program);
+    base::Vector<ShaderCbuf> cbufs;
+    base::HashMap<u32, u32> bindings;
     PlanCbufs(*program, 0, cbufs, bindings, reachable.data(),
               kIndirectCbufBindings);
     total += static_cast<u32>(cbufs.size());
@@ -1989,7 +2002,7 @@ void SeedUserData(Translator& t, Id user_data) {
 // ---- VS ---------------------------------------------------------------------
 bool TranslateVs(const Program& program,
                  const u32* vs_user_data,
-                 const std::unordered_set<u32>& flat_attrs,
+                 const base::HashSet<u32>& flat_attrs,
                  u32 tex_binding_base,
                  // Already shifted down by tex_binding_base: the plan this
                  // stage walks numbers its bindings from zero.
@@ -2002,9 +2015,9 @@ bool TranslateVs(const Program& program,
                  Translator& t) {
   const u64 fetch =
       (static_cast<u64>(vs_user_data[1] & 0xFFFF) << 32) | vs_user_data[0];
-  const std::vector<u8> reachable = ComputeReachability(program);
+  const base::Vector<u8> reachable = ComputeReachability(program);
   t.spill_vgprs = PlanLaneSpills(program, reachable.data());
-  std::vector<FetchAttr> direct_attrs;
+  base::Vector<FetchAttr> direct_attrs;
   for (u32 i = 0; i < program.size(); i++) {
     const Inst& inst = program[i];
     // MTBUF addresses the buffer exactly as MUBUF does and its load opcodes
@@ -2036,14 +2049,14 @@ bool TranslateVs(const Program& program,
   // otherwise it is whatever user data the title parked there (SotC: its
   // per-draw shader-resource-table pointer), and ParseFetch would read phantom
   // vertex attributes out of live constant data.
-  std::vector<FetchAttr> attrs;
+  base::Vector<FetchAttr> attrs;
   if (CallsFetchShader(program))
     attrs = ParseFetch(fetch);
   if (attrs.empty())
-    attrs = std::move(direct_attrs);
+    attrs = base::move(direct_attrs);
   t.InitTypes();
 
-  std::vector<Id> iface;
+  base::Vector<Id> iface;
   const Id pos_out =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_v4),
                    spv::StorageClass::Output);
@@ -2087,7 +2100,7 @@ bool TranslateVs(const Program& program,
   if (UsesDsSwizzle(program, reachable.data()))
     EnableDsSwizzle(t, sc, iface);
   if (es) {
-    sc.es_ring_vec4s = std::max(1u, (es->esgs_dwords + 3) / 4);
+    sc.es_ring_vec4s = base::Max(1u, (es->esgs_dwords + 3) / 4);
     const Id ring = t.m.TypeArray(t.TypeV4u(), sc.es_ring_vec4s);
     sc.es_ring = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, ring),
                               spv::StorageClass::Output);
@@ -2147,7 +2160,7 @@ bool TranslateVs(const Program& program,
         t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, comp_ty),
                      spv::StorageClass::Input);
     t.m.Decorate(in_var, spv::Decoration::Location, {a.semantic});
-    t.m.Name(in_var, "v_attr" + std::to_string(a.semantic));
+    t.m.Name(in_var, "v_attr" + base::ToString(a.semantic));
     iface.push_back(in_var);
     const Id val = t.m.Load(comp_ty, in_var);
     // A narrow integer format arrives through its SCALED twin as the value in
@@ -2236,7 +2249,7 @@ bool TranslateVs(const Program& program,
 
 // ---- GS ---------------------------------------------------------------------
 // Vertices per input primitive for a VGT_PRIMITIVE_TYPE, and its GS input mode.
-std::pair<u32, spv::ExecutionMode> GsInputOf(u32 prim) {
+base::Pair<u32, spv::ExecutionMode> GsInputOf(u32 prim) {
   switch (prim) {
     case 0x1:
       return {1, spv::ExecutionMode::InputPoints};
@@ -2256,18 +2269,18 @@ std::pair<u32, spv::ExecutionMode> GsInputOf(u32 prim) {
 
 bool TranslateGs(const Program& program,
                  const GsPipeline& gs,
-                 const std::vector<GsCopyExport>& exports,
-                 const std::unordered_set<u32>& flat_params,
+                 const base::Vector<GsCopyExport>& exports,
+                 const base::HashSet<u32>& flat_params,
                  bool gl_clip_space,
                  Recompiled& r,
                  Translator& t) {
-  const std::vector<u8> reachable = ComputeReachability(program);
+  const base::Vector<u8> reachable = ComputeReachability(program);
   t.spill_vgprs = PlanLaneSpills(program, reachable.data());
   t.InitTypes();
   t.m.Capability(spv::Capability::Geometry);
   const auto [verts, input_mode] = GsInputOf(gs.input_prim);
 
-  std::vector<Id> iface;
+  base::Vector<Id> iface;
   StageContext sc;
   sc.r = &r;
   sc.iface = &iface;
@@ -2286,7 +2299,7 @@ bool TranslateGs(const Program& program,
   if (!PlanCbufs(program, r.vs_cbufs.size(), r.gs_cbufs, sc.cbuf_bind,
                  reachable.data(), CbufBindingLimit(t)))
     return false;
-  sc.es_ring_vec4s = std::max(1u, (gs.esgs_dwords + 3) / 4);
+  sc.es_ring_vec4s = base::Max(1u, (gs.esgs_dwords + 3) / 4);
   const Id ring = t.m.TypeArray(t.m.TypeArray(t.TypeV4u(), sc.es_ring_vec4s),
                                 verts);
   sc.es_ring = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, ring),
@@ -2295,14 +2308,14 @@ bool TranslateGs(const Program& program,
   t.m.Name(sc.es_ring, "esgs_ring");
   iface.push_back(sc.es_ring);
 
-  sc.gsvs_dwords = std::max(1u, gs.gsvs_dwords);
+  sc.gsvs_dwords = base::Max(1u, gs.gsvs_dwords);
   const Id gsvs = t.m.TypeArray(t.t_u, sc.gsvs_dwords);
   sc.gsvs = t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, gsvs),
                          spv::StorageClass::Private, t.m.ConstNull(gsvs));
   t.m.Name(sc.gsvs, "gsvs_ring");
   sc.gs_emitted = t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
                                t.m.ConstNull(t.t_u));
-  sc.gs_max_vert_out = std::max(1u, gs.max_vert_out);
+  sc.gs_max_vert_out = base::Max(1u, gs.max_vert_out);
   sc.gs_exports = &exports;
 
   const Id p_in_i = t.m.TypePointer(spv::StorageClass::Input, t.t_i);
@@ -2332,7 +2345,7 @@ bool TranslateGs(const Program& program,
   t.m.EndFunction();
   t.m.EntryPoint(spv::ExecutionModel::Geometry, main_fn, "main", iface);
   t.m.ExecMode(main_fn, spv::ExecutionMode::Invocations,
-               {std::max(1u, gs.instances)});
+               {base::Max(1u, gs.instances)});
   t.m.ExecMode(main_fn, input_mode);
   t.m.ExecMode(main_fn, gs.out_prim == 0   ? spv::ExecutionMode::OutputPoints
                         : gs.out_prim == 1 ? spv::ExecutionMode::OutputLineStrip
@@ -2344,11 +2357,11 @@ bool TranslateGs(const Program& program,
 
 // ---- PS ---------------------------------------------------------------------
 bool TranslatePs(const Program& program,
-                  const std::unordered_set<u32>& flat_attrs,
+                  const base::HashSet<u32>& flat_attrs,
                   u32 ps_input_ena,
                   const u32* ps_in_cntl,
                   u32 ps_num_interp,
-                  const std::vector<u32>* vs_exported_params,
+                  const base::Vector<u32>* vs_exported_params,
                   u32 tex_3d_mask,
                   u32 tex_1d_mask,
                   u32 tex_uint_mask,
@@ -2359,8 +2372,8 @@ bool TranslatePs(const Program& program,
                   Translator& t) {
   // Color outputs (PsColorOut) are declared lazily per MRT target (location ==
   // target); PS inputs (PsInputVar) likewise as they are read.
-  std::vector<Id> iface;
-  const std::vector<u8> reachable = ComputeReachability(program);
+  base::Vector<Id> iface;
+  const base::Vector<u8> reachable = ComputeReachability(program);
   t.spill_vgprs = PlanLaneSpills(program, reachable.data());
   StageContext sc;
   sc.is_ps = true;
@@ -2595,7 +2608,7 @@ bool TranslateCs(const Program& program,
   // Footer-bounded decode keeps blocks reached only after an early-out
   // s_endpgm, but also picks up dead padding between the real code and the
   // OrbShdr footer; only reachable instructions may influence translation.
-  const std::vector<u8> reachable = ComputeReachability(program);
+  const base::Vector<u8> reachable = ComputeReachability(program);
   t.spill_vgprs = PlanLaneSpills(program, reachable.data());
   if (!PlanCsResources(program, reachable.data(), sc.lds_dwords, r,
                        sc.cs_bind) ||
@@ -2639,7 +2652,7 @@ bool TranslateCs(const Program& program,
     const Id v = t.m.Variable(p_buf, spv::StorageClass::StorageBuffer);
     t.m.Decorate(v, spv::Decoration::DescriptorSet, {0});
     t.m.Decorate(v, spv::Decoration::Binding, {res.binding});
-    t.m.Name(v, "buf" + std::to_string(res.binding));
+    t.m.Name(v, "buf" + base::ToString(res.binding));
     sc.cs_ssbo[res.binding] = v;
   }
 
@@ -2683,7 +2696,7 @@ bool TranslateCs(const Program& program,
   const Id group_id = t.m.Variable(p_in_v3, spv::StorageClass::Input);
   t.m.Decorate(group_id, spv::Decoration::BuiltIn,
                {static_cast<u32>(spv::BuiltIn::WorkgroupId)});
-  std::vector<Id> iface{local_id, group_id};
+  base::Vector<Id> iface{local_id, group_id};
   // Cross-lane channel: LocalInvocationIndex is the order GCN packs threads
   // into waves, so lane = index % 64 and the wave's lanes are contiguous. Two
   // words per invocation, so one barrier pair can carry two published values.
@@ -2749,7 +2762,7 @@ bool TranslateCs(const Program& program,
     t.wave_base = t.And(index, t.U32(~63u));
   }
   sc.uniform_points = sc.lockstep_loop
-                          ? std::vector<u8>(program.size(), 1)
+                          ? base::Vector<u8>(program.size(), 1)
                           : UniformPoints(program);
   sc.uniform_readfirstlane =
       ProvenUniformReadFirstLane(program, reachable.data());
@@ -2813,44 +2826,44 @@ bool NoOpt() {
 
 // Dump-header summaries of the resource plan, so a shader dump is
 // self-contained (which user-data slot each cbuffer/texture came from).
-std::string PlanSummaryGfx(const Recompiled& r, bool ps) {
-  std::string s = ps ? "ps plan:" : "vs plan:";
+base::String PlanSummaryGfx(const Recompiled& r, bool ps) {
+  base::String s = ps ? "ps plan:" : "vs plan:";
   if (!ps) {
-    s += " attrs=" + std::to_string(r.attrs.size());
+    s += " attrs=" + base::ToString(r.attrs.size());
   }
   const auto& cbufs = ps ? r.ps_cbufs : r.vs_cbufs;
   const auto& bufs = ps ? r.ps_bufs : r.vs_bufs;
   s += " cbufs:";
   for (const ShaderCbuf& c : cbufs)
-    s += " [b" + std::to_string(c.binding) +
-         " ud=" + std::to_string(c.ud_sgpr) + (c.pointer ? " ptr" : "") + " " +
-         std::to_string(c.num_dwords) + "dw]";
+    s += " [b" + base::ToString(c.binding) +
+         " ud=" + base::ToString(c.ud_sgpr) + (c.pointer ? " ptr" : "") + " " +
+         base::ToString(c.num_dwords) + "dw]";
   s += " bufs:";
   for (const ShaderBuffer& b : bufs)
-    s += " [b" + std::to_string(b.binding) + " srsrc=s" +
-         std::to_string(b.srsrc_sgpr) + " pc=" + std::to_string(b.use_pc) + "]";
+    s += " [b" + base::ToString(b.binding) + " srsrc=s" +
+         base::ToString(b.srsrc_sgpr) + " pc=" + base::ToString(b.use_pc) + "]";
   if (ps) {
     s += " texs:";
     for (const ShaderTex& tex : r.ps_texs)
-      s += " [t" + std::to_string(tex.binding) +
-           " ud=" + std::to_string(tex.ud_sgpr) +
+      s += " [t" + base::ToString(tex.binding) +
+           " ud=" + base::ToString(tex.ud_sgpr) +
            (tex.storage ? " storage" : "") + (tex.is_3d ? " 3d" : "") +
            (tex.is_1d ? " 1d" : "") + "]";
   }
   return s;
 }
 
-std::string PlanSummaryCs(const RecompiledCs& r) {
+base::String PlanSummaryCs(const RecompiledCs& r) {
   // The threadgroup size decides whether the group is one wave, which is what
   // lets the guest compiler omit LDS barriers and what gates our lock-step
   // control flow, so it belongs in the dump next to the bindings.
-  std::string s = "cs plan: tg=" + std::to_string(r.local_size[0]) + "x" +
-                  std::to_string(r.local_size[1]) + "x" +
-                  std::to_string(r.local_size[2]);
+  base::String s = "cs plan: tg=" + base::ToString(r.local_size[0]) + "x" +
+                  base::ToString(r.local_size[1]) + "x" +
+                  base::ToString(r.local_size[2]);
   for (const CsResource& res : r.resources)
-    s += " [b" + std::to_string(res.binding) + " s" +
-         std::to_string(res.base_sgpr) + " kind=" + std::to_string(res.kind) +
-         (res.written ? " w" : "") + " min=" + std::to_string(res.min_bytes) +
+    s += " [b" + base::ToString(res.binding) + " s" +
+         base::ToString(res.base_sgpr) + " kind=" + base::ToString(res.kind) +
+         (res.written ? " w" : "") + " min=" + base::ToString(res.min_bytes) +
          "]";
   return s;
 }
@@ -2862,9 +2875,9 @@ std::string PlanSummaryCs(const RecompiledCs& r) {
 // a second triangle. Vulkan has no matching input topology, so insert a
 // geometry stage that performs the fixed-function expansion without assuming
 // anything about the guest VS.
-std::vector<u32> EmitRectListGeometry(
+base::Vector<u32> EmitRectListGeometry(
     u32 num_params,
-    const std::unordered_set<u32>& flat_attrs) {
+    const base::HashSet<u32>& flat_attrs) {
   spirv::Module m;
   m.Capability(spv::Capability::Geometry);
   const Id t_void = m.TypeVoid(), t_f = m.TypeFloat(32),
@@ -2874,7 +2887,7 @@ std::vector<u32> EmitRectListGeometry(
   const Id p_in_v4 = m.TypePointer(spv::StorageClass::Input, t_v4);
   const Id p_out_v4 = m.TypePointer(spv::StorageClass::Output, t_v4);
 
-  std::vector<Id> iface;
+  base::Vector<Id> iface;
   const Id in_pos = m.Variable(m.TypePointer(spv::StorageClass::Input, t_in_v4),
                                spv::StorageClass::Input);
   const Id out_pos = m.Variable(p_out_v4, spv::StorageClass::Output);
@@ -2885,7 +2898,7 @@ std::vector<u32> EmitRectListGeometry(
   iface.push_back(in_pos);
   iface.push_back(out_pos);
 
-  std::vector<Id> inputs(num_params), outputs(num_params);
+  base::Vector<Id> inputs(num_params), outputs(num_params);
   for (u32 p = 0; p < num_params; p++) {
     inputs[p] = m.Variable(m.TypePointer(spv::StorageClass::Input, t_in_v4),
                            spv::StorageClass::Input);
@@ -2911,7 +2924,7 @@ std::vector<u32> EmitRectListGeometry(
                   {m.Emit(spv::Op::OpFAdd, t_v4, {v1, v2}), v0});
   };
   const Id pos3 = fourth_corner(in_pos);
-  std::vector<Id> param3(num_params);
+  base::Vector<Id> param3(num_params);
   for (u32 p = 0; p < num_params; p++)
     if (!flat_attrs.count(p))
       param3[p] = fourth_corner(inputs[p]);
@@ -2979,7 +2992,7 @@ bool RecompileSpirv(const u32* vs_code,
   // V_INTERP_MOV P0 reads a per-primitive parameter rather than a smoothly
   // interpolated value: represent those locations as flat varyings in both
   // stages.
-  std::unordered_set<u32> flat_attrs;
+  base::HashSet<u32> flat_attrs;
   for (const Inst& inst : ps_program)
     if (inst.enc == Enc::kVintrp && inst.opcode == 2 &&
         (inst.raw[0] & 0xFF) == 2)
@@ -2988,7 +3001,7 @@ bool RecompileSpirv(const u32* vs_code,
   // The VS's parameter exports, ascending and deduplicated: the parameter cache
   // packs them densely in export order, which is what SPI_PS_INPUT_CNTL.OFFSET
   // indexes.
-  std::vector<u32> vs_exported_params;
+  base::Vector<u32> vs_exported_params;
   {
     for (const Inst& inst : vs_program)
       if (inst.enc == Enc::kExp) {
@@ -2996,9 +3009,9 @@ bool RecompileSpirv(const u32* vs_code,
         if (tgt >= 32 && tgt <= 63)
           vs_exported_params.push_back(tgt - 32);
       }
-    std::sort(vs_exported_params.begin(), vs_exported_params.end());
+    base::Sort(vs_exported_params.begin(), vs_exported_params.end());
     vs_exported_params.erase(
-        std::unique(vs_exported_params.begin(), vs_exported_params.end()),
+        base::Unique(vs_exported_params.begin(), vs_exported_params.end()),
         vs_exported_params.end());
   }
 
@@ -3009,7 +3022,7 @@ bool RecompileSpirv(const u32* vs_code,
   // leaves a Flat decoration on one side of the interface and not the other,
   // which is undefined; it is what made the first attempt at honouring these
   // registers far worse than ignoring them.
-  std::unordered_set<u32> flat_params;
+  base::HashSet<u32> flat_params;
   for (u32 slot : flat_attrs)
     flat_params.insert((ps_in_cntl && slot < ps_num_interp)
                            ? (ps_in_cntl[slot & 31] & 0x1F)
@@ -3019,7 +3032,7 @@ bool RecompileSpirv(const u32* vs_code,
   // is a pure function of the code, so doing it here costs only the walk.
   u32 vs_tex_base = 0;
   if (!ps_program.empty()) {
-    const std::vector<u8> ps_reachable = ComputeReachability(ps_program);
+    const base::Vector<u8> ps_reachable = ComputeReachability(ps_program);
     vs_tex_base = static_cast<u32>(
         PlanMimgBindings(ps_program, ps_reachable.data()).binding_srsrc.size());
   }
@@ -3028,7 +3041,7 @@ bool RecompileSpirv(const u32* vs_code,
   // says which export each GSVS component feeds.
   const Program es_program =
       gs ? DecodeShader(gs->es_code, 4096) : Program{};
-  std::vector<GsCopyExport> copy_exports;
+  base::Vector<GsCopyExport> copy_exports;
   if (gs && !ParseCopyShader(vs_program, gs->max_vert_out, copy_exports)) {
     BASE_LOGI("gcnspv", "copy shader not understood @{}",
               static_cast<const void*>(vs_code));
@@ -3056,7 +3069,7 @@ bool RecompileSpirv(const u32* vs_code,
                   tex_1d_mask >> vs_tex_base, gl_clip_space, gs, int_attr_mask,
                   r, tv) &&
       !HadUnsupported();
-  std::vector<u32> vs;
+  base::Vector<u32> vs;
   if (vs_ok)
     vs = tv.m.Assemble();
   if (dbg) {
@@ -3073,7 +3086,7 @@ bool RecompileSpirv(const u32* vs_code,
     return false;
   }
 
-  std::vector<u32> gs_words;
+  base::Vector<u32> gs_words;
   if (gs) {
     Translator tg;
     tg.program_base = reinterpret_cast<u64>(gs->gs_code);
@@ -3115,7 +3128,7 @@ bool RecompileSpirv(const u32* vs_code,
                                              col_format, r, tp)
                                : TranslateDepthOnlyPs(tp)) &&
                      !HadUnsupported();
-  std::vector<u32> ps;
+  base::Vector<u32> ps;
   if (ps_ok)
     ps = tp.m.Assemble();
   if (dbg && ps_code) {
@@ -3136,7 +3149,7 @@ bool RecompileSpirv(const u32* vs_code,
     gs_words = EmitRectListGeometry(r.num_params, flat_params);
   // A module the translator emitted but the validator rejects is a translator
   // bug (wrong codegen, not a guest gap): always loud.
-  std::string err;
+  base::String err;
   // Validate + optimize through the disk cache (spv_post::Finalize): the
   // optimizer is ~65% of recompile time and its output is a pure function of
   // its input, so a hit is only faster, never different. NoOpt keeps the
@@ -3241,7 +3254,7 @@ bool RecompileComputeSpirv(const u32* cs_code,
       TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
                   tgid_enable, lds_dwords, tmp, t) &&
       !HadUnsupported();
-  std::vector<u32> spv_bin;
+  base::Vector<u32> spv_bin;
   if (cs_ok)
     spv_bin = t.m.Assemble();
   if (dbg) {
@@ -3253,7 +3266,7 @@ bool RecompileComputeSpirv(const u32* cs_code,
   }
   if (!cs_ok)
     return false;
-  std::string err;
+  base::String err;
   if (NoOpt()) {
     if (!spirv::Validate(spv_bin, &err)) {
       BASE_LOGI("gcnspv", "CS invalid @{}: {}",
@@ -3269,7 +3282,7 @@ bool RecompileComputeSpirv(const u32* cs_code,
   if (tmp.spirv.empty())
     return false;
   tmp.ok = true;
-  r = std::move(tmp);
+  r = base::move(tmp);
   return true;
 }
 

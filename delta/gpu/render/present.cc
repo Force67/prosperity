@@ -8,10 +8,10 @@
 #include "gfx/gfx.h"
 #include "gpu/gpu_perf.h"
 
-#include <condition_variable>
-#include <mutex>
-#include <thread>
-#include <vector>
+#include <base/containers/vector.h>
+#include <base/memory/move.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace gpu::render {
 
@@ -26,15 +26,16 @@ LatestFramePresenter::~LatestFramePresenter() {
 }
 
 void LatestFramePresenter::StartLocked() {
-  if (!thread_.joinable())
-    thread_ = std::thread(&LatestFramePresenter::Run, this);
+  if (!thread_)
+    thread_ = base::MakeUnique<base::Thread>("present", [this] { Run(); },
+                                             true);
 }
 
 void LatestFramePresenter::Run() {
-  std::unique_lock<std::mutex> lock(mutex_);
-  std::vector<u8> local;
+  base::UniqueLock<base::Mutex> lock(mutex_);
+  base::Vector<u8> local;
   while (true) {
-    ready_.wait(lock, [this] { return pending_ || stopping_; });
+    ready_.Wait(lock, [this] { return pending_ || stopping_; });
     if (stopping_)
       return;
     const u32 w = width_;
@@ -61,7 +62,7 @@ void LatestFramePresenter::Run() {
     lock.lock();
     if (pending_src_ == src) {
       pending_src_ = nullptr;
-      released_.notify_all();
+      released_.NotifyAll();
     }
   }
 }
@@ -70,7 +71,7 @@ void LatestFramePresenter::Present(const u8* pixels,
                                    u32 w,
                                    u32 h,
                                    gfx::PixelFormat fmt) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  base::LockGuard<base::Mutex> lock(mutex_);
   if (stopping_)
     return;
   StartLocked();
@@ -79,49 +80,49 @@ void LatestFramePresenter::Present(const u8* pixels,
   height_ = h;
   pending_fmt_ = fmt;
   pending_ = true;
-  ready_.notify_one();
+  ready_.NotifyOne();
 }
 
-void LatestFramePresenter::Present(std::vector<u8>&& pixels,
+void LatestFramePresenter::Present(base::Vector<u8>&& pixels,
                                    u32 w,
                                    u32 h,
                                    gfx::PixelFormat fmt) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  base::LockGuard<base::Mutex> lock(mutex_);
   if (stopping_)
     return;
   StartLocked();
   pending_pixels_.swap(pixels);
   pending_src_ = nullptr;
-  released_.notify_all();
+  released_.NotifyAll();
   width_ = w;
   height_ = h;
   pending_fmt_ = fmt;
   pending_ = true;
-  ready_.notify_one();
+  ready_.NotifyOne();
 }
 
 void LatestFramePresenter::WaitForBorrowed() {
   const u64 _t0 = NowNs();
-  std::unique_lock<std::mutex> lock(mutex_);
-  released_.wait(lock, [this] { return !pending_src_ || stopping_; });
+  base::UniqueLock<base::Mutex> lock(mutex_);
+  released_.Wait(lock, [this] { return !pending_src_ || stopping_; });
   g_ns_borrow_wait += NowNs() - _t0;
 }
 
 void LatestFramePresenter::Stop() {
-  std::thread thread;
+  base::UniquePointer<base::Thread> thread;
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    base::LockGuard<base::Mutex> lock(mutex_);
     stopping_ = true;
     pending_ = false;
     pending_src_ = nullptr;
-    thread = std::move(thread_);
+    thread = base::move(thread_);
   }
-  released_.notify_all();
-  if (thread.joinable())
+  released_.NotifyAll();
+  if (thread)
     gfx::requestPresentStop();
-  ready_.notify_one();
-  if (thread.joinable())
-    thread.join();
+  ready_.NotifyOne();
+  if (thread)
+    thread->Join();
 }
 
 }  // namespace gpu::render

@@ -6,19 +6,20 @@
 #include "../../vprx.h"
 #include "base/arch.h"
 
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
-#include <thread>
-#include <vector>
 
 #include <base/logging.h>
 
 #include "gfx/gfx.h"
 #include <cctype>
 #include <utl/options.h>
+#include <base/atomic.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
+#include <base/threading/thread.h>
+#include <base/time/time.h>
 
 namespace {
 DELTA_OPTION(const char *, kMemWatch, "DELTA_MEMWATCH", nullptr);
@@ -107,7 +108,7 @@ u64 g_readSeq = 0;
 void startMemWatch() {
   const char *e = kMemWatch;
   if (!e) return;
-  std::vector<u64> addrs;
+  base::Vector<u64> addrs;
   for (const char *p = e; *p;) {
     while (*p == ',' || *p == ' ') p++;
     char *end = nullptr;
@@ -117,12 +118,11 @@ void startMemWatch() {
     p = end;
   }
   if (addrs.empty()) return;
-  std::thread([addrs] {
-    const auto t0 = std::chrono::steady_clock::now();
-    std::vector<u64> last(addrs.size(), 0xdeadbeefdeadbeefull);
+  base::SpawnDetachedThread("libScePad", [addrs] {
+    const auto t0 = base::TimeTicks::Now();
+    base::Vector<u64> last(addrs.size(), 0xdeadbeefdeadbeefull);
     for (;;) {
-      double t = std::chrono::duration<double>(
-                     std::chrono::steady_clock::now() - t0).count();
+      double t = (base::TimeTicks::Now() - t0).InSecondsF();
       bool any = false;
       for (size_t i = 0; i < addrs.size(); i++) {
         u64 cur = *reinterpret_cast<volatile u64 *>(addrs[i]);
@@ -135,9 +135,9 @@ void startMemWatch() {
         }
       }
       (void)any;
-      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      base::SleepForMilliseconds(250);
     }
-  }).detach();
+  });
 }
 
 // DELTA_MEMPOKE=<spec>[,...], spec = addr:width:value[:delayMs]. addr is a literal
@@ -157,30 +157,30 @@ struct PokeSpec {
 void startMemPoke() {
   const char *e = kMemPoke;
   if (!e) return;
-  std::vector<PokeSpec> specs;
-  const std::string in(e);
+  base::Vector<PokeSpec> specs;
+  const base::String in(e);
   size_t i = 0;
   while (i < in.size()) {
     size_t comma = in.find(',', i);
-    std::string s = in.substr(i, comma == std::string::npos ? comma : comma - i);
-    i = comma == std::string::npos ? in.size() : comma + 1;
+    base::String s = in.substr(i, comma == base::String::npos ? comma : comma - i);
+    i = comma == base::String::npos ? in.size() : comma + 1;
     // split s on ':' but the addr field may itself contain no ':'
-    std::vector<std::string> f;
+    base::Vector<base::String> f;
     size_t j = 0;
     while (j <= s.size()) {
       size_t c = s.find(':', j);
-      f.push_back(s.substr(j, c == std::string::npos ? c : c - j));
-      if (c == std::string::npos) break;
+      f.push_back(s.substr(j, c == base::String::npos ? c : c - j));
+      if (c == base::String::npos) break;
       j = c + 1;
     }
     if (f.size() < 3) continue;
     PokeSpec p;
-    std::string addr = f[0];
+    base::String addr = f[0];
     if (!addr.empty() && addr[0] == '*') {
       p.indirect = true;
       size_t plus = addr.find('+');
       p.ptrAddr = std::strtoull(addr.c_str() + 1, nullptr, 0);
-      p.off = plus == std::string::npos ? 0 : std::strtoull(addr.c_str() + plus + 1, nullptr, 0);
+      p.off = plus == base::String::npos ? 0 : std::strtoull(addr.c_str() + plus + 1, nullptr, 0);
     } else {
       p.off = std::strtoull(addr.c_str(), nullptr, 0);
     }
@@ -191,12 +191,11 @@ void startMemPoke() {
       specs.push_back(p);
   }
   if (specs.empty()) return;
-  std::thread([specs] {
-    const auto t0 = std::chrono::steady_clock::now();
-    std::vector<bool> announced(specs.size(), false);
+  base::SpawnDetachedThread("libScePad", [specs] {
+    const auto t0 = base::TimeTicks::Now();
+    base::Vector<bool> announced(specs.size(), false);
     for (;;) {
-      double ms = std::chrono::duration<double, std::milli>(
-                      std::chrono::steady_clock::now() - t0).count();
+      double ms = (base::TimeTicks::Now() - t0).InSecondsF() * 1000.0;
       for (size_t k = 0; k < specs.size(); k++) {
         const auto &p = specs[k];
         if (ms < (double)p.delayMs) continue;
@@ -222,9 +221,9 @@ void startMemPoke() {
                     p.width);
         }
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      base::SleepForMilliseconds(200);
     }
-  }).detach();
+  });
 }
 
 // Auto-skip pulse for headless verification runs. NEVER pulse Circle with Cross:
@@ -235,8 +234,8 @@ void startMemPoke() {
 // (names = the constants below plus "none" for a gap), then hold neutral.
 u32 scriptButtons(bool &active) {
   struct Step { u32 mask; u64 reads; };
-  static const std::vector<Step> steps = [] {
-    std::vector<Step> out;
+  static const base::Vector<Step> steps = [] {
+    base::Vector<Step> out;
     const char *e = kPadScript;
     if (!e)
       return out;
@@ -247,14 +246,14 @@ u32 scriptButtons(bool &active) {
         {"options", kOptions}, {"l1", kL1},      {"r1", kR1},
         {"touchpad", kTouchPad},
     };
-    for (std::string spec(e), tok; !spec.empty();) {
+    for (base::String spec(e), tok; !spec.empty();) {
       const size_t comma = spec.find(',');
       tok = spec.substr(0, comma);
-      spec = comma == std::string::npos ? std::string() : spec.substr(comma + 1);
+      spec = comma == base::String::npos ? base::String() : spec.substr(comma + 1);
       const size_t colon = tok.find(':');
-      const std::string name = tok.substr(0, colon);
+      const base::String name = tok.substr(0, colon);
       const u64 reads =
-          colon == std::string::npos ? 30 : std::strtoull(tok.c_str() + colon + 1, nullptr, 10);
+          colon == base::String::npos ? 30 : std::strtoull(tok.c_str() + colon + 1, nullptr, 10);
       for (const auto &n : kNames)
         if (name == n.name) {
           out.push_back({n.mask, reads});
@@ -385,13 +384,13 @@ constexpr AxisName kAxisNames[] = {
     {"rsleft", -1, -1, 0, -1},  {"rsright", -1, -1, 255, -1},
 };
 
-const AxisName *axisByName(const std::string &name) {
+const AxisName *axisByName(const base::String &name) {
   for (const auto &a : kAxisNames)
     if (name == a.name) return &a;
   return nullptr;
 }
 
-u32 buttonMask(const std::string &name) {
+u32 buttonMask(const base::String &name) {
   for (const auto &b : kBtnNames)
     if (name == b.name) return b.mask;
   if (axisByName(name)) return 0;  // an axis, reported by the caller instead
@@ -399,8 +398,8 @@ u32 buttonMask(const std::string &name) {
   return 0;
 }
 
-std::string buttonNames(u32 buttons) {
-  std::string out;
+base::String buttonNames(u32 buttons) {
+  base::String out;
   for (const auto &b : kBtnNames)
     if (buttons & b.mask) { if (!out.empty()) out += '+'; out += b.name; }
   return out.empty() ? "none" : out;
@@ -417,14 +416,14 @@ struct ScriptStep {
   int lx, ly, rx, ry;  // -1: leave alone
 };
 
-std::vector<ScriptStep> parseScript(const char *s) {
-  std::vector<ScriptStep> steps;
-  const std::string in(s);
+base::Vector<ScriptStep> parseScript(const char *s) {
+  base::Vector<ScriptStep> steps;
+  const base::String in(s);
   // Two script formats share this env: time-keyed here, read-count-keyed in
   // scriptButtons(). Distinguish by what precedes the first colon (number vs
   // button name); feeding a count script here spammed unknown-button complaints.
   size_t colon = in.find(':');
-  if (colon == std::string::npos)
+  if (colon == base::String::npos)
     return steps;
   for (size_t k = 0; k < colon; k++)
     if (!std::isdigit(static_cast<unsigned char>(in[k])) && in[k] != '.' &&
@@ -433,22 +432,22 @@ std::vector<ScriptStep> parseScript(const char *s) {
   size_t i = 0;
   while (i < in.size()) {
     size_t comma = in.find(',', i);
-    std::string e = in.substr(i, comma == std::string::npos ? comma : comma - i);
-    i = comma == std::string::npos ? in.size() : comma + 1;
+    base::String e = in.substr(i, comma == base::String::npos ? comma : comma - i);
+    i = comma == base::String::npos ? in.size() : comma + 1;
     size_t c1 = e.find(':');
-    if (c1 == std::string::npos) continue;
+    if (c1 == base::String::npos) continue;
     double t = std::atof(e.substr(0, c1).c_str());
     size_t c2 = e.find(':', c1 + 1);
-    std::string btns =
-        e.substr(c1 + 1, c2 == std::string::npos ? c2 : c2 - c1 - 1);
-    double holdMs = c2 == std::string::npos ? 150.0 : std::atof(e.c_str() + c2 + 1);
+    base::String btns =
+        e.substr(c1 + 1, c2 == base::String::npos ? c2 : c2 - c1 - 1);
+    double holdMs = c2 == base::String::npos ? 150.0 : std::atof(e.c_str() + c2 + 1);
     u32 mask = 0;
     int lx = -1, ly = -1, rx = -1, ry = -1;
     size_t j = 0;
     while (j < btns.size()) {
       size_t plus = btns.find('+', j);
-      const std::string tok =
-          btns.substr(j, plus == std::string::npos ? plus : plus - j);
+      const base::String tok =
+          btns.substr(j, plus == base::String::npos ? plus : plus - j);
       if (const AxisName *a = axisByName(tok)) {
         if (a->lx >= 0) lx = a->lx;
         if (a->ly >= 0) ly = a->ly;
@@ -457,7 +456,7 @@ std::vector<ScriptStep> parseScript(const char *s) {
       } else {
         mask |= buttonMask(tok);
       }
-      j = plus == std::string::npos ? btns.size() : plus + 1;
+      j = plus == base::String::npos ? btns.size() : plus + 1;
     }
     // A stick-only step carries no button bits, so testing the mask alone would
     // silently drop every movement instruction.
@@ -528,12 +527,11 @@ void fillPadState(PadData *d) {
       if (dir==0) lx=255; else if (dir==1) lx=0; else if (dir==2) ly=0; else ly=255;
     }
   }
-  static const std::vector<ScriptStep> g_script =
-      kPadScript ? parseScript(kPadScript) : std::vector<ScriptStep>{};
-  static const auto g_scriptT0 = std::chrono::steady_clock::now();
+  static const base::Vector<ScriptStep> g_script =
+      kPadScript ? parseScript(kPadScript) : base::Vector<ScriptStep>{};
+  static const auto g_scriptT0 = base::TimeTicks::Now();
   if (!g_script.empty()) {
-    double t = std::chrono::duration<double>(
-                   std::chrono::steady_clock::now() - g_scriptT0).count();
+    double t = (base::TimeTicks::Now() - g_scriptT0).InSecondsF();
     for (const auto &st : g_script)
       if (t >= st.start && t < st.end) {
         buttons |= st.buttons;
@@ -707,7 +705,7 @@ int scePadReadState(int handle, void *data) {
   // Whether a title polls the pad at all, and how often. A title sitting on a
   // screen that renders nothing is either waiting for input or not asking for
   // it, and those want opposite fixes.
-  static std::atomic<u64> reads{0};
+  static base::Atomic<u64> reads{0};
   const u64 n = reads.fetch_add(1);
   if (n < 2 || (n % 3000) == 0)
     BASE_LOGI("pad", "readState #{}", (unsigned long long)n);

@@ -13,18 +13,20 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include <mutex>
 #include <sys/mman.h>
-#include <algorithm>
 #include <cstring>
-#include <unordered_map>
-#include <vector>
 
 #include "dma_dev.h"
 #include "kern/guest_vaspace.h"
 #include "kern/proc.h"
 #include "kern/lv2/sys_mem.h"  // allocLowGuest, mFlags
 #include <utl/options.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
@@ -44,15 +46,15 @@ namespace {
 // was in those pages, NOT zeroes. Our memfd backing reads zero at a fresh offset,
 // so every such remap silently wiped what was there (V8 lost a just-deserialized
 // read-only heap when it shrank the page holding it).
-std::mutex g_dmemVaLock;
-std::unordered_map<u64, size_t> g_dmemVaLen;
+base::Mutex g_dmemVaLock;
+base::HashMap<u64, size_t> g_dmemVaLen;
 }  // namespace
 
 void forgetDmemVa(u8 *ptr, size_t size) {
   if (!ptr || !size)
     return;
   const u64 lo = reinterpret_cast<u64>(ptr), hi = lo + size;
-  std::lock_guard<std::mutex> lk(g_dmemVaLock);
+  base::LockGuard<base::Mutex> lk(g_dmemVaLock);
   for (auto it = g_dmemVaLen.begin(); it != g_dmemVaLen.end();) {
     if (it->first >= lo && it->first < hi)
       it = g_dmemVaLen.erase(it);
@@ -72,18 +74,18 @@ u8 *dmaDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
   // A fixed map onto the exact base of an existing region is the guest re-pointing its
   // own region: carry the contents over, like reusing the same physical pages. A map
   // at a DIFFERENT base is a genuine new allocation and must read fresh.
-  std::vector<u8> carry;
+  base::Vector<u8> carry;
   const bool systemBase =
       !fixed && reinterpret_cast<uintptr_t>(va) == 0xfe0000000ull;
   if (va && (fixed || systemBase) && !kNoCarry) {
-    std::lock_guard<std::mutex> lk(g_dmemVaLock);
+    base::LockGuard<base::Mutex> lk(g_dmemVaLock);
     auto it = g_dmemVaLen.find(reinterpret_cast<u64>(va));
     // Carry as much as both mappings have: the system block is mapped twice,
     // 64 KiB by libSceGnmDriver and then 2 MiB by libSceAgcDriver, and the
     // second map must not take back the register tables the first one just
     // wrote at base+0xf000.
     if (it != g_dmemVaLen.end())
-      carry.assign(va, va + std::min<size_t>(len, it->second));
+      carry.assign(va, va + base::Min<size_t>(len, it->second));
   }
   void *p = MAP_FAILED;
   // libSceAgcDriver maps a 2 MiB system block with a hint at 0xfe0000000 and treats
@@ -108,10 +110,10 @@ u8 *dmaDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
                                  s_gnmTookBase && !s_agcTookBase;
   if (agcSystemFollowUp) {
     va = reinterpret_cast<u8 *>(kAgcSystemBase);
-    std::lock_guard<std::mutex> lk(g_dmemVaLock);
+    base::LockGuard<base::Mutex> lk(g_dmemVaLock);
     auto it = g_dmemVaLen.find(kAgcSystemBase);
     if (it != g_dmemVaLen.end() && !kNoCarry)
-      carry.assign(va, va + std::min<size_t>(len, it->second));
+      carry.assign(va, va + base::Min<size_t>(len, it->second));
   }
   const bool otherHintIntoAgcBlock =
       !fixed && !agcSystemBlock && hint < kAgcSystemBase + kAgcSystemSize &&
@@ -150,7 +152,7 @@ u8 *dmaDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
   if (!carry.empty())
     std::memcpy(p, carry.data(), carry.size());
   {
-    std::lock_guard<std::mutex> lk(g_dmemVaLock);
+    base::LockGuard<base::Mutex> lk(g_dmemVaLock);
     g_dmemVaLen[reinterpret_cast<u64>(p)] = len;
   }
   if (kDmemTrace)

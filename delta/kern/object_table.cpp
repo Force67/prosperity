@@ -2,8 +2,10 @@
 #include <base.h>
 #include "base/arch.h"
 #include "object_table.h"
-#include <algorithm>
 #include <logger/logger.h>
+#include <base/algorithm.h>
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
 
 namespace krnl {
 objectTable::objectTable() {}
@@ -11,7 +13,7 @@ objectTable::objectTable() {}
 objectTable::~objectTable() { reset(); }
 
 void objectTable::reset() {
-  std::lock_guard lock(omutex);
+  base::LockGuard lock(omutex);
 
   // Release all objects.
   for (u32 n = 0; n < tableCap; n++) {
@@ -30,7 +32,7 @@ void objectTable::reset() {
 }
 
 void objectTable::purge() {
-  std::lock_guard lock(omutex);
+  base::LockGuard lock(omutex);
 
   for (u32 slot = 0; slot < tableCap; slot++) {
     auto &entry = table[slot];
@@ -81,7 +83,7 @@ bool objectTable::findSlot(u32 &out) {
   }
 
   // Table out of slots, expand.
-  u32 new_table_capacity = std::max(16 * 1024u, tableCap * 2);
+  u32 new_table_capacity = base::Max(16 * 1024u, tableCap * 2);
   if (!resize(new_table_capacity)) {
     LOG_ERROR("unable to resize handle table");
     return false;
@@ -104,7 +106,7 @@ objectTable::entry *objectTable::findEntry(u32 handle) {
 }
 
 bool objectTable::keep(u32 handle) {
-  std::lock_guard lock(omutex);
+  base::LockGuard lock(omutex);
 
   auto *e = findEntry(handle);
   if (e) {
@@ -116,7 +118,7 @@ bool objectTable::keep(u32 handle) {
 }
 
 bool objectTable::add(kObject *obj, u32 &handleOut) {
-  std::lock_guard lock(omutex);
+  base::LockGuard lock(omutex);
 
   u32 slot = 0, handle = 0;
 
@@ -143,7 +145,7 @@ bool objectTable::add(kObject *obj, u32 &handleOut) {
 }
 
 bool objectTable::remove(u32 handle) {
-  std::lock_guard lock(omutex);
+  base::LockGuard lock(omutex);
 
   auto *e = findEntry(handle);
   if (e && e->obj) {
@@ -153,7 +155,7 @@ bool objectTable::remove(u32 handle) {
 
     auto &handles = object->handles();
 
-    auto it = std::find(handles.begin(), handles.end(), handle);
+    auto it = base::Find(handles.begin(), handles.end(), handle);
     if (it != handles.end())
       handles.erase(it);
 
@@ -165,7 +167,7 @@ bool objectTable::remove(u32 handle) {
 }
 
 bool objectTable::release(u32 handle) {
-  std::lock_guard lock(omutex);
+  base::LockGuard lock(omutex);
 
   auto *e = findEntry(handle);
   if (!e) {
@@ -179,7 +181,7 @@ bool objectTable::release(u32 handle) {
 }
 
 kObject *objectTable::get(u32 handle) {
-  std::lock_guard lock(omutex);
+  base::LockGuard lock(omutex);
 
   // Lower 2 bits are ignored.
   u32 slot = handle >> 2;

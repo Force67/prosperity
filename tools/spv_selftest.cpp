@@ -14,10 +14,11 @@
 #include <cstdio>
 #include <spirv-tools/libspirv.h>
 #include <spirv/unified1/GLSL.std.450.h>
+#include <base/containers/vector.h>
 
 using namespace gpu::gcn::spirv;
 
-static bool validate(const std::vector<u32> &spv, const char *tag) {
+static bool validate(const base::Vector<u32> &spv, const char *tag) {
   spv_context ctx = spvContextCreate(SPV_ENV_VULKAN_1_1);
   spv_diagnostic diag = nullptr;
   spv_const_binary_t bin{spv.data(), spv.size()};
@@ -30,7 +31,7 @@ static bool validate(const std::vector<u32> &spv, const char *tag) {
   return ok;
 }
 
-static std::vector<u32> buildVs() {
+static base::Vector<u32> buildVs() {
   Module m;
   Id tVoid = m.typeVoid();
   Id tFn = m.typeFunction(tVoid);
@@ -49,7 +50,7 @@ static std::vector<u32> buildVs() {
   return m.assemble();
 }
 
-static std::vector<u32> buildFs() {
+static base::Vector<u32> buildFs() {
   Module m;
   Id tVoid = m.typeVoid();
   Id tFn = m.typeFunction(tVoid);
@@ -72,7 +73,7 @@ static std::vector<u32> buildFs() {
 // A register-VM-style VS: a Private uint[8] "vgpr" file, written then read back,
 // position computed via float<->uint bitcasts. Exercises exactly what the GCN
 // translator emits; legalization must promote vgpr[] to SSA.
-static std::vector<u32> buildRegVmVs() {
+static base::Vector<u32> buildRegVmVs() {
   Module m;
   Id tVoid = m.typeVoid(), tFn = m.typeFunction(tVoid);
   Id tU = m.typeInt(32, false), tF = m.typeFloat(32), tV4 = m.typeVec(tF, 4);

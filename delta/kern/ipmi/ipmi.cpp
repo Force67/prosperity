@@ -4,16 +4,10 @@
  * The IPMI manager: client table + op dispatch. See ipmi.h for the ABI.
  */
 
-#include <atomic>
 #include "base/arch.h"
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <unordered_map>
 
 #include <base.h>
 #include <base/logging.h>
@@ -25,6 +19,13 @@
 #include "kern/crash.h"
 #include "services.h"
 #include <utl/options.h>
+#include <base/threading/thread.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/memory/move.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(u32, kIpmiDump, "DELTA_IPMI_DUMP", 0);
@@ -76,21 +77,21 @@ bool readable(const void *p, u64 n) {
 // ---------------------------------------------------------------- clients
 
 struct Client {
-  std::string service;
+  base::String service;
   Service *impl = nullptr;
 };
 
-std::mutex g_clientsMtx;
-std::unordered_map<u32, Client> g_clients;
-std::atomic<u32> g_nextKid{1};
+base::Mutex g_clientsMtx;
+base::HashMap<u32, Client> g_clients;
+base::Atomic<u32> g_nextKid{1};
 
 // Previous manager op per client. A repeated consecutive async-reply poll is a
 // client waiting on something (libSceIpmi runs event-flag waits as a 1168 poll
 // loop), not collecting an invoke's reply; see kPollAsyncReply.
-std::unordered_map<u32, u32> g_lastOp;
+base::HashMap<u32, u32> g_lastOp;
 
 bool isRepeatPoll(u32 op, u32 kid) {
-  std::lock_guard<std::mutex> lk(g_clientsMtx);
+  base::LockGuard<base::Mutex> lk(g_clientsMtx);
   u32 &last = g_lastOp[kid];
   const bool repeat = op == kPollAsyncReply && last == kPollAsyncReply;
   last = op;
@@ -109,7 +110,7 @@ Service *findService(const char *name) {
 }
 
 Client lookupClient(u32 kid) {
-  std::lock_guard<std::mutex> lk(g_clientsMtx);
+  base::LockGuard<base::Mutex> lk(g_clientsMtx);
   auto it = g_clients.find(kid);
   return it == g_clients.end() ? Client{} : it->second;
 }
@@ -141,9 +142,9 @@ const char *payloadServiceName(const void *in, u64 insize) {
 
 // ---------------------------------------------------------------- tracing
 
-std::atomic<u64> g_opHist[2048];
-std::atomic<u64> g_methodHist[64];
-std::atomic<u32> g_methodId[64];
+base::Atomic<u64> g_opHist[2048];
+base::Atomic<u64> g_methodHist[64];
+base::Atomic<u32> g_methodId[64];
 
 bool traceOn() {
   return kIpmiTrace;
@@ -156,37 +157,37 @@ void histogram(u32 op, const InvokeRequest *req) {
   if (!kIpmiHist)
     return;
   if (op < 2048)
-    g_opHist[op].fetch_add(1, std::memory_order_relaxed);
+    g_opHist[op].fetch_add(1, base::memory_order_relaxed);
   if (req) {
     const u32 m = req->methodId;
     for (u32 i = 0; i < 64; i++) {
-      u32 want = g_methodId[i].load(std::memory_order_relaxed);
+      u32 want = g_methodId[i].load(base::memory_order_relaxed);
       if (want == m) {
-        g_methodHist[i].fetch_add(1, std::memory_order_relaxed);
+        g_methodHist[i].fetch_add(1, base::memory_order_relaxed);
         break;
       }
       if (!want) {
         u32 expect = 0;
         if (g_methodId[i].compare_exchange_strong(expect, m))
-          g_methodHist[i].fetch_add(1, std::memory_order_relaxed);
+          g_methodHist[i].fetch_add(1, base::memory_order_relaxed);
         break;
       }
     }
   }
   static const bool started = [] {
-    std::thread([] {
+    base::SpawnDetachedThread("ipmi", [] {
       for (;;) {
-        std::this_thread::sleep_for(std::chrono::seconds(15));
+        base::SleepForMilliseconds((15) * 1000);
         for (u32 i = 0; i < 2048; i++)
-          if (u64 c = g_opHist[i].load(std::memory_order_relaxed))
+          if (u64 c = g_opHist[i].load(base::memory_order_relaxed))
             BASE_LOGI("ipmihist", "op={} {}", i, (unsigned long long)c);
         for (u32 i = 0; i < 64; i++)
-          if (u64 c = g_methodHist[i].load(std::memory_order_relaxed))
+          if (u64 c = g_methodHist[i].load(base::memory_order_relaxed))
             BASE_LOGI("ipmihist", "method={:#x} {}",
-                      g_methodId[i].load(std::memory_order_relaxed),
+                      g_methodId[i].load(base::memory_order_relaxed),
                       (unsigned long long)c);
       }
-    }).detach();
+    });
     return true;
   }();
   (void)started;
@@ -208,7 +209,7 @@ void traceInvoke(u32 kid, const char *svc, const InvokeRequest *req,
 void dumpInvoke(u32 kid, const char *svc, const InvokeRequest *req) {
   if (!kIpmiDump || req->methodId != kIpmiDump)
     return;
-  static std::atomic<int> seen{0};
+  static base::Atomic<int> seen{0};
   if (seen.fetch_add(1) >= 2)
     return;
 
@@ -261,7 +262,7 @@ void dumpManagerOp(u32 op, u32 kid, void *out, void *in,
                    u64 insize) {
   if (!kIpmiOpDump || op != kIpmiOpDump)
     return;
-  static std::atomic<int> seen{0};
+  static base::Atomic<int> seen{0};
   if (seen.fetch_add(1) >= 3)
     return;
 
@@ -418,15 +419,15 @@ int managerCall(u32 op, u32 kid, void *out, void *in,
       BASE_LOGI("ipmi", "create kid={} service=\"{}\"{}", newKid,
                 c.service.c_str(), c.impl ? "" : " (no handler)");
     {
-      std::lock_guard<std::mutex> lk(g_clientsMtx);
-      g_clients[newKid] = std::move(c);
+      base::LockGuard<base::Mutex> lk(g_clientsMtx);
+      g_clients[newKid] = base::move(c);
     }
     setResult(newKid);
     return 0;
   }
 
   case kDestroyClient: {
-    std::lock_guard<std::mutex> lk(g_clientsMtx);
+    base::LockGuard<base::Mutex> lk(g_clientsMtx);
     g_clients.erase(kid);
     setResult(0);
     return 0;
@@ -437,7 +438,7 @@ int managerCall(u32 op, u32 kid, void *out, void *in,
     // recognisable name still gets bound here.
     const char *svc = in ? payloadServiceName(in, insize) : nullptr;
     if (svc) {
-      std::lock_guard<std::mutex> lk(g_clientsMtx);
+      base::LockGuard<base::Mutex> lk(g_clientsMtx);
       Client &c = g_clients[kid];
       if (c.service.empty()) {
         c.service = svc;
@@ -473,7 +474,7 @@ int managerCall(u32 op, u32 kid, void *out, void *in,
     // (the resource-arbitrator worker measured ~150k polls/s otherwise).
     dumpManagerOp(op, kid, out, in, insize);
     if (repeatPoll)
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      base::SleepForMilliseconds(2);
     if (in && insize >= 40) {
       auto *b = static_cast<u8 *>(in);
       u32 status = 0;

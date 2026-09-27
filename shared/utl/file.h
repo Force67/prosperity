@@ -8,14 +8,16 @@
  * in the root of the source tree.
  */
 
-#include <algorithm>
 #include "base/arch.h"
-#include <memory>
-#include <type_traits>
 
 #include <base/containers/vector.h>
 #include <base/memory/unique_pointer.h>
 #include <base/strings/xstring.h>
+#include <base/algorithm.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/shared_pointer.h>
+#include <base/meta/traits.h>
 
 namespace utl {
 // Use void* uniformly: on Windows we stash the HANDLE, on POSIX we stash
@@ -64,9 +66,9 @@ public:
       file = {};
   }
 
-  inline void Reset(base::UniquePointer<fileBase> &&ptr) { file = std::move(ptr); }
+  inline void Reset(base::UniquePointer<fileBase> &&ptr) { file = base::move(ptr); }
 
-  inline base::UniquePointer<fileBase> GetBase() { return std::move(file); }
+  inline base::UniquePointer<fileBase> GetBase() { return base::move(file); }
 
   inline u64 Read(void *ptr, size_t size) { return file->Read(ptr, size); }
   inline u64 Write(const void *ptr, size_t size) {
@@ -87,36 +89,36 @@ public:
 
   // POD to base::Vector
   template <typename T>
-  std::enable_if_t<std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>, bool>
-  Read(base::Vector<T> &vec, std::size_t size) {
+  base::enable_if_t<base::is_trivially_copyable_v<T> && !base::is_pointer_v<T>, bool>
+  Read(base::Vector<T> &vec, mem_size size) {
     vec.resize(size);
     return this->Read(vec.data(), sizeof(T) * size) == sizeof(T) * size;
   }
 
   // Read POD vector, size set via resize() externally.
   template <typename T>
-  std::enable_if_t<std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>, bool>
+  base::enable_if_t<base::is_trivially_copyable_v<T> && !base::is_pointer_v<T>, bool>
   Read(base::Vector<T> &vec) {
     return this->Read(vec.data(), sizeof(T) * vec.size()) ==
            sizeof(T) * vec.size();
   }
 
   template <typename T>
-  std::enable_if_t<std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>, bool>
+  base::enable_if_t<base::is_trivially_copyable_v<T> && !base::is_pointer_v<T>, bool>
   Read(T &data) {
     return Read(&data, sizeof(T)) == sizeof(T);
   }
 
   template <typename T>
-  std::enable_if_t<std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>,
+  base::enable_if_t<base::is_trivially_copyable_v<T> && !base::is_pointer_v<T>,
                    const File &>
   Write(const T &data) {
-    Write(std::addressof(data), sizeof(T));
+    Write(base::AddressOf(data), sizeof(T));
     return *this;
   }
 
   template <typename T>
-  std::enable_if_t<std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>,
+  base::enable_if_t<base::is_trivially_copyable_v<T> && !base::is_pointer_v<T>,
                    const File &>
   Write(const base::Vector<T> &vec) {
     Write(vec.data(), vec.size() * sizeof(T));
@@ -124,15 +126,15 @@ public:
   }
 };
 
-using FileHandle = std::shared_ptr<File>;
+using FileHandle = base::SharedPointer<File>;
 
 template <typename T> struct ContainerStream final : fileBase {
-  using value_type = typename std::remove_reference_t<T>::value_type;
+  using value_type = typename base::remove_reference_t<T>::value_type;
 
   T obj;
   u64 pos;
 
-  ContainerStream(T &&obj) : obj(std::forward<T>(obj)), pos(0) {}
+  ContainerStream(T &&obj) : obj(base::forward<T>(obj)), pos(0) {}
 
   ~ContainerStream() override {}
 
@@ -140,8 +142,8 @@ template <typename T> struct ContainerStream final : fileBase {
     const u64 end = obj.size();
 
     if (pos < end) {
-      if (const u64 max = std::min<u64>(size, end - pos)) {
-        std::copy(obj.begin() + pos, obj.begin() + pos + max,
+      if (const u64 max = base::Min<u64>(size, end - pos)) {
+        base::Copy(obj.begin() + pos, obj.begin() + pos + max,
                   static_cast<value_type *>(buffer));
         pos = pos + max;
         return max;
@@ -161,8 +163,8 @@ template <typename T> struct ContainerStream final : fileBase {
 
     const auto src = static_cast<const value_type *>(buffer);
 
-    const u64 overlap = std::min<u64>(obj.size() - pos, size);
-    std::copy(src, src + overlap, obj.begin() + pos);
+    const u64 overlap = base::Min<u64>(obj.size() - pos, size);
+    base::Copy(src, src + overlap, obj.begin() + pos);
 
     obj.insert(obj.end(), src + overlap, src + size);
     pos += size;
@@ -194,7 +196,7 @@ template <typename T> struct ContainerStream final : fileBase {
 };
 
 template <typename T> File make_stream(T &&container = T{}) {
-  File result(base::MakeUnique<ContainerStream<T>>(std::forward<T>(container)));
+  File result(base::MakeUnique<ContainerStream<T>>(base::forward<T>(container)));
   return result;
 }
 }

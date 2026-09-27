@@ -12,18 +12,23 @@
 #include "archive_object.h"
 #include "archive_backend.h"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <list>
-#include <mutex>
 #include <sys/stat.h>
-#include <unordered_map>
 
 #include <base/environment_variables.h>
 #include <base/logging.h>
 #include <utl/file.h>
 #include <utl/options.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(int, kCacheMb, "DELTA_ARCHIVE_CACHE_MB", 512,
@@ -51,11 +56,11 @@ u64 hashPath(const char *s) {
   return h;
 }
 
-std::string indexCachePath(const char *archivePath, u64 archiveSize) {
+base::String indexCachePath(const char *archivePath, u64 archiveSize) {
   base::StringU8 home;
   base::GetEnvironmentVariable(u8"HOME", home);
-  std::string dir =
-      std::string(home.empty() ? "." : (const char *)home.c_str()) +
+  base::String dir =
+      base::String(home.empty() ? "." : (const char *)home.c_str()) +
       "/.prosperity/archive-index";
   char name[64];
   std::snprintf(name, sizeof(name), "/%016llx-%016llx.idx",
@@ -64,11 +69,11 @@ std::string indexCachePath(const char *archivePath, u64 archiveSize) {
   return dir + name;
 }
 
-void put64(std::vector<u8> &v, u64 x) {
+void put64(base::Vector<u8> &v, u64 x) {
   for (int i = 0; i < 8; i++)
     v.push_back(static_cast<u8>(x >> (i * 8)));
 }
-void put32(std::vector<u8> &v, u32 x) {
+void put32(base::Vector<u8> &v, u32 x) {
   for (int i = 0; i < 4; i++)
     v.push_back(static_cast<u8>(x >> (i * 8)));
 }
@@ -98,26 +103,26 @@ struct Reader {
     p += 4;
     return x;
   }
-  std::string str(u32 n) {
+  base::String str(u32 n) {
     if (p + n > end) {
       ok = false;
       return {};
     }
-    std::string s(reinterpret_cast<const char *>(p), n);
+    base::String s(reinterpret_cast<const char *>(p), n);
     p += n;
     return s;
   }
 };
 
-bool loadIndexCache(const std::string &path, const char *backend,
-                    std::vector<ArchiveEntry> &out) {
+bool loadIndexCache(const base::String &path, const char *backend,
+                    base::Vector<ArchiveEntry> &out) {
   utl::File f(base::String(path.c_str()), utl::fileMode::read);
   if (!f.IsOpen())
     return false;
   const u64 size = f.GetSize();
   if (size < sizeof(kIndexMagic))
     return false;
-  std::vector<u8> buf(static_cast<size_t>(size));
+  base::Vector<u8> buf(static_cast<size_t>(size));
   if (f.Read(buf.data(), buf.size()) != size)
     return false;
 
@@ -146,13 +151,13 @@ bool loadIndexCache(const std::string &path, const char *backend,
     e.crc = r.u32v();
     if (!r.ok)
       return false;
-    out.push_back(std::move(e));
+    out.push_back(base::move(e));
   }
   return true;
 }
 
 // mkdir -p for the index cache directory.
-void makeDirs(std::string p) {
+void makeDirs(base::String p) {
   for (size_t i = 1; i < p.size(); i++) {
     if (p[i] == '/') {
       p[i] = 0;
@@ -163,13 +168,13 @@ void makeDirs(std::string p) {
   ::mkdir(p.c_str(), 0755);
 }
 
-void saveIndexCache(const std::string &path, const char *backend,
-                    const std::vector<ArchiveEntry> &entries) {
+void saveIndexCache(const base::String &path, const char *backend,
+                    const base::Vector<ArchiveEntry> &entries) {
   const size_t slash = path.find_last_of('/');
-  if (slash != std::string::npos)
+  if (slash != base::String::npos)
     makeDirs(path.substr(0, slash));
 
-  std::vector<u8> buf;
+  base::Vector<u8> buf;
   buf.reserve(entries.size() * 96);
   buf.insert(buf.end(), kIndexMagic, kIndexMagic + sizeof(kIndexMagic));
   const u32 nameLen = static_cast<u32>(std::strlen(backend));
@@ -198,7 +203,7 @@ void saveIndexCache(const std::string &path, const char *backend,
 // The console's /app0 is case-insensitive and titles rely on it: Demon's Souls dumps
 // all-lowercase but opens mixed-case paths off its own command line, so exact-match
 // loses files that are plainly there. Keys fold; the entry keeps its real name.
-std::string foldCase(std::string s) {
+base::String foldCase(base::String s) {
   for (char &c : s)
     if (c >= 'A' && c <= 'Z')
       c += 'a' - 'A';
@@ -209,20 +214,20 @@ std::string foldCase(std::string s) {
 // paths all under "PPSA01342-app/". Dumps are archived with the game wrapped in
 // one (sometimes two) such directories, and the guest expects /app0 to be the
 // game root, not the wrapper.
-size_t commonWrapperPrefix(const std::vector<ArchiveEntry> &entries) {
+size_t commonWrapperPrefix(const base::Vector<ArchiveEntry> &entries) {
   if (entries.empty())
     return 0;
   size_t prefix = 0;
   for (int depth = 0; depth < 4; depth++) {
-    const std::string &first = entries[0].path;
+    const base::String &first = entries[0].path;
     const size_t slash = first.find('/', prefix);
-    if (slash == std::string::npos)
+    if (slash == base::String::npos)
       break;
     const size_t next = slash + 1;
     bool shared = true;
     for (const auto &e : entries) {
       if (e.path.size() <= next ||
-          e.path.compare(0, next, first, 0, next) != 0) {
+          std::memcmp(e.path.data(), first.data(), next) != 0) {
         shared = false;
         break;
       }
@@ -237,10 +242,10 @@ size_t commonWrapperPrefix(const std::vector<ArchiveEntry> &entries) {
 } // namespace
 
 struct ArchiveImpl {
-  std::unique_ptr<ArchiveBackend> backend;
-  std::vector<ArchiveEntry> entries;
-  std::unordered_map<std::string, ArchiveFilesystem::Node> files; // case-folded
-  std::vector<std::string> guestPaths; // as stored, for listings
+  base::UniquePointer<ArchiveBackend> backend;
+  base::Vector<ArchiveEntry> entries;
+  base::HashMap<base::String, ArchiveFilesystem::Node> files; // case-folded
+  base::Vector<base::String> guestPaths; // as stored, for listings
   bool ok = false;
 
   // Whole decompressed entries, most recently used first. Small files are read
@@ -248,11 +253,10 @@ struct ArchiveImpl {
   // re-inflating them each time is what makes a container mount feel slow.
   struct Slot {
     u32 index;
-    std::vector<u8> data;
+    base::Vector<u8> data;
   };
-  std::mutex lock;
-  std::list<Slot> lru;
-  std::unordered_map<u32, std::list<Slot>::iterator> lruIndex;
+  base::Mutex lock;
+  base::Vector<Slot> lru;  // at most a few hundred: a scan beats an index
   u64 lruBytes = 0;
 
   explicit ArchiveImpl(const base::String &path) {
@@ -267,7 +271,7 @@ struct ArchiveImpl {
     utl::File probe(path, utl::fileMode::read);
     const u64 archiveSize = probe.IsOpen() ? probe.GetSize() : 0;
     probe.Close();
-    const std::string cache = indexCachePath(path.c_str(), archiveSize);
+    const base::String cache = indexCachePath(path.c_str(), archiveSize);
 
     bool fromCache = false;
     if (!kNoIndexCache && loadIndexCache(cache, backend->name(), entries)) {
@@ -284,17 +288,16 @@ struct ArchiveImpl {
       saveIndexCache(cache, backend->name(), entries);
 
     const size_t strip = commonWrapperPrefix(entries);
-    files.reserve(entries.size() * 2);
     guestPaths.reserve(entries.size());
     for (u32 i = 0; i < entries.size(); i++) {
-      std::string path = "/" + entries[i].path.substr(strip);
+      base::String path = "/" + entries[i].path.substr(strip);
       files.emplace(foldCase(path), ArchiveFilesystem::Node{entries[i].size, i});
-      guestPaths.push_back(std::move(path));
+      guestPaths.push_back(base::move(path));
     }
     ok = true;
 
-    const std::string root =
-        strip ? ", root " + entries[0].path.substr(0, strip) : std::string();
+    const base::String root =
+        strip ? ", root " + entries[0].path.substr(0, strip) : base::String();
     BASE_LOGI("archive", "{} ({}): {} files{}{}", path.c_str(),
               backend->name(), entries.size(),
               fromCache ? ", index cached" : "", root.c_str());
@@ -305,40 +308,40 @@ struct ArchiveImpl {
       return -1;
     if (static_cast<u64>(off) >= node.size)
       return 0;
-    len = std::min<i64>(len, static_cast<i64>(node.size - off));
+    len = base::Min<i64>(len, static_cast<i64>(node.size - off));
     if (len == 0)
       return 0;
 
-    const u64 smallMax = u64(std::max(0, (int)kSmallMb)) << 20;
+    const u64 smallMax = u64(base::Max(0, (int)kSmallMb)) << 20;
     if (node.size > smallMax)
       return backend->extractRange(entries[node.index], buf, off, len);
 
-    std::lock_guard<std::mutex> guard(lock);
-    auto it = lruIndex.find(node.index);
-    if (it == lruIndex.end()) {
-      std::vector<u8> data(static_cast<size_t>(node.size));
+    base::LockGuard<base::Mutex> guard(lock);
+    Slot *hit = lru.FindIf([&](const Slot &s) { return s.index == node.index; });
+    if (!hit) {
+      base::Vector<u8> data(static_cast<size_t>(node.size));
       const i64 got = backend->extractRange(entries[node.index], data.data(), 0,
                                             static_cast<i64>(node.size));
       if (got < 0)
         return -1;
       data.resize(static_cast<size_t>(got));
-      lru.push_front(Slot{node.index, std::move(data)});
-      lruIndex[node.index] = lru.begin();
-      lruBytes += lru.front().data.size();
+      lruBytes += data.size();
+      lru.insert(lru.begin(), Slot{node.index, base::move(data)});
       trim();
-      it = lruIndex.find(node.index);
-      if (it == lruIndex.end()) {
+      if (lru.empty() || lru.front().index != node.index) {
         // The entry alone blew the budget, so it was trimmed straight back out.
         return backend->extractRange(entries[node.index], buf, off, len);
       }
-    } else if (it->second != lru.begin()) {
-      lru.splice(lru.begin(), lru, it->second);
+    } else if (hit != lru.begin()) {
+      Slot slot = base::move(*hit);
+      lru.erase(hit);
+      lru.insert(lru.begin(), base::move(slot));
     }
 
-    const std::vector<u8> &data = lru.front().data;
+    const base::Vector<u8> &data = lru.front().data;
     if (static_cast<u64>(off) >= data.size())
       return 0;
-    len = std::min<i64>(len, static_cast<i64>(data.size() - off));
+    len = base::Min<i64>(len, static_cast<i64>(data.size() - off));
     std::memcpy(buf, data.data() + off, static_cast<size_t>(len));
     return len;
   }
@@ -346,21 +349,21 @@ struct ArchiveImpl {
   // Directory path (folded, with trailing '/') -> immediate children. Built once
   // on the first listing: scanning all 223k paths per readdir made directory
   // enumeration quadratic.
-  std::unordered_map<std::string, std::vector<ArchiveFilesystem::Child>> dirs;
+  base::HashMap<base::String, base::Vector<ArchiveFilesystem::Child>> dirs;
   bool dirsBuilt = false;
 
   void buildDirs() {
     if (dirsBuilt)
       return;
     dirsBuilt = true;
-    std::unordered_map<std::string, std::unordered_map<std::string, bool>> seen;
+    base::HashMap<base::String, base::HashMap<base::String, bool>> seen;
     for (const auto &p : guestPaths) {
       // Register the file under its parent, and every ancestor under its own.
       size_t pos = 0;
       while (true) {
         const size_t slash = p.find('/', pos + 1);
-        const std::string parent = foldCase(p.substr(0, pos + 1));
-        if (slash == std::string::npos) {
+        const base::String parent = foldCase(p.substr(0, pos + 1));
+        if (slash == base::String::npos) {
           seen[parent].emplace(p.substr(pos + 1), false);
           break;
         }
@@ -377,18 +380,16 @@ struct ArchiveImpl {
   }
 
   void trim() {
-    const u64 budget = u64(std::max(0, (int)kCacheMb)) << 20;
+    const u64 budget = u64(base::Max(0, (int)kCacheMb)) << 20;
     while (lruBytes > budget && !lru.empty()) {
-      auto &back = lru.back();
-      lruBytes -= back.data.size();
-      lruIndex.erase(back.index);
+      lruBytes -= lru.back().data.size();
       lru.pop_back();
     }
   }
 };
 
 ArchiveFilesystem::ArchiveFilesystem(const base::String &archivePath)
-    : impl_(std::make_unique<ArchiveImpl>(archivePath)) {}
+    : impl_(base::MakeUnique<ArchiveImpl>(archivePath)) {}
 ArchiveFilesystem::~ArchiveFilesystem() = default;
 
 bool ArchiveFilesystem::valid() const { return impl_ && impl_->ok; }
@@ -404,17 +405,17 @@ i64 ArchiveFilesystem::read(const Node &node, void *buf, i64 off, i64 len) {
   return impl_ && impl_->ok ? impl_->read(node, buf, off, len) : -1;
 }
 
-bool ArchiveFilesystem::list(const char *rel, std::vector<Child> &out) {
+bool ArchiveFilesystem::list(const char *rel, base::Vector<Child> &out) {
   if (!impl_ || !impl_->ok)
     return false;
-  std::string prefix(rel ? rel : "");
+  base::String prefix(rel ? rel : "");
   while (!prefix.empty() && prefix.back() == '/')
     prefix.pop_back();
   prefix += "/";
   if (prefix[0] != '/')
-    prefix.insert(prefix.begin(), '/');
+    prefix.insert(0, 1, '/');
 
-  std::lock_guard<std::mutex> guard(impl_->lock);
+  base::LockGuard<base::Mutex> guard(impl_->lock);
   impl_->buildDirs();
   auto it = impl_->dirs.find(foldCase(prefix));
   if (it == impl_->dirs.end())
@@ -423,7 +424,7 @@ bool ArchiveFilesystem::list(const char *rel, std::vector<Child> &out) {
   return !out.empty();
 }
 
-void ArchiveFilesystem::paths(std::vector<std::string> &out) const {
+void ArchiveFilesystem::paths(base::Vector<base::String> &out) const {
   if (!impl_)
     return;
   out.insert(out.end(), impl_->guestPaths.begin(), impl_->guestPaths.end());

@@ -8,11 +8,14 @@
 #include "base/arch.h"
 #include "gpu/guest_memory.h"
 
-#include <algorithm>
-#include <atomic>
 #include <cstdio>
 #include <cstring>
-#include <unordered_map>
+#include <base/algorithm.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/memory/shared_pointer.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::gcn {
 namespace {
@@ -191,15 +194,15 @@ u64 HashCode(const u32* code, u32 dwords) {
 }  // namespace
 
 namespace {
-std::atomic<IsaMode> g_default_isa_mode{IsaMode::kBase};
+base::Atomic<IsaMode> g_default_isa_mode{IsaMode::kBase};
 }
 
 IsaMode DefaultIsaMode() {
-  return g_default_isa_mode.load(std::memory_order_acquire);
+  return g_default_isa_mode.load(base::memory_order_acquire);
 }
 
 void SetDefaultIsaMode(IsaMode mode) {
-  g_default_isa_mode.store(mode, std::memory_order_release);
+  g_default_isa_mode.store(mode, base::memory_order_release);
   NextProgramCacheGeneration();
 }
 
@@ -310,8 +313,8 @@ Program DecodeShader(const u32* code, u32 max_dwords, IsaMode mode) {
   return Decode(code, max_dwords, /*stop_at_endpgm=*/true, mode);
 }
 
-std::vector<u8> ComputeReachability(const Program& program) {
-  std::vector<u8> reachable(program.size(), 0);
+base::Vector<u8> ComputeReachability(const Program& program) {
+  base::Vector<u8> reachable(program.size(), 0);
   if (program.empty())
     return reachable;
 
@@ -366,7 +369,7 @@ std::vector<u8> ComputeReachability(const Program& program) {
     }
   };
   const u32 max_pc = program.back().pc + program.back().size;
-  std::vector<u32> starts{0};
+  base::Vector<u32> starts{0};
   for (const Inst& inst : program) {
     const int kind = branch_kind(inst);
     if (!kind)
@@ -379,9 +382,9 @@ std::vector<u8> ComputeReachability(const Program& program) {
                                              simm));
     }
   }
-  std::sort(starts.begin(), starts.end());
-  starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
-  starts.erase(std::remove_if(starts.begin(), starts.end(),
+  base::Sort(starts.begin(), starts.end());
+  starts.erase(base::Unique(starts.begin(), starts.end()), starts.end());
+  starts.erase(base::RemoveIf(starts.begin(), starts.end(),
                               [max_pc](u32 pc) { return pc >= max_pc; }),
                starts.end());
   const auto block_of = [&](u32 pc) {
@@ -394,8 +397,8 @@ std::vector<u8> ComputeReachability(const Program& program) {
     return block;
   };
 
-  std::vector<u8> block_reachable(starts.size(), 0);
-  std::vector<u32> worklist{0};
+  base::Vector<u8> block_reachable(starts.size(), 0);
+  base::Vector<u32> worklist{0};
   while (!worklist.empty()) {
     const u32 block = worklist.back();
     worklist.pop_back();
@@ -417,7 +420,7 @@ std::vector<u8> ComputeReachability(const Program& program) {
       if (kind == 4) {
         // An indirect target may be any decoded block. Conservatively retain
         // all blocks rather than misreporting valid code as dead.
-        std::fill(block_reachable.begin(), block_reachable.end(), 1);
+        base::Fill(block_reachable.begin(), block_reachable.end(), 1);
         worklist.clear();
         break;
       }
@@ -448,20 +451,20 @@ void NextProgramCacheGeneration() {
   g_prog_cache_generation++;
 }
 
-std::shared_ptr<const Program> CachedProgram(u64 addr,
+base::SharedPointer<const Program> CachedProgram(u64 addr,
                                              u32 max_dwords) {
   struct Entry {
     u64 hash = 0;
     u32 hashed_dwords = 0;
     u64 generation = 0;
     IsaMode mode = IsaMode::kBase;
-    std::shared_ptr<const Program> program;
+    base::SharedPointer<const Program> program;
   };
-  static std::unordered_map<u64, Entry> cache;
+  static base::HashMap<u64, Entry> cache;
 
   const auto* code = reinterpret_cast<const u32*>(addr);
   if (!code)
-    return std::make_shared<const Program>();
+    return base::MakeShared<const Program>();
   const IsaMode mode = DefaultIsaMode();
 
   // Fast path: already revalidated this generation (frame). A draw touches the
@@ -488,14 +491,14 @@ std::shared_ptr<const Program> CachedProgram(u64 addr,
   // (GTA:SA well over 512), so clearing the lot at a small cap re-decoded
   // every live shader each frame; drop only the ones idle for a while.
   if (cache.size() > 4096) {
-    std::erase_if(cache, [](const auto& kv) {
+    base::EraseIf(cache, [](const auto& kv) {
       return kv.second.generation + 60 < g_prog_cache_generation;
     });
     if (cache.size() > 16384)
       cache.clear();
   }
   auto program =
-      std::make_shared<const Program>(DecodeShader(code, max_dwords, mode));
+      base::MakeShared<const Program>(DecodeShader(code, max_dwords, mode));
   cache[addr] = {hash, hashed, g_prog_cache_generation, mode, program};
   return program;
 }
@@ -507,7 +510,7 @@ u64 CachedCodeHash(u64 addr, u32 max_dwords) {
     u64 hash = 0;
     u64 generation = 0;
   };
-  static std::unordered_map<u64, Entry> cache;
+  static base::HashMap<u64, Entry> cache;
 
   auto it = cache.find(addr);
   if (it != cache.end() && it->second.generation == g_prog_cache_generation)

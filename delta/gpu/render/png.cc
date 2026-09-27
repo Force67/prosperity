@@ -5,10 +5,10 @@
 #include "gpu/render/png.h"
 #include "base/arch.h"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <vector>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
 
 namespace gpu::render {
 namespace {
@@ -123,8 +123,8 @@ u64 Deflate(const u8* data, u64 len, u8* out) {
   w.Bits(1, 1);  // BFINAL
   w.Bits(1, 2);  // BTYPE = 01, fixed Huffman
 
-  std::vector<i64> head(kHashSize, -1);
-  std::vector<i64> prev(kWindow, -1);
+  base::Vector<i64> head(kHashSize, -1);
+  base::Vector<i64> prev(kWindow, -1);
   auto hash3 = [&](u64 p) {
     return static_cast<u32>(
                (static_cast<u32>(data[p]) * 2654435761u) ^
@@ -151,7 +151,7 @@ u64 Deflate(const u8* data, u64 len, u8* out) {
         if (c >= pos || pos - c > kWindow)
           break;
         const u32 limit =
-            static_cast<u32>(std::min<u64>(258, len - pos));
+            static_cast<u32>(base::Min<u64>(258, len - pos));
         u32 match = 0;
         while (match < limit && data[c + match] == data[pos + match])
           match++;
@@ -192,14 +192,14 @@ u64 Deflate(const u8* data, u64 len, u8* out) {
   return w.size();
 }
 
-void PutBe32(std::vector<u8>& v, u32 value) {
+void PutBe32(base::Vector<u8>& v, u32 value) {
   v.push_back(static_cast<u8>(value >> 24));
   v.push_back(static_cast<u8>(value >> 16));
   v.push_back(static_cast<u8>(value >> 8));
   v.push_back(static_cast<u8>(value));
 }
 
-void PutChunk(std::vector<u8>& v,
+void PutChunk(base::Vector<u8>& v,
               const char tag[4],
               const u8* data,
               u64 len) {
@@ -212,15 +212,15 @@ void PutChunk(std::vector<u8>& v,
 
 // Encode already-filtered scanlines (each row preceded by its filter byte).
 bool WritePngRaw(const char* path,
-                 const std::vector<u8>& scanlines,
+                 const base::Vector<u8>& scanlines,
                  u32 width,
                  u32 height,
                  u8 bit_depth) {
-  std::vector<u8> z(DeflateBound(scanlines.size()));
+  base::Vector<u8> z(DeflateBound(scanlines.size()));
   const u64 zn =
       ZlibCompress(scanlines.data(), scanlines.size(), z.data());
 
-  std::vector<u8> png;
+  base::Vector<u8> png;
   const u8 signature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
   png.insert(png.end(), signature, signature + 8);
   u8 ihdr[13];
@@ -274,7 +274,7 @@ bool WritePngRgba8(const char* path,
   if (!width || !height)
     return false;
   const u64 row = static_cast<u64>(width) * 4;
-  std::vector<u8> scanlines(static_cast<u64>(height) * (row + 1));
+  base::Vector<u8> scanlines(static_cast<u64>(height) * (row + 1));
   for (u32 y = 0; y < height; y++) {
     u8* dst = scanlines.data() + static_cast<u64>(y) * (row + 1);
     dst[0] = 0;  // filter: none
@@ -290,7 +290,7 @@ bool WritePngRgba16(const char* path,
   if (!width || !height)
     return false;
   const u64 row = static_cast<u64>(width) * 8;
-  std::vector<u8> scanlines(static_cast<u64>(height) * (row + 1));
+  base::Vector<u8> scanlines(static_cast<u64>(height) * (row + 1));
   for (u32 y = 0; y < height; y++) {
     u8* dst = scanlines.data() + static_cast<u64>(y) * (row + 1);
     dst[0] = 0;

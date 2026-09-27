@@ -16,7 +16,6 @@
 #include <cstring>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <vector>
 
 #include "guest_memory.h"
 #include "gcn/gcn_detile.h"
@@ -24,6 +23,8 @@
 #include "ps5/rdna/rdna_decode.h"
 #include "ps5/rdna/rdna_resource.h"
 #include "ps5/rdna/rdna_translate.h"
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 using gpu::gcn::Enc;
 
@@ -38,7 +39,7 @@ void expect(bool cond, const char *what) {
 
 // True if the SPIR-V word stream contains an instruction with the given opcode.
 // Each instruction's first word packs wordCount[31:16] | opcode[15:0].
-bool hasOpcode(const std::vector<u32> &spv, u32 opcode) {
+bool hasOpcode(const base::Vector<u32> &spv, u32 opcode) {
   size_t i = 5; // skip the 5-word module header
   while (i < spv.size()) {
     const u32 wc = spv[i] >> 16;
@@ -51,7 +52,7 @@ bool hasOpcode(const std::vector<u32> &spv, u32 opcode) {
   return false;
 }
 
-bool hasExtInst(const std::vector<u32> &spv, u32 instruction) {
+bool hasExtInst(const base::Vector<u32> &spv, u32 instruction) {
   size_t i = 5;
   while (i < spv.size()) {
     const u32 wc = spv[i] >> 16;
@@ -68,7 +69,7 @@ bool hasExtInst(const std::vector<u32> &spv, u32 instruction) {
 // True if the module decorates any id with BuiltIn `builtin` (OpDecorate == 71,
 // Decoration BuiltIn == 11, then the BuiltIn enum). Used to prove a PS input
 // VGPR was seeded from a Vulkan built-in (gl_FragCoord == 15).
-bool hasBuiltin(const std::vector<u32> &spv, u32 builtin) {
+bool hasBuiltin(const base::Vector<u32> &spv, u32 builtin) {
   size_t i = 5;
   while (i < spv.size()) {
     const u32 wc = spv[i] >> 16;
@@ -82,7 +83,7 @@ bool hasBuiltin(const std::vector<u32> &spv, u32 builtin) {
   return false;
 }
 
-bool hasVariableStorage(const std::vector<u32> &spv, u32 storage) {
+bool hasVariableStorage(const base::Vector<u32> &spv, u32 storage) {
   size_t i = 5;
   while (i < spv.size()) {
     const u32 wc = spv[i] >> 16;
@@ -108,13 +109,13 @@ u32 vop2(u32 op, u32 vdst, u32 src0, u32 vsrc1) {
 }
 // VOP3: word0 [31:26]=0x35, op[25:16], clamp[15], abs[10:8], vdst[7:0];
 // word1: neg[31:29], src2[26:18], src1[17:9], src0[8:0].
-void vop3(std::vector<u32> &out, u32 op, u32 vdst, u32 s0,
+void vop3(base::Vector<u32> &out, u32 op, u32 vdst, u32 s0,
           u32 s1, u32 s2) {
   out.push_back((0x35u << 26) | ((op & 0x3FF) << 16) | (vdst & 0xFF));
   out.push_back(((s2 & 0x1FF) << 18) | ((s1 & 0x1FF) << 9) | (s0 & 0x1FF));
 }
 
-void vop3b(std::vector<u32> &out, u32 op, u32 vdst,
+void vop3b(base::Vector<u32> &out, u32 op, u32 vdst,
            u32 sdst, u32 s0, u32 s1, u32 s2 = 0) {
   out.push_back((0x35u << 26) | ((op & 0x3FF) << 16) | ((sdst & 0x7F) << 8) |
                 (vdst & 0xFF));
@@ -127,7 +128,7 @@ u32 vopc(u32 op, u32 src0, u32 vsrc1) {
 }
 // EXP: [31:26]=0x3E, done[11], compr[10], target[9:4], en[3:0]; word1 = 4
 // VGPRs.
-void exp(std::vector<u32> &out, u32 target, u32 en, bool done,
+void exp(base::Vector<u32> &out, u32 target, u32 en, bool done,
          u32 v0, u32 v1, u32 v2, u32 v3) {
   out.push_back((0x3Eu << 26) | ((done ? 1u : 0u) << 11) |
                 ((target & 0x3F) << 4) | (en & 0xF));
@@ -139,7 +140,7 @@ u32 sopp(u32 op, u32 simm) {
   return (0x17Fu << 23) | ((op & 0x7F) << 16) | (simm & 0xFFFF);
 }
 // SMEM: [31:26]=0x3D, op[25:18], sdst[12:6], sbase[5:0]; word1 imm[20:0].
-void smem(std::vector<u32> &out, u32 op, u32 sdst,
+void smem(base::Vector<u32> &out, u32 op, u32 sdst,
           u32 sbase, u32 imm, u32 soffset = 125) {
   out.push_back((0x3Du << 26) | ((op & 0xFF) << 18) | ((sdst & 0x7F) << 6) |
                 (sbase & 0x3F));
@@ -151,7 +152,7 @@ u32 sop1(u32 op, u32 sdst, u32 ssrc) {
          (ssrc & 0xFF);
 }
 
-void sop2(std::vector<u32> &out, u32 op, u32 sdst,
+void sop2(base::Vector<u32> &out, u32 op, u32 sdst,
           u32 ssrc0, u32 ssrc1, u32 literal = 0) {
   out.push_back((0x2u << 30) | ((op & 0x7F) << 23) | ((sdst & 0x7F) << 16) |
                 ((ssrc1 & 0xFF) << 8) | (ssrc0 & 0xFF));
@@ -172,7 +173,7 @@ u32 sopk(u32 op, u32 sdst, u32 simm) {
 // MIMG (NSA=0, 64-bit): word0 [31:26]=0x3C, op[24:18], da[14], dmask[11:8],
 // op[7] at bit 0; word1 ssamp[25:21], srsrc[20:16], vdata[15:8], vaddr[7:0].
 // srsrc/ssamp are the SGPR index >> 2 (4-SGPR-aligned).
-void mimg(std::vector<u32> &out, u32 op, u32 dmask,
+void mimg(base::Vector<u32> &out, u32 op, u32 dmask,
           u32 vdata, u32 vaddr, u32 srsrc, u32 ssamp,
           u32 dim = 1) {
   out.push_back((0x3Cu << 26) | ((op & 0x7F) << 18) | ((dmask & 0xF) << 8) |
@@ -185,7 +186,7 @@ void mimg(std::vector<u32> &out, u32 op, u32 dmask,
 // seg[15:14], lds[13], dlc[12], offset[11:0]; word1 vdst[31:24], saddr[22:16],
 // data[15:8], addr[7:0]. seg 0 = flat, 1 = scratch, 2 = global; saddr 0x7d is
 // NULL (no scalar base).
-void flat(std::vector<u32> &out, u32 op, u32 seg, u32 vdst,
+void flat(base::Vector<u32> &out, u32 op, u32 seg, u32 vdst,
           u32 addr, u32 data, u32 saddr, u32 offset = 0) {
   out.push_back((0x37u << 26) | ((op & 0x7F) << 18) | ((seg & 0x3) << 14) |
                 (offset & 0xFFF));
@@ -193,12 +194,12 @@ void flat(std::vector<u32> &out, u32 op, u32 seg, u32 vdst,
                 ((data & 0xFF) << 8) | (addr & 0xFF));
 }
 
-void mubuf(std::vector<u32> &out, u32 op, u32 srsrc) {
+void mubuf(base::Vector<u32> &out, u32 op, u32 srsrc) {
   out.push_back((0x38u << 26) | ((op & 0x7F) << 18) | (1u << 13));
   out.push_back((128u << 24) | (((srsrc / 4) & 0x1F) << 16));
 }
 
-void mtbuf(std::vector<u32> &out, u32 op, u32 format,
+void mtbuf(base::Vector<u32> &out, u32 op, u32 format,
            u32 vdata, u32 vaddr, u32 srsrc) {
   out.push_back((0x3Au << 26) | ((format & 0x7F) << 19) | ((op & 0x07) << 16) |
                 (1u << 13));
@@ -209,7 +210,7 @@ void mtbuf(std::vector<u32> &out, u32 op, u32 format,
 
 // VOP3P with canonical componentwise selectors: low result uses low sources,
 // high result uses high sources.
-void vop3p(std::vector<u32> &out, u32 op, u32 vdst, u32 s0,
+void vop3p(base::Vector<u32> &out, u32 op, u32 vdst, u32 s0,
            u32 s1, u32 s2) {
   out.push_back((0x33u << 26) | ((op & 0x7F) << 16) | (1u << 14) |
                 (vdst & 0xFF));
@@ -233,7 +234,7 @@ int main() {
   std::printf("== RDNA2 decoder ==\n");
   {
     // v_mov_b32 v0, 0.0 ; v_mov_b32 v3, 1.0 ; exp pos0 ; s_endpgm
-    std::vector<u32> code;
+    base::Vector<u32> code;
     code.push_back(vop1(0x01, 0, kInline0));
     code.push_back(vop1(0x01, 3, kInline1f));
     exp(code, /*POS0*/ 12, 0xF, true, 0, 0, 0, 3);
@@ -251,7 +252,7 @@ int main() {
   }
   {
     // SMEM s_buffer_load_dwordx4 is a 2-dword instruction.
-    std::vector<u32> code;
+    base::Vector<u32> code;
     smem(code, /*s_buffer_load_dwordx4*/ 0x0A, /*sdst*/ 8, /*sbase*/ 2,
          /*imm*/ 0);
     code.push_back(sopp(kEndpgm, 0));
@@ -265,7 +266,7 @@ int main() {
   std::printf("== RDNA2 -> SPIR-V recompile ==\n");
   {
     // Procedural VS: position = (0,0,0,1).
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, 8));         // v0 = VS user SGPR s8
     vs.push_back(vop1(0x01, 1, kInline0));  // v1 = 0.0
     vs.push_back(vop1(0x01, 2, kInline0));  // v2 = 0.0
@@ -274,7 +275,7 @@ int main() {
     vs.push_back(sopp(kEndpgm, 0));
 
     // PS: color = (1,1,1,1) -> MRT0. (v_add_f32 exercises VOP2.)
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, 0));            // v0 = PS user SGPR s0
     ps.push_back(vop2(0x03, 1, kInline1f, 0)); // v1 = 1.0 + v0 = 2.0 (VOP2 add)
     ps.push_back(vop1(0x01, 2, kInline1f));    // v2 = 1.0
@@ -296,7 +297,7 @@ int main() {
     const gpu::gcn::Recompiled no_user_data = gpu::rdna::Recompile(
         vs.data(), ps.data(), user_data, user_data, 0, false, 0, 0);
     expect(no_user_data.ok, "zero-user-data stages recompile");
-    std::string err;
+    base::String err;
     expect(gpu::gcn::spirv::Validate(r.vs_spirv, &err), "VS SPIR-V validates");
     if (!err.empty())
       std::printf("      vs: %s\n", err.c_str());
@@ -305,7 +306,7 @@ int main() {
     if (!err.empty())
       std::printf("      ps: %s\n", err.c_str());
 
-    std::vector<u32> fetch;
+    base::Vector<u32> fetch;
     smem(fetch, 0x02, 12, 4, 0);
     mubuf(fetch, 0x00, 12);
     fetch.push_back(sop1(0x20, 0, 0));
@@ -337,7 +338,7 @@ int main() {
       expect(undeclared_fetch.attrs.empty(),
              "undeclared GS user data cannot supply a fetch shader");
 
-      std::vector<u32> typed_vs;
+      base::Vector<u32> typed_vs;
       smem(typed_vs, 0x02, 12, 4, 0);
       mtbuf(typed_vs, 0x03, 56, 0, 0, 12);
       exp(typed_vs, 12, 0xF, true, 0, 1, 2, 3);
@@ -356,7 +357,7 @@ int main() {
     // VS with a constant buffer + VOP3: load cbuffer[0..3] into s4.., move a
     // cbuf dword into a VGPR, v_fma_f32 (VOP3 0x14b), export POS0. Exercises
     // RdnaPlanCbufs / RdnaEmitSmem and the VOP3 field decode.
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     smem(vs, /*s_buffer_load_dwordx4*/ 0x0A, /*sdst s4*/ 4,
          /*sbase sgpr2*/ 1, 0);
     vs.push_back(vop1(0x01, 0, 4));         // v0 = s4 (cbuffer dword 0)
@@ -367,7 +368,7 @@ int main() {
     exp(vs, /*POS0*/ 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, kInline1f));
     exp(ps, /*MRT0*/ 0, 0xF, true, 0, 0, 0, 0);
     ps.push_back(sopp(kEndpgm, 0));
@@ -379,7 +380,7 @@ int main() {
     expect(r.vs_cbufs.size() == 1, "one VS constant buffer planned");
     expect(r.vs_cbufs.size() == 1 && r.vs_cbufs[0].num_dwords == 4,
            "static SMEM offsets retain the required cbuffer window");
-    std::string err;
+    base::String err;
     expect(gpu::gcn::spirv::Validate(r.vs_spirv, &err),
            "cbuf VS SPIR-V validates");
     expect(hasExtInst(r.vs_spirv, 50), "VOP3 v_fma_f32 emits fused Fma");
@@ -397,12 +398,12 @@ int main() {
     user_data[2] = 64;
     user_data[3] = 56u << 12;  // 8_8_8_8 UNORM
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, kInline1f));
     exp(ps, /*MRT0*/ 0, 0xF, true, 0, 0, 0, 0);
     ps.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     mubuf(vs, /*buffer_load_format_xyzw*/ 0x03, /*srsrc s8*/ 8);
     exp(vs, /*POS0*/ 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
@@ -434,7 +435,7 @@ int main() {
 
     // A store has nowhere to land (the set-2 window is never read back), but
     // dropping it keeps the draw that a rejected shader would have lost.
-    std::vector<u32> store_vs;
+    base::Vector<u32> store_vs;
     mubuf(store_vs, /*buffer_store_format_x*/ 0x04, 8);
     exp(store_vs, 12, 0xF, true, 0, 1, 2, 3);
     store_vs.push_back(sopp(kEndpgm, 0));
@@ -450,7 +451,7 @@ int main() {
     //   global_load_dword   v1,     v1, s[48:49] offset:12
     //   global_load_dwordx3 v[4:6], v4, s[48:49]
     //   global_load_dwordx4 v[4:7], v4, s[48:49] offset:16
-    std::vector<u32> real{0xdc30800cu, 0x01300001u, 0xdc3c8000u, 0x04300004u,
+    base::Vector<u32> real{0xdc30800cu, 0x01300001u, 0xdc3c8000u, 0x04300004u,
                           0xdc388010u, 0x04300004u, sopp(kEndpgm, 0)};
     const gpu::gcn::Program prog =
         gpu::rdna::Decode(real.data(), (u32)real.size());
@@ -460,13 +461,13 @@ int main() {
                prog[2].opcode == 0x0e,
            "gfx10 FLAT opcodes: dword, dwordx3, dwordx4 (x4 before x3)");
 
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 3, kInline1f));
     exp(vs, /*POS0*/ 12, 0xF, true, 0, 0, 0, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps(real.begin(), real.end() - 1);
+    base::Vector<u32> ps(real.begin(), real.end() - 1);
     exp(ps, /*MRT0*/ 0, 0xF, true, 4, 5, 6, 7);
     ps.push_back(sopp(kEndpgm, 0));
     u32 ud[32] = {};
@@ -482,21 +483,21 @@ int main() {
 
     // A generic FLAT access (SEG 0) carries the whole 64-bit pointer in a VGPR
     // pair, so nothing names a resource to bind.
-    std::vector<u32> generic;
+    base::Vector<u32> generic;
     flat(generic, /*flat_load_dword*/ 0x0c, /*seg flat*/ 0, 4, 4, 0, 0x7d);
     exp(generic, 0, 0xF, true, 4, 4, 4, 4);
     generic.push_back(sopp(kEndpgm, 0));
     expect(!gpu::rdna::Recompile(vs.data(), generic.data(), ud, ud).ok,
            "generic FLAT addressing is refused, not guessed");
 
-    std::vector<u32> null_saddr;
+    base::Vector<u32> null_saddr;
     flat(null_saddr, 0x0c, /*seg global*/ 2, 4, 4, 0, 0x7d);
     exp(null_saddr, 0, 0xF, true, 4, 4, 4, 4);
     null_saddr.push_back(sopp(kEndpgm, 0));
     expect(!gpu::rdna::Recompile(vs.data(), null_saddr.data(), ud, ud).ok,
            "SADDR-NULL global addressing is refused");
 
-    std::vector<u32> scratch;
+    base::Vector<u32> scratch;
     flat(scratch, 0x0c, /*seg scratch*/ 1, 4, 4, 0, 48);
     exp(scratch, 0, 0xF, true, 4, 4, 4, 4);
     scratch.push_back(sopp(kEndpgm, 0));
@@ -504,14 +505,14 @@ int main() {
            "SCRATCH addressing is refused");
 
     // A negative immediate reads below the staged window's base.
-    std::vector<u32> negative;
+    base::Vector<u32> negative;
     flat(negative, 0x0c, 2, 4, 4, 0, 48, /*offset -4*/ 0xFFC);
     exp(negative, 0, 0xF, true, 4, 4, 4, 4);
     negative.push_back(sopp(kEndpgm, 0));
     expect(!gpu::rdna::Recompile(vs.data(), negative.data(), ud, ud).ok,
            "a negative FLAT offset is refused");
 
-    std::vector<u32> store;
+    base::Vector<u32> store;
     flat(store, /*global_store_dword*/ 0x1c, 2, 0, 4, 5, 48);
     exp(store, 0, 0xF, true, 4, 4, 4, 4);
     store.push_back(sopp(kEndpgm, 0));
@@ -521,7 +522,7 @@ int main() {
     expect(stored_flat.ps_bufs.empty(),
            "a dropped flat store spends no binding");
 
-    std::vector<u32> sub;
+    base::Vector<u32> sub;
     flat(sub, /*global_load_ubyte*/ 0x08, 2, 4, 4, 0, 48, 3);
     exp(sub, 0, 0xF, true, 4, 4, 4, 4);
     sub.push_back(sopp(kEndpgm, 0));
@@ -531,7 +532,7 @@ int main() {
                                     /*OpBitFieldUExtract*/ 203),
            "global_load_ubyte extracts its byte from the containing dword");
 
-    std::vector<u32> sbyte;
+    base::Vector<u32> sbyte;
     flat(sbyte, /*global_load_sbyte*/ 0x09, 2, 4, 4, 0, 48);
     exp(sbyte, 0, 0xF, true, 4, 4, 4, 4);
     sbyte.push_back(sopp(kEndpgm, 0));
@@ -545,7 +546,7 @@ int main() {
   {
     // gfx10 SOP1 slots above the GFX7 range: the wave32 saveexec forms and the
     // ANDN1/ORN1 pair, plus VOP3-only v_readlane_b32 (0x360).
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 3, kInline1f));
     exp(vs, 12, 0xF, true, 0, 0, 0, 3);
@@ -557,7 +558,7 @@ int main() {
                          /*and_saveexec_b32*/ 0x3cu, /*xnor_saveexec_b32*/ 0x43u,
                          /*andn1_saveexec_b32*/ 0x44u,
                          /*andn2_wrexec_b32*/ 0x47u}) {
-      std::vector<u32> ps;
+      base::Vector<u32> ps;
       ps.push_back(sop1(op, /*s20*/ 20, /*s8*/ 8));
       ps.push_back(vop1(0x01, 0, 20));
       exp(ps, 0, 0xF, true, 0, 0, 0, 0);
@@ -565,7 +566,7 @@ int main() {
       expect(gpu::rdna::Recompile(vs.data(), ps.data(), ud, ud).ok,
              "gfx10 SOP1 saveexec/wrexec slot recompiles");
     }
-    std::vector<u32> readlane;
+    base::Vector<u32> readlane;
     vop3(readlane, /*v_readlane_b32*/ 0x360, /*sdst s20*/ 20, /*v0*/ 256,
          /*lane*/ kInline0, 0);
     readlane.push_back(vop1(0x01, 0, 20));
@@ -577,7 +578,7 @@ int main() {
 
   {
     // v_readfirstlane_b32 and the SOP2 slots gfx10 added above GFX7's.
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline1f));
     vs.push_back(vop1(/*v_readfirstlane_b32*/ 0x02, /*s20*/ 20, /*v0*/ 256));
     sop2(vs, /*s_mul_hi_u32*/ 0x35, 21, 8, 9);
@@ -588,7 +589,7 @@ int main() {
     exp(vs, /*POS0*/ 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, kInline1f));
     exp(ps, /*MRT0*/ 0, 0xF, true, 0, 0, 0, 0);
     ps.push_back(sopp(kEndpgm, 0));
@@ -599,7 +600,7 @@ int main() {
     expect(r.ok, "v_readfirstlane + gfx10 SOP2 VS recompiled ok");
     expect(hasOpcode(r.vs_spirv, /*OpUMulExtended*/ 151),
            "s_mul_hi_u32 emits the wide multiply");
-    std::string sop_err;
+    base::String sop_err;
     expect(gpu::gcn::spirv::Validate(r.vs_spirv, &sop_err),
            "gfx10 SOP2 VS SPIR-V validates");
     if (!sop_err.empty())
@@ -607,7 +608,7 @@ int main() {
   }
 
   {
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     smem(vs, /*s_buffer_load_dword*/ 0x08, 20, /*s8*/ 4, 0);
     vs.push_back(sop1(/*s_mov_b32*/ 0x03, 8, 12));
     smem(vs, /*s_buffer_load_dword*/ 0x08, 21, /*s8*/ 4, 0);
@@ -618,7 +619,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, kInline1f));
     exp(ps, 0, 0xF, true, 0, 0, 0, 0);
     ps.push_back(sopp(kEndpgm, 0));
@@ -632,7 +633,7 @@ int main() {
   }
 
   {
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     smem(vs, /*s_load_dword*/ 0x00, 12, /*s8*/ 4, 0);
     vs.push_back(sop1(/*s_mov_b32*/ 0x03, 12, 16));
     smem(vs, /*s_load_dword*/ 0x00, 20, /*s12*/ 6, 0);
@@ -643,7 +644,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, kInline1f));
     exp(ps, 0, 0xF, true, 0, 0, 0, 0);
     ps.push_back(sopp(kEndpgm, 0));
@@ -658,7 +659,7 @@ int main() {
 
   {
     // PS exercising cndmask, CMPX, no-carry, and carry-in/out gfx10 semantics.
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 1, kInline0));
     vs.push_back(vop1(0x01, 2, kInline0));
@@ -666,7 +667,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, kInline0));  // v0 = 0.0
     ps.push_back(vop1(0x01, 1, kInline1f)); // v1 = 1.0
     ps.push_back(vopc(0x01, 256, 257));     // v_cmp_lt_f32 v0,v1 -> VCC
@@ -681,7 +682,7 @@ int main() {
     gpu::gcn::Recompiled r =
         gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
     expect(r.ok, "cndmask/CMPX/carry PS recompiled ok");
-    std::string err;
+    base::String err;
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
            "cndmask/CMPX/carry PS SPIR-V validates");
     if (!err.empty())
@@ -690,7 +691,7 @@ int main() {
 
   {
     // RDNA2 VOP3-only integer ops (native no-carry add/sub + 3-input forms).
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 1, kInline0));
     vs.push_back(vop1(0x01, 2, kInline0));
@@ -698,7 +699,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, kInline0));              // v0 = 0
     ps.push_back(vop1(0x01, 1, kInline1f));             // v1 = 1.0 bits
     vop3(ps, /*v_add_nc_i32*/ 0x37F, 4, 256, 257, 0);   // v4 = v0 + v1
@@ -719,7 +720,7 @@ int main() {
     gpu::gcn::Recompiled r =
         gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
     expect(r.ok, "VOP3 int-ALU PS recompiled ok");
-    std::string err;
+    base::String err;
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
            "VOP3 int-ALU PS SPIR-V validates");
     if (!err.empty())
@@ -729,7 +730,7 @@ int main() {
   {
     // Unsupported operations must reject the stage rather than return valid
     // SPIR-V containing the shared emitter's fallback behavior.
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 1, kInline0));
     vs.push_back(vop1(0x01, 2, kInline0));
@@ -737,7 +738,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop2(/*unsupported v_add_f16*/ 0x32, 0, 256, 0));
     exp(ps, 0, 0xF, true, 0, 0, 0, 0);
     ps.push_back(sopp(kEndpgm, 0));
@@ -871,7 +872,7 @@ int main() {
     expect(fmac.ok && hasExtInst(fmac.fs_spirv, 50),
            "VOP3 FMAC uses its implicit destination accumulator");
 
-    std::vector<u32> prim_vs;
+    base::Vector<u32> prim_vs;
     prim_vs.push_back(vop1(0x01, 0, kInline0));
     exp(prim_vs, /*PRIM*/ 20, 1, true, 0, 0, 0, 0);
     prim_vs.push_back(sopp(kEndpgm, 0));
@@ -883,7 +884,7 @@ int main() {
   }
 
   {
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 1, kInline0));
     vs.push_back(vop1(0x01, 2, kInline0));
@@ -891,7 +892,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     for (u32 i = 0; i < 17; i++) {
       mimg(ps, /*image_load*/ 0x00, 0xF, 0, 0, 4, 0);
       if (i != 16)
@@ -910,7 +911,7 @@ int main() {
     // PS sampling a 2D texture: s_load T# (x8->s8) + S# (x4->s16),
     // image_sample, export the texel. Exercises RdnaPlanMimg + the shared
     // EmitMimg.
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 1, kInline0));
     vs.push_back(vop1(0x01, 2, kInline0));
@@ -918,7 +919,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     smem(ps, /*s_load_dwordx8 T#*/ 0x03, /*sdst s8*/ 8, /*sbase s0*/ 0, 0);
     smem(ps, /*s_load_dwordx4 S#*/ 0x02, /*sdst s16*/ 16, /*sbase s2*/ 1, 0);
     ps.push_back(vop1(0x01, 0, kInline0)); // v0 = u = 0.0
@@ -937,7 +938,7 @@ int main() {
     // unplanned-fallback): OpImageSampleImplicitLod == 87.
     expect(hasOpcode(r.fs_spirv, 87),
            "image_sample PS emits OpImageSampleImplicitLod");
-    std::string err;
+    base::String err;
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
            "image_sample PS SPIR-V validates");
     if (!err.empty())
@@ -946,7 +947,7 @@ int main() {
 
   {
     // Storage-image writes are lane side effects and must be guarded by EXEC.
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 1, kInline0));
     vs.push_back(vop1(0x01, 2, kInline0));
@@ -954,7 +955,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, kInline0));
     ps.push_back(vop1(0x01, 1, kInline0));
     ps.push_back(vop1(0x01, 2, kInline1f));
@@ -969,7 +970,7 @@ int main() {
     expect(hasOpcode(r.fs_spirv, 99), "image_store emits OpImageWrite");
     expect(hasOpcode(r.fs_spirv, 247),
            "image_store side effect is guarded by EXEC");
-    std::string err;
+    base::String err;
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
            "image_store PS SPIR-V validates");
     if (!err.empty())
@@ -978,7 +979,7 @@ int main() {
 
   {
     // VOP3P packed f16: v_pk_mul_f16, v_pk_add_f16, v_pk_fma_f16.
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 1, kInline0));
     vs.push_back(vop1(0x01, 2, kInline0));
@@ -986,7 +987,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, kInline1f)); // v0 = two f16 lanes (bit pattern)
     ps.push_back(vop1(0x01, 1, kInline1f)); // v1
     vop3p(ps, /*v_pk_mul_f16*/ 0x10, 4, 256, 257, 0);   // v4 = v0 .* v1
@@ -1001,7 +1002,7 @@ int main() {
     expect(r.ok, "VOP3P packed-f16 PS recompiled ok");
     expect(hasOpcode(r.fs_spirv, 12), "VOP3P PS emits pack/unpack ext-insts");
     expect(hasExtInst(r.fs_spirv, 50), "VOP3P PS emits fused GLSL.std.450 Fma");
-    std::string err;
+    base::String err;
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
            "VOP3P packed-f16 PS SPIR-V validates");
     if (!err.empty())
@@ -1012,7 +1013,7 @@ int main() {
     // RDNA2 f16 compare (v_cmp_lt_f16 = 0xC9), which GFX7 numbers as u32. Must
     // convert the low-half f16 operands (UnpackHalf2x16, OpExtInst) and run a
     // float predicate rather than an integer compare.
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 1, kInline0));
     vs.push_back(vop1(0x01, 2, kInline0));
@@ -1020,7 +1021,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(vop1(0x01, 0, kInline0));  // v0
     ps.push_back(vop1(0x01, 1, kInline1f)); // v1
     ps.push_back(vopc(0xC9, 256, 257));     // v_cmp_lt_f16 v0,v1 -> VCC
@@ -1033,7 +1034,7 @@ int main() {
         gpu::rdna::Recompile(vs.data(), ps.data(), user_data, user_data);
     expect(r.ok, "f16-VOPC PS recompiled ok");
     expect(hasOpcode(r.fs_spirv, 12), "f16-VOPC converts operands (OpExtInst)");
-    std::string err;
+    base::String err;
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
            "f16-VOPC PS SPIR-V validates");
     if (!err.empty())
@@ -1047,7 +1048,7 @@ int main() {
     // + POS_X (bit 8) + POS_Y (bit 9) enabled they land in v2/v3; unseeded they
     // stay zero and a frag.x*a+frag.y*b<c clip discards every fragment. The
     // seed must load them from gl_FragCoord.
-    std::vector<u32> vs;
+    base::Vector<u32> vs;
     vs.push_back(vop1(0x01, 0, kInline0));
     vs.push_back(vop1(0x01, 1, kInline0));
     vs.push_back(vop1(0x01, 2, kInline0));
@@ -1055,7 +1056,7 @@ int main() {
     exp(vs, 12, 0xF, true, 0, 1, 2, 3);
     vs.push_back(sopp(kEndpgm, 0));
 
-    std::vector<u32> ps;
+    base::Vector<u32> ps;
     ps.push_back(
         vop2(0x03, 0, 256 + 2, 3)); // v0 = v2 + v3 (reads seeded frag x/y)
     exp(ps, 0, 0xF, true, 0, 0, 0, 0);
@@ -1067,7 +1068,7 @@ int main() {
     expect(r.ok, "frag-coord seed PS recompiled ok");
     expect(hasBuiltin(r.fs_spirv, 15),
            "POS_X/Y VGPRs seeded from gl_FragCoord");
-    std::string err;
+    base::String err;
     expect(gpu::gcn::spirv::Validate(r.fs_spirv, &err),
            "frag-coord seed PS SPIR-V validates");
     if (!err.empty())
@@ -1183,7 +1184,7 @@ int main() {
       user_data[8] = static_cast<u32>(table_address);
       user_data[9] = static_cast<u32>(table_address >> 32);
 
-      std::vector<u32> dynamic;
+      base::Vector<u32> dynamic;
       dynamic.push_back(sopk(0x00, 106, 16)); // s_movk_i32 s106, 16
       smem(dynamic, 0x03, 0, 4, 0, 106); // s_load_dwordx8 s[0:7], s[8:9], s106
       mimg(dynamic, 0x00, 0xF, 0, 0, 0, 0);
@@ -1194,7 +1195,7 @@ int main() {
                  dynamic_textures[0].base == texture_base,
              "dynamic SMEM SOFFSET resolves the selected T#");
 
-      std::vector<u32> null_dest;
+      base::Vector<u32> null_dest;
       null_dest.push_back(sopk(0x00, 126, 16));
       null_dest.push_back(sop1(/*s_mov_b64*/ 0x04, 125, 128));
       smem(null_dest, 0x03, 0, 4, 0, 126);
@@ -1206,7 +1207,7 @@ int main() {
              "NULL scalar destination preserves adjacent SGPR state");
 
       writeImage(&user_data[16]);
-      std::vector<u32> inline_image;
+      base::Vector<u32> inline_image;
       mimg(inline_image, 0x00, 0xF, 0, 0, 4, 0);
       inline_image.push_back(sopp(kEndpgm, 0));
       const auto declared24 =
@@ -1218,7 +1219,7 @@ int main() {
       expect(declared16.size() == 1 && !declared16[0].valid,
              "inline T# at s16 is rejected outside the declared window");
 
-      std::vector<u32> dimensions;
+      base::Vector<u32> dimensions;
       mimg(dimensions, 0x00, 0xF, 0, 0, 4, 0, 1);
       mimg(dimensions, 0x00, 0xF, 0, 0, 4, 0, 5);
       dimensions.push_back(sopp(kEndpgm, 0));
@@ -1233,7 +1234,7 @@ int main() {
                  dim_textures[1].arrayed,
              "MIMG DIM controls array addressing");
 
-      std::vector<u32> reachable_image;
+      base::Vector<u32> reachable_image;
       reachable_image.push_back(sopp(/*s_branch*/ 0x02, 2));
       mimg(reachable_image, 0x00, 0xF, 0, 0, 0, 0); // unreachable T# at s0
       mimg(reachable_image, 0x00, 0xF, 0, 0, 4, 0); // live T# at s16
@@ -1250,7 +1251,7 @@ int main() {
                  reachable_textures.size() == 1 && reachable_textures[0].valid,
              "unreachable MIMG instructions do not shift live bindings");
 
-      std::vector<u32> versioned_images;
+      base::Vector<u32> versioned_images;
       mimg(versioned_images, 0x00, 0xF, 0, 0, 4, 0);
       versioned_images.push_back(sopk(/*s_cmpk_eq_u32*/ 0x09, 16, 0));
       mimg(versioned_images, 0x00, 0xF, 0, 0, 4, 0);
@@ -1268,7 +1269,7 @@ int main() {
       u32 gs_user_data[32] = {};
       gs_user_data[0] = static_cast<u32>(texture_base);
       gs_user_data[1] = static_cast<u32>(texture_base >> 32);
-      std::vector<u32> gs_load;
+      base::Vector<u32> gs_load;
       smem(gs_load, 0x00, 0, 4, 0);
       gs_load.push_back(sopp(kEndpgm, 0));
       const auto gs_cbufs =
@@ -1291,7 +1292,7 @@ int main() {
           reinterpret_cast<u64>(vertex_table);
       gs_user_data[0] = static_cast<u32>(vertex_table_address);
       gs_user_data[1] = static_cast<u32>(vertex_table_address >> 32);
-      std::vector<u32> vertex_fetch;
+      base::Vector<u32> vertex_fetch;
       sop2(vertex_fetch, 0x27, 106, 3, 255, 0x00080008);
       sop2(vertex_fetch, 0x1e, 106, 106, 132);
       smem(vertex_fetch, 0x02, 12, 4, 0, 106);
@@ -1308,7 +1309,7 @@ int main() {
                  vertex_resource->second.descriptor[2] == 6,
              "merged-wave scalar replay resolves the inline vertex V#");
 
-      std::vector<u32> wide_unknown;
+      base::Vector<u32> wide_unknown;
       wide_unknown.push_back(sop1(/*s_mov_b64*/ 0x04, 12, 8));
       sop2(wide_unknown, /*s_and_b64*/ 0x0F, 12, 12, 120);
       smem(wide_unknown, 0x00, 0, /*s12*/ 6, 0);
@@ -1321,7 +1322,7 @@ int main() {
       // s_andn1_saveexec_b64 is one of the four 64-bit SOP1 forms gfx10 added
       // past the GFX7 saveexec block; reading it as a 32-bit write would leave
       // s13 looking like the user data it no longer holds.
-      std::vector<u32> saveexec;
+      base::Vector<u32> saveexec;
       saveexec.push_back(sop1(/*s_mov_b64*/ 0x04, 12, 8));
       saveexec.push_back(sop1(/*s_andn1_saveexec_b64*/ 0x37, 12, 126));
       smem(saveexec, 0x00, 0, /*s12*/ 6, 0);
@@ -1332,7 +1333,7 @@ int main() {
 
       // global_load_dword v1, v1, s[8:9]: the scalar pair is the resource, and
       // only the replay can produce it.
-      std::vector<u32> global_load;
+      base::Vector<u32> global_load;
       flat(global_load, /*load_dword*/ 0x0c, /*global*/ 2, 1, 1, 0, 8);
       global_load.push_back(sopp(kEndpgm, 0));
       const auto global_resources =
@@ -1341,7 +1342,7 @@ int main() {
                  global_resources.at(0).descriptor_dwords == 2 &&
                  global_resources.at(0).base == vertex_table_address,
              "a global_load resolves its scalar base pair");
-      std::vector<u32> flat_seg;
+      base::Vector<u32> flat_seg;
       flat(flat_seg, 0x0c, /*flat*/ 0, 1, 1, 0, 8);
       flat_seg.push_back(sopp(kEndpgm, 0));
       expect(gpu::rdna::ResolveBuffers(flat_seg.data(), gs_user_data, 2, 8)
@@ -1350,7 +1351,7 @@ int main() {
 
       u32 stale_scc_user_data[8] = {};
       std::memcpy(stale_scc_user_data + 4, selected_vb, 4 * sizeof(u32));
-      std::vector<u32> stale_scc;
+      base::Vector<u32> stale_scc;
       stale_scc.push_back(sopc(/*s_cmp_eq_u32*/ 0x00, 128, 128));
       sop2(stale_scc, /*s_add_u32*/ 0x00, 20, 128, 128);
       sop2(stale_scc, /*s_cselect_b32*/ 0x0A, 15, 15, 120);
@@ -1361,7 +1362,7 @@ int main() {
       expect(stale_scc_resources.empty(),
              "unmodeled arithmetic SCC invalidates conditional descriptors");
 
-      std::vector<u32> sopk_scc;
+      base::Vector<u32> sopk_scc;
       sopk_scc.push_back(sopk(/*s_cmpk_eq_u32*/ 0x09, 14, 6));
       sop2(sopk_scc, /*s_cselect_b32*/ 0x0A, 15, 15, 120);
       mubuf(sopk_scc, 0x00, 12);

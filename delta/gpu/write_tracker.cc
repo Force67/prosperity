@@ -5,9 +5,6 @@
 
 #include "gpu/guest_page_table.h"
 
-#include <algorithm>
-#include <chrono>
-#include <iterator>
 
 #if defined(__linux__)
 #include <fcntl.h>
@@ -17,6 +14,14 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <base/containers/array.h>
+#include <base/algorithm.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
+#include <base/time/time.h>
 #endif
 
 #if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)
@@ -42,17 +47,17 @@ u64 PageUp(u64 v) {
 }
 
 // Adds [first, end) to a coalesced run map; returns the bytes newly covered.
-u64 InsertRun(std::map<u64, u64>& runs, u64 first, u64 end) {
+u64 InsertRun(base::Map<u64, u64>& runs, u64 first, u64 end) {
   u64 added = end - first;
   auto it = runs.upper_bound(first);
-  if (it != runs.begin() && std::prev(it)->second >= first)
+  if (it != runs.begin() && base::Prev(it)->second >= first)
     --it;
   while (it != runs.end() && it->first <= end) {
-    const u64 lo = std::max(first, it->first), hi = std::min(end, it->second);
+    const u64 lo = base::Max(first, it->first), hi = base::Min(end, it->second);
     if (hi > lo)
       added -= hi - lo;
-    first = std::min(first, it->first);
-    end = std::max(end, it->second);
+    first = base::Min(first, it->first);
+    end = base::Max(end, it->second);
     it = runs.erase(it);
   }
   runs.emplace(first, end);
@@ -60,7 +65,7 @@ u64 InsertRun(std::map<u64, u64>& runs, u64 first, u64 end) {
 }
 
 // Removes [first, end) from a run map; returns the bytes it covered.
-u64 EraseRun(std::map<u64, u64>& runs, u64 first, u64 end) {
+u64 EraseRun(base::Map<u64, u64>& runs, u64 first, u64 end) {
   u64 removed = 0;
   auto it = runs.upper_bound(first);
   if (it != runs.begin())
@@ -71,7 +76,7 @@ u64 EraseRun(std::map<u64, u64>& runs, u64 first, u64 end) {
       ++it;
       continue;
     }
-    removed += std::min(b, end) - std::max(a, first);
+    removed += base::Min(b, end) - base::Max(a, first);
     it = runs.erase(it);
     if (a < first)
       runs.emplace(a, first);
@@ -82,18 +87,18 @@ u64 EraseRun(std::map<u64, u64>& runs, u64 first, u64 end) {
 }
 
 // The parts of [first, end) no run covers.
-std::vector<std::pair<u64, u64>> Gaps(const std::map<u64, u64>& runs,
+base::Vector<base::Pair<u64, u64>> Gaps(const base::Map<u64, u64>& runs,
                                       u64 first,
                                       u64 end) {
-  std::vector<std::pair<u64, u64>> gaps;
+  base::Vector<base::Pair<u64, u64>> gaps;
   auto it = runs.upper_bound(first);
-  if (it != runs.begin() && std::prev(it)->second > first)
+  if (it != runs.begin() && base::Prev(it)->second > first)
     --it;
   u64 cursor = first;
   for (; it != runs.end() && it->first < end && cursor < end; ++it) {
     if (it->first > cursor)
       gaps.emplace_back(cursor, it->first);
-    cursor = std::max(cursor, it->second);
+    cursor = base::Max(cursor, it->second);
   }
   if (cursor < end)
     gaps.emplace_back(cursor, end);
@@ -146,7 +151,7 @@ bool WriteTracker::Register(u64 first, u64 end) {
     const u64 wide_lo = lo & ~(kRegisterAlign - 1);
     const u64 wide_hi = (hi + kRegisterAlign - 1) & ~(kRegisterAlign - 1);
     bool registered = false;
-    for (const auto& [a, b] : {std::pair{wide_lo, wide_hi}, std::pair{lo, hi}}) {
+    for (const auto& [a, b] : {base::Pair{wide_lo, wide_hi}, base::Pair{lo, hi}}) {
       uffdio_register reg{};
       reg.range.start = a;
       reg.range.len = b - a;
@@ -197,7 +202,7 @@ bool WriteTracker::Arm(u64 base, u64 bytes) {
   u64 wide_first = first, wide_end = end;
   auto next = armed_.lower_bound(first);
   if (next != armed_.begin()) {
-    const auto prev = std::prev(next);
+    const auto prev = base::Prev(next);
     if (prev->second < first && first - prev->second <= kCoalesceGap)
       wide_first = prev->second;
   }
@@ -226,7 +231,7 @@ void WriteTracker::Disarm(u64 first, u64 end) {
 
 // The walk costs ~0.3 us a mapping in [first, end), registered or not, and a
 // few ns a page.
-bool WriteTracker::Scan(u64 first, u64 end, std::vector<Range>& out) {
+bool WriteTracker::Scan(u64 first, u64 end, base::Vector<Range>& out) {
   page_region regions[256];
   pm_scan_arg arg{};
   arg.size = sizeof(arg);
@@ -234,7 +239,7 @@ bool WriteTracker::Scan(u64 first, u64 end, std::vector<Range>& out) {
   arg.start = first;
   arg.end = end;
   arg.vec = reinterpret_cast<u64>(regions);
-  arg.vec_len = std::size(regions);
+  arg.vec_len = base::ArraySize(regions);
   arg.category_mask = PAGE_IS_WRITTEN | PAGE_IS_WPALLOWED;
   arg.return_mask = PAGE_IS_WRITTEN;
   for (;;) {
@@ -243,7 +248,7 @@ bool WriteTracker::Scan(u64 first, u64 end, std::vector<Range>& out) {
       return false;
     for (long i = 0; i < n; i++)
       out.emplace_back(regions[i].start, regions[i].end);
-    if (arg.walk_end >= end || n < static_cast<long>(std::size(regions)))
+    if (arg.walk_end >= end || n < static_cast<long>(base::ArraySize(regions)))
       return true;
     arg.start = arg.walk_end;
   }
@@ -267,16 +272,16 @@ void WriteTracker::Disarm(u64, u64) {}
 long WriteTracker::MinorFaults() {
   return 0;
 }
-bool WriteTracker::Scan(u64, u64, std::vector<Range>&) {
+bool WriteTracker::Scan(u64, u64, base::Vector<Range>&) {
   return false;
 }
 
 #endif
 
-void WriteTracker::Drain(std::vector<Range>& out) {
-  std::vector<Range> remapped;
+void WriteTracker::Drain(base::Vector<Range>& out) {
+  base::Vector<Range> remapped;
   {
-    std::lock_guard lock(noted_lock_);
+    base::LockGuard lock(noted_lock_);
     out.insert(out.end(), noted_.begin(), noted_.end());
     noted_.clear();
     remapped.swap(remapped_);
@@ -314,15 +319,15 @@ u64 WriteTracker::EraseArmed(u64 first, u64 end) {
     --it;
   for (; it != armed_.end() && it->first < end; ++it)
     if (it->second > first)
-      MarkArmed(std::max(first, it->first), std::min(end, it->second), false);
+      MarkArmed(base::Max(first, it->first), base::Min(end, it->second), false);
   return EraseRun(armed_, first, end);
 }
 
-void WriteTracker::Collect(std::vector<Range>& out) {
+void WriteTracker::Collect(base::Vector<Range>& out) {
   if (uffd_ < 0)
     return;
   collects_++;
-  const auto t0 = std::chrono::steady_clock::now();
+  const auto t0 = base::TimeTicks::Now();
   Drain(out);
   const size_t first_new = out.size();
   // A write to an armed page is a page fault, counted in the faulting task's
@@ -360,22 +365,21 @@ void WriteTracker::Collect(std::vector<Range>& out) {
       }
       p->reports++;
     }
-  collect_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                     std::chrono::steady_clock::now() - t0)
-                     .count();
+  collect_ns_ += ((
+                     base::TimeTicks::Now() - t0).InMicroseconds() * 1000);
 }
 
 void WriteTracker::NoteWrite(u64 base, u64 bytes) {
   if (uffd_ < 0 || !bytes)
     return;
-  std::lock_guard lock(noted_lock_);
+  base::LockGuard lock(noted_lock_);
   noted_.emplace_back(PageDown(base), PageUp(base + bytes));
 }
 
 void WriteTracker::NoteRemap(u64 base, u64 bytes) {
   if (uffd_ < 0 || !bytes)
     return;
-  std::lock_guard lock(noted_lock_);
+  base::LockGuard lock(noted_lock_);
   remapped_.emplace_back(PageDown(base), PageUp(base + bytes));
 }
 
@@ -386,7 +390,7 @@ void WriteTracker::EndFrame() {
   // the title rewrites every frame. A copy of it is good for one submission at
   // most, and keeping it armed costs a fault and a scan every frame.
   GuestPageTable& table = GuestPages();
-  std::vector<u64> demote;
+  base::Vector<u64> demote;
   for (u64 page : reported_) {
     const GuestPageTable::Page* p = table.Find(page);
     if (p && (p->reports >= kHotReports || p->previous_report + 1 == frame_))
@@ -394,7 +398,7 @@ void WriteTracker::EndFrame() {
   }
   reported_.clear();
   frame_++;
-  std::sort(demote.begin(), demote.end());
+  base::Sort(demote.begin(), demote.end());
   for (size_t i = 0; i < demote.size();) {
     const u64 first = demote[i];
     u64 end = first + kPage;

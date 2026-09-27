@@ -22,12 +22,12 @@
 #include <cstddef>
 #include "base/arch.h"
 
-#include <vector>
 
 // Spelled from the delta root, the one include convention the layering check
 // (tests/check_layering.py) accepts; all modules share that include root, so
 // internal headers are kept private by the check, not by the build.
 #include "gpu/render/command.h"
+#include <base/containers/vector.h>
 
 namespace gpu::render {
 
@@ -61,7 +61,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci);
 // Compile the pipeline a dispatch of this module over `num_res` resources will
 // need, for that dispatch to pick up (or wait for) instead of compiling it
 // again. Safe from any thread.
-void PrebuildComputePipeline(const std::vector<u32>& spirv,
+void PrebuildComputePipeline(const base::Vector<u32>& spirv,
                              u32 num_res,
                              int guest_memory_binding);
 

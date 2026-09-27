@@ -10,11 +10,12 @@
  */
 
 #include "base/arch.h"
-#include <unordered_map>
-#include <vector>
 
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::rdna {
 
@@ -216,16 +217,16 @@ struct ScalarReplayPlan {
     u32 target;
     u32 source;
   };
-  std::vector<Write> writes;
-  std::vector<BackEdge> back_edges;
-  std::vector<u32> targets;
+  base::Vector<Write> writes;
+  base::Vector<BackEdge> back_edges;
+  base::Vector<u32> targets;
   bool indirect = false;  // s_setpc: control may reach anywhere from anywhere
   // Dominators, not "a branch lands between": a descriptor is routinely built in one
   // if-arm and used at the join. The question is whether the write DOMINATES the use
   // (Astro Bot's frame is largely compute; the blunt test declined its biggest passes).
   static constexpr u32 kNoBlock = ~0u;
-  std::vector<u32> block_of;  // instruction index -> block id
-  std::vector<u32> idom;      // block id -> immediate dominator (entry: self)
+  base::Vector<u32> block_of;  // instruction index -> block id
+  base::Vector<u32> idom;      // block id -> immediate dominator (entry: self)
   bool Dominates(u32 write_index, u32 use_index) const;
 
   // Does the replay hold the live value of sgpr[dwords] at instruction
@@ -279,14 +280,14 @@ bool PlausibleVBuffer(const VBuffer& v);
 // Resolve the live T#/S# each MIMG samples, in binding order. user_sgprs is
 // SPI_SHADER_PGM_RSRC2_*.USER_SGPR: a descriptor inline beyond that window is not
 // user data, just whatever the previous draw left in those registers.
-std::vector<gpu::gcn::TImage> TrackTextures(const u32* ps_code,
+base::Vector<gpu::gcn::TImage> TrackTextures(const u32* ps_code,
                                             const u32* ps_user_data,
                                             u32 user_sgprs,
                                             u32 ud_base = 0,
                                             u64 system_user_data_addr = 0);
 
 // Resolve buffer bases and complete V#s at their consuming instruction PCs.
-std::unordered_map<u32, BufferResource> ResolveBuffers(
+base::HashMap<u32, BufferResource> ResolveBuffers(
     const u32* code,
     const u32* user_data,
     u32 user_sgprs,

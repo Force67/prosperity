@@ -12,10 +12,7 @@
 #include <base/strings/xstring.h>
 #include <base/containers/vector.h>
 
-#include <chrono>
 #include <cstring>
-#include <string>
-#include <thread>
 
 #if defined(__linux__)
 #include <sys/prctl.h>
@@ -31,6 +28,7 @@
 #include "gfx/overlay_log.h"
 #include "gpu/render/renderer.h"
 #include "kern/guest_vaspace.h"
+#include <base/threading/thread.h>
 
 static bool verifyViablity() {
 #ifdef _WIN32
@@ -95,7 +93,7 @@ static void registerPkgAssociation() {
   if (!GetModuleFileNameW(nullptr, exe, MAX_PATH))
     return;
 
-  auto writeKey = [](const wchar_t *sub, const std::wstring &value) {
+  auto writeKey = [](const wchar_t *sub, const base::StringW &value) {
     HKEY key;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, sub, 0, nullptr, 0, KEY_WRITE,
                         nullptr, &key, nullptr) != ERROR_SUCCESS)
@@ -107,7 +105,7 @@ static void registerPkgAssociation() {
   };
 
   writeKey(L"Software\\Classes\\.pkg", L"PS4Delta.pkg");
-  std::wstring cmd = L"\"";
+  base::StringW cmd = L"\"";
   cmd += exe;
   cmd += L"\" \"%1\"";
   writeKey(L"Software\\Classes\\PS4Delta.pkg\\shell\\open\\command", cmd);
@@ -186,7 +184,7 @@ EXPORT int dcoreMain(int argc, char **argv) {
 
   // Block forever; proc runs on a detached thread.
   for (;;) {
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    base::SleepForMilliseconds((1) * 1000);
   }
 
   return 0;

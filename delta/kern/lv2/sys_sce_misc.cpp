@@ -11,7 +11,6 @@
 #include "base/arch.h"
 #include <base/logging.h>
 
-#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -20,6 +19,7 @@
 #include "sys_sce_misc.h"
 #include "kern/proc.h"
 #include <utl/options.h>
+#include <base/atomic.h>
 
 namespace {
 DELTA_OPTION(bool, kAioTrace, "DELTA_AIO_TRACE", false);
@@ -33,7 +33,7 @@ extern int sys_budget_get_ptype();
 
 // Log a message the first time a given handler runs. Used for the stubs whose
 // fakery would silently break if a title actually exercised the subsystem.
-static void logOnce(std::atomic<bool> &flag, const char *msg) {
+static void logOnce(base::Atomic<bool> &flag, const char *msg) {
   if (!flag.exchange(true))
     BASE_LOGI("sce", "{}", msg);
 }
@@ -44,7 +44,7 @@ static void logOnce(std::atomic<bool> &flag, const char *msg) {
 // because that mismatch breaks runtime code generation if a title relies on it.
 i64 PS4ABI sys_jitshm_create(size_t len, u32 flags) {
   (void)flags;
-  static std::atomic<bool> once{false};
+  static base::Atomic<bool> once{false};
   logOnce(once, "jitshm_create returns a raw RWX region, not an fd; JIT may break");
   return (i64)sys_mmap(nullptr, len, 7 /*rwx*/, 0x1000 /*anon*/, -1, 0);
 }
@@ -68,7 +68,7 @@ int PS4ABI sys_dl_notify_event() { return -SysError::eNOSYS; }
 // repeat init, so a second sys_debug_init from the guest is already an error we
 // mirror rather than fake away.
 int PS4ABI sys_debug_init(const int *version) {
-  static std::atomic<bool> once{false};
+  static base::Atomic<bool> once{false};
   if (!version || once.exchange(true))
     return -SysError::eBUSY;
   return 0;
@@ -97,7 +97,7 @@ int PS4ABI sys_opmc_get_hw() { return 0; }
 // an overcommit shows up here first. Args {name@0, ptype@8 (0..3), res@16,
 // nres@24 (0..10), resOut@32}; object = 64 bytes; system ucred only (else 78).
 int PS4ABI sys_budget_create() {
-  static std::atomic<bool> once{false};
+  static base::Atomic<bool> once{false};
   logOnce(once, "budget_create granted unconditionally (no enforcement)");
   return 0x2001;
 }
@@ -131,7 +131,7 @@ int PS4ABI sys_sblock_xexit() { return 0; }
 // name, mtx, cv, waiter list, open-count, attr; trigger sets the pattern and
 // broadcasts; named eports share across processes (attr bit 0x100).
 int PS4ABI sys_eport_create() {
-  static std::atomic<bool> once{false};
+  static base::Atomic<bool> once{false};
   logOnce(once, "eport_create returns a fake handle; events are never delivered");
   return 0x3001;
 }
@@ -227,7 +227,7 @@ i64 PS4ABI sys_blockpool_map(i64 pool, size_t len, u32 prot,
   (void)pool;
   (void)prot;
   (void)flags;
-  static std::atomic<bool> once{false};
+  static base::Atomic<bool> once{false};
   logOnce(once, "blockpool_map backs the pool with a plain anon region");
   return (i64)sys_mmap(nullptr, len, 3 /*rw*/, 0x1000 /*anon*/, -1, 0);
 }
@@ -265,12 +265,12 @@ int PS4ABI sys_get_page_table_stats() { return 0; }
 // synchronous IO. Every AIO entry point funnels here, so the log can't name
 // which one; pair it with FEX_SCTRACE to attribute the call.
 int PS4ABI sys_aio_unsupported() {
-  static std::atomic<int> n{0};
+  static base::Atomic<int> n{0};
   int c = ++n;
   if (kAioTrace && c <= 200)
     BASE_LOGI("aio", "unsupported call #{}", c);
   else {
-    static std::atomic<bool> once{false};
+    static base::Atomic<bool> once{false};
     logOnce(once, "aio unsupported; guest should fall back to sync IO");
   }
   return -SysError::eOPNOTSUPP;

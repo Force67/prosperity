@@ -7,10 +7,10 @@
 
 #include <vulkan/vulkan.h>
 
-#include <memory>
 
 #include "base/arch.h"
 #include "gpu/rhi/device.h"
+#include <base/memory/unique_pointer.h>
 
 namespace gpu::vk {
 
@@ -30,7 +30,7 @@ struct VulkanOptions {
 
 // Null when no usable device exists. Call from a plain host thread: some ICDs
 // misbehave on a guest thread.
-std::unique_ptr<rhi::Device> CreateVulkanDevice(const VulkanOptions& options);
+base::UniquePointer<rhi::Device> CreateVulkanDevice(const VulkanOptions& options);
 
 // The native objects behind the abstraction, for code that has not moved onto
 // it yet. Each takes an object the Vulkan device created.

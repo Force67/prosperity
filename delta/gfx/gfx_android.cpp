@@ -11,17 +11,11 @@
  */
 #if defined(__ANDROID__) && defined(DELTA_ANDROID_APP)
 
-#include <algorithm>
 #include "base/arch.h"
-#include <array>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <mutex>
-#include <utility>
-#include <vector>
 
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <base/logging.h>
@@ -30,6 +24,14 @@
 
 #include "gfx.h"
 #include "gfx_android.h"
+#include <base/algorithm.h>
+#include <base/atomic.h>
+#include <base/containers/array.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace gfx {
 namespace {
@@ -72,13 +74,13 @@ struct State {
   VkExtent2D swapExtent{};
   VkSurfaceTransformFlagBitsKHR preTransform =
       VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-  std::vector<VkImage> swapImages;
+  base::Vector<VkImage> swapImages;
 
   VkCommandPool cmdPool = VK_NULL_HANDLE;
-  std::array<FrameSlot, kFrameSlotCount> slots;
-  std::vector<VkSemaphore> renderSems;
+  base::Array<FrameSlot, kFrameSlotCount> slots;
+  base::Vector<VkSemaphore> renderSems;
   // Semaphores of a replaced swapchain; see retireRenderSemaphores.
-  std::vector<VkSemaphore> retiredRenderSems;
+  base::Vector<VkSemaphore> retiredRenderSems;
   u32 nextSlot = 0;
 
   // Framebuffer dimensions shared by the per-slot upload resources.
@@ -89,18 +91,18 @@ struct State {
   bool ready = false;
 };
 State g;
-std::atomic_bool g_presentFailed{false};
-std::atomic_bool g_presentStopRequested{false};
+base::Atomic<bool> g_presentFailed{false};
+base::Atomic<bool> g_presentStopRequested{false};
 constexpr u64 kPresentWaitSliceNs = 50'000'000;
 
 void stopPresenting(const char *operation, VkResult result) {
   BASE_LOGI("gfx-android", "{} failed: VkResult={}", operation, (int)result);
-  g_presentFailed.store(true, std::memory_order_release);
+  g_presentFailed.store(true, base::memory_order_release);
 }
 
 bool waitForPresentFence(VkFence fence, const char *operation) {
-  while (!g_presentFailed.load(std::memory_order_acquire) &&
-         !g_presentStopRequested.load(std::memory_order_acquire)) {
+  while (!g_presentFailed.load(base::memory_order_acquire) &&
+         !g_presentStopRequested.load(base::memory_order_acquire)) {
     const VkResult result =
         vkWaitForFences(g.device, 1, &fence, VK_TRUE, kPresentWaitSliceNs);
     if (result == VK_SUCCESS)
@@ -114,7 +116,7 @@ bool waitForPresentFence(VkFence fence, const char *operation) {
 }
 
 // Window handle + touch state published by android_main (other thread).
-std::mutex g_inMutex;
+base::Mutex g_inMutex;
 ANativeWindow *g_pendingWindow = nullptr;
 bool g_windowChanged = false;
 constexpr int kMaxTouch = 8;
@@ -174,10 +176,10 @@ PadKeys computePad() {
     // centre.
     const Stick &s = (nx < 0.5f) ? kLStick : kRStick;
     float dx = (nx - s.cx) / s.r, dy = (ny - s.cy) / s.r;
-    dx = std::clamp(dx, -1.0f, 1.0f);
-    dy = std::clamp(dy, -1.0f, 1.0f);
-    u8 vx = u8(std::clamp(128.0f + dx * 127.0f, 0.0f, 255.0f));
-    u8 vy = u8(std::clamp(128.0f + dy * 127.0f, 0.0f, 255.0f));
+    dx = base::Clamp(dx, -1.0f, 1.0f);
+    dy = base::Clamp(dy, -1.0f, 1.0f);
+    u8 vx = u8(base::Clamp(128.0f + dx * 127.0f, 0.0f, 255.0f));
+    u8 vy = u8(base::Clamp(128.0f + dy * 127.0f, 0.0f, 255.0f));
     if (nx < 0.5f) {
       k.lx = vx;
       k.ly = vy;
@@ -216,10 +218,10 @@ void glyph(u8 *buf, int w, int h, bool bgra, float xr, float yr, float fx,
            float a) {
   float cx = fx * w, cy = fy * h;
   float rx = sr * xr, ry = sr * yr; // px radii (round on screen)
-  int x0 = std::max(0, int(cx - rx - 1)),
-      x1 = std::min(w - 1, int(cx + rx + 1));
-  int y0 = std::max(0, int(cy - ry - 1)),
-      y1 = std::min(h - 1, int(cy + ry + 1));
+  int x0 = base::Max(0, int(cx - rx - 1)),
+      x1 = base::Min(w - 1, int(cx + rx + 1));
+  int y0 = base::Max(0, int(cy - ry - 1)),
+      y1 = base::Min(h - 1, int(cy + ry + 1));
   for (int y = y0; y <= y1; y++)
     for (int x = x0; x <= x1; x++) {
       float ex = (x - cx) / rx, ey = (y - cy) / ry;
@@ -234,7 +236,7 @@ void drawOverlay(u8 *buf, u32 w, u32 h, bool bgra) {
   int n;
   u32 sw, sh;
   {
-    std::lock_guard<std::mutex> lk(g_inMutex);
+    base::LockGuard<base::Mutex> lk(g_inMutex);
     n = g_touchCount;
     std::memcpy(t, g_touches, sizeof(Touch) * (n < kMaxTouch ? n : kMaxTouch));
     sw = g_surfaceW;
@@ -282,8 +284,8 @@ void drawOverlay(u8 *buf, u32 w, u32 h, bool bgra) {
       bool mine = (s == &kLStick) ? (nx < 0.5f) : (nx >= 0.5f);
       if (!mine)
         continue;
-      float dx = std::clamp((nx - s->cx) / s->r, -1.0f, 1.0f);
-      float dy = std::clamp((ny - s->cy) / s->r, -1.0f, 1.0f);
+      float dx = base::Clamp((nx - s->cx) / s->r, -1.0f, 1.0f);
+      float dy = base::Clamp((ny - s->cy) / s->r, -1.0f, 1.0f);
       dotx = s->cx + dx * s->r;
       doty = s->cy + dy * s->r;
     }
@@ -333,12 +335,12 @@ void destroyRenderSemaphores() {
 void retireRenderSemaphores() {
   for (VkSemaphore sem : g.retiredRenderSems)
     vkDestroySemaphore(g.device, sem, nullptr);
-  g.retiredRenderSems = std::move(g.renderSems);
+  g.retiredRenderSems = base::move(g.renderSems);
   g.renderSems.clear();
 }
 
 bool createRenderSemaphores(u32 count,
-                            std::vector<VkSemaphore> &semaphores) {
+                            base::Vector<VkSemaphore> &semaphores) {
   VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
   semaphores.resize(count);
   for (VkSemaphore &sem : semaphores) {
@@ -360,7 +362,7 @@ bool createSwapchain() {
 
   u32 nfmt = 0;
   vkGetPhysicalDeviceSurfaceFormatsKHR(g.phys, g.surface, &nfmt, nullptr);
-  std::vector<VkSurfaceFormatKHR> fmts(nfmt);
+  base::Vector<VkSurfaceFormatKHR> fmts(nfmt);
   vkGetPhysicalDeviceSurfaceFormatsKHR(g.phys, g.surface, &nfmt, fmts.data());
   VkSurfaceFormatKHR chosen = fmts[0];
   for (auto &f : fmts)
@@ -391,16 +393,16 @@ bool createSwapchain() {
     ext.height = (u32)ANativeWindow_getHeight(g.window);
   }
   if (g.preTransform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR && preRotated)
-    std::swap(ext.width, ext.height);
+    base::Swap(ext.width, ext.height);
   if (ext.width == 0 || ext.height == 0)
     return false;
   g.swapExtent = ext;
   {
     // Input + overlay work in the on-screen (landscape) space, which may differ
     // from the swapchain extent when the compositor is rotating for us.
-    std::lock_guard<std::mutex> lk(g_inMutex);
-    g_surfaceW = std::max(ext.width, ext.height);
-    g_surfaceH = std::min(ext.width, ext.height);
+    base::LockGuard<base::Mutex> lk(g_inMutex);
+    g_surfaceW = base::Max(ext.width, ext.height);
+    g_surfaceH = base::Min(ext.width, ext.height);
   }
 
   u32 imgCount = caps.minImageCount + 1;
@@ -449,9 +451,9 @@ bool createSwapchain() {
 
   u32 n = 0;
   vkGetSwapchainImagesKHR(g.device, newSwap, &n, nullptr);
-  std::vector<VkImage> newImages(n);
+  base::Vector<VkImage> newImages(n);
   vkGetSwapchainImagesKHR(g.device, newSwap, &n, newImages.data());
-  std::vector<VkSemaphore> newRenderSems;
+  base::Vector<VkSemaphore> newRenderSems;
   if (!createRenderSemaphores(n, newRenderSems)) {
     discardRetiredSwapchain();
     vkDestroySwapchainKHR(g.device, newSwap, nullptr);
@@ -573,13 +575,13 @@ bool bringUp() {
     BASE_LOGI("gfx-android", "no Vulkan physical devices");
     return false;
   }
-  std::vector<VkPhysicalDevice> phs(nphys);
+  base::Vector<VkPhysicalDevice> phs(nphys);
   vkEnumeratePhysicalDevices(g.instance, &nphys, phs.data());
   bool found = false;
   for (auto pd : phs) {
     u32 nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, nullptr);
-    std::vector<VkQueueFamilyProperties> qf(nq);
+    base::Vector<VkQueueFamilyProperties> qf(nq);
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qf.data());
     for (u32 i = 0; i < nq; i++) {
       VkBool32 present = VK_FALSE;
@@ -627,7 +629,7 @@ bool bringUp() {
   cbi.commandPool = g.cmdPool;
   cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   cbi.commandBufferCount = kFrameSlotCount;
-  std::array<VkCommandBuffer, kFrameSlotCount> commands{};
+  base::Array<VkCommandBuffer, kFrameSlotCount> commands{};
   VK_CHECK(vkAllocateCommandBuffers(g.device, &cbi, commands.data()));
 
   VkSemaphoreCreateInfo si2{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -679,7 +681,7 @@ void teardown() {
   ANativeWindow *keep = g.window;
   g = State{};
   g.window = keep;
-  g_presentFailed.store(false, std::memory_order_release);
+  g_presentFailed.store(false, base::memory_order_release);
 }
 
 } // namespace
@@ -701,36 +703,36 @@ bool available() {
 }
 
 bool canPresent() {
-  std::lock_guard<std::mutex> lk(g_inMutex);
-  return !g_presentStopRequested.load(std::memory_order_acquire) &&
+  base::LockGuard<base::Mutex> lk(g_inMutex);
+  return !g_presentStopRequested.load(base::memory_order_acquire) &&
          (g_windowChanged ||
-          !g_presentFailed.load(std::memory_order_acquire)) &&
+          !g_presentFailed.load(base::memory_order_acquire)) &&
          (g_pendingWindow != nullptr || g.window != nullptr);
 }
 
 void requestPresentStop() {
-  g_presentStopRequested.store(true, std::memory_order_release);
+  g_presentStopRequested.store(true, base::memory_order_release);
 }
 
 bool ensure(const char *, u32, u32) {
   // Adopt any window change published by android_main (this thread owns
   // Vulkan).
   {
-    std::lock_guard<std::mutex> lk(g_inMutex);
+    base::LockGuard<base::Mutex> lk(g_inMutex);
     if (g_windowChanged) {
       g_windowChanged = false;
       if (g_pendingWindow != g.window ||
-          g_presentFailed.load(std::memory_order_acquire)) {
+          g_presentFailed.load(base::memory_order_acquire)) {
         if (g.instance)
           teardown(); // resets g, preserves g.window
         else
-          g_presentFailed.store(false, std::memory_order_release);
+          g_presentFailed.store(false, base::memory_order_release);
         g.window = g_pendingWindow;
       }
     }
   }
-  if (g_presentFailed.load(std::memory_order_acquire) ||
-      g_presentStopRequested.load(std::memory_order_acquire))
+  if (g_presentFailed.load(base::memory_order_acquire) ||
+      g_presentStopRequested.load(base::memory_order_acquire))
     return false;
   if (!g.window)
     return false;
@@ -747,8 +749,8 @@ bool ensure(const char *, u32, u32) {
 
 void present(const void *pixels, u32 w, u32 h, u32 srcPitch,
              PixelFormat fmt) {
-  if (g_presentFailed.load(std::memory_order_acquire) ||
-      g_presentStopRequested.load(std::memory_order_acquire) || !g.device ||
+  if (g_presentFailed.load(base::memory_order_acquire) ||
+      g_presentStopRequested.load(base::memory_order_acquire) || !g.device ||
       !g.swapchain || !pixels || !w || !h)
     return;
   if (g.needRecreate && !createSwapchain())
@@ -785,9 +787,9 @@ void present(const void *pixels, u32 w, u32 h, u32 srcPitch,
     ar = vkAcquireNextImageKHR(g.device, g.swapchain, kPresentWaitSliceNs,
                                slot.acquireSem, slot.acquireFence, &idx);
   } while (ar == VK_TIMEOUT &&
-           !g_presentFailed.load(std::memory_order_acquire) &&
-           !g_presentStopRequested.load(std::memory_order_acquire));
-  if (g_presentStopRequested.load(std::memory_order_acquire))
+           !g_presentFailed.load(base::memory_order_acquire) &&
+           !g_presentStopRequested.load(base::memory_order_acquire));
+  if (g_presentStopRequested.load(base::memory_order_acquire))
     return;
   if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
     g.needRecreate = true;
@@ -890,7 +892,7 @@ void present(const void *pixels, u32 w, u32 h, u32 srcPitch,
 bool pumpEvents() { return true; }
 
 bool pollKeyboardPad(PadKeys &out) {
-  std::lock_guard<std::mutex> lk(g_inMutex);
+  base::LockGuard<base::Mutex> lk(g_inMutex);
   out = computePad();
   return true;
 }
@@ -904,13 +906,13 @@ void shutdown() { teardown(); }
 void queryVram(u64 &used, u64 &total) { used = total = 0; }
 
 void setAndroidWindow(ANativeWindow *window) {
-  std::lock_guard<std::mutex> lk(g_inMutex);
+  base::LockGuard<base::Mutex> lk(g_inMutex);
   g_pendingWindow = window;
   g_windowChanged = true;
 }
 
 void setAndroidTouches(const Touch *pts, int count) {
-  std::lock_guard<std::mutex> lk(g_inMutex);
+  base::LockGuard<base::Mutex> lk(g_inMutex);
   g_touchCount = count < 0 ? 0 : (count > kMaxTouch ? kMaxTouch : count);
   for (int i = 0; i < g_touchCount; i++)
     g_touches[i] = pts[i];

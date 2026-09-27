@@ -10,8 +10,8 @@
 
 
 #include "gpu/rhi/device.h"
-#include <vector>
 #include "base/arch.h"
+#include <base/containers/vector.h>
 
 
 namespace gpu::render {
@@ -27,11 +27,11 @@ struct FrameSlot {
     u32 draws;
   };
   rhi::TimestampPool* pass_timestamps = nullptr;
-  std::vector<PassMark> pass_marks;
+  base::Vector<PassMark> pass_marks;
   rhi::Buffer* readback = nullptr;
   // Chunks of this frame submitted early (SubmitFrameChunk), recycled once
   // the slot's submission has retired.
-  std::vector<rhi::CommandList*> chunks;
+  base::Vector<rhi::CommandList*> chunks;
   bool submitted = false;    // submitted and not yet waited
   bool presentable = false;  // the frame copied pixels into `readback`
   bool present_to_window = false;

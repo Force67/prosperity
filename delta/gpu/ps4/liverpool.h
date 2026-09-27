@@ -15,8 +15,8 @@
  * https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_sh_mask.h
  */
 
-#include <array>
 #include "base/arch.h"
+#include <base/containers/array.h>
 
 namespace gpu {
 
@@ -165,7 +165,7 @@ constexpr u32 mmCOMPUTE_USER_DATA_0 = 0x2E40;  // 16 user-data SGPRs
 
 // The full GPU register state. A draw is rendered from a snapshot of this.
 struct Regs {
-  std::array<u32, kRegFileSize> data{};
+  base::Array<u32, kRegFileSize> data{};
 
   u32& operator[](u32 off) { return data[off]; }
   u32 operator[](u32 off) const {

@@ -7,8 +7,9 @@
 
 #include "gpu/gpu_check.h"
 
-#include <algorithm>
 #include <limits>
+#include <base/algorithm.h>
+#include <base/math/value_bounds.h>
 
 namespace gpu::vk {
 
@@ -52,7 +53,7 @@ void MemorySpanAllocator::Free(u64 offset, u64 size) {
   if (!size || offset > std::numeric_limits<u64>::max() - size)
     return;
   free_.push_back({offset, size});
-  std::sort(free_.begin(), free_.end(),
+  base::Sort(free_.begin(), free_.end(),
             [](const MemorySpan& a, const MemorySpan& b) {
               return a.offset < b.offset;
             });
@@ -65,7 +66,7 @@ void MemorySpanAllocator::Free(u64 offset, u64 size) {
                      free_[out - 1].offset + free_[out - 1].size <= span.offset,
                  "double free: span overlaps an already-free span");
     if (out && free_[out - 1].offset + free_[out - 1].size >= span.offset) {
-      const u64 end = std::max(free_[out - 1].offset + free_[out - 1].size,
+      const u64 end = base::Max(free_[out - 1].offset + free_[out - 1].size,
                                     span.offset + span.size);
       free_[out - 1].size = end - free_[out - 1].offset;
     } else {

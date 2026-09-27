@@ -7,9 +7,9 @@
  */
 
 #include "base/arch.h"
-#include <vector>
 
 #include "gpu/gcn/gcn_decode.h"
+#include <base/containers/vector.h>
 
 namespace gpu::gcn {
 
@@ -90,7 +90,7 @@ inline bool WaveSplitsAcrossSubgroups() {
 
 // Barriers a 64-thread group can omit on GCN but a split host subgroup needs.
 struct LdsBarrierPlan {
-  std::vector<u32> at;  // barrier points in straight-line shaders
+  base::Vector<u32> at;  // barrier points in straight-line shaders
   bool lockstep = false;  // branchy shaders: barrier per dispatch-loop iteration
 };
 LdsBarrierPlan PlanLdsBarriers(const Program& program,
@@ -98,7 +98,7 @@ LdsBarrierPlan PlanLdsBarriers(const Program& program,
                                u32 threads_per_group);
 
 // Per instruction: does every invocation reach it on the same iteration?
-std::vector<u8> UniformPoints(const Program& program);
+base::Vector<u8> UniformPoints(const Program& program);
 
 // Raw MUBUF buffer (hand-fetched vertex data, skinning, instance tables) at
 // set 2; the V# may have arrived via SRT, hence srsrc_sgpr/use_pc.
@@ -142,22 +142,22 @@ struct Recompiled {
   bool ok = false;
   bool guest_gs = false;  // gs_spirv is the guest's GS, bound for every prim
   bool writes_layer = false;  // the GS picks the target slice (gl_Layer)
-  std::vector<u32> vs_spirv;  // emitted directly from GCN
-  std::vector<u32> mesh_spirv;  // merged NGG geometry, replaces VS/GS
+  base::Vector<u32> vs_spirv;  // emitted directly from GCN
+  base::Vector<u32> mesh_spirv;  // merged NGG geometry, replaces VS/GS
   u32 mesh_input_primitives = 1;  // input primitives consumed per workgroup
   u32 mesh_threads = 0, mesh_shared_bytes = 0;
   u32 mesh_vertices = 0, mesh_primitives = 0;
   bool indirect_cbufs = false;
-  std::vector<u32> gs_spirv;  // fixed RECTLIST expansion stage
-  std::vector<u32> fs_spirv;
-  std::vector<ShaderAttr> attrs;     // vertex inputs
-  std::vector<ShaderCbuf> vs_cbufs;  // VS UBOs (set 1, binding = .binding)
-  std::vector<ShaderCbuf> gs_cbufs;  // guest GS UBOs, numbered after the VS's
-  std::vector<ShaderCbuf> ps_cbufs;  // PS UBOs (set 1, binding = .binding)
-  std::vector<ShaderBuffer> vs_bufs;  // VS raw buffers (set 2, = .binding)
-  std::vector<ShaderBuffer> ps_bufs;  // PS raw buffers (set 2, = .binding)
-  std::vector<ShaderTex> ps_texs;    // PS samplers (set 0, binding = .binding)
-  std::vector<ShaderTex> vs_texs;  // vertex texture fetch, numbered after ps_texs
+  base::Vector<u32> gs_spirv;  // fixed RECTLIST expansion stage
+  base::Vector<u32> fs_spirv;
+  base::Vector<ShaderAttr> attrs;     // vertex inputs
+  base::Vector<ShaderCbuf> vs_cbufs;  // VS UBOs (set 1, binding = .binding)
+  base::Vector<ShaderCbuf> gs_cbufs;  // guest GS UBOs, numbered after the VS's
+  base::Vector<ShaderCbuf> ps_cbufs;  // PS UBOs (set 1, binding = .binding)
+  base::Vector<ShaderBuffer> vs_bufs;  // VS raw buffers (set 2, = .binding)
+  base::Vector<ShaderBuffer> ps_bufs;  // PS raw buffers (set 2, = .binding)
+  base::Vector<ShaderTex> ps_texs;    // PS samplers (set 0, binding = .binding)
+  base::Vector<ShaderTex> vs_texs;  // vertex texture fetch, numbered after ps_texs
   u32 num_params = 0;           // VS->PS interpolants (locations 0..n-1)
   u8 ps_mrt_mask = 0;           // bit n set = PS exports MRT color n
   bool shared_lds = false;  // VS LDS lives in the set-3 per-wave buffer
@@ -216,8 +216,8 @@ struct CsResource {
 // A recompiled compute shader; the cache key includes workgroup shape + RSRC2 state.
 struct RecompiledCs {
   bool ok = false;
-  std::vector<u32> spirv;
-  std::vector<CsResource> resources;
+  base::Vector<u32> spirv;
+  base::Vector<CsResource> resources;
   u32 local_size[3] = {1, 1, 1};  // threads per workgroup
   int gds_binding = -1;  // GDS scratchpad (ds_append/consume), not guest memory
   int guest_memory_binding = -1;
@@ -244,7 +244,7 @@ struct ImageTilingParams {
   u32 depth16;
 };
 
-std::vector<u32> BuildImageTilingShader();
+base::Vector<u32> BuildImageTilingShader();
 
 // Diagnostic: disassemble the shader at a guest address (they move between runs).
 void DisassembleAt(u64 code_address, const char* tag);

@@ -24,21 +24,24 @@
 #include "gpu/render/trace.h"
 #include "gpu/render/upload_ring.h"
 
-#include <algorithm>
-#include <iterator>
-#include <chrono>
-#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
+#include <base/containers/array.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
 #include <utl/mem.h>
 #include <utl/options.h>
-#include <unordered_map>
 #include <base/containers/unordered_map.h>
+#include <base/algorithm.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kNoWipe, "DELTA_GPU_NOWIPE", true);
@@ -165,7 +168,7 @@ struct StageCache {
   base::UnorderedMap<StageCacheKey, Entry, StageCacheKeyHash> map;
   // Tracked keys by the 64 KiB blocks they cover. May hold keys since dropped
   // or re-inserted: Invalidate rechecks each against the map.
-  std::unordered_map<u64, std::vector<StageCacheKey>> blocks;
+  base::HashMap<u64, base::Vector<StageCacheKey>> blocks;
   int frame = -1;
   u32 dcb = 0;
 
@@ -211,7 +214,7 @@ struct StageCache {
         blocks[b].push_back(key);
   }
   void Invalidate(u64 first, u64 end) {
-    const auto drop = [&](const std::vector<StageCacheKey>& keys) {
+    const auto drop = [&](const base::Vector<StageCacheKey>& keys) {
       for (const StageCacheKey& key : keys) {
         Entry* e = map.find(key);
         if (e && key.base < end && first < key.base + e->bytes)
@@ -244,7 +247,7 @@ struct GpuStaged {
   u64 rev = 0;
   int frame = -1;
 };
-std::unordered_map<u64, GpuStaged> g_sbo_gpu;
+base::HashMap<u64, GpuStaged> g_sbo_gpu;
 
 // Drops every tracked entry the guest has written since the last call. Runs
 // when a new submission starts and whenever compute results have landed in
@@ -292,7 +295,7 @@ u32 g_collect_dcb = 0;
 }  // namespace
 
 void CollectGuestWrites() {
-  static std::vector<gpu::WriteTracker::Range> written;
+  static base::Vector<gpu::WriteTracker::Range> written;
   if (!gpu::GuestWriteTracker().enabled())
     return;
   g_collect_frame = g_frame.num;
@@ -360,8 +363,8 @@ bool ShaderFilterDrops(u64 ps_addr) {
   }();
   if (kSkipPs && ps_addr == kSkipPs)
     return true;
-  static const std::vector<u64> kOnlyPs = [] {
-    std::vector<u64> out;
+  static const base::Vector<u64> kOnlyPs = [] {
+    base::Vector<u64> out;
     if (const char* e = std::getenv("DELTA_GPU_ONLY_PS"))
       for (const char* p = e; *p;) {
         while (*p == ',' || *p == ' ')
@@ -473,13 +476,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         d.recomp->mesh_primitives > limits.max_output_primitives)
       return Decline(kNoRecomp);
     const u32 groups = (draw_count - 1) / d.recomp->mesh_input_primitives + 1;
-    const u32 instances = std::max(d.instance_count, 1u);
+    const u32 instances = base::Max(d.instance_count, 1u);
     if (groups > limits.max_groups[0] || instances > limits.max_groups[1] ||
         u64(groups) * instances > limits.max_total_groups)
       return Decline(kNoRecomp);
   }
   const bool has_storage_image =
-      std::any_of(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
+      base::AnyOf(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
                   [](const gcn::ShaderTex& tex) { return tex.storage; });
   if (!d.mrt_count && !d.depth_base && !has_storage_image) {
     // DELTA_GPU_DECLTRACE: a draw with no target at all. Legitimate for a
@@ -494,7 +497,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                 (unsigned long)d.ps_addr, (unsigned long)d.tex_base,
                 d.index_count, d.vertex_count, d.target_mask,
                 d.recomp->ps_texs.size(),
-                (size_t)std::count_if(d.recomp->ps_texs.begin(),
+                (size_t)base::CountIf(d.recomp->ps_texs.begin(),
                                       d.recomp->ps_texs.end(),
                                       [](const gcn::ShaderTex& t) {
                                         return t.storage;
@@ -804,16 +807,15 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       return e ? std::strtoull(e, nullptr, 0) : 0ull;
     }();
     // The menu floods the early run, so hold off until the level is up.
-    static const auto kVtxStart = std::chrono::steady_clock::now();
+    static const auto kVtxStart = base::TimeTicks::Now();
     static const int kVtxAfter = [] {
       const char* e = std::getenv("DELTA_GPU_VTXTRACE_AFTER");
       return e ? std::atoi(e) : 0;
     }();
     static int vtx_n = 0;
     if (kVtxRt && d.rt_base == kVtxRt && vtx_n < 40 &&
-        std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - kVtxStart)
-                .count() >= kVtxAfter) {
+        (
+            base::TimeTicks::Now() - kVtxStart).InSeconds() >= kVtxAfter) {
       vtx_n++;
       base::String line;
       base::FormatTo(line, "f{} draw#{} rt={:#x} nv={} stride={} attrs={}",
@@ -918,7 +920,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         if (rt) {
           // Counted, not sampled.
           if (kClearTrace) {
-            static std::atomic<u64> n{0};
+            static base::Atomic<u64> n{0};
             if ((n.fetch_add(1) % 500) == 0)
               BASE_LOGI("clear",
                         "lazyclear-heuristic #{} rt={:#x} mrt={} "
@@ -981,7 +983,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // bindings are 16-byte aligned so no attribute straddles a coarse boundary.
   // A binding whose guest range is already staged this frame reuses that copy
   // (vb_cached[j]) and takes no ring space at all.
-  const u32 nbind = d.num_vattrs ? std::min(d.num_vbufs, 8u) : 0;
+  const u32 nbind = d.num_vattrs ? base::Min(d.num_vbufs, 8u) : 0;
   u64 bind_off[8] = {}, bind_size[8] = {};
   u64 vb_cached[8] = {};
   // Bindings served from the cross-frame buffer cache (buffer set).
@@ -990,7 +992,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   for (u32 j = 0; j < nbind; j++) {
     if (d.vbufs[j].stride) {
       const u32 records = d.vbufs[j].per_instance
-                              ? std::max(1u, d.instance_count)
+                              ? base::Max(1u, d.instance_count)
                               : nv;
       bind_size[j] = (u64)records * d.vbufs[j].stride;
     } else {
@@ -1000,7 +1002,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       u32 rec = 0;
       for (u32 a = 0; a < d.num_vattrs; a++)
         if (d.vattrs[a].binding == j)
-          rec = std::max(
+          rec = base::Max(
               rec, d.vattrs[a].offset + VertexFormatBytes(d.vattrs[a].dfmt));
       bind_size[j] = rec;
     }
@@ -1107,10 +1109,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   rhi::TextureView* multi_views[kMaxTex] = {};
   rhi::TextureState multi_layouts[kMaxTex];
   bool multi_transition_source = false;
-  u32 multi_n = std::min(d.num_texs, kMaxTex);
+  u32 multi_n = base::Min(d.num_texs, kMaxTex);
   if (rp->multi_tex) {
     auto is_bound_target = [&](u64 base) {
-      u32 count = std::min(d.mrt_count, 8u);
+      u32 count = base::Min(d.mrt_count, 8u);
       for (u32 m = 0; m < count; m++)
         if (d.mrt_base[m] == base)
           return true;
@@ -1333,11 +1335,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // memory below (a fence wait and a readback each). GTA:SA reads one 4 MiB
   // compute output this way six times a frame.
   u64 raw_gpu_off[kRawBufBindings];
-  std::fill(std::begin(raw_gpu_off), std::end(raw_gpu_off), u64(-1));
+  base::Fill(raw_gpu_off, raw_gpu_off + base::ArraySize(raw_gpu_off), u64(-1));
   if (rp->raw_bufs && EnsureRawBufferRing()) {
     for (u32 i = 0; i < kRawBufBindings; i++) {
       const auto& rb = d.bufs[i];
-      const u32 want = std::min(rb.size, kRawBufWindow);
+      const u32 want = base::Min(rb.size, kRawBufWindow);
       const u64 rev = want ? CsBufferRevision(rb.base, want) : 0;
       if (!rev)
         continue;
@@ -1376,7 +1378,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // with nothing to say it belongs to one; write it through once a later slice
   // shows that it does.
   if (d.rt_array_base) {
-    static std::unordered_map<u64, int> written_frame;
+    static base::HashMap<u64, int> written_frame;
     const auto first = g_rts.find(d.rt_array_base);
     int& frame = written_frame[d.rt_array_base];
     if (first != g_rts.end() && first->second.last_frame == g_frame.num &&
@@ -1385,7 +1387,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       WriteRtToGuest(d.rt_array_base, d.rt_tile_mode);
     }
   }
-  u32 mrt_n = std::min(d.mrt_count, 8u);
+  u32 mrt_n = base::Min(d.mrt_count, 8u);
   bool transition_source =
       rp->multi_tex
           ? multi_transition_source
@@ -1667,7 +1669,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   list->SetPushConstants(0, 64, d.vs_user_data);
   list->SetPushConstants(64, 64, d.ps_user_data);
   if (mesh) {
-    const u32 mesh_draw[4] = {draw_count, std::max(d.instance_count, 1u), 0, 0};
+    const u32 mesh_draw[4] = {draw_count, base::Max(d.instance_count, 1u), 0, 0};
     list->SetPushConstants(144, 16, mesh_draw);
   }
   if (gpu::gcn::PushCodeBase()) {
@@ -1707,7 +1709,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   u64 next = cb_off;
   for (u32 i = 0; i < cbuf_count; i++) {
     const auto& cb = d.cbufs[i];
-    const u32 readable = std::min(cb.size, kCbufWindow);
+    const u32 readable = base::Min(cb.size, kCbufWindow);
     const bool have_cbuf = readable && IsReadableThisFrame(cb.base, readable);
     if (have_cbuf)
       cbuf_mask |= i < 32 ? 1u << i : 0;
@@ -1724,8 +1726,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       const u32 planned = cb.size < kCbufWindow ? cb.size : kCbufWindow;
       const u64 page_end = (cb.base + 0x1000) & ~u64{0xFFF};
       const u32 avail = static_cast<u32>(
-          std::min<u64>(kCbufWindow, page_end - cb.base));
-      cache_n = kTightCbuf ? planned : std::max(planned, avail);
+          base::Min<u64>(kCbufWindow, page_end - cb.base));
+      cache_n = kTightCbuf ? planned : base::Max(planned, avail);
       if (kRingDedup) {
         const u64 cached = StagedOffset(g_ubo_staged.Find(cb.base, cache_n));
         if (cached != u64(-1)) {
@@ -1826,7 +1828,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     u32 sbo_dyn[kRawBufBindings] = {};
     for (u32 i = 0; i < kRawBufBindings; i++) {
       const auto& rb = d.bufs[i];
-      const u32 want = std::min(rb.size, kRawBufWindow);
+      const u32 want = base::Min(rb.size, kRawBufWindow);
       if (!want || !IsReadableThisFrame(rb.base, want))
         continue;  // unresolved descriptor: the shared zero window at offset 0
       // Same per-frame cache as the vertex/index/cbuffer rings. Unlike
@@ -2087,7 +2089,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       const u64* rc = rp->multi_tex ? multi_color : shown_color;
       const u64* rf = rp->multi_tex ? multi_feedback : shown_feedback;
       const u64* rd = rp->multi_tex ? multi_depth : shown_depth;
-      const u32 shown_n = rp->multi_tex ? multi_n : std::min(multi_n, 1u);
+      const u32 shown_n = rp->multi_tex ? multi_n : base::Min(multi_n, 1u);
       // How many textures the recompiler found vs how many are being reported:
       // a shader with several image_samples that took the single-texture path
       // reads only the first, and the trace would look identical to a genuine
@@ -2170,13 +2172,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // A pass that covers the screen with the wrong colour is either drawing
       // the wrong geometry or reading the wrong attributes, and only the bytes
       // behind the attribute say which.
-      for (u32 j = 0; j < std::min(d.num_vbufs, 4u); j++) {
+      for (u32 j = 0; j < base::Min(d.num_vbufs, 4u); j++) {
         const auto& vb = d.vbufs[j];
         if (!vb.data || !gpu::IsReadableRange((u64)(uintptr_t)vb.data, 64))
           continue;
         base::String bytes;
         const auto* p = static_cast<const u8*>(vb.data);
-        for (u32 b = 0; b < std::min<u32>(vb.stride ? vb.stride : 16, 48); b++)
+        for (u32 b = 0; b < base::Min<u32>(vb.stride ? vb.stride : 16, 48); b++)
           base::FormatTo(bytes, "{:02x}", p[b]);
         BASE_LOGI("drawrt", " vb{} @{:#x} stride={} v0={}", j,
                   (unsigned long)(uintptr_t)vb.data, vb.stride, bytes.c_str());
@@ -2215,7 +2217,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                 vb.stride ? (u64)vb.stride * vb.num_records : vb.num_records;
             if (!vb.base || !bytes)
               continue;
-            const u32 scan = static_cast<u32>(std::min<u64>(bytes, 4096));
+            const u32 scan = static_cast<u32>(base::Min<u64>(bytes, 4096));
             int nz = -1;
             if (gpu::IsReadableRange(vb.base, scan)) {
               nz = 0;
@@ -2253,7 +2255,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
       // A shader that fetches its own vertices reads a raw buffer instead of a
       // vertex binding, so vb0 above says nothing about the geometry it draws.
-      for (u32 j = 0; j < std::min(d.num_bufs, kRawBufBindings); j++) {
+      for (u32 j = 0; j < base::Min(d.num_bufs, kRawBufBindings); j++) {
         const auto& rb = d.bufs[j];
         if (!rb.base || !gpu::IsReadableRange(rb.base, 16))
           continue;
@@ -2289,7 +2291,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         base::String idx;
         const auto* p16 = static_cast<const u16*>(d.index_data);
         const auto* p32 = static_cast<const u32*>(d.index_data);
-        for (u32 k = 0; k < std::min(d.index_count, 8u); k++)
+        for (u32 k = 0; k < base::Min(d.index_count, 8u); k++)
           base::FormatTo(idx, " {}", d.index_type == 1 ? p32[k] : p16[k]);
         BASE_LOGI("drawrt", " idx @{:#x} type={} :{}",
                   (unsigned long)(uintptr_t)d.index_data, d.index_type,
@@ -2297,10 +2299,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
       // Only the slots this draw actually declared: the rest are unused
       // array entries, and reporting them buries the one that matters.
-      for (u32 c = 0; c < std::min<u32>(d.num_cbufs, kCbufBindings);
+      for (u32 c = 0; c < base::Min<u32>(d.num_cbufs, kCbufBindings);
            c++) {
         const auto& cb = d.cbufs[c];
-        if (!gpu::IsReadableRange(cb.base, std::min(cb.size, 192u))) {
+        if (!gpu::IsReadableRange(cb.base, base::Min(cb.size, 192u))) {
           // Say so rather than skipping: a silently absent binding reads as a
           // pass with fewer constant buffers than it has, and a shader whose
           // transform lives in the missing one draws with a zero matrix.

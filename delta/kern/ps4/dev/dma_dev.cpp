@@ -10,13 +10,10 @@
 #include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
-#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <vector>
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -25,6 +22,9 @@
 #include "kern/lv2/sys_mem.h"
 #include "kern/proc.h"
 #include <utl/options.h>
+#include <base/containers/vector.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace {
 DELTA_OPTION(bool, kDmemCaller, "DELTA_DMEM_CALLER", false);
@@ -76,13 +76,12 @@ struct DmemRegion {
   u64 start, end;
   u32 memType;
 };
-std::mutex g_dmemMutex;
-std::vector<DmemRegion> g_dmemRegions;
+base::Mutex g_dmemMutex;
+base::Vector<DmemRegion> g_dmemRegions;
 
 // One memfd backing the whole dmem pool: every VA mapping a physical offset maps
 // this fd there (MAP_SHARED), so aliases share bytes; sparse, touched pages only.
 int g_dmemBackingFd = -1;
-std::once_flag g_dmemBackingOnce;
 
 // First-fit hole search in [lo, hi); the window is contract, not hint: SotC carves
 // fixed windows up front (0x220000 tail scratch ending at pool end, a 1 GiB CPU
@@ -101,7 +100,7 @@ int dmemAllocate(u64 lo, u64 hi, u64 len, u64 align,
     hi = dmemTotal();
   if (len == 0 || align == 0 || (align & (align - 1)) || lo >= hi)
     return -22 /*EINVAL*/;
-  std::lock_guard<std::mutex> lk(g_dmemMutex);
+  base::LockGuard<base::Mutex> lk(g_dmemMutex);
   u64 cand;
   if (windowed) {
     // First fit inside the window the caller asked for.
@@ -170,7 +169,7 @@ int dmemAllocate(u64 lo, u64 hi, u64 len, u64 align,
 // past a real console's pool. The VA stays mapped (our munmap keeps host pages).
 void dmemFree(u64 start, u64 len) {
   const u64 end = start + len;
-  std::lock_guard<std::mutex> lk(g_dmemMutex);
+  base::LockGuard<base::Mutex> lk(g_dmemMutex);
   for (size_t i = 0; i < g_dmemRegions.size();) {
     auto &r = g_dmemRegions[i];
     if (r.end <= start || r.start >= end) {
@@ -207,7 +206,7 @@ void dmemLargestHole(u64 lo, u64 hi, u64 align,
     align = 0x4000;
   *holeBase = 0;
   *holeSize = 0;
-  std::lock_guard<std::mutex> lk(g_dmemMutex);
+  base::LockGuard<base::Mutex> lk(g_dmemMutex);
   u64 cur = (lo + align - 1) & ~(align - 1);
   auto consider = [&](u64 end) {
     if (end > cur && end - cur > *holeSize) {
@@ -230,7 +229,7 @@ void dmemLargestHole(u64 lo, u64 hi, u64 align,
 // Memory type of the reservation owning `off`, or -1; sceKernelVirtualQuery must
 // report the type the allocation was made with, not one inferred from protection.
 int dmemTypeForOffset(u64 off) {
-  std::lock_guard<std::mutex> lk(g_dmemMutex);
+  base::LockGuard<base::Mutex> lk(g_dmemMutex);
   for (const auto &r : g_dmemRegions)
     if (off >= r.start && off < r.end)
       return static_cast<int>(r.memType);
@@ -238,14 +237,15 @@ int dmemTypeForOffset(u64 off) {
 }
 
 int dmemBackingFd() {
-  std::call_once(g_dmemBackingOnce, [] {
+  static const bool once = ([] {
     int fd = memfd_create("delta_dmem", 0);
     if (fd >= 0 && ftruncate(fd, static_cast<off_t>(kDmemTotal)) != 0) {
       close(fd);
       fd = -1;
     }
     g_dmemBackingFd = fd;
-  });
+  }(), true);
+  (void)once;
   return g_dmemBackingFd;
 }
 u64 dmemBackingSize() { return kDmemTotal; }
@@ -372,7 +372,7 @@ i32 dmaDevice::ioctlImpl(u32 cmd, void *data) {
     if (!a)
       return -1;
     u64 phys = a[0];
-    std::lock_guard<std::mutex> lk(g_dmemMutex);
+    base::LockGuard<base::Mutex> lk(g_dmemMutex);
     for (const auto &r : g_dmemRegions) {
       if (phys >= r.start && phys < r.end) {
         a[1] = r.start;

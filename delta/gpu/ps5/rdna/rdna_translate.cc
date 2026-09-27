@@ -35,15 +35,9 @@ u64 FetchPlanHash(u64) {
 }  // namespace gpu::rdna
 #else
 
-#include <algorithm>
-#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
-#include <vector>
 
 #include "gpu/guest_memory.h"
 #include "gpu/gcn/gcn_audit.h"
@@ -52,10 +46,20 @@ u64 FetchPlanHash(u64) {
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/rdna/rdna_emit.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
+#include <base/strings/to_string.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kExpTrace, "DELTA_GPU_EXPTRACE", false);
@@ -273,14 +277,14 @@ bool BufLoadIsVertexFetch(const Inst& in, bool chained) {
 // taken from the s_load, not from the position of the load. Returns, per
 // buffer_load pc, {table root SGPR pair, entry index}; absent means the V# is
 // inline in user data at srsrc.
-std::unordered_map<u32, std::pair<u32, u32> >
+base::HashMap<u32, base::Pair<u32, u32> >
 MapTableChainedLoads(const Program& insts) {
-  std::unordered_map<u32, std::pair<u32, u32> > out;
+  base::HashMap<u32, base::Pair<u32, u32> > out;
   i32 root[128];
   u32 slot[128] = {};
   for (int i = 0; i < 128; i++)
     root[i] = -1;
-  std::unordered_map<u32, u32> next_slot;  // per table root
+  base::HashMap<u32, u32> next_slot;  // per table root
   for (const Inst& in : insts) {
     if (in.enc == Enc::kSop1 && in.opcode == 0x20)
       break;  // s_setpc_b64 (return)
@@ -636,7 +640,7 @@ bool Overlaps(u32 first,
   return first < other_first + other_count && other_first < first + count;
 }
 
-void InvalidateCbufDefs(std::unordered_map<u32, CbufDef>& loads,
+void InvalidateCbufDefs(base::HashMap<u32, CbufDef>& loads,
                         ScalarWrite write) {
   if (!write.count)
     return;
@@ -650,7 +654,7 @@ void InvalidateCbufDefs(std::unordered_map<u32, CbufDef>& loads,
 
 // Same, for the SGPR quad -> descriptor-source map, whose entries are always
 // four dwords wide.
-void InvalidateDescSrc(std::unordered_map<u32, u64>& src, ScalarWrite write) {
+void InvalidateDescSrc(base::HashMap<u32, u64>& src, ScalarWrite write) {
   if (!write.count)
     return;
   for (auto it = src.begin(); it != src.end();) {
@@ -677,9 +681,9 @@ bool UsedAsBaseBeforeOverwrite(const Program& program,
   return false;
 }
 
-std::unordered_map<u32, u64> BufferVersionKeys(
+base::HashMap<u32, u64> BufferVersionKeys(
     const Program& program) {
-  std::unordered_map<u32, u64> out;
+  base::HashMap<u32, u64> out;
   u32 versions[136] = {};
   u32 generation = 1;
   for (const Inst& inst : program) {
@@ -700,7 +704,7 @@ std::unordered_map<u32, u64> BufferVersionKeys(
 }
 
 u32 TraceCbufChain(u32 sbase,
-                        const std::unordered_map<u32, CbufDef>& loads,
+                        const base::HashMap<u32, CbufDef>& loads,
                         u32 chain_off[3],
                         u32* len) {
   u32 cur = sbase, n = 0, tmp[3] = {};
@@ -721,8 +725,8 @@ u32 TraceCbufChain(u32 sbase,
 // s_load writing one of these fetches a DESCRIPTOR, not constant data, so the
 // cbuf planner must leave it alone: ParseFetchInsts/RdnaPlanGfxBuffers and
 // RdnaPlanMimg resolve those at draw time from user data instead.
-static std::unordered_set<u32> VmemDescriptorSgprs(const Program& program) {
-  std::unordered_set<u32> regs;
+static base::HashSet<u32> VmemDescriptorSgprs(const Program& program) {
+  base::HashSet<u32> regs;
   for (const Inst& inst : program) {
     const bool buf = inst.enc == Enc::kMubuf || inst.enc == Enc::kMtbuf;
     const bool img = inst.enc == Enc::kMimg;
@@ -749,27 +753,27 @@ static std::unordered_set<u32> VmemDescriptorSgprs(const Program& program) {
 // renderer can walk it.
 bool RdnaPlanCbufs(const Program& program,
                    u32 first_binding,
-                   std::vector<ShaderCbuf>& cbufs,
-                   std::unordered_map<u32, u32>& bindings,
-                   std::unordered_map<u32, u32>& by_pc,
+                   base::Vector<ShaderCbuf>& cbufs,
+                   base::HashMap<u32, u32>& bindings,
+                   base::HashMap<u32, u32>& by_pc,
                    u32 binding_limit = kMaxCbufBindings) {
   // Walk in program order, growing the def map as s_loads appear, so each
   // SMEM's base traces through the defs live AT that instruction. Shaders
   // reuse SGPRs (the sprite VS s_buffer_loads its transform from the s[8:11]
   // user-data V#, then s_loads the vertex V# INTO s[8:11]); a whole-program
   // last-write map would misroute the transform to the vertex chain.
-  std::unordered_map<u32, CbufDef> loads;
+  base::HashMap<u32, CbufDef> loads;
   // One descriptor can back several bindings: loads too far apart to share a
   // window get one each (see below).
-  std::unordered_map<u64, std::vector<u32>> bindings_by_descriptor;
+  base::HashMap<u64, base::Vector<u32>> bindings_by_descriptor;
   // binding -> [lowest dword, highest dword) any of its loads touches.
-  std::unordered_map<u32, std::pair<u32, u32>> span;
+  base::HashMap<u32, base::Pair<u32, u32>> span;
   // SGPR quad -> which descriptor it currently holds, so a reload of the same
   // table entry is recognised as the same buffer.
-  std::unordered_map<u32, u64> desc_src;
+  base::HashMap<u32, u64> desc_src;
   const auto version_keys = BufferVersionKeys(program);
   const auto descriptor_sgprs = VmemDescriptorSgprs(program);
-  std::unordered_set<u32> indexed_raw_descriptors;
+  base::HashSet<u32> indexed_raw_descriptors;
   for (const Inst& inst : program)
     if (((inst.enc == Enc::kMubuf && inst.opcode >= 0x08 &&
           inst.opcode <= 0x0f) ||
@@ -810,7 +814,7 @@ bool RdnaPlanCbufs(const Program& program,
     // needed to see.
     // Raw indexed loads also read STRIDE from the descriptor's SGPRs. Keep
     // their descriptor fetch as a real uniform load, including each reload.
-    const bool raw_descriptor = std::any_of(
+    const bool raw_descriptor = base::AnyOf(
         indexed_raw_descriptors.begin(), indexed_raw_descriptors.end(),
         [&](u32 descriptor) { return Overlaps(sdst, load_count, descriptor, 4); });
     if (sload && descriptor_sgprs.count(sdst) && !raw_descriptor) {
@@ -850,11 +854,11 @@ bool RdnaPlanCbufs(const Program& program,
     // Only the SPAN has to fit: a shader reading one constant 17 KiB into a
     // buffer and the rest near its start gets two windows on it, not a
     // rejection.
-    std::vector<u32>& shared = bindings_by_descriptor[key];
+    base::Vector<u32>& shared = bindings_by_descriptor[key];
     u32 binding = ~0u;
     for (u32 b : shared) {
       const auto& s = span[b];
-      if (std::max(s.second, hi) - std::min(s.first, lo) <=
+      if (base::Max(s.second, hi) - base::Min(s.first, lo) <=
           gpu::gcn::kCbufDwords) {
         binding = b;
         break;
@@ -888,8 +892,8 @@ bool RdnaPlanCbufs(const Program& program,
                   binding, inst.pc, sbase, root, chain_len, lo, hi);
     } else {
       auto& s = span[binding];
-      s.first = std::min(s.first, lo);
-      s.second = std::max(s.second, hi);
+      s.first = base::Min(s.first, lo);
+      s.second = base::Max(s.second, hi);
       for (ShaderCbuf& cb : cbufs)
         if (cb.binding == binding) {
           cb.first_dword = s.first;
@@ -905,7 +909,7 @@ bool RdnaPlanCbufs(const Program& program,
 
 // Hand the emitter the window each binding was planned at, once every planner
 // that can widen one has run.
-void NoteCbufWindows(const std::vector<ShaderCbuf>& cbufs, StageContext& sc) {
+void NoteCbufWindows(const base::Vector<ShaderCbuf>& cbufs, StageContext& sc) {
   for (const ShaderCbuf& cb : cbufs)
     if (cb.first_dword)
       sc.cbuf_first_dword[cb.binding] = cb.first_dword;
@@ -927,10 +931,10 @@ void NoteCbufWindows(const std::vector<ShaderCbuf>& cbufs, StageContext& sc) {
 // FlatServableLoad), keyed by that pair rather than by a V# quad.
 void RdnaPlanGfxBuffers(const Program& program,
                         u32 first_binding,
-                        const std::unordered_set<u32>* claimed,
-                        std::vector<gpu::gcn::ShaderBuffer>& buffers,
-                        std::unordered_map<u32, u32>& bindings) {
-  std::unordered_map<u32, u32> by_srsrc;
+                        const base::HashSet<u32>* claimed,
+                        base::Vector<gpu::gcn::ShaderBuffer>& buffers,
+                        base::HashMap<u32, u32>& bindings) {
+  base::HashMap<u32, u32> by_srsrc;
   for (const Inst& inst : program) {
     // Reloading any word of a descriptor changes the resource seen by later
     // loads. Keep earlier bindings for their original instructions, but stop
@@ -990,8 +994,8 @@ void RdnaPlanGfxBuffers(const Program& program,
 // Emitting the mov would read our zero-initialised register file and turn EXEC
 // off, making the CFG path skip every export (the PS then kills all fragments).
 // Those movs are dropped so EXEC keeps its all-on seed.
-std::unordered_set<u32> LaunchExecMovPcs(const Program& program) {
-  std::unordered_set<u32> skip, written;
+base::HashSet<u32> LaunchExecMovPcs(const Program& program) {
+  base::HashSet<u32> skip, written;
   for (const Inst& in : program) {
     u32 d0 = 0xFFFF, n = 1;
     switch (in.enc) {
@@ -1084,7 +1088,7 @@ thread_local u64 g_ps_addr = 0;
 // format is then baked into the module, so a later draw binding a
 // differently-formatted V# to the same shader would be wrong; that is the
 // assumption the lifted vertex-fetch path already makes about r.attrs.
-thread_local std::unordered_map<u32, BufferResource> g_stage_bufs;
+thread_local base::HashMap<u32, BufferResource> g_stage_bufs;
 
 // One dropped-store report per translated stage.
 thread_local bool g_warned_store = false;
@@ -1386,7 +1390,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       const Id out = target == 12 ? sc.pos_out
                                   : gpu::gcn::VsParamOut(t, sc, target - 32);
       if (target >= 32)
-        sc.max_param = std::max(sc.max_param, target - 31);
+        sc.max_param = base::Max(sc.max_param, target - 31);
       Id c[4];
       for (u32 i = 0; i < 4; ++i)
         c[i] = (en & (1u << i)) ? t.VgF(v[i])
@@ -2742,7 +2746,7 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
       // edge texel and comes out one flat colour.
       const bool cube = dim == 3;
       if (nsa || cube) {
-        std::array<Id, 13> address{};
+        base::Array<Id, 13> address{};
         const u32 vaddr = w1 & 0xFF;
         if (nsa) {
           address[0] = t.Vg(vaddr);
@@ -2841,7 +2845,7 @@ bool IsReturn(const Inst& inst) {
 }
 
 bool HasControlFlow(const Program& program) {
-  return std::any_of(program.begin(), program.end(), [](const Inst& inst) {
+  return base::AnyOf(program.begin(), program.end(), [](const Inst& inst) {
     const int k = BranchKind(inst);
     return (k >= 1 && k <= 7) || IsCall(inst) || IsReturn(inst);
   });
@@ -2869,8 +2873,8 @@ Id BranchTaken(Translator& t, int kind) {
   }
 }
 
-std::vector<u32> BlockStarts(const Program& program, u32 max_pc) {
-  std::vector<u32> leaders{0};
+base::Vector<u32> BlockStarts(const Program& program, u32 max_pc) {
+  base::Vector<u32> leaders{0};
   for (const Inst& inst : program) {
     const int k = BranchKind(inst);
     if (k == 0 && !IsCall(inst) && !IsReturn(inst))
@@ -2883,9 +2887,9 @@ std::vector<u32> BlockStarts(const Program& program, u32 max_pc) {
                                               simm));
     }
   }
-  std::sort(leaders.begin(), leaders.end());
-  leaders.erase(std::unique(leaders.begin(), leaders.end()), leaders.end());
-  std::vector<u32> starts;
+  base::Sort(leaders.begin(), leaders.end());
+  leaders.erase(base::Unique(leaders.begin(), leaders.end()), leaders.end());
+  base::Vector<u32> starts;
   for (u32 l : leaders)
     if (l < max_pc)
       starts.push_back(l);
@@ -2931,8 +2935,8 @@ struct FetchAttr {
 // sub-shader and the head of an NGG vertex program that fetches inline (PS5 AGC
 // frequently inlines the fetch), so buffer_load_format never reaches
 // RdnaEmitInst as an unsupported op.
-std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
-  std::vector<FetchAttr> out;
+base::Vector<FetchAttr> ParseFetchInsts(const Program& insts) {
+  base::Vector<FetchAttr> out;
   u32 sem = 0;  // dense vertex-input location (per-vertex fetches only)
   const auto chained_loads = MapTableChainedLoads(insts);
   for (const Inst& in : insts) {
@@ -2977,13 +2981,13 @@ std::vector<FetchAttr> ParseFetchInsts(const Program& insts) {
   return out;
 }
 
-std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
+base::Vector<FetchAttr> ParseFetch(u64 fetch_addr) {
   constexpr u64 kMaxFetchBytes = 256 * sizeof(u32);
   if (!gpu::gcn::InGuest(fetch_addr) ||
       !gpu::IsReadableRangeCached(fetch_addr, kMaxFetchBytes))
     return {};
   const auto* code = reinterpret_cast<const u32*>(fetch_addr);
-  std::vector<FetchAttr> attrs = ParseFetchInsts(Decode(code, 256));
+  base::Vector<FetchAttr> attrs = ParseFetchInsts(Decode(code, 256));
   for (FetchAttr& attr : attrs)
     attr.pc = ~0u;
   return attrs;
@@ -2995,8 +2999,8 @@ std::vector<FetchAttr> ParseFetch(u64 fetch_addr) {
 // forbids Workgroup storage outside compute-like stages. Zero initialised so a
 // read-before-write is reproducible.
 void PlanCrossLane(const Program& program, Translator& t, StageContext& sc,
-                   std::vector<Id>& iface) {
-  const bool addtid = std::any_of(program.begin(), program.end(), [](const Inst& i) {
+                   base::Vector<Id>& iface) {
+  const bool addtid = base::AnyOf(program.begin(), program.end(), [](const Inst& i) {
     return i.enc == Enc::kDs && (i.opcode == 176 || i.opcode == 177);
   });
   if (!sc.subgroup_local_id &&
@@ -3080,7 +3084,7 @@ void PlanGraphicsLds(const Program& program, Translator& t, StageContext& sc) {
 }
 
 u64 FetchPlanHash(u64 fetch_addr) {
-  const std::vector<FetchAttr> attrs = ParseFetch(fetch_addr);
+  const base::Vector<FetchAttr> attrs = ParseFetch(fetch_addr);
   if (attrs.empty())
     return 0;
   u64 h = 1469598103934665603ull;
@@ -3113,7 +3117,7 @@ void SeedUserData(Translator& t,
                   u32 sgpr_base,
                   u32 count) {
   const Id p_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
-  for (u32 i = 0; i < std::min(count, 32u); i++)
+  for (u32 i = 0; i < base::Min(count, 32u); i++)
     t.SetSg(
         sgpr_base + i,
         t.indirect_cbufs
@@ -3131,7 +3135,7 @@ void SeedUserData(Translator& t,
 
 bool TranslateVs(const Program& program,
                  const u32* vs_user_data,
-                 const std::unordered_set<u32>& flat_attrs,
+                 const base::HashSet<u32>& flat_attrs,
                  Recompiled& r,
                  Translator& t,
                  bool gl_clip_space,
@@ -3149,7 +3153,7 @@ bool TranslateVs(const Program& program,
   // way each attribute becomes a Location vertex input (RdnaEmitInst then
   // treats the inline buffer_load_format as a no-op) and the renderer binds the
   // real vertex buffers from r.attrs.
-  std::vector<FetchAttr> attrs = ParseFetch(fetch);
+  base::Vector<FetchAttr> attrs = ParseFetch(fetch);
   if (attrs.empty())
     attrs = ParseFetchInsts(program);
   if (ShDbg())
@@ -3165,7 +3169,7 @@ bool TranslateVs(const Program& program,
   t.wave_masks = kWaveMasks && gpu::gcn::GraphicsLdsDwords(program, nullptr);
   t.InitTypes();
 
-  std::vector<Id> iface;
+  base::Vector<Id> iface;
   const Id pos_out =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_v4),
                    spv::StorageClass::Output);
@@ -3202,7 +3206,7 @@ bool TranslateVs(const Program& program,
   // 1-vert/1-prim wave so that math yields a live lane instead of zeros.
   t.SetSg(3, t.U32(kNggWaveInfo));
 
-  std::unordered_map<u32, StageContext::VfetchSeed> vfetch_seed;
+  base::HashMap<u32, StageContext::VfetchSeed> vfetch_seed;
   Id vertex_index = 0;
   {  // Vertex/instance IDs are live inputs even when attributes are fetched.
     const Id p_in_u = t.m.TypePointer(spv::StorageClass::Input, t.t_u);
@@ -3237,7 +3241,7 @@ bool TranslateVs(const Program& program,
         t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, comp_ty),
                      spv::StorageClass::Input);
     t.m.Decorate(in_var, spv::Decoration::Location, {a.semantic});
-    t.m.Name(in_var, "v_attr" + std::to_string(a.semantic));
+    t.m.Name(in_var, "v_attr" + base::ToString(a.semantic));
     iface.push_back(in_var);
     const Id val = t.m.Load(comp_ty, in_var);
     if (a.pc == ~0u)
@@ -3266,7 +3270,7 @@ bool TranslateVs(const Program& program,
   sc.main_fn = main_fn;
   sc.pos_out = pos_out;
   sc.flat_attrs = &flat_attrs;
-  sc.vfetch_seed = std::move(vfetch_seed);
+  sc.vfetch_seed = base::move(vfetch_seed);
   sc.skip_launch_movs = LaunchExecMovPcs(program);
   // Shared LDS keys its per-wave block on the vertex index.
   if (gpu::gcn::GraphicsLdsDwords(program, nullptr)) {
@@ -3285,7 +3289,7 @@ bool TranslateVs(const Program& program,
                                       : kMaxCbufBindings))
     return false;
   // A fetch already lifted to a vertex input needs no buffer of its own.
-  std::unordered_set<u32> lifted;
+  base::HashSet<u32> lifted;
   for (const FetchAttr& a : attrs)
     if (a.pc != ~0u)
       lifted.insert(a.pc);
@@ -3379,7 +3383,7 @@ bool TranslateVs(const Program& program,
         t.SelectF(t.IsNonZero(t.And(vidx, t.U32(2))), t.F32(1.f), t.F32(-1.f));
     const Id have = t.m.Load(t.t_v4, pos_out);
     const Id quad[4] = {fx, fy, t.F32(0.f), t.F32(1.f)};
-    std::vector<Id> comps;
+    base::Vector<Id> comps;
     for (u32 i = 0; i < 4; i++)
       comps.push_back(t.SelectF(unset, quad[i],
                                 t.m.CompositeExtract(t.t_f, have, i)));
@@ -3476,7 +3480,7 @@ bool TranslateVs(const Program& program,
 bool TranslateMesh(Program es_program, const Program& gs_program,
                    const u32* es_code, const u32* user_data, u32 user_sgprs,
                    const NggConfig& cfg,
-                   const std::unordered_set<u32>& flat_attrs,
+                   const base::HashSet<u32>& flat_attrs,
                    u32 tex_binding_base, bool gl_clip_space,
                    Recompiled& r, Translator& t) {
   if (es_program.empty() || gs_program.empty() || !cfg.threads ||
@@ -3487,7 +3491,7 @@ bool TranslateMesh(Program es_program, const Program& gs_program,
   // The ES entry transfers to the separately bound GS entry through s[6:7].
   // Each half gets its own descriptor plan and original instruction PCs.
   if (cfg.separate_es) {
-    const auto transfer_at = std::find_if(es_program.begin(), es_program.end(),
+    const auto transfer_at = base::FindIf(es_program.begin(), es_program.end(),
         [](const Inst& inst) {
           return IsReturn(inst) && (inst.raw[0] & 0xff) == 6;
         });
@@ -3511,7 +3515,7 @@ bool TranslateMesh(Program es_program, const Program& gs_program,
       t.m.TypeArray(t.t_u, 2 * cfg.threads + 1)), spv::StorageClass::Workgroup);
   t.m.Capability(spv::Capability::MeshShadingEXT);
   t.m.Extension("SPV_EXT_mesh_shader");
-  std::vector<Id> iface;
+  base::Vector<Id> iface;
   const Id uv3 = t.m.TypeVec(t.t_u, 3);
   const Id local = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_u),
                                 spv::StorageClass::Input);
@@ -3590,7 +3594,7 @@ bool TranslateMesh(Program es_program, const Program& gs_program,
     sc.lds_var = lds;
     sc.lds_dwords = cfg.lds_dwords;
     const Program& program = half ? gs_program : es_program;
-    std::vector<ShaderCbuf> cbufs;
+    base::Vector<ShaderCbuf> cbufs;
     const u32 cb_base = static_cast<u32>(r.vs_cbufs.size());
     if (!RdnaPlanCbufs(program, cb_base, cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc,
                         gpu::gcn::kIndirectCbufBindings))
@@ -3600,7 +3604,7 @@ bool TranslateMesh(Program es_program, const Program& gs_program,
       cb.from_gs = half != 0;
       r.vs_cbufs.push_back(cb);
     }
-    std::vector<gpu::gcn::ShaderBuffer> buffers;
+    base::Vector<gpu::gcn::ShaderBuffer> buffers;
     RdnaPlanGfxBuffers(program, static_cast<u32>(r.vs_bufs.size()), nullptr,
                        buffers, sc.gfx_buf_bind);
     for (auto& buf : buffers) {
@@ -3718,17 +3722,17 @@ bool TranslateMesh(Program es_program, const Program& gs_program,
 }
 
 bool TranslatePs(const Program& program,
-                 const std::unordered_set<u32>& flat_attrs,
+                 const base::HashSet<u32>& flat_attrs,
                  u32 ps_input_ena,
                  Recompiled& r,
                  Translator& t,
                  u32 user_sgprs,
                  const u32* ps_in_cntl,
                  u32 ps_num_interp,
-                 const std::vector<u32>* vs_exported_params) {
+                 const base::Vector<u32>* vs_exported_params) {
   if (ShDbg())
     DumpProgram(program, "ps");
-  std::vector<Id> iface;
+  base::Vector<Id> iface;
   StageContext sc;
   sc.is_ps = true;
   sc.r = &r;
@@ -3784,7 +3788,7 @@ bool TranslatePs(const Program& program,
   gpu::gcn::SeedPsBarycentrics(t, ps_input_ena, sc);
 
   const bool has_color_export =
-      std::any_of(program.begin(), program.end(), [](const Inst& inst) {
+      base::AnyOf(program.begin(), program.end(), [](const Inst& inst) {
         return inst.enc == Enc::kExp && ((inst.raw[0] >> 4) & 0x3F) <= 7 &&
                (inst.raw[0] & 0xF);
       });
@@ -3884,7 +3888,7 @@ bool HasNggTransfer(const u32* code) {
   if (!code || !gpu::IsReadableRangeCached(reinterpret_cast<u64>(code), 1024))
     return false;
   const Program program = DecodeShader(code, 256);
-  return std::any_of(program.begin(), program.end(), [](const Inst& inst) {
+  return base::AnyOf(program.begin(), program.end(), [](const Inst& inst) {
     return IsReturn(inst) && (inst.raw[0] & 0xff) == 6;
   });
 }
@@ -3923,7 +3927,7 @@ u32 LdsAccess(const Inst& inst) {
 void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   const u32 max_pc =
       program.empty() ? 0 : program.back().pc + program.back().size;
-  std::vector<u32> starts = BlockStarts(program, max_pc);
+  base::Vector<u32> starts = BlockStarts(program, max_pc);
   const bool scheduled = sc.is_mesh || sc.wave_lockstep;
   if (scheduled) {
     // A guest barrier is a rendezvous PC. Keep it separate from adjacent
@@ -3935,8 +3939,8 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
       if (inst.pc + inst.size < max_pc)
         starts.push_back(inst.pc + inst.size);
     }
-    std::sort(starts.begin(), starts.end());
-    starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+    base::Sort(starts.begin(), starts.end());
+    starts.erase(base::Unique(starts.begin(), starts.end()), starts.end());
   }
   const u32 num_blocks = static_cast<u32>(starts.size());
   const u32 kExit = num_blocks;
@@ -3960,7 +3964,7 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   const Id merge_sel = t.m.NewBlock();
   const Id cont = t.m.NewBlock(), merge = t.m.NewBlock();
   const Id exit_blk = t.m.NewBlock();
-  std::vector<Id> case_labels(num_blocks);
+  base::Vector<Id> case_labels(num_blocks);
   for (Id& l : case_labels)
     l = t.m.NewBlock();
 
@@ -4045,7 +4049,7 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
     state = t.SelectB(over, t.U32(kExit), state);
   }
   t.m.SelectionMerge(merge_sel);
-  std::vector<std::pair<u32, Id> > cases;
+  base::Vector<base::Pair<u32, Id> > cases;
   for (u32 i = 0; i < num_blocks; i++)
     cases.push_back({i, case_labels[i]});
   t.m.Switch(state, exit_blk, cases);
@@ -4153,7 +4157,7 @@ Recompiled Recompile(const u32* vs_code,
 
   // V_INTERP_MOV P0 reads a per-primitive (flat) parameter; represent those
   // locations as flat varyings in both stages.
-  std::unordered_set<u32> flat_attrs;
+  base::HashSet<u32> flat_attrs;
   for (const Inst& inst : ps_program)
     if (inst.enc == Enc::kVintrp && inst.opcode == 2 &&
         (inst.raw[0] & 0xFF) == 2)
@@ -4161,16 +4165,16 @@ Recompiled Recompile(const u32* vs_code,
 
   // The parameter cache packs the VS's exports densely in export order, and
   // SPI_PS_INPUT_CNTL.OFFSET indexes THAT, not the param number.
-  std::vector<u32> vs_exported_params;
+  base::Vector<u32> vs_exported_params;
   for (const Inst& inst : ngg ? gs_program : vs_program)
     if (inst.enc == Enc::kExp) {
       const u32 tgt = (inst.raw[0] >> 4) & 0x3F;
       if (tgt >= 32 && tgt <= 63)
         vs_exported_params.push_back(tgt - 32);
     }
-  std::sort(vs_exported_params.begin(), vs_exported_params.end());
+  base::Sort(vs_exported_params.begin(), vs_exported_params.end());
   vs_exported_params.erase(
-      std::unique(vs_exported_params.begin(), vs_exported_params.end()),
+      base::Unique(vs_exported_params.begin(), vs_exported_params.end()),
       vs_exported_params.end());
 
   r.indirect_cbufs = ngg || vs_user_sgprs > 16 || ps_user_sgprs > 16;
@@ -4226,13 +4230,13 @@ Recompiled Recompile(const u32* vs_code,
     return r;
   }
 
-  const std::vector<u32> vs = tv.m.Assemble();
-  const std::vector<u32> ps = tp.m.Assemble();
+  const base::Vector<u32> vs = tv.m.Assemble();
+  const base::Vector<u32> ps = tp.m.Assemble();
   // gfx10.3 RECTLIST draws reach us as three corners of a rectangle; Vulkan has
   // no such topology, so carry the same expansion stage the GFX7 path uses.
-  const std::vector<u32> gs =
+  const base::Vector<u32> gs =
       gpu::gcn::EmitRectListGeometry(r.num_params, flat_attrs);
-  std::string err;
+  base::String err;
   if (!gpu::gcn::spirv::Validate(vs, &err)) {
     if (gpu::gcn::TraceEnabled() || kDrawCensus)
       BASE_LOGI("rdna", "VS invalid: {}", err.c_str());
@@ -4268,7 +4272,7 @@ Recompiled Recompile(const u32* vs_code,
   else
     r.vs_spirv = vs;
   r.fs_spirv = ps;
-  std::string gs_err;
+  base::String gs_err;
   if (!gs.empty() && gpu::gcn::spirv::Validate(gs, &gs_err))
     r.gs_spirv = gs;
   else if (gpu::gcn::TraceEnabled())

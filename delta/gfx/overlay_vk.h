@@ -10,15 +10,15 @@
  */
 
 #include "base/arch.h"
-#include <vector>
 
 #include <vulkan/vulkan.h>
+#include <base/containers/vector.h>
 
 namespace gfx {
 
 bool overlayVkInit(VkPhysicalDevice phys, VkDevice device, VkQueue queue,
                    u32 queueFamily, VkCommandPool pool, VkFormat swapFormat);
-void overlayVkSetSwapchain(const std::vector<VkImage> &images, VkExtent2D extent,
+void overlayVkSetSwapchain(const base::Vector<VkImage> &images, VkExtent2D extent,
                            VkFormat format);
 // Records the overlay render pass into `cmd` for swapchain image `imageIndex`.
 // The overlay frame must have been built (overlayBuildFrame) first. Returns true

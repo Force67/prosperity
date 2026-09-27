@@ -4,7 +4,6 @@
 
 #include "gpu/render/backend.h"
 
-#include <string>
 
 #include "gpu/vulkan/vk_rhi.h"
 #if DELTA_GPU_OPENGL
@@ -12,11 +11,14 @@
 #endif
 #if DELTA_HAVE_D3D12
 #include "gpu/d3d12/d3d12_rhi.h"
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
 #endif
 
 namespace gpu::render {
 
-std::vector<rhi::Backend> CompiledBackends() {
+base::Vector<rhi::Backend> CompiledBackends() {
   return {
     rhi::Backend::kVulkan,
 #if DELTA_GPU_OPENGL
@@ -28,12 +30,12 @@ std::vector<rhi::Backend> CompiledBackends() {
   };
 }
 
-std::unique_ptr<rhi::Device> CreateBackendDevice(
+base::UniquePointer<rhi::Device> CreateBackendDevice(
     rhi::Backend backend,
     const BackendOptions& options) {
-  const std::string cache =
-      options.cache_dir ? std::string(options.cache_dir) + "/pipeline.bin"
-                        : std::string();
+  const base::String cache =
+      options.cache_dir ? base::String(options.cache_dir) + "/pipeline.bin"
+                        : base::String();
   switch (backend) {
     case rhi::Backend::kVulkan: {
       vk::VulkanOptions vo;

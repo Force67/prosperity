@@ -3,18 +3,18 @@
  */
 #include "gpu/render/buffer_cache.h"
 
-#include <algorithm>
 #include <cstring>
-#include <iterator>
-#include <map>
-#include <unordered_map>
-#include <vector>
 
 #include <utl/options.h>
 
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/renderer.h"
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/memory/move.h>
+#include <base/containers/hash_map.h>
+#include <base/algorithm.h>
 
 namespace gpu::render {
 namespace {
@@ -33,7 +33,7 @@ constexpr u32 kIndexShift = 16;  // 64 KiB blocks for invalidation lookups
 struct Block {
   rhi::Buffer* buffer = nullptr;
   u8* map = nullptr;
-  std::map<u64, u64> free;  // offset -> bytes, coalesced
+  base::Map<u64, u64> free;  // offset -> bytes, coalesced
 };
 
 struct Entry {
@@ -51,22 +51,22 @@ struct Retired {
   int frame;
 };
 
-std::vector<Block> g_blocks;
+base::Vector<Block> g_blocks;
 // Copies live in a pool addressed by handle: the idle sweep walks one vector,
 // and the index holds handles instead of keys to look up again.
-std::vector<Entry> g_pool;
-std::vector<u32> g_free_handles;
-std::unordered_map<u64, u32> g_by_base;
+base::Vector<Entry> g_pool;
+base::Vector<u32> g_free_handles;
+base::HashMap<u64, u32> g_by_base;
 // 64 KiB block -> handles. May hold handles since dropped or reused: every
 // hit is checked against the entry it names now.
-std::unordered_map<u64, std::vector<u32>> g_index;
-std::vector<Retired> g_retired;
+base::HashMap<u64, base::Vector<u32>> g_index;
+base::Vector<Retired> g_retired;
 u64 g_live_bytes = 0;
 
 void Free(Block& block, u64 offset, u64 bytes) {
   auto next = block.free.lower_bound(offset);
   if (next != block.free.begin()) {
-    auto prev = std::prev(next);
+    auto prev = base::Prev(next);
     if (prev->first + prev->second == offset) {
       offset = prev->first;
       bytes += prev->second;
@@ -114,7 +114,7 @@ bool Allocate(u64 bytes, u32& block_index, u64& offset) {
     return false;
   }
   block.free.emplace(bytes, kBlockBytes - bytes);
-  g_blocks.push_back(std::move(block));
+  g_blocks.push_back(base::move(block));
   block_index = static_cast<u32>(g_blocks.size() - 1);
   offset = 0;
   return true;
@@ -182,7 +182,7 @@ bool CacheGuestBuffer(u64 base, u64 bytes, CachedBuffer& out) {
 void InvalidateCachedBuffers(u64 first, u64 end) {
   if (g_by_base.empty() || end <= first)
     return;
-  const auto drop = [&](const std::vector<u32>& handles) {
+  const auto drop = [&](const base::Vector<u32>& handles) {
     for (u32 handle : handles) {
       const Entry& e = g_pool[handle];
       if (e.bytes && e.base < end && first < e.base + e.bytes)
@@ -212,7 +212,7 @@ void BufferCacheEndFrame() {
       if (g_pool[handle].bytes &&
           g_pool[handle].last_used + kIdleFrames < g_frame.num)
         Drop(handle);
-  std::erase_if(g_retired, [](const Retired& r) {
+  base::EraseIf(g_retired, [](const Retired& r) {
     if (r.frame + kRetireFrames > g_frame.num)
       return false;
     Free(g_blocks[r.block], r.offset, r.bytes);

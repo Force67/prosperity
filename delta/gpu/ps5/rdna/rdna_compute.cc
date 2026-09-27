@@ -40,15 +40,9 @@ RecompileCompute(const u32*, u32, u32, u32, u32, u32, u32, bool, bool) {
 }  // namespace gpu::rdna
 #else
 
-#include <algorithm>
-#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gcn/spirv/spv_post.h"
@@ -57,8 +51,18 @@ RecompileCompute(const u32*, u32, u32, u32, u32, u32, u32, bool, bool) {
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/rdna/rdna_emit.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
+#include <base/strings/to_string.h>
 #include <base/logging.h>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/strings/xstring.h>
+#include <base/strings/format.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kGpuSpirvNoopt, "DELTA_GPU_SPIRV_NOOPT", false);
@@ -163,12 +167,12 @@ bool PlanResources(const Program& program,
                    u32 lds_dwords,
                    u32 user_sgpr,
                    RecompiledCs& r,
-                   std::unordered_map<u32, u32>& bind) {
+                   base::HashMap<u32, u32>& bind) {
   const ScalarReplayPlan replay = PlanScalarReplay(program);
   bool uses_gds = false;
-  std::unordered_set<u32> image_candidates, staged_images;
+  base::HashSet<u32> image_candidates, staged_images;
   // COMPUTE_USER_DATA is 16 dwords wide; the dispatch path reads no further.
-  const u32 ud_dwords = std::min(user_sgpr, 16u);
+  const u32 ud_dwords = base::Min(user_sgpr, 16u);
   bool scalar_written[136] = {};
   u32 version[136] = {};  // instruction index of the last write
 
@@ -180,7 +184,7 @@ bool PlanResources(const Program& program,
     u32 kind;
     u32 versions[8];
   };
-  std::vector<BindingKey> keys;
+  base::Vector<BindingKey> keys;
   u32 index = 0;  // instruction index of the use being planned
   const auto resource = [&](u32 pc, u32 base_sgpr, u32 dwords,
                             u8 kind, bool written, u32 min_bytes) {
@@ -225,7 +229,7 @@ bool PlanResources(const Program& program,
       CsResource& res = r.resources[i];
       res.written = res.written || written;
       res.runtime_address = res.runtime_address || runtime_address;
-      res.min_bytes = std::max(res.min_bytes, min_bytes);
+      res.min_bytes = base::Max(res.min_bytes, min_bytes);
       bind[pc] = i;
       return true;
     }
@@ -415,18 +419,18 @@ bool PlanResources(const Program& program,
     r.gds_binding = static_cast<int>(r.resources.size());
   // Reuse the guest-address capability only in shaders that already require
   // it. Ordinary image shaders retain their portable staged implementation.
-  const bool has_runtime = std::any_of(r.resources.begin(), r.resources.end(),
+  const bool has_runtime = base::AnyOf(r.resources.begin(), r.resources.end(),
       [](const CsResource& res) { return res.runtime_address; });
   for (u32 binding : image_candidates) {
     auto& image = r.resources[binding];
     image.base_mip_only = !staged_images.count(binding);
     image.runtime_image = has_runtime && image.base_mip_only;
   }
-  if (std::any_of(r.resources.begin(), r.resources.end(),
+  if (base::AnyOf(r.resources.begin(), r.resources.end(),
                   [](const CsResource& res) { return res.runtime_address || res.runtime_image; })) {
     // Traversal follows pointers through scalar tables before reaching a BVH.
     // All read-only raw resources in this shader use their live GPU address.
-    const bool writes = std::any_of(r.resources.begin(), r.resources.end(),
+    const bool writes = base::AnyOf(r.resources.begin(), r.resources.end(),
         [](const CsResource& res) { return res.runtime_address && res.written; });
     for (CsResource& res : r.resources)
       if (res.kind != 1 && (!res.written || writes))
@@ -457,7 +461,7 @@ void EmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
   const Id dword0 = t.Shr(byte_off, t.U32(2));
   // The destination may overwrite the pointer/descriptor pair itself.
   // Read every component using the original SGPRs before updating any of them.
-  std::vector<Id> values;
+  base::Vector<Id> values;
   for (u32 k = 0; k < n; k++)
     values.push_back(gpu::gcn::CsSsboLoad(t, sc, static_cast<u32>(b),
                                          t.Add(dword0, t.U32(k))));
@@ -469,16 +473,16 @@ void EmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
 // the sequential form numbers them up from VADDR. Slots past the ones an
 // instruction actually uses still have to hold a valid id, because the shared
 // emitter indexes a fixed few of them whatever the image type turns out to be.
-std::array<Id, 8> MimgAddress(Translator& t, const Inst& inst) {
+base::Array<Id, 8> MimgAddress(Translator& t, const Inst& inst) {
   const u32 nsa = (inst.raw[0] >> 1) & 0x3;
   const u32 vaddr = inst.raw[1] & 0xFF;
-  std::array<u32, 8> reg;
+  base::Array<u32, 8> reg;
   for (u32 i = 0; i < reg.size(); i++)
-    reg[i] = std::min(vaddr + i, 255u);
+    reg[i] = base::Min(vaddr + i, 255u);
   for (u32 d = 0; d < nsa; d++)
     for (u32 c = 0; c < 4 && 1 + d * 4 + c < reg.size(); c++)
       reg[1 + d * 4 + c] = (inst.raw[2 + d] >> (c * 8)) & 0xFF;
-  std::array<Id, 8> address;
+  base::Array<Id, 8> address;
   for (u32 i = 0; i < address.size(); i++)
     address[i] = t.Vg(reg[i]);
   return address;
@@ -539,7 +543,7 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
   const u32 ssamp = ((w1 >> 21) & 0x1F) * 4;
 
-  std::array<Id, 8> address = MimgAddress(t, inst);
+  base::Array<Id, 8> address = MimgAddress(t, inst);
   const Id packed_offset = address[0];
   const Id reference = t.m.Bitcast(t.t_f, address[offset ? 1 : 0]);
   const u32 prefix = u32(compare) + u32(offset);
@@ -585,7 +589,7 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
     // (x0,y1) (x1,y1) (x1,y0) (x0,y0).
     static const float step[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
     for (u32 tap = 0; tap < 4; tap++) {
-      std::array<Id, 8> tapped = address;
+      base::Array<Id, 8> tapped = address;
       tapped[0] = StepTexels(t, tapped[0], t.F32(step[tap][0]), extent.width);
       tapped[1] = StepTexels(t, tapped[1], t.F32(step[tap][1]), extent.height);
       Inst one = plain;
@@ -631,7 +635,7 @@ bool NoOpt() {
 // A declined dispatch leaves the buffers it was meant to fill untouched, which
 // is otherwise invisible in the frame. One line per distinct shader.
 void ReportDecline(const u32* cs_code, size_t insts) {
-  static std::unordered_set<u64> reported;
+  static base::HashSet<u64> reported;
   const u64 address = reinterpret_cast<uintptr_t>(cs_code);
   if (!reported.insert(address).second)
     return;
@@ -711,7 +715,7 @@ bool TranslateCs(const Program& program,
     const Id v = t.m.Variable(p_buf, spv::StorageClass::StorageBuffer);
     t.m.Decorate(v, spv::Decoration::DescriptorSet, {0});
     t.m.Decorate(v, spv::Decoration::Binding, {res.binding});
-    t.m.Name(v, "buf" + std::to_string(res.binding));
+    t.m.Name(v, "buf" + base::ToString(res.binding));
     sc.cs_ssbo[res.binding] = v;
     if (res.runtime_address)
       sc.cs_runtime_resources[res.binding] = {res.kind, res.base_sgpr};
@@ -736,8 +740,8 @@ bool TranslateCs(const Program& program,
     // Counters return one pre-operation value to the entire guest wave,
     // including when it spans two host subgroups. The CFG only enables this
     // exchange channel at points where the whole workgroup can synchronize.
-    t.xchg_lanes = std::max(num_thread_x, 1u) *
-                   std::max(num_thread_y, 1u) * std::max(num_thread_z, 1u);
+    t.xchg_lanes = base::Max(num_thread_x, 1u) *
+                   base::Max(num_thread_y, 1u) * base::Max(num_thread_z, 1u);
     const Id exchange = t.m.TypeArray(t.t_u, t.xchg_lanes * 2 + 1);
     t.xchg_var = t.m.Variable(
         t.m.TypePointer(spv::StorageClass::Workgroup, exchange),
@@ -785,7 +789,7 @@ bool TranslateCs(const Program& program,
   const Id group_id = t.m.Variable(p_in_v3, spv::StorageClass::Input);
   t.m.Decorate(group_id, spv::Decoration::BuiltIn,
                {static_cast<u32>(spv::BuiltIn::WorkgroupId)});
-  std::vector<Id> iface{local_id, group_id};
+  base::Vector<Id> iface{local_id, group_id};
   if (uses_lane_id) {
     t.m.Capability(spv::Capability::GroupNonUniform);
     t.m.Capability(spv::Capability::GroupNonUniformShuffle);
@@ -821,8 +825,8 @@ bool TranslateCs(const Program& program,
     t.SetVg(c, t.m.Load(t.t_u, t.m.AccessChain(p_in_u, local_id, {t.U32(c)})));
   t.lane_masks = true;
   const Id local_index = t.Add(
-      t.Vg(0), t.Mul(t.U32(std::max(num_thread_x, 1u)),
-                    t.Add(t.Vg(1), t.Mul(t.U32(std::max(num_thread_y, 1u)),
+      t.Vg(0), t.Mul(t.U32(base::Max(num_thread_x, 1u)),
+                    t.Add(t.Vg(1), t.Mul(t.U32(base::Max(num_thread_y, 1u)),
                                          t.Vg(2)))));
   t.mask_lane_id = t.And(local_index, t.U32(t.wave_size - 1));
   t.xchg_index = local_index;
@@ -913,7 +917,7 @@ static bool EmitCsMemoryUnpredicated(Translator& t,
       }
       const u32 nsa = (w >> 1) & 0x3;
       if (nsa) {
-        std::array<gpu::gcn::Id, 13> address{};
+        base::Array<gpu::gcn::Id, 13> address{};
         address[0] = t.Vg(inst.raw[1] & 0xFF);
         for (u32 d = 0; d < nsa; d++)
           for (u32 c = 0; c < 4; c++)
@@ -1008,10 +1012,10 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
     return r;
   }
 
-  const std::vector<u32> spv_bin = t.m.Assemble();
+  const base::Vector<u32> spv_bin = t.m.Assemble();
   // A module the translator emitted but the validator rejects is a translator
   // bug (wrong codegen, not a guest gap): always loud.
-  std::string err;
+  base::String err;
   // Use the same content-addressed optimizer cache as graphics. Large native
   // decoder kernels otherwise repeat legalization on every game launch.
   const bool no_opt = NoOpt();

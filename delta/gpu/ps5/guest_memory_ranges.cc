@@ -1,21 +1,25 @@
 #include "gpu/ps5/guest_memory_ranges.h"
-#include <algorithm>
 #include <cstdio>
 #include "gpu/ps5/guest_address.h"
 #include "utl/mem.h"
+#include <base/algorithm.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace gpu::ps5 {
-std::vector<render::GuestMemoryRange> GuestMemoryRanges(
-    const std::vector<u64>& addresses) {
-  std::vector<render::GuestMemoryRange> result;
+base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
+    const base::Vector<u64>& addresses) {
+  base::Vector<render::GuestMemoryRange> result;
 #ifdef OS_LINUX
   FILE* maps = std::fopen("/proc/self/maps", "r");
   if (!maps)
     return result;
-  std::vector<NotedPools::Range> pools;
+  base::Vector<NotedPools::Range> pools;
   {
     auto& noted = GpuPools();
-    std::lock_guard<std::mutex> lock(noted.lock);
+    base::LockGuard<base::Mutex> lock(noted.lock);
     pools.assign(noted.ranges, noted.ranges + noted.count.load());
   }
   char line[1024];
@@ -34,7 +38,7 @@ std::vector<render::GuestMemoryRange> GuestMemoryRanges(
       if (!identity)
         identity = 1;
     }
-    const bool explicit_address = std::any_of(
+    const bool explicit_address = base::AnyOf(
         addresses.begin(), addresses.end(),
         [&](u64 address) { return address >= begin && address < end; });
     const auto add_range = [&](u64 lo, u64 hi) {
@@ -52,23 +56,23 @@ std::vector<render::GuestMemoryRange> GuestMemoryRanges(
       continue;
     }
     for (const auto& pool : pools) {
-      const u64 lo = std::max<u64>(begin, pool.base),
-                hi = std::min<u64>(end, pool.end);
+      const u64 lo = base::Max<u64>(begin, pool.base),
+                hi = base::Min<u64>(end, pool.end);
       if (lo < hi)
         add_range(lo, hi);
     }
   }
   std::fclose(maps);
-  std::sort(result.begin(), result.end(),
+  base::Sort(result.begin(), result.end(),
             [](auto& a, auto& b) { return a.base < b.base; });
-  std::vector<render::GuestMemoryRange> unique;
+  base::Vector<render::GuestMemoryRange> unique;
   for (auto range : result) {
     if (!unique.empty()) {
       const u64 prior_end = unique.back().base + unique.back().size;
       if (prior_end >= range.base && unique.back().identity == range.identity &&
           unique.back().writable == range.writable) {
         unique.back().size =
-            std::max(prior_end, range.base + range.size) - unique.back().base;
+            base::Max(prior_end, range.base + range.size) - unique.back().base;
         continue;
       }
       if (prior_end >= range.base + range.size)

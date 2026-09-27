@@ -11,29 +11,31 @@
 
 #include <spirv_cross.hpp>
 
-#include <algorithm>
-#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <vector>
+#include <dirent.h>
+#include <sys/stat.h>
 
 #include "base/arch.h"
 #include "gpu/d3d12/d3d12_internal.h"
 #include "gpu/d3d12/d3d12_shader.h"
 #include "gpu/render/backend.h"
+#include <base/algorithm.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
 
 namespace {
 
-namespace fs = std::filesystem;
 namespace sc = spirv_cross;
 using namespace gpu;
 using namespace gpu::d3d12;
@@ -43,24 +45,45 @@ struct Stats {
 };
 
 struct Module {
-  std::vector<u32> words;
+  base::Vector<u32> words;
   rhi::ShaderStage stage = rhi::kStageVertex;
   bool barycentric = false;
   bool buffer_address = false;
-  std::map<u32, std::vector<rhi::BindingLayout>> sets;
+  base::Map<u32, base::Vector<rhi::BindingLayout>> sets;
   u32 push_bytes = 0;
-  std::vector<std::pair<u32, rhi::Format>> inputs;  // vertex: location, format
-  std::vector<std::pair<u32, DXGI_FORMAT>> outputs;  // fragment targets
+  base::Vector<base::Pair<u32, rhi::Format>> inputs;  // vertex: location, format
+  base::Vector<base::Pair<u32, DXGI_FORMAT>> outputs;  // fragment targets
   bool writes_depth = false;
   u32 separate = 0;  // separate images/samplers the rhi cannot bind
 };
 
-std::vector<u32> ReadWords(const fs::path& path) {
-  std::ifstream f(path, std::ios::binary);
-  std::vector<char> bytes((std::istreambuf_iterator<char>(f)),
-                          std::istreambuf_iterator<char>());
-  std::vector<u32> words(bytes.size() / 4);
-  std::memcpy(words.data(), bytes.data(), words.size() * 4);
+// The *.spv files directly inside `dir`.
+void ListSpirv(const base::String& dir, base::Vector<base::String>* files) {
+  DIR* d = ::opendir(dir.c_str());
+  if (!d)
+    return;
+  while (const dirent* e = ::readdir(d)) {
+    const mem_size n = std::strlen(e->d_name);
+    if (n > 4 && !std::strcmp(e->d_name + n - 4, ".spv"))
+      files->push_back(dir + "/" + e->d_name);
+  }
+  ::closedir(d);
+}
+
+base::Vector<u32> ReadWords(const base::String& path) {
+  base::Vector<u32> words;
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f)
+    return words;
+  std::fseek(f, 0, SEEK_END);
+  const long n = std::ftell(f);
+  std::fseek(f, 0, SEEK_SET);
+  if (n > 0) {
+    words.resize(static_cast<mem_size>(n) / 4);
+    if (std::fread(words.data(), 4, words.size(), f) != words.size())
+      words.clear();
+  }
+  std::fclose(f);
   return words;
 }
 
@@ -74,7 +97,7 @@ rhi::Format AttributeFormat(const sc::SPIRType& t) {
   static const rhi::Format kSint[] = {
       rhi::Format::kR32Sint, rhi::Format::kRG32Sint, rhi::Format::kRGBA32Sint,
       rhi::Format::kRGBA32Sint};
-  const u32 n = std::clamp(t.vecsize, 1u, 4u) - 1;
+  const u32 n = base::Clamp(t.vecsize, 1u, 4u) - 1;
   if (t.basetype == sc::SPIRType::UInt)
     return kUint[n];
   if (t.basetype == sc::SPIRType::Int)
@@ -82,9 +105,9 @@ rhi::Format AttributeFormat(const sc::SPIRType& t) {
   return kFloat[n];
 }
 
-bool Reflect(const std::vector<u32>& words, Module* m, std::string* error) {
+bool Reflect(const base::Vector<u32>& words, Module* m, base::String* error) {
   try {
-    sc::Compiler c(words);
+    sc::Compiler c(words.data(), words.size());
     switch (c.get_execution_model()) {
       case spv::ExecutionModelVertex:
         m->stage = rhi::kStageVertex;
@@ -170,14 +193,14 @@ bool Reflect(const std::vector<u32>& words, Module* m, std::string* error) {
 
 // The first line of a diagnostic, without the file:line: prefix or numbers
 // that would split one cause into many.
-std::string Reason(const std::string& text) {
+base::String Reason(const base::String& text) {
   size_t start = text.find("error: ");
-  start = start == std::string::npos ? 0 : text.rfind('\n', start) + 1;
-  std::string line = text.substr(start, text.find('\n', start) - start);
+  start = start == base::String::npos ? 0 : text.rfind('\n', start) + 1;
+  base::String line = text.substr(start, text.find('\n', start) - start);
   const size_t err = line.find("error: ");
-  if (err != std::string::npos)
+  if (err != base::String::npos)
     line = line.substr(err + 7);
-  std::string out;
+  base::String out;
   for (size_t i = 0; i < line.size(); i++) {
     if (std::isdigit(static_cast<unsigned char>(line[i]))) {
       if (out.empty() || out.back() != '#')
@@ -194,27 +217,29 @@ std::string Reason(const std::string& text) {
 class PsoChecker {
  public:
   explicit PsoChecker(rhi::Device* device) : device_(device) {
-    std::string error;
+    base::String error;
     Dxc::Compile(
         "float4 main(uint id : SV_VertexID) : SV_Position { return 0; }",
         "vs_6_0", &passthrough_vs_, &error);
   }
 
   // Empty on success.
-  std::string Check(const Module& m, const std::vector<u8>& dxil) {
-    std::vector<rhi::Object*> objects;
-    std::string result = Build(m, dxil, objects);
+  base::String Check(const Module& m, const base::Vector<u8>& dxil) {
+    base::Vector<rhi::Object*> objects;
+    base::String result = Build(m, dxil, objects);
     for (auto it = objects.rbegin(); it != objects.rend(); ++it)
       device_->Destroy(*it);
     return result;
   }
 
  private:
-  std::string Build(const Module& m,
-                    const std::vector<u8>& dxil,
-                    std::vector<rhi::Object*>& objects) {
+  base::String Build(const Module& m,
+                    const base::Vector<u8>& dxil,
+                    base::Vector<rhi::Object*>& objects) {
     rhi::PipelineLayoutDesc pl;
-    const u32 sets = m.sets.empty() ? 0 : m.sets.rbegin()->first + 1;
+    u32 sets = 0;
+    for (const auto& [s, bindings] : m.sets)
+      sets = base::Max(sets, s + 1);
     for (u32 s = 0; s < sets; s++) {
       rhi::BindGroupLayoutDesc gd;
       auto it = m.sets.find(s);
@@ -274,7 +299,7 @@ class PsoChecker {
     for (const auto& [location, format] : m.outputs)
       if (location < 8) {
         pd.RTVFormats[location] = format;
-        pd.NumRenderTargets = std::max<UINT>(pd.NumRenderTargets, location + 1);
+        pd.NumRenderTargets = base::Max<UINT>(pd.NumRenderTargets, location + 1);
         pd.BlendState.RenderTarget[location].RenderTargetWriteMask = 0xF;
       }
     for (UINT i = 0; i < pd.NumRenderTargets; i++)
@@ -306,7 +331,7 @@ class PsoChecker {
   }
 
   rhi::Device* device_;
-  std::vector<u8> passthrough_vs_;
+  base::Vector<u8> passthrough_vs_;
 };
 
 const char* StageName(rhi::ShaderStage s) {
@@ -326,11 +351,12 @@ const char* StageName(rhi::ShaderStage s) {
   }
 }
 
-void Top(const char* title, const std::map<std::string, int>& reasons) {
-  std::vector<std::pair<int, std::string>> sorted;
+void Top(const char* title, const base::Map<base::String, int>& reasons) {
+  base::Vector<base::Pair<int, base::String>> sorted;
   for (const auto& [r, n] : reasons)
     sorted.emplace_back(n, r);
-  std::sort(sorted.rbegin(), sorted.rend());
+  base::Sort(sorted.begin(), sorted.end(),
+             [](const auto& a, const auto& b) { return b < a; });
   std::printf("\n%s:\n", title);
   for (size_t i = 0; i < sorted.size() && i < 25; i++)
     std::printf("  %6d  %s\n", sorted[i].first, sorted[i].second.c_str());
@@ -343,7 +369,7 @@ int main(int argc, char** argv) {
   size_t limit = ~size_t(0);
   u32 shader_model = 60;
   u32 jobs = 1;
-  std::vector<fs::path> inputs;
+  base::Vector<base::String> inputs;
   for (int i = 1; i < argc; i++) {
     if (!std::strcmp(argv[i], "--pso"))
       pso = true;
@@ -356,60 +382,58 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--sm") && i + 1 < argc)
       shader_model = static_cast<u32>(std::atoi(argv[++i]));
     else if (!std::strcmp(argv[i], "--jobs") && i + 1 < argc)
-      jobs = std::max(1, std::atoi(argv[++i]));
+      jobs = base::Max(1, std::atoi(argv[++i]));
     else
       inputs.emplace_back(argv[i]);
   }
   if (inputs.empty()) {
     const char* home = std::getenv("HOME");
-    inputs.emplace_back(fs::path(home ? home : ".") / ".cache/ps4delta/spirv");
+    inputs.push_back(base::String(home ? home : ".") + "/.cache/ps4delta/spirv");
   }
-  std::vector<fs::path> files;
-  for (const fs::path& p : inputs) {
-    if (fs::is_directory(p)) {
-      for (const auto& e : fs::directory_iterator(p))
-        if (e.path().extension() == ".spv")
-          files.push_back(e.path());
-    } else {
+  base::Vector<base::String> files;
+  for (const base::String& p : inputs) {
+    struct stat st;
+    if (::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+      ListSpirv(p, &files);
+    else
       files.push_back(p);
-    }
   }
-  std::sort(files.begin(), files.end());
+  base::Sort(files.begin(), files.end());
   if (files.size() > limit)
     files.resize(limit);
   if (!Dxc::Load()) {
     std::fprintf(stderr, "cannot load DXC\n");
     return 1;
   }
-  std::unique_ptr<rhi::Device> device;
-  std::unique_ptr<PsoChecker> checker;
+  base::UniquePointer<rhi::Device> device;
+  base::UniquePointer<PsoChecker> checker;
   if (pso) {
     device = render::CreateBackendDevice(rhi::Backend::kD3D12);
     if (!device) {
       std::fprintf(stderr, "no D3D12 device\n");
       return 1;
     }
-    checker = std::make_unique<PsoChecker>(device.get());
+    checker = base::MakeUnique<PsoChecker>(&*device);
   }
 
-  std::map<std::string, Stats> stats;
-  std::map<std::string, int> lower_fail, dxc_fail, pso_fail;
+  base::Map<base::String, Stats> stats;
+  base::Map<base::String, int> lower_fail, dxc_fail, pso_fail;
   int barycentric = 0, barycentric_read = 0, buffer_address = 0, separate = 0;
-  std::mutex mutex;
-  std::atomic<size_t> next{0}, done{0};
+  base::Mutex mutex;
+  base::Atomic<size_t> next{0}, done{0};
   auto process = [&](size_t n) {
     Module m;
     m.words = ReadWords(files[n]);
-    std::string error;
+    base::String error;
     if (!Reflect(m.words, &m, &error)) {
-      std::lock_guard<std::mutex> lock(mutex);
+      base::LockGuard<base::Mutex> lock(mutex);
       stats["??"].total++;
       lower_fail["reflect: " + Reason(error)]++;
       return;
     }
-    const std::string stage = StageName(m.stage);
+    const base::String stage = StageName(m.stage);
     {
-      std::lock_guard<std::mutex> lock(mutex);
+      base::LockGuard<base::Mutex> lock(mutex);
       stats[stage].total++;
       barycentric += m.barycentric;
       buffer_address += m.buffer_address;
@@ -419,7 +443,7 @@ int main(int argc, char** argv) {
     o.stage = m.stage;
     o.shader_model = shader_model;
     if (m.stage == rhi::kStageMesh)
-      o.shader_model = std::max(o.shader_model, 65u);
+      o.shader_model = base::Max(o.shader_model, 65u);
     o.flip_y = m.stage == rhi::kStageVertex || m.stage == rhi::kStageGeometry;
     for (const auto& [set, bindings] : m.sets)
       for (const rhi::BindingLayout& b : bindings)
@@ -430,13 +454,13 @@ int main(int argc, char** argv) {
     // come from a generated geometry shader.
     o.emulate_barycentrics = o.shader_model < 61;
     const bool ok = LowerToHlsl(m.words.data(), m.words.size(), o, &lowered);
-    const bool sm61 = lowered.hlsl.find(": DELTABARY") != std::string::npos;
+    const bool sm61 = lowered.hlsl.find(": DELTABARY") != base::String::npos;
     if (sm61) {
-      std::lock_guard<std::mutex> lock(mutex);
+      base::LockGuard<base::Mutex> lock(mutex);
       barycentric_read++;
     }
     if (dump || (fails && !ok)) {
-      std::lock_guard<std::mutex> lock(mutex);
+      base::LockGuard<base::Mutex> lock(mutex);
       if (ok)
         std::printf("// %s\n%s\n", files[n].c_str(), lowered.hlsl.c_str());
       else
@@ -444,15 +468,15 @@ int main(int argc, char** argv) {
                     lowered.error.c_str());
     }
     if (!ok) {
-      std::lock_guard<std::mutex> lock(mutex);
+      base::LockGuard<base::Mutex> lock(mutex);
       lower_fail[stage + ": " + Reason(lowered.error)]++;
       return;
     }
-    std::vector<u8> dxil;
+    base::Vector<u8> dxil;
     const bool compiled =
         Dxc::Compile(lowered.hlsl, lowered.profile, &dxil, &error);
     {
-      std::lock_guard<std::mutex> lock(mutex);
+      base::LockGuard<base::Mutex> lock(mutex);
       stats[stage].lowered++;
       if (!compiled) {
         dxc_fail[stage + ": " + Reason(error)]++;
@@ -464,10 +488,10 @@ int main(int argc, char** argv) {
     }
     if (!checker)
       return;
-    std::string failure = checker->Check(m, dxil);
+    base::String failure = checker->Check(m, dxil);
     if (sm61 && !failure.empty())
       failure = "emulated barycentrics, " + failure;
-    std::lock_guard<std::mutex> lock(mutex);
+    base::LockGuard<base::Mutex> lock(mutex);
     if (failure.empty())
       stats[stage].pso++;
     else
@@ -475,17 +499,17 @@ int main(int argc, char** argv) {
     if (fails && !failure.empty())
       std::printf("%s: pipeline: %s\n", files[n].c_str(), failure.c_str());
   };
-  std::vector<std::thread> threads;
+  base::Vector<base::UniquePointer<base::Thread>> threads;
   for (u32 t = 0; t < jobs; t++)
-    threads.emplace_back([&] {
+    threads.push_back(base::MakeUnique<base::Thread>("corpus", [&] {
       for (size_t n; (n = next++) < files.size();) {
         process(n);
         if (++done % 1000 == 0)
           std::fprintf(stderr, "%zu / %zu\n", done.load(), files.size());
       }
-    });
-  for (std::thread& t : threads)
-    t.join();
+    }, true));
+  for (auto& t : threads)
+    t->Join();
 
   std::printf("%zu modules; %d declare barycentrics (%d read them, emulated), "
               "%d buffer addresses, %d separate images/samplers\n",

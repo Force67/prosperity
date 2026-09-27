@@ -77,20 +77,20 @@ constexpr FormatEntry kFormats[] = {
 #undef F
 
 static_assert(sizeof(kFormats) / sizeof(kFormats[0]) ==
-                  static_cast<size_t>(Format::kCount),
+                  static_cast<mem_size>(Format::kCount),
               "every Format needs an entry");
 
 constexpr bool InOrder() {
-  for (size_t i = 0; i < sizeof(kFormats) / sizeof(kFormats[0]); ++i)
-    if (static_cast<size_t>(kFormats[i].format) != i)
+  for (mem_size i = 0; i < sizeof(kFormats) / sizeof(kFormats[0]); ++i)
+    if (static_cast<mem_size>(kFormats[i].format) != i)
       return false;
   return true;
 }
 static_assert(InOrder(), "kFormats must be in enum order");
 
 const FormatEntry& Entry(Format format) {
-  const size_t i = static_cast<size_t>(format);
-  return kFormats[i < static_cast<size_t>(Format::kCount) ? i : 0];
+  const mem_size i = static_cast<mem_size>(format);
+  return kFormats[i < static_cast<mem_size>(Format::kCount) ? i : 0];
 }
 
 }  // namespace

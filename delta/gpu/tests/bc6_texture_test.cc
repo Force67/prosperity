@@ -1,4 +1,3 @@
-#include <array>
 
 #include <gtest/gtest.h>
 
@@ -8,6 +7,7 @@
 #include "gpu/render/frame.h"
 #include "gpu/render/guest_format.h"
 #include "gpu/render/texture_cache.h"
+#include <base/containers/array.h>
 
 // The renderer links the PS4 command processor; this test issues no EOPs.
 extern "C" void prosperity_gpu_end_of_pipe() {}
@@ -43,7 +43,7 @@ TEST(Bc6Texture, NativeUploadsSupportSignedUnsignedTiledMipArrays) {
     GTEST_SKIP() << "Device does not support BC textures";
   ASSERT_TRUE(gpu::render::CreateTextureDescriptors());
   // Zero BC6 blocks encode black. Separate allocations avoid cache aliasing.
-  alignas(65536) static std::array<std::array<u8, 1048576>, 4> images{};
+  alignas(65536) static base::Array<base::Array<u8, 1048576>, 4> images{};
   u32 allocation = 0;
   for (u32 nfmt : {0u, 1u}) {
     for (u32 tiling : {8u, 0x109u}) {

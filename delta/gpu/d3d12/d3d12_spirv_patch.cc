@@ -9,10 +9,10 @@
  *     FindUMsb and selects.
  */
 
-#include <string>
-#include <vector>
 
 #include "gpu/d3d12/d3d12_shader.h"
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 namespace gpu::d3d12 {
 
@@ -54,14 +54,14 @@ class Patcher {
  public:
   Patcher(const u32* words, size_t count) : in_(words, words + count) {}
 
-  std::vector<u32> Run() {
+  base::Vector<u32> Run() {
     if (in_.size() < 5)
       return in_;
     bound_ = in_[3];
     Scan();
     if (!invocation_var_ && !ballot_)
       return in_;
-    std::vector<u32> out(in_.begin(), in_.begin() + 5);
+    base::Vector<u32> out(in_.begin(), in_.begin() + 5);
     bool globals_done = false;
     for (size_t at = 5; at < in_.size();) {
       const u32 op = in_[at] & 0xffff;
@@ -92,7 +92,7 @@ class Patcher {
         continue;
       }
       if (op == kOpEntryPoint && invocation_var_) {
-        std::vector<u32> ep(w, w + n);
+        base::Vector<u32> ep(w, w + n);
         for (size_t i = 3; i < ep.size(); i++)
           if (ep[i] == invocation_var_) {
             ep.erase(ep.begin() + i);
@@ -126,7 +126,7 @@ class Patcher {
         break;
       switch (op) {
         case kOpExtInstImport:
-          if (n >= 4 && !std::string(reinterpret_cast<const char*>(w + 2))
+          if (n >= 4 && !base::String(reinterpret_cast<const char*>(w + 2))
                             .compare(0, 12, "GLSL.std.450"))
             glsl_ = w[1];
           break;
@@ -174,7 +174,7 @@ class Patcher {
       invocation_var_ = 0;
   }
 
-  void EmitGlobals(std::vector<u32>& out) {
+  void EmitGlobals(base::Vector<u32>& out) {
     if (invocation_var_) {
       const u32 ptr = bound_++, zero = bound_++;
       out.insert(out.end(), {Op(kOpTypePointer, 4), ptr, kStoragePrivate,
@@ -200,7 +200,7 @@ class Patcher {
   }
 
   // result = the lowest (highest) set bit of a uvec4 ballot.
-  void EmitFind(std::vector<u32>& out, bool lsb, u32 type, u32 result,
+  void EmitFind(base::Vector<u32>& out, bool lsb, u32 type, u32 result,
                 u32 value) {
     u32 comp[4], bit[4];
     for (u32 i = 0; i < 4; i++) {
@@ -234,7 +234,7 @@ class Patcher {
   struct Pointer {
     u32 id, storage, pointee;
   };
-  std::vector<u32> in_;
+  base::Vector<u32> in_;
   u32 bound_ = 0;
   u32 glsl_ = 0;
   u32 bool_ = 0;
@@ -242,12 +242,12 @@ class Patcher {
   u32 consts_[4] = {};
   bool ballot_ = false;
   u32 invocation_var_ = 0, invocation_ptr_ = 0, invocation_type_ = 0;
-  std::vector<Pointer> pointers_;
+  base::Vector<Pointer> pointers_;
 };
 
 }  // namespace
 
-std::vector<u32> PatchSpirvForHlsl(const u32* words, size_t count) {
+base::Vector<u32> PatchSpirvForHlsl(const u32* words, size_t count) {
   return Patcher(words, count).Run();
 }
 

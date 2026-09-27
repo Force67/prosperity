@@ -4,10 +4,10 @@
 #include "base/arch.h"
 #include <cstdio>
 #include <cstdlib>
-#include <vector>
 
 #include "gfx/gfx.h"
 #include <utl/options.h>
+#include <base/containers/vector.h>
 
 namespace {
 DELTA_OPTION(u32, kTestFrames, "DELTA_GFX_TEST_FRAMES", 0);
@@ -22,7 +22,7 @@ int main() {
   if (!gfx::init("PS4Delta gfx test", 960, 540))
     return 1;
 
-  std::vector<u32> fb((size_t)W * H);
+  base::Vector<u32> fb((size_t)W * H);
   u32 t = 0;
   while (gfx::pumpEvents()) {
     if (maxFrames && t >= maxFrames) {

@@ -33,6 +33,19 @@
 #include <unistd.h>
 
 #include <utl/options.h>
+#include <base/threading/thread.h>
+#include <base/containers/deque.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/functional/function.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/shared_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::gcn::spirv {
 
@@ -49,7 +62,7 @@ namespace {
 DELTA_OPTION(u32, kOptLevel, "DELTA_GPU_SPIRV_OPT", 2);
 }  // namespace
 
-std::vector<u32> Optimize(const std::vector<u32>& spv) {
+base::Vector<u32> Optimize(const base::Vector<u32>& spv) {
   if (kOptLevel == 0)
     return spv;
   const auto env = spv.size() > 1 && spv[1] >= 0x00010400u
@@ -63,13 +76,14 @@ std::vector<u32> Optimize(const std::vector<u32>& spv) {
   opt.RegisterLegalizationPasses();
   if (kOptLevel >= 2)
     opt.RegisterPerformancePasses();
+  // SPIRV-Tools hands the result back in a std::vector.
   std::vector<u32> out;
   if (!opt.Run(spv.data(), spv.size(), &out) || out.empty())
     return spv;  // keep the valid-but-unoptimized binary on failure
-  return out;
+  return base::Vector<u32>(out.data(), out.data() + out.size());
 }
 
-bool Validate(const std::vector<u32>& spv, std::string* err) {
+bool Validate(const base::Vector<u32>& spv, base::String* err) {
   const auto env = spv.size() > 1 && spv[1] >= 0x00010400u
                        ? SPV_ENV_VULKAN_1_2 : SPV_ENV_VULKAN_1_1;
   spv_context ctx = spvContextCreate(env);
@@ -96,7 +110,7 @@ DELTA_OPTION(const char*,
 // generation are never looked up.
 constexpr u32 kCacheGeneration = 1;
 
-u64 HashWords(const std::vector<u32>& w) {
+u64 HashWords(const base::Vector<u32>& w) {
   u64 h = 1469598103934665603ull;  // FNV-1a
   for (u32 x : w) {
     h ^= x;
@@ -113,19 +127,19 @@ u64 HashWords(const std::vector<u32>& w) {
 }
 
 // The cache directory, created on first use. Empty means "no cache".
-const std::string& CacheDir() {
-  static const std::string dir = [] {
+const base::String& CacheDir() {
+  static const base::String dir = [] {
     if (!kShaderCache)
-      return std::string();
-    std::string d;
+      return base::String();
+    base::String d;
     if (kShaderCacheDir && *kShaderCacheDir) {
       d = kShaderCacheDir;
     } else if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg) {
-      d = std::string(xdg) + "/ps4delta/spirv";
+      d = base::String(xdg) + "/ps4delta/spirv";
     } else if (const char* home = std::getenv("HOME"); home && *home) {
-      d = std::string(home) + "/.cache/ps4delta/spirv";
+      d = base::String(home) + "/.cache/ps4delta/spirv";
     } else {
-      return std::string();
+      return base::String();
     }
     // mkdir -p over the components we own.
     for (size_t i = 1; i <= d.size(); i++)
@@ -136,14 +150,14 @@ const std::string& CacheDir() {
   return dir;
 }
 
-std::string EntryPath(u64 key) {
+base::String EntryPath(u64 key) {
   char name[32];
   std::snprintf(name, sizeof(name), "/%016llx.spv",
                 static_cast<unsigned long long>(key));
   return CacheDir() + name;
 }
 
-bool ReadEntry(u64 key, std::vector<u32>* out) {
+bool ReadEntry(u64 key, base::Vector<u32>* out) {
   if (CacheDir().empty())
     return false;
   FILE* f = std::fopen(EntryPath(key).c_str(), "rb");
@@ -166,10 +180,10 @@ bool ReadEntry(u64 key, std::vector<u32>* out) {
 
 // Write through a temporary + rename, so a torn file is never observed: two
 // processes recompiling the same shader is normal.
-void WriteEntry(u64 key, const std::vector<u32>& spv) {
+void WriteEntry(u64 key, const base::Vector<u32>& spv) {
   if (CacheDir().empty() || spv.empty())
     return;
-  const std::string path = EntryPath(key);
+  const base::String path = EntryPath(key);
   char tmp[512];
   std::snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path.c_str(), (int)::getpid());
   FILE* f = std::fopen(tmp, "wb");
@@ -188,11 +202,11 @@ void WriteEntry(u64 key, const std::vector<u32>& spv) {
 namespace {
 struct Finalized {
   bool valid = false;
-  std::vector<u32> spv;
-  std::string err;
+  base::Vector<u32> spv;
+  base::String err;
 };
 
-Finalized RunFinalize(const std::vector<u32>& spv, u64 key) {
+Finalized RunFinalize(const base::Vector<u32>& spv, u64 key) {
   Finalized f;
   f.valid = Validate(spv, &f.err);
   if (f.valid) {
@@ -209,16 +223,16 @@ Finalized RunFinalize(const std::vector<u32>& spv, u64 key) {
 class FinalizePool {
  public:
   FinalizePool() {
-    const u32 n = std::max(2u, std::thread::hardware_concurrency() / 2);
+    const u32 n = base::Max(2u, std::thread::hardware_concurrency() / 2);
     for (u32 i = 0; i < n; i++)
-      std::thread([this] { Work(); }).detach();
+      base::SpawnDetachedThread("spv_post", [this] { Work(); });
   }
 
-  void Start(const std::vector<u32>& spv, u64 key) {
-    std::lock_guard<std::mutex> lock(mutex_);
+  void Start(const base::Vector<u32>& spv, u64 key) {
+    base::LockGuard<base::Mutex> lock(mutex_);
     if (pending_.count(key))
       return;
-    auto task = std::make_shared<std::packaged_task<Finalized()>>(
+    auto task = base::MakeShared<std::packaged_task<Finalized()>>(
         [spv, key] { return RunFinalize(spv, key); });
     pending_.emplace(key, task->get_future().share());
     queue_.push_back([this, task, key] {
@@ -226,31 +240,31 @@ class FinalizePool {
       // Once the disk cache holds the result a later Finalize reads it there;
       // a module the prefetch guessed and no draw asked for is not kept.
       if (!CacheDir().empty()) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        base::LockGuard<base::Mutex> lock(mutex_);
         pending_.erase(key);
       }
     });
-    ready_.notify_one();
+    ready_.NotifyOne();
   }
 
   // Run `then` on a worker with the optimized module, once there is one.
-  void Then(const std::vector<u32>& spv,
+  void Then(const base::Vector<u32>& spv,
             u64 key,
-            std::function<void(const std::vector<u32>&)> then) {
-    std::lock_guard<std::mutex> lock(mutex_);
+            base::Function<void(const base::Vector<u32>&)> then) {
+    base::LockGuard<base::Mutex> lock(mutex_);
     const auto it = pending_.find(key);
     std::shared_future<Finalized> job;
     if (it != pending_.end())
       job = it->second;
     // FIFO: the job this waits on was queued earlier, so some worker already
     // holds it.
-    queue_.push_back([spv, key, job, then = std::move(then)] {
+    queue_.push_back([spv, key, job, then = base::move(then)] {
       if (job.valid()) {
         if (job.get().valid)
           then(job.get().spv);
         return;
       }
-      std::vector<u32> out;
+      base::Vector<u32> out;
       if (ReadEntry(key, &out)) {
         then(out);
         return;
@@ -259,12 +273,12 @@ class FinalizePool {
       if (f.valid)
         then(f.spv);
     });
-    ready_.notify_one();
+    ready_.NotifyOne();
   }
 
   // The job for `key`, handed over once: afterwards the disk cache has it.
   bool Take(u64 key, std::shared_future<Finalized>* out) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    base::LockGuard<base::Mutex> lock(mutex_);
     const auto it = pending_.find(key);
     if (it == pending_.end())
       return false;
@@ -276,21 +290,21 @@ class FinalizePool {
  private:
   void Work() {
     for (;;) {
-      std::function<void()> job;
+      base::Function<void()> job;
       {
-        std::unique_lock<std::mutex> lock(mutex_);
-        ready_.wait(lock, [this] { return !queue_.empty(); });
-        job = std::move(queue_.front());
+        base::UniqueLock<base::Mutex> lock(mutex_);
+        ready_.Wait(lock, [this] { return !queue_.empty(); });
+        job = base::move(queue_.front());
         queue_.pop_front();
       }
       job();
     }
   }
 
-  std::mutex mutex_;
-  std::condition_variable ready_;
-  std::deque<std::function<void()>> queue_;
-  std::unordered_map<u64, std::shared_future<Finalized>> pending_;
+  base::Mutex mutex_;
+  base::ConditionVariable ready_;
+  base::SimpleDeque<base::Function<void()>> queue_;
+  base::HashMap<u64, std::shared_future<Finalized>> pending_;
 };
 
 FinalizePool& Pool() {
@@ -309,21 +323,21 @@ PrefetchScope::~PrefetchScope() {
   t_prefetching = false;
 }
 
-void Prefetch(const std::vector<u32>& spv) {
+void Prefetch(const base::Vector<u32>& spv) {
   const u64 key = HashWords(spv);
   if (!CacheDir().empty() && ::access(EntryPath(key).c_str(), F_OK) == 0)
     return;
   Pool().Start(spv, key);
 }
 
-void PrefetchThen(const std::vector<u32>& spv,
-                  std::function<void(const std::vector<u32>&)> then) {
-  Pool().Then(spv, HashWords(spv), std::move(then));
+void PrefetchThen(const base::Vector<u32>& spv,
+                  base::Function<void(const base::Vector<u32>&)> then) {
+  Pool().Then(spv, HashWords(spv), base::move(then));
 }
 
-bool Finalize(const std::vector<u32>& spv,
-              std::vector<u32>* out,
-              std::string* err) {
+bool Finalize(const base::Vector<u32>& spv,
+              base::Vector<u32>* out,
+              base::String* err) {
   if (t_prefetching) {
     Prefetch(spv);
     *out = spv;

@@ -9,13 +9,14 @@
 #include <sys/mman.h>
 #include <sys/uio.h>
 #include <unistd.h>
-#include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
 #include <limits>
-#include <unordered_map>
-#include <vector>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu {
 
@@ -36,7 +37,7 @@ inline bool IsReadableMapping(u64 address, u64 bytes) {
       continue;
     if (begin > cursor || permissions[0] != 'r')
       break;
-    cursor = std::min<u64>(end, mapping_end);
+    cursor = base::Min<u64>(end, mapping_end);
   }
   std::fclose(maps);
   return cursor == end;
@@ -80,7 +81,7 @@ inline bool IsReadableRange(u64 address, u64 bytes) {
   // has no mapping, which is the same question the per-page walk was asking.
   // Only its success matters, not the residency bytes it writes.
   const size_t pages = static_cast<size_t>((last_page - first_page) / page + 1);
-  static thread_local std::vector<unsigned char> residency;
+  static thread_local base::Vector<unsigned char> residency;
   if (residency.size() < pages)
     residency.resize(pages);
   if (mincore(reinterpret_cast<void*>(first_page), pages * page,
@@ -127,7 +128,7 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
     bool all = true;
     for (u64 page = first; page <= last; page++) {
       const GuestPageTable::Page* p = table.Find(page << kPageShift);
-      const u32 known = p ? p->readable.load(std::memory_order_relaxed) : 0;
+      const u32 known = p ? p->readable.load(base::memory_order_relaxed) : 0;
       if (known == (gen | GuestPageTable::kUnreadable))
         return false;
       all &= known == gen;
@@ -142,7 +143,7 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
   };
   // Per thread, so the command processor and the frame loop never share it and
   // no lock is needed.
-  static thread_local std::unordered_map<u64, Entry> cache;
+  static thread_local base::HashMap<u64, Entry> cache;
   static thread_local u64 seen_generation = 0;
   if (seen_generation != MemoryGeneration()) {
     seen_generation = MemoryGeneration();
@@ -155,7 +156,7 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
   if (readable && paged) {
     for (u64 page = first; page <= last; page++)
       if (GuestPageTable::Page* p = table.At(page << kPageShift))
-        p->readable.store(gen, std::memory_order_relaxed);
+        p->readable.store(gen, base::memory_order_relaxed);
     return true;
   }
   // Mappings are page granular: a range within one page that is unreadable
@@ -163,7 +164,7 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
   if (!readable && paged && first == last)
     if (GuestPageTable::Page* p = table.At(first << kPageShift))
       p->readable.store(gen | GuestPageTable::kUnreadable,
-                        std::memory_order_relaxed);
+                        base::memory_order_relaxed);
   cache[address] = {bytes, MemoryGeneration(), readable};
   return readable;
 }

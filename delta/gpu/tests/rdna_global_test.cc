@@ -1,8 +1,5 @@
 #include <gtest/gtest.h>
-#include <algorithm>
-#include <array>
 #include <cstring>
-#include <vector>
 
 #include <base/option.h>
 #ifdef OS_LINUX
@@ -16,6 +13,11 @@
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/shader_cache.h"
 #include "gpu/render/device.h"
+#include <base/algorithm.h>
+#include <base/containers/array.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
 
 namespace {
 class RdnaGlobal : public testing::Test {
@@ -24,17 +26,17 @@ class RdnaGlobal : public testing::Test {
     if (!gpu::render::Init(gpu::render::DefaultRenderer()))
       GTEST_SKIP() << "Vulkan is required";
   }
-  using Page = std::array<u32, 16384>;
+  using Page = base::Array<u32, 16384>;
   Page& PageForDispatch() {
-    alignas(65536) static std::array<Page, 32> pages{};
+    alignas(65536) static base::Array<Page, 32> pages{};
     static u32 next = 0;
     gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(pages.data()), sizeof(pages));
     auto& page = pages.at(next++);
     page.fill(0xa5a5a5a5);
     return page;
   }
-  std::vector<u32> program;
-  std::array<u32, 3> group_start{}, group_end{1, 1, 1};
+  base::Vector<u32> program;
+  base::Array<u32, 3> group_start{}, group_end{1, 1, 1};
   u32 tgid_enable = 0, initiator = 1, lds_size = 0;
   void Mov(u32 vgpr, u32 value) {
     program.push_back(0x7e0002ff | vgpr << 17);
@@ -45,9 +47,9 @@ class RdnaGlobal : public testing::Test {
     program.push_back(addr | scalar << 16 | data << (op >= 0x18 ? 8 : 24));
   }
   void Run(u64 src, u64 dst, u32 threads = 1) {
-    alignas(256) static std::array<u32, 16384> code{};
+    alignas(256) static base::Array<u32, 16384> code{};
     code.fill(0);
-    std::copy(program.begin(), program.end(), code.begin());
+    base::Copy(program.begin(), program.end(), code.begin());
     code[program.size()] = 0xbf810000;
     gpu::rdna::NextProgramGeneration();
     const auto cs =
@@ -191,16 +193,16 @@ TEST_F(RdnaGlobal, GdsCountersBroadcastAcrossBothHalvesOfEachWave) {
   Global(0x1c, 0, 3, 2, 512);
   // Include a partially populated final wave, for both dispatch wave sizes.
   for (const auto [width, threads] :
-       {std::pair{64u, 128u}, std::pair{64u, 70u}, std::pair{32u, 80u}}) {
+       {base::Pair{64u, 128u}, base::Pair{64u, 70u}, base::Pair{32u, 80u}}) {
     SCOPED_TRACE(testing::Message() << "width=" << width << " threads=" << threads);
     ASSERT_TRUE(gpu::render::FillGds(renderer, 0xc70, 4, 17));
     initiator = 1 | (width == 32 ? 1u << 15 : 0);
     Run(mask, reinterpret_cast<u64>(dest.data()), threads);
-    std::vector<std::pair<u32, u32>> allocations, consumptions;
+    base::Vector<base::Pair<u32, u32>> allocations, consumptions;
     u32 total = 0;
     for (u32 base = 0; base < threads; base += width) {
       u32 count = 0;
-      for (u32 lane = base; lane < std::min(base + width, threads); ++lane) {
+      for (u32 lane = base; lane < base::Min(base + width, threads); ++lane) {
         const bool active = (mask >> (lane - base)) & 1;
         count += active;
         EXPECT_EQ(dest[lane], active ? dest[base] : 99u) << lane;
@@ -212,8 +214,9 @@ TEST_F(RdnaGlobal, GdsCountersBroadcastAcrossBothHalvesOfEachWave) {
     }
     // Waves may execute atomics in either order, but their allocations must
     // form a contiguous range, and consumes must return its pre-op endpoint.
-    std::sort(allocations.begin(), allocations.end());
-    std::sort(consumptions.rbegin(), consumptions.rend());
+    base::Sort(allocations.begin(), allocations.end());
+    base::Sort(consumptions.begin(), consumptions.end(),
+               [](const auto& a, const auto& b) { return b < a; });
     u32 next = 17;
     for (const auto [base, count] : allocations) {
       EXPECT_EQ(base, next);
@@ -414,7 +417,7 @@ TEST_F(RdnaGlobal, InactiveLanesCannotStore) {
 }
 
 TEST_F(RdnaGlobal, AddressesBeyondTheOldSixtyFourMiBWindow) {
-  alignas(65536) static std::array<u32, (65 * 1024 * 1024) / 4> data{};
+  alignas(65536) static base::Array<u32, (65 * 1024 * 1024) / 4> data{};
   constexpr u32 offset = 64 * 1024 * 1024 + 32;
   data[offset / 4] = 0xa5a5a5a5;
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(data.data()), sizeof(data));

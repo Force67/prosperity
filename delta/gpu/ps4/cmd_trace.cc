@@ -7,14 +7,7 @@
 #include "gpu/ps4/cmd_trace.h"
 #include "base/arch.h"
 
-#include <algorithm>
-#include <atomic>
-#include <chrono>
 #include <cstring>
-#include <mutex>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -26,6 +19,14 @@
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/pm4.h"
+#include <base/algorithm.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 // Each probe logs on its own channel, named after the tag it has always
 // printed, so the lines still grep as [drawpkt], [csres] and so on, and one
@@ -94,15 +95,13 @@ class Elapsed {
   double Seconds() {
     if (!started_) {
       started_ = true;
-      start_ = std::chrono::steady_clock::now();
+      start_ = base::TimeTicks::Now();
     }
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                         start_)
-        .count();
+    return (base::TimeTicks::Now() - start_).InSecondsF();
   }
 
  private:
-  std::chrono::steady_clock::time_point start_;
+  base::TimeTicks start_;
   bool started_ = false;
 };
 
@@ -197,7 +196,7 @@ void NoteRegisterWrites(u32 first_reg,
     for (int rt = 0; rt < 8; rt++) {
       if (reg != mmCB_COLOR0_INFO + rt * kCbColorStride)
         continue;
-      static std::atomic<u64> nonzero{0}, zero{0};
+      static base::Atomic<u64> nonzero{0}, zero{0};
       static int shown = 0;
       (values[i] ? nonzero : zero).fetch_add(1);
       if (shown < 24) {
@@ -245,7 +244,7 @@ void MaybeArmRootWriteWatch(const Regs& regs,
   constexpr size_t kRootPoolSpan = 64 * 1024;
   const size_t watch_size = kRootWprotStep ? kRootSize : kRootPoolSpan;
   const unsigned interval =
-      static_cast<unsigned>(std::max(0, kRootWprotMs.get()));
+      static_cast<unsigned>(base::Max(0, kRootWprotMs.get()));
   BASE_LOGI(
       "root-wprot",
       "f{} PS={:#x} hash={:#x} root={:#x} watching-forward={:#x} every={}ms{}",
@@ -292,7 +291,7 @@ void TraceFirstTexturedPs(const Regs& regs, u64 ps_addr) {
             (unsigned long)ps_addr, n_mimg, n_smrd);
   const u32* ud = UserData(regs, mmSPI_SHADER_USER_DATA_PS_0);
   LogUserData("gpu", "  PS user_data:", ud);
-  std::vector<gcn::TImage> texs;
+  base::Vector<gcn::TImage> texs;
   gcn::TrackTextures(texs, gcn::CachedProgram(ps_addr, 4096), ud, false,
                      ps_addr);
   BASE_LOGI("gpu", "  TrackTextures -> {}", texs.size());
@@ -403,7 +402,7 @@ void TraceMrtSlotZeroGap(const render::DrawInfo& d,
                          u64 ps_addr) {
   if (!kNoMrtTrace || !d.mrt_count || d.mrt_base[0])
     return;
-  static std::atomic<u64> n{0};
+  static base::Atomic<u64> n{0};
   const u64 seen = n.fetch_add(1);
   if ((seen % 200) != 0)
     return;
@@ -527,9 +526,9 @@ void TraceShaderCacheMiss(u64 vs_addr,
   struct Seen {
     u64 addr_vs = 0, addr_ps = 0, fetch = 0;
     u32 ena = 0, t3d = 0, t1d = 0;
-    std::unordered_set<u64> fetches, states;
+    base::HashSet<u64> fetches, states;
   };
-  static std::unordered_map<u64, Seen> seen;  // by content pair
+  static base::HashMap<u64, Seen> seen;  // by content pair
   static u32 n_new = 0, n_addr = 0, n_fetch = 0, n_ena = 0, n_3d = 0,
                   n_1d = 0, n_none = 0, n_total = 0;
   const u64 pair = vs_hash ^ (ps_hash * 0x9e3779b97f4a7c15ull);
@@ -588,8 +587,8 @@ void TraceShaderCacheMiss(u64 vs_addr,
   if ((n_total & 31) == 0) {
     size_t max_fetch = 0, max_state = 0;
     for (const auto& [key, value] : seen) {
-      max_fetch = std::max(max_fetch, value.fetches.size());
-      max_state = std::max(max_state, value.states.size());
+      max_fetch = base::Max<size_t>(max_fetch, value.fetches.size());
+      max_state = base::Max<size_t>(max_state, value.states.size());
     }
     BASE_LOGI("shreloc",
               "miss fields: pair-new={} addr={} fetch={} ena={} 3d={} 1d={} "
@@ -628,7 +627,7 @@ void TraceBlitDraw(const Regs& regs,
   if (!kBlitDump || n >= 6)
     return;
   bool target_bound = !kBlitRt || d.rt_base == kBlitRt;
-  for (u32 i = 0; kBlitRt && i < std::min(d.mrt_count, 8u); i++)
+  for (u32 i = 0; kBlitRt && i < base::Min(d.mrt_count, 8u); i++)
     target_bound |= d.mrt_base[i] == kBlitRt;
   if (!target_bound || (!kBlitRt && d.rt_w < 1280))
     return;
@@ -640,7 +639,7 @@ void TraceBlitDraw(const Regs& regs,
             (unsigned long)ps_addr, (unsigned long)d.tex_base, d.tex_w, d.tex_h,
             d.num_vattrs, d.vertex_stride, d.index_count, d.blend_control);
   base::String mrt;
-  for (u32 i = 0; i < std::min(d.mrt_count, 8u); i++)
+  for (u32 i = 0; i < base::Min(d.mrt_count, 8u); i++)
     base::FormatTo(mrt, " {:#x}", d.mrt_base[i]);
   BASE_LOGI("blit", "  MRT({}):{}", d.mrt_count, mrt.c_str());
   BASE_LOGI("blit", "  CB0 pitch={:#x} slice={:#x} info={:#x} attrib={:#x}",
@@ -648,7 +647,7 @@ void TraceBlitDraw(const Regs& regs,
             regs[mmCB_COLOR0_INFO], regs[mmCB_COLOR0_ATTRIB]);
   if (!IsGuestAddress(ps_addr))
     return;
-  std::vector<gcn::TImage> texs;
+  base::Vector<gcn::TImage> texs;
   gcn::TrackTextures(texs, gcn::CachedProgram(ps_addr, 4096),
                      UserData(regs, mmSPI_SHADER_USER_DATA_PS_0), false,
                      ps_addr);
@@ -674,7 +673,7 @@ void TraceBlitDraw(const Regs& regs,
       continue;
     const u32* words = reinterpret_cast<const u32*>(resolved.base);
     const u32 rows =
-        std::min({(cb.num_dwords + 3) / 4, resolved.size / 16, 64u});
+        base::Min<u32>({(cb.num_dwords + 3) / 4, u32(resolved.size / 16), 64u});
     for (u32 row = 0; row < rows; row++) {
       float values[4];
       std::memcpy(values, words + row * 4, sizeof(values));
@@ -725,7 +724,7 @@ void TraceColorMasks(const Regs& regs,
   const double elapsed = since_first_draw.Seconds();
   static int n = 0;
   bool rt_hit = !kMtRt || d.rt_base == kMtRt;
-  for (u32 i = 0; kMtRt && i < std::min(d.mrt_count, 8u); i++)
+  for (u32 i = 0; kMtRt && i < base::Min(d.mrt_count, 8u); i++)
     rt_hit |= d.mrt_base[i] == kMtRt;
   if (!rt_hit || n >= kMtMax || elapsed < kMtAfter)
     return;
@@ -816,7 +815,7 @@ void TraceSpriteDraw(const render::DrawInfo& d) {
       continue;
     const auto& binding = d.vbufs[attr.binding];
     base::String vertices;
-    for (u32 v = 0; v < std::min(d.vertex_count, 3u); v++) {
+    for (u32 v = 0; v < base::Min(d.vertex_count, 3u); v++) {
       const u8* raw = static_cast<const u8*>(binding.data) +
                            static_cast<size_t>(v) * binding.stride +
                            attr.offset;
@@ -1191,7 +1190,7 @@ void TraceDrawRegisters(const Regs& regs,
   if (!IsGuestAddress(fetch))
     return;
   gcn::Disassemble(reinterpret_cast<const u32*>(fetch), 128, "VS.fetch");
-  std::vector<gcn::VBuffer> vbs;
+  base::Vector<gcn::VBuffer> vbs;
   gcn::TrackVertexBuffers(vbs, *gcn::CachedProgram(fetch, 64), vud);
   for (size_t i = 0; i < vbs.size(); i++) {
     const auto& v = vbs[i];
@@ -1216,7 +1215,7 @@ void TraceComputeShader(const Regs& regs,
                         u32 user_sgpr,
                         u32 tgid_enable,
                         u32 lds_dwords) {
-  static std::unordered_set<u64> dumped;
+  static base::HashSet<u64> dumped;
   if (!kCsDump || dumped.size() >= 32 || !IsGuestAddress(cs_addr) ||
       !dumped.insert(cs_addr).second)
     return;
@@ -1235,7 +1234,7 @@ void TraceDroppedDispatch(u64 cs_addr,
                           const char* reason) {
   if (!kCsDrops)
     return;
-  static std::atomic<u64> dropped{0};
+  static base::Atomic<u64> dropped{0};
   const u64 n = dropped.fetch_add(1) + 1;
   if (n <= 64 || (n % 512) == 0)
     BASE_LOGI("csdrop", "#{} cs={:#x} groups=[{} {} {}] tg=[{} {} {}] ({})", n,
@@ -1248,13 +1247,13 @@ bool ShouldTraceCsResources(u64 cs_addr) {
     return false;
   if (kCsResTrace > 1)
     return cs_addr == (u64)kCsResTrace;
-  static std::unordered_set<u64> traced;
+  static base::HashSet<u64> traced;
   return traced.size() < 64 && traced.insert(cs_addr).second;
 }
 
 bool CsWatchCovers(u64 base, u64 size) {
   return kCsWatch && base <= (u64)kCsWatch &&
-         (u64)kCsWatch < base + std::max<u64>(size, 1);
+         (u64)kCsWatch < base + base::Max<u64>(size, 1);
 }
 
 void TraceCsUnresolved(u64 cs_addr, const gcn::CsResource& res) {
@@ -1264,7 +1263,7 @@ void TraceCsUnresolved(u64 cs_addr, const gcn::CsResource& res) {
 }
 
 void TraceCsCode(u64 cs_addr) {
-  static std::unordered_set<u64> dumped;
+  static base::HashSet<u64> dumped;
   if (!kEudFail || !dumped.insert(cs_addr).second)
     return;
   const u32* code = reinterpret_cast<const u32*>(cs_addr);
@@ -1393,8 +1392,8 @@ void TraceConstRam(const char* what,
                    u32 first_dword) {
   if (!kCeTrace)
     return;
-  static std::atomic<u64> n{0};
-  static std::atomic<u64> dst_lo{~0ull}, dst_hi{0};
+  static base::Atomic<u64> n{0};
+  static base::Atomic<u64> dst_lo{~0ull}, dst_hi{0};
   if (addr) {
     u64 lo = dst_lo.load();
     while (addr < lo && !dst_lo.compare_exchange_weak(lo, addr)) {
@@ -1440,7 +1439,7 @@ void TraceCcbHistogram(u32 words) {
 void TraceWaitRegMem(bool timed_out) {
   if (!kWaitTrace)
     return;
-  static std::atomic<u64> waits{0}, expired{0};
+  static base::Atomic<u64> waits{0}, expired{0};
   waits.fetch_add(1);
   if (timed_out)
     expired.fetch_add(1);
@@ -1464,7 +1463,7 @@ void TraceDmaData(u32 control,
   // and used to eat the whole trace cap, which made "this title never CP-DMAs
   // anything" unfalsifiable. Count every packet by class and spend the cap on
   // transfers only.
-  static std::atomic<u64> n_all{0}, n_prefetch{0}, n_copy{0}, n_reject{0};
+  static base::Atomic<u64> n_all{0}, n_prefetch{0}, n_copy{0}, n_reject{0};
   static int shown = 0;
   n_all.fetch_add(1);
   if (src == dst)
@@ -1545,7 +1544,7 @@ void TraceDataWrite(u64 addr, u32 dwords, u32 first_dword) {
 void TraceUnhandledOpcode(u32 op, u32 count) {
   if (!kOpTrace)
     return;
-  static std::atomic<u64> seen[256];
+  static base::Atomic<u64> seen[256];
   const u64 n = seen[op & 0xFF].fetch_add(1);
   if (n == 0 || n == 4096)
     BASE_LOGI("pm4", "unhandled op={:#x} count={} seen={}", op, count,
@@ -1650,9 +1649,9 @@ void TraceDcbStat(u32 words) {
   if (!kDcbStat)
     return;
   g_dcb_words += words;
-  static auto last = std::chrono::steady_clock::now();
-  const auto now = std::chrono::steady_clock::now();
-  if (std::chrono::duration<double>(now - last).count() < 2.0)
+  static auto last = base::TimeTicks::Now();
+  const auto now = base::TimeTicks::Now();
+  if ((now - last).InSecondsF() < 2.0)
     return;
   last = now;
   // Not the numerous packets that cost: on SotC's load phase DISPATCH_DIRECT is
@@ -1664,15 +1663,15 @@ void TraceDcbStat(u32 words) {
     u32 n = g_op_hist[o], op = o;
     for (int k = 0; k < 5; k++)
       if (n > top_n[k]) {
-        std::swap(n, top_n[k]);
-        std::swap(op, top_op[k]);
+        base::Swap(n, top_n[k]);
+        base::Swap(op, top_op[k]);
       }
     u64 ns = g_op_ns[o];
     op = o;
     for (int k = 0; k < 5; k++)
       if (ns > slow_ns[k]) {
-        std::swap(ns, slow_ns[k]);
-        std::swap(op, slow_op[k]);
+        base::Swap(ns, slow_ns[k]);
+        base::Swap(op, slow_op[k]);
       }
   }
   base::String line;

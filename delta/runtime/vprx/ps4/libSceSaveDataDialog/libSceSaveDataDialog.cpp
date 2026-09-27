@@ -20,8 +20,8 @@
 #include "libSceSaveDataDialog.h"
 #include "base/arch.h"
 
-#include <atomic>
 #include <cstring>
+#include <base/atomic.h>
 
 namespace {
 
@@ -35,7 +35,7 @@ enum {
 // Whole dialog lifecycle is a single global (like the real per-process singleton;
 // only one common dialog can be active at a time). Touched from the game's dialog
 // pump thread and its poller, hence atomic.
-std::atomic<int> g_status{STATUS_NONE};
+base::Atomic<int> g_status{STATUS_NONE};
 
 }  // namespace
 

@@ -18,22 +18,21 @@
 // filesystem is a decision, and the composition root holds wiring.
 
 #include "base/arch.h"
-#include <memory>
-#include <string>
-#include <vector>
 
 #include <base/strings/xstring.h>
 
 #include "kern/vfs.h"
+#include <base/containers/vector.h>
+#include <base/memory/shared_pointer.h>
 
 namespace krnl::vfs {
 
 struct TitleMount {
   // Null when the container could not be opened; nothing else is then set.
-  std::shared_ptr<VirtualProvider> provider;
-  std::string titleId;
-  std::string title;
-  std::vector<u8> icon;  // empty unless `wantIcon`
+  base::SharedPointer<VirtualProvider> provider;
+  base::String titleId;
+  base::String title;
+  base::Vector<u8> icon;  // empty unless `wantIcon`
   u32 attributes = 0;    // PS4 param.sfo ATTRIBUTE
   u32 sdkVersion = 0;    // PS5 param.json sdkVersion, top half
   bool isPs5 = false;

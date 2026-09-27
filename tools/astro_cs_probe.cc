@@ -11,13 +11,14 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <vector>
 
 #include "guest_memory.h"
 #include "gcn/gcn_detile.h"
 #include "gcn/gcn_disasm.h"
 #include "ps5/rdna/rdna_resource.h"
 #include "ps5/rdna/rdna_compute.h"
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 namespace {
 
@@ -29,7 +30,7 @@ struct LoadMap {
   u64 off;
   u64 size;
 };
-std::vector<LoadMap> g_loads;
+base::Vector<LoadMap> g_loads;
 
 void ParseLoads(const char* path) {
   FILE* f = std::fopen(path, "rb");
@@ -106,7 +107,7 @@ int main(int argc, char** argv) {
       break;
     }
   }
-  std::vector<u32> code(0x40000);
+  base::Vector<u32> code(0x40000);
   FILE* f = std::fopen("/tmp/dumped_module.elf", "rb");
   if (!f)
     return 1;
@@ -122,7 +123,7 @@ int main(int argc, char** argv) {
   std::printf("program dwords=%zu\n", prog.size());
   std::printf("== disassembly ==\n");
   for (u32 i = 0; i < prog.size(); i++) {
-    std::string line = gpu::gcn::DisasmLine(prog[i]);
+    base::String line = gpu::gcn::DisasmLine(prog[i]);
     std::printf("  %4llu: %s\n", (unsigned long long)i, line.c_str());
   }
 
@@ -138,7 +139,7 @@ int main(int argc, char** argv) {
         (unsigned long long)r.min_bytes, (int)r.base_sgpr, r.use_pc);
   }
 
-  std::vector<u32> ud(16, 0);
+  base::Vector<u32> ud(16, 0);
   const auto resolved =
       gpu::rdna::ResolveBuffers(base, ud.data(),
                                 16, 0);

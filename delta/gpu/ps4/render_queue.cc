@@ -6,13 +6,23 @@
 
 #include "gpu/render/renderer.h"
 
-#include <chrono>
-#include <map>
 #include <pthread.h>
 
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <utl/options.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/functional/function.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/time/time.h>
+#include <base/algorithm.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
 
 namespace gpu::ps4 {
 
@@ -24,18 +34,18 @@ RenderQueue::~RenderQueue() {
   if (!running_)
     return;
   stop_.store(true);
-  head_.notify_all();
-  thread_.join();
+  Wake(render_wake_);
+  thread_->Join();
 }
 
 void RenderQueue::Start(render::Renderer& renderer) {
   if (running_)
     return;
   renderer_ = &renderer;
-  commands_ = std::make_unique<Command[]>(kCommands);
-  draws_ = std::make_unique<render::DrawInfo[]>(kDrawSlots);
-  thread_ = std::thread([this] { Run(); });
-  pthread_setname_np(thread_.native_handle(), "gpu-render");
+  commands_ = base::MakeUnique<Command[]>(kCommands);
+  draws_ = base::MakeUnique<render::DrawInfo[]>(kDrawSlots);
+  thread_ = base::MakeUnique<base::Thread>("gpu-render", [this] { Run(); },
+                                          /*start_now=*/true);
   running_ = true;
 }
 
@@ -48,15 +58,15 @@ render::DrawInfo& RenderQueue::NextDraw() {
 }
 
 RenderQueue::Command& RenderQueue::Claim() {
-  const u64 head = head_.load(std::memory_order_relaxed);
+  const u64 head = head_.load(base::memory_order_relaxed);
   if (head >= kCommands)
     WaitDone(done_, head - kCommands + 1, "command-slot");
   return commands_[head % kCommands];
 }
 
 void RenderQueue::Publish() {
-  head_.fetch_add(1, std::memory_order_release);
-  head_.notify_one();
+  head_.fetch_add(1, base::memory_order_release);
+  Wake(render_wake_);
 }
 
 void RenderQueue::PushDraw() {
@@ -77,24 +87,24 @@ void RenderQueue::PushEndFrame(u64 scanout_base) {
   c.arg = scanout_base;
   Publish();
   const u64 previous = last_end_frame_;
-  last_end_frame_ = head_.load(std::memory_order_relaxed);
+  last_end_frame_ = head_.load(base::memory_order_relaxed);
   WaitDone(done_, previous, "end-frame");
 }
 
-void RenderQueue::PushCall(std::function<void()> fn) {
+void RenderQueue::PushCall(base::Function<void()> fn) {
   Command& c = Claim();
   c.kind = Kind::kCall;
-  c.fn = std::move(fn);
+  c.fn = base::move(fn);
   Publish();
 }
 
 void RenderQueue::Drain(const char* why) {
   // The renderer's own thread already owns it (a replay it runs may ask).
-  if (!running_ || std::this_thread::get_id() == thread_.get_id())
+  if (!running_ || base::IsCurrentThread(thread_->handle()))
     return;
-  const u64 head = head_.load(std::memory_order_relaxed);
-  if (kDrainTrace && done_.load(std::memory_order_acquire) != head) {
-    static std::map<const char*, u64> counts;
+  const u64 head = head_.load(base::memory_order_relaxed);
+  if (kDrainTrace && done_.load(base::memory_order_acquire) != head) {
+    static base::Map<const char*, u64> counts;
     static u64 n = 0;
     counts[why]++;
     if (++n % 2000 == 0) {
@@ -107,42 +117,54 @@ void RenderQueue::Drain(const char* why) {
   WaitDone(done_, head, why);
 }
 
-void RenderQueue::WaitDone(const std::atomic<u64>& done,
+void RenderQueue::Wake(base::ConditionVariable& cv) {
+  // Through the lock: a waiter between its check and its sleep holds it, so
+  // the change it missed cannot also miss it.
+  { base::LockGuard<base::Mutex> lock(wake_mutex_); }
+  cv.NotifyAll();
+}
+
+void RenderQueue::WaitDone(const base::Atomic<u64>& done,
                            u64 target,
                            const char* what) {
-  u64 seen = done.load(std::memory_order_acquire);
+  u64 seen = done.load(base::memory_order_acquire);
   if (seen >= target)
     return;
-  const auto start = std::chrono::steady_clock::now();
-  for (; seen < target; seen = done.load(std::memory_order_acquire))
-    done.wait(seen, std::memory_order_acquire);
-  const auto waited = std::chrono::steady_clock::now() - start;
-  if (waited > std::chrono::milliseconds(500)) {
+  const auto start = base::TimeTicks::Now();
+  {
+    base::UniqueLock<base::Mutex> lock(wake_mutex_);
+    walk_wake_.Wait(lock, [&] {
+      return done.load(base::memory_order_acquire) >= target;
+    });
+  }
+  const auto waited = base::TimeTicks::Now() - start;
+  if (waited > base::Milliseconds(500)) {
     static const char* const kKinds[] = {"draw", "begin-frame", "end-frame",
                                          "call"};
     BASE_LOGW("gpuq", "walk waited {} ms for {}; renderer thread last ran {}",
-              std::chrono::duration_cast<std::chrono::milliseconds>(waited)
-                  .count(),
+              (waited).InMilliseconds(),
               what, kKinds[running_kind_.load() & 3]);
   }
 }
 
 void RenderQueue::Run() {
   for (u64 tail = 0;; tail++) {
-    for (u64 head = head_.load(std::memory_order_acquire); head == tail;
-         head = head_.load(std::memory_order_acquire)) {
-      if (stop_.load())
-        return;
-      head_.wait(head, std::memory_order_acquire);
+    if (head_.load(base::memory_order_acquire) == tail) {
+      base::UniqueLock<base::Mutex> lock(wake_mutex_);
+      render_wake_.Wait(lock, [&] {
+        return stop_.load() || head_.load(base::memory_order_acquire) != tail;
+      });
+      if (head_.load(base::memory_order_acquire) == tail)
+        return;  // stopped
     }
     Command& c = commands_[tail % kCommands];
-    running_kind_.store(static_cast<u8>(c.kind), std::memory_order_relaxed);
-    const auto started = std::chrono::steady_clock::now();
+    running_kind_.store(static_cast<u8>(c.kind), base::memory_order_relaxed);
+    const auto started = base::TimeTicks::Now();
     switch (c.kind) {
       case Kind::kDraw:
         render::Draw(*renderer_, draws_[c.arg]);
-        draws_done_.fetch_add(1, std::memory_order_release);
-        draws_done_.notify_all();
+        draws_done_.fetch_add(1, base::memory_order_release);
+        Wake(walk_wake_);
         break;
       case Kind::kBeginFrame:
         render::BeginFrame(*renderer_);
@@ -155,28 +177,27 @@ void RenderQueue::Run() {
         c.fn = nullptr;
         break;
     }
-    const auto took = std::chrono::steady_clock::now() - started;
-    if (took > std::chrono::milliseconds(500))
+    const auto took = base::TimeTicks::Now() - started;
+    if (took > base::Milliseconds(500))
       BASE_LOGW("gpuq", "renderer thread spent {} ms in one {} command",
-                std::chrono::duration_cast<std::chrono::milliseconds>(took)
-                    .count(),
+                (took).InMilliseconds(),
                 static_cast<int>(c.kind));
-    done_.store(tail + 1, std::memory_order_release);
-    done_.notify_all();
+    done_.store(tail + 1, base::memory_order_release);
+    Wake(walk_wake_);
   }
 }
 
 void RenderQueue::NotePendingWrite(u64 base, u64 bytes) {
   if (running_ && bytes)
     pending_writes_.push_back(
-        {head_.load(std::memory_order_relaxed), base, base + bytes});
+        {head_.load(base::memory_order_relaxed), base, base + bytes});
 }
 
 bool RenderQueue::PendingWriteOverlaps(u64 base, u64 bytes) {
   if (pending_writes_.empty())
     return false;
-  const u64 done = done_.load(std::memory_order_acquire);
-  std::erase_if(pending_writes_,
+  const u64 done = done_.load(base::memory_order_acquire);
+  base::EraseIf(pending_writes_,
                 [done](const PendingWrite& w) { return w.command < done; });
   const u64 end = base + bytes;
   for (const PendingWrite& w : pending_writes_)

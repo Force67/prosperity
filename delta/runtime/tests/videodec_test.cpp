@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
-#include <array>
 #include <cstring>
-#include <vector>
 #include "runtime/media/videodec.h"
 #include "runtime/vprx/vprx.h"
 #include "video_fixture.h"
+#include <base/containers/array.h>
+#include <base/containers/vector.h>
 using namespace runtime::video;
 
 TEST(VideoDecode, ReordersPixelsAndMetadataDrainsAndResets) {
@@ -16,7 +16,7 @@ TEST(VideoDecode, ReordersPixelsAndMetadataDrainsAndResets) {
   void* decoder = nullptr;
   ASSERT_EQ(Create(&config, &memory, &decoder), 0);
   struct Cleanup { void* handle; ~Cleanup() { Delete(handle); } } cleanup{decoder};
-  std::vector<u8> pixels(memory.frame_bytes + 16, 0xcd);
+  base::Vector<u8> pixels(memory.frame_bytes + 16, 0xcd);
   constexpr unsigned sizes[] = {698,16,11,12,26,12};
   constexpr unsigned order[] = {0,3,1,2,5,4};
   for (unsigned cycle = 0; cycle < 2; ++cycle) {
@@ -30,7 +30,7 @@ TEST(VideoDecode, ReordersPixelsAndMetadataDrainsAndResets) {
       for (unsigned i = 64 * 48; i < out.bytes; i += 2) {
         ASSERT_NEAR(pixels[i], 96, 2); ASSERT_NEAR(pixels[i+1], 160, 2);
       }
-      std::array<u64, 16> info{}; info[0] = 0x78; info[15] = 0xdeadbeef;
+      base::Array<u64, 16> info{}; info[0] = 0x78; info[15] = 0xdeadbeef;
       EXPECT_EQ(Picture(&out, info.data(), nullptr), 0);
       EXPECT_EQ(info[0], 0x78u); EXPECT_EQ(info[2], received * 512u);
       EXPECT_EQ(info[4], 100u + received); EXPECT_EQ(info[15], 0xdeadbeefu);

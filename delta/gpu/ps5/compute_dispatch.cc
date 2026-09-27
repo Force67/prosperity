@@ -8,10 +8,7 @@
 #include "gpu/ps5/compute_dispatch.h"
 #include "base/arch.h"
 
-#include <algorithm>
-#include <array>
 #include <cstring>
-#include <unordered_set>
 
 #include <base/logging.h>
 #include <utl/options.h>
@@ -25,6 +22,15 @@
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/shader_cache.h"
+#include <base/algorithm.h>
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/strings/xstring.h>
+#include <base/strings/format.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
@@ -65,9 +71,9 @@ ResourceRange ResolveImageResource(u64 cs_addr,
                                    const gcn::CsResource& res,
                                    const u32* descriptor) {
   ResourceRange out;
-  std::array<u32, 8> view;
+  base::Array<u32, 8> view;
   if (res.base_mip_only) {
-    std::copy_n(descriptor, view.size(), view.begin());
+    base::CopyN(descriptor, view.size(), view.begin());
     const u32 base_mip = (view[3] >> 12) & 15;
     if (base_mip <= ((view[3] >> 16) & 15))
       view[3] = (view[3] & ~0xf0000u) | (base_mip << 16);
@@ -110,7 +116,7 @@ ResourceRange ResolveImageResource(u64 cs_addr,
                    : r8               ? 1u
                                       : 4u;
   out.stage_elem_bytes =
-      (r11g11b10f || bc6) ? 16u : bc1 ? 4u : std::max(out.elem_bytes, 4u);
+      (r11g11b10f || bc6) ? 16u : bc1 ? 4u : base::Max(out.elem_bytes, 4u);
 
   // type 10 is a volume: DecodeTImage already reports its depth as layers and
   // the shared emitter addresses 3D slice-major, so it stages like the 2D
@@ -131,7 +137,7 @@ ResourceRange ResolveImageResource(u64 cs_addr,
     // the rest of the shader run.
     TraceCsUnsupportedImage(cs_addr, res.binding, t, descriptor);
     out.zero_fill = true;
-    out.size = std::max<u64>(res.min_bytes, 16);
+    out.size = base::Max<u64>(res.min_bytes, 16);
     return out;
   }
   out.base = t.base;
@@ -176,7 +182,7 @@ ResourceRange ResolveBufferResource(const gcn::CsResource& res,
     if (res.min_bytes >= 0x10000 && out.base &&
         GpuPoolRange(out.base, pool_base, pool_end)) {
       constexpr u64 kMaxWindow = 64ull << 20;
-      out.size = std::min<u64>(pool_end - out.base, kMaxWindow);
+      out.size = base::Min<u64>(pool_end - out.base, kMaxWindow);
       out.prefer_import = true;
     }
     return out;
@@ -185,14 +191,14 @@ ResourceRange ResolveBufferResource(const gcn::CsResource& res,
   out.base = v.base;
   out.size = v.stride ? static_cast<u64>(v.stride) * v.num_records
                       : v.num_records;
-  out.size = std::max<u64>(out.size, res.min_bytes);
+  out.size = base::Max<u64>(out.size, res.min_bytes);
   return out;
 }
 
 const u32* ResolveUniformImageTable(
     const gcn::CsResource& resource,
-    const std::unordered_map<u32, rdna::BufferResource>& resolved,
-    std::array<u32, 8>& descriptor) {
+    const base::HashMap<u32, rdna::BufferResource>& resolved,
+    base::Array<u32, 8>& descriptor) {
   const auto table = resolved.find(resource.image_table_pc);
   if (table == resolved.end() || !table->second.descriptor_valid)
     return nullptr;
@@ -285,13 +291,13 @@ void DispatchCompute(render::Renderer& renderer,
   }
 
   const u32* ud = regs.At(mmCOMPUTE_USER_DATA_0);
-  const u32 ud_dwords = std::min(user_sgpr, 16u);
+  const u32 ud_dwords = base::Min(user_sgpr, 16u);
   render::ComputeInfo ci;
   ci.cs_addr = cs_addr;
   ci.groups[0] = groups[0];
   ci.groups[1] = groups[1];
   ci.groups[2] = groups[2];
-  std::copy(std::begin(group_base), std::end(group_base), ci.group_base);
+  base::Copy(group_base, group_base + base::ArraySize(group_base), ci.group_base);
   ci.recomp = &rc;
   for (int k = 0; k < 16; k++)
     ci.user_data[k] = ud[k];
@@ -304,7 +310,7 @@ void DispatchCompute(render::Renderer& renderer,
       rdna::ComputeCodeDwords(reinterpret_cast<const u32*>(cs_addr)));
 
   if (kCsProbe && std::strstr(probe_buf, kCsProbe)) {
-    static std::unordered_set<u64> reported;
+    static base::HashSet<u64> reported;
     if (reported.insert(cs_addr).second) {
       for (const auto& r : rc.resources) {
         const auto it = resolved.find(r.use_pc);
@@ -317,14 +323,14 @@ void DispatchCompute(render::Renderer& renderer,
         BASE_LOGI("csprobe", "{}", line.c_str());
       }
       const auto& pools = GpuPools();
-      for (u32 i = 0; i < pools.count.load(std::memory_order_acquire); i++)
+      for (u32 i = 0; i < pools.count.load(base::memory_order_acquire); i++)
         BASE_LOGI("csprobe", "pool {:#x}-{:#x}", pools.ranges[i].base,
                   pools.ranges[i].end);
     }
   }
 
   if (rc.guest_memory_binding >= 0) {
-    std::vector<u64> bases;
+    base::Vector<u64> bases;
     for (const auto& r : rc.resources) {
       if (!r.runtime_address && !r.runtime_image)
         continue;
@@ -357,7 +363,7 @@ void DispatchCompute(render::Renderer& renderer,
     // is at least as good: preferring the window would bind whatever the CPU
     // left there for a shader that loaded a descriptor over its own user data.
     const u32* desc = nullptr;
-    std::array<u32, 8> table_descriptor;
+    base::Array<u32, 8> table_descriptor;
     if (const auto it = resolved.find(r.use_pc);
         it != resolved.end() && it->second.descriptor_valid &&
         it->second.descriptor_dwords >= dwords) {
@@ -379,11 +385,11 @@ void DispatchCompute(render::Renderer& renderer,
       out.read = false;
       continue;
     }
-    if (std::all_of(desc, desc + dwords, [](u32 w) { return w == 0; })) {
+    if (base::AllOf(desc, desc + dwords, [](u32 w) { return w == 0; })) {
       // A null descriptor is a real binding on a path this launch does not
       // take; the translator guards it and reads zero.
       range.zero_fill = true;
-      range.size = std::max<u64>(r.min_bytes, 16);
+      range.size = base::Max<u64>(r.min_bytes, 16);
     } else if (r.kind == 1) {
       range = ResolveImageResource(cs_addr, r, desc);
     } else {

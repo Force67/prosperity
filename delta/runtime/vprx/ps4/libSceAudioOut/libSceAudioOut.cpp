@@ -82,14 +82,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <vector>
 
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
 
 #include <utl/options.h>
+#include <base/containers/vector.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace {
 DELTA_OPTION(bool, kAudioTrace, "DELTA_AUDIO_TRACE", false);
@@ -104,8 +105,8 @@ struct Port {
   bool open = false;
 };
 
-std::mutex g_mtx;
-std::vector<Port> g_ports;  // SCE handle = index + 1
+base::Mutex g_mtx;
+base::Vector<Port> g_ports;  // SCE handle = index + 1
 
 // SceAudioOutParamFormat (param low byte) -> (channels, isFloat).
 void decodeFormat(u32 param, u32 &channels, int &isFloat) {
@@ -146,7 +147,7 @@ int PS4ABI sceAudioOutOpen(i32 /*userId*/, i32 /*type*/, i32 /*index*/,
     BASE_LOGI("audioopen", "len={} freq={} param={:#x} -> {}ch {}", length, freq,
               param, channels, isFloat ? "f32" : "s16");
   int bridge = prosperity_audio_open(freq, channels, isFloat);
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   Port p;
   p.bridge = bridge;
   p.grain = length ? length : 256;
@@ -157,7 +158,7 @@ int PS4ABI sceAudioOutOpen(i32 /*userId*/, i32 /*type*/, i32 /*index*/,
 }
 
 int PS4ABI sceAudioOutOutput(i32 handle, const void *ptr) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   Port *p = port(handle);
   if (!p) return -1;
   if (!ptr) return 0;  // a null ptr is a "drain" request; nothing to queue
@@ -197,7 +198,7 @@ int PS4ABI sceAudioOutOutputs(void *params, u32 num) {
 }
 
 int PS4ABI sceAudioOutClose(i32 handle) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   Port *p = port(handle);
   if (!p) return -1;
   if (p->bridge >= 0) prosperity_audio_close(p->bridge);
@@ -207,7 +208,7 @@ int PS4ABI sceAudioOutClose(i32 handle) {
 }
 
 int PS4ABI sceAudioOutSetVolume(i32 handle, i32 /*flag*/, i32 *vol) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   Port *p = port(handle);
   if (!p) return -1;
   if (vol && p->bridge >= 0)  // SCE 0dB == 32768; use channel 0 as the master gain
@@ -222,7 +223,7 @@ int PS4ABI sceAudioOutGetPortState(i32 handle, void *state) {
   // caller doesn't read garbage (see the output-buffer convention).
   if (state) {
     std::memset(state, 0, 32);
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     Port *p = port(handle);
     if (p) {
       reinterpret_cast<u16 *>(state)[0] = 1;             // output: connected

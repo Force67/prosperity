@@ -2,6 +2,7 @@
 #include "base/arch.h"
 
 #include "runtime/vprx/vprx.h"
+#include <base/strings/format.h>
 
 // The seven sanitizer fiber hooks libSceFiber imports from the TSan/ASan debug
 // modules retail firmware doesn't ship (see vprx/ps5/libSceFiber_ps5.cpp).
@@ -20,8 +21,8 @@ constexpr u64 kSanitizerHookNids[] = {
 TEST(FiberShim, SanitizerHooksRegistered) {
   runtime::vprx_init();
   for (u64 nid : kSanitizerHookNids)
-    EXPECT_NE(runtime::vprx_get_forced("libSceFiber", nid), 0u) << std::hex
-                                                                << nid;
+    EXPECT_NE(runtime::vprx_get_forced("libSceFiber", nid), 0u)
+        << base::Format("{:#x}", nid).c_str();
 }
 
 TEST(FiberShim, StartSwitchNullsFakeStackSave) {

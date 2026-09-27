@@ -11,14 +11,9 @@
 
 #include "base/arch.h"
 
-#include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <thread>
-#include <unordered_map>
 
 #include <base/logging.h>
 #include <unistd.h>
@@ -26,6 +21,12 @@
 #include <utl/options.h>
 
 #include "kern/crash.h"
+#include <base/threading/thread.h>
+#include <base/containers/map.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace krnl {
 const u32 *currentGuestTidPtr();  // sys_thread.cpp: this thread's guest tid
@@ -42,13 +43,13 @@ struct Parked {
   const char *what;
   unsigned gtid;
   long a0, a1;
-  std::chrono::steady_clock::time_point since;
+  base::TimeTicks since;
   uintptr_t gsp;   // guest stack at the syscall, walked by the reporter
   bool traced;     // this wait has had its guest stack reported
 };
 
-std::mutex g_mtx;
-std::unordered_map<long, Parked> g_parked;
+base::Mutex g_mtx;
+base::HashMap<long, Parked> g_parked;
 
 long selfTid() { return static_cast<long>(::syscall(SYS_gettid)); }
 
@@ -78,16 +79,15 @@ void threadComm(long tid, char *buf, size_t len) {
 
 void startReporter() {
   static const bool started = [] {
-    std::thread([] {
+    base::SpawnDetachedThread("wait_probe", [] {
       for (;;) {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-        const auto now = std::chrono::steady_clock::now();
-        std::lock_guard<std::mutex> lk(g_mtx);
+        base::SleepForMilliseconds((5) * 1000);
+        const auto now = base::TimeTicks::Now();
+        base::LockGuard<base::Mutex> lk(g_mtx);
         bool any = false;
         for (auto &[tid, p] : g_parked) {
           const auto secs =
-              std::chrono::duration_cast<std::chrono::seconds>(now - p.since)
-                  .count();
+              (now - p.since).InSeconds();
           if (secs < 2)
             continue;
           if (!any) {
@@ -107,7 +107,7 @@ void startReporter() {
           }
         }
       }
-    }).detach();
+    });
     return true;
   }();
   (void)started;
@@ -120,9 +120,9 @@ void waitProbeEnter(const char *what, long a0, long a1) {
     return;
   startReporter();
   const long tid = selfTid();
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   g_parked[tid] = {what, currentGuestTid(), a0, a1,
-                   std::chrono::steady_clock::now(), guestStackScanBase(),
+                   base::TimeTicks::Now(), guestStackScanBase(),
                    false};
 }
 
@@ -132,13 +132,13 @@ bool waitProbeDescribeGuest(unsigned gtid, char *out, unsigned long len) {
   out[0] = '\0';
   if (!probeOn() || !gtid)
     return false;
-  const auto now = std::chrono::steady_clock::now();
-  std::lock_guard<std::mutex> lk(g_mtx);
+  const auto now = base::TimeTicks::Now();
+  base::LockGuard<base::Mutex> lk(g_mtx);
   for (const auto &[tid, p] : g_parked) {
     if (p.gtid != gtid)
       continue;
     const long secs = static_cast<long>(
-        std::chrono::duration_cast<std::chrono::seconds>(now - p.since).count());
+        (now - p.since).InSeconds());
     std::snprintf(out, len, "%s(%#lx) for %lds", p.what, p.a0, secs);
     // The owner's own stack is the other half of the cycle: it says which of
     // its calls is waiting, not just which primitive.
@@ -152,7 +152,7 @@ void waitProbeExit() {
   if (!probeOn())
     return;
   const long tid = selfTid();
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   g_parked.erase(tid);
 }
 

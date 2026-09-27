@@ -11,11 +11,13 @@
 #include "pup_object.h"
 #include "base/arch.h"
 
-#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <zlib.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/strings/xstring.h>
 
 namespace vfs {
 namespace {
@@ -275,7 +277,7 @@ bool pupReader::extractPS5Segment(const pup_entry &e, size_t idx,
   if (!ps5Compressed(e.flags)) {
     // Stored plain (possibly block-hashed): the payload is the file itself.
     size_t peek = static_cast<size_t>(
-        std::min<u64>(e.sizeCompressed, 0x1000ull));
+        base::Min<u64>(e.sizeCompressed, 0x1000ull));
     if (!readAt(e.offset, first, peek))
       return false;
   } else if (!blocked) {
@@ -288,7 +290,7 @@ bool pupReader::extractPS5Segment(const pup_entry &e, size_t idx,
     }
   } else {
     u32 ublk = static_cast<u32>(
-        std::min<u64>(blockSize, e.sizeUncompressed));
+        base::Min<u64>(blockSize, e.sizeUncompressed));
     size_t stored = exts.size() > 1
                         ? exts[1].offset - exts[0].offset
                         : static_cast<size_t>(e.sizeCompressed) - exts[0].offset;
@@ -325,7 +327,7 @@ bool pupReader::extractPS5Segment(const pup_entry &e, size_t idx,
     u64 pos = e.offset + first.size();
     base::Vector<u8> buf;
     while (remaining) {
-      size_t n = static_cast<size_t>(std::min<u64>(remaining, 1u << 20));
+      size_t n = static_cast<size_t>(base::Min<u64>(remaining, 1u << 20));
       if (!readAt(pos, buf, n))
         break;
       out.Write(buf.data(), n);
@@ -335,7 +337,7 @@ bool pupReader::extractPS5Segment(const pup_entry &e, size_t idx,
     }
   } else if (blocked) {
     for (size_t b = 1; b < exts.size(); b++) {
-      u32 ublk = static_cast<u32>(std::min<u64>(
+      u32 ublk = static_cast<u32>(base::Min<u64>(
           blockSize, e.sizeUncompressed - static_cast<u64>(b) * blockSize));
       size_t stored = b + 1 < exts.size()
                           ? exts[b + 1].offset - exts[b].offset

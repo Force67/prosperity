@@ -15,23 +15,23 @@
 
 #include <epoxy/gl.h>
 
-#include <atomic>
-#include <condition_variable>
-#include <deque>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <new>
-#include <string>
-#include <thread>
-#include <unordered_map>
-#include <vector>
 
 #include "base/arch.h"
 #include "gpu/opengl/gl_context.h"
 #include "gpu/opengl/gl_rhi.h"
 #include "gpu/opengl/gl_shader_lowering.h"
 #include "gpu/rhi/device.h"
+#include <base/atomic.h>
+#include <base/containers/deque.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::opengl {
 
@@ -98,7 +98,7 @@ class GlView final : public rhi::TextureView {
   GLenum internal = 0;
   rhi::Format format = rhi::Format::kUndefined;
   // Framebuffers this view is attached to; render thread only.
-  mutable std::vector<FboKey> fbos;
+  mutable base::Vector<FboKey> fbos;
 };
 
 class GlSampler final : public rhi::Sampler {
@@ -115,7 +115,7 @@ class GlBindGroupLayout final : public rhi::BindGroupLayout {
     desc_ = desc;
   }
   // Per binding: its index among the dynamic offsets, or kNotDynamic.
-  std::vector<u8> dynamic_index;
+  base::Vector<u8> dynamic_index;
   i32 Position(u32 binding) const;
 };
 
@@ -137,7 +137,7 @@ struct BoundResource {
 class GlBindGroup final : public rhi::BindGroup {
  public:
   GlBindGroupLayout* layout = nullptr;
-  std::vector<BoundResource> entries;  // parallel to layout bindings
+  base::Vector<BoundResource> entries;  // parallel to layout bindings
 };
 
 class GlPipelineLayout final : public rhi::PipelineLayout {
@@ -159,9 +159,9 @@ struct SlotMap {
   };
   struct Group {
     const GlBindGroupLayout* layout = nullptr;
-    std::vector<Slot> slots;
+    base::Vector<Slot> slots;
   };
-  std::vector<Group> groups;
+  base::Vector<Group> groups;
 };
 
 // Vertex attribute formats and per-binding divisors, i.e. one vertex array
@@ -175,8 +175,8 @@ struct VertexInput {
     u8 kind = 0;  // 0 float, 1 normalized, 2 integer
     u32 offset = 0;
   };
-  std::vector<Attribute> attributes;
-  std::vector<u8> per_instance;
+  base::Vector<Attribute> attributes;
+  base::Vector<u8> per_instance;
   GLuint vao = 0;
 };
 
@@ -240,7 +240,7 @@ class GlTimestampPool final : public rhi::TimestampPool {
   u32 count = 0;
   GLuint buffer = 0;  // one u64 result per query; 0 = not written
   const u64* results = nullptr;
-  std::vector<GLuint> queries;  // render thread
+  base::Vector<GLuint> queries;  // render thread
 };
 
 // ---- the recorded stream ---------------------------------------------------
@@ -550,7 +550,7 @@ class CommandStream {
   }
 
  private:
-  std::vector<u8> bytes_;
+  base::Vector<u8> bytes_;
 };
 
 // ---- recording -------------------------------------------------------------
@@ -690,7 +690,7 @@ class GlCommandList final : public rhi::CommandList {
   const GlPipeline* flushed_push_ = nullptr;
   BoundGroup groups_[kMaxGroups];
   // PushBindGroup storage; reset at Begin, once the last replay retired.
-  std::vector<std::vector<BoundResource>> push_groups_;
+  base::Vector<base::Vector<BoundResource>> push_groups_;
   u32 push_groups_used_ = 0;
   u8 push_data_[kMaxPushBytes] = {};
   bool push_dirty_ = true;
@@ -704,7 +704,7 @@ class GlCommandList final : public rhi::CommandList {
   GLenum index_type_ = GL_UNSIGNED_SHORT;
   bool index_dirty_ = true;
   // What this list already bound, per GL slot, to drop repeats.
-  std::vector<SlotState> slot_state_[kSlotKinds];
+  base::Vector<SlotState> slot_state_[kSlotKinds];
   u32 pointers_[kMaxPointers][4] = {};
   bool pointers_dirty_ = true;
   const GlPipeline* flushed_pointers_ = nullptr;
@@ -757,7 +757,7 @@ class Replayer {
   void DetachScratch(GLuint fbo);
 
   GlDevice& device_;
-  std::unordered_map<FboKey, GLuint, FboKeyHash> fbos_;
+  base::HashMap<FboKey, GLuint, FboKeyHash> fbos_;
   GLuint scratch_read_ = 0, scratch_draw_ = 0;
   GLuint push_ubo_ = 0;
   GLuint pixel_pack_ = 0, pixel_unpack_ = 0;
@@ -850,31 +850,31 @@ class GlDevice final : public rhi::Device {
   GlWorker render_;
   GlWorker resource_;
   GlWorker compile_;
-  std::unique_ptr<Replayer> replayer_;
+  base::UniquePointer<Replayer> replayer_;
 
   EGLContext waiter_context_ = EGL_NO_CONTEXT;
-  std::thread waiter_;
-  std::mutex fence_mutex_;
-  std::condition_variable fence_cv_;
-  std::deque<std::pair<u64, GLsync>> fences_;
+  base::UniquePointer<base::Thread> waiter_;
+  base::Mutex fence_mutex_;
+  base::ConditionVariable fence_cv_;
+  base::SimpleDeque<base::Pair<u64, GLsync>> fences_;
   bool stop_waiter_ = false;
-  std::mutex completed_mutex_;
-  std::condition_variable completed_cv_;
-  std::atomic<u64> completed_{0};
-  std::atomic<bool> lost_{false};
+  base::Mutex completed_mutex_;
+  base::ConditionVariable completed_cv_;
+  base::Atomic<u64> completed_{0};
+  base::Atomic<bool> lost_{false};
 
-  std::mutex submit_mutex_;
-  std::atomic<u64> submitted_{0};
+  base::Mutex submit_mutex_;
+  base::Atomic<u64> submitted_{0};
 
   rhi::Caps caps_;
-  std::string device_name_;
+  base::String device_name_;
   GlslFeatures glsl_;
   u32 slot_limits_[kSlotKinds] = {};
   u32 format_usage_[static_cast<size_t>(rhi::Format::kCount)] = {};
 
-  std::mutex intern_mutex_;
-  std::map<std::string, std::unique_ptr<SlotMap>> slot_maps_;
-  std::map<std::string, std::unique_ptr<VertexInput>> vertex_inputs_;
+  base::Mutex intern_mutex_;
+  base::Map<base::String, base::UniquePointer<SlotMap>> slot_maps_;
+  base::Map<base::String, base::UniquePointer<VertexInput>> vertex_inputs_;
 };
 
 }  // namespace gpu::opengl

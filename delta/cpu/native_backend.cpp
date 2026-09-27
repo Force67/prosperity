@@ -14,6 +14,7 @@
 #include "cpu_backend.h"
 #include "kern/crash.h"
 #include "kern/proc.h"
+#include <base/containers/vector.h>
 
 namespace krnl {
 
@@ -128,7 +129,7 @@ u64 currentGuestRip() { return 0; }
 // The guest fs base lives in host TLS on this backend (the lifter's fs stubs
 // read it from there), so it is available to host code without a segment read.
 u64 currentGuestFsBase() { return krnl::threadFsBase(); }
-void guestThreadFsBases(std::vector<u64> & /*out*/) {} // FEX only
+void guestThreadFsBases(base::Vector<u64> & /*out*/) {} // FEX only
 const u64 *currentGuestGregs() { return nullptr; }
 
 bool guestGregsFromSignal(const void *, u64[16]) { return false; }

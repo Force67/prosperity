@@ -9,9 +9,7 @@
 #include "gpu/guest_memory.h"
 #include "base/arch.h"
 
-#include <algorithm>
 #include <cstring>
-#include <unordered_set>
 
 #include <base/logging.h>
 #include <utl/mem.h>
@@ -26,6 +24,10 @@
 #include "gpu/ps4/render_queue.h"
 #include "gpu/ps4/shader_cache.h"
 #include "gpu/render/render_target.h"
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
@@ -94,7 +96,7 @@ ResourceRange ResolveImageResource(u64 cs_addr,
                    : (r16f || rg8)      ? 2
                    : r8                 ? 1
                                         : 4;
-  out.stage_elem_bytes = r11g11b10f ? 16 : std::max(out.elem_bytes, 4u);
+  out.stage_elem_bytes = r11g11b10f ? 16 : base::Max(out.elem_bytes, 4u);
 
   if (!supported_type || !supported_format) {
     // Invalid/null T# values can be present on paths the guest shader does not
@@ -149,7 +151,7 @@ ResourceRange ResolveBufferResource(u64 cs_addr,
     if (!IsMappedGuestRange(out.base, 1)) {
       out.zero_fill = true;
       out.base = 0;
-      out.size = std::max<u64>(out.size, kZeroFillBytes);
+      out.size = base::Max<u64>(out.size, kZeroFillBytes);
     }
     return out;
   }
@@ -227,7 +229,7 @@ bool RunFillKernelOnCpu(render::Renderer& renderer,
   if (!raw_dwords || dst.stride != 4 || dst.dfmt != 4 ||
       (dst.nfmt != 4 && dst.nfmt != 5 && dst.nfmt != 7))
     return false;
-  const u64 bytes = std::min<u64>(u64(groups[0]) * 64, dst.num_records) * 4;
+  const u64 bytes = base::Min<u64>(u64(groups[0]) * 64, dst.num_records) * 4;
   // A surface's image is refreshed from the compute range the GPU path
   // leaves behind; a CPU fill under a live target would never reach it.
   if (!bytes || !IsMappedGuestRange(dst.base, bytes) ||
@@ -292,7 +294,7 @@ void DispatchCompute(render::Renderer& renderer,
   if (!rc.ok) {
     // Loud, not silently corrupting memory: an unsupported CS is content the
     // frame is missing, and one report per shader says which.
-    static std::unordered_set<u64> reported;
+    static base::HashSet<u64> reported;
     if (reported.size() < 8 && reported.insert(cs_addr).second)
       BASE_LOGW("csgpu", "unsupported CS @{:#x} groups=[{} {} {}], skipped",
                 cs_addr, groups[0], groups[1], groups[2]);
@@ -310,7 +312,7 @@ void DispatchCompute(render::Renderer& renderer,
     ci.user_data[i] = user_data[i];
 
   const auto cs_program = gcn::CachedProgram(cs_addr, 4096);
-  thread_local std::vector<gcn::ResolvedCsResource> resolved;
+  thread_local base::Vector<gcn::ResolvedCsResource> resolved;
   gcn::ResolveCsResources(resolved, *cs_program, rc, user_data);
   // Descriptor chains live in guest memory, which an earlier dispatch may have
   // written, and writebacks are lazy. If any binding failed to resolve, land

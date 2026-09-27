@@ -14,7 +14,6 @@
 #include <logger/logger.h>
 #include <utl/mem.h>
 
-#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -28,6 +27,7 @@
 #include "sys_mem.h"      // shared enums + sys_mmap (dmem maps delegate to it)
 #include "sys_mem_ext.h"
 #include <utl/options.h>
+#include <base/atomic.h>
 
 namespace {
 DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
@@ -42,11 +42,11 @@ namespace krnl {
 // allocator state off VirtualQuery's [start,end), so dead VMA entries report stale
 // bounds.
 int PS4ABI sys_munmap(void *addr, size_t len) {
-  static std::atomic<bool> warned{false};
+  static base::Atomic<bool> warned{false};
   if (!warned.exchange(true))
     LOG_WARNING("sys_munmap: host pages are retained (first was {} +{:#x}); "
                 "only the VMA bookkeeping is released",
-                fmt::ptr(addr), len);
+                static_cast<const void*>(addr), len);
   if (auto *proc = proc::getActive(); proc && addr && len) {
     audioDaemonForgetRange(addr, len);
     // Exception to "keep the host pages": a whole PROT_NONE reservation holds no data
@@ -384,7 +384,7 @@ int PS4ABI sys_batch_map(u32 /*handle*/, u32 /*flags*/,
 // arg 0 or 1 selects it (requires privilege). The kernel validates: unsigned
 // (arg+1) > 2 is EINVAL, and arg > 1 is EINVAL. We track the id (default 0).
 int PS4ABI sys_set_vm_container(u32 op) {
-  static std::atomic<u32> current{0};
+  static base::Atomic<u32> current{0};
   if (op == 0xFFFFFFFFu)
     return static_cast<int>(current.load());
   if (op > 1)

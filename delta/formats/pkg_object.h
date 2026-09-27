@@ -9,11 +9,10 @@
  */
 
 #include "base/arch.h"
-#include <memory>
-#include <string>
-#include <vector>
 
 #include <base/strings/xstring.h>
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
 
 namespace vfs {
 struct PkgImpl;
@@ -49,14 +48,14 @@ public:
   i64 read(const Node &node, void *buf, i64 off, i64 len);
 
   // Collect every file path in the image (tooling / debugging).
-  void paths(std::vector<std::string> &out) const;
+  void paths(base::Vector<base::String> &out) const;
 
   // Read a well-known outer-PKG entry by id (param.sfo = 0x1000, icon0.png = 0x1200)
   // from the header's entry table, which sits outside the encrypted PFS and works even
   // when the inner image didn't decrypt. Bytes read, or -1 if absent.
-  i64 readPkgEntry(u32 entryId, std::vector<u8> &out);
+  i64 readPkgEntry(u32 entryId, base::Vector<u8> &out);
 
 private:
-  std::unique_ptr<PkgImpl> impl_;
+  base::UniquePointer<PkgImpl> impl_;
 };
 } // namespace vfs

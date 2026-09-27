@@ -17,7 +17,8 @@
 #include "kern/proc.h"
 #include "kern/vfs.h"
 
-#include <string>
+#include <base/strings/string_ref.h>
+#include <base/strings/xstring.h>
 
 // Resolve a host address to "<module>+0x<off> (<seg>)" by scanning the loaded
 // module images, so a guest fault points straight at a guest module offset.
@@ -159,9 +160,9 @@ int main(int argc, char** argv) {
   // Mount /app0 onto the directory the main module lives in, so the game's
   // runtime file opens resolve to the extracted disc image.
   {
-    std::string p(argv[1]);
+    base::String p(argv[1]);
     auto slash = p.find_last_of('/');
-    std::string dir = slash == std::string::npos ? "." : p.substr(0, slash);
+    base::String dir = slash == base::String::npos ? "." : p.substr(0, slash);
     krnl::vfs::mount("/app0", dir.c_str());
     std::printf("[modexec] mounted /app0 -> %s\n", dir.c_str());
   }

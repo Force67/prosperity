@@ -14,12 +14,12 @@
 
 #include "libSceMsgDialog.h"
 #include "base/arch.h"
+#include <base/atomic.h>
 
-#include <atomic>
 
 namespace {
-std::atomic<bool> g_initialized{false};
-std::atomic<bool> g_open{false};
+base::Atomic<bool> g_initialized{false};
+base::Atomic<bool> g_open{false};
 }  // namespace
 
 extern "C" {

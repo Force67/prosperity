@@ -11,7 +11,6 @@
 #include <cstddef>
 #include "base/arch.h"
 #include <cstdint>
-#include <type_traits>
 
 namespace utl {
 enum class allocationType { reserve, commit, reservecommit };

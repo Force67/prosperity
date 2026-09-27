@@ -6,13 +6,13 @@
 #include <cstring>
 #include <utl/options.h>
 
-#include <atomic>
-#include <chrono>
-#include <thread>
 
 #include <base/logging.h>
 
 #include "cpu/cpu_backend.h"
+#include <base/atomic.h>
+#include <base/threading/thread.h>
+#include <base/time/time.h>
 
 namespace {
 DELTA_OPTION(bool, kAvpTrace, "DELTA_AVP_TRACE", false);
@@ -48,12 +48,10 @@ enum : i32 {
 constexpr u64 kMovieMs = 200;
 
 // Set by Start; IsActive and CurrentTime answer against it so the three agree.
-std::atomic<i64> g_startMs{0};
+base::Atomic<i64> g_startMs{0};
 
 i64 nowMs() {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
+  return base::TickClock::NowNs() / 1000000;
 }
 
 struct PendingEvent {
@@ -65,7 +63,7 @@ struct PendingEvent {
 // context and TLS on both backends.
 void PS4ABI avpEventThread(void *arg) {
   auto *pending = static_cast<PendingEvent *>(arg);
-  std::this_thread::sleep_for(std::chrono::milliseconds(pending->delay_ms));
+  base::SleepForMilliseconds(pending->delay_ms);
   const i32 event = pending->event;
   delete pending;
   if (!g_eventCallback)
@@ -94,7 +92,7 @@ void postEvent(i32 event, u32 delay_ms) {
       new PendingEvent{event, delay_ms}, fsbase);
   if (!gthread)
     return;
-  std::thread([gthread] { cpu::backend().runGuestThread(gthread); }).detach();
+  base::SpawnDetachedThread("libSceAvPlayer", [gthread] { cpu::backend().runGuestThread(gthread); });
 }
 
 // DELTA_AVP_TRACE: count calls to the hot AvPlayer entrypoints. If a title spins

@@ -9,11 +9,10 @@
  */
 
 #include "base/arch.h"
-#include <memory>
-#include <string>
-#include <vector>
 
 #include <base/strings/xstring.h>
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
 
 namespace vfs {
 struct Ufs2Impl;
@@ -51,9 +50,9 @@ public:
   i64 read(const Node &node, void *buf, i64 off, i64 len);
 
   // Collect every regular-file path in the image (leading '/'), for tooling.
-  void paths(std::vector<std::string> &out) const;
+  void paths(base::Vector<base::String> &out) const;
 
 private:
-  std::unique_ptr<Ufs2Impl> impl_;
+  base::UniquePointer<Ufs2Impl> impl_;
 };
 } // namespace vfs

@@ -4,6 +4,8 @@
 
 #include "gpu/opengl/gl_shader_lowering.h"
 
+#include <base/strings/format.h>
+
 #include <spirv_glsl.hpp>
 
 #include <algorithm>
@@ -340,11 +342,11 @@ struct Use {
 
 bool LowerProgram(const StageCode* stages,
                   u32 count,
-                  const std::vector<const rhi::BindGroupLayoutDesc*>& groups,
+                  const base::Vector<const rhi::BindGroupLayoutDesc*>& groups,
                   const GlslFeatures& features,
-                  std::vector<std::string>* glsl,
+                  base::Vector<base::String>* glsl,
                   ProgramInterface* program,
-                  std::string* error) {
+                  base::String* error) {
   *program = {};
   glsl->clear();
   for (u32 i = 0; i < count; i++)
@@ -463,8 +465,8 @@ bool LowerProgram(const StageCode* stages,
                             : use.demoted ? SlotKind::kStorageBuffer
                                           : use.kind;
       if (!layout || !Accepts(layout->type, use.kind)) {
-        *error = "set " + std::to_string(set) + " binding " +
-                 std::to_string(binding) + " missing from the layout";
+        *error = base::Format("set {} binding {} missing from the layout", set,
+                              binding);
         return false;
       }
       const u32 k = static_cast<u32>(kind);
@@ -524,7 +526,8 @@ bool LowerProgram(const StageCode* stages,
           // constants, and free of std140's 16-byte array strides.
           c.flatten_buffer_block(pc.id);
           program->push_uniforms.push_back(
-              {s.stage, name, (c.DeclaredSize(pc.base_type_id) + 15) / 16, t});
+              {s.stage, base::String(name.c_str(), name.size()),
+               (c.DeclaredSize(pc.base_type_id) + 15) / 16, t});
         } else {
           options.emit_push_constant_as_uniform_buffer = true;
           c.set_decoration(pc.id, spv::DecorationBinding, kPushUboSlot);
@@ -552,7 +555,8 @@ bool LowerProgram(const StageCode* stages,
           c.set_decoration(
               res.id, spv::DecorationLocation,
               packed[c.get_decoration(res.id, spv::DecorationLocation)]);
-        program->vertex_locations.assign(packed.begin(), packed.end());
+        for (const auto& [location, attribute] : packed)
+          program->vertex_locations.push_back({location, attribute});
         if (next > features.max_vertex_attribs) {
           *error = "too many vertex attributes for GL";
           return false;
@@ -576,7 +580,7 @@ bool LowerProgram(const StageCode* stages,
         ReplaceAll(source, "gl_BaryCoordNoPerspEXT", "gl_BaryCoordNoPerspNV");
         ReplaceAll(source, "pervertexEXT", "pervertexNV");
       }
-      glsl->push_back(std::move(source));
+      glsl->push_back(base::String(source.c_str(), source.size()));
     }
   } catch (const std::exception& e) {
     *error = e.what();
@@ -587,9 +591,9 @@ bool LowerProgram(const StageCode* stages,
 
 bool ReflectLayout(const rhi::ShaderCode& code,
                    u32* stage,
-                   std::vector<rhi::BindGroupLayoutDesc>* groups,
+                   base::Vector<rhi::BindGroupLayoutDesc>* groups,
                    u32* push_constant_bytes,
-                   std::string* error) {
+                   base::String* error) {
   groups->clear();
   *push_constant_bytes = 0;
   try {

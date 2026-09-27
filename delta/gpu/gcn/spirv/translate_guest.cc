@@ -1,6 +1,7 @@
 /* PS4Delta: checked guest-address reads and writes for runtime compute. */
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 #include "gpu/gcn/spirv/translator.h"
+#include <base/containers/vector.h>
 
 namespace gpu::gcn {
 namespace {
@@ -30,7 +31,7 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding) {
   t.m.Decorate(sc.cs_guest_table, spv::Decoration::Binding, {binding});
   t.m.Decorate(sc.cs_guest_table, spv::Decoration::NonWritable);
   t.m.Name(sc.cs_guest_table, "guest_address_map");
-  std::vector<Id> args;
+  base::Vector<Id> args;
   sc.cs_guest_translate =
       t.m.BeginFunction(wide, t.m.TypeFunction(wide, {wide, t.t_u, t.t_u}),
                         {wide, t.t_u, t.t_u}, &args);
@@ -279,7 +280,7 @@ void EmitGuestGlobal(Translator& t, const Inst& inst, StageContext& sc) {
     sc.cs_unsupported = true;
     return;
   }
-  std::vector<Id> values;
+  base::Vector<Id> values;
   if (store)
     for (u32 i = 0; i < count; ++i)
       values.push_back(t.Vg(data + i));

@@ -9,7 +9,6 @@
 #include <base.h>
 #include "base/arch.h"
 
-#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -18,6 +17,7 @@
 #include "sys_time.h"
 #include "sys_time_ext.h"
 #include <utl/options.h>
+#include <base/atomic.h>
 
 namespace {
 DELTA_OPTION(long, kTimeScaleRt, "DELTA_TIMESCALE_RT", 1);
@@ -104,9 +104,9 @@ int PS4ABI sys_setitimer(int which, const sce_itimerval *val,
 // associated signals/events; this keeps create/delete/arm bookkeeping in the
 // guest happy without us needing a timer thread.
 int PS4ABI sys_ktimer_create(u32 clock_id, void *evp, int *timerid) {
-  static std::atomic<int> next{1};
+  static base::Atomic<int> next{1};
   if (timerid)
-    *timerid = next.fetch_add(1, std::memory_order_relaxed);
+    *timerid = next.fetch_add(1, base::memory_order_relaxed);
   return 0;
 }
 

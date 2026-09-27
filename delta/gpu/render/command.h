@@ -14,8 +14,8 @@
 #include "base/arch.h"
 #include <cstddef>
 #include <cstring>
-#include <type_traits>
-#include <vector>
+#include <base/containers/vector.h>
+#include <base/meta/traits.h>
 
 namespace gpu::gcn {
 struct Recompiled;
@@ -301,7 +301,7 @@ struct DrawInfo {
   void Reset();
 };
 
-static_assert(std::is_trivially_copyable_v<DrawInfo>);
+static_assert(base::is_trivially_copyable_v<DrawInfo>);
 
 inline void DrawInfo::Reset() {
   static const DrawInfo kDefault{};
@@ -358,7 +358,7 @@ struct ComputeInfo {
   // Binding of the GDS scratchpad, past the resources, or -1 when the shader
   // has no ds_append/ds_consume.
   int gds_binding = -1;
-  std::vector<GuestMemoryRange> guest_memory;
+  base::Vector<GuestMemoryRange> guest_memory;
 };
 
 // How long a command processor spent walking a submitted command buffer, and

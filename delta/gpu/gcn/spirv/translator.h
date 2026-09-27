@@ -10,9 +10,6 @@
  */
 
 #include "base/arch.h"
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
 #include <spirv/unified1/GLSL.std.450.h>
 
@@ -20,6 +17,14 @@
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gcn/spirv/spv_emit.h"
+#include <base/strings/to_string.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/strings/xstring.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::gcn {
 
@@ -40,7 +45,7 @@ void WarnUnsupported(const char* enc,
 void NoteApproximated(const char* enc, u32 op);
 void ResetUnsupported();
 bool HadUnsupported();
-const std::string& UnsupportedOps();
+const base::String& UnsupportedOps();
 
 // DELTA_GPU_SHTRACE: translator debug logging.
 bool TraceEnabled();
@@ -68,10 +73,10 @@ struct Translator {
   u32 tex_cube_mask = 0;
   u32 user_data_slot = 0;  // 0 = vertex/geometry, 1 = pixel
   Id cbuf_ring = 0, cbuf_offsets = 0;
-  std::unordered_map<u32, Id> cbuf_vars;  // binding -> cbuffer UBO var
+  base::HashMap<u32, Id> cbuf_vars;  // binding -> cbuffer UBO var
   Id gfx_buf_type = 0;  // shared Buf { uint data[]; } type (set 2)
   Id lds_buf_var = 0;   // shared-LDS storage buffer (set 3), see EnsureLdsBuffer
-  std::unordered_map<u32, Id> gfx_buf_vars;  // binding -> raw-buffer SSBO
+  base::HashMap<u32, Id> gfx_buf_vars;  // binding -> raw-buffer SSBO
   // Index: arrayed | dref<<1 | 3d<<2 | integer<<3 (integer images yield uvec4).
   Id img_types[16] = {};      // sampled 2D / 2D-array / 3D, color / depth
   Id sampled_types[16] = {};  // corresponding combined image-sampler types
@@ -317,8 +322,8 @@ struct Translator {
   // A scalar-starved shader parks scalars in VGPR lanes (v_writelane_b32);
   // both lane operands are wave-uniform by encoding, so a Private array per
   // spilled VGPR reproduces the lane file exactly, with no cross-lane channel.
-  std::unordered_set<u32> spill_vgprs;  // pre-populated by PlanLaneSpills
-  std::unordered_map<u32, Id> spill_vars;
+  base::HashSet<u32> spill_vgprs;  // pre-populated by PlanLaneSpills
+  base::HashMap<u32, Id> spill_vars;
   bool IsSpillVgpr(u32 v) const { return spill_vgprs.count(v) != 0; }
   Id SpillAt(u32 vgpr, Id lane) {
     Id& var = spill_vars[vgpr];
@@ -456,7 +461,7 @@ struct Translator {
                    spv::StorageClass::Uniform);
     m.Decorate(v, spv::Decoration::DescriptorSet, {1});
     m.Decorate(v, spv::Decoration::Binding, {binding});
-    m.Name(v, "cbuf" + std::to_string(binding));
+    m.Name(v, "cbuf" + base::ToString(binding));
     cbuf_vars[binding] = v;
     return v;
   }
@@ -468,7 +473,7 @@ struct Translator {
     const Id p_u = m.TypePointer(spv::StorageClass::Uniform, t_u);
     const Id ch = m.AccessChain(
         p_u, var,
-        {U32(0), U32(std::min(k >> 2, kCbufDwords / 4 - 1)), U32(k & 3)});
+        {U32(0), U32(base::Min(k >> 2, kCbufDwords / 4 - 1)), U32(k & 3)});
     return m.Load(t_u, ch);
   }
   Id DrawDataDword(u32 index) {
@@ -547,7 +552,7 @@ struct Translator {
         spv::StorageClass::StorageBuffer);
     m.Decorate(v, spv::Decoration::DescriptorSet, {2});
     m.Decorate(v, spv::Decoration::Binding, {binding});
-    m.Name(v, "rawbuf" + std::to_string(binding));
+    m.Name(v, "rawbuf" + base::ToString(binding));
     gfx_buf_vars[binding] = v;
     return v;
   }
@@ -630,7 +635,7 @@ struct Translator {
 // bit order); interpolated parameters come through as Location inputs.
 inline void SeedPsInputVgprs(Translator& t,
                              u32 ena,
-                             std::vector<Id>& iface) {
+                             base::Vector<Id>& iface) {
   if (!ena)
     return;
   static constexpr u8 width[16] = {2, 2, 2, 3, 2, 2, 2, 1,
@@ -702,7 +707,7 @@ struct StageContext {
   u32 ps_num_interp = 0;
   // VS param exports that exist; OFFSET indexes the export cache, not always
   // the param number.
-  const std::vector<u32>* vs_exported_params = nullptr;
+  const base::Vector<u32>* vs_exported_params = nullptr;
   bool is_cs = false;
   // PS5 compute whose 64-lane wave spans two host subgroups: every wave runs
   // the same block at once (the mesh scheduler), and LDS write/read turns get
@@ -711,7 +716,7 @@ struct StageContext {
   bool lds_sync = false;
   Id cs_probe_var = 0;  // DELTA_GPU_CSVGPR snapshot
   Recompiled* r = nullptr;
-  std::vector<Id>* iface = nullptr;
+  base::Vector<Id>* iface = nullptr;
   Id main_fn = 0;  // entry function (for stage-wide ExecMode additions)
 
   // VS
@@ -720,8 +725,8 @@ struct StageContext {
   Id mesh_primitive = 0;  // Private packed NGG connectivity
   Id mesh_local_index = 0;
   Id pos_out = 0;
-  std::unordered_map<u32, Id> param_outs;
-  std::unordered_set<u32>
+  base::HashMap<u32, Id> param_outs;
+  base::HashSet<u32>
       direct_vfetch;  // MUBUF pc seeded as vertex input
   u32 max_param = 0;
   // PS5 inline vertex fetch: (input, first dest VGPR, comps) per fetch pc;
@@ -730,7 +735,7 @@ struct StageContext {
     Id in_var;
     u32 dest_vgpr, num_comps;
   };
-  std::unordered_map<u32, VfetchSeed> vfetch_seed;
+  base::HashMap<u32, VfetchSeed> vfetch_seed;
   // DELTA_GPU_DBGPOS: position input + cbuf transform, to split bad lifted
   // math from bad input values.
   Id dbg_pos_in = 0;
@@ -752,10 +757,10 @@ struct StageContext {
   u32 col_format = kColFormatUnknown;
   u64 tex_uint_mask = 0;
   Id depth_out = 0;       // MRTZ -> FragDepth (lazily declared)
-  std::unordered_map<u32, Id> in_vars;
+  base::HashMap<u32, Id> in_vars;
   bool wrote_color = false;  // compile-time: shader has a color export
   Id color_written_var = 0;  // runtime: this fragment reached a color export
-  const std::unordered_set<u32>* flat_attrs = nullptr;
+  const base::HashSet<u32>* flat_attrs = nullptr;
   // MIMGs sharing a descriptor share one set-0 binding; TrackTextures pairs
   // against this plan at draw time.
   const MimgBindingPlan* mimg_plan = nullptr;
@@ -772,35 +777,35 @@ struct StageContext {
 
   // shared graphics
   // Set-1 binding per consuming SMRD pc (GCN) or per V# SGPR (RDNA).
-  std::unordered_map<u32, u32> cbuf_bind;
+  base::HashMap<u32, u32> cbuf_bind;
   // Raw MUBUF: pc -> set-2 binding (per pc, not SGPR: one quad can hold
   // several descriptors over a shader's life).
-  std::unordered_map<u32, u32> gfx_buf_bind;
+  base::HashMap<u32, u32> gfx_buf_bind;
   // Per-pc cbuf bindings for reused srsrc SGPRs (PS5 table chains); beats cbuf_bind.
-  std::unordered_map<u32, u32> mubuf_cbuf_by_pc;
+  base::HashMap<u32, u32> mubuf_cbuf_by_pc;
   // Per-instruction RDNA SMEM binding when one sbase has multiple producers.
-  std::unordered_map<u32, u32> smem_cbuf_by_pc;
+  base::HashMap<u32, u32> smem_cbuf_by_pc;
   // set-1 binding -> staged window start (ShaderCbuf::first_dword); absent = 0.
-  std::unordered_map<u32, u32> cbuf_first_dword;
+  base::HashMap<u32, u32> cbuf_first_dword;
   // pcs of `s_mov exec, sN` with unmodelled launch state; emitting would zero
   // EXEC and skip every export.
-  std::unordered_set<u32> skip_launch_movs;
+  base::HashSet<u32> skip_launch_movs;
 
   // Compute: storage buffers modelling the guest memory the CS reads/writes.
-  std::unordered_map<u32, u32> cs_bind;  // instruction pc -> binding
+  base::HashMap<u32, u32> cs_bind;  // instruction pc -> binding
   u32 cs_cur_pc = 0;                     // instruction being emitted
-  std::vector<Id> cs_ssbo;                         // binding -> SSBO variable
+  base::Vector<Id> cs_ssbo;                         // binding -> SSBO variable
   // Push constants {user_data[16], bounds[64]}: SSBO access clamps to the
   // per-binding bounds, as the hardware drops out-of-bound stores.
   Id cs_bounds_var = 0;
   Id cs_guest_table = 0, cs_guest_translate = 0;
-  std::unordered_map<u32, std::pair<u32, u32>> cs_runtime_resources; // binding -> kind, SGPR
-  std::unordered_set<u32> cs_runtime_images;
+  base::HashMap<u32, base::Pair<u32, u32>> cs_runtime_resources; // binding -> kind, SGPR
+  base::HashSet<u32> cs_runtime_images;
 
   // Attrs v_interp_mov_f32 reads as P10/P20 (per-vertex deltas); their whole
   // Location becomes a PerVertexKHR array[3] recomputed from BaryCoordKHR.
-  std::unordered_set<u32> pervertex_attrs;
-  std::unordered_map<u32, Id> pervertex_vars;
+  base::HashSet<u32> pervertex_attrs;
+  base::HashMap<u32, Id> pervertex_vars;
   Id bary_var = 0;  // BaryCoordKHR, declared on first use
   Id bary_nopersp_var = 0;  // BaryCoordNoPerspKHR, likewise
   // DELTA_GPU_PSVGPR_BLOCK: a saved copy of the probed VGPR, taken at
@@ -821,14 +826,14 @@ struct StageContext {
   // only one a VS has.
   bool is_vs_shared_lds_capable = false;
   Id vertex_index_value = 0;
-  std::unordered_set<u32> ds_own_lane;
+  base::HashSet<u32> ds_own_lane;
   Id subgroup_local_id = 0;     // SubgroupLocalInvocationId for DS swizzles
   // Sorted instruction indices needing a barrier the guest omitted. See PlanLdsBarriers.
-  std::vector<u32> lds_barrier_at;
+  base::Vector<u32> lds_barrier_at;
   // Per instruction: v_readfirstlane source proven wave-uniform.
-  std::vector<u8> uniform_readfirstlane;
+  base::Vector<u8> uniform_readfirstlane;
   // Per instruction: may the group be synchronised there? See UniformPoints.
-  std::vector<u8> uniform_points;
+  base::Vector<u8> uniform_points;
   // Barrier once per dispatch-loop iteration (see LdsBarrierPlan).
   bool lockstep_loop = false;
   bool cs_unsupported = false;  // op the compute backend can't model
@@ -844,7 +849,7 @@ struct StageContext {
   u32 gsvs_dwords = 0;
   Id gs_emitted = 0;
   u32 gs_max_vert_out = 0;
-  const std::vector<GsCopyExport>* gs_exports = nullptr;
+  const base::Vector<GsCopyExport>* gs_exports = nullptr;
   Id layer_out = 0;
   bool gl_clip = false;
 };
@@ -853,7 +858,7 @@ struct StageContext {
 Id PsInputVar(Translator& t, StageContext& sc, u32 attr);
 // Locations a reachable v_interp_mov_f32 reads as P10/P20 become PerVertexKHR
 // arrays; settled before the first read.
-std::unordered_set<u32> PlanPerVertexAttrs(const Program& program,
+base::HashSet<u32> PlanPerVertexAttrs(const Program& program,
                                            const u8* reachable);
 void EmitVintrp(Translator& t, u32 w, StageContext& sc);
 Id VsParamOut(Translator& t, StageContext& sc, u32 p);
@@ -907,7 +912,7 @@ void EmitVopc(Translator& t,
               Id s1_hi = 0);
 bool IsVop3b(u32 op);
 // Every v_writelane_b32 destination (incl. VOP3). See Translator::spill_vgprs.
-std::unordered_set<u32> PlanLaneSpills(const Program& program,
+base::HashSet<u32> PlanLaneSpills(const Program& program,
                                             const u8* reachable = nullptr);
 // v_readlane/writelane against a spill VGPR, exact in every stage; false
 // leaves the general cross-lane lowering.
@@ -939,13 +944,13 @@ u32 SmrdLoadCount(u32 op);
 u32 SmrdDwordCount(u32 op);
 bool PlanCbufs(const Program& program,
                u32 first_binding,
-               std::vector<ShaderCbuf>& cbufs,
-               std::unordered_map<u32, u32>& bindings,
+               base::Vector<ShaderCbuf>& cbufs,
+               base::HashMap<u32, u32>& bindings,
                const u8* reachable = nullptr,
                u32 max_bindings = kMaxCbufBindings);
 void EmitCbufSmrd(Translator& t,
                   const Inst& inst,
-                  const std::unordered_map<u32, u32>& bindings);
+                  const base::HashMap<u32, u32>& bindings);
 // True for MIMG ops stating their own LOD (legal outside fragment shaders).
 bool MimgNamesItsLod(u32 op);
 // DS ops legal on Private-backed LDS: plain loads/stores only (no atomics on
@@ -955,10 +960,10 @@ bool DsGraphicsSupported(u32 op);
 // addresses (M0 0x10000 means "unrestricted", not an allocation).
 u32 GraphicsLdsDwords(const Program& program, const u8* reachable);
 // DS instructions whose address is provably the lane's own slot.
-std::unordered_set<u32> PlanDsOwnLane(const Program& program,
+base::HashSet<u32> PlanDsOwnLane(const Program& program,
                                       const u8* reachable);
 // Declare SubgroupLocalInvocationId + shuffle capability (ds_swizzle/DPP channel).
-void EnableDsSwizzle(Translator& t, StageContext& sc, std::vector<Id>& iface);
+void EnableDsSwizzle(Translator& t, StageContext& sc, base::Vector<Id>& iface);
 bool UsesDsSwizzle(const Program& program, const u8* reachable);
 void EmitMimg(Translator& t,
               const Inst& inst,
@@ -968,9 +973,9 @@ void EmitMimg(Translator& t,
 // input; sharers share a binding, past the cap warns at emit time.
 void PlanGfxBuffers(const Program& program,
                     u32 first_binding,
-                    const std::unordered_set<u32>* claimed,
-                    std::vector<ShaderBuffer>& buffers,
-                    std::unordered_map<u32, u32>& bindings,
+                    const base::HashSet<u32>* claimed,
+                    base::Vector<ShaderBuffer>& buffers,
+                    base::HashMap<u32, u32>& bindings,
                     const u8* reachable = nullptr);
 void EmitGfxMubuf(Translator& t, const Inst& inst, StageContext& sc);
 // Typed buffer op in a graphics stage; loads share the set-2 window, stores
@@ -980,7 +985,7 @@ bool PlanCsResources(const Program& program,
                      const u8* reachable,
                      u32 lds_dwords,
                      RecompiledCs& r,
-                     std::unordered_map<u32, u32>& bind);
+                     base::HashMap<u32, u32>& bind);
 void EmitCsSmrd(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc);
 void EmitCsGlobal(Translator& t, const Inst& inst, StageContext& sc);
@@ -1023,7 +1028,7 @@ int CsBindingFor(StageContext& sc, u32 pc);
 // a copy shader this model cannot follow.
 bool ParseCopyShader(const Program& program,
                      u32 max_vert_out,
-                     std::vector<GsCopyExport>& out);
+                     base::Vector<GsCopyExport>& out);
 void EmitEsRingStore(Translator& t, const Inst& inst, StageContext& sc);
 void EmitGsRingAccess(Translator& t, const Inst& inst, StageContext& sc);
 // s_sendmsg in a GS: emit and cut become EmitVertex / EndPrimitive.
@@ -1031,8 +1036,8 @@ void EmitGsMessage(Translator& t, const Inst& inst, StageContext& sc);
 
 // RECTLIST expansion: three post-VS corners in, two triangles out; shared
 // with the RDNA2 path.
-std::vector<u32> EmitRectListGeometry(
+base::Vector<u32> EmitRectListGeometry(
     u32 num_params,
-    const std::unordered_set<u32>& flat_attrs);
+    const base::HashSet<u32>& flat_attrs);
 
 }  // namespace gpu::gcn

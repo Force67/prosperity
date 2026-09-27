@@ -12,14 +12,7 @@
 #include <base/logging.h>
 #include <unistd.h>
 #include <base/strings/string_ref.h>
-#include <algorithm>
-#include <atomic>
-#include <thread>
-#include <chrono>
-#include <unordered_map>
 #include <cstdio>
-#include <deque>
-#include <mutex>
 
 #include "kern/ps4/dev/ajm_dev.h"
 #include "kern/ps4/dev/authmgr_dev.h"
@@ -57,6 +50,18 @@
 
 #include <utl/object_ref.h>
 #include <utl/options.h>
+#include <base/threading/thread.h>
+#include <base/algorithm.h>
+#include <base/atomic.h>
+#include <base/containers/deque.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/memory/move.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kManifestSeq, "DELTA_MANIFEST_SEQ", false);
@@ -211,10 +216,10 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
     asDir = vfs::stat(path, dsize, isDir) && isDir;
   }
   if (asDir) {
-    std::vector<vfs::DirEntry> entries;
+    base::Vector<vfs::DirEntry> entries;
     if (vfs::listDir(path, entries)) {
       const size_t n = entries.size();
-      auto *dir = new dirDevice(proc::getActive()->getObjTable(), std::move(entries));
+      auto *dir = new dirDevice(proc::getActive()->getObjTable(), base::move(entries));
       if (kVfsTrace)
         BASE_LOGI("open", "  -> dir fd={} entries={} {}", dir->handle(), n,
                   path);
@@ -256,7 +261,7 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
 
   i64 fsize = vf.GetSize();
   auto *file = new fileDevice(proc::getActive()->getObjTable());
-  if (!file->adopt(std::move(vf))) {
+  if (!file->adopt(base::move(vf))) {
     file->releaseHandle();
     return -SysError::eNOENT;
   }
@@ -290,24 +295,24 @@ static device *fdToDevice(u32 fd) {
 void fdReadStat(u32 fd, i64 n) {
   if (!kFdStats || n <= 0)
     return;
-  static std::atomic<u64> bytes[4096];
-  static std::atomic<u64> calls[4096];
+  static base::Atomic<u64> bytes[4096];
+  static base::Atomic<u64> calls[4096];
   if (fd >= 4096)
     return;
-  bytes[fd].fetch_add(static_cast<u64>(n), std::memory_order_relaxed);
-  calls[fd].fetch_add(1, std::memory_order_relaxed);
+  bytes[fd].fetch_add(static_cast<u64>(n), base::memory_order_relaxed);
+  calls[fd].fetch_add(1, base::memory_order_relaxed);
   static const bool started = [] {
-    std::thread([] {
+    base::SpawnDetachedThread("sys_vfs", [] {
       for (;;) {
-        std::this_thread::sleep_for(std::chrono::seconds(20));
+        base::SleepForMilliseconds((20) * 1000);
         BASE_LOGI("fdstats", "--- bytes read per fd ---");
         for (u32 i = 0; i < 4096; i++)
-          if (u64 b = bytes[i].load(std::memory_order_relaxed))
+          if (u64 b = bytes[i].load(base::memory_order_relaxed))
             BASE_LOGI("fdstats", "fd={} calls={} bytes={}", i,
                       (unsigned long long)calls[i].load(),
                       (unsigned long long)b);
       }
-    }).detach();
+    });
     return true;
   }();
   (void)started;
@@ -321,20 +326,22 @@ void throttleIo(i64 bytes) {
   const unsigned mbps = kIoMbps;
   if (!mbps || bytes <= 0)
     return;
-  static std::mutex m;
-  static std::chrono::steady_clock::time_point next{};
-  const auto cost = std::chrono::nanoseconds(
-      (i64)((double)bytes * 1e9 / ((double)mbps * 1024.0 * 1024.0)));
-  std::chrono::steady_clock::time_point until;
+  static base::Mutex m;
+  static base::TimeTicks next{};
+  const auto cost = base::Microseconds(
+      (i64)((double)bytes * 1e6 / ((double)mbps * 1024.0 * 1024.0)));
+  base::TimeTicks until;
   {
-    std::lock_guard<std::mutex> lk(m);
-    const auto now = std::chrono::steady_clock::now();
+    base::LockGuard<base::Mutex> lk(m);
+    const auto now = base::TimeTicks::Now();
     if (next < now)
       next = now;
-    next += cost;
+    next = next + cost;
     until = next;
   }
-  std::this_thread::sleep_until(until);
+  const base::TimeDelta wait = until - base::TimeTicks::Now();
+  if (wait > base::TimeDelta())
+    base::SleepForMicroseconds(u64(wait.InMicroseconds()));
 }
 
 i64 PS4ABI sys_read(u32 fd, void *buf, size_t nbytes) {
@@ -463,9 +470,9 @@ int PS4ABI sys_fstat(u32 fd, void *stat) {
       return 0;
     }
     if (kFstatTrace) {
-      static std::mutex m;
-      static std::unordered_map<u32, u64> bad;
-      std::lock_guard<std::mutex> lk(m);
+      static base::Mutex m;
+      static base::HashMap<u32, u64> bad;
+      base::LockGuard<base::Mutex> lk(m);
       if (bad[fd]++ == 0)
         BASE_LOGI("fstat", "fd={} -> EBADF (unknown descriptor)", fd);
     }
@@ -513,8 +520,8 @@ i64 PS4ABI sys_getdents(u32 fd, void *buf, size_t nbytes) {
 // file -> garbage archive header -> a ~32 GiB entry-table allocation. Keeping the
 // last N closed slots alive lets the lagging read finish right. PFS-backed files
 // share one host fd, so this costs no host descriptors; char devices close at once.
-static std::mutex g_deferM;
-static std::deque<u32> g_deferred;
+static base::Mutex g_deferM;
+static base::SimpleDeque<u32> g_deferred;
 static constexpr size_t kDeferredCloseWindow = 256;
 
 int PS4ABI sys_close(u32 fd) {
@@ -527,11 +534,11 @@ int PS4ABI sys_close(u32 fd) {
     if (d && d->isRegularFile()) {
       u32 evict = static_cast<u32>(-1);
       {
-        std::lock_guard<std::mutex> lk(g_deferM);
+        base::LockGuard<base::Mutex> lk(g_deferM);
         // A deferred fd keeps its slot pinned, so it can't have been reopened as
         // a different file; a second close of it is a redundant double-close and
         // must not queue a second (wrong) release.
-        bool already = std::find(g_deferred.begin(), g_deferred.end(), fd) !=
+        bool already = base::Find(g_deferred.begin(), g_deferred.end(), fd) !=
                        g_deferred.end();
         if (!already) {
           g_deferred.push_back(fd);

@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <base/logging.h>
 #include <utl/options.h>
+#include <base/time/time.h>
 
 namespace gpu::render {
 
@@ -351,12 +352,11 @@ void DrawPerfOverlay(u8* pixels, u32 w, u32 h, bool rgba) {
 void ReportFps() {
   if (!kFpsReport)
     return;
-  using clock = std::chrono::steady_clock;
-  static auto last = clock::now();
+  static auto last = base::TimeTicks::Now();
   static int frames = 0;
   frames++;
-  auto now = clock::now();
-  double dt = std::chrono::duration<double>(now - last).count();
+  auto now = base::TimeTicks::Now();
+  double dt = (now - last).InSecondsF();
   if (dt >= 2.0) {
     double f = frames ? frames : 1;
     BASE_LOGI("fps", "{:.1f} fps | per-frame gpu-code: draw={:.2f}ms end={:.2f}ms "

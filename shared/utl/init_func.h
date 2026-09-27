@@ -50,7 +50,7 @@ public:
 
   static init_function *&ROOT() noexcept;
 
-  static std::size_t init();
+  static mem_size init();
 };
 
 inline init_function::init_function(init_function *&parent,
@@ -73,8 +73,8 @@ inline init_function *&init_function::ROOT() noexcept {
   return root;
 }
 
-inline std::size_t init_function::init() {
-  std::size_t total = 0;
+inline mem_size init_function::init() {
+  mem_size total = 0;
 
   for (init_function *i = ROOT(); i;) {
     if (i->callback_) {

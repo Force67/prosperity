@@ -15,20 +15,20 @@
  */
 
 #include "base/arch.h"
-#include <functional>
-#include <string>
-#include <vector>
+#include <base/containers/vector.h>
+#include <base/functional/function.h>
+#include <base/strings/xstring.h>
 
 namespace gpu::gcn::spirv {
 
 // Legalize + optimize a module. Returns the optimized binary; on failure
 // returns the input unchanged (the naive SPIR-V is still valid, just
 // unoptimized).
-std::vector<u32> Optimize(const std::vector<u32>& spv);
+base::Vector<u32> Optimize(const base::Vector<u32>& spv);
 
 // Validate against the Vulkan 1.1 environment. On failure fills *err (if
 // given).
-bool Validate(const std::vector<u32>& spv, std::string* err = nullptr);
+bool Validate(const base::Vector<u32>& spv, base::String* err = nullptr);
 
 // Validate + optimize, with a DISK cache keyed by the content of the incoming
 // module. Optimization is ~65% of the recompiler's cost (SotC: 3110 ms of
@@ -39,18 +39,18 @@ bool Validate(const std::vector<u32>& spv, std::string* err = nullptr);
 // Returns false only when the module fails validation, filling *err as
 // Validate does. The cache lives in DELTA_GPU_SHADER_CACHE_DIR, or
 // $XDG_CACHE_HOME/ps4delta/spirv, and is disabled by DELTA_GPU_SHADER_CACHE=0.
-bool Finalize(const std::vector<u32>& spv,
-              std::vector<u32>* out,
-              std::string* err = nullptr);
+bool Finalize(const base::Vector<u32>& spv,
+              base::Vector<u32>* out,
+              base::String* err = nullptr);
 
 // Start finalizing `spv` on a worker thread; the Finalize that later asks for
 // the same module waits for it instead of redoing it.
-void Prefetch(const std::vector<u32>& spv);
+void Prefetch(const base::Vector<u32>& spv);
 
 // Hand the optimized form of `spv` to `then` on a worker thread, finalizing it
 // there first if nothing else has.
-void PrefetchThen(const std::vector<u32>& spv,
-                  std::function<void(const std::vector<u32>&)> then);
+void PrefetchThen(const base::Vector<u32>& spv,
+                  base::Function<void(const base::Vector<u32>&)> then);
 
 // While one is alive on this thread, Finalize only prefetches and hands the
 // input back unchanged: a recompile run for its modules' sake, whose result is

@@ -9,8 +9,8 @@
 // command processor or the translator can time itself without reaching into
 // the backend.
 
-#include <chrono>
 #include "base/arch.h"
+#include <base/time/time.h>
 
 namespace gpu {
 
@@ -61,9 +61,7 @@ extern u64 g_cs_wb_conflicts;
 extern u64 g_fr_draw, g_fr_submit, g_fr_wait, g_fr_present, g_fr_tex_up;
 
 inline u64 NowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
+  return (base::TickClock::NowNs());
 }
 
 struct ScopeNs {

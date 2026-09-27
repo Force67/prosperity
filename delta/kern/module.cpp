@@ -10,10 +10,6 @@
 #include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
-#include <chrono>
-#include <memory>
-#include <thread>
-#include <vector>
 #include <sys/mman.h>
 #include <utl/file.h>
 #include <utl/mem.h>
@@ -31,6 +27,14 @@
 #include "kern/probe/probe.h"
 #include "vfs.h"
 #include <utl/options.h>
+#include <base/threading/thread.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/shared_pointer.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/string_ref.h>
+#include <base/strings/xstring.h>
 
 namespace {
 DELTA_OPTION(const char *, kDumpModule, "DELTA_DUMP_MODULE", nullptr);
@@ -71,7 +75,7 @@ bool smodule::fromFile(const base::String &path) {
     auto sz = file.GetSize();
     data = base::MakeUnique<u8[]>(static_cast<mem_size>(sz));
     file.Read(data.Get_UseOnlyIfYouKnowWhatYouareDoing(), sz);
-    return fromMem(std::move(data));
+    return fromMem(base::move(data));
   }
 
   // Not a raw x86-64 (SCE) ELF, e.g. still SELF-encrypted, or a different
@@ -130,11 +134,11 @@ bool smodule::fromVfs(const base::String &guestPath) {
 
   auto out = base::MakeUnique<u8[]>(static_cast<mem_size>(srcSize));
   std::memcpy(out.Get_UseOnlyIfYouKnowWhatYouareDoing(), src, srcSize);
-  return fromMem(std::move(out));
+  return fromMem(base::move(out));
 }
 
 bool smodule::fromMem(base::UniquePointer<u8[]> data) {
-  this->data = std::move(data);
+  this->data = base::move(data);
 
   elf = getOffset<ELFHeader>(0);
   segments = getOffset<ELFPgHeader>(elf->phoff);
@@ -148,7 +152,7 @@ bool smodule::fromMem(base::UniquePointer<u8[]> data) {
   digestDynamic();
 
 #ifdef _DEBUG
-  LOG_TRACE("mapped {} at {}", info.name.c_str(), fmt::ptr(info.base));
+  LOG_TRACE("mapped {} at {}", info.name.c_str(), static_cast<const void*>(info.base));
 #endif
   setupTLS();
 
@@ -430,21 +434,21 @@ static void startNoExecWatch() {
   const char *spec = kNoExec;
   if (!spec)
     return;
-  static std::once_flag once;
-  std::call_once(once, [spec] {
+  static const bool once = ([spec] {
     const uintptr_t addr = std::strtoull(spec, nullptr, 16);
     const char *c1 = std::strchr(spec, ':');
     const size_t size = c1 ? std::strtoull(c1 + 1, nullptr, 16) : 0x1000;
     const char *c2 = c1 ? std::strchr(c1 + 1, ':') : nullptr;
     const u64 delay = c2 ? std::strtoull(c2 + 1, nullptr, 10) : 60;
-    std::thread([addr, size, delay] {
-      std::this_thread::sleep_for(std::chrono::seconds(delay));
+    base::SpawnDetachedThread("module", [addr, size, delay] {
+      base::SleepForMilliseconds((delay) * 1000);
       const int r = ::mprotect(reinterpret_cast<void *>(addr), size,
                                PROT_READ | PROT_WRITE);
       BASE_LOGI("noexec", "{:#x}+{:#x} -> rw ({})", (unsigned long long)addr,
                 size, r);
-    }).detach();
-  });
+    });
+  }(), true);
+  (void)once;
 }
 
 void smodule::plantGuestBreakpoints() {
@@ -474,14 +478,14 @@ void smodule::plantGuestBreakpoints() {
     // one being investigated; delaying past the earlier ones reaches it.
     if (const u64 delay = kBrkAfter) {
       const base::String name = info.name;
-      std::thread([at, off, delay, name] {
-        std::this_thread::sleep_for(std::chrono::seconds(delay));
+      base::SpawnDetachedThread("module", [at, off, delay, name] {
+        base::SleepForMilliseconds((delay) * 1000);
         at[0] = 0x0F;
         at[1] = 0x0B;  // ud2
         BASE_LOGI("guestbrk", "{} +{:#x} -> ud2 at {:p} (armed after {}s)",
                   name.c_str(), (unsigned long long)off, (void *)at,
                   (unsigned long long)delay);
-      }).detach();
+      });
       continue;
     }
     at[0] = 0x0F;
@@ -501,7 +505,7 @@ void smodule::startModuleWatch() {
     const u8 *addr;
     size_t size;
   };
-  auto ranges = std::make_shared<std::vector<Range>>();
+  auto ranges = base::MakeShared<base::Vector<Range>>();
   for (u16 i = 0; i < elf->phnum; ++i) {
     const auto *p = &segments[i];
     if (p->type != PT_LOAD || (p->flags & PF_W) || !p->filesz)
@@ -514,8 +518,8 @@ void smodule::startModuleWatch() {
   if (ranges->empty())
     return;
   const base::String name = info.name;
-  std::thread([ranges, name] {
-    std::vector<u64> last(ranges->size(), 0);
+  base::SpawnDetachedThread("module", [ranges, name] {
+    base::Vector<u64> last(ranges->size(), 0);
     for (bool first = true;; first = false) {
       for (size_t i = 0; i < ranges->size(); i++) {
         u64 h = 1469598103934665603ull;
@@ -533,9 +537,9 @@ void smodule::startModuleWatch() {
         }
         last[i] = h;
       }
-      std::this_thread::sleep_for(std::chrono::seconds(2));
+      base::SleepForMilliseconds((2) * 1000);
     }
-  }).detach();
+  });
 }
 
 bool smodule::mapImage() {
@@ -573,7 +577,7 @@ bool smodule::mapImage() {
       const auto *p = &segments[i];
       if (p->type == PT_LOAD || p->type == PT_SCE_RELRO) {
         u64 align = p->align ? p->align : 0x1000;
-        loVaddr = std::min<u64>(loVaddr, p->vaddr & ~(align - 1));
+        loVaddr = base::Min<u64>(loVaddr, p->vaddr & ~(align - 1));
       }
     }
     if (loVaddr == UINT64_MAX)
@@ -581,7 +585,7 @@ bool smodule::mapImage() {
 
     // The rip zone (x86 lifter scratch) trails the image. It is unused on the
     // FEX/aarch64 path but still reserved + filled so the layout matches.
-    info.ripZoneSize = std::max<size_t>(info.ripZoneSize, codeSize - loVaddr);
+    info.ripZoneSize = base::Max<size_t>(info.ripZoneSize, codeSize - loVaddr);
     size_t span = (codeSize - loVaddr) + info.ripZoneSize;
 
     void *got = utl::allocMem(reinterpret_cast<void *>(loVaddr), span,
@@ -625,7 +629,7 @@ bool smodule::mapImage() {
     // The lifter emits a per-fs-access stub into the rip-zone; linear-sweep lifts the
     // whole segment, so size the zone to the code (stubs ~32 B, capped under the
     // 8 GiB slot / rel32 reach), not the old fixed 5 KiB.
-    info.ripZoneSize = std::max<size_t>(info.ripZoneSize, codeSize);
+    info.ripZoneSize = base::Max<size_t>(info.ripZoneSize, codeSize);
 
     // immediately take module memory + rip Zone memory
     utl::allocMem(info.base, codeSize + info.ripZoneSize, utl::pageProtection::w,
@@ -1307,7 +1311,7 @@ void smodule::logDbgInfo() {
 
 							size_t length = i - index;
 
-							std::string name;
+							base::String name;
 							name.resize(length);
 							memcpy(name.data(), &sec[index], length);
 

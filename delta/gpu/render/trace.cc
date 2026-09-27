@@ -17,19 +17,22 @@
 
 #include <sys/stat.h>
 #include <utl/options.h>
-#include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 
+#include <base/containers/array.h>
 #include <base/logging.h>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
+#include <base/algorithm.h>
+#include <base/containers/map.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/strings/xstring.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 // Arming. Any one of these turns the debugger on; everything else follows.
@@ -85,8 +88,8 @@ namespace {
 // --- state -----------------------------------------------------------------
 
 std::FILE* g_file = nullptr;
-std::string g_dir;
-std::string g_prefix;  // "<dir>/frame_<n>"
+base::String g_dir;
+base::String g_prefix;  // "<dir>/frame_<n>"
 int g_frame_num = 0;
 u64 g_seq = 0;
 u32 g_draw_seq = 0;
@@ -108,7 +111,7 @@ struct Snapshot {
   u32 at_draw = 0;
   rhi::Texture* image = nullptr;
 };
-std::vector<Snapshot> g_snapshots;
+base::Vector<Snapshot> g_snapshots;
 
 // Every distinct guest texture descriptor the frame bound, for the end-of-
 // frame dump.
@@ -131,17 +134,15 @@ struct TexKeyHash {
     return size_t(h);
   }
 };
-std::unordered_set<TexKey, TexKeyHash> g_frame_texs;
+base::HashSet<TexKey, TexKeyHash> g_frame_texs;
 
-std::unordered_map<u64, std::string>& NameTable() {
-  static std::unordered_map<u64, std::string> table;
+base::HashMap<u64, base::String>& NameTable() {
+  static base::HashMap<u64, base::String> table;
   return table;
 }
 
 u64 NowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
+  return (base::TickClock::NowNs());
 }
 
 // --- arming ----------------------------------------------------------------
@@ -156,7 +157,7 @@ bool Armed() {
 struct SnapshotPlan {
   bool all = false;
   u32 every = 0;
-  std::vector<u32> at;
+  base::Vector<u32> at;
 };
 const SnapshotPlan& Plan() {
   static const SnapshotPlan plan = [] {
@@ -191,15 +192,15 @@ bool SnapshotWanted(u32 draw_index) {
     return true;
   if (p.every)
     return draw_index % p.every == 0;
-  return std::find(p.at.begin(), p.at.end(), draw_index) != p.at.end();
+  return base::Find(p.at.begin(), p.at.end(), draw_index) != p.at.end();
 }
 
 bool DumpWanted(const char* what) {
-  static const std::string spec = kCaptureDump.get() ? kCaptureDump.get() : "";
-  if (spec.find("none") != std::string::npos)
+  static const base::String spec = kCaptureDump.get() ? kCaptureDump.get() : "";
+  if (spec.find("none") != base::String::npos)
     return false;
-  return spec.find("all") != std::string::npos ||
-         spec.find(what) != std::string::npos;
+  return spec.find("all") != base::String::npos ||
+         spec.find(what) != base::String::npos;
 }
 
 // --- JSON ------------------------------------------------------------------
@@ -235,7 +236,7 @@ class Line {
   Line& Num(const char* key, double v) { return Raw(key, NumText(v)); }
   Line& Bool(const char* key, bool v) { return Raw(key, v ? "true" : "false"); }
   Line& Str(const char* key, const char* v) {
-    std::string q = "\"";
+    base::String q = "\"";
     for (const char* c = v; c && *c; c++) {
       if (*c == '"' || *c == '\\')
         q += '\\';
@@ -248,7 +249,7 @@ class Line {
     q += '"';
     return Raw(key, q);
   }
-  Line& Raw(const char* key, const std::string& json) {
+  Line& Raw(const char* key, const base::String& json) {
     s_ += ",\"";
     s_ += key;
     s_ += "\":";
@@ -260,7 +261,7 @@ class Line {
   // (Python's included) accept the bare literals. A NaN in a viewport
   // or a constant is exactly what a capture exists to show, so it must not be
   // silently rewritten to null.
-  static std::string NumText(double v) {
+  static base::String NumText(double v) {
     if (std::isnan(v))
       return "NaN";
     if (std::isinf(v))
@@ -269,12 +270,12 @@ class Line {
     std::snprintf(buf, sizeof buf, "%.9g", v);
     return buf;
   }
-  static std::string HexText(u64 v) {
+  static base::String HexText(u64 v) {
     char buf[32];
     std::snprintf(buf, sizeof buf, "\"0x%llx\"", (unsigned long long)v);
     return buf;
   }
-  static std::string IntText(long long v) {
+  static base::String IntText(long long v) {
     char buf[32];
     std::snprintf(buf, sizeof buf, "%lld", v);
     return buf;
@@ -283,7 +284,7 @@ class Line {
   void Emit();
 
  private:
-  std::string s_;
+  base::String s_;
 };
 
 // An array/object under construction inside a Line.
@@ -300,7 +301,7 @@ class Obj {
   Obj& Num(const char* key, double v) { return Raw(key, Line::NumText(v)); }
   Obj& Bool(const char* key, bool v) { return Raw(key, v ? "true" : "false"); }
   Obj& Str(const char* key, const char* v) {
-    std::string q = "\"";
+    base::String q = "\"";
     for (const char* c = v; c && *c; c++) {
       if (*c == '"' || *c == '\\')
         q += '\\';
@@ -309,7 +310,7 @@ class Obj {
     q += '"';
     return Raw(key, q);
   }
-  Obj& Raw(const char* key, const std::string& json) {
+  Obj& Raw(const char* key, const base::String& json) {
     if (s_.size() > 1)
       s_ += ',';
     s_ += '"';
@@ -318,26 +319,26 @@ class Obj {
     s_ += json;
     return *this;
   }
-  std::string Done() const { return s_ + "}"; }
+  base::String Done() const { return s_ + "}"; }
 
  private:
-  std::string s_;
+  base::String s_;
 };
 
 class Arr {
  public:
   Arr() : s_("[") {}
-  void Add(const std::string& json) {
+  void Add(const base::String& json) {
     if (s_.size() > 1)
       s_ += ',';
     s_ += json;
   }
   void Add(const Obj& o) { Add(o.Done()); }
-  std::string Done() const { return s_ + "]"; }
+  base::String Done() const { return s_ + "]"; }
   bool empty() const { return s_.size() == 1; }  // NOLINT: cheap accessor
 
  private:
-  std::string s_;
+  base::String s_;
 };
 
 void Line::Emit() {
@@ -360,7 +361,7 @@ MemStat StatGuest(u64 base, u64 bytes) {
   MemStat s;
   if (!base || !bytes)
     return s;
-  const u64 probe = std::min<u64>(bytes, 1u << 20);
+  const u64 probe = base::Min<u64>(bytes, 1u << 20);
   if (!gpu::IsReadableRange(base, probe))
     return s;
   s.readable = true;
@@ -376,9 +377,9 @@ MemStat StatGuest(u64 base, u64 bytes) {
   return s;
 }
 
-std::string HexBytes(u64 base, u32 bytes);
+base::String HexBytes(u64 base, u32 bytes);
 
-std::string GuestObj(u64 base, u64 bytes) {
+base::String GuestObj(u64 base, u64 bytes) {
   const MemStat s = StatGuest(base, bytes);
   Obj o;
   o.Bool("readable", s.readable);
@@ -394,11 +395,11 @@ std::string GuestObj(u64 base, u64 bytes) {
   return o.Done();
 }
 
-std::string HexBytes(u64 base, u32 bytes) {
+base::String HexBytes(u64 base, u32 bytes) {
   if (!base || !bytes || !gpu::IsReadableRange(base, bytes))
     return "\"\"";
   const auto* p = reinterpret_cast<const u8*>(base);
-  std::string s = "\"";
+  base::String s = "\"";
   s.reserve(bytes * 2 + 2);
   static const char* kHex = "0123456789abcdef";
   for (u32 i = 0; i < bytes; i++) {
@@ -431,7 +432,7 @@ u64 GuestCodeHash(u64 addr, u32* out_dwords) {
   return h;
 }
 
-u64 SpirvHash(const std::vector<u32>& spirv) {
+u64 SpirvHash(const base::Vector<u32>& spirv) {
   u64 h = 1469598103934665603ull;
   for (u32 w : spirv)
     h = (h ^ w) * 1099511628211ull;
@@ -595,9 +596,9 @@ u8 ToByte(float v, bool hdr) {
     v *= kCaptureExposure.get();
     const float gamma = kCaptureGamma.get();
     if (gamma > 0.0f && gamma != 1.0f)
-      v = std::pow(std::clamp(v, 0.0f, 1.0f), 1.0f / gamma);
+      v = std::pow(base::Clamp(v, 0.0f, 1.0f), 1.0f / gamma);
   }
-  return static_cast<u8>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+  return static_cast<u8>(std::lround(base::Clamp(v, 0.0f, 1.0f) * 255.0f));
 }
 
 // --- image readback --------------------------------------------------------
@@ -611,7 +612,7 @@ bool ReadImage(rhi::Texture* image,
                u32 h,
                u32 texel_bytes,
                rhi::TextureState& layout,
-               std::vector<u8>& out) {
+               base::Vector<u8>& out) {
   if (!image || !w || !h)
     return false;
   rhi::BufferDesc desc;
@@ -651,7 +652,7 @@ struct PixelStats {
   u64 count = 0;
 };
 
-std::string StatsObj(const PixelStats& s) {
+base::String StatsObj(const PixelStats& s) {
   Obj o;
   Arr mn, mx, mean;
   for (int i = 0; i < 4; i++) {
@@ -668,14 +669,14 @@ std::string StatsObj(const PixelStats& s) {
   return o.Done();
 }
 
-bool WriteImagePng(const std::string& path,
+bool WriteImagePng(const base::String& path,
                    const u8* src,
                    u32 w,
                    u32 h,
                    rhi::Format fmt,
                    PixelStats* stats) {
   const u32 texel = FormatBytes(fmt);
-  std::vector<u8> rgba(size_t(w) * h * 4);
+  base::Vector<u8> rgba(size_t(w) * h * 4);
   for (u64 i = 0; i < u64(w) * h; i++) {
     float v[4] = {0, 0, 0, 1};
     bool hdr = false;
@@ -695,8 +696,8 @@ bool WriteImagePng(const std::string& path,
           stats->nan++;
           continue;
         }
-        stats->min[c] = std::min<double>(stats->min[c], v[c]);
-        stats->max[c] = std::max<double>(stats->max[c], v[c]);
+        stats->min[c] = base::Min<double>(stats->min[c], v[c]);
+        stats->max[c] = base::Max<double>(stats->max[c], v[c]);
         stats->mean[c] += v[c];
         any |= c < 3 && v[c] != 0.0f;
       }
@@ -713,7 +714,7 @@ bool WriteImagePng(const std::string& path,
 // Depth is a single float per texel with no meaningful absolute range (a
 // reversed-Z target lives in [0.996, 1]), so it is normalised against its own
 // extent and the extent is recorded.
-bool WriteDepthPng(const std::string& path,
+bool WriteDepthPng(const base::String& path,
                    const u8* src,
                    u32 w,
                    u32 h,
@@ -727,8 +728,8 @@ bool WriteDepthPng(const std::string& path,
         stats->nan++;
       continue;
     }
-    lo = std::min(lo, d[i]);
-    hi = std::max(hi, d[i]);
+    lo = base::Min(lo, d[i]);
+    hi = base::Max(hi, d[i]);
   }
   if (stats) {
     stats->count = n;
@@ -744,18 +745,18 @@ bool WriteDepthPng(const std::string& path,
     }
   }
   const float span = (hi > lo) ? (hi - lo) : 1.0f;
-  std::vector<u8> rgba(size_t(n) * 4);
+  base::Vector<u8> rgba(size_t(n) * 4);
   for (u64 i = 0; i < n; i++) {
     const float t = std::isfinite(d[i]) ? (d[i] - lo) / span : 0.0f;
     const u8 g =
-        static_cast<u8>(std::lround(std::clamp(t, 0.0f, 1.0f) * 255.0f));
+        static_cast<u8>(std::lround(base::Clamp(t, 0.0f, 1.0f) * 255.0f));
     rgba[i * 4 + 0] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = g;
     rgba[i * 4 + 3] = 255;
   }
   return WritePngRgba8(path.c_str(), rgba.data(), w, h);
 }
 
-void WriteRawSidecar(const std::string& path,
+void WriteRawSidecar(const base::String& path,
                      const u8* src,
                      u64 bytes) {
   if (!kCaptureRaw)
@@ -984,7 +985,7 @@ bool DecodeGuestTexel(u32 dfmt,
 // stores, not the one a linear read sees) and write mip 0 layer 0 as a PNG.
 // `reason` receives why it could not be written.
 bool DumpGuestTexture(const TexKey& t,
-                      const std::string& path,
+                      const base::String& path,
                       const char** reason) {
   *reason = "";
   const bool compressed = GuestFormatBlockCompressed(t.dfmt);
@@ -998,8 +999,8 @@ bool DumpGuestTexture(const TexKey& t,
     return false;
   }
   gcn::TextureLayout32 layout;
-  if (!gcn::BuildTextureLayout32(layout, ew, eh, epitch, std::max(1u, t.layers),
-                                 std::max(1u, t.mips), t.tiling, t.pow2_pad,
+  if (!gcn::BuildTextureLayout32(layout, ew, eh, epitch, base::Max(1u, t.layers),
+                                 base::Max(1u, t.mips), t.tiling, t.pow2_pad,
                                  elem)) {
     *reason = "layout";
     return false;
@@ -1008,13 +1009,13 @@ bool DumpGuestTexture(const TexKey& t,
     *reason = "unreadable";
     return false;
   }
-  std::vector<u8> linear(u64(ew) * eh * elem);
+  base::Vector<u8> linear(u64(ew) * eh * elem);
   if (!gcn::DetileTextureMip32(reinterpret_cast<const void*>(t.base),
                                linear.data(), layout, 0, 0)) {
     *reason = "detile";
     return false;
   }
-  std::vector<u8> rgba(u64(t.w) * t.h * 4, 0);
+  base::Vector<u8> rgba(u64(t.w) * t.h * 4, 0);
   if (compressed) {
     for (u32 by = 0; by < eh; by++) {
       for (u32 bx = 0; bx < ew; bx++) {
@@ -1052,7 +1053,7 @@ bool DumpGuestTexture(const TexKey& t,
 
 // --- draw serialization ----------------------------------------------------
 
-std::string ShaderObj(u64 addr, const std::vector<u32>* spirv) {
+base::String ShaderObj(u64 addr, const base::Vector<u32>* spirv) {
   Obj o;
   o.Hex("addr", addr);
   u32 dwords = 0;
@@ -1065,7 +1066,7 @@ std::string ShaderObj(u64 addr, const std::vector<u32>* spirv) {
   return o.Done();
 }
 
-std::string TexObj(u32 index,
+base::String TexObj(u32 index,
                    const render::DrawInfo::DrawTex& t,
                    const DrawBindings* b) {
   Obj o;
@@ -1203,7 +1204,7 @@ void SnapshotOpenRegion(u32 draw_index) {
   if (!g_region.open)
     return;
   u64 mrt[8];
-  const u32 n = std::min(g_region.cur_mrt_count, 8u);
+  const u32 n = base::Min(g_region.cur_mrt_count, 8u);
   for (u32 i = 0; i < n; i++)
     mrt[i] = g_region.cur_mrt[i];
   const u64 depth_base = g_region.cur_depth;
@@ -1224,7 +1225,7 @@ void SnapshotOpenRegion(u32 draw_index) {
                   depth_base, true, draw_index, dt.layout);
   }
   const u64 watch = kRtWatch.get();
-  if (watch && std::find(mrt, mrt + n, watch) == mrt + n) {
+  if (watch && base::Find(mrt, mrt + n, watch) == mrt + n) {
     auto wit = g_rts.find(watch);
     if (wit != g_rts.end())
       QueueSnapshot(wit->second.texture, rhi::kAspectColor, wit->second.w,
@@ -1274,7 +1275,7 @@ void DumpFrameResources() {
       RTarget& rt = kv.second;
       if (!rt.used_this_frame && !rt.ever_rendered)
         continue;
-      std::vector<u8> bytes;
+      base::Vector<u8> bytes;
       if (!ReadImage(rt.texture, rhi::kAspectColor, rt.w, rt.h,
                      FormatBytes(rt.fmt), rt.layout, bytes))
         continue;
@@ -1313,7 +1314,7 @@ void DumpFrameResources() {
       DepthTarget& dt = kv.second;
       if (!dt.used_this_frame)
         continue;
-      std::vector<u8> bytes;
+      base::Vector<u8> bytes;
       if (!ReadImage(dt.texture, rhi::kAspectDepth, dt.w, dt.h, 4, dt.layout,
                      bytes))
         continue;
@@ -1446,10 +1447,10 @@ void FrameBegin(int frame_num) {
       trigger = true;
     if (!trigger)
       return;
-    g_frames_left = std::max(1, kCaptureCount.get());
+    g_frames_left = base::Max(1, kCaptureCount.get());
     g_armed_frame = frame_num;
     const char* dir = kCaptureDir;
-    g_dir = (dir && *dir) ? dir : (std::string(DumpDir()) + "/gpucap");
+    g_dir = (dir && *dir) ? dir : (base::String(DumpDir()) + "/gpucap");
     ::mkdir(g_dir.c_str(), 0755);
   }
 
@@ -1462,7 +1463,7 @@ void FrameBegin(int frame_num) {
   char prefix[256];
   std::snprintf(prefix, sizeof prefix, "%s/frame_%d", g_dir.c_str(), frame_num);
   g_prefix = prefix;
-  const std::string path = g_prefix + ".jsonl";
+  const base::String path = g_prefix + ".jsonl";
   g_file = std::fopen(path.c_str(), "wb");
   if (!g_file) {
     BASE_LOGI("gpucap", "cannot open {}", path.c_str());
@@ -1609,7 +1610,7 @@ void RecordDraw(const render::DrawInfo& d,
   }
 
   Arr texs;
-  const u32 ntex = std::min<u32>(d.num_texs, 24);
+  const u32 ntex = base::Min<u32>(d.num_texs, 24);
   for (u32 i = 0; i < ntex; i++) {
     texs.Add(TexObj(i, d.texs[i], b));
     NoteTexture(d.texs[i]);
@@ -1618,7 +1619,7 @@ void RecordDraw(const render::DrawInfo& d,
   Arr cbufs;
   const u32 cbuf_cap =
       kCaptureCbufBytes.get() < 0 ? 0 : u32(kCaptureCbufBytes.get());
-  for (u32 i = 0; i < d.num_cbufs && i < std::size(d.cbufs); i++) {
+  for (u32 i = 0; i < d.num_cbufs && i < base::ArraySize(d.cbufs); i++) {
     if (!d.cbufs[i].base && !d.cbufs[i].size)
       continue;
     Obj o;
@@ -1628,7 +1629,7 @@ void RecordDraw(const render::DrawInfo& d,
     o.Bool("staged", b ? ((b->cbuf_mask >> i) & 1) != 0 : false);
     o.Raw("guest", GuestObj(d.cbufs[i].base, d.cbufs[i].size));
     const u32 bytes =
-        cbuf_cap ? std::min(cbuf_cap, d.cbufs[i].size) : d.cbufs[i].size;
+        cbuf_cap ? base::Min(cbuf_cap, d.cbufs[i].size) : d.cbufs[i].size;
     o.Raw("data", HexBytes(d.cbufs[i].base, bytes));
     cbufs.Add(o);
   }
@@ -1684,7 +1685,7 @@ void RecordDraw(const render::DrawInfo& d,
   viewport.Num("z_offset", d.viewport_z_offset);
 
   Arr vs_ud, ps_ud;
-  for (u32 i = 0; i < std::size(d.vs_user_data); i++) {
+  for (u32 i = 0; i < base::ArraySize(d.vs_user_data); i++) {
     vs_ud.Add(Line::HexText(d.vs_user_data[i]));
     ps_ud.Add(Line::HexText(d.ps_user_data[i]));
   }
@@ -1801,7 +1802,7 @@ void RecordBarrier(const char* aspect,
                    rhi::TextureState to) {
   if (!g_recording)
     return;
-  std::string name = ObjectName(image);
+  base::String name = ObjectName(image);
   if (name.empty())
     for (const auto& kv : g_rts)
       if (reinterpret_cast<u64>(kv.second.texture) == image) {

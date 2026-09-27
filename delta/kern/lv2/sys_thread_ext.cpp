@@ -11,11 +11,8 @@
 #include "base/arch.h"
 #include <base/logging.h>
 #include <base/strings/format.h>
-#include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <thread>
 #if defined(__linux__)
 #include <pthread.h>
 #endif
@@ -27,6 +24,10 @@
 #include "sys_thread_ext.h"
 #include "sys_thread.h"
 #include <utl/options.h>
+#include <base/threading/thread.h>
+#include <base/atomic.h>
+#include <base/math/value_bounds.h>
+#include <base/algorithm.h>
 
 namespace {
 DELTA_OPTION(bool, kSchedYieldReal, "DELTA_SCHED_YIELD_REAL", false);
@@ -87,14 +88,13 @@ int PS4ABI sys_thr_kill2(u32 pid, u32 tid, int sig) {
 // the caller briefly (honouring the timeout if given, capped) and return. Most
 // callers poll, so a short delay is enough.
 int PS4ABI sys_thr_suspend(const void *timeout) {
-  using namespace std::chrono;
-  nanoseconds dur = milliseconds(1);
+  i64 us = 1000;
   if (timeout) {
     auto *ts = static_cast<const ts64 *>(timeout);
-    auto req = seconds(ts->tv_sec) + nanoseconds(ts->tv_nsec);
-    dur = std::min<nanoseconds>(req, milliseconds(50));
+    const i64 req = i64(ts->tv_sec) * 1000000 + i64(ts->tv_nsec) / 1000;
+    us = base::Clamp<i64>(req, 0, 50000);
   }
-  std::this_thread::sleep_for(dur);
+  base::SleepForMicroseconds(u64(us));
   return 0;
 }
 
@@ -137,7 +137,7 @@ static inline void cpuRelax() {
 #elif defined(__aarch64__)
   asm volatile("yield" ::: "memory");
 #else
-  std::this_thread::yield();
+  base::YieldCurrentThread();
 #endif
 }
 
@@ -149,7 +149,7 @@ int PS4ABI sys_yield() {
 // stack for return addresses in a module's .text. A title that spins here is
 // waiting for something; this names the loop doing the waiting.
 static void yieldCallerScout() {
-  static std::atomic<u64> n{0};
+  static base::Atomic<u64> n{0};
   if ((++n % kYieldCaller) != 0)
     return;
   guestStackTrace("yield-caller", 8);
@@ -166,7 +166,7 @@ int PS4ABI sys_sched_yield() {
   // real host yield so the runnable sibling gets scheduled. Env-gated (default off)
   // so it can't regress the many-core pause path (Doom64's job manager).
   if (kSchedYieldReal)
-    std::this_thread::yield();
+    base::YieldCurrentThread();
   else
     cpuRelax();
   return 0;

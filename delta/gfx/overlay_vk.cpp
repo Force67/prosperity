@@ -20,6 +20,7 @@
 #include "imgui.h"
 #include "overlay.h"
 #include "overlay_vk_shaders.h"
+#include <base/containers/vector.h>
 
 namespace gfx {
 namespace {
@@ -51,9 +52,9 @@ struct {
   VkDeviceMemory fontMem = VK_NULL_HANDLE;
   VkImageView fontView = VK_NULL_HANDLE;
 
-  std::vector<VkImageView> views;
-  std::vector<VkFramebuffer> fbs;
-  std::vector<Frame> frames;
+  base::Vector<VkImageView> views;
+  base::Vector<VkFramebuffer> fbs;
+  base::Vector<Frame> frames;
   bool ready = false;
 } v;
 
@@ -419,7 +420,7 @@ bool overlayVkInit(VkPhysicalDevice phys, VkDevice device, VkQueue queue,
   return true;
 }
 
-void overlayVkSetSwapchain(const std::vector<VkImage> &images,
+void overlayVkSetSwapchain(const base::Vector<VkImage> &images,
                            VkExtent2D extent, VkFormat format) {
   if (!v.device)
     return;

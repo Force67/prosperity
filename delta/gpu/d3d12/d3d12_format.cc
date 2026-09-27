@@ -2,9 +2,9 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-#include <array>
 
 #include "gpu/d3d12/d3d12_internal.h"
+#include <base/containers/array.h>
 
 namespace gpu::d3d12::impl {
 
@@ -146,7 +146,7 @@ DxgiInfo Build(Format f) {
 
 const DxgiInfo& Dxgi(Format format) {
   static const auto table = [] {
-    std::array<DxgiInfo, static_cast<size_t>(Format::kCount)> t;
+    base::Array<DxgiInfo, static_cast<size_t>(Format::kCount)> t;
     for (size_t i = 0; i < t.size(); i++)
       t[i] = Build(static_cast<Format>(i));
     return t;

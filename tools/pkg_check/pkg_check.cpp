@@ -1,11 +1,8 @@
 // Dumps a fake-signed .pkg through the native PkgFilesystem so it can be
 // cross-checked against tools/pkg_extract.py: lists every file and rebuilds
 // eboot.bin into an ELF. Usage: pkg_check <game.pkg> [out.elf]
-#include <algorithm>
 #include "base/arch.h"
 #include <cstdio>
-#include <string>
-#include <vector>
 
 #include <logger/logger.h>
 #include <utl/file.h>
@@ -13,6 +10,9 @@
 #include <crypto/UnSELF.h>
 
 #include "formats/pkg_object.h"
+#include <base/algorithm.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 int main(int argc, char **argv) {
   utl::createLogger(true);
@@ -27,16 +27,16 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::vector<std::string> paths;
+  base::Vector<base::String> paths;
   fs.paths(paths);
-  std::sort(paths.begin(), paths.end());
+  base::Sort(paths.begin(), paths.end());
   std::printf("%zu files\n", paths.size());
   for (const auto &p : paths)
     std::printf("%s\n", p.c_str());
 
   const auto *node = fs.find("/eboot.bin");
   if (node) {
-    std::vector<u8> buf(node->size);
+    base::Vector<u8> buf(node->size);
     fs.read(*node, buf.data(), 0, static_cast<i64>(node->size));
     auto elf = crypto::self2elf(buf.data(), buf.size());
     if (!elf.empty()) {

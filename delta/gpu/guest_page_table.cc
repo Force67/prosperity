@@ -4,8 +4,8 @@
 #include "gpu/guest_page_table.h"
 
 #include <sys/mman.h>
+#include <base/math/value_bounds.h>
 
-#include <algorithm>
 
 namespace gpu {
 
@@ -19,7 +19,7 @@ GuestPageTable::Chunk* GuestPageTable::ChunkAt(u64 address) {
   const u64 index = address >> kChunkShift;
   if (index >= kChunks)
     return nullptr;
-  Chunk* chunk = chunks_[index].load(std::memory_order_acquire);
+  Chunk* chunk = chunks_[index].load(base::memory_order_acquire);
   if (chunk)
     return chunk;
   // Zero pages are default records. Reserved only: a chunk costs what its
@@ -30,14 +30,14 @@ GuestPageTable::Chunk* GuestPageTable::ChunkAt(u64 address) {
     return nullptr;
   Chunk* fresh = static_cast<Chunk*>(p);
   if (chunks_[index].compare_exchange_strong(chunk, fresh,
-                                             std::memory_order_acq_rel))
+                                             base::memory_order_acq_rel))
     return fresh;
   munmap(p, sizeof(Chunk));
   return chunk;
 }
 
 void GuestPageTable::AddCsDirty(u64 first, u64 end, int delta) {
-  end = std::min<u64>(end, kChunks << kChunkShift);
+  end = base::Min<u64>(end, kChunks << kChunkShift);
   if (first >= end)
     return;
   for (u64 block = first >> kBlockShift; block <= (end - 1) >> kBlockShift;
@@ -46,7 +46,7 @@ void GuestPageTable::AddCsDirty(u64 first, u64 end, int delta) {
     if (!chunk)
       return;
     chunk->cs_dirty[block & (kBlocksPerChunk - 1)].fetch_add(
-        static_cast<u16>(delta), std::memory_order_relaxed);
+        static_cast<u16>(delta), base::memory_order_relaxed);
   }
 }
 
@@ -63,7 +63,7 @@ bool GuestPageTable::CsClear(u64 first, u64 end) const {
       continue;
     }
     if (chunk->cs_dirty[block & (kBlocksPerChunk - 1)].load(
-            std::memory_order_relaxed))
+            base::memory_order_relaxed))
       return false;
     block++;
   }

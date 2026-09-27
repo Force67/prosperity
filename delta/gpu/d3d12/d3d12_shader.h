@@ -12,12 +12,12 @@
  * same numbers.
  */
 
-#include <string>
-#include <utility>
-#include <vector>
 
 #include "base/arch.h"
 #include "gpu/rhi/types.h"
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 namespace gpu::d3d12 {
 
@@ -46,21 +46,21 @@ struct LowerOptions {
   // of BarycentricGeometryShader instead of SV_Barycentrics (SM 6.1).
   bool emulate_barycentrics = false;
   // Storage buffers the layout binds as SRVs, as (set, binding).
-  std::vector<std::pair<u32, u32>> read_only_storage;
+  base::Vector<base::Pair<u32, u32>> read_only_storage;
   // The previous stage's outputs (LoweredShader::outputs). D3D12 links
   // stages by signature register, not by semantic, so the inputs are
   // rewritten to the producer's order and shapes.
-  std::string producer_outputs;
+  base::String producer_outputs;
 };
 
 struct LoweredShader {
-  std::string hlsl;
-  std::string outputs;  // the stage's output signature, for the next stage
-  std::string profile;  // "vs_6_0", ...
+  base::String hlsl;
+  base::String outputs;  // the stage's output signature, for the next stage
+  base::String profile;  // "vs_6_0", ...
   bool uses_draw_params = false;    // reads kDrawRegister
   bool uses_workgroup_count = false;  // reads kDispatchRegister
   bool uses_raster = false;           // reads kRasterRegister
-  std::string error;
+  base::String error;
 };
 
 // False (with out->error) when SPIRV-Cross cannot express the module.
@@ -74,21 +74,21 @@ class Dxc {
  public:
   // False when no DXC library could be loaded.
   static bool Load();
-  static bool Compile(const std::string& hlsl,
-                      const std::string& profile,
-                      std::vector<u8>* dxil,
-                      std::string* error);
+  static bool Compile(const base::String& hlsl,
+                      const base::String& profile,
+                      base::Vector<u8>* dxil,
+                      base::String* error);
 };
 
 // A pass-through geometry shader for triangles that adds the DELTABARY and
 // DELTABARYNP varyings to the vertex stage's outputs (LoweredShader::outputs):
 // barycentrics on devices without SM 6.1. Its outputs go to *outputs.
-std::string BarycentricGeometryShader(const std::string& vertex_outputs,
-                                      std::string* outputs);
+base::String BarycentricGeometryShader(const base::String& vertex_outputs,
+                                      base::String* outputs);
 
 // Rewrites what SPIRV-Cross cannot lower to HLSL into what it can
 // (d3d12_spirv_patch.cc). Returns the input unchanged when nothing applies.
-std::vector<u32> PatchSpirvForHlsl(const u32* words, size_t count);
+base::Vector<u32> PatchSpirvForHlsl(const u32* words, size_t count);
 // True when the module decorates a variable with this BuiltIn.
 bool DeclaresBuiltIn(const u32* words, size_t count, u32 builtin);
 

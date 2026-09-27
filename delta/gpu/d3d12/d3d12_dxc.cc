@@ -6,9 +6,6 @@
  * vkd3d's, so no D3D12 header may be included here.
  */
 
-#include <mutex>
-#include <string>
-#include <vector>
 
 #include "gpu/d3d12/d3d12_shader.h"
 
@@ -18,6 +15,8 @@
 #else
 #include <dlfcn.h>
 #include <dxc/dxcapi.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 #endif
 
 #ifndef DELTA_DXCOMPILER_PATH
@@ -65,21 +64,23 @@ DxcCreateInstanceProc LoadLibraryEntry() {
 }  // namespace
 
 bool Dxc::Load() {
-  static std::once_flag once;
-  std::call_once(once, [] { g_create = LoadLibraryEntry(); });
+  static const bool once = ([] { g_create = LoadLibraryEntry(); }(), true);
+  (void)once;
   return g_create && Local().compiler;
 }
 
-bool Dxc::Compile(const std::string& hlsl,
-                  const std::string& profile,
-                  std::vector<u8>* dxil,
-                  std::string* error) {
+bool Dxc::Compile(const base::String& hlsl,
+                  const base::String& profile,
+                  base::Vector<u8>* dxil,
+                  base::String* error) {
   ThreadCompiler& tc = Local();
   if (!tc.compiler) {
     *error = "DXC is not loaded";
     return false;
   }
-  const std::wstring wprofile(profile.begin(), profile.end());
+  base::StringW wprofile;
+  for (char c : profile)
+    wprofile += static_cast<wchar_t>(c);
   // HLSL 2018: SPIRV-Cross relies on its component-wise vector ternary.
   LPCWSTR args[] = {L"-E",  L"main", L"-T",          wprofile.c_str(),
                     L"-HV", L"2018", L"-Qstrip_debug", L"-O3"};
@@ -96,7 +97,7 @@ bool Dxc::Compile(const std::string& hlsl,
   IDxcBlobUtf8* errors = nullptr;
   result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
   if (errors && errors->GetStringLength())
-    *error = std::string(errors->GetStringPointer(), errors->GetStringLength());
+    *error = base::String(errors->GetStringPointer(), errors->GetStringLength());
   if (errors)
     errors->Release();
   bool ok = false;

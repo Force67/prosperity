@@ -377,7 +377,7 @@ std::string Lower(const u32* words,
     const bool srv =
         std::find(options.read_only_storage.begin(),
                   options.read_only_storage.end(),
-                  std::make_pair(set, binding)) !=
+                  base::Pair<u32, u32>{set, binding}) !=
         options.read_only_storage.end();
     if (srv)
       compiler.set_decoration(r.id, spv::DecorationNonWritable);
@@ -477,12 +477,13 @@ std::string Lower(const u32* words,
   }
   if (model == spv::ExecutionModelFragment ||
       model == spv::ExecutionModelGeometry)
-    MatchInputs(hlsl, options.producer_outputs);
+    MatchInputs(hlsl, std::string(options.producer_outputs.c_str(),
+                                  options.producer_outputs.size()));
   size_t begin, end;
   if ((model == spv::ExecutionModelVertex ||
        model == spv::ExecutionModelGeometry) &&
       FindStruct(hlsl, "SPIRV_Cross_Output", &begin, &end))
-    out->outputs = hlsl.substr(begin, end - begin);
+    out->outputs = base::String(hlsl.data() + begin, end - begin);
   if (emulate.integer_sampling && options.shader_model < 67)
     IntegerSampling(hlsl);
   return ExtendedArithmetic(hlsl) + hlsl;
@@ -499,15 +500,19 @@ u64 HashWords(const u32* words, size_t count, u64 seed) {
   return h;
 }
 
-std::string BarycentricGeometryShader(const std::string& vertex_outputs,
-                                      std::string* outputs) {
+base::String BarycentricGeometryShader(const base::String& vertex_outputs_in,
+                                       base::String* outputs_out) {
+  const std::string vertex_outputs(vertex_outputs_in.c_str(),
+                                   vertex_outputs_in.size());
+  std::string outputs_storage;
+  std::string* outputs = &outputs_storage;
   *outputs = vertex_outputs +
              "    float3 delta_bary : DELTABARY;\n"
              "    noperspective float3 delta_bary_np : DELTABARYNP;\n";
   std::string copy;
   for (const Element& e : ParseElements(vertex_outputs))
     copy += "        o." + e.name + " = v[i]." + e.name + ";\n";
-  return "struct DeltaIn\n{\n" + vertex_outputs +
+  const std::string gs = "struct DeltaIn\n{\n" + vertex_outputs +
          "};\n\nstruct DeltaOut\n{\n" + *outputs +
          "};\n\n[maxvertexcount(3)]\n"
          "void main(triangle DeltaIn v[3], "
@@ -517,20 +522,23 @@ std::string BarycentricGeometryShader(const std::string& vertex_outputs,
          "        o.delta_bary = float3(i == 0, i == 1, i == 2);\n"
          "        o.delta_bary_np = o.delta_bary;\n"
          "        s.Append(o);\n    }\n}\n";
+  *outputs_out = base::String(outputs->c_str(), outputs->size());
+  return base::String(gs.c_str(), gs.size());
 }
 
 bool LowerToHlsl(const u32* words,
                  size_t count,
                  const LowerOptions& options,
                  LoweredShader* out) {
-  const std::vector<u32> patched = PatchSpirvForHlsl(words, count);
+  const base::Vector<u32> patched = PatchSpirvForHlsl(words, count);
   std::vector<u32> flatten;
   Emulation emulate;
   for (;;) {
     *out = {};
     try {
-      out->hlsl = Lower(patched.data(), patched.size(), options, flatten,
-                        emulate, out);
+      const std::string hlsl = Lower(patched.data(), patched.size(), options,
+                                     flatten, emulate, out);
+      out->hlsl = base::String(hlsl.c_str(), hlsl.size());
       break;
     } catch (const std::exception& e) {
       u32 id;
@@ -554,9 +562,10 @@ bool LowerToHlsl(const u32* words,
       return false;
     }
   }
-  out->profile = std::string(StagePrefix(options.stage)) + "_" +
-                 std::to_string(options.shader_model / 10) + "_" +
-                 std::to_string(options.shader_model % 10);
+  const std::string profile = std::string(StagePrefix(options.stage)) + "_" +
+                              std::to_string(options.shader_model / 10) + "_" +
+                              std::to_string(options.shader_model % 10);
+  out->profile = base::String(profile.c_str(), profile.size());
   return true;
 }
 

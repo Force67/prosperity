@@ -1,8 +1,5 @@
 #include <algorithm>
-#include <array>
-#include <bit>
 #include <cstring>
-#include <vector>
 #include <gtest/gtest.h>
 #include <utl/options.h>
 
@@ -21,6 +18,12 @@
 #include "gpu/render/draw_recomp.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/upload_ring.h"
+#include <base/algorithm.h>
+#include <base/containers/array.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/bit_cast.h>
+#include <base/strings/xstring.h>
 
 extern "C" void prosperity_gpu_end_of_pipe() {}
 extern "C" bool prosperity_ps5_is_display_buffer(u64) { return false; }
@@ -42,7 +45,7 @@ TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
   gpu::render::BeginFrame(renderer);
   const auto capacity = gpu::render::UboRingBytes();
   EXPECT_EQ(capacity,
-            std::min<u64>(512ull << 20,
+            base::Min<u64>(512ull << 20,
                           gpu::render::Device().caps().max_storage_buffer_range * 2));
   ASSERT_NE(gpu::render::g_ring.ubo_map, nullptr);
   EXPECT_GE(gpu::render::g_ring.ubo_buf->desc().size, capacity);
@@ -54,7 +57,7 @@ TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
 }
 
 TEST(RdnaResources, RepeatedDescriptorLoadsReuseTextureBindings) {
-  std::vector<u32> code;
+  base::Vector<u32> code;
   for (u32 i = 0; i < 32; ++i) {
     code.insert(code.end(), {0xf408040e, 0xfa000030,  // s_load s[16:19], s[28:29], 48
                               0xf09c0108, 0x00040f05});  // sample with s[16:23]
@@ -137,11 +140,11 @@ TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
   m.ExecMode(main, spv::ExecutionMode::OutputVertices, {3});
   m.ExecMode(main, spv::ExecutionMode::OutputPrimitivesEXT, {1});
   m.ExecMode(main, spv::ExecutionMode::OutputTrianglesEXT, {});
-  std::string error;
+  base::String error;
   ASSERT_TRUE(gpu::gcn::spirv::Finalize(m.Assemble(), &program.mesh_spirv, &error))
-      << error;
+      << error.c_str();
   program.vs_spirv.clear();
-  alignas(65536) static std::array<u8, 65536> target{};
+  alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.prim_type = 1;
@@ -195,7 +198,7 @@ TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
   ASSERT_TRUE(program.ok);
   ASSERT_FALSE(program.mesh_spirv.empty());
   ASSERT_TRUE(program.vs_spirv.empty());
-  alignas(65536) static std::array<u8, 65536> target{};
+  alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.prim_type = 1;
@@ -246,7 +249,7 @@ TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
   EXPECT_FALSE(gpu::rdna::HasNggTransfer(gs));
   ASSERT_FALSE(program.mesh_spirv.empty());
   ASSERT_TRUE(program.vs_spirv.empty());
-  alignas(65536) static std::array<u8, 65536> target{};
+  alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.prim_type = 1;
@@ -272,7 +275,7 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
-  std::array<u32, 4096> code{};
+  base::Array<u32, 4096> code{};
   u32 pc = 0;
   const auto v1 = [&](u32 op, u32 dst, u32 src) {
     code[pc++] = 0x7e000000 | (dst << 17) | (op << 9) | src;
@@ -323,9 +326,9 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
                         0xf800080f, 0x00010100, 0xbf810000};
   const u32 user_data[32]{};
   const u32 batches[] = {6, 2, 4}; // one group, three groups, partial final group
-  static std::array<gpu::gcn::Recompiled, 3> programs;
-  alignas(65536) static std::array<std::array<u8, 65536>, 3> targets{};
-  std::array<u8, 64 * 16 * 4> reference{};
+  static base::Array<gpu::gcn::Recompiled, 3> programs;
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 3> targets{};
+  base::Array<u8, 64 * 16 * 4> reference{};
   for (u32 i = 0; i < 3; ++i) {
     SCOPED_TRACE(batches[i]);
     const gpu::rdna::NggConfig cfg{code.data(), 64, batches[i], batches[i] * 4,
@@ -350,7 +353,7 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
       EXPECT_EQ(pixels[(8 * 64 + 10 + q * 8) * 4], 255);
       EXPECT_EQ(pixels[(8 * 64 + 14 + q * 8) * 4], 0);
     }
-    if (!i) std::copy_n(pixels, reference.size(), reference.begin());
+    if (!i) base::CopyN(pixels, reference.size(), reference.begin());
     else EXPECT_TRUE(std::equal(reference.begin(), reference.end(), pixels));
   }
 }
@@ -361,7 +364,7 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
   const u32 es[64] = {0x34000a82, 0xd8340000, 0x00000500, 0xbe802006};
-  std::array<u32, 256> gs{};
+  base::Array<u32, 256> gs{};
   u32 pc = 0;
   // One scalar load in each of 17 disjoint constant-buffer windows. The
   // final load controls the triangle position, beyond the 15 dynamic UBOs.
@@ -376,7 +379,7 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
       0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100,
       0x7e0802ff, 0x00200400, 0xbefe0481, 0xf8000941, 0x00000004,
       0xbefe04c1, 0xbefc03ff, 0x00001003, 0xbf900009, 0xbf810000};
-  std::copy(std::begin(body), std::end(body), gs.begin() + pc);
+  base::Copy(body, body + base::ArraySize(body), gs.begin() + pc);
   const u32 ps[64] = {0x7e0002f2, 0x7e020280,
                       0xf800080f, 0x00010100, 0xbf810000};
   const u32 user_data[32]{};
@@ -386,8 +389,8 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
   ASSERT_TRUE(program.ok);
   ASSERT_EQ(program.vs_cbufs.size(), 17u);
   ASSERT_TRUE(program.indirect_cbufs);
-  static std::array<float, 17 * gpu::gcn::kCbufDwords> constants{};
-  alignas(65536) static std::array<std::array<u8, 65536>, 3> targets{};
+  static base::Array<float, 17 * gpu::gcn::kCbufDwords> constants{};
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 3> targets{};
   for (u32 frame = 0; frame < 3; ++frame) {
     constants[16 * gpu::gcn::kCbufDwords] = frame == 1 ? .5f : -.5f;
     gpu::render::DrawInfo draw;
@@ -398,7 +401,7 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
       draw.cbufs[cb.binding] = {
           reinterpret_cast<u64>(constants.data() + cb.first_dword),
           cb.num_dwords * 4};
-      draw.num_cbufs = std::max(draw.num_cbufs, cb.binding + 1);
+      draw.num_cbufs = base::Max(draw.num_cbufs, cb.binding + 1);
     }
     draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[frame].data());
     draw.rt_w = draw.rt_h = 16;
@@ -448,7 +451,7 @@ TEST(VkDraw, SplitNggUserWindowsAndHighPixelRegistersRemainDistinct) {
   static const auto program = gpu::rdna::Recompile(es, ps, user_data, user_data,
                                             0, false, 4, 30, nullptr, 0, &cfg);
   ASSERT_TRUE(program.ok);
-  alignas(65536) static std::array<std::array<u8, 65536>, 2> targets{};
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   for (u32 frame = 0; frame < 2; ++frame) {
     gpu::render::DrawInfo draw;
     draw.recomp = &program;
@@ -511,7 +514,7 @@ TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
   ASSERT_TRUE(program.ok);
   ASSERT_TRUE(program.indirect_cbufs);
   ASSERT_TRUE(program.mesh_spirv.empty());
-  alignas(65536) static std::array<std::array<u8, 65536>, 2> targets{};
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   for (u32 frame = 0; frame < 2; ++frame) {
     gpu::render::DrawInfo draw;
     draw.recomp = &program;
@@ -552,7 +555,7 @@ TEST(VkDraw, PixelShaderUsesDppOperand) {
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data,
                                                   0, false, 0, 0);
   ASSERT_TRUE(program.ok);
-  alignas(65536) static std::array<u8, 65536> target{};
+  alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.prim_type = 1;
@@ -593,11 +596,11 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
       {0, 1, 0x4301c000, 0xffffff81}, {4, 1, 0x449a5800, 0x000004d2}};
   const u32 vs[64] = {0x7e0002ff, 0x3d800000, 0x7e040280, 0x7e0602f2,
                       0xf80008cf, 0x03020000, 0xbf810000};
-  static std::array<gpu::gcn::Recompiled, std::size(cases) * 2> programs;
-  alignas(65536) static std::array<std::array<u8, 65536>, std::size(cases) * 2> targets{};
-  for (u32 i = 0; i < std::size(programs); ++i) {
-    const auto& c = cases[i % std::size(cases)];
-    const bool binary = i >= std::size(cases);
+  static base::Array<gpu::gcn::Recompiled, base::ArraySize(cases) * 2> programs;
+  alignas(65536) static base::Array<base::Array<u8, 65536>, base::ArraySize(cases) * 2> targets{};
+  for (u32 i = 0; i < programs.size(); ++i) {
+    const auto& c = cases[i % base::ArraySize(cases)];
+    const bool binary = i >= base::ArraySize(cases);
     SCOPED_TRACE(i);
     u32 ps[64] = {0x7e000200, 0x7e020201}; // old bits and float input
     u32 pc = 2;
@@ -612,7 +615,7 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
         0x7d840002,              // compare packed integer result with s2
         0x7e0402f2, 0x02000480,  // red = result matches ? 1 : 0
         0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
-    std::copy_n(tail, std::size(tail), ps + pc);
+    base::CopyN(tail, base::ArraySize(tail), ps + pc);
     const u32 user_data[32] = {0xabcdef12, c.input, c.expected};
     programs[i] = gpu::rdna::Recompile(vs, ps, user_data, user_data,
                                        0, false, 0, 3);
@@ -621,7 +624,7 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
     draw.recomp = &programs[i];
     draw.prim_type = 1;
     draw.vertex_count = 1;
-    std::copy_n(user_data, 32, draw.ps_user_data);
+    base::CopyN(user_data, 32, draw.ps_user_data);
     draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[i].data());
     draw.rt_w = draw.rt_h = 16;
     draw.mrt_count = draw.mrt_bound_mask = 1;
@@ -690,7 +693,7 @@ TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
   static const auto program = gpu::rdna::Recompile(es, ps, user_data, user_data,
                                             0, false, 0, 0, nullptr, 0, &cfg);
   ASSERT_TRUE(program.ok);
-  alignas(65536) static std::array<u8, 65536> target{};
+  alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.prim_type = 1;
@@ -729,7 +732,7 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
       0xbf810000};
   const u32 ps[64] = {0x7e0002f2, 0x7e020280,
                       0xf800080f, 0x00010100, 0xbf810000};
-  const std::array<float, 2> vertices = {1.f, 1.f};
+  const base::Array<float, 2> vertices = {1.f, 1.f};
   const u64 vb = reinterpret_cast<u64>(vertices.data());
   const u32 descriptor[4] = {u32(vb), u32(vb >> 32) | (4u << 16), 2,
                             0x21014fac};
@@ -738,7 +741,7 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
   ASSERT_EQ(program.attrs.size(), 1u);
-  alignas(65536) static std::array<u8, 65536> target{};
+  alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
@@ -762,12 +765,12 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
   ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
   ASSERT_TRUE(slot.presentable);
   const auto* pixels = slot.readback->mapped();
-  std::array<u32, 4> quadrants{};
+  base::Array<u32, 4> quadrants{};
   for (u32 y = 0; y < 16; ++y)
     for (u32 x = 0; x < 16; ++x)
       if (pixels[(y * 16 + x) * 4] == 255)
         ++quadrants[(y / 8) * 2 + x / 8];
-  EXPECT_EQ(quadrants, (std::array<u32, 4>{1, 1, 1, 1}));
+  EXPECT_EQ(quadrants, (base::Array<u32, 4>{1, 1, 1, 1}));
 }
 
 TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
@@ -782,7 +785,7 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
       0xf80008cf, 0x03020100, 0xbf810000};
   const u32 ps[64] = {0x7e0002f2, 0x7e020280,
                       0xf800080f, 0x00010100, 0xbf810000};
-  const std::array<float, 4> vertices = {-.5f, 99.f, .5f, 99.f};
+  const base::Array<float, 4> vertices = {-.5f, 99.f, .5f, 99.f};
   const u64 vb = reinterpret_cast<u64>(vertices.data());
   const u32 descriptor[4] = {u32(vb), u32(vb >> 32) | (8u << 16), 2,
                             0x21014fac};
@@ -791,12 +794,12 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
   gpu::rdna::NextProgramGeneration();
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
-  alignas(65536) static std::array<u8, 65536> target{};
+  alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
-  std::copy_n(user_data, 32, draw.vs_user_data);
+  base::CopyN(user_data, 32, draw.vs_user_data);
   draw.prim_type = 1;
   draw.vertex_count = 2;
   draw.bufs[0] = {vb, sizeof(vertices)};
@@ -815,12 +818,12 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
   ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
   ASSERT_TRUE(slot.presentable);
   const auto* pixels = slot.readback->mapped();
-  std::array<u32, 2> halves{};
+  base::Array<u32, 2> halves{};
   for (u32 y = 0; y < 16; ++y)
     for (u32 x = 0; x < 16; ++x)
       if (pixels[(y * 16 + x) * 4] == 255)
         ++halves[x / 8];
-  EXPECT_EQ(halves, (std::array<u32, 2>{1, 1}));
+  EXPECT_EQ(halves, (base::Array<u32, 2>{1, 1}));
 }
 
 TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
@@ -833,7 +836,7 @@ TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
       0x7e0602f2, 0xf80008cf, 0x03020100, 0xbf810000};
   alignas(256) static const u32 ps[4096] = {
       0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
-  alignas(65536) static std::array<u8, 65536> target{}, depth{};
+  alignas(65536) static base::Array<u8, 65536> target{}, depth{};
   using namespace gpu::ps5;
   Regs regs;
   const auto address = [&](u32 reg, const void* ptr) {
@@ -850,13 +853,13 @@ TEST(VkDraw, Ps5DepthClearUsesRegisterValueInsteadOfVertexDepth) {
   regs[mmCB_COLOR0_INFO] = 10u << 2;
   regs[mmCB_COLOR0_ATTRIB2] = (15u << 14) | 15;
   regs[mmPA_CL_CLIP_CNTL] = 1u << 19;
-  regs[mmPA_CL_VPORT_XSCALE] = regs[mmPA_CL_VPORT_XOFFSET] = std::bit_cast<u32>(8.f);
-  regs[mmPA_CL_VPORT_YSCALE] = std::bit_cast<u32>(-8.f);
-  regs[mmPA_CL_VPORT_YOFFSET] = std::bit_cast<u32>(8.f);
+  regs[mmPA_CL_VPORT_XSCALE] = regs[mmPA_CL_VPORT_XOFFSET] = base::BitCast<u32>(8.f);
+  regs[mmPA_CL_VPORT_YSCALE] = base::BitCast<u32>(-8.f);
+  regs[mmPA_CL_VPORT_YOFFSET] = base::BitCast<u32>(8.f);
   regs[mmDB_Z_INFO] = 3;
   regs[mmDB_Z_WRITE_BASE] = u32(reinterpret_cast<u64>(depth.data()) >> 8);
   regs[mmDB_Z_WRITE_BASE_HI] = u32(reinterpret_cast<u64>(depth.data()) >> 40);
-  regs[mmDB_DEPTH_CLEAR] = std::bit_cast<u32>(1.f);
+  regs[mmDB_DEPTH_CLEAR] = base::BitCast<u32>(1.f);
   regs[mmDB_DEPTH_CONTROL] = (7u << 4) | 6;  // ALWAYS, test and write
   regs[mmDB_RENDER_CONTROL] = 1;
   const u32 body[] = {1, 0};
@@ -901,7 +904,7 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
                       0xf80008cf, 0x03020100, 0xbf810000};
   const u32 ps[64] = {0x7e0002f2, 0x7e020280,
                       0xf800080f, 0x00010100, 0xbf810000};
-  std::array<float, 32> vertices;
+  base::Array<float, 32> vertices;
   const u64 vb = reinterpret_cast<u64>(vertices.data());
   u32 user_data[32] = {u32(vb), u32(vb >> 32) | (32u << 16), 2,
                        0x21014fac};
@@ -910,21 +913,21 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
   ASSERT_TRUE(program.ok);
   ASSERT_TRUE(program.attrs.empty());
   ASSERT_EQ(program.vs_bufs.size(), 1u);
-  alignas(65536) static std::array<std::array<u8, 65536>, 2> targets{};
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   for (u32 pass = 0; pass < 2; ++pass) {
     const u32 stride = pass ? 48 : 32;
     SCOPED_TRACE(stride);
     vertices.fill(99.f);
-    const std::array<float, 4> left = {-.5f, 0.f, 0.f, 1.f};
-    const std::array<float, 4> right = {.5f, 0.f, 0.f, 1.f};
-    std::copy(left.begin(), left.end(), vertices.begin());
-    std::copy(right.begin(), right.end(), vertices.begin() + stride / 4);
+    const base::Array<float, 4> left = {-.5f, 0.f, 0.f, 1.f};
+    const base::Array<float, 4> right = {.5f, 0.f, 0.f, 1.f};
+    base::Copy(left.begin(), left.end(), vertices.begin());
+    base::Copy(right.begin(), right.end(), vertices.begin() + stride / 4);
     user_data[1] = u32(vb >> 32) | (stride << 16);
     gpu::render::DrawInfo draw;
     draw.recomp = &program;
     draw.vs_addr = reinterpret_cast<u64>(vs);
     draw.ps_addr = reinterpret_cast<u64>(ps);
-    std::copy_n(user_data, 32, draw.vs_user_data);
+    base::CopyN(user_data, 32, draw.vs_user_data);
     draw.prim_type = 1;
     draw.vertex_count = 2;
     draw.bufs[0] = {vb, sizeof(vertices)};
@@ -941,12 +944,12 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
     ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
     ASSERT_TRUE(slot.presentable);
     const auto* pixels = slot.readback->mapped();
-    std::array<u32, 2> halves{};
+    base::Array<u32, 2> halves{};
     for (u32 y = 0; y < 16; ++y)
       for (u32 x = 0; x < 16; ++x)
         if (pixels[(y * 16 + x) * 4] == 255)
           ++halves[x / 8];
-    EXPECT_EQ(halves, (std::array<u32, 2>{1, 1}));
+    EXPECT_EQ(halves, (base::Array<u32, 2>{1, 1}));
   }
 }
 
@@ -963,7 +966,7 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
       0xf80008cf, 0x03020100, 0xbf810000};
   const u32 ps[64] = {0x7e0002f2, 0x7e020280,
                       0xf800080f, 0x00010100, 0xbf810000};
-  const std::array<float, 4> vertices = {-.5f, 99.f, .5f, 99.f};
+  const base::Array<float, 4> vertices = {-.5f, 99.f, .5f, 99.f};
   const u64 vb = reinterpret_cast<u64>(vertices.data());
   const u32 descriptor[16] = {
       u32(vb), u32(vb >> 32) | (8u << 16), 2, 0x21014fac,
@@ -974,12 +977,12 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
   gpu::rdna::NextProgramGeneration();
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
-  alignas(65536) static std::array<u8, 65536> target{};
+  alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
-  std::copy_n(user_data, 32, draw.vs_user_data);
+  base::CopyN(user_data, 32, draw.vs_user_data);
   draw.prim_type = 1;
   draw.vertex_count = 2;
   draw.bufs[0] = {vb, sizeof(vertices)};
@@ -989,7 +992,7 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
     ASSERT_TRUE(resources.count(cb.use_pc));
     draw.cbufs[cb.binding] = {resources.at(cb.use_pc).base + cb.first_dword * 4,
                               cb.num_dwords * 4};
-    draw.num_cbufs = std::max(draw.num_cbufs, cb.binding + 1);
+    draw.num_cbufs = base::Max(draw.num_cbufs, cb.binding + 1);
   }
   draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
   draw.rt_w = draw.rt_h = 16;
@@ -1003,12 +1006,12 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
   ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
   ASSERT_TRUE(slot.presentable);
   const auto* pixels = slot.readback->mapped();
-  std::array<u32, 2> halves{};
+  base::Array<u32, 2> halves{};
   for (u32 y = 0; y < 16; ++y)
     for (u32 x = 0; x < 16; ++x)
       if (pixels[(y * 16 + x) * 4] == 255)
         ++halves[x / 8];
-  EXPECT_EQ(halves, (std::array<u32, 2>{1, 1}));
+  EXPECT_EQ(halves, (base::Array<u32, 2>{1, 1}));
 }
 
 TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
@@ -1034,7 +1037,7 @@ TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
   const u64 vb = reinterpret_cast<u64>(vertices);
   const u32 vs_ud[32] = {u32(vb), u32(vb >> 32) | (16u << 16), 3, 0x21014fac};
   const u32 ps_ud[32] = {vertices[0].packed, vertices[1].packed, vertices[2].packed};
-  alignas(65536) static std::array<std::array<u8, 65536>, 2> targets{};
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   const gpu::gcn::Recompiled* previous = nullptr;
   for (u32 passthrough = 0; passthrough < 2; ++passthrough) {
     const u32 input_control[32] = {passthrough ? 0x420u : 0u};
@@ -1051,8 +1054,8 @@ TEST(VkDraw, PassthroughInterpolationPreservesPackedVertexValues) {
     draw.recomp = &program;
     draw.vs_addr = reinterpret_cast<u64>(vs);
     draw.ps_addr = reinterpret_cast<u64>(ps);
-    std::copy_n(vs_ud, 32, draw.vs_user_data);
-    std::copy_n(ps_ud, 32, draw.ps_user_data);
+    base::CopyN(vs_ud, 32, draw.vs_user_data);
+    base::CopyN(ps_ud, 32, draw.ps_user_data);
     draw.prim_type = 4;
     draw.vertex_count = 3;
     draw.bufs[0] = {vb, sizeof(vertices)};
@@ -1094,12 +1097,12 @@ TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
   ASSERT_EQ(program.ps_bufs.size(), 1u);
-  alignas(65536) static std::array<u8, 65536> target{};
+  alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
-  std::copy_n(user_data, 32, draw.ps_user_data);
+  base::CopyN(user_data, 32, draw.ps_user_data);
   draw.prim_type = draw.vertex_count = 1;
   draw.bufs[0] = {base, sizeof(data)};
   draw.num_bufs = 1;
@@ -1145,7 +1148,7 @@ TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
   const u32 user_data[32]{};
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
-  alignas(65536) static std::array<u8, 65536> texture{64, 128, 255, 255}, target{};
+  alignas(65536) static base::Array<u8, 65536> texture{64, 128, 255, 255}, target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
@@ -1200,7 +1203,7 @@ TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
       0xf80008cf, 0x03020100, 0xbf810000};
   const u32 ps[64] = {0x7e0002f2, 0x7e020280,
                       0xf800080f, 0x00010100, 0xbf810000};
-  std::vector<float> vertices(4 * 1024 * 1024);
+  base::Vector<float> vertices(4 * 1024 * 1024);
   const u32 indices[] = {1, 2 * 1024 * 1024, u32(vertices.size() - 1)};
   const float positions[] = {-.5625f, .0625f, .5625f};
   for (u32 i = 0; i < 3; ++i)
@@ -1211,12 +1214,12 @@ TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
   gpu::rdna::NextProgramGeneration();
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
-  alignas(65536) static std::array<u8, 65536> target{};
+  alignas(65536) static base::Array<u8, 65536> target{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
   draw.ps_addr = reinterpret_cast<u64>(ps);
-  std::copy_n(user_data, 32, draw.vs_user_data);
+  base::CopyN(user_data, 32, draw.vs_user_data);
   draw.prim_type = 1;
   draw.vertex_count = 3;
   draw.bufs[0] = {vb, u32(vertices.size() * sizeof(float))};
@@ -1254,7 +1257,7 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
   const u32 user_data[32] = {};
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
-  alignas(65536) static std::array<std::array<u8, 65536>, 2> targets{};
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   const u16 index = 0;
   for (u32 indexed = 0; indexed < 2; ++indexed) {
     gpu::render::DrawInfo draw;
@@ -1288,14 +1291,14 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
     // Read the point through a compute image, swap red/green, and publish it
     // back into the same live render target. Guest bytes still contain zeros:
     // this must bridge the actual GPU image in both directions.
-    alignas(256) static std::array<u32, 4096> cs{};
-    const std::array<u32, 10> code = {
+    alignas(256) static base::Array<u32, 4096> cs{};
+    const base::Array<u32, 10> code = {
         0x7e020287,               // v1 = row 7
         0xf0000f08, 0x00000400,   // image_load v[4:7], v[0:1], s[0:7]
         0x7e100304, 0x7e080305, 0x7e0a0308,  // swap v4/v5 through v8
         0xf0200f08, 0x00000400,   // image_store v[4:7], v[0:1], s[0:7]
         0xbf810000, 0};
-    std::copy(code.begin(), code.end(), cs.begin());
+    base::Copy(code.begin(), code.end(), cs.begin());
     gpu::rdna::NextProgramGeneration();
     gpu::ps5::NoteGpuPool(draw.rt_base, targets[indexed].size());
     gpu::ps5::Regs regs;
@@ -1343,7 +1346,7 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
   const u32 user_data[32] = {};
   static const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
-  alignas(65536) static std::array<std::array<u8, 65536>, 3> targets{};
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 3> targets{};
   for (u32 format_index = 0; format_index < 3; ++format_index) {
     gpu::render::DrawInfo draw;
     draw.recomp = &program;
@@ -1383,14 +1386,14 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
     EXPECT_EQ(gpu::render::g_frame.heuristic, 0u);
 
     // Halve the live red channel in compute, then present the modified image.
-    alignas(256) static std::array<u32, 4096> cs{};
-    const std::array<u32, 7> code = {
+    alignas(256) static base::Array<u32, 4096> cs{};
+    const base::Array<u32, 7> code = {
         0x7e020287,               // v1 = row 7
         0xf0000108, 0x00000400,   // image_load v4, v[0:1], s[0:7]
         0x100808f0,              // v_mul_f32 v4, 0.5, v4
         0xf0200108, 0x00000400,   // image_store v4, v[0:1], s[0:7]
         0xbf810000};
-    std::copy(code.begin(), code.end(), cs.begin());
+    base::Copy(code.begin(), code.end(), cs.begin());
     gpu::rdna::NextProgramGeneration();
     gpu::ps5::NoteGpuPool(draw.rt_base, targets[format_index].size());
     gpu::ps5::Regs regs;

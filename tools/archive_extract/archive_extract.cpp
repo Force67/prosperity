@@ -6,17 +6,18 @@
 //   archive_extract <game.rar> <relpath> <out>     extract one file
 //   archive_extract <game.rar> --bench <relpath>   time a streaming read
 #include "base/arch.h"
-#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <string>
-#include <vector>
 
 #include <logger/logger.h>
 #include <utl/file.h>
 
 #include "formats/archive_object.h"
+#include <base/algorithm.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
+#include <base/time/time.h>
 
 int main(int argc, char **argv) {
   utl::createLogger(true);
@@ -26,17 +27,16 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  const auto t0 = std::chrono::steady_clock::now();
+  const auto t0 = base::TimeTicks::Now();
   vfs::ArchiveFilesystem fs((base::String(argv[1])));
-  const auto t1 = std::chrono::steady_clock::now();
+  const auto t1 = base::TimeTicks::Now();
   if (!fs.valid()) {
     std::printf("not a container we can read\n");
     return 1;
   }
   std::printf("opened via %s backend in %lld ms\n", fs.backendName(),
-              (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
-                  t1 - t0)
-                  .count());
+              (long long)(
+                  t1 - t0).InMilliseconds());
 
   if (argc >= 4 && std::strcmp(argv[2], "--bench") == 0) {
     const auto *node = fs.find(argv[3]);
@@ -47,8 +47,8 @@ int main(int argc, char **argv) {
     // Read it the way a guest streams an asset: forward, one chunk at a time.
     // If the backend restarts its decoder per call this never finishes.
     constexpr i64 kChunk = 1 << 20;
-    std::vector<u8> buf(kChunk);
-    const auto start = std::chrono::steady_clock::now();
+    base::Vector<u8> buf(kChunk);
+    const auto start = base::TimeTicks::Now();
     i64 off = 0, total = 0;
     while (off < static_cast<i64>(node->size)) {
       const i64 n = fs.read(*node, buf.data(), off, kChunk);
@@ -58,8 +58,7 @@ int main(int argc, char **argv) {
       total += n;
     }
     const double secs =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
-            .count();
+        (base::TimeTicks::Now() - start).InSecondsF();
     std::printf("streamed %lld / %llu bytes in %.2f s (%.1f MB/s)\n",
                 (long long)total, (unsigned long long)node->size, secs,
                 secs > 0 ? total / secs / (1 << 20) : 0.0);
@@ -72,7 +71,7 @@ int main(int argc, char **argv) {
       std::printf("%s: not found\n", argv[2]);
       return 1;
     }
-    std::vector<u8> buf(node->size);
+    base::Vector<u8> buf(node->size);
     const i64 n = fs.read(*node, buf.data(), 0, static_cast<i64>(node->size));
     if (n < 0) {
       std::printf("read failed\n");
@@ -84,9 +83,9 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  std::vector<std::string> paths;
+  base::Vector<base::String> paths;
   fs.paths(paths);
-  std::sort(paths.begin(), paths.end());
+  base::Sort(paths.begin(), paths.end());
   u64 total = 0;
   for (const auto &p : paths) {
     const auto *node = fs.find(p.c_str());

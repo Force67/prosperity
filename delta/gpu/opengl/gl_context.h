@@ -8,22 +8,23 @@
 
 #include <epoxy/egl.h>
 
-#include <condition_variable>
-#include <deque>
-#include <functional>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <vector>
+#include <base/memory/unique_pointer.h>
+#include <base/threading/thread.h>
 
 #include "base/arch.h"
 #include "gpu/opengl/gl_shader_lowering.h"
+#include <base/containers/deque.h>
+#include <base/containers/vector.h>
+#include <base/functional/function.h>
+#include <base/strings/xstring.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/mutex.h>
 
 namespace gpu::opengl {
 
 struct EglDevice {
   EGLDisplay display = EGL_NO_DISPLAY;
-  std::string renderer;  // GL_RENDERER
+  base::String renderer;  // GL_RENDERER
 };
 
 // The best EGL device with GL 4.6 core: a hardware GPU over a software
@@ -48,25 +49,25 @@ class GlWorker {
   // One thread per context; the worker owns the contexts from here on.
   // `init` runs once on each thread once its context is current.
   void Start(EGLDisplay display,
-             std::vector<EGLContext> contexts,
+             base::Vector<EGLContext> contexts,
              const char* name,
-             std::function<void()> init = {});
+             base::Function<void()> init = {});
   void Stop();
 
-  void Post(std::function<void()> task);
+  void Post(base::Function<void()> task);
   // Runs `task` on a worker thread and waits for it.
-  void Run(const std::function<void()>& task);
+  void Run(const base::Function<void()>& task);
 
  private:
   void Loop(EGLContext context, const char* name);
 
   EGLDisplay display_ = EGL_NO_DISPLAY;
-  std::vector<EGLContext> contexts_;
-  std::vector<std::thread> threads_;
-  std::function<void()> init_;
-  std::mutex mutex_;
-  std::condition_variable cv_;
-  std::deque<std::function<void()>> tasks_;
+  base::Vector<EGLContext> contexts_;
+  base::Vector<base::UniquePointer<base::Thread>> threads_;
+  base::Function<void()> init_;
+  base::Mutex mutex_;
+  base::ConditionVariable cv_;
+  base::SimpleDeque<base::Function<void()>> tasks_;
   bool stop_ = false;
 };
 

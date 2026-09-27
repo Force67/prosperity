@@ -16,19 +16,28 @@
 
 #include "archive_backend.h"
 
-#include <algorithm>
-#include <condition_variable>
 #include <cstring>
-#include <list>
-#include <atomic>
-#include <memory>
-#include <mutex>
-#include <thread>
+#include <string>
 
 #include <base/logging.h>
 #include <utl/file.h>
 
+// UnRAR's API speaks std::wstring and throws std::bad_alloc: both stay at
+// its boundary. Its Min/Max macros would rewrite base::Min/Max.
 #include <unrar/rar.hpp>
+#undef Min
+#undef Max
+#include <base/atomic.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/shared_pointer.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
 
 namespace vfs {
 namespace {
@@ -43,20 +52,20 @@ constexpr size_t kMaxSessions = 4;
 // ratio of bytes inflated to bytes delivered is what says whether a slow boot
 // is the archive thrashing or the title genuinely reading that much.
 struct RarStats {
-  std::atomic<u64> sessions{0};   // decodes started
-  std::atomic<u64> reused{0};     // reads served by an existing session
-  std::atomic<u64> evicted{0};    // sessions dropped while still useful
-  std::atomic<u64> inflated{0};   // bytes the decoder produced
-  std::atomic<u64> delivered{0};  // bytes handed to the guest
-  std::atomic<u64> discarded{0};  // bytes skipped to reach the wanted offset
-  std::atomic<u64> whole{0};      // entries decoded in one shot, no session
+  base::Atomic<u64> sessions{0};   // decodes started
+  base::Atomic<u64> reused{0};     // reads served by an existing session
+  base::Atomic<u64> evicted{0};    // sessions dropped while still useful
+  base::Atomic<u64> inflated{0};   // bytes the decoder produced
+  base::Atomic<u64> delivered{0};  // bytes handed to the guest
+  base::Atomic<u64> discarded{0};  // bytes skipped to reach the wanted offset
+  base::Atomic<u64> whole{0};      // entries decoded in one shot, no session
 };
 RarStats &stats() {
   static RarStats s;
   return s;
 }
 void reportStats() {
-  static std::atomic<u64> last{0};
+  static base::Atomic<u64> last{0};
   const u64 n = stats().delivered.load() >> 24;  // every 16 MiB delivered
   u64 prev = last.load();
   if (n == prev || !last.compare_exchange_strong(prev, n))
@@ -72,106 +81,88 @@ void reportStats() {
 }
 
 // One in-flight decode of one entry: a worker thread unpacking from entry
-// byte 0, and a cursor of how far the consumer has drained it.
+// byte 0, and a cursor of how far the consumer has drained it. The worker
+// borrows the session; whoever drops the last reference stops and joins it.
 struct RarSession {
   u64 headerOff = 0;
 
-  std::mutex m;
-  std::condition_variable canProduce, canConsume;
-  std::vector<u8> ring;
+  base::Mutex m;
+  base::ConditionVariable canProduce, canConsume;
+  base::Vector<u8> ring;
   u64 produced = 0; // total bytes the decoder pushed
   u64 consumed = 0; // total bytes drained (delivered or discarded)
   bool done = false;
   bool ok = false;   // full decode finished and the stored hash matched
   bool stop = false; // eviction: abort the decoder
 
-  std::mutex readLock; // serialises consumers of this session
-  std::thread worker;
-
-  // Abort the decode and wait for the worker to notice. Safe to call twice.
-  void retire() {
-    {
-      std::lock_guard<std::mutex> lk(m);
-      stop = true;
-    }
-    canProduce.notify_all();
-    if (worker.joinable())
-      worker.join();
-  }
+  base::Mutex readLock; // serialises consumers of this session
+  base::UniquePointer<base::Thread> worker;
 
   ~RarSession() {
     {
-      std::lock_guard<std::mutex> lk(m);
+      base::LockGuard<base::Mutex> lk(m);
       stop = true;
     }
-    canProduce.notify_all();
-    if (!worker.joinable())
-      return;
-    // decodeEntry holds a shared_ptr to this session, so when a decode outlives
-    // every consumer the last reference dies on the worker itself as that
-    // parameter is destroyed. Joining there is joining ourselves, which throws
-    // std::system_error(EDEADLK) out of a thread with no handler and aborts the
-    // emulator. The worker is returning anyway, so let it go.
-    if (worker.get_id() == std::this_thread::get_id())
-      worker.detach();
-    else
-      worker.join();
+    canProduce.NotifyAll();
+    if (worker)
+      worker->Join();
   }
 
   // Decoder side: blocks while the ring is full. False aborts the decode.
   bool push(const u8 *data, size_t count) {
-    std::unique_lock<std::mutex> lk(m);
+    base::UniqueLock<base::Mutex> lk(m);
     while (count) {
-      canProduce.wait(lk, [&] { return stop || produced - consumed < kRingSize; });
+      canProduce.Wait(lk, [&] { return stop || produced - consumed < kRingSize; });
       if (stop)
         return false;
       size_t space = kRingSize - size_t(produced - consumed);
       size_t wpos = size_t(produced % kRingSize);
-      size_t n = std::min({count, space, kRingSize - wpos});
+      size_t n = base::Min(count, base::Min(space, kRingSize - wpos));
       std::memcpy(ring.data() + wpos, data, n);
       produced += n;
       data += n;
       count -= n;
-      canConsume.notify_all();
+      canConsume.NotifyAll();
     }
     return true;
   }
 
   void finish(bool success) {
     {
-      std::lock_guard<std::mutex> lk(m);
+      base::LockGuard<base::Mutex> lk(m);
       done = true;
       ok = success;
     }
-    canConsume.notify_all();
+    canConsume.NotifyAll();
   }
 
   // Consumer side: discards [consumed, off), then copies [off, off+len).
   // Caller must hold readLock and have verified consumed <= off.
   i64 consume(u64 off, u8 *out, u64 len) {
-    std::unique_lock<std::mutex> lk(m);
+    base::UniqueLock<base::Mutex> lk(m);
     while (consumed < off + len) {
       u64 avail = produced - consumed;
       if (avail == 0) {
         if (done)
           return -1; // stream ended short of the range: corrupt
-        canConsume.wait(lk, [&] { return done || produced > consumed; });
+        canConsume.Wait(lk, [&] { return done || produced > consumed; });
         continue;
       }
       if (done && !ok)
         return -1; // full decode finished but the checksum failed
       if (consumed < off) {
-        const u64 skip = std::min(avail, off - consumed);
-        stats().discarded.fetch_add(skip, std::memory_order_relaxed);
+        const u64 skip = base::Min(avail, off - consumed);
+        stats().discarded.fetch_add(skip, base::memory_order_relaxed);
         consumed += skip;
-        canProduce.notify_all();
+        canProduce.NotifyAll();
         continue;
       }
       size_t rpos = size_t(consumed % kRingSize);
-      size_t n = size_t(std::min({avail, off + len - consumed, u64(kRingSize - rpos)}));
+      size_t n = size_t(base::Min(avail, base::Min(off + len - consumed,
+                                                    u64(kRingSize - rpos))));
       std::memcpy(out + (consumed - off), ring.data() + rpos, n);
       consumed += n;
-      canProduce.notify_all();
+      canProduce.NotifyAll();
     }
     return i64(len);
   }
@@ -181,7 +172,7 @@ extern "C" int rarSessionCallback(UINT msg, LPARAM userData, LPARAM p1, LPARAM p
   if (msg != UCM_PROCESSDATA)
     return 0;
   auto *s = reinterpret_cast<RarSession *>(userData);
-  stats().inflated.fetch_add(size_t(p2), std::memory_order_relaxed);
+  stats().inflated.fetch_add(size_t(p2), base::memory_order_relaxed);
   return s->push(reinterpret_cast<const u8 *>(p1), size_t(p2)) ? 1 : -1;
 }
 
@@ -236,13 +227,13 @@ struct RarDecoder {
       dataIO.SetSkipUnpCRC(false);
 
       if (hd.Method == 0) {
-        std::vector<byte> buf(0x40000);
+        base::Vector<byte> buf(0x40000);
         int64 left = hd.UnpSize;
         while (left > 0) {
           int r = dataIO.UnpRead(buf.data(), buf.size());
           if (r <= 0)
             break;
-          int w = int(std::min(int64(r), left));
+          int w = int(base::Min(int64(r), left));
           dataIO.UnpWrite(buf.data(), w);
           left -= w;
         }
@@ -268,9 +259,9 @@ struct RarDecoder {
 // worker outlives none of its state, so thread-local ownership needs no lock
 // and keeps each thread's window hot.
 RarDecoder &threadDecoder(const std::wstring &arcPath) {
-  static thread_local std::unique_ptr<RarDecoder> d;
+  static thread_local base::UniquePointer<RarDecoder> d;
   if (!d)
-    d = std::make_unique<RarDecoder>(arcPath);
+    d = base::MakeUnique<RarDecoder>(arcPath);
   return *d;
 }
 
@@ -279,7 +270,7 @@ RarDecoder &threadDecoder(const std::wstring &arcPath) {
 // LZ window) is reused across every entry that thread reads instead of being
 // built and thrown away per file.
 struct WholeSink {
-  std::vector<u8> *out;
+  base::Vector<u8> *out;
 };
 
 extern "C" int rarWholeCallback(UINT msg, LPARAM userData, LPARAM p1, LPARAM p2) {
@@ -288,7 +279,7 @@ extern "C" int rarWholeCallback(UINT msg, LPARAM userData, LPARAM p1, LPARAM p2)
   auto *w = reinterpret_cast<WholeSink *>(userData);
   const auto *src = reinterpret_cast<const u8 *>(p1);
   w->out->insert(w->out->end(), src, src + size_t(p2));
-  stats().inflated.fetch_add(size_t(p2), std::memory_order_relaxed);
+  stats().inflated.fetch_add(size_t(p2), base::memory_order_relaxed);
   return 1;
 }
 
@@ -296,31 +287,33 @@ extern "C" int rarWholeCallback(UINT msg, LPARAM userData, LPARAM p1, LPARAM p2)
 // session so a multi-GB read is not held in memory.
 constexpr u64 kWholeEntryMax = 16u << 20;
 
-void decodeEntry(std::shared_ptr<RarSession> s, std::wstring arcPath, u64 headerOff) {
-  s->finish(threadDecoder(arcPath).decode(
-      headerOff, rarSessionCallback, reinterpret_cast<LPARAM>(s.get())));
+void decodeEntry(RarSession *s, const std::wstring &arcPath, u64 headerOff) {
+  s->finish(threadDecoder(arcPath).decode(headerOff, rarSessionCallback,
+                                          reinterpret_cast<LPARAM>(s)));
 }
 
 class RarBackend final : public ArchiveBackend {
 public:
   RarBackend(const base::String &path, std::wstring pathW)
-      : pathW_(std::move(pathW)), rawFile_(path) {}
+      : pathW_(base::move(pathW)), rawFile_(path) {}
 
-  bool index(std::vector<ArchiveEntry> &out) override;
+  bool index(base::Vector<ArchiveEntry> &out) override;
   i64 extractRange(const ArchiveEntry &entry, void *buf, i64 off, i64 len) override;
   const char *name() const override { return "rar"; }
 
 private:
-  std::shared_ptr<RarSession> acquireSession(const ArchiveEntry &entry, u64 off);
+  base::SharedPointer<RarSession> acquireSession(const ArchiveEntry &entry, u64 off);
+
+  base::SharedPointer<RarSession> startSession(u64 headerOff);
 
   std::wstring pathW_;
   utl::File rawFile_;     // stored (method 0) entries are read directly
-  std::mutex rawMutex_;   // guards rawFile_'s seek+read
-  std::mutex cacheMutex_; // guards sessions_ (MRU front)
-  std::list<std::shared_ptr<RarSession>> sessions_;
+  base::Mutex rawMutex_;   // guards rawFile_'s seek+read
+  base::Mutex cacheMutex_; // guards sessions_ (MRU front)
+  base::Vector<base::SharedPointer<RarSession>> sessions_;  // MRU first
 };
 
-bool RarBackend::index(std::vector<ArchiveEntry> &out) {
+bool RarBackend::index(base::Vector<ArchiveEntry> &out) {
   CommandData cmd;
   cmd.FileArgs.AddString(L"*");
   Archive arc(&cmd);
@@ -333,19 +326,22 @@ bool RarBackend::index(std::vector<ArchiveEntry> &out) {
           !arc.FileHead.SplitBefore && !arc.FileHead.UnknownUnpSize) {
         FileHeader &hd = arc.FileHead;
         ArchiveEntry e;
-        std::string utf;
-        WideToUtf(hd.FileName, utf);
-        std::replace(utf.begin(), utf.end(), '\\', '/');
+        std::string narrow;
+        WideToUtf(hd.FileName, narrow);
+        base::String utf(narrow.c_str(), narrow.size());
+        for (char &c : utf)
+          if (c == '\\')
+            c = '/';
         while (!utf.empty() && utf.front() == '/')
-          utf.erase(utf.begin());
-        e.path = std::move(utf);
+          utf.erase(0, 1);
+        e.path = base::move(utf);
         e.size = u64(hd.UnpSize);
         e.packedSize = u64(hd.PackSize);
         e.dataOffset = u64(arc.NextBlockPos - hd.PackSize);
         e.extra = u64(arc.CurBlockPos);
         e.method = hd.Method;
         e.crc = hd.FileHash.Type == HASH_CRC32 ? hd.FileHash.CRC32 : 0;
-        out.push_back(std::move(e));
+        out.push_back(base::move(e));
       }
       arc.SeekToNext();
     }
@@ -358,21 +354,20 @@ bool RarBackend::index(std::vector<ArchiveEntry> &out) {
 // Reuse the most advanced cached session that has not passed `off` yet, else
 // start a fresh decode. The returned session may still be raced past `off` by
 // a concurrent reader; the caller rechecks under readLock.
-std::shared_ptr<RarSession> RarBackend::acquireSession(const ArchiveEntry &entry,
+base::SharedPointer<RarSession> RarBackend::acquireSession(const ArchiveEntry &entry,
                                                        u64 off) {
-  std::shared_ptr<RarSession> evicted, best;
-  bool evictedIdle = false;
+  base::SharedPointer<RarSession> evicted, best;
   {
-    std::lock_guard<std::mutex> lk(cacheMutex_);
+    base::LockGuard<base::Mutex> lk(cacheMutex_);
     u64 bestPos = 0;
-    std::list<std::shared_ptr<RarSession>>::iterator bestIt;
-    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+    base::SharedPointer<RarSession> *bestIt = nullptr;
+    for (auto *it = sessions_.begin(); it != sessions_.end(); ++it) {
       auto &s = **it;
       if (s.headerOff != entry.extra)
         continue;
       u64 pos;
       {
-        std::lock_guard<std::mutex> sl(s.m);
+        base::LockGuard<base::Mutex> sl(s.m);
         pos = s.consumed;
       }
       if (pos <= off && (!best || pos >= bestPos)) {
@@ -383,33 +378,34 @@ std::shared_ptr<RarSession> RarBackend::acquireSession(const ArchiveEntry &entry
     }
     if (best) {
       sessions_.erase(bestIt);
-      stats().reused.fetch_add(1, std::memory_order_relaxed);
+      stats().reused.fetch_add(1, base::memory_order_relaxed);
     } else {
-      stats().sessions.fetch_add(1, std::memory_order_relaxed);
-      best = std::make_shared<RarSession>();
-      best->headerOff = entry.extra;
-      best->ring.resize(kRingSize);
-      best->worker = std::thread(decodeEntry, best, pathW_, entry.extra);
+      stats().sessions.fetch_add(1, base::memory_order_relaxed);
+      best = startSession(entry.extra);
     }
-    sessions_.push_front(best);
+    sessions_.insert(sessions_.begin(), best);
     if (sessions_.size() > kMaxSessions) {
-      evicted = sessions_.back();
+      evicted = base::move(sessions_.back());
       sessions_.pop_back();
-      stats().evicted.fetch_add(1, std::memory_order_relaxed);
-      // Once it is out of the list nobody new can find it, so the only refs
-      // left are this local and the worker's own parameter. Anything more means
-      // a consumer is still draining it, and stopping the decode would fail
-      // that read.
-      evictedIdle = evicted.use_count() <= 2;
+      stats().evicted.fetch_add(1, base::memory_order_relaxed);
     }
   }
-  // An evicted session with no consumer left would otherwise sit in push()
-  // waiting on a ring nobody drains, holding its worker thread forever: with
-  // one worker per streamed asset the title runs out of threads and its loader
-  // never completes. Retire it here, outside the cache lock.
-  if (evicted && evictedIdle)
-    evicted->retire();
+  // An evicted session no consumer holds is destroyed here, outside the cache
+  // lock, which stops its decode; one still being drained stops when its
+  // reader lets go.
   return best;
+}
+
+base::SharedPointer<RarSession> RarBackend::startSession(u64 headerOff) {
+  auto s = base::MakeShared<RarSession>();
+  s->headerOff = headerOff;
+  s->ring.resize(kRingSize);
+  RarSession *raw = s.get();
+  s->worker = base::MakeUnique<base::Thread>(
+      "rar-decode",
+      [raw, path = pathW_, headerOff] { decodeEntry(raw, path, headerOff); },
+      /*start_now=*/true);
+  return s;
 }
 
 i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
@@ -418,12 +414,12 @@ i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
     return -1;
   if (u64(off) >= entry.size)
     return 0;
-  len = std::min(len, i64(entry.size - u64(off)));
+  len = base::Min(len, i64(entry.size - u64(off)));
   if (len == 0)
     return 0;
 
   if (entry.method == 0) {
-    std::lock_guard<std::mutex> lk(rawMutex_);
+    base::LockGuard<base::Mutex> lk(rawMutex_);
     if (!rawFile_.Exists())
       return -1;
     rawFile_.Seek(entry.dataOffset + u64(off), utl::seekMode::seek_set);
@@ -433,7 +429,7 @@ i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
   if (entry.size <= kWholeEntryMax) {
     // Reused per thread so a run of reads does not reallocate; cleared, not
     // freed, so the capacity survives.
-    static thread_local std::vector<u8> whole;
+    static thread_local base::Vector<u8> whole;
     whole.clear();
     whole.reserve(size_t(entry.size));
     WholeSink sink{&whole};
@@ -442,23 +438,23 @@ i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
         whole.size() < u64(off) + u64(len))
       return -1;
     std::memcpy(buf, whole.data() + off, size_t(len));
-    stats().delivered.fetch_add(u64(len), std::memory_order_relaxed);
-    stats().whole.fetch_add(1, std::memory_order_relaxed);
+    stats().delivered.fetch_add(u64(len), base::memory_order_relaxed);
+    stats().whole.fetch_add(1, base::memory_order_relaxed);
     reportStats();
     return len;
   }
 
   for (int attempt = 0; attempt < 4; attempt++) {
     auto s = acquireSession(entry, u64(off));
-    std::lock_guard<std::mutex> rl(s->readLock);
+    base::LockGuard<base::Mutex> rl(s->readLock);
     {
-      std::lock_guard<std::mutex> sl(s->m);
+      base::LockGuard<base::Mutex> sl(s->m);
       if (s->consumed > u64(off))
         continue; // a concurrent reader advanced past us; retry fresh
     }
     const i64 got = s->consume(u64(off), static_cast<u8 *>(buf), u64(len));
     if (got > 0) {
-      stats().delivered.fetch_add(u64(got), std::memory_order_relaxed);
+      stats().delivered.fetch_add(u64(got), base::memory_order_relaxed);
       reportStats();
     }
     return got;
@@ -466,32 +462,25 @@ i64 RarBackend::extractRange(const ArchiveEntry &entry, void *buf, i64 off,
 
   // Contended fallback: start a decode and take its read lock before other
   // threads can find it in the cache, so nobody can advance it past us.
-  auto s = std::make_shared<RarSession>();
-  s->headerOff = entry.extra;
-  s->ring.resize(kRingSize);
-  s->worker = std::thread(decodeEntry, s, pathW_, entry.extra);
-  std::lock_guard<std::mutex> rl(s->readLock);
+  auto s = startSession(entry.extra);
+  base::LockGuard<base::Mutex> rl(s->readLock);
   {
-    std::shared_ptr<RarSession> evicted;
-    bool evictedIdle = false;
+    base::SharedPointer<RarSession> evicted;
     {
-      std::lock_guard<std::mutex> lk(cacheMutex_);
-      sessions_.push_front(s);
+      base::LockGuard<base::Mutex> lk(cacheMutex_);
+      sessions_.insert(sessions_.begin(), s);
       if (sessions_.size() > kMaxSessions) {
-        evicted = sessions_.back();
+        evicted = base::move(sessions_.back());
         sessions_.pop_back();
-        evictedIdle = evicted.use_count() <= 2;
       }
     }
-    if (evicted && evictedIdle)
-      evicted->retire();
   }
   return s->consume(u64(off), static_cast<u8 *>(buf), u64(len));
 }
 
 } // namespace
 
-std::unique_ptr<ArchiveBackend> openRarBackend(const base::String &path) {
+base::UniquePointer<ArchiveBackend> openRarBackend(const base::String &path) {
   utl::File f(path);
   if (!f.Exists() || !f.IsOpen())
     return nullptr;
@@ -503,7 +492,7 @@ std::unique_ptr<ArchiveBackend> openRarBackend(const base::String &path) {
   std::wstring pathW;
   if (!UtfToWide(path.c_str(), pathW))
     return nullptr;
-  return std::make_unique<RarBackend>(path, std::move(pathW));
+  return base::MakeUnique<RarBackend>(path, base::move(pathW));
 }
 
 } // namespace vfs

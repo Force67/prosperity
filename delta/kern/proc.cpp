@@ -8,8 +8,6 @@
 
 #include <sys/mman.h>
 #include "base/arch.h"
-#include <thread>
-#include <chrono>
 #include <base.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -32,17 +30,12 @@
 #include "kern/probe/probe.h"
 #include "runtime/vprx/vprx.h"
 
-#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <set>
-#include <string>
-#include <unordered_set>
 #include <utl/options.h>
-#include <vector>
+#include <base/strings/string_ref.h>
 
 namespace {
 DELTA_OPTION(const char *, kPs5Modules, "DELTA_PS5_MODULES", nullptr);

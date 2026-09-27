@@ -15,16 +15,11 @@
 // (gfx_headless.cpp) and the GPU renderer dumps frames instead of presenting.
 #ifndef __ANDROID__
 
-#include <algorithm>
 #include "base/arch.h"
-#include <array>
-#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <utility>
-#include <vector>
 
 #if defined(__linux__)
 #define STBI_ONLY_PNG
@@ -39,7 +34,6 @@
 #include <vulkan/vulkan.h>
 
 #include "gfx.h"
-#include <string>
 
 #include <base/logging.h>
 
@@ -47,6 +41,12 @@
 #include "overlay_log.h"
 #include "overlay_vk.h"
 #include <utl/options.h>
+#include <base/atomic.h>
+#include <base/containers/array.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/strings/xstring.h>
 
 namespace {
 DELTA_OPTION(bool, kVkValidate, "DELTA_VK_VALIDATE", false);
@@ -69,8 +69,8 @@ namespace {
 // Window title set by the boot path (title id + platform). The renderer and the
 // videoout HLE race to bring the window up and each passes its own generic
 // title, so whoever wins uses this instead when it is set.
-std::string g_title;
-std::vector<u8> g_iconPng;
+base::String g_title;
+base::Vector<u8> g_iconPng;
 
 constexpr u32 kFrameSlotCount = 2;
 
@@ -99,16 +99,16 @@ struct State {
   VkSwapchainKHR swapchain = VK_NULL_HANDLE;
   VkFormat swapFormat = VK_FORMAT_B8G8R8A8_UNORM;
   VkExtent2D swapExtent{};
-  std::vector<VkImage> swapImages;
+  base::Vector<VkImage> swapImages;
 
   VkCommandPool cmdPool = VK_NULL_HANDLE;
-  std::array<FrameSlot, kFrameSlotCount> slots;
-  std::vector<VkSemaphore> renderSems;
+  base::Array<FrameSlot, kFrameSlotCount> slots;
+  base::Vector<VkSemaphore> renderSems;
   // Semaphores of a replaced swapchain. vkDeviceWaitIdle does not cover the
   // presentation engine's pending semaphore waits (that needs
   // VK_EXT_swapchain_maintenance1), so a retired swapchain's semaphores rest
   // here for one whole swapchain generation before being destroyed.
-  std::vector<VkSemaphore> retiredRenderSems;
+  base::Vector<VkSemaphore> retiredRenderSems;
   u32 nextSlot = 0;
 
   // Framebuffer dimensions shared by the per-slot upload resources.
@@ -123,7 +123,7 @@ struct State {
 };
 
 State g;
-std::atomic_bool g_canPresent{true};
+base::Atomic<bool> g_canPresent{true};
 constexpr u64 kPresentWaitSliceNs = 50'000'000;
 constexpr size_t kMaxIconSize = 16u << 20;
 constexpr int kMaxIconDimension = 4096;
@@ -131,7 +131,7 @@ constexpr int kMaxIconDimension = 4096;
 #if defined(__linux__)
 void drawBadge(u8 *pixels, int width, int height, const u8 *logo,
                int logoWidth, int logoHeight) {
-  const int size = std::max(1, std::min(width, height) * 3 / 4);
+  const int size = base::Max(1, base::Min(width, height) * 3 / 4);
   const int left = width - size;
   // The logo art carries ~11% transparent margin, so a top-anchored badge reads
   // as floating below the edge. Lift it by that margin; the rows that fall off
@@ -166,7 +166,7 @@ void drawBadge(u8 *pixels, int width, int height, const u8 *logo,
 // Blue frame around the artwork, so the icon reads as ours at taskbar size.
 void drawBorder(u8 *pixels, int width, int height) {
   constexpr u8 kFrame[4] = {0x18, 0x60, 0xCC, 0xFF};
-  const int thickness = std::max(2, std::min(width, height) / 24);
+  const int thickness = base::Max(2, base::Min(width, height) / 24);
   for (int y = 0; y < height; ++y) {
     const bool edgeRow = y < thickness || y >= height - thickness;
     for (int x = 0; x < width; ++x) {
@@ -219,11 +219,11 @@ void applyWindowIcon() {
 
 void stopPresenting(const char *operation, VkResult result) {
   BASE_LOGI("gfx", "{} failed: VkResult={}", operation, (int)result);
-  g_canPresent.store(false, std::memory_order_release);
+  g_canPresent.store(false, base::memory_order_release);
 }
 
 bool waitForPresentFence(VkFence fence, const char *operation) {
-  while (g_canPresent.load(std::memory_order_acquire)) {
+  while (g_canPresent.load(base::memory_order_acquire)) {
     const VkResult result =
         vkWaitForFences(g.device, 1, &fence, VK_TRUE, kPresentWaitSliceNs);
     if (result == VK_SUCCESS)
@@ -277,12 +277,12 @@ void destroyRenderSemaphores() {
 void retireRenderSemaphores() {
   for (VkSemaphore sem : g.retiredRenderSems)
     vkDestroySemaphore(g.device, sem, nullptr);
-  g.retiredRenderSems = std::move(g.renderSems);
+  g.retiredRenderSems = base::move(g.renderSems);
   g.renderSems.clear();
 }
 
 bool createRenderSemaphores(u32 count,
-                            std::vector<VkSemaphore> &semaphores) {
+                            base::Vector<VkSemaphore> &semaphores) {
   VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
   semaphores.resize(count);
   for (VkSemaphore &sem : semaphores) {
@@ -305,7 +305,7 @@ bool createSwapchain() {
   // Choose a format (prefer BGRA8 unorm).
   u32 nfmt = 0;
   vkGetPhysicalDeviceSurfaceFormatsKHR(g.phys, g.surface, &nfmt, nullptr);
-  std::vector<VkSurfaceFormatKHR> fmts(nfmt);
+  base::Vector<VkSurfaceFormatKHR> fmts(nfmt);
   vkGetPhysicalDeviceSurfaceFormatsKHR(g.phys, g.surface, &nfmt, fmts.data());
   VkSurfaceFormatKHR chosen = fmts[0];
   for (auto &f : fmts)
@@ -348,7 +348,7 @@ bool createSwapchain() {
   {
     u32 npm = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g.phys, g.surface, &npm, nullptr);
-    std::vector<VkPresentModeKHR> pms(npm);
+    base::Vector<VkPresentModeKHR> pms(npm);
     vkGetPhysicalDeviceSurfacePresentModesKHR(g.phys, g.surface, &npm,
                                               pms.data());
     auto has = [&](VkPresentModeKHR m) {
@@ -401,9 +401,9 @@ bool createSwapchain() {
 
   u32 n = 0;
   vkGetSwapchainImagesKHR(g.device, newSwap, &n, nullptr);
-  std::vector<VkImage> newImages(n);
+  base::Vector<VkImage> newImages(n);
   vkGetSwapchainImagesKHR(g.device, newSwap, &n, newImages.data());
-  std::vector<VkSemaphore> newRenderSems;
+  base::Vector<VkSemaphore> newRenderSems;
   if (!createRenderSemaphores(n, newRenderSems)) {
     discardRetiredSwapchain();
     vkDestroySwapchainKHR(g.device, newSwap, nullptr);
@@ -543,17 +543,17 @@ bool init(const char *title, u32 width, u32 height) {
   // Instance: SDL-required extensions + optional validation.
   u32 nExt = 0;
   const char *const *sdlExt = SDL_Vulkan_GetInstanceExtensions(&nExt);
-  std::vector<const char *> exts(sdlExt, sdlExt + nExt);
+  base::Vector<const char *> exts(sdlExt, sdlExt + nExt);
 
   VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
   app.pApplicationName = title;
   app.apiVersion = VK_API_VERSION_1_1;
 
-  std::vector<const char *> layers;
+  base::Vector<const char *> layers;
   if (kVkValidate) {
     u32 nl = 0;
     vkEnumerateInstanceLayerProperties(&nl, nullptr);
-    std::vector<VkLayerProperties> lp(nl);
+    base::Vector<VkLayerProperties> lp(nl);
     vkEnumerateInstanceLayerProperties(&nl, lp.data());
     for (auto &l : lp)
       if (std::strcmp(l.layerName, "VK_LAYER_KHRONOS_validation") == 0)
@@ -580,7 +580,7 @@ bool init(const char *title, u32 width, u32 height) {
     BASE_LOGI("gfx", "no Vulkan physical devices");
     return false;
   }
-  std::vector<VkPhysicalDevice> phs(nphys);
+  base::Vector<VkPhysicalDevice> phs(nphys);
   vkEnumeratePhysicalDevices(g.instance, &nphys, phs.data());
   // Prefer a real GPU over the llvmpipe software rasteriser (type CPU) among
   // the devices that can both render and present; discrete > integrated >
@@ -591,7 +591,7 @@ bool init(const char *title, u32 width, u32 height) {
   for (auto pd : phs) {
     u32 nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, nullptr);
-    std::vector<VkQueueFamilyProperties> qf(nq);
+    base::Vector<VkQueueFamilyProperties> qf(nq);
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qf.data());
     u32 fam = UINT32_MAX;
     for (u32 i = 0; i < nq; i++) {
@@ -648,11 +648,11 @@ bool init(const char *title, u32 width, u32 height) {
   qci.queueFamilyIndex = g.queueFamily;
   qci.queueCount = 1;
   qci.pQueuePriorities = &prio;
-  std::vector<const char *> devExts = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+  base::Vector<const char *> devExts = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
   { // VK_EXT_memory_budget (optional): powers the overlay VRAM gauge.
     u32 ne = 0;
     vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &ne, nullptr);
-    std::vector<VkExtensionProperties> ext(ne);
+    base::Vector<VkExtensionProperties> ext(ne);
     vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &ne, ext.data());
     for (auto &e : ext)
       if (!std::strcmp(e.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
@@ -677,7 +677,7 @@ bool init(const char *title, u32 width, u32 height) {
   cbi.commandPool = g.cmdPool;
   cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   cbi.commandBufferCount = kFrameSlotCount;
-  std::array<VkCommandBuffer, kFrameSlotCount> commands;
+  base::Array<VkCommandBuffer, kFrameSlotCount> commands;
   VK_CHECK(vkAllocateCommandBuffers(g.device, &cbi, commands.data()));
 
   VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -726,7 +726,7 @@ void queryVram(u64 &used, u64 &total) {
 
 void present(const void *pixels, u32 w, u32 h, u32 srcPitch,
              PixelFormat fmt) {
-  if (!g_canPresent.load(std::memory_order_acquire) || !g.device || !pixels ||
+  if (!g_canPresent.load(base::memory_order_acquire) || !g.device || !pixels ||
       !w || !h)
     return;
   if (g.needRecreate && !createSwapchain())
@@ -760,8 +760,8 @@ void present(const void *pixels, u32 w, u32 h, u32 srcPitch,
   do {
     ar = vkAcquireNextImageKHR(g.device, g.swapchain, kPresentWaitSliceNs,
                                slot.acquireSem, slot.acquireFence, &idx);
-  } while (ar == VK_TIMEOUT && g_canPresent.load(std::memory_order_acquire));
-  if (!g_canPresent.load(std::memory_order_acquire))
+  } while (ar == VK_TIMEOUT && g_canPresent.load(base::memory_order_acquire));
+  if (!g_canPresent.load(base::memory_order_acquire))
     return;
   if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
     g.needRecreate = true;
@@ -894,10 +894,10 @@ bool available() {
   return g.window != nullptr && g.swapchain != VK_NULL_HANDLE;
 }
 
-bool canPresent() { return g_canPresent.load(std::memory_order_acquire); }
+bool canPresent() { return g_canPresent.load(base::memory_order_acquire); }
 
 void requestPresentStop() {
-  g_canPresent.store(false, std::memory_order_release);
+  g_canPresent.store(false, base::memory_order_release);
 }
 
 // Idempotent bring-up: create the window/swapchain on the first call, then just
@@ -906,12 +906,12 @@ void requestPresentStop() {
 bool ensure(const char *title, u32 width, u32 height) {
   if (available())
     return true;
-  if (!g_canPresent.load(std::memory_order_acquire))
+  if (!g_canPresent.load(base::memory_order_acquire))
     return false;
   if (g.device)
     return createSwapchain();
   if (!init(title, width, height)) {
-    g_canPresent.store(false, std::memory_order_release);
+    g_canPresent.store(false, base::memory_order_release);
     return false;
   }
   return true;
@@ -921,7 +921,7 @@ bool pumpEvents() {
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
     if (e.type == SDL_EVENT_QUIT) {
-      g_canPresent.store(false, std::memory_order_release);
+      g_canPresent.store(false, base::memory_order_release);
       return false;
     }
     if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
@@ -1061,7 +1061,7 @@ void shutdown() {
     SDL_DestroyWindow(g.window);
   SDL_Quit();
   g = State{};
-  g_canPresent.store(true, std::memory_order_release);
+  g_canPresent.store(true, base::memory_order_release);
 }
 
 } // namespace gfx

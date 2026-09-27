@@ -2,13 +2,14 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-#include <algorithm>
 #include <cmath>
 #include <cstring>
 
 #include <base/logging.h>
 
 #include "gpu/opengl/gl_rhi_internal.h"
+#include <base/algorithm.h>
+#include <base/math/value_bounds.h>
 
 namespace gpu::opengl {
 
@@ -32,13 +33,13 @@ void Enable(GLenum cap, bool on) {
 }
 
 float EncodeSrgb(float v) {
-  v = std::clamp(v, 0.0f, 1.0f);
+  v = base::Clamp(v, 0.0f, 1.0f);
   return v <= 0.0031308f ? v * 12.92f
                          : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
 }
 
 u32 MipExtent(u32 extent, u32 mip) {
-  return std::max(extent >> mip, 1u);
+  return base::Max(extent >> mip, 1u);
 }
 
 // The attachment point for the planes of a depth/stencil format in `aspect`.
@@ -138,7 +139,7 @@ GLuint Replayer::Framebuffer(const FboKey& key) {
     else
       glNamedFramebufferTextureLayer(fbo, point, v->name, v->level, v->layer);
     auto& keys = v->fbos;
-    if (std::find(keys.begin(), keys.end(), key) == keys.end())
+    if (base::Find(keys.begin(), keys.end(), key) == keys.end())
       keys.push_back(key);
   };
   GLenum draw[8];
@@ -509,7 +510,7 @@ void Replayer::BufferToTexture(const CmdBufferTexture& c, bool upload) {
     }
     const auto offset = reinterpret_cast<void*>(r.buffer_offset);
     const GLsizei room = static_cast<GLsizei>(
-        std::min<u64>(c.buffer->desc().size - r.buffer_offset, INT32_MAX));
+        base::Min<u64>(c.buffer->desc().size - r.buffer_offset, INT32_MAX));
     const GLint mip = static_cast<GLint>(g.mip);
     if (!upload) {
       if (fi.compressed)
@@ -598,8 +599,8 @@ void Replayer::Blit(const CmdBlit& c) {
                                                     : DepthAttachment(planes);
   const bool is_3d = c.src->target == GL_TEXTURE_3D;
   const u32 slices =
-      is_3d ? std::min(c.src_region.depth, c.dst_region.depth)
-            : std::min(c.src_region.layers, c.dst_region.layers);
+      is_3d ? base::Min(c.src_region.depth, c.dst_region.depth)
+            : base::Min(c.src_region.layers, c.dst_region.layers);
   SetScissorTest(false);
   ResetMasks();
   const rhi::TextureRegion& s = c.src_region;

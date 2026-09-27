@@ -6,10 +6,10 @@
 // The OpenGL 4.6 core implementation of rhi::Device, on a headless EGL
 // context.
 
-#include <memory>
 
 #include "base/arch.h"
 #include "gpu/rhi/device.h"
+#include <base/memory/unique_pointer.h>
 
 namespace gpu::opengl {
 
@@ -24,6 +24,6 @@ struct OpenGLOptions {
 };
 
 // Null when no GL 4.6 core device is available.
-std::unique_ptr<rhi::Device> CreateOpenGLDevice(const OpenGLOptions& options);
+base::UniquePointer<rhi::Device> CreateOpenGLDevice(const OpenGLOptions& options);
 
 }  // namespace gpu::opengl

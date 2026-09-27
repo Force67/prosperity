@@ -17,16 +17,21 @@
 #include "gpu/render/trace.h"
 
 #include <cmath>
-#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <utility>
 
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 // DELTA_GPU_CLEARTRACE=<n>: print up to n clear-opening lines. A small cap only
@@ -102,7 +107,7 @@ rhi::TextureView* SampledImageView(rhi::Texture* texture,
                                    rhi::Format format,
                                    u8 aspect,
                                    u32 swizzle,
-                                   std::unordered_map<u32, rhi::TextureView*>& views,
+                                   base::HashMap<u32, rhi::TextureView*>& views,
                                    rhi::ViewDim dim = rhi::ViewDim::k2D) {
   rhi::TextureViewDesc desc;
   TextureSwizzle(swizzle, desc.swizzle);
@@ -315,7 +320,7 @@ bool CreateRtImage(RTarget& t,
 // address reads mostly stale pixels. Every lookup in the backend names a target
 // by address alone, so g_rts keeps holding the live target and the other
 // geometries wait here until a draw asks for them again.
-std::unordered_map<u64, std::vector<RTarget>> g_rt_variants;
+base::HashMap<u64, base::Vector<RTarget>> g_rt_variants;
 // Budgeted by MEMORY, not by count. A flat cap of three is generous for an
 // address aliased at 1920x1080 and hopeless for one aliased at 48x48, and
 // Gameface renders every glyph into the same scratch address at the glyph's own
@@ -326,10 +331,10 @@ std::unordered_map<u64, std::vector<RTarget>> g_rt_variants;
 constexpr u64 kMaxRtVariantBytes = 32ull << 20;
 constexpr size_t kMaxRtVariants = 256;
 
-std::vector<RTarget> g_retired_rts;
+base::Vector<RTarget> g_retired_rts;
 
 void RetireRt(RTarget& t) {
-  g_retired_rts.push_back(std::move(t));
+  g_retired_rts.push_back(base::move(t));
   // Cached multi-texture groups may name its views.
   ClearMultiTexCache();
 }
@@ -416,7 +421,7 @@ RTarget* ActivateRtVariant(RTarget& live,
     alt = &parked.back();
     RegisterRtPages(base, w, h, fmt);
   }
-  std::swap(live, *alt);
+  base::Swap(live, *alt);
   if (trace::Recording())
     trace::RecordVariantSwap(base, reinterpret_cast<u64>(alt->texture), alt->w,
                              alt->h, reinterpret_cast<u64>(live.texture),
@@ -456,7 +461,7 @@ bool ActivateVolumeRt(u64 base, u32 w, u32 h, u32 depth) {
     const auto parked = g_rt_variants.find(base);
     if (parked == g_rt_variants.end())
       return false;
-    const auto alt = std::find_if(parked->second.begin(), parked->second.end(),
+    const auto alt = base::FindIf(parked->second.begin(), parked->second.end(),
                                   matches);
     if (alt == parked->second.end() ||
         !ActivateRtVariant(live, base, w, h, alt->fmt, depth))
@@ -566,7 +571,7 @@ u64 RtByteSize(const RTarget& rt) {
 // of that image: P.T.'s 1920x1080 depth buffer had a 960x540 clear in its
 // top-left quadrant and nothing anywhere else, so every pass that sampled the
 // depth (SSAO first, then the whole post chain) read zero.
-std::unordered_map<u64, std::vector<DepthTarget>> g_depth_variants;
+base::HashMap<u64, base::Vector<DepthTarget>> g_depth_variants;
 constexpr size_t kMaxDepthVariants = 3;
 
 bool CreateDepthImage(DepthTarget& t,
@@ -655,7 +660,7 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
     DepthTarget t;
     // A variant that replaces the live one at the same geometry only because
     // it needs more layers keeps the larger count.
-    const u32 want = live.w == w && live.h == h ? std::max(layers, live.layers)
+    const u32 want = live.w == w && live.h == h ? base::Max(layers, live.layers)
                                                 : layers;
     if (!CreateDepthImage(t, base, w, h, stencil_base, want))
       return covers(&live);
@@ -665,7 +670,7 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
     parked.push_back(t);
     alt = &parked.back();
   }
-  std::swap(live, *alt);
+  base::Swap(live, *alt);
   if (live.last_frame != g_frame.num) {
     live.used_this_frame = false;
     live.stencil_used_this_frame = false;
@@ -697,7 +702,7 @@ bool ActivateSampledDepthVariant(u64 base, u32 w, u32 h) {
 }
 
 u64 g_render_serial = 0;
-std::vector<DepthTarget> g_retired_depths;
+base::Vector<DepthTarget> g_retired_depths;
 
 void RetireDepthTarget(const DepthTarget& t) {
   g_retired_depths.push_back(t);
@@ -707,12 +712,12 @@ void RetireDepthTarget(const DepthTarget& t) {
 
 void ReleaseRetiredTargets() {
   // Two BeginFrames of rest, like ReleaseRetiredTextures.
-  static std::vector<RTarget> aged_rts;
+  static base::Vector<RTarget> aged_rts;
   for (RTarget& t : aged_rts)
     DestroyRt(t);
-  aged_rts = std::move(g_retired_rts);
+  aged_rts = base::move(g_retired_rts);
   g_retired_rts.clear();
-  static std::vector<DepthTarget> aged;
+  static base::Vector<DepthTarget> aged;
   for (DepthTarget& t : aged) {
     Device().Destroy(t.set);
     for (rhi::TextureView* v : {t.view, t.stencil_view, t.attachment_view})
@@ -723,7 +728,7 @@ void ReleaseRetiredTargets() {
       Device().Destroy(v);
     Device().Destroy(t.texture);
   }
-  aged = std::move(g_retired_depths);
+  aged = base::move(g_retired_depths);
   g_retired_depths.clear();
 }
 
@@ -883,7 +888,7 @@ u64 ResolveSampledRT(u64 addr, u32 w, u32 h) {
         consider(b0);
   }
   if (kResolveTrace && ties) {
-    static std::atomic<u64> n{0};
+    static base::Atomic<u64> n{0};
     if (n.fetch_add(1) < 40)
       BASE_LOGI("resolve",
                 "AMBIGUOUS {:#x} {}x{}: {} candidates, {} tied at score {}; "
@@ -941,7 +946,7 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
     const auto parked = g_depth_variants.find(base);
     if (parked != g_depth_variants.end())
       for (const DepthTarget& v : parked->second) {
-        span = std::max(span, v.guest_w && v.guest_h
+        span = base::Max(span, v.guest_w && v.guest_h
                                   ? (u64)v.guest_w * v.guest_h * 4
                                   : RtByteSizeWH(v.w, v.h, kDepthFormat));
         if (w && h && v.w == w && v.h == h)
@@ -1096,7 +1101,7 @@ bool OverlapsLiveTarget(u64 base, u64 bytes) {
   const u64 end = base + bytes;
   const auto hits = [&](u64 at, u64 n) { return at < end && base < at + n; };
   const auto depth_bytes = [](const DepthTarget& d) {
-    return u64(d.w) * d.h * 4 * std::max(1u, d.layers);
+    return u64(d.w) * d.h * 4 * base::Max(1u, d.layers);
   };
   for (const auto& [at, rt] : g_rts)
     if (hits(at, RtByteSize(rt)))
@@ -1169,7 +1174,7 @@ bool DccClearColor(u32 code,
 // it expanded lets the guest's next clear show up as a write back to 0 however
 // it lands, which is not always a packet we see.
 void NoteCmaskBind(RTarget& rt) {
-  const u64 bytes = std::max<u64>(4, (u64(rt.w) * rt.h) / 128);
+  const u64 bytes = base::Max<u64>(4, (u64(rt.w) * rt.h) / 128);
   if (!gpu::IsReadableRangeCached(rt.dcc_base, bytes))
     return;
   render::FlushCsWritesRange(render::DefaultRenderer(), rt.dcc_base, 4, "cmask");
@@ -1354,7 +1359,7 @@ bool BeginRegion(const u64* mrt_base,
   rhi::RenderPassDesc pass;
   rhi::ColorAttachment* colors = pass.colors;
   RTarget* targets[8]{};
-  mrt_count = std::min(mrt_count, 8u);
+  mrt_count = base::Min(mrt_count, 8u);
   for (u32 i = 0; i < 8; i++) {
     g_region.cur_fmt[i] = 0;
     g_region.cur_w[i] = 0;

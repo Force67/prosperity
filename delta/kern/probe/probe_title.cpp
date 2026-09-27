@@ -7,9 +7,9 @@
 #include "kern/probe/probe_internal.h"
 
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include "base/arch.h"
-#include <thread>
-#include <chrono>
 #include <base.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -29,16 +29,20 @@
 #include "kern/vfs.h"
 #include "runtime/vprx/vprx.h"
 
-#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <set>
-#include <string>
-#include <unordered_set>
-#include <vector>
+#include <base/threading/thread.h>
+#include <base/atomic.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/strings/string_ref.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/recursive_mutex.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kVoForceConnect, "DELTA_VO_FORCE_CONNECT", false);
@@ -77,7 +81,7 @@ const u32 *currentGuestTidPtr();  // sys_thread.cpp: this thread's guest tid
 namespace krnl::probe {
 
 namespace {
-std::atomic<u64> g_jobClaims{0}, g_jobFails{0};
+base::Atomic<u64> g_jobClaims{0}, g_jobFails{0};
 
 // Host-side JobSystem watcher. Spawned once with the guest jobsys base
 // (identity-mapped, safe to read from a host thread). Everything expensive
@@ -99,7 +103,7 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
       u64 tcb = fsb ? *reinterpret_cast<u64 *>(fsb) : 0;
       u64 v = tcb ? *reinterpret_cast<u64 *>(tcb - 0x10) : 0;
       i64 ord = (v & 0x8000) ? (i64)(v & ~0x8000ULL) : -1;
-      static std::mutex m; std::lock_guard lk(m);
+      static base::Mutex m; base::LockGuard lk(m);
       BASE_LOGI("jobclaim",
                 "worker fsbase={:#x} tcb={:#x} [tcb-0x10]={:#x} -> ordinal={} "
                 "(1<<ord={:#x}) firstClaim->{:#x}",
@@ -119,10 +123,10 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
     // never written by the CPU: +0x117930 ("Material Param Update") memcpys a
     // template and dispatches (n+63)/64 threadgroups over the block (a3=rcx) with
     // element count a2=rdx. One line per DISTINCT block.
-    static std::mutex m;
-    static std::unordered_set<u64> seen;
+    static base::Mutex m;
+    static base::HashSet<u64> seen;
     static u64 calls = 0;
-    std::lock_guard lk(m);
+    base::LockGuard lk(m);
     calls++;
     if (seen.insert(a3).second && seen.size() <= 256)
       BASE_LOGI("mattrace",
@@ -143,10 +147,10 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
       break;
     const auto *cb = reinterpret_cast<const u64 *>(a0);
     const u64 wp = cb[2], end = cb[1];
-    static std::mutex m;
-    static std::unordered_set<u64> seen;
+    static base::Mutex m;
+    static base::HashSet<u64> seen;
     static u64 n = 0;
-    std::lock_guard lk(m);
+    base::LockGuard lk(m);
     n++;
     if (seen.insert(wp >> 20).second && seen.size() <= 64)
       BASE_LOGI("matcb",
@@ -181,15 +185,15 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
 // moving the marker qword into block 2 hands worker 2 a zeroed job (the claim
 // path copies a 0x40-byte descriptor at +0xea8); superseded by the survey.
 void spawnJobWatcher(u64 base) {
-  static std::atomic<u64> once{0};
+  static base::Atomic<u64> once{0};
   u64 expect = 0;
   if (!once.compare_exchange_strong(expect, base))
     return;
-  std::thread([base] {
+  base::SpawnDetachedThread("probe_title", [base] {
         u64 prev[8] = {0};
         int persist = 0;
         for (;;) {
-          std::this_thread::sleep_for(std::chrono::seconds(30));
+          base::SleepForMilliseconds((30) * 1000);
           u64 slot[8];
           for (int i = 0; i < 8; i++)
             slot[i] = *reinterpret_cast<volatile u64 *>(base + (u64)i * 0x120 + 0xeb0);
@@ -315,11 +319,11 @@ void spawnJobWatcher(u64 base) {
           // bit 15 = valid; fn 0x33350). An affinity naming only an unreported core
           // (e.g. SotC's core-6 pin, mask 0x40) is unclaimable by anyone.
           {
-            std::vector<u64> fsb;
+            base::Vector<u64> fsb;
             cpu::guestThreadFsBases(fsb);
             u32 present = 0;
             int valid = 0;
-            std::string list;
+            base::String list;
             for (u64 f : fsb) {
               if (!f)
                 continue;
@@ -458,7 +462,7 @@ void spawnJobWatcher(u64 base) {
             persist = 0;
           }
         }
-  }).detach();
+  });
 }
 
 // DELTA_SOTC_ALLOCLOCK: hold ONE host mutex across every call into the title's
@@ -471,10 +475,10 @@ void spawnJobWatcher(u64 base) {
 // once is normal for a shared heap; several inside the FREE-TREE INSERT at once
 // is the violation, so the insert's count is the answer.
 struct AllocLockSite {
-  std::recursive_mutex m;
-  std::atomic<u64> calls{0};
-  std::atomic<u64> contended{0};
-  std::atomic<u64> maxWaitNs{0};
+  base::RecursiveMutex m;
+  base::Atomic<u64> calls{0};
+  base::Atomic<u64> contended{0};
+  base::Atomic<u64> maxWaitNs{0};
   const char *name = "";
   bool serialise = false;  // only the tree mutators need the shared lock
 };
@@ -485,7 +489,7 @@ AllocLockSite g_allocSites[kAllocLockSites];
 // try_lock at the insert names a second thread inside it). =1 shares one mutex,
 // which MITIGATES it; per-site locks cannot, since threads in 0x12820 and
 // 0x12af0 hold different locks yet meet over the same tree.
-std::recursive_mutex g_allocSharedM;
+base::RecursiveMutex g_allocSharedM;
 
 // ONE LOCK PER ALLOCATOR STATE, not overall: 22 of 24 measured collisions were
 // between DIFFERENT allocator instances (three heaps, disjoint trees), so
@@ -496,30 +500,30 @@ std::recursive_mutex g_allocSharedM;
 // Payoff: a failed try_lock is now two threads in the SAME tree's mutators.
 constexpr int kAllocStates = 16;
 struct StateLock {
-  std::atomic<u64> state{0};
-  std::recursive_mutex m;
+  base::Atomic<u64> state{0};
+  base::RecursiveMutex m;
 };
 StateLock g_stateLocks[kAllocStates];
-std::atomic<u64> g_stateLockOverflow{0};
+base::Atomic<u64> g_stateLockOverflow{0};
 
-static std::recursive_mutex &allocMutexFor(int i, u64 a0) {
+static base::RecursiveMutex &allocMutexFor(int i, u64 a0) {
   if (kSotcAllocLock == 2)
     return g_allocSites[i].m;
   if (!a0)
     return g_allocSharedM;
   for (int k = 0; k < kAllocStates; k++) {
-    u64 cur = g_stateLocks[k].state.load(std::memory_order_acquire);
+    u64 cur = g_stateLocks[k].state.load(base::memory_order_acquire);
     if (cur == a0)
       return g_stateLocks[k].m;
     if (cur == 0) {
       u64 expect = 0;
       if (g_stateLocks[k].state.compare_exchange_strong(expect, a0))
         return g_stateLocks[k].m;
-      if (g_stateLocks[k].state.load(std::memory_order_acquire) == a0)
+      if (g_stateLocks[k].state.load(base::memory_order_acquire) == a0)
         return g_stateLocks[k].m;
     }
   }
-  g_stateLockOverflow.fetch_add(1, std::memory_order_relaxed);
+  g_stateLockOverflow.fetch_add(1, base::memory_order_relaxed);
   return g_allocSharedM;  // more states than slots: fall back to one lock
 }
 
@@ -533,22 +537,22 @@ static std::recursive_mutex &allocMutexFor(int i, u64 a0) {
 // 256 MiB per state: disjoint buckets kill the idea, a shared bucket is the lead.
 struct RouteBucket { u64 prefix; u64 count; };
 struct RouteTab {
-  std::atomic<u64> state{0};
+  base::Atomic<u64> state{0};
   u64 inserts = 0;
   u64 lo = ~0ull, hi = 0;
   RouteBucket b[12] {};
 };
 constexpr int kRouteTabs = 8;
 RouteTab g_routeTabs[kRouteTabs];
-std::mutex g_routeM;
+base::Mutex g_routeM;
 
 static void heapRouteNote(u64 state, u64 chunk) {
   if (!state || !chunk || chunk < 0x8000000000ull || chunk >= 0x8700000000ull)
     return;
-  std::lock_guard<std::mutex> lk(g_routeM);
+  base::LockGuard<base::Mutex> lk(g_routeM);
   RouteTab *t = nullptr;
   for (int i = 0; i < kRouteTabs; i++) {
-    const u64 cur = g_routeTabs[i].state.load(std::memory_order_relaxed);
+    const u64 cur = g_routeTabs[i].state.load(base::memory_order_relaxed);
     if (cur == state) { t = &g_routeTabs[i]; break; }
     if (cur == 0) { g_routeTabs[i].state.store(state); t = &g_routeTabs[i]; break; }
   }
@@ -565,9 +569,9 @@ static void heapRouteNote(u64 state, u64 chunk) {
 }
 
 static void heapRouteReport() {
-  std::lock_guard<std::mutex> lk(g_routeM);
+  base::LockGuard<base::Mutex> lk(g_routeM);
   for (auto &t : g_routeTabs) {
-    const u64 st = t.state.load(std::memory_order_relaxed);
+    const u64 st = t.state.load(base::memory_order_relaxed);
     if (!st) continue;
     base::String bytes;
     base::FormatTo(bytes, "state {:#x}: {} inserts, chunks {:#x}..{:#x}, 256MB buckets:",
@@ -582,12 +586,12 @@ static void heapRouteReport() {
 }
 
 struct LockHolder {
-  std::atomic<u32> gtid{0};
-  std::atomic<u32> site{0};
-  std::atomic<u64> a0{0};
+  base::Atomic<u32> gtid{0};
+  base::Atomic<u32> site{0};
+  base::Atomic<u64> a0{0};
 };
 LockHolder g_lockHolder;
-std::atomic<int> g_contendReported{0};
+base::Atomic<int> g_contendReported{0};
 
 // The guest pthread mutex the allocator's shared heap locks with (the one the
 // crashing thread spins on): FreeBSD umutex, owner tid in the low bits of word
@@ -635,8 +639,8 @@ struct AllocEvt { u32 site; u32 tid; u64 a0, a1; };
 // none of the mutators in the window that actually did the damage.
 constexpr int kAllocRing = 8192;
 AllocEvt g_allocRing[kAllocRing];
-std::atomic<u64> g_allocRingPos{0};
-std::atomic<u64> g_allocCallSeq{0};
+base::Atomic<u64> g_allocRingPos{0};
+base::Atomic<u64> g_allocCallSeq{0};
 
 // Which allocator state this thread locked, per nesting level: the leave hook has
 // no argument to re-derive it from.
@@ -648,10 +652,10 @@ static void treeWalkPeriodic();
 
 static void allocLockEnterAt(int i, u64 a0, u64 a1) {
   AllocLockSite &s = g_allocSites[i];
-  s.calls.fetch_add(1, std::memory_order_relaxed);
-  g_allocCallSeq.fetch_add(1, std::memory_order_relaxed);
+  s.calls.fetch_add(1, base::memory_order_relaxed);
+  g_allocCallSeq.fetch_add(1, base::memory_order_relaxed);
   if (kSotcTreeWalk) {
-    const u64 k = g_allocRingPos.fetch_add(1, std::memory_order_relaxed);
+    const u64 k = g_allocRingPos.fetch_add(1, base::memory_order_relaxed);
     AllocEvt &e = g_allocRing[k % kAllocRing];
     e.site = (u32)i;
     e.tid = (u32)syscall(SYS_gettid);
@@ -668,7 +672,7 @@ static void allocLockEnterAt(int i, u64 a0, u64 a1) {
     treeWatchAt(i, false);
   if (!kSotcAllocLock || !s.serialise)
     return;  // observation-only site, or watch-only run: do not serialise
-  std::recursive_mutex &mx = allocMutexFor(i, a0);
+  base::RecursiveMutex &mx = allocMutexFor(i, a0);
   if (mx.try_lock()) {
     if (t_lockDepth < 8) t_lockedState[t_lockDepth++] = a0;
     g_lockHolder.gtid.store(*currentGuestTidPtr());
@@ -678,19 +682,19 @@ static void allocLockEnterAt(int i, u64 a0, u64 a1) {
   }
   // The try_lock failed, so another thread is inside this function. That is
   // the measurement; the blocking acquire below is the mitigation.
-  s.contended.fetch_add(1, std::memory_order_relaxed);
+  s.contended.fetch_add(1, base::memory_order_relaxed);
   reportContention(i, a0);
-  const auto t0 = std::chrono::steady_clock::now();
+  const auto t0 = base::TimeTicks::Now();
   mx.lock();
   if (t_lockDepth < 8) t_lockedState[t_lockDepth++] = a0;
   g_lockHolder.gtid.store(*currentGuestTidPtr());
   g_lockHolder.site.store((u32)i);
   g_lockHolder.a0.store(a0);
-  const u64 ns = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::steady_clock::now() - t0).count();
-  u64 prev = s.maxWaitNs.load(std::memory_order_relaxed);
+  const u64 ns = (u64)((
+      base::TimeTicks::Now() - t0).InMicroseconds() * 1000);
+  u64 prev = s.maxWaitNs.load(base::memory_order_relaxed);
   while (ns > prev &&
-         !s.maxWaitNs.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {}
+         !s.maxWaitNs.compare_exchange_weak(prev, ns, base::memory_order_relaxed)) {}
 }
 
 // DELTA_SOTC_TREEWATCH: catch the free tree going bad AT ITS BIRTH. Five crashes
@@ -702,25 +706,25 @@ static void allocLockEnterAt(int i, u64 a0, u64 a1) {
 // reused live data, safe to read; anything outside guest direct memory is
 // reported without dereference. Two loads + compares per call, ~6M calls a run.
 static thread_local bool t_treeOkAtEntry = true;
-std::atomic<u64> g_treeChecks{0};
-std::atomic<u64> g_treeBadAtEntry{0};
-std::atomic<u64> g_treeWentBad{0};
-std::atomic<int> g_treeReported{0};
+base::Atomic<u64> g_treeChecks{0};
+base::Atomic<u64> g_treeBadAtEntry{0};
+base::Atomic<u64> g_treeWentBad{0};
+base::Atomic<int> g_treeReported{0};
 
 // The watched node does not exist until the heap grows into it, so stay disarmed
 // until its page is mapped (the first armed run took the process down). Poll
 // like the write census, then sanity-check the node before trusting it.
-std::atomic<bool> g_treeArmed{false};
+base::Atomic<bool> g_treeArmed{false};
 
 static void treeWatchArm() {
-  std::thread([] {
+  base::SpawnDetachedThread("probe_title", [] {
     const long pg = sysconf(_SC_PAGESIZE);
     void *page = reinterpret_cast<void *>(kSotcTreeNode & ~(u64)(pg - 1));
     // The walk reads the allocator STATE, the field watch reads the node: both
     // pages have to exist before either is allowed to dereference anything.
     void *spage = reinterpret_cast<void *>(kSotcTreeState & ~(u64)(pg - 1));
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      base::SleepForMilliseconds(200);
       unsigned char vec = 0;
       if (mincore(page, 1, &vec) != 0 || mincore(spage, 1, &vec) != 0)
         continue;
@@ -731,10 +735,10 @@ static void treeWatchArm() {
                 (unsigned long long)kSotcTreeNode, (unsigned long long)own,
                 (unsigned long long)kSotcTreeState,
                 (unsigned long long)(kSotcTreeState + 0x80));
-      g_treeArmed.store(true, std::memory_order_release);
+      g_treeArmed.store(true, base::memory_order_release);
       return;
     }
-  }).detach();
+  });
 }
 
 static bool treeFieldOk(u64 &valOut, u64 &szOut) {
@@ -761,20 +765,20 @@ static bool treeFieldOk(u64 &valOut, u64 &szOut) {
 }
 
 static void treeWatchAt(int site, bool onExit) {
-  if (!g_treeArmed.load(std::memory_order_acquire))
+  if (!g_treeArmed.load(base::memory_order_acquire))
     return;
   u64 val = 0, sz = 0;
   const bool ok = treeFieldOk(val, sz);
-  g_treeChecks.fetch_add(1, std::memory_order_relaxed);
+  g_treeChecks.fetch_add(1, base::memory_order_relaxed);
   if (!onExit) {
     t_treeOkAtEntry = ok;
     if (!ok)
-      g_treeBadAtEntry.fetch_add(1, std::memory_order_relaxed);
+      g_treeBadAtEntry.fetch_add(1, base::memory_order_relaxed);
     return;
   }
   if (ok || !t_treeOkAtEntry)
     return;  // already bad on the way in: some earlier call did it
-  g_treeWentBad.fetch_add(1, std::memory_order_relaxed);
+  g_treeWentBad.fetch_add(1, base::memory_order_relaxed);
   if (g_treeReported.fetch_add(1) < 8) {
     BASE_LOGI("treewatch",
               "node {:#x} child[0] WENT BAD inside {} (tid {}): "
@@ -793,7 +797,7 @@ static void treeWatchAt(int site, bool onExit) {
 // calls", and the ring above says what ran in that window. Depth-first with an
 // explicit stack; nodes judged by their size word at node-8 (8-granular, non-
 // zero, not absurd), pointers range-checked before any dereference.
-std::atomic<bool> g_treeWalkTripped{false};
+base::Atomic<bool> g_treeWalkTripped{false};
 
 static inline bool inDmem(u64 p) {
   return p >= 0x8000000000ull && p < 0x8700000000ull;
@@ -801,11 +805,11 @@ static inline bool inDmem(u64 p) {
 
 static void treeWalkPeriodic() {
   const u64 n = kSotcTreeWalk;
-  if (!n || g_treeWalkTripped.load(std::memory_order_relaxed))
+  if (!n || g_treeWalkTripped.load(base::memory_order_relaxed))
     return;
-  if ((g_allocCallSeq.load(std::memory_order_relaxed) % n) != 0)
+  if ((g_allocCallSeq.load(base::memory_order_relaxed) % n) != 0)
     return;
-  if (!g_treeArmed.load(std::memory_order_acquire))
+  if (!g_treeArmed.load(base::memory_order_acquire))
     return;
   const u64 state = kSotcTreeState;
   const u64 sentinel = state + 0x80;
@@ -839,7 +843,7 @@ static void treeWalkPeriodic() {
                 (unsigned long long)g_allocCallSeq.load(), visited,
                 (unsigned long long)field, (unsigned long long)cur,
                 (unsigned long long)sz);
-      const u64 pos = g_allocRingPos.load(std::memory_order_relaxed);
+      const u64 pos = g_allocRingPos.load(base::memory_order_relaxed);
       const int have = (int)(pos < kAllocRing ? pos : kAllocRing);
       BASE_LOGI("treewalk",
                 "the last {} allocator calls, oldest first (the "
@@ -982,9 +986,9 @@ void installAllocLock(smodule &m) {
   }
   if (kSotcTreeWatch || kSotcTreeWalk)
     treeWatchArm();
-  std::thread([] {
+  base::SpawnDetachedThread("probe_title", [] {
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::seconds(10));
+      base::SleepForMilliseconds((10) * 1000);
       if (kSotcHeapRoute)
         heapRouteReport();
       if (kSotcTreeWatch)
@@ -1003,7 +1007,7 @@ void installAllocLock(smodule &m) {
                   (unsigned long long)g_allocSites[i].contended.load(),
                   (unsigned long long)g_allocSites[i].maxWaitNs.load());
     }
-  }).detach();
+  });
 }
 
 // DELTA_SOTC_MATTRACE: name the blocks "Material Param Update" fills. Hooks the
@@ -1116,7 +1120,7 @@ void investigateDcbGate(smodule &m) {
               (unsigned long long)off, expMod, (unsigned long long)expAddr);
   }
   auto *slot = reinterpret_cast<volatile u64 *>(base + 0x985a00);
-  std::thread([slot] {
+  base::SpawnDetachedThread("probe_title", [slot] {
     u64 last = ~1ull;
     for (int i = 0; i < 400000; i++) {
       u64 v = *slot;
@@ -1125,9 +1129,9 @@ void investigateDcbGate(smodule &m) {
                   i / 2, (unsigned long long)v);
         last = v;
       }
-      std::this_thread::sleep_for(std::chrono::microseconds(500));
+      base::SleepForMicroseconds(500);
     }
-  }).detach();
+  });
 }
 
 /*does not expect an extension*/
@@ -1166,7 +1170,7 @@ void bringUpRebirthSurfaceRegistry(smodule &m) {
   // shows whether/when it gets allocated. Logs every transition.
   if (kGfxctxWatch) {
     auto *slot = reinterpret_cast<volatile u64 *>(base + 0x687b30 + 0x38);
-    std::thread([slot] {
+    base::SpawnDetachedThread("probe_title", [slot] {
       u64 last = ~0ull;
       for (int i = 0; i < 200000; i++) {
         u64 v = *slot;
@@ -1175,9 +1179,9 @@ void bringUpRebirthSurfaceRegistry(smodule &m) {
                     (unsigned long long)v, i / 2);
           last = v;
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(500));
+        base::SleepForMicroseconds(500);
       }
-    }).detach();
+    });
   }
 }
 
@@ -1225,7 +1229,7 @@ static void watchVideoOutState(smodule &m) {
   if (!kVoWatch)
     return;
   u8 *base = m.getInfo().base;
-  std::thread([base] {
+  base::SpawnDetachedThread("probe_title", [base] {
     i32 lc = 0x7fffffff, li = 0x7fffffff;
     u32 lf[3] = {0xdead, 0xdead, 0xdead};
     for (int i = 0; i < 120000; i++) {
@@ -1260,9 +1264,9 @@ static void watchVideoOutState(smodule &m) {
         patched = true;
         BASE_LOGI("vowatch", "FORCE_CONNECT: cfg[{}] <- cfg[0], f0=4", idx);
       }
-      std::this_thread::sleep_for(std::chrono::microseconds(500));
+      base::SleepForMicroseconds(500);
     }
-  }).detach();
+  });
 }
 
 // Host hook for the videoout busType/index map-op (vaddr 0x1020; esi=userId,

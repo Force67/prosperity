@@ -13,25 +13,25 @@
  */
 
 #include "base/arch.h"
-#include <string>
 
 #include "gpu/gcn/gcn_decode.h"
+#include <base/strings/xstring.h>
 
 namespace gpu::gcn {
 
 // Mnemonic only (e.g. "v_mad_f32"). Unmapped opcodes render as
 // "<enc>_op0x<n>" rather than failing, so unknown-op reports stay greppable.
-std::string Mnemonic(const Inst& inst);
+base::String Mnemonic(const Inst& inst);
 
 // Full one-line disassembly: mnemonic + rendered operands
 // (e.g. "v_mac_f32 v3, s2, v1" or "image_sample v[0:3], v[4:5], s[8:15],
 // s[16:19] dmask:0xf"). Best effort: operand fields are always printed from
 // the encoding even when the opcode itself is unmapped.
-std::string DisasmInst(const Inst& inst);
+base::String DisasmInst(const Inst& inst);
 
 // Formatted listing line: "pc: raw-words  disassembly". `pc_width` pads the
 // pc column (dword offsets).
-std::string DisasmLine(const Inst& inst);
+base::String DisasmLine(const Inst& inst);
 
 // Disassemble a code range to stderr (debug aid; decodes with the
 // stop-at-endpgm heuristic exactly like the old raw dump did).

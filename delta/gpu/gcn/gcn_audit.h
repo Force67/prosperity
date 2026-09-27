@@ -28,10 +28,10 @@
 
 #include "base/arch.h"
 #include <cstdio>
-#include <string>
-#include <vector>
 
 #include "gpu/gcn/gcn_decode.h"
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 namespace gpu::gcn {
 
@@ -61,7 +61,7 @@ void AuditInstTag(const char* tag);
 void AuditNote(const char* what, u32 op);
 
 // One header line for the dump (binding plan etc.).
-void AuditPlan(const std::string& line);
+void AuditPlan(const base::String& line);
 
 // The stage translation was declined outright.
 void AuditDecline(const char* reason);
@@ -69,7 +69,7 @@ void AuditDecline(const char* reason);
 // Finish: fold into the run-wide registry and (first time a shader is seen)
 // write the dump files. `spirv` is the assembled unoptimized module, null if
 // translation failed.
-void AuditEnd(const std::vector<u32>* spirv);
+void AuditEnd(const base::Vector<u32>* spirv);
 
 // Write the aggregate report (what the atexit hook prints to stderr).
 void WriteAuditReport(std::FILE* f);

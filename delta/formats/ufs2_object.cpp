@@ -12,15 +12,19 @@
 #include "ufs2_object.h"
 #include "base/arch.h"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unordered_map>
 
 #include <base/logging.h>
 #include <utl/file.h>
 #include <utl/options.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kUfsDbg, "DELTA_UFS_DBG", false);
@@ -63,7 +67,7 @@ struct Ufs2Impl {
   u32 bsize = 0, fsize = 0, iblkno = 0, ipg = 0, fpg = 0;
   u32 nindir = 0; // pointers per indirect block = bsize/8
 
-  std::unordered_map<std::string, Ufs2Filesystem::Node> files;
+  base::HashMap<base::String, Ufs2Filesystem::Node> files;
 
   struct Dinode {
     u16 mode = 0;
@@ -78,7 +82,7 @@ struct Ufs2Impl {
     imageSize = file.GetSize();
     if (!parseSuperblock())
       return;
-    walk(kRootIno, std::string(), 0);
+    walk(kRootIno, base::String(), 0);
     ok = true;
   }
 
@@ -165,14 +169,14 @@ struct Ufs2Impl {
     u64 size = din.size;
     if (static_cast<u64>(off) >= size)
       return 0;
-    u64 want = std::min<u64>(len, size - off);
+    u64 want = base::Min<u64>(len, size - off);
     auto *dst = static_cast<u8 *>(buf);
     u64 done = 0;
     while (done < want) {
       u64 pos = off + done;
       u64 lbn = pos / bsize;
       u64 boff = pos % bsize;
-      u64 chunk = std::min<u64>(bsize - boff, want - done);
+      u64 chunk = base::Min<u64>(bsize - boff, want - done);
       i64 frag = blockAddr(din, lbn);
       if (frag <= 0) {
         std::memset(dst + done, 0, chunk); // hole
@@ -185,13 +189,13 @@ struct Ufs2Impl {
     return static_cast<i64>(done);
   }
 
-  void walk(u32 dirIno, const std::string &prefix, int depth) {
+  void walk(u32 dirIno, const base::String &prefix, int depth) {
     if (depth > 64 || files.size() > 200000)
       return;
     Dinode din;
     if (!readDinode(dirIno, din) || din.size == 0 || din.size > (64u << 20))
       return;
-    std::vector<u8> data(static_cast<size_t>(din.size));
+    base::Vector<u8> data(static_cast<size_t>(din.size));
     if (readInode(din, data.data(), 0, data.size()) !=
         static_cast<i64>(data.size()))
       return;
@@ -205,9 +209,9 @@ struct Ufs2Impl {
       if (reclen == 0 || p + reclen > data.size())
         break;
       if (ino != 0 && namlen != 0 && p + 8 + namlen <= data.size()) {
-        std::string name(reinterpret_cast<char *>(&data[p + 8]), namlen);
+        base::String name(reinterpret_cast<char *>(&data[p + 8]), namlen);
         if (name != "." && name != "..") {
-          std::string full = prefix + "/" + name;
+          base::String full = prefix + "/" + name;
           if (type == kDtDir) {
             walk(ino, full, depth + 1);
           } else {
@@ -223,7 +227,7 @@ struct Ufs2Impl {
 };
 
 Ufs2Filesystem::Ufs2Filesystem(const base::String &path)
-    : impl_(std::make_unique<Ufs2Impl>(path)) {}
+    : impl_(base::MakeUnique<Ufs2Impl>(path)) {}
 Ufs2Filesystem::~Ufs2Filesystem() = default;
 
 bool Ufs2Filesystem::valid() const { return impl_ && impl_->ok; }
@@ -231,7 +235,7 @@ bool Ufs2Filesystem::valid() const { return impl_ && impl_->ok; }
 const Ufs2Filesystem::Node *Ufs2Filesystem::find(const char *relPath) const {
   if (!impl_ || !relPath)
     return nullptr;
-  std::string key = relPath[0] == '/' ? relPath : std::string("/") + relPath;
+  base::String key = relPath[0] == '/' ? relPath : base::String("/") + relPath;
   auto it = impl_->files.find(key);
   return it == impl_->files.end() ? nullptr : &it->second;
 }
@@ -246,7 +250,7 @@ i64 Ufs2Filesystem::read(const Node &node, void *buf, i64 off,
   return impl_->readInode(din, buf, off, len);
 }
 
-void Ufs2Filesystem::paths(std::vector<std::string> &out) const {
+void Ufs2Filesystem::paths(base::Vector<base::String> &out) const {
   if (!impl_)
     return;
   out.reserve(out.size() + impl_->files.size());

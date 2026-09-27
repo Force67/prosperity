@@ -19,14 +19,6 @@ target_include_directories(zlib_iface INTERFACE
 target_link_libraries(zlib_iface INTERFACE zlibstatic)
 
 # --------------------------------------------------------------------------
-# fmtlib
-# --------------------------------------------------------------------------
-set(FMT_DOC OFF CACHE BOOL "" FORCE)
-set(FMT_TEST OFF CACHE BOOL "" FORCE)
-set(FMT_INSTALL OFF CACHE BOOL "" FORCE)
-add_subdirectory(fmtlib EXCLUDE_FROM_ALL)
-
-# --------------------------------------------------------------------------
 # capstone
 # --------------------------------------------------------------------------
 set(CAPSTONE_BUILD_SHARED OFF CACHE BOOL "" FORCE)

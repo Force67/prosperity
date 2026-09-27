@@ -10,19 +10,24 @@
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/guest_memory.h"
 
-#include <algorithm>
-#include <bitset>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <set>
 
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
 #include <utl/mem.h>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/map.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/shared_pointer.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kGpuEudfail, "DELTA_GPU_EUDFAIL", false);
@@ -125,7 +130,7 @@ u64 ScanForDescriptor(u64 want_base) {
 // outside is not an option (ptrace_scope denies /proc/<pid>/mem), so it runs
 // in-process like the sweep above.
 void ScanForDwords(const char* spec) {
-  std::vector<u32> want;
+  base::Vector<u32> want;
   for (const char* c = spec; *c;) {
     while (*c == ',' || *c == ' ')
       c++;
@@ -325,7 +330,7 @@ struct NullSite {
   // passes it, we walked the command buffer at the wrong moment.
   u64 peak_watermark;
 };
-std::vector<NullSite> g_null_sites;
+base::Vector<NullSite> g_null_sites;
 u64 g_track_draws = 0;
 
 void NoteNullDescriptor(u64 address, u64 code_base) {
@@ -377,7 +382,7 @@ void PollNullDescriptors() {
     if (!GuestRange(s.address, 32))
       continue;
     const u32* p = reinterpret_cast<const u32*>(s.address);
-    if (std::all_of(p, p + 8, [](u32 w) { return w == 0; })) {
+    if (base::AllOf(p, p + 8, [](u32 w) { return w == 0; })) {
       still_zero++;
       continue;
     }
@@ -548,8 +553,8 @@ struct ScalarEval {
   // restores descriptor-table POINTERS this way, and a walk that skips the pair
   // decodes a descriptor from whatever those SGPRs held earlier. Keyed
   // vgpr*64 + lane; an absent slot is unknown and invalidates its destination.
-  std::unordered_map<u32, u32> lane_spill;
-  std::unordered_map<u32, u64> lane_spill_src;
+  base::HashMap<u32, u32> lane_spill;
+  base::HashMap<u32, u64> lane_spill_src;
 
   explicit ScalarEval(const u32* user_data, u64 base = 0) {
     for (u32 i = 0; i < 16; i++) {
@@ -797,17 +802,17 @@ struct ScalarEval {
       switch (op) {
         case 0x06:
           value = static_cast<u32>(
-              std::min(static_cast<i32>(a), static_cast<i32>(b)));
+              base::Min(static_cast<i32>(a), static_cast<i32>(b)));
           break;
         case 0x07:
-          value = std::min(a, b);
+          value = base::Min(a, b);
           break;
         case 0x08:
           value = static_cast<u32>(
-              std::max(static_cast<i32>(a), static_cast<i32>(b)));
+              base::Max(static_cast<i32>(a), static_cast<i32>(b)));
           break;
         case 0x09:
-          value = std::max(a, b);
+          value = base::Max(a, b);
           break;
         case 0x27: {  // s_bfe_u32: src1[4:0] offset, src1[22:16] width
           const u32 width = (b >> 16) & 0x7F;
@@ -971,12 +976,12 @@ struct ReplayOp {
 // shader rewrite yields a new Program from CachedProgram -> a new entry.
 struct ScalarPassInfo {
   MimgBindingPlan plan;
-  std::vector<Inst> insts;  // program-order subset relevant to ScalarEval users
-  std::vector<ReplayOp> replay;
-  std::vector<ReplayOp> full_replay;  // every step, for DELTA_GPU_REPLAY_CHECK
+  base::Vector<Inst> insts;  // program-order subset relevant to ScalarEval users
+  base::Vector<ReplayOp> replay;
+  base::Vector<ReplayOp> full_replay;  // every step, for DELTA_GPU_REPLAY_CHECK
 };
 
-std::vector<ReplayOp> PlanReplay(const std::vector<Inst>& insts, bool prune);
+base::Vector<ReplayOp> PlanReplay(const base::Vector<Inst>& insts, bool prune);
 DELTA_OPTION(bool, kReplayCheck, "DELTA_GPU_REPLAY_CHECK", false);
 
 // The vector instructions the walk has to see: the lane-spill pair that moves
@@ -1003,12 +1008,12 @@ bool VectorTouchesScalarFile(const Inst& inst) {
 u64 g_scalar_info_gen = 0;
 
 const ScalarPassInfo& CachedScalarInfo(
-    const std::shared_ptr<const Program>& program) {
+    const base::SharedPointer<const Program>& program) {
   struct Entry {
-    std::shared_ptr<const Program> pin;
+    base::SharedPointer<const Program> pin;
     ScalarPassInfo info;
   };
-  static std::unordered_map<const Program*, Entry> cache;
+  static base::HashMap<const Program*, Entry> cache;
   // A draw's resolvers alternate between its VS and PS program.
   struct Recent {
     const Program* program = nullptr;
@@ -1034,14 +1039,14 @@ const ScalarPassInfo& CachedScalarInfo(
   // longer holds (only the pin here keeps it alive). Clearing the lot at 512
   // re-planned every live shader each frame.
   if (cache.size() > 4096) {
-    std::erase_if(cache,
+    base::EraseIf(cache,
                   [](const auto& kv) { return kv.second.pin.use_count() == 1; });
     if (cache.size() > 16384)
       cache.clear();
   }
   Entry e;
   e.pin = program;
-  const std::vector<u8> reachable = ComputeReachability(*program);
+  const base::Vector<u8> reachable = ComputeReachability(*program);
   e.info.plan = PlanMimgBindings(*program, reachable.data());
   u32 index = 0;
   for (const Inst& inst : *program) {
@@ -1059,7 +1064,7 @@ const ScalarPassInfo& CachedScalarInfo(
   e.info.replay = PlanReplay(e.info.insts, true);
   if (kReplayCheck)
     e.info.full_replay = PlanReplay(e.info.insts, false);
-  return cache.emplace(program.get(), std::move(e)).first->second.info;
+  return cache.emplace(program.get(), base::move(e)).first->second.info;
 }
 
 // The registers one descriptor consumer reads, as the walk had them there: an
@@ -1146,7 +1151,7 @@ class ConsumerRegs {
 
 void Capture(ScalarConsumer& c, u32 w, u32 first, u32 count,
              const ScalarEval& eval) {
-  count = std::min<u32>(count, ScalarEval::kRegs - std::min<u32>(first, ScalarEval::kRegs));
+  count = base::Min<u32>(count, ScalarEval::kRegs - base::Min<u32>(first, ScalarEval::kRegs));
   c.first[w] = static_cast<u8>(first);
   c.count[w] = static_cast<u8>(count);
   // An unknown register's value is whatever the walk left there, and that
@@ -1167,7 +1172,26 @@ u32 SamplerSgpr(const Inst& inst) {
   return ((inst.raw[1] >> 21) & 0x1F) * 4;
 }
 
-using SgprSet = std::bitset<ScalarEval::kRegs>;
+struct SgprSet {
+  static constexpr u32 kWords = (ScalarEval::kRegs + 63) / 64;
+  u64 words[kWords] = {};
+
+  void set(u32 i) { words[i / 64] |= 1ull << (i % 64); }
+  bool Intersects(const SgprSet& other) const {
+    for (u32 i = 0; i < kWords; i++)
+      if (words[i] & other.words[i])
+        return true;
+    return false;
+  }
+  void Kill(const SgprSet& other) {
+    for (u32 i = 0; i < kWords; i++)
+      words[i] &= ~other.words[i];
+  }
+  void Add(const SgprSet& other) {
+    for (u32 i = 0; i < kWords; i++)
+      words[i] |= other.words[i];
+  }
+};
 
 void AddRange(SgprSet& set, u32 first, u32 count) {
   for (u32 i = first; i < first + count && i < ScalarEval::kRegs; i++)
@@ -1264,8 +1288,8 @@ StepEffects EffectsOf(const Inst& inst) {
 // program order), and, when pruning, only the steps whose results reach a
 // capture. Most SMRDs load cbuffer constants for vector code the walk never
 // sees; a pruned replay neither reads nor flushes their memory.
-std::vector<ReplayOp> PlanReplay(const std::vector<Inst>& insts, bool prune) {
-  std::vector<ReplayOp> ops(insts.size());
+base::Vector<ReplayOp> PlanReplay(const base::Vector<Inst>& insts, bool prune) {
+  base::Vector<ReplayOp> ops(insts.size());
   DescriptorVersions versions;
   for (u32 i = 0; i < insts.size(); i++) {
     const Inst& inst = insts[i];
@@ -1293,26 +1317,26 @@ std::vector<ReplayOp> PlanReplay(const std::vector<Inst>& insts, bool prune) {
       AddRange(live_sources, srsrc, 1);
     }
     const StepEffects e = EffectsOf(inst);
-    op.step = !prune || e.keep || (e.writes & live).any() ||
-              (e.sources & live_sources).any();
+    op.step = !prune || e.keep || e.writes.Intersects(live) ||
+              e.sources.Intersects(live_sources);
     if (op.step) {
-      live &= ~e.writes;
-      live |= e.reads;
+      live.Kill(e.writes);
+      live.Add(e.reads);
     }
     if (op.capture_before)
       AddRange(live, DecodeSmrd(inst.raw[0]).sbase * 2, 4);
   }
-  std::erase_if(ops, [](const ReplayOp& op) {
+  base::EraseIf(ops, [](const ReplayOp& op) {
     return !op.step && !op.capture_before && !op.capture_after;
   });
   return ops;
 }
 
-void BuildReplay(const std::vector<Inst>& insts,
-                 const std::vector<ReplayOp>& plan,
+void BuildReplay(const base::Vector<Inst>& insts,
+                 const base::Vector<ReplayOp>& plan,
                  const u32* user_data,
                  u64 code_base,
-                 std::vector<ScalarConsumer>& out) {
+                 base::Vector<ScalarConsumer>& out) {
   out.clear();
   ScalarEval eval(user_data, code_base);
   for (const ReplayOp& op : plan) {
@@ -1353,8 +1377,8 @@ bool SameConsumer(const ScalarConsumer& a, const ScalarConsumer& b) {
 void CheckReplay(const ScalarPassInfo& info,
                  const u32* user_data,
                  u64 code_base,
-                 const std::vector<ScalarConsumer>& pruned) {
-  thread_local std::vector<ScalarConsumer> full;
+                 const base::Vector<ScalarConsumer>& pruned) {
+  thread_local base::Vector<ScalarConsumer> full;
   BuildReplay(info.insts, info.full_replay, user_data, code_base, full);
   bool same = full.size() == pruned.size();
   for (u32 i = 0; same && i < full.size(); i++)
@@ -1375,20 +1399,20 @@ struct SharedReplays {
   struct Entry {
     // Pinned: a caller's temporary may be the only other owner, and a freed
     // program's address can come back as another program within the draw.
-    std::shared_ptr<const Program> program;
+    base::SharedPointer<const Program> program;
     u64 code_base = 0;
     u32 user_data[16] = {};
-    std::vector<ScalarConsumer> consumers;
+    base::Vector<ScalarConsumer> consumers;
   };
   u32 depth = 0;
   u32 used = 0;
-  std::vector<Entry> entries;  // kept across scopes for their capacity
+  base::Vector<Entry> entries;  // kept across scopes for their capacity
 };
 thread_local SharedReplays g_replays;
 DELTA_OPTION(bool, kSharedReplay, "DELTA_GPU_SHARED_REPLAY", true);
 
-const std::vector<ScalarConsumer>* SharedReplay(
-    const std::shared_ptr<const Program>& program,
+const base::Vector<ScalarConsumer>* SharedReplay(
+    const base::SharedPointer<const Program>& program,
     const u32* user_data,
     u64 code_base) {
   if (!g_replays.depth)
@@ -1417,7 +1441,7 @@ const std::vector<ScalarConsumer>* SharedReplay(
 // the draw's shared replay when a ScalarReplayScope is open, unless `own`;
 // false when that replay could not answer (replay again with `own`).
 template <typename Fn>
-bool ForEachConsumer(const std::shared_ptr<const Program>& program,
+bool ForEachConsumer(const base::SharedPointer<const Program>& program,
                      const u32* user_data,
                      u64 code_base,
                      bool own,
@@ -1480,7 +1504,7 @@ MimgBindingPlan PlanMimgBindings(const Program& program,
   struct Load {
     u32 sgpr, dwords, index;
   };
-  std::vector<Load> loads;
+  base::Vector<Load> loads;
   const auto covering_load = [&](u32 sgpr, u32 dwords) -> u32 {
     for (auto it = loads.rbegin(); it != loads.rend(); ++it)
       if (sgpr >= it->sgpr && sgpr + dwords <= it->sgpr + it->dwords)
@@ -1488,7 +1512,7 @@ MimgBindingPlan PlanMimgBindings(const Program& program,
     return 0xFFFF;  // inline user data (no covering load)
   };
 
-  std::unordered_map<u64, u32> binding_of;
+  base::HashMap<u64, u32> binding_of;
   u32 inst_index = 0;
   for (const Inst& inst : program) {
     const u32 idx = inst_index++;
@@ -1498,7 +1522,7 @@ MimgBindingPlan PlanMimgBindings(const Program& program,
       const Smrd s = DecodeSmrd(inst.raw[0]);
       if (s.op <= 0x04) {  // s_load_dword..x16 can rewrite descriptor SGPRs
         const u32 dwords = 1u << s.op;
-        loads.erase(std::remove_if(loads.begin(), loads.end(),
+        loads.erase(base::RemoveIf(loads.begin(), loads.end(),
                                    [&](const Load& ld) {
                                      return s.sdst < ld.sgpr + ld.dwords &&
                                             ld.sgpr < s.sdst + dwords;
@@ -1567,7 +1591,7 @@ TImage DecodeTImage(const u32* p) {
   //  [5] base_array[12:0]; last_array[25:13]
   TImage t;
   t.null_descriptor =
-      std::all_of(p, p + 8, [](u32 word) { return word == 0; });
+      base::AllOf(p, p + 8, [](u32 word) { return word == 0; });
   t.base = ((static_cast<u64>(p[1] & 0x3F) << 32) | p[0]) << 8;
   t.min_lod = (p[1] >> 8) & 0xFFF;
   t.dfmt = (p[1] >> 20) & 0x3F;
@@ -1605,7 +1629,7 @@ TImage DecodeTImage(const u32* p) {
     t.view_layers = 0;
     const u32 last_array = (p[5] >> 13) & 0x1FFF;
     if (t.base_array < t.layers && last_array >= t.base_array)
-      t.view_layers = std::min(last_array, t.layers - 1) - t.base_array + 1;
+      t.view_layers = base::Min(last_array, t.layers - 1) - t.base_array + 1;
   }
   if (t.type == 8 || t.type == 12) {  // SQ_RSRC_IMG_1D[_ARRAY]
     // Modelled as a height-1 2D image. Keep the descriptor's tiling mode so
@@ -1625,7 +1649,7 @@ TImage DecodeTImage(const u32* p) {
   const bool valid_view = (t.type != 13 && t.type != 12 && t.type != 11) ||
                           (t.base_array < t.layers && t.view_layers > 0);
   u32 max_levels = 1;
-  for (u32 extent = std::max(t.width, t.height); extent > 1; extent >>= 1)
+  for (u32 extent = base::Max(t.width, t.height); extent > 1; extent >>= 1)
     max_levels++;
   const bool valid_mips = t.view_mips && t.mip_levels <= max_levels;
   // A volume image only halves width/height per mip in our layout builder, so
@@ -1638,7 +1662,7 @@ TImage DecodeTImage(const u32* p) {
   return t;
 }
 
-void TrackVertexBuffers(std::vector<VBuffer>& result,
+void TrackVertexBuffers(base::Vector<VBuffer>& result,
                         const Program& fetch_program,
                         const u32* vs_user_data) {
   result.clear();
@@ -1682,8 +1706,8 @@ void TrackVertexBuffers(std::vector<VBuffer>& result,
   return;
 }
 
-void TrackTextures(std::vector<TImage>& result,
-                   const std::shared_ptr<const Program>& ps_program,
+void TrackTextures(base::Vector<TImage>& result,
+                   const base::SharedPointer<const Program>& ps_program,
                    const u32* ps_user_data,
                    bool trace,
                    u64 code_base) {
@@ -1763,7 +1787,7 @@ void TrackTextures(std::vector<TImage>& result,
           if (!GuestRange(probe, 32))
             continue;
           const u32* w = reinterpret_cast<const u32*>(probe);
-          if (std::all_of(w, w + 8, [](u32 v) { return v == 0; }))
+          if (base::AllOf(w, w + 8, [](u32 v) { return v == 0; }))
             continue;
           const TImage probe_t = DecodeTImage(w);
           BASE_LOGI("arena",
@@ -1820,10 +1844,9 @@ void TrackTextures(std::vector<TImage>& result,
     }
     if (kTscan && t.null_descriptor) {
       static bool scanned = false;
-      static const auto kScanStart = std::chrono::steady_clock::now();
-      const bool due = std::chrono::duration_cast<std::chrono::seconds>(
-                           std::chrono::steady_clock::now() - kScanStart)
-                           .count() >= kTscanAfter;
+      static const auto kScanStart = base::TimeTicks::Now();
+      const bool due = (
+                           base::TimeTicks::Now() - kScanStart).InSeconds() >= kTscanAfter;
       if (!scanned && due) {
         scanned = true;
         BASE_LOGI("tscan",
@@ -1861,7 +1884,7 @@ void TrackTextures(std::vector<TImage>& result,
         if (!GuestRange(probe, 32))
           continue;
         const u32* w = reinterpret_cast<const u32*>(probe);
-        if (std::all_of(w, w + 8, [](u32 v) { return v == 0; }))
+        if (base::AllOf(w, w + 8, [](u32 v) { return v == 0; }))
           continue;
         const TImage cand = DecodeTImage(w);
         if (!cand.valid)
@@ -1952,7 +1975,7 @@ void TrackTextures(std::vector<TImage>& result,
     // lives. A surface the GPU samples but nothing ever fills is only
     // explainable from the code that publishes its address.
     if (kTexSrc && t.base >= (u64)kTexSrc) {
-      static std::set<u64> seen;
+      static base::Set<u64> seen;
       if (seen.size() < 64 && seen.insert(t.base).second)
         BASE_LOGI("texsrc", "base={:#x} T# at {:#x} (sgpr{})",
                   static_cast<unsigned long>(t.base),
@@ -2006,7 +2029,7 @@ void TrackTextures(std::vector<TImage>& result,
 }
 
 void ResolveCbuffers(CbufList& result,
-                     const std::shared_ptr<const Program>& program,
+                     const base::SharedPointer<const Program>& program,
                      const u32* user_data,
                      u64 code_base) {
   result.clear();
@@ -2024,10 +2047,9 @@ void ResolveCbuffers(CbufList& result,
   // should have named exists by then, and the sweep costs a full pass over
   // every mapped guest page.
   if ((kMemFind && *kMemFind) || kSoaScan) {
-    static const auto epoch = std::chrono::steady_clock::now();
+    static const auto epoch = base::TimeTicks::Now();
     static bool swept = false;
-    if (!swept && std::chrono::duration<double>(
-                      std::chrono::steady_clock::now() - epoch).count() > 60.0) {
+    if (!swept && (base::TimeTicks::Now() - epoch).InSecondsF() > 60.0) {
       swept = true;
       if (kMemFind && *kMemFind)
         ScanForDwords(kMemFind);
@@ -2069,9 +2091,9 @@ void ResolveCbuffers(CbufList& result,
   return;
 }
 
-void ResolveDirectVertexBuffers(std::vector<VBuffer>& result,
-                                const std::shared_ptr<const Program>& program,
-                                const std::vector<ShaderAttr>& attrs,
+void ResolveDirectVertexBuffers(base::Vector<VBuffer>& result,
+                                const base::SharedPointer<const Program>& program,
+                                const base::Vector<ShaderAttr>& attrs,
                                 const u32* user_data,
                                 u64 code_base) {
   result.assign(attrs.size(), VBuffer{});
@@ -2108,15 +2130,15 @@ void ResolveDirectVertexBuffers(std::vector<VBuffer>& result,
     }
   };
   if (!ForEachConsumer(program, user_data, code_base, false, false, consume)) {
-    std::fill(result.begin(), result.end(), VBuffer{});
+    base::Fill(result.begin(), result.end(), VBuffer{});
     ForEachConsumer(program, user_data, code_base, true, false, consume);
   }
   return;
 }
 
-void ResolveShaderBuffers(std::vector<VBuffer>& result,
-                          const std::shared_ptr<const Program>& program,
-                          const std::vector<ShaderBuffer>& buffers,
+void ResolveShaderBuffers(base::Vector<VBuffer>& result,
+                          const base::SharedPointer<const Program>& program,
+                          const base::Vector<ShaderBuffer>& buffers,
                           const u32* user_data,
                           u64 code_base) {
   result.assign(buffers.size(), VBuffer{});
@@ -2155,13 +2177,13 @@ void ResolveShaderBuffers(std::vector<VBuffer>& result,
     }
   };
   if (!ForEachConsumer(program, user_data, code_base, false, false, consume)) {
-    std::fill(result.begin(), result.end(), VBuffer{});
+    base::Fill(result.begin(), result.end(), VBuffer{});
     ForEachConsumer(program, user_data, code_base, true, false, consume);
   }
   return;
 }
 
-void ResolveCsResources(std::vector<ResolvedCsResource>& result,
+void ResolveCsResources(base::Vector<ResolvedCsResource>& result,
                         const Program& program,
                         const RecompiledCs& plan,
                         const u32* user_data) {

@@ -7,15 +7,15 @@
 
 #include <vulkan/vulkan.h>
 
-#include <atomic>
-#include <mutex>
-#include <string>
-#include <vector>
 
 #include "base/arch.h"
 #include "gpu/rhi/device.h"
 #include "gpu/vulkan/vk_memory_span.h"
 #include "gpu/vulkan/vk_rhi.h"
+#include <base/atomic.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
+#include <base/threading/mutex.h>
 
 namespace gpu::vk::rhi_impl {
 
@@ -41,8 +41,8 @@ class ImageAllocator {
     u32 type = 0;
     MemorySpanAllocator spans;
   };
-  std::mutex mutex_;
-  std::vector<Block> blocks_;
+  base::Mutex mutex_;
+  base::Vector<Block> blocks_;
 };
 
 class VulkanBuffer final : public rhi::Buffer {
@@ -83,7 +83,7 @@ class VulkanBindGroupLayout final : public rhi::BindGroupLayout {
   }
   VkDescriptorSetLayout layout = VK_NULL_HANDLE;
   // Per binding: the descriptor type, in desc().bindings order.
-  std::vector<VkDescriptorType> types;
+  base::Vector<VkDescriptorType> types;
   u32 dynamic_count = 0;
 };
 
@@ -230,7 +230,7 @@ class VulkanCommandList final : public rhi::CommandList {
   VulkanPipeline* pipeline_ = nullptr;
   // Sets for PushBindGroup on a device without push descriptors; reset at
   // Begin, which is only legal once the previous submission retired.
-  std::vector<VkDescriptorPool> transient_pools_;
+  base::Vector<VkDescriptorPool> transient_pools_;
   u32 transient_pool_ = 0;
 };
 
@@ -301,7 +301,7 @@ class VulkanDevice final : public rhi::Device {
   PFN_vkCmdEndDebugUtilsLabelEXT cmd_end_label = nullptr;
   PFN_vkCmdInsertDebugUtilsLabelEXT cmd_insert_label = nullptr;
   VkPhysicalDeviceMemoryProperties memory_properties{};
-  std::mutex queue_mutex;
+  base::Mutex queue_mutex;
 
  private:
   VkDescriptorPool GrowSetPool();
@@ -309,19 +309,19 @@ class VulkanDevice final : public rhi::Device {
   void WritePipelineCache(bool force);
 
   rhi::Caps caps_;
-  std::string device_name_;
-  std::string pipeline_cache_path_;
+  base::String device_name_;
+  base::String pipeline_cache_path_;
   VkPipelineStageFlags shader_stages_ = 0;
   VkSemaphore timeline_ = VK_NULL_HANDLE;
   u64 submitted_ = 0;
   ImageAllocator images_;
-  std::mutex set_pool_mutex_;
-  std::vector<VkDescriptorPool> set_pools_;
-  std::atomic<u64> last_pipeline_build_ns_{0};
+  base::Mutex set_pool_mutex_;
+  base::Vector<VkDescriptorPool> set_pools_;
+  base::Atomic<u64> last_pipeline_build_ns_{0};
   u64 last_cache_write_ns_ = 0;
   size_t last_cache_size_ = 0;
   // A periodic save runs on a thread of its own; a forced one waits for it.
-  std::atomic<bool> cache_saving_{false};
+  base::Atomic<bool> cache_saving_{false};
   bool fault_reported_ = false;
   VkDebugUtilsMessengerEXT messenger_ = VK_NULL_HANDLE;
   float max_lod_bias_ = 0.0f;

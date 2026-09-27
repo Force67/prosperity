@@ -9,10 +9,12 @@
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "base/arch.h"
 
-#include <algorithm>
 #include <cstdio>
-#include <memory>
-#include <unordered_map>
+#include <base/algorithm.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/memory/shared_pointer.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::rdna {
 namespace {
@@ -216,8 +218,8 @@ u32 Vop3SourceCountImpl(Enc enc, u32 op) {
   return 3;
 }
 
-std::vector<u8> ComputeRdnaReachability(const Program& program) {
-  std::vector<u8> reachable(program.size(), 0);
+base::Vector<u8> ComputeRdnaReachability(const Program& program) {
+  base::Vector<u8> reachable(program.size(), 0);
   if (program.empty())
     return reachable;
 
@@ -282,7 +284,7 @@ std::vector<u8> ComputeRdnaReachability(const Program& program) {
   };
 
   const u32 max_pc = program.back().pc + program.back().size;
-  std::vector<u32> starts{0};
+  base::Vector<u32> starts{0};
   for (const Inst& inst : program) {
     const int kind = branch_kind(inst);
     if (!kind)
@@ -295,9 +297,9 @@ std::vector<u8> ComputeRdnaReachability(const Program& program) {
                                              simm));
     }
   }
-  std::sort(starts.begin(), starts.end());
-  starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
-  starts.erase(std::remove_if(starts.begin(), starts.end(),
+  base::Sort(starts.begin(), starts.end());
+  starts.erase(base::Unique(starts.begin(), starts.end()), starts.end());
+  starts.erase(base::RemoveIf(starts.begin(), starts.end(),
                               [max_pc](u32 pc) { return pc >= max_pc; }),
                starts.end());
   const auto block_of = [&](u32 pc) {
@@ -307,8 +309,8 @@ std::vector<u8> ComputeRdnaReachability(const Program& program) {
     return block;
   };
 
-  std::vector<u8> block_reachable(starts.size(), 0);
-  std::vector<u32> worklist{0};
+  base::Vector<u8> block_reachable(starts.size(), 0);
+  base::Vector<u32> worklist{0};
   while (!worklist.empty()) {
     const u32 block = worklist.back();
     worklist.pop_back();
@@ -328,7 +330,7 @@ std::vector<u8> ComputeRdnaReachability(const Program& program) {
       if (kind == 3)
         break;
       if (kind == 4) {
-        std::fill(block_reachable.begin(), block_reachable.end(), 1);
+        base::Fill(block_reachable.begin(), block_reachable.end(), 1);
         worklist.clear();
         break;
       }
@@ -494,7 +496,7 @@ Program DecodeShader(const u32* code, u32 max_dwords) {
 }
 
 Program ReachableProgram(const Program& program) {
-  const std::vector<u8> reachable = ComputeRdnaReachability(program);
+  const base::Vector<u8> reachable = ComputeRdnaReachability(program);
   Program out;
   out.reserve(program.size());
   for (u32 i = 0; i < program.size(); i++)
@@ -520,18 +522,18 @@ void NextProgramGeneration() {
   g_generation++;
 }
 
-std::shared_ptr<const Program> CachedReachableProgram(const u32* code,
+base::SharedPointer<const Program> CachedReachableProgram(const u32* code,
                                                       u32 max_dwords) {
   struct Entry {
     u64 hash = 0;
     u32 hashed_dwords = 0;
     u64 generation = 0;
-    std::shared_ptr<const Program> program;
+    base::SharedPointer<const Program> program;
   };
-  static std::unordered_map<u64, Entry> cache;
+  static base::HashMap<u64, Entry> cache;
 
   if (!code)
-    return std::make_shared<const Program>();
+    return base::MakeShared<const Program>();
   const u64 addr = reinterpret_cast<u64>(code);
 
   // Already revalidated this frame: the three per-draw walks that share a
@@ -561,7 +563,7 @@ std::shared_ptr<const Program> CachedReachableProgram(const u32* code,
 
   if (cache.size() > 512)
     cache.clear();  // unbounded-growth backstop
-  auto program = std::make_shared<const Program>(
+  auto program = base::MakeShared<const Program>(
       ReachableProgram(DecodeShader(code, max_dwords)));
   cache[addr] = {hash, hashed, g_generation, program};
   return program;
@@ -572,7 +574,7 @@ u64 CachedCodeHash(const u32* code, u32 max_dwords) {
     u64 hash = 0;
     u64 generation = 0;
   };
-  static std::unordered_map<u64, Entry> cache;
+  static base::HashMap<u64, Entry> cache;
 
   if (!code)
     return 0;

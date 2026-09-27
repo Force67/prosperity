@@ -11,6 +11,8 @@
 
 #include "dir_dev.h"
 #include "file_dev.h"
+#include <base/containers/vector.h>
+#include <base/memory/move.h>
 
 namespace krnl {
 // FreeBSD dirent (PS4 is FreeBSD 9, pre-ino64): 8-byte header + name, each
@@ -24,8 +26,8 @@ struct fbsd_dirent {
 };
 enum { kDtDir = 4, kDtReg = 8 };
 
-dirDevice::dirDevice(objectTable &objects, std::vector<vfs::DirEntry> &&entries)
-    : device(objects), entries_(std::move(entries)) {}
+dirDevice::dirDevice(objectTable &objects, base::Vector<vfs::DirEntry> &&entries)
+    : device(objects), entries_(base::move(entries)) {}
 
 i64 dirDevice::getdents(void *buf, size_t len) {
   auto *p = static_cast<u8 *>(buf);

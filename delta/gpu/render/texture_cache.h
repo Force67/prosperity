@@ -10,7 +10,6 @@
 
 #include "base/arch.h"
 
-#include <vector>
 
 #include "gpu/render/command.h"
 #include "gpu/rhi/device.h"

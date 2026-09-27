@@ -3,10 +3,7 @@
  */
 
 #include <cstdio>
-#include <algorithm>
 #include <cstring>
-#include <memory>
-#include <thread>
 
 #include <base/logging.h>
 #include <unistd.h>
@@ -14,6 +11,16 @@
 #include "gpu/gpu_check.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_rhi_internal.h"
+#include <base/threading/thread.h>
+#include <base/algorithm.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/strings/format.h>
 
 namespace gpu::vk {
 
@@ -38,7 +45,7 @@ MessageCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
       severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT     ? "error"
       : severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT ? "warning"
                                                                    : "info";
-  std::string labels;
+  base::String labels;
   for (u32 i = 0; i < data->cmdBufLabelCount; i++) {
     if (!labels.empty())
       labels += " > ";
@@ -50,7 +57,7 @@ MessageCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
   return VK_FALSE;
 }
 
-bool HasExtension(const std::vector<VkExtensionProperties>& exts,
+bool HasExtension(const base::Vector<VkExtensionProperties>& exts,
                   const char* name) {
   for (const auto& e : exts)
     if (!std::strcmp(e.extensionName, name))
@@ -58,8 +65,8 @@ bool HasExtension(const std::vector<VkExtensionProperties>& exts,
   return false;
 }
 
-std::vector<u8> ReadFile(const std::string& path) {
-  std::vector<u8> out;
+base::Vector<u8> ReadFile(const base::String& path) {
+  base::Vector<u8> out;
   if (path.empty())
     return out;
   FILE* f = std::fopen(path.c_str(), "rb");
@@ -314,7 +321,7 @@ bool ImageAllocator::Allocate(VulkanDevice& device,
     type = device.FindMemoryType(mr.memoryTypeBits, 0);
 
   if (!dedicated.requiresDedicatedAllocation && mr.size <= kImageBlockSize / 2) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    base::LockGuard<base::Mutex> lock(mutex_);
     auto try_block = [&](Block& block) {
       u64 offset = 0;
       if (block.type != type ||
@@ -337,7 +344,7 @@ bool ImageAllocator::Allocate(VulkanDevice& device,
     ai.memoryTypeIndex = type;
     if (vkAllocateMemory(dev, &ai, nullptr, &block.memory) == VK_SUCCESS) {
       block.spans.Reset(kImageBlockSize);
-      blocks_.push_back(std::move(block));
+      blocks_.push_back(base::move(block));
       if (try_block(blocks_.back()))
         return true;
     }
@@ -367,7 +374,7 @@ void ImageAllocator::Free(VulkanDevice& device, Allocation& allocation) {
   if (allocation.dedicated) {
     vkFreeMemory(device.native.device, allocation.memory, nullptr);
   } else {
-    std::lock_guard<std::mutex> lock(mutex_);
+    base::LockGuard<base::Mutex> lock(mutex_);
     bool found = false;
     for (auto& block : blocks_)
       if (block.memory == allocation.memory) {
@@ -415,7 +422,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   if (options.debug_utils || options.validation_layer) {
     u32 n = 0;
     vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr);
-    std::vector<VkExtensionProperties> exts(n);
+    base::Vector<VkExtensionProperties> exts(n);
     vkEnumerateInstanceExtensionProperties(nullptr, &n, exts.data());
     debug_utils = HasExtension(exts, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
   }
@@ -431,7 +438,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   if (layer) {
     u32 n = 0;
     vkEnumerateInstanceLayerProperties(&n, nullptr);
-    std::vector<VkLayerProperties> layers(n);
+    base::Vector<VkLayerProperties> layers(n);
     vkEnumerateInstanceLayerProperties(&n, layers.data());
     bool found = false;
     for (const auto& l : layers)
@@ -485,13 +492,13 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   // virtual > CPU, unless the filter names one.
   u32 n = 0;
   vkEnumeratePhysicalDevices(native.instance, &n, nullptr);
-  std::vector<VkPhysicalDevice> devs(n);
+  base::Vector<VkPhysicalDevice> devs(n);
   vkEnumeratePhysicalDevices(native.instance, &n, devs.data());
   int best = -1;
   for (VkPhysicalDevice d : devs) {
     u32 qn = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(d, &qn, nullptr);
-    std::vector<VkQueueFamilyProperties> qs(qn);
+    base::Vector<VkQueueFamilyProperties> qs(qn);
     vkGetPhysicalDeviceQueueFamilyProperties(d, &qn, qs.data());
     int family = -1;
     for (u32 i = 0; i < qn && family < 0; i++)
@@ -542,7 +549,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
 
   u32 en = 0;
   vkEnumerateDeviceExtensionProperties(phys, nullptr, &en, nullptr);
-  std::vector<VkExtensionProperties> exts(en);
+  base::Vector<VkExtensionProperties> exts(en);
   vkEnumerateDeviceExtensionProperties(phys, nullptr, &en, exts.data());
 
   VkPhysicalDeviceVulkan12Features f12{
@@ -559,7 +566,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   void** chain = &f13.pNext;
   (void)chain;
 
-  std::vector<const char*> dev_exts;
+  base::Vector<const char*> dev_exts;
   auto want_ext = [&](const char* name) {
     if (!HasExtension(exts, name))
       return false;
@@ -684,7 +691,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
 
   if (options.pipeline_cache_path)
     pipeline_cache_path_ = options.pipeline_cache_path;
-  std::vector<u8> blob = ReadFile(pipeline_cache_path_);
+  base::Vector<u8> blob = ReadFile(pipeline_cache_path_);
   VkPipelineCacheCreateInfo pci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
   pci.initialDataSize = blob.size();
   pci.pInitialData = blob.empty() ? nullptr : blob.data();
@@ -750,7 +757,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   max_lod_bias_ = lim.maxSamplerLodBias;
   max_anisotropy_ = lim.maxSamplerAnisotropy;
   caps_.max_compute_resources =
-      std::min(lim.maxPerStageDescriptorStorageBuffers,
+      base::Min(lim.maxPerStageDescriptorStorageBuffers,
                lim.maxDescriptorSetStorageBuffers);
   constexpr VkMemoryPropertyFlags kUnified =
       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
@@ -769,7 +776,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
 }
 
 rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
-  auto buffer = std::make_unique<VulkanBuffer>(desc);
+  auto buffer = base::MakeUnique<VulkanBuffer>(desc);
   VkDevice dev = native.device;
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = desc.size;
@@ -898,12 +905,12 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
     buffer->set_address(vkGetBufferDeviceAddress(dev, &info));
   }
   if (desc.name)
-    SetName(buffer.get(), desc.name);
-  return buffer.release();
+    SetName(&*buffer, desc.name);
+  return gpu::rhi::Release(buffer);
 }
 
 rhi::Texture* VulkanDevice::CreateTexture(const rhi::TextureDesc& desc) {
-  auto texture = std::make_unique<VulkanTexture>(desc);
+  auto texture = base::MakeUnique<VulkanTexture>(desc);
   const rhi::FormatInfo& fi = rhi::GetFormatInfo(desc.format);
   VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ii.imageType = desc.dim == rhi::TextureDim::k1D   ? VK_IMAGE_TYPE_1D
@@ -947,14 +954,14 @@ rhi::Texture* VulkanDevice::CreateTexture(const rhi::TextureDesc& desc) {
                                (fi.is_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0)
                          : VK_IMAGE_ASPECT_COLOR_BIT;
   if (desc.name)
-    SetName(texture.get(), desc.name);
-  return texture.release();
+    SetName(&*texture, desc.name);
+  return gpu::rhi::Release(texture);
 }
 
 rhi::TextureView* VulkanDevice::CreateView(rhi::Texture* texture,
                                            const rhi::TextureViewDesc& desc) {
   auto* tex = static_cast<VulkanTexture*>(texture);
-  auto view = std::make_unique<VulkanView>(texture, desc);
+  auto view = base::MakeUnique<VulkanView>(texture, desc);
   VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vi.image = tex->image;
   vi.viewType = ToVkViewType(desc.dim);
@@ -968,11 +975,11 @@ rhi::TextureView* VulkanDevice::CreateView(rhi::Texture* texture,
   if (vkCreateImageView(native.device, &vi, nullptr, &view->view) !=
       VK_SUCCESS)
     return nullptr;
-  return view.release();
+  return gpu::rhi::Release(view);
 }
 
 rhi::Sampler* VulkanDevice::CreateSampler(const rhi::SamplerDesc& desc) {
-  auto sampler = std::make_unique<VulkanSampler>();
+  auto sampler = base::MakeUnique<VulkanSampler>();
   VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
   si.magFilter = ToVkFilter(desc.mag);
   si.minFilter = ToVkFilter(desc.min);
@@ -988,13 +995,13 @@ rhi::Sampler* VulkanDevice::CreateSampler(const rhi::SamplerDesc& desc) {
   si.addressModeU = address(desc.address_u);
   si.addressModeV = address(desc.address_v);
   si.addressModeW = address(desc.address_w);
-  si.mipLodBias = std::clamp(desc.lod_bias, -max_lod_bias_, max_lod_bias_);
+  si.mipLodBias = base::Clamp(desc.lod_bias, -max_lod_bias_, max_lod_bias_);
   si.minLod = desc.min_lod;
   si.maxLod = desc.max_lod;
   si.anisotropyEnable =
       desc.max_anisotropy > 1.0f && caps_.sampler_anisotropy ? VK_TRUE
                                                              : VK_FALSE;
-  si.maxAnisotropy = std::min(desc.max_anisotropy, max_anisotropy_);
+  si.maxAnisotropy = base::Min(desc.max_anisotropy, max_anisotropy_);
   si.compareEnable = desc.compare_enable ? VK_TRUE : VK_FALSE;
   si.compareOp = ToVkCompare(desc.compare);
   switch (desc.border) {
@@ -1011,13 +1018,13 @@ rhi::Sampler* VulkanDevice::CreateSampler(const rhi::SamplerDesc& desc) {
   if (vkCreateSampler(native.device, &si, nullptr, &sampler->sampler) !=
       VK_SUCCESS)
     return nullptr;
-  return sampler.release();
+  return gpu::rhi::Release(sampler);
 }
 
 rhi::BindGroupLayout* VulkanDevice::CreateBindGroupLayout(
     const rhi::BindGroupLayoutDesc& desc) {
-  auto layout = std::make_unique<VulkanBindGroupLayout>(desc);
-  std::vector<VkDescriptorSetLayoutBinding> bindings;
+  auto layout = base::MakeUnique<VulkanBindGroupLayout>(desc);
+  base::Vector<VkDescriptorSetLayoutBinding> bindings;
   for (const auto& b : desc.bindings) {
     VkDescriptorType type = ToVkDescriptorType(b.type);
     layout->types.push_back(type);
@@ -1035,7 +1042,7 @@ rhi::BindGroupLayout* VulkanDevice::CreateBindGroupLayout(
   if (vkCreateDescriptorSetLayout(native.device, &li, nullptr,
                                   &layout->layout) != VK_SUCCESS)
     return nullptr;
-  return layout.release();
+  return gpu::rhi::Release(layout);
 }
 
 VkDescriptorPool VulkanDevice::GrowSetPool() {
@@ -1098,10 +1105,10 @@ void VulkanDevice::FillWrite(VkDescriptorType type,
 
 rhi::BindGroup* VulkanDevice::CreateBindGroup(const rhi::BindGroupDesc& desc) {
   auto* layout = static_cast<VulkanBindGroupLayout*>(desc.layout);
-  auto group = std::make_unique<VulkanBindGroup>();
+  auto group = base::MakeUnique<VulkanBindGroup>();
   group->layout = layout;
   {
-    std::lock_guard<std::mutex> lock(set_pool_mutex_);
+    base::LockGuard<base::Mutex> lock(set_pool_mutex_);
     VkDescriptorSetAllocateInfo ai{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorSetCount = 1;
@@ -1123,9 +1130,9 @@ rhi::BindGroup* VulkanDevice::CreateBindGroup(const rhi::BindGroupDesc& desc) {
       group->pool = ai.descriptorPool;
     }
   }
-  UpdateBindGroup(group.get(), desc.writes.data(),
+  UpdateBindGroup(&*group, desc.writes.data(),
                   static_cast<u32>(desc.writes.size()));
-  return group.release();
+  return gpu::rhi::Release(group);
 }
 
 void VulkanDevice::UpdateBindGroup(rhi::BindGroup* group,
@@ -1133,9 +1140,9 @@ void VulkanDevice::UpdateBindGroup(rhi::BindGroup* group,
                                    u32 count) {
   auto* g = static_cast<VulkanBindGroup*>(group);
   const auto& bindings = g->layout->desc().bindings;
-  std::vector<VkWriteDescriptorSet> vk_writes(count);
-  std::vector<VkDescriptorImageInfo> images(count);
-  std::vector<VkDescriptorBufferInfo> buffers(count);
+  base::Vector<VkWriteDescriptorSet> vk_writes(count);
+  base::Vector<VkDescriptorImageInfo> images(count);
+  base::Vector<VkDescriptorBufferInfo> buffers(count);
   u32 n = 0;
   for (u32 i = 0; i < count; i++) {
     for (size_t b = 0; b < bindings.size(); b++) {
@@ -1154,8 +1161,8 @@ void VulkanDevice::UpdateBindGroup(rhi::BindGroup* group,
 
 rhi::PipelineLayout* VulkanDevice::CreatePipelineLayout(
     const rhi::PipelineLayoutDesc& desc) {
-  auto layout = std::make_unique<VulkanPipelineLayout>(desc);
-  std::vector<VkDescriptorSetLayout> sets;
+  auto layout = base::MakeUnique<VulkanPipelineLayout>(desc);
+  base::Vector<VkDescriptorSetLayout> sets;
   for (rhi::BindGroupLayout* g : desc.groups)
     sets.push_back(g ? static_cast<VulkanBindGroupLayout*>(g)->layout
                      : VK_NULL_HANDLE);
@@ -1169,7 +1176,7 @@ rhi::PipelineLayout* VulkanDevice::CreatePipelineLayout(
   if (vkCreatePipelineLayout(native.device, &li, nullptr, &layout->layout) !=
       VK_SUCCESS)
     return nullptr;
-  return layout.release();
+  return gpu::rhi::Release(layout);
 }
 
 rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
@@ -1199,13 +1206,13 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
             add_stage(desc.geometry, VK_SHADER_STAGE_GEOMETRY_BIT) &&
             add_stage(desc.fragment, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-  std::vector<VkVertexInputBindingDescription> binds;
+  base::Vector<VkVertexInputBindingDescription> binds;
   for (size_t i = 0; i < desc.vertex_buffers.size(); i++)
     binds.push_back({static_cast<u32>(i), desc.vertex_buffers[i].stride,
                      desc.vertex_buffers[i].per_instance
                          ? VK_VERTEX_INPUT_RATE_INSTANCE
                          : VK_VERTEX_INPUT_RATE_VERTEX});
-  std::vector<VkVertexInputAttributeDescription> attrs;
+  base::Vector<VkVertexInputAttributeDescription> attrs;
   for (const auto& a : desc.vertex_attributes)
     attrs.push_back({a.location, a.buffer, ToVkFormat(a.format), a.offset});
   VkPipelineVertexInputStateCreateInfo vi{
@@ -1287,7 +1294,7 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
   pi.pColorBlendState = &cb;
   pi.pDynamicState = &dy;
   pi.layout = layout->layout;
-  auto pipeline = std::make_unique<VulkanPipeline>();
+  auto pipeline = base::MakeUnique<VulkanPipeline>();
   pipeline->layout = layout;
   pipeline->bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
   VkResult r = VK_ERROR_UNKNOWN;
@@ -1305,8 +1312,8 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
   }
   last_pipeline_build_ns_ = NowNs();
   if (desc.name)
-    SetName(pipeline.get(), desc.name);
-  return pipeline.release();
+    SetName(&*pipeline, desc.name);
+  return gpu::rhi::Release(pipeline);
 }
 
 rhi::Pipeline* VulkanDevice::CreateComputePipeline(
@@ -1324,7 +1331,7 @@ rhi::Pipeline* VulkanDevice::CreateComputePipeline(
   ci.layout = layout->layout;
   if (desc.dispatch_base)
     ci.flags = VK_PIPELINE_CREATE_DISPATCH_BASE_BIT;
-  auto pipeline = std::make_unique<VulkanPipeline>();
+  auto pipeline = base::MakeUnique<VulkanPipeline>();
   pipeline->layout = layout;
   pipeline->bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
   const VkResult r = vkCreateComputePipelines(
@@ -1337,12 +1344,12 @@ rhi::Pipeline* VulkanDevice::CreateComputePipeline(
   }
   last_pipeline_build_ns_ = NowNs();
   if (desc.name)
-    SetName(pipeline.get(), desc.name);
-  return pipeline.release();
+    SetName(&*pipeline, desc.name);
+  return gpu::rhi::Release(pipeline);
 }
 
 rhi::TimestampPool* VulkanDevice::CreateTimestampPool(u32 count) {
-  auto pool = std::make_unique<VulkanTimestampPool>();
+  auto pool = base::MakeUnique<VulkanTimestampPool>();
   VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
   qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
   qi.queryCount = count;
@@ -1350,11 +1357,11 @@ rhi::TimestampPool* VulkanDevice::CreateTimestampPool(u32 count) {
       VK_SUCCESS)
     return nullptr;
   pool->count = count;
-  return pool.release();
+  return gpu::rhi::Release(pool);
 }
 
 rhi::CommandList* VulkanDevice::CreateCommandList() {
-  auto list = std::make_unique<VulkanCommandList>(*this);
+  auto list = base::MakeUnique<VulkanCommandList>(*this);
   VkCommandBufferAllocateInfo ai{
       VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
   ai.commandPool = command_pool;
@@ -1362,7 +1369,7 @@ rhi::CommandList* VulkanDevice::CreateCommandList() {
   ai.commandBufferCount = 1;
   if (vkAllocateCommandBuffers(native.device, &ai, &list->cmd) != VK_SUCCESS)
     return nullptr;
-  return list.release();
+  return gpu::rhi::Release(list);
 }
 
 void VulkanDevice::Destroy(rhi::Object* object) {
@@ -1382,7 +1389,7 @@ void VulkanDevice::Destroy(rhi::Object* object) {
   } else if (auto* l = dynamic_cast<VulkanBindGroupLayout*>(object)) {
     vkDestroyDescriptorSetLayout(dev, l->layout, nullptr);
   } else if (auto* g = dynamic_cast<VulkanBindGroup*>(object)) {
-    std::lock_guard<std::mutex> lock(set_pool_mutex_);
+    base::LockGuard<base::Mutex> lock(set_pool_mutex_);
     vkFreeDescriptorSets(dev, g->pool, 1, &g->set);
   } else if (auto* pl = dynamic_cast<VulkanPipelineLayout*>(object)) {
     vkDestroyPipelineLayout(dev, pl->layout, nullptr);
@@ -1466,10 +1473,10 @@ void VulkanDevice::QueryMemoryBudget(u64* used, u64* budget) const {
 }
 
 u64 VulkanDevice::Submit(rhi::CommandList* const* lists, u32 count) {
-  std::vector<VkCommandBuffer> cmds(count);
+  base::Vector<VkCommandBuffer> cmds(count);
   for (u32 i = 0; i < count; i++)
     cmds[i] = static_cast<VulkanCommandList*>(lists[i])->cmd;
-  std::lock_guard<std::mutex> lock(queue_mutex);
+  base::LockGuard<base::Mutex> lock(queue_mutex);
   const uint64_t value = submitted_ + 1;
   VkTimelineSemaphoreSubmitInfo ti{
       VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
@@ -1512,7 +1519,7 @@ bool VulkanDevice::Wait(u64 submission, u64 timeout_ns) {
 }
 
 void VulkanDevice::WaitIdle() {
-  std::lock_guard<std::mutex> lock(queue_mutex);
+  base::LockGuard<base::Mutex> lock(queue_mutex);
   vkQueueWaitIdle(native.queue);
 }
 
@@ -1531,7 +1538,7 @@ void VulkanDevice::SavePipelineCache(bool force) {
     return;
   if (force) {
     while (cache_saving_.load())
-      std::this_thread::yield();
+      base::YieldCurrentThread();
   } else if (cache_saving_.load()) {
     return;
   }
@@ -1552,10 +1559,10 @@ void VulkanDevice::SavePipelineCache(bool force) {
     return;
   }
   cache_saving_.store(true);
-  std::thread([this] {
+  base::SpawnDetachedThread("vk_rhi_device", [this] {
     WritePipelineCache(false);
     cache_saving_.store(false);
-  }).detach();
+  });
 }
 
 void VulkanDevice::WritePipelineCache(bool force) {
@@ -1567,14 +1574,14 @@ void VulkanDevice::WritePipelineCache(bool force) {
   if (!force && size == last_cache_size_)
     return;
   last_cache_size_ = size;
-  std::vector<u8> blob(size);
+  base::Vector<u8> blob(size);
   if (vkGetPipelineCacheData(native.device, native.pipeline_cache, &size,
                              blob.data()) != VK_SUCCESS)
     return;
   // Write-then-rename: the runner SIGKILLs the emulator, and a torn blob
   // would cost the next run its whole cache.
-  const std::string tmp =
-      pipeline_cache_path_ + "." + std::to_string(::getpid()) + ".tmp";
+  const base::String tmp =
+      base::Format("{}.{}.tmp", pipeline_cache_path_, ::getpid());
   FILE* f = std::fopen(tmp.c_str(), "wb");
   if (!f)
     return;
@@ -1601,7 +1608,7 @@ void VulkanDevice::ReportDeviceLoss() {
     if (get) {
       u32 count = 0;
       get(native.queue, &count, nullptr);
-      std::vector<VkCheckpointDataNV> points(
+      base::Vector<VkCheckpointDataNV> points(
           count, {VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV});
       get(native.queue, &count, points.data());
       for (const auto& p : points)
@@ -1620,8 +1627,8 @@ void VulkanDevice::ReportDeviceLoss() {
   VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
   if (get_fault(dev, &counts, nullptr) < 0)
     return;
-  std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
-  std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+  base::Vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
+  base::Vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
   VkDeviceFaultInfoEXT info{VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
   info.pAddressInfos = addrs.data();
   info.pVendorInfos = vendors.data();
@@ -1642,8 +1649,8 @@ void VulkanDevice::ReportDeviceLoss() {
 
 }  // namespace rhi_impl
 
-std::unique_ptr<rhi::Device> CreateVulkanDevice(const VulkanOptions& options) {
-  auto device = std::make_unique<VulkanDevice>();
+base::UniquePointer<rhi::Device> CreateVulkanDevice(const VulkanOptions& options) {
+  auto device = base::MakeUnique<VulkanDevice>();
   if (!device->Init(options))
     return nullptr;
   return device;

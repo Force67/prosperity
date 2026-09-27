@@ -7,15 +7,22 @@
 #include <epoxy/gl.h>
 #include <pthread.h>
 
-#include <algorithm>
 #include <cstring>
+#include <base/containers/vector.h>
+#include <base/functional/function.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/strings/xstring.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace gpu::opengl {
 
 namespace {
 
 // Scores a display by what it renders on; < 0 when it has no GL 4.6 core.
-int Probe(EGLDisplay display, const char* filter, std::string* renderer) {
+int Probe(EGLDisplay display, const char* filter, base::String* renderer) {
   EGLint major = 0, minor = 0;
   if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor))
     return -1;
@@ -43,7 +50,7 @@ int Probe(EGLDisplay display, const char* filter, std::string* renderer) {
 }  // namespace
 
 bool OpenEglDevice(const char* filter, EglDevice* out) {
-  std::vector<EGLDisplay> candidates;
+  base::Vector<EGLDisplay> candidates;
   if (epoxy_has_egl_extension(EGL_NO_DISPLAY, "EGL_EXT_device_enumeration") &&
       epoxy_has_egl_extension(EGL_NO_DISPLAY, "EGL_EXT_platform_device")) {
     EGLDeviceEXT devices[16];
@@ -61,7 +68,7 @@ bool OpenEglDevice(const char* filter, EglDevice* out) {
   const bool filtered = filter && *filter;
   int best = -1;
   for (EGLDisplay d : candidates) {
-    std::string renderer;
+    base::String renderer;
     const int score = Probe(d, filter, &renderer);
     if (score > best) {
       best = score;
@@ -94,7 +101,7 @@ GlslFeatures QueryGlslFeatures() {
   auto get = [](GLenum pname) {
     GLint v = 0;
     glGetIntegerv(pname, &v);
-    return static_cast<u32>(std::max(v, 0));
+    return static_cast<u32>(base::Max(v, 0));
   };
   GlslFeatures f;
   f.nv_barycentric_only =
@@ -105,7 +112,7 @@ GlslFeatures QueryGlslFeatures() {
   f.max_textures = get(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
   f.max_images = get(GL_MAX_IMAGE_UNITS);
   f.max_stage_storage_buffers =
-      std::min({get(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS),
+      base::Min({get(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS),
                 get(GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS),
                 get(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS),
                 get(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS)});
@@ -117,56 +124,57 @@ GlslFeatures QueryGlslFeatures() {
 }
 
 void GlWorker::Start(EGLDisplay display,
-                     std::vector<EGLContext> contexts,
+                     base::Vector<EGLContext> contexts,
                      const char* name,
-                     std::function<void()> init) {
+                     base::Function<void()> init) {
   display_ = display;
-  contexts_ = std::move(contexts);
-  init_ = std::move(init);
+  contexts_ = base::move(contexts);
+  init_ = base::move(init);
   stop_ = false;
   for (EGLContext c : contexts_)
-    threads_.emplace_back([this, c, name] { Loop(c, name); });
+    threads_.push_back(base::MakeUnique<base::Thread>(
+        name, [this, c, name] { Loop(c, name); }, true));
 }
 
 void GlWorker::Stop() {
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    base::LockGuard<base::Mutex> lock(mutex_);
     stop_ = true;
   }
-  cv_.notify_all();
-  for (std::thread& t : threads_)
-    t.join();
+  cv_.NotifyAll();
+  for (auto& t : threads_)
+    t->Join();
   threads_.clear();
   for (EGLContext c : contexts_)
     eglDestroyContext(display_, c);
   contexts_.clear();
 }
 
-void GlWorker::Post(std::function<void()> task) {
+void GlWorker::Post(base::Function<void()> task) {
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    tasks_.push_back(std::move(task));
+    base::LockGuard<base::Mutex> lock(mutex_);
+    tasks_.push_back(base::move(task));
   }
-  cv_.notify_one();
+  cv_.NotifyOne();
 }
 
-void GlWorker::Run(const std::function<void()>& task) {
-  for (const std::thread& t : threads_)
-    if (t.get_id() == std::this_thread::get_id()) {
+void GlWorker::Run(const base::Function<void()>& task) {
+  for (const auto& t : threads_)
+    if (base::IsCurrentThread(t->handle())) {
       task();
       return;
     }
-  std::mutex m;
-  std::condition_variable cv;
+  base::Mutex m;
+  base::ConditionVariable cv;
   bool done = false;
   Post([&] {
     task();
-    std::lock_guard<std::mutex> lock(m);
+    base::LockGuard<base::Mutex> lock(m);
     done = true;
-    cv.notify_one();
+    cv.NotifyOne();
   });
-  std::unique_lock<std::mutex> lock(m);
-  cv.wait(lock, [&] { return done; });
+  base::UniqueLock<base::Mutex> lock(m);
+  cv.Wait(lock, [&] { return done; });
 }
 
 void GlWorker::Loop(EGLContext context, const char* name) {
@@ -176,13 +184,13 @@ void GlWorker::Loop(EGLContext context, const char* name) {
   if (init_)
     init_();
   while (true) {
-    std::function<void()> task;
+    base::Function<void()> task;
     {
-      std::unique_lock<std::mutex> lock(mutex_);
-      cv_.wait(lock, [&] { return stop_ || !tasks_.empty(); });
+      base::UniqueLock<base::Mutex> lock(mutex_);
+      cv_.Wait(lock, [&] { return stop_ || !tasks_.empty(); });
       if (tasks_.empty())
         break;
-      task = std::move(tasks_.front());
+      task = base::move(tasks_.front());
       tasks_.pop_front();
     }
     task();

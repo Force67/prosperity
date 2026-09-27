@@ -24,16 +24,22 @@
 #include "gpu/gcn/gcn_detile.h"
 #include "base/arch.h"
 
-#include <algorithm>
-#include <atomic>
-#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <thread>
-#include <unordered_map>
-#include <vector>
 #include <utl/options.h>
+#include <base/atomic.h>
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/functional/function.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/memory/unique_pointer.h>
+#include <base/threading/thread.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kDetileMt, "DELTA_GPU_DETILE_MT", true);
@@ -56,7 +62,7 @@ class RowPool {
 
   void run(u32 units,
            u64 work_items,
-           const std::function<void(u32, u32)>& fn) {
+           const base::Function<void(u32, u32)>& fn) {
     // A callback can use another detile operation for one of its units. Running
     // that nested region inline avoids recursively taking run_mutex_ and keeps
     // the outer workers useful instead of deadlocking them at a second barrier.
@@ -67,34 +73,34 @@ class RowPool {
     }
     // Serialize whole regions: the GPU pipeline is single-threaded, but this
     // guards the shared state should two callers ever overlap.
-    std::lock_guard<std::mutex> serial(run_mutex_);
+    base::LockGuard<base::Mutex> serial(run_mutex_);
     if (!enabled_ || threads_.empty() || units < 2 ||
         work_items < kMinParallelItems) {
       invoke(fn, 0, units);
       return;
     }
     {
-      std::unique_lock<std::mutex> lk(mtx_);
+      base::UniqueLock<base::Mutex> lk(mtx_);
       fn_ = &fn;
       total_units_ = units;
-      cursor_.store(0, std::memory_order_relaxed);
-      const u64 useful_lanes = std::max<u64>(
+      cursor_.store(0, base::memory_order_relaxed);
+      const u64 useful_lanes = base::Max<u64>(
           2, (work_items + kItemsPerLane - 1) / kItemsPerLane);
-      worker_count_ = std::min<u32>(
+      worker_count_ = base::Min<u32>(
           {static_cast<u32>(threads_.size()), units - 1,
-           static_cast<u32>(std::min<u64>(
+           static_cast<u32>(base::Min<u64>(
                useful_lanes - 1, static_cast<u64>(UINT32_MAX)))});
       // Aim for several chunks per lane so stealing balances uneven units.
       const u32 lanes = worker_count_ + 1;
-      block_ = std::max(1u, units / (lanes * 4u));
+      block_ = base::Max(1u, units / (lanes * 4u));
       active_ = 0;
       ++generation_;
-      start_cv_.notify_all();
+      start_cv_.NotifyAll();
     }
     drain();  // the caller is a lane too
     {
-      std::unique_lock<std::mutex> lk(mtx_);
-      done_cv_.wait(lk, [this] { return active_ == 0; });
+      base::UniqueLock<base::Mutex> lk(mtx_);
+      done_cv_.Wait(lk, [this] { return active_ == 0; });
       fn_ = nullptr;
     }
   }
@@ -105,43 +111,42 @@ class RowPool {
 
   RowPool() {
     enabled_ = kDetileMt;
-    u32 hw = std::thread::hardware_concurrency();
-    u32 n = std::min(8u, hw ? hw / 2u : 1u);
+    u32 n = base::Min(8u, base::Max(base::GetProcessorCount() / 2u, 1u));
     if (const char* configured = kDetileThreads) {
       char* end = nullptr;
       const unsigned long lanes = std::strtoul(configured, &end, 10);
       if (end != configured && !*end)
-        n = lanes > 1 ? static_cast<u32>(std::min(lanes - 1, 63ul)) : 0;
+        n = lanes > 1 ? static_cast<u32>(base::Min(lanes - 1, 63ul)) : 0;
     }
     if (!enabled_)
       n = 0;
     for (u32 i = 0; i < n; i++)
-      threads_.emplace_back([this, i] { worker(i); });
+      threads_.push_back(base::MakeUnique<base::Thread>(
+          "detile", [this, i] { worker(i); }, true));
   }
 
   ~RowPool() {
     {
-      std::unique_lock<std::mutex> lk(mtx_);
+      base::UniqueLock<base::Mutex> lk(mtx_);
       stop_ = true;
-      start_cv_.notify_all();
+      start_cv_.NotifyAll();
     }
     for (auto& t : threads_)
-      if (t.joinable())
-        t.join();
+      t->Join();
   }
 
   // Claim and process chunks until the range is exhausted.
   void drain() {
     for (;;) {
-      u32 s = cursor_.fetch_add(block_, std::memory_order_relaxed);
+      u32 s = cursor_.fetch_add(block_, base::memory_order_relaxed);
       if (s >= total_units_)
         break;
-      u32 e = std::min(s + block_, total_units_);
+      u32 e = base::Min(s + block_, total_units_);
       invoke(*fn_, s, e);
     }
   }
 
-  void invoke(const std::function<void(u32, u32)>& fn,
+  void invoke(const base::Function<void(u32, u32)>& fn,
               u32 first,
               u32 last) {
     if (first == last)
@@ -157,8 +162,8 @@ class RowPool {
     for (;;) {
       bool participate;
       {
-        std::unique_lock<std::mutex> lk(mtx_);
-        start_cv_.wait(lk, [this, &local_gen] {
+        base::UniqueLock<base::Mutex> lk(mtx_);
+        start_cv_.Wait(lk, [this, &local_gen] {
           return stop_ || generation_ != local_gen;
         });
         if (stop_)
@@ -167,7 +172,7 @@ class RowPool {
         // A late worker need not acknowledge a region whose rows are already
         // claimed. Only workers holding the callback can delay its release.
         participate = index < worker_count_ &&
-                      cursor_.load(std::memory_order_relaxed) < total_units_;
+                      cursor_.load(base::memory_order_relaxed) < total_units_;
         if (participate)
           ++active_;
       }
@@ -175,19 +180,19 @@ class RowPool {
         continue;
       drain();
       {
-        std::lock_guard<std::mutex> lk(mtx_);
+        base::LockGuard<base::Mutex> lk(mtx_);
         if (--active_ == 0)
-          done_cv_.notify_one();
+          done_cv_.NotifyOne();
       }
     }
   }
 
-  std::vector<std::thread> threads_;
-  std::mutex mtx_;
-  std::mutex run_mutex_;
-  std::condition_variable start_cv_, done_cv_;
-  const std::function<void(u32, u32)>* fn_ = nullptr;
-  std::atomic<u32> cursor_{0};
+  base::Vector<base::UniquePointer<base::Thread>> threads_;
+  base::Mutex mtx_;
+  base::Mutex run_mutex_;
+  base::ConditionVariable start_cv_, done_cv_;
+  const base::Function<void(u32, u32)>* fn_ = nullptr;
+  base::Atomic<u32> cursor_{0};
   u32 total_units_ = 0;
   u32 block_ = 1;
   u32 generation_ = 0;
@@ -684,7 +689,7 @@ inline u32 PipeFromCoord(u32 x,
   }
   if (am == kAm3DThin1 || am == kAm3DThick || am == kAm3DXThick) {
     u32 rotation =
-        std::max(1u, NumPipesOf(pc) / 2 - 1) * (slice / thickness);
+        base::Max(1u, NumPipesOf(pc) / 2 - 1) * (slice / thickness);
     pipe ^= rotation & (NumPipesOf(pc) - 1);
   }
   return pipe;
@@ -730,7 +735,7 @@ inline u32 BankFromCoord(u32 x,
     rotation = (mp.num_banks / 2 - 1) * (slice / thickness);
   else if (am == kAm3DThin1 || am == kAm3DThick || am == kAm3DXThick)
     rotation =
-        std::max(1u, num_pipes / 2 - 1) * (slice / thickness) / num_pipes;
+        base::Max(1u, num_pipes / 2 - 1) * (slice / thickness) / num_pipes;
   u32 tile_split_rotation = 0;
   if (am == kAm2DThin1 || am == kAm3DThin1 || am == kAmPrt2DThin1 ||
       am == kAmPrt3DThin1)
@@ -1093,8 +1098,8 @@ bool BuildGfx10Layout(TextureLayout32& out,
     return false;
 
   for (u32 mip = 0; mip < mip_levels; mip++) {
-    out.mips[mip].width = std::max(width >> mip, 1u);
-    out.mips[mip].height = std::max(height >> mip, 1u);
+    out.mips[mip].width = base::Max(width >> mip, 1u);
+    out.mips[mip].height = base::Max(height >> mip, 1u);
   }
 
   if (mode.set == kG10_Linear) {
@@ -1105,7 +1110,7 @@ bool BuildGfx10Layout(TextureLayout32& out,
     for (u32 mip = mip_levels; mip-- > 0;) {
       TextureMipLayout32& level = out.mips[mip];
       const u32 raw_pitch =
-          mip_levels > 1 ? ShiftCeil(width, mip) : std::max(width, pitch);
+          mip_levels > 1 ? ShiftCeil(width, mip) : base::Max(width, pitch);
       level.pitch = AlignUp(raw_pitch, pitch_align);
       level.stored_height =
           mip_levels > 1 ? ShiftCeil(height, mip) : level.height;
@@ -1172,8 +1177,8 @@ bool BuildGfx10Layout(TextureLayout32& out,
     }
     level.mip_tail_x = tail_x * micro_w;
     level.mip_tail_y = tail_y * micro_h;
-    tail_w = std::max(tail_w >> 1, micro_w);
-    tail_h = std::max(tail_h >> 1, micro_h);
+    tail_w = base::Max(tail_w >> 1, micro_w);
+    tail_h = base::Max(tail_h >> 1, micro_h);
   }
 
   out.layer_stride = chain;
@@ -1229,7 +1234,7 @@ void CopyMicroTiledMip(u8* tiled,
                        u32 layer,
                        size_t linear_row_bytes,
                        MicroMode mm) {
-  std::array<u32, kMicroTilePixels> element_offsets{};
+  base::Array<u32, kMicroTilePixels> element_offsets{};
   for (u32 y = 0; y < kMicroH; ++y)
     for (u32 x = 0; x < kMicroW; ++x)
       element_offsets[y * kMicroW + x] =
@@ -1250,11 +1255,11 @@ void CopyMicroTiledMip(u8* tiled,
         for (u32 tile_y = tile_y0; tile_y < tile_y1; ++tile_y) {
           const u32 first_y = tile_y * kMicroH;
           const u32 copy_height =
-              std::min(kMicroH, level.height - first_y);
+              base::Min(kMicroH, level.height - first_y);
           for (u32 tile_x = 0; tile_x < tile_columns; ++tile_x) {
             const u32 first_x = tile_x * kMicroW;
             const u32 copy_width =
-                std::min(kMicroW, level.width - first_x);
+                base::Min(kMicroW, level.width - first_x);
             const u64 tile_offset =
                 slice_offset +
                 (static_cast<u64>(tile_y) * physical_tiles_per_row +
@@ -1281,8 +1286,8 @@ void CopyMacroTiledMip(u8* tiled,
                        u32 layer,
                        size_t linear_row_bytes,
                        const Macro2D& c) {
-  std::array<u32, kMicroTilePixels> element_offsets{};
-  std::array<u16, kMicroTilePixels> split_slices{};
+  base::Array<u32, kMicroTilePixels> element_offsets{};
+  base::Array<u16, kMicroTilePixels> split_slices{};
   for (u32 y = 0; y < kMicroH; ++y) {
     for (u32 x = 0; x < kMicroW; ++x) {
       const u32 i = y * kMicroW + x;
@@ -1314,7 +1319,7 @@ void CopyMacroTiledMip(u8* tiled,
         for (u32 tile_y = tile_y0; tile_y < tile_y1; ++tile_y) {
           const u32 first_y = tile_y * kMicroH;
           const u32 copy_height =
-              std::min(kMicroH, level.height - first_y);
+              base::Min(kMicroH, level.height - first_y);
           const u64 macro_row =
               static_cast<u64>(first_y / c.macro_height) *
               macro_tiles_per_row;
@@ -1322,7 +1327,7 @@ void CopyMacroTiledMip(u8* tiled,
           for (u32 tile_x = 0; tile_x < tile_columns; ++tile_x) {
             const u32 first_x = tile_x * kMicroW;
             const u32 copy_width =
-                std::min(kMicroW, level.width - first_x);
+                base::Min(kMicroW, level.width - first_x);
             const u64 macro_tile_offset =
                 (macro_row + first_x / c.macro_pitch) * c.macro_tile_bytes;
             const u32 tile_col = (tile_x / c.num_pipes) % c.mp.bank_width;
@@ -1340,8 +1345,8 @@ void CopyMacroTiledMip(u8* tiled,
             const u32 pipe = PipeFromCoord(swizzle_x, swizzle_y, layer,
                                                 c.pc, c.am, c.thickness);
 
-            std::array<u64, 16> split_bases{};
-            std::array<u32, 16> split_banks{};
+            base::Array<u64, 16> split_bases{};
+            base::Array<u32, 16> split_banks{};
             u64 base = 0;
             u32 bank = 0;
             if constexpr (Split) {
@@ -1474,8 +1479,8 @@ void CopyGfx10Mip(u8* tiled,
   const u32 blocks_per_row = level.pitch / block_w;
   const u32 slice_offset = addr.Offset(2, layer);
 
-  std::vector<u32> x_offsets(level.width), y_offsets(level.height);
-  std::vector<u64> x_blocks(level.width);
+  base::Vector<u32> x_offsets(level.width), y_offsets(level.height);
+  base::Vector<u64> x_blocks(level.width);
   for (u32 x = 0; x < level.width; x++) {
     x_offsets[x] = addr.Offset(0, x + level.mip_tail_x);
     x_blocks[x] = static_cast<u64>(x / block_w) * block_bytes;
@@ -1557,7 +1562,7 @@ bool CopyTextureMip(u8* tiled_image,
 
 bool BuildGfx10AddressTable(const TextureLayout32& layout,
                             u32 mip,
-                            std::vector<u32>& terms,
+                            base::Vector<u32>& terms,
                             u32& block_mask) {
   if (!TilingIsGfx10(layout.tiling_idx) || TilingIsLinear(layout.tiling_idx) ||
       mip >= layout.mip_levels || layout.size > UINT32_MAX)
@@ -1589,7 +1594,7 @@ namespace {
 // checked against every texel.
 bool BuildLiverpoolAddressTable(const TextureLayout32& layout,
                                 u32 mip,
-                                std::vector<u32>& terms,
+                                base::Vector<u32>& terms,
                                 u32& block_mask,
                                 u64& slice_stride) {
   if (TilingIsGfx10(layout.tiling_idx) || TilingIsLinear(layout.tiling_idx) ||
@@ -1601,11 +1606,11 @@ bool BuildLiverpoolAddressTable(const TextureLayout32& layout,
   const u32 words = layout.elem_bytes / 4;
   if (!w || !h || !layers)
     return false;
-  std::vector<u32> identity(layout.size / 4);
+  base::Vector<u32> identity(layout.size / 4);
   for (size_t i = 0; i < identity.size(); i++)
     identity[i] = static_cast<u32>(i * 4);
-  std::vector<u32> address(size_t(w) * h * layers);
-  std::vector<u32> texels(size_t(w) * h * words);
+  base::Vector<u32> address(size_t(w) * h * layers);
+  base::Vector<u32> texels(size_t(w) * h * words);
   for (u32 z = 0; z < layers; z++) {
     if (!DetileTextureMip32(identity.data(), texels.data(), layout, mip, z))
       return false;
@@ -1658,7 +1663,7 @@ bool BuildLiverpoolAddressTable(const TextureLayout32& layout,
 
 bool BuildSeparableAddressTable(const TextureLayout32& layout,
                                 u32 mip,
-                                std::vector<u32>& terms,
+                                base::Vector<u32>& terms,
                                 u32& block_mask,
                                 u64& slice_stride) {
   if (TilingIsGfx10(layout.tiling_idx)) {
@@ -1667,13 +1672,13 @@ bool BuildSeparableAddressTable(const TextureLayout32& layout,
            BuildGfx10AddressTable(layout, mip, terms, block_mask);
   }
   struct Built {
-    std::vector<u32> terms;
+    base::Vector<u32> terms;
     u32 mask = 0;
     u64 stride = 0;
     bool ok = false;
   };
-  static std::mutex mutex;
-  static std::unordered_map<u64, Built> built;
+  static base::Mutex mutex;
+  static base::HashMap<u64, Built> built;
   u64 key = 1469598103934665603ull;
   for (u64 v : {u64(layout.tiling_idx), u64(layout.elem_bytes),
                 u64(layout.layers), u64(layout.mip_levels), layout.size,
@@ -1681,12 +1686,12 @@ bool BuildSeparableAddressTable(const TextureLayout32& layout,
                 u64(layout.mips[mip].height), u64(layout.mips[mip].pitch),
                 u64(layout.mips[mip].stored_height)})
     key = (key ^ v) * 1099511628211ull;
-  std::lock_guard<std::mutex> lock(mutex);
+  base::LockGuard<base::Mutex> lock(mutex);
   auto it = built.find(key);
   if (it == built.end()) {
     Built b;
     b.ok = BuildLiverpoolAddressTable(layout, mip, b.terms, b.mask, b.stride);
-    it = built.emplace(key, std::move(b)).first;
+    it = built.emplace(key, base::move(b)).first;
   }
   if (!it->second.ok)
     return false;
@@ -1700,7 +1705,7 @@ void CopyImageContents(const TextureLayout32& layout,
                        const void* src,
                        void* dst) {
   if (!TilingIsGfx10(layout.tiling_idx)) {
-    std::vector<u32> terms;
+    base::Vector<u32> terms;
     for (u32 mip = 0; mip < layout.mip_levels; mip++) {
       const auto& level = layout.mips[mip];
       u32 mask;
@@ -1732,7 +1737,7 @@ void CopyImageContents(const TextureLayout32& layout,
   Gfx10Addresser addr;
   if (!addr.Init(layout.tiling_idx - kGfx10TilingBase, layout.elem_bytes))
     return;
-  std::vector<u32> terms;
+  base::Vector<u32> terms;
   for (u32 mip = 0; mip < layout.mip_levels; mip++) {
     const auto& level = layout.mips[mip];
     u32 mask;
@@ -1784,13 +1789,13 @@ void CopyImageContents(const TextureLayout32& layout,
 }
 
 void DetileParallelRows(u32 rows,
-                        const std::function<void(u32, u32)>& fn) {
+                        const base::Function<void(u32, u32)>& fn) {
   RowPool::get().run(rows, static_cast<u64>(rows) * 1024, fn);
 }
 
 void DetileParallelWork(u32 units,
                         u64 work_items,
-                        const std::function<void(u32, u32)>& fn) {
+                        const base::Function<void(u32, u32)>& fn) {
   RowPool::get().run(units, work_items, fn);
 }
 
@@ -1845,9 +1850,9 @@ bool BuildTextureLayout32(TextureLayout32& out,
   u64 end = 0;
   for (u32 mip = 0; mip < mip_levels; mip++) {
     TextureMipLayout32& level = out.mips[mip];
-    level.width = std::max(width >> mip, 1u);
-    level.height = std::max(height >> mip, 1u);
-    u32 raw_pitch = std::max(std::max(pitch >> mip, 1u), level.width);
+    level.width = base::Max(width >> mip, 1u);
+    level.height = base::Max(height >> mip, 1u);
+    u32 raw_pitch = base::Max(base::Max(pitch >> mip, 1u), level.width);
     u32 storage_height = level.height;
     if (pow2_pad) {
       raw_pitch = BitCeil(raw_pitch);

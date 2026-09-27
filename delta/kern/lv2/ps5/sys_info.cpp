@@ -8,14 +8,16 @@
 
 #include <base/logging.h>
 #include <cstring>
-#include <map>
-#include <mutex>
-#include <string>
 #include <base/strings/string_ref.h>
 #include <utl/options.h>
 
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_info.h"
+#include <base/containers/map.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/strings/format.h>
 
 namespace {
 DELTA_OPTION(u64, kPs5Cores, "DELTA_PS5_CORES", 0);
@@ -53,16 +55,16 @@ DELTA_OPTION(bool, kSysctlCensus, "DELTA_SYSCTL_CENSUS", false);
 void censusSysctl(int *name, u32 namelen, const void *newp, size_t newlen) {
   if (!kSysctlCensus)
     return;
-  static std::map<std::string, u64> hist;
-  static std::mutex lock;
+  static base::Map<base::String, u64> hist;
+  static base::Mutex lock;
   static u64 calls = 0;
-  std::string key;
+  base::String key;
   if (name && namelen == 2 && name[0] == 0 && name[1] == 3 && newp && newlen)
     key.assign(static_cast<const char *>(newp), newlen);  // name2oid
   else if (name)
     for (u32 i = 0; i < namelen && i < 6; i++)
-      key += (i ? "." : "") + std::to_string(name[i]);
-  std::lock_guard<std::mutex> lk(lock);
+      base::FormatTo(key, "{}{}", i ? "." : "", name[i]);
+  base::LockGuard<base::Mutex> lk(lock);
   hist[key]++;
   if (++calls % 200000)
     return;

@@ -3,7 +3,7 @@
 
 #include "base/arch.h"
 #include <cstdio>
-#include <memory>
+#include <base/memory/unique_pointer.h>
 
 struct SELFHeader {
   u32 magic;
@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
     // determine the size
     fseek(file, 0, SEEK_END);
     u32 len = ftell(file);
-    auto data = std::make_unique<u8[]>(len);
+    auto data = base::MakeUnique<u8[]>(len);
 
     // read file in buffer
     fseek(file, 0, SEEK_SET);

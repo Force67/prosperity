@@ -10,8 +10,12 @@
 #include <base.h>
 #include "base/arch.h"
 #include "file.h"
-#include <algorithm>
 #include <cstdio>
+#include <base/algorithm.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
 
 namespace utl {
 namespace {
@@ -148,7 +152,7 @@ public:
   u64 Read(void *buf, size_t count) override {
     if (pos < size) {
       // get readable size
-      if (const u64 result = std::min<u64>(count, size - pos)) {
+      if (const u64 result = base::Min<u64>(count, size - pos)) {
         std::memcpy(buf, ptr + pos, result);
         pos += result;
         return result;
@@ -192,7 +196,7 @@ File::File(const base::String &dir, fileMode mode /* = fileMode::read */)
 File::File(const void *ptr, size_t size)
     : file(base::MakeUnique<MemStream>(ptr, size)) {}
 
-File::File(base::UniquePointer<fileBase> &&base) : file(std::move(base)) {}
+File::File(base::UniquePointer<fileBase> &&base) : file(base::move(base)) {}
 
 File::~File() { Close(); }
 }

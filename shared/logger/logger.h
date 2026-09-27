@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include "base/arch.h"
 
 #include <base.h>
@@ -8,9 +7,8 @@
 #include <base/strings/xstring.h>
 #include <base/strings/string_ref.h>
 #include <base/memory/unique_pointer.h>
-
-// hard dependency
-#include <fmt/format.h>
+#include <base/strings/format.h>
+#include <base/time/time.h>
 
 // log impl is heavily influenced & based on the yuzu logger
 
@@ -26,7 +24,7 @@ enum class logLevel : u8 {
 };
 
 struct logEntry {
-  std::chrono::microseconds timestamp;
+  base::TimeDelta timestamp;  // since the logger started
   logLevel log_level;
   unsigned int line_num;
   base::String function;
@@ -52,8 +50,7 @@ public:
 base::String formatLogEntry(const logEntry &entry);
 logBase *addLogSink(base::UniquePointer<logBase> sink);
 logBase *getLogSink(base::StringRef name);
-void formatLogMsg(logLevel lvl, u32 line, const char *func,
-                  const char *fmt, const fmt::format_args &args);
+void addLogMsg(logLevel lvl, u32 line, const char *func, base::String msg);
 
 void createLogger(bool withConsole = false);
 
@@ -70,13 +67,12 @@ void silenceLogging();
 template <typename... Args>
 inline void fmtLogMsg(logLevel lvl, u32 line, const char *func,
                       const char *fmt, const Args &... args) {
-  formatLogMsg(lvl, line, func, fmt, fmt::make_format_args(args...));
+  addLogMsg(lvl, line, func, base::Format(fmt, args...));
 }
 
-template <typename... Args>
 inline void fmtLogMsg(logLevel lvl, u32 line, const char *func,
                       const base::String &text) {
-  formatLogMsg(lvl, line, func, text.c_str(), {});
+  addLogMsg(lvl, line, func, text);
 }
 }
 

@@ -14,10 +14,6 @@
 
 #include <cctype>
 #include <cstring>
-#include <mutex>
-#include <string>
-#include <unordered_map>
-#include <vector>
 
 #include <zlib.h>
 
@@ -33,6 +29,14 @@
 #include <logger/logger.h>
 #include <utl/file.h>
 #include <utl/options.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(const char *, kPfsDbg, "DELTA_PFS_DBG", nullptr);
@@ -102,9 +106,9 @@ inline u32 be32(const u8 *p) {
 
 // RSA-2048: m = ct^D mod N, then strip PKCS#1 v1.5 type-2 padding (like the
 // Python _rsa()). Returns the recovered payload, or empty on bad padding.
-std::vector<u8> rsaDecrypt(const u8 *ct, size_t ctLen, const char *nHex,
+base::Vector<u8> rsaDecrypt(const u8 *ct, size_t ctLen, const char *nHex,
                                 const char *dHex) {
-  std::vector<u8> result;
+  base::Vector<u8> result;
   mbedtls_mpi N, D, C, M;
   mbedtls_mpi_init(&N);
   mbedtls_mpi_init(&D);
@@ -213,7 +217,7 @@ public:
     u64 p = off, end = off + len;
     while (p < end) {
       u64 si = p / 0x1000, so = p % 0x1000;
-      u64 take = std::min<u64>(0x1000 - so, end - p);
+      u64 take = base::Min<u64>(0x1000 - so, end - p);
       inner_->read(si * 0x1000, 0x1000, sector);
       if (si >= skip_)
         decryptSector(si, sector);
@@ -271,15 +275,15 @@ public:
       return;
     n_ = dl / bs_;
     map_.resize(n_ + 1);
-    std::vector<u8> raw((n_ + 1) * 8);
+    base::Vector<u8> raw((n_ + 1) * 8);
     inner_->read(bo, raw.size(), raw.data());
     for (u64 i = 0; i <= n_; ++i)
       map_[i] = rd64(raw.data() + i * 8);
   }
 
   void read(u64 off, u64 len, u8 *dst) override {
-    std::vector<u8> block(bs_);
-    std::vector<u8> comp;
+    base::Vector<u8> block(bs_);
+    base::Vector<u8> comp;
     while (len > 0) {
       u64 bi = off / bs_, bo = off % bs_;
       if (bi + 1 > n_) { // out of range
@@ -297,7 +301,7 @@ public:
         uncompress(block.data(), &out, comp.data(),
                    static_cast<uLong>(clen));
       }
-      u64 take = std::min<u64>(bs_ - bo, len);
+      u64 take = base::Min<u64>(bs_ - bo, len);
       std::memcpy(dst, block.data() + bo, take);
       dst += take;
       off += take;
@@ -309,22 +313,22 @@ private:
   DataSource *inner_;
   u64 bs_ = 0;
   u64 n_ = 0;
-  std::vector<u64> map_;
+  base::Vector<u64> map_;
 };
 } // namespace
 
 // ----------------------------------------------------------------------------
 struct PkgImpl {
   utl::File pkg;
-  std::mutex io;
-  std::vector<std::unique_ptr<DataSource>> nodes;
+  base::Mutex io;
+  base::Vector<base::UniquePointer<DataSource>> nodes;
   DataSource *inner = nullptr;
   u32 innerBs = 0;
-  std::unordered_map<std::string, PkgFilesystem::Node> files;
+  base::HashMap<base::String, PkgFilesystem::Node> files;
   // lowercased path -> canonical key in `files`. PFS lookups on the console are
   // case-insensitive for app content; titles rely on it (SotC opens
   // "pakn.psarc" for a shipped "pakN.psarc").
-  std::unordered_map<std::string, std::string> filesCI;
+  base::HashMap<base::String, base::String> filesCI;
   bool valid = false;
 
   explicit PkgImpl(const base::String &path) : pkg(path, utl::fileMode::read) {
@@ -336,9 +340,9 @@ struct PkgImpl {
   }
 
   template <typename T, typename... Args> T *make(Args &&...args) {
-    auto p = std::make_unique<T>(std::forward<Args>(args)...);
-    T *raw = p.get();
-    nodes.emplace_back(std::move(p));
+    auto p = base::MakeUnique<T>(base::forward<Args>(args)...);
+    T *raw = &*p;
+    nodes.emplace_back(base::move(p));
     return raw;
   }
 
@@ -355,7 +359,7 @@ struct PkgImpl {
     if (ec == 0 || ec > 0x10000)
       return false;
 
-    std::vector<u8> tb(static_cast<size_t>(ec) * 0x20);
+    base::Vector<u8> tb(static_cast<size_t>(ec) * 0x20);
     R(to, tb.size(), tb.data());
 
     const u8 *row20 = nullptr;
@@ -375,18 +379,18 @@ struct PkgImpl {
     if (!row20 || !ekOff || ekSz < 0x500 || ikSz < 0x100 || (ikSz % 16))
       return false;
 
-    std::vector<u8> ek(ekSz);
+    base::Vector<u8> ek(ekSz);
     R(ekOff, ekSz, ek.data());
     auto dk3 = rsaDecrypt(ek.data() + 0x400, 0x100, kNDk3, kDDk3);
     if (dk3.empty())
       return false;
 
-    std::vector<u8> ivkIn(row20, row20 + 0x20);
+    base::Vector<u8> ivkIn(row20, row20 + 0x20);
     ivkIn.insert(ivkIn.end(), dk3.begin(), dk3.end());
     u8 ivk[32];
     sha256(ivkIn.data(), ivkIn.size(), ivk);
 
-    std::vector<u8> ik(ikSz), imdec(ikSz);
+    base::Vector<u8> ik(ikSz), imdec(ikSz);
     R(ikOff, ikSz, ik.data());
     aes128CbcDecrypt(ivk + 16, ivk, ik.data(), ikSz, imdec.data());
 
@@ -427,13 +431,13 @@ struct PkgImpl {
     u32 blocks;
     u32 start;
   };
-  std::vector<Inode> ino;
+  base::Vector<Inode> ino;
 
   void readInodes(DataSource *r, u32 bs, bool signedFlag, u64 nd,
                   u64 ndb) {
     u32 dsz = signedFlag ? 0x2C8 : 0xA8;
     u32 per = bs / dsz;
-    std::vector<u8> blk(bs);
+    base::Vector<u8> blk(bs);
     u64 tot = 0;
     u64 count = ndb < 1 ? 1 : ndb;
     for (u64 bi = 0; bi < count && tot < nd; ++bi) {
@@ -457,7 +461,7 @@ struct PkgImpl {
     if (dirInode >= ino.size())
       return -1;
     u32 blocks = ino[dirInode].blocks, st = ino[dirInode].start;
-    std::vector<u8> d(bs);
+    base::Vector<u8> d(bs);
     for (u32 bb = 0; bb < blocks; ++bb) {
       r->read((u64)(st + bb) * bs, bs, d.data());
       u64 o = 0;
@@ -469,7 +473,7 @@ struct PkgImpl {
         if (es == 0)
           break;
         if (ty == 3 && nl > 0 && nl < 256 && o + 16 + nl <= bs) {
-          std::string nm(reinterpret_cast<const char *>(d.data() + o + 16), nl);
+          base::String nm(reinterpret_cast<const char *>(d.data() + o + 16), nl);
           if (nm == name && ch < ino.size())
             return static_cast<i64>(ch);
         }
@@ -479,11 +483,11 @@ struct PkgImpl {
     return -1;
   }
 
-  void walk(u32 i, const std::string &pre, DataSource *r, u32 bs) {
+  void walk(u32 i, const base::String &pre, DataSource *r, u32 bs) {
     if (i >= ino.size())
       return;
     u32 blocks = ino[i].blocks, st = ino[i].start;
-    std::vector<u8> d(bs);
+    base::Vector<u8> d(bs);
     for (u32 bb = 0; bb < blocks; ++bb) {
       r->read((u64)(st + bb) * bs, bs, d.data());
       u64 o = 0;
@@ -495,11 +499,11 @@ struct PkgImpl {
         if (es == 0)
           break;
         if (nl > 0 && nl < 256 && o + 16 + nl <= bs) {
-          std::string nm(reinterpret_cast<const char *>(d.data() + o + 16), nl);
+          base::String nm(reinterpret_cast<const char *>(d.data() + o + 16), nl);
           if (ty == 2 && ch < ino.size()) {
             files[pre + "/" + nm] = {ino[ch].size, ino[ch].start};
                if (const char *dbg = kPfsDbg)
-                 if (nm.find(dbg) != std::string::npos)
+                 if (nm.find(dbg) != base::String::npos)
                    BASE_LOGI("pfs", "{}/{} size={} start={} blocks={} "
                             "blocks*bs={} bs={}",
                             pre.c_str(), nm.c_str(),
@@ -582,10 +586,10 @@ struct PkgImpl {
     walk(root >= 0 ? static_cast<u32>(root) : 0, "", inner, innerBs);
 
     for (const auto &kv : files) {
-      std::string lower(kv.first);
+      base::String lower(kv.first);
       for (auto &c : lower)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-      filesCI.emplace(std::move(lower), kv.first);
+      filesCI.emplace(base::move(lower), kv.first);
     }
 
     valid = true;
@@ -598,9 +602,9 @@ struct PkgImpl {
     if (const char *st = kQarSelftest) {
       const char *want = *st ? st : "texture.qar";
       const PkgFilesystem::Node *node = nullptr;
-      std::string nodePath;
+      base::String nodePath;
       for (const auto &kv : files)
-        if (kv.first.find(want) != std::string::npos) {
+        if (kv.first.find(want) != base::String::npos) {
           node = &kv.second;
           nodePath = kv.first;
           break;
@@ -640,8 +644,8 @@ struct PkgImpl {
     if (static_cast<u64>(off) >= n.size)
       return 0;
     u64 take =
-        std::min<u64>(len, n.size - static_cast<u64>(off));
-    std::lock_guard<std::mutex> lk(io);
+        base::Min<u64>(len, n.size - static_cast<u64>(off));
+    base::LockGuard<base::Mutex> lk(io);
     u64 innerOff =
         static_cast<u64>(n.startBlock) * innerBs + static_cast<u64>(off);
     inner->read(innerOff, take, static_cast<u8 *>(buf));
@@ -659,10 +663,10 @@ struct PkgImpl {
   // Outer-PKG entry straight from the header's entry table (plaintext in a fake pkg,
   // outside the PFS). Same big-endian layout getEkpfs walks: count @0x10, table @0x18,
   // 0x20-byte rows of [id @0, offset @16, size @20].
-  bool readEntry(u32 wantId, std::vector<u8> &out) {
+  bool readEntry(u32 wantId, base::Vector<u8> &out) {
     if (!pkg.IsOpen())
       return false;
-    std::lock_guard<std::mutex> lk(io);
+    base::LockGuard<base::Mutex> lk(io);
     auto R = [&](u64 o, u64 n, u8 *dst) {
       pkg.Seek(o, utl::seekMode::seek_set);
       pkg.Read(dst, n);
@@ -674,7 +678,7 @@ struct PkgImpl {
     u32 to = be32(tmp);
     if (ec == 0 || ec > 0x10000)
       return false;
-    std::vector<u8> tb(static_cast<size_t>(ec) * 0x20);
+    base::Vector<u8> tb(static_cast<size_t>(ec) * 0x20);
     R(to, tb.size(), tb.data());
     for (u32 i = 0; i < ec; ++i) {
       const u8 *e = tb.data() + i * 0x20;
@@ -696,7 +700,7 @@ struct PkgImpl {
 };
 
 PkgFilesystem::PkgFilesystem(const base::String &pkgPath)
-    : impl_(std::make_unique<PkgImpl>(pkgPath)) {}
+    : impl_(base::MakeUnique<PkgImpl>(pkgPath)) {}
 PkgFilesystem::~PkgFilesystem() = default;
 
 bool PkgFilesystem::valid() const { return impl_ && impl_->valid; }
@@ -708,7 +712,7 @@ const PkgFilesystem::Node *PkgFilesystem::find(const char *relPath) const {
   // emit doubled separators (Doom64 opens "/app0//DOOMSND.DLS"); the table is keyed
   // on the clean path and POSIX treats // as /, so an exact match must too (else the
   // soundfont open ENOENTs and FMOD aborts the boot).
-  std::string key;
+  base::String key;
   key.reserve(std::strlen(relPath) + 1);
   key.push_back('/');
   for (const char *p = relPath; *p; ++p) {
@@ -722,7 +726,7 @@ const PkgFilesystem::Node *PkgFilesystem::find(const char *relPath) const {
 
   // Case-insensitive fallback (PFS app-content semantics): exact match wins,
   // otherwise resolve through the lowercased index.
-  std::string lower(key);
+  base::String lower(key);
   for (auto &c : lower)
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   auto ci = impl_->filesCI.find(lower);
@@ -739,7 +743,7 @@ i64 PkgFilesystem::read(const Node &node, void *buf, i64 off,
   return impl_->readNode(node, buf, off, len);
 }
 
-void PkgFilesystem::paths(std::vector<std::string> &out) const {
+void PkgFilesystem::paths(base::Vector<base::String> &out) const {
   if (!impl_)
     return;
   out.reserve(impl_->files.size());
@@ -747,7 +751,7 @@ void PkgFilesystem::paths(std::vector<std::string> &out) const {
     out.push_back(kv.first);
 }
 
-i64 PkgFilesystem::readPkgEntry(u32 entryId, std::vector<u8> &out) {
+i64 PkgFilesystem::readPkgEntry(u32 entryId, base::Vector<u8> &out) {
   if (!impl_)
     return -1;
   return impl_->readEntry(entryId, out) ? static_cast<i64>(out.size()) : -1;

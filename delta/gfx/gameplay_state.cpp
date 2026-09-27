@@ -7,15 +7,15 @@
  */
 
 #include "gfx.h"
+#include <base/atomic.h>
 
-#include <atomic>
 
 namespace gfx {
 namespace {
-std::atomic<bool> g_inGameplay{false};
+base::Atomic<bool> g_inGameplay{false};
 }
 
-void setInGameplay(bool v) { g_inGameplay.store(v, std::memory_order_relaxed); }
-bool inGameplay() { return g_inGameplay.load(std::memory_order_relaxed); }
+void setInGameplay(bool v) { g_inGameplay.store(v, base::memory_order_relaxed); }
+bool inGameplay() { return g_inGameplay.load(base::memory_order_relaxed); }
 
 }  // namespace gfx

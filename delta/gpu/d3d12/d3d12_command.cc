@@ -2,12 +2,17 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-#include <algorithm>
 #include <cstring>
 
 #include <base/logging.h>
 
 #include "gpu/d3d12/d3d12_internal.h"
+#include <base/algorithm.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace gpu::d3d12::impl {
 
@@ -100,7 +105,7 @@ void D3D12CommandList::ReleaseTransient() {
     b.used = 0;
   upload_block_ = 0;
   // Keep the largest scratch buffer for the next recording.
-  std::sort(scratch_.begin(), scratch_.end(),
+  base::Sort(scratch_.begin(), scratch_.end(),
             [](const UploadBlock& a, const UploadBlock& b) {
               return a.size > b.size;
             });
@@ -177,7 +182,7 @@ UploadAlloc D3D12CommandList::AllocateUpload(u64 bytes, u64 alignment) {
     }
   }
   UploadBlock b;
-  b.size = std::max(kUploadBlock, AlignUp(bytes, 65536));
+  b.size = base::Max(kUploadBlock, AlignUp(bytes, 65536));
   b.resource = device_.CreateBufferResource(b.size, D3D12_HEAP_TYPE_UPLOAD,
                                             D3D12_RESOURCE_FLAG_NONE,
                                             D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -203,7 +208,7 @@ UploadAlloc D3D12CommandList::AllocateScratch(u64 bytes) {
     }
   }
   UploadBlock b;
-  b.size = std::max<u64>(kUploadBlock, AlignUp(bytes, 65536));
+  b.size = base::Max<u64>(kUploadBlock, AlignUp(bytes, 65536));
   b.resource = device_.CreateBufferResource(b.size, D3D12_HEAP_TYPE_DEFAULT,
                                             D3D12_RESOURCE_FLAG_NONE,
                                             D3D12_RESOURCE_STATE_COMMON);
@@ -326,7 +331,7 @@ void D3D12CommandList::Barrier(u32 src_access,
 
 void D3D12CommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
   FlushBarriers();
-  pass_color_count_ = std::min(pass.color_count, 8u);
+  pass_color_count_ = base::Min(pass.color_count, 8u);
   const D3D12_RECT area{pass.x, pass.y,
                         pass.x + static_cast<LONG>(pass.width),
                         pass.y + static_cast<LONG>(pass.height)};
@@ -395,16 +400,16 @@ void D3D12CommandList::BindTable(u32 index,
                                  D3D12BindGroupLayout* layout,
                                  D3D12_GPU_DESCRIPTOR_HANDLE table,
                                  D3D12_GPU_DESCRIPTOR_HANDLE samplers,
-                                 std::vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv,
-                                 std::vector<BufferUse> uses) {
+                                 base::Vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv,
+                                 base::Vector<BufferUse> uses) {
   if (index >= 8)
     return;
   BoundGroup& g = groups_[index];
   g.layout = layout;
   g.table = table;
   g.samplers = samplers;
-  g.root_cbv = std::move(root_cbv);
-  g.uses = std::move(uses);
+  g.root_cbv = base::move(root_cbv);
+  g.uses = base::move(uses);
   g.dirty = true;
   g.validated_epoch = ~0ull;
 }
@@ -440,7 +445,7 @@ void D3D12CommandList::SetBindGroup(u32 index,
         layout->table_size, cpu, group->table.cpu,
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   }
-  std::vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv(
+  base::Vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv(
       layout->dynamic_entries.size());
   for (u32 d = 0; d < layout->dynamic_entries.size(); d++) {
     const GroupEntry& e = layout->entries[layout->dynamic_entries[d]];
@@ -458,12 +463,12 @@ void D3D12CommandList::SetBindGroup(u32 index,
   if (layout->sampler_count)
     samplers = device_.SamplerTable(group->samplers, &group->sampler_table,
                                     &group->sampler_generation);
-  std::vector<BufferUse> uses;
+  base::Vector<BufferUse> uses;
   for (const BufferUse& u : group->uses)
     if (u.buffer)
       uses.push_back(u);
-  BindTable(index, layout, table, samplers, std::move(root_cbv),
-            std::move(uses));
+  BindTable(index, layout, table, samplers, base::move(root_cbv),
+            base::move(uses));
 }
 
 void D3D12CommandList::PushBindGroup(u32 index,
@@ -476,11 +481,11 @@ void D3D12CommandList::PushBindGroup(u32 index,
   if (layout->table_size &&
       !AllocateDescriptors(layout->table_size, &cpu, &table))
     return;
-  std::vector<bool> written(layout->entries.size());
-  std::vector<u32> sampler_ids(layout->sampler_count, 0);
-  std::vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv(
+  base::Vector<bool> written(layout->entries.size());
+  base::Vector<u32> sampler_ids(layout->sampler_count, 0);
+  base::Vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv(
       layout->dynamic_entries.size());
-  std::vector<BufferUse> uses;
+  base::Vector<BufferUse> uses;
   for (u32 i = 0; i < num_writes; i++) {
     const rhi::BindingWrite& w = writes[i];
     const GroupEntry* e = layout->Find(w.binding);
@@ -534,8 +539,8 @@ void D3D12CommandList::PushBindGroup(u32 index,
   D3D12_GPU_DESCRIPTOR_HANDLE samplers{};
   if (layout->sampler_count)
     samplers = device_.SamplerTable(sampler_ids, nullptr, nullptr);
-  BindTable(index, layout, table, samplers, std::move(root_cbv),
-            std::move(uses));
+  BindTable(index, layout, table, samplers, base::move(root_cbv),
+            base::move(uses));
 }
 
 void D3D12CommandList::SetPushConstants(u32 offset,
@@ -553,7 +558,7 @@ void D3D12CommandList::SetVertexBuffers(u32 first,
                                         const u64* offsets) {
   for (u32 i = 0; i < count && first + i < 16; i++)
     vertex_[first + i] = {Buf(buffers[i]), offsets[i]};
-  vertex_count_ = std::max(vertex_count_, std::min(first + count, 16u));
+  vertex_count_ = base::Max(vertex_count_, base::Min(first + count, 16u));
   vertex_dirty_ = true;
 }
 
@@ -581,8 +586,8 @@ void D3D12CommandList::SetViewport(float x,
     viewport_ = {x, y, width, height, min_depth, max_depth};
     y_sign_ = -1.0f;
   }
-  viewport_.MinDepth = std::clamp(viewport_.MinDepth, 0.0f, 1.0f);
-  viewport_.MaxDepth = std::clamp(viewport_.MaxDepth, 0.0f, 1.0f);
+  viewport_.MinDepth = base::Clamp(viewport_.MinDepth, 0.0f, 1.0f);
+  viewport_.MaxDepth = base::Clamp(viewport_.MaxDepth, 0.0f, 1.0f);
   cmd->RSSetViewports(1, &viewport_);
 }
 
@@ -605,7 +610,7 @@ void D3D12CommandList::ApplyVertexBuffers() {
       continue;
     views[i].BufferLocation = v.buffer->va + v.offset;
     views[i].SizeInBytes = static_cast<UINT>(
-        v.buffer->desc().size - std::min(v.offset, v.buffer->desc().size));
+        v.buffer->desc().size - base::Min(v.offset, v.buffer->desc().size));
     views[i].StrideInBytes = pipeline_->strides[i];
   }
   cmd->IASetVertexBuffers(0, vertex_count_, views);
@@ -694,7 +699,7 @@ void D3D12CommandList::FlushState(bool compute) {
       ib.BufferLocation = index_buffer_->va + index_offset_;
       ib.SizeInBytes = static_cast<UINT>(
           index_buffer_->desc().size -
-          std::min(index_offset_, index_buffer_->desc().size));
+          base::Min(index_offset_, index_buffer_->desc().size));
       ib.Format = index_type_ == rhi::IndexType::kUint32
                       ? DXGI_FORMAT_R32_UINT
                       : DXGI_FORMAT_R16_UINT;
@@ -1024,7 +1029,7 @@ CpuRange D3D12CommandList::AttachmentView(D3D12Texture* texture,
                                           u32 mip,
                                           u32 layer,
                                           bool depth) {
-  std::lock_guard<std::mutex> lock(texture->view_mutex);
+  base::LockGuard<base::Mutex> lock(texture->view_mutex);
   auto& cache = depth ? texture->dsvs : texture->rtvs;
   const u32 key = mip | (layer << 8);
   auto it = cache.find(key);
@@ -1078,8 +1083,8 @@ void D3D12CommandList::BlitTexture(rhi::Texture* dst,
               rhi::FormatName(d->desc().format));
     return;
   }
-  const u32 src_w = std::max(1u, s->desc().width >> src_region.mip);
-  const u32 src_h = std::max(1u, s->desc().height >> src_region.mip);
+  const u32 src_w = base::Max(1u, s->desc().width >> src_region.mip);
+  const u32 src_h = base::Max(1u, s->desc().height >> src_region.mip);
   const D3D12_RESOURCE_STATES copy_src = D3D12_RESOURCE_STATE_COPY_SOURCE;
   const D3D12_RESOURCE_STATES copy_dst = D3D12_RESOURCE_STATE_COPY_DEST;
   const D3D12_RESOURCE_STATES read =
@@ -1214,11 +1219,11 @@ void D3D12CommandList::ClearByCopy(D3D12Texture* texture,
   }
   for (u32 mip = 0; mip < range.mips; mip++) {
     const rhi::TextureDesc& d = texture->desc();
-    const u32 w = std::max(1u, d.width >> (range.base_mip + mip));
-    const u32 h = std::max(1u, d.height >> (range.base_mip + mip));
+    const u32 w = base::Max(1u, d.width >> (range.base_mip + mip));
+    const u32 h = base::Max(1u, d.height >> (range.base_mip + mip));
     const u32 depth =
         d.dim == rhi::TextureDim::k3D
-            ? std::max(1u, d.depth >> (range.base_mip + mip))
+            ? base::Max(1u, d.depth >> (range.base_mip + mip))
             : 1u;
     const u64 pitch = AlignUp(u64(w) * fi.bytes,
                               D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
@@ -1282,7 +1287,7 @@ void D3D12CommandList::FillBuffer(rhi::Buffer* buffer,
                                   u32 value) {
   D3D12Buffer* b = Buf(buffer);
   if (bytes == ~0ull || offset + bytes > b->desc().size)
-    bytes = (b->desc().size - std::min(offset, b->desc().size)) & ~3ull;
+    bytes = (b->desc().size - base::Min(offset, b->desc().size)) & ~3ull;
   if (!bytes)
     return;
   if (b->fixed_state) {

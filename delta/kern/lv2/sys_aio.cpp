@@ -13,8 +13,6 @@
 
 #include "sys_aio.h"
 
-#include <mutex>
-#include <unordered_map>
 
 #include <base/logging.h>
 #include <utl/mem.h>
@@ -22,6 +20,10 @@
 
 #include "error_table.h"
 #include "sys_vfs_ext.h"
+#include <base/containers/map.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kAioTrace, "DELTA_AIO_TRACE", false);
@@ -63,8 +65,8 @@ enum : u32 {
 
 // Live submit ids. The value is the SCE error the request finished with, which
 // is what wait/poll/delete report back per id.
-std::mutex g_mutex;
-std::unordered_map<u32, int> g_requests;
+base::Mutex g_mutex;
+base::HashMap<u32, int> g_requests;
 u32 g_nextId = 1;
 
 // One request, start to finish. Returns the SCE error for the id.
@@ -96,7 +98,7 @@ int runRequest(u32 cmd, AioRequest &req) {
 // caller is about to drop it either way, and refusing one it believes in is
 // what turns a stale id into a stalled loader.
 int reportIds(const u32 *ids, u32 num, int *errs, bool erase) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  base::LockGuard<base::Mutex> lock(g_mutex);
   for (u32 i = 0; i < num; i++) {
     int err = 0;
     if (ids && utl::isMemoryRangeMapped(ids + i, sizeof(u32))) {
@@ -133,13 +135,13 @@ int PS4ABI sys_aio_submit_cmd(u32 cmd, void *reqs, u32 num, u32 prio,
 
   int worst = 0;
   {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    base::LockGuard<base::Mutex> lock(g_mutex);
     for (u32 i = 0; i < idCount; i++)
       ids[i] = g_nextId++;
   }
   for (u32 i = 0; i < num; i++) {
     const int err = runRequest(cmd, req[i]);
-    std::lock_guard<std::mutex> lock(g_mutex);
+    base::LockGuard<base::Mutex> lock(g_mutex);
     // A shared id carries the first failure of its batch; a per-request id
     // carries its own.
     if (multi)
@@ -148,7 +150,7 @@ int PS4ABI sys_aio_submit_cmd(u32 cmd, void *reqs, u32 num, u32 prio,
       worst = err;
   }
   if (!multi) {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    base::LockGuard<base::Mutex> lock(g_mutex);
     g_requests[ids[0]] = worst;
   }
   return 0;

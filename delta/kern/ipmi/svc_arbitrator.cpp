@@ -22,12 +22,11 @@
  * is the cheapest state we have found. None of it moves the title's stall.
  */
 
-#include <chrono>
-#include <thread>
 
 #include "base/arch.h"
 
 #include "services.h"
+#include <base/threading/thread.h>
 
 namespace krnl::ipmi {
 namespace {
@@ -39,7 +38,7 @@ struct ArbitratorIpc : Service {
 
   void invoke(Invocation &inv) override {
     if (inv.method() == kDrainNotification)
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      base::SleepForMilliseconds(10);
     inv.replyEmpty();
   }
 };

@@ -10,12 +10,13 @@
 
 #include <base.h>
 #include "base/arch.h"
-#include <condition_variable>
-#include <mutex>
 
 #include <base/containers/vector.h>
 
 #include "kern/object.h"
+#include <base/threading/condition_variable.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
 
 namespace krnl {
 class proc;
@@ -88,14 +89,14 @@ private:
   };
   knote *find(u64 ident, i16 filter);
 
-  std::mutex m;
-  std::condition_variable cv;
+  base::Mutex m;
+  base::ConditionVariable cv;
   base::Vector<knote> notes;
   bool warnedEmptyWait = false;
   // A queue nothing has posted to since this point. A title that polls with a
   // timeout looks busy from the outside, so the idle span is what says its
   // event never came.
-  std::chrono::steady_clock::time_point idleSince{};
+  base::TimeTicks idleSince{};
   bool reportedIdle = false;
 };
 

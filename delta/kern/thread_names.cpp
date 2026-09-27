@@ -19,12 +19,13 @@
 
 #include <cstddef>
 #include <cstring>
-#include <mutex>
-#include <vector>
 
 #include <pthread.h>
 
 #include "proc.h"
+#include <base/containers/vector.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace krnl {
 namespace {
@@ -35,8 +36,8 @@ struct StackEntry {
   pthread_t thread;
 };
 
-std::mutex g_mtx;
-std::vector<StackEntry> g_stacks;
+base::Mutex g_mtx;
+base::Vector<StackEntry> g_stacks;
 
 void setName(pthread_t t, const char *name) {
   if (!name || !*name)
@@ -53,7 +54,7 @@ void registerGuestThreadStack(const void *stack, size_t size) {
   if (!stack || !size)
     return;
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     g_stacks.push_back({stack, size, pthread_self()});
   }
   // The creating thread usually tags the stack before starting the thread;
@@ -68,7 +69,7 @@ void registerGuestThreadStack(const void *stack, size_t size) {
 
 void unregisterGuestThreadStack() {
   const pthread_t self = pthread_self();
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   for (auto it = g_stacks.begin(); it != g_stacks.end(); ++it) {
     if (pthread_equal(it->thread, self)) {
       g_stacks.erase(it);
@@ -86,7 +87,7 @@ void nameThreadsForRange(const void *ptr, size_t len, const char *name) {
     return;
   const auto *lo = static_cast<const u8 *>(ptr);
   const auto *hi = lo + len;
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   // CONTAINMENT, not overlap. A title tags a region that can span several
   // guest stacks (SotC's "Resource Loading" tag covers a range overlapping the
   // FIOS and job-worker stacks), and renaming on any overlap gave four

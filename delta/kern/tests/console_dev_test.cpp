@@ -7,6 +7,7 @@
 #include "kern/ps4/dev/console_dev.h"
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/lv2/error_table.h"
+#include <base/strings/format.h>
 
 // No title exercises /dev/console beyond opening it, so its behaviour has to be
 // pinned here rather than by a boot: every guest that does start using it will
@@ -65,11 +66,13 @@ TEST_F(ConsoleDevice, GettersZeroTheirOutputBuffer) {
   for (const auto &c : cases) {
     u8 buf[0x40];
     std::memset(buf, 0xAA, sizeof(buf));
-    EXPECT_EQ(dev_.ioctl(c.cmd, buf), 0) << std::hex << c.cmd;
+    EXPECT_EQ(dev_.ioctl(c.cmd, buf), 0)
+        << base::Format("{:#x}", c.cmd).c_str();
     for (u32 i = 0; i < c.bytes; i++)
-      EXPECT_EQ(buf[i], 0) << std::hex << c.cmd << " byte " << i;
+      EXPECT_EQ(buf[i], 0)
+          << base::Format("{:#x}", c.cmd).c_str() << " byte " << i;
     // Only the payload is touched.
-    EXPECT_EQ(buf[c.bytes], 0xAA) << std::hex << c.cmd;
+    EXPECT_EQ(buf[c.bytes], 0xAA) << base::Format("{:#x}", c.cmd).c_str();
   }
 }
 

@@ -2,16 +2,16 @@
 // real fake-pkg eboots use, without needing a pkg fixture.
 #include "base/arch.h"
 #include <cstring>
-#include <vector>
 
 #include <gtest/gtest.h>
 
 #include <crypto/UnSELF.h>
 #include <elf_types.h>
 #include <sce_types.h>
+#include <base/containers/vector.h>
 
 TEST(UnSELF, RebuildsElfFromFakeSelf) {
-  std::vector<u8> buf(0x400, 0);
+  base::Vector<u8> buf(0x400, 0);
 
   auto *sh = reinterpret_cast<SELFHeader *>(buf.data());
   sh->magic = SELF_MAGIC;
@@ -61,7 +61,7 @@ TEST(UnSELF, RebuildsElfFromFakeSelf) {
 }
 
 TEST(UnSELF, RejectsNonSelf) {
-  std::vector<u8> buf(0x100, 0);
+  base::Vector<u8> buf(0x100, 0);
   u32 notMagic = 0xDEADBEEF;
   std::memcpy(buf.data(), &notMagic, 4);
   EXPECT_TRUE(crypto::self2elf(buf.data(), buf.size()).empty());

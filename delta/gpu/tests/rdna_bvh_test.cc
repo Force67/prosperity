@@ -1,8 +1,4 @@
-#include <array>
-#include <bit>
 #include <limits>
-#include <span>
-#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -11,14 +7,19 @@
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/shader_cache.h"
+#include <base/containers/span.h>
+#include <base/algorithm.h>
+#include <base/containers/array.h>
+#include <base/containers/vector.h>
+#include <base/memory/bit_cast.h>
 
 namespace {
 constexpr u32 kInvalid = 0xffffffff;
 u32 Bits(float value) {
-  return std::bit_cast<u32>(value);
+  return base::BitCast<u32>(value);
 }
 float Float(u32 value) {
-  return std::bit_cast<float>(value);
+  return base::BitCast<float>(value);
 }
 
 class RdnaBvh : public testing::Test {
@@ -28,10 +29,10 @@ class RdnaBvh : public testing::Test {
       GTEST_SKIP() << "A Vulkan device is required";
   }
   // Every dispatch owns distinct guest memory; the renderer can cache inputs.
-  std::array<u32, 4> Run(const std::array<u32, 48>& nodes,
+  base::Array<u32, 4> Run(const base::Array<u32, 48>& nodes,
                          u32 ptr,
-                         std::array<float, 3> origin = {0, 0, 0},
-                         std::array<float, 3> direction = {0, 0, 1},
+                         base::Array<float, 3> origin = {0, 0, 0},
+                         base::Array<float, 3> direction = {0, 0, 1},
                          bool sort = true,
                          bool wide = false,
                          bool nsa = false,
@@ -41,27 +42,27 @@ class RdnaBvh : public testing::Test {
                          float extent = 100,
                          u32 grow = 0,
                          u32 extra_bindings = 0,
-                         std::span<const u32> epilogue = {},
+                         base::Span<const u32> epilogue = {},
                          bool runtime = false,
                          bool changing = false,
                          bool indirect = false) {
-    alignas(65536) static std::array<std::array<u32, 16384>, 256> memory{};
+    alignas(65536) static base::Array<base::Array<u32, 16384>, 256> memory{};
     static u32 allocation = 0;
     auto& source = memory.at(allocation++);
     auto& output = memory.at(allocation++);
-    std::copy(nodes.begin(), nodes.end(), source.begin());
+    base::Copy(nodes.begin(), nodes.end(), source.begin());
     output.fill(0xa5a5a5a5);
     if (changing) {
-      std::copy(nodes.begin(), nodes.end(), source.begin() + 64);
+      base::Copy(nodes.begin(), nodes.end(), source.begin() + 64);
       for (u32 i = 0; i < 4; ++i)
         source[64 + 16 + i] += 0x100;
     }
     if (allocation == 2)
       gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()),
                             sizeof(memory));
-    alignas(256) static std::array<u32, 4096> code{};
+    alignas(256) static base::Array<u32, 4096> code{};
     code.fill(0);
-    std::array<u32, 12> args{};
+    base::Array<u32, 12> args{};
     const u32 shift = wide ? 1 : 0;
     args[0] = ptr;
     if (wide)
@@ -75,12 +76,12 @@ class RdnaBvh : public testing::Test {
     if (a16) {
       // A16 is used below with direction (0,0,1); packed inverse is
       // (inf,inf,1).
-      EXPECT_EQ(direction, (std::array<float, 3>{0, 0, 1}));
+      EXPECT_EQ(direction, (base::Array<float, 3>{0, 0, 1}));
       args[5 + shift] = 0;
       args[6 + shift] = 0x7c003c00;
       args[7 + shift] = 0x3c007c00;
     }
-    constexpr std::array<u32, 12> registers = {0,  61, 65, 66, 68, 62,
+    constexpr base::Array<u32, 12> registers = {0,  61, 65, 66, 68, 62,
                                                64, 67, 69, 70, 71, 72};
     const u32 count = (a16 ? 8 : 11) + shift;
     u32 pc = 0;
@@ -173,15 +174,15 @@ class RdnaBvh : public testing::Test {
     EXPECT_TRUE(gpu::render::FlushCsWrites(gpu::render::DefaultRenderer()));
     if (changing) {
       EXPECT_EQ(
-          (std::array<u32, 4>{output[4], output[5], output[6], output[7]}),
-          (std::array<u32, 4>{0x188, 0x198, 0x180, kInvalid}));
+          (base::Array<u32, 4>{output[4], output[5], output[6], output[7]}),
+          (base::Array<u32, 4>{0x188, 0x198, 0x180, kInvalid}));
     }
     EXPECT_EQ(output[changing ? 8 : 4], 0xa5a5a5a5);
     return {output[0], output[1], output[2], output[3]};
   }
 
-  std::array<u32, 48> Boxes(bool half) {
-    std::array<u32, 48> nodes{};
+  base::Array<u32, 48> Boxes(bool half) {
+    base::Array<u32, 48> nodes{};
     // Node 1: four children, one misses, distances intentionally out of order.
     const float bounds[4][6] = {{-1, -1, 8, 1, 1, 9},
                                 {-1, -1, 2, 1, 1, 3},
@@ -225,28 +226,28 @@ TEST_F(RdnaBvh, RuntimeDescriptorReadsGuestPagesAndChecksWholeNodes) {
   for (bool half : {false, true}) {
     EXPECT_EQ(Run(Boxes(half), 8 + (half ? 4 : 5), {0, 0, 0}, {0, 0, 1}, true,
                   false, true, false, 2, 0, 100, 0, 0, {}, true),
-              (std::array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
+              (base::Array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
   }
   EXPECT_EQ(Run(Boxes(false), 13, {0, 0, 0}, {0, 0, 1}, true, false, true,
                 false, 1, 0, 100, 0, 0, {}, true),
-            (std::array<u32, 4>{kInvalid, kInvalid, kInvalid, kInvalid}));
+            (base::Array<u32, 4>{kInvalid, kInvalid, kInvalid, kInvalid}));
 }
 
 TEST_F(RdnaBvh, RuntimeDescriptorChangesBetweenTraversalIterations) {
   EXPECT_EQ(Run(Boxes(false), 13, {0, 0, 0}, {0, 0, 1}, true, false, false,
                 false, 2, 0, 100, 0, 0, {}, true, true),
-            (std::array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
+            (base::Array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
 }
 
 TEST_F(RdnaBvh, RuntimeScalarLoadsFollowChangingPointerChains) {
   EXPECT_EQ(Run(Boxes(false), 13, {0, 0, 0}, {0, 0, 1}, true, false, false,
                 false, 2, 0, 100, 0, 0, {}, true, true, true),
-            (std::array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
+            (base::Array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
 }
 
 TEST_F(RdnaBvh, DynamicRawBuffersAndScalarPointersWithoutBvh) {
-  alignas(65536) static std::array<std::array<u32, 16384>, 4> memory{};
-  alignas(256) static std::array<u32, 4096> code{};
+  alignas(65536) static base::Array<base::Array<u32, 16384>, 4> memory{};
+  alignas(256) static base::Array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()), sizeof(memory));
   for (bool scalar : {false, true}) {
     auto& input = memory[scalar ? 2 : 0];
@@ -313,14 +314,14 @@ TEST_F(RdnaBvh, BoxesSortCullAndDecodeAllOperandForms) {
           SCOPED_TRACE(testing::Message() << half << wide << nsa << a16);
           EXPECT_EQ(Run(Boxes(half), 8 + (half ? 4 : 5), {0, 0, 0}, {0, 0, 1},
                         true, wide, nsa, a16),
-                    (std::array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
+                    (base::Array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
         }
   EXPECT_EQ(Run(Boxes(false), 13, {0, 0, 0}, {0, 0, 1}, false),
-            (std::array<u32, 4>{0x80, 0x88, kInvalid, 0x98}));
+            (base::Array<u32, 4>{0x80, 0x88, kInvalid, 0x98}));
 }
 
 TEST_F(RdnaBvh, BoundsInvalidNodesAndParallelSlabBoundary) {
-  const std::array<u32, 4> miss = {kInvalid, kInvalid, kInvalid, kInvalid};
+  const base::Array<u32, 4> miss = {kInvalid, kInvalid, kInvalid, kInvalid};
   const auto boxes = Boxes(false);
   for (u32 ptr : {kInvalid, 0xfffffffdu, 29u, 14u, 15u})
     EXPECT_EQ(Run(boxes, ptr), miss);
@@ -331,47 +332,47 @@ TEST_F(RdnaBvh, BoundsInvalidNodesAndParallelSlabBoundary) {
       Run(boxes, 13, {0, 0, 0}, {0, 0, 1}, true, true, false, false, 2, 1),
       miss);
   EXPECT_EQ(Run(boxes, 13, {-1, 0, 0}),
-            (std::array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
+            (base::Array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
   EXPECT_EQ(Run(boxes, 13, {-2, 0, 0}), miss);
   EXPECT_EQ(Run(boxes, 13, {0, 0, 10}, {0, 0, -1}),
-            (std::array<u32, 4>{0x80, 0x98, 0x88, kInvalid}));
+            (base::Array<u32, 4>{0x80, 0x98, 0x88, kInvalid}));
   EXPECT_EQ(
       Run(boxes, 13, {0, 0, 0}, {0, 0, 1}, true, false, false, false, 2, 0, 3),
-      (std::array<u32, 4>{0x88, kInvalid, kInvalid, kInvalid}));
+      (base::Array<u32, 4>{0x88, kInvalid, kInvalid, kInvalid}));
 }
 
 TEST_F(RdnaBvh, BoxGrowthAndNaNs) {
   auto boxes = Boxes(false);
   boxes[22] = Bits(1.f) + 1;  // near just beyond the ray extent
-  const std::array<u32, 4> miss = {kInvalid, kInvalid, kInvalid, kInvalid};
+  const base::Array<u32, 4> miss = {kInvalid, kInvalid, kInvalid, kInvalid};
   EXPECT_EQ(Run(boxes, 13, {0, 0, 0}, {0, 0, 1}, true, false, false, false, 2,
                 0, 1, 0),
             miss);
   EXPECT_EQ(Run(boxes, 13, {0, 0, 0}, {0, 0, 1}, true, false, false, false, 2,
                 0, 1, 2),
-            (std::array<u32, 4>{0x80, kInvalid, kInvalid, kInvalid}));
+            (base::Array<u32, 4>{0x80, kInvalid, kInvalid, kInvalid}));
   const float nan = std::numeric_limits<float>::quiet_NaN();
   EXPECT_EQ(Run(boxes, 13, {nan, 0, 0}), miss);
   EXPECT_EQ(Run(boxes, 13, {0, 0, 0}, {nan, 0, 1}), miss);
   boxes[20] = Bits(nan);
   EXPECT_EQ(Run(boxes, 13),
-            (std::array<u32, 4>{0x88, 0x98, kInvalid, kInvalid}));
+            (base::Array<u32, 4>{0x88, 0x98, kInvalid, kInvalid}));
 }
 
 TEST_F(RdnaBvh, BindingsBeyondPushConstantsAndOldResourceLimit) {
   for (u32 extra : {48u, 64u}) {
     EXPECT_EQ(Run(Boxes(false), 13, {0, 0, 0}, {0, 0, 1}, true, false, false,
                   false, 2, 0, 100, 0, extra),
-              (std::array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
+              (base::Array<u32, 4>{0x88, 0x98, 0x80, kInvalid}));
     EXPECT_EQ(Run(Boxes(false), 13, {0, 0, 0}, {0, 0, 1}, true, false, false,
                   false, 1, 0, 100, 0, extra),
-              (std::array<u32, 4>{kInvalid, kInvalid, kInvalid, kInvalid}));
+              (base::Array<u32, 4>{kInvalid, kInvalid, kInvalid, kInvalid}));
   }
 }
 
 TEST_F(RdnaBvh,
        RayShaderWideComparisonsReadBothHalvesAndSignExtendInlineConstants) {
-  std::vector<u32> tail = {
+  base::Vector<u32> tail = {
       0x7e2802ff, 0,          0x7e2a02ff, 1,  // v[20:21] = 0x100000000
       0x7e2c02ff, 0xffffffff, 0x7e2e02ff, 0,  // v[22:23] = 0xffffffff
       0xbf920001};  // trap without a handler is a hardware NOP
@@ -386,11 +387,11 @@ TEST_F(RdnaBvh,
   compare(0xe2, 278, 278, 3);  // unsigned B == B
   EXPECT_EQ(Run({}, 8, {0, 0, 0}, {0, 0, 1}, true, false, false, false, 2, 0,
                 100, 0, 0, tail),
-            (std::array<u32, 4>{1, 0, 1, 1}));
+            (base::Array<u32, 4>{1, 0, 1, 1}));
 }
 
 TEST(RdnaBvhCompile, RejectsUnsupportedControlFields) {
-  alignas(256) std::array<u32, 4096> code = {0xf1989f01, 0, 0xe0780000,
+  alignas(256) base::Array<u32, 4096> code = {0xf1989f01, 0, 0xe0780000,
                                              0x80010000, 0xbf810000};
   for (u32 bit : {3u, 8u, 12u, 15u, 16u, 17u}) {
     code[0] = 0xf1989f01 ^ (1u << bit);
@@ -402,7 +403,7 @@ TEST(RdnaBvhCompile, RejectsUnsupportedControlFields) {
 }
 
 TEST(RdnaBvhCompile, LaneDependentBvhDescriptorRequiresRuntimeBinding) {
-  alignas(256) static std::array<u32, 4096> code = {
+  alignas(256) static base::Array<u32, 4096> code = {
       0x7e000500,  // v_readfirstlane_b32 s0, v0
       0xf1989f01, 0, 0xe0780000, 0x80010000, 0xbf810000};
   const auto compiled =
@@ -414,7 +415,7 @@ TEST(RdnaBvhCompile, LaneDependentBvhDescriptorRequiresRuntimeBinding) {
 }
 
 TEST(RdnaBvhCompile, TrapHandlerStateIsPartOfTheShaderCacheKey) {
-  alignas(256) static std::array<u32, 4096> code = {0xbf920001, 0xe0780000,
+  alignas(256) static base::Array<u32, 4096> code = {0xbf920001, 0xe0780000,
                                                     0x80010000, 0xbf810000};
   gpu::ps5::ComputeShaderState state;
   state.cs_addr = reinterpret_cast<u64>(code.data());
@@ -431,7 +432,7 @@ TEST_F(RdnaBvh, AllCompressedTrianglesAndBarycentricRotations) {
   constexpr u32 slots[4][3] = {{0, 1, 2}, {1, 3, 2}, {2, 3, 4}, {2, 4, 0}};
   constexpr float vertices[3][3] = {{0, 0, 5}, {2, 0, 5}, {0, 2, 5}};
   for (u32 type = 0; type < 4; type++) {
-    std::array<u32, 48> nodes{};
+    base::Array<u32, 48> nodes{};
     for (u32 v = 0; v < 3; v++)
       for (u32 c = 0; c < 3; c++)
         nodes[16 + slots[type][v] * 3 + c] = Bits(vertices[v][c]);
@@ -442,7 +443,7 @@ TEST_F(RdnaBvh, AllCompressedTrianglesAndBarycentricRotations) {
           Run(nodes, 8 + type, {.5f, .25f, 0}, {0, 0, 1}, true, type & 1, true,
               type & 2, 2, 0, 1);  // triangles aren't clipped to extent
       const float den = Float(result[1]);
-      const std::array<float, 3> bary = {.625f, .25f, .125f};
+      const base::Array<float, 3> bary = {.625f, .25f, .125f};
       EXPECT_FLOAT_EQ(Float(result[0]) / den, 5);
       EXPECT_FLOAT_EQ(Float(result[2]) / den, bary[i]);
       EXPECT_FLOAT_EQ(Float(result[3]) / den, bary[j]);

@@ -7,10 +7,10 @@
  * device for one of them. Nothing else in the renderer names a backend.
  */
 
-#include <memory>
-#include <vector>
 
 #include "gpu/rhi/device.h"
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
 
 namespace gpu::render {
 
@@ -28,11 +28,11 @@ struct BackendOptions {
   const char* cache_dir = nullptr;
 };
 
-std::vector<rhi::Backend> CompiledBackends();
+base::Vector<rhi::Backend> CompiledBackends();
 
 // Null when the backend is not compiled in or has no usable device. Call
 // from a plain host thread.
-std::unique_ptr<rhi::Device> CreateBackendDevice(
+base::UniquePointer<rhi::Device> CreateBackendDevice(
     rhi::Backend backend,
     const BackendOptions& options = {});
 

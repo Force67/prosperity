@@ -21,9 +21,10 @@
 #include "gpu/render/render_target.h"
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/upload_ring.h"
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/containers/hash_map.h>
 
-#include <unordered_map>
-#include <vector>
 
 namespace gpu::render {
 
@@ -37,9 +38,9 @@ struct BackendState {
 
   // Render targets keyed by guest address + the guest-page -> target index.
   RenderRegion region;
-  std::unordered_map<u64, RTarget> rts;
-  std::unordered_map<u64, DepthTarget> depths;
-  std::unordered_map<u64, std::vector<u64>> rt_pages;
+  base::HashMap<u64, RTarget> rts;
+  base::HashMap<u64, DepthTarget> depths;
+  base::HashMap<u64, base::Vector<u64>> rt_pages;
 
   // Declared last so its worker stops before the device-owned state above is
   // destroyed during process teardown.

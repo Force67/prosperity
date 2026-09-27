@@ -18,7 +18,4 @@ add_library(shared STATIC ${SHARED_SOURCES})
 # through a second root, which meant the same file was addressable two ways.
 target_include_directories(shared PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-target_link_libraries(shared PUBLIC
-  fmt::fmt
-  eq_base
-)
+target_link_libraries(shared PUBLIC eq_base)

@@ -1,9 +1,9 @@
-#include <array>
 #include "base/arch.h"
 
 #include <gtest/gtest.h>
 
 #include "gpu/ps5/rdna/rdna_decode.h"
+#include <base/containers/array.h>
 
 namespace {
 
@@ -243,7 +243,7 @@ TEST(RdnaDecode, DisabledDebugBranchesDoNotReachIndirectTrapStubs) {
         0xbe802100,  // debug-only s_swappc_b64 s[0:1], s[0:1]
         0xdeadbeef}; // non-executable footer
     const auto reachable = gpu::rdna::ReachableProgram(
-        gpu::rdna::Decode(code, std::size(code), false));
+        gpu::rdna::Decode(code, base::ArraySize(code), false));
     ASSERT_EQ(reachable.size(), 2u) << "debug opcode " << opcode;
     EXPECT_EQ(reachable.back().raw[0], 0xbf810000u);
   }
@@ -267,7 +267,7 @@ TEST(RdnaDecode, EndpgmSavedTerminatesAndCallTargetsRemainReachable) {
 }
 
 TEST(RdnaDecode, ReusedShaderAddressInvalidatesChangesAfterFirst64Dwords) {
-  std::array<u32, 128> code;
+  base::Array<u32, 128> code;
   code.fill(Sopp(0));
   code[80] = Sopp(1);
   gpu::rdna::NextProgramGeneration();

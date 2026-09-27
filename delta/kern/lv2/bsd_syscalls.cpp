@@ -21,13 +21,14 @@ void symbolize(uintptr_t addr, char *out, size_t n);
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <logger/logger.h>
-#include <atomic>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
-#include <mutex>
-#include <string>
 #include <utl/options.h>
+#include <base/atomic.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace {
 DELTA_OPTION(bool, kQuietGuest, "DELTA_QUIET_GUEST", false);
@@ -156,12 +157,12 @@ int PS4ABI sys_regmgr_call(u32 op, u32 id, void *result, void *value,
     // Name the guest code that asked, once. A key a title reads ONCE at boot
     // and one it polls every frame want different answers, and only the caller
     // says which this is.
-    static std::mutex seenMtx;
+    static base::Mutex seenMtx;
     static u64 seen[24]{};
     static int seenN = 0;
     bool fresh = false;
     {
-      std::lock_guard<std::mutex> lk(seenMtx);
+      base::LockGuard<base::Mutex> lk(seenMtx);
       fresh = true;
       for (int i = 0; i < seenN; i++)
         if (seen[i] == int_value->encoded_id)
@@ -248,7 +249,7 @@ int PS4ABI sys_uuidgen(u8 *store, int count) {
     return -SysError::eFAULT;
   if (count < 1 || count > 2048)
     return -SysError::eINVAL;
-  static std::atomic<u64> seq{1};
+  static base::Atomic<u64> seq{1};
   for (int i = 0; i < count; i++) {
     u8 *p = store + i * 16;
     u64 a = seq.fetch_add(1) * 0x9E3779B97F4A7C15ull;
@@ -290,12 +291,12 @@ int PS4ABI sys_write(u32 fd, const void *buf, size_t nbytes) {
     // redirected file, and a plain fwrite sits in stdio a killed run never flushes,
     // making "stopped printing" and "lost the last 4 KiB" identical. Titles write
     // this fd a character at a time, hence the accumulator.
-    static std::mutex mtx;
-    static std::string line;
-    std::lock_guard<std::mutex> lk(mtx);
+    static base::Mutex mtx;
+    static base::String line;
+    base::LockGuard<base::Mutex> lk(mtx);
     line.append(static_cast<const char *>(buf), nbytes);
-    for (size_t nl; (nl = line.find('\n')) != std::string::npos;) {
-      std::string one = line.substr(0, nl);
+    for (size_t nl; (nl = line.find('\n')) != base::String::npos;) {
+      base::String one = line.substr(0, nl);
       line.erase(0, nl + 1);
       while (!one.empty() && one.back() == '\r')
         one.pop_back();

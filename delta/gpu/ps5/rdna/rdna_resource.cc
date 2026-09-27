@@ -11,19 +11,21 @@
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/guest_memory.h"
 
-#include <algorithm>
-#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <numeric>
-#include <map>
-#include <string>
-#include <unordered_map>
-#include <utility>
 
 #include <base/logging.h>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/shared_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
@@ -284,7 +286,7 @@ struct ScalarEval {
              u32 user_sgprs,
              u32 user_sgpr_base,
              u64 system_user_data_addr = 0) {
-    const u32 count = std::min(user_sgprs, 32u);
+    const u32 count = base::Min(user_sgprs, 32u);
     for (u32 i = 0; i < count && user_sgpr_base + i < kRegs; i++) {
       sgpr[user_sgpr_base + i] = user_data[i];
       known[user_sgpr_base + i] = true;
@@ -1090,7 +1092,7 @@ ScalarReplayPlan::Loss ScalarReplayPlan::LossAt(u32 sgpr,
   };
 
   Loss worst = kCovered;
-  const auto note = [&](Loss loss) { worst = std::max(worst, loss); };
+  const auto note = [&](Loss loss) { worst = base::Max(worst, loss); };
   for (u32 reg = sgpr; reg < sgpr + dwords; reg++) {
     const Write* last = nullptr;
     for (const Write& write : writes) {
@@ -1186,7 +1188,7 @@ void BuildBlockDominators(const Program& program, ScalarReplayPlan& plan) {
   const u32 n = static_cast<u32>(program.size());
   if (!n)
     return;
-  std::vector<u8> leader(n, 0);
+  base::Vector<u8> leader(n, 0);
   leader[0] = 1;
   for (u32 target : plan.targets)
     if (target < n)
@@ -1196,14 +1198,14 @@ void BuildBlockDominators(const Program& program, ScalarReplayPlan& plan) {
       leader[i + 1] = 1;
 
   plan.block_of.assign(n, 0);
-  std::vector<u32> start;
+  base::Vector<u32> start;
   for (u32 i = 0; i < n; i++) {
     if (leader[i])
       start.push_back(i);
     plan.block_of[i] = static_cast<u32>(start.size() - 1);
   }
   const u32 blocks = static_cast<u32>(start.size());
-  std::vector<std::vector<u32>> preds(blocks);
+  base::Vector<base::Vector<u32>> preds(blocks);
   for (u32 b = 0; b < blocks; b++) {
     const u32 last = (b + 1 < blocks ? start[b + 1] : n) - 1;
     const int kind = BranchKind(program[last]);
@@ -1268,8 +1270,8 @@ void MarkLoopInvariantWrites(const Program& program,
       if (edge.target <= write.index && write.index <= edge.source) {
         // The widest loop the write sits in: a value the outer loop changes is
         // not invariant just because the inner one leaves it alone.
-        begin = in_loop ? std::min(begin, edge.target) : edge.target;
-        end = in_loop ? std::max(end, edge.source) : edge.source;
+        begin = in_loop ? base::Min(begin, edge.target) : edge.target;
+        end = in_loop ? base::Max(end, edge.source) : edge.source;
         in_loop = true;
       }
     if (!in_loop || write.index >= program.size())
@@ -1329,7 +1331,7 @@ MimgBindingPlan RdnaPlanMimg(const Program& program) {
     u32 flags;
     u32 versions[12];
   };
-  std::vector<BindingKey> keys;
+  base::Vector<BindingKey> keys;
   u32 versions[136] = {};
   u32 generation = 1;
   // Repeated loads of an unchanged descriptor table entry name the same
@@ -1337,14 +1339,14 @@ MimgBindingPlan RdnaPlanMimg(const Program& program) {
   // times; assigning a new binding each time exceeds the hardware interface.
   // Only reuse loads in programs without memory writes, and include the
   // address registers' versions so a changed table pointer stays distinct.
-  const bool read_only = std::none_of(program.begin(), program.end(), [](const Inst& i) {
+  const bool read_only = base::NoneOf(program.begin(), program.end(), [](const Inst& i) {
     return (i.enc == Enc::kSmrd && i.opcode >= 0x10) ||
            (i.enc == Enc::kMubuf && i.opcode >= 4) ||
            (i.enc == Enc::kMtbuf && i.opcode >= 4) ||
            i.enc == Enc::kFlat ||
            (i.enc == Enc::kMimg && i.opcode >= 8 && i.opcode < 0x20);
   });
-  std::map<std::array<u32, 4>, u32> descriptor_loads;
+  base::Map<base::Array<u32, 4>, u32> descriptor_loads;
   for (const Inst& inst : program) {
     if (inst.enc == Enc::kMimg) {
       const u32 w0 = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
@@ -1388,7 +1390,7 @@ MimgBindingPlan RdnaPlanMimg(const Program& program) {
     if (read_only && inst.enc == Enc::kSmrd && inst.opcode <= 4) {
       const Smem load = DecodeSmem(inst);
       if (load.soffset == 125) {
-        const std::array<u32, 4> key = {
+        const base::Array<u32, 4> key = {
             inst.raw[0], inst.raw[1], versions[load.sbase],
             versions[load.sbase + 1]};
         value_version = descriptor_loads.emplace(key, generation).first->second;
@@ -1464,7 +1466,7 @@ bool PlausibleVBuffer(const VBuffer& v) {
 TImage DecodeTImage(const u32* d, bool r128) {
   TImage t;
   const u32 descriptor_dwords = r128 ? 4 : 8;
-  t.null_descriptor = std::all_of(
+  t.null_descriptor = base::AllOf(
       d, d + descriptor_dwords, [](u32 word) { return word == 0; });
   const u64 base_units = d[0] | (static_cast<u64>(d[1] & 0xFF) << 32);
   t.base = base_units << 8;
@@ -1493,13 +1495,13 @@ TImage DecodeTImage(const u32* d, bool r128) {
   t.depth = volumetric ? depth + 1 : 1;
   t.layers = (t.arrayed || volumetric) ? depth + 1 : 1;
   if (t.type == 11)
-    t.layers = std::max<u32>(t.layers, 6);
+    t.layers = base::Max<u32>(t.layers, 6);
   t.view_layers =
       t.arrayed
-          ? std::max<u32>(t.layers - std::min(t.base_array, t.layers), 1)
+          ? base::Max<u32>(t.layers - base::Min(t.base_array, t.layers), 1)
           : 1;
   t.mip_levels = max_mip + 1;
-  t.view_mips = std::max<u32>(last_level + 1 - t.base_mip, 1);
+  t.view_mips = base::Max<u32>(last_level + 1 - t.base_mip, 1);
   const bool valid_array = !t.arrayed || t.base_array <= depth;
   const u32 gfmt = (d[1] >> 20) & 0x1FF;
   Gfx10ImgFormat(gfmt, t.dfmt, t.nfmt);
@@ -1550,7 +1552,7 @@ TImage DecodeTImage(const u32* d, bool r128) {
     }
   }
   u32 max_levels = 1;
-  for (u32 extent = std::max(t.width, t.height); extent > 1; extent >>= 1)
+  for (u32 extent = base::Max(t.width, t.height); extent > 1; extent >>= 1)
     max_levels++;
   const bool valid_mips = t.base_mip <= last_level && last_level < max_levels &&
                           t.base_mip + t.view_mips <= t.mip_levels;
@@ -1581,19 +1583,19 @@ bool CanAccessLinearIntegerImage(const TImage& t) {
       !((t.dfmt == 1 || t.dfmt == 3) && t.nfmt == 5);
 }
 
-std::vector<TImage> TrackTextures(const u32* ps_code,
+base::Vector<TImage> TrackTextures(const u32* ps_code,
                                   const u32* pud,
                                   u32 user_sgprs,
                                   u32 ud_base,
                                   u64 system_user_data_addr) {
-  std::vector<TImage> out;
+  base::Vector<TImage> out;
   if (!ps_code || !pud || !InGuest(reinterpret_cast<u64>(ps_code)))
     return out;
   const auto prog_ref = CachedReachableProgram(ps_code, 4096);
   const Program& prog = *prog_ref;
   // The plan is a pure function of the program, so the cached program's own
   // identity says whether a cached plan still describes it.
-  static std::unordered_map<u64, std::pair<std::shared_ptr<const Program>,
+  static base::HashMap<u64, base::Pair<base::SharedPointer<const Program>,
                                            MimgBindingPlan>>
       plan_cache;
   const u64 code_addr = reinterpret_cast<u64>(ps_code);
@@ -1601,14 +1603,16 @@ std::vector<TImage> TrackTextures(const u32* ps_code,
   if (plan_it == plan_cache.end() || plan_it->second.first != prog_ref) {
     if (plan_cache.size() > 512)
       plan_cache.clear();
-    plan_it = plan_cache.insert_or_assign(code_addr,
-                                          std::make_pair(prog_ref,
-                                                         RdnaPlanMimg(prog)))
+    plan_it = plan_cache
+                  .insert_or_assign(
+                      code_addr,
+                      base::Pair<base::SharedPointer<const Program>,
+                                 MimgBindingPlan>{prog_ref, RdnaPlanMimg(prog)})
                   .first;
   }
   const MimgBindingPlan& plan = plan_it->second.second;
   out.resize(plan.binding_srsrc.size());
-  std::vector<bool> filled(out.size(), false);
+  base::Vector<bool> filled(out.size(), false);
   ScalarEval eval(pud, user_sgprs, ud_base, system_user_data_addr);
   eval.code_addr = code_addr;
 
@@ -1669,7 +1673,7 @@ std::vector<TImage> TrackTextures(const u32* ps_code,
           out[b].height > 1) {
         static u32 printed = 0;
         if (printed++ < 6) {
-          std::string replayed, in_memory;
+          base::String replayed, in_memory;
           const u64 from = eval.src_addr[srsrc];
           const bool mapped = from && GuestRange(from, resource_dwords * 4);
           const auto* mem = reinterpret_cast<const u32*>(from);
@@ -1703,12 +1707,12 @@ std::vector<TImage> TrackTextures(const u32* ps_code,
   return out;
 }
 
-std::unordered_map<u32, BufferResource> ResolveBuffers(
+base::HashMap<u32, BufferResource> ResolveBuffers(
     const u32* code,
     const u32* user_data,
     u32 user_sgprs,
     u32 user_sgpr_base, u32 max_dwords, u64 system_user_data_addr) {
-  std::unordered_map<u32, BufferResource> out;
+  base::HashMap<u32, BufferResource> out;
   if (!code || !user_data || !InGuest(reinterpret_cast<u64>(code)))
     return out;
   ScalarEval eval(user_data, user_sgprs, user_sgpr_base, system_user_data_addr);

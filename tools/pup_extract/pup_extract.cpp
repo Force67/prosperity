@@ -6,6 +6,7 @@
 #include <utl/file.h>
 
 #include "formats/pup_object.h"
+#include <base/strings/xstring.h>
 
 int main(int argc, char **argv) {
   utl::createLogger(true);

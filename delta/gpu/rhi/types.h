@@ -9,8 +9,8 @@
  */
 
 #include "base/arch.h"
+#include <base/containers/vector.h>
 
-#include <vector>
 
 namespace gpu::rhi {
 
@@ -246,7 +246,7 @@ struct BindingLayout {
 };
 
 struct BindGroupLayoutDesc {
-  std::vector<BindingLayout> bindings;
+  base::Vector<BindingLayout> bindings;
   // Bound only through CommandList::PushBindGroup, never as a BindGroup.
   bool push = false;
 };
@@ -271,12 +271,12 @@ struct BindingWrite {
 
 struct BindGroupDesc {
   BindGroupLayout* layout = nullptr;
-  std::vector<BindingWrite> writes;
+  base::Vector<BindingWrite> writes;
 };
 
 struct PipelineLayoutDesc {
   // Group index = position; a null entry is an empty group.
-  std::vector<BindGroupLayout*> groups;
+  base::Vector<BindGroupLayout*> groups;
   u32 push_constant_bytes = 0;
   u32 push_constant_stages = 0;
 };
@@ -334,11 +334,11 @@ struct VertexAttribute {
 // the pipeline is created, against the pipeline's layout.
 struct ShaderCode {
   const u32* words = nullptr;
-  size_t count = 0;  // in words
+  mem_size count = 0;  // in words
   bool empty() const { return count == 0; }  // NOLINT: accessor
 };
 
-inline ShaderCode Code(const std::vector<u32>& spirv) {
+inline ShaderCode Code(const base::Vector<u32>& spirv) {
   return {spirv.data(), spirv.size()};
 }
 
@@ -348,8 +348,8 @@ struct GraphicsPipelineDesc {
   ShaderCode geometry;
   ShaderCode fragment;
   bool mesh = false;  // `vertex` is a mesh shader; no vertex input
-  std::vector<VertexBufferLayout> vertex_buffers;
-  std::vector<VertexAttribute> vertex_attributes;
+  base::Vector<VertexBufferLayout> vertex_buffers;
+  base::Vector<VertexAttribute> vertex_attributes;
   Topology topology = Topology::kTriangleList;
   bool primitive_restart = false;
   CullMode cull = CullMode::kNone;

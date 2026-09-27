@@ -12,14 +12,9 @@
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
-#include <atomic>
 #include <cstdio>
 #include <cstdlib>
-#include <chrono>
 #include <cstring>
-#include <map>
-#include <mutex>
-#include <thread>
 
 #include <sys/mman.h>
 
@@ -30,6 +25,12 @@
 #include "kern/proc.h"
 #include "kern/lv2/sys_mem.h"  // allocLowGuest, mFlags
 #include <utl/options.h>
+#include <base/threading/thread.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
 
 namespace {
 DELTA_OPTION(bool, kAgcRingdump, "DELTA_AGC_RINGDUMP", false);
@@ -135,8 +136,8 @@ struct AcqQueue {
   u32 id = 0;
 };
 
-static std::mutex g_queueLock;
-static std::map<u32, AcqQueue> g_queues;  // by 1-based queue id
+static base::Mutex g_queueLock;
+static base::Map<u32, AcqQueue> g_queues;  // by 1-based queue id
 
 // The doorbell value is the ring write pointer. Advance our own read pointer to
 // it and hand the command processor the dwords in between, unwrapping the ring.
@@ -203,8 +204,8 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
 static void doorbellPoller() {
   u64 ticks = 0;
   for (;;) {
-    std::this_thread::sleep_for(std::chrono::microseconds(500));
-    std::lock_guard<std::mutex> lk(g_queueLock);
+    base::SleepForMicroseconds(500);
+    base::LockGuard<base::Mutex> lk(g_queueLock);
     // Every 5s under DELTA_AGC_QSTAT: what each queue has published against
     // what we have walked. A consumer waiting on a fence one submit short is
     // either work we never drained (they differ) or work never submitted.
@@ -254,7 +255,7 @@ static void registerAcqQueue(u32 qid, u64 dcb, u64 ccb, u64 doorbellBase,
   // business, and refusing one on the aperture guess loses every submit on it.
   if (!qid || !dcb || ringLog2Dw > 24)
     return;
-  std::lock_guard<std::mutex> lk(g_queueLock);
+  base::LockGuard<base::Mutex> lk(g_queueLock);
   AcqQueue &q = g_queues[qid];
   q.id = qid;
   q.dcb = dcb;
@@ -268,7 +269,7 @@ static void registerAcqQueue(u32 qid, u64 dcb, u64 ccb, u64 doorbellBase,
   static bool polling = false;
   if (!polling) {
     polling = true;
-    std::thread(doorbellPoller).detach();
+    base::SpawnDetachedThread("gc_dev", doorbellPoller);
   }
 }
 
@@ -309,13 +310,13 @@ static void submitGnmDescArray(u64 descPtr, u32 count) {
 
 i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
   if (kGcIoctlCensus) {
-    static std::mutex mtx;
-    static std::map<u32, u64> hist;
-    static auto last = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lk(mtx);
+    static base::Mutex mtx;
+    static base::Map<u32, u64> hist;
+    static auto last = base::TimeTicks::Now();
+    base::LockGuard<base::Mutex> lk(mtx);
     hist[cmd]++;
-    auto now = std::chrono::steady_clock::now();
-    if (now - last > std::chrono::seconds(10)) {
+    auto now = base::TimeTicks::Now();
+    if (now - last > base::Seconds(10)) {
       last = now;
       BASE_LOGI("gcioctl", "--- 10s census ---");
       for (auto &[c, n] : hist)
@@ -363,7 +364,7 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     // AGC suspend-point submit, at the tail of every submit; the driver fails with
     // 0x8A6D0107 unless it succeeds. The two out words are a suspend sequence
     // number, so advance them.
-    static std::atomic<u64> suspendSeq{0};
+    static base::Atomic<u64> suspendSeq{0};
     if (data) {
       const u64 seq = ++suspendSeq;
       auto *a = static_cast<u8 *>(data);
@@ -621,12 +622,12 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
       // Census: a whole submit used to be dropped when it carried >= 64
       // descriptors, and individual buffers are skipped when the address does
       // not look like GPU memory. Both are invisible without counting them.
-      static std::atomic<u64> nSubmits{0}, nDropBatch{0}, nDesc{0},
+      static base::Atomic<u64> nSubmits{0}, nDropBatch{0}, nDesc{0},
           nFwd{0}, nSkipAddr{0};
-      nSubmits.fetch_add(1, std::memory_order_relaxed);
-      if (count > 0x1000) nDropBatch.fetch_add(1, std::memory_order_relaxed);
+      nSubmits.fetch_add(1, base::memory_order_relaxed);
+      if (count > 0x1000) nDropBatch.fetch_add(1, base::memory_order_relaxed);
       if (kGcCensus) {
-        static std::atomic<u64> last{0};
+        static base::Atomic<u64> last{0};
         u64 n = nSubmits.load();
         if (n - last.load() >= 2000) {
           last.store(n);
@@ -649,15 +650,15 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
         for (u32 i = 0; i < count; i++) {
           u64 buf = (static_cast<u64>(d[i * 4 + 1]) << 32) | d[i * 4];
           u32 sz = d[i * 4 + 2];
-          nDesc.fetch_add(1, std::memory_order_relaxed);
+          nDesc.fetch_add(1, base::memory_order_relaxed);
           if (sz && guestReadable(buf, static_cast<size_t>(sz) * 4)) {
-            nFwd.fetch_add(1, std::memory_order_relaxed);
+            nFwd.fetch_add(1, base::memory_order_relaxed);
             // Tag: 0x8132, the descriptor's index in the batch, its flags.
             prosperity_agc_submit_tagged(
                 buf, sz * 4,
                 0x81320000u | ((i & 0xFF) << 8) | (d[i * 4 + 3] & 0xFF));
           } else if (sz) {
-            nSkipAddr.fetch_add(1, std::memory_order_relaxed);
+            nSkipAddr.fetch_add(1, base::memory_order_relaxed);
             static int n = 0;
             if (n++ < 16)
               LOG_WARNING("agc: submit buffer {:#x}+{:#x} dwords unreadable",

@@ -8,11 +8,11 @@
  * in the root of the source tree.
  */
 
-#include <vector>
 #include "base/arch.h"
 
 #include "kern/vfs.h"
 #include "device.h"
+#include <base/containers/vector.h>
 
 namespace krnl {
 // A directory opened by the guest (e.g. /app0/resources). Holds a snapshot of
@@ -20,14 +20,14 @@ namespace krnl {
 // a directory. Games open a dir then enumerate it to find their resources.
 class dirDevice : public device {
 public:
-  dirDevice(objectTable &objects, std::vector<vfs::DirEntry> &&entries);
+  dirDevice(objectTable &objects, base::Vector<vfs::DirEntry> &&entries);
 
   i64 getdents(void *buf, size_t len) override;
   int fstat(void *stat) override;
   i64 read(void *, size_t) override;
 
 private:
-  std::vector<vfs::DirEntry> entries_;
+  base::Vector<vfs::DirEntry> entries_;
   size_t cursor_ = 0;
 };
 }  // namespace krnl

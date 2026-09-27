@@ -4,8 +4,8 @@
 #pragma once
 
 #include "base/arch.h"
+#include <base/atomic.h>
 
-#include <atomic>
 
 namespace gpu {
 
@@ -22,7 +22,7 @@ class GuestPageTable {
     // The MemoryGeneration() the page was proven readable at, or with
     // kUnreadable set, proven unreadable at. Any thread; a stale answer only
     // costs a probe.
-    std::atomic<u32> readable{0};
+    base::Atomic<u32> readable{0};
     // Write tracker state, owned by the thread that owns the tracker.
     bool armed = false;
     u16 reports = 0;          // write reports in report_frame
@@ -54,17 +54,17 @@ class GuestPageTable {
   static constexpr u64 kBlocksPerChunk = 1ull << (kChunkShift - kBlockShift);
   struct Chunk {
     Page pages[kPagesPerChunk];
-    std::atomic<u16> cs_dirty[kBlocksPerChunk];
+    base::Atomic<u16> cs_dirty[kBlocksPerChunk];
   };
 
   Chunk* ChunkAt(u64 address);
   const Chunk* FindChunk(u64 address) const {
     const u64 index = address >> kChunkShift;
-    return index < kChunks ? chunks_[index].load(std::memory_order_acquire)
+    return index < kChunks ? chunks_[index].load(base::memory_order_acquire)
                            : nullptr;
   }
 
-  std::atomic<Chunk*> chunks_[kChunks] = {};
+  base::Atomic<Chunk*> chunks_[kChunks] = {};
 };
 
 GuestPageTable& GuestPages();

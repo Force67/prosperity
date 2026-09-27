@@ -10,19 +10,20 @@
 #include <base/logging.h>
 #include "libSceSaveData.h"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
-#include <mutex>
-#include <string>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <vector>
 
 #include "kern/vfs.h"
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace {
 DELTA_OPTION(const char *, kSavedataDir, "DELTA_SAVEDATA_DIR", nullptr);
@@ -76,29 +77,29 @@ constexpr u32 kParamDetail = 3;
 constexpr u32 kParamUserParam = 4;
 constexpr u32 kParamMtime = 5;
 
-std::mutex g_mtx;
+base::Mutex g_mtx;
 int g_nextSlot = 0;
 int g_nextTransactionResource = 1;
 
 struct Slot {
-  std::string point;  // "/savedataN"
-  std::string host;   // host directory
+  base::String point;  // "/savedataN"
+  base::String host;   // host directory
   bool readOnly = false;
 };
-std::vector<Slot> g_slots;  // guarded by g_mtx
+base::Vector<Slot> g_slots;  // guarded by g_mtx
 
 bool g_trace() {
   return kSaveTrace;
 }
 
-bool hostDirExists(const std::string &path) {
+bool hostDirExists(const base::String &path) {
   struct stat st;
   return ::stat(path.c_str(), &st) == 0 && (st.st_mode & S_IFDIR);
 }
 
 // mkdir -p on the host.
-void makeHostDirs(const std::string &path) {
-  std::string p = path;
+void makeHostDirs(const base::String &path) {
+  base::String p = path;
   for (size_t i = 1; i < p.size(); i++) {
     if (p[i] == '/') {
       p[i] = 0;
@@ -110,13 +111,13 @@ void makeHostDirs(const std::string &path) {
 }
 
 // Remove a directory tree on the host (like `rm -rf`).
-void removeTree(const std::string &path) {
+void removeTree(const base::String &path) {
   DIR *d = ::opendir(path.c_str());
   if (d) {
     while (dirent *e = ::readdir(d)) {
       if (!std::strcmp(e->d_name, ".") || !std::strcmp(e->d_name, ".."))
         continue;
-      std::string child = path + "/" + e->d_name;
+      base::String child = path + "/" + e->d_name;
       struct stat st;
       if (::stat(child.c_str(), &st) == 0 && (st.st_mode & S_IFDIR))
         removeTree(child);
@@ -131,42 +132,42 @@ void removeTree(const std::string &path) {
 // Host directory that holds every title's saves. Matches the pre-existing
 // behaviour ($DELTA_SAVEDATA_DIR, else ~/.prosperity/savedata) so saves written
 // before this module gained per-title roots stay reachable.
-std::string saveRoot() {
+base::String saveRoot() {
   if (const char *e = kSavedataDir)
     return e;
   base::StringU8 home;
   base::GetEnvironmentVariable(u8"HOME", home);
-  return std::string(home.empty() ? "." : (const char *)home.c_str()) +
+  return base::String(home.empty() ? "." : (const char *)home.c_str()) +
          "/.prosperity/savedata";
 }
 
 // The booted title's tag for the save root. dcore parses TITLE_ID from the pkg's
 // (outer) param.sfo; fall back to "SAVEDATA" when it can't be determined so
 // per-title layout still works and never produces an empty path component.
-const std::string &titleTag() {
-  static const std::string tag = [] {
-    std::string t = krnl::vfs::titleId();
+const base::String &titleTag() {
+  static const base::String tag = [] {
+    base::String t = krnl::vfs::titleId();
     if (g_trace())
       BASE_LOGI("savedata", "title id = {}",
                 t.empty() ? "(fallback SAVEDATA)" : t.c_str());
-    return t.empty() ? std::string("SAVEDATA") : t;
+    return t.empty() ? base::String("SAVEDATA") : t;
   }();
   return tag;
 }
 
-std::string titleRoot() { return saveRoot() + "/" + titleTag(); }
+base::String titleRoot() { return saveRoot() + "/" + titleTag(); }
 
 // The host dir for a save. Prefer the per-title path; but if it doesn't exist
 // yet and a legacy dirName-only save does (written before per-title roots),
 // keep using the legacy path so those saves are not orphaned. `existing` is set
 // to whether a save already lives at the chosen path.
-std::string chooseHost(const char *dirName, bool &existing) {
-  const std::string perTitle = titleRoot() + "/" + dirName;
+base::String chooseHost(const char *dirName, bool &existing) {
+  const base::String perTitle = titleRoot() + "/" + dirName;
   if (hostDirExists(perTitle)) {
     existing = true;
     return perTitle;
   }
-  const std::string legacy = saveRoot() + "/" + dirName;
+  const base::String legacy = saveRoot() + "/" + dirName;
   if (hostDirExists(legacy)) {
     existing = true;
     return legacy;  // migrate-in-place: reuse the pre-per-title save
@@ -176,11 +177,11 @@ std::string chooseHost(const char *dirName, bool &existing) {
 }
 
 // Look up the host directory a mount point ("/savedataN") maps to.
-std::string hostForPoint(const void *mountPoint) {
+base::String hostForPoint(const void *mountPoint) {
   if (!mountPoint)
     return {};
   const char *point = static_cast<const char *>(mountPoint);
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   for (auto &s : g_slots)
     if (s.point == point)
       return s.host;
@@ -191,7 +192,7 @@ int unmountPoint(const void *mountPoint) {
   if (!mountPoint)
     return kErrParameter;
   const char *point = static_cast<const char *>(mountPoint);
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   for (auto it = g_slots.begin(); it != g_slots.end(); ++it) {
     if (it->point == point) {
       krnl::vfs::unmount(point);
@@ -224,11 +225,11 @@ const char *cstrOf(const void *p) { return static_cast<const char *>(p); }
 
 // -------- param sidecar (.sce_param.bin) --------
 
-std::string paramPath(const std::string &host) {
+base::String paramPath(const base::String &host) {
   return host + "/.sce_param.bin";
 }
 
-void loadParam(const std::string &host, u8 *out /*kParamSize*/) {
+void loadParam(const base::String &host, u8 *out /*kParamSize*/) {
   std::memset(out, 0, kParamSize);
   if (FILE *f = std::fopen(paramPath(host).c_str(), "rb")) {
     size_t got = std::fread(out, 1, kParamSize, f);
@@ -237,7 +238,7 @@ void loadParam(const std::string &host, u8 *out /*kParamSize*/) {
   }
 }
 
-void storeParam(const std::string &host, const u8 *blob /*kParamSize*/) {
+void storeParam(const base::String &host, const u8 *blob /*kParamSize*/) {
   if (FILE *f = std::fopen(paramPath(host).c_str(), "wb")) {
     std::fwrite(blob, 1, kParamSize, f);
     std::fclose(f);
@@ -246,8 +247,8 @@ void storeParam(const std::string &host, const u8 *blob /*kParamSize*/) {
 
 // -------- SaveDataMemory backing --------
 
-std::string memoryPath(u32 slotId) {
-  std::string dir = titleRoot() + "/sce_sdmemory";
+base::String memoryPath(u32 slotId) {
+  base::String dir = titleRoot() + "/sce_sdmemory";
   makeHostDirs(dir);
   char name[64];
   std::snprintf(name, sizeof(name), "/memory%u.bin", slotId);
@@ -255,7 +256,7 @@ std::string memoryPath(u32 slotId) {
 }
 
 int memorySetup(u64 memorySize, u32 slotId, void *result) {
-  const std::string path = memoryPath(slotId);
+  const base::String path = memoryPath(slotId);
   u64 existed = 0;
   struct stat st;
   if (::stat(path.c_str(), &st) == 0)
@@ -299,7 +300,7 @@ int memoryWrite(u32 slotId, const void *buf, u64 bufSize,
                 i64 offset) {
   if (!buf || !bufSize)
     return kOk;
-  const std::string path = memoryPath(slotId);
+  const base::String path = memoryPath(slotId);
   FILE *f = std::fopen(path.c_str(), "rb+");
   if (!f)
     f = std::fopen(path.c_str(), "wb");
@@ -316,7 +317,7 @@ int doMount(const char *dir_name, u32 mode, void *result) {
   if (!dir_name || !dir_name[0])
     return kErrParameter;
   bool exists = false;
-  const std::string host = chooseHost(dir_name, exists);
+  const base::String host = chooseHost(dir_name, exists);
   const bool create = (mode & (kModeCreate | kModeCreate2)) != 0;
   const bool readOnly = (mode & kModeRdOnly) && !(mode & kModeRdWr);
 
@@ -325,7 +326,7 @@ int doMount(const char *dir_name, u32 mode, void *result) {
   if (exists && (mode & kModeCreate))
     return kErrExists;  // strict CREATE requires the save not to exist yet
 
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   char point[16];
   std::snprintf(point, sizeof(point), "/savedata%d", g_nextSlot++);
   krnl::vfs::mountWritable(point, host.c_str());  // creates the host dir
@@ -407,7 +408,7 @@ int PS4ABI sceSaveDataGetMountInfo(const void *, void *info) {
 
 int PS4ABI sceSaveDataCreateTransactionResource(u32) {
   sdTrace("sceSaveDataCreateTransactionResource");
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   return g_nextTransactionResource++;
 }
 
@@ -433,12 +434,12 @@ int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result) {
   if (!result)
     return kErrParameter;
   auto *r = static_cast<u8 *>(result);
-  std::string searchRoot = titleRoot();
+  base::String searchRoot = titleRoot();
   if (cond) {
     const void *titleId = ptrAt(cond, 8);
     if (titleId && cstrOf(titleId)[0])
       searchRoot = saveRoot() + "/" +
-                   std::string(cstrOf(titleId), strnlen(cstrOf(titleId), 10));
+                   base::String(cstrOf(titleId), strnlen(cstrOf(titleId), 10));
   }
   // dirNamesNum@16 is the caller's array capacity (input).
   const u32 capacity = u32At(result, 16);
@@ -455,12 +456,12 @@ int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result) {
   }
 
   // Enumerate existing save directories under the title root.
-  std::vector<std::string> hits;
+  base::Vector<base::String> hits;
   if (DIR *d = ::opendir(searchRoot.c_str())) {
     while (dirent *e = ::readdir(d)) {
       if (e->d_name[0] == '.' || !std::strncmp(e->d_name, "sce_", 4))
         continue;
-      std::string child = searchRoot + "/" + e->d_name;
+      base::String child = searchRoot + "/" + e->d_name;
       struct stat st;
       if (::stat(child.c_str(), &st) != 0 || !(st.st_mode & S_IFDIR))
         continue;
@@ -470,10 +471,10 @@ int PS4ABI sceSaveDataDirNameSearch(const void *cond, void *result) {
     }
     ::closedir(d);
   }
-  std::sort(hits.begin(), hits.end());
+  base::Sort(hits.begin(), hits.end());
   // order@28: 1 = DESCENT.
   if (cond && u32At(cond, 28) == 1)
-    std::reverse(hits.begin(), hits.end());
+    base::Reverse(hits.begin(), hits.end());
 
   const u32 setNum =
       capacity < hits.size() ? capacity : static_cast<u32>(hits.size());
@@ -512,7 +513,7 @@ int PS4ABI sceSaveDataDelete(const void *del) {
   if (!dn || !cstrOf(dn)[0])
     return kErrParameter;
   bool exists = false;
-  const std::string host = chooseHost(cstrOf(dn), exists);
+  const base::String host = chooseHost(cstrOf(dn), exists);
   if (exists)
     removeTree(host);
   if (g_trace())
@@ -546,7 +547,7 @@ int PS4ABI sceSaveDataGetParam(const void *mountPoint, u32 paramType,
     std::memset(buf, 0, size);
   if (result)
     *result = 0;
-  const std::string host = hostForPoint(mountPoint);
+  const base::String host = hostForPoint(mountPoint);
   if (host.empty())
     return kErrNotMounted;
   if (!buf || !size)
@@ -593,7 +594,7 @@ int PS4ABI sceSaveDataGetParam(const void *mountPoint, u32 paramType,
 int PS4ABI sceSaveDataSetParam(const void *mountPoint, u32 paramType,
                                const void *buf, u64 size) {
   sdTrace("sceSaveDataSetParam");
-  const std::string host = hostForPoint(mountPoint);
+  const base::String host = hostForPoint(mountPoint);
   if (host.empty())
     return kErrNotMounted;
   if (!buf || !size)
@@ -641,7 +642,7 @@ int PS4ABI sceSaveDataSetParam(const void *mountPoint, u32 paramType,
 
 int PS4ABI sceSaveDataSaveIcon(const void *mountPoint, const void *icon) {
   sdTrace("sceSaveDataSaveIcon");
-  const std::string host = hostForPoint(mountPoint);
+  const base::String host = hostForPoint(mountPoint);
   if (host.empty())
     return kErrNotMounted;
   if (icon) {
@@ -663,13 +664,13 @@ int PS4ABI sceSaveDataSaveIcon(const void *mountPoint, const void *icon) {
 
 int PS4ABI sceSaveDataLoadIcon(const void *mountPoint, void *icon) {
   sdTrace("sceSaveDataLoadIcon");
-  const std::string host = hostForPoint(mountPoint);
+  const base::String host = hostForPoint(mountPoint);
   if (host.empty())
     return kErrNotMounted;
   if (!icon)
     return kErrParameter;
 
-  const std::string path = host + "/.sce_icon.bin";
+  const base::String path = host + "/.sce_icon.bin";
   struct stat st;
   if (::stat(path.c_str(), &st) != 0)
     return kErrNotFound;

@@ -32,25 +32,16 @@
 #include "gpu/guest_page_table.h"
 #include "gpu/write_tracker.h"
 
-#include <algorithm>
-#include <atomic>
-#include <bit>
-#include <array>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <climits>
 #include <cstring>
 #include <limits>
-#include <map>
-#include <future>
-#include <mutex>
-#include <unordered_map>
-#include <string>
-#include <unordered_set>
-#include <vector>
 #include <sys/mman.h>
 
+#include <base/memory/shared_pointer.h>
+#include <base/strings/to_string.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
@@ -59,6 +50,20 @@
 #define BCDECDEF static inline
 #define BCDEC_IMPLEMENTATION
 #include <bcdec.h>
+#include <base/algorithm.h>
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/bit_cast.h>
+#include <base/memory/move.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(u64, kDetileDump, "DELTA_GPU_DETILEDUMP", 0);
@@ -168,7 +173,7 @@ u64 g_truth_stage_bytes = 0, g_truth_import_n = 0, g_truth_detile_n = 0,
     g_truth_rt_n = 0;
 // Who forced each writeback: the reader tag of FlushCsWritesRange, or one of
 // the internal sites.
-std::map<std::string, u64> g_wb_why;
+base::Map<base::String, u64> g_wb_why;
 u64 g_wb_why_bytes = 0;
 u64 g_lazy_kept_n = 0, g_lazy_kept_bytes = 0;
 u64 g_out_retile_n = 0, g_out_rt_submits = 0;
@@ -196,7 +201,7 @@ void ParallelCopy(void* dst, const void* src, u64 bytes) {
   const auto* s = static_cast<const u8*>(src);
   gcn::DetileParallelWork(chunks, bytes, [&](u32 c0, u32 c1) {
     const u64 off = u64(c0) * kChunk;
-    std::memcpy(d + off, s + off, std::min<u64>(u64(c1 - c0) * kChunk,
+    std::memcpy(d + off, s + off, base::Min<u64>(u64(c1 - c0) * kChunk,
                                                 bytes - off));
   });
 }
@@ -210,7 +215,7 @@ struct StageStat {
   u32 n = 0, first = 0, shape = 0, hash = 0, rt = 0, wait = 0;
   u64 wait_ns = 0;
 };
-std::unordered_map<u64, StageStat> g_stage_stats;
+base::HashMap<u64, StageStat> g_stage_stats;
 
 using render::ComputeInfo;
 
@@ -237,7 +242,7 @@ struct GdsBuffer {
 };
 GdsBuffer g_gds;
 
-std::unordered_map<u64, CsPipe> g_cs_pipes;
+base::HashMap<u64, CsPipe> g_cs_pipes;
 
 // Every read and write: the dependency the old ALL_COMMANDS/MEMORY barriers
 // expressed.
@@ -305,7 +310,7 @@ rhi::PipelineLayout* CsPipelineLayout(rhi::BindGroupLayout* set_layout) {
 }
 
 rhi::Pipeline* CreateCsPipeline(rhi::PipelineLayout* layout,
-                                const std::vector<u32>& spirv) {
+                                const base::Vector<u32>& spirv) {
   rhi::ComputePipelineDesc desc;
   desc.layout = layout;
   desc.code = rhi::Code(spirv);
@@ -320,10 +325,17 @@ struct PrebuiltCs {
   rhi::PipelineLayout* layout = nullptr;
   rhi::Pipeline* pipe = nullptr;
 };
-std::mutex g_prebuilt_mutex;
-std::unordered_map<u64, std::shared_future<PrebuiltCs>> g_prebuilt;
+// Filled in once by the thread building it; a consumer waits for `ready`.
+struct PrebuiltSlot {
+  base::Mutex mutex;
+  base::ConditionVariable built;
+  bool ready = false;
+  PrebuiltCs value;
+};
+base::Mutex g_prebuilt_mutex;
+base::HashMap<u64, base::SharedPointer<PrebuiltSlot>> g_prebuilt;
 
-u64 PrebuiltKey(const std::vector<u32>& spirv,
+u64 PrebuiltKey(const base::Vector<u32>& spirv,
                 u32 num_res,
                 int guest_memory_binding) {
   u64 h = 1469598103934665603ull;
@@ -341,21 +353,27 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   cp.num_res = ci.num_res;
   cp.gds_binding = ci.gds_binding;
   if (ci.gds_binding < 0) {
-    std::shared_future<PrebuiltCs> prebuilt;
+    base::SharedPointer<PrebuiltSlot> slot;
     {
-      std::lock_guard<std::mutex> lock(g_prebuilt_mutex);
+      base::LockGuard<base::Mutex> lock(g_prebuilt_mutex);
       const auto found = g_prebuilt.find(PrebuiltKey(
           ci.recomp->spirv, ci.num_res, ci.recomp->guest_memory_binding));
       if (found != g_prebuilt.end()) {
-        prebuilt = found->second;
+        slot = found->second;
         g_prebuilt.erase(found);
       }
     }
-    if (prebuilt.valid() && prebuilt.get().pipe) {
+    PrebuiltCs prebuilt;
+    if (slot) {
+      base::UniqueLock<base::Mutex> lock(slot->mutex);
+      slot->built.Wait(lock, [&] { return slot->ready; });
+      prebuilt = slot->value;
+    }
+    if (prebuilt.pipe) {
       const u64 started = NowNs();
-      cp.set_layout = prebuilt.get().set_layout;
-      cp.layout = prebuilt.get().layout;
-      cp.pipe = prebuilt.get().pipe;
+      cp.set_layout = prebuilt.set_layout;
+      cp.layout = prebuilt.layout;
+      cp.pipe = prebuilt.pipe;
       g_ns_pipe_build += NowNs() - started;
       g_pipe_build_n++;
       g_cs_pipes[key] = cp;
@@ -438,11 +456,11 @@ float UnpackUnsignedFloat(u32 value, u32 mantissa_bits) {
   const u32 exponent = (value >> mantissa_bits) & 0x1F;
   if (!exponent)
     return static_cast<float>(mantissa) *
-           std::bit_cast<float>((127u - 14u - mantissa_bits) << 23);
+           base::BitCast<float>((127u - 14u - mantissa_bits) << 23);
   if (exponent == 0x1F)
     return mantissa ? std::numeric_limits<float>::quiet_NaN()
                     : std::numeric_limits<float>::infinity();
-  return std::bit_cast<float>((exponent + 112) << 23 |
+  return base::BitCast<float>((exponent + 112) << 23 |
                               mantissa << (23 - mantissa_bits));
 }
 
@@ -450,7 +468,7 @@ float UnpackUnsignedFloat(u32 value, u32 mantissa_bits) {
 // float-staged R11G11B10 target on each writeback. Rounds to nearest, ties
 // away, as lround did.
 u32 PackUnsignedFloat(float value, u32 mantissa_bits) {
-  const u32 bits = std::bit_cast<u32>(value);
+  const u32 bits = base::BitCast<u32>(value);
   const u32 inf = 0x1Fu << mantissa_bits;
   const u32 exp32 = (bits >> 23) & 0xFF;
   const u32 mant23 = bits & 0x7FFFFF;
@@ -462,7 +480,7 @@ u32 PackUnsignedFloat(float value, u32 mantissa_bits) {
   if (exp32 > 112) {
     const u32 packed =
         (((exp32 - 112) << 23 | mant23) + (1u << (drop - 1))) >> drop;
-    return std::min(packed, inf);
+    return base::Min(packed, inf);
   }
   // Denormal in the target: the implicit bit joins the shifted mantissa.
   const u32 shift = drop + 113 - (exp32 ? exp32 : 1);
@@ -511,7 +529,7 @@ bool StageCsImage(const ComputeInfo::Res& res, void* dst) {
   fills_complete_layout = fills_complete_layout && filled_bytes == res.size;
   if (!fills_complete_layout)
     std::memset(dst, 0, res.size);
-  std::vector<u8> tight;
+  base::Vector<u8> tight;
   if (!direct)
     tight.resize(static_cast<size_t>(tiled.mips[0].width) *
                    tiled.mips[0].height * res.elem_bytes);
@@ -565,7 +583,7 @@ bool StageCsImage(const ComputeInfo::Res& res, void* dst) {
                 const size_t offset =
                     (static_cast<size_t>(by * 4 + y) * dst_level.pitch + bx * 4) * 4;
                 std::memcpy(level_dst + offset, rgba[y],
-                            std::min(4u, dst_level.width - bx * 4) * 4);
+                            base::Min(4u, dst_level.width - bx * 4) * 4);
               }
             }
         });
@@ -663,7 +681,7 @@ bool WritebackCsImage(const ComputeInfo::Res& res, const void* src) {
     return false;
   }
   const bool direct = res.elem_bytes == res.stage_elem_bytes;
-  std::vector<u8> tight;
+  base::Vector<u8> tight;
   if (!direct)
     tight.resize(static_cast<size_t>(res.width) * res.height * res.elem_bytes);
   for (u32 mip = 0; mip < tiled.mip_levels; mip++) {
@@ -778,7 +796,7 @@ struct CsRange {
   // Without it the writeback has to assume the whole range is GPU output and
   // copies the stale snapshot back over anything the CPU changed meanwhile –
   // see CsRangeFlushOne.
-  std::vector<u8> shadow;
+  base::Vector<u8> shadow;
   bool shadow_valid = false;
   // Bumped whenever the buffer's contents change (a dispatch wrote it, or it
   // was staged in again), so a texture bridged from it knows when to re-copy.
@@ -801,7 +819,7 @@ struct CsRange {
   // Guest CPU writes into the range while it held dispatch output that is
   // not written back (CsNoteGuestWrites), page aligned and coalesced. They
   // came after the dispatch, so they win over its output.
-  std::vector<std::pair<u64, u64>> cpu_writes;
+  base::Vector<base::Pair<u64, u64>> cpu_writes;
   int dirty_frame = -1;  // frame the range last went dirty
 };
 
@@ -853,7 +871,7 @@ u64 g_cs_scratch_bytes = 0;
 // Buffers a frame command list reads: destroyed two BeginFrames after
 // retirement, like ReleaseRetiredTextures, once every command list that
 // could reference them has retired.
-std::vector<rhi::Buffer*> g_cs_frame_retired;
+base::Vector<rhi::Buffer*> g_cs_frame_retired;
 
 bool CsFrameReferenced(const CsRange& e) {
   return e.frame_ref >= 0 && e.frame_ref + 2 > g_frame.num;
@@ -870,7 +888,7 @@ struct CsFreeBuffer {
   u64 cap = 0;
   bool device_local = false;
 };
-std::vector<CsFreeBuffer> g_cs_free;
+base::Vector<CsFreeBuffer> g_cs_free;
 u64 g_cs_free_bytes = 0, g_cs_recycled_n = 0;
 
 // Move a split range between its host mirror and its VRAM buffer, bracketed by
@@ -1037,7 +1055,7 @@ bool LiveTargetOfSize(u64 base, u32 w, u32 h) {
   const auto d = g_depths.find(base);
   if (d != g_depths.end() && d->second.w == w && d->second.h == h)
     return true;
-  return std::any_of(g_depths.begin(), g_depths.end(),
+  return base::AnyOf(g_depths.begin(), g_depths.end(),
                      [base](const auto& entry) {
                        return entry.second.stencil_base == base;
                      });
@@ -1046,7 +1064,7 @@ bool LiveTargetOfSize(u64 base, u32 w, u32 h) {
 bool CsAliasedBase(u64 base) {
   if (g_rts.find(base) != g_rts.end() || g_depths.find(base) != g_depths.end())
     return true;
-  return std::any_of(g_depths.begin(), g_depths.end(),
+  return base::AnyOf(g_depths.begin(), g_depths.end(),
                      [base](const auto& entry) {
                        return entry.second.stencil_base == base;
                      });
@@ -1144,18 +1162,18 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
       img.w + kExtentSlack >= res.width &&
       img.h + kExtentSlack >= res.height &&
       (img.elem_bytes == want_elem || unpack || widen)) {
-    plan.w = std::min(img.w, res.width);
-    plan.h = std::min(img.h, res.height);
+    plan.w = base::Min(img.w, res.width);
+    plan.h = base::Min(img.h, res.height);
     plan.unpack = unpack;
     plan.widen = widen;
     plan.depth16 = depth16;
     // Layers the target has not grown to yet were never drawn.
-    plan.layers = std::max(std::min(res.layers, img.layers), 1u);
+    plan.layers = base::Max(base::Min(res.layers, img.layers), 1u);
     return true;
   }
   // One line per address and direction. A flat cap spends itself on the level
   // load and then says nothing at all about the steady state.
-  static std::unordered_set<u64> warned;
+  static base::HashSet<u64> warned;
   const u64 key = (res.base << 1) | (dir[0] == 'r' ? 1u : 0u);
   if (warned.size() < 256 && warned.insert(key).second)
     BASE_LOGI("gpuvk",
@@ -1330,7 +1348,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
       c->FillBuffer(copy_buf, 0, (s_linear.size + 3) & ~u64(3), 0);
     else
       c->FillBuffer(copy_buf, level.offset,
-                    layer_bytes * std::max(res.layers, 1u), 0);
+                    layer_bytes * base::Max(res.layers, 1u), 0);
     c->Barrier(rhi::kAccessCopyWrite, rhi::kAccessCopyWrite);
   }
   // Chain from, and restore, the SUBMITTED layout: this copy executes
@@ -1364,7 +1382,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     c->CopyTextureToBuffer(copy_buf, img.texture, &copy, 1);
   if (truth && !to_image) {
     RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, copy_buf, res.size,
-                      /*detile=*/false, 1, std::max(res.layers, 1u),
+                      /*detile=*/false, 1, base::Max(res.layers, 1u),
                       plan.depth16);
     e.mirror_current = false;
   }
@@ -1427,11 +1445,11 @@ struct BridgeFloatImage {
   rhi::Texture* texture = nullptr;
   u32 w = 0, h = 0;
 };
-std::vector<BridgeFloatImage> g_bridge_float_images;
+base::Vector<BridgeFloatImage> g_bridge_float_images;
 u64 g_in_frame_bridge_n = 0;
 
 bool BlitsBetween(rhi::Format a, rhi::Format b) {
-  static std::unordered_map<u64, bool> known;
+  static base::HashMap<u64, bool> known;
   const u64 key = (u64(a) << 32) | u64(b);
   auto it = known.find(key);
   if (it != known.end())
@@ -1677,14 +1695,14 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
   return true;
 }
 
-std::unordered_map<u64, CsRange> g_cs_ranges;
+base::HashMap<u64, CsRange> g_cs_ranges;
 // Ranges MarkPending flagged, so retiring a batch visits those instead of
 // every range. Map nodes do not move; CsRangeDestroy (which precedes every
 // erase) drops its entry. May hold ranges no longer pending, or twice.
-std::vector<CsRange*> g_cs_pending;
+base::Vector<CsRange*> g_cs_pending;
 u64 g_cs_range_bytes = 0;
 constexpr u32 kCsDirtyPageShift = 16;
-std::unordered_map<u64, std::vector<u64>> g_cs_dirty_pages;
+base::HashMap<u64, base::Vector<u64>> g_cs_dirty_pages;
 // How many dirty ranges touch each 64 KiB of guest memory lives in the guest
 // page table: a zero answers "nothing dirty here" without a single hash map
 // lookup, and without the false alarms of a hashed table. Atomic because the
@@ -1700,7 +1718,7 @@ bool DirtyFilterClear(u64 base, u64 end) {
 // The same bases, once each: what the readback staging walks instead of every
 // range (thousands of them against a few dozen dirty ones).
 // Dirty range base -> end of the footprint its index entries cover.
-std::unordered_map<u64, u64> g_cs_dirty_bases;
+base::HashMap<u64, u64> g_cs_dirty_bases;
 // Bumped whenever compute results land in guest memory (writeback or an
 // executed batch of importing dispatches). The draw path's per-frame staging
 // caches stamp entries with this and re-copy when it has moved: a cached
@@ -1719,7 +1737,7 @@ void IndexDirtyRange(u64 base, u64 bytes) {
   u64& indexed = g_cs_dirty_bases[base];
   if (indexed)
     NoteDirtyFilter(base, indexed, -1);
-  indexed = std::max(indexed, end);
+  indexed = base::Max(indexed, end);
   NoteDirtyFilter(base, indexed, 1);
   for (u64 page = base >> kCsDirtyPageShift;
        page <= (end - 1) >> kCsDirtyPageShift; page++)
@@ -1734,7 +1752,7 @@ void UnindexDirtyRange(u64 base, u64 bytes) {
   if (auto found = g_cs_dirty_bases.find(base);
       found != g_cs_dirty_bases.end()) {
     NoteDirtyFilter(base, found->second, -1);
-    end = std::max(end, found->second);
+    end = base::Max(end, found->second);
     g_cs_dirty_bases.erase(found);
   }
   for (u64 page = base >> kCsDirtyPageShift;
@@ -1743,7 +1761,7 @@ void UnindexDirtyRange(u64 base, u64 bytes) {
     if (found == g_cs_dirty_pages.end())
       continue;
     auto& bases = found->second;
-    bases.erase(std::remove(bases.begin(), bases.end(), base), bases.end());
+    base::EraseIf(bases, [&](u64 b) { return b == base; });
     if (bases.empty())
       g_cs_dirty_pages.erase(found);
   }
@@ -1752,7 +1770,7 @@ void UnindexDirtyRange(u64 base, u64 bytes) {
 // Every range by the 1 MiB blocks its guest footprint covers, dirty or not:
 // what a CPU write to guest memory looks up instead of walking every range.
 constexpr u32 kCsRangeBlockShift = 20;
-std::unordered_map<u64, std::vector<u64>> g_cs_range_blocks;
+base::HashMap<u64, base::Vector<u64>> g_cs_range_blocks;
 
 void IndexCsRange(u64 base, u64 bytes) {
   if (!bytes)
@@ -1772,7 +1790,7 @@ void UnindexCsRange(u64 base, u64 bytes) {
     auto found = g_cs_range_blocks.find(b);
     if (found == g_cs_range_blocks.end())
       continue;
-    std::erase(found->second, base);
+    base::EraseIf(found->second, [base](u64 b) { return b == base; });
     if (found->second.empty())
       g_cs_range_blocks.erase(found);
   }
@@ -1816,10 +1834,10 @@ bool AnyDirtyOverlapping(u64 base, u64 bytes, Fn&& fn) {
   return false;
 }
 
-std::vector<u64> DirtyRangesOverlapping(u64 base,
+base::Vector<u64> DirtyRangesOverlapping(u64 base,
                                              u64 bytes,
                                              u64 exclude = UINT64_MAX) {
-  std::vector<u64> candidates;
+  base::Vector<u64> candidates;
   if (!bytes)
     return candidates;
   const u64 end = RangeEnd(base, bytes);
@@ -1842,11 +1860,11 @@ std::vector<u64> DirtyRangesOverlapping(u64 base,
                           found->second.end());
     }
   }
-  std::sort(candidates.begin(), candidates.end());
-  candidates.erase(std::unique(candidates.begin(), candidates.end()),
+  base::Sort(candidates.begin(), candidates.end());
+  candidates.erase(base::Unique(candidates.begin(), candidates.end()),
                    candidates.end());
   candidates.erase(
-      std::remove_if(candidates.begin(), candidates.end(),
+      base::RemoveIf(candidates.begin(), candidates.end(),
                      [&](u64 other) {
                        if (other == exclude)
                          return true;
@@ -1916,8 +1934,8 @@ bool EnsureGdsBuffer() {
 
 void CsRangeDestroy(CsRange& e);
 
-std::unordered_map<u64, CsRange>::iterator EraseCsRange(
-    std::unordered_map<u64, CsRange>::iterator it) {
+base::HashMap<u64, CsRange>::iterator EraseCsRange(
+    base::HashMap<u64, CsRange>::iterator it) {
   UnindexCsRange(it->first, it->second.guest_bytes);
   CsRangeDestroy(it->second);
   return g_cs_ranges.erase(it);
@@ -2053,7 +2071,7 @@ bool CsRangeRename(CsRange& e, u64 size) {
 void DropTiledImport(u64 base);
 
 void CsRangeDestroy(CsRange& e) {
-  std::erase(g_cs_pending, &e);
+  base::EraseIf(g_cs_pending, [&e](CsRange* r) { return r == &e; });
   if (e.res.base)
     DropTiledImport(e.res.base);
   if (!e.imported && !CsFrameReferenced(e) && !e.pending_batch && e.buf &&
@@ -2082,7 +2100,7 @@ struct ImportedRange {
   u64 offset = 0;  // base - the alignment floor the import starts at
   u64 bytes = 0;   // usable bytes from `offset`
 };
-std::unordered_map<u64, ImportedRange> g_tiled_imports;
+base::HashMap<u64, ImportedRange> g_tiled_imports;
 
 // The tiled side of a layout conversion is guest memory the CPU otherwise
 // copies twice a frame: in on the way to the shader, out again on the way back.
@@ -2140,11 +2158,11 @@ const ImportedRange* ImportTiledRange(u64 base, u64 bytes) {
 struct TileTable {
   rhi::Buffer* buf = nullptr;
   u64 bytes = 0;
-  std::vector<gcn::ImageTilingParams> params;  // per mip; `detile` patched
+  base::Vector<gcn::ImageTilingParams> params;  // per mip; `detile` patched
   u32 layers = 0;
   bool expanded = false;
 };
-std::unordered_map<u64, TileTable> g_tile_tables;
+base::HashMap<u64, TileTable> g_tile_tables;
 
 // The tiling shader, its descriptors pushed into whichever command list
 // records a conversion.
@@ -2216,8 +2234,8 @@ bool ConvertGfx10ImageImpl(const gcn::TextureLayout32& tiled,
       linear.size > max_range || tiled.size > UINT32_MAX ||
       linear.size > UINT32_MAX)
     return false;
-  std::vector<u32> table, terms;
-  std::vector<gcn::ImageTilingParams> params;
+  base::Vector<u32> table, terms;
+  base::Vector<gcn::ImageTilingParams> params;
   for (u32 mip = 0; mip < tiled.mip_levels; mip++) {
     const auto& t = tiled.mips[mip];
     const auto& l = linear.mips[mip];
@@ -2373,7 +2391,7 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
   if (g_tile_tables.size() >= 1024)
     return nullptr;
   TileTable& t = g_tile_tables[key];  // a failed build stays empty: no retry
-  std::vector<u32> table, terms;
+  base::Vector<u32> table, terms;
   for (u32 mip = 0; mip < tiled.mip_levels; mip++) {
     const auto& tm = tiled.mips[mip];
     const auto& lm = linear.mips[mip];
@@ -2428,8 +2446,8 @@ void RecordImageTiling(rhi::CommandList* c,
                        bool depth16) {
   auto& s = g_tiling;
   const u32 mip_count =
-      mips ? std::min<u32>(mips, t.params.size()) : t.params.size();
-  const u32 layer_count = layers ? std::min(layers, t.layers) : t.layers;
+      mips ? base::Min<u32>(mips, t.params.size()) : t.params.size();
+  const u32 layer_count = layers ? base::Min(layers, t.layers) : t.layers;
   c->Barrier(kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostWrite,
              kAccessComputeRW | rhi::kAccessCopyWrite);
   c->SetPipeline(s.pipe);
@@ -2472,7 +2490,7 @@ struct CsScratch {
   const TileTable* view_table = nullptr;
   u64 view_seq = 0;
 };
-std::vector<CsScratch> g_cs_scratch;
+base::Vector<CsScratch> g_cs_scratch;
 u64 g_truth_view_hits = 0;
 
 rhi::Buffer* AcquireView(u64 bytes,
@@ -2627,7 +2645,7 @@ bool GpuTileable(const ComputeInfo::Res& r) {
     return true;
   if (r.elem_bytes < 4 || r.elem_bytes != r.stage_elem_bytes)
     return false;
-  static std::unordered_map<u64, bool> known;
+  static base::HashMap<u64, bool> known;
   u64 key = 1469598103934665603ull;
   for (u64 v : {u64(r.tiling_idx), u64(r.width), u64(r.height), u64(r.pitch),
                 u64(r.layers), u64(r.mip_levels), u64(r.elem_bytes),
@@ -2639,7 +2657,7 @@ bool GpuTileable(const ComputeInfo::Res& r) {
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(r, tiled, linear))
     return false;
-  std::vector<u32> terms;
+  base::Vector<u32> terms;
   u32 mask;
   u64 stride;
   for (u32 mip = 0; mip < tiled.mip_levels; mip++)
@@ -2733,14 +2751,14 @@ struct BatchedDispatch {
   u8 res_img;    // bit i: resource i is an image
   u8 res_write;  // bit i: resource i is written
 };
-std::vector<BatchedDispatch> g_cs_batch_log;
+base::Vector<BatchedDispatch> g_cs_batch_log;
 rhi::TimestampPool* g_cs_timestamps = nullptr;
 struct CsGpuTime {
   double ns = 0;
   u64 count = 0;
 };
-std::unordered_map<u64, CsGpuTime> g_cs_gpu_times;
-std::unordered_map<rhi::Buffer*, ComputeBufferAccess> g_cs_batch_access;
+base::HashMap<u64, CsGpuTime> g_cs_gpu_times;
+base::HashMap<rhi::Buffer*, ComputeBufferAccess> g_cs_batch_access;
 
 struct CsBatch {
   rhi::CommandList* list = nullptr;
@@ -2749,7 +2767,7 @@ struct CsBatch {
   u64 id = 0;
   bool submitted = false;
   u32 count = 0;
-  std::vector<BatchedDispatch> log;
+  base::Vector<BatchedDispatch> log;
 };
 CsBatch g_cs_batches[kCsBatchRing];
 
@@ -2799,7 +2817,7 @@ void CsBatchLogFault(const CsBatch& b, const char* what) {
 // The batch's submission has completed: what it produced is real now.
 void CsBatchFinalize(CsBatch& b) {
   if (b.timestamps && !b.log.empty()) {
-    std::array<u64, 256> stamps{};
+    base::Array<u64, 256> stamps{};
     const u32 count = static_cast<u32>(b.log.size());
     if (Device().ReadTimestamps(b.timestamps, 0, count * 2, stamps.data())) {
       const rhi::Caps& caps = Device().caps();
@@ -2812,8 +2830,8 @@ void CsBatchFinalize(CsBatch& b) {
       }
     }
   }
-  g_cs_batch_done = std::max(g_cs_batch_done, b.id);
-  std::erase_if(g_cs_pending, [](CsRange* range) {
+  g_cs_batch_done = base::Max(g_cs_batch_done, b.id);
+  base::EraseIf(g_cs_pending, [](CsRange* range) {
     CsRange& e = *range;
     if (!e.pending_batch)
       return true;
@@ -2875,7 +2893,7 @@ u64 g_cs_sync_n[kSyncCount] = {};
 u64 g_cs_sync_ns[kSyncCount] = {};
 // The guest reader a writeback wait is paid for (FlushCsWritesRange's `why`).
 const char* g_cs_wait_reader = "other";
-std::map<std::string, std::pair<u64, u64>> g_cs_reader_waits;
+base::Map<base::String, base::Pair<u64, u64>> g_cs_reader_waits;
 struct WaitReaderScope {
   explicit WaitReaderScope(const char* why) { g_cs_wait_reader = why; }
   ~WaitReaderScope() { g_cs_wait_reader = prev; }
@@ -2951,7 +2969,7 @@ bool CsBatchSubmit() {
   if (Device().caps().debug_labels)
     g_cs_list->PopLabel();  // close the "cs batch" scope
   b.count = g_cs_batch_count;
-  b.log = std::move(g_cs_batch_log);
+  b.log = base::move(g_cs_batch_log);
   g_cs_batch_log.clear();
   g_cs_list->End();
   // A failed submit returns an id that has already been handed out.
@@ -3034,7 +3052,7 @@ void CsStageReadback(u64 base, CsRange& e, bool all) {
 
 void CsStageReadbacks(bool all = true) {
   // A copy: staging can open a batch, and finalizing an old one may unindex.
-  std::vector<u64> bases;
+  base::Vector<u64> bases;
   bases.reserve(g_cs_dirty_bases.size());
   for (const auto& [base, end] : g_cs_dirty_bases)
     bases.push_back(base);
@@ -3122,7 +3140,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
     // Once per destination, not the first 24 overall: a title that uploads
     // hundreds of surfaces spends a flat cap entirely on the first few, and
     // the one surface that stays empty is never among them.
-    static std::unordered_set<u64> seen;
+    static base::HashSet<u64> seen;
     if (seen.size() < 4096 && seen.insert(base).second)
       BASE_LOGI("cswb",
                 "image base={:#x} {}x{} layers={} tiling={} staged {}/{} "
@@ -3137,13 +3155,13 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
   // CPU wrote since the dispatch are set aside here and put back after it.
   // Without it, a report can be of our own earlier writeback.
   const u64 linear_n =
-      e.guest_bytes ? std::min<u64>(e.size, e.guest_bytes) : e.size;
+      e.guest_bytes ? base::Min<u64>(e.size, e.guest_bytes) : e.size;
   const bool merges = (!e.image_staging || e.truth) && !kCsWbFull &&
                       !e.rt_sourced && e.shadow_valid &&
                       e.shadow.size() >= linear_n;
   struct KeptPages {
-    std::vector<std::pair<u64, u64>> spans;
-    std::vector<u8> bytes;
+    base::Vector<base::Pair<u64, u64>> spans;
+    base::Vector<u8> bytes;
     ~KeptPages() {
       u64 off = 0;
       for (const auto& [first, end] : spans) {
@@ -3156,7 +3174,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
   if (!merges && CsTracksGuestWrites()) {
     const u64 footprint_end = base + (e.guest_bytes ? e.guest_bytes : e.size);
     for (const auto& [first, end] : e.cpu_writes) {
-      const u64 lo = std::max(first, base), hi = std::min(end, footprint_end);
+      const u64 lo = base::Max(first, base), hi = base::Min(end, footprint_end);
       if (lo >= hi)
         continue;
       kept.spans.emplace_back(lo, hi);
@@ -3205,7 +3223,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
     // would otherwise scribble compute results over whatever follows, which
     // reads as float data turning up in the title's allocator free lists.
     const u64 n =
-        e.guest_bytes ? std::min<u64>(e.size, e.guest_bytes) : e.size;
+        e.guest_bytes ? base::Min<u64>(e.size, e.guest_bytes) : e.size;
     if (!gpu::IsReadableRange(base, n)) {
       static int logged = 0;
       if (logged++ < 8)
@@ -3254,11 +3272,11 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
       struct ChunkCounts {
         u64 wrote = 0, adopted = 0, conflicts = 0;
       };
-      std::vector<ChunkCounts> counts(chunks);
+      base::Vector<ChunkCounts> counts(chunks);
       gcn::DetileParallelWork(chunks, blocks * 64, [&](u32 c0, u32 c1) {
         for (u32 c = c0; c < c1; c++) {
           const u64 first = u64(c) * kMergeBlocksPerChunk;
-          const u64 last = std::min<u64>(first + kMergeBlocksPerChunk, blocks);
+          const u64 last = base::Min<u64>(first + kMergeBlocksPerChunk, blocks);
           ChunkCounts local;
           for (u64 b = first; b < last; b++) {
             const u64 o = b * 64;
@@ -3319,7 +3337,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
         const auto* src = static_cast<const u8*>(e.map);
         const u8* shd = e.shadow.data();
         for (u64 off = 0; off < n; off += 64) {
-          const u64 blk = std::min<u64>(64, n - off);
+          const u64 blk = base::Min<u64>(64, n - off);
           if (std::memcmp(src + off, shd + off, blk) != 0)
             wrote += blk;
         }
@@ -3427,12 +3445,13 @@ bool ConvertGfx10Image(const gcn::TextureLayout32& tiled,
 
 void CsSyncReport(double frames) {
   if (kCsSyncReport && frames > 0) {
-    std::vector<std::pair<u64, CsGpuTime>> times(g_cs_gpu_times.begin(),
-                                               g_cs_gpu_times.end());
-    std::sort(times.begin(), times.end(), [](const auto& a, const auto& b) {
+    base::Vector<base::Pair<u64, CsGpuTime>> times;
+    for (const auto& [base, time] : g_cs_gpu_times)
+      times.push_back({base, time});
+    base::Sort(times.begin(), times.end(), [](const auto& a, const auto& b) {
       return a.second.ns > b.second.ns;
     });
-    for (size_t i = 0; i < std::min<size_t>(8, times.size()); ++i)
+    for (size_t i = 0; i < base::Min<size_t>(8, times.size()); ++i)
       BASE_LOGI("cstime", "CS {:#x} {:.2f}ms/f x{:.1f}", times[i].first,
                 times[i].second.ns / frames / 1e6,
                 double(times[i].second.count) / frames);
@@ -3522,9 +3541,10 @@ void CsSyncReport(double frames) {
   g_stage_guest_detile_bytes = g_stage_guest_detile_n = 0;
   // The ranges that actually cost the frame, most expensive first: what to fix
   // is whichever reason column is not "hash" (guest memory genuinely changed).
-  std::vector<std::pair<u64, StageStat>> top(g_stage_stats.begin(),
-                                             g_stage_stats.end());
-  std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+  base::Vector<base::Pair<u64, StageStat>> top;
+  for (const auto& [base, stat] : g_stage_stats)
+    top.push_back({base, stat});
+  base::Sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
     return a.second.bytes + a.second.wait_ns / 8 >
            b.second.bytes + b.second.wait_ns / 8;
   });
@@ -3689,7 +3709,7 @@ bool CsSupplyTexture(u64 base,
     return false;
   auto declined = [&](const char* why) {
     if (kCsTexBridgeTrace) {
-      static std::unordered_set<u64> seen;
+      static base::HashSet<u64> seen;
       if (seen.size() < 256 && seen.insert(base).second)
         BASE_LOGI("texbridge",
                   "{:#x} {}: cs {}x{} l={} m={} e={}/{} d={} t={} | tex "
@@ -3757,9 +3777,9 @@ bool CsSupplyTexture(u64 base,
   rhi::BufferTextureCopy copies[16];
   for (u32 mip = 0; mip < linear.mip_levels; mip++) {
     const auto& level = linear.mips[mip];
-    if (level.offset % std::max<u64>(4, r.elem_bytes) ||
-        level.width != std::max(w >> mip, 1u) ||
-        level.height != std::max(h >> mip, 1u))
+    if (level.offset % base::Max<u64>(4, r.elem_bytes) ||
+        level.width != base::Max(w >> mip, 1u) ||
+        level.height != base::Max(h >> mip, 1u))
       return declined("mip geometry");
     copies[mip].buffer_offset = level.offset;
     copies[mip].row_length = level.pitch;
@@ -3880,7 +3900,7 @@ CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base) {
     return nullptr;
   CsRange& e = g_cs_ranges.find(only)->second;
   // Raw bytes only: an image staging or a truth holds another layout.
-  const u64 valid = std::min<u64>(e.size, e.guest_bytes);
+  const u64 valid = base::Min<u64>(e.size, e.guest_bytes);
   if (!e.buf || e.image_staging || e.truth || e.imported || base < only ||
       base + bytes > only + valid)
     return nullptr;
@@ -3954,7 +3974,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(r, tiled, linear))
     return false;
-  const u32 w = std::min(rt.w, r.width), h = std::min(rt.h, r.height);
+  const u32 w = base::Min(rt.w, r.width), h = base::Min(rt.h, r.height);
   rhi::Texture* float_image = nullptr;
   if (unpacked && (!BlitsBetween(rhi::Format::kRGBA32Float, rt.fmt) ||
                    !(float_image = GetBridgeFloatImage(w, h))))
@@ -4033,10 +4053,10 @@ bool CsRefreshRtFromTruth(u64 base) {
 }
 
 void ReleaseRetiredCsBuffers() {
-  static std::vector<rhi::Buffer*> aged;
+  static base::Vector<rhi::Buffer*> aged;
   for (rhi::Buffer* buf : aged)
     Device().Destroy(buf);
-  aged = std::move(g_cs_frame_retired);
+  aged = base::move(g_cs_frame_retired);
   g_cs_frame_retired.clear();
 }
 
@@ -4045,7 +4065,7 @@ void CsForgetGuestRange(u64 base, u64 bytes) {
   if (!bytes)
     return;
   const u64 end = RangeEnd(base, bytes);
-  std::vector<u64> bases;
+  base::Vector<u64> bases;
   for (u64 b = base >> kCsRangeBlockShift; b <= (end - 1) >> kCsRangeBlockShift;
        b++)
     if (auto found = g_cs_range_blocks.find(b); found != g_cs_range_blocks.end())
@@ -4073,7 +4093,7 @@ void CsNoteGuestWrites(u64 first, u64 end) {
   // cache armed the pages, and acting on those costs more than it saves.
   if (!CsTracksGuestWrites() || g_cs_range_blocks.empty() || first >= end)
     return;
-  thread_local std::vector<u64> bases;
+  thread_local base::Vector<u64> bases;
   bases.clear();
   // A remapped reservation can span gigabytes: walk the smaller side.
   const u64 first_block = first >> kCsRangeBlockShift;
@@ -4102,11 +4122,11 @@ void CsNoteGuestWrites(u64 first, u64 end) {
       e.last_validated_frame = -1;
       continue;
     }
-    const u64 lo = std::max(first, range_base), hi = std::min(end, range_end);
+    const u64 lo = base::Max(first, range_base), hi = base::Min(end, range_end);
     if (!e.cpu_writes.empty() && e.cpu_writes.back().second >= lo &&
         e.cpu_writes.back().first <= hi) {
       auto& last = e.cpu_writes.back();
-      last = {std::min(last.first, lo), std::max(last.second, hi)};
+      last = {base::Min(last.first, lo), base::Max(last.second, hi)};
     } else {
       e.cpu_writes.emplace_back(lo, hi);
     }
@@ -4184,8 +4204,8 @@ bool FillGds(Renderer& renderer, u32 offset, u32 bytes, u32 value) {
 // The reason is the number of the `return false` it came from; the file's
 // line is one grep away and a prose reason at each of them would be noise.
 bool CsDeclined(const ComputeInfo& ci, const char* why) {
-  static std::unordered_set<std::string> reported;
-  std::string key = std::to_string(ci.cs_addr) + why;
+  static base::HashSet<base::String> reported;
+  base::String key = base::ToString(ci.cs_addr) + why;
   if (reported.size() < 512 && reported.insert(key).second)
     BASE_LOGI("csgpu", "CS @{:#x} declined at exit {}", ci.cs_addr, why);
   return false;
@@ -4214,24 +4234,24 @@ const ComputeInfo& MergeSameBase(const ComputeInfo& ci, ComputeInfo& merged) {
       if (a.base != b.base || a.zero_fill || b.zero_fill || a.image_staging ||
           b.image_staging)
         continue;
-      a.size = b.size = std::max(a.size, b.size);
-      a.guest_size = b.guest_size = std::max(a.guest_size, b.guest_size);
+      a.size = b.size = base::Max(a.size, b.size);
+      a.guest_size = b.guest_size = base::Max(a.guest_size, b.guest_size);
     }
   return merged;
 }
 
-void PrebuildComputePipeline(const std::vector<u32>& spirv,
+void PrebuildComputePipeline(const base::Vector<u32>& spirv,
                              u32 num_res,
                              int guest_memory_binding) {
   if (!g_backend.device || spirv.empty())
     return;
-  std::promise<PrebuiltCs> done;
+  const auto slot = base::MakeShared<PrebuiltSlot>();
   {
-    std::lock_guard<std::mutex> lock(g_prebuilt_mutex);
+    base::LockGuard<base::Mutex> lock(g_prebuilt_mutex);
     const u64 key = PrebuiltKey(spirv, num_res, guest_memory_binding);
     if (g_prebuilt.count(key))
       return;
-    g_prebuilt.emplace(key, done.get_future().share());
+    g_prebuilt.emplace(key, slot);
   }
   PrebuiltCs built;
   built.set_layout = CsSetLayout(num_res, -1, guest_memory_binding);
@@ -4239,7 +4259,12 @@ void PrebuildComputePipeline(const std::vector<u32>& spirv,
     built.layout = CsPipelineLayout(built.set_layout);
   if (built.layout)
     built.pipe = CreateCsPipeline(built.layout, spirv);
-  done.set_value(built);
+  {
+    base::LockGuard<base::Mutex> lock(slot->mutex);
+    slot->value = built;
+    slot->ready = true;
+  }
+  slot->built.NotifyAll();
 }
 
 bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
@@ -4265,7 +4290,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   }
   const rhi::Caps& caps = Device().caps();
   const u32 max_resources =
-      std::min(gcn::kMaxCsResources, caps.max_compute_resources);
+      base::Min(gcn::kMaxCsResources, caps.max_compute_resources);
   if (ci.num_res + (ci.recomp->guest_memory_binding >= 0) +
           (ci.gds_binding >= 0) >
       max_resources)
@@ -4356,17 +4381,17 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   // into its texture heap".
   if (kCsHist) {
     struct Cell { u64 size, n; };
-    static std::mutex m;
-    static std::map<u64, Cell> tbl;
-    static auto last = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lk(m);
+    static base::Mutex m;
+    static base::Map<u64, Cell> tbl;
+    static auto last = base::TimeTicks::Now();
+    base::LockGuard<base::Mutex> lk(m);
     for (u32 i = 0; i < ci.num_res; i++)
       if (ci.res[i].written && tbl.size() < 4096) {
         Cell& c = tbl[ci.res[i].base];
         c = {ci.res[i].size, c.n + 1};
       }
-    const auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count() >=
+    const auto now = base::TimeTicks::Now();
+    if ((now - last).InSeconds() >=
         kCsHist) {
       last = now;
       BASE_LOGI("cshist", "{} written ranges", tbl.size());
@@ -4492,7 +4517,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           parent = nullptr;
         } else if (s.buf) {
           const u64 n =
-              std::min<u64>(s.size ? s.size : s.cap, guest_bytes);
+              base::Min<u64>(s.size ? s.size : s.cap, guest_bytes);
           CsBatchBeginImpl();
           g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
           g_cs_list->CopyBuffer(parent->buf, base - pbase, s.buf, 0, n);
@@ -4825,7 +4850,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           st.shape++;
           // Which field flipped is the whole question: two dispatches that
           // describe the same surface slightly differently restage it in full.
-          static std::unordered_set<u64> shape_logged, big_logged;
+          static base::HashSet<u64> shape_logged, big_logged;
           auto& logged = sz[i] >= (1u << 20) ? big_logged : shape_logged;
           if (logged.size() < 64 && logged.insert(base).second)
             BASE_LOGI("csshape",
@@ -4884,7 +4909,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       CsRange& s = f->second;
       if (!s.gpu_dirty || !s.buf)
         continue;
-      const u64 n = std::min<u64>(s.size ? s.size : s.cap, s.guest_bytes);
+      const u64 n = base::Min<u64>(s.size ? s.size : s.cap, s.guest_bytes);
       CsBatchBeginImpl();
       g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
       g_cs_list->CopyBuffer(e.buf, folds[k] - base, s.buf, 0, n);
@@ -5132,7 +5157,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     }
   }
   // A CPU reader is coming for what this batch wrote: start it now.
-  if ((g_cs_batch_count >= std::max<u32>(1, kCsBatchCap) || kick ||
+  if ((g_cs_batch_count >= base::Max<u32>(1, kCsBatchCap) || kick ||
        kGpuCsgpuVerbose) &&
       !CsBatchSubmit()) {
     renderer.state = nullptr;
@@ -5161,7 +5186,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     }
     for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
       const u64 base = it->first, end = base + it->second.guest_bytes;
-      const bool touched = std::any_of(written.begin(), written.end(),
+      const bool touched = base::AnyOf(written.begin(), written.end(),
           [&](const auto& r) { return r.base < end && base < r.base + r.size; });
       if (touched) {
         it = EraseCsRange(it);
@@ -5297,7 +5322,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
         g_lazy_kept_bytes += it->second.size;
       } else if (it->second.gpu_dirty) {
         const CsRange& fe = it->second;
-        g_wb_why[std::string("frame-end") +
+        g_wb_why[base::String("frame-end") +
                  (fe.truth ? "/img" : fe.image_staging ? "/lin" : "/buf")]++;
         g_wb_why_bytes += fe.size;
         if (!CsRangeFlushOne(it->first, it->second)) {
@@ -5451,7 +5476,7 @@ bool FlushCsWritesRange(Renderer& renderer,
       // tiled image surface: a truth is not what it is after.
       if (e.truth && !std::strcmp(why, "srt"))
         continue;
-      g_wb_why[std::string(why) + (e.truth ? "/img" : e.image_staging ? "/lin" : "/buf")]++;
+      g_wb_why[base::String(why) + (e.truth ? "/img" : e.image_staging ? "/lin" : "/buf")]++;
       g_wb_why_bytes += e.size;
       if (e.device_local && !e.mirror_current && !e.imported &&
           (!CanGpuTile(e.res, e) || e.truth))
@@ -5483,7 +5508,7 @@ void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
     return;
   FlushCsWritesRange(renderer, base, bytes, "fill");
   u32* words = reinterpret_cast<u32*>(base);
-  std::fill(words, words + bytes / 4, value);
+  base::Fill(words, words + bytes / 4, value);
   CsForgetGuestRange(base, bytes);
   InvalidateTexRange(base, bytes);
   NoteMemoryFill(renderer, base, bytes, value);

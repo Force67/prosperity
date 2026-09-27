@@ -10,7 +10,6 @@
 
 #include <logger/logger.h>
 #include "base/arch.h"
-#include <string>
 #include <utl/init_func.h>
 
 #include <base.h>

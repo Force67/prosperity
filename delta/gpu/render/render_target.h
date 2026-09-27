@@ -10,11 +10,12 @@
 
 #include "base/arch.h"
 
-#include <unordered_map>
-#include <vector>
 
 #include "gpu/render/command.h"
 #include "gpu/rhi/device.h"
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::render {
 
@@ -31,11 +32,11 @@ struct RTarget {
   rhi::Texture* feedback_texture = nullptr;
   rhi::TextureView* feedback_view = nullptr;
   rhi::BindGroup* feedback_set = nullptr;
-  std::unordered_map<u32, rhi::TextureView*> sampled_views;
+  base::HashMap<u32, rhi::TextureView*> sampled_views;
   // Views of the same image in a different (size-compatible) format, keyed by
   // swizzle | format<<16. See SampledViewAs.
-  std::unordered_map<u32, rhi::TextureView*> alias_views;
-  std::unordered_map<u32, rhi::TextureView*> feedback_sampled_views;
+  base::HashMap<u32, rhi::TextureView*> alias_views;
+  base::HashMap<u32, rhi::TextureView*> feedback_sampled_views;
   rhi::TextureState feedback_layout = rhi::TextureState::kUndefined;
   u32 w = 0, h = 0;
   // Slices of a target a GS renders layered (gl_Layer). Such a target is a 3D
@@ -105,7 +106,7 @@ struct RTarget {
 // several geometries owns one image per geometry, of which this holds the one
 // the last draw rendered into; the others are parked in vk_render_target.cc, so
 // resolving a target by address alone keeps working.
-extern std::unordered_map<u64, RTarget>& g_rts;
+extern base::HashMap<u64, RTarget>& g_rts;
 
 // Depth/stencil attachment, keyed by its guest DB_Z_WRITE_BASE. A combined host
 // image preserves the separate PS4 Z and stencil planes for raster and compute.
@@ -121,12 +122,12 @@ struct DepthTarget {
   rhi::TextureView* attachment_view = nullptr;
   // Array layers, and attachment views of the layers past 0, made on demand.
   u32 layers = 1;
-  std::vector<rhi::TextureView*> layer_views;
+  base::Vector<rhi::TextureView*> layer_views;
   // Layers a clear still has to reach: a clear of an array lands on each
   // layer's first bind, not only on whichever layer is bound first.
   u32 clear_layers = 0;
   rhi::BindGroup* set = nullptr;
-  std::unordered_map<u32, rhi::TextureView*> sampled_views;
+  base::HashMap<u32, rhi::TextureView*> sampled_views;
   u32 w = 0, h = 0;
   // DB_DEPTH_SIZE's padded geometry: how much guest memory this Z surface
   // actually owns, which is not the image size when the guest binds a
@@ -159,22 +160,22 @@ struct DepthTarget {
   u32 htile_clear_code = 0;
 };
 
-extern std::unordered_map<u64, DepthTarget>& g_depths;
+extern base::HashMap<u64, DepthTarget>& g_depths;
 // Bumped each time a target is bound for writing: a finer clock than the
 // frame number, whose boundary does not line up with the guest's.
 extern u64 g_render_serial;
 // Depth images of a base rendered at more than one geometry; only the one in
 // g_depths answers to the address (see ActivateDepthVariant).
-extern std::unordered_map<u64, std::vector<DepthTarget>> g_depth_variants;
+extern base::HashMap<u64, base::Vector<DepthTarget>> g_depth_variants;
 // Colour images of a base rendered at more than one geometry (see
 // ActivateRtVariant); only the one in g_rts answers to the address.
-extern std::unordered_map<u64, std::vector<RTarget>> g_rt_variants;
+extern base::HashMap<u64, base::Vector<RTarget>> g_rt_variants;
 
 // Address -> image page table, the resource model's core: a 64 KiB guest page maps to
 // the RT bases whose footprint covers it, so a sampled address resolves to every
 // overlapping live image in O(pages). Pages hold lists (aliased/double-buffered RTs).
 constexpr u32 kRtPageShift = 16;  // 64 KiB
-extern std::unordered_map<u64, std::vector<u64>>& g_rt_pages;
+extern base::HashMap<u64, base::Vector<u64>>& g_rt_pages;
 
 u64 RtByteSizeWH(u32 w, u32 h, rhi::Format fmt);
 u64 RtByteSize(const RTarget& rt);

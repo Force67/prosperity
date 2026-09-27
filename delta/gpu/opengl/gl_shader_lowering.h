@@ -11,12 +11,12 @@
 // only the resources its stages use, so a wide pipeline layout does not run
 // into GL's small per-kind limits.
 
-#include <string>
-#include <utility>
-#include <vector>
 
 #include "base/arch.h"
 #include "gpu/rhi/types.h"
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 namespace gpu::opengl {
 
@@ -50,19 +50,19 @@ struct ResourceSlot {
 // One stage's push constants as a flattened `uniform {u,i,}vec4 name[count]`.
 struct PushUniform {
   u32 stage = 0;  // rhi::ShaderStage bit
-  std::string name;
+  base::String name;
   u32 vec4_count = 0;
   char type = 'u';  // 'f', 'i' or 'u'
 };
 
 struct ProgramInterface {
-  std::vector<ResourceSlot> slots;  // sorted by (set, binding)
-  std::vector<PushUniform> push_uniforms;
+  base::Vector<ResourceSlot> slots;  // sorted by (set, binding)
+  base::Vector<PushUniform> push_uniforms;
   bool push_ubo = false;  // some stage reads push constants from kPushUboSlot
   u32 pointer_count = 0;  // entries of kPointerTable
   // Vertex inputs are packed from GL attribute 0: {shader location, GL
   // attribute} for each location the vertex stage reads.
-  std::vector<std::pair<u32, u32>> vertex_locations;
+  base::Vector<base::Pair<u32, u32>> vertex_locations;
 };
 
 struct GlslFeatures {
@@ -96,18 +96,18 @@ inline constexpr size_t kMaxModuleBytes = 640 * 1024;
 // order. A resource missing from the layout, or bound as another type, fails.
 bool LowerProgram(const StageCode* stages,
                   u32 count,
-                  const std::vector<const rhi::BindGroupLayoutDesc*>& groups,
+                  const base::Vector<const rhi::BindGroupLayoutDesc*>& groups,
                   const GlslFeatures& features,
-                  std::vector<std::string>* glsl,
+                  base::Vector<base::String>* glsl,
                   ProgramInterface* program,
-                  std::string* error);
+                  base::String* error);
 
 // The resources a module uses, as a layout would declare them, for tools
 // that have a module but no pipeline layout. Sets are dense from 0.
 bool ReflectLayout(const rhi::ShaderCode& code,
                    u32* stage,
-                   std::vector<rhi::BindGroupLayoutDesc>* groups,
+                   base::Vector<rhi::BindGroupLayoutDesc>* groups,
                    u32* push_constant_bytes,
-                   std::string* error);
+                   base::String* error);
 
 }  // namespace gpu::opengl

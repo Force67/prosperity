@@ -9,12 +9,8 @@
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/render_queue.h"
 
-#include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <memory>
-#include <unordered_set>
-#include <vector>
 
 #include <utl/mem.h>
 #include <utl/options.h>
@@ -26,6 +22,13 @@
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps4/shader_cache.h"
+#include <base/containers/array.h>
+#include <base/algorithm.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/shared_pointer.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 
@@ -471,7 +474,7 @@ void ResolveHeuristicSources(const u32* vud,
   }
   if (!fetch_addr)
     return;
-  thread_local std::vector<gcn::VBuffer> vbs;
+  thread_local base::Vector<gcn::VBuffer> vbs;
   gcn::TrackVertexBuffers(vbs, *gcn::CachedProgram(fetch_addr, 64), vud);
   if (vbs.empty())
     return;
@@ -502,7 +505,7 @@ void ResolveHeuristicSources(const u32* vud,
 
 // The images the pixel shader samples, in its set-0 binding order. Returns the
 // decoded program, which the recompiled path reuses.
-std::shared_ptr<const gcn::Program> ResolvePsTextures(render::Renderer& renderer,
+base::SharedPointer<const gcn::Program> ResolvePsTextures(render::Renderer& renderer,
                                                       const Regs& regs,
                                                       u64 ps_addr,
                                                       u32 frame,
@@ -516,7 +519,7 @@ std::shared_ptr<const gcn::Program> ResolvePsTextures(render::Renderer& renderer
   }
   auto ps_prog = gcn::CachedProgram(ps_addr, 4096);
   const bool trace = ShouldTraceTextureTracking(frame, ps_addr);
-  thread_local std::vector<gcn::TImage> texs;
+  thread_local base::Vector<gcn::TImage> texs;
   gcn::TrackTextures(texs, ps_prog, regs.At(mmSPI_SHADER_USER_DATA_PS_0), trace,
                      ps_addr);
   if (texs.empty())
@@ -557,7 +560,7 @@ std::shared_ptr<const gcn::Program> ResolvePsTextures(render::Renderer& renderer
   d.uv_stride = d.vertex_stride;
 
   d.num_texs =
-      static_cast<u32>(std::min<size_t>(texs.size(), kMaxTrackedTextures));
+      static_cast<u32>(base::Min<size_t>(texs.size(), kMaxTrackedTextures));
   for (u32 i = 0; i < d.num_texs; i++)
     BindTexture(d, texs[i], i, masks);
   TraceTextureFormat(first, d);
@@ -574,7 +577,7 @@ void ResolveVsTextures(const u32* vud,
                        TextureMasks& masks) {
   if (!IsGuestAddress(vs_addr))
     return;
-  thread_local std::vector<gcn::TImage> texs;
+  thread_local base::Vector<gcn::TImage> texs;
   gcn::TrackTextures(texs, gcn::CachedProgram(vs_addr, 4096), vud, false,
                      vs_addr);
   for (const auto& t : texs) {
@@ -589,8 +592,8 @@ void ResolveVsTextures(const u32* vud,
 // DELTA_GPU_SKIPSH=addr[,addr...] (hex): refuse to recompile draws whose VS or
 // PS lives at one of these guest addresses, for shader-hang bisection.
 bool ShaderSkipped(u64 vs_addr, u64 ps_addr) {
-  static const std::vector<u64> kSkipped = [] {
-    std::vector<u64> list;
+  static const base::Vector<u64> kSkipped = [] {
+    base::Vector<u64> list;
     if (const char* spec = kSkipShList)
       for (const char* p = spec; *p;) {
         char* end;
@@ -602,9 +605,9 @@ bool ShaderSkipped(u64 vs_addr, u64 ps_addr) {
       }
     return list;
   }();
-  return !kSkipped.empty() && (std::find(kSkipped.begin(), kSkipped.end(),
+  return !kSkipped.empty() && (base::Find(kSkipped.begin(), kSkipped.end(),
                                          vs_addr) != kSkipped.end() ||
-                               std::find(kSkipped.begin(), kSkipped.end(),
+                               base::Find(kSkipped.begin(), kSkipped.end(),
                                          ps_addr) != kSkipped.end());
 }
 
@@ -627,8 +630,8 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
           d.vbufs[j].per_instance != per_instance)
         continue;
       const u64 bound = reinterpret_cast<u64>(d.vbufs[j].data);
-      const u64 lo = std::min(bound, vb.base);
-      const u64 hi = std::max(bound, vb.base);
+      const u64 lo = base::Min(bound, vb.base);
+      const u64 hi = base::Max(bound, vb.base);
       if (hi - lo < vb.stride) {
         sel = static_cast<int>(j);
         break;
@@ -644,7 +647,7 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
       auto& bind = d.vbufs[sel];
       if (vb.base < reinterpret_cast<u64>(bind.data))
         bind.data = reinterpret_cast<const void*>(vb.base);
-      bind.num_records = std::min(bind.num_records, vb.num_records);
+      bind.num_records = base::Min(bind.num_records, vb.num_records);
     }
     attr_binding[i] = static_cast<u32>(sel);
   }
@@ -681,7 +684,7 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
   u32 records = UINT32_MAX;
   for (u32 j = 0; j < d.num_vbufs; j++)
     if (d.vbufs[j].stride && !d.vbufs[j].per_instance)
-      records = std::min(records, d.vbufs[j].num_records);
+      records = base::Min(records, d.vbufs[j].num_records);
   d.vertex_count = records == UINT32_MAX ? 0 : records;
   return RecompStatus::kOk;
 }
@@ -708,9 +711,9 @@ u32 IntAttrMask(const gcn::Recompiled& rc,
 // chains (FOX loads the V# through an extended-user-data pointer, so it is not
 // sitting directly in user data at cb.ud_sgpr). Bindings are assigned by the
 // translator and shared across both stages in descriptor set 1.
-void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
+void ResolveCbufferBindings(const base::Vector<gcn::ShaderCbuf>& cbufs,
                             const u32* user_data,
-                            const std::shared_ptr<const gcn::Program>& program,
+                            const base::SharedPointer<const gcn::Program>& program,
                             u64 code_base,
                             bool vertex_stage,
                             render::DrawInfo& d,
@@ -718,7 +721,7 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
   thread_local gcn::CbufList resolved;
   gcn::ResolveCbuffers(resolved, program, user_data, code_base);
   for (const auto& cb : cbufs) {
-    if (cb.binding >= std::size(d.cbufs))
+    if (cb.binding >= base::ArraySize(d.cbufs))
       continue;
     gcn::VBuffer vb{};
     if (const gcn::VBuffer* found = gcn::FindCbuf(
@@ -737,7 +740,7 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
     if (!IsGuestRange(vb.base, bytes) || bytes > 0xFFFFFFFFull)
       continue;
     d.cbufs[cb.binding] = {vb.base, static_cast<u32>(bytes)};
-    d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
+    d.num_cbufs = base::Max(d.num_cbufs, cb.binding + 1);
     if (cb.pointer)
       continue;  // an SRT root is not a transform buffer
     if (vertex_stage && !resolved_vs_cbuf) {
@@ -755,16 +758,16 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
 // The live V# behind every raw buffer an emitted stage reads with MUBUF. Same
 // scalar replay as the cbuffers: the descriptor is read at the instruction that
 // consumes it, so an SRT-chained V# lands here as well as an inline one.
-void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
+void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
                        const u32* user_data,
-                       const std::shared_ptr<const gcn::Program>& program,
+                       const base::SharedPointer<const gcn::Program>& program,
                        u64 code_base,
                        const char* stage,
                        u64 vs_addr,
                        render::DrawInfo& d) {
   if (buffers.empty())
     return;
-  thread_local std::vector<gcn::VBuffer> resolved;
+  thread_local base::Vector<gcn::VBuffer> resolved;
   gcn::ResolveShaderBuffers(resolved, program, buffers, user_data, code_base);
   for (size_t i = 0; i < buffers.size(); i++) {
     const gcn::ShaderBuffer& sb = buffers[i];
@@ -780,7 +783,7 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
     if (!ok)
       continue;
     d.bufs[sb.binding] = {vb.base, static_cast<u32>(bytes)};
-    d.num_bufs = std::max(d.num_bufs, sb.binding + 1);
+    d.num_bufs = base::Max(d.num_bufs, sb.binding + 1);
   }
 }
 
@@ -835,7 +838,7 @@ RecompStatus ResolveRecompiledShaders(
     const gcn::GsPipeline* gs,
     u64 ps_addr,
     u64 fetch_addr,
-    const std::shared_ptr<const gcn::Program>& ps_prog,
+    const base::SharedPointer<const gcn::Program>& ps_prog,
     const TextureMasks& masks,
     u32 mrt_uint_mask,
     u32 mrt_bound_mask,
@@ -864,7 +867,7 @@ RecompStatus ResolveRecompiledShaders(
   d.ps4_neo = gcn::DefaultIsaMode() == gcn::IsaMode::kNeo;
   const u32* pud = regs.At(mmSPI_SHADER_USER_DATA_PS_0);
   const auto vs_prog = gcn::CachedProgram(vs_addr, 4096);
-  thread_local std::vector<gcn::VBuffer> direct_vbs;
+  thread_local base::Vector<gcn::VBuffer> direct_vbs;
   gcn::ResolveDirectVertexBuffers(direct_vbs, vs_prog, rc->attrs, vud, vs_addr);
 
   gcn::VBuffer attr_vbs[render::DrawInfo::kMaxVertexAttrs];
@@ -927,11 +930,11 @@ RecompStatus ResolveRecompiledShaders(
         gcn::CachedProgram(reinterpret_cast<u64>(gs->gs_code), 4096),
         reinterpret_cast<u64>(gs->gs_code), false, d, resolved_vs_cbuf);
   for (const auto& cb : rc->vs_cbufs)
-    d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
+    d.num_cbufs = base::Max(d.num_cbufs, cb.binding + 1);
   for (const auto& cb : rc->gs_cbufs)
-    d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
+    d.num_cbufs = base::Max(d.num_cbufs, cb.binding + 1);
   for (const auto& cb : rc->ps_cbufs)
-    d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
+    d.num_cbufs = base::Max(d.num_cbufs, cb.binding + 1);
   ResolveRawBuffers(rc->vs_bufs, vud, vs_prog, vs_addr, "vs", vs_addr, d);
   if (ps_program)
     ResolveRawBuffers(rc->ps_bufs, pud, ps_program, ps_addr, "ps", vs_addr, d);
@@ -964,7 +967,7 @@ bool ResolveGsPipeline(const Regs& regs, u32 prim_type, gcn::GsPipeline& gs) {
   gs.esgs_dwords = regs[mmVGT_ESGS_RING_ITEMSIZE] & 0x7FFF;
   gs.gsvs_dwords = regs[mmVGT_GSVS_RING_ITEMSIZE] & 0x7FFF;
   const u32 instancing = regs[mmVGT_GS_INSTANCE_CNT];
-  gs.instances = (instancing & 1) ? std::max(1u, (instancing >> 2) & 0x7F) : 1;
+  gs.instances = (instancing & 1) ? base::Max(1u, (instancing >> 2) & 0x7F) : 1;
   return true;
 }
 
@@ -1041,7 +1044,7 @@ void PrefetchDrawShaders(const Regs& regs) {
                              : regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS);
   const u64 ps_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);
   // Most draws reuse a shader pair; only a new one is worth resolving.
-  static std::unordered_set<u64> seen;
+  static base::HashSet<u64> seen;
   if (!seen.insert(vs_addr * 0x9e3779b97f4a7c15ull ^ ps_addr).second)
     return;
   if (ShaderSkipped(vs_addr, ps_addr) || !IsGuestAddress(vs_addr) ||
@@ -1054,13 +1057,13 @@ void PrefetchDrawShaders(const Regs& regs) {
   const u32 mrt_uint_mask = ResolveRenderTargets(regs, d, vs_addr, ps_addr);
   TextureMasks masks;
   if (IsGuestAddress(ps_addr)) {
-    thread_local std::vector<gcn::TImage> texs;
+    thread_local base::Vector<gcn::TImage> texs;
     gcn::TrackTextures(texs, gcn::CachedProgram(ps_addr, 4096),
                        regs.At(mmSPI_SHADER_USER_DATA_PS_0), false, ps_addr);
     for (u32 i = 0; i < texs.size() && i < kMaxTrackedTextures; i++)
       BindTexture(d, texs[i], i, masks);
     d.num_texs =
-        static_cast<u32>(std::min<size_t>(texs.size(), kMaxTrackedTextures));
+        static_cast<u32>(base::Min<size_t>(texs.size(), kMaxTrackedTextures));
   }
   ResolveVsTextures(vud, vs_addr, d, masks);
   u32 ps_in_cntl[32];

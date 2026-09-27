@@ -15,12 +15,9 @@
 #include <base/strings/format.h>
 #include <cstdio>
 #include <cstring>
-#include <string>
 #include <ctime>
-#include <mutex>
 #include <unistd.h>
 #include <sys/select.h>
-#include <unordered_map>
 
 #include <logger/logger.h>
 
@@ -33,6 +30,11 @@
 #include "sys_vfs.h" // sys_open (sys_openat delegates to it)
 #include "sys_vfs_ext.h"
 #include <utl/options.h>
+#include <base/containers/map.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kQarBuf, "DELTA_QARBUF", false);
@@ -235,11 +237,11 @@ i64 PS4ABI sys_pread(u32 fd, void *buf, size_t nbytes, i64 offset) {
     // nReread = a downstream consume/decompress stage that never drains, so the
     // streamer re-issues the same reads. lastOff catches exact-repeat reads.
     struct FdIo { i64 maxOff, lastMax, lastOff; long lastMs; long nNew, nReread, nSame; };
-    static std::mutex m;
-    static std::unordered_map<u32, FdIo> tbl;
+    static base::Mutex m;
+    static base::HashMap<u32, FdIo> tbl;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     long nowMs = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-    std::lock_guard<std::mutex> lk(m);
+    base::LockGuard<base::Mutex> lk(m);
     auto &e = tbl[fd];
     i64 end = offset + (r > 0 ? r : 0);
     if (end > e.maxOff) e.nNew++; else e.nReread++;
@@ -286,7 +288,7 @@ i64 PS4ABI sys_writev(u32 fd, const void *iov, int iovcnt) {
     // most direct account of what it is doing, and interleaving them with ours
     // by timestamp is what makes them usable.
     i64 total = 0;
-    std::string out;
+    base::String out;
     for (int i = 0; i < iovcnt; ++i) {
       out.append(static_cast<const char *>(segs[i].iov_base),
                  segs[i].iov_len);

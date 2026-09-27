@@ -15,20 +15,19 @@
 
 #include <cstdio>
 #include <cstring>
-#include <string>
-#include <vector>
 
 #include <base/strings/xstring.h>
 
 #include "formats/pkg_object.h"
 #include "formats/pup_object.h"
+#include <base/containers/vector.h>
 
 namespace {
 
 // Minimal param.sfo reader: returns the value of `key` (UTF-8 string keys, or
 // int32 keys rendered as decimal), or "" if absent. The SFO is a small flat
 // table; see the PS4 param.sfo layout. All offsets are bounds-checked.
-std::string sfoGet(const u8 *d, size_t n, const char *key) {
+base::String sfoGet(const u8 *d, size_t n, const char *key) {
   if (n < 20)
     return {};
   auto rd32 = [&](size_t o) -> u32 {
@@ -71,7 +70,7 @@ std::string sfoGet(const u8 *d, size_t n, const char *key) {
     }
     size_t avail = n - dpos;
     size_t l = len < avail ? len : avail;
-    std::string s(reinterpret_cast<const char *>(d + dpos), l);
+    base::String s(reinterpret_cast<const char *>(d + dpos), l);
     while (!s.empty() && s.back() == '\0')
       s.pop_back();
     return s;
@@ -87,7 +86,7 @@ constexpr u32 kEntryIcon0Png = 0x1200;
 // in the PKG header table, not the inner PFS, so they read even for pkgs whose
 // PFS we don't fully mount.
 bool readPkgMeta(const char *pkgPath, u32 entryId,
-                 std::vector<u8> &out) {
+                 base::Vector<u8> &out) {
   vfs::PkgFilesystem fs((base::String(pkgPath)));
   return fs.readPkgEntry(entryId, out) > 0;
 }
@@ -102,11 +101,11 @@ extern "C" {
 JNIEXPORT jstring JNICALL Java_com_prosperity_ps4_NativeBridge_pkgInfo(
     JNIEnv *env, jclass, jstring jpath) {
   const char *path = env->GetStringUTFChars(jpath, nullptr);
-  std::string result;
-  std::vector<u8> sfo;
+  base::String result;
+  base::Vector<u8> sfo;
   if (readPkgMeta(path, kEntryParamSfo, sfo)) {
-    std::string tid = sfoGet(sfo.data(), sfo.size(), "TITLE_ID");
-    std::string title = sfoGet(sfo.data(), sfo.size(), "TITLE");
+    base::String tid = sfoGet(sfo.data(), sfo.size(), "TITLE_ID");
+    base::String title = sfoGet(sfo.data(), sfo.size(), "TITLE");
     result = tid + "\t" + title;
   }
   env->ReleaseStringUTFChars(jpath, path);
@@ -119,7 +118,7 @@ JNIEXPORT jboolean JNICALL Java_com_prosperity_ps4_NativeBridge_pkgIcon(
   const char *path = env->GetStringUTFChars(jpath, nullptr);
   const char *out = env->GetStringUTFChars(joutPath, nullptr);
   bool ok = false;
-  std::vector<u8> png;
+  base::Vector<u8> png;
   if (readPkgMeta(path, kEntryIcon0Png, png)) {
     if (FILE *f = std::fopen(out, "wb")) {
       ok = std::fwrite(png.data(), 1, png.size(), f) == png.size();

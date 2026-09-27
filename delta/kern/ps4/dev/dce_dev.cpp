@@ -6,11 +6,9 @@
  * in the root of the source tree.
  */
 
-#include <atomic>
 #include "base/arch.h"
 #include <base.h>
 #include <base/logging.h>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +19,8 @@
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_mem.h"
 #include <utl/options.h>
+#include <base/atomic.h>
+#include <base/time/time.h>
 
 namespace {
 DELTA_OPTION(bool, kDceTrace, "DELTA_DCE_TRACE", false);
@@ -34,14 +34,11 @@ dceDevice::dceDevice(objectTable &objects) : device(objects) {}
 // so it MUST tick in real time despite no display hardware, else the title spins
 // forever on frame 1.
 static u64 nowNs() {
-  using namespace std::chrono;
-  return static_cast<u64>(
-      duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
+  return static_cast<u64>(base::TickClock::NowNs());
 }
 static u64 vblankCount() {
-  using namespace std::chrono;
-  static const auto start = steady_clock::now();
-  auto ns = duration_cast<nanoseconds>(steady_clock::now() - start).count();
+  static const i64 start = base::TickClock::NowNs();
+  const i64 ns = base::TickClock::NowNs() - start;
   return static_cast<u64>(ns / 16666667);  // ~59.94 Hz
 }
 // A TSC value in the same domain/rate as the guest's rdtsc, so flip/vblank-status
@@ -58,10 +55,10 @@ static u64 guestTsc() {
 // The last flip submitted via 0xc0488204. A title flips buffer N then polls
 // GetFlipStatus until currentBuffer == N; reporting 0 always made flips to
 // buffers 1/2 spin to a ~1s timeout (Doom64 at ~1fps). Record and report it.
-static std::atomic<u32> g_dceCurrentBuffer{0};
-static std::atomic<i64> g_dceFlipArg{0};
-static std::atomic<u64> g_dceFlipCount{0};
-static std::atomic<u64> g_dceScanoutBuffers[16]{};
+static base::Atomic<u32> g_dceCurrentBuffer{0};
+static base::Atomic<i64> g_dceFlipArg{0};
+static base::Atomic<u64> g_dceFlipCount{0};
+static base::Atomic<u64> g_dceScanoutBuffers[16]{};
 
 u32 dceCurrentBuffer() { return g_dceCurrentBuffer.load(); }
 

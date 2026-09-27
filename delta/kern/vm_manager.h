@@ -9,11 +9,11 @@
  */
 
 #include "base/arch.h"
-#include <mutex>
 
 #include <base/containers/vector.h>
 
 #include <utl/mem.h>
+#include <base/threading/mutex.h>
 
 namespace krnl {
 struct procInfo;
@@ -98,7 +98,7 @@ private:
   procInfo &pinfo;
 
   // guards the page lists against concurrent sys_mmap from guest threads.
-  mutable std::mutex vmlock;
+  mutable base::Mutex vmlock;
 
   size_t codeMemTotal{0};
   size_t rtMemTotal{0};

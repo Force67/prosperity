@@ -14,14 +14,9 @@
 #include "../vprx.h"  // PS4ABI (via <base.h>), MODULE_INIT_PS5
 #include "base/arch.h"
 
-#include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <string>
-#include <thread>
 
 #include <base/logging.h>
 
@@ -32,6 +27,10 @@
 
 #include "kern/lv2/sys_mem.h"  // allocLowGuest
 #include <utl/options.h>
+#include <base/atomic.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
 
 namespace {
 DELTA_OPTION(bool, kVoNostomp, "DELTA_VO_NOSTOMP", false);
@@ -45,9 +44,9 @@ extern "C" void prosperity_agc_flip(u64 scanoutBase);
 // (sceVideoOutSubmitFlip*'s bufferIndex resolved through the registered-buffer
 // table). The PS5 /dev/gc AGC flip ioctls carry no buffer field, so they read
 // the scanout target here instead of presenting whichever RT was drawn last.
-static std::atomic<u64> g_currentScanout{0};
+static base::Atomic<u64> g_currentScanout{0};
 extern "C" u64 prosperity_ps5_scanout_base() {
-  return g_currentScanout.load(std::memory_order_relaxed);
+  return g_currentScanout.load(base::memory_order_relaxed);
 }
 
 using namespace krnl;
@@ -99,8 +98,8 @@ struct VideoPort {
   u32 pixelFormat = kFmtA8R8G8B8_SRGB;
   void *buffers[kMaxBuffers] = {};
   int bufferCount = 0;
-  std::atomic<u64> flipCount{0};
-  std::atomic<u64> submitCount{0};
+  base::Atomic<u64> flipCount{0};
+  base::Atomic<u64> submitCount{0};
   i64 lastFlipArg = -1;
   int currentBuffer = -1;
   int flipEqueue = -1;
@@ -109,7 +108,7 @@ struct VideoPort {
   void *vblankUdata = nullptr;
 };
 
-std::mutex g_mtx;
+base::Mutex g_mtx;
 VideoPort g_port;  // dedicated PS5 port state
 
 // The 16 flip labels sceVideoOutGetBufferLabelAddress hands to the title. They
@@ -122,13 +121,13 @@ u64 *videoLabels() {
   return labels;
 }
 
-std::atomic<int> g_gfxState{0};  // 0=untried, 1=up, 2=failed
+base::Atomic<int> g_gfxState{0};  // 0=untried, 1=up, 2=failed
 
 bool ensureGfx(u32 w, u32 h) {
   int st = g_gfxState.load();
   if (st == 1) return true;
   if (st == 2) return false;
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   st = g_gfxState.load();
   if (st != 0) return st == 1;
   if (!gfx::init("prosperity", w, h)) {
@@ -149,7 +148,7 @@ equeue *findEqueue(int handle) {
   return static_cast<equeue *>(obj);
 }
 
-std::atomic<bool> g_flipPumpStarted{false};
+base::Atomic<bool> g_flipPumpStarted{false};
 
 // Synthesize flip completion (labels + events) so a title that flips via Gnm/AGC
 // and blocks on the flip equeue keeps advancing. Does NOT present (the GPU
@@ -158,9 +157,9 @@ void startFlipPump() {
   bool expected = false;
   if (!g_flipPumpStarted.compare_exchange_strong(expected, true)) return;
   BASE_LOGI("videoout/ps5", "flip pump started (60 Hz)");
-  std::thread([] {
+  base::SpawnDetachedThread("libSceVideoOut_", [] {
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::microseconds(16667));
+      base::SleepForMicroseconds(16667);
       u64 c = g_port.flipCount.fetch_add(1) + 1;
       // The label is a flip-completion flag, not a counter: the title leaves it
       // at 0 when it queues a flip and waits for the display controller to write
@@ -173,18 +172,18 @@ void startFlipPump() {
       }
       triggerAllEqueues(kEventFlip, kFilterFlip, static_cast<i64>(c));
     }
-  }).detach();
+  });
 }
 
 int PS4ABI vOpen(int userId, int busType, int index, const void *) {
   BASE_LOGI("videoout/ps5", "open user={} bus={} idx={}", userId, busType, index);
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   g_port.open = true;
   return kHandleBase;
 }
 
 int PS4ABI vClose(int handle) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   g_port.open = false;
   return 0;
 }
@@ -232,7 +231,7 @@ int PS4ABI vRegisterBuffers(int, int startIndex, int option, void *const *buffer
   (void)option;
   u32 w, h;
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     if (attribute) {
       auto *a = static_cast<const BufferAttribute *>(attribute);
       g_port.width = a->width ? a->width : g_port.width;
@@ -259,10 +258,10 @@ int PS4ABI vRegisterBuffers(int, int startIndex, int option, void *const *buffer
     // A title that flips through AGC never calls sceVideoOutSubmitFlip, so it
     // never names a scanout buffer either. Default to the first one it just
     // registered, or the AGC flip ioctls present a null address.
-    if (!g_currentScanout.load(std::memory_order_relaxed))
+    if (!g_currentScanout.load(base::memory_order_relaxed))
       g_currentScanout.store(
           reinterpret_cast<u64>(g_port.buffers[startIndex]),
-          std::memory_order_relaxed);
+          base::memory_order_relaxed);
   }
   // Registering display buffers is the title committing to present, whichever
   // flip path it uses. Bring the window up here rather than in submitFlip, which
@@ -322,7 +321,7 @@ int PS4ABI vGetEventData(const void *event, i64 *data) {
 // first thing to know when nothing reaches the screen; the AGC path flips
 // somewhere else entirely.
 static void traceSubmit(const char *what, int bufferIndex, i64 flipArg) {
-  static std::atomic<u64> n{0};
+  static base::Atomic<u64> n{0};
   const u64 i = n.fetch_add(1);
   if (i < 3 || (i % 600) == 0)
     BASE_LOGI("videoout/ps5", "{} #{} buffer={} arg={}", what,
@@ -335,13 +334,13 @@ int PS4ABI vSubmitFlip(int, int bufferIndex, int, i64 flipArg) {
   u32 w, h, pitch, fmt;
   int eqHandle;
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     if (bufferIndex >= 0 && bufferIndex < kMaxBuffers)
       fb = g_port.buffers[bufferIndex];
     w = g_port.width; h = g_port.height; pitch = g_port.pitch; fmt = g_port.pixelFormat;
     g_port.currentBuffer = bufferIndex;
     g_currentScanout.store(reinterpret_cast<u64>(fb),
-                           std::memory_order_relaxed);
+                           base::memory_order_relaxed);
     g_port.lastFlipArg = flipArg;
     g_port.submitCount.fetch_add(1);
   }
@@ -352,7 +351,7 @@ int PS4ABI vSubmitFlip(int, int bufferIndex, int, i64 flipArg) {
   }
   g_port.flipCount.fetch_add(1);
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     eqHandle = g_port.flipEqueue;
   }
   if (eqHandle >= 0)
@@ -373,12 +372,12 @@ int PS4ABI vSubmitFlipEop(int, int bufferIndex, int, i64 flipArg,
   u64 scanout = 0;
   int eqHandle;
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     if (bufferIndex >= 0 && bufferIndex < kMaxBuffers) {
       scanout = reinterpret_cast<u64>(g_port.buffers[bufferIndex]);
       g_port.currentBuffer = bufferIndex;
     }
-    g_currentScanout.store(scanout, std::memory_order_relaxed);
+    g_currentScanout.store(scanout, base::memory_order_relaxed);
     g_port.lastFlipArg = flipArg;
     g_port.submitCount.fetch_add(1);
     eqHandle = g_port.flipEqueue;
@@ -440,7 +439,7 @@ int PS4ABI vModeSetAny(int, void *) { return 0; }
 extern "C" bool prosperity_ps5_is_display_buffer(u64 addr) {
   if (!addr)
     return false;
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   for (int i = 0; i < g_port.bufferCount && i < kMaxBuffers; i++)
     if (reinterpret_cast<u64>(g_port.buffers[i]) == addr)
       return true;

@@ -2,19 +2,19 @@
 #include "base/arch.h"
 #include <cstdio>
 #include <cstdlib>
-#include <string>
 
 #include <gtest/gtest.h>
 
 #include "gpu/gcn/gcn_audit.h"
+#include <base/strings/xstring.h>
 
 namespace {
 
-std::string ReportString() {
+base::String ReportString() {
   std::FILE* f = std::tmpfile();
   gpu::gcn::WriteAuditReport(f);
   std::fseek(f, 0, SEEK_SET);
-  std::string s;
+  base::String s;
   char buf[4096];
   size_t n;
   while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
@@ -54,15 +54,15 @@ TEST_F(GcnAuditTest, ClassifiesSilentAndUnsupportedAndDeduplicates) {
     gpu::gcn::AuditEnd(nullptr);
   }
 
-  const std::string report = ReportString();
-  EXPECT_NE(report.find("unique shaders: 1 (vs=1)"), std::string::npos)
-      << report;
-  EXPECT_NE(report.find("vop3 op=0x141 (v_mad_f32)"), std::string::npos)
-      << report;
+  const base::String report = ReportString();
+  EXPECT_NE(report.find("unique shaders: 1 (vs=1)"), base::String::npos)
+      << report.c_str();
+  EXPECT_NE(report.find("vop3 op=0x141 (v_mad_f32)"), base::String::npos)
+      << report.c_str();
   // The silent drop is reported under its mnemonic; the translated and the
   // warned instructions are not.
-  EXPECT_NE(report.find("v_mov_b32"), std::string::npos) << report;
-  EXPECT_EQ(report.find("s_mov_b32"), std::string::npos) << report;
+  EXPECT_NE(report.find("v_mov_b32"), base::String::npos) << report.c_str();
+  EXPECT_EQ(report.find("s_mov_b32"), base::String::npos) << report.c_str();
 }
 
 TEST_F(GcnAuditTest, DeclinedShaderIsListedWithReason) {
@@ -75,10 +75,10 @@ TEST_F(GcnAuditTest, DeclinedShaderIsListedWithReason) {
   gpu::gcn::AuditDecline("cs translation rejected");
   gpu::gcn::AuditEnd(nullptr);
 
-  const std::string report = ReportString();
-  EXPECT_NE(report.find("declined: 1"), std::string::npos) << report;
-  EXPECT_NE(report.find("cs translation rejected"), std::string::npos)
-      << report;
+  const base::String report = ReportString();
+  EXPECT_NE(report.find("declined: 1"), base::String::npos) << report.c_str();
+  EXPECT_NE(report.find("cs translation rejected"), base::String::npos)
+      << report.c_str();
 }
 
 TEST_F(GcnAuditTest, ExpectedNoOpsAreNotSilent) {
@@ -92,8 +92,8 @@ TEST_F(GcnAuditTest, ExpectedNoOpsAreNotSilent) {
   gpu::gcn::AuditInstEnd(0, 0);
   gpu::gcn::AuditEnd(nullptr);
 
-  const std::string report = ReportString();
-  EXPECT_EQ(report.find("s_waitcnt"), std::string::npos) << report;
+  const base::String report = ReportString();
+  EXPECT_EQ(report.find("s_waitcnt"), base::String::npos) << report.c_str();
 }
 
 TEST_F(GcnAuditTest, VintrpP2IsNotHiddenAsAnExpectedNoOp) {
@@ -107,8 +107,8 @@ TEST_F(GcnAuditTest, VintrpP2IsNotHiddenAsAnExpectedNoOp) {
   gpu::gcn::AuditInstEnd(0, 0);
   gpu::gcn::AuditEnd(nullptr);
 
-  const std::string report = ReportString();
-  EXPECT_NE(report.find("v_interp_p2_f32"), std::string::npos) << report;
+  const base::String report = ReportString();
+  EXPECT_NE(report.find("v_interp_p2_f32"), base::String::npos) << report.c_str();
 }
 
 }  // namespace

@@ -4,13 +4,22 @@
 
 #include <pthread.h>
 
-#include <algorithm>
-#include <chrono>
 #include <cstring>
 
 #include <base/logging.h>
 
 #include "gpu/opengl/gl_rhi_internal.h"
+#include <base/algorithm.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/functional/function.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
 
 namespace gpu::opengl {
 
@@ -29,7 +38,7 @@ void GLAPIENTRY OnDebugMessage(GLenum /*source*/,
             type == GL_DEBUG_TYPE_ERROR ? "error" : "debug", message);
 }
 
-std::function<void()> ContextInit(bool debug) {
+base::Function<void()> ContextInit(bool debug) {
   if (!debug)
     return {};
   return [] {
@@ -182,13 +191,13 @@ StencilState ToGlStencil(const rhi::StencilFace& f) {
   return s;
 }
 
-std::string InfoLog(GLuint object, bool program) {
+base::String InfoLog(GLuint object, bool program) {
   GLint n = 0;
   if (program)
     glGetProgramiv(object, GL_INFO_LOG_LENGTH, &n);
   else
     glGetShaderiv(object, GL_INFO_LOG_LENGTH, &n);
-  std::string log(n > 1 ? n : 1, '\0');
+  base::String log(n > 1 ? n : 1, '\0');
   if (program)
     glGetProgramInfoLog(object, n, nullptr, log.data());
   else
@@ -198,7 +207,7 @@ std::string InfoLog(GLuint object, bool program) {
 }
 
 template <typename T>
-void AppendBytes(std::string& key, const T& value) {
+void AppendBytes(base::String& key, const T& value) {
   key.append(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
@@ -241,12 +250,12 @@ GlDevice::~GlDevice() {
     return;
   render_.Run([] { glFinish(); });
   {
-    std::lock_guard<std::mutex> lock(fence_mutex_);
+    base::LockGuard<base::Mutex> lock(fence_mutex_);
     stop_waiter_ = true;
   }
-  fence_cv_.notify_all();
-  if (waiter_.joinable())
-    waiter_.join();
+  fence_cv_.NotifyAll();
+  if (waiter_)
+    waiter_->Join();
   if (waiter_context_ != EGL_NO_CONTEXT)
     eglDestroyContext(egl_.display, waiter_context_);
   compile_.Stop();
@@ -266,15 +275,15 @@ bool GlDevice::Init(const OpenGLOptions& options) {
     BASE_LOGI("gpugl", "eglCreateContext failed: {:#x}", eglGetError());
     return false;
   }
-  replayer_ = std::make_unique<Replayer>(*this);
+  replayer_ = base::MakeUnique<Replayer>(*this);
   render_.Start(display, {root}, "gl-render", ContextInit(debug_));
   bool ok = false;
   render_.Run([&] { ok = InitRenderThread(); });
   if (!ok)
     return false;
-  std::vector<EGLContext> resource{CreateGlContext(display, root, debug_)};
-  std::vector<EGLContext> compile;
-  for (u32 i = 0; i < std::max(options.compile_threads, 1u); i++)
+  base::Vector<EGLContext> resource{CreateGlContext(display, root, debug_)};
+  base::Vector<EGLContext> compile;
+  for (u32 i = 0; i < base::Max(options.compile_threads, 1u); i++)
     compile.push_back(CreateGlContext(display, root, debug_));
   waiter_context_ = CreateGlContext(display, root, false);
   bool contexts = resource[0] != EGL_NO_CONTEXT &&
@@ -291,7 +300,8 @@ bool GlDevice::Init(const OpenGLOptions& options) {
   }
   resource_.Start(display, resource, "gl-resource", ContextInit(debug_));
   compile_.Start(display, compile, "gl-compile", ContextInit(debug_));
-  waiter_ = std::thread(&GlDevice::WaitLoop, this);
+  waiter_ = base::MakeUnique<base::Thread>("gl-fence", [this] { WaitLoop(); },
+                                           true);
   BASE_LOGI("gpugl", "device: {}", device_name_.c_str());
   return true;
 }
@@ -332,11 +342,11 @@ bool GlDevice::InitRenderThread() {
                             ? static_cast<u32>(GetInt(GL_SUBGROUP_SIZE_KHR))
                             : 32;
   const u32 ubo_blocks = static_cast<u32>(
-      std::min({GetInt(GL_MAX_VERTEX_UNIFORM_BLOCKS),
+      base::Min({GetInt(GL_MAX_VERTEX_UNIFORM_BLOCKS),
                 GetInt(GL_MAX_FRAGMENT_UNIFORM_BLOCKS),
                 GetInt(GL_MAX_COMPUTE_UNIFORM_BLOCKS)}));
   const u32 ssbo_blocks = static_cast<u32>(
-      std::min({GetInt(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS),
+      base::Min({GetInt(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS),
                 GetInt(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS),
                 GetInt(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS)}));
   caps_.max_dynamic_uniform_buffers = ubo_blocks > 1 ? ubo_blocks - 1 : 0;
@@ -391,7 +401,7 @@ bool GlDevice::InitRenderThread() {
 rhi::Buffer* GlDevice::CreateBuffer(const rhi::BufferDesc& desc) {
   if (desc.host_pointer)
     return nullptr;
-  auto buffer = std::make_unique<GlBuffer>(desc);
+  auto buffer = base::MakeUnique<GlBuffer>(desc);
   bool ok = false;
   resource_.Run([&] {
     GLbitfield map = 0;
@@ -408,7 +418,7 @@ rhi::Buffer* GlDevice::CreateBuffer(const rhi::BufferDesc& desc) {
         storage |= GL_CLIENT_STORAGE_BIT;
         break;
     }
-    const GLsizeiptr size = static_cast<GLsizeiptr>(std::max<u64>(desc.size, 4));
+    const GLsizeiptr size = static_cast<GLsizeiptr>(base::Max<u64>(desc.size, 4));
     glCreateBuffers(1, &buffer->name);
     glNamedBufferStorage(buffer->name, size, nullptr, storage | map);
     if (map)
@@ -437,11 +447,11 @@ rhi::Buffer* GlDevice::CreateBuffer(const rhi::BufferDesc& desc) {
       glMakeNamedBufferResidentNV(name, GL_READ_WRITE);
     });
   }
-  return buffer.release();
+  return gpu::rhi::Release(buffer);
 }
 
 rhi::Texture* GlDevice::CreateTexture(const rhi::TextureDesc& desc) {
-  auto texture = std::make_unique<GlTexture>(desc);
+  auto texture = base::MakeUnique<GlTexture>(desc);
   texture->internal = ToGl(desc.format).internal;
   if (!texture->internal)
     return nullptr;
@@ -463,7 +473,7 @@ rhi::Texture* GlDevice::CreateTexture(const rhi::TextureDesc& desc) {
   bool ok = false;
   resource_.Run([&] {
     GlTexture& t = *texture;
-    const GLsizei mips = static_cast<GLsizei>(std::max(desc.mips, 1u));
+    const GLsizei mips = static_cast<GLsizei>(base::Max(desc.mips, 1u));
     const GLsizei w = desc.width, h = desc.height;
     glCreateTextures(t.target, 1, &t.name);
     switch (t.target) {
@@ -490,13 +500,13 @@ rhi::Texture* GlDevice::CreateTexture(const rhi::TextureDesc& desc) {
       glDeleteTextures(1, &t.name);
     glFinish();
   });
-  return ok ? texture.release() : nullptr;
+  return ok ? gpu::rhi::Release(texture) : nullptr;
 }
 
 rhi::TextureView* GlDevice::CreateView(rhi::Texture* texture,
                                        const rhi::TextureViewDesc& desc) {
   auto* t = static_cast<GlTexture*>(texture);
-  auto view = std::make_unique<GlView>(texture, desc);
+  auto view = base::MakeUnique<GlView>(texture, desc);
   view->format = desc.format == rhi::Format::kUndefined
                      ? texture->desc().format
                      : desc.format;
@@ -510,7 +520,7 @@ rhi::TextureView* GlDevice::CreateView(rhi::Texture* texture,
     view->internal = t->internal;
     view->level = static_cast<GLint>(desc.base_mip);
     view->layer = desc.layers == 1 ? static_cast<GLint>(desc.base_layer) : -1;
-    return view.release();
+    return gpu::rhi::Release(view);
   }
   const GLenum target = ViewTarget(desc.dim);
   if ((target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_2D_ARRAY) &&
@@ -521,8 +531,8 @@ rhi::TextureView* GlDevice::CreateView(rhi::Texture* texture,
     GlView& v = *view;
     glGenTextures(1, &v.name);
     glTextureView(v.name, target, t->name, v.internal, desc.base_mip,
-                  std::max(desc.mips, 1u), desc.base_layer,
-                  std::max(desc.layers, 1u));
+                  base::Max(desc.mips, 1u), desc.base_layer,
+                  base::Max(desc.layers, 1u));
     const GLint swizzle[4] = {ToGlSwizzle(desc.swizzle[0], GL_RED),
                               ToGlSwizzle(desc.swizzle[1], GL_GREEN),
                               ToGlSwizzle(desc.swizzle[2], GL_BLUE),
@@ -539,11 +549,11 @@ rhi::TextureView* GlDevice::CreateView(rhi::Texture* texture,
       glDeleteTextures(1, &v.name);
     glFinish();
   });
-  return ok ? view.release() : nullptr;
+  return ok ? gpu::rhi::Release(view) : nullptr;
 }
 
 rhi::Sampler* GlDevice::CreateSampler(const rhi::SamplerDesc& desc) {
-  auto sampler = std::make_unique<GlSampler>();
+  auto sampler = base::MakeUnique<GlSampler>();
   const bool filtered = desc.mag == rhi::Filter::kLinear ||
                         desc.min == rhi::Filter::kLinear ||
                         desc.mip == rhi::Filter::kLinear;
@@ -563,13 +573,13 @@ rhi::Sampler* GlDevice::CreateSampler(const rhi::SamplerDesc& desc) {
       glSamplerParameteri(s, GL_TEXTURE_WRAP_T, ToGlAddress(desc.address_v));
       glSamplerParameteri(s, GL_TEXTURE_WRAP_R, ToGlAddress(desc.address_w));
       glSamplerParameterf(s, GL_TEXTURE_LOD_BIAS,
-                          std::clamp(desc.lod_bias, -max_lod_bias_,
+                          base::Clamp(desc.lod_bias, -max_lod_bias_,
                                      max_lod_bias_));
       glSamplerParameterf(s, GL_TEXTURE_MIN_LOD, desc.min_lod);
       glSamplerParameterf(s, GL_TEXTURE_MAX_LOD, desc.max_lod);
       if (linear_ok && desc.max_anisotropy > 1.0f)
         glSamplerParameterf(s, GL_TEXTURE_MAX_ANISOTROPY,
-                            std::min(desc.max_anisotropy, max_anisotropy_));
+                            base::Min(desc.max_anisotropy, max_anisotropy_));
       if (desc.compare_enable) {
         glSamplerParameteri(s, GL_TEXTURE_COMPARE_MODE,
                             GL_COMPARE_REF_TO_TEXTURE);
@@ -586,14 +596,14 @@ rhi::Sampler* GlDevice::CreateSampler(const rhi::SamplerDesc& desc) {
     sampler->nearest = filtered ? make(false) : sampler->name;
     glFinish();
   });
-  return sampler.release();
+  return gpu::rhi::Release(sampler);
 }
 
 rhi::BindGroupLayout* GlDevice::CreateBindGroupLayout(
     const rhi::BindGroupLayoutDesc& desc) {
-  auto layout = std::make_unique<GlBindGroupLayout>(desc);
+  auto layout = base::MakeUnique<GlBindGroupLayout>(desc);
   // Dynamic offsets come in binding-number order.
-  std::vector<std::pair<u32, size_t>> dynamic;
+  base::Vector<base::Pair<u32, size_t>> dynamic;
   for (size_t i = 0; i < desc.bindings.size(); i++) {
     const rhi::BindingType t = desc.bindings[i].type;
     if (t == rhi::BindingType::kUniformBufferDynamic ||
@@ -602,11 +612,11 @@ rhi::BindGroupLayout* GlDevice::CreateBindGroupLayout(
   }
   if (dynamic.size() > kMaxDynamicOffsets)
     return nullptr;
-  std::sort(dynamic.begin(), dynamic.end());
+  base::Sort(dynamic.begin(), dynamic.end());
   layout->dynamic_index.assign(desc.bindings.size(), kNotDynamic);
   for (size_t i = 0; i < dynamic.size(); i++)
     layout->dynamic_index[dynamic[i].second] = static_cast<u8>(i);
-  return layout.release();
+  return gpu::rhi::Release(layout);
 }
 
 void GlDevice::Resolve(const GlBindGroupLayout& layout,
@@ -638,7 +648,7 @@ void GlDevice::Resolve(const GlBindGroupLayout& layout,
         r.format = v->internal;
         r.level = v->owns_name ? 0 : v->level;
         r.layered = v->owns_name || v->layer < 0 ? GL_TRUE : GL_FALSE;
-        r.layer = v->owns_name ? 0 : std::max(v->layer, 0);
+        r.layer = v->owns_name ? 0 : base::Max(v->layer, 0);
       }
       break;
     }
@@ -660,12 +670,12 @@ void GlDevice::Resolve(const GlBindGroupLayout& layout,
 }
 
 rhi::BindGroup* GlDevice::CreateBindGroup(const rhi::BindGroupDesc& desc) {
-  auto group = std::make_unique<GlBindGroup>();
+  auto group = base::MakeUnique<GlBindGroup>();
   group->layout = static_cast<GlBindGroupLayout*>(desc.layout);
   group->entries.resize(group->layout->desc().bindings.size());
-  UpdateBindGroup(group.get(), desc.writes.data(),
+  UpdateBindGroup(&*group, desc.writes.data(),
                   static_cast<u32>(desc.writes.size()));
-  return group.release();
+  return gpu::rhi::Release(group);
 }
 
 void GlDevice::UpdateBindGroup(rhi::BindGroup* group,
@@ -686,8 +696,8 @@ rhi::PipelineLayout* GlDevice::CreatePipelineLayout(
 
 const SlotMap* GlDevice::InternSlots(const rhi::PipelineLayoutDesc& layout,
                                      const ProgramInterface& program) {
-  auto map = std::make_unique<SlotMap>();
-  std::string key;
+  auto map = base::MakeUnique<SlotMap>();
+  base::String key;
   for (const ResourceSlot& s : program.slots) {
     if (map->groups.size() <= s.set)
       map->groups.resize(s.set + 1);
@@ -705,20 +715,20 @@ const SlotMap* GlDevice::InternSlots(const rhi::PipelineLayoutDesc& layout,
     }
     key += '|';
   }
-  std::lock_guard<std::mutex> lock(intern_mutex_);
-  auto [it, inserted] = slot_maps_.try_emplace(key, nullptr);
+  base::LockGuard<base::Mutex> lock(intern_mutex_);
+  auto [it, inserted] = slot_maps_.emplace(key, nullptr);
   if (inserted)
-    it->second = std::move(map);
-  return it->second.get();
+    it->second = base::move(map);
+  return &*it->second;
 }
 
 VertexInput* GlDevice::InternVertexInput(
     const rhi::GraphicsPipelineDesc& desc,
     const ProgramInterface& program) {
-  auto input = std::make_unique<VertexInput>();
+  auto input = base::MakeUnique<VertexInput>();
   for (const rhi::VertexAttribute& a : desc.vertex_attributes) {
     // Attributes the shader does not read are left disabled.
-    auto it = std::find_if(program.vertex_locations.begin(),
+    auto it = base::FindIf(program.vertex_locations.begin(),
                            program.vertex_locations.end(),
                            [&](const auto& m) { return m.first == a.location; });
     if (it == program.vertex_locations.end())
@@ -737,7 +747,7 @@ VertexInput* GlDevice::InternVertexInput(
   }
   for (const rhi::VertexBufferLayout& b : desc.vertex_buffers)
     input->per_instance.push_back(b.per_instance ? 1 : 0);
-  std::string key;
+  base::String key;
   for (const auto& a : input->attributes) {
     AppendBytes(key, a.location);
     AppendBytes(key, a.binding);
@@ -747,12 +757,13 @@ VertexInput* GlDevice::InternVertexInput(
     AppendBytes(key, a.offset);
   }
   key += '|';
-  key.append(input->per_instance.begin(), input->per_instance.end());
-  std::lock_guard<std::mutex> lock(intern_mutex_);
-  auto [it, inserted] = vertex_inputs_.try_emplace(key, nullptr);
+  for (u8 v : input->per_instance)
+    key += static_cast<char>(v);
+  base::LockGuard<base::Mutex> lock(intern_mutex_);
+  auto [it, inserted] = vertex_inputs_.emplace(key, nullptr);
   if (inserted)
-    it->second = std::move(input);
-  return it->second.get();
+    it->second = base::move(input);
+  return &*it->second;
 }
 
 rhi::Pipeline* GlDevice::BuildPipeline(
@@ -761,13 +772,13 @@ rhi::Pipeline* GlDevice::BuildPipeline(
     u32 count,
     const rhi::GraphicsPipelineDesc* graphics,
     GlPipeline* raw) {
-  std::unique_ptr<GlPipeline> pipeline(raw);
-  std::vector<const rhi::BindGroupLayoutDesc*> groups;
+  base::UniquePointer<GlPipeline> pipeline(raw);
+  base::Vector<const rhi::BindGroupLayoutDesc*> groups;
   for (rhi::BindGroupLayout* g : layout.groups)
     groups.push_back(g ? &g->desc() : nullptr);
-  std::vector<std::string> glsl;
+  base::Vector<base::String> glsl;
   ProgramInterface program;
-  std::string error;
+  base::String error;
   if (!LowerProgram(stages, count, groups, glsl_, &glsl, &program, &error)) {
     BASE_LOGI("gpugl", "shader lowering failed: {}", error.c_str());
     return nullptr;
@@ -847,7 +858,7 @@ rhi::Pipeline* GlDevice::BuildPipeline(
     BASE_LOGI("gpugl", "program build failed: {}", error.c_str());
     return nullptr;
   }
-  return pipeline.release();
+  return gpu::rhi::Release(pipeline);
 }
 
 rhi::Pipeline* GlDevice::CreateGraphicsPipeline(
@@ -855,7 +866,7 @@ rhi::Pipeline* GlDevice::CreateGraphicsPipeline(
   if (desc.mesh || desc.vertex.empty() ||
       desc.vertex_buffers.size() > kMaxVertexBuffers)
     return nullptr;
-  auto pipeline = std::make_unique<GlPipeline>();
+  auto pipeline = base::MakeUnique<GlPipeline>();
   StageCode stages[3];
   u32 count = 0;
   stages[count++] = {rhi::kStageVertex, desc.vertex};
@@ -902,26 +913,26 @@ rhi::Pipeline* GlDevice::CreateGraphicsPipeline(
   }
   const auto* layout = static_cast<GlPipelineLayout*>(desc.layout);
   return BuildPipeline(layout->desc(), stages, count, &desc,
-                       pipeline.release());
+                       gpu::rhi::Release(pipeline));
 }
 
 rhi::Pipeline* GlDevice::CreateComputePipeline(
     const rhi::ComputePipelineDesc& desc) {
-  auto pipeline = std::make_unique<GlPipeline>();
+  auto pipeline = base::MakeUnique<GlPipeline>();
   pipeline->compute = true;
   const StageCode stage{rhi::kStageCompute, desc.code, desc.dispatch_base};
   const auto* layout = static_cast<GlPipelineLayout*>(desc.layout);
-  return BuildPipeline(layout->desc(), &stage, 1, nullptr, pipeline.release());
+  return BuildPipeline(layout->desc(), &stage, 1, nullptr, gpu::rhi::Release(pipeline));
 }
 
 rhi::TimestampPool* GlDevice::CreateTimestampPool(u32 count) {
-  auto pool = std::make_unique<GlTimestampPool>();
+  auto pool = base::MakeUnique<GlTimestampPool>();
   pool->count = count;
   bool ok = false;
   resource_.Run([&] {
     const GLbitfield map =
         GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
-    const GLsizeiptr size = std::max<GLsizeiptr>(count, 1) * 8;
+    const GLsizeiptr size = base::Max<GLsizeiptr>(count, 1) * 8;
     glCreateBuffers(1, &pool->buffer);
     glNamedBufferStorage(pool->buffer, size, nullptr,
                          map | GL_DYNAMIC_STORAGE_BIT | GL_CLIENT_STORAGE_BIT);
@@ -932,7 +943,7 @@ rhi::TimestampPool* GlDevice::CreateTimestampPool(u32 count) {
     ok = pool->results && glGetError() == GL_NO_ERROR;
     glFinish();
   });
-  return ok ? pool.release() : nullptr;
+  return ok ? gpu::rhi::Release(pool) : nullptr;
 }
 
 rhi::CommandList* GlDevice::CreateCommandList() {
@@ -989,7 +1000,7 @@ void GlDevice::SetName(rhi::Object* object, const char* name) {
   } else {
     return;
   }
-  render_.Post([type, handle, label = std::string(name)] {
+  render_.Post([type, handle, label = base::String(name)] {
     glObjectLabel(type, handle, -1, label.c_str());
   });
 }
@@ -1002,21 +1013,21 @@ bool GlDevice::SupportsFormat(rhi::Format format, u32 usage) const {
 }
 
 u64 GlDevice::Submit(rhi::CommandList* const* lists, u32 count) {
-  std::vector<const GlCommandList*> work(count);
+  base::Vector<const GlCommandList*> work(count);
   for (u32 i = 0; i < count; i++)
     work[i] = static_cast<const GlCommandList*>(lists[i]);
-  std::lock_guard<std::mutex> lock(submit_mutex_);
+  base::LockGuard<base::Mutex> lock(submit_mutex_);
   const u64 id = submitted_ + 1;
-  render_.Post([this, work = std::move(work), id] {
+  render_.Post([this, work = base::move(work), id] {
     for (const GlCommandList* list : work)
       replayer_->Execute(*list);
     const GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     glFlush();
     {
-      std::lock_guard<std::mutex> fence_lock(fence_mutex_);
+      base::LockGuard<base::Mutex> fence_lock(fence_mutex_);
       fences_.push_back({id, fence});
     }
-    fence_cv_.notify_one();
+    fence_cv_.NotifyOne();
   });
   submitted_ = id;
   return id;
@@ -1028,10 +1039,10 @@ void GlDevice::WaitLoop() {
   eglMakeCurrent(egl_.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                  waiter_context_);
   while (true) {
-    std::pair<u64, GLsync> fence;
+    base::Pair<u64, GLsync> fence;
     {
-      std::unique_lock<std::mutex> lock(fence_mutex_);
-      fence_cv_.wait(lock, [&] { return stop_waiter_ || !fences_.empty(); });
+      base::UniqueLock<base::Mutex> lock(fence_mutex_);
+      fence_cv_.Wait(lock, [&] { return stop_waiter_ || !fences_.empty(); });
       if (fences_.empty())
         break;
       fence = fences_.front();
@@ -1047,10 +1058,10 @@ void GlDevice::WaitLoop() {
     }
     glDeleteSync(fence.second);
     {
-      std::lock_guard<std::mutex> lock(completed_mutex_);
+      base::LockGuard<base::Mutex> lock(completed_mutex_);
       completed_ = fence.first;
     }
-    completed_cv_.notify_all();
+    completed_cv_.NotifyAll();
   }
   eglMakeCurrent(egl_.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                  EGL_NO_CONTEXT);
@@ -1063,11 +1074,11 @@ bool GlDevice::IsComplete(u64 submission) {
 
 bool GlDevice::Wait(u64 submission, u64 timeout_ns) {
   auto done = [&] { return completed_ >= submission || lost_; };
-  std::unique_lock<std::mutex> lock(completed_mutex_);
+  base::UniqueLock<base::Mutex> lock(completed_mutex_);
   if (timeout_ns == ~0ull)
-    completed_cv_.wait(lock, done);
+    completed_cv_.Wait(lock, done);
   else
-    completed_cv_.wait_for(lock, std::chrono::nanoseconds(timeout_ns), done);
+    completed_cv_.WaitFor(lock, base::Microseconds((timeout_ns) / 1000), done);
   return completed_ >= submission;
 }
 
@@ -1092,8 +1103,8 @@ bool GlDevice::ReadTimestamps(rhi::TimestampPool* pool,
   return true;
 }
 
-std::unique_ptr<rhi::Device> CreateOpenGLDevice(const OpenGLOptions& options) {
-  auto device = std::make_unique<GlDevice>();
+base::UniquePointer<rhi::Device> CreateOpenGLDevice(const OpenGLOptions& options) {
+  auto device = base::MakeUnique<GlDevice>();
   if (!device->Init(options))
     return nullptr;
   return device;

@@ -30,13 +30,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <string>
-#include <thread>
-#include <chrono>
-#include <atomic>
-#include <algorithm>
-#include <vector>
-#include <unordered_map>
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -52,6 +45,9 @@
 #include <base/strings/xstring.h>
 #include <utl/mem.h>
 #include <utl/options.h>
+#include <base/threading/thread.h>
+#include <base/atomic.h>
+#include <base/containers/vector.h>
 
 namespace {
 DELTA_OPTION(uintptr_t, kBrkTrace, "DELTA_GUEST_BRK_TRACE", 0);
@@ -113,7 +109,7 @@ static void probeHandler(int, siginfo_t *, void *ucv) {
   // DELTA_SCHIST histogram dump: the only profiler available (perf/strace/
   // proc-mem are yama-blocked here). Only the first responder of a burst
   // prints it; forty interleaved copies are unreadable.
-  static std::atomic<u64> lastHist{0};
+  static base::Atomic<u64> lastHist{0};
   const u64 nowS = (u64)::time(nullptr);
   u64 prev = lastHist.load();
   if (nowS - prev < 2 || !lastHist.compare_exchange_strong(prev, nowS)) {
@@ -145,19 +141,19 @@ uintptr_t g_heapProfAddr = 0;  // non-zero once any hook is armed
 static constexpr int kHeapProfMaxHooks = 24;
 static uintptr_t g_heapProfHooks[kHeapProfMaxHooks];
 static int g_heapProfHookCount = 0;
-static std::atomic<u64> g_heapProfHookBytes[kHeapProfMaxHooks];
-static std::atomic<u64> g_heapProfHookCalls[kHeapProfMaxHooks];
+static base::Atomic<u64> g_heapProfHookBytes[kHeapProfMaxHooks];
+static base::Atomic<u64> g_heapProfHookCalls[kHeapProfMaxHooks];
 static bool g_heapProfCountOnly[kHeapProfMaxHooks];
 namespace {
 constexpr u32 kHeapProfSlots = 16384;
 struct HeapProfSlot {
-  std::atomic<uintptr_t> caller{0};
-  std::atomic<u64> bytes{0};
-  std::atomic<u64> count{0};
-  std::atomic<u64> unscoped{0};  // of `bytes`, taken with no scope live
+  base::Atomic<uintptr_t> caller{0};
+  base::Atomic<u64> bytes{0};
+  base::Atomic<u64> count{0};
+  base::Atomic<u64> unscoped{0};  // of `bytes`, taken with no scope live
 };
 HeapProfSlot g_heapProf[kHeapProfSlots];
-std::atomic<u64> g_heapProfTotal{0};
+base::Atomic<u64> g_heapProfTotal{0};
 
 // DELTA_HEAP_PROF_SCOPE=<tls-slot-global>:<depth-offset>: engines route
 // allocations through a THREAD-LOCAL stack of scoped allocators, falling back
@@ -168,7 +164,7 @@ std::atomic<u64> g_heapProfTotal{0};
 //   depth = block ? *(u32*)(block + <depth-offset>) : 0
 uintptr_t g_heapProfScopeSlot = 0;
 u64 g_heapProfScopeDepthOff = 0;
-std::atomic<u64> g_heapProfScoped{0}, g_heapProfUnscoped{0};
+base::Atomic<u64> g_heapProfScoped{0}, g_heapProfUnscoped{0};
 
 // Reads through process_vm_readv so a mis-specified address reports nothing
 // instead of taking the run down from inside the trap handler.
@@ -196,14 +192,14 @@ u32 heapProfScopeDepth(uintptr_t fs_base) {
 void heapProfRecord(uintptr_t caller, u64 size, bool unscoped) {
   u32 h = static_cast<u32>((caller * 2654435761u) >> 13) & (kHeapProfSlots - 1);
   const auto add = [&](u32 s) {
-    g_heapProf[s].bytes.fetch_add(size, std::memory_order_relaxed);
-    g_heapProf[s].count.fetch_add(1, std::memory_order_relaxed);
+    g_heapProf[s].bytes.fetch_add(size, base::memory_order_relaxed);
+    g_heapProf[s].count.fetch_add(1, base::memory_order_relaxed);
     if (unscoped)
-      g_heapProf[s].unscoped.fetch_add(size, std::memory_order_relaxed);
+      g_heapProf[s].unscoped.fetch_add(size, base::memory_order_relaxed);
   };
   for (u32 i = 0; i < kHeapProfSlots; i++) {
     u32 s = (h + i) & (kHeapProfSlots - 1);
-    uintptr_t c = g_heapProf[s].caller.load(std::memory_order_relaxed);
+    uintptr_t c = g_heapProf[s].caller.load(base::memory_order_relaxed);
     if (c == caller) {
       add(s);
       break;
@@ -211,7 +207,7 @@ void heapProfRecord(uintptr_t caller, u64 size, bool unscoped) {
     if (c == 0) {
       uintptr_t expected = 0;
       if (g_heapProf[s].caller.compare_exchange_strong(expected, caller,
-                                                       std::memory_order_relaxed)) {
+                                                       base::memory_order_relaxed)) {
         add(s);
         break;
       }
@@ -221,9 +217,9 @@ void heapProfRecord(uintptr_t caller, u64 size, bool unscoped) {
       }
     }
   }
-  g_heapProfTotal.fetch_add(size, std::memory_order_relaxed);
+  g_heapProfTotal.fetch_add(size, base::memory_order_relaxed);
   (unscoped ? g_heapProfUnscoped : g_heapProfScoped)
-      .fetch_add(size, std::memory_order_relaxed);
+      .fetch_add(size, base::memory_order_relaxed);
 }
 void heapProfDump() {
   BASE_LOGI("heapprof",
@@ -237,10 +233,10 @@ void heapProfDump() {
               g_heapProfScoped.load() / 1048576.0,
               g_heapProfUnscoped.load() / 1048576.0);
   for (int i = 0; i < g_heapProfHookCount; i++) {
-    u64 b = g_heapProfHookBytes[i].load(std::memory_order_relaxed);
+    u64 b = g_heapProfHookBytes[i].load(base::memory_order_relaxed);
     BASE_LOGI("heapprof", "  hook[{}] {:#x}: {:8.1f} MB  {:8} calls", i,
               (unsigned long)g_heapProfHooks[i], b / 1048576.0,
-              (unsigned long long)g_heapProfHookCalls[i].load(std::memory_order_relaxed));
+              (unsigned long long)g_heapProfHookCalls[i].load(base::memory_order_relaxed));
   }
   // Select top 20 by bytes without allocating (linear passes).
   u64 prevBytes = ~0ull;
@@ -248,16 +244,16 @@ void heapProfDump() {
   for (int rank = 0; rank < 20; rank++) {
     u64 bestB = 0; u32 bestS = kHeapProfSlots;
     for (u32 s = 0; s < kHeapProfSlots; s++) {
-      u64 b = g_heapProf[s].bytes.load(std::memory_order_relaxed);
+      u64 b = g_heapProf[s].bytes.load(base::memory_order_relaxed);
       if (b == 0) continue;
-      uintptr_t c = g_heapProf[s].caller.load(std::memory_order_relaxed);
+      uintptr_t c = g_heapProf[s].caller.load(base::memory_order_relaxed);
       bool below = b < prevBytes || (b == prevBytes && c > prevCaller);
       if (below && b >= bestB) { bestB = b; bestS = s; }
     }
     if (bestS == kHeapProfSlots) break;
-    uintptr_t c = g_heapProf[bestS].caller.load(std::memory_order_relaxed);
-    u64 cnt = g_heapProf[bestS].count.load(std::memory_order_relaxed);
-    u64 uns = g_heapProf[bestS].unscoped.load(std::memory_order_relaxed);
+    uintptr_t c = g_heapProf[bestS].caller.load(base::memory_order_relaxed);
+    u64 cnt = g_heapProf[bestS].count.load(base::memory_order_relaxed);
+    u64 uns = g_heapProf[bestS].unscoped.load(base::memory_order_relaxed);
     char sym[200];
     symbolize(c, sym, sizeof(sym));
     BASE_LOGI("heapprof", "  {:8.1f} MB  {:8} calls  {}{}",
@@ -284,14 +280,14 @@ void setHeapProf(uintptr_t addr, bool countOnly) {
 }
 // Throttle to one dump per SIGUSR1 burst (every thread gets the signal).
 static void heapProfDumpOnce() {
-  static std::atomic<u64> last{0};
+  static base::Atomic<u64> last{0};
   timespec t{};
   clock_gettime(CLOCK_MONOTONIC, &t);
   u64 now = (u64)t.tv_sec * 1000 + t.tv_nsec / 1000000;
-  u64 prev = last.load(std::memory_order_relaxed);
+  u64 prev = last.load(base::memory_order_relaxed);
   if (now - prev < 300)
     return;
-  if (!last.compare_exchange_strong(prev, now, std::memory_order_relaxed))
+  if (!last.compare_exchange_strong(prev, now, base::memory_order_relaxed))
     return;
   heapProfDump();
 }
@@ -345,7 +341,7 @@ static int g_callSkipCount = 0;
 static constexpr int kFnWatchMax = 16;
 static uintptr_t g_fnWatchAddrs[kFnWatchMax];
 static const char *g_fnWatchLabels[kFnWatchMax];
-static std::atomic<u64> g_fnWatchHits[kFnWatchMax];
+static base::Atomic<u64> g_fnWatchHits[kFnWatchMax];
 static int g_fnWatchCount = 0;
 
 // DELTA_FNARGS pointer-chain probe (see crash.h).
@@ -356,17 +352,17 @@ static uintptr_t g_fnArgsAddrs[kFnArgsMax];
 static const char *g_fnArgsLabels[kFnArgsMax];
 static u64 g_fnArgsOffs[kFnArgsMax][kFnArgsOffsMax];
 static int g_fnArgsNoffs[kFnArgsMax];
-static std::atomic<u64> g_fnArgsHits[kFnArgsMax];
+static base::Atomic<u64> g_fnArgsHits[kFnArgsMax];
 static int g_fnArgsCount = 0;
 
 // Range currently write-protected for the write watch, armed either from the
 // DELTA_GUEST_BRK_TRACE handler or standalone by DELTA_GUEST_WPROT.
-static std::atomic<uintptr_t> g_wprotBase{0};
-static std::atomic<size_t> g_wprotLen{0};
-static std::atomic<bool> g_wprotRegs{false};
-static std::atomic<bool> g_wprotStep{false};
-static std::atomic<uintptr_t> g_wprotReportBase{0};
-static std::atomic<size_t> g_wprotReportLen{0};
+static base::Atomic<uintptr_t> g_wprotBase{0};
+static base::Atomic<size_t> g_wprotLen{0};
+static base::Atomic<bool> g_wprotRegs{false};
+static base::Atomic<bool> g_wprotStep{false};
+static base::Atomic<uintptr_t> g_wprotReportBase{0};
+static base::Atomic<size_t> g_wprotReportLen{0};
 #if defined(__x86_64__)
 static thread_local uintptr_t g_wprotStepPage = 0;
 #endif
@@ -377,15 +373,15 @@ static thread_local uintptr_t g_wprotStepPage = 0;
 static constexpr size_t kWhistGranule = 16u << 20;
 static constexpr int kWhistBuckets = 512;
 static constexpr int kWhistSites = 32;
-static std::atomic<uintptr_t> g_whistBase{0};
-static std::atomic<size_t> g_whistLen{0};
-static std::atomic<u32> g_whistBucket[kWhistBuckets];
-static std::atomic<uintptr_t> g_whistSite[kWhistSites];
-static std::atomic<uintptr_t> g_whistSiteCaller[kWhistSites];
-static std::atomic<u32> g_whistSiteHits[kWhistSites];
+static base::Atomic<uintptr_t> g_whistBase{0};
+static base::Atomic<size_t> g_whistLen{0};
+static base::Atomic<u32> g_whistBucket[kWhistBuckets];
+static base::Atomic<uintptr_t> g_whistSite[kWhistSites];
+static base::Atomic<uintptr_t> g_whistSiteCaller[kWhistSites];
+static base::Atomic<u32> g_whistSiteHits[kWhistSites];
 // Faults whose guest instruction could not be established; reported alongside
 // the sites so a census never reads as complete when some writers went unnamed.
-static std::atomic<u64> g_whistUnattributed{0};
+static base::Atomic<u64> g_whistUnattributed{0};
 
 // The guest instruction behind a memory-watch fault; false (rip 0) when it
 // cannot be established. On x86 the context RIP already IS the guest RIP;
@@ -454,7 +450,7 @@ static void reopenWatchPage(uintptr_t at) {
 static void resumeWatchedWrite(uintptr_t at, void *ucv) {
   reopenWatchPage(at);
 #if defined(__x86_64__)
-  if (g_wprotStep.load(std::memory_order_relaxed)) {
+  if (g_wprotStep.load(base::memory_order_relaxed)) {
     const uintptr_t pgsz = (uintptr_t)sysconf(_SC_PAGESIZE);
     g_wprotStepPage = at & ~(pgsz - 1);
     static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs[REG_EFL] |= 0x100;
@@ -487,16 +483,16 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       const bool attributed = watchFaultGuestRip(ucv, rip);
       const size_t b = (at - base) / kWhistGranule;
       if (b < kWhistBuckets)
-        g_whistBucket[b].fetch_add(1, std::memory_order_relaxed);
+        g_whistBucket[b].fetch_add(1, base::memory_order_relaxed);
       // Slot 0 doubles as "empty" in the site table, so an unattributable fault
       // is counted apart, never filed as a writer at rip 0.
       if (!attributed) {
-        g_whistUnattributed.fetch_add(1, std::memory_order_relaxed);
+        g_whistUnattributed.fetch_add(1, base::memory_order_relaxed);
       } else {
         for (int i = 0; i < kWhistSites; i++) {
-          uintptr_t cur = g_whistSite[i].load(std::memory_order_relaxed);
+          uintptr_t cur = g_whistSite[i].load(base::memory_order_relaxed);
           if (cur == rip) {
-            g_whistSiteHits[i].fetch_add(1, std::memory_order_relaxed);
+            g_whistSiteHits[i].fetch_add(1, base::memory_order_relaxed);
             break;
           }
           if (!cur && g_whistSite[i].compare_exchange_strong(cur, rip)) {
@@ -505,8 +501,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
             if (const uintptr_t sp = watchFaultGuestRsp(ucv))
               g_whistSiteCaller[i].store(
                   *reinterpret_cast<const uintptr_t *>(sp),
-                  std::memory_order_relaxed);
-            g_whistSiteHits[i].fetch_add(1, std::memory_order_relaxed);
+                  base::memory_order_relaxed);
+            g_whistSiteHits[i].fetch_add(1, base::memory_order_relaxed);
             break;
           }
         }
@@ -805,7 +801,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
     for (int i = 0; i < g_fnArgsCount; i++) {
       if ((uintptr_t)gr[REG_RIP] != g_fnArgsAddrs[i] + 1)
         continue;
-      if (g_fnArgsHits[i].fetch_add(1, std::memory_order_relaxed) < kFnArgsLogs) {
+      if (g_fnArgsHits[i].fetch_add(1, base::memory_order_relaxed) < kFnArgsLogs) {
         char m[512];
         int n = std::snprintf(m, sizeof(m),
                               "[fnargs] %s rdi=%#lx rsi=%#lx rdx=%#lx rcx=%#lx",
@@ -849,7 +845,7 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
     for (int i = 0; i < g_fnWatchCount; i++) {
       if ((uintptr_t)gr[REG_RIP] != g_fnWatchAddrs[i] + 1)
         continue;
-      g_fnWatchHits[i].fetch_add(1, std::memory_order_relaxed);
+      g_fnWatchHits[i].fetch_add(1, base::memory_order_relaxed);
       // Emulate the displaced `push rbp`; RIP stays at addr+1 (the `mov rbp,rsp`).
       gr[REG_RSP] -= 8;
       *reinterpret_cast<u64 *>(gr[REG_RSP]) = (u64)gr[REG_RBP];
@@ -1043,8 +1039,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
       heapProfRecord(
           caller, size,
           g_heapProfScopeSlot && heapProfScopeDepth(threadFsBase()) == 0);
-      g_heapProfHookBytes[i].fetch_add(size, std::memory_order_relaxed);
-      g_heapProfHookCalls[i].fetch_add(1, std::memory_order_relaxed);
+      g_heapProfHookBytes[i].fetch_add(size, base::memory_order_relaxed);
+      g_heapProfHookCalls[i].fetch_add(1, base::memory_order_relaxed);
       gr[REG_RSP] -= 8;  // emulate the displaced `push rbp`
       *reinterpret_cast<u64 *>(gr[REG_RSP]) = (u64)gr[REG_RBP];
       return true;
@@ -1150,7 +1146,7 @@ void setFnWatch(uintptr_t addr, const char *label) {
     return;
   g_fnWatchAddrs[g_fnWatchCount] = addr;
   g_fnWatchLabels[g_fnWatchCount] = label;
-  g_fnWatchHits[g_fnWatchCount].store(0, std::memory_order_relaxed);
+  g_fnWatchHits[g_fnWatchCount].store(0, base::memory_order_relaxed);
   g_fnWatchCount++;
 }
 
@@ -1165,7 +1161,7 @@ void setFnArgs(uintptr_t addr, const char *label, const u64 *offsets,
   g_fnArgsNoffs[g_fnArgsCount] = noffsets;
   for (int i = 0; i < noffsets; i++)
     g_fnArgsOffs[g_fnArgsCount][i] = offsets[i];
-  g_fnArgsHits[g_fnArgsCount].store(0, std::memory_order_relaxed);
+  g_fnArgsHits[g_fnArgsCount].store(0, base::memory_order_relaxed);
   g_fnArgsCount++;
 }
 
@@ -1199,14 +1195,14 @@ void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
     }
     return;
   }
-  std::thread([addr, bytes, everyMs, trapReads] {
+  base::SpawnDetachedThread("probe_trap", [addr, bytes, everyMs, trapReads] {
     const long pgsz = sysconf(_SC_PAGESIZE);
     const uintptr_t base = addr & ~((uintptr_t)pgsz - 1);
     const size_t span =
         (addr + bytes - base + (size_t)pgsz - 1) & ~((size_t)pgsz - 1);
     bool announced = false;
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      base::SleepForMilliseconds(everyMs);
       unsigned char vec = 0;
       if (mincore(reinterpret_cast<void *>(base), 1, &vec) != 0)
         continue;  // not mapped yet
@@ -1226,7 +1222,7 @@ void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
                   trapReads ? "reads+writes" : "writes", everyMs);
       }
     }
-  }).detach();
+  });
 }
 
 // DELTA_GUEST_WHIST=<hex addr>:<hex bytes>[:<ms>]: write census over a pool too
@@ -1235,12 +1231,12 @@ void startWriteWatch(uintptr_t addr, size_t bytes, unsigned everyMs,
 void startWriteHist(uintptr_t addr, size_t bytes, unsigned everyMs) {
   if (!addr || !bytes)
     return;
-  std::thread([addr, bytes, everyMs] {
+  base::SpawnDetachedThread("probe_trap", [addr, bytes, everyMs] {
     const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
     const uintptr_t base = addr & ~(pgsz - 1);
     const size_t span = (bytes + pgsz - 1) & ~(pgsz - 1);
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      base::SleepForMilliseconds(200);
       unsigned char vec = 0;
       if (mincore(reinterpret_cast<void *>(base), 1, &vec) == 0)
         break;
@@ -1252,11 +1248,11 @@ void startWriteHist(uintptr_t addr, size_t bytes, unsigned everyMs) {
     unsigned sinceReport = 0;
     for (;;) {
       ::mprotect(reinterpret_cast<void *>(base), span, PROT_READ);
-      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      base::SleepForMilliseconds(everyMs);
       if ((sinceReport += everyMs) < 4000)
         continue;
       sinceReport = 0;
-      std::string map;
+      base::String map;
       for (size_t off = 0; off < span; off += kWhistGranule) {
         const u32 n = g_whistBucket[off / kWhistGranule].load();
         map += n == 0 ? '_' : n < 10 ? '.' : n < 100 ? '+' : '#';
@@ -1278,7 +1274,7 @@ void startWriteHist(uintptr_t addr, size_t bytes, unsigned everyMs) {
         BASE_LOGI("whist", "  {:8} <unattributed>",
                   (unsigned long long)unattributed);
     }
-  }).detach();
+  });
 }
 
 // DELTA_GUEST_POPCNT=<hex addr>:<hex bytes>: population count of a guest bitmap
@@ -1287,10 +1283,10 @@ void startWriteHist(uintptr_t addr, size_t bytes, unsigned everyMs) {
 void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs) {
   if (!addr || !bytes)
     return;
-  std::thread([addr, bytes, everyMs] {
+  base::SpawnDetachedThread("probe_trap", [addr, bytes, everyMs] {
     const long pgsz = sysconf(_SC_PAGESIZE);
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      base::SleepForMilliseconds(everyMs);
       unsigned char vec = 0;
       if (mincore(reinterpret_cast<void *>(addr & ~((uintptr_t)pgsz - 1)), 1,
                   &vec) != 0)
@@ -1310,7 +1306,7 @@ void startPopcntPrinter(uintptr_t addr, size_t bytes, unsigned everyMs) {
                 (unsigned long)addr, (unsigned long long)set, bytes * 8, first,
                 last);
     }
-  }).detach();
+  });
 }
 
 // DELTA_GUEST_SUMWATCH=<slot>:<off>:<stride>:<count>[:<ms>] (hex but count):
@@ -1320,7 +1316,7 @@ void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
                           unsigned everyMs) {
   if (!slot || count <= 0 || count > 32)
     return;
-  std::thread([slot, off, stride, count, everyMs] {
+  base::SpawnDetachedThread("probe_trap", [slot, off, stride, count, everyMs] {
     const long pgsz = sysconf(_SC_PAGESIZE);
     auto readable = [pgsz](uintptr_t a) {
       unsigned char v = 0;
@@ -1329,7 +1325,7 @@ void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
                      &v) == 0;
     };
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      base::SleepForMilliseconds(everyMs);
       if (!readable(slot))
         continue;
       const uintptr_t obj = *reinterpret_cast<const uintptr_t *>(slot);
@@ -1346,7 +1342,7 @@ void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
       }
       BASE_LOGI("sumwatch", "{} = {}", line.c_str(), (unsigned long long)sum);
     }
-  }).detach();
+  });
 }
 
 // DELTA_POOLMAP=<hex addr>:<hex bytes>[:<ms>]: survey a multi-GB pool without
@@ -1355,20 +1351,20 @@ void startSumWatchPrinter(uintptr_t slot, size_t off, size_t stride, int count,
 void startPoolMap(uintptr_t addr, size_t bytes, unsigned everyMs) {
   if (!addr || !bytes)
     return;
-  std::thread([addr, bytes, everyMs] {
+  base::SpawnDetachedThread("probe_trap", [addr, bytes, everyMs] {
     const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
     const uintptr_t base = addr & ~(pgsz - 1);
     const size_t span = (bytes + pgsz - 1) & ~(pgsz - 1);
     const size_t npages = span / pgsz;
     const size_t granule = 16u << 20;              // one report column
     const size_t pagesPerGranule = granule / pgsz;
-    std::vector<unsigned char> vec(npages);
+    base::Vector<unsigned char> vec(npages);
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      base::SleepForMilliseconds(everyMs);
       if (mincore(reinterpret_cast<void *>(base), span, vec.data()) != 0)
         continue;
       size_t resident = 0, nonzero = 0;
-      std::string map;
+      base::String map;
       for (size_t g = 0; g * pagesPerGranule < npages; g++) {
         size_t res = 0, nz = 0;
         for (size_t i = g * pagesPerGranule;
@@ -1389,21 +1385,21 @@ void startPoolMap(uintptr_t addr, size_t bytes, unsigned everyMs) {
                 nonzero);
       BASE_LOGI("poolmap", "{}", map.c_str());
     }
-  }).detach();
+  });
 }
 
 // DELTA_POOLMAP=all[:<ms>]: the same survey over every guest mapping; a
 // "wrote a gigabyte somewhere" question needs the whole address space.
 void startPoolCensus(unsigned everyMs) {
-  std::thread([everyMs] {
+  base::SpawnDetachedThread("probe_trap", [everyMs] {
     const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(everyMs));
+      base::SleepForMilliseconds(everyMs);
       FILE *f = std::fopen("/proc/self/maps", "r");
       if (!f)
         return;
       char line[512];
-      std::vector<unsigned char> vec;
+      base::Vector<unsigned char> vec;
       BASE_LOGI("census", "---- guest mappings ----");
       while (std::fgets(line, sizeof line, f)) {
         unsigned long lo = 0, hi = 0;
@@ -1434,7 +1430,7 @@ void startPoolCensus(unsigned everyMs) {
       }
       std::fclose(f);
     }
-  }).detach();
+  });
 }
 
 // DELTA_MEMDUMP=<hex addr>:<hex bytes>:<ms>:<path>[,...]: snapshot a guest range
@@ -1443,13 +1439,13 @@ void startMemDump(uintptr_t addr, size_t bytes, unsigned afterMs,
                   const char *path) {
   if (!addr || !bytes || !path)
     return;
-  std::string out(path);
-  std::thread([addr, bytes, afterMs, out] {
-    std::this_thread::sleep_for(std::chrono::milliseconds(afterMs));
+  base::String out(path);
+  base::SpawnDetachedThread("probe_trap", [addr, bytes, afterMs, out] {
+    base::SleepForMilliseconds(afterMs);
     const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
     const uintptr_t base = addr & ~(pgsz - 1);
     const size_t span = (bytes + pgsz - 1) & ~(pgsz - 1);
-    std::vector<unsigned char> vec(span / pgsz);
+    base::Vector<unsigned char> vec(span / pgsz);
     if (mincore(reinterpret_cast<void *>(base), span, vec.data()) != 0) {
       BASE_LOGI("memdump", "{:#x} not mapped", (unsigned long)base);
       return;
@@ -1457,7 +1453,7 @@ void startMemDump(uintptr_t addr, size_t bytes, unsigned afterMs,
     FILE *f = std::fopen(out.c_str(), "wb");
     if (!f)
       return;
-    std::vector<unsigned char> zero(pgsz, 0);
+    base::Vector<unsigned char> zero(pgsz, 0);
     size_t resident = 0;
     for (size_t i = 0; i < vec.size(); i++) {
       if (vec[i] & 1) {
@@ -1471,29 +1467,29 @@ void startMemDump(uintptr_t addr, size_t bytes, unsigned afterMs,
     BASE_LOGI("memdump", "{:#x}+{:#x} -> {} ({}/{} resident pages)",
               (unsigned long)base, (unsigned long)span, out.c_str(), resident,
               vec.size());
-  }).detach();
+  });
 }
 
 void startFnWatchPrinter() {
-  static std::atomic<bool> started{false};
+  static base::Atomic<bool> started{false};
   bool exp = false;
   if (!started.compare_exchange_strong(exp, true))
     return;
-  std::thread([] {
+  base::SpawnDetachedThread("probe_trap", [] {
     u64 last[kFnWatchMax] = {0};
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::seconds(2));
+      base::SleepForMilliseconds((2) * 1000);
       base::String line;
       base::FormatTo(line, "[fnwatch]");
       for (int i = 0; i < g_fnWatchCount; i++) {
-        u64 h = g_fnWatchHits[i].load(std::memory_order_relaxed);
+        u64 h = g_fnWatchHits[i].load(base::memory_order_relaxed);
         base::FormatTo(line, " {}={}(+{})", g_fnWatchLabels[i],
                        (unsigned long long)h, (unsigned long long)(h - last[i]));
         last[i] = h;
       }
       BASE_LOGI("fnwatch", "{}", line.c_str());
     }
-  }).detach();
+  });
 }
 
 

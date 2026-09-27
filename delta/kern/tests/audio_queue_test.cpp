@@ -1,14 +1,14 @@
-#include <array>
 #include <cstring>
 #include <limits>
 
 #include <gtest/gtest.h>
 
 #include "kern/ps5/audio_queue.h"
+#include <base/containers/array.h>
 
 namespace {
 struct Queue {
-  alignas(8) std::array<u8, 0x4000> memory{};
+  alignas(8) base::Array<u8, 0x4000> memory{};
   template <class T> void Set(size_t at, T value) {
     std::memcpy(memory.data() + at, &value, sizeof(value));
   }

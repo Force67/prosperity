@@ -1,14 +1,15 @@
 #ifdef DELTA_HAVE_AVCODEC
 #include "runtime/media/videodec.h"
-#include <algorithm>
-#include <array>
 #include <cstring>
-#include <limits>
-#include <memory>
-#include <mutex>
-#include <unordered_map>
 #include <base/logging.h>
 #include <utl/mem.h>
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/buffer.h>
@@ -20,8 +21,7 @@ constexpr i32 kSize = i32(0x811d0101), kPointer = i32(0x811d0102);
 constexpr i32 kHandle = i32(0x811d0103), kConfig = i32(0x811d0104);
 constexpr i32 kFrame = i32(0x811d0109), kDecode = i32(0x811d0200);
 bool Readable(const void* p, u64 bytes) {
-  return p && bytes && bytes <= std::numeric_limits<size_t>::max() &&
-         utl::isMemoryRangeMapped(p, bytes);
+  return p && bytes && utl::isMemoryRangeMapped(p, bytes);
 }
 template<class T> bool Sized(const T* p) { return Readable(p, sizeof(T)) && p->size == sizeof(T); }
 bool ValidConfig(const Config* c) {
@@ -37,11 +37,11 @@ struct Decoder {
   u32 outputs = 0;
   ~Decoder() { av_frame_free(&frame); avcodec_free_context(&context); }
 };
-std::mutex lock;
-std::unordered_map<void*, std::unique_ptr<Decoder>> decoders;
-std::unordered_map<void*, std::array<u8, 0x78>> pictures;
+base::Mutex lock;
+base::HashMap<void*, base::UniquePointer<Decoder>> decoders;
+base::HashMap<void*, base::Array<u8, 0x78>> pictures;
 
-template<class T> void Put(std::array<u8, 0x78>& b, size_t offset, T value) {
+template<class T> void Put(base::Array<u8, 0x78>& b, size_t offset, T value) {
   std::memcpy(b.data() + offset, &value, sizeof(value));
 }
 
@@ -98,7 +98,7 @@ i32 Receive(Decoder& d, FrameBuffer& target, Output& out) {
   out.bytes = bytes;
   if (out.size == sizeof(Output)) { out.format = 0; out.pitch_bytes = pitch; }
   target.accepted = true;
-  std::array<u8, 0x78> info{};
+  base::Array<u8, 0x78> info{};
   Put(info, 0, u64(info.size()));
   info[8] = 1;
   Stamp stamp{u64(f.pts), u64(f.pkt_dts), 0};
@@ -161,7 +161,7 @@ i32 PS4ABI QueryMemory(const Config* c, Memory* m) {
 i32 PS4ABI Create(const Config* c, const Memory* m, void** result) {
   if (!ValidConfig(c) || !Sized(m) || !Readable(result, sizeof(*result))) return kConfig;
   *result = nullptr;
-  auto d = std::make_unique<Decoder>();
+  auto d = base::MakeUnique<Decoder>();
   const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_H264);
   if (!codec || !d->frame) return kDecode;
   d->context = avcodec_alloc_context3(codec);
@@ -170,20 +170,20 @@ i32 PS4ABI Create(const Config* c, const Memory* m, void** result) {
   d->context->thread_count = 2;
   d->context->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
   if (avcodec_open2(d->context, codec, nullptr) < 0) return kDecode;
-  std::lock_guard guard(lock);
-  *result = d.get();
-  decoders.emplace(d.get(), std::move(d));
+  base::LockGuard guard(lock);
+  *result = &*d;
+  decoders.emplace(&*d, base::move(d));
   BASE_LOGI("videodec", "created CPU H.264 decoder {}x{} config={:#x}", c->width, c->height, c->size);
   return 0;
 }
 i32 PS4ABI Delete(void* handle) {
-  std::lock_guard guard(lock);
+  base::LockGuard guard(lock);
   return decoders.erase(handle) ? 0 : kHandle;
 }
 i32 PS4ABI Decode(void* handle, const Input* input, FrameBuffer* target, Output* out) {
   if (!Sized(input) || !Readable(input->data, input->bytes) || input->bytes > 64 * 1024 * 1024) return kPointer;
   if (const i32 error = OutputArgs(target, out)) return error;
-  std::lock_guard guard(lock);
+  base::LockGuard guard(lock);
   const auto it = decoders.find(handle);
   if (it == decoders.end()) return kHandle;
   Decoder& d = *it->second;
@@ -212,7 +212,7 @@ i32 PS4ABI Decode(void* handle, const Input* input, FrameBuffer* target, Output*
 }
 i32 PS4ABI Flush(void* handle, FrameBuffer* target, Output* out) {
   if (const i32 error = OutputArgs(target, out)) return error;
-  std::lock_guard guard(lock);
+  base::LockGuard guard(lock);
   const auto it = decoders.find(handle);
   if (it == decoders.end()) return kHandle;
   Decoder& d = *it->second;
@@ -224,7 +224,7 @@ i32 PS4ABI Flush(void* handle, FrameBuffer* target, Output* out) {
   return Receive(d, *target, *out);
 }
 i32 PS4ABI Reset(void* handle) {
-  std::lock_guard guard(lock);
+  base::LockGuard guard(lock);
   const auto it = decoders.find(handle);
   if (it == decoders.end()) return kHandle;
   Decoder& d = *it->second;
@@ -234,7 +234,7 @@ i32 PS4ABI Reset(void* handle) {
 }
 i32 PS4ABI Picture(const Output* out, void* first, void* second) {
   if (!Readable(out, 0x30) || (out->size != 0x30 && out->size != 0x38)) return kPointer;
-  std::lock_guard guard(lock);
+  base::LockGuard guard(lock);
   for (void* dest : {first, second}) {
     if (!dest) continue;
     if (!Readable(dest, 8)) return kPointer;

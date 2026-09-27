@@ -11,14 +11,14 @@
 
 #include <SDL3/SDL.h>
 
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <mutex>
-#include <thread>
-#include <vector>
 #include <base/logging.h>
 #include <utl/options.h>
+#include <base/containers/vector.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
 
 namespace {
 DELTA_OPTION(const char *, kAudioPcm, "DELTA_AUDIO_PCM", nullptr);
@@ -34,15 +34,15 @@ struct Port {
   float gain = 1.0f;
 };
 
-std::mutex g_mtx;
-std::vector<Port> g_ports;
+base::Mutex g_mtx;
+base::Vector<Port> g_ports;
 bool g_init = false;
 u64 g_framesOut = 0;
 
 }  // namespace
 
 extern "C" int prosperity_audio_open(u32 freq, u32 channels, int isFloat) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   if (!g_init) {
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
       BASE_LOGI("audio", "SDL_InitSubSystem(AUDIO) failed: {}", SDL_GetError());
@@ -82,9 +82,9 @@ FILE *pcmFile(int handle, int channels, int bps) {
   const char *pfx = kAudioPcm;
   if (!pfx || !*pfx)
     return nullptr;
-  static std::mutex m;
-  static std::vector<FILE *> fs;
-  std::lock_guard<std::mutex> lk(m);
+  static base::Mutex m;
+  static base::Vector<FILE *> fs;
+  base::LockGuard<base::Mutex> lk(m);
   if (handle < 0 || handle > 63)
     return nullptr;
   if ((int)fs.size() <= handle)
@@ -106,7 +106,7 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, u32 fram
   int channels, bytesPerSample;
   float gain;
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     if (handle < 0 || handle >= static_cast<int>(g_ports.size()))
       return -1;
     Port &p = g_ports[handle];
@@ -139,7 +139,7 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, u32 fram
     if (prevQ >= 0 && q >= prevQ)
       break;
     prevQ = q;
-    std::this_thread::sleep_for(std::chrono::microseconds(500));
+    base::SleepForMicroseconds(500);
   }
   // Bound latency: if the device queue is STILL many buffers deep after the wait
   // (no real playback to pace against, e.g. headless), drop this buffer rather than
@@ -150,7 +150,7 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, u32 fram
       SDL_PutAudioStreamData(stream, samples, static_cast<int>(bytes));
     } else {
       // Apply gain into a scratch copy so we never mutate guest memory.
-      static thread_local std::vector<u8> scratch;
+      static thread_local base::Vector<u8> scratch;
       scratch.resize(bytes);
       u32 n = frames * channels;
       if (bytesPerSample == 4) {
@@ -184,13 +184,13 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, u32 fram
 }
 
 extern "C" void prosperity_audio_volume(int handle, float gain) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   if (handle < 0 || handle >= static_cast<int>(g_ports.size())) return;
   g_ports[handle].gain = gain < 0.f ? 0.f : gain > 1.f ? 1.f : gain;
 }
 
 extern "C" void prosperity_audio_close(int handle) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   if (handle < 0 || handle >= static_cast<int>(g_ports.size())) return;
   if (g_ports[handle].stream) {
     SDL_DestroyAudioStream(g_ports[handle].stream);

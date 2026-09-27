@@ -9,10 +9,11 @@
 
 #include "base/arch.h"
 
-#include <unordered_map>
 
 #include "gpu/render/command.h"
 #include "gpu/rhi/device.h"
+#include <base/containers/map.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::render {
 
@@ -24,7 +25,7 @@ struct QuadPipelines {
   rhi::PipelineLayout* tex_layout = nullptr;
   rhi::Pipeline* tex_pipeline = nullptr;
   // Keyed by (textured<<0, enable<<1, blend_control<<2), mixed with the format.
-  std::unordered_map<u64, rhi::Pipeline*> cache;
+  base::HashMap<u64, rhi::Pipeline*> cache;
 };
 
 extern QuadPipelines& g_quad;
@@ -59,7 +60,7 @@ class RecompiledPipelineCache {
   RecompPipe* Store(u64 key, RecompPipe pipeline);
 
  private:
-  std::unordered_map<u64, RecompPipe> pipelines_;
+  base::HashMap<u64, RecompPipe> pipelines_;
 };
 
 // Transitional alias into render::BackendState while pipeline creation is

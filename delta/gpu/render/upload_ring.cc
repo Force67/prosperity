@@ -9,7 +9,6 @@
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +16,8 @@
 
 #include <base/logging.h>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/math/value_bounds.h>
 
 namespace {
 // DELTA_GPU_LDSDUMP=<dwords>: host-visible shared-LDS scratch, dumped after a
@@ -33,9 +34,9 @@ u64 UboRingBytes() {
   if (g_ring.ubo_bytes)
     return g_ring.ubo_bytes;
   const u64 requested =
-      u64(std::clamp(kUboRingMb.get(), 16u, 2048u)) * 1024 * 1024;
+      u64(base::Clamp(kUboRingMb.get(), 16u, 2048u)) * 1024 * 1024;
   const u64 range = Device().caps().max_storage_buffer_range;
-  return range ? std::min(requested, u64(range) * 2) : requested;
+  return range ? base::Min(requested, u64(range) * 2) : requested;
 }
 
 u64 VbRingBytes() {
@@ -88,7 +89,7 @@ bool CreateUploadRings() {
   if (!g_ring.vb || !g_ring.ib)
     return false;
   // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
-  g_ring.ubo_align = std::max(caps.uniform_offset_alignment, 1u);
+  g_ring.ubo_align = base::Max(caps.uniform_offset_alignment, 1u);
   if (caps.max_dynamic_uniform_buffers < kCbufBindings)
     BASE_LOGI("gpuvk", "only {}/{} dynamic UBOs available; set 1 is an "
                        "out-of-spec layout on this device and a cbuffer may "
@@ -124,14 +125,14 @@ bool CreateUploadRings() {
   // Raw-buffer set layout (set 2). Every recompiled pipeline layout that has a
   // shader reading buffers by hand names it, so it exists from the start; the
   // ring behind it is allocated only if such a shader actually appears.
-  g_ring.sbo_align = std::max(caps.storage_offset_alignment, 4u);
+  g_ring.sbo_align = base::Max(caps.storage_offset_alignment, 4u);
   // These are DYNAMIC storage buffers, whose device limit has a floor of 4
   // while real desktop parts report 16+. Take what the device offers (up to
   // our compile-time ceiling) and tell the recompiler, so a shader
   // referencing more raw buffers than 4 is planned rather than declined
   // wherever the hardware can carry it.
   g_ring.sbo_count =
-      std::min<u32>(caps.max_dynamic_storage_buffers, kRawBufBindings);
+      base::Min<u32>(caps.max_dynamic_storage_buffers, kRawBufBindings);
   if (g_ring.sbo_count < gpu::gcn::kMinGfxBuffers) {
     BASE_LOGI("gpuvk", "only {} dynamic storage buffers available, below "
                        "the floor of {}: shaders reading raw buffers will "
@@ -293,7 +294,7 @@ bool AllocateTextureUpload(u32 slot,
   GPU_BUGCHECK(slot < 2, "slot %u is not a frame-ring slot", slot);
   if (!bytes)
     return false;
-  alignment = std::max<u64>(alignment, 4);
+  alignment = base::Max<u64>(alignment, 4);
   GPU_BUGCHECK((alignment & (alignment - 1)) == 0,
                "alignment %llu is not a power of two",
                (unsigned long long)alignment);

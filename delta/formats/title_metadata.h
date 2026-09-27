@@ -10,27 +10,27 @@
 
 #include "base/arch.h"
 #include <cstddef>
-#include <string>
+#include <base/strings/xstring.h>
 
 namespace formats {
 
 // String value of `key` (e.g. "TITLE_ID") from a param.sfo image, or "" if
 // absent. The SFO is a small flat table; every offset is bounds-checked.
-std::string sfoGet(const u8 *data, size_t size, const char *key);
+base::String sfoGet(const u8 *data, size_t size, const char *key);
 
 // u32 value of `key` from a param.sfo image, or 0 if absent.
 u32 sfoGetU32(const u8 *data, size_t size, const char *key);
 
 // One top-level string value out of a param.json (flat file, no nesting on the
 // keys a title uses).
-std::string jsonGetString(const std::string &json, const char *key);
+base::String jsonGetString(const base::String &json, const char *key);
 
 // The display name, taken from localizedParameters.<defaultLanguage>.titleName
 // so a title shipping several languages does not get whichever comes first.
-std::string jsonGetTitleName(const std::string &json);
+base::String jsonGetTitleName(const base::String &json);
 
 // param.json stores sdkVersion as "0xMMmmpppp00000000"; libkernel wants the top
 // half (0x03000000 for a 3.00 title). Empty or unparsable -> 0.
-u32 parseSdkVersion(const std::string &s);
+u32 parseSdkVersion(const base::String &s);
 
 }  // namespace formats

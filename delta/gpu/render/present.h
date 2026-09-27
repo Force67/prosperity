@@ -7,13 +7,14 @@
 // swapchain and, on a software driver, rasterizes the blit on the CPU, so a
 // dedicated thread owns the window and always shows the newest complete frame.
 
-#include <condition_variable>
 #include "base/arch.h"
-#include <mutex>
-#include <thread>
-#include <vector>
 
 #include "gfx/gfx.h"
+#include <base/containers/vector.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/mutex.h>
+#include <base/memory/unique_pointer.h>
+#include <base/threading/thread.h>
 
 namespace gpu::render {
 
@@ -27,7 +28,7 @@ class LatestFramePresenter {
 
   void Present(const u8* pixels, u32 w, u32 h,
                gfx::PixelFormat fmt = gfx::PixelFormat::bgra8);
-  void Present(std::vector<u8>&& pixels, u32 w, u32 h,
+  void Present(base::Vector<u8>&& pixels, u32 w, u32 h,
                gfx::PixelFormat fmt = gfx::PixelFormat::bgra8);
   // Block until a lent buffer has been copied out, for a caller that is about
   // to write over the one it lent.
@@ -38,11 +39,11 @@ class LatestFramePresenter {
   void StartLocked();
   void Run();
 
-  std::thread thread_;
-  std::mutex mutex_;
-  std::condition_variable ready_;
-  std::condition_variable released_;  // a lent buffer has been copied out
-  std::vector<u8> pending_pixels_;  // tight pitch, pending_fmt_; latest wins
+  base::UniquePointer<base::Thread> thread_;
+  base::Mutex mutex_;
+  base::ConditionVariable ready_;
+  base::ConditionVariable released_;  // a lent buffer has been copied out
+  base::Vector<u8> pending_pixels_;  // tight pitch, pending_fmt_; latest wins
   // Set instead of pending_pixels_ when the caller lends us its buffer: the
   // presenter thread copies out of it, under the lock, before releasing it.
   const u8* pending_src_ = nullptr;

@@ -69,26 +69,29 @@
 #include "base/arch.h"
 
 #include <base.h>
+#include <base/strings/number_parse.h>
 #include <base/logging.h>
 
-#include <algorithm>
-#include <atomic>
 #include <charconv>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <unordered_map>
-#include <vector>
 
 #include "kern/ps4/audio_sink.h"
 #include "kern/ps5/audio_queue.h"
 #include "kern/lv2/sys_event_flag.h"
 #include <utl/options.h>
+#include <base/threading/thread.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/strings/string_ref.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kAudioDaemon, "DELTA_AUDIO_DAEMON", true);
@@ -138,10 +141,10 @@ struct Port {
   bool warnedNoArea = false;  // logged once
 };
 
-std::mutex g_m;
+base::Mutex g_m;
 Region g_ctl;
-std::unordered_map<int, Region> g_area;
-std::atomic<bool> g_started{false};
+base::HashMap<int, Region> g_area;
+base::Atomic<bool> g_started{false};
 
 // AudioOut2 uses monotonically increasing producer/consumer block counters (unlike
 // AudioOut's single-buffer token); offsets from the 01.14.00 module, checked against
@@ -149,19 +152,19 @@ std::atomic<bool> g_started{false};
 // releases only submitted blocks.
 struct Ps5Container {
   Region region;
-  std::string flag;
+  base::String flag;
   u32 index = 0;
   u64 due = 0;
   u64 blocks = 0;
 };
-std::unordered_map<std::string, Ps5Container> g_ps5_containers;
+base::HashMap<base::String, Ps5Container> g_ps5_containers;
 
 u64 drainPs5(u64 now) {
-  std::lock_guard<std::mutex> lk(g_m);
+  base::LockGuard<base::Mutex> lk(g_m);
   u64 wait = 2000;
   for (auto& [name, c] : g_ps5_containers) {
     if (now < c.due) {
-      wait = std::min(wait, c.due - now);
+      wait = base::Min(wait, c.due - now);
       continue;
     }
     const u32 frames = ps5::ConsumeAudioOut2Block(c.region.base, c.region.size);
@@ -190,9 +193,7 @@ bool enabled() {
 }
 
 u64 nowUs() {
-  return (u64)std::chrono::duration_cast<std::chrono::microseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
+  return (u64)(base::TickClock::NowNs() / 1000);
 }
 
 // A slot is only believed if every field it declares is one the module could
@@ -235,14 +236,14 @@ float blockPeak(const u8 *p, size_t bytes, u32 type) {
 
 void daemonMain() {
   Port ports[kSlots];
-  std::vector<u8> block;
+  base::Vector<u8> block;
   u64 lastTrace = nowUs();
 
   for (;;) {
     Region ctl;
-    std::unordered_map<int, Region> areas;
+    base::HashMap<int, Region> areas;
     {
-      std::lock_guard<std::mutex> lk(g_m);
+      base::LockGuard<base::Mutex> lk(g_m);
       ctl = g_ctl;
       areas = g_area;
     }
@@ -263,7 +264,7 @@ void daemonMain() {
         // guest's release and guarantees the block is fully visible.
         if (word(kOffToken) == 0)
           continue;
-        std::atomic_thread_fence(std::memory_order_acquire);
+        base::atomic_thread_fence(base::memory_order_acquire);
 
         const u32 bpf = word(kOffBpf), type = word(kOffType);
         const u32 rate = word(kOffRate), grain = word(kOffGrain);
@@ -353,7 +354,7 @@ void daemonMain() {
         // matters, since the module re-tests the token as soon as it wakes.
         *reinterpret_cast<volatile u64 *>(
             const_cast<u8 *>(slot) + kOffToken) = 0;
-        std::atomic_thread_fence(std::memory_order_release);
+        base::atomic_thread_fence(base::memory_order_release);
         evfSetByNameSubstr(kMixFlagStem, 1ull << k);
 
         const u64 period = (u64)grain * 1000000ull / rate;
@@ -406,17 +407,17 @@ void daemonMain() {
 
     if (sleepUs < 250)
       sleepUs = 250;  // never spin: worst case ~4k wakeups/s, all of them cheap
-    std::this_thread::sleep_for(std::chrono::microseconds(sleepUs));
+    base::SleepForMicroseconds(sleepUs);
   }
 }
 
 // "/shm_<pid>_<idx>_A" -> idx, or -1.
-int parsePortIndex(const std::string &n) {
+int parsePortIndex(const base::String &n) {
   if (n.size() < 4 || n.compare(n.size() - 2, 2, "_A") != 0)
     return -1;
   const size_t e = n.size() - 2;  // the '_' of "_A"
   const size_t s = n.rfind('_', e - 1);
-  if (s == std::string::npos || s + 1 >= e)
+  if (s == base::String::npos || s + 1 >= e)
     return -1;
   int v = 0;
   for (size_t i = s + 1; i < e; i++) {
@@ -431,7 +432,7 @@ int parsePortIndex(const std::string &n) {
 
 void audioDaemonForgetRange(const void* base, size_t size) {
   const auto first = reinterpret_cast<uintptr_t>(base);
-  std::lock_guard<std::mutex> lk(g_m);
+  base::LockGuard<base::Mutex> lk(g_m);
   for (auto it = g_ps5_containers.begin(); it != g_ps5_containers.end();) {
     const auto other = reinterpret_cast<uintptr_t>(it->second.region.base);
     if (first < other + it->second.region.size && other < first + size)
@@ -444,24 +445,23 @@ void audioDaemonForgetRange(const void* base, size_t size) {
 void audioDaemonNoticeShm(const char *name, u8 *base, size_t size) {
   if (!name || !enabled())
     return;
-  const std::string n(name);
-  constexpr std::string_view ps5_stem = "/SceAuOut2ContShm";
+  const base::String n(name);
+  constexpr base::StringRef ps5_stem = "/SceAuOut2ContShm";
   const bool ps5 = n.starts_with(ps5_stem);
   if (!ps5 && n.compare(0, 5, "/shm_") != 0)
     return;
 
   bool start = false;
   {
-    std::lock_guard<std::mutex> lk(g_m);
+    base::LockGuard<base::Mutex> lk(g_m);
     if (ps5) {
       const size_t split = n.rfind("0x");
-      if (split == std::string::npos || split <= ps5_stem.size())
+      if (split == base::String::npos || split <= ps5_stem.size())
         return;
-      u32 index;
-      const auto result = std::from_chars(n.data() + split + 2,
-                                          n.data() + n.size(), index, 16);
-      if (result.ec != std::errc{} || result.ptr != n.data() + n.size() ||
-          index >= 64)
+      u64 index;
+      const char* end = nullptr;
+      if (!base::ParseUnsigned(n.c_str() + split + 2, index, 16, &end) ||
+          end != n.c_str() + n.size() || index >= 64)
         return;
       auto& c = g_ps5_containers[n];
       if (c.region.base != base)
@@ -494,7 +494,7 @@ void audioDaemonNoticeShm(const char *name, u8 *base, size_t size) {
               "WARNING: DELTA_AUDIOMIX_ACK is set. That research aid fakes the "
               "mix-flag grant on a timer, which races the daemon's real grant "
               "and breaks pacing.");
-  std::thread(daemonMain).detach();
+  base::SpawnDetachedThread("audio_daemon", daemonMain);
 }
 
 }  // namespace krnl

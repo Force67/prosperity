@@ -8,13 +8,8 @@
 #include "libSceVideoOut.h"
 #include "base/arch.h"
 
-#include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <mutex>
-#include <string>
-#include <thread>
 
 #include <base/logging.h>
 
@@ -24,6 +19,11 @@
 #include "kern/lv2/sys_event.h"
 #include "kern/lv2/sys_mem.h"
 #include <utl/options.h>
+#include <base/atomic.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
+#include <base/time/time.h>
 
 namespace {
 DELTA_OPTION(const char *, kVoFail, "DELTA_VO_FAIL", nullptr);
@@ -116,17 +116,17 @@ struct VideoPort {
   int bufferCount = 0;
 
   // flip bookkeeping (read back via sceVideoOutGetFlipStatus).
-  std::atomic<u64> flipCount{0};
-  std::atomic<u64> submitCount{0};
+  base::Atomic<u64> flipCount{0};
+  base::Atomic<u64> submitCount{0};
   i64 lastFlipArg = -1;
   int currentBuffer = -1;
   // When the last flip was submitted and when it completed. Zero here is not
   // harmless: a title that decides a per-frame resource is retired by comparing
   // its own submit stamp against the flip's never sees one advance, so it
   // allocates a fresh one every frame instead of recycling.
-  std::atomic<u64> lastSubmitTsc{0};
-  std::atomic<u64> lastFlipTsc{0};
-  std::atomic<u64> lastProcessTime{0};
+  base::Atomic<u64> lastSubmitTsc{0};
+  base::Atomic<u64> lastFlipTsc{0};
+  base::Atomic<u64> lastProcessTime{0};
 
   // equeue (by handle) a flip/vblank event was registered on, so SubmitFlip can
   // wake exactly that queue. Isaac uses one display port + one equeue.
@@ -144,28 +144,26 @@ struct VideoPort {
 // Monotonic nanoseconds, used for the flip/vblank timestamps the SCE structs
 // carry (processTime is documented as microseconds, tsc as a raw counter).
 static u64 nowNs() {
-  return (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
+  return (u64)base::TickClock::NowNs();
 }
 
 u64 *videoLabels();  // fwd (needs g_mtx/g_port below)
 
-std::mutex g_mtx;
+base::Mutex g_mtx;
 VideoPort g_port;            // single display port is enough for Isaac
 
 // Guest-visible 16-slot label block, allocated on first use (either the pump
 // or the title asking for the address can get here first).
 u64 *videoLabels() {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   if (!g_port.labels)
     g_port.labels =
         reinterpret_cast<u64 *>(krnl::allocLowGuest(16 * sizeof(u64)));
   return g_port.labels;
 }
-std::atomic<bool> g_gfxUp{false};
+base::Atomic<bool> g_gfxUp{false};
 
-std::atomic<int> g_gfxState{0};  // 0=untried, 1=up, 2=failed
+base::Atomic<int> g_gfxState{0};  // 0=untried, 1=up, 2=failed
 
 bool ensureGfx(u32 w, u32 h) {
   int st = g_gfxState.load();
@@ -173,7 +171,7 @@ bool ensureGfx(u32 w, u32 h) {
     return true;
   if (st == 2)
     return false;  // tried once and failed; don't spam retries every frame
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   st = g_gfxState.load();
   if (st != 0)
     return st == 1;
@@ -203,7 +201,7 @@ void presentScanout() {
   void *fb;
   u32 w, h, pitch, fmt;
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     int idx = g_port.currentBuffer >= 0 ? g_port.currentBuffer : 0;
     fb = (idx < kMaxBuffers) ? g_port.buffers[idx] : nullptr;
     w = g_port.width;
@@ -218,7 +216,7 @@ void presentScanout() {
   gfx::pumpEvents();
 }
 
-std::atomic<bool> g_flipPumpStarted{false};
+base::Atomic<bool> g_flipPumpStarted{false};
 
 // The game flips through Gnm (a PM4 prepareFlip), then blocks in kevent on the equeue
 // from sceVideoOutAddFlipEvent. No GPU yet, so synthesize completion: a ~60 Hz pump
@@ -228,9 +226,9 @@ void startFlipPump() {
   if (!g_flipPumpStarted.compare_exchange_strong(expected, true))
     return;
   BASE_LOGI("videoout", "flip pump started (60 Hz)");
-  std::thread([] {
+  base::SpawnDetachedThread("libSceVideoOut", [] {
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::microseconds(16667));
+      base::SleepForMicroseconds(16667);
       // NB: do NOT present here. The window is driven solely by the GPU renderer on the
       // submit thread; gfx has one swapchain/command buffer and a present from this pump
       // thread races it, intermittently deadlocking Vulkan. This pump only synthesizes
@@ -249,7 +247,7 @@ void startFlipPump() {
       // post the flip-complete event to whichever equeue holds a flip knote.
       triggerAllEqueues(kEventFlip, kFilterFlip, static_cast<i64>(c));
     }
-  }).detach();
+  });
 }
 
 }  // namespace
@@ -270,7 +268,7 @@ extern "C" {
 int PS4ABI sceVideoOutOpen(int userId, int busType, int index, const void *param) {
   BASE_LOGI("videoout", "open user={} bus={} idx={}", userId, busType, index);
   if (int r = failInject("open")) { BASE_LOGI("vofail", "open -> {}", r); return r; }
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   g_port.open = true;
   // bring the window up early so the user sees something while the game inits.
   // (do it outside the lock-sensitive gfx path on first flip if init is heavy)
@@ -279,7 +277,7 @@ int PS4ABI sceVideoOutOpen(int userId, int busType, int index, const void *param
 
 int PS4ABI sceVideoOutClose(int handle) {
   BASE_LOGI("videoout", "close h={}", handle);
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   g_port.open = false;
   return 0;
 }
@@ -322,7 +320,7 @@ int PS4ABI sceVideoOutRegisterBuffers(int handle, int startIndex,
                                      void *const *addresses, int bufferNum,
                                      const void *attribute) {
   if (int r = failInject("regbuf")) { BASE_LOGI("vofail", "regbuf -> {}", r); return r; }
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   if (attribute) {
     auto *a = static_cast<const BufferAttribute *>(attribute);
     g_port.width = a->width ? a->width : g_port.width;
@@ -421,7 +419,7 @@ int PS4ABI sceVideoOutSubmitFlip(int handle, int bufferIndex, int flipMode,
   int eqHandle;
   void *udata;
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     if (bufferIndex >= 0 && bufferIndex < kMaxBuffers)
       fb = g_port.buffers[bufferIndex];
     w = g_port.width;
@@ -449,7 +447,7 @@ int PS4ABI sceVideoOutSubmitFlip(int handle, int bufferIndex, int flipMode,
   // flip "completes" immediately: bump the count and wake the flip equeue.
   g_port.flipCount.fetch_add(1);
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     eqHandle = g_port.flipEqueue;
     udata = g_port.flipUdata;
   }
@@ -471,7 +469,7 @@ int PS4ABI sceVideoOutSubmitFlipEop(int handle, int bufferIndex, int flipMode,
   int eqHandle;
   void *udata;
   {
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     if (bufferIndex >= 0 && bufferIndex < kMaxBuffers) {
       scanout = reinterpret_cast<u64>(g_port.buffers[bufferIndex]);
       g_port.currentBuffer = bufferIndex;
@@ -567,7 +565,7 @@ int PS4ABI sceVideoOutModeSetAny_(int handle, void *arg) {
 // CommandBuffers (a GPU prepareFlip packet), so record the target scanout buffer
 // here; the flip pump then presents it and posts the flip-complete event.
 void prosperity_videoout_set_flip(int bufferIndex, i64 flipArg) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   if (bufferIndex >= 0 && bufferIndex < kMaxBuffers)
     g_port.currentBuffer = bufferIndex;
   g_port.lastFlipArg = flipArg;
@@ -577,7 +575,7 @@ void prosperity_videoout_set_flip(int bufferIndex, i64 flipArg) {
 // render target the flip displays). Used by the GPU renderer to present the
 // right render target.
 u64 prosperity_videoout_buffer(int bufferIndex) {
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   if (bufferIndex >= 0 && bufferIndex < kMaxBuffers)
     return reinterpret_cast<u64>(g_port.buffers[bufferIndex]);
   return 0;

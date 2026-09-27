@@ -12,21 +12,23 @@
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
 
-#include <mutex>
 #include "wait_probe.h"
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 #include <unistd.h>
-#include <unordered_map>
 
 #include "kern/crash.h"
 #include "kern/ipmi/services.h"
 #include "kern/proc.h"
 #include "sys_event_flag.h"
 #include <utl/options.h>
+#include <base/containers/map.h>
+#include <base/strings/string_ref.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(const char *, kEvfTrace, "DELTA_EVF_TRACE", nullptr);
@@ -38,14 +40,14 @@ DELTA_OPTION(bool, kEvfStack, "DELTA_EVF_STACK", false);
 
 namespace krnl {
 // Named event flags, so evf_open(name) finds the one evf_create(name) made.
-static std::mutex g_efRegM;
-static std::unordered_map<std::string, eventFlag *> g_efByName;
+static base::Mutex g_efRegM;
+static base::HashMap<base::String, eventFlag *> g_efByName;
 
 eventFlag::eventFlag(objectTable &objects, const char *nm, u64 init, u64 sticky_)
     : kObject(objects, oType::eventflag), bits(init), sticky(sticky_) {
   if (nm && *nm) {
     name = nm;
-    std::lock_guard<std::mutex> lk(g_efRegM);
+    base::LockGuard<base::Mutex> lk(g_efRegM);
     g_efByName[nm] = this;
   }
 }
@@ -76,7 +78,7 @@ void eventFlag::removeWaiter(Waiter *waiter) {
 
 int eventFlag::wait(u64 pattern, u32 mode, u64 *result,
                     u32 *timeoutUs) {
-  std::unique_lock<std::mutex> lk(m);
+  base::UniqueLock<base::Mutex> lk(m);
   if (satisfied(pattern, mode))
     return take(pattern, mode, result);
 
@@ -85,20 +87,18 @@ int eventFlag::wait(u64 pattern, u32 mode, u64 *result,
   if (timeoutUs) {
     // The timeout is an in/out parameter: the kernel writes back the remaining
     // microseconds after the wait (zero on exhaustion).
-    auto start = std::chrono::steady_clock::now();
-    if (!cv.wait_for(lk, std::chrono::microseconds(*timeoutUs),
+    auto start = base::TimeTicks::Now();
+    if (!cv.WaitFor(lk, base::Microseconds(*timeoutUs),
                      [&] { return waiter.done; })) {
       removeWaiter(&waiter);
       *timeoutUs = 0;
       return -SysError::eTIMEDOUT;
     }
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - start);
-    *timeoutUs = elapsed.count() < *timeoutUs
-                     ? static_cast<u32>(*timeoutUs - elapsed.count())
-                     : 0;
+    const i64 elapsed = (base::TimeTicks::Now() - start).InMicroseconds();
+    *timeoutUs = elapsed < *timeoutUs ? static_cast<u32>(*timeoutUs - elapsed)
+                                      : 0;
   } else {
-    cv.wait(lk, [&] { return waiter.done; });
+    cv.Wait(lk, [&] { return waiter.done; });
   }
   removeWaiter(&waiter);
   // A cancelled waiter is woken by evf_cancel, not by a matching set(). The
@@ -113,16 +113,16 @@ int eventFlag::wait(u64 pattern, u32 mode, u64 *result,
 }
 
 int eventFlag::trywait(u64 pattern, u32 mode, u64 *result) {
-  std::unique_lock<std::mutex> lk(m);
+  base::UniqueLock<base::Mutex> lk(m);
   if (!satisfied(pattern, mode))
     return -SysError::eBUSY;
   return take(pattern, mode, result);
 }
 
 void eventFlag::set(u64 b) {
-  std::lock_guard<std::mutex> lk(m);
+  base::LockGuard<base::Mutex> lk(m);
   bits |= b;
-  lastSetTid.store((long)gettid(), std::memory_order_relaxed);
+  lastSetTid.store((long)gettid(), base::memory_order_relaxed);
   // A kernel event flag commits satisfied queued waits during set(). Keeping
   // that result on the waiter prevents a later clear from revoking the wake
   // before the host thread gets scheduled and reacquires this mutex.
@@ -132,16 +132,16 @@ void eventFlag::set(u64 b) {
     take(waiter->pattern, waiter->mode, &waiter->result);
     waiter->done = true;
   }
-  cv.notify_all();
+  cv.NotifyAll();
 }
 
 void eventFlag::clear(u64 b) {
-  std::lock_guard<std::mutex> lk(m);
+  base::LockGuard<base::Mutex> lk(m);
   bits &= b;  // SCE clear keeps the bits set in b
 }
 
 int eventFlag::cancel(u64 pattern) {
-  std::lock_guard<std::mutex> lk(m);
+  base::LockGuard<base::Mutex> lk(m);
   // Mark all waiters as cancelled. They wake from the cv with done==true but a
   // zero result, which the wait() loop turns into an error return (the kernel
   // delivers ETIMEDOUT/EINTR to a cancelled waiter).
@@ -154,7 +154,7 @@ int eventFlag::cancel(u64 pattern) {
     w->done = true;
     ++n;
   }
-  cv.notify_all();
+  cv.NotifyAll();
   return n;
 }
 
@@ -166,9 +166,9 @@ int eventFlag::cancel(u64 pattern) {
 bool evfSetByNameSubstr(const char *substr, u64 bits) {
   if (!substr)
     return false;
-  std::lock_guard<std::mutex> lk(g_efRegM);
+  base::LockGuard<base::Mutex> lk(g_efRegM);
   for (auto &kv : g_efByName) {
-    if (kv.first.find(substr) == std::string::npos)
+    if (kv.first.find(substr) == base::String::npos)
       continue;
     kv.second->set(bits);
     return true;
@@ -216,9 +216,7 @@ static void evfTrace(const char *op, int id, const eventFlag *ef,
     return;
   // us timestamp from the same steady_clock the shm-audio dumper stamps its
   // snapshots with, so an evf signal can be placed against a cursor movement.
-  const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                      std::chrono::steady_clock::now().time_since_epoch())
-                      .count();
+  const auto us = (base::TickClock::NowNs() / 1000);
   BASE_LOGI("evf",
             "us={} tid={} {} id={} '{}' pat={:#x} mode={:#x} -> ret={} "
             "res={:#x}",
@@ -291,7 +289,7 @@ static u64 systemFlagInit(const char *name) {
 
 int PS4ABI sys_evf_open(const char *name) {
   {
-    std::lock_guard<std::mutex> lk(g_efRegM);
+    base::LockGuard<base::Mutex> lk(g_efRegM);
     auto it = name ? g_efByName.find(name) : g_efByName.end();
     if (it != g_efByName.end())
       return it->second->handle();
@@ -311,7 +309,7 @@ int PS4ABI sys_evf_delete(int id) {
   if (!ef)
     return -SysError::eSRCH;
   {
-    std::lock_guard<std::mutex> lk(g_efRegM);
+    base::LockGuard<base::Mutex> lk(g_efRegM);
     if (!ef->fname().empty())
       g_efByName.erase(ef->fname().c_str());
   }
@@ -346,7 +344,7 @@ int PS4ABI sys_evf_wait(int id, u64 pattern, u32 mode,
   // trace, which is exactly the wait one is usually hunting.
   evfTrace("waitE", id, ef, pattern, mode, 0, 0);
   if (audioMixAckUs() >= 0 &&
-      ef->fname().find("sceAudioOutMix") != std::string::npos) {
+      ef->fname().find("sceAudioOutMix") != base::String::npos) {
     u32 to = static_cast<u32>(audioMixAckUs());
     u64 ares = 0;
     int ar = ef->wait(pattern, mode, &ares, &to);
@@ -383,7 +381,7 @@ int PS4ABI sys_evf_trywait(int id, u64 pattern, u32 mode,
   // that (SOTTR's file-I/O channel streams garbage otherwise). Emulate with a bounded
   // wait. Pure pollers never set the flag, so they pay nothing. DELTA_NO_EVF_GRACE = A/B.
   if (r == -SysError::eBUSY && !kNoEvfGrace &&
-      ef->lastSetTid.load(std::memory_order_relaxed) == (long)gettid()) {
+      ef->lastSetTid.load(base::memory_order_relaxed) == (long)gettid()) {
     u32 toUs = 250000;
     r = ef->wait(pattern, mode, &res, &toUs);
     if (r == -SysError::eTIMEDOUT)
@@ -400,13 +398,13 @@ int PS4ABI sys_evf_trywait(int id, u64 pattern, u32 mode,
 static void evfSetTally(int id) {
   if (!kWaitProbe)
     return;
-  static std::mutex m;
-  static std::unordered_map<int, u64> hist;
-  static auto last = std::chrono::steady_clock::now();
-  std::lock_guard<std::mutex> lk(m);
+  static base::Mutex m;
+  static base::HashMap<int, u64> hist;
+  static auto last = base::TimeTicks::Now();
+  base::LockGuard<base::Mutex> lk(m);
   hist[id]++;
-  const auto now = std::chrono::steady_clock::now();
-  if (now - last < std::chrono::seconds(10))
+  const auto now = base::TimeTicks::Now();
+  if (now - last < base::Seconds(10))
     return;
   last = now;
   base::String ids;

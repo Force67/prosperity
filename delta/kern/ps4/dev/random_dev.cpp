@@ -7,11 +7,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <random>
+#include <base/random/random.h>
 
 #include "file_dev.h" // fillStat / kSceFileMode*
 #include "random_dev.h"
 #include <utl/options.h>
+#include <base/math/value_bounds.h>
 
 namespace {
 DELTA_OPTION(bool, kArndZero, "DELTA_ARND_ZERO", false);
@@ -35,13 +36,16 @@ i64 randomDevice::read(void *buf, size_t len) {
     std::memset(buf, 0, len);
     return static_cast<i64>(len);
   }
-  static thread_local std::random_device rd;
-  static thread_local std::mt19937_64 gen(rd());
+  // xorshift64*, seeded per thread from the OS entropy source.
+  static thread_local u64 state = base::SourceTrueRandomSeed() | 1;
   auto *out = static_cast<u8 *>(buf);
   size_t done = 0;
   while (done < len) {
-    const u64 v = gen();
-    const size_t n = std::min(sizeof(v), len - done);
+    state ^= state >> 12;
+    state ^= state << 25;
+    state ^= state >> 27;
+    const u64 v = state * 0x2545F4914F6CDD1Dull;
+    const size_t n = base::Min(sizeof(v), len - done);
     std::memcpy(out + done, &v, n);
     done += n;
   }

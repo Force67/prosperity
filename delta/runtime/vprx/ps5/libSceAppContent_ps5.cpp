@@ -16,10 +16,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 #include <sys/stat.h>
 
 #include "kern/vfs.h"
+#include <base/strings/xstring.h>
 
 namespace {
 // SCE_APP_CONTENT_APPPARAM_ID_SKU_FLAG == 0; 0 = full game, 1 = trial.
@@ -32,19 +32,19 @@ constexpr u64 kAvailableKb = 1024ull * 1024;
 
 constexpr char kTempPoint[] = "/temp0";
 
-std::string tempHostDir() {
+base::String tempHostDir() {
   base::StringU8 home;
   base::GetEnvironmentVariable(u8"HOME", home);
-  std::string root =
-      std::string(home.empty() ? "." : (const char *)home.c_str()) +
+  base::String root =
+      base::String(home.empty() ? "." : (const char *)home.c_str()) +
       "/.prosperity/appcontent";
-  const std::string &title = krnl::vfs::titleId();
-  return root + "/" + (title.empty() ? std::string("APPCONTENT") : title) +
+  const base::String &title = krnl::vfs::titleId();
+  return root + "/" + (title.empty() ? base::String("APPCONTENT") : title) +
          "/temp0";
 }
 
-void makeHostDirs(const std::string &path) {
-  std::string p = path;
+void makeHostDirs(const base::String &path) {
+  base::String p = path;
   for (size_t i = 1; i < p.size(); i++) {
     if (p[i] == '/') {
       p[i] = 0;
@@ -65,21 +65,21 @@ int PS4ABI appContentInitialize(const void *, u32 *bootParam) {
 // /app0/sce_sys/param.json. Scrape the one key rather than pulling in a JSON
 // parser: the file is a flat object of "key": value pairs.
 i32 userDefinedParam(u32 n) {
-  static const std::string json = [] {
+  static const base::String json = [] {
     utl::File f = krnl::vfs::openRead("/app0/sce_sys/param.json");
     if (!f.IsOpen())
-      return std::string();
-    std::string s(static_cast<size_t>(f.GetSize()), '\0');
+      return base::String();
+    base::String s(static_cast<size_t>(f.GetSize()), '\0');
     f.Read(s.data(), s.size());
     return s;
   }();
   char key[32];
   std::snprintf(key, sizeof(key), "\"userDefinedParam%u\"", n);
   const size_t at = json.find(key);
-  if (at == std::string::npos)
+  if (at == base::String::npos)
     return 0;
   const size_t colon = json.find(':', at);
-  return colon == std::string::npos
+  return colon == base::String::npos
              ? 0
              : static_cast<i32>(std::strtol(json.c_str() + colon + 1,
                                                 nullptr, 10));
@@ -97,7 +97,7 @@ int PS4ABI appContentAppParamGetInt(u32 paramId, i32 *value) {
 int PS4ABI appContentTemporaryDataMount2(u32 /*option*/, void *mountPoint) {
   if (!mountPoint)
     return -1;
-  const std::string host = tempHostDir();
+  const base::String host = tempHostDir();
   makeHostDirs(host);
   krnl::vfs::mountWritable(kTempPoint, host.c_str());
   std::memset(mountPoint, 0, 16);

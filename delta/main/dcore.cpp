@@ -12,11 +12,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <memory>
-#include <set>
-#include <string>
-#include <thread>
-#include <vector>
 
 #include "dcore.h"
 #include <logger/logger.h>
@@ -38,6 +33,11 @@
 #include "formats/pup_object.h"
 #include "formats/title_metadata.h"
 #include <utl/options.h>
+#include <base/containers/vector.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/thread.h>
 
 namespace {
 DELTA_OPTION(bool, kHdrFill, "DELTA_HDR_FILL", false);
@@ -78,8 +78,8 @@ using formats::parseSdkVersion;
 using formats::sfoGet;
 using formats::sfoGetU32;
 
-bool readHostFile(const std::string &path, u64 maxSize,
-                  std::vector<u8> &out) {
+bool readHostFile(const base::String &path, u64 maxSize,
+                  base::Vector<u8> &out) {
   utl::File file(base::String(path.c_str()), utl::fileMode::read);
   if (!file.IsOpen())
     return false;
@@ -94,10 +94,10 @@ bool readHostFile(const std::string &path, u64 maxSize,
   return true;
 }
 
-std::string parentPath(const base::String &path) {
-  const std::string value(path.c_str());
+base::String parentPath(const base::String &path) {
+  const base::String value(path.c_str());
   const size_t slash = value.find_last_of("/\\");
-  return slash == std::string::npos ? std::string(".") : value.substr(0, slash);
+  return slash == base::String::npos ? base::String(".") : value.substr(0, slash);
 }
 
 
@@ -135,9 +135,9 @@ void deltaCore::boot(const base::String &xdir) {
   const bool isArchive = !isPkg && !isFfpkg && vfs::isArchivePath(xdir.c_str());
   // A raw app dump: the extracted /app0 tree itself, identified by its console
   // metadata. Host-mounted rather than read through an image reader.
-  const std::string appRoot(path.c_str());
-  const std::string appSfo = appRoot + "/sce_sys/param.sfo";
-  const std::string appJson = appRoot + "/sce_sys/param.json";
+  const base::String appRoot(path.c_str());
+  const base::String appSfo = appRoot + "/sce_sys/param.sfo";
+  const base::String appJson = appRoot + "/sce_sys/param.json";
   // IsOpen(), not Exists(): the File ctor always allocates its backing object, so
   // Exists() is true even for a missing path. A PS5 dump has no param.sfo, and
   // treating it as a PS4 app dir loses both the title id and the platform.
@@ -152,9 +152,9 @@ void deltaCore::boot(const base::String &xdir) {
   base::String mainModule = path;
   u32 sdkVersion = 0;
   u32 ps4Attributes = 0;
-  std::string gameTitle;
+  base::String gameTitle;
 #if defined(__linux__) && !defined(__ANDROID__)
-  std::vector<u8> gameIcon;
+  base::Vector<u8> gameIcon;
 #endif
 
   if (isPkg) {
@@ -168,7 +168,7 @@ void deltaCore::boot(const base::String &xdir) {
     gameTitle = mount.title;
     ps4Attributes = mount.attributes;
 #if defined(__linux__) && !defined(__ANDROID__)
-    gameIcon = std::move(mount.icon);
+    gameIcon = base::move(mount.icon);
 #endif
     mainModule = base::String("/app0/eboot.bin");
   } else if (isFfpkg) {
@@ -182,7 +182,7 @@ void deltaCore::boot(const base::String &xdir) {
     krnl::vfs::setTitleId(mount.titleId);
     gameTitle = mount.title;
 #if defined(__linux__) && !defined(__ANDROID__)
-    gameIcon = std::move(mount.icon);
+    gameIcon = base::move(mount.icon);
 #endif
     sdkVersion = mount.sdkVersion;
     mainModule = base::String(mount.hasDecrypted ? "/app0/decrypted/eboot.bin"
@@ -199,7 +199,7 @@ void deltaCore::boot(const base::String &xdir) {
     sdkVersion = mount.sdkVersion;
     ps4Attributes = mount.attributes;
 #if defined(__linux__) && !defined(__ANDROID__)
-    gameIcon = std::move(mount.icon);
+    gameIcon = base::move(mount.icon);
 #endif
     krnl::vfs::mountVirtual("/app0", mount.provider);
     mainModule = base::String(mount.hasDecrypted ? "/app0/decrypted/eboot.bin"
@@ -209,7 +209,7 @@ void deltaCore::boot(const base::String &xdir) {
   } else if (isAppDir) {
     krnl::vfs::mount("/app0", path.c_str());
     if (isPs4AppDir) {
-      std::vector<u8> sfo;
+      base::Vector<u8> sfo;
       if (readHostFile(appSfo, kMaxSfoSize, sfo)) {
         krnl::vfs::setTitleId(sfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
         gameTitle = sfoGet(sfo.data(), sfo.size(), "TITLE");
@@ -220,9 +220,10 @@ void deltaCore::boot(const base::String &xdir) {
         readHostFile(appRoot + "/icon0.png", kMaxIconSize, gameIcon);
 #endif
     } else {
-      std::vector<u8> json;
+      base::Vector<u8> json;
       readHostFile(appJson, kMaxSfoSize, json);
-      const std::string js(json.begin(), json.end());
+      const base::String js(reinterpret_cast<const char*>(json.data()),
+                            json.size());
       krnl::vfs::setTitleId(jsonGetString(js, "titleId"));
       gameTitle = jsonGetTitleName(js);
       sdkVersion = parseSdkVersion(jsonGetString(js, "sdkVersion"));
@@ -235,8 +236,8 @@ void deltaCore::boot(const base::String &xdir) {
     LOG_INFO("mounted app dir at /app0 ({}), boot module {}",
              krnl::vfs::titleId().c_str(), mainModule.c_str());
   } else {
-    const std::string root = parentPath(path);
-    std::vector<u8> sfo;
+    const base::String root = parentPath(path);
+    base::Vector<u8> sfo;
     if (!readHostFile(root + "/sce_sys/param.sfo", kMaxSfoSize, sfo))
       readHostFile(root + "/param.sfo", kMaxSfoSize, sfo);
     if (!sfo.empty()) {
@@ -258,11 +259,11 @@ void deltaCore::boot(const base::String &xdir) {
   if (isPkg || isFfpkg || isAppDir || isArchive) {
     base::StringU8 home;
     base::GetEnvironmentVariable(u8"HOME", home);
-    std::string tid = krnl::vfs::titleId();
-    std::string dl =
-        std::string(home.empty() ? "." : (const char *)home.c_str()) +
+    base::String tid = krnl::vfs::titleId();
+    base::String dl =
+        base::String(home.empty() ? "." : (const char *)home.c_str()) +
         "/.prosperity/download/" +
-        (tid.empty() ? std::string("UNKNOWN") : tid);
+        (tid.empty() ? base::String("UNKNOWN") : tid);
     krnl::vfs::mountWritable("/download0", dl.c_str());
   }
 
@@ -279,11 +280,11 @@ void deltaCore::boot(const base::String &xdir) {
   // Name the window after the booted game, since the renderer and the videoout
   // HLE both bring it up with a generic title depending on who gets there first.
   {
-    const std::string &tid = krnl::vfs::titleId();
-    std::string title = "prosperity - ";
-    title += gameTitle.empty() ? std::string("unknown") : gameTitle;
+    const base::String &tid = krnl::vfs::titleId();
+    base::String title = "prosperity - ";
+    title += gameTitle.empty() ? base::String("unknown") : gameTitle;
     title += " - [";
-    title += tid.empty() ? std::string("unknown") : tid;
+    title += tid.empty() ? base::String("unknown") : tid;
     title += isPs5 ? "] (PS5)" : "] (PS4)";
     LOG_INFO("window title: {}", title.c_str());
     gfx::setTitle(title.c_str());
@@ -292,7 +293,7 @@ void deltaCore::boot(const base::String &xdir) {
   if (!gameIcon.empty())
     gfx::setIcon(gameIcon.data(), gameIcon.size());
 #endif
-  std::thread ctx([mainModule = std::move(mainModule), mounted, isPs5, sdkVersion]() {
+  base::SpawnDetachedThread("guest-main", [mainModule = base::move(mainModule), mounted, isPs5, sdkVersion]() {
     auto p = base::MakeUnique<krnl::proc>();
     if (isPs5)
       p->setPlatform(krnl::proc::platform::ps5);
@@ -302,6 +303,4 @@ void deltaCore::boot(const base::String &xdir) {
 
     p->start();
   });
-
-  ctx.detach();
 }

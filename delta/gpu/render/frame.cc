@@ -28,19 +28,23 @@
 #include "gpu/render/upload_ring.h"
 
 #include <dlfcn.h>
-#include <algorithm>
-#include <unordered_map>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <vector>
 
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kGpuSync, "DELTA_GPU_SYNC", false);
@@ -98,7 +102,7 @@ DELTA_OPTION(bool, kWantOffscreen, "DELTA_GPU_PRESENT_OFFSCREEN", false);
 namespace gpu::render {
 
 namespace {
-std::vector<rhi::CommandList*> g_free_lists;
+base::Vector<rhi::CommandList*> g_free_lists;
 
 rhi::CommandList* AcquireList() {
   if (!g_free_lists.empty()) {
@@ -138,7 +142,7 @@ struct PassTotal {
   double ns = 0;
   u64 passes = 0, draws = 0;
 };
-std::unordered_map<u64, PassTotal> g_pass_totals;
+base::HashMap<u64, PassTotal> g_pass_totals;
 u32 g_pass_frames = 0;
 
 // Once the slot's submission has retired: fold its passes into the totals and
@@ -147,7 +151,7 @@ void CollectPassTimes(FrameSlot& slot) {
   if (!slot.pass_timestamps || slot.pass_marks.empty())
     return;
   const u32 n = static_cast<u32>(slot.pass_marks.size());
-  std::vector<u64> stamps(n * 2);
+  base::Vector<u64> stamps(n * 2);
   if (Device().ReadTimestamps(slot.pass_timestamps, 0, n * 2, stamps.data())) {
     const rhi::Caps& caps = Device().caps();
     const u64 mask =
@@ -163,9 +167,10 @@ void CollectPassTimes(FrameSlot& slot) {
   slot.pass_marks.clear();
   if (++g_pass_frames < 120)
     return;
-  std::vector<std::pair<u64, PassTotal>> sorted(g_pass_totals.begin(),
-                                                g_pass_totals.end());
-  std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+  base::Vector<base::Pair<u64, PassTotal>> sorted;
+  for (const auto& [target, pass] : g_pass_totals)
+    sorted.push_back({target, pass});
+  base::Sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
     return a.second.ns > b.second.ns;
   });
   double total = 0;
@@ -305,9 +310,9 @@ bool ReportRtContents(FrameSlot& owner) {
   // shared-LDS scratch. Runs on the same schedule as RTSTAT, after the frame's
   // work has been waited on.
   if (kLdsDump && g_ring.lds_map &&
-      g_frame.num % std::max(1, kRtStatEvery.get()) == 0) {
+      g_frame.num % base::Max(1, kRtStatEvery.get()) == 0) {
     const u32* dw = reinterpret_cast<const u32*>(g_ring.lds_map);
-    const u32 n = std::min<u32>(kLdsDump.get(),
+    const u32 n = base::Min<u32>(kLdsDump.get(),
                                 (u32)(kLdsScratch / sizeof(u32)));
     char line[1024];
     int at = 0;
@@ -342,7 +347,7 @@ bool ReportRtContents(FrameSlot& owner) {
   }
   // DELTA_GPU_RTSTAT_EVERY=<n>: sample every n frames instead of every 200, so
   // a per-frame flicker can be told apart from a slow animation.
-  const int every = std::max(1, kRtStatEvery.get());
+  const int every = base::Max(1, kRtStatEvery.get());
   if (!kGpuRtstat ||
       (kReportFrame ? g_frame.num != kReportFrame : g_frame.num % every != 0))
     return true;
@@ -351,12 +356,12 @@ bool ReportRtContents(FrameSlot& owner) {
   // unordered_map's order made that a lottery: the scene-colour target was
   // reported in one run and absent from the next, with nothing to say it had
   // been dropped.
-  const size_t max_scored = std::max(1, kRtStatMax.get());
-  std::vector<std::pair<u64, RTarget*> > order;
+  const size_t max_scored = base::Max(1, kRtStatMax.get());
+  base::Vector<base::Pair<u64, RTarget*> > order;
   for (auto& kv : g_rts)
     if (kv.second.used_this_frame || (kGpuRtstatAll && kv.second.ever_rendered))
       order.emplace_back(kv.first, &kv.second);
-  std::sort(order.begin(), order.end());
+  base::Sort(order.begin(), order.end());
   if (order.size() > max_scored) {
     char dropped[512] = {};
     int at = 0;
@@ -396,7 +401,7 @@ bool ReportRtContents(FrameSlot& owner) {
     // midtones" reading: a 50% pile-up just under 1.0 with an empty midrange,
     // in a buffer that had neither.
     const auto* px8 = static_cast<const u8*>(g_frame.readback_map);
-    const u32 bpp = std::max(1u, (u32)FormatBytes(rt.fmt));
+    const u32 bpp = base::Max(1u, (u32)FormatBytes(rt.fmt));
     const bool is_h4 = rt.fmt == rhi::Format::kRGBA16Float;
     const bool is_h2 = rt.fmt == rhi::Format::kRG16Float;
     const bool is_half = is_h4 || is_h2;
@@ -426,7 +431,7 @@ bool ReportRtContents(FrameSlot& owner) {
     float a_at_max = -1.f;
     double hi_a_sum = 0.0;
     float hi_a_min = 1e30f, hi_a_max = -1e30f;
-    std::vector<float> lums;
+    base::Vector<float> lums;
     u64 tone[8] = {};
     u32 distinct[4] = {};
     u32 num_distinct = 0;
@@ -445,7 +450,7 @@ bool ReportRtContents(FrameSlot& owner) {
     for (u64 i = 0; i < n; i += step, samples++) {
       const u8* t = px8 + i * bpp;
       u32 v = 0;
-      std::memcpy(&v, t, std::min<u32>(bpp, 4));
+      std::memcpy(&v, t, base::Min<u32>(bpp, 4));
       // Channel values in display units: [0,1] is the displayable range for a
       // unorm target and for a float one alike.
       float ch[4] = {0.f, 0.f, 0.f, 1.f};
@@ -482,9 +487,9 @@ bool ReportRtContents(FrameSlot& owner) {
       a_sum += ch[3];
       // Luminance is RGB only. Alpha is a coverage or fade term on most of
       // these targets and says nothing about how bright the frame looks.
-      const float lum = std::max({ch[0], ch[1], ch[2]});
+      const float lum = base::Max({ch[0], ch[1], ch[2]});
       if (finite) {
-        luma_sum += std::min(1.f, std::max(0.f, lum));
+        luma_sum += base::Min(1.f, base::Max(0.f, lum));
         if (lum > lum_max) {
           lum_max = lum;
           max_x = (u32)(i % rt.w);
@@ -494,13 +499,13 @@ bool ReportRtContents(FrameSlot& owner) {
         if (lum > 100.f) {
           hi++;
           const u32 hx = (u32)(i % rt.w), hy = (u32)(i / rt.w);
-          hx0 = std::min(hx0, hx);
-          hy0 = std::min(hy0, hy);
-          hx1 = std::max(hx1, hx);
-          hy1 = std::max(hy1, hy);
+          hx0 = base::Min(hx0, hx);
+          hy0 = base::Min(hy0, hy);
+          hx1 = base::Max(hx1, hx);
+          hy1 = base::Max(hy1, hy);
           hi_a_sum += ch[3];
-          hi_a_min = std::min(hi_a_min, ch[3]);
-          hi_a_max = std::max(hi_a_max, ch[3]);
+          hi_a_min = base::Min(hi_a_min, ch[3]);
+          hi_a_max = base::Max(hi_a_max, ch[3]);
         }
         lums.push_back(lum);
         // Eight buckets, not four: the coarse form showed a "gap" that four
@@ -552,13 +557,13 @@ bool ReportRtContents(FrameSlot& owner) {
           for (u32 k = 0; k < 4; k++)
             c4[k] = half_val((u32)t8[2 * k] |
                              ((u32)t8[2 * k + 1] << 8));
-          const float l = std::max({c4[0], c4[1], c4[2]});
+          const float l = base::Max({c4[0], c4[1], c4[2]});
           u8 px3[3];
           if (l > 100.f) {
             px3[0] = 255; px3[1] = 0; px3[2] = 0;
           } else {
             const float g = l <= 0.f ? 0.f : std::log10(1.f + l * 9.f);
-            const int v8 = (int)(std::min(1.f, g) * 255.f);
+            const int v8 = (int)(base::Min(1.f, g) * 255.f);
             px3[0] = px3[1] = px3[2] = (u8)v8;
           }
           std::fwrite(px3, 1, 3, rf2);
@@ -595,13 +600,13 @@ bool ReportRtContents(FrameSlot& owner) {
               for (u32 k = 0; k < 4; k++)
                 c4[k] = half_val((u32)t8[2 * k] |
                                  ((u32)t8[2 * k + 1] << 8));
-              const float l = std::max({c4[0], c4[1], c4[2]});
-              fmax = std::max(fmax, l);
+              const float l = base::Max({c4[0], c4[1], c4[2]});
+              fmax = base::Max(fmax, l);
               if (l > 100.f) {
                 fhi++;
                 fa_sum += c4[3];
-                fa_min = std::min(fa_min, c4[3]);
-                fa_max = std::max(fa_max, c4[3]);
+                fa_min = base::Min(fa_min, c4[3]);
+                fa_max = base::Max(fa_max, c4[3]);
                 if (c4[3] < 0.89990f)
                   below++;
               }
@@ -638,14 +643,14 @@ bool ReportRtContents(FrameSlot& owner) {
                   for (u32 k = 0; k < 4; k++)
                     c4[k] = half_val((u32)t8[2 * k] |
                                      ((u32)t8[2 * k + 1] << 8));
-                  const float l = std::max({c4[0], c4[1], c4[2]});
+                  const float l = base::Max({c4[0], c4[1], c4[2]});
                   u8 px3[3];
                   if (l > 100.f) {  // runaway: flag red
                     px3[0] = 255; px3[1] = 0; px3[2] = 0;
                   } else {  // else log-scaled grey so structure is visible
                     const float g = l <= 0.f ? 0.f
                                              : std::log10(1.f + l * 9.f);
-                    const int v8 = (int)(std::min(1.f, g) * 255.f);
+                    const int v8 = (int)(base::Min(1.f, g) * 255.f);
                     px3[0] = px3[1] = px3[2] = (u8)v8;
                   }
                   std::fwrite(px3, 1, 3, pf);
@@ -680,7 +685,7 @@ bool ReportRtContents(FrameSlot& owner) {
           guest_nz += gp[k] != 0;
       }
     }
-    std::sort(lums.begin(), lums.end());
+    base::Sort(lums.begin(), lums.end());
     const auto pct = [&](double q) -> float {
       if (lums.empty())
         return 0.f;
@@ -717,14 +722,14 @@ bool ReportRtContents(FrameSlot& owner) {
     // NaN-poisoned half-float target. Guest shader addresses differ from run to
     // run, so the shader has to be named in the same run that observed the NaN.
     if (kNanDis && nan_half && rt.last_ps) {
-      static std::vector<u64> seen;
-      if (std::find(seen.begin(), seen.end(), rt.last_ps) == seen.end()) {
+      static base::Vector<u64> seen;
+      if (base::Find(seen.begin(), seen.end(), rt.last_ps) == seen.end()) {
         seen.push_back(rt.last_ps);
         gcn::DisassembleAt(rt.last_ps, "nan.PS");
       }
     }
     if (kGpuRtdump) {
-      std::vector<u8> bgra(n * 4);
+      base::Vector<u8> bgra(n * 4);
       const auto* src = static_cast<const u8*>(g_frame.readback_map);
       const u32 src_bytes = FormatBytes(rt.fmt);
       for (u64 i = 0; i < n; i++)
@@ -755,7 +760,7 @@ bool ReportRtContents(FrameSlot& owner) {
   // Score parked variants too: the live one at a base is whichever geometry
   // ran last, which is routinely the small post-process pass rather than the
   // full-resolution one the scene was drawn into.
-  std::vector<std::pair<u64, DepthTarget*>> depth_list;
+  base::Vector<base::Pair<u64, DepthTarget*>> depth_list;
   for (auto& kv : g_depths)
     depth_list.emplace_back(kv.first, &kv.second);
   for (auto& kv : g_depth_variants)
@@ -765,8 +770,8 @@ bool ReportRtContents(FrameSlot& owner) {
     depth_list.clear();
   else if (kGpuDbStat != 1)
     depth_list.erase(
-        std::remove_if(depth_list.begin(), depth_list.end(),
-                       [](const std::pair<u64, DepthTarget*>& e) {
+        base::RemoveIf(depth_list.begin(), depth_list.end(),
+                       [](const base::Pair<u64, DepthTarget*>& e) {
                          return e.first != (u64)kGpuDbStat;
                        }),
         depth_list.end());
@@ -809,8 +814,8 @@ bool ReportRtContents(FrameSlot& owner) {
       const float v = z[i];
       zero += v == 0.f;
       one += v == 1.f;
-      lo = std::min(lo, v);
-      hi = std::max(hi, v);
+      lo = base::Min(lo, v);
+      hi = base::Max(hi, v);
       sum += v;
     }
     BASE_LOGI("dbstat",
@@ -822,11 +827,11 @@ bool ReportRtContents(FrameSlot& owner) {
     // number that fits several different pictures, and which one it is
     // decides where to look next.
     if (kGpuRtdump && hi > lo) {
-      std::vector<u8> bgra(n * 4);
+      base::Vector<u8> bgra(n * 4);
       for (u64 i = 0; i < n; i++) {
         const float t = (z[i] - lo) / (hi - lo);
         const u8 g = static_cast<u8>(
-            std::min(255.f, std::max(0.f, t * 255.f)));
+            base::Min(255.f, base::Max(0.f, t * 255.f)));
         bgra[i * 4 + 0] = g;
         bgra[i * 4 + 1] = g;
         bgra[i * 4 + 2] = g;
@@ -957,10 +962,10 @@ void BeginFrame(Renderer& renderer) {
     const u64 used_ubo = g_ring.ubo_offset - prev_ubo;
     const u64 used_sbo =
         g_ring.sbo_map ? g_ring.sbo_offset - prev_sbo : 0;
-    peak_vb = std::max(peak_vb, used_vb);
-    peak_ib = std::max(peak_ib, used_ib);
-    peak_ubo = std::max(peak_ubo, used_ubo);
-    peak_sbo = std::max(peak_sbo, used_sbo);
+    peak_vb = base::Max(peak_vb, used_vb);
+    peak_ib = base::Max(peak_ib, used_ib);
+    peak_ubo = base::Max(peak_ubo, used_ubo);
+    peak_sbo = base::Max(peak_sbo, used_sbo);
     if (g_frame.num % 10 == 0)
       BASE_LOGI("ringhwm",
                 "f{} draws={} vb={}K/{}K(peak {}K) ib={}K/{}K(peak {}K) "
@@ -1318,7 +1323,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // (which samples that upright content correctly), so the presented image
   // needs no flip. (The old default Y-flip existed only to undo the heuristic
   // composite's upside-down output.)
-  static std::vector<u8> flipped;
+  static base::Vector<u8> flipped;
   auto* rb = fin.readback ? fin.readback->mapped() : nullptr;
   // DELTA_GPU_RBTRACE: whether the bytes this present is about to show are
   // actually non-zero, and which slot's mapping they came from. "A black window"
@@ -1541,7 +1546,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
       if (gfx::ensure("prosperity", fin.w, fin.h) && gfx::pumpEvents())
         gfx::present(pixels, fin.w, fin.h, fin.w * 4, pixel_fmt);
     } else if (pixels == flipped.data()) {
-      renderer.state->presenter.Present(std::move(flipped), fin.w, fin.h,
+      renderer.state->presenter.Present(base::move(flipped), fin.w, fin.h,
                                         pixel_fmt);
     } else {
       renderer.state->presenter.Present(pixels, fin.w, fin.h, pixel_fmt);

@@ -3,15 +3,18 @@
 // taken from:
 // https://github.com/xenia-project/xenia/blob/master/src/xenia/kernel/xobject.h
 
-#include <memory>
+#include <base/algorithm.h>
+#include <base/memory/cxx_lifetime.h>
+#include <base/memory/move.h>
+#include <base/meta/traits.h>
 
 namespace utl {
 template <typename T> class object_ref {
 public:
   object_ref() noexcept : value_(nullptr) {}
-  object_ref(std::nullptr_t) noexcept // NOLINT(runtime/explicit)
+  object_ref(base::nullptr_t) noexcept // NOLINT(runtime/explicit)
       : value_(nullptr) {}
-  object_ref &operator=(std::nullptr_t) noexcept {
+  object_ref &operator=(base::nullptr_t) noexcept {
     reset();
     return (*this);
   }
@@ -24,8 +27,8 @@ public:
     if (value_)
       value_->retain();
   }
-  template <class V, class = typename std::enable_if<
-                         std::is_convertible<V *, T *>::value, void>::type>
+  template <class V>
+    requires(base::ConvertibleTo<V *, T *>)
   object_ref(const object_ref<V> &right) noexcept {
     reset(right.get());
     if (value_)
@@ -34,11 +37,11 @@ public:
 
   object_ref(object_ref &&right) noexcept : value_(right.release()) {}
   object_ref &operator=(object_ref &&right) noexcept {
-    object_ref(std::move(right)).swap(*this);
+    object_ref(base::move(right)).swap(*this);
     return (*this);
   }
   template <typename V> object_ref &operator=(object_ref<V> &&right) noexcept {
-    object_ref(std::move(right)).swap(*this);
+    object_ref(base::move(right)).swap(*this);
     return (*this);
   }
 
@@ -52,7 +55,7 @@ public:
     return (*this);
   }
 
-  void swap(object_ref &right) noexcept { std::swap(value_, right.value_); }
+  void swap(object_ref &right) noexcept { base::Swap(value_, right.value_); }
 
   ~object_ref() noexcept {
     if (value_) {
@@ -61,13 +64,9 @@ public:
     }
   }
 
-  typename std::add_lvalue_reference<T>::type operator*() const {
-    return (*get());
-  }
+  T &operator*() const { return *get(); }
 
-  T *operator->() const noexcept {
-    return std::pointer_traits<T *>::pointer_to(**this);
-  }
+  T *operator->() const noexcept { return get(); }
 
   T *get() const noexcept { return value_; }
 
@@ -93,9 +92,9 @@ private:
   T *value_ = nullptr;
 };
 
-template <class _Ty, class... _Types,
-          std::enable_if_t<!std::is_array_v<_Ty>, int> = 0>
+template <class _Ty, class... _Types>
+  requires(!base::IsArray<_Ty>)
 object_ref<_Ty> make_ref(_Types &&... _Args) {
-  return object_ref<_Ty>(new _Ty(std::forward<_Types>(_Args)...));
+  return object_ref<_Ty>(new _Ty(base::forward<_Types>(_Args)...));
 }
 }

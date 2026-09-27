@@ -8,18 +8,19 @@
  */
 #ifndef __ANDROID__
 
-#include <algorithm>
 #include "base/arch.h"
 #include <cfloat>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
-#include <mutex>
 #include <unistd.h>
 
 #include "imgui.h"
 #include "overlay.h"
 #include "overlay_log.h"
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace gfx {
 namespace {
@@ -27,7 +28,7 @@ namespace {
 bool g_visible = true;
 bool g_inited = false;
 
-std::mutex g_perfMtx;
+base::Mutex g_perfMtx;
 float g_fps = 0, g_gpuMs = 0, g_frameMs = 0;
 
 struct Row {
@@ -62,13 +63,13 @@ void buildLegend() {
   const float pad = 8.0f, gap = fs, lh = fs + 3.0f;
   float keyW = 0.0f;
   for (auto &r : kRows)
-    keyW = std::max(keyW, font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.key).x);
+    keyW = base::Max(keyW, font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.key).x);
   float bodyW = 0.0f;
   for (auto &r : kRows)
-    bodyW = std::max(bodyW, keyW + gap + font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.button).x);
+    bodyW = base::Max(bodyW, keyW + gap + font->CalcTextSizeA(fs, FLT_MAX, 0.0f, r.button).x);
   float titleW = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, kTitle).x;
   const ImVec2 o(10.0f, 10.0f);
-  float panelW = std::max(titleW, bodyW) + pad * 2.0f;
+  float panelW = base::Max(titleW, bodyW) + pad * 2.0f;
   float panelH = pad * 2.0f + lh + 4.0f + lh * IM_ARRAYSIZE(kRows);
   panelBg(dl, o, ImVec2(o.x + panelW, o.y + panelH));
   float x = o.x + pad, y = o.y + pad;
@@ -95,7 +96,7 @@ void overlayEnsureImGui() {
 }
 
 void overlaySetPerf(float fps, float gpuMs, float frameMs) {
-  std::lock_guard<std::mutex> lk(g_perfMtx);
+  base::LockGuard<base::Mutex> lk(g_perfMtx);
   g_fps = fps;
   g_gpuMs = gpuMs;
   g_frameMs = frameMs;

@@ -8,12 +8,9 @@
 #include "gpu/ps5/draw_state.h"
 #include "base/arch.h"
 
-#include <algorithm>
 #include <cstring>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
+#include <base/containers/array.h>
 #include <base/logging.h>
 #include <utl/options.h>
 
@@ -25,6 +22,11 @@
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/shader_cache.h"
 #include "gpu/gpu_perf.h"
+#include <base/containers/map.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
@@ -47,7 +49,7 @@ namespace {
 constexpr u64 kMaxShaderBytes = 4096 * sizeof(u32);
 constexpr u32 kMaxAttrs = 8;
 
-using ResolvedBuffers = std::unordered_map<u32, rdna::BufferResource>;
+using ResolvedBuffers = base::HashMap<u32, rdna::BufferResource>;
 
 // --- render-target dimensions ----------------------------------------------
 
@@ -93,7 +95,7 @@ u32 FbHeight(const Regs& regs) {
 
 u32 UserSgprCount(u32 rsrc2) {
   const u32 count = ((rsrc2 >> 1) & 0x1F) | (((rsrc2 >> 27) & 1) << 5);
-  return std::min(count, 32u);
+  return base::Min(count, 32u);
 }
 
 // The T#'s four DST_SEL channel selects, packed 3 bits each for the renderer's
@@ -490,7 +492,7 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
       auto& bind = d.vbufs[sel];
       if (vb.base < reinterpret_cast<u64>(bind.data))
         bind.data = reinterpret_cast<const void*>(vb.base);
-      bind.num_records = std::min(bind.num_records, vb.num_records);
+      bind.num_records = base::Min(bind.num_records, vb.num_records);
     }
     attr_binding[i] = static_cast<u32>(sel);
   }
@@ -522,11 +524,11 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
   d.vertex_stride = d.vbufs[0].stride;
   u32 count = UINT32_MAX;
   for (u32 j = 0; j < d.num_vbufs; j++)
-    count = std::min(count, d.vbufs[j].num_records);
+    count = base::Min(count, d.vbufs[j].num_records);
   d.vertex_count = count;
 }
 
-void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
+void ResolveCbufferBindings(const base::Vector<gcn::ShaderCbuf>& cbufs,
                             const ResolvedBuffers& resolved,
                             bool vertex_stage,
                             u64 stage_addr,
@@ -534,7 +536,7 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
                             const ResolvedBuffers* gs_resolved = nullptr) {
   u32 planned = 0, replayed = 0, mapped = 0;
   for (const gcn::ShaderCbuf& cb : cbufs) {
-    if (cb.binding >= std::size(d.cbufs))
+    if (cb.binding >= base::ArraySize(d.cbufs))
       continue;
     planned++;
     const auto& resources = cb.from_gs && gs_resolved ? *gs_resolved : resolved;
@@ -553,7 +555,7 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
       continue;
     mapped++;
     d.cbufs[cb.binding] = {base, static_cast<u32>(bytes)};
-    d.num_cbufs = std::max(d.num_cbufs, cb.binding + 1);
+    d.num_cbufs = base::Max(d.num_cbufs, cb.binding + 1);
     if (vertex_stage && !cb.first_dword && bytes >= sizeof(d.mvp)) {
       d.cbuf_base = base;
       d.cbuf_size = static_cast<u32>(bytes);
@@ -561,7 +563,7 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
     }
   }
   if (kCbResolve && planned) {
-    static std::unordered_set<u64> seen;
+    static base::HashSet<u64> seen;
     const u64 key = stage_addr * 2 + vertex_stage;
     if (seen.size() < 512 && seen.insert(key).second)
       BASE_LOGI("cbresolve", "{} {:#x} planned={} replayed={} mapped={}",
@@ -572,7 +574,7 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
 
 // Raw MUBUF buffers the shader indexes itself (set 2). Same per-pc descriptor
 // replay as the cbuffers.
-void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
+void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
                        const ResolvedBuffers& resolved,
                        const u32* user_data,
                        u32 user_sgprs,
@@ -607,7 +609,7 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
       if (!ok)
         continue;
       d.bufs[sb.binding] = {base, kRawBufWindow};
-      d.num_bufs = std::max(d.num_bufs, sb.binding + 1);
+      d.num_bufs = base::Max(d.num_bufs, sb.binding + 1);
       continue;
     }
     rdna::VBuffer vb{};
@@ -626,7 +628,7 @@ void ResolveRawBuffers(const std::vector<gcn::ShaderBuffer>& buffers,
     if (!ok)
       continue;
     d.bufs[sb.binding] = {vb.base, static_cast<u32>(bytes)};
-    d.num_bufs = std::max(d.num_bufs, sb.binding + 1);
+    d.num_bufs = base::Max(d.num_bufs, sb.binding + 1);
   }
 }
 
@@ -676,7 +678,7 @@ void ResolvePsTextures(u64 ps_addr,
   constexpr size_t kMax = render::DrawInfo::kMaxDrawTextures;
   for (size_t i = 0; i < texs.size() && i < kMax; i++)
     FillDrawTex(static_cast<u32>(i), texs[i], d);
-  d.num_texs = static_cast<u32>(std::min<size_t>(texs.size(), kMax));
+  d.num_texs = static_cast<u32>(base::Min<size_t>(texs.size(), kMax));
   TraceDrawTextures(d);
 }
 
@@ -717,7 +719,7 @@ void FillDrawTex(u32 slot, const gcn::TImage& s, render::DrawInfo& d) {
 // back a 2D array (Astro Bot's 240x135x64 froxel volume does exactly this),
 // the module wins: its declaration is the one the pipeline was built against,
 // and a 2D array and a 3D image of the same shape occupy the same memory.
-void ReconcileTextureDims(const std::vector<gcn::ShaderTex>& plan,
+void ReconcileTextureDims(const base::Vector<gcn::ShaderTex>& plan,
                           u32 first_slot,
                           render::DrawInfo& d) {
   for (const gcn::ShaderTex& st : plan) {
@@ -825,15 +827,15 @@ void ResolveRecompiledShaders(const Regs& regs,
     // Point primitives are independent, and NGG programs already handle a
     // partial final group. Use smaller input batches to fit Vulkan's guaranteed
     // 128 mesh invocations; DrawMeshTasks still covers every input primitive.
-    const u32 per_input = std::max({1u, vertices_per_input, primitives_per_input});
-    const u32 inputs = std::min((regs[mmVGT_GS_ONCHIP_CNTL] >> 11) & 0x7ff,
+    const u32 per_input = base::Max({1u, vertices_per_input, primitives_per_input});
+    const u32 inputs = base::Min((regs[mmVGT_GS_ONCHIP_CNTL] >> 11) & 0x7ff,
                                 128u / per_input);
     const u32 vertices = inputs * vertices_per_input;
     const u32 primitives = inputs * primitives_per_input;
     const u32 lds = ((regs[mmSPI_SHADER_PGM_RSRC2_GS] >> 19) & 0xff) * 128;
     if (inputs && vertices && primitives && lds &&
         vertices <= 256 && primitives <= 256) {
-      const u32 threads = (std::max({inputs, vertices, primitives}) + 63) & ~63u;
+      const u32 threads = (base::Max({inputs, vertices, primitives}) + 63) & ~63u;
       ngg = {split_ngg ? reinterpret_cast<const u32*>(binding.gs_addr) : es_code,
                threads, inputs, vertices, primitives, lds, gs_user_data_addr,
                split_ngg};

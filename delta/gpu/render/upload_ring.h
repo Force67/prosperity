@@ -10,10 +10,10 @@
 
 #include "base/arch.h"
 
-#include <vector>
 
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/rhi/device.h"
+#include <base/containers/vector.h>
 
 namespace gpu::render {
 
@@ -121,7 +121,7 @@ struct UploadRings {
   u32 sbo_count = gpu::gcn::kMinGfxBuffers;
   u32 sbo_align = 256;
   u64 sbo_stride = kRawBufWindow;
-  std::vector<u32> sbo_written;
+  base::Vector<u32> sbo_written;
   rhi::BindGroupLayout* sbo_layout = nullptr;
   rhi::BindGroup* sbo_set = nullptr;
 
@@ -136,7 +136,7 @@ struct UploadRings {
 
   // Texture uploads are recorded into the active frame command buffer. Each
   // frame slot owns its blocks so an in-flight transfer is never overwritten.
-  std::vector<TextureUploadBlock> texture_uploads[2];
+  base::Vector<TextureUploadBlock> texture_uploads[2];
 };
 
 extern UploadRings& g_ring;

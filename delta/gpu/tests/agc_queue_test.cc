@@ -1,8 +1,4 @@
-#include <chrono>
-#include <array>
 #include <cstring>
-#include <thread>
-#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -10,22 +6,25 @@
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/draw_state.h"
 #include "gpu/ps4/pm4.h"
+#include <base/threading/thread.h>
+#include <base/containers/array.h>
+#include <base/containers/vector.h>
 
 // Exercise the real packet walker with a backend that records dispatch state.
 // Queue scheduling must work independently of a host graphics device.
 namespace {
-std::vector<u32> dispatch_values;
-std::vector<std::array<u32, 3>> dispatch_groups;
-std::vector<u32> draw_instances;
-std::vector<u32> draw_index_types;
-std::array<u8, 65536> gds{};
+base::Vector<u32> dispatch_values;
+base::Vector<base::Array<u32, 3>> dispatch_groups;
+base::Vector<u32> draw_instances;
+base::Vector<u32> draw_index_types;
+base::Array<u8, 65536> gds{};
 u64 pending_address = 0;
-std::array<u32, 3> pending_groups{};
+base::Array<u32, 3> pending_groups{};
 bool flush_succeeds = true;
 bool accept_draw = false;
 u64 presented = 0;
 constexpr u64 draw_target = 0x500000000;
-using Words = std::vector<u32>;
+using Words = base::Vector<u32>;
 
 void Packet(Words& words, u32 op, std::initializer_list<u32> body) {
   words.push_back(0xc0000000u | ((body.size() - 1) << 16) | (op << 8));
@@ -84,7 +83,7 @@ TEST(AgcQueue, RegistersSurviveAnotherQueueRunningWhileSuspended) {
   EXPECT_EQ(Submit(b, 104), b.size());
   ready = 1;
   EXPECT_EQ(Submit(ring, 103), ring.size());
-  EXPECT_EQ(dispatch_values, (std::vector<u32>{22, 11}));
+  EXPECT_EQ(dispatch_values, (base::Vector<u32>{22, 11}));
 }
 
 TEST(AgcQueue, ElapsedTimeDoesNotCompleteAWait) {
@@ -92,7 +91,7 @@ TEST(AgcQueue, ElapsedTimeDoesNotCompleteAWait) {
   Words w;
   Wait(w, &ready); Add(w, &count);
   EXPECT_EQ(Submit(w, 105), 0u);
-  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  base::SleepForMilliseconds(300);
   EXPECT_EQ(Submit(w, 105), 0u);
   EXPECT_EQ(count, 0u);
   ready = 1;
@@ -108,7 +107,7 @@ TEST(AgcQueue, MaskAppliesToMemoryAndNotReference) {
 }
 
 TEST(AgcQueue, IndirectDispatchReadsCompletedGpuArguments) {
-  std::array<u32, 3> args{};
+  base::Array<u32, 3> args{};
   pending_address = reinterpret_cast<u64>(args.data());
   pending_groups = {3, 2, 1};
   dispatch_groups.clear();
@@ -121,7 +120,7 @@ TEST(AgcQueue, IndirectDispatchReadsCompletedGpuArguments) {
 }
 
 TEST(AgcQueue, IndirectOffsetDispatchReadsCompletedGpuArguments) {
-  std::array<u32, 4> args{};
+  base::Array<u32, 4> args{};
   pending_address = reinterpret_cast<u64>(&args[1]);
   pending_groups = {4, 5, 6};
   dispatch_groups.clear();
@@ -136,7 +135,7 @@ TEST(AgcQueue, IndirectOffsetDispatchReadsCompletedGpuArguments) {
 }
 
 TEST(AgcQueue, FailedArgumentWritebackDoesNotDispatchStaleDimensions) {
-  std::array<u32, 3> args{1, 1, 1};
+  base::Array<u32, 3> args{1, 1, 1};
   dispatch_groups.clear();
   flush_succeeds = false;
   Words w;
@@ -159,7 +158,7 @@ TEST(AgcQueue, PresentsTheRequestedBufferRatherThanTheLastDrawTarget) {
 }
 
 TEST(AgcQueue, ZeroInstanceIndirectDrawDoesNotReusePreviousInstanceCount) {
-  std::array<u32, 4> args{3, 0, 0, 0};
+  base::Array<u32, 4> args{3, 0, 0, 0};
   draw_instances.clear();
   Words w;
   Packet(w, 0x11, {1, Lo(args.data()), Hi(args.data())});
@@ -169,7 +168,7 @@ TEST(AgcQueue, ZeroInstanceIndirectDrawDoesNotReusePreviousInstanceCount) {
   EXPECT_TRUE(draw_instances.empty());
   args[1] = 2;
   EXPECT_EQ(Submit(w, 111), w.size());
-  EXPECT_EQ(draw_instances, (std::vector<u32>{2}));
+  EXPECT_EQ(draw_instances, (base::Vector<u32>{2}));
 }
 
 TEST(AgcQueue, IndexTypePacketsAndRegisterWritesShareState) {
@@ -184,11 +183,11 @@ TEST(AgcQueue, IndexTypePacketsAndRegisterWritesShareState) {
   Packet(w, 0x2a, {2});  // INDEX_TYPE: 8-bit
   Packet(w, 0x2d, {3, 0});
   EXPECT_EQ(Submit(w, 112), w.size());
-  EXPECT_EQ(draw_index_types, (std::vector<u32>{0, 1, 2}));
+  EXPECT_EQ(draw_index_types, (base::Vector<u32>{0, 1, 2}));
 }
 
 TEST(AgcQueue, DmaDataCopiesAndClearsGdsCounters) {
-  std::array<u32, 2> input{17, 29}, output{};
+  base::Array<u32, 2> input{17, 29}, output{};
   Words w;
   Packet(w, 0x50, {1u << 20, Lo(input.data()), Hi(input.data()),
                     0xc70, 0, 8});
@@ -199,7 +198,7 @@ TEST(AgcQueue, DmaDataCopiesAndClearsGdsCounters) {
   Packet(w, 0x50, {0x46106000, 0, 0, 0xc70, 0, 4});
   Packet(w, 0x50, {0x24306000, 0xc70, 0, Lo(output.data()), Hi(output.data()), 8});
   EXPECT_EQ(Submit(w, 113), w.size());
-  EXPECT_EQ(output, (std::array<u32, 2>{0, 29}));
+  EXPECT_EQ(output, (base::Array<u32, 2>{0, 29}));
 }
 }  // namespace
 

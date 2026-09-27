@@ -10,13 +10,18 @@
 #include <base/logging.h>
 #include <logger/logger.h>
 
-#include <set>
 #include <utl/options.h>
 
 #include "formats/archive_object.h"
 #include "formats/pkg_object.h"
 #include "formats/ufs2_object.h"
 #include "formats/title_metadata.h"
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/memory/move.h>
+#include <base/memory/shared_pointer.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
 
 namespace {
 DELTA_OPTION(const char *, kPkgLs, "DELTA_PKG_LS", nullptr);
@@ -39,32 +44,32 @@ class PkgProvider : public krnl::vfs::VirtualProvider {
 public:
   explicit PkgProvider(const base::String &path) : fs_(path) {
     if (const char *sub = kPkgLs) {
-      std::vector<std::string> all;
+      base::Vector<base::String> all;
       fs_.paths(all);
       for (const auto &p : all)
-        if (sub[0] == '1' || p.find(sub) != std::string::npos) {
+        if (sub[0] == '1' || p.find(sub) != base::String::npos) {
           const auto *n = fs_.find(p.c_str());
           BASE_LOGI("pkg", "{:12}  {}", n ? (long long)n->size : -1LL,
                     p.c_str());
         }
     }
     if (const char *wantEnv = kPkgDump) {
-      std::string list(wantEnv);
+      base::String list(wantEnv);
       size_t pos = 0;
       while (pos <= list.size()) {
         size_t comma = list.find(',', pos);
-        std::string want = list.substr(pos, comma == std::string::npos
-                                                ? std::string::npos
+        base::String want = list.substr(pos, comma == base::String::npos
+                                                ? base::String::npos
                                                 : comma - pos);
-        pos = comma == std::string::npos ? list.size() + 1 : comma + 1;
+        pos = comma == base::String::npos ? list.size() + 1 : comma + 1;
         if (want.empty())
           continue;
         if (const auto *node = fs_.find(want.c_str())) {
-          std::vector<u8> buf(node->size);
+          base::Vector<u8> buf(node->size);
           i64 n = fs_.read(*node, buf.data(), 0, node->size);
           const char *base = std::strrchr(want.c_str(), '/');
-          std::string out =
-              std::string("/tmp/") + (base ? base + 1 : want.c_str());
+          base::String out =
+              base::String("/tmp/") + (base ? base + 1 : want.c_str());
           if (FILE *f = std::fopen(out.c_str(), "wb")) {
             std::fwrite(buf.data(), 1, n > 0 ? n : 0, f);
             std::fclose(f);
@@ -83,29 +88,29 @@ public:
   // lives in the PKG header, outside the encrypted PFS, so it reads even for
   // titles (e.g. Isaac) whose only param.sfo copy is there and never appears at
   // /app0/sce_sys. Returns "" when unavailable.
-  std::string titleId() {
-    std::vector<u8> sfo;
+  base::String titleId() {
+    base::Vector<u8> sfo;
     if (fs_.readPkgEntry(0x1000, sfo) > 0)
       return sfoGet(sfo.data(), sfo.size(), "TITLE_ID");
     return {};
   }
 
-  std::string title() {
-    std::vector<u8> sfo;
+  base::String title() {
+    base::Vector<u8> sfo;
     if (fs_.readPkgEntry(0x1000, sfo) > 0)
       return sfoGet(sfo.data(), sfo.size(), "TITLE");
     return {};
   }
 
   u32 attributes() {
-    std::vector<u8> sfo;
+    base::Vector<u8> sfo;
     if (fs_.readPkgEntry(0x1000, sfo) > 0)
       return sfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
     return 0;
   }
 
-  std::vector<u8> icon() {
-    std::vector<u8> png;
+  base::Vector<u8> icon() {
+    base::Vector<u8> png;
     fs_.readPkgEntry(0x1200, png);
     return png;
   }
@@ -116,7 +121,7 @@ public:
   void cacheManifests() {
     if (!kHdrFill)
       return;
-    std::vector<std::string> all;
+    base::Vector<base::String> all;
     fs_.paths(all);
     for (const auto &p : all) {
       const char *suf = ".manifest.bin";
@@ -126,23 +131,23 @@ public:
       const auto *node = fs_.find(p.c_str());
       if (!node)
         continue;
-      std::vector<u8> buf(node->size);
+      base::Vector<u8> buf(node->size);
       i64 n = fs_.read(*node, buf.data(), 0, node->size);
       if (n <= 0)
         continue;
       buf.resize(static_cast<size_t>(n));
       size_t start = (p[0] == '/') ? 1 : 0;
-      std::string key = p.substr(start, p.size() - start - sl);
-      krnl::vfs::cacheFile(key, std::move(buf));
+      base::String key = p.substr(start, p.size() - start - sl);
+      krnl::vfs::cacheFile(key, base::move(buf));
     }
   }
 
-  std::unique_ptr<krnl::vfs::VirtualFile> open(const char *rel) override {
+  base::UniquePointer<krnl::vfs::VirtualFile> open(const char *rel) override {
     maybeDump();
     const auto *node = fs_.find(rel);
     if (!node)
       return nullptr;
-    return std::make_unique<PkgFile>(&fs_, *node);
+    return base::MakeUnique<PkgFile>(&fs_, *node);
   }
   void maybeDump() {
     static bool done = false;
@@ -151,10 +156,10 @@ public:
       return;
     done = true;
     if (const auto *node = fs_.find(want)) {
-      std::vector<u8> buf(node->size);
+      base::Vector<u8> buf(node->size);
       i64 n = fs_.read(*node, buf.data(), 0, node->size);
       const char *base = std::strrchr(want, '/');
-      std::string out = std::string("/tmp/") + (base ? base + 1 : want);
+      base::String out = base::String("/tmp/") + (base ? base + 1 : want);
       if (FILE *f = std::fopen(out.c_str(), "wb")) {
         std::fwrite(buf.data(), 1, n > 0 ? n : 0, f);
         std::fclose(f);
@@ -170,26 +175,26 @@ public:
     size = static_cast<i64>(node->size);
     return true;
   }
-  bool list(const char *rel, std::vector<krnl::vfs::DirEntry> &out) override {
+  bool list(const char *rel, base::Vector<krnl::vfs::DirEntry> &out) override {
     // Build "prefix/" so we match only paths inside this directory. Root ("" or
     // "/") -> "/". The pkg stores absolute paths with a leading '/'.
-    std::string prefix(rel ? rel : "");
+    base::String prefix(rel ? rel : "");
     while (!prefix.empty() && prefix.back() == '/')
       prefix.pop_back();
     prefix += "/";
     if (prefix.empty() || prefix[0] != '/')
-      prefix.insert(prefix.begin(), '/');
+      prefix.insert(0, 1, '/');
 
-    std::vector<std::string> all;
+    base::Vector<base::String> all;
     fs_.paths(all);
-    std::set<std::string> seen;
+    base::Set<base::String> seen;
     for (const auto &p : all) {
       if (p.size() <= prefix.size() || p.compare(0, prefix.size(), prefix) != 0)
         continue;
-      std::string rest = p.substr(prefix.size());
+      base::String rest = p.substr(prefix.size());
       auto slash = rest.find('/');
-      bool isDir = slash != std::string::npos;
-      std::string child = isDir ? rest.substr(0, slash) : rest;
+      bool isDir = slash != base::String::npos;
+      base::String child = isDir ? rest.substr(0, slash) : rest;
       if (!child.empty() && seen.insert(child).second)
         out.push_back({child, isDir});
     }
@@ -218,11 +223,11 @@ public:
   explicit Ufs2Provider(const base::String &path) : fs_(path) {}
   bool valid() const { return fs_.valid(); }
 
-  std::unique_ptr<krnl::vfs::VirtualFile> open(const char *rel) override {
+  base::UniquePointer<krnl::vfs::VirtualFile> open(const char *rel) override {
     const auto *node = fs_.find(rel);
     if (!node)
       return nullptr;
-    return std::make_unique<Ufs2File>(&fs_, *node);
+    return base::MakeUnique<Ufs2File>(&fs_, *node);
   }
   bool stat(const char *rel, i64 &size) override {
     const auto *node = fs_.find(rel);
@@ -231,23 +236,23 @@ public:
     size = static_cast<i64>(node->size);
     return true;
   }
-  bool list(const char *rel, std::vector<krnl::vfs::DirEntry> &out) override {
-    std::string prefix(rel ? rel : "");
+  bool list(const char *rel, base::Vector<krnl::vfs::DirEntry> &out) override {
+    base::String prefix(rel ? rel : "");
     while (!prefix.empty() && prefix.back() == '/')
       prefix.pop_back();
     prefix += "/";
     if (prefix[0] != '/')
-      prefix.insert(prefix.begin(), '/');
-    std::vector<std::string> all;
+      prefix.insert(0, 1, '/');
+    base::Vector<base::String> all;
     fs_.paths(all);
-    std::set<std::string> seen;
+    base::Set<base::String> seen;
     for (const auto &p : all) {
       if (p.size() <= prefix.size() || p.compare(0, prefix.size(), prefix) != 0)
         continue;
-      std::string rest = p.substr(prefix.size());
+      base::String rest = p.substr(prefix.size());
       auto slash = rest.find('/');
-      bool isDir = slash != std::string::npos;
-      std::string child = isDir ? rest.substr(0, slash) : rest;
+      bool isDir = slash != base::String::npos;
+      base::String child = isDir ? rest.substr(0, slash) : rest;
       if (!child.empty() && seen.insert(child).second)
         out.push_back({child, isDir});
     }
@@ -259,15 +264,15 @@ public:
 
   // The title's id (e.g. "PPSA03311"). PS5 backups carry sce_sys/param.json
   // instead of the PS4 param.sfo; pull the "titleId" string out of it.
-  std::string titleId() { return paramJsonField("titleId"); }
+  base::String titleId() { return paramJsonField("titleId"); }
 
-  std::string title() { return jsonGetTitleName(paramJson()); }
+  base::String title() { return jsonGetTitleName(paramJson()); }
 
-  std::vector<u8> icon() {
+  base::Vector<u8> icon() {
     const auto *node = fs_.find("/sce_sys/icon0.png");
     if (!node || node->size > kMaxIconSize)
       return {};
-    std::vector<u8> png(node->size);
+    base::Vector<u8> png(node->size);
     const i64 read = fs_.read(*node, png.data(), 0, node->size);
     if (read <= 0)
       return {};
@@ -280,17 +285,17 @@ public:
   u32 sdkVersion() { return parseSdkVersion(paramJsonField("sdkVersion")); }
 
 private:
-  std::string paramJson() {
+  base::String paramJson() {
     const auto *node = fs_.find("/sce_sys/param.json");
     if (!node || node->size > (1u << 20))
       return {};
-    std::string js(node->size, '\0');
+    base::String js(node->size, '\0');
     if (fs_.read(*node, js.data(), 0, static_cast<i64>(js.size())) <= 0)
       return {};
     return js;
   }
 
-  std::string paramJsonField(const char *key) {
+  base::String paramJsonField(const char *key) {
     return jsonGetString(paramJson(), key);
   }
 
@@ -317,11 +322,11 @@ public:
   explicit ArchiveProvider(const base::String &path) : fs_(path) {}
   bool valid() const { return fs_.valid(); }
 
-  std::unique_ptr<krnl::vfs::VirtualFile> open(const char *rel) override {
+  base::UniquePointer<krnl::vfs::VirtualFile> open(const char *rel) override {
     const auto *node = fs_.find(rel);
     if (!node)
       return nullptr;
-    return std::make_unique<ArchiveFile>(&fs_, *node);
+    return base::MakeUnique<ArchiveFile>(&fs_, *node);
   }
   bool stat(const char *rel, i64 &size) override {
     const auto *node = fs_.find(rel);
@@ -330,12 +335,12 @@ public:
     size = static_cast<i64>(node->size);
     return true;
   }
-  bool list(const char *rel, std::vector<krnl::vfs::DirEntry> &out) override {
-    std::vector<vfs::ArchiveFilesystem::Child> children;
+  bool list(const char *rel, base::Vector<krnl::vfs::DirEntry> &out) override {
+    base::Vector<vfs::ArchiveFilesystem::Child> children;
     if (!fs_.list(rel, children))
       return false;
     for (auto &c : children)
-      out.push_back({std::move(c.name), c.isDir});
+      out.push_back({base::move(c.name), c.isDir});
     return true;
   }
 
@@ -343,22 +348,22 @@ public:
   bool isPs5() { return fs_.find("/sce_sys/param.json") != nullptr; }
   bool hasDecrypted() { return fs_.find("/decrypted/eboot.bin") != nullptr; }
 
-  std::string titleId() {
+  base::String titleId() {
     if (isPs5())
       return jsonGetString(paramJson(), "titleId");
-    std::vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
+    base::Vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
     return sfoGet(sfo.data(), sfo.size(), "TITLE_ID");
   }
 
-  std::string title() {
+  base::String title() {
     if (isPs5())
       return jsonGetTitleName(paramJson());
-    std::vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
+    base::Vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
     return sfoGet(sfo.data(), sfo.size(), "TITLE");
   }
 
   u32 attributes() {
-    std::vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
+    base::Vector<u8> sfo = readWhole("/sce_sys/param.sfo", kMaxSfoSize);
     return sfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
   }
 
@@ -366,14 +371,14 @@ public:
     return parseSdkVersion(jsonGetString(paramJson(), "sdkVersion"));
   }
 
-  std::vector<u8> icon() { return readWhole("/sce_sys/icon0.png", kMaxIconSize); }
+  base::Vector<u8> icon() { return readWhole("/sce_sys/icon0.png", kMaxIconSize); }
 
 private:
-  std::vector<u8> readWhole(const char *rel, u64 maxSize) {
+  base::Vector<u8> readWhole(const char *rel, u64 maxSize) {
     const auto *node = fs_.find(rel);
     if (!node || node->size == 0 || node->size > maxSize)
       return {};
-    std::vector<u8> buf(node->size);
+    base::Vector<u8> buf(node->size);
     const i64 read = fs_.read(*node, buf.data(), 0, static_cast<i64>(buf.size()));
     if (read <= 0)
       return {};
@@ -381,9 +386,9 @@ private:
     return buf;
   }
 
-  std::string paramJson() {
-    const std::vector<u8> js = readWhole("/sce_sys/param.json", kMaxSfoSize);
-    return std::string(js.begin(), js.end());
+  base::String paramJson() {
+    const base::Vector<u8> js = readWhole("/sce_sys/param.json", kMaxSfoSize);
+    return base::String(reinterpret_cast<const char *>(js.data()), js.size());
   }
 
   struct ArchiveFile : krnl::vfs::VirtualFile {
@@ -410,7 +415,7 @@ namespace {
 template <typename P>
 TitleMount mount(const base::String &path, bool wantIcon, const char *what) {
   TitleMount m;
-  auto p = std::make_shared<P>(path);
+  auto p = base::MakeShared<P>(path);
   if (!p->valid()) {
     LOG_ERROR("failed to load {} {}", what, path.c_str());
     return m;

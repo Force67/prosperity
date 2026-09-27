@@ -6,12 +6,13 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <base/strings/xstring.h>
 
 namespace formats {
 
 // Minimal param.sfo reader: return the string value of `key` (e.g. "TITLE_ID"),
 // or "" if absent. The SFO is a small flat table; all offsets are bounds-checked.
-std::string sfoGet(const u8 *d, size_t n, const char *key) {
+base::String sfoGet(const u8 *d, size_t n, const char *key) {
   if (n < 20)
     return {};
   auto rd16 = [&](size_t o) -> u16 {
@@ -38,7 +39,7 @@ std::string sfoGet(const u8 *d, size_t n, const char *key) {
     if (dpos >= n)
       return {};
     size_t avail = n - dpos, len = rd32(idx + 4);
-    std::string s(reinterpret_cast<const char *>(d + dpos),
+    base::String s(reinterpret_cast<const char *>(d + dpos),
                   len < avail ? len : avail);
     while (!s.empty() && s.back() == '\0')
       s.pop_back();
@@ -79,17 +80,17 @@ u32 sfoGetU32(const u8 *d, size_t n, const char *key) {
 
 // PS5 titles carry sce_sys/param.json instead of the PS4 param.sfo. Pull one
 // top-level string value out of it (flat file, no nesting on the keys we want).
-std::string jsonGetString(const std::string &js, const char *key) {
-  std::string pat = std::string("\"") + key + "\"";
+base::String jsonGetString(const base::String &js, const char *key) {
+  base::String pat = base::String("\"") + key + "\"";
   size_t k = js.find(pat);
-  if (k == std::string::npos)
+  if (k == base::String::npos)
     return {};
   size_t colon = js.find(':', k + pat.size());
-  if (colon == std::string::npos)
+  if (colon == base::String::npos)
     return {};
   size_t open = js.find('"', colon);
-  size_t close = open == std::string::npos ? open : js.find('"', open + 1);
-  if (close == std::string::npos)
+  size_t close = open == base::String::npos ? open : js.find('"', open + 1);
+  if (close == base::String::npos)
     return {};
   return js.substr(open + 1, close - open - 1);
 }
@@ -97,12 +98,12 @@ std::string jsonGetString(const std::string &js, const char *key) {
 // param.json keeps the display name under localizedParameters.<defaultLanguage>
 // .titleName. Search from the default language's block so a title shipping
 // several languages doesn't pick whichever one happens to come first.
-std::string jsonGetTitleName(const std::string &js) {
-  const std::string lang = jsonGetString(js, "defaultLanguage");
+base::String jsonGetTitleName(const base::String &js) {
+  const base::String lang = jsonGetString(js, "defaultLanguage");
   if (!lang.empty()) {
     const size_t block = js.find("\"" + lang + "\"");
-    if (block != std::string::npos) {
-      std::string name = jsonGetString(js.substr(block), "titleName");
+    if (block != base::String::npos) {
+      base::String name = jsonGetString(js.substr(block), "titleName");
       if (!name.empty())
         return name;
     }
@@ -111,7 +112,7 @@ std::string jsonGetTitleName(const std::string &js) {
 }
 // param.json stores sdkVersion as "0xMMmmpppp00000000"; libkernel wants the top
 // half (0x03000000 for a 3.00 title). Empty/unparsable -> 0.
-u32 parseSdkVersion(const std::string &s) {
+u32 parseSdkVersion(const base::String &s) {
   if (s.empty())
     return 0;
   return static_cast<u32>(std::strtoull(s.c_str(), nullptr, 0) >> 32);

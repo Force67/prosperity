@@ -18,7 +18,6 @@
 #include "base/arch.h"
 #include <base/logging.h>
 #include <cstring>
-#include <set>
 
 #include "kern/lv2/dispatch.h"
 #include "kern/lv2/error_table.h"
@@ -28,6 +27,7 @@
 #include "kern/module.h"
 #include "kern/proc.h"
 #include <utl/options.h>
+#include <base/containers/set.h>
 
 namespace {
 DELTA_OPTION(bool, kPs5SysTrace, "DELTA_PS5_SYSTRACE", false);
@@ -142,7 +142,7 @@ static const ps5Sys *ps5Extra(u32 sid) {
 uintptr_t lv2_get_ps5(u32 sid) {
   const ps5Sys *ex = ps5Extra(sid);
 
-  static std::set<u32> seen;
+  static base::Set<u32> seen;
   if (kPs5SysTrace && seen.insert(sid).second) {
     const char *name = ex ? ex->name : syscall_getname(sid);
     BASE_LOGI("ps5sys", "{:4}  {}", sid, name ? name : "?");

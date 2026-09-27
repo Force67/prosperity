@@ -5,8 +5,8 @@
 #include "gpu/render/index_upload.h"
 #include "base/arch.h"
 
-#include <algorithm>
 #include <cstring>
+#include <base/math/value_bounds.h>
 
 namespace gpu::render {
 
@@ -25,15 +25,15 @@ u32 MaxGuestIndex(const void* source,
   if (index_type == 1) {
     const auto* indices = static_cast<const u32*>(source);
     for (u32 i = 0; i < count; i++)
-      maximum = std::max(maximum, indices[i]);
+      maximum = base::Max(maximum, indices[i]);
   } else if (index_type == 2) {
     const auto* indices = static_cast<const u8*>(source);
     for (u32 i = 0; i < count; i++)
-      maximum = std::max(maximum, static_cast<u32>(indices[i]));
+      maximum = base::Max(maximum, static_cast<u32>(indices[i]));
   } else {
     const auto* indices = static_cast<const u16*>(source);
     for (u32 i = 0; i < count; i++)
-      maximum = std::max(maximum, static_cast<u32>(indices[i]));
+      maximum = base::Max(maximum, static_cast<u32>(indices[i]));
   }
   return maximum;
 }

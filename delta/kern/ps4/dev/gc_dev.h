@@ -4,9 +4,9 @@
 
 #include "device.h"
 #include "base/arch.h"
+#include <base/containers/array.h>
+#include <base/threading/mutex.h>
 
-#include <array>
-#include <mutex>
 
 namespace krnl {
 class proc;
@@ -51,7 +51,7 @@ public:
   // visible to anything that drains it (including the per-frame drain, which
   // runs outside any ioctl). Shared for the same reason the /dev/gc mapping
   // pool is.
-  static std::array<ComputeQueue, 64> computeQueues;
-  static std::mutex computeMutex;
+  static base::Array<ComputeQueue, 64> computeQueues;
+  static base::Mutex computeMutex;
 };
 }

@@ -6,9 +6,9 @@
 #include "base/arch.h"
 #include "gpu/gcn/gcn_detile.h"
 
-#include <algorithm>
 #include <cstring>
-#include <vector>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
 
 namespace gpu::render {
 
@@ -55,11 +55,11 @@ u64 TexHash(u64 base, u64 bytes) {
   if (bytes < 2 * kHashChunk)
     return TexHashRange(base, bytes);
   const u32 chunks = static_cast<u32>((bytes + kHashChunk - 1) / kHashChunk);
-  std::vector<u64> parts(chunks);
+  base::Vector<u64> parts(chunks);
   gcn::DetileParallelWork(chunks, bytes, [&](u32 c0, u32 c1) {
     for (u32 c = c0; c < c1; c++) {
       const u64 off = u64(c) * kHashChunk;
-      parts[c] = TexHashRange(base + off, std::min(kHashChunk, bytes - off));
+      parts[c] = TexHashRange(base + off, base::Min(kHashChunk, bytes - off));
     }
   });
   u64 h = 1469598103934665603ull;
@@ -73,7 +73,7 @@ u64 TexHashSerial(u64 base, u64 bytes) {
     return TexHashRange(base, bytes);
   u64 h = 1469598103934665603ull;
   for (u64 off = 0; off < bytes; off += kHashChunk)
-    h = (h ^ TexHashRange(base + off, std::min(kHashChunk, bytes - off))) *
+    h = (h ^ TexHashRange(base + off, base::Min(kHashChunk, bytes - off))) *
         kHashPrime;
   return h ^ (bytes << 1);
 }

@@ -8,14 +8,9 @@
 #include "gpu/ps5/cmd_processor.h"
 #include "base/arch.h"
 
-#include <array>
-#include <atomic>
-#include <chrono>
 #include <cstring>
-#include <map>
-#include <mutex>
-#include <type_traits>
 
+#include <base/meta/traits.h>
 #include <base/logging.h>
 #include <utl/options.h>
 
@@ -32,6 +27,15 @@
 #include "gpu/render/command.h"
 #include "gpu/render/renderer.h"
 #include "gpu/gpu_perf.h"
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/strings/format.h>
 
 namespace {
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
@@ -56,7 +60,7 @@ namespace {
 
 // The register file is the state of one GPU: two submit threads walking it
 // concurrently would interleave one draw's registers with another's.
-std::mutex g_mutex;
+base::Mutex g_mutex;
 
 bool MemWatchHit(u64 base, u64 bytes) {
   const u64 w = kMemWatch;
@@ -81,7 +85,7 @@ struct RingStall {
   // Retained for diagnostics; elapsed time never satisfies a GPU wait.
   u64 wait_addr = 0;
   u64 wait_ref = 0;
-  std::chrono::steady_clock::time_point wait_since;
+  base::TimeTicks wait_since;
 };
 u64 g_total_submits = 0;
 bool g_renderer_started = false;
@@ -106,11 +110,11 @@ struct QueueState {
   IndexState index;
   u64 draw_indirect_base = 0;
   u64 dispatch_indirect_base = 0;
-  std::array<u32, 0x400> pushed_context{};
+  base::Array<u32, 0x400> pushed_context{};
   bool context_pushed = false;
 };
 QueueState g_graphics_queue;
-std::map<u32, QueueState> g_ring_queues;
+base::Map<u32, QueueState> g_ring_queues;
 QueueState* g_queue = &g_graphics_queue;  // protected by g_mutex
 
 // A cycle in the IB chain would recurse until the stack overflowed. Real
@@ -130,10 +134,8 @@ bool IsLabelAddress(u64 address) {
 // immediate data (which is 0 for these). Our submit is synchronous, so any
 // advancing non-zero value reads as "already complete".
 u64 GpuClockTimestamp() {
-  using namespace std::chrono;
   return static_cast<u64>(
-      duration_cast<nanoseconds>(steady_clock::now().time_since_epoch())
-          .count());
+      (base::TickClock::NowNs()));
 }
 
 // Our submit is synchronous: every draw in the buffer is finished by the time
@@ -243,7 +245,7 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
         copied = render::WriteGds(renderer, static_cast<u32>(dst),
                                 reinterpret_cast<const void*>(src), bytes);
       else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src) {
-        std::vector<u8> data(bytes);
+        base::Vector<u8> data(bytes);
         copied = render::ReadGds(renderer, static_cast<u32>(src), data.data(), bytes) &&
                  render::WriteGds(renderer, static_cast<u32>(dst), data.data(), bytes);
       }
@@ -289,7 +291,7 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
 // once per submit (op 103 kSwap64), which nothing else ever wrote.
 template <typename T>
 T AtomicMemOp(u32 op, T dst, T src, T cmp) {
-  using S = std::make_signed_t<T>;
+  using S = base::conditional_t<sizeof(T) == 8, i64, i32>;
   switch (op) {
     case 1: case 9:  // fcmpswap: compare as floats
       return dst == cmp ? src : dst;
@@ -427,14 +429,14 @@ bool StallOnWait(u32 op, const u32* body, u32 count) {
   const bool wide = op == 0x93;
   const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
   const u64 ref = wide ? (static_cast<u64>(body[4]) << 32) | body[3] : body[3];
-  const auto now = std::chrono::steady_clock::now();
+  const auto now = base::TimeTicks::Now();
   if (address != g_queue->stall.wait_addr || ref != g_queue->stall.wait_ref) {
     g_queue->stall.wait_addr = address;
     g_queue->stall.wait_ref = ref;
     g_queue->stall.wait_since = now;
     return true;
   }
-  if (now - g_queue->stall.wait_since >= std::chrono::seconds(5)) {
+  if (now - g_queue->stall.wait_since >= base::Seconds(5)) {
     BASE_LOGW("agc", "queue {} waitOnAddress {:#x} ref={:#x} remains pending",
               render::g_submit_queue,
               (unsigned long)address, (unsigned long)ref);
@@ -820,7 +822,7 @@ u32 Walk(render::Renderer& renderer,
           // Re-enter where a stalled walk of this same buffer left off.
           u32 start = 0;
           if (g_queue->stall.ib[depth + 1] == ib) {
-            start = std::min(g_queue->stall.ib_dw[depth + 1], ib_words);
+            start = base::Min(g_queue->stall.ib_dw[depth + 1], ib_words);
             g_queue->stall.ib[depth + 1] = 0;
           }
           const u32 done =
@@ -1049,7 +1051,7 @@ void StartRendererOnce(render::Renderer& renderer) {
 u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
   if (!dcb || size_bytes < 4)
     return size_bytes / 4;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  base::LockGuard<base::Mutex> lock(g_mutex);
   render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);
   const u32 words = size_bytes / 4;
@@ -1077,7 +1079,7 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   if (!dcb || size_bytes < 4)
     return;
   const u64 t_enter = NowNs();
-  std::lock_guard<std::mutex> lock(g_mutex);
+  base::LockGuard<base::Mutex> lock(g_mutex);
   const u64 t_held = NowNs();
   render::g_ns_dcb_lock += t_held - t_enter;
   render::Renderer& renderer = render::DefaultRenderer();
@@ -1098,13 +1100,13 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
 void SubmitCcb(const void* ccb, u32 size_bytes) {
   if (!ccb || size_bytes < 4)
     return;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  base::LockGuard<base::Mutex> lock(g_mutex);
   Walk(render::DefaultRenderer(), static_cast<const u32*>(ccb), size_bytes / 4,
        false, 0);
 }
 
 void EndFrame(u64 scanout_base) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  base::LockGuard<base::Mutex> lock(g_mutex);
   // New frame -> shader code may have been rewritten; let the cached programs
   // revalidate each address once next frame instead of once per draw. Before
   // the early return, or a frame that ends with nothing active never advances

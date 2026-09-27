@@ -6,11 +6,9 @@
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
-#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
 
 #include <sys/mman.h>
 
@@ -21,6 +19,11 @@
 #include "kern/lv2/sys_mem.h"
 #include <utl/mem.h>
 #include <utl/options.h>
+#include <base/containers/array.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace {
 DELTA_OPTION(bool, kGcCaller, "DELTA_GC_CALLER", false);
@@ -298,7 +301,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
                                    ring_bytes) &&
           utl::isMemoryRangeMapped(reinterpret_cast<const void*>(args->readPtr),
                                    sizeof(u32))) {
-        std::lock_guard lock(computeMutex);
+        base::LockGuard lock(computeMutex);
         ComputeQueue* slot = nullptr;
         for (ComputeQueue& entry : computeQueues) {
           if (entry.mapped && entry.me == args->me && entry.pipe == args->pipe &&
@@ -333,7 +336,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
   case 0xC00C810E: { // sceGnmUnmapComputeQueue
     if (kGcAcb && data) {
       const auto* args = static_cast<const u32*>(data);
-      std::lock_guard lock(computeMutex);
+      base::LockGuard lock(computeMutex);
       for (ComputeQueue& entry : computeQueues)
         if (entry.mapped && entry.me == args[0] && entry.pipe == args[1] &&
             entry.queue == args[2])
@@ -365,7 +368,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
     }
     if (kGcAcb && data) {
       const auto* args = static_cast<const u32*>(data);
-      std::lock_guard lock(computeMutex);
+      base::LockGuard lock(computeMutex);
       // Census of EVERY mapped queue, not just the kicked one: SotC maps seven and
       // only 1/0/0 arrives here. Either the other six are empty or their doorbell
       // never reaches us (the driver can ring via its /dev/gc mapping); reading the
@@ -401,7 +404,7 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
         const u32 available =
             (next - entry.readOffsetDw) & (entry.ringSizeDw - 1);
         if (available) {
-          std::vector<u32> commands(available);
+          base::Vector<u32> commands(available);
           const auto* ring = reinterpret_cast<const u32*>(entry.ringBase);
           for (u32 i = 0; i < available; i++)
             commands[i] = ring[(entry.readOffsetDw + i) &
@@ -477,8 +480,8 @@ i32 gcDevice::ioctl(u32 cmd, void *data) {
 // cap; on retail those fields are never initialized, so every real mmap fails.
 // Back the mapping with a lazily allocated pool in [512 GiB, 2^40), inside the
 // identity range the CP renders into; out-of-range offsets fall back to anon.
-std::array<gcDevice::ComputeQueue, 64> gcDevice::computeQueues{};
-std::mutex gcDevice::computeMutex;
+base::Array<gcDevice::ComputeQueue, 64> gcDevice::computeQueues{};
+base::Mutex gcDevice::computeMutex;
 
 // SotC spreads async compute over seven queues; only 1/0/0 arrives as a DingDong
 // ioctl, the other six sit at read=0 all run, so their doorbell reaches the
@@ -509,7 +512,7 @@ void gcDevice::drainQueues(u32 budget_dw) {
       continue;
     const auto *ring = reinterpret_cast<const u32 *>(q.ringBase);
     const u32 mask = q.ringSizeDw - 1;
-    const u32 budget = std::min<u32>(budget_dw, q.ringSizeDw);
+    const u32 budget = base::Min<u32>(budget_dw, q.ringSizeDw);
     u32 off = q.readOffsetDw, consumed = 0;
     while (consumed < budget) {
       u32 w[4];
@@ -543,9 +546,9 @@ u8 *gcDevice::map(void *, size_t size, u32, u32, size_t offset) {
   // The pool belongs to the device, not the descriptor: a gcDevice per open would
   // hand two openers different memory for the same offset; sys_mmap holds no lock
   // across device::map, so lazy creation needs its own.
-  static std::mutex poolLock;
+  static base::Mutex poolLock;
   static u8 *pool = nullptr;
-  std::lock_guard<std::mutex> lk(poolLock);
+  base::LockGuard<base::Mutex> lk(poolLock);
   if (!pool) {
     pool = allocLowGuest(kPoolSize);
     if (!pool)
@@ -565,13 +568,13 @@ u8 *gcDevice::map(void *, size_t size, u32, u32, size_t offset) {
 // flip time recycles buffers under us (SIGSEGV in Tomb Raider). Called once per
 // flip so the backlog is not charged to whichever frame rang the doorbell.
 extern "C" void prosperity_gc_dingdong(u32 ringId, u32 offsetDw) {
-  std::lock_guard lock(krnl::gcDevice::computeMutex);
+  base::LockGuard lock(krnl::gcDevice::computeMutex);
   krnl::gcDevice::ringDoorbell(ringId, offsetDw);
 }
 
 extern "C" void prosperity_gc_drain_acb(u32 budget_dw) {
   if (!budget_dw)
     return;
-  std::lock_guard lock(krnl::gcDevice::computeMutex);
+  base::LockGuard lock(krnl::gcDevice::computeMutex);
   krnl::gcDevice::drainQueues(budget_dw);
 }

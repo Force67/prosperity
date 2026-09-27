@@ -12,9 +12,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
-#include <map>
-#include <mutex>
-#include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -23,6 +20,13 @@
 
 #include "vfs.h"
 #include <utl/options.h>
+#include <base/containers/map.h>
+#include <base/memory/move.h>
+#include <base/memory/shared_pointer.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace {
 DELTA_OPTION(bool, kShortRead, "DELTA_SHORTREAD", false);
@@ -36,21 +40,21 @@ namespace krnl::vfs {
 struct mountPoint {
   base::String guest;
   base::String host;                        // host mount
-  std::shared_ptr<VirtualProvider> provider; // virtual mount (else null)
+  base::SharedPointer<VirtualProvider> provider; // virtual mount (else null)
   bool writable = false;                     // host mount opened for writing
 };
 
 static base::Vector<mountPoint> g_mounts;
-static std::mutex g_mountsMutex;
+static base::Mutex g_mountsMutex;
 
 void mount(const char *guest, const char *host) {
-  std::lock_guard<std::mutex> lock(g_mountsMutex);
+  base::LockGuard<base::Mutex> lock(g_mountsMutex);
   g_mounts.push_back({base::String(guest), base::String(host), nullptr, false});
 }
 
 // Create hostDir and each parent (mkdir -p).
 static void makeHostDirs(const char *hostDir) {
-  std::string p(hostDir);
+  base::String p(hostDir);
   for (size_t i = 1; i < p.size(); i++) {
     if (p[i] == '/') {
       p[i] = 0;
@@ -63,12 +67,12 @@ static void makeHostDirs(const char *hostDir) {
 
 void mountWritable(const char *guest, const char *host) {
   makeHostDirs(host);
-  std::lock_guard<std::mutex> lock(g_mountsMutex);
+  base::LockGuard<base::Mutex> lock(g_mountsMutex);
   g_mounts.push_back({base::String(guest), base::String(host), nullptr, true});
 }
 
 void unmount(const char *guest) {
-  std::lock_guard<std::mutex> lock(g_mountsMutex);
+  base::LockGuard<base::Mutex> lock(g_mountsMutex);
   for (mem_size i = g_mounts.size(); i > 0; --i) {
     if (g_mounts[i - 1].guest == guest) {
       g_mounts.erase(g_mounts.begin() + i - 1);
@@ -77,10 +81,10 @@ void unmount(const char *guest) {
   }
 }
 
-void mountVirtual(const char *guest, std::shared_ptr<VirtualProvider> provider) {
-  std::lock_guard<std::mutex> lock(g_mountsMutex);
+void mountVirtual(const char *guest, base::SharedPointer<VirtualProvider> provider) {
+  base::LockGuard<base::Mutex> lock(g_mountsMutex);
   g_mounts.push_back(
-      {base::String(guest), base::String(), std::move(provider)});
+      {base::String(guest), base::String(), base::move(provider)});
 }
 
 // The process working directory is /app0 (sys_getcwd reports it) and the guest
@@ -101,7 +105,7 @@ static base::String normalizePath(const char *path, const char *relPrefix = "/ap
 // Longest matching mount. prefixLen is the matched length.
 static bool findMount(const char *path, bool hostOnly, mountPoint &result,
                       size_t &prefixLen) {
-  std::lock_guard<std::mutex> lock(g_mountsMutex);
+  base::LockGuard<base::Mutex> lock(g_mountsMutex);
   const mountPoint *best = nullptr;
   size_t bestLen = 0;
   for (auto &m : g_mounts) {
@@ -144,10 +148,10 @@ namespace {
 // Adapts a VirtualFile to utl::fileBase so it can flow through fileDevice and
 // the rest of the file machinery like a real file. Read-only.
 struct PfsFileStream final : utl::fileBase {
-  std::unique_ptr<VirtualFile> vf;
+  base::UniquePointer<VirtualFile> vf;
   u64 pos = 0;
 
-  explicit PfsFileStream(std::unique_ptr<VirtualFile> v) : vf(std::move(v)) {}
+  explicit PfsFileStream(base::UniquePointer<VirtualFile> v) : vf(base::move(v)) {}
 
   u64 Read(void *buf, size_t size) override {
     i64 n = vf->read(buf, static_cast<i64>(pos),
@@ -207,29 +211,29 @@ base::String joinHost(const base::String &host, const char *rest) {
 // the unique case-insensitive match. Directory listings are memoised: a title
 // streaming thousands of assets would otherwise rescan the same directory on
 // every open.
-std::mutex g_caseMutex;
-std::map<std::string, std::map<std::string, std::string>> g_caseIndex;
+base::Mutex g_caseMutex;
+base::Map<base::String, base::Map<base::String, base::String>> g_caseIndex;
 
 // Returns the on-disc spelling of `name` in `dir`, or null. Caller holds no
 // lock; the index is shared across the title's streaming threads.
-const std::string *lookupCaseInsensitive(const std::string &dir,
-                                         const std::string &name) {
-  std::lock_guard<std::mutex> lk(g_caseMutex);
+const base::String *lookupCaseInsensitive(const base::String &dir,
+                                         const base::String &name) {
+  base::LockGuard<base::Mutex> lk(g_caseMutex);
   auto it = g_caseIndex.find(dir);
   if (it == g_caseIndex.end()) {
-    std::map<std::string, std::string> index;
+    base::Map<base::String, base::String> index;
     if (DIR *d = opendir(dir.c_str())) {
       while (dirent *e = readdir(d)) {
-        std::string lower(e->d_name);
+        base::String lower(e->d_name);
         for (auto &c : lower)
           c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        index.emplace(std::move(lower), e->d_name);
+        index.emplace(base::move(lower), e->d_name);
       }
       closedir(d);
     }
-    it = g_caseIndex.emplace(dir, std::move(index)).first;
+    it = g_caseIndex.emplace(dir, base::move(index)).first;
   }
-  std::string lower(name);
+  base::String lower(name);
   for (auto &c : lower)
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   auto hit = it->second.find(lower);
@@ -241,22 +245,22 @@ base::String fixHostCase(const base::String &host) {
   if (::stat(host.c_str(), &st) == 0)
     return host;
 
-  std::string path(host.c_str());
+  base::String path(host.c_str());
   size_t pos = path.find('/', 1);
-  std::string built = pos == std::string::npos ? path : path.substr(0, pos);
-  while (pos != std::string::npos) {
+  base::String built = pos == base::String::npos ? path : path.substr(0, pos);
+  while (pos != base::String::npos) {
     size_t next = path.find('/', pos + 1);
-    std::string comp = path.substr(pos + 1, next == std::string::npos
-                                                ? std::string::npos
+    base::String comp = path.substr(pos + 1, next == base::String::npos
+                                                ? base::String::npos
                                                 : next - pos - 1);
-    std::string cand = built + "/" + comp;
+    base::String cand = built + "/" + comp;
     if (::stat(cand.c_str(), &st) != 0) {
-      const std::string *real = lookupCaseInsensitive(built, comp);
+      const base::String *real = lookupCaseInsensitive(built, comp);
       if (!real)
         return host;  // no match: let the caller report the original miss
       cand = built + "/" + *real;
     }
-    built = std::move(cand);
+    built = base::move(cand);
     pos = next;
   }
   return base::String(built.c_str());
@@ -291,7 +295,7 @@ utl::File openRead(const char *path) {
   if (const char *hide = kVfsHide) {
     for (const char *p = hide; *p;) {
       const char *sep = std::strchr(p, ',');
-      std::string pat(p, sep ? size_t(sep - p) : std::strlen(p));
+      base::String pat(p, sep ? size_t(sep - p) : std::strlen(p));
       if (!pat.empty() && std::strstr(path, pat.c_str()))
         return utl::File();
       p = sep ? sep + 1 : p + pat.size();
@@ -320,7 +324,7 @@ utl::File openRead(const char *path) {
     auto vf = m.provider->open(rest);
     if (!vf)
       return utl::File();
-    utl::File out(base::MakeUnique<PfsFileStream>(std::move(vf)));
+    utl::File out(base::MakeUnique<PfsFileStream>(base::move(vf)));
     // DELTA_OPEN_TRACE: also report the size we hand back. A file that opens OK
     // but reports size 0 (e.g. a >4 GiB member whose size truncated) makes the
     // resource loader hang forever with {payload=0, err=0} (SotC world container).
@@ -426,20 +430,20 @@ bool stat(const char *path, i64 &size, bool &isDir) {
   return true;
 }
 
-static std::string g_titleId;
-void setTitleId(const std::string &id) { g_titleId = id; }
-const std::string &titleId() { return g_titleId; }
+static base::String g_titleId;
+void setTitleId(const base::String &id) { g_titleId = id; }
+const base::String &titleId() { return g_titleId; }
 
-static std::map<std::string, std::vector<u8>> g_fileCache;
-void cacheFile(const std::string &key, std::vector<u8> data) {
-  g_fileCache[key] = std::move(data);
+static base::Map<base::String, base::Vector<u8>> g_fileCache;
+void cacheFile(const base::String &key, base::Vector<u8> data) {
+  g_fileCache[key] = base::move(data);
 }
-const std::vector<u8> *getCachedFile(const char *key) {
+const base::Vector<u8> *getCachedFile(const char *key) {
   auto it = g_fileCache.find(key);
   return it == g_fileCache.end() ? nullptr : &it->second;
 }
 
-bool listDir(const char *path, std::vector<DirEntry> &out) {
+bool listDir(const char *path, base::Vector<DirEntry> &out) {
   if (!path)
     return false;
 
@@ -450,13 +454,13 @@ bool listDir(const char *path, std::vector<DirEntry> &out) {
   // libkernel opens "/" and walks its entries by d_reclen looking for a name, so
   // an empty/failed listing leaves it spinning on a zero-length record.
   if (std::strcmp(path, "/") == 0) {
-    std::lock_guard<std::mutex> lock(g_mountsMutex);
+    base::LockGuard<base::Mutex> lock(g_mountsMutex);
     for (auto &mp : g_mounts) {
       const char *g = mp.guest.c_str();
       if (*g != '/')
         continue;
       const char *end = std::strchr(g + 1, '/');
-      std::string top(g + 1, end ? end - (g + 1) : std::strlen(g + 1));
+      base::String top(g + 1, end ? end - (g + 1) : std::strlen(g + 1));
       if (top.empty())
         continue;
       bool dup = false;

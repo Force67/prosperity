@@ -13,6 +13,7 @@
 #include <base/strings/xstring.h>
 
 #include "logger.h"
+#include <base/strings/string_ref.h>
 
 namespace utl {
 
@@ -35,7 +36,7 @@ class fileOut final : public logBase {
   const char* getName() override { return "fileOut"; }
 
   void write(const logEntry& entry) override {
-    constexpr std::size_t MAX_BYTES_WRITTEN = 50 * 1024L * 1024L;
+    constexpr mem_size MAX_BYTES_WRITTEN = 50 * 1024L * 1024L;
 
     if (!handle || bytes_written > MAX_BYTES_WRITTEN)
       return;

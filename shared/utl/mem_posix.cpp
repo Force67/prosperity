@@ -10,10 +10,11 @@
 
 #include <sys/mman.h>
 #include <unistd.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
-#include <vector>
-#include <map>
-#include <mutex>
 
 namespace utl {
 
@@ -23,8 +24,8 @@ struct Mapping {
   u64 identity;
 };
 struct MappingRegistry {
-  std::mutex lock;
-  std::map<uintptr_t, Mapping> mappings;
+  base::Mutex lock;
+  base::Map<uintptr_t, Mapping> mappings;
   u64 next_identity = 0;
 };
 MappingRegistry& MappingState() {
@@ -58,7 +59,7 @@ void trackMemoryMapping(void* addr, size_t len) {
   if (!base || !len || len > UINTPTR_MAX - base)
     return;
   auto& state = MappingState();
-  std::lock_guard lock(state.lock);
+  base::LockGuard lock(state.lock);
   ForgetMapping(state, base, base + len);
   state.mappings.emplace(base, Mapping{base + len, ++state.next_identity});
 }
@@ -68,7 +69,7 @@ void forgetMemoryMapping(void* addr, size_t len) {
   if (!base || !len || len > UINTPTR_MAX - base)
     return;
   auto& state = MappingState();
-  std::lock_guard lock(state.lock);
+  base::LockGuard lock(state.lock);
   ForgetMapping(state, base, base + len);
 }
 
@@ -78,7 +79,7 @@ u64 memoryMappingIdentity(const void* addr, size_t len) {
     return 0;
   const uintptr_t end = base + len;
   auto& state = MappingState();
-  std::lock_guard lock(state.lock);
+  base::LockGuard lock(state.lock);
   const auto& mappings = state.mappings;
   auto it = mappings.upper_bound(base);
   if (it == mappings.begin())
@@ -159,7 +160,7 @@ bool isMemoryRangeMapped(const void *addr, size_t len) {
   const uintptr_t first = begin & ~(page_size - 1);
   const uintptr_t last = (begin + len - 1) & ~(page_size - 1);
   const size_t pages = static_cast<size_t>((last - first) / page_size + 1);
-  std::vector<unsigned char> residency(pages);
+  base::Vector<unsigned char> residency(pages);
   return ::mincore(reinterpret_cast<void *>(first), pages * page_size,
                    residency.data()) == 0;
 }

@@ -23,15 +23,15 @@
 #include "error_table.h"
 #include "kern/crash.h"
 #include <sys/random.h>
-#include <algorithm>
 #include <cstring>
 #include <cstdio>
 
 #include <ctime>
-#include <mutex>
-#include <set>
-#include <string>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/set.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 // Declared unconditionally: read unconditionally below. They used to sit behind
 // DELTA_BACKEND_NATIVE, leaving the FEX/ARM build uses without declarations.
@@ -79,11 +79,11 @@ moduleInfo *called_in(void *addr);
 
 // The oid names we have already reported as unhandled, so a polling caller
 // cannot flood the log. Guarded because sysctl runs on any guest thread.
-static std::set<std::string> &loggedOidNames() {
-  static std::set<std::string> names;
+static base::Set<base::String> &loggedOidNames() {
+  static base::Set<base::String> names;
   return names;
 }
-static std::mutex g_loggedOidLock;
+static base::Mutex g_loggedOidLock;
 
 int PS4ABI sys_is_in_sandbox() { return 0; }
 
@@ -208,7 +208,7 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
       tls += m->getInfo().tlsSizeMem + m->getInfo().tlsalign;
     constexpr size_t kPage = 0x4000;
     size_t tlsPages = (tls + 0xFFFF + kPage - 1) / kPage;
-    tlsPages = std::clamp<size_t>(tlsPages, 16, 1024);
+    tlsPages = base::Clamp<size_t>(tlsPages, 16, 1024);
 
     auto *out = static_cast<tlsArenaInfo *>(oldp);
     out->size = sizeof(tlsArenaInfo);
@@ -529,8 +529,8 @@ int PS4ABI sys_sysctl(int *name, u32 namelen, void *oldp, size_t *oldlenp,
     // An ENOENT answer is often polled from a retry loop (Demon's Souls asks for
     // kern.nfxtmeqp ~9000x/s), so log each distinct name once.
     {
-      std::string key(static_cast<const char *>(newp), newlen);
-      std::lock_guard<std::mutex> lock(g_loggedOidLock);
+      base::String key(static_cast<const char *>(newp), newlen);
+      base::LockGuard<base::Mutex> lock(g_loggedOidLock);
       if (loggedOidNames().insert(key).second)
         BASE_LOGI("sysctl", "UNHANDLED name2oid: '{}'", key.c_str());
     }

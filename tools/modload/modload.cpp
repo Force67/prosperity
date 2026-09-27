@@ -7,6 +7,7 @@
 
 #include "kern/module.h"
 #include "kern/proc.h"
+#include <base/strings/xstring.h>
 
 int main(int argc, char** argv) {
   if (argc < 2) {

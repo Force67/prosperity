@@ -5,24 +5,26 @@
 
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <string>
-#include <vector>
 
 #include <zlib.h>
 
 #include "formats/archive_backend.h"
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/time/time.h>
 
 namespace {
 
 const char kArchive[] = "/home/vince/Documents/dumps/PS5/PPSA01342 (1.05).rar";
 
 struct Ctx {
-  std::unique_ptr<vfs::ArchiveBackend> backend;
-  std::vector<vfs::ArchiveEntry> entries;
+  base::UniquePointer<vfs::ArchiveBackend> backend;
+  base::Vector<vfs::ArchiveEntry> entries;
   double indexSeconds = 0;
 };
 
@@ -31,12 +33,10 @@ Ctx *ctx() {
     Ctx c;
     c.backend = vfs::openRarBackend(kArchive);
     if (c.backend) {
-      auto t0 = std::chrono::steady_clock::now();
+      auto t0 = base::TimeTicks::Now();
       if (!c.backend->index(c.entries))
-        c.backend.reset();
-      c.indexSeconds = std::chrono::duration<double>(
-                           std::chrono::steady_clock::now() - t0)
-                           .count();
+        c.backend.Reset();
+      c.indexSeconds = (base::TimeTicks::Now() - t0).InSecondsF();
     }
     return c;
   }();
@@ -69,11 +69,11 @@ TEST(ArchiveRar, ParamJson) {
   REQUIRE_ARCHIVE();
   auto *e = find("PPSA01342-app/sce_sys/param.json");
   ASSERT_NE(e, nullptr);
-  std::string data(e->size, 0);
+  base::String data(e->size, 0);
   ASSERT_EQ(ctx()->backend->extractRange(*e, data.data(), 0, i64(e->size)),
             i64(e->size));
   printf("param.json (%llu bytes):\n%s\n", e->size, data.c_str());
-  EXPECT_NE(data.find("\"titleId\""), std::string::npos);
+  EXPECT_NE(data.find("\"titleId\""), base::String::npos);
 }
 
 // Full sequential extract of the boot executable: chunked forward reads must
@@ -87,17 +87,16 @@ TEST(ArchiveRar, EbootCrc) {
   EXPECT_EQ(e->crc, 0xB00EA44Du);
 
   constexpr i64 kChunk = 1 << 20;
-  std::vector<unsigned char> buf(kChunk);
+  base::Vector<unsigned char> buf(kChunk);
   uLong crc = crc32(0, nullptr, 0);
-  auto t0 = std::chrono::steady_clock::now();
+  auto t0 = base::TimeTicks::Now();
   for (i64 off = 0; off < i64(e->size); off += kChunk) {
     i64 got = ctx()->backend->extractRange(*e, buf.data(), off, kChunk);
     ASSERT_GT(got, 0) << "at offset " << off;
     crc = crc32(crc, buf.data(), uInt(got));
   }
   double sec =
-      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
-          .count();
+      (base::TimeTicks::Now() - t0).InSecondsF();
   printf("eboot.bin: %llu bytes in %.2fs (%.1f MB/s), crc %08lX\n", e->size,
          sec, e->size / sec / 1e6, crc);
   EXPECT_EQ(crc, 0xB00EA44Du);
@@ -116,22 +115,22 @@ TEST(ArchiveRar, RangedReadMatchesUnrar) {
 
   const i64 off = i64(e->size / 2);
   const i64 len = 64 << 10;
-  std::vector<unsigned char> ours(len);
+  base::Vector<unsigned char> ours(len);
   ASSERT_EQ(ctx()->backend->extractRange(*e, ours.data(), off, len), len);
 
-  std::string cmd = "unrar p -inul \"";
+  base::String cmd = "unrar p -inul \"";
   cmd += kArchive;
   cmd += "\" \"";
   cmd += e->path;
   cmd += "\"";
   FILE *p = popen(cmd.c_str(), "r");
   ASSERT_NE(p, nullptr);
-  std::vector<unsigned char> theirs(len);
-  std::vector<unsigned char> skip(1 << 20);
+  base::Vector<unsigned char> theirs(len);
+  base::Vector<unsigned char> skip(1 << 20);
   i64 pos = 0;
   while (pos < off) {
     size_t n = fread(skip.data(),
-                     1, size_t(std::min(i64(skip.size()), off - pos)), p);
+                     1, size_t(base::Min(i64(skip.size()), off - pos)), p);
     ASSERT_GT(n, 0u) << "unrar pipe ended early at " << pos;
     pos += i64(n);
   }
@@ -159,17 +158,16 @@ TEST(ArchiveRar, SequentialResume) {
   printf("streaming %s (%llu bytes)\n", e->path.c_str(), e->size);
 
   constexpr i64 kChunk = 8 << 20;
-  const i64 total = std::min<i64>(i64(e->size), 512 << 20);
-  std::vector<unsigned char> buf(kChunk);
+  const i64 total = base::Min<i64>(i64(e->size), 512 << 20);
+  base::Vector<unsigned char> buf(kChunk);
 
   auto readSpan = [&](i64 begin, i64 end) {
-    auto t0 = std::chrono::steady_clock::now();
+    auto t0 = base::TimeTicks::Now();
     for (i64 off = begin; off < end; off += kChunk) {
-      i64 want = std::min(kChunk, end - off);
+      i64 want = base::Min(kChunk, end - off);
       EXPECT_EQ(ctx()->backend->extractRange(*e, buf.data(), off, want), want);
     }
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
-        .count();
+    return (base::TimeTicks::Now() - t0).InSecondsF();
   };
 
   double first = readSpan(0, total / 2);

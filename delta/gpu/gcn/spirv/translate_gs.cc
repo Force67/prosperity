@@ -6,10 +6,13 @@
  * interface and the copy shader is only read for its export map.
  */
 #ifdef DELTA_HAVE_SPIRV_BACKEND
-#include <algorithm>
-#include <array>
 
 #include "gpu/gcn/spirv/translator.h"
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::gcn {
 namespace {
@@ -40,7 +43,7 @@ bool RingDwordOp(const Inst& inst, u32 op) {
 
 bool ParseCopyShader(const Program& program,
                      u32 max_vert_out,
-                     std::vector<GsCopyExport>& out) {
+                     base::Vector<GsCopyExport>& out) {
   struct Value {
     enum Kind : u8 { kUnknown, kConst, kComp } kind = kUnknown;
     u32 bits = 0;
@@ -209,7 +212,7 @@ namespace {
 void WriteGsVertex(Translator& t, StageContext& sc, Id vertex) {
   Id pos[4] = {t.F32(0.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)};
   bool wrote_pos = false;
-  std::unordered_map<u32, std::array<Id, 4>> params;
+  base::HashMap<u32, base::Array<Id, 4>> params;
   Id layer = 0;
   for (const GsCopyExport& e : *sc.gs_exports) {
     Id value;
@@ -240,7 +243,7 @@ void WriteGsVertex(Translator& t, StageContext& sc, Id vertex) {
                                                           pos[2], pos[3]}));
   }
   for (const auto& [p, c] : params) {
-    sc.max_param = std::max(sc.max_param, p + 1);
+    sc.max_param = base::Max(sc.max_param, p + 1);
     t.m.Store(VsParamOut(t, sc, p),
               t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]}));
   }

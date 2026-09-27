@@ -17,9 +17,9 @@
 
 #include "base/arch.h"
 
-#include <memory>
 
 #include "gpu/gcn/gcn_decode.h"
+#include <base/memory/shared_pointer.h>
 
 namespace gpu::rdna {
 
@@ -61,7 +61,7 @@ Program ReachableProgram(const Program& program);
 // three times per draw (5.4 ms/frame in Dead Cells). Keyed by address, revalidated
 // against a code hash at most once per generation; shared_ptr survives eviction.
 // Not thread-safe: callers hold the command-processor lock.
-std::shared_ptr<const Program> CachedReachableProgram(const u32* code,
+base::SharedPointer<const Program> CachedReachableProgram(const u32* code,
                                                       u32 max_dwords);
 
 // Hash of the shader's CODE (footer-declared length, else up to the first ending

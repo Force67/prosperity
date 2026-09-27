@@ -13,9 +13,9 @@
  */
 
 #include "base/arch.h"
-#include <algorithm>
-#include <memory>
-#include <vector>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/shared_pointer.h>
 
 namespace gpu::gcn {
 
@@ -67,7 +67,7 @@ struct Inst {
 };
 
 // A decoded shader: the flat instruction list in program order.
-using Program = std::vector<Inst>;
+using Program = base::Vector<Inst>;
 
 // Where an SMRD load takes its offset from; the three forms do NOT share units, and
 // the wrong stride resolves a T#/V# out of unrelated buffer bytes:
@@ -125,7 +125,7 @@ class DescriptorVersions {
     if (!n)
       return;
     const u32 sdst = (inst.raw[0] >> 15) & 0x7F;
-    const u32 end = std::min(sdst + n, kSgprs);
+    const u32 end = base::Min(sdst + n, kSgprs);
     // A load overlapping an older one retires all of it, not just the overlap.
     for (u32 s = sdst; s < end; s++)
       if (len_[s]) {
@@ -177,13 +177,13 @@ Program DecodeShader(const u32* code,
 // Mark instructions reachable from the entry block. Shader binaries may
 // contain footer padding after an early s_endpgm; decoded dead data must not
 // influence translation or resource planning.
-std::vector<u8> ComputeReachability(const Program& program);
+base::Vector<u8> ComputeReachability(const Program& program);
 
 // Shared, cached DecodeShader for per-draw analysis (decoding 4K dwords per draw is
 // measurable). Keyed by guest address, revalidated against a code hash so an
 // in-place rewrite is picked up; shared_ptr keeps entries valid past eviction.
 // Not thread-safe: callers hold the command-processor lock.
-std::shared_ptr<const Program> CachedProgram(u64 addr,
+base::SharedPointer<const Program> CachedProgram(u64 addr,
                                              u32 max_dwords);
 
 // Content hash of the shader at `addr`, instructions only (footer body, or up to the

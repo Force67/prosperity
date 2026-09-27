@@ -10,13 +10,8 @@
 #include <base.h>
 #include "base/arch.h"
 #include <base/logging.h>
-#include <atomic>
-#include <chrono>
 #include <cstdlib>
-#include <mutex>
 #include <sys/mman.h>
-#include <thread>
-#include <unordered_map>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -28,6 +23,12 @@
 #include "kern/crash.h"
 #include "kern/module.h"
 #include "kern/proc.h"
+#include <base/threading/thread.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(bool, kScerrTrace, "DELTA_SCERR_TRACE", false);
@@ -62,7 +63,7 @@ int PS4ABI lv2_stub_syscall() {
 #endif
   called_in(ret);
 
-  static std::atomic<u64> nulls{0};
+  static base::Atomic<u64> nulls{0};
   const u64 n = ++nulls;
   if (n == 1 || (g_scHist && n % 400 == 0)) {
     BASE_LOGI("nullhandler", ">>>>>>>>>>>>> NULL HANDLER called {} times",
@@ -164,12 +165,12 @@ static const bool g_scHistDump = [] {
   // The emulator is normally SIGKILLed, so also sample on a timer: what a title
   // is doing in STEADY STATE is a different question from what it did at boot,
   // and only a periodic dump answers it.
-  std::thread([] {
+  base::SpawnDetachedThread("dispatch", [] {
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::seconds(20));
+      base::SleepForMilliseconds((20) * 1000);
       dumpSyscallHist();
     }
-  }).detach();
+  });
   return true;
 }();
 
@@ -252,9 +253,9 @@ uintptr_t lv2_trampoline(const void *handler, u32 sid) {
   // (and the many duplicate sites in the guest) reuse a single stub. When
   // DELTA_SCERR_TRACE or DELTA_SCHIST is set the stub also reports under its
   // own number, so key the cache by sid instead.
-  static std::mutex trMutex;
-  static std::unordered_map<u64, uintptr_t> trCache;
-  std::lock_guard<std::mutex> lk(trMutex);
+  static base::Mutex trMutex;
+  static base::HashMap<u64, uintptr_t> trCache;
+  base::LockGuard<base::Mutex> lk(trMutex);
   u64 key = (kScerrTrace || g_scHist) ? static_cast<u64>(sid)
                                       : reinterpret_cast<u64>(handler);
   auto it = trCache.find(key);

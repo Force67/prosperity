@@ -1,15 +1,18 @@
 /* PS4Delta: guest virtual addresses -> checked device buffer addresses. */
 #include "gpu/render/guest_memory_table.h"
-#include <algorithm>
 #include <cstdint>
-#include <array>
-#include <bit>
 #include <cstring>
-#include <unordered_map>
 
 #include <utl/options.h>
+#include <base/containers/builtins_bit.h>
 #include <base/logging.h>
 #include "gpu/render/frame.h"
+#include <base/algorithm.h>
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/containers/hash_map.h>
+#include <base/containers/span.h>
 
 namespace {
 // DELTA_GPU_GUEST_IMPORT=0: copy guest spans instead of importing their pages.
@@ -25,7 +28,7 @@ struct Buffer {
   u64 size = 0, identity = 0;
   bool imported = false;
 };
-std::unordered_map<u64, Buffer> spans, dirty_spans;
+base::HashMap<u64, Buffer> spans, dirty_spans;
 Buffer table_buffer;
 
 void Destroy(Buffer& b) {
@@ -58,7 +61,7 @@ bool Create(Buffer& out, u64 bytes, void* host = nullptr) {
 }
 }  // namespace
 
-bool PrepareGuestMemory(std::span<const render::GuestMemoryRange> ranges,
+bool PrepareGuestMemory(base::Span<const render::GuestMemoryRange> ranges,
                         rhi::Buffer*& table,
                         u64& table_bytes,
                         bool writes) {
@@ -67,7 +70,7 @@ bool PrepareGuestMemory(std::span<const render::GuestMemoryRange> ranges,
     return false;
   for (auto it = spans.begin(); it != spans.end();) {
     const bool current =
-        std::any_of(ranges.begin(), ranges.end(), [&](const auto& r) {
+        base::AnyOf(ranges.begin(), ranges.end(), [&](const auto& r) {
           return r.base == it->first && r.size == it->second.size &&
                  r.identity && r.identity == it->second.identity;
         });
@@ -82,7 +85,7 @@ bool PrepareGuestMemory(std::span<const render::GuestMemoryRange> ranges,
       ++it;
     }
   }
-  std::vector<std::array<u64, 4>> entries;
+  base::Vector<base::Array<u64, 4>> entries;
   for (const auto& range : ranges) {
     Buffer& b = spans[range.base];
     if (!b.buffer) {
@@ -135,8 +138,8 @@ bool PrepareGuestMemory(std::span<const render::GuestMemoryRange> ranges,
   return true;
 }
 
-std::vector<render::GuestMemoryRange> FinishGuestMemoryWrites() {
-  std::vector<render::GuestMemoryRange> written;
+base::Vector<render::GuestMemoryRange> FinishGuestMemoryWrites() {
+  base::Vector<render::GuestMemoryRange> written;
   for (auto& [base, dirty] : dirty_spans) {
     auto* marks = static_cast<u32*>(dirty.mapped);
     const u32 first = marks[0], end = marks[1];
@@ -147,7 +150,7 @@ std::vector<render::GuestMemoryRange> FinishGuestMemoryWrites() {
     for (u64 word = first / 32; word <= (end - 1) / 32; ++word) {
       u32 bits = marks[2 + word];
       while (bits) {
-        const u32 bit = std::countr_zero(bits);
+        const u32 bit = base::CountRightZero(bits);
         const u64 offset = (word * 32 + bit) * 4;
         if (offset + 4 <= buffer.size) {
           if (!buffer.imported)

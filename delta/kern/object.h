@@ -8,14 +8,13 @@
  * in the root of the source tree.
  */
 
-#include <atomic>
 #include "base/arch.h"
-#include <mutex>
 #include <utl/object_ref.h>
 
 #include <base/containers/vector.h>
 #include <base/strings/string_ref.h>
 #include <base/strings/xstring.h>
+#include <base/atomic.h>
 
 namespace krnl {
 class proc;
@@ -64,7 +63,7 @@ protected:
 
 private:
   handleList handleCollection;
-  std::atomic<i32> refCount;
+  base::Atomic<i32> refCount;
 };
 
 template <typename T> utl::object_ref<T> retain_object(T *ptr) {

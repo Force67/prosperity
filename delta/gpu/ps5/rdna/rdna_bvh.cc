@@ -32,16 +32,16 @@
  */
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
-#include <array>
 #include <limits>
 
 #include "gpu/ps5/rdna/rdna_emit.h"
+#include <base/containers/array.h>
 
 namespace gpu::rdna {
 using gpu::gcn::Id;
 using gpu::gcn::Translator;
 namespace {
-using Vec3 = std::array<Id, 3>;
+using Vec3 = base::Array<Id, 3>;
 Id FLe(Translator& t, Id a, Id b) {
   return t.m.Emit(spv::Op::OpFOrdLessThanEqual, t.t_bool, {a, b});
 }
@@ -72,7 +72,7 @@ void EmitBvh(Translator& t,
   const u32 dest = (w1 >> 8) & 255, wide = inst.opcode == 0xe7;
   const bool a16 = (w1 >> 30) & 1;
   // Read ALL addresses before overwriting VDATA: Astro aliases vaddr/vdata.
-  std::array<Id, 12> a{};
+  base::Array<Id, 12> a{};
   const u32 count = (a16 ? 8 : 11) + wide;
   for (u32 i = 0; i < count; i++) {
     const u32 reg =
@@ -85,7 +85,7 @@ void EmitBvh(Translator& t,
   Vec3 origin, direction, inverse;
   for (u32 i = 0; i < 3; i++)
     origin[i] = as_float(a[2 + wide + i]);
-  std::array<Id, 6> directions;
+  base::Array<Id, 6> directions;
   if (a16) {
     for (u32 i = 0; i < 3; i++) {
       const Id pair = t.m.ExtInst(t.m.TypeVec(t.t_f, 2),
@@ -160,7 +160,7 @@ void EmitBvh(Translator& t,
       t.Eq(type, t.U32(0)), t.U32(0x210),
       t.SelectB(t.Eq(type, t.U32(1)), t.U32(0x231),
                 t.SelectB(t.Eq(type, t.U32(2)), t.U32(0x432), t.U32(0x042))));
-  std::array<Vec3, 3> vertices;
+  base::Array<Vec3, 3> vertices;
   for (u32 v = 0; v < 3; v++) {
     const Id slot =
         t.Mul(t.And(t.Shr(mapping, t.U32(v * 4)), t.U32(15)), t.U32(3));
@@ -205,7 +205,7 @@ void EmitBvh(Translator& t,
           t.SelectB(hit, t.U32(1), t.U32(0))));
   t.m.Branch(node_done);
   t.m.OpenBlock(box_block);
-  std::array<Id, 4> children, distances;
+  base::Array<Id, 4> children, distances;
   const Id grow =
       t.FAdd(one, t.FMul(t.m.Emit(spv::Op::OpConvertUToF, t.t_f,
                                   {t.And(t.Shr(desc1, t.U32(23)), t.U32(255))}),
@@ -217,7 +217,7 @@ void EmitBvh(Translator& t,
         box_valid = t.LAnd(box_valid, t.m.Emit(spv::Op::OpFOrdEqual, t.t_bool,
                                                {value, value}));
     for (u32 axis = 0; axis < 3; axis++) {
-      std::array<Id, 2> limits;
+      base::Array<Id, 2> limits;
       for (u32 side = 0; side < 2; side++) {
         const u32 component = axis + 3 * side;
         const Id word =

@@ -4,13 +4,14 @@
 //   ffpkg_extract <game.ffpkg> <relpath> <out>     extract one file
 #include "base/arch.h"
 #include <cstdio>
-#include <string>
-#include <vector>
 
 #include <logger/logger.h>
 #include <utl/file.h>
 
 #include "formats/ufs2_object.h"
+#include <base/algorithm.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 int main(int argc, char **argv) {
   utl::createLogger(true);
@@ -31,7 +32,7 @@ int main(int argc, char **argv) {
       std::printf("%s: not found\n", argv[2]);
       return 1;
     }
-    std::vector<u8> buf(node->size);
+    base::Vector<u8> buf(node->size);
     i64 n = fs.read(*node, buf.data(), 0, static_cast<i64>(node->size));
     if (n < 0) {
       std::printf("read failed\n");
@@ -43,9 +44,9 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  std::vector<std::string> paths;
+  base::Vector<base::String> paths;
   fs.paths(paths);
-  std::sort(paths.begin(), paths.end());
+  base::Sort(paths.begin(), paths.end());
   u64 total = 0;
   for (const auto &p : paths) {
     const auto *node = fs.find(p.c_str());

@@ -22,7 +22,7 @@
 
 #include <cstdint>
 #include "base/arch.h"
-#include <vector>
+#include <base/containers/vector.h>
 
 namespace krnl {
 struct moduleInfo;
@@ -127,7 +127,7 @@ u64 currentGuestFsBase();
 // Every live guest thread's fs base. Lets a host thread survey guest TLS
 // across the whole process (e.g. which BPE JobSystem worker ordinals exist)
 // without instrumenting a hot guest path. FEX only; empty on native.
-void guestThreadFsBases(std::vector<u64> &out);
+void guestThreadFsBases(base::Vector<u64> &out);
 
 // The 16 guest GPRs (FEXCore::X86State::REG_* order) of the guest thread on this
 // host thread, or nullptr. FEX only; lets the crash handler dump guest regs and

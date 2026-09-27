@@ -11,16 +11,8 @@
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
-#include <atomic>
-#include <chrono>
 #include <cstdlib>
 #include <cstdio>
-#include <algorithm>
-#include <mutex>
-#include <set>
-#include <thread>
-#include <utility>
-#include <vector>
 
 #include <sys/select.h>
 #include <unistd.h>
@@ -32,6 +24,15 @@
 
 #include "kern/crash.h"
 #include <utl/options.h>
+#include <base/threading/thread.h>
+#include <base/atomic.h>
+#include <base/containers/pair.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
 
 namespace {
 DELTA_OPTION(bool, kEventTrace, "DELTA_EVENT_TRACE", false);
@@ -44,7 +45,7 @@ DELTA_OPTION(bool, kIdent0Vblank, "DELTA_PS5_IDENT0_VBLANK", false);
 namespace krnl {
 // All live equeues, so the vblank pump can fan flip events to every one of them
 // without knowing which equeue a given flip event was registered on.
-static std::mutex g_eqRegM;
+static base::Mutex g_eqRegM;
 static base::Vector<equeue *> g_equeues;
 
 // EVFILT_DISPLAY (-13) and Sony's videoout filter (-14) carry real vblank/flip
@@ -60,11 +61,11 @@ static constexpr i16 kEVFILT_VIDEOOUT = -14;
 // bits of ident (0x6 << 48 up), sceGnmAddEqEvent registers under the bare id.
 // This bound tells them apart.
 static constexpr u64 kGnmIdentMax = 0x10000;
-static std::atomic<bool> g_vblankStarted{false};
+static base::Atomic<bool> g_vblankStarted{false};
 
 // Flips the title has actually submitted. The display event's data>>16 carries
 // this (not the vblank tick) so render-frame pacing tracks real flips.
-static std::atomic<u64> g_flipCount{0};
+static base::Atomic<u64> g_flipCount{0};
 u64 flipCount() { return g_flipCount.load(); }
 
 // Low-bit TSC nonce for the display event's bits 0..11 so a polling title sees each
@@ -73,24 +74,22 @@ static u64 tscNonce() {
 #if defined(DELTA_BACKEND_NATIVE)
   return __builtin_ia32_rdtsc();
 #else
-  using namespace std::chrono;
-  return static_cast<u64>(
-      duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
+  return static_cast<u64>(base::TickClock::NowNs());
 #endif
 }
 
 // Guest fds with a live EVFILT_READ knote + the thread selecting on their host
 // sockets. A read knote's source is outside the guest, so nothing here would ever
 // mark it active; without this, Minecraft's rtc::PhysicalSocketServer never wakes.
-static std::mutex g_watchM;
-static std::set<u32> g_watched;
-static std::atomic<bool> g_watchStarted{false};
+static base::Mutex g_watchM;
+static base::Set<u32> g_watched;
+static base::Atomic<bool> g_watchStarted{false};
 
 static void watchSocket(u32 fd) {
   if (!fdToSocket(fd))
     return;
   {
-    std::lock_guard<std::mutex> lk(g_watchM);
+    base::LockGuard<base::Mutex> lk(g_watchM);
     if (!g_watched.insert(fd).second)
       return;
   }
@@ -98,31 +97,31 @@ static void watchSocket(u32 fd) {
   if (!g_watchStarted.compare_exchange_strong(expected, true))
     return;
   BASE_LOGI("kevent", "socket read-poll started");
-  std::thread([] {
+  base::SpawnDetachedThread("sys_event", [] {
     for (;;) {
       fd_set rd;
       FD_ZERO(&rd);
       int maxFd = -1;
-      std::vector<std::pair<u32, int>> live;
+      base::Vector<base::Pair<u32, int>> live;
       {
-        std::lock_guard<std::mutex> lk(g_watchM);
+        base::LockGuard<base::Mutex> lk(g_watchM);
         for (u32 g : g_watched)
           if (auto *s = fdToSocket(g)) {
             live.emplace_back(g, s->hostFd());
             FD_SET(s->hostFd(), &rd);
-            maxFd = std::max(maxFd, s->hostFd());
+            maxFd = base::Max(maxFd, s->hostFd());
           }
       }
       timeval tv{0, 20000};  // 20 ms; also the retry tick when nothing is live
       if (maxFd < 0 || ::select(maxFd + 1, &rd, nullptr, nullptr, &tv) <= 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        base::SleepForMilliseconds(5);
         continue;
       }
       for (auto &[guestFd, hostFd] : live)
         if (FD_ISSET(hostFd, &rd))
           triggerAllEqueues(guestFd, kEVFILT_READ, 1);
     }
-  }).detach();
+  });
 }
 
 // Start the 60 Hz EVFILT_DISPLAY pump once, on the first vblank registration, so
@@ -132,10 +131,10 @@ static void startVblankPump() {
   if (!g_vblankStarted.compare_exchange_strong(expected, true))
     return;
   BASE_LOGI("vblank", "pump started (60 Hz, EVFILT_DISPLAY/VIDEOOUT)");
-  std::thread([] {
+  base::SpawnDetachedThread("sys_event", [] {
     u64 count = 0;
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::microseconds(16667));  // ~60 Hz
+      base::SleepForMicroseconds(16667);  // ~60 Hz
       ++count;
       // data>>16 = counter, bits 12..15 = 1..14 per-event sequence the title polls
       // for "new", bits 0..11 = TSC nonce. Packing only count<<16 left the sequence
@@ -156,7 +155,7 @@ static void startVblankPump() {
         triggerAllEqueues(-1, kEVFILT_DISPLAY, fdata);
       }
     }
-  }).detach();
+  });
 }
 
 // A GPU end-of-pipe interrupt: RELEASE_MEM/EVENT_WRITE_EOP's INT_SEL asks the CP to
@@ -165,8 +164,8 @@ static void startVblankPump() {
 // 0x5/0x40). Deliberately NOT the 60 Hz pump's business: that tick serves the
 // vblank waiters sharing the filter, and firing Gnm events on it says "GPU done"
 // when it did not. EOP interrupts since boot; a knote compares so none is lost.
-static std::atomic<u64> g_eopSeq{0};
-u64 gpuEndOfPipeCount() { return g_eopSeq.load(std::memory_order_relaxed); }
+static base::Atomic<u64> g_eopSeq{0};
+u64 gpuEndOfPipeCount() { return g_eopSeq.load(base::memory_order_relaxed); }
 
 void noteGpuEndOfPipe() {
   const u64 n = g_eopSeq.fetch_add(1) + 1;
@@ -176,7 +175,7 @@ void noteGpuEndOfPipe() {
   // sequence so a poller can tell a new event from a repeat, a TSC nonce below.
   const i64 data =
       static_cast<i64>((n << 16) | (((n - 1) % 14 + 1) << 12) | (tscNonce() & 0xFFF));
-  std::lock_guard<std::mutex> lk(g_eqRegM);
+  base::LockGuard<base::Mutex> lk(g_eqRegM);
   for (auto *eq : g_equeues)
     eq->triggerGnm(data);
 }
@@ -184,12 +183,12 @@ void noteGpuEndOfPipe() {
 // The id of the most recent completion, for a knote that was not listening when
 // it happened: re-arming it with a counter would hand the title an id it can
 // never match.
-static std::atomic<u64> g_lastEopCtx{0};
+static base::Atomic<u64> g_lastEopCtx{0};
 
 void noteGpuEndOfPipeCtx(u64 context_id) {
-  g_eopSeq.fetch_add(1, std::memory_order_relaxed);
-  g_lastEopCtx.store(context_id, std::memory_order_relaxed);
-  std::lock_guard<std::mutex> lk(g_eqRegM);
+  g_eopSeq.fetch_add(1, base::memory_order_relaxed);
+  g_lastEopCtx.store(context_id, base::memory_order_relaxed);
+  base::LockGuard<base::Mutex> lk(g_eqRegM);
   for (auto *eq : g_equeues)
     eq->triggerGnm(static_cast<i64>(context_id), /*raw_data=*/true);
 }
@@ -208,12 +207,12 @@ equeue::equeue(objectTable &objects, const char *nm)
     : kObject(objects, oType::equeue) {
   if (nm)
     name = nm;
-  std::lock_guard<std::mutex> lk(g_eqRegM);
+  base::LockGuard<base::Mutex> lk(g_eqRegM);
   g_equeues.push_back(this);
 }
 
 equeue::~equeue() {
-  std::lock_guard<std::mutex> lk(g_eqRegM);
+  base::LockGuard<base::Mutex> lk(g_eqRegM);
   for (size_t i = 0; i < g_equeues.size(); i++) {
     if (g_equeues[i] == this) {
       g_equeues.erase(g_equeues.begin() + i);
@@ -231,7 +230,7 @@ equeue::knote *equeue::find(u64 ident, i16 filter) {
 
 int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
                    int nout, const ktimespec *to) {
-  std::unique_lock<std::mutex> lk(m);
+  base::UniqueLock<base::Mutex> lk(m);
 
   // 1) apply the changelist.
   for (int i = 0; i < nchanges; i++) {
@@ -261,7 +260,7 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
         // sceKernelGetEventUserData return null and Minecraft deref it into a vcall.
         if (c.udata)
           k->ev.udata = c.udata;
-        cv.notify_all();
+        cv.NotifyAll();
       }
       continue;
     }
@@ -304,13 +303,13 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
   // many milliseconds of silence, to tell "the title is one event short" apart
   // from "the title is stuck on something else entirely".
   if (kEopPumpMs > 0) {
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = base::TimeTicks::Now();
     for (auto &k : notes) {
       if (k.active || k.ev.filter != kEVFILT_VIDEOOUT ||
           k.ev.ident >= kGnmIdentMax)
         continue;
       k.active = true;
-      k.ev.data = static_cast<i64>(g_lastEopCtx.load(std::memory_order_relaxed));
+      k.ev.data = static_cast<i64>(g_lastEopCtx.load(base::memory_order_relaxed));
     }
     (void)now;
   }
@@ -324,7 +323,7 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
           k.ev.ident >= kGnmIdentMax || k.eop_seen >= eop)
         continue;
       k.active = true;
-      k.ev.data = static_cast<i64>(g_lastEopCtx.load(std::memory_order_relaxed));
+      k.ev.data = static_cast<i64>(g_lastEopCtx.load(base::memory_order_relaxed));
     }
   }
 
@@ -359,28 +358,28 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
     // queue with knotes that never go active is a source we do not drive.
     if (kEventStallSecs > 0) {
       const auto until =
-          std::chrono::steady_clock::now() + std::chrono::seconds(kEventStallSecs);
-      if (!cv.wait_until(lk, until, pred)) {
+          base::TimeTicks::Now() + base::Seconds(kEventStallSecs);
+      if (!cv.WaitUntil(lk, until, pred)) {
         reportRegistrationsLocked(handle());
-        cv.wait(lk, pred);
+        cv.Wait(lk, pred);
       }
     } else {
-      cv.wait(lk, pred);
+      cv.Wait(lk, pred);
     }
     ready = true;
   } else {
-    auto dur = std::chrono::seconds(to->tv_sec) +
-               std::chrono::nanoseconds(to->tv_nsec);
-    ready = cv.wait_for(lk, dur, pred);
+    auto dur = base::Seconds(to->tv_sec) +
+               base::Microseconds((to->tv_nsec) / 1000);
+    ready = cv.WaitFor(lk, dur, pred);
   }
   if (!ready) {
     if (kEventTrace)
       BASE_LOGI("kevent", "timeout nout={}", nout);
-    const auto now = std::chrono::steady_clock::now();
-    if (idleSince == std::chrono::steady_clock::time_point{})
+    const auto now = base::TimeTicks::Now();
+    if (idleSince == base::TimeTicks{})
       idleSince = now;
     if (kEventStallSecs > 0 && !reportedIdle &&
-        now - idleSince >= std::chrono::seconds(kEventStallSecs)) {
+        now - idleSince >= base::Seconds(kEventStallSecs)) {
       reportedIdle = true;
       reportRegistrationsLocked(handle());
       // On the waiting thread itself, so the walk is this call's own stack:
@@ -400,7 +399,7 @@ int equeue::kevent(const kevent_t *changes, int nchanges, kevent_t *out,
 }
 
 void equeue::reportRegistrations(int fd) {
-  std::lock_guard<std::mutex> lk(m);
+  base::LockGuard<base::Mutex> lk(m);
   reportRegistrationsLocked(fd);
 }
 
@@ -416,7 +415,7 @@ void equeue::reportRegistrationsLocked(int fd) {
 }
 
 void equeue::addEvent(u64 ident, i16 filter, void *udata) {
-  std::lock_guard<std::mutex> lk(m);
+  base::LockGuard<base::Mutex> lk(m);
   kevent_t ev{};
   ev.ident = ident;
   ev.filter = filter;
@@ -433,7 +432,7 @@ void equeue::addEvent(u64 ident, i16 filter, void *udata) {
 }
 
 bool equeue::removeEvent(u64 ident, i16 filter) {
-  std::lock_guard<std::mutex> lk(m);
+  base::LockGuard<base::Mutex> lk(m);
   for (size_t j = 0; j < notes.size(); j++)
     if (notes[j].ev.ident == ident && notes[j].ev.filter == filter) {
       notes.erase(notes.begin() + j);
@@ -446,7 +445,7 @@ bool equeue::removeEvent(u64 ident, i16 filter) {
 // own event id. sceGnmGetEqEventType reads data whole and GetEqTimeStamp reads
 // data >> 16, so the id must survive in the low bits.
 void equeue::triggerGnm(i64 data, bool raw_data) {
-  std::lock_guard<std::mutex> lk(m);
+  base::LockGuard<base::Mutex> lk(m);
   bool any = false;
   for (auto &k : notes) {
     if (k.ev.filter != kEVFILT_VIDEOOUT || k.ev.ident >= kGnmIdentMax)
@@ -460,11 +459,11 @@ void equeue::triggerGnm(i64 data, bool raw_data) {
     any = true;
   }
   if (any)
-    cv.notify_all();
+    cv.NotifyAll();
 }
 
 void equeue::trigger(i64 ident, i16 filter, i64 data) {
-  std::lock_guard<std::mutex> lk(m);
+  base::LockGuard<base::Mutex> lk(m);
   bool any = false;
   for (auto &k : notes) {
     // filter==0 is a wildcard (no real EVFILT is 0); ident<0 matches any.
@@ -483,11 +482,11 @@ void equeue::trigger(i64 ident, i16 filter, i64 data) {
     any = true;
   }
   if (any)
-    cv.notify_all();
+    cv.NotifyAll();
 }
 
 void triggerAllEqueues(i64 ident, i16 filter, i64 data) {
-  std::lock_guard<std::mutex> lk(g_eqRegM);
+  base::LockGuard<base::Mutex> lk(g_eqRegM);
   for (auto *eq : g_equeues)
     eq->trigger(ident, filter, data);
 }
@@ -517,14 +516,14 @@ int PS4ABI sys_kevent(int kq, const kevent_t *changelist, int nchanges,
   // was the one wait they could not see.
   WaitProbe _wp("kevent", (long)kq, (long)nevents);
   auto *eq = static_cast<equeue *>(obj);
-  const auto t0 = std::chrono::steady_clock::now();
+  const auto t0 = base::TimeTicks::Now();
   int r = eq->kevent(changelist, nchanges, eventlist, nevents, to);
   // A wait this long is a title that is not going to wake up on its own. What
   // it registered says which event never arrived, and that is the only thing
   // the queue can tell us from the outside.
   if (kEventStallSecs > 0 &&
-      std::chrono::steady_clock::now() - t0 >=
-          std::chrono::seconds(kEventStallSecs))
+      base::TimeTicks::Now() - t0 >=
+          base::Seconds(kEventStallSecs))
     eq->reportRegistrations(kq);
   if (kKeventTrace) {
     base::String line;

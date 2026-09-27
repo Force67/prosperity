@@ -8,8 +8,6 @@
 
 #include <sys/mman.h>
 #include "base/arch.h"
-#include <thread>
-#include <chrono>
 #include <base.h>
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -27,16 +25,16 @@
 #include "kern/proc.h"
 #include "kern/vfs.h"
 
-#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <set>
-#include <string>
-#include <unordered_set>
-#include <vector>
+#include <base/atomic.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/strings/string_ref.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace {
 DELTA_OPTION(const char *, kFnWatch, "DELTA_FNWATCH", nullptr);
@@ -261,25 +259,25 @@ static void investigateMemDump() {
   const char *e = kMemDump;
   if (!e)
     return;
-  std::string list(e);
+  base::String list(e);
   size_t start = 0;
   while (start < list.size()) {
     size_t comma = list.find(',', start);
-    std::string spec = list.substr(start, comma == std::string::npos
-                                              ? std::string::npos
+    base::String spec = list.substr(start, comma == base::String::npos
+                                              ? base::String::npos
                                               : comma - start);
     uintptr_t at = 0;
     size_t bytes = 0;
     unsigned ms = 0;
     size_t p1 = spec.find(':'), p2 = spec.find(':', p1 + 1),
            p3 = spec.find(':', p2 + 1);
-    if (p3 != std::string::npos) {
+    if (p3 != base::String::npos) {
       at = std::strtoull(spec.c_str(), nullptr, 16);
       bytes = std::strtoull(spec.c_str() + p1 + 1, nullptr, 16);
       ms = (unsigned)std::strtoul(spec.c_str() + p2 + 1, nullptr, 0);
       startMemDump(at, bytes, ms, spec.c_str() + p3 + 1);
     }
-    if (comma == std::string::npos)
+    if (comma == base::String::npos)
       break;
     start = comma + 1;
   }
@@ -470,14 +468,14 @@ static void forceSotcPayload(smodule &m) {
 namespace {
 struct FiosOpen {          // one FHOpen (all opens tracked so any fh maps to a path)
   u64 pOutFH;         // guest ptr the async open writes the SceFiosFH into
-  std::string path;
+  base::String path;
 };
-std::mutex g_fiosMx;
-std::vector<FiosOpen> g_fiosOpens;          // all opens, for fh->path reverse lookup
-std::set<u64> g_zeroSizeFh;            // FHGetSize==0 fh's already reported
-std::set<u64> g_zeroActOp;             // OpGetActualCount==0 ops already reported
-std::set<std::string> g_seenPaths;          // DELTA_FIOS_ALLOPEN: dedup full open list
-std::atomic<u64> g_fiosOpenN{0}, g_zeroSizeChurn{0}, g_zeroActChurn{0};
+base::Mutex g_fiosMx;
+base::Vector<FiosOpen> g_fiosOpens;          // all opens, for fh->path reverse lookup
+base::Set<u64> g_zeroSizeFh;            // FHGetSize==0 fh's already reported
+base::Set<u64> g_zeroActOp;             // OpGetActualCount==0 ops already reported
+base::Set<base::String> g_seenPaths;          // DELTA_FIOS_ALLOPEN: dedup full open list
+base::Atomic<u64> g_fiosOpenN{0}, g_zeroSizeChurn{0}, g_zeroActChurn{0};
 
 // Safe-ish read of a guest C string (guest memory is identity-mapped to host).
 const char *guestStr(u64 va, char *buf, size_t cap) {
@@ -492,7 +490,7 @@ const char *guestStr(u64 va, char *buf, size_t cap) {
 // Reverse-map an SceFiosFH to the path that opened it (newest first). Only ever
 // called on the RARE zero-size/zero-count anomaly, so the O(n) scan is fine.
 // Caller holds g_fiosMx.
-std::string pathForFh(u64 fh) {
+base::String pathForFh(u64 fh) {
   if (!fh) return "<null-fh>";
   for (auto it = g_fiosOpens.rbegin(); it != g_fiosOpens.rend(); ++it) {
     u64 v = it->pOutFH ? *reinterpret_cast<u64 *>(it->pOutFH) : 0;
@@ -517,14 +515,14 @@ void PS4ABI fiosTraceLogger(u64 hookId, u64 a0, u64 a1,
     // /app0/misc and /app0/scripts are mounted (the guest opens /app0/misc files
     // by open ~#905). Firing at proc::create or the first open is too early.
     if (n == 2000) {
-      static std::once_flag probeOnce;
-      std::call_once(probeOnce, [] { probeFiosPaths(); });
+      static const bool probeOnce = ([] { probeFiosPaths(); }(), true);
+      (void)probeOnce;
     }
     const char *path = guestStr(a2, pb, sizeof(pb));
     bool firstSeen = false;
-    { std::lock_guard lk(g_fiosMx);
-      if (g_fiosOpens.size() < 80000) g_fiosOpens.push_back({a1, std::string(path)});
-      if (kFiosAllopen) firstSeen = g_seenPaths.insert(std::string(path)).second; }
+    { base::LockGuard lk(g_fiosMx);
+      if (g_fiosOpens.size() < 80000) g_fiosOpens.push_back({a1, base::String(path)});
+      if (kFiosAllopen) firstSeen = g_seenPaths.insert(base::String(path)).second; }
     // DELTA_FIOS_ALLOPEN: log every DISTINCT path once (full file inventory, to
     // find whether the world-op file is ever even opened). Else sample first 40 +
     // container types.
@@ -538,7 +536,7 @@ void PS4ABI fiosTraceLogger(u64 hookId, u64 a0, u64 a1,
   }
   case 2: { // FHGetSize(fh) -> size ; ANY zero/neg is the anomaly
     if ((i64)ret <= 0) {
-      std::lock_guard lk(g_fiosMx);
+      base::LockGuard lk(g_fiosMx);
       if (g_zeroSizeFh.insert(a0).second) {
         BASE_LOGI("fios",
                   "*** FHGetSize ZERO fh={:#x} -> size={}  path='{}'",
@@ -549,7 +547,7 @@ void PS4ABI fiosTraceLogger(u64 hookId, u64 a0, u64 a1,
       }
     } else if (kFiosAllopen && (i64)ret > (4 << 20)) {
       // Large files (>4MB) are candidates for the world container; log once/fh.
-      std::lock_guard lk(g_fiosMx);
+      base::LockGuard lk(g_fiosMx);
       if (g_zeroSizeFh.insert(a0 ^ 0x5A5A5A5Aull).second)
         BASE_LOGI("fios", "FHGetSize BIG fh={:#x} -> size={} path='{}'",
                   (unsigned long long)a0, (long long)ret,
@@ -560,7 +558,7 @@ void PS4ABI fiosTraceLogger(u64 hookId, u64 a0, u64 a1,
   case 3:
   case 4: { // FHRead / FHPread ; log zero-length reads (the container's read)
     if (a3 == 0) {
-      std::lock_guard lk(g_fiosMx);
+      base::LockGuard lk(g_fiosMx);
       BASE_LOGI("fios",
                 "*** {} ZERO-LEN fh={:#x} buf={:#x} len=0 op={:#x} path='{}'",
                 hookId == 3 ? "FHRead" : "FHPread", (unsigned long long)a1,
@@ -571,7 +569,7 @@ void PS4ABI fiosTraceLogger(u64 hookId, u64 a0, u64 a1,
   }
   case 5: { // OpGetActualCount(op) -> count ; ANY zero/neg is the anomaly
     if ((i64)ret <= 0) {
-      std::lock_guard lk(g_fiosMx);
+      base::LockGuard lk(g_fiosMx);
       if (g_zeroActOp.insert(a0).second) {
         BASE_LOGI("fios", "*** OpGetActualCount ZERO op={:#x} -> count={}",
                   (unsigned long long)a0, (long long)ret);
@@ -625,12 +623,12 @@ static void probeFiosPaths() {
   const char *e = kFiosProbe;
   if (!e)
     return;
-  std::string list(e);
+  base::String list(e);
   size_t start = 0;
   while (start < list.size()) {
     size_t comma = list.find(',', start);
-    std::string path = list.substr(start, comma == std::string::npos
-                                              ? std::string::npos
+    base::String path = list.substr(start, comma == base::String::npos
+                                              ? base::String::npos
                                               : comma - start);
     if (!path.empty()) {
       utl::File f = vfs::openRead(path.c_str());
@@ -640,7 +638,7 @@ static void probeFiosPaths() {
        else
          BASE_LOGI("fiosprobe", "'{}' MISSING (openRead empty)", path.c_str());
     }
-    if (comma == std::string::npos)
+    if (comma == base::String::npos)
       break;
     start = comma + 1;
   }

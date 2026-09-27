@@ -15,6 +15,7 @@
 
 #include "file_dev.h"
 #include <utl/options.h>
+#include <base/strings/xstring.h>
 
 namespace {
 DELTA_OPTION(bool, kFileReadTrace, "DELTA_FILEREAD_TRACE", false);

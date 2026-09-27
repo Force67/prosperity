@@ -16,6 +16,7 @@
 #include "kern/vfs.h"
 #include "services.h"
 #include <utl/options.h>
+#include <base/containers/vector.h>
 
 namespace {
 DELTA_OPTION(u32, kPlaygoChunks, "DELTA_PLAYGO_CHUNKS", 0);

@@ -2,10 +2,13 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-#include <algorithm>
 #include <cstring>
 
 #include "gpu/opengl/gl_rhi_internal.h"
+#include <base/containers/array.h>
+#include <base/algorithm.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
 
 namespace gpu::opengl {
 
@@ -90,15 +93,15 @@ void GlCommandList::Begin() {
   flushed_input_ = nullptr;
   index_dirty_ = true;
   for (auto& slots : slot_state_)
-    std::fill(slots.begin(), slots.end(), SlotState{});
+    base::Fill(slots.begin(), slots.end(), SlotState{});
   pointers_dirty_ = true;
   flushed_pointers_ = nullptr;
-  std::fill(std::begin(pass_colors_), std::end(pass_colors_), nullptr);
+  base::Fill(pass_colors_, pass_colors_ + base::ArraySize(pass_colors_), nullptr);
 }
 
 void GlCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
   auto* c = stream_.Add<CmdBeginPass>();
-  c->color_count = static_cast<u8>(std::min(pass.color_count, 8u));
+  c->color_count = static_cast<u8>(base::Min(pass.color_count, 8u));
   u8 store_discard = 0;
   for (u32 i = 0; i < c->color_count; i++) {
     const rhi::ColorAttachment& a = pass.colors[i];
@@ -179,7 +182,7 @@ void GlCommandList::SetBindGroup(u32 index,
   b.layout = g->layout;
   b.entries = g->entries.data();
   std::memcpy(b.offsets, dynamic_offsets,
-              std::min(num_offsets, kMaxDynamicOffsets) * sizeof(u32));
+              base::Min(num_offsets, kMaxDynamicOffsets) * sizeof(u32));
   b.dirty = true;
 }
 
@@ -192,7 +195,7 @@ void GlCommandList::PushBindGroup(u32 index,
   auto* l = static_cast<GlBindGroupLayout*>(layout);
   if (push_groups_used_ == push_groups_.size())
     push_groups_.emplace_back();
-  std::vector<BoundResource>& entries = push_groups_[push_groups_used_++];
+  base::Vector<BoundResource>& entries = push_groups_[push_groups_used_++];
   entries.assign(l->desc().bindings.size(), BoundResource{});
   for (u32 i = 0; i < num_writes; i++)
     device_.Resolve(*l, writes[i], entries.data());
@@ -208,7 +211,7 @@ void GlCommandList::PushBindGroup(u32 index,
 void GlCommandList::SetPushConstants(u32 offset, u32 bytes, const void* data) {
   if (offset >= kMaxPushBytes)
     return;
-  std::memcpy(push_data_ + offset, data, std::min(bytes, kMaxPushBytes - offset));
+  std::memcpy(push_data_ + offset, data, base::Min(bytes, kMaxPushBytes - offset));
   push_dirty_ = true;
 }
 
@@ -363,7 +366,7 @@ void GlCommandList::FlushBindings() {
   // new program needs them again even when the data did not change.
   if (pipeline_->pointer_count &&
       (pointers_dirty_ || flushed_pointers_ != pipeline_)) {
-    const u32 count = std::min(pipeline_->pointer_count, kMaxPointers);
+    const u32 count = base::Min(pipeline_->pointer_count, kMaxPointers);
     auto* c = stream_.Add<CmdPointers>(count * sizeof(pointers_[0]));
     c->count = count;
     std::memcpy(c + 1, pointers_, count * sizeof(pointers_[0]));
@@ -374,8 +377,8 @@ void GlCommandList::FlushBindings() {
       (push_dirty_ || flushed_push_ != pipeline_)) {
     u32 bytes = pipeline_->push_bytes;
     for (u32 i = 0; i < pipeline_->push_count; i++)
-      bytes = std::max(bytes, pipeline_->push[i].vec4_count * 16);
-    bytes = std::min(bytes, kMaxPushBytes);
+      bytes = base::Max(bytes, pipeline_->push[i].vec4_count * 16);
+    bytes = base::Min(bytes, kMaxPushBytes);
     auto* c = stream_.Add<CmdPush>(bytes);
     c->bytes = bytes;
     std::memcpy(c + 1, push_data_, bytes);

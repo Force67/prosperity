@@ -4,14 +4,18 @@
  * Root signatures, pipeline state objects and the shader cache.
  */
 
-#include <algorithm>
 #include <cstring>
-#include <memory>
-#include <string>
 
 #include <base/logging.h>
 
 #include "gpu/d3d12/d3d12_internal.h"
+#include <base/containers/vector.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/hashing/hash.h>
 
 namespace gpu::d3d12::impl {
 
@@ -188,7 +192,7 @@ ID3D12RootSignature* D3D12Device::SerializeRoot(
 
 rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
     const rhi::PipelineLayoutDesc& desc) {
-  auto layout = std::make_unique<D3D12PipelineLayout>(desc);
+  auto layout = base::MakeUnique<D3D12PipelineLayout>(desc);
   // Whole 16-byte rows: the shader's cbuffer is sized in rows.
   layout->push_dwords = (desc.push_constant_bytes + 15) / 16 * 4;
 
@@ -214,8 +218,8 @@ rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
       push_root_constants = false;
   }
 
-  std::vector<D3D12_ROOT_PARAMETER> params;
-  std::vector<std::vector<D3D12_DESCRIPTOR_RANGE>> ranges;
+  base::Vector<D3D12_ROOT_PARAMETER> params;
+  base::Vector<base::Vector<D3D12_DESCRIPTOR_RANGE>> ranges;
   ranges.reserve(desc.groups.size() * 2);
   if (layout->push_dwords) {
     D3D12_ROOT_PARAMETER p = Constants(kPushRegister, layout->push_dwords);
@@ -244,7 +248,7 @@ rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
       continue;
     RootGroup& rg = layout->groups[set];
     rg.root_cbv.assign(gl->dynamic_entries.size(), -1);
-    std::vector<D3D12_DESCRIPTOR_RANGE> views, samplers;
+    base::Vector<D3D12_DESCRIPTOR_RANGE> views, samplers;
     for (const GroupEntry& e : gl->entries) {
       if ((e.type == rhi::BindingType::kStorageBuffer ||
            e.type == rhi::BindingType::kStorageBufferDynamic) &&
@@ -267,7 +271,7 @@ rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
     for (auto* list : {&views, &samplers}) {
       if (list->empty())
         continue;
-      ranges.push_back(std::move(*list));
+      ranges.push_back(base::move(*list));
       D3D12_ROOT_PARAMETER p{};
       p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
       p.DescriptorTable = {static_cast<UINT>(ranges.back().size()),
@@ -286,12 +290,12 @@ rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
   layout->root = SerializeRoot(rd);
   if (!layout->root)
     return nullptr;
-  return layout.release();
+  return gpu::rhi::Release(layout);
 }
 
 bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
                                const LowerOptions& options,
-                               std::vector<u8>* dxil,
+                               base::Vector<u8>* dxil,
                                LoweredShader* info) {
   u64 key = HashWords(code.words, code.count, code.count);
   const u32 opts[] = {u32(options.stage),         options.shader_model,
@@ -309,7 +313,7 @@ bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
     key = HashWords(&w, 1, key);
   }
   {
-    std::lock_guard<std::mutex> lock(shader_mutex_);
+    base::LockGuard<base::Mutex> lock(shader_mutex_);
     auto it = shaders_.find(key);
     if (it != shaders_.end()) {
       *dxil = it->second.dxil;
@@ -319,7 +323,7 @@ bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
   }
   ShaderEntry entry;
   entry.ok = LowerToHlsl(code.words, code.count, options, &entry.info);
-  std::string error = entry.info.error;
+  base::String error = entry.info.error;
   if (entry.ok)
     entry.ok = Dxc::Compile(entry.info.hlsl, entry.info.profile, &entry.dxil,
                             &error);
@@ -328,17 +332,18 @@ bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
   entry.info.hlsl.clear();
   *dxil = entry.dxil;
   *info = entry.info;
-  std::lock_guard<std::mutex> lock(shader_mutex_);
-  shaders_[key] = std::move(entry);
+  base::LockGuard<base::Mutex> lock(shader_mutex_);
+  shaders_[key] = base::move(entry);
   return shaders_[key].ok;
 }
 
-bool D3D12Device::CompileHlsl(const std::string& hlsl,
+bool D3D12Device::CompileHlsl(const base::String& hlsl,
                               const char* profile,
-                              std::vector<u8>* dxil) {
-  const u64 key = std::hash<std::string>()(hlsl + profile);
+                              base::Vector<u8>* dxil) {
+  const base::String keyed = hlsl + profile;
+  const u64 key = base::HashBytes(keyed.data(), keyed.size());
   {
-    std::lock_guard<std::mutex> lock(shader_mutex_);
+    base::LockGuard<base::Mutex> lock(shader_mutex_);
     auto it = shaders_.find(key);
     if (it != shaders_.end()) {
       *dxil = it->second.dxil;
@@ -346,13 +351,13 @@ bool D3D12Device::CompileHlsl(const std::string& hlsl,
     }
   }
   ShaderEntry entry;
-  std::string error;
+  base::String error;
   entry.ok = Dxc::Compile(hlsl, profile, &entry.dxil, &error);
   if (!entry.ok)
     BASE_LOGI("gpud3d12", "internal shader failed: {}", error.c_str());
   *dxil = entry.dxil;
-  std::lock_guard<std::mutex> lock(shader_mutex_);
-  shaders_[key] = std::move(entry);
+  base::LockGuard<base::Mutex> lock(shader_mutex_);
+  shaders_[key] = base::move(entry);
   return shaders_[key].ok;
 }
 
@@ -363,7 +368,7 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
     BASE_LOGI("gpud3d12", "mesh pipelines are not supported");
     return nullptr;
   }
-  auto pipeline = std::make_unique<D3D12Pipeline>();
+  auto pipeline = base::MakeUnique<D3D12Pipeline>();
   pipeline->layout = layout;
 
   LowerOptions vo;
@@ -371,7 +376,7 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
   vo.shader_model = shader_model_;
   vo.flip_y = desc.geometry.empty();
   vo.read_only_storage = layout->read_only_storage;
-  std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
+  base::Vector<D3D12_INPUT_ELEMENT_DESC> elements;
   for (const rhi::VertexAttribute& a : desc.vertex_attributes) {
     const DxgiInfo& fi = Dxgi(a.format);
     if (a.location < 32) {
@@ -390,13 +395,13 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
                                  : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
                         instance ? 1u : 0u});
   }
-  std::vector<u8> vs, gs, ps;
+  base::Vector<u8> vs, gs, ps;
   LoweredShader vinfo, ginfo, pinfo;
   if (!CompileStage(desc.vertex, vo, &vs, &vinfo))
     return nullptr;
   pipeline->uses_draw_params = vinfo.uses_draw_params;
   pipeline->uses_raster = vinfo.uses_raster;
-  std::string outputs = vinfo.outputs;
+  base::String outputs = vinfo.outputs;
   if (!desc.geometry.empty()) {
     LowerOptions go = vo;
     go.stage = rhi::kStageGeometry;
@@ -506,8 +511,8 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
     pipeline->strides[i] = desc.vertex_buffers[i].stride;
   pipeline->stencil_ref = desc.stencil_front.reference;
   if (desc.name)
-    SetName(pipeline.get(), desc.name);
-  return pipeline.release();
+    SetName(&*pipeline, desc.name);
+  return gpu::rhi::Release(pipeline);
 }
 
 rhi::Pipeline* D3D12Device::CreateComputePipeline(
@@ -518,11 +523,11 @@ rhi::Pipeline* D3D12Device::CreateComputePipeline(
   co.shader_model = shader_model_;
   co.read_only_storage = layout->read_only_storage;
   co.dispatch_base = desc.dispatch_base;
-  std::vector<u8> cs;
+  base::Vector<u8> cs;
   LoweredShader info;
   if (!CompileStage(desc.code, co, &cs, &info))
     return nullptr;
-  auto pipeline = std::make_unique<D3D12Pipeline>();
+  auto pipeline = base::MakeUnique<D3D12Pipeline>();
   pipeline->layout = layout;
   pipeline->compute = true;
   pipeline->uses_workgroup_count = info.uses_workgroup_count;
@@ -538,18 +543,20 @@ rhi::Pipeline* D3D12Device::CreateComputePipeline(
     return nullptr;
   }
   if (desc.name)
-    SetName(pipeline.get(), desc.name);
-  return pipeline.release();
+    SetName(&*pipeline, desc.name);
+  return gpu::rhi::Release(pipeline);
 }
 
 bool D3D12Device::InitBlit() {
-  std::string error;
+  base::String error;
   auto compile = [&](const char* entry, const char* profile,
-                     std::vector<u8>* out) {
+                     base::Vector<u8>* out) {
     // Dxc::Compile always takes "main": rename the entry point in the text.
-    std::string text = kBlitHlsl;
-    const std::string decl = std::string(" ") + entry + "(";
-    text.replace(text.find(decl), decl.size(), " main(");
+    const base::String source = kBlitHlsl;
+    const base::String decl = base::String(" ") + entry + "(";
+    const mem_size at = source.find(decl);
+    const base::String text = source.substr(0, at) + " main(" +
+                              source.substr(at + decl.size());
     return Dxc::Compile(text, profile, out, &error);
   };
   if (!compile("vs", "vs_6_0", &blit_vs_) ||
@@ -583,7 +590,7 @@ bool D3D12Device::InitBlit() {
 }
 
 ID3D12PipelineState* D3D12Device::BlitPipeline(DXGI_FORMAT format) {
-  std::lock_guard<std::mutex> lock(blit_mutex_);
+  base::LockGuard<base::Mutex> lock(blit_mutex_);
   auto it = blit_psos_.find(format);
   if (it != blit_psos_.end())
     return it->second;

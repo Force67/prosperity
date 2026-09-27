@@ -7,7 +7,6 @@
 #include "gpu/ps5/reg_state.h"
 #include "base/arch.h"
 
-#include <algorithm>
 
 #include <utl/options.h>
 
@@ -15,6 +14,7 @@
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps5/cmd_trace.h"
 #include "gpu/ps5/guest_address.h"
+#include <base/math/value_bounds.h>
 
 namespace {
 DELTA_OPTION(bool, kNoBlendState, "DELTA_AGC_NOBLENDSTATE", false);
@@ -193,10 +193,10 @@ void LoadRegImage(Regs& regs, u32 base, const u32* body, u32 count) {
   u64 source_dwords = TraceRegImagePrefixDwords();
   for (u32 i = 2; i + 1 < count; i += 2) {
     const u32 off = body[i] & 0xFFFF;
-    const u32 num = std::min<u32>(body[i + 1] & 0xFFFF, 0x2000);
+    const u32 num = base::Min<u32>(body[i + 1] & 0xFFFF, 0x2000);
     if (base + off < limit)
-      source_dwords = std::max<u64>(
-          source_dwords, off + std::min<u32>(num, limit - base - off));
+      source_dwords = base::Max<u64>(
+          source_dwords, off + base::Min<u32>(num, limit - base - off));
   }
   if (!source_dwords ||
       !gpu::IsReadableRange(image, source_dwords * sizeof(u32)))
@@ -213,7 +213,7 @@ void LoadRegImage(Regs& regs, u32 base, const u32* body, u32 count) {
   bool any_value = false;
   for (u32 i = 2; i + 1 < count && !any_value; i += 2) {
     const u32 off = body[i] & 0xFFFF;
-    const u32 num = std::min<u32>(body[i + 1] & 0xFFFF, 0x2000);
+    const u32 num = base::Min<u32>(body[i + 1] & 0xFFFF, 0x2000);
     for (u32 j = 0; j < num; j++)
       if (base + off + j < limit && src[off + j]) {
         any_value = true;
@@ -225,7 +225,7 @@ void LoadRegImage(Regs& regs, u32 base, const u32* body, u32 count) {
 
   for (u32 i = 2; i + 1 < count; i += 2) {
     const u32 off = body[i] & 0xFFFF;
-    const u32 num = std::min<u32>(body[i + 1] & 0xFFFF, 0x2000);  // sanity cap
+    const u32 num = base::Min<u32>(body[i + 1] & 0xFFFF, 0x2000);  // sanity cap
     for (u32 j = 0; j < num; j++) {
       if (base + off + j >= limit)
         break;

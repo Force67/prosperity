@@ -24,13 +24,13 @@
 #include "gpu/render/trace.h"
 #include "gpu/render/upload_ring.h"
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <optional>
 #include <base/logging.h>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/optional.h>
 
 namespace {
 DELTA_OPTION(int, kMaxDraw, "DELTA_GPU_MAXDRAW", -1);
@@ -51,10 +51,10 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     return;
   // DELTA_GPU_SWAPTEX01: bisect a suspected sampler-binding order mismatch by
   // exchanging the first two textures of every multi-texture draw.
-  std::optional<DrawInfo> swapped;
+  base::Optional<DrawInfo> swapped;
   if (kSwapTex && d_in.num_texs >= 2) {
     swapped = d_in;
-    std::swap(swapped->texs[0], swapped->texs[1]);
+    base::Swap(swapped->texs[0], swapped->texs[1]);
   }
   const DrawInfo& d_sw = swapped ? *swapped : d_in;
   // DELTA_GPU_MAXDRAW=<n> / DELTA_GPU_ONLYDRAW=<n>: build a frame up one draw
@@ -89,7 +89,7 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
         detach_depth = true;
   }
   // Copied only when patched: DrawInfo is ~10 KB and this runs every draw.
-  std::optional<DrawInfo> patched_copy;
+  base::Optional<DrawInfo> patched_copy;
   const bool patched = kNoDepth || kNoCull || kNoMask || detach_depth;
   if (patched) {
     patched_copy = d_sw;

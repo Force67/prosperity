@@ -2,10 +2,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-#include <algorithm>
 #include <cstring>
-#include <memory>
-#include <string>
 
 #include <base/logging.h>
 
@@ -14,6 +11,14 @@
 #define INITGUID
 #endif
 #include "gpu/d3d12/d3d12_internal.h"
+#include <base/algorithm.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace gpu::d3d12 {
 
@@ -74,8 +79,8 @@ UINT Mapping(const rhi::TextureViewDesc& desc, const u32 base[4]) {
   return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(c[0], c[1], c[2], c[3]);
 }
 
-std::string PackSampler(const rhi::SamplerDesc& d) {
-  std::string key;
+base::String PackSampler(const rhi::SamplerDesc& d) {
+  base::String key;
   auto put = [&](const void* p, size_t n) {
     key.append(static_cast<const char*>(p), n);
   };
@@ -112,7 +117,7 @@ void CpuDescriptorPool::Shutdown() {
 bool CpuDescriptorPool::Allocate(u32 count, CpuRange* out) {
   if (!count || count > page_size_)
     return false;
-  std::lock_guard<std::mutex> lock(mutex_);
+  base::LockGuard<base::Mutex> lock(mutex_);
   auto take = [&](u32 page_index) {
     Page& p = pages_[page_index];
     for (auto it = p.free.begin(); it != p.free.end(); ++it) {
@@ -144,14 +149,14 @@ bool CpuDescriptorPool::Allocate(u32 count, CpuRange* out) {
     return false;
   page.start = page.heap->GetCPUDescriptorHandleForHeapStart();
   page.free[0] = page_size_;
-  pages_.push_back(std::move(page));
+  pages_.push_back(base::move(page));
   return take(static_cast<u32>(pages_.size() - 1));
 }
 
 void CpuDescriptorPool::Free(CpuRange& range) {
   if (!range.valid())
     return;
-  std::lock_guard<std::mutex> lock(mutex_);
+  base::LockGuard<base::Mutex> lock(mutex_);
   auto& free = pages_[range.page].free;
   u32 offset = range.offset, count = range.count;
   auto next = free.lower_bound(offset);
@@ -160,7 +165,7 @@ void CpuDescriptorPool::Free(CpuRange& range) {
     next = free.erase(next);
   }
   if (next != free.begin()) {
-    auto prev = std::prev(next);
+    auto prev = base::Prev(next);
     if (prev->first + prev->second == offset) {
       prev->second += count;
       range = {};
@@ -222,12 +227,12 @@ bool D3D12Device::Init(const D3D12Options& options) {
       break;
     DXGI_ADAPTER_DESC1 ad{};
     adapter->GetDesc1(&ad);
-    std::string name;
+    base::String name;
     for (const WCHAR* c = ad.Description; *c; c++)
       name += *c < 128 ? static_cast<char>(*c) : '?';
     const bool wanted =
         !(ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
-        (!options.gpu_filter || name.find(options.gpu_filter) != std::string::npos);
+        (!options.gpu_filter || name.find(options.gpu_filter) != base::String::npos);
     if (wanted &&
         SUCCEEDED(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0,
                                     IID_ID3D12Device,
@@ -254,7 +259,7 @@ bool D3D12Device::Init(const D3D12Options& options) {
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(vkd3d_get_vk_physical_device(device),
                                   &props);
-    device_name_ = std::string("vkd3d: ") + props.deviceName;
+    device_name_ = base::String("vkd3d: ") + props.deviceName;
   }
 #endif
   if (!device) {
@@ -392,9 +397,9 @@ ID3D12Resource* D3D12Device::CreateBufferResource(
 rhi::Buffer* D3D12Device::CreateBuffer(const rhi::BufferDesc& desc) {
   if (desc.host_pointer)
     return nullptr;
-  auto buffer = std::make_unique<D3D12Buffer>(desc);
+  auto buffer = base::MakeUnique<D3D12Buffer>(desc);
   // 256-byte multiples: a constant buffer view rounds its size up to that.
-  buffer->alloc_size = AlignUp(std::max<u64>(desc.size, 1), 256);
+  buffer->alloc_size = AlignUp(base::Max<u64>(desc.size, 1), 256);
   D3D12_HEAP_TYPE heap = D3D12_HEAP_TYPE_DEFAULT;
   D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
@@ -429,8 +434,8 @@ rhi::Buffer* D3D12Device::CreateBuffer(const rhi::BufferDesc& desc) {
       buffer->set_mapped(static_cast<u8*>(p));
   }
   if (desc.name)
-    SetName(buffer.get(), desc.name);
-  return buffer.release();
+    SetName(&*buffer, desc.name);
+  return gpu::rhi::Release(buffer);
 }
 
 rhi::Texture* D3D12Device::CreateTexture(const rhi::TextureDesc& desc) {
@@ -438,7 +443,7 @@ rhi::Texture* D3D12Device::CreateTexture(const rhi::TextureDesc& desc) {
   const rhi::FormatInfo& info = rhi::GetFormatInfo(desc.format);
   if (!fi.texture)
     return nullptr;
-  auto texture = std::make_unique<D3D12Texture>(desc);
+  auto texture = base::MakeUnique<D3D12Texture>(desc);
   const bool depth = info.is_depth || info.is_stencil;
   D3D12_RESOURCE_DESC rd{};
   rd.Dimension = desc.dim == rhi::TextureDim::k1D
@@ -486,8 +491,8 @@ rhi::Texture* D3D12Device::CreateTexture(const rhi::TextureDesc& desc) {
   texture->states.assign(desc.mips * texture->array_size() * texture->planes,
                          D3D12_RESOURCE_STATE_COMMON);
   if (desc.name)
-    SetName(texture.get(), desc.name);
-  return texture.release();
+    SetName(&*texture, desc.name);
+  return gpu::rhi::Release(texture);
 }
 
 rhi::TextureView* D3D12Device::CreateView(rhi::Texture* texture,
@@ -506,7 +511,7 @@ rhi::TextureView* D3D12Device::CreateView(rhi::Texture* texture,
               rhi::FormatName(format), rhi::FormatName(td.format));
     return nullptr;
   }
-  auto view = std::make_unique<D3D12View>(texture, desc);
+  auto view = base::MakeUnique<D3D12View>(texture, desc);
   const bool is3d = td.dim == rhi::TextureDim::k3D;
   const bool arrayed = td.layers > 1 || desc.base_layer > 0;
   const bool stencil = desc.aspect == rhi::kAspectStencil;
@@ -552,7 +557,7 @@ rhi::TextureView* D3D12Device::CreateView(rhi::Texture* texture,
       case rhi::ViewDim::kCubeArray:
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
         sv.TextureCubeArray = {desc.base_mip, desc.mips, desc.base_layer,
-                               std::max(desc.layers / 6, 1u), 0.0f};
+                               base::Max(desc.layers / 6, 1u), 0.0f};
         break;
       case rhi::ViewDim::k3D:
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
@@ -619,8 +624,8 @@ rhi::TextureView* D3D12Device::CreateView(rhi::Texture* texture,
   }
 
   if (tex->flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
-    Dsv(view.get(), 0);
-  return view.release();
+    Dsv(&*view, 0);
+  return gpu::rhi::Release(view);
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Device::Dsv(D3D12View* view, u32 variant) {
@@ -628,7 +633,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3D12Device::Dsv(D3D12View* view, u32 variant) {
   const rhi::TextureDesc& td = tex->desc();
   if (!rhi::GetFormatInfo(td.format).is_stencil)
     variant &= 1;
-  std::lock_guard<std::mutex> lock(tex->view_mutex);
+  base::LockGuard<base::Mutex> lock(tex->view_mutex);
   CpuRange& range = view->dsv[variant];
   if (range.valid() || !dsvs.Allocate(1, &range))
     return range.cpu;
@@ -650,13 +655,13 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3D12Device::Dsv(D3D12View* view, u32 variant) {
 }
 
 rhi::Sampler* D3D12Device::CreateSampler(const rhi::SamplerDesc& desc) {
-  auto sampler = std::make_unique<D3D12Sampler>();
-  const std::string key = PackSampler(desc);
-  std::lock_guard<std::mutex> lock(sampler_mutex_);
+  auto sampler = base::MakeUnique<D3D12Sampler>();
+  const base::String key = PackSampler(desc);
+  base::LockGuard<base::Mutex> lock(sampler_mutex_);
   auto it = sampler_ids_.find(key);
   if (it != sampler_ids_.end()) {
     sampler->id = it->second;
-    return sampler.release();
+    return gpu::rhi::Release(sampler);
   }
   D3D12_SAMPLER_DESC sd{};
   const bool aniso = desc.max_anisotropy > 1.0f;
@@ -669,10 +674,10 @@ rhi::Sampler* D3D12Device::CreateSampler(const rhi::SamplerDesc& desc) {
   sd.AddressU = ToAddress(desc.address_u);
   sd.AddressV = ToAddress(desc.address_v);
   sd.AddressW = ToAddress(desc.address_w);
-  sd.MipLODBias = std::clamp(desc.lod_bias, D3D12_MIP_LOD_BIAS_MIN,
+  sd.MipLODBias = base::Clamp(desc.lod_bias, D3D12_MIP_LOD_BIAS_MIN,
                              D3D12_MIP_LOD_BIAS_MAX);
   sd.MaxAnisotropy =
-      aniso ? std::min<u32>(D3D12_MAX_MAXANISOTROPY,
+      aniso ? base::Min<u32>(D3D12_MAX_MAXANISOTROPY,
                             static_cast<u32>(desc.max_anisotropy))
             : 1u;
   sd.ComparisonFunc = static_cast<D3D12_COMPARISON_FUNC>(
@@ -691,14 +696,14 @@ rhi::Sampler* D3D12Device::CreateSampler(const rhi::SamplerDesc& desc) {
   sampler->id = static_cast<u32>(sampler_cpu_.size());
   sampler_cpu_.push_back(range);
   sampler_ids_[key] = sampler->id;
-  return sampler.release();
+  return gpu::rhi::Release(sampler);
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::SamplerTable(
-    const std::vector<u32>& ids,
+    const base::Vector<u32>& ids,
     u32* cached,
     u64* generation) {
-  std::lock_guard<std::mutex> lock(sampler_mutex_);
+  base::LockGuard<base::Mutex> lock(sampler_mutex_);
   const D3D12_GPU_DESCRIPTOR_HANDLE base =
       sampler_heap->GetGPUDescriptorHandleForHeapStart();
   if (cached && *cached != ~0u && *generation == sampler_generation_)
@@ -737,7 +742,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::SamplerTable(
 }
 
 bool D3D12Device::AcquireChunk(RingChunk* out) {
-  std::lock_guard<std::mutex> lock(chunk_mutex_);
+  base::LockGuard<base::Mutex> lock(chunk_mutex_);
   if (free_chunks_.empty())
     return false;
   out->first = free_chunks_.back();
@@ -747,13 +752,13 @@ bool D3D12Device::AcquireChunk(RingChunk* out) {
 }
 
 void D3D12Device::ReleaseChunk(const RingChunk& chunk) {
-  std::lock_guard<std::mutex> lock(chunk_mutex_);
+  base::LockGuard<base::Mutex> lock(chunk_mutex_);
   free_chunks_.push_back(chunk.first);
 }
 
 rhi::BindGroupLayout* D3D12Device::CreateBindGroupLayout(
     const rhi::BindGroupLayoutDesc& desc) {
-  auto layout = std::make_unique<D3D12BindGroupLayout>(desc);
+  auto layout = base::MakeUnique<D3D12BindGroupLayout>(desc);
   for (const rhi::BindingLayout& b : desc.bindings) {
     GroupEntry e;
     e.binding = b.binding;
@@ -771,13 +776,13 @@ rhi::BindGroupLayout* D3D12Device::CreateBindGroupLayout(
         t == rhi::BindingType::kStorageBufferDynamic)
       layout->dynamic_entries.push_back(i);
   }
-  std::sort(layout->dynamic_entries.begin(), layout->dynamic_entries.end(),
+  base::Sort(layout->dynamic_entries.begin(), layout->dynamic_entries.end(),
             [&](u32 a, u32 b) {
               return layout->entries[a].binding < layout->entries[b].binding;
             });
   for (u32 d = 0; d < layout->dynamic_entries.size(); d++)
     layout->entries[layout->dynamic_entries[d]].dynamic_index = d;
-  return layout.release();
+  return gpu::rhi::Release(layout);
 }
 
 void D3D12Device::WriteCbv(D3D12_CPU_DESCRIPTOR_HANDLE dst,
@@ -789,11 +794,11 @@ void D3D12Device::WriteCbv(D3D12_CPU_DESCRIPTOR_HANDLE dst,
     return;
   }
   if (!range || offset + range > buffer->alloc_size)
-    range = buffer->alloc_size - std::min(offset, buffer->alloc_size);
+    range = buffer->alloc_size - base::Min(offset, buffer->alloc_size);
   D3D12_CONSTANT_BUFFER_VIEW_DESC cv{};
   cv.BufferLocation = buffer->va + offset;
-  cv.SizeInBytes = static_cast<UINT>(std::min<u64>(
-      AlignUp(std::min<u64>(range, 65536), 256), buffer->alloc_size - offset));
+  cv.SizeInBytes = static_cast<UINT>(base::Min<u64>(
+      AlignUp(base::Min<u64>(range, 65536), 256), buffer->alloc_size - offset));
   device->CreateConstantBufferView(&cv, dst);
 }
 
@@ -808,7 +813,7 @@ void D3D12Device::WriteRawView(D3D12_CPU_DESCRIPTOR_HANDLE dst,
   }
   const u64 size = buffer->desc().size;
   if (!range || offset + range > size)
-    range = size - std::min(offset, size);
+    range = size - base::Min(offset, size);
   if (uav) {
     D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
     uv.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -875,7 +880,7 @@ void D3D12Device::WriteNull(D3D12_CPU_DESCRIPTOR_HANDLE dst,
 
 rhi::BindGroup* D3D12Device::CreateBindGroup(const rhi::BindGroupDesc& desc) {
   auto* layout = static_cast<D3D12BindGroupLayout*>(desc.layout);
-  auto group = std::make_unique<D3D12BindGroup>();
+  auto group = base::MakeUnique<D3D12BindGroup>();
   group->layout = layout;
   if (layout->table_size && !views.Allocate(layout->table_size, &group->table))
     return nullptr;
@@ -884,9 +889,9 @@ rhi::BindGroup* D3D12Device::CreateBindGroup(const rhi::BindGroupDesc& desc) {
   group->samplers.assign(layout->sampler_count, 0);
   group->dynamic.resize(layout->dynamic_entries.size());
   group->uses.resize(layout->entries.size());
-  UpdateBindGroup(group.get(), desc.writes.data(),
+  UpdateBindGroup(&*group, desc.writes.data(),
                   static_cast<u32>(desc.writes.size()));
-  return group.release();
+  return gpu::rhi::Release(group);
 }
 
 void D3D12Device::UpdateBindGroup(rhi::BindGroup* bind_group,
@@ -950,7 +955,7 @@ void D3D12Device::UpdateBindGroup(rhi::BindGroup* bind_group,
 }
 
 rhi::TimestampPool* D3D12Device::CreateTimestampPool(u32 count) {
-  auto pool = std::make_unique<D3D12TimestampPool>();
+  auto pool = base::MakeUnique<D3D12TimestampPool>();
   D3D12_QUERY_HEAP_DESC qd{};
   qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
   qd.Count = count;
@@ -968,14 +973,14 @@ rhi::TimestampPool* D3D12Device::CreateTimestampPool(u32 count) {
   }
   pool->results = static_cast<const u64*>(p);
   pool->count = count;
-  return pool.release();
+  return gpu::rhi::Release(pool);
 }
 
 rhi::CommandList* D3D12Device::CreateCommandList() {
-  auto list = std::make_unique<D3D12CommandList>(*this);
+  auto list = base::MakeUnique<D3D12CommandList>(*this);
   if (!list->Init())
     return nullptr;
-  return list.release();
+  return gpu::rhi::Release(list);
 }
 
 void D3D12Device::Destroy(rhi::Object* object) {
@@ -1023,7 +1028,7 @@ void D3D12Device::SetName(rhi::Object* object, const char* name) {
     target = p->pso;
   if (!target)
     return;
-  std::vector<WCHAR> wide;
+  base::Vector<WCHAR> wide;
   for (const char* c = name; *c; c++)
     wide.push_back(static_cast<WCHAR>(static_cast<u8>(*c)));
   wide.push_back(0);
@@ -1089,7 +1094,7 @@ D3D12_RESOURCE_STATES D3D12Device::TextureState(const D3D12Texture* texture,
 }
 
 u64 D3D12Device::Submit(rhi::CommandList* const* lists, u32 count) {
-  std::lock_guard<std::mutex> lock(queue_mutex_);
+  base::LockGuard<base::Mutex> lock(queue_mutex_);
   // One ExecuteCommandLists per list: buffers decay to COMMON between calls,
   // which is what each list's own state tracking starts from.
   for (u32 i = 0; i < count; i++) {
@@ -1114,7 +1119,7 @@ bool D3D12Device::Wait(u64 submission, u64 timeout_ns) {
     return true;
   const u32 ms = timeout_ns == ~0ull
                      ? ~0u
-                     : static_cast<u32>(std::min<u64>(
+                     : static_cast<u32>(base::Min<u64>(
                            (timeout_ns + 999999) / 1000000, ~0u - 1));
   bool done = false;
 #if defined(_WIN32)
@@ -1161,8 +1166,8 @@ void D3D12Device::ReportDeviceLoss() {
 
 }  // namespace impl
 
-std::unique_ptr<rhi::Device> CreateD3D12Device(const D3D12Options& options) {
-  auto device = std::make_unique<D3D12Device>();
+base::UniquePointer<rhi::Device> CreateD3D12Device(const D3D12Options& options) {
+  auto device = base::MakeUnique<D3D12Device>();
   if (!device->Init(options))
     return nullptr;
   return device;

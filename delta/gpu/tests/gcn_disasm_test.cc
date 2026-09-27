@@ -4,6 +4,7 @@
 
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_disasm.h"
+#include <base/strings/xstring.h>
 
 namespace {
 
@@ -15,7 +16,7 @@ gpu::gcn::Inst DecodeOne(const u32* code,
   return program.empty() ? gpu::gcn::Inst{} : program[0];
 }
 
-std::string Name(gpu::gcn::Enc enc,
+base::String Name(gpu::gcn::Enc enc,
                  u32 opcode,
                  gpu::gcn::IsaMode mode = gpu::gcn::IsaMode::kBase) {
   gpu::gcn::Inst inst;
@@ -306,13 +307,13 @@ TEST(GcnDisasm, NeoVopcSixteenBitFamilies) {
   static const char* const int_cond[] = {"lt", "eq", "le", "gt", "ne", "ge"};
   for (u32 i = 0; i < 6; i++) {
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0x89 + i, gpu::gcn::IsaMode::kNeo),
-              std::string("v_cmp_") + int_cond[i] + "_i16");
+              base::String("v_cmp_") + int_cond[i] + "_i16");
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0x99 + i, gpu::gcn::IsaMode::kNeo),
-              std::string("v_cmpx_") + int_cond[i] + "_i16");
+              base::String("v_cmpx_") + int_cond[i] + "_i16");
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0xa9 + i, gpu::gcn::IsaMode::kNeo),
-              std::string("v_cmp_") + int_cond[i] + "_u16");
+              base::String("v_cmp_") + int_cond[i] + "_u16");
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0xb9 + i, gpu::gcn::IsaMode::kNeo),
-              std::string("v_cmpx_") + int_cond[i] + "_u16");
+              base::String("v_cmpx_") + int_cond[i] + "_u16");
   }
   EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, 0x8f, gpu::gcn::IsaMode::kNeo),
             "v_cmp_class_f16");
@@ -325,9 +326,9 @@ TEST(GcnDisasm, NeoVopcSixteenBitFamilies) {
   for (u32 i = 0; i < 16; i++) {
     const u32 cmp = (i < 8 ? 0xc8 : 0xe0) + i;
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, cmp, gpu::gcn::IsaMode::kNeo),
-              std::string("v_cmp_") + float_cond[i] + "_f16");
+              base::String("v_cmp_") + float_cond[i] + "_f16");
     EXPECT_EQ(Name(gpu::gcn::Enc::kVopc, cmp + 0x10, gpu::gcn::IsaMode::kNeo),
-              std::string("v_cmpx_") + float_cond[i] + "_f16");
+              base::String("v_cmpx_") + float_cond[i] + "_f16");
   }
 }
 

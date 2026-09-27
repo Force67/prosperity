@@ -10,12 +10,15 @@
 #include "base/arch.h"
 
 #include <cstring>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 namespace gpu::gcn::spirv {
 
 // Pack a literal string into SPIR-V words (LSB-first, null-terminated, zero
 // padded to a word boundary).
-void Module::PutString(std::vector<u32>& sec, const std::string& s) {
+void Module::PutString(base::Vector<u32>& sec, const base::String& s) {
   u32 w = 0;
   int b = 0;
   const auto push = [&](u8 c) {
@@ -33,9 +36,9 @@ void Module::PutString(std::vector<u32>& sec, const std::string& s) {
     sec.push_back(w);  // flush trailing partial word (incl. padding)
 }
 
-void Module::Instr(std::vector<u32>& sec,
+void Module::Instr(base::Vector<u32>& sec,
                    spv::Op op,
-                   const std::vector<u32>& ops) {
+                   const base::Vector<u32>& ops) {
   const u32 wc = 1 + static_cast<u32>(ops.size());
   sec.push_back((wc << 16) | static_cast<u32>(op));
   sec.insert(sec.end(), ops.begin(), ops.end());
@@ -45,7 +48,7 @@ Module::Module() {
   Instr(caps_, spv::Op::OpCapability,
         {static_cast<u32>(spv::Capability::Shader)});
   glsl_ext_ = Alloc();
-  std::vector<u32> ops{glsl_ext_};
+  base::Vector<u32> ops{glsl_ext_};
   PutString(ops, "GLSL.std.450");
   Instr(ext_imports_, spv::Op::OpExtInstImport, ops);
   Instr(mem_model_, spv::Op::OpMemoryModel,
@@ -118,12 +121,12 @@ Id Module::TypeRuntimeArray(Id elem) {
   Instr(types_consts_, spv::Op::OpTypeRuntimeArray, {id, elem});
   return Cached(k, id);
 }
-Id Module::TypeStruct(const std::vector<Id>& members) {
+Id Module::TypeStruct(const base::Vector<Id>& members) {
   auto it = struct_cache_.find(members);
   if (it != struct_cache_.end())
     return it->second;
   const Id id = Alloc();
-  std::vector<u32> ops{id};
+  base::Vector<u32> ops{id};
   ops.insert(ops.end(), members.begin(), members.end());
   Instr(types_consts_, spv::Op::OpTypeStruct, ops);
   struct_cache_[members] = id;
@@ -140,14 +143,14 @@ Id Module::TypePointer(spv::StorageClass sc, Id pointee) {
         {id, static_cast<u32>(sc), pointee});
   return Cached(k, id);
 }
-Id Module::TypeFunction(Id ret, const std::vector<Id>& params) {
-  std::vector<Id> key{ret};
+Id Module::TypeFunction(Id ret, const base::Vector<Id>& params) {
+  base::Vector<Id> key{ret};
   key.insert(key.end(), params.begin(), params.end());
   auto it = fn_type_cache_.find(key);
   if (it != fn_type_cache_.end())
     return it->second;
   const Id id = Alloc();
-  std::vector<u32> ops{id, ret};
+  base::Vector<u32> ops{id, ret};
   ops.insert(ops.end(), params.begin(), params.end());
   Instr(types_consts_, spv::Op::OpTypeFunction, ops);
   fn_type_cache_[key] = id;
@@ -216,9 +219,9 @@ Id Module::ConstBool(bool v) {
         {t, id});
   return Cached(k, id);
 }
-Id Module::ConstComposite(Id type, const std::vector<Id>& parts) {
+Id Module::ConstComposite(Id type, const base::Vector<Id>& parts) {
   const Id id = Alloc();
-  std::vector<u32> ops{type, id};
+  base::Vector<u32> ops{type, id};
   ops.insert(ops.end(), parts.begin(), parts.end());
   Instr(types_consts_, spv::Op::OpConstantComposite, ops);
   return id;
@@ -236,7 +239,7 @@ Id Module::ConstNull(Id type) {
 // ---- globals / decorations -------------------------------------------------
 Id Module::Variable(Id ptr_type, spv::StorageClass sc, Id init) {
   const Id id = Alloc();
-  std::vector<u32> ops{ptr_type, id, static_cast<u32>(sc)};
+  base::Vector<u32> ops{ptr_type, id, static_cast<u32>(sc)};
   if (init)
     ops.push_back(init);
   Instr(types_consts_, spv::Op::OpVariable, ops);
@@ -245,33 +248,33 @@ Id Module::Variable(Id ptr_type, spv::StorageClass sc, Id init) {
 }
 void Module::Decorate(Id target,
                       spv::Decoration dec,
-                      const std::vector<u32>& operands) {
-  std::vector<u32> ops{target, static_cast<u32>(dec)};
+                      const base::Vector<u32>& operands) {
+  base::Vector<u32> ops{target, static_cast<u32>(dec)};
   ops.insert(ops.end(), operands.begin(), operands.end());
   Instr(decos_, spv::Op::OpDecorate, ops);
 }
 void Module::MemberDecorate(Id struct_type,
                             u32 member,
                             spv::Decoration dec,
-                            const std::vector<u32>& operands) {
-  std::vector<u32> ops{struct_type, member, static_cast<u32>(dec)};
+                            const base::Vector<u32>& operands) {
+  base::Vector<u32> ops{struct_type, member, static_cast<u32>(dec)};
   ops.insert(ops.end(), operands.begin(), operands.end());
   Instr(decos_, spv::Op::OpMemberDecorate, ops);
 }
-void Module::Name(Id target, const std::string& n) {
-  std::vector<u32> ops{target};
+void Module::Name(Id target, const base::String& n) {
+  base::Vector<u32> ops{target};
   PutString(ops, n);
   Instr(debug_, spv::Op::OpName, ops);
 }
-void Module::MemberName(Id struct_type, u32 member, const std::string& n) {
-  std::vector<u32> ops{struct_type, member};
+void Module::MemberName(Id struct_type, u32 member, const base::String& n) {
+  base::Vector<u32> ops{struct_type, member};
   PutString(ops, n);
   Instr(debug_, spv::Op::OpMemberName, ops);
 }
 
-Id Module::String(const std::string& s) {
+Id Module::String(const base::String& s) {
   const Id id = Alloc();
-  std::vector<u32> ops{id};
+  base::Vector<u32> ops{id};
   PutString(ops, s);
   Instr(strings_, spv::Op::OpString, ops);
   return id;
@@ -283,9 +286,9 @@ void Module::Line(Id file, u32 line) {
 
 void Module::EntryPoint(spv::ExecutionModel model,
                         Id fn,
-                        const std::string& n,
-                        const std::vector<Id>& interface) {
-  std::vector<u32> ops{static_cast<u32>(model), fn};
+                        const base::String& n,
+                        const base::Vector<Id>& interface) {
+  base::Vector<u32> ops{static_cast<u32>(model), fn};
   PutString(ops, n);
   if (model == spv::ExecutionModel::MeshEXT) {
     // Mesh shading requires SPIR-V 1.4, whose entry-point interface includes
@@ -299,8 +302,8 @@ void Module::EntryPoint(spv::ExecutionModel model,
 }
 void Module::ExecMode(Id fn,
                       spv::ExecutionMode mode,
-                      const std::vector<u32>& operands) {
-  std::vector<u32> ops{fn, static_cast<u32>(mode)};
+                      const base::Vector<u32>& operands) {
+  base::Vector<u32> ops{fn, static_cast<u32>(mode)};
   ops.insert(ops.end(), operands.begin(), operands.end());
   Instr(exec_modes_, spv::Op::OpExecutionMode, ops);
 }
@@ -308,8 +311,8 @@ void Module::Capability(spv::Capability cap) {
   Instr(caps_, spv::Op::OpCapability, {static_cast<u32>(cap)});
 }
 
-void Module::Extension(const std::string& name) {
-  std::vector<u32> ops;
+void Module::Extension(const base::String& name) {
+  base::Vector<u32> ops;
   PutString(ops, name);
   Instr(exts_, spv::Op::OpExtension, ops);
 }
@@ -326,8 +329,8 @@ void Module::PhysicalStorageBuffers() {
 }
 
 Id Module::BeginFunction(Id ret_type, Id fn_type,
-                         const std::vector<Id>& parameter_types,
-                         std::vector<Id>* parameter_ids) {
+                         const base::Vector<Id>& parameter_types,
+                         base::Vector<Id>* parameter_ids) {
   const Id fn = Alloc();
   Instr(fn_body_, spv::Op::OpFunction,
         {ret_type, fn,
@@ -355,21 +358,21 @@ void Module::EndFunction() {
   cur_block_ = 0;
 }
 
-Id Module::Emit(spv::Op op, Id result_type, const std::vector<Id>& operands) {
+Id Module::Emit(spv::Op op, Id result_type, const base::Vector<Id>& operands) {
   const Id id = Alloc();
-  std::vector<u32> ops{result_type, id};
+  base::Vector<u32> ops{result_type, id};
   ops.insert(ops.end(), operands.begin(), operands.end());
   Instr(fn_body_, op, ops);
   return id;
 }
-void Module::EmitVoid(spv::Op op, const std::vector<Id>& operands) {
+void Module::EmitVoid(spv::Op op, const base::Vector<Id>& operands) {
   Instr(fn_body_, op, operands);
 }
 Id Module::ExtInst(Id result_type,
                    u32 glsl_op,
-                   const std::vector<Id>& operands) {
+                   const base::Vector<Id>& operands) {
   const Id id = Alloc();
-  std::vector<u32> ops{result_type, id, glsl_ext_, glsl_op};
+  base::Vector<u32> ops{result_type, id, glsl_ext_, glsl_op};
   ops.insert(ops.end(), operands.begin(), operands.end());
   Instr(fn_body_, spv::Op::OpExtInst, ops);
   return id;
@@ -381,8 +384,8 @@ Id Module::Load(Id type, Id ptr) {
 void Module::Store(Id ptr, Id value) {
   EmitVoid(spv::Op::OpStore, {ptr, value});
 }
-Id Module::AccessChain(Id ptr_type, Id base, const std::vector<Id>& indices) {
-  std::vector<Id> ops{base};
+Id Module::AccessChain(Id ptr_type, Id base, const base::Vector<Id>& indices) {
+  base::Vector<Id> ops{base};
   ops.insert(ops.end(), indices.begin(), indices.end());
   return Emit(spv::Op::OpAccessChain, ptr_type, ops);
 }
@@ -394,15 +397,15 @@ Id Module::CompositeExtract(Id type, Id composite, u32 index) {
   Instr(fn_body_, spv::Op::OpCompositeExtract, {type, id, composite, index});
   return id;
 }
-Id Module::CompositeConstruct(Id type, const std::vector<Id>& parts) {
+Id Module::CompositeConstruct(Id type, const base::Vector<Id>& parts) {
   return Emit(spv::Op::OpCompositeConstruct, type, parts);
 }
 Id Module::VectorShuffle(Id type,
                          Id a,
                          Id b,
-                         const std::vector<u32>& comps) {
+                         const base::Vector<u32>& comps) {
   const Id id = Alloc();
-  std::vector<u32> ops{type, id, a, b};
+  base::Vector<u32> ops{type, id, a, b};
   ops.insert(ops.end(), comps.begin(), comps.end());
   Instr(fn_body_, spv::Op::OpVectorShuffle, ops);
   return id;
@@ -426,8 +429,8 @@ void Module::BranchConditional(Id cond, Id t, Id f) {
 }
 void Module::Switch(Id selector,
                     Id default_label,
-                    const std::vector<std::pair<u32, Id>>& cases) {
-  std::vector<u32> ops{selector, default_label};
+                    const base::Vector<base::Pair<u32, Id>>& cases) {
+  base::Vector<u32> ops{selector, default_label};
   for (const auto& c : cases) {
     ops.push_back(c.first);
     ops.push_back(c.second);
@@ -445,14 +448,14 @@ void Module::Kill() {
 }
 
 // ---- assembly --------------------------------------------------------------
-std::vector<u32> Module::Assemble() const {
-  std::vector<u32> out;
+base::Vector<u32> Module::Assemble() const {
+  base::Vector<u32> out;
   out.push_back(spv::MagicNumber);  // 0x07230203
   out.push_back(version_);
   out.push_back(0);                 // generator (0 = unknown)
   out.push_back(bound_);            // id bound
   out.push_back(0);                 // schema
-  const auto append = [&](const std::vector<u32>& s) {
+  const auto append = [&](const base::Vector<u32>& s) {
     out.insert(out.end(), s.begin(), s.end());
   };
   append(caps_);

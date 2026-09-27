@@ -13,15 +13,21 @@
 
 #include "archive_backend.h"
 
-#include <algorithm>
 #include <cstring>
-#include <mutex>
-#include <unordered_map>
 
 #include <zlib.h>
 
 #include <logger/logger.h>
 #include <utl/file.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/unique_pointer.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace vfs {
 namespace {
@@ -72,8 +78,8 @@ public:
     // scan the tail backwards for its signature instead of assuming a fixed
     // position, and require the comment length to run exactly to EOF so a
     // stray signature inside the comment cannot win.
-    u64 win = std::min<u64>(fileSize_, 22 + 0xFFFF);
-    std::vector<u8> tail(win);
+    u64 win = base::Min<u64>(fileSize_, 22 + 0xFFFF);
+    base::Vector<u8> tail(win);
     if (!pread(fileSize_ - win, tail.data(), win))
       return false;
     for (i64 i = static_cast<i64>(win) - 22; i >= 0; --i) {
@@ -106,11 +112,11 @@ public:
     return false;
   }
 
-  bool index(std::vector<ArchiveEntry> &out) override {
-    std::lock_guard<std::mutex> lk(mtx_);
+  bool index(base::Vector<ArchiveEntry> &out) override {
+    base::LockGuard<base::Mutex> lk(mtx_);
     if (cdSize_ > (1ull << 30)) // a sane central directory is a few MB
       return false;
-    std::vector<u8> cd(cdSize_);
+    base::Vector<u8> cd(cdSize_);
     if (!pread(cdOff_, cd.data(), cdSize_))
       return false;
 
@@ -162,7 +168,7 @@ public:
 
       // Bit 11 flags a UTF-8 name; either way the bytes pass through as-is
       // (legacy CP437 names are not transcoded).
-      std::string nm(reinterpret_cast<const char *>(h + 46), nameLen);
+      base::String nm(reinterpret_cast<const char *>(h + 46), nameLen);
       for (auto &c : nm)
         if (c == '\\')
           c = '/';
@@ -186,14 +192,14 @@ public:
       }
 
       ArchiveEntry e;
-      e.path = std::move(nm);
+      e.path = base::move(nm);
       e.size = uncomp;
       e.packedSize = comp;
       e.dataOffset = 0; // resolved lazily from the local header
       e.extra = lho;
       e.method = method;
       e.crc = crc;
-      out.push_back(std::move(e));
+      out.push_back(base::move(e));
     }
     LOG_INFO("zip: indexed {} files ({} skipped)", out.size(), skipped);
     return true;
@@ -205,9 +211,9 @@ public:
       return -1;
     if (static_cast<u64>(off) >= entry.size)
       return 0;
-    u64 want = std::min<u64>(len, entry.size - static_cast<u64>(off));
+    u64 want = base::Min<u64>(len, entry.size - static_cast<u64>(off));
 
-    std::lock_guard<std::mutex> lk(mtx_);
+    base::LockGuard<base::Mutex> lk(mtx_);
     i64 ds = dataStart(entry);
     if (ds < 0)
       return -1;
@@ -226,7 +232,7 @@ public:
     if (skip_.empty())
       skip_.resize(256 << 10);
     while (s->outPos < static_cast<u64>(off)) {
-      u64 chunk = std::min<u64>(skip_.size(), off - s->outPos);
+      u64 chunk = base::Min<u64>(skip_.size(), off - s->outPos);
       if (inflateTo(*s, skip_.data(), chunk) != static_cast<i64>(chunk)) {
         drop(*s);
         return -1;
@@ -266,7 +272,7 @@ public:
 private:
   struct Session {
     z_stream zs{};
-    std::vector<u8> in;
+    base::Vector<u8> in;
     u64 key = 0;      // entry identity: local header offset
     u64 filePos = 0;  // next compressed byte, absolute in the archive
     u64 compLeft = 0;
@@ -301,7 +307,7 @@ private:
   }
 
   bool fill(Session &s) {
-    u64 n = std::min<u64>(s.in.size(), s.compLeft);
+    u64 n = base::Min<u64>(s.in.size(), s.compLeft);
     if (n == 0 || !pread(s.filePos, s.in.data(), n))
       return false;
     s.zs.next_in = s.in.data();
@@ -317,7 +323,7 @@ private:
       if (s.zs.avail_in == 0 && s.compLeft > 0 && !fill(s))
         return -1;
       s.zs.next_out = dst + done;
-      uInt avail = static_cast<uInt>(std::min<u64>(want - done, 1u << 30));
+      uInt avail = static_cast<uInt>(base::Min<u64>(want - done, 1u << 30));
       s.zs.avail_out = avail;
       int rc = ::inflate(&s.zs, Z_NO_FLUSH);
       u64 got = avail - s.zs.avail_out;
@@ -385,19 +391,19 @@ private:
   }
 
   utl::File file_;
-  std::mutex mtx_;
+  base::Mutex mtx_;
   u64 fileSize_ = 0;
   u64 cdOff_ = 0, cdSize_ = 0, cdCount_ = 0;
-  std::unordered_map<u64, u64> dataOff_;
-  std::vector<u8> skip_;
+  base::HashMap<u64, u64> dataOff_;
+  base::Vector<u8> skip_;
   Session sess_[4];
   u64 stamp_ = 0;
 };
 
 } // namespace
 
-std::unique_ptr<ArchiveBackend> openZipBackend(const base::String &path) {
-  auto b = std::make_unique<ZipBackend>(path);
+base::UniquePointer<ArchiveBackend> openZipBackend(const base::String &path) {
+  auto b = base::MakeUnique<ZipBackend>(path);
   if (!b->sniff())
     return nullptr;
   return b;

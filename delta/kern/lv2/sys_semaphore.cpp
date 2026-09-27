@@ -11,15 +11,19 @@
 #include <base/logging.h>
 
 #include "wait_probe.h"
-#include <chrono>
 #include <cstdio>
-#include <unordered_map>
 
 #include "error_table.h"
 #include "kern/proc.h"
 #include "sys_mem.h"
 #include "sys_semaphore.h"
 #include <utl/options.h>
+#include <base/containers/map.h>
+#include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 // DELTA_OSEM_TRACE=<id>: every wait/post on one semaphore, with the guest tid.
@@ -44,14 +48,14 @@ static void osemTrace(const char *what, int id, int n, int count) {
 }
 
 // Named semaphores, so osem_open(name) finds the one osem_create(name) made.
-static std::mutex g_semRegM;
-static std::unordered_map<std::string, semaphore *> g_semByName;
+static base::Mutex g_semRegM;
+static base::HashMap<base::String, semaphore *> g_semByName;
 
 semaphore::semaphore(objectTable &objects, const char *nm, int init, int max)
     : kObject(objects, oType::semaphore), count(init), maxCount(max), initCount(init) {
   if (nm && *nm) {
     name = nm;
-    std::lock_guard<std::mutex> lk(g_semRegM);
+    base::LockGuard<base::Mutex> lk(g_semRegM);
     g_semByName[nm] = this;
   }
 }
@@ -59,7 +63,7 @@ semaphore::semaphore(objectTable &objects, const char *nm, int init, int max)
 int semaphore::wait(int need, u32 *timeoutUs) {
   if (need <= 0)
     return -SysError::eINVAL;
-  std::unique_lock<std::mutex> lk(m);
+  base::UniqueLock<base::Mutex> lk(m);
   // A request larger than the ceiling can never succeed: the kernel rejects it
   // outright with EINVAL rather than parking the thread forever.
   if (maxCount > 0 && need > maxCount)
@@ -69,9 +73,9 @@ int semaphore::wait(int need, u32 *timeoutUs) {
     waiters++;
     bool ok = true;
     if (timeoutUs)
-      ok = cv.wait_for(lk, std::chrono::microseconds(*timeoutUs), enough);
+      ok = cv.WaitFor(lk, base::Microseconds(*timeoutUs), enough);
     else
-      cv.wait(lk, enough);
+      cv.Wait(lk, enough);
     waiters--;
     if (!ok)
       return -SysError::eTIMEDOUT;
@@ -83,7 +87,7 @@ int semaphore::wait(int need, u32 *timeoutUs) {
 int semaphore::trywait(int need) {
   if (need <= 0)
     return -SysError::eINVAL;
-  std::unique_lock<std::mutex> lk(m);
+  base::UniqueLock<base::Mutex> lk(m);
   if (count < need) {
     // Distinguish an impossible request (need > ceiling => EINVAL) from a
     // momentarily-unavailable one (=> EBUSY).
@@ -98,18 +102,18 @@ int semaphore::trywait(int need) {
 int semaphore::post(int n) {
   if (n <= 0)
     return -SysError::eINVAL;
-  std::lock_guard<std::mutex> lk(m);
+  base::LockGuard<base::Mutex> lk(m);
   // The kernel rejects a post that would push the count past maxCount and leaves
   // the count untouched (returns EINVAL).
   if (maxCount > 0 && count + n > maxCount)
     return -SysError::eINVAL;
   count += n;
-  cv.notify_all();
+  cv.NotifyAll();
   return 0;
 }
 
 int semaphore::cancel(int setCount, int *numWaiters) {
-  std::lock_guard<std::mutex> lk(m);
+  base::LockGuard<base::Mutex> lk(m);
   if (maxCount > 0 && setCount > maxCount)
     return -SysError::eINVAL;
   // Report the waiter count before waking: each woken thread will decrement it
@@ -120,7 +124,7 @@ int semaphore::cancel(int setCount, int *numWaiters) {
     count = initCount;  // negative => reset to the create-time value
   else
     count = setCount;
-  cv.notify_all();
+  cv.NotifyAll();
   return 0;
 }
 
@@ -140,7 +144,7 @@ int PS4ABI sys_osem_create(const char *name, u32 attr, int init, int max) {
 
 int PS4ABI sys_osem_open(const char *name) {
   {
-    std::lock_guard<std::mutex> lk(g_semRegM);
+    base::LockGuard<base::Mutex> lk(g_semRegM);
     auto it = name ? g_semByName.find(name) : g_semByName.end();
     if (it != g_semByName.end())
       return it->second->handle();
@@ -158,7 +162,7 @@ int PS4ABI sys_osem_delete(int id) {
   if (!s)
     return -SysError::eSRCH;
   {
-    std::lock_guard<std::mutex> lk(g_semRegM);
+    base::LockGuard<base::Mutex> lk(g_semRegM);
     if (!s->fname().empty())
       g_semByName.erase(s->fname().c_str());
   }

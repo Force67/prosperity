@@ -10,10 +10,11 @@
 
 #include <base.h>
 #include "base/arch.h"
-#include <condition_variable>
-#include <mutex>
 
 #include "kern/object.h"
+#include <base/strings/xstring.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/mutex.h>
 
 namespace krnl {
 class proc;
@@ -60,8 +61,8 @@ public:
   int value() const { return count; }
 
 private:
-  std::mutex m;
-  std::condition_variable cv;
+  base::Mutex m;
+  base::ConditionVariable cv;
   int count;
   int maxCount;
   int initCount;

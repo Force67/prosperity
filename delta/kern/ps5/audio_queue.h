@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <cstddef>
 
 #include "base/arch.h"
@@ -15,17 +14,18 @@ namespace krnl::ps5 {
 inline u32 ConsumeAudioOut2Block(u8* memory, size_t size) {
   if (!memory || size < 0x2508)
     return 0;
-  const auto produced = std::atomic_ref<u64>(
-      *reinterpret_cast<u64*>(memory + 0x1c80)).load(std::memory_order_acquire);
-  auto consumer = std::atomic_ref<u64>(*reinterpret_cast<u64*>(memory + 0x2500));
-  const u64 consumed = consumer.load(std::memory_order_relaxed);
+  // Shared with the guest: plain memory accessed atomically in place.
+  const u64 produced = __atomic_load_n(
+      reinterpret_cast<u64*>(memory + 0x1c80), __ATOMIC_ACQUIRE);
+  u64* consumer = reinterpret_cast<u64*>(memory + 0x2500);
+  const u64 consumed = __atomic_load_n(consumer, __ATOMIC_RELAXED);
   const u32 frames = *reinterpret_cast<const volatile u32*>(memory + 0x1c88);
   const u32 capacity = *reinterpret_cast<const volatile u32*>(memory + 0x1c8c);
   const u64 pending = produced - consumed;
   if (!pending || !capacity || capacity > 16 || pending > capacity ||
       !frames || frames > 2048 || (frames & 0x7f))
     return 0;
-  consumer.store(consumed + 1, std::memory_order_release);
+  __atomic_store_n(consumer, consumed + 1, __ATOMIC_RELEASE);
   return frames;
 }
 

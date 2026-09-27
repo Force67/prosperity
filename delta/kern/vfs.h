@@ -9,17 +9,17 @@
  */
 
 #include "base/arch.h"
-#include <memory>
-#include <string>
-#include <vector>
 
 #include <base/strings/xstring.h>
 #include <utl/file.h>
+#include <base/containers/vector.h>
+#include <base/memory/shared_pointer.h>
+#include <base/memory/unique_pointer.h>
 
 namespace krnl::vfs {
 // One entry in a directory listing.
 struct DirEntry {
-  std::string name;
+  base::String name;
   bool isDir;
 };
 // Map a guest path prefix (e.g. "/app0") onto a host directory. Longest prefix
@@ -63,11 +63,11 @@ struct VirtualFile {
 // prefix and keeps its leading '/', e.g. "/eboot.bin".
 struct VirtualProvider {
   virtual ~VirtualProvider() = default;
-  virtual std::unique_ptr<VirtualFile> open(const char *relPath) = 0;
+  virtual base::UniquePointer<VirtualFile> open(const char *relPath) = 0;
   virtual bool stat(const char *relPath, i64 &size) = 0;
   // List the immediate children of a directory. Returns false if relPath is not
   // a directory (or listing is unsupported). Default: not a directory.
-  virtual bool list(const char * /*relPath*/, std::vector<DirEntry> & /*out*/) {
+  virtual bool list(const char * /*relPath*/, base::Vector<DirEntry> & /*out*/) {
     return false;
   }
   // Whether relPath names a directory. A provider's stat() only knows files, so
@@ -75,7 +75,7 @@ struct VirtualProvider {
   // "<level>/cinematics" to decide whether a level has any) is told it does not
   // exist. Providers that can answer cheaply should override.
   virtual bool isDir(const char *relPath) {
-    std::vector<DirEntry> children;
+    base::Vector<DirEntry> children;
     return list(relPath, children);
   }
 };
@@ -83,7 +83,7 @@ struct VirtualProvider {
 // Map a guest path prefix onto an on-demand provider (kept alive for the
 // process lifetime).
 void mountVirtual(const char *guestPrefix,
-                  std::shared_ptr<VirtualProvider> provider);
+                  base::SharedPointer<VirtualProvider> provider);
 
 // Open a guest path for reading, resolving both host and virtual mounts.
 // Returns an empty File (Exists() == false) if nothing matches / the file is
@@ -94,18 +94,18 @@ utl::File openRead(const char *guestPath);
 bool stat(const char *guestPath, i64 &size, bool &isDir);
 
 // List a directory's immediate children. Returns false if not a directory.
-bool listDir(const char *guestPath, std::vector<DirEntry> &out);
+bool listDir(const char *guestPath, base::Vector<DirEntry> &out);
 
 // The booted title's TITLE_ID (e.g. "CUSA00792"), or empty if unknown. Set once
 // at boot by dcore from the pkg's param.sfo (the outer PKG metadata entry, which
 // is the only copy for titles like Isaac). savedata reads it to give each title
 // its own host save root.
-void setTitleId(const std::string &id);
-const std::string &titleId();
+void setTitleId(const base::String &id);
+const base::String &titleId();
 
 // Small content cache keyed by a short name (SOTTR workaround: the engine's
 // async manifest reader races, so we cache the real manifest contents at mount
 // and let the count-setter fill the header buffer with correct data).
-void cacheFile(const std::string &key, std::vector<u8> data);
-const std::vector<u8> *getCachedFile(const char *key);
+void cacheFile(const base::String &key, base::Vector<u8> data);
+const base::Vector<u8> *getCachedFile(const char *key);
 } // namespace krnl::vfs

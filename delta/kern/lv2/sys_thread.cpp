@@ -15,23 +15,13 @@
 
 #include "wait_probe.h"
 #include "kern/thread_names.h"
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <chrono>
 #include <cstdlib>
-#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
-#include <mutex>
-#include <optional>
-#include <string>
-#include <thread>
-#include <tuple>
 #include <pthread.h>
-#include <unordered_map>
-#include <vector>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include <utl/mem.h>
 
@@ -41,6 +31,20 @@
 #include "cpu/cpu_backend.h"
 #include "sys_thread.h"
 #include <utl/options.h>
+#include <base/threading/thread.h>
+#include <base/algorithm.h>
+#include <base/atomic.h>
+#include <base/containers/array.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/shared_pointer.h>
+#include <base/optional.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(const char *, kHostStackMb, "DELTA_HOST_STACK_MB", nullptr);
@@ -70,7 +74,7 @@ moduleInfo *called_in(void *addr);
 
 // Per-thread guest thread id (sys_thr_self). Main thread is 1.
 static DELTA_TLS_IE thread_local u32 t_tid = 1;
-static std::atomic<u32> g_nextTid{2};
+static base::Atomic<u32> g_nextTid{2};
 
 // Calling thread's guest tid TLS; the FEX watchdog maps umutex owner words to
 // the thread that holds the lock with it.
@@ -78,28 +82,28 @@ const u32 *currentGuestTidPtr() { return &t_tid; }
 
 // guest tid -> host tid. A umutex owner word names a guest thread; finding out
 // what that thread is doing means finding its OS thread first.
-static std::atomic<long> g_hostByGuest[4096];
+static base::Atomic<long> g_hostByGuest[4096];
 
 void noteGuestThreadHost(u32 gtid) {
   if (gtid < 4096)
     g_hostByGuest[gtid].store(static_cast<long>(::syscall(SYS_gettid)),
-                              std::memory_order_relaxed);
+                              base::memory_order_relaxed);
 }
 
 long hostTidForGuest(u32 gtid) {
-  return gtid < 4096 ? g_hostByGuest[gtid].load(std::memory_order_relaxed) : 0;
+  return gtid < 4096 ? g_hostByGuest[gtid].load(base::memory_order_relaxed) : 0;
 }
 
 // Thread-startup handshake: thr_new blocks until the new thread reaches its
 // first sync point, so the main thread doesn't read not-yet-produced shared state.
-static std::mutex g_startM;
-static std::condition_variable g_startCv;
-static DELTA_TLS_IE thread_local std::atomic<bool> *t_started = nullptr;
+static base::Mutex g_startM;
+static base::ConditionVariable g_startCv;
+static DELTA_TLS_IE thread_local base::Atomic<bool> *t_started = nullptr;
 
 static void markThreadStarted() {
   if (t_started && !t_started->exchange(true)) {
-    std::lock_guard<std::mutex> lk(g_startM);
-    g_startCv.notify_all();
+    base::LockGuard<base::Mutex> lk(g_startM);
+    g_startCv.NotifyAll();
   }
 }
 
@@ -184,7 +188,7 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   auto fn = p->start_func;
   auto arg = p->arg;
   auto fsbase = reinterpret_cast<u64>(p->tls_base);
-  auto started = std::make_shared<std::atomic<bool>>(false);
+  auto started = base::MakeShared<base::Atomic<bool>>(false);
 
   // Run on the host thread's large stack, not the guest's (64 KiB overflows
   // our syscall handlers); the guest thread is created on THIS thread as FEX
@@ -198,8 +202,14 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
   const size_t gss = p->stack_size;
   const char *hsEnv = kHostStackMb;
   if (hsEnv) {
-    auto *ctx = new std::tuple<void *, u32, std::shared_ptr<std::atomic<bool>>,
-                               void *, size_t>(gthread, tid, started, gsb, gss);
+    struct Start {
+      void *gthread;
+      u32 tid;
+      base::SharedPointer<base::Atomic<bool>> started;
+      void *stackBase;
+      size_t stackSize;
+    };
+    auto *ctx = new Start{gthread, tid, started, gsb, gss};
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     size_t hostStack = (size_t)std::strtoull(hsEnv, nullptr, 0) * 1024 * 1024;
@@ -207,14 +217,12 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
     pthread_attr_setstacksize(&attr, hostStack);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     auto trampoline = +[](void *pv) -> void * {
-      auto *c = static_cast<std::tuple<void *, u32,
-                                       std::shared_ptr<std::atomic<bool>>,
-                                       void *, size_t> *>(pv);
-      t_tid = std::get<1>(*c);
+      auto *c = static_cast<Start *>(pv);
+      t_tid = c->tid;
       noteGuestThreadHost(t_tid);
-      t_started = std::get<2>(*c).get();
-      void *gt = std::get<0>(*c);
-      registerGuestThreadStack(std::get<3>(*c), std::get<4>(*c));
+      t_started = c->started.get();
+      void *gt = c->gthread;
+      registerGuestThreadStack(c->stackBase, c->stackSize);
       delete c;
       cpu::backend().runGuestThread(gt);
       unregisterGuestThreadStack();
@@ -223,33 +231,33 @@ int PS4ABI sys_thr_new(thr_param *p, int size) {
     pthread_t th;
     if (pthread_create(&th, &attr, trampoline, ctx) != 0) {
       delete ctx;
-      std::thread([gthread, tid, started, gsb, gss] {
+      base::SpawnDetachedThread("sys_thread", [gthread, tid, started, gsb, gss] {
         t_tid = tid;
         noteGuestThreadHost(t_tid);
         t_started = started.get();
         registerGuestThreadStack(gsb, gss);
         cpu::backend().runGuestThread(gthread);
         unregisterGuestThreadStack();
-      }).detach();
+      });
     }
     pthread_attr_destroy(&attr);
   } else {
-    std::thread([gthread, tid, started, gsb, gss] {
+    base::SpawnDetachedThread("sys_thread", [gthread, tid, started, gsb, gss] {
       t_tid = tid;
       noteGuestThreadHost(t_tid);
       t_started = started.get();
       registerGuestThreadStack(gsb, gss);
       cpu::backend().runGuestThread(gthread);
       unregisterGuestThreadStack();
-    }).detach();
+    });
   }
 
   // Wait for the new thread's first sync point so it wins the races the game
   // expects; bounded, DELTA_NO_THR_BARRIER disables (for a spawner that is
   // itself the producer).
   if (!kNoThrBarrier) {
-    std::unique_lock<std::mutex> lk(g_startM);
-    g_startCv.wait_for(lk, std::chrono::milliseconds(200),
+    base::UniqueLock<base::Mutex> lk(g_startM);
+    g_startCv.WaitFor(lk, base::Milliseconds(200),
                        [&] { return started->load(); });
   }
   return 0;
@@ -345,11 +353,11 @@ struct WaitChan {
   }
 };
 struct Bucket {
-  std::mutex m;
-  std::condition_variable cv;
-  std::unordered_map<const void *, WaitChan> chan;
+  base::Mutex m;
+  base::ConditionVariable cv;
+  base::HashMap<const void *, WaitChan> chan;
 };
-std::array<Bucket, 256> g_umtxBuckets;
+base::Array<Bucket, 256> g_umtxBuckets;
 Bucket &umtxBucket(const void *a) {
   return g_umtxBuckets[(reinterpret_cast<uintptr_t>(a) >> 4) & 0xff];
 }
@@ -358,8 +366,8 @@ constexpr u32 UMUTEX_CONTESTED = 0x80000000u;
 // and no wake syscall (Doom64's job scheduler stalled ~1s/frame). The tick is
 // re-poll only; no wait returns to the guest because of it (engines deref
 // half-built state on a spurious return).
-std::chrono::milliseconds umtxTimeout() {
-  return std::chrono::milliseconds(kUmtxTimeoutMs);
+base::TimeDelta umtxTimeout() {
+  return base::Milliseconds(kUmtxTimeoutMs);
 }
 
 // One report per stalled wait; the object word names who it waits for
@@ -368,14 +376,14 @@ struct StallReport {
   const char *op;
   const void *obj;
   const void *obj2 = nullptr;  // a CV wait's umutex, whose owner is the other half
-  std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+  base::TimeTicks start = base::TimeTicks::Now();
   bool done = kUmtxStallSecs <= 0;
 
   void tick() {
     if (done)
       return;
-    const auto waited = std::chrono::steady_clock::now() - start;
-    if (waited < std::chrono::seconds(kUmtxStallSecs))
+    const auto waited = base::TimeTicks::Now() - start;
+    if (waited < base::Seconds(kUmtxStallSecs))
       return;
     done = true;
     const u32 word = obj ? *static_cast<const volatile u32 *>(obj) : 0;
@@ -385,8 +393,8 @@ struct StallReport {
               "(owner gtid={}) waited {}s",
               op, obj, word, word & 0x7fffffffu, obj2, word2,
               word2 & 0x7fffffffu,
-              (long long)std::chrono::duration_cast<std::chrono::seconds>(
-                  waited).count());
+              (long long)(
+                  waited).InSeconds());
     // Name what the OWNER is stuck in; that wait is the other half of the cycle.
     if (std::strcmp(op, "MUTEX_WAIT") == 0) {
       const u32 owner_gtid = word & 0x7fffffffu;
@@ -409,25 +417,24 @@ struct GuestTimespec {
   i64 sec;
   i64 nsec;
 };
-using SteadyTp = std::chrono::steady_clock::time_point;
-std::optional<SteadyTp> umtxRelDeadline(const void *b) {
+using SteadyTp = base::TimeTicks;
+base::Optional<SteadyTp> umtxRelDeadline(const void *b) {
   if (!b)
-    return std::nullopt;
+    return base::nullopt;
   auto *ts = static_cast<const GuestTimespec *>(b);
-  auto d = std::chrono::seconds(ts->sec) + std::chrono::nanoseconds(ts->nsec);
-  if (d < d.zero())
-    d = d.zero();
-  return std::chrono::steady_clock::now() +
-         std::chrono::duration_cast<std::chrono::steady_clock::duration>(d);
+  auto d = base::Seconds(ts->sec) + base::Microseconds((ts->nsec) / 1000);
+  if (d < base::TimeDelta())
+    d = base::TimeDelta();
+  return base::TimeTicks::Now() + d;
 }
 
 // CV_WAIT's val argument carries flags: with CVWAIT_ABSTIME the timespec is
 // absolute on the ucond's c_clockid clock; convert to a steady deadline.
 constexpr u64 kCvWaitAbsTime = 0x02;
-std::optional<SteadyTp> cvDeadline(const void *ucond, u64 flags,
+base::Optional<SteadyTp> cvDeadline(const void *ucond, u64 flags,
                                    const void *b) {
   if (!b)
-    return std::nullopt;
+    return base::nullopt;
   if (!(flags & kCvWaitAbsTime))
     return umtxRelDeadline(b);
   auto *ts = static_cast<const GuestTimespec *>(b);
@@ -435,12 +442,11 @@ std::optional<SteadyTp> cvDeadline(const void *ucond, u64 flags,
       static_cast<const u8 *>(ucond) + 8);  // ucond.c_clockid
   struct timespec now {};
   clock_gettime(clockid == 0 ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now);
-  auto rel = std::chrono::seconds(ts->sec - now.tv_sec) +
-             std::chrono::nanoseconds(ts->nsec - now.tv_nsec);
-  if (rel < rel.zero())
-    rel = rel.zero();
-  return std::chrono::steady_clock::now() +
-         std::chrono::duration_cast<std::chrono::steady_clock::duration>(rel);
+  auto rel = base::Seconds(ts->sec - now.tv_sec) +
+             base::Microseconds((ts->nsec - now.tv_nsec) / 1000);
+  if (rel < base::TimeDelta())
+    rel = base::TimeDelta();
+  return base::TimeTicks::Now() + rel;
 }
 
 void threadComm(char *out, size_t n) {
@@ -484,7 +490,7 @@ const AddrWatchList &addrWatchList() {
         win = std::strtoull(end + 1, &end, 16);
       if (base <= 1)                     // "=1" -> built-in probe address
         base = kAddrWatchDefault;
-      l.v[l.n++] = {base - std::min(base, win), base + win};
+      l.v[l.n++] = {base - base::Min(base, win), base + win};
       while (*end && *end != ',')
         ++end;
       p = *end == ',' ? end + 1 : end;
@@ -556,7 +562,7 @@ static void addrWatchLog(int op, const void *ptr, const void *a, u64 val,
   }
   if (!hitPtr && !hitA && !hitBatch)
     return;
-  static std::atomic<u32> n{0};
+  static base::Atomic<u32> n{0};
   if (n.fetch_add(1) >= addrWatchMax())
     return;
   char comm[32] = "";
@@ -573,7 +579,7 @@ static void addrWatchLog(int op, const void *ptr, const void *a, u64 val,
 static void addrWatchDump(const char *what, const void *p, u32 self) {
   if (!addrWatched(p))
     return;
-  static std::atomic<u32> n{0};
+  static base::Atomic<u32> n{0};
   if (n.fetch_add(1) >= addrWatchMax())
     return;
   char pre[80], at[160];
@@ -591,16 +597,16 @@ static void addrWatchDump(const char *what, const void *p, u32 self) {
 namespace umtxhist {
 constexpr size_t kSlots = 1024;
 struct Slot {
-  std::atomic<u64> key{0};  // hash of (op, addr, tid), 0 = empty
-  std::atomic<u64> n{0};
-  std::atomic<u64> addr{0};
-  std::atomic<u32> op{0};
-  std::atomic<u32> tid{0};
+  base::Atomic<u64> key{0};  // hash of (op, addr, tid), 0 = empty
+  base::Atomic<u64> n{0};
+  base::Atomic<u64> addr{0};
+  base::Atomic<u32> op{0};
+  base::Atomic<u32> tid{0};
 };
 Slot g_slots[kSlots];
-std::atomic<u64> g_op[64];
-std::atomic<u64> g_total{0};
-std::atomic<u64> g_dropped{0};
+base::Atomic<u64> g_op[64];
+base::Atomic<u64> g_total{0};
+base::Atomic<u64> g_dropped{0};
 
 bool enabled() {
   return kUmtxHist;
@@ -611,8 +617,8 @@ void startTimer();
 inline void count(int op, const void *ptr, u32 tid) {
   startTimer();
   const u64 a = reinterpret_cast<u64>(ptr);
-  g_total.fetch_add(1, std::memory_order_relaxed);
-  g_op[op & 63].fetch_add(1, std::memory_order_relaxed);
+  g_total.fetch_add(1, base::memory_order_relaxed);
+  g_op[op & 63].fetch_add(1, base::memory_order_relaxed);
   u64 key = (static_cast<u64>(op & 63) << 56) ^
                  (static_cast<u64>(tid) << 44) ^ a;
   if (!key)
@@ -620,28 +626,28 @@ inline void count(int op, const void *ptr, u32 tid) {
   size_t h = static_cast<size_t>((key * 0x9E3779B97F4A7C15ull) >> 54) % kSlots;
   for (size_t i = 0; i < 32; ++i) {
     Slot &s = g_slots[(h + i) % kSlots];
-    u64 k = s.key.load(std::memory_order_relaxed);
+    u64 k = s.key.load(base::memory_order_relaxed);
     if (k == key) {
-      s.n.fetch_add(1, std::memory_order_relaxed);
+      s.n.fetch_add(1, base::memory_order_relaxed);
       return;
     }
     if (k == 0) {
       u64 expect = 0;
       if (s.key.compare_exchange_strong(expect, key,
-                                        std::memory_order_relaxed)) {
-        s.addr.store(a, std::memory_order_relaxed);
-        s.op.store(static_cast<u32>(op), std::memory_order_relaxed);
-        s.tid.store(tid, std::memory_order_relaxed);
-        s.n.fetch_add(1, std::memory_order_relaxed);
+                                        base::memory_order_relaxed)) {
+        s.addr.store(a, base::memory_order_relaxed);
+        s.op.store(static_cast<u32>(op), base::memory_order_relaxed);
+        s.tid.store(tid, base::memory_order_relaxed);
+        s.n.fetch_add(1, base::memory_order_relaxed);
         return;
       }
-      if (s.key.load(std::memory_order_relaxed) == key) {
-        s.n.fetch_add(1, std::memory_order_relaxed);
+      if (s.key.load(base::memory_order_relaxed) == key) {
+        s.n.fetch_add(1, base::memory_order_relaxed);
         return;
       }
     }
   }
-  g_dropped.fetch_add(1, std::memory_order_relaxed);
+  g_dropped.fetch_add(1, base::memory_order_relaxed);
 }
 
 const char *opName(u32 op) {
@@ -682,11 +688,11 @@ void dump() {
       BASE_LOGI("umtxhist", "  op {:<2} {:<18} {}", i, opName(i),
                 (unsigned long long)n);
   struct Row { u64 n, addr; u32 op, tid; };
-  std::vector<Row> rows;
+  base::Vector<Row> rows;
   for (auto &s : g_slots)
     if (u64 n = s.n.load())
       rows.push_back({n, s.addr.load(), s.op.load(), s.tid.load()});
-  std::sort(rows.begin(), rows.end(),
+  base::Sort(rows.begin(), rows.end(),
             [](const Row &a, const Row &b) { return a.n > b.n; });
   for (size_t i = 0; i < rows.size() && i < 28; ++i)
     BASE_LOGI("umtxhist", "  {:<18} {:#012x} gtid={:<3} {}",
@@ -699,12 +705,12 @@ void dump() {
 // after a namespace-scope initializer would have asked.
 void startTimer() {
   static const bool once = [] {
-    std::thread([] {
+    base::SpawnDetachedThread("sys_thread", [] {
       for (;;) {
-        std::this_thread::sleep_for(std::chrono::seconds(20));
+        base::SleepForMilliseconds((20) * 1000);
         dump();
       }
-    }).detach();
+    });
     return true;
   }();
   (void)once;
@@ -714,7 +720,7 @@ void startTimer() {
 static void umtxTrace(int op, void *ptr, u32 self, u32 owner) {
   if (!kUmtxTrace)
     return;
-  static std::atomic<int> n{0};
+  static base::Atomic<int> n{0};
   if (n.fetch_add(1) < 4000)
     BASE_LOGI("umtx", "op={} ptr={:p} self={} owner={:#x}", op, ptr, self,
               owner);
@@ -727,17 +733,17 @@ static void umtxTrace(int op, void *ptr, u32 self, u32 owner) {
 namespace umtxwall {
 struct Acc {
   u32 tid = 0;
-  std::atomic<u64> ns{0};
-  std::atomic<u64> calls{0};
+  base::Atomic<u64> ns{0};
+  base::Atomic<u64> calls{0};
 };
-std::mutex g_mtx;
-std::vector<Acc *> g_accs;
+base::Mutex g_mtx;
+base::Vector<Acc *> g_accs;
 DELTA_TLS_IE thread_local Acc *t_acc = nullptr;
 // Which op is being hammered, and how long each spends. Same window.
-std::atomic<u64> g_op_n[64];
-std::atomic<u64> g_op_ns[64];
+base::Atomic<u64> g_op_n[64];
+base::Atomic<u64> g_op_ns[64];
 // How often the unlocked owner-word check answers the whole call.
-std::atomic<u64> g_fast[64];
+base::Atomic<u64> g_fast[64];
 
 bool enabled() {
   static const bool on = [] {
@@ -750,7 +756,7 @@ bool enabled() {
 Acc &acc() {
   if (!t_acc) {
     t_acc = new Acc{t_tid};
-    std::lock_guard<std::mutex> lk(g_mtx);
+    base::LockGuard<base::Mutex> lk(g_mtx);
     g_accs.push_back(t_acc);
   }
   return *t_acc;
@@ -758,11 +764,9 @@ Acc &acc() {
 
 // Report every ~2s from whichever thread notices; no hook in the frame loop.
 void maybeReport() {
-  static std::atomic<u64> last{0};
-  const auto now = std::chrono::steady_clock::now().time_since_epoch();
-  const u64 now_ns =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
-  u64 prev = last.load(std::memory_order_relaxed);
+  static base::Atomic<u64> last{0};
+  const u64 now_ns = u64(base::TickClock::NowNs());
+  u64 prev = last.load(base::memory_order_relaxed);
   if (!prev) {
     last.compare_exchange_strong(prev, now_ns);
     return;
@@ -772,7 +776,7 @@ void maybeReport() {
   if (!last.compare_exchange_strong(prev, now_ns))
     return;
   const double window = double(now_ns - prev);
-  std::lock_guard<std::mutex> lk(g_mtx);
+  base::LockGuard<base::Mutex> lk(g_mtx);
   base::String line1;
   base::FormatTo(line1, "over {:.1f}s:", window / 1e9);
   for (Acc *a : g_accs) {
@@ -799,24 +803,23 @@ void maybeReport() {
 }  // namespace umtxwall
 
 struct UmtxWallScope {
-  std::chrono::steady_clock::time_point t0;
+  base::TimeTicks t0;
   int op = -1;
   bool on = umtxwall::enabled();
   explicit UmtxWallScope(int o) : op(o) {
     if (on)
-      t0 = std::chrono::steady_clock::now();
+      t0 = base::TimeTicks::Now();
   }
   ~UmtxWallScope() {
     if (!on)
       return;
-    const u64 d = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::steady_clock::now() - t0)
-                           .count();
+    const u64 d = ((
+                           base::TimeTicks::Now() - t0).InMicroseconds() * 1000);
     auto &a = umtxwall::acc();
-    a.ns.fetch_add(d, std::memory_order_relaxed);
-    a.calls.fetch_add(1, std::memory_order_relaxed);
-    umtxwall::g_op_n[op & 63].fetch_add(1, std::memory_order_relaxed);
-    umtxwall::g_op_ns[op & 63].fetch_add(d, std::memory_order_relaxed);
+    a.ns.fetch_add(d, base::memory_order_relaxed);
+    a.calls.fetch_add(1, base::memory_order_relaxed);
+    umtxwall::g_op_n[op & 63].fetch_add(1, base::memory_order_relaxed);
+    umtxwall::g_op_ns[op & 63].fetch_add(d, base::memory_order_relaxed);
     umtxwall::maybeReport();
   }
 };
@@ -824,7 +827,6 @@ struct UmtxWallScope {
 int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
   UmtxWallScope _uw(op);
   WaitProbe _wp("umtx_op", (long)(long)ptr, (long)op);
-  using namespace std::chrono_literals;
   markThreadStarted();  // first sync point => our init is done
   if (umtxhist::enabled())
     umtxhist::count(op, ptr, t_tid);
@@ -843,26 +845,26 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
                            static_cast<u32>(val);
     };
     const auto dl = umtxRelDeadline(b);
-    std::unique_lock<std::mutex> lk(bk.m);
+    base::UniqueLock<base::Mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
     SimpleWaiter waiter;
     ch.queueSimple(waiter);
     while (!changed() && !waiter.selected) {
-      if (dl && std::chrono::steady_clock::now() >= *dl) {
+      if (dl && base::TimeTicks::Now() >= *dl) {
         ch.removeSimple(waiter);
         return -SysError::eTIMEDOUT;
       }
-      bk.cv.wait_for(lk, umtxTimeout());
+      bk.cv.WaitFor(lk, umtxTimeout());
     }
     ch.removeSimple(waiter);
     return 0;
   }
   case 17: { // UMTX_OP_MUTEX_WAIT: block while the umutex is owned
-    auto *p = static_cast<std::atomic<u32> *>(ptr);
+    auto *p = static_cast<base::Atomic<u32> *>(ptr);
     if (kUmtxInjectNs) {
-      const auto until = std::chrono::steady_clock::now() +
-                         std::chrono::nanoseconds(kUmtxInjectNs);
-      while (std::chrono::steady_clock::now() < until)
+      const auto until = base::TimeTicks::Now() +
+                         base::Microseconds((kUmtxInjectNs) / 1000);
+      while (base::TimeTicks::Now() < until)
         __builtin_ia32_pause();
     }
     // The word is usually already free by the time we get here (libthr calls
@@ -871,11 +873,11 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // them anyway cost ~1us across 2.9M calls/s in SotC, half the wall time of
     // every command-buffer-submitting thread.
     if ((p->load() & ~UMUTEX_CONTESTED) == 0) {
-      umtxwall::g_fast[17].fetch_add(1, std::memory_order_relaxed);
+      umtxwall::g_fast[17].fetch_add(1, base::memory_order_relaxed);
       return 0;
     }
     auto &bk = umtxBucket(ptr);
-    std::unique_lock<std::mutex> lk(bk.m);
+    base::UniqueLock<base::Mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
     u32 owner = p->load();
     // FreeBSD _do_lock_normal (kern_umtx.c, _UMUTEX_WAIT mode): a word that is
@@ -896,7 +898,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // harmless, libthr re-runs its CAS loop).
     StallReport stall{"MUTEX_WAIT", ptr};
     while ((p->load() & ~UMUTEX_CONTESTED) != 0 && ch.gen == g0) {
-      bk.cv.wait_for(lk, umtxTimeout());
+      bk.cv.WaitFor(lk, umtxTimeout());
       stall.tick();
     }
     ch.mutexWaiters--;
@@ -907,11 +909,11 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     auto &bk = umtxBucket(ptr);
     bool woke = false;
     {
-      std::lock_guard<std::mutex> lk(bk.m);
+      base::LockGuard<base::Mutex> lk(bk.m);
       woke = bk.chan[ptr].wakeSimple(val) != 0;
     }
     if (woke)
-      bk.cv.notify_all();
+      bk.cv.NotifyAll();
     return 0;
   }
   // FreeBSD do_wake_umutex/do_wake2_umutex: refuse to release anyone while the
@@ -922,16 +924,16 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
   // answering EINVAL parked Astro Bot's main thread in scePthreadMutexLock.
   case 23:   // PS5 UMTX_OP_MUTEX_WAKE2
   case 18: { // UMTX_OP_MUTEX_WAKE
-    auto *p = static_cast<std::atomic<u32> *>(ptr);
+    auto *p = static_cast<base::Atomic<u32> *>(ptr);
     // "Still held, so wake nobody" is decided by the owner word alone; the
     // release that just happened enters the kernel to do the waking (the word
     // stays CONTESTED while waiters are queued).
     if ((p->load() & ~UMUTEX_CONTESTED) != 0) {
-      umtxwall::g_fast[18].fetch_add(1, std::memory_order_relaxed);
+      umtxwall::g_fast[18].fetch_add(1, base::memory_order_relaxed);
       return 0;
     }
     auto &bk = umtxBucket(ptr);
-    std::unique_lock<std::mutex> lk(bk.m);
+    base::UniqueLock<base::Mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
     u32 owner = p->load();
     if ((owner & ~UMUTEX_CONTESTED) != 0) {
@@ -946,7 +948,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     if (ch.mutexWaiters != 0)
       ch.gen++;  // release the queued MUTEX_WAIT sleepers to re-CAS
     lk.unlock();
-    bk.cv.notify_all();
+    bk.cv.NotifyAll();
     return 0;
   }
   // Kernel-arbitrated mutex (PI/PROTECT): libthr hands the whole lock/unlock to
@@ -956,9 +958,9 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
   case 4:    // UMTX_OP_MUTEX_TRYLOCK
   case 5: {  // UMTX_OP_MUTEX_LOCK
     auto &bk = umtxBucket(ptr);
-    auto *p = static_cast<std::atomic<u32> *>(ptr);
+    auto *p = static_cast<base::Atomic<u32> *>(ptr);
     const u32 self = t_tid;
-    std::unique_lock<std::mutex> lk(bk.m);
+    base::UniqueLock<base::Mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
     bool queued = false;
     struct Dequeue {  // keep mutexWaiters exact on every exit path
@@ -995,7 +997,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
         ch.mutexWaiters++;
         queued = true;
       }
-      bk.cv.wait_for(lk, umtxTimeout());  // re-check on wake / safety timeout
+      bk.cv.WaitFor(lk, umtxTimeout());  // re-check on wake / safety timeout
     }
   }
   case 6: { // UMTX_OP_MUTEX_UNLOCK
@@ -1004,8 +1006,8 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // contested PI/PROTECT release). Re-checking would EPERM and make libthr
     // skip dequeueing ("Fatal error 'mutex is on list'"). Just release and wake.
     auto &bk = umtxBucket(ptr);
-    auto *p = static_cast<std::atomic<u32> *>(ptr);
-    std::unique_lock<std::mutex> lk(bk.m);
+    auto *p = static_cast<base::Atomic<u32> *>(ptr);
+    base::UniqueLock<base::Mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
     u32 owner = p->load();
     umtxTrace(6, ptr, t_tid, owner);
@@ -1018,7 +1020,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
                                           : UMUTEX_CONTESTED);
     ch.gen++;  // releases MUTEX_WAIT sleepers
     lk.unlock();
-    bk.cv.notify_all();
+    bk.cv.NotifyAll();
     return 0;
   }
   // CV_WAIT atomically releases the umutex (uaddr1=a) and sleeps on the ucond
@@ -1032,12 +1034,12 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     auto &cbk = umtxBucket(ptr);
     auto &mbk = umtxBucket(a);
     const auto dl = cvDeadline(ptr, val, b);
-    std::unique_lock<std::mutex> clk(cbk.m);
+    base::UniqueLock<base::Mutex> clk(cbk.m);
     auto &ch = cbk.chan[ptr];  // stable ref: unordered_map never moves nodes
     ch.waiters++;
     const u64 myTicket = ch.nextTicket++;
     addrWatchDump("cv-wait pre", ptr, t_tid);
-    static_cast<std::atomic<u32> *>(ptr)->store(1);  // c_has_waiters
+    static_cast<base::Atomic<u32> *>(ptr)->store(1);  // c_has_waiters
     addrWatchDump("cv-wait post", ptr, t_tid);
     if (a)
       addrWatchDump("cv-wait mutex", a, t_tid);
@@ -1059,8 +1061,8 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     const u64 g0 = ch.gen;
     if (a) {                           // release the mutex (waking its waiters)
       umtxTrace(8, a, t_tid,
-                static_cast<std::atomic<u32> *>(a)->load());
-      auto *m = static_cast<std::atomic<u32> *>(a);
+                static_cast<base::Atomic<u32> *>(a)->load());
+      auto *m = static_cast<base::Atomic<u32> *>(a);
       // Same release rule as op 6 (do_cv_wait calls do_unlock_umutex, not a raw
       // store): leave CONTESTED while 2+ waiters are queued, or the next
       // acquirer's release stays in userland and strands them.
@@ -1073,14 +1075,14 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
       };
       if (&mbk == &cbk) {              // same bucket: already locked
         releaseMutex(mbk.chan[a]);
-        mbk.cv.notify_all();
+        mbk.cv.NotifyAll();
       } else {
         clk.unlock();
         {
-          std::lock_guard<std::mutex> mlk(mbk.m);
+          base::LockGuard<base::Mutex> mlk(mbk.m);
           releaseMutex(mbk.chan[a]);
         }
-        mbk.cv.notify_all();
+        mbk.cv.NotifyAll();
         clk.lock();
       }
     }
@@ -1094,11 +1096,11 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
         ch.signals--;                  // exactly one queued sleeper consumes it
         break;
       }
-      if (dl && std::chrono::steady_clock::now() >= *dl) {
+      if (dl && base::TimeTicks::Now() >= *dl) {
         r = -SysError::eTIMEDOUT;
         break;
       }
-      cbk.cv.wait_for(clk, umtxTimeout());
+      cbk.cv.WaitFor(clk, umtxTimeout());
       if (watch && __builtin_memcmp(snap, ptr, sizeof(snap)) != 0) {
         __builtin_memcpy(snap, ptr, sizeof(snap));
         addrWatchDump("ucond changed", ptr, t_tid);
@@ -1111,28 +1113,28 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     addrWatchDump("cv-wait exit", ptr, t_tid);
     if (--ch.waiters == 0) {           // last one out lowers c_has_waiters
       ch.signals = 0;                  // unconsumed signals don't outlive waiters
-      static_cast<std::atomic<u32> *>(ptr)->store(0);
+      static_cast<base::Atomic<u32> *>(ptr)->store(0);
     }
     return r;
   }
   case 9: {  // UMTX_OP_CV_SIGNAL: release one waiter
     cvTrace("CV_SIGNAL", ptr, t_tid);
     auto &bk = umtxBucket(ptr);
-    std::lock_guard<std::mutex> lk(bk.m);
+    base::LockGuard<base::Mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
     if (ch.waiters > ch.signals) {     // signal with nobody waiting is lost
       ch.signals++;
       ch.signalCutoff = ch.nextTicket;  // only sleepers queued by now may take it
     }
-    bk.cv.notify_all();
+    bk.cv.NotifyAll();
     return 0;
   }
   case 10: { // UMTX_OP_CV_BROADCAST: release all waiters
     cvTrace("CV_BROADCAST", ptr, t_tid);
     auto &bk = umtxBucket(ptr);
-    std::lock_guard<std::mutex> lk(bk.m);
+    base::LockGuard<base::Mutex> lk(bk.m);
     bk.chan[ptr].gen++;
-    bk.cv.notify_all();
+    bk.cv.NotifyAll();
     return 0;
   }
   // Userland semaphore (struct _usem at ptr): SEM_WAIT publishes _has_waiters
@@ -1151,12 +1153,12 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     constexpr u32 kPreferReader = 0x0002u;
     const bool wr = op == 13;
     auto &bk = umtxBucket(ptr);
-    auto *p = static_cast<std::atomic<u32> *>(ptr);
+    auto *p = static_cast<base::Atomic<u32> *>(ptr);
     auto *blocked = reinterpret_cast<volatile u32 *>(
         static_cast<u8 *>(ptr) + (wr ? 12 : 8));
     const u32 flags = reinterpret_cast<volatile u32 *>(
         static_cast<u8 *>(ptr))[1];
-    std::unique_lock<std::mutex> lk(bk.m);
+    base::UniqueLock<base::Mutex> lk(bk.m);
     for (;;) {
       u32 st = p->load();
       if (wr) {
@@ -1185,7 +1187,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
       if (st != want && !p->compare_exchange_strong(st, want))
         continue;
       (*blocked)++;
-      bk.cv.wait_for(lk, umtxTimeout());  // re-check on wake / safety timeout
+      bk.cv.WaitFor(lk, umtxTimeout());  // re-check on wake / safety timeout
       (*blocked)--;
     }
   }
@@ -1195,10 +1197,10 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     constexpr u32 kReadWaiters = 0x20000000u;
     constexpr u32 kMaxReaders = 0x1fffffffu;
     auto &bk = umtxBucket(ptr);
-    auto *p = static_cast<std::atomic<u32> *>(ptr);
+    auto *p = static_cast<base::Atomic<u32> *>(ptr);
     auto *blocked = reinterpret_cast<volatile u32 *>(
         static_cast<u8 *>(ptr));
-    std::unique_lock<std::mutex> lk(bk.m);
+    base::UniqueLock<base::Mutex> lk(bk.m);
     u32 st = p->load();
     for (;;) {
       u32 next;
@@ -1218,32 +1220,32 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
         break;
     }
     lk.unlock();
-    bk.cv.notify_all();
+    bk.cv.NotifyAll();
     return 0;
   }
   case 19: { // UMTX_OP_SEM_WAIT
     auto &bk = umtxBucket(ptr);
-    auto *hasWaiters = static_cast<std::atomic<u32> *>(ptr);
+    auto *hasWaiters = static_cast<base::Atomic<u32> *>(ptr);
     auto *count = reinterpret_cast<volatile u32 *>(
         static_cast<u8 *>(ptr) + 4);
     const auto dl = umtxRelDeadline(b);
-    std::unique_lock<std::mutex> lk(bk.m);
+    base::UniqueLock<base::Mutex> lk(bk.m);
     u32 z = 0;
     hasWaiters->compare_exchange_strong(z, 1);  // publish "has waiters"
     auto &ch = bk.chan[ptr];
     const u64 g0 = ch.gen;
     while (*count == 0 && ch.gen == g0) {
-      if (dl && std::chrono::steady_clock::now() >= *dl)
+      if (dl && base::TimeTicks::Now() >= *dl)
         return -SysError::eTIMEDOUT;
-      bk.cv.wait_for(lk, umtxTimeout());
+      bk.cv.WaitFor(lk, umtxTimeout());
     }
     return 0;
   }
   case 20: { // UMTX_OP_SEM_WAKE
     auto &bk = umtxBucket(ptr);
-    std::lock_guard<std::mutex> lk(bk.m);
+    base::LockGuard<base::Mutex> lk(bk.m);
     bk.chan[ptr].gen++;
-    bk.cv.notify_all();
+    bk.cv.NotifyAll();
     return 0;
   }
   case 21: { // UMTX_OP_NWAKE_PRIVATE: wake all waiters on each listed address
@@ -1254,11 +1256,11 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
       auto &bk = umtxBucket(addrs[i]);
       bool woke = false;
       {
-        std::lock_guard<std::mutex> lk(bk.m);
+        base::LockGuard<base::Mutex> lk(bk.m);
         woke = bk.chan[addrs[i]].wakeSimple(0x7fffffff) != 0;
       }
       if (woke)
-        bk.cv.notify_all();
+        bk.cv.NotifyAll();
     }
     return 0;
   }
@@ -1267,13 +1269,13 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // effect, and a stray wake is harmless (libthr re-checks the predicate).
     cvTrace("CV_SIGNALTO", ptr, t_tid);
     auto &bk = umtxBucket(ptr);
-    std::lock_guard<std::mutex> lk(bk.m);
+    base::LockGuard<base::Mutex> lk(bk.m);
     auto &ch = bk.chan[ptr];
     if (ch.waiters > ch.signals) {
       ch.signals++;
       ch.signalCutoff = ch.nextTicket;
     }
-    bk.cv.notify_all();
+    bk.cv.NotifyAll();
     return 0;
   }
   default: {
@@ -1281,7 +1283,7 @@ int PS4ABI sys_umtx_op(void *ptr, int op, u64 val, void *a, void *b) {
     // different numbering past 17.
     if (op < 0 || op > 22)
       return -SysError::eINVAL;
-    static std::atomic<u32> seen[32]{};
+    static base::Atomic<u32> seen[32]{};
     if (op >= 0 && op < 32 && seen[op].fetch_add(1) == 0)
       BASE_LOGI("umtx", "unhandled op={}", op);
     return 0;

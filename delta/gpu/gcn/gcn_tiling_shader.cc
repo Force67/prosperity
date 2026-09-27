@@ -5,10 +5,12 @@
 #include "gpu/gcn/spirv/spv_emit.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include <spirv/unified1/GLSL.std.450.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
 
 namespace gpu::gcn {
 
-std::vector<u32> BuildImageTilingShader() {
+base::Vector<u32> BuildImageTilingShader() {
   using namespace spirv;
   using spv::Op;
   using spv::StorageClass;
@@ -28,7 +30,7 @@ std::vector<u32> BuildImageTilingShader() {
     m.Decorate(buffers[i], spv::Decoration::Binding, {i});
   }
   const Id pc_type =
-      m.TypeStruct(std::vector<Id>(sizeof(ImageTilingParams) / 4, u));
+      m.TypeStruct(base::Vector<Id>(sizeof(ImageTilingParams) / 4, u));
   m.Decorate(pc_type, spv::Decoration::Block);
   for (u32 i = 0; i < sizeof(ImageTilingParams) / 4; i++)
     m.MemberDecorate(pc_type, i, spv::Decoration::Offset, {i * 4});
@@ -174,7 +176,7 @@ std::vector<u32> BuildImageTilingShader() {
   m.ReturnVoid();
   m.EndFunction();
   auto code = m.Assemble();
-  std::string error;
+  base::String error;
   if (!Validate(code, &error)) {
     BASE_LOGI("gpuvk", "tiling shader invalid: {}", error.c_str());
     return {};

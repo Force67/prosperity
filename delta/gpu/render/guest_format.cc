@@ -5,13 +5,14 @@
 #include "gpu/render/guest_format.h"
 #include "base/arch.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <base/logging.h>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/math/value_bounds.h>
 
 namespace {
 // A colour target whose NUMBER_TYPE is UINT/SINT holds packed bits, not a
@@ -57,7 +58,7 @@ u8 Unorm8(float value) {
   if (!std::isfinite(value))
     return 0;
   return static_cast<u8>(
-      std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+      std::lround(base::Clamp(value, 0.0f, 1.0f) * 255.0f));
 }
 
 float PackedUfloat(u32 value, u32 mantissa_bits) {
@@ -408,7 +409,7 @@ rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
         break;
       case 1:  // SNORM
         out.f[i] =
-            std::max(static_cast<float>(SignExtend(raw, bits)) /
+            base::Max(static_cast<float>(SignExtend(raw, bits)) /
                          static_cast<float>((1u << (bits - 1)) - 1),
                      -1.0f);
         break;

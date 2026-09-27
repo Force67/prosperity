@@ -13,18 +13,11 @@
 #include <logger/logger.h>
 #include <utl/mem.h>
 
-#include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <string>
 #include <sys/mman.h>
-#include <thread>
 #include <unistd.h>
-#include <unordered_map>
-#include <vector>
 
 #include "kern/proc.h"
 #include "kern/crash.h"
@@ -34,6 +27,17 @@
 #include "error_table.h"
 #include "sys_mem.h"
 #include <utl/options.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/memory/shared_pointer.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/threading/thread.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(const char *, kShmFilter, "DELTA_SHM_AUDIO_FILTER", nullptr);
@@ -75,8 +79,8 @@ namespace {
 struct ReleasedRange {
   uintptr_t base, end;
 };
-std::mutex g_releasedLock;
-std::vector<ReleasedRange> g_released;
+base::Mutex g_releasedLock;
+base::Vector<ReleasedRange> g_released;
 }  // namespace
 
 void noteGuestReleased(u8 *ptr, size_t size) {
@@ -84,11 +88,11 @@ void noteGuestReleased(u8 *ptr, size_t size) {
     return;
   utl::forgetMemoryMapping(ptr, size);
   const uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
-  std::lock_guard<std::mutex> lk(g_releasedLock);
+  base::LockGuard<base::Mutex> lk(g_releasedLock);
   for (auto &r : g_released) {
     if (base <= r.end && base + size >= r.base) {  // merge touching ranges
-      r.base = std::min(r.base, base);
-      r.end = std::max(r.end, base + size);
+      r.base = base::Min(r.base, base);
+      r.end = base::Max(r.end, base + size);
       return;
     }
   }
@@ -101,10 +105,10 @@ void noteGuestTaken(u8 *ptr, size_t size) {
     return;
   utl::forgetMemoryMapping(ptr, size);
   const uintptr_t lo = reinterpret_cast<uintptr_t>(ptr), hi = lo + size;
-  std::lock_guard<std::mutex> lk(g_releasedLock);
+  base::LockGuard<base::Mutex> lk(g_releasedLock);
   for (auto it = g_released.begin(); it != g_released.end();) {
     if (lo < it->end && it->base < hi)
-      it = g_released.erase(it);  // partially reused: no longer safe to reuse
+      g_released.erase(it);  // partially reused: no longer safe to reuse
     else
       ++it;
   }
@@ -112,7 +116,7 @@ void noteGuestTaken(u8 *ptr, size_t size) {
 
 bool wasGuestReleased(u8 *ptr, size_t size) {
   const uintptr_t base = reinterpret_cast<uintptr_t>(ptr);
-  std::lock_guard<std::mutex> lk(g_releasedLock);
+  base::LockGuard<base::Mutex> lk(g_releasedLock);
   for (const auto &r : g_released)
     if (base >= r.base && base + size <= r.end)
       return true;
@@ -139,18 +143,18 @@ u8 *allocLowGuest(size_t size, size_t align) {
   // 64 KiB, not just one page: GNM surfaces sub-allocated from a pool base
   // assert on weaker alignment (DOOM rhiTextureGnm).
   constexpr uintptr_t kAlign = 0x10000;
-  static std::atomic<uintptr_t> next{kFloor};
+  static base::Atomic<uintptr_t> next{kFloor};
   size = (size + 0x3FFF) & ~uintptr_t(0x3FFF);
   // MAP_ALIGNED(n) is contractual: SotC indexes its streaming arenas by VA>>20,
   // so a weaker base breaks every lookup.
   const uintptr_t al = align > kAlign ? align : kAlign;
   for (int tries = 0; tries < 8192; tries++) {
-    uintptr_t raw = next.load(std::memory_order_relaxed);
+    uintptr_t raw = next.load(base::memory_order_relaxed);
     uintptr_t base = (raw + (al - 1)) & ~(al - 1);  // align the base up
     if (base + size + 0x4000 > kCeil)
       return nullptr;  // doesn't fit; do NOT poison `next` (CAS, not fetch_add)
     if (!next.compare_exchange_weak(raw, base + size + 0x4000,
-                                    std::memory_order_relaxed))
+                                    base::memory_order_relaxed))
       continue;  // another thread advanced it; reload and retry
     void *p = ::mmap(reinterpret_cast<void *>(base), size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
@@ -175,11 +179,11 @@ struct shmBacking {
   u8 *base = nullptr;
   size_t size = 0;
 };
-using shmRef = std::shared_ptr<shmBacking>;
-std::mutex g_shmMutex;
+using shmRef = base::SharedPointer<shmBacking>;
+base::Mutex g_shmMutex;
 // name -> backing. The backing outlives the name (shmObject holds a shared
 // ref), like the kernel refcounting the shm object by fd.
-std::unordered_map<std::string, shmRef> g_shmByName;
+base::HashMap<base::String, shmRef> g_shmByName;
 
 // ---------------------------------------------------------------------------
 // RESEARCH INSTRUMENTATION (env-gated, default OFF), for reverse-engineering
@@ -196,8 +200,8 @@ const char *shmAudioFilter() {
   return (v && *v) ? v : "shm_";
 }
 
-bool shmAudioMatch(const std::string &n) {
-  return n.find(shmAudioFilter()) != std::string::npos;
+bool shmAudioMatch(const base::String &n) {
+  return n.find(shmAudioFilter()) != base::String::npos;
 }
 
 bool shmAudioTraceOn() {
@@ -205,12 +209,10 @@ bool shmAudioTraceOn() {
 }
 
 u64 shmAudioNowUs() {
-  return (u64)std::chrono::duration_cast<std::chrono::microseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
+  return (u64)(base::TickClock::NowNs() / 1000);
 }
 
-void shmAudioTrace(const char *op, const std::string &name, const void *base,
+void shmAudioTrace(const char *op, const base::String &name, const void *base,
                    size_t size, size_t off) {
   if (!shmAudioTraceOn() || !shmAudioMatch(name))
     return;
@@ -220,8 +222,8 @@ void shmAudioTrace(const char *op, const std::string &name, const void *base,
             name.c_str(), base, size, off);
 }
 
-std::string shmAudioSanitize(const std::string &n) {
-  std::string s;
+base::String shmAudioSanitize(const base::String &n) {
+  base::String s;
   for (char c : n)
     s += (c == '/' || c == '\\') ? '_' : c;
   return s;
@@ -229,44 +231,44 @@ std::string shmAudioSanitize(const std::string &n) {
 
 // DELTA_SHM_AUDIO_POISON=<byte>: fill matching regions (filter default "_A") on
 // first map; silence is otherwise indistinguishable from untouched.
-bool shmAudioPoisonQuiet(const std::string &name, u8 *base, size_t size) {
+bool shmAudioPoisonQuiet(const base::String &name, u8 *base, size_t size) {
   const char *pv = kShmPoison;
   if (!pv || !base || !size)
     return false;
   const char *pf = (kShmPoisonFilter && *kShmPoisonFilter.get())
                        ? kShmPoisonFilter.get()
                        : "_A";
-  if (name.find(pf) == std::string::npos)
+  if (name.find(pf) == base::String::npos)
     return false;
   std::memset(base, (int)std::strtol(pv, nullptr, 0), size);
   return true;
 }
 
-void shmAudioPoison(const std::string &name, u8 *base, size_t size) {
+void shmAudioPoison(const base::String &name, u8 *base, size_t size) {
   if (shmAudioPoisonQuiet(name, base, size))
     BASE_LOGI("shmaudio", "poisoned '{}' {:p} +{:#x}", name.c_str(), base,
               size);
 }
 
-void shmAudioRepoison(const std::string &name, u8 *base, size_t size) {
+void shmAudioRepoison(const base::String &name, u8 *base, size_t size) {
   if (!kShmRepoison)
     return;
   shmAudioPoisonQuiet(name, base, size);
 }
 
-std::atomic<bool> g_shmAudioDumper{false};
+base::Atomic<bool> g_shmAudioDumper{false};
 
-void shmAudioDumperMain(std::string dir, unsigned periodMs, unsigned maxSnaps,
+void shmAudioDumperMain(base::String dir, unsigned periodMs, unsigned maxSnaps,
                         size_t maxBytes, bool deltaOnly) {
-  std::unordered_map<std::string, FILE *> files;
-  std::unordered_map<std::string, std::vector<u8>> prev;
+  base::HashMap<base::String, FILE *> files;
+  base::HashMap<base::String, base::Vector<u8>> prev;
   FILE *idx = std::fopen((dir + "/index.txt").c_str(), "w");
-  struct reg { std::string n; u8 *b; size_t sz; };
-  std::vector<u8> cur;
+  struct reg { base::String n; u8 *b; size_t sz; };
+  base::Vector<u8> cur;
   for (unsigned seq = 0; seq < maxSnaps; seq++) {
-    std::vector<reg> regs;
+    base::Vector<reg> regs;
     {
-      std::lock_guard<std::mutex> lk(g_shmMutex);
+      base::LockGuard<base::Mutex> lk(g_shmMutex);
       for (auto &kv : g_shmByName)
         if (kv.second && kv.second->base && kv.second->size &&
             shmAudioMatch(kv.first))
@@ -336,12 +338,12 @@ void shmAudioProbeMain(long periodUs) {
     u8 *ctlRaw = nullptr;
     size_t ctlSize = 0;
     struct areg { int idx; u8 *b; size_t sz; };
-    std::vector<areg> as;
+    base::Vector<areg> as;
     {
-      std::lock_guard<std::mutex> lk(g_shmMutex);
+      base::LockGuard<base::Mutex> lk(g_shmMutex);
       for (auto &kv : g_shmByName) {
         if (!kv.second || !kv.second->base) continue;
-        const std::string &n = kv.first;
+        const base::String &n = kv.first;
         if (n.size() > 2 && n.compare(n.size() - 2, 2, "_C") == 0 &&
             n.compare(0, 5, "/shm_") == 0) {
           ctlRaw = kv.second->base;
@@ -351,7 +353,7 @@ void shmAudioProbeMain(long periodUs) {
           // "/shm_<pid>_<idx>_A" -> idx
           size_t e = n.size() - 2;            // at the '_' of "_A"
           size_t s = n.rfind('_', e - 1);
-          if (s != std::string::npos)
+          if (s != base::String::npos)
             as.push_back({std::atoi(n.c_str() + s + 1), kv.second->base,
                           kv.second->size});
         }
@@ -419,13 +421,13 @@ void shmAudioProbeMaybeStart() {
   const char *v = kShmProbe;
   if (!v || !*v)
     return;
-  static std::atomic<bool> started{false};
+  static base::Atomic<bool> started{false};
   bool e = false;
   if (!started.compare_exchange_strong(e, true))
     return;
   const long us = std::strtol(v, nullptr, 0);
   BASE_LOGI("shmprobe", "consumer probe every {}us", us);
-  std::thread(shmAudioProbeMain, us > 0 ? us : 10667).detach();
+  base::SpawnDetachedThread("shmprobe", [us] { shmAudioProbeMain(us > 0 ? us : 10667); });
 }
 
 // Start the periodic dumper once, on the first matching shm we see.
@@ -441,23 +443,26 @@ void shmAudioDumpMaybeStart() {
   const size_t mx = kShmDumpMax;
   BASE_LOGI("shmaudio", "dumper -> {} every {}ms x{} (<={:#x} B){}", dir, ms,
             n, mx, kShmAudioDumpDelta ? " delta-only" : "");
-  std::thread(shmAudioDumperMain, std::string(dir), ms, n, mx,
-              kShmAudioDumpDelta.get()).detach();
+  base::SpawnDetachedThread(
+      "shmaudio", [dir = base::String(dir), ms, n, mx,
+                   delta = kShmAudioDumpDelta.get()] {
+        shmAudioDumperMain(dir, ms, n, mx, delta);
+      });
 }
 
 class shmObject : public kObject {
 public:
-  shmObject(objectTable &objects, std::string nm, shmRef b)
-      : kObject(objects, kObject::oType::shm), shmName(std::move(nm)),
-        backing(std::move(b)) {}
-  std::string shmName;  // diagnostics / audio protocol key
+  shmObject(objectTable &objects, base::String nm, shmRef b)
+      : kObject(objects, kObject::oType::shm), shmName(base::move(nm)),
+        backing(base::move(b)) {}
+  base::String shmName;  // diagnostics / audio protocol key
   shmRef backing;       // keeps the backing alive while this fd is open
 };
 
 // Backing block for a shm, grown to cover the requested range. Caller must not
 // hold g_shmMutex; -1 on failure.
 u8 *shmMap(shmObject *shm, size_t size, size_t offset) {
-  std::lock_guard<std::mutex> lk(g_shmMutex);
+  base::LockGuard<base::Mutex> lk(g_shmMutex);
   auto &b = *shm->backing;
   size_t need = (offset + size + 0x3FFF) & ~size_t(0x3FFF);
   if (!b.base && need) {
@@ -761,10 +766,10 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
     return -SysError::eINVAL;
 
   constexpr u32 kO_CREAT = 0x0200, kO_EXCL = 0x0800, kO_TRUNC = 0x0400;
-  std::string name(path);
+  base::String name(path);
   shmRef backing;
   {
-    std::lock_guard<std::mutex> lk(g_shmMutex);
+    base::LockGuard<base::Mutex> lk(g_shmMutex);
     auto it = g_shmByName.find(name);
     if (it == g_shmByName.end()) {
       if (!(flags & kO_CREAT) && kShmNoAuto) {
@@ -777,7 +782,7 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
         // Read-only open of a system shm (e.g. libSceAvSetting's settings
         // block): auto-provide a zeroed backing so the title fstats a real
         // size instead of failing init.
-        backing = std::make_shared<shmBacking>();
+        backing = base::MakeShared<shmBacking>();
         backing->size = 0x10000;  // 64 KiB, ample for a settings block
         backing->base = allocLowGuest(backing->size);
         if (backing->base) {
@@ -789,7 +794,7 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
         g_shmByName.emplace(name, backing);
       } else {
         // O_CREAT: fresh, empty backing; sized later by ftruncate.
-        backing = std::make_shared<shmBacking>();
+        backing = base::MakeShared<shmBacking>();
         g_shmByName.emplace(name, backing);
       }
     } else {
@@ -808,7 +813,7 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
   }
 
   // A fresh fd per open, all sharing the named backing.
-  auto *obj = new shmObject(proc->getObjTable(), std::move(name), std::move(backing));
+  auto *obj = new shmObject(proc->getObjTable(), base::move(name), base::move(backing));
   BASE_LOGI("shm_open", "'{}' flags={:#x} -> fd={}", path, flags,
             obj->handle());
   shmAudioTrace("shm_open", obj->shmName, nullptr, 0, flags);
@@ -820,7 +825,7 @@ int PS4ABI sys_shm_open(const char *path, u32 flags, u16 mode) {
 int PS4ABI sys_shm_unlink(const char *path) {
   if (!path)
     return -SysError::eINVAL;
-  std::lock_guard<std::mutex> lk(g_shmMutex);
+  base::LockGuard<base::Mutex> lk(g_shmMutex);
   auto it = g_shmByName.find(path);
   if (it == g_shmByName.end())
     return -SysError::eNOENT;
@@ -841,7 +846,7 @@ size_t shmFstatSize(u32 fd) {
   if (!obj || obj->type() != kObject::oType::shm)
     return SIZE_MAX;
   auto *shm = static_cast<shmObject *>(obj);
-  std::lock_guard<std::mutex> lk(g_shmMutex);
+  base::LockGuard<base::Mutex> lk(g_shmMutex);
   return shm->backing->size;
 }
 
@@ -860,7 +865,7 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
   auto *shm = static_cast<shmObject *>(obj);
   const size_t raw = static_cast<size_t>(length);
   const size_t want = (raw + 0x3FFF) & ~size_t(0x3FFF);
-  std::lock_guard<std::mutex> lk(g_shmMutex);
+  base::LockGuard<base::Mutex> lk(g_shmMutex);
   auto &b = *shm->backing;
   // The RAW length matters for the protocol spec (the rounded `want` hides it).
   shmAudioTrace("ftruncate", shm->shmName, b.base, raw, want);
@@ -928,7 +933,7 @@ static_assert(sizeof(mdbg_property) == 72);
 
 // Stand-in for the kernel's per-process debug-raise qword (proc+2600); no
 // debugger is attached, so a raise is recorded and reported delivered.
-static std::atomic<u64> gMdbgFlags{0};
+static base::Atomic<u64> gMdbgFlags{0};
 
 // Mirrors mdbg_service_raise; the suspend notification callback is
 // unregistered, so report the raise as delivered.
@@ -969,7 +974,7 @@ int PS4ABI sys_mdbg_service(u32 op, void *arg1, void *arg2, void *a3) {
     const char *msg = static_cast<const char *>(arg1);
     if (!msg)
       return -SysError::eINVAL;
-    std::string s(msg, strnlen(msg, 0x1000));
+    base::String s(msg, strnlen(msg, 0x1000));
     LOG_INFO("[mdbg-text] {}", s);
     return 0;
   }
@@ -989,7 +994,7 @@ int PS4ABI sys_mdbg_service(u32 op, void *arg1, void *arg2, void *a3) {
 // sys_dmem_container (586): 0xFFFFFFFF reads the container id, 0/1 sets it
 // (needs privilege 0x2AD; the kernel keeps it at proc+2020). We only track it.
 int PS4ABI sys_dmem_container(u32 op) {
-  static std::atomic<u32> current{0};
+  static base::Atomic<u32> current{0};
   if (op == 0xFFFFFFFFu)
     return static_cast<int>(current.load());
   if (op > 1)

@@ -11,10 +11,10 @@
  * with SPIRV-Cross and compiled to DXIL with DXC when a pipeline is created.
  */
 
-#include <memory>
 
 #include "base/arch.h"
 #include "gpu/rhi/device.h"
+#include <base/memory/unique_pointer.h>
 
 namespace gpu::d3d12 {
 
@@ -28,6 +28,6 @@ struct D3D12Options {
 
 // Null when D3D12 is not compiled in, no device exists, or DXC cannot be
 // loaded. Call from a plain host thread.
-std::unique_ptr<rhi::Device> CreateD3D12Device(const D3D12Options& options);
+base::UniquePointer<rhi::Device> CreateD3D12Device(const D3D12Options& options);
 
 }  // namespace gpu::d3d12

@@ -17,13 +17,6 @@
  * 2048-entry shader-visible sampler heap.
  */
 
-#include <atomic>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <unordered_map>
-#include <vector>
 
 #include "base/arch.h"
 #include "gpu/d3d12/d3d12_rhi.h"
@@ -31,6 +24,12 @@
 #include "gpu/rhi/device.h"
 
 #include "gpu/d3d12/d3d12_api.h"
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::d3d12::impl {
 
@@ -84,14 +83,14 @@ class CpuDescriptorPool {
   struct Page {
     ID3D12DescriptorHeap* heap = nullptr;
     D3D12_CPU_DESCRIPTOR_HANDLE start{};
-    std::map<u32, u32> free;  // offset -> count
+    base::Map<u32, u32> free;  // offset -> count
   };
   ID3D12Device* device_ = nullptr;
   D3D12_DESCRIPTOR_HEAP_TYPE type_{};
   u32 page_size_ = 0;
   u32 increment_ = 0;
-  std::mutex mutex_;
-  std::vector<Page> pages_;
+  base::Mutex mutex_;
+  base::Vector<Page> pages_;
 };
 
 class D3D12Buffer final : public rhi::Buffer {
@@ -120,10 +119,10 @@ class D3D12Texture final : public rhi::Texture {
   u32 planes = 1;
   // The last state each subresource was moved into while recording: only
   // consulted for a kUndefined "before", the one side the caller cannot name.
-  std::vector<D3D12_RESOURCE_STATES> states;
+  base::Vector<D3D12_RESOURCE_STATES> states;
   // Per (mip, layer) attachment descriptors for clears and blits.
-  std::mutex view_mutex;
-  std::unordered_map<u32, CpuRange> rtvs, dsvs;
+  base::Mutex view_mutex;
+  base::HashMap<u32, CpuRange> rtvs, dsvs;
 };
 
 class D3D12View final : public rhi::TextureView {
@@ -156,8 +155,8 @@ class D3D12BindGroupLayout final : public rhi::BindGroupLayout {
     desc_ = desc;
   }
   const GroupEntry* Find(u32 binding) const;
-  std::vector<GroupEntry> entries;  // desc().bindings order
-  std::vector<u32> dynamic_entries;  // entry index per dynamic index
+  base::Vector<GroupEntry> entries;  // desc().bindings order
+  base::Vector<u32> dynamic_entries;  // entry index per dynamic index
   u32 table_size = 0;
   u32 sampler_count = 0;
 };
@@ -172,10 +171,10 @@ class D3D12BindGroup final : public rhi::BindGroup {
  public:
   D3D12BindGroupLayout* layout = nullptr;
   CpuRange table;  // CPU-only copy of every table slot
-  std::vector<u32> samplers;  // sampler ids by sampler slot
+  base::Vector<u32> samplers;  // sampler ids by sampler slot
   // Per dynamic index: the buffer and the write's own offset/range.
-  std::vector<rhi::BindingWrite> dynamic;
-  std::vector<BufferUse> uses;
+  base::Vector<rhi::BindingWrite> dynamic;
+  base::Vector<BufferUse> uses;
   // Cached shader-visible sampler table and the cache generation it is from.
   u32 sampler_table = ~0u;
   u64 sampler_generation = 0;
@@ -184,7 +183,7 @@ class D3D12BindGroup final : public rhi::BindGroup {
 struct RootGroup {
   i32 table = -1;
   i32 sampler_table = -1;
-  std::vector<i32> root_cbv;  // per dynamic index; -1 = in the table
+  base::Vector<i32> root_cbv;  // per dynamic index; -1 = in the table
 };
 
 class D3D12PipelineLayout final : public rhi::PipelineLayout {
@@ -197,8 +196,8 @@ class D3D12PipelineLayout final : public rhi::PipelineLayout {
   i32 push_cbv = -1;        // push constants from upload memory
   u32 push_dwords = 0;
   i32 raster = -1, draw = -1, dispatch = -1, group_base = -1;
-  std::vector<RootGroup> groups;
-  std::vector<std::pair<u32, u32>> read_only_storage;  // (set, binding)
+  base::Vector<RootGroup> groups;
+  base::Vector<base::Pair<u32, u32>> read_only_storage;  // (set, binding)
 };
 
 class D3D12Pipeline final : public rhi::Pipeline {
@@ -364,8 +363,8 @@ class D3D12CommandList final : public rhi::CommandList {
     D3D12BindGroupLayout* layout = nullptr;
     D3D12_GPU_DESCRIPTOR_HANDLE table{};
     D3D12_GPU_DESCRIPTOR_HANDLE samplers{};
-    std::vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv;
-    std::vector<BufferUse> uses;
+    base::Vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv;
+    base::Vector<BufferUse> uses;
     bool dirty = false;
     u64 validated_epoch = ~0ull;
   };
@@ -397,8 +396,8 @@ class D3D12CommandList final : public rhi::CommandList {
                  D3D12BindGroupLayout* layout,
                  D3D12_GPU_DESCRIPTOR_HANDLE table,
                  D3D12_GPU_DESCRIPTOR_HANDLE samplers,
-                 std::vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv,
-                 std::vector<BufferUse> uses);
+                 base::Vector<D3D12_GPU_VIRTUAL_ADDRESS> root_cbv,
+                 base::Vector<BufferUse> uses);
   void WriteBufferView(D3D12_CPU_DESCRIPTOR_HANDLE dst,
                        const GroupEntry& entry,
                        D3D12Buffer* buffer,
@@ -420,16 +419,16 @@ class D3D12CommandList final : public rhi::CommandList {
   D3D12Device& device_;
   bool recording_ = false;
 
-  std::vector<RingChunk> chunks_;
-  std::vector<UploadBlock> upload_;
+  base::Vector<RingChunk> chunks_;
+  base::Vector<UploadBlock> upload_;
   size_t upload_block_ = 0;
-  std::vector<UploadBlock> scratch_;
+  base::Vector<UploadBlock> scratch_;
   ID3D12DescriptorHeap* cpu_scratch_ = nullptr;  // for UAV clears
   u32 cpu_scratch_next_ = 0;
 
-  std::vector<D3D12_RESOURCE_BARRIER> barriers_;
-  std::unordered_map<D3D12Buffer*, D3D12_RESOURCE_STATES> buffer_states_;
-  std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> scratch_states_;
+  base::Vector<D3D12_RESOURCE_BARRIER> barriers_;
+  base::HashMap<D3D12Buffer*, D3D12_RESOURCE_STATES> buffer_states_;
+  base::HashMap<ID3D12Resource*, D3D12_RESOURCE_STATES> scratch_states_;
   u64 transition_epoch_ = 0;
 
   D3D12Pipeline* pipeline_ = nullptr;
@@ -521,7 +520,7 @@ class D3D12Device final : public rhi::Device {
     return {ring_gpu_.ptr + static_cast<u64>(index) * view_increment};
   }
   // A shader-visible sampler table holding these sampler ids.
-  D3D12_GPU_DESCRIPTOR_HANDLE SamplerTable(const std::vector<u32>& ids,
+  D3D12_GPU_DESCRIPTOR_HANDLE SamplerTable(const base::Vector<u32>& ids,
                                            u32* cached,
                                            u64* generation);
 
@@ -552,46 +551,46 @@ class D3D12Device final : public rhi::Device {
   // SPIR-V -> DXIL, cached by module and options.
   bool CompileStage(const rhi::ShaderCode& code,
                     const LowerOptions& options,
-                    std::vector<u8>* dxil,
+                    base::Vector<u8>* dxil,
                     LoweredShader* info);
   // Backend-generated HLSL, cached by text.
-  bool CompileHlsl(const std::string& hlsl,
+  bool CompileHlsl(const base::String& hlsl,
                    const char* profile,
-                   std::vector<u8>* dxil);
+                   base::Vector<u8>* dxil);
   bool InitBlit();
 
   rhi::Caps caps_;
-  std::string device_name_;
+  base::String device_name_;
   u32 shader_model_ = 60;
   ID3D12Fence* fence_ = nullptr;
-  std::mutex queue_mutex_;
+  base::Mutex queue_mutex_;
   u64 submitted_ = 0;
 
   D3D12_CPU_DESCRIPTOR_HANDLE ring_cpu_{};
   D3D12_GPU_DESCRIPTOR_HANDLE ring_gpu_{};
   u32 ring_size_ = 0;
-  std::mutex chunk_mutex_;
-  std::vector<u32> free_chunks_;
+  base::Mutex chunk_mutex_;
+  base::Vector<u32> free_chunks_;
 
-  std::mutex sampler_mutex_;
-  std::map<std::string, u32> sampler_ids_;  // packed desc -> id
-  std::vector<CpuRange> sampler_cpu_;       // by id
-  std::map<std::vector<u32>, u32> sampler_tables_;
+  base::Mutex sampler_mutex_;
+  base::Map<base::String, u32> sampler_ids_;  // packed desc -> id
+  base::Vector<CpuRange> sampler_cpu_;       // by id
+  base::Map<base::Vector<u32>, u32> sampler_tables_;
   u32 sampler_heap_used_ = 0;
   u64 sampler_generation_ = 1;
 
-  std::mutex shader_mutex_;
+  base::Mutex shader_mutex_;
   struct ShaderEntry {
-    std::vector<u8> dxil;
+    base::Vector<u8> dxil;
     LoweredShader info;
     bool ok = false;
   };
-  std::unordered_map<u64, ShaderEntry> shaders_;
+  base::HashMap<u64, ShaderEntry> shaders_;
 
   ID3D12RootSignature* blit_root_ = nullptr;
-  std::vector<u8> blit_vs_, blit_ps_;
-  std::mutex blit_mutex_;
-  std::unordered_map<u32, ID3D12PipelineState*> blit_psos_;
+  base::Vector<u8> blit_vs_, blit_ps_;
+  base::Mutex blit_mutex_;
+  base::HashMap<u32, ID3D12PipelineState*> blit_psos_;
   bool fault_reported_ = false;
 };
 

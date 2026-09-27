@@ -12,6 +12,8 @@
 
 #include "gpu/gcn/spirv/translator.h"
 #include "base/arch.h"
+#include <base/containers/set.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::gcn {
 namespace {
@@ -907,9 +909,9 @@ void EmitSopk(Translator& t, const Inst& inst) {
 }
 
 // ---- SGPR spills parked in a VGPR's lanes -----------------------------------
-std::unordered_set<u32> PlanLaneSpills(const Program& program,
+base::HashSet<u32> PlanLaneSpills(const Program& program,
                                             const u8* reachable) {
-  std::unordered_set<u32> spills;
+  base::HashSet<u32> spills;
   u32 index = 0;
   for (const Inst& inst : program) {
     const u32 i = index++;

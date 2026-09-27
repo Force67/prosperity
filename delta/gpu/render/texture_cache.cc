@@ -21,8 +21,6 @@
 #include "gpu/render/render_target.h"
 #include "gpu/render/upload_ring.h"
 
-#include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -30,11 +28,18 @@
 #include <base/logging.h>
 #include <base/strings/format.h>
 #include <base/strings/xstring.h>
-#include <map>
-#include <mutex>
-#include <unordered_map>
-#include <unordered_set>
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(int, kForceTile, "DELTA_GPU_FORCETILE", -1);
@@ -224,16 +229,16 @@ struct TexEntry {
   rhi::BindGroup* set = nullptr;
 };
 
-std::unordered_map<TexImageKey, TexImageEntry, TexImageKeyHash> g_tex_images;
-std::unordered_map<TexViewKey, TexViewEntry, TexViewKeyHash> g_tex_views;
-std::unordered_map<TexKey, TexEntry, TexKeyHash> g_tex_cache;
-std::unordered_map<SamplerKey, rhi::Sampler*, SamplerKeyHash> g_sampler_cache;
+base::HashMap<TexImageKey, TexImageEntry, TexImageKeyHash> g_tex_images;
+base::HashMap<TexViewKey, TexViewEntry, TexViewKeyHash> g_tex_views;
+base::HashMap<TexKey, TexEntry, TexKeyHash> g_tex_cache;
+base::HashMap<SamplerKey, rhi::Sampler*, SamplerKeyHash> g_sampler_cache;
 constexpr u32 kTexturePageShift = 16;
-std::unordered_map<u64, std::vector<TexImageKey>> g_texture_pages;
+base::HashMap<u64, base::Vector<TexImageKey>> g_texture_pages;
 u64 g_tex_image_bytes = 0;
-std::vector<TexImageEntry> g_retired_tex_images;
-std::vector<TexViewEntry> g_retired_tex_views;
-std::vector<TexEntry> g_retired_tex_sets;
+base::Vector<TexImageEntry> g_retired_tex_images;
+base::Vector<TexViewEntry> g_retired_tex_views;
+base::Vector<TexEntry> g_retired_tex_sets;
 
 void RegisterTexturePages(const TexImageKey& key, u64 bytes) {
   const u64 end = key.base + bytes;
@@ -250,7 +255,7 @@ void UnregisterTexturePages(const TexImageKey& key, u64 bytes) {
     if (found == g_texture_pages.end())
       continue;
     auto& keys = found->second;
-    keys.erase(std::remove(keys.begin(), keys.end(), key), keys.end());
+    base::EraseIf(keys, [&](const auto& k) { return k == key; });
     if (keys.empty())
       g_texture_pages.erase(found);
   }
@@ -283,11 +288,11 @@ TexKey TextureKey(u64 base,
   else
     depth = 1;
   if (layers && base_array < layers)
-    view_layers = std::min(view_layers, layers - base_array);
+    view_layers = base::Min(view_layers, layers - base_array);
   if (!arrayed)
     view_layers = 1;
   if (mip_levels && base_mip < mip_levels)
-    view_mips = std::min(view_mips, mip_levels - base_mip);
+    view_mips = base::Min(view_mips, mip_levels - base_mip);
   TexKey key;
   key.image = {base,   w,          h,
                tiling, pitch,      layers,
@@ -530,10 +535,10 @@ rhi::Sampler* SamplerFor(const SamplerKey& key) {
                                            : rhi::Filter::kNearest;
   ci.min_lod = ci.max_lod = 0.0f;
   if (mip_filter) {
-    u32 min_lod = std::max(key.raw[1] & 0xFFF, key.image_min_lod);
+    u32 min_lod = base::Max(key.raw[1] & 0xFFF, key.image_min_lod);
     ci.min_lod = static_cast<float>(min_lod) / 256.0f;
     ci.max_lod = static_cast<float>((key.raw[1] >> 12) & 0xFFF) / 256.0f;
-    ci.max_lod = std::max(ci.min_lod, ci.max_lod);
+    ci.max_lod = base::Max(ci.min_lod, ci.max_lod);
   }
   if (key.force_lod_zero)
     ci.min_lod = ci.max_lod = 0.0f;
@@ -594,8 +599,8 @@ void PackTexPixels(u8* linear,
     // `depth` z-slices of a single-layer image.
     copy.region.mip = mip;
     copy.region.layers = is_3d ? 1u : layout.layers;
-    copy.region.width = std::max(texel_w >> mip, 1u);
-    copy.region.height = std::max(texel_h >> mip, 1u);
+    copy.region.width = base::Max(texel_w >> mip, 1u);
+    copy.region.height = base::Max(texel_h >> mip, 1u);
     copy.region.depth = is_3d ? layout.layers : 1u;
     const u64 layer_bytes =
         static_cast<u64>(level.width) * level.height * elem;
@@ -812,7 +817,7 @@ bool RecordTexPixels(rhi::Texture* img,
   const u32 barrier_layers = is_3d ? 1 : layout.layers;
   TextureUploadSlice upload;
   if (!AllocateTextureUpload(g_frame.slot_idx, bytes,
-                             std::max<u32>(16, layout.elem_bytes), upload))
+                             base::Max<u32>(16, layout.elem_bytes), upload))
     return false;
   const u64 start = NowNs();
   rhi::BufferTextureCopy copies[16]{};
@@ -836,7 +841,7 @@ bool RecordTexPixels(rhi::Texture* img,
   return true;
 }
 
-using TexImageKeySet = std::unordered_set<TexImageKey, TexImageKeyHash>;
+using TexImageKeySet = base::HashSet<TexImageKey, TexImageKeyHash>;
 
 // One pass over the set and view caches for a whole batch of images: walking
 // both caches once per image was most of what eviction cost.
@@ -883,16 +888,16 @@ void RetireTextureImages(const TexImageKeySet& keys) {
 constexpr size_t kMaxTextureImages = 3000;
 
 bool EvictTextures(u64 bytes, u64 budget) {
-  std::vector<std::pair<int, TexImageKey>> old;
+  base::Vector<base::Pair<int, TexImageKey>> old;
   for (const auto& [key, entry] : g_tex_images)
     if (entry.last_used_frame != g_frame.num)
       old.push_back({entry.last_used_frame, key});
   if (old.empty())
     return false;
-  std::sort(old.begin(), old.end(), [](const auto& a, const auto& b) {
+  base::Sort(old.begin(), old.end(), [](const auto& a, const auto& b) {
     return a.first < b.first;
   });
-  const u64 want_bytes = budget - std::min(budget, budget / 16 + bytes);
+  const u64 want_bytes = budget - base::Min(budget, budget / 16 + bytes);
   const size_t want_count = kMaxTextureImages - kMaxTextureImages / 16;
   u64 live_bytes = g_tex_image_bytes;
   size_t live_count = g_tex_images.size();
@@ -919,7 +924,7 @@ void PrevalidateTextures() {
     u64 base;
     bool full;
   };
-  static std::vector<Job> jobs;
+  static base::Vector<Job> jobs;
   jobs.clear();
   u64 bytes = 0;
   for (auto& [key, e] : g_tex_images) {
@@ -929,7 +934,7 @@ void PrevalidateTextures() {
     const bool full =
         g_frame.num - e.last_full_frame >= static_cast<int>(e.check_interval);
     jobs.push_back({&e, key.base, full});
-    bytes += full ? e.footprint : std::min<u64>(e.footprint, 16384);
+    bytes += full ? e.footprint : base::Min<u64>(e.footprint, 16384);
   }
   if (jobs.empty())
     return;
@@ -1040,14 +1045,14 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     }
     return nullptr;
   }
-  view_layers = std::min(view_layers, layers - base_array);
+  view_layers = base::Min(view_layers, layers - base_array);
   if (!arrayed)
     view_layers = 1;
   if (!view_layers)
     return nullptr;
   if (!mip_levels || base_mip >= mip_levels)
     return nullptr;
-  view_mips = std::min(view_mips, mip_levels - base_mip);
+  view_mips = base::Min(view_mips, mip_levels - base_mip);
   if (!view_mips)
     return nullptr;
   // Diagnostic override used to identify incorrectly described guest surfaces.
@@ -1105,14 +1110,14 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       u32 w, h, dfmt, nfmt, tiling, mips;
       u64 footprint, binds;
     };
-    static std::mutex m;
-    static std::map<u64, Cell> tbl;
-    static auto last = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lk(m);
+    static base::Mutex m;
+    static base::Map<u64, Cell> tbl;
+    static auto last = base::TimeTicks::Now();
+    base::LockGuard<base::Mutex> lk(m);
     Cell& c = tbl[base];
     c = {w, h, dfmt, nfmt, tiling, mip_levels, footprint, c.binds + 1};
-    const auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count() >=
+    const auto now = base::TimeTicks::Now();
+    if ((now - last).InSeconds() >=
         kTexCensus) {
       last = now;
       BASE_LOGI("texcensus", "{} surfaces", tbl.size());
@@ -1143,7 +1148,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   // layout in the name, so a swizzle can be worked out offline.
   if (kTexRaw && w >= 256 && h >= 128 && gpu::IsReadableRange(base, footprint)) {
     static int rawn = 0;
-    static std::unordered_set<u64> raw_seen;
+    static base::HashSet<u64> raw_seen;
     if (rawn < 12 && raw_seen.insert(static_cast<u64>(w) << 32 | h).second) {
       char p[320];
       std::snprintf(p, sizeof(p), "%s/raw_%02d_%ux%u_pitch%u_sh%u_tile%u_e%u.bin",
@@ -1251,7 +1256,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       // as the interval (nothing calls InvalidateTexRange for those, only
       // compute writeback does), and the windows alone can miss a small one.
       const u64 sample = pre ? e.pre_sample : TexSampleHash(base, footprint);
-      g_tex_hash_bytes += std::min<u64>(footprint, 16384);
+      g_tex_hash_bytes += base::Min<u64>(footprint, 16384);
       bool changed = sample != e.sample_hash;
       if (!changed &&
           g_frame.num - e.last_full_frame >= static_cast<int>(e.check_interval)) {
@@ -1298,7 +1303,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   }
   if (image_it == g_tex_images.end()) {
     static const u64 kTextureBudget =
-        std::max<u64>(kTextureMb, 64) * 1024 * 1024;
+        base::Max<u64>(kTextureMb, 64) * 1024 * 1024;
     if (g_tex_images.size() >= kMaxTextureImages &&
         !EvictTextures(0, kTextureBudget))
       return nullptr;
@@ -1607,8 +1612,8 @@ struct MultiTexKeyHash {
   }
 };
 
-std::unordered_map<MultiTexKey, MultiTexSet, MultiTexKeyHash> g_mtex_cache;
-std::vector<MultiTexSet> g_retired_mtex;
+base::HashMap<MultiTexKey, MultiTexSet, MultiTexKeyHash> g_mtex_cache;
+base::Vector<MultiTexSet> g_retired_mtex;
 void ClearMultiTexCache() {
   for (const auto& [key, entry] : g_mtex_cache) {
     (void)key;
@@ -1624,10 +1629,10 @@ void ReleaseRetiredTextures() {
   // until N's EndFrame, N until N+1's EndFrame). Objects therefore rest one
   // extra BeginFrame in the `aged` generation before being destroyed, by
   // then every command buffer that could reference them has been fence-waited.
-  static std::vector<MultiTexSet> aged_mtex;
-  static std::vector<TexEntry> aged_tex_sets;
-  static std::vector<TexViewEntry> aged_tex_views;
-  static std::vector<TexImageEntry> aged_tex_images;
+  static base::Vector<MultiTexSet> aged_mtex;
+  static base::Vector<TexEntry> aged_tex_sets;
+  static base::Vector<TexViewEntry> aged_tex_views;
+  static base::Vector<TexImageEntry> aged_tex_images;
   for (const MultiTexSet& entry : aged_mtex)
     Device().Destroy(entry.set);
   for (const TexEntry& e : aged_tex_sets)
@@ -1636,10 +1641,10 @@ void ReleaseRetiredTextures() {
     Device().Destroy(e.view);
   for (const TexImageEntry& e : aged_tex_images)
     Device().Destroy(e.image);
-  aged_mtex = std::move(g_retired_mtex);
-  aged_tex_sets = std::move(g_retired_tex_sets);
-  aged_tex_views = std::move(g_retired_tex_views);
-  aged_tex_images = std::move(g_retired_tex_images);
+  aged_mtex = base::move(g_retired_mtex);
+  aged_tex_sets = base::move(g_retired_tex_sets);
+  aged_tex_views = base::move(g_retired_tex_views);
+  aged_tex_images = base::move(g_retired_tex_images);
   g_retired_mtex.clear();
   g_retired_tex_sets.clear();
   g_retired_tex_views.clear();
@@ -1660,7 +1665,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
   // unwritten is read as an undefined descriptor. Validation names it
   // (VUID-vkCmdDrawIndexed-None-08114) and a driver may fault on it. Cover
   // every declared binding; the ones past what resolved take the default.
-  const u32 resolved = std::min(d.num_texs, kMaxTex);
+  const u32 resolved = base::Min(d.num_texs, kMaxTex);
   // A binding past what the draw resolved has no T# to describe it, so the
   // default it takes has to match what the SHADER declared: a 2D default in a
   // binding the module built as a volume is the same undefined read by another
@@ -1674,7 +1679,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
     return vs_i < d.recomp->vs_texs.size() ? &d.recomp->vs_texs[vs_i] : nullptr;
   };
   MultiTexKey key;
-  key.num_texs = std::min(std::max(resolved, num_bindings), kMaxTex);
+  key.num_texs = base::Min(base::Max(resolved, num_bindings), kMaxTex);
   // DELTA_GPU_FORCEWHITE: bind the 1x1 white default for every sampler
   // (diagnostic). Doom64's world textures are built by compute dispatches we
   // don't execute, so the atlases are all-zero and the alpha-blended world
@@ -1813,14 +1818,14 @@ void InvalidateTexRange(u64 base, u64 size) {
     return;
   BumpTextureEpoch();
   u64 end = base + size;
-  std::vector<TexImageKey> overlap;
+  base::Vector<TexImageKey> overlap;
   for (u64 page = base >> kTexturePageShift;
        page <= (end - 1) >> kTexturePageShift; page++) {
     auto found = g_texture_pages.find(page);
     if (found == g_texture_pages.end())
       continue;
     for (const TexImageKey& key : found->second) {
-      if (std::find(overlap.begin(), overlap.end(), key) == overlap.end())
+      if (base::Find(overlap.begin(), overlap.end(), key) == overlap.end())
         overlap.push_back(key);
     }
   }

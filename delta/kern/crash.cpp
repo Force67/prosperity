@@ -7,7 +7,6 @@
  */
 
 #define _GNU_SOURCE
-#include <atomic>
 #include "base/arch.h"
 #include <csignal>
 #include <cstdint>
@@ -23,10 +22,6 @@
 #include <sys/uio.h>
 #include <time.h>
 #include <pthread.h>
-#include <thread>
-#include <chrono>
-#include <string>
-#include <vector>
 
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -43,6 +38,7 @@
 #include "cpu/cpu_backend.h"
 #include <logger/logger.h>
 #include <utl/options.h>
+#include <base/atomic.h>
 
 namespace {
 DELTA_OPTION(uintptr_t, kBrkTrace, "DELTA_GUEST_BRK_TRACE", 0);
@@ -393,7 +389,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
     if (ip && ip[0] == 0xcd &&
         (ip[1] == 0x41 || ip[1] == 0x44 || ip[1] == 0x45)) {
-      static std::atomic<int> n{0};
+      static base::Atomic<int> n{0};
       if (n.fetch_add(1) < 20) {
         char sym[256];
         symbolize(uc->uc_mcontext.gregs[REG_RIP], sym, sizeof(sym));
@@ -420,8 +416,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   // Only the first faulting thread prints (a concurrent second fault
   // interleaves and truncates the dump); a dumper re-entering after a step
   // re-faulted must bail out, not park, or the process hangs.
-  static std::atomic<bool> s_dumping{false};
-  static std::atomic<pid_t> s_dumper{0};
+  static base::Atomic<bool> s_dumping{false};
+  static base::Atomic<pid_t> s_dumper{0};
   const pid_t self = static_cast<pid_t>(syscall(SYS_gettid));
   if (s_dumping.exchange(true)) {
     if (s_dumper.load() == self) {

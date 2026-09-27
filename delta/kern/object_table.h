@@ -5,11 +5,10 @@
 
 #include <logger/logger.h>
 #include "base/arch.h"
-#include <memory>
-#include <mutex>
 #include <utl/object_ref.h>
 
 #include "kern/object.h"
+#include <base/threading/recursive_mutex.h>
 
 namespace krnl {
 class kObject;
@@ -32,7 +31,7 @@ private:
   bool findSlot(u32 &out);
 
   // recursive: release() holds the lock and calls remove(), which re-locks.
-  std::recursive_mutex omutex;
+  base::RecursiveMutex omutex;
 
   struct entry {
     int refCount = 0;

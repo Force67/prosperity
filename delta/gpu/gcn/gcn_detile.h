@@ -17,11 +17,11 @@
  * layout path; nothing in the Liverpool range can reach it.
  */
 
-#include <array>
 #include "base/arch.h"
 #include <cstddef>
-#include <functional>
-#include <vector>
+#include <base/containers/array.h>
+#include <base/containers/vector.h>
+#include <base/functional/function.h>
 
 namespace gpu::gcn {
 
@@ -31,7 +31,7 @@ namespace gpu::gcn {
 // this module; callers get a plain blocking call, no synchronization. Used for 8-row
 // microtile bands and the staging paths' row-major converts; one region at a time.
 void DetileParallelRows(u32 rows,
-                        const std::function<void(u32, u32)>& fn);
+                        const base::Function<void(u32, u32)>& fn);
 
 // As above, but the caller states how much work the units carry (bytes or
 // texels) instead of the row heuristic. A few dozen block rows of a 4K surface
@@ -39,7 +39,7 @@ void DetileParallelRows(u32 rows,
 // not, and only the caller can tell the two apart.
 void DetileParallelWork(u32 units,
                         u64 work_items,
-                        const std::function<void(u32, u32)>& fn);
+                        const base::Function<void(u32, u32)>& fn);
 
 // A PS5 gfx10.3 swizzle mode enters the tiling_idx parameter as
 // kGfx10TilingBase + sw_mode, keeping it disjoint from the Liverpool indices
@@ -71,7 +71,7 @@ struct TextureMipLayout32 {
 };
 
 struct TextureLayout32 {
-  std::array<TextureMipLayout32, 16> mips{};
+  base::Array<TextureMipLayout32, 16> mips{};
   u64 size = 0;
   u32 mip_levels = 0;
   u32 layers = 0;
@@ -87,7 +87,7 @@ struct TextureLayout32 {
 // Block offsets add; the low bits selected by block_mask XOR together.
 bool BuildGfx10AddressTable(const TextureLayout32& layout,
                             u32 mip,
-                            std::vector<u32>& terms,
+                            base::Vector<u32>& terms,
                             u32& block_mask);
 
 // The same terms for any tiled layout with 4-byte or wider elements: gfx10
@@ -96,7 +96,7 @@ bool BuildGfx10AddressTable(const TextureLayout32& layout,
 // the per-layer terms carry only the XOR part.
 bool BuildSeparableAddressTable(const TextureLayout32& layout,
                                 u32 mip,
-                                std::vector<u32>& terms,
+                                base::Vector<u32>& terms,
                                 u32& block_mask,
                                 u64& slice_stride);
 

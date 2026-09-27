@@ -14,11 +14,13 @@
  */
 
 #include "base/arch.h"
-#include <memory>
-#include <unordered_map>
-#include <vector>
 
 #include "gpu/gcn/gcn_decode.h"
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/memory/shared_pointer.h>
+#include <base/containers/hash_map.h>
 
 namespace gpu::gcn {
 
@@ -91,11 +93,11 @@ TImage DecodeTImage(const u32* dwords);
 // cannot drift.
 struct MimgBindingPlan {
   // MIMG instruction pc -> binding id.
-  std::unordered_map<u32, u32> binding_by_pc;
+  base::HashMap<u32, u32> binding_by_pc;
   // Per binding: the T# base SGPR of its first-use MIMG.
-  std::vector<u32> binding_srsrc;
+  base::Vector<u32> binding_srsrc;
   // Per binding: true when the descriptor is an image_store target.
-  std::vector<bool> binding_storage;
+  base::Vector<bool> binding_storage;
 };
 MimgBindingPlan PlanMimgBindings(const Program& program,
                                  const u8* reachable = nullptr);
@@ -117,8 +119,8 @@ class ScalarReplayScope {
 // per-program cache of plan + scalar-relevant subset, skipping re-planning per draw.
 // code_base resolves s_getpc_b64 against a table embedded after the code; 0 = unknown.
 void TrackTextures(
-    std::vector<TImage>& out,
-    const std::shared_ptr<const Program>& ps_program,
+    base::Vector<TImage>& out,
+    const base::SharedPointer<const Program>& ps_program,
     const u32* ps_user_data,
     bool trace = false,
     u64 code_base = 0);
@@ -136,7 +138,7 @@ inline u64 CbufKey(u32 base_sgpr, bool pointer, u32 version) {
 // a handful per shader, so a flat list.
 // FOX passes cbuffer descriptors through EUD, so the chain is walked and read
 // at the point of load.
-using CbufList = std::vector<std::pair<u64, VBuffer>>;
+using CbufList = base::Vector<base::Pair<u64, VBuffer>>;
 inline const VBuffer* FindCbuf(const CbufList& list, u64 key) {
   for (const auto& [k, v] : list)
     if (k == key)
@@ -145,7 +147,7 @@ inline const VBuffer* FindCbuf(const CbufList& list, u64 key) {
 }
 void ResolveCbuffers(
     CbufList& out,
-    const std::shared_ptr<const Program>& program,
+    const base::SharedPointer<const Program>& program,
     const u32* user_data,
     u64 code_base = 0);
 
@@ -153,9 +155,9 @@ void ResolveCbuffers(
 // as inline user data or be overwritten by an SMRD load, so capture each V# from the
 // scalar state live at its MUBUF. Index-aligned with attrs; unresolved zeroed.
 void ResolveDirectVertexBuffers(
-    std::vector<VBuffer>& out,
-    const std::shared_ptr<const Program>& program,
-    const std::vector<ShaderAttr>& attrs,
+    base::Vector<VBuffer>& out,
+    const base::SharedPointer<const Program>& program,
+    const base::Vector<ShaderAttr>& attrs,
     const u32* user_data,
     u64 code_base = 0);
 
@@ -163,9 +165,9 @@ void ResolveDirectVertexBuffers(
 // as ResolveDirectVertexBuffers, captured at the consuming instruction.
 // Index-aligned with `buffers`; unresolved zeroed.
 void ResolveShaderBuffers(
-    std::vector<VBuffer>& out,
-    const std::shared_ptr<const Program>& program,
-    const std::vector<ShaderBuffer>& buffers,
+    base::Vector<VBuffer>& out,
+    const base::SharedPointer<const Program>& program,
+    const base::Vector<ShaderBuffer>& buffers,
     const u32* user_data,
     u64 code_base = 0);
 
@@ -176,7 +178,7 @@ struct ResolvedCsResource {
   bool valid = false;
   u32 descriptor[8] = {};
 };
-void ResolveCsResources(std::vector<ResolvedCsResource>& out,
+void ResolveCsResources(base::Vector<ResolvedCsResource>& out,
                         const Program& program,
                         const RecompiledCs& plan,
                         const u32* user_data);
@@ -184,7 +186,7 @@ void ResolveCsResources(std::vector<ResolvedCsResource>& out,
 // Given a decoded fetch shader + the 16 VS user-data SGPRs, recover the vertex-
 // attribute buffers in attribute order (the common s_load_dwordx4 from the
 // vertex-buffer table + buffer_load_format pattern).
-void TrackVertexBuffers(std::vector<VBuffer>& out,
+void TrackVertexBuffers(base::Vector<VBuffer>& out,
                         const Program& fetch_program,
                         const u32* vs_user_data);
 

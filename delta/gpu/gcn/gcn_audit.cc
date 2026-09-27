@@ -7,17 +7,21 @@
 #include "gpu/gcn/gcn_audit.h"
 #include "base/arch.h"
 
-#include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <map>
-#include <unordered_map>
+#include <sys/stat.h>
 
 #include <base/logging.h>
 
 #include "gpu/gcn/gcn_disasm.h"
 #include <utl/options.h>
+#include <base/algorithm.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/vector.h>
+#include <base/memory/move.h>
+#include <base/strings/xstring.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(const char*, kShAudit, "DELTA_GPU_SHAUDIT", nullptr);
@@ -76,31 +80,31 @@ struct Active {
   const char* stage = "";
   const u32* code = nullptr;
   const Program* program = nullptr;
-  std::vector<InstRecord> insts;
-  std::vector<u8> reachable;
+  base::Vector<InstRecord> insts;
+  base::Vector<u8> reachable;
   // note key ("mubuf.ps op=0x0 buffer_load_format_x") -> stats
-  std::map<std::string, EventStat> events;
-  std::vector<std::string> plan;
-  std::string decline;
+  base::Map<base::String, EventStat> events;
+  base::Vector<base::String> plan;
+  base::String decline;
   u32 cur = ~0u;  // program index currently being emitted
 };
 
 struct ShaderRecord {
-  std::string stage;
+  base::String stage;
   u64 hash = 0;
   u64 guest = 0;
   u32 dwords = 0;
   u32 insts = 0, dead = 0, silent_count = 0;
   u32 recompiles = 1;
   bool declined = false;
-  std::string decline_reason;
-  std::map<std::string, EventStat> events;
-  std::map<std::string, EventStat> silent;  // mnemonic -> stats
+  base::String decline_reason;
+  base::Map<base::String, EventStat> events;
+  base::Map<base::String, EventStat> silent;  // mnemonic -> stats
 };
 
 Active g_active;
-std::vector<ShaderRecord> g_records;
-std::unordered_map<u64, size_t> g_by_key;  // hash^stage -> record index
+base::Vector<ShaderRecord> g_records;
+base::HashMap<u64, size_t> g_by_key;  // hash^stage -> record index
 bool g_atexit_registered = false;
 
 // Rewrite the report file after every new shader. The emulator is routinely
@@ -131,12 +135,11 @@ void ReportAtExit() {
 
 void WriteDumpFiles(const ShaderRecord& rec,
                     const Active& a,
-                    const std::vector<u32>* spirv) {
+                    const base::Vector<u32>* spirv) {
   const char* dir = DumpDir();
   if (!dir)
     return;
-  std::error_code ec;
-  std::filesystem::create_directories(dir, ec);  // best effort
+  ::mkdir(dir, 0755);
 
   // The guest address goes in the name, not just the hash. Every other
   // diagnostic in the tree names a shader by the address the guest set it from
@@ -150,20 +153,20 @@ void WriteDumpFiles(const ShaderRecord& rec,
                 static_cast<unsigned long long>(rec.hash));
 
   // Raw bytecode.
-  if (std::FILE* f = std::fopen((std::string(stem) + ".gcn").c_str(), "wb")) {
+  if (std::FILE* f = std::fopen((base::String(stem) + ".gcn").c_str(), "wb")) {
     std::fwrite(a.code, 4, rec.dwords, f);
     std::fclose(f);
   }
   // Unoptimized SPIR-V (with OpLine pc markers when the translator saw the
   // dump env).
   if (spirv && !spirv->empty()) {
-    if (std::FILE* f = std::fopen((std::string(stem) + ".spv").c_str(), "wb")) {
+    if (std::FILE* f = std::fopen((base::String(stem) + ".spv").c_str(), "wb")) {
       std::fwrite(spirv->data(), 4, spirv->size(), f);
       std::fclose(f);
     }
   }
 
-  std::FILE* f = std::fopen((std::string(stem) + ".txt").c_str(), "w");
+  std::FILE* f = std::fopen((base::String(stem) + ".txt").c_str(), "w");
   if (!f) {
     static bool warned = false;
     if (!warned) {
@@ -176,7 +179,7 @@ void WriteDumpFiles(const ShaderRecord& rec,
                rec.stage.c_str(), static_cast<unsigned long long>(rec.hash),
                static_cast<const void*>(a.code), rec.dwords,
                rec.declined ? rec.decline_reason.c_str() : "ok");
-  for (const std::string& line : a.plan)
+  for (const base::String& line : a.plan)
     std::fprintf(f, "; %s\n", line.c_str());
   std::fprintf(
       f, "; fates: %u insts, %u dead, %u unsupported-sites, %u silent\n",
@@ -198,8 +201,8 @@ void WriteDumpFiles(const ShaderRecord& rec,
   for (u32 i = 0; i < program.size(); i++) {
     const Inst& inst = program[i];
     const InstRecord& ir = i < a.insts.size() ? a.insts[i] : InstRecord{};
-    std::string line = DisasmLine(inst);
-    std::string mark;
+    base::String line = DisasmLine(inst);
+    base::String mark;
     if (i < a.reachable.size() && !a.reachable[i]) {
       mark = " ; dead";
     } else {
@@ -292,7 +295,7 @@ void AuditNote(const char* what, u32 op) {
   }
 }
 
-void AuditPlan(const std::string& line) {
+void AuditPlan(const base::String& line) {
   if (g_active.on)
     g_active.plan.push_back(line);
 }
@@ -302,10 +305,10 @@ void AuditDecline(const char* reason) {
     g_active.decline = reason;
 }
 
-void AuditEnd(const std::vector<u32>* spirv) {
+void AuditEnd(const base::Vector<u32>* spirv) {
   if (!g_active.on)
     return;
-  Active a = std::move(g_active);
+  Active a = base::move(g_active);
   g_active = Active{};
 
   const Program& program = *a.program;
@@ -351,7 +354,7 @@ void AuditEnd(const std::vector<u32>* spirv) {
 
 void WriteAuditReport(std::FILE* f) {
   u32 total = 0, declined = 0;
-  std::map<std::string, u32> per_stage;
+  base::Map<base::String, u32> per_stage;
   for (const ShaderRecord& r : g_records) {
     total++;
     per_stage[r.stage]++;
@@ -371,11 +374,11 @@ void WriteAuditReport(std::FILE* f) {
   // example).
   struct Agg {
     u32 shaders = 0, sites = 0;
-    std::string example;
+    base::String example;
     // Every shader carrying this op, not just the first. One example is enough
     // to know an op is unhandled, but not to answer "is the pass I am chasing
     // one of them", which is the question that actually comes up.
-    std::vector<std::string> all;
+    base::Vector<base::String> all;
   };
   const auto example_of = [](const ShaderRecord& r, const EventStat& st) {
     char buf[96];
@@ -385,9 +388,9 @@ void WriteAuditReport(std::FILE* f) {
     else
       std::snprintf(buf, sizeof(buf), "%s_%016llx", r.stage.c_str(),
                     static_cast<unsigned long long>(r.hash));
-    return std::string(buf);
+    return base::String(buf);
   };
-  std::map<std::string, Agg> events, silents;
+  base::Map<base::String, Agg> events, silents;
   for (const ShaderRecord& r : g_records) {
     for (const auto& e : r.events) {
       Agg& agg = events[e.first];
@@ -407,14 +410,14 @@ void WriteAuditReport(std::FILE* f) {
     }
   }
   const auto print_ranked = [f](const char* title,
-                                const std::map<std::string, Agg>& m) {
+                                const base::Map<base::String, Agg>& m) {
     if (m.empty())
       return;
     std::fprintf(f, "[shaudit] == %s ==\n", title);
-    std::vector<const std::pair<const std::string, Agg>*> rows;
+    base::Vector<const base::Pair<const base::String, Agg>*> rows;
     for (const auto& e : m)
       rows.push_back(&e);
-    std::sort(rows.begin(), rows.end(), [](const auto* x, const auto* y) {
+    base::Sort(rows.begin(), rows.end(), [](const auto* x, const auto* y) {
       if (x->second.shaders != y->second.shaders)
         return x->second.shaders > y->second.shaders;
       return x->second.sites > y->second.sites;
@@ -423,7 +426,7 @@ void WriteAuditReport(std::FILE* f) {
       std::fprintf(f, "[shaudit]   %3u shaders / %4u sites  %-40s e.g. %s\n",
                    row->second.shaders, row->second.sites, row->first.c_str(),
                    row->second.example.c_str());
-      for (const std::string& who : row->second.all)
+      for (const base::String& who : row->second.all)
         std::fprintf(f, "[shaudit]        %s\n", who.c_str());
     }
   };

@@ -13,8 +13,8 @@
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/gcn/spirv/gcn_spirv.h"
 
-#include <algorithm>
-#include <chrono>
+#include <base/algorithm.h>
+#include <base/time/time.h>
 
 namespace gpu::gcn {
 
@@ -25,9 +25,7 @@ u32 g_spv_hit_n = 0, g_spv_miss_n = 0;
 
 namespace {
 u64 NowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
+  return (base::TickClock::NowNs());
 }
 // Set-2 raw-buffer bindings the planner may use. Starts at the Vulkan floor so
 // a shader planned before the renderer reports the device limit is still valid
@@ -51,7 +49,7 @@ u32 MaxGfxBuffers() {
 }
 
 void SetMaxGfxBuffers(u32 n) {
-  g_max_gfx_buffers = std::clamp(n, kMinGfxBuffers, kMaxGfxBuffers);
+  g_max_gfx_buffers = base::Clamp(n, kMinGfxBuffers, kMaxGfxBuffers);
 }
 
 bool PushCodeBase() {

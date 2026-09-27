@@ -1,34 +1,42 @@
-#include <algorithm>
 #include "base/arch.h"
-#include <atomic>
-#include <iterator>
-#include <mutex>
-#include <thread>
 #include <unistd.h>
 
+#include <base/atomic.h>
 #include <base/containers/vector.h>
 #include <base/logging.h>
+#include <base/memory/move.h>
 #include <base/memory/unique_pointer.h>
+#include <base/strings/format.h>
+#include <base/strings/string_ref.h>
 #include <base/strings/xstring.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
+#include <base/time/time.h>
 
 #include "logger.h"
 #include "threadsafe_queue.h"
 
 namespace utl {
 
-static std::atomic<bool> g_logSilenced{false};
-static std::atomic<std::thread::id> g_dumpingThread{};
+static base::Atomic<bool> g_logSilenced{false};
+// Any address unique to the calling thread names it.
+static mem_size ThisThread() {
+  static thread_local char tag;
+  return reinterpret_cast<mem_size>(&tag);
+}
+static base::Atomic<mem_size> g_dumpingThread{0};
 void silenceLogging() {
-  g_dumpingThread.store(std::this_thread::get_id(), std::memory_order_relaxed);
-  g_logSilenced.store(true, std::memory_order_relaxed);
+  g_dumpingThread.store(ThisThread(), base::memory_order_relaxed);
+  g_logSilenced.store(true, base::memory_order_relaxed);
 }
 
 class LogRegistry {
-  std::mutex writing_lock;
-  std::thread backend_thread;
+  base::Mutex writing_lock;
+  base::UniquePointer<base::Thread> backend_thread;
   base::Vector<base::UniquePointer<logBase>> sinks;
   Common::MPSCQueue<logEntry> pending;
-  std::chrono::steady_clock::time_point time_origin;
+  base::TimeTicks time_origin;
 
 public:
   LogRegistry(LogRegistry const &) = delete;
@@ -40,12 +48,12 @@ public:
   }
 
   LogRegistry() {
-    time_origin = std::chrono::steady_clock::now();
+    time_origin = base::TimeTicks::Now();
 
-    backend_thread = std::thread([&] {
+    backend_thread = base::MakeUnique<base::Thread>("log", [this] {
       logEntry entry;
       auto write_logs = [&](logEntry &e) {
-        std::lock_guard lock{writing_lock};
+        base::LockGuard<base::Mutex> lock{writing_lock};
         for (auto &sink : sinks) {
           sink->write(e);
         }
@@ -66,35 +74,30 @@ public:
       while (logs_written++ < MAX_LOGS_TO_WRITE && pending.Pop(entry)) {
         write_logs(entry);
       }
-    });
+    }, /*start_now=*/true);
   }
 
   ~LogRegistry() {
     logEntry entry;
     entry.final_entry = true;
     pending.Push(entry);
-    backend_thread.join();
+    backend_thread->Join();
   }
 
   void AddEntry(logLevel lvl, u32 line, const char *func,
                 base::String msg) {
-    using std::chrono::duration_cast;
-    using std::chrono::steady_clock;
-
     logEntry entry{};
-    entry.timestamp = duration_cast<std::chrono::microseconds>(
-        steady_clock::now() - time_origin);
+    entry.timestamp = base::TimeTicks::Now() - time_origin;
     entry.log_level = lvl;
     entry.line_num = line;
     entry.function = base::String(func);
-    entry.message = std::move(msg);
+    entry.message = base::move(msg);
 
-    if (g_logSilenced.load(std::memory_order_relaxed)) {
+    if (g_logSilenced.load(base::memory_order_relaxed)) {
       // The crash handler stopped the backend thread so nothing races its
       // report on stderr, but the report itself comes through here, so the
       // dumping thread has to write its own lines, synchronously.
-      if (g_dumpingThread.load(std::memory_order_relaxed) !=
-          std::this_thread::get_id())
+      if (g_dumpingThread.load(base::memory_order_relaxed) != ThisThread())
         return;
       base::String out = formatLogEntry(entry);
       ssize_t w = ::write(2, out.c_str(), out.size());
@@ -107,20 +110,20 @@ public:
   }
 
   logBase *AddSink(base::UniquePointer<logBase> sink) {
-    std::lock_guard lock{writing_lock};
+    base::LockGuard<base::Mutex> lock{writing_lock};
     auto *raw = sink.Get_UseOnlyIfYouKnowWhatYouareDoing();
-    sinks.push_back(std::move(sink));
+    sinks.push_back(base::move(sink));
     return raw;
   }
 
   void RemoveSink(base::StringRef name) {
-    std::lock_guard lock{writing_lock};
-    // base::Vector lacks std::remove_if; do it inline.
+    base::LockGuard<base::Mutex> lock{writing_lock};
+    // base::Vector lacks base::RemoveIf; do it inline.
     auto* it = sinks.begin();
     auto* dst = sinks.begin();
     for (; it != sinks.end(); ++it) {
       if (name != base::StringRef((*it)->getName())) {
-        if (dst != it) *dst = std::move(*it);
+        if (dst != it) *dst = base::move(*it);
         ++dst;
       }
     }
@@ -154,32 +157,23 @@ const char *GetLevelName(logLevel log_level) {
 }
 
 base::String formatLogEntry(const logEntry &entry) {
-  u32 time_seconds =
-      static_cast<unsigned int>(entry.timestamp.count() / 1000000);
-  u32 time_fractional =
-      static_cast<unsigned int>(entry.timestamp.count() % 1000000);
+  const i64 us = entry.timestamp.InMicroseconds();
+  u32 time_seconds = static_cast<u32>(us / 1000000);
+  u32 time_fractional = static_cast<u32>(us % 1000000);
 
   const char *level_name = GetLevelName(entry.log_level);
 
-  // fmt::format produces std::string; copy into base::String once.
-  std::string s = fmt::format("[{:4d}.{:06d}] <{}> {}:{}: {}", time_seconds,
-                              time_fractional, level_name,
-                              entry.function.c_str(), entry.line_num,
-                              entry.message.c_str());
-  return base::String(s.c_str(), static_cast<base::String::size_type>(s.size()));
+  return base::Format("[{:4d}.{:06d}] <{}> {}:{}: {}", time_seconds,
+                      time_fractional, level_name, entry.function,
+                      entry.line_num, entry.message);
 }
 
 logBase *addLogSink(base::UniquePointer<logBase> sink) {
-  return LogRegistry::Instance().AddSink(std::move(sink));
+  return LogRegistry::Instance().AddSink(base::move(sink));
 }
 
-void formatLogMsg(logLevel lvl, u32 line, const char *func,
-                  const char *fmt, const fmt::format_args &args) {
-  std::string s = fmt::vformat(fmt, args);
-  auto &reg = LogRegistry::Instance();
-  reg.AddEntry(lvl, line, func,
-               base::String(s.c_str(),
-                            static_cast<base::String::size_type>(s.size())));
+void addLogMsg(logLevel lvl, u32 line, const char *func, base::String msg) {
+  LogRegistry::Instance().AddEntry(lvl, line, func, base::move(msg));
 }
 
 logBase *getLogSink(base::StringRef name) {
@@ -192,10 +186,10 @@ void routeBaseLogging() {
         static constexpr logLevel kLevels[] = {
             logLevel::Trace, logLevel::Debug, logLevel::Info,
             logLevel::Warning, logLevel::Error, logLevel::Critical};
-        const auto i = static_cast<size_t>(level);
+        const auto i = static_cast<mem_size>(level);
         // The channel goes in the message as [channel], which is the form
         // these lines are grepped by; the function column names the bridge.
-        fmtLogMsg(i < std::size(kLevels) ? kLevels[i] : logLevel::Info, 0,
+        fmtLogMsg(i < _countof(kLevels) ? kLevels[i] : logLevel::Info, 0,
                   "base", "[{}] {}", channel ? channel : "?", msg ? msg : "");
       },
       nullptr);

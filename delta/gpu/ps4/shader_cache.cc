@@ -8,14 +8,16 @@
 #include "gpu/ps4/shader_cache.h"
 #include "base/arch.h"
 
-#include <functional>
-#include <unordered_map>
-#include <unordered_set>
 
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/render/renderer.h"
+#include <base/containers/map.h>
+#include <base/containers/set.h>
+#include <base/containers/vector.h>
+#include <base/containers/hash_map.h>
+#include <base/hashing/hash.h>
 
 namespace gpu::ps4 {
 namespace {
@@ -82,7 +84,7 @@ struct ComputeKey {
 
 struct ComputeKeyHash {
   size_t operator()(const ComputeKey& key) const {
-    u64 h = std::hash<u64>{}(key.address);
+    u64 h = base::Hash<u64>{}(key.address);
     MixHash(h, key.thread_x);
     MixHash(h, key.thread_y);
     MixHash(h, key.thread_z);
@@ -154,9 +156,9 @@ GraphicsKey GraphicsKeyOf(const GraphicsShaderState& state) {
   return key;
 }
 
-std::unordered_map<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>&
+base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>&
 GraphicsCache() {
-  static std::unordered_map<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>
+  static base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>
       cache;
   return cache;
 }
@@ -194,7 +196,7 @@ const gcn::Recompiled& GetGraphicsShader(const Regs& regs,
 
 void PrefetchGraphicsShader(const Regs& regs,
                             const GraphicsShaderState& state) {
-  static std::unordered_set<GraphicsKey, GraphicsKeyHash> started;
+  static base::HashSet<GraphicsKey, GraphicsKeyHash> started;
   const GraphicsKey key = GraphicsKeyOf(state);
   if (GraphicsCache().count(key) || !started.insert(key).second)
     return;
@@ -212,9 +214,9 @@ ComputeKey ComputeKeyOf(const ComputeShaderState& state) {
           state.lds_dwords, gcn::DefaultIsaMode() == gcn::IsaMode::kNeo};
 }
 
-std::unordered_map<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>&
+base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>&
 ComputeCache() {
-  static std::unordered_map<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>
+  static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>
       cache;
   return cache;
 }
@@ -237,7 +239,7 @@ const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
 }
 
 void PrefetchComputeShader(const ComputeShaderState& state) {
-  static std::unordered_set<ComputeKey, ComputeKeyHash> started;
+  static base::HashSet<ComputeKey, ComputeKeyHash> started;
   const ComputeKey key = ComputeKeyOf(state);
   if (ComputeCache().count(key) || !started.insert(key).second)
     return;
@@ -253,7 +255,7 @@ void PrefetchComputeShader(const ComputeShaderState& state) {
   if (rc.ok)
     gcn::spirv::PrefetchThen(
         rc.spirv, [n = static_cast<u32>(rc.resources.size()),
-                   guest = rc.guest_memory_binding](const std::vector<u32>& spv) {
+                   guest = rc.guest_memory_binding](const base::Vector<u32>& spv) {
           render::PrebuildComputePipeline(spv, n, guest);
         });
 #endif

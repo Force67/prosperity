@@ -7,11 +7,12 @@
 // a simple lockless thread-safe,
 // single reader, single writer queue
 
-#include <atomic>
-#include <condition_variable>
-#include <cstddef>
-#include <mutex>
-#include <utility>
+#include "base/arch.h"
+#include <base/atomic.h>
+#include <base/memory/move.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 
 namespace Common {
 template <typename T> class SPSCQueue {
@@ -22,7 +23,7 @@ public:
     delete read_ptr;
   }
 
-  std::size_t Size() const { return size.load(); }
+  mem_size Size() const { return size.load(); }
 
   bool Empty() const { return Size() == 0; }
 
@@ -30,20 +31,20 @@ public:
 
   template <typename Arg> void Push(Arg &&t) {
     // create the element, add it to the queue
-    write_ptr->current = std::forward<Arg>(t);
+    write_ptr->current = base::forward<Arg>(t);
     // set the next pointer to a new element ptr
     // then advance the write pointer
     ElementPtr *new_ptr = new ElementPtr();
-    write_ptr->next.store(new_ptr, std::memory_order_release);
+    write_ptr->next.store(new_ptr, base::memory_order_release);
     write_ptr = new_ptr;
     // publish size before notifying, under cv_mutex, or PopWait can check its
     // predicate, miss this element, and sleep through the wakeup (which hung
     // process exit when the lost entry was the logger's final one)
     ++size;
     {
-      std::lock_guard lock{cv_mutex};
+      base::LockGuard<base::Mutex> lock{cv_mutex};
     }
-    cv.notify_one();
+    cv.NotifyOne();
   }
 
   void Pop() {
@@ -64,8 +65,8 @@ public:
     --size;
 
     ElementPtr *tmpptr = read_ptr;
-    read_ptr = tmpptr->next.load(std::memory_order_acquire);
-    t = std::move(tmpptr->current);
+    read_ptr = tmpptr->next.load(base::memory_order_acquire);
+    t = base::move(tmpptr->current);
     tmpptr->next.store(nullptr);
     delete tmpptr;
     return true;
@@ -73,8 +74,8 @@ public:
 
   T PopWait() {
     if (Empty()) {
-      std::unique_lock lock{cv_mutex};
-      cv.wait(lock, [this]() { return !Empty(); });
+      base::UniqueLock<base::Mutex> lock{cv_mutex};
+      cv.Wait(lock, [this]() { return !Empty(); });
     }
     T t;
     Pop(t);
@@ -102,14 +103,14 @@ private:
     }
 
     T current;
-    std::atomic<ElementPtr *> next{nullptr};
+    base::Atomic<ElementPtr *> next{nullptr};
   };
 
   ElementPtr *write_ptr;
   ElementPtr *read_ptr;
-  std::atomic_size_t size{0};
-  std::mutex cv_mutex;
-  std::condition_variable cv;
+  base::Atomic<mem_size> size{0};
+  base::Mutex cv_mutex;
+  base::ConditionVariable cv;
 };
 
 // a simple thread-safe,
@@ -117,14 +118,14 @@ private:
 
 template <typename T> class MPSCQueue {
 public:
-  std::size_t Size() const { return spsc_queue.Size(); }
+  mem_size Size() const { return spsc_queue.Size(); }
 
   bool Empty() const { return spsc_queue.Empty(); }
 
   T &Front() const { return spsc_queue.Front(); }
 
   template <typename Arg> void Push(Arg &&t) {
-    std::lock_guard lock{write_lock};
+    base::LockGuard<base::Mutex> lock{write_lock};
     spsc_queue.Push(t);
   }
 
@@ -139,6 +140,6 @@ public:
 
 private:
   SPSCQueue<T> spsc_queue;
-  std::mutex write_lock;
+  base::Mutex write_lock;
 };
 } // namespace Common

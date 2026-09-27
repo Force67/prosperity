@@ -13,6 +13,7 @@
 #include <utl/file.h>
 
 #include "device.h"
+#include <base/strings/xstring.h>
 
 namespace krnl {
 // FreeBSD-style stat the PS4 returns (SceKernelStat, 0x78 bytes), filled from vn_stat.

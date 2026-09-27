@@ -7,6 +7,7 @@
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/hid_dev.h"
 #include "kern/lv2/error_table.h"
+#include <base/strings/format.h>
 
 // Without DELTA_HID_PASSTHROUGH the device has no host input behind it, so it
 // has to soft-succeed exactly like the real device does for non-system
@@ -44,10 +45,11 @@ TEST_F(HidDevice, ReadsProduceNothing) {
   for (const auto &c : cases) {
     u8 buf[0x40];
     std::memset(buf, 0xAA, sizeof(buf));
-    EXPECT_EQ(dev_.ioctl(c.cmd, buf), 0) << std::hex << c.cmd;
+    EXPECT_EQ(dev_.ioctl(c.cmd, buf), 0)
+        << base::Format("{:#x}", c.cmd).c_str();
     // A read that produced nothing must not have touched the guest buffer.
     for (u8 b : buf)
-      EXPECT_EQ(b, 0xAA) << std::hex << c.cmd;
+      EXPECT_EQ(b, 0xAA) << base::Format("{:#x}", c.cmd).c_str();
   }
 }
 

@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include "gpu/gcn/gcn_decode.h"
+#include <base/containers/vector.h>
 
 namespace {
 
@@ -236,7 +237,7 @@ TEST(GcnDecode, ReachabilityIncludesDebugBranchTargetAndFallthrough) {
 
   const gpu::gcn::Program program =
       gpu::gcn::Decode(code, 5, /*stop_at_endpgm=*/false);
-  const std::vector<u8> reachable = gpu::gcn::ComputeReachability(program);
+  const base::Vector<u8> reachable = gpu::gcn::ComputeReachability(program);
 
   ASSERT_EQ(reachable.size(), 5u);
   EXPECT_EQ(reachable[0], 1u);
@@ -256,7 +257,7 @@ TEST(GcnDecode, IndirectControlFlowDoesNotMarkPotentialTargetsDead) {
 
   const gpu::gcn::Program program =
       gpu::gcn::Decode(code, 4, /*stop_at_endpgm=*/false);
-  const std::vector<u8> reachable = gpu::gcn::ComputeReachability(program);
+  const base::Vector<u8> reachable = gpu::gcn::ComputeReachability(program);
 
   ASSERT_EQ(reachable.size(), 4u);
   for (u8 value : reachable)
@@ -274,7 +275,7 @@ TEST(GcnDecode, ReachabilityExcludesUnconditionalBranchFallthrough) {
 
   const gpu::gcn::Program program =
       gpu::gcn::Decode(code, 6, /*stop_at_endpgm=*/false);
-  const std::vector<u8> reachable = gpu::gcn::ComputeReachability(program);
+  const base::Vector<u8> reachable = gpu::gcn::ComputeReachability(program);
 
   ASSERT_EQ(reachable.size(), 6u);
   EXPECT_EQ(reachable[0], 1u);

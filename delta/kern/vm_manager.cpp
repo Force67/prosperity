@@ -7,7 +7,6 @@
  * in the root of the source tree.
  */
 
-#include <algorithm>
 #include "base/arch.h"
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +15,8 @@
 
 #include "proc.h"
 #include "vm_manager.h"
+#include <base/algorithm.h>
+#include <base/threading/lock_guard.h>
 
 namespace krnl {
 vmManager::vmManager(procInfo &info) : pinfo(info) {}
@@ -89,7 +90,7 @@ void setMappingChangedHook(MappingChangedHook hook) { g_mappingChanged = hook; }
 
 void vmManager::add(u8 *ptr, size_t size, mprot prot, u32 sceProt,
                     bool reserved) {
-  std::lock_guard lock(vmlock);
+  base::LockGuard lock(vmlock);
   punchHoleLocked(ptr, size);
   mappingChanged(ptr, size);
   rtPages.emplace_back(ptr, size, prot, sceProt, reserved);
@@ -97,7 +98,7 @@ void vmManager::add(u8 *ptr, size_t size, mprot prot, u32 sceProt,
 
 void vmManager::addDirect(u8 *ptr, size_t size, mprot prot,
                           u32 sceProt, u64 physOffset) {
-  std::lock_guard lock(vmlock);
+  base::LockGuard lock(vmlock);
   punchHoleLocked(ptr, size);
   mappingChanged(ptr, size);
   rtPages.emplace_back(ptr, size, prot, sceProt, false);
@@ -106,17 +107,17 @@ void vmManager::addDirect(u8 *ptr, size_t size, mprot prot,
 }
 
 void vmManager::remove(u8 *ptr, size_t size) {
-  std::lock_guard lock(vmlock);
+  base::LockGuard lock(vmlock);
   punchHoleLocked(ptr, size);
   mappingChanged(ptr, size);
 }
 
 pageInfo *vmManager::get(u8 *ptr) {
-  std::lock_guard lock(vmlock);
+  base::LockGuard lock(vmlock);
   // The kernel resolves the region *containing* an address, not just one that
   // starts there: sceKernelVirtualQuery / QueryMemoryProtection / mname all pass
   // interior pointers. Match by range so those report the right region.
-  auto it = std::find_if(rtPages.begin(), rtPages.end(), [&ptr](const auto &page) {
+  auto it = base::FindIf(rtPages.begin(), rtPages.end(), [&ptr](const auto &page) {
     return ptr >= page.ptr && ptr < page.ptr + page.size;
   });
 
@@ -127,7 +128,7 @@ pageInfo *vmManager::get(u8 *ptr) {
 }
 
 bool vmManager::overlaps(u8 *ptr, size_t size) const {
-  std::lock_guard lock(vmlock);
+  base::LockGuard lock(vmlock);
   u8 *end = ptr + size;
   for (const auto &page : rtPages) {
     if (ptr < page.ptr + page.size && page.ptr < end)
@@ -138,7 +139,7 @@ bool vmManager::overlaps(u8 *ptr, size_t size) const {
 
 void vmManager::protectRange(u8 *ptr, size_t size, mprot prot,
                              u32 sceProt) {
-  std::lock_guard lock(vmlock);
+  base::LockGuard lock(vmlock);
   u8 *end = ptr + size;
   for (auto &page : rtPages)
     if (ptr < page.ptr + page.size && page.ptr < end) {
@@ -148,7 +149,7 @@ void vmManager::protectRange(u8 *ptr, size_t size, mprot prot,
 }
 
 void vmManager::setRangeName(u8 *ptr, size_t size, const char *name) {
-  std::lock_guard lock(vmlock);
+  base::LockGuard lock(vmlock);
   u8 *end = ptr + size;
   // The kernel (vm_map_set_name) allocates the name storage per entry; mirror
   // that with a strdup'd copy so the field outlives the caller's buffer. The
@@ -168,7 +169,7 @@ void vmManager::setRangeName(u8 *ptr, size_t size, const char *name) {
 
 void vmManager::forEachGpuAperturePage(void (*fn)(void *, u8 *, size_t),
                                        void *ctx) const {
-  std::lock_guard lock(vmlock);
+  base::LockGuard lock(vmlock);
   for (const auto &page : rtPages) {
     auto a = reinterpret_cast<u64>(page.ptr);
     // Same range as gpu/ps5's GpuAddr(): everything allocLowGuest() can hand
@@ -192,9 +193,9 @@ u8 *vmManager::mapMemory(u8 *preference, size_t size,
 }
 
 void vmManager::unmapRtMemory(u8 *ptr) {
-  std::lock_guard lock(vmlock);
+  base::LockGuard lock(vmlock);
   auto iter =
-      std::find_if(rtPages.begin(), rtPages.end(),
+      base::FindIf(rtPages.begin(), rtPages.end(),
                    [&ptr](const auto &page) { return page.ptr == ptr; });
 
   rtPages.erase(iter);

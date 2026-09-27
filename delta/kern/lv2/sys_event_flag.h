@@ -10,12 +10,13 @@
 
 #include <base.h>
 #include "base/arch.h"
-#include <atomic>
-#include <condition_variable>
-#include <mutex>
-#include <vector>
 
 #include "kern/object.h"
+#include <base/atomic.h>
+#include <base/containers/vector.h>
+#include <base/strings/xstring.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/mutex.h>
 
 namespace krnl {
 class proc;
@@ -49,7 +50,7 @@ enum evfAttr : u32 {
 //   +0x4c  uint32  nwaiters
 //   +0x50  uint32  is_shared
 //   +0x54  uint32  proc_type
-// We model it with host primitives (std::mutex/cv) rather than the exact layout.
+// We model it with host primitives (base::Mutex/cv) rather than the exact layout.
 
 // SCE event flag: a 64-bit bitmask threads wait on (AND/OR a pattern) and others
 // set/clear. This is a core thread-sync primitive; with it stubbed, waiters
@@ -78,7 +79,7 @@ public:
   // Tid of the last set() caller: lets trywait detect the request/response
   // handshake pattern (this thread just posted a request bit and now polls for
   // the responder's done bit). See sys_evf_trywait.
-  std::atomic<long> lastSetTid{0};
+  base::Atomic<long> lastSetTid{0};
 
 private:
   struct Waiter {
@@ -93,9 +94,9 @@ private:
   int take(u64 pattern, u32 mode, u64 *result);
   void removeWaiter(Waiter *waiter);
 
-  std::mutex m;
-  std::condition_variable cv;
-  std::vector<Waiter *> waiters;
+  base::Mutex m;
+  base::ConditionVariable cv;
+  base::Vector<Waiter *> waiters;
   u64 bits;
   u64 sticky;
 };

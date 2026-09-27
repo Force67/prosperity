@@ -8,18 +8,9 @@
 #include "gpu/ps5/cmd_trace.h"
 #include "base/arch.h"
 
-#include <algorithm>
-#include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <map>
-#include <mutex>
-#include <set>
-#include <thread>
-#include <unordered_set>
-#include <utility>
 
 #include <base/logging.h>
 #include <base/strings/format.h>
@@ -31,6 +22,15 @@
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
+#include <base/threading/thread.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/containers/pair.h>
+#include <base/containers/set.h>
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/containers/hash_map.h>
 
 namespace {
 DELTA_OPTION(u64, kBlkFrom, "DELTA_AGC_REGSTAT_FROM", 0);
@@ -72,7 +72,7 @@ constexpr u64 kMaxShaderBytes = 4096 * sizeof(u32);
 
 // Draw accounting. The counters the census reports and the index every
 // detail probe below gates on.
-std::atomic<u64> g_draws_seen{0}, g_draws_issued{0}, g_drop_no_shader{0};
+base::Atomic<u64> g_draws_seen{0}, g_draws_issued{0}, g_drop_no_shader{0};
 
 // Draws that have reached shader resolution. The one being reported on is the
 // last, so its index is one less.
@@ -198,10 +198,10 @@ void NoteRegisterWrite(const char* source, u32 reg, u32 value) {
   // resolves against nothing.
   if (kAgcShcensus && value && reg >= kShRegBase &&
       reg < kShRegBase + 0x300) {
-    static std::map<u32, std::pair<u64, u32>> hist;  // offset -> {count, last}
-    static std::mutex lock;
+    static base::Map<u32, base::Pair<u64, u32>> hist;  // offset -> {count, last}
+    static base::Mutex lock;
     static u64 dumps = 0;
-    std::lock_guard<std::mutex> lk(lock);
+    base::LockGuard<base::Mutex> lk(lock);
     auto& e = hist[reg - kShRegBase];
     e.first++;
     e.second = value;
@@ -285,7 +285,7 @@ void TraceRegImage(u32 base, u64 image, const u32* body, u32 count) {
   u32 cursor = 0;
   for (u32 i = 2; i + 1 < count; i += 2) {
     const u32 off = body[i] & 0xFFFF;
-    const u32 num = std::min<u32>(body[i + 1] & 0xFFFF, 0x400);
+    const u32 num = base::Min<u32>(body[i + 1] & 0xFFFF, 0x400);
     BASE_LOGI("agc", "  cursor off={:#x} <- img[{}..]: {:08x} {:08x}", off,
               cursor, src[cursor], num > 1 ? src[cursor + 1] : 0);
     cursor += num;
@@ -408,37 +408,37 @@ void TraceShaderBind(u64 address, u32 gs_pgm_lo, u32 ps_pgm_lo) {
 // --- draw accounting -------------------------------------------------------
 
 void NoteDrawSeen() {
-  g_draws_seen.fetch_add(1, std::memory_order_relaxed);
+  g_draws_seen.fetch_add(1, base::memory_order_relaxed);
   if (!kGpuDrawcensus)
     return;
   static const bool started = [] {
-    std::thread([] {
+    base::SpawnDetachedThread("cmd_trace", [] {
       for (;;) {
-        std::this_thread::sleep_for(std::chrono::seconds(15));
+        base::SleepForMilliseconds((15) * 1000);
         BASE_LOGI("drawcensus", "seen={} issued={} dropped: no-shader={}",
                   g_draws_seen.load(), g_draws_issued.load(),
                   g_drop_no_shader.load());
       }
-    }).detach();
+    });
     return true;
   }();
   (void)started;
 }
 
 u64 DrawsSeen() {
-  return g_draws_seen.load(std::memory_order_relaxed);
+  return g_draws_seen.load(base::memory_order_relaxed);
 }
 
 void NoteDrawIssued(const render::DrawInfo& d) {
-  g_draws_issued.fetch_add(1, std::memory_order_relaxed);
+  g_draws_issued.fetch_add(1, base::memory_order_relaxed);
   if (!kGpuDrawcensus)
     return;
   // Which targets the frame actually renders into, once each. A frame that
   // presents black while thousands of draws issue means none of them landed in
   // a registered display buffer, and this is the only way to see that.
-  static std::set<u64> rts;
-  static std::mutex lock;
-  std::lock_guard<std::mutex> lk(lock);
+  static base::Set<u64> rts;
+  static base::Mutex lock;
+  base::LockGuard<base::Mutex> lk(lock);
   if (rts.size() < 64 && rts.insert(d.rt_base).second)
     BASE_LOGI("drawcensus",
               "rt {:#x} {}x{} display={} mrt={} depth={} prim={} vcount={}",
@@ -451,7 +451,7 @@ void NoteDrawDropped(const render::DrawInfo& d,
                      u64 vs_addr,
                      u64 ps_addr,
                      size_t shader_attrs) {
-  g_drop_no_shader.fetch_add(1, std::memory_order_relaxed);
+  g_drop_no_shader.fetch_add(1, base::memory_order_relaxed);
   if (!kGpuDrawcensus)
     return;
   static int shown = 0;
@@ -468,7 +468,7 @@ void NoteDrawDropped(const render::DrawInfo& d,
 void TraceNggState(const Regs& regs, u64 es_addr, u64 gs_addr) {
   if (!kGpuDrawcensus || !gs_addr || es_addr == gs_addr)
     return;
-  static std::unordered_set<u64> seen;
+  static base::HashSet<u64> seen;
   const u64 key = gs_addr ^ (es_addr * 0x9e3779b97f4a7c15ull);
   if (seen.size() >= 128 || !seen.insert(key).second)
     return;
@@ -576,7 +576,7 @@ void TraceIndexBuffer(u32 op, const render::DrawInfo& d, u64 index_size) {
     return;
   static int n = 0;
   const u64 base = reinterpret_cast<u64>(d.index_data);
-  const u64 bytes = std::min(d.index_count, 8u) * index_size;
+  const u64 bytes = base::Min(d.index_count, 8u) * index_size;
   if (n >= 12 || !gpu::IsReadableRange(base, bytes))
     return;
   n++;
@@ -739,7 +739,7 @@ void TraceCbufBinding(bool vertex_stage,
   // reads is what decides the pixel, and a scale factor sitting at zero looks
   // exactly like a shader that never ran.
   base::String head;
-  const u32 shown = std::min(num_dwords, 4u);
+  const u32 shown = base::Min(num_dwords, 4u);
   if (gpu::IsReadableRange(base, static_cast<u64>(shown) * 4)) {
     const u32* w = reinterpret_cast<const u32*>(base);
     for (u32 i = 0; i < shown; i++) {
@@ -783,7 +783,7 @@ void TraceVertexDump(const render::DrawInfo& d,
   if ((kVdumpRt && d.rt_base != kVdumpRt) ||
       (kVdumpIc && d.index_count != kVdumpIc))
     return;
-  const u64 vertex_bytes = std::min<u64>(
+  const u64 vertex_bytes = base::Min<u64>(
       static_cast<u64>(d.vertex_stride) * (d.vertex_count ? d.vertex_count : 4),
       128);
   static int n = 0;
@@ -889,7 +889,7 @@ void TraceVertexDump(const render::DrawInfo& d,
   // How many floats of each bound cbuffer to print: the default shows the head,
   // but a transform hides further in (a 48-dword window holds several).
   for (u32 b = 0; b < d.num_cbufs; b++) {
-    const int count = std::min<int>(kCbFloats, d.cbufs[b].size / 4);
+    const int count = base::Min<int>(kCbFloats, d.cbufs[b].size / 4);
     if (count <= 0 ||
         !gpu::IsReadableRange(d.cbufs[b].base, count * sizeof(float)))
       continue;
@@ -945,8 +945,8 @@ void TraceDrawDone() {
 void TraceShaderListing(u64 address) {
   if (!kDumpSh)
     return;
-  static std::set<u64> wanted = [] {
-    std::set<u64> out;
+  static base::Set<u64> wanted = [] {
+    base::Set<u64> out;
     for (const char* p = kDumpSh; *p;) {
       char* end = nullptr;
       const u64 v = std::strtoull(p, &end, 0);
@@ -970,7 +970,7 @@ void NoteDispatch(u64 cs_addr, const u32 threads[3], u32 rsrc2) {
   if (!kCsDump)
     return;
   static u64 n_total = 0, n_valid = 0;
-  static std::unordered_set<u64> seen;
+  static base::HashSet<u64> seen;
   n_total++;
   if (IsGuestAddress(cs_addr))
     n_valid++;
@@ -995,7 +995,7 @@ void TraceComputeShader(const Regs& regs,
                         const u32 groups[3],
                         const u32 threads[3],
                         u32 rsrc2) {
-  static std::unordered_set<u64> dumped;
+  static base::HashSet<u64> dumped;
   if (!kCsDump || dumped.size() >= 24 || !IsGuestAddress(cs_addr) ||
       !gpu::IsReadableRange(cs_addr, kMaxShaderBytes) ||
       !dumped.insert(cs_addr).second)
@@ -1044,7 +1044,7 @@ void TraceCsUnsupported(u64 cs_addr,
                         u32 user_sgpr) {
   // Once per shader: a title dispatches the same unsupported shader every
   // frame, and repeating it would spend the whole skip budget on one of them.
-  static std::unordered_set<u64> reported;
+  static base::HashSet<u64> reported;
   if (reported.insert(cs_addr).second && CsReport())
     BASE_LOGI("csgpu",
               "unsupported CS @{:#x} groups=[{} {} {}] tg=[{} {} {}] usgpr={} "
@@ -1066,7 +1066,7 @@ void TraceCsUnsupportedImage(u64 cs_addr,
                              u32 binding,
                              const gcn::TImage& image,
                              const u32* descriptor) {
-  static std::unordered_set<u64> reported;
+  static base::HashSet<u64> reported;
   if (reported.size() < 256 &&
       reported.insert((cs_addr << 8) | (binding & 0xFF)).second)
     BASE_LOGI("csgpu",
@@ -1111,7 +1111,7 @@ void TraceCsTooManyResources(u64 cs_addr, u32 max_resources) {
 // One line per shader: a global cap spends itself on the loading screens and
 // then says nothing about the dispatch that goes missing at the frontier.
 void TraceCsDispatchFailed(u64 cs_addr, u32 num_resources) {
-  static std::unordered_set<u64> reported;
+  static base::HashSet<u64> reported;
   if (reported.size() < 256 && reported.insert(cs_addr).second)
     BASE_LOGI("csgpu", "CS @{:#x} dispatch failed ({} resources)", cs_addr,
               num_resources);
@@ -1144,13 +1144,13 @@ void NoteOpcode(u32 op) {
   if (!kOpCensus)
     return;
   static const bool started = [] {
-    std::thread([] {
+    base::SpawnDetachedThread("cmd_trace", [] {
       for (;;) {
-        std::this_thread::sleep_for(std::chrono::seconds(15));
+        base::SleepForMilliseconds((15) * 1000);
         BASE_LOGI("agc", "=== opcode census (tick) ===");
         DumpOpcodeHistogram();
       }
-    }).detach();
+    });
     return true;
   }();
   (void)started;
@@ -1220,7 +1220,7 @@ void TraceDcbPacket(u32 position, u32 op, const u32* body, u32 count) {
   base::String line;
   base::FormatTo(line, "  @{:<5} T3 op={:#04x} count={} body:", position, op,
                  count);
-  const u32 shown = (op == 0x93 || op == 0x79) ? count : std::min(count, 6u);
+  const u32 shown = (op == 0x93 || op == 0x79) ? count : base::Min(count, 6u);
   for (u32 b = 0; b < shown && b < 24; b++)
     base::FormatTo(line, " {:08x}", body[b]);
   // An indirect register packet references a GPU buffer at body[0..1]; dump it
@@ -1237,8 +1237,8 @@ void TraceDcbPacket(u32 position, u32 op, const u32* body, u32 count) {
 // Followed vs refused INDIRECT_BUFFERs. A chain we refuse takes every draw in
 // it with it, and the only symptom is a frame that renders nothing.
 void TraceIndirectBuffer(u64 address, u32 words, bool followed) {
-  static std::atomic<u64> ok{0}, skipped{0};
-  (followed ? ok : skipped).fetch_add(1, std::memory_order_relaxed);
+  static base::Atomic<u64> ok{0}, skipped{0};
+  (followed ? ok : skipped).fetch_add(1, base::memory_order_relaxed);
   if (!kWalkStat)
     return;
   const u64 n = ok.load() + skipped.load();
@@ -1251,7 +1251,7 @@ void TraceIndirectBuffer(u64 address, u32 words, bool followed) {
 // The first few occlusion-query dumps: a title that never gets one waits for a
 // result bit that never arrives, and that is invisible in any other log.
 void TraceOcclusionQuery(u64 address, u64 value) {
-  static std::atomic<u64> n{0};
+  static base::Atomic<u64> n{0};
   const u64 i = n.fetch_add(1);
   if (i < 3 || (i % 4000) == 0)
     BASE_LOGI("agc", "occlusion query #{} -> {:#x} = {:#x} (always visible)",
@@ -1304,7 +1304,7 @@ bool TraceSubmit(const void* dcb, u32 size_bytes, u32 words, u64 submission) {
   const u32* w = static_cast<const u32*>(dcb);
   BASE_LOGI("agc", "=== dcb walk #{} (size={} words={} hdr0={:#x}) ===",
             submission, size_bytes, words, w[0]);
-  const u32 raw_n = std::min(words, 100u);  // enough of a big draw buffer
+  const u32 raw_n = base::Min(words, 100u);  // enough of a big draw buffer
   base::String raw;
   base::FormatTo(raw, "  raw[0..{}]:{}", raw_n, Words(w, raw_n).c_str());
   BASE_LOGI("agc", "{}", raw.c_str());

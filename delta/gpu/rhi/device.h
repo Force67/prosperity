@@ -29,6 +29,8 @@
 #include "base/arch.h"
 #include "gpu/rhi/types.h"
 
+#include <base/memory/unique_pointer.h>
+
 namespace gpu::rhi {
 
 class Object {
@@ -291,5 +293,13 @@ class Device {
   // After a failed Wait: log what the backend knows about the device loss.
   virtual void ReportDeviceLoss() {}
 };
+
+// Hands a freshly built object to the caller, who frees it with Destroy.
+template <typename T>
+T* Release(base::UniquePointer<T>& object) {
+  T* raw = object.Get_UseOnlyIfYouKnowWhatYouareDoing();
+  object.ResetUnchecked_UseOnlyIfYouKnowWhatYouareDoing();
+  return raw;
+}
 
 }  // namespace gpu::rhi
