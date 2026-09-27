@@ -27,7 +27,7 @@ int PS4ABI AgcIgnored(int, int) {
 }
 }  // namespace
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0xFCA47359E915D76D, (void*)&AgcUnsupported},  // -KRzWekV120
     {0x4FAC6E570D0A509A, (void*)&AgcIgnored},      // T6xuVw0KUJo
     {0x000797FD4E7F3F73, (void*)&AgcUnsupported},  // AAeX-U5-P3M

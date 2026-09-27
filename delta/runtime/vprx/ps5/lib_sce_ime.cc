@@ -26,7 +26,7 @@ int PS4ABI ImeKeyboardOpen(i32, const void*) {
 }
 }  // namespace
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x79A1578DF26FDF1B, (void*)&ImeKeyboardOpen},  // eaFXjfJv3xs
 };
 

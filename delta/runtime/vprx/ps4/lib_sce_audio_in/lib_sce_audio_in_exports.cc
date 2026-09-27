@@ -4,7 +4,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_audio_in/lib_sce_audio_in.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x4B1429AE08EDB4A1, (void*)&sceAudioInInit},
     {0xE4D13C4A373B542F, (void*)&sceAudioInOpen},
     {0x2E8CC4394F3E6A73, (void*)&sceAudioInInput},

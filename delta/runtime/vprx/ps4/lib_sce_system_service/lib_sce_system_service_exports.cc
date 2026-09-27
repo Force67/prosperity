@@ -1,6 +1,6 @@
 #include "runtime/vprx/ps4/lib_sce_system_service/lib_sce_system_service.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0xdecf1c1e20812811,
      (void*)&sceSystemServiceReportAbnormalTermination},        // 3s8cHiCBKBE
     {0x7D9A38F2E9FB2CAE, (void*)&sceSystemServiceParamGetInt},  // fZo48un7LK4

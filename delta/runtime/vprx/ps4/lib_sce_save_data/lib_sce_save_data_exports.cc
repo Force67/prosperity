@@ -7,7 +7,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_save_data/lib_sce_save_data.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x664661B2408F5C5C, (void*)&sceSaveDataInitialize},        // ZkZhskCPXFw
     {0x9753660DE0E93465, (void*)&sceSaveDataInitialize2},       // l1NmDeDpNGU
     {0x4F2C2B14A0A82C66, (void*)&sceSaveDataInitialize3},       // TywrFKCoLGY

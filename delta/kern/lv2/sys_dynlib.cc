@@ -33,6 +33,7 @@
 #include "base/strings/xstring.h"
 #include "kern/lv2/sys_mem.h"
 #include "options/options.h"
+#include "runtime/vprx/nid.h"
 #include "runtime/vprx/vprx.h"
 
 namespace {
@@ -140,7 +141,7 @@ int PS4ABI sys_dynlib_dlsym(u32 handle, const char* sym_name, void** sym) {
     return -1;
 
   char nameenc[12]{};
-  runtime::EncodeNid(sym_name, reinterpret_cast<u8*>(&nameenc));
+  runtime::nid::Encode(sym_name, reinterpret_cast<u8*>(&nameenc));
 
   auto& mod_name = mod->GetInfo().name;
 
@@ -150,7 +151,7 @@ int PS4ABI sys_dynlib_dlsym(u32 handle, const char* sym_name, void** sym) {
   uintptr_t addr_out = mod->GetSymbolByNid(nameenc);
 
   // Callers may pass an already-encoded 11-char NID (e.g. the SDK module-entry
-  // symbol "BaOKcng8g88") instead of a plain name. EncodeNid() would hash the
+  // symbol "BaOKcng8g88") instead of a plain name. nid::Encode() would hash the
   // NID string itself and never match, so also try matching it verbatim.
   if (!addr_out && std::strlen(sym_name) == 11)
     addr_out = mod->GetSymbolByNid(sym_name);

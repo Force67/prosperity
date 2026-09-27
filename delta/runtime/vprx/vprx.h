@@ -12,53 +12,48 @@
 #include "logger/logger.h"
 #include "runtime/vprx/init_function.h"
 
-namespace runtime {
-struct FuncInfo {
-  u64 hash_id;
+namespace runtime::vprx {
+
+// One HLE export: the host function a guest import of `nid` binds to.
+struct ExportEntry {
+  u64 nid;
   const void* address;
 };
 
-struct ModInfo {
-  FuncInfo* func_nodes;
-  size_t func_count;
-  const char* name_ptr;
+// The exports an HLE module provides for one library.
+struct ExportTable {
+  const ExportEntry* entries;
+  size_t count;
+  const char* library;
 };
 
-void VprxInit();
-void VprxReg(const ModInfo*);
-uintptr_t VprxGet(const char* lib, u64 hid);
-// Table lookup that ignores the LLE-by-default policy gate (useHleShim). The
+void Init();
+void Register(const ExportTable* table);
+uintptr_t Lookup(const char* lib, u64 nid);
+// Table lookup that ignores the LLE-by-default policy gate (UseHleShim). The
 // PS5 import resolver uses it to force libSceVideoOut onto the HLE shim (its
 // LLE port backend never registers in our env, so sceVideoOutOpen fails).
-uintptr_t VprxGetForced(const char* lib, u64 hid);
+uintptr_t LookupForced(const char* lib, u64 nid);
 
 // PS5-only HLE alias tables. Prospero modules export some functions under NIDs
 // that differ from the PS4 ABI (e.g. sceVideoOutRegisterBuffers). Rather than
 // pollute the PS4 tables, PS5 aliases register here (runtime/vprx/ps5/*) and
-// are consulted first by VprxGetForced, which is PS5-only. PS4 paths never
+// are consulted first by LookupForced, which is PS5-only. PS4 paths never
 // touch it.
-void VprxRegPs5(const ModInfo*);
+void RegisterPs5(const ExportTable* table);
 
-bool DecodeNid(const char* subset, size_t len, u64&);
-void EncodeNid(const char* sym_name, u8* out);
-}  // namespace runtime
+}  // namespace runtime::vprx
 
-#define MODULE_INIT(tname)                                      \
-                                                                \
-  static const runtime::ModInfo info_##tname{                   \
-      (runtime::FuncInfo*)&functions,                           \
-      (sizeof(functions) / sizeof(runtime::FuncInfo)), #tname}; \
-                                                                \
-  static runtime::InitFunction init_##tname(                    \
-      []() { runtime::VprxReg(&info_##tname); })
+#define MODULE_INIT(tname)                                       \
+  static const runtime::vprx::ExportTable info_##tname{          \
+      kExports, sizeof(kExports) / sizeof(kExports[0]), #tname}; \
+  static runtime::InitFunction init_##tname(                     \
+      []() { runtime::vprx::Register(&info_##tname); })
 
 // Register a PS5-only NID alias table under the module name `tname`. Same shape
-// as MODULE_INIT but lands in the separate PS5 registry (VprxRegPs5).
-#define MODULE_INIT_PS5(tname)                                  \
-                                                                \
-  static const runtime::ModInfo info_ps5_##tname{               \
-      (runtime::FuncInfo*)&functions,                           \
-      (sizeof(functions) / sizeof(runtime::FuncInfo)), #tname}; \
-                                                                \
-  static runtime::InitFunction init_ps5_##tname(                \
-      []() { runtime::VprxRegPs5(&info_ps5_##tname); })
+// as MODULE_INIT but lands in the separate PS5 registry (RegisterPs5).
+#define MODULE_INIT_PS5(tname)                                   \
+  static const runtime::vprx::ExportTable info_ps5_##tname{      \
+      kExports, sizeof(kExports) / sizeof(kExports[0]), #tname}; \
+  static runtime::InitFunction init_ps5_##tname(                 \
+      []() { runtime::vprx::RegisterPs5(&info_ps5_##tname); })

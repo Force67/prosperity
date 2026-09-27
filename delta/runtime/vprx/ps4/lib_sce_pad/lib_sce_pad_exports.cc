@@ -5,7 +5,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_pad/lib_sce_pad.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0xEA77207B9FA5E50B, (void*)&scePadClose},
     {0x91ACEFD4DCD207C7, (void*)&scePadConnectPort},
     {0x01CB25A4DD631D1F, (void*)&scePadDeviceClassGetExtendedInformation},

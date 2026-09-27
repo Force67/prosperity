@@ -1,6 +1,6 @@
 #include "runtime/vprx/ps4/lib_sce_av_player/lib_sce_av_player.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x692EBA448D201A0A, (void*)&sceAvPlayerInit},
     {0xA3D79646448BF8CE, (void*)&sceAvPlayerInitEx},
     {0x1C3D58295536EBF3, (void*)&sceAvPlayerPostInit},

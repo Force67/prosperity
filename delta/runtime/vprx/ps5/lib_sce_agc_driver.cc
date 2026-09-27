@@ -44,7 +44,7 @@ int PS4ABI AgcDriverSetFlag(int) {
 }
 }  // namespace
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x174657B79AB46530, (void*)&AgcDriverQueryU32},   // F0ZXt5q0ZTA
     {0xB89CE246C3839357, (void*)&AgcDriverQuerySize},  // uJziRsODk1c
     {0x53DB9EC84852905E, (void*)&AgcDriverSetFlag},    // U9ueyEhSkF4

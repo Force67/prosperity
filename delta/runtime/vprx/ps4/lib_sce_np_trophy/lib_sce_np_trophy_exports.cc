@@ -1,6 +1,6 @@
 #include "runtime/vprx/ps4/lib_sce_np_trophy/lib_sce_np_trophy.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x5DB9236E86D99426, (void*)&sceNpTrophyCreateContext},
     {0xABB53AB440107FB7, (void*)&sceNpTrophyCreateHandle},
     {0x1355ABC1DD3B2EBF, (void*)&sceNpTrophyDestroyContext},

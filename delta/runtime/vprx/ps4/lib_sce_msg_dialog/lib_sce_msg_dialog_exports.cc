@@ -7,7 +7,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_msg_dialog/lib_sce_msg_dialog.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x943AB1698D546C4A, (void*)&sceMsgDialogInitialize},    // lDqxaY1UbEo
     {0x78FC3F92A6667A5A, (void*)&sceMsgDialogTerminate},     // ePw-kqZmelo
     {0x6F4E878740CF11A1, (void*)&sceMsgDialogOpen},          // b06Hh0DPEaE

@@ -7,7 +7,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_save_data_dialog/lib_sce_save_data_dialog.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0xB3D7B7F98A519F3C, (void*)&sceSaveDataDialogInitialize},    // s9e3+YpRnzw
     {0x62E1F6140EDACEA4, (void*)&sceSaveDataDialogTerminate},     // YuH2FA7azqQ
     {0xE2D3E1B0FE85A432, (void*)&sceSaveDataDialogOpen},          // 4tPhsP6FpDI

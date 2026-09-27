@@ -60,7 +60,7 @@ Process* Process::GetActive() {
 
 bool Process::Create(const base::String& path, bool from_vfs) {
   /*register HLE prx overrides*/
-  runtime::VprxInit();
+  runtime::vprx::Init();
 
   /*init memory manager*/
   LOG_ASSERT(vmem_.Init());

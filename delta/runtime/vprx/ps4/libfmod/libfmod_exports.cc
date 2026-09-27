@@ -9,7 +9,7 @@
 
 #include "runtime/vprx/ps4/libfmod/libfmod.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x05d13cf8fca1a227, (void*)&FmodStub},
     {0x28ef2d6fc0e400cc, (void*)&FmodStub},
     {0x343310e59f107564, (void*)&FmodStub},

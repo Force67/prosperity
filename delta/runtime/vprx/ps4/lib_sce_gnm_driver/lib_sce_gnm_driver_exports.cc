@@ -7,7 +7,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_gnm_driver/lib_sce_gnm_driver.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0xCF0634615F754D32, (void*)&sceGnmSubmitCommandBuffers},  // zwY0YV91TTI
     {0x8D1708F157204F3E,
      (void*)&sceGnmSubmitCommandBuffersForWorkload},  // jRcI8VcgTz4

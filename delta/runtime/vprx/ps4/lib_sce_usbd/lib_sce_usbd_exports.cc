@@ -1,6 +1,6 @@
 #include "runtime/vprx/ps4/lib_sce_usbd/lib_sce_usbd.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x4CE860ECFEA44C7E, (void*)&sceUsbdInit},
     {0x16AEBED059B9E715, (void*)&sceUsbdExit},
     {0xF2A07D02BE0FE677, (void*)&sceUsbdGetDeviceList},

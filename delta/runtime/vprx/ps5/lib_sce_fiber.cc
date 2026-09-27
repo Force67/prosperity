@@ -49,7 +49,7 @@ void PS4ABI SanitizerFinishSwitchFiber(void*,
 void PS4ABI AsanDestroyFakeStack(void*) {}
 }  // namespace
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x52428EF1EB1400CE,
      (void*)&TsanCreateFiber},  // UkKO8esUAM4 __tsan_create_fiber
     {0xA8F98DBB1D62524A,

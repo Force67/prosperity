@@ -1,6 +1,6 @@
 #include "runtime/vprx/ps4/lib_sce_net_ctl/lib_sce_net_ctl.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x824CB4FA868D3389, (void*)&sceNetCtlInit},                // gky0+oaNM4k
     {0x678C3008588110B4, (void*)&sceNetCtlTerm},                // Z4wwCFiBELQ
     {0xB813E5AF495BBA22, (void*)&sceNetCtlGetState},            // uBPlr0lbuiI
@@ -8,7 +8,7 @@ static const runtime::FuncInfo functions[] = {
     {0x509F99ED0FB8724D, (void*)&sceNetCtlRegisterCallback},    // UJ+Z7Q+4ck0
     {0x46A9B63A764C0B3D, (void*)&sceNetCtlUnregisterCallback},  // Rqm2OnZMCz0
     {0x890C378903E1BD44, (void*)&sceNetCtlCheckCallback},       // iQw3iQPhvUQ
-    // libSceNetCtlForNpToolkit, aliased onto this table in VprxGet.
+    // libSceNetCtlForNpToolkit, aliased onto this table in vprx::Lookup.
     {0xC08B0ACBE4DF78BB,
      (void*)&sceNetCtlRegisterCallbackForNpToolkit},  // wIsKy+TfeLs
     {0xDA852A291E687467,

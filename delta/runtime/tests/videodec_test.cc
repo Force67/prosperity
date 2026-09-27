@@ -92,7 +92,8 @@ TEST(VideoDecode, RejectsInvalidArgumentsAndExportsDecoder) {
   EXPECT_NE(QueryMemory(nullptr, nullptr), 0);
   EXPECT_NE(Decode(nullptr, nullptr, nullptr, nullptr), 0);
   EXPECT_NE(Delete(nullptr), 0);
-  runtime::VprxInit();
-  EXPECT_NE(runtime::VprxGetForced("libSceVideodec2", 0xF39D85E7EABAFA23ull),
-            0u);
+  runtime::vprx::Init();
+  EXPECT_NE(
+      runtime::vprx::LookupForced("libSceVideodec2", 0xF39D85E7EABAFA23ull),
+      0u);
 }

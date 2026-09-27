@@ -81,7 +81,7 @@ int PS4ABI UserServiceGetUserName(i32, char* name, u64 size) {
 }
 }  // namespace
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x8F760CBB531534DA, (void*)&UserServiceInitialize},
     {0x6B3FF447A7AF899D, (void*)&UserServiceInitialize2},
     {0x6F01634BE6D7F660, (void*)&UserServiceTerminate},

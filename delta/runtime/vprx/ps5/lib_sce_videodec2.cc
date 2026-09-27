@@ -3,7 +3,7 @@
 #include "runtime/vprx/vprx.h"
 #ifdef DELTA_HAVE_AVCODEC
 namespace {
-const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x4670E26DC1823CACull,
      (void*)&runtime::video::QueryCompute},  // QueryComputeMemoryInfo
     {0x783F97D929B152DEull,

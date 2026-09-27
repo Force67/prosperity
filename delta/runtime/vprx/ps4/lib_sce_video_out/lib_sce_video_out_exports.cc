@@ -7,7 +7,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_video_out/lib_sce_video_out.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x529DFA3D393AF3B1, (void*)&sceVideoOutOpen},   // Up36PTk687E
     {0xBAAB951F8FC3BBBF, (void*)&sceVideoOutClose},  // uquVH4-Du78
     {0xEA43E78F9D53EB66,
@@ -39,7 +39,7 @@ static const runtime::FuncInfo functions[] = {
 
 MODULE_INIT(libSceVideoOut);
 
-// Anchor referenced by VprxInit() so the linker keeps this TU (and thus the
+// Anchor referenced by vprx::Init() so the linker keeps this TU (and thus the
 // MODULE_INIT static initializer) instead of dropping the unreferenced archive
 // member. Without this the HLE table never registers.
 extern "C" int g_vprx_anchor_lib_sce_video_out = 1;

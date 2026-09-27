@@ -44,6 +44,7 @@
 #include "base/threading/thread.h"
 #include "base/time/time.h"
 #include "kern/lv2/sys_thread.h"
+#include "runtime/vprx/nid.h"
 
 namespace {
 DELTA_OPTION(bool, kVoForceConnect, "DELTA_VO_FORCE_CONNECT", false);
@@ -1209,7 +1210,7 @@ void InvestigateDcbGate(Module& m) {
     u64 hid = 0;
     const char* exp_mod = "NONE";
     u64 exp_addr = 0;
-    if (runtime::DecodeNid(g.nid, 11, hid) && p)
+    if (runtime::nid::Decode(g.nid, 11, hid) && p)
       for (auto& mm : p->GetModuleList())
         if (uintptr_t a = mm->GetExport(hid)) {
           exp_mod = mm->GetInfo().name.c_str();

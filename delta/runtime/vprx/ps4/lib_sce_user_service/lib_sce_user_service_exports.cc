@@ -1,6 +1,6 @@
 #include "runtime/vprx/ps4/lib_sce_user_service/lib_sce_user_service.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x8F760CBB531534DA, (void*)&sceUserServiceInitialize},
     {0x6B3FF447A7AF899D, (void*)&sceUserServiceInitialize2},
     {0x6F01634BE6D7F660, (void*)&sceUserServiceTerminate},
@@ -9,7 +9,7 @@ static const runtime::FuncInfo functions[] = {
     {0x09D5A9D281D61ABD, (void*)&sceUserServiceGetInitialUser},
     {0x78D6F9DCB4099883, (void*)&sceUserServiceGetForegroundUser},
     {0xD71C5C3221AED9FA, (void*)&sceUserServiceGetUserName},
-    // libSceUserServiceForNpToolkit, aliased onto this table in VprxGet.
+    // libSceUserServiceForNpToolkit, aliased onto this table in vprx::Lookup.
     {0xC2E23B73B50D9340,
      (void*)&sceUserServiceRegisterCallbackForNpToolkit},  // wuI7c7UNk0A
     {0xB295BFFF2A0B43DA,

@@ -55,7 +55,7 @@ int PS4ABI KernelStubOk(void*, size_t, u64, u64) {
 }
 }  // namespace
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0xE21E85D4B2DB4E2C, (void*)&KernelMapNamedFlexibleAligned},
     {0x71FC01490CABE58B, (void*)&KernelStubOk},
 };

@@ -8,7 +8,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_audio_out/lib_sce_audio_out.h"
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x25F10F5D5C6116A0, (void*)&sceAudioOutInit},
     {0x7A436FB13DB6AEC6, (void*)&sceAudioOutOpen},
     {0x40E42D6DE0EAB13E, (void*)&sceAudioOutOutput},

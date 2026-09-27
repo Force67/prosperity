@@ -120,7 +120,7 @@ int PS4ABI AppContentGetAvailableSpaceKb(const void*, u64* available_kb) {
 
 }  // namespace
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x47D940F363AB68DB, (void*)&AppContentInitialize},
     {0xF7D6FCD88297A47E, (void*)&AppContentAppParamGetInt},
     {0x6EE61B78B3865A60, (void*)&AppContentTemporaryDataMount2},

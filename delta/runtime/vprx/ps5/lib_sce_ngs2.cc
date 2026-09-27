@@ -20,7 +20,7 @@ int PS4ABI Ngs2SubmitCommands(void*, const void*, u32) {
 }
 }  // namespace
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x01B62F4CE67C3EDB, (void*)&Ngs2SubmitCommands},  // AbYvTOZ8Pts
 };
 

@@ -44,7 +44,7 @@ int PS4ABI LncUtilGetAppStatus(u32* status) {
 }
 }  // namespace
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0xDECF1C1E20812811, (void*)&SystemServiceReportAbnormalTermination},
     {0x7D9A38F2E9FB2CAE, (void*)&SystemServiceParamGetInt},
     {0x0F14648BB4F6138E, (void*)&LncUtilGetAppStatus},

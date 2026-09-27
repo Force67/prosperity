@@ -424,7 +424,7 @@ int PS4ABI VideoOutSubmitFlipEop(int,
     eq_handle = g_port.flip_equeue;
   }
   // PS5 always presents through the AGC command processor's render target.
-// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+  // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
   prosperity_agc_flip(scanout);
   if (host_memory::IsMemoryRangeMapped(eop_label, sizeof(u64)))
     *static_cast<volatile u64*>(eop_label) = 1;
@@ -503,7 +503,7 @@ extern "C" bool prosperity_ps5_is_display_buffer(u64 addr) {
 }
 // NOLINTEND(readability-identifier-naming)
 
-static const runtime::FuncInfo functions[] = {
+static const runtime::vprx::ExportEntry kExports[] = {
     {0x529DFA3D393AF3B1, (void*)&VideoOutOpen},                 // Up36PTk687E
     {0xBAAB951F8FC3BBBF, (void*)&VideoOutClose},                // uquVH4-Du78
     {0xEA43E78F9D53EB66, (void*)&VideoOutGetResolutionStatus},  // 6kPnj51T62Y

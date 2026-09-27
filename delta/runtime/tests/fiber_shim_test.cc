@@ -20,16 +20,16 @@ constexpr u64 kSanitizerHookNids[] = {
 }
 
 TEST(FiberShim, SanitizerHooksRegistered) {
-  runtime::VprxInit();
+  runtime::vprx::Init();
   for (u64 nid : kSanitizerHookNids)
-    EXPECT_NE(runtime::VprxGetForced("libSceFiber", nid), 0u)
+    EXPECT_NE(runtime::vprx::LookupForced("libSceFiber", nid), 0u)
         << base::Format("{:#x}", nid).c_str();
 }
 
 TEST(FiberShim, StartSwitchNullsFakeStackSave) {
-  runtime::VprxInit();
+  runtime::vprx::Init();
   auto fn = reinterpret_cast<void(PS4ABI*)(void**, const void*, size_t)>(
-      runtime::VprxGetForced("libSceFiber", 0x00CE5D6D7A77A9B2));
+      runtime::vprx::LookupForced("libSceFiber", 0x00CE5D6D7A77A9B2));
   ASSERT_NE(fn, nullptr);
   void* save = reinterpret_cast<void*>(0xdeadbeef);
   fn(&save, nullptr, 0);
@@ -38,9 +38,9 @@ TEST(FiberShim, StartSwitchNullsFakeStackSave) {
 }
 
 TEST(FiberShim, FinishSwitchZeroesOutputs) {
-  runtime::VprxInit();
+  runtime::vprx::Init();
   auto fn = reinterpret_cast<void(PS4ABI*)(void*, const void**, size_t*)>(
-      runtime::VprxGetForced("libSceFiber", 0x718958B03418E74D));
+      runtime::vprx::LookupForced("libSceFiber", 0x718958B03418E74D));
   ASSERT_NE(fn, nullptr);
   const void* bottom = &bottom;
   size_t size = 42;

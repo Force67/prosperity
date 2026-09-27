@@ -2,8 +2,8 @@
 
 /*
  * Partial HLE for libSceSystemService: a couple of export overrides. The rest
- * of the module stays LLE (the real .sprx runs; VprxGet returns 0 for the NIDs
- * not listed here, so they resolve to the loaded module).
+ * of the module stays LLE (the real .sprx runs; vprx::Lookup returns 0 for the
+ * NIDs not listed here, so they resolve to the loaded module).
  *
  * sceSystemServiceReportAbnormalTermination is a crash-telemetry call the title
  * invokes from its own fatal-error path. The real .sprx asserts (int 0x44 ->

@@ -13,7 +13,6 @@
 #include "base/arch.h"
 #include "base/containers/vector.h"
 #include "base/logging.h"
-#include "crypto/sha1.h"
 
 #include "kern/process.h"
 #include "options/options.h"
@@ -28,12 +27,12 @@ DELTA_OPTION(bool, kGnmHle, "DELTA_GNM_HLE", false);
 DELTA_OPTION(bool, kVoHle, "DELTA_VO_HLE", false);
 }  // namespace
 
-namespace runtime {
-static base::Vector<const ModInfo*> g_vprx_table;
+namespace runtime::vprx {
+static base::Vector<const ExportTable*> g_vprx_table;
 // PS5-only NID alias tables (runtime/vprx/ps5/*). Kept separate from vprxTable
-// so PS4 resolution is byte-for-byte unchanged; only VprxGetForced (PS5) reads
+// so PS4 resolution is byte-for-byte unchanged; only LookupForced (PS5) reads
 // it.
-static base::Vector<const ModInfo*> g_vprx_table_ps5;
+static base::Vector<const ExportTable*> g_vprx_table_ps5;
 
 // HLE-module anchors. Each vprx HLE module's _exports.cc defines one of these;
 // we reference them here so the linker keeps those archive members (otherwise
@@ -123,7 +122,7 @@ static volatile int* const kVprxAnchors[] = {
     &g_vprx_anchor_lib_sce_system_service,
     &g_vprx_anchor_lib_sce_net_ctl};
 
-void VprxInit() {
+void Init() {
   // Touch the anchors so the references aren't optimized away.
   int sum = 0;
   for (auto* a : kVprxAnchors)
@@ -132,10 +131,10 @@ void VprxInit() {
   runtime::InitFunction::Init();
 }
 
-void VprxReg(const ModInfo* info) {
+void Register(const ExportTable* info) {
   g_vprx_table.push_back(info);
 }
-void VprxRegPs5(const ModInfo* info) {
+void RegisterPs5(const ExportTable* info) {
   g_vprx_table_ps5.push_back(info);
 }
 
@@ -249,7 +248,7 @@ static bool UseHleShim(const char* lib, u64 hid) {
   return true;  // every other HLE module stays HLE
 }
 
-uintptr_t VprxGetForced(const char* lib, u64 hid) {
+uintptr_t LookupForced(const char* lib, u64 hid) {
   // Keep native decoder execution available for GPU accuracy investigations.
   static const bool kNativeVideo = [] {
     const char* value = std::getenv("DELTA_PS5_NATIVE_VIDEO");
@@ -262,16 +261,16 @@ uintptr_t VprxGetForced(const char* lib, u64 hid) {
   // its own full PS5 copy so behaviour can diverge safely. A miss here falls
   // through to the real .sprx (LLE) in the caller, never to a PS4 stub.
   for (const auto& t : g_vprx_table_ps5) {
-    if (std::strcmp(lib, t->name_ptr) != 0)
+    if (std::strcmp(lib, t->library) != 0)
       continue;
-    for (int i = 0; i < t->func_count; i++)
-      if (t->func_nodes[i].hash_id == hid)
-        return reinterpret_cast<uintptr_t>(t->func_nodes[i].address);
+    for (int i = 0; i < t->count; i++)
+      if (t->entries[i].nid == hid)
+        return reinterpret_cast<uintptr_t>(t->entries[i].address);
   }
   return 0;
 }
 
-uintptr_t VprxGet(const char* lib, u64 hid) {
+uintptr_t Lookup(const char* lib, u64 hid) {
   // The Neo SPRX is a filename variant of the libSceGnmDriver ABI. Keep its
   // imports on the same HLE/LLE policy and HLE export table as the Base module.
   if (std::strcmp(lib, "libSceGnmDriver") == 0 ||
@@ -289,11 +288,11 @@ uintptr_t VprxGet(const char* lib, u64 hid) {
   if (!UseHleShim(lib, hid))
     return 0;
 
-  const ModInfo* table = nullptr;
+  const ExportTable* table = nullptr;
 
   // find the right table
   for (const auto& t : g_vprx_table) {
-    if (std::strcmp(lib, t->name_ptr) == 0) {
+    if (std::strcmp(lib, t->library) == 0) {
       table = t;
       break;
     }
@@ -301,9 +300,9 @@ uintptr_t VprxGet(const char* lib, u64 hid) {
 
   if (table) {
     // search the table
-    for (int i = 0; i < table->func_count; i++) {
-      auto* f = &table->func_nodes[i];
-      if (f->hash_id == hid) {
+    for (int i = 0; i < table->count; i++) {
+      auto* f = &table->entries[i];
+      if (f->nid == hid) {
         return reinterpret_cast<uintptr_t>(f->address);
       }
     }
@@ -320,60 +319,4 @@ uintptr_t VprxGet(const char* lib, u64 hid) {
   return 0;
 }
 
-const char kBase64Lookup[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
-
-// base64 fast lookup
-bool DecodeNid(const char* subset, size_t len, u64& out) {
-  for (size_t i = 0; i < len; i++) {
-    auto pos = std::strchr(kBase64Lookup, subset[i]);
-
-    // invalid NID?
-    if (!pos) {
-      return false;
-    }
-
-    auto offset = static_cast<u32>(pos - kBase64Lookup);
-
-    // max NID is 11
-    if (i < 10) {
-      out <<= 6;
-      out |= offset;
-    } else {
-      out <<= 4;
-      out |= (offset >> 2);
-    }
-  }
-
-  return true;
-}
-
-static void ObfuscateSym(u64 in, u8* out, size_t xlen) {
-  out[xlen--] = 0;
-  out[xlen--] = kBase64Lookup[(in & 0xF) * 4];
-  u64 exp = in >> 4;
-  while (exp != 0) {
-    out[xlen--] = kBase64Lookup[exp & 0x3F];
-    exp = exp >> 6;
-  }
-}
-
-void EncodeNid(const char* name, u8* x) {
-  static const char kSuffix[] =
-      "\x51\x8D\x64\xA6\x35\xDE\xD8\xC1\xE6\xB0\x39\xB1\xC3\xE5\x52\x30";
-
-  u8 sha[20]{};
-  sha1_context ctx;
-
-  Sha1Starts(&ctx);
-  Sha1Update(&ctx, reinterpret_cast<const u8*>(name), std::strlen(name));
-  Sha1Update(&ctx, reinterpret_cast<const u8*>(kSuffix), std::strlen(kSuffix));
-  Sha1Finish(&ctx, sha);
-
-  /*the rest is ignored*/
-  u64 target = *(u64*)(&sha);
-
-  // u8 out[11]{};
-  ObfuscateSym(target, x, 11);
-}
-}  // namespace runtime
+}  // namespace runtime::vprx
