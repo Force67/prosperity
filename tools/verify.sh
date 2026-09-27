@@ -105,6 +105,10 @@ run() {
 # written by several threads, so line order is not stable but content is):
 #
 #   ANSI colouring, the timestamp, and build/dump paths.
+#   The emitting function and line, so renaming or moving a C++ function is not reported
+#     as a behaviour change.
+#   Timing readouts ([fps], [hitch], [gpuq] stall warnings): whether they fire
+#     depends on the wall clock, not on what the guest did.
 #   Hex values and decimal runs; the latter covers the func:line prefix, so
 #     moving code between files is not reported as a behaviour change.
 #   "sp+" lines. guestStackTrace SCANS the stack window and prints every slot
@@ -113,8 +117,8 @@ run() {
 #     the guest did; measured on the kern/probe extraction, these were the only
 #     lines that moved while the rest of the log stayed byte-identical.
 boot_digest() {
-  sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\] //' "$OUT/$1.log" |
-    grep -v 'sp+' |
+  sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\] //; s/^(<[A-Za-z]+>) [A-Za-z_~][A-Za-z0-9_]*:[0-9]+:/\1 FN:/' "$OUT/$1.log" |
+    grep -v 'sp+' | grep -vE '\[(fps|hitch|gpuq)\]' |
     sed -E 's#/[^ ]*/(build|\.verify)[^ ]*#PATH#g; s#/tmp/[^ ]*#PATH#g;
             s/0x[0-9a-fA-F]+/X/g; s/\b[0-9a-fA-F]{3,}\b/X/g; s/[0-9]+/N/g' |
     sort -u | sha256sum | cut -c1-16
@@ -167,8 +171,9 @@ if [ -f "$ISAAC" ]; then
   kill -SEGV "$(ls /proc/$emu/task 2>/dev/null | tail -1)" 2>/dev/null
   sleep 5
   kill -9 $emu 2>/dev/null; wait $emu 2>/dev/null
+  # Not the dump's length: it depends on which thread the signal lands on.
   grep -q 'GUEST FAULT' "$OUT/crash-smoke.log" &&
-    say crash-smoke "DUMPED,maps=$(grep -c 'maps ' "$OUT/crash-smoke.log")" ||
+    say crash-smoke DUMPED ||
     say crash-smoke NO-DUMP
 else
   say crash-smoke "SKIP (missing pkg)"
