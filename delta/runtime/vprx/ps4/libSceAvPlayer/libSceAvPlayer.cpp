@@ -10,7 +10,7 @@
 
 #include <base/logging.h>
 
-#include "cpu/cpu_backend.h"
+#include "cpu/backend.h"
 #include <base/atomic.h>
 #include <base/threading/thread.h>
 #include <base/time/time.h>

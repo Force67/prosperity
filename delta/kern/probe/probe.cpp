@@ -17,7 +17,7 @@
 #include <options/options.h>
 #include <io/path.h>
 
-#include "cpu/cpu_backend.h"
+#include "cpu/backend.h"
 #include "kern/crash.h"
 #include "kern/lv2/sys_dynlib.h"
 #include "kern/lv2/sys_mem.h"

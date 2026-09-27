@@ -22,7 +22,7 @@
 #include "lv2/ps5/ctor_probe.h"
 #include "lv2/ps5/initial_tcb.h"
 #include "vfs.h"
-#include "cpu/cpu_backend.h"
+#include "cpu/backend.h"
 #include "ps4/hardware_mode.h"
 #include "lv2/sys_dynlib.h"
 #include "lv2/sys_mem.h"

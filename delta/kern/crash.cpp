@@ -36,7 +36,7 @@
 #include "module.h"
 #include "proc.h"
 #include "vfs.h"
-#include "cpu/cpu_backend.h"
+#include "cpu/backend.h"
 #include <logger/logger.h>
 #include <options/options.h>
 #include <base/atomic.h>

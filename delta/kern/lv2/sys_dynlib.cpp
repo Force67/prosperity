@@ -17,7 +17,7 @@
 #include <logger/logger.h>
 
 #include <host_memory/host_memory.h>
-#include "cpu/cpu_backend.h"
+#include "cpu/backend.h"
 #include "kern/module.h"
 #include "kern/proc.h"
 

@@ -28,7 +28,7 @@
 #include "kern/crash.h"
 #include "kern/module.h"
 #include "kern/proc.h"
-#include "cpu/cpu_backend.h"
+#include "cpu/backend.h"
 #include "sys_thread.h"
 #include <options/options.h>
 #include <base/threading/thread.h>

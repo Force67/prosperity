@@ -19,7 +19,7 @@
 
 #include "kern/crash.h"
 #include "kern/proc.h"
-#include "cpu/cpu_backend.h"
+#include "cpu/backend.h"
 #include "error_table.h"
 #include "sys_thread_ext.h"
 #include "sys_thread.h"

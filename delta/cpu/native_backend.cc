@@ -6,12 +6,11 @@
  * is just a host function call and the lifted FS stubs read the guest FS base
  * from host thread-local storage.
  */
-#if defined(DELTA_BACKEND_NATIVE)
 
 #include <guest_abi.h>
 #include "base/arch.h"
 #include <csetjmp>
-#include "cpu_backend.h"
+#include "backend.h"
 #include "kern/crash.h"
 #include "kern/proc.h"
 #include <base/containers/vector.h>
@@ -139,4 +138,3 @@ bool tryHandleJitSignal(int, void *, void *) { return false; }
 
 } // namespace cpu
 
-#endif // DELTA_BACKEND_NATIVE

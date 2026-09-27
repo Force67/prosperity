@@ -22,7 +22,7 @@
 #include <base/option_file.h>
 #include <base/strings/xstring.h>
 
-#include "cpu/cpu_backend.h"
+#include "cpu/backend.h"
 #include "dcore.h"
 #include "gfx/gfx.h"
 #include "gfx/gfx_android.h"

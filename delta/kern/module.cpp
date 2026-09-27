@@ -18,7 +18,7 @@
 #include "runtime/code_lift.h"
 #endif
 #include "runtime/vprx/vprx.h"
-#include "cpu/cpu_backend.h"
+#include "cpu/backend.h"
 
 #include <formats/fself.h>
 

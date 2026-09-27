@@ -23,7 +23,7 @@
 #endif
 
 #include "dcore.h"
-#include "cpu/cpu_backend.h"
+#include "cpu/backend.h"
 #include "gfx/overlay_log.h"
 #include "gpu/render/renderer.h"
 #include "kern/guest_vaspace.h"

@@ -5,7 +5,6 @@
  * CPUState. Guest threads pin 1:1 to host threads, so guest TLS (fs base) is
  * the host thread_local's CPUState.fs_cached. Mirrors tools fex-embed/harness.
  */
-#if defined(DELTA_BACKEND_FEX)
 
 #include <guest_abi.h>
 #include "base/arch.h"
@@ -36,7 +35,7 @@
 
 #include "Common/HostFeatures.h" // FEX::FetchHostFeatures
 
-#include "cpu_backend.h"
+#include "backend.h"
 #include "kern/crash.h"
 #include "kern/lv2/dispatch.h"
 #include "kern/module.h"
@@ -1370,4 +1369,3 @@ u64 threadFsBase() {
 }
 } // namespace krnl
 
-#endif // DELTA_BACKEND_FEX
