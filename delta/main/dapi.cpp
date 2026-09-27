@@ -154,7 +154,7 @@ extern "C" __attribute__((visibility("default"))) int dcoreMain(int argc, char *
   // Claim the addresses the guest MAP_FIXEDs before anything host-side can be
   // handed them, in particular before the CPU backend reserves its JIT heap.
   krnl::reserveGuestVaSpace();
-  cpu::earlyInit(); // segregate guest/JIT memory before guest modules map
+  cpu::EarlyInit(); // segregate guest/JIT memory before guest modules map
 
   if (!verifyViablity())
     return -1;

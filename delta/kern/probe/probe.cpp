@@ -460,7 +460,7 @@ static void forceSotcPayload(smodule &m) {
 // DELTA_FIOS_TRACE: ARM-compatible guest trace of libSceFios2's
 // FHOpen/FHGetSize/FHRead/FHPread (the whole-file API the SotC world-container
 // loads through); int3 hooks are inert under FEX, so each import is WRAPPED via
-// cpu::makeGuestReturnHook. Wrapping happens at IMPORT-RESOLUTION time
+// cpu::MakeGuestReturnHook. Wrapping happens at IMPORT-RESOLUTION time
 // (maybeWrapFiosImport from resolveImports): the PLT slots are lazy, so a GOT
 // patch at proc::create is too early; at resolveImports the real export address is
 // in hand and substituting the wrapper installs the hook exactly when bound.
@@ -600,7 +600,7 @@ uintptr_t maybeWrapFiosImport(const char *nidName, uintptr_t realAddr) {
   };
   for (auto &e : tbl) {
     if (std::strncmp(nidName, e.nid, 11) == 0) {
-      uintptr_t wrap = cpu::makeGuestReturnHook(reinterpret_cast<void *>(realAddr),
+      uintptr_t wrap = cpu::MakeGuestReturnHook(reinterpret_cast<void *>(realAddr),
                                                 e.hookId,
                                                 reinterpret_cast<void *>(&fiosTraceLogger),
                                                 e.nm);
@@ -609,7 +609,7 @@ uintptr_t maybeWrapFiosImport(const char *nidName, uintptr_t realAddr) {
                  (unsigned long)realAddr, (unsigned long)wrap);
         return wrap;
       }
-      LOG_WARNING("fiostrace: makeGuestReturnHook failed for {}", e.nm);
+      LOG_WARNING("fiostrace: MakeGuestReturnHook failed for {}", e.nm);
       return realAddr;
     }
   }

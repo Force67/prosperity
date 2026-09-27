@@ -293,7 +293,7 @@ void proc::start() {
   // PS5 starts with the TCB its kernel would have installed; libkernel reads
   // fs:0x10 before it gets around to setting up its own (see makeInitialTcb).
   const u64 fsbase = plat == platform::ps5 ? ps5::makeInitialTcb() : 0;
-  cpu::backend().enterGuest(reinterpret_cast<uintptr_t>(kinfo.entry), stack,
+  cpu::backend().EnterGuest(reinterpret_cast<uintptr_t>(kinfo.entry), stack,
                             fsbase);
 }
 }  // namespace krnl

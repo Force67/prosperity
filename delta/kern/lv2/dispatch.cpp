@@ -181,7 +181,7 @@ static const bool g_scHistDump = [] {
 static uintptr_t emit_bsd_trampoline(const void *handler, u32 sid,
                                      bool trace, bool count) {
   // The two handlers that never return (they longjmp out of the guest call
-  // chain, cpu::exitGuestThread) must stay on the guest stack: glibc's
+  // chain, cpu::ExitGuestThread) must stay on the guest stack: glibc's
   // longjmp check rejects a jump to a frame that is not on the current stack.
   // Neither needs the room anyway.
   const bool ownStack = sid != 1 /*exit*/ && sid != 431 /*thr_exit*/;

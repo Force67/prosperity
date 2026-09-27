@@ -99,7 +99,7 @@ void PS4ABI jobTraceLogger(u64 hookId, u64 a0, u64 a1,
       // Replicate get-core-ordinal fn 0x33350: tcb = *(fsbase); v = [tcb-0x10];
       // ord = (v & 0x8000) ? (v & ~0x8000) : -1.  This is the value the claim
       // path (0x38d70/0x38d7f) uses for 1<<ord AND the direct-assign slot index.
-      u64 fsb = cpu::currentGuestFsBase();
+      u64 fsb = cpu::CurrentGuestFsBase();
       u64 tcb = fsb ? *reinterpret_cast<u64 *>(fsb) : 0;
       u64 v = tcb ? *reinterpret_cast<u64 *>(tcb - 0x10) : 0;
       i64 ord = (v & 0x8000) ? (i64)(v & ~0x8000ULL) : -1;
@@ -320,7 +320,7 @@ void spawnJobWatcher(u64 base) {
           // (e.g. SotC's core-6 pin, mask 0x40) is unclaimable by anyone.
           {
             base::Vector<u64> fsb;
-            cpu::guestThreadFsBases(fsb);
+            cpu::GuestThreadFsBases(fsb);
             u32 present = 0;
             int valid = 0;
             base::String list;
@@ -891,9 +891,9 @@ void installInternalHook(u8 *base, u32 off, u32 prologueLen,
   u8 *target = base + off;
   host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(target) & ~0xFFFull),
                   0x2000, host_memory::PageProtection::kRwx);
-  uintptr_t tramp = cpu::makeGuestTrampoline(target, prologueLen, target + prologueLen);
+  uintptr_t tramp = cpu::MakeGuestTrampoline(target, prologueLen, target + prologueLen);
   if (!tramp) { LOG_WARNING("jobtrace: trampoline failed for {}", name); return; }
-  uintptr_t wrap = cpu::makeGuestReturnHook(reinterpret_cast<void *>(tramp), hookId,
+  uintptr_t wrap = cpu::MakeGuestReturnHook(reinterpret_cast<void *>(tramp), hookId,
                                             reinterpret_cast<void *>(&jobTraceLogger), name);
   if (!wrap) { LOG_WARNING("jobtrace: wrapper failed for {}", name); return; }
   u8 patch[32];
@@ -912,9 +912,9 @@ static void installAllocLockHook(u8 *base, u32 off, u32 prologueLen,
   u8 *target = base + off;
   host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(target) & ~0xFFFull),
                   0x2000, host_memory::PageProtection::kRwx);
-  uintptr_t tramp = cpu::makeGuestTrampoline(target, prologueLen, target + prologueLen);
+  uintptr_t tramp = cpu::MakeGuestTrampoline(target, prologueLen, target + prologueLen);
   if (!tramp) { LOG_WARNING("alloclock: trampoline failed for {}", name); return; }
-  uintptr_t wrap = cpu::makeGuestLockWrapper(reinterpret_cast<void *>(tramp),
+  uintptr_t wrap = cpu::MakeGuestLockWrapper(reinterpret_cast<void *>(tramp),
                                              enterFn, leaveFn, name);
   if (!wrap) { LOG_WARNING("alloclock: wrapper failed for {}", name); return; }
   u8 patch[32];
@@ -1288,7 +1288,7 @@ static u64 PS4ABI voOpMapLog(u64 a1, u64 userId, u64 busType,
 void patchVideoOutDiag(smodule &m) {
   watchVideoOutState(m);
   if (kVoOplog) {
-    uintptr_t thunk = cpu::makeHostThunk(reinterpret_cast<void *>(&voOpMapLog));
+    uintptr_t thunk = cpu::MakeHostThunk(reinterpret_cast<void *>(&voOpMapLog));
     u8 *o = m.getInfo().base + 0x1020;
     host_memory::ProtectMem(reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(o) & ~0xFFFull),
                     0x2000, host_memory::PageProtection::kRwx);

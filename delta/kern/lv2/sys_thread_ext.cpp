@@ -49,7 +49,7 @@ struct sched_param64 {
 // FreeBSD stores a nonzero value at *state and wakes the umtx waiter the joiner
 // spins on, then tears the thread down. We must not call exit(): that would kill
 // the whole emulated process. Publishing the state word, waking the joiner, and
-// returning lets the guest thread function return so cpu::runGuestThread unwinds
+// returning lets the guest thread function return so cpu::RunGuestThread unwinds
 // the host thread.
 int PS4ABI sys_thr_exit(i64 *state) {
   if (state)
@@ -69,7 +69,7 @@ int PS4ABI sys_thr_exit(i64 *state) {
   // in-kernel, and libkernel's pthread trampoline aborts ("thr_exit() returned")
   // if it does. Leave the JIT now (FEX longjmps out of ExecuteThread; native is
   // a no-op and the entry returns naturally).
-  cpu::exitGuestThread();
+  cpu::ExitGuestThread();
   return 0;
 }
 

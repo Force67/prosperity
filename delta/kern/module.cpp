@@ -726,7 +726,7 @@ bool smodule::mapImage() {
 
   // Tell the backend the image is in place: native no-op (lifting done above),
   // FEX registers [base, base+codeSize) as an executable range for the JIT.
-  cpu::backend().onImageMapped(info);
+  cpu::backend().OnImageMapped(info);
 
   return true;
 }
@@ -785,7 +785,7 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
     auto bindHle = [&](const char *lib, uintptr_t hle) {
       char tn[64];
       std::snprintf(tn, sizeof(tn), "%s!%.11s", lib, name);
-      ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle), tn);
+      ptrOut = cpu::MakeHostThunk(reinterpret_cast<void *>(hle), tn);
     };
     for (const char *lib : kPs5ForcedHle) {
       if (uintptr_t hle = runtime::vprx_get_forced(lib, hid)) {
@@ -861,7 +861,7 @@ bool smodule::resolveObfSymbol(const char *name, uintptr_t &ptrOut) {
         // to it directly, so bind a guest trampoline. Native returns it as-is.
         char tn[64];
         std::snprintf(tn, sizeof(tn), "%s!%.11s", libname, name);
-        ptrOut = cpu::makeHostThunk(reinterpret_cast<void *>(hle), tn);
+        ptrOut = cpu::MakeHostThunk(reinterpret_cast<void *>(hle), tn);
         return true;
       }
     }

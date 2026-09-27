@@ -354,7 +354,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     return;
   // Let the CPU backend handle JIT-internal signals (e.g. FEX unaligned-atomic
   // SIGBUS) and resume; only a genuinely fatal fault falls through to the dump.
-  if (cpu::tryHandleJitSignal(sig, si, ucv))
+  if (cpu::TryHandleJitSignal(sig, si, ucv))
     return;
 
 #if defined(__x86_64__)
@@ -437,7 +437,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   symbolize((uintptr_t)si->si_addr, fault, sizeof(fault));
   BASE_LOGI("crashHandler", "\n=== GUEST FAULT: {} (signal {}) ===",
             strsignal(sig), sig);
-  if (int sc = cpu::faultingSyscall(); sc >= 0)
+  if (int sc = cpu::FaultingSyscall(); sc >= 0)
     BASE_LOGI("crashHandler", "  in syscall {} ({})", sc,
               syscall_getname((u32)sc));
   BASE_LOGI("crashHandler", "  fault = {:016x}  {}",
@@ -447,7 +447,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   {
     u32 ti = 0;
     if (const char *tn =
-            cpu::hostThunkNameForAddr((uintptr_t)si->si_addr, &ti))
+            cpu::HostThunkNameForAddr((uintptr_t)si->si_addr, &ti))
       BASE_LOGI("crashHandler",
                 "  ^ inside the HLE host-thunk pool: thunk #{} {}", ti,
                 *tn ? tn : "(bound without a name)");
@@ -787,8 +787,8 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   if (ucv)
     hostpc = static_cast<ucontext_t *>(ucv)->uc_mcontext.pc;
 #endif
-  u64 recon = cpu::reconstructGuestRip(hostpc);
-  u64 grip = recon ? recon : cpu::currentGuestRip(); // fall back to block rip
+  u64 recon = cpu::ReconstructGuestRip(hostpc);
+  u64 grip = recon ? recon : cpu::CurrentGuestRip(); // fall back to block rip
   BASE_LOGI("crashHandler", "  host pc in JIT: {}",
             recon ? "yes" : "no (FEX/HLE C++)");
   char ripsym[256];
@@ -812,12 +812,12 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
   // published (how SotC's New-Game crash got misdiagnosed). The fallback is
   // labelled so a stale dump is never mistaken for a precise one.
   u64 sig_gregs[16];
-  const bool gexact = cpu::guestGregsFromSignal(ucv, sig_gregs);
+  const bool gexact = cpu::GuestGregsFromSignal(ucv, sig_gregs);
   if (!gexact)
     BASE_LOGI("crashHandler",
               "  [regs] NOT from the fault: host pc is outside the JIT, so "
               "these are the last spilled CPUState values (STALE)");
-  if (const u64 *g = gexact ? sig_gregs : cpu::currentGuestGregs()) {
+  if (const u64 *g = gexact ? sig_gregs : cpu::CurrentGuestGregs()) {
     enum { RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15 };
     BASE_LOGI("crashHandler", "  rax={:016x} rbx={:016x} rcx={:016x} rdx={:016x}",
               (unsigned long long)g[RAX], (unsigned long long)g[RBX],
@@ -1112,7 +1112,7 @@ static void crashHandler(int sig, siginfo_t *si, void *ucv) {
     }
     // Print the boundary-call trace before the (best-effort, occasionally
     // out-of-bounds) stack scan so it survives even if the scan faults.
-    cpu::dumpThreadTrace(stderr);
+    cpu::DumpThreadTrace(stderr);
     std::fflush(stderr);
     backtrace(g[RBP]);
     // Raw stack scan: optimised guest code omits frame pointers, so scan for

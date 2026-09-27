@@ -73,7 +73,7 @@ void PS4ABI avpEventThread(void *arg) {
     BASE_LOGI("avp", "event {} -> {:#x}", event,
               (unsigned long long)g_eventCallback);
   // eventData is null for the state events.
-  cpu::backend().runGuestFunction(g_eventCallback, g_eventObject,
+  cpu::backend().RunGuestFunction(g_eventCallback, g_eventObject,
                                   static_cast<u64>(event), 0, 0);
 }
 
@@ -84,16 +84,16 @@ void PS4ABI avpEventThread(void *arg) {
 void postEvent(i32 event, u32 delay_ms) {
   if (!g_eventCallback)
     return;
-  const u64 fsbase = cpu::currentGuestFsBase();
+  const u64 fsbase = cpu::CurrentGuestFsBase();
   // Create the guest thread on THIS thread (FEX requires it) and only run it on
   // the worker, exactly as sys_thr_new does.
-  void *gthread = cpu::backend().createGuestThread(
-      cpu::makeHostThunk(reinterpret_cast<void *>(&avpEventThread),
+  void *gthread = cpu::backend().CreateGuestThread(
+      cpu::MakeHostThunk(reinterpret_cast<void *>(&avpEventThread),
                          "avpEvent"),
       new PendingEvent{event, delay_ms}, fsbase);
   if (!gthread)
     return;
-  base::SpawnDetachedThread("libSceAvPlayer", [gthread] { cpu::backend().runGuestThread(gthread); });
+  base::SpawnDetachedThread("libSceAvPlayer", [gthread] { cpu::backend().RunGuestThread(gthread); });
 }
 
 // DELTA_AVP_TRACE: count calls to the hot AvPlayer entrypoints. If a title spins

@@ -385,7 +385,7 @@ static base::Atomic<u64> g_whistUnattributed{0};
 
 // The guest instruction behind a memory-watch fault; false (rip 0) when it
 // cannot be established. On x86 the context RIP already IS the guest RIP;
-// under FEX on ARM map the host pc back through FEX. cpu::currentGuestRip()
+// under FEX on ARM map the host pc back through FEX. cpu::CurrentGuestRip()
 // is NOT a fallback: block-accurate only, it attributed a title's store to
 // libc memcpy and sent an investigation down a dead end. Unattributable
 // faults must say so.
@@ -395,7 +395,7 @@ static bool watchFaultGuestRip(void *ucv, uintptr_t &rip) {
   rip = (uintptr_t)static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs[REG_RIP];
   return rip != 0;
 #elif defined(__aarch64__)
-  rip = (uintptr_t)cpu::reconstructGuestRip(
+  rip = (uintptr_t)cpu::ReconstructGuestRip(
       static_cast<ucontext_t *>(ucv)->uc_mcontext.pc);
   return rip != 0;
 #else
@@ -411,7 +411,7 @@ static uintptr_t watchFaultGuestRsp(void *ucv) {
   return (uintptr_t)static_cast<ucontext_t *>(ucv)->uc_mcontext.gregs[REG_RSP];
 #else
   (void)ucv;
-  if (const u64 *g = cpu::currentGuestGregs()) {
+  if (const u64 *g = cpu::CurrentGuestGregs()) {
     enum { RAX, RCX, RDX, RBX, RSP };
     return (uintptr_t)g[RSP];
   }
@@ -607,8 +607,8 @@ bool onSignal(int sig, siginfo_t *si, void *ucv) {
         // holds the exact values at the fault; the in-memory state lags (written at
         // block boundaries) and is only a fallback for non-JIT faults.
         u64 sig_gregs[16];
-        bool exact = cpu::guestGregsFromSignal(ucv, sig_gregs);
-        g = exact ? sig_gregs : cpu::currentGuestGregs();
+        bool exact = cpu::GuestGregsFromSignal(ucv, sig_gregs);
+        g = exact ? sig_gregs : cpu::CurrentGuestGregs();
 #endif
         if (g) {
           enum { RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI,

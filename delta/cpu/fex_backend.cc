@@ -6,57 +6,57 @@
  * the host thread_local's CPUState.fs_cached. Mirrors tools fex-embed/harness.
  */
 
-#include <guest_abi.h>
 #include "base/arch.h"
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <base/strings/xstring.h>
-#include <logger/logger.h>
+#include "base/logging.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
+#include "guest_abi.h"
+#include "logger/logger.h"
 
+#include <sys/mman.h>
+#include <ucontext.h>
 #include <csetjmp>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ucontext.h>
-#include <sys/mman.h>
 
-#include <FEXCore/Utils/ArchHelpers/Arm64.h>
 #include <FEXCore/Utils/Allocator.h>
+#include <FEXCore/Utils/ArchHelpers/Arm64.h>
 
+#include <FEXCore/Config/Config.h>
 #include <FEXCore/Core/Context.h>
 #include <FEXCore/Core/CoreState.h>
-#include <FEXCore/Core/X86Enums.h>
-#include <FEXCore/Core/SignalDelegator.h>
-#include <FEXCore/HLE/SyscallHandler.h>
-#include <FEXCore/Config/Config.h>
 #include <FEXCore/Core/HostFeatures.h>
+#include <FEXCore/Core/SignalDelegator.h>
+#include <FEXCore/Core/X86Enums.h>
 #include <FEXCore/Debug/InternalThreadState.h>
+#include <FEXCore/HLE/SyscallHandler.h>
 
-#include "Common/HostFeatures.h" // FEX::FetchHostFeatures
+#include "Common/HostFeatures.h"  // FEX::FetchHostFeatures
 
-#include "backend.h"
+#include "base/atomic.h"
+#include "base/containers/pair.h"
+#include "base/containers/set.h"
+#include "base/containers/vector.h"
+#include "base/functional/function.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/optional.h"
+#include "base/threading/condition_variable.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
+#include "cpu/backend.h"
 #include "kern/crash.h"
 #include "kern/lv2/dispatch.h"
 #include "kern/module.h"
 #include "kern/proc.h"
-#include <options/options.h>
-#include <base/atomic.h>
-#include <base/containers/pair.h>
-#include <base/containers/set.h>
-#include <base/containers/vector.h>
-#include <base/functional/function.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/optional.h>
-#include <base/threading/condition_variable.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/threading/thread.h>
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(int, kSampleMs, "DELTA_SAMPLE_MS", 0);
-DELTA_OPTION(const char *, kRipRace, "DELTA_RIPRACE", nullptr);
+DELTA_OPTION(const char*, kRipRace, "DELTA_RIPRACE", nullptr);
 DELTA_OPTION(int, kLoadWatch, "DELTA_LOADWATCH", 0);
 DELTA_OPTION(u64, kLoadWatchBase, "DELTA_LOADWATCH_BASE", 0x201400000000ull);
 DELTA_OPTION(u64, kLoadWatchGoff, "DELTA_LOADWATCH_GOFF", 0x2ee2d00ull);
@@ -69,18 +69,18 @@ DELTA_OPTION(bool, kWatchdog, "DELTA_WATCHDOG", false);
 
 namespace krnl {
 struct tls_index;
-void *PS4ABI guest_tls_get_addr(tls_index *ti); // HLE dynamic-TLS resolver
-const u32 *currentGuestTidPtr();           // this thread's guest tid TLS addr
-}
+void* PS4ABI guest_tls_get_addr(tls_index* ti);  // HLE dynamic-TLS resolver
+const u32* currentGuestTidPtr();  // this thread's guest tid TLS addr
+}  // namespace krnl
 
 namespace cpu {
 
 // FEXCore thread on this host thread (1:1); the syscall handler and
 // krnl::setThreadFsBase (same TU) reach the live guest CPUState through it.
-static thread_local FEXCore::Core::InternalThreadState *t_curThread = nullptr;
+static thread_local FEXCore::Core::InternalThreadState* t_curThread = nullptr;
 
 // Raw context for the signal-path helpers; owned by FexBackend's unique_ptr.
-static FEXCore::Context::Context *g_ctxPtr = nullptr;
+static FEXCore::Context::Context* g_ctxPtr = nullptr;
 
 // Last syscall this host thread entered, for the crash handler.
 static thread_local u32 t_lastSyscall = 0xFFFFFFFFu;
@@ -89,24 +89,24 @@ static thread_local bool t_inSyscall = false;
 // Per-thread ring of recent guest->host crossings, dumped by the crash
 // handler; thread_local so a signal handler can touch it.
 struct TraceEvt {
-  char kind;        // 's' syscall, 'h' HLE thunk, 0 = empty
-  u32 id;      // syscall number / thunk index
+  char kind;  // 's' syscall, 'h' HLE thunk, 0 = empty
+  u32 id;     // syscall number / thunk index
   u64 a0, a1, a2, a3;
-  u64 ret;     // result (or sentinel before return)
-  u64 caller;  // guest caller PC (HLE only)
-  const char *name; // static HLE name pointer (HLE only), else nullptr
+  u64 ret;           // result (or sentinel before return)
+  u64 caller;        // guest caller PC (HLE only)
+  const char* name;  // static HLE name pointer (HLE only), else nullptr
 };
 static constexpr u32 kTraceRing = 96;
 static thread_local TraceEvt t_trace[kTraceRing];
 static thread_local u32 t_tracePos = 0;
-static inline TraceEvt &traceNext() {
-  TraceEvt &e = t_trace[t_tracePos % kTraceRing];
+static inline TraceEvt& traceNext() {
+  TraceEvt& e = t_trace[t_tracePos % kTraceRing];
   t_tracePos++;
   return e;
 }
 
 // Set around CTX->ExecuteThread so thr_exit can longjmp out of the JIT.
-static thread_local std::jmp_buf t_exitJmp;
+static thread_local std::jmp_buf t_exit_jmp;
 static thread_local bool t_exitJmpValid = false;
 
 namespace {
@@ -118,21 +118,24 @@ struct ExecRange {
 base::Mutex g_rangeMutex;
 base::Vector<ExecRange> g_ranges;
 
-// Per-thunk HLE name (libname!NID), parallel to g_hostThunks, for DELTA_HLE_TRACE.
+// Per-thunk HLE name (libname!NID), parallel to g_hostThunks, for
+// DELTA_HLE_TRACE.
 base::Vector<base::String> g_thunkNames;
 
 // Named module ranges, for the deadlock watchdog's symbolization.
-struct NamedRange { u64 base, size; base::String name; };
+struct NamedRange {
+  u64 base, size;
+  base::String name;
+};
 base::Mutex g_namedMutex;
 base::Vector<NamedRange> g_named;
-static void symRange(u64 a, char *out, size_t n) {
+static void symRange(u64 a, char* out, size_t n) {
   base::LockGuard lk(g_namedMutex);
-  for (auto &r : g_named)
+  for (auto& r : g_named)
     if (a >= r.base && a < r.base + r.size) {
-      std::snprintf(out, n, "%s[%#llx]+%#llx",
-                    r.name.empty() ? "?" : r.name.c_str(),
-                    (unsigned long long)r.base,
-                    (unsigned long long)(a - r.base));
+      std::snprintf(
+          out, n, "%s[%#llx]+%#llx", r.name.empty() ? "?" : r.name.c_str(),
+          (unsigned long long)r.base, (unsigned long long)(a - r.base));
       return;
     }
   std::snprintf(out, n, "%#llx", (unsigned long long)a);
@@ -148,20 +151,20 @@ static thread_local base::Atomic<u64> t_sampleRip{0};
 static thread_local base::Atomic<u64> t_sampleNs{0};
 
 struct LiveThread {
-  FEXCore::Core::InternalThreadState *thread;
+  FEXCore::Core::InternalThreadState* thread;
   u32 id;
   // This thread's TLS trace ring, so the stall dump shows parked threads'
   // last syscalls with arguments, not just the rip.
-  const TraceEvt *trace = nullptr;
-  const u32 *tracePos = nullptr;
-  const u32 *gtid = nullptr;  // this thread's guest tid (umutex owner space)
+  const TraceEvt* trace = nullptr;
+  const u32* tracePos = nullptr;
+  const u32* gtid = nullptr;  // this thread's guest tid (umutex owner space)
   // Parked in a syscall? State.rip is only written at block boundaries, so a
   // waiting thread keeps its last published rip.
-  const bool *inSyscall = nullptr;
+  const bool* inSyscall = nullptr;
   // DELTA_RIPRACE sample slots and the host tid to signal for one.
-  base::Atomic<u64> *sampleGen = nullptr;
-  base::Atomic<u64> *sampleRip = nullptr;
-  base::Atomic<u64> *sampleNs = nullptr;
+  base::Atomic<u64>* sampleGen = nullptr;
+  base::Atomic<u64>* sampleRip = nullptr;
+  base::Atomic<u64>* sampleNs = nullptr;
   pid_t hostTid = 0;
 };
 base::Mutex g_liveMutex;
@@ -222,7 +225,7 @@ static void startWatchdog() {
         sigemptyset(&sa.sa_mask);
         sa.sa_sigaction = [](int, siginfo_t *, void *ucv) {
           auto *uc = static_cast<ucontext_t *>(ucv);
-          const u64 rip = reconstructGuestRip(uc->uc_mcontext.pc);
+          const u64 rip = ReconstructGuestRip(uc->uc_mcontext.pc);
           struct timespec ts {};
           clock_gettime(CLOCK_MONOTONIC, &ts);
           t_sampleNs.store((u64)ts.tv_sec * 1000000000ull + ts.tv_nsec,
@@ -464,41 +467,43 @@ static void startWatchdog() {
 }
 
 // Host-thunk table: index -> native HLE function, dispatched from a guest
-// trampoline via the kHostThunkSyscallBase magic syscall. See makeHostThunk.
+// trampoline via the kHostThunkSyscallBase magic syscall. See MakeHostThunk.
 base::Mutex g_thunkMutex;
-base::Vector<void *> g_hostThunks;
-// Bump-allocated pool of guest-executable trampolines (one per bound HLE export).
-u8 *g_thunkPool = nullptr;
+base::Vector<void*> g_hostThunks;
+// Bump-allocated pool of guest-executable trampolines (one per bound HLE
+// export).
+u8* g_thunkPool = nullptr;
 size_t g_thunkPoolUsed = 0;
-constexpr size_t g_thunkPoolSize = 0x100000; // 1 MiB -> ~95k trampolines
+constexpr size_t g_thunkPoolSize = 0x100000;  // 1 MiB -> ~95k trampolines
 constexpr size_t kThunkStride = 16;
 
 class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
-public:
+ public:
   FexSyscallHandler() { OSABI = FEXCore::HLE::SyscallOSABI::OS_LINUX64; }
 
-  u64 HandleSyscall(FEXCore::Core::CpuStateFrame *Frame,
-                         FEXCore::HLE::SyscallArguments *Args) override {
+  u64 HandleSyscall(FEXCore::Core::CpuStateFrame* Frame,
+                    FEXCore::HLE::SyscallArguments* Args) override {
     // Args->Argument[0] = syscall number (RAX); [1..6] = RDI,RSI,RDX,R10,R8,R9.
     const u32 num = static_cast<u32>(Args->Argument[0]);
 
     // Dynamic-TLS bridge: patched __tls_get_addr issues this magic syscall.
     if (num == kTlsGetAddrSyscall) {
       u64 r = reinterpret_cast<u64>(krnl::guest_tls_get_addr(
-          reinterpret_cast<krnl::tls_index *>(Args->Argument[1])));
+          reinterpret_cast<krnl::tls_index*>(Args->Argument[1])));
       if (g_ctxPtr) {
-        u32 ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false, nullptr, 0);
+        u32 ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false,
+                                                      nullptr, 0);
         g_ctxPtr->SetFlagsFromCompactedEFLAGS(Frame->Thread, ef & ~1u);
       }
       return r;
     }
 
     // Host-thunk bridge: a planted trampoline issued this magic syscall. It did
-    // `mov r10,rcx`, so the original 4th arg (rcx, clobbered by `syscall`) is in
-    // Argument[4]; args 7+ sit on the guest stack above the return address.
+    // `mov r10,rcx`, so the original 4th arg (rcx, clobbered by `syscall`) is
+    // in Argument[4]; args 7+ sit on the guest stack above the return address.
     if ((num & 0xFF000000u) == kHostThunkSyscallBase) {
       const u32 idx = num & 0x00FFFFFFu;
-      void *fn = nullptr;
+      void* fn = nullptr;
       {
         base::LockGuard lk(g_thunkMutex);
         if (idx < g_hostThunks.size())
@@ -512,36 +517,49 @@ public:
         u64 s[8] = {};
         if (rsp)
           for (int i = 0; i < 8; i++)
-            s[i] = reinterpret_cast<u64 *>(rsp)[i + 1];
-        using Fn = u64(PS4ABI *)(u64, u64, u64, u64,
-                                      u64, u64, u64, u64,
-                                      u64, u64, u64, u64,
-                                      u64, u64);
-        u64 caller = (rsp) ? reinterpret_cast<u64 *>(rsp)[0] : 0;
-        const char *evName = nullptr;
-        { base::LockGuard lk(g_thunkMutex);
-          if (idx < g_thunkNames.size()) evName = g_thunkNames[idx].c_str(); }
-        TraceEvt &ev = traceNext();
-        ev = {'h', idx, Args->Argument[1], Args->Argument[2], Args->Argument[3],
-              Args->Argument[4], ~0ull, caller, evName};
+            s[i] = reinterpret_cast<u64*>(rsp)[i + 1];
+        using Fn = u64(PS4ABI*)(u64, u64, u64, u64, u64, u64, u64, u64, u64,
+                                u64, u64, u64, u64, u64);
+        u64 caller = (rsp) ? reinterpret_cast<u64*>(rsp)[0] : 0;
+        const char* evName = nullptr;
+        {
+          base::LockGuard lk(g_thunkMutex);
+          if (idx < g_thunkNames.size())
+            evName = g_thunkNames[idx].c_str();
+        }
+        TraceEvt& ev = traceNext();
+        ev = {'h',
+              idx,
+              Args->Argument[1],
+              Args->Argument[2],
+              Args->Argument[3],
+              Args->Argument[4],
+              ~0ull,
+              caller,
+              evName};
         ret = reinterpret_cast<Fn>(fn)(
             Args->Argument[1], Args->Argument[2], Args->Argument[3],
             Args->Argument[4], Args->Argument[5], Args->Argument[6], s[0], s[1],
             s[2], s[3], s[4], s[5], s[6], s[7]);
         ev.ret = ret;
         if (kHleTrace) {
-          char cs[256]; symRange(caller, cs, sizeof(cs));
-          const char *nm = "";
-          { base::LockGuard lk(g_thunkMutex);
-            if (idx < g_thunkNames.size()) nm = g_thunkNames[idx].c_str(); }
-          BASE_LOGI("hle", "{} thunk#{}({:#x},{:#x},{:#x},{:#x}) -> {:#x}  from {}",
-                    nm, idx, Args->Argument[1], Args->Argument[2],
-                    Args->Argument[3], Args->Argument[4],
-                    (unsigned long)ret, cs);
+          char cs[256];
+          symRange(caller, cs, sizeof(cs));
+          const char* nm = "";
+          {
+            base::LockGuard lk(g_thunkMutex);
+            if (idx < g_thunkNames.size())
+              nm = g_thunkNames[idx].c_str();
+          }
+          BASE_LOGI(
+              "hle", "{} thunk#{}({:#x},{:#x},{:#x},{:#x}) -> {:#x}  from {}",
+              nm, idx, Args->Argument[1], Args->Argument[2], Args->Argument[3],
+              Args->Argument[4], (unsigned long)ret, cs);
         }
       }
       if (g_ctxPtr) {
-        u32 ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false, nullptr, 0);
+        u32 ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false,
+                                                      nullptr, 0);
         g_ctxPtr->SetFlagsFromCompactedEFLAGS(Frame->Thread, ef & ~1u);
       }
       return ret;
@@ -560,18 +578,25 @@ public:
 
     // lv2 handlers are plain AArch64 functions; translate Linux-style negative
     // errno to the BSD carry + positive errno convention.
-    using Fn = u64(PS4ABI *)(u64, u64, u64, u64, u64, u64);
+    using Fn = u64(PS4ABI*)(u64, u64, u64, u64, u64, u64);
     auto fn = reinterpret_cast<Fn>(handler);
     // The native x86 bsd trampoline normally counts this; count here too.
     if (krnl::g_scHist)
       g_sysHist[num & 1023]++;
     t_lastSyscall = num;
     t_inSyscall = true;
-    TraceEvt &ev = traceNext();
-    ev = {'s', num, Args->Argument[1], Args->Argument[2], Args->Argument[3],
-          Args->Argument[4], ~0ull, 0, nullptr};
+    TraceEvt& ev = traceNext();
+    ev = {'s',
+          num,
+          Args->Argument[1],
+          Args->Argument[2],
+          Args->Argument[3],
+          Args->Argument[4],
+          ~0ull,
+          0,
+          nullptr};
     u64 ret = fn(Args->Argument[1], Args->Argument[2], Args->Argument[3],
-                       Args->Argument[4], Args->Argument[5], Args->Argument[6]);
+                 Args->Argument[4], Args->Argument[5], Args->Argument[6]);
     const u32 error = krnl::krnl_syscall_errno(ret);
     if (error)
       ret = error;
@@ -583,7 +608,8 @@ public:
     // CF isn't in flags[]; set it through the compacted-EFLAGS API so the
     // guest's `jb cerror` sees the syscall result.
     if (g_ctxPtr) {
-      u32 ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false, nullptr, 0);
+      u32 ef = g_ctxPtr->ReconstructCompactedEFLAGS(Frame->Thread, false,
+                                                    nullptr, 0);
       if (error)
         ef |= 1u;  // EFLAGS.CF
       else
@@ -593,17 +619,19 @@ public:
     return ret;
   }
 
-  FEXCore::HLE::ExecutableRangeInfo
-  QueryGuestExecutableRange(FEXCore::Core::InternalThreadState *, u64 Address) override {
+  FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(
+      FEXCore::Core::InternalThreadState*,
+      u64 Address) override {
     base::LockGuard lk(g_rangeMutex);
-    for (auto &r : g_ranges)
+    for (auto& r : g_ranges)
       if (Address >= r.base && Address < r.base + r.size)
         return {r.base, r.size, false};
     return {0, 0, false};
   }
 
   base::Optional<FEXCore::ExecutableFileSectionInfo>
-  LookupExecutableFileSection(FEXCore::Core::InternalThreadState *, u64) override {
+  LookupExecutableFileSection(FEXCore::Core::InternalThreadState*,
+                              u64) override {
     return base::nullopt;
   }
 };
@@ -612,16 +640,16 @@ public:
 // SIGSEGV/SIGILL plumbing.
 class FexSignalDelegator final : public FEXCore::SignalDelegator {};
 
-// Return target for runGuestFunction: longjmp out of the JIT like thr_exit;
+// Return target for RunGuestFunction: longjmp out of the JIT like thr_exit;
 // dispatched as a host thunk, so extra args are ignored.
 static u64 PS4ABI guestFnReturnExit() {
-  exitGuestThread();
-  return 0;  // unreachable (exitGuestThread longjmps)
+  ExitGuestThread();
+  return 0;  // unreachable (ExitGuestThread longjmps)
 }
 
 class FexBackend final : public ICpuBackend {
-public:
-  void onImageMapped(krnl::moduleInfo &info) override {
+ public:
+  void OnImageMapped(krnl::moduleInfo& info) override {
     ensureInit();
     base::LockGuard lk(g_rangeMutex);
     g_ranges.push_back({reinterpret_cast<u64>(info.base), info.codeSize});
@@ -630,16 +658,17 @@ public:
       g_named.push_back({reinterpret_cast<u64>(info.base), info.codeSize,
                          base::String(info.name.c_str())});
     }
-    LOG_INFO("fex: registered exec range {} +{:#x}", (void *)info.base, info.codeSize);
+    LOG_INFO("fex: registered exec range {} +{:#x}", (void*)info.base,
+             info.codeSize);
   }
 
   // Per-guest-thread state; the GDT is per thread (FEX requirement) and the
   // stacks are pooled for reuse.
   struct FexThread {
-    FEXCore::Core::InternalThreadState *thread;
-    void *stack;
+    FEXCore::Core::InternalThreadState* thread;
+    void* stack;
     size_t stackSize;
-    void *callret;
+    void* callret;
     size_t callretSize;
     FEXCore::Core::CPUState::gdt_segment gdt[32];
   };
@@ -648,29 +677,30 @@ public:
   // long-lived structures, and unmapping made those dangle or corrupted the
   // next reuse (SotC AllocationTracker faults ~10s into LoadInitialWorld).
   base::Mutex stackPoolM;
-  base::Vector<base::Pair<void *, size_t>> stackPool;    // guest rsp stacks
-  base::Vector<base::Pair<void *, size_t>> callretPool;  // FEX call-ret stacks
+  base::Vector<base::Pair<void*, size_t>> stackPool;    // guest rsp stacks
+  base::Vector<base::Pair<void*, size_t>> callretPool;  // FEX call-ret stacks
 
-  void *poolTake(base::Vector<base::Pair<void *, size_t>> &pool, size_t size) {
+  void* poolTake(base::Vector<base::Pair<void*, size_t>>& pool, size_t size) {
     base::LockGuard<base::Mutex> lk(stackPoolM);
     for (size_t i = 0; i < pool.size(); i++) {
       if (pool[i].second == size) {
-        void *p = pool[i].first;
+        void* p = pool[i].first;
         pool.erase(pool.begin() + i);
         return p;
       }
     }
     return nullptr;
   }
-  void poolPut(base::Vector<base::Pair<void *, size_t>> &pool, void *p,
+  void poolPut(base::Vector<base::Pair<void*, size_t>>& pool,
+               void* p,
                size_t size) {
     base::LockGuard<base::Mutex> lk(stackPoolM);
     pool.push_back({p, size});
   }
 
-  void *createGuestThread(uintptr_t entry, void *arg, u64 fsbase) override {
+  void* CreateGuestThread(uintptr_t entry, void* arg, u64 fsbase) override {
     ensureInit();
-    auto *h = new FexThread{};
+    auto* h = new FexThread{};
 
     // Guest stack; HLE handlers run on the host stack, so this only serves
     // guest code. Reuse a pooled retired stack when one exists.
@@ -679,24 +709,27 @@ public:
     if (!h->stack)
       h->stack = mmap(nullptr, h->stackSize, PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    u64 rsp = (reinterpret_cast<u64>(h->stack) + h->stackSize - 0x200) & ~0xFULL;
+    u64 rsp =
+        (reinterpret_cast<u64>(h->stack) + h->stackSize - 0x200) & ~0xFULL;
 
     // Create on the calling thread, as FEX's ThreadManager does.
-    auto *thread = CTX->CreateThread(entry, rsp, nullptr);
+    auto* thread = CTX->CreateThread(entry, rsp, nullptr);
     h->thread = thread;
-    auto &S = thread->CurrentFrame->State;
+    auto& S = thread->CurrentFrame->State;
 
     // FEX call/return prediction stack (guard-paged), seeded to Base + SIZE/4.
     {
-      constexpr size_t kSize = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+      constexpr size_t kSize =
+          FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
       constexpr size_t kPage = 0x1000;
       h->callretSize = kSize + 2 * kPage;
-      void *alloc = poolTake(callretPool, h->callretSize);
+      void* alloc = poolTake(callretPool, h->callretSize);
       if (!alloc)
-        alloc = mmap(nullptr, h->callretSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        alloc = mmap(nullptr, h->callretSize, PROT_NONE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (alloc != MAP_FAILED) {
         h->callret = alloc;
-        void *crBase = reinterpret_cast<u8 *>(alloc) + kPage;
+        void* crBase = reinterpret_cast<u8*>(alloc) + kPage;
         mprotect(crBase, kSize, PROT_READ | PROT_WRITE);
         thread->CallRetStackBase = crBase;
         S.callret_sp = reinterpret_cast<u64>(crBase) + kSize / 4;
@@ -704,10 +737,12 @@ public:
     }
 
     // Per-thread 64-bit segments (the decoder reads CS.L).
-    S.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_GDT] = &h->gdt[0];
-    S.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_LDT] = &h->gdt[0];
+    S.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_GDT] =
+        &h->gdt[0];
+    S.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_LDT] =
+        &h->gdt[0];
     S.cs_idx = FEXCore::Core::CPUState::DEFAULT_USER_CS << 3;
-    auto *gdt = FEXCore::Core::CPUState::GetSegmentFromIndex(S, S.cs_idx);
+    auto* gdt = FEXCore::Core::CPUState::GetSegmentFromIndex(S, S.cs_idx);
     FEXCore::Core::CPUState::SetGDTBase(gdt, 0);
     FEXCore::Core::CPUState::SetGDTLimit(gdt, 0xFFFFFU);
     S.cs_cached = FEXCore::Core::CPUState::CalculateGDTBase(*gdt);
@@ -722,10 +757,11 @@ public:
     u64 fs = fsbase;
     if (fs == 0) {
       constexpr size_t kTls = 0x10000;
-      void *t = mmap(nullptr, kTls, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      void* t = mmap(nullptr, kTls, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (t != MAP_FAILED) {
         fs = reinterpret_cast<u64>(t) + kTls / 2;
-        *reinterpret_cast<u64 *>(fs) = fs;
+        *reinterpret_cast<u64*>(fs) = fs;
       }
     }
     S.fs_cached = fs;
@@ -733,21 +769,24 @@ public:
     return h;
   }
 
-  void runGuestThread(void *handle) override {
-    auto *h = static_cast<FexThread *>(handle);
+  void RunGuestThread(void* handle) override {
+    auto* h = static_cast<FexThread*>(handle);
     t_curThread = h->thread;
-    krnl::installSigAltStack();  // fatal handler must survive a blown guest stack
+    krnl::installSigAltStack();  // fatal handler must survive a blown guest
+                                 // stack
     // Re-assert the fatal handler: FEXCore init may have registered its own
     // SIGSEGV/SIGILL handlers; sigaction is idempotent.
     krnl::installCrashHandler();
-    FEXCore::Allocator::RegisterTLSData(h->thread); // FEX per-thread registration
+    FEXCore::Allocator::RegisterTLSData(
+        h->thread);  // FEX per-thread registration
     startWatchdog();
     u32 myId = g_liveSeq.fetch_add(1);
     u64 entryRip = h->thread->CurrentFrame->State.rip;
     {
-      // Log guest + host pthread stack ranges, to attribute fault addresses later.
+      // Log guest + host pthread stack ranges, to attribute fault addresses
+      // later.
       pthread_attr_t at;
-      void *hsp = nullptr;
+      void* hsp = nullptr;
       size_t hsz = 0;
       if (pthread_getattr_np(pthread_self(), &at) == 0) {
         pthread_attr_getstack(&at, &hsp, &hsz);
@@ -757,43 +796,55 @@ public:
                 "gthread rip={:#x} gstack=[{:p}+{:#x}] hoststack=[{:p}+{:#x}]",
                 (unsigned long long)entryRip, h->stack, h->stackSize, hsp, hsz);
     }
-    { base::LockGuard lk(g_liveMutex);
+    {
+      base::LockGuard lk(g_liveMutex);
       g_live.push_back({h->thread, myId, t_trace, &t_tracePos,
-                        krnl::currentGuestTidPtr(), &t_inSyscall,
-                        &t_sampleGen, &t_sampleRip, &t_sampleNs,
-                        static_cast<pid_t>(::syscall(SYS_gettid))}); }
+                        krnl::currentGuestTidPtr(), &t_inSyscall, &t_sampleGen,
+                        &t_sampleRip, &t_sampleNs,
+                        static_cast<pid_t>(::syscall(SYS_gettid))});
+    }
     LOG_INFO("fex: running guest thread rip={:#x} (watchdog tid={})",
              h->thread->CurrentFrame->State.rip, myId);
-    // thr_exit longjmps here to leave the JIT; the thread is being torn down anyway.
-    if (setjmp(t_exitJmp) == 0) {
+    // thr_exit longjmps here to leave the JIT; the thread is being torn down
+    // anyway.
+    if (setjmp(t_exit_jmp) == 0) {
       t_exitJmpValid = true;
       CTX->ExecuteThread(h->thread);
     } else {
       LOG_INFO("fex: guest thread exited via thr_exit");
     }
     t_exitJmpValid = false;
-    auto &endS = h->thread->CurrentFrame->State;
+    auto& endS = h->thread->CurrentFrame->State;
     LOG_INFO("fex: guest thread returned rip={:#x}", (unsigned long)endS.rip);
     if (kWatchdog) {
-      char es[256]; symRange(entryRip, es, sizeof(es));
-      char rs[256]; symRange(endS.rip, rs, sizeof(rs));
-      BASE_LOGI("watchdog", "=== THREAD tid={} RETURNED entry={:#x} ({}) ret={:#x} ({}) ===",
-                myId, (unsigned long long)entryRip, es,
-                (unsigned long long)endS.rip, rs);
+      char es[256];
+      symRange(entryRip, es, sizeof(es));
+      char rs[256];
+      symRange(endS.rip, rs, sizeof(rs));
+      BASE_LOGI(
+          "watchdog",
+          "=== THREAD tid={} RETURNED entry={:#x} ({}) ret={:#x} ({}) ===",
+          myId, (unsigned long long)entryRip, es, (unsigned long long)endS.rip,
+          rs);
       if (endS.rip >= 0x200000000000ull && endS.rip < 0x210000000000ull) {
-        const u8 *b = reinterpret_cast<const u8 *>(endS.rip);
-        BASE_LOGI("watchdog", "      bytes@rip: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+        const u8* b = reinterpret_cast<const u8*>(endS.rip);
+        BASE_LOGI("watchdog",
+                  "      bytes@rip: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                   b[0], b[1], b[2], b[3], b[4], b[5]);
       }
       u64 rsp = endS.gregs[FEXCore::X86State::REG_RSP];
       int shown = 0;
       for (int i = 0; i < 2048 && shown < 20; i++) {
         u64 a = rsp + (u64)i * 8, v = 0;
-        if (a < 0x1000) break;
-        std::memcpy(&v, reinterpret_cast<void *>(a), 8);
-        if (v < 0x200000000000ull || v >= 0x210000000000ull) continue;
-        char s2[256]; symRange(v, s2, sizeof(s2));
-        if (s2[0] == '0') continue;
+        if (a < 0x1000)
+          break;
+        std::memcpy(&v, reinterpret_cast<void*>(a), 8);
+        if (v < 0x200000000000ull || v >= 0x210000000000ull)
+          continue;
+        char s2[256];
+        symRange(v, s2, sizeof(s2));
+        if (s2[0] == '0')
+          continue;
         BASE_LOGI("watchdog", "      stk+{:#x} {:#x} ({})", i * 8,
                   (unsigned long long)v, s2);
         shown++;
@@ -803,52 +854,60 @@ public:
     if (endS.rip < 0x100000ull) {
       BASE_LOGI("fex", "=== BOGUS THREAD RETURN rip={:#x} ===",
                 (unsigned long)endS.rip);
-      const char *rn[] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
-                          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
+      const char* rn[] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi",
+                          "rbp", "rsp", "r8",  "r9",  "r10", "r11",
+                          "r12", "r13", "r14", "r15"};
       for (int i = 0; i < 16; i++)
         BASE_LOGI("fex", "  {}={:#x}", rn[i], (unsigned long)endS.gregs[i]);
       u64 rsp = endS.gregs[FEXCore::X86State::REG_RSP];
       if (rsp) {
         for (int i = 0; i < 64; i++) {
-          u64 v = reinterpret_cast<u64 *>(rsp)[i];
+          u64 v = reinterpret_cast<u64*>(rsp)[i];
           if (v >= 0x200000000000ull && v < 0x206000000000ull)
             BASE_LOGI("fex", "  stk+{:#x} = {:#x}", i * 8, (unsigned long)v);
         }
       }
     }
-    { base::LockGuard lk(g_liveMutex);
+    {
+      base::LockGuard lk(g_liveMutex);
       for (size_t i = 0; i < g_live.size(); i++)
-        if (g_live[i].thread == h->thread) { g_live.erase(g_live.begin() + i); break; } }
+        if (g_live[i].thread == h->thread) {
+          g_live.erase(g_live.begin() + i);
+          break;
+        }
+    }
     FEXCore::Allocator::UninstallTLSData(h->thread);
     CTX->DestroyThread(h->thread);
     t_curThread = nullptr;
     // Pool, never unmap: guest code may hold pointers into a retired stack.
-    if (h->stack) poolPut(stackPool, h->stack, h->stackSize);
-    if (h->callret) poolPut(callretPool, h->callret, h->callretSize);
+    if (h->stack)
+      poolPut(stackPool, h->stack, h->stackSize);
+    if (h->callret)
+      poolPut(callretPool, h->callret, h->callretSize);
     delete h;
   }
 
-  u64 runGuestFunction(uintptr_t fn, u64 a0, u64 a1,
-                            u64 a2, u64 a3) override {
+  u64 RunGuestFunction(uintptr_t fn, u64 a0, u64 a1, u64 a2, u64 a3) override {
     // Point a guest function's return address at a thunk that exits the thread.
     static uintptr_t exitThunk =
-        makeHostThunk(reinterpret_cast<void *>(&guestFnReturnExit));
+        MakeHostThunk(reinterpret_cast<void*>(&guestFnReturnExit));
 
     // Inherit the caller's fs base: module init calls libkernel, which reads
     // TLS, and the caller is blocked on join meanwhile.
     u64 fsbase = t_curThread ? t_curThread->CurrentFrame->State.fs_cached : 0;
 
-    // createGuestThread sets RDI=arg; add RSI/RDX for the 2nd/3rd SysV args.
-    auto *h = static_cast<FexThread *>(
-        createGuestThread(fn, reinterpret_cast<void *>(a0), fsbase));
-    auto &S = h->thread->CurrentFrame->State;
+    // CreateGuestThread sets RDI=arg; add RSI/RDX for the 2nd/3rd SysV args.
+    auto* h = static_cast<FexThread*>(
+        CreateGuestThread(fn, reinterpret_cast<void*>(a0), fsbase));
+    auto& S = h->thread->CurrentFrame->State;
     S.gregs[FEXCore::X86State::REG_RSI] = a1;
     S.gregs[FEXCore::X86State::REG_RDX] = a2;
     S.gregs[FEXCore::X86State::REG_RCX] = a3;
-    // After the implicit `call`, x86 wants rsp%16==8 at the callee's first instruction.
+    // After the implicit `call`, x86 wants rsp%16==8 at the callee's first
+    // instruction.
     u64 rsp = S.gregs[FEXCore::X86State::REG_RSP] & ~0xFULL;
     rsp -= 8;
-    *reinterpret_cast<u64 *>(rsp) = exitThunk;
+    *reinterpret_cast<u64*>(rsp) = exitThunk;
     S.gregs[FEXCore::X86State::REG_RSP] = rsp;
     // Run on a persistent host worker, never the caller's thread, and block:
     // module inits record host-thread-derived pointers (glibc TCB above the
@@ -877,7 +936,7 @@ public:
         });  // process-lifetime worker; its TCB/TLS stay mapped
       }
       initWorkerDone = false;
-      initWorkerJob = [this, h] { runGuestThread(h); };
+      initWorkerJob = [this, h] { RunGuestThread(h); };
       initWorkerCv.notify_all();
       initWorkerCv.wait(lk, [this] { return initWorkerDone; });
     }
@@ -890,7 +949,7 @@ public:
   base::Function<void()> initWorkerJob;
   bool initWorkerDone = false;
 
-private:
+ private:
   void ensureInit() {
     base::LockGuard<base::Mutex> lk(initM);
     if (initDone)
@@ -902,7 +961,8 @@ private:
       FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
       // Serialize unaligned LOCK RMWs: the dual-CAS emulation tears on ARM
       // (SotC's BPE allocator has >1000 unaligned-atomic sites).
-      FEXCore::Config::Set(FEXCore::Config::CONFIG_STRICTINPROCESSSPLITLOCKS, "1");
+      FEXCore::Config::Set(FEXCore::Config::CONFIG_STRICTINPROCESSSPLITLOCKS,
+                           "1");
       // FEX orders scalar loadstores only; SIMD copies and REP MOVS reorder on
       // ARM. SotC publishes job descriptors with vmovups pairs, so workers can
       // observe a half-published descriptor. Both knobs default off.
@@ -933,76 +993,91 @@ private:
 
 FexBackend g_backend;
 
-} // namespace
+}  // namespace
 
 namespace {
 // Dedicated VA window for FEXCore internals, disjoint from guest memory: a
 // guest MAP_FIXED range high in VA would clobber kernel-placed FEX mappings
 // (zero-fills the JIT's block-link map, the null-node crash).
 #ifdef __ANDROID__
-// 39-bit user VA: above the guest arena, below bionic's mmap_base. Reserved in earlyInit.
-constexpr uintptr_t kFexHeapBase = 0x0000'0060'0000'0000ull; // 384 GiB
-constexpr size_t kFexHeapSize = 32ull * 1024 * 1024 * 1024;  // 32 GiB
+// 39-bit user VA: above the guest arena, below bionic's mmap_base. Reserved in
+// EarlyInit.
+constexpr uintptr_t kFexHeapBase = 0x0000'0060'0000'0000ull;  // 384 GiB
+constexpr size_t kFexHeapSize = 32ull * 1024 * 1024 * 1024;   // 32 GiB
 #else
-constexpr uintptr_t kFexHeapBase = 0x0000'5000'0000'0000ull; // 80 TiB
-constexpr size_t kFexHeapSize = 96ull * 1024 * 1024 * 1024;  // 96 GiB
+constexpr uintptr_t kFexHeapBase = 0x0000'5000'0000'0000ull;  // 80 TiB
+constexpr size_t kFexHeapSize = 96ull * 1024 * 1024 * 1024;   // 96 GiB
 #endif
 base::Atomic<uintptr_t> g_fexHeapNext{0};
 uintptr_t g_fexHeapEnd = 0;
 
-void *fexInternalMmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
+void* fexInternalMmap(void* addr,
+                      size_t len,
+                      int prot,
+                      int flags,
+                      int fd,
+                      off_t off) {
   // MAP_FIXED means FEX requires that exact address; honour it.
   if ((flags & MAP_FIXED) || !g_fexHeapEnd)
     return ::mmap(addr, len, prot, flags, fd, off);
   // A bare hint is advisory and the kernel may place the mapping in a range the
   // guest MAP_FIXEDs later; the window matters more, so drop the hint.
   (void)addr;
-  // Bump-allocate from the reserved window with MAP_FIXED, never overlapping guest memory.
+  // Bump-allocate from the reserved window with MAP_FIXED, never overlapping
+  // guest memory.
   const size_t alen = (len + 0xFFFull) & ~0xFFFull;
   uintptr_t base = g_fexHeapNext.fetch_add(alen, base::memory_order_relaxed);
   if (base + alen > g_fexHeapEnd)
-    return ::mmap(nullptr, len, prot, flags, fd, off); // window exhausted: fall back
-  return ::mmap(reinterpret_cast<void *>(base), len, prot, flags | MAP_FIXED, fd, off);
+    return ::mmap(nullptr, len, prot, flags, fd,
+                  off);  // window exhausted: fall back
+  return ::mmap(reinterpret_cast<void*>(base), len, prot, flags | MAP_FIXED, fd,
+                off);
 }
-int fexInternalMunmap(void *addr, size_t len) { return ::munmap(addr, len); }
-} // namespace
+int fexInternalMunmap(void* addr, size_t len) {
+  return ::munmap(addr, len);
+}
+}  // namespace
 
-void earlyInit() {
+void EarlyInit() {
   // Reserve PROT_NONE before any guest mapping, then hook FEXCore's allocator.
   int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
 #ifdef MAP_FIXED_NOREPLACE
-  void *r = ::mmap(reinterpret_cast<void *>(kFexHeapBase), kFexHeapSize, PROT_NONE,
-                   flags | MAP_FIXED_NOREPLACE, -1, 0);
-  if (r == MAP_FAILED || r != reinterpret_cast<void *>(kFexHeapBase))
+  void* r = ::mmap(reinterpret_cast<void*>(kFexHeapBase), kFexHeapSize,
+                   PROT_NONE, flags | MAP_FIXED_NOREPLACE, -1, 0);
+  if (r == MAP_FAILED || r != reinterpret_cast<void*>(kFexHeapBase))
     r = ::mmap(nullptr, kFexHeapSize, PROT_NONE, flags, -1, 0);
 #else
-  void *r = ::mmap(nullptr, kFexHeapSize, PROT_NONE, flags, -1, 0);
+  void* r = ::mmap(nullptr, kFexHeapSize, PROT_NONE, flags, -1, 0);
 #endif
   if (r == MAP_FAILED) {
-    LOG_WARNING("fex: could not reserve internal heap window; JIT memory shares "
-                "guest VA (may corrupt under heavy guest mmap use)");
+    LOG_WARNING(
+        "fex: could not reserve internal heap window; JIT memory shares "
+        "guest VA (may corrupt under heavy guest mmap use)");
     return;
   }
-  g_fexHeapNext.store(reinterpret_cast<uintptr_t>(r), base::memory_order_relaxed);
+  g_fexHeapNext.store(reinterpret_cast<uintptr_t>(r),
+                      base::memory_order_relaxed);
   g_fexHeapEnd = reinterpret_cast<uintptr_t>(r) + kFexHeapSize;
   FEXCore::Allocator::mmap = fexInternalMmap;
   FEXCore::Allocator::munmap = fexInternalMunmap;
   LOG_INFO("fex: reserved internal heap {} +{:#x}", r, kFexHeapSize);
 }
 
-ICpuBackend &backend() { return g_backend; }
+ICpuBackend& backend() {
+  return g_backend;
+}
 
-void exitGuestThread() {
+void ExitGuestThread() {
   if (t_exitJmpValid) {
     t_exitJmpValid = false;
-    std::longjmp(t_exitJmp, 1);
+    std::longjmp(t_exit_jmp, 1);
   }
   // Not in a guest thread context: nothing to unwind.
 }
 
 // Map a host-thunk-pool address back to the HLE export planted there; a guest
 // fault in this pool is a call through a bound-but-unserviced import slot.
-const char *hostThunkNameForAddr(uintptr_t addr, u32 *idxOut) {
+const char* HostThunkNameForAddr(uintptr_t addr, u32* idxOut) {
   base::LockGuard lk(g_thunkMutex);
   if (!g_thunkPool)
     return nullptr;
@@ -1019,14 +1094,14 @@ const char *hostThunkNameForAddr(uintptr_t addr, u32 *idxOut) {
 
 // Plant a guest x86 trampoline bouncing into native hostFn via the magic
 // syscall; preserves rcx into r10 before `syscall` clobbers rcx.
-uintptr_t makeHostThunk(void *hostFn, const char *name) {
+uintptr_t MakeHostThunk(void* hostFn, const char* name) {
   base::LockGuard lk(g_thunkMutex);
   g_thunkNames.resize(g_hostThunks.size() + 1);
   g_thunkNames[g_hostThunks.size()] = name ? name : "";
   if (!g_thunkPool) {
-    g_thunkPool = static_cast<u8 *>(
-        mmap(nullptr, g_thunkPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC,
-             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    g_thunkPool = static_cast<u8*>(mmap(nullptr, g_thunkPoolSize,
+                                        PROT_READ | PROT_WRITE | PROT_EXEC,
+                                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     if (g_thunkPool == MAP_FAILED) {
       g_thunkPool = nullptr;
       LOG_ERROR("fex: host-thunk pool mmap failed");
@@ -1035,8 +1110,7 @@ uintptr_t makeHostThunk(void *hostFn, const char *name) {
     // FEX hooks mmap, so the pool lands in the reserved heap; log the range
     // (faults here are bad HLE import slots).
     LOG_INFO("fex: host-thunk pool {:#x}+{:#x}",
-             reinterpret_cast<u64>(g_thunkPool),
-             (u64)g_thunkPoolSize);
+             reinterpret_cast<u64>(g_thunkPool), (u64)g_thunkPoolSize);
     // FEX won't JIT code outside a registered executable range.
     base::LockGuard rk(g_rangeMutex);
     g_ranges.push_back({reinterpret_cast<u64>(g_thunkPool), g_thunkPoolSize});
@@ -1048,15 +1122,19 @@ uintptr_t makeHostThunk(void *hostFn, const char *name) {
   const u32 idx = static_cast<u32>(g_hostThunks.size());
   g_hostThunks.push_back(hostFn);
 
-  u8 *t = g_thunkPool + g_thunkPoolUsed;
+  u8* t = g_thunkPool + g_thunkPoolUsed;
   g_thunkPoolUsed += kThunkStride;
   const u32 sc = kHostThunkSyscallBase | idx;
-  u8 *p = t;
-  *p++ = 0x49; *p++ = 0x89; *p++ = 0xCA;           // mov r10, rcx
-  *p++ = 0xB8;                                       // mov eax, imm32
-  std::memcpy(p, &sc, 4); p += 4;
-  *p++ = 0x0F; *p++ = 0x05;                          // syscall
-  *p++ = 0xC3;                                       // ret
+  u8* p = t;
+  *p++ = 0x49;
+  *p++ = 0x89;
+  *p++ = 0xCA;  // mov r10, rcx
+  *p++ = 0xB8;  // mov eax, imm32
+  std::memcpy(p, &sc, 4);
+  p += 4;
+  *p++ = 0x0F;
+  *p++ = 0x05;  // syscall
+  *p++ = 0xC3;  // ret
   return reinterpret_cast<uintptr_t>(t);
 }
 
@@ -1064,13 +1142,15 @@ uintptr_t makeHostThunk(void *hostFn, const char *name) {
 // loggerFn(hookId, a0..a3, ret) via the magic syscall, and returns realTarget's
 // result. Install by writing the returned address into the import GOT slot;
 // the ARM-compatible replacement for int3 return hooks. 0 on failure.
-uintptr_t makeGuestReturnHook(void *realTarget, u32 hookId, void *loggerFn,
-                              const char *name) {
+uintptr_t MakeGuestReturnHook(void* realTarget,
+                              u32 hookId,
+                              void* loggerFn,
+                              const char* name) {
   base::LockGuard lk(g_thunkMutex);
   if (!g_thunkPool) {
-    g_thunkPool = static_cast<u8 *>(
-        mmap(nullptr, g_thunkPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC,
-             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    g_thunkPool = static_cast<u8*>(mmap(nullptr, g_thunkPoolSize,
+                                        PROT_READ | PROT_WRITE | PROT_EXEC,
+                                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     if (g_thunkPool == MAP_FAILED) {
       g_thunkPool = nullptr;
       LOG_ERROR("fex: guest-hook pool mmap failed");
@@ -1086,17 +1166,26 @@ uintptr_t makeGuestReturnHook(void *realTarget, u32 hookId, void *loggerFn,
   g_thunkNames[loggerIdx] = name ? name : "guesthook";
   const u32 magic = kHostThunkSyscallBase | loggerIdx;
 
-  constexpr size_t kWrapStride = 64; // emitted body is ~51 bytes
+  constexpr size_t kWrapStride = 64;  // emitted body is ~51 bytes
   if (g_thunkPoolUsed + kWrapStride > g_thunkPoolSize) {
     LOG_ERROR("fex: guest-hook pool exhausted");
     return 0;
   }
-  u8 *t = g_thunkPool + g_thunkPoolUsed;
+  u8* t = g_thunkPool + g_thunkPoolUsed;
   g_thunkPoolUsed += kWrapStride;
-  u8 *p = t;
-  auto emit = [&](std::initializer_list<u8> b) { for (u8 x : b) *p++ = x; };
-  auto emit32 = [&](u32 v) { std::memcpy(p, &v, 4); p += 4; };
-  auto emit64 = [&](u64 v) { std::memcpy(p, &v, 8); p += 8; };
+  u8* p = t;
+  auto emit = [&](std::initializer_list<u8> b) {
+    for (u8 x : b)
+      *p++ = x;
+  };
+  auto emit32 = [&](u32 v) {
+    std::memcpy(p, &v, 4);
+    p += 4;
+  };
+  auto emit64 = [&](u64 v) {
+    std::memcpy(p, &v, 8);
+    p += 8;
+  };
   // On entry: rsp%16==8; args rdi,rsi,rdx,rcx; [rsp]=caller return address.
   emit({0x57});                    // push rdi                 ; save a0
   emit({0x56});                    // push rsi                 ; save a1
@@ -1105,36 +1194,45 @@ uintptr_t makeGuestReturnHook(void *realTarget, u32 hookId, void *loggerFn,
   emit({0x48, 0x83, 0xEC, 0x08});  // sub rsp, 8               ; realign to 16
   emit({0x49, 0xBB});              // movabs r11, realTarget
   emit64(reinterpret_cast<u64>(realTarget));
-  emit({0x41, 0xFF, 0xD3});        // call r11                 ; run real fn -> rax=ret
+  emit(
+      {0x41, 0xFF, 0xD3});  // call r11                 ; run real fn -> rax=ret
   emit({0x48, 0x83, 0xC4, 0x08});  // add rsp, 8
-  emit({0x49, 0x89, 0xC1});        // mov r9, rax              ; logger arg6 = ret
-  emit({0x41, 0x58});              // pop r8                   ; a3 -> r8
-  emit({0x59});                    // pop rcx                  ; a2 -> rcx
-  emit({0x5A});                    // pop rdx                  ; a1 -> rdx
-  emit({0x5E});                    // pop rsi                  ; a0 -> rsi
-  emit({0xBF});                    // mov edi, imm32
-  emit32(hookId);                  //   = hookId
-  emit({0x50});                    // push rax                 ; preserve ret across syscall
-  emit({0x49, 0x89, 0xCA});        // mov r10, rcx             ; handler reads a2 from r10
-  emit({0xB8});                    // mov eax, imm32
-  emit32(magic);                   //   = kHostThunkSyscallBase|loggerIdx
-  emit({0x0F, 0x05});              // syscall                  ; -> loggerFn(rdi,rsi,rdx,rcx,r8,r9)
-  emit({0x58});                    // pop rax                  ; restore realTarget's ret
-  emit({0xC3});                    // ret                      ; return to caller with ret
+  emit({0x49, 0x89, 0xC1});  // mov r9, rax              ; logger arg6 = ret
+  emit({0x41, 0x58});        // pop r8                   ; a3 -> r8
+  emit({0x59});              // pop rcx                  ; a2 -> rcx
+  emit({0x5A});              // pop rdx                  ; a1 -> rdx
+  emit({0x5E});              // pop rsi                  ; a0 -> rsi
+  emit({0xBF});              // mov edi, imm32
+  emit32(hookId);            //   = hookId
+  emit({0x50});  // push rax                 ; preserve ret across syscall
+  emit({0x49, 0x89,
+        0xCA});   // mov r10, rcx             ; handler reads a2 from r10
+  emit({0xB8});   // mov eax, imm32
+  emit32(magic);  //   = kHostThunkSyscallBase|loggerIdx
+  emit(
+      {0x0F,
+       0x05});  // syscall                  ; -> loggerFn(rdi,rsi,rdx,rcx,r8,r9)
+  emit({0x58});  // pop rax                  ; restore realTarget's ret
+  emit({0xC3});  // ret                      ; return to caller with ret
   return reinterpret_cast<uintptr_t>(t);
 }
 
 // Wrap a guest function so a NATIVE lock is held across it: syscall(lockFn),
 // call realTarget, syscall(unlockFn). Fires before and after, unlike
-// makeGuestReturnHook; observes every call DELTA_RIPRACE could only sample.
-uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
-                               const char *name) {
+// MakeGuestReturnHook; observes every call DELTA_RIPRACE could only sample.
+uintptr_t MakeGuestLockWrapper(void* realTarget,
+                               void* lockFn,
+                               void* unlockFn,
+                               const char* name) {
   base::LockGuard lk(g_thunkMutex);
   if (!g_thunkPool) {
-    g_thunkPool = static_cast<u8 *>(
-        mmap(nullptr, g_thunkPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC,
-             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-    if (g_thunkPool == MAP_FAILED) { g_thunkPool = nullptr; return 0; }
+    g_thunkPool = static_cast<u8*>(mmap(nullptr, g_thunkPoolSize,
+                                        PROT_READ | PROT_WRITE | PROT_EXEC,
+                                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (g_thunkPool == MAP_FAILED) {
+      g_thunkPool = nullptr;
+      return 0;
+    }
     base::LockGuard rk(g_rangeMutex);
     g_ranges.push_back({reinterpret_cast<u64>(g_thunkPool), g_thunkPoolSize});
   }
@@ -1148,21 +1246,31 @@ uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
   g_thunkNames[unlockIdx] = name ? name : "guestunlock";
 
   constexpr size_t kStride = 64;  // emitted body is 46 bytes
-  if (g_thunkPoolUsed + kStride > g_thunkPoolSize) return 0;
-  u8 *t = g_thunkPool + g_thunkPoolUsed;
+  if (g_thunkPoolUsed + kStride > g_thunkPoolSize)
+    return 0;
+  u8* t = g_thunkPool + g_thunkPoolUsed;
   g_thunkPoolUsed += kStride;
-  u8 *p = t;
-  auto emit = [&](std::initializer_list<u8> b) { for (u8 x : b) *p++ = x; };
-  auto emit32 = [&](u32 v) { std::memcpy(p, &v, 4); p += 4; };
-  auto emit64 = [&](u64 v) { std::memcpy(p, &v, 8); p += 8; };
+  u8* p = t;
+  auto emit = [&](std::initializer_list<u8> b) {
+    for (u8 x : b)
+      *p++ = x;
+  };
+  auto emit32 = [&](u32 v) {
+    std::memcpy(p, &v, 4);
+    p += 4;
+  };
+  auto emit64 = [&](u64 v) {
+    std::memcpy(p, &v, 8);
+    p += 8;
+  };
   // Reached by `jmp` from the patched entry: [rsp] is still the original
   // caller's return address. Args are saved around the syscall (a C handler may
   // clobber every caller-saved register), pushes paired for call alignment.
-  emit({0x57});                    // push rdi        ; save a0
-  emit({0x56});                    // push rsi        ; save a1
-  emit({0x52});                    // push rdx        ; save a2
-  emit({0x51});                    // push rcx        ; save a3
-  emit({0xB8});                    // mov eax, imm32
+  emit({0x57});  // push rdi        ; save a0
+  emit({0x56});  // push rsi        ; save a1
+  emit({0x52});  // push rdx        ; save a2
+  emit({0x51});  // push rcx        ; save a3
+  emit({0xB8});  // mov eax, imm32
   emit32(kHostThunkSyscallBase | lockIdx);
   emit({0x0F, 0x05});              // syscall         ; -> lockFn()
   emit({0x59});                    // pop rcx
@@ -1174,75 +1282,83 @@ uintptr_t makeGuestLockWrapper(void *realTarget, void *lockFn, void *unlockFn,
   emit64(reinterpret_cast<u64>(realTarget));
   emit({0x41, 0xFF, 0xD3});        // call r11        ; the real function
   emit({0x48, 0x83, 0xC4, 0x08});  // add rsp, 8
-  emit({0x50});                    // push rax        ; preserve the return value
-  emit({0xB8});                    // mov eax, imm32
+  emit({0x50});  // push rax        ; preserve the return value
+  emit({0xB8});  // mov eax, imm32
   emit32(kHostThunkSyscallBase | unlockIdx);
-  emit({0x0F, 0x05});              // syscall         ; -> unlockFn()
-  emit({0x58});                    // pop rax
-  emit({0xC3});                    // ret
+  emit({0x0F, 0x05});  // syscall         ; -> unlockFn()
+  emit({0x58});        // pop rax
+  emit({0xC3});        // ret
   return reinterpret_cast<uintptr_t>(t);
 }
 
 // Callable copy of a guest function whose prologue an entry detour overwrites:
 // [relocated prologue] + [abs jmp to continueAt]. prologueLen must be
 // position-independent and cover >= 14 bytes on an instruction boundary.
-uintptr_t makeGuestTrampoline(const void *fnBytes, u32 prologueLen,
-                              const void *continueAt) {
+uintptr_t MakeGuestTrampoline(const void* fnBytes,
+                              u32 prologueLen,
+                              const void* continueAt) {
   base::LockGuard lk(g_thunkMutex);
   if (!g_thunkPool) {
-    g_thunkPool = static_cast<u8 *>(
-        mmap(nullptr, g_thunkPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC,
-             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-    if (g_thunkPool == MAP_FAILED) { g_thunkPool = nullptr; return 0; }
+    g_thunkPool = static_cast<u8*>(mmap(nullptr, g_thunkPoolSize,
+                                        PROT_READ | PROT_WRITE | PROT_EXEC,
+                                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (g_thunkPool == MAP_FAILED) {
+      g_thunkPool = nullptr;
+      return 0;
+    }
     base::LockGuard rk(g_rangeMutex);
     g_ranges.push_back({reinterpret_cast<u64>(g_thunkPool), g_thunkPoolSize});
   }
   const size_t need = prologueLen + 14;
   const size_t stride = (need + 15) & ~size_t(15);
-  if (g_thunkPoolUsed + stride > g_thunkPoolSize) return 0;
-  u8 *t = g_thunkPool + g_thunkPoolUsed;
+  if (g_thunkPoolUsed + stride > g_thunkPoolSize)
+    return 0;
+  u8* t = g_thunkPool + g_thunkPoolUsed;
   g_thunkPoolUsed += stride;
-  std::memcpy(t, fnBytes, prologueLen);           // relocated prologue
-  u8 *p = t + prologueLen;
-  *p++ = 0xFF; *p++ = 0x25;                        // jmp qword [rip+0]
-  u32 zero = 0; std::memcpy(p, &zero, 4); p += 4;
+  std::memcpy(t, fnBytes, prologueLen);  // relocated prologue
+  u8* p = t + prologueLen;
+  *p++ = 0xFF;
+  *p++ = 0x25;  // jmp qword [rip+0]
+  u32 zero = 0;
+  std::memcpy(p, &zero, 4);
+  p += 4;
   u64 cont = reinterpret_cast<u64>(continueAt);
   std::memcpy(p, &cont, 8);
   return reinterpret_cast<uintptr_t>(t);
 }
 
-u64 currentGuestRip() {
+u64 CurrentGuestRip() {
   return t_curThread ? t_curThread->CurrentFrame->State.rip : 0;
 }
 
 // Guest fs base of the thread on this host thread, so a native logger can
 // read guest TLS without emitting fs-relative code.
-u64 currentGuestFsBase() {
+u64 CurrentGuestFsBase() {
   return t_curThread ? t_curThread->CurrentFrame->State.fs_cached : 0;
 }
 
 // Every live thread's fs base, to survey guest TLS (the BPE worker ordinal at
 // [*(fsbase)-0x10] decides which job affinities are claimable).
-void guestThreadFsBases(base::Vector<u64> &out) {
+void GuestThreadFsBases(base::Vector<u64>& out) {
   out.clear();
   base::LockGuard lk(g_liveMutex);
   out.reserve(g_live.size());
-  for (auto &t : g_live)
+  for (auto& t : g_live)
     if (t.thread && t.thread->CurrentFrame)
       out.push_back(t.thread->CurrentFrame->State.fs_cached);
 }
 
-const u64 *currentGuestGregs() {
+const u64* CurrentGuestGregs() {
   return t_curThread ? t_curThread->CurrentFrame->State.gregs : nullptr;
 }
 
-bool guestGregsFromSignal(const void *ucontext, u64 out[16]) {
+bool GuestGregsFromSignal(const void* ucontext, u64 out[16]) {
 #if defined(__aarch64__)
   if (!ucontext || !t_curThread)
     return false;
-  const auto *uc = static_cast<const ucontext_t *>(ucontext);
+  const auto* uc = static_cast<const ucontext_t*>(ucontext);
   // Only meaningful inside JIT'd code; same test the RIP reconstruction uses.
-  if (!reconstructGuestRip(uc->uc_mcontext.pc))
+  if (!ReconstructGuestRip(uc->uc_mcontext.pc))
     return false;
   // FEX's arm64 backend keeps every guest GPR in a fixed host register
   // (x64::SRA), exact at the faulting pc unlike the block-boundary gregs; kSra
@@ -1259,23 +1375,25 @@ bool guestGregsFromSignal(const void *ucontext, u64 out[16]) {
 #endif
 }
 
-int faultingSyscall() { return t_inSyscall ? static_cast<int>(t_lastSyscall) : -1; }
+int FaultingSyscall() {
+  return t_inSyscall ? static_cast<int>(t_lastSyscall) : -1;
+}
 
-void dumpThreadTrace(void *fileStar) {
-  auto *f = static_cast<std::FILE *>(fileStar);
+void DumpThreadTrace(void* fileStar) {
+  auto* f = static_cast<std::FILE*>(fileStar);
   if (!f)
     return;
-  std::fprintf(f, "  --- last guest->host calls (this thread, oldest first) ---\n");
+  std::fprintf(
+      f, "  --- last guest->host calls (this thread, oldest first) ---\n");
   u32 count = t_tracePos < kTraceRing ? t_tracePos : kTraceRing;
   u32 start = t_tracePos - count;
   for (u32 i = 0; i < count; i++) {
-    const TraceEvt &e = t_trace[(start + i) % kTraceRing];
+    const TraceEvt& e = t_trace[(start + i) % kTraceRing];
     if (e.kind == 's') {
       std::fprintf(f, "  sc  %3u %-22s (%#llx,%#llx,%#llx,%#llx) -> %#llx\n",
-                   e.id, krnl::syscall_getname(e.id),
-                   (unsigned long long)e.a0, (unsigned long long)e.a1,
-                   (unsigned long long)e.a2, (unsigned long long)e.a3,
-                   (unsigned long long)e.ret);
+                   e.id, krnl::syscall_getname(e.id), (unsigned long long)e.a0,
+                   (unsigned long long)e.a1, (unsigned long long)e.a2,
+                   (unsigned long long)e.a3, (unsigned long long)e.ret);
     } else if (e.kind == 'h') {
       char cs[256];
       symRange(e.caller, cs, sizeof(cs));
@@ -1287,7 +1405,7 @@ void dumpThreadTrace(void *fileStar) {
   }
 }
 
-u64 reconstructGuestRip(u64 hostPC) {
+u64 ReconstructGuestRip(u64 hostPC) {
   if (!g_ctxPtr || !t_curThread)
     return 0;
   if (!g_ctxPtr->IsAddressInCodeBuffer(t_curThread, hostPC))
@@ -1295,20 +1413,19 @@ u64 reconstructGuestRip(u64 hostPC) {
   return g_ctxPtr->RestoreRIPFromHostPC(t_curThread, hostPC);
 }
 
-bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
+bool TryHandleJitSignal(int sig, void* infop, void* ucv) {
 #if defined(__aarch64__)
   if (!g_ctxPtr || !t_curThread || !ucv || !infop)
     return false;
-  auto *uc = static_cast<ucontext_t *>(ucv);
+  auto* uc = static_cast<ucontext_t*>(ucv);
 
   // Guest call/ret that do not pair up (fiber switches) drift FEX's call-ret
   // predictor into its guard pages; upstream FEX treats that as expected and
   // resets x25. Mirror it, or SotC's job system dies mid-LoadInitialWorld.
   if (sig == SIGSEGV && t_curThread->CallRetStackBase) {
     const u64 fa =
-        reinterpret_cast<u64>(static_cast<siginfo_t *>(infop)->si_addr);
-    const u64 crBase =
-        reinterpret_cast<u64>(t_curThread->CallRetStackBase);
+        reinterpret_cast<u64>(static_cast<siginfo_t*>(infop)->si_addr);
+    const u64 crBase = reinterpret_cast<u64>(t_curThread->CallRetStackBase);
     constexpr size_t kCrSize =
         FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
     constexpr size_t kPage = 0x1000;
@@ -1318,8 +1435,8 @@ bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
       u32 c = n.fetch_add(1);
       if (c < 8 || (c & (c - 1)) == 0)  // first few, then powers of two
         BASE_LOGI("fex",
-                  "callret predictor over/underflow #{} reset (fault {:#x})",
-                  c, (unsigned long long)fa);
+                  "callret predictor over/underflow #{} reset (fault {:#x})", c,
+                  (unsigned long long)fa);
       return true;
     }
   }
@@ -1331,15 +1448,16 @@ bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
   const u64 pc = uc->uc_mcontext.pc;
   if (!g_ctxPtr->IsAddressInCodeBuffer(t_curThread, pc))
     return false;
-  if (static_cast<siginfo_t *>(infop)->si_code != BUS_ADRALN)
+  if (static_cast<siginfo_t*>(infop)->si_code != BUS_ADRALN)
     return false;
   auto result = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
-      t_curThread, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier,
-      pc, reinterpret_cast<u64 *>(&uc->uc_mcontext.regs[0]));
+      t_curThread,
+      FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, pc,
+      reinterpret_cast<u64*>(&uc->uc_mcontext.regs[0]));
   // A backpatched atomic stops being atomic (HalfBarrier); log each site once.
   static base::Mutex logM;
   static base::Set<u64> seenRips;
-  const u64 grip = reconstructGuestRip(pc);
+  const u64 grip = ReconstructGuestRip(pc);
   {
     base::LockGuard<base::Mutex> lk(logM);
     if (seenRips.insert(grip).second)
@@ -1350,12 +1468,14 @@ bool tryHandleJitSignal(int sig, void *infop, void *ucv) {
   uc->uc_mcontext.pc = pc + result.value_or(0);
   return result.has_value();
 #else
-  (void)sig; (void)infop; (void)ucv;
+  (void)sig;
+  (void)infop;
+  (void)ucv;
   return false;
 #endif
 }
 
-} // namespace cpu
+}  // namespace cpu
 
 // Guest fs base lives in the current FEXCore thread's CPUState; called via
 // sys_sysarch(AMD64_SET_FSBASE) and on thread spawn.
@@ -1367,5 +1487,4 @@ void setThreadFsBase(u64 v) {
 u64 threadFsBase() {
   return cpu::t_curThread ? cpu::t_curThread->CurrentFrame->State.fs_cached : 0;
 }
-} // namespace krnl
-
+}  // namespace krnl
