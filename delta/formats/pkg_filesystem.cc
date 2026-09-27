@@ -44,7 +44,7 @@ DELTA_OPTION(const char*, kQarSelftest, "DELTA_QAR_SELFTEST", nullptr);
 DELTA_OPTION(bool, kPkgReadTrace, "DELTA_PKGREAD_TRACE", false);
 }  // namespace
 
-namespace vfs {
+namespace formats {
 namespace {
 // Public fake-pkg keysets (from LibOrbisPkg): RSA-2048 modulus + private exp.
 static const char* kNFake =
@@ -773,4 +773,4 @@ i64 PkgFilesystem::ReadPkgEntry(u32 entry_id, base::Vector<u8>& out) {
     return -1;
   return impl_->ReadEntry(entry_id, out) ? static_cast<i64>(out.size()) : -1;
 }
-}  // namespace vfs
+}  // namespace formats

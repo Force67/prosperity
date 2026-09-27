@@ -14,7 +14,7 @@
 #include "base/memory/unique_pointer.h"
 #include "base/strings/xstring.h"
 
-namespace vfs {
+namespace formats {
 struct Ufs2Impl;
 
 // Read-only reader for a UFS2 (FreeBSD FFSv2) image, as produced for PS5 game
@@ -55,4 +55,4 @@ class Ufs2Filesystem {
  private:
   base::UniquePointer<Ufs2Impl> impl_;
 };
-}  // namespace vfs
+}  // namespace formats

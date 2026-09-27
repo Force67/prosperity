@@ -28,7 +28,7 @@ int main(int argc, char **argv) {
   }
 
   const auto t0 = base::TimeTicks::Now();
-  vfs::ArchiveFilesystem fs((base::String(argv[1])));
+  formats::ArchiveFilesystem fs((base::String(argv[1])));
   const auto t1 = base::TimeTicks::Now();
   if (!fs.Valid()) {
     std::printf("not a container we can read\n");

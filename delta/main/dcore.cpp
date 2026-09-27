@@ -132,7 +132,7 @@ void deltaCore::boot(const base::String &xdir) {
   // A game left inside the container it was distributed in (.rar, .zip). The
   // tree inside is an ordinary app dump; we just decompress it on demand rather
   // than making the host find room for the extracted copy.
-  const bool isArchive = !isPkg && !isFfpkg && vfs::IsArchivePath(xdir.c_str());
+  const bool isArchive = !isPkg && !isFfpkg && formats::IsArchivePath(xdir.c_str());
   // A raw app dump: the extracted /app0 tree itself, identified by its console
   // metadata. Host-mounted rather than read through an image reader.
   const base::String appRoot(path.c_str());

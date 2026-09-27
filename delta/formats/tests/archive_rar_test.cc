@@ -23,15 +23,15 @@ namespace {
 const char kArchive[] = "/home/vince/Documents/dumps/PS5/PPSA01342 (1.05).rar";
 
 struct Ctx {
-  base::UniquePointer<vfs::ArchiveBackend> backend;
-  base::Vector<vfs::ArchiveEntry> entries;
+  base::UniquePointer<formats::ArchiveBackend> backend;
+  base::Vector<formats::ArchiveEntry> entries;
   double index_seconds = 0;
 };
 
 Ctx* ctx() {
   static Ctx c = [] {
     Ctx c;
-    c.backend = vfs::OpenRarBackend(kArchive);
+    c.backend = formats::OpenRarBackend(kArchive);
     if (c.backend) {
       auto t0 = base::TimeTicks::Now();
       if (!c.backend->Index(c.entries))
@@ -43,7 +43,7 @@ Ctx* ctx() {
   return &c;
 }
 
-const vfs::ArchiveEntry* Find(const char* path) {
+const formats::ArchiveEntry* Find(const char* path) {
   for (auto& e : ctx()->entries)
     if (e.path == path)
       return &e;
@@ -105,7 +105,7 @@ TEST(ArchiveRar, EbootCrc) {
 // same bytes the reference unrar produces for that offset.
 TEST(ArchiveRar, RangedReadMatchesUnrar) {
   REQUIRE_ARCHIVE();
-  const vfs::ArchiveEntry* e = nullptr;
+  const formats::ArchiveEntry* e = nullptr;
   for (auto& c : ctx()->entries)
     if (c.method != 0 && c.size > 100u << 20 && c.size < 1u << 30 &&
         (!e || c.size < e->size))
@@ -149,7 +149,7 @@ TEST(ArchiveRar, RangedReadMatchesUnrar) {
 // stream this would be quadratic and visibly slow down chunk over chunk.
 TEST(ArchiveRar, SequentialResume) {
   REQUIRE_ARCHIVE();
-  const vfs::ArchiveEntry* e = nullptr;
+  const formats::ArchiveEntry* e = nullptr;
   for (auto& c : ctx()->entries)
     if (c.method != 0 && (!e || c.size > e->size))
       e = &c;

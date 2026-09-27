@@ -19,7 +19,7 @@
 #include "base/math/value_bounds.h"
 #include "base/strings/xstring.h"
 
-namespace vfs {
+namespace formats {
 namespace {
 struct FileNode {
   u32 id;
@@ -400,4 +400,4 @@ base::String PupReader::ExtractAllPS5(const base::String& out_dir) {
       "full. SELF modules inside those images are still encrypted.\n";
   return summary;
 }
-}  // namespace vfs
+}  // namespace formats

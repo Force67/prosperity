@@ -109,7 +109,7 @@ bool smodule::fromVfs(const base::String &guestPath) {
                    (static_cast<u32>(src[2]) << 16) |
                    (static_cast<u32>(src[3]) << 24);
   if (isSelfMagic(magic)) {
-    elfImg = crypto::Self2elf(src, srcSize);
+    elfImg = formats::FselfToElf(src, srcSize);
     if (elfImg.empty()) {
       LOG_ERROR("smodule: self2elf failed for {}", guestPath.c_str());
       return false;

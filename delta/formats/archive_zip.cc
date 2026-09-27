@@ -29,7 +29,7 @@
 #include "io/file.h"
 #include "logger/logger.h"
 
-namespace vfs {
+namespace formats {
 namespace {
 
 inline u16 Rd16(const u8* p) {
@@ -411,4 +411,4 @@ base::UniquePointer<ArchiveBackend> OpenZipBackend(const base::String& path) {
   return b;
 }
 
-}  // namespace vfs
+}  // namespace formats

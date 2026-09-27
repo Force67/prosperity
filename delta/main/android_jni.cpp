@@ -87,7 +87,7 @@ constexpr u32 kEntryIcon0Png = 0x1200;
 // PFS we don't fully mount.
 bool readPkgMeta(const char *pkgPath, u32 entryId,
                  base::Vector<u8> &out) {
-  vfs::PkgFilesystem fs((base::String(pkgPath)));
+  formats::PkgFilesystem fs((base::String(pkgPath)));
   return fs.readPkgEntry(entryId, out) > 0;
 }
 
@@ -138,7 +138,7 @@ JNIEXPORT jstring JNICALL Java_com_prosperity_ps4_NativeBridge_pupExtract(
   const char *pup = env->GetStringUTFChars(jpup, nullptr);
   const char *out = env->GetStringUTFChars(jout, nullptr);
   base::String summary;
-  vfs::PupReader r((base::String(pup)));
+  formats::PupReader r((base::String(pup)));
   if (!r.load()) {
     summary = "Not a recognized PUP container (magic mismatch). Retail firmware "
               "is encrypted and unsupported here; import a pre-extracted .sprx "

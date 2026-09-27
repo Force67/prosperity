@@ -179,7 +179,7 @@ base::Vector<u8> Pattern(size_t n, u32 seed) {
   return v;
 }
 
-const vfs::ArchiveEntry* Find(const base::Vector<vfs::ArchiveEntry>& es,
+const formats::ArchiveEntry* Find(const base::Vector<formats::ArchiveEntry>& es,
                               const char* path) {
   for (const auto& e : es)
     if (e.path == path)
@@ -187,7 +187,7 @@ const vfs::ArchiveEntry* Find(const base::Vector<vfs::ArchiveEntry>& es,
   return nullptr;
 }
 
-base::Vector<u8> ReadAll(vfs::ArchiveBackend& b, const vfs::ArchiveEntry& e) {
+base::Vector<u8> ReadAll(formats::ArchiveBackend& b, const formats::ArchiveEntry& e) {
   base::Vector<u8> v(e.size);
   EXPECT_EQ(b.ExtractRange(e, v.data(), 0, e.size), static_cast<i64>(e.size));
   return v;
@@ -204,11 +204,11 @@ TEST(ArchiveZip, DeflateRoundTrip) {
   w.Finish("trailing archive comment to force the EOCD back-scan");
   auto path = WriteTemp(w.out, "zt_deflate.zip");
 
-  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
+  auto z = formats::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
   EXPECT_STREQ(z->Name(), "zip");
 
-  base::Vector<vfs::ArchiveEntry> es;
+  base::Vector<formats::ArchiveEntry> es;
   ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 3u);  // the directory row is skipped
 
@@ -240,9 +240,9 @@ TEST(ArchiveZip, StoredRangedRead) {
   w.Finish();
   auto path = WriteTemp(w.out, "zt_stored.zip");
 
-  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
+  auto z = formats::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
-  base::Vector<vfs::ArchiveEntry> es;
+  base::Vector<formats::ArchiveEntry> es;
   ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 1u);
   EXPECT_EQ(es[0].method, 0u);
@@ -263,9 +263,9 @@ TEST(ArchiveZip, Zip64) {
   w.Finish();
   auto path = WriteTemp(w.out, "zt_zip64.zip");
 
-  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
+  auto z = formats::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
-  base::Vector<vfs::ArchiveEntry> es;
+  base::Vector<formats::ArchiveEntry> es;
   ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 2u);
   auto* ea = Find(es, "big/a.bin");
@@ -286,9 +286,9 @@ TEST(ArchiveZip, SkipsUnsupportedMethod) {
   w.Finish();
   auto path = WriteTemp(w.out, "zt_method.zip");
 
-  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
+  auto z = formats::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
-  base::Vector<vfs::ArchiveEntry> es;
+  base::Vector<formats::ArchiveEntry> es;
   ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 1u);
   EXPECT_EQ(es[0].path, "good.bin");
@@ -298,7 +298,7 @@ TEST(ArchiveZip, SkipsUnsupportedMethod) {
 TEST(ArchiveZip, NotAZip) {
   auto junk = Pattern(4096, 7);
   auto path = WriteTemp(junk, "zt_junk.bin");
-  EXPECT_FALSE(vfs::OpenZipBackend(base::String(path.c_str())));
+  EXPECT_FALSE(formats::OpenZipBackend(base::String(path.c_str())));
   std::remove(path.c_str());
 }
 
@@ -313,9 +313,9 @@ TEST(ArchiveZip, StreamingResumesCursor) {
   w.Finish();
   auto path = WriteTemp(w.out, "zt_stream.zip");
 
-  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
+  auto z = formats::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
-  base::Vector<vfs::ArchiveEntry> es;
+  base::Vector<formats::ArchiveEntry> es;
   ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 1u);
 
@@ -354,9 +354,9 @@ TEST(ArchiveZip, CorruptCrcDetected) {
   w.out[w.cd_off + 16] ^= 0xFF;  // crc field of the first central row
   auto path = WriteTemp(w.out, "zt_badcrc.zip");
 
-  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
+  auto z = formats::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
-  base::Vector<vfs::ArchiveEntry> es;
+  base::Vector<formats::ArchiveEntry> es;
   ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 1u);
   base::Vector<u8> buf(es[0].size);
@@ -375,9 +375,9 @@ TEST(ArchiveZip, CorruptStreamDetected) {
     w.out[30 + 5 + off] ^= 0x5A;
   auto path = WriteTemp(w.out, "zt_badstream.zip");
 
-  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
+  auto z = formats::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
-  base::Vector<vfs::ArchiveEntry> es;
+  base::Vector<formats::ArchiveEntry> es;
   ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 1u);
   base::Vector<u8> buf(es[0].size);
@@ -392,9 +392,9 @@ TEST(ArchiveZip, ExternalArchive) {
   const char* p = getenv("DELTA_ZIPTEST_FILE");
   if (!p)
     GTEST_SKIP() << "set DELTA_ZIPTEST_FILE to a zip to run";
-  auto z = vfs::OpenZipBackend(base::String(p));
+  auto z = formats::OpenZipBackend(base::String(p));
   ASSERT_TRUE(z);
-  base::Vector<vfs::ArchiveEntry> es;
+  base::Vector<formats::ArchiveEntry> es;
   ASSERT_TRUE(z->Index(es));
   ASSERT_FALSE(es.empty());
   base::Vector<u8> buf(1 << 20);

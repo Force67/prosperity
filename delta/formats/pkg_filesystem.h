@@ -14,7 +14,7 @@
 #include "base/memory/unique_pointer.h"
 #include "base/strings/xstring.h"
 
-namespace vfs {
+namespace formats {
 struct PkgImpl;
 
 // On-demand fake-signed PS4 .pkg reader: recover the EKPFS, decrypt the PFS,
@@ -60,4 +60,4 @@ class PkgFilesystem {
  private:
   base::UniquePointer<PkgImpl> impl_;
 };
-}  // namespace vfs
+}  // namespace formats

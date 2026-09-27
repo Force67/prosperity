@@ -31,7 +31,7 @@ namespace {
 DELTA_OPTION(bool, kUfsDbg, "DELTA_UFS_DBG", false);
 }  // namespace
 
-namespace vfs {
+namespace formats {
 namespace {
 constexpr u64 kSblockUfs2 = 65536;  // SBLOCK_UFS2
 constexpr u32 kUfs2Magic = 0x19540119u;
@@ -261,4 +261,4 @@ void Ufs2Filesystem::Paths(base::Vector<base::String>& out) const {
   for (const auto& kv : impl_->files)
     out.push_back(kv.first);
 }
-}  // namespace vfs
+}  // namespace formats

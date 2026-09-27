@@ -15,8 +15,8 @@
 #include "elf_types.h"
 #include "sce_types.h"
 
-namespace crypto {
-base::Vector<u8> Self2elf(const u8* data, size_t size) {
+namespace formats {
+base::Vector<u8> FselfToElf(const u8* data, size_t size) {
   base::Vector<u8> out;
 
   if (size < sizeof(SELFHeader))
@@ -89,4 +89,4 @@ base::Vector<u8> Self2elf(const u8* data, size_t size) {
 
   return out;
 }
-}  // namespace crypto
+}  // namespace formats

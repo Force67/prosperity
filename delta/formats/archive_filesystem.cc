@@ -49,7 +49,7 @@ DELTA_OPTION(bool,
              "always re-walk the container instead of reading the index cache");
 }  // namespace
 
-namespace vfs {
+namespace formats {
 namespace {
 
 constexpr char kIndexMagic[8] = {'D', 'A', 'R', 'I', 'D', 'X', '0', '1'};
@@ -475,4 +475,4 @@ bool IsArchivePath(const char* path) {
   return false;
 }
 
-}  // namespace vfs
+}  // namespace formats

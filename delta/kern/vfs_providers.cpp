@@ -203,9 +203,9 @@ public:
 
 private:
   struct PkgFile : krnl::vfs::VirtualFile {
-    vfs::PkgFilesystem *fs;
-    vfs::PkgFilesystem::Node node;
-    PkgFile(vfs::PkgFilesystem *f, const vfs::PkgFilesystem::Node &n)
+    formats::PkgFilesystem *fs;
+    formats::PkgFilesystem::Node node;
+    PkgFile(formats::PkgFilesystem *f, const formats::PkgFilesystem::Node &n)
         : fs(f), node(n) {}
     i64 read(void *buf, i64 off, i64 len) override {
       return fs->Read(node, buf, off, len);
@@ -213,7 +213,7 @@ private:
     i64 size() override { return static_cast<i64>(node.size); }
   };
 
-  vfs::PkgFilesystem fs_;
+  formats::PkgFilesystem fs_;
 };
 
 // Bridges a UFS2 (*.ffpkg) game backup into the kernel VFS. The files inside are
@@ -300,9 +300,9 @@ private:
   }
 
   struct Ufs2File : krnl::vfs::VirtualFile {
-    vfs::Ufs2Filesystem *fs;
-    vfs::Ufs2Filesystem::Node node;
-    Ufs2File(vfs::Ufs2Filesystem *f, const vfs::Ufs2Filesystem::Node &n)
+    formats::Ufs2Filesystem *fs;
+    formats::Ufs2Filesystem::Node node;
+    Ufs2File(formats::Ufs2Filesystem *f, const formats::Ufs2Filesystem::Node &n)
         : fs(f), node(n) {}
     i64 read(void *buf, i64 off, i64 len) override {
       return fs->Read(node, buf, off, len);
@@ -310,7 +310,7 @@ private:
     i64 size() override { return static_cast<i64>(node.size); }
   };
 
-  vfs::Ufs2Filesystem fs_;
+  formats::Ufs2Filesystem fs_;
 };
 
 // Bridges a plain .rar/.zip of a game dump into the kernel VFS. Same shape as
@@ -336,7 +336,7 @@ public:
     return true;
   }
   bool list(const char *rel, base::Vector<krnl::vfs::DirEntry> &out) override {
-    base::Vector<vfs::ArchiveFilesystem::Child> children;
+    base::Vector<formats::ArchiveFilesystem::Child> children;
     if (!fs_.List(rel, children))
       return false;
     for (auto &c : children)
@@ -392,10 +392,10 @@ private:
   }
 
   struct ArchiveFile : krnl::vfs::VirtualFile {
-    vfs::ArchiveFilesystem *fs;
-    vfs::ArchiveFilesystem::Node node;
-    ArchiveFile(vfs::ArchiveFilesystem *f,
-                const vfs::ArchiveFilesystem::Node &n)
+    formats::ArchiveFilesystem *fs;
+    formats::ArchiveFilesystem::Node node;
+    ArchiveFile(formats::ArchiveFilesystem *f,
+                const formats::ArchiveFilesystem::Node &n)
         : fs(f), node(n) {}
     i64 read(void *buf, i64 off, i64 len) override {
       return fs->Read(node, buf, off, len);
@@ -403,7 +403,7 @@ private:
     i64 size() override { return static_cast<i64>(node.size); }
   };
 
-  vfs::ArchiveFilesystem fs_;
+  formats::ArchiveFilesystem fs_;
 };
 
 }  // namespace

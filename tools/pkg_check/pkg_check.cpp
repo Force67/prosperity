@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  vfs::PkgFilesystem fs((base::String(argv[1])));
+  formats::PkgFilesystem fs((base::String(argv[1])));
   if (!fs.Valid()) {
     std::printf("invalid / unsupported pkg\n");
     return 1;
@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
   if (node) {
     base::Vector<u8> buf(node->size);
     fs.Read(*node, buf.data(), 0, static_cast<i64>(node->size));
-    auto elf = crypto::Self2elf(buf.data(), buf.size());
+    auto elf = formats::FselfToElf(buf.data(), buf.size());
     if (!elf.empty()) {
       const char *out = argc > 2 ? argv[2] : "eboot_native.elf";
       io::File f(base::String(out), io::FileMode::kWrite);

@@ -17,7 +17,7 @@ namespace io {
 class File;
 }
 
-namespace vfs {
+namespace formats {
 struct PupHeader {
   u32 magic;
   u32 unk;
@@ -90,4 +90,4 @@ class PupReader {
   base::Vector<PupEntry> entries_;
   bool is_ps5_ = false;
 };
-}  // namespace vfs
+}  // namespace formats

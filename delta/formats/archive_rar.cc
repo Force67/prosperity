@@ -39,7 +39,7 @@
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
 
-namespace vfs {
+namespace formats {
 namespace {
 
 // Decode-ahead per session. Must comfortably exceed the largest single
@@ -508,4 +508,4 @@ base::UniquePointer<ArchiveBackend> OpenRarBackend(const base::String& path) {
   return base::MakeUnique<RarBackend>(path, base::move(path_w));
 }
 
-}  // namespace vfs
+}  // namespace formats

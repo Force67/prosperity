@@ -15,7 +15,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  vfs::PupReader r((base::String(argv[1])));
+  formats::PupReader r((base::String(argv[1])));
   if (!r.Load()) {
     std::printf("not a recognized PUP container (encrypted or bad magic)\n");
     return 1;

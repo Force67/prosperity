@@ -1,4 +1,4 @@
-// Synthetic SELF -> ELF round trip for crypto::Self2elf. Mirrors the layout the
+// Synthetic SELF -> ELF round trip for formats::FselfToElf. Mirrors the layout the
 // real fake-pkg eboots use, without needing a pkg fixture.
 #include <cstring>
 #include "base/arch.h"
@@ -44,7 +44,7 @@ TEST(Fself, RebuildsElfFromFakeSelf) {
   const u8 payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
   std::memcpy(buf.data() + 0x200, payload, sizeof(payload));
 
-  auto elf = crypto::Self2elf(buf.data(), buf.size());
+  auto elf = formats::FselfToElf(buf.data(), buf.size());
   ASSERT_FALSE(elf.empty());
   ASSERT_EQ(elf.size(), 0x108u);  // phdr offset 0x100 + filesz 8
 
@@ -64,5 +64,5 @@ TEST(Fself, RejectsNonSelf) {
   base::Vector<u8> buf(0x100, 0);
   u32 not_magic = 0xDEADBEEF;
   std::memcpy(buf.data(), &not_magic, 4);
-  EXPECT_TRUE(crypto::Self2elf(buf.data(), buf.size()).empty());
+  EXPECT_TRUE(formats::FselfToElf(buf.data(), buf.size()).empty());
 }

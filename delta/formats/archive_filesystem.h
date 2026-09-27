@@ -14,7 +14,7 @@
 #include "base/memory/unique_pointer.h"
 #include "base/strings/xstring.h"
 
-namespace vfs {
+namespace formats {
 struct ArchiveImpl;
 
 // On-demand reader for a game shipped as a plain compressed container (.rar,
@@ -76,4 +76,4 @@ class ArchiveFilesystem {
 // checks the name, not the contents.
 bool IsArchivePath(const char* path);
 
-}  // namespace vfs
+}  // namespace formats

@@ -14,7 +14,7 @@
 #include "base/memory/unique_pointer.h"
 #include "base/strings/xstring.h"
 
-namespace vfs {
+namespace formats {
 
 // One file inside a container archive, per a backend's index. offset/method are
 // backend-private resume bookkeeping AND the on-disk index cache's content, so
@@ -58,4 +58,4 @@ struct ArchiveBackend {
 base::UniquePointer<ArchiveBackend> OpenRarBackend(const base::String& path);
 base::UniquePointer<ArchiveBackend> OpenZipBackend(const base::String& path);
 
-}  // namespace vfs
+}  // namespace formats

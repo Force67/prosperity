@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  vfs::Ufs2Filesystem fs((base::String(argv[1])));
+  formats::Ufs2Filesystem fs((base::String(argv[1])));
   if (!fs.Valid()) {
     std::printf("not a valid UFS2 image (bad superblock)\n");
     return 1;
