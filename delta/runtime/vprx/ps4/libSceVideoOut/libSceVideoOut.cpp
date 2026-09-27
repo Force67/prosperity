@@ -14,7 +14,7 @@
 
 #include <base/logging.h>
 
-#include "gfx/gfx.h"
+#include "host/window.h"
 #include "gpu/ps4/cmd_processor.h"
 #include "kern/proc.h"
 #include "kern/lv2/sys_event.h"
@@ -176,8 +176,8 @@ bool ensureGfx(u32 w, u32 h) {
   st = g_gfxState.load();
   if (st != 0)
     return st == 1;
-  if (!gfx::init("prosperity", w, h)) {
-    BASE_LOGI("videoout", "gfx::init FAILED (no window this run)");
+  if (!host::init("prosperity", w, h)) {
+    BASE_LOGI("videoout", "host::init FAILED (no window this run)");
     g_gfxState.store(2);
     return false;
   }
@@ -212,9 +212,9 @@ void presentScanout() {
   }
   if (!fb || !ensureGfx(w, h))
     return;
-  auto pf = (fmt & 0x2200u) ? gfx::PixelFormat::rgba8 : gfx::PixelFormat::bgra8;
-  gfx::present(fb, w, h, pitch * 4, pf);
-  gfx::pumpEvents();
+  auto pf = (fmt & 0x2200u) ? host::PixelFormat::rgba8 : host::PixelFormat::bgra8;
+  host::present(fb, w, h, pitch * 4, pf);
+  host::pumpEvents();
 }
 
 base::Atomic<bool> g_flipPumpStarted{false};
@@ -231,7 +231,7 @@ void startFlipPump() {
     for (;;) {
       base::SleepForMicroseconds(16667);
       // NB: do NOT present here. The window is driven solely by the GPU renderer on the
-      // submit thread; gfx has one swapchain/command buffer and a present from this pump
+      // submit thread; the window has one swapchain/command buffer and a present from this pump
       // thread races it, intermittently deadlocking Vulkan. This pump only synthesizes
       // flip completion (labels + events); the scanout buffer is never CPU-written.
       u64 c = g_port.flipCount.fetch_add(1) + 1;
@@ -272,7 +272,7 @@ int PS4ABI sceVideoOutOpen(int userId, int busType, int index, const void *param
   base::LockGuard<base::Mutex> lk(g_mtx);
   g_port.open = true;
   // bring the window up early so the user sees something while the game inits.
-  // (do it outside the lock-sensitive gfx path on first flip if init is heavy)
+  // (do it outside the lock-sensitive window path on first flip if init is heavy)
   return kHandleBase;
 }
 
@@ -440,9 +440,9 @@ int PS4ABI sceVideoOutSubmitFlip(int handle, int bufferIndex, int flipMode,
   // guest address is directly readable on the host). Until the Gnm->Vulkan
   // path detiles real GPU output this is the linear scanout contents.
   if (fb && ensureGfx(w, h)) {
-    auto pf = (fmt & 0x2200u) ? gfx::PixelFormat::rgba8 : gfx::PixelFormat::bgra8;
-    gfx::present(fb, w, h, pitch * 4, pf);
-    gfx::pumpEvents();
+    auto pf = (fmt & 0x2200u) ? host::PixelFormat::rgba8 : host::PixelFormat::bgra8;
+    host::present(fb, w, h, pitch * 4, pf);
+    host::pumpEvents();
   }
 
   // flip "completes" immediately: bump the count and wake the flip equeue.

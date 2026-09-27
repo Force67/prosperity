@@ -5,7 +5,7 @@
 
 // Where the audio daemon sends decoded PCM.
 //
-// The device itself is an SDL3 stream and lives in delta_gfx, which is the
+// The device itself is an SDL3 stream and lives in delta_host, which is the
 // module that links SDL. kern may not name it, so the daemon is handed these
 // four operations by the composition root instead. Unset (the default in a
 // test or a headless tool) means the daemon runs and discards, which is what

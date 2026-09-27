@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "gfx/gfx.h"
+#include "host/window.h"
 #include <options/options.h>
 #include <base/containers/vector.h>
 
@@ -19,12 +19,12 @@ int main() {
   // otherwise runs until the window is closed.
   const u32 maxFrames = kTestFrames;
 
-  if (!gfx::init("PS4Delta gfx test", 960, 540))
+  if (!host::init("PS4Delta gfx test", 960, 540))
     return 1;
 
   base::Vector<u32> fb((size_t)W * H);
   u32 t = 0;
-  while (gfx::pumpEvents()) {
+  while (host::pumpEvents()) {
     if (maxFrames && t >= maxFrames) {
       std::printf("[gfx_test] presented %u frames OK\n", t);
       break;
@@ -39,9 +39,9 @@ int main() {
             0xff000000u | ((u32)b << 16) | ((u32)gch << 8) | r;
       }
     }
-    gfx::present(fb.data(), W, H, 0, gfx::PixelFormat::rgba8);
+    host::present(fb.data(), W, H, 0, host::PixelFormat::rgba8);
     t++;
   }
-  gfx::shutdown();
+  host::shutdown();
   return 0;
 }

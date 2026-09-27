@@ -2,14 +2,13 @@
  * PS4Delta : PS4 emulation and research project
  *
  * On-screen Vulkan present for the Android app (DELTA_ANDROID_APP). Same scheme
- * as the desktop gfx_vk.cpp (CPU framebuffer -> staging buffer -> device image
+ * as the desktop window_sdl.cc (CPU framebuffer -> staging buffer -> device image
  * -> blit into the acquired swapchain image -> present), but the window is an
  * ANativeWindow handed in by the NativeActivity loop (android_main) and the
  * surface comes from VK_KHR_android_surface. All Vulkan calls run on the guest
  * renderer thread (the only caller of ensure()/present()); android_main only
  * publishes the window handle and the touch-derived pad state.
  */
-#if defined(__ANDROID__) && defined(DELTA_ANDROID_APP)
 
 #include "base/arch.h"
 #include <cmath>
@@ -22,8 +21,8 @@
 #include <android/native_window.h>
 #include <vulkan/vulkan.h>
 
-#include "gfx.h"
-#include "gfx_android.h"
+#include "window.h"
+#include "window_android.h"
 #include <base/algorithm.h>
 #include <base/atomic.h>
 #include <base/containers/array.h>
@@ -33,7 +32,7 @@
 #include <base/threading/lock_guard.h>
 #include <base/threading/mutex.h>
 
-namespace gfx {
+namespace host {
 namespace {
 
 #define VK_CHECK(expr)                                                         \
@@ -686,7 +685,7 @@ void teardown() {
 
 } // namespace
 
-// --- public gfx API ---------------------------------------------------------
+// --- public window API ------------------------------------------------------
 
 bool init(const char *, u32, u32) {
   if (available())
@@ -918,6 +917,4 @@ void setAndroidTouches(const Touch *pts, int count) {
     g_touches[i] = pts[i];
 }
 
-} // namespace gfx
-
-#endif // __ANDROID__ && DELTA_ANDROID_APP
+} // namespace host

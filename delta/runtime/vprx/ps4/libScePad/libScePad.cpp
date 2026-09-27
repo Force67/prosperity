@@ -12,7 +12,7 @@
 
 #include <base/logging.h>
 
-#include "gfx/gfx.h"
+#include "host/window.h"
 #include <cctype>
 #include <options/options.h>
 #include <base/atomic.h>
@@ -295,7 +295,7 @@ u32 autoSkipButtons() {
   // pause menu) and keep only an occasional Cross to dismiss popups. Never Circle/
   // Down so nothing cancels or moves off the default path. The gameplay signal
   // latches, so a brief pause flash won't restart the mashing.
-  if (gfx::inGameplay())
+  if (host::inGameplay())
     return 0;
   // DELTA_PAD_AUTOSKIP_STOP=N: stop after N reads; an idle-triggered attract DEMO
   // (Doom64) only plays once input goes quiet, so login passes then the title idles.
@@ -351,7 +351,7 @@ u32 autoSkipButtons() {
   return 0;
 }
 
-// Adapter from the gfx pad (maps the SDL window keyboard; the Android app maps
+// Adapter from the host pad (maps the SDL window keyboard; the Android app maps
 // the on-screen touch gamepad). On by default for interactive play; set
 // DELTA_PAD_KEYBOARD=0 to disable. DELTA_PAD_AUTOSKIP overrides it.
 #if defined(DELTA_ANDROID_APP)
@@ -480,10 +480,10 @@ void fillPadState(PadData *d) {
   std::memset(d, 0, sizeof(*d));
   u32 buttons = 0;
   u8 lx = 128, ly = 128, rx = 128, ry = 128;
-  gfx::PadKeys k;
+  host::PadKeys k;
   if (kPadAutoskip) {
     buttons = autoSkipButtons();
-  } else if (kPadKeyboard && gfx::pollKeyboardPad(k)) {
+  } else if (kPadKeyboard && host::pollKeyboardPad(k)) {
     if (k.cross) buttons |= kCross;
     if (k.circle) buttons |= kCircle;
     if (k.square) buttons |= kSquare;
@@ -504,7 +504,7 @@ void fillPadState(PadData *d) {
   // headless run visits multiple rooms (to verify rendering beyond the start room).
   // Cycles direction every ~150 reads (up, right, down, left) on the left stick.
   static u64 g_firstGameplaySeq = 0;
-  if (kPadExplore && kPadAutoskip && gfx::inGameplay()) {
+  if (kPadExplore && kPadAutoskip && host::inGameplay()) {
     if (!g_firstGameplaySeq) g_firstGameplaySeq = g_readSeq;
     u64 since = g_readSeq - g_firstGameplaySeq;
     // Walk up into the adjacent room and stop near its centre (a short burst), then
@@ -781,7 +781,7 @@ int scePadSetTiltCorrectionState() {
 struct ScePadVibrationParam { u8 largeMotor; u8 smallMotor; };
 int scePadSetVibration(int /*handle*/, const ScePadVibrationParam *param) {
   if (param)
-    gfx::setRumble(param->largeMotor, param->smallMotor);
+    host::setRumble(param->largeMotor, param->smallMotor);
   return 0;
 }
 

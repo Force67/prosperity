@@ -19,7 +19,7 @@
 
 #include "base/arch.h"
 
-namespace gfx {
+namespace host {
 
 // Start capturing log lines. Idempotent; overlayEnsureImGui does it.
 void overlayLogAttach();
@@ -30,4 +30,4 @@ void overlayLogBuild(u32 w, u32 h);
 // Bound to F2 by the window event pump. Visible by default.
 void overlayLogToggle();
 
-}  // namespace gfx
+}  // namespace host

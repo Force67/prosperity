@@ -7,7 +7,7 @@
 
 #include <base/logging.h>
 
-#include "gfx/gfx.h"
+#include "host/window.h"
 
 // A single virtual DualShock4 presented through the libusb-style sceUsbd API.
 // Opaque tokens are handed to the game and validated on the way back.
@@ -39,11 +39,11 @@ void buildReport(u8 *r, int len) {
   if (!r || len < 10) { if (r && len > 0) std::memset(r, 0, len); return; }
   std::memset(r, 0, len);
   u8 lx = 128, ly = 128, rx = 128, ry = 128;
-  gfx::PadKeys k;
+  host::PadKeys k;
   bool sq = false, cr = false, ci = false, tr = false, l1 = false, r1 = false,
        l2 = false, r2 = false, opt = false, tpad = false;
   int dpad = 8;  // 8 = released
-  if (gfx::pollKeyboardPad(k)) {
+  if (host::pollKeyboardPad(k)) {
     lx = k.lx; ly = k.ly; rx = k.rx; ry = k.ry;
     sq = k.square; cr = k.cross; ci = k.circle; tr = k.triangle;
     l1 = k.l1; r1 = k.r1; l2 = k.l2; r2 = k.r2; opt = k.options; tpad = k.touchpad;

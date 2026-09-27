@@ -5,13 +5,13 @@
  *
  * On-screen overlay content: a keyboard->DualSense legend, a memory-pressure
  * gauge (VRAM + system RAM), and a CPU/GPU utilization gauge. Built as a Dear
- * ImGui draw list here and rendered through a Vulkan pipeline (overlay_vk.cpp).
+ * ImGui draw list here and rendered through a Vulkan pipeline (overlay_vk.cc).
  * Desktop/Linux only; the Android build has its own touch overlay.
  */
 
 #include "base/arch.h"
 
-namespace gfx {
+namespace host {
 
 // Create the ImGui context if needed (safe to call repeatedly).
 void overlayEnsureImGui();
@@ -27,4 +27,4 @@ void overlayBuildFrame(u32 w, u32 h, u64 vramUsed,
 // Show/hide the overlay (bound to F1 by the window event pump).
 void overlayToggle();
 
-}  // namespace gfx
+}  // namespace host

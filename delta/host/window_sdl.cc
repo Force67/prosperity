@@ -11,9 +11,8 @@
 // The copy+blit route sidesteps host-writes-to-image layout constraints and allows
 // any window size relative to the framebuffer.
 
-// SDL3 is not available on Android; that build uses the headless gfx stub
-// (gfx_headless.cpp) and the GPU renderer dumps frames instead of presenting.
-#ifndef __ANDROID__
+// SDL3 is not available on Android; those builds use window_android.cc or the
+// headless stub (window_headless.cc).
 
 #include "base/arch.h"
 #include <cstdint>
@@ -33,7 +32,7 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 
-#include "gfx.h"
+#include "window.h"
 
 #include <base/logging.h>
 
@@ -54,7 +53,7 @@ DELTA_OPTION(const char *, kVkGpu, "DELTA_VK_GPU", nullptr);
 DELTA_OPTION(const char *, kVsync, "DELTA_GPU_VSYNC", nullptr);
 }  // namespace
 
-namespace gfx {
+namespace host {
 namespace {
 
 #define VK_CHECK(expr)                                                         \
@@ -947,7 +946,7 @@ bool pumpEvents() {
 // Keyboard->DS4 adapter, laid out for two-handed keyboard play: the left hand
 // moves (WASD) and works the action keys, the right hand aims (arrow keys).
 // Both hands reach a shoulder pair via the Shift keys. Keep this in sync with
-// the on-screen legend (overlay.cpp).
+// the on-screen legend (overlay.cc).
 bool pollKeyboardPad(PadKeys &out) {
   if (!g.window)
     return false;
@@ -1064,6 +1063,4 @@ void shutdown() {
   g_canPresent.store(true, base::memory_order_release);
 }
 
-} // namespace gfx
-
-#endif // !__ANDROID__
+} // namespace host

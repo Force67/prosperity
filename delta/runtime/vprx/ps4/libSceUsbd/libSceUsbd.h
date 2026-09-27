@@ -6,7 +6,7 @@
 // HLE of libSceUsbd (the PS4's libusb-1.0 port). Presents a single virtual
 // DualShock4 so the title's USB controller enumeration succeeds and it leaves
 // the "no controller" pause into active gameplay. HID input reports are built
-// from the keyboard adapter (gfx::pollKeyboardPad) / neutral state.
+// from the keyboard adapter (host::pollKeyboardPad) / neutral state.
 int PS4ABI sceUsbdInit();
 void PS4ABI sceUsbdExit();
 int PS4ABI sceUsbdGetDeviceList(void ***list);

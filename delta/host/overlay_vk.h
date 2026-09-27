@@ -5,8 +5,8 @@
  *
  * Vulkan backend for the Dear ImGui overlay. Renders the overlay's ImDrawData
  * into the swapchain image with a small dedicated pipeline (embedded SPIR-V),
- * replacing the earlier software rasteriser. Driven by gfx_vk.cpp; the overlay
- * content + metrics live in overlay.cpp.
+ * replacing the earlier software rasteriser. Driven by window_sdl.cc; the overlay
+ * content + metrics live in overlay.cc.
  */
 
 #include "base/arch.h"
@@ -14,7 +14,7 @@
 #include <vulkan/vulkan.h>
 #include <base/containers/vector.h>
 
-namespace gfx {
+namespace host {
 
 bool overlayVkInit(VkPhysicalDevice phys, VkDevice device, VkQueue queue,
                    u32 queueFamily, VkCommandPool pool, VkFormat swapFormat);
@@ -28,4 +28,4 @@ bool overlayVkRender(VkCommandBuffer cmd, u32 imageIndex);
 void overlayVkShutdown();
 bool overlayVkReady();
 
-}  // namespace gfx
+}  // namespace host

@@ -14,7 +14,7 @@
 // SDL3 window backed by a Vulkan swapchain. present() uploads a CPU framebuffer
 // and blits it to the swapchain, scaling to the window size. The VideoOut flip
 // path (/dev/dce) drives present() with the guest scanout framebuffer.
-namespace gfx {
+namespace host {
 
 enum class PixelFormat {
   rgba8, // R8G8B8A8 unorm, byte order R,G,B,A
@@ -88,4 +88,4 @@ bool inGameplay();
 
 void shutdown();
 
-} // namespace gfx
+} // namespace host

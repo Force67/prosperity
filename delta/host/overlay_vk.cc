@@ -7,7 +7,6 @@
  * pass that also transitions the image from TRANSFER_DST (the frame blit) to
  * PRESENT_SRC, so gfx_vk's present path just calls overlayVkRender.
  */
-#ifndef __ANDROID__
 
 #include "overlay_vk.h"
 #include "base/arch.h"
@@ -22,7 +21,7 @@
 #include "overlay_vk_shaders.h"
 #include <base/containers/vector.h>
 
-namespace gfx {
+namespace host {
 namespace {
 
 struct Frame {
@@ -547,6 +546,4 @@ void overlayVkShutdown() {
 
 bool overlayVkReady() { return v.ready && !v.fbs.empty(); }
 
-} // namespace gfx
-
-#endif // !__ANDROID__
+} // namespace host

@@ -1,13 +1,12 @@
 /*
  * PS4Delta : PS4 emulation and research project
  *
- * Host audio output bridge (SDL3). See gfx_audio.h.
+ * Host audio output bridge (SDL3). See audio_output.h.
  */
 
-#include "gfx_audio.h"
+#include "audio_output.h"
 #include "base/arch.h"
 
-#if !defined(__ANDROID__)
 
 #include <SDL3/SDL.h>
 
@@ -19,6 +18,8 @@
 #include <base/threading/lock_guard.h>
 #include <base/threading/mutex.h>
 #include <base/threading/thread.h>
+
+namespace host {
 
 namespace {
 DELTA_OPTION(const char *, kAudioPcm, "DELTA_AUDIO_PCM", nullptr);
@@ -41,7 +42,7 @@ u64 g_framesOut = 0;
 
 }  // namespace
 
-extern "C" int prosperity_audio_open(u32 freq, u32 channels, int isFloat) {
+int OpenAudioPort(u32 freq, u32 channels, int isFloat) {
   base::LockGuard<base::Mutex> lk(g_mtx);
   if (!g_init) {
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
@@ -74,7 +75,7 @@ extern "C" int prosperity_audio_open(u32 freq, u32 channels, int isFloat) {
 }
 
 // STAGE-3 VERIFICATION AID, default OFF. DELTA_AUDIO_PCM=<prefix> appends every
-// buffer handed to prosperity_audio_output to "<prefix>.h<handle>.raw", verbatim
+// buffer handed to QueueAudio to "<prefix>.h<handle>.raw", verbatim
 // and BEFORE any gain/backpressure/drop, so the HLE shim's stream and the LLE
 // daemon's stream can be compared byte-for-byte off-line.
 namespace {
@@ -98,7 +99,7 @@ FILE *pcmFile(int handle, int channels, int bps) {
 }
 }  // namespace
 
-extern "C" int prosperity_audio_output(int handle, const void *samples, u32 frames) {
+int QueueAudio(int handle, const void *samples, u32 frames) {
   // Snapshot the port under the lock, then run lock-free. SDL stream ops are
   // thread-safe, but we must NOT hold g_mtx across the backpressure sleep: another
   // thread opening a port mid-wait reallocs g_ports and dangles the held Port&.
@@ -183,13 +184,13 @@ extern "C" int prosperity_audio_output(int handle, const void *samples, u32 fram
   return static_cast<int>(frames);
 }
 
-extern "C" void prosperity_audio_volume(int handle, float gain) {
+void SetAudioPortVolume(int handle, float gain) {
   base::LockGuard<base::Mutex> lk(g_mtx);
   if (handle < 0 || handle >= static_cast<int>(g_ports.size())) return;
   g_ports[handle].gain = gain < 0.f ? 0.f : gain > 1.f ? 1.f : gain;
 }
 
-extern "C" void prosperity_audio_close(int handle) {
+void CloseAudioPort(int handle) {
   base::LockGuard<base::Mutex> lk(g_mtx);
   if (handle < 0 || handle >= static_cast<int>(g_ports.size())) return;
   if (g_ports[handle].stream) {
@@ -198,13 +199,4 @@ extern "C" void prosperity_audio_close(int handle) {
   }
 }
 
-#else  // __ANDROID__ : SDL is not linked into the gfx build; no-ops below.
-
-extern "C" int prosperity_audio_open(u32, u32, int) { return -1; }
-extern "C" int prosperity_audio_output(int, const void *, u32 frames) {
-  return static_cast<int>(frames);
-}
-extern "C" void prosperity_audio_volume(int, float) {}
-extern "C" void prosperity_audio_close(int) {}
-
-#endif
+}  // namespace host

@@ -9,8 +9,8 @@
 #include "gpu/render/buffer_cache.h"
 #include "gpu/write_tracker.h"
 
-#include "gfx/gfx.h"
-#include "gfx/overlay.h"
+#include "host/window.h"
+#include "host/overlay.h"
 #include "gpu/gcn/gcn_translate.h"
 
 #include <cstdio>
@@ -183,7 +183,7 @@ void DrawResourcePanel(u8* bgra,
                        float wallMs) {
   RefreshProcStats();
   u64 vramUsed = 0, vramTotal = 0;
-  gfx::queryVram(vramUsed, vramTotal);
+  host::queryVram(vramUsed, vramTotal);
   constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
   const float gpuPct =
       wallMs > 0.01f ? (gpuMs / wallMs * 100.0f > 100.0f ? 100.0f
@@ -430,7 +430,7 @@ void ReportFps() {
     CsSyncReport(f);
     // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
     // cost).
-    gfx::overlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
+    host::overlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
                         float(1000.0 * dt / frames));
     last = now;
     frames = 0;

@@ -2,7 +2,7 @@
  * PS4Delta : PS4 emulation and research project
  *
  * HLE libSceAudioOut. See libSceAudioOut.h. Bridges to the host SDL3 device via
- * delta_gfx's gfx_audio. Each open port records its grain/format so Output knows
+ * delta_host's gfx_audio. Each open port records its grain/format so Output knows
  * how many interleaved frames the guest buffer holds.
  *
  * This path is verified working end to end: The Binding of Isaac opens two
@@ -78,7 +78,7 @@
 #include "libSceAudioOut.h"
 #include "base/arch.h"
 
-#include "gfx/gfx_audio.h"
+#include "host/audio_output.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -147,7 +147,7 @@ int PS4ABI sceAudioOutOpen(i32 /*userId*/, i32 /*type*/, i32 /*index*/,
   if (kAudioTrace)
     BASE_LOGI("audioopen", "len={} freq={} param={:#x} -> {}ch {}", length, freq,
               param, channels, isFloat ? "f32" : "s16");
-  int bridge = prosperity_audio_open(freq, channels, isFloat);
+  int bridge = host::OpenAudioPort(freq, channels, isFloat);
   base::LockGuard<base::Mutex> lk(g_mtx);
   Port p;
   p.bridge = bridge;
@@ -164,7 +164,7 @@ int PS4ABI sceAudioOutOutput(i32 handle, const void *ptr) {
   if (!p) return -1;
   if (!ptr) return 0;  // a null ptr is a "drain" request; nothing to queue
   if (p->bridge >= 0)
-    prosperity_audio_output(p->bridge, ptr, p->grain);
+    host::QueueAudio(p->bridge, ptr, p->grain);
   return static_cast<int>(p->grain);
 }
 
@@ -202,7 +202,7 @@ int PS4ABI sceAudioOutClose(i32 handle) {
   base::LockGuard<base::Mutex> lk(g_mtx);
   Port *p = port(handle);
   if (!p) return -1;
-  if (p->bridge >= 0) prosperity_audio_close(p->bridge);
+  if (p->bridge >= 0) host::CloseAudioPort(p->bridge);
   p->open = false;
   p->bridge = -1;
   return 0;
@@ -213,7 +213,7 @@ int PS4ABI sceAudioOutSetVolume(i32 handle, i32 /*flag*/, i32 *vol) {
   Port *p = port(handle);
   if (!p) return -1;
   if (vol && p->bridge >= 0)  // SCE 0dB == 32768; use channel 0 as the master gain
-    prosperity_audio_volume(p->bridge, static_cast<float>(vol[0]) / 32768.0f);
+    host::SetAudioPortVolume(p->bridge, static_cast<float>(vol[0]) / 32768.0f);
   return 0;
 }
 

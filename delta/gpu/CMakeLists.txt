@@ -54,10 +54,10 @@ if(DELTA_GPU_D3D12 AND NOT ANDROID)
 endif()
 
 if(ANDROID)
-  add_delta_module(gpu DEPS vulkan delta_gfx)
+  add_delta_module(gpu DEPS vulkan delta_host)
 else()
   find_package(Vulkan REQUIRED)
-  add_delta_module(gpu DEPS Vulkan::Vulkan delta_gfx)
+  add_delta_module(gpu DEPS Vulkan::Vulkan delta_host)
 endif()
 
 # Header-only BC6H decoder used by compute image staging.

@@ -24,7 +24,7 @@
 
 #include "dcore.h"
 #include "cpu/backend.h"
-#include "gfx/overlay_log.h"
+#include "host/overlay_log.h"
 #include "gpu/render/renderer.h"
 #include "kern/guest_vaspace.h"
 #include <base/threading/thread.h>
@@ -140,7 +140,7 @@ extern "C" __attribute__((visibility("default"))) int dcoreMain(int argc, char *
   logger::RouteBaseLogging();
   // Before anything logs: the on-screen panel shows the tail of the log, and
   // the boot lines are the ones worth seeing before a title even presents.
-  gfx::overlayLogAttach();
+  host::overlayLogAttach();
   // Before anything else: every subsystem below reads its knobs from here, and
   // most latch the value the first time they run.
   options::Init(argc, argv);

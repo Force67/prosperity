@@ -17,10 +17,10 @@
 #include <logger/logger.h>
 #include <io/file.h>
 
-#include <gfx/gfx.h>
+#include <host/window.h>
 #include <gpu/ps4/cmd_processor.h>
 #include <gpu/render/renderer.h>
-#include <gfx/gfx_audio.h>
+#include <host/audio_output.h>
 #include <kern/ps4/audio_sink.h>
 #include <kern/ps4/hardware_mode.h>
 #include <kern/crash.h>
@@ -55,8 +55,8 @@ bool deltaCore::init() {
   gpu::ps4::SetWriteWatchCallback(&krnl::probe::startWriteWatch);
   krnl::setCsRangeDescriber(&gpu::render::DescribeCsRangeCovering);
   krnl::setMappingChangedHook(&gpu::render::NoteGuestRemap);
-  krnl::ps4::setAudioSink({prosperity_audio_open, prosperity_audio_output,
-                           prosperity_audio_volume, prosperity_audio_close});
+  krnl::ps4::setAudioSink({host::OpenAudioPort, host::QueueAudio,
+                           host::SetAudioPortVolume, host::CloseAudioPort});
   return true;
 }
 
@@ -287,11 +287,11 @@ void deltaCore::boot(const base::String &xdir) {
     title += tid.empty() ? base::String("unknown") : tid;
     title += isPs5 ? "] (PS5)" : "] (PS4)";
     LOG_INFO("window title: {}", title.c_str());
-    gfx::setTitle(title.c_str());
+    host::setTitle(title.c_str());
   }
 #if defined(__linux__) && !defined(__ANDROID__)
   if (!gameIcon.empty())
-    gfx::setIcon(gameIcon.data(), gameIcon.size());
+    host::setIcon(gameIcon.data(), gameIcon.size());
 #endif
   base::SpawnDetachedThread("guest-main", [mainModule = base::move(mainModule), mounted, isPs5, sdkVersion]() {
     auto p = base::MakeUnique<krnl::proc>();

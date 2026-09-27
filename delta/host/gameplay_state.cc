@@ -6,11 +6,11 @@
  * the module both already link, rather than owned by either of them.
  */
 
-#include "gfx.h"
+#include "window.h"
 #include <base/atomic.h>
 
 
-namespace gfx {
+namespace host {
 namespace {
 base::Atomic<bool> g_inGameplay{false};
 }
@@ -18,4 +18,4 @@ base::Atomic<bool> g_inGameplay{false};
 void setInGameplay(bool v) { g_inGameplay.store(v, base::memory_order_relaxed); }
 bool inGameplay() { return g_inGameplay.load(base::memory_order_relaxed); }
 
-}  // namespace gfx
+}  // namespace host

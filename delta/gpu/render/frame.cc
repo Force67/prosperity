@@ -7,7 +7,7 @@
 #include "gpu/write_tracker.h"
 #include "base/arch.h"
 
-#include "gfx/gfx.h"
+#include "host/window.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/guest_memory.h"
 #include "gpu/render/renderer.h"
@@ -1192,7 +1192,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   cur.presentable = false;
   const bool kNeedsCpuCapture =
       kSnapAt || kSnapSeqN || kSnapEvery || kOverlayDump;
-  const bool present_to_window = !kNoPresent && gfx::canPresent();
+  const bool present_to_window = !kNoPresent && host::canPresent();
   const bool need_scanout = present_to_window || g_dump || kNeedsCpuCapture;
   cur.present_to_window = present_to_window;
   if (it != g_rts.end() && need_scanout) {
@@ -1256,9 +1256,9 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // draw, mean a run is underway. Stop the headless autoskip mashing menus.
   static int room_streak = 0;
   if (g_frame.had_room && g_frame.draws > 20 && ++room_streak >= 4)
-    gfx::setInGameplay(true);  // latch fast, before the autoskip re-pauses
+    host::setInGameplay(true);  // latch fast, before the autoskip re-pauses
   if (g_frame.max_idx >= 1500)
-    gfx::setInGameplay(true);
+    host::setInGameplay(true);
 
   // Finish a completed frame: the previous slot when pipelined (its raster ran
   // while this frame recorded), this frame's own when synchronous.
@@ -1350,7 +1350,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   u8* pixels;
   // What `pixels` holds. The swapchain takes either order, so a readback that
   // is already one of them is presented without being touched.
-  gfx::PixelFormat pixel_fmt = gfx::PixelFormat::bgra8;
+  host::PixelFormat pixel_fmt = host::PixelFormat::bgra8;
   if (kFlipMode == 0 && fin.fmt == rhi::Format::kBGRA8Unorm) {
     // Common case: the readback is already BGRA8 in presentation order; the
     // consumers below (WritePpm/present) read it in place, so skip the 8 MB
@@ -1362,7 +1362,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     // blue, which the swapchain upload does for free. Converting here instead
     // cost Skyrim 40% of its frame rate at 3840x2160.
     pixels = rb;
-    pixel_fmt = gfx::PixelFormat::rgba8;
+    pixel_fmt = host::PixelFormat::rgba8;
   } else {
     flipped.resize(static_cast<size_t>(fin.w) * fin.h * 4);
     const u32 src_bytes = FormatBytes(fin.fmt);
@@ -1383,7 +1383,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // buffer it is given. Both are off by default, so an RGBA readback is
   // converted here only when one of them is actually about to run.
   const auto toBgra = [&]() {
-    if (pixel_fmt == gfx::PixelFormat::bgra8)
+    if (pixel_fmt == host::PixelFormat::bgra8)
       return;
     flipped.resize(static_cast<size_t>(fin.w) * fin.h * 4);
     const size_t texels = static_cast<size_t>(fin.w) * fin.h;
@@ -1394,7 +1394,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
       flipped[i * 4 + 3] = pixels[i * 4 + 3];
     }
     pixels = flipped.data();
-    pixel_fmt = gfx::PixelFormat::bgra8;
+    pixel_fmt = host::PixelFormat::bgra8;
   };
   // Minimal single-shot capture (DELTA_GPU_SNAP=N): write ONE ppm of the
   // presented scanout to <dumpdir>/gpu_snap.ppm at the first drawing frame >=
@@ -1519,7 +1519,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // Perf overlay, drawn into the presented buffer only: the PPM capture
   // paths above already consumed `pixels`, so dumps stay clean.
   DrawPerfOverlay(pixels, fin.w, fin.h,
-                  pixel_fmt == gfx::PixelFormat::rgba8);
+                  pixel_fmt == host::PixelFormat::rgba8);
   // DELTA_GPU_OVERLAY_DUMP: one post-overlay ppm (visual check of the overlay
   // itself, which the clean capture paths above deliberately exclude).
   static bool overlay_dumped = false;
@@ -1543,8 +1543,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     ScopeNs present_timer(&g_ns_present);
     ScopeNs frame_present_timer(&g_fr_present);
     if (kSyncPresent) {
-      if (gfx::ensure("prosperity", fin.w, fin.h) && gfx::pumpEvents())
-        gfx::present(pixels, fin.w, fin.h, fin.w * 4, pixel_fmt);
+      if (host::ensure("prosperity", fin.w, fin.h) && host::pumpEvents())
+        host::present(pixels, fin.w, fin.h, fin.w * 4, pixel_fmt);
     } else if (pixels == flipped.data()) {
       renderer.state->presenter.Present(base::move(flipped), fin.w, fin.h,
                                         pixel_fmt);

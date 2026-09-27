@@ -8,7 +8,7 @@ list(REMOVE_ITEM MAIN_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/android_jni.cpp)
 
 set(MAIN_LIBS delta_deps delta_kern delta_runtime delta_formats
-              delta_gfx delta_cpu)
+              delta_host delta_cpu)
 
 if(DELTA_ANDROID_APP)
   # NativeActivity shared lib loaded by android.app.NativeActivity. android_main

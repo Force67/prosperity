@@ -3,7 +3,6 @@
  *
  * The live log panel. See overlay_log.h.
  */
-#ifndef __ANDROID__
 
 #include "base/arch.h"
 #include <cstring>
@@ -17,7 +16,7 @@
 #include <base/threading/lock_guard.h>
 #include <base/threading/mutex.h>
 
-namespace gfx {
+namespace host {
 namespace {
 
 // The ring holds exactly what the panel shows. Lines are truncated at capture,
@@ -127,6 +126,4 @@ void overlayLogBuild(u32 w, u32 h) {
 
 void overlayLogToggle() { g_visible = !g_visible; }
 
-}  // namespace gfx
-
-#endif  // !__ANDROID__
+}  // namespace host

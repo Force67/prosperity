@@ -21,7 +21,7 @@ endif()
 
 add_subdirectory(cpu)
 add_subdirectory(formats)
-add_subdirectory(gfx)
+add_subdirectory(host)
 add_subdirectory(gpu)
 add_subdirectory(kern)
 add_subdirectory(runtime)
@@ -39,7 +39,7 @@ endif()
 # repeats the archives until symbols resolve.
 #
 # Both are recorded in delta/tests/check_module_layering.py as debts to unwind,
-# not as the intended shape. kern no longer reaches gpu or gfx at all: the two
+# not as the intended shape. kern no longer reaches gpu or host at all: the two
 # calls that used to (the PM4 write-watch and the crash dump's CS-range
 # describer) are now installed by the composition root, as is the audio sink.
 target_link_libraries(delta_kern    PUBLIC delta_runtime delta_cpu)
@@ -47,5 +47,5 @@ target_link_libraries(delta_runtime PUBLIC delta_kern delta_gpu)
 target_link_libraries(delta_cpu     PUBLIC delta_kern)
 
 # delta_gpu (GCN PM4 -> Vulkan) is driven by the Gnm HLE in delta_runtime and
-# renders through delta_gfx's Vulkan device.
-target_link_libraries(delta_gpu     PUBLIC delta_gfx)
+# renders through delta_host's Vulkan device.
+target_link_libraries(delta_gpu     PUBLIC delta_host)

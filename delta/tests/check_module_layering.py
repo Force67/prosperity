@@ -21,7 +21,7 @@ import sys
 ROOT = sys.argv[1] if len(sys.argv) > 1 else '.'
 DELTA = os.path.join(ROOT, 'delta')
 
-MODULES = ('cpu', 'formats', 'gfx', 'gpu', 'kern', 'main', 'runtime')
+MODULES = ('cpu', 'formats', 'host', 'gpu', 'kern', 'main', 'runtime')
 
 # The one-way design. Read down: a module may only include modules below it.
 #
@@ -29,15 +29,15 @@ MODULES = ('cpu', 'formats', 'gfx', 'gpu', 'kern', 'main', 'runtime')
 #   runtime     the HLE modules a title imports (vprx) + the code lifter
 #   kern        the process model, lv2 syscalls, devices, VFS
 #   gpu         guest command streams -> rendered frames
-#   gfx         the host platform shell (window, input, audio, overlay)
+#   host        the host platform shell (window, input, audio, overlay)
 #   formats     container parsers (pkg, pup, ufs2, archive, fself); depends on nothing
 ALLOWED = {
     'formats': (),
-    'gfx': (),
-    'gpu': ('gfx',),
-    'kern': ('formats', 'gpu', 'gfx'),
+    'host': (),
+    'gpu': ('host',),
+    'kern': ('formats', 'gpu', 'host'),
     'cpu': (),
-    'runtime': ('kern', 'cpu', 'gpu', 'gfx', 'formats'),
+    'runtime': ('kern', 'cpu', 'gpu', 'host', 'formats'),
     'main': MODULES,
 }
 

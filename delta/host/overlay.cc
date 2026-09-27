@@ -2,11 +2,10 @@
  * PS4Delta : PS4 emulation and research project
  *
  * On-screen overlay content (Dear ImGui): the keyboard->DualSense legend. This
- * file only builds the ImDrawData; overlay_vk.cpp rasterises it through a
+ * file only builds the ImDrawData; overlay_vk.cc rasterises it through a
  * Vulkan pipeline. Frame timings and this process's CPU/GPU/RAM/VRAM use are
  * drawn by the GPU perf overlay instead (gpu/render/perf.cc).
  */
-#ifndef __ANDROID__
 
 #include "base/arch.h"
 #include <cfloat>
@@ -22,7 +21,7 @@
 #include <base/threading/lock_guard.h>
 #include <base/threading/mutex.h>
 
-namespace gfx {
+namespace host {
 namespace {
 
 bool g_visible = true;
@@ -117,6 +116,4 @@ void overlayBuildFrame(u32 w, u32 h, u64 vramUsed,
 
 void overlayToggle() { g_visible = !g_visible; }
 
-}  // namespace gfx
-
-#endif  // !__ANDROID__
+}  // namespace host

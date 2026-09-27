@@ -6,7 +6,7 @@
  * HLE libSceAudioOut: PS4 audio output. The real module talks to the audio DSP /
  * a kernel audio device we don't emulate (same situation as libSceVideoOut, which
  * is also HLE'd), so we bridge sceAudioOutOpen/Output to a host SDL3 audio device
- * (delta_gfx's gfx_audio). This is the audio analogue of the graphics HLE
+ * (delta_host's gfx_audio). This is the audio analogue of the graphics HLE
  * exception to the keep-PRX-LLE rule.
  */
 

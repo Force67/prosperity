@@ -5,7 +5,7 @@
 #include "gpu/render/present.h"
 #include "base/arch.h"
 
-#include "gfx/gfx.h"
+#include "host/window.h"
 #include "gpu/gpu_perf.h"
 
 #include <base/containers/vector.h>
@@ -15,7 +15,7 @@
 
 namespace gpu::render {
 
-// gfx::present blocks on the window swapchain (previous-present fence, vsync /
+// host::present blocks on the window swapchain (previous-present fence, vsync /
 // compositor pacing) and, on a software Vulkan driver, rasterizes the blit on
 // the CPU, ~10ms+ that used to sit on the frame loop. A dedicated presenter
 // thread owns the window (creation, event pump, and present all happen on it)
@@ -40,9 +40,9 @@ void LatestFramePresenter::Run() {
       return;
     const u32 w = width_;
     const u32 h = height_;
-    const gfx::PixelFormat fmt = pending_fmt_;
+    const host::PixelFormat fmt = pending_fmt_;
     // A lent buffer is presented in place. Staging it into `local` first would
-    // be a second 33 MB copy of a 4K scanout on top of the one gfx::present
+    // be a second 33 MB copy of a 4K scanout on top of the one host::present
     // already does into its upload buffer, 6.5 ms for nothing. The borrow is
     // held until present returns; the renderer waits for that in BeginFrame
     // before it lets the GPU write the buffer again.
@@ -56,8 +56,8 @@ void LatestFramePresenter::Run() {
     pending_ = false;
     lock.unlock();
     const u64 _tp = NowNs();
-    if (gfx::ensure("prosperity", w, h) && gfx::pumpEvents())
-      gfx::present(src, w, h, w * 4, fmt);
+    if (host::ensure("prosperity", w, h) && host::pumpEvents())
+      host::present(src, w, h, w * 4, fmt);
     g_ns_gfx_present += NowNs() - _tp;
     lock.lock();
     if (pending_src_ == src) {
@@ -70,7 +70,7 @@ void LatestFramePresenter::Run() {
 void LatestFramePresenter::Present(const u8* pixels,
                                    u32 w,
                                    u32 h,
-                                   gfx::PixelFormat fmt) {
+                                   host::PixelFormat fmt) {
   base::LockGuard<base::Mutex> lock(mutex_);
   if (stopping_)
     return;
@@ -86,7 +86,7 @@ void LatestFramePresenter::Present(const u8* pixels,
 void LatestFramePresenter::Present(base::Vector<u8>&& pixels,
                                    u32 w,
                                    u32 h,
-                                   gfx::PixelFormat fmt) {
+                                   host::PixelFormat fmt) {
   base::LockGuard<base::Mutex> lock(mutex_);
   if (stopping_)
     return;
@@ -119,7 +119,7 @@ void LatestFramePresenter::Stop() {
   }
   released_.NotifyAll();
   if (thread)
-    gfx::requestPresentStop();
+    host::requestPresentStop();
   ready_.NotifyOne();
   if (thread)
     thread->Join();

@@ -17,7 +17,7 @@
 
 #include <cstdint>
 
-namespace gfx {}  // fwd: present/init live in delta/gfx/gfx.h
+namespace host {}  // fwd: present/init live in delta/host/window.h
 
 extern "C" {
 

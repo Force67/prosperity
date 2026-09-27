@@ -5,7 +5,7 @@
  * calls android_main on its own thread; we redirect stdout/stderr to logcat,
  * point the loader at the app's external files dir (modules/ + game.pkg pushed
  * there by adb), bring up the emulator once the window exists, and feed touch
- * input to the gfx pad. Rendering reaches the screen via gfx_android.cpp.
+ * input to the host pad. Rendering reaches the screen via window_android.cc.
  */
 #include <android/log.h>
 #include "base/arch.h"
@@ -24,8 +24,8 @@
 
 #include "cpu/backend.h"
 #include "dcore.h"
-#include "gfx/gfx.h"
-#include "gfx/gfx_android.h"
+#include "host/window.h"
+#include "host/window_android.h"
 #include <logger/logger.h>
 #include <options/options.h>
 
@@ -106,13 +106,13 @@ void bootOnce(AppState *s) {
   s->core->boot(pkg);  // mounts pkg, runs the guest on a detached thread
 }
 
-// Forward the currently-down touch points (surface pixel coords) to gfx, which
+// Forward the currently-down touch points (surface pixel coords) to the host window, which
 // owns the on-screen control layout and maps them to the DS4 pad + overlay.
 void forwardTouch(AInputEvent *ev) {
   int action = AMotionEvent_getAction(ev);
   int kind = action & AMOTION_EVENT_ACTION_MASK;
   if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_CANCEL) {
-    gfx::setAndroidTouches(nullptr, 0);  // last finger up
+    host::setAndroidTouches(nullptr, 0);  // last finger up
     return;
   }
   int upIdx = -1;
@@ -120,7 +120,7 @@ void forwardTouch(AInputEvent *ev) {
     upIdx = (action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >>
             AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
   int n = AMotionEvent_getPointerCount(ev);
-  gfx::Touch pts[8];
+  host::Touch pts[8];
   int c = 0;
   for (int i = 0; i < n && c < 8; i++) {
     if (i == upIdx)
@@ -129,7 +129,7 @@ void forwardTouch(AInputEvent *ev) {
     pts[c].y = AMotionEvent_getY(ev, i);
     c++;
   }
-  gfx::setAndroidTouches(pts, c);
+  host::setAndroidTouches(pts, c);
 }
 
 void onCmd(android_app *app, i32 cmd) {
@@ -137,12 +137,12 @@ void onCmd(android_app *app, i32 cmd) {
   switch (cmd) {
   case APP_CMD_INIT_WINDOW:
     if (app->window) {
-      gfx::setAndroidWindow(app->window);
+      host::setAndroidWindow(app->window);
       bootOnce(s);  // first window: start the emulator (renderer needs a window)
     }
     break;
   case APP_CMD_TERM_WINDOW:
-    gfx::setAndroidWindow(nullptr);
+    host::setAndroidWindow(nullptr);
     break;
   default:
     break;

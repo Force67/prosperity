@@ -3,13 +3,13 @@
  */
 #pragma once
 
-// Handing a finished frame to the window. gfx::present blocks on the window
+// Handing a finished frame to the window. host::present blocks on the window
 // swapchain and, on a software driver, rasterizes the blit on the CPU, so a
 // dedicated thread owns the window and always shows the newest complete frame.
 
 #include "base/arch.h"
 
-#include "gfx/gfx.h"
+#include "host/window.h"
 #include <base/containers/vector.h>
 #include <base/threading/condition_variable.h>
 #include <base/threading/mutex.h>
@@ -27,9 +27,9 @@ class LatestFramePresenter {
   LatestFramePresenter& operator=(const LatestFramePresenter&) = delete;
 
   void Present(const u8* pixels, u32 w, u32 h,
-               gfx::PixelFormat fmt = gfx::PixelFormat::bgra8);
+               host::PixelFormat fmt = host::PixelFormat::bgra8);
   void Present(base::Vector<u8>&& pixels, u32 w, u32 h,
-               gfx::PixelFormat fmt = gfx::PixelFormat::bgra8);
+               host::PixelFormat fmt = host::PixelFormat::bgra8);
   // Block until a lent buffer has been copied out, for a caller that is about
   // to write over the one it lent.
   void WaitForBorrowed();
@@ -47,7 +47,7 @@ class LatestFramePresenter {
   // Set instead of pending_pixels_ when the caller lends us its buffer: the
   // presenter thread copies out of it, under the lock, before releasing it.
   const u8* pending_src_ = nullptr;
-  gfx::PixelFormat pending_fmt_ = gfx::PixelFormat::bgra8;
+  host::PixelFormat pending_fmt_ = host::PixelFormat::bgra8;
   u32 width_ = 0;
   u32 height_ = 0;
   bool pending_ = false;
