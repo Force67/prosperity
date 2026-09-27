@@ -27,7 +27,7 @@ namespace {
 // Minimal param.sfo reader: returns the value of `key` (UTF-8 string keys, or
 // int32 keys rendered as decimal), or "" if absent. The SFO is a small flat
 // table; see the PS4 param.sfo layout. All offsets are bounds-checked.
-base::String sfoGet(const u8 *d, size_t n, const char *key) {
+base::String SfoGet(const u8 *d, size_t n, const char *key) {
   if (n < 20)
     return {};
   auto rd32 = [&](size_t o) -> u32 {
@@ -104,8 +104,8 @@ JNIEXPORT jstring JNICALL Java_com_prosperity_ps4_NativeBridge_pkgInfo(
   base::String result;
   base::Vector<u8> sfo;
   if (readPkgMeta(path, kEntryParamSfo, sfo)) {
-    base::String tid = sfoGet(sfo.data(), sfo.size(), "TITLE_ID");
-    base::String title = sfoGet(sfo.data(), sfo.size(), "TITLE");
+    base::String tid = SfoGet(sfo.data(), sfo.size(), "TITLE_ID");
+    base::String title = SfoGet(sfo.data(), sfo.size(), "TITLE");
     result = tid + "\t" + title;
   }
   env->ReleaseStringUTFChars(jpath, path);
@@ -131,14 +131,14 @@ JNIEXPORT jboolean JNICALL Java_com_prosperity_ps4_NativeBridge_pkgIcon(
 }
 
 // Best-effort firmware PUP unpack into outDir. Returns a human-readable summary
-// (see pupReader::extractAll); retail PUPs are encrypted, so this can only dump
+// (see PupReader::ExtractAll); retail PUPs are encrypted, so this can only dump
 // container segments, never loadable modules.
 JNIEXPORT jstring JNICALL Java_com_prosperity_ps4_NativeBridge_pupExtract(
     JNIEnv *env, jclass, jstring jpup, jstring jout) {
   const char *pup = env->GetStringUTFChars(jpup, nullptr);
   const char *out = env->GetStringUTFChars(jout, nullptr);
   base::String summary;
-  vfs::pupReader r((base::String(pup)));
+  vfs::PupReader r((base::String(pup)));
   if (!r.load()) {
     summary = "Not a recognized PUP container (magic mismatch). Retail firmware "
               "is encrypted and unsupported here; import a pre-extracted .sprx "

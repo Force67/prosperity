@@ -653,7 +653,7 @@ u8 *PS4ABI sys_mmap(void *addr, size_t size, u32 prot, u32 flags,
         // The kernel hands back base + (offset & 0x3FFF), so the fill starts at
         // the page-aligned offset for that contract to hold.
         const i64 fileOff = static_cast<i64>(offset & ~size_t(0x3FFF));
-        i64 got = static_cast<device *>(o)->readAt(ptr, size, fileOff);
+        i64 got = static_cast<device *>(o)->ReadAt(ptr, size, fileOff);
         if (got > 0 && kMmapfdTrace)
           BASE_LOGI("mmapfd", "  filled {:p} from fd={} off={:#x} -> {} bytes",
                     ptr, fd, (unsigned long long)fileOff, (long long)got);

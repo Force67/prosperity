@@ -1,5 +1,5 @@
 // Unpacks a decrypted PS4/PS5 firmware update (*.PUP / *.PUP.dec) through the
-// native pupReader. Usage: pup_extract <fw.PUP.dec> <out_dir>
+// native PupReader. Usage: pup_extract <fw.PUP.dec> <out_dir>
 #include <cstdio>
 
 #include <logger/logger.h>
@@ -15,16 +15,16 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  vfs::pupReader r((base::String(argv[1])));
-  if (!r.load()) {
+  vfs::PupReader r((base::String(argv[1])));
+  if (!r.Load()) {
     std::printf("not a recognized PUP container (encrypted or bad magic)\n");
     return 1;
   }
 
   std::printf("%s PUP, %d segment(s)\n", r.ps5() ? "PS5" : "PS4",
-              r.segmentCount());
+              r.SegmentCount());
   bool encrypted = false;
-  base::String summary = r.extractAll(base::String(argv[2]), encrypted);
+  base::String summary = r.ExtractAll(base::String(argv[2]), encrypted);
   std::fputs(summary.c_str(), stdout);
   return 0;
 }

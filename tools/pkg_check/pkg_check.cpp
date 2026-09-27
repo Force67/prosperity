@@ -22,23 +22,23 @@ int main(int argc, char **argv) {
   }
 
   vfs::PkgFilesystem fs((base::String(argv[1])));
-  if (!fs.valid()) {
+  if (!fs.Valid()) {
     std::printf("invalid / unsupported pkg\n");
     return 1;
   }
 
   base::Vector<base::String> paths;
-  fs.paths(paths);
+  fs.Paths(paths);
   base::Sort(paths.begin(), paths.end());
   std::printf("%zu files\n", paths.size());
   for (const auto &p : paths)
     std::printf("%s\n", p.c_str());
 
-  const auto *node = fs.find("/eboot.bin");
+  const auto *node = fs.Find("/eboot.bin");
   if (node) {
     base::Vector<u8> buf(node->size);
-    fs.read(*node, buf.data(), 0, static_cast<i64>(node->size));
-    auto elf = crypto::self2elf(buf.data(), buf.size());
+    fs.Read(*node, buf.data(), 0, static_cast<i64>(node->size));
+    auto elf = crypto::Self2elf(buf.data(), buf.size());
     if (!elf.empty()) {
       const char *out = argc > 2 ? argv[2] : "eboot_native.elf";
       io::File f(base::String(out), io::FileMode::kWrite);

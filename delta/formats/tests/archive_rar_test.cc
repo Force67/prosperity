@@ -11,12 +11,12 @@
 
 #include <zlib.h>
 
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
+#include "base/time/time.h"
 #include "formats/archive_backend.h"
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/unique_pointer.h>
-#include <base/strings/xstring.h>
-#include <base/time/time.h>
 
 namespace {
 
@@ -25,41 +25,41 @@ const char kArchive[] = "/home/vince/Documents/dumps/PS5/PPSA01342 (1.05).rar";
 struct Ctx {
   base::UniquePointer<vfs::ArchiveBackend> backend;
   base::Vector<vfs::ArchiveEntry> entries;
-  double indexSeconds = 0;
+  double index_seconds = 0;
 };
 
-Ctx *ctx() {
+Ctx* ctx() {
   static Ctx c = [] {
     Ctx c;
-    c.backend = vfs::openRarBackend(kArchive);
+    c.backend = vfs::OpenRarBackend(kArchive);
     if (c.backend) {
       auto t0 = base::TimeTicks::Now();
-      if (!c.backend->index(c.entries))
+      if (!c.backend->Index(c.entries))
         c.backend.Reset();
-      c.indexSeconds = (base::TimeTicks::Now() - t0).InSecondsF();
+      c.index_seconds = (base::TimeTicks::Now() - t0).InSecondsF();
     }
     return c;
   }();
   return &c;
 }
 
-const vfs::ArchiveEntry *find(const char *path) {
-  for (auto &e : ctx()->entries)
+const vfs::ArchiveEntry* Find(const char* path) {
+  for (auto& e : ctx()->entries)
     if (e.path == path)
       return &e;
   return nullptr;
 }
 
-#define REQUIRE_ARCHIVE()                                                      \
-  if (!ctx()->backend)                                                         \
+#define REQUIRE_ARCHIVE() \
+  if (!ctx()->backend)    \
     GTEST_SKIP() << "test archive not present: " << kArchive;
 
-} // namespace
+}  // namespace
 
 TEST(ArchiveRar, Index) {
   REQUIRE_ARCHIVE();
   printf("indexed %zu entries in %.2fs\n", ctx()->entries.size(),
-         ctx()->indexSeconds);
+         ctx()->index_seconds);
   // 242953 headers total: 223259 regular files + 19694 directories, which the
   // index skips (verified against `unrar vt`).
   EXPECT_EQ(ctx()->entries.size(), 223259u);
@@ -67,10 +67,10 @@ TEST(ArchiveRar, Index) {
 
 TEST(ArchiveRar, ParamJson) {
   REQUIRE_ARCHIVE();
-  auto *e = find("PPSA01342-app/sce_sys/param.json");
+  auto* e = Find("PPSA01342-app/sce_sys/param.json");
   ASSERT_NE(e, nullptr);
   base::String data(e->size, 0);
-  ASSERT_EQ(ctx()->backend->extractRange(*e, data.data(), 0, i64(e->size)),
+  ASSERT_EQ(ctx()->backend->ExtractRange(*e, data.data(), 0, i64(e->size)),
             i64(e->size));
   printf("param.json (%llu bytes):\n%s\n", e->size, data.c_str());
   EXPECT_NE(data.find("\"titleId\""), base::String::npos);
@@ -81,7 +81,7 @@ TEST(ArchiveRar, ParamJson) {
 // archive stores. B00EA44D is the known-good value from `unrar l`.
 TEST(ArchiveRar, EbootCrc) {
   REQUIRE_ARCHIVE();
-  auto *e = find("PPSA01342-app/eboot.bin");
+  auto* e = Find("PPSA01342-app/eboot.bin");
   ASSERT_NE(e, nullptr);
   EXPECT_EQ(e->size, 46574897u);
   EXPECT_EQ(e->crc, 0xB00EA44Du);
@@ -91,12 +91,11 @@ TEST(ArchiveRar, EbootCrc) {
   uLong crc = crc32(0, nullptr, 0);
   auto t0 = base::TimeTicks::Now();
   for (i64 off = 0; off < i64(e->size); off += kChunk) {
-    i64 got = ctx()->backend->extractRange(*e, buf.data(), off, kChunk);
+    i64 got = ctx()->backend->ExtractRange(*e, buf.data(), off, kChunk);
     ASSERT_GT(got, 0) << "at offset " << off;
     crc = crc32(crc, buf.data(), uInt(got));
   }
-  double sec =
-      (base::TimeTicks::Now() - t0).InSecondsF();
+  double sec = (base::TimeTicks::Now() - t0).InSecondsF();
   printf("eboot.bin: %llu bytes in %.2fs (%.1f MB/s), crc %08lX\n", e->size,
          sec, e->size / sec / 1e6, crc);
   EXPECT_EQ(crc, 0xB00EA44Du);
@@ -106,8 +105,8 @@ TEST(ArchiveRar, EbootCrc) {
 // same bytes the reference unrar produces for that offset.
 TEST(ArchiveRar, RangedReadMatchesUnrar) {
   REQUIRE_ARCHIVE();
-  const vfs::ArchiveEntry *e = nullptr;
-  for (auto &c : ctx()->entries)
+  const vfs::ArchiveEntry* e = nullptr;
+  for (auto& c : ctx()->entries)
     if (c.method != 0 && c.size > 100u << 20 && c.size < 1u << 30 &&
         (!e || c.size < e->size))
       e = &c;
@@ -116,21 +115,21 @@ TEST(ArchiveRar, RangedReadMatchesUnrar) {
   const i64 off = i64(e->size / 2);
   const i64 len = 64 << 10;
   base::Vector<unsigned char> ours(len);
-  ASSERT_EQ(ctx()->backend->extractRange(*e, ours.data(), off, len), len);
+  ASSERT_EQ(ctx()->backend->ExtractRange(*e, ours.data(), off, len), len);
 
   base::String cmd = "unrar p -inul \"";
   cmd += kArchive;
   cmd += "\" \"";
   cmd += e->path;
   cmd += "\"";
-  FILE *p = popen(cmd.c_str(), "r");
+  FILE* p = popen(cmd.c_str(), "r");
   ASSERT_NE(p, nullptr);
   base::Vector<unsigned char> theirs(len);
   base::Vector<unsigned char> skip(1 << 20);
   i64 pos = 0;
   while (pos < off) {
-    size_t n = fread(skip.data(),
-                     1, size_t(base::Min(i64(skip.size()), off - pos)), p);
+    size_t n = fread(skip.data(), 1,
+                     size_t(base::Min(i64(skip.size()), off - pos)), p);
     ASSERT_GT(n, 0u) << "unrar pipe ended early at " << pos;
     pos += i64(n);
   }
@@ -150,8 +149,8 @@ TEST(ArchiveRar, RangedReadMatchesUnrar) {
 // stream this would be quadratic and visibly slow down chunk over chunk.
 TEST(ArchiveRar, SequentialResume) {
   REQUIRE_ARCHIVE();
-  const vfs::ArchiveEntry *e = nullptr;
-  for (auto &c : ctx()->entries)
+  const vfs::ArchiveEntry* e = nullptr;
+  for (auto& c : ctx()->entries)
     if (c.method != 0 && (!e || c.size > e->size))
       e = &c;
   ASSERT_NE(e, nullptr);
@@ -161,17 +160,17 @@ TEST(ArchiveRar, SequentialResume) {
   const i64 total = base::Min<i64>(i64(e->size), 512 << 20);
   base::Vector<unsigned char> buf(kChunk);
 
-  auto readSpan = [&](i64 begin, i64 end) {
+  auto read_span = [&](i64 begin, i64 end) {
     auto t0 = base::TimeTicks::Now();
     for (i64 off = begin; off < end; off += kChunk) {
       i64 want = base::Min(kChunk, end - off);
-      EXPECT_EQ(ctx()->backend->extractRange(*e, buf.data(), off, want), want);
+      EXPECT_EQ(ctx()->backend->ExtractRange(*e, buf.data(), off, want), want);
     }
     return (base::TimeTicks::Now() - t0).InSecondsF();
   };
 
-  double first = readSpan(0, total / 2);
-  double second = readSpan(total / 2, total);
+  double first = read_span(0, total / 2);
+  double second = read_span(total / 2, total);
   printf("first half:  %.2fs (%.1f MB/s)\n", first, total / 2.0 / first / 1e6);
   printf("second half: %.2fs (%.1f MB/s)\n", second,
          total / 2.0 / second / 1e6);

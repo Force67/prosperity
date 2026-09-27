@@ -38,7 +38,7 @@ constexpr u32 kMaxChunks = 0x3e8;
 // Per-chunk availability.
 enum { kLocusNotDownloaded = 0, kLocusLocalSlow = 2, kLocusLocalFast = 3 };
 
-bool readAll(const char *path, base::Vector<char> &out) {
+bool ReadAll(const char *path, base::Vector<char> &out) {
   io::File f = vfs::openRead(path);
   if (!f.Exists())
     return false;
@@ -74,7 +74,7 @@ u32 ps5ChunkCount() {
   u32 maxId = 0;
   bool any = false;
   base::Vector<char> text;
-  if (readAll("/app0/sce_sys/playgo-scenario.json", text)) {
+  if (ReadAll("/app0/sce_sys/playgo-scenario.json", text)) {
     const char *end = text.data() + text.size() - 1;
     for (const char *p = text.data(); (p = std::strstr(p, "\"chunks\"")); ) {
       p += 8;
@@ -96,7 +96,7 @@ u32 ps5ChunkCount() {
       p = stop > p ? stop : p + 1;
     }
   }
-  if (!any && readAll("/app0/playgo-chunkdefs.xml", text)) {
+  if (!any && ReadAll("/app0/playgo-chunkdefs.xml", text)) {
     const char *end = text.data() + text.size() - 1;
     for (const char *p = text.data(); (p = std::strstr(p, "<chunk ")); ) {
       const char *stop = p;

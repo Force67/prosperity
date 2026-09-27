@@ -11,7 +11,7 @@
 #include <cstddef>
 #include "base/arch.h"
 
-#include <base/containers/vector.h>
+#include "base/containers/vector.h"
 
 namespace crypto {
 // Rebuild a loadable ELF image from a fake-signed SELF (fSELF). A fake SELF
@@ -19,5 +19,5 @@ namespace crypto {
 // reassembles the ELF header + program headers and copies each block segment to
 // the file offset of the program header it references. Returns an empty vector
 // if the input is not a SELF or is malformed.
-base::Vector<u8> self2elf(const u8 *data, size_t size);
-} // namespace crypto
+base::Vector<u8> Self2elf(const u8* data, size_t size);
+}  // namespace crypto

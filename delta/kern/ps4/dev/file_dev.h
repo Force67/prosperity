@@ -71,14 +71,14 @@ public:
   void setSeqMode() { seq_ = true; }
 
   // A file mmap is satisfied by sys_mmap's anonymous-alloc + file-content fill
-  // (via readAt), not a device-owned region; return -1 silently to take that path.
+  // (via ReadAt), not a device-owned region; return -1 silently to take that path.
   u8 *map(void *, size_t, u32, u32, size_t) override {
     return reinterpret_cast<u8 *>(-1);
   }
   i64 read(void *buf, size_t n) override;
   i64 write(const void *buf, size_t n) override;
   i64 lseek(i64 off, int whence) override;
-  i64 readAt(void *buf, size_t n, i64 off) override;
+  i64 ReadAt(void *buf, size_t n, i64 off) override;
   int fstat(void *stat) override;
 
 private:

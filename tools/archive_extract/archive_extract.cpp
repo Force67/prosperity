@@ -30,16 +30,16 @@ int main(int argc, char **argv) {
   const auto t0 = base::TimeTicks::Now();
   vfs::ArchiveFilesystem fs((base::String(argv[1])));
   const auto t1 = base::TimeTicks::Now();
-  if (!fs.valid()) {
+  if (!fs.Valid()) {
     std::printf("not a container we can read\n");
     return 1;
   }
-  std::printf("opened via %s backend in %lld ms\n", fs.backendName(),
+  std::printf("opened via %s backend in %lld ms\n", fs.BackendName(),
               (long long)(
                   t1 - t0).InMilliseconds());
 
   if (argc >= 4 && std::strcmp(argv[2], "--bench") == 0) {
-    const auto *node = fs.find(argv[3]);
+    const auto *node = fs.Find(argv[3]);
     if (!node) {
       std::printf("%s: not found\n", argv[3]);
       return 1;
@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
     const auto start = base::TimeTicks::Now();
     i64 off = 0, total = 0;
     while (off < static_cast<i64>(node->size)) {
-      const i64 n = fs.read(*node, buf.data(), off, kChunk);
+      const i64 n = fs.Read(*node, buf.data(), off, kChunk);
       if (n <= 0)
         break;
       off += n;
@@ -66,13 +66,13 @@ int main(int argc, char **argv) {
   }
 
   if (argc >= 4) {
-    const auto *node = fs.find(argv[2]);
+    const auto *node = fs.Find(argv[2]);
     if (!node) {
       std::printf("%s: not found\n", argv[2]);
       return 1;
     }
     base::Vector<u8> buf(node->size);
-    const i64 n = fs.read(*node, buf.data(), 0, static_cast<i64>(node->size));
+    const i64 n = fs.Read(*node, buf.data(), 0, static_cast<i64>(node->size));
     if (n < 0) {
       std::printf("read failed\n");
       return 1;
@@ -84,11 +84,11 @@ int main(int argc, char **argv) {
   }
 
   base::Vector<base::String> paths;
-  fs.paths(paths);
+  fs.Paths(paths);
   base::Sort(paths.begin(), paths.end());
   u64 total = 0;
   for (const auto &p : paths) {
-    const auto *node = fs.find(p.c_str());
+    const auto *node = fs.Find(p.c_str());
     const u64 sz = node ? node->size : 0;
     total += sz;
     std::printf("%12llu  %s\n", (unsigned long long)sz, p.c_str());

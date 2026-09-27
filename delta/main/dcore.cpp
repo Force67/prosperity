@@ -72,11 +72,11 @@ constexpr bool kWantIcon = false;
 constexpr u64 kMaxSfoSize = 1u << 20;
 constexpr u64 kMaxIconSize = 16u << 20;
 
-using formats::jsonGetString;
-using formats::jsonGetTitleName;
-using formats::parseSdkVersion;
-using formats::sfoGet;
-using formats::sfoGetU32;
+using formats::JsonGetString;
+using formats::JsonGetTitleName;
+using formats::ParseSdkVersion;
+using formats::SfoGet;
+using formats::SfoGetU32;
 
 bool readHostFile(const base::String &path, u64 maxSize,
                   base::Vector<u8> &out) {
@@ -132,7 +132,7 @@ void deltaCore::boot(const base::String &xdir) {
   // A game left inside the container it was distributed in (.rar, .zip). The
   // tree inside is an ordinary app dump; we just decompress it on demand rather
   // than making the host find room for the extracted copy.
-  const bool isArchive = !isPkg && !isFfpkg && vfs::isArchivePath(xdir.c_str());
+  const bool isArchive = !isPkg && !isFfpkg && vfs::IsArchivePath(xdir.c_str());
   // A raw app dump: the extracted /app0 tree itself, identified by its console
   // metadata. Host-mounted rather than read through an image reader.
   const base::String appRoot(path.c_str());
@@ -211,9 +211,9 @@ void deltaCore::boot(const base::String &xdir) {
     if (isPs4AppDir) {
       base::Vector<u8> sfo;
       if (readHostFile(appSfo, kMaxSfoSize, sfo)) {
-        krnl::vfs::setTitleId(sfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
-        gameTitle = sfoGet(sfo.data(), sfo.size(), "TITLE");
-        ps4Attributes = sfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
+        krnl::vfs::setTitleId(SfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
+        gameTitle = SfoGet(sfo.data(), sfo.size(), "TITLE");
+        ps4Attributes = SfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
       }
 #if defined(__linux__) && !defined(__ANDROID__)
       if (!readHostFile(appRoot + "/sce_sys/icon0.png", kMaxIconSize, gameIcon))
@@ -224,9 +224,9 @@ void deltaCore::boot(const base::String &xdir) {
       readHostFile(appJson, kMaxSfoSize, json);
       const base::String js(reinterpret_cast<const char*>(json.data()),
                             json.size());
-      krnl::vfs::setTitleId(jsonGetString(js, "titleId"));
-      gameTitle = jsonGetTitleName(js);
-      sdkVersion = parseSdkVersion(jsonGetString(js, "sdkVersion"));
+      krnl::vfs::setTitleId(JsonGetString(js, "titleId"));
+      gameTitle = JsonGetTitleName(js);
+      sdkVersion = ParseSdkVersion(JsonGetString(js, "sdkVersion"));
 #if defined(__linux__) && !defined(__ANDROID__)
       if (!readHostFile(appRoot + "/sce_sys/icon0.png", kMaxIconSize, gameIcon))
         readHostFile(appRoot + "/icon0.png", kMaxIconSize, gameIcon);
@@ -241,9 +241,9 @@ void deltaCore::boot(const base::String &xdir) {
     if (!readHostFile(root + "/sce_sys/param.sfo", kMaxSfoSize, sfo))
       readHostFile(root + "/param.sfo", kMaxSfoSize, sfo);
     if (!sfo.empty()) {
-      krnl::vfs::setTitleId(sfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
-      gameTitle = sfoGet(sfo.data(), sfo.size(), "TITLE");
-      ps4Attributes = sfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
+      krnl::vfs::setTitleId(SfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
+      gameTitle = SfoGet(sfo.data(), sfo.size(), "TITLE");
+      ps4Attributes = SfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
     }
 #if defined(__linux__) && !defined(__ANDROID__)
     if (!readHostFile(root + "/sce_sys/icon0.png", kMaxIconSize, gameIcon))

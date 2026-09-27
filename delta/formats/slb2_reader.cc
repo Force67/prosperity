@@ -7,9 +7,9 @@
  * in the root of the source tree.
  */
 
-#include "slb2_reader.h"
+#include "formats/slb2_reader.h"
 #include "base/arch.h"
-#include <base/containers/vector.h>
+#include "base/containers/vector.h"
 
 namespace formats {
 /*
@@ -43,5 +43,7 @@ io::FileMode::Write); if (out.IsOpen()) { out.Write(data);
 }
 */
 
-bool slb2Object::load(io::File &) { return true; }
-} // namespace formats
+bool Slb2Object::Load(io::File&) {
+  return true;
+}
+}  // namespace formats

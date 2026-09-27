@@ -72,7 +72,7 @@ public:
   // Read `n` bytes at absolute `off` into `buf` WITHOUT moving the file position
   // (pread). Used to back a file mmap with the file's content. Returns bytes read
   // (0 at/after EOF), or -1 if this device isn't a readable file.
-  virtual i64 readAt(void *, size_t, i64) { return -1; }
+  virtual i64 ReadAt(void *, size_t, i64) { return -1; }
   virtual int fstat(void * /*SceKernelStat*/) { return -SysError::eNODEV; }
   // Directory enumeration (FreeBSD dirents). Non-directories aren't one.
   virtual i64 getdents(void *, size_t) { return -SysError::eNOTDIR; }

@@ -21,19 +21,19 @@ int main(int argc, char **argv) {
   }
 
   vfs::Ufs2Filesystem fs((base::String(argv[1])));
-  if (!fs.valid()) {
+  if (!fs.Valid()) {
     std::printf("not a valid UFS2 image (bad superblock)\n");
     return 1;
   }
 
   if (argc >= 4) {
-    const auto *node = fs.find(argv[2]);
+    const auto *node = fs.Find(argv[2]);
     if (!node) {
       std::printf("%s: not found\n", argv[2]);
       return 1;
     }
     base::Vector<u8> buf(node->size);
-    i64 n = fs.read(*node, buf.data(), 0, static_cast<i64>(node->size));
+    i64 n = fs.Read(*node, buf.data(), 0, static_cast<i64>(node->size));
     if (n < 0) {
       std::printf("read failed\n");
       return 1;
@@ -45,11 +45,11 @@ int main(int argc, char **argv) {
   }
 
   base::Vector<base::String> paths;
-  fs.paths(paths);
+  fs.Paths(paths);
   base::Sort(paths.begin(), paths.end());
   u64 total = 0;
   for (const auto &p : paths) {
-    const auto *node = fs.find(p.c_str());
+    const auto *node = fs.Find(p.c_str());
     u64 sz = node ? node->size : 0;
     total += sz;
     std::printf("%12llu  %s\n", (unsigned long long)sz, p.c_str());

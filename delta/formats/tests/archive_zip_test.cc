@@ -7,34 +7,34 @@
 #include <gtest/gtest.h>
 #include <zlib.h>
 
+#include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
+#include "base/memory/move.h"
+#include "base/strings/xstring.h"
+#include "base/time/time.h"
 #include "formats/archive_backend.h"
-#include <base/containers/vector.h>
-#include <base/math/value_bounds.h>
-#include <base/memory/move.h>
-#include <base/strings/xstring.h>
-#include <base/time/time.h>
 
 namespace {
 
-void p16(base::Vector<u8> &o, u16 v) {
+void P16(base::Vector<u8>& o, u16 v) {
   o.push_back(v & 0xff);
   o.push_back(v >> 8);
 }
-void p32(base::Vector<u8> &o, u32 v) {
+void P32(base::Vector<u8>& o, u32 v) {
   for (int i = 0; i < 4; ++i)
     o.push_back((v >> (8 * i)) & 0xff);
 }
-void p64(base::Vector<u8> &o, u64 v) {
+void P64(base::Vector<u8>& o, u64 v) {
   for (int i = 0; i < 8; ++i)
     o.push_back((v >> (8 * i)) & 0xff);
 }
 
-base::Vector<u8> rawDeflate(const base::Vector<u8> &in) {
+base::Vector<u8> RawDeflate(const base::Vector<u8>& in) {
   z_stream zs{};
   deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8,
                Z_DEFAULT_STRATEGY);
   base::Vector<u8> out(deflateBound(&zs, in.size()));
-  zs.next_in = const_cast<u8 *>(in.data());
+  zs.next_in = const_cast<u8*>(in.data());
   zs.avail_in = static_cast<uInt>(in.size());
   zs.next_out = out.data();
   zs.avail_out = static_cast<uInt>(out.size());
@@ -48,8 +48,8 @@ base::Vector<u8> rawDeflate(const base::Vector<u8> &in) {
 // and offset fields and emits the ZIP64 extras + EOCD64, like a >4 GB archive.
 struct ZipWriter {
   base::Vector<u8> out;
-  bool forceZip64 = false;
-  u64 cdOff = 0;
+  bool force_zip64 = false;
+  u64 cd_off = 0;
 
   struct Member {
     base::String name;
@@ -59,34 +59,33 @@ struct ZipWriter {
   };
   base::Vector<Member> members;
 
-  void add(const base::String &name, const base::Vector<u8> &data, u16 method) {
+  void Add(const base::String& name, const base::Vector<u8>& data, u16 method) {
     Member m;
     m.name = name;
     m.lho = out.size();
     m.method = method;
     m.uncomp = data.size();
-    m.crc = crc32(crc32(0, Z_NULL, 0), data.data(),
-                  static_cast<uInt>(data.size()));
-    base::Vector<u8> payload =
-        method == 8 ? rawDeflate(data) : data;
+    m.crc =
+        crc32(crc32(0, Z_NULL, 0), data.data(), static_cast<uInt>(data.size()));
+    base::Vector<u8> payload = method == 8 ? RawDeflate(data) : data;
     m.comp = payload.size();
 
-    p32(out, 0x04034b50);
-    p16(out, forceZip64 ? 45 : 20);
-    p16(out, 0); // flags
-    p16(out, method);
-    p32(out, 0); // dos time/date
-    p32(out, m.crc);
-    p32(out, forceZip64 ? 0xFFFFFFFF : static_cast<u32>(m.comp));
-    p32(out, forceZip64 ? 0xFFFFFFFF : static_cast<u32>(m.uncomp));
-    p16(out, static_cast<u16>(name.size()));
-    p16(out, forceZip64 ? 20 : 0);
+    P32(out, 0x04034b50);
+    P16(out, force_zip64 ? 45 : 20);
+    P16(out, 0);  // flags
+    P16(out, method);
+    P32(out, 0);  // dos time/date
+    P32(out, m.crc);
+    P32(out, force_zip64 ? 0xFFFFFFFF : static_cast<u32>(m.comp));
+    P32(out, force_zip64 ? 0xFFFFFFFF : static_cast<u32>(m.uncomp));
+    P16(out, static_cast<u16>(name.size()));
+    P16(out, force_zip64 ? 20 : 0);
     out.insert(out.end(), name.begin(), name.end());
-    if (forceZip64) {
-      p16(out, 0x0001);
-      p16(out, 16);
-      p64(out, m.uncomp);
-      p64(out, m.comp);
+    if (force_zip64) {
+      P16(out, 0x0001);
+      P16(out, 16);
+      P64(out, m.uncomp);
+      P64(out, m.comp);
     }
     out.insert(out.end(), payload.begin(), payload.end());
     members.push_back(base::move(m));
@@ -94,82 +93,82 @@ struct ZipWriter {
 
   // A raw central-directory row with no local header behind it, to exercise
   // the skip paths (directories, unsupported methods).
-  void addDirEntry(const base::String &name) {
+  void AddDirEntry(const base::String& name) {
     Member m{name, 0, 0, 0, 0, 0};
     members.push_back(base::move(m));
   }
 
-  void finish(const base::String &comment = "") {
-    cdOff = out.size();
-    for (const auto &m : members) {
+  void Finish(const base::String& comment = "") {
+    cd_off = out.size();
+    for (const auto& m : members) {
       bool dir = !m.name.empty() && m.name.back() == '/';
-      bool z64 = forceZip64 && !dir;
-      p32(out, 0x02014b50);
-      p16(out, z64 ? 45 : 20);
-      p16(out, z64 ? 45 : 20);
-      p16(out, 0);
-      p16(out, m.method);
-      p32(out, 0);
-      p32(out, m.crc);
-      p32(out, z64 ? 0xFFFFFFFF : static_cast<u32>(m.comp));
-      p32(out, z64 ? 0xFFFFFFFF : static_cast<u32>(m.uncomp));
-      p16(out, static_cast<u16>(m.name.size()));
-      p16(out, z64 ? 28 : 0);
-      p16(out, 0); // comment len
-      p16(out, 0); // disk
-      p16(out, 0); // internal attrs
-      p32(out, dir ? 0x10 : 0);
-      p32(out, z64 ? 0xFFFFFFFF : static_cast<u32>(m.lho));
+      bool z64 = force_zip64 && !dir;
+      P32(out, 0x02014b50);
+      P16(out, z64 ? 45 : 20);
+      P16(out, z64 ? 45 : 20);
+      P16(out, 0);
+      P16(out, m.method);
+      P32(out, 0);
+      P32(out, m.crc);
+      P32(out, z64 ? 0xFFFFFFFF : static_cast<u32>(m.comp));
+      P32(out, z64 ? 0xFFFFFFFF : static_cast<u32>(m.uncomp));
+      P16(out, static_cast<u16>(m.name.size()));
+      P16(out, z64 ? 28 : 0);
+      P16(out, 0);  // comment len
+      P16(out, 0);  // disk
+      P16(out, 0);  // internal attrs
+      P32(out, dir ? 0x10 : 0);
+      P32(out, z64 ? 0xFFFFFFFF : static_cast<u32>(m.lho));
       out.insert(out.end(), m.name.begin(), m.name.end());
       if (z64) {
-        p16(out, 0x0001);
-        p16(out, 24);
-        p64(out, m.uncomp);
-        p64(out, m.comp);
-        p64(out, m.lho);
+        P16(out, 0x0001);
+        P16(out, 24);
+        P64(out, m.uncomp);
+        P64(out, m.comp);
+        P64(out, m.lho);
       }
     }
-    u64 cdSize = out.size() - cdOff;
+    u64 cd_size = out.size() - cd_off;
 
-    if (forceZip64) {
-      u64 recOff = out.size();
-      p32(out, 0x06064b50);
-      p64(out, 44);
-      p16(out, 45);
-      p16(out, 45);
-      p32(out, 0);
-      p32(out, 0);
-      p64(out, members.size());
-      p64(out, members.size());
-      p64(out, cdSize);
-      p64(out, cdOff);
-      p32(out, 0x07064b50);
-      p32(out, 0);
-      p64(out, recOff);
-      p32(out, 1);
+    if (force_zip64) {
+      u64 rec_off = out.size();
+      P32(out, 0x06064b50);
+      P64(out, 44);
+      P16(out, 45);
+      P16(out, 45);
+      P32(out, 0);
+      P32(out, 0);
+      P64(out, members.size());
+      P64(out, members.size());
+      P64(out, cd_size);
+      P64(out, cd_off);
+      P32(out, 0x07064b50);
+      P32(out, 0);
+      P64(out, rec_off);
+      P32(out, 1);
     }
-    p32(out, 0x06054b50);
-    p16(out, 0);
-    p16(out, 0);
-    p16(out, forceZip64 ? 0xFFFF : static_cast<u16>(members.size()));
-    p16(out, forceZip64 ? 0xFFFF : static_cast<u16>(members.size()));
-    p32(out, forceZip64 ? 0xFFFFFFFF : static_cast<u32>(cdSize));
-    p32(out, forceZip64 ? 0xFFFFFFFF : static_cast<u32>(cdOff));
-    p16(out, static_cast<u16>(comment.size()));
+    P32(out, 0x06054b50);
+    P16(out, 0);
+    P16(out, 0);
+    P16(out, force_zip64 ? 0xFFFF : static_cast<u16>(members.size()));
+    P16(out, force_zip64 ? 0xFFFF : static_cast<u16>(members.size()));
+    P32(out, force_zip64 ? 0xFFFFFFFF : static_cast<u32>(cd_size));
+    P32(out, force_zip64 ? 0xFFFFFFFF : static_cast<u32>(cd_off));
+    P16(out, static_cast<u16>(comment.size()));
     out.insert(out.end(), comment.begin(), comment.end());
   }
 };
 
-base::String writeTemp(const base::Vector<u8> &bytes, const char *name) {
+base::String WriteTemp(const base::Vector<u8>& bytes, const char* name) {
   base::String path = testing::TempDir() + name;
-  FILE *f = fopen(path.c_str(), "wb");
+  FILE* f = fopen(path.c_str(), "wb");
   EXPECT_TRUE(f);
   EXPECT_EQ(fwrite(bytes.data(), 1, bytes.size(), f), bytes.size());
   fclose(f);
   return path;
 }
 
-base::Vector<u8> pattern(size_t n, u32 seed) {
+base::Vector<u8> Pattern(size_t n, u32 seed) {
   base::Vector<u8> v(n);
   u32 s = seed;
   for (size_t i = 0; i < n; ++i) {
@@ -180,126 +179,126 @@ base::Vector<u8> pattern(size_t n, u32 seed) {
   return v;
 }
 
-const vfs::ArchiveEntry *find(const base::Vector<vfs::ArchiveEntry> &es,
-                              const char *path) {
-  for (const auto &e : es)
+const vfs::ArchiveEntry* Find(const base::Vector<vfs::ArchiveEntry>& es,
+                              const char* path) {
+  for (const auto& e : es)
     if (e.path == path)
       return &e;
   return nullptr;
 }
 
-base::Vector<u8> readAll(vfs::ArchiveBackend &b, const vfs::ArchiveEntry &e) {
+base::Vector<u8> ReadAll(vfs::ArchiveBackend& b, const vfs::ArchiveEntry& e) {
   base::Vector<u8> v(e.size);
-  EXPECT_EQ(b.extractRange(e, v.data(), 0, e.size), static_cast<i64>(e.size));
+  EXPECT_EQ(b.ExtractRange(e, v.data(), 0, e.size), static_cast<i64>(e.size));
   return v;
 }
 
 TEST(ArchiveZip, DeflateRoundTrip) {
-  auto a = pattern(300000, 1), b = pattern(17, 2);
+  auto a = Pattern(300000, 1), b = Pattern(17, 2);
   base::Vector<u8> empty;
   ZipWriter w;
-  w.add("dir/a.bin", a, 8);
-  w.add("b.bin", b, 8);
-  w.add("empty.bin", empty, 8);
-  w.addDirEntry("dir/");
-  w.finish("trailing archive comment to force the EOCD back-scan");
-  auto path = writeTemp(w.out, "zt_deflate.zip");
+  w.Add("dir/a.bin", a, 8);
+  w.Add("b.bin", b, 8);
+  w.Add("empty.bin", empty, 8);
+  w.AddDirEntry("dir/");
+  w.Finish("trailing archive comment to force the EOCD back-scan");
+  auto path = WriteTemp(w.out, "zt_deflate.zip");
 
-  auto z = vfs::openZipBackend(base::String(path.c_str()));
+  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
-  EXPECT_STREQ(z->name(), "zip");
+  EXPECT_STREQ(z->Name(), "zip");
 
   base::Vector<vfs::ArchiveEntry> es;
-  ASSERT_TRUE(z->index(es));
-  ASSERT_EQ(es.size(), 3u); // the directory row is skipped
+  ASSERT_TRUE(z->Index(es));
+  ASSERT_EQ(es.size(), 3u);  // the directory row is skipped
 
-  auto *ea = find(es, "dir/a.bin");
+  auto* ea = Find(es, "dir/a.bin");
   ASSERT_TRUE(ea);
   EXPECT_EQ(ea->size, a.size());
-  EXPECT_EQ(readAll(*z, *ea), a);
-  auto *eb = find(es, "b.bin");
+  EXPECT_EQ(ReadAll(*z, *ea), a);
+  auto* eb = Find(es, "b.bin");
   ASSERT_TRUE(eb);
-  EXPECT_EQ(readAll(*z, *eb), b);
+  EXPECT_EQ(ReadAll(*z, *eb), b);
 
-  auto *ee = find(es, "empty.bin");
+  auto* ee = Find(es, "empty.bin");
   ASSERT_TRUE(ee);
   u8 tmp[8];
-  EXPECT_EQ(z->extractRange(*ee, tmp, 0, 8), 0);
+  EXPECT_EQ(z->ExtractRange(*ee, tmp, 0, 8), 0);
 
   // reads past the end clamp / return 0
   base::Vector<u8> tail(100);
-  EXPECT_EQ(z->extractRange(*eb, tail.data(), 10, 100), 7);
+  EXPECT_EQ(z->ExtractRange(*eb, tail.data(), 10, 100), 7);
   EXPECT_EQ(memcmp(tail.data(), b.data() + 10, 7), 0);
-  EXPECT_EQ(z->extractRange(*eb, tail.data(), 17, 1), 0);
+  EXPECT_EQ(z->ExtractRange(*eb, tail.data(), 17, 1), 0);
   std::remove(path.c_str());
 }
 
 TEST(ArchiveZip, StoredRangedRead) {
-  auto a = pattern(100000, 3);
+  auto a = Pattern(100000, 3);
   ZipWriter w;
-  w.add("stored.bin", a, 0);
-  w.finish();
-  auto path = writeTemp(w.out, "zt_stored.zip");
+  w.Add("stored.bin", a, 0);
+  w.Finish();
+  auto path = WriteTemp(w.out, "zt_stored.zip");
 
-  auto z = vfs::openZipBackend(base::String(path.c_str()));
+  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
   base::Vector<vfs::ArchiveEntry> es;
-  ASSERT_TRUE(z->index(es));
+  ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 1u);
   EXPECT_EQ(es[0].method, 0u);
-  EXPECT_EQ(readAll(*z, es[0]), a);
+  EXPECT_EQ(ReadAll(*z, es[0]), a);
 
   base::Vector<u8> mid(5000);
-  EXPECT_EQ(z->extractRange(es[0], mid.data(), 40000, 5000), 5000);
+  EXPECT_EQ(z->ExtractRange(es[0], mid.data(), 40000, 5000), 5000);
   EXPECT_EQ(memcmp(mid.data(), a.data() + 40000, 5000), 0);
   std::remove(path.c_str());
 }
 
 TEST(ArchiveZip, Zip64) {
-  auto a = pattern(200000, 4), b = pattern(999, 5);
+  auto a = Pattern(200000, 4), b = Pattern(999, 5);
   ZipWriter w;
-  w.forceZip64 = true;
-  w.add("big/a.bin", a, 8);
-  w.add("b.bin", b, 0);
-  w.finish();
-  auto path = writeTemp(w.out, "zt_zip64.zip");
+  w.force_zip64 = true;
+  w.Add("big/a.bin", a, 8);
+  w.Add("b.bin", b, 0);
+  w.Finish();
+  auto path = WriteTemp(w.out, "zt_zip64.zip");
 
-  auto z = vfs::openZipBackend(base::String(path.c_str()));
+  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
   base::Vector<vfs::ArchiveEntry> es;
-  ASSERT_TRUE(z->index(es));
+  ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 2u);
-  auto *ea = find(es, "big/a.bin");
+  auto* ea = Find(es, "big/a.bin");
   ASSERT_TRUE(ea);
   EXPECT_EQ(ea->size, a.size());
-  EXPECT_EQ(readAll(*z, *ea), a);
-  auto *eb = find(es, "b.bin");
+  EXPECT_EQ(ReadAll(*z, *ea), a);
+  auto* eb = Find(es, "b.bin");
   ASSERT_TRUE(eb);
-  EXPECT_EQ(readAll(*z, *eb), b);
+  EXPECT_EQ(ReadAll(*z, *eb), b);
   std::remove(path.c_str());
 }
 
 TEST(ArchiveZip, SkipsUnsupportedMethod) {
-  auto a = pattern(1000, 6);
+  auto a = Pattern(1000, 6);
   ZipWriter w;
-  w.add("good.bin", a, 8);
-  w.add("bad.bz2", a, 12); // bzip2: indexed as unsupported, skipped
-  w.finish();
-  auto path = writeTemp(w.out, "zt_method.zip");
+  w.Add("good.bin", a, 8);
+  w.Add("bad.bz2", a, 12);  // bzip2: indexed as unsupported, skipped
+  w.Finish();
+  auto path = WriteTemp(w.out, "zt_method.zip");
 
-  auto z = vfs::openZipBackend(base::String(path.c_str()));
+  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
   base::Vector<vfs::ArchiveEntry> es;
-  ASSERT_TRUE(z->index(es));
+  ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 1u);
   EXPECT_EQ(es[0].path, "good.bin");
   std::remove(path.c_str());
 }
 
 TEST(ArchiveZip, NotAZip) {
-  auto junk = pattern(4096, 7);
-  auto path = writeTemp(junk, "zt_junk.bin");
-  EXPECT_FALSE(vfs::openZipBackend(base::String(path.c_str())));
+  auto junk = Pattern(4096, 7);
+  auto path = WriteTemp(junk, "zt_junk.bin");
+  EXPECT_FALSE(vfs::OpenZipBackend(base::String(path.c_str())));
   std::remove(path.c_str());
 }
 
@@ -308,26 +307,25 @@ TEST(ArchiveZip, NotAZip) {
 // and time out, resume decodes 64 MB once.
 TEST(ArchiveZip, StreamingResumesCursor) {
   const size_t kSize = 64u << 20;
-  auto a = pattern(kSize, 8);
+  auto a = Pattern(kSize, 8);
   ZipWriter w;
-  w.add("stream.bin", a, 8);
-  w.finish();
-  auto path = writeTemp(w.out, "zt_stream.zip");
+  w.Add("stream.bin", a, 8);
+  w.Finish();
+  auto path = WriteTemp(w.out, "zt_stream.zip");
 
-  auto z = vfs::openZipBackend(base::String(path.c_str()));
+  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
   base::Vector<vfs::ArchiveEntry> es;
-  ASSERT_TRUE(z->index(es));
+  ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 1u);
 
   base::Vector<u8> buf(kSize);
   auto t0 = base::TimeTicks::Now();
   for (size_t off = 0; off < kSize; off += 64u << 10) {
-    ASSERT_EQ(z->extractRange(es[0], buf.data() + off, off, 64u << 10),
+    ASSERT_EQ(z->ExtractRange(es[0], buf.data() + off, off, 64u << 10),
               64 << 10);
   }
-  auto ms = (
-                base::TimeTicks::Now() - t0).InMilliseconds();
+  auto ms = (base::TimeTicks::Now() - t0).InMilliseconds();
   EXPECT_EQ(buf, a);
   EXPECT_LT(ms, 30000);
   printf("[ perf ] sequential 64 MB in 64 KB chunks: %lld ms (%.0f MB/s)\n",
@@ -336,55 +334,54 @@ TEST(ArchiveZip, StreamingResumesCursor) {
   // ranged read in the middle (restart + discard forward)
   base::Vector<u8> mid(1 << 20);
   auto t1 = base::TimeTicks::Now();
-  ASSERT_EQ(z->extractRange(es[0], mid.data(), 32u << 20, 1 << 20), 1 << 20);
-  auto midMs = (
-                   base::TimeTicks::Now() - t1).InMilliseconds();
+  ASSERT_EQ(z->ExtractRange(es[0], mid.data(), 32u << 20, 1 << 20), 1 << 20);
+  auto mid_ms = (base::TimeTicks::Now() - t1).InMilliseconds();
   EXPECT_EQ(memcmp(mid.data(), a.data() + (32u << 20), 1 << 20), 0);
   printf("[ perf ] cold 1 MB range at +32 MB: %lld ms\n",
-         static_cast<long long>(midMs));
+         static_cast<long long>(mid_ms));
 
   // backward seek restarts cleanly
-  ASSERT_EQ(z->extractRange(es[0], mid.data(), 1 << 20, 1 << 20), 1 << 20);
+  ASSERT_EQ(z->ExtractRange(es[0], mid.data(), 1 << 20, 1 << 20), 1 << 20);
   EXPECT_EQ(memcmp(mid.data(), a.data() + (1 << 20), 1 << 20), 0);
   std::remove(path.c_str());
 }
 
 TEST(ArchiveZip, CorruptCrcDetected) {
-  auto a = pattern(50000, 9);
+  auto a = Pattern(50000, 9);
   ZipWriter w;
-  w.add("a.bin", a, 8);
-  w.finish();
-  w.out[w.cdOff + 16] ^= 0xFF; // crc field of the first central row
-  auto path = writeTemp(w.out, "zt_badcrc.zip");
+  w.Add("a.bin", a, 8);
+  w.Finish();
+  w.out[w.cd_off + 16] ^= 0xFF;  // crc field of the first central row
+  auto path = WriteTemp(w.out, "zt_badcrc.zip");
 
-  auto z = vfs::openZipBackend(base::String(path.c_str()));
+  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
   base::Vector<vfs::ArchiveEntry> es;
-  ASSERT_TRUE(z->index(es));
+  ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 1u);
   base::Vector<u8> buf(es[0].size);
   // a full decode from 0 must fail the CRC check
-  EXPECT_EQ(z->extractRange(es[0], buf.data(), 0, es[0].size), -1);
+  EXPECT_EQ(z->ExtractRange(es[0], buf.data(), 0, es[0].size), -1);
   std::remove(path.c_str());
 }
 
 TEST(ArchiveZip, CorruptStreamDetected) {
-  auto a = pattern(200000, 10);
+  auto a = Pattern(200000, 10);
   ZipWriter w;
-  w.add("a.bin", a, 8);
-  w.finish();
+  w.Add("a.bin", a, 8);
+  w.Finish();
   // clobber compressed bytes mid-stream (local header is 30 + name)
   for (u64 off = 20000; off < 20016; ++off)
     w.out[30 + 5 + off] ^= 0x5A;
-  auto path = writeTemp(w.out, "zt_badstream.zip");
+  auto path = WriteTemp(w.out, "zt_badstream.zip");
 
-  auto z = vfs::openZipBackend(base::String(path.c_str()));
+  auto z = vfs::OpenZipBackend(base::String(path.c_str()));
   ASSERT_TRUE(z);
   base::Vector<vfs::ArchiveEntry> es;
-  ASSERT_TRUE(z->index(es));
+  ASSERT_TRUE(z->Index(es));
   ASSERT_EQ(es.size(), 1u);
   base::Vector<u8> buf(es[0].size);
-  EXPECT_EQ(z->extractRange(es[0], buf.data(), 0, es[0].size), -1);
+  EXPECT_EQ(z->ExtractRange(es[0], buf.data(), 0, es[0].size), -1);
   std::remove(path.c_str());
 }
 
@@ -392,19 +389,19 @@ TEST(ArchiveZip, CorruptStreamDetected) {
 // fully decode every member, relying on the CRC verification for correctness.
 // Gated on DELTA_ZIPTEST_FILE so CI does not need external tooling.
 TEST(ArchiveZip, ExternalArchive) {
-  const char *p = getenv("DELTA_ZIPTEST_FILE");
+  const char* p = getenv("DELTA_ZIPTEST_FILE");
   if (!p)
     GTEST_SKIP() << "set DELTA_ZIPTEST_FILE to a zip to run";
-  auto z = vfs::openZipBackend(base::String(p));
+  auto z = vfs::OpenZipBackend(base::String(p));
   ASSERT_TRUE(z);
   base::Vector<vfs::ArchiveEntry> es;
-  ASSERT_TRUE(z->index(es));
+  ASSERT_TRUE(z->Index(es));
   ASSERT_FALSE(es.empty());
   base::Vector<u8> buf(1 << 20);
-  for (const auto &e : es) {
+  for (const auto& e : es) {
     for (u64 off = 0; off < e.size; off += buf.size()) {
       i64 want = base::Min<u64>(buf.size(), e.size - off);
-      ASSERT_EQ(z->extractRange(e, buf.data(), off, want), want)
+      ASSERT_EQ(z->ExtractRange(e, buf.data(), off, want), want)
           << e.path.c_str() << " @" << off;
     }
   }
@@ -412,4 +409,4 @@ TEST(ArchiveZip, ExternalArchive) {
          es.size());
 }
 
-} // namespace
+}  // namespace

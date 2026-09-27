@@ -8,31 +8,31 @@
  * in the root of the source tree.
  */
 
-#include <io/file.h>
 #include "base/arch.h"
+#include "io/file.h"
 
 namespace formats {
-struct slb2_header {
+struct Slb2Header {
   u32 magic;
   u32 version;
   u32 flags;
-  u32 fileCount;
-  u32 blockCount;
+  u32 file_count;
+  u32 block_count;
   u32 unk[3];
 };
 
-struct slb2_entry {
+struct Slb2Entry {
   u32 offset;
-  u32 fileSize;
+  u32 file_size;
   u32 unk[2];
-  char fileName[32];
+  char file_name[32];
 };
 
-class slb2Object {
-public:
-  bool load(io::File &);
+class Slb2Object {
+ public:
+  bool Load(io::File&);
 
-private:
-  slb2_header header{};
+ private:
+  Slb2Header header_{};
 };
-}
+}  // namespace formats

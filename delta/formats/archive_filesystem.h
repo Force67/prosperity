@@ -10,22 +10,22 @@
 
 #include "base/arch.h"
 
-#include <base/strings/xstring.h>
-#include <base/containers/vector.h>
-#include <base/memory/unique_pointer.h>
+#include "base/containers/vector.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
 
 namespace vfs {
 struct ArchiveImpl;
 
 // On-demand reader for a game shipped as a plain compressed container (.rar,
-// .zip). Entries decompress lazily, so a 54 GB archive is never extracted, which
-// a host without room for the extracted game could not afford. The one
+// .zip). Entries decompress lazily, so a 54 GB archive is never extracted,
+// which a host without room for the extracted game could not afford. The one
 // top-level directory dumps wrap the game in (PPSA01342-app/...) is stripped at
 // index time so paths start at the game root and /app0 lines up with what the
 // guest expects. Same public shape as PkgFilesystem and Ufs2Filesystem so it
 // drops into the same VirtualProvider. Thread-safe across guest threads.
 class ArchiveFilesystem {
-public:
+ public:
   // A regular file inside the container, identified by its index in the entry
   // table (the backend keeps the offsets needed to decode it).
   struct Node {
@@ -33,47 +33,47 @@ public:
     u32 index = 0;
   };
 
-  explicit ArchiveFilesystem(const base::String &archivePath);
+  explicit ArchiveFilesystem(const base::String& archive_path);
   ~ArchiveFilesystem();
 
-  ArchiveFilesystem(const ArchiveFilesystem &) = delete;
-  ArchiveFilesystem &operator=(const ArchiveFilesystem &) = delete;
+  ArchiveFilesystem(const ArchiveFilesystem&) = delete;
+  ArchiveFilesystem& operator=(const ArchiveFilesystem&) = delete;
 
-  bool valid() const;
+  bool Valid() const;
 
   // Look up a file by archive-relative path with a leading '/', e.g.
   // "/eboot.bin". Returns nullptr if absent or a directory.
-  const Node *find(const char *relPath) const;
+  const Node* Find(const char* rel_path) const;
 
   // Read up to len bytes of a file starting at byte offset off. Returns the
   // number of bytes read (clamped to the file size, 0 past the end), or -1 on
   // error.
-  i64 read(const Node &node, void *buf, i64 off, i64 len);
+  i64 Read(const Node& node, void* buf, i64 off, i64 len);
 
   // One immediate child of a directory.
   struct Child {
     base::String name;
-    bool isDir;
+    bool is_dir;
   };
 
-  // List a directory's immediate children. relPath is matched case-insensitively
-  // like find(). Returns false if the directory holds nothing. The child index is
-  // built on first use, since a title that never enumerates should not pay for
-  // it (this container has 223k entries).
-  bool list(const char *relPath, base::Vector<Child> &out);
+  // List a directory's immediate children. relPath is matched
+  // case-insensitively like find(). Returns false if the directory holds
+  // nothing. The child index is built on first use, since a title that never
+  // enumerates should not pay for it (this container has 223k entries).
+  bool List(const char* rel_path, base::Vector<Child>& out);
 
   // Collect every regular-file path in the container (leading '/').
-  void paths(base::Vector<base::String> &out) const;
+  void Paths(base::Vector<base::String>& out) const;
 
   // Which backend claimed the file ("rar", "zip"), or "" if none did.
-  const char *backendName() const;
+  const char* BackendName() const;
 
-private:
+ private:
   base::UniquePointer<ArchiveImpl> impl_;
 };
 
 // True if the path's extension is a container ArchiveFilesystem can open. Only
 // checks the name, not the contents.
-bool isArchivePath(const char *path);
+bool IsArchivePath(const char* path);
 
-} // namespace vfs
+}  // namespace vfs

@@ -8,29 +8,29 @@
 // open nothing and know nothing about the container the buffer came from, so
 // the pkg, ffpkg and archive paths can all ask the same questions.
 
-#include "base/arch.h"
 #include <cstddef>
-#include <base/strings/xstring.h>
+#include "base/arch.h"
+#include "base/strings/xstring.h"
 
 namespace formats {
 
 // String value of `key` (e.g. "TITLE_ID") from a param.sfo image, or "" if
 // absent. The SFO is a small flat table; every offset is bounds-checked.
-base::String sfoGet(const u8 *data, size_t size, const char *key);
+base::String SfoGet(const u8* data, size_t size, const char* key);
 
 // u32 value of `key` from a param.sfo image, or 0 if absent.
-u32 sfoGetU32(const u8 *data, size_t size, const char *key);
+u32 SfoGetU32(const u8* data, size_t size, const char* key);
 
 // One top-level string value out of a param.json (flat file, no nesting on the
 // keys a title uses).
-base::String jsonGetString(const base::String &json, const char *key);
+base::String JsonGetString(const base::String& json, const char* key);
 
 // The display name, taken from localizedParameters.<defaultLanguage>.titleName
 // so a title shipping several languages does not get whichever comes first.
-base::String jsonGetTitleName(const base::String &json);
+base::String JsonGetTitleName(const base::String& json);
 
 // param.json stores sdkVersion as "0xMMmmpppp00000000"; libkernel wants the top
 // half (0x03000000 for a 3.00 title). Empty or unparsable -> 0.
-u32 parseSdkVersion(const base::String &s);
+u32 ParseSdkVersion(const base::String& s);
 
 }  // namespace formats

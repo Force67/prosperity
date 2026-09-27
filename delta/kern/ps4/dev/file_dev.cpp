@@ -177,7 +177,7 @@ i64 fileDevice::lseek(i64 off, int whence) {
 
 // pread: read at an absolute offset without disturbing the file position (the
 // guest keeps its own position for sequential reads). Backs a file mmap.
-i64 fileDevice::readAt(void *buf, size_t n, i64 off) {
+i64 fileDevice::ReadAt(void *buf, size_t n, i64 off) {
   if (!open_)
     return -SysError::eBADF;
   if (seq_) {  // ignore the bogus offset; serve in order from the cursor
