@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build + run the RDNA2 recompiler self-test (tools/rdna_selftest.cpp). Run
+# Build + run the RDNA2 recompiler self-test (tools/rdna_selftest.cc). Run
 # inside the nix dev shell:  nix develop -c bash tools/build_rdna_selftest.sh
 set -e
 cd "$(dirname "$0")/.."
@@ -9,7 +9,7 @@ OUT=/tmp/rdna_selftest
 c++ -std=c++20 -DDELTA_HAVE_SPIRV_BACKEND=1 \
   $(pkg-config --cflags SPIRV-Headers SPIRV-Tools) \
   -Idelta -I"$G" -I"$G/ps4" -Ishared -Ivendor/equilibrium \
-  tools/rdna_selftest.cpp \
+  tools/rdna_selftest.cc \
   "$G/ps5/rdna/rdna_decode.cc" \
   "$G/ps5/rdna/rdna_translate.cc" \
   "$G/ps5/rdna/rdna_resource.cc" \

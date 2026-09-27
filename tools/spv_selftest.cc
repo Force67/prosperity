@@ -3,7 +3,7 @@
  * passthrough VS and FS and validates the emitted binary with SPIRV-Tools.
  * Not part of the emulator build; compiled directly (from repo root):
  *   D=delta/gpu/gcn/spirv; nix develop --command c++ -std=c++20 -Idelta -Ivendor/equilibrium \
- *     $(pkg-config --cflags SPIRV-Headers SPIRV-Tools) tools/spv_selftest.cpp \
+ *     $(pkg-config --cflags SPIRV-Headers SPIRV-Tools) tools/spv_selftest.cc \
  *     $D/spv_emit.cc $D/spv_post.cc $(pkg-config --libs SPIRV-Tools) -o /tmp/t && /tmp/t
  */
 

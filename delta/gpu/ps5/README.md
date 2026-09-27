@@ -47,7 +47,7 @@ Titles submit and render: Isaac (PPSA03311) plays with its UI pixel-correct, and
 the doorbell submit path, the state blocks, the recompiler and the flip are all
 exercised by a real guest rather than by a harness.
 
-## Implemented (verified via `tools/rdna_selftest.cpp`)
+## Implemented (verified via `tools/rdna_selftest.cc`)
 
 - RDNA2 3-input integer ALU (address math): `v_add3_u32`, `v_lshl_or_b32`,
   `v_and_or_b32`, `v_or3_b32`, `v_lshl_add_u32`, `v_add_lshl_u32`, native

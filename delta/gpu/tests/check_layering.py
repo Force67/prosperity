@@ -65,7 +65,7 @@ PUBLIC = ('gpu/render/renderer.h', 'gpu/render/command.h',
 # Developer harnesses that test a gpu internal directly, the same role as
 # gpu/tests/. They are not emulator code and nothing links them, so the public
 # surface does not apply.
-INTERNAL_HARNESSES = (os.path.join('tools', 'spv_selftest.cpp'),)
+INTERNAL_HARNESSES = (os.path.join('tools', 'spv_selftest.cc'),)
 
 # Quoted or angle form: DELTA_ROOT is a plain -I directory, so both spellings
 # resolve and both must be policed.

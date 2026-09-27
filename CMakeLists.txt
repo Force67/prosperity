@@ -116,7 +116,7 @@ add_subdirectory(vendor)
 add_subdirectory(shared)
 add_subdirectory(delta)
 
-# Host-only dev tools (gfx_test needs an SDL3 window). The Android target builds
+# Host-only dev tools (window_test needs an SDL3 window). The Android target builds
 # just the ps4delta executable, run headless via adb.
 if(NOT ANDROID)
   add_subdirectory(tools/modload)
@@ -125,5 +125,5 @@ if(NOT ANDROID)
   add_subdirectory(tools/pup_extract)
   add_subdirectory(tools/ffpkg_extract)
   add_subdirectory(tools/archive_extract)
-  add_subdirectory(tools/gfx_test)
+  add_subdirectory(tools/window_test)
 endif()

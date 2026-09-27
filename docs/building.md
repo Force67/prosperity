@@ -84,7 +84,7 @@ The exact NDK/SDK wiring lives in the (gitignored) `build-apk.sh` /
 | `DELTA_BACKEND` | auto | `NATIVE` or `FEX`; auto-selected from host arch |
 | `DELTA_ANDROID_APP` | `OFF` | build the on-screen Android app (needs the NDK) |
 
-Host-only dev tools (`tools/modload`, `modexec`, `pkg_check`, `gfx_test`) are
+Host-only dev tools (`tools/modload`, `modexec`, `pkg_check`, `window_test`) are
 built automatically on non-Android targets.
 
 ## Tests

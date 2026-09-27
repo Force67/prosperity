@@ -26,7 +26,7 @@ int main() {
   u32 t = 0;
   while (host::PumpEvents()) {
     if (maxFrames && t >= maxFrames) {
-      std::printf("[gfx_test] presented %u frames OK\n", t);
+      std::printf("[window_test] presented %u frames OK\n", t);
       break;
     }
     for (u32 y = 0; y < H; y++) {
