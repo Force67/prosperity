@@ -41,7 +41,7 @@ DELTA_OPTION(u32, kGcTraceMax, "DELTA_GC_TRACE_MAX", 0);
 
 // LLE GPU submit bridge: real libSceGnmDriver.sprx submits PM4 through these
 // ioctls; forward the descriptor array to the GPU command processor
-// (see prosperity_gc_submit in libSceGnmDriver.cpp).
+// (see prosperity_gc_submit in lib_sce_gnm_driver.cc).
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe() {
   kern::NoteGpuEndOfPipe();

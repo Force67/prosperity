@@ -7,7 +7,7 @@
  * ATRAC9 codec through the AJM hardware decoder (/dev/ajm), which we don't
  * emulate, and the failure makes Doom64 (KEX) treat audio init as fatal and abort
  * before it ever renders. We stub FMOD's API to "succeed" with null audio so the
- * game boots; no sound plays. See libfmod.cpp.
+ * game boots; no sound plays. See libfmod.cc.
  */
 
 #include "guest_abi.h"

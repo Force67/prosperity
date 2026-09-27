@@ -400,7 +400,7 @@ int PS4ABI sys_sysctl(int* name,
   // AVAILABLE. Left ENOENT, libkernel's internal allocator sizes the
   // SceKernelInternalMemory arena minimally, then "Internal Memory is running
   // out" + std::bad_alloc terminates the process (only bites once a real
-  // firmware module allocates from the arena; see DELTA_LLE in vprx.cpp).
+  // firmware module allocates from the arena; see DELTA_LLE in vprx.cc).
   // Report 6 GiB.
   else if (name[0] == 0x1337 && name[1] == 11 && namelen == 2) {
     if (oldp && oldlenp) {

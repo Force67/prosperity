@@ -831,7 +831,7 @@ bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
         return true;
       }
 
-    // Shims for exports a given firmware lacks (see vprx/ps5/*_ps5.cpp);
+    // Shims for exports a given firmware lacks (see vprx/ps5/);
     // consulted only when no loaded module exports the NID. The seven AGC shims
     // are real exports from firmware 13.60 on; forcing them there would shadow
     // working code.
