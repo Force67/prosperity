@@ -8,25 +8,24 @@
  * in the root of the source tree.
  */
 
-#include <kern/process.h>
+#include "kern/process.h"
 
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
-#include <base/memory/unique_pointer.h>
+#include "base/containers/vector.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
 
 class Launcher {
-public:
-  using argvList = base::Vector<base::String>;
+ public:
+  using ArgvList = base::Vector<base::String>;
 
   Launcher();
   ~Launcher();
 
-  bool init();
-  void boot(const base::String& fromdir);
+  bool Init();
+  void Boot(const base::String& fromdir);
 
-  argvList argv;
+  ArgvList argv;
 
-private:
-  base::UniquePointer<kern::Process> proc;
+ private:
+  base::UniquePointer<kern::Process> proc_;
 };
-

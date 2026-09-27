@@ -1,15 +1,15 @@
 // Copyright (C) 2019 Force67
 
-#include <logger/logger.h>
-#include <host_memory/host_memory.h>
-#include <options/options.h>
-#include <io/path.h>
+#include "host_memory/host_memory.h"
+#include "io/path.h"
+#include "logger/logger.h"
+#include "options/options.h"
 #if defined(DELTA_BACKEND_NATIVE)
 #include <xbyak_util.h>
 #endif
 
-#include <base/strings/xstring.h>
-#include <base/containers/vector.h>
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 
 #include <cstring>
 
@@ -18,30 +18,31 @@
 #endif
 
 #ifdef _WIN32
-#include <Windows.h>
 #include <VersionHelpers.h>
+#include <Windows.h>
 #endif
 
-#include "main/launcher.h"
+#include "base/threading/thread.h"
 #include "cpu/backend.h"
-#include "host/overlay_log.h"
 #include "gpu/render/renderer.h"
+#include "host/overlay_log.h"
 #include "kern/guest_va_space.h"
-#include <base/threading/thread.h>
+#include "main/launcher.h"
 
-static bool verifyViablity() {
+static bool VerifyViability() {
 #ifdef _WIN32
   if (!IsWindows8OrGreater()) {
-    LOG_ERROR("Your operating system is outdated. Please update to windows 8 "
-              "or newer.");
+    LOG_ERROR(
+        "Your operating system is outdated. Please update to windows 8 "
+        "or newer.");
     return false;
   }
 #endif
 
-  constexpr size_t one_mb = 1024ull * 1024ull;
-  constexpr size_t eight_gb = 8ull * 1024ull * one_mb;
+  constexpr size_t kOneMb = 1024ull * 1024ull;
+  constexpr size_t kEightGb = 8ull * 1024ull * kOneMb;
 
-  if (host_memory::GetAvailableMem() < eight_gb) {
+  if (host_memory::GetAvailableMem() < kEightGb) {
     LOG_ERROR("Your system doesn't have enough physical memory to run " FXNAME);
     return false;
   }
@@ -52,10 +53,10 @@ static bool verifyViablity() {
   base::String missingFeatures;
   Xbyak::util::Cpu cpu;
 
-#define CHECK_FEATURE(x, y)                                                    \
-  if (!cpu.has(Xbyak::util::Cpu::t##x)) {                                      \
-    missingFeatures += y;                                                      \
-    missingFeatures += ";";                                                    \
+#define CHECK_FEATURE(x, y)               \
+  if (!cpu.has(Xbyak::util::Cpu::t##x)) { \
+    missingFeatures += y;                 \
+    missingFeatures += ";";               \
   }
 
   CHECK_FEATURE(SSE, "SSE");
@@ -92,13 +93,13 @@ static void registerPkgAssociation() {
   if (!GetModuleFileNameW(nullptr, exe, MAX_PATH))
     return;
 
-  auto writeKey = [](const wchar_t *sub, const base::StringW &value) {
+  auto writeKey = [](const wchar_t* sub, const base::StringW& value) {
     HKEY key;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, sub, 0, nullptr, 0, KEY_WRITE,
                         nullptr, &key, nullptr) != ERROR_SUCCESS)
       return;
     RegSetValueExW(key, nullptr, 0, REG_SZ,
-                   reinterpret_cast<const BYTE *>(value.c_str()),
+                   reinterpret_cast<const BYTE*>(value.c_str()),
                    static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
     RegCloseKey(key);
   };
@@ -111,8 +112,8 @@ static void registerPkgAssociation() {
 }
 
 static void win32PostInit() {
-  using NtQueryTimerResolution_t = LONG(WINAPI *)(PULONG, PULONG, PULONG);
-  using NtSetTimerResolution_t = LONG(WINAPI *)(ULONG, BOOLEAN, PULONG);
+  using NtQueryTimerResolution_t = LONG(WINAPI*)(PULONG, PULONG, PULONG);
+  using NtSetTimerResolution_t = LONG(WINAPI*)(ULONG, BOOLEAN, PULONG);
 
   auto hNtLib = GetModuleHandleW(L"ntdll.dll");
   auto NtQueryTimerResolution_f = reinterpret_cast<NtQueryTimerResolution_t>(
@@ -128,7 +129,7 @@ static void win32PostInit() {
 }
 #endif
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
 #if defined(__linux__)
   // Let a debugger attach to a run that is already going. Under the default
   // yama ptrace_scope=1 only an ancestor may attach, and a stuck title is
@@ -154,14 +155,14 @@ int main(int argc, char **argv) {
   // Claim the addresses the guest MAP_FIXEDs before anything host-side can be
   // handed them, in particular before the CPU backend reserves its JIT heap.
   kern::ReserveGuestVaSpace();
-  cpu::EarlyInit(); // segregate guest/JIT memory before guest modules map
+  cpu::EarlyInit();  // segregate guest/JIT memory before guest modules map
 
-  if (!verifyViablity())
+  if (!VerifyViability())
     return -1;
 
   Launcher core;
 
-  if (!core.init())
+  if (!core.Init())
     return -1;
 
 #ifdef _WIN32
@@ -178,7 +179,7 @@ int main(int argc, char **argv) {
     }
 
     base::String path(argv[1]);
-    core.boot(path);
+    core.Boot(path);
   }
 
   // Block forever; proc runs on a detached thread.

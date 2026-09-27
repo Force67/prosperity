@@ -8,9 +8,9 @@
  * input to the host pad. Rendering reaches the screen via window_android.cc.
  */
 #include <android/log.h>
-#include "base/arch.h"
 #include <android/native_window.h>
 #include <android_native_app_glue.h>
+#include "base/arch.h"
 
 #include <pthread.h>
 #include <unistd.h>
@@ -19,24 +19,25 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <base/option_file.h>
-#include <base/strings/xstring.h>
+#include "base/option_file.h"
+#include "base/strings/xstring.h"
 
 #include "cpu/backend.h"
-#include "main/launcher.h"
 #include "host/window.h"
 #include "host/window_android.h"
-#include <logger/logger.h>
-#include <options/options.h>
+#include "logger/logger.h"
+#include "main/launcher.h"
+#include "options/options.h"
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "prosperity", __VA_ARGS__)
+#define LOGI(...) \
+  __android_log_print(ANDROID_LOG_INFO, "prosperity", __VA_ARGS__)
 
 namespace {
 
 // Pump stdout/stderr (the emulator logs through both) into logcat so a plain
 // `adb logcat -s prosperity` shows the whole boot.
-void *logPump(void *arg) {
-  int fd = *static_cast<int *>(arg);
+void* LogPump(void* arg) {
+  int fd = *static_cast<int*>(arg);
   char buf[2048];
   ssize_t n;
   while ((n = ::read(fd, buf, sizeof(buf) - 1)) > 0) {
@@ -48,7 +49,7 @@ void *logPump(void *arg) {
   return nullptr;
 }
 
-void redirectStdioToLogcat() {
+void RedirectStdioToLogcat() {
   static int pfd[2];
   if (::pipe(pfd) != 0)
     return;
@@ -57,13 +58,13 @@ void redirectStdioToLogcat() {
   setvbuf(stdout, nullptr, _IONBF, 0);
   setvbuf(stderr, nullptr, _IONBF, 0);
   pthread_t t;
-  pthread_create(&t, nullptr, logPump, &pfd[0]);
+  pthread_create(&t, nullptr, LogPump, &pfd[0]);
   pthread_detach(t);
 }
 
 struct AppState {
-  Launcher *core = nullptr;
-  base::String dataDir;
+  Launcher* core = nullptr;
+  base::String data_dir;
   bool booted = false;
 };
 
@@ -71,15 +72,15 @@ struct AppState {
 // <dataDir>/boot.cfg (one line) before starting this NativeActivity. Read it;
 // fall back to the legacy <dataDir>/game.pkg when no launcher config exists
 // (e.g. data staged by hand over adb).
-base::String resolveBootPkg(const base::String &dataDir) {
-  base::String cfg = dataDir;
+base::String ResolveBootPkg(const base::String& data_dir) {
+  base::String cfg = data_dir;
   cfg += "/boot.cfg";
-  if (FILE *f = ::fopen(cfg.c_str(), "rb")) {
+  if (FILE* f = ::fopen(cfg.c_str(), "rb")) {
     char buf[4096];
     size_t n = ::fread(buf, 1, sizeof(buf) - 1, f);
     ::fclose(f);
     buf[n] = '\0';
-    char *p = buf;
+    char* p = buf;
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
       ++p;
     size_t len = std::strlen(p);
@@ -90,40 +91,41 @@ base::String resolveBootPkg(const base::String &dataDir) {
       return base::String(p);
     LOGI("boot.cfg path unusable ('%s'); falling back to game.pkg", p);
   }
-  base::String fallback = dataDir;
+  base::String fallback = data_dir;
   fallback += "/game.pkg";
   return fallback;
 }
 
-void bootOnce(AppState *s) {
+void BootOnce(AppState* s) {
   if (s->booted)
     return;
   s->booted = true;
   s->core = new Launcher();
-  s->core->init();
-  base::String pkg = resolveBootPkg(s->dataDir);
+  s->core->Init();
+  base::String pkg = ResolveBootPkg(s->data_dir);
   LOGI("booting pkg %s", pkg.c_str());
-  s->core->boot(pkg);  // mounts pkg, runs the guest on a detached thread
+  s->core->Boot(pkg);  // mounts pkg, runs the guest on a detached thread
 }
 
-// Forward the currently-down touch points (surface pixel coords) to the host window, which
-// owns the on-screen control layout and maps them to the DS4 pad + overlay.
-void forwardTouch(AInputEvent *ev) {
+// Forward the currently-down touch points (surface pixel coords) to the host
+// window, which owns the on-screen control layout and maps them to the DS4 pad
+// + overlay.
+void ForwardTouch(AInputEvent* ev) {
   int action = AMotionEvent_getAction(ev);
   int kind = action & AMOTION_EVENT_ACTION_MASK;
   if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_CANCEL) {
     host::SetAndroidTouches(nullptr, 0);  // last finger up
     return;
   }
-  int upIdx = -1;
+  int up_idx = -1;
   if (kind == AMOTION_EVENT_ACTION_POINTER_UP)
-    upIdx = (action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >>
-            AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
+    up_idx = (action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >>
+             AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
   int n = AMotionEvent_getPointerCount(ev);
   host::Touch pts[8];
   int c = 0;
   for (int i = 0; i < n && c < 8; i++) {
-    if (i == upIdx)
+    if (i == up_idx)
       continue;  // this pointer is lifting
     pts[c].x = AMotionEvent_getX(ev, i);
     pts[c].y = AMotionEvent_getY(ev, i);
@@ -132,26 +134,27 @@ void forwardTouch(AInputEvent *ev) {
   host::SetAndroidTouches(pts, c);
 }
 
-void onCmd(android_app *app, i32 cmd) {
-  auto *s = static_cast<AppState *>(app->userData);
+void OnCmd(android_app* app, i32 cmd) {
+  auto* s = static_cast<AppState*>(app->userData);
   switch (cmd) {
-  case APP_CMD_INIT_WINDOW:
-    if (app->window) {
-      host::SetAndroidWindow(app->window);
-      bootOnce(s);  // first window: start the emulator (renderer needs a window)
-    }
-    break;
-  case APP_CMD_TERM_WINDOW:
-    host::SetAndroidWindow(nullptr);
-    break;
-  default:
-    break;
+    case APP_CMD_INIT_WINDOW:
+      if (app->window) {
+        host::SetAndroidWindow(app->window);
+        BootOnce(
+            s);  // first window: start the emulator (renderer needs a window)
+      }
+      break;
+    case APP_CMD_TERM_WINDOW:
+      host::SetAndroidWindow(nullptr);
+      break;
+    default:
+      break;
   }
 }
 
-i32 onInput(android_app *, AInputEvent *ev) {
+i32 OnInput(android_app*, AInputEvent* ev) {
   if (AInputEvent_getType(ev) == AINPUT_EVENT_TYPE_MOTION) {
-    forwardTouch(ev);
+    ForwardTouch(ev);
     return 1;
   }
   return 0;
@@ -159,35 +162,36 @@ i32 onInput(android_app *, AInputEvent *ev) {
 
 }  // namespace
 
-extern "C" void android_main(android_app *app) {
-  redirectStdioToLogcat();
-  kern::ReserveGuestVaSpace();  // claim guest-fixed ranges first (no-op on Android)
+extern "C" void android_main(android_app* app) {
+  RedirectStdioToLogcat();
+  kern::ReserveGuestVaSpace();  // claim guest-fixed ranges first (no-op on
+                                // Android)
   cpu::EarlyInit();  // reserve the FEX heap before any large guest mapping
   logger::CreateLogger(true);
   logger::RouteBaseLogging();
 
   AppState state;
-  const char *ext = app->activity->externalDataPath;
-  state.dataDir = base::String(ext ? ext : "/data/local/tmp/prosperity");
-  LOGI("data dir = %s", state.dataDir.c_str());
+  const char* ext = app->activity->externalDataPath;
+  state.data_dir = base::String(ext ? ext : "/data/local/tmp/prosperity");
+  LOGI("data dir = %s", state.data_dir.c_str());
 
   // The activity has no command line of its own, so the knobs come from the
   // environment plus an options.txt pushed next to the modules and the game.
   options::Init();
-  base::SetOptionValue("DELTA_DATA_DIR", state.dataDir.c_str());
-  base::String optionFile = state.dataDir;
-  optionFile.append("/options.txt");
-  options::LoadFile(optionFile.c_str(), /*optional=*/true);
+  base::SetOptionValue("DELTA_DATA_DIR", state.data_dir.c_str());
+  base::String option_file = state.data_dir;
+  option_file.append("/options.txt");
+  options::LoadFile(option_file.c_str(), /*optional=*/true);
 
   app->userData = &state;
-  app->onAppCmd = onCmd;
-  app->onInputEvent = onInput;
+  app->onAppCmd = OnCmd;
+  app->onInputEvent = OnInput;
 
   while (!app->destroyRequested) {
     int events;
-    android_poll_source *source;
+    android_poll_source* source;
     if (ALooper_pollOnce(-1, nullptr, &events,
-                         reinterpret_cast<void **>(&source)) < 0)
+                         reinterpret_cast<void**>(&source)) < 0)
       continue;
     if (source)
       source->process(app, source);
