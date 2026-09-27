@@ -69,7 +69,10 @@ add_library(eq_base STATIC
   equilibrium/base/environment_variables_posix.cc
   equilibrium/base/logging.cc
   equilibrium/base/option_file.cc
+  equilibrium/base/standard_streams_posix.cc
+  equilibrium/base/strings/float_format.cc
   equilibrium/base/strings/format.cc
+  equilibrium/base/strings/number_parse.cc
   equilibrium/base/filesystem/file.cc
   equilibrium/base/filesystem/path.cc
   equilibrium/base/filesystem/scoped_file.cc

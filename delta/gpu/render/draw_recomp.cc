@@ -163,8 +163,6 @@ struct StageCache {
   };
   static constexpr u32 kBlockShift = 16;
   base::UnorderedMap<StageCacheKey, Entry, StageCacheKeyHash> map;
-  // Dropped entries are zeroed rather than erased: base::UnorderedMap can
-  // insert a key twice after an erase leaves a tombstone ahead of it.
   // Tracked keys by the 64 KiB blocks they cover. May hold keys since dropped
   // or re-inserted: Invalidate rechecks each against the map.
   std::unordered_map<u64, std::vector<StageCacheKey>> blocks;
@@ -217,7 +215,7 @@ struct StageCache {
       for (const StageCacheKey& key : keys) {
         Entry* e = map.find(key);
         if (e && key.base < end && first < key.base + e->bytes)
-          e->bytes = 0;
+          map.erase(key);
       }
     };
     // A remapped reservation can span gigabytes: walk the smaller side.
