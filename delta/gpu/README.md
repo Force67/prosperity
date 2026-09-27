@@ -240,26 +240,8 @@ with the `DELTA_GPU_*` logs:
 
 ## Conventions
 
-The module follows [Chromium C++ style](https://chromium.googlesource.com/chromium/src/+/main/styleguide/c++/c++.md),
-enforced by the local `.clang-format` / `.clang-tidy` (naming) and by
-`tests/check_layering.py` (dependencies, registered with CTest as
-`gpu_layering`):
-
-- Types `CamelCase`; functions `CamelCase()`; variables, struct members and
-  parameters `snake_case` (private class members would take a trailing `_`);
-  constants `kCamelCase`; mutable globals `g_snake_case`; macros `UPPER_CASE`.
-- Every include is spelled from the delta root (`gpu/render/frame.h`),
-  including inside the module. No extra include roots.
-- Directory dependencies are one-way and machine-checked; the module's public
-  surface is `render/` plus the two `cmd_processor.h` entry headers. Everything
-  else is internal: nothing outside `delta/gpu` may include it.
-
-Deliberate deviations from Chromium:
-
-- (The module uses Chromium's `.cc` extension; the rest of the repo stays
-  `.cpp`. The shared `add_delta_module` glob accepts both.)
-- Unit tests live in `tests/`, not next to the code (repo-wide
-  `add_delta_module`/CTest wiring).
-- Hardware mnemonics keep AMD's canonical spelling (`IT_DRAW_INDEX_2`,
-  register names) so they can be grepped against cikd.h and the ISA docs;
-  such enums carry `NOLINT` guards.
+The module follows the repo-wide [conventions](../../docs/conventions.md),
+plus `tests/check_layering.py` (registered with CTest as `gpu_layering`):
+directory dependencies inside the module are one-way, and its public surface
+is `render/` plus the two `cmd_processor.h` entry headers. Everything else is
+internal: nothing outside `delta/gpu` may include it.

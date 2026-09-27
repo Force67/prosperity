@@ -10,6 +10,7 @@ glslangValidator -V -S "$STAGE" "$SRC" -o "$TMP"
   echo "// Generated."
   echo "#pragma once"
   echo "#include \"base/arch.h\""
+  echo "// NOLINTBEGIN(readability-identifier-naming): generated"
   printf 'static const u32 %s[]={' "$VAR"
   python3 - "$TMP" <<'PY'
 import sys,struct
@@ -19,5 +20,6 @@ vals=struct.unpack('<%dI'%n,d)
 sys.stdout.write(','.join('0x%08x'%v for v in vals))
 PY
   echo "};"
+  echo "// NOLINTEND(readability-identifier-naming)"
 } > "$OUT"
 echo "wrote $OUT"

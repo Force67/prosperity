@@ -1,6 +1,7 @@
-# Machine-enforced Chromium naming for delta/gpu (see README "Conventions").
-# Hardware-mnemonic enums (PM4 IT_* opcodes, AMD register names) are exempted
-# in place with NOLINTBEGIN/END(readability-identifier-naming) blocks.
+# Machine-enforced Chromium naming. Hardware mnemonics (PM4 IT_* opcodes, AMD
+# register names) are exempted in place with NOLINTBEGIN/END blocks. Guest ABI
+# entry points keep their Sony/BSD spelling (sce*, sys_*, unk_<nid>), JNI
+# exports theirs (Java_*).
 Checks: '-*,readability-identifier-naming'
 CheckOptions:
   - key: readability-identifier-naming.NamespaceCase
@@ -15,6 +16,13 @@ CheckOptions:
     value: CamelCase
   - key: readability-identifier-naming.FunctionCase
     value: CamelCase
+  - key: readability-identifier-naming.FunctionIgnoredRegexp
+    value: '^(sce|sys_|unk_|Java_).*'
+  # lower_case methods are trivial accessors (field-like, Chromium).
+  - key: readability-identifier-naming.MethodCase
+    value: CamelCase
+  - key: readability-identifier-naming.MethodIgnoredRegexp
+    value: '^([a-z][a-z0-9_]*|sce.*|sys_.*)$'
   - key: readability-identifier-naming.VariableCase
     value: lower_case
   - key: readability-identifier-naming.ParameterCase
@@ -43,9 +51,26 @@ CheckOptions:
     value: CamelCase
   - key: readability-identifier-naming.StaticConstantPrefix
     value: 'k'
+  # kFOO_BAR keeps a spec mnemonic readable behind the k (O_CREAT itself is a
+  # libc macro); mmREG_NAME is AMD's register-offset spelling.
+  - key: readability-identifier-naming.EnumConstantIgnoredRegexp
+    value: '^(k[A-Z0-9][A-Za-z0-9]*(_[A-Za-z0-9]+)+|mm[A-Z][A-Z0-9_]*)$'
+  - key: readability-identifier-naming.ConstexprVariableIgnoredRegexp
+    value: '^(k[A-Z0-9][A-Za-z0-9]*(_[A-Za-z0-9]+)+|mm[A-Z][A-Z0-9_]*)$'
+  - key: readability-identifier-naming.StaticConstantIgnoredRegexp
+    value: '^(k[A-Z0-9][A-Za-z0-9]*(_[A-Za-z0-9]+)+|mm[A-Z][A-Z0-9_]*)$'
+  - key: readability-identifier-naming.GlobalConstantIgnoredRegexp
+    value: '^(k[A-Z0-9][A-Za-z0-9]*(_[A-Za-z0-9]+)+|mm[A-Z][A-Z0-9_]*)$'
+  # Local constants may take the kFoo form.
+  - key: readability-identifier-naming.VariableIgnoredRegexp
+    value: '^k[A-Z][A-Za-z0-9]*$'
   - key: readability-identifier-naming.GlobalVariableCase
     value: lower_case
   - key: readability-identifier-naming.GlobalVariablePrefix
     value: 'g_'
+  # DELTA_OPTION knobs are mutable globals named like constants; thread-locals
+  # take t_ instead of g_.
+  - key: readability-identifier-naming.GlobalVariableIgnoredRegexp
+    value: '^(k[A-Z].*|t_[a-z0-9_]+)$'
   - key: readability-identifier-naming.MacroDefinitionCase
     value: UPPER_CASE

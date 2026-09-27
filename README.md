@@ -24,6 +24,7 @@ Everything else, including the loader, kernel HLE, and devices, runs as natively
 ## Documentation
 * [Building](docs/building.md)
 * [Installation & running](docs/installation.md)
+* [Code conventions](docs/conventions.md)
 
 ## Quick start (Linux)
 

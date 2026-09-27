@@ -1,3 +1,2 @@
-BasedOnStyle: LLVM
-PointerAlignment: Right
-SortIncludes: 'true'
+BasedOnStyle: Chromium
+SortIncludes: true
