@@ -8,200 +8,205 @@
  * in the root of the source tree.
  */
 
-#include "process.h"
 #include "base/arch.h"
-#include <elf_types.h>
-#include <sce_types.h>
+#include "elf_types.h"
+#include "sce_types.h"
 
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
-#include <base/memory/unique_pointer.h>
+#include "base/containers/vector.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
 
 namespace io {
 class File;
 }
 
 namespace krnl {
-struct moduleSeg {
-  u8 *addr;
+class Proc;
+struct ModuleSeg {
+  u8* addr;
   u32 size;
 };
 
-struct moduleInfo {
+struct ModuleInfo {
   base::String name;
   u32 handle;
-  u8 *base;
-  u8 *entry;
-  u16 tlsSlot;
-  u32 codeSize;
+  u8* base;
+  u8* entry;
+  u16 tls_slot;
+  u32 code_size;
 
-  u8 *ripZone;
-  size_t ripZoneSize;
+  u8* rip_zone;
+  size_t rip_zone_size;
 
-  u8 *procParam;
-  u32 procParamSize;
+  u8* proc_param;
+  u32 proc_param_size;
 
   // per-library SCE module param (PT_SCE_MODULEPARAM); queried via
   // sys_dynlib_get_obj_member index 8 to validate the module's SDK version.
-  u8 *moduleParam;
-  u32 moduleParamSize;
+  u8* module_param;
+  u32 module_param_size;
 
-  u8 *initAddr;
-  u8 *finiAddr;
-  bool initRan = false;  // DT_INIT already executed (loader runs it for some PRX)
+  u8* init_addr;
+  u8* fini_addr;
+  bool init_ran =
+      false;  // DT_INIT already executed (loader runs it for some PRX)
 
-  moduleSeg textSeg;
-  moduleSeg dataSeg;
+  ModuleSeg text_seg;
+  ModuleSeg data_seg;
 
-  u8 *tlsAddr;
-  size_t tlsSizeMem;
-  size_t tlsSizeFile;
+  u8* tls_addr;
+  size_t tls_size_mem;
+  size_t tls_size_file;
   u32 tlsalign;
 
-  u8 *ehFrameheaderAddr;
-  u8 *ehFrameAddr;
-  u32 ehFrameheaderSize;
-  u32 ehFrameSize;
+  u8* eh_frameheader_addr;
+  u8* eh_frame_addr;
+  u32 eh_frameheader_size;
+  u32 eh_frame_size;
 
   u8 fingerprint[20];
 };
 
-class smodule {
-  friend class proc;
+class Smodule {
+  friend class Proc;
 
-public:
-  explicit smodule(proc *);
+ public:
+  explicit Smodule(Proc*);
 
-  bool fromFile(const base::String &);
+  bool FromFile(const base::String&);
   // Load a module from a guest VFS path (host or virtual mount). Converts a
   // fake SELF to an ELF on the fly, so it works for a pkg's eboot.bin.
-  bool fromVfs(const base::String &);
-  bool fromMem(base::UniquePointer<u8[]>);
+  bool FromVfs(const base::String&);
+  bool FromMem(base::UniquePointer<u8[]>);
 
-  uintptr_t getSymbol(u64);
-  // LLE-only export lookup by NID (getSymbol without the HLE/vprx override), for
-  // the PS5 global-NID resolver.
-  uintptr_t getExport(u64 nid);
-  uintptr_t getSymbolFullName(const char *name);
-  uintptr_t getSymbol2(const char *name);
+  uintptr_t GetSymbol(u64);
+  // LLE-only export lookup by NID (GetSymbol without the HLE/vprx override),
+  // for the PS5 global-NID resolver.
+  uintptr_t GetExport(u64 nid);
+  uintptr_t GetSymbolFullName(const char* name);
+  uintptr_t GetSymbol2(const char* name);
   // Resolve an exported symbol by its 11-char NID prefix (export strtab names
   // are "<nid>#<libid>#<modid>"; dlsym only knows the NID, not the inner ids).
-  uintptr_t getSymbolByNid(const char *nid);
-  bool resolveObfSymbol(const char *name, uintptr_t &ptrOut);
+  uintptr_t GetSymbolByNid(const char* nid);
+  bool ResolveObfSymbol(const char* name, uintptr_t& ptr_out);
 
-  bool applyRelocations();
-  bool resolveImports();
+  bool ApplyRelocations();
+  bool ResolveImports();
 
-  // Imports that landed on the badcall stub the last time resolveImports ran,
+  // Imports that landed on the badcall stub the last time ResolveImports ran,
   // i.e. slots a module loaded later could still satisfy.
-  inline bool hasUnresolvedImports() const { return unresolvedImports != 0; }
+  inline bool HasUnresolvedImports() const { return unresolved_imports_ != 0; }
 
-  bool unload();
+  bool Unload();
 
-  inline moduleInfo &getInfo() { return info; }
+  inline ModuleInfo& GetInfo() { return info_; }
 
   // DT_NEEDED module names (".prx" suffix stripped), for dependency-ordered
   // module enumeration (sys_dynlib_get_list).
-  inline const base::Vector<base::String> &neededObjects() const {
-    return sharedObjects;
+  inline const base::Vector<base::String>& NeededObjects() const {
+    return shared_objects_;
   }
 
-  inline bool isDynlib() { return elf->type == ET_SCE_DYNAMIC; }
+  inline bool IsDynlib() { return elf_->type == ET_SCE_DYNAMIC; }
 
   /*traits -> ObjectRef TODO: properly implement*/
-  void release(){};
-  void retain(){};
+  void Release() {};
+  void Retain() {};
 
-private:
-  moduleInfo info{};
+ private:
+  ModuleInfo info_{};
 
-  void digestDynamic();
-  // PS5 modules drop PT_SCE_DYNLIBDATA and use standard ELF dynamic tags; parsed
-  // on this separate path so PS4 handling stays byte-identical.
-  void digestDynamicPs5(const ELFPgHeader *dynS);
-  void logDbgInfo();
-  void installEHFrame();
-  bool setupTLS();
-  bool mapImage();
-  void startModuleWatch();
-  void plantGuestBreakpoints();
+  void DigestDynamic();
+  // PS5 modules drop PT_SCE_DYNLIBDATA and use standard ELF dynamic tags;
+  // parsed on this separate path so PS4 handling stays byte-identical.
+  void DigestDynamicPs5(const ELFPgHeader* dyn_s);
+  void LogDbgInfo();
+  void InstallEhFrame();
+  bool SetupTls();
+  bool MapImage();
+  void StartModuleWatch();
+  void PlantGuestBreakpoints();
 
-  template <typename Type, typename TAdd> Type *getOffset(const TAdd dist) {
-    return (Type *)(data.Get_UseOnlyIfYouKnowWhatYouareDoing() + dist);
+  template <typename Type, typename TAdd>
+  Type* GetOffset(const TAdd dist) {
+    return (Type*)(data_.Get_UseOnlyIfYouKnowWhatYouareDoing() + dist);
   }
 
-  template <typename Type, typename TAdd> Type *getAddress(const TAdd dist) {
-    return (Type *)(info.base + dist);
+  template <typename Type, typename TAdd>
+  Type* GetAddress(const TAdd dist) {
+    return (Type*)(info_.base + dist);
   }
 
-  template <typename Type, typename TAdd> Type getAddressNPTR(const TAdd dist) {
-    return (Type)(info.base + dist);
+  template <typename Type, typename TAdd>
+  Type GetAddressNptr(const TAdd dist) {
+    return (Type)(info_.base + dist);
   }
 
-  template <typename Type = ELFPgHeader> Type *getSegment(ElfSegType type) {
-    for (u16 i = 0; i < elf->phnum; i++) {
-      auto s = &segments[i];
+  template <typename Type = ELFPgHeader>
+  Type* GetSegment(ElfSegType type) {
+    for (u16 i = 0; i < elf_->phnum; i++) {
+      auto s = &segments_[i];
       if (s->type == type)
-        return reinterpret_cast<Type *>(s);
+        return reinterpret_cast<Type*>(s);
     }
 
     return nullptr;
   }
 
-private:
-  base::UniquePointer<u8[]> data;
+ private:
+  base::UniquePointer<u8[]> data_;
 
-private:
-  proc *process;
-  ELFHeader *elf;
-  ELFPgHeader *segments;
+ private:
+  Proc* process_;
+  ELFHeader* elf_;
+  ELFPgHeader* segments_;
 
-  struct libInfo {
-    const char *name;
+  struct LibInfo {
+    const char* name;
     i32 id;
     u16 attr;
     bool exported;
   };
 
-  struct modInfo {
-    const char *name;
+  struct ModInfo {
+    const char* name;
     i32 id;
     u16 attr;
   };
 
-  base::Vector<modInfo> impModules;
-  base::Vector<libInfo> impLibs;
-  base::Vector<base::String> sharedObjects;
+  base::Vector<ModInfo> imp_modules_;
+  base::Vector<LibInfo> imp_libs_;
+  base::Vector<base::String> shared_objects_;
 
   // True for a PS5 (Prospero) module: standard-ELF dynamic layout, no
-  // PT_SCE_DYNLIBDATA. Set by digestDynamic(); gates the PS5-only code path.
-  bool ps5Layout = false;
+  // PT_SCE_DYNLIBDATA. Set by DigestDynamic(); gates the PS5-only code path.
+  bool ps5_layout_ = false;
 
-  // filled in by digestDynamic() from DT_ entries. must default to zero: a
+  // filled in by DigestDynamic() from DT_ entries. must default to zero: a
   // module that omits one would otherwise relocate against garbage.
-  ElfRel *jmpslots = nullptr;
-  ElfRel *rela = nullptr;
-  ElfSym *symbols = nullptr;
-  u8 *hashes = nullptr;
+  ElfRel* jmpslots_ = nullptr;
+  ElfRel* rela_ = nullptr;
+  ElfSym* symbols_ = nullptr;
+  u8* hashes_ = nullptr;
 
-  struct table {
-    char *ptr = nullptr;
+  struct Table {
+    char* ptr = nullptr;
     size_t size = 0;
   };
 
-  table strtab;
-  table symtab;
+  Table strtab_;
+  Table symtab_;
 
-  u32 numJmpSlots = 0;
-  u32 numSymbols = 0;
-  u32 numRela = 0;
+  u32 num_jmp_slots_ = 0;
+  u32 num_symbols_ = 0;
+  u32 num_rela_ = 0;
 
-  // applyRelocations must run at most once: the TLS relocs (DTPMOD64/DTPOFF)
+  // ApplyRelocations must run at most once: the TLS relocs (DTPMOD64/DTPOFF)
   // are additive (+=), so a second pass (the harness relocates, then the guest
   // libkernel calls syscall 599 too) would double the module's TLS index.
-  bool relocated = false;
+  bool relocated_ = false;
 
-  u32 unresolvedImports = 0;
-  bool importsBound = false;
+  u32 unresolved_imports_ = 0;
+  bool imports_bound_ = false;
 };
-}
+}  // namespace krnl

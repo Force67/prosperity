@@ -10,23 +10,23 @@
 
 #include "base/arch.h"
 
+#include "base/containers/vector.h"
+#include "kern/ps4/dev/device.h"
 #include "kern/vfs.h"
-#include "device.h"
-#include <base/containers/vector.h>
 
 namespace krnl {
 // A directory opened by the guest (e.g. /app0/resources). Holds a snapshot of
 // its immediate children and serves them through getdents; fstat reports it as
 // a directory. Games open a dir then enumerate it to find their resources.
-class dirDevice : public device {
-public:
-  dirDevice(objectTable &objects, base::Vector<vfs::DirEntry> &&entries);
+class DirDevice : public Device {
+ public:
+  DirDevice(ObjectTable& objects, base::Vector<vfs::DirEntry>&& entries);
 
-  i64 getdents(void *buf, size_t len) override;
-  int fstat(void *stat) override;
-  i64 read(void *, size_t) override;
+  i64 Getdents(void* buf, size_t len) override;
+  int Fstat(void* stat) override;
+  i64 Read(void*, size_t) override;
 
-private:
+ private:
   base::Vector<vfs::DirEntry> entries_;
   size_t cursor_ = 0;
 };

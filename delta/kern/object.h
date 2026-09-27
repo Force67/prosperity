@@ -9,66 +9,67 @@
  */
 
 #include "base/arch.h"
-#include <kern/object_ref.h>
+#include "kern/object_ref.h"
 
-#include <base/containers/vector.h>
-#include <base/strings/string_ref.h>
-#include <base/strings/xstring.h>
-#include <base/atomic.h>
+#include "base/atomic.h"
+#include "base/containers/vector.h"
+#include "base/strings/string_ref.h"
+#include "base/strings/xstring.h"
 
 namespace krnl {
-class proc;
-class objectTable;
+class Proc;
+class ObjectTable;
 
-class kObject {
-public:
-  using handleList = base::Vector<u32>;
+class Object {
+ public:
+  using HandleList = base::Vector<u32>;
 
-  enum class oType {
-    file,
-    device,
-    equeue,
-    eventflag,
-    semaphore,
-    shm,
+  enum class OType {
+    kFile,
+    kDevice,
+    kEqueue,
+    kEventflag,
+    kSemaphore,
+    kShm,
   };
 
-  explicit kObject(objectTable &, oType);
+  explicit Object(ObjectTable&, OType);
   // Must be virtual: derived devices add virtual methods, so without a virtual
-  // dtor the kObject subobject sits past the vptr (offset 8) and `delete this`
+  // dtor the Object subobject sits past the vptr (offset 8) and `delete this`
   // in release() would free an interior pointer (invalid free) and skip the
   // derived destructors (leaking the device's file handle).
-  virtual ~kObject() = default;
+  virtual ~Object() = default;
 
-  void retain();
-  void release();
-  void retainHandle();
-  void releaseHandle();
+  void Retain();
+  void Release();
+  void RetainHandle();
+  void ReleaseHandle();
 
-  oType type() const { return otype; }
+  OType type() const { return otype_; }
 
-  handleList &handles() { return handleCollection; }
+  HandleList& handles() { return handle_collection_; }
 
-  u32 handle() const { return handleCollection[0]; }
+  u32 handle() const { return handle_collection_[0]; }
 
   // What diagnostics call this object. Devices are opened by name, so the
   // opener is the only place that knows it.
-  void setName(base::StringRef n) { name = base::String(n.data(), n.size()); }
-  const base::String &GetName() const { return name; }
+  void SetName(base::StringRef n) { name_ = base::String(n.data(), n.size()); }
+  const base::String& GetName() const { return name_; }
 
-protected:
-  oType otype;
-  objectTable &objects;
-  base::String name;
+ protected:
+  OType otype_;
+  ObjectTable& objects_;
+  base::String name_;
 
-private:
-  handleList handleCollection;
-  base::Atomic<i32> refCount;
+ private:
+  HandleList handle_collection_;
+  base::Atomic<i32> ref_count_;
 };
 
-template <typename T> krnl::ObjectRef<T> retain_object(T *ptr) {
+template <typename T>
+krnl::ObjectRef<T> RetainObject(T* ptr) {
   if (ptr)
     ptr->retain();
   return krnl::ObjectRef<T>(ptr);
 }
-}
+}  // namespace krnl

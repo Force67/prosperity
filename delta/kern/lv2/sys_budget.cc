@@ -6,10 +6,10 @@
  * in the root of the source tree.
  */
 
-#include <guest_abi.h>
-#include <logger/logger.h>
+#include "guest_abi.h"
+#include "logger/logger.h"
 
-#include <kern/process.h>
+#include "kern/process.h"
 
 namespace krnl {
 using namespace krnl;
@@ -22,4 +22,4 @@ using namespace krnl;
 int PS4ABI sys_budget_get_ptype() {
   return 1;
 }
-} // namespace krnl
+}  // namespace krnl

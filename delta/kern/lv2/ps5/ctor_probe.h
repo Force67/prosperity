@@ -1,8 +1,7 @@
 #pragma once
 
-
 namespace krnl {
-class proc;
+class Proc;
 }
 
 namespace krnl::ps5 {
@@ -13,6 +12,6 @@ namespace krnl::ps5 {
 // before every static initializer. Used to answer "if subsystem X were already
 // constructed, how much further would this title boot?" without guessing at the
 // real trigger. DELTA_PS5_CTOR_PREPEND=<hex offset into the main module>.
-void maybePrependCtor(proc &p);
+void MaybePrependCtor(Proc& p);
 
-} // namespace krnl::ps5
+}  // namespace krnl::ps5

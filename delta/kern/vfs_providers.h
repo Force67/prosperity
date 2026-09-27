@@ -19,34 +19,34 @@
 
 #include "base/arch.h"
 
-#include <base/strings/xstring.h>
+#include "base/strings/xstring.h"
 
+#include "base/containers/vector.h"
+#include "base/memory/shared_pointer.h"
 #include "kern/vfs.h"
-#include <base/containers/vector.h>
-#include <base/memory/shared_pointer.h>
 
 namespace krnl::vfs {
 
 struct TitleMount {
   // Null when the container could not be opened; nothing else is then set.
   base::SharedPointer<VirtualProvider> provider;
-  base::String titleId;
+  base::String title_id;
   base::String title;
   base::Vector<u8> icon;  // empty unless `wantIcon`
-  u32 attributes = 0;    // PS4 param.sfo ATTRIBUTE
-  u32 sdkVersion = 0;    // PS5 param.json sdkVersion, top half
-  bool isPs5 = false;
+  u32 attributes = 0;     // PS4 param.sfo ATTRIBUTE
+  u32 sdk_version = 0;    // PS5 param.json sdkVersion, top half
+  bool is_ps5 = false;
   // Whether the container carries a decrypted/ tree of plaintext ELFs. When it
   // does not, the top-level eboot.bin is a still-encrypted SELF.
-  bool hasDecrypted = false;
+  bool has_decrypted = false;
 
   explicit operator bool() const { return provider != nullptr; }
 };
 
 // `wantIcon` reads sce_sys/icon0.png into the result; it is up to 16 MiB and
 // only the desktop window title bar uses it.
-TitleMount mountPkg(const base::String &path, bool wantIcon);
-TitleMount mountFfpkg(const base::String &path, bool wantIcon);
-TitleMount mountArchive(const base::String &path, bool wantIcon);
+TitleMount MountPkg(const base::String& path, bool want_icon);
+TitleMount MountFfpkg(const base::String& path, bool want_icon);
+TitleMount MountArchive(const base::String& path, bool want_icon);
 
 }  // namespace krnl::vfs

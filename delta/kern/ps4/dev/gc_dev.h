@@ -2,56 +2,55 @@
 
 // Copyright (C) Force67 2019
 
-#include "device.h"
 #include "base/arch.h"
-#include <base/containers/array.h>
-#include <base/threading/mutex.h>
-
+#include "base/containers/array.h"
+#include "base/threading/mutex.h"
+#include "kern/ps4/dev/device.h"
 
 namespace krnl {
-class proc;
+class Proc;
 
-class gcDevice : public device {
-public:
-  gcDevice(objectTable &);
+class GcDevice : public Device {
+ public:
+  GcDevice(ObjectTable&);
 
-  bool init(const char *, u32, u32) override;
-  i32 ioctl(u32 command, void *args) override;
-  u8 *map(void *, size_t, u32, u32, size_t) override;
+  bool Init(const char*, u32, u32) override;
+  i32 Ioctl(u32 command, void* args) override;
+  u8* Map(void*, size_t, u32, u32, size_t) override;
 
   // Kernel /dev/gc maps GPU-visible memory at a fixed base+offset; mirror that
   // with a lazily-allocated pool (identity range, CP-renderable).
-  u8 *poolBase = nullptr;
-  u64 poolSize = 0;
+  u8* pool_base = nullptr;
+  u64 pool_size = 0;
 
   // Execute the complete indirect-buffer packets sitting in every mapped
   // compute queue, up to `budget_dw` dwords per queue. Static because the
   // queues are hardware state and the per-frame drain runs outside any ioctl.
-  // The CALLER must hold computeMutex (the doorbell handler already does).
-  static void drainQueues(u32 budget_dw);
+  // The CALLER must hold g_compute_mutex (the doorbell handler already does).
+  static void DrainQueues(u32 budget_dw);
   // A doorbell ring: execute queue `ringId` up to the write pointer the guest
   // just published. See prosperity_gc_dingdong.
-  static void ringDoorbell(u32 ringId, u32 writeOffsetDw);
+  static void RingDoorbell(u32 ring_id, u32 write_offset_dw);
 
   struct ComputeQueue {
     u32 me = 0;
     u32 pipe = 0;
     u32 queue = 0;
     u32 vqueue = 0;
-    u64 ringBase = 0;
-    u64 readPtr = 0;
+    u64 ring_base = 0;
+    u64 read_ptr = 0;
     u64 state = 0;
-    u32 ringSizeDw = 0;
-    u32 readOffsetDw = 0;
+    u32 ring_size_dw = 0;
+    u32 read_offset_dw = 0;
     bool mapped = false;
   };
 
   // The mapped compute queues are hardware, not per-descriptor state: sys_open
-  // news a gcDevice per open, and a queue mapped through one fd has to be
+  // news a GcDevice per open, and a queue mapped through one fd has to be
   // visible to anything that drains it (including the per-frame drain, which
   // runs outside any ioctl). Shared for the same reason the /dev/gc mapping
   // pool is.
-  static base::Array<ComputeQueue, 64> computeQueues;
-  static base::Mutex computeMutex;
+  static base::Array<ComputeQueue, 64> g_compute_queues;
+  static base::Mutex g_compute_mutex;
 };
-}
+}  // namespace krnl

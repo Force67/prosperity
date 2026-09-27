@@ -8,81 +8,80 @@
  * in the root of the source tree.
  */
 
-#include <base/containers/vector.h>
 #include "base/arch.h"
-#include <base/strings/xstring.h>
-#include <base/strings/string_ref.h>
+#include "base/containers/vector.h"
+#include "base/strings/string_ref.h"
+#include "base/strings/xstring.h"
 
-#include "ps4/dev/device.h"
-#include "module.h"
-#include "object.h"
+#include "kern/module.h"
+#include "kern/object.h"
 #include "kern/object_table.h"
-#include "vm_map.h"
+#include "kern/ps4/dev/device.h"
+#include "kern/vm_map.h"
 
 namespace krnl {
-struct procInfo {
-  u32 ripZoneSize = 5 * 1024;
-  u8 *userStack = nullptr;
-  size_t userStackSize = 20 * 1024 * 1024;
-  void *fsBase = nullptr;
+struct ProcInfo {
+  u32 rip_zone_size = 5 * 1024;
+  u8* user_stack = nullptr;
+  size_t user_stack_size = 20 * 1024 * 1024;
+  void* fs_base = nullptr;
 };
 
-class smodule;
-class kObject;
+class Smodule;
+class Object;
 
+/*TODO: ModulePtr is misused in places; audit the refs*/
+using ModulePtr = krnl::ObjectRef<Smodule>;
 
-/*TODO: modulePtr is misused in places; audit the refs*/
-using modulePtr = krnl::ObjectRef<smodule>;
+class Proc {
+  friend class Smodule;
 
-class proc {
-  friend class smodule;
+ public:
+  using ModuleList = base::Vector<ModulePtr>;
 
-public:
-  using moduleList = base::Vector<modulePtr>;
+  enum class Platform { kPs4, kPs5 };
 
-  enum class platform { ps4, ps5 };
-
-  proc();
+  Proc();
   // Load the process. When fromVfs is set, path is a guest VFS path (e.g.
   // "/app0/eboot.bin") loaded through the mount table; otherwise a host file.
-  bool create(const base::String &, bool fromVfs = false);
-  void start();
+  bool Create(const base::String&, bool from_vfs = false);
+  void Start();
 
-  static proc *getActive();
+  static Proc* GetActive();
 
-  inline moduleList &getModuleList() { return modules; }
-  inline objectTable &getObjTable() { return objects; }
+  inline ModuleList& GetModuleList() { return modules_; }
+  inline ObjectTable& GetObjTable() { return objects_; }
 
-  modulePtr loadModule(base::StringRef);
-  modulePtr getModule(base::StringRef);
-  modulePtr getModule(u32);
+  ModulePtr LoadModule(base::StringRef);
+  ModulePtr GetModule(base::StringRef);
+  ModulePtr GetModule(u32);
 
-  inline vmManager &getVma() { return vmem; }
-  inline procInfo &getEnv() { return env; }
+  inline VmManager& GetVma() { return vmem_; }
+  inline ProcInfo& GetEnv() { return env_; }
 
-  platform getPlatform() const { return plat; }
-  void setPlatform(platform p) { plat = p; }
+  Platform GetPlatform() const { return plat_; }
+  void SetPlatform(Platform p) { plat_ = p; }
 
   // SDK version the title was built against, 0xMMmmpppp (PS5 titles carry it in
-  // sce_sys/param.json). libkernel reads it back through sysctl kern.proc.36 and
-  // branches on it; 0 makes it take pre-1.70 code paths.
-  u32 getSdkVersion() const { return sdkVersion; }
-  void setSdkVersion(u32 v) { sdkVersion = v; }
+  // sce_sys/param.json). libkernel reads it back through sysctl kern.proc.36
+  // and branches on it; 0 makes it take pre-1.70 code paths.
+  u32 GetSdkVersion() const { return sdk_version_; }
+  void SetSdkVersion(u32 v) { sdk_version_ = v; }
 
-private:
-  vmManager vmem;
-  procInfo env;
-  platform plat = platform::ps4;
-  u32 sdkVersion = 0;
-  moduleList modules;
-  objectTable objects;
-  u32 handleCounter = 1;
-  u16 tlsCounter = 1;
+ private:
+  VmManager vmem_;
+  ProcInfo env_;
+  Platform plat_ = Platform::kPs4;
+  u32 sdk_version_ = 0;
+  ModuleList modules_;
+  ObjectTable objects_;
+  u32 handle_counter_ = 1;
+  u16 tls_counter_ = 1;
 
   // 1-based ELF TLS module index handed to each module that ships a PT_TLS.
   // libkernel uses this as the DTV slot; it must be unique and non-negative
   // (-1 corrupts DTPMOD relocations and the DTV).
-  u16 nextFreeTLS() { return tlsCounter++; }
+  u16 NextFreeTls() { return tls_counter_++; }
 };
 
-}
+}  // namespace krnl

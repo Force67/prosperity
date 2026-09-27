@@ -10,102 +10,102 @@
 
 #include "base/arch.h"
 
-#include <base/strings/xstring.h>
-#include <io/file.h>
-#include <base/containers/vector.h>
-#include <base/memory/shared_pointer.h>
-#include <base/memory/unique_pointer.h>
+#include "base/containers/vector.h"
+#include "base/memory/shared_pointer.h"
+#include "base/memory/unique_pointer.h"
+#include "base/strings/xstring.h"
+#include "io/file.h"
 
 namespace krnl::vfs {
 // One entry in a directory listing.
 struct DirEntry {
   base::String name;
-  bool isDir;
+  bool is_dir;
 };
 // Map a guest path prefix (e.g. "/app0") onto a host directory. Longest prefix
 // wins at resolve time.
-void mount(const char *guestPrefix, const char *hostDir);
+void Mount(const char* guest_prefix, const char* host_dir);
 
 // Like mount(), but the mount is writable: guest opens with a write/create flag
 // create/modify files on the host underneath it (used for savedata). The host
 // directory is created if absent. Read-only titles never open host mounts for
 // write, so this cannot affect them.
-void mountWritable(const char *guestPrefix, const char *hostDir);
+void MountWritable(const char* guest_prefix, const char* host_dir);
 
 // Remove the most recently added mount for a guest prefix.
-void unmount(const char *guestPrefix);
+void Unmount(const char* guest_prefix);
 
 // Resolve a guest path to a host path, or empty if no host mount matches.
-// (Virtual mounts have no host path; use openRead/stat for those.)
-base::String resolve(const char *guestPath);
+// (Virtual mounts have no host path; use OpenRead/stat for those.)
+base::String Resolve(const char* guest_path);
 
 // Resolve a guest path to its host path IFF it lies under a WRITABLE host mount
 // (else empty). sys_open/sys_mkdir use this to service create/write requests.
-base::String resolveWritable(const char *guestPath);
+base::String ResolveWritable(const char* guest_path);
 
 // Create a directory (and parents) on the host for a guest path under a
 // writable mount. Returns false if the path is not under a writable mount.
-bool makeDir(const char *guestPath);
+bool MakeDir(const char* guest_path);
 
 // Remove a file on the host for a guest path under a writable mount.
-bool removeFile(const char *guestPath);
+bool RemoveFile(const char* guest_path);
 
 // A lazily-read file backing a virtual mount, e.g. a file inside a .pkg PFS.
 struct VirtualFile {
   virtual ~VirtualFile() = default;
   // Read up to len bytes at byte offset off. Returns bytes read (0 past EOF) or
   // -1 on error.
-  virtual i64 read(void *buf, i64 off, i64 len) = 0;
-  virtual i64 size() = 0;
+  virtual i64 Read(void* buf, i64 off, i64 len) = 0;
+  virtual i64 Size() = 0;
 };
 
 // Serves files for a virtual mount prefix. relPath is the remainder after the
 // prefix and keeps its leading '/', e.g. "/eboot.bin".
 struct VirtualProvider {
   virtual ~VirtualProvider() = default;
-  virtual base::UniquePointer<VirtualFile> open(const char *relPath) = 0;
-  virtual bool stat(const char *relPath, i64 &size) = 0;
+  virtual base::UniquePointer<VirtualFile> Open(const char* rel_path) = 0;
+  virtual bool Stat(const char* rel_path, i64& size) = 0;
   // List the immediate children of a directory. Returns false if relPath is not
   // a directory (or listing is unsupported). Default: not a directory.
-  virtual bool list(const char * /*relPath*/, base::Vector<DirEntry> & /*out*/) {
+  virtual bool List(const char* /*relPath*/, base::Vector<DirEntry>& /*out*/) {
     return false;
   }
   // Whether relPath names a directory. A provider's stat() only knows files, so
   // without this a title that probes for a directory (Astro Bot stats
   // "<level>/cinematics" to decide whether a level has any) is told it does not
   // exist. Providers that can answer cheaply should override.
-  virtual bool isDir(const char *relPath) {
+  virtual bool IsDir(const char* rel_path) {
     base::Vector<DirEntry> children;
-    return list(relPath, children);
+    return List(rel_path, children);
   }
 };
 
 // Map a guest path prefix onto an on-demand provider (kept alive for the
 // process lifetime).
-void mountVirtual(const char *guestPrefix,
+void MountVirtual(const char* guest_prefix,
                   base::SharedPointer<VirtualProvider> provider);
 
 // Open a guest path for reading, resolving both host and virtual mounts.
 // Returns an empty File (Exists() == false) if nothing matches / the file is
 // absent; otherwise a File ready to read.
-io::File openRead(const char *guestPath);
+io::File OpenRead(const char* guest_path);
 
 // Stat a guest path across host and virtual mounts. Returns false if absent.
-bool stat(const char *guestPath, i64 &size, bool &isDir);
+bool Stat(const char* guest_path, i64& size, bool& is_dir);
 
 // List a directory's immediate children. Returns false if not a directory.
-bool listDir(const char *guestPath, base::Vector<DirEntry> &out);
+bool ListDir(const char* guest_path, base::Vector<DirEntry>& out);
 
 // The booted title's TITLE_ID (e.g. "CUSA00792"), or empty if unknown. Set once
-// at boot by dcore from the pkg's param.sfo (the outer PKG metadata entry, which
-// is the only copy for titles like Isaac). savedata reads it to give each title
-// its own host save root.
-void setTitleId(const base::String &id);
-const base::String &titleId();
+// at boot by dcore from the pkg's param.sfo (the outer PKG metadata entry,
+// which is the only copy for titles like Isaac). savedata reads it to give each
+// title its own host save root.
+void SetTitleId(const base::String& id);
+const base::String& TitleId();
 
 // Small content cache keyed by a short name (SOTTR workaround: the engine's
 // async manifest reader races, so we cache the real manifest contents at mount
 // and let the count-setter fill the header buffer with correct data).
-void cacheFile(const base::String &key, base::Vector<u8> data);
-const base::Vector<u8> *getCachedFile(const char *key);
-} // namespace krnl::vfs
+void CacheFile(const base::String& key, base::Vector<u8> data);
+const base::Vector<u8>* GetCachedFile(const char* key);
+}  // namespace krnl::vfs

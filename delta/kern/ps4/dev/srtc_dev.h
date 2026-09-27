@@ -1,20 +1,20 @@
 #pragma once
 
-#include "device.h"
 #include "base/arch.h"
+#include "kern/ps4/dev/device.h"
 
 namespace krnl {
-class proc;
+class Proc;
 
 // /dev/srtc: the secure real-time clock. System-only (ShellUI/Diag); games read
 // time through clock_gettime/gettimeofday. Registers so an open succeeds;
 // commands soft-succeed.
-class srtcDevice : public device {
-public:
-  srtcDevice(objectTable &objects);
+class SrtcDevice : public Device {
+ public:
+  SrtcDevice(ObjectTable& objects);
 
-  i32 ioctl(u32 command, void *args) override;
-  i64 lseek(i64, int) override;
-  int fstat(void *stat) override;
+  i32 Ioctl(u32 command, void* args) override;
+  i64 Lseek(i64, int) override;
+  int Fstat(void* stat) override;
 };
-} // namespace krnl
+}  // namespace krnl

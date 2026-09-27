@@ -16,13 +16,13 @@
 namespace krnl::ps4 {
 
 struct AudioSink {
-  int (*open)(u32 freq, u32 channels, int isFloat) = nullptr;
-  int (*output)(int handle, const void *samples, u32 frames) = nullptr;
+  int (*open)(u32 freq, u32 channels, int is_float) = nullptr;
+  int (*output)(int handle, const void* samples, u32 frames) = nullptr;
   void (*volume)(int handle, float gain) = nullptr;
   void (*close)(int handle) = nullptr;
 };
 
-void setAudioSink(const AudioSink &sink);
-const AudioSink &audioSink();
+void SetAudioSink(const AudioSink& sink);
+const AudioSink& GetAudioSink();
 
 }  // namespace krnl::ps4

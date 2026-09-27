@@ -22,11 +22,10 @@
  * is the cheapest state we have found. None of it moves the title's stall.
  */
 
-
 #include "base/arch.h"
 
-#include "services.h"
-#include <base/threading/thread.h>
+#include "base/threading/thread.h"
+#include "kern/ipmi/services.h"
 
 namespace krnl::ipmi {
 namespace {
@@ -34,19 +33,21 @@ namespace {
 enum { kDrainNotification = 0x32 };
 
 struct ArbitratorIpc : Service {
-  const char *name() const override { return "SceArbitratorIpc"; }
+  const char* Name() const override { return "SceArbitratorIpc"; }
 
-  void invoke(Invocation &inv) override {
-    if (inv.method() == kDrainNotification)
+  void Invoke(Invocation& inv) override {
+    if (inv.Method() == kDrainNotification)
       base::SleepForMilliseconds(10);
-    inv.replyEmpty();
+    inv.ReplyEmpty();
   }
 };
 
-ArbitratorIpc g_arbitratorIpc;
+ArbitratorIpc g_arbitrator_ipc;
 
-} // namespace
+}  // namespace
 
-Service &arbitratorIpcService() { return g_arbitratorIpc; }
+Service& ArbitratorIpcService() {
+  return g_arbitrator_ipc;
+}
 
-} // namespace krnl::ipmi
+}  // namespace krnl::ipmi

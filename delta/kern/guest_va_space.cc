@@ -3,33 +3,35 @@
  *
  * The guest picks its own virtual addresses. libkernel MAP_FIXEDs its internal
  * arena at a hard-coded 8 GiB, the GNM driver maps its register/dump areas just
- * below 64 GiB, and titles MAP_FIXED their direct/flexible memory pools at round
- * 64 GiB slots. None of that is negotiable: the guest asserts on, or silently
- * mis-indexes, an address it did not ask for.
+ * below 64 GiB, and titles MAP_FIXED their direct/flexible memory pools at
+ * round 64 GiB slots. None of that is negotiable: the guest asserts on, or
+ * silently mis-indexes, an address it did not ask for.
  *
  * The host, meanwhile, is free to put an anonymous mmap wherever it likes, and
- * with FEX in the process there are a lot of host allocations (JIT buffers, block
- * link maps, thunk pools) made before the guest has mapped anything. Whoever gets
- * there first wins, and when the host wins the guest's fixed map either fails or
- * gets relocated. A relocated mapping is the worse outcome because it looks like
- * success: libkernel quietly falls back to its internal arena, exhausts the 16 MiB,
- * prints "Internal Memory is running out" and throws std::bad_alloc.
+ * with FEX in the process there are a lot of host allocations (JIT buffers,
+ * block link maps, thunk pools) made before the guest has mapped anything.
+ * Whoever gets there first wins, and when the host wins the guest's fixed map
+ * either fails or gets relocated. A relocated mapping is the worse outcome
+ * because it looks like success: libkernel quietly falls back to its internal
+ * arena, exhausts the 16 MiB, prints "Internal Memory is running out" and
+ * throws std::bad_alloc.
  *
- * So claim the ranges up front, PROT_NONE and MAP_NORESERVE (address space only,
- * no commit, no RSS). A later guest MAP_FIXED replaces the placeholder, which is
- * exactly what we want; a guest mmap that only HINTS at one of these addresses is
- * handled by isGuestReservedVa() at the sys_mmap placement decision, which treats
- * our own placeholder as free rather than relocating away from it.
+ * So claim the ranges up front, PROT_NONE and MAP_NORESERVE (address space
+ * only, no commit, no RSS). A later guest MAP_FIXED replaces the placeholder,
+ * which is exactly what we want; a guest mmap that only HINTS at one of these
+ * addresses is handled by IsGuestReservedVa() at the sys_mmap placement
+ * decision, which treats our own placeholder as free rather than relocating
+ * away from it.
  *
- * Deliberately NOT reserved here: the low-guest arena (sys_mem allocLowGuest) and
- * the module region (module.cc), both of which are bump-allocated by us with
- * MAP_FIXED_NOREPLACE. Reserving those would make our own allocators' probes fail
- * against our own placeholder.
+ * Deliberately NOT reserved here: the low-guest arena (sys_mem AllocLowGuest)
+ * and the module region (module.cc), both of which are bump-allocated by us
+ * with MAP_FIXED_NOREPLACE. Reserving those would make our own allocators'
+ * probes fail against our own placeholder.
  */
 
-#include "guest_va_space.h"
+#include "kern/guest_va_space.h"
 
-#include <logger/logger.h>
+#include "logger/logger.h"
 
 #include <sys/mman.h>
 
@@ -39,15 +41,15 @@ namespace {
 struct Range {
   uintptr_t base;
   size_t size;
-  const char *what;
+  const char* what;
 };
 
 constexpr size_t kMiB = 1024ull * 1024;
 constexpr size_t kGiB = 1024ull * kMiB;
 
 // x86-64 host layout. Android's 39-bit user VA cannot host these addresses at
-// all (the arena there is packed differently, see allocLowGuest), so the table
-// is empty and reserveGuestVaSpace() is a no-op.
+// all (the arena there is packed differently, see AllocLowGuest), so the table
+// is empty and ReserveGuestVaSpace() is a no-op.
 #if defined(__ANDROID__)
 constexpr Range kRanges[] = {};
 #else
@@ -72,7 +74,7 @@ bool g_done = false;
 
 }  // namespace
 
-void reserveGuestVaSpace() {
+void ReserveGuestVaSpace() {
   if (g_done)
     return;
   g_done = true;
@@ -82,12 +84,12 @@ void reserveGuestVaSpace() {
   LOG_WARNING("vaspace: no MAP_FIXED_NOREPLACE; guest fixed ranges unreserved");
   return;
 #else
-  for (const auto &r : kRanges) {
-    void *p = ::mmap(reinterpret_cast<void *>(r.base), r.size, PROT_NONE,
-                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE |
-                         MAP_FIXED_NOREPLACE,
-                     -1, 0);
-    if (p == reinterpret_cast<void *>(r.base)) {
+  for (const auto& r : kRanges) {
+    void* p = ::mmap(
+        reinterpret_cast<void*>(r.base), r.size, PROT_NONE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1,
+        0);
+    if (p == reinterpret_cast<void*>(r.base)) {
       LOG_INFO("vaspace: reserved {:#x}+{:#x} for {}", r.base, r.size, r.what);
       continue;
     }
@@ -102,11 +104,11 @@ void reserveGuestVaSpace() {
 #endif
 }
 
-bool isGuestReservedVa(const void *addr, size_t len) {
+bool IsGuestReservedVa(const void* addr, size_t len) {
   const auto a = reinterpret_cast<uintptr_t>(addr);
   if (!a || !len)
     return false;
-  for (const auto &r : kRanges) {
+  for (const auto& r : kRanges) {
     if (a >= r.base && a + len <= r.base + r.size)
       return true;
   }

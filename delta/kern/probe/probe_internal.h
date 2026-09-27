@@ -10,20 +10,20 @@
 #include "base/arch.h"
 
 namespace krnl {
-class proc;
-class smodule;
+class Proc;
+class Smodule;
 
 namespace probe {
 
-// probe_title.cc, armed from onProcessCreated / onModuleLoaded / onBeforeStart.
-void bringUpRebirthEbootRegistry(smodule &m);
-void bringUpRebirthSurfaceRegistry(smodule &m);
-void patchVideoOutDiag(smodule &m);
-void investigateDcbGate(smodule &m);
-void installAllocLock(smodule &m);
-void installMatTrace(smodule &m);
-void installJobTrace(smodule &m);
-void applyBootPatches(proc &p);
+// probe_title.cc, armed from OnProcessCreated / OnModuleLoaded / OnBeforeStart.
+void BringUpRebirthEbootRegistry(Smodule& m);
+void BringUpRebirthSurfaceRegistry(Smodule& m);
+void PatchVideoOutDiag(Smodule& m);
+void InvestigateDcbGate(Smodule& m);
+void InstallAllocLock(Smodule& m);
+void InstallMatTrace(Smodule& m);
+void InstallJobTrace(Smodule& m);
+void ApplyBootPatches(Proc& p);
 
 }  // namespace probe
 }  // namespace krnl

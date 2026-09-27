@@ -1,15 +1,15 @@
-#include "base/arch.h"
-#include <base/logging.h>
 #include <cstdio>
 #include <cstring>
+#include "base/arch.h"
+#include "base/logging.h"
 
-#include "file_dev.h"
-#include "npdrm_dev.h"
+#include "kern/ps4/dev/file_dev.h"
+#include "kern/ps4/dev/npdrm_dev.h"
 
 namespace krnl {
-npdrmDevice::npdrmDevice(objectTable &objects) : device(objects) {}
+NpdrmDevice::NpdrmDevice(ObjectTable& objects) : Device(objects) {}
 
-i32 npdrmDevice::ioctl(u32 cmd, void *data) {
+i32 NpdrmDevice::Ioctl(u32 cmd, void* data) {
   BASE_LOGI("npdrm", "UNHANDLED ioctl({:#x})", cmd);
   if (data && (cmd & 0x40000000u)) {
     const u32 len = (cmd >> 16) & 0x1fff;
@@ -19,12 +19,14 @@ i32 npdrmDevice::ioctl(u32 cmd, void *data) {
   return 0;
 }
 
-i64 npdrmDevice::lseek(i64, int) { return 0; }
-
-int npdrmDevice::fstat(void *stat) {
-  if (!stat)
-    return -static_cast<int>(SysError::eFAULT);
-  fillStat(*reinterpret_cast<SceKernelStat *>(stat), 0x2000, 0);
+i64 NpdrmDevice::Lseek(i64, int) {
   return 0;
 }
-} // namespace krnl
+
+int NpdrmDevice::Fstat(void* stat) {
+  if (!stat)
+    return -static_cast<int>(SysError::eFAULT);
+  FillStat(*reinterpret_cast<SceKernelStat*>(stat), 0x2000, 0);
+  return 0;
+}
+}  // namespace krnl

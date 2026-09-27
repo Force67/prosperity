@@ -29,10 +29,10 @@ DELTA_OPTION(bool, kVoHle, "DELTA_VO_HLE", false);
 }  // namespace
 
 namespace runtime {
-static base::Vector<const modInfo *> vprxTable;
+static base::Vector<const ModInfo *> vprxTable;
 // PS5-only NID alias tables (runtime/vprx/ps5/*). Kept separate from vprxTable so
 // PS4 resolution is byte-for-byte unchanged; only vprx_get_forced (PS5) reads it.
-static base::Vector<const modInfo *> vprxTablePs5;
+static base::Vector<const ModInfo *> vprxTablePs5;
 
 // HLE-module anchors. Each vprx HLE module's _api.cpp defines one of these; we
 // reference them here so the linker keeps those archive members (otherwise the
@@ -60,8 +60,8 @@ extern "C" int vprx_anchor_ps5_libSceSystemService;
 extern "C" int vprx_anchor_ps5_libSceFiber;
 extern "C" int vprx_anchor_libSceGnmDriver;
 extern "C" int vprx_anchor_libSceMsgDialog;
-// Pad + userService HLE: a connected controller + one logged-in user lets the
-// title advance into actual gameplay (the userService init override avoids the
+// Pad + UserService HLE: a connected controller + one logged-in user lets the
+// title advance into actual gameplay (the UserService init override avoids the
 // IPMI sign-in spin). Mbus still busy-polls /dev/usbctl on a worker but that no
 // longer blocks boot or rendering.
 extern "C" int vprx_anchor_libScePad;
@@ -129,16 +129,16 @@ void vprx_init() {
   runtime::InitFunction::Init();
 }
 
-void vprx_reg(const modInfo *info) { vprxTable.push_back(info); }
-void vprx_reg_ps5(const modInfo *info) { vprxTablePs5.push_back(info); }
+void vprx_reg(const ModInfo *info) { vprxTable.push_back(info); }
+void vprx_reg_ps5(const ModInfo *info) { vprxTablePs5.push_back(info); }
 
 // Per-module HLE policy. We prefer running the real sprx (LLE) for modules whose
 // syscall/device backing we emulate, falling back to the HLE shim only when the
 // real path isn't ready or is forced off.
-//   - libSceGnmDriver: LLE by default (PM4 via ioctl(/dev/gc) -> gcDevice -> the
+//   - libSceGnmDriver: LLE by default (PM4 via ioctl(/dev/gc) -> GcDevice -> the
 //     GPU command processor). Force the HLE submit shim with DELTA_GNM_HLE.
 //   - libSceVideoOut: LLE by default; the real module drives the framebuffer
-//     through ioctl(/dev/dce) + mmap (dceDevice) and flips via the videoout
+//     through ioctl(/dev/dce) + mmap (DceDevice) and flips via the videoout
 //     service thread. Force the HLE shim with DELTA_VO_HLE.
 // DIAGNOSTIC: force just a few specific NIDs of an otherwise-LLE module onto the
 // HLE shim. Env is a comma/space list of hex hids, e.g.
@@ -282,7 +282,7 @@ uintptr_t vprx_get(const char *lib, u64 hid) {
   if (!useHleShim(lib, hid))
     return 0;
 
-  const modInfo *table = nullptr;
+  const ModInfo *table = nullptr;
 
   // find the right table
   for (const auto &t : vprxTable) {

@@ -1,27 +1,26 @@
 #pragma once
 
 #include "base/arch.h"
-#include <options/options.h>
-
+#include "options/options.h"
 
 namespace krnl::ps4 {
 
-enum class HardwareMode { base, neo };
+enum class HardwareMode { kBase, kNeo };
 
 struct HardwareModeProfile {
   HardwareMode mode;
-  u32 mainSocId;
+  u32 main_soc_id;
 };
 
 // DELTA_PS4_NEO selects the emulated hardware. A title only enters enhanced
 // Neo mode when its param.sfo ATTRIBUTE also advertises Neo support.
 extern base::Option<bool> kNeoMode;
-const HardwareModeProfile &hardwareModeProfile();
+const HardwareModeProfile& GetHardwareModeProfile();
 
-void setTitleAttributes(u32 attributes);
-u32 titleAttributes();
-u32 cpuMode();
-bool isNeoMode();
-const char *gnmDriverModule();
+void SetTitleAttributes(u32 attributes);
+u32 TitleAttributes();
+u32 CpuMode();
+bool IsNeoMode();
+const char* GnmDriverModule();
 
-} // namespace krnl::ps4
+}  // namespace krnl::ps4

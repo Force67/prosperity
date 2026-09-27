@@ -28,7 +28,6 @@ static i32 HostTlsOffset(const void* address) {
                           thread_pointer);
 }
 
-
 i32 HostGuestFsOffset() {
   return HostTlsOffset(&t_fsbase);
 }
@@ -57,7 +56,7 @@ static thread_local std::jmp_buf* t_exit_jmp = nullptr;
 
 class NativeBackend final : public Backend {
  public:
-  void OnImageMapped(krnl::moduleInfo&) override {
+  void OnImageMapped(krnl::ModuleInfo&) override {
     // Nothing to do: the loader runs the lifter inline (runtime/code_lift),
     // rewriting syscall/int/fs in the executable segment in place.
   }
@@ -79,7 +78,7 @@ class NativeBackend final : public Backend {
     // Give this guest thread a signal alt-stack so the fatal handler still runs
     // (and dumps the guest RIP) when the guest blows or corrupts its own RSP;
     // otherwise the kernel can't deliver SIGSEGV and silently core-dumps.
-    krnl::installSigAltStack();
+    krnl::InstallSigAltStack();
     SetThreadFsBase(t->fsbase);
     auto entry = t->entry;
     auto arg = t->arg;

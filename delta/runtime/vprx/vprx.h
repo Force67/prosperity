@@ -19,14 +19,14 @@ struct funcInfo {
   const void *address;
 };
 
-struct modInfo {
+struct ModInfo {
   funcInfo *funcNodes;
   size_t funcCount;
   const char *namePtr;
 };
 
 void vprx_init();
-void vprx_reg(const modInfo *);
+void vprx_reg(const ModInfo *);
 uintptr_t vprx_get(const char *lib, u64 hid);
 // Table lookup that ignores the LLE-by-default policy gate (useHleShim). The PS5
 // import resolver uses it to force libSceVideoOut onto the HLE shim (its LLE port
@@ -37,7 +37,7 @@ uintptr_t vprx_get_forced(const char *lib, u64 hid);
 // that differ from the PS4 ABI (e.g. sceVideoOutRegisterBuffers). Rather than
 // pollute the PS4 tables, PS5 aliases register here (runtime/vprx/ps5/*) and are
 // consulted first by vprx_get_forced, which is PS5-only. PS4 paths never touch it.
-void vprx_reg_ps5(const modInfo *);
+void vprx_reg_ps5(const ModInfo *);
 
 bool decode_nid(const char *subset, size_t len, u64 &);
 void encode_nid(const char *symName, u8 *out);
@@ -45,7 +45,7 @@ void encode_nid(const char *symName, u8 *out);
 
 #define MODULE_INIT(tname)                                                     \
   \
-static const runtime::modInfo info_##tname{                                    \
+static const runtime::ModInfo info_##tname{                                    \
       (runtime::funcInfo *)&functions,                                         \
       (sizeof(functions) / sizeof(runtime::funcInfo)), #tname};                \
   \
@@ -56,7 +56,7 @@ static runtime::InitFunction init_##tname(                                      
 // as MODULE_INIT but lands in the separate PS5 registry (vprx_reg_ps5).
 #define MODULE_INIT_PS5(tname)                                                  \
   \
-static const runtime::modInfo info_ps5_##tname{                                \
+static const runtime::ModInfo info_ps5_##tname{                                \
       (runtime::funcInfo *)&functions,                                         \
       (sizeof(functions) / sizeof(runtime::funcInfo)), #tname};                \
   \

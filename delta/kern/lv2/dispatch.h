@@ -8,10 +8,10 @@
  * in the root of the source tree.
  */
 
-#include <guest_abi.h>
+#include <cstdint>  // uintptr_t
 #include "base/arch.h"
-#include <cstdint> // uintptr_t
-#include <options/options.h>
+#include "guest_abi.h"
+#include "options/options.h"
 
 namespace krnl {
 
@@ -21,32 +21,32 @@ namespace krnl {
 
 // The trampoline for `sid` under the active process's platform. Both CPU
 // backends enter here.
-uintptr_t lv2_lookup(u32 sid);
+uintptr_t Lv2Lookup(u32 sid);
 
 // The individual tables, for callers that already know the platform.
-uintptr_t lv2_get(u32 sid);     // Orbis
-uintptr_t lv2_get_ps5(u32 sid); // Prospero
+uintptr_t Lv2Get(u32 sid);     // Orbis
+uintptr_t Lv2GetPs5(u32 sid);  // Prospero
 
 // Wraps `handler` in the trampoline that applies the BSD carry/errno return
 // convention. Cached per handler, or per id while tracing or counting so each
 // id reports under its own number.
-uintptr_t lv2_trampoline(const void *handler, u32 sid);
+uintptr_t Lv2Trampoline(const void* handler, u32 sid);
 
 // A syscall a table names but does not implement.
-int PS4ABI lv2_stub_syscall();
+int PS4ABI Lv2StubSyscall();
 
 // An id no table row covers at all.
-int PS4ABI lv2_unmapped_syscall();
+int PS4ABI Lv2UnmappedSyscall();
 
-const char *syscall_getname(u32 idx); // name_table.cc
-void dumpSyscallHist();
+const char* SyscallGetname(u32 idx);  // name_table.cc
+void DumpSyscallHist();
 
 // Classifies a raw handler return as an errno or a result; see the definition.
-extern "C" u32 krnl_syscall_errno(u64 raw);
+extern "C" u32 SyscallErrno(u64 raw);
 
 // DELTA_SCHIST per-id call counter. The native trampoline increments it, so a
 // backend that emits no trampoline has to do so itself.
-extern base::Option<bool> g_scHist;
-} // namespace krnl
+extern base::Option<bool> g_sc_hist;
+}  // namespace krnl
 
-extern "C" u64 g_sysHist[1024];
+extern "C" u64 g_sys_hist[1024];

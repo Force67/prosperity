@@ -7,47 +7,49 @@
  * in the root of the source tree.
  */
 
-#include "object.h"
+#include "kern/object.h"
 #include "base/arch.h"
 #include "kern/object_table.h"
 
 #include <cstdlib>
 
-#include <logger/logger.h>
-#include <options/options.h>
+#include "logger/logger.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(bool, kObjTrace, "DELTA_OBJ_TRACE", false);
 }  // namespace
 
 namespace krnl {
-kObject::kObject(objectTable &objects, oType type)
-    : otype(type), objects(objects) {
+Object::Object(ObjectTable& objects, OType type)
+    : otype_(type), objects_(objects) {
   u32 temp = 0;
-  objects.add(this, temp);
+  objects.Add(this, temp);
 
   // DELTA_OBJ_TRACE: titles that poll a device re-create its object thousands
   // of times a second (Minecraft: ~14k in 40s), which buried every other line
   // in the log. Off unless asked for.
   if (kObjTrace) {
-    static const char *tn[] = {"file", "device", "equeue", "eventflag",
-                               "semaphore", "shm"};
+    static const char* tn[] = {"file",      "device",    "equeue",
+                               "eventflag", "semaphore", "shm"};
     LOG_INFO("assigned handle {} type={}", temp, tn[static_cast<int>(type)]);
   }
 }
 
-void kObject::release() {
-  if (--refCount == 0)
+void Object::Release() {
+  if (--ref_count_ == 0)
     delete this;
 }
 
-void kObject::retain() { refCount++; }
-
-void kObject::retainHandle() {
-  objects.keep(handleCollection[0]);
+void Object::Retain() {
+  ref_count_++;
 }
 
-void kObject::releaseHandle() {
-  objects.release(handleCollection[0]);
+void Object::RetainHandle() {
+  objects_.Keep(handle_collection_[0]);
 }
-} // namespace krnl
+
+void Object::ReleaseHandle() {
+  objects_.Release(handle_collection_[0]);
+}
+}  // namespace krnl

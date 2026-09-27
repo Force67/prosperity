@@ -1,16 +1,15 @@
 #include <gtest/gtest.h>
 #include "base/arch.h"
 
-
+#include "base/atomic.h"
+#include "base/containers/array.h"
+#include "base/containers/vector.h"
+#include "base/functional/function.h"
+#include "base/memory/move.h"
+#include "base/memory/unique_pointer.h"
+#include "base/threading/thread.h"
+#include "base/time/time.h"
 #include "kern/lv2/sys_thread.h"
-#include <base/atomic.h>
-#include <base/containers/array.h>
-#include <base/containers/vector.h>
-#include <base/time/time.h>
-#include <base/threading/thread.h>
-#include <base/memory/unique_pointer.h>
-#include <base/functional/function.h>
-#include <base/memory/move.h>
 
 namespace {
 // Joins on scope exit, like std::jthread.
@@ -26,10 +25,9 @@ struct GuestTimespec {
   i64 nsec;
 };
 
-bool WaitFor(const base::Atomic<int> &value, int expected) {
+bool WaitFor(const base::Atomic<int>& value, int expected) {
   const auto deadline = base::TimeTicks::Now() + base::Seconds(1);
-  while (value.load() != expected &&
-         base::TimeTicks::Now() < deadline)
+  while (value.load() != expected && base::TimeTicks::Now() < deadline)
     base::SleepForMilliseconds(1);
   return value.load() == expected;
 }
@@ -81,38 +79,37 @@ TEST(UmtxOp, WakeBeforeWaitIsLost) {
 
 TEST(UmtxOp, BucketCollisionDoesNotReleaseAnotherAddress) {
   alignas(16) base::Array<u32, 1025> words{};
-  auto *first = &words[0];
-  auto *collision = &words[1024]; // 0x1000 apart: same wait-bucket hash.
+  auto* first = &words[0];
+  auto* collision = &words[1024];  // 0x1000 apart: same wait-bucket hash.
   GuestTimespec timeout{2, 0};
   base::Atomic<int> ready{0};
-  base::Atomic<int> firstReturned{0};
-  base::Atomic<int> collisionReturned{0};
-  int firstResult = 0;
-  int collisionResult = 0;
+  base::Atomic<int> first_returned{0};
+  base::Atomic<int> collision_returned{0};
+  int first_result = 0;
+  int collision_result = 0;
 
-  JoinedThread firstWaiter("first", [&] {
+  JoinedThread first_waiter("first", [&] {
     ready.fetch_add(1);
-    firstResult = krnl::sys_umtx_op(first, 15, 0, nullptr, &timeout);
-    firstReturned.store(1);
+    first_result = krnl::sys_umtx_op(first, 15, 0, nullptr, &timeout);
+    first_returned.store(1);
   });
-  JoinedThread collisionWaiter("collision", [&] {
+  JoinedThread collision_waiter("collision", [&] {
     ready.fetch_add(1);
-    collisionResult =
-        krnl::sys_umtx_op(collision, 15, 0, nullptr, &timeout);
-    collisionReturned.store(1);
+    collision_result = krnl::sys_umtx_op(collision, 15, 0, nullptr, &timeout);
+    collision_returned.store(1);
   });
 
   ASSERT_TRUE(WaitFor(ready, 2));
   base::SleepForMilliseconds(20);
 
   EXPECT_EQ(krnl::sys_umtx_op(first, 16, 1, nullptr, nullptr), 0);
-  ASSERT_TRUE(WaitFor(firstReturned, 1));
+  ASSERT_TRUE(WaitFor(first_returned, 1));
   base::SleepForMilliseconds(20);
-  EXPECT_EQ(collisionReturned.load(), 0);
+  EXPECT_EQ(collision_returned.load(), 0);
 
   EXPECT_EQ(krnl::sys_umtx_op(collision, 16, 1, nullptr, nullptr), 0);
-  ASSERT_TRUE(WaitFor(collisionReturned, 1));
-  EXPECT_EQ(firstResult, 0);
-  EXPECT_EQ(collisionResult, 0);
+  ASSERT_TRUE(WaitFor(collision_returned, 1));
+  EXPECT_EQ(first_result, 0);
+  EXPECT_EQ(collision_result, 0);
 }
-} // namespace
+}  // namespace

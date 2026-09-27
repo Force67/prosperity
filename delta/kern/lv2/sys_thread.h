@@ -8,18 +8,18 @@
  * in the root of the source tree.
  */
 
-#include <guest_abi.h>
 #include "base/arch.h"
+#include "guest_abi.h"
 
 namespace krnl {
-struct thread_prio {
+struct thread_prio {  // NOLINT(readability-identifier-naming): guest ABI name
   u16 type;
   u16 prio;
 };
 
-struct thr_param;
-int PS4ABI sys_thr_new(thr_param *p, int size);
-int PS4ABI sys_thr_self(i64 *tid);
-int PS4ABI sys_rtprio_thread(int, u64, thread_prio *);
-int PS4ABI sys_umtx_op(void *, int, u64, void *, void *);
-}
+struct thr_param;  // NOLINT(readability-identifier-naming): guest ABI name
+int PS4ABI sys_thr_new(thr_param* p, int size);
+int PS4ABI sys_thr_self(i64* tid);
+int PS4ABI sys_rtprio_thread(int, u64, thread_prio*);
+int PS4ABI sys_umtx_op(void*, int, u64, void*, void*);
+}  // namespace krnl

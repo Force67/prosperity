@@ -7,23 +7,23 @@
  * in the root of the source tree.
  */
 
-#include "base/arch.h"
-#include <base/logging.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "base/arch.h"
+#include "base/logging.h"
 
 #include <sys/mman.h>
 #include <unistd.h>
 
-#include "dma_dev.h"
+#include "base/containers/vector.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 #include "kern/lv2/sys_mem.h"
 #include "kern/process.h"
-#include <options/options.h>
-#include <base/containers/vector.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
+#include "kern/ps4/dev/dma_dev.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(bool, kDmemCaller, "DELTA_DMEM_CALLER", false);
@@ -31,84 +31,87 @@ DELTA_OPTION(bool, kDmemTrace, "DELTA_DMEM_TRACE", false);
 }  // namespace
 
 namespace krnl {
-dmaDevice::dmaDevice(objectTable &objects) : device(objects) {}
+DmaDevice::DmaDevice(ObjectTable& objects) : Device(objects) {}
 
 // PS4 direct ("physical") memory model: a title allocates a physical range
-// (0xC0288001) then maps it at a VA it reserved (0x80108002). We don't model a real
-// GPU physical pool (the renderer drives by VA); the offset is bookkeeping but must
-// be unique, non-zero and aligned, or the title's allocator sees overlaps and a
-// dependent subsystem (PT's render device) refuses to init. GetDirectMemorySize
-// (0x4008800A) is the ceiling the title passes back, so a tiny stub kills all allocs.
+// (0xC0288001) then maps it at a VA it reserved (0x80108002). We don't model a
+// real GPU physical pool (the renderer drives by VA); the offset is bookkeeping
+// but must be unique, non-zero and aligned, or the title's allocator sees
+// overlaps and a dependent subsystem (PT's render device) refuses to init.
+// GetDirectMemorySize (0x4008800A) is the ceiling the title passes back, so a
+// tiny stub kills all allocs.
 namespace {
-// PS4 user dmem is ~4.5-5 GiB; report a flat large pool, bump from a non-zero base
-// so "offset 0 means invalid" holds.
+// PS4 user dmem is ~4.5-5 GiB; report a flat large pool, bump from a non-zero
+// base so "offset 0 means invalid" holds.
 constexpr u64 kDmemTotal = 0x300000000ull;  // 12 GiB (SOTTR working set)
-// A title that SIZES SOMETHING from this sees a 3x pool: SotC maps it all once and
-// sub-allocates 4 MiB arenas downstream of the value. Overridable per run rather
-// than lowered; 12 GiB is load-bearing for SOTTR.
+// A title that SIZES SOMETHING from this sees a 3x pool: SotC maps it all once
+// and sub-allocates 4 MiB arenas downstream of the value. Overridable per run
+// rather than lowered; 12 GiB is load-bearing for SOTTR.
 DELTA_OPTION(u64, kDmemTotalOverride, "DELTA_DMEM_TOTAL", 0);
-// A PS5 hands a game 12.5 GiB of 16; Astro Bot reserves ~7.6 GiB then asks for one
-// 4.5 GiB block anywhere, missing 12 GiB by 72 MiB (its allocator asserts, engine
-// runs with no GPU heap).
+// A PS5 hands a game 12.5 GiB of 16; Astro Bot reserves ~7.6 GiB then asks for
+// one 4.5 GiB block anywhere, missing 12 GiB by 72 MiB (its allocator asserts,
+// engine runs with no GPU heap).
 constexpr u64 kDmemTotalPs5 = 0x320000000ull;  // 12.5 GiB
-u64 dmemTotal() {
+u64 DmemTotal() {
   if (kDmemTotalOverride)
     return kDmemTotalOverride;
-  auto *p = proc::getActive();
-  if (p && p->getPlatform() == proc::platform::ps5)
+  auto* p = Proc::GetActive();
+  if (p && p->GetPlatform() == Proc::Platform::kPs5)
     return kDmemTotalPs5;
   return kDmemTotal;
 }
 // Floor for window-less requests so physical offset 0 stays invalid ("offset 0
 // means the allocation failed" checks in titles keep working).
 constexpr u64 kDmemBase = 0x10000000ull;
-// Band for window-less requests, below every title-carved window (those start at
-// kDmemBase) and above offset 0 (Skyrim reserves it; titles read it as "failed").
-// At the pool TOP these fell outside the largest hole AvailableDirectMemorySize
-// reports, so a title sizing its heap map from that hole overflowed its index.
+// Band for window-less requests, below every title-carved window (those start
+// at kDmemBase) and above offset 0 (Skyrim reserves it; titles read it as
+// "failed"). At the pool TOP these fell outside the largest hole
+// AvailableDirectMemorySize reports, so a title sizing its heap map from that
+// hole overflowed its index.
 constexpr u64 kDmemSysBase = 0x01000000ull;
 
-// Reservation records so GetDirectMemoryType (0xC0208004) can say which region owns
-// a physical offset and of what type; the renderer refuses to init on zero-length
-// type-0 answers. Sorted by start so allocation walks holes in order.
+// Reservation records so GetDirectMemoryType (0xC0208004) can say which region
+// owns a physical offset and of what type; the renderer refuses to init on
+// zero-length type-0 answers. Sorted by start so allocation walks holes in
+// order.
 struct DmemRegion {
   u64 start, end;
-  u32 memType;
+  u32 mem_type;
 };
-base::Mutex g_dmemMutex;
-base::Vector<DmemRegion> g_dmemRegions;
+base::Mutex g_dmem_mutex;
+base::Vector<DmemRegion> g_dmem_regions;
 
-// One memfd backing the whole dmem pool: every VA mapping a physical offset maps
-// this fd there (MAP_SHARED), so aliases share bytes; sparse, touched pages only.
-int g_dmemBackingFd = -1;
+// One memfd backing the whole dmem pool: every VA mapping a physical offset
+// maps this fd there (MAP_SHARED), so aliases share bytes; sparse, touched
+// pages only.
+int g_dmem_backing_fd = -1;
 
-// First-fit hole search in [lo, hi); the window is contract, not hint: SotC carves
-// fixed windows up front (0x220000 tail scratch ending at pool end, a 1 GiB CPU
-// heap, the ~11 GiB streaming/GPU heap) and identifies heap partitions by
-// physical range. A bump allocator pushed later reservations past their windows,
-// the AllocationTracker missed on free, and a job fiber deref'd the null/-1
-// result (Shadow_Shipping+0x189a7 / +0x8d9b7).
-int dmemAllocate(u64 lo, u64 hi, u64 len, u64 align,
-                 u32 memType, u64 *out) {
-  // A caller-supplied window means it, offset 0 included: Skyrim reserves exactly
-  // [0, 0x200000) and falls back to 64 KiB mmaps when that fails. A non-zero
-  // searchStart is a window just as much as searchEnd below pool end (SotC asks
-  // for exactly the top 0x220000 with searchEnd == pool size).
-  const bool windowed = lo != 0 || (hi != 0 && hi < dmemTotal());
-  if (hi == 0 || hi > dmemTotal())
-    hi = dmemTotal();
+// First-fit hole search in [lo, hi); the window is contract, not hint: SotC
+// carves fixed windows up front (0x220000 tail scratch ending at pool end, a 1
+// GiB CPU heap, the ~11 GiB streaming/GPU heap) and identifies heap partitions
+// by physical range. A bump allocator pushed later reservations past their
+// windows, the AllocationTracker missed on free, and a job fiber deref'd the
+// null/-1 result (Shadow_Shipping+0x189a7 / +0x8d9b7).
+int DmemAllocate(u64 lo, u64 hi, u64 len, u64 align, u32 mem_type, u64* out) {
+  // A caller-supplied window means it, offset 0 included: Skyrim reserves
+  // exactly [0, 0x200000) and falls back to 64 KiB mmaps when that fails. A
+  // non-zero searchStart is a window just as much as searchEnd below pool end
+  // (SotC asks for exactly the top 0x220000 with searchEnd == pool size).
+  const bool windowed = lo != 0 || (hi != 0 && hi < DmemTotal());
+  if (hi == 0 || hi > DmemTotal())
+    hi = DmemTotal();
   if (len == 0 || align == 0 || (align & (align - 1)) || lo >= hi)
     return -22 /*EINVAL*/;
-  base::LockGuard<base::Mutex> lk(g_dmemMutex);
+  base::LockGuard<base::Mutex> lk(g_dmem_mutex);
   u64 cand;
   if (windowed) {
     // First fit inside the window the caller asked for.
     cand = (lo + align - 1) & ~(align - 1);
-    for (const auto &r : g_dmemRegions) {
+    for (const auto& r : g_dmem_regions) {
       if (r.end <= cand)
-        continue;               // fully below the candidate
+        continue;  // fully below the candidate
       if (r.start >= cand + len)
-        break;                  // hole before this region fits (list is sorted)
+        break;  // hole before this region fits (list is sorted)
       cand = ((r.end > cand ? r.end : cand) + align - 1) & ~(align - 1);
     }
     if (cand + len > hi)
@@ -117,7 +120,7 @@ int dmemAllocate(u64 lo, u64 hi, u64 len, u64 align,
     // "Anywhere" (searchStart 0, whole pool): serve it from the system band,
     // which is below every window a title carves for itself.
     cand = (kDmemBase + align - 1) & ~(align - 1);
-    for (const auto &r : g_dmemRegions) {
+    for (const auto& r : g_dmem_regions) {
       if (r.end <= cand)
         continue;
       if (r.start >= cand + len)
@@ -125,18 +128,19 @@ int dmemAllocate(u64 lo, u64 hi, u64 len, u64 align,
       cand = ((r.end > cand ? r.end : cand) + align - 1) & ~(align - 1);
     }
     if (cand + len <= hi) {
-      auto it2 = g_dmemRegions.begin();
-      while (it2 != g_dmemRegions.end() && it2->start < cand)
+      auto it2 = g_dmem_regions.begin();
+      while (it2 != g_dmem_regions.end() && it2->start < cand)
         ++it2;
-      g_dmemRegions.insert(it2, {cand, cand + len, memType});
+      g_dmem_regions.insert(it2, {cand, cand + len, mem_type});
       *out = cand;
       return 0;
     }
-    // Band full: fall back to the highest hole that fits; titles carve upwards from
-    // offset 0 (Skyrim walks the pool in 2 MiB steps), so the bottom isn't free either.
+    // Band full: fall back to the highest hole that fits; titles carve upwards
+    // from offset 0 (Skyrim walks the pool in 2 MiB steps), so the bottom isn't
+    // free either.
     u64 top = hi;
     cand = UINT64_MAX;
-    for (auto it = g_dmemRegions.rbegin(); it != g_dmemRegions.rend(); ++it) {
+    for (auto it = g_dmem_regions.rbegin(); it != g_dmem_regions.rend(); ++it) {
       if (it->start >= top) {
         top = it->start;
         continue;
@@ -155,31 +159,32 @@ int dmemAllocate(u64 lo, u64 hi, u64 len, u64 align,
       cand = base;
     }
   }
-  auto it = g_dmemRegions.begin();
-  while (it != g_dmemRegions.end() && it->start < cand)
+  auto it = g_dmem_regions.begin();
+  while (it != g_dmem_regions.end() && it->start < cand)
     ++it;
-  g_dmemRegions.insert(it, {cand, cand + len, memType});
+  g_dmem_regions.insert(it, {cand, cand + len, mem_type});
   *out = cand;
   return 0;
 }
 
-// sceKernelReleaseDirectMemory. Titles carve an aligned block by over-allocating
-// and releasing head/tail, so an allocator that never frees marches the cursor
-// past a real console's pool. The VA stays mapped (our munmap keeps host pages).
-void dmemFree(u64 start, u64 len) {
+// sceKernelReleaseDirectMemory. Titles carve an aligned block by
+// over-allocating and releasing head/tail, so an allocator that never frees
+// marches the cursor past a real console's pool. The VA stays mapped (our
+// munmap keeps host pages).
+void DmemFree(u64 start, u64 len) {
   const u64 end = start + len;
-  base::LockGuard<base::Mutex> lk(g_dmemMutex);
-  for (size_t i = 0; i < g_dmemRegions.size();) {
-    auto &r = g_dmemRegions[i];
+  base::LockGuard<base::Mutex> lk(g_dmem_mutex);
+  for (size_t i = 0; i < g_dmem_regions.size();) {
+    auto& r = g_dmem_regions[i];
     if (r.end <= start || r.start >= end) {
       i++;
       continue;
     }
-    const bool head = r.start < start, tail = r.end > end;
+    const bool head = r.start<start, tail = r.end> end;
     if (head && tail) {
-      const DmemRegion right{end, r.end, r.memType};
+      const DmemRegion right{end, r.end, r.mem_type};
       r.end = start;
-      g_dmemRegions.insert(g_dmemRegions.begin() + i + 1, right);
+      g_dmem_regions.insert(g_dmem_regions.begin() + i + 1, right);
       return;  // the release was interior to one region: nothing else overlaps
     }
     if (head) {
@@ -189,31 +194,34 @@ void dmemFree(u64 start, u64 len) {
       r.start = end;
       i++;
     } else {
-      g_dmemRegions.erase(g_dmemRegions.begin() + i);
+      g_dmem_regions.erase(g_dmem_regions.begin() + i);
     }
   }
 }
 
 // Largest free hole inside [lo, hi) (AvailableDirectMemorySize).
-void dmemLargestHole(u64 lo, u64 hi, u64 align,
-                     u64 *holeBase, u64 *holeSize) {
-  if (hi == 0 || hi > dmemTotal())
-    hi = dmemTotal();
+void DmemLargestHole(u64 lo,
+                     u64 hi,
+                     u64 align,
+                     u64* hole_base,
+                     u64* hole_size) {
+  if (hi == 0 || hi > DmemTotal())
+    hi = DmemTotal();
   if (lo == 0)
     lo = kDmemBase;
   if (align == 0)
     align = 0x4000;
-  *holeBase = 0;
-  *holeSize = 0;
-  base::LockGuard<base::Mutex> lk(g_dmemMutex);
+  *hole_base = 0;
+  *hole_size = 0;
+  base::LockGuard<base::Mutex> lk(g_dmem_mutex);
   u64 cur = (lo + align - 1) & ~(align - 1);
   auto consider = [&](u64 end) {
-    if (end > cur && end - cur > *holeSize) {
-      *holeBase = cur;
-      *holeSize = end - cur;
+    if (end > cur && end - cur > *hole_size) {
+      *hole_base = cur;
+      *hole_size = end - cur;
     }
   };
-  for (const auto &r : g_dmemRegions) {
+  for (const auto& r : g_dmem_regions) {
     if (r.end <= cur)
       continue;
     if (r.start >= hi)
@@ -225,37 +233,40 @@ void dmemLargestHole(u64 lo, u64 hi, u64 align,
 }
 }  // namespace
 
-// Memory type of the reservation owning `off`, or -1; sceKernelVirtualQuery must
-// report the type the allocation was made with, not one inferred from protection.
-int dmemTypeForOffset(u64 off) {
-  base::LockGuard<base::Mutex> lk(g_dmemMutex);
-  for (const auto &r : g_dmemRegions)
+// Memory type of the reservation owning `off`, or -1; sceKernelVirtualQuery
+// must report the type the allocation was made with, not one inferred from
+// protection.
+int DmemTypeForOffset(u64 off) {
+  base::LockGuard<base::Mutex> lk(g_dmem_mutex);
+  for (const auto& r : g_dmem_regions)
     if (off >= r.start && off < r.end)
-      return static_cast<int>(r.memType);
+      return static_cast<int>(r.mem_type);
   return -1;
 }
 
-int dmemBackingFd() {
-  static const bool once = ([] {
+int DmemBackingFd() {
+  static const bool kOnce = ([] {
     int fd = memfd_create("delta_dmem", 0);
     if (fd >= 0 && ftruncate(fd, static_cast<off_t>(kDmemTotal)) != 0) {
       close(fd);
       fd = -1;
     }
-    g_dmemBackingFd = fd;
+    g_dmem_backing_fd = fd;
   }(), true);
-  (void)once;
-  return g_dmemBackingFd;
+  (void)kOnce;
+  return g_dmem_backing_fd;
 }
-u64 dmemBackingSize() { return kDmemTotal; }
+u64 DmemBackingSize() {
+  return kDmemTotal;
+}
 
 /* dmem_ioctl */
-i32 dmaDevice::ioctl(u32 cmd, void *data) {
-  const i32 r = ioctlImpl(cmd, data);
+i32 DmaDevice::Ioctl(u32 cmd, void* data) {
+  const i32 r = IoctlImpl(cmd, data);
   if (kDmemTrace) {
     // The result too: an allocation whose window is exhausted is invisible in
     // the arguments, and the title's own heap map is built from what it got.
-    auto *q = static_cast<u64 *>(data);
+    auto* q = static_cast<u64*>(data);
     BASE_LOGI("dmem-ioctl", "  -> ret={} out=[{:#x} {:#x}]", r,
               q ? (unsigned long long)q[0] : 0ull,
               q ? (unsigned long long)q[1] : 0ull);
@@ -263,142 +274,147 @@ i32 dmaDevice::ioctl(u32 cmd, void *data) {
   return r;
 }
 
-i32 dmaDevice::ioctlImpl(u32 cmd, void *data) {
+i32 DmaDevice::IoctlImpl(u32 cmd, void* data) {
   if (kDmemTrace) {
-    auto *q = static_cast<u64 *>(data);
-    BASE_LOGI("dmem-ioctl",
-              "cmd={:#x} data={:p} [{:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}]",
-              cmd, data, q ? (unsigned long long)q[0] : 0ull,
-              q ? (unsigned long long)q[1] : 0ull,
-              q ? (unsigned long long)q[2] : 0ull,
-              q ? (unsigned long long)q[3] : 0ull,
-              q ? (unsigned long long)q[4] : 0ull,
-              q ? (unsigned long long)q[5] : 0ull,
-              q ? (unsigned long long)q[6] : 0ull,
-              q ? (unsigned long long)q[7] : 0ull);
+    auto* q = static_cast<u64*>(data);
+    BASE_LOGI(
+        "dmem-ioctl",
+        "cmd={:#x} data={:p} [{:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}]",
+        cmd, data, q ? (unsigned long long)q[0] : 0ull,
+        q ? (unsigned long long)q[1] : 0ull,
+        q ? (unsigned long long)q[2] : 0ull,
+        q ? (unsigned long long)q[3] : 0ull,
+        q ? (unsigned long long)q[4] : 0ull,
+        q ? (unsigned long long)q[5] : 0ull,
+        q ? (unsigned long long)q[6] : 0ull,
+        q ? (unsigned long long)q[7] : 0ull);
   }
   switch (cmd) {
-  case 0x4008800A: {
-    // GetDirectMemorySize: total physical pool available to the title.
-    *static_cast<u64 *>(data) = dmemTotal();
-    return 0;
-  }
-  case 0xC0288001: {
-    // AllocateDirectMemory: struct = [searchStart, searchEnd, len, align,
-    // memType]; on success write the chosen physical offset back into [0].
-    auto *a = static_cast<u64 *>(data);
-    if (!a)
-      return -1;
-    u64 len = a[2];
-    u64 align = a[3] ? a[3] : 0x4000;
-    if (len == 0)
-      return -1;
-    // DELTA_DMEM_CALLER: scan the guest stack (native handlers run on it) for module
-    // .text return addresses, pinning which guest code reserved this pool.
-    if (kDmemCaller) {
-      BASE_LOGI("dmem-alloc",
-                "len={:#x} memType={:#x} align={:#x} caller-chain:",
-                (unsigned long long)len, (unsigned long long)a[4],
-                (unsigned long long)align);
-      auto *sp = reinterpret_cast<uintptr_t *>(__builtin_frame_address(0));
-      auto *pr = proc::getActive();
-      int shown = 0;
-      for (int i = 0; i < 4096 && shown < 12; i++) {
-        uintptr_t v = sp[i];
-        if (!pr) break;
-        for (auto &m : pr->getModuleList()) {
-          auto &mi = m->getInfo();
-          auto *t = mi.textSeg.addr;
-          if (t && v >= (uintptr_t)t && v < (uintptr_t)t + mi.textSeg.size) {
-            BASE_LOGI("dmem-alloc", "  sp+{:<4x} {}+{:#x}", i * 8,
-                      mi.name.c_str(), v - (uintptr_t)t);
-            shown++;
+    case 0x4008800A: {
+      // GetDirectMemorySize: total physical pool available to the title.
+      *static_cast<u64*>(data) = DmemTotal();
+      return 0;
+    }
+    case 0xC0288001: {
+      // AllocateDirectMemory: struct = [searchStart, searchEnd, len, align,
+      // memType]; on success write the chosen physical offset back into [0].
+      auto* a = static_cast<u64*>(data);
+      if (!a)
+        return -1;
+      u64 len = a[2];
+      u64 align = a[3] ? a[3] : 0x4000;
+      if (len == 0)
+        return -1;
+      // DELTA_DMEM_CALLER: scan the guest stack (native handlers run on it) for
+      // module .text return addresses, pinning which guest code reserved this
+      // pool.
+      if (kDmemCaller) {
+        BASE_LOGI("dmem-alloc",
+                  "len={:#x} memType={:#x} align={:#x} caller-chain:",
+                  (unsigned long long)len, (unsigned long long)a[4],
+                  (unsigned long long)align);
+        auto* sp = reinterpret_cast<uintptr_t*>(__builtin_frame_address(0));
+        auto* pr = Proc::GetActive();
+        int shown = 0;
+        for (int i = 0; i < 4096 && shown < 12; i++) {
+          uintptr_t v = sp[i];
+          if (!pr)
             break;
+          for (auto& m : pr->GetModuleList()) {
+            auto& mi = m->GetInfo();
+            auto* t = mi.text_seg.addr;
+            if (t && v >= (uintptr_t)t && v < (uintptr_t)t + mi.text_seg.size) {
+              BASE_LOGI("dmem-alloc", "  sp+{:<4x} {}+{:#x}", i * 8,
+                        mi.name.c_str(), v - (uintptr_t)t);
+              shown++;
+              break;
+            }
           }
         }
       }
-    }
-    u64 off = 0;
-    int r = dmemAllocate(a[0], a[1], len, align, static_cast<u32>(a[4]),
-                         &off);
-    if (r < 0) {
-      BASE_LOGI("dmem",
-                "alloc FAILED window=[{:#x},{:#x}) len={:#x} -> {}",
-                (unsigned long long)a[0], (unsigned long long)a[1],
-                (unsigned long long)len, r);
-      return r;
-    }
-    a[0] = off;  // physical offset out
-    return 0;
-  }
-  case 0xC0288011: {
-    // AllocateMainDirectMemory [offset(out), _, len, align, memType]: same allocator,
-    // whole-pool range; chosen offset -> [0]. Left unhandled it returned 0 without
-    // writing an offset, so every reservation aliased physical 0.
-    auto *a = static_cast<u64 *>(data);
-    if (!a)
-      return -1;
-    u64 len = a[2];
-    u64 align = a[3] ? a[3] : 0x4000;
-    if (len == 0)
-      return -1;
-    u64 off = 0;
-    int r = dmemAllocate(0, kDmemTotal, len, align,
-                         static_cast<u32>(a[4]), &off);
-    if (r < 0)
-      return r;
-    a[0] = off;
-    return 0;
-  }
-  case 0xC0208016: {
-    // AvailableDirectMemorySize [searchStart(in)/physOut, searchEnd, align, sizeOut]:
-    // largest hole at/after searchStart -> [0], size -> [3]. Swapped fields made
-    // SotC read our physical offset as its budget and starve its allocator.
-    auto *a = static_cast<u64 *>(data);
-    if (!a)
-      return -1;
-    u64 base = 0, size = 0;
-    dmemLargestHole(a[0], a[1], a[2], &base, &size);
-    a[0] = base;                        // physical offset of the hole
-    a[3] = size;                        // available size
-    return 0;
-  }
-  case 0xC0208004: {
-    // GetDirectMemoryType [physAddr(in), regionStart(out), regionEnd(out),
-    // memType(out)]: report the reservation owning physAddr (how the renderer reads
-    // back its GPU pool bounds).
-    auto *a = static_cast<u64 *>(data);
-    if (!a)
-      return -1;
-    u64 phys = a[0];
-    base::LockGuard<base::Mutex> lk(g_dmemMutex);
-    for (const auto &r : g_dmemRegions) {
-      if (phys >= r.start && phys < r.end) {
-        a[1] = r.start;
-        a[2] = r.end;
-        a[3] = r.memType;
-        return 0;
+      u64 off = 0;
+      int r =
+          DmemAllocate(a[0], a[1], len, align, static_cast<u32>(a[4]), &off);
+      if (r < 0) {
+        BASE_LOGI("dmem", "alloc FAILED window=[{:#x},{:#x}) len={:#x} -> {}",
+                  (unsigned long long)a[0], (unsigned long long)a[1],
+                  (unsigned long long)len, r);
+        return r;
       }
+      a[0] = off;  // physical offset out
+      return 0;
     }
-    // Unknown offset: report it as a page-sized direct (WC_GARLIC) region so the
-    // query still succeeds rather than returning a zero-length hole.
-    a[1] = phys & ~0xFFFFull;
-    a[2] = (phys & ~0xFFFFull) + 0x10000;
-    a[3] = 3;
-    return 0;
-  }
-  case 0x80108002: {
-    // ReleaseDirectMemory [physOffset, len] (11.00 passes args straight through).
-    // Read as a VA-based MapDirectMemory before: MAP_FIXED'd anon memory at a host
-    // address equal to the physical offset and never freed. P.T. over-allocates and
-    // releases slop per 4 MiB buffer, so the leak walked a gigabyte past the pool.
-    auto *a = static_cast<u64 *>(data);
-    if (!a)
-      return -1;
-    if (a[1])
-      dmemFree(a[0], a[1]);
-    return 0;
-  }
+    case 0xC0288011: {
+      // AllocateMainDirectMemory [offset(out), _, len, align, memType]: same
+      // allocator, whole-pool range; chosen offset -> [0]. Left unhandled it
+      // returned 0 without writing an offset, so every reservation aliased
+      // physical 0.
+      auto* a = static_cast<u64*>(data);
+      if (!a)
+        return -1;
+      u64 len = a[2];
+      u64 align = a[3] ? a[3] : 0x4000;
+      if (len == 0)
+        return -1;
+      u64 off = 0;
+      int r =
+          DmemAllocate(0, kDmemTotal, len, align, static_cast<u32>(a[4]), &off);
+      if (r < 0)
+        return r;
+      a[0] = off;
+      return 0;
+    }
+    case 0xC0208016: {
+      // AvailableDirectMemorySize [searchStart(in)/physOut, searchEnd, align,
+      // sizeOut]: largest hole at/after searchStart -> [0], size -> [3].
+      // Swapped fields made SotC read our physical offset as its budget and
+      // starve its allocator.
+      auto* a = static_cast<u64*>(data);
+      if (!a)
+        return -1;
+      u64 base = 0, size = 0;
+      DmemLargestHole(a[0], a[1], a[2], &base, &size);
+      a[0] = base;  // physical offset of the hole
+      a[3] = size;  // available size
+      return 0;
+    }
+    case 0xC0208004: {
+      // GetDirectMemoryType [physAddr(in), regionStart(out), regionEnd(out),
+      // memType(out)]: report the reservation owning physAddr (how the renderer
+      // reads back its GPU pool bounds).
+      auto* a = static_cast<u64*>(data);
+      if (!a)
+        return -1;
+      u64 phys = a[0];
+      base::LockGuard<base::Mutex> lk(g_dmem_mutex);
+      for (const auto& r : g_dmem_regions) {
+        if (phys >= r.start && phys < r.end) {
+          a[1] = r.start;
+          a[2] = r.end;
+          a[3] = r.mem_type;
+          return 0;
+        }
+      }
+      // Unknown offset: report it as a page-sized direct (WC_GARLIC) region so
+      // the query still succeeds rather than returning a zero-length hole.
+      a[1] = phys & ~0xFFFFull;
+      a[2] = (phys & ~0xFFFFull) + 0x10000;
+      a[3] = 3;
+      return 0;
+    }
+    case 0x80108002: {
+      // ReleaseDirectMemory [physOffset, len] (11.00 passes args straight
+      // through). Read as a VA-based MapDirectMemory before: MAP_FIXED'd anon
+      // memory at a host address equal to the physical offset and never freed.
+      // P.T. over-allocates and releases slop per 4 MiB buffer, so the leak
+      // walked a gigabyte past the pool.
+      auto* a = static_cast<u64*>(data);
+      if (!a)
+        return -1;
+      if (a[1])
+        DmemFree(a[0], a[1]);
+      return 0;
+    }
   }
 
   return 0;
@@ -406,11 +422,10 @@ i32 dmaDevice::ioctlImpl(u32 cmd, void *data) {
 
 // /dev/dmem has no device-backed mapping on PS4; fall back to anon in sys_mmap
 // (the PS5 shared-memfd coherency mapping lives in the PS5 override).
-u8 *dmaDevice::map(void *addr, size_t len, u32, u32 flags,
-                        size_t offset) {
+u8* DmaDevice::Map(void* addr, size_t len, u32, u32 flags, size_t offset) {
   if (kDmemTrace)
     BASE_LOGI("dmem", "devmap off={:#x} len={:#x} want={:p} fixed={} -> anon",
-              offset, len, addr, (flags & mFlags::fixed) ? 1 : 0);
-  return reinterpret_cast<u8 *>(-1);
+              offset, len, addr, (flags & MFlags::kFixed) ? 1 : 0);
+  return reinterpret_cast<u8*>(-1);
 }
-} // namespace krnl
+}  // namespace krnl

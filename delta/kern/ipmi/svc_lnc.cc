@@ -12,7 +12,7 @@
 
 #include "base/arch.h"
 
-#include "services.h"
+#include "kern/ipmi/services.h"
 
 namespace krnl::ipmi {
 namespace {
@@ -22,9 +22,11 @@ enum {
   // and returns SCE_NP_WEBAPI error 0x8055a402 unless it is 4 or 5, which fails
   // the whole NpToolkit2 bring-up above it (GTA:SA treats that as fatal).
   kLncGetAppStatus = 0x30013,
-  // PS5 asks the same question with a 64-byte reply and no input; libSceSystemService
+  // PS5 asks the same question with a 64-byte reply and no input;
+  // libSceSystemService
   // +0xdfa0 caches it at init. A zeroed reply = appId 0, which matches no focus
-  // pattern, so GetStatus reports the title overlaid by system UI and it renders nothing.
+  // pattern, so GetStatus reports the title overlaid by system UI and it
+  // renders nothing.
   kLncGetAppStatusPs5 = 0x30010,
 };
 
@@ -34,30 +36,33 @@ enum {
 constexpr u32 kAppRunning = 4;
 
 struct Lnc : Service {
-  const char *name() const override { return "SceLncService"; }
+  const char* Name() const override { return "SceLncService"; }
 
-  void invoke(Invocation &inv) override {
-    switch (inv.method()) {
-    case kLncGetAppStatusPs5:
-    case kLncGetAppStatus: {
-      // libSceSystemService caches this appId against the focus flag patterns; a mismatch
-      // reads "another app has focus" and titles answer by dropping pad input (Tomb
-      // Raider: DE stops calling scePadReadState forever).
-      const u32 status[3] = {kForegroundAppId, 0, kAppRunning};
-      inv.reply(0, status, sizeof(status));
-      break;
-    }
-    default:
-      inv.replyEmpty();
-      break;
+  void Invoke(Invocation& inv) override {
+    switch (inv.Method()) {
+      case kLncGetAppStatusPs5:
+      case kLncGetAppStatus: {
+        // libSceSystemService caches this appId against the focus flag
+        // patterns; a mismatch reads "another app has focus" and titles answer
+        // by dropping pad input (Tomb Raider: DE stops calling scePadReadState
+        // forever).
+        const u32 status[3] = {kForegroundAppId, 0, kAppRunning};
+        inv.Reply(0, status, sizeof(status));
+        break;
+      }
+      default:
+        inv.ReplyEmpty();
+        break;
     }
   }
 };
 
 Lnc g_lnc;
 
-} // namespace
+}  // namespace
 
-Service &lncService() { return g_lnc; }
+Service& LncService() {
+  return g_lnc;
+}
 
-} // namespace krnl::ipmi
+}  // namespace krnl::ipmi

@@ -7,61 +7,61 @@
  * in the root of the source tree.
  */
 
-#include <guest_abi.h>
-#include "base/arch.h"
-#include <base/logging.h>
 #include <unistd.h>
-#include <base/strings/string_ref.h>
 #include <cstdio>
+#include "base/arch.h"
+#include "base/logging.h"
+#include "base/strings/string_ref.h"
+#include "guest_abi.h"
 
+#include "kern/crash.h"
+#include "kern/lv2/sys_mem.h"
+#include "kern/lv2/sys_vfs.h"
+#include "kern/lv2/sys_vfs_ext.h"
+#include "kern/probe/probe_arm.h"
+#include "kern/process.h"
 #include "kern/ps4/dev/ajm_dev.h"
 #include "kern/ps4/dev/authmgr_dev.h"
 #include "kern/ps4/dev/av_control_dev.h"
 #include "kern/ps4/dev/console_dev.h"
-#include "kern/ps4/dev/deci_stdin_dev.h"
-#include "kern/ps4/dev/hdmi_dev.h"
-#include "kern/ps4/dev/mdctl_dev.h"
-#include "kern/ps4/dev/npdrm_dev.h"
-#include "kern/ps4/dev/null_dev.h"
-#include "kern/ps4/dev/srtc_dev.h"
-#include "kern/ps4/dev/zero_dev.h"
-#include "kern/ps4/dev/dipsw_dev.h"
-#include "kern/ps4/dev/random_dev.h"
 #include "kern/ps4/dev/dce_dev.h"
+#include "kern/ps4/dev/deci_stdin_dev.h"
+#include "kern/ps4/dev/dipsw_dev.h"
 #include "kern/ps4/dev/dir_dev.h"
 #include "kern/ps4/dev/dma_dev.h"
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/gc_dev.h"
+#include "kern/ps4/dev/hdmi_dev.h"
 #include "kern/ps4/dev/hid_dev.h"
+#include "kern/ps4/dev/mdctl_dev.h"
+#include "kern/ps4/dev/npdrm_dev.h"
+#include "kern/ps4/dev/null_dev.h"
 #include "kern/ps4/dev/pfsctl_dev.h"
+#include "kern/ps4/dev/random_dev.h"
 #include "kern/ps4/dev/scegp_dev.h"
-#include "kern/ps5/dev/gc_dev.h"   // PS5 AGC /dev/gc device
-#include "kern/ps5/dev/dma_dev.h"  // PS5 /dev/dmem (shared-memfd mapping)
+#include "kern/ps4/dev/srtc_dev.h"
 #include "kern/ps4/dev/tty6_dev.h"
 #include "kern/ps4/dev/usbctl_dev.h"
 #include "kern/ps4/dev/vtrm_dev.h"
-#include "kern/process.h"
-#include "kern/crash.h"
-#include "kern/probe/probe_arm.h"
+#include "kern/ps4/dev/zero_dev.h"
+#include "kern/ps5/dev/dma_dev.h"  // PS5 /dev/dmem (shared-memfd mapping)
+#include "kern/ps5/dev/gc_dev.h"   // PS5 AGC /dev/gc device
 #include "kern/vfs.h"
-#include "sys_mem.h"
-#include "sys_vfs_ext.h"
-#include "sys_vfs.h"
 
-#include <kern/object_ref.h>
-#include <options/options.h>
-#include <base/threading/thread.h>
-#include <base/algorithm.h>
-#include <base/atomic.h>
-#include <base/containers/deque.h>
-#include <base/containers/map.h>
-#include <base/containers/vector.h>
-#include <base/memory/move.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/time/time.h>
-#include <base/containers/hash_map.h>
+#include "base/algorithm.h"
+#include "base/atomic.h"
+#include "base/containers/deque.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/memory/move.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
+#include "base/time/time.h"
+#include "kern/object_ref.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(bool, kManifestSeq, "DELTA_MANIFEST_SEQ", false);
@@ -76,22 +76,23 @@ DELTA_OPTION(bool, kVfsTrace, "DELTA_VFS_TRACE", false);
 
 namespace krnl {
 // Scan the (guest) stack for the first return address inside any guest module's
-// .text and print it as <module>+offset, to pin which guest code issued an open.
-// Native backend runs handlers on the guest stack. Gated; for tracing loops.
-static void printOpenCaller(const char *path) {
+// .text and print it as <module>+offset, to pin which guest code issued an
+// open. Native backend runs handlers on the guest stack. Gated; for tracing
+// loops.
+static void PrintOpenCaller(const char* path) {
   if (!kOpenCaller)
     return;
-  auto *proc = proc::getActive();
+  auto* proc = Proc::GetActive();
   if (!proc)
     return;
-  auto *sp = reinterpret_cast<uintptr_t *>(__builtin_frame_address(0));
+  auto* sp = reinterpret_cast<uintptr_t*>(__builtin_frame_address(0));
   int printed = 0;
   for (int i = 0; i < 768 && printed < 5; i++) {
     uintptr_t v = sp[i];
-    for (auto &m : proc->getModuleList()) {
-      auto &mi = m->getInfo();
-      auto base = reinterpret_cast<uintptr_t>(mi.textSeg.addr);
-      if (base && v >= base && v < base + mi.textSeg.size) {
+    for (auto& m : proc->GetModuleList()) {
+      auto& mi = m->GetInfo();
+      auto base = reinterpret_cast<uintptr_t>(mi.text_seg.addr);
+      if (base && v >= base && v < base + mi.text_seg.size) {
         BASE_LOGI("open-caller", "{} : {}+{:#x}", path, mi.name.c_str(),
                   v - base);
         printed++;
@@ -101,71 +102,71 @@ static void printOpenCaller(const char *path) {
   }
 }
 
-static device *make_device(const char *deviceName) {
-  base::StringRef xname(deviceName);
+static Device* MakeDevice(const char* device_name) {
+  base::StringRef xname(device_name);
 
-  device *dev = nullptr;
-  auto *proc = proc::getActive();
+  Device* dev = nullptr;
+  auto* proc = Proc::GetActive();
   if (xname == "console")
-    dev = new consoleDevice(proc->getObjTable());
+    dev = new ConsoleDevice(proc->GetObjTable());
   if (xname == "deci_tty6")
-    dev = new tty6Device(proc->getObjTable());
+    dev = new Tty6Device(proc->GetObjTable());
   if (xname == "deci_stdin")
-    dev = new deciStdinDevice(proc->getObjTable());
+    dev = new DeciStdinDevice(proc->GetObjTable());
   if (xname == "null")
-    dev = new nullDevice(proc->getObjTable());
+    dev = new NullDevice(proc->GetObjTable());
   if (xname == "zero")
-    dev = new zeroDevice(proc->getObjTable());
+    dev = new ZeroDevice(proc->GetObjTable());
   if (xname == "mdctl")
-    dev = new mdctlDevice(proc->getObjTable());
+    dev = new MdctlDevice(proc->GetObjTable());
   if (xname == "av_control")
-    dev = new avControlDevice(proc->getObjTable());
+    dev = new AvControlDevice(proc->GetObjTable());
   if (xname == "hdmi")
-    dev = new hdmiDevice(proc->getObjTable());
+    dev = new HdmiDevice(proc->GetObjTable());
   if (xname == "srtc")
-    dev = new srtcDevice(proc->getObjTable());
+    dev = new SrtcDevice(proc->GetObjTable());
   if (xname == "authmgr")
-    dev = new authmgrDevice(proc->getObjTable());
+    dev = new AuthmgrDevice(proc->GetObjTable());
   if (xname == "npdrm")
-    dev = new npdrmDevice(proc->getObjTable());
+    dev = new NpdrmDevice(proc->GetObjTable());
   if (xname == "vtrm")
-    dev = new vtrmDevice(proc->getObjTable());
+    dev = new VtrmDevice(proc->GetObjTable());
   if (xname == "pfsctldev")
-    dev = new pfsctlDevice(proc->getObjTable());
+    dev = new PfsctlDevice(proc->GetObjTable());
   if (xname == "usbctl")
-    dev = new usbctlDevice(proc->getObjTable());
+    dev = new UsbctlDevice(proc->GetObjTable());
   if (xname == "hid")
-    dev = new hidDevice(proc->getObjTable());
+    dev = new HidDevice(proc->GetObjTable());
   if (xname == "sceGp")
-    dev = new sceGpDevice(proc->getObjTable());
+    dev = new SceGpDevice(proc->GetObjTable());
   if (xname == "gc")
-    dev = (proc && proc->getPlatform() == krnl::proc::platform::ps5)
-              ? static_cast<device *>(new gcDevicePs5(proc->getObjTable()))
-              : static_cast<device *>(new gcDevice(proc->getObjTable()));
+    dev = (proc && proc->GetPlatform() == krnl::Proc::Platform::kPs5)
+              ? static_cast<Device*>(new GcDevicePs5(proc->GetObjTable()))
+              : static_cast<Device*>(new GcDevice(proc->GetObjTable()));
   if (xname == "dce")
-    dev = new dceDevice(proc->getObjTable());
+    dev = new DceDevice(proc->GetObjTable());
   if (xname == "dipsw")
-    dev = new dipswDevice(proc->getObjTable());
+    dev = new DipswDevice(proc->GetObjTable());
   if (xname == "random" || xname == "urandom")
-    dev = new randomDevice(proc->getObjTable());
-  // PS5 only. /dev/rng lets libSceSsl's DT_INIT seed itself; on Orbis that reaches
-  // libSceNpMatching2's init, which derefs an NpManager context we leave null
-  // (Tomb Raider faults). Widen once PS4 Np bring-up follows.
+    dev = new RandomDevice(proc->GetObjTable());
+  // PS5 only. /dev/rng lets libSceSsl's DT_INIT seed itself; on Orbis that
+  // reaches libSceNpMatching2's init, which derefs an NpManager context we
+  // leave null (Tomb Raider faults). Widen once PS4 Np bring-up follows.
   if (xname == "rng" && proc &&
-      proc->getPlatform() == krnl::proc::platform::ps5)
-    dev = new randomDevice(proc->getObjTable());
+      proc->GetPlatform() == krnl::Proc::Platform::kPs5)
+    dev = new RandomDevice(proc->GetObjTable());
   if (xname == "ajm")
-    dev = new ajmDevice(proc->getObjTable());
+    dev = new AjmDevice(proc->GetObjTable());
   /*there are multiple of these*/
   if (xname.find("dmem", 0, 4) != base::StringRef::npos)
-    dev = (proc && proc->getPlatform() == krnl::proc::platform::ps5)
-              ? static_cast<device *>(new dmaDevicePs5(proc->getObjTable()))
-              : static_cast<device *>(new dmaDevice(proc->getObjTable()));
+    dev = (proc && proc->GetPlatform() == krnl::Proc::Platform::kPs5)
+              ? static_cast<Device*>(new DmaDevicePs5(proc->GetObjTable()))
+              : static_cast<Device*>(new DmaDevice(proc->GetObjTable()));
 
   return dev;
 }
 
-int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
+int PS4ABI sys_open(const char* path, u32 flags, u32 mode) {
   if (!path)
     return -SysError::eINVAL;
 
@@ -181,20 +182,20 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
   if (kVfsTrace)
     BASE_LOGI("open", "{} flags={:#x} mode={:#x}", path, flags, mode);
   if (std::strstr(path, ".psarc"))
-    printOpenCaller(path);
+    PrintOpenCaller(path);
 
   if (std::strncmp(path, "/dev/", 5) == 0) {
-    const char *name = &path[5];
+    const char* name = &path[5];
 
-    auto dev = make_device(name);
+    auto dev = MakeDevice(name);
     if (dev) {
-      // kObject::name is what every device diagnostic prints, and nothing had
+      // Object::name is what every device diagnostic prints, and nothing had
       // ever set it, so an unknown ioctl reported the device it arrived on as
       // an empty string.
-      dev->setName(name);
+      dev->SetName(name);
 
-      if (!dev->init(name, flags, mode)) {
-        dev->releaseHandle();
+      if (!dev->Init(name, flags, mode)) {
+        dev->ReleaseHandle();
         return -SysError::eNXIO;
       }
 
@@ -204,22 +205,23 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
     return -SysError::eNOENT;
   }
 
-  // Directory: games open (O_DIRECTORY) then getdents. The guest's flag bits are
-  // FreeBSD's, so confirm with a stat when the flag is absent: a read open of a
-  // directory must still yield a dirDevice, else getdents reports ENOTDIR and a
-  // d_reclen walk never advances (Dead Cells spins on its loading screen). Write
-  // opens are never directories, so they skip the stat.
-  bool asDir = (flags & O_DIRECTORY) != 0;
-  if (!asDir && (flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT)) {
+  // Directory: games open (O_DIRECTORY) then getdents. The guest's flag bits
+  // are FreeBSD's, so confirm with a stat when the flag is absent: a read open
+  // of a directory must still yield a DirDevice, else getdents reports ENOTDIR
+  // and a d_reclen walk never advances (Dead Cells spins on its loading
+  // screen). Write opens are never directories, so they skip the stat.
+  bool as_dir = (flags & O_DIRECTORY) != 0;
+  if (!as_dir && (flags & O_ACCMODE) == O_RDONLY && !(flags & O_CREAT)) {
     i64 dsize = 0;
-    bool isDir = false;
-    asDir = vfs::stat(path, dsize, isDir) && isDir;
+    bool is_dir = false;
+    as_dir = vfs::Stat(path, dsize, is_dir) && is_dir;
   }
-  if (asDir) {
+  if (as_dir) {
     base::Vector<vfs::DirEntry> entries;
-    if (vfs::listDir(path, entries)) {
+    if (vfs::ListDir(path, entries)) {
       const size_t n = entries.size();
-      auto *dir = new dirDevice(proc::getActive()->getObjTable(), base::move(entries));
+      auto* dir =
+          new DirDevice(Proc::GetActive()->GetObjTable(), base::move(entries));
       if (kVfsTrace)
         BASE_LOGI("open", "  -> dir fd={} entries={} {}", dir->handle(), n,
                   path);
@@ -231,28 +233,28 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
   }
 
   // Writable open (savedata): a create/write flag on a path under a writable
-  // host mount goes to a writable fileDevice. Read-only titles never take this
+  // host mount goes to a writable FileDevice. Read-only titles never take this
   // (they open /app0, a read-only virtual mount), so it can't affect them.
-  const bool writeIntent =
+  const bool write_intent =
       accmode == O_WRONLY || accmode == O_RDWR || (flags & O_CREAT);
-  if (writeIntent) {
-    base::String host = vfs::resolveWritable(path);
+  if (write_intent) {
+    base::String host = vfs::ResolveWritable(path);
     if (!host.empty()) {
-      auto *file = new fileDevice(proc::getActive()->getObjTable());
-      if (file->openWritable(host, (flags & O_CREAT) != 0,
+      auto* file = new FileDevice(Proc::GetActive()->GetObjTable());
+      if (file->OpenWritable(host, (flags & O_CREAT) != 0,
                              (flags & O_TRUNC) != 0)) {
         if (kVfsTrace)
           BASE_LOGI("open", "  -> writable fd={} {}", file->handle(),
                     host.c_str());
         return file->handle();
       }
-      file->releaseHandle();
+      file->ReleaseHandle();
       return -SysError::eNOENT;
     }
   }
 
   // Regular file: resolve through the VFS (host + virtual mounts).
-  io::File vf = vfs::openRead(path);
+  io::File vf = vfs::OpenRead(path);
   if (!vf.Exists()) {
     if (kVfsTrace)
       BASE_LOGI("open", "  -> ENOENT {}", path);
@@ -260,39 +262,39 @@ int PS4ABI sys_open(const char *path, u32 flags, u32 mode) {
   }
 
   i64 fsize = vf.GetSize();
-  auto *file = new fileDevice(proc::getActive()->getObjTable());
-  if (!file->adopt(base::move(vf))) {
-    file->releaseHandle();
+  auto* file = new FileDevice(Proc::GetActive()->GetObjTable());
+  if (!file->Adopt(base::move(vf))) {
+    file->ReleaseHandle();
     return -SysError::eNOENT;
   }
   // SOTTR's TAFS loader reads .manifest.bin with an uninitialised file offset;
-  // serve those sequentially so the header (off 0) loads. See setSeqMode().
+  // serve those sequentially so the header (off 0) loads. See SetSeqMode().
   if (kManifestSeq && std::strstr(path, ".manifest.bin"))
-    file->setSeqMode();
+    file->SetSeqMode();
   // Flag manifest fds so the read-request setter hook (DELTA_RDOFF_FIX) can
   // force their read offset to 0.
   if (std::strstr(path, ".manifest.bin"))
-    probe::markManifestFd(file->handle(), true);
+    probe::MarkManifestFd(file->handle(), true);
   // Flag .qar archive fds for the DELTA_QARBUF read-destination trace.
   if (std::strstr(path, ".qar"))
-    markQarFd(file->handle(), true);
+    MarkQarFd(file->handle(), true);
   if (kVfsTrace)
-    BASE_LOGI("open", "  -> fd={} size={} {}", file->handle(),
-              (long long)fsize, path);
+    BASE_LOGI("open", "  -> fd={} size={} {}", file->handle(), (long long)fsize,
+              path);
   return file->handle();
 }
 
 // Resolve an fd (object-table handle) back to the device that backs it.
-static device *fdToDevice(u32 fd) {
-  auto *obj = proc::getActive()->getObjTable().get(fd);
-  if (!obj || obj->type() != kObject::oType::device)
+static Device* FdToDevice(u32 fd) {
+  auto* obj = Proc::GetActive()->GetObjTable().Get(fd);
+  if (!obj || obj->type() != Object::OType::kDevice)
     return nullptr;
-  return static_cast<device *>(obj);
+  return static_cast<Device*>(obj);
 }
 
-// DELTA_FD_STATS: bytes read per fd, dumped periodically; "opened but never read"
-// is a strong signal that whatever consumes the asset is stuck.
-void fdReadStat(u32 fd, i64 n) {
+// DELTA_FD_STATS: bytes read per fd, dumped periodically; "opened but never
+// read" is a strong signal that whatever consumes the asset is stuck.
+void FdReadStat(u32 fd, i64 n) {
   if (!kFdStats || n <= 0)
     return;
   static base::Atomic<u64> bytes[4096];
@@ -301,7 +303,7 @@ void fdReadStat(u32 fd, i64 n) {
     return;
   bytes[fd].fetch_add(static_cast<u64>(n), base::memory_order_relaxed);
   calls[fd].fetch_add(1, base::memory_order_relaxed);
-  static const bool started = [] {
+  static const bool kStarted = [] {
     base::SpawnDetachedThread("sys_vfs", [] {
       for (;;) {
         base::SleepForMilliseconds((20) * 1000);
@@ -315,14 +317,15 @@ void fdReadStat(u32 fd, i64 n) {
     });
     return true;
   }();
-  (void)started;
+  (void)kStarted;
 }
 
-// DELTA_IO_MBPS=<MiB/s>: cap file-read throughput. A host SSD outruns a loader the
-// title tuned to a console drive: a pipeline keeping loaded-but-unfinalized data
-// in a fixed CPU budget can be outrun and exhaust it (SotC fills its 1 GiB onion
-// heap and dies in its own allocator; the same run survives on a busy host). 0 = off.
-void throttleIo(i64 bytes) {
+// DELTA_IO_MBPS=<MiB/s>: cap file-read throughput. A host SSD outruns a loader
+// the title tuned to a console drive: a pipeline keeping loaded-but-unfinalized
+// data in a fixed CPU budget can be outrun and exhaust it (SotC fills its 1 GiB
+// onion heap and dies in its own allocator; the same run survives on a busy
+// host). 0 = off.
+void ThrottleIo(i64 bytes) {
   const unsigned mbps = kIoMbps;
   if (!mbps || bytes <= 0)
     return;
@@ -344,47 +347,48 @@ void throttleIo(i64 bytes) {
     base::SleepForMicroseconds(u64(wait.InMicroseconds()));
 }
 
-i64 PS4ABI sys_read(u32 fd, void *buf, size_t nbytes) {
-  auto *d = fdToDevice(fd);
+i64 PS4ABI sys_read(u32 fd, void* buf, size_t nbytes) {
+  auto* d = FdToDevice(fd);
   if (!d) {
-    // The standard descriptors exist but read nothing: report EOF, not EBADF. Skyrim's
-    // INI parser falls back to stderr when the file is missing and its fgets loop only
-    // stops on EOF; an error left it reading fd 2 forever at 100% CPU.
+    // The standard descriptors exist but read nothing: report EOF, not EBADF.
+    // Skyrim's INI parser falls back to stderr when the file is missing and its
+    // fgets loop only stops on EOF; an error left it reading fd 2 forever at
+    // 100% CPU.
     if (fd <= 2)
       return 0;
     if (kRdall)
       BASE_LOGI("rd", "fd={} -> EBADF (no device)", fd);
     return -SysError::eBADF;
   }
-  i64 r = d->read(buf, nbytes);
-  throttleIo(r);
-  fdReadStat(fd, r);
-  // DELTA_READ_TRACE: log large reads (asset/texture loads) + their target buffer,
-  // to see whether texture data lands in the GPU texture region (0x41x) directly or
-  // a staging buffer the game later copies from.
+  i64 r = d->Read(buf, nbytes);
+  ThrottleIo(r);
+  FdReadStat(fd, r);
+  // DELTA_READ_TRACE: log large reads (asset/texture loads) + their target
+  // buffer, to see whether texture data lands in the GPU texture region (0x41x)
+  // directly or a staging buffer the game later copies from.
   if (kReadTrace && nbytes >= 0x4000)
     BASE_LOGI("read", "fd={} buf={:p} nbytes={:#x} -> {}", fd, buf, nbytes,
               (long long)r);
   if (kRdall) {
     u32 f4 = 0;
-    if (buf && r >= 4) f4 = *reinterpret_cast<const u32 *>(buf);
-    BASE_LOGI("rd",
-              "t={} fd={} nbytes={:#x} -> {} buf={:p} first4={:08x}",
+    if (buf && r >= 4)
+      f4 = *reinterpret_cast<const u32*>(buf);
+    BASE_LOGI("rd", "t={} fd={} nbytes={:#x} -> {} buf={:p} first4={:08x}",
               (long)gettid(), fd, nbytes, (long long)r, buf, f4);
   }
   return r;
 }
 
 i64 PS4ABI sys_lseek(u32 fd, i64 offset, int whence) {
-  auto *d = fdToDevice(fd);
+  auto* d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
-  return d->lseek(offset, whence);
+  return d->Lseek(offset, whence);
 }
 
-// FreeBSD struct statfs (0x1D8 bytes). Only capacity matters (it decides whether a
-// title may write); unhandled, the caller read garbage as "no space" and
-// Minecraft refused to open a world. Needs privilege 0x2AC in the kernel.
+// FreeBSD struct statfs (0x1D8 bytes). Only capacity matters (it decides
+// whether a title may write); unhandled, the caller read garbage as "no space"
+// and Minecraft refused to open a world. Needs privilege 0x2AC in the kernel.
 struct BsdStatfs {
   u32 f_version, f_type;
   u64 f_flags, f_bsize, f_iosize;
@@ -402,17 +406,17 @@ struct BsdStatfs {
   char f_mntonname[88];
 };
 
-static void fillStatfs(void *buf, const char *mount) {
-  auto *sf = static_cast<BsdStatfs *>(buf);
+static void FillStatfs(void* buf, const char* mount) {
+  auto* sf = static_cast<BsdStatfs*>(buf);
   std::memset(sf, 0, sizeof(*sf));
-  constexpr u64 kBlockSize = 0x8000;             // 32 KiB, as the PS5 fs
-  constexpr u64 kBlocks = 0x1000000ull;          // 512 GiB total
-  sf->f_version = 0x20140518;                         // STATFS_VERSION
+  constexpr u64 kBlockSize = 0x8000;     // 32 KiB, as the PS5 fs
+  constexpr u64 kBlocks = 0x1000000ull;  // 512 GiB total
+  sf->f_version = 0x20140518;            // STATFS_VERSION
   sf->f_bsize = kBlockSize;
   sf->f_iosize = kBlockSize;
   sf->f_blocks = kBlocks;
   sf->f_bfree = kBlocks / 2;
-  sf->f_bavail = static_cast<i64>(kBlocks / 2);   // 256 GiB free
+  sf->f_bavail = static_cast<i64>(kBlocks / 2);  // 256 GiB free
   sf->f_files = 0x100000;
   sf->f_ffree = 0x100000 / 2;
   sf->f_namemax = 255;
@@ -422,23 +426,23 @@ static void fillStatfs(void *buf, const char *mount) {
                sizeof(sf->f_mntonname) - 1);
 }
 
-int PS4ABI sys_statfs(const char *path, void *buf) {
+int PS4ABI sys_statfs(const char* path, void* buf) {
   if (kVfsTrace)
     BASE_LOGI("statfs", "'{}'", path ? path : "(null)");
   if (!buf)
     return -SysError::eFAULT;
-  fillStatfs(buf, path);
+  FillStatfs(buf, path);
   return 0;
 }
 
-int PS4ABI sys_fstatfs(u32 fd, void *buf) {
+int PS4ABI sys_fstatfs(u32 fd, void* buf) {
   if (!buf)
     return -SysError::eFAULT;
-  fillStatfs(buf, "/");
+  FillStatfs(buf, "/");
   return 0;
 }
 
-int PS4ABI sys_fstat(u32 fd, void *stat) {
+int PS4ABI sys_fstat(u32 fd, void* stat) {
   // Zero first: a failed/unsupported fstat must not leave the caller's stat
   // buffer uninitialized. Games read st_size from it without checking the
   // return and then allocate that many bytes (garbage -> bad_alloc).
@@ -447,23 +451,23 @@ int PS4ABI sys_fstat(u32 fd, void *stat) {
   // shm fds aren't device-backed; size them from the shm backing so a title
   // that fstat()s a shm before mmap'ing it (e.g. libSceAvSetting) gets a real
   // st_size instead of -EBADF + a zero-length map.
-  if (size_t sz = shmFstatSize(fd); sz != SIZE_MAX) {
+  if (size_t sz = ShmFstatSize(fd); sz != SIZE_MAX) {
     if (stat) {
-      auto *st = static_cast<SceKernelStat *>(stat);
+      auto* st = static_cast<SceKernelStat*>(stat);
       st->st_size = static_cast<i64>(sz);
       st->st_mode = 0x8000;  // S_IFREG
       st->st_blksize = 0x4000;
     }
     return 0;
   }
-  auto *d = fdToDevice(fd);
+  auto* d = FdToDevice(fd);
   if (!d) {
-    // The standard descriptors are not device-backed here; report them as character
-    // devices, not EBADF (Skyrim's INI parser stats its stderr fallback; an error
-    // makes its stdio layer treat the stream as broken).
+    // The standard descriptors are not device-backed here; report them as
+    // character devices, not EBADF (Skyrim's INI parser stats its stderr
+    // fallback; an error makes its stdio layer treat the stream as broken).
     if (fd <= 2) {
       if (stat) {
-        auto *st = static_cast<SceKernelStat *>(stat);
+        auto* st = static_cast<SceKernelStat*>(stat);
         st->st_mode = 0x2000;  // S_IFCHR
         st->st_blksize = 0x4000;
       }
@@ -478,66 +482,68 @@ int PS4ABI sys_fstat(u32 fd, void *stat) {
     }
     return -SysError::eBADF;
   }
-  int r = d->fstat(stat);
+  int r = d->Fstat(stat);
   if (kRdall && stat)
     BASE_LOGI("fstat", "fd={} -> st_size={}", fd,
-              (long long)static_cast<SceKernelStat *>(stat)->st_size);
+              (long long)static_cast<SceKernelStat*>(stat)->st_size);
   return r;
 }
 
-int PS4ABI sys_stat(const char *path, void *stat) {
+int PS4ABI sys_stat(const char* path, void* stat) {
   if (!path || !stat)
     return -SysError::eFAULT;
-  // Zero first, for the reason sys_fstat documents: callers read st_size without
-  // checking the return and then size a buffer from it. A missing file must
-  // leave st_size = 0, not stack garbage (DOOM read a -1 size and crashed).
+  // Zero first, for the reason sys_fstat documents: callers read st_size
+  // without checking the return and then size a buffer from it. A missing file
+  // must leave st_size = 0, not stack garbage (DOOM read a -1 size and
+  // crashed).
   std::memset(stat, 0, sizeof(SceKernelStat));
   i64 size = 0;
-  bool isDir = false;
-  if (!vfs::stat(path, size, isDir)) {
+  bool is_dir = false;
+  if (!vfs::Stat(path, size, is_dir)) {
     if (kRdall)
       BASE_LOGI("stat", "{} -> ENOENT", path);
     return -SysError::eNOENT;
   }
-  fillStat(*reinterpret_cast<SceKernelStat *>(stat),
-           isDir ? kSceFileModeDir : kSceFileModeReg, size);
+  FillStat(*reinterpret_cast<SceKernelStat*>(stat),
+           is_dir ? kSceFileModeDir : kSceFileModeReg, size);
   if (kRdall)
     BASE_LOGI("stat", "{} -> size={} dir={}", path, (long long)size,
-              (int)isDir);
+              (int)is_dir);
   return 0;
 }
 
-i64 PS4ABI sys_getdents(u32 fd, void *buf, size_t nbytes) {
-  auto *d = fdToDevice(fd);
+i64 PS4ABI sys_getdents(u32 fd, void* buf, size_t nbytes) {
+  auto* d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
-  return d->getdents(buf, nbytes);
+  return d->Getdents(buf, nbytes);
 }
 
-// Regular-file fd slots are released a bounded number of closes late. SOTTR opens a
-// file, hands the fd to an async I/O worker, then closes and reopens: freeing the
-// slot at once reuses it for the next open, and the pending read lands on the wrong
-// file -> garbage archive header -> a ~32 GiB entry-table allocation. Keeping the
-// last N closed slots alive lets the lagging read finish right. PFS-backed files
-// share one host fd, so this costs no host descriptors; char devices close at once.
-static base::Mutex g_deferM;
+// Regular-file fd slots are released a bounded number of closes late. SOTTR
+// opens a file, hands the fd to an async I/O worker, then closes and reopens:
+// freeing the slot at once reuses it for the next open, and the pending read
+// lands on the wrong file -> garbage archive header -> a ~32 GiB entry-table
+// allocation. Keeping the last N closed slots alive lets the lagging read
+// finish right. PFS-backed files share one host fd, so this costs no host
+// descriptors; char devices close at once.
+static base::Mutex g_defer_m;
 static base::SimpleDeque<u32> g_deferred;
 static constexpr size_t kDeferredCloseWindow = 256;
 
 int PS4ABI sys_close(u32 fd) {
-  auto *proc = proc::getActive();
+  auto* proc = Proc::GetActive();
 
   if (proc && fd != -1) {
     if (kRdall)
       BASE_LOGI("close", "fd={}", fd);
-    auto *d = fdToDevice(fd);
-    if (d && d->isRegularFile()) {
+    auto* d = FdToDevice(fd);
+    if (d && d->IsRegularFile()) {
       u32 evict = static_cast<u32>(-1);
       {
-        base::LockGuard<base::Mutex> lk(g_deferM);
-        // A deferred fd keeps its slot pinned, so it can't have been reopened as
-        // a different file; a second close of it is a redundant double-close and
-        // must not queue a second (wrong) release.
+        base::LockGuard<base::Mutex> lk(g_defer_m);
+        // A deferred fd keeps its slot pinned, so it can't have been reopened
+        // as a different file; a second close of it is a redundant double-close
+        // and must not queue a second (wrong) release.
         bool already = base::Find(g_deferred.begin(), g_deferred.end(), fd) !=
                        g_deferred.end();
         if (!already) {
@@ -549,14 +555,14 @@ int PS4ABI sys_close(u32 fd) {
         }
       }
       if (evict != static_cast<u32>(-1))
-        proc->getObjTable().release(evict);
+        proc->GetObjTable().Release(evict);
       return 0;
     }
-    proc->getObjTable().release(fd);
+    proc->GetObjTable().Release(fd);
     return 0;
   }
 
   LOG_WARNING("failed to release handle {}", fd);
   return -SysError::eBADF;
 }
-} // namespace krnl
+}  // namespace krnl

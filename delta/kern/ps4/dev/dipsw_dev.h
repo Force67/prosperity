@@ -8,16 +8,16 @@
  * in the root of the source tree.
  */
 
-#include "device.h"
 #include "base/arch.h"
+#include "kern/ps4/dev/device.h"
 
 namespace krnl {
-class proc;
+class Proc;
 
-class dipswDevice : public device {
-public:
-  dipswDevice(objectTable &);
+class DipswDevice : public Device {
+ public:
+  DipswDevice(ObjectTable&);
 
-  i32 ioctl(u32 command, void *args) override;
+  i32 Ioctl(u32 command, void* args) override;
 };
-}
+}  // namespace krnl

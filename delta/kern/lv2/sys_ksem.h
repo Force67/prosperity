@@ -8,8 +8,8 @@
  * in the root of the source tree.
  */
 
-#include <guest_abi.h>
 #include "base/arch.h"
+#include "guest_abi.h"
 
 namespace krnl {
 // FreeBSD POSIX kernel semaphores (ksem_*). These are the libc/pthread-backing
@@ -17,26 +17,26 @@ namespace krnl {
 // ksem_open, distinct from the SCE "osem" syscalls (549+). They were
 // null_handler stubs, so sem_wait() never blocked and consumers raced their
 // producers. We back them with a self-contained registry (see the .cc); the
-// kObject path is intentionally avoided since ksem ids are plain ints, not
+// Object path is intentionally avoided since ksem ids are plain ints, not
 // object-table handles.
 
 // timespec as the guest passes it: two 64-bit fields. Declared here so the
 // timedwait prototype is well-formed; layout matches FreeBSD's struct timespec
 // on the 64-bit ABI.
-struct ksem_timespec {
+struct ksem_timespec {  // NOLINT(readability-identifier-naming): guest ABI name
   i64 tv_sec;
   i64 tv_nsec;
 };
 
-int PS4ABI sys_ksem_init(int *idp, unsigned value);
-int PS4ABI sys_ksem_open(int *idp, const char *name, int oflag, u16 mode,
-                         unsigned value);
-int PS4ABI sys_ksem_unlink(const char *name);
+int PS4ABI sys_ksem_init(int* idp, unsigned value);
+int PS4ABI
+sys_ksem_open(int* idp, const char* name, int oflag, u16 mode, unsigned value);
+int PS4ABI sys_ksem_unlink(const char* name);
 int PS4ABI sys_ksem_close(int id);
 int PS4ABI sys_ksem_post(int id);
 int PS4ABI sys_ksem_wait(int id);
 int PS4ABI sys_ksem_trywait(int id);
-int PS4ABI sys_ksem_timedwait(int id, const struct ksem_timespec *abstime);
-int PS4ABI sys_ksem_getvalue(int id, int *val);
+int PS4ABI sys_ksem_timedwait(int id, const struct ksem_timespec* abstime);
+int PS4ABI sys_ksem_getvalue(int id, int* val);
 int PS4ABI sys_ksem_destroy(int id);
 }  // namespace krnl

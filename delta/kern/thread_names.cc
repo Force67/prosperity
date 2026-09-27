@@ -8,13 +8,13 @@
  * shows which guest thread is which.
  *
  * Two directions, because the tag and the thread can start in either order:
- *  - registerGuestThreadStack: a starting guest thread names itself from the
+ *  - RegisterGuestThreadStack: a starting guest thread names itself from the
  *    VMA tag covering its stack, if one landed already.
- *  - nameThreadsForRange: a later sys_mname tag covering a live registered
+ *  - NameThreadsForRange: a later sys_mname tag covering a live registered
  *    stack renames that thread.
  */
 
-#include "thread_names.h"
+#include "kern/thread_names.h"
 #include "base/arch.h"
 
 #include <cstddef>
@@ -22,16 +22,16 @@
 
 #include <pthread.h>
 
-#include "process.h"
-#include <base/containers/vector.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
+#include "base/containers/vector.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "kern/process.h"
 
 namespace krnl {
 namespace {
 
 struct StackEntry {
-  const void *stack;
+  const void* stack;
   size_t size;
   pthread_t thread;
 };
@@ -39,7 +39,7 @@ struct StackEntry {
 base::Mutex g_mtx;
 base::Vector<StackEntry> g_stacks;
 
-void setName(pthread_t t, const char *name) {
+void SetName(pthread_t t, const char* name) {
   if (!name || !*name)
     return;
   char buf[16];  // pthread_setname_np limit: 15 chars + NUL
@@ -50,7 +50,7 @@ void setName(pthread_t t, const char *name) {
 
 }  // namespace
 
-void registerGuestThreadStack(const void *stack, size_t size) {
+void RegisterGuestThreadStack(const void* stack, size_t size) {
   if (!stack || !size)
     return;
   {
@@ -59,15 +59,15 @@ void registerGuestThreadStack(const void *stack, size_t size) {
   }
   // The creating thread usually tags the stack before starting the thread;
   // pick that tag up now.
-  if (auto *proc = proc::getActive()) {
-    auto *info = proc->getVma().get(
-        const_cast<u8 *>(static_cast<const u8 *>(stack)));
+  if (auto* proc = Proc::GetActive()) {
+    auto* info =
+        proc->GetVma().Get(const_cast<u8*>(static_cast<const u8*>(stack)));
     if (info && info->name)
-      setName(pthread_self(), info->name);
+      SetName(pthread_self(), info->name);
   }
 }
 
-void unregisterGuestThreadStack() {
+void UnregisterGuestThreadStack() {
   const pthread_t self = pthread_self();
   base::LockGuard<base::Mutex> lk(g_mtx);
   for (auto it = g_stacks.begin(); it != g_stacks.end(); ++it) {
@@ -78,15 +78,15 @@ void unregisterGuestThreadStack() {
   }
 }
 
-void nameThreadsForRange(const void *ptr, size_t len, const char *name) {
+void NameThreadsForRange(const void* ptr, size_t len, const char* name) {
   if (!ptr || !len || !name || !*name)
     return;
   // "stack guard" tags land adjacent to the real stack tag; naming a thread
   // after its guard page would overwrite the useful name.
   if (std::strcmp(name, "stack guard") == 0)
     return;
-  const auto *lo = static_cast<const u8 *>(ptr);
-  const auto *hi = lo + len;
+  const auto* lo = static_cast<const u8*>(ptr);
+  const auto* hi = lo + len;
   base::LockGuard<base::Mutex> lk(g_mtx);
   // CONTAINMENT, not overlap. A title tags a region that can span several
   // guest stacks (SotC's "Resource Loading" tag covers a range overlapping the
@@ -94,11 +94,11 @@ void nameThreadsForRange(const void *ptr, size_t len, const char *name) {
   // unrelated threads the same name, which is worse than no name, because it
   // makes a wait-probe report look like one subsystem is wedged four times.
   // Only rename a thread whose whole stack lies inside the tagged range.
-  for (const auto &e : g_stacks) {
-    const auto *slo = static_cast<const u8 *>(e.stack);
-    const auto *shi = slo + e.size;
+  for (const auto& e : g_stacks) {
+    const auto* slo = static_cast<const u8*>(e.stack);
+    const auto* shi = slo + e.size;
     if (slo >= lo && shi <= hi)
-      setName(e.thread, name);
+      SetName(e.thread, name);
   }
 }
 

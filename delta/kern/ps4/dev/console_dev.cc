@@ -1,14 +1,14 @@
 // Copyright (C) Force67 2019
 
-#include "base/arch.h"
-#include <base/logging.h>
 #include <cstdio>
 #include <cstring>
+#include "base/arch.h"
+#include "base/logging.h"
 
-#include <options/options.h>
+#include "options/options.h"
 
-#include "console_dev.h"
-#include "file_dev.h"
+#include "kern/ps4/dev/console_dev.h"
+#include "kern/ps4/dev/file_dev.h"
 
 namespace {
 // The same knob sys_write honours for guest fd 1/2. Console output is the same
@@ -18,16 +18,20 @@ DELTA_OPTION(bool, kQuietGuest, "DELTA_QUIET_GUEST", false);
 }  // namespace
 
 namespace krnl {
-consoleDevice::consoleDevice(objectTable &objects) : device(objects) {}
+ConsoleDevice::ConsoleDevice(ObjectTable& objects) : Device(objects) {}
 
-bool consoleDevice::init(const char *, u32, u32) { return true; }
+bool ConsoleDevice::Init(const char*, u32, u32) {
+  return true;
+}
 
 // No input source in the emulator: report EOF so a reader loop terminates.
-i64 consoleDevice::read(void *, size_t) { return 0; }
+i64 ConsoleDevice::Read(void*, size_t) {
+  return 0;
+}
 
 // The point of a console is that its output is visible. Forward to the host
 // console; the guest wrote to /dev/console specifically to be seen.
-i64 consoleDevice::write(const void *buf, size_t n) {
+i64 ConsoleDevice::Write(const void* buf, size_t n) {
   if (!buf || !n)
     return 0;
   if (kQuietGuest)
@@ -35,12 +39,14 @@ i64 consoleDevice::write(const void *buf, size_t n) {
   return static_cast<i64>(std::fwrite(buf, 1, n, stdout));
 }
 
-i64 consoleDevice::lseek(i64, int) { return 0; }
+i64 ConsoleDevice::Lseek(i64, int) {
+  return 0;
+}
 
-int consoleDevice::fstat(void *stat) {
+int ConsoleDevice::Fstat(void* stat) {
   if (!stat)
     return -static_cast<int>(SysError::eFAULT);
-  fillStat(*reinterpret_cast<SceKernelStat *>(stat), 0x2000, 0);
+  FillStat(*reinterpret_cast<SceKernelStat*>(stat), 0x2000, 0);
   return 0;
 }
 
@@ -49,7 +55,7 @@ int consoleDevice::fstat(void *stat) {
 // that would reconfigure a real line are accepted and ignored. Anything else
 // soft-fails like the base device, with its output buffer zeroed so the caller
 // never reads stack garbage.
-i32 consoleDevice::ioctl(u32 cmd, void *data) {
+i32 ConsoleDevice::Ioctl(u32 cmd, void* data) {
   switch (cmd) {
     case 0x402c7413:  // get termios
       if (data)
@@ -105,4 +111,4 @@ i32 consoleDevice::ioctl(u32 cmd, void *data) {
     }
   }
 }
-} // namespace krnl
+}  // namespace krnl

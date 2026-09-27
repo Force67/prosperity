@@ -4,7 +4,7 @@
 #include <cstdint>
 
 // Lets a layer that cannot reach the kernel arm a write-watch on a guest range.
-// The kernel owns the SIGSEGV machinery (see krnl::startWriteWatch) and
+// The kernel owns the SIGSEGV machinery (see krnl::StartWriteWatch) and
 // registers itself here at startup; the GPU layer needs it because the only
 // interesting addresses (the descriptor-table pointer a shader actually read)
 // are not known until a draw is being processed, and they move every run.

@@ -11,20 +11,19 @@
  * IO thread of its own.
  */
 
+#include "kern/lv2/sys_aio.h"
 #include "guest_abi.h"
-#include "sys_aio.h"
 
+#include "base/logging.h"
+#include "host_memory/host_memory.h"
+#include "options/options.h"
 
-#include <base/logging.h>
-#include <host_memory/host_memory.h>
-#include <options/options.h>
-
-#include "error_table.h"
-#include "sys_vfs_ext.h"
-#include <base/containers/map.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/containers/hash_map.h>
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "kern/lv2/error_table.h"
+#include "kern/lv2/sys_vfs_ext.h"
 
 namespace {
 DELTA_OPTION(bool, kAioTrace, "DELTA_AIO_TRACE", false);
@@ -37,15 +36,15 @@ namespace {
 struct AioRequest {
   i64 offset;
   u64 nbyte;
-  void *buf;
-  void *result;  // SceKernelAioResult *
+  void* buf;
+  void* result;  // SceKernelAioResult *
   i32 fd;
   i32 pad;
 };
 
 // SceKernelAioResult.
 struct AioResult {
-  i64 returnValue;
+  i64 return_value;
   u32 state;
   u32 pad;
 };
@@ -68,10 +67,10 @@ enum : u32 {
 // is what wait/poll/delete report back per id.
 base::Mutex g_mutex;
 base::HashMap<u32, int> g_requests;
-u32 g_nextId = 1;
+u32 g_next_id = 1;
 
 // One request, start to finish. Returns the SCE error for the id.
-int runRequest(u32 cmd, AioRequest &req) {
+int RunRequest(u32 cmd, AioRequest& req) {
   i64 done = -SysError::eBADF;
   if (req.buf && req.nbyte) {
     done = (cmd & kCmdMask) == kCmdWrite
@@ -88,8 +87,8 @@ int runRequest(u32 cmd, AioRequest &req) {
   const int err = done < 0 ? static_cast<int>(-done) : 0;
   if (req.result &&
       host_memory::IsMemoryRangeMapped(req.result, sizeof(AioResult))) {
-    auto *out = static_cast<AioResult *>(req.result);
-    out->returnValue = done;
+    auto* out = static_cast<AioResult*>(req.result);
+    out->return_value = done;
     out->state = err ? kStateAborted : kStateCompleted;
   }
   return err ? static_cast<int>(0x80020000u | static_cast<u32>(err)) : 0;
@@ -98,7 +97,7 @@ int runRequest(u32 cmd, AioRequest &req) {
 // Report `num` ids as finished. An id we never handed out still answers 0: the
 // caller is about to drop it either way, and refusing one it believes in is
 // what turns a stale id into a stalled loader.
-int reportIds(const u32 *ids, u32 num, int *errs, bool erase) {
+int ReportIds(const u32* ids, u32 num, int* errs, bool erase) {
   base::LockGuard<base::Mutex> lock(g_mutex);
   for (u32 i = 0; i < num; i++) {
     int err = 0;
@@ -118,30 +117,30 @@ int reportIds(const u32 *ids, u32 num, int *errs, bool erase) {
 
 }  // namespace
 
-int PS4ABI sys_aio_submit_cmd(u32 cmd, void *reqs, u32 num, u32 prio,
-                              u32 *ids) {
+int PS4ABI
+sys_aio_submit_cmd(u32 cmd, void* reqs, u32 num, u32 prio, u32* ids) {
   if (!reqs || !num)
     return -SysError::eINVAL;
   if (!host_memory::IsMemoryRangeMapped(reqs, sizeof(AioRequest) * num))
     return -SysError::eFAULT;
-  auto *req = static_cast<AioRequest *>(reqs);
+  auto* req = static_cast<AioRequest*>(reqs);
 
   // Without SCE_KERNEL_AIO_CMD_MULTI the whole batch shares ONE id and the
   // caller passed a pointer to a single SceKernelAioSubmitId. Writing one id
   // per request there overruns its stack.
   const bool multi = (cmd & kCmdMulti) != 0;
-  const u32 idCount = multi ? num : 1;
-  if (!ids || !host_memory::IsMemoryRangeMapped(ids, sizeof(u32) * idCount))
+  const u32 id_count = multi ? num : 1;
+  if (!ids || !host_memory::IsMemoryRangeMapped(ids, sizeof(u32) * id_count))
     return -SysError::eFAULT;
 
   int worst = 0;
   {
     base::LockGuard<base::Mutex> lock(g_mutex);
-    for (u32 i = 0; i < idCount; i++)
-      ids[i] = g_nextId++;
+    for (u32 i = 0; i < id_count; i++)
+      ids[i] = g_next_id++;
   }
   for (u32 i = 0; i < num; i++) {
-    const int err = runRequest(cmd, req[i]);
+    const int err = RunRequest(cmd, req[i]);
     base::LockGuard<base::Mutex> lock(g_mutex);
     // A shared id carries the first failure of its batch; a per-request id
     // carries its own.
@@ -157,26 +156,26 @@ int PS4ABI sys_aio_submit_cmd(u32 cmd, void *reqs, u32 num, u32 prio,
   return 0;
 }
 
-int PS4ABI sys_aio_submit(u32 cmd, void *reqs, u32 num, u32 prio, u32 *ids) {
+int PS4ABI sys_aio_submit(u32 cmd, void* reqs, u32 num, u32 prio, u32* ids) {
   return sys_aio_submit_cmd(cmd, reqs, num, prio, ids);
 }
 
-int PS4ABI sys_aio_multi_wait(u32 *ids, u32 num, int *errs, u32 /*mode*/,
-                              u32 * /*usec*/) {
-  return reportIds(ids, num, errs, false);
+int PS4ABI
+sys_aio_multi_wait(u32* ids, u32 num, int* errs, u32 /*mode*/, u32* /*usec*/) {
+  return ReportIds(ids, num, errs, false);
 }
 
-int PS4ABI sys_aio_multi_poll(u32 *ids, u32 num, int *errs) {
-  return reportIds(ids, num, errs, false);
+int PS4ABI sys_aio_multi_poll(u32* ids, u32 num, int* errs) {
+  return ReportIds(ids, num, errs, false);
 }
 
-int PS4ABI sys_aio_multi_delete(u32 *ids, u32 num, int *errs) {
-  return reportIds(ids, num, errs, true);
+int PS4ABI sys_aio_multi_delete(u32* ids, u32 num, int* errs) {
+  return ReportIds(ids, num, errs, true);
 }
 
-int PS4ABI sys_aio_multi_cancel(u32 *ids, u32 num, int *errs) {
+int PS4ABI sys_aio_multi_cancel(u32* ids, u32 num, int* errs) {
   // Nothing is ever in flight, so a cancel can only report the finished state.
-  return reportIds(ids, num, errs, false);
+  return ReportIds(ids, num, errs, false);
 }
 
 }  // namespace krnl

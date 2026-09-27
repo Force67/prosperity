@@ -15,11 +15,11 @@ namespace krnl {
 // Reserve every known guest-fixed range PROT_NONE. Call once, as early as
 // possible, before the CPU backend reserves its JIT heap and before any guest
 // module maps. Safe to call twice (the second call is a no-op).
-void reserveGuestVaSpace();
+void ReserveGuestVaSpace();
 
 // True when [addr, addr+len) lies wholly inside a range reserved above. A guest
 // mmap whose hint lands here must be COMMITTED there rather than relocated: the
 // range is guest-owned, and our placeholder is the only thing occupying it.
-bool isGuestReservedVa(const void *addr, size_t len);
+bool IsGuestReservedVa(const void* addr, size_t len);
 
 }  // namespace krnl

@@ -1,16 +1,16 @@
 #include <cstdint>
-#include "base/arch.h"
 #include <cstdlib>
 #include <cstring>
+#include "base/arch.h"
 
 #include <gtest/gtest.h>
 
-#include "kern/ps4/hardware_mode.h"
 #include "kern/lv2/sys_info.h"
+#include "kern/ps4/hardware_mode.h"
 
 namespace {
 
-u32 ReadSysctlByName(const char *name) {
+u32 ReadSysctlByName(const char* name) {
   int translate_mib[] = {0, 3};
   int mib[4]{};
   size_t mib_size = sizeof(mib);
@@ -28,15 +28,15 @@ u32 ReadSysctlByName(const char *name) {
 }
 
 class TitleAttributesScope {
-public:
-  TitleAttributesScope() : saved_(krnl::ps4::titleAttributes()) {}
-  ~TitleAttributesScope() { krnl::ps4::setTitleAttributes(saved_); }
+ public:
+  TitleAttributesScope() : saved_(krnl::ps4::TitleAttributes()) {}
+  ~TitleAttributesScope() { krnl::ps4::SetTitleAttributes(saved_); }
 
-private:
+ private:
   u32 saved_;
 };
 
-} // namespace
+}  // namespace
 
 TEST(SysInfo, ReportsPs4PageSize) {
   int mib[] = {6, 7};
@@ -52,20 +52,20 @@ TEST(SysInfo, ReportsConfiguredPs4HardwareMode) {
   const TitleAttributesScope restore_attributes;
   base::InitOptionsFromEnv();
   const bool expect_neo_hardware = krnl::ps4::kNeoMode;
-  const auto &profile = krnl::ps4::hardwareModeProfile();
+  const auto& profile = krnl::ps4::GetHardwareModeProfile();
 
-  EXPECT_EQ(profile.mode, expect_neo_hardware ? krnl::ps4::HardwareMode::neo
-                                              : krnl::ps4::HardwareMode::base);
-  EXPECT_EQ(profile.mainSocId, expect_neo_hardware ? 0x740f30u : 0x710f10u);
+  EXPECT_EQ(profile.mode, expect_neo_hardware ? krnl::ps4::HardwareMode::kNeo
+                                              : krnl::ps4::HardwareMode::kBase);
+  EXPECT_EQ(profile.main_soc_id, expect_neo_hardware ? 0x740f30u : 0x710f10u);
 
-  krnl::ps4::setTitleAttributes(0);
-  EXPECT_FALSE(krnl::ps4::isNeoMode());
-  EXPECT_STREQ(krnl::ps4::gnmDriverModule(), "libSceGnmDriver");
+  krnl::ps4::SetTitleAttributes(0);
+  EXPECT_FALSE(krnl::ps4::IsNeoMode());
+  EXPECT_STREQ(krnl::ps4::GnmDriverModule(), "libSceGnmDriver");
   EXPECT_EQ(ReadSysctlByName("kern.neomode"), 0u);
 
-  krnl::ps4::setTitleAttributes(1u << 23);
-  EXPECT_EQ(krnl::ps4::isNeoMode(), expect_neo_hardware);
-  EXPECT_STREQ(krnl::ps4::gnmDriverModule(), expect_neo_hardware
+  krnl::ps4::SetTitleAttributes(1u << 23);
+  EXPECT_EQ(krnl::ps4::IsNeoMode(), expect_neo_hardware);
+  EXPECT_STREQ(krnl::ps4::GnmDriverModule(), expect_neo_hardware
                                                  ? "libSceGnmDriverForNeoMode"
                                                  : "libSceGnmDriver");
   EXPECT_EQ(ReadSysctlByName("kern.neomode"), expect_neo_hardware ? 1u : 0u);
@@ -77,7 +77,7 @@ TEST(SysInfo, ReportsCpuModeFromTitleAttributes) {
     u32 attributes;
     u32 expected;
   };
-  constexpr Case cases[] = {
+  constexpr Case kCases[] = {
       {0, 0},
       {1u << 15, 0},
       {1u << 16, 5},
@@ -85,8 +85,8 @@ TEST(SysInfo, ReportsCpuModeFromTitleAttributes) {
   };
 
   int cpu_mode_mib[] = {1, 14, 42};
-  for (const Case &test : cases) {
-    krnl::ps4::setTitleAttributes(test.attributes);
+  for (const Case& test : kCases) {
+    krnl::ps4::SetTitleAttributes(test.attributes);
     u32 direct_cpu_mode = UINT32_MAX;
     size_t cpu_mode_size = sizeof(direct_cpu_mode);
     ASSERT_EQ(krnl::sys_sysctl(cpu_mode_mib, 3, &direct_cpu_mode,

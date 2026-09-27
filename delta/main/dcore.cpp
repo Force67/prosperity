@@ -52,10 +52,10 @@ bool deltaCore::init() {
   // arm, the CS-range describer the crash dump asks for, the guest write
   // tracker that must hear about remapped memory, and the audio daemon's host
   // sink. The composition root introduces them.
-  gpu::ps4::SetWriteWatchCallback(&krnl::probe::startWriteWatch);
-  krnl::setCsRangeDescriber(&gpu::render::DescribeCsRangeCovering);
-  krnl::setMappingChangedHook(&gpu::render::NoteGuestRemap);
-  krnl::ps4::setAudioSink({host::OpenAudioPort, host::QueueAudio,
+  gpu::ps4::SetWriteWatchCallback(&krnl::probe::StartWriteWatch);
+  krnl::SetCsRangeDescriber(&gpu::render::DescribeCsRangeCovering);
+  krnl::SetMappingChangedHook(&gpu::render::NoteGuestRemap);
+  krnl::ps4::SetAudioSink({host::OpenAudioPort, host::QueueAudio,
                            host::SetAudioPortVolume, host::CloseAudioPort});
   return true;
 }
@@ -158,13 +158,13 @@ void deltaCore::boot(const base::String &xdir) {
 #endif
 
   if (isPkg) {
-    auto mount = krnl::vfs::mountPkg(path, kWantIcon);
+    auto mount = krnl::vfs::MountPkg(path, kWantIcon);
     if (!mount)
       return;
-    krnl::vfs::mountVirtual("/app0", mount.provider);
+    krnl::vfs::MountVirtual("/app0", mount.provider);
     // Publish the title id so savedata can give this game its own host save
     // root (else saves for different titles collide under one directory).
-    krnl::vfs::setTitleId(mount.titleId);
+    krnl::vfs::SetTitleId(mount.title_id);
     gameTitle = mount.title;
     ps4Attributes = mount.attributes;
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -175,43 +175,43 @@ void deltaCore::boot(const base::String &xdir) {
     // PS5 game backup (UFS2). Mount it at /app0 and prefer the decrypted/ tree
     // of plaintext ELFs when the dump provides one (the top-level eboot.bin is a
     // still-encrypted SELF).
-    auto mount = krnl::vfs::mountFfpkg(path, kWantIcon);
+    auto mount = krnl::vfs::MountFfpkg(path, kWantIcon);
     if (!mount)
       return;
-    krnl::vfs::mountVirtual("/app0", mount.provider);
-    krnl::vfs::setTitleId(mount.titleId);
+    krnl::vfs::MountVirtual("/app0", mount.provider);
+    krnl::vfs::SetTitleId(mount.title_id);
     gameTitle = mount.title;
 #if defined(__linux__) && !defined(__ANDROID__)
     gameIcon = base::move(mount.icon);
 #endif
-    sdkVersion = mount.sdkVersion;
-    mainModule = base::String(mount.hasDecrypted ? "/app0/decrypted/eboot.bin"
+    sdkVersion = mount.sdk_version;
+    mainModule = base::String(mount.has_decrypted ? "/app0/decrypted/eboot.bin"
                                                  : "/app0/eboot.bin");
     LOG_INFO("mounted ffpkg at /app0 ({}), boot module {}",
-             krnl::vfs::titleId().c_str(), mainModule.c_str());
+             krnl::vfs::TitleId().c_str(), mainModule.c_str());
   } else if (isArchive) {
-    auto mount = krnl::vfs::mountArchive(path, kWantIcon);
+    auto mount = krnl::vfs::MountArchive(path, kWantIcon);
     if (!mount)
       return;
-    isPs5Archive = mount.isPs5;
-    krnl::vfs::setTitleId(mount.titleId);
+    isPs5Archive = mount.is_ps5;
+    krnl::vfs::SetTitleId(mount.title_id);
     gameTitle = mount.title;
-    sdkVersion = mount.sdkVersion;
+    sdkVersion = mount.sdk_version;
     ps4Attributes = mount.attributes;
 #if defined(__linux__) && !defined(__ANDROID__)
     gameIcon = base::move(mount.icon);
 #endif
-    krnl::vfs::mountVirtual("/app0", mount.provider);
-    mainModule = base::String(mount.hasDecrypted ? "/app0/decrypted/eboot.bin"
+    krnl::vfs::MountVirtual("/app0", mount.provider);
+    mainModule = base::String(mount.has_decrypted ? "/app0/decrypted/eboot.bin"
                                                  : "/app0/eboot.bin");
     LOG_INFO("mounted archive at /app0 ({}), boot module {}",
-             krnl::vfs::titleId().c_str(), mainModule.c_str());
+             krnl::vfs::TitleId().c_str(), mainModule.c_str());
   } else if (isAppDir) {
-    krnl::vfs::mount("/app0", path.c_str());
+    krnl::vfs::Mount("/app0", path.c_str());
     if (isPs4AppDir) {
       base::Vector<u8> sfo;
       if (readHostFile(appSfo, kMaxSfoSize, sfo)) {
-        krnl::vfs::setTitleId(SfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
+        krnl::vfs::SetTitleId(SfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
         gameTitle = SfoGet(sfo.data(), sfo.size(), "TITLE");
         ps4Attributes = SfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
       }
@@ -224,7 +224,7 @@ void deltaCore::boot(const base::String &xdir) {
       readHostFile(appJson, kMaxSfoSize, json);
       const base::String js(reinterpret_cast<const char*>(json.data()),
                             json.size());
-      krnl::vfs::setTitleId(JsonGetString(js, "titleId"));
+      krnl::vfs::SetTitleId(JsonGetString(js, "titleId"));
       gameTitle = JsonGetTitleName(js);
       sdkVersion = ParseSdkVersion(JsonGetString(js, "sdkVersion"));
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -234,14 +234,14 @@ void deltaCore::boot(const base::String &xdir) {
     }
     mainModule = base::String("/app0/eboot.bin");
     LOG_INFO("mounted app dir at /app0 ({}), boot module {}",
-             krnl::vfs::titleId().c_str(), mainModule.c_str());
+             krnl::vfs::TitleId().c_str(), mainModule.c_str());
   } else {
     const base::String root = parentPath(path);
     base::Vector<u8> sfo;
     if (!readHostFile(root + "/sce_sys/param.sfo", kMaxSfoSize, sfo))
       readHostFile(root + "/param.sfo", kMaxSfoSize, sfo);
     if (!sfo.empty()) {
-      krnl::vfs::setTitleId(SfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
+      krnl::vfs::SetTitleId(SfoGet(sfo.data(), sfo.size(), "TITLE_ID"));
       gameTitle = SfoGet(sfo.data(), sfo.size(), "TITLE");
       ps4Attributes = SfoGetU32(sfo.data(), sfo.size(), "ATTRIBUTE");
     }
@@ -259,28 +259,28 @@ void deltaCore::boot(const base::String &xdir) {
   if (isPkg || isFfpkg || isAppDir || isArchive) {
     base::StringU8 home;
     base::GetEnvironmentVariable(u8"HOME", home);
-    base::String tid = krnl::vfs::titleId();
+    base::String tid = krnl::vfs::TitleId();
     base::String dl =
         base::String(home.empty() ? "." : (const char *)home.c_str()) +
         "/.prosperity/download/" +
         (tid.empty() ? base::String("UNKNOWN") : tid);
-    krnl::vfs::mountWritable("/download0", dl.c_str());
+    krnl::vfs::MountWritable("/download0", dl.c_str());
   }
 
   // The title is known now, so the settings we ship for it can fill in
   // everything the environment / an options file / the command line didn't.
   // Before the guest starts: the knobs below and in the boot thread latch.
-  options::LoadGameProfile(krnl::vfs::titleId().c_str());
+  options::LoadGameProfile(krnl::vfs::TitleId().c_str());
 
   // These all boot from an /app0 mount rather than a bare host path.
   const bool mounted = isPkg || isFfpkg || isAppDir || isArchive;
   const bool isPs5 = isFfpkg || isPs5AppDir || isPs5Archive;
-  krnl::ps4::setTitleAttributes(isPs5 ? 0 : ps4Attributes);
-  gpu::ps4::SetPs4NeoMode(!isPs5 && krnl::ps4::isNeoMode());
+  krnl::ps4::SetTitleAttributes(isPs5 ? 0 : ps4Attributes);
+  gpu::ps4::SetPs4NeoMode(!isPs5 && krnl::ps4::IsNeoMode());
   // Name the window after the booted game, since the renderer and the videoout
   // HLE both bring it up with a generic title depending on who gets there first.
   {
-    const base::String &tid = krnl::vfs::titleId();
+    const base::String &tid = krnl::vfs::TitleId();
     base::String title = "prosperity - ";
     title += gameTitle.empty() ? base::String("unknown") : gameTitle;
     title += " - [";
@@ -294,13 +294,13 @@ void deltaCore::boot(const base::String &xdir) {
     host::SetIcon(gameIcon.data(), gameIcon.size());
 #endif
   base::SpawnDetachedThread("guest-main", [mainModule = base::move(mainModule), mounted, isPs5, sdkVersion]() {
-    auto p = base::MakeUnique<krnl::proc>();
+    auto p = base::MakeUnique<krnl::Proc>();
     if (isPs5)
-      p->setPlatform(krnl::proc::platform::ps5);
-    p->setSdkVersion(sdkVersion);
-    if (!p->create(mainModule, mounted))
+      p->SetPlatform(krnl::Proc::Platform::kPs5);
+    p->SetSdkVersion(sdkVersion);
+    if (!p->Create(mainModule, mounted))
       return;
 
-    p->start();
+    p->Start();
   });
 }

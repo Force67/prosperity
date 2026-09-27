@@ -8,6 +8,6 @@ namespace krnl::ps5 {
 
 // Build the TCB a PS5 process's initial thread starts life with, and return the
 // value its fs base should hold. 0 if it could not be allocated.
-u64 makeInitialTcb();
+u64 MakeInitialTcb();
 
-} // namespace krnl::ps5
+}  // namespace krnl::ps5

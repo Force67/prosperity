@@ -159,7 +159,7 @@ u64 *videoLabels() {
   base::LockGuard<base::Mutex> lk(g_mtx);
   if (!g_port.labels)
     g_port.labels =
-        reinterpret_cast<u64 *>(krnl::allocLowGuest(16 * sizeof(u64)));
+        reinterpret_cast<u64 *>(krnl::AllocLowGuest(16 * sizeof(u64)));
   return g_port.labels;
 }
 base::Atomic<bool> g_gfxUp{false};
@@ -187,14 +187,14 @@ bool ensureGfx(u32 w, u32 h) {
   return true;
 }
 
-equeue *findEqueue(int handle) {
-  auto *p = proc::getActive();
+Equeue *findEqueue(int handle) {
+  auto *p = Proc::GetActive();
   if (!p)
     return nullptr;
-  auto *obj = p->getObjTable().get(static_cast<u32>(handle));
-  if (!obj || obj->type() != kObject::oType::equeue)
+  auto *obj = p->GetObjTable().Get(static_cast<u32>(handle));
+  if (!obj || obj->type() != Object::OType::kEqueue)
     return nullptr;
-  return static_cast<equeue *>(obj);
+  return static_cast<Equeue *>(obj);
 }
 
 // Present the most recently flipped scanout buffer to the window.
@@ -246,7 +246,7 @@ void startFlipPump() {
           for (int i = 0; i < 16; i++)
             lb[i] = c;
       // post the flip-complete event to whichever equeue holds a flip knote.
-      triggerAllEqueues(kEventFlip, kFilterFlip, static_cast<i64>(c));
+      TriggerAllEqueues(kEventFlip, kFilterFlip, static_cast<i64>(c));
     }
   });
 }
@@ -364,7 +364,7 @@ int PS4ABI sceVideoOutAddFlipEvent(int eqHandle, int handle, void *udata) {
     return -1;
   g_port.flipEqueue = eqHandle;
   g_port.flipUdata = udata;
-  eq->addEvent(static_cast<u64>(kEventFlip), kFilterFlip, udata);
+  eq->AddEvent(static_cast<u64>(kEventFlip), kFilterFlip, udata);
   startFlipPump();
   return 0;
 }
@@ -373,7 +373,7 @@ int PS4ABI sceVideoOutDeleteFlipEvent(int eqHandle, int handle) {
   BASE_LOGI("videoout", "deleteFlipEvent eq={} h={}", eqHandle, handle);
   auto *eq = findEqueue(eqHandle);
   if (eq)
-    eq->removeEvent(static_cast<u64>(kEventFlip), kFilterFlip);
+    eq->RemoveEvent(static_cast<u64>(kEventFlip), kFilterFlip);
   g_port.flipEqueue = -1;
   return 0;
 }
@@ -387,7 +387,7 @@ int PS4ABI sceVideoOutAddVblankEvent(int eqHandle, int handle, void *udata) {
   g_port.vblankEqueue = eqHandle;
   g_port.vblankUdata = udata;
   // vblank rides the existing 60 Hz EVFILT_DISPLAY pump (ident wildcard).
-  eq->addEvent(static_cast<u64>(kEventVblank), kFilterVblank, udata);
+  eq->AddEvent(static_cast<u64>(kEventVblank), kFilterVblank, udata);
   return 0;
 }
 
@@ -454,7 +454,7 @@ int PS4ABI sceVideoOutSubmitFlip(int handle, int bufferIndex, int flipMode,
   }
   if (eqHandle >= 0) {
     if (auto *eq = findEqueue(eqHandle))
-      eq->trigger(kEventFlip, kFilterFlip,
+      eq->Trigger(kEventFlip, kFilterFlip,
                   static_cast<i64>(g_port.flipCount.load()));
   }
   return 0;
@@ -488,8 +488,8 @@ int PS4ABI sceVideoOutSubmitFlipEop(int handle, int bufferIndex, int flipMode,
   // matching `scanout`, falling back to the last RT rendered when it isn't one.
   // On PS5 the frame was rendered by the AGC command processor (gpu::ps5), so
   // route the present there; the PS4 Gnm path uses gpu::ps4::EndFrame.
-  auto *active = proc::getActive();
-  if (active && active->getPlatform() == proc::platform::ps5)
+  auto *active = Proc::GetActive();
+  if (active && active->GetPlatform() == Proc::Platform::kPs5)
     prosperity_agc_flip(scanout);
   else
     gpu::ps4::EndFrame(scanout);
@@ -498,7 +498,7 @@ int PS4ABI sceVideoOutSubmitFlipEop(int handle, int bufferIndex, int flipMode,
   g_port.flipCount.fetch_add(1);
   if (eqHandle >= 0) {
     if (auto *eq = findEqueue(eqHandle))
-      eq->trigger(kEventFlip, kFilterFlip,
+      eq->Trigger(kEventFlip, kFilterFlip,
                   static_cast<i64>(g_port.flipCount.load()));
   }
   return 0;

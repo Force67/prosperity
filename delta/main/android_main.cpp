@@ -161,7 +161,7 @@ i32 onInput(android_app *, AInputEvent *ev) {
 
 extern "C" void android_main(android_app *app) {
   redirectStdioToLogcat();
-  krnl::reserveGuestVaSpace();  // claim guest-fixed ranges first (no-op on Android)
+  krnl::ReserveGuestVaSpace();  // claim guest-fixed ranges first (no-op on Android)
   cpu::EarlyInit();  // reserve the FEX heap before any large guest mapping
   logger::CreateLogger(true);
   logger::RouteBaseLogging();

@@ -27,7 +27,7 @@ public:
   argvList argv;
 
 private:
-  base::UniquePointer<krnl::proc> proc;
+  base::UniquePointer<krnl::Proc> proc;
 };
 
 extern "C" int dcoreMain(int argc, char** argv);

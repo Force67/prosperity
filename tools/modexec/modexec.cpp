@@ -23,18 +23,18 @@
 // Resolve a host address to "<module>+0x<off> (<seg>)" by scanning the loaded
 // module images, so a guest fault points straight at a guest module offset.
 static void symbolize(uintptr_t addr, char* out, size_t n) {
-  auto* proc = krnl::proc::getActive();
+  auto* proc = krnl::Proc::GetActive();
   if (proc) {
-    for (auto& mod : proc->getModuleList()) {
-      auto& mi = mod->getInfo();
-      auto* t = mi.textSeg.addr;
-      auto* d = mi.dataSeg.addr;
-      if (t && addr >= (uintptr_t)t && addr < (uintptr_t)t + mi.textSeg.size) {
+    for (auto& mod : proc->GetModuleList()) {
+      auto& mi = mod->GetInfo();
+      auto* t = mi.text_seg.addr;
+      auto* d = mi.data_seg.addr;
+      if (t && addr >= (uintptr_t)t && addr < (uintptr_t)t + mi.text_seg.size) {
         std::snprintf(out, n, "%s+%#lx (.text)", mi.name.c_str(),
                       addr - (uintptr_t)t);
         return;
       }
-      if (d && addr >= (uintptr_t)d && addr < (uintptr_t)d + mi.dataSeg.size) {
+      if (d && addr >= (uintptr_t)d && addr < (uintptr_t)d + mi.data_seg.size) {
         std::snprintf(out, n, "%s+%#lx (.data)", mi.name.c_str(),
                       addr - (uintptr_t)d);
         return;
@@ -69,8 +69,8 @@ static void crashHandler(int sig, siginfo_t* si, void* ucv) {
   // Dump the guest TLS state so we can see why __tls_get_addr returns null.
   // TCB = fs base; DTV = *(TCB+8); DTV[0]=generation, per-module block pointers
   // at DTV+0x10 + id*8 (see libkernel __tls_get_addr at 0x289c0).
-  if (auto* proc = krnl::proc::getActive()) {
-    auto* tcb = reinterpret_cast<u64*>(proc->getEnv().fsBase);
+  if (auto* proc = krnl::Proc::GetActive()) {
+    auto* tcb = reinterpret_cast<u64*>(proc->GetEnv().fs_base);
     std::fprintf(stderr, "  --- TLS ---\n  tcb(fs)=%p\n", (void*)tcb);
     if (tcb) {
       auto* dtv = reinterpret_cast<u64*>(tcb[1]);
@@ -91,7 +91,7 @@ static void crashHandler(int sig, siginfo_t* si, void* ucv) {
   std::_Exit(128 + sig);
 }
 
-static void installCrashHandler() {
+static void InstallCrashHandler() {
   struct sigaction sa = {};
   sa.sa_sigaction = crashHandler;
   sa.sa_flags = SA_SIGINFO;
@@ -106,11 +106,11 @@ static void installCrashHandler() {
 // SCOUT: patch a guest function to `xor eax,eax; ret` (return 0). Used to step
 // over libkernel-internal validation that rejects our externally-loaded module
 // set, so we can see how much further the boot gets.
-static void forceReturn0(krnl::proc& proc, const char* mod, u32 off) {
-  auto m = proc.getModule(base::StringRef(mod));
+static void forceReturn0(krnl::Proc& proc, const char* mod, u32 off) {
+  auto m = proc.GetModule(base::StringRef(mod));
   if (!m)
     return;
-  u8* p = m->getInfo().base + off;
+  u8* p = m->GetInfo().base + off;
   // mprotect needs a page-aligned base.
   auto page = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(p) & ~0xFFFull);
   host_memory::ProtectMem(page, 0x1000, host_memory::PageProtection::kRwx);
@@ -125,11 +125,11 @@ static void forceReturn0(krnl::proc& proc, const char* mod, u32 off) {
 // leaves DTV entries null, so general-dynamic __thread access faults; ours
 // hands back a real per-module block. Overwrites the entry with
 // `movabs rax, &fn; jmp rax`.
-static void patchTlsGetAddr(krnl::proc& proc) {
-  auto k = proc.getModule(base::StringRef("libkernel"));
+static void patchTlsGetAddr(krnl::Proc& proc) {
+  auto k = proc.GetModule(base::StringRef("libkernel"));
   if (!k)
     return;
-  uintptr_t addr = k->getSymbolByNid("vNe1w4diLCs");
+  uintptr_t addr = k->GetSymbolByNid("vNe1w4diLCs");
   if (!addr) {
     std::printf("[modexec] __tls_get_addr export not found\n");
     return;
@@ -140,7 +140,7 @@ static void patchTlsGetAddr(krnl::proc& proc) {
   p[0] = 0x48;  // movabs rax, imm64
   p[1] = 0xB8;
   *reinterpret_cast<u64*>(p + 2) =
-      reinterpret_cast<u64>(&krnl::guest_tls_get_addr);
+      reinterpret_cast<u64>(&krnl::GuestTlsGetAddr);
   p[10] = 0xFF;  // jmp rax
   p[11] = 0xE0;
   std::printf("[modexec] patched libkernel __tls_get_addr @%p -> host HLE\n", p);
@@ -153,7 +153,7 @@ int main(int argc, char** argv) {
   }
 
   std::setvbuf(stdout, nullptr, _IONBF, 0);  // don't lose scout prints on crash
-  installCrashHandler();
+  InstallCrashHandler();
 
   logger::CreateLogger(true);
 
@@ -163,26 +163,26 @@ int main(int argc, char** argv) {
     base::String p(argv[1]);
     auto slash = p.find_last_of('/');
     base::String dir = slash == base::String::npos ? "." : p.substr(0, slash);
-    krnl::vfs::mount("/app0", dir.c_str());
+    krnl::vfs::Mount("/app0", dir.c_str());
     std::printf("[modexec] mounted /app0 -> %s\n", dir.c_str());
   }
 
-  krnl::proc proc;
+  krnl::Proc proc;
 
   // stage 1: load. create() preloads libkernel + libSceLibcInternal, then the
   // main module and its DT_NEEDED tree.
   std::printf("[modexec] === stage 1: load ===\n");
-  if (!proc.create(base::String(argv[1]))) {
+  if (!proc.Create(base::String(argv[1]))) {
     std::printf("[modexec] proc::create FAILED\n");
     return 2;
   }
-  auto& mods = proc.getModuleList();
+  auto& mods = proc.GetModuleList();
   std::printf("[modexec] loaded %zu modules\n", mods.size());
   for (auto& m : mods) {
-    auto& mi = m->getInfo();
+    auto& mi = m->GetInfo();
     std::printf("[modexec]   %-24s base=%p init=+%#lx\n", mi.name.c_str(),
                 (void*)mi.base,
-                mi.initAddr ? (uintptr_t)(mi.initAddr - mi.base) : 0);
+                mi.init_addr ? (uintptr_t)(mi.init_addr - mi.base) : 0);
   }
 
   // stage 2: resolve imports + relocate every module (what guest libkernel
@@ -196,18 +196,18 @@ int main(int argc, char** argv) {
   // A real eboot carries its own SCE process param (PT_SCE_PROCPARAM). Only when
   // it's missing (e.g. running a bare lib as main) do we fake a minimal one so
   // libkernel's _start clears its size + "ORBI" magic check.
-  auto& m0 = mods[0]->getInfo();
-  if (!m0.procParam) {
+  auto& m0 = mods[0]->GetInfo();
+  if (!m0.proc_param) {
     static u8 procParam[0x50] = {};
     *reinterpret_cast<u64*>(procParam + 0x00) = sizeof(procParam);
     *reinterpret_cast<u32*>(procParam + 0x08) = 0x4942524F;  // "ORBI"
     *reinterpret_cast<u32*>(procParam + 0x0C) = 1;           // entry count (!= 0)
     *reinterpret_cast<u32*>(procParam + 0x10) = 0x11000000;  // sdk version
-    m0.procParam = procParam;
-    m0.procParamSize = sizeof(procParam);
+    m0.proc_param = procParam;
+    m0.proc_param_size = sizeof(procParam);
     std::printf("[modexec] (using synthetic proc param)\n");
   } else {
-    std::printf("[modexec] using module's own proc param (%u bytes)\n", m0.procParamSize);
+    std::printf("[modexec] using module's own proc param (%u bytes)\n", m0.proc_param_size);
   }
 
   // stage 3 (opt-in): jump into the guest. proc::start enters libkernel's entry
@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
     patchTlsGetAddr(proc);
     std::printf("[modexec] === stage 3: execute (jumping to guest entry) ===\n");
     std::fflush(stdout);
-    proc.start();
+    proc.Start();
     std::printf("[modexec] returned from guest entry\n");
   }
 

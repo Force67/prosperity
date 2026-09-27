@@ -1,35 +1,35 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
  *
- * PS5 /dev/gc device: the libSceAgc / libSceAgcDriver AGC command protocol. This
- * is a dedicated PS5 device, split from the PS4 gcDevice (GNM PM4) so the two
- * unrelated ioctl command sets never share a switch. Forwards the AGC DCB to the
- * PS5 command processor (gpu/ps5).
+ * PS5 /dev/gc device: the libSceAgc / libSceAgcDriver AGC command protocol.
+ * This is a dedicated PS5 device, split from the PS4 GcDevice (GNM PM4) so the
+ * two unrelated ioctl command sets never share a switch. Forwards the AGC DCB
+ * to the PS5 command processor (gpu/ps5).
  */
 
-#include "base/arch.h"
-#include <base/logging.h>
-#include <base/strings/format.h>
-#include <base/strings/xstring.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "base/arch.h"
+#include "base/logging.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
 
 #include <sys/mman.h>
 
-#include <host_memory/host_memory.h>
+#include "host_memory/host_memory.h"
 
-#include "gc_dev.h"
-#include "kern/ps4/dev/dma_dev.h"  // dmemBackingFd/Size (shared physical dmem store)
+#include "base/atomic.h"
+#include "base/containers/map.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
+#include "base/time/time.h"
+#include "kern/lv2/sys_mem.h"  // AllocLowGuest, MFlags
 #include "kern/process.h"
-#include "kern/lv2/sys_mem.h"  // allocLowGuest, mFlags
-#include <options/options.h>
-#include <base/threading/thread.h>
-#include <base/atomic.h>
-#include <base/containers/map.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/time/time.h>
+#include "kern/ps4/dev/dma_dev.h"  // DmemBackingFd/Size (shared physical dmem store)
+#include "kern/ps5/dev/gc_dev.h"
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(bool, kAgcRingdump, "DELTA_AGC_RINGDUMP", false);
@@ -42,81 +42,101 @@ DELTA_OPTION(bool, kGcIoctlCensus, "DELTA_GC_IOCTL_CENSUS", false);
 DELTA_OPTION(bool, kGcTrace, "DELTA_GC_TRACE", false);
 }  // namespace
 
-// PS5 AGC submit bridge (delta_gpu, gpu/ps5): forward the DCB to the PS5 command
-// processor, which follows INDIRECT_BUFFER chains and decodes the draws.
-extern "C" void prosperity_agc_submit(u64 dcbBase, u32 sizeBytes);
-extern "C" u32 prosperity_agc_submit_ring(u64 dcbBase, u32 sizeBytes, u32 queue);
-extern "C" void prosperity_agc_submit_tagged(u64 dcbBase, u32 sizeBytes, u32 tag);
+// PS5 AGC submit bridge (delta_gpu, gpu/ps5): forward the DCB to the PS5
+// command processor, which follows INDIRECT_BUFFER chains and decodes the
+// draws.
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+extern "C" void prosperity_agc_submit(u64 dcb_base, u32 size_bytes);
+// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
+extern "C" u32 prosperity_agc_submit_ring(u64 dcb_base,
+                                          u32 size_bytes,
+                                          u32 queue);
+// NOLINTEND(readability-identifier-naming)
+// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
+extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
+                                             u32 size_bytes,
+                                             u32 tag);
+// NOLINTEND(readability-identifier-naming)
 // PS5 present bridge: end the frame and present the rendered RT to the window.
-extern "C" void prosperity_agc_flip(u64 scanoutBase);
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+extern "C" void prosperity_agc_flip(u64 scanout_base);
 // Is this address inside a pool the title mapped for the GPU (gpu/ps5)?
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" int prosperity_gpu_is_aperture(u64 address);
 
 // Guest address of the most recently flipped display buffer, resolved from
-// sceVideoOutSubmitFlip's bufferIndex; the AGC flip ioctls carry no buffer field.
+// sceVideoOutSubmitFlip's bufferIndex; the AGC flip ioctls carry no buffer
+// field.
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" u64 prosperity_ps5_scanout_base();
 
 // DELTA_FLIP_TRACE: log the scanout base each AGC flip presents, so the derived
 // per-flip buffer can be checked against the registered display buffers.
-static void traceFlip(const char *site, u64 base) {
+static void TraceFlip(const char* site, u64 base) {
   if (kFlipTrace)
     BASE_LOGI("flip", "{} present={:#x}", site, (unsigned long)base);
 }
 
 namespace krnl {
-gcDevicePs5::gcDevicePs5(objectTable &objects) : device(objects) {}
+GcDevicePs5::GcDevicePs5(ObjectTable& objects) : Device(objects) {}
 
-bool gcDevicePs5::init(const char *, u32, u32) { return true; }
+bool GcDevicePs5::Init(const char*, u32, u32) {
+  return true;
+}
 
 // Diagnostic (DELTA_AGC_TRACE): scan one GPU-aperture page for a draw-DCB PM4
 // header to locate the command buffer if a submit-arg pointer reads zero.
-static void scanPagePm4(void *ctx, u8 *p, size_t sz) {
-  int *hits = static_cast<int *>(ctx);
-  auto isDcb = [](u32 h) {
-    if ((h >> 30) != 3) return false;
+static void ScanPagePm4(void* ctx, u8* p, size_t sz) {
+  int* hits = static_cast<int*>(ctx);
+  auto is_dcb = [](u32 h) {
+    if ((h >> 30) != 3)
+      return false;
     u32 op = (h >> 8) & 0xFF;
     return op == 0x69 || op == 0x76 || op == 0x79 || op == 0x3F || op == 0x2D ||
            op == 0x27 || op == 0x35 || op == 0x15;
   };
-  auto *w = reinterpret_cast<const u32 *>(p);
+  auto* w = reinterpret_cast<const u32*>(p);
   u64 n = sz / 4;
-  if (n > 0x400000) n = 0x400000;
-  int perPage = 0;
-  for (u64 j = 0; j < n && *hits < 24 && perPage < 4; j++) {
-    if (isDcb(w[j])) {
+  if (n > 0x400000)
+    n = 0x400000;
+  int per_page = 0;
+  for (u64 j = 0; j < n && *hits < 24 && per_page < 4; j++) {
+    if (is_dcb(w[j])) {
       BASE_LOGI("agc", "  DCB@{:#x} hdr={:08x} op={:#x}",
                 (unsigned long)(reinterpret_cast<u64>(p) + j * 4), w[j],
                 (w[j] >> 8) & 0xFF);
       (*hits)++;
-      perPage++;
+      per_page++;
     }
   }
 }
 
-// A guest GPU address: one question, answered by gpu/ps5/guest_address.h. A fixed
-// band silently drops command buffers allocated outside it, and the title waits
-// forever on a GPU label the dropped submits would have written (Astro Bot).
-static inline bool gpuAddr(u64 a) {
+// A guest GPU address: one question, answered by gpu/ps5/guest_address.h. A
+// fixed band silently drops command buffers allocated outside it, and the title
+// waits forever on a GPU label the dropped submits would have written (Astro
+// Bot).
+static inline bool GpuAddr(u64 a) {
   return prosperity_gpu_is_aperture(a) != 0;
 }
 
-// The submit paths and trace probes below deref candidate pointers pulled out of
-// a submit arg. Plenty of those words look like GPU addresses without being
+// The submit paths and trace probes below deref candidate pointers pulled out
+// of a submit arg. Plenty of those words look like GPU addresses without being
 // mapped, so the range check alone is not enough to read through one.
-static inline bool gpuReadable(u64 a, size_t n) {
-  return gpuAddr(a) && host_memory::IsMemoryRangeMapped(reinterpret_cast<void *>(a), n);
+static inline bool GpuReadable(u64 a, size_t n) {
+  return GpuAddr(a) &&
+         host_memory::IsMemoryRangeMapped(reinterpret_cast<void*>(a), n);
 }
 
 // Command buffers need not live in the GPU aperture (the video decoder builds
 // one in any allocation it owns); mapped-and-in-guest-map is the honest test.
-static inline bool guestReadable(u64 a, size_t n) {
+static inline bool GuestReadable(u64 a, size_t n) {
   return a >= 0x10000ull && a < 0x1000000000000ull &&
-         host_memory::IsMemoryRangeMapped(reinterpret_cast<void *>(a), n);
+         host_memory::IsMemoryRangeMapped(reinterpret_cast<void*>(a), n);
 }
 
 // Span of ACQ ring windows named in 0xC0408121 submits, learned at run time, so
 // the per-frame trace can re-read the ring after the ioctls stop.
-static u64 g_acqRingLo = 0, g_acqRingHi = 0;
+static u64 g_acq_ring_lo = 0, g_acq_ring_hi = 0;
 
 // One ACQ ring from sceAgcDriverCreateQueue (0xC0408121). Steady-state submits
 // never reach the kernel: the title stores its ring write pointer to the
@@ -126,27 +146,27 @@ struct AcqQueue {
   u64 dcb = 0;       // command ring
   u64 ccb = 0;       // dcb + ringBytes: the ring READ POINTER (see below)
   u64 doorbell = 0;  // 8-byte write-pointer slot in the DingDong page
-  u32 ringBytes = 0;
-  u64 lastDoorbell = 0;
-  u32 readDw = 0;  // how far we have walked, in dwords
+  u32 ring_bytes = 0;
+  u64 last_doorbell = 0;
+  u32 read_dw = 0;  // how far we have walked, in dwords
   // The walk stopped at a wait the memory did not satisfy; poll again even
   // though the doorbell has not moved.
   bool stalled = false;
   u32 id = 0;
 };
 
-static base::Mutex g_queueLock;
+static base::Mutex g_queue_lock;
 static base::Map<u32, AcqQueue> g_queues;  // by 1-based queue id
 
 // The doorbell value is the ring write pointer. Advance our own read pointer to
 // it and hand the command processor the dwords in between, unwrapping the ring.
-static void drainQueue(AcqQueue &q, u64 doorbell) {
-  const u32 ringDw = q.ringBytes / 4;
-  if (!ringDw)
+static void DrainQueue(AcqQueue& q, u64 doorbell) {
+  const u32 ring_dw = q.ring_bytes / 4;
+  if (!ring_dw)
     return;
-  const u32 write = static_cast<u32>(doorbell % ringDw);
+  const u32 write = static_cast<u32>(doorbell % ring_dw);
   q.stalled = false;
-  if (write == q.readDw) {
+  if (write == q.read_dw) {
     // The doorbell moved but lands where we already are: the title wrapped a
     // whole ring between two polls, so that lap is gone (and with it any fence
     // it carried). Say so; a silent skip reads as an idle queue.
@@ -158,14 +178,14 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
   }
   // Returns false when the walk stalled part way: readDw then sits on the
   // waiting packet and the rest of the ring waits for the next poll.
-  auto forward = [&](u32 firstDw, u32 dwords) {
-    const u64 at = q.dcb + static_cast<u64>(firstDw) * 4;
+  auto forward = [&](u32 first_dw, u32 dwords) {
+    const u64 at = q.dcb + static_cast<u64>(first_dw) * 4;
     if (!dwords)
       return true;
-    if (guestReadable(at, static_cast<size_t>(dwords) * 4)) {
+    if (GuestReadable(at, static_cast<size_t>(dwords) * 4)) {
       const u32 done = prosperity_agc_submit_ring(at, dwords * 4, q.id);
       if (done < dwords) {
-        q.readDw = (firstDw + done) % ringDw;
+        q.read_dw = (first_dw + done) % ring_dw;
         q.stalled = true;
         return false;
       }
@@ -181,44 +201,44 @@ static void drainQueue(AcqQueue &q, u64 doorbell) {
     return true;
   };
   bool complete;
-  if (write > q.readDw) {
-    complete = forward(q.readDw, write - q.readDw);
+  if (write > q.read_dw) {
+    complete = forward(q.read_dw, write - q.read_dw);
   } else {  // wrapped
-    complete = forward(q.readDw, ringDw - q.readDw) && forward(0, write);
+    complete = forward(q.read_dw, ring_dw - q.read_dw) && forward(0, write);
   }
   if (complete)
-    q.readDw = write;
-  // Report the read pointer back or the ring only ever fills: the driver keeps one
-  // dword past the ring for it (+0x2226 stores dcb+0x4000, +0x11f0 spins on free
-  // space). Astro Bot's DrawThread parks in exactly that spin, holding its frame
-  // mutex, and the main thread blocks behind it.
-  const u64 rptr = q.ccb ? q.ccb : q.dcb + q.ringBytes;
-  if (guestReadable(rptr, sizeof(u32)))
-    *reinterpret_cast<volatile u32 *>(rptr) = q.readDw;
+    q.read_dw = write;
+  // Report the read pointer back or the ring only ever fills: the driver keeps
+  // one dword past the ring for it (+0x2226 stores dcb+0x4000, +0x11f0 spins on
+  // free space). Astro Bot's DrawThread parks in exactly that spin, holding its
+  // frame mutex, and the main thread blocks behind it.
+  const u64 rptr = q.ccb ? q.ccb : q.dcb + q.ring_bytes;
+  if (GuestReadable(rptr, sizeof(u32)))
+    *reinterpret_cast<volatile u32*>(rptr) = q.read_dw;
 }
 
 // Poll every registered doorbell. A real command processor is woken by the
 // doorbell write; we have no way to trap it cheaply, and the page is a handful
 // of cache lines, so a poll costs nothing next to a frame.
-static void doorbellPoller() {
+static void DoorbellPoller() {
   u64 ticks = 0;
   for (;;) {
     base::SleepForMicroseconds(500);
-    base::LockGuard<base::Mutex> lk(g_queueLock);
+    base::LockGuard<base::Mutex> lk(g_queue_lock);
     // Every 5s under DELTA_AGC_QSTAT: what each queue has published against
     // what we have walked. A consumer waiting on a fence one submit short is
     // either work we never drained (they differ) or work never submitted.
     const bool stat = kAgcQstat && (++ticks % 10000) == 0;
-    for (auto &[qid, q] : g_queues) {
-      if (stat && guestReadable(q.doorbell, sizeof(u64))) {
-        const u64 db = *reinterpret_cast<volatile const u64 *>(q.doorbell);
-        const u32 ringDw = q.ringBytes / 4;
-        BASE_LOGI("agcq", "q{} doorbell={:#x} write={:#x} read={:#x} ring={:#x}",
-                  qid, (unsigned long)db,
-                  ringDw ? (unsigned long)(db % ringDw) : 0ul,
-                  (unsigned long)q.readDw, q.ringBytes);
+    for (auto& [qid, q] : g_queues) {
+      if (stat && GuestReadable(q.doorbell, sizeof(u64))) {
+        const u64 db = *reinterpret_cast<volatile const u64*>(q.doorbell);
+        const u32 ring_dw = q.ring_bytes / 4;
+        BASE_LOGI(
+            "agcq", "q{} doorbell={:#x} write={:#x} read={:#x} ring={:#x}", qid,
+            (unsigned long)db, ring_dw ? (unsigned long)(db % ring_dw) : 0ul,
+            (unsigned long)q.read_dw, q.ring_bytes);
       }
-      if (!guestReadable(q.doorbell, sizeof(u64))) {
+      if (!GuestReadable(q.doorbell, sizeof(u64))) {
         // A queue we never poll is a queue whose work never runs, and the
         // title waits on it just the same. The aperture is a guess; mapped is
         // the fact.
@@ -228,9 +248,8 @@ static void doorbellPoller() {
                       qid, (unsigned long)q.doorbell);
         continue;
       }
-      const u64 now =
-          *reinterpret_cast<volatile const u64 *>(q.doorbell);
-      if (now == q.lastDoorbell && !q.stalled)
+      const u64 now = *reinterpret_cast<volatile const u64*>(q.doorbell);
+      if (now == q.last_doorbell && !q.stalled)
         continue;
       // QSTAT wants every ring, uncapped: correlating them with the fence
       // labels is what tells a submit the title never made from one it made
@@ -239,36 +258,39 @@ static void doorbellPoller() {
       if (kAgcQstat || (kAgcTrace && rung < 32)) {
         rung++;
         BASE_LOGI("agc", "doorbell q{} {:#x} -> {:#x} (ring {:#x} +{:#x})", qid,
-                  (unsigned long)q.lastDoorbell, (unsigned long)now,
-                  (unsigned long)q.dcb, q.ringBytes);
+                  (unsigned long)q.last_doorbell, (unsigned long)now,
+                  (unsigned long)q.dcb, q.ring_bytes);
       }
-      q.lastDoorbell = now;
-      drainQueue(q, now);
+      q.last_doorbell = now;
+      DrainQueue(q, now);
     }
   }
 }
 
-static void registerAcqQueue(u32 qid, u64 dcb, u64 ccb, u64 doorbellBase,
-                             u32 ringLog2Dw) {
+static void RegisterAcqQueue(u32 qid,
+                             u64 dcb,
+                             u64 ccb,
+                             u64 doorbell_base,
+                             u32 ring_log2_dw) {
   // Register any ring the title names; where it allocated it is its own
   // business, and refusing one on the aperture guess loses every submit on it.
-  if (!qid || !dcb || ringLog2Dw > 24)
+  if (!qid || !dcb || ring_log2_dw > 24)
     return;
-  base::LockGuard<base::Mutex> lk(g_queueLock);
-  AcqQueue &q = g_queues[qid];
+  base::LockGuard<base::Mutex> lk(g_queue_lock);
+  AcqQueue& q = g_queues[qid];
   q.id = qid;
   q.dcb = dcb;
   q.ccb = ccb;
-  q.doorbell = doorbellBase + static_cast<u64>(qid - 1) * 8;
-  q.ringBytes = 4u << ringLog2Dw;
-  q.lastDoorbell = guestReadable(q.doorbell, sizeof(u64))
-                       ? *reinterpret_cast<volatile const u64 *>(q.doorbell)
-                       : 0;
-  q.readDw = static_cast<u32>(q.lastDoorbell % (q.ringBytes / 4));
+  q.doorbell = doorbell_base + static_cast<u64>(qid - 1) * 8;
+  q.ring_bytes = 4u << ring_log2_dw;
+  q.last_doorbell = GuestReadable(q.doorbell, sizeof(u64))
+                        ? *reinterpret_cast<volatile const u64*>(q.doorbell)
+                        : 0;
+  q.read_dw = static_cast<u32>(q.last_doorbell % (q.ring_bytes / 4));
   static bool polling = false;
   if (!polling) {
     polling = true;
-    base::SpawnDetachedThread("gc_dev", doorbellPoller);
+    base::SpawnDetachedThread("gc_dev", DoorbellPoller);
   }
 }
 
@@ -276,29 +298,31 @@ static void registerAcqQueue(u32 qid, u64 dcb, u64 ccb, u64 doorbellBase,
 // status dword and treats the submit as FAILED unless the kernel clears it,
 // skipping the 0x8132 call that carries the real command buffer (frame dropped,
 // completion label never written). Older IN-only variants have no such field.
-static void clearSubmitStatus(u32 cmd, void *data, u32 offset) {
+static void ClearSubmitStatus(u32 cmd, void* data, u32 offset) {
   if (!data || !(cmd & 0x40000000u))
     return;
   const u32 len = (cmd >> 16) & 0x1fff;
   if (offset + sizeof(u32) > len)
     return;
-  std::memset(static_cast<u8 *>(data) + offset, 0, sizeof(u32));
+  std::memset(static_cast<u8*>(data) + offset, 0, sizeof(u32));
 }
 
-// GNM-style submit descriptor array: each 4-dword entry is an IT_INDIRECT_BUFFER
-// (0xC0023F00 dcb) / _CNST (0xC0023300 ccb) with [hdr, addrLo, addrHi&0xFF,
-// sizeDwords]; they carry the SET_SH_REG shader binding the AGC mode-1 path
-// never emits, so forward each buffer to the command processor.
-static void submitGnmDescArray(u64 descPtr, u32 count) {
-  const u32 *d = reinterpret_cast<const u32 *>(descPtr);
-  if (!d || count > 0x1000) return;
+// GNM-style submit descriptor array: each 4-dword entry is an
+// IT_INDIRECT_BUFFER (0xC0023F00 dcb) / _CNST (0xC0023300 ccb) with [hdr,
+// addrLo, addrHi&0xFF, sizeDwords]; they carry the SET_SH_REG shader binding
+// the AGC mode-1 path never emits, so forward each buffer to the command
+// processor.
+static void SubmitGnmDescArray(u64 desc_ptr, u32 count) {
+  const u32* d = reinterpret_cast<const u32*>(desc_ptr);
+  if (!d || count > 0x1000)
+    return;
   for (u32 i = 0; i < count; i++) {
-    const u32 *e = d + i * 4;
+    const u32* e = d + i * 4;
     u32 hdr = e[0];
     u64 addr = (static_cast<u64>(e[2] & 0xFF) << 32) | e[1];
     u32 bytes = (e[3] & 0xFFFFF) * 4;
     if (bytes && (hdr == 0xC0023F00u || hdr == 0xC0023300u) &&
-        gpuReadable(addr, bytes)) {
+        GpuReadable(addr, bytes)) {
       if (kAgcQstat)
         BASE_LOGI("agcq", "ioctl submit {:#x}+{:#x}", (unsigned long)addr,
                   bytes);
@@ -307,7 +331,7 @@ static void submitGnmDescArray(u64 descPtr, u32 count) {
   }
 }
 
-i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
+i32 GcDevicePs5::Ioctl(u32 cmd, void* data) {
   if (kGcIoctlCensus) {
     static base::Mutex mtx;
     static base::Map<u32, u64> hist;
@@ -318,413 +342,478 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     if (now - last > base::Seconds(10)) {
       last = now;
       BASE_LOGI("gcioctl", "--- 10s census ---");
-      for (auto &[c, n] : hist)
+      for (auto& [c, n] : hist)
         BASE_LOGI("gcioctl", "{:#x} {}", c, (unsigned long long)n);
     }
   }
   if (kGcTrace)
     BASE_LOGI("gc", "ioctl({:x}) data={:p}", cmd, data);
   switch (cmd) {
-  case 0xC0108102: {  // GNM submit: {u32 a0, u32 count, u64 descPtr}
-    struct argl { u32 a0; u32 count; u64 descPtr; };
-    auto *a = static_cast<argl *>(data);
-    if (a) submitGnmDescArray(a->descPtr, a->count);
-    return 0;
-  }
-  case 0xC018810A: {  // GNM submit variant: {a0, count, a2, pad, descPtr}
-    struct argl { u32 a0, count, a2, pad; u64 descPtr; };
-    auto *a = static_cast<argl *>(data);
-    if (a) submitGnmDescArray(a->descPtr, a->count);
-    return 0;
-  }
-  case 0xC020810C: {  // GNM submit-and-flip: {a0, count, descPtr, flipPtr, flag}
-    struct argl { u32 a0, count; u64 descPtr, flipPtr; u32 flag; };
-    auto *a = static_cast<argl *>(data);
-    if (a) submitGnmDescArray(a->descPtr, a->count);
-    u64 scanout = prosperity_ps5_scanout_base();
-    traceFlip("0xC020810C", scanout);
-    prosperity_agc_flip(scanout);  // present the flipped display buffer
-    return 0;
-  }
-  case 0xC008811B: {
-    // GNM submit-state pointer, read through on every submit path
-    // (AreSubmitsAllowed is `*p == 0`, SubmitDone tests it). The soft-succeed
-    // default zeroed the OUT slot, so the driver cached null and every later
-    // submit read through it; hand back a real zeroed page ([+0] == 0 = allowed).
-    static u8 *submitState = nullptr;
-    if (!submitState)
-      submitState = allocLowGuest(0x100);
-    if (data)
-      *static_cast<u64 *>(data) = reinterpret_cast<u64>(submitState);
-    BASE_LOGI("gc", "ioctl({:x}): submit-state -> {:p}", cmd, submitState);
-    return 0;
-  }
-  case 0xC0108139: {
-    // AGC suspend-point submit, at the tail of every submit; the driver fails with
-    // 0x8A6D0107 unless it succeeds. The two out words are a suspend sequence
-    // number, so advance them.
-    static base::Atomic<u64> suspendSeq{0};
-    if (data) {
-      const u64 seq = ++suspendSeq;
-      auto *a = static_cast<u8 *>(data);
-      std::memset(a, 0, 0x10);
-      const u32 lo = static_cast<u32>(seq);
-      std::memcpy(a, &lo, 4);
-      std::memcpy(a + 8, &seq, 8);
+    case 0xC0108102: {  // GNM submit: {u32 a0, u32 count, u64 descPtr}
+      struct Argl {
+        u32 a0;
+        u32 count;
+        u64 desc_ptr;
+      };
+      auto* a = static_cast<Argl*>(data);
+      if (a)
+        SubmitGnmDescArray(a->desc_ptr, a->count);
+      return 0;
     }
-    return 0;
-  }
-  case 0x40048135:  // AGC query: OUT dword (submit/queue id). The driver stores
-                    // it; 0 is accepted.
-    if (data)
-      *static_cast<u32 *>(data) = 0;
-    return 0;
-  case 0xC004812E:  // AGC init: INOUT dword. 0 tells AgcDriver to map its own
-                    // submit doorbell (which then succeeds).
-    if (data)
-      *static_cast<u32 *>(data) = 0;
-    return 0;
-  case 0xC0408121: {  // sceAgcDriverCreateQueue (IN, 64 bytes):
-                      //   +0x00 me +0x04 pipe +0x08 queue +0x0c 1-based qid
-                      //   +0x10 dcb +0x18 ccb (=dcb+ring) +0x20 doorbell page
-                      //   +0x28 log2(ring dwords) +0x2c flags +0x30 mqd +0x38 mqd size
-                      // Not a submit: hands the title a ring + doorbell slot, and every
-                      // later submit is a store of the write pointer there. Record the
-                      // queue for the poller; the ring is empty now, by construction.
-    if (data) {
-      auto *a = static_cast<u8 *>(data);
-      u64 base = 0, base2 = 0, doorbellBase = 0;
-      u32 qid = 0, ringLog2Dw = 0;
-      std::memcpy(&base, a + 0x10, 8);
-      std::memcpy(&base2, a + 0x18, 8);
-      std::memcpy(&doorbellBase, a + 0x20, 8);
-      std::memcpy(&qid, a + 0x0c, 4);
-      std::memcpy(&ringLog2Dw, a + 0x28, 4);
-      // Mapped is the test here too: a doorbell page the title put outside the
-      // aperture guess would never register, and a queue that never registers
-      // is a queue whose submits never run.
-      if (guestReadable(doorbellBase, sizeof(u64)))
-        registerAcqQueue(qid, base, base2, doorbellBase, ringLog2Dw);
-      // The ring is exactly what the create names. A fixed 0x8000 walked twice
-      // past the end of a 0x4000-byte ring, over the read-pointer dword and
-      // into whatever followed.
-      u32 size = ringLog2Dw <= 24 ? (4u << ringLog2Dw) : 0x8000u;
-      if (gpuAddr(base)) {
-        if (!g_acqRingLo || base < g_acqRingLo) g_acqRingLo = base;
-        if (base + size > g_acqRingHi) g_acqRingHi = base + size;
+    case 0xC018810A: {  // GNM submit variant: {a0, count, a2, pad, descPtr}
+      struct Argl {
+        u32 a0, count, a2, pad;
+        u64 desc_ptr;
+      };
+      auto* a = static_cast<Argl*>(data);
+      if (a)
+        SubmitGnmDescArray(a->desc_ptr, a->count);
+      return 0;
+    }
+    case 0xC020810C: {  // GNM submit-and-flip: {a0, count, descPtr, flipPtr,
+                        // flag}
+      struct Argl {
+        u32 a0, count;
+        u64 desc_ptr, flip_ptr;
+        u32 flag;
+      };
+      auto* a = static_cast<Argl*>(data);
+      if (a)
+        SubmitGnmDescArray(a->desc_ptr, a->count);
+      u64 scanout = prosperity_ps5_scanout_base();
+      TraceFlip("0xC020810C", scanout);
+      prosperity_agc_flip(scanout);  // present the flipped display buffer
+      return 0;
+    }
+    case 0xC008811B: {
+      // GNM submit-state pointer, read through on every submit path
+      // (AreSubmitsAllowed is `*p == 0`, SubmitDone tests it). The soft-succeed
+      // default zeroed the OUT slot, so the driver cached null and every later
+      // submit read through it; hand back a real zeroed page ([+0] == 0 =
+      // allowed).
+      static u8* submit_state = nullptr;
+      if (!submit_state)
+        submit_state = AllocLowGuest(0x100);
+      if (data)
+        *static_cast<u64*>(data) = reinterpret_cast<u64>(submit_state);
+      BASE_LOGI("gc", "ioctl({:x}): submit-state -> {:p}", cmd, submit_state);
+      return 0;
+    }
+    case 0xC0108139: {
+      // AGC suspend-point submit, at the tail of every submit; the driver fails
+      // with 0x8A6D0107 unless it succeeds. The two out words are a suspend
+      // sequence number, so advance them.
+      static base::Atomic<u64> suspend_seq{0};
+      if (data) {
+        const u64 seq = ++suspend_seq;
+        auto* a = static_cast<u8*>(data);
+        std::memset(a, 0, 0x10);
+        const u32 lo = static_cast<u32>(seq);
+        std::memcpy(a, &lo, 4);
+        std::memcpy(a + 8, &seq, 8);
       }
-      static int dumps = 0;
-      static u64 calls = 0;
-      ++calls;
-      // The first few submits are engine init, where the ring legitimately holds
-      // nothing. Sample later ones too, or "the ring reads empty" only ever
-      // describes start-up.
-      if (kAgcTrace && (dumps < 8 || (calls % 200 == 0 && dumps < 12))) {
-        dumps++;
-        BASE_LOGI("agc", "--- submit #{} ---", (unsigned long long)calls);
-        auto *w = reinterpret_cast<u32 *>(a);
-        base::String line;
-        base::FormatTo(line, "submit arg[0..15]:");
-        for (int k = 0; k < 16; k++)
-          base::FormatTo(line, " {:08x}", w[k]);
-        base::FormatTo(line, "\n  dcb0={:#x} dcb1={:#x} size={}", (unsigned long)base,
-                       (unsigned long)base2, size);
-        BASE_LOGI("agc", "{}", line.c_str());
-        for (int k = 0; k + 1 < 16; k++) {
-          u64 p = (static_cast<u64>(w[k + 1]) << 32) | w[k];
-          if (gpuReadable(p, 32)) {
-            auto *pw = reinterpret_cast<const u32 *>(p);
-            base::String line;
-            base::FormatTo(line, "  arg[{}] ptr={:#x} ->", k, (unsigned long)p);
-            for (int j = 0; j < 8; j++) base::FormatTo(line, " {:08x}", pw[j]);
-            BASE_LOGI("agc", "{}", line.c_str());
+      return 0;
+    }
+    case 0x40048135:  // AGC query: OUT dword (submit/queue id). The driver
+                      // stores it; 0 is accepted.
+      if (data)
+        *static_cast<u32*>(data) = 0;
+      return 0;
+    case 0xC004812E:  // AGC init: INOUT dword. 0 tells AgcDriver to map its own
+                      // submit doorbell (which then succeeds).
+      if (data)
+        *static_cast<u32*>(data) = 0;
+      return 0;
+    case 0xC0408121: {  // sceAgcDriverCreateQueue (IN, 64 bytes):
+                        //   +0x00 me +0x04 pipe +0x08 queue +0x0c 1-based qid
+                        //   +0x10 dcb +0x18 ccb (=dcb+ring) +0x20 doorbell page
+                        //   +0x28 log2(ring dwords) +0x2c flags +0x30 mqd +0x38
+                        //   mqd size
+                        // Not a submit: hands the title a ring + doorbell slot,
+                        // and every later submit is a store of the write
+                        // pointer there. Record the queue for the poller; the
+                        // ring is empty now, by construction.
+      if (data) {
+        auto* a = static_cast<u8*>(data);
+        u64 base = 0, base2 = 0, doorbell_base = 0;
+        u32 qid = 0, ring_log2_dw = 0;
+        std::memcpy(&base, a + 0x10, 8);
+        std::memcpy(&base2, a + 0x18, 8);
+        std::memcpy(&doorbell_base, a + 0x20, 8);
+        std::memcpy(&qid, a + 0x0c, 4);
+        std::memcpy(&ring_log2_dw, a + 0x28, 4);
+        // Mapped is the test here too: a doorbell page the title put outside
+        // the aperture guess would never register, and a queue that never
+        // registers is a queue whose submits never run.
+        if (GuestReadable(doorbell_base, sizeof(u64)))
+          RegisterAcqQueue(qid, base, base2, doorbell_base, ring_log2_dw);
+        // The ring is exactly what the create names. A fixed 0x8000 walked
+        // twice past the end of a 0x4000-byte ring, over the read-pointer dword
+        // and into whatever followed.
+        u32 size = ring_log2_dw <= 24 ? (4u << ring_log2_dw) : 0x8000u;
+        if (GpuAddr(base)) {
+          if (!g_acq_ring_lo || base < g_acq_ring_lo)
+            g_acq_ring_lo = base;
+          if (base + size > g_acq_ring_hi)
+            g_acq_ring_hi = base + size;
+        }
+        static int dumps = 0;
+        static u64 calls = 0;
+        ++calls;
+        // The first few submits are engine init, where the ring legitimately
+        // holds nothing. Sample later ones too, or "the ring reads empty" only
+        // ever describes start-up.
+        if (kAgcTrace && (dumps < 8 || (calls % 200 == 0 && dumps < 12))) {
+          dumps++;
+          BASE_LOGI("agc", "--- submit #{} ---", (unsigned long long)calls);
+          auto* w = reinterpret_cast<u32*>(a);
+          base::String line;
+          base::FormatTo(line, "submit arg[0..15]:");
+          for (int k = 0; k < 16; k++)
+            base::FormatTo(line, " {:08x}", w[k]);
+          base::FormatTo(line, "\n  dcb0={:#x} dcb1={:#x} size={}",
+                         (unsigned long)base, (unsigned long)base2, size);
+          BASE_LOGI("agc", "{}", line.c_str());
+          for (int k = 0; k + 1 < 16; k++) {
+            u64 p = (static_cast<u64>(w[k + 1]) << 32) | w[k];
+            if (GpuReadable(p, 32)) {
+              auto* pw = reinterpret_cast<const u32*>(p);
+              base::String line;
+              base::FormatTo(line, "  arg[{}] ptr={:#x} ->", k,
+                             (unsigned long)p);
+              for (int j = 0; j < 8; j++)
+                base::FormatTo(line, " {:08x}", pw[j]);
+              BASE_LOGI("agc", "{}", line.c_str());
+            }
+          }
+          if (auto* pr = Proc::GetActive()) {
+            int hits = 0;
+            pr->GetVma().ForEachGpuAperturePage(ScanPagePm4, &hits);
+            if (!hits)
+              BASE_LOGI("agc",
+                        "  no PM4 anywhere in the GPU aperture (empty ring?)");
+          }
+          // Distinguish "the title wrote nothing" from "we are reading a
+          // mapping that does not see its writes": count non-zero dwords in the
+          // ring window, regardless of whether they look like PM4.
+          if (GpuReadable(base, 0x8000)) {
+            auto* rw = reinterpret_cast<const u32*>(base);
+            u32 nz = 0, first = 0;
+            for (u32 k = 0; k < 0x8000 / 4; k++)
+              if (rw[k]) {
+                if (!nz)
+                  first = k;
+                nz++;
+              }
+            BASE_LOGI("agc",
+                      "  ring {:#x}: {}/{} dwords non-zero (first @dw {})",
+                      (unsigned long)base, nz, 0x8000u / 4, first);
           }
         }
-        if (auto *pr = proc::getActive()) {
-          int hits = 0;
-          pr->getVma().forEachGpuAperturePage(scanPagePm4, &hits);
-          if (!hits)
-            BASE_LOGI("agc", "  no PM4 anywhere in the GPU aperture (empty ring?)");
-        }
-        // Distinguish "the title wrote nothing" from "we are reading a mapping
-        // that does not see its writes": count non-zero dwords in the ring
-        // window, regardless of whether they look like PM4.
-        if (gpuReadable(base, 0x8000)) {
-          auto *rw = reinterpret_cast<const u32 *>(base);
-          u32 nz = 0, first = 0;
-          for (u32 k = 0; k < 0x8000 / 4; k++)
-            if (rw[k]) { if (!nz) first = k; nz++; }
-          BASE_LOGI("agc", "  ring {:#x}: {}/{} dwords non-zero (first @dw {})",
-                    (unsigned long)base, nz, 0x8000u / 4, first);
-        }
-      }
-      // A submit's window is empty AT IOCTL TIME when the driver fills it later and
-      // kicks via the doorbell; re-read the PREVIOUS submit's window to detect that.
-      static u64 prevBase = 0;
-      if (kAgcTrace && prevBase && prevBase != base && gpuReadable(prevBase, 0x8000)) {
-        auto *pw = reinterpret_cast<const u32 *>(prevBase);
-        u32 nz = 0;
-        for (u32 k = 0; k < 0x8000 / 4; k++)
-          if (pw[k]) nz++;
-        if (nz && dumps <= 12) {
-          base::String line;
-          base::FormatTo(line, "  prev ring {:#x} now {} dwords non-zero:",
-                         (unsigned long)prevBase, nz);
-          for (int k = 0; k < 12; k++) base::FormatTo(line, " {:08x}", pw[k]);
-          BASE_LOGI("agc", "{}", line.c_str());
-        }
-      }
-      prevBase = base;
-      // DELTA_AGC_RINGDUMP: the submit arg in full plus its ring descriptor table,
-      // with a PM4 sniff of each buffer (Skyrim's unprogrammed per-pass register
-      // state has to come from one of these).
-      static int ringN = 0;
-      if (kAgcRingdump && ringN < 3) {
-        ringN++;
-        auto *w = reinterpret_cast<const u32 *>(a);
-        base::String line;
-        base::FormatTo(line, "arg:");
-        for (int k = 0; k < 16; k++) base::FormatTo(line, " {:08x}", w[k]);
-        BASE_LOGI("ring", "{}", line.c_str());
-        auto sniff = [](u64 p, const char *what) {
-          if (!gpuReadable(p, 1024)) return;
-          const auto *q = reinterpret_cast<const u32 *>(p);
-          u32 t3 = 0;
-          for (int i = 0; i < 256; i++)
-            if ((q[i] >> 30) == 3) t3++;
-          BASE_LOGI("ring",
-                    "  {} {:#x}: {:08x} {:08x} {:08x} {:08x}  (type3 hdrs in 256 dw: {})",
-                    what, (unsigned long)p, q[0], q[1], q[2], q[3], t3);
-        };
-        for (int k = 0; k + 1 < 16; k++)
-          sniff((static_cast<u64>(w[k + 1]) << 32) | w[k], "argptr");
-        const u64 tbl = 0x80014981d8ull;
-        if (gpuAddr(tbl)) {
-          const auto *t = reinterpret_cast<const u32 *>(tbl);
-          base::String line;
-          base::FormatTo(line, "table @{:#x}:", (unsigned long)tbl);
-          for (int k = 0; k < 16; k++) base::FormatTo(line, " {:08x}", t[k]);
-          BASE_LOGI("ring", "{}", line.c_str());
-          for (int k = 0; k + 1 < 16; k += 2)
-            sniff((static_cast<u64>(t[k + 1] & 0xFFFF) << 32) | t[k], "tblptr");
-        }
-      }
-      // A ring that already holds packets belongs to a title that filled it
-      // before asking for the queue; the poller would still catch it, but only
-      // once its doorbell moves again.
-      if (gpuReadable(base, size) &&
-          *reinterpret_cast<const u32 *>(base) != 0)
-        prosperity_agc_submit(base, size);
-      std::memset(a, 0, 64);
-    }
-    return 0;
-  }
-  case 0xC0048125: {  // AGC submit.mode=1 completion poll (INOUT, 4 bytes). The
-                      // The render loop reads this for GPU progress; our submit is synchronous,
-                      // so report a monotonic counter or the title spins re-submitting forever.
-    if (data) {
-      static u32 s_agcDone = 0;
-      *static_cast<u32 *>(data) = ++s_agcDone;
-    }
-    return 0;
-  }
-  // Firmware 13.60 issues the mode-1 family INOUT and widens the 0x8132 arg from
-  // 16 to 24 bytes (extra dwords past the fields read below); directions share a case.
-  case 0xC0488131:
-  case 0x80488131: {  // AGC submit.mode=1 submit (IN, 72 bytes). The arg IS a small
-                      // command buffer: leading filler then IT_INDIRECT_BUFFER
-                      // packets pointing at the real per-frame PM4. Forward it to the
-                      // command processor, which follows the IBs and renders.
-    if (kAgcQstat)
-      BASE_LOGI("agcq", "submit 8131");
-    if (data) {
-      // Acquiring/submitting command state is not a display flip. VideoOut
-      // owns presentation and supplies the actual registered buffer index.
-      static int s_d131 = 0;
-      if (kAgcTrace && s_d131 < 6) {
-        s_d131++;
-        auto *w = static_cast<const u32 *>(data);
-        base::String line;
-        base::FormatTo(line, "8131 arg(18 dwords):");
-        for (int i = 0; i < 18; i++) base::FormatTo(line, " {:08x}", w[i]);
-        BASE_LOGI("agc", "{}", line.c_str());
-        // The ACQ ring is only ever sampled from the 0x8121 handler, which stops
-        // firing once the driver has initialised. Sample it HERE, on the actual
-        // per-frame submit, or "the ring is empty" only ever describes start-up.
-        for (u64 r = g_acqRingLo; r && r < g_acqRingHi; r += 0x8000) {
-          if (!gpuReadable(r, 0x8000)) continue;
-          auto *rw = reinterpret_cast<const u32 *>(r);
+        // A submit's window is empty AT IOCTL TIME when the driver fills it
+        // later and kicks via the doorbell; re-read the PREVIOUS submit's
+        // window to detect that.
+        static u64 prev_base = 0;
+        if (kAgcTrace && prev_base && prev_base != base &&
+            GpuReadable(prev_base, 0x8000)) {
+          auto* pw = reinterpret_cast<const u32*>(prev_base);
           u32 nz = 0;
           for (u32 k = 0; k < 0x8000 / 4; k++)
-            if (rw[k]) nz++;
-          if (!nz) continue;
-          base::String line;
-          base::FormatTo(line, "  acqring {:#x}: {} non-zero:", (unsigned long)r, nz);
-          for (int k = 0; k < 12; k++) base::FormatTo(line, " {:08x}", rw[k]);
-          BASE_LOGI("agc", "{}", line.c_str());
-        }
-        // Raw dump of every IT_INDIRECT_BUFFER the arg points at. The decoded walk
-        // can only show what it manages to parse; the question here is whether the
-        // title's own command buffer is chained in at all.
-        for (int i = 0; i + 3 < 18; i++) {
-          if (w[i] != 0xC0023F00u) continue;
-          u64 ib = (static_cast<u64>(w[i + 2] & 0xFF) << 32) | w[i + 1];
-          u32 dw = w[i + 3] & 0xFFFFF;
-          if (dw > 256) dw = 256;
-          if (!gpuReadable(ib, dw * 4)) continue;
-          auto *iw = reinterpret_cast<const u32 *>(ib);
-          base::String line;
-          base::FormatTo(line, "  IB {:#x} ({} dw):", (unsigned long)ib, dw);
-          for (u32 k = 0; k < dw; k++) base::FormatTo(line, " {:08x}", iw[k]);
-          BASE_LOGI("agc", "{}", line.c_str());
-        }
-      }
-      prosperity_agc_submit(reinterpret_cast<u64>(data), (cmd >> 16) & 0x1fff);
-      clearSubmitStatus(cmd, data, 0x40);
-    }
-    return 0;
-  }
-  case 0xC0188132:
-  case 0x80108132: {  // AGC mode-1 secondary submit (IN, 16 bytes): arg = [_, count,
-                      // [ptrLo, ptrHi] -> `count` 16-byte descriptors [addrLo, addrHi,
-                      // sizeDwords, flags]. THESE carry the real rendering PM4; the 0x80488131
-                      // stream is only per-frame register state. Forward each non-null buffer.
-    if (data) {
-      auto *w = static_cast<u32 *>(data);
-      u32 count = w[1];
-      u64 ptr = (static_cast<u64>(w[3]) << 32) | w[2];
-      if (kAgcQstat)
-        BASE_LOGI("agcq", "submit 8132 count={}", count);
-      static int s_d132 = 0;
-      if (kAgcTrace && s_d132 < 8) {
-        s_d132++;
-        BASE_LOGI("agc", "8132 arg=[{:08x} {:08x} {:08x} {:08x}] ptr={:#x} count={}",
-                  w[0], w[1], w[2], w[3], (unsigned long)ptr, count);
-        if (ptr && count && count < 4096) {
-          auto *dd = reinterpret_cast<const u32 *>(ptr);
-          for (u32 i = 0; i < count && i < 24; i++) {
-            BASE_LOGI("agc", "  desc[{}] = {:08x} {:08x} {:08x} {:08x}", i,
-                      dd[i * 4], dd[i * 4 + 1], dd[i * 4 + 2], dd[i * 4 + 3]);
-            const u64 buf = (static_cast<u64>(dd[i * 4 + 1]) << 32) | dd[i * 4];
-            const u32 sz = dd[i * 4 + 2];
-            if (!sz || !gpuReadable(buf, 4)) continue;
-            const u32 show = sz < 48 ? sz : 48;
-            if (!gpuReadable(buf, show * 4)) continue;
-            auto *bw = reinterpret_cast<const u32 *>(buf);
+            if (pw[k])
+              nz++;
+          if (nz && dumps <= 12) {
             base::String line;
-            base::FormatTo(line, "    buf {:#x} ({} dw):", (unsigned long)buf, sz);
-            for (u32 k = 0; k < show; k++) base::FormatTo(line, " {:08x}", bw[k]);
+            base::FormatTo(line, "  prev ring {:#x} now {} dwords non-zero:",
+                           (unsigned long)prev_base, nz);
+            for (int k = 0; k < 12; k++)
+              base::FormatTo(line, " {:08x}", pw[k]);
             BASE_LOGI("agc", "{}", line.c_str());
           }
         }
-      }
-      // Census: a whole submit used to be dropped when it carried >= 64
-      // descriptors, and individual buffers are skipped when the address does
-      // not look like GPU memory. Both are invisible without counting them.
-      static base::Atomic<u64> nSubmits{0}, nDropBatch{0}, nDesc{0},
-          nFwd{0}, nSkipAddr{0};
-      nSubmits.fetch_add(1, base::memory_order_relaxed);
-      if (count > 0x1000) nDropBatch.fetch_add(1, base::memory_order_relaxed);
-      if (kGcCensus) {
-        static base::Atomic<u64> last{0};
-        u64 n = nSubmits.load();
-        if (n - last.load() >= 2000) {
-          last.store(n);
-          BASE_LOGI("gccensus",
-                    "submits={} batch-dropped(count>=64)={} desc={} forwarded={} "
-                    "skipped-addr={}",
-                    (unsigned long long)n,
-                    (unsigned long long)nDropBatch.load(),
-                    (unsigned long long)nDesc.load(),
-                    (unsigned long long)nFwd.load(),
-                    (unsigned long long)nSkipAddr.load());
-        }
-      }
-      // A batch is however long the title makes it. The old count < 64 cap
-      // dropped a whole submit (every buffer in it, including the fence the
-      // title then waits on) once a level got heavy enough to exceed it.
-      if (ptr && count && count <= 0x1000 &&
-          guestReadable(ptr, static_cast<size_t>(count) * 16)) {
-        auto *d = reinterpret_cast<u32 *>(ptr);
-        for (u32 i = 0; i < count; i++) {
-          u64 buf = (static_cast<u64>(d[i * 4 + 1]) << 32) | d[i * 4];
-          u32 sz = d[i * 4 + 2];
-          nDesc.fetch_add(1, base::memory_order_relaxed);
-          if (sz && guestReadable(buf, static_cast<size_t>(sz) * 4)) {
-            nFwd.fetch_add(1, base::memory_order_relaxed);
-            // Tag: 0x8132, the descriptor's index in the batch, its flags.
-            prosperity_agc_submit_tagged(
-                buf, sz * 4,
-                0x81320000u | ((i & 0xFF) << 8) | (d[i * 4 + 3] & 0xFF));
-          } else if (sz) {
-            nSkipAddr.fetch_add(1, base::memory_order_relaxed);
-            static int n = 0;
-            if (n++ < 16)
-              LOG_WARNING("agc: submit buffer {:#x}+{:#x} dwords unreadable",
-                          (unsigned long)buf, sz);
+        prev_base = base;
+        // DELTA_AGC_RINGDUMP: the submit arg in full plus its ring descriptor
+        // table, with a PM4 sniff of each buffer (Skyrim's unprogrammed
+        // per-pass register state has to come from one of these).
+        static int ring_n = 0;
+        if (kAgcRingdump && ring_n < 3) {
+          ring_n++;
+          auto* w = reinterpret_cast<const u32*>(a);
+          base::String line;
+          base::FormatTo(line, "arg:");
+          for (int k = 0; k < 16; k++)
+            base::FormatTo(line, " {:08x}", w[k]);
+          BASE_LOGI("ring", "{}", line.c_str());
+          auto sniff = [](u64 p, const char* what) {
+            if (!GpuReadable(p, 1024))
+              return;
+            const auto* q = reinterpret_cast<const u32*>(p);
+            u32 t3 = 0;
+            for (int i = 0; i < 256; i++)
+              if ((q[i] >> 30) == 3)
+                t3++;
+            BASE_LOGI("ring",
+                      "  {} {:#x}: {:08x} {:08x} {:08x} {:08x}  (type3 hdrs in "
+                      "256 dw: {})",
+                      what, (unsigned long)p, q[0], q[1], q[2], q[3], t3);
+          };
+          for (int k = 0; k + 1 < 16; k++)
+            sniff((static_cast<u64>(w[k + 1]) << 32) | w[k], "argptr");
+          const u64 tbl = 0x80014981d8ull;
+          if (GpuAddr(tbl)) {
+            const auto* t = reinterpret_cast<const u32*>(tbl);
+            base::String line;
+            base::FormatTo(line, "table @{:#x}:", (unsigned long)tbl);
+            for (int k = 0; k < 16; k++)
+              base::FormatTo(line, " {:08x}", t[k]);
+            BASE_LOGI("ring", "{}", line.c_str());
+            for (int k = 0; k + 1 < 16; k += 2)
+              sniff((static_cast<u64>(t[k + 1] & 0xFFFF) << 32) | t[k],
+                    "tblptr");
           }
         }
-      } else if (ptr && count) {
-        static int n = 0;
-        if (n++ < 16)
-          LOG_WARNING("agc: submit batch of {} descriptors at {:#x} dropped",
-                      count, (unsigned long)ptr);
+        // A ring that already holds packets belongs to a title that filled it
+        // before asking for the queue; the poller would still catch it, but
+        // only once its doorbell moves again.
+        if (GpuReadable(base, size) && *reinterpret_cast<const u32*>(base) != 0)
+          prosperity_agc_submit(base, size);
+        std::memset(a, 0, 64);
       }
-      clearSubmitStatus(cmd, data, 0x10);
+      return 0;
     }
-    return 0;
-  }
-  case 0xC0088133:
-  case 0x80088133: {  // AGC mode-1 submission completion. This carries no
-                    // display-buffer index and is followed by a separate
-                    // VideoOut EOP flip. Presenting here as well splits one
-                    // guest frame into two and scans out the previous buffer.
-    if (kAgcQstat)
-      BASE_LOGI("agcq", "submit done 8133");
-    clearSubmitStatus(cmd, data, 0);
-    return 0;
-  }
+    case 0xC0048125: {  // AGC submit.mode=1 completion poll (INOUT, 4 bytes).
+                        // The The render loop reads this for GPU progress; our
+                        // submit is synchronous, so report a monotonic counter
+                        // or the title spins re-submitting forever.
+      if (data) {
+        static u32 s_agc_done = 0;
+        *static_cast<u32*>(data) = ++s_agc_done;
+      }
+      return 0;
+    }
+    // Firmware 13.60 issues the mode-1 family INOUT and widens the 0x8132 arg
+    // from 16 to 24 bytes (extra dwords past the fields read below); directions
+    // share a case.
+    case 0xC0488131:
+    case 0x80488131: {  // AGC submit.mode=1 submit (IN, 72 bytes). The arg IS a
+                        // small command buffer: leading filler then
+                        // IT_INDIRECT_BUFFER packets pointing at the real
+                        // per-frame PM4. Forward it to the command processor,
+                        // which follows the IBs and renders.
+      if (kAgcQstat)
+        BASE_LOGI("agcq", "submit 8131");
+      if (data) {
+        // Acquiring/submitting command state is not a display flip. VideoOut
+        // owns presentation and supplies the actual registered buffer index.
+        static int s_d131 = 0;
+        if (kAgcTrace && s_d131 < 6) {
+          s_d131++;
+          auto* w = static_cast<const u32*>(data);
+          base::String line;
+          base::FormatTo(line, "8131 arg(18 dwords):");
+          for (int i = 0; i < 18; i++)
+            base::FormatTo(line, " {:08x}", w[i]);
+          BASE_LOGI("agc", "{}", line.c_str());
+          // The ACQ ring is only ever sampled from the 0x8121 handler, which
+          // stops firing once the driver has initialised. Sample it HERE, on
+          // the actual per-frame submit, or "the ring is empty" only ever
+          // describes start-up.
+          for (u64 r = g_acq_ring_lo; r && r < g_acq_ring_hi; r += 0x8000) {
+            if (!GpuReadable(r, 0x8000))
+              continue;
+            auto* rw = reinterpret_cast<const u32*>(r);
+            u32 nz = 0;
+            for (u32 k = 0; k < 0x8000 / 4; k++)
+              if (rw[k])
+                nz++;
+            if (!nz)
+              continue;
+            base::String line;
+            base::FormatTo(
+                line, "  acqring {:#x}: {} non-zero:", (unsigned long)r, nz);
+            for (int k = 0; k < 12; k++)
+              base::FormatTo(line, " {:08x}", rw[k]);
+            BASE_LOGI("agc", "{}", line.c_str());
+          }
+          // Raw dump of every IT_INDIRECT_BUFFER the arg points at. The decoded
+          // walk can only show what it manages to parse; the question here is
+          // whether the title's own command buffer is chained in at all.
+          for (int i = 0; i + 3 < 18; i++) {
+            if (w[i] != 0xC0023F00u)
+              continue;
+            u64 ib = (static_cast<u64>(w[i + 2] & 0xFF) << 32) | w[i + 1];
+            u32 dw = w[i + 3] & 0xFFFFF;
+            if (dw > 256)
+              dw = 256;
+            if (!GpuReadable(ib, dw * 4))
+              continue;
+            auto* iw = reinterpret_cast<const u32*>(ib);
+            base::String line;
+            base::FormatTo(line, "  IB {:#x} ({} dw):", (unsigned long)ib, dw);
+            for (u32 k = 0; k < dw; k++)
+              base::FormatTo(line, " {:08x}", iw[k]);
+            BASE_LOGI("agc", "{}", line.c_str());
+          }
+        }
+        prosperity_agc_submit(reinterpret_cast<u64>(data),
+                              (cmd >> 16) & 0x1fff);
+        ClearSubmitStatus(cmd, data, 0x40);
+      }
+      return 0;
+    }
+    case 0xC0188132:
+    case 0x80108132: {  // AGC mode-1 secondary submit (IN, 16 bytes): arg = [_,
+                        // count, [ptrLo, ptrHi] -> `count` 16-byte descriptors
+                        // [addrLo, addrHi, sizeDwords, flags]. THESE carry the
+                        // real rendering PM4; the 0x80488131 stream is only
+                        // per-frame register state. Forward each non-null
+                        // buffer.
+      if (data) {
+        auto* w = static_cast<u32*>(data);
+        u32 count = w[1];
+        u64 ptr = (static_cast<u64>(w[3]) << 32) | w[2];
+        if (kAgcQstat)
+          BASE_LOGI("agcq", "submit 8132 count={}", count);
+        static int s_d132 = 0;
+        if (kAgcTrace && s_d132 < 8) {
+          s_d132++;
+          BASE_LOGI("agc",
+                    "8132 arg=[{:08x} {:08x} {:08x} {:08x}] ptr={:#x} count={}",
+                    w[0], w[1], w[2], w[3], (unsigned long)ptr, count);
+          if (ptr && count && count < 4096) {
+            auto* dd = reinterpret_cast<const u32*>(ptr);
+            for (u32 i = 0; i < count && i < 24; i++) {
+              BASE_LOGI("agc", "  desc[{}] = {:08x} {:08x} {:08x} {:08x}", i,
+                        dd[i * 4], dd[i * 4 + 1], dd[i * 4 + 2], dd[i * 4 + 3]);
+              const u64 buf =
+                  (static_cast<u64>(dd[i * 4 + 1]) << 32) | dd[i * 4];
+              const u32 sz = dd[i * 4 + 2];
+              if (!sz || !GpuReadable(buf, 4))
+                continue;
+              const u32 show = sz < 48 ? sz : 48;
+              if (!GpuReadable(buf, show * 4))
+                continue;
+              auto* bw = reinterpret_cast<const u32*>(buf);
+              base::String line;
+              base::FormatTo(line, "    buf {:#x} ({} dw):", (unsigned long)buf,
+                             sz);
+              for (u32 k = 0; k < show; k++)
+                base::FormatTo(line, " {:08x}", bw[k]);
+              BASE_LOGI("agc", "{}", line.c_str());
+            }
+          }
+        }
+        // Census: a whole submit used to be dropped when it carried >= 64
+        // descriptors, and individual buffers are skipped when the address does
+        // not look like GPU memory. Both are invisible without counting them.
+        static base::Atomic<u64> n_submits{0}, n_drop_batch{0}, n_desc{0},
+            n_fwd{0}, n_skip_addr{0};
+        n_submits.fetch_add(1, base::memory_order_relaxed);
+        if (count > 0x1000)
+          n_drop_batch.fetch_add(1, base::memory_order_relaxed);
+        if (kGcCensus) {
+          static base::Atomic<u64> last{0};
+          u64 n = n_submits.load();
+          if (n - last.load() >= 2000) {
+            last.store(n);
+            BASE_LOGI(
+                "gccensus",
+                "submits={} batch-dropped(count>=64)={} desc={} forwarded={} "
+                "skipped-addr={}",
+                (unsigned long long)n, (unsigned long long)n_drop_batch.load(),
+                (unsigned long long)n_desc.load(),
+                (unsigned long long)n_fwd.load(),
+                (unsigned long long)n_skip_addr.load());
+          }
+        }
+        // A batch is however long the title makes it. The old count < 64 cap
+        // dropped a whole submit (every buffer in it, including the fence the
+        // title then waits on) once a level got heavy enough to exceed it.
+        if (ptr && count && count <= 0x1000 &&
+            GuestReadable(ptr, static_cast<size_t>(count) * 16)) {
+          auto* d = reinterpret_cast<u32*>(ptr);
+          for (u32 i = 0; i < count; i++) {
+            u64 buf = (static_cast<u64>(d[i * 4 + 1]) << 32) | d[i * 4];
+            u32 sz = d[i * 4 + 2];
+            n_desc.fetch_add(1, base::memory_order_relaxed);
+            if (sz && GuestReadable(buf, static_cast<size_t>(sz) * 4)) {
+              n_fwd.fetch_add(1, base::memory_order_relaxed);
+              // Tag: 0x8132, the descriptor's index in the batch, its flags.
+              prosperity_agc_submit_tagged(
+                  buf, sz * 4,
+                  0x81320000u | ((i & 0xFF) << 8) | (d[i * 4 + 3] & 0xFF));
+            } else if (sz) {
+              n_skip_addr.fetch_add(1, base::memory_order_relaxed);
+              static int n = 0;
+              if (n++ < 16)
+                LOG_WARNING("agc: submit buffer {:#x}+{:#x} dwords unreadable",
+                            (unsigned long)buf, sz);
+            }
+          }
+        } else if (ptr && count) {
+          static int n = 0;
+          if (n++ < 16)
+            LOG_WARNING("agc: submit batch of {} descriptors at {:#x} dropped",
+                        count, (unsigned long)ptr);
+        }
+        ClearSubmitStatus(cmd, data, 0x10);
+      }
+      return 0;
+    }
+    case 0xC0088133:
+    case 0x80088133: {  // AGC mode-1 submission completion. This carries no
+                        // display-buffer index and is followed by a separate
+                        // VideoOut EOP flip. Presenting here as well splits one
+                        // guest frame into two and scans out the previous
+                        // buffer.
+      if (kAgcQstat)
+        BASE_LOGI("agcq", "submit done 8133");
+      ClearSubmitStatus(cmd, data, 0);
+      return 0;
+    }
 
-  // The init-time family, issued once while the drivers come up; named from their
-  // own error strings so boot doesn't log eight UNHANDLED lines that read like gaps.
-  case 0xC00C8110:  // sceGnmSetGsRingSizes {esgsRingSize, gsvsRingSize, _}: our
-                    // rings are implicit in the walker.
-  case 0xC0848119:  // MIP-stats report setup/reset (132-byte command block).
-  case 0x80888123:  // set trap-handler resources; failing it aborts AGC init
-                    // with "Can't set trap handler resources".
-  case 0x80048126:  // set submit mode (1 = the AGC mode-1 path this title uses).
-  case 0x80048134:  // init flag cleared immediately before the 8126 above.
-    return 0;
+    // The init-time family, issued once while the drivers come up; named from
+    // their own error strings so boot doesn't log eight UNHANDLED lines that
+    // read like gaps.
+    case 0xC00C8110:  // sceGnmSetGsRingSizes {esgsRingSize, gsvsRingSize, _}:
+                      // our rings are implicit in the walker.
+    case 0xC0848119:  // MIP-stats report setup/reset (132-byte command block).
+    case 0x80888123:  // set trap-handler resources; failing it aborts AGC init
+                      // with "Can't set trap handler resources".
+    case 0x80048126:  // set submit mode (1 = the AGC mode-1 path this title
+                      // uses).
+    case 0x80048134:  // init flag cleared immediately before the 8126 above.
+      return 0;
 
-  case 0xC010810B: {  // Get CU Mask. The driver presets four dwords to
-                      // Reads back the low 16 bits as a per-SE REDUNDANT-CU mask; a real
-                      // console reports none, and a non-zero answer skews its CU count
-                      // (failing it aborts with "Get CU Mask Fails").
-    if (data)
-      std::memset(data, 0, 0x10);
-    return 0;
-  }
-  case 0xC010813B: {  // GPU info query at the tail of sce_agc_initialize; the
-                      // reply is memcpy'd into a SceGnmGpuInfo block the driver
-                      // first fills with 0xFF, so zeros read as "nothing to
-                      // override".
-    if (data)
-      std::memset(data, 0, 0x10);
-    return 0;
-  }
+    case 0xC010810B: {  // Get CU Mask. The driver presets four dwords to
+                        // Reads back the low 16 bits as a per-SE REDUNDANT-CU
+                        // mask; a real console reports none, and a non-zero
+                        // answer skews its CU count (failing it aborts with
+                        // "Get CU Mask Fails").
+      if (data)
+        std::memset(data, 0, 0x10);
+      return 0;
+    }
+    case 0xC010813B: {  // GPU info query at the tail of sce_agc_initialize; the
+                        // reply is memcpy'd into a SceGnmGpuInfo block the
+                        // driver first fills with 0xFF, so zeros read as
+                        // "nothing to override".
+      if (data)
+        std::memset(data, 0, 0x10);
+      return 0;
+    }
   }
 
   // DELTA_AGC_TRACE: dump the mode-1 ioctl family (0x8131 submit, 0x8132/0x8133
-  // flip/label, 0x8123 setup) with embedded GPU-pointer probes, to RE the ones we
-  // still soft-ok.
+  // flip/label, 0x8123 setup) with embedded GPU-pointer probes, to RE the ones
+  // we still soft-ok.
   if (data) {
     u32 num = cmd & 0xff;
-    static int agcDumps = 0;
-    if (kAgcTrace && agcDumps < 24 &&
+    static int agc_dumps = 0;
+    if (kAgcTrace && agc_dumps < 24 &&
         (num == 0x31 || num == 0x32 || num == 0x33 || num == 0x23)) {
-      agcDumps++;
+      agc_dumps++;
       u32 len = (cmd >> 16) & 0x1fff;
-      auto *w = static_cast<u32 *>(data);
+      auto* w = static_cast<u32*>(data);
       base::String line;
       base::FormatTo(line, "mode1 ioctl({:x}) len={}:", cmd, len);
       for (u32 k = 0; k * 4 < len && k < 24; k++)
@@ -734,22 +823,25 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
         u64 p = (static_cast<u64>(w[k + 1]) << 32) | w[k];
         // Follow both GPU-aperture pointers AND host/stack pointers (the mode-1
         // flip/wait ioctls embed a stack ptr to a label/status struct).
-        bool gpu = gpuAddr(p);
+        bool gpu = GpuAddr(p);
         bool stk = p >= 0x7ff000000000ull && p < 0x800000000000ull;
         if (gpu || stk) {
-          auto *pw = reinterpret_cast<const u32 *>(p);
+          auto* pw = reinterpret_cast<const u32*>(p);
           base::String line;
           base::FormatTo(line, "  +{} ptr={:#x} ->", k * 4, (unsigned long)p);
-          for (int j = 0; j < 8; j++) base::FormatTo(line, " {:08x}", pw[j]);
-          // If the struct holds a further (GPU) pointer, deref that too (a label).
+          for (int j = 0; j < 8; j++)
+            base::FormatTo(line, " {:08x}", pw[j]);
+          // If the struct holds a further (GPU) pointer, deref that too (a
+          // label).
           if (stk) {
             for (int e = 0; e < 6; e++) {
               u64 cand = (static_cast<u64>(pw[e + 1]) << 32) | pw[e];
-              if (gpuAddr(cand)) {
-                auto *cw = reinterpret_cast<const u32 *>(cand);
-                base::FormatTo(line, "\n    [+{}] buf {:#x} sz={:08x} ->", e * 4,
-                               (unsigned long)cand, pw[e + 2]);
-                for (int j = 0; j < 8; j++) base::FormatTo(line, " {:08x}", cw[j]);
+              if (GpuAddr(cand)) {
+                auto* cw = reinterpret_cast<const u32*>(cand);
+                base::FormatTo(line, "\n    [+{}] buf {:#x} sz={:08x} ->",
+                               e * 4, (unsigned long)cand, pw[e + 2]);
+                for (int j = 0; j < 8; j++)
+                  base::FormatTo(line, " {:08x}", cw[j]);
               }
             }
           }
@@ -759,11 +851,11 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
     }
   }
 
-  // Unknown AGC ioctl: log (rate-limited) and soft-succeed, zeroing any OUT buffer
-  // so the driver reads a benign result instead of stack garbage.
-  static int unhandledLogged = 0;
-  if (kGcTrace || unhandledLogged < 32) {
-    unhandledLogged++;
+  // Unknown AGC ioctl: log (rate-limited) and soft-succeed, zeroing any OUT
+  // buffer so the driver reads a benign result instead of stack garbage.
+  static int unhandled_logged = 0;
+  if (kGcTrace || unhandled_logged < 32) {
+    unhandled_logged++;
     BASE_LOGI("gc", "UNHANDLED ioctl({:x}) data={:p}", cmd, data);
   }
   if (data && (cmd & 0x40000000u)) {
@@ -774,42 +866,45 @@ i32 gcDevicePs5::ioctl(u32 cmd, void *data) {
   return 0;
 }
 
-// The AGC driver mmaps /dev/gc for its GPU ring/fifo buffers; back them with the
-// shared physical-dmem store at the requested offset so the CPU's command packets
-// and the command processor's reads are the same bytes, in the low guest aperture.
-u8 *gcDevicePs5::map(void *addr, size_t len, u32 /*prot*/, u32 flags,
-                          size_t offset) {
-  int fd = dmemBackingFd();
-  if (fd < 0 || len == 0 ||
-      static_cast<u64>(offset) + len > dmemBackingSize())
-    return reinterpret_cast<u8 *>(-1);
-  u8 *va = static_cast<u8 *>(addr);
-  const bool fixed = (flags & mFlags::fixed) != 0;
-  void *p = MAP_FAILED;
-  // Same hint handling as dmaDevicePs5::map: never let the host kernel choose the
-  // address, or the guest gets a merely page-aligned ring buffer.
+// The AGC driver mmaps /dev/gc for its GPU ring/fifo buffers; back them with
+// the shared physical-dmem store at the requested offset so the CPU's command
+// packets and the command processor's reads are the same bytes, in the low
+// guest aperture.
+u8* GcDevicePs5::Map(void* addr,
+                     size_t len,
+                     u32 /*prot*/,
+                     u32 flags,
+                     size_t offset) {
+  int fd = DmemBackingFd();
+  if (fd < 0 || len == 0 || static_cast<u64>(offset) + len > DmemBackingSize())
+    return reinterpret_cast<u8*>(-1);
+  u8* va = static_cast<u8*>(addr);
+  const bool fixed = (flags & MFlags::kFixed) != 0;
+  void* p = MAP_FAILED;
+  // Same hint handling as DmaDevicePs5::map: never let the host kernel choose
+  // the address, or the guest gets a merely page-aligned ring buffer.
   if (va && !fixed) {
     p = ::mmap(va, len, PROT_READ | PROT_WRITE,
-               MAP_SHARED | MAP_FIXED_NOREPLACE, fd, static_cast<off_t>(offset));
+               MAP_SHARED | MAP_FIXED_NOREPLACE, fd,
+               static_cast<off_t>(offset));
     if (p != MAP_FAILED && p != va) {
       ::munmap(p, len);
       p = MAP_FAILED;
     }
   }
   if (p == MAP_FAILED) {
-    u8 *base = (va && fixed) ? va : allocLowGuest(len);
+    u8* base = (va && fixed) ? va : AllocLowGuest(len);
     if (!base)
-      return reinterpret_cast<u8 *>(-1);
+      return reinterpret_cast<u8*>(-1);
     p = ::mmap(base, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
                static_cast<off_t>(offset));
   }
   if (p == MAP_FAILED)
-    return reinterpret_cast<u8 *>(-1);
-  static const bool trace = kGcTrace ||
-                            kDmemTrace;
-  if (trace)
+    return reinterpret_cast<u8*>(-1);
+  static const bool kTrace = kGcTrace || kDmemTrace;
+  if (kTrace)
     BASE_LOGI("gc", "devmap off={:#x} len={:#x} -> {:p} (shared)", offset, len,
               p);
-  return reinterpret_cast<u8 *>(p);
+  return reinterpret_cast<u8*>(p);
 }
 }  // namespace krnl

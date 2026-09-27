@@ -1,13 +1,13 @@
-#include "base/arch.h"
 #include <cstring>
+#include "base/arch.h"
 
 #include <gtest/gtest.h>
 
+#include "base/strings/format.h"
+#include "kern/lv2/error_table.h"
 #include "kern/object_table.h"
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/hid_dev.h"
-#include "kern/lv2/error_table.h"
-#include <base/strings/format.h>
 
 // Without DELTA_HID_PASSTHROUGH the device has no host input behind it, so it
 // has to soft-succeed exactly like the real device does for non-system
@@ -16,14 +16,14 @@
 namespace {
 
 class HidDevice : public ::testing::Test {
-protected:
+ protected:
   // A device registers itself in the object table it is handed, which then owns
   // it, so it has to be built the way the kernel builds one. But that table is
   // the whole of what it needs, so no process is involved.
-  HidDevice() : dev_(*new krnl::hidDevice(objects_)) {}
+  HidDevice() : dev_(*new krnl::HidDevice(objects_)) {}
 
-  krnl::objectTable objects_;
-  krnl::hidDevice &dev_;
+  krnl::ObjectTable objects_;
+  krnl::HidDevice& dev_;
 };
 
 // The read commands request up to 16 reports (controller: 64), but the real
@@ -42,10 +42,10 @@ TEST_F(HidDevice, ReadsProduceNothing) {
       {0x80204829},  // ControllerReadPort
       {0x8028482e},  // ControllerRead2
   };
-  for (const auto &c : cases) {
+  for (const auto& c : cases) {
     u8 buf[0x40];
     std::memset(buf, 0xAA, sizeof(buf));
-    EXPECT_EQ(dev_.ioctl(c.cmd, buf), 0)
+    EXPECT_EQ(dev_.Ioctl(c.cmd, buf), 0)
         << base::Format("{:#x}", c.cmd).c_str();
     // A read that produced nothing must not have touched the guest buffer.
     for (u8 b : buf)
@@ -58,9 +58,9 @@ TEST_F(HidDevice, ReadsProduceNothing) {
 TEST_F(HidDevice, WritesAreAcceptedAndIgnored) {
   u8 buf[0x10];
   std::memset(buf, 0x5A, sizeof(buf));
-  EXPECT_EQ(dev_.ioctl(0x80104822, buf), 0);  // SetVibration
-  EXPECT_EQ(dev_.ioctl(0x80104821, buf), 0);  // SetLightBar
-  EXPECT_EQ(dev_.ioctl(0x80044825, buf), 0);  // ResetLightBar
+  EXPECT_EQ(dev_.Ioctl(0x80104822, buf), 0);  // SetVibration
+  EXPECT_EQ(dev_.Ioctl(0x80104821, buf), 0);  // SetLightBar
+  EXPECT_EQ(dev_.Ioctl(0x80044825, buf), 0);  // ResetLightBar
   for (u8 b : buf)
     EXPECT_EQ(b, 0x5A);  // a setter reads its argument, it does not rewrite it
 }
@@ -70,14 +70,14 @@ TEST_F(HidDevice, WritesAreAcceptedAndIgnored) {
 TEST_F(HidDevice, UnknownIoctlZeroesAnOutBuffer) {
   u8 buf[0x20];
   std::memset(buf, 0xAA, sizeof(buf));
-  EXPECT_EQ(dev_.ioctl(0x40107499, buf), 0);  // IOC_OUT, 0x10 bytes
+  EXPECT_EQ(dev_.Ioctl(0x40107499, buf), 0);  // IOC_OUT, 0x10 bytes
   for (u32 i = 0; i < 0x10; i++)
     EXPECT_EQ(buf[i], 0) << "byte " << i;
   EXPECT_EQ(buf[0x10], 0xAA);
 
   // IOC_VOID carries no payload, so nothing may be written through the pointer.
   std::memset(buf, 0xAA, sizeof(buf));
-  EXPECT_EQ(dev_.ioctl(0x20007499, buf), 0);
+  EXPECT_EQ(dev_.Ioctl(0x20007499, buf), 0);
   for (u8 b : buf)
     EXPECT_EQ(b, 0xAA);
 }
@@ -85,10 +85,10 @@ TEST_F(HidDevice, UnknownIoctlZeroesAnOutBuffer) {
 TEST_F(HidDevice, ReportsItselfAsACharacterDevice) {
   krnl::SceKernelStat st;
   std::memset(&st, 0xAA, sizeof(st));
-  EXPECT_EQ(dev_.fstat(&st), 0);
+  EXPECT_EQ(dev_.Fstat(&st), 0);
   EXPECT_EQ(st.st_mode & 0xF000, 0x2000);  // S_IFCHR
   EXPECT_EQ(st.st_size, 0);
-  EXPECT_EQ(dev_.fstat(nullptr), -static_cast<int>(krnl::SysError::eFAULT));
+  EXPECT_EQ(dev_.Fstat(nullptr), -static_cast<int>(krnl::SysError::eFAULT));
 }
 
 }  // namespace

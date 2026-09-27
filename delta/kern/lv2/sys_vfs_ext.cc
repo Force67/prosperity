@@ -7,34 +7,34 @@
  * in the root of the source tree.
  */
 
-#include <guest_abi.h>
-#include "base/arch.h"
-#include <base/logging.h>
-#include <cstdlib>
-#include "kern/crash.h"
-#include <base/strings/format.h>
+#include <sys/select.h>
+#include <unistd.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <unistd.h>
-#include <sys/select.h>
+#include "base/arch.h"
+#include "base/logging.h"
+#include "base/strings/format.h"
+#include "guest_abi.h"
+#include "kern/crash.h"
 
-#include <logger/logger.h>
+#include "logger/logger.h"
 
-#include "error_table.h"
-#include "kern/ps4/dev/device.h"
-#include "kern/ps4/dev/file_dev.h" // SceKernelStat, fillStat, kSceFileMode*
-#include "kern/ps4/dev/socket_dev.h" // fdToSocket, for select over real sockets
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "kern/lv2/error_table.h"
+#include "kern/lv2/sys_vfs.h"  // sys_open (sys_openat delegates to it)
+#include "kern/lv2/sys_vfs_ext.h"
 #include "kern/process.h"
+#include "kern/ps4/dev/device.h"
+#include "kern/ps4/dev/file_dev.h"    // SceKernelStat, FillStat, kSceFileMode*
+#include "kern/ps4/dev/socket_dev.h"  // FdToSocket, for select over real sockets
 #include "kern/vfs.h"
-#include "sys_vfs.h" // sys_open (sys_openat delegates to it)
-#include "sys_vfs_ext.h"
-#include <options/options.h>
-#include <base/containers/map.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/containers/hash_map.h>
+#include "options/options.h"
 
 namespace {
 DELTA_OPTION(bool, kQarBuf, "DELTA_QARBUF", false);
@@ -48,31 +48,31 @@ namespace krnl {
 enum { kSeekSet = 0, kSeekCur = 1 };
 
 // The helper in sys_vfs.cc is file-local static, so keep our own copy.
-static device *fdToDevice(u32 fd) {
-  auto *obj = proc::getActive()->getObjTable().get(fd);
-  if (!obj || obj->type() != kObject::oType::device)
+static Device* FdToDevice(u32 fd) {
+  auto* obj = Proc::GetActive()->GetObjTable().Get(fd);
+  if (!obj || obj->type() != Object::OType::kDevice)
     return nullptr;
-  return static_cast<device *>(obj);
+  return static_cast<Device*>(obj);
 }
 
-struct sce_iovec {
-  void *iov_base;
+struct sce_iovec {  // NOLINT(readability-identifier-naming): guest ABI name
+  void* iov_base;
   size_t iov_len;
 };
 
-int PS4ABI sys_access(const char *path, int mode) {
+int PS4ABI sys_access(const char* path, int mode) {
   if (!path)
     return -SysError::eINVAL;
   // We model read-only assets, so existence is the only check we can honour;
   // W_OK/X_OK are accepted for anything that exists.
   i64 size = 0;
-  bool isDir = false;
-  if (!vfs::stat(path, size, isDir))
+  bool is_dir = false;
+  if (!vfs::Stat(path, size, is_dir))
     return -SysError::eNOENT;
   return 0;
 }
 
-int PS4ABI sys_faccessat(int fd, const char *path, int mode, int flag) {
+int PS4ABI sys_faccessat(int fd, const char* path, int mode, int flag) {
   return sys_access(path, mode);
 }
 
@@ -80,78 +80,98 @@ int PS4ABI sys_faccessat(int fd, const char *path, int mode, int flag) {
 // target is not a VLNK vnode, so we do too. The PS4 uses symlinks only for
 // /app0 -> the PFS mount root and the base system dirs; our VFS resolves
 // those directly, so readlink should never reach a callable path.
-int PS4ABI sys_readlink(const char *path, char *buf, size_t bufsize) {
+int PS4ABI sys_readlink(const char* path, char* buf, size_t bufsize) {
   return -SysError::eINVAL;
 }
 
-int PS4ABI sys_readlinkat(int fd, const char *path, char *buf, size_t bufsize) {
+int PS4ABI sys_readlinkat(int fd, const char* path, char* buf, size_t bufsize) {
   return -SysError::eINVAL;
 }
 
 // No symlinks, so lstat is plain stat. Zero the buffer first for the reason
 // sys_fstat documents: callers read st_size without checking the return.
-int PS4ABI sys_lstat(const char *path, void *stat) {
+int PS4ABI sys_lstat(const char* path, void* stat) {
   if (!path)
     return -SysError::eINVAL;
   if (stat)
     std::memset(stat, 0, sizeof(SceKernelStat));
   i64 size = 0;
-  bool isDir = false;
-  if (!vfs::stat(path, size, isDir))
+  bool is_dir = false;
+  if (!vfs::Stat(path, size, is_dir))
     return -SysError::eNOENT;
-  fillStat(*reinterpret_cast<SceKernelStat *>(stat),
-           isDir ? kSceFileModeDir : kSceFileModeReg, size);
+  FillStat(*reinterpret_cast<SceKernelStat*>(stat),
+           is_dir ? kSceFileModeDir : kSceFileModeReg, size);
   return 0;
 }
 
-int PS4ABI sys_fstatat(int fd, const char *path, void *stat, int flag) {
+int PS4ABI sys_fstatat(int fd, const char* path, void* stat, int flag) {
   return sys_lstat(path, stat);
 }
 
-// sys_fcntl: non-privileged cmds validated against 0x3818 {F_GETFL, F_SETFL, F_GETLK,
-// F_SETLK, F_SETLKW}; 7/8/9 (OGETLK/OSETLK/OSETLKW) translate to 11/12/13. Flags and
-// advisory locks unmodelled: GETFD/GETFL report 0, locks accept silently.
+// sys_fcntl: non-privileged cmds validated against 0x3818 {F_GETFL, F_SETFL,
+// F_GETLK, F_SETLK, F_SETLKW}; 7/8/9 (OGETLK/OSETLK/OSETLKW) translate to
+// 11/12/13. Flags and advisory locks unmodelled: GETFD/GETFL report 0, locks
+// accept silently.
 int PS4ABI sys_fcntl(u32 fd, int cmd, i64 arg) {
   enum {
-    F_DUPFD = 0, F_GETFD = 1, F_SETFD = 2, F_GETFL = 3, F_SETFL = 4,
-    F_GETOWN = 5, F_SETOWN = 6,
-    F_OGETLK = 7, F_OSETLK = 8, F_OSETLKW = 9,
-    F_GETLK = 11, F_SETLK = 12, F_SETLKW = 13,
+    // FreeBSD fcntl(2) command spelling.
+    // NOLINTBEGIN(readability-identifier-naming)
+    F_DUPFD = 0,
+    F_GETFD = 1,
+    F_SETFD = 2,
+    F_GETFL = 3,
+    F_SETFL = 4,
+    F_GETOWN = 5,
+    F_SETOWN = 6,
+    F_OGETLK = 7,
+    F_OSETLK = 8,
+    F_OSETLKW = 9,
+    F_GETLK = 11,
+    F_SETLK = 12,
+    F_SETLKW = 13,
+    // NOLINTEND(readability-identifier-naming)
   };
   // Normalize legacy OGETLK/OSETLK/OSETLKW (7/8/9) to their modern equivalents.
   int ncmd = cmd;
   switch (cmd) {
-  case F_OGETLK:  ncmd = F_GETLK;  break;
-  case F_OSETLK:  ncmd = F_SETLK;  break;
-  case F_OSETLKW: ncmd = F_SETLKW; break;
+    case F_OGETLK:
+      ncmd = F_GETLK;
+      break;
+    case F_OSETLK:
+      ncmd = F_SETLK;
+      break;
+    case F_OSETLKW:
+      ncmd = F_SETLKW;
+      break;
   }
   switch (ncmd) {
-  case F_GETFL:
-    // Report O_RDONLY: the device opened with whatever flags the guest passed,
-    // but we model read-only access for regular files.
-    return 0;
-  case F_SETFL:
-  case F_GETFD:
-  case F_SETFD:
-    return 0;
-  case F_GETLK:
-    // No locks held: return F_UNLCK (type 2) in the caller's flock struct.
-    if (arg) {
-      auto *fl = reinterpret_cast<i32 *>(arg);
-      fl[0] = 2;  // l_type = F_UNLCK
-    }
-    return 0;
-  case F_SETLK:
-  case F_SETLKW:
-    return 0;  // advisory lock accepted, not enforced
-  case F_DUPFD:
-    return -SysError::eOPNOTSUPP;  // no descriptor duplication in the object table
-  case F_GETOWN:
-  case F_SETOWN:
-    return 0;  // no signal delivery so ownership is inert
-  default:
-    LOG_WARNING("sys_fcntl: unhandled cmd {} on fd {} -> 0", cmd, fd);
-    return 0;
+    case F_GETFL:
+      // Report O_RDONLY: the device opened with whatever flags the guest
+      // passed, but we model read-only access for regular files.
+      return 0;
+    case F_SETFL:
+    case F_GETFD:
+    case F_SETFD:
+      return 0;
+    case F_GETLK:
+      // No locks held: return F_UNLCK (type 2) in the caller's flock struct.
+      if (arg) {
+        auto* fl = reinterpret_cast<i32*>(arg);
+        fl[0] = 2;  // l_type = F_UNLCK
+      }
+      return 0;
+    case F_SETLK:
+    case F_SETLKW:
+      return 0;  // advisory lock accepted, not enforced
+    case F_DUPFD:
+      return -SysError::eOPNOTSUPP;  // no descriptor duplication in the object
+                                     // table
+    case F_GETOWN:
+    case F_SETOWN:
+      return 0;  // no signal delivery so ownership is inert
+    default:
+      LOG_WARNING("sys_fcntl: unhandled cmd {} on fd {} -> 0", cmd, fd);
+      return 0;
   }
 }
 
@@ -165,13 +185,17 @@ int PS4ABI sys_dup2(u32 oldfd, u32 newfd) {
   return -SysError::eOPNOTSUPP;
 }
 
-int PS4ABI sys_fsync(u32 fd) { return 0; }
-int PS4ABI sys_fdatasync(u32 fd) { return 0; }
+int PS4ABI sys_fsync(u32 fd) {
+  return 0;
+}
+int PS4ABI sys_fdatasync(u32 fd) {
+  return 0;
+}
 
-int PS4ABI sys_getcwd(char *buf, size_t size) {
+int PS4ABI sys_getcwd(char* buf, size_t size) {
   if (!buf || size == 0)
     return -SysError::eINVAL;
-  const char *cwd = "/app0"; // the single working directory we expose
+  const char* cwd = "/app0";  // the single working directory we expose
   size_t n = std::strlen(cwd);
   if (n + 1 > size)
     n = size - 1;
@@ -184,132 +208,148 @@ int PS4ABI sys_getcwd(char *buf, size_t size) {
 // seek+read, so snapshot the current offset, do the positioned I/O, then
 // restore it. Without the restore a following read() would resume from the
 // wrong place.
-static bool g_qarFd[8192] = {false};
-void markQarFd(u32 fd, bool v) {
+static bool g_qar_fd[8192] = {false};
+void MarkQarFd(u32 fd, bool v) {
   if (fd < 8192)
-    g_qarFd[fd] = v;
+    g_qar_fd[fd] = v;
 }
 
-void throttleIo(i64 bytes);
+void ThrottleIo(i64 bytes);
 
-i64 PS4ABI sys_pread(u32 fd, void *buf, size_t nbytes, i64 offset) {
-  auto *d = fdToDevice(fd);
+i64 PS4ABI sys_pread(u32 fd, void* buf, size_t nbytes, i64 offset) {
+  auto* d = FdToDevice(fd);
   if (!d) {
     if (kRdall)
-      BASE_LOGI("pread", "fd={} off={} -> EBADF (no device)", fd, (long long)offset);
+      BASE_LOGI("pread", "fd={} off={} -> EBADF (no device)", fd,
+                (long long)offset);
     return -SysError::eBADF;
   }
   struct timespec t0;
   if (kQarBuf)
     clock_gettime(CLOCK_MONOTONIC, &t0);
-  i64 saved = d->lseek(0, kSeekCur);
-  d->lseek(offset, kSeekSet);
-  i64 r = d->read(buf, nbytes);
+  i64 saved = d->Lseek(0, kSeekCur);
+  d->Lseek(offset, kSeekSet);
+  i64 r = d->Read(buf, nbytes);
   if (saved >= 0)
-    d->lseek(saved, kSeekSet);
-  long readUs = 0;
+    d->Lseek(saved, kSeekSet);
+  long read_us = 0;
   if (kQarBuf) {
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    readUs = (t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000;
+    read_us =
+        (t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000;
   }
-  throttleIo(r);
+  ThrottleIo(r);
   if (kRdall) {
     u32 f4 = 0;
-    if (buf && r >= 4) f4 = *reinterpret_cast<const u32 *>(buf);
-    BASE_LOGI("pread", "t={} fd={} off={} nbytes={:#x} -> {} buf={:p} first4={:08x}",
+    if (buf && r >= 4)
+      f4 = *reinterpret_cast<const u32*>(buf);
+    BASE_LOGI("pread",
+              "t={} fd={} off={} nbytes={:#x} -> {} buf={:p} first4={:08x}",
               (long)gettid(), fd, (long long)offset, (size_t)nbytes,
               (long long)r, buf, f4);
   }
   // DELTA_QARBUF: where does streamed .qar data land? Reports the destination
   // buffer for reads on a *.qar fd, so we can tell whether textures stream into
-  // a GPU-mapped region (0x81xx, directly bindable) or a low staging buffer that
-  // still needs a copy/commit step the engine never performs.
-  if (fd < 8192 && g_qarFd[fd] && kQarBuf) {
+  // a GPU-mapped region (0x81xx, directly bindable) or a low staging buffer
+  // that still needs a copy/commit step the engine never performs.
+  if (fd < 8192 && g_qar_fd[fd] && kQarBuf) {
     BASE_LOGI("qarbuf", "fd={} off={} nbytes={:#x} -> {} buf={:p} {}us", fd,
-              (long long)offset, (size_t)nbytes, (long long)r, buf, readUs);
+              (long long)offset, (size_t)nbytes, (long long)r, buf, read_us);
   }
-  // DELTA_IOPROGRESS: throttled per-fd streaming high-water mark: is FIOS2's pread of
-  // a large world archive advancing or stalled, without the DELTA_RDALL firehose.
-  // One line per fd per ~2s: current + max offset and MB/s since the last line.
+  // DELTA_IOPROGRESS: throttled per-fd streaming high-water mark: is FIOS2's
+  // pread of a large world archive advancing or stalled, without the
+  // DELTA_RDALL firehose. One line per fd per ~2s: current + max offset and
+  // MB/s since the last line.
   if (kIoprogress) {
-    // maxOff/lastMax = streaming high-water. nNew climbing = fetching NEW bytes;
-    // nReread = a downstream consume/decompress stage that never drains, so the
-    // streamer re-issues the same reads. lastOff catches exact-repeat reads.
-    struct FdIo { i64 maxOff, lastMax, lastOff; long lastMs; long nNew, nReread, nSame; };
+    // maxOff/lastMax = streaming high-water. nNew climbing = fetching NEW
+    // bytes; nReread = a downstream consume/decompress stage that never drains,
+    // so the streamer re-issues the same reads. lastOff catches exact-repeat
+    // reads.
+    struct FdIo {
+      i64 max_off, last_max, last_off;
+      long last_ms;
+      long n_new, n_reread, n_same;
+    };
     static base::Mutex m;
     static base::HashMap<u32, FdIo> tbl;
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    long nowMs = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long now_ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
     base::LockGuard<base::Mutex> lk(m);
-    auto &e = tbl[fd];
+    auto& e = tbl[fd];
     i64 end = offset + (r > 0 ? r : 0);
-    if (end > e.maxOff) e.nNew++; else e.nReread++;
-    if (offset == e.lastOff) e.nSame++;
-    e.lastOff = offset;
-    if (end > e.maxOff) e.maxOff = end;
-    if (e.lastMs == 0) e.lastMs = nowMs;
-    if (nowMs - e.lastMs >= 2000) {
-      double mb = (e.maxOff - e.lastMax) / 1048576.0;
-      double sec = (nowMs - e.lastMs) / 1000.0;
+    if (end > e.max_off)
+      e.n_new++;
+    else
+      e.n_reread++;
+    if (offset == e.last_off)
+      e.n_same++;
+    e.last_off = offset;
+    if (end > e.max_off)
+      e.max_off = end;
+    if (e.last_ms == 0)
+      e.last_ms = now_ms;
+    if (now_ms - e.last_ms >= 2000) {
+      double mb = (e.max_off - e.last_max) / 1048576.0;
+      double sec = (now_ms - e.last_ms) / 1000.0;
       BASE_LOGI("ioprog",
-                "fd={} off={} max={} ({:.1f} MB) +{:.2f} MB/s  new={} reread={} same={}",
-                fd, (long long)offset, (long long)e.maxOff,
-                e.maxOff / 1048576.0, sec > 0 ? mb / sec : 0.0,
-                e.nNew, e.nReread, e.nSame);
-      e.lastMax = e.maxOff;
-      e.lastMs = nowMs;
-      e.nNew = e.nReread = e.nSame = 0;
+                "fd={} off={} max={} ({:.1f} MB) +{:.2f} MB/s  new={} "
+                "reread={} same={}",
+                fd, (long long)offset, (long long)e.max_off,
+                e.max_off / 1048576.0, sec > 0 ? mb / sec : 0.0, e.n_new,
+                e.n_reread, e.n_same);
+      e.last_max = e.max_off;
+      e.last_ms = now_ms;
+      e.n_new = e.n_reread = e.n_same = 0;
     }
   }
   return r;
 }
 
-i64 PS4ABI sys_pwrite(u32 fd, const void *buf, size_t nbytes,
-                          i64 offset) {
-  auto *d = fdToDevice(fd);
+i64 PS4ABI sys_pwrite(u32 fd, const void* buf, size_t nbytes, i64 offset) {
+  auto* d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
-  i64 saved = d->lseek(0, kSeekCur);
-  d->lseek(offset, kSeekSet);
-  i64 r = d->write(buf, nbytes);
+  i64 saved = d->Lseek(0, kSeekCur);
+  d->Lseek(offset, kSeekSet);
+  i64 r = d->Write(buf, nbytes);
   if (saved >= 0)
-    d->lseek(saved, kSeekSet);
+    d->Lseek(saved, kSeekSet);
   return r;
 }
 
-i64 PS4ABI sys_writev(u32 fd, const void *iov, int iovcnt) {
-  auto *segs = static_cast<const sce_iovec *>(iov);
+i64 PS4ABI sys_writev(u32 fd, const void* iov, int iovcnt) {
+  auto* segs = static_cast<const sce_iovec*>(iov);
   if (!segs || iovcnt < 0)
     return -SysError::eINVAL;
 
-  if (fd == 1 || fd == 2) { // stdout / stderr, like sys_write
+  if (fd == 1 || fd == 2) {  // stdout / stderr, like sys_write
     // Through the logger rather than printf: a title's own diagnostics are the
     // most direct account of what it is doing, and interleaving them with ours
     // by timestamp is what makes them usable.
     i64 total = 0;
     base::String out;
     for (int i = 0; i < iovcnt; ++i) {
-      out.append(static_cast<const char *>(segs[i].iov_base),
-                 segs[i].iov_len);
+      out.append(static_cast<const char*>(segs[i].iov_base), segs[i].iov_len);
       total += static_cast<i64>(segs[i].iov_len);
     }
     while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
       out.pop_back();
     if (!out.empty())
       BASE_LOGI("guest", "{}", out.c_str());
-      if (const char *m = std::getenv("DELTA_GUEST_LOG_STACK");
-          m && out.find(m) != base::String::npos)
-        guestStackTrace("guestlog", 12);
+    if (const char* m = std::getenv("DELTA_GUEST_LOG_STACK");
+        m && out.find(m) != base::String::npos)
+      GuestStackTrace("guestlog", 12);
     return total;
   }
 
-  auto *d = fdToDevice(fd);
+  auto* d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
   i64 total = 0;
   for (int i = 0; i < iovcnt; ++i) {
-    i64 r = d->write(segs[i].iov_base, segs[i].iov_len);
+    i64 r = d->Write(segs[i].iov_base, segs[i].iov_len);
     if (r < 0)
       return r;
     total += r;
@@ -317,17 +357,17 @@ i64 PS4ABI sys_writev(u32 fd, const void *iov, int iovcnt) {
   return total;
 }
 
-i64 PS4ABI sys_readv(u32 fd, const void *iov, int iovcnt) {
-  auto *segs = static_cast<const sce_iovec *>(iov);
+i64 PS4ABI sys_readv(u32 fd, const void* iov, int iovcnt) {
+  auto* segs = static_cast<const sce_iovec*>(iov);
   if (!segs || iovcnt < 0)
     return -SysError::eINVAL;
 
-  auto *d = fdToDevice(fd);
+  auto* d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
   i64 total = 0;
   for (int i = 0; i < iovcnt; ++i) {
-    i64 r = d->read(segs[i].iov_base, segs[i].iov_len);
+    i64 r = d->Read(segs[i].iov_base, segs[i].iov_len);
     if (r < 0)
       return r;
     total += r;
@@ -339,22 +379,21 @@ i64 PS4ABI sys_readv(u32 fd, const void *iov, int iovcnt) {
 // clean end-of-file to the caller: a title that loads through preadv gets empty
 // buffers and no error to notice it by. Offsets advance across the segments and
 // the file position is left alone, like pread/pwrite.
-i64 PS4ABI sys_preadv(u32 fd, const void *iov, int iovcnt,
-                          i64 offset) {
-  auto *segs = static_cast<const sce_iovec *>(iov);
+i64 PS4ABI sys_preadv(u32 fd, const void* iov, int iovcnt, i64 offset) {
+  auto* segs = static_cast<const sce_iovec*>(iov);
   if (!segs || iovcnt < 0 || offset < 0)
     return -SysError::eINVAL;
-  auto *d = fdToDevice(fd);
+  auto* d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
-  const i64 saved = d->lseek(0, kSeekCur);
+  const i64 saved = d->Lseek(0, kSeekCur);
   i64 total = 0;
   for (int i = 0; i < iovcnt; ++i) {
-    d->lseek(offset + total, kSeekSet);
-    i64 r = d->read(segs[i].iov_base, segs[i].iov_len);
+    d->Lseek(offset + total, kSeekSet);
+    i64 r = d->Read(segs[i].iov_base, segs[i].iov_len);
     if (r < 0) {
       if (saved >= 0)
-        d->lseek(saved, kSeekSet);
+        d->Lseek(saved, kSeekSet);
       return total ? total : r;
     }
     total += r;
@@ -362,26 +401,25 @@ i64 PS4ABI sys_preadv(u32 fd, const void *iov, int iovcnt,
       break;  // short read: end of file
   }
   if (saved >= 0)
-    d->lseek(saved, kSeekSet);
+    d->Lseek(saved, kSeekSet);
   return total;
 }
 
-i64 PS4ABI sys_pwritev(u32 fd, const void *iov, int iovcnt,
-                           i64 offset) {
-  auto *segs = static_cast<const sce_iovec *>(iov);
+i64 PS4ABI sys_pwritev(u32 fd, const void* iov, int iovcnt, i64 offset) {
+  auto* segs = static_cast<const sce_iovec*>(iov);
   if (!segs || iovcnt < 0 || offset < 0)
     return -SysError::eINVAL;
-  auto *d = fdToDevice(fd);
+  auto* d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
-  const i64 saved = d->lseek(0, kSeekCur);
+  const i64 saved = d->Lseek(0, kSeekCur);
   i64 total = 0;
   for (int i = 0; i < iovcnt; ++i) {
-    d->lseek(offset + total, kSeekSet);
-    i64 r = d->write(segs[i].iov_base, segs[i].iov_len);
+    d->Lseek(offset + total, kSeekSet);
+    i64 r = d->Write(segs[i].iov_base, segs[i].iov_len);
     if (r < 0) {
       if (saved >= 0)
-        d->lseek(saved, kSeekSet);
+        d->Lseek(saved, kSeekSet);
       return total ? total : r;
     }
     total += r;
@@ -389,7 +427,7 @@ i64 PS4ABI sys_pwritev(u32 fd, const void *iov, int iovcnt,
       break;
   }
   if (saved >= 0)
-    d->lseek(saved, kSeekSet);
+    d->Lseek(saved, kSeekSet);
   return total;
 }
 
@@ -397,7 +435,7 @@ i64 PS4ABI sys_pwritev(u32 fd, const void *iov, int iovcnt,
 // timed poll into a busy-spin, so honour the caller's timeout by sleeping it
 // first (capped). timeout is in milliseconds; negative means "wait forever",
 // which we treat as the cap rather than hanging.
-int PS4ABI sys_poll(void *fds, u32 nfds, int timeout) {
+int PS4ABI sys_poll(void* fds, u32 nfds, int timeout) {
   int ms = timeout;
   if (ms < 0 || ms > 50)
     ms = 50;
@@ -415,61 +453,74 @@ struct GuestTimeval {
   i64 sec, usec;
 };
 
-bool fdIsSet(const void *set, int fd) {
+bool FdIsSet(const void* set, int fd) {
   if (!set || fd < 0 || fd >= kFdSetWords * 64)
     return false;
-  return (static_cast<const u64 *>(set)[fd / 64] >> (fd % 64)) & 1;
+  return (static_cast<const u64*>(set)[fd / 64] >> (fd % 64)) & 1;
 }
 
-void fdSet(void *set, int fd) {
+void FdSet(void* set, int fd) {
   if (set && fd >= 0 && fd < kFdSetWords * 64)
-    static_cast<u64 *>(set)[fd / 64] |= 1ull << (fd % 64);
+    static_cast<u64*>(set)[fd / 64] |= 1ull << (fd % 64);
 }
 }  // namespace
 
-// select(): sockets ask the host; everything else (file, device) is always ready and
-// never blocks. The old stub returned "nothing ready" without waiting or clearing
-// the sets, so a title selecting with a timeout spun: GTA:SA's Gameface thread made
-// 1.8 billion calls in 78s and left the render loop at 0.1 fps.
-int PS4ABI sys_select(int nfds, void *readfds, void *writefds, void *exceptfds,
-                      void *timeout) {
+// select(): sockets ask the host; everything else (file, device) is always
+// ready and never blocks. The old stub returned "nothing ready" without waiting
+// or clearing the sets, so a title selecting with a timeout spun: GTA:SA's
+// Gameface thread made 1.8 billion calls in 78s and left the render loop at 0.1
+// fps.
+int PS4ABI sys_select(int nfds,
+                      void* readfds,
+                      void* writefds,
+                      void* exceptfds,
+                      void* timeout) {
   if (nfds < 0)
     return -SysError::eINVAL;
   if (nfds > kFdSetWords * 64)
     nfds = kFdSetWords * 64;
 
-  fd_set hostRead, hostWrite, hostExcept;
-  FD_ZERO(&hostRead);
-  FD_ZERO(&hostWrite);
-  FD_ZERO(&hostExcept);
-  int hostMax = -1, ready = 0;
+  fd_set host_read, host_write, host_except;
+  FD_ZERO(&host_read);
+  FD_ZERO(&host_write);
+  FD_ZERO(&host_except);
+  int host_max = -1, ready = 0;
   // The always-ready fds, collected before the wait: with one of them in the
   // set there is nothing to wait for.
-  u64 alwaysRead[kFdSetWords] = {}, alwaysWrite[kFdSetWords] = {};
+  u64 always_read[kFdSetWords] = {}, always_write[kFdSetWords] = {};
 
   for (int fd = 0; fd < nfds; fd++) {
-    const bool r = fdIsSet(readfds, fd), w = fdIsSet(writefds, fd),
-               e = fdIsSet(exceptfds, fd);
+    const bool r = FdIsSet(readfds, fd), w = FdIsSet(writefds, fd),
+               e = FdIsSet(exceptfds, fd);
     if (!r && !w && !e)
       continue;
-    auto *s = fdToSocket(static_cast<u32>(fd));
+    auto* s = FdToSocket(static_cast<u32>(fd));
     if (!s) {
-      if (r) { fdSet(alwaysRead, fd); ready++; }
-      if (w) { fdSet(alwaysWrite, fd); ready++; }
+      if (r) {
+        FdSet(always_read, fd);
+        ready++;
+      }
+      if (w) {
+        FdSet(always_write, fd);
+        ready++;
+      }
       continue;
     }
-    const int h = s->hostFd();
-    if (r) FD_SET(h, &hostRead);
-    if (w) FD_SET(h, &hostWrite);
-    if (e) FD_SET(h, &hostExcept);
-    if (h > hostMax)
-      hostMax = h;
+    const int h = s->HostFd();
+    if (r)
+      FD_SET(h, &host_read);
+    if (w)
+      FD_SET(h, &host_write);
+    if (e)
+      FD_SET(h, &host_except);
+    if (h > host_max)
+      host_max = h;
   }
 
   // A null timeout means "wait forever". We cap it (as sys_poll does) so a
   // title that parks a thread there stays interruptible.
   timeval tv{0, 50 * 1000};
-  if (auto *gt = static_cast<const GuestTimeval *>(timeout)) {
+  if (auto* gt = static_cast<const GuestTimeval*>(timeout)) {
     if (gt->sec > 0 || gt->usec >= 50 * 1000)
       tv = {0, 50 * 1000};
     else
@@ -478,16 +529,23 @@ int PS4ABI sys_select(int nfds, void *readfds, void *writefds, void *exceptfds,
   if (ready)
     tv = {0, 0};
 
-  if (hostMax >= 0) {
-    const int n = ::select(hostMax + 1, &hostRead, &hostWrite, &hostExcept, &tv);
+  if (host_max >= 0) {
+    const int n =
+        ::select(host_max + 1, &host_read, &host_write, &host_except, &tv);
     if (n > 0) {
       for (int fd = 0; fd < nfds; fd++) {
-        auto *s = fdToSocket(static_cast<u32>(fd));
+        auto* s = FdToSocket(static_cast<u32>(fd));
         if (!s)
           continue;
-        const int h = s->hostFd();
-        if (fdIsSet(readfds, fd) && FD_ISSET(h, &hostRead)) { fdSet(alwaysRead, fd); ready++; }
-        if (fdIsSet(writefds, fd) && FD_ISSET(h, &hostWrite)) { fdSet(alwaysWrite, fd); ready++; }
+        const int h = s->HostFd();
+        if (FdIsSet(readfds, fd) && FD_ISSET(h, &host_read)) {
+          FdSet(always_read, fd);
+          ready++;
+        }
+        if (FdIsSet(writefds, fd) && FD_ISSET(h, &host_write)) {
+          FdSet(always_write, fd);
+          ready++;
+        }
       }
     }
   } else if (!ready && (tv.tv_sec || tv.tv_usec)) {
@@ -496,52 +554,59 @@ int PS4ABI sys_select(int nfds, void *readfds, void *writefds, void *exceptfds,
 
   // select reports its answer by rewriting the sets, so the ones it was given
   // have to be cleared even when nothing is ready.
-  if (readfds) std::memcpy(readfds, alwaysRead, sizeof(alwaysRead));
-  if (writefds) std::memcpy(writefds, alwaysWrite, sizeof(alwaysWrite));
-  if (exceptfds) std::memset(exceptfds, 0, sizeof(alwaysRead));
+  if (readfds)
+    std::memcpy(readfds, always_read, sizeof(always_read));
+  if (writefds)
+    std::memcpy(writefds, always_write, sizeof(always_write));
+  if (exceptfds)
+    std::memset(exceptfds, 0, sizeof(always_read));
   return ready;
 }
 
-int PS4ABI sys_openat(int fd, const char *path, u32 flags, u32 mode) {
+int PS4ABI sys_openat(int fd, const char* path, u32 flags, u32 mode) {
   return sys_open(path, flags, mode);
 }
 
-int PS4ABI sys_chdir(const char *path) { return 0; }
-int PS4ABI sys_fchdir(u32 fd) { return 0; }
+int PS4ABI sys_chdir(const char* path) {
+  return 0;
+}
+int PS4ABI sys_fchdir(u32 fd) {
+  return 0;
+}
 
 // The host tree stays read-only. We report success so installers and savedata
 // setup proceed, but log every call: if a title relies on a file it "created"
 // here being readable back, that read returns stale VFS data and this trace is
 // the only sign of why.
-int PS4ABI sys_unlink(const char *path) {
+int PS4ABI sys_unlink(const char* path) {
   // Under a writable mount (savedata, /download0) do the real thing: a title
   // that rewrites a file by unlink+create reads back stale content otherwise.
-  if (path && vfs::removeFile(path))
+  if (path && vfs::RemoveFile(path))
     return 0;
   BASE_LOGI("vfs", "unlink('{}') ignored (read-only host)",
             path ? path : "(null)");
   return 0;
 }
-int PS4ABI sys_rmdir(const char *path) {
+int PS4ABI sys_rmdir(const char* path) {
   BASE_LOGI("vfs", "rmdir('{}') ignored (read-only host)",
             path ? path : "(null)");
   return 0;
 }
-int PS4ABI sys_mkdir(const char *path, u32 mode) {
+int PS4ABI sys_mkdir(const char* path, u32 mode) {
   (void)mode;
   // Real directory creation under a writable mount (savedata); otherwise a
   // no-op success as before (the read-only host content the game expects to
   // exist already does).
-  if (path && vfs::makeDir(path)) {
+  if (path && vfs::MakeDir(path)) {
     if (kVfsTrace)
       BASE_LOGI("vfs", "mkdir('{}') -> host", path);
     return 0;
   }
   return 0;
 }
-int PS4ABI sys_rename(const char *from, const char *to) {
-  base::String hf = from ? vfs::resolveWritable(from) : base::String();
-  base::String ht = to ? vfs::resolveWritable(to) : base::String();
+int PS4ABI sys_rename(const char* from, const char* to) {
+  base::String hf = from ? vfs::ResolveWritable(from) : base::String();
+  base::String ht = to ? vfs::ResolveWritable(to) : base::String();
   if (!hf.empty() && !ht.empty() && std::rename(hf.c_str(), ht.c_str()) == 0)
     return 0;
   BASE_LOGI("vfs", "rename('{}' -> '{}') ignored (read-only host)",
@@ -550,26 +615,27 @@ int PS4ABI sys_rename(const char *from, const char *to) {
 }
 
 // sys_unlinkat (503): flag bit 0x800 (AT_REMOVEDIR) means rmdir, else unlink.
-int PS4ABI sys_unlinkat(int fd, const char *path, int flag) {
+int PS4ABI sys_unlinkat(int fd, const char* path, int flag) {
   if (flag & 0x800)
     return sys_rmdir(path);
   return sys_unlink(path);
 }
 
 // sys_mkdirat (496): identical to mkdir (the dirfd is always AT_FDCWD here).
-int PS4ABI sys_mkdirat(int fd, const char *path, u32 mode) {
+int PS4ABI sys_mkdirat(int fd, const char* path, u32 mode) {
   return sys_mkdir(path, mode);
 }
 
 // sys_renameat (501): identical to rename (both dirfds are AT_FDCWD here).
-int PS4ABI sys_renameat(int fd_old, const char *old, int fd_new,
-                        const char *new_) {
-  return sys_rename(old, new_);
+int PS4ABI sys_renameat(int fd_old,
+                        const char* old,
+                        int fd_new,
+                        const char* to) {
+  return sys_rename(old, to);
 }
 
-i64 PS4ABI sys_getdirentries(u32 fd, void *buf, size_t nbytes,
-                                 i64 *basep) {
-  auto *d = fdToDevice(fd);
+i64 PS4ABI sys_getdirentries(u32 fd, void* buf, size_t nbytes, i64* basep) {
+  auto* d = FdToDevice(fd);
   if (!d) {
     if (kVfsTrace)
       BASE_LOGI("getdirentries", "fd={} BADF", fd);
@@ -578,9 +644,10 @@ i64 PS4ABI sys_getdirentries(u32 fd, void *buf, size_t nbytes,
   // The kernel validates buflen and returns EINVAL on a negative value.
   if (nbytes == 0)
     return -SysError::eINVAL;
-  i64 r = d->getdents(buf, nbytes);
-  // On success write the next seek offset to *basep; the byte count consumed is the
-  // cookie. Our dirDevice serves all entries on the first call, so it's just the total.
+  i64 r = d->Getdents(buf, nbytes);
+  // On success write the next seek offset to *basep; the byte count consumed is
+  // the cookie. Our DirDevice serves all entries on the first call, so it's
+  // just the total.
   if (r >= 0 && basep)
     *basep = r;
   if (kVfsTrace)
@@ -589,6 +656,8 @@ i64 PS4ABI sys_getdirentries(u32 fd, void *buf, size_t nbytes,
   return r;
 }
 
-int PS4ABI sys_closefrom(u32 lowfd) { return 0; }
+int PS4ABI sys_closefrom(u32 lowfd) {
+  return 0;
+}
 
-} // namespace krnl
+}  // namespace krnl

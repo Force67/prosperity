@@ -8,8 +8,8 @@
  * here would be dropped by the linker.
  */
 
-#include "ipmi.h"
 #include "base/arch.h"
+#include "kern/ipmi/ipmi.h"
 
 namespace krnl::ipmi {
 
@@ -20,11 +20,11 @@ namespace krnl::ipmi {
 // overlaid unless the flag pattern equals its own appId).
 constexpr u32 kForegroundAppId = 0x60000001;
 
-Service &playGoService();
-Service &npManagerService();
-Service &npWebService();
-Service &userService();
-Service &lncService();
-Service &arbitratorIpcService();
+Service& PlayGoService();
+Service& NpManagerService();
+Service& NpWebService();
+Service& UserService();
+Service& LncService();
+Service& ArbitratorIpcService();
 
-} // namespace krnl::ipmi
+}  // namespace krnl::ipmi

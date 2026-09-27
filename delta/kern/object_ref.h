@@ -26,14 +26,14 @@ class ObjectRef {
   explicit ObjectRef(const ObjectRef& right) noexcept {
     Reset(right.get());
     if (value_)
-      value_->retain();
+      value_->Retain();
   }
   template <class V>
     requires(base::ConvertibleTo<V*, T*>)
   ObjectRef(const ObjectRef<V>& right) noexcept {
     Reset(right.get());
     if (value_)
-      value_->retain();
+      value_->Retain();
   }
 
   ObjectRef(ObjectRef&& right) noexcept : value_(right.Release()) {}
@@ -61,7 +61,7 @@ class ObjectRef {
 
   ~ObjectRef() noexcept {
     if (value_) {
-      value_->release();
+      value_->Release();
       value_ = nullptr;
     }
   }

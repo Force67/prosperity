@@ -12,7 +12,7 @@
 
 #include "base/arch.h"
 
-#include "services.h"
+#include "kern/ipmi/services.h"
 
 namespace krnl::ipmi {
 namespace {
@@ -29,19 +29,19 @@ enum {
 constexpr u32 kInternalSignedOut = 1;
 
 struct NpManager : Service {
-  const char *name() const override { return "SceNpMgrIpc"; }
+  const char* Name() const override { return "SceNpMgrIpc"; }
 
-  void invoke(Invocation &inv) override {
-    switch (inv.method()) {
-    case kMgrGetState:
-      inv.replyU32(0, kInternalSignedOut);
-      break;
-    default:
-      // The rest of this daemon's getters share one shape (inputs, then a
-      // single u32 the library hands back). Zero reads as "no value" for all of
-      // them: no account id, no country, no entitlement.
-      inv.replyEmpty();
-      break;
+  void Invoke(Invocation& inv) override {
+    switch (inv.Method()) {
+      case kMgrGetState:
+        inv.ReplyU32(0, kInternalSignedOut);
+        break;
+      default:
+        // The rest of this daemon's getters share one shape (inputs, then a
+        // single u32 the library hands back). Zero reads as "no value" for all
+        // of them: no account id, no country, no entitlement.
+        inv.ReplyEmpty();
+        break;
     }
   }
 };
@@ -51,15 +51,19 @@ struct NpManager : Service {
 // reply is exactly "nothing pending", but the buffers must still be written,
 // though, or the caller reads whatever was on its stack.
 struct NpWeb : Service {
-  const char *name() const override { return "SceNpService"; }
+  const char* Name() const override { return "SceNpService"; }
 };
 
-NpManager g_npManager;
-NpWeb g_npWeb;
+NpManager g_np_manager;
+NpWeb g_np_web;
 
-} // namespace
+}  // namespace
 
-Service &npManagerService() { return g_npManager; }
-Service &npWebService() { return g_npWeb; }
+Service& NpManagerService() {
+  return g_np_manager;
+}
+Service& NpWebService() {
+  return g_np_web;
+}
 
-} // namespace krnl::ipmi
+}  // namespace krnl::ipmi

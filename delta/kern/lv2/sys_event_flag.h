@@ -8,18 +8,18 @@
  * in the root of the source tree.
  */
 
-#include <guest_abi.h>
 #include "base/arch.h"
+#include "guest_abi.h"
 
+#include "base/atomic.h"
+#include "base/containers/vector.h"
+#include "base/strings/xstring.h"
+#include "base/threading/condition_variable.h"
+#include "base/threading/mutex.h"
 #include "kern/object.h"
-#include <base/atomic.h>
-#include <base/containers/vector.h>
-#include <base/strings/xstring.h>
-#include <base/threading/condition_variable.h>
-#include <base/threading/mutex.h>
 
 namespace krnl {
-class proc;
+class Proc;
 
 // Kernel event-flag attr / wait-mode bits. The attr is a persistent default
 // stored on the object; the mode is supplied per wait/trywait call. Both share
@@ -29,10 +29,11 @@ class proc;
 //   0x0010  CLEAR_ALL: clear every bit on a successful wait
 //   0x0020  CLEAR_PAT: clear only the waited-for bits on success
 //   0x0100  SHARED: publish in the global name table (cross-process open)
-//   0x1000  (internal) destroyed/cancelling marker, checked by evf_wait/osem_wait
-// The kernel rejects: attr/mode with both AND and OR (bits & 3 == 3), both clear
-// modes (bits & 0x30 == 0x30), or any bit outside the 0x133 mask.
-enum evfAttr : u32 {
+//   0x1000  (internal) destroyed/cancelling marker, checked by
+//   evf_wait/osem_wait
+// The kernel rejects: attr/mode with both AND and OR (bits & 3 == 3), both
+// clear modes (bits & 0x30 == 0x30), or any bit outside the 0x133 mask.
+enum EvfAttr : u32 {
   kEvfAnd = 0x01,
   kEvfOr = 0x02,
   kEvfClearAll = 0x10,
@@ -50,38 +51,39 @@ enum evfAttr : u32 {
 //   +0x4c  uint32  nwaiters
 //   +0x50  uint32  is_shared
 //   +0x54  uint32  proc_type
-// We model it with host primitives (base::Mutex/cv) rather than the exact layout.
+// We model it with host primitives (base::Mutex/cv) rather than the exact
+// layout.
 
-// SCE event flag: a 64-bit bitmask threads wait on (AND/OR a pattern) and others
-// set/clear. This is a core thread-sync primitive; with it stubbed, waiters
-// never block and read producer state before it is built (garbage / crashes).
-class eventFlag : public kObject {
-public:
+// SCE event flag: a 64-bit bitmask threads wait on (AND/OR a pattern) and
+// others set/clear. This is a core thread-sync primitive; with it stubbed,
+// waiters never block and read producer state before it is built (garbage /
+// crashes).
+class EventFlag : public Object {
+ public:
   // `sticky` bits are re-asserted after every clear: used for system focus/
   // ready flags the (absent) ShellCore would keep set, so a game that polls
   // them with clear-on-wait stays "focused" instead of latching off.
-  eventFlag(objectTable &objects, const char *name, u64 init, u64 sticky = 0);
+  EventFlag(ObjectTable& objects, const char* name, u64 init, u64 sticky = 0);
 
-  // Wait until the bits satisfy pattern per mode (AND=all, OR=any). Blocks up to
-  // *timeoutUs micros (null = forever). Writes the matched bits to *result, then
-  // applies the clear mode. Returns 0 or -errno.
-  int wait(u64 pattern, u32 mode, u64 *result,
-           u32 *timeoutUs);
-  int trywait(u64 pattern, u32 mode, u64 *result);
-  void set(u64 bits);
-  void clear(u64 bits);
+  // Wait until the bits satisfy pattern per mode (AND=all, OR=any). Blocks up
+  // to *timeoutUs micros (null = forever). Writes the matched bits to *result,
+  // then applies the clear mode. Returns 0 or -errno.
+  int Wait(u64 pattern, u32 mode, u64* result, u32* timeout_us);
+  int Trywait(u64 pattern, u32 mode, u64* result);
+  void Set(u64 bits);
+  void Clear(u64 bits);
   // Wake every waiter; returns how many were released. The woken threads see
   // an error status (not a match), matching kernel evf_cancel semantics.
-  int cancel(u64 pattern);
+  int Cancel(u64 pattern);
 
-  const base::String &fname() const { return name; }
+  const base::String& fname() const { return name_; }
 
   // Tid of the last set() caller: lets trywait detect the request/response
   // handshake pattern (this thread just posted a request bit and now polls for
   // the responder's done bit). See sys_evf_trywait.
-  base::Atomic<long> lastSetTid{0};
+  base::Atomic<long> last_set_tid{0};
 
-private:
+ private:
   struct Waiter {
     u64 pattern;
     u32 mode;
@@ -90,32 +92,31 @@ private:
     bool cancelled = false;
   };
 
-  bool satisfied(u64 pattern, u32 mode) const;
-  int take(u64 pattern, u32 mode, u64 *result);
-  void removeWaiter(Waiter *waiter);
+  bool Satisfied(u64 pattern, u32 mode) const;
+  int Take(u64 pattern, u32 mode, u64* result);
+  void RemoveWaiter(Waiter* waiter);
 
-  base::Mutex m;
-  base::ConditionVariable cv;
-  base::Vector<Waiter *> waiters;
-  u64 bits;
-  u64 sticky;
+  base::Mutex m_;
+  base::ConditionVariable cv_;
+  base::Vector<Waiter*> waiters_;
+  u64 bits_;
+  u64 sticky_;
 };
 
 // Set `bits` on the first named event flag whose name contains `substr`.
 // Returns false if no such flag exists (yet). Unlike the syscalls this takes no
 // handle and touches no object table, so a HOST thread with no guest proc (the
 // audio daemon stand-in, kern/ps4/audio_daemon.cc) can signal a guest flag.
-bool evfSetByNameSubstr(const char *substr, u64 bits);
+bool EvfSetByNameSubstr(const char* substr, u64 bits);
 
-int PS4ABI sys_evf_create(const char *name, u32 attr, u64 initPattern);
+int PS4ABI sys_evf_create(const char* name, u32 attr, u64 init_pattern);
 int PS4ABI sys_evf_delete(int id);
-int PS4ABI sys_evf_open(const char *name);
+int PS4ABI sys_evf_open(const char* name);
 int PS4ABI sys_evf_close(int id);
-int PS4ABI sys_evf_wait(int id, u64 pattern, u32 mode,
-                        u64 *result, u32 *timeoutUs);
-int PS4ABI sys_evf_trywait(int id, u64 pattern, u32 mode,
-                           u64 *result);
+int PS4ABI
+sys_evf_wait(int id, u64 pattern, u32 mode, u64* result, u32* timeout_us);
+int PS4ABI sys_evf_trywait(int id, u64 pattern, u32 mode, u64* result);
 int PS4ABI sys_evf_set(int id, u64 bits);
 int PS4ABI sys_evf_clear(int id, u64 bits);
-int PS4ABI sys_evf_cancel(int id, u64 pattern, int *numWaiters);
+int PS4ABI sys_evf_cancel(int id, u64 pattern, int* num_waiters);
 }  // namespace krnl

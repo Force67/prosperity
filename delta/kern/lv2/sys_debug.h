@@ -8,5 +8,4 @@
  * in the root of the source tree.
  */
 
-
 namespace krnl {}

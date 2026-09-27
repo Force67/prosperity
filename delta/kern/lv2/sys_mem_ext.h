@@ -8,39 +8,45 @@
  * in the root of the source tree.
  */
 
-#include <guest_abi.h>
 #include "base/arch.h"
+#include "guest_abi.h"
 
 namespace krnl {
 /* POSIX-ish memory lifecycle (we run on a flat host-backed VM; teardown is a
  * no-op since the host reclaims everything at process exit) */
-int PS4ABI sys_munmap(void *addr, size_t len);
-i64 PS4ABI sys_obreak(void *addr);
+int PS4ABI sys_munmap(void* addr, size_t len);
+i64 PS4ABI sys_obreak(void* addr);
 i64 PS4ABI sys_sbrk(intptr_t incr);
-int PS4ABI sys_msync(void *addr, size_t len, int flags);
-int PS4ABI sys_madvise(void *addr, size_t len, int behav);
-int PS4ABI sys_mincore(void *addr, size_t len, char *vec);
-int PS4ABI sys_mlock(const void *addr, size_t len);
-int PS4ABI sys_munlock(const void *addr, size_t len);
+int PS4ABI sys_msync(void* addr, size_t len, int flags);
+int PS4ABI sys_madvise(void* addr, size_t len, int behav);
+int PS4ABI sys_mincore(void* addr, size_t len, char* vec);
+int PS4ABI sys_mlock(const void* addr, size_t len);
+int PS4ABI sys_munlock(const void* addr, size_t len);
 int PS4ABI sys_mlockall(int how);
 int PS4ABI sys_munlockall();
-int PS4ABI sys_minherit(void *addr, size_t len, int inherit);
+int PS4ABI sys_minherit(void* addr, size_t len, int inherit);
 
 /* Sony memory-introspection syscalls */
-int PS4ABI sys_query_memory_protection(void *addr, void *info);
-int PS4ABI sys_virtual_query(const void *addr, int flags, void *info,
-                             size_t infoSize);
+int PS4ABI sys_query_memory_protection(void* addr, void* info);
+int PS4ABI sys_virtual_query(const void* addr,
+                             int flags,
+                             void* info,
+                             size_t info_size);
 
 /* Sony direct-memory / vm-map management (largely stubbed) */
-int PS4ABI sys_batch_map(u32 handle, u32 flags, void *entries,
-                         int count, int *processed);
+int PS4ABI
+sys_batch_map(u32 handle, u32 flags, void* entries, int count, int* processed);
 int PS4ABI sys_set_vm_container(u32 container);
-i64 PS4ABI sys_mmap_dmem(void *addr, size_t len, int prot, int flags,
-                             i64 packed, i64 physOffset);
-int PS4ABI sys_cpuset(void *out, int level, int which, i64 id, size_t size,
-                      void *mask);
+i64 PS4ABI sys_mmap_dmem(void* addr,
+                         size_t len,
+                         int prot,
+                         int flags,
+                         i64 packed,
+                         i64 phys_offset);
+int PS4ABI
+sys_cpuset(void* out, int level, int which, i64 id, size_t size, void* mask);
 int PS4ABI sys_extend_page_table_pool();
 i64 PS4ABI sys_get_vm_map_timestamp();
-int PS4ABI sys_get_map_statistics(void *info);
-int PS4ABI sys_free_stack(void *addr, size_t len);
-}
+int PS4ABI sys_get_map_statistics(void* info);
+int PS4ABI sys_free_stack(void* addr, size_t len);
+}  // namespace krnl

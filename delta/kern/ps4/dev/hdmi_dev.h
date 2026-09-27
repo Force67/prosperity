@@ -1,20 +1,20 @@
 #pragma once
 
-#include "device.h"
 #include "base/arch.h"
+#include "kern/ps4/dev/device.h"
 
 namespace krnl {
-class proc;
+class Proc;
 
 // /dev/hdmi: the HDMI output controller (EDID/HDCP link state). System-only;
 // games negotiate display through the gc device. Registers so an open
 // succeeds; commands soft-succeed.
-class hdmiDevice : public device {
-public:
-  hdmiDevice(objectTable &objects);
+class HdmiDevice : public Device {
+ public:
+  HdmiDevice(ObjectTable& objects);
 
-  i32 ioctl(u32 command, void *args) override;
-  i64 lseek(i64, int) override;
-  int fstat(void *stat) override;
+  i32 Ioctl(u32 command, void* args) override;
+  i64 Lseek(i64, int) override;
+  int Fstat(void* stat) override;
 };
-} // namespace krnl
+}  // namespace krnl

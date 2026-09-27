@@ -3,45 +3,45 @@
 // based off:
 // https://github.com/xenia-project/xenia/blob/master/src/xenia/kernel/util/object_table.h
 
-#include <logger/logger.h>
 #include "base/arch.h"
-#include <kern/object_ref.h>
+#include "kern/object_ref.h"
+#include "logger/logger.h"
 
+#include "base/threading/recursive_mutex.h"
 #include "kern/object.h"
-#include <base/threading/recursive_mutex.h>
 
 namespace krnl {
-class kObject;
+class Object;
 
-class objectTable {
-public:
-  objectTable();
-  ~objectTable();
+class ObjectTable {
+ public:
+  ObjectTable();
+  ~ObjectTable();
 
-  void reset();
-  void purge();
-  bool add(kObject *, u32 &);
-  bool remove(u32);
-  bool release(u32);
-  bool keep(u32);
-  kObject *get(u32);
+  void Reset();
+  void Purge();
+  bool Add(Object*, u32&);
+  bool Remove(u32);
+  bool Release(u32);
+  bool Keep(u32);
+  Object* Get(u32);
 
-private:
-  bool resize(u32 newCap);
-  bool findSlot(u32 &out);
+ private:
+  bool Resize(u32 new_cap);
+  bool FindSlot(u32& out);
 
   // recursive: release() holds the lock and calls remove(), which re-locks.
-  base::RecursiveMutex omutex;
+  base::RecursiveMutex omutex_;
 
-  struct entry {
-    int refCount = 0;
-    kObject *obj = nullptr;
+  struct Entry {
+    int ref_count = 0;
+    Object* obj = nullptr;
   };
 
-  entry *findEntry(u32);
+  Entry* FindEntry(u32);
 
-  u32 tableCap = 0;
-  u32 lastFreeEntry = 0;
-  entry *table = nullptr;
+  u32 table_cap_ = 0;
+  u32 last_free_entry_ = 0;
+  Entry* table_ = nullptr;
 };
-}
+}  // namespace krnl

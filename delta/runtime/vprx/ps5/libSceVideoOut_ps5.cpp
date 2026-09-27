@@ -26,7 +26,7 @@
 #include "kern/lv2/sys_event.h"
 #include <host_memory/host_memory.h>
 
-#include "kern/lv2/sys_mem.h"  // allocLowGuest
+#include "kern/lv2/sys_mem.h"  // AllocLowGuest
 #include <options/options.h>
 #include <base/atomic.h>
 #include <base/threading/lock_guard.h>
@@ -118,7 +118,7 @@ VideoPort g_port;  // dedicated PS5 port state
 // write host .bss.
 u64 *videoLabels() {
   static u64 *labels =
-      reinterpret_cast<u64 *>(krnl::allocLowGuest(16 * sizeof(u64)));
+      reinterpret_cast<u64 *>(krnl::AllocLowGuest(16 * sizeof(u64)));
   return labels;
 }
 
@@ -141,12 +141,12 @@ bool ensureGfx(u32 w, u32 h) {
   return true;
 }
 
-equeue *findEqueue(int handle) {
-  auto *p = proc::getActive();
+Equeue *findEqueue(int handle) {
+  auto *p = Proc::GetActive();
   if (!p) return nullptr;
-  auto *obj = p->getObjTable().get(static_cast<u32>(handle));
-  if (!obj || obj->type() != kObject::oType::equeue) return nullptr;
-  return static_cast<equeue *>(obj);
+  auto *obj = p->GetObjTable().Get(static_cast<u32>(handle));
+  if (!obj || obj->type() != Object::OType::kEqueue) return nullptr;
+  return static_cast<Equeue *>(obj);
 }
 
 base::Atomic<bool> g_flipPumpStarted{false};
@@ -171,7 +171,7 @@ void startFlipPump() {
         u64 *labels = videoLabels();
         for (int i = 0; i < 16; i++) labels[i] = 1;
       }
-      triggerAllEqueues(kEventFlip, kFilterFlip, static_cast<i64>(c));
+      TriggerAllEqueues(kEventFlip, kFilterFlip, static_cast<i64>(c));
     }
   });
 }
@@ -283,14 +283,14 @@ int PS4ABI vAddFlipEvent(int eqHandle, int, void *udata) {
   if (!eq) return -1;
   g_port.flipEqueue = eqHandle;
   g_port.flipUdata = udata;
-  eq->addEvent(static_cast<u64>(kEventFlip), kFilterFlip, udata);
+  eq->AddEvent(static_cast<u64>(kEventFlip), kFilterFlip, udata);
   startFlipPump();
   return 0;
 }
 
 int PS4ABI vDeleteFlipEvent(int eqHandle, int) {
   auto *eq = findEqueue(eqHandle);
-  if (eq) eq->removeEvent(static_cast<u64>(kEventFlip), kFilterFlip);
+  if (eq) eq->RemoveEvent(static_cast<u64>(kEventFlip), kFilterFlip);
   g_port.flipEqueue = -1;
   return 0;
 }
@@ -300,7 +300,7 @@ int PS4ABI vAddVblankEvent(int eqHandle, int, void *udata) {
   if (!eq) return -1;
   g_port.vblankEqueue = eqHandle;
   g_port.vblankUdata = udata;
-  eq->addEvent(static_cast<u64>(kEventVblank), kFilterVblank, udata);
+  eq->AddEvent(static_cast<u64>(kEventVblank), kFilterVblank, udata);
   return 0;
 }
 
@@ -357,7 +357,7 @@ int PS4ABI vSubmitFlip(int, int bufferIndex, int, i64 flipArg) {
   }
   if (eqHandle >= 0)
     if (auto *eq = findEqueue(eqHandle))
-      eq->trigger(kEventFlip, kFilterFlip,
+      eq->Trigger(kEventFlip, kFilterFlip,
                   static_cast<i64>(g_port.flipCount.load()));
   return 0;
 }
@@ -390,7 +390,7 @@ int PS4ABI vSubmitFlipEop(int, int bufferIndex, int, i64 flipArg,
   g_port.flipCount.fetch_add(1);
   if (eqHandle >= 0)
     if (auto *eq = findEqueue(eqHandle))
-      eq->trigger(kEventFlip, kFilterFlip,
+      eq->Trigger(kEventFlip, kFilterFlip,
                   static_cast<i64>(g_port.flipCount.load()));
   return 0;
 }

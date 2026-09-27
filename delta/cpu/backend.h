@@ -27,7 +27,7 @@
 #include "base/containers/vector.h"
 
 namespace krnl {
-struct moduleInfo;
+struct ModuleInfo;
 }
 
 namespace cpu {
@@ -35,7 +35,7 @@ namespace cpu {
 // Magic syscall on the FEX path bridging the guest dynamic-TLS resolver to host
 // HLE (the native path patches __tls_get_addr directly; a host jump is invalid
 // inside the x86 JIT, so FEX patches a `mov eax,<this>; syscall; ret` stub
-// dispatched in HandleSyscall -> krnl::guest_tls_get_addr). Above any real PS4
+// dispatched in HandleSyscall -> krnl::GuestTlsGetAddr). Above any real PS4
 // syscall number.
 constexpr u32 kTlsGetAddrSyscall = 0x40000001u;
 
@@ -51,7 +51,7 @@ class Backend {
 
   // Once per module, after segments are copied and before protections finalize.
   // Native: no-op. FEX: register the executable range with the JIT.
-  virtual void OnImageMapped(krnl::moduleInfo& info) = 0;
+  virtual void OnImageMapped(krnl::ModuleInfo& info) = 0;
 
   // Create a guest thread object without running it. MUST be called on the
   // PARENT thread: FEX serializes creation against running threads, and

@@ -10,12 +10,12 @@
 #include "base/arch.h"
 
 namespace krnl {
-struct nameNode {
+struct NameNode {
   u32 id;
-  const char *name;
+  const char* name;
 };
 
-static const nameNode syscall_names[] = {
+static const NameNode kSyscallNames[] = {
     {0, "sys_nosys"},
     {1, "sys_exit"},
     {2, "sys_fork"},
@@ -641,15 +641,15 @@ static const nameNode syscall_names[] = {
     {677, "get_phys_page_size"},
 };
 
-const char *syscall_getname(u32 idx) {
-  if (idx >= sizeof(syscall_names))
+const char* SyscallGetname(u32 idx) {
+  if (idx >= sizeof(kSyscallNames))
     return nullptr;
 
-  for (auto &e : syscall_names) {
+  for (auto& e : kSyscallNames) {
     if (e.id == idx)
       return e.name;
   }
 
   return nullptr;
 }
-} // namespace krnl
+}  // namespace krnl

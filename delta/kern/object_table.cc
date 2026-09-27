@@ -1,81 +1,83 @@
 
 #include <cstring>
 
+#include "base/algorithm.h"
 #include "base/arch.h"
-#include "object_table.h"
-#include <logger/logger.h>
-#include <base/algorithm.h>
-#include <base/math/value_bounds.h>
-#include <base/threading/lock_guard.h>
+#include "base/math/value_bounds.h"
+#include "base/threading/lock_guard.h"
+#include "kern/object_table.h"
+#include "logger/logger.h"
 
 namespace krnl {
-objectTable::objectTable() {}
+ObjectTable::ObjectTable() {}
 
-objectTable::~objectTable() { reset(); }
+ObjectTable::~ObjectTable() {
+  Reset();
+}
 
-void objectTable::reset() {
-  base::LockGuard lock(omutex);
+void ObjectTable::Reset() {
+  base::LockGuard lock(omutex_);
 
   // Release all objects.
-  for (u32 n = 0; n < tableCap; n++) {
-    auto &entry = table[n];
+  for (u32 n = 0; n < table_cap_; n++) {
+    auto& entry = table_[n];
     if (entry.obj)
-      entry.obj->release();
+      entry.obj->Release();
   }
 
-  tableCap = 0;
-  lastFreeEntry = 0;
+  table_cap_ = 0;
+  last_free_entry_ = 0;
 
-  if (table) {
-    free(table);
-    table = nullptr;
+  if (table_) {
+    free(table_);
+    table_ = nullptr;
   }
 }
 
-void objectTable::purge() {
-  base::LockGuard lock(omutex);
+void ObjectTable::Purge() {
+  base::LockGuard lock(omutex_);
 
-  for (u32 slot = 0; slot < tableCap; slot++) {
-    auto &entry = table[slot];
+  for (u32 slot = 0; slot < table_cap_; slot++) {
+    auto& entry = table_[slot];
     if (entry.obj) {
-      entry.refCount = 0;
-      entry.obj->release();
+      entry.ref_count = 0;
+      entry.obj->Release();
       entry.obj = nullptr;
     }
   }
 }
 
-bool objectTable::resize(u32 newCap) {
-  u32 new_size = newCap * sizeof(entry);
-  u32 old_size = tableCap * sizeof(entry);
+bool ObjectTable::Resize(u32 new_cap) {
+  u32 new_size = new_cap * sizeof(Entry);
+  u32 old_size = table_cap_ * sizeof(Entry);
 
-  auto new_table = reinterpret_cast<entry *>(realloc(table, new_size));
+  auto new_table = reinterpret_cast<Entry*>(realloc(table_, new_size));
   if (!new_table)
     return false;
 
   // Zero out new entries.
   if (new_size > old_size)
-    std::memset(reinterpret_cast<u8 *>(new_table) + old_size, 0,
+    std::memset(reinterpret_cast<u8*>(new_table) + old_size, 0,
                 new_size - old_size);
 
-  lastFreeEntry = tableCap;
-  tableCap = newCap;
-  table = new_table;
+  last_free_entry_ = table_cap_;
+  table_cap_ = new_cap;
+  table_ = new_table;
 
   return true;
 }
 
-bool objectTable::findSlot(u32 &out) {
-  u32 slot = lastFreeEntry;
+bool ObjectTable::FindSlot(u32& out) {
+  u32 slot = last_free_entry_;
   u32 scan_count = 0;
-  while (scan_count < tableCap) {
-    auto &entry = table[slot];
+  while (scan_count < table_cap_) {
+    auto& entry = table_[slot];
     if (!entry.obj) {
       out = slot;
       return true;
     }
     scan_count++;
-    slot = (slot + 1) % tableCap;
+    slot = (slot + 1) % table_cap_;
     if (slot == 0) {
       // Never allow 0 handles.
       scan_count++;
@@ -84,123 +86,122 @@ bool objectTable::findSlot(u32 &out) {
   }
 
   // Table out of slots, expand.
-  u32 new_table_capacity = base::Max(16 * 1024u, tableCap * 2);
-  if (!resize(new_table_capacity)) {
+  u32 new_table_capacity = base::Max(16 * 1024u, table_cap_ * 2);
+  if (!Resize(new_table_capacity)) {
     LOG_ERROR("unable to resize handle table");
     return false;
   }
 
   // Never allow 0 handles.
-  slot = ++lastFreeEntry;
+  slot = ++last_free_entry_;
   out = slot;
 
   return true;
 }
 
-objectTable::entry *objectTable::findEntry(u32 handle) {
+ObjectTable::Entry* ObjectTable::FindEntry(u32 handle) {
   u32 slot = handle >> 2;
 
-  if (slot < tableCap)
-    return &table[slot];
+  if (slot < table_cap_)
+    return &table_[slot];
 
   return nullptr;
 }
 
-bool objectTable::keep(u32 handle) {
-  base::LockGuard lock(omutex);
+bool ObjectTable::Keep(u32 handle) {
+  base::LockGuard lock(omutex_);
 
-  auto *e = findEntry(handle);
+  auto* e = FindEntry(handle);
   if (e) {
-    e->refCount++;
+    e->ref_count++;
     return true;
   }
 
   return false;
 }
 
-bool objectTable::add(kObject *obj, u32 &handleOut) {
-  base::LockGuard lock(omutex);
+bool ObjectTable::Add(Object* obj, u32& handle_out) {
+  base::LockGuard lock(omutex_);
 
   u32 slot = 0, handle = 0;
 
-  bool result = findSlot(slot);
+  bool result = FindSlot(slot);
   if (result) {
-
     // stash
-    auto &entry = table[slot];
+    auto& entry = table_[slot];
     entry.obj = obj;
-    entry.refCount = 1;
+    entry.ref_count = 1;
 
     handle = slot << 2;
     obj->handles().push_back(handle);
 
     // Retain so long as the object is in the table.
-    obj->retain();
+    obj->Retain();
 
-    handleOut = handle;
+    handle_out = handle;
     return true;
   }
 
-  handleOut = -1;
+  handle_out = -1;
   return false;
 }
 
-bool objectTable::remove(u32 handle) {
-  base::LockGuard lock(omutex);
+bool ObjectTable::Remove(u32 handle) {
+  base::LockGuard lock(omutex_);
 
-  auto *e = findEntry(handle);
+  auto* e = FindEntry(handle);
   if (e && e->obj) {
-    auto *object = e->obj;
+    auto* object = e->obj;
     e->obj = nullptr;
-    e->refCount = 0;
+    e->ref_count = 0;
 
-    auto &handles = object->handles();
+    auto& handles = object->handles();
 
     auto it = base::Find(handles.begin(), handles.end(), handle);
     if (it != handles.end())
       handles.erase(it);
 
-    object->release();
+    object->Release();
     return true;
   }
 
   return false;
 }
 
-bool objectTable::release(u32 handle) {
-  base::LockGuard lock(omutex);
+bool ObjectTable::Release(u32 handle) {
+  base::LockGuard lock(omutex_);
 
-  auto *e = findEntry(handle);
+  auto* e = FindEntry(handle);
   if (!e) {
     return false;
   }
 
-  if (--e->refCount == 0)
-    return remove(handle);
+  if (--e->ref_count == 0)
+    return Remove(handle);
 
   return true;
 }
 
-kObject *objectTable::get(u32 handle) {
-  base::LockGuard lock(omutex);
+Object* ObjectTable::Get(u32 handle) {
+  base::LockGuard lock(omutex_);
 
   // Lower 2 bits are ignored.
   u32 slot = handle >> 2;
-  kObject *obj = nullptr;
+  Object* obj = nullptr;
 
   // Verify slot.
-  if (slot < tableCap) {
-    auto &entry = table[slot];
+  if (slot < table_cap_) {
+    auto& entry = table_[slot];
     if (entry.obj)
       obj = entry.obj;
   }
 
   // Retain the object pointer.
   if (obj) {
-    obj->retain();
+    obj->Retain();
     return obj;
   }
 
   return nullptr;
 }
-} // namespace krnl
+}  // namespace krnl

@@ -2,26 +2,26 @@
 
 // PS5 /dev/dmem device. The physical-offset bump-allocator ioctls are identical
 // to PS4 (both platforms call sceKernelAllocateDirectMemory), so this inherits
-// the shared dmaDevice; only the mapping diverges: PS5 backs each mapping with the
-// shared physical-dmem memfd (MAP_SHARED) so a CPU-written GPU command buffer and
-// the command processor's view of it alias one physOffset. PS4 has no such backing
-// (its map falls back to the anonymous path).
+// the shared DmaDevice; only the mapping diverges: PS5 backs each mapping with
+// the shared physical-dmem memfd (MAP_SHARED) so a CPU-written GPU command
+// buffer and the command processor's view of it alias one physOffset. PS4 has
+// no such backing (its map falls back to the anonymous path).
 
-#include "kern/ps4/dev/dma_dev.h"
 #include "base/arch.h"
+#include "kern/ps4/dev/dma_dev.h"
 
 namespace krnl {
-class proc;
+class Proc;
 
 // Forget the direct-memory mapping recorded at this VA range. sys_munmap calls
 // it so an explicit unmap-then-map reads as a fresh allocation, while a map
 // straight onto a live mapping's base stays a re-point and keeps its contents.
-void forgetDmemVa(u8 *ptr, size_t size);
+void ForgetDmemVa(u8* ptr, size_t size);
 
-class dmaDevicePs5 : public dmaDevice {
-public:
-  dmaDevicePs5(objectTable &objects) : dmaDevice(objects) {}
+class DmaDevicePs5 : public DmaDevice {
+ public:
+  DmaDevicePs5(ObjectTable& objects) : DmaDevice(objects) {}
 
-  u8 *map(void *, size_t, u32, u32, size_t) override;
+  u8* Map(void*, size_t, u32, u32, size_t) override;
 };
 }  // namespace krnl

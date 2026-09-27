@@ -1,9 +1,9 @@
-#include "hardware_mode.h"
+#include "kern/ps4/hardware_mode.h"
 #include "base/arch.h"
 
 #include <cstdlib>
-#include <options/options.h>
-#include <base/atomic.h>
+#include "base/atomic.h"
+#include "options/options.h"
 
 namespace krnl::ps4 {
 
@@ -11,42 +11,42 @@ DELTA_OPTION(bool, kNeoMode, "DELTA_PS4_NEO", false);
 
 namespace {
 
-constexpr HardwareModeProfile kBaseProfile{HardwareMode::base, 0x710f10};
-constexpr HardwareModeProfile kNeoProfile{HardwareMode::neo, 0x740f30};
-base::Atomic<u32> g_titleAttributes{0};
+constexpr HardwareModeProfile kBaseProfile{HardwareMode::kBase, 0x710f10};
+constexpr HardwareModeProfile kNeoProfile{HardwareMode::kNeo, 0x740f30};
+base::Atomic<u32> g_title_attributes{0};
 
-} // namespace
+}  // namespace
 
-const HardwareModeProfile &hardwareModeProfile() {
-  static const HardwareModeProfile *const profile =
+const HardwareModeProfile& GetHardwareModeProfile() {
+  static const HardwareModeProfile* const kProfile =
       kNeoMode ? &kNeoProfile : &kBaseProfile;
-  return *profile;
+  return *kProfile;
 }
 
-void setTitleAttributes(u32 attributes) {
-  g_titleAttributes.store(attributes, base::memory_order_release);
+void SetTitleAttributes(u32 attributes) {
+  g_title_attributes.store(attributes, base::memory_order_release);
 }
 
-u32 titleAttributes() {
-  return g_titleAttributes.load(base::memory_order_acquire);
+u32 TitleAttributes() {
+  return g_title_attributes.load(base::memory_order_acquire);
 }
 
-u32 cpuMode() {
-  const u32 attributes = titleAttributes();
-  const bool sixCpu = attributes & (1u << 15);
-  const bool sevenCpu = attributes & (1u << 16);
-  if (sixCpu && sevenCpu)
+u32 CpuMode() {
+  const u32 attributes = TitleAttributes();
+  const bool six_cpu = attributes & (1u << 15);
+  const bool seven_cpu = attributes & (1u << 16);
+  if (six_cpu && seven_cpu)
     return 2;
-  return sevenCpu ? 5 : 0;
+  return seven_cpu ? 5 : 0;
 }
 
-bool isNeoMode() {
-  return hardwareModeProfile().mode == HardwareMode::neo &&
-         (titleAttributes() & (1u << 23));
+bool IsNeoMode() {
+  return GetHardwareModeProfile().mode == HardwareMode::kNeo &&
+         (TitleAttributes() & (1u << 23));
 }
 
-const char *gnmDriverModule() {
-  return isNeoMode() ? "libSceGnmDriverForNeoMode" : "libSceGnmDriver";
+const char* GnmDriverModule() {
+  return IsNeoMode() ? "libSceGnmDriverForNeoMode" : "libSceGnmDriver";
 }
 
-} // namespace krnl::ps4
+}  // namespace krnl::ps4

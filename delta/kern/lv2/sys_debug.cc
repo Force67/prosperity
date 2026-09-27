@@ -7,7 +7,6 @@
  * in the root of the source tree.
  */
 
-
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif

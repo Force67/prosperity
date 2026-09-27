@@ -8,8 +8,8 @@
  * in the root of the source tree.
  */
 
-#include <guest_abi.h>
 #include "base/arch.h"
+#include "guest_abi.h"
 
 namespace krnl {
 
@@ -19,7 +19,7 @@ int PS4ABI sys_jitshm_alias();
 int PS4ABI sys_dl_get_list();
 int PS4ABI sys_dl_get_info();
 int PS4ABI sys_dl_notify_event();
-int PS4ABI sys_debug_init(const int *version);
+int PS4ABI sys_debug_init(const int* version);
 int PS4ABI sys_suspend_process();
 int PS4ABI sys_resume_process();
 int PS4ABI sys_prepare_to_suspend_process();
@@ -53,11 +53,11 @@ int PS4ABI sys_eport_open();
 int PS4ABI sys_eport_close();
 int PS4ABI sys_dynlib_dlclose();
 int PS4ABI sys_dynlib_prepare_dlclose();
-int PS4ABI sys_sandbox_path(const char *path);
+int PS4ABI sys_sandbox_path(const char* path);
 int PS4ABI sys_rdup();
 int PS4ABI sys_dl_get_metadata();
 int PS4ABI sys_is_development_mode();
-int PS4ABI sys_get_self_auth_info(const char *path, void *out);
+int PS4ABI sys_get_self_auth_info(const char* path, void* out);
 int PS4ABI sys_get_paging_stats_of_all_threads();
 int PS4ABI sys_get_paging_stats_of_all_objects();
 int PS4ABI sys_get_resident_count();
@@ -74,14 +74,12 @@ int PS4ABI sys_set_phys_fmem_limit();
 int PS4ABI sys_set_uevt();
 int PS4ABI sys_set_chicken_switches();
 int PS4ABI sys_unk645();
-int PS4ABI sys_get_kernel_mem_statistics(void *out);
+int PS4ABI sys_get_kernel_mem_statistics(void* out);
 int PS4ABI sys_get_sdk_compiled_version();
 int PS4ABI sys_app_state_change();
-i64 PS4ABI sys_blockpool_map(i64 pool, size_t len, u32 prot,
-                                 u32 flags);
+i64 PS4ABI sys_blockpool_map(i64 pool, size_t len, u32 prot, u32 flags);
 int PS4ABI sys_blockpool_unmap();
-i64 PS4ABI sys_blockpool_batch(u64 a0, u64 a1, u64 a2,
-                                   u64 a3, u64 a4, u64 a5);
+i64 PS4ABI sys_blockpool_batch(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
 int PS4ABI sys_dynlib_get_info_for_libdbg();
 int PS4ABI sys_dynlib_get_list_for_libdbg();
 int PS4ABI sys_dynlib_get_list2();
@@ -94,25 +92,25 @@ int PS4ABI sys_get_bio_usage_all();
 int PS4ABI sys_aio_init();
 
 /* --- leftover POSIX --- */
-int PS4ABI sys_getgroups(int gidsetlen, u32 *gidset);
+int PS4ABI sys_getgroups(int gidsetlen, u32* gidset);
 int PS4ABI sys_setgroups();
 int PS4ABI sys_setpriority();
 int PS4ABI sys_getpriority();
 int PS4ABI sys_setsockopt();
-int PS4ABI sys_getsockopt(int fd, int level, int name, void *val, u32 *len);
+int PS4ABI sys_getsockopt(int fd, int level, int name, void* val, u32* len);
 int PS4ABI sys_sync();
 int PS4ABI sys_getpagesize();
 int PS4ABI sys_flock();
 int PS4ABI sys_utimes();
 int PS4ABI sys_futimes();
-int PS4ABI sys_pathconf(const char *path, int name);
+int PS4ABI sys_pathconf(const char* path, int name);
 int PS4ABI sys_fpathconf(int fd, int name);
-int PS4ABI sys_lpathconf(const char *path, int name);
+int PS4ABI sys_lpathconf(const char* path, int name);
 int PS4ABI sys_sigqueue();
-int PS4ABI sys_abort2(const char *msg, int nargs, void **args);
+int PS4ABI sys_abort2(const char* msg, int nargs, void** args);
 int PS4ABI sys_thr_sleep();
 int PS4ABI sys_thr_wakeup();
 int PS4ABI sys_posix_fallocate();
 int PS4ABI sys_posix_fadvise();
 
-} // namespace krnl
+}  // namespace krnl

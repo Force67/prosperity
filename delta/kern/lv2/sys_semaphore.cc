@@ -6,24 +6,24 @@
  * in the root of the source tree.
  */
 
-#include <guest_abi.h>
 #include "base/arch.h"
-#include <base/logging.h>
+#include "base/logging.h"
+#include "guest_abi.h"
 
-#include "wait_probe.h"
 #include <cstdio>
+#include "kern/lv2/wait_probe.h"
 
-#include "error_table.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/strings/xstring.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/time/time.h"
+#include "kern/lv2/error_table.h"
+#include "kern/lv2/sys_mem.h"
+#include "kern/lv2/sys_semaphore.h"
 #include "kern/process.h"
-#include "sys_mem.h"
-#include "sys_semaphore.h"
-#include <options/options.h>
-#include <base/containers/map.h>
-#include <base/strings/xstring.h>
-#include <base/threading/lock_guard.h>
-#include <base/threading/mutex.h>
-#include <base/time/time.h>
-#include <base/containers/hash_map.h>
+#include "options/options.h"
 
 namespace {
 // DELTA_OSEM_TRACE=<id>: every wait/post on one semaphore, with the guest tid.
@@ -37,185 +37,191 @@ DELTA_OPTION(u32, kOsemMaxWaitMs, "DELTA_OSEM_MAXWAIT", 0);
 }  // namespace
 
 namespace krnl {
-const u32 *currentGuestTidPtr();  // sys_thread.cc: this thread's guest tid
+const u32* CurrentGuestTidPtr();  // sys_thread.cc: this thread's guest tid
 
-static void osemTrace(const char *what, int id, int n, int count) {
+static void OsemTrace(const char* what, int id, int n, int count) {
   // 1 traces every semaphore; any other value traces just that id.
   if (!kOsemTrace || (kOsemTrace != 1 && static_cast<u32>(id) != kOsemTrace))
     return;
   BASE_LOGI("osem", "{} id={} n={} count={} gtid={}", what, id, n, count,
-            *currentGuestTidPtr());
+            *CurrentGuestTidPtr());
 }
 
 // Named semaphores, so osem_open(name) finds the one osem_create(name) made.
-static base::Mutex g_semRegM;
-static base::HashMap<base::String, semaphore *> g_semByName;
+static base::Mutex g_sem_reg_m;
+static base::HashMap<base::String, Semaphore*> g_sem_by_name;
 
-semaphore::semaphore(objectTable &objects, const char *nm, int init, int max)
-    : kObject(objects, oType::semaphore), count(init), maxCount(max), initCount(init) {
+Semaphore::Semaphore(ObjectTable& objects, const char* nm, int init, int max)
+    : Object(objects, OType::kSemaphore),
+      count_(init),
+      max_count_(max),
+      init_count_(init) {
   if (nm && *nm) {
-    name = nm;
-    base::LockGuard<base::Mutex> lk(g_semRegM);
-    g_semByName[nm] = this;
+    name_ = nm;
+    base::LockGuard<base::Mutex> lk(g_sem_reg_m);
+    g_sem_by_name[nm] = this;
   }
 }
 
-int semaphore::wait(int need, u32 *timeoutUs) {
+int Semaphore::Wait(int need, u32* timeout_us) {
   if (need <= 0)
     return -SysError::eINVAL;
-  base::UniqueLock<base::Mutex> lk(m);
+  base::UniqueLock<base::Mutex> lk(m_);
   // A request larger than the ceiling can never succeed: the kernel rejects it
   // outright with EINVAL rather than parking the thread forever.
-  if (maxCount > 0 && need > maxCount)
+  if (max_count_ > 0 && need > max_count_)
     return -SysError::eINVAL;
-  auto enough = [&] { return count >= need; };
+  auto enough = [&] { return count_ >= need; };
   if (!enough()) {
-    waiters++;
+    waiters_++;
     bool ok = true;
-    if (timeoutUs)
-      ok = cv.WaitFor(lk, base::Microseconds(*timeoutUs), enough);
+    if (timeout_us)
+      ok = cv_.WaitFor(lk, base::Microseconds(*timeout_us), enough);
     else
-      cv.Wait(lk, enough);
-    waiters--;
+      cv_.Wait(lk, enough);
+    waiters_--;
     if (!ok)
       return -SysError::eTIMEDOUT;
   }
-  count -= need;
+  count_ -= need;
   return 0;
 }
 
-int semaphore::trywait(int need) {
+int Semaphore::Trywait(int need) {
   if (need <= 0)
     return -SysError::eINVAL;
-  base::UniqueLock<base::Mutex> lk(m);
-  if (count < need) {
+  base::UniqueLock<base::Mutex> lk(m_);
+  if (count_ < need) {
     // Distinguish an impossible request (need > ceiling => EINVAL) from a
     // momentarily-unavailable one (=> EBUSY).
-    if (maxCount > 0 && need > maxCount)
+    if (max_count_ > 0 && need > max_count_)
       return -SysError::eINVAL;
     return -SysError::eBUSY;
   }
-  count -= need;
+  count_ -= need;
   return 0;
 }
 
-int semaphore::post(int n) {
+int Semaphore::Post(int n) {
   if (n <= 0)
     return -SysError::eINVAL;
-  base::LockGuard<base::Mutex> lk(m);
-  // The kernel rejects a post that would push the count past maxCount and leaves
-  // the count untouched (returns EINVAL).
-  if (maxCount > 0 && count + n > maxCount)
+  base::LockGuard<base::Mutex> lk(m_);
+  // The kernel rejects a post that would push the count past maxCount and
+  // leaves the count untouched (returns EINVAL).
+  if (max_count_ > 0 && count_ + n > max_count_)
     return -SysError::eINVAL;
-  count += n;
-  cv.NotifyAll();
+  count_ += n;
+  cv_.NotifyAll();
   return 0;
 }
 
-int semaphore::cancel(int setCount, int *numWaiters) {
-  base::LockGuard<base::Mutex> lk(m);
-  if (maxCount > 0 && setCount > maxCount)
+int Semaphore::Cancel(int set_count, int* num_waiters) {
+  base::LockGuard<base::Mutex> lk(m_);
+  if (max_count_ > 0 && set_count > max_count_)
     return -SysError::eINVAL;
   // Report the waiter count before waking: each woken thread will decrement it
   // itself as it returns from cv.wait.
-  if (numWaiters)
-    *numWaiters = waiters;
-  if (setCount < 0)
-    count = initCount;  // negative => reset to the create-time value
+  if (num_waiters)
+    *num_waiters = waiters_;
+  if (set_count < 0)
+    count_ = init_count_;  // negative => reset to the create-time value
   else
-    count = setCount;
-  cv.NotifyAll();
+    count_ = set_count;
+  cv_.NotifyAll();
   return 0;
 }
 
-static semaphore *fromId(int id) {
-  auto *obj = proc::getActive()->getObjTable().get(id);
-  if (!obj || obj->type() != kObject::oType::semaphore)
+static Semaphore* FromId(int id) {
+  auto* obj = Proc::GetActive()->GetObjTable().Get(id);
+  if (!obj || obj->type() != Object::OType::kSemaphore)
     return nullptr;
-  return static_cast<semaphore *>(obj);
+  return static_cast<Semaphore*>(obj);
 }
 
-int PS4ABI sys_osem_create(const char *name, u32 attr, int init, int max) {
-  auto *s = new semaphore(proc::getActive()->getObjTable(), name, init, max);
+int PS4ABI sys_osem_create(const char* name, u32 attr, int init, int max) {
+  auto* s = new Semaphore(Proc::GetActive()->GetObjTable(), name, init, max);
   BASE_LOGI("osem", "create '{}' attr={:#x} init={} max={} -> id={}",
             name ? name : "", attr, init, max, s->handle());
   return s->handle();
 }
 
-int PS4ABI sys_osem_open(const char *name) {
+int PS4ABI sys_osem_open(const char* name) {
   {
-    base::LockGuard<base::Mutex> lk(g_semRegM);
-    auto it = name ? g_semByName.find(name) : g_semByName.end();
-    if (it != g_semByName.end())
+    base::LockGuard<base::Mutex> lk(g_sem_reg_m);
+    auto it = name ? g_sem_by_name.find(name) : g_sem_by_name.end();
+    if (it != g_sem_by_name.end())
       return it->second->handle();
   }
   // Auto-create unknown named semaphores (a system service makes them on real
   // hw); creating on first open gives producer+consumer a shared one.
-  auto *s = new semaphore(proc::getActive()->getObjTable(), name, 0, 0x7fffffff);
+  auto* s =
+      new Semaphore(Proc::GetActive()->GetObjTable(), name, 0, 0x7fffffff);
   BASE_LOGI("osem", "open '{}' (auto-created) -> id={}", name ? name : "",
             s->handle());
   return s->handle();
 }
 
 int PS4ABI sys_osem_delete(int id) {
-  auto *s = fromId(id);
+  auto* s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
   {
-    base::LockGuard<base::Mutex> lk(g_semRegM);
+    base::LockGuard<base::Mutex> lk(g_sem_reg_m);
     if (!s->fname().empty())
-      g_semByName.erase(s->fname().c_str());
+      g_sem_by_name.erase(s->fname().c_str());
   }
-  proc::getActive()->getObjTable().release(id);
+  Proc::GetActive()->GetObjTable().Release(id);
   return 0;
 }
 
-int PS4ABI sys_osem_close(int id) { return sys_osem_delete(id); }
+int PS4ABI sys_osem_close(int id) {
+  return sys_osem_delete(id);
+}
 
-int PS4ABI sys_osem_wait(int id, int need, u32 *timeoutUs) {
-  WaitProbe _wp("osem_wait", (long)id, (long)need);
-  auto *s = fromId(id);
+int PS4ABI sys_osem_wait(int id, int need, u32* timeout_us) {
+  WaitProbe wp("osem_wait", (long)id, (long)need);
+  auto* s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
-  osemTrace("wait", id, need, s->value());
-  u32 capUs = kOsemMaxWaitMs * 1000;
-  if (!timeoutUs && capUs)
-    timeoutUs = &capUs;
+  OsemTrace("wait", id, need, s->value());
+  u32 cap_us = kOsemMaxWaitMs * 1000;
+  if (!timeout_us && cap_us)
+    timeout_us = &cap_us;
   // The doorbell of a service we do not host: nothing in this process will ever
   // ring it, so an untimed wait parks the caller for the rest of the run (Tomb
   // Raider's sceNpCheckCallback sat on 'SceNpTpip 0' forever). Give it the
   // answer an idle channel gives: wait a beat, then time out, so the caller
   // polls on instead of blocking, without spinning a core.
-  if (isAbsentServiceChannel(s->fname().c_str())) {
-    u32 idleUs = 100 * 1000;
-    if (timeoutUs && *timeoutUs < idleUs)
-      idleUs = *timeoutUs;
-    const int r = s->wait(need, &idleUs);
+  if (IsAbsentServiceChannel(s->fname().c_str())) {
+    u32 idle_us = 100 * 1000;
+    if (timeout_us && *timeout_us < idle_us)
+      idle_us = *timeout_us;
+    const int r = s->Wait(need, &idle_us);
     return r == 0 ? 0 : -SysError::eTIMEDOUT;
   }
-  return s->wait(need, timeoutUs);
+  return s->Wait(need, timeout_us);
 }
 
 int PS4ABI sys_osem_trywait(int id, int need) {
-  auto *s = fromId(id);
+  auto* s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
-  return s->trywait(need);
+  return s->Trywait(need);
 }
 
 int PS4ABI sys_osem_post(int id, int count) {
-  auto *s = fromId(id);
+  auto* s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
-  const int r = s->post(count);
-  osemTrace("post", id, count, s->value());
+  const int r = s->Post(count);
+  OsemTrace("post", id, count, s->value());
   return r;
 }
 
-int PS4ABI sys_osem_cancel(int id, int setCount, int *numWaiters) {
-  auto *s = fromId(id);
+int PS4ABI sys_osem_cancel(int id, int set_count, int* num_waiters) {
+  auto* s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
-  return s->cancel(setCount, numWaiters);
+  return s->Cancel(set_count, num_waiters);
 }
 }  // namespace krnl
