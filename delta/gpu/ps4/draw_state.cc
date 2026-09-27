@@ -744,7 +744,8 @@ void ResolveCbufferBindings(const std::vector<gcn::ShaderCbuf>& cbufs,
       resolved_vs_cbuf = true;
       d.cbuf_base = vb.base;
       d.cbuf_size = static_cast<u32>(bytes);
-      if (bytes >= sizeof(d.mvp))
+      if (bytes >= sizeof(d.mvp) &&
+          gpu::IsReadableRangeCached(vb.base, sizeof(d.mvp)))
         std::memcpy(d.mvp, reinterpret_cast<const void*>(vb.base),
                     sizeof(d.mvp));
     }
