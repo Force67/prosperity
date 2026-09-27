@@ -12,6 +12,9 @@
  */
 
 #include "base/arch.h"
+#include <cstddef>
+#include <cstring>
+#include <type_traits>
 #include <vector>
 
 namespace gpu::gcn {
@@ -164,7 +167,6 @@ struct DrawInfo {
     u64 src = 0;
   };
   static constexpr u32 kMaxDrawTextures = 64;  // == gpu::render::kMaxTex
-  DrawTex texs[kMaxDrawTextures];
   u32 num_texs = 0;
 
   // Per-draw blend state, decoded from CB_BLEND0_CONTROL (raw dword) + whether
@@ -283,13 +285,28 @@ struct DrawInfo {
   // with no Location (VUID-VkGraphicsPipelineCreateInfo-Input-07904) reading
   // undefined.
   static constexpr u32 kMaxVertexAttrs = 16;
-  VertexAttr vattrs[kMaxVertexAttrs];
   u32 num_vattrs = 0;
+  u32 num_vbufs = 0;
+
+  // The dense tables go last: an entry past its count is never read and every
+  // one below it is written whole, so Reset() leaves them alone. They are
+  // most of the record, and a queue slot is reset for every draw.
+  DrawTex texs[kMaxDrawTextures];
+  VertexAttr vattrs[kMaxVertexAttrs];
   // Vertex buffer bindings; vbufs[0] mirrors vertex_data/stride so the single-
   // binding fast path is unchanged; a multi-stream draw fills one per distinct V#.
   VertexBinding vbufs[8];
-  u32 num_vbufs = 0;
+
+  // Everything but the dense tables back to its default.
+  void Reset();
 };
+
+static_assert(std::is_trivially_copyable_v<DrawInfo>);
+
+inline void DrawInfo::Reset() {
+  static const DrawInfo kDefault{};
+  std::memcpy(static_cast<void*>(this), &kDefault, offsetof(DrawInfo, texs));
+}
 
 // A compute dispatch resolved by the command processor: the recompiled CS, the live
 // guest memory ranges its descriptors point at, and the raw user data (pushed).

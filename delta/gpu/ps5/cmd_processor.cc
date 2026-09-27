@@ -671,7 +671,8 @@ void HandleDrawPacket(render::Renderer& renderer,
   packet.index_max = g_queue->index.max;
   packet.num_instances = g_queue->index.num_instances;
 
-  render::DrawInfo d;
+  thread_local render::DrawInfo d;
+  d.Reset();
   if (!BuildDrawInfo(g_queue->regs, packet, d))
     return;
   if (!g_frame_active) {

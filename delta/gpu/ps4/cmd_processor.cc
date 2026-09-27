@@ -498,7 +498,8 @@ void HandleDrawPacket(render::Renderer& renderer,
       if (renderable)
         queue.PushDraw();
     } else {
-      render::DrawInfo d;
+      thread_local render::DrawInfo d;
+      d.Reset();
       const bool renderable = BuildDrawInfo(renderer, g_regs, packet, d);
       // On the first draw of a frame, and for every draw the renderer sees
       // including the ones dropped below, so a frame whose draws all decline

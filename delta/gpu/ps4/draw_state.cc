@@ -1049,7 +1049,7 @@ void PrefetchDrawShaders(const Regs& regs) {
   const u32* vud = regs.At(has_gs ? mmSPI_SHADER_USER_DATA_ES_0
                                   : mmSPI_SHADER_USER_DATA_VS_0);
   thread_local render::DrawInfo d;
-  d = render::DrawInfo{};
+  d.Reset();
   const u32 mrt_uint_mask = ResolveRenderTargets(regs, d, vs_addr, ps_addr);
   TextureMasks masks;
   if (IsGuestAddress(ps_addr)) {

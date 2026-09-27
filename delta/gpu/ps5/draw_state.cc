@@ -683,6 +683,7 @@ void ResolvePsTextures(u64 ps_addr,
 // One resolved T# into one descriptor slot.
 void FillDrawTex(u32 slot, const gcn::TImage& s, render::DrawInfo& d) {
   render::DrawInfo::DrawTex& dt = d.texs[slot];
+  dt = {};
   TraceRejectedTexture(slot, s);
     dt.base = s.valid ? s.base : 0;
     dt.w = s.width;

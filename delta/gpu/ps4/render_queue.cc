@@ -43,7 +43,7 @@ render::DrawInfo& RenderQueue::NextDraw() {
   if (draw_head_ >= kDrawSlots)
     WaitDone(draws_done_, draw_head_ - kDrawSlots + 1, "draw-slot");
   render::DrawInfo& d = draws_[draw_head_ % kDrawSlots];
-  d = render::DrawInfo{};
+  d.Reset();
   return d;
 }
 
