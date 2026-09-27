@@ -138,7 +138,7 @@ template <typename T> struct ContainerStream final : fileBase {
 
   ~ContainerStream() override {}
 
-  u64 Read(void *buffer, u64 size) override {
+  u64 Read(void *buffer, size_t size) override {
     const u64 end = obj.size();
 
     if (pos < end) {
@@ -153,7 +153,7 @@ template <typename T> struct ContainerStream final : fileBase {
     return 0;
   }
 
-  u64 Write(const void *buffer, u64 size) override {
+  u64 Write(const void *buffer, size_t size) override {
     const u64 old_size = obj.size();
     (void)old_size;
 
