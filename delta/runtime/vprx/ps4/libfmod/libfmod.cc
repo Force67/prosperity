@@ -7,12 +7,14 @@
  * out-pointer get specific handlers in libfmod_exports.cc.
  */
 
-#include "guest_abi.h"
-#include "libfmod.h"
+#include "runtime/vprx/ps4/libfmod/libfmod.h"
 #include "base/arch.h"
+#include "guest_abi.h"
 
 extern "C" {
 
-u64 PS4ABI fmodStub() { return 0; /* FMOD_OK */ }
+u64 PS4ABI FmodStub() {
+  return 0; /* FMOD_OK */
+}
 
 }  // extern "C"

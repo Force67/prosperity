@@ -6,20 +6,19 @@
  * HLE libSceSaveDataDialog. See lib_sce_save_data_dialog.cc.
  */
 
-#include "guest_abi.h"
-#include "../../vprx.h"
 #include "base/arch.h"
-
+#include "guest_abi.h"
+#include "runtime/vprx/vprx.h"
 
 extern "C" {
 
 int PS4ABI sceSaveDataDialogInitialize();
 int PS4ABI sceSaveDataDialogTerminate();
-int PS4ABI sceSaveDataDialogOpen(const void *param);
+int PS4ABI sceSaveDataDialogOpen(const void* param);
 int PS4ABI sceSaveDataDialogClose();
 int PS4ABI sceSaveDataDialogGetStatus();
 int PS4ABI sceSaveDataDialogUpdateStatus();
-int PS4ABI sceSaveDataDialogGetResult(void *result);
+int PS4ABI sceSaveDataDialogGetResult(void* result);
 int PS4ABI sceSaveDataDialogIsReadyToDisplay();
 int PS4ABI sceSaveDataDialogProgressBarSetValue(u32 target, u32 rate);
 int PS4ABI sceSaveDataDialogProgressBarInc(u32 target, u32 delta);

@@ -1209,7 +1209,7 @@ void InvestigateDcbGate(Module& m) {
     u64 hid = 0;
     const char* exp_mod = "NONE";
     u64 exp_addr = 0;
-    if (runtime::decode_nid(g.nid, 11, hid) && p)
+    if (runtime::DecodeNid(g.nid, 11, hid) && p)
       for (auto& mm : p->GetModuleList())
         if (uintptr_t a = mm->GetExport(hid)) {
           exp_mod = mm->GetInfo().name.c_str();

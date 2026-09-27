@@ -7,153 +7,161 @@
  * in the root of the source tree.
  */
 
-#include "vprx.h"
-#include "base/arch.h"
-#include <crypto/sha1.h>
-#include <base/containers/vector.h>
-#include <base/logging.h>
+#include "runtime/vprx/vprx.h"
 #include <cstdlib>
 #include <cstring>
+#include "base/arch.h"
+#include "base/containers/vector.h"
+#include "base/logging.h"
+#include "crypto/sha1.h"
 
 #include "kern/process.h"
-#include <options/options.h>
+#include "options/options.h"
 
 namespace {
-DELTA_OPTION(const char *, kHleLibs, "DELTA_HLE", nullptr);
-DELTA_OPTION(const char *, kLleLibs, "DELTA_LLE", nullptr);
-DELTA_OPTION(const char *, kHleNidsGnm, "DELTA_HLE_NIDS_GNM", nullptr);
-DELTA_OPTION(const char *, kHleNidsVo, "DELTA_HLE_NIDS_VO", nullptr);
-DELTA_OPTION(const char *, kNidTrace, "DELTA_NID_TRACE", nullptr);
+DELTA_OPTION(const char*, kHleLibs, "DELTA_HLE", nullptr);
+DELTA_OPTION(const char*, kLleLibs, "DELTA_LLE", nullptr);
+DELTA_OPTION(const char*, kHleNidsGnm, "DELTA_HLE_NIDS_GNM", nullptr);
+DELTA_OPTION(const char*, kHleNidsVo, "DELTA_HLE_NIDS_VO", nullptr);
+DELTA_OPTION(const char*, kNidTrace, "DELTA_NID_TRACE", nullptr);
 DELTA_OPTION(bool, kGnmHle, "DELTA_GNM_HLE", false);
 DELTA_OPTION(bool, kVoHle, "DELTA_VO_HLE", false);
 }  // namespace
 
 namespace runtime {
-static base::Vector<const ModInfo *> vprxTable;
-// PS5-only NID alias tables (runtime/vprx/ps5/*). Kept separate from vprxTable so
-// PS4 resolution is byte-for-byte unchanged; only vprx_get_forced (PS5) reads it.
-static base::Vector<const ModInfo *> vprxTablePs5;
+static base::Vector<const ModInfo*> g_vprx_table;
+// PS5-only NID alias tables (runtime/vprx/ps5/*). Kept separate from vprxTable
+// so PS4 resolution is byte-for-byte unchanged; only VprxGetForced (PS5) reads
+// it.
+static base::Vector<const ModInfo*> g_vprx_table_ps5;
 
-// HLE-module anchors. Each vprx HLE module's _exports.cc defines one of these; we
-// reference them here so the linker keeps those archive members (otherwise the
-// MODULE_INIT static initializers never run and the HLE tables stay empty).
-extern "C" int vprx_anchor_libSceVideoOut;
+// HLE-module anchors. Each vprx HLE module's _exports.cc defines one of these;
+// we reference them here so the linker keeps those archive members (otherwise
+// the MODULE_INIT static initializers never run and the HLE tables stay empty).
+extern "C" int g_vprx_anchor_lib_sce_video_out;
 // PS5 module copies (runtime/vprx/ps5/*). Separate registry (vprxTablePs5).
-extern "C" int vprx_anchor_ps5_libSceVideoOut;
-extern "C" int vprx_anchor_ps5_libSceVideodec2;
-extern "C" int vprx_anchor_ps5_libSceUserService;
-// A few libkernel exports newer SDK libc.prx builds import that firmware 01.14.00
-// doesn't export at all; the rest of libkernel stays LLE.
-extern "C" int vprx_anchor_ps5_libkernel;
+extern "C" int g_vprx_anchor_ps5_lib_sce_video_out;
+extern "C" int g_vprx_anchor_ps5_lib_sce_videodec2;
+extern "C" int g_vprx_anchor_ps5_lib_sce_user_service;
+// A few libkernel exports newer SDK libc.prx builds import that firmware
+// 01.14.00 doesn't export at all; the rest of libkernel stays LLE.
+extern "C" int g_vprx_anchor_ps5_libkernel;
 // Same story for the AGC/Ngs2 exports newer-SDK titles import.
-extern "C" int vprx_anchor_ps5_libSceAgcDriver;
-extern "C" int vprx_anchor_ps5_libSceAgc;
-extern "C" int vprx_anchor_ps5_libSceNgs2;
+extern "C" int g_vprx_anchor_ps5_lib_sce_agc_driver;
+extern "C" int g_vprx_anchor_ps5_lib_sce_agc;
+extern "C" int g_vprx_anchor_ps5_lib_sce_ngs2;
 // Forced-HLE sceImeKeyboardOpen: the LLE one needs the IME service daemon and
 // fails with a code titles don't expect from it (see ps5/lib_sce_ime.cc).
-extern "C" int vprx_anchor_ps5_libSceIme;
-extern "C" int vprx_anchor_ps5_libSceAppContent;
+extern "C" int g_vprx_anchor_ps5_lib_sce_ime;
+extern "C" int g_vprx_anchor_ps5_lib_sce_app_content;
 // Same abnormal-termination reporter override the PS4 HLE has.
-extern "C" int vprx_anchor_ps5_libSceSystemService;
+extern "C" int g_vprx_anchor_ps5_lib_sce_system_service;
 // No-op sanitizer fiber hooks; retail fw ships no TSan/ASan runtime for
 // libSceFiber to import them from (see ps5/lib_sce_fiber.cc).
-extern "C" int vprx_anchor_ps5_libSceFiber;
-extern "C" int vprx_anchor_libSceGnmDriver;
-extern "C" int vprx_anchor_libSceMsgDialog;
+extern "C" int g_vprx_anchor_ps5_lib_sce_fiber;
+extern "C" int g_vprx_anchor_lib_sce_gnm_driver;
+extern "C" int g_vprx_anchor_lib_sce_msg_dialog;
 // Pad + UserService HLE: a connected controller + one logged-in user lets the
 // title advance into actual gameplay (the UserService init override avoids the
 // IPMI sign-in spin). Mbus still busy-polls /dev/usbctl on a worker but that no
 // longer blocks boot or rendering.
-extern "C" int vprx_anchor_libScePad;
-extern "C" int vprx_anchor_libSceUserService;
-extern "C" int vprx_anchor_libSceUsbd;
-extern "C" int vprx_anchor_libSceAudioOut;
-extern "C" int vprx_anchor_libSceAudioIn;
-extern "C" int vprx_anchor_libSceNpTrophy;
-// HLE libSceAvPlayer: stub the movie player so intro/cutscene playback is skipped
-// instead of crashing the un-emulated H.264/Atrac9 decode threads.
-extern "C" int vprx_anchor_libSceAvPlayer;
-// Partial HLE override: only sceSystemServiceReportAbnormalTermination (the rest
-// of libSceSystemService stays LLE). Stops the title's fatal-error reporter from
-// tripping the real .sprx's NULL-arg assert.
-extern "C" int vprx_anchor_libSceSystemService;
-// HLE libfmod: the game's bundled FMOD .prx. Its real init needs the un-emulated
-// AJM ATRAC9 decoder; stub the API to "succeed" with null audio so Doom64 boots.
-extern "C" int vprx_anchor_libfmod;
+extern "C" int g_vprx_anchor_lib_sce_pad;
+extern "C" int g_vprx_anchor_lib_sce_user_service;
+extern "C" int g_vprx_anchor_lib_sce_usbd;
+extern "C" int g_vprx_anchor_lib_sce_audio_out;
+extern "C" int g_vprx_anchor_lib_sce_audio_in;
+extern "C" int g_vprx_anchor_lib_sce_np_trophy;
+// HLE libSceAvPlayer: stub the movie player so intro/cutscene playback is
+// skipped instead of crashing the un-emulated H.264/Atrac9 decode threads.
+extern "C" int g_vprx_anchor_lib_sce_av_player;
+// Partial HLE override: only sceSystemServiceReportAbnormalTermination (the
+// rest of libSceSystemService stays LLE). Stops the title's fatal-error
+// reporter from tripping the real .sprx's NULL-arg assert.
+extern "C" int g_vprx_anchor_lib_sce_system_service;
+// HLE libfmod: the game's bundled FMOD .prx. Its real init needs the
+// un-emulated AJM ATRAC9 decoder; stub the API to "succeed" with null audio so
+// Doom64 boots.
+extern "C" int g_vprx_anchor_libfmod;
 // HLE libSceNetCtl: report a connected wired network (state IPOBTAINED). The
 // LLE .sprx polls a non-existent system net daemon, so titles that gate boot on
 // connectivity (PT) would stall 10s and then continue down a broken init path.
-extern "C" int vprx_anchor_libSceNetCtl;
+extern "C" int g_vprx_anchor_lib_sce_net_ctl;
 // HLE libSceSaveData: PS4 saves are client/server (the LLE .sprx forwards over
 // IPMI to the SceSaveData system-service process we don't host, so it blocks
 // forever). Replace the library and back saves with a writable host directory.
-extern "C" int vprx_anchor_libSceSaveData;
+extern "C" int g_vprx_anchor_lib_sce_save_data;
 // HLE libSceSaveDataDialog: the LLE .sprx forwards the dialog to the SceShellUI
 // service (over IPMI) we don't host, so its status never reaches FINISHED and a
 // title that waits for the save dialog to close (PT's world-load save flow)
 // hangs. Complete the dialog immediately with a default OK.
-extern "C" int vprx_anchor_libSceSaveDataDialog;
-static volatile int *const vprx_anchors[] = {&vprx_anchor_libSceVideoOut,
-                                             &vprx_anchor_ps5_libSceVideoOut,
-                                             &vprx_anchor_ps5_libSceVideodec2,
-                                             &vprx_anchor_ps5_libSceUserService,
-                                             &vprx_anchor_ps5_libkernel,
-                                             &vprx_anchor_ps5_libSceAgcDriver,
-                                             &vprx_anchor_ps5_libSceAgc,
-                                             &vprx_anchor_ps5_libSceNgs2,
-                                             &vprx_anchor_ps5_libSceIme,
-                                             &vprx_anchor_ps5_libSceAppContent,
-                                             &vprx_anchor_ps5_libSceSystemService,
-                                             &vprx_anchor_ps5_libSceFiber,
-                                             &vprx_anchor_libSceSaveData,
-                                             &vprx_anchor_libSceSaveDataDialog,
-                                             &vprx_anchor_libfmod,
-                                             &vprx_anchor_libSceGnmDriver,
-                                             &vprx_anchor_libSceMsgDialog,
-                                             &vprx_anchor_libScePad,
-                                             &vprx_anchor_libSceUserService,
-                                             &vprx_anchor_libSceUsbd,
-                                             &vprx_anchor_libSceAudioOut,
-                                             &vprx_anchor_libSceAudioIn,
-                                             &vprx_anchor_libSceNpTrophy,
-                                             &vprx_anchor_libSceAvPlayer,
-                                             &vprx_anchor_libSceSystemService,
-                                             &vprx_anchor_libSceNetCtl};
+extern "C" int g_vprx_anchor_lib_sce_save_data_dialog;
+static volatile int* const kVprxAnchors[] = {
+    &g_vprx_anchor_lib_sce_video_out,
+    &g_vprx_anchor_ps5_lib_sce_video_out,
+    &g_vprx_anchor_ps5_lib_sce_videodec2,
+    &g_vprx_anchor_ps5_lib_sce_user_service,
+    &g_vprx_anchor_ps5_libkernel,
+    &g_vprx_anchor_ps5_lib_sce_agc_driver,
+    &g_vprx_anchor_ps5_lib_sce_agc,
+    &g_vprx_anchor_ps5_lib_sce_ngs2,
+    &g_vprx_anchor_ps5_lib_sce_ime,
+    &g_vprx_anchor_ps5_lib_sce_app_content,
+    &g_vprx_anchor_ps5_lib_sce_system_service,
+    &g_vprx_anchor_ps5_lib_sce_fiber,
+    &g_vprx_anchor_lib_sce_save_data,
+    &g_vprx_anchor_lib_sce_save_data_dialog,
+    &g_vprx_anchor_libfmod,
+    &g_vprx_anchor_lib_sce_gnm_driver,
+    &g_vprx_anchor_lib_sce_msg_dialog,
+    &g_vprx_anchor_lib_sce_pad,
+    &g_vprx_anchor_lib_sce_user_service,
+    &g_vprx_anchor_lib_sce_usbd,
+    &g_vprx_anchor_lib_sce_audio_out,
+    &g_vprx_anchor_lib_sce_audio_in,
+    &g_vprx_anchor_lib_sce_np_trophy,
+    &g_vprx_anchor_lib_sce_av_player,
+    &g_vprx_anchor_lib_sce_system_service,
+    &g_vprx_anchor_lib_sce_net_ctl};
 
-void vprx_init() {
+void VprxInit() {
   // Touch the anchors so the references aren't optimized away.
   int sum = 0;
-  for (auto *a : vprx_anchors)
+  for (auto* a : kVprxAnchors)
     sum += *a;
   (void)sum;
   runtime::InitFunction::Init();
 }
 
-void vprx_reg(const ModInfo *info) { vprxTable.push_back(info); }
-void vprx_reg_ps5(const ModInfo *info) { vprxTablePs5.push_back(info); }
+void VprxReg(const ModInfo* info) {
+  g_vprx_table.push_back(info);
+}
+void VprxRegPs5(const ModInfo* info) {
+  g_vprx_table_ps5.push_back(info);
+}
 
-// Per-module HLE policy. We prefer running the real sprx (LLE) for modules whose
-// syscall/device backing we emulate, falling back to the HLE shim only when the
-// real path isn't ready or is forced off.
-//   - libSceGnmDriver: LLE by default (PM4 via ioctl(/dev/gc) -> GcDevice -> the
+// Per-module HLE policy. We prefer running the real sprx (LLE) for modules
+// whose syscall/device backing we emulate, falling back to the HLE shim only
+// when the real path isn't ready or is forced off.
+//   - libSceGnmDriver: LLE by default (PM4 via ioctl(/dev/gc) -> GcDevice ->
+//   the
 //     GPU command processor). Force the HLE submit shim with DELTA_GNM_HLE.
 //   - libSceVideoOut: LLE by default; the real module drives the framebuffer
 //     through ioctl(/dev/dce) + mmap (DceDevice) and flips via the videoout
 //     service thread. Force the HLE shim with DELTA_VO_HLE.
-// DIAGNOSTIC: force just a few specific NIDs of an otherwise-LLE module onto the
-// HLE shim. Env is a comma/space list of hex hids, e.g.
+// DIAGNOSTIC: force just a few specific NIDs of an otherwise-LLE module onto
+// the HLE shim. Env is a comma/space list of hex hids, e.g.
 //   DELTA_HLE_NIDS_VO=0x1234...,0xabcd...
-// Lets us binary-search which single videoout/gnm export's real behavior triggers
-// the both-LLE Isaac crash, without recompiling per test.
-static bool nidForcedHle(const char *list, u64 hid) {
+// Lets us binary-search which single videoout/gnm export's real behavior
+// triggers the both-LLE Isaac crash, without recompiling per test.
+static bool NidForcedHle(const char* list, u64 hid) {
   if (!list)
     return false;
-  for (const char *p = list; *p;) {
+  for (const char* p = list; *p;) {
     while (*p == ',' || *p == ' ')
       p++;
     if (!*p)
       break;
-    char *end = nullptr;
+    char* end = nullptr;
     u64 v = std::strtoull(p, &end, 16);
     if (end == p)
       break;
@@ -167,23 +175,23 @@ static bool nidForcedHle(const char *list, u64 hid) {
 // Does `lib` appear in a comma/space separated env list? "all" matches every
 // library, so one variable can flip the whole default. Names match on a
 // substring so "SaveData" covers libSceSaveData and libSceSaveDataDialog.
-static bool libListed(const char *list, const char *lib) {
+static bool LibListed(const char* list, const char* lib) {
   if (!list || !*list)
     return false;
   if (std::strcmp(list, "all") == 0 || std::strcmp(list, "1") == 0)
     return true;
-  for (const char *p = list; *p;) {
+  for (const char* p = list; *p;) {
     while (*p == ',' || *p == ' ')
       p++;
     if (!*p)
       break;
-    const char *end = p;
+    const char* end = p;
     while (*end && *end != ',' && *end != ' ')
       end++;
     const size_t n = static_cast<size_t>(end - p);
     if (n) {
       // Substring match of the list entry against the library name.
-      for (const char *h = lib; *h; h++) {
+      for (const char* h = lib; *h; h++) {
         if (std::strncmp(h, p, n) == 0)
           return true;
       }
@@ -221,10 +229,10 @@ static bool libListed(const char *list, const char *lib) {
 //
 // What IS verified: the switch itself is airtight; under DELTA_LLE=all the HLE
 // trace records zero thunk calls, so every registered shim really is bypassed.
-static bool useHleShim(const char *lib, u64 hid) {
-  if (libListed(kHleLibs, lib))
+static bool UseHleShim(const char* lib, u64 hid) {
+  if (LibListed(kHleLibs, lib))
     return true;
-  if (libListed(kLleLibs, lib))
+  if (LibListed(kLleLibs, lib))
     return false;
   if (std::strcmp(lib, "libSceGnmDriver") == 0)
     // sceGnmDingDong is the exception to keeping this module LLE. It is the
@@ -235,36 +243,35 @@ static bool useHleShim(const char *lib, u64 hid) {
     // recycled the buffers those packets point at. Taking the call gives us the
     // one moment the ring is known good.
     return kGnmHle || hid == 0x6D7E486D1BC40979ull ||
-           nidForcedHle(kHleNidsGnm, hid);
+           NidForcedHle(kHleNidsGnm, hid);
   if (std::strcmp(lib, "libSceVideoOut") == 0)
-    return kVoHle ||
-           nidForcedHle(kHleNidsVo, hid);
+    return kVoHle || NidForcedHle(kHleNidsVo, hid);
   return true;  // every other HLE module stays HLE
 }
 
-uintptr_t vprx_get_forced(const char *lib, u64 hid) {
+uintptr_t VprxGetForced(const char* lib, u64 hid) {
   // Keep native decoder execution available for GPU accuracy investigations.
-  static const bool native_video = [] {
+  static const bool kNativeVideo = [] {
     const char* value = std::getenv("DELTA_PS5_NATIVE_VIDEO");
     return value && std::strcmp(value, "1") == 0;
   }();
-  if (native_video && std::strcmp(lib, "libSceVideodec2") == 0)
+  if (kNativeVideo && std::strcmp(lib, "libSceVideodec2") == 0)
     return 0;
   // PS5-only: resolve exclusively from the PS5 registry (runtime/vprx/ps5/*).
-  // PS5 must NOT borrow the PS4 HLE modules, since each forced-HLE library has its own
-  // full PS5 copy so behaviour can diverge safely. A miss here falls through to the
-  // real .sprx (LLE) in the caller, never to a PS4 stub.
-  for (const auto &t : vprxTablePs5) {
-    if (std::strcmp(lib, t->namePtr) != 0)
+  // PS5 must NOT borrow the PS4 HLE modules, since each forced-HLE library has
+  // its own full PS5 copy so behaviour can diverge safely. A miss here falls
+  // through to the real .sprx (LLE) in the caller, never to a PS4 stub.
+  for (const auto& t : g_vprx_table_ps5) {
+    if (std::strcmp(lib, t->name_ptr) != 0)
       continue;
-    for (int i = 0; i < t->funcCount; i++)
-      if (t->funcNodes[i].hashId == hid)
-        return reinterpret_cast<uintptr_t>(t->funcNodes[i].address);
+    for (int i = 0; i < t->func_count; i++)
+      if (t->func_nodes[i].hash_id == hid)
+        return reinterpret_cast<uintptr_t>(t->func_nodes[i].address);
   }
   return 0;
 }
 
-uintptr_t vprx_get(const char *lib, u64 hid) {
+uintptr_t VprxGet(const char* lib, u64 hid) {
   // The Neo SPRX is a filename variant of the libSceGnmDriver ABI. Keep its
   // imports on the same HLE/LLE policy and HLE export table as the Base module.
   if (std::strcmp(lib, "libSceGnmDriver") == 0 ||
@@ -279,14 +286,14 @@ uintptr_t vprx_get(const char *lib, u64 hid) {
   if (std::strcmp(lib, "libSceUserServiceForNpToolkit") == 0)
     lib = "libSceUserService";
 
-  if (!useHleShim(lib, hid))
+  if (!UseHleShim(lib, hid))
     return 0;
 
-  const ModInfo *table = nullptr;
+  const ModInfo* table = nullptr;
 
   // find the right table
-  for (const auto &t : vprxTable) {
-    if (std::strcmp(lib, t->namePtr) == 0) {
+  for (const auto& t : g_vprx_table) {
+    if (std::strcmp(lib, t->name_ptr) == 0) {
       table = t;
       break;
     }
@@ -294,9 +301,9 @@ uintptr_t vprx_get(const char *lib, u64 hid) {
 
   if (table) {
     // search the table
-    for (int i = 0; i < table->funcCount; i++) {
-      auto *f = &table->funcNodes[i];
-      if (f->hashId == hid) {
+    for (int i = 0; i < table->func_count; i++) {
+      auto* f = &table->func_nodes[i];
+      if (f->hash_id == hid) {
         return reinterpret_cast<uintptr_t>(f->address);
       }
     }
@@ -305,7 +312,7 @@ uintptr_t vprx_get(const char *lib, u64 hid) {
   // DELTA_NID_TRACE: report imports with no HLE override (resolved to the LLE
   // module). Set it to a library-name substring to focus the dump, or "1" for
   // all. Fires once per import at load time, so it stays bounded.
-  if (const char *t = kNidTrace) {
+  if (const char* t = kNidTrace) {
     if (t[0] == '1' || std::strstr(lib, t))
       BASE_LOGI("nid", "{} hid={:#018x} -> LLE (no HLE)", lib,
                 (unsigned long long)hid);
@@ -313,20 +320,20 @@ uintptr_t vprx_get(const char *lib, u64 hid) {
   return 0;
 }
 
-const char base64Lookup[] =
+const char kBase64Lookup[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
 
 // base64 fast lookup
-bool decode_nid(const char *subset, size_t len, u64 &out) {
+bool DecodeNid(const char* subset, size_t len, u64& out) {
   for (size_t i = 0; i < len; i++) {
-    auto pos = std::strchr(base64Lookup, subset[i]);
+    auto pos = std::strchr(kBase64Lookup, subset[i]);
 
     // invalid NID?
     if (!pos) {
       return false;
     }
 
-    auto offset = static_cast<u32>(pos - base64Lookup);
+    auto offset = static_cast<u32>(pos - kBase64Lookup);
 
     // max NID is 11
     if (i < 10) {
@@ -341,33 +348,32 @@ bool decode_nid(const char *subset, size_t len, u64 &out) {
   return true;
 }
 
-static void obfuscate_sym(u64 in, u8 *out, size_t xlen) {
+static void ObfuscateSym(u64 in, u8* out, size_t xlen) {
   out[xlen--] = 0;
-  out[xlen--] = base64Lookup[(in & 0xF) * 4];
+  out[xlen--] = kBase64Lookup[(in & 0xF) * 4];
   u64 exp = in >> 4;
   while (exp != 0) {
-    out[xlen--] = base64Lookup[exp & 0x3F];
+    out[xlen--] = kBase64Lookup[exp & 0x3F];
     exp = exp >> 6;
   }
 }
 
-void encode_nid(const char *name, u8 *x) {
-  static const char suffix[] =
+void EncodeNid(const char* name, u8* x) {
+  static const char kSuffix[] =
       "\x51\x8D\x64\xA6\x35\xDE\xD8\xC1\xE6\xB0\x39\xB1\xC3\xE5\x52\x30";
 
   u8 sha[20]{};
   sha1_context ctx;
 
   Sha1Starts(&ctx);
-  Sha1Update(&ctx, reinterpret_cast<const u8 *>(name), std::strlen(name));
-  Sha1Update(&ctx, reinterpret_cast<const u8 *>(suffix),
-              std::strlen(suffix));
+  Sha1Update(&ctx, reinterpret_cast<const u8*>(name), std::strlen(name));
+  Sha1Update(&ctx, reinterpret_cast<const u8*>(kSuffix), std::strlen(kSuffix));
   Sha1Finish(&ctx, sha);
 
   /*the rest is ignored*/
-  u64 target = *(u64 *)(&sha);
+  u64 target = *(u64*)(&sha);
 
   // u8 out[11]{};
-  obfuscate_sym(target, x, 11);
+  ObfuscateSym(target, x, 11);
 }
-} // namespace runtime
+}  // namespace runtime

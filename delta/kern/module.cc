@@ -684,10 +684,10 @@ bool Module::MapImage() {
     u32 perm = s->flags & (PF_R | PF_W | PF_X);
     const bool exec = ps5 ? (perm & PF_X) != 0 : perm == (PF_R | PF_X);
     if (s->type == PT_LOAD && exec) {
-      runtime::codeLift lift(info_.rip_zone, rip_end);
-      LOG_ASSERT(lift.init());
+      runtime::CodeLift lift(info_.rip_zone, rip_end);
+      LOG_ASSERT(lift.Init());
 
-      lift.transform(GetAddress<u8>(s->vaddr), s->filesz);
+      lift.Transform(GetAddress<u8>(s->vaddr), s->filesz);
     }
   }
 #endif
@@ -769,9 +769,9 @@ static bool DecodeNid(const char* name, u64& lid, u64& mid) {
     return false;
   lid = 0;
   mid = 0;
-  if (!runtime::decode_nid(h1 + 1, static_cast<size_t>(h2 - (h1 + 1)), lid))
+  if (!runtime::DecodeNid(h1 + 1, static_cast<size_t>(h2 - (h1 + 1)), lid))
     return false;
-  if (!runtime::decode_nid(h2 + 1, std::strlen(h2 + 1), mid))
+  if (!runtime::DecodeNid(h2 + 1, std::strlen(h2 + 1), mid))
     return false;
   return true;
 }
@@ -782,7 +782,7 @@ bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
   // import.
   if (ps5_layout_) {
     u64 hid = 0;
-    if (!runtime::decode_nid(name, 11, hid))
+    if (!runtime::DecodeNid(name, 11, hid))
       return false;
     // System libraries forced to HLE on PS5 because their LLE backend needs a
     // daemon we don't host: libSceVideoOut (port table never registers; real
@@ -802,7 +802,7 @@ bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
       ptr_out = cpu::MakeHostThunk(reinterpret_cast<void*>(hle), tn);
     };
     for (const char* lib : kPs5ForcedHle) {
-      if (uintptr_t hle = runtime::vprx_get_forced(lib, hid)) {
+      if (uintptr_t hle = runtime::VprxGetForced(lib, hid)) {
         bind_hle(lib, hle);
         return true;
       }
@@ -839,7 +839,7 @@ bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
         "libkernel", "libSceAgcDriver", "libSceAgc", "libSceNgs2",
         "libSceFiber"};
     for (const char* lib : kPs5MissingExportShims) {
-      if (uintptr_t hle = runtime::vprx_get_forced(lib, hid)) {
+      if (uintptr_t hle = runtime::VprxGetForced(lib, hid)) {
         bind_hle(lib, hle);
         return true;
       }
@@ -871,8 +871,8 @@ bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
   // (e.g. libSceVideoOut's .bss device table is never populated here).
   {
     u64 hid = 0;
-    if (runtime::decode_nid(name, 11, hid)) {
-      if (uintptr_t hle = runtime::vprx_get(libname, hid)) {
+    if (runtime::DecodeNid(name, 11, hid)) {
+      if (uintptr_t hle = runtime::VprxGet(libname, hid)) {
         // The HLE handler is a native host function; on FEX the guest can't
         // jump to it directly, so bind a guest trampoline. Native returns it
         // as-is.
@@ -1075,7 +1075,7 @@ bool Module::ApplyRelocations() {
 
 uintptr_t Module::GetSymbol(u64 nid) {
   // are there any overrides for me?
-  auto imp = runtime::vprx_get(info_.name.c_str(), nid);
+  auto imp = runtime::VprxGet(info_.name.c_str(), nid);
   if (imp != 0)
     return imp;
 
@@ -1091,7 +1091,7 @@ uintptr_t Module::GetSymbol(u64 nid) {
     const char* name = &strtab_.ptr[s->st_name];
 
     u64 hid = 0;
-    if (!runtime::decode_nid(name, 11, hid)) {
+    if (!runtime::DecodeNid(name, 11, hid)) {
       LOG_ERROR("resolveExport: cant handle NID");
       return 0;
     }
@@ -1111,7 +1111,7 @@ uintptr_t Module::GetExport(u64 nid) {
       continue;
     const char* name = &strtab_.ptr[s->st_name];
     u64 hid = 0;
-    if (runtime::decode_nid(name, 11, hid) && nid == hid)
+    if (runtime::DecodeNid(name, 11, hid) && nid == hid)
       return GetAddressNptr<uintptr_t>(s->st_value);
   }
   return 0;
@@ -1145,7 +1145,7 @@ uintptr_t Module::GetSymbolFullName(const char* name) {
   u32* chain = &bucket[nbucket];
 
   /*char nameOut[11]{};
-  runtime::encode_nid("module_start", reinterpret_cast<u8*>(&nameOut));*/
+  runtime::EncodeNid("module_start", reinterpret_cast<u8*>(&nameOut));*/
 
   for (u32 i = bucket[hash % nbucket]; i; i = chain[i]) {
     const auto* s = &symbols_[i];

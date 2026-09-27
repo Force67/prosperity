@@ -1,28 +1,29 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
  *
- * PS5-only HLE alias for the one libSceNgs2 export missing from firmware 01.14.00.
- * All 12 call sites build the command struct in place and pass it in; there is no
- * out-parameter to fill, and the sites that check the result treat non-zero as
- * fatal, so report success.
+ * PS5-only HLE alias for the one libSceNgs2 export missing from firmware
+ * 01.14.00. All 12 call sites build the command struct in place and pass it in;
+ * there is no out-parameter to fill, and the sites that check the result treat
+ * non-zero as fatal, so report success.
  *
  * Everything else in libSceNgs2 stays LLE.
  */
 
-#include "guest_abi.h"
-#include "../vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 #include "base/arch.h"
-
+#include "guest_abi.h"
+#include "runtime/vprx/vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 
 namespace {
 // f(handle, const void *cmds, u32 count): command submission, all inputs.
-int PS4ABI ngs2SubmitCommands(void *, const void *, u32) { return 0; }
+int PS4ABI Ngs2SubmitCommands(void*, const void*, u32) {
+  return 0;
+}
 }  // namespace
 
-static const runtime::funcInfo functions[] = {
-    {0x01B62F4CE67C3EDB, (void *)&ngs2SubmitCommands},  // AbYvTOZ8Pts
+static const runtime::FuncInfo functions[] = {
+    {0x01B62F4CE67C3EDB, (void*)&Ngs2SubmitCommands},  // AbYvTOZ8Pts
 };
 
 MODULE_INIT_PS5(libSceNgs2);
 
-extern "C" int vprx_anchor_ps5_libSceNgs2 = 1;
+extern "C" int g_vprx_anchor_ps5_lib_sce_ngs2 = 1;

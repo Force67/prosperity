@@ -14,21 +14,22 @@
  * Everything else in libSceIme stays LLE.
  */
 
-#include "guest_abi.h"
-#include "../vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 #include "base/arch.h"
-
+#include "guest_abi.h"
+#include "runtime/vprx/vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 
 namespace {
 constexpr int kImeNoKeyboard = 0x80bc0004;
 
-int PS4ABI imeKeyboardOpen(i32, const void *) { return kImeNoKeyboard; }
+int PS4ABI ImeKeyboardOpen(i32, const void*) {
+  return kImeNoKeyboard;
+}
 }  // namespace
 
-static const runtime::funcInfo functions[] = {
-    {0x79A1578DF26FDF1B, (void *)&imeKeyboardOpen},  // eaFXjfJv3xs
+static const runtime::FuncInfo functions[] = {
+    {0x79A1578DF26FDF1B, (void*)&ImeKeyboardOpen},  // eaFXjfJv3xs
 };
 
 MODULE_INIT_PS5(libSceIme);
 
-extern "C" int vprx_anchor_ps5_libSceIme = 1;
+extern "C" int g_vprx_anchor_ps5_lib_sce_ime = 1;

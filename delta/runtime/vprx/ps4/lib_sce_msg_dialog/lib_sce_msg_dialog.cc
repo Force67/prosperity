@@ -1,22 +1,21 @@
 /*
  * PS4Delta : PS4 emulation and research project
  *
- * HLE libSceMsgDialog. Like libSceVideoOut/libSceGnmDriver, the real module is a
- * boot module whose init never runs in our env, so its internal state/callbacks
- * are null and the first call (rebirth polls sceMsgDialogUpdateStatus every
- * frame) jumps through an unset pointer and crashes (then corrupts the kernel
- * object table). Override the API: report "no dialog active" so the game's
- * per-frame dialog pump is a clean no-op, and complete any dialog the game does
- * open immediately with a default OK result.
+ * HLE libSceMsgDialog. Like libSceVideoOut/libSceGnmDriver, the real module is
+ * a boot module whose init never runs in our env, so its internal
+ * state/callbacks are null and the first call (rebirth polls
+ * sceMsgDialogUpdateStatus every frame) jumps through an unset pointer and
+ * crashes (then corrupts the kernel object table). Override the API: report "no
+ * dialog active" so the game's per-frame dialog pump is a clean no-op, and
+ * complete any dialog the game does open immediately with a default OK result.
  *
  * SceCommonDialogStatus: NONE=0, INITIALIZED=1, RUNNING=2, FINISHED=3.
  */
 
-#include "guest_abi.h"
-#include "lib_sce_msg_dialog.h"
+#include "runtime/vprx/ps4/lib_sce_msg_dialog/lib_sce_msg_dialog.h"
 #include "base/arch.h"
-#include <base/atomic.h>
-
+#include "base/atomic.h"
+#include "guest_abi.h"
 
 namespace {
 base::Atomic<bool> g_initialized{false};
@@ -36,7 +35,7 @@ int PS4ABI sceMsgDialogTerminate() {
   return 0;
 }
 
-int PS4ABI sceMsgDialogOpen(const void *param) {
+int PS4ABI sceMsgDialogOpen(const void* param) {
   g_open.store(true);
   return 0;
 }
@@ -56,7 +55,7 @@ int PS4ABI sceMsgDialogGetStatus() {
   return g_open.load() ? 3 : 0;
 }
 
-int PS4ABI sceMsgDialogGetResult(void *result) {
+int PS4ABI sceMsgDialogGetResult(void* result) {
   // Leave the caller-provided result struct as-is (games zero it first); a 0
   // return is success with the default (no button / OK) selection. Mark the
   // dialog consumed.
@@ -72,7 +71,7 @@ int PS4ABI sceMsgDialogProgressBarInc(u32 target, u32 delta) {
   return 0;
 }
 
-int PS4ABI sceMsgDialogProgressBarSetMsg(u32 target, const char *msg) {
+int PS4ABI sceMsgDialogProgressBarSetMsg(u32 target, const char* msg) {
   return 0;
 }
 

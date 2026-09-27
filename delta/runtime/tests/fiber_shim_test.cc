@@ -1,9 +1,9 @@
-#include "guest_abi.h"
 #include <gtest/gtest.h>
 #include "base/arch.h"
+#include "guest_abi.h"
 
+#include "base/strings/format.h"
 #include "runtime/vprx/vprx.h"
-#include <base/strings/format.h>
 
 // The seven sanitizer fiber hooks libSceFiber imports from the TSan/ASan debug
 // modules retail firmware doesn't ship (see vprx/ps5/lib_sce_fiber.cc).
@@ -20,29 +20,29 @@ constexpr u64 kSanitizerHookNids[] = {
 }
 
 TEST(FiberShim, SanitizerHooksRegistered) {
-  runtime::vprx_init();
+  runtime::VprxInit();
   for (u64 nid : kSanitizerHookNids)
-    EXPECT_NE(runtime::vprx_get_forced("libSceFiber", nid), 0u)
+    EXPECT_NE(runtime::VprxGetForced("libSceFiber", nid), 0u)
         << base::Format("{:#x}", nid).c_str();
 }
 
 TEST(FiberShim, StartSwitchNullsFakeStackSave) {
-  runtime::vprx_init();
-  auto fn = reinterpret_cast<void(PS4ABI *)(void **, const void *, size_t)>(
-      runtime::vprx_get_forced("libSceFiber", 0x00CE5D6D7A77A9B2));
+  runtime::VprxInit();
+  auto fn = reinterpret_cast<void(PS4ABI*)(void**, const void*, size_t)>(
+      runtime::VprxGetForced("libSceFiber", 0x00CE5D6D7A77A9B2));
   ASSERT_NE(fn, nullptr);
-  void *save = reinterpret_cast<void *>(0xdeadbeef);
+  void* save = reinterpret_cast<void*>(0xdeadbeef);
   fn(&save, nullptr, 0);
   EXPECT_EQ(save, nullptr);
   fn(nullptr, nullptr, 0);  // must tolerate a null out-pointer
 }
 
 TEST(FiberShim, FinishSwitchZeroesOutputs) {
-  runtime::vprx_init();
-  auto fn = reinterpret_cast<void(PS4ABI *)(void *, const void **, size_t *)>(
-      runtime::vprx_get_forced("libSceFiber", 0x718958B03418E74D));
+  runtime::VprxInit();
+  auto fn = reinterpret_cast<void(PS4ABI*)(void*, const void**, size_t*)>(
+      runtime::VprxGetForced("libSceFiber", 0x718958B03418E74D));
   ASSERT_NE(fn, nullptr);
-  const void *bottom = &bottom;
+  const void* bottom = &bottom;
   size_t size = 42;
   fn(nullptr, &bottom, &size);
   EXPECT_EQ(bottom, nullptr);

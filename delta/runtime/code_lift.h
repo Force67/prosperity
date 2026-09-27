@@ -18,21 +18,21 @@ struct procEnv;
 namespace runtime {
 // code analysis:
 // convert unsupported code
-class codeLift {
-public:
-  codeLift(u8 *&rip, u8 *ripEnd = nullptr);
-  ~codeLift();
+class CodeLift {
+ public:
+  CodeLift(u8*& rip, u8* rip_end = nullptr);
+  ~CodeLift();
 
-  bool init();
-  bool transform(u8 *, size_t size, u64 base = 0);
+  bool Init();
+  bool Transform(u8*, size_t size, u64 base = 0);
 
-private:
-  void emit_syscall(u8 *base, u32 idx);
-  void emit_fsbase(u8 *base);
+ private:
+  void EmitSyscall(u8* base, u32 idx);
+  void EmitFsbase(u8* base);
 
-  csh handle = 0;
-  cs_insn *insn = nullptr;
-  u8 *&ripPointer;
-  u8 *ripEnd = nullptr;  // end of the rip-zone; stop emitting stubs past it
+  csh handle_ = 0;
+  cs_insn* insn_ = nullptr;
+  u8*& rip_pointer_;
+  u8* rip_end_ = nullptr;  // end of the rip-zone; stop emitting stubs past it
 };
-}
+}  // namespace runtime

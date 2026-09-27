@@ -1,53 +1,55 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
  *
- * PS5-only HLE aliases for libSceAgcDriver exports that firmware 01.14.00 does not
- * have (newer-SDK titles import them anyway; see vprx/ps5/libkernel.cc for the
- * same problem in libc). Both entries here are query functions with a u32
- * out-parameter, reached from the title's varargs GPU-debug-label path. Left on the
- * badcall stub they return "success" without writing the out-param, and the caller
- * allocas that uninitialised stack slot. Dead Cells (PPSA15552) overflows its
- * stack into a guard page that way.
+ * PS5-only HLE aliases for libSceAgcDriver exports that firmware 01.14.00 does
+ * not have (newer-SDK titles import them anyway; see vprx/ps5/libkernel.cc for
+ * the same problem in libc). Both entries here are query functions with a u32
+ * out-parameter, reached from the title's varargs GPU-debug-label path. Left on
+ * the badcall stub they return "success" without writing the out-param, and the
+ * caller allocas that uninitialised stack slot. Dead Cells (PPSA15552)
+ * overflows its stack into a guard page that way.
  *
  * Everything else in libSceAgcDriver stays LLE.
  */
 
-#include "guest_abi.h"
-#include "../vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 #include "base/arch.h"
-
+#include "guest_abi.h"
+#include "runtime/vprx/vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 
 namespace {
-// libSceAgc "unsupported" status. The title's own SDK wrappers already return this
-// code, so its error paths handle it; anything non-zero except 0x8a6c9018 makes the
-// debug-label helper bail before the alloca.
+// libSceAgc "unsupported" status. The title's own SDK wrappers already return
+// this code, so its error paths handle it; anything non-zero except 0x8a6c9018
+// makes the debug-label helper bail before the alloca.
 constexpr int kAgcUnsupported = 0x8a6c0044;
 
 // f(u32 *out): caller reads *out unconditionally and ignores the return.
-int PS4ABI agcDriverQueryU32(u32 *out) {
+int PS4ABI AgcDriverQueryU32(u32* out) {
   if (out)
     *out = 0;
   return 0;
 }
 
 // f(u32 *sizeOut): on success the caller allocas *sizeOut. We have no size to
-// report, so fail instead; the caller then returns -1 without touching the stack.
-int PS4ABI agcDriverQuerySize(u32 *sizeOut) {
-  if (sizeOut)
-    *sizeOut = 0;
+// report, so fail instead; the caller then returns -1 without touching the
+// stack.
+int PS4ABI AgcDriverQuerySize(u32* size_out) {
+  if (size_out)
+    *size_out = 0;
   return kAgcUnsupported;
 }
 
 // f(int): return value ignored at its only call site.
-int PS4ABI agcDriverSetFlag(int) { return 0; }
+int PS4ABI AgcDriverSetFlag(int) {
+  return 0;
+}
 }  // namespace
 
-static const runtime::funcInfo functions[] = {
-    {0x174657B79AB46530, (void *)&agcDriverQueryU32},   // F0ZXt5q0ZTA
-    {0xB89CE246C3839357, (void *)&agcDriverQuerySize},  // uJziRsODk1c
-    {0x53DB9EC84852905E, (void *)&agcDriverSetFlag},    // U9ueyEhSkF4
+static const runtime::FuncInfo functions[] = {
+    {0x174657B79AB46530, (void*)&AgcDriverQueryU32},   // F0ZXt5q0ZTA
+    {0xB89CE246C3839357, (void*)&AgcDriverQuerySize},  // uJziRsODk1c
+    {0x53DB9EC84852905E, (void*)&AgcDriverSetFlag},    // U9ueyEhSkF4
 };
 
 MODULE_INIT_PS5(libSceAgcDriver);
 
-extern "C" int vprx_anchor_ps5_libSceAgcDriver = 1;
+extern "C" int g_vprx_anchor_ps5_lib_sce_agc_driver = 1;

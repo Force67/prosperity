@@ -5,7 +5,7 @@
 // This file was generated on 10/12/2019
 
 #include "guest_abi.h"
-#include "../../vprx.h"
+#include "runtime/vprx/vprx.h"
 
 #pragma warning(push, 0)
 
@@ -20,17 +20,17 @@ int PS4ABI scePadDisconnectPort();
 int PS4ABI scePadEnableAutoDetect();
 int PS4ABI scePadEnableUsbConnection();
 int PS4ABI scePadGetCapability();
-int PS4ABI scePadGetControllerInformation(int handle, void *pInfo);
+int PS4ABI scePadGetControllerInformation(int handle, void* p_info);
 int PS4ABI scePadGetDataInternal();
 int PS4ABI scePadGetDeviceInfo();
-int PS4ABI scePadGetHandle(int userId, int type, int index);
+int PS4ABI scePadGetHandle(int user_id, int type, int index);
 int PS4ABI scePadGetVersionInfo();
 int PS4ABI scePadInit();
 int PS4ABI scePadIsLightBarBaseBrightnessControllable();
 int PS4ABI scePadMbusInit();
-int PS4ABI scePadOpen(int userId, int type, int index, const void *param);
-int PS4ABI scePadRead(int handle, void *data, int num);
-int PS4ABI scePadReadState(int handle, void *data);
+int PS4ABI scePadOpen(int user_id, int type, int index, const void* param);
+int PS4ABI scePadRead(int handle, void* data, int num);
+int PS4ABI scePadReadState(int handle, void* data);
 int PS4ABI scePadResetLightBar();
 int PS4ABI scePadResetOrientation();
 int PS4ABI scePadSetAngularVelocityDeadbandState();
@@ -44,7 +44,7 @@ int PS4ABI scePadSetLightBarBlinking();
 int PS4ABI scePadSetMotionSensorState();
 int PS4ABI scePadSetTiltCorrectionState();
 struct ScePadVibrationParam;
-int PS4ABI scePadSetVibration(int handle, const ScePadVibrationParam *param);
+int PS4ABI scePadSetVibration(int handle, const ScePadVibrationParam* param);
 int PS4ABI scePadShareOutputData();
 int PS4ABI scePadSwitchConnection();
 int PS4ABI scePadSetProcessPrivilege();
@@ -56,7 +56,7 @@ int PS4ABI scePadVirtualDeviceGetRemoteSetting();
 int PS4ABI scePadVirtualDeviceAddDevice();
 int PS4ABI scePadVirtualDeviceDeleteDevice();
 int PS4ABI scePadGetFeatureReport();
-int PS4ABI scePadReadExt(int handle, void *data, int num);
+int PS4ABI scePadReadExt(int handle, void* data, int num);
 int PS4ABI scePadGetBluetoothAddress();
 int PS4ABI unk_UeUUvNOgXKU();
 int PS4ABI scePadOpenExt();
@@ -88,7 +88,7 @@ int PS4ABI scePadReadForTracker();
 int PS4ABI scePadReadHistory();
 int PS4ABI scePadGetInfoByPortType();
 int PS4ABI scePadIsMoveConnected();
-int PS4ABI scePadReadStateExt(int handle, void *data);
+int PS4ABI scePadReadStateExt(int handle, void* data);
 int PS4ABI unk_7xA_hFtvBCA();
 int PS4ABI scePadOpenExt2();
 int PS4ABI scePadSetVibrationForce();

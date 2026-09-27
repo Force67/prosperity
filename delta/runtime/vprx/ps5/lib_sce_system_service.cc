@@ -2,10 +2,11 @@
  * PS4Delta : PS4/PS5 emulation and research project
  *
  * PS5-only HLE override for sceSystemServiceReportAbnormalTermination, matching
- * what the PS4 HLE already does. The real .sprx aborts when handed a NULL report,
- * which is exactly how titles call it from their own fatal handlers, so the
- * crash the emulator sees is the reporter rather than whatever the title was
- * complaining about. Accept the report and let the title's error path continue.
+ * what the PS4 HLE already does. The real .sprx aborts when handed a NULL
+ * report, which is exactly how titles call it from their own fatal handlers, so
+ * the crash the emulator sees is the reporter rather than whatever the title
+ * was complaining about. Accept the report and let the title's error path
+ * continue.
  *
  * sceSystemServiceParamGetInt answers the console's system settings, the system
  * LANGUAGE above all (see ../sys_params.h).
@@ -13,24 +14,27 @@
  * Everything else in libSceSystemService stays LLE.
  */
 
-#include "guest_abi.h"
-#include "../vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 #include "base/arch.h"
+#include "guest_abi.h"
+#include "runtime/vprx/vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 
-#include "../sys_params.h"
+#include "runtime/vprx/sys_params.h"
 
 namespace {
-int PS4ABI systemServiceReportAbnormalTermination(void *) { return 0; }
-
-int PS4ABI systemServiceParamGetInt(i32 paramId, i32 *value) {
-  return runtime::sysparam::ParamGetInt(paramId, value);
+int PS4ABI SystemServiceReportAbnormalTermination(void*) {
+  return 0;
 }
 
-// sceLncUtilGetAppStatus {appId, _, state}: state 4 = running in foreground (the PS4
-// query answers the same in svc_lnc.cc). The PS5 LLE path reads a zeroed reply from
-// a SceLncService method we don't implement, and sceNpWebApi2Initialize returns
-// 0x8055c102 unless state is 4 or 5 (Demon's Souls' Crossgen init verifies it).
-int PS4ABI lncUtilGetAppStatus(u32 *status) {
+int PS4ABI SystemServiceParamGetInt(i32 param_id, i32* value) {
+  return runtime::sysparam::ParamGetInt(param_id, value);
+}
+
+// sceLncUtilGetAppStatus {appId, _, state}: state 4 = running in foreground
+// (the PS4 query answers the same in svc_lnc.cc). The PS5 LLE path reads a
+// zeroed reply from a SceLncService method we don't implement, and
+// sceNpWebApi2Initialize returns 0x8055c102 unless state is 4 or 5 (Demon's
+// Souls' Crossgen init verifies it).
+int PS4ABI LncUtilGetAppStatus(u32* status) {
   if (!status)
     return -1;
   status[0] = 0x60000001;  // ipmi kForegroundAppId
@@ -40,12 +44,12 @@ int PS4ABI lncUtilGetAppStatus(u32 *status) {
 }
 }  // namespace
 
-static const runtime::funcInfo functions[] = {
-    {0xDECF1C1E20812811, (void *)&systemServiceReportAbnormalTermination},
-    {0x7D9A38F2E9FB2CAE, (void *)&systemServiceParamGetInt},
-    {0x0F14648BB4F6138E, (void *)&lncUtilGetAppStatus},
+static const runtime::FuncInfo functions[] = {
+    {0xDECF1C1E20812811, (void*)&SystemServiceReportAbnormalTermination},
+    {0x7D9A38F2E9FB2CAE, (void*)&SystemServiceParamGetInt},
+    {0x0F14648BB4F6138E, (void*)&LncUtilGetAppStatus},
 };
 
 MODULE_INIT_PS5(libSceSystemService);
 
-extern "C" int vprx_anchor_ps5_libSceSystemService = 1;
+extern "C" int g_vprx_anchor_ps5_lib_sce_system_service = 1;
