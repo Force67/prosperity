@@ -1831,6 +1831,8 @@ void InvalidateTexRange(u64 base, u64 size) {
       found->second.last_checked_frame = -1;
       found->second.last_full_frame = -1;
       found->second.check_interval = 1;
+      // Its prevalidated hashes read the bytes from before this change.
+      found->second.pre_frame = -1;
     }
   }
 }
