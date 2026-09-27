@@ -13,7 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "dcore.h"
+#include "main/launcher.h"
 #include <logger/logger.h>
 #include <io/file.h>
 
@@ -43,11 +43,11 @@ namespace {
 DELTA_OPTION(bool, kHdrFill, "DELTA_HDR_FILL", false);
 }  // namespace
 
-deltaCore::deltaCore() = default;
-deltaCore::~deltaCore() = default;
+Launcher::Launcher() = default;
+Launcher::~Launcher() = default;
 
-bool deltaCore::init() {
-  LOG_INFO("Initializing deltaCore " rsc_copyright);
+bool Launcher::init() {
+  LOG_INFO("Initializing prosperity " rsc_copyright);
   // Collaborators kern is not allowed to name: the PM4 write-watch the probes
   // arm, the CS-range describer the crash dump asks for, the guest write
   // tracker that must hear about remapped memory, and the audio daemon's host
@@ -116,7 +116,7 @@ bool endsWithIgnoreCase(const base::String &s, const char *ext) {
 }
 } // namespace
 
-void deltaCore::boot(const base::String &xdir) {
+void Launcher::boot(const base::String &xdir) {
   base::String path = xdir;
 
 #ifdef _WIN32

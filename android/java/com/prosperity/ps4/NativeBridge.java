@@ -2,7 +2,7 @@ package com.prosperity.ps4;
 
 /**
  * Thin bridge to the native utilities exported by libps4delta_app.so
- * (delta/main/android_jni.cpp). Loaded in the launcher process only to read pkg
+ * (delta/main/android_jni.cc). Loaded in the launcher process only to read pkg
  * metadata and unpack firmware; the emulator itself is entered via
  * NativeActivity in a separate process.
  */

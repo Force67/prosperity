@@ -22,7 +22,7 @@
 #include <VersionHelpers.h>
 #endif
 
-#include "dcore.h"
+#include "main/launcher.h"
 #include "cpu/backend.h"
 #include "host/overlay_log.h"
 #include "gpu/render/renderer.h"
@@ -128,7 +128,7 @@ static void win32PostInit() {
 }
 #endif
 
-extern "C" __attribute__((visibility("default"))) int dcoreMain(int argc, char **argv) {
+int main(int argc, char **argv) {
 #if defined(__linux__)
   // Let a debugger attach to a run that is already going. Under the default
   // yama ptrace_scope=1 only an ancestor may attach, and a stuck title is
@@ -159,7 +159,7 @@ extern "C" __attribute__((visibility("default"))) int dcoreMain(int argc, char *
   if (!verifyViablity())
     return -1;
 
-  deltaCore core;
+  Launcher core;
 
   if (!core.init())
     return -1;

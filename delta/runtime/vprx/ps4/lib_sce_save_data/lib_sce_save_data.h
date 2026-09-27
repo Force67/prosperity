@@ -14,7 +14,7 @@
 // I/O under. Saves live under $DELTA_SAVEDATA_DIR (default
 // ~/.prosperity/savedata) keyed by <TITLE_ID>/<dirName>, so different games
 // can't collide on a shared dirName. The title id comes from the pkg's
-// param.sfo (plumbed by dcore). Saves created before per-title roots existed (a
+// param.sfo (plumbed by the launcher). Saves created before per-title roots existed (a
 // bare <dirName> under the root) are still found: mount/param lookups fall back
 // to that legacy path when no per-title directory exists yet.
 //

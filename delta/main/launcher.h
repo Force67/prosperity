@@ -14,12 +14,12 @@
 #include <base/strings/xstring.h>
 #include <base/memory/unique_pointer.h>
 
-class deltaCore {
+class Launcher {
 public:
   using argvList = base::Vector<base::String>;
 
-  deltaCore();
-  ~deltaCore();
+  Launcher();
+  ~Launcher();
 
   bool init();
   void boot(const base::String& fromdir);
@@ -30,4 +30,3 @@ private:
   base::UniquePointer<kern::Process> proc;
 };
 
-extern "C" int dcoreMain(int argc, char** argv);

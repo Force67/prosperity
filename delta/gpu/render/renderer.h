@@ -132,7 +132,7 @@ bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size);
 void NoteGuestRemap(u64 base, u64 bytes);
 
 // The process-wide renderer instance the command processors drive. The
-// composition root (main/dapi) Init()s it once; the HLE submit paths reach it
+// composition root (main/main.cc) Init()s it once; the HLE submit paths reach it
 // through this accessor because the guest-called entry points cannot thread a
 // handle. The single point of ambient state at this seam.
 Renderer& DefaultRenderer();

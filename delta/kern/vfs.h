@@ -97,7 +97,7 @@ bool Stat(const char* guest_path, i64& size, bool& is_dir);
 bool ListDir(const char* guest_path, base::Vector<DirEntry>& out);
 
 // The booted title's TITLE_ID (e.g. "CUSA00792"), or empty if unknown. Set once
-// at boot by dcore from the pkg's param.sfo (the outer PKG metadata entry,
+// at boot by the launcher from the pkg's param.sfo (the outer PKG metadata entry,
 // which is the only copy for titles like Isaac). savedata reads it to give each
 // title its own host save root.
 void SetTitleId(const base::String& id);

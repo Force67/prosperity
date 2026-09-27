@@ -23,7 +23,7 @@
 #include <base/strings/xstring.h>
 
 #include "cpu/backend.h"
-#include "dcore.h"
+#include "main/launcher.h"
 #include "host/window.h"
 #include "host/window_android.h"
 #include <logger/logger.h>
@@ -62,7 +62,7 @@ void redirectStdioToLogcat() {
 }
 
 struct AppState {
-  deltaCore *core = nullptr;
+  Launcher *core = nullptr;
   base::String dataDir;
   bool booted = false;
 };
@@ -99,7 +99,7 @@ void bootOnce(AppState *s) {
   if (s->booted)
     return;
   s->booted = true;
-  s->core = new deltaCore();
+  s->core = new Launcher();
   s->core->init();
   base::String pkg = resolveBootPkg(s->dataDir);
   LOGI("booting pkg %s", pkg.c_str());

@@ -1,23 +1,20 @@
-# The main module: process bootstrap (dapi), the deltaCore orchestrator
-# (dcore) and the executable entry point (main.cpp). Links every other module
-# into the final ps4delta binary. android_main.cpp is the app-only entry.
-file(GLOB MAIN_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
-# android_main.cpp / android_jni.cpp are app-only (NativeActivity + JNI bridge).
-list(REMOVE_ITEM MAIN_SOURCES
-  ${CMAKE_CURRENT_SOURCE_DIR}/android_main.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/android_jni.cpp)
+# The composition root: the executable entry (main.cc) and the Launcher that
+# wires the subsystems together and boots a title. Links every other module
+# into the final ps4delta binary. android_main.cc is the app-only entry.
+set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cc
+                 ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc)
 
 set(MAIN_LIBS delta_deps delta_kern delta_runtime delta_formats
               delta_host delta_cpu)
 
 if(DELTA_ANDROID_APP)
   # NativeActivity shared lib loaded by android.app.NativeActivity. android_main
-  # (via native_app_glue) replaces main.cpp/dapi.cpp; dcore drives the boot.
+  # (via native_app_glue) replaces main.cc; the Launcher drives the boot.
   set(_glue ${ANDROID_NDK}/sources/android/native_app_glue)
   add_library(ps4delta_app SHARED
-    ${CMAKE_CURRENT_SOURCE_DIR}/android_main.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/android_jni.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dcore.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/android_main.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/android_jni.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc
     ${_glue}/android_native_app_glue.c)
   target_include_directories(ps4delta_app PRIVATE ${_glue}
     ${CMAKE_CURRENT_SOURCE_DIR}/_res)
@@ -39,12 +36,12 @@ endif()
 
 add_executable(ps4delta ${MAIN_SOURCES})
 
-# host.rc / dapi resource defines include resource.h out of _res.
+# host.rc / main.cc resource defines include resource.h out of _res.
 target_include_directories(ps4delta PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/_res)
 
 target_link_libraries(ps4delta PRIVATE ${MAIN_LIBS})
 
-# dapi.cpp uses xbyak_util for the CPU feature probe only on the native x86 path.
+# main.cc uses xbyak_util for the CPU feature probe only on the native x86 path.
 if(DELTA_BACKEND STREQUAL "NATIVE")
   target_link_libraries(ps4delta PRIVATE xbyak)
 endif()

@@ -5,7 +5,7 @@
  * LauncherActivity loads libps4delta_app.so and calls these to read pkg
  * metadata (param.sfo title / title-id, icon0.png cover art) for the game
  * library, and to best-effort unpack a firmware .PUP. The emulator itself is
- * still entered through ANativeActivity_onCreate (android_main.cpp); this file
+ * still entered through ANativeActivity_onCreate (android_main.cc); this file
  * only adds utility entry points reused by the launcher UI.
  */
 #if defined(__ANDROID__) && defined(DELTA_ANDROID_APP)
