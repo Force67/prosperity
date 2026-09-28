@@ -73,6 +73,7 @@ extern "C" int g_vprx_anchor_lib_sce_np_trophy;
 // HLE libSceAvPlayer: stub the movie player so intro/cutscene playback is
 // skipped instead of crashing the un-emulated H.264/Atrac9 decode threads.
 extern "C" int g_vprx_anchor_lib_sce_av_player;
+extern "C" int g_vprx_anchor_lib_sce_videodec2;
 // Partial HLE override: only sceSystemServiceReportAbnormalTermination (the
 // rest of libSceSystemService stays LLE). Stops the title's fatal-error
 // reporter from tripping the real .sprx's NULL-arg assert.
@@ -119,6 +120,7 @@ static volatile int* const kVprxAnchors[] = {
     &g_vprx_anchor_lib_sce_audio_in,
     &g_vprx_anchor_lib_sce_np_trophy,
     &g_vprx_anchor_lib_sce_av_player,
+    &g_vprx_anchor_lib_sce_videodec2,
     &g_vprx_anchor_lib_sce_system_service,
     &g_vprx_anchor_lib_sce_net_ctl};
 
