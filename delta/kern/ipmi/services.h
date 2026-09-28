@@ -21,6 +21,8 @@ namespace kern::ipmi {
 constexpr u32 kForegroundAppId = 0x60000001;
 
 Service& PlayGoService();
+// The title's PlayGo chunk count, as the daemon reports it.
+u32 PlayGoChunkCount();
 Service& NpManagerService();
 Service& NpWebService();
 Service& UserService();

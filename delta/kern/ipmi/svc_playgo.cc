@@ -197,4 +197,8 @@ Service& PlayGoService() {
   return g_play_go;
 }
 
+u32 PlayGoChunkCount() {
+  return ChunkCount();
+}
+
 }  // namespace kern::ipmi
