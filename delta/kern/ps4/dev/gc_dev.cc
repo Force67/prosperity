@@ -537,48 +537,55 @@ void GcDevice::RingDoorbell(u32 ring_id, u32 write_offset_dw) {
       return;
     const u32 pending =
         (write_offset_dw - q.read_offset_dw) & (q.ring_size_dw - 1);
+    // This queue only, and only up to what the doorbell published. Draining
+    // every queue ran Uncharted 2's other ring early, before the title reset
+    // the labels that work sets, so its graphics waited on labels already
+    // wiped and skinned from tables not yet written.
     if (pending)
-      DrainQueues(pending);
+      DrainQueue(q, pending);
     return;
   }
 }
 
 void GcDevice::DrainQueues(u32 budget_dw) {
-  for (ComputeQueue& q : g_compute_queues) {
-    if (!q.mapped || !q.ring_size_dw ||
-        !host_memory::IsMemoryRangeMapped(
-            reinterpret_cast<const void*>(q.ring_base),
-            static_cast<u64>(q.ring_size_dw) * 4))
-      continue;
-    const auto* ring = reinterpret_cast<const u32*>(q.ring_base);
-    const u32 mask = q.ring_size_dw - 1;
-    const u32 budget = base::Min<u32>(budget_dw, q.ring_size_dw);
-    u32 off = q.read_offset_dw, consumed = 0;
-    while (consumed < budget) {
-      u32 w[4];
-      for (u32 i = 0; i < 4; i++)
-        w[i] = ring[(off + i) & mask];
-      if ((w[0] & 0xFFFFFF00u) != 0xC0023F00u)
-        break;
-      const u64 addr = (static_cast<u64>(w[2] & 0xFF) << 32) | w[1];
-      const u32 dw = w[3] & 0xFFFFF;
-      if (!dw ||
-          !host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(addr),
-                                            static_cast<u64>(dw) * 4))
-        break;
-      prosperity_gc_submit_acb(w, sizeof(w));
-      off = (off + 4) & mask;
-      consumed += 4;
-    }
-    if (consumed) {
-      q.read_offset_dw = off;
-      if (host_memory::IsMemoryRangeMapped(
-              reinterpret_cast<const void*>(q.read_ptr), sizeof(u32)))
-        *reinterpret_cast<u32*>(q.read_ptr) = off;
-      if (kGcTrace)
-        BASE_LOGI("acbscan", "{}/{}/{} drained {} dwords -> {:#x}", q.me,
-                  q.pipe, q.queue, consumed, off);
-    }
+  for (ComputeQueue& q : g_compute_queues)
+    DrainQueue(q, budget_dw);
+}
+
+void GcDevice::DrainQueue(ComputeQueue& q, u32 budget_dw) {
+  if (!q.mapped || !q.ring_size_dw ||
+      !host_memory::IsMemoryRangeMapped(
+          reinterpret_cast<const void*>(q.ring_base),
+          static_cast<u64>(q.ring_size_dw) * 4))
+    return;
+  const auto* ring = reinterpret_cast<const u32*>(q.ring_base);
+  const u32 mask = q.ring_size_dw - 1;
+  const u32 budget = base::Min<u32>(budget_dw, q.ring_size_dw);
+  u32 off = q.read_offset_dw, consumed = 0;
+  while (consumed < budget) {
+    u32 w[4];
+    for (u32 i = 0; i < 4; i++)
+      w[i] = ring[(off + i) & mask];
+    if ((w[0] & 0xFFFFFF00u) != 0xC0023F00u)
+      break;
+    const u64 addr = (static_cast<u64>(w[2] & 0xFF) << 32) | w[1];
+    const u32 dw = w[3] & 0xFFFFF;
+    if (!dw ||
+        !host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(addr),
+                                          static_cast<u64>(dw) * 4))
+      break;
+    prosperity_gc_submit_acb(w, sizeof(w));
+    off = (off + 4) & mask;
+    consumed += 4;
+  }
+  if (consumed) {
+    q.read_offset_dw = off;
+    if (host_memory::IsMemoryRangeMapped(
+            reinterpret_cast<const void*>(q.read_ptr), sizeof(u32)))
+      *reinterpret_cast<u32*>(q.read_ptr) = off;
+    if (kGcTrace)
+      BASE_LOGI("acbscan", "{}/{}/{} drained {} dwords -> {:#x}", q.me,
+                q.pipe, q.queue, consumed, off);
   }
 }
 

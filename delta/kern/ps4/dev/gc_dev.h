@@ -44,6 +44,9 @@ class GcDevice : public Device {
     u32 read_offset_dw = 0;
     bool mapped = false;
   };
+  // Execute one queue's complete indirect-buffer packets, up to `budget_dw`
+  // dwords. Same locking rule as DrainQueues.
+  static void DrainQueue(ComputeQueue& q, u32 budget_dw);
 
   // The mapped compute queues are hardware, not per-descriptor state: sys_open
   // news a GcDevice per open, and a queue mapped through one fd has to be
