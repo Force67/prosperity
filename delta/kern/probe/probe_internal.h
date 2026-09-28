@@ -9,6 +9,8 @@
 
 #include "base/arch.h"
 
+#include <cstdint>
+
 namespace kern {
 class Process;
 class Module;
@@ -24,6 +26,10 @@ void InstallAllocLock(Module& m);
 void InstallMatTrace(Module& m);
 void InstallJobTrace(Module& m);
 void ApplyBootPatches(Process& p);
+
+// DELTA_IMPORT_TRACE: route an import through a recording stub (see
+// import_trace.cc); returns real_addr when it is not traced.
+uintptr_t MaybeTraceImport(const char* nid_name, uintptr_t real_addr);
 
 }  // namespace probe
 }  // namespace kern

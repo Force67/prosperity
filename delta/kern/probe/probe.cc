@@ -816,7 +816,7 @@ void OnBeforeStart(Process& p) {
 }
 
 uintptr_t WrapImport(const char* nid_name, uintptr_t real_addr) {
-  return MaybeWrapFiosImport(nid_name, real_addr);
+  return MaybeTraceImport(nid_name, MaybeWrapFiosImport(nid_name, real_addr));
 }
 
 }  // namespace kern::probe

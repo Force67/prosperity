@@ -33,6 +33,7 @@
 #include <ctime>
 
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -102,6 +103,19 @@ static void ProbeHandler(int, siginfo_t*, void* ucv) {
   // The frame chain first: a stack scan finds stale return addresses too, which
   // is misleading when the question is "what is this thread blocked in".
   Backtrace(gr[REG_RBP]);
+  // The host frames too, raw: which of our waits a parked thread is in.
+  // tools/drun.py symbolizes them against the binary.
+  {
+    void* frames[24];
+    const int n = ::backtrace(frames, 24);
+    char line[24 * 17 + 1];
+    int at = 0;
+    for (int i = 0; i < n; i++)
+      at += std::snprintf(line + at, sizeof(line) - at, " %lx",
+                          reinterpret_cast<unsigned long>(frames[i]));
+    line[at] = '\0';
+    BASE_LOGI("probe", "  hostbt:{}", line);
+  }
   // A thread parked in a wait is parked inside a SYSCALL, so its rsp is our own
   // handler stack; the guest stack it came off is recorded on syscall entry,
   // copied out with process_vm_readv, and is the one that names the waiter.
