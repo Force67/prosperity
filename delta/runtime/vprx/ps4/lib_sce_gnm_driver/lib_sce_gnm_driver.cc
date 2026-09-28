@@ -30,6 +30,7 @@
 #include "base/logging.h"
 
 #include "gpu/ps4/cmd_processor.h"
+#include "kern/probe/probe_arm.h"
 #include "options/options.h"
 
 namespace {
@@ -39,6 +40,8 @@ DELTA_OPTION(bool, kGcSubmit, "DELTA_GC_SUBMIT", false);
 DELTA_OPTION(u32, kGcAcbFrame, "DELTA_GPU_ACB_FRAME", 0);
 DELTA_OPTION(u64, kGcSubmitMax, "DELTA_GC_SUBMIT_MAX", 0);
 DELTA_OPTION(bool, kPm4dump, "DELTA_PM4DUMP", false);
+// Name the writer of a word the command processor waits on but never writes.
+DELTA_OPTION(bool, kWaitWatch, "DELTA_GPU_WAITWATCH", false);
 }  // namespace
 
 // VideoOut HLE flip bridge (same delta_runtime library).
@@ -59,6 +62,15 @@ extern "C" u64 prosperity_videoout_buffer(int buffer_index);
 // sprx submit wrappers.)
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gc_submit(const void* desc_array, u32 desc_count) {
+  static const bool hooked = [] {
+    if (kWaitWatch)
+      gpu::ps4::SetUnknownWaitHook([](u64 address) {
+        kern::probe::StartWriteWatch(address, 4, 0, /*trap_reads=*/false,
+                                     /*single_step=*/true);
+      });
+    return true;
+  }();
+  (void)hooked;
   auto* d = static_cast<const u32*>(desc_array);
   if (!d)
     return;
@@ -125,7 +137,7 @@ extern "C" void prosperity_gc_submit(const void* desc_array, u32 desc_count) {
 
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gc_submit_acb(const void* commands, u32 bytes) {
-  gpu::ps4::SubmitDcb(commands, bytes);
+  gpu::ps4::SubmitRingDcb(commands, bytes);
 }
 // NOLINTEND(readability-identifier-naming)
 
@@ -347,8 +359,9 @@ int PS4ABI sceGnmAreSubmitsAllowed() {
 // known good. See prosperity_gc_dingdong.
 int PS4ABI sceGnmDingDong(u32 ring_id, u32 offset) {
   static int n = 0;
-  if (kDingDong && n++ < 20)
-    BASE_LOGI("gnm", "sceGnmDingDong ring={} offset={:#x}", ring_id, offset);
+  if (kDingDong && (n++ < 20 || n % 50 == 0))
+    BASE_LOGI("gnm", "sceGnmDingDong #{} ring={} offset={:#x}", n, ring_id,
+              offset);
   // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
   prosperity_gc_dingdong(ring_id, offset);
   return 0;

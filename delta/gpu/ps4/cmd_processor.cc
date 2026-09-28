@@ -19,6 +19,7 @@
 #include "base/atomic.h"
 #include "base/containers/hash_map.h"
 #include "base/containers/set.h"
+#include "base/memory/move.h"
 #include "base/containers/vector.h"
 #include "base/math/value_bounds.h"
 #include "base/threading/lock_guard.h"
@@ -38,6 +39,9 @@
 
 namespace {
 DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
+// Log every memory WAIT_REG_MEM from this many seconds into the run: where in
+// which buffer, on what word, and what the word held when the walk got there.
+DELTA_OPTION(u32, kWaitTraceFrom, "DELTA_GPU_WAITTRACE", 0);
 // Record draws on a renderer thread of their own (see render_queue.h).
 DELTA_OPTION(bool, kRenderThread, "DELTA_GPU_RENDER_THREAD", true);
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
@@ -93,23 +97,31 @@ constexpr u32 kMaxIbDepth = 8;
 // WRITE_DATA fence labels a title's CPU threads and other rings poll to order
 // themselves after this one. A WAIT_REG_MEM on anything else is waiting for a
 // producer we do not run, and spinning on that buys nothing.
+// Titles that allocate labels per frame (Uncharted 2) keep producing new
+// addresses, so the set forgets the oldest generation rather than filling up:
+// a full set turned every later wait on a label of ours into a skipped one.
 class FenceLabels {
  public:
   void Note(u64 address) {
     if (!address)
       return;
     base::LockGuard<base::Mutex> lock(mutex_);
-    if (addresses_.size() < 4096)
-      addresses_.insert(address & ~3ull);
+    if (current_.size() >= kGeneration) {
+      previous_ = base::move(current_);
+      current_ = {};
+    }
+    current_.insert(address & ~3ull);
   }
   bool Contains(u64 address) const {
     base::LockGuard<base::Mutex> lock(mutex_);
-    return addresses_.count(address & ~3ull) != 0;
+    const u64 key = address & ~3ull;
+    return current_.count(key) != 0 || previous_.count(key) != 0;
   }
 
  private:
+  static constexpr size_t kGeneration = 65536;
   mutable base::Mutex mutex_;
-  base::HashSet<u64> addresses_;
+  base::HashSet<u64> current_, previous_;
 };
 FenceLabels g_fence_labels;
 
@@ -140,7 +152,11 @@ bool GpuWriteMapped(const char* packet, u64 address, u64 bytes) {
 // CPU-side polls (the flip-done / submit-done labels Gnm spins on between
 // frames) make progress. Without it the title stalls once the few in-flight
 // display buffers drain.
+void NoteGpuWriteNear(const char* packet, u64 address, u64 value);
+
 void WriteLabel(u64 address, u64 value, bool is_64bit) {
+  NoteGpuWriteNear("label", address, value);
+
   g_fence_labels.Note(address);
   if (!IsLabelAddress(address) ||
       !GpuWriteMapped("label", address, is_64bit ? 8 : 4))
@@ -285,13 +301,63 @@ const volatile u32* WaitRegMemTarget(const u32* body) {
   return nullptr;
 }
 
+// DELTA_GPU_WAITWATCH: a poll on a word nothing of ours writes, still
+// unsatisfied, hands the word to this hook (a write watch) so the run names
+// whoever does write it. The first few distinct words only.
+void (*g_unknown_wait_hook)(u64 address) = nullptr;
+// Pages of the words handed to the hook: a write of ours landing next to one
+// (a label decoded at the wrong address) is the other half of the question.
+base::Atomic<u64> g_watched_pages[4] = {~0ull, ~0ull, ~0ull, ~0ull};
+
+void NoteGpuWriteNear(const char* packet, u64 address, u64 value) {
+  if (!g_unknown_wait_hook)
+    return;
+  for (auto& page : g_watched_pages)
+    if (page.load(base::memory_order_relaxed) == (address & ~0xFFFull)) {
+      BASE_LOGI("waitwatch", "{} writes {:#x} = {:#x} on a watched page",
+                packet, (unsigned long long)address,
+                (unsigned long long)value);
+      return;
+    }
+}
+
+void NoteUnknownWait(const u32* body) {
+  if (!g_unknown_wait_hook || !((body[0] >> 4) & 1))
+    return;
+  const u64 address =
+      ((static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1]) & ~3ull;
+  if (!IsGuestAddress(address) ||
+      !host_memory::IsMemoryRangeMapped(reinterpret_cast<void*>(address), 4))
+    return;
+  const u32 value = *reinterpret_cast<const volatile u32*>(address);
+  if (WaitRegMemPasses(body, value))
+    return;
+  // One new watch every few seconds: the first unknown words of a run are
+  // rarely the ones behind a later stall.
+  static u32 watched = 0;
+  static base::TimeTicks last;
+  const base::TimeTicks now = base::TimeTicks::Now();
+  if (watched >= 20 || (watched && now - last < base::Seconds(5)))
+    return;
+  g_watched_pages[watched % 4].store(address & ~0xFFFull);
+  watched++;
+  last = now;
+  BASE_LOGI("waitwatch",
+            "WAIT_REG_MEM on unknown word {:#x} (fn={} ref={:#x} mask={:#x} "
+            "now {:#x}); watching its writer",
+            (unsigned long long)address, body[0] & 7, body[3], body[4], value);
+  g_unknown_wait_hook(address);
+}
+
 void HandleWaitRegMem(const u32* body, u32 count) {
   if (count < 5)
     return;
   const volatile u32* polled = WaitRegMemTarget(body);
   const auto passes = [&](u32 value) { return WaitRegMemPasses(body, value); };
-  if (!polled)
+  if (!polled) {
+    NoteUnknownWait(body);
     return;
+  }
 
   // Bounded, because a producer can still be one we dropped and an unbounded
   // poll would hang the title outright. Yield rather than spin: the thread that
@@ -350,6 +416,7 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
     } else {
       render::FlushCsWrites(renderer);
     }
+    NoteGpuWriteNear("DMA_DATA", dst, bytes);
     std::memcpy(reinterpret_cast<void*>(dst),
                 reinterpret_cast<const void*>(src), bytes);
     copied = true;
@@ -384,6 +451,7 @@ void HandleWriteData(const u32* body, u32 count) {
   const u64 address =
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
   const u32 dwords = count - 3;
+  NoteGpuWriteNear("WRITE_DATA", address, body[3]);
   if (IsLabelAddress(address) && IsLabelAddress(address + (u64)dwords * 4) &&
       GpuWriteMapped("WRITE_DATA", address, (u64)dwords * 4)) {
     std::memcpy(reinterpret_cast<void*>(address), &body[3], (size_t)dwords * 4);
@@ -541,10 +609,13 @@ void HandleDrawPacket(render::Renderer& renderer,
 // those draws read as soon as it sees the write.
 // `label` is the address the packet writes, noted here so a WAIT_REG_MEM on
 // it knows it is ours before the write has run.
+void NoteLateLabel(u64 address, const char* packet);
+
 void InOrder(void (*handle)(const u32*, u32),
              const u32* body,
              u32 count,
              u64 label) {
+  NoteLateLabel(label, handle == HandleWriteData ? "WRITE_DATA" : "label");
   RenderQueue& queue = GuestRenderQueue();
   if (!queue.running()) {
     handle(body, count);
@@ -621,6 +692,100 @@ u32 WalkDcb(render::Renderer& renderer,
             u32 depth,
             bool dump);
 
+// DELTA_GPU_WAITTRACE: the words recent waits gave up on, so the packet that
+// writes one later can be named with its ring and how late it came.
+struct FailedWait {
+  u64 address = 0;
+  base::TimeTicks when;
+};
+FailedWait g_failed_waits[2048];
+u32 g_failed_next = 0;
+// The ring the walk on this thread executes ("gfx", or "acb" for a compute
+// queue's commands).
+thread_local const char* t_walk_ring = "gfx";
+
+struct LabelWrite {
+  base::TimeTicks when;
+  const char* ring;
+  const char* packet;
+  u64 value;
+};
+base::Mutex g_label_writes_mutex;
+base::HashMap<u64, LabelWrite> g_label_writes;
+
+void NoteLateLabel(u64 address, const char* packet) {
+  if (!kWaitTraceFrom || !address)
+    return;
+  {
+    base::LockGuard<base::Mutex> lock(g_label_writes_mutex);
+    if (g_label_writes.size() > (1u << 20))
+      g_label_writes.clear();
+    g_label_writes[address & ~3ull] = {base::TimeTicks::Now(), t_walk_ring,
+                                       packet, 0};
+  }
+  for (FailedWait& f : g_failed_waits)
+    if (f.address == (address & ~3ull)) {
+      BASE_LOGI("waittrace", "late: {} on {} writes {:#x} {} ms after the wait",
+                packet, t_walk_ring, (unsigned long long)address,
+                (base::TimeTicks::Now() - f.when).InMilliseconds());
+      f.address = 0;
+      return;
+    }
+}
+
+void TraceWaitPacket(const u32* p,
+                     u32 i,
+                     u32 words,
+                     u32 depth,
+                     const u32* body,
+                     u32 count) {
+  static const base::TimeTicks start = base::TimeTicks::Now();
+  if (!kWaitTraceFrom || count < 5 || !((body[0] >> 4) & 1) ||
+      base::TimeTicks::Now() - start < base::Seconds(kWaitTraceFrom))
+    return;
+  static u32 lines = 0;
+  if (lines++ > 3000)
+    return;
+  const u64 address =
+      ((static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1]) & ~3ull;
+  const bool mapped =
+      IsGuestAddress(address) &&
+      host_memory::IsMemoryRangeMapped(reinterpret_cast<void*>(address), 4);
+  const u32 value =
+      mapped ? *reinterpret_cast<const volatile u32*>(address) : 0;
+  char last[96] = "never written by us";
+  if (!WaitRegMemPasses(body, value)) {
+    g_failed_waits[g_failed_next++ % 2048] = {address, base::TimeTicks::Now()};
+    base::LockGuard<base::Mutex> lock(g_label_writes_mutex);
+    auto it = g_label_writes.find(address);
+    if (it != g_label_writes.end())
+      std::snprintf(last, sizeof(last), "last %s on %s %lld ms ago",
+                    it->second.packet, it->second.ring,
+                    (long long)(base::TimeTicks::Now() - it->second.when)
+                        .InMilliseconds());
+  }
+  BASE_LOGI("waittrace",
+            "frame {} {} dcb {:p}+{:#x}/{:#x} d{} wait {:#x} fn={} want {:#x} "
+            "have {:#x} {} {} ({})",
+            g_presented_frames, t_walk_ring, (const void*)p, i * 4, words * 4,
+            depth,
+            (unsigned long long)address, body[0] & 7, body[3], value,
+            WaitRegMemPasses(body, value) ? "pass" : "FAIL",
+            g_fence_labels.Contains(address) ? "ours" : "foreign", last);
+}
+
+// INDIRECT_BUFFER's CHAIN bit (size dword bit 20): continue in the target
+// and never come back.
+bool IbChains(const u32* body, u32 count) {
+  const bool chains = count >= 3 && ((body[2] >> 20) & 1);
+  if (chains) {
+    static base::Atomic<u64> n{0};
+    if (n.fetch_add(1) == 0)
+      BASE_LOGI("gpu", "first chained indirect buffer");
+  }
+  return chains;
+}
+
 // Walk one CCB (CE stream), recursing into any chained indirect buffers at
 // `depth`. The CE runs ahead of the draw engine: it fills its on-chip RAM and
 // dumps it to the guest memory the DE's draws then read as constant buffers.
@@ -659,6 +824,8 @@ void FlattenCcb(const u32* p, u32 words, u32 depth) {
       if (depth < kMaxIbDepth &&
           ResolveIndirectBuffer(&p[i + 1], count, chain, chain_dwords))
         FlattenCcb(chain, chain_dwords, depth + 1);
+      if (IbChains(&p[i + 1], count))
+        return;
     } else {
       g_ce.packets.push_back(&p[i]);
     }
@@ -863,22 +1030,37 @@ u32 WalkDcb(render::Renderer& renderer,
         g_index.num_instances = (count >= 1 && body[0]) ? body[0] : 1;
         break;
       case IT_WAIT_REG_MEM:
-        // A memory poll waits on a label, and the renderer thread reaches it
-        // only after running every command that could write one ahead of it;
-        // a register poll reads the walk's own register file.
-        // What the walk reads after the wait may be what it waits for, and
-        // the producer may be the title's CPU as well as a queued label: wait
-        // here, but only drain the queue when the word is not there yet.
-        if (count >= 5 && GuestRenderQueue().running()) {
-          const volatile u32* polled = WaitRegMemTarget(body);
-          if (polled && GuestRenderQueue().PendingWriteOverlaps(
-                            reinterpret_cast<u64>(polled), 4))
+        do {
+          // A memory poll waits on a label, and the renderer thread reaches it
+          // only after running every command that could write one ahead of it;
+          // a register poll reads the walk's own register file.
+          // What the walk reads after the wait may be what it waits for, and
+          // the producer may be the title's CPU as well as a queued label: wait
+          // here, but only drain the queue when the word is not there yet.
+          // A dispatch may have stored the word, and its results stay on the
+          // GPU until something reads them.
+          if (count >= 5 && ((body[0] >> 4) & 1)) {
+            const u64 address =
+                ((static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1]) & ~3ull;
+            if (IsGuestAddress(address))
+              FlushForWalkRead(renderer, address, 4, "wait-reg-mem");
+          }
+          if (count >= 5 && GuestRenderQueue().running()) {
+            const volatile u32* polled = WaitRegMemTarget(body);
+            if (polled && GuestRenderQueue().PendingWriteOverlaps(
+                              reinterpret_cast<u64>(polled), 4))
+              OwnRenderer("wait-reg-mem");
+            if (!polled) {
+              NoteUnknownWait(body);
+              break;
+            }
+            if (WaitRegMemPasses(body, *polled))
+              break;
             OwnRenderer("wait-reg-mem");
-          if (!polled || WaitRegMemPasses(body, *polled))
-            break;
-          OwnRenderer("wait-reg-mem");
-        }
-        HandleWaitRegMem(body, count);
+          }
+          HandleWaitRegMem(body, count);
+        } while (false);
+        TraceWaitPacket(p, i, words, depth, body, count);
         break;
       case IT_DMA_DATA:
         QueueDmaData(renderer, body, count);
@@ -920,6 +1102,11 @@ u32 WalkDcb(render::Renderer& renderer,
           else
             WalkDcb(renderer, chain, chain_dwords, depth + 1, dump);
         }
+        // CHAIN: a jump, not a call. What follows the packet in this buffer
+        // is whatever an earlier frame left there; Uncharted 2 reuses its
+        // command memory, and walking on ran its stale waits and dispatches.
+        if (IbChains(body, count))
+          return words;
         break;
       }
       case IT_INCREMENT_CE_COUNTER:
@@ -1004,10 +1191,27 @@ void PrefetchWalk(Regs& regs, const u32* p, u32 words, u32 depth) {
         if (depth < kMaxIbDepth &&
             ResolveIndirectBuffer(body, count, chain, chain_dwords))
           PrefetchWalk(regs, chain, chain_dwords, depth + 1);
+        if (IbChains(body, count))
+          return;
         break;
       }
       case IT_DISPATCH_DIRECT:
         PrefetchComputeDispatch(regs);
+        break;
+      case IT_WAIT_REG_MEM:
+        // Past a wait that has not passed, the title may not have written
+        // the commands yet (Uncharted 2 fills a submitted frame behind
+        // them): what follows is not worth reading ahead, or safe to.
+        if (count >= 5 && ((body[0] >> 4) & 1)) {
+          const u64 address =
+              ((static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1]) & ~3ull;
+          if (!IsGuestAddress(address) ||
+              !host_memory::IsMemoryRangeMapped(
+                  reinterpret_cast<const void*>(address), 4) ||
+              !WaitRegMemPasses(
+                  body, *reinterpret_cast<const volatile u32*>(address)))
+            return;
+        }
         break;
       default:
         if (IsDraw(op))
@@ -1122,9 +1326,20 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   }
   const u32 walked = WalkDcb(renderer, p, words, 0, dump);
   FinishCe(renderer);
+
   if (dump)
     TraceDcbWalkResult(p, words, walked);
   MaybeDumpOpcodeHistogram(walked, words);
+}
+
+void SetUnknownWaitHook(void (*hook)(u64 address)) {
+  g_unknown_wait_hook = hook;
+}
+
+void SubmitRingDcb(const void* dcb, u32 size_bytes) {
+  t_walk_ring = "acb";
+  SubmitDcb(dcb, size_bytes);
+  t_walk_ring = "gfx";
 }
 
 }  // namespace gpu::ps4
