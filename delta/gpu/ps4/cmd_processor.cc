@@ -122,6 +122,20 @@ bool IsLabelAddress(u64 address) {
   return address >= 0x10000ull && address < kGuestEnd;
 }
 
+// A GPU write to unmapped memory faults the GPU, not the CPU: drop it rather
+// than let the emulator segfault, and report the first few so a packet parsed
+// from the wrong bytes shows up.
+bool GpuWriteMapped(const char* packet, u64 address, u64 bytes) {
+  if (host_memory::IsMemoryRangeMapped(reinterpret_cast<void*>(address),
+                                       bytes))
+    return true;
+  static base::Atomic<u32> reported{0};
+  if (reported.fetch_add(1) < 16)
+    BASE_LOGW("gpu", "{} writes unmapped {:#x}+{:#x}, dropped", packet,
+              (unsigned long long)address, (unsigned long long)bytes);
+  return false;
+}
+
 // Our submit is synchronous: every draw in the buffer is finished by the time
 // the walk passes these packets, so the fence the GPU would signal is complete
 // the instant we process it. Writing it immediately is what lets the guest's
@@ -130,7 +144,8 @@ bool IsLabelAddress(u64 address) {
 // display buffers drain.
 void WriteLabel(u64 address, u64 value, bool is_64bit) {
   g_fence_labels.Note(address);
-  if (!IsLabelAddress(address))
+  if (!IsLabelAddress(address) ||
+      !GpuWriteMapped("label", address, is_64bit ? 8 : 4))
     return;
   if (is_64bit)
     *reinterpret_cast<volatile u64*>(address) = value;
@@ -323,7 +338,8 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
   if (!kNoCopy && src_is_memory && dst_is_memory && bytes &&
       bytes <= 0x1000000u && src != dst && addressable(src) &&
       addressable(src + bytes) && addressable(dst) &&
-      addressable(dst + bytes)) {
+      addressable(dst + bytes) && GpuWriteMapped("DMA_DATA", dst, bytes) &&
+      host_memory::IsMemoryRangeMapped(reinterpret_cast<void*>(src), bytes)) {
     // src may be CS-written; land pending writes first, and those under dst
     // before the copy lands over them. Copy even if the flush fails: a
     // possibly-stale source beats silently dropping the copy. Unless compute
@@ -344,7 +360,8 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
   // and their CMASK/HTILE metadata this way, so apply it to guest memory and
   // let the renderer clear any target it covers.
   if (!kNoCopy && src_sel == 2 && dst_is_memory && bytes &&
-      bytes <= 0x8000000u && addressable(dst) && addressable(dst + bytes)) {
+      bytes <= 0x8000000u && addressable(dst) && addressable(dst + bytes) &&
+      GpuWriteMapped("DMA_DATA fill", dst, bytes)) {
     render::ApplyMemoryFill(renderer, dst, bytes, body[1]);
     copied = true;
   }
@@ -369,7 +386,8 @@ void HandleWriteData(const u32* body, u32 count) {
   const u64 address =
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
   const u32 dwords = count - 3;
-  if (IsLabelAddress(address) && IsLabelAddress(address + (u64)dwords * 4)) {
+  if (IsLabelAddress(address) && IsLabelAddress(address + (u64)dwords * 4) &&
+      GpuWriteMapped("WRITE_DATA", address, (u64)dwords * 4)) {
     std::memcpy(reinterpret_cast<void*>(address), &body[3], (size_t)dwords * 4);
     g_fence_labels.Note(address);
   }
