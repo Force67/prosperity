@@ -1,7 +1,13 @@
 // Uncharted 2: Among Thieves Remastered (CUSA03281, PS4)
-// Boots through libc, Fios2 and the engine's thread bring-up. The blocker is an
-// engine assert deep in GetRenderFrameParams (frame out of range), i.e. frame
-// pacing rather than any single syscall (2026-07-31).
+// Status 2026-09-28: boots, plays the logo movies, runs the menus at ~20 fps
+// (language, title, New Game, Game Mode, Difficulty) and loads into chapter 1.
+// In the level it draws ~650 draws/frame at ~6 fps, but presents black: the
+// 1920x1080 HDR target and the 960x540 lighting target hold NaNs, and a 32x32
+// target (exposure?) reads 1e4. Perf: ~450 compute writebacks per frame.
+//
+// Headless drive to the level (tools/drun.py):
+//   tools/drun.py uc2 -t 120 --pad "$(seq -s, -f '%g:cross' 12 6 110)"
 
-// +DELTA_SCERR_TRACE=1
-// +DELTA_UMTX_TRACE=1
+// +DELTA_GPU_RTSTAT=1       the NaN targets above
+// +DELTA_GPU_CSSYNC=1       per-shader GPU time and sync causes
+// +DELTA_GPU_WAITTRACE=36   every WAIT_REG_MEM from 36 s on, and who wrote late
