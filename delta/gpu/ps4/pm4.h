@@ -86,6 +86,7 @@ enum Pm4It : u32 {
   IT_INCREMENT_CE_COUNTER = 0x84,
   IT_INCREMENT_DE_COUNTER = 0x85,
   IT_WAIT_ON_CE_COUNTER = 0x86,
+  IT_WAIT_ON_DE_COUNTER_DIFF = 0x88,
   IT_DUMP_CONST_RAM_OFFSET = 0x9E,  // Orbis extension; absent from Linux CIK
 };
 // NOLINTEND(readability-identifier-naming)

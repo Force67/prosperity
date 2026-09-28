@@ -77,11 +77,9 @@ struct IndexState {
 };
 IndexState g_index;
 
-// CE/DE synchronization counters. On real hardware the DE waits on the CE's
-// counter before a dependent draw. Our submit is synchronous and the CCB (CE
-// work) always runs before the DCB (DE work), so WAIT_ON_CE_COUNTER is always
-// already satisfied; the counters are tracked so the stream state matches and
-// the packets are never mistaken for a desync.
+// CE/DE synchronization counters (24-bit). The DE's WAIT_ON_CE_COUNTER runs
+// the CE until it is ahead; the CE's WAIT_ON_DE_COUNTER_DIFF pauses it until
+// the DE catches up.
 u64 g_ce_counter = 0;
 u64 g_de_counter = 0;
 
@@ -626,7 +624,19 @@ u32 WalkDcb(render::Renderer& renderer,
 // Walk one CCB (CE stream), recursing into any chained indirect buffers at
 // `depth`. The CE runs ahead of the draw engine: it fills its on-chip RAM and
 // dumps it to the guest memory the DE's draws then read as constant buffers.
-void WalkCcb(render::Renderer& renderer, const u32* p, u32 words, u32 depth) {
+// The CE stream of the current submit, flattened to its packets in order
+// (chained const buffers followed), and how far the CE has run. The CE and the
+// DE run side by side, ordered only by their counters: the CE dumps each draw's
+// tables into a ring the DE reads, and waits (WAIT_ON_DE_COUNTER_DIFF) before
+// lapping what the DE has not consumed. Running all of it before the DE
+// overwrote tables still to be read.
+struct CeStream {
+  base::Vector<const u32*> packets;
+  size_t pos = 0;
+};
+CeStream g_ce;
+
+void FlattenCcb(const u32* p, u32 words, u32 depth) {
   u32 i = 0;
   while (i < words) {
     const u32 hdr = p[i];
@@ -641,96 +651,125 @@ void WalkCcb(render::Renderer& renderer, const u32* p, u32 words, u32 depth) {
       continue;
     }
     const u32 op = Pm4Opcode(hdr), count = Pm4Count(hdr);
-    const u32* body = &p[i + 1];
     if (i + 1 + count > words)
       break;
-    NoteCcbPacket(op);
-    switch (op) {
-      case IT_WRITE_CONST_RAM: {  // body[0] = byte offset, body[1..] = data
-        if (!kCeOn)
-          break;
-        const u32 offset = body[0] & 0xFFFF;
-        const u32 dwords = count > 1 ? count - 1 : 0;
-        const bool fits = g_const_ram.Fits(offset, dwords);
-        if (fits)
-          g_const_ram.Write(offset, &body[1], dwords);
-        TraceConstRam("write", offset, dwords, 0, fits ? "ok" : "off+n>ceram",
-                      dwords ? body[1] : 0);
-        break;
-      }
-      case IT_LOAD_CONST_RAM: {  // addrLo, addrHi, num_dwords, byte offset
-        if (!kCeOn || count < 4)
-          break;
-        // The raw body, once: an address that does not move across a run of
-        // chunked loads is a field-order mistake, not a title loading the same
-        // bytes forty-eight times, and the decoded trace below cannot show the
-        // difference.
-        {
-          static int shown = 0;
-          if (CeTraceOn() && shown < 6) {
-            shown++;
-            BASE_LOGI(
-                "ce", "load raw count={} body={:08x} {:08x} {:08x} {:08x}",
-                count, body[0], body[1], body[2], count > 3 ? body[3] : 0u);
-          }
-        }
-        const u64 address =
-            (static_cast<u64>(body[1] & 0xFFFF) << 32) | body[0];
-        const u32 dwords = body[2] & 0x7FFF, offset = body[3] & 0xFFFF;
-        const bool in_guest = IsGuestRange(address, (u64)dwords * 4);
-        const bool fits = g_const_ram.Fits(offset, dwords);
-        if (in_guest && fits)
-          g_const_ram.Write(offset, reinterpret_cast<const void*>(address),
-                            dwords);
-        TraceConstRam("load", offset, dwords, address,
-                      !in_guest ? "addr-not-guest"
-                      : !fits   ? "off+n>ceram"
-                                : "ok",
-                      in_guest ? *reinterpret_cast<const u32*>(address) : 0);
-        break;
-      }
-      case IT_DUMP_CONST_RAM:
-      case IT_DUMP_CONST_RAM_OFFSET: {  // offset, num_dwords, addrLo, addrHi
-        if (!kCeOn || count < 4)
-          break;
-        const u32 offset = body[0] & 0xFFFF, dwords = body[1] & 0x7FFF;
-        const u64 address =
-            (static_cast<u64>(body[3] & 0xFFFF) << 32) | body[2];
-        const bool in_guest = IsGuestRange(address, (u64)dwords * 4);
-        const bool fits = g_const_ram.Fits(offset, dwords);
-        if (in_guest && fits)
-          g_const_ram.Read(offset, reinterpret_cast<void*>(address), dwords);
-        TraceConstRam(op == IT_DUMP_CONST_RAM ? "dump" : "dump.off", offset,
-                      dwords, address,
-                      !in_guest ? "addr-not-guest"
-                      : !fits   ? "off+n>ceram"
-                                : "ok",
-                      fits ? g_const_ram.DwordAt(offset) : 0);
-        break;
-      }
-      case IT_INCREMENT_CE_COUNTER:  // the DE later waits on this value
-        g_ce_counter++;
-        break;
-      case IT_INDIRECT_BUFFER_CNST:
-      case IT_INDIRECT_BUFFER: {
-        // The CE can chain further const buffers; follow them so chained
-        // WRITE/LOAD/DISPATCH work is not silently dropped.
-        const u32* chain = nullptr;
-        u32 chain_dwords = 0;
-        if (depth < kMaxIbDepth &&
-            ResolveIndirectBuffer(body, count, chain, chain_dwords)) {
-          if (op == IT_INDIRECT_BUFFER_CNST)
-            WalkCcb(renderer, chain, chain_dwords, depth + 1);
-          else
-            WalkDcb(renderer, chain, chain_dwords, depth + 1, false);
-        }
-        break;
-      }
-      default:
-        break;
+    const u32* chain = nullptr;
+    u32 chain_dwords = 0;
+    if (op == IT_INDIRECT_BUFFER_CNST) {
+      if (depth < kMaxIbDepth &&
+          ResolveIndirectBuffer(&p[i + 1], count, chain, chain_dwords))
+        FlattenCcb(chain, chain_dwords, depth + 1);
+    } else {
+      g_ce.packets.push_back(&p[i]);
     }
     i += 1 + count;
   }
+}
+
+void ExecCePacket(render::Renderer& renderer, const u32* packet) {
+  const u32 op = Pm4Opcode(packet[0]), count = Pm4Count(packet[0]);
+  const u32* body = packet + 1;
+  NoteCcbPacket(op);
+  switch (op) {
+    case IT_WRITE_CONST_RAM: {  // body[0] = byte offset, body[1..] = data
+      if (!kCeOn)
+        break;
+      const u32 offset = body[0] & 0xFFFF;
+      const u32 dwords = count > 1 ? count - 1 : 0;
+      const bool fits = g_const_ram.Fits(offset, dwords);
+      if (fits)
+        g_const_ram.Write(offset, &body[1], dwords);
+      TraceConstRam("write", offset, dwords, 0, fits ? "ok" : "off+n>ceram",
+                    dwords ? body[1] : 0);
+      break;
+    }
+    case IT_LOAD_CONST_RAM: {  // addrLo, addrHi, num_dwords, byte offset
+      if (!kCeOn || count < 4)
+        break;
+      // The raw body, once: an address that does not move across a run of
+      // chunked loads is a field-order mistake, not a title loading the same
+      // bytes forty-eight times, and the decoded trace below cannot show the
+      // difference.
+      {
+        static int shown = 0;
+        if (CeTraceOn() && shown < 6) {
+          shown++;
+          BASE_LOGI(
+              "ce", "load raw count={} body={:08x} {:08x} {:08x} {:08x}",
+              count, body[0], body[1], body[2], count > 3 ? body[3] : 0u);
+        }
+      }
+      const u64 address =
+          (static_cast<u64>(body[1] & 0xFFFF) << 32) | body[0];
+      const u32 dwords = body[2] & 0x7FFF, offset = body[3] & 0xFFFF;
+      const bool in_guest = IsGuestRange(address, (u64)dwords * 4);
+      const bool fits = g_const_ram.Fits(offset, dwords);
+      if (in_guest && fits)
+        g_const_ram.Write(offset, reinterpret_cast<const void*>(address),
+                          dwords);
+      TraceConstRam("load", offset, dwords, address,
+                    !in_guest ? "addr-not-guest"
+                    : !fits   ? "off+n>ceram"
+                              : "ok",
+                    in_guest ? *reinterpret_cast<const u32*>(address) : 0);
+      break;
+    }
+    case IT_DUMP_CONST_RAM:
+    case IT_DUMP_CONST_RAM_OFFSET: {  // offset, num_dwords, addrLo, addrHi
+      if (!kCeOn || count < 4)
+        break;
+      const u32 offset = body[0] & 0xFFFF, dwords = body[1] & 0x7FFF;
+      const u64 address =
+          (static_cast<u64>(body[3] & 0xFFFF) << 32) | body[2];
+      const bool in_guest = IsGuestRange(address, (u64)dwords * 4);
+      const bool fits = g_const_ram.Fits(offset, dwords);
+      if (in_guest && fits)
+        g_const_ram.Read(offset, reinterpret_cast<void*>(address), dwords);
+      TraceConstRam(op == IT_DUMP_CONST_RAM ? "dump" : "dump.off", offset,
+                    dwords, address,
+                    !in_guest ? "addr-not-guest"
+                    : !fits   ? "off+n>ceram"
+                              : "ok",
+                    fits ? g_const_ram.DwordAt(offset) : 0);
+      break;
+    }
+    case IT_INCREMENT_CE_COUNTER:  // the DE later waits on this value
+      g_ce_counter = (g_ce_counter + 1) & 0xFFFFFF;
+      break;
+    case IT_INDIRECT_BUFFER: {
+      const u32* chain = nullptr;
+      u32 chain_dwords = 0;
+      if (ResolveIndirectBuffer(body, count, chain, chain_dwords))
+        WalkDcb(renderer, chain, chain_dwords, 1, false);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// Run the CE until `done` holds or it reaches a WAIT_ON_DE_COUNTER_DIFF the DE
+// has not satisfied. `force` runs everything left, waits included: the DE has
+// finished and will not move the counter again.
+template <class Done>
+void RunCe(render::Renderer& renderer, Done done, bool force) {
+  while (g_ce.pos < g_ce.packets.size() && !done()) {
+    const u32* packet = g_ce.packets[g_ce.pos];
+    if (!force && Pm4Opcode(packet[0]) == IT_WAIT_ON_DE_COUNTER_DIFF &&
+        Pm4Count(packet[0]) >= 1) {
+      const u32 ahead = (g_ce_counter - g_de_counter) & 0xFFFFFF;
+      if (ahead >= (packet[1] & 0xFFFFFF))
+        return;
+    }
+    ExecCePacket(renderer, packet);
+    g_ce.pos++;
+  }
+}
+
+void FinishCe(render::Renderer& renderer) {
+  RunCe(renderer, [] { return false; }, /*force=*/true);
+  g_ce.packets.clear();
+  g_ce.pos = 0;
 }
 
 // Walk one DCB (DE stream), issuing draws and dispatches and recursing into any
@@ -877,7 +916,7 @@ u32 WalkDcb(render::Renderer& renderer,
         TraceIndirectBuffer(i, depth, chain_dwords, followed);
         if (followed) {
           if (op == IT_INDIRECT_BUFFER_CNST)
-            WalkCcb(renderer, chain, chain_dwords, depth + 1);
+            FlattenCcb(chain, chain_dwords, depth + 1);
           else
             WalkDcb(renderer, chain, chain_dwords, depth + 1, dump);
         }
@@ -892,8 +931,14 @@ u32 WalkDcb(render::Renderer& renderer,
         TraceCounter("IT_INCREMENT_DE_COUNTER", g_de_counter);
         break;
       case IT_WAIT_ON_CE_COUNTER:
-        // The CE runs synchronously before the DCB, so the requested count is
-        // already satisfied; only the state is kept.
+        // The DE waits until the CE is ahead of it.
+        RunCe(
+            renderer,
+            [] {
+              const u32 ahead = (g_ce_counter - g_de_counter) & 0xFFFFFF;
+              return ahead != 0 && ahead < 0x800000;
+            },
+            /*force=*/false);
         TraceWaitOnCeCounter(count >= 1 ? (body[0] & 0xFFFFFF) : 0,
                              g_ce_counter);
         break;
@@ -1045,7 +1090,7 @@ void SubmitCcb(const void* ccb, u32 size_bytes) {
   base::LockGuard<base::Mutex> lock(g_mutex);
   const u32 words = size_bytes / 4;
   TraceCcbSubmit(size_bytes, words);
-  WalkCcb(render::DefaultRenderer(), static_cast<const u32*>(ccb), words, 0);
+  FlattenCcb(static_cast<const u32*>(ccb), words, 0);
   TraceCcbHistogram(words);
 }
 
@@ -1076,6 +1121,7 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
     PrefetchWalk(prefetch_regs, p, words, 0);
   }
   const u32 walked = WalkDcb(renderer, p, words, 0, dump);
+  FinishCe(renderer);
   if (dump)
     TraceDcbWalkResult(p, words, walked);
   MaybeDumpOpcodeHistogram(walked, words);
