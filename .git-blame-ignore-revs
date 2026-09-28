@@ -1,0 +1,11 @@
+# Mechanical renames and reformatting; git blame --ignore-revs-file skips them.
+8b473a6f8961732a4e6dcd3e31b2692098e063a8 # gpu: finish Chromium naming, formatting and quoted includes
+75610d27d59fa64158c6918fa0df37d8de5ed77a # tools: Chromium naming and formatting; the self-test scripts link the built libraries
+8d803d12d5ce74e7e12036060ed7c4f659096149 # main: Chromium naming, formatting and include spelling
+11b60829b671a6427f2e0816412b9605d660eaaa # runtime: Chromium naming, formatting and include spelling
+e53d9067e0f930d5ebbb9e717ad441273074d876 # kern: Chromium naming, formatting and include spelling
+716fc77a2b806d9e47213bc6b93e683be36218c8 # cpu: Chromium naming for the FEX backend
+dbea67dc62c97396ae9b3931c27b000ef0a01cf1 # host: Chromium naming, formatting and include spelling
+a9cc87ce478aa5f4b69541ac0d6e97796c804fde # cpu: Chromium naming, formatting and include spelling
+426e50ba481067a76d4572264c793a2274c68ab4 # formats: Chromium naming, formatting and include spelling
+9fa2f8f7b1c2414f8e4b76d8381f5d705ec6fd75 # shared: Chromium naming, formatting and include spelling
