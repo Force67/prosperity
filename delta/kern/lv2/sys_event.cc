@@ -173,6 +173,10 @@ static void StartVblankPump() {
 // it says "GPU done" when it did not. EOP interrupts since boot; a knote
 // compares so none is lost.
 static base::Atomic<u64> g_eop_seq{0};
+// The latest Gnm event data (PS4), or false while completions carry an AGC
+// context id instead (PS5); a re-armed knote needs whichever one applies.
+static base::Atomic<i64> g_last_eop_data{0};
+static base::Atomic<bool> g_eop_raw{false};
 u64 GpuEndOfPipeCount() {
   return g_eop_seq.load(base::memory_order_relaxed);
 }
@@ -185,6 +189,7 @@ void NoteGpuEndOfPipe() {
   // sequence so a poller can tell a new event from a repeat, a TSC nonce below.
   const i64 data = static_cast<i64>((n << 16) | (((n - 1) % 14 + 1) << 12) |
                                     (TscNonce() & 0xFFF));
+  g_last_eop_data.store(data, base::memory_order_relaxed);
   base::LockGuard<base::Mutex> lk(g_eq_reg_m);
   for (auto* eq : g_equeues)
     eq->TriggerGnm(data);
@@ -198,6 +203,7 @@ static base::Atomic<u64> g_last_eop_ctx{0};
 void NoteGpuEndOfPipeCtx(u64 context_id) {
   g_eop_seq.fetch_add(1, base::memory_order_relaxed);
   g_last_eop_ctx.store(context_id, base::memory_order_relaxed);
+  g_eop_raw.store(true, base::memory_order_relaxed);
   base::LockGuard<base::Mutex> lk(g_eq_reg_m);
   for (auto* eq : g_equeues)
     eq->TriggerGnm(static_cast<i64>(context_id), /*raw_data=*/true);
@@ -341,7 +347,12 @@ int Equeue::Kevent(const kevent_t* changes,
         continue;
       k.active = true;
       k.ev.data =
-          static_cast<i64>(g_last_eop_ctx.load(base::memory_order_relaxed));
+          g_eop_raw.load(base::memory_order_relaxed)
+              ? static_cast<i64>(
+                    g_last_eop_ctx.load(base::memory_order_relaxed))
+              : ((g_last_eop_data.load(base::memory_order_relaxed) &
+                  ~static_cast<i64>(0xFFFF)) |
+                 static_cast<i64>(k.ev.ident));
     }
   }
 
@@ -469,10 +480,11 @@ void Equeue::TriggerGnm(i64 data, bool raw_data) {
     if (k.ev.filter != kEVFILT_VIDEOOUT || k.ev.ident >= kGnmIdentMax)
       continue;
     k.active = true;
-    // AGC: the data IS the context id. Gnm (PS4): the id has to survive in the
-    // low bits, because sceGnmGetEqEventType reads the data there.
+    // AGC: the data IS the context id. Gnm (PS4): the low 16 bits are the id
+    // alone, because sceGnmGetEqEventType reads them there (Uncharted 2 drops
+    // any EOP event whose (u16)data is not its id, so no sequence bits).
     k.ev.data = raw_data ? data
-                         : ((data & ~static_cast<i64>(0xFFF)) |
+                         : ((data & ~static_cast<i64>(0xFFFF)) |
                             static_cast<i64>(k.ev.ident));
     any = true;
   }
