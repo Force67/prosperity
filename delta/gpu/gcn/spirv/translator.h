@@ -327,6 +327,18 @@ struct Translator {
       v = SelectB(LaneActive(Exec()), v, Vg(i));
     StorePrivate(VgPtr(i), v);
   }
+  // v_movrel*: a VGPR indexed at run time by M0 (the register file is a
+  // Private array, so this is an ordinary dynamic access).
+  Id VgRelPtr(u32 i) {
+    return m.AccessChain(p_priv_u, vgpr,
+                         {UMin(Add(U32(i), Sg(124)), U32(255))});
+  }
+  void SetVgRel(u32 i, Id v) {
+    const Id ptr = VgRelPtr(i);
+    if (predicate_vector)
+      v = SelectB(LaneActive(Exec()), v, m.Load(t_u, ptr));
+    StorePrivate(ptr, v);
+  }
   Id VgF(u32 i) { return m.Bitcast(t_f, Vg(i)); }
   void SetVgF(u32 i, Id f) { SetVg(i, m.Bitcast(t_u, f)); }
 

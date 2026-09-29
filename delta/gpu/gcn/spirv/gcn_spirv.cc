@@ -934,6 +934,19 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       if (inst.isa == IsaMode::kNeo && EmitNeoVop1(t, inst))
         break;
       const u32 op = inst.opcode, vdst = (w >> 17) & 0xFF, src0 = w & 0x1FF;
+      if (op == 0x42) {  // v_movreld_b32: v[vdst + M0] = src0
+        t.SetVgRel(vdst, t.SrcRaw(src0, inst.literal));
+        break;
+      }
+      if ((op == 0x43 || op == 0x44) && src0 >= 256) {
+        // v_movrels_b32: vdst = v[src0 + M0]; v_movrelsd_b32 offsets both.
+        const Id v = t.m.Load(t.t_u, t.VgRelPtr(src0 - 256));
+        if (op == 0x43)
+          t.SetVg(vdst, v);
+        else
+          t.SetVgRel(vdst, v);
+        break;
+      }
       EmitVop1(t, op, vdst, t.SrcF(src0, inst.literal));
       break;
     }
