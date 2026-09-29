@@ -1645,6 +1645,26 @@ bool BuildSeparableAddressTable(const TextureLayout32& layout,
     return layout.layer_stride &&
            BuildGfx10AddressTable(layout, mip, terms, block_mask);
   }
+  // Linear rows: x and y add their byte offsets, nothing is swizzled. The
+  // conversions widen narrow texels through this (a stencil plane copied out
+  // one byte a texel).
+  if (TilingIsLinear(layout.tiling_idx)) {
+    if (mip >= layout.mip_levels)
+      return false;
+    const auto& level = layout.mips[mip];
+    const u32 w = level.width, h = level.height, layers = layout.layers;
+    if (!w || !h || !layers)
+      return false;
+    const u64 row = static_cast<u64>(level.pitch) * layout.elem_bytes;
+    slice_stride = layers > 1 ? row * level.stored_height : 0;
+    block_mask = 0;
+    terms.assign(size_t(w) + h + layers, 0);
+    for (u32 x = 0; x < w; x++)
+      terms[x] = x * layout.elem_bytes;
+    for (u32 y = 0; y < h; y++)
+      terms[w + y] = static_cast<u32>(y * row);
+    return true;
+  }
   struct Built {
     base::Vector<u32> terms;
     u32 mask = 0;

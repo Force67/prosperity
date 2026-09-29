@@ -1528,11 +1528,24 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
       static_cast<u64>(level.pitch) * plan.h * res.stage_elem_bytes;
   const TileTable* table = nullptr;
   rhi::Buffer* linear_buf = e.buf;
+  // A staged stencil holds a dword per texel: the plane is copied out packed,
+  // one byte a texel, and the tiling shader widens it into the staging, which
+  // the host path did on the CPU behind a wait for the whole queue.
+  const bool widen_stencil = img.is_stencil && !e.truth;
+  gcn::TextureLayout32 packed;
+  if (widen_stencil &&
+      (res.elem_bytes != 1 || res.stage_elem_bytes != 4 ||
+       !gcn::BuildTextureLayout32(packed, res.width, res.height, res.pitch, 1,
+                                  1, 8, res.pow2_pad, 1) ||
+       !(table = GetTileTable(packed, linear)) ||
+       !(linear_buf = AcquireScratch(packed.size)) || res.size > e.cap))
+    return false;
   if (e.truth) {
     if (!(table = GetTileTable(tiled, linear)) ||
         !(linear_buf = AcquireScratch(res.size)))
       return false;
-  } else if (level.offset + copy_bytes > e.cap || res.size > e.cap) {
+  } else if (!widen_stencil &&
+             (level.offset + copy_bytes > e.cap || res.size > e.cap)) {
     return false;
   }
   rhi::Texture* float_image = nullptr;
@@ -1546,7 +1559,10 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   AliasedImageBarrier(c, img, t.layout, kSrc);
   // Staging bytes the copy does not reach read as zero, as the host path's
   // cleared mirror did.
-  if (level.offset || copy_bytes < res.size || plan.w < level.pitch) {
+  if (widen_stencil) {
+    c->FillBuffer(e.buf, 0, res.size & ~u64(3), 0);
+    c->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
+  } else if (level.offset || copy_bytes < res.size || plan.w < level.pitch) {
     c->FillBuffer(linear_buf, 0, res.size & ~u64(3), 0);
     c->Barrier(rhi::kAccessCopyWrite, rhi::kAccessCopyWrite);
   }
@@ -1554,6 +1570,11 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   copy.buffer_offset = level.offset;
   copy.row_length = level.pitch;
   copy.image_height = level.stored_height;
+  if (widen_stencil) {
+    copy.buffer_offset = packed.mips[0].offset;
+    copy.row_length = packed.mips[0].pitch;
+    copy.image_height = packed.mips[0].stored_height;
+  }
   copy.region.aspect = img.aspect;
   copy.region.width = plan.w;
   copy.region.height = plan.h;
@@ -1575,7 +1596,10 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   } else {
     c->CopyTextureToBuffer(linear_buf, img.texture, &copy, 1);
   }
-  if (table)
+  if (widen_stencil)
+    RecordImageTiling(c, *table, linear_buf, 0, packed.size, e.buf, res.size,
+                      /*detile=*/true, 1, 1);
+  else if (table)
     RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, linear_buf, res.size,
                       /*detile=*/false, 1, 1);
   AliasedImageBarrier(c, img, kSrc, t.layout);
@@ -1615,7 +1639,19 @@ bool LiveInFrameTarget(u64 base, bool prefer_depth, InFrameTarget& t) {
     return true;
   }
   auto it = g_depths.find(base);
-  return it != g_depths.end() && use_depth(it->second);
+  if (it != g_depths.end())
+    return use_depth(it->second);
+  // A stencil plane allocated at an address of its own.
+  for (auto& [depth_base, depth] : g_depths) {
+    (void)depth_base;
+    if (depth.stencil_base != base || !depth.texture || depth.clear_pending)
+      continue;
+    t.layout = depth.stencil_layout;
+    t.img = {depth.texture, depth.w, depth.h, 1,    rhi::kAspectStencil,
+             t.layout,      false,   true,    depth.layers};
+    return true;
+  }
+  return false;
 }
 
 bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
