@@ -4299,8 +4299,10 @@ static bool PrepareGdsTransfer(Renderer& renderer,
     return false;
   if (read) {
     CsBatchBeginImpl();
-    g_cs_list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
+    g_cs_list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+                       rhi::kAccessHostRead);
   }
+  const WaitReaderScope reader(read ? "gds-read" : "gds-write");
   return CsBatchFlush(kSyncWriteback);
 }
 
@@ -4311,7 +4313,32 @@ bool ReadGds(Renderer& renderer, u32 offset, void* data, u32 bytes) {
   return true;
 }
 
+// A dword-aligned GDS write rides the open batch, ordered with the dispatches
+// around it, instead of waiting for every one of them to finish so the CPU can
+// write the mapping. UC2 resets its exposure counters this way each frame and
+// paid for the whole skinning pass with it.
+bool RecordGdsWrite(u32 offset,
+                    u32 bytes,
+                    const void* data,
+                    u32 fill_value) {
+  if ((offset | bytes) & 3u || !bytes || offset > GdsBuffer::kBytes ||
+      bytes > GdsBuffer::kBytes - offset || !EnsureGdsBuffer())
+    return false;
+  CsBatchBeginImpl();
+  if (!g_cs_batch_open)
+    return false;
+  g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
+  if (data)
+    g_cs_list->UpdateBuffer(g_gds.buf, offset, bytes, data);
+  else
+    g_cs_list->FillBuffer(g_gds.buf, offset, bytes, fill_value);
+  g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
+  return true;
+}
+
 bool WriteGds(Renderer& renderer, u32 offset, const void* data, u32 bytes) {
+  if (renderer.available() && RecordGdsWrite(offset, bytes, data, 0))
+    return true;
   if (!PrepareGdsTransfer(renderer, offset, bytes))
     return false;
   std::memcpy(static_cast<u8*>(g_gds.map) + offset, data, bytes);
@@ -4319,6 +4346,8 @@ bool WriteGds(Renderer& renderer, u32 offset, const void* data, u32 bytes) {
 }
 
 bool FillGds(Renderer& renderer, u32 offset, u32 bytes, u32 value) {
+  if (renderer.available() && RecordGdsWrite(offset, bytes, nullptr, value))
+    return true;
   if (!PrepareGdsTransfer(renderer, offset, bytes))
     return false;
   auto* dst = static_cast<u8*>(g_gds.map) + offset;
