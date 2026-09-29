@@ -357,6 +357,9 @@ struct ComputeInfo {
     // The shader's view starts this far into the range: bindings of one
     // dispatch whose buffers overlap share a range, as they share memory.
     u64 view_offset = 0;
+    // Bytes from `base` the dispatch can write, when the shader's stores
+    // bound it tighter than the descriptor's extent; 0: all of guest_size.
+    u64 write_bytes = 0;
   };
   Res res[kMaxResources];
   u32 num_res = 0;

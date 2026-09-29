@@ -205,8 +205,15 @@ bool RenderQueue::PendingWriteOverlaps(u64 base, u64 bytes) {
                 [done](const PendingWrite& w) { return w.command < done; });
   const u64 end = base + bytes;
   for (const PendingWrite& w : pending_writes_)
-    if (w.first < end && base < w.end)
+    if (w.first < end && base < w.end) {
+      if (kDrainTrace) {
+        static int shown = 0;
+        if ((shown++ % 64) == 0)
+          BASE_LOGI("drain", "read {:#x}+{:#x} hits pending {:#x}+{:#x}", base,
+                    bytes, w.first, w.end - w.first);
+      }
       return true;
+    }
   return false;
 }
 

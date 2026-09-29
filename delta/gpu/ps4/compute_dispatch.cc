@@ -19,6 +19,7 @@
 #include "base/containers/set.h"
 #include "base/containers/vector.h"
 #include "base/math/value_bounds.h"
+#include "base/memory/shared_pointer.h"
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_resource.h"
@@ -32,6 +33,9 @@
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
+// Record dispatches on the renderer thread, queued behind the draws, instead
+// of draining the queue and recording them on the walk.
+DELTA_OPTION(bool, kCsOnRenderThread, "DELTA_GPU_CS_RENDER_THREAD", false);
 }  // namespace
 
 namespace gpu::ps4 {
@@ -61,6 +65,7 @@ struct ResourceRange {
   bool zero_fill = false;      // no live range: hand the shader zeros
   u32 elem_bytes = 4;
   u32 stage_elem_bytes = 4;
+  u64 write_bytes = 0;  // see ComputeInfo::Res::write_bytes
   bool ok = true;
 };
 
@@ -161,10 +166,23 @@ ResourceRange ResolveBufferResource(u64 cs_addr,
   out.size = v.stride ? (u64)v.stride * v.num_records : v.num_records;
   if (out.size < res.min_bytes)
     out.size = res.min_bytes;
+  // Unswizzled records written by index alone end where the last record's
+  // furthest store does, often short of stride * num_records: a merged
+  // vertex stream's V# runs up to a component past its data.
+  const bool swizzled = (descriptor[1] >> 31) || ((descriptor[3] >> 23) & 1);
+  if (res.written && res.store_extent &&
+      res.store_extent != gcn::kUnknownStoreExtent && v.stride &&
+      v.num_records && !swizzled) {
+    const u64 end =
+        static_cast<u64>(v.num_records - 1) * v.stride + res.store_extent;
+    if (end < out.size)
+      out.write_bytes = end;
+  }
   if (!IsMappedGuestRange(out.base, 1)) {
     out.zero_fill = true;
     out.base = 0;
     out.size = kZeroFillBytes;
+    out.write_bytes = 0;
   } else if (out.size > kMaxResource) {
     const u64 declared = out.size;
     out.size = host_memory::MappedMemoryPrefix(
@@ -387,6 +405,7 @@ void DispatchCompute(render::Renderer& renderer,
     out.shader_writes = r.written;
     out.read = r.read;
     out.written = r.written && !range.zero_fill;
+    out.write_bytes = range.write_bytes;
     out.zero_fill = range.zero_fill;
     out.image_staging = range.image_staging;
     if (!range.image_staging)
@@ -412,8 +431,25 @@ void DispatchCompute(render::Renderer& renderer,
   if (!ci.num_res)
     return;
 
-  // Dispatches run on the walk: they are few, and what they write is what the
-  // walk's next descriptor reads may need.
+  // Queued behind the draws, so the walk moves on while the renderer thread
+  // records. What it writes is announced as pending: a walk read of those
+  // bytes (the next dispatch's descriptor chain) waits for it to run.
+  RenderQueue& queue = GuestRenderQueue();
+  if (kCsOnRenderThread && queue.running()) {
+    for (u32 i = 0; i < ci.num_res; i++)
+      if (ci.res[i].written)
+        queue.NotePendingWrite(ci.res[i].base,
+                               ci.res[i].write_bytes ? ci.res[i].write_bytes
+                               : ci.res[i].guest_size ? ci.res[i].guest_size
+                                                      : ci.res[i].size);
+    auto job = base::MakeShared<render::ComputeInfo>(ci);
+    queue.PushCall([&renderer, job, trace, num_res = ci.num_res] {
+      const bool executed = render::Dispatch(renderer, *job);
+      if (trace)
+        TraceCsDispatch(job->cs_addr, executed, num_res);
+    });
+    return;
+  }
   OwnRenderer("dispatch");
   const bool executed = render::Dispatch(renderer, ci);
   if (trace)

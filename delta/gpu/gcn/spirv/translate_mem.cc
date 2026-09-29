@@ -1179,7 +1179,8 @@ bool PlanCsResources(const Program& program,
   };
   base::HashMap<u64, u32> resource_by_version;
   const auto resource = [&](u32 pc, u32 base_sgpr, u32 dwords, u8 kind,
-                            bool written, u32 min_bytes, bool read = true) {
+                            bool written, u32 min_bytes, bool read = true,
+                            u32 store_extent = 0) {
     const u64 key =
         static_cast<u64>(kind) | (static_cast<u64>(base_sgpr) << 8) |
         (static_cast<u64>(descriptor_version(base_sgpr, dwords)) << 16);
@@ -1190,6 +1191,7 @@ bool PlanCsResources(const Program& program,
       res.read = res.read || read;
       if (min_bytes > res.min_bytes)
         res.min_bytes = min_bytes;
+      res.store_extent = base::Max(res.store_extent, store_extent);
       bind[pc] = it->second;
       return true;
     }
@@ -1201,7 +1203,15 @@ bool PlanCsResources(const Program& program,
     resource_by_version[key] = idx;
     bind[pc] = idx;
     r.resources.push_back({base_sgpr, pc, idx, kind, written, read, min_bytes});
+    r.resources.back().store_extent = store_extent;
     return true;
+  };
+  // An index-only store reaches instruction offset + size into its record;
+  // a per-lane (OFFEN) or SGPR (soffset) byte offset could go anywhere.
+  const auto store_extent = [](u32 w, u32 w1, u32 bytes) {
+    const bool offen = (w >> 12) & 1;
+    const u32 soffset = (w1 >> 24) & 0xFF;
+    return offen || soffset != 0x80 ? kUnknownStoreExtent : (w & 0xFFF) + bytes;
   };
 
   bool uses_gds = false;
@@ -1251,15 +1261,33 @@ bool PlanCsResources(const Program& program,
         const bool atomic = MubufAtomic(op);
         if (!load && !store && !atomic)
           return reject("cs.plan.mubuf");
+        // Format stores move at most a dword per component; atomics at most
+        // a qword.
+        const u32 store_bytes = op >= 0x04 && op <= 0x07 ? (op - 3) * 4
+                                : op == 0x18             ? 1
+                                : op == 0x1a             ? 2
+                                : op == 0x1c             ? 4
+                                : op == 0x1d             ? 8
+                                : op == 0x1e             ? 16
+                                : op == 0x1f             ? 12
+                                                         : 8;
         if (!resource(inst.pc, srsrc, 4, 0, store || atomic, 0,
-                      /*read=*/load || atomic))
+                      /*read=*/load || atomic,
+                      store || atomic ? store_extent(w, w1, store_bytes) : 0))
           return false;
         break;
       }
       case Enc::kMtbuf: {
         const u32 op = (w >> 16) & 0x7;
         const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
-        if (!resource(inst.pc, srsrc, 4, 0, op >= 4, 0, /*read=*/op < 4))
+        // The whole element of the instruction's own data format.
+        static constexpr u8 kDfmtBytes[16] = {0, 1, 2, 2, 4, 4, 4, 4,
+                                              4, 4, 4, 8, 8, 12, 16, 16};
+        const u32 dfmt_bytes = kDfmtBytes[(w >> 19) & 0xF];
+        if (!resource(inst.pc, srsrc, 4, 0, op >= 4, 0, /*read=*/op < 4,
+                      op >= 4 ? (dfmt_bytes ? store_extent(w, w1, dfmt_bytes)
+                                            : kUnknownStoreExtent)
+                              : 0))
           return false;
         break;
       }

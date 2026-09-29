@@ -207,6 +207,8 @@ Recompiled Recompile(
 
 // A CS memory resource; base_sgpr/use_pc locate the possibly-SRT-chained
 // descriptor for the command processor to resolve at dispatch.
+constexpr u32 kUnknownStoreExtent = ~0u;
+
 struct CsResource {
   u32 base_sgpr = 0;  // SGPR index of the live descriptor at use_pc
   u32 use_pc = 0;     // representative instruction consuming it
@@ -216,6 +218,10 @@ struct CsResource {
   bool read =
       false;  // written-only resources skip the staging upload (SotC fills)
   u32 min_bytes = 0;  // lower bound on size from immediate offsets
+  // How far into a record the stores reach (instruction offset plus store
+  // size) when every store addresses by index alone; kUnknownStoreExtent when
+  // one adds a per-lane or SGPR byte offset. 0: never stored.
+  u32 store_extent = 0;
   bool runtime_address =
       false;                   // base resolved on GPU via the guest-address map
   bool runtime_image = false;  // linear integer storage shared across views
