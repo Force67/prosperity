@@ -331,16 +331,17 @@ BufferFormat DecodeBufferFormat(Translator& t, Id dfmt, Id nfmt) {
   return f;
 }
 
-// Component `i` of a buffer_load_format element.
-Id FormattedComponent(Translator& t,
-                      const BufferFormat& f,
-                      Id var,
-                      Id byte_off,
-                      u32 i) {
+// Component `i` of a buffer_load_format element; `load_word` reads the dword
+// at a dword index.
+template <typename LoadWord>
+Id FormattedComponentWith(Translator& t,
+                          const BufferFormat& f,
+                          const LoadWord& load_word,
+                          Id byte_off,
+                          u32 i) {
   const auto fbits = [&](Id v) { return t.m.Bitcast(t.t_u, v); };
   const Id at = t.Add(byte_off, t.Mul(f.bytes, t.U32(i)));
-  const Id word = SsboLoad(
-      t, var, t.UMin(t.Shr(at, t.U32(2)), t.U32(kGfxBufferDwords - 1)));
+  const Id word = load_word(t.Shr(at, t.U32(2)));
   const Id shift =
       t.SelectB(f.is32, t.U32(0), t.Shl(t.And(at, t.U32(3)), t.U32(3)));
   const Id raw =
@@ -368,6 +369,68 @@ Id FormattedComponent(Translator& t,
       i == 3 ? t.SelectB(f.integer, t.U32(1), fbits(t.F32(1.f))) : t.U32(0);
   v = t.SelectB(t.Ult(t.U32(i), f.ncomp), v, missing);
   return t.SelectB(f.dfmt_known, v, word);
+}
+
+Id FormattedComponent(Translator& t,
+                      const BufferFormat& f,
+                      Id var,
+                      Id byte_off,
+                      u32 i) {
+  return FormattedComponentWith(
+      t, f,
+      [&](Id idx) {
+        return SsboLoad(t, var, t.UMin(idx, t.U32(kGfxBufferDwords - 1)));
+      },
+      byte_off, i);
+}
+
+// Component `i` of a buffer_store_format element, converted to the format's
+// raw bits and merged into its dword (8- and 16-bit components share one).
+// Components past the format's count are dropped, as the hardware drops them.
+void StoreFormattedComponent(Translator& t,
+                             StageContext& sc,
+                             u32 binding,
+                             const BufferFormat& f,
+                             Id byte_off,
+                             u32 i,
+                             Id value) {
+  const Id at = t.Add(byte_off, t.Mul(f.bytes, t.U32(i)));
+  const Id idx = t.Shr(at, t.U32(2));
+  const Id fv = t.m.Bitcast(t.t_f, value);
+  const auto is = [&](u32 k) { return t.Eq(f.nfmt, t.U32(k)); };
+  const Id to_u = [&](Id x) {
+    return t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {x});
+  }(t.Ext1(GLSLstd450RoundEven,
+           t.FMul(t.FClamp01(fv), f.umax)));
+  const Id to_s = t.m.Bitcast(
+      t.t_u,
+      t.m.Emit(spv::Op::OpConvertFToS, t.t_i,
+               {t.Ext1(GLSLstd450RoundEven,
+                       t.FMul(t.m.ExtInst(t.t_f, GLSLstd450FClamp,
+                                          {fv, t.F32(-1.f), t.F32(1.f)}),
+                              f.smax))}));
+  const Id uscaled = t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {fv});
+  const Id sscaled =
+      t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpConvertFToS, t.t_i, {fv}));
+  const Id half =
+      t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
+                  {t.m.CompositeConstruct(t.t_v2, {fv, t.F32(0.f)})});
+  Id raw = to_u;
+  raw = t.SelectB(is(1), to_s, raw);
+  raw = t.SelectB(is(2), uscaled, raw);
+  raw = t.SelectB(is(3), sscaled, raw);
+  raw = t.SelectB(t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is(4), is(5)}),
+                  value, raw);
+  raw = t.SelectB(is(7), half, raw);
+  // A 32-bit component (or an unknown format) is the register as it is.
+  raw = t.SelectB(f.is32, value, raw);
+  const Id shift = t.Shl(t.And(at, t.U32(3)), t.U32(3));
+  const Id old = CsSsboLoad(t, sc, binding, idx);
+  const Id merged = t.SelectB(
+      f.is32, raw,
+      t.m.Emit(spv::Op::OpBitFieldInsert, t.t_u, {old, raw, shift, f.bits}));
+  const Id keep = t.Ult(t.U32(i), t.SelectB(f.dfmt_known, f.ncomp, t.U32(4)));
+  CsSsboStore(t, sc, binding, idx, t.SelectB(keep, merged, old));
 }
 
 // Sub-dword store: read-modify-write the containing dword.
@@ -1514,14 +1577,38 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
     case 0x01:
     case 0x02:
     case 0x03:  // buffer_load_format_x..xyzw
-      load_dwords(op + 1);
-      break;
     case 0x04:
     case 0x05:
     case 0x06:
-    case 0x07:  // buffer_store_format_x..xyzw
-      store_dwords(op - 3);
+    case 0x07: {  // buffer_store_format_x..xyzw
+      // Converted as the V#'s DATA_FORMAT / NUM_FORMAT say: a skinning job
+      // storing xyz into an RGBA16F stream wrote 12 raw bytes, over the next
+      // attribute and into the next vertex's position.
+      if (sc.cs_runtime_resources.count(binding)) {
+        if (op <= 0x03)
+          load_dwords(op + 1);
+        else
+          store_dwords(op - 3);
+        break;
+      }
+      const Id w3 = t.Sg(srsrc + 3);
+      const BufferFormat f =
+          DecodeBufferFormat(t, t.And(t.Shr(w3, t.U32(15)), t.U32(0xF)),
+                             t.And(t.Shr(w3, t.U32(12)), t.U32(0x7)));
+      if (op <= 0x03) {
+        const auto load_word = [&](Id idx) {
+          return CsSsboLoad(t, sc, binding, idx);
+        };
+        for (u32 i = 0; i <= op; i++)
+          t.SetVg(vdata + i,
+                  FormattedComponentWith(t, f, load_word, byte_off, i));
+      } else {
+        for (u32 i = 0; i < op - 3; i++)
+          StoreFormattedComponent(t, sc, binding, f, byte_off, i,
+                                  t.Vg(vdata + i));
+      }
       break;
+    }
     case 0x08:  // buffer_load_ubyte
       t.SetVg(vdata, load_subword(8, false));
       break;
