@@ -239,27 +239,8 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
     // Selector 1 addresses GDS by byte offset, rather than guest virtual
     // memory. These fills reset the append counters used to build indirect
     // dispatch arguments; dropping them makes those counts grow every frame.
-    if (dst_sel == 1 && dst < 65536 && bytes <= 65536 - dst) {
-      if (src_sel == 2)
-        copied =
-            render::FillGds(renderer, static_cast<u32>(dst), bytes, body[1]);
-      else if (src_is_memory && gpu::IsReadableRange(src, bytes) &&
-               render::FlushCsWritesRange(renderer, src, bytes, "dma"))
-        copied = render::WriteGds(renderer, static_cast<u32>(dst),
-                                  reinterpret_cast<const void*>(src), bytes);
-      else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src) {
-        base::Vector<u8> data(bytes);
-        copied = render::ReadGds(renderer, static_cast<u32>(src), data.data(),
-                                 bytes) &&
-                 render::WriteGds(renderer, static_cast<u32>(dst), data.data(),
-                                  bytes);
-      }
-    } else if (src_sel == 1 && src < 65536 && bytes <= 65536 - src &&
-               dst_is_memory && gpu::IsReadableRange(dst, bytes) &&
-               render::FlushCsWritesRange(renderer, dst, bytes, "dma")) {
-      copied = render::ReadGds(renderer, static_cast<u32>(src),
-                               reinterpret_cast<void*>(dst), bytes);
-    }
+    copied =
+        render::DmaGds(renderer, src_sel, dst_sel, src, dst, bytes, body[1]);
     TraceDmaData(control, src, dst, bytes, copied);
     return;
   }

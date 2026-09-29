@@ -1123,6 +1123,7 @@ bool PlanCsResources(const Program& program,
     return true;
   };
 
+  bool uses_gds = false;
   u32 idx = 0;
   for (const Inst& inst : program) {
     const u32 inst_idx = idx++;
@@ -1198,16 +1199,24 @@ bool PlanCsResources(const Program& program,
         break;
       }
       case Enc::kDs:
+        if ((w >> 17) & 1) {
+          // The append/consume counters are modelled; the rest of GDS is not.
+          if (inst.opcode != 0x3d && inst.opcode != 0x3e)
+            return reject("cs.plan.gds");
+          uses_gds = true;
+          break;
+        }
         // DS swizzle uses the wave cross-lane path, not LDS memory.
         if (!lds_dwords && inst.opcode != 0x35)
-          return false;
-        if ((w >> 17) & 1)
-          return false;  // GDS not modelled
+          return reject("cs.plan.ds-without-lds");
         break;
       default:
         break;
     }
   }
+  // The counters get a buffer of their own past the resources.
+  if (uses_gds)
+    r.gds_binding = static_cast<int>(r.resources.size());
   return true;
 }
 
@@ -1257,7 +1266,9 @@ void EmitGdsCounter(Translator& t, const Inst& inst, StageContext& sc) {
   const Id ptr = t.m.AccessChain(p_u, sc.gds_var, {t.U32(0), index});
   const Id scope = t.U32(static_cast<u32>(spv::Scope::Device));
   const Id relaxed = t.U32(0);
-  if (t.CanExchange()) {
+  // The one-bit EXEC model cannot rank lanes (see EmitMbcntOfExec), so there
+  // every lane takes its own slot below.
+  if (t.CanExchange() && (t.wave_masks || t.lane_masks || t.full_wave_masks)) {
     t.WavePublish(t.SelectB(t.LaneActive(t.Exec()), t.U32(1), t.U32(0)));
     t.Barrier();
     const Id leader = t.m.NewBlock(), merge = t.m.NewBlock();
@@ -1285,14 +1296,11 @@ void EmitGdsCounter(Translator& t, const Inst& inst, StageContext& sc) {
     t.SetVg(vdst, result);
     return;
   }
-  if (op == 0x3e) {  // ds_append
-    t.SetVg(vdst, t.m.Emit(spv::Op::OpAtomicIAdd, t.t_u,
-                           {ptr, scope, relaxed, t.U32(1)}));
-  } else {  // ds_consume
-    const Id old =
-        t.m.Emit(spv::Op::OpAtomicISub, t.t_u, {ptr, scope, relaxed, t.U32(1)});
-    t.SetVg(vdst, old);
-  }
+  // An inactive lane adds 0, so it leaves the counter alone.
+  const Id step = t.SelectB(t.LaneActive(t.Exec()), t.U32(1), t.U32(0));
+  t.SetVg(vdst, t.m.Emit(op == 0x3e ? spv::Op::OpAtomicIAdd  // ds_append
+                                    : spv::Op::OpAtomicISub,  // ds_consume
+                         t.t_u, {ptr, scope, relaxed, step}));
 }
 
 void EmitCsGlobal(Translator& t, const Inst& inst, StageContext& sc) {

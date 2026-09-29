@@ -943,7 +943,8 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const u32 op = inst.opcode, vdst = (w >> 17) & 0xFF;
       const u32 vsrc1 = (w >> 9) & 0xFF, src0 = w & 0x1FF;
       const u32 src1 = op == 0x01 || op == 0x02 ? vsrc1 : 256 + vsrc1;
-      if (EmitLaneSpill(t, op, vdst, src0, src1, inst.literal))
+      if (EmitLaneSpill(t, op, vdst, src0, src1, inst.literal) ||
+          EmitMbcntOfExec(t, op, vdst, src0, src1, inst.literal))
         break;
       EmitVop2(t, op, vdst, t.SrcF(src0, inst.literal),
                t.SrcF(src1, inst.literal), inst.literal);
@@ -964,6 +965,9 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       // second dword; EmitVop3 sees Ids, not register fields.
       if ((op == 0x101 || op == 0x102) &&
           EmitLaneSpill(t, op - 0x100, vdst, s0, s1, inst.literal))
+        break;
+      if (op >= 0x100 && op < 0x140 && !neg && !abs &&
+          EmitMbcntOfExec(t, op - 0x100, vdst, s0, s1, inst.literal))
         break;
       Id source0 = t.SrcF(s0, inst.literal, neg & 1, abs & 1);
       if (op == 0x18b) {
@@ -1045,7 +1049,9 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         EmitGfxMtbuf(t, inst, sc);
       break;
     case Enc::kDs:
-      if (sc.is_cs || inst.opcode == 0x35) {
+      if (sc.is_cs && sc.gds_var && ((w >> 17) & 1)) {
+        EmitGdsCounter(t, inst, sc);
+      } else if (sc.is_cs || inst.opcode == 0x35) {
         EmitDs(t, inst, sc);
       } else if (sc.lds_var && DsGraphicsSupported(inst.opcode)) {
         // Private-backed LDS. Exact when the address is the lane's own slot,
@@ -2644,6 +2650,14 @@ bool TranslateCs(const Program& program,
     t.m.Decorate(v, spv::Decoration::Binding, {res.binding});
     t.m.Name(v, "buf" + base::ToString(res.binding));
     sc.cs_ssbo[res.binding] = v;
+  }
+  if (r.gds_binding >= 0) {
+    const Id v = t.m.Variable(p_buf, spv::StorageClass::StorageBuffer);
+    t.m.Decorate(v, spv::Decoration::DescriptorSet, {0});
+    t.m.Decorate(v, spv::Decoration::Binding,
+                 {static_cast<u32>(r.gds_binding)});
+    t.m.Name(v, "gds");
+    sc.gds_var = v;
   }
 
   // LDS: a Workgroup-storage uint array sized by RSRC2.

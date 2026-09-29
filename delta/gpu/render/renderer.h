@@ -94,6 +94,16 @@ bool CsTracksGuestWrites();
 bool ReadGds(Renderer& renderer, u32 offset, void* data, u32 bytes);
 bool WriteGds(Renderer& renderer, u32 offset, const void* data, u32 bytes);
 bool FillGds(Renderer& renderer, u32 offset, u32 bytes, u32 value);
+// A CP DMA_DATA whose source or destination selector is GDS (1). `data` is
+// the packet's immediate dword, used when src_sel is 2 (a fill). Returns
+// whether the transfer landed.
+bool DmaGds(Renderer& renderer,
+            u32 src_sel,
+            u32 dst_sel,
+            u64 src,
+            u64 dst,
+            u32 bytes,
+            u32 data);
 
 // Monotonic count of compute-results-became-visible-in-guest-memory events
 // (a range writeback, or an executed batch of dispatches that write guest

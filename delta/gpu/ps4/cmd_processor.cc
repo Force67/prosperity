@@ -400,6 +400,15 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
     return address >= 0x1000000ull && address < kGuestEnd;
   };
   bool copied = false;
+  // Selector 1 addresses GDS by byte offset: the append counters a title
+  // resets every frame.
+  if (!kNoCopy && bytes && (src_sel == 1 || dst_sel == 1)) {
+    copied =
+        render::DmaGds(renderer, src_sel, dst_sel, src, dst, bytes, body[1]);
+    TraceDmaData(control, body[5] & ~0x1fffffu, src_sel, dst_sel, src, dst,
+                 bytes, copied);
+    return;
+  }
   if (!kNoCopy && src_is_memory && dst_is_memory && bytes &&
       bytes <= 0x1000000u && src != dst && addressable(src) &&
       addressable(src + bytes) && addressable(dst) &&

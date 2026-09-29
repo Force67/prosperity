@@ -940,6 +940,13 @@ bool EmitLaneSpill(Translator& t,
                    u32 src0,
                    u32 src1,
                    u32 literal);
+// v_mbcnt_lo/hi of EXEC in the one-bit EXEC model; false if not that.
+bool EmitMbcntOfExec(Translator& t,
+                     u32 op,
+                     u32 dst,
+                     u32 src0,
+                     u32 src1,
+                     u32 literal);
 bool EmitNeoVop1(Translator& t, const Inst& inst);
 bool EmitNeoVop2(Translator& t, const Inst& inst);
 bool EmitNeoVopc(Translator& t,

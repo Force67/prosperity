@@ -950,6 +950,23 @@ bool EmitLaneSpill(Translator& t,
   return false;
 }
 
+// v_mbcnt over EXEC in the one-bit EXEC model, where EXEC is this lane's own
+// flag rather than a lane mask, so it cannot rank the lane. Its use is ranking
+// lanes after a GDS ds_append, which here already hands every lane its own
+// slot, so the rank is 0.
+bool EmitMbcntOfExec(Translator& t,
+                     u32 op,
+                     u32 dst,
+                     u32 src0,
+                     u32 src1,
+                     u32 literal) {
+  if ((op != 0x23 && op != 0x24) || (src0 != 126 && src0 != 127) ||
+      t.wave_masks || t.lane_masks || t.full_wave_masks)
+    return false;
+  t.SetVg(dst, t.SrcRaw(src1, literal));
+  return true;
+}
+
 // ---- cross-lane -------------------------------------------------------------
 // A GCN wave is 64 lanes; the host subgroup may be half that. Compute gets an
 // exact channel (a Workgroup array indexed the way GCN packs threads into
