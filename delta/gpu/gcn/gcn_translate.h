@@ -9,6 +9,7 @@
 #include "base/arch.h"
 
 #include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_decode.h"
 
 namespace gpu::gcn {
@@ -260,5 +261,7 @@ base::Vector<u32> BuildImageTilingShader();
 // Diagnostic: disassemble the shader at a guest address (they move between
 // runs).
 void DisassembleAt(u64 code_address, const char* tag);
+// The same as text, one instruction per line; `max_dwords` bounds the read.
+base::String ListingAt(u64 code_address, u32 max_dwords);
 
 }  // namespace gpu::gcn

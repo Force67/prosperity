@@ -127,4 +127,14 @@ void DisassembleAt(u64 code_address, const char* tag) {
   Disassemble(code, words ? words : 512, tag);
 }
 
+base::String ListingAt(u64 code_address, u32 max_dwords) {
+  base::String out;
+  const auto* code = reinterpret_cast<const u32*>(code_address);
+  for (const Inst& inst : DecodeShader(code, max_dwords)) {
+    out += DisasmLine(inst);
+    out += '\n';
+  }
+  return out;
+}
+
 }  // namespace gpu::gcn

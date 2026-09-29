@@ -66,7 +66,7 @@ DELTA_OPTION(float, kCaptureExposure, "DELTA_GPU_CAPTURE_EXPOSURE", 1.f);
 DELTA_OPTION(float, kCaptureGamma, "DELTA_GPU_CAPTURE_GAMMA", 2.2f);
 // Bytes of each constant buffer written into the capture (0 = the whole
 // binding).
-DELTA_OPTION(int, kCaptureCbufBytes, "DELTA_GPU_CAPTURE_CBUF_BYTES", 256);
+DELTA_OPTION(int, kCaptureCbufBytes, "DELTA_GPU_CAPTURE_CBUF_BYTES", 1024);
 // Also write the untouched readback bytes next to each PNG.
 DELTA_OPTION(bool, kCaptureRaw, "DELTA_GPU_CAPTURE_RAW", false);
 DELTA_OPTION(bool, kValidate, "DELTA_GPU_VALIDATE", false);
@@ -1043,12 +1043,35 @@ bool DumpGuestTexture(const TexKey& t,
 
 // --- draw serialization ----------------------------------------------------
 
+// Each distinct shader of the frame is disassembled once next to the capture
+// (<prefix>_sh_<addr>.s), so reading one needs no second run.
+base::Set<u64> g_frame_shaders;
+
+void DumpShaderListing(u64 addr, u32 dwords) {
+  if (!dwords || !g_frame_shaders.insert(addr).second)
+    return;
+  char path[320];
+  std::snprintf(path, sizeof path, "%s_sh_%llx.s", g_prefix.c_str(),
+                (unsigned long long)addr);
+  std::FILE* f = std::fopen(path, "wb");
+  if (!f)
+    return;
+  // Bounded by the OrbShdr footer, so code past an early s_endpgm is listed.
+  u32 span = 8192;
+  while (span > dwords && !gpu::IsReadableRange(addr, span * 4ull))
+    span /= 2;
+  const base::String listing = gcn::ListingAt(addr, base::Max(span, dwords));
+  std::fwrite(listing.data(), 1, listing.size(), f);
+  std::fclose(f);
+}
+
 base::String ShaderObj(u64 addr, const base::Vector<u32>* spirv) {
   Obj o;
   o.Hex("addr", addr);
   u32 dwords = 0;
   o.Hex("guest_hash", GuestCodeHash(addr, &dwords));
   o.U("guest_dwords", dwords);
+  DumpShaderListing(addr, dwords);
   if (spirv && !spirv->empty()) {
     o.Hex("spirv_hash", SpirvHash(*spirv));
     o.U("spirv_words", spirv->size());
@@ -1463,6 +1486,7 @@ void FrameBegin(int frame_num) {
   g_seq = 0;
   g_draw_seq = 0;
   g_frame_texs.clear();
+  g_frame_shaders.clear();
   BASE_LOGI("gpucap", "capturing frame {} -> {}", frame_num, path.c_str());
   Line l("capture");
   l.Int("version", 1)
