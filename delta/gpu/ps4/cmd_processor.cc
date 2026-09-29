@@ -626,7 +626,8 @@ void NoteLateLabel(u64 address, const char* packet);
 void InOrder(void (*handle)(const u32*, u32),
              const u32* body,
              u32 count,
-             u64 label) {
+             u64 label,
+             u64 label_bytes) {
   NoteLateLabel(label, handle == HandleWriteData ? "WRITE_DATA" : "label");
   RenderQueue& queue = GuestRenderQueue();
   if (!queue.running()) {
@@ -635,8 +636,9 @@ void InOrder(void (*handle)(const u32*, u32),
   }
   if (label && IsLabelAddress(label)) {
     g_fence_labels.Note(label);
-    // Wide enough for EVENT_WRITE's eight 16-byte slots.
-    queue.NotePendingWrite(label, 128);
+    // Exactly what the packet writes: a wider window catches walk reads of
+    // the neighbouring labels, each a drain of the whole queue.
+    queue.NotePendingWrite(label, label_bytes);
   }
   queue.PushCall([handle, words = base::Vector<u32>(body, body + count)] {
     handle(words.data(), static_cast<u32>(words.size()));
@@ -1082,23 +1084,26 @@ u32 WalkDcb(render::Renderer& renderer,
           GuestRenderQueue().NotePendingWrite(PacketAddress(body, 1),
                                               (count - 3) * 4ull);
         InOrder(HandleWriteData, body, count,
-                count >= 3 ? PacketAddress(body, 1) : 0);
+                count >= 3 ? PacketAddress(body, 1) : 0,
+                count >= 4 ? (count - 3) * 4ull : 4);
         break;
       case IT_EVENT_WRITE_EOP:
         InOrder(HandleEventWriteEop, body, count,
-                count >= 3 ? PacketAddress(body, 1) : 0);
+                count >= 3 ? PacketAddress(body, 1) : 0, 8);
         break;
       case IT_RELEASE_MEM:
         InOrder(HandleReleaseMem, body, count,
-                count >= 4 ? PacketAddress(body, 2) : 0);
+                count >= 4 ? PacketAddress(body, 2) : 0, 8);
         break;
+      // EVENT_WRITE's occlusion and pipeline-stats dumps fill eight 16-byte
+      // slots; EOS can copy GDS dwords out.
       case IT_EVENT_WRITE:
         InOrder(HandleEventWrite, body, count,
-                count >= 3 ? PacketAddress(body, 1) & ~7ull : 0);
+                count >= 3 ? PacketAddress(body, 1) & ~7ull : 0, 128);
         break;
       case IT_EVENT_WRITE_EOS:
         InOrder(HandleEventWriteEos, body, count,
-                count >= 3 ? PacketAddress(body, 1) : 0);
+                count >= 3 ? PacketAddress(body, 1) : 0, 128);
         break;
       case IT_INDIRECT_BUFFER:
       case IT_INDIRECT_BUFFER_CNST: {  // chained buffer (nested CMDBUF)
