@@ -74,8 +74,11 @@ inline bool IsReadableRange(u64 address, u64 bytes) {
       read = syscall(SYS_process_vm_readv, kSelf, &local, 1, remote, count, 0);
     } while (read < 0 && errno == EINTR);
   }
+  // A short read or EFAULT is the answer, not a reason to ask again: parsing
+  // the map costs milliseconds, and a replay chasing garbage pointers asks
+  // often.
   if (read != static_cast<ssize_t>(count))
-    return IsReadableMapping(address, bytes);
+    return read < 0 && errno != EFAULT && IsReadableMapping(address, bytes);
 
   // Everything in between: mincore fails with ENOMEM when any page of the span
   // has no mapping, which is the same question the per-page walk was asking.
@@ -86,7 +89,7 @@ inline bool IsReadableRange(u64 address, u64 bytes) {
     residency.resize(pages);
   if (mincore(reinterpret_cast<void*>(first_page), pages * page,
               residency.data()) != 0)
-    return IsReadableMapping(address, bytes);
+    return errno != ENOMEM && IsReadableMapping(address, bytes);
   return true;
 }
 
