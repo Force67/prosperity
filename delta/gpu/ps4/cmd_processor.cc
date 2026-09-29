@@ -442,6 +442,7 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
   }
   TraceDmaData(control, body[5] & ~0x1fffffu, src_sel, dst_sel, src, dst, bytes,
                copied);
+  TraceAddrWatch("DMA_DATA", dst, bytes, body[1], /*max_lines=*/8);
 }
 
 // Gnm writes its 32/64-bit submit/flip fence labels with WRITE_DATA. The

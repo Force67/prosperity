@@ -614,7 +614,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
   if (nv > 200000u || (d.num_vattrs && (!d.vertex_data || !d.vertex_stride)))
     return vtx_decline(nv > 200000u ? "nv-cap" : "no-vertex-data", nv);
+  // A window a dispatch still holds is bound from its buffer below
+  // (CsVertexBuffer); anything that falls back is flushed per binding there.
   if (d.vertex_data && d.vertex_stride &&
+      !CsHoldsVertices(reinterpret_cast<u64>(d.vertex_data),
+                       static_cast<u64>(nv) * d.vertex_stride) &&
       !FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.vertex_data),
                           static_cast<u64>(nv) * d.vertex_stride, "vtx"))
     return vtx_decline("cs-flush", nv);
@@ -1005,6 +1009,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       bind_size[j] = rec;
     }
     vb_cached[j] = u64(-1);
+    // A dispatch's unflushed output (skinning) is fetched from its own buffer.
+    if (bind_size[j] &&
+        CsVertexBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
+                       &vb_kept[j].buffer, &vb_kept[j].offset))
+      continue;
     if (kRingDedup && bind_size[j] && TrackingGuestWrites()) {
       SyncGuestWrites();
       if (FindCachedBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],

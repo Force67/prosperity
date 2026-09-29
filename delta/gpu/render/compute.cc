@@ -127,6 +127,8 @@ DELTA_OPTION(bool, kCsImageLazyWb, "DELTA_GPU_CS_IMAGE_LAZY_WB", true);
 // writeback is a copy, and a descriptor's shape stops mattering. =0 restores
 // per-shape linear staging.
 DELTA_OPTION(bool, kCsTruth, "DELTA_GPU_CS_TRUTH", true);
+DELTA_OPTION(bool, kCsMergeOverlap, "DELTA_GPU_CS_MERGE_OVERLAP", true);
+DELTA_OPTION(bool, kCsKeepOverlap, "DELTA_GPU_CS_KEEP_OVERLAP", true);
 // Dispatches per batch submit. Small batches are what makes the asynchronous
 // ring pay: a reader then waits for a few dispatches' worth of GPU work,
 // usually already done, instead of a frame's worth.
@@ -138,6 +140,10 @@ DELTA_OPTION(bool, kCsTexBridgeTrace, "DELTA_GPU_CS_TEXBRIDGE_TRACE", false);
 // draws instead of a frame early. =0 restores the old one-frame latency.
 DELTA_OPTION(bool, kFrameChunks, "DELTA_GPU_FRAME_CHUNKS", true);
 DELTA_OPTION(u64, kCsFlushTrace, "DELTA_GPU_CSFLUSHTRACE", 0);
+// DELTA_GPU_CSOVERLAP=<frame>: from that frame on, name the binding and the
+// dirty range behind the next "overlap" writebacks (a dispatch input
+// straddling another's unflushed output).
+DELTA_OPTION(int, kCsOverlapTrace, "DELTA_GPU_CSOVERLAP", 0);
 DELTA_OPTION(bool, kCsSyncReport, "DELTA_GPU_CSSYNC", false);
 DELTA_OPTION(bool, kCsEagerReadback, "DELTA_GPU_CS_EAGER_READBACK", true);
 // Off by default: with the CP DMA flush narrowed, ranges a dispatch rewrites
@@ -158,6 +164,7 @@ u64 g_out_retile_ns = 0, g_out_rt_ns = 0, g_out_tail_ns = 0;
 u64 g_out_buffer_ns = 0;
 u64 g_tex_bridge_n = 0, g_tex_bridge_bytes = 0, g_cs_chunk_splits = 0;
 u64 g_buf_bridge_n = 0, g_buf_bridge_bytes = 0, g_buf_bridge_declined = 0;
+u64 g_vtx_bridge_n = 0;
 u64 g_stage_ro_bytes = 0, g_stage_rw_bytes = 0, g_stage_img_bytes = 0;
 u64 g_stage_guest_detile_bytes = 0, g_stage_guest_detile_n = 0;
 // Staging-in halves: hashing guest memory to decide validity, CPU detiling,
@@ -2008,7 +2015,8 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
   }
   // CopyDst: RT-backed inputs are staged by an image->buffer copy on the
   // queue (StageCsRangeFromRt) instead of a CPU memcpy from guest memory.
-  u32 usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
+  // Vertex: a draw may fetch a dispatch's output in place (CsVertexBuffer).
+  u32 usage = rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferVertex;
   if (kCsVram)
     usage |= rhi::kBufferCopySrc;  // readback of results
   const bool split = kCsVram && SplitVram();
@@ -3094,7 +3102,6 @@ bool CsSplitFrameChunk() {
 // Write one dirty range back to guest memory (retile for images) and re-stamp
 // its hash so the next validation sees guest == buffer.
 bool CsRangeFlushOne(u64 base, CsRange& e) {
-  BumpTextureEpoch();
   if (kCsWbAudit) {
     // Counters, not a sample: the first N flushes are all startup, and the
     // question ("does a tiled-image range ever reach the retile?") is about
@@ -3112,8 +3119,12 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
                 (unsigned long long)img_n, (unsigned long long)img_dirty_n,
                 (unsigned long long)g_cs_image_staged);
   }
+  // A clean range writes nothing, so texture answers memoized on the epoch
+  // still hold. Callers sweep every overlapping sibling through here.
   if (!e.gpu_dirty)
     return true;
+  DELTA_ZONE("gpu.cs_writeback");
+  BumpTextureEpoch();
   if (e.imported) {  // the dispatch wrote straight into guest memory
     if (!CsBatchWaitRange(e, kSyncImported))
       return false;
@@ -3298,11 +3309,24 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
             const u64 o = b * 64;
             const bool gpu = std::memcmp(src + o, shd + o, 64) != 0;
             const bool cpu = std::memcmp(dst + o, shd + o, 64) != 0;
-            if (cpu) {
+            if (cpu && gpu) {
+              // Both changed the block: merge it word by word, the CPU's
+              // word winning where both changed the same one.
+              local.conflicts++;
+              for (u64 w = o; w < o + 64; w += 4) {
+                if (std::memcmp(dst + w, shd + w, 4) != 0) {
+                  std::memcpy(src + w, dst + w, 4);
+                  local.adopted += 4;
+                } else if (std::memcmp(src + w, shd + w, 4) != 0) {
+                  std::memcpy(dst + w, src + w, 4);
+                  local.wrote += 4;
+                }
+                std::memcpy(shd + w, src + w, 4);
+              }
+            } else if (cpu) {
               std::memcpy(src + o, dst + o, 64);
               std::memcpy(shd + o, dst + o, 64);
               local.adopted += 64;
-              local.conflicts += gpu;
             } else if (gpu) {
               std::memcpy(dst + o, src + o, 64);
               std::memcpy(shd + o, src + o, 64);
@@ -3586,14 +3610,16 @@ void CsSyncReport(double frames) {
             "retile={:.1f}ms x{:.1f} buffers={:.1f}ms "
             "rt-upload={:.1f}ms x{:.1f} tail={:.1f}ms "
             "texbridge={:.1f}x {:.1f}MB bufbridge={:.1f}x {:.1f}MB "
-            "(declined {:.1f}) chunks={:.1f}",
+            "(declined {:.1f}) vtxbridge={:.1f}x chunks={:.1f}",
             g_out_retile_ns / frames / 1e6, g_out_retile_n / frames,
             g_out_buffer_ns / frames / 1e6, g_out_rt_ns / frames / 1e6,
             g_out_rt_submits / frames, g_out_tail_ns / frames / 1e6,
             g_tex_bridge_n / frames, g_tex_bridge_bytes / frames / 1e6,
             g_buf_bridge_n / frames, g_buf_bridge_bytes / frames / 1e6,
-            g_buf_bridge_declined / frames, g_cs_chunk_splits / frames);
+            g_buf_bridge_declined / frames, g_vtx_bridge_n / frames,
+            g_cs_chunk_splits / frames);
   g_buf_bridge_n = g_buf_bridge_bytes = g_buf_bridge_declined = 0;
+  g_vtx_bridge_n = 0;
   g_out_retile_ns = g_out_rt_ns = g_out_tail_ns = 0;
   g_out_buffer_ns = 0;
   g_tex_bridge_n = g_tex_bridge_bytes = g_cs_chunk_splits = 0;
@@ -3872,6 +3898,7 @@ bool CsSupplyTexture(u64 base,
 }
 
 DELTA_OPTION(bool, kCsBufBridge, "DELTA_GPU_CS_BUF_BRIDGE", true);
+DELTA_OPTION(bool, kCsVtxBridge, "DELTA_GPU_CS_VTX_BRIDGE", true);
 DELTA_OPTION(bool, kBufMemo, "DELTA_GPU_BUFMEMO", true);
 
 namespace {
@@ -3907,6 +3934,19 @@ CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base) {
     only = other;
     return false;
   });
+  if (kCsOverlapTrace && g_frame.num >= kCsOverlapTrace && only) {
+    static int shown = 0;
+    if (shown++ < 30) {
+      base::String line;
+      for (u64 r : DirtyRangesOverlapping(base, bytes, base)) {
+        const CsRange& o = g_cs_ranges.find(r)->second;
+        base::FormatTo(line, " [{:#x}+{:#x} size={:#x} truth={} img={}]", r,
+                       o.guest_bytes, o.size, (int)o.truth,
+                       (int)o.image_staging);
+      }
+      BASE_LOGI("csvtx", "window {:#x}+{:#x}:{}", base, bytes, line.c_str());
+    }
+  }
   if (several || !only)
     return nullptr;
   CsRange& e = g_cs_ranges.find(only)->second;
@@ -3956,6 +3996,81 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
     g_cs_chunk_needs_batch = true;
   g_buf_bridge_n++;
   g_buf_bridge_bytes += bytes;
+  return true;
+}
+
+// The range holding a draw's vertex window. Unlike a raw window, neighbours
+// may touch its ends: a mesh's streams are written through V#s whose extents
+// run a few bytes into the next mesh's vertices without writing them.
+CsRange* VertexSource(u64 base, u64 bytes, u64* range_base) {
+  if (!kCsBufBridge || !kCsVram || g_cs_failed || !bytes || !g_frame.recording)
+    return nullptr;
+  constexpr u64 kSlack = 64;
+  CsRange* found = nullptr;
+  bool bad = false;
+  AnyDirtyOverlapping(base, bytes, [&](u64 other) {
+    CsRange& e = g_cs_ranges.find(other)->second;
+    const u64 valid = base::Min<u64>(e.size, e.guest_bytes);
+    if (other <= base && base + bytes <= other + valid) {
+      if (found || !e.buf || e.image_staging || e.truth || e.imported)
+        bad = true;
+      found = &e;
+      *range_base = other;
+    } else {
+      const u64 lo = base::Max(base, other);
+      const u64 hi = base::Min(base + bytes, other + e.guest_bytes);
+      bad |= hi > lo && hi - lo > kSlack;
+    }
+    return bad;
+  });
+  return bad ? nullptr : found;
+}
+
+bool CsHoldsVertices(u64 base, u64 bytes) {
+  u64 range_base;
+  return kCsVtxBridge && VertexSource(base, bytes, &range_base);
+}
+
+bool CsVertexBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
+  if (!kCsVtxBridge)
+    return false;
+  u64 range_base;
+  CsRange* const found = VertexSource(base, bytes, &range_base);
+  if (!found)
+    return false;
+  CsRange& e = *found;
+  // As for CsSupplyBuffer: only while the guest still holds what was staged
+  // do the buffer's bytes around the output equal guest memory's.
+  const u64 off = base - range_base;
+  if (!e.shadow_valid || e.shadow.size() < off + bytes ||
+      std::memcmp(e.shadow.data() + off, reinterpret_cast<const void*>(base),
+                  bytes)) {
+    g_buf_bridge_declined++;
+    return false;
+  }
+  // One barrier outside the pass covers every batch recorded so far, so a pass
+  // of skinned draws ends once, not per draw. A later dispatch into a range
+  // this chunk reads splits the chunk (chunk_ref), so the draw still sees the
+  // output it was recorded against.
+  static u64 covered_chunk = ~0ull, covered_batch = 0;
+  if (covered_chunk != g_frame.chunk_seq) {
+    covered_chunk = g_frame.chunk_seq;
+    covered_batch = 0;
+  }
+  if (e.batch_id > covered_batch) {
+    EndRegion();
+    g_frame.list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+                          kAccessAll);
+    covered_batch = g_cs_batch_open ? g_cs_batch_id : g_cs_batch_next_id - 1;
+  }
+  e.last_used_frame = g_frame.num;
+  e.frame_ref = g_frame.num;
+  e.chunk_ref = g_frame.chunk_seq;
+  if (e.pending_batch)
+    g_cs_chunk_needs_batch = true;
+  g_vtx_bridge_n++;
+  *buffer = e.buf;
+  *offset = off;
   return true;
 }
 
@@ -4227,18 +4342,96 @@ bool CsDeclined(const ComputeInfo& ci, const char* why) {
 // constant block read through a 0x1c-byte window and a 0x24-byte one) share
 // one staging range, so they have to agree on its size: take the larger for
 // both. Image bindings keep their own shapes and still conflict below.
+// Plain bindings of one dispatch that overlap without sharing a base (a
+// skinning job writing two interleaved vertex streams through V#s 8 bytes
+// apart) are one piece of memory: stage them as one range covering both, each
+// bound at its own offset into it. As two ranges, each held the other's words
+// stale, so neither could be read back or fed to a draw without the other
+// flushed.
+bool MergeOverlapping(ComputeInfo& ci) {
+  constexpr u64 kAlign = 16;
+  const auto plain = [&](u32 i) {
+    const auto& r = ci.res[i];
+    return !r.zero_fill && !r.image_staging && r.binding < 48 &&
+           !TruthEligible(r);
+  };
+  const auto end_of = [](const ComputeInfo::Res& r) {
+    return r.base + base::Max(r.size, r.guest_size);
+  };
+  bool changed = false;
+  for (u32 i = 0; i < ci.num_res; i++) {
+    if (!plain(i))
+      continue;
+    u64 lo = ci.res[i].base, hi = end_of(ci.res[i]);
+    u32 members = 0;
+    // Grow the group until no other plain binding overlaps it.
+    for (bool grew = true; grew;) {
+      grew = false;
+      members = 0;
+      for (u32 j = 0; j < ci.num_res; j++) {
+        if (!plain(j) || ci.res[j].base >= hi || end_of(ci.res[j]) <= lo)
+          continue;
+        members++;
+        if (ci.res[j].base < lo || end_of(ci.res[j]) > hi) {
+          lo = base::Min(lo, ci.res[j].base);
+          hi = base::Max(hi, end_of(ci.res[j]));
+          grew = true;
+        }
+      }
+    }
+    bool distinct = false;
+    for (u32 j = 0; j < ci.num_res; j++)
+      distinct |= plain(j) && ci.res[j].base < hi && end_of(ci.res[j]) > lo &&
+                  ci.res[j].base != ci.res[i].base;
+    if (members < 2 || !distinct)
+      continue;
+    lo &= ~(kAlign - 1);
+    hi = (hi + 3) & ~u64(3);
+    for (u32 j = 0; j < ci.num_res; j++) {
+      auto& r = ci.res[j];
+      if (!plain(j) || r.base < lo || end_of(r) > hi)
+        continue;
+      r.view_offset = r.base - lo;
+      r.base = lo;
+      r.size = r.guest_size = hi - lo;
+    }
+    changed = true;
+  }
+  return changed;
+}
+
 const ComputeInfo& MergeSameBase(const ComputeInfo& ci, ComputeInfo& merged) {
+  const ComputeInfo* src = &ci;
+  if (kCsMergeOverlap) {
+    bool overlap = false;
+    for (u32 i = 0; i < ci.num_res && !overlap; i++)
+      for (u32 j = 0; j < i && !overlap; j++) {
+        const auto& a = ci.res[i];
+        const auto& b = ci.res[j];
+        overlap = !a.zero_fill && !b.zero_fill && !a.image_staging &&
+                  !b.image_staging && a.base != b.base &&
+                  a.base < b.base + base::Max(b.size, b.guest_size) &&
+                  b.base < a.base + base::Max(a.size, a.guest_size);
+      }
+    if (overlap) {
+      merged = ci;
+      if (MergeOverlapping(merged))
+        src = &merged;
+    }
+  }
+  const ComputeInfo& in = *src;
   bool need = false;
-  for (u32 i = 0; i < ci.num_res && !need; i++)
+  for (u32 i = 0; i < in.num_res && !need; i++)
     for (u32 j = 0; j < i && !need; j++)
-      need = ci.res[i].base == ci.res[j].base && !ci.res[i].zero_fill &&
-             !ci.res[j].zero_fill && !ci.res[i].image_staging &&
-             !ci.res[j].image_staging &&
-             (ci.res[i].size != ci.res[j].size ||
-              ci.res[i].guest_size != ci.res[j].guest_size);
+      need = in.res[i].base == in.res[j].base && !in.res[i].zero_fill &&
+             !in.res[j].zero_fill && !in.res[i].image_staging &&
+             !in.res[j].image_staging &&
+             (in.res[i].size != in.res[j].size ||
+              in.res[i].guest_size != in.res[j].guest_size);
   if (!need)
-    return ci;
-  merged = ci;
+    return in;
+  if (src != &merged)
+    merged = ci;
   for (u32 i = 0; i < merged.num_res; i++)
     for (u32 j = 0; j < i; j++) {
       auto& a = merged.res[i];
@@ -4513,9 +4706,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         if (f == g_cs_ranges.end())
           continue;
         CsRange& r = f->second;
+        const bool offset_ok =
+            (base - cand) % caps.storage_offset_alignment == 0 ||
+            ((base - cand) % 4 == 0 && ci.res[i].binding < 48 && !truth_i);
         if ((!r.truth && r.image_staging) || !r.gpu_dirty || !r.buf ||
             cand > base || base + guest_bytes > cand + r.guest_bytes ||
-            (base - cand) % caps.storage_offset_alignment)
+            !offset_ok)
           continue;
         parent = &r;
         pbase = cand;
@@ -4594,9 +4790,37 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           folds[fold_count++] = dirty;
           continue;
         }
+        // A plain output this dispatch only writes needs none of the
+        // sibling's bytes: each writeback publishes just the words its own
+        // dispatch changed. A title's skinning jobs write interleaved vertex
+        // streams whose windows overlap their neighbours by a few bytes, and
+        // flushing each neighbour first cost UC2 ~440 GPU waits a frame.
+        if (kCsKeepOverlap && s.gpu_dirty && !ci.res[i].read &&
+            !ci.res[i].image_staging &&
+            !truth_i && !s.image_staging && !s.truth) {
+          g_wb_why["overlap-kept"]++;
+          continue;
+        }
         if (s.gpu_dirty) {
           g_wb_why["overlap"]++;
           g_wb_why_bytes += s.size;
+          if (kCsOverlapTrace && g_frame.num >= kCsOverlapTrace) {
+            static int shown = 0;
+            if (shown++ < 1500)
+              BASE_LOGI("csoverlap",
+                        "cs={:#x} res{} {:#x}+{:#x} {} w={} {}x{}x{} mips={} "
+                        "tile={} dfmt={} | dirty {:#x}+{:#x} truth={} img={} "
+                        "{}x{}x{} mips={} tile={} dfmt={}",
+                        ci.cs_addr, i, base, guest_bytes,
+                        ci.res[i].image_staging ? "img" : "buf",
+                        (int)ci.res[i].shader_writes, ci.res[i].width,
+                        ci.res[i].height, ci.res[i].layers,
+                        ci.res[i].mip_levels, ci.res[i].tiling_idx,
+                        ci.res[i].dfmt, dirty, s.guest_bytes, (int)s.truth,
+                        (int)s.image_staging, s.res.width, s.res.height,
+                        s.res.layers, s.res.mip_levels, s.res.tiling_idx,
+                        s.res.dfmt);
+          }
         }
         if (!CsRangeFlushOne(dirty, s) && g_cs_failed)
           return CsDeclined(ci, "11");
@@ -4968,11 +5192,23 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                   : parent_base[i]
                       ? parent_off[i]
                       : g_cs_ranges[ci.res[i].base].imported_offset;
+  // A view that starts off the device's storage alignment binds from the
+  // aligned offset below it; the shader adds the difference (see the bias
+  // bits of the pushed bound in the recompiler).
+  u32 bias_dwords[ComputeInfo::kMaxResources] = {};
+  const u64 align = base::Max<u64>(caps.storage_offset_alignment, 4);
   for (u32 i = 0; i < ci.num_res; i++) {
+    const u64 view = ci.res[i].zero_fill ? 0 : ci.res[i].view_offset;
+    const u64 off = bind_off[i] + view;
+    const u64 skew = off % align;
+    if (skew && (off % 4 || ci.res[i].binding >= 48 ||
+                 (sz[i] - view) / 4 >= (1u << 26)))
+      return CsDeclined(ci, "unaligned-view");
+    bias_dwords[i] = static_cast<u32>(skew / 4);
     wr[i].binding = ci.res[i].binding;
     wr[i].buffer = bind_buf[i];
-    wr[i].offset = bind_off[i];
-    wr[i].range = sz[i];
+    wr[i].offset = off - skew;
+    wr[i].range = sz[i] - view + skew;
   }
   u32 nwrite = ci.num_res;
   if (ci.gds_binding >= 0 && EnsureGdsBuffer()) {
@@ -5019,9 +5255,15 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   // binding; 0 means unbounded (a binding the shader indexes nowhere).
   for (u32 i = 16; i < kCsPushDwords; i++)
     pc[i] = 0;
-  for (u32 i = 0; i < ci.num_res; i++)
-    if (bind_buf[i] && ci.res[i].binding < kCsPushDwords - 16)
-      pc[16 + ci.res[i].binding] = static_cast<u32>(sz[i] / 4);
+  // Bits [31:26] carry the bias, so a bound past them reads as unbounded.
+  for (u32 i = 0; i < ci.num_res; i++) {
+    if (!bind_buf[i] || ci.res[i].binding >= kCsPushDwords - 16)
+      continue;
+    const u64 dwords = (sz[i] - ci.res[i].view_offset) / 4;
+    pc[16 + ci.res[i].binding] =
+        (dwords < (1u << 26) ? static_cast<u32>(dwords) : 0) |
+        (bias_dwords[i] << 26);
+  }
   g_cs_list->SetPushConstants(0, sizeof(pc), pc);
   // One barrier covers every hazard the dispatch has against the batch.
   u32 hazard_src = 0, hazard_dst = 0;

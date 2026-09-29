@@ -33,6 +33,12 @@ bool CsSupplyTexture(u64 base,
 // reading a dispatch's output then costs no readback and no wait.
 u64 CsBufferRevision(u64 base, u64 bytes);
 bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
+// The same window bound in place as a vertex stream: `*buffer`+`*offset` is
+// the range's own buffer, made visible to vertex fetch on the frame list.
+// Skinning output read by the next draws then never goes through guest memory.
+bool CsVertexBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
+// Whether CsVertexBuffer can serve the window, without binding anything.
+bool CsHoldsVertices(u64 base, u64 bytes);
 
 // Destroy range buffers retired two frames ago; called once per BeginFrame.
 void ReleaseRetiredCsBuffers();

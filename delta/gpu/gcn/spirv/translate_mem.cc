@@ -68,14 +68,26 @@ bool CsBindingValid(StageContext& sc, u32 binding) {
   return false;
 }
 
+// A pushed bound packs the binding's dword count in [25:0] and, in [31:26],
+// how many dwords the resource starts past the descriptor's offset: a range
+// shared by several bindings binds each one at an offset the device's storage
+// alignment may not allow, so the descriptor starts at the aligned offset
+// below it and the shader skips the rest.
+constexpr u32 kBoundBiasShift = 26;
+
+Id CsSsboBoundWord(Translator& t, StageContext& sc, u32 binding) {
+  const Id p_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
+  return t.m.Load(t.t_u, t.m.AccessChain(p_u, sc.cs_bounds_var,
+                                         {t.U32(1), t.U32(binding)}));
+}
+
 Id CsSsboBound(Translator& t, StageContext& sc, u32 binding) {
   if (!CsBindingValid(sc, binding))
     return t.U32(0);
   if (binding >= 48 || !sc.cs_bounds_var)
     return t.m.Emit(spv::Op::OpArrayLength, t.t_u, {sc.cs_ssbo[binding], 0});
-  const Id p_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
-  return t.m.Load(t.t_u, t.m.AccessChain(p_u, sc.cs_bounds_var,
-                                         {t.U32(1), t.U32(binding)}));
+  return t.And(CsSsboBoundWord(t, sc, binding),
+               t.U32((1u << kBoundBiasShift) - 1));
 }
 
 Id CsSsboPtr(Translator& t, StageContext& sc, u32 binding, Id dword_idx) {
@@ -83,7 +95,13 @@ Id CsSsboPtr(Translator& t, StageContext& sc, u32 binding, Id dword_idx) {
     return t.U32(0);
   // Stop at the last dword of the descriptor's range. Bindings beyond the
   // 48 push-constant bounds obtain their length from the runtime SSBO array.
-  if (sc.cs_bounds_var) {
+  if (sc.cs_bounds_var && binding < 48) {
+    const Id word = CsSsboBoundWord(t, sc, binding);
+    const Id bound = t.And(word, t.U32((1u << kBoundBiasShift) - 1));
+    dword_idx = t.SelectB(t.IsNonZero(bound),
+                          t.UMin(dword_idx, t.Sub(bound, t.U32(1))), dword_idx);
+    dword_idx = t.Add(dword_idx, t.Shr(word, t.U32(kBoundBiasShift)));
+  } else if (sc.cs_bounds_var) {
     const Id bound = CsSsboBound(t, sc, binding);
     dword_idx = t.SelectB(t.IsNonZero(bound),
                           t.UMin(dword_idx, t.Sub(bound, t.U32(1))), dword_idx);
@@ -1496,10 +1514,12 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
   };
 
   const auto load_subword = [&](u32 bits, bool sign) {
-    if (!sc.cs_runtime_resources.count(binding))
-      return LoadSubDword(t, sc.cs_ssbo[binding], byte_off, bits, sign);
-    const Id word = CsGuestLoad(t, sc, binding, dword_idx,
-                                t.Add(byte_off, t.U32(bits / 8)));
+    // Through CsSsboLoad, which applies the binding's bound and view bias.
+    const Id word =
+        sc.cs_runtime_resources.count(binding)
+            ? CsGuestLoad(t, sc, binding, dword_idx,
+                          t.Add(byte_off, t.U32(bits / 8)))
+            : CsSsboLoad(t, sc, binding, dword_idx);
     const Id shift = t.Shl(t.And(byte_off, t.U32(3)), t.U32(3));
     Id value = t.And(t.Shr(word, shift), t.U32((1u << bits) - 1));
     if (sign)

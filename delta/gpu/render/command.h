@@ -354,6 +354,9 @@ struct ComputeInfo {
     u32 dfmt = 0;
     u32 nfmt = 0;
     bool pow2_pad = false;
+    // The shader's view starts this far into the range: bindings of one
+    // dispatch whose buffers overlap share a range, as they share memory.
+    u64 view_offset = 0;
   };
   Res res[kMaxResources];
   u32 num_res = 0;
