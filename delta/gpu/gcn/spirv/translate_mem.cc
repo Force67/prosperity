@@ -1126,17 +1126,21 @@ bool PlanCsResources(const Program& program,
   u32 idx = 0;
   for (const Inst& inst : program) {
     const u32 inst_idx = idx++;
+    const auto reject = [&](const char* what) {
+      WarnUnsupported(what, inst.opcode, inst.raw[0], inst.raw[1]);
+      return false;
+    };
     if (reachable && !reachable[inst_idx])
       continue;  // dead block/padding
     const u32 w = inst.raw[0], w1 = inst.raw[1];
     switch (inst.enc) {
       case Enc::kSmrd: {
         const u32 op = inst.opcode, sbase = (w >> 9) & 0x3F;
-        if (op > 0x0c)
-          return false;  // beyond s_buffer_load_dwordx16
+        if (op > 0x0c)  // beyond s_buffer_load_dwordx16
+          return reject("cs.plan.smrd");
         const u32 n = op < 0x08 ? (1u << op) : SmrdLoadCount(op);
-        if (!n)
-          return false;  // reserved scalar-load opcode
+        if (!n)  // reserved scalar-load opcode
+          return reject("cs.plan.smrd");
         const SmrdOffset so = DecodeSmrdOffset(inst);
         const u32 bytes = so.in_sgpr ? 0 : (so.dwords + n) * 4;
         const u32 base_sgpr = sbase * 2;
@@ -1164,7 +1168,7 @@ bool PlanCsResources(const Program& program,
         // any other; leaving it unplanned declined the whole dispatch.
         const bool atomic = MubufAtomic(op);
         if (!load && !store && !atomic)
-          return false;
+          return reject("cs.plan.mubuf");
         if (!resource(inst.pc, srsrc, 4, 0, store || atomic, 0,
                       /*read=*/load || atomic))
           return false;
@@ -1187,7 +1191,7 @@ bool PlanCsResources(const Program& program,
         const bool load = op == 0x00 || op == 0x01;
         const bool sample = op >= 0x20 && MimgNamesItsLod(op);
         if ((!store && !load && !sample) || r128 || srsrc + 7 >= 136)
-          return false;
+          return reject("cs.plan.mimg");
         if (!resource(inst.pc, srsrc, 8, 1, store, 0,
                       /*read=*/load || sample))
           return false;

@@ -3248,8 +3248,19 @@ bool RecompileComputeSpirv(const u32* cs_code,
       AuditDecline("cs translation rejected (dispatch will be skipped)");
     AuditEnd(cs_ok ? &spv_bin : nullptr);
   }
-  if (!cs_ok)
+  if (!cs_ok) {
+    // Name the reason and list the shader once: a skipped dispatch is missing
+    // content, and without the listing the next step is always a second run.
+    static base::HashSet<u64> listed;
+    const u64 addr = reinterpret_cast<u64>(cs_code);
+    if (listed.size() < 16 && listed.insert(addr).second) {
+      BASE_LOGW("gcnspv", "CS rejected @{:#x}: {}", addr,
+                UnsupportedOps().empty() ? "no resources or untranslatable"
+                                         : UnsupportedOps().c_str());
+      Disassemble(cs_code, 2048, "rejected CS");
+    }
     return false;
+  }
   base::String err;
   if (NoOpt()) {
     if (!spirv::Validate(spv_bin, &err)) {
