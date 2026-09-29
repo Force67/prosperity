@@ -29,6 +29,7 @@
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps4/shader_cache.h"
+#include "profile/profile.h"
 
 namespace {
 
@@ -988,6 +989,7 @@ bool BuildDrawInfo(render::Renderer& renderer,
                    const Regs& regs,
                    const DrawPacket& packet,
                    render::DrawInfo& d) {
+  DELTA_ZONE("ps4.build_draw_info");
   const gcn::ScalarReplayScope replays;
   d.prim_type = regs[mmVGT_PRIMITIVE_TYPE];
   gcn::GsPipeline gs;

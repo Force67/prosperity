@@ -30,6 +30,14 @@
 #include "kern/module.h"
 #include "kern/process.h"
 
+#if defined(DELTA_TRACY) && defined(DELTA_BACKEND_NATIVE)
+#include <cstring>
+
+#include "base/strings/format.h"
+#include "tracy/TracyC.h"
+#define DELTA_SYSCALL_ZONES 1
+#endif
+
 namespace {
 DELTA_OPTION(bool, kScerrTrace, "DELTA_SCERR_TRACE", false);
 }  // namespace
@@ -176,6 +184,45 @@ static const bool kScHistDump = [] {
   return true;
 }();
 
+#if defined(DELTA_SYSCALL_ZONES)
+// Each syscall is a Tracy zone named after it, on the guest thread that made
+// it: where a guest thread blocks, and which calls cost, is on the timeline.
+extern "C" u64 SyscallZoneBegin(const ___tracy_source_location_data* where) {
+  const TracyCZoneCtx ctx = ___tracy_emit_zone_begin(where, 1);
+  u64 packed;
+  std::memcpy(&packed, &ctx, sizeof(packed));
+  return packed;
+}
+
+extern "C" void SyscallZoneEnd(u64 packed) {
+  TracyCZoneCtx ctx;
+  std::memcpy(&ctx, &packed, sizeof(ctx));
+  ___tracy_emit_zone_end(ctx);
+}
+
+// Source locations must outlive every zone that names them; one per syscall id.
+// The clock and yield calls are left out: a title spinning on them makes
+// millions a second, and zoning each one costs more than the call and swamps
+// the capture (DELTA_SCHIST counts them instead).
+static const ___tracy_source_location_data* SyscallZoneLocation(u32 sid) {
+  const char* name = SyscallGetname(sid);
+  static const char* const kTooHot[] = {"sys_gettimeofday", "sys_clock_gettime",
+                                        "sys_clock_getres", "sys_sched_yield",
+                                        "sys_thr_self", "sys_getpid"};
+  for (const char* hot : kTooHot)
+    if (name && std::strcmp(name, hot) == 0)
+      return nullptr;
+  const base::String label =
+      name ? base::String("sys.") + name : base::Format("sys.{}", sid);
+  auto* where = new ___tracy_source_location_data{};
+  where->name = strdup(label.c_str());
+  where->function = where->name;
+  where->file = __FILE__;
+  where->line = sid;
+  return where;
+}
+#endif
+
 #if defined(DELTA_BACKEND_NATIVE)
 // One-time trampoline per handler: call it with the guest's arg registers
 // untouched, then set/clear the carry flag and normalise rax per the convention
@@ -183,14 +230,20 @@ static const bool kScHistDump = [] {
 static uintptr_t EmitBsdTrampoline(const void* handler,
                                    u32 sid,
                                    bool trace,
-                                   bool count) {
+                                   bool count,
+                                   const void* zone) {
   // The two handlers that never return (they longjmp out of the guest call
   // chain, cpu::ExitGuestThread) must stay on the guest stack: glibc's
   // longjmp check rejects a jump to a frame that is not on the current stack.
   // Neither needs the room anyway.
   const bool own_stack = sid != 1 /*exit*/ && sid != 431 /*thr_exit*/;
   struct BsdRet : Xbyak::CodeGenerator {
-    BsdRet(uintptr_t handler, u32 sid, bool trace, bool count, bool own_stack) {
+    BsdRet(uintptr_t handler,
+           u32 sid,
+           bool trace,
+           bool count,
+           bool own_stack,
+           const void* zone) {
       if (count) {  // DELTA_SCHIST: ++g_sys_hist[sid] (rax is caller-saved)
         mov(rax, reinterpret_cast<uintptr_t>(&g_sys_hist[sid & 1023]));
         inc(qword[rax]);
@@ -224,8 +277,29 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
         L(keep);
       }
       and_(rsp, -16);  // the guest rsp is safe in rbx either way
-      mov(rax, handler);
-      call(rax);      // handler(rdi,rsi,rdx,rcx,r8,r9) -> rax (args intact)
+      if (zone) {
+        // [rsp, +48) the six arg registers, +48 the zone, +56 the result.
+        const Xbyak::Reg64 args[] = {rdi, rsi, rdx, rcx, r8, r9};
+        sub(rsp, 64);
+        for (int i = 0; i < 6; i++)
+          mov(qword[rsp + i * 8], args[i]);
+        mov(rdi, reinterpret_cast<uintptr_t>(zone));
+        mov(rax, reinterpret_cast<uintptr_t>(&SyscallZoneBegin));
+        call(rax);
+        mov(qword[rsp + 48], rax);
+        for (int i = 0; i < 6; i++)
+          mov(args[i], qword[rsp + i * 8]);
+        mov(rax, handler);
+        call(rax);
+        mov(qword[rsp + 56], rax);
+        mov(rdi, qword[rsp + 48]);
+        mov(rax, reinterpret_cast<uintptr_t>(&SyscallZoneEnd));
+        call(rax);
+        mov(rax, qword[rsp + 56]);
+      } else {
+        mov(rax, handler);
+        call(rax);  // handler(rdi,rsi,rdx,rcx,r8,r9) -> rax (args intact)
+      }
       mov(rsp, rbx);  // back onto the guest stack
       push(rax);      // stash the raw return across the helper call
       mov(rdi, rax);
@@ -255,7 +329,7 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
     }
   };
   auto* gen = new BsdRet(reinterpret_cast<uintptr_t>(handler), sid, trace,
-                         count, own_stack);
+                         count, own_stack, zone);
   return reinterpret_cast<uintptr_t>(gen->getCode());
 }
 #endif  // DELTA_BACKEND_NATIVE
@@ -269,12 +343,25 @@ uintptr_t Lv2Trampoline(const void* handler, u32 sid) {
   static base::Mutex tr_mutex;
   static base::HashMap<u64, uintptr_t> tr_cache;
   base::LockGuard<base::Mutex> lk(tr_mutex);
-  u64 key = (kScerrTrace || g_sc_hist) ? static_cast<u64>(sid)
-                                       : reinterpret_cast<u64>(handler);
+#if defined(DELTA_SYSCALL_ZONES)
+  constexpr bool kPerSyscall = true;  // each zone names its own syscall
+#else
+  constexpr bool kPerSyscall = false;
+#endif
+  u64 key = (kPerSyscall || kScerrTrace || g_sc_hist)
+                ? static_cast<u64>(sid)
+                : reinterpret_cast<u64>(handler);
   auto it = tr_cache.find(key);
   if (it != tr_cache.end())
     return it->second;
-  uintptr_t tr = EmitBsdTrampoline(handler, sid, kScerrTrace, g_sc_hist);
+  const void* zone = nullptr;
+#if defined(DELTA_SYSCALL_ZONES)
+  // exit and thr_exit longjmp out of the handler and never close a zone.
+  if (sid != 1 && sid != 431)
+    zone = SyscallZoneLocation(sid);
+#endif
+  uintptr_t tr =
+      EmitBsdTrampoline(handler, sid, kScerrTrace, g_sc_hist, zone);
   tr_cache.emplace(key, tr);
   return tr;
 #else

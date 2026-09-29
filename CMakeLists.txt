@@ -112,6 +112,15 @@ if(DELTA_BUILD_TESTS)
   enable_testing()
 endif()
 
+# Tracy profiler client, on demand: idle until a Tracy viewer or tracy-capture
+# connects on localhost:8086 (tools/drun.py --tracy does that).
+if(ANDROID)
+  set(_delta_tracy_default OFF)
+else()
+  set(_delta_tracy_default ON)
+endif()
+option(DELTA_TRACY "Build with the Tracy profiler client" ${_delta_tracy_default})
+
 add_subdirectory(vendor)
 add_subdirectory(shared)
 add_subdirectory(delta)

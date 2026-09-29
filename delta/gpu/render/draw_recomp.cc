@@ -43,6 +43,7 @@
 #include "host_memory/host_memory.h"
 #include "options/options.h"
 #include "write_watch/write_watch.h"
+#include "profile/profile.h"
 
 namespace {
 DELTA_OPTION(bool, kNoWipe, "DELTA_GPU_NOWIPE", true);
@@ -396,6 +397,7 @@ bool ShaderFilterDrops(u64 ps_addr) {
 }
 
 bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
+  DELTA_ZONE("gpu.draw_recomp");
   const u64 t_draw_start = NowNs();
   // DELTA_GPU_WHYDROP=1: every draw as the renderer receives it, so a slot that
   // never reaches the seq log can be identified.

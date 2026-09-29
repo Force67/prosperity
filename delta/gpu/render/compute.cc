@@ -64,6 +64,8 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "base/time/time.h"
+#include "profile/profile.h"
+#include "gpu/render/gpu_timeline.h"
 
 namespace {
 DELTA_OPTION(u64, kDetileDump, "DELTA_GPU_DETILEDUMP", 0);
@@ -1598,6 +1600,7 @@ bool LiveInFrameTarget(u64 base, bool prefer_depth, InFrameTarget& t) {
 }
 
 bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
+  DELTA_ZONE("gpu.cs_stage_from_rt");
   InFrameTarget live;
   AliasedCopyPlan live_plan;
   if (LiveInFrameTarget(res.base, /*prefer_depth=*/res.dfmt == 4, live) &&
@@ -2746,6 +2749,8 @@ struct BatchedDispatch {
   u64 res_size[4];
   u8 res_img;    // bit i: resource i is an image
   u8 res_write;  // bit i: resource i is written
+  bool traced = false;  // also a zone on the Tracy GPU timeline
+  u16 query = 0;
 };
 base::Vector<BatchedDispatch> g_cs_batch_log;
 rhi::TimestampPool* g_cs_timestamps = nullptr;
@@ -2784,7 +2789,12 @@ bool CsBatchInit() {
     if (!b.list)
       return false;
     // Two timestamps for each of at most 128 dispatches.
-    if (kCsSyncReport && Device().caps().timestamps)
+#if defined(DELTA_TRACY)
+    constexpr bool kTimeline = true;  // dispatches on the Tracy GPU timeline
+#else
+    constexpr bool kTimeline = false;
+#endif
+    if ((kCsSyncReport || kTimeline) && Device().caps().timestamps)
       b.timestamps = Device().CreateTimestampPool(256);
   }
   g_cs_list = g_cs_batches[0].list;
@@ -2814,7 +2824,19 @@ void CsBatchFinalize(CsBatch& b) {
   if (b.timestamps && !b.log.empty()) {
     base::Array<u64, 256> stamps{};
     const u32 count = static_cast<u32>(b.log.size());
-    if (Device().ReadTimestamps(b.timestamps, 0, count * 2, stamps.data())) {
+    const bool any_traced = base::AnyOf(
+        b.log.begin(), b.log.end(),
+        [](const BatchedDispatch& d) { return d.traced; });
+    const bool read =
+        (kCsSyncReport || any_traced) &&
+        Device().ReadTimestamps(b.timestamps, 0, count * 2, stamps.data());
+    for (u32 i = 0; i < count; ++i) {
+      if (!b.log[i].traced)
+        continue;
+      timeline::Time(b.log[i].query, read ? stamps[i * 2] : 0);
+      timeline::Time(b.log[i].query + 1, read ? stamps[i * 2 + 1] : 0);
+    }
+    if (read && kCsSyncReport) {
       const rhi::Caps& caps = Device().caps();
       const u64 mask = UINT64_MAX >> (64 - caps.timestamp_bits);
       for (u32 i = 0; i < count; ++i) {
@@ -2949,6 +2971,7 @@ void CsCopyStaging(CsRange& e, u64 bytes, bool to_device) {
 
 // Put the open batch on the queue and go on recording into the next slot.
 bool CsBatchSubmit() {
+  DELTA_ZONE("gpu.cs_batch_submit");
   if (!g_cs_batch_open)
     return !g_cs_failed;
   CsBatch& b = g_cs_batches[g_cs_batch_cur];
@@ -2984,6 +3007,7 @@ bool CsBatchSubmit() {
 
 // Wait until batch `id` (and so every earlier one) has completed.
 bool CsBatchWaitId(u64 id, CsSyncWhy why) {
+  DELTA_ZONE("gpu.cs_wait");
   if (g_cs_failed)
     return false;
   if (!id || id <= g_cs_batch_done)
@@ -4256,6 +4280,7 @@ void PrebuildComputePipeline(const base::Vector<u32>& spirv,
 }
 
 bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
+  DELTA_ZONE("gpu.cs_dispatch");
   BumpTextureEpoch();
   ComputeInfo ci_merged;
   const ComputeInfo& ci = MergeSameBase(ci_in, ci_merged);
@@ -5040,16 +5065,27 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   }
   if (ci.recomp->guest_memory_binding >= 0)
     g_cs_list->Barrier(rhi::kAccessHostWrite, rhi::kAccessComputeRead);
-  if (g_cs_timestamps)
+  const bool traced = g_cs_timestamps && timeline::Active();
+  u16 query = 0;
+  if (traced) {
+    char name[48];
+    std::snprintf(name, sizeof(name), "cs %#llx",
+                  (unsigned long long)ci.cs_addr);
+    query = timeline::Begin(name);
+  }
+  const bool stamp = g_cs_timestamps && (kCsSyncReport || traced);
+  if (stamp)
     g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2,
                               /*start=*/true);
   DispatchCheckpoint(g_cs_list, ci.cs_addr, false);
   g_cs_list->DispatchBase(ci.group_base[0], ci.group_base[1], ci.group_base[2],
                           ci.groups[0], ci.groups[1], ci.groups[2]);
   DispatchCheckpoint(g_cs_list, ci.cs_addr, true);
-  if (g_cs_timestamps)
+  if (stamp)
     g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2 + 1,
                               /*start=*/false);
+  if (traced)
+    timeline::End(query);
   // What the dispatch wrote through a detiled view goes back into the truth.
   for (u32 i = 0; i < ci.num_res; i++) {
     if (!truth_view[i] || !ci.res[i].written)
@@ -5086,6 +5122,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       if (ci.res[i].written)
         bd.res_write |= static_cast<u8>(1u << i);
     }
+    bd.traced = traced;
+    bd.query = query;
     g_cs_batch_log.push_back(bd);
   }
   if (trace::Recording())
@@ -5281,6 +5319,7 @@ void ReportGpuMemory() {
 }
 
 bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
+  DELTA_ZONE("gpu.cs_flush_frame_end");
   ReportGpuMemory();
   const WaitReaderScope reader("frame-end");
   if (g_cs_failed) {

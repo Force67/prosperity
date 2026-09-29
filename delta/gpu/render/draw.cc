@@ -31,6 +31,7 @@
 #include "base/logging.h"
 #include "base/optional.h"
 #include "options/options.h"
+#include "profile/profile.h"
 
 namespace {
 DELTA_OPTION(int, kMaxDraw, "DELTA_GPU_MAXDRAW", -1);
@@ -47,6 +48,7 @@ DELTA_OPTION(bool, kSwapTex, "DELTA_GPU_SWAPTEX01", false);
 namespace gpu::render {
 
 void Draw(Renderer& renderer, const DrawInfo& d_in) {
+  DELTA_ZONE("gpu.draw");
   if (!g_frame.recording)
     return;
   // DELTA_GPU_SWAPTEX01: bisect a suspected sampler-binding order mismatch by

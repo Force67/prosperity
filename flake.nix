@@ -100,6 +100,8 @@
             libepoxy        # GL entry points for the OpenGL backend (EGL, headless)
             libglvnd        # libEGL / libOpenGL dispatch
             renderdocPython # frame capture: UI, CLI, and Python replay API
+            tracy           # profiler viewer + tracy-capture/csvexport (client 0.13.1)
+            perf            # tools/drun.py --perf: where guest threads spend time
             # D3D12 rhi backend: D3D12 over Vulkan, and HLSL -> DXIL.
             directx-shader-compiler
             vkd3d           # the 2.0 override above (let outranks with)

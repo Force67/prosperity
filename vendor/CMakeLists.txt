@@ -174,3 +174,19 @@ set(SPIRV_CROSS_ENABLE_UTIL OFF CACHE BOOL "" FORCE)
 set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
 set(SPIRV_CROSS_FORCE_PIC ON CACHE BOOL "" FORCE)
 add_subdirectory(SPIRV-Cross EXCLUDE_FROM_ALL)
+
+# --------------------------------------------------------------------------
+# Tracy client (v0.13.1, matches nixpkgs' tracy viewer and tracy-capture).
+# On demand and localhost only. Its crash handler would take over the signals
+# the guest fault paths own, so it is off.
+# --------------------------------------------------------------------------
+if(DELTA_TRACY)
+  add_library(tracy_client STATIC tracy/public/TracyClient.cpp)
+  target_include_directories(tracy_client SYSTEM PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/tracy/public)
+  target_compile_definitions(tracy_client PUBLIC
+    TRACY_ENABLE TRACY_ON_DEMAND TRACY_ONLY_LOCALHOST TRACY_NO_BROADCAST
+    TRACY_NO_CRASH_HANDLER TRACY_NO_FRAME_IMAGE DELTA_TRACY=1)
+  target_compile_options(tracy_client PRIVATE -w)
+  target_link_libraries(tracy_client PUBLIC pthread dl)
+endif()

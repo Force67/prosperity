@@ -83,9 +83,34 @@ The exact NDK/SDK wiring lives in the (gitignored) `build-apk.sh` /
 | `DELTA_BUILD_TESTS` | `ON` | build the unit tests (`ctest`) |
 | `DELTA_BACKEND` | auto | `NATIVE` or `FEX`; auto-selected from host arch |
 | `DELTA_ANDROID_APP` | `OFF` | build the on-screen Android app (needs the NDK) |
+| `DELTA_TRACY` | `ON` (off on Android) | Tracy profiler client, idle until a viewer connects |
 
 Host-only dev tools (`tools/modload`, `modexec`, `pkg_check`, `window_test`) are
 built automatically on non-Android targets.
+
+## Profiling
+
+Builds carry an on-demand [Tracy](https://github.com/wolfpld/tracy) client
+(v0.13.1, the version the dev shell's `tracy` viewer speaks). It costs nothing
+until something connects to `localhost:8086`, then streams:
+
+* CPU zones (`DELTA_ZONE` in `shared/profile/profile.h`) around the command
+  processor walk, draws, dispatches, compute writebacks, texture uploads,
+  shader recompiles and every Vulkan submit, wait and pipeline build;
+* every guest syscall as a zone on the guest thread that made it (guest
+  threads carry their `thr_new` names);
+* the guest GPU as its own timeline: one zone per render target region and per
+  compute dispatch, from GPU timestamps;
+* a frame mark per presented guest frame.
+
+Run `tracy` in the dev shell and connect to a running `ps4delta`, or let
+`tools/drun.py` record and summarise a window:
+
+```bash
+tools/drun.py uc2 -t 130 --tracy 100:20       # zones, waits, GPU, thread CPU
+tools/drun.py uc2 -t 130 --perf 100:10:NdJob  # sampled hot spots, guest ones
+                                              # as module+offset
+```
 
 ## Tests
 

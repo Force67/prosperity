@@ -172,6 +172,13 @@ bool Module::FromMem(base::UniquePointer<u8[]> data) {
   }
 
   InstallEhFrame();
+  // One line per module so tools can turn a raw guest address into
+  // module+offset, and through the .eh_frame_hdr search table (every
+  // function's start) into a function (tools/drun.py --perf).
+  BASE_LOGI("modmap", "{} base={:#x} size={:#x} ehhdr={:#x}",
+            info_.name.c_str(), reinterpret_cast<uintptr_t>(info_.base),
+            info_.code_size + info_.rip_zone_size,
+            reinterpret_cast<uintptr_t>(info_.eh_frame_addr));
 
   PlantGuestBreakpoints();
   StartModuleWatch();

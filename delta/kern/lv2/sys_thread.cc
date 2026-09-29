@@ -89,10 +89,19 @@ const u32* CurrentGuestTidPtr() {
 // what that thread is doing means finding its OS thread first.
 static base::Atomic<long> g_host_by_guest[4096];
 
+// The name thr_new was given, for the host thread that runs it: a profile or
+// a `ps` then says "JobWorker" where every guest thread read "sys_thread".
+char g_guest_name[4096][16];
+
 void NoteGuestThreadHost(u32 gtid) {
-  if (gtid < 4096)
-    g_host_by_guest[gtid].store(static_cast<long>(::syscall(SYS_gettid)),
-                                base::memory_order_relaxed);
+  if (gtid >= 4096)
+    return;
+  g_host_by_guest[gtid].store(static_cast<long>(::syscall(SYS_gettid)),
+                              base::memory_order_relaxed);
+#if defined(__linux__)
+  if (g_guest_name[gtid][0])
+    pthread_setname_np(pthread_self(), g_guest_name[gtid]);
+#endif
 }
 
 long HostTidForGuest(u32 gtid) {
@@ -157,6 +166,14 @@ int PS4ABI sys_thr_new(thr_param* p, int size) {
             tid, (void*)p->start_func, p->arg, (void*)p->stack_base,
             p->stack_size, (void*)p->tls_base, entry);
 
+  if (tid < 4096) {
+    const size_t cap = sizeof(g_guest_name[tid]);
+    const char* name = size >= 0x58 ? p->name : nullptr;
+    if (name && host_memory::IsMemoryRangeMapped(name, cap))
+      std::snprintf(g_guest_name[tid], cap, "%s", name);
+    else
+      g_guest_name[tid][0] = 0;
+  }
   if (p->child_tid)
     *p->child_tid = tid;
   if (p->parent_tid)

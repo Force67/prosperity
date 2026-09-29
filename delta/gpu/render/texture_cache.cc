@@ -40,6 +40,7 @@
 #include "base/threading/mutex.h"
 #include "base/time/time.h"
 #include "options/options.h"
+#include "profile/profile.h"
 
 namespace {
 DELTA_OPTION(int, kForceTile, "DELTA_GPU_FORCETILE", -1);
@@ -762,6 +763,7 @@ bool UploadTexPixelsImmediate(rhi::Texture* img,
                               u32 texel_w,
                               u32 texel_h,
                               bool is_3d) {
+  DELTA_ZONE("gpu.tex_upload_immediate");
   const u64 sz = TextureLinearBytes(layout);
   const u32 barrier_layers = is_3d ? 1 : layout.layers;
   rhi::BufferDesc desc;
@@ -812,6 +814,7 @@ bool RecordTexPixels(rhi::Texture* img,
                      u32 texel_w,
                      u32 texel_h,
                      bool is_3d) {
+  DELTA_ZONE("gpu.tex_upload");
   const u64 bytes = TextureLinearBytes(layout);
   const u32 barrier_layers = is_3d ? 1 : layout.layers;
   TextureUploadSlice upload;
@@ -917,6 +920,7 @@ bool EvictTextures(u64 bytes, u64 budget) {
 // replaces, which are themselves once a frame: a write after it is seen next
 // frame, as one after the first use always was.
 void PrevalidateTextures() {
+  DELTA_ZONE("gpu.tex_prevalidate");
   struct Job {
     TexImageEntry* entry;
     u64 base;

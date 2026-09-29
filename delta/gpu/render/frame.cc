@@ -45,6 +45,8 @@
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
 #include "options/options.h"
+#include "profile/profile.h"
+#include "gpu/render/gpu_timeline.h"
 
 namespace {
 DELTA_OPTION(bool, kGpuSync, "DELTA_GPU_SYNC", false);
@@ -134,6 +136,11 @@ bool EndImmediate(rhi::CommandList* list) {
 
 namespace {
 DELTA_OPTION(bool, kPassProf, "DELTA_GPU_PASSPROF", false);
+#if defined(DELTA_TRACY)
+constexpr bool kTracyBuilt = true;  // regions go on the Tracy GPU timeline
+#else
+constexpr bool kTracyBuilt = false;
+#endif
 constexpr u32 kMaxProfiledPasses = 4096;
 u32 g_pass_open = ~0u;  // mark index of the open region, or none
 u32 g_pass_draws_at_open = 0;
@@ -152,7 +159,16 @@ void CollectPassTimes(FrameSlot& slot) {
     return;
   const u32 n = static_cast<u32>(slot.pass_marks.size());
   base::Vector<u64> stamps(n * 2);
-  if (Device().ReadTimestamps(slot.pass_timestamps, 0, n * 2, stamps.data())) {
+  const bool read =
+      Device().ReadTimestamps(slot.pass_timestamps, 0, n * 2, stamps.data());
+  for (u32 i = 0; i < n; i++) {
+    const FrameSlot::PassMark& mark = slot.pass_marks[i];
+    if (!mark.traced)
+      continue;
+    timeline::Time(mark.query, read ? stamps[i * 2] : 0);
+    timeline::Time(mark.query + 1, read ? stamps[i * 2 + 1] : 0);
+  }
+  if (read && kPassProf) {
     const rhi::Caps& caps = Device().caps();
     const u64 mask = caps.timestamp_bits >= 64
                          ? UINT64_MAX
@@ -166,7 +182,7 @@ void CollectPassTimes(FrameSlot& slot) {
     }
   }
   slot.pass_marks.clear();
-  if (++g_pass_frames < 120)
+  if (!kPassProf || ++g_pass_frames < 120)
     return;
   base::Vector<base::Pair<u64, PassTotal>> sorted;
   for (const auto& [target, pass] : g_pass_totals)
@@ -195,9 +211,18 @@ void PassProfBegin(u64 target) {
   FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
   if (!slot.pass_timestamps || slot.pass_marks.size() >= kMaxProfiledPasses)
     return;
+  const bool traced = timeline::Active();
+  if (!kPassProf && !traced)
+    return;
+  u16 query = 0;
+  if (traced) {
+    char name[48];
+    std::snprintf(name, sizeof(name), "rt %#llx", (unsigned long long)target);
+    query = timeline::Begin(name);
+  }
   g_pass_open = static_cast<u32>(slot.pass_marks.size());
   g_pass_draws_at_open = g_frame.draws;
-  slot.pass_marks.push_back({target, 0});
+  slot.pass_marks.push_back({target, 0, traced, query});
   g_frame.list->WriteTimestamp(slot.pass_timestamps, g_pass_open * 2, true);
 }
 
@@ -205,7 +230,10 @@ void PassProfEnd() {
   if (g_pass_open == ~0u)
     return;
   FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
-  slot.pass_marks[g_pass_open].draws = g_frame.draws - g_pass_draws_at_open;
+  FrameSlot::PassMark& mark = slot.pass_marks[g_pass_open];
+  mark.draws = g_frame.draws - g_pass_draws_at_open;
+  if (mark.traced)
+    timeline::End(mark.query);
   g_frame.list->WriteTimestamp(slot.pass_timestamps, g_pass_open * 2 + 1,
                                false);
   g_pass_open = ~0u;
@@ -219,7 +247,7 @@ bool CreateFrameSlots() {
       return false;
     if (timestamps)
       slot.timestamps = Device().CreateTimestampPool(2);
-    if (timestamps && kPassProf)
+    if (timestamps && (kPassProf || kTracyBuilt))
       slot.pass_timestamps =
           Device().CreateTimestampPool(kMaxProfiledPasses * 2);
   }
@@ -898,6 +926,8 @@ bool SubmitFrameChunk() {
 namespace gpu::render {
 
 void BeginFrame(Renderer& renderer) {
+  DELTA_ZONE("gpu.begin_frame");
+  timeline::Refresh();
   if (!renderer.available())
     return;
   if (!EnsureCbufRing())
@@ -1110,6 +1140,9 @@ struct EndFramePhases {
 }  // namespace
 
 void EndFrame(Renderer& renderer, u64 scanout_base) {
+  DELTA_ZONE("gpu.end_frame");
+  DELTA_FRAME_MARK();
+  DELTA_PLOT("gpu.draws", static_cast<int64_t>(g_frame.draws));
   EndFramePhases phases;
   WatchGuestMem();
   GuestWriteTracker().EndFrame();

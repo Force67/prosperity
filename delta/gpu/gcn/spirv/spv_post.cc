@@ -46,6 +46,7 @@
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
 #include "options/options.h"
+#include "profile/profile.h"
 
 namespace gpu::gcn::spirv {
 
@@ -338,6 +339,7 @@ void PrefetchThen(const base::Vector<u32>& spv,
 bool Finalize(const base::Vector<u32>& spv,
               base::Vector<u32>* out,
               base::String* err) {
+  DELTA_ZONE("spv.finalize");
   if (t_prefetching) {
     Prefetch(spv);
     *out = spv;

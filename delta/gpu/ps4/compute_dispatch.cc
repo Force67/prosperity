@@ -28,6 +28,7 @@
 #include "gpu/ps4/render_queue.h"
 #include "gpu/ps4/shader_cache.h"
 #include "gpu/render/render_target.h"
+#include "profile/profile.h"
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
@@ -255,6 +256,7 @@ void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
                      u32 count) {
+  DELTA_ZONE("ps4.dispatch");
   const u32 groups[3] = {count >= 1 ? body[0] : 0, count >= 2 ? body[1] : 0,
                          count >= 3 ? body[2] : 0};
   const u64 cs_addr = (static_cast<u64>(regs[mmCOMPUTE_PGM_HI] & 0xFF) << 32 |

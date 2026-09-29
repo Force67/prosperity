@@ -31,6 +31,7 @@
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/shader_cache.h"
+#include "profile/profile.h"
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
@@ -228,6 +229,7 @@ void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
                      u32 count) {
+  DELTA_ZONE("ps5.dispatch");
   u32 groups[3] = {count >= 1 ? body[0] : 0, count >= 2 ? body[1] : 0,
                    count >= 3 ? body[2] : 0};
   const u32 initiator = count >= 4 ? body[3] : 5;

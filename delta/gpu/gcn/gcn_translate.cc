@@ -15,6 +15,7 @@
 
 #include "base/algorithm.h"
 #include "base/time/time.h"
+#include "profile/profile.h"
 
 namespace gpu::gcn {
 
@@ -85,6 +86,7 @@ Recompiled Recompile(const u32* vs_code,
                      u32 int_attr_mask,
                      u32 col_format,
                      u32 tex_cube_mask) {
+  DELTA_ZONE("gcn.recompile");
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
     return r;
@@ -105,6 +107,7 @@ RecompiledCs RecompileCompute(const u32* cs_code,
                               u32 user_sgpr,
                               u32 tgid_enable,
                               u32 lds_dwords) {
+  DELTA_ZONE("gcn.recompile_cs");
   RecompiledCs r;
   if (!cs_code)
     return r;

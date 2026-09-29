@@ -21,6 +21,7 @@
 #include "gpu/gpu_check.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_rhi_internal.h"
+#include "profile/profile.h"
 
 namespace gpu::vk {
 
@@ -1176,6 +1177,7 @@ rhi::PipelineLayout* VulkanDevice::CreatePipelineLayout(
 
 rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
     const rhi::GraphicsPipelineDesc& desc) {
+  DELTA_ZONE("vk.create_graphics_pipeline");
   auto* layout = static_cast<VulkanPipelineLayout*>(desc.layout);
   VkDevice dev = native.device;
   VkShaderModule modules[3] = {};
@@ -1313,6 +1315,7 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
 
 rhi::Pipeline* VulkanDevice::CreateComputePipeline(
     const rhi::ComputePipelineDesc& desc) {
+  DELTA_ZONE("vk.create_compute_pipeline");
   auto* layout = static_cast<VulkanPipelineLayout*>(desc.layout);
   VkShaderModule module = MakeModule(native.device, desc.code);
   if (!module)
@@ -1466,6 +1469,7 @@ void VulkanDevice::QueryMemoryBudget(u64* used, u64* budget) const {
 }
 
 u64 VulkanDevice::Submit(rhi::CommandList* const* lists, u32 count) {
+  DELTA_ZONE("vk.submit");
   base::Vector<VkCommandBuffer> cmds(count);
   for (u32 i = 0; i < count; i++)
     cmds[i] = static_cast<VulkanCommandList*>(lists[i])->cmd;
@@ -1500,6 +1504,7 @@ bool VulkanDevice::IsComplete(u64 submission) {
 }
 
 bool VulkanDevice::Wait(u64 submission, u64 timeout_ns) {
+  DELTA_ZONE("vk.wait");
   VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
   wi.semaphoreCount = 1;
   wi.pSemaphores = &timeline_;
@@ -1512,6 +1517,7 @@ bool VulkanDevice::Wait(u64 submission, u64 timeout_ns) {
 }
 
 void VulkanDevice::WaitIdle() {
+  DELTA_ZONE("vk.wait_idle");
   base::LockGuard<base::Mutex> lock(queue_mutex);
   vkQueueWaitIdle(native.queue);
 }

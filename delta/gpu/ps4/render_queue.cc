@@ -23,6 +23,7 @@
 #include "base/threading/thread.h"
 #include "base/time/time.h"
 #include "options/options.h"
+#include "profile/profile.h"
 
 namespace gpu::ps4 {
 
@@ -100,6 +101,7 @@ void RenderQueue::PushCall(base::Function<void()> fn) {
 }
 
 void RenderQueue::Drain(const char* why) {
+  DELTA_ZONE("gpuq.drain");
   // The renderer's own thread already owns it (a replay it runs may ask).
   if (!running_ || base::IsCurrentThread(thread_->handle()))
     return;
@@ -130,6 +132,7 @@ void RenderQueue::Wake(base::ConditionVariable& cv) {
 void RenderQueue::WaitDone(const base::Atomic<u64>& done,
                            u64 target,
                            const char* what) {
+  DELTA_ZONE("gpuq.wait_done");
   u64 seen = done.load(base::memory_order_acquire);
   if (seen >= target)
     return;

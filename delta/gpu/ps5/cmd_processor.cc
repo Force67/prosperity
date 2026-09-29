@@ -36,6 +36,7 @@
 #include "gpu/ps5/reg_state.h"
 #include "gpu/render/command.h"
 #include "gpu/render/renderer.h"
+#include "profile/profile.h"
 
 namespace {
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
@@ -1116,6 +1117,7 @@ u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
 }
 
 void SubmitDcb(const void* dcb, u32 size_bytes) {
+  DELTA_ZONE("ps5.submit_dcb");
   if (!dcb || size_bytes < 4)
     return;
   const u64 t_enter = NowNs();

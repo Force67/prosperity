@@ -36,6 +36,7 @@
 #include "gpu/ps4/liverpool.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/render/renderer.h"
+#include "profile/profile.h"
 
 namespace {
 DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
@@ -556,6 +557,7 @@ void HandleDrawPacket(render::Renderer& renderer,
                       u32 op,
                       const u32* body,
                       u32 count) {
+  DELTA_ZONE("ps4.draw_packet");
   g_total_draws.fetch_add(1);
   // Ahead of the renderer gate: the watch these can arm is a kernel one, and a
   // run whose device failed to come up is when register state is worth having.
@@ -1272,6 +1274,7 @@ void SetPs4NeoMode(bool enabled) {
 }
 
 void EndFrame(u64 scanout_base) {
+  DELTA_ZONE("ps4.end_frame");
   base::LockGuard<base::Mutex> lock(g_mutex);
   // New frame -> shader code may have been rewritten; let CachedProgram
   // revalidate each address once next frame instead of once per draw.
@@ -1289,6 +1292,7 @@ void EndFrame(u64 scanout_base) {
 }
 
 void SubmitCcb(const void* ccb, u32 size_bytes) {
+  DELTA_ZONE("ps4.submit_ccb");
   if (!ccb || size_bytes < 4)
     return;
   base::LockGuard<base::Mutex> lock(g_mutex);
@@ -1299,6 +1303,7 @@ void SubmitCcb(const void* ccb, u32 size_bytes) {
 }
 
 void SubmitDcb(const void* dcb, u32 size_bytes) {
+  DELTA_ZONE("ps4.submit_dcb");
   if (!dcb || size_bytes < 4)
     return;
   ScopedWalkTimer timer;

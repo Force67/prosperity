@@ -23,6 +23,8 @@ struct FrameSlot {
   struct PassMark {
     u64 target;
     u32 draws;
+    bool traced;  // also a zone on the Tracy GPU timeline
+    u16 query;    // its timeline query id
   };
   rhi::TimestampPool* pass_timestamps = nullptr;
   base::Vector<PassMark> pass_marks;
