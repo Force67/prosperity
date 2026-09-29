@@ -14,9 +14,9 @@ namespace gpu::render {
 
 namespace {
 constexpr u64 kHashPrime = 1099511628211ull;
-// Chunk size for the parallel sweep. Fixed, so a surface hashes to the same
-// value however many lanes the pool gives it.
-constexpr u64 kHashChunk = 1ull << 20;
+// Below this a sweep stays on the calling thread.
+constexpr u64 kParallelBytes = 2ull << 20;
+}  // namespace
 
 // frame per texture unless a compute write explicitly invalidates the
 // resource, and big atlases make it the dominant per-frame CPU cost, so it
@@ -45,34 +45,41 @@ u64 TexHashRange(u64 base, u64 bytes) {
   u64 h = ((h0 * kPrime + h1) * kPrime + h2) * kPrime + h3;
   return h ^ (bytes << 1);
 }
-}  // namespace
+
+u64 TexHashCombine(const u64* parts, u64 count, u64 bytes) {
+  if (count == 1)
+    return parts[0];
+  u64 h = 1469598103934665603ull;
+  for (u64 i = 0; i < count; i++)
+    h = (h ^ parts[i]) * kHashPrime;
+  return h ^ (bytes << 1);
+}
 
 // One core sweeps ~2.5 GB/s of cold texture memory, and a compute-heavy title
 // re-hashes over a hundred megabytes a frame. Chunking is by byte offset only,
 // so the result is independent of how the work is spread.
 u64 TexHash(u64 base, u64 bytes) {
-  if (bytes < 2 * kHashChunk)
-    return TexHashRange(base, bytes);
-  const u32 chunks = static_cast<u32>((bytes + kHashChunk - 1) / kHashChunk);
+  if (bytes < kParallelBytes)
+    return TexHashSerial(base, bytes);
+  const u32 chunks =
+      static_cast<u32>((bytes + kTexHashChunk - 1) / kTexHashChunk);
   base::Vector<u64> parts(chunks);
   gcn::DetileParallelWork(chunks, bytes, [&](u32 c0, u32 c1) {
     for (u32 c = c0; c < c1; c++) {
-      const u64 off = u64(c) * kHashChunk;
-      parts[c] = TexHashRange(base + off, base::Min(kHashChunk, bytes - off));
+      const u64 off = u64(c) * kTexHashChunk;
+      parts[c] =
+          TexHashRange(base + off, base::Min(kTexHashChunk, bytes - off));
     }
   });
-  u64 h = 1469598103934665603ull;
-  for (const u64 p : parts)
-    h = (h ^ p) * kHashPrime;
-  return h ^ (bytes << 1);
+  return TexHashCombine(parts.data(), chunks, bytes);
 }
 
 u64 TexHashSerial(u64 base, u64 bytes) {
-  if (bytes < 2 * kHashChunk)
+  if (bytes <= kTexHashChunk)
     return TexHashRange(base, bytes);
   u64 h = 1469598103934665603ull;
-  for (u64 off = 0; off < bytes; off += kHashChunk)
-    h = (h ^ TexHashRange(base + off, base::Min(kHashChunk, bytes - off))) *
+  for (u64 off = 0; off < bytes; off += kTexHashChunk)
+    h = (h ^ TexHashRange(base + off, base::Min(kTexHashChunk, bytes - off))) *
         kHashPrime;
   return h ^ (bytes << 1);
 }

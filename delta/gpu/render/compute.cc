@@ -45,6 +45,7 @@
 #include "base/strings/format.h"
 #include "base/strings/to_string.h"
 #include "base/strings/xstring.h"
+#include "host_memory/host_memory.h"
 #include "options/options.h"
 
 #define BCDECDEF static inline
@@ -171,6 +172,7 @@ u64 g_stage_guest_detile_bytes = 0, g_stage_guest_detile_n = 0;
 // the render-target bridge (its own submit+wait), and the plain copy.
 u64 g_in_hash_ns = 0, g_in_detile_ns = 0, g_in_rt_ns = 0, g_in_copy_ns = 0;
 u64 g_in_hash_n = 0, g_in_rt_n = 0;
+u64 g_in_hash_bytes = 0, g_wb_hash_bytes = 0, g_wb_hash_ns = 0;
 // The rest of a stage-in: writebacks forced by an overlapping dirty range or a
 // reshape (each a GPU wait plus a retile), buffer allocation, the plain guest
 // memcpy and its shadow copy. Without these `in=` is mostly unattributed.
@@ -3255,6 +3257,9 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
       kCsSkipRetile && e.image_staging && !e.truth &&
       FindCsAliasedImage(base, refreshed, /*for_write=*/true,
                          /*prefer_depth=*/e.res.dfmt == 4);
+  // The guest bytes' TexHash, built chunk by chunk while the writeback has
+  // them in cache (0 parts: not built, hash them again afterwards).
+  base::Vector<u64> hash_parts;
   if (e.image_staging && !e.truth && !gpu_carries) {
     const bool converted = ConvertCsRangeImage(e.res, e, false);
     if (!converted && e.device_local && !e.mirror_current) {
@@ -3333,6 +3338,20 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
         u64 wrote = 0, adopted = 0, conflicts = 0;
       };
       base::Vector<ChunkCounts> counts(chunks);
+      static_assert(kMergeBlocksPerChunk * 64 == kTexHashChunk);
+      const u64 hash_chunks = (n + kTexHashChunk - 1) / kTexHashChunk;
+      if (n == e.guest_bytes)
+        hash_parts.resize(hash_chunks);
+      const auto hash_chunk = [&](u64 c) {
+        const u64 at = c * kTexHashChunk;
+        hash_parts[c] =
+            TexHashRange(base + at, base::Min(kTexHashChunk, n - at));
+      };
+      // A chunk the tail loop below still writes into is hashed after it.
+      const auto merged_by_lanes = [&](u64 c) {
+        const u64 at = c * kTexHashChunk;
+        return at + base::Min(kTexHashChunk, n - at) <= blocks * 64;
+      };
       gcn::DetileParallelWork(chunks, blocks * 64, [&](u32 c0, u32 c1) {
         for (u32 c = c0; c < c1; c++) {
           const u64 first = u64(c) * kMergeBlocksPerChunk;
@@ -3367,6 +3386,8 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
             }
           }
           counts[c] = local;
+          if (!hash_parts.empty() && merged_by_lanes(c))
+            hash_chunk(c);
         }
       });
       u64 adopted_bytes = 0;
@@ -3386,6 +3407,9 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
           wrote++;
         }
       }
+      for (u64 c = 0; c < hash_parts.size(); c++)
+        if (!merged_by_lanes(c))
+          hash_chunk(c);
       adopted |= adopted_bytes != 0;
       g_cs_wb_bytes_written += wrote;
       g_cs_wb_bytes_total += n;
@@ -3425,7 +3449,23 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
                       (unsigned long long)(n - wrote));
         }
       }
-      std::memcpy(reinterpret_cast<void*>(base), e.map, n);
+      // One write announced up front instead of a fault per armed page; each
+      // chunk is hashed right after it is copied, while it is in cache.
+      host_memory::BeforeHostWrite(reinterpret_cast<void*>(base), n);
+      const u64 hash_chunks = (n + kTexHashChunk - 1) / kTexHashChunk;
+      if (n == e.guest_bytes)
+        hash_parts.resize(hash_chunks);
+      const auto* from = static_cast<const u8*>(e.map);
+      gcn::DetileParallelWork(
+          static_cast<u32>(hash_chunks), n, [&](u32 c0, u32 c1) {
+            for (u32 c = c0; c < c1; c++) {
+              const u64 at = u64(c) * kTexHashChunk;
+              const u64 len = base::Min(kTexHashChunk, n - at);
+              std::memcpy(reinterpret_cast<void*>(base + at), from + at, len);
+              if (!hash_parts.empty())
+                hash_parts[c] = TexHashRange(base + at, len);
+            }
+          });
       g_cs_wb_bytes_written += wrote;
       g_cs_wb_bytes_total += n;
     }
@@ -3456,7 +3496,15 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
     e.hash = 0;
     e.last_validated_frame = -1;
   } else {
-    e.hash = TexHash(base, e.guest_bytes);
+    const u64 th = NowNs();
+    if (!hash_parts.empty()) {
+      e.hash = TexHashCombine(hash_parts.data(), hash_parts.size(),
+                              e.guest_bytes);
+    } else {
+      e.hash = TexHash(base, e.guest_bytes);
+      g_wb_hash_bytes += e.guest_bytes;
+    }
+    g_wb_hash_ns += NowNs() - th;
     e.last_validated_frame = g_frame.num;
   }
   g_out_tail_ns += NowNs() - t_inv;
@@ -3541,14 +3589,18 @@ void CsSyncReport(double frames) {
     return;
   }
   BASE_LOGI("csin",
-            "hash={:.1f}ms x{:.1f} detile={:.1f}ms rt-bridge={:.1f}ms x{:.1f} "
-            "(in-frame x{:.1f}) copy={:.1f}ms",
+            "hash={:.1f}ms x{:.1f} {:.1f}MB "
+            "wb-hash={:.1f}ms {:.1f}MB detile={:.1f}ms "
+            "rt-bridge={:.1f}ms x{:.1f} (in-frame x{:.1f}) copy={:.1f}ms",
             g_in_hash_ns / frames / 1e6, g_in_hash_n / frames,
+            g_in_hash_bytes / frames / 1e6,
+            g_wb_hash_ns / frames / 1e6, g_wb_hash_bytes / frames / 1e6,
             g_in_detile_ns / frames / 1e6, g_in_rt_ns / frames / 1e6,
             g_in_rt_n / frames, g_in_frame_bridge_n / frames,
             g_in_copy_ns / frames / 1e6);
   g_in_hash_ns = g_in_detile_ns = g_in_rt_ns = g_in_copy_ns = 0;
   g_in_hash_n = g_in_rt_n = g_in_frame_bridge_n = 0;
+  g_in_hash_bytes = g_wb_hash_bytes = g_wb_hash_ns = 0;
   BASE_LOGI(
       "csin2",
       "overlap-wb={:.1f}ms x{:.1f} reshape-wb={:.1f}ms x{:.1f} "
@@ -5067,6 +5119,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       // forever, and GTA:SA's lighting went psychedelic in 1 run of 4.
       const u64 th = NowNs();
       const u64 h = TexHash(base, hash_bytes);
+      g_in_hash_bytes += hash_bytes;
       g_in_hash_ns += NowNs() - th;
       g_in_hash_n++;
       if (h == e.hash)
