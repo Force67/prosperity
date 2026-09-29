@@ -2831,6 +2831,11 @@ struct CsGpuTime {
   u64 count = 0;
 };
 base::HashMap<u64, CsGpuTime> g_cs_gpu_times;
+// DELTA_GPU_CS_ISOLATE_HEAVY: a shader whose last dispatch ran longer than
+// this goes into a submission of its own, so a wait on the work queued before
+// it does not also wait for it (UC2's 22 ms skinning pass).
+DELTA_OPTION(u32, kCsHeavyUs, "DELTA_GPU_CS_ISOLATE_HEAVY", 4000);
+base::HashSet<u64> g_cs_heavy;
 base::HashMap<rhi::Buffer*, ComputeBufferAccess> g_cs_batch_access;
 
 struct CsBatch {
@@ -2900,8 +2905,20 @@ void CsBatchFinalize(CsBatch& b) {
         b.log.begin(), b.log.end(),
         [](const BatchedDispatch& d) { return d.traced; });
     const bool read =
-        (kCsSyncReport || any_traced) &&
+        (kCsSyncReport || any_traced || kCsHeavyUs) &&
         Device().ReadTimestamps(b.timestamps, 0, count * 2, stamps.data());
+    if (read && kCsHeavyUs) {
+      const rhi::Caps& caps = Device().caps();
+      const u64 mask = UINT64_MAX >> (64 - caps.timestamp_bits);
+      for (u32 i = 0; i < count; ++i) {
+        const double us = ((stamps[i * 2 + 1] - stamps[i * 2]) & mask) *
+                          caps.timestamp_period_ns / 1000.0;
+        if (us > kCsHeavyUs)
+          g_cs_heavy.insert(b.log[i].cs_addr);
+        else
+          g_cs_heavy.erase(b.log[i].cs_addr);
+      }
+    }
     for (u32 i = 0; i < count; ++i) {
       if (!b.log[i].traced)
         continue;
@@ -3047,12 +3064,14 @@ bool CsBatchSubmit() {
   if (!g_cs_batch_open)
     return !g_cs_failed;
   CsBatch& b = g_cs_batches[g_cs_batch_cur];
-  base::String where;
-  base::FormatTo(where, "batch n={} last-cs={:#x}", g_cs_batch_count,
-                 g_cs_batch_log.empty() ? 0 : g_cs_batch_log.back().cs_addr);
-  if (!QueueCheck(where.c_str())) {
-    g_cs_failed = true;
-    return false;
+  if (QueueCheckArmed()) {
+    base::String where;
+    base::FormatTo(where, "batch n={} last-cs={:#x}", g_cs_batch_count,
+                   g_cs_batch_log.empty() ? 0 : g_cs_batch_log.back().cs_addr);
+    if (!QueueCheck(where.c_str())) {
+      g_cs_failed = true;
+      return false;
+    }
   }
   if (Device().caps().debug_labels)
     g_cs_list->PopLabel();  // close the "cs batch" scope
@@ -4645,6 +4664,11 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       }
     }
   }
+  const bool heavy = g_cs_heavy.contains(ci.cs_addr);
+  if (heavy && g_cs_batch_count && !CsBatchSubmit()) {
+    renderer.state = nullptr;
+    return CsDeclined(ci, "heavy");
+  }
   const rhi::Caps& caps = Device().caps();
   const u32 max_resources =
       base::Min(gcn::kMaxCsResources, caps.max_compute_resources);
@@ -5542,7 +5566,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                   (unsigned long long)ci.cs_addr);
     query = timeline::Begin(name);
   }
-  const bool stamp = g_cs_timestamps && (kCsSyncReport || traced);
+  const bool stamp =
+      g_cs_timestamps && (kCsSyncReport || traced || kCsHeavyUs);
   if (stamp)
     g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2,
                               /*start=*/true);
@@ -5648,7 +5673,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     }
   }
   // A CPU reader is coming for what this batch wrote: start it now.
-  if ((g_cs_batch_count >= base::Max<u32>(1, kCsBatchCap) || kick ||
+  if ((g_cs_batch_count >= base::Max<u32>(1, kCsBatchCap) || kick || heavy ||
        kGpuCsgpuVerbose) &&
       !CsBatchSubmit()) {
     renderer.state = nullptr;
