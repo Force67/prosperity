@@ -52,4 +52,28 @@ void CopyGuestIndices(void* destination,
   }
 }
 
+void CopyGuestQuadIndices(void* destination,
+                          const void* source,
+                          u32 count,
+                          u32 index_type) {
+  const auto at = [&](u32 i) -> u32 {
+    if (index_type == 1)
+      return static_cast<const u32*>(source)[i];
+    if (index_type == 2)
+      return static_cast<const u8*>(source)[i];
+    return static_cast<const u16*>(source)[i];
+  };
+  constexpr u32 kCorner[6] = {0, 1, 2, 0, 2, 3};
+  u32 o = 0;
+  for (u32 q = 0; q + 4 <= count; q += 4) {
+    for (u32 c : kCorner) {
+      const u32 index = at(q + c);
+      if (index_type == 1)
+        static_cast<u32*>(destination)[o++] = index;
+      else
+        static_cast<u16*>(destination)[o++] = static_cast<u16>(index);
+    }
+  }
+}
+
 }  // namespace gpu::render

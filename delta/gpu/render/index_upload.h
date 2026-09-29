@@ -17,5 +17,11 @@ void CopyGuestIndices(void* destination,
                       const void* source,
                       u32 count,
                       u32 index_type);
+// A QUADLIST's indices as a triangle list: quad (a, b, c, d) becomes
+// (a, b, c) and (a, c, d); count / 4 * 6 indices are written.
+void CopyGuestQuadIndices(void* destination,
+                          const void* source,
+                          u32 count,
+                          u32 index_type);
 
 }  // namespace gpu::render

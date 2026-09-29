@@ -33,5 +33,13 @@ TEST(IndexUpload, WidensEightBitIndices) {
   EXPECT_EQ(UploadedIndexElementBytes(2), 2u);
 }
 
+TEST(IndexUpload, SplitsQuadsIntoTwoTriangles) {
+  const u16 input[] = {10, 11, 12, 13, 20, 21, 22, 23};
+  u16 output[12] = {};
+  CopyGuestQuadIndices(output, input, 8, 0);
+  const u16 expected[] = {10, 11, 12, 10, 12, 13, 20, 21, 22, 20, 22, 23};
+  EXPECT_EQ(std::memcmp(output, expected, sizeof(expected)), 0);
+}
+
 }  // namespace
 }  // namespace gpu::render

@@ -592,13 +592,17 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     return Decline(kNoRecomp);
   };
   u32 nv = d.vertex_count;
-  const u64 index_bytes = indexed ? static_cast<u64>(d.index_count) *
+  // QUADLIST has no host topology: each quad uploads as two triangles.
+  const bool quads = indexed && d.prim_type == 19;
+  const u32 upload_indices = quads ? d.index_count / 4 * 6 : d.index_count;
+  const u32 ib_tag = 1u + d.index_type + (quads ? 4u : 0u);
+  const u64 index_bytes = indexed ? static_cast<u64>(upload_indices) *
                                         UploadedIndexElementBytes(d.index_type)
                                   : 0;
   if (indexed) {
     const StageCache::Entry* staged =
         kRingDedup ? g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
-                                      index_bytes, 1u + d.index_type)
+                                      index_bytes, ib_tag)
                    : nullptr;
     const u32 max_index =
         staged && staged->bytes == index_bytes && staged->max_index != ~0u
@@ -1041,7 +1045,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   const u64 ib_cached =
       kRingDedup && indexed
           ? StagedOffset(g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
-                                          index_bytes, 1u + d.index_type))
+                                          index_bytes, ib_tag))
           : u64(-1);
   const u64 index_align = d.index_type == 1 ? 4 : 2;
   const u64 aligned_ioff =
@@ -1920,12 +1924,16 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     const bool tracked =
         ArmForCache(reinterpret_cast<u64>(d.index_data),
                     u64(d.index_count) * (d.index_type == 1 ? 4 : 2));
-    CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
-                     d.index_type);
+    if (quads)
+      CopyGuestQuadIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
+                           d.index_type);
+    else
+      CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
+                       d.index_type);
     g_ring_ib_bytes += index_bytes;
     if (kRingDedup)
       g_ib_staged.Insert(reinterpret_cast<u64>(d.index_data), index_bytes,
-                         1u + d.index_type, ioff, tracked, nv - 1);
+                         ib_tag, ioff, tracked, nv - 1);
   }
   if (nbind) {
     rhi::Buffer* bufs[8];
@@ -1961,8 +1969,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     list->DrawMeshTasks((draw_count - 1) / d.recomp->mesh_input_primitives + 1,
                         d.instance_count ? d.instance_count : 1, 1);
   else if (indexed)
-    list->DrawIndexed(d.index_count, d.instance_count ? d.instance_count : 1, 0,
-                      0, 0);
+    list->DrawIndexed(upload_indices,
+                      d.instance_count ? d.instance_count : 1, 0, 0, 0);
   else
     list->Draw(d.vertex_count, d.instance_count ? d.instance_count : 1, 0, 0);
   DrawCheckpoint(g_frame.list, g_frame.num, g_frame.draws, true);
