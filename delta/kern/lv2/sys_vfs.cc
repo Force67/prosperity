@@ -70,6 +70,7 @@
 #include "kern/ps4/dev/socket_dev.h"  // FdToSocket, for select over real sockets
 #include "logger/logger.h"
 #include "options/options.h"
+#include "host_memory/host_memory.h"
 
 namespace {
 DELTA_OPTION(bool, kQuietGuest, "DELTA_QUIET_GUEST", false);
@@ -371,6 +372,9 @@ i64 PS4ABI sys_read(u32 fd, void* buf, size_t nbytes) {
       BASE_LOGI("rd", "fd={} -> EBADF (no device)", fd);
     return -SysError::eBADF;
   }
+  // The host kernel may write the buffer (a file read): open any page a
+  // cache protected, or the call fails with EFAULT.
+  host_memory::BeforeHostWrite(buf, nbytes);
   i64 r = d->Read(buf, nbytes);
   ThrottleIo(r);
   FdReadStat(fd, r);
@@ -756,6 +760,9 @@ i64 PS4ABI sys_pread(u32 fd, void* buf, size_t nbytes, i64 offset) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
   i64 saved = d->Lseek(0, kSeekCur);
   d->Lseek(offset, kSeekSet);
+  // The host kernel may write the buffer (a file read): open any page a
+  // cache protected, or the call fails with EFAULT.
+  host_memory::BeforeHostWrite(buf, nbytes);
   i64 r = d->Read(buf, nbytes);
   if (saved >= 0)
     d->Lseek(saved, kSeekSet);
@@ -894,6 +901,7 @@ i64 PS4ABI sys_readv(u32 fd, const void* iov, int iovcnt) {
     return -SysError::eBADF;
   i64 total = 0;
   for (int i = 0; i < iovcnt; ++i) {
+    host_memory::BeforeHostWrite(segs[i].iov_base, segs[i].iov_len);
     i64 r = d->Read(segs[i].iov_base, segs[i].iov_len);
     if (r < 0)
       return r;
@@ -917,6 +925,7 @@ i64 PS4ABI sys_preadv(u32 fd, const void* iov, int iovcnt, i64 offset) {
   i64 total = 0;
   for (int i = 0; i < iovcnt; ++i) {
     d->Lseek(offset + total, kSeekSet);
+    host_memory::BeforeHostWrite(segs[i].iov_base, segs[i].iov_len);
     i64 r = d->Read(segs[i].iov_base, segs[i].iov_len);
     if (r < 0) {
       if (saved >= 0)

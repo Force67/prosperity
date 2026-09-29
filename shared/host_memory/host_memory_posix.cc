@@ -10,10 +10,12 @@
 
 #include <sys/mman.h>
 #include <unistd.h>
+#include "base/atomic.h"
 #include "base/containers/map.h"
 #include "base/containers/vector.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
+#include "profile/profile.h"
 
 namespace host_memory {
 
@@ -117,6 +119,7 @@ void* AllocMem(void* preferred_addr,
                size_t length,
                PageProtection prot,
                AllocationType type) {
+  DELTA_ZONE("mem.alloc");
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
   int posix_prot;
 
@@ -148,10 +151,12 @@ void FreeMem(void* addr) {
 }
 
 bool ProtectMem(void* addr, size_t len, PageProtection prot) {
+  DELTA_ZONE("mem.protect");
   return ::mprotect(addr, len, ProtectionToPosix(prot)) == 0;
 }
 
 bool IsMemoryRangeMapped(const void* addr, size_t len) {
+  DELTA_ZONE("mem.mincore");
   if (!addr || !len)
     return false;
   const uintptr_t begin = reinterpret_cast<uintptr_t>(addr);
@@ -170,6 +175,7 @@ bool IsMemoryRangeMapped(const void* addr, size_t len) {
 }
 
 size_t MappedMemoryPrefix(const void* addr, size_t max_len) {
+  DELTA_ZONE("mem.mapped_prefix");
   if (!addr || !max_len)
     return 0;
   size_t mapped = 0, remaining = max_len;
@@ -191,6 +197,29 @@ size_t GetAvailableMem() {
   if (pages <= 0 || page_size <= 0)
     return static_cast<size_t>(-1);
   return static_cast<size_t>(pages) * static_cast<size_t>(page_size);
+}
+
+namespace {
+base::Atomic<WriteFaultHandler> g_write_fault_handler{nullptr};
+base::Atomic<HostWriteHook> g_host_write_hook{nullptr};
+}  // namespace
+
+void SetWriteFaultHandler(WriteFaultHandler handler) {
+  g_write_fault_handler.store(handler);
+}
+
+bool HandleWriteFault(uintptr_t addr) {
+  const WriteFaultHandler handler = g_write_fault_handler.load();
+  return handler && handler(addr);
+}
+
+void SetHostWriteHook(HostWriteHook hook) {
+  g_host_write_hook.store(hook);
+}
+
+void BeforeHostWrite(void* addr, size_t len) {
+  if (const HostWriteHook hook = g_host_write_hook.load(); hook && len)
+    hook(addr, len);
 }
 
 }  // namespace host_memory

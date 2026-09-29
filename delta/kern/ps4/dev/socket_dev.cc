@@ -17,6 +17,7 @@
 
 #include "kern/process.h"
 #include "kern/ps4/dev/socket_dev.h"
+#include "host_memory/host_memory.h"
 
 namespace kern {
 namespace {
@@ -151,6 +152,7 @@ i64 SocketDevice::Recvfrom(void* buf,
                            u32* addr_len) {
   sockaddr_storage sa;
   socklen_t n = sizeof(sa);
+  host_memory::BeforeHostWrite(buf, len);
   ssize_t r =
       ::recvfrom(fd_, buf, len, flags, reinterpret_cast<sockaddr*>(&sa), &n);
   if (r < 0)

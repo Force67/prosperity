@@ -4,12 +4,17 @@
 #include "gpu/write_tracker.h"
 
 #include "gpu/guest_page_table.h"
+#include "host_memory/host_memory.h"
+#include "options/options.h"
+#include "profile/profile.h"
 
 #if defined(__linux__)
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <linux/userfaultfd.h>
+#include <immintrin.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -30,6 +35,8 @@
 
 namespace gpu {
 namespace {
+
+DELTA_OPTION(bool, kScanMode, "DELTA_GPU_WT_SCAN", false);
 
 constexpr u64 kPage = 4096;
 constexpr u64 kRegisterAlign = 4096;
@@ -105,12 +112,199 @@ base::Vector<base::Pair<u64, u64>> Gaps(const base::Map<u64, u64>& runs,
   return gaps;
 }
 
+#if defined(__linux__)
+// Fault mode. A page's `armed` state: open, protected, or written and waiting
+// in the queue for Collect. Only the owner arms (open -> protected); a writer
+// takes protected -> queued, so a page is never re-armed while the write that
+// opened it is still in flight, and never queued twice.
+constexpr u8 kOpen = 0, kProtected = 1, kQueued = 2;
+// Pages protected at once are at most half of this, so the queue of written
+// pages can never fill.
+constexpr u64 kQueueSize = 1u << 20;
+u64* g_queue = nullptr;  // written pages; 0 = slot not filled yet
+base::Atomic<u64> g_queue_head{0};
+u64 g_queue_tail = 0;  // owner only
+
+// Readable, executable too: a protected page may hold code, and it faults on
+// execution then as well; opening it must not leave it unexecutable.
+constexpr int kOpenProt = PROT_READ | PROT_WRITE | PROT_EXEC;
+
+void Enqueue(u64 page) {
+  const u64 at = g_queue_head.fetch_add(1, base::memory_order_relaxed);
+  __atomic_store_n(&g_queue[at % kQueueSize], page, __ATOMIC_RELEASE);
+}
+
+// Async-signal-safe: atomics, the page table and one mprotect.
+bool OnWriteFault(uintptr_t addr) {
+  const u64 page = addr & ~(kPage - 1);
+  auto* p = const_cast<GuestPageTable::Page*>(GuestPages().Find(page));
+  if (!p || !p->ever_armed.load(base::memory_order_relaxed))
+    return false;
+  u8 armed = kProtected;
+  if (p->armed.compare_exchange_strong(armed, kQueued,
+                                       base::memory_order_acq_rel)) {
+    ::mprotect(reinterpret_cast<void*>(page), kPage, kOpenProt);
+    Enqueue(page);
+  }
+  // Otherwise another thread is opening it right now: retrying the write is
+  // all that is left to do.
+  return true;
+}
+
+// Any thread: the host kernel is about to write [addr, addr+len).
+void OnHostWrite(void* addr, size_t len) {
+  const u64 first = reinterpret_cast<u64>(addr) & ~(kPage - 1);
+  const u64 end =
+      (reinterpret_cast<u64>(addr) + len + kPage - 1) & ~(kPage - 1);
+  const GuestPageTable& table = GuestPages();
+  u64 run = 0;
+  const auto flush = [&](u64 at) {
+    if (run)
+      ::mprotect(reinterpret_cast<void*>(run), at - run, kOpenProt);
+    run = 0;
+  };
+  for (u64 page = first; page < end; page += kPage) {
+    auto* p = const_cast<GuestPageTable::Page*>(table.Find(page));
+    u8 armed = kProtected;
+    if (p && p->armed.compare_exchange_strong(armed, kQueued,
+                                              base::memory_order_acq_rel)) {
+      if (!run)
+        run = page;
+      Enqueue(page);
+    } else {
+      flush(page);
+    }
+  }
+  flush(end);
+}
+#endif
+
 }  // namespace
 
 WriteTracker& GuestWriteTracker() {
   static WriteTracker tracker;
   return tracker;
 }
+
+bool WriteTracker::Enable() {
+  if (enabled())
+    return true;
+  return (!kScanMode && EnableFault()) || EnableScan();
+}
+
+#if defined(__linux__)
+bool WriteTracker::EnableFault() {
+  void* queue = mmap(nullptr, kQueueSize * sizeof(u64), PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (queue == MAP_FAILED)
+    return false;
+  g_queue = static_cast<u64*>(queue);
+  host_memory::SetWriteFaultHandler(&OnWriteFault);
+  host_memory::SetHostWriteHook(&OnHostWrite);
+  mode_ = Mode::kFault;
+  return true;
+}
+
+bool WriteTracker::ArmFault(u64 first, u64 end) {
+  DELTA_ZONE("wt.arm");
+  if ((armed_bytes_ + (end - first)) / kPage >= kQueueSize / 2)
+    return false;
+  GuestPageTable& table = GuestPages();
+  for (u64 page = first; page < end; page += kPage) {
+    const GuestPageTable::Page* p = table.Find(page);
+    if (p && (p->volatile_until > frame_ ||
+              p->armed.load(base::memory_order_acquire) == kQueued))
+      return false;  // hot, or its last write is not collected yet
+  }
+  // Protect each run of open pages; mark before protecting, so a write in
+  // between is one the fault handler can take.
+  u64 run = 0;
+  const auto protect = [&](u64 at) {
+    if (!run)
+      return true;
+    const bool ok = ::mprotect(reinterpret_cast<void*>(run), at - run,
+                               PROT_READ) == 0;
+    if (!ok)
+      for (u64 page = run; page < at; page += kPage)
+        table.At(page)->armed.store(kOpen, base::memory_order_release);
+    run = 0;
+    return ok;
+  };
+  for (u64 page = first; page < end; page += kPage) {
+    GuestPageTable::Page* p = table.At(page);
+    if (!p)
+      return false;
+    if (p->armed.load(base::memory_order_acquire) != kOpen) {
+      if (!protect(page))
+        return false;
+      continue;
+    }
+    p->ever_armed.store(1, base::memory_order_relaxed);
+    p->armed.store(kProtected, base::memory_order_release);
+    if (!run)
+      run = page;
+  }
+  if (!protect(end))
+    return false;
+  armed_bytes_ += InsertRun(armed_, first, end);
+  return true;
+}
+
+void WriteTracker::DisarmFault(u64 first, u64 end) {
+  DELTA_ZONE("wt.disarm");
+  GuestPageTable& table = GuestPages();
+  for (u64 page = first; page < end; page += kPage)
+    if (GuestPageTable::Page* p = table.At(page)) {
+      u8 armed = kProtected;
+      p->armed.compare_exchange_strong(armed, kOpen,
+                                       base::memory_order_acq_rel);
+    }
+  ::mprotect(reinterpret_cast<void*>(first), end - first, kOpenProt);
+  armed_bytes_ -= EraseRun(armed_, first, end);
+}
+
+void WriteTracker::TakeFaulted(base::Vector<Range>& out) {
+  const u64 head = g_queue_head.load(base::memory_order_acquire);
+  if (head == g_queue_tail)
+    return;
+  base::Vector<u64> pages;
+  pages.reserve(head - g_queue_tail);
+  for (u64 at = g_queue_tail; at < head; at++) {
+    u64* slot = &g_queue[at % kQueueSize];
+    u64 page;
+    // A writer between claiming the slot and filling it: a few instructions.
+    while (!(page = __atomic_exchange_n(slot, 0, __ATOMIC_ACQUIRE)))
+      _mm_pause();
+    pages.push_back(page);
+  }
+  g_queue_tail = head;
+  base::Sort(pages.begin(), pages.end());
+  GuestPageTable& table = GuestPages();
+  for (size_t i = 0; i < pages.size();) {
+    const u64 first = pages[i];
+    u64 end = first + kPage;
+    for (++i; i < pages.size() && pages[i] <= end; ++i)
+      end = base::Max(end, pages[i] + kPage);
+    for (u64 page = first; page < end; page += kPage)
+      if (GuestPageTable::Page* p = table.At(page)) {
+        u8 armed = kQueued;
+        p->armed.compare_exchange_strong(armed, kOpen,
+                                         base::memory_order_acq_rel);
+      }
+    armed_bytes_ -= EraseRun(armed_, first, end);
+    out.emplace_back(first, end);
+  }
+}
+#else
+bool WriteTracker::EnableFault() {
+  return false;
+}
+bool WriteTracker::ArmFault(u64, u64) {
+  return false;
+}
+void WriteTracker::DisarmFault(u64, u64) {}
+void WriteTracker::TakeFaulted(base::Vector<Range>&) {}
+#endif
 
 #if defined(DELTA_HAVE_WRITE_TRACKER)
 
@@ -120,9 +314,7 @@ long WriteTracker::MinorFaults() {
   return usage.ru_minflt;
 }
 
-bool WriteTracker::Enable() {
-  if (uffd_ >= 0)
-    return true;
+bool WriteTracker::EnableScan() {
   const int uffd = static_cast<int>(
       syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY));
   if (uffd < 0)
@@ -140,10 +332,12 @@ bool WriteTracker::Enable() {
   }
   uffd_ = uffd;
   pagemap_ = pagemap;
+  mode_ = Mode::kScan;
   return true;
 }
 
 bool WriteTracker::Register(u64 first, u64 end) {
+  DELTA_ZONE("wt.register");
   for (const auto& [lo, hi] : Gaps(registered_, first, end)) {
     // Coarser than the pages asked for, so neighbouring buffers do not each
     // split the mapping again; a range that runs into a hole falls back to the
@@ -170,6 +364,9 @@ bool WriteTracker::Register(u64 first, u64 end) {
 }
 
 bool WriteTracker::ArmRange(u64 first, u64 end) {
+  if (mode_ == Mode::kFault)
+    return ArmFault(first, end);
+  DELTA_ZONE("wt.arm");
   const GuestPageTable& table = GuestPages();
   for (u64 page = first; page < end; page += kPage)
     if (const GuestPageTable::Page* p = table.Find(page);
@@ -191,12 +388,16 @@ bool WriteTracker::ArmRange(u64 first, u64 end) {
 }
 
 bool WriteTracker::Arm(u64 base, u64 bytes) {
-  if (uffd_ < 0 || !bytes)
+  if (!enabled() || !bytes)
     return false;
   const u64 first = PageDown(base), end = PageUp(base + bytes);
   // Most calls ask again about pages armed long ago.
   if (AllArmed(first, end))
     return true;
+  // Fault mode protects exactly what it is asked to: a gap page may be code,
+  // a guard page or another mapping, and costs nothing to leave alone.
+  if (mode_ == Mode::kFault)
+    return ArmRange(first, end);
   // Close a small gap to a neighbouring armed run: every separate run is a
   // mapping of its own after registration, and the scan pays per mapping
   // (GTA:SA held ~2700 runs, ~10 ms a frame of scans).
@@ -219,6 +420,11 @@ bool WriteTracker::Arm(u64 base, u64 bytes) {
 // Unregistered too: the span scan arms every registered page it walks, and a
 // page left registered would be armed again at the next one.
 void WriteTracker::Disarm(u64 first, u64 end) {
+  if (mode_ == Mode::kFault) {
+    DisarmFault(first, end);
+    return;
+  }
+  DELTA_ZONE("wt.disarm");
   uffdio_writeprotect wp{};
   wp.range.start = first;
   wp.range.len = end - first;
@@ -233,6 +439,7 @@ void WriteTracker::Disarm(u64 first, u64 end) {
 // The walk costs ~0.3 us a mapping in [first, end), registered or not, and a
 // few ns a page.
 bool WriteTracker::Scan(u64 first, u64 end, base::Vector<Range>& out) {
+  DELTA_ZONE("wt.scan");
   page_region regions[256];
   pm_scan_arg arg{};
   arg.size = sizeof(arg);
@@ -257,19 +464,24 @@ bool WriteTracker::Scan(u64 first, u64 end, base::Vector<Range>& out) {
 
 #else
 
-bool WriteTracker::Enable() {
+bool WriteTracker::EnableScan() {
   return false;
 }
 bool WriteTracker::Register(u64, u64) {
   return false;
 }
-bool WriteTracker::Arm(u64, u64) {
-  return false;
+bool WriteTracker::Arm(u64 base, u64 bytes) {
+  if (mode_ != Mode::kFault || !bytes)
+    return false;
+  const u64 first = PageDown(base), end = PageUp(base + bytes);
+  return AllArmed(first, end) || ArmFault(first, end);
 }
-bool WriteTracker::ArmRange(u64, u64) {
-  return false;
+bool WriteTracker::ArmRange(u64 first, u64 end) {
+  return mode_ == Mode::kFault && ArmFault(first, end);
 }
-void WriteTracker::Disarm(u64, u64) {}
+void WriteTracker::Disarm(u64 first, u64 end) {
+  DisarmFault(first, end);
+}
 long WriteTracker::MinorFaults() {
   return 0;
 }
@@ -299,7 +511,7 @@ bool WriteTracker::AllArmed(u64 first, u64 end) const {
   const GuestPageTable& table = GuestPages();
   for (u64 page = first; page < end; page += kPage) {
     const GuestPageTable::Page* p = table.Find(page);
-    if (!p || !p->armed)
+    if (!p || p->armed.load(base::memory_order_acquire) != 1)
       return false;
   }
   return true;
@@ -309,7 +521,7 @@ void WriteTracker::MarkArmed(u64 first, u64 end, bool armed) {
   GuestPageTable& table = GuestPages();
   for (u64 page = first; page < end; page += kPage)
     if (GuestPageTable::Page* p = table.At(page))
-      p->armed = armed;
+      p->armed.store(armed ? 1 : 0, base::memory_order_release);
 }
 
 // EraseRun on armed_, clearing only the pages that were armed: a remap can
@@ -325,18 +537,21 @@ u64 WriteTracker::EraseArmed(u64 first, u64 end) {
 }
 
 void WriteTracker::Collect(base::Vector<Range>& out) {
-  if (uffd_ < 0)
+  DELTA_ZONE("wt.collect");
+  if (!enabled())
     return;
   collects_++;
   const auto t0 = base::TimeTicks::Now();
   Drain(out);
   const size_t first_new = out.size();
+  if (mode_ == Mode::kFault)
+    TakeFaulted(out);
   // A write to an armed page is a page fault, counted in the faulting task's
   // minor faults whether the task was in user or kernel mode. No fault
   // anywhere in the process since the last scan: nothing armed was written,
   // and the scan (~36 ns an armed page, ~60 times a frame) can be skipped.
   // Four in five collects in GTA:SA are that quiet.
-  const long faults = MinorFaults();
+  const long faults = mode_ == Mode::kScan ? MinorFaults() : faults_at_scan_;
   if (faults != faults_at_scan_) {
     // Runs close together are scanned as one span; a wide gap is not, since
     // the walk pays for every mapping in it (GTA:SA keeps ~37k 64 KiB guest
@@ -371,21 +586,21 @@ void WriteTracker::Collect(base::Vector<Range>& out) {
 }
 
 void WriteTracker::NoteWrite(u64 base, u64 bytes) {
-  if (uffd_ < 0 || !bytes)
+  if (!enabled() || !bytes)
     return;
   base::LockGuard lock(noted_lock_);
   noted_.emplace_back(PageDown(base), PageUp(base + bytes));
 }
 
 void WriteTracker::NoteRemap(u64 base, u64 bytes) {
-  if (uffd_ < 0 || !bytes)
+  if (!enabled() || !bytes)
     return;
   base::LockGuard lock(noted_lock_);
   remapped_.emplace_back(PageDown(base), PageUp(base + bytes));
 }
 
 void WriteTracker::EndFrame() {
-  if (uffd_ < 0)
+  if (!enabled())
     return;
   // Written this frame and the one before, or several times in this one: data
   // the title rewrites every frame. A copy of it is good for one submission at

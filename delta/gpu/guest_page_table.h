@@ -22,8 +22,13 @@ class GuestPageTable {
     // kUnreadable set, proven unreadable at. Any thread; a stale answer only
     // costs a probe.
     base::Atomic<u32> readable{0};
+    // Write-protected by the write tracker. Cleared by whichever thread's
+    // write opens it again (the fault handler); set by the tracker's owner.
+    base::Atomic<u8> armed{0};
+    // Was protected at some point: an access fault here that lost the race to
+    // clear `armed` is still ours, and only needs to resume.
+    base::Atomic<u8> ever_armed{0};
     // Write tracker state, owned by the thread that owns the tracker.
-    bool armed = false;
     u16 reports = 0;          // write reports in report_frame
     u32 report_frame = 0;     // frame of the latest write report
     u32 previous_report = 0;  // frame of the report before that frame

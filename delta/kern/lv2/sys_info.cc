@@ -35,6 +35,7 @@
 #include "kern/lv2/sys_budget.h"
 #include "kern/lv2/sys_info.h"
 #include "options/options.h"
+#include "host_memory/host_memory.h"
 
 // Declared unconditionally: read unconditionally below. They used to sit behind
 // DELTA_BACKEND_NATIVE, leaving the FEX/ARM build uses without declarations.
@@ -317,6 +318,7 @@ int PS4ABI sys_sysctl(int* name,
     auto length = *oldlenp;
     if (length > 256)
       length = 256;
+    host_memory::BeforeHostWrite(oldp, length);
     if (kArndZero || getrandom(oldp, length, 0) != static_cast<ssize_t>(length))
       std::memset(oldp, 0, length);
     *oldlenp = length;

@@ -56,4 +56,19 @@ u64 MemoryMappingIdentity(const void* addr, size_t len);
 size_t MappedMemoryPrefix(const void* addr, size_t max_len);
 
 size_t GetAvailableMem();
+
+// Pages a cache write-protects to learn when the guest writes them (the GPU's
+// write tracker). The kernel's fault handler offers every access fault here
+// first; a true return means the page was one of those, is writable again and
+// the faulting instruction can resume.
+using WriteFaultHandler = bool (*)(uintptr_t addr);
+void SetWriteFaultHandler(WriteFaultHandler handler);
+bool HandleWriteFault(uintptr_t addr);
+
+// The host kernel does not fault on a protected page, it fails the call
+// (read() returns EFAULT). Code that lets the kernel write guest memory calls
+// this first; the tracker opens and reports the pages in the range.
+using HostWriteHook = void (*)(void* addr, size_t len);
+void SetHostWriteHook(HostWriteHook hook);
+void BeforeHostWrite(void* addr, size_t len);
 }  // namespace host_memory

@@ -373,6 +373,10 @@ struct NullGuard {
 NullGuard g_null_guards[16] = {};
 int g_null_guard_count = 0;
 static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
+  // A write to a page a cache protected: opened and noted, resume.
+  if (sig == SIGSEGV && si && si->si_code == SEGV_ACCERR &&
+      host_memory::HandleWriteFault(reinterpret_cast<uintptr_t>(si->si_addr)))
+    return;
   if (probe::OnSignal(sig, si, ucv))
     return;
   // Let the CPU backend handle JIT-internal signals (e.g. FEX unaligned-atomic

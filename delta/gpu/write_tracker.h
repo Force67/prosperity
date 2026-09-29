@@ -14,10 +14,18 @@ namespace gpu {
 // Which guest pages were written since a cache copied them, for caches that
 // keep a copy of guest memory longer than one submission.
 //
-// Linux userfaultfd write protection in async mode plus the PAGEMAP_SCAN
-// ioctl (Linux 6.7): an armed page takes one kernel-resolved fault on its
-// first write, writes by the kernel itself (read() into a buffer) included,
-// and a scan reports it and arms it again. No signal handler is involved.
+// Default (fault mode): an armed page is made read-only. The first write to it
+// faults; the kernel's SIGSEGV handler hands it here (host_memory::
+// HandleWriteFault), the page is made writable, queued, and the write resumes.
+// Collect drains the queue: no syscall and no scan, so the cost is paid per
+// written page rather than per question. A written page stays open until a
+// cache arms it again. The host kernel does not fault on a protected page but
+// fails the call, so code that lets it write guest memory (read(), recv())
+// announces the range first (host_memory::BeforeHostWrite).
+//
+// DELTA_GPU_WT_SCAN=1 (scan mode): userfaultfd async write protection plus
+// the PAGEMAP_SCAN ioctl (Linux 6.7). Faults resolve in the kernel and a scan
+// finds the written pages; each scan costs per mapping walked.
 //
 // Only CPU writes through the armed mapping are seen. A write through another
 // mapping of the same memory, or by a device into imported pages, must be
@@ -28,7 +36,7 @@ class WriteTracker {
 
   // False when the host cannot track writes; every other call is then a no-op.
   bool Enable();
-  bool enabled() const { return uffd_ >= 0; }
+  bool enabled() const { return mode_ != Mode::kOff; }
 
   // Arms the pages of [base, base+bytes). False when they cannot be tracked,
   // or are written too often to be worth it.
@@ -55,6 +63,13 @@ class WriteTracker {
   u64 collect_ns() const { return collect_ns_; }
 
  private:
+  enum class Mode { kOff, kScan, kFault };
+
+  bool EnableScan();
+  bool EnableFault();
+  bool ArmFault(u64 first, u64 end);
+  void DisarmFault(u64 first, u64 end);
+  void TakeFaulted(base::Vector<Range>& out);
   bool Register(u64 first, u64 end);
   bool AllArmed(u64 first, u64 end) const;
   // Mirrors armed_ into the guest page table, one run at a time.
@@ -66,6 +81,7 @@ class WriteTracker {
   void Drain(base::Vector<Range>& out);
   static long MinorFaults();
 
+  Mode mode_ = Mode::kOff;
   int uffd_ = -1;
   int pagemap_ = -1;
   base::Map<u64, u64> armed_;       // first -> end, coalesced

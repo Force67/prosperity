@@ -26,6 +26,7 @@
 #include "base/threading/mutex.h"
 #include "kern/vfs.h"
 #include "options/options.h"
+#include "host_memory/host_memory.h"
 
 namespace {
 DELTA_OPTION(const char*, kSavedataDir, "DELTA_SAVEDATA_DIR", nullptr);
@@ -709,6 +710,7 @@ int PS4ABI sceSaveDataLoadIcon(const void* mount_point, void* icon) {
     if (!f)
       return kErrNotFound;
     const u64 copy_size = data_size < buf_size ? data_size : buf_size;
+    host_memory::BeforeHostWrite(icon_buf, static_cast<size_t>(copy_size));
     std::fread(icon_buf, 1, static_cast<size_t>(copy_size), f);
     std::fclose(f);
   }
