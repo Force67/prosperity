@@ -314,21 +314,34 @@ void DispatchCompute(render::Renderer& renderer,
   thread_local base::Vector<gcn::ResolvedCsResource> resolved;
   gcn::ResolveCsResources(resolved, *cs_program, rc, user_data);
   // Descriptor chains live in guest memory, which an earlier dispatch may have
-  // written, and writebacks are lazy. If any binding failed to resolve, land
-  // pending compute writes in guest memory and re-resolve once before falling
-  // back to a dummy (the fallback zeroes a real input and silently corrupts
-  // whatever pipeline this CS belongs to). Best-effort: a range that could not
-  // be written back leaves its chain stale, but the dummy still beats dropping
-  // the dispatch. Only a dead renderer makes retrying pointless.
-  bool any_unresolved = false;
-  for (const auto& r : rc.resources)
-    any_unresolved |=
-        r.binding >= resolved.size() || !resolved[r.binding].valid;
-  if (any_unresolved) {
+  // written, and writebacks are lazy. The replay already lands pending writes
+  // under every table it reads, so a binding left unresolved is normally one
+  // the replay cannot evaluate (an SGPR set inside a loop), which no
+  // writeback changes. Still, flush everything and re-resolve once per
+  // shader; a shader the retry did not help is not flushed for again. UC2's
+  // skinning CS wrote back ~250 ranges (~59 MB) a frame for nothing.
+  const auto count_resolved = [&] {
+    u32 n = 0;
+    for (const auto& r : rc.resources)
+      n += r.binding < resolved.size() && resolved[r.binding].valid;
+    return n;
+  };
+  const u32 resolved_n = count_resolved();
+  static base::HashSet<u64> retry_useless;
+  if (resolved_n < rc.resources.size() && !retry_useless.contains(cs_addr)) {
     OwnRenderer("cs-unresolved");
-    if (!render::FlushCsWrites(renderer) && !renderer.available())
+    if (!render::FlushCsWrites(renderer, "cs-unresolved") &&
+        !renderer.available())
       return;
     gcn::ResolveCsResources(resolved, *cs_program, rc, user_data);
+    if (count_resolved() > resolved_n) {
+      static u32 helped = 0;
+      if (helped++ < 8)
+        BASE_LOGI("csgpu", "cs @{:#x}: the unresolved-binding retry helped",
+                  cs_addr);
+    } else {
+      retry_useless.insert(cs_addr);
+    }
   }
 
   const bool trace = ShouldTraceCsResources(cs_addr);

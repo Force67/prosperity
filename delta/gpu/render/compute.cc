@@ -799,6 +799,9 @@ struct CsRange {
   bool rt_sourced = false;
   int last_rt_frame = -1;
   u64 rt_serial = 0;  // the live target's render_serial the staged copy holds
+  // The target's render_serial when it took this range's pixels in frame
+  // (CsRefreshRtInFrame): rendered past it, the target is the newer copy.
+  u64 refreshed_serial = 0;
   ComputeInfo::Res res;  // writeback needs the full layout description
   // A copy of the guest bytes as they were staged IN, kept so the writeback can
   // tell "the shader wrote this word" from "the shader never touched it".
@@ -830,6 +833,13 @@ struct CsRange {
   // came after the dispatch, so they win over its output.
   base::Vector<base::Pair<u64, u64>> cpu_writes;
   int dirty_frame = -1;  // frame the range last went dirty
+  // When the GPU last wrote it, in dispatch order across all ranges. Ranges
+  // whose footprints overlap (a title reusing transient memory) must reach
+  // guest memory oldest first, so the newest bytes land last.
+  u64 dirty_stamp = 0;
+  // g_render_serial at that write: a target at this address rendered past it
+  // holds newer bytes than the range does.
+  u64 dirty_render_serial = 0;
 };
 
 bool CsSplitFrameChunk();
@@ -1696,6 +1706,22 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
 }
 
 base::HashMap<u64, CsRange> g_cs_ranges;
+u64 g_cs_dirty_stamp = 0;
+
+// Oldest GPU write first: the order overlapping ranges must be written back in.
+void SortByDirtyOrder(base::Vector<u64>& bases) {
+  if (bases.size() < 2)
+    return;
+  thread_local base::Vector<base::Pair<u64, u64>> keyed;
+  keyed.clear();
+  for (u64 b : bases) {
+    const auto it = g_cs_ranges.find(b);
+    keyed.emplace_back(it == g_cs_ranges.end() ? 0 : it->second.dirty_stamp, b);
+  }
+  base::Sort(keyed.begin(), keyed.end());
+  for (size_t i = 0; i < keyed.size(); i++)
+    bases[i] = keyed[i].second;
+}
 // Ranges MarkPending flagged, so retiring a batch visits those instead of
 // every range. Map nodes do not move; CsRangeDestroy (which precedes every
 // erase) drops its entry. May hold ranges no longer pending, or twice.
@@ -3075,13 +3101,20 @@ void CsStageReadback(u64 base, CsRange& e, bool all) {
     CsCopyStaging(e, e.size ? e.size : e.cap, /*to_device=*/false);
 }
 
-void CsStageReadbacks(bool all = true) {
-  // A copy: staging can open a batch, and finalizing an old one may unindex.
+// A copy: staging can open a batch, and finalizing an old one may unindex.
+// `ordered`: oldest write first, as every writeback of overlapping ranges.
+base::Vector<u64> DirtyBases(bool ordered) {
   base::Vector<u64> bases;
   bases.reserve(g_cs_dirty_bases.size());
   for (const auto& [base, end] : g_cs_dirty_bases)
     bases.push_back(base);
-  for (u64 base : bases) {
+  if (ordered)
+    SortByDirtyOrder(bases);
+  return bases;
+}
+
+void CsStageReadbacks(bool all = true) {
+  for (u64 base : DirtyBases(/*ordered=*/false)) {
     auto found = g_cs_ranges.find(base);
     if (found != g_cs_ranges.end())
       CsStageReadback(base, found->second, all);
@@ -4157,6 +4190,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   rt.ever_rendered = true;
   rt.last_frame = g_frame.num;
   e.rt_seq = e.write_seq;
+  e.refreshed_serial = rt.render_serial;
   e.frame_ref = g_frame.num;
   e.chunk_ref = g_frame.chunk_seq;
   e.last_used_frame = g_frame.num;
@@ -4768,6 +4802,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           s.mirror_current = false;
           MarkPending(s);
           parent->write_seq++;
+          parent->dirty_stamp = ++g_cs_dirty_stamp;
+          parent->dirty_render_serial = g_render_serial;
           BumpTextureEpoch();
         }
       }
@@ -4804,7 +4840,28 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     // guest byte (see des-perf-profile).
     {
       const u64 to = NowNs();
-      const auto siblings = DirtyRangesOverlapping(base, guest_bytes, base);
+      // A binding that reuses its own dirty range as it stands reads that
+      // buffer, never guest memory, so no sibling's writeback can reach this
+      // dispatch. UC2's skinning reads each vertex stream while the one before
+      // it, bound 0x14 bytes too long, is still dirty: ~20 waits a frame.
+      const auto own = g_cs_ranges.find(base);
+      const bool own_dirty = own != g_cs_ranges.end() &&
+                             own->second.gpu_dirty && own->second.buf &&
+                             own->second.cpu_writes.empty() &&
+                             !own->second.imported;
+      const bool reads_own_buffer =
+          own_dirty &&
+          (truth_i
+               ? own->second.truth && own->second.guest_bytes >= guest_bytes
+               : !own->second.truth && !own->second.image_staging &&
+                     !ci.res[i].image_staging && own->second.cap >= sz[i] &&
+                     ((own->second.size == sz[i] &&
+                       own->second.guest_bytes == guest_bytes &&
+                       SameCsResourceShape(own->second.res, ci.res[i])) ||
+                      (kCsSubset && own->second.size >= sz[i] &&
+                       own->second.guest_bytes >= guest_bytes)));
+      auto siblings = DirtyRangesOverlapping(base, guest_bytes, base);
+      SortByDirtyOrder(siblings);
       for (u64 dirty : siblings) {
         auto found = g_cs_ranges.find(dirty);
         if (found == g_cs_ranges.end())
@@ -4830,6 +4887,22 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           g_wb_why["overlap-kept"]++;
           continue;
         }
+        if (reads_own_buffer && s.gpu_dirty) {
+          g_wb_why["overlap-own"]++;
+          continue;
+        }
+        // Two tiled footprints that only partly overlap: the title reuses
+        // transient memory, and the bytes one surface holds past the other's
+        // base are not pixels of the other. Neither dispatch reads the
+        // other's through guest memory, so their order there is irrelevant; a
+        // linear reader of the intersection still flushes both.
+        if ((truth_i || ci.res[i].image_staging) &&
+            (s.truth || s.image_staging) && s.gpu_dirty &&
+            !(dirty >= base && dirty + s.guest_bytes <= base + guest_bytes) &&
+            !(base >= dirty && base + guest_bytes <= dirty + s.guest_bytes)) {
+          g_wb_why["overlap-tiled"]++;
+          continue;
+        }
         if (s.gpu_dirty) {
           g_wb_why["overlap"]++;
           g_wb_why_bytes += s.size;
@@ -4851,6 +4924,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                         s.res.dfmt);
           }
         }
+        const WaitReaderScope reader("cs-sibling");
         if (!CsRangeFlushOne(dirty, s) && g_cs_failed)
           return CsDeclined(ci, "11");
       }
@@ -4864,6 +4938,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (e.gpu_dirty && !e.cpu_writes.empty()) {
       g_wb_why["cpu-write"]++;
       g_wb_why_bytes += e.size;
+      const WaitReaderScope reader("cpu-write");
       if (!CsRangeFlushOne(base, e) && g_cs_failed)
         return CsDeclined(ci, "24");
     }
@@ -4901,10 +4976,26 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                             : truth_i               ? guest_bytes
                                                     : 0;
     const u64 hash_bytes = stage_bytes ? stage_bytes : guest_bytes;
+    // Reused memory: an image read over the whole range at an address a
+    // target has been rendered into since the dispatch wrote it. The target
+    // holds the newer bytes and the read stages from it; writing the old
+    // ones back first cost UC2 a ~20 ms GPU wait a frame (its stencil lives
+    // where a skinning job's buffer was earlier in the frame).
+    if (!same_shape && e.gpu_dirty && ci.res[i].image_staging &&
+        guest_bytes >= e.guest_bytes && CsAliasedBase(base) &&
+        AliasedImageRenderSerial(base) != UINT64_MAX &&
+        AliasedImageRenderSerial(base) > e.dirty_render_serial) {
+      UnindexDirtyRange(base, e.guest_bytes);
+      e.gpu_dirty = false;
+      e.cpu_writes.clear();
+      e.readback_pending = false;
+      g_wb_why["reshape-superseded"]++;
+    }
     if (!same_shape && e.gpu_dirty) {
       const u64 trs = NowNs();
       g_wb_why["reshape"]++;
       g_wb_why_bytes += e.size;
+      const WaitReaderScope reader("reshape");
       const bool ok = CsRangeFlushOne(base, e);
       g_in_reshape_ns += NowNs() - trs;
       g_in_reshape_n++;
@@ -4947,6 +5038,22 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     // staged. Astro Bot's shadow array (1536x1536 x16 layers = 151 MB) is
     // re-lit rarely and re-copied every frame without this; that one range is
     // 40% of a frame's image staging.
+    // The target took this range's pixels in frame and has been rendered
+    // into since: it is the newer copy, and the dispatch output this range
+    // still holds is superseded. Kept dirty it would stay authoritative, and
+    // the dispatch would read last frame's result instead of the target (UC2
+    // blurs a target back into itself: blur of blur, into garbage).
+    if (rt_backed && e.gpu_dirty && e.rt_seq == e.write_seq &&
+        AliasedImageRenderSerial(base) > e.refreshed_serial) {
+      UnindexDirtyRange(base, e.guest_bytes);
+      e.gpu_dirty = false;
+      e.cpu_writes.clear();
+      e.hash = 0;
+      e.last_validated_frame = -1;
+      e.mirror_current = false;
+      e.readback_pending = false;
+      g_wb_why["rt-superseded"]++;
+    }
     const bool rt_stale = kCsRtCache && e.rt_sourced && e.last_rt_frame >= 0 &&
                           AliasedImageRenderSerial(base) <= e.rt_serial;
     const bool rt_attempt = rt_backed && !e.gpu_dirty && !rt_stale;
@@ -5191,6 +5298,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         e.dirty_frame = g_frame.num;
       }
       e.write_seq++;
+      e.dirty_stamp = ++g_cs_dirty_stamp;
+      e.dirty_render_serial = g_render_serial;
       BumpTextureEpoch();
       e.mirror_current = false;
       MarkPending(e);
@@ -5427,6 +5536,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     }
     it->second.gpu_dirty = true;
     it->second.write_seq++;
+    it->second.dirty_stamp = ++g_cs_dirty_stamp;
+    it->second.dirty_render_serial = g_render_serial;
     BumpTextureEpoch();
     if (truth_view[i])
       StampView(truth_view[i], dirty_base, parent_off[i], truth_table[i],
@@ -5497,19 +5608,27 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
 // Make guest memory current with every GPU-written compute range. Called
 // before anything that consumes guest memory: draws (vertex/texture reads at
 // record time), CP DMA copies, and the end of each frame (bounds staleness
-// for direct guest CPU readers to one frame). Cheap no-op when nothing is
-// dirty; also evicts cold entries so the working set stays bounded.
-bool FlushCsWrites(Renderer& renderer) {
+// for direct guest CPU readers to one frame). Walks only the dirty ranges;
+// cold entries are evicted at frame end.
+bool FlushCsWrites(Renderer& renderer, const char* why) {
+  DELTA_ZONE("gpu.cs_flush_all");
   if (g_cs_failed) {
     renderer.state = nullptr;
     return false;
   }
   const u64 t0 = NowNs();
   bool all_current = true;
+  const WaitReaderScope reader(why);
+  g_wb_why[base::String("all-call/") + why]++;
   // Record every readback first: one fence wait then covers all of them,
   // instead of one submit+wait per dirty range.
   CsStageReadbacks();
-  for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
+  for (u64 base : DirtyBases(/*ordered=*/true)) {
+    auto it = g_cs_ranges.find(base);
+    if (it == g_cs_ranges.end() || !it->second.gpu_dirty)
+      continue;
+    g_wb_why[base::String("all/") + why]++;
+    g_wb_why_bytes += it->second.size;
     if (!CsRangeFlushOne(it->first, it->second)) {
       if (g_cs_failed) {
         renderer.state = nullptr;
@@ -5518,13 +5637,6 @@ bool FlushCsWrites(Renderer& renderer) {
       // Writeback of this one range failed; it stays dirty. Keep flushing the
       // rest so one bad range cannot hold every other range stale forever.
       all_current = false;
-    }
-    if (!it->second.gpu_dirty && !it->second.pending_batch &&
-        !CsFrameReferenced(it->second) &&
-        it->second.last_used_frame + 60 < g_frame.num) {
-      it = EraseCsRange(it);
-    } else {
-      ++it;
     }
   }
   g_ns_cs_out += NowNs() - t0;
@@ -5612,30 +5724,39 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
              (e.rt_seq == e.write_seq || CsRefreshRtInFrame(base, e));
     };
     CsStageReadbacks(/*all=*/false);
-    for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
+    for (u64 base : DirtyBases(/*ordered=*/true)) {
+      auto it = g_cs_ranges.find(base);
+      if (it == g_cs_ranges.end() || !it->second.gpu_dirty)
+        continue;
       if (stays(it->first, it->second)) {
         g_lazy_kept_n++;
         g_lazy_kept_bytes += it->second.size;
-      } else if (it->second.gpu_dirty) {
-        const CsRange& fe = it->second;
-        g_wb_why[base::String("frame-end") + (fe.truth           ? "/img"
-                                              : fe.image_staging ? "/lin"
-                                                                 : "/buf")]++;
-        g_wb_why_bytes += fe.size;
-        if (!CsRangeFlushOne(it->first, it->second)) {
-          if (g_cs_failed) {
-            renderer.state = nullptr;
-            return false;
-          }
-          all_current = false;
-        }
+        continue;
       }
-      if (!it->second.gpu_dirty && !it->second.pending_batch &&
-          !CsFrameReferenced(it->second) &&
-          it->second.last_used_frame + 60 < g_frame.num) {
-        it = EraseCsRange(it);
-      } else {
-        ++it;
+      const CsRange& fe = it->second;
+      g_wb_why[base::String("frame-end") + (fe.truth           ? "/img"
+                                            : fe.image_staging ? "/lin"
+                                                               : "/buf")]++;
+      g_wb_why_bytes += fe.size;
+      if (!CsRangeFlushOne(it->first, it->second)) {
+        if (g_cs_failed) {
+          renderer.state = nullptr;
+          return false;
+        }
+        all_current = false;
+      }
+    }
+    // Eviction walks every range; a range has to sit idle for 60 frames
+    // anyway, so checking every 16th frame costs nothing in freshness.
+    if (g_frame.num % 16 == 0) {
+      for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
+        if (!it->second.gpu_dirty && !it->second.pending_batch &&
+            !CsFrameReferenced(it->second) &&
+            it->second.last_used_frame + 60 < g_frame.num) {
+          it = EraseCsRange(it);
+        } else {
+          ++it;
+        }
       }
     }
   }
@@ -5753,16 +5874,14 @@ bool FlushCsWritesRange(Renderer& renderer,
       BASE_LOGI("csflush", "{}", line.c_str());
     }
   }
-  const auto overlapping = DirtyRangesOverlapping(base, bytes);
+  auto overlapping = DirtyRangesOverlapping(base, bytes);
+  SortByDirtyOrder(overlapping);
   const WaitReaderScope reader(why);
-  // This read is about to cost a fence wait, so pull EVERY dirty range's
-  // results across on it rather than only the ones it asked for. The waits are
-  // the expensive part and one covers them all; the ranges this draw does not
-  // want stay dirty, but their mirrors are now current, so the flush that
-  // eventually wants them needs no wait at all. Draw-at-a-time flushing was
-  // ~25 waits a frame where a frame needs 2 or 3.
+  // Only the ranges this read overlaps are pulled across. Pulling every dirty
+  // range along made later flushes wait-free while a blanket flush wrote them
+  // all back each frame anyway; now most dirty ranges are never read on the
+  // CPU, and reading them all back on every flush cost UC2 ~8% of the walk.
   if (!overlapping.empty()) {
-    CsStageReadbacks(/*all=*/false);
     for (u64 dirty : overlapping) {
       auto found = g_cs_ranges.find(dirty);
       if (found == g_cs_ranges.end() || !found->second.gpu_dirty)

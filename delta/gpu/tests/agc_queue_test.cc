@@ -249,7 +249,7 @@ void EndFrame(Renderer&, u64 base) {
   g_presented = base;
 }
 void Draw(Renderer&, const DrawInfo&) {}
-bool FlushCsWrites(Renderer&) {
+bool FlushCsWrites(Renderer&, const char*) {
   return true;
 }
 bool ReadGds(Renderer&, u32 offset, void* data, u32 bytes) {

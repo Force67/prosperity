@@ -1203,14 +1203,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // before this draw samples it (the flush uploads it, see
       // UploadCsRangeToRt); guest-upload textures already get this from the
       // texture cache.
-      // A sample at another size than the live target reads the memory,
-      // which the texture cache takes from the compute range itself. Except
-      // that the draw binds the live image below whatever the size: with
-      // write tracking, ranges stay dirty long enough for that to show.
-      const bool samples_target =
-          base && g_rts.count(base) &&
-          ((g_rts[base].w == t.w && g_rts[base].h == t.h) ||
-           CsTracksGuestWrites());
+      // Whatever size the sample names, the draw binds the live image
+      // below, so the image takes the dispatch's pixels either way. Ranges
+      // stay dirty until a reader asks, often across the draws that sample
+      // them.
+      const bool samples_target = base && g_rts.count(base);
       if (samples_target && !CsRefreshRtFromTruth(base))
         FlushCsWritesRange(renderer, base,
                            u64(g_rts[base].w) * g_rts[base].h * 8, "rt-tex");

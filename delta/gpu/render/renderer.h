@@ -68,7 +68,7 @@ void PrebuildComputePipeline(const base::Vector<u32>& spirv,
 // anything reads guest memory that a dispatch may have written: draw
 // recording, CP DMA, frame end. No-op when nothing is dirty; returns false when
 // the data could not be made current.
-bool FlushCsWrites(Renderer& renderer);
+bool FlushCsWrites(Renderer& renderer, const char* why = "all");
 // False when no compute result still owed to guest memory can overlap the
 // range. Callable from any thread, without owning the renderer; a true may be
 // a false alarm.

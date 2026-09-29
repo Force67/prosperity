@@ -47,6 +47,9 @@ DELTA_OPTION(u32, kWaitTraceFrom, "DELTA_GPU_WAITTRACE", 0);
 DELTA_OPTION(bool, kRenderThread, "DELTA_GPU_RENDER_THREAD", true);
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
 DELTA_OPTION(bool, kFenceFlush, "DELTA_GPU_CS_FENCE_FLUSH", true);
+// Every CP DMA copy writes back every dirty compute range, not only those
+// under its source and destination (the behaviour before lazy writeback).
+DELTA_OPTION(bool, kDmaFlushAll, "DELTA_GPU_CS_DMA_FLUSH_ALL", false);
 DELTA_OPTION(bool, kPrefetchShaders, "DELTA_GPU_PREFETCH_SHADERS", true);
 }  // namespace
 
@@ -197,7 +200,7 @@ void WriteEventLabel(const char* packet,
   // The guest CPU reads a dispatch's output once it sees a fence behind it:
   // those results go to guest memory before the fence does.
   if (data_sel && kFenceFlush && render::CsTracksGuestWrites())
-    render::FlushCsWrites(render::DefaultRenderer());
+    render::FlushCsWrites(render::DefaultRenderer(), "fence");
   if (data_sel == 1)
     WriteLabel(address, value, false);
   else if (data_sel == 2)
@@ -416,15 +419,12 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       host_memory::IsMemoryRangeMapped(reinterpret_cast<void*>(src), bytes)) {
     // src may be CS-written; land pending writes first, and those under dst
     // before the copy lands over them. Copy even if the flush fails: a
-    // possibly-stale source beats silently dropping the copy. Unless compute
-    // ranges track guest writes (DELTA_GPU_CS_TRACK), every range is flushed:
-    // GTA:SA issues ~300 of these a frame, which keeps lazy writeback short,
-    // and some reader of long-dirty ranges depends on that.
-    if (render::CsTracksGuestWrites()) {
+    // possibly-stale source beats silently dropping the copy.
+    if (kDmaFlushAll) {
+      render::FlushCsWrites(renderer, "dma");
+    } else {
       render::FlushCsWritesRange(renderer, src, bytes, "dma");
       render::FlushCsWritesRange(renderer, dst, bytes, "dma");
-    } else {
-      render::FlushCsWrites(renderer);
     }
     NoteGpuWriteNear("DMA_DATA", dst, bytes);
     std::memcpy(reinterpret_cast<void*>(dst),
