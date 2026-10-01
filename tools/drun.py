@@ -819,8 +819,9 @@ def main():
             elif proc.poll() is not None:
                 break
     finally:
-        if tracy:
+        if tracy and not tracy.threads_end:
             tracy.threads_end = thread_times(proc.pid)
+            tracy.t1 = time.time()
         if perf and perf.proc:
             perf.function_starts(run.modmap)
         try:
