@@ -1640,7 +1640,7 @@ bool BuildSeparableAddressTable(const TextureLayout32& layout,
                                 base::Vector<u32>& terms,
                                 u32& block_mask,
                                 u64& slice_stride) {
-  if (TilingIsGfx10(layout.tiling_idx)) {
+  if (TilingIsGfx10(layout.tiling_idx) && !TilingIsLinear(layout.tiling_idx)) {
     slice_stride = layout.layer_stride;
     return layout.layer_stride &&
            BuildGfx10AddressTable(layout, mip, terms, block_mask);
@@ -1656,7 +1656,9 @@ bool BuildSeparableAddressTable(const TextureLayout32& layout,
     if (!w || !h || !layers)
       return false;
     const u64 row = static_cast<u64>(level.pitch) * layout.elem_bytes;
-    slice_stride = layers > 1 ? row * level.stored_height : 0;
+    slice_stride = layers <= 1                          ? 0
+                   : TilingIsGfx10(layout.tiling_idx) ? layout.layer_stride
+                                                      : row * level.stored_height;
     block_mask = 0;
     terms.assign(size_t(w) + h + layers, 0);
     for (u32 x = 0; x < w; x++)
@@ -1698,7 +1700,7 @@ bool BuildSeparableAddressTable(const TextureLayout32& layout,
 void CopyImageContents(const TextureLayout32& layout,
                        const void* src,
                        void* dst) {
-  if (!TilingIsGfx10(layout.tiling_idx)) {
+  if (!TilingIsGfx10(layout.tiling_idx) || TilingIsLinear(layout.tiling_idx)) {
     base::Vector<u32> terms;
     for (u32 mip = 0; mip < layout.mip_levels; mip++) {
       const auto& level = layout.mips[mip];

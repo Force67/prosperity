@@ -73,6 +73,10 @@ bool FlushCsWrites(Renderer& renderer, const char* why = "all");
 // range. Callable from any thread, without owning the renderer; a true may be
 // a false alarm.
 bool CsRangeMaybeDirty(u64 base, u64 bytes);
+// A render target bound for writing takes ownership of its bytes: only the
+// dirty range that is this target (starting at its base) is carried into it;
+// ranges it merely overlaps stay GPU-owned until their own reader asks.
+bool FlushCsWritesAt(Renderer& renderer, u64 base, const char* why);
 // Flush only dirty ranges overlapping [base, base+bytes), with the same result
 // contract as FlushCsWrites.
 // `why` names the reader for the DELTA_GPU_CSSYNC report.
@@ -94,6 +98,23 @@ bool CsTracksGuestWrites();
 bool ReadGds(Renderer& renderer, u32 offset, void* data, u32 bytes);
 bool WriteGds(Renderer& renderer, u32 offset, const void* data, u32 bytes);
 bool FillGds(Renderer& renderer, u32 offset, u32 bytes, u32 value);
+// GDS -> guest memory, copied by the GPU into the guest page in queue order;
+// false when the caller must copy on the CPU. Only after DeferLabelsToGpu:
+// the guest must not see a label announcing the bytes before they land.
+bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes);
+// The command processor holds its fence labels back while GPU writes into
+// guest memory are pending (see GuestWritePublishBatch).
+void DeferLabelsToGpu();
+// Our own CPU readers of [base, base+bytes): wait for pending GPU writes.
+bool WaitPendingGuestWrites(u64 base, u64 bytes);
+// The compute batch after which every pending GPU write into guest memory has
+// landed; 0 when none is pending. Does not submit it.
+u64 GuestWritePublishBatch();
+// End of a command-buffer walk: submit the open batch if a held label waits
+// for it, once, instead of at every label.
+void SubmitForPublishedLabels();
+// Thread safe: blocks until compute batch `batch` was submitted and completed.
+bool WaitBatch(u64 batch);
 // A CP DMA_DATA whose source or destination selector is GDS (1). `data` is
 // the packet's immediate dword, used when src_sel is 2 (a fill). Returns
 // whether the transfer landed.
@@ -113,6 +134,9 @@ u64 CsWritebackGeneration();
 // Whether any GPU-dirty compute range overlaps [base, base+bytes). O(1) when
 // nothing is dirty anywhere (the common case on the draw path).
 bool CsRangeDirtyOverlapping(u64 base, u64 bytes);
+// Whether a dispatch can take its group counts at `args` from the GPU
+// (ComputeInfo::indirect_args): a dispatch output holds them, still unflushed.
+bool CanDispatchIndirect(u64 args);
 
 // A CP DMA immediate fill over guest memory. When the range covers a live
 // render target that is how the title clears it (there is no clear packet on

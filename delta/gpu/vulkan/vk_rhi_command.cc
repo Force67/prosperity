@@ -379,6 +379,10 @@ void VulkanCommandList::Dispatch(u32 x, u32 y, u32 z) {
   vkCmdDispatch(cmd, x, y, z);
 }
 
+void VulkanCommandList::DispatchIndirect(rhi::Buffer* args, u64 offset) {
+  vkCmdDispatchIndirect(cmd, Buf(args)->buffer, offset);
+}
+
 void VulkanCommandList::DispatchBase(u32 bx,
                                      u32 by,
                                      u32 bz,

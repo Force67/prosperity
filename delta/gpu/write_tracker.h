@@ -48,6 +48,9 @@ class WriteTracker {
 
   // Thread safe. A write the tracker cannot see (another mapping, a device).
   void NoteWrite(u64 base, u64 bytes);
+  // Unprotects [base, base+bytes) and reports it as written, for a host API
+  // that refuses protected memory (a Vulkan import of guest pages).
+  void Release(u64 base, u64 bytes);
   // Thread safe. The guest mapped or unmapped [base, base+bytes): the pages
   // there are no longer the ones that were armed, and count as written.
   void NoteRemap(u64 base, u64 bytes);
@@ -55,6 +58,16 @@ class WriteTracker {
   // Once a frame: pages reported more than a few times in the frame are hot
   // CPU data, and a fault on every write to them costs more than copying.
   void EndFrame();
+  // Platform policy for memory the tracker cannot fully see. `arm_filter`
+  // refuses [first, end) when another mapping could write it unseen;
+  // `on_remap` hears every NoteRemap (any thread, kernel VM lock held).
+  struct Policy {
+    bool (*arm_filter)(u64 first, u64 end) = nullptr;
+    void (*on_remap)(u64 base, u64 bytes) = nullptr;
+    // Runs first in Collect: the policy may NoteWrite what it cannot arm.
+    void (*before_collect)() = nullptr;
+  };
+  void SetPolicy(const Policy& policy) { policy_ = policy; }
 
   u64 armed_bytes() const { return armed_bytes_; }
   u64 collects() const { return collects_; }
@@ -82,6 +95,7 @@ class WriteTracker {
   static long MinorFaults();
 
   Mode mode_ = Mode::kOff;
+  Policy policy_;
   int uffd_ = -1;
   int pagemap_ = -1;
   base::Map<u64, u64> armed_;       // first -> end, coalesced

@@ -538,6 +538,14 @@ base::SharedPointer<const Program> CachedReachableProgram(const u32* code,
   auto it = cache.find(addr);
   if (it != cache.end() && it->second.generation == g_generation)
     return it->second.program;
+  // Revalidating: the span the entry hashed is still the one to hash; code
+  // rewritten in place changes it. Finding the length again meant decoding
+  // the whole shader after every generation bump.
+  if (it != cache.end() &&
+      it->second.hash == HashCode(code, it->second.hashed_dwords)) {
+    it->second.generation = g_generation;
+    return it->second.program;
+  }
 
   // Hash the real code span (footer-bounded when there is one) so a shader
   // rewritten in place at the same address invalidates the entry.
@@ -558,7 +566,7 @@ base::SharedPointer<const Program> CachedReachableProgram(const u32* code,
     return it->second.program;
   }
 
-  if (cache.size() > 512)
+  if (cache.size() > 16384)
     cache.clear();  // unbounded-growth backstop
   auto program = base::MakeShared<const Program>(
       ReachableProgram(DecodeShader(code, max_dwords)));
@@ -569,6 +577,7 @@ base::SharedPointer<const Program> CachedReachableProgram(const u32* code,
 u64 CachedCodeHash(const u32* code, u32 max_dwords) {
   struct Entry {
     u64 hash = 0;
+    u32 len = 0;
     u64 generation = 0;
   };
   static base::HashMap<u64, Entry> cache;
@@ -579,6 +588,10 @@ u64 CachedCodeHash(const u32* code, u32 max_dwords) {
   auto it = cache.find(addr);
   if (it != cache.end() && it->second.generation == g_generation)
     return it->second.hash;
+  if (it != cache.end() && it->second.hash == HashCode(code, it->second.len)) {
+    it->second.generation = g_generation;
+    return it->second.hash;
+  }
 
   u32 len = CodeLength(code, max_dwords);
   if (!len) {
@@ -595,9 +608,9 @@ u64 CachedCodeHash(const u32* code, u32 max_dwords) {
     }
   }
   const u64 hash = HashCode(code, len);
-  if (cache.size() > 4096)
+  if (cache.size() > 16384)
     cache.clear();  // unbounded-growth backstop
-  cache[addr] = {hash, g_generation};
+  cache[addr] = {hash, len, g_generation};
   return hash;
 }
 

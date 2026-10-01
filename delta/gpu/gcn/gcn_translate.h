@@ -260,6 +260,9 @@ struct ImageTilingParams {
   u32 packed;  // narrow texels: linear side in bytes, one texel per dword lane
   // The linear side holds 32-bit float depth for a 16-bit UNORM surface.
   u32 depth16;
+  // The linear side holds RGBA32F texels of a packed R11G11B10F surface
+  // (`words` 1, `pitch` in texels, offsets and strides in dwords).
+  u32 pack11;
 };
 
 base::Vector<u32> BuildImageTilingShader();

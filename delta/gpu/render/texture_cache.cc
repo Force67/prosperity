@@ -350,7 +350,7 @@ void ClearDepthDefaultToFar() {
   b.before = rhi::TextureState::kCopyDst;
   b.after = rhi::TextureState::kDepthRead;
   list->Barrier(0, 0, &b, 1);
-  EndImmediate(list);
+  EndImmediate(list, "imm.clear_depth");
 }
 
 namespace {
@@ -792,7 +792,7 @@ bool UploadTexPixelsImmediate(rhi::Texture* img,
   b.after = rhi::TextureState::kShaderRead;
   list->Barrier(0, 0, &b, 1);
   const u64 t0 = NowNs();
-  const bool ok = EndImmediate(list);
+  const bool ok = EndImmediate(list, "imm.tex_upload");
   if (!ok)
     BASE_LOGI("gpuvk",
               "tex upload DEVICE FAULT: base={:#x} {}x{} mips={} layers={} "

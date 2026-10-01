@@ -737,6 +737,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   caps_.host_import_alignment = host.minImportedHostPointerAlignment;
   caps_.texture_blit = true;
   caps_.dispatch_base = true;
+  caps_.dispatch_indirect = true;
   caps_.timestamps =
       lim.timestampComputeAndGraphics && native.timestamp_valid_bits != 0;
   caps_.timestamp_period_ns = lim.timestampPeriod;
@@ -882,8 +883,25 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
       type = FindMemoryType(mr.memoryTypeBits, 0);
   }
   ai.memoryTypeIndex = type;
-  if (type == UINT32_MAX ||
-      vkAllocateMemory(dev, &ai, nullptr, &buffer->memory) != VK_SUCCESS ||
+  const VkResult allocated = type == UINT32_MAX
+                                 ? VK_ERROR_FEATURE_NOT_PRESENT
+                                 : vkAllocateMemory(dev, &ai, nullptr,
+                                                    &buffer->memory);
+  if (allocated == VK_SUCCESS && desc.host_pointer) {
+    static u64 total = 0, count = 0;
+    total += desc.size;
+    if (++count <= 400 || count % 1000 == 0)
+      BASE_LOGI("gpuvk", "host import #{} {:p}+{:#x} (total created {} MiB)",
+                count, desc.host_pointer, desc.size, total >> 20);
+  }
+  if (allocated != VK_SUCCESS && desc.host_pointer) {
+    static int n = 0;
+    if (n++ < 8)
+      BASE_LOGI("gpuvk", "host import {:p}+{:#x} failed: VkResult {} type {}",
+                desc.host_pointer, desc.size, static_cast<int>(allocated),
+                type);
+  }
+  if (allocated != VK_SUCCESS ||
       vkBindBufferMemory(dev, buffer->buffer, buffer->memory, 0) !=
           VK_SUCCESS) {
     if (buffer->memory)

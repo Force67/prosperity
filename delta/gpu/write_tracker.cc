@@ -391,6 +391,8 @@ bool WriteTracker::Arm(u64 base, u64 bytes) {
   if (!enabled() || !bytes)
     return false;
   const u64 first = PageDown(base), end = PageUp(base + bytes);
+  if (policy_.arm_filter && !policy_.arm_filter(first, end))
+    return false;
   // Most calls ask again about pages armed long ago.
   if (AllArmed(first, end))
     return true;
@@ -474,6 +476,8 @@ bool WriteTracker::Arm(u64 base, u64 bytes) {
   if (mode_ != Mode::kFault || !bytes)
     return false;
   const u64 first = PageDown(base), end = PageUp(base + bytes);
+  if (policy_.arm_filter && !policy_.arm_filter(first, end))
+    return false;
   return AllArmed(first, end) || ArmFault(first, end);
 }
 bool WriteTracker::ArmRange(u64 first, u64 end) {
@@ -537,6 +541,8 @@ u64 WriteTracker::EraseArmed(u64 first, u64 end) {
 }
 
 void WriteTracker::Collect(base::Vector<Range>& out) {
+  if (enabled() && policy_.before_collect)
+    policy_.before_collect();
   DELTA_ZONE("wt.collect");
   if (!enabled())
     return;
@@ -592,9 +598,22 @@ void WriteTracker::NoteWrite(u64 base, u64 bytes) {
   noted_.emplace_back(PageDown(base), PageUp(base + bytes));
 }
 
+void WriteTracker::Release(u64 base, u64 bytes) {
+  if (!enabled() || !bytes)
+    return;
+  const u64 first = PageDown(base), end = PageUp(base + bytes);
+  if (mode_ == Mode::kFault)
+    DisarmFault(first, end);
+  else
+    Disarm(first, end);
+  NoteWrite(base, bytes);
+}
+
 void WriteTracker::NoteRemap(u64 base, u64 bytes) {
   if (!enabled() || !bytes)
     return;
+  if (policy_.on_remap)
+    policy_.on_remap(base, bytes);
   base::LockGuard lock(noted_lock_);
   remapped_.emplace_back(PageDown(base), PageUp(base + bytes));
 }

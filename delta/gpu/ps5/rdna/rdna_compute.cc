@@ -186,8 +186,10 @@ bool PlanResources(const Program& program,
   };
   base::Vector<BindingKey> keys;
   u32 index = 0;  // instruction index of the use being planned
+  // `reads`: the use returns data (a load, a sample, an atomic); a resource
+  // only ever stored to is write-only and needs nothing staged in.
   const auto resource = [&](u32 pc, u32 base_sgpr, u32 dwords, u8 kind,
-                            bool written, u32 min_bytes) {
+                            bool written, u32 min_bytes, bool reads = true) {
     if (base_sgpr + dwords > 136) {
       gpu::gcn::WarnUnsupported("cs.descriptor-range.rdna", base_sgpr);
       return false;
@@ -228,6 +230,7 @@ bool PlanResources(const Program& program,
         continue;
       CsResource& res = r.resources[i];
       res.written = res.written || written;
+      res.read = res.read || reads;
       res.runtime_address = res.runtime_address || runtime_address;
       res.min_bytes = base::Max(res.min_bytes, min_bytes);
       bind[pc] = i;
@@ -247,8 +250,8 @@ bool PlanResources(const Program& program,
     }
     keys.push_back(key);
     bind[pc] = idx;
-    r.resources.push_back({base_sgpr, pc, idx, kind, written, /*read=*/true,
-                           min_bytes, runtime_address});
+    r.resources.push_back(
+        {base_sgpr, pc, idx, kind, written, reads, min_bytes, runtime_address});
     r.resources.back().inline_user_data = inline_user_data;
     return true;
   };
@@ -290,7 +293,7 @@ bool PlanResources(const Program& program,
           return false;
         }
         if (!resource(inst.pc, ((w1 >> 16) & 0x1F) * 4, 4, 0, store || atomic,
-                      0))
+                      0, !store || atomic))
           return false;
         break;
       }
@@ -300,7 +303,8 @@ bool PlanResources(const Program& program,
           gpu::gcn::WarnUnsupported("mtbuf.cs.rdna", op, w, w1);
           return false;
         }
-        if (!resource(inst.pc, ((w1 >> 16) & 0x1F) * 4, 4, 0, op >= 4, 0))
+        if (!resource(inst.pc, ((w1 >> 16) & 0x1F) * 4, 4, 0, op >= 4, 0,
+                      op < 4))
           return false;
         break;
       }
@@ -349,7 +353,8 @@ bool PlanResources(const Program& program,
           gpu::gcn::WarnUnsupported("mimg.cs.rdna", inst.opcode, w, w1);
           return false;
         }
-        if (!resource(inst.pc, srsrc, 8, 1, store, 0))
+        if (!resource(inst.pc, srsrc, 8, 1, store, 0,
+                      op != 0x08 && op != 0x09))
           return false;
         (op == 0 || op == 8 ? image_candidates : staged_images)
             .insert(bind[inst.pc]);
@@ -401,7 +406,8 @@ bool PlanResources(const Program& program,
           gpu::gcn::WarnUnsupported("flat.cs.rdna", op, w, w1);
           return false;
         }
-        if (!resource(inst.pc, saddr == 125 ? 0 : saddr, 2, 2, store, 0))
+        if (!resource(inst.pc, saddr == 125 ? 0 : saddr, 2, 2, store, 0,
+                      !store))
           return false;
         r.resources[bind[inst.pc]].runtime_address = true;
         break;

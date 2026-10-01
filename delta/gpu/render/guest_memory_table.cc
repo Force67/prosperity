@@ -1,23 +1,12 @@
 /* PS4Delta: guest virtual addresses -> checked device buffer addresses. */
 #include "gpu/render/guest_memory_table.h"
-#include <cstdint>
 #include <cstring>
 
-#include "base/algorithm.h"
 #include "base/containers/array.h"
-#include "base/containers/builtins_bit.h"
-#include "base/containers/hash_map.h"
-#include "base/containers/map.h"
 #include "base/containers/span.h"
 #include "base/containers/vector.h"
 #include "base/logging.h"
 #include "gpu/render/frame.h"
-#include "options/options.h"
-
-namespace {
-// DELTA_GPU_GUEST_IMPORT=0: copy guest spans instead of importing their pages.
-DELTA_OPTION(bool, kGuestImport, "DELTA_GPU_GUEST_IMPORT", true);
-}  // namespace
 
 namespace gpu::render {
 namespace {
@@ -25,149 +14,91 @@ struct Buffer {
   rhi::Buffer* buffer = nullptr;
   void* mapped = nullptr;
   u64 address = 0;
-  u64 size = 0, identity = 0;
-  bool imported = false;
+  u64 size = 0;
 };
-base::HashMap<u64, Buffer> g_spans, g_dirty_spans;
-Buffer g_table_buffer;
+Buffer g_table, g_flags, g_misses;
+u32 g_windows = 0;
+// Entry 0 of the table is a header the search can never match (an empty
+// window at 0): its third field names the miss buffer, a u32 count then up
+// to kMissSlots addresses the shader found in no window.
+constexpr u32 kMissSlots = 63;
 
-void Destroy(Buffer& b) {
-  Device().Destroy(b.buffer);
-  b = {};
-}
-
-bool Create(Buffer& out, u64 bytes, void* host = nullptr) {
+bool Ensure(Buffer& out, u64 bytes) {
+  if (out.size >= bytes)
+    return true;
+  Device().Destroy(out.buffer);
+  out = {};
   rhi::BufferDesc desc;
-  desc.size = bytes;
+  desc.size = (bytes + 255) & ~u64(255);
   desc.usage = rhi::kBufferStorage | rhi::kBufferAddress;
   desc.memory = rhi::MemoryKind::kReadback;
-  // These are allocations in this process, not foreign host mappings.
-  desc.host_pointer = host;
   out.buffer = Device().CreateBuffer(desc);
-  if (!out.buffer) {
-    BASE_LOGI("gpuvk", "guest mapping allocation size={} imported={} failed",
-              bytes, host != nullptr);
+  if (!out.buffer)
     return false;
-  }
-  out.imported = host != nullptr;
   out.mapped = out.buffer->mapped();
   out.address = out.buffer->address();
-  out.size = bytes;
+  out.size = desc.size;
   if (!out.mapped || !out.address) {
-    Destroy(out);
+    Device().Destroy(out.buffer);
+    out = {};
     return false;
   }
   return true;
 }
 }  // namespace
 
-bool PrepareGuestMemory(base::Span<const render::GuestMemoryRange> ranges,
+bool PrepareGuestMemory(base::Span<const GuestMemoryWindow> windows,
                         rhi::Buffer*& table,
                         u64& table_bytes,
                         bool writes) {
-  const rhi::Caps& caps = Device().caps();
-  if (!caps.buffer_address || ranges.empty())
+  if (!Device().caps().buffer_address)
     return false;
-  for (auto it = g_spans.begin(); it != g_spans.end();) {
-    const bool current =
-        base::AnyOf(ranges.begin(), ranges.end(), [&](const auto& r) {
-          return r.base == it->first && r.size == it->second.size &&
-                 r.identity && r.identity == it->second.identity;
-        });
-    if (!current) {
-      Destroy(it->second);
-      if (auto d = g_dirty_spans.find(it->first); d != g_dirty_spans.end()) {
-        Destroy(d->second);
-        g_dirty_spans.erase(d);
-      }
-      it = g_spans.erase(it);
-    } else {
-      ++it;
-    }
-  }
-  base::Vector<base::Array<u64, 4>> entries;
-  for (const auto& range : ranges) {
-    Buffer& b = g_spans[range.base];
-    if (!b.buffer) {
-      const u64 align = caps.host_import_alignment;
-      const bool can_import = range.writable && kGuestImport &&
-                              caps.host_import && align &&
-                              !(range.base % align) && !(range.size % align);
-      if ((!can_import ||
-           !Create(b, range.size, reinterpret_cast<void*>(range.base))) &&
-          !Create(b, range.size)) {
-        BASE_LOGI("gpuvk", "cannot map guest GPU range {:#x}+{:#x}", range.base,
-                  range.size);
-        return false;
-      }
-      b.identity = range.identity;
-    }
-    if (!b.imported)
-      std::memcpy(b.mapped, reinterpret_cast<const void*>(range.base),
-                  range.size);
-    u64 dirty_address = 0;
-    if (writes && range.writable) {
-      // Min/max dword indices followed by a bit for every potentially written
-      // dword. Imported spans need only invalidation; copied spans need exact
-      // writeback so unrelated guest data is preserved.
-      if (range.size > (u64(UINT32_MAX) * 4))
-        return false;
-      Buffer& dirty = g_dirty_spans[range.base];
-      const u64 bitmap_bytes = 8 + ((range.size + 127) / 128) * 4;
-      if (!dirty.buffer) {
-        if (!Create(dirty, (bitmap_bytes + 255) & ~u64(255)))
-          return false;
-        std::memset(dirty.mapped, 0, dirty.size);
-        static_cast<u32*>(dirty.mapped)[0] = UINT32_MAX;
-      }
-      dirty_address = dirty.address;
-    }
-    entries.push_back(
-        {range.base, range.base + range.size, b.address, dirty_address});
-  }
-  const u64 bytes = entries.size() * sizeof(entries[0]);
-  if (g_table_buffer.size < bytes) {
-    Destroy(g_table_buffer);
-    if (!Create(g_table_buffer, (bytes + 255) & ~u64(255)))
+  if (!g_misses.buffer) {
+    if (!Ensure(g_misses, 8 + kMissSlots * 8))
       return false;
+    std::memset(g_misses.mapped, 0, g_misses.size);
   }
-  std::memcpy(g_table_buffer.mapped, entries.data(), bytes);
-  table = g_table_buffer.buffer;
+  // One u32 written flag per window: entry i + 1's dirty field names flag i.
+  const u64 bytes = (windows.size() + 1) * sizeof(base::Array<u64, 4>);
+  if (!Ensure(g_table, bytes) ||
+      (writes && !Ensure(g_flags, windows.size() * 4 + 4)))
+    return false;
+  auto* entries = static_cast<base::Array<u64, 4>*>(g_table.mapped);
+  entries[0] = {0, 0, g_misses.address, 0};
+  for (size_t i = 0; i < windows.size(); i++) {
+    const GuestMemoryWindow& w = windows[i];
+    // No flag: the shader drops stores into a read-only window.
+    entries[i + 1] = {w.base, w.base + w.size, w.address,
+                      writes && w.writable ? g_flags.address + i * 4 : 0};
+  }
+  if (writes)
+    std::memset(g_flags.mapped, 0, windows.size() * 4);
+  g_windows = writes ? static_cast<u32>(windows.size()) : 0;
+  table = g_table.buffer;
   table_bytes = bytes;
   return true;
 }
 
-base::Vector<render::GuestMemoryRange> FinishGuestMemoryWrites() {
-  base::Vector<render::GuestMemoryRange> written;
-  for (auto& [base, dirty] : g_dirty_spans) {
-    auto* marks = static_cast<u32*>(dirty.mapped);
-    const u32 first = marks[0], end = marks[1];
-    if (first >= end)
-      continue;
-    auto& buffer = g_spans.at(base);
-    // Iterate marked words only, and coalesce adjacent words for cache updates.
-    for (u64 word = first / 32; word <= (end - 1) / 32; ++word) {
-      u32 bits = marks[2 + word];
-      while (bits) {
-        const u32 bit = base::CountRightZero(bits);
-        const u64 offset = (word * 32 + bit) * 4;
-        if (offset + 4 <= buffer.size) {
-          if (!buffer.imported)
-            std::memcpy(reinterpret_cast<void*>(base + offset),
-                        static_cast<const u8*>(buffer.mapped) + offset, 4);
-          if (!written.empty() &&
-              written.back().base + written.back().size == base + offset)
-            written.back().size += 4;
-          else
-            written.push_back({base + offset, 4});
-        }
-        bits &= bits - 1;
-      }
-      marks[2 + word] = 0;
+base::Vector<u32> TakeWrittenWindows() {
+  base::Vector<u32> written;
+  auto* flags = static_cast<u32*>(g_flags.mapped);
+  for (u32 i = 0; i < g_windows; i++)
+    if (flags[i]) {
+      written.push_back(i);
+      flags[i] = 0;
     }
-    marks[0] = UINT32_MAX;
-    marks[1] = 0;
-  }
+  g_windows = 0;
   return written;
+}
+base::Vector<u64> TakeGuestMisses() {
+  base::Vector<u64> misses;
+  if (!g_misses.mapped)
+    return misses;
+  auto* words = static_cast<u32*>(g_misses.mapped);
+  const u32 count = words[0] < kMissSlots ? words[0] : kMissSlots;
+  for (u32 i = 0; i < count; i++)
+    misses.push_back(words[2 + i * 2] | (u64(words[3 + i * 2]) << 32));
+  words[0] = 0;
+  return misses;
 }
 }  // namespace gpu::render

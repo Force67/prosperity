@@ -38,11 +38,13 @@ bool DmaGds(Renderer& renderer,
     return ReadGds(renderer, static_cast<u32>(src), copy.data(), bytes) &&
            WriteGds(renderer, static_cast<u32>(dst), copy.data(), bytes);
   }
-  return src_sel == 1 && src < kGdsBytes && bytes <= kGdsBytes - src &&
-         dst_is_memory && gpu::IsReadableRange(dst, bytes) &&
-         FlushCsWritesRange(renderer, dst, bytes, "dma") &&
+  if (!(src_sel == 1 && src < kGdsBytes && bytes <= kGdsBytes - src &&
+        dst_is_memory && gpu::IsReadableRange(dst, bytes)))
+    return false;
+  return CopyGdsToGuest(static_cast<u32>(src), dst, bytes) ||
+         (FlushCsWritesRange(renderer, dst, bytes, "dma") &&
          ReadGds(renderer, static_cast<u32>(src), reinterpret_cast<void*>(dst),
-                 bytes);
+                 bytes));
 }
 
 }  // namespace gpu::render

@@ -17,6 +17,7 @@
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/shader_cache.h"
 #include "gpu/render/device.h"
+#include "gpu/render/compute.h"
 #include "host_memory/host_memory.h"
 
 namespace {
@@ -33,6 +34,9 @@ class RdnaGlobal : public testing::Test {
     gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(pages.data()), sizeof(pages));
     auto& page = pages.at(next++);
     page.fill(0xa5a5a5a5);
+    // What the write tracker reports in the emulator.
+    const u64 at = reinterpret_cast<u64>(page.data());
+    gpu::render::CsNoteGuestWrites(at, at + sizeof(page));
     return page;
   }
   base::Vector<u32> program_;
@@ -47,6 +51,11 @@ class RdnaGlobal : public testing::Test {
     program_.push_back(addr | scalar << 16 | data << (op >= 0x18 ? 8 : 24));
   }
   void Run(u64 src, u64 dst, u32 threads = 1) {
+    // The harness wrote its pages since the last dispatch: what the write
+    // tracker reports in the emulator.
+    for (u64 at : {src, dst})
+      if (at)
+        gpu::render::CsNoteGuestWrites(at, at + sizeof(Page));
     alignas(256) static base::Array<u32, 16384> code{};
     code.fill(0);
     base::Copy(program_.begin(), program_.end(), code.begin());
@@ -347,21 +356,11 @@ TEST_F(RdnaGlobal, FullVectorAddressAndStoreThenLoadAlias) {
   EXPECT_EQ(dest[2], 0xa5a5a5a5);
 }
 
-TEST_F(RdnaGlobal, ConcurrentByteStoresPreserveOtherBytesAndCopiedWriteback) {
-  // Anonymous imports are rebuilt each dispatch. Force the copy path and
-  // verify that its dirty bitmap writes back precisely the changed words.
-  base::OptionBase* import = nullptr;
-  base::OptionBase::VisitAll([&](const base::OptionBase* option) {
-    if (std::strcmp(option->name(), "DELTA_GPU_GUEST_IMPORT") == 0)
-      import = const_cast<base::OptionBase*>(option);
-  });
-  ASSERT_NE(import, nullptr);
-  ASSERT_TRUE(import->SetFromString("0"));
+TEST_F(RdnaGlobal, ConcurrentByteStoresPreserveOtherBytes) {
   auto& dest = PageForDispatch();
   Mov(1, 0x44);
   Global(0x18, 0, 1, 2);
   Run(0, reinterpret_cast<u64>(dest.data()), 63);
-  import->Reset();
   for (u32 i = 0; i < 15; ++i)
     EXPECT_EQ(dest[i], 0x44444444);
   EXPECT_EQ(dest[15], 0xa5444444);
@@ -429,6 +428,10 @@ TEST_F(RdnaGlobal, AddressesBeyondTheOldSixtyFourMiBWindow) {
   Global(0x0c, 3, 2, 2);
   Mov(3, 0);
   Global(0x1c, 3, 2, 2);
+  // The first dispatch reaches past its pointer's window, into memory no
+  // buffer holds yet; the second has one (miss feedback).
+  Run(0, reinterpret_cast<u64>(data.data()));
+  data[kOffset / 4] = 0xa5a5a5a5;
   Run(0, reinterpret_cast<u64>(data.data()));
   EXPECT_EQ(data[kOffset / 4], 0x76543210);
   EXPECT_EQ(data[0], 0x76543210);
@@ -436,65 +439,6 @@ TEST_F(RdnaGlobal, AddressesBeyondTheOldSixtyFourMiBWindow) {
 }
 
 #ifdef OS_LINUX
-TEST_F(RdnaGlobal, TrackedAnonymousMappingReuseAndReplacement) {
-  constexpr size_t kSize = 65536;
-  // Leave guard space so /proc/maps cannot merge this allocation with an
-  // unrelated anonymous allocation. Keep it alive while Vulkan imports it.
-  void* reservation = host_memory::AllocMem(
-      nullptr, kSize * 3, host_memory::PageProtection::kPriv,
-      host_memory::AllocationType::kReserve);
-  ASSERT_NE(reservation, nullptr);
-  const u64 base =
-      (reinterpret_cast<u64>(reservation) + kSize - 1) & ~(kSize - 1);
-  auto* source = static_cast<u32*>(host_memory::AllocMem(
-      reinterpret_cast<void*>(base), kSize, host_memory::PageProtection::kW,
-      host_memory::AllocationType::kCommit));
-  ASSERT_NE(source, nullptr);
-  gpu::ps5::NoteGpuPool(base, kSize);
-  const auto identity = [&] {
-    for (const auto& range : gpu::ps5::GuestMemoryRanges({}))
-      if (range.base <= base && base < range.base + range.size)
-        return range.identity;
-    return u64(0);
-  };
-  const u64 first = identity();
-  ASSERT_NE(first, 0);
-  auto& dest = PageForDispatch();
-  Global(0x0c, 0, 2, 0);
-  Global(0x1c, 0, 2, 2);
-  for (u32 value : {0x12345678u, 0x87654321u}) {
-    source[0] = value;
-    Run(base, reinterpret_cast<u64>(dest.data()));
-    ASSERT_EQ(dest[0], value);
-    ASSERT_EQ(identity(), first);
-  }
-  ASSERT_EQ(
-      host_memory::AllocMem(source, kSize, host_memory::PageProtection::kW,
-                            host_memory::AllocationType::kCommit),
-      source);
-  ASSERT_NE(identity(), first);
-  source[0] = 0xaabbccdd;
-  Run(base, reinterpret_cast<u64>(dest.data()));
-  EXPECT_EQ(dest[0], 0xaabbccdd);
-}
-
-TEST(MemoryMappingIdentity, PartialReplacementAndUntrackedGaps) {
-  auto* base = reinterpret_cast<u8*>(0x12300000000ull);
-  host_memory::TrackMemoryMapping(base, 0x10000);
-  const u64 original = host_memory::MemoryMappingIdentity(base, 0x10000);
-  ASSERT_NE(original, 0);
-  host_memory::TrackMemoryMapping(base + 0x4000, 0x4000);
-  EXPECT_NE(host_memory::MemoryMappingIdentity(base, 0x10000), original);
-  EXPECT_NE(host_memory::MemoryMappingIdentity(base, 0x4000), 0);
-  EXPECT_NE(host_memory::MemoryMappingIdentity(base + 0x8000, 0x8000), 0);
-  host_memory::ForgetMemoryMapping(base + 0x4000, 0x4000);
-  EXPECT_EQ(host_memory::MemoryMappingIdentity(base, 0x10000), 0);
-  EXPECT_EQ(host_memory::MemoryMappingIdentity(base + 0x4000, 4), 0);
-  EXPECT_NE(host_memory::MemoryMappingIdentity(base + 0x8000, 0x8000), 0);
-  host_memory::ForgetMemoryMapping(base, 0x10000);
-  EXPECT_EQ(host_memory::MemoryMappingIdentity(base, 4), 0);
-}
-
 TEST_F(RdnaGlobal, ReadOnlyMappingRejectsStoresButAllowsLoads) {
   // Kept alive until process exit because Vulkan may retain a host import.
   static void* memory = mmap(nullptr, 65536, PROT_READ | PROT_WRITE,

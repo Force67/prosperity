@@ -146,6 +146,9 @@ class CommandList : public Object {
   // Workgroup ids start at (bx, by, bz) (Caps::dispatch_base; the pipeline
   // needs ComputePipelineDesc::dispatch_base).
   virtual void DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) = 0;
+  // Three u32 group counts at `offset` in `args` (kBufferIndirect), read when
+  // the dispatch executes (Caps::dispatch_indirect).
+  virtual void DispatchIndirect(Buffer* /*args*/, u64 /*offset*/) {}
   // Inside a pass: clear a rectangle of one bound attachment. `attachment`
   // indexes the colours; ~0u means the depth/stencil attachment.
   virtual void ClearAttachment(u32 attachment,

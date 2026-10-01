@@ -94,34 +94,65 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding) {
       t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {dirty, zero64});
   valid = t.LAnd(valid, t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
                                  {t.IsZero(args[2]), can_write}));
+  // An address no window holds: report it (count, then up to 63 addresses in
+  // the buffer entry 0 names) so the next dispatch has a buffer for it.
+  {
+    const Id wide_size = Wide(t, args[1]);
+    Id inside = t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool, {base, args[0]});
+    inside = t.LAnd(inside, t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool,
+                                     {args[0], end}));
+    inside = t.LAnd(inside, t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool,
+                                     {wide_size, t.m.Emit(spv::Op::OpISub, wide,
+                                                          {end, args[0]})}));
+    const Id misses = field(zero, 2);
+    const Id report = t.LAnd(
+        t.LAnd(t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {inside}),
+               t.IsNonZero(args[1])),
+        t.LAnd(t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {args[0], zero64}),
+               t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {misses, zero64})));
+    const Id record_miss = t.m.NewBlock(), store_miss = t.m.NewBlock(),
+             stored = t.m.NewBlock(), reported = t.m.NewBlock();
+    t.m.SelectionMerge(reported);
+    t.m.BranchConditional(report, record_miss, reported);
+    t.m.OpenBlock(record_miss);
+    const Id u32_ptr =
+        t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
+    const auto at = [&](Id byte) {
+      return t.m.Emit(spv::Op::OpConvertUToPtr, u32_ptr,
+                      {t.m.Emit(spv::Op::OpIAdd, wide, {misses, Wide(t, byte)})});
+    };
+    const Id device = t.U32(static_cast<u32>(spv::Scope::Device));
+    const Id slot =
+        t.m.Emit(spv::Op::OpAtomicIAdd, t.t_u, {at(zero), device, zero, t.U32(1)});
+    const Id has_slot = t.Ult(slot, t.U32(63));
+    t.m.SelectionMerge(stored);
+    t.m.BranchConditional(has_slot, store_miss, stored);
+    t.m.OpenBlock(store_miss);
+    const Id offset = t.Add(t.U32(8), t.Mul(slot, t.U32(8)));
+    t.m.Emit(spv::Op::OpAtomicExchange, t.t_u,
+             {at(offset), device, zero,
+              t.m.Emit(spv::Op::OpUConvert, t.t_u, {args[0]})});
+    t.m.Emit(spv::Op::OpAtomicExchange, t.t_u,
+             {at(t.Add(offset, t.U32(4))), device, zero,
+              t.m.Emit(spv::Op::OpUConvert, t.t_u,
+                       {t.m.Emit(spv::Op::OpShiftRightLogical, wide,
+                                 {args[0], t.U32(32)})})});
+    t.m.Branch(stored);
+    t.m.OpenBlock(stored);
+    t.m.Branch(reported);
+    t.m.OpenBlock(reported);
+  }
   const Id mark = t.m.NewBlock(), marked = t.m.NewBlock();
   const Id mark_valid = t.LAnd(valid, writing);
   t.m.SelectionMerge(marked);
   t.m.BranchConditional(mark_valid, mark, marked);
   t.m.OpenBlock(mark);
-  const Id offset = t.m.Emit(spv::Op::OpISub, wide, {args[0], base});
-  const Id first = t.m.Emit(
-      spv::Op::OpUConvert, t.t_u,
-      {t.m.Emit(spv::Op::OpShiftRightLogical, wide, {offset, t.U32(2)})});
-  const Id last = t.Add(first, t.Shr(t.Sub(args[1], t.U32(1)), t.U32(2)));
-  const Id physical =
-      t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
-  const auto dirty_ptr = [&](Id byte) {
-    return t.m.Emit(spv::Op::OpConvertUToPtr, physical,
-                    {t.m.Emit(spv::Op::OpIAdd, wide, {dirty, Wide(t, byte)})});
-  };
-  const Id scope = t.U32(static_cast<u32>(spv::Scope::Device));
-  t.m.Emit(spv::Op::OpAtomicUMin, t.t_u, {dirty_ptr(zero), scope, zero, first});
-  t.m.Emit(spv::Op::OpAtomicUMax, t.t_u,
-           {dirty_ptr(t.U32(4)), scope, zero, t.Add(last, t.U32(1))});
-  // One bit per dword, so fallback writeback does not overwrite untouched
-  // words. All callers access at most a 128-byte BVH node (read-only) or four
-  // dwords. Store callers mark a single dword, including atomic byte/halfword
-  // updates.
-  const Id bits =
-      dirty_ptr(t.Add(t.U32(8), t.Mul(t.Shr(first, t.U32(5)), t.U32(4))));
+  // The window's written flag: its range holds GPU-newer bytes now.
+  const Id flag = t.m.Emit(
+      spv::Op::OpConvertUToPtr,
+      t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u), {dirty});
   t.m.Emit(spv::Op::OpAtomicOr, t.t_u,
-           {bits, scope, zero, t.Shl(t.U32(1), t.And(first, t.U32(31)))});
+           {flag, t.U32(static_cast<u32>(spv::Scope::Device)), zero, t.U32(1)});
   t.m.Branch(marked);
   t.m.OpenBlock(marked);
   const Id translated =

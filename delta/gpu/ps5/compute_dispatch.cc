@@ -31,6 +31,8 @@
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/shader_cache.h"
+#include "gpu/render/render_target.h"
+#include "gpu/render/renderer.h"
 #include "profile/profile.h"
 
 namespace {
@@ -58,7 +60,6 @@ struct ResourceRange {
   gcn::TImage image;
   bool image_staging = false;  // tiled or reformatted: stage, don't alias
   bool zero_fill = false;      // no live range: hand the shader zeros
-  bool prefer_import = false;  // alias the guest pages, do not copy them
   u32 elem_bytes = 4;
   u32 stage_elem_bytes = 4;
   bool ok = true;
@@ -180,14 +181,20 @@ ResourceRange ResolveBufferResource(const gcn::CsResource& res,
     out.base = (static_cast<u64>(descriptor[1] & 0xFFFF) << 32) | descriptor[0];
     out.size = res.min_bytes;
     // A global_* base has no extent in the instruction. Its own allocation is
-    // the bound the hardware would fault at, so use that and let the range be
-    // imported instead of copied.
+    // the bound the hardware would fault at, so use that.
+    // A pointer the shader offsets at run time may reach anywhere in it.
+    constexpr u64 kMaxWindow = 64ull << 20;
     u64 pool_base = 0, pool_end = 0;
-    if (res.min_bytes >= 0x10000 && out.base &&
+    if ((res.min_bytes >= 0x10000 || res.runtime_address) && out.base &&
         GpuPoolRange(out.base, pool_base, pool_end)) {
-      constexpr u64 kMaxWindow = 64ull << 20;
       out.size = base::Min<u64>(pool_end - out.base, kMaxWindow);
-      out.prefer_import = true;
+    } else if (res.runtime_address && out.base) {
+      for (const HostMapping& m : HostMappings())
+        if (out.base >= m.begin && out.base < m.end) {
+          out.size = base::Max<u64>(
+              out.size, base::Min<u64>(m.end - out.base, kMaxWindow));
+          break;
+        }
     }
     return out;
   }
@@ -225,10 +232,53 @@ const u32* ResolveUniformImageTable(
 
 }  // namespace
 
+// The titles' metadata clear kernel: thread i of 64-wide groups stores the
+// four user-data dwords s[4:7] to element i of the V# in s[0:3]. The value is
+// in the packet, so the fill is known when it is recorded: applied here it is
+// a memset with nothing to read back, where on the GPU it was a dispatch and,
+// for the CMASK/DCC/HTILE reader that followed, a wait.
+constexpr u32 kFillKernel[] = {0xd7460004, 0x04010c08, 0x7e000204,
+                               0x7e020205, 0x7e040206, 0x7e060207,
+                               0xe01c2000, 0x80000004, 0xbf810000};
+
+bool ApplyFillKernel(render::Renderer& renderer,
+                     u64 cs_addr,
+                     const u32 groups[3],
+                     const u32 threads[3],
+                     u32 user_sgpr,
+                     u32 tgid_enable,
+                     const u32* ud) {
+  if (threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
+      groups[1] != 1 || groups[2] != 1 || user_sgpr != 8 ||
+      !(tgid_enable & 1) || !gpu::IsReadableRange(cs_addr, sizeof(kFillKernel)) ||
+      std::memcmp(reinterpret_cast<const void*>(cs_addr), kFillKernel,
+                  sizeof(kFillKernel)))
+    return false;
+  const rdna::VBuffer dst = rdna::DecodeVBuffer(ud);
+  // Plain elements: no swizzle, no ADD_TID; 32-bit channels stored as they
+  // are, every one of them the same word.
+  const u32 channels = dst.dfmt == 4 ? 1 : dst.dfmt == 11 ? 2 : dst.dfmt == 14 ? 4 : 0;
+  if (!channels || dst.stride != channels * 4 || (ud[1] >> 30) ||
+      (ud[3] & (1u << 23)) || (dst.nfmt != 4 && dst.nfmt != 5 && dst.nfmt != 7))
+    return false;
+  for (u32 c = 1; c < channels; c++)
+    if (ud[4 + c] != ud[4])
+      return false;
+  const u64 bytes =
+      base::Min<u64>(u64(groups[0]) * 64, dst.num_records) * dst.stride;
+  if (!bytes || !gpu::IsReadableRange(dst.base, bytes) ||
+      render::OverlapsLiveTarget(dst.base, bytes) ||
+      render::CsRangeDirtyOverlapping(dst.base, bytes))
+    return false;
+  render::ApplyMemoryFill(renderer, dst.base, bytes, ud[4]);
+  return true;
+}
+
 void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
-                     u32 count) {
+                     u32 count,
+                     u64 indirect_args) {
   DELTA_ZONE("ps5.dispatch");
   u32 groups[3] = {count >= 1 ? body[0] : 0, count >= 2 ? body[1] : 0,
                    count >= 3 ? body[2] : 0};
@@ -279,6 +329,10 @@ void DispatchCompute(render::Renderer& renderer,
   if (kNoCs || !renderer.available() ||
       !gpu::IsReadableRange(cs_addr, kMaxShaderBytes))
     return;
+  if (!group_base[0] && !indirect_args &&
+      ApplyFillKernel(renderer, cs_addr, groups, threads, user_sgpr,
+                      (rsrc2 >> 7) & 0x7, regs.At(mmCOMPUTE_USER_DATA_0)))
+    return;
 
   // Recompile the CS to a Vulkan compute pipeline (cached), resolve the guest
   // ranges its descriptors name, and run it on the shared compute backend.
@@ -301,6 +355,7 @@ void DispatchCompute(render::Renderer& renderer,
   const u32 ud_dwords = base::Min(user_sgpr, 16u);
   render::ComputeInfo ci;
   ci.cs_addr = cs_addr;
+  ci.indirect_args = indirect_args;
   ci.groups[0] = groups[0];
   ci.groups[1] = groups[1];
   ci.groups[2] = groups[2];
@@ -358,15 +413,9 @@ void DispatchCompute(render::Renderer& renderer,
       return;
   }
 
+  // Every resource becomes a range, pointer bases included: a shader that
+  // follows guest pointers reads them through the ranges' own buffers.
   for (const gcn::CsResource& r : rc.resources) {
-    if (r.runtime_address) {
-      auto& out = ci.res[ci.num_res++];
-      out.binding = r.binding;
-      out.size = 16;
-      out.zero_fill = true;
-      out.read = false;
-      continue;
-    }
     const u32 dwords = r.kind == 1 ? 8u : r.kind == 2 ? 2u : 4u;
     // Compute seeds user data straight into s0.., so a plan naming an SGPR past
     // the loaded window names one an SRT load produced, which nothing here
@@ -389,15 +438,6 @@ void DispatchCompute(render::Renderer& renderer,
     }
 
     ResourceRange range;
-    if (r.runtime_image &&
-        rdna::CanAccessLinearIntegerImage(rdna::DecodeTImage(desc))) {
-      auto& out = ci.res[ci.num_res++];
-      out.binding = r.binding;
-      out.size = 16;
-      out.zero_fill = true;
-      out.read = false;
-      continue;
-    }
     if (base::AllOf(desc, desc + dwords, [](u32 w) { return w == 0; })) {
       // A null descriptor is a real binding on a path this launch does not
       // take; the translator guards it and reads zero.
@@ -405,8 +445,25 @@ void DispatchCompute(render::Renderer& renderer,
       range.size = base::Max<u64>(r.min_bytes, 16);
     } else if (r.kind == 1) {
       range = ResolveImageResource(cs_addr, r, desc);
+      // Read and written through its guest addresses: the guest bytes as
+      // they are, not a staged image.
+      if (r.runtime_image && range.ok && !range.zero_fill) {
+        range.image_staging = false;
+        range.size = range.guest_size ? range.guest_size : range.size;
+      }
     } else {
       range = ResolveBufferResource(r, desc);
+    }
+    // A pointer the shader offsets at run time may start anywhere, mapped or
+    // not; it only lacks a buffer of its own then.
+    if ((r.runtime_address || (r.kind == 2 && rc.guest_memory_binding >= 0)) &&
+        !range.zero_fill &&
+        (!range.ok || !range.base || !range.size ||
+         !gpu::IsReadableRange(range.base, range.size))) {
+      range = {};
+      range.ok = true;
+      range.zero_fill = true;
+      range.size = 16;
     }
     if (!range.ok)
       return;
@@ -441,7 +498,8 @@ void DispatchCompute(render::Renderer& renderer,
          range.size > (range.image_staging ? kMaxImageStaging : max_resource) ||
          range.guest_size >
              (range.image_staging ? kMaxImageStaging : max_resource) ||
-         (r.written && !kCsAnyMem && !IsGpuAddress(range.base)) ||
+         (r.written && !kCsAnyMem && !r.runtime_address &&
+          !IsGpuAddress(range.base)) ||
          !gpu::IsReadableRange(range.base, range.guest_size))) {
       TraceCsInvalidRange(cs_addr, r, range.base, range.guest_size);
       return;
@@ -455,9 +513,13 @@ void DispatchCompute(render::Renderer& renderer,
     out.size = range.size;
     out.guest_size = range.guest_size;
     out.binding = r.binding;
-    out.prefer_import = range.prefer_import;
+    out.read = r.read;
     out.shader_writes = r.written;
-    out.written = r.written && !range.zero_fill;
+    // A pointer into memory the guest cannot write: its stores are dropped
+    // (the window is read-only), never written back.
+    out.written = r.written && !range.zero_fill &&
+                  !(r.runtime_address &&
+                    !IsGuestWritable(range.base, range.guest_size));
     out.zero_fill = range.zero_fill;
     out.image_staging = range.image_staging;
     if (!range.image_staging)

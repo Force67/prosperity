@@ -407,3 +407,56 @@ TEST(GcnDetile, ConcurrentRepeatedRegionsFinishEveryRowBeforeReturning) {
 }
 
 }  // namespace
+
+// gfx10 linear surfaces take the plain row terms, slices and mips included.
+TEST(GcnDetile, SeparableTermsMatchTheDetilerForGfx10Linear) {
+  const u32 tiling = gpu::gcn::kGfx10TilingBase;
+  ASSERT_TRUE(gpu::gcn::TilingIsLinear(tiling));
+  struct Shape {
+    u32 width, height, pitch, layers, mips;
+  };
+  u32 checked = 0;
+  for (const Shape& shape : {Shape{240, 135, 240, 64, 1},
+                             Shape{263, 137, 271, 3, 4},
+                             Shape{960, 540, 960, 1, 1}}) {
+    for (u32 elem : {4u, 8u, 16u}) {
+      gpu::gcn::TextureLayout32 layout;
+      if (!gpu::gcn::BuildTextureLayout32(layout, shape.width, shape.height,
+                                          shape.pitch, shape.layers,
+                                          shape.mips, tiling, false, elem))
+        continue;
+      base::Vector<u8> tiled(layout.size);
+      for (size_t i = 0; i < tiled.size(); ++i)
+        tiled[i] = static_cast<u8>((i * 193u + i / 29u) & 255u);
+      for (u32 mip = 0; mip < layout.mip_levels; ++mip) {
+        base::Vector<u32> terms;
+        u32 mask;
+        u64 stride;
+        ASSERT_TRUE(gpu::gcn::BuildSeparableAddressTable(layout, mip, terms,
+                                                         mask, stride));
+        const auto& level = layout.mips[mip];
+        base::Vector<u8> linear(size_t(level.width) * level.height * elem);
+        for (u32 layer = 0; layer < layout.layers; ++layer) {
+          ASSERT_TRUE(gpu::gcn::DetileTextureMip32(
+              tiled.data(), linear.data(), layout, mip, layer));
+          const u32 zt = terms[level.width + level.height + layer];
+          for (u32 y = 0; y < level.height; ++y)
+            for (u32 x = 0; x < level.width; ++x) {
+              const u32 xt = terms[x], yt = terms[level.width + y];
+              const u64 at = level.offset + stride * layer + (xt & ~mask) +
+                             (yt & ~mask) + ((xt ^ yt ^ zt) & mask);
+              ASSERT_EQ(
+                  std::memcmp(&tiled[at],
+                              &linear[(size_t(y) * level.width + x) * elem],
+                              elem),
+                  0)
+                  << "elem " << elem << " mip " << mip << " layer " << layer
+                  << " at " << x << "," << y;
+            }
+          checked++;
+        }
+      }
+    }
+  }
+  EXPECT_GT(checked, 0u);
+}

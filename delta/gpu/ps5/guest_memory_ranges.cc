@@ -1,36 +1,108 @@
 #include "gpu/ps5/guest_memory_ranges.h"
 #include <cstdio>
 #include "base/algorithm.h"
+#include "base/atomic.h"
 #include "base/containers/vector.h"
 #include "base/math/value_bounds.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
+#include "gpu/guest_memory.h"
 #include "gpu/ps5/guest_address.h"
 #include "host_memory/host_memory.h"
 
 namespace gpu::ps5 {
+namespace {
+base::Atomic<bool> g_mappings_stale{true};
+base::Atomic<bool> g_remaps_reported{false};
+u64 g_mappings_version = 0;
+}  // namespace
+
+void ReportRemapsToHostMappings() {
+  g_remaps_reported.store(true, base::memory_order_release);
+}
+
+u64 HostMappingsVersion() {
+  return g_mappings_version;
+}
+
+void MarkHostMappingsStale() {
+  g_mappings_stale.store(true, base::memory_order_release);
+}
+
+// Parsing /proc/self/maps for every pointer-chasing dispatch was 6% of the
+// submit thread. With remaps reported it is parsed only after one; without,
+// once a frame, so a mapping created mid-frame is seen from the next frame, as
+// with IsReadableRangeCached.
+const base::Vector<HostMapping>& HostMappings() {
+  static u64 generation = ~0ull;
+  static base::Vector<HostMapping> mappings;
+  const bool new_frame =
+      generation != gpu::MemoryGeneration() &&
+      !g_remaps_reported.load(base::memory_order_acquire);
+  if (!new_frame &&
+      !g_mappings_stale.exchange(false, base::memory_order_acq_rel))
+    return mappings;
+  generation = gpu::MemoryGeneration();
+  g_mappings_version++;
+  mappings.clear();
+  FILE* maps = std::fopen("/proc/self/maps", "r");
+  if (!maps)
+    return mappings;
+  char line[1024];
+  while (std::fgets(line, sizeof(line), maps)) {
+    HostMapping m{};
+    if (std::sscanf(line, "%llx-%llx %4s %llx %x:%x %llu", &m.begin, &m.end,
+                    m.perm, &m.offset, &m.major, &m.minor, &m.inode) == 7 &&
+        m.perm[0] == 'r')
+      mappings.push_back(m);
+  }
+  std::fclose(maps);
+  return mappings;
+}
+
+bool IsGuestWritable(u64 base, u64 bytes) {
+  u64 at = base;
+  const u64 end = base + bytes;
+  for (const HostMapping& m : HostMappings()) {
+    if (m.end <= at || m.begin > at)
+      continue;
+    if (m.perm[1] != 'w' && !(m.inode && m.perm[3] == 's'))
+      return false;
+    at = m.end;
+    if (at >= end)
+      return true;
+  }
+  return at >= end;
+}
+
 base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
     const base::Vector<u64>& addresses) {
   base::Vector<render::GuestMemoryRange> result;
 #ifdef OS_LINUX
-  FILE* maps = std::fopen("/proc/self/maps", "r");
-  if (!maps)
-    return result;
   base::Vector<NotedPools::Range> pools;
   {
     auto& noted = GpuPools();
     base::LockGuard<base::Mutex> lock(noted.lock);
     pools.assign(noted.ranges, noted.ranges + noted.count.load());
   }
-  char line[1024];
-  while (std::fgets(line, sizeof(line), maps)) {
-    unsigned long long begin, end, offset, inode;
-    unsigned major, minor;
-    char perm[5];
-    if (std::sscanf(line, "%llx-%llx %4s %llx %x:%x %llu", &begin, &end, perm,
-                    &offset, &major, &minor, &inode) != 7 ||
-        perm[0] != 'r')
-      continue;
+  // An address the shader names outside every known mapping means the
+  // mappings changed without a report: parse them again.
+  const auto known = [](u64 address) {
+    for (const HostMapping& m : HostMappings())
+      if (address >= m.begin && address < m.end)
+        return true;
+    return false;
+  };
+  if (!base::AllOf(addresses.begin(), addresses.end(), known))
+    MarkHostMappingsStale();
+  for (const HostMapping& m : HostMappings()) {
+    const unsigned long long begin = m.begin, end = m.end, offset = m.offset,
+                             inode = m.inode;
+    const unsigned major = m.major, minor = m.minor;
+    const char* perm = m.perm;
+    // Direct memory is mapped read-write and shared; a read-only view of it
+    // here is the write tracker's protection, not the guest's.
+    const bool writable = perm[1] == 'w' || (inode && perm[3] == 's');
     u64 identity = inode;
     if (identity) {
       for (u64 word : {u64(major), u64(minor), u64(offset - begin)})
@@ -50,10 +122,10 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
       // invalidate imports if the mapping's write permission changes.
       const u64 key =
           backing ? ((backing ^ (inode ? 1ull : 2ull)) * 1099511628211ull ^
-                     u64(perm[1]))
+                     u64(writable))
                   : 0;
       result.push_back(
-          {lo, hi - lo, key ? key : (backing ? 1ull : 0ull), perm[1] == 'w'});
+          {lo, hi - lo, key ? key : (backing ? 1ull : 0ull), writable});
     };
     if (explicit_address) {
       add_range(begin, end);
@@ -66,7 +138,6 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
         add_range(lo, hi);
     }
   }
-  std::fclose(maps);
   base::Sort(result.begin(), result.end(),
              [](auto& a, auto& b) { return a.base < b.base; });
   base::Vector<render::GuestMemoryRange> unique;

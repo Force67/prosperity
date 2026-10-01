@@ -30,12 +30,15 @@
 #include "gpu/ps5/agc_regs.h"
 #include "gpu/ps5/cmd_trace.h"
 #include "gpu/ps5/compute_dispatch.h"
+#include "gpu/ps5/dmem_aliases.h"
 #include "gpu/ps5/draw_state.h"
+#include "gpu/ps5/label_publisher.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/reg_state.h"
 #include "gpu/render/command.h"
 #include "gpu/render/renderer.h"
+#include "gpu/write_tracker.h"
 #include "profile/profile.h"
 
 namespace {
@@ -189,21 +192,23 @@ void WriteEventLabel(u64 address,
   // offset and size. A timestamp there puts a huge number where a fence value
   // belongs and the waiter's `label == expected` never comes true, and the
   // immediate is not the value either, so write nothing and say so.
-  if (data_sel == 1)
-    WriteLabel(address, value, false);
-  else if (data_sel == 2)
-    WriteLabel(address, value, true);
-  else if (data_sel == 3 || data_sel == 4)
-    WriteLabel(address, GpuClockTimestamp(), true);
-  else if (data_sel == 5) {
+  if (data_sel == 5) {
     static int n = 0;
     if (n++ < 8)
       BASE_LOGW("agc", "fence label {:#x} asks for GDS data, unimplemented",
                 address);
   }
-  if (int_sel)
-    // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
-    prosperity_gpu_end_of_pipe_ctx(context_id ? context_id : value);
+  PublishLabel([=] {
+    if (data_sel == 1)
+      WriteLabel(address, value, false);
+    else if (data_sel == 2)
+      WriteLabel(address, value, true);
+    else if (data_sel == 3 || data_sel == 4)
+      WriteLabel(address, GpuClockTimestamp(), true);
+    if (int_sel)
+      // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+      prosperity_gpu_end_of_pipe_ctx(context_id ? context_id : value);
+  });
 }
 
 // --- packet handlers -------------------------------------------------------
@@ -409,6 +414,7 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
   if (function == 0 || !IsLabelAddress(address) ||
       !gpu::IsReadableRange(address, wide ? 8 : 4))
     return true;
+  DrainLabels();
   if (!render::FlushCsWritesRange(render::DefaultRenderer(), address,
                                   wide ? 8 : 4, "label"))
     return false;
@@ -481,8 +487,10 @@ void HandleWriteData(const u32* body, u32 count) {
               dwords > 1 ? body[4] : 0u);
   if (IsLabelAddress(address) &&
       IsLabelAddress(address + static_cast<u64>(dwords) * 4))
-    std::memcpy(reinterpret_cast<void*>(address), &body[3],
-                static_cast<size_t>(dwords) * 4);
+    PublishLabel([address, words = base::Vector<u32>(body + 3, body + count)] {
+      std::memcpy(reinterpret_cast<void*>(address), words.data(),
+                  words.size() * 4);
+    });
 }
 
 // body: eventCtrl, addrLo, addrHi+sel, dataLo, dataHi
@@ -517,7 +525,7 @@ void HandleEventWriteEos(const u32* body, u32 count) {
     return;
   const u64 address =
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
-  WriteLabel(address, body[3], false);
+  PublishLabel([address, value = body[3]] { WriteLabel(address, value, false); });
 }
 
 // IT_COPY_DATA: one small copy between memory, a register and the GPU's own
@@ -596,6 +604,13 @@ void HandleEventWrite(const u32* body, u32 count) {
   TraceOcclusionQuery(address, value);
 }
 
+// A packet whose whole effect is a write to guest memory runs in label order.
+void PublishPacket(void (*handle)(const u32*, u32), const u32* body, u32 count) {
+  PublishLabel([handle, words = base::Vector<u32>(body, body + count)] {
+    handle(words.data(), static_cast<u32>(words.size()));
+  });
+}
+
 // IT_DISPATCH_INDIRECT: the workgroup counts live in memory rather than in the
 // packet. Our submits run synchronously, so whatever wrote them has already
 // run and the counts are readable now.
@@ -609,9 +624,20 @@ void HandleDispatchIndirect(render::Renderer& renderer,
     args = g_queue->dispatch_indirect_base + body[0];
   if (!args || !IsGuestAddress(args) || !gpu::IsReadableRange(args, 12))
     return;
+  // Counts a dispatch produced stay on the GPU, which reads them itself.
+  const u32 initiator = count >= 2 ? body[count - 1] : 5;
+  const bool starts_at_zero =
+      (initiator & 4) || (!g_queue->regs[mmCOMPUTE_START_X] &&
+                          !g_queue->regs[mmCOMPUTE_START_Y] &&
+                          !g_queue->regs[mmCOMPUTE_START_Z]);
+  if (starts_at_zero && render::CanDispatchIndirect(args)) {
+    const u32 placeholder[4] = {1, 1, 1, initiator};
+    DispatchCompute(renderer, g_queue->regs, placeholder, 4, args);
+    return;
+  }
   // An earlier compute dispatch can produce the indirect dimensions.
   // Read its completed result, not the stale guest-side staging copy.
-  if (!render::FlushCsWritesRange(renderer, args, 12, "indirect"))
+  if (!render::FlushCsWritesRange(renderer, args, 12, "indirect-cs"))
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
   const u32 groups[4] = {a[0], a[1], a[2], count >= 2 ? body[count - 1] : 5};
@@ -648,7 +674,7 @@ void HandleDrawIndirect(
   if (!g_queue->draw_indirect_base || !IsGuestAddress(args) ||
       !gpu::IsReadableRange(args, want))
     return;
-  if (!render::FlushCsWritesRange(renderer, args, want, "indirect"))
+  if (!render::FlushCsWritesRange(renderer, args, want, "indirect-draw"))
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
   if (a[1] > (1u << 20))
@@ -1012,7 +1038,7 @@ u32 Walk(render::Renderer& renderer,
         break;
       }
       case 0x1e:  // ATOMIC_MEM
-        HandleAtomicMem(body, count);
+        PublishPacket(HandleAtomicMem, body, count);
         break;
       case 0x12:  // CLEAR_STATE: context push/pop/clear
         HandleClearState(body, count);
@@ -1025,10 +1051,10 @@ u32 Walk(render::Renderer& renderer,
         HandleWriteData(body, count);
         break;
       case IT_COPY_DATA:
-        HandleCopyData(body, count);
+        PublishPacket(HandleCopyData, body, count);
         break;
       case IT_EVENT_WRITE:
-        HandleEventWrite(body, count);
+        PublishPacket(HandleEventWrite, body, count);
         break;
       case IT_EVENT_WRITE_EOP:
         HandleEventWriteEop(body, count);
@@ -1059,6 +1085,9 @@ void StartRendererOnce(render::Renderer& renderer) {
     return;
   g_renderer_started = true;
   render::Init(renderer);
+  render::DeferLabelsToGpu();
+  InstallWriteTrackerPolicy();
+  GuestWriteTracker().Enable();
   // The descriptor replay reads SRT tables out of guest memory a previous
   // dispatch may still own, and it sits below the renderer, so it cannot ask
   // for the flush itself.
@@ -1084,6 +1113,7 @@ u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
   g_queue->stall.ring_walk = true;
   g_queue->stall.stalled = false;
   const u32 done = Walk(renderer, static_cast<const u32*>(dcb), words, dump, 0);
+  render::SubmitForPublishedLabels();
   g_queue->stall.ring_walk = false;
   const bool stalled = g_queue->stall.stalled;
   g_queue = &g_graphics_queue;
@@ -1113,6 +1143,7 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   const u64 submission = ++g_total_submits;
   const bool dump = TraceSubmit(dcb, size_bytes, words, submission);
   Walk(renderer, static_cast<const u32*>(dcb), words, dump, 0);
+  render::SubmitForPublishedLabels();
   TraceOpcodeCensus(dcb, words, submission);
   if (dump)
     TraceWalkDone();

@@ -80,7 +80,8 @@ rhi::Device& Device();
 // into it, then EndImmediate submits, waits and recycles it; false when the
 // submission failed or the device was lost.
 rhi::CommandList* BeginImmediate();
-bool EndImmediate(rhi::CommandList* list);
+// `why` names the call site in a Tracy capture.
+bool EndImmediate(rhi::CommandList* list, const char* why = "imm.other");
 // Pipelined by default; DELTA_GPU_SYNC=1 restores the submit-and-wait frame.
 bool FramePipelined();
 // DELTA_GPU_PASSPROF: time the render region about to open, keyed by its

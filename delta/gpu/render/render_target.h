@@ -258,6 +258,9 @@ bool OverlapsLiveTarget(u64 base, u64 bytes);
 // geometry's image the live one so the write lands where a later sample at
 // that geometry looks, whether or not it has been rendered before.
 bool ActivateWrittenRtVariant(u64 base, u32 w, u32 h);
+// The variant at `base` of exactly w x h in `fmt`, made live, created if
+// none is parked. False when the address has no target at all.
+bool ActivateRtVariantAs(u64 base, u32 w, u32 h, rhi::Format fmt);
 
 // The open dynamic-rendering region, and which targets the frame has touched.
 struct RenderRegion {

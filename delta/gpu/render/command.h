@@ -327,6 +327,9 @@ struct ComputeInfo {
   u64 cs_addr = 0;            // pipeline cache key
   u32 groups[3] = {1, 1, 1};  // workgroup counts
   u32 group_base[3] = {};     // first workgroup ID in each dimension
+  // DISPATCH_INDIRECT: the guest address of the three group counts, read by
+  // the GPU when the dispatch runs (`groups` is ignored).
+  u64 indirect_args = 0;
   const gcn::RecompiledCs* recomp = nullptr;
   u32 user_data[16] = {};  // COMPUTE_USER_DATA_0..15 (push constants)
   struct Res {
@@ -342,10 +345,6 @@ struct ComputeInfo {
     bool read = true;
     bool zero_fill =
         false;  // inactive/null descriptor: bind zeroed dummy storage
-    // Back this range with the guest pages themselves rather than a staged
-    // copy. A window sized to a whole allocation is far too big to copy per
-    // dispatch, and the shader only touches part of it.
-    bool prefer_import = false;
     bool image_staging = false;  // detile and/or expand compact texels
     u32 width = 0, height = 0, pitch = 0;
     u32 layers = 0, mip_levels = 0, tiling_idx = 0;

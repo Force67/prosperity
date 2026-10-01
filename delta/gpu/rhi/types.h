@@ -563,6 +563,8 @@ struct Caps {
   u64 host_import_alignment = 0;
   bool texture_blit = true;
   bool dispatch_base = false;
+  // CommandList::DispatchIndirect: group counts read by the GPU from a buffer.
+  bool dispatch_indirect = false;
   // One memory type is both device-local and host-cached: a kReadback buffer
   // is as fast for the GPU as kDevice.
   bool unified_memory = false;

@@ -9,6 +9,7 @@
 #include "base/math/value_bounds.h"
 #include "base/memory/bit_cast.h"
 #include "gpu/gcn/gcn_detile.h"
+#include "gpu/render/compute.h"
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
@@ -20,7 +21,7 @@ TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required for this integration test";
   for (u32 mode :
-       {1u, 2u, 5u, 6u, 9u, 10u, 17u, 18u, 21u, 22u, 24u, 25u, 26u, 27u}) {
+       {0u, 1u, 2u, 5u, 6u, 9u, 10u, 17u, 18u, 21u, 22u, 24u, 25u, 26u, 27u}) {
     for (u32 elem : {1u, 2u, 4u, 8u, 16u}) {
       SCOPED_TRACE(testing::Message() << "mode=" << mode << " elem=" << elem);
       gpu::gcn::TextureLayout32 tiled, linear;
@@ -75,6 +76,88 @@ TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
       ASSERT_TRUE(gpu::render::ConvertGfx10Image(tiled, linear, actual.data(),
                                                  retiled.data(), false));
       ASSERT_EQ(retiled, reference);
+    }
+  }
+}
+
+// An R11G11B10F surface staged as RGBA32F retiles on the GPU exactly as the
+// host packs it: rounding, denormals, NaN, infinity, negatives, overflow.
+TEST(Gfx10GpuTiling, PacksR11G11B10LikeTheHost) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required for this integration test";
+  for (u32 mode : {27u, 0u}) {
+    SCOPED_TRACE(testing::Message() << "mode=" << mode);
+    gpu::gcn::TextureLayout32 tiled, linear;
+    ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(tiled, 121, 67, 121, 2, 3,
+                                               0x100 + mode, false, 4));
+    ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(linear, 121, 67, 121, 2, 3, 8,
+                                               false, 16));
+    const float specials[] = {0.f,          -0.f,     1.f,      -1.f,
+                              65000.f,      1e9f,     6.1e-5f,  3e-6f,
+                              1e-9f,        0.5f,     0.49999f, 1.0078125f,
+                              1.00390625f, 123.456f, 7e-45f,   1e-38f};
+    base::Vector<u8> source(linear.size);
+    for (size_t i = 0; i < source.size() / 4; i++) {
+      u32 bits = static_cast<u32>(i * 2654435761u) ^ static_cast<u32>(i >> 3);
+      if (i % 7 == 0) {
+        float v = specials[(i / 7) % 16];
+        std::memcpy(&bits, &v, 4);
+      } else if (i % 13 == 0) {
+        bits = i % 2 ? 0x7f800000u : 0x7fc00001u;  // infinity, NaN
+      }
+      std::memcpy(source.data() + i * 4, &bits, 4);
+    }
+    base::Vector<u8> reference(tiled.size, 0xa5), actual = reference;
+    for (u32 mip = 0; mip < tiled.mip_levels; mip++) {
+      const auto& l = linear.mips[mip];
+      for (u32 layer = 0; layer < tiled.layers; layer++) {
+        const u64 offset = l.offset + u64(layer) * l.pitch * l.stored_height * 16;
+        base::Vector<u8> tight(u64(l.width) * l.height * 4);
+        for (u32 y = 0; y < l.height; y++)
+          for (u32 x = 0; x < l.width; x++) {
+            const u32 packed = gpu::render::PackR11G11B10Texel(
+                source.data() + offset + (u64(y) * l.pitch + x) * 16);
+            std::memcpy(tight.data() + (u64(y) * l.width + x) * 4, &packed, 4);
+          }
+        ASSERT_TRUE(gpu::gcn::RetileTextureMip32Pitched(
+            tight.data(), l.width * 4, reference.data(), tiled, mip, layer));
+      }
+    }
+    ASSERT_TRUE(gpu::render::ConvertGfx10Image(tiled, linear, source.data(),
+                                               actual.data(), false, true));
+    ASSERT_EQ(actual, reference);
+    // And back: every texel unpacks as the host unpacks it.
+    base::Vector<u8> unpacked(linear.size, 0), expected(linear.size, 0);
+    ASSERT_TRUE(gpu::render::ConvertGfx10Image(tiled, linear, actual.data(),
+                                               unpacked.data(), true, true));
+    for (u32 mip = 0; mip < tiled.mip_levels; mip++) {
+      const auto& l = linear.mips[mip];
+      for (u32 layer = 0; layer < tiled.layers; layer++) {
+        const u64 offset = l.offset + u64(layer) * l.pitch * l.stored_height * 16;
+        base::Vector<u8> tight(u64(l.width) * l.height * 4);
+        ASSERT_TRUE(gpu::gcn::DetileTextureMip32Pitched(
+            actual.data(), tight.data(), l.width * 4, tiled, mip, layer));
+        for (u32 y = 0; y < l.height; y++)
+          for (u32 x = 0; x < l.width; x++) {
+            u32 packed;
+            std::memcpy(&packed, tight.data() + (u64(y) * l.width + x) * 4, 4);
+            gpu::render::UnpackR11G11B10Texel(
+                packed, expected.data() + offset + (u64(y) * l.pitch + x) * 16);
+          }
+      }
+    }
+    for (u32 mip = 0; mip < tiled.mip_levels; mip++) {
+      const auto& l = linear.mips[mip];
+      for (u32 layer = 0; layer < tiled.layers; layer++)
+        for (u32 y = 0; y < l.height; y++) {
+          const u64 row = l.offset + u64(layer) * l.pitch * l.stored_height * 16 +
+                          u64(y) * l.pitch * 16;
+          ASSERT_EQ(std::memcmp(unpacked.data() + row, expected.data() + row,
+                                u64(l.width) * 16),
+                    0)
+              << "mip " << mip << " layer " << layer << " row " << y;
+        }
     }
   }
 }
@@ -1339,7 +1422,10 @@ TEST(RdnaComputeImageConversion,
   alignas(65536) static base::Array<base::Array<u32, 16384>, 2> memory{};
   alignas(256) static base::Array<u32, 4096> code{};
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory.data()), sizeof(memory));
-  for (u32 reverse = 0; reverse < 2; ++reverse) {
+  // Pass 0 primes: the plain GLOBAL store reaches memory no buffer holds
+  // yet, which the next dispatch has one for (miss feedback).
+  for (u32 pass = 0; pass < 3; ++pass) {
+    const u32 reverse = pass ? pass - 1 : 0;
     memory[0].fill(0xa5a5a5a5);
     memory[0][1] = 0xdeadbeef;
     memory[1].fill(0xa5a5a5a5);
@@ -1385,8 +1471,14 @@ TEST(RdnaComputeImageConversion,
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0, reverse);
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, !reverse);
     const u32 launch[] = {1, 1, 1, 1};
+    // What the write tracker reports in the emulator.
+    for (auto& block : memory)
+      gpu::render::CsNoteGuestWrites(u64(block.data()),
+                                     u64(block.data()) + sizeof(block));
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
     ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    if (!pass)
+      continue;
     EXPECT_EQ(memory[1][0], reverse ? 0xdead66efu : 0x56u);
     EXPECT_EQ(memory[0][1], reverse ? 0xdead66efu : 0x12345678u);
     EXPECT_EQ(memory[0][0], 0xa5a5a5a5);
@@ -1439,6 +1531,10 @@ TEST(RdnaComputeImageConversion,
       regs[ud + 4] = 1 | (base_layer << 16);
     }
     const u32 launch[] = {1, 1, 1, 1};
+    // What the write tracker reports in the emulator.
+    for (auto& block : memory)
+      gpu::render::CsNoteGuestWrites(u64(block.data()),
+                                     u64(block.data()) + sizeof(block));
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
     ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
     EXPECT_EQ(memory[1], expected) << "base layer " << base_layer;

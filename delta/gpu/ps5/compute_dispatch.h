@@ -31,6 +31,7 @@ namespace gpu::ps5 {
 void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
-                     u32 count);
+                     u32 count,
+                     u64 indirect_args = 0);
 
 }  // namespace gpu::ps5

@@ -19,6 +19,7 @@
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/rdna/rdna_translate.h"
 #include "gpu/ps5/shader_cache.h"
+#include "gpu/render/compute.h"
 #include "gpu/render/device.h"
 #include "gpu/render/draw_recomp.h"
 #include "gpu/render/frame.h"
@@ -59,6 +60,235 @@ TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
   EXPECT_EQ(gpu::render::UboRingBytes(), capacity);
   budget->Reset();
   gpu::render::EndFrame(renderer, 0);
+}
+
+TEST(GcnCompute, LockstepBranchSeesEitherHalfOfWave) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  alignas(65536) static u32 dest[5][64] = {};
+  alignas(256) static u32 code[4096] = {};
+  static gpu::gcn::RecompiledCs compiled_shaders[5];
+  const u32 lanes[] = {0, 31, 32, 63, 64};
+  for (u32 trial = 0; trial < 5; trial++) {
+    // The LDS round trip requires lockstep control flow. Only one lane sets
+    // VCC, but every lane must take the same scalar branch and write one.
+    const u32 shader[] = {0x34020082, 0xd8340000, 0x00000001,
+                          0xd8d80000, 0x02000001, 0x7d840080u + lanes[trial],
+                          0xbf860003, 0x7e020281, 0xe0702000,
+                          0x80000100, 0xbf810000};
+    std::memcpy(code, shader, sizeof(shader));
+    const auto previous_isa = gpu::gcn::DefaultIsaMode();
+    gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+    auto& compiled = compiled_shaders[trial];
+    compiled = gpu::gcn::RecompileCompute(code, 64, 1, 1, 4, 0, 1);
+    gpu::gcn::SetDefaultIsaMode(previous_isa);
+    ASSERT_TRUE(compiled.ok);
+    ASSERT_EQ(compiled.resources.size(), 1u);
+    gpu::render::ComputeInfo ci;
+    ci.cs_addr = reinterpret_cast<u64>(code);
+    ci.recomp = &compiled;
+    ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
+    ci.num_res = 1;
+    auto& resource = ci.res[0];
+    resource.base = reinterpret_cast<u64>(dest[trial]);
+    resource.size = resource.guest_size = sizeof(dest[trial]);
+    resource.binding = compiled.resources[0].binding;
+    resource.written = resource.shader_writes = true;
+    ci.user_data[0] = static_cast<u32>(resource.base);
+    ci.user_data[1] = (resource.base >> 32) | (4u << 16);
+    ci.user_data[2] = 64;
+    ci.user_data[3] = (4u << 15) | (4u << 12);
+    ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    for (u32 lane = 0; lane < 64; lane++)
+      EXPECT_EQ(dest[trial][lane], lanes[trial] < 64 ? 1u : 0u)
+          << "predicate lane " << lanes[trial] << ", output lane " << lane;
+  }
+}
+
+TEST(GcnCompute, CpuReadSeesLatestOfTwoWrites) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  alignas(65536) static u32 dest[64] = {};
+  alignas(256) static const u32 code[4096] = {0x7e020204, 0xe0702000,
+                                              0x80000100, 0xbf810000};
+  static gpu::gcn::RecompiledCs compiled;
+  const auto previous_isa = gpu::gcn::DefaultIsaMode();
+  gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+  compiled = gpu::gcn::RecompileCompute(code, 64, 1, 1, 5, 0, 0);
+  gpu::gcn::SetDefaultIsaMode(previous_isa);
+  ASSERT_TRUE(compiled.ok);
+  ASSERT_EQ(compiled.resources.size(), 1u);
+  gpu::render::ComputeInfo ci;
+  ci.cs_addr = reinterpret_cast<u64>(code);
+  ci.recomp = &compiled;
+  ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
+  ci.num_res = 1;
+  auto& resource = ci.res[0];
+  resource.base = reinterpret_cast<u64>(dest);
+  resource.size = resource.guest_size = sizeof(dest);
+  resource.binding = compiled.resources[0].binding;
+  resource.written = resource.shader_writes = true;
+  ci.user_data[0] = static_cast<u32>(resource.base);
+  ci.user_data[1] = (resource.base >> 32) | (4u << 16);
+  ci.user_data[2] = 64;
+  ci.user_data[3] = (4u << 15) | (4u << 12);
+  for (u32 trial = 0; trial < 3; trial++) {
+    ci.user_data[4] = trial * 2 + 1;
+    ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+    // A second write supersedes any readback queued by the first dispatch.
+    ci.user_data[4]++;
+    ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+    ASSERT_TRUE(gpu::render::FlushCsWritesRange(
+        renderer, resource.base, resource.size, "test-readback"));
+    for (u32 value : dest)
+      EXPECT_EQ(value, ci.user_data[4]);
+  }
+}
+
+TEST(GcnCompute, MergingChildInvalidatesParentReadback) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  base::OptionBase* merge = nullptr;
+  base::OptionBase::VisitAll([&](const base::OptionBase* option) {
+    if (std::strcmp(option->name(), "DELTA_GPU_CS_TRUTH") == 0)
+      merge = const_cast<base::OptionBase*>(option);
+  });
+  ASSERT_NE(merge, nullptr);
+  struct ResetOption {
+    base::OptionBase* option;
+    ~ResetOption() { option->Reset(); }
+  } reset{merge};
+  alignas(65536) static u32 dest[2][64] = {};
+  alignas(256) static const u32 write_code[4096] = {0x7e020204, 0xe0702000,
+                                                    0x80000100, 0xbf810000};
+  alignas(256) static const u32 read_code[4096] = {0xe0302000, 0x80000100,
+                                                   0xbf810000};
+  static gpu::gcn::RecompiledCs writer, reader;
+  const auto previous_isa = gpu::gcn::DefaultIsaMode();
+  gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+  writer = gpu::gcn::RecompileCompute(write_code, 64, 1, 1, 5, 0, 0);
+  reader = gpu::gcn::RecompileCompute(read_code, 64, 1, 1, 4, 0, 0);
+  gpu::gcn::SetDefaultIsaMode(previous_isa);
+  ASSERT_TRUE(writer.ok);
+  ASSERT_TRUE(reader.ok);
+  ASSERT_EQ(writer.resources.size(), 1u);
+  ASSERT_EQ(reader.resources.size(), 1u);
+  for (u32 trial = 0; trial < 2; trial++) {
+    const u64 parent = reinterpret_cast<u64>(dest[trial]);
+    auto dispatch = [&](u64 base, u32 count, bool write, u32 value) {
+      gpu::render::ComputeInfo ci;
+      ci.cs_addr = reinterpret_cast<u64>(write ? write_code : read_code);
+      ci.recomp = write ? &writer : &reader;
+      ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
+      ci.num_res = 1;
+      auto& resource = ci.res[0];
+      resource.base = base;
+      resource.size = resource.guest_size = count * sizeof(u32);
+      resource.binding = ci.recomp->resources[0].binding;
+      resource.written = resource.shader_writes = write;
+      resource.read = !write;
+      ci.user_data[0] = static_cast<u32>(base);
+      ci.user_data[1] = (base >> 32) | (4u << 16);
+      ci.user_data[2] = count;
+      ci.user_data[3] = (4u << 15) | (4u << 12);
+      ci.user_data[4] = value;
+      return gpu::render::Dispatch(renderer, ci);
+    };
+    ASSERT_TRUE(dispatch(parent, 64, true, 1));
+    ASSERT_TRUE(
+        gpu::render::FlushCsWritesRange(renderer, parent, 256, "test-merge"));
+    ASSERT_TRUE(dispatch(parent, 64, true, 3));
+    // Create independent dirty ranges, then merge through either read path.
+    ASSERT_TRUE(merge->SetFromString("0"));
+    ASSERT_TRUE(dispatch(parent + 64, 16, true, 2));
+    ASSERT_TRUE(merge->SetFromString("1"));
+    ASSERT_TRUE(dispatch(parent + (trial ? 64 : 0), trial ? 16 : 64, false, 0));
+    ASSERT_TRUE(
+        gpu::render::FlushCsWritesRange(renderer, parent, 256, "test-merge"));
+    for (u32 lane = 0; lane < 64; lane++)
+      EXPECT_EQ(dest[trial][lane], lane >= 16 && lane < 32 ? 2u : 3u)
+          << "read path " << trial << ", lane " << lane;
+  }
+}
+
+TEST(GcnCompute, DirtyExtentTracksStoresRatherThanStagingPadding) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  alignas(65536) static u32 dest[2][32768] = {};
+  alignas(256) static const u32 code[2][4096] = {
+      {0x7e020204, 0xe0702000, 0x80000100, 0xbf810000},
+      {0x7e020204, 0xea242000, 0x80000100, 0xbf810000}};
+  static gpu::gcn::RecompiledCs shaders[2];
+  for (u32 trial = 0; trial < 2; trial++) {
+    SCOPED_TRACE(trial);
+    auto& compiled = shaders[trial];
+    const auto previous_isa = gpu::gcn::DefaultIsaMode();
+    gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+    compiled = gpu::gcn::RecompileCompute(code[trial], 64, 1, 1, 5, 0, 0);
+    gpu::gcn::SetDefaultIsaMode(previous_isa);
+    ASSERT_TRUE(compiled.ok);
+    ASSERT_EQ(compiled.resources.size(), 1u);
+    gpu::render::ComputeInfo ci;
+    ci.cs_addr = reinterpret_cast<u64>(code[trial]);
+    ci.recomp = &compiled;
+    ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
+    ci.num_res = 1;
+    auto& resource = ci.res[0];
+    const u64 base = resource.base = reinterpret_cast<u64>(dest[trial]);
+    resource.size = resource.guest_size = sizeof(dest[trial]);
+    resource.binding = compiled.resources[0].binding;
+    resource.written = resource.shader_writes = true;
+    ci.user_data[0] = static_cast<u32>(base);
+    ci.user_data[1] = (base >> 32) | (4u << 16);
+    ci.user_data[3] = (4u << 15) | (4u << 12);
+    auto dispatch = [&](u32 records, u64 extent, u32 value) {
+      ci.user_data[2] = records;
+      ci.user_data[4] = value;
+      resource.write_bytes = extent;
+      return gpu::render::Dispatch(renderer, ci);
+    };
+    ASSERT_TRUE(dispatch(32, 128, 1));
+    EXPECT_TRUE(gpu::render::CsRangeDirtyOverlapping(base + 127, 1));
+    EXPECT_FALSE(gpu::render::CsRangeDirtyOverlapping(base + 128, 1));
+    EXPECT_FALSE(gpu::render::CsRangeMaybeDirty(base + 65536, 4));
+    dest[trial][16384] = 9;
+    const u64 submitted = gpu::render::Device().LastSubmission();
+    ASSERT_TRUE(gpu::render::FlushCsWritesRange(renderer, base + 65536, 4,
+                                               "test-padding"));
+    EXPECT_EQ(gpu::render::Device().LastSubmission(), submitted);
+    EXPECT_EQ(dest[trial][0], 0u);
+    ASSERT_TRUE(dispatch(64, 256, 2));
+    ASSERT_TRUE(dispatch(32, 128, 3));
+    EXPECT_TRUE(gpu::render::CsRangeDirtyOverlapping(base + 255, 1));
+    EXPECT_FALSE(gpu::render::CsRangeDirtyOverlapping(base + 256, 1));
+    ASSERT_TRUE(gpu::render::FlushCsWritesRange(renderer, base, 256,
+                                               "test-extent"));
+    for (u32 lane = 0; lane < 64; lane++)
+      EXPECT_EQ(dest[trial][lane], lane < 32 ? 3u : 2u);
+    // An unknown bound covers the whole footprint until its results are read.
+    gpu::render::BeginFrame(renderer);
+    ASSERT_TRUE(dispatch(64, 0, 4));
+    EXPECT_TRUE(gpu::render::CsHoldsVertices(base, sizeof(dest[trial])));
+    ASSERT_TRUE(dispatch(32, 128, 5));
+    EXPECT_TRUE(gpu::render::CsRangeDirtyOverlapping(base + 65536, 4));
+    EXPECT_TRUE(gpu::render::CsRangeMaybeDirty(base + 65536, 4));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    EXPECT_FALSE(gpu::render::CsRangeDirtyOverlapping(base, sizeof(dest[trial])));
+    EXPECT_FALSE(gpu::render::CsRangeMaybeDirty(base + 65536, 4));
+    for (u32 lane = 0; lane < 64; lane++)
+      EXPECT_EQ(dest[trial][lane], lane < 32 ? 5u : 4u);
+    EXPECT_EQ(dest[trial][16384], 9u);
+    gpu::render::EndFrame(renderer, 0);
+    ASSERT_TRUE(dispatch(0, 128, 6));
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    for (u32 lane = 0; lane < 64; lane++)
+      EXPECT_EQ(dest[trial][lane], lane < 32 ? 5u : 4u);
+  }
 }
 
 TEST(RdnaResources, RepeatedDescriptorLoadsReuseTextureBindings) {
@@ -236,7 +466,8 @@ TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
-  const u32 gs[64] = {
+  // The shader probe reads 16 KiB and caches its result by address.
+  alignas(16384) static const u32 gs[4096] = {
       0x7e040305,              // v2 = input vertex ID
       0x7e000d02,              // v0 = float(v2)
       0x100000f0, 0x060000f1,  // x = id * .5 - .5
@@ -1423,15 +1654,10 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
     ASSERT_TRUE(slot.presentable);
     ASSERT_NE(slot.readback, nullptr);
     const auto* pixels = slot.readback->mapped();
-    const auto red = [&](const u8* data, u32 i) -> u32 {
-      if (!format_index)
-        return data[i];
-      u16 value;
-      std::memcpy(&value, data + i * 2, 2);
-      return value;
-    };
-    const u32 half = format_index == 2 ? 0x3800 : format_index ? 32768 : 128;
-    const u32 quarter = format_index == 2 ? 0x3400 : half / 2;
+    // The scanout is converted to BGRA8 on the GPU before the readback.
+    ASSERT_EQ(slot.fmt, gpu::rhi::Format::kBGRA8Unorm);
+    const auto red = [](const u8* data, u32 i) -> u32 { return data[i * 4 + 2]; };
+    const u32 half = 128, quarter = 64;
     u32 colored = 0;
     for (u32 i = 0; i < 16 * 16; ++i)
       if (red(pixels, i) >= half - 1 && red(pixels, i) <= half)

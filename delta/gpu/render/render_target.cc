@@ -230,7 +230,7 @@ void ClearNewRt(RTarget& t) {
   list->ClearTexture(t.texture, rhi::TextureState::kCopyDst, {},
                      rhi::ClearColor{});
   TransitionImage(list, t.texture, layout, rhi::TextureState::kShaderRead);
-  if (EndImmediate(list)) {
+  if (EndImmediate(list, "imm.clear_new_rt")) {
     // Submitted and waited, so this layout is the real one on both timelines.
     t.layout = layout;
     t.submitted_layout = layout;
@@ -1118,6 +1118,16 @@ bool OverlapsLiveTarget(u64 base, u64 bytes) {
   return false;
 }
 
+bool ActivateRtVariantAs(u64 base, u32 w, u32 h, rhi::Format fmt) {
+  auto it = g_rts.find(base);
+  if (it == g_rts.end() || !w || !h || fmt == rhi::Format::kUndefined)
+    return false;
+  RTarget& live = it->second;
+  if (live.w == w && live.h == h && live.fmt == fmt)
+    return true;
+  return ActivateRtVariant(live, base, w, h, fmt) != nullptr;
+}
+
 bool ActivateWrittenRtVariant(u64 base, u32 w, u32 h) {
   if (!base || !w || !h)
     return false;
@@ -1284,7 +1294,7 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
   list->CopyTextureToBuffer(buf, rt.texture, &copy, 1);
   TransitionImage(list, rt.texture, rt.layout, old_layout);
   list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
-  const bool ok = EndImmediate(list);
+  const bool ok = EndImmediate(list, "imm.rt_to_guest");
   if (!ok || !gcn::RetileTextureMip32(map, reinterpret_cast<void*>(base),
                                       layout, 0, 0))
     return false;
@@ -1371,10 +1381,11 @@ bool BeginRegion(const u64* mrt_base,
         GetRT(mrt_base[i], iw, ih, ColorTargetFormat(mrt_info[i]), layers);
     if (!targets[i])
       return false;
-    // A dispatch wrote these pixels since the image last saw them.
+    // A dispatch wrote these pixels since the image last saw them. Ranges the
+    // target only overlaps keep their bytes: the target now owns its own.
     if (!CsRefreshRtFromTruth(mrt_base[i]))
-      render::FlushCsWritesRange(render::DefaultRenderer(), mrt_base[i],
-                                 RtByteSize(*targets[i]), "rt-bind");
+      render::FlushCsWritesAt(render::DefaultRenderer(), mrt_base[i],
+                              "rt-bind");
     targets[i]->cb_info = mrt_info[i];
     if (mrt_dcc_base && mrt_dcc_base[i]) {
       targets[i]->dcc_base = mrt_dcc_base[i];

@@ -127,7 +127,8 @@ rhi::CommandList* BeginImmediate() {
   return list;
 }
 
-bool EndImmediate(rhi::CommandList* list) {
+bool EndImmediate(rhi::CommandList* list, const char* why) {
+  DELTA_ZONE_DYN(why);
   list->End();
   const bool ok = Device().Wait(Device().Submit(list));
   g_free_lists.push_back(list);
@@ -293,6 +294,29 @@ void EnsureReadback(u32 w, u32 h, rhi::Format fmt) {
       g_frame.readback ? g_frame.readback->mapped() : nullptr;
 }
 
+// The scanout converted to BGRA8 on the GPU. A 4K scanout in any other format
+// cost 150-200 ms a frame converting texel by texel on the CPU.
+rhi::Texture* PresentConvertTarget(u32 w, u32 h) {
+  static rhi::Texture* image = nullptr;
+  static u32 image_w = 0, image_h = 0;
+  if (image && image_w == w && image_h == h)
+    return image;
+  if (image) {
+    Device().WaitIdle();
+    Device().Destroy(image);
+  }
+  rhi::TextureDesc desc;
+  desc.format = rhi::Format::kBGRA8Unorm;
+  desc.width = w;
+  desc.height = h;
+  desc.usage = rhi::kTextureCopySrc | rhi::kTextureCopyDst;
+  desc.name = "present convert";
+  image = Device().CreateTexture(desc);
+  image_w = image ? w : 0;
+  image_h = image ? h : 0;
+  return image;
+}
+
 namespace {
 
 // DELTA_RDOC_FRAME=N: bracket frame N's guest rendering with a RenderDoc
@@ -423,7 +447,7 @@ bool ReportRtContents(FrameSlot& owner) {
     copy.region.height = rt.h;
     list->CopyTextureToBuffer(g_frame.readback, rt.texture, &copy, 1);
     list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
-    if (!EndImmediate(list)) {
+    if (!EndImmediate(list, "imm.rt_report")) {
       rt.layout = old_layout;
       BASE_LOGI("rtstat", "readback submit failed");
       return false;
@@ -624,7 +648,7 @@ bool ReportRtContents(FrameSlot& owner) {
                                    1);
         TransitionImage(flist, rt.feedback_texture, rt.feedback_layout, fold);
         flist->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
-        if (EndImmediate(flist)) {
+        if (EndImmediate(flist, "imm.rt_report")) {
           u64 fhi = 0, below = 0;
           float fa_min = 1e30f, fa_max = -1e30f, fmax = 0.f;
           double fa_sum = 0.0;
@@ -830,7 +854,7 @@ bool ReportRtContents(FrameSlot& owner) {
     TransitionImage(list, d.texture, d.layout, old_layout, rhi::kAspectDepth,
                     d.layers);
     list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
-    if (!EndImmediate(list))
+    if (!EndImmediate(list, "imm.rt_report"))
       continue;
     const float* z = static_cast<const float*>(g_frame.readback_map);
     const u64 n = static_cast<u64>(d.w) * d.h;
@@ -934,9 +958,12 @@ void BeginFrame(Renderer& renderer) {
     return;
   // Objects retired two frames ago are past every in-flight command buffer
   // (see ReleaseRetiredTextures) and safe to destroy now.
-  ReleaseRetiredTextures();
-  ReleaseRetiredTargets();
-  ReleaseRetiredCsBuffers();
+  {
+    DELTA_ZONE("gpu.bf_release");
+    ReleaseRetiredTextures();
+    ReleaseRetiredTargets();
+    ReleaseRetiredCsBuffers();
+  }
   if (!CreatePipeline())
     return;
   CreateTexPipeline();  // best-effort; colored path still works without it
@@ -970,8 +997,10 @@ void BeginFrame(Renderer& renderer) {
   // ago, and this frame is about to have the GPU write over it. The copy is
   // long finished by now in the steady state, so this waits for nothing; but
   // it is what makes lending the buffer instead of copying it safe.
-  if (renderer.state)
+  if (renderer.state) {
+    DELTA_ZONE("gpu.bf_wait_present");
     renderer.state->presenter.WaitForBorrowed();
+  }
   g_frame.list = slot.list;
   g_frame.readback = slot.readback;
   g_frame.readback_map = slot.readback ? slot.readback->mapped() : nullptr;
@@ -1116,6 +1145,7 @@ void WatchGuestMem() {
 }
 
 namespace {
+DELTA_OPTION(u64, kSlowEndMs, "DELTA_GPU_SLOW_END_MS", 300);
 // A frame end slow enough to stall the title (its hang detector fires at
 // 10 s) says which phase took the time.
 struct EndFramePhases {
@@ -1127,14 +1157,15 @@ struct EndFramePhases {
     last = now;
   }
   ~EndFramePhases() {
-    if (NowNs() - start < 300'000'000)
+    if (NowNs() - start < kSlowEndMs * 1'000'000)
       return;
     BASE_LOGW("gpuvk",
               "slow frame end {} ms: tracker {} buffers {} cs-flush {} "
-              "record+submit {} gpu-wait {} present+maintain {}",
+              "record+submit {} gpu-wait {} convert {} present+maintain {}",
               (NowNs() - start) / 1'000'000, ns[0] / 1'000'000,
               ns[1] / 1'000'000, ns[2] / 1'000'000, ns[3] / 1'000'000,
-              ns[4] / 1'000'000, (NowNs() - last + ns[5]) / 1'000'000);
+              ns[4] / 1'000'000, ns[5] / 1'000'000,
+              (NowNs() - last) / 1'000'000);
   }
 };
 }  // namespace
@@ -1228,7 +1259,13 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   cur.present_to_window = present_to_window;
   if (it != g_rts.end() && need_scanout) {
     RTarget& rt = it->second;
-    EnsureReadback(rt.w, rt.h, rt.fmt);
+    rhi::Texture* convert = nullptr;
+    if (kFlipMode == 0 && rt.fmt != rhi::Format::kBGRA8Unorm &&
+        rt.fmt != rhi::Format::kRGBA8Unorm &&
+        Device().SupportsBlit(rt.fmt, rhi::Format::kBGRA8Unorm))
+      convert = PresentConvertTarget(rt.w, rt.h);
+    const rhi::Format read_fmt = convert ? rhi::Format::kBGRA8Unorm : rt.fmt;
+    EnsureReadback(rt.w, rt.h, read_fmt);
     if (kClearRedTransfer) {
       TransitionImage(g_frame.list, rt.texture, rt.layout,
                       rhi::TextureState::kCopyDst);
@@ -1239,14 +1276,31 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
                    (unsigned long long)present_base, rt.w, rt.h);
     TransitionImage(g_frame.list, rt.texture, rt.layout,
                     rhi::TextureState::kCopySrc);
+    rhi::Texture* read_src = rt.texture;
+    if (convert) {
+      rhi::TextureRegion region;
+      region.width = rt.w;
+      region.height = rt.h;
+      rhi::TextureBarrier barrier;
+      barrier.texture = convert;
+      barrier.before = rhi::TextureState::kUndefined;
+      barrier.after = rhi::TextureState::kCopyDst;
+      g_frame.list->Barrier(0, 0, &barrier, 1);
+      g_frame.list->BlitTexture(convert, region, rt.texture, region,
+                                rhi::Filter::kNearest);
+      barrier.before = rhi::TextureState::kCopyDst;
+      barrier.after = rhi::TextureState::kCopySrc;
+      g_frame.list->Barrier(0, 0, &barrier, 1);
+      read_src = convert;
+    }
     rhi::BufferTextureCopy copy;
     copy.region.width = rt.w;
     copy.region.height = rt.h;
-    g_frame.list->CopyTextureToBuffer(g_frame.readback, rt.texture, &copy, 1);
+    g_frame.list->CopyTextureToBuffer(g_frame.readback, read_src, &copy, 1);
     cur.presentable = true;
     cur.w = rt.w;
     cur.h = rt.h;
-    cur.fmt = rt.fmt;
+    cur.fmt = read_fmt;
   }
   {
     ScopeNs submit_timer(&g_ns_submit);
@@ -1302,6 +1356,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   phases.Mark(3);
   if (fin.submitted) {
     u64 tr0 = NowNs();
+    DELTA_ZONE("gpu.frame_fence");
     if (!Device().Wait(fin.submission)) {
       BASE_LOGI("gpuvk", "frame {} DEVICE FAULT: draws={}", fin.frame_num,
                 fin.frame_draws);
@@ -1410,6 +1465,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     }
     pixels = flipped.data();
   }
+  phases.Mark(5);
   // The dump writers below read BGRA, and the perf overlay draws BGRA into the
   // buffer it is given. Both are off by default, so an RGBA readback is
   // converted here only when one of them is actually about to run.

@@ -100,6 +100,58 @@ base::Vector<u32> BuildImageTilingShader() {
   const Id lshift = m.Emit(
       Op::OpSelect, u,
       {is_packed, mul(op(Op::OpBitwiseAnd, lin_byte, c(3)), c(8)), c(0)});
+  // R11G11B10F from three floats, rounded to nearest with ties away, as the
+  // host's PackUnsignedFloat: NaN keeps a mantissa bit, negatives are zero.
+  const Id t_bool = m.TypeBool();
+  const auto sel = [&](Id cond, Id a, Id b) {
+    return m.Emit(Op::OpSelect, u, {cond, a, b});
+  };
+  const auto eq = [&](Id a, Id b) { return m.Emit(Op::OpIEqual, t_bool, {a, b}); };
+  const auto ult = [&](Id a, Id b) {
+    return m.Emit(Op::OpULessThan, t_bool, {a, b});
+  };
+  const auto pack_unsigned_float = [&](Id bits, u32 mantissa_bits) {
+    const u32 drop = 23 - mantissa_bits;
+    const Id inf = c(0x1Fu << mantissa_bits);
+    const Id exp32 =
+        op(Op::OpBitwiseAnd, op(Op::OpShiftRightLogical, bits, c(23)), c(0xFF));
+    const Id mant23 = op(Op::OpBitwiseAnd, bits, c(0x7FFFFF));
+    const Id negative = m.Emit(Op::OpINotEqual, t_bool,
+                               {op(Op::OpShiftRightLogical, bits, c(31)), c(0)});
+    const Id special =
+        sel(m.Emit(Op::OpINotEqual, t_bool, {mant23, c(0)}),
+            op(Op::OpBitwiseOr, inf, c(1)), sel(negative, c(0), inf));
+    const Id normal = m.ExtInst(
+        u, GLSLstd450UMin,
+        {op(Op::OpShiftRightLogical,
+            add(op(Op::OpBitwiseOr,
+                   op(Op::OpShiftLeftLogical, op(Op::OpISub, exp32, c(112)),
+                      c(23)),
+                   mant23),
+                c(1u << (drop - 1))),
+            c(drop)),
+         inf});
+    const Id shift = op(Op::OpISub, c(drop + 113),
+                        m.ExtInst(u, GLSLstd450UMax, {exp32, c(1)}));
+    const Id held = m.ExtInst(u, GLSLstd450UMin, {shift, c(31)});
+    const Id mant = sel(eq(exp32, c(0)), mant23,
+                        op(Op::OpBitwiseOr, mant23, c(0x800000)));
+    const Id denormal = sel(
+        ult(shift, c(32)),
+        op(Op::OpShiftRightLogical,
+           add(mant, op(Op::OpShiftLeftLogical, c(1),
+                        op(Op::OpISub, held, c(1)))),
+           held),
+        c(0));
+    return sel(eq(exp32, c(0xFF)), special,
+               sel(negative, c(0),
+                   sel(m.Emit(Op::OpUGreaterThan, t_bool, {exp32, c(112)}),
+                       normal, denormal)));
+  };
+  const Id is_pack11 = m.Emit(Op::OpINotEqual, t_bool, {param(14), c(0)});
+  // Every lane loads: a lane not packing reads its own dword three times.
+  const Id texel4 = add(add(param(7), mul(z, param(9))),
+                        mul(add(mul(y, param(8)), xw), c(4)));
   const Id detile = m.NewBlock(), retile = m.NewBlock(), copied = m.NewBlock();
   const Id direction = m.Emit(Op::OpINotEqual, m.TypeBool(), {param(10), c(0)});
   const Id f = m.TypeFloat();
@@ -120,7 +172,44 @@ base::Vector<u32> BuildImageTilingShader() {
       m.Emit(Op::OpSelect, u, {is_depth16, unorm_to_float, raw_texel});
   const Id pk_store = m.NewBlock(), plain_store = m.NewBlock(),
            det_done = m.NewBlock();
+  // RGBA32F out of R11G11B10F, as the host's UnpackUnsignedFloat.
+  const auto unpack_unsigned_float = [&](Id packed, u32 mantissa_bits) {
+    const Id mant = op(Op::OpBitwiseAnd, packed, c((1u << mantissa_bits) - 1));
+    const Id exponent = op(Op::OpBitwiseAnd,
+                           op(Op::OpShiftRightLogical, packed, c(mantissa_bits)),
+                           c(0x1F));
+    const Id denormal = m.Emit(
+        Op::OpBitcast, u,
+        {m.Emit(Op::OpFMul, f,
+                {m.Emit(Op::OpConvertUToF, f, {mant}),
+                 m.Emit(Op::OpBitcast, f,
+                        {c((127u - 14u - mantissa_bits) << 23)})})});
+    const Id special = sel(m.Emit(Op::OpINotEqual, t_bool, {mant, c(0)}),
+                           c(0x7FC00000), c(0x7F800000));
+    const Id normal = op(
+        Op::OpBitwiseOr,
+        op(Op::OpShiftLeftLogical, add(exponent, c(112)), c(23)),
+        op(Op::OpShiftLeftLogical, mant, c(23 - mantissa_bits)));
+    return sel(eq(exponent, c(0)), denormal,
+               sel(eq(exponent, c(0x1F)), special, normal));
+  };
+  const Id unpack_store = m.NewBlock(), narrow_or_plain = m.NewBlock();
   m.SelectionMerge(det_done);
+  m.BranchConditional(is_pack11, unpack_store, narrow_or_plain);
+  m.OpenBlock(unpack_store);
+  {
+    const Id word = m.Load(u, at(0, tiled));
+    m.Store(at(1, texel4), unpack_unsigned_float(word, 6));
+    m.Store(at(1, add(texel4, c(1))),
+            unpack_unsigned_float(op(Op::OpShiftRightLogical, word, c(11)), 6));
+    m.Store(at(1, add(texel4, c(2))),
+            unpack_unsigned_float(op(Op::OpShiftRightLogical, word, c(22)), 5));
+    m.Store(at(1, add(texel4, c(3))), c(0x3F800000));
+  }
+  m.Branch(det_done);
+  m.OpenBlock(narrow_or_plain);
+  const Id narrow_done = m.NewBlock();
+  m.SelectionMerge(narrow_done);
   m.BranchConditional(is_packed, pk_store, plain_store);
   m.OpenBlock(pk_store);
   m.Emit(
@@ -130,9 +219,11 @@ base::Vector<u32> BuildImageTilingShader() {
   m.Emit(
       Op::OpAtomicOr, u,
       {at(1, linear), c(1), c(0), op(Op::OpShiftLeftLogical, texel, lshift)});
-  m.Branch(det_done);
+  m.Branch(narrow_done);
   m.OpenBlock(plain_store);
   m.Store(at(1, linear), texel);
+  m.Branch(narrow_done);
+  m.OpenBlock(narrow_done);
   m.Branch(det_done);
   m.OpenBlock(det_done);
   m.Branch(copied);
@@ -147,10 +238,19 @@ base::Vector<u32> BuildImageTilingShader() {
              {m.Emit(Op::OpFAdd, f,
                      {m.Emit(Op::OpFMul, f, {clamped, m.ConstF32(65535.f)}),
                       m.ConstF32(0.5f)})});
-  const Id value =
+  const auto channel = [&](u32 k) {
+    return m.Load(u, at(1, sel(is_pack11, add(texel4, c(k)), linear)));
+  };
+  const Id pack11 = op(
+      Op::OpBitwiseOr,
+      op(Op::OpBitwiseOr, pack_unsigned_float(channel(0), 6),
+         op(Op::OpShiftLeftLogical, pack_unsigned_float(channel(1), 6), c(11))),
+      op(Op::OpShiftLeftLogical, pack_unsigned_float(channel(2), 5), c(22)));
+  const Id value = sel(
+      is_pack11, pack11,
       op(Op::OpBitwiseAnd,
          m.Emit(Op::OpSelect, u, {is_depth16, float_to_unorm, raw_value}),
-         value_mask);
+         value_mask));
   const Id packed = m.NewBlock(), direct = m.NewBlock(), stored = m.NewBlock();
   m.SelectionMerge(stored);
   m.BranchConditional(narrow, packed, direct);
