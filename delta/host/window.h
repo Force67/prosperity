@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include "base/arch.h"
+#include "base/containers/vector.h"
 
 // SDL3 window backed by a Vulkan swapchain. present() uploads a CPU framebuffer
 // and blits it to the swapchain, scaling to the window size. The VideoOut flip
@@ -28,6 +29,11 @@ void SetTitle(const char* title);
 // Set PNG artwork for the game window. The desktop backend applies a small
 // emulator badge before using it as the taskbar icon.
 void SetIcon(const u8* png, size_t size);
+
+// Show the title's key art (a PNG) in the window from now until the guest
+// presents its first frame, as the console does while a game starts. Opens the
+// window right away and keeps it responsive meanwhile. Desktop Linux only.
+void ShowSplash(base::Vector<u8> png);
 
 // Device-local memory this process is using, and what it may use. Both 0 when
 // the driver has no VK_EXT_memory_budget (or there is no window at all).

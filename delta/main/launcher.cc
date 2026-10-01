@@ -296,6 +296,12 @@ void Launcher::Boot(const base::String& xdir) {
 #if defined(__linux__) && !defined(__ANDROID__)
   if (!game_icon.empty())
     host::SetIcon(game_icon.data(), game_icon.size());
+  if (io::File art = kern::vfs::OpenRead("/app0/sce_sys/pic0.png");
+      art.Exists() && art.GetSize() <= kMaxIconSize) {
+    base::Vector<u8> png(art.GetSize());
+    if (art.Read(png.data(), png.size()) == png.size())
+      host::ShowSplash(base::move(png));
+  }
 #endif
   base::SpawnDetachedThread(
       "guest-main",

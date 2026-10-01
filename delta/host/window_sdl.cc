@@ -41,6 +41,9 @@
 #include "base/containers/vector.h"
 #include "base/math/value_bounds.h"
 #include "base/memory/move.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "base/threading/thread.h"
 #include "base/strings/xstring.h"
 #include "host/overlay.h"
 #include "host/overlay_log.h"
@@ -123,6 +126,21 @@ struct State {
 
 State g_window;
 base::Atomic<bool> g_can_present{true};
+// The splash thread and the videoout HLE may both bring the window up.
+base::Mutex g_init_mutex;
+// 0: no splash, 1: the splash thread owns the window, 2: asked to hand it over.
+base::Atomic<int> g_splash{0};
+thread_local bool t_splash_thread = false;
+
+// The first present or event pump from anyone else takes the window over.
+void StopSplash() {
+  if (t_splash_thread || g_splash.load(base::memory_order_acquire) == 0)
+    return;
+  int running = 1;
+  g_splash.compare_exchange_strong(running, 2);
+  while (g_splash.load(base::memory_order_acquire) != 0)
+    base::YieldCurrentThread();
+}
 constexpr u64 kPresentWaitSliceNs = 50'000'000;
 constexpr size_t kMaxIconSize = 16u << 20;
 constexpr int kMaxIconDimension = 4096;
@@ -524,6 +542,7 @@ bool EnsureFrameResources(u32 w, u32 h, VkFormat fmt) {
 }  // namespace
 
 bool Init(const char* title, u32 width, u32 height) {
+  base::LockGuard<base::Mutex> lock(g_init_mutex);
   if (Available())
     return true;  // already up; init is idempotent
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
@@ -748,6 +767,7 @@ void QueryVram(u64& used, u64& total) {
 }
 
 void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
+  StopSplash();
   if (!g_can_present.load(base::memory_order_acquire) || !g_window.device ||
       !pixels || !w || !h)
     return;
@@ -915,6 +935,40 @@ void SetIcon(const u8* png, size_t size) {
 #endif
 }
 
+void ShowSplash(base::Vector<u8> png) {
+#if defined(__linux__)
+  if (png.empty() || png.size() > kMaxIconSize || !CanPresent())
+    return;
+  g_splash.store(1, base::memory_order_release);
+  base::SpawnDetachedThread("splash", [png = base::move(png)] {
+    t_splash_thread = true;
+    int w = 0, h = 0, channels = 0;
+    stbi_uc* pixels =
+        stbi_load_from_memory(png.data(), static_cast<int>(png.size()), &w, &h,
+                              &channels, STBI_rgb_alpha);
+    if (pixels && Init("prosperity", 1920, 1080)) {
+      BASE_LOGI("gfx", "splash {}x{} until the first frame", w, h);
+      bool shown = false;
+      while (g_splash.load(base::memory_order_acquire) == 1 &&
+             CanPresent()) {
+        // Again after a resize: the swapchain was rebuilt without it.
+        if (!shown || g_window.need_recreate) {
+          Present(pixels, static_cast<u32>(w), static_cast<u32>(h), 0,
+                  PixelFormat::kRgba8);
+          shown = true;
+        }
+        PumpEvents();
+        base::SleepForMicroseconds(16667);
+      }
+    }
+    stbi_image_free(pixels);
+    g_splash.store(0, base::memory_order_release);
+  });
+#else
+  (void)png;
+#endif
+}
+
 bool Available() {
   return g_window.window != nullptr && g_window.swapchain != VK_NULL_HANDLE;
 }
@@ -945,6 +999,7 @@ bool Ensure(const char* title, u32 width, u32 height) {
 }
 
 bool PumpEvents() {
+  StopSplash();
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
     if (e.type == SDL_EVENT_QUIT) {
