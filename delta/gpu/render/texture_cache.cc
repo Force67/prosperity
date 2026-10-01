@@ -1064,7 +1064,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   // texel dimensions; decline others (rare) rather than mis-address them.
   const bool bc = GuestFormatBlockCompressed(dfmt);
   const u32 elem_bytes = GuestFormatElemBytes(dfmt);
-  if (bc && mip_levels > 1 && ((w & (w - 1)) || (h & (h - 1))))
+  const bool gfx10 = tiling >= gcn::kGfx10TilingBase;
+  if (bc && mip_levels > 1 && !gfx10 && ((w & (w - 1)) || (h & (h - 1))))
     return nullptr;
   // BCn volume images are an optional Vulkan feature; decline rather than
   // create an image the driver need not support.
@@ -1089,6 +1090,15 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     }
     return nullptr;
   }
+  // gfx10 sizes each level in blocks as ceil(blocks / 2^mip), which is the
+  // hardware's, but a level holds ceil(texels / 4) blocks of real data: a
+  // 1600-wide chain is 13 blocks at 50 texels where halving says 12.
+  if (bc && gfx10)
+    for (u32 mip = 0; mip < mip_levels; mip++) {
+      auto& level = layout.mips[mip];
+      level.width = (base::Max(w >> mip, 1u) + 3) / 4;
+      level.height = (base::Max(h >> mip, 1u) + 3) / 4;
+    }
   u64 footprint = layout.size;
   if (footprint > kMaxTextureBytes) {
     if (kTexFail) {
