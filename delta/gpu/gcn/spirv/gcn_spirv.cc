@@ -1796,22 +1796,32 @@ void EmitCfg(Translator& t,
   // synchronise against each other whenever they are in different iterations,
   // which is every cross-block pair.
   //
-  // "Is anyone still running" has to be a workgroup-wide OR, and it must be
-  // computed without divergence: every invocation stores the zero (idempotent),
-  // then every invocation contributes with an atomic, then everyone reads.
+  // Publish one vote per host subgroup. The second barrier keeps the next
+  // block from overwriting slots another subgroup is still reading.
   if (lockstep) {
     t.m.Branch(lockstep_blk);
     t.m.OpenBlock(lockstep_blk);
-    // OR the published bit across the group. The reset is written by EVERY
-    // invocation rather than by lane 0 under an `if`, so nothing here is
-    // divergent and both barriers are reached by everyone.
-    const Id slot = t.XchgAt(t.U32(t.xchg_lanes * 2));
-    t.m.Store(slot, t.U32(0));
+    t.RequireSubgroup(spv::Capability::GroupNonUniformVote);
+    const Id vote = t.m.Emit(spv::Op::OpGroupNonUniformAny, t.t_bool,
+                             {t.U32(3), t.IsNonZero(t.m.Load(t.t_u, br_raw))});
+    const Id elected =
+        t.m.Emit(spv::Op::OpGroupNonUniformElect, t.t_bool, {t.U32(3)});
+    const Id publish = t.m.NewBlock(), published = t.m.NewBlock();
+    t.m.SelectionMerge(published);
+    t.m.BranchConditional(elected, publish, published);
+    t.m.OpenBlock(publish);
+    t.m.Store(t.XchgAt(t.m.Load(t.t_u, sc.subgroup_id)),
+              t.SelectB(vote, t.U32(1), t.U32(0)));
+    t.m.Branch(published);
+    t.m.OpenBlock(published);
     t.Barrier();
-    t.m.Emit(spv::Op::OpAtomicOr, t.t_u,
-             {slot, t.U32(2), t.U32(0x108), t.m.Load(t.t_u, br_raw)});
+    Id bits = t.U32(0);
+    const u32 subgroups =
+        (t.xchg_lanes + HostSubgroupSize() - 1) / HostSubgroupSize();
+    for (u32 group = 0; group < subgroups; group++)
+      bits = t.Or(bits, t.m.Load(t.t_u, t.XchgAt(t.U32(group))));
+    const Id any = t.IsNonZero(bits);
     t.Barrier();
-    const Id any = t.IsNonZero(t.m.Load(t.t_u, slot));
     const Id inv = t.IsNonZero(t.m.Load(t.t_u, br_invert));
     const Id taken = t.m.Emit(spv::Op::OpLogicalNotEqual, t.t_bool, {any, inv});
     t.SetStateId(
@@ -2724,6 +2734,15 @@ bool TranslateCs(const Program& program,
   if (uses_cross_lane && HasControlFlow(program) && threads == kGcnWave &&
       WaveSplitsAcrossSubgroups())
     sc.lockstep_loop = true;
+  if (sc.lockstep_loop) {
+    t.m.Capability(spv::Capability::GroupNonUniform);
+    sc.subgroup_id =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_u),
+                     spv::StorageClass::Input);
+    t.m.Decorate(sc.subgroup_id, spv::Decoration::BuiltIn,
+                 {static_cast<u32>(spv::BuiltIn::SubgroupId)});
+    iface.push_back(sc.subgroup_id);
+  }
   if ((uses_cross_lane || sc.lockstep_loop) && threads) {
     const Id lii =
         t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_u),
@@ -2731,9 +2750,7 @@ bool TranslateCs(const Program& program,
     t.m.Decorate(lii, spv::Decoration::BuiltIn,
                  {static_cast<u32>(spv::BuiltIn::LocalInvocationIndex)});
     iface.push_back(lii);
-    // Two words per invocation, plus one for the lock-step loop's
-    // "is anyone still running" reduction.
-    const Id xchg_arr = t.m.TypeArray(t.t_u, threads * 2 + 1);
+    const Id xchg_arr = t.m.TypeArray(t.t_u, threads * 2);
     t.xchg_var =
         t.m.Variable(t.m.TypePointer(spv::StorageClass::Workgroup, xchg_arr),
                      spv::StorageClass::Workgroup);

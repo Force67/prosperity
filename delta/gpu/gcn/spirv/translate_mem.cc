@@ -1273,7 +1273,8 @@ bool PlanCsResources(const Program& program,
                                                          : 8;
         if (!resource(inst.pc, srsrc, 4, 0, store || atomic, 0,
                       /*read=*/load || atomic,
-                      store || atomic ? store_extent(w, w1, store_bytes) : 0))
+                      atomic ? kUnknownStoreExtent
+                             : store ? store_extent(w, w1, store_bytes) : 0))
           return false;
         break;
       }
@@ -1284,8 +1285,9 @@ bool PlanCsResources(const Program& program,
         static constexpr u8 kDfmtBytes[16] = {0, 1, 2, 2, 4, 4, 4, 4,
                                               4, 4, 4, 8, 8, 12, 16, 16};
         const u32 dfmt_bytes = kDfmtBytes[(w >> 19) & 0xF];
+        const u32 store_bytes = base::Max(dfmt_bytes, ((op & 3) + 1) * 4);
         if (!resource(inst.pc, srsrc, 4, 0, op >= 4, 0, /*read=*/op < 4,
-                      op >= 4 ? (dfmt_bytes ? store_extent(w, w1, dfmt_bytes)
+                      op >= 4 ? (dfmt_bytes ? store_extent(w, w1, store_bytes)
                                             : kUnknownStoreExtent)
                               : 0))
           return false;
@@ -1513,6 +1515,23 @@ void EmitCsGlobal(Translator& t, const Inst& inst, StageContext& sc) {
   }
 }
 
+// Indexed GCN stores must not spill beyond NUM_RECORDS, even when their
+// descriptor shares a larger staging allocation with another binding.
+static Id BeginCsIndexedStore(Translator& t, const Inst& inst) {
+  if (t.rdna_sources || !(inst.raw[0] & (1u << 13)))
+    return 0;
+  const u32 srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+  const Id stride = t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF));
+  const Id valid = t.m.Emit(
+      spv::Op::OpLogicalOr, t.t_bool,
+      {t.IsZero(stride), t.Ult(t.Vg(inst.raw[1] & 0xFF), t.Sg(srsrc + 2))});
+  const Id write = t.m.NewBlock(), merge = t.m.NewBlock();
+  t.m.SelectionMerge(merge);
+  t.m.BranchConditional(valid, write, merge);
+  t.m.OpenBlock(write);
+  return merge;
+}
+
 void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const u32 op = (w >> 18) & 0x7F, inst_offset = w & 0xFFF;
@@ -1620,6 +1639,9 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
 
+  const bool store = (op >= 0x04 && op <= 0x07) || op == 0x18 ||
+                     op == 0x1a || (op >= 0x1c && op <= 0x1f);
+  const Id store_done = store ? BeginCsIndexedStore(t, inst) : 0;
   switch (op) {
     case 0x00:
     case 0x01:
@@ -1704,6 +1726,10 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
       sc.cs_unsupported = true;
       break;
   }
+  if (store_done) {
+    t.m.Branch(store_done);
+    t.m.OpenBlock(store_done);
+  }
 }
 
 // ---- compute: MTBUF ---------------------------------------------------------
@@ -1730,8 +1756,13 @@ void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
       t.SetVg(vdata + i,
               CsSsboLoad(t, sc, binding, t.Add(dword_idx, t.U32(i))));
   } else {  // tbuffer_store_format_x..xyzw
+    const Id store_done = BeginCsIndexedStore(t, inst);
     for (u32 i = 0; i < n; i++)
       CsSsboStore(t, sc, binding, t.Add(dword_idx, t.U32(i)), t.Vg(vdata + i));
+    if (store_done) {
+      t.m.Branch(store_done);
+      t.m.OpenBlock(store_done);
+    }
   }
 }
 

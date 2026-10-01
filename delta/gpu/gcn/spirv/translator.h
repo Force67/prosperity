@@ -856,6 +856,7 @@ struct StageContext {
   bool is_vs_shared_lds_capable = false;
   Id vertex_index_value = 0;
   base::HashSet<u32> ds_own_lane;
+  Id subgroup_id = 0;        // SubgroupId for the compute branch reduction
   Id subgroup_local_id = 0;  // SubgroupLocalInvocationId for DS swizzles
   // Sorted instruction indices needing a barrier the guest omitted. See
   // PlanLdsBarriers.
