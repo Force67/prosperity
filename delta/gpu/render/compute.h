@@ -26,6 +26,17 @@ bool CsSupplyTexture(u64 base,
                      rhi::TextureState state,
                      u64* seq);
 
+// The same for a texture inside a raw range a dispatch wrote through a V#:
+// the tiling shader detiles the range's bytes (`tiled`) into `linear` first.
+bool CsSupplyTextureFromBuffer(u64 base,
+                               const gcn::TextureLayout32& tiled,
+                               const gcn::TextureLayout32& linear,
+                               u32 w,
+                               u32 h,
+                               rhi::Texture* img,
+                               rhi::TextureState state,
+                               u64* seq);
+
 // The buffer counterpart. When [base, base+bytes) lies inside one range a
 // dispatch wrote and has not written back, CsBufferRevision is its write
 // revision (0 otherwise) and CsSupplyBuffer copies it VRAM->`dst`+`dst_off`
@@ -48,6 +59,9 @@ void ReleaseRetiredCsBuffers();
 // on the frame command buffer. Returns false when no such range exists or the
 // shapes disagree (the caller then falls back to the guest-memory flush).
 bool CsRefreshRtFromTruth(u64 base);
+// The frame went on recording into a fresh command list (SubmitFrameChunk);
+// dispatches recorded into the frame list follow it.
+void CsFrameListChanged();
 
 // Something other than a dispatch rewrote guest memory at [base, base+bytes):
 // ranges staged from it re-read it at their next use. Flush pending dispatch

@@ -1207,14 +1207,28 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   auto image_it = g_tex_images.find(key.image);
   // A dispatch's output for this surface still in VRAM is copied straight into
   // the image; the guest bytes under it are stale and stay that way.
-  const bool cs_supplies =
+  // A raw range a dispatch wrote through a V# holds the guest layout itself.
+  gcn::TextureLayout32 linear;
+  const bool cs_image =
       (!is_3d || mip_levels == 1) &&
       CsSupplyTexture(base, layout, w, h, nullptr,
                       rhi::TextureState::kUndefined, nullptr);
+  const bool cs_buffer =
+      !cs_image && !bc && !is_3d &&
+      gcn::BuildTextureLayout32(linear, lw, lh, lpitch, layers, mip_levels, 8,
+                                pow2_pad, elem_bytes) &&
+      CsSupplyTextureFromBuffer(base, layout, linear, w, h, nullptr,
+                                rhi::TextureState::kUndefined, nullptr);
+  const bool cs_supplies = cs_image || cs_buffer;
+  const auto cs_supply = [&](rhi::Texture* img, rhi::TextureState state,
+                             u64* seq) {
+    return cs_image ? CsSupplyTexture(base, layout, w, h, img, state, seq)
+                    : CsSupplyTextureFromBuffer(base, layout, linear, w, h,
+                                                img, state, seq);
+  };
   if (cs_supplies && image_it != g_tex_images.end()) {
-    if (!CsSupplyTexture(base, layout, w, h, image_it->second.image,
-                         rhi::TextureState::kShaderRead,
-                         &image_it->second.cs_seq))
+    if (!cs_supply(image_it->second.image, rhi::TextureState::kShaderRead,
+                   &image_it->second.cs_seq))
       return nullptr;
     image_it->second.last_checked_frame = g_frame.num;
     image_it->second.hash_valid = false;
@@ -1347,9 +1361,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     if (!image_entry.image)
       return nullptr;
     const bool cs_uploaded =
-        cs_supplies &&
-        CsSupplyTexture(base, layout, w, h, image_entry.image,
-                        rhi::TextureState::kUndefined, &image_entry.cs_seq);
+        cs_supplies && cs_supply(image_entry.image,
+                                 rhi::TextureState::kUndefined,
+                                 &image_entry.cs_seq);
     if (!cs_uploaded) {  // see the refresh above: hash before the upload
       image_entry.hash = TexHash(base, footprint);
       image_entry.hash_valid = true;

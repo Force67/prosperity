@@ -1202,15 +1202,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // A pending CS write into an RT-resolved range must reach the image
       // before this draw samples it (the flush uploads it, see
       // UploadCsRangeToRt); guest-upload textures already get this from the
-      // texture cache.
-      // Whatever size the sample names, the draw binds the live image
-      // below, so the image takes the dispatch's pixels either way. Ranges
-      // stay dirty until a reader asks, often across the draws that sample
-      // them.
+      // texture cache. Only a range at the target's own base can land in its
+      // image; one it merely overlaps would be written back for nothing.
       const bool samples_target = base && g_rts.count(base);
       if (samples_target && !CsRefreshRtFromTruth(base))
-        FlushCsWritesRange(renderer, base,
-                           u64(g_rts[base].w) * g_rts[base].h * 8, "rt-tex");
+        render::FlushCsWritesAt(renderer, base, "rt-tex");
       if (base && rt_eligible && is_bound_target(base) && g_rts.count(base) &&
           g_rts[base].ever_rendered) {
         multi_feedback[i] = base;

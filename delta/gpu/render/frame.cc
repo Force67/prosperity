@@ -936,6 +936,7 @@ bool SubmitFrameChunk() {
   next->Begin();
   slot.list = next;
   g_frame.list = next;
+  CsFrameListChanged();
   g_frame.chunk_seq++;
   g_frame.draws_at_chunk = g_frame.draws;
   CmdBeginLabel(g_frame.list, "frame %llu chunk %llu",

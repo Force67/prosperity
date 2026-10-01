@@ -110,6 +110,9 @@ DELTA_OPTION(bool, kCsGpuTiling, "DELTA_GPU_CS_GPU_TILING", true);
 // queue instead of writing it back to guest memory, retiling, hashing and
 // re-uploading it. =0 restores the guest round trip.
 DELTA_OPTION(bool, kCsTexBridge, "DELTA_GPU_CS_TEX_BRIDGE", true);
+// Dispatches are recorded into the frame's own command list, in walk order
+// with the draws, instead of into batches of their own.
+DELTA_OPTION(bool, kCsInFrame, "DELTA_GPU_CS_IN_FRAME", true);
 // An image range a draw took straight from VRAM this frame (CsSupplyTexture)
 // stays there at frame end instead of being retiled into guest memory; a
 // guest reader that does turn up (CP DMA, a reshaped dispatch, a vertex
@@ -1664,14 +1667,20 @@ bool LiveInFrameTarget(u64 base, bool prefer_depth, InFrameTarget& t) {
   return false;
 }
 
-bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
+// All on the GPU: the copy goes into the frame chunk, so it needs no wait for
+// a batch still using the buffer, only that batch on the queue first.
+bool StageCsRangeFromRtInFrame(const ComputeInfo::Res& res, CsRange& e) {
   DELTA_ZONE("gpu.cs_stage_from_rt");
   InFrameTarget live;
   AliasedCopyPlan live_plan;
-  if (LiveInFrameTarget(res.base, /*prefer_depth=*/res.dfmt == 4, live) &&
-      PlanAliasedCopy(live.img, res, "reads", live_plan) &&
-      RecordRtStageInFrame(live, res, e, live_plan))
-    return true;
+  return LiveInFrameTarget(res.base, /*prefer_depth=*/res.dfmt == 4, live) &&
+         PlanAliasedCopy(live.img, res, "reads", live_plan) &&
+         RecordRtStageInFrame(live, res, e, live_plan);
+}
+
+// The host-side bridge: the buffer must be idle.
+bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
+  DELTA_ZONE("gpu.cs_stage_from_rt");
   // The draws that produced it this frame must be on the queue before the
   // copy is, or the dispatch reads last frame's pixels.
   if (RenderedInOpenChunk(res.base) && !CsSplitFrameChunk())
@@ -2728,6 +2737,7 @@ base::HashMap<rhi::Buffer*, ComputeBufferAccess> g_cs_batch_access;
 
 struct CsBatch {
   rhi::CommandList* list = nullptr;
+  bool in_frame = false;  // recorded into the frame list (kCsInFrame)
   rhi::TimestampPool* timestamps = nullptr;
   u64 submission = 0;  // the device submission carrying it
   u64 id = 0;
@@ -2901,7 +2911,13 @@ struct WaitReaderScope {
 // Open the batch command buffer. Staging copies are recorded into the same
 // buffer as the dispatches, so this has to be callable before the first one.
 void CsBatchBeginImpl() {
-  if (g_cs_batch_open || !CsBatchInit())
+  if (g_cs_batch_open) {
+    // Draws may have opened a render pass on the shared list since.
+    if (g_cs_batches[g_cs_batch_cur].in_frame)
+      EndRegion();
+    return;
+  }
+  if (!CsBatchInit())
     return;
   CsBatchReap();
   CsBatch& b = g_cs_batches[g_cs_batch_cur];
@@ -2916,10 +2932,21 @@ void CsBatchBeginImpl() {
     g_cs_sync_n[kSyncRingFull]++;
     g_cs_sync_ns[kSyncRingFull] += NowNs() - t0;
   }
-  g_cs_list = b.list;
   g_cs_timestamps = b.timestamps;
   b.id = g_cs_batch_next_id++;
   g_cs_batch_id = b.id;
+  b.in_frame = kCsInFrame && g_frame.recording;
+  if (b.in_frame) {
+    EndRegion();
+    g_cs_list = g_frame.list;
+    if (g_cs_timestamps)
+      g_cs_list->ResetTimestamps(g_cs_timestamps, 0, 256);
+    // Whatever the draws recorded so far did, the dispatches see it.
+    g_cs_list->Barrier(kAccessAll, kAccessAll);
+    g_cs_batch_open = true;
+    return;
+  }
+  g_cs_list = b.list;
   g_cs_list->Begin();
   if (g_cs_timestamps)
     g_cs_list->ResetTimestamps(g_cs_timestamps, 0, 256);
@@ -2987,15 +3014,26 @@ bool CsBatchSubmit() {
       return false;
     }
   }
-  if (Device().caps().debug_labels)
+  if (Device().caps().debug_labels && !b.in_frame)
     g_cs_list->PopLabel();  // close the "cs batch" scope
   b.count = g_cs_batch_count;
   b.log = base::move(g_cs_batch_log);
   g_cs_batch_log.clear();
-  g_cs_list->End();
   // A failed submit returns an id that has already been handed out.
   const u64 before = Device().LastSubmission();
-  b.submission = Device().Submit(g_cs_list);
+  if (b.in_frame) {
+    // The batch rides in the frame chunk: submitting it submits the draws
+    // recorded around it too, in order.
+    g_cs_batch_open = false;
+    if (!SubmitFrameChunk()) {
+      g_cs_failed = true;
+      return false;
+    }
+    b.submission = g_frame.slots[g_frame.slot_idx].submission;
+  } else {
+    g_cs_list->End();
+    b.submission = Device().Submit(g_cs_list);
+  }
   g_cs_batch_open = false;
   g_cs_chunk_needs_batch = false;
   g_cs_batch_count = 0;
@@ -3096,6 +3134,9 @@ void CsStageReadbacks(bool all = true) {
 // Submit the frame's open chunk, behind the open batch when the chunk copies
 // out of a range that batch writes.
 bool CsSplitFrameChunk() {
+  // One list: the chunk and every batch are already in order.
+  if (kCsInFrame && g_frame.recording)
+    return true;
   if (g_cs_chunk_needs_batch && (++g_submit_why[1], !CsBatchSubmit()))
     return false;
   if (!SubmitFrameChunk())
@@ -4038,6 +4079,85 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
     g_cs_chunk_needs_batch = true;
   g_buf_bridge_n++;
   g_buf_bridge_bytes += bytes;
+  return true;
+}
+
+bool CsSupplyTextureFromBuffer(u64 base,
+                               const gcn::TextureLayout32& tiled,
+                               const gcn::TextureLayout32& linear,
+                               u32 w,
+                               u32 h,
+                               rhi::Texture* img,
+                               rhi::TextureState state,
+                               u64* seq) {
+  u64 range_base;
+  CsRange* const found = BufferSource(base, tiled.size, &range_base);
+  if (!found || linear.mip_levels > 16 || linear.mips[0].width != w ||
+      linear.mips[0].height != h ||
+      (img && img->desc().dim == rhi::TextureDim::k3D))
+    return false;
+  CsRange& e = *found;
+  const TileTable* table = GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4);
+  if (!table)
+    return false;
+  if (!img)
+    return true;
+  e.last_used_frame = g_frame.num;
+  if (*seq == e.write_seq)
+    return true;
+  // As for CsSupplyBuffer: the bytes around the output are the staged guest
+  // bytes, so they must still be what the guest holds.
+  const u64 off = base - range_base;
+  if (!e.shadow_valid || e.shadow.size() < off + tiled.size ||
+      std::memcmp(e.shadow.data() + off, reinterpret_cast<const void*>(base),
+                  tiled.size)) {
+    g_buf_bridge_declined++;
+    return false;
+  }
+  rhi::BufferTextureCopy copies[16];
+  for (u32 mip = 0; mip < linear.mip_levels; mip++) {
+    const auto& level = linear.mips[mip];
+    copies[mip].buffer_offset = level.offset;
+    copies[mip].row_length = level.pitch;
+    copies[mip].image_height = level.stored_height;
+    copies[mip].region.mip = mip;
+    copies[mip].region.layers = linear.layers;
+    copies[mip].region.width = level.width;
+    copies[mip].region.height = level.height;
+  }
+  EndRegion();
+  rhi::CommandList* const list = g_frame.list;
+  list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+                rhi::kAccessCopyRead);
+  g_cs_scratch_owner++;
+  bool fresh = true;
+  rhi::Buffer* src = AcquireView(linear.size, range_base, off, table,
+                                 e.write_seq, &fresh);
+  if (!src)
+    return false;
+  if (fresh) {
+    RecordImageTiling(list, *table, e.buf, off, tiled.size, src, linear.size,
+                      /*detile=*/true);
+    StampView(src, range_base, off, table, e.write_seq);
+  }
+  rhi::TextureBarrier b;
+  b.texture = img;
+  b.before = state;
+  b.after = rhi::TextureState::kCopyDst;
+  b.range.mips = linear.mip_levels;
+  b.range.layers = linear.layers;
+  list->Barrier(0, 0, &b, 1);
+  list->CopyBufferToTexture(img, src, copies, linear.mip_levels);
+  b.before = rhi::TextureState::kCopyDst;
+  b.after = rhi::TextureState::kShaderRead;
+  list->Barrier(0, 0, &b, 1);
+  *seq = e.write_seq;
+  e.frame_ref = g_frame.num;
+  e.chunk_ref = g_frame.chunk_seq;
+  if (e.pending_batch)
+    g_cs_chunk_needs_batch = true;
+  g_tex_bridge_n++;
+  g_tex_bridge_bytes += tiled.size;
   return true;
 }
 
@@ -5498,15 +5618,23 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           return CsDeclined(ci, "15");
         }
         e.pending_batch = false;
-      } else if (!CsBatchWaitRange(e, kSyncStageHazard)) {
+      } else if (rt_attempt && e.pending_batch && g_cs_batch_open &&
+                 e.batch_id >= g_cs_batch_id) {
+        g_cs_chunk_needs_batch = true;
+      }
+      bool staged_in_frame = false;
+      if (rt_attempt) {
+        e.last_rt_frame = static_cast<int>(g_frame.num);
+        e.rt_serial = AliasedImageRenderSerial(base);
+        staged_in_frame = StageCsRangeFromRtInFrame(ci.res[i], e);
+      }
+      if (!staged_in_frame && !CsBatchWaitRange(e, kSyncStageHazard)) {
         renderer.state = nullptr;
         return CsDeclined(ci, "16");
       }
       if (rt_attempt) {
-        e.last_rt_frame = static_cast<int>(g_frame.num);
-        e.rt_serial = AliasedImageRenderSerial(base);
         const u64 tr = NowNs();
-        e.rt_sourced = StageCsRangeFromRt(ci.res[i], e);
+        e.rt_sourced = staged_in_frame || StageCsRangeFromRt(ci.res[i], e);
         g_in_rt_ns += NowNs() - tr;
         g_in_rt_n++;
         // DELTA_GPU_CSRT: trace every RT-backed staging decision.
@@ -6097,6 +6225,11 @@ void ReportGpuMemory() {
             g_rts.size(), rt / kMb, rt_parked / kMb, depth / kMb);
 }
 
+void CsFrameListChanged() {
+  if (g_cs_batch_open && g_cs_batches[g_cs_batch_cur].in_frame)
+    g_cs_list = g_frame.list;
+}
+
 bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
   DELTA_ZONE("gpu.cs_flush_frame_end");
   ReportGpuMemory();
@@ -6273,7 +6406,7 @@ bool FlushCsWritesRange(Renderer& renderer,
   }
   auto overlapping = DirtyRangesOverlapping(base, bytes);
   SortByDirtyOrder(overlapping);
-  if (kCsSyncReport && (!std::strcmp(why, "rt-bind") || !std::strcmp(why, "rt-tex"))) {
+  if (kCsSyncReport) {
     static int shown = 0;
     for (u64 d : overlapping) {
       auto f = g_cs_ranges.find(d);
