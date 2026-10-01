@@ -137,6 +137,9 @@ bool EndImmediate(rhi::CommandList* list, const char* why) {
 
 namespace {
 DELTA_OPTION(bool, kPassProf, "DELTA_GPU_PASSPROF", false);
+// DELTA_GPU_DRAWPROF=1: the same report per draw, keyed by pixel shader, in
+// place of the per-target one.
+DELTA_OPTION(bool, kDrawProf, "DELTA_GPU_DRAWPROF", false);
 #if defined(DELTA_TRACY)
 constexpr bool kTracyBuilt = true;  // regions go on the Tracy GPU timeline
 #else
@@ -169,7 +172,7 @@ void CollectPassTimes(FrameSlot& slot) {
     timeline::Time(mark.query, read ? stamps[i * 2] : 0);
     timeline::Time(mark.query + 1, read ? stamps[i * 2 + 1] : 0);
   }
-  if (read && kPassProf) {
+  if (read && (kPassProf || kDrawProf)) {
     const rhi::Caps& caps = Device().caps();
     const u64 mask = caps.timestamp_bits >= 64
                          ? UINT64_MAX
@@ -183,7 +186,7 @@ void CollectPassTimes(FrameSlot& slot) {
     }
   }
   slot.pass_marks.clear();
-  if (!kPassProf || ++g_pass_frames < 120)
+  if (!(kPassProf || kDrawProf) || ++g_pass_frames < 120)
     return;
   base::Vector<base::Pair<u64, PassTotal>> sorted;
   for (const auto& [target, pass] : g_pass_totals)
@@ -194,9 +197,10 @@ void CollectPassTimes(FrameSlot& slot) {
   double total = 0;
   for (const auto& [target, t] : sorted)
     total += t.ns;
-  BASE_LOGI("passprof", "regions {:.2f} ms/frame over {} targets",
-            total / g_pass_frames / 1e6, sorted.size());
-  for (size_t i = 0; i < sorted.size() && i < 16; i++) {
+  BASE_LOGI("passprof", "{} {:.2f} ms/frame over {} {}",
+            kDrawProf ? "draws" : "regions", total / g_pass_frames / 1e6,
+            sorted.size(), kDrawProf ? "pixel shaders" : "targets");
+  for (size_t i = 0; i < sorted.size() && i < 24; i++) {
     const PassTotal& t = sorted[i].second;
     BASE_LOGI("passprof", "  {:#x} {:.2f} ms/f  passes={:.1f}/f draws={:.0f}/f",
               (unsigned long long)sorted[i].first, t.ns / g_pass_frames / 1e6,
@@ -208,7 +212,30 @@ void CollectPassTimes(FrameSlot& slot) {
 }
 }  // namespace
 
+void DrawProfBegin(u64 ps) {
+  FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
+  if (!kDrawProf || !slot.pass_timestamps ||
+      slot.pass_marks.size() >= kMaxProfiledPasses)
+    return;
+  g_pass_open = static_cast<u32>(slot.pass_marks.size());
+  g_pass_draws_at_open = g_frame.draws;
+  slot.pass_marks.push_back({ps, 0, false, 0});
+  g_frame.list->WriteTimestamp(slot.pass_timestamps, g_pass_open * 2, true);
+}
+
+void DrawProfEnd() {
+  if (!kDrawProf || g_pass_open == ~0u)
+    return;
+  FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
+  slot.pass_marks[g_pass_open].draws = 1;
+  g_frame.list->WriteTimestamp(slot.pass_timestamps, g_pass_open * 2 + 1,
+                               false);
+  g_pass_open = ~0u;
+}
+
 void PassProfBegin(u64 target) {
+  if (kDrawProf)
+    return;
   FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
   if (!slot.pass_timestamps || slot.pass_marks.size() >= kMaxProfiledPasses)
     return;
@@ -228,7 +255,7 @@ void PassProfBegin(u64 target) {
 }
 
 void PassProfEnd() {
-  if (g_pass_open == ~0u)
+  if (kDrawProf || g_pass_open == ~0u)
     return;
   FrameSlot& slot = g_frame.slots[g_frame.slot_idx];
   FrameSlot::PassMark& mark = slot.pass_marks[g_pass_open];

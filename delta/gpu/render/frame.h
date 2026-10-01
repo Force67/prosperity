@@ -88,6 +88,9 @@ bool FramePipelined();
 // first target; PassProfEnd closes it. No-ops when the knob is off.
 void PassProfBegin(u64 target);
 void PassProfEnd();
+// DELTA_GPU_DRAWPROF: GPU time of one draw, totalled per pixel shader.
+void DrawProfBegin(u64 ps);
+void DrawProfEnd();
 // Grow the active slot's readback buffer to hold one w*h image of `fmt`.
 void EnsureReadback(u32 w, u32 h, rhi::Format fmt);
 

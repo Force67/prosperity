@@ -1967,6 +1967,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     g_region.write_through = d.rt_base;
     g_region.write_through_tile = d.rt_tile_mode;
   }
+  DrawProfBegin(d.ps_addr);
   if (mesh)
     list->DrawMeshTasks((draw_count - 1) / d.recomp->mesh_input_primitives + 1,
                         d.instance_count ? d.instance_count : 1, 1);
@@ -1975,6 +1976,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                       d.instance_count ? d.instance_count : 1, 0, 0, 0);
   else
     list->Draw(d.vertex_count, d.instance_count ? d.instance_count : 1, 0, 0);
+  DrawProfEnd();
   DrawCheckpoint(g_frame.list, g_frame.num, g_frame.draws, true);
   // DELTA_GPU_DRAWSEQ=<n>: the first n draws of the run in record order, with
   // the frame they belong to, since the per-frame filters cannot show that a
