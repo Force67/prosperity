@@ -62,6 +62,8 @@ endif()
 
 # Header-only BC6H decoder used by compute image staging.
 target_include_directories(delta_gpu PRIVATE ${CMAKE_SOURCE_DIR}/vendor/bcdec)
+# Use the vendored xxHash header independently of the optional Tracy client.
+target_include_directories(delta_gpu PRIVATE ${CMAKE_SOURCE_DIR}/vendor/tracy/server)
 
 # Layering: the command processors (ps4/, ps5/) talk to render/, the renderer
 # runs on rhi/ alone, and vulkan/, opengl/ and d3d12/ implement rhi/. Every

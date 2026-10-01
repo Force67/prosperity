@@ -3,8 +3,8 @@
  */
 #pragma once
 
-// Hashing shared by the renderer caches: FNV-1a mixing for descriptor keys, and
-// a content fingerprint for a range of guest memory.
+// FNV-1a mixing for descriptor keys and xxHash content fingerprints for the
+// renderer's in-memory caches.
 
 #include "base/arch.h"
 

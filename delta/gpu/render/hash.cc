@@ -10,40 +10,43 @@
 #include "base/containers/vector.h"
 #include "base/math/value_bounds.h"
 
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#include <immintrin.h>
+#define XXH_X86DISPATCH
+#define XXH_DISPATCH_AVX2 1
+#define XXH_TARGET_AVX2 __attribute__((target("avx2")))
+#endif
+#define XXH_INLINE_ALL
+#include <tracy_xxhash.h>
+
 namespace gpu::render {
 
 namespace {
 constexpr u64 kHashPrime = 1099511628211ull;
 // Below this a sweep stays on the calling thread.
 constexpr u64 kParallelBytes = 2ull << 20;
+
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2"))) u64 HashLongAvx2(const void* data,
+                                                 u64 bytes,
+                                                 u64 seed) {
+  return XXH3_hashLong_64b_withSeed_internal(
+      data, bytes, seed, XXH3_accumulate_avx2, XXH3_scrambleAcc_avx2,
+      XXH3_initCustomSecret_avx2);
+}
+#endif
+
+u64 HashBytes(const void* data, u64 bytes, u64 seed = 0) {
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+  if (bytes > XXH3_MIDSIZE_MAX && __builtin_cpu_supports("avx2"))
+    return HashLongAvx2(data, bytes, seed);
+#endif
+  return XXH3_64bits_withSeed(data, bytes, seed);
+}
 }  // namespace
 
-// frame per texture unless a compute write explicitly invalidates the
-// resource, and big atlases make it the dominant per-frame CPU cost, so it
-// runs four independent FNV lanes over 64-bit words (instead of one dependent
-// multiply per dword) to break the serial multiply chain and go memory-bound.
 u64 TexHashRange(u64 base, u64 bytes) {
-  constexpr u64 kPrime = kHashPrime;
-  const u64* w = reinterpret_cast<const u64*>(base);
-  const u64 nw = bytes / 8;
-  u64 h0 = 1469598103934665603ull, h1 = 0x9e3779b97f4a7c15ull,
-      h2 = 0xc2b2ae3d27d4eb4full, h3 = 0x165667b19e3779f9ull;
-  u64 i = 0;
-  for (; i + 4 <= nw; i += 4) {
-    h0 = (h0 ^ w[i + 0]) * kPrime;
-    h1 = (h1 ^ w[i + 1]) * kPrime;
-    h2 = (h2 ^ w[i + 2]) * kPrime;
-    h3 = (h3 ^ w[i + 3]) * kPrime;
-  }
-  for (; i < nw; i++)
-    h0 = (h0 ^ w[i]) * kPrime;
-  if (const u64 tail = bytes & 7) {
-    u64 last = 0;
-    std::memcpy(&last, reinterpret_cast<const u8*>(base) + bytes - tail, tail);
-    h1 = (h1 ^ last) * kPrime;
-  }
-  u64 h = ((h0 * kPrime + h1) * kPrime + h2) * kPrime + h3;
-  return h ^ (bytes << 1);
+  return HashBytes(reinterpret_cast<const void*>(base), bytes);
 }
 
 u64 TexHashCombine(const u64* parts, u64 count, u64 bytes) {
@@ -55,9 +58,8 @@ u64 TexHashCombine(const u64* parts, u64 count, u64 bytes) {
   return h ^ (bytes << 1);
 }
 
-// One core sweeps ~2.5 GB/s of cold texture memory, and a compute-heavy title
-// re-hashes over a hundred megabytes a frame. Chunking is by byte offset only,
-// so the result is independent of how the work is spread.
+// Chunking is by byte offset only, so the result is independent of how the
+// work is spread, including hashes assembled during compute writeback.
 u64 TexHash(u64 base, u64 bytes) {
   if (bytes < kParallelBytes)
     return TexHashSerial(base, bytes);
@@ -85,18 +87,14 @@ u64 TexHashSerial(u64 base, u64 bytes) {
 }
 
 u64 TexSampleHash(u64 base, u64 bytes) {
-  constexpr u64 kPrime = 1099511628211ull;
   if (bytes <= 16384)
     return TexHash(base, bytes);
-  u64 h = 1469598103934665603ull ^ (bytes * kPrime);
+  u8 samples[256 * 64];
   const u64 step = (bytes - 64) / 255;
-  for (u32 i = 0; i < 256; i++) {
-    u64 w[8];
-    std::memcpy(w, reinterpret_cast<const void*>(base + i * step), 64);
-    for (int j = 0; j < 8; j++)
-      h = (h ^ w[j]) * kPrime;
-  }
-  return h;
+  for (u32 i = 0; i < 256; i++)
+    std::memcpy(samples + i * 64,
+                reinterpret_cast<const void*>(base + i * step), 64);
+  return HashBytes(samples, sizeof(samples), bytes);
 }
 
 }  // namespace gpu::render

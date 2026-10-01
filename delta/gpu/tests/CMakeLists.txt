@@ -89,6 +89,12 @@ add_delta_test(render_compute_hazard_test
     render_compute_hazard_test.cc
   DEPS delta_deps)
 
+add_delta_test(render_hash_test
+  SOURCES render_hash_test.cc
+  DEPS delta_gpu)
+target_include_directories(render_hash_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/vendor/tracy/server)
+
 add_delta_test(render_index_upload_test
   SOURCES
     render_index_upload_test.cc
