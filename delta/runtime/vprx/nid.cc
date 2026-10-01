@@ -5,6 +5,7 @@
 
 #include <cstring>
 
+#include "base/containers/array.h"
 #include "crypto/sha1.h"
 
 namespace runtime::nid {
@@ -26,15 +27,17 @@ void ObfuscateSym(u64 in, u8* out, size_t xlen) {
 }  // namespace
 
 bool Decode(const char* subset, size_t len, u64& out) {
+  static const auto kIndex = [] {
+    base::Array<u8, 256> index;
+    index.fill(0xff);
+    for (u32 i = 0; i < 64; i++)
+      index[static_cast<u8>(kBase64Lookup[i])] = static_cast<u8>(i);
+    return index;
+  }();
   for (size_t i = 0; i < len; i++) {
-    auto pos = std::strchr(kBase64Lookup, subset[i]);
-
-    // invalid NID?
-    if (!pos) {
+    const u32 offset = kIndex[static_cast<u8>(subset[i])];
+    if (offset == 0xff)
       return false;
-    }
-
-    auto offset = static_cast<u32>(pos - kBase64Lookup);
 
     // max NID is 11
     if (i < 10) {

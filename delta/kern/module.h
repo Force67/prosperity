@@ -12,6 +12,7 @@
 #include "elf_types.h"
 #include "sce_types.h"
 
+#include "base/containers/hash_map.h"
 #include "base/containers/vector.h"
 #include "base/memory/unique_pointer.h"
 #include "base/strings/xstring.h"
@@ -196,6 +197,11 @@ class Module {
 
   Table strtab_;
   Table symtab_;
+
+  // NID -> st_value of every defined symbol, built at the first GetExport:
+  // every import of every module asks every loaded module.
+  base::HashMap<u64, u64> export_index_;
+  bool export_index_built_ = false;
 
   u32 num_jmp_slots_ = 0;
   u32 num_symbols_ = 0;

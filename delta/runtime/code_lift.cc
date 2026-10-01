@@ -14,6 +14,7 @@
 
 #include <xbyak.h>
 #include <cstdio>
+#include <cstring>
 #include "base/arch.h"
 #include "base/logging.h"
 #include "base/math/alignment.h"
@@ -105,73 +106,72 @@ static bool IsBmi1Instruction(int op) {
 };
 
 bool CodeLift::Transform(u8* data, size_t size, u64 base) {
-  insn_ = cs_malloc(handle_);
+  if (!insn_)
+    insn_ = cs_malloc(handle_);
+  // Executable PT_LOAD segments interleave code with rodata, and only two
+  // shapes need rewriting, so search their bytes instead of disassembling
+  // everything (a full Capstone sweep of a 500 MB eboot took most of boot).
+  // Each candidate is then decoded on its own; the rewriters bail on anything
+  // they don't recognise.
+  auto decode_at = [&](size_t off) {
+    const u8* code = data + off;
+    size_t left = size - off;
+    uint64_t addr = base + off;
+    return cs_disasm_iter(handle_, &code, &left, &addr, insn_);
+  };
 
-  const u8* code_ptr = data;  // iterator
-  uint64_t addr = base;       // capstone's own cursor type
-  // Executable PT_LOAD segments interleave code with rodata (strings,
-  // constants, jump tables) that capstone can't decode. A plain linear sweep
-  // stops dead at the first such blob, leaving every later instruction
-  // un-lifted; that code still runs natively, so its raw `syscall`/`int`/`mov
-  // fs:[..]` hit the host CPU (an un-lifted guest TLS write corrupts the host
-  // fs base). Resync past the undecodable byte so code after a data blob is
-  // lifted too. The rewriters below bail (rather than trap) on anything they
-  // don't recognise, so a data byte that briefly mis-decodes as a syscall/fs
-  // access is left untouched.
-  while (size > 0) {
-    if (!cs_disasm_iter(handle_, &code_ptr, &size, &addr, insn_)) {
-      ++code_ptr;
-      --size;
-      ++addr;
+  // Whether a linear sweep from a little before `target` lands on it: x86
+  // decoding resynchronises within a few instructions, so this is where the
+  // full sweep would have put an instruction boundary.
+  auto starts_at = [&](size_t target) {
+    size_t off = target > 512 ? target - 512 : 0;
+    while (off < target)
+      off += decode_at(off) ? insn_->size : 1;
+    return off == target;
+  };
+  auto legacy_prefix = [](u8 b) {
+    return b == 0x66 || b == 0x67 || b == 0xf2 || b == 0xf3 || b == 0x2e ||
+           b == 0x3e || b == 0x26 || b == 0x36 || b == 0x65 || b == 0xf0;
+  };
+
+  // `mov fs:[disp], reg` / `mov reg, fs:[disp]`, which may carry more legacy
+  // prefixes before the fs one (a REX prefix must sit right before the
+  // opcode, so never before it). The patch covers the whole instruction.
+  for (const u8* p = data; (p = static_cast<const u8*>(
+                                std::memchr(p, 0x64, data + size - p)));
+       p++) {
+    size_t off = p - data;
+    if (!decode_at(off) || insn_->id != X86_INS_MOV)
       continue;
-    }
-
-    auto detail = insn_->detail->x86;
-    // u32 dest = static_cast<u32>(X86_REL_ADDR(*insn));
-
-    auto get_ops = [&](i32 ofs) { return &data[insn_->address + ofs]; };
-
-    /*syscall -> custom handler*/
-    if (insn_->id == X86_INS_SYSCALL) {
-      // EmitSyscall writes 10 bytes before the insn (the `mov rax,imm/jmp` it
-      // builds over the `mov eax,nr; syscall` pair); skip if that would
-      // underflow. It also no-ops unless the preceding bytes form a known
-      // syscall number, so a stray `0f 05` in resync'd data is left alone.
-      if (insn_->address >= 10)
-        EmitSyscall(get_ops(-10), *(u32*)(get_ops(-7)));
-    }
-
-    // `int` is intentionally NOT rewritten: turning every `cd xx` (common in
-    // the rodata the resync sweeps over) into a breakpoint would mass-corrupt
-    // data, and it bought nothing (a raw guest `int 0x41` already faults like
-    // int3). A reached SDK assert stays fatal; handle it in the signal path if
-    // needed.
-
-    /*fs base (tls) access*/
-    else {
-      /*idea inspired by uplift*/
-      bool is_tls = false;
-
-      for (u8 i = 0; i < insn_->detail->x86.op_count; i++) {
-        auto operand = insn_->detail->x86.operands[i];
-        if (operand.type == X86_OP_MEM) {
-          if (operand.mem.segment == X86_REG_FS) {
-            is_tls = true;
-            break;
-          } else if (operand.mem.segment == X86_REG_DS ||
-                     operand.mem.segment == X86_REG_ES ||
-                     operand.mem.segment == X86_REG_GS) {
-            //__builtin_trap();
-          }
-        }
+    size_t first = off;
+    while (first && off - first < 14 && legacy_prefix(data[first - 1]))
+      first--;
+    while (first < off && !starts_at(first))
+      first++;
+    if (first == off && !starts_at(off))
+      continue;
+    off = first;
+    if (!decode_at(off) || insn_->id != X86_INS_MOV)
+      continue;
+    const auto& x = insn_->detail->x86;
+    for (u8 i = 0; i < x.op_count; i++)
+      if (x.operands[i].type == X86_OP_MEM &&
+          x.operands[i].mem.segment == X86_REG_FS) {
+        EmitFsbase(data + off);
+        break;
       }
-
-      if (is_tls && insn_->id == X86_INS_MOV) {
-        EmitFsbase(get_ops(0));
-      }
-    }
   }
 
+  // libkernel's stub: `mov rax, imm32; mov r10, rcx; syscall`.
+  static constexpr u8 kMovRax[] = {0x48, 0xc7, 0xc0};
+  static constexpr u8 kSyscall[] = {0x0f, 0x05};
+  for (u8* p = data + 10; p + 2 <= data + size; p++) {
+    p = static_cast<u8*>(memmem(p, data + size - p, kSyscall, 2));
+    if (!p)
+      break;
+    if (!std::memcmp(p - 10, kMovRax, sizeof(kMovRax)))
+      EmitSyscall(p - 10, *reinterpret_cast<u32*>(p - 7));
+  }
   return false;
 }
 
@@ -273,6 +273,8 @@ void CodeLift::EmitFsbase(u8* base) {
   if (rip_end_ && rip_pointer_ + aligned_size > rip_end_)
     return;
 
+  if (kSysliftTrace)
+    BASE_LOGI("fslift", "site={:p} size={}", (void*)base, insn_->size);
   base[0] = 0xE9;
   auto disp = static_cast<u32>(rip_pointer_ - &base[5]);
   *reinterpret_cast<u32*>(&base[1]) = disp;

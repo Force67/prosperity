@@ -473,7 +473,9 @@ void Module::PlantGuestBreakpoints() {
     const size_t colon = tok.find(':');
     if (colon == base::String::npos)
       continue;
-    if (info_.name.find(tok.substr(0, colon)) == base::String::npos)
+    // The main executable is not named yet when its image is mapped.
+    const base::String name = info_.name.empty() ? "eboot" : info_.name;
+    if (name.find(tok.substr(0, colon)) == base::String::npos)
       continue;
     const u64 off = std::strtoull(tok.c_str() + colon + 1, nullptr, 16);
     if (off >= info_.code_size)
@@ -1113,16 +1115,20 @@ uintptr_t Module::GetSymbol(u64 nid) {
 }
 
 uintptr_t Module::GetExport(u64 nid) {
-  for (u32 i = 0; i < num_symbols_; i++) {
-    const auto* s = &symbols_[i];
-    if (!s->st_value)
-      continue;
-    const char* name = &strtab_.ptr[s->st_name];
-    u64 hid = 0;
-    if (runtime::nid::Decode(name, 11, hid) && nid == hid)
-      return GetAddressNptr<uintptr_t>(s->st_value);
+  if (!export_index_built_ && num_symbols_) {
+    export_index_built_ = true;
+    for (u32 i = 0; i < num_symbols_; i++) {
+      const auto* s = &symbols_[i];
+      u64 hid = 0;
+      if (s->st_value &&
+          runtime::nid::Decode(&strtab_.ptr[s->st_name], 11, hid))
+        export_index_.emplace(hid, s->st_value);
+    }
   }
-  return 0;
+  const auto it = export_index_.find(nid);
+  return it == export_index_.end()
+             ? 0
+             : GetAddressNptr<uintptr_t>(it->second);
 }
 
 uintptr_t Module::GetSymbolFullName(const char* name) {
