@@ -14,4 +14,6 @@ void PublishLabel(base::Function<void()> write);
 // Returns once every held write has run: for the walk, before it reads guest
 // memory a held write may target.
 void DrainLabels();
+// What the held writes wait for (a stuck waitOnAddress reports it).
+void ReportHeldLabels();
 }  // namespace gpu::ps5

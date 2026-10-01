@@ -1,6 +1,9 @@
 #include "gpu/ps5/label_publisher.h"
 
 #include "base/containers/vector.h"
+#include "base/logging.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
 #include "base/memory/move.h"
 #include "base/memory/unique_pointer.h"
 #include "base/threading/condition_variable.h"
@@ -65,6 +68,16 @@ void PublishLabel(base::Function<void()> write) {
     write();
   else
     g_wake.NotifyAll();
+}
+
+void ReportHeldLabels() {
+  base::LockGuard<base::Mutex> lock(g_lock);
+  base::String line;
+  for (size_t i = g_head; i < g_held.size() && i < g_head + 8; i++)
+    base::FormatTo(line, " {}", g_held[i].batch);
+  BASE_LOGW("agc", "held labels: {} waiting on batches [{} ]",
+            g_held.size() - g_head, line.c_str());
+  render::ReportBatchState();
 }
 
 void DrainLabels() {

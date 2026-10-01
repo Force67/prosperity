@@ -16,6 +16,9 @@ namespace gpu::gcn {
 
 // Compute planner bound; the renderer also checks device descriptor limits.
 inline constexpr u32 kMaxCsResources = 128;
+// Set-0 binding of a compute shader's first natively bound image; the storage
+// buffers, the GDS and the guest-memory table sit below it.
+inline constexpr u32 kCsTexBindingBase = 192;
 
 // Wave blocks in the shared-LDS storage buffer; the wave id wraps into it.
 inline constexpr u32 kLdsWaves = 1024;
@@ -240,6 +243,13 @@ struct RecompiledCs {
   int gds_binding = -1;  // GDS scratchpad (ds_append/consume), not guest memory
   int guest_memory_binding = -1;
   bool guest_memory_written = false;
+  // Resources (by binding, below 64) a variant may bind as real images: read
+  // only, through forms the image emitter covers.
+  u64 native_candidates = 0;
+  // Per image-plan binding: its set-0 binding when this module binds the image
+  // natively, else -1. Empty when every image is staged.
+  base::Vector<int> textures;
+  u64 textures_3d = 0;  // bit n: plan binding n is declared a volume
 };
 
 // Recompile a compute shader; ok=false on unimplemented features, which the

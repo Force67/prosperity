@@ -73,6 +73,8 @@ struct ComputeKey {
   u32 user_sgpr = 0, tgid_enable = 0, lds_dwords = 0;
   bool trap_present = false;
   bool wave32 = false;
+  u64 native_mask = 0, uint_mask = 0;
+  bool plan_only = false;
 
   bool operator==(const ComputeKey& other) const = default;
 };
@@ -88,6 +90,9 @@ struct ComputeKeyHash {
     MixHash(h, key.lds_dwords);
     MixHash(h, key.trap_present);
     MixHash(h, key.wave32);
+    MixHash(h, key.native_mask);
+    MixHash(h, key.uint_mask);
+    MixHash(h, key.plan_only);
     return static_cast<size_t>(h);
   }
 };
@@ -192,7 +197,10 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
   return rc;
 }
 
-const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
+const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state,
+                                          u64 native_mask,
+                                          u64 uint_mask,
+                                          bool plan_only) {
   static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash> cache;
   const ComputeKey key{
       CodeHash(state.cs_addr, rdna::ComputeCodeDwords(
@@ -204,7 +212,10 @@ const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
       state.tgid_enable,
       state.lds_dwords,
       state.trap_present,
-      state.wave32};
+      state.wave32,
+      native_mask,
+      uint_mask,
+      plan_only};
   auto it = cache.find(key);
   if (it != cache.end())
     return it->second;
@@ -214,7 +225,8 @@ const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
                         reinterpret_cast<const u32*>(state.cs_addr),
                         state.thread_x, state.thread_y, state.thread_z,
                         state.user_sgpr, state.tgid_enable, state.lds_dwords,
-                        state.trap_present, state.wave32))
+                        state.trap_present, state.wave32, native_mask,
+                        uint_mask, plan_only))
       .first->second;
 }
 

@@ -33,7 +33,18 @@ u32 ComputeCodeDwords(const u32* code) {
 namespace gpu::rdna {
 
 gpu::gcn::RecompiledCs
-RecompileCompute(const u32*, u32, u32, u32, u32, u32, u32, bool, bool) {
+RecompileCompute(const u32*,
+                 u32,
+                 u32,
+                 u32,
+                 u32,
+                 u32,
+                 u32,
+                 bool,
+                 bool,
+                 u64,
+                 u64,
+                 bool) {
   return {};  // no SPIR-V backend: the caller skips the dispatch
 }
 
@@ -675,6 +686,57 @@ bool NeedsWaveLockstep(const Program& program) {
   return lds == 3;
 }
 
+// The MIMG forms a natively bound image serves: the shared emitter's fetches
+// and level-explicit samples, and the compare/offset/gather forms
+// EmitLoweredMimg reduces to them. gather4_l is not one: its taps are point
+// samples, which a filtering sampler would blend.
+bool NativeMimgForm(u32 op) {
+  switch (op) {
+    case 0x00:
+    case 0x01:
+    case 0x24:
+    case 0x27:
+    case 0x2c:
+    case 0x2f:
+    case 0x34:
+    case 0x37:
+    case 0x47:
+    case 0x57:
+    case 0x5f:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Image resources every use of which a real sampled view can serve: never
+// written, no cube addressing (whose face bias the staged path keeps), and no
+// control bits the emitter does not model.
+u64 NativeImageCandidates(const Program& program,
+                          const RecompiledCs& r,
+                          const base::HashMap<u32, u32>& bind) {
+  u64 ok = 0, bad = 0;
+  for (const Inst& inst : program) {
+    if (inst.enc != Enc::kMimg)
+      continue;
+    const auto it = bind.find(inst.pc);
+    if (it == bind.end() || it->second >= 64)
+      continue;
+    const u32 w = inst.raw[0], w1 = inst.raw[1];
+    const u32 dim = (w >> 3) & 0x7;
+    const bool plain = !((w >> 12) & 1) && !((w >> 15) & 0x7) &&
+                       !((w1 >> 30) & 0x3);  // unrm, r128/tfe/lwe, a16/d16
+    (NativeMimgForm(inst.opcode) && plain && dim <= 5 && dim != 3 ? ok : bad) |=
+        1ull << it->second;
+  }
+  u64 out = ok & ~bad;
+  for (const CsResource& res : r.resources)
+    if (res.binding < 64 && (res.kind != 1 || res.written || res.runtime_image ||
+                             res.runtime_address))
+      out &= ~(1ull << res.binding);
+  return out;
+}
+
 bool TranslateCs(const Program& program,
                  u32 num_thread_x,
                  u32 num_thread_y,
@@ -683,6 +745,9 @@ bool TranslateCs(const Program& program,
                  u32 tgid_enable,
                  u32 lds_dwords,
                  bool wave32,
+                 u64 native_mask,
+                 u64 uint_mask,
+                 bool plan_only,
                  RecompiledCs& r,
                  Translator& t) {
   if (program.empty())
@@ -694,6 +759,34 @@ bool TranslateCs(const Program& program,
   if (!PlanResources(program, sc.lds_dwords, user_sgpr, r, sc.cs_bind) ||
       r.resources.empty())
     return false;
+  r.native_candidates = NativeImageCandidates(program, r, sc.cs_bind);
+  if (plan_only)
+    return true;
+  // Images bound as real views sample through set-0 combined samplers numbered
+  // like a pixel shader's, so the dispatch resolves them with TrackTextures.
+  const u64 native = native_mask & r.native_candidates;
+  gpu::gcn::MimgBindingPlan image_plan;
+  if (native) {
+    image_plan = RdnaPlanMimg(program);
+    if (image_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers)
+      return false;
+    sc.mimg_plan = &image_plan;
+    sc.tex_binding_base = gpu::gcn::kCsTexBindingBase;
+    sc.tex_3d_mask = RdnaTexDimMask(program, image_plan, 1u << 2);
+    sc.tex_1d_mask = RdnaTexDimMask(program, image_plan, (1u << 0) | (1u << 4));
+    sc.tex_uint_mask = uint_mask;
+    r.textures_3d = sc.tex_3d_mask;
+    r.textures.assign(image_plan.binding_srsrc.size(), -1);
+    for (const Inst& inst : program) {
+      const auto it = sc.cs_bind.find(inst.pc);
+      if (inst.enc != Enc::kMimg || it == sc.cs_bind.end() ||
+          !((native >> it->second) & 1))
+        continue;
+      sc.cs_native.insert(it->second);
+      const u32 b = image_plan.binding_by_pc[inst.pc];
+      r.textures[b] = static_cast<int>(gpu::gcn::kCsTexBindingBase + b);
+    }
+  }
 
   // Cross-lane work needs this invocation's lane. ds_swizzle is not the only
   // way a program asks for it: a DPP modifier is a lane shuffle too, and a
@@ -718,7 +811,7 @@ bool TranslateCs(const Program& program,
                                    NeedsWaveLockstep(program);
   t.wave_size = wave32 ? 32 : 64;
   t.full_wave_masks = sc.wave_lockstep;
-  t.InitTypes();
+  t.InitTypes(&program);
   // Storage buffers: Buf { uint data[]; } at set 0, binding = resource index.
   const Id t_run = t.m.TypeRuntimeArray(t.t_u);
   t.m.Decorate(t_run, spv::Decoration::ArrayStride, {4});
@@ -992,7 +1085,10 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
                                         u32 tgid_enable,
                                         u32 lds_dwords,
                                         bool trap_present,
-                                        bool wave32) {
+                                        bool wave32,
+                                        u64 native_mask,
+                                        u64 uint_mask,
+                                        bool plan_only) {
   RecompiledCs r;
   const u32 code_dwords = ComputeCodeDwords(cs_code);
   if (!code_dwords)
@@ -1020,10 +1116,15 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
   RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r intact
   gpu::gcn::ResetUnsupported();
   if (!TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
-                   tgid_enable, lds_dwords, wave32, tmp, t) ||
+                   tgid_enable, lds_dwords, wave32, native_mask, uint_mask,
+                   plan_only, tmp, t) ||
       gpu::gcn::HadUnsupported()) {
     ReportDecline(cs_code, program.size());
     return r;
+  }
+  if (plan_only) {
+    tmp.ok = true;
+    return tmp;
   }
 
   const base::Vector<u32> spv_bin = t.m.Assemble();

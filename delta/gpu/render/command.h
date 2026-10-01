@@ -366,6 +366,15 @@ struct ComputeInfo {
   // has no ds_append/ds_consume.
   int gds_binding = -1;
   base::Vector<GuestMemoryRange> guest_memory;
+  // Images the module samples through real views, each at its set-0 binding
+  // (RecompiledCs::textures).
+  struct Tex {
+    u32 binding = 0;
+    DrawInfo::DrawTex tex;
+  };
+  static constexpr u32 kMaxTextures = 64;
+  Tex tex[kMaxTextures];
+  u32 num_tex = 0;
 };
 
 // How long a command processor spent walking a submitted command buffer, and

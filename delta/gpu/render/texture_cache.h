@@ -100,6 +100,13 @@ rhi::BindGroup* GetTexture(u64 base,
                            bool is_3d = false);
 bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt);
 rhi::TextureView* TexViewFor(const render::DrawInfo::DrawTex& t);
+// The sampler a T#'s S# asks for, made safe for a view of `view_format`
+// (integer formats are never filtered).
+rhi::Sampler* SamplerForTex(const render::DrawInfo::DrawTex& t,
+                            rhi::Format view_format);
+// The 1x1 default for a binding nothing resolved, shaped like its T#.
+rhi::TextureView* DefaultTexView(const render::DrawInfo::DrawTex& t,
+                                 bool want_uint);
 // Anything that can change what a texture binding resolves to (compute
 // writes and writebacks, fills, invalidations, eviction) calls this; it
 // retires TexViewFor's per-binding memo.

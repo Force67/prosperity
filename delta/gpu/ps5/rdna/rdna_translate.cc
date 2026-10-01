@@ -3161,7 +3161,7 @@ bool TranslateVs(const Program& program,
   // ever use a mask as this lane's predicate, and those are exactly the
   // shaders with no LDS.
   t.wave_masks = kWaveMasks && gpu::gcn::GraphicsLdsDwords(program, nullptr);
-  t.InitTypes();
+  t.InitTypes(&program);
 
   base::Vector<Id> iface;
   const Id pos_out =
@@ -3505,7 +3505,7 @@ bool TranslateMesh(Program es_program,
   t.lane_masks = true;
   t.full_wave_masks = true;
   t.indirect_cbufs = r.indirect_cbufs = true;
-  t.InitTypes();
+  t.InitTypes(&es_program, &gs_program);
   t.xchg_lanes = cfg.threads;
   t.xchg_var =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::Workgroup,
@@ -4222,7 +4222,7 @@ Recompiled Recompile(const u32* vs_code,
   g_ps_addr = reinterpret_cast<uintptr_t>(ps_code);
   g_stage_bufs = ResolveBuffers(ps_code, ps_user_data, ps_user_sgprs, 0);
   g_warned_store = false;
-  tp.InitTypes();
+  tp.InitTypes(&ps_program);
   gpu::gcn::ResetUnsupported();
   if (ps_code ? !TranslatePs(ps_program, flat_attrs, ps_input_ena, r, tp,
                              ps_user_sgprs, ps_in_cntl, ps_num_interp,

@@ -28,6 +28,12 @@ void EmitCfg(gpu::gcn::Translator& t,
              const gpu::gcn::Program& program,
              gpu::gcn::StageContext& sc);
 
+// Which image-plan bindings use the requested gfx10 DIM encodings (bit n:
+// DIM n), for the shared emitter's 3D/1D masks.
+u64 RdnaTexDimMask(const gpu::gcn::Program& program,
+                   const gpu::gcn::MimgBindingPlan& plan,
+                   u32 dimensions);
+
 // The compute program being translated (for DELTA_GPU_CSVGPR).
 void SetComputeAddress(u64 address);
 

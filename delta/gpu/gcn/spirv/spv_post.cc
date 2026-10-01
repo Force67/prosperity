@@ -74,6 +74,11 @@ base::Vector<u32> Optimize(const base::Vector<u32>& spv) {
     if (lvl <= SPV_MSG_WARNING)
       BASE_LOGI("spv-opt", "{}", msg);
   });
+  // The register file is two Private arrays. Scalar replacement only splits
+  // arrays of up to 100 elements by default, and the VGPR file has 256, so
+  // every register access stayed a memory access in the finished shader.
+  opt.RegisterPass(spvtools::CreatePrivateToLocalPass());
+  opt.RegisterPass(spvtools::CreateScalarReplacementPass(0));
   opt.RegisterLegalizationPasses();
   if (kOptLevel >= 2)
     opt.RegisterPerformancePasses();
@@ -105,11 +110,14 @@ DELTA_OPTION(const char*,
              kShaderCacheDir,
              "DELTA_GPU_SHADER_CACHE_DIR",
              nullptr);
+// DELTA_GPU_SPV_RAW_DUMP=<dir>: every module as it reaches the optimizer, for
+// trying pass pipelines offline (spirv-opt) against what we really emit.
+DELTA_OPTION(const char*, kRawDump, "DELTA_GPU_SPV_RAW_DUMP", nullptr);
 
 // Bump when anything that changes the optimizer's OUTPUT changes: the pass
 // list here, or the SPIRV-Tools version the build links. Entries from an older
 // generation are never looked up.
-constexpr u32 kCacheGeneration = 1;
+constexpr u32 kCacheGeneration = 2;
 
 u64 HashWords(const base::Vector<u32>& w) {
   u64 h = 1469598103934665603ull;  // FNV-1a
@@ -346,6 +354,15 @@ bool Finalize(const base::Vector<u32>& spv,
     return true;
   }
   const u64 key = HashWords(spv);
+  if (const char* dir = kRawDump) {
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/%016llx.spv", dir,
+                  (unsigned long long)key);
+    if (FILE* f = std::fopen(path, "wb")) {
+      std::fwrite(spv.data(), 4, spv.size(), f);
+      std::fclose(f);
+    }
+  }
   std::shared_future<Finalized> job;
   if (Pool().Take(key, &job)) {
     g_spv_miss_n++;

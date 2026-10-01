@@ -461,6 +461,7 @@ bool StallOnWait(u32 op, const u32* body, u32 count) {
     BASE_LOGW("agc", "queue {} waitOnAddress {:#x} ref={:#x} remains pending",
               render::g_submit_queue, (unsigned long)address,
               (unsigned long)ref);
+    ReportHeldLabels();
     g_queue->stall.wait_since = now;
   }
   return true;
@@ -1086,6 +1087,7 @@ void StartRendererOnce(render::Renderer& renderer) {
   g_renderer_started = true;
   render::Init(renderer);
   render::DeferLabelsToGpu();
+  render::RecordComputeInFrame();
   InstallWriteTrackerPolicy();
   GuestWriteTracker().Enable();
   // The descriptor replay reads SRT tables out of guest memory a previous

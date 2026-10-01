@@ -2516,6 +2516,10 @@ void EmitCsMimg(Translator& t,
                 StageContext& sc,
                 const Id* address) {
   const int binding = CsBindingFor(sc, inst.pc);
+  if (binding >= 0 && sc.cs_native.count(binding)) {
+    EmitMimg(t, inst, sc, address);
+    return;
+  }
   if (!t.rdna_sources || binding < 0 || !sc.cs_runtime_images.count(binding)) {
     EmitCsMimgStaged(t, inst, sc, address);
     return;

@@ -285,7 +285,8 @@ base::Vector<gpu::gcn::TImage> TrackTextures(const u32* ps_code,
                                              const u32* ps_user_data,
                                              u32 user_sgprs,
                                              u32 ud_base = 0,
-                                             u64 system_user_data_addr = 0);
+                                             u64 system_user_data_addr = 0,
+                                             u32 max_dwords = 4096);
 
 // Resolve buffer bases and complete V#s at their consuming instruction PCs.
 base::HashMap<u32, BufferResource> ResolveBuffers(

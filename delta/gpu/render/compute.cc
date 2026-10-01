@@ -113,6 +113,7 @@ DELTA_OPTION(bool, kCsTexBridge, "DELTA_GPU_CS_TEX_BRIDGE", true);
 // Dispatches are recorded into the frame's own command list, in walk order
 // with the draws, instead of into batches of their own.
 DELTA_OPTION(bool, kCsInFrame, "DELTA_GPU_CS_IN_FRAME", true);
+bool g_cs_in_frame = false;  // RecordComputeInFrame, where the option allows it
 // An image range a draw took straight from VRAM this frame (CsSupplyTexture)
 // stays there at frame end instead of being retiled into guest memory; a
 // guest reader that does turn up (CP DMA, a reshaped dispatch, a vertex
@@ -294,8 +295,14 @@ rhi::Buffer* CreateCsBuffer(u64 size, u32 usage, rhi::MemoryKind memory) {
 // The set-0 layout every compute pipeline over `num_res` guest ranges uses.
 rhi::BindGroupLayout* CsSetLayout(u32 num_res,
                                   int gds_binding,
-                                  int guest_memory_binding) {
+                                  int guest_memory_binding,
+                                  const base::Vector<int>& textures) {
   rhi::BindGroupLayoutDesc desc;
+  for (int binding : textures)
+    if (binding >= 0)
+      desc.bindings.push_back({static_cast<u32>(binding),
+                               rhi::BindingType::kSampledTexture,
+                               rhi::kStageCompute});
   for (u32 i = 0; i < num_res; i++)
     desc.bindings.push_back(
         {i, rhi::BindingType::kStorageBuffer, rhi::kStageCompute});
@@ -366,7 +373,7 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   CsPipe cp;
   cp.num_res = ci.num_res;
   cp.gds_binding = ci.gds_binding;
-  if (ci.gds_binding < 0) {
+  if (ci.gds_binding < 0 && ci.recomp->textures.empty()) {
     base::SharedPointer<PrebuiltSlot> slot;
     {
       base::LockGuard<base::Mutex> lock(g_prebuilt_mutex);
@@ -394,8 +401,9 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
       return &g_cs_pipes[key];
     }
   }
-  cp.set_layout =
-      CsSetLayout(ci.num_res, ci.gds_binding, ci.recomp->guest_memory_binding);
+  cp.set_layout = CsSetLayout(ci.num_res, ci.gds_binding,
+                              ci.recomp->guest_memory_binding,
+                              ci.recomp->textures);
   if (!cp.set_layout)
     return nullptr;
   cp.layout = CsPipelineLayout(cp.set_layout);
@@ -2737,7 +2745,7 @@ base::HashMap<rhi::Buffer*, ComputeBufferAccess> g_cs_batch_access;
 
 struct CsBatch {
   rhi::CommandList* list = nullptr;
-  bool in_frame = false;  // recorded into the frame list (kCsInFrame)
+  bool in_frame = false;  // recorded into the frame list (g_cs_in_frame)
   rhi::TimestampPool* timestamps = nullptr;
   u64 submission = 0;  // the device submission carrying it
   u64 id = 0;
@@ -2935,7 +2943,7 @@ void CsBatchBeginImpl() {
   g_cs_timestamps = b.timestamps;
   b.id = g_cs_batch_next_id++;
   g_cs_batch_id = b.id;
-  b.in_frame = kCsInFrame && g_frame.recording;
+  b.in_frame = g_cs_in_frame && g_frame.recording;
   if (b.in_frame) {
     EndRegion();
     g_cs_list = g_frame.list;
@@ -3135,7 +3143,7 @@ void CsStageReadbacks(bool all = true) {
 // out of a range that batch writes.
 bool CsSplitFrameChunk() {
   // One list: the chunk and every batch are already in order.
-  if (kCsInFrame && g_frame.recording)
+  if (g_cs_in_frame && g_frame.recording)
     return true;
   if (g_cs_chunk_needs_batch && (++g_submit_why[1], !CsBatchSubmit()))
     return false;
@@ -4646,6 +4654,19 @@ u64 GuestWritePublishBatch() {
   return batch;
 }
 
+void ReportBatchState() {
+  base::String writes;
+  for (const PendingGuestWrite& w : g_pending_guest_writes)
+    base::FormatTo(writes, " {:#x}+{:#x}@{}", w.base, w.end - w.base, w.batch);
+  BASE_LOGW("agc",
+            "batches: open={} id={} next={} done={} last_submitted={} "
+            "publish={} in_frame={} recording={} guest writes [{} ]",
+            (int)g_cs_batch_open, g_cs_batch_id, g_cs_batch_next_id,
+            g_cs_batch_done, g_last_submitted_id, g_publish_batch,
+            (int)g_cs_batches[g_cs_batch_cur].in_frame, (int)g_frame.recording,
+            writes.c_str());
+}
+
 void SubmitForPublishedLabels() {
   if (g_cs_batch_open && g_publish_batch >= g_cs_batch_id) {
     ++g_submit_why[2];
@@ -4798,7 +4819,7 @@ void PrebuildComputePipeline(const base::Vector<u32>& spirv,
     g_prebuilt.emplace(key, slot);
   }
   PrebuiltCs built;
-  built.set_layout = CsSetLayout(num_res, -1, guest_memory_binding);
+  built.set_layout = CsSetLayout(num_res, -1, guest_memory_binding, {});
   if (built.set_layout)
     built.layout = CsPipelineLayout(built.set_layout);
   if (built.layout)
@@ -5023,6 +5044,79 @@ bool FindIndirectArgs(u64 args, IndirectArgs& out) {
 
 bool CanDispatchIndirect(u64 args) {
   return Device().caps().dispatch_indirect && CsRangeDirtyOverlapping(args, 12);
+}
+
+// A dispatch's sampled image, resolved the way a draw resolves one: the live
+// render, depth or stencil target at its address, else the guest texture. The
+// view is left readable on the frame list the dispatch records into.
+void ResolveComputeTexture(const DrawInfo::DrawTex& t,
+                           rhi::TextureView** view,
+                           rhi::TextureState* state,
+                           rhi::Format* format) {
+  if (t.null_descriptor || !t.base)
+    return;
+  const bool rt_eligible =
+      !t.arrayed && !t.is_3d && !GuestFormatBlockCompressed(t.dfmt);
+  u64 base = t.base;
+  if (rt_eligible) {
+    ActivateSampledRtVariant(base, t.w, t.h);
+    ActivateSampledDepthVariant(base, t.w, t.h);
+    if (!g_rts.count(base) && !g_depths.count(base)) {
+      const bool depth_format = t.dfmt == 4 && t.nfmt == 7;
+      u64 resolved = depth_format ? ResolveSampledDepth(base, t.w, t.h) : 0;
+      if (!resolved)
+        resolved = ResolveSampledRT(base, t.w, t.h);
+      if (!resolved && !depth_format)
+        resolved = ResolveSampledDepth(base, t.w, t.h);
+      if (resolved) {
+        base = resolved;
+        ActivateSampledDepthVariant(base, t.w, t.h);
+      }
+    }
+  }
+  rhi::CommandList* const list = g_frame.list;
+  if (rt_eligible && g_rts.count(base)) {
+    if (!CsRefreshRtFromTruth(base))
+      FlushCsWritesAt(DefaultRenderer(), base, "cs-tex");
+    RTarget& rt = g_rts[base];
+    if (rt.ever_rendered) {
+      if (rt.layout != rhi::TextureState::kShaderRead || rt.dirty_for_read) {
+        TransitionImage(list, rt.texture, rt.layout,
+                        rhi::TextureState::kShaderRead);
+        rt.dirty_for_read = false;
+      }
+      *view = SampledViewAs(rt, t.swizzle, GuestTextureFormat(t.dfmt, t.nfmt),
+                            format);
+      *state = rhi::TextureState::kShaderRead;
+      return;
+    }
+  }
+  if (rt_eligible && g_depths.count(base)) {
+    DepthTarget& depth = g_depths[base];
+    if (depth.layout != rhi::TextureState::kDepthRead)
+      TransitionImage(list, depth.texture, depth.layout,
+                      rhi::TextureState::kDepthRead, rhi::kAspectDepth,
+                      depth.layers);
+    *view = SampledView(depth, t.swizzle);
+    *state = rhi::TextureState::kDepthRead;
+    *format = rhi::Format::kUndefined;
+    return;
+  }
+  if (rt_eligible) {
+    if (const u64 stencil = ResolveSampledStencil(base)) {
+      DepthTarget& depth = g_depths[stencil];
+      if (depth.stencil_layout != rhi::TextureState::kDepthRead)
+        TransitionImage(list, depth.texture, depth.stencil_layout,
+                        rhi::TextureState::kDepthRead, rhi::kAspectStencil,
+                        depth.layers);
+      *view = StencilSampledView(depth);
+      *state = rhi::TextureState::kDepthRead;
+      *format = rhi::Format::kS8Uint;
+      return;
+    }
+  }
+  *view = TexViewFor(t);
+  *state = rhi::TextureState::kShaderRead;
 }
 
 bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
@@ -5828,7 +5922,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   g_ns_cs_in += NowNs() - t_in0;
 
   // The storage buffers, pushed into the batch's command list.
-  rhi::BindingWrite wr[ComputeInfo::kMaxResources + 2];
+  rhi::BindingWrite wr[ComputeInfo::kMaxResources + 2 +
+                      ComputeInfo::kMaxTextures];
   for (u32 i = 0; i < ci.num_res; i++)
     bind_off[i] = ci.res[i].zero_fill ? 0
                   : truth_view[i]     ? 0
@@ -5879,7 +5974,33 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
 
   // Record the dispatch into the open batch. Submission + the wait happen at
   // the next flush point, not here.
+  // Real image views are transitioned and uploaded on the frame list, so the
+  // dispatch has to record there too.
+  if (ci.num_tex && g_cs_batch_open &&
+      !g_cs_batches[g_cs_batch_cur].in_frame && !CsBatchSubmit())
+    return CsDeclined(ci, "tex-batch");
   CsBatchBeginImpl();
+  if (ci.num_tex && !g_cs_batches[g_cs_batch_cur].in_frame)
+    return CsDeclined(ci, "tex-out-of-frame");
+  for (u32 i = 0; i < ci.num_tex; i++) {
+    const DrawInfo::DrawTex& t = ci.tex[i].tex;
+    rhi::TextureView* view = nullptr;
+    rhi::TextureState state = rhi::TextureState::kShaderRead;
+    rhi::Format format = GuestTextureFormat(t.dfmt, t.nfmt);
+    ResolveComputeTexture(t, &view, &state, &format);
+    // The resolve may have recorded uploads and opened a region on the list.
+    CsBatchBeginImpl();
+    if (!view) {
+      view = DefaultTexView(t, t.nfmt == 4 || t.nfmt == 5);
+      state = rhi::TextureState::kShaderRead;
+    }
+    rhi::BindingWrite& w = wr[nwrite++];
+    w = {};
+    w.binding = ci.tex[i].binding;
+    w.view = view;
+    w.view_state = state;
+    w.sampler = SamplerForTex(t, format);
+  }
   u32 zero_count = 0;
   for (u32 i = 0; i < ci.num_res; i++) {
     if (!ci.res[i].zero_fill)
@@ -6223,6 +6344,14 @@ void ReportGpuMemory() {
             g_frame.num, g_cs_ranges.size(), g_cs_range_bytes / kMb,
             dirty / kMb, truth / kMb, cold / kMb, g_cs_free_bytes / kMb,
             g_rts.size(), rt / kMb, rt_parked / kMb, depth / kMb);
+}
+
+void RecordComputeInFrame() {
+  g_cs_in_frame = kCsInFrame;
+}
+
+bool CsBindsImages() {
+  return g_cs_in_frame && g_frame.recording && !g_cs_failed;
 }
 
 void CsFrameListChanged() {

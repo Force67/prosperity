@@ -21,6 +21,7 @@
 #include "base/arch.h"
 
 #include "gpu/ps5/agc_regs.h"
+#include "gpu/gcn/gcn_resource.h"
 #include "gpu/render/command.h"
 
 namespace gpu::ps5 {
@@ -43,5 +44,8 @@ struct DrawPacket {
 bool BuildDrawInfo(const Regs& regs,
                    const DrawPacket& packet,
                    render::DrawInfo& d);
+
+// One resolved gfx10.3 T#/S# as the renderer binds it.
+void TexFromImage(const gcn::TImage& image, render::DrawInfo::DrawTex& tex);
 
 }  // namespace gpu::ps5

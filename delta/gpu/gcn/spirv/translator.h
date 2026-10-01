@@ -49,11 +49,32 @@ const base::String& UnsupportedOps();
 bool TraceEnabled();
 
 // Translator context: one SPIR-V module + the register-file model.
+// The lowest VGPR a v_movreld/v_movrels/v_movrelsd in `program` addresses:
+// from there up the register file has to stay indexable.
+inline u32 RelativeVgprFloor(const Program& program) {
+  u32 lo = 256;
+  for (const Inst& inst : program) {
+    if (inst.enc != Enc::kVop1)
+      continue;
+    const u32 w = inst.raw[0], op = inst.opcode;
+    const u32 vdst = (w >> 17) & 0xFF, src0 = w & 0x1FF;
+    if (op == 0x42 || op == 0x44)
+      lo = base::Min(lo, vdst);
+    if ((op == 0x43 || op == 0x44) && src0 >= 256)
+      lo = base::Min(lo, src0 - 256);
+  }
+  return lo;
+}
+
 struct Translator {
   spirv::Module m;
   Id t_void = 0, t_fn = 0, t_u = 0, t_i = 0, t_f = 0, t_bool = 0;
   Id t_v2 = 0, t_v3 = 0, t_v4 = 0;
   Id p_priv_u = 0, sgpr = 0, vgpr = 0;
+  // VGPRs below this are one variable each; the rest stay in `vgpr`, where a
+  // v_movrel* may index them.
+  u32 vgpr_dyn_lo = 0;
+  Id vgpr_regs[256] = {};
   bool predicate_vector = false;
   // Mesh: only waves whose private PC names the selected block may change
   // state.
@@ -93,7 +114,14 @@ struct Translator {
   Id probe_var = 0;
   Id dbg_file = 0;  // OpString for OpLine pc markers (DELTA_GPU_SHDUMP)
 
-  void InitTypes() {
+  // `programs`: what the module will run, so VGPRs that no v_movrel can reach
+  // become separate variables the optimizer turns into SSA values; null keeps
+  // the whole file one array.
+  void InitTypes(const Program* program = nullptr,
+                 const Program* second = nullptr) {
+    vgpr_dyn_lo = program ? RelativeVgprFloor(*program) : 0u;
+    if (second)
+      vgpr_dyn_lo = base::Min(vgpr_dyn_lo, RelativeVgprFloor(*second));
     t_void = m.TypeVoid();
     t_fn = m.TypeFunction(t_void);
     t_u = m.TypeInt(32, false);
@@ -306,7 +334,14 @@ struct Translator {
 
   // ---- register file ----
   Id SgPtr(u32 i) { return m.AccessChain(p_priv_u, sgpr, {U32(i)}); }
-  Id VgPtr(u32 i) { return m.AccessChain(p_priv_u, vgpr, {U32(i)}); }
+  Id VgPtr(u32 i) {
+    if (i >= vgpr_dyn_lo || i >= 256)
+      return m.AccessChain(p_priv_u, vgpr, {U32(i)});
+    if (!vgpr_regs[i])
+      vgpr_regs[i] =
+          m.Variable(p_priv_u, spv::StorageClass::Private, m.ConstNull(t_u));
+    return vgpr_regs[i];
+  }
   Id Sg(u32 i) {
     return rdna_sources && i == 125 ? U32(0) : m.Load(t_u, SgPtr(i));
   }
@@ -830,6 +865,8 @@ struct StageContext {
   base::HashMap<u32, base::Pair<u32, u32>>
       cs_runtime_resources;  // binding -> kind, SGPR
   base::HashSet<u32> cs_runtime_images;
+  // Resource bindings this module samples as real images (mimg_plan).
+  base::HashSet<u32> cs_native;
 
   // Attrs v_interp_mov_f32 reads as P10/P20 (per-vertex deltas); their whole
   // Location becomes a PerVertexKHR array[3] recomputed from BaryCoordKHR.

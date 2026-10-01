@@ -2077,7 +2077,7 @@ bool TranslateVs(const Program& program,
     attrs = ParseFetch(fetch);
   if (attrs.empty())
     attrs = base::move(direct_attrs);
-  t.InitTypes();
+  t.InitTypes(&program);
 
   base::Vector<Id> iface;
   const Id pos_out =
@@ -2299,7 +2299,7 @@ bool TranslateGs(const Program& program,
                  Translator& t) {
   const base::Vector<u8> reachable = ComputeReachability(program);
   t.spill_vgprs = PlanLaneSpills(program, reachable.data());
-  t.InitTypes();
+  t.InitTypes(&program);
   t.m.Capability(spv::Capability::Geometry);
   const auto [verts, input_mode] = GsInputOf(gs.input_prim);
 
@@ -2658,7 +2658,7 @@ bool TranslateCs(const Program& program,
       uses_cross_lane = true;
   }
 
-  t.InitTypes();
+  t.InitTypes(&program);
   // Storage buffers: Buf { uint data[]; } at set 0, binding = resource index.
   const Id t_run = t.m.TypeRuntimeArray(t.t_u);
   t.m.Decorate(t_run, spv::Decoration::ArrayStride, {4});
@@ -3145,7 +3145,7 @@ bool RecompileSpirv(const u32* vs_code,
   tp.program_base = reinterpret_cast<u64>(ps_code);
   tp.indirect_cbufs = r.indirect_cbufs;
   tp.tex_cube_mask = tex_cube_mask;
-  tp.InitTypes();
+  tp.InitTypes(&ps_program);
   ResetUnsupported();
   if (dbg && ps_code)
     AuditBegin("ps", ps_code, ps_program);

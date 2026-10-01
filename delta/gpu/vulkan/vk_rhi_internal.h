@@ -300,6 +300,9 @@ class VulkanDevice final : public rhi::Device {
  private:
   VkDescriptorPool GrowSetPool();
   void SavePipelineCache(bool force);
+  // A build that took a second or more is written out now, off this thread:
+  // waiting for a quiet frame end loses it to a run that never has one.
+  void SaveAfterSlowBuild(u64 started);
   void WritePipelineCache(bool force);
 
   rhi::Caps caps_;
@@ -316,6 +319,7 @@ class VulkanDevice final : public rhi::Device {
   size_t last_cache_size_ = 0;
   // A periodic save runs on a thread of its own; a forced one waits for it.
   base::Atomic<bool> cache_saving_{false};
+  base::Atomic<bool> save_requested_{false};
   bool fault_reported_ = false;
   VkDebugUtilsMessengerEXT messenger_ = VK_NULL_HANDLE;
   float max_lod_bias_ = 0.0f;

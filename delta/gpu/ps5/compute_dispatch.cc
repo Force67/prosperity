@@ -26,6 +26,7 @@
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps5/cmd_trace.h"
+#include "gpu/ps5/draw_state.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/guest_memory_ranges.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
@@ -41,6 +42,9 @@ DELTA_OPTION(const char*, kCsProbe, "DELTA_GPU_CSPROBE", nullptr);
 // The video decoder writes frames into its own mappings, outside every GPU
 // pool; off by default because a written range is only as safe as the V#.
 DELTA_OPTION(bool, kCsAnyMem, "DELTA_PS5_CSANYMEM", false);
+// Images a dispatch only reads are sampled through real views (the render
+// targets and textures draws use) instead of staged buffers.
+DELTA_OPTION(bool, kCsNativeImages, "DELTA_GPU_CS_NATIVE_IMAGES", true);
 }  // namespace
 
 namespace gpu::ps5 {
@@ -336,24 +340,61 @@ void DispatchCompute(render::Renderer& renderer,
 
   // Recompile the CS to a Vulkan compute pipeline (cached), resolve the guest
   // ranges its descriptors name, and run it on the shared compute backend.
-  const gcn::RecompiledCs& rc =
-      GetComputeShader({.cs_addr = cs_addr,
-                        .thread_x = threads[0],
-                        .thread_y = threads[1],
-                        .thread_z = threads[2],
-                        .user_sgpr = user_sgpr,
-                        .tgid_enable = (rsrc2 >> 7) & 0x7,
-                        .lds_dwords = (rsrc2 >> 15) & 0x1FF,
-                        .trap_present = (rsrc2 & 0x40) != 0,
-                        .wave32 = (initiator & (1u << 15)) != 0});
+  const ComputeShaderState shader{.cs_addr = cs_addr,
+                                  .thread_x = threads[0],
+                                  .thread_y = threads[1],
+                                  .thread_z = threads[2],
+                                  .user_sgpr = user_sgpr,
+                                  .tgid_enable = (rsrc2 >> 7) & 0x7,
+                                  .lds_dwords = (rsrc2 >> 15) & 0x1FF,
+                                  .trap_present = (rsrc2 & 0x40) != 0,
+                                  .wave32 = (initiator & (1u << 15)) != 0};
+  const u32* ud = regs.At(mmCOMPUTE_USER_DATA_0);
+  const u32 ud_dwords = base::Min(user_sgpr, 16u);
+  // The images it only reads are sampled through real views: their T#/S# in
+  // the image plan's order, and an integer format changes the module.
+  const gcn::RecompiledCs& plan =
+      GetComputeShader(shader, 0, 0, /*plan_only=*/true);
+  // Descriptors an SRT chain produced are not in the user-data window; replay
+  // the shader's scalar ops to recover the one each resource's instruction
+  // actually used.
+  const auto resolved = rdna::ResolveBuffers(
+      reinterpret_cast<const u32*>(cs_addr), ud, ud_dwords, 0,
+      rdna::ComputeCodeDwords(reinterpret_cast<const u32*>(cs_addr)));
+  base::Vector<gcn::TImage> images;
+  u64 native = 0, uint_mask = 0;
+  if (kCsNativeImages && plan.ok && plan.native_candidates &&
+      render::CsBindsImages()) {
+    images = rdna::TrackTextures(
+        reinterpret_cast<const u32*>(cs_addr), ud, ud_dwords, 0, 0,
+        rdna::ComputeCodeDwords(reinterpret_cast<const u32*>(cs_addr)));
+    native = plan.native_candidates;
+    for (u32 i = 0; i < images.size() && i < 64; i++)
+      if (images[i].nfmt == 4 || images[i].nfmt == 5)
+        uint_mask |= 1ull << i;
+  }
+  const gcn::RecompiledCs* module = &GetComputeShader(shader, native, uint_mask);
+  if (!module->ok && native) {
+    native = 0;
+    module = &GetComputeShader(shader);
+  }
+  const gcn::RecompiledCs& rc = *module;
   if (!rc.ok) {
     TraceCsUnsupported(cs_addr, groups, threads, user_sgpr);
     return;
   }
-
-  const u32* ud = regs.At(mmCOMPUTE_USER_DATA_0);
-  const u32 ud_dwords = base::Min(user_sgpr, 16u);
   render::ComputeInfo ci;
+  for (u32 i = 0; i < rc.textures.size(); i++) {
+    if (rc.textures[i] < 0 || i >= images.size() ||
+        ci.num_tex >= render::ComputeInfo::kMaxTextures)
+      continue;
+    render::ComputeInfo::Tex& tex = ci.tex[ci.num_tex++];
+    tex.binding = static_cast<u32>(rc.textures[i]);
+    TexFromImage(images[i], tex.tex);
+    // The module's declaration wins, as for a draw (ReconcileTextureDims).
+    tex.tex.is_3d = (rc.textures_3d >> i) & 1;
+  }
+
   ci.cs_addr = cs_addr;
   ci.indirect_args = indirect_args;
   ci.groups[0] = groups[0];
@@ -365,12 +406,6 @@ void DispatchCompute(render::Renderer& renderer,
   for (int k = 0; k < 16; k++)
     ci.user_data[k] = ud[k];
 
-  // Descriptors an SRT chain produced are not in the user-data window; replay
-  // the shader's scalar ops to recover the one each resource's instruction
-  // actually used.
-  const auto resolved = rdna::ResolveBuffers(
-      reinterpret_cast<const u32*>(cs_addr), ud, ud_dwords, 0,
-      rdna::ComputeCodeDwords(reinterpret_cast<const u32*>(cs_addr)));
 
   if (kCsProbe && std::strstr(probe_buf, kCsProbe)) {
     static base::HashSet<u64> reported;
@@ -422,9 +457,12 @@ void DispatchCompute(render::Renderer& renderer,
     // replays. The replay seeds from this same user data, so what it recovered
     // is at least as good: preferring the window would bind whatever the CPU
     // left there for a shader that loaded a descriptor over its own user data.
+    // Sampled through a real view: its storage buffer stays an empty stub.
+    const bool sampled = r.binding < 64 && ((native >> r.binding) & 1);
     const u32* desc = nullptr;
     base::Array<u32, 8> table_descriptor;
-    if (const auto it = resolved.find(r.use_pc);
+    if (sampled) {
+    } else if (const auto it = resolved.find(r.use_pc);
         it != resolved.end() && it->second.descriptor_valid &&
         it->second.descriptor_dwords >= dwords) {
       desc = it->second.descriptor;
@@ -438,7 +476,10 @@ void DispatchCompute(render::Renderer& renderer,
     }
 
     ResourceRange range;
-    if (base::AllOf(desc, desc + dwords, [](u32 w) { return w == 0; })) {
+    if (sampled) {
+      range.zero_fill = true;
+      range.size = 16;
+    } else if (base::AllOf(desc, desc + dwords, [](u32 w) { return w == 0; })) {
       // A null descriptor is a real binding on a path this launch does not
       // take; the translator guards it and reads zero.
       range.zero_fill = true;

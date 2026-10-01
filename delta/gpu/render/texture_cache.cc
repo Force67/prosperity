@@ -1674,6 +1674,26 @@ void ReleaseRetiredTextures() {
   g_retired_tex_images.clear();
 }
 
+rhi::Sampler* SamplerForTex(const DrawInfo::DrawTex& t,
+                            rhi::Format view_format) {
+  SamplerKey sampler;
+  sampler.valid = t.sampler_valid;
+  std::memcpy(sampler.raw, t.sampler, sizeof(sampler.raw));
+  sampler.image_min_lod = t.min_lod;
+  sampler.force_lod_zero = t.force_lod_zero;
+  sampler.integer = (kIntegerRt && (t.nfmt == 4 || t.nfmt == 5)) ||
+                    IsIntegerColorFormat(view_format);
+  return SamplerFor(sampler);
+}
+
+rhi::TextureView* DefaultTexView(const DrawInfo::DrawTex& t, bool want_uint) {
+  if (t.is_3d)
+    return want_uint ? g_tex.white_uint_3d_view : g_tex.white_3d_view;
+  if (t.arrayed)
+    return want_uint ? g_tex.white_uint_array_view : g_tex.white_array_view;
+  return want_uint ? g_tex.white_uint_view : g_tex.white_view;
+}
+
 rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
                                rhi::BindGroupLayout* set_layout,
                                u32 num_bindings,

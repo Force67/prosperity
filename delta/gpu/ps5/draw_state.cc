@@ -680,9 +680,14 @@ void ResolvePsTextures(u64 ps_addr,
 
 // One resolved T# into one descriptor slot.
 void FillDrawTex(u32 slot, const gcn::TImage& s, render::DrawInfo& d) {
-  render::DrawInfo::DrawTex& dt = d.texs[slot];
-  dt = {};
   TraceRejectedTexture(slot, s);
+  TexFromImage(s, d.texs[slot]);
+}
+
+}  // namespace
+
+void TexFromImage(const gcn::TImage& s, render::DrawInfo::DrawTex& dt) {
+  dt = {};
   dt.base = s.valid ? s.base : 0;
   dt.w = s.width;
   dt.h = s.height;
@@ -708,6 +713,8 @@ void FillDrawTex(u32 slot, const gcn::TImage& s, render::DrawInfo& d) {
   dt.null_descriptor = s.null_descriptor;
   dt.swizzle = PackDstSel(s);
 }
+
+namespace {
 
 // The SPIR-V declares each sampled image's dimensionality at compile time, so
 // the descriptor bound to it has to agree or the set is invalid and the sample

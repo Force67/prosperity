@@ -1583,11 +1583,12 @@ base::Vector<TImage> TrackTextures(const u32* ps_code,
                                    const u32* pud,
                                    u32 user_sgprs,
                                    u32 ud_base,
-                                   u64 system_user_data_addr) {
+                                   u64 system_user_data_addr,
+                                   u32 max_dwords) {
   base::Vector<TImage> out;
   if (!ps_code || !pud || !InGuest(reinterpret_cast<u64>(ps_code)))
     return out;
-  const auto prog_ref = CachedReachableProgram(ps_code, 4096);
+  const auto prog_ref = CachedReachableProgram(ps_code, max_dwords);
   const Program& prog = *prog_ref;
   // The plan is a pure function of the program, so the cached program's own
   // identity says whether a cached plan still describes it.

@@ -41,6 +41,9 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
                                         u32 tgid_enable,
                                         u32 lds_dwords,
                                         bool trap_present = false,
-                                        bool wave32 = false);
+                                        bool wave32 = false,
+                                        u64 native_mask = 0,
+                                        u64 uint_mask = 0,
+                                        bool plan_only = false);
 
 }  // namespace gpu::rdna

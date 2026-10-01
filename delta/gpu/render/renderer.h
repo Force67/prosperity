@@ -77,6 +77,12 @@ bool CsRangeMaybeDirty(u64 base, u64 bytes);
 // dirty range that is this target (starting at its base) is carried into it;
 // ranges it merely overlaps stay GPU-owned until their own reader asks.
 bool FlushCsWritesAt(Renderer& renderer, u64 base, const char* why);
+// Whether a dispatch recorded now can bind real image views: it records into
+// the frame list, where those views are transitioned and uploaded.
+bool CsBindsImages();
+// Dispatches go into the frame's command list. Only for a command processor
+// that records draws and dispatches on one thread at a time.
+void RecordComputeInFrame();
 // Flush only dirty ranges overlapping [base, base+bytes), with the same result
 // contract as FlushCsWrites.
 // `why` names the reader for the DELTA_GPU_CSSYNC report.
@@ -113,6 +119,8 @@ u64 GuestWritePublishBatch();
 // End of a command-buffer walk: submit the open batch if a held label waits
 // for it, once, instead of at every label.
 void SubmitForPublishedLabels();
+// The compute batches' state, for a stuck wait's report.
+void ReportBatchState();
 // Thread safe: blocks until compute batch `batch` was submitted and completed.
 bool WaitBatch(u64 batch);
 // A CP DMA_DATA whose source or destination selector is GDS (1). `data` is

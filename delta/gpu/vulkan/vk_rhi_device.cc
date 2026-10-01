@@ -1313,6 +1313,7 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
   pipeline->layout = layout;
   pipeline->bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
   VkResult r = VK_ERROR_UNKNOWN;
+  const u64 started = NowNs();
   if (ok) {
     ScopeNs t(&g_ns_pipe_build);
     r = vkCreateGraphicsPipelines(dev, native.pipeline_cache, 1, &pi, nullptr,
@@ -1326,6 +1327,7 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
     return nullptr;
   }
   last_pipeline_build_ns_ = NowNs();
+  SaveAfterSlowBuild(started);
   if (desc.name)
     SetName(&*pipeline, desc.name);
   return gpu::rhi::Release(pipeline);
@@ -1350,6 +1352,7 @@ rhi::Pipeline* VulkanDevice::CreateComputePipeline(
   auto pipeline = base::MakeUnique<VulkanPipeline>();
   pipeline->layout = layout;
   pipeline->bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+  const u64 started = NowNs();
   const VkResult r =
       vkCreateComputePipelines(native.device, native.pipeline_cache, 1, &ci,
                                nullptr, &pipeline->pipeline);
@@ -1359,6 +1362,7 @@ rhi::Pipeline* VulkanDevice::CreateComputePipeline(
     return nullptr;
   }
   last_pipeline_build_ns_ = NowNs();
+  SaveAfterSlowBuild(started);
   if (desc.name)
     SetName(&*pipeline, desc.name);
   return gpu::rhi::Release(pipeline);
@@ -1579,6 +1583,27 @@ void VulkanDevice::SavePipelineCache(bool force) {
   base::SpawnDetachedThread("vk_rhi_device", [this] {
     WritePipelineCache(false);
     cache_saving_.store(false);
+  });
+}
+
+void VulkanDevice::SaveAfterSlowBuild(u64 started) {
+  const u64 now = NowNs();
+  if (now - started < 1000000000ull || pipeline_cache_path_.empty() ||
+      !native.pipeline_cache)
+    return;
+  // A build that lands while a save runs is picked up by one more pass.
+  save_requested_.store(true);
+  if (cache_saving_.exchange(true))
+    return;
+  last_cache_write_ns_ = now;
+  base::SpawnDetachedThread("vk_rhi_device", [this] {
+    for (;;) {
+      while (save_requested_.exchange(false))
+        WritePipelineCache(false);
+      cache_saving_.store(false);
+      if (!save_requested_.load() || cache_saving_.exchange(true))
+        return;
+    }
   });
 }
 

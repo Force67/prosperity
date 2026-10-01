@@ -69,6 +69,12 @@ struct ComputeShaderState {
 // The compute module for `state`, recompiled on first use. Never null; .ok is
 // false for a shader using something the compute backend does not implement,
 // which the caller must skip loudly rather than run.
-const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state);
+// `native_mask`: resources (RecompiledCs::native_candidates) this variant
+// samples as real images; `uint_mask`: image-plan bindings with an integer
+// format. `plan_only` plans resources without emitting a module.
+const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state,
+                                          u64 native_mask = 0,
+                                          u64 uint_mask = 0,
+                                          bool plan_only = false);
 
 }  // namespace gpu::ps5
