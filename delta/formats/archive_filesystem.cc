@@ -329,35 +329,51 @@ struct ArchiveImpl {
     if (node.size > small_max)
       return backend->ExtractRange(entries[node.index], buf, off, len);
 
-    base::LockGuard<base::Mutex> guard(lock);
-    Slot* hit =
-        lru.FindIf([&](const Slot& s) { return s.index == node.index; });
-    if (!hit) {
-      base::Vector<u8> data(static_cast<size_t>(node.size));
-      const i64 got = backend->ExtractRange(entries[node.index], data.data(), 0,
-                                            static_cast<i64>(node.size));
-      if (got < 0)
-        return -1;
-      data.resize(static_cast<size_t>(got));
-      lru_bytes += data.size();
-      lru.insert(lru.begin(), Slot{node.index, base::move(data)});
-      Trim();
-      if (lru.empty() || lru.front().index != node.index) {
-        // The entry alone blew the budget, so it was trimmed straight back out.
-        return backend->ExtractRange(entries[node.index], buf, off, len);
+    // Copies out of the cache under the lock; a miss decodes outside it, so
+    // the title's loader threads inflate in parallel.
+    const auto copy_cached = [&]() -> i64 {
+      base::LockGuard<base::Mutex> guard(lock);
+      Slot* hit =
+          lru.FindIf([&](const Slot& s) { return s.index == node.index; });
+      if (!hit)
+        return -2;
+      if (hit != lru.begin()) {
+        Slot slot = base::move(*hit);
+        lru.erase(hit);
+        lru.insert(lru.begin(), base::move(slot));
       }
-    } else if (hit != lru.begin()) {
-      Slot slot = base::move(*hit);
-      lru.erase(hit);
-      lru.insert(lru.begin(), base::move(slot));
-    }
+      const base::Vector<u8>& data = lru.front().data;
+      if (static_cast<u64>(off) >= data.size())
+        return 0;
+      const i64 n = base::Min<i64>(len, static_cast<i64>(data.size() - off));
+      std::memcpy(buf, data.data() + off, static_cast<size_t>(n));
+      return n;
+    };
+    if (const i64 cached = copy_cached(); cached != -2)
+      return cached;
+    // A whole-file read, the common case, needs no cache entry: inflate
+    // straight into the caller's buffer.
+    if (off == 0 && static_cast<u64>(len) == node.size)
+      return backend->ExtractRange(entries[node.index], buf, 0, len);
 
-    const base::Vector<u8>& data = lru.front().data;
-    if (static_cast<u64>(off) >= data.size())
-      return 0;
-    len = base::Min<i64>(len, static_cast<i64>(data.size() - off));
-    std::memcpy(buf, data.data() + off, static_cast<size_t>(len));
-    return len;
+    base::Vector<u8> data(static_cast<size_t>(node.size));
+    const i64 got = backend->ExtractRange(entries[node.index], data.data(), 0,
+                                          static_cast<i64>(node.size));
+    if (got < 0)
+      return -1;
+    data.resize(static_cast<size_t>(got));
+    {
+      base::LockGuard<base::Mutex> guard(lock);
+      if (!lru.FindIf([&](const Slot& s) { return s.index == node.index; })) {
+        lru_bytes += data.size();
+        lru.insert(lru.begin(), Slot{node.index, base::move(data)});
+        Trim();
+      }
+    }
+    if (const i64 cached = copy_cached(); cached != -2)
+      return cached;
+    // The entry alone blew the budget, so it was trimmed straight back out.
+    return backend->ExtractRange(entries[node.index], buf, off, len);
   }
 
   // Directory path (folded, with trailing '/') -> immediate children. Built

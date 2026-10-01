@@ -196,6 +196,11 @@ struct RarDecoder {
 
   explicit RarDecoder(const std::wstring& arc_path) {
     cmd.DllOpMode = RAR_TEST;  // route UnpWrite into the callback
+    // Our index already holds each header's offset. With the quick-open block
+    // loaded, every ReadHeader walked it from the start and checksummed each
+    // record on the way: O(entries) per read, 156k entries in Astro Bot.
+    cmd.QOpenMode = QOPEN_NONE;
+    unp.SetThreads(4);
     cmd.FileArgs.AddString(L"*");
     try {
       opened = arc.Open(arc_path) && arc.IsArchive(false);
@@ -222,8 +227,11 @@ struct RarDecoder {
                             nullptr, nullptr);
       data_io.CurUnpRead = 0;
       data_io.CurUnpWrite = 0;
-      data_io.UnpHash.Init(hd.FileHash.Type, 1);
-      data_io.PackedDataHash.Init(hd.FileHash.Type, 1);
+      // No checksums: hashing the packed and the unpacked bytes cost more than
+      // decompressing them, on the thread the title loads its data on. A
+      // short or broken stream still fails the size check below.
+      data_io.UnpHash.Init(HASH_NONE, 1);
+      data_io.PackedDataHash.Init(HASH_NONE, 1);
       data_io.SetPackedSizeToRead(hd.PackSize);
       data_io.SetFiles(&arc, nullptr);
       data_io.SetTestMode(true);
@@ -273,7 +281,9 @@ RarDecoder& ThreadDecoder(const std::wstring& arc_path) {
 // LZ window) is reused across every entry that thread reads instead of being
 // built and thrown away per file.
 struct WholeSink {
-  base::Vector<u8>* out;
+  u8* out;
+  u64 cap;
+  u64 size = 0;
 };
 
 extern "C" int RarWholeCallback(UINT msg,
@@ -283,8 +293,11 @@ extern "C" int RarWholeCallback(UINT msg,
   if (msg != UCM_PROCESSDATA)
     return 0;
   auto* w = reinterpret_cast<WholeSink*>(user_data);
-  const auto* src = reinterpret_cast<const u8*>(p1);
-  w->out->insert(w->out->end(), src, src + size_t(p2));
+  const u64 n = u64(p2);
+  if (w->size + n > w->cap)
+    return -1;
+  std::memcpy(w->out + w->size, reinterpret_cast<const u8*>(p1), size_t(n));
+  w->size += n;
   Stats().inflated.fetch_add(size_t(p2), base::memory_order_relaxed);
   return 1;
 }
@@ -440,17 +453,19 @@ i64 RarBackend::ExtractRange(const ArchiveEntry& entry,
   }
 
   if (entry.size <= kWholeEntryMax) {
-    // Reused per thread so a run of reads does not reallocate; cleared, not
-    // freed, so the capacity survives.
+    // A whole-entry read inflates straight into `buf`; a part of one goes
+    // through a per-thread buffer that keeps its capacity across reads.
     static thread_local base::Vector<u8> whole;
-    whole.clear();
-    whole.reserve(size_t(entry.size));
-    WholeSink sink{&whole};
+    const bool direct = off == 0 && u64(len) == entry.size;
+    if (!direct && whole.size() < entry.size)
+      whole.resize(size_t(entry.size));
+    WholeSink sink{direct ? static_cast<u8*>(buf) : whole.data(), entry.size};
     if (!ThreadDecoder(pathW_).Decode(entry.extra, RarWholeCallback,
                                       reinterpret_cast<LPARAM>(&sink)) ||
-        whole.size() < u64(off) + u64(len))
+        sink.size < u64(off) + u64(len))
       return -1;
-    std::memcpy(buf, whole.data() + off, size_t(len));
+    if (!direct)
+      std::memcpy(buf, whole.data() + off, size_t(len));
     Stats().delivered.fetch_add(u64(len), base::memory_order_relaxed);
     Stats().whole.fetch_add(1, base::memory_order_relaxed);
     ReportStats();
