@@ -11,13 +11,16 @@
 #include "base/threading/mutex.h"
 #include "guest_abi.h"
 #include "host_memory/host_memory.h"
+#include "options/options.h"
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/buffer.h>
+#include <libavutil/hwcontext.h>
 }
 
 namespace runtime::video {
 namespace {
+DELTA_OPTION(bool, kHwDecode, "DELTA_VIDEO_HW", true);
 constexpr i32 kSize = i32(0x811d0101), kPointer = i32(0x811d0102);
 constexpr i32 kHandle = i32(0x811d0103), kConfig = i32(0x811d0104);
 constexpr i32 kFrame = i32(0x811d0109), kDecode = i32(0x811d0200);
@@ -39,13 +42,53 @@ u32 Align(u32 n, u32 alignment) {
 struct Stamp {
   u64 pts, dts, attached;
 };
+// The GPU's video engine, shared by every decoder: Vulkan Video first, then
+// the vendor APIs. Empty when the host has none, and decoding stays on the CPU.
+struct HwDevice {
+  AVBufferRef* ref = nullptr;
+  AVPixelFormat format = AV_PIX_FMT_NONE;
+  const char* name = "CPU";
+};
+
+const HwDevice& Hardware() {
+  static const HwDevice device = [] {
+    if (!kHwDecode)
+      return HwDevice{};
+    const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    for (AVHWDeviceType type : {AV_HWDEVICE_TYPE_VULKAN, AV_HWDEVICE_TYPE_CUDA,
+                                AV_HWDEVICE_TYPE_VAAPI}) {
+      AVPixelFormat format = AV_PIX_FMT_NONE;
+      for (int i = 0; const AVCodecHWConfig* c = avcodec_get_hw_config(codec, i);
+           i++)
+        if (c->device_type == type &&
+            (c->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
+          format = c->pix_fmt;
+      AVBufferRef* ref = nullptr;
+      if (format != AV_PIX_FMT_NONE &&
+          av_hwdevice_ctx_create(&ref, type, nullptr, nullptr, 0) >= 0)
+        return HwDevice{ref, format, av_hwdevice_get_type_name(type)};
+    }
+    return HwDevice{};
+  }();
+  return device;
+}
+
+AVPixelFormat PickFormat(AVCodecContext*, const AVPixelFormat* formats) {
+  for (const AVPixelFormat* f = formats; *f != AV_PIX_FMT_NONE; f++)
+    if (*f == Hardware().format)
+      return *f;
+  return formats[0];
+}
+
 struct Decoder {
   AVCodecContext* context = nullptr;
   AVFrame* frame = av_frame_alloc();
+  AVFrame* download = av_frame_alloc();  // a hardware frame, in host memory
   bool draining = false, pending = false;
   u32 outputs = 0;
   ~Decoder() {
     av_frame_free(&frame);
+    av_frame_free(&download);
     avcodec_free_context(&context);
   }
 };
@@ -83,7 +126,18 @@ i32 Receive(Decoder& d, FrameBuffer& target, Output& out) {
       return kDecode;
     d.pending = true;
   }
-  const AVFrame& f = *d.frame;
+  // The engine decodes into GPU memory; the guest wants the picture in its
+  // own buffer, so bring it over. The decode itself never touches the CPU.
+  if (d.frame->format == Hardware().format && d.frame->format != AV_PIX_FMT_NONE) {
+    av_frame_unref(d.download);
+    if (av_hwframe_transfer_data(d.download, d.frame, 0) < 0 ||
+        av_frame_copy_props(d.download, d.frame) < 0)
+      return kDecode;
+  }
+  const AVFrame& f = d.download->format != AV_PIX_FMT_NONE &&
+                             d.frame->format == Hardware().format
+                         ? *d.download
+                         : *d.frame;
   if (f.format != AV_PIX_FMT_YUV420P && f.format != AV_PIX_FMT_NV12)
     return kDecode;
   const u32 width = f.width, height = f.height;
@@ -167,9 +221,11 @@ i32 Receive(Decoder& d, FrameBuffer& target, Output& out) {
   g_pictures[target.data] = info;
   ++d.outputs;
   if (d.outputs == 1 || d.outputs % 120 == 0)
-    BASE_LOGI("videodec", "CPU H.264 frame {} {}x{} pts={} buffer={:p}",
-              d.outputs, width, height, stamp.pts, target.data);
+    BASE_LOGI("videodec", "{} H.264 frame {} {}x{} pts={} buffer={:p}",
+              Hardware().name, d.outputs, width, height, stamp.pts,
+              target.data);
   av_frame_unref(d.frame);
+  av_frame_unref(d.download);
   d.pending = false;
   return 0;
 }
@@ -219,15 +275,20 @@ i32 PS4ABI Create(const Config* c, const Memory* m, void** result) {
     return kDecode;
   d->context->width = c->width;
   d->context->height = c->height;
-  d->context->thread_count = 2;
   d->context->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
+  if (const HwDevice& hw = Hardware(); hw.ref) {
+    d->context->hw_device_ctx = av_buffer_ref(hw.ref);
+    d->context->get_format = PickFormat;
+  } else {
+    d->context->thread_count = 2;
+  }
   if (avcodec_open2(d->context, codec, nullptr) < 0)
     return kDecode;
   base::LockGuard guard(g_lock);
   *result = &*d;
   g_decoders.emplace(&*d, base::move(d));
-  BASE_LOGI("videodec", "created CPU H.264 decoder {}x{} config={:#x}",
-            c->width, c->height, c->size);
+  BASE_LOGI("videodec", "created {} H.264 decoder {}x{} config={:#x}",
+            Hardware().name, c->width, c->height, c->size);
   return 0;
 }
 i32 PS4ABI Delete(void* handle) {
@@ -300,6 +361,7 @@ i32 PS4ABI Reset(void* handle) {
   Decoder& d = *it->second;
   avcodec_flush_buffers(d.context);
   av_frame_unref(d.frame);
+  av_frame_unref(d.download);
   d.draining = d.pending = false;
   return 0;
 }
