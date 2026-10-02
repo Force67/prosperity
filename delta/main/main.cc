@@ -27,6 +27,8 @@
 #include "gpu/render/renderer.h"
 #include "host/overlay_log.h"
 #include "kern/guest_va_space.h"
+#include "main/command_line.h"
+#include "main/firmware_config.h"
 #include "main/launcher.h"
 
 static bool VerifyViability() {
@@ -130,6 +132,12 @@ static void win32PostInit() {
 #endif
 
 int main(int argc, char** argv) {
+  auto command = cli::Parse(argc, argv);
+  if (command.exit)
+    return command.exit_code;
+  if (!cli::ConfigureFirmware(command))
+    return 2;
+
 #if defined(__linux__)
   // Let a debugger attach to a run that is already going. Under the default
   // yama ptrace_scope=1 only an ancestor may attach, and a stuck title is
@@ -144,7 +152,14 @@ int main(int argc, char** argv) {
   host::OverlayLogAttach();
   // Before anything else: every subsystem below reads its knobs from here, and
   // most latch the value the first time they run.
-  options::Init(argc, argv);
+  base::Vector<char*> option_argv{argv[0]};
+  for (auto& option : command.options)
+    option_argv.push_back(option.data());
+  int option_argc = static_cast<int>(option_argv.size());
+  option_argv.push_back(nullptr);
+  options::Init(option_argc, option_argv.data());
+  if (command.game.empty())
+    return 0;
   // Bring the render Vulkan device up NOW, before any guest memory is mapped:
   // initialized lazily (first Gnm submit), the NVIDIA driver fails its
   // in-process setup once the guest's huge MAP_FIXED mappings exist
@@ -169,18 +184,13 @@ int main(int argc, char** argv) {
   win32PostInit();
 #endif
 
-  if (argc > 1) {
-    if (argc > 2) {
-      core.argv.reserve(argc - 1);
-      core.argv.emplace_back();
-      for (int i = 2; i < argc; ++i) {
-        core.argv.emplace_back(argv[i]);
-      }
-    }
-
-    base::String path(argv[1]);
-    core.Boot(path);
+  if (!command.guest_args.empty()) {
+    core.argv.reserve(command.guest_args.size() + 1);
+    core.argv.emplace_back();
+    for (const auto& arg : command.guest_args)
+      core.argv.emplace_back(arg.c_str());
   }
+  core.Boot(base::String(command.game.c_str()));
 
   // Block forever; proc runs on a detached thread.
   for (;;) {

@@ -2,6 +2,8 @@
 # wires the subsystems together and boots a title. Links every other module
 # into the final ps4delta binary. android_main.cc is the app-only entry.
 set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cc
+                 ${CMAKE_CURRENT_SOURCE_DIR}/command_line.cc
+                 ${CMAKE_CURRENT_SOURCE_DIR}/firmware_config.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc)
 
 set(MAIN_LIBS delta_deps delta_kern delta_runtime delta_formats

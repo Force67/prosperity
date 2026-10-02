@@ -1,122 +1,67 @@
-# Building
+# Build
 
-Prosperity targets Linux (x86-64 and aarch64) and Android. The CPU backend is
-chosen automatically from the host architecture:
+Linux: x86-64 uses the native CPU backend. ARM64 uses FEX.
 
-* **x86-64 host** -> `NATIVE`: guest x86-64 runs directly on the CPU.
-* **aarch64 host** -> `FEX`: guest x86-64 runs through an embedded FEX JIT.
+## Linux with Nix
 
-The graphics layer needs Vulkan, SDL3 and shaderc. The supported way to get a
-matching toolchain is the Nix dev shell defined in `flake.nix`.
-
-## Get the source
-
-All third-party code (capstone, fmtlib, zlib, xbyak, FEX, mbedtls, equilibrium,
-googletest) is vendored as git submodules, so clone recursively:
+Install [Nix](https://nixos.org/download) with flakes enabled, then:
 
 ```bash
 git clone --recursive https://github.com/Force67/prosperity.git
 cd prosperity
-# already cloned without --recursive?
-git submodule update --init --recursive
-```
-
-## Linux (Nix, recommended)
-
-Install Nix (with flakes enabled) from <https://nixos.org/download>, then:
-
-```bash
-nix develop                                 # enter the dev shell
-cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build                         # or: ninja -C build
-```
-
-The dev shell provides cmake, ninja, the compiler, Vulkan, SDL3, shaderc, and
-mesa's lavapipe (software Vulkan) for headless/GPU-less machines.
-
-To run everything in one shot without entering the shell interactively:
-
-```bash
-nix develop --command bash -c 'cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build'
-```
-
-The resulting binary is `build/delta/main/ps4delta`. See
-[installation.md](installation.md) for how to run it.
-
-## Linux (without Nix)
-
-You need a C++20 toolchain (GCC 13+ or Clang 18+) plus:
-
-* `cmake` >= 3.20 and `ninja`
-* Vulkan headers + loader (`libvulkan`)
-* SDL3 (note: not packaged on Ubuntu 24.04 yet; build it from source)
-* shaderc (`glslc` / `libshaderc`)
-
-Then configure and build the same way:
-
-```bash
-cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
+nix develop
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-If `find_package(Vulkan)` or `find_package(SDL3)` fails, the corresponding
-dependency is missing. Nix is recommended precisely because SDL3 and shaderc are
-awkward to obtain on stable distros.
+Already cloned? Run `git submodule update --init --recursive` first.
+Already configured `build/` with another generator? Leave out `-G Ninja`.
+
+Binary: `build/delta/main/ps4delta`.
+Next: [install system modules and run a game](installation.md).
+Keep the Nix shell open when running the binary.
+
+## Linux without Nix
+
+Install a C++20 compiler, CMake 3.20+, Ninja, pkg-config, and development
+packages for Vulkan, SDL3, shaderc, SPIRV-Tools, SPIRV-Headers, and FFmpeg.
+OpenGL/EGL + libepoxy and vkd3d + DXC enable optional graphics backends.
+
+Use the same CMake commands above. If a dependency is hard to obtain on your
+distro, use the Nix shell.
 
 ## Android
 
-Android builds use the NDK toolchain (clang) and run on aarch64 via the FEX
-backend. There are two flavours:
-
-* **Headless adb-shell binary** (default): dumps frames, driven over `adb`.
-* **On-screen NativeActivity APK**: configure with `-DDELTA_ANDROID_APP=ON`
-  (requires the NDK; builds `libps4delta_app.so` and presents to the device).
-
-The exact NDK/SDK wiring lives in the (gitignored) `build-apk.sh` /
-`run-android.sh` helper scripts.
-
-## CMake options
-
-| Option | Default | Effect |
-| --- | --- | --- |
-| `CMAKE_BUILD_TYPE` | `Release` | standard CMake build type |
-| `DELTA_BUILD_TESTS` | `ON` | build the unit tests (`ctest`) |
-| `DELTA_BACKEND` | auto | `NATIVE` or `FEX`; auto-selected from host arch |
-| `DELTA_ANDROID_APP` | `OFF` | build the on-screen Android app (needs the NDK) |
-| `DELTA_TRACY` | `ON` (off on Android) | Tracy profiler client, idle until a viewer connects |
-
-Host-only dev tools (`tools/modload`, `modexec`, `pkg_check`, `window_test`) are
-built automatically on non-Android targets.
-
-## Profiling
-
-Builds carry an on-demand [Tracy](https://github.com/wolfpld/tracy) client
-(v0.13.1, the version the dev shell's `tracy` viewer speaks). It costs nothing
-until something connects to `localhost:8086`, then streams:
-
-* CPU zones (`DELTA_ZONE` in `shared/profile/profile.h`) around the command
-  processor walk, draws, dispatches, compute writebacks, texture uploads,
-  shader recompiles and every Vulkan submit, wait and pipeline build;
-* every guest syscall as a zone on the guest thread that made it (guest
-  threads carry their `thr_new` names);
-* the guest GPU as its own timeline: one zone per render target region and per
-  compute dispatch, from GPU timestamps;
-* a frame mark per presented guest frame.
-
-Run `tracy` in the dev shell and connect to a running `ps4delta`, or let
-`tools/drun.py` record and summarise a window:
+Use the NDK toolchain and an ARM64 target:
 
 ```bash
-tools/drun.py uc2 -t 130 --tracy 100:20       # zones, waits, GPU, thread CPU
-tools/drun.py uc2 -t 130 --perf 100:10:NdJob  # sampled hot spots, guest ones
-                                              # as module+offset
+cmake -S . -B build-android -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
+  -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release \
+  -DDELTA_BUILD_TESTS=OFF
+cmake --build build-android --target ps4delta
 ```
 
-## Tests
+Set `ANDROID_NDK` to your NDK directory. This builds the headless executable
+for `adb shell`. Add `-DDELTA_ANDROID_APP=ON` and build `ps4delta_app` for the
+NativeActivity library. APK packaging uses local, gitignored helper scripts.
+
+## Build options
+
+| CMake option | Default | Purpose |
+| --- | --- | --- |
+| `CMAKE_BUILD_TYPE` | `Release` | `Debug` for debugging |
+| `DELTA_BUILD_TESTS` | `ON` | Unit tests |
+| `DELTA_BACKEND` | Host architecture | `NATIVE` (x86-64), `FEX` (ARM64) |
+| `DELTA_ANDROID_APP` | `OFF` | Android app library |
+| `DELTA_TRACY` | `ON`, Android `OFF` | Tracy profiling |
+
+## Tests and profiling
 
 ```bash
 ctest --test-dir build --output-on-failure
+tracy                                      # connect to a running ps4delta
+tools/drun.py uc2 -t 130 --tracy 100:20     # capture 20 seconds at t=100
+tools/drun.py uc2 -t 130 --perf 100:10:NdJob # sample the named guest thread
 ```
-
-CI (`.github/workflows/cibuild.yml`) runs exactly this configure/build/test flow
-inside the same Nix dev shell.

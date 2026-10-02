@@ -38,6 +38,7 @@
 #include "options/options.h"
 
 namespace {
+DELTA_OPTION(const char*, kPs4Modules, "DELTA_PS4_MODULES", nullptr);
 DELTA_OPTION(const char*, kPs5Modules, "DELTA_PS5_MODULES", nullptr);
 }  // namespace
 
@@ -248,7 +249,15 @@ ModulePtr Process::LoadModule(base::StringRef name) {
   else
     host_rel.append(name.data(), name.length());
   host_rel += ".sprx";
-  base::String host_path = io::MakeAbsPath(host_rel);
+  base::String host_path;
+  if (const char* directory = kPs4Modules; directory && *directory) {
+    host_path = directory;
+    if (host_path.back() != '/')
+      host_path += "/";
+    host_path += host_rel.substr(base::CountStringLength("modules/"));
+  } else {
+    host_path = io::MakeAbsPath(host_rel);
+  }
   if (io::File(host_path, io::FileMode::kRead).IsOpen()) {
     if (lib->FromFile(host_path)) {
       if (is_ps4_gnm_driver)

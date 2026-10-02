@@ -22,7 +22,7 @@ class Launcher {
   ~Launcher();
 
   bool Init();
-  void Boot(const base::String& fromdir);
+  void Boot(const base::String& game_path);
 
   ArgvList argv;
 
