@@ -51,6 +51,22 @@ mem_size g_previous_background = 0;
 float g_background_transition = 1;
 u64 g_started_ns = 0;
 u64 g_selection_ns = 0;
+u64 g_launch_ns = 0;
+u64 g_game_frame_ns = 0;
+u64 g_boot_ns = 0;
+bool g_booting = false;
+Artwork g_launch_artwork;
+base::String g_launch_name;
+
+float FadeProgress(u64 start, float seconds) {
+  const float t = base::Min(
+      float(base::TickClock::NowNs() - start) / (seconds * 1e9f), 1.0f);
+  return t * t * (3 - 2 * t);
+}
+
+float LaunchOpacity() {
+  return g_game_frame_ns ? 1 - FadeProgress(g_game_frame_ns, 0.55f) : 1;
+}
 ImFont* g_heading = nullptr;
 base::String g_result;
 base::String g_error;
@@ -162,13 +178,25 @@ void DrawArtwork(ImDrawList* dl,
 }
 
 void Play(const base::String& path) {
+  if (g_launch_ns)
+    return;
   struct stat info {};
   if (::stat(path.c_str(), &info) != 0) {
     g_error = "This game is no longer at its saved location.";
     return;
   }
   g_result = path;
-  g_done = true;
+  g_launch_ns = base::TickClock::NowNs();
+  g_launch_name = "Prosperity";
+  g_launch_artwork = {};
+  for (mem_size i = 0; i < g_games->size(); ++i) {
+    if ((*g_games)[i].path == path) {
+      g_selected = i;
+      g_launch_name = (*g_games)[i].name;
+      g_launch_artwork = g_artwork[i];
+      break;
+    }
+  }
 }
 
 void SDLCALL DialogResult(void*, const char* const* files, int) {
@@ -246,9 +274,12 @@ bool HomeScreenActive() {
 
 HomeBackground HomeScreenBackground() {
   HomeBackground background;
-  if (!g_active)
+  if (!g_active && !LaunchTransitionActive())
     return background;
-  background.visible = g_games->empty() || g_artwork[g_selected].background < 0;
+  background.visible =
+      g_active ? g_games->empty() || g_artwork[g_selected].background < 0
+               : g_launch_artwork.background < 0;
+  background.opacity = g_active ? 1 : LaunchOpacity();
   background.style = g_background_style;
   const auto now = base::TickClock::NowNs();
   background.time = float(now - g_started_ns) / 1e9f;
@@ -257,7 +288,8 @@ HomeBackground HomeScreenBackground() {
 }
 
 void HomeScreenBuild(u32 width, u32 height) {
-  ReadDialogResult();
+  if (!g_launch_ns)
+    ReadDialogResult();
   const float w = float(width), h = float(height);
   const float margin = base::Clamp(w * 0.05f, 24.0f, 64.0f);
   const float tile = base::Clamp(w * 0.09f, 72.0f, 120.0f);
@@ -266,7 +298,7 @@ void HomeScreenBuild(u32 width, u32 height) {
       base::Max(96.0f, h * 0.15f) + (missing_firmware ? 112.0f : 0.0f);
   const mem_size visible = base::Max(
       mem_size(1), static_cast<mem_size>((w - margin * 2) / (tile + 20)));
-  if (!DialogPending() && !g_games->empty()) {
+  if (!g_launch_ns && !DialogPending() && !g_games->empty()) {
     if ((ImGui::IsKeyPressed(ImGuiKey_LeftArrow) ||
          ImGui::GetIO().MouseWheel > 0) &&
         g_selected)
@@ -279,7 +311,7 @@ void HomeScreenBuild(u32 width, u32 height) {
         ImGui::IsKeyPressed(ImGuiKey_Space))
       Play((*g_games)[g_selected].path);
   }
-  if (!DialogPending()) {
+  if (!g_launch_ns && !DialogPending()) {
     if (ImGui::IsKeyPressed(ImGuiKey_Escape))
       g_done = true;
     if (ImGui::IsKeyPressed(ImGuiKey_O))
@@ -323,6 +355,8 @@ void HomeScreenBuild(u32 width, u32 height) {
                    ImGuiWindowFlags_NoSavedSettings |
                    ImGuiWindowFlags_NoBackground);
   ImDrawList* dl = ImGui::GetWindowDrawList();
+  const int first_vertex = dl->VtxBuffer.Size;
+  ImGui::BeginDisabled(g_launch_ns != 0);
   dl->AddText(ImVec2(margin, 32), overlay_theme::kText, "Prosperity");
   dl->AddText(ImVec2(margin + 108, 32), overlay_theme::kSecondary, "Games");
   ImGui::SetCursorPos(ImVec2(w - margin - 256, 24));
@@ -446,7 +480,56 @@ void HomeScreenBuild(u32 width, u32 height) {
                 IM_COL32(220, 202, 167, static_cast<int>(opacity * 175)),
                 kAnniversary);
   }
+  ImGui::EndDisabled();
+  if (g_launch_ns) {
+    const float fade = FadeProgress(g_launch_ns, 0.35f);
+    for (int i = first_vertex; i < dl->VtxBuffer.Size; ++i) {
+      auto& vertex = dl->VtxBuffer[i];
+      const u32 alpha = vertex.col >> IM_COL32_A_SHIFT;
+      vertex.col = (vertex.col & ~IM_COL32_A_MASK) |
+                   (u32(alpha * (1 - fade)) << IM_COL32_A_SHIFT);
+      vertex.pos.y -= 12 * fade;
+    }
+  }
   ImGui::End();
+}
+
+bool LaunchTransitionActive() {
+  return g_booting && LaunchOpacity() > 0;
+}
+
+void LaunchTransitionGameReady() {
+  if (g_booting && !g_game_frame_ns)
+    g_game_frame_ns = base::TickClock::NowNs();
+}
+
+void LaunchTransitionBuild(u32 width, u32 height) {
+  const float w = float(width), h = float(height);
+  const float opacity = LaunchOpacity();
+  const auto tint = IM_COL32(255, 255, 255, int(255 * opacity));
+  auto* bg = ImGui::GetBackgroundDrawList();
+  const float zoom = 0.025f * FadeProgress(g_boot_ns, 6);
+  DrawArtwork(bg, g_launch_artwork.background, ImVec2(-w * zoom, -h * zoom),
+              ImVec2(w * (1 + zoom), h * (1 + zoom)), 0, tint);
+  const float enter = FadeProgress(g_boot_ns, 0.45f);
+  bg->AddRectFilledMultiColor(
+      ImVec2(0, 0), ImVec2(w, h),
+      IM_COL32(12, 13, 17, int(210 * (1 - enter) * opacity)),
+      IM_COL32(12, 13, 17, int(95 * (1 - enter) * opacity)),
+      IM_COL32(12, 13, 17, int((210 - 30 * enter) * opacity)),
+      IM_COL32(12, 13, 17, int((245 - 65 * enter) * opacity)));
+  const float x = base::Clamp(w * 0.05f, 24.0f, 64.0f);
+  const float y = h - 100 + 16 * (1 - enter);
+  const auto ink = IM_COL32(240, 244, 250, int(255 * opacity * enter));
+  if (g_launch_artwork.icon >= 0)
+    DrawArtwork(bg, g_launch_artwork.icon, ImVec2(x, y - 4),
+                ImVec2(x + 64, y + 60), 14, ink);
+  const float text_x = x + (g_launch_artwork.icon >= 0 ? 84 : 0);
+  bg->AddText(g_heading, 26, ImVec2(text_x, y), ink, g_launch_name.c_str());
+  const float angle = float(base::TickClock::NowNs() - g_launch_ns) / 1e9f * 4;
+  bg->PathArcTo(ImVec2(text_x + 8, y + 44), 6, angle, angle + 4.5f, 24);
+  bg->PathStroke(ink, 0, 1.5f);
+  bg->AddText(ImVec2(text_x + 24, y + 36), ink, "Starting game");
 }
 
 void BeginHomeScreen(const base::Vector<HomeGame>& games,
@@ -458,6 +541,8 @@ void BeginHomeScreen(const base::Vector<HomeGame>& games,
                            : ChooseHomeBackground(base::RandomUint(0, 767));
   g_started_ns = base::TickClock::NowNs();
   g_selection_ns = 0;
+  g_launch_ns = g_game_frame_ns = g_boot_ns = 0;
+  g_booting = false;
   g_ps4_ready = ps4_ready;
   g_ps5_ready = ps5_ready;
   g_games = &games;
@@ -473,10 +558,14 @@ void BeginHomeScreen(const base::Vector<HomeGame>& games,
 }
 
 bool HomeScreenDone() {
-  return g_done;
+  return g_done || (g_launch_ns && FadeProgress(g_launch_ns, 0.35f) >= 1);
 }
 
 base::String EndHomeScreen() {
+  if (!HomeScreenDone())
+    g_result.clear();
+  g_booting = !g_result.empty();
+  g_boot_ns = base::TickClock::NowNs();
   g_active = false;
   g_games = nullptr;
   g_artwork.clear();
@@ -501,5 +590,10 @@ HomeBackground HomeScreenBackground() {
   return {};
 }
 void HomeScreenBuild(u32, u32) {}
+bool LaunchTransitionActive() {
+  return false;
+}
+void LaunchTransitionGameReady() {}
+void LaunchTransitionBuild(u32, u32) {}
 }  // namespace ui
 #endif

@@ -22,6 +22,8 @@ base::String ShowHomeScreen(const base::Vector<ui::HomeGame>& games) {
   auto selected = ui::EndHomeScreen();
   if (selected.empty())
     host::Shutdown();
+  else
+    host::ShowSplash({});
   return selected;
 }
 

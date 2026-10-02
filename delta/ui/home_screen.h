@@ -27,10 +27,14 @@ struct HomeBackground {
   u32 style = 1;
   float time = 0;
   float pulse = 20;
+  float opacity = 1;
 };
 
 bool HomeScreenActive();
 HomeBackground HomeScreenBackground();
 void HomeScreenBuild(u32 width, u32 height);
+bool LaunchTransitionActive();
+void LaunchTransitionGameReady();
+void LaunchTransitionBuild(u32 width, u32 height);
 
 }  // namespace ui

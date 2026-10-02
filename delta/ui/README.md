@@ -18,6 +18,10 @@ Desktop ImGui menus and overlays. Namespace `ui`.
 this module to draw. `main/home_screen.cc` runs the startup menu and returns the
 selected game path to the launcher. UI code does not depend on either module.
 
+Selecting Play fades the menu out over 350 ms. Artwork or the animated fallback
+stays visible with a loading indicator and a gentle artwork zoom during startup,
+then fades into the first game frame over 550 ms. The same window stays open.
+
 Rounded charcoal panels, white text, and blue focus highlights follow the PS5
 menu style. Logs use a monospace font.
 

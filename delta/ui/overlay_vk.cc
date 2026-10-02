@@ -495,7 +495,7 @@ bool OverlayVkRender(VkCommandBuffer cmd, u32 image_index) {
   const auto background = HomeScreenBackground();
   if (background.visible)
     HomeBackgroundVkDraw(cmd, fb_w, fb_h, background.time, background.style,
-                         background.pulse);
+                         background.pulse, background.opacity);
 
   if (dd && dd->TotalVtxCount > 0) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_vk.pipe);

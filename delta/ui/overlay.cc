@@ -118,9 +118,13 @@ void OverlayBuildFrame(u32 w,
   if (HomeScreenActive()) {
     HomeScreenBuild(w, h);
   } else {
-    if (g_visible)
-      BuildLegend();
-    OverlayLogBuild(w, h);
+    if (LaunchTransitionActive()) {
+      LaunchTransitionBuild(w, h);
+    } else {
+      if (g_visible)
+        BuildLegend();
+      OverlayLogBuild(w, h);
+    }
     OverlayBusyBuild(w, h, frame_stalled);
   }
   ImGui::Render();

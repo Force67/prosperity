@@ -15,6 +15,7 @@ struct BackgroundPush {
   float time;
   float style;
   float pulse;
+  float opacity;
 };
 
 VkShaderModule MakeShader(const u32* code, mem_size size) {
@@ -75,6 +76,13 @@ bool HomeBackgroundVkInit(VkDevice device, VkRenderPass pass) {
   samples.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
   VkPipelineColorBlendAttachmentState attachment{};
   attachment.colorWriteMask = 0xf;
+  attachment.blendEnable = VK_TRUE;
+  attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+  attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+  attachment.colorBlendOp = VK_BLEND_OP_ADD;
+  attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+  attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+  attachment.alphaBlendOp = VK_BLEND_OP_ADD;
   VkPipelineColorBlendStateCreateInfo blend{
       VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
   blend.attachmentCount = 1;
@@ -112,7 +120,8 @@ void HomeBackgroundVkDraw(VkCommandBuffer cmd,
                           u32 height,
                           float time,
                           u32 style,
-                          float pulse) {
+                          float pulse,
+                          float opacity) {
   if (!g_pipeline)
     return;
   VkViewport viewport{0, 0, float(width), float(height), 0, 1};
@@ -120,8 +129,8 @@ void HomeBackgroundVkDraw(VkCommandBuffer cmd,
   vkCmdSetViewport(cmd, 0, 1, &viewport);
   vkCmdSetScissor(cmd, 0, 1, &scissor);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pipeline);
-  const BackgroundPush push{float(width), float(height), time, float(style),
-                            pulse};
+  const BackgroundPush push{float(width), float(height), time,
+                            float(style), pulse,         opacity};
   vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                      sizeof(push), &push);
   vkCmdDraw(cmd, 3, 1, 0, 0);

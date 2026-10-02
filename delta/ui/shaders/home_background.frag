@@ -5,6 +5,7 @@ layout(push_constant) uniform Background {
   float time;
   float style;
   float pulse;
+  float opacity;
 } background;
 layout(location = 0) out vec4 color;
 
@@ -200,5 +201,5 @@ void main() {
   float vignette = 1.0 - 0.3 * smoothstep(0.6, 2.2, length(p));
   result *= readable * vignette;
   result = vec3(1.0) - exp(-result * 1.3);
-  color = vec4(result, 1.0);
+  color = vec4(result, background.opacity);
 }

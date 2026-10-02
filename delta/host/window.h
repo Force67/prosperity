@@ -32,7 +32,8 @@ void SetIcon(const u8* png, size_t size);
 
 // Show the title's key art (a PNG) in the window from now until the guest
 // presents its first frame, as the console does while a game starts. Opens the
-// window right away and keeps it responsive meanwhile. Desktop Linux only.
+// window right away and keeps it responsive meanwhile. An empty PNG keeps the
+// current frame and animates the UI during startup. Desktop Linux only.
 void ShowSplash(base::Vector<u8> png);
 
 // Device-local memory this process is using, and what it may use. Both 0 when

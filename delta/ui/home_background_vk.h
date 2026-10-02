@@ -12,7 +12,8 @@ void HomeBackgroundVkDraw(VkCommandBuffer cmd,
                           u32 height,
                           float time,
                           u32 style,
-                          float pulse);
+                          float pulse,
+                          float opacity);
 void HomeBackgroundVkShutdown();
 
 }  // namespace ui

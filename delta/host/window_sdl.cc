@@ -45,6 +45,7 @@
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
 #include "options/options.h"
+#include "ui/home_screen.h"
 #include "ui/input_sdl.h"
 #include "ui/overlay.h"
 #include "ui/overlay_vk.h"
@@ -934,6 +935,8 @@ static void PresentFrame(const void* pixels,
 
 void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
   StopSplash();
+  if (pixels && !t_splash_thread && !ui::HomeScreenActive())
+    ui::LaunchTransitionGameReady();
   if (pixels)
     PresentFrame(pixels, w, h, src_pitch, fmt, false);
 }
@@ -963,21 +966,25 @@ void SetIcon(const u8* png, size_t size) {
 
 void ShowSplash(base::Vector<u8> png) {
 #if defined(__linux__)
-  if (png.empty() || png.size() > kMaxIconSize || !CanPresent())
+  if (png.size() > kMaxIconSize || !CanPresent())
     return;
+  StopSplash();
   g_splash.store(1, base::memory_order_release);
   base::SpawnDetachedThread("splash", [png = base::move(png)] {
     t_splash_thread = true;
     int w = 0, h = 0, channels = 0;
     stbi_uc* pixels =
-        stbi_load_from_memory(png.data(), static_cast<int>(png.size()), &w, &h,
-                              &channels, STBI_rgb_alpha);
-    if (pixels && Init("prosperity", 1920, 1080)) {
-      BASE_LOGI("gfx", "splash {}x{} until the first frame", w, h);
+        png.empty()
+            ? nullptr
+            : stbi_load_from_memory(png.data(), static_cast<int>(png.size()),
+                                    &w, &h, &channels, STBI_rgb_alpha);
+    if ((pixels || png.empty()) && Init("prosperity", 1920, 1080)) {
+      if (pixels)
+        BASE_LOGI("gfx", "splash {}x{} until the first frame", w, h);
       bool shown = false;
       while (g_splash.load(base::memory_order_acquire) == 1 && CanPresent()) {
         // Again after a resize: the swapchain was rebuilt without it.
-        if (!shown || g_window.need_recreate) {
+        if (pixels && (!shown || g_window.need_recreate)) {
           Present(pixels, static_cast<u32>(w), static_cast<u32>(h), 0,
                   PixelFormat::kRgba8);
           shown = true;
@@ -1141,6 +1148,7 @@ void SetRumble(u8 large_motor, u8 small_motor) {
 }
 
 void Shutdown() {
+  StopSplash();
   if (g_window.device)
     vkDeviceWaitIdle(g_window.device);
   ui::OverlayVkShutdown();
