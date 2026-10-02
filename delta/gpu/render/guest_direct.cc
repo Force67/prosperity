@@ -99,7 +99,10 @@ rhi::Buffer* ChunkAt(u64 offset) {
   if (it != g_chunks.end())
     return it->second;
   rhi::BufferDesc desc;
-  desc.size = base::Min(kChunk, g_alias_size - chunk);
+  // A block's reads may run past its end: the import overlaps the next
+  // chunk by a block, so they stay inside it.
+  desc.size = base::Min(kChunk + (1ull << kDirectBlockShift),
+                        g_alias_size - chunk);
   desc.usage = rhi::kBufferStorage | rhi::kBufferAddress |
                rhi::kBufferCopySrc | rhi::kBufferCopyDst;
   desc.host_pointer = g_alias + chunk;

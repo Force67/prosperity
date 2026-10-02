@@ -161,6 +161,8 @@ struct Recompiled {
   // Every buffer read goes through the direct guest memory table: the draw
   // binds no cbuffers or buffers and needs no descriptor replay for them.
   bool direct = false;
+  // The same for the vertex stage: no vertex buffers, cbuffers or buffers.
+  bool direct_vs = false;
   base::Vector<u32> gs_spirv;  // fixed RECTLIST expansion stage
   base::Vector<u32> fs_spirv;
   base::Vector<ShaderAttr> attrs;      // vertex inputs

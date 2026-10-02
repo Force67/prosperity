@@ -882,9 +882,12 @@ void ResolveRecompiledShaders(const Regs& regs,
   // user_data[N-udBase] for both attributes and cbuffers. Defaults to 8 (the
   // observed merged-NGG layout); DELTA_PS5_UDBASE overrides.
   // TODO: derive from RSRC2.
-  const ResolvedBuffers vs_resources = rdna::ResolveBuffers(
-      reinterpret_cast<const u32*>(binding.vs_addr), binding.vs_user_data,
-      vs_user_sgprs, kUdBase, 4096, ngg.gs_code ? gs_user_data_addr : 0);
+  const ResolvedBuffers vs_resources =
+      rc.direct_vs ? ResolvedBuffers{}
+                   : rdna::ResolveBuffers(
+                         reinterpret_cast<const u32*>(binding.vs_addr),
+                         binding.vs_user_data, vs_user_sgprs, kUdBase, 4096,
+                         ngg.gs_code ? gs_user_data_addr : 0);
   TraceAttrPlan(rc.attrs.size(), vs_user_sgprs, vs_resources.size(),
                 binding.vs_user_data);
   BindVertexAttributes(rc, vs_resources, binding.vs_user_data, vs_user_sgprs,
@@ -921,10 +924,12 @@ void ResolveRecompiledShaders(const Regs& regs,
           : rdna::ResolveBuffers(ngg.gs_code, binding.vs_user_data,
                                  vs_user_sgprs, kUdBase, 4096,
                                  gs_user_data_addr);
-  ResolveCbufferBindings(rc.vs_cbufs, vs_resources, true, binding.vs_addr, d,
-                         &gs_resources);
-  ResolveRawBuffers(rc.vs_bufs, vs_resources, binding.vs_user_data,
-                    vs_user_sgprs, d, true, &gs_resources);
+  if (!rc.direct_vs) {
+    ResolveCbufferBindings(rc.vs_cbufs, vs_resources, true, binding.vs_addr,
+                           d, &gs_resources);
+    ResolveRawBuffers(rc.vs_bufs, vs_resources, binding.vs_user_data,
+                      vs_user_sgprs, d, true, &gs_resources);
+  }
   if (binding.ps_addr) {
     if (!rc.direct) {
       ResolveCbufferBindings(rc.ps_cbufs, ps_resources, false, binding.ps_addr,

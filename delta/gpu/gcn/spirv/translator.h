@@ -887,6 +887,11 @@ struct StageContext {
   // A graphics stage reading guest memory through the direct table: buffer
   // loads convert their V#'s format at run time.
   bool direct = false;
+  Id direct_formats = 0;  // gfx10 buffer format -> dfmt | nfmt << 4
+  // Vertex-attribute fetches of a direct vertex stage: indexed by the vertex
+  // index itself, not the VGPR the NGG prologue derives it into.
+  base::HashSet<u32> direct_vertex_fetch;
+  Id direct_vertex_index = 0;
   base::HashSet<u32> cs_runtime_images;
   // Resource bindings this module samples as real images (mimg_plan).
   base::HashSet<u32> cs_native;
@@ -1104,6 +1109,8 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding);
 // As DeclareGuestMemory, through the direct table (render/guest_direct.h):
 // reads only, a block the table does not hold yet is reported and reads 0.
 void DeclareDirectMemory(Translator& t, StageContext& sc);
+// A direct graphics stage's scalar and buffer load; false when it is not one.
+bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc);
 Id CsGuestBase(Translator& t, StageContext& sc, u32 binding);
 Id CsGuestAddress(Translator& t,
                   StageContext& sc,

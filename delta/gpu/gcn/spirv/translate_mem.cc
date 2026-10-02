@@ -1534,35 +1534,196 @@ static Id BeginCsIndexedStore(Translator& t, const Inst& inst) {
   return merge;
 }
 
-// gfx10.3's unified buffer format enum as the GCN (dfmt, nfmt) pair, at run
-// time: consecutive runs of one channel layout, each UNorm, SNorm, UScaled,
-// SScaled, UInt, SInt [, Float] (rdna::DecodeBufferFormat is the same table).
-void RdnaFormatPair(Translator& t, Id gfmt, Id& dfmt, Id& nfmt) {
+// gfx10.3's unified buffer format enum -> GCN dfmt | nfmt << 4: consecutive
+// runs of one channel layout, each UNorm, SNorm, UScaled, SScaled, UInt, SInt
+// [, Float] (rdna::DecodeBufferFormat is the same table).
+constexpr u32 kGfx10Formats = 128;
+u8 Gfx10FormatPair(u32 gfmt) {
   struct Run {
     u8 first, count, dfmt;
     bool has_float;
   };
   static constexpr Run kRuns[] = {
-      {1, 6, 1, false},   {7, 7, 2, true},    {14, 6, 3, false},
-      {20, 3, 4, true},   {23, 7, 5, true},   {30, 7, 7, true},
-      {37, 7, 6, true},   {44, 6, 8, false},  {50, 6, 9, false},
-      {56, 6, 10, false}, {62, 3, 11, true},  {65, 7, 12, true},
+      {1, 6, 1, false},   {7, 7, 2, true},   {14, 6, 3, false},
+      {20, 3, 4, true},   {23, 7, 5, true},  {30, 7, 7, true},
+      {37, 7, 6, true},   {44, 6, 8, false}, {50, 6, 9, false},
+      {56, 6, 10, false}, {62, 3, 11, true}, {65, 7, 12, true},
       {72, 3, 13, true},  {75, 3, 14, true},
   };
-  dfmt = t.U32(0);
-  nfmt = t.U32(0);
   for (const Run& r : kRuns) {
-    const Id i = t.Sub(gfmt, t.U32(r.first));
-    const Id in = t.Ult(i, t.U32(r.count));
-    Id n = i;
-    if (r.count == 3)
-      n = t.SelectB(t.Eq(i, t.U32(0)), t.U32(4),
-                    t.SelectB(t.Eq(i, t.U32(1)), t.U32(5), t.U32(7)));
-    else if (r.has_float)
-      n = t.SelectB(t.Eq(i, t.U32(6)), t.U32(7), i);
-    dfmt = t.SelectB(in, t.U32(r.dfmt), dfmt);
-    nfmt = t.SelectB(in, n, nfmt);
+    if (gfmt < r.first || gfmt >= r.first + r.count)
+      continue;
+    const u32 i = gfmt - r.first;
+    const u32 nfmt = r.count == 3             ? (i == 0 ? 4u : i == 1 ? 5u : 7u)
+                     : r.has_float && i == 6 ? 7u
+                                             : i;
+    return static_cast<u8>(r.dfmt | nfmt << 4);
   }
+  return 0;
+}
+
+// Direct graphics loads (render/guest_direct.h): one translation per
+// instruction and no branches. An address the table does not hold, or one
+// past the descriptor's records, reads 0 out of the table itself.
+bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
+  const Id wide = t.m.TypeInt(64, false);
+  const auto to64 = [&](Id v) {
+    return t.m.Emit(spv::Op::OpUConvert, wide, {v});
+  };
+  const auto pair = [&](Id lo, Id hi) {
+    return t.m.Emit(spv::Op::OpBitwiseOr, wide,
+                    {to64(lo), t.m.Emit(spv::Op::OpShiftLeftLogical, wide,
+                                        {to64(hi), t.U32(32)})});
+  };
+  const auto add64 = [&](Id a, Id b) {
+    return t.m.Emit(spv::Op::OpIAdd, wide, {a, b});
+  };
+  const Id null64 = to64(t.U32(0));
+  const Id dummy = pair(t.U32(static_cast<u32>(g_direct_table)),
+                        t.U32(static_cast<u32>(g_direct_table >> 32)));
+  const Id u32_ptr =
+      t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
+  const auto translate = [&](Id address, u32 bytes) {
+    return t.m.Emit(spv::Op::OpFunctionCall, wide,
+                    {sc.cs_guest_translate, address, t.U32(bytes), t.U32(0)});
+  };
+  const auto load = [&](Id ptr, Id valid, Id byte) {
+    const Id at = t.m.Emit(spv::Op::OpSelect, wide,
+                           {valid, add64(ptr, to64(byte)), dummy});
+    const Id v = t.m.Emit(
+        spv::Op::OpLoad, t.t_u,
+        {t.m.Emit(spv::Op::OpConvertUToPtr, u32_ptr, {at}),
+         static_cast<u32>(spv::MemoryAccessMask::Aligned), 4});
+    return t.SelectB(valid, v, t.U32(0));
+  };
+  const auto base_of = [&](u32 sgpr) {
+    return pair(t.Sg(sgpr), t.And(t.Sg(sgpr + 1), t.U32(0xFFFF)));
+  };
+  const u32 w = inst.raw[0], w1 = inst.raw[1];
+
+  if (inst.enc == Enc::kSmrd) {
+    const u32 n =
+        inst.opcode <= 0x04 ? 1u << inst.opcode : SmrdLoadCount(inst.opcode);
+    if (!n)
+      return false;
+    const u32 sbase = (w & 0x3F) * 2, sdst = (w >> 6) & 0x7F;
+    const u32 soffset = (w1 >> 25) & 0x7F;
+    const i32 imm = static_cast<i32>(w1 << 11) >> 11;
+    Id byte_off = t.U32(static_cast<u32>(imm));
+    if (soffset != 125)
+      byte_off = t.Add(t.SrcRaw(soffset, 0), byte_off);
+    byte_off = t.And(byte_off, t.U32(~3u));
+    const Id ptr = translate(add64(base_of(sbase), to64(byte_off)), n * 4);
+    const Id held = t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {ptr, null64});
+    // s_buffer_load: within max(stride, 1) * NUM_RECORDS bytes.
+    Id limit = 0;
+    if (inst.opcode >= 0x08) {
+      const Id stride =
+          t.And(t.Shr(t.Sg(sbase + 1), t.U32(16)), t.U32(0x3FFF));
+      limit = t.m.Emit(spv::Op::OpIMul, wide,
+                       {to64(t.UMax(stride, t.U32(1))), to64(t.Sg(sbase + 2))});
+    }
+    base::Vector<Id> values;
+    for (u32 k = 0; k < n; k++) {
+      Id valid = held;
+      if (limit)
+        valid = t.LAnd(valid, t.m.Emit(spv::Op::OpULessThan, t.t_bool,
+                                       {to64(t.Add(byte_off, t.U32(k * 4))),
+                                        limit}));
+      values.push_back(load(ptr, valid, t.U32(k * 4)));
+    }
+    for (u32 k = 0; k < n; k++)
+      t.SetSdst(sdst, k, values[k]);
+    return true;
+  }
+  if (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf)
+    return false;
+  const bool typed = inst.enc == Enc::kMtbuf;
+  const u32 op = typed ? (w >> 16) & 0x7 : (w >> 18) & 0x7F;
+  const bool format = typed ? op < 4 : op <= 0x03;
+  const bool subword = !typed && op >= 0x08 && op <= 0x0B;
+  const bool dwords = !typed && op >= 0x0C && op <= 0x0F;
+  if (!format && !subword && !dwords)
+    return true;  // graphics stores and atomics are dropped
+  const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
+  const u32 vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
+  const u32 srsrc = ((w1 >> 16) & 0x1F) * 4, soffset = (w1 >> 24) & 0xFF;
+  Id byte_off;
+  if (idxen && sc.direct_vertex_fetch.count(inst.pc)) {
+    const Id stride = t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF));
+    byte_off = t.Add(t.Add(t.SrcRaw(soffset, inst.literal), t.U32(w & 0xFFF)),
+                     t.Mul(sc.direct_vertex_index, stride));
+    if (offen)
+      byte_off = t.Add(byte_off, t.Vg(vaddr + 1));
+  } else {
+    byte_off = BufferByteOffset(t, inst, w & 0xFFF, idxen, offen, vaddr,
+                                srsrc, soffset);
+  }
+  const Id aligned = t.And(byte_off, t.U32(~3u));
+  const Id ptr = translate(add64(base_of(srsrc), to64(aligned)), 16);
+  const Id stride = t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF));
+  const Id limit = t.m.Emit(
+      spv::Op::OpIMul, wide,
+      {to64(t.UMax(stride, t.U32(1))), to64(t.Sg(srsrc + 2))});
+  const Id held = t.LAnd(
+      t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {ptr, null64}),
+      t.m.Emit(spv::Op::OpULessThan, t.t_bool, {to64(byte_off), limit}));
+  const auto word_at = [&](Id dword_idx) {
+    return load(ptr, held,
+                t.Sub(t.Shl(dword_idx, t.U32(2)), aligned));
+  };
+  const Id first = t.Shr(byte_off, t.U32(2));
+  if (dwords) {
+    const u32 n = op == 0x0C ? 1 : op == 0x0D ? 2 : op == 0x0E ? 4 : 3;
+    for (u32 i = 0; i < n; i++)
+      t.SetVg(vdata + i, word_at(t.Add(first, t.U32(i))));
+    return true;
+  }
+  if (subword) {
+    const u32 bits = op <= 0x09 ? 8 : 16;
+    const bool sign = op & 1;
+    const Id shift = t.Shl(t.And(byte_off, t.U32(3)), t.U32(3));
+    Id value = t.And(t.Shr(word_at(first), shift), t.U32((1u << bits) - 1));
+    if (sign)
+      value = t.Sar(t.Shl(value, t.U32(32 - bits)), t.U32(32 - bits));
+    t.SetVg(vdata, value);
+    return true;
+  }
+  Id dfmt, nfmt;
+  if (typed) {
+    const u8 fmt = Gfx10FormatPair((w >> 19) & 0x7F);
+    dfmt = t.U32(fmt & 0xF);
+    nfmt = t.U32(fmt >> 4);
+  } else {
+    if (!sc.direct_formats) {
+      base::Vector<Id> words;
+      for (u32 i = 0; i < kGfx10Formats / 4; i++) {
+        u32 packed = 0;
+        for (u32 k = 0; k < 4; k++)
+          packed |= u32{Gfx10FormatPair(i * 4 + k)} << (k * 8);
+        words.push_back(t.U32(packed));
+      }
+      const Id array = t.m.TypeArray(t.t_u, kGfx10Formats / 4);
+      sc.direct_formats = t.m.Variable(
+          t.m.TypePointer(spv::StorageClass::Private, array),
+          spv::StorageClass::Private, t.m.ConstComposite(array, words));
+    }
+    const Id gfmt = t.And(t.Shr(t.Sg(srsrc + 3), t.U32(12)), t.U32(0x7F));
+    const Id packed = t.m.Load(
+        t.t_u,
+        t.m.AccessChain(t.m.TypePointer(spv::StorageClass::Private, t.t_u),
+                        sc.direct_formats, {t.Shr(gfmt, t.U32(2))}));
+    const Id pair_bits =
+        t.And(t.Shr(packed, t.Shl(t.And(gfmt, t.U32(3)), t.U32(3))),
+              t.U32(0xFF));
+    dfmt = t.And(pair_bits, t.U32(0xF));
+    nfmt = t.Shr(pair_bits, t.U32(4));
+  }
+  const BufferFormat f = DecodeBufferFormat(t, dfmt, nfmt);
+  const u32 n = (op & 3) + 1;
+  for (u32 i = 0; i < n; i++)
+    t.SetVg(vdata + i, FormattedComponentWith(t, f, word_at, byte_off, i));
+  return true;
 }
 
 void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
@@ -1687,19 +1848,6 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
       // Converted as the V#'s DATA_FORMAT / NUM_FORMAT say: a skinning job
       // storing xyz into an RGBA16F stream wrote 12 raw bytes, over the next
       // attribute and into the next vertex's position.
-      if (sc.direct && op <= 0x03) {
-        Id dfmt, nfmt;
-        RdnaFormatPair(t, t.And(t.Shr(t.Sg(srsrc + 3), t.U32(12)), t.U32(0x7F)),
-                       dfmt, nfmt);
-        const BufferFormat f = DecodeBufferFormat(t, dfmt, nfmt);
-        const auto load_word = [&](Id idx) {
-          return CsGuestLoad(t, sc, binding, idx);
-        };
-        for (u32 i = 0; i <= op; i++)
-          t.SetVg(vdata + i,
-                  FormattedComponentWith(t, f, load_word, byte_off, i));
-        break;
-      }
       if (sc.cs_runtime_resources.count(binding)) {
         if (op <= 0x03)
           load_dwords(op + 1);
@@ -1791,21 +1939,13 @@ void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   const u32 n = (op & 3) + 1;
-  if (!sc.direct && !MtbufIsRawDwords(inst, n))
+  if (!MtbufIsRawDwords(inst, n))
     WarnUnsupported("mtbuf.raw-format", op, w, w1);
   const u32 binding = static_cast<u32>(b);
   const Id byte_off = BufferByteOffset(t, inst, inst_offset, idxen, offen,
                                        vaddr, srsrc, soffset);
   const Id dword_idx = t.Shr(byte_off, t.U32(2));
-  if (op < 4 && sc.direct) {
-    const BufferFormat f = DecodeBufferFormat(
-        t, t.U32((w >> 19) & 0xF), t.U32((w >> 23) & 0x7));
-    const auto load_word = [&](Id idx) {
-      return CsGuestLoad(t, sc, binding, idx);
-    };
-    for (u32 i = 0; i < n; i++)
-      t.SetVg(vdata + i, FormattedComponentWith(t, f, load_word, byte_off, i));
-  } else if (op < 4) {  // tbuffer_load_format_x..xyzw
+  if (op < 4) {  // tbuffer_load_format_x..xyzw
     for (u32 i = 0; i < n; i++)
       t.SetVg(vdata + i,
               CsSsboLoad(t, sc, binding, t.Add(dword_idx, t.U32(i))));

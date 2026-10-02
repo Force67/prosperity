@@ -1910,8 +1910,10 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
   }
   // Compute reaches guest memory through the shared CS resource model (set-0
   // storage buffers), not through the graphics cbuf/vertex-fetch bindings.
-  if ((sc.is_cs || (sc.direct && IsDirectMemory(inst))) &&
-      EmitCsMemory(t, inst, sc))
+  if (sc.direct && IsDirectMemory(inst) &&
+      (gpu::gcn::EmitDirectLoad(t, inst, sc) || EmitCsMemory(t, inst, sc)))
+    return;
+  if (sc.is_cs && EmitCsMemory(t, inst, sc))
     return;
   if (sc.is_mesh && inst.enc == Enc::kSopp && inst.opcode == 0x0a) {
     t.Barrier();
@@ -3138,12 +3140,29 @@ thread_local u64 g_vs_addr = 0;
 Id DeclareUserData(Translator& t) {
   const Id words = t.m.TypeArray(t.t_u, 16);
   t.m.Decorate(words, spv::Decoration::ArrayStride, {4});
-  const Id block = t.m.TypeStruct({words});
+  // With the push budget for it, this stage's own code address {lo, hi}
+  // follows at 128 + 8 * slot, for s_getpc_b64 (the module is keyed by code
+  // content, so the address cannot live in it).
+  const bool code_base = gpu::gcn::PushCodeBase();
+  const Id block = code_base ? t.m.TypeStruct({words, t.t_u, t.t_u})
+                             : t.m.TypeStruct({words});
   t.m.Decorate(block, spv::Decoration::Block);
   t.m.MemberDecorate(block, 0, spv::Decoration::Offset,
                      {t.user_data_slot * 64});
-  return t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, block),
-                      spv::StorageClass::PushConstant);
+  if (code_base) {
+    t.m.MemberDecorate(block, 1, spv::Decoration::Offset,
+                       {128 + t.user_data_slot * 8});
+    t.m.MemberDecorate(block, 2, spv::Decoration::Offset,
+                       {132 + t.user_data_slot * 8});
+  }
+  const Id v =
+      t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, block),
+                   spv::StorageClass::PushConstant);
+  if (code_base) {
+    t.pc_base_var = v;
+    t.pc_base_member = 1;
+  }
+  return v;
 }
 
 void SeedUserData(Translator& t, Id user_data, u32 sgpr_base, u32 count) {
@@ -3183,7 +3202,13 @@ bool TranslateVs(const Program& program,
   // treats the inline buffer_load_format as a no-op) and the renderer binds the
   // real vertex buffers from r.attrs.
   base::Vector<FetchAttr> attrs = ParseFetch(fetch);
-  if (attrs.empty())
+  // Direct: an inline fetch runs as the buffer load it is.
+  r.direct_vs = r.direct && attrs.empty();
+  base::HashSet<u32> direct_vertex_fetch;
+  if (r.direct_vs)
+    for (const FetchAttr& a : ParseFetchInsts(program))
+      direct_vertex_fetch.insert(a.pc);
+  if (attrs.empty() && !r.direct_vs)
     attrs = ParseFetchInsts(program);
   if (ShDbg())
     for (const FetchAttr& a : attrs)
@@ -3219,6 +3244,9 @@ bool TranslateVs(const Program& program,
   iface.push_back(point_out);
 
   const Id user_data = DeclareUserData(t);
+  StageContext direct_decl;
+  if (r.direct_vs)
+    gpu::gcn::DeclareDirectMemory(t, direct_decl);
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data, 8, user_sgprs);
   t.m.Store(point_out, t.F32(1.f));
@@ -3314,17 +3342,25 @@ bool TranslateVs(const Program& program,
     // one primitive a fullscreen pass draws lives at offset 0.
     t.SetVg(0, t.U32(0));
   }
-  if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc,
-                     r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
-                                      : kMaxCbufBindings))
-    return false;
-  // A fetch already lifted to a vertex input needs no buffer of its own.
-  base::HashSet<u32> lifted;
-  for (const FetchAttr& a : attrs)
-    if (a.pc != ~0u)
-      lifted.insert(a.pc);
-  RdnaPlanGfxBuffers(program, 0, &lifted, r.vs_bufs, sc.gfx_buf_bind);
-  NoteCbufWindows(r.vs_cbufs, sc);
+  if (r.direct_vs) {
+    PlanDirect(program, sc);
+    sc.cs_guest_translate = direct_decl.cs_guest_translate;
+    sc.direct_vertex_fetch = base::move(direct_vertex_fetch);
+    sc.direct_vertex_index = t.m.Load(t.t_u, vertex_index);
+  } else {
+    if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind,
+                       sc.smem_cbuf_by_pc,
+                       r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
+                                        : kMaxCbufBindings))
+      return false;
+    // A fetch already lifted to a vertex input needs no buffer of its own.
+    base::HashSet<u32> lifted;
+    for (const FetchAttr& a : attrs)
+      if (a.pc != ~0u)
+        lifted.insert(a.pc);
+    RdnaPlanGfxBuffers(program, 0, &lifted, r.vs_bufs, sc.gfx_buf_bind);
+    NoteCbufWindows(r.vs_cbufs, sc);
+  }
   // A vertex program may sample too, and only the PS path used to plan its
   // MIMG bindings, so every VS that read a texture reached the shared
   // emitter with no plan, was reported "mimg.unplanned" and took its draws
@@ -4687,6 +4723,7 @@ Recompiled Recompile(const u32* vs_code,
       vs_exported_params.end());
 
   r.indirect_cbufs = ngg || vs_user_sgprs > 16 || ps_user_sgprs > 16;
+  r.direct = DirectGraphics();
   Translator tv;
   tv.rdna_sources = true;
   tv.indirect_cbufs = r.indirect_cbufs;
@@ -4716,7 +4753,6 @@ Recompiled Recompile(const u32* vs_code,
                 gpu::gcn::UnsupportedOps().c_str());
     return r;
   }
-  r.direct = DirectGraphics();
   Translator tp;
   tp.rdna_sources = true;
   tp.indirect_cbufs = r.indirect_cbufs;
