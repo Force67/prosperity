@@ -12,3 +12,4 @@ it receives, audio output and the on-screen overlay. Namespace `host`.
 | `gameplay_state.cc` | the renderer's "a run is underway" latch the pad autoskip reads |
 | `audio_output.h` | PCM playback ports (`audio_output_sdl.cc`, `_stub.cc` without SDL) |
 | `overlay*.cc` | the ImGui perf/controls/log overlay and its Vulkan pass |
+| `overlay_theme.h` | shared Delta palette, ImGui widget style, and overlay panel drawing |

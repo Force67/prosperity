@@ -4,7 +4,7 @@
 # NativeActivity surface in the Android app, and a headless stub for the adb
 # runner (which has no Activity). Audio and the overlay need SDL/ImGui, so the
 # Android builds leave them out.
-set(_desktop_only audio_output_sdl.cc overlay.cc overlay_log.cc overlay_vk.cc
+set(_desktop_only audio_output_sdl.cc overlay.cc overlay_log.cc overlay_theme.cc overlay_vk.cc
                   window_sdl.cc)
 if(ANDROID)
   if(DELTA_ANDROID_APP)
@@ -31,7 +31,8 @@ else()
     ${_imgui}/imgui_draw.cpp
     ${_imgui}/imgui_tables.cpp
     ${_imgui}/imgui_widgets.cpp)
-  target_include_directories(delta_host PRIVATE ${_imgui})
+  target_include_directories(delta_host PRIVATE ${_imgui}
+    ${CMAKE_SOURCE_DIR}/vendor/equilibrium/external/tracy/profiler/src)
 
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(_logo ${CMAKE_SOURCE_DIR}/delta/main/_res/logo.png)
@@ -44,7 +45,6 @@ else()
         "static constexpr unsigned char kProsperityLogoPng[] = {${_logo_bytes}};\n"
       @ONLY)
     target_include_directories(delta_host PRIVATE
-      ${CMAKE_CURRENT_BINARY_DIR}
-      ${CMAKE_SOURCE_DIR}/vendor/equilibrium/external/tracy/profiler/src)
+      ${CMAKE_CURRENT_BINARY_DIR})
   endif()
 endif()
