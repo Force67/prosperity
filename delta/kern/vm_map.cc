@@ -16,6 +16,7 @@
 #include "base/algorithm.h"
 #include "base/threading/lock_guard.h"
 #include "kern/process.h"
+#include "kern/ps5/dev/dma_dev.h"
 #include "kern/vm_map.h"
 
 namespace kern {
@@ -112,11 +113,42 @@ void VmMap::AddDirect(u8* ptr,
 
 void VmMap::Remove(u8* ptr, size_t size) {
   base::LockGuard lock(vmlock_);
+  for (const auto& page : rt_pages_) {
+    if (!page.has_phys)
+      continue;
+    u8* first = base::Max(ptr, page.ptr);
+    u8* end = base::Min(ptr + size, page.ptr + page.size);
+    if (first < end)
+      host_memory::AllocMem(first, end - first, Mprot::kW,
+                            Alloct::kReservecommit);
+  }
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
 }
 
-PageInfo* VmMap::Get(u8* ptr) {
+void VmMap::RemoveDirect(u64 phys_offset, size_t size) {
+  base::LockGuard lock(vmlock_);
+  base::Vector<PageInfo> removed;
+  for (const auto& page : rt_pages_) {
+    if (!page.has_phys)
+      continue;
+    const u64 first = base::Max(phys_offset, page.phys_offset);
+    const u64 end = base::Min(phys_offset + size, page.phys_offset + page.size);
+    if (first < end)
+      removed.emplace_back(page.ptr + first - page.phys_offset, end - first,
+                           page.prot);
+  }
+  // Retained stale pointers must not alias a later physical allocation.
+  for (const auto& page : removed) {
+    host_memory::AllocMem(page.ptr, page.size, Mprot::kW,
+                          Alloct::kReservecommit);
+    ForgetDmemVa(page.ptr, page.size);
+    PunchHoleLocked(page.ptr, page.size);
+    MappingChanged(page.ptr, page.size);
+  }
+}
+
+std::optional<PageInfo> VmMap::Get(u8* ptr) {
   base::LockGuard lock(vmlock_);
   // The kernel resolves the region *containing* an address, not just one that
   // starts there: sceKernelVirtualQuery / QueryMemoryProtection / mname all
@@ -127,9 +159,9 @@ PageInfo* VmMap::Get(u8* ptr) {
                          });
 
   if (it != rt_pages_.end())
-    return &*it;
+    return *it;
 
-  return nullptr;
+  return std::nullopt;
 }
 
 bool VmMap::Overlaps(u8* ptr, size_t size) const {

@@ -624,9 +624,11 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
       // through.
       auto* m = static_cast<Device*>(obj)->Map(addr, size, prot, flags, offset);
       if (m != reinterpret_cast<u8*>(-1)) {
-        proc->GetVma().Add(m, size,
-                           static_cast<Ppt>(prot & static_cast<u32>(Ppt::kRwx)),
-                           prot);
+        auto gprot = static_cast<Ppt>(prot & static_cast<u32>(Ppt::kRwx));
+        if (dmem_map)
+          proc->GetVma().AddDirect(m, size, gprot, prot, offset);
+        else
+          proc->GetVma().Add(m, size, gprot, prot);
         return m;
       }
     }
@@ -656,6 +658,7 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
       void* want = addr;
       if (flags & MFlags::kStack)
         want = static_cast<u8*>(addr) - size;
+      ForgetDmemVa(static_cast<u8*>(want), size);
       ptr = host_memory::AllocMem(want, size, Ppt::kW, Alt::kReservecommit);
       if (!ptr)
         ptr = host_memory::AllocMem(want, size, Ppt::kW,
@@ -1080,7 +1083,7 @@ int PS4ABI sys_munmap(void* addr, size_t len) {
     // no data and leaving it mapped makes the next reservation there relocate.
     // V8 reserves padded, frees, re-reserves exact; a stale pointer into the
     // padding should fault where the mistake is.
-    auto* region = proc->GetVma().Get(static_cast<u8*>(addr));
+    auto region = proc->GetVma().Get(static_cast<u8*>(addr));
     if (region && region->ptr == addr && region->size == len &&
         region->sce_prot == 0)
       ::munmap(addr, len);
@@ -1148,7 +1151,7 @@ int PS4ABI sys_query_memory_protection(void* addr, void* info) {
   auto* proc = Process::GetActive();
   if (!proc || !info)
     return -SysError::eINVAL;
-  auto* region = proc->GetVma().Get(static_cast<u8*>(addr));
+  auto region = proc->GetVma().Get(static_cast<u8*>(addr));
   if (!region)
     return -SysError::eACCES;
 
@@ -1210,7 +1213,7 @@ int PS4ABI sys_virtual_query(const void* addr,
     return -SysError::eINVAL;
 
   std::memset(info, 0, info_size);
-  auto* region =
+  auto region =
       proc->GetVma().Get(const_cast<u8*>(static_cast<const u8*>(addr)));
   if (!region) {
     // Memory we allocated outside the guest VMA is still guest-used memory: a

@@ -1116,7 +1116,7 @@ bool BuildGfx10Layout(TextureLayout32& out,
   // 8 (4 KiB) and 12 (64 KiB) levels in theirs.
   const u32 max_in_tail = mode.blk_log2 > 8 ? mode.blk_log2 - 4 : 0;
   u32 first_tail = mip_levels;
-  if (mode.blk_log2 > 8) {
+  if (mode.blk_log2 > 8 && mip_levels > 1) {
     for (u32 mip = 0; mip < mip_levels; mip++) {
       if (ShiftCeil(width, mip) <= block_w / 2 &&
           ShiftCeil(height, mip) <= block_h &&

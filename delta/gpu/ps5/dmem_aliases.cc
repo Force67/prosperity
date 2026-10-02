@@ -51,15 +51,33 @@ base::Vector<Range> FindAliased(base::Vector<Piece> pieces) {
     return a.file != b.file ? a.file < b.file : a.offset < b.offset;
   });
   base::Vector<Range> aliased;
-  for (size_t i = 0; i < pieces.size(); i++)
+  u64 previous_end = 0;
+  for (size_t i = 0; i < pieces.size(); i++) {
+    const Piece& p = pieces[i];
+    if (!i || p.file != pieces[i - 1].file)
+      previous_end = 0;
+    u64 first = p.offset;
+    u64 end = base::Min(p.offset_end, base::Max(first, previous_end));
+    const auto emit = [&] {
+      if (first < end)
+        aliased.push_back({p.va + first - p.offset, p.va + end - p.offset});
+    };
+    // Earlier pieces can only overlap a prefix. Merge later overlaps before
+    // emitting, rather than materializing every pair of aliases.
     for (size_t j = i + 1; j < pieces.size() && pieces[j].file == pieces[i].file &&
-                           pieces[j].offset < pieces[i].offset_end;
+                           pieces[j].offset < p.offset_end && end < p.offset_end;
          j++) {
       const u64 lo = pieces[j].offset;
-      const u64 hi = base::Min(pieces[i].offset_end, pieces[j].offset_end);
-      for (const Piece* p : {&pieces[i], &pieces[j]})
-        aliased.push_back({p->va + (lo - p->offset), p->va + (hi - p->offset)});
+      const u64 hi = base::Min(p.offset_end, pieces[j].offset_end);
+      if (lo > end) {
+        emit();
+        first = lo;
+      }
+      end = base::Max(end, hi);
     }
+    emit();
+    previous_end = base::Max(previous_end, p.offset_end);
+  }
   base::Sort(aliased.begin(), aliased.end(),
              [](const Range& a, const Range& b) { return a.first < b.first; });
   base::Vector<Range> merged;

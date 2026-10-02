@@ -62,7 +62,31 @@ constexpr int kErrNotFound = static_cast<int>(0x809F0008u);
 // multiple of 4 GiB to exactly zero and reads that as "no free space".
 // Minecraft's world creation is gated on exactly that check.
 constexpr u64 kTotalBlocks = 60000;  // ~1.83 GiB
-constexpr u64 kFreeBlocks = 50000;   // ~1.53 GiB
+
+u64 UsedBlocks(const base::String& path) {
+  u64 blocks = 0;
+  if (DIR* dir = ::opendir(path.c_str())) {
+    while (dirent* entry = ::readdir(dir)) {
+      if (!std::strcmp(entry->d_name, ".") ||
+          !std::strcmp(entry->d_name, ".."))
+        continue;
+      const base::String child = path + "/" + entry->d_name;
+      struct stat st;
+      if (::lstat(child.c_str(), &st) != 0)
+        continue;
+      if (S_ISDIR(st.st_mode))
+        blocks += UsedBlocks(child);
+      else if (S_ISREG(st.st_mode))
+        blocks += (static_cast<u64>(st.st_size) + 32767) / 32768;
+    }
+    ::closedir(dir);
+  }
+  return blocks;
+}
+
+u64 FreeBlocks(const base::String& path) {
+  return kTotalBlocks - base::Min(kTotalBlocks, UsedBlocks(path));
+}
 
 // OrbisSaveDataParam sidecar layout.
 constexpr size_t kParamSize = 1328;
@@ -416,13 +440,14 @@ int PS4ABI sceSaveDataUmount2(u32, const void* mount_point) {
   return UnmountPoint(mount_point);
 }
 
-int PS4ABI sceSaveDataGetMountInfo(const void*, void* info) {
+int PS4ABI sceSaveDataGetMountInfo(const void* point, void* info) {
   SdTrace("sceSaveDataGetMountInfo");
   if (info) {
+    const u64 free_blocks = FreeBlocks(HostForPoint(point));
     auto* i = static_cast<u8*>(info);
     std::memset(i, 0, 48);
     std::memcpy(i + 0, &kTotalBlocks, 8);  // total blocks
-    std::memcpy(i + 8, &kFreeBlocks, 8);   // free blocks
+    std::memcpy(i + 8, &free_blocks, 8);  // free blocks
   }
   return kOk;
 }
@@ -511,10 +536,11 @@ int PS4ABI sceSaveDataDirNameSearch(const void* cond, void* result) {
       LoadParam(search_root + "/" + hits[i], pslot);
     }
     if (infos) {
+      const u64 blocks = UsedBlocks(search_root + "/" + hits[i]);
       u8* islot = infos + i * 48;  // SearchInfo { u64 blocks; u64 free; }
       std::memset(islot, 0, 48);
-      std::memcpy(islot + 0, &kTotalBlocks, 8);
-      std::memcpy(islot + 8, &kFreeBlocks, 8);
+      // Host saves grow on demand rather than reserving the mount's quota.
+      std::memcpy(islot + 0, &blocks, 8);
     }
   }
   const u32 hit_num = static_cast<u32>(hits.size());

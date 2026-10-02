@@ -10,6 +10,8 @@
 
 #include "base/arch.h"
 
+#include <optional>
+
 #include "base/containers/vector.h"
 
 #include "base/threading/mutex.h"
@@ -66,11 +68,11 @@ class VmMap {
   // Same, for a range backed by direct memory at `physOffset`.
   void AddDirect(u8* ptr, size_t size, Mprot, u32 sce_prot, u64 phys_offset);
   // Drop bookkeeping for [ptr, ptr+size): entries fully inside vanish,
-  // straddling entries are truncated/split. Host pages are the caller's
-  // business (sys_munmap keeps them mapped; stale guest pointers then read
-  // stable garbage instead of faulting, and the NEXT mapping there rules).
+  // straddling entries are truncated/split. Direct-memory aliases are detached
+  // from their backing so stale pointers cannot access a reused allocation.
   void Remove(u8* ptr, size_t size);
-  PageInfo* Get(u8* ptr);
+  void RemoveDirect(u64 phys_offset, size_t size);
+  std::optional<PageInfo> Get(u8* ptr);
 
   // Apply a protection to every tracked mapping intersecting [ptr, ptr+size)
   // (kernel vm_map_protect: a range with no tracked mapping is fine, not an

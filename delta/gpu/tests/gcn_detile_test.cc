@@ -298,6 +298,23 @@ TEST(GcnDetile, SeparableTermsMatchTheDetiler) {
   EXPECT_GT(macro_ok, 0u);
 }
 
+TEST(GcnDetile, Gfx10SingleMipStartsAtTheBlockOrigin) {
+  for (u32 mode : {5u, 9u, 25u, 27u}) {
+    SCOPED_TRACE(mode);
+    gpu::gcn::TextureLayout32 layout;
+    ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(
+        layout, 16, 16, 16, 1, 1, gpu::gcn::kGfx10TilingBase + mode, false, 4));
+    EXPECT_EQ(layout.mips[0].mip_tail_x, 0u);
+    EXPECT_EQ(layout.mips[0].mip_tail_y, 0u);
+    base::Vector<u8> tiled(layout.size, 0);
+    tiled[0] = 42;
+    base::Vector<u8> linear(16 * 16 * 4, 0);
+    ASSERT_TRUE(gpu::gcn::DetileTextureMip32(
+        tiled.data(), linear.data(), layout, 0, 0));
+    EXPECT_EQ(linear[0], 42);
+  }
+}
+
 TEST(GcnDetile, PitchedTransfersLeaveLinearPaddingUntouched) {
   constexpr u32 kWidth = 263;
   constexpr u32 kHeight = 137;

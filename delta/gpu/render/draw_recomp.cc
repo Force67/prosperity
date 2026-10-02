@@ -526,11 +526,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   const bool force_white_tex = kTexForce && tex_base == (u64)kTexForce;
   if (force_white_tex)
     tex_base = 0;
-  // Render targets are plain 2D images, so only a plain 2D binding may resolve
-  // to one. An array or volume binding declared a sampler type no render target
-  // can satisfy.
+  // Render targets hold one mip. A mip chain at the same guest base must use
+  // the texture upload, including its mip offsets and sampler levels.
   const bool tex_rt_eligible =
-      !d.tex_arrayed && !d.tex_is_3d && !GuestFormatBlockCompressed(d.tex_dfmt);
+      !d.tex_arrayed && !d.tex_is_3d && d.tex_mip_levels == 1 &&
+      !GuestFormatBlockCompressed(d.tex_dfmt);
   if (tex_base && tex_rt_eligible && !g_rts.count(tex_base) &&
       !g_depths.count(tex_base)) {
     bool depth_format = d.tex_dfmt == 4 && d.tex_nfmt == 7;
@@ -1151,11 +1151,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         }
         continue;
       }
-      // Render targets are plain 2D images, so only a plain 2D binding may
-      // resolve to one. An array or volume binding declared a sampler type no
-      // render target can satisfy.
       const bool rt_eligible =
-          !t.arrayed && !t.is_3d && !GuestFormatBlockCompressed(t.dfmt);
+          !t.arrayed && !t.is_3d && t.mip_levels == 1 &&
+          !GuestFormatBlockCompressed(t.dfmt);
       // One base can hold several render-target geometries, and only the live
       // one answers to the address. Pick the variant this sample is asking for
       // before deciding what the binding resolves to, but never while the

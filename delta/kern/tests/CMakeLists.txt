@@ -2,6 +2,10 @@ add_delta_test(object_table_test
   SOURCES object_table_test.cc
   DEPS delta_kern)
 
+add_delta_test(dma_dev_test
+  SOURCES dma_dev_test.cc
+  DEPS delta_kern)
+
 add_delta_test(audio_queue_test
   SOURCES audio_queue_test.cc
   DEPS delta_deps)

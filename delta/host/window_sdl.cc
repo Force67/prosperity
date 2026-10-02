@@ -1113,13 +1113,9 @@ bool PollKeyboardPad(PadKeys& out) {
     g_suppress_pad.store(false);
   }
 
-  // Movement on the left stick (and the d-pad, for menus).
-  out.left = down(SDL_SCANCODE_A);
-  out.right = down(SDL_SCANCODE_D);
-  out.up = down(SDL_SCANCODE_W);
-  out.down = down(SDL_SCANCODE_S);
-  out.lx = out.left ? 0 : (out.right ? 255 : 128);
-  out.ly = out.up ? 0 : (out.down ? 255 : 128);
+  // Sending both stick and d-pad directions makes menus navigate twice.
+  out.lx = down(SDL_SCANCODE_A) ? 0 : (down(SDL_SCANCODE_D) ? 255 : 128);
+  out.ly = down(SDL_SCANCODE_W) ? 0 : (down(SDL_SCANCODE_S) ? 255 : 128);
   // Aim / shoot on the right stick (arrow keys).
   out.rx = down(SDL_SCANCODE_LEFT) ? 0 : (down(SDL_SCANCODE_RIGHT) ? 255 : 128);
   out.ry = down(SDL_SCANCODE_UP) ? 0 : (down(SDL_SCANCODE_DOWN) ? 255 : 128);

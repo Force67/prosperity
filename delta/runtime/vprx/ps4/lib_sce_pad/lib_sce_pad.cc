@@ -127,9 +127,10 @@ struct PadControllerInformation {
   u8 connection_type;        // 0x0A
   u8 connected_count;        // 0x0B
   bool connected;            // 0x0C
-  u8 device_class;           // 0x0D (ORBIS_PAD_DEVICE_CLASS_STANDARD = 0)
+  u32 device_class;          // 0x10 (ORBIS_PAD_DEVICE_CLASS_STANDARD = 0)
   u8 reserve[8];
 };
+static_assert(sizeof(PadControllerInformation) == 0x1c);
 
 u64 g_read_seq = 0;
 
@@ -720,7 +721,9 @@ void FillPadState(PadData* d) {
   d->orientation = {0, 0, 0, 1};
   d->connected = true;
   d->connected_count = 1;
-  d->timestamp = ++g_read_seq;
+  d->timestamp =
+      (base::TimeTicks::Now() - base::TimeTicks()).InMicroseconds();
+  ++g_read_seq;
   if (kPadAutoskip && (g_read_seq % 600 == 1))
     BASE_LOGI("pad", "readSeq={} buttons={:#x}", (unsigned long long)g_read_seq,
               buttons);
@@ -789,8 +792,8 @@ int scePadGetControllerInformation(int handle, void* p_info) {
     info->touchpad_density = 44.86f;
     info->touch_resolution_x = 1920;
     info->touch_resolution_y = 942;
-    info->stick_dead_zone_left = 0;
-    info->stick_dead_zone_right = 0;
+    info->stick_dead_zone_left = 12;
+    info->stick_dead_zone_right = 12;
     info->connection_type = 0;  // local
     info->connected_count = 1;
     info->connected = true;

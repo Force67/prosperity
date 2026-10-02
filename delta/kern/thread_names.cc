@@ -60,7 +60,7 @@ void RegisterGuestThreadStack(const void* stack, size_t size) {
   // The creating thread usually tags the stack before starting the thread;
   // pick that tag up now.
   if (auto* proc = Process::GetActive()) {
-    auto* info =
+    auto info =
         proc->GetVma().Get(const_cast<u8*>(static_cast<const u8*>(stack)));
     if (info && info->name)
       SetName(pthread_self(), info->name);

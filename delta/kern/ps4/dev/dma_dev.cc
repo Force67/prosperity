@@ -174,6 +174,8 @@ int DmemAllocate(u64 lo, u64 hi, u64 len, u64 align, u32 mem_type, u64* out) {
 void DmemFree(u64 start, u64 len) {
   const u64 end = start + len;
   base::LockGuard<base::Mutex> lk(g_dmem_mutex);
+  if (auto* process = Process::GetActive())
+    process->GetVma().RemoveDirect(start, len);
   for (size_t i = 0; i < g_dmem_regions.size();) {
     auto& r = g_dmem_regions[i];
     if (r.end <= start || r.start >= end) {
@@ -247,7 +249,7 @@ int DmemTypeForOffset(u64 off) {
 int DmemBackingFd() {
   static const bool kOnce = ([] {
     int fd = memfd_create("delta_dmem", 0);
-    if (fd >= 0 && ftruncate(fd, static_cast<off_t>(kDmemTotal)) != 0) {
+    if (fd >= 0 && ftruncate(fd, static_cast<off_t>(DmemTotal())) != 0) {
       close(fd);
       fd = -1;
     }
@@ -257,7 +259,7 @@ int DmemBackingFd() {
   return g_dmem_backing_fd;
 }
 u64 DmemBackingSize() {
-  return kDmemTotal;
+  return DmemTotal();
 }
 
 /* dmem_ioctl */
@@ -358,7 +360,7 @@ i32 DmaDevice::IoctlImpl(u32 cmd, void* data) {
         return -1;
       u64 off = 0;
       int r =
-          DmemAllocate(0, kDmemTotal, len, align, static_cast<u32>(a[4]), &off);
+          DmemAllocate(0, DmemTotal(), len, align, static_cast<u32>(a[4]), &off);
       if (r < 0)
         return r;
       a[0] = off;
