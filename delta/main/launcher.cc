@@ -31,6 +31,7 @@
 #include "kern/vfs_providers.h"
 #include "kern/vm_map.h"
 #include "logger/logger.h"
+#include "main/game_directory.h"
 #include "options/options.h"
 #include "ui/pause_menu.h"
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -84,7 +85,7 @@ bool ReadHostFile(const base::String& path,
 }
 
 base::String ParentPath(const base::String& path) {
-  const mem_size slash = path.find_last_of("/\\");
+  const mem_size slash = path.find_last_of("/\\", base::String::npos, 2);
   if (slash == base::String::npos)
     return base::String(".");
   return path.substr(0, slash == 0 ? 1 : slash);
@@ -150,7 +151,7 @@ bool MountContainer(kern::vfs::TitleMount mount, BootTitle* title) {
   return true;
 }
 
-bool LoadTitle(const base::String& path, BootTitle* title) {
+bool LoadTitle(base::String& path, BootTitle* title) {
   if (EndsWithIgnoreCase(path, ".pkg"))
     return MountContainer(kern::vfs::MountPkg(path, kWantIcon), title);
   if (EndsWithIgnoreCase(path, ".ffpkg"))
@@ -158,14 +159,8 @@ bool LoadTitle(const base::String& path, BootTitle* title) {
   if (formats::IsArchivePath(path.c_str()))
     return MountContainer(kern::vfs::MountArchive(path, kWantIcon), title);
 
-  const base::String sfo_path = path + "/sce_sys/param.sfo";
-  const base::String json_path = path + "/sce_sys/param.json";
-  if (IsHostFileReadable(sfo_path)) {
-    ReadPs4Metadata(sfo_path, title);
-  } else if (IsHostFileReadable(json_path)) {
-    title->is_ps5 = true;
-    ReadPs5Metadata(json_path, title);
-  } else {
+  const auto directory = cli::FindGameDirectory(path);
+  if (directory.root.empty()) {
     const base::String root = ParentPath(path);
     if (!ReadPs4Metadata(root + "/sce_sys/param.sfo", title))
       ReadPs4Metadata(root + "/param.sfo", title);
@@ -173,10 +168,19 @@ bool LoadTitle(const base::String& path, BootTitle* title) {
     title->main_module = path;
     return true;
   }
+  path = directory.root;
+  const base::String sfo_path = path + "/sce_sys/param.sfo";
+  const base::String json_path = path + "/sce_sys/param.json";
+  if (IsHostFileReadable(sfo_path)) {
+    ReadPs4Metadata(sfo_path, title);
+  } else if (IsHostFileReadable(json_path)) {
+    title->is_ps5 = true;
+    ReadPs5Metadata(json_path, title);
+  }
 
   kern::vfs::Mount("/app0", path.c_str());
   title->mounted = true;
-  title->main_module = "/app0/eboot.bin";
+  title->main_module = directory.main_module;
   ReadTitleIcon(path, title);
   return true;
 }

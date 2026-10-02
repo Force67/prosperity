@@ -4,6 +4,7 @@
 set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/command_line.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/firmware_config.cc
+                 ${CMAKE_CURRENT_SOURCE_DIR}/game_directory.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/recent_games.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/home_screen.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc)
@@ -19,6 +20,7 @@ if(DELTA_ANDROID_APP)
     ${CMAKE_CURRENT_SOURCE_DIR}/android_main.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/android_jni.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/game_directory.cc
     ${_glue}/android_native_app_glue.c)
   target_include_directories(ps4delta_app PRIVATE ${_glue}
     ${CMAKE_CURRENT_SOURCE_DIR}/_res)

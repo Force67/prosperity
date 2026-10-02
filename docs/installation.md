@@ -12,6 +12,8 @@ Start without a game path:
 ```
 
 Choose a recent game and press **Play**, or use **Open game** / **Open folder**.
+For an unpacked game, select its `eboot.bin` in **Open game**, or select the
+game's root with **Open folder**. Dumps with `decrypted/eboot.bin` work too.
 Each card shows a PS4 or PS5 badge from the game's metadata.
 Games without background art use an animated Delta backdrop chosen at random.
 A banner lists missing firmware modules and the setup commands to import them.

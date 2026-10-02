@@ -2,6 +2,10 @@
 
 Desktop ImGui menus and overlays. Namespace `ui`.
 
+**Open game** accepts packages, archives, standalone executables, and an
+unpacked game's `eboot.bin`. **Open folder** selects its root instead. The
+launcher mounts the whole game folder and saves that folder in recent games.
+
 | Unit | Purpose |
 |---|---|
 | `home_screen.h` | Recent games, artwork, PS4/PS5 chips, native file pickers |

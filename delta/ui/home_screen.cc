@@ -187,7 +187,7 @@ void DrawArtwork(ImDrawList* dl,
 void Play(const base::String& path) {
   if (g_launch_ns)
     return;
-  struct stat info {};
+  struct stat info{};
   if (::stat(path.c_str(), &info) != 0) {
     g_error = "This game is no longer at its saved location.";
     return;
@@ -225,7 +225,8 @@ void OpenGame(bool folder) {
   }
   auto* window = SDL_GetKeyboardFocus();
   static const SDL_DialogFileFilter kFilters[] = {
-      {"Games", "pkg;ffpkg;zip;rar;bin;elf"}, {"All files", "*"}};
+      {"Games (packages, archives, or eboot.bin)", "pkg;ffpkg;zip;rar;bin;elf"},
+      {"All files", "*"}};
   if (folder)
     SDL_ShowOpenFolderDialog(DialogResult, nullptr, window, nullptr, false);
   else
