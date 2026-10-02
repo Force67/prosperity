@@ -256,17 +256,23 @@ void WriteEventLabel(u64 address,
       BASE_LOGW("agc", "fence label {:#x} asks for GDS data, unimplemented",
                 address);
   }
-  PublishLabel([=] {
-    if (data_sel == 1)
-      WriteLabel(address, value, false);
-    else if (data_sel == 2)
-      WriteLabel(address, value, true);
-    else if (data_sel == 3 || data_sel == 4)
-      WriteLabel(address, GpuClockTimestamp(), true);
-    if (int_sel)
-      // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
-      prosperity_gpu_end_of_pipe_ctx(context_id ? context_id : value);
-  });
+  const u64 written =
+      data_sel == 3 || data_sel == 4 ? GpuClockTimestamp() : value;
+  PublishLabel(
+      [=] {
+        if (data_sel == 1)
+          WriteLabel(address, written, false);
+        else if (data_sel >= 2 && data_sel <= 4)
+          WriteLabel(address, written, true);
+        if (int_sel)
+          // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+          prosperity_gpu_end_of_pipe_ctx(context_id ? context_id : value);
+      },
+      address,
+      data_sel == 1                    ? 4
+      : data_sel >= 2 && data_sel <= 4 ? 8
+                                       : 0,
+      data_sel >= 1 && data_sel <= 4 ? &written : nullptr);
 }
 
 // --- packet handlers -------------------------------------------------------
@@ -317,14 +323,16 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       addressable(dst + bytes)) {
     if (bytes <= kLabelBytes) {
       const auto* from = reinterpret_cast<const u8*>(src);
-      PublishLabel([dst, data = base::Vector<u8>(from, from + bytes)] {
-        std::memcpy(reinterpret_cast<void*>(dst), data.data(), data.size());
-        for (size_t k = 0; k + 4 <= data.size(); k += 4) {
-          u32 word;
-          std::memcpy(&word, data.data() + k, 4);
-          RecordLabelWrite(dst + k, word);
-        }
-      });
+      PublishLabel(
+          [dst, data = base::Vector<u8>(from, from + bytes)] {
+            std::memcpy(reinterpret_cast<void*>(dst), data.data(), data.size());
+            for (size_t k = 0; k + 4 <= data.size(); k += 4) {
+              u32 word;
+              std::memcpy(&word, data.data() + k, 4);
+              RecordLabelWrite(dst + k, word);
+            }
+          },
+          dst, bytes, from);
     } else {
       std::memcpy(reinterpret_cast<void*>(dst),
                   reinterpret_cast<const void*>(src), bytes);
@@ -338,13 +346,18 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       bytes <= 0x8000000u && addressable(dst) && addressable(dst + bytes)) {
     const u32 fill = body[1];
     if (bytes <= kLabelBytes) {
-      PublishLabel([dst, bytes, fill] {
-        u32* words = reinterpret_cast<u32*>(dst);
-        for (u32 k = 0; k < bytes / 4; k++) {
-          words[k] = fill;
-          RecordLabelWrite(dst + k * 4, fill);
-        }
-      });
+      u32 filled[kLabelBytes / 4];
+      for (u32& word : filled)
+        word = fill;
+      PublishLabel(
+          [dst, bytes, fill] {
+            u32* words = reinterpret_cast<u32*>(dst);
+            for (u32 k = 0; k < bytes / 4; k++) {
+              words[k] = fill;
+              RecordLabelWrite(dst + k * 4, fill);
+            }
+          },
+          dst, bytes, filled);
     } else {
       u32* words = reinterpret_cast<u32*>(dst);
       for (u32 k = 0; k < bytes / 4; k++)
@@ -497,17 +510,17 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
     mask = body[4];
   }
   if (function == 0 || !IsLabelAddress(address) ||
-      !gpu::IsReadableRange(address, wide ? 8 : 4))
+      !gpu::IsReadableRangeCached(address, wide ? 8 : 4))
     return true;
-  DrainLabels();
   if (!render::FlushCsWritesRange(render::DefaultRenderer(), address,
                                   wide ? 8 : 4, "label"))
     return false;
-  u64 value;
-  if (wide)
-    value = *reinterpret_cast<const volatile u64*>(address);
-  else
-    value = *reinterpret_cast<const volatile u32*>(address);
+  u64 value = wide ? *reinterpret_cast<const volatile u64*>(address)
+                   : *reinterpret_cast<const volatile u32*>(address);
+  if (!OverlayHeld(address, wide ? 8 : 4, reinterpret_cast<u8*>(&value))) {
+    LabelPending(address, wide ? 8 : 4);
+    return false;
+  }
   return Compares(function, value & mask, ref);
 }
 
@@ -529,7 +542,10 @@ bool WaitBriefly(u32 op, const u32* body, u32 count) {
   const u32 submit_queue = render::g_submit_queue;
   const auto start = base::TimeTicks::Now();
   while (!WaitSatisfied(op, body, count)) {
-    if (base::TimeTicks::Now() - start >= base::Milliseconds(2)) {
+    // A held write is certain to land: only a wait on nothing in flight
+    // gives up.
+    if (base::TimeTicks::Now() - start >= base::Milliseconds(2) &&
+        !LabelPending(address, op == 0x93 ? 8 : 4)) {
       if (++missed == 3)
         BASE_LOGI("agc", "graphics no longer waits for {:#x}", address);
       return false;
@@ -631,12 +647,14 @@ void HandleWriteData(const u32* body, u32 count) {
               dwords > 1 ? body[4] : 0u);
   if (IsLabelAddress(address) &&
       IsLabelAddress(address + static_cast<u64>(dwords) * 4))
-    PublishLabel([address, words = base::Vector<u32>(body + 3, body + count)] {
-      std::memcpy(reinterpret_cast<void*>(address), words.data(),
-                  words.size() * 4);
-      for (size_t k = 0; k < words.size(); k++)
-        RecordLabelWrite(address + k * 4, words[k]);
-    });
+    PublishLabel(
+        [address, words = base::Vector<u32>(body + 3, body + count)] {
+          std::memcpy(reinterpret_cast<void*>(address), words.data(),
+                      words.size() * 4);
+          for (size_t k = 0; k < words.size(); k++)
+            RecordLabelWrite(address + k * 4, words[k]);
+        },
+        address, static_cast<u64>(dwords) * 4, body + 3);
 }
 
 // body: eventCtrl, addrLo, addrHi+sel, dataLo, dataHi
@@ -671,7 +689,9 @@ void HandleEventWriteEos(const u32* body, u32 count) {
     return;
   const u64 address =
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
-  PublishLabel([address, value = body[3]] { WriteLabel(address, value, false); });
+  PublishLabel(
+      [address, value = body[3]] { WriteLabel(address, value, false); },
+      address, 4, body + 3);
 }
 
 // IT_COPY_DATA: one small copy between memory, a register and the GPU's own
@@ -1256,7 +1276,12 @@ u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
   const u64 submission = ++g_total_submits;
   const bool dump = TraceSubmit(dcb, size_bytes, words, submission);
   render::g_submit_queue = queue;
-  g_queue = &g_ring_queues[queue];
+  // Looked up, not indexed: indexing builds a whole default QueueState (the
+  // register file and a pushed context) on every submit.
+  auto found = g_ring_queues.find(queue);
+  if (found == g_ring_queues.end())
+    found = g_ring_queues.emplace(queue, QueueState{}).first;
+  g_queue = &found->second;
   g_queue->stall.ring_walk = true;
   g_queue->stall.stalled = false;
   const u32 done = Walk(renderer, static_cast<const u32*>(dcb), words, dump, 0);

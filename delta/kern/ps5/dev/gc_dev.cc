@@ -153,6 +153,9 @@ struct AcqQueue {
   // though the doorbell has not moved.
   bool stalled = false;
   u32 id = 0;
+  // The doorbell page stays mapped once it is: asking every poll was a
+  // mincore per queue per tick.
+  bool doorbell_mapped = false;
 };
 
 static base::Mutex g_queue_lock;
@@ -238,7 +241,8 @@ static void DoorbellPoller() {
             (unsigned long)db, ring_dw ? (unsigned long)(db % ring_dw) : 0ul,
             (unsigned long)q.read_dw, q.ring_bytes);
       }
-      if (!GuestReadable(q.doorbell, sizeof(u64))) {
+      if (!q.doorbell_mapped &&
+          !(q.doorbell_mapped = GuestReadable(q.doorbell, sizeof(u64)))) {
         // A queue we never poll is a queue whose work never runs, and the
         // title waits on it just the same. The aperture is a guess; mapped is
         // the fact.

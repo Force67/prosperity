@@ -1,11 +1,14 @@
 #include "gpu/ps5/label_publisher.h"
 
+#include <cstring>
+
 #include "base/containers/vector.h"
 #include "base/logging.h"
-#include "base/strings/format.h"
-#include "base/strings/xstring.h"
+#include "base/math/value_bounds.h"
 #include "base/memory/move.h"
 #include "base/memory/unique_pointer.h"
+#include "base/strings/format.h"
+#include "base/strings/xstring.h"
 #include "base/threading/condition_variable.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
@@ -16,6 +19,8 @@ namespace gpu::ps5 {
 namespace {
 struct Held {
   u64 batch = 0;  // 0: nothing of its own to wait for
+  u64 lo = 0, hi = 0;     // the guest bytes it writes
+  base::Vector<u8> data;  // what it writes there, when known
   base::Function<void()> write;
 };
 
@@ -24,6 +29,7 @@ base::ConditionVariable g_wake;  // a write was held
 base::ConditionVariable g_done;  // a held write ran
 base::Vector<Held> g_held;
 size_t g_head = 0;  // g_held[g_head..] have not run
+
 base::UniquePointer<base::Thread> g_thread;
 
 void Run() {
@@ -52,12 +58,22 @@ void Run() {
 }
 }  // namespace
 
-void PublishLabel(base::Function<void()> write) {
+void PublishLabel(base::Function<void()> write,
+                  u64 base,
+                  u64 bytes,
+                  const void* data) {
   const u64 point = render::GuestWritePublishBatch();
   {
     base::LockGuard<base::Mutex> lock(g_lock);
     if (point || g_head < g_held.size()) {
-      g_held.push_back({point, base::move(write)});
+      Held& held = g_held.emplace_back();
+      held.batch = point;
+      held.lo = base;
+      held.hi = base + bytes < base ? ~0ull : base + bytes;
+      if (data)
+        held.data.assign(static_cast<const u8*>(data),
+                         static_cast<const u8*>(data) + bytes);
+      held.write = base::move(write);
       if (!g_thread)
         g_thread = base::MakeUnique<base::Thread>(
             "agc-labels", [] { Run(); }, /*start_now=*/true);
@@ -80,10 +96,30 @@ void ReportHeldLabels() {
   render::ReportBatchState();
 }
 
-void DrainLabels() {
-  // The held labels may wait for the batch this thread has not submitted yet.
-  render::SubmitForPublishedLabels();
-  base::UniqueLock<base::Mutex> lock(g_lock);
-  g_done.Wait(lock, [] { return g_head == g_held.size(); });
+bool OverlayHeld(u64 base, u32 bytes, u8* out) {
+  base::LockGuard<base::Mutex> lock(g_lock);
+  for (size_t i = g_head; i < g_held.size(); i++) {
+    const Held& h = g_held[i];
+    if (h.hi <= base || base + bytes <= h.lo)
+      continue;
+    if (h.data.empty())
+      return false;
+    const u64 lo = base::Max(base, h.lo), hi = base::Min(base + bytes, h.hi);
+    std::memcpy(out + (lo - base), h.data.data() + (lo - h.lo), hi - lo);
+  }
+  return true;
+}
+
+bool LabelPending(u64 base, u64 bytes) {
+  bool pending = false;
+  {
+    base::LockGuard<base::Mutex> lock(g_lock);
+    for (size_t i = g_head; i < g_held.size() && !pending; i++)
+      pending = g_held[i].lo < base + bytes && base < g_held[i].hi;
+  }
+  // The held write may wait for the batch this thread has not submitted yet.
+  if (pending)
+    render::SubmitForPublishedLabels();
+  return pending;
 }
 }  // namespace gpu::ps5
