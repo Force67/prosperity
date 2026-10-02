@@ -8,6 +8,7 @@
 #include "base/algorithm.h"
 #include "base/memory/mem_ops.h"
 #include "base/random/random.h"
+#include "base/strings/format.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "base/time/time.h"
@@ -30,6 +31,14 @@ struct Artwork {
   int icon = -1;
   int background = -1;
 };
+struct HomeMotion {
+  base::Vector<float> card_focus;
+  mem_size title_selection = 0;
+  u64 title_ns = 0;
+  u64 tick_ns = 0;
+};
+HomeMotion g_motion;
+
 struct AtlasImage {
   int rect;
   u32 width, height;
@@ -126,7 +135,7 @@ int AddArtwork(const base::Vector<u8>& png,
 
 void PrepareArtwork() {
   ImGuiIO& io = ImGui::GetIO();
-  g_heading = overlay_theme::AddSansFont(36);
+  g_heading = overlay_theme::HeadingFont();
   io.Fonts->TexDesiredWidth = 2048;
   base::Vector<AtlasImage> images;
   g_artwork.clear();
@@ -240,6 +249,20 @@ void ReadDialogResult() {
   if (!path.empty())
     Play(path);
 }
+float DrawShortcut(ImDrawList* dl,
+                   float x,
+                   float y,
+                   const char* key,
+                   const char* label) {
+  const float key_width = ImGui::CalcTextSize(key).x + 16;
+  dl->AddRectFilled(ImVec2(x, y), ImVec2(x + key_width, y + 24),
+                    overlay_theme::kSurface, 6);
+  dl->AddText(ImVec2(x + 8, y + 4), overlay_theme::kText, key);
+  dl->AddText(ImVec2(x + key_width + 8, y + 4), overlay_theme::kSecondary,
+              label);
+  return x + key_width + ImGui::CalcTextSize(label).x + 32;
+}
+
 void DrawFirmwareWarning(ImDrawList* dl, float width, float margin) {
   const ImVec2 tl(margin, 72);
   const ImVec2 br(width - margin, 172);
@@ -288,6 +311,9 @@ HomeBackground HomeScreenBackground() {
 void HomeScreenBuild(u32 width, u32 height) {
   if (!g_launch_ns)
     ReadDialogResult();
+  const auto now = base::TickClock::NowNs();
+  const float dt = base::Min(float(now - g_motion.tick_ns) / 1e9f, 0.05f);
+  g_motion.tick_ns = now;
   const float w = float(width), h = float(height);
   const float margin = base::Clamp(w * 0.05f, 24.0f, 64.0f);
   const float tile = base::Clamp(w * 0.09f, 72.0f, 120.0f);
@@ -355,8 +381,12 @@ void HomeScreenBuild(u32 width, u32 height) {
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const int first_vertex = dl->VtxBuffer.Size;
   ImGui::BeginDisabled(g_launch_ns != 0);
-  dl->AddText(ImVec2(margin, 32), overlay_theme::kText, "Prosperity");
-  dl->AddText(ImVec2(margin + 108, 32), overlay_theme::kSecondary, "Games");
+  overlay_theme::DrawMark(dl, ImVec2(margin, 34));
+  dl->AddText(ImVec2(margin + 24, 32), overlay_theme::kText, "Prosperity");
+  dl->AddRectFilled(ImVec2(margin + 132, 24), ImVec2(margin + 204, 56),
+                    overlay_theme::WithOpacity(overlay_theme::kText, 0.06f),
+                    16);
+  dl->AddText(ImVec2(margin + 148, 32), overlay_theme::kText, "Games");
   ImGui::SetCursorPos(ImVec2(w - margin - 256, 24));
   ImGui::BeginDisabled(DialogPending());
   if (ImGui::Button("Open game", ImVec2(120, 36)))
@@ -386,6 +416,11 @@ void HomeScreenBuild(u32 width, u32 height) {
   } else {
     dl->AddText(ImVec2(margin, row_y - 28), overlay_theme::kSecondary,
                 "Recently played");
+    const auto count =
+        base::Format("{:02} / {:02}", g_selected + 1, g_games->size());
+    dl->AddText(overlay_theme::MonospaceFont(), 13,
+                ImVec2(margin + 124, row_y - 27), overlay_theme::kMuted,
+                count.c_str());
     if (g_games->size() > visible) {
       ImGui::SetCursorPos(ImVec2(w - margin - 84, row_y - 36));
       ImGui::BeginDisabled(g_selected == 0 || DialogPending());
@@ -402,8 +437,21 @@ void HomeScreenBuild(u32 width, u32 height) {
     for (mem_size i = g_first;
          i < base::Min(g_games->size(), g_first + visible); ++i) {
       const auto& game = (*g_games)[i];
-      const ImVec2 tl(margin + (i - g_first) * (tile + 20), row_y);
-      const ImVec2 br(tl.x + tile, tl.y + tile);
+      const ImVec2 slot(margin + (i - g_first) * (tile + 20), row_y);
+      ImGui::PushID(static_cast<int>(i));
+      ImGui::SetCursorPos(ImVec2(slot.x - 4, slot.y - 8));
+      if (ImGui::InvisibleButton("game", ImVec2(tile + 8, tile + 8)))
+        g_selected = i;
+      const bool hovered = ImGui::IsItemHovered();
+      if (!DialogPending() && hovered && ImGui::IsMouseDoubleClicked(0))
+        Play(game.path);
+      const bool focused = i == g_selected;
+      float& focus = g_motion.card_focus[i];
+      const float target = focused ? 1 : (hovered ? 0.35f : 0);
+      focus += (target - focus) * base::Min(dt * 14, 1.0f);
+      const ImVec2 tl(slot.x - 4 * focus, slot.y - 8 * focus);
+      const ImVec2 br(slot.x + tile + 4 * focus, slot.y + tile);
+      overlay_theme::DrawFocusHalo(dl, tl, br, 12, focus);
       dl->AddRectFilled(tl, br, overlay_theme::kRaised, 12);
       if (g_artwork[i].icon >= 0)
         DrawArtwork(
@@ -412,38 +460,42 @@ void HomeScreenBuild(u32 width, u32 height) {
       else
         dl->AddText(g_heading, 32, ImVec2(tl.x + 28, tl.y + tile * 0.35f),
                     overlay_theme::kSecondary, game.is_ps5 ? "PS5" : "PS4");
-      const ImVec2 chip(tl.x, br.y + 10);
+      const ImVec2 chip(slot.x, br.y + 12);
       dl->AddRectFilled(chip, ImVec2(chip.x + 44, chip.y + 24),
-                        overlay_theme::kSurface, 6);
+                        overlay_theme::kSurface, 12);
+      dl->AddRectFilled(
+          chip, ImVec2(chip.x + 44, chip.y + 24),
+          overlay_theme::WithOpacity(overlay_theme::kAccent, focus * 0.15f),
+          12);
       dl->AddText(ImVec2(chip.x + 9, chip.y + 4), overlay_theme::kText,
                   game.is_ps5 ? "PS5" : "PS4");
-      ImGui::PushID(static_cast<int>(i));
-      ImGui::SetCursorPos(tl);
-      if (ImGui::InvisibleButton("game", ImVec2(tile, tile)))
-        g_selected = i;
-      if (!DialogPending() && ImGui::IsItemHovered() &&
-          ImGui::IsMouseDoubleClicked(0))
-        Play(game.path);
-      const bool focused = i == g_selected;
-      if (focused || ImGui::IsItemHovered())
+      if (focus > 0.01f)
         dl->AddRect(ImVec2(tl.x - 4, tl.y - 4), ImVec2(br.x + 4, br.y + 4),
-                    focused ? overlay_theme::kText : overlay_theme::kMuted, 16,
-                    0, 2);
+                    overlay_theme::WithOpacity(overlay_theme::kText, focus), 16,
+                    0, 1.5f);
       ImGui::PopID();
     }
     const auto& game = (*g_games)[g_selected];
-    const float title_y = base::Max(row_y + tile + 56, h * 0.55f);
+    if (g_motion.title_selection != g_selected) {
+      g_motion.title_selection = g_selected;
+      g_motion.title_ns = now;
+    }
+    const float reveal = FadeProgress(g_motion.title_ns, 0.24f);
+    const float title_y =
+        base::Max(row_y + tile + 56, h * 0.55f) + 8 * (1 - reveal);
     const float title_size = base::Min(36.0f, w / 28);
     const float title_width = w - margin * 2;
     const auto size =
         g_heading->CalcTextSizeA(title_size, title_width, 0, game.name.c_str());
     dl->AddText(g_heading, title_size, ImVec2(margin, title_y),
-                overlay_theme::kText, game.name.c_str());
+                overlay_theme::WithOpacity(overlay_theme::kText, reveal),
+                game.name.c_str());
     const auto subtitle =
         base::String(game.is_ps5 ? "PS5" : "PS4") +
         (game.title_id.empty() ? "" : "  /  " + game.title_id);
     dl->AddText(ImVec2(margin, title_y + size.y + 10),
-                overlay_theme::kSecondary, subtitle.c_str());
+                overlay_theme::WithOpacity(overlay_theme::kSecondary, reveal),
+                subtitle.c_str());
     ImGui::SetCursorPos(
         ImVec2(margin, base::Min(title_y + size.y + 40, h - 80)));
     ImGui::PushStyleColor(ImGuiCol_Button, overlay_theme::kText);
@@ -451,18 +503,29 @@ void HomeScreenBuild(u32 width, u32 height) {
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, overlay_theme::kAccent);
     ImGui::PushStyleColor(ImGuiCol_Text, overlay_theme::kCanvas);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 22);
-    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.54f, 0.5f));
     ImGui::BeginDisabled(!game.available || DialogPending());
     if (ImGui::Button(game.available ? "Play" : "Game unavailable",
                       ImVec2(200, 44)))
       Play(game.path);
+    if (game.available) {
+      const auto tl = ImGui::GetItemRectMin();
+      const auto br = ImGui::GetItemRectMax();
+      if (ImGui::IsItemHovered())
+        overlay_theme::DrawFocusHalo(dl, tl, br, 22, 1);
+      dl->AddTriangleFilled(
+          ImVec2(tl.x + 70, tl.y + 16), ImVec2(tl.x + 70, tl.y + 28),
+          ImVec2(tl.x + 80, tl.y + 22), overlay_theme::kCanvas);
+    }
     ImGui::EndDisabled();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(4);
   }
-  dl->AddText(
-      ImVec2(margin, h - 36), overlay_theme::kSecondary,
-      "Arrow keys  Browse     Enter  Play     O  Open game     Esc  Exit");
+  float hint_x = margin;
+  hint_x = DrawShortcut(dl, hint_x, h - 40, "< >", "Browse");
+  hint_x = DrawShortcut(dl, hint_x, h - 40, "Enter", "Play");
+  hint_x = DrawShortcut(dl, hint_x, h - 40, "O", "Open game");
+  DrawShortcut(dl, hint_x, h - 40, "Esc", "Exit");
   if (!g_error.empty())
     dl->AddText(ImVec2(margin, h - 64), overlay_theme::kWarning,
                 g_error.c_str());
@@ -545,6 +608,9 @@ void BeginHomeScreen(const base::Vector<HomeGame>& games,
   g_ps5_ready = ps5_ready;
   g_games = &games;
   g_selected = g_first = 0;
+  g_motion = {};
+  g_motion.card_focus.resize(games.size());
+  g_motion.title_ns = g_motion.tick_ns = g_started_ns;
   g_background_selection = g_previous_background = 0;
   g_background_transition = 1;
   g_done = false;
@@ -567,6 +633,7 @@ base::String EndHomeScreen() {
   g_active = false;
   g_games = nullptr;
   g_artwork.clear();
+  g_motion.card_focus.clear();
   ImGui::GetIO().ClearInputKeys();
   return g_result;
 }

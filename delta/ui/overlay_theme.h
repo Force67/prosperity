@@ -20,6 +20,13 @@ inline constexpr ImU32 kCritical = kError;
 ImFont* AddSansFont(float size);
 void Apply();
 ImFont* MonospaceFont();
+ImFont* HeadingFont();
+ImU32 WithOpacity(ImU32 color, float opacity);
+void DrawFocusHalo(ImDrawList* draw_list,
+                   ImVec2 top_left,
+                   ImVec2 bottom_right,
+                   float rounding,
+                   float opacity);
 void DrawPanel(ImDrawList* draw_list,
                ImVec2 top_left,
                ImVec2 bottom_right,

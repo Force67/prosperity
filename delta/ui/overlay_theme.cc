@@ -6,6 +6,7 @@ namespace ui::overlay_theme {
 namespace {
 
 ImFont* g_monospace_font = nullptr;
+ImFont* g_heading_font = nullptr;
 
 ImVec4 Color(ImU32 value, float alpha = 1.0f) {
   ImVec4 color = ImGui::ColorConvertU32ToFloat4(value);
@@ -28,6 +29,7 @@ void Apply() {
   ImGuiIO& io = ImGui::GetIO();
   io.FontDefault = AddSansFont(15.0f);
   g_monospace_font = io.Fonts->AddFontDefault();
+  g_heading_font = AddSansFont(36);
 
   style.WindowPadding = ImVec2(20.0f, 20.0f);
   style.FramePadding = ImVec2(12.0f, 8.0f);
@@ -109,8 +111,30 @@ void Apply() {
   colors[ImGuiCol_ModalWindowDimBg] = Color(kCanvas, 0.75f);
 }
 
+ImFont* HeadingFont() {
+  return g_heading_font;
+}
+
 ImFont* MonospaceFont() {
   return g_monospace_font;
+}
+
+ImU32 WithOpacity(ImU32 color, float opacity) {
+  return ImGui::ColorConvertFloat4ToU32(Color(color, opacity));
+}
+
+void DrawFocusHalo(ImDrawList* draw_list,
+                   ImVec2 top_left,
+                   ImVec2 bottom_right,
+                   float rounding,
+                   float opacity) {
+  for (int i = 3; i > 0; --i) {
+    const float spread = float(i * 4);
+    draw_list->AddRect(ImVec2(top_left.x - spread, top_left.y - spread),
+                       ImVec2(bottom_right.x + spread, bottom_right.y + spread),
+                       WithOpacity(kAccent, opacity * (4 - i) * 0.035f),
+                       rounding + spread, 0, 4);
+  }
 }
 
 void DrawPanel(ImDrawList* draw_list,
@@ -118,6 +142,13 @@ void DrawPanel(ImDrawList* draw_list,
                ImVec2 bottom_right,
                float opacity) {
   const float rounding = ImGui::GetStyle().WindowRounding;
+  for (int i = 3; i > 0; --i) {
+    const float spread = float(i * 2);
+    draw_list->AddRectFilled(
+        ImVec2(top_left.x - spread, top_left.y - spread + 3),
+        ImVec2(bottom_right.x + spread, bottom_right.y + spread + 3),
+        IM_COL32(0, 0, 0, int((4 - i) * 5 * opacity)), rounding + spread);
+  }
   draw_list->AddRectFilled(
       top_left, bottom_right,
       ImGui::GetColorU32(ImGuiCol_WindowBg, 0.95f * opacity), rounding);
