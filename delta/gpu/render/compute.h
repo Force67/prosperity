@@ -88,4 +88,7 @@ void CsNoteGuestWrites(u64 first, u64 end);
 bool QueueCheck(const char* where);
 bool QueueCheckArmed();
 
+// The buffer and offset the GPU reads GpuIndirectArgs' arguments at.
+rhi::Buffer* IndirectArgsBuffer(u64 args, u64* offset);
+
 }  // namespace gpu::render

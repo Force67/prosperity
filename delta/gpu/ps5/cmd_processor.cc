@@ -116,6 +116,7 @@ struct QueueState {
   RingStall stall;
   IndexState index;
   u64 draw_indirect_base = 0;
+  u64 indirect_args = 0;  // the draw being issued reads its arguments on the GPU
   u64 dispatch_indirect_base = 0;
   base::Array<u32, 0x400> pushed_context{};
   bool context_pushed = false;
@@ -852,6 +853,21 @@ void HandleDrawIndirect(
   if (!g_queue->draw_indirect_base || !IsGuestAddress(args) ||
       !gpu::IsReadableRangeCached(args, want))
     return;
+  // Indexed and not NGG: the GPU reads the arguments where a dispatch left
+  // them, over the whole index buffer, and nothing waits for them here.
+  const bool ngg = (g_queue->regs[mmVGT_SHADER_STAGES_EN] >> 7) & 1;
+  if (indexed && !ngg && g_queue->index.max && g_queue->index.base &&
+      render::GpuIndirectArgs(args, want)) {
+    const u32 initiator = count >= 4 ? body[3] : 0;
+    const u64 base = g_queue->index.base;
+    const u32 idx_body[5] = {g_queue->index.max, static_cast<u32>(base),
+                             static_cast<u32>(base >> 32), g_queue->index.max,
+                             initiator};
+    g_queue->indirect_args = args;
+    issue(renderer, IT_DRAW_INDEX_2, idx_body, 5);
+    g_queue->indirect_args = 0;
+    return;
+  }
   if (!render::FlushCsWritesRange(renderer, args, want, "indirect-draw"))
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
@@ -895,6 +911,7 @@ void HandleDrawPacket(render::Renderer& renderer,
   packet.index_base = g_queue->index.base;
   packet.index_max = g_queue->index.max;
   packet.num_instances = g_queue->index.num_instances;
+  packet.indirect_args = g_queue->indirect_args;
 
   thread_local render::DrawInfo d;
   d.Reset();

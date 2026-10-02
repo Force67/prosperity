@@ -1396,6 +1396,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                               bind_size[j], "vb"))
         return Decline(kNoRecomp);
   }
+  rhi::Buffer* indirect_buf = nullptr;
+  u64 indirect_off = 0;
+  if (d.indirect_args) {
+    indirect_buf = IndirectArgsBuffer(d.indirect_args, &indirect_off);
+    EndRegion();
+    g_frame.list->Barrier(rhi::kAccessAllWrite, rhi::kAccessIndirectRead);
+  }
 
   // Raw windows a dispatch wrote and still holds in VRAM: copied into the ring
   // on the GPU, before the pass opens, instead of read back through guest
@@ -2049,6 +2056,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   if (mesh)
     list->DrawMeshTasks((draw_count - 1) / d.recomp->mesh_input_primitives + 1,
                         d.instance_count ? d.instance_count : 1, 1);
+  else if (indexed && indirect_buf && !quads)
+    list->DrawIndexedIndirect(indirect_buf, indirect_off);
   else if (indexed)
     list->DrawIndexed(upload_indices,
                       d.instance_count ? d.instance_count : 1, 0, 0, 0);

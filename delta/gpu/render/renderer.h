@@ -167,6 +167,10 @@ void MirrorNoteGuestWrites(u64 first, u64 end);
 u64 MirrorCacheBlock(u64 block);
 // Blocks the CPU stopped writing go back to VRAM.
 void MirrorRecache();
+// Draw arguments the GPU can read where they are: true when the mirror holds
+// them (written there by a dispatch, or copied in now), so the draw reads
+// them indirectly instead of the CPU waiting for them.
+bool GpuIndirectArgs(u64 args, u64 bytes);
 void MirrorWritesCollected();
 
 // Does `addr` fall inside a compute staging range, i.e. guest memory the

@@ -5096,6 +5096,24 @@ u64 MirrorCacheBlock(u64 block) {
   return address;
 }
 
+bool GpuIndirectArgs(u64 args, u64 bytes) {
+  if (!kMirror || !gcn::g_direct_table || !Mirror() || !g_mirror->address() ||
+      (args & 3) || !InMirror(args) ||
+      (args & ~(kMirrorBlock - 1)) != ((args + bytes - 1) & ~(kMirrorBlock - 1)))
+    return false;
+  const u64 block = args & ~(kMirrorBlock - 1);
+  if (MirrorOwned(block))
+    return !(OwnAt(block).state.load(base::memory_order_acquire) &
+             kOwnPending) ||
+           CsBatchSubmit();
+  return MirrorCacheBlock(block) != 0;
+}
+
+rhi::Buffer* IndirectArgsBuffer(u64 args, u64* offset) {
+  *offset = args - kMirrorBase;
+  return g_mirror;
+}
+
 void MirrorUncache(u64 block) {
   if (!g_mirror_cached.erase(block))
     return;

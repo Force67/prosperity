@@ -36,6 +36,7 @@ struct DrawPacket {
   u64 index_base = 0;     // IT_INDEX_BASE (DRAW_INDEX_2 carries its own)
   u32 index_max = 0;      // IT_INDEX_BUFFER_SIZE, bounding an offset draw
   u32 num_instances = 1;  // IT_NUM_INSTANCES
+  u64 indirect_args = 0;  // see render::DrawInfo
 };
 
 // Fill `d` from the packet and the live registers. False when no usable shader

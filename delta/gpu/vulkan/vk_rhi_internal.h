@@ -166,6 +166,7 @@ class VulkanCommandList final : public rhi::CommandList {
   void Dispatch(u32 x, u32 y, u32 z) override;
   void DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) override;
   void DispatchIndirect(rhi::Buffer* args, u64 offset) override;
+  void DrawIndexedIndirect(rhi::Buffer* args, u64 offset) override;
   void ClearAttachment(u32 attachment,
                        const rhi::ClearColor& color,
                        float depth,

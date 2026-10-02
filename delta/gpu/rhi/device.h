@@ -149,6 +149,8 @@ class CommandList : public Object {
   // Three u32 group counts at `offset` in `args` (kBufferIndirect), read when
   // the dispatch executes (Caps::dispatch_indirect).
   virtual void DispatchIndirect(Buffer* /*args*/, u64 /*offset*/) {}
+  // One indexed draw whose five u32 arguments the GPU reads at `offset`.
+  virtual void DrawIndexedIndirect(Buffer* /*args*/, u64 /*offset*/) {}
   // Inside a pass: clear a rectangle of one bound attachment. `attachment`
   // indexes the colours; ~0u means the depth/stencil attachment.
   virtual void ClearAttachment(u32 attachment,

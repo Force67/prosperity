@@ -981,6 +981,7 @@ bool BuildDrawInfo(const Regs& regs,
   std::memcpy(d.ps_user_data, binding.ps_user_data, sizeof(d.ps_user_data));
   d.prim_type = regs[mmVGT_PRIMITIVE_TYPE];
   d.instance_count = packet.num_instances;
+  d.indirect_args = packet.indirect_args;
   ResolveIndexBuffer(packet, d);
   ResolveRenderTargets(regs, d);
   ResolveColorState(regs, d);

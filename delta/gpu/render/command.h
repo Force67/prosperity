@@ -62,6 +62,10 @@ struct DrawInfo {
   u32 index_count = 0;
   u32 index_type = 0;
   u32 instance_count = 1;  // from IT_NUM_INSTANCES (tilemaps draw instanced)
+  // DRAW_INDEX_INDIRECT the GPU resolves: the guest address of its arguments
+  // (index count, instances, first index, vertex offset, first instance),
+  // over an index buffer uploaded whole.
+  u64 indirect_args = 0;
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
   // Legacy transform fields for heuristic rendering, mirroring the first
   // resolved VS cbuffer; recompiled shaders use cbufs[] (set 1, bindings 0..7).
