@@ -185,6 +185,7 @@ base::HashSet<u64> g_mirror_cached;
 base::Map<u64, u64> g_mirror_uncached;  // block -> frame the CPU last wrote it
 base::Map<u64, u64> g_mirror_wb_union;
 DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", false);
+DELTA_OPTION(bool, kCsListProf, "DELTA_GPU_LISTPROF", false);
 // Staging-in halves: hashing guest memory to decide validity, CPU detiling,
 // the render-target bridge (its own submit+wait), and the plain copy.
 u64 g_in_hash_ns = 0, g_in_detile_ns = 0, g_in_rt_ns = 0, g_in_copy_ns = 0;
@@ -1554,6 +1555,15 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
                           const ComputeInfo::Res& res,
                           CsRange& e,
                           const AliasedCopyPlan& plan) {
+  struct Span {
+    rhi::CommandList* c;
+    ~Span() {
+      if (c)
+        c->ProfileEnd();
+    }
+  } span{g_frame.recording ? g_frame.list : nullptr};
+  if (span.c)
+    span.c->ProfileBegin(5);
   const CsAliasedImage& img = t.img;
   const u32 layers = base::Max(res.layers, 1u);
   g_rec_why = !e.buf                                      ? "no-buf"
@@ -1744,6 +1754,14 @@ bool StageCsRangeFromRtInFrame(const ComputeInfo::Res& res, CsRange& e) {
   return !why;
 }
 
+// Read shapes no target bridge can serve (the live image is another size):
+// staged from guest memory without first waiting for the range to go idle.
+base::HashSet<u64> g_rt_unbridgeable;
+u64 RtShapeKey(const ComputeInfo::Res& res) {
+  return res.base ^ (u64{res.width} << 40) ^ (u64{res.height} << 20) ^
+         res.layers;
+}
+
 // The host-side bridge: the buffer must be idle.
 bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
   DELTA_ZONE("gpu.cs_stage_from_rt");
@@ -1756,8 +1774,10 @@ bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
                           /*prefer_depth=*/res.dfmt == 4))
     return false;
   AliasedCopyPlan plan;
-  if (!PlanAliasedCopy(img, res, "reads", plan))
+  if (!PlanAliasedCopy(img, res, "reads", plan)) {
+    g_rt_unbridgeable.insert(RtShapeKey(res));
     return false;
+  }
   return RunAliasedCopy(img, res, e, /*to_image=*/false, plan);
 }
 
@@ -2493,6 +2513,11 @@ void RecordImageTiling(rhi::CommandList* c,
                        u32 mips,
                        u32 layers,
                        bool depth16) {
+  struct Span {
+    rhi::CommandList* c;
+    ~Span() { c->ProfileEnd(); }
+  } span{c};
+  c->ProfileBegin(4);
   auto& s = g_tiling;
   const u32 mip_count =
       mips ? base::Min<u32>(mips, t.params.size()) : t.params.size();
@@ -2828,6 +2853,8 @@ bool CsBatchInit() {
     return true;
   for (auto& b : g_cs_batches) {
     b.list = Device().CreateCommandList();
+    if (b.list && kCsListProf)
+      b.list->SetProfileTag(2);
     if (!b.list)
       return false;
     // Two timestamps for each of at most 128 dispatches.
@@ -3167,8 +3194,11 @@ bool CsBatchFlush(CsSyncWhy why = kSyncWriteback) {
 // needs its guest bytes, and those ask on demand; a live target aliasing it
 // still wants the image refreshed at frame end.
 bool CsLazyKept(u64 base, const CsRange& e) {
-  return kCsImageLazyWb && e.truth && e.gpu_dirty && !e.imported &&
-         !CsAliasedBase(base);
+  // A linear image is served to draws from its buffer as a tiled truth is.
+  const bool linear_image =
+      e.image_staging && gcn::TilingIsLinear(e.res.tiling_idx);
+  return kCsImageLazyWb && (e.truth || linear_image) && e.gpu_dirty &&
+         !e.imported && !CsAliasedBase(base);
 }
 
 // `all`: every dirty range, or only those nothing keeps in VRAM on purpose.
@@ -4787,6 +4817,7 @@ bool MirrorCopy(u64 base,
   }
   if (!list)
     list = g_cs_list;
+  list->ProfileBegin(3);
   list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
   for (const auto& [import, span] : pieces) {
     u64 import_base = 0;
@@ -4801,6 +4832,7 @@ bool MirrorCopy(u64 base,
   }
   list->Barrier(rhi::kAccessCopyWrite,
                 kAccessAll | rhi::kAccessHostRead);
+  list->ProfileEnd();
   return true;
 }
 
@@ -6340,7 +6372,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     }
     const bool rt_stale = kCsRtCache && e.rt_sourced && e.last_rt_frame >= 0 &&
                           AliasedImageRenderSerial(base) <= e.rt_serial;
-    const bool rt_attempt = rt_backed && !e.gpu_dirty && !rt_stale;
+    const bool rt_attempt = rt_backed && !e.gpu_dirty && !rt_stale &&
+                            !g_rt_unbridgeable.count(RtShapeKey(ci.res[i]));
     if (rt_attempt)
       valid = false;
     else if (rt_backed && !e.gpu_dirty && e.rt_sourced)
@@ -6775,6 +6808,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2,
                               /*start=*/true);
   DispatchCheckpoint(g_cs_list, ci.cs_addr, false);
+  g_cs_list->ProfileBegin(1);
   if (indirect.buffer) {
     g_cs_list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                        rhi::kAccessIndirectRead);
@@ -6783,6 +6817,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     g_cs_list->DispatchBase(ci.group_base[0], ci.group_base[1],
                             ci.group_base[2], groups[0], groups[1], groups[2]);
   }
+  g_cs_list->ProfileEnd();
   DispatchCheckpoint(g_cs_list, ci.cs_addr, true);
   if (stamp)
     g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2 + 1,
@@ -7399,8 +7434,20 @@ void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
     FlushCsWritesRange(renderer, base, bytes, "fill");
   // Announced first: armed pages open in runs, not with a fault per page.
   host_memory::BeforeHostWrite(reinterpret_cast<void*>(base), bytes);
+  // Split over the detile pool: one thread memsetting ~20 MB a frame was the
+  // submit thread's largest item.
+  constexpr u64 kChunk = 256 * 1024;
   u32* words = reinterpret_cast<u32*>(base);
-  base::Fill(words, words + bytes / 4, value);
+  if (bytes < kParallelCopyMin) {
+    base::Fill(words, words + bytes / 4, value);
+  } else {
+    const u32 chunks = static_cast<u32>((bytes + kChunk - 1) / kChunk);
+    gcn::DetileParallelWork(chunks, bytes, [&](u32 c0, u32 c1) {
+      const u64 off = u64(c0) * kChunk / 4;
+      const u64 end = base::Min<u64>(u64(c1) * kChunk, bytes) / 4;
+      base::Fill(words + off, words + end, value);
+    });
+  }
   CsForgetGuestRange(base, bytes);
   InvalidateTexRange(base, bytes);
   NoteMemoryFill(renderer, base, bytes, value);

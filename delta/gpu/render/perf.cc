@@ -3,6 +3,7 @@
  */
 
 #include "gpu/render/perf.h"
+#include "gpu/rhi/device.h"
 #include "base/arch.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/render/buffer_cache.h"
@@ -349,6 +350,29 @@ void ReportFps() {
   double dt = (now - last).InSecondsF();
   if (dt >= 2.0) {
     double f = frames ? frames : 1;
+    if (rhi::g_list_gpu_n[1] | rhi::g_list_gpu_n[2] | rhi::g_list_gpu_n[3]) {
+      BASE_LOGI("listprof",
+                "GPU ms/frame: frame lists {:.2f} (x{:.1f}) batches {:.2f} "
+                "(x{:.1f}) immediate {:.2f} (x{:.1f})",
+                rhi::g_list_gpu_ns[1] / f / 1e6, rhi::g_list_gpu_n[1] / f,
+                rhi::g_list_gpu_ns[2] / f / 1e6, rhi::g_list_gpu_n[2] / f,
+                rhi::g_list_gpu_ns[3] / f / 1e6, rhi::g_list_gpu_n[3] / f);
+      for (u32 i = 0; i < 4; i++)
+        rhi::g_list_gpu_ns[i] = rhi::g_list_gpu_n[i] = 0;
+      static const char* const kNames[] = {"-",       "dispatch", "pass",
+                                            "mirror",  "tiling",   "rt-bridge",
+                                            "present", "copy",     "fill/clear",
+                                            "barrier",       "buf->tex", "tex->buf",
+                                            "tex->tex", "blit",     "copy-host", "15"};
+      base::String line;
+      for (u32 i = 1; i < rhi::kProfCats; i++)
+        if (rhi::g_prof_cat_ns[i])
+          base::FormatTo(line, " {}={:.2f}", kNames[i],
+                         rhi::g_prof_cat_ns[i] / f / 1e6);
+      BASE_LOGI("listprof", "spans ms/frame:{}", line.c_str());
+      for (u64& v : rhi::g_prof_cat_ns)
+        v = 0;
+    }
     BASE_LOGI(
         "fps",
         "{:.1f} fps | per-frame gpu-code: draw={:.2f}ms end={:.2f}ms "

@@ -123,6 +123,15 @@ class VulkanCommandList final : public rhi::CommandList {
   ~VulkanCommandList() override;
 
   VkCommandBuffer cmd = VK_NULL_HANDLE;
+  VkQueryPool prof_pool_ = VK_NULL_HANDLE;
+  u8 prof_pending_ = 0;  // the tag the last recording's stamps belong to
+  static constexpr u32 kProfSpans = 255;
+  u8 span_cat_[kProfSpans] = {};
+  u32 spans_ = 0, spans_pending_ = 0;
+  bool span_open_ = false;
+  void ProfileBegin(u32 cat) override;
+  bool CanOpenSpan() const { return profile_tag_ && prof_pool_ && !span_open_; }
+  void ProfileEnd() override;
 
   void Begin() override;
   void End() override;

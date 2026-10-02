@@ -161,18 +161,95 @@ VulkanCommandList::~VulkanCommandList() {
     vkDestroyDescriptorPool(dev, pool, nullptr);
 }
 
+namespace {
+// A command profiled on its own when no wider span is open.
+struct AutoSpan {
+  VulkanCommandList* list;
+  bool opened;
+  AutoSpan(VulkanCommandList* l, u32 cat) : list(l), opened(l->CanOpenSpan()) {
+    if (opened)
+      list->ProfileBegin(cat);
+  }
+  ~AutoSpan() {
+    if (opened)
+      list->ProfileEnd();
+  }
+};
+}  // namespace
+
 void VulkanCommandList::Begin() {
+  // The previous recording has retired (the list is being reused): fold its
+  // span into its tag.
+  if (prof_pending_) {
+    static u64 stamps[2 + 2 * kProfSpans];
+    const u32 n = 2 + 2 * spans_pending_;
+    if (vkGetQueryPoolResults(device_.native.device, prof_pool_, 0, n,
+                              n * sizeof(u64), stamps, sizeof(u64),
+                              VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+      const double period = device_.caps().timestamp_period_ns;
+      if (stamps[1] > stamps[0]) {
+        rhi::g_list_gpu_ns[prof_pending_ & 3] +=
+            static_cast<u64>((stamps[1] - stamps[0]) * period);
+        rhi::g_list_gpu_n[prof_pending_ & 3]++;
+      }
+      for (u32 i = 0; i < spans_pending_; i++) {
+        const u64 a = stamps[2 + 2 * i], b = stamps[3 + 2 * i];
+        if (b > a)
+          rhi::g_prof_cat_ns[span_cat_[i] % rhi::kProfCats] +=
+              static_cast<u64>((b - a) * period);
+      }
+    }
+    prof_pending_ = 0;
+  }
+  spans_ = spans_pending_ = 0;
+  span_open_ = false;
   vkResetCommandBuffer(cmd, 0);
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(cmd, &bi);
+  if (profile_tag_) {
+    if (!prof_pool_) {
+      VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+      qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      qi.queryCount = 2 + 2 * kProfSpans;
+      vkCreateQueryPool(device_.native.device, &qi, nullptr, &prof_pool_);
+    }
+    vkCmdResetQueryPool(cmd, prof_pool_, 0, 2 + 2 * kProfSpans);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, prof_pool_, 0);
+  }
   pipeline_ = nullptr;
   for (VkDescriptorPool pool : transient_pools_)
     vkResetDescriptorPool(device_.native.device, pool, 0);
   transient_pool_ = 0;
 }
 
+void VulkanCommandList::ProfileBegin(u32 cat) {
+  if (!profile_tag_ || !prof_pool_ || span_open_ || spans_ >= kProfSpans)
+    return;
+  span_cat_[spans_] = static_cast<u8>(cat);
+  vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, prof_pool_,
+                      2 + 2 * spans_);
+  span_open_ = true;
+}
+
+void VulkanCommandList::ProfileEnd() {
+  if (!span_open_)
+    return;
+  vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, prof_pool_,
+                      3 + 2 * spans_);
+  spans_++;
+  span_open_ = false;
+}
+
 void VulkanCommandList::End() {
+  if (span_open_)
+    ProfileEnd();
+  if (profile_tag_ && prof_pool_) {
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, prof_pool_,
+                        1);
+    prof_pending_ = profile_tag_;
+    spans_pending_ = spans_;
+  }
   vkEndCommandBuffer(cmd);
 }
 
@@ -219,11 +296,13 @@ void VulkanCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
   ri.pColorAttachments = colors;
   ri.pDepthAttachment = d.view && d.depth ? &depth : nullptr;
   ri.pStencilAttachment = d.view && d.stencil ? &stencil : nullptr;
+  ProfileBegin(2);
   device_.cmd_begin_rendering(cmd, &ri);
 }
 
 void VulkanCommandList::EndRenderPass() {
   device_.cmd_end_rendering(cmd);
+  ProfileEnd();
 }
 
 void VulkanCommandList::SetPipeline(rhi::Pipeline* pipeline) {
@@ -423,6 +502,8 @@ void VulkanCommandList::CopyBuffer(rhi::Buffer* dst,
                                    rhi::Buffer* src,
                                    u64 src_offset,
                                    u64 bytes) {
+  // 14: one side is host memory, so the copy crosses the bus.
+  AutoSpan span(this, src->mapped() || dst->mapped() ? 14 : 7);
   const VkBufferCopy region{src_offset, dst_offset, bytes};
   vkCmdCopyBuffer(cmd, Buf(src)->buffer, Buf(dst)->buffer, 1, &region);
 }
@@ -432,6 +513,7 @@ void VulkanCommandList::CopyBufferToTexture(
     rhi::Buffer* src,
     const rhi::BufferTextureCopy* regions,
     u32 count) {
+  AutoSpan span(this, 10);
   VkBufferImageCopy vk[16];
   for (u32 done = 0; done < count;) {
     const u32 n = count - done > 16 ? 16 : count - done;
@@ -448,6 +530,7 @@ void VulkanCommandList::CopyTextureToBuffer(
     rhi::Texture* src,
     const rhi::BufferTextureCopy* regions,
     u32 count) {
+  AutoSpan span(this, 11);
   VkBufferImageCopy vk[16];
   for (u32 done = 0; done < count;) {
     const u32 n = count - done > 16 ? 16 : count - done;
@@ -464,6 +547,7 @@ void VulkanCommandList::CopyTexture(rhi::Texture* dst,
                                     const rhi::TextureRegion& dst_region,
                                     rhi::Texture* src,
                                     const rhi::TextureRegion& src_region) {
+  AutoSpan span(this, 12);
   VkImageCopy c{};
   c.srcSubresource = Layers(src_region);
   c.srcOffset = {src_region.x, src_region.y, src_region.z};
@@ -479,6 +563,7 @@ void VulkanCommandList::BlitTexture(rhi::Texture* dst,
                                     rhi::Texture* src,
                                     const rhi::TextureRegion& src_region,
                                     rhi::Filter filter) {
+  AutoSpan span(this, 13);
   VkImageBlit b{};
   b.srcSubresource = Layers(src_region);
   b.srcOffsets[0] = {src_region.x, src_region.y, src_region.z};
@@ -500,6 +585,7 @@ void VulkanCommandList::ClearTexture(rhi::Texture* texture,
                                      rhi::TextureState state,
                                      const rhi::TextureRange& range,
                                      const rhi::ClearColor& color) {
+  AutoSpan span(this, 8);
   const VkClearColorValue v = ToVkClear(color);
   const VkImageSubresourceRange r{ToVkAspect(range.aspect), range.base_mip,
                                   range.mips, range.base_layer, range.layers};
@@ -523,6 +609,7 @@ void VulkanCommandList::FillBuffer(rhi::Buffer* buffer,
                                    u64 offset,
                                    u64 bytes,
                                    u32 value) {
+  AutoSpan span(this, 8);
   vkCmdFillBuffer(cmd, Buf(buffer)->buffer, offset, bytes, value);
 }
 
@@ -530,6 +617,7 @@ void VulkanCommandList::UpdateBuffer(rhi::Buffer* buffer,
                                      u64 offset,
                                      u64 bytes,
                                      const void* data) {
+  AutoSpan span(this, 8);
   vkCmdUpdateBuffer(cmd, Buf(buffer)->buffer, offset, bytes, data);
 }
 
@@ -537,6 +625,7 @@ void VulkanCommandList::Barrier(u32 src_access,
                                 u32 dst_access,
                                 const rhi::TextureBarrier* textures,
                                 u32 num_textures) {
+  AutoSpan span(this, 9);
   const VkPipelineStageFlags shader = device_.ShaderStages();
   VkPipelineStageFlags src_stages = StagesFor(src_access, shader);
   VkPipelineStageFlags dst_stages = StagesFor(dst_access, shader);

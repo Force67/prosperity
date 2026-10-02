@@ -92,10 +92,30 @@ class TimestampPool : public Object {};
 
 // One recorded sequence of GPU work: Begin, record, End, Device::Submit. It
 // may be recorded again once that submission has retired.
+// GPU time the command lists of each profile tag took (DELTA_GPU_LISTPROF):
+// from the first command to the last, read once the list is reused.
+inline u64 g_list_gpu_ns[4];
+inline u64 g_list_gpu_n[4];
+// Named spans inside profiled lists (ProfileBegin/End), by category.
+constexpr u32 kProfCats = 16;
+inline u64 g_prof_cat_ns[kProfCats];
+inline const char* g_prof_cat_names[kProfCats];
+
 class CommandList : public Object {
  public:
   virtual void Begin() = 0;
   virtual void End() = 0;
+  // Which g_list_gpu_ns entry this list's time goes to; 0 = not profiled.
+  void SetProfileTag(u8 tag) { profile_tag_ = tag; }
+  // A span of this (profiled) list counted under category `cat`; spans do
+  // not nest.
+  virtual void ProfileBegin(u32 /*cat*/) {}
+  virtual void ProfileEnd() {}
+
+ protected:
+  u8 profile_tag_ = 0;
+
+ public:
 
   // Draws are legal only inside a pass; copies, clears and dispatches only
   // outside one.

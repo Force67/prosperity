@@ -103,6 +103,10 @@ DELTA_OPTION(bool, kWantOffscreen, "DELTA_GPU_PRESENT_OFFSCREEN", false);
 
 namespace gpu::render {
 
+// DELTA_GPU_LISTPROF: GPU time per frame of the frame's lists, the compute
+// batches and immediate work, in the fps report.
+DELTA_OPTION(bool, kListProf, "DELTA_GPU_LISTPROF", false);
+
 namespace {
 base::Vector<rhi::CommandList*> g_free_lists;
 
@@ -122,8 +126,10 @@ rhi::Device& Device() {
 
 rhi::CommandList* BeginImmediate() {
   rhi::CommandList* list = AcquireList();
-  if (list)
+  if (list) {
+    list->SetProfileTag(kListProf ? 3 : 0);
     list->Begin();
+  }
   return list;
 }
 
@@ -960,6 +966,7 @@ bool SubmitFrameChunk() {
   rhi::CommandList* next = AcquireList();
   if (!next)
     return false;
+  next->SetProfileTag(kListProf ? 1 : 0);
   next->Begin();
   slot.list = next;
   g_frame.list = next;
@@ -1123,6 +1130,7 @@ void BeginFrame(Renderer& renderer) {
     kv.second.stencil_used_this_frame = false;
   }
 
+  g_frame.list->SetProfileTag(kListProf ? 1 : 0);
   g_frame.list->Begin();
   CmdBeginLabel(g_frame.list, "frame %llu", (unsigned long long)g_frame.num);
   // Clear the shared-LDS scratch every frame: a merged NGG vertex program
@@ -1301,6 +1309,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
       g_frame.list->ClearTexture(rt.texture, rhi::TextureState::kCopyDst, {},
                                  rhi::ClearColor{{1.0f, 0.0f, 0.0f, 1.0f}});
     }
+    g_frame.list->ProfileBegin(6);
     CmdInsertLabel(g_frame.list, "present readback rt=%#llx %ux%u",
                    (unsigned long long)present_base, rt.w, rt.h);
     TransitionImage(g_frame.list, rt.texture, rt.layout,
@@ -1334,6 +1343,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   {
     ScopeNs submit_timer(&g_ns_submit);
     ScopeNs frame_submit_timer(&g_fr_submit);
+    g_frame.list->ProfileEnd();
     if (cur.timestamps)
       g_frame.list->WriteTimestamp(cur.timestamps, 1, false);
     CmdEndLabel(g_frame.list);  // close the "frame N" scope
