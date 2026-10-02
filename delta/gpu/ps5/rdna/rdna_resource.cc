@@ -1579,6 +1579,261 @@ bool CanAccessLinearIntegerImage(const TImage& t) {
          !((t.dfmt == 1 || t.dfmt == 3) && t.nfmt == 5);
 }
 
+namespace {
+DELTA_OPTION(bool, kMovrelTrace, "DELTA_GPU_MOVRELTRACE", false);
+constexpr size_t kMaxIndexValues = 64;
+constexpr u32 kTrackedSgprs = 128;
+
+// The values one SGPR can hold: a small set, or anything (`any`).
+struct ValueSet {
+  bool any = true;
+  base::Vector<u32> values;  // sorted, unique, when !any
+
+  static ValueSet Of(u32 v) { return {false, {v}}; }
+  bool operator==(const ValueSet& o) const {
+    return any == o.any && (any || values == o.values);
+  }
+  void Add(u32 v) {
+    auto it = base::LowerBound(values.begin(), values.end(), v);
+    if (it == values.end() || *it != v)
+      values.insert(it, v);
+    if (values.size() > kMaxIndexValues) {
+      any = true;
+      values.clear();
+    }
+  }
+  void Join(const ValueSet& o) {
+    if (any)
+      return;
+    if (o.any) {
+      any = true;
+      values.clear();
+      return;
+    }
+    for (u32 v : o.values) {
+      Add(v);
+      if (any)
+        return;
+    }
+  }
+};
+
+using ScalarState = base::Vector<ValueSet>;  // per SGPR
+
+ValueSet Operand(const ScalarState& state, const Inst& inst, u32 src) {
+  if (src < kTrackedSgprs)
+    return state[src];
+  if (src >= 128 && src <= 192)
+    return ValueSet::Of(src - 128);
+  if (src >= 193 && src <= 208)
+    return ValueSet::Of(static_cast<u32>(192 - static_cast<i32>(src)));
+  if (src == 255)
+    return ValueSet::Of(inst.literal);
+  return {};
+}
+
+ValueSet Apply(u32 op, const ValueSet& a, const ValueSet& b) {
+  if (op == 0x27) {  // s_bfe_u32: a field no wider than its bits
+    if (b.any || b.values.size() != 1)
+      return {};
+    const u32 offset = b.values[0] & 31, width = (b.values[0] >> 16) & 0x7F;
+    if (width > 6 || offset + width > 32)
+      return {};
+    ValueSet out{false, {}};
+    for (u32 v = 0; v < (1u << width); v++)
+      out.Add(v);
+    return out;
+  }
+  if (op == 0x0e && !b.any && b.values.size() == 1 &&
+      b.values[0] < kMaxIndexValues) {  // s_and_b32 with a small mask
+    ValueSet out{false, {}};
+    for (u32 v = 0; v <= b.values[0]; v++)
+      if (!(v & ~b.values[0]))
+        out.Add(v);
+    return out;
+  }
+  if (a.any || b.any)
+    return {};
+  ValueSet out{false, {}};
+  for (u32 x : a.values)
+    for (u32 y : b.values) {
+      switch (op) {
+        case 0x00:
+        case 0x02:
+          out.Add(x + y);
+          break;
+        case 0x0e:
+          out.Add(x & y);
+          break;
+        case 0x1e:
+          out.Add(x << (y & 31));
+          break;
+        case 0x20:
+          out.Add(x >> (y & 31));
+          break;
+        case 0x26:
+          out.Add(x * y);
+          break;
+        default:
+          return {};
+      }
+      if (out.any)
+        return out;
+    }
+  return out;
+}
+
+// The scalar state after `inst`: modelled moves and arithmetic give sets,
+// every other write makes its registers anything.
+void Step(ScalarState& state, const Inst& inst) {
+  const u32 w = inst.raw[0], sdst = (w >> 16) & 0x7F;
+  ValueSet result;
+  bool modelled = false;
+  if (inst.enc == Enc::kSopk && inst.opcode == 0x00) {
+    result = ValueSet::Of(
+        static_cast<u32>(static_cast<i32>(static_cast<i16>(w & 0xFFFF))));
+    modelled = true;
+  } else if (inst.enc == Enc::kSop1 && inst.opcode == 0x03) {
+    result = Operand(state, inst, w & 0xFF);
+    modelled = true;
+  } else if (inst.enc == Enc::kSop2) {
+    switch (inst.opcode) {
+      case 0x00:
+      case 0x02:
+      case 0x0e:
+      case 0x1e:
+      case 0x20:
+      case 0x26:
+      case 0x27:
+        result = Apply(inst.opcode, Operand(state, inst, w & 0xFF),
+                       Operand(state, inst, (w >> 8) & 0xFF));
+        modelled = true;
+        break;
+    }
+  }
+  for (const ScalarWrites::Range& r : PossibleScalarWrites(inst).range)
+    for (u32 k = r.first; k < r.first + r.count && k < kTrackedSgprs; k++)
+      state[k] = modelled && k == sdst ? result : ValueSet{};
+}
+}  // namespace
+
+base::HashMap<u32, base::Vector<u32>> PlanMovrelIndices(const Program& p) {
+  base::HashMap<u32, base::Vector<u32>> out;
+  if (base::NoneOf(p.begin(), p.end(), [](const Inst& inst) {
+        return inst.enc == Enc::kVop1 && inst.opcode >= 0x42 &&
+               inst.opcode <= 0x44;
+      }))
+    return out;
+  // Blocks: leaders are the entry, branch targets and fall-throughs.
+  base::Vector<u32> leaders{0};
+  for (size_t i = 0; i < p.size(); i++) {
+    const Inst& inst = p[i];
+    if (inst.enc != Enc::kSopp)
+      continue;
+    const bool branch = inst.opcode >= 0x02 && inst.opcode <= 0x09;
+    const bool end = inst.opcode == 0x01;
+    if (!branch && !end)
+      continue;
+    if (i + 1 < p.size())
+      leaders.push_back(static_cast<u32>(i + 1));
+    if (branch) {
+      const u32 pc = static_cast<u32>(static_cast<i32>(inst.pc + inst.size) +
+                                      static_cast<i16>(inst.raw[0] & 0xFFFF));
+      for (size_t k = 0; k < p.size(); k++)
+        if (p[k].pc == pc) {
+          leaders.push_back(static_cast<u32>(k));
+          break;
+        }
+    }
+  }
+  base::Sort(leaders.begin(), leaders.end());
+  leaders.erase(base::Unique(leaders.begin(), leaders.end()), leaders.end());
+  const size_t n = leaders.size();
+  const auto block_of = [&](size_t index) {
+    return static_cast<size_t>(
+        base::UpperBound(leaders.begin(), leaders.end(), static_cast<u32>(index),
+                         [](u32 a, u32 b) { return a < b; }) -
+        leaders.begin() - 1);
+  };
+  base::Vector<base::Vector<size_t>> succ(n);
+  for (size_t b = 0; b < n; b++) {
+    const size_t last = (b + 1 < n ? leaders[b + 1] : p.size()) - 1;
+    const Inst& inst = p[last];
+    const bool sopp = inst.enc == Enc::kSopp;
+    const bool branch = sopp && inst.opcode >= 0x02 && inst.opcode <= 0x09;
+    if (branch) {
+      const u32 pc = static_cast<u32>(static_cast<i32>(inst.pc + inst.size) +
+                                      static_cast<i16>(inst.raw[0] & 0xFFFF));
+      for (size_t k = 0; k < p.size(); k++)
+        if (p[k].pc == pc)
+          succ[b].push_back(block_of(k));
+    }
+    if (!(sopp && (inst.opcode == 0x02 || inst.opcode == 0x01)) && b + 1 < n)
+      succ[b].push_back(b + 1);
+  }
+  base::Vector<ScalarState> in(n, ScalarState(kTrackedSgprs));
+  base::Vector<u8> reached(n, 0), queued(n, 0);
+  reached[0] = 1;
+  base::Vector<size_t> work{0};
+  queued[0] = 1;
+  for (u32 steps = 0; !work.empty() && steps < 64 * n + 64; steps++) {
+    const size_t b = work.back();
+    work.pop_back();
+    queued[b] = 0;
+    ScalarState state = in[b];
+    const size_t end = b + 1 < n ? leaders[b + 1] : p.size();
+    for (size_t i = leaders[b]; i < end; i++)
+      Step(state, p[i]);
+    for (size_t s : succ[b]) {
+      if (!reached[s]) {
+        in[s] = state;
+        reached[s] = 1;
+      } else {
+        bool changed = false;
+        for (u32 r = 0; r < kTrackedSgprs; r++) {
+          ValueSet joined = in[s][r];
+          joined.Join(state[r]);
+          if (!(joined == in[s][r])) {
+            in[s][r] = base::move(joined);
+            changed = true;
+          }
+        }
+        if (!changed)
+          continue;
+      }
+      if (!queued[s]) {
+        queued[s] = 1;
+        work.push_back(s);
+      }
+    }
+  }
+  if (!work.empty())
+    return out;  // no fixpoint in budget: leave every index unknown
+  for (size_t b = 0; b < n; b++) {
+    if (!reached[b])
+      continue;
+    ScalarState state = in[b];
+    const size_t end = b + 1 < n ? leaders[b + 1] : p.size();
+    for (size_t i = leaders[b]; i < end; i++) {
+      const Inst& inst = p[i];
+      if (inst.enc == Enc::kVop1 && inst.opcode >= 0x42 &&
+          inst.opcode <= 0x44) {
+        const ValueSet& m0 = state[124 - 0];
+        if (kMovrelTrace) {
+          static int traced = 0;
+          if (traced++ < 40)
+            BASE_LOGI("movrel", "pc={:#x} known={} values={}", inst.pc,
+                      (int)!m0.any, m0.values.size());
+        }
+        if (!m0.any && !m0.values.empty())
+          out[inst.pc] = m0.values;
+      }
+      Step(state, inst);
+    }
+  }
+  return out;
+}
+
 base::Vector<TImage> TrackTextures(const u32* ps_code,
                                    const u32* pud,
                                    u32 user_sgprs,

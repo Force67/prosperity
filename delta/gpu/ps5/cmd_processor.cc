@@ -249,12 +249,23 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
     TraceDmaData(control, src, dst, bytes, copied);
     return;
   }
+  // A small write is a label: it lands in order with the label writes
+  // PublishLabel may still hold, or a reset could overtake the release
+  // before it and the waiter would never see its value.
+  constexpr u32 kLabelBytes = 64;
   if (!kNoCopy && src_is_memory && dst_is_memory && bytes &&
       bytes <= 0x1000000u && src != dst && addressable(src) &&
       addressable(src + bytes) && addressable(dst) &&
       addressable(dst + bytes)) {
-    std::memcpy(reinterpret_cast<void*>(dst),
-                reinterpret_cast<const void*>(src), bytes);
+    if (bytes <= kLabelBytes) {
+      const auto* from = reinterpret_cast<const u8*>(src);
+      PublishLabel([dst, data = base::Vector<u8>(from, from + bytes)] {
+        std::memcpy(reinterpret_cast<void*>(dst), data.data(), data.size());
+      });
+    } else {
+      std::memcpy(reinterpret_cast<void*>(dst),
+                  reinterpret_cast<const void*>(src), bytes);
+    }
     copied = true;
   }
   // src_sel 2 = the packet's own dword, repeated: a fill. That is how a title
@@ -263,9 +274,17 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
   if (!kNoCopy && src_sel == 2 && dst_is_memory && bytes &&
       bytes <= 0x8000000u && addressable(dst) && addressable(dst + bytes)) {
     const u32 fill = body[1];
-    u32* words = reinterpret_cast<u32*>(dst);
-    for (u32 k = 0; k < bytes / 4; k++)
-      words[k] = fill;
+    if (bytes <= kLabelBytes) {
+      PublishLabel([dst, bytes, fill] {
+        u32* words = reinterpret_cast<u32*>(dst);
+        for (u32 k = 0; k < bytes / 4; k++)
+          words[k] = fill;
+      });
+    } else {
+      u32* words = reinterpret_cast<u32*>(dst);
+      for (u32 k = 0; k < bytes / 4; k++)
+        words[k] = fill;
+    }
     render::NoteMemoryFill(renderer, dst, bytes, fill);
   }
   TraceDmaData(control, src, dst, bytes, copied);

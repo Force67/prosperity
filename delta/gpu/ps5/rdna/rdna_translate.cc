@@ -74,6 +74,7 @@ DELTA_OPTION(bool, kAllowNan, "DELTA_GPU_ALLOWNAN", false);
 DELTA_OPTION(const char*, kDbgPos, "DELTA_GPU_DBGPOS", nullptr);
 DELTA_OPTION(float, kRawPos, "DELTA_GPU_RAWPOS", 0.f);
 DELTA_OPTION(bool, kDrawCensus, "DELTA_GPU_DRAWCENSUS", false);
+DELTA_OPTION(u64, kNullPs, "DELTA_GPU_NULL_PS", 0);
 DELTA_OPTION(const char*, kSpvDump, "DELTA_GPU_SPVDUMP", nullptr);
 DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
 DELTA_OPTION(bool, kGpuDebugalpha, "DELTA_GPU_DEBUGALPHA", false);
@@ -3161,6 +3162,7 @@ bool TranslateVs(const Program& program,
   // ever use a mask as this lane's predicate, and those are exactly the
   // shaders with no LDS.
   t.wave_masks = kWaveMasks && gpu::gcn::GraphicsLdsDwords(program, nullptr);
+  t.movrel_m0 = PlanMovrelIndices(program);
   t.InitTypes(&program);
 
   base::Vector<Id> iface;
@@ -3817,7 +3819,10 @@ bool TranslatePs(const Program& program,
     t.m.Store(gpu::gcn::PsColorOut(t, sc, 0),
               t.m.ConstComposite(
                   t.t_v4, {t.F32(0.f), t.F32(1.f), t.F32(0.f), t.F32(1.f)}));
-  EmitBody(t, program, sc);
+  // DELTA_GPU_NULL_PS=<addr>: run that pixel shader's body as nothing, so a
+  // draw's cost can be split between its pixels and its geometry.
+  if (!kNullPs || g_ps_addr != kNullPs)
+    EmitBody(t, program, sc);
 
   // The straight-line alpha kill: v_cmpx_* compares and clears EXEC, and the
   // export then applies to no lane. Nothing consulted EXEC, so those fragments
@@ -3932,11 +3937,467 @@ u32 LdsAccess(const Inst& inst) {
   return atomic_rtn ? 3 : read ? 1 : 2;
 }
 
+// Structured lowering. The guest compiler's control flow is structured
+// already (ifs that join at their immediate post-dominator, loops with one
+// header and one exit), so most programs map onto SPIR-V selections and loops
+// directly. That leaves the driver real control flow to allocate registers
+// across, where the state machine below made every register live around one
+// loop and every branch a store and a switch. Anything that does not fit
+// (calls, irreducible loops, a loop with two exits) keeps the state machine.
+// DELTA_GPU_STRUCTURED_CFG=0 always uses the state machine.
+DELTA_OPTION(bool, kStructuredCfg, "DELTA_GPU_STRUCTURED_CFG", true);
+// DELTA_GPU_CFGTRACE=1: each lowering's outcome, and why a fallback fell back.
+DELTA_OPTION(bool, kCfgTrace, "DELTA_GPU_CFGTRACE", false);
+
+namespace {
+class Structurizer {
+ public:
+  Structurizer(Translator& t, const Program& program, StageContext& sc)
+      : t_(t), program_(program), sc_(sc) {}
+
+  const char* why() const { return why_; }
+
+  bool Run() {
+    if (!Build() || !Analyze())
+      return false;
+    // Validate and size the emission before writing any of it: a shape that
+    // cannot be expressed, or one that duplicates too many blocks, has to
+    // fall back with the module untouched.
+    dry_ = true;
+    emitted_ = 0;
+    ok_ = true;
+    Emit(0, n_, Loop{});
+    if (!ok_)
+      return Fail(why_ ? why_ : "shape");
+    if (emitted_ > 2 * program_.size() + 64)
+      return Fail("duplication");
+    dry_ = false;
+    if (kCfgMaxIter)
+      iter_var_ = t_.m.Variable(t_.p_priv_u, spv::StorageClass::Private,
+                                t_.m.ConstNull(t_.t_u));
+    Emit(0, n_, Loop{});
+    return true;
+  }
+
+ private:
+  struct Loop {
+    u32 header = ~0u, exit = ~0u;
+    Id cont = 0, brk = 0;
+  };
+
+  bool Build() {
+    max_pc_ = program_.empty() ? 0 : program_.back().pc + program_.back().size;
+    starts_ = BlockStarts(program_, max_pc_);
+    n_ = static_cast<u32>(starts_.size());
+    if (!n_ || n_ > 2048)
+      return Fail("size");
+    kind_.assign(n_, 0);
+    term_.assign(n_, ~0u);
+    succ_.assign(n_, {});
+    first_.assign(n_, 0);
+    last_.assign(n_, 0);
+    u32 bi = 0;
+    for (u32 i = 0; i < program_.size(); i++) {
+      const Inst& inst = program_[i];
+      while (bi + 1 < n_ && inst.pc >= starts_[bi + 1])
+        bi++;
+      if (IsCall(inst) || IsReturn(inst))
+        return Fail("call");
+      if (i == 0 || program_[i - 1].pc < starts_[bi])
+        first_[bi] = i;
+      last_[bi] = i + 1;
+      if (BranchKind(inst) && term_[bi] == ~0u)
+        term_[bi] = i;
+    }
+    for (u32 b = 0; b < n_; b++) {
+      const u32 fall = b + 1 < n_ ? b + 1 : n_;
+      if (term_[b] == ~0u) {
+        succ_[b] = {fall};
+        continue;
+      }
+      const Inst& inst = program_[term_[b]];
+      kind_[b] = BranchKind(inst);
+      if (kind_[b] == 8) {
+        succ_[b] = {n_};
+        continue;
+      }
+      const i32 simm = static_cast<i16>(inst.raw[0] & 0xFFFF);
+      const u32 target = BlockOf(static_cast<u32>(
+          static_cast<i32>(inst.pc) + static_cast<i32>(inst.size) + simm));
+      if (kind_[b] == 1 || target == fall)
+        succ_[b] = {target};
+      else
+        succ_[b] = {target, fall};
+    }
+    return true;
+  }
+
+  u32 BlockOf(u32 pc) const {
+    if (pc >= max_pc_)
+      return n_;
+    u32 b = 0;
+    for (u32 i = 0; i < n_ && starts_[i] <= pc; i++)
+      b = i;
+    return b;
+  }
+
+  // Dominators and post-dominators (Cooper/Harvey/Kennedy), natural loops.
+  bool Analyze() {
+    const u32 nodes = n_ + 1;  // n_ is the exit
+    base::Vector<base::Vector<u32>> pred(nodes);
+    for (u32 b = 0; b < n_; b++)
+      for (u32 s : succ_[b])
+        pred[s].push_back(b);
+    // Reverse postorder from the entry.
+    base::Vector<u32> order;
+    base::Vector<u8> seen(nodes, 0);
+    base::Vector<base::Pair<u32, u32>> stack{{0u, 0u}};
+    seen[0] = 1;
+    while (!stack.empty()) {
+      auto& [b, i] = stack.back();
+      const auto& out = b < n_ ? succ_[b] : base::Vector<u32>{};
+      if (i < out.size()) {
+        const u32 s = out[i++];
+        if (!seen[s]) {
+          seen[s] = 1;
+          stack.push_back({s, 0u});
+        }
+        continue;
+      }
+      order.push_back(b);
+      stack.pop_back();
+    }
+    if (!seen[n_])
+      return Fail("no-exit");
+    reachable_ = seen;
+    base::Vector<u32> rpo(order.rbegin(), order.rend());
+    base::Vector<u32> index(nodes, ~0u);
+    for (u32 i = 0; i < rpo.size(); i++)
+      index[rpo[i]] = i;
+    idom_ = Dominators(rpo, index, pred, 0);
+    // Post-dominators: the same over the reversed graph from the exit.
+    base::Vector<u32> rorder;
+    base::Vector<u8> rseen(nodes, 0);
+    stack = {{n_, 0u}};
+    rseen[n_] = 1;
+    while (!stack.empty()) {
+      auto& [b, i] = stack.back();
+      if (i < pred[b].size()) {
+        const u32 p = pred[b][i++];
+        if (!rseen[p] && reachable_[p]) {
+          rseen[p] = 1;
+          stack.push_back({p, 0u});
+        }
+        continue;
+      }
+      rorder.push_back(b);
+      stack.pop_back();
+    }
+    for (u32 b = 0; b < nodes; b++)
+      if (reachable_[b] && !rseen[b])
+        return Fail("dead-end");
+    base::Vector<u32> prpo(rorder.rbegin(), rorder.rend());
+    base::Vector<u32> pindex(nodes, ~0u);
+    for (u32 i = 0; i < prpo.size(); i++)
+      pindex[prpo[i]] = i;
+    base::Vector<base::Vector<u32>> rsucc(nodes);  // preds in the reversed graph
+    for (u32 b = 0; b < n_; b++)
+      if (reachable_[b])
+        for (u32 s : succ_[b])
+          rsucc[b].push_back(s);
+    ipdom_ = Dominators(prpo, pindex, rsucc, n_);
+    // Loops: every retreating edge must be a back edge to a dominating header.
+    header_of_.assign(nodes, ~0u);
+    exit_of_.assign(nodes, ~0u);
+    in_loop_.assign(nodes, {});
+    for (u32 b = 0; b < n_; b++) {
+      if (!reachable_[b])
+        continue;
+      for (u32 s : succ_[b]) {
+        if (s == n_ || index[s] > index[b])
+          continue;
+        if (!Dominates(s, b))
+          return Fail("irreducible");
+        // Natural loop of the back edge b -> s.
+        if (in_loop_[s].empty())
+          in_loop_[s].assign(nodes, 0);
+        base::Vector<u32> work{b};
+        in_loop_[s][s] = 1;
+        while (!work.empty()) {
+          const u32 x = work.back();
+          work.pop_back();
+          if (in_loop_[s][x])
+            continue;
+          in_loop_[s][x] = 1;
+          for (u32 p : pred[x])
+            if (reachable_[p])
+              work.push_back(p);
+        }
+      }
+    }
+    for (u32 h = 0; h < n_; h++) {
+      if (in_loop_[h].empty())
+        continue;
+      u32 exit = ~0u;
+      for (u32 x = 0; x < n_; x++) {
+        if (!in_loop_[h][x])
+          continue;
+        for (u32 s : succ_[x]) {
+          if (s < nodes && in_loop_[h][s])
+            continue;
+          if (exit != ~0u && exit != s)
+            return Fail("two-exits");
+          exit = s;
+        }
+      }
+      if (exit == ~0u)
+        return Fail("no-loop-exit");
+      exit_of_[h] = exit;
+    }
+    return true;
+  }
+
+  base::Vector<u32> Dominators(const base::Vector<u32>& rpo,
+                               const base::Vector<u32>& index,
+                               const base::Vector<base::Vector<u32>>& pred,
+                               u32 root) {
+    base::Vector<u32> dom(index.size(), ~0u);
+    dom[root] = root;
+    for (bool changed = true; changed;) {
+      changed = false;
+      for (u32 b : rpo) {
+        if (b == root)
+          continue;
+        u32 d = ~0u;
+        for (u32 p : pred[b]) {
+          if (index[p] == ~0u || dom[p] == ~0u)
+            continue;
+          if (d == ~0u) {
+            d = p;
+            continue;
+          }
+          u32 x = p, y = d;
+          while (x != y) {
+            while (index[x] > index[y])
+              x = dom[x];
+            while (index[y] > index[x])
+              y = dom[y];
+          }
+          d = x;
+        }
+        if (d != dom[b]) {
+          dom[b] = d;
+          changed = true;
+        }
+      }
+    }
+    return dom;
+  }
+
+  bool Dominates(u32 a, u32 b) const {
+    for (u32 x = b;; x = idom_[x]) {
+      if (x == a)
+        return true;
+      if (x == 0 || idom_[x] == ~0u || idom_[x] == x)
+        return x == a;
+    }
+  }
+
+  bool InLoop(const Loop& loop, u32 b) const {
+    return loop.header == ~0u || (b < in_loop_[loop.header].size() &&
+                                  in_loop_[loop.header][b]);
+  }
+
+  // Emit from block b until `stop`. True: the open block falls into `stop`.
+  // False: every path left through a loop's continue or break.
+  bool Emit(u32 b, u32 stop, const Loop& loop) {
+    for (u32 guard = 0; ok_ && b != stop; guard++) {
+      if (guard > 4 * n_ + 16) {
+        ok_ = false;
+        return false;
+      }
+      if (loop.header != ~0u && b == loop.header)
+        return Leave(loop.cont);
+      if (loop.header != ~0u && b == loop.exit)
+        return Leave(loop.brk);
+      if (b == n_) {
+        // Only reachable outside every loop, where the exit is `stop`.
+        ok_ = false;
+        return false;
+      }
+      if (!in_loop_[b].empty() && b != loop.header) {
+        b = EmitLoop(b, loop);
+        continue;
+      }
+      b = EmitBlock(b, stop, loop);
+      if (b == ~0u)
+        return false;
+    }
+    return ok_;
+  }
+
+  bool Fail(const char* why) {
+    if (!why_)
+      why_ = why;
+    return false;
+  }
+
+  bool Leave(Id target) {
+    if (!dry_)
+      t_.m.Branch(target);
+    return false;
+  }
+
+  u32 EmitLoop(u32 h, const Loop& outer) {
+    const u32 exit = exit_of_[h];
+    if (outer.header != ~0u && exit != outer.exit && exit != outer.header &&
+        !InLoop(outer, exit)) {
+      ok_ = false;
+      return n_;
+    }
+    Loop loop{h, exit, 0, 0};
+    Id header = 0, body = 0;
+    if (!dry_) {
+      header = t_.m.NewBlock();
+      body = t_.m.NewBlock();
+      loop.cont = t_.m.NewBlock();
+      loop.brk = t_.m.NewBlock();
+      t_.m.Branch(header);
+      t_.m.OpenBlock(header);
+      t_.m.LoopMerge(loop.brk, loop.cont);
+      t_.m.Branch(body);
+      t_.m.OpenBlock(body);
+    }
+    const u32 next = EmitBlock(h, ~0u, loop);
+    if (next != ~0u && ok_)
+      Emit(next, ~0u, loop);
+    if (!dry_) {
+      // The runaway guard, as in the state machine: a mistranslated loop
+      // renders wrong instead of hanging the device.
+      t_.m.OpenBlock(loop.cont);
+      if (iter_var_) {
+        const Id it = t_.m.Load(t_.t_u, iter_var_);
+        t_.m.Store(iter_var_, t_.m.Emit(spv::Op::OpIAdd, t_.t_u,
+                                        {it, t_.U32(1)}));
+        t_.m.BranchConditional(
+            t_.m.Emit(spv::Op::OpUGreaterThan, t_.t_bool,
+                      {it, t_.U32(kCfgMaxIter)}),
+            loop.brk, header);
+      } else {
+        t_.m.Branch(header);
+      }
+      t_.m.OpenBlock(loop.brk);
+    }
+    return exit;
+  }
+
+  // One block's instructions and its terminator. Returns the block to go on
+  // with, or ~0u when control left through a loop branch.
+  u32 EmitBlock(u32 b, u32 stop, const Loop& loop) {
+    const u32 end = term_[b] != ~0u ? term_[b] : last_[b];
+    emitted_ += end - first_[b] + 1;
+    // What the LDS saw since the last barrier: 1 = a read, 2 = a write. A
+    // block can be entered after either.
+    u32 lds_seen = 3;
+    if (!dry_)
+      for (u32 i = first_[b]; i < end; i++) {
+        const Inst& inst = program_[i];
+        if (sc_.lds_sync) {
+          const u32 access = LdsAccess(inst);
+          if (access &&
+              ((access & 1 && lds_seen & 2) || (access & 2 && lds_seen & 1))) {
+            t_.Barrier();
+            lds_seen = 0;
+          }
+          lds_seen |= access;
+          if (inst.enc == Enc::kSopp && inst.opcode == 0x0a)
+            lds_seen = 0;
+        }
+        RdnaEmitInst(t_, inst, sc_);
+      }
+    if (succ_[b].size() == 1)
+      return succ_[b][0];
+    const u32 target = succ_[b][0], fall = succ_[b][1];
+    // Join at the immediate post-dominator when it lies in this construct;
+    // otherwise both arms end in loop branches and the merge is unreachable.
+    u32 merge = ipdom_[b];
+    const bool joins = merge != ~0u && InLoop(loop, merge) &&
+                       merge != loop.header &&
+                       (loop.header == ~0u || merge != loop.exit);
+    if (!joins)
+      merge = stop;
+    Id merge_label = 0, then_label = 0, else_label = 0;
+    if (!dry_) {
+      const Id cond = BranchTaken(t_, kind_[b]);
+      merge_label = t_.m.NewBlock();
+      then_label = t_.m.NewBlock();
+      else_label = t_.m.NewBlock();
+      t_.m.SelectionMerge(merge_label);
+      t_.m.BranchConditional(cond, then_label, else_label);
+      t_.m.OpenBlock(then_label);
+    }
+    const bool then_joins = Emit(target, merge, loop);
+    if (then_joins && !dry_)
+      t_.m.Branch(merge_label);
+    if (!dry_)
+      t_.m.OpenBlock(else_label);
+    const bool else_joins = Emit(fall, merge, loop);
+    if (else_joins && !dry_)
+      t_.m.Branch(merge_label);
+    if (!dry_)
+      t_.m.OpenBlock(merge_label);
+    if (!then_joins && !else_joins) {
+      if (!dry_)
+        t_.m.Unreachable();
+      return ~0u;
+    }
+    return merge;
+  }
+
+  Translator& t_;
+  const Program& program_;
+  StageContext& sc_;
+  u32 max_pc_ = 0, n_ = 0;
+  base::Vector<u32> starts_, term_, first_, last_;
+  base::Vector<int> kind_;
+  base::Vector<base::Vector<u32>> succ_;
+  base::Vector<u8> reachable_;
+  base::Vector<u32> idom_, ipdom_, header_of_, exit_of_;
+  base::Vector<base::Vector<u8>> in_loop_;
+  bool dry_ = true, ok_ = true;
+  const char* why_ = nullptr;
+  u64 emitted_ = 0;
+  Id iter_var_ = 0;
+};
+}  // namespace
+
 void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   const u32 max_pc =
       program.empty() ? 0 : program.back().pc + program.back().size;
   base::Vector<u32> starts = BlockStarts(program, max_pc);
   const bool scheduled = sc.is_mesh || sc.wave_lockstep;
+  // A workgroup that is one guest wave takes every branch together (SCC, VCC
+  // and EXEC are the wave's), so it needs no scheduler and its barriers sit
+  // in uniform control flow.
+  const bool one_wave = scheduled && t.xchg_lanes && t.xchg_lanes <= 64;
+  if ((!scheduled || one_wave) && kStructuredCfg) {
+    t.uniform_here = one_wave || (sc.is_cs && starts.size() == 1);
+    t.block_active = 0;
+    Structurizer structurizer(t, program, sc);
+    const bool done = structurizer.Run();
+    if (kCfgTrace)
+      BASE_LOGI("cfgtrace", "{} insts={} lanes={} -> {}{}",
+                sc.is_mesh ? "mesh" : sc.is_cs ? "cs" : sc.is_ps ? "ps" : "vs",
+                program.size(), t.xchg_lanes,
+                done ? "structured" : "state machine: ",
+                done ? "" : (structurizer.why() ? structurizer.why() : "?"));
+    if (done)
+      return;
+  } else if (kCfgTrace) {
+    BASE_LOGI("cfgtrace", "{} insts={} lanes={} -> state machine: scheduled",
+              sc.is_mesh ? "mesh" : sc.is_cs ? "cs" : sc.is_ps ? "ps" : "vs",
+              program.size(), t.xchg_lanes);
+  }
   if (scheduled) {
     // A guest barrier is a rendezvous PC. Keep it separate from adjacent
     // instructions so an early wave can wait while its peers keep running.
@@ -4222,6 +4683,7 @@ Recompiled Recompile(const u32* vs_code,
   g_ps_addr = reinterpret_cast<uintptr_t>(ps_code);
   g_stage_bufs = ResolveBuffers(ps_code, ps_user_data, ps_user_sgprs, 0);
   g_warned_store = false;
+  tp.movrel_m0 = PlanMovrelIndices(ps_program);
   tp.InitTypes(&ps_program);
   gpu::gcn::ResetUnsupported();
   if (ps_code ? !TranslatePs(ps_program, flat_attrs, ps_input_ena, r, tp,

@@ -833,10 +833,14 @@ void ResolveRecompiledShaders(const Regs& regs,
     // Point primitives are independent, and NGG programs already handle a
     // partial final group. Use smaller input batches to fit Vulkan's guaranteed
     // 128 mesh invocations; DrawMeshTasks still covers every input primitive.
+    // A batch that fits one 64-lane wave is better still: a one-wave workgroup
+    // takes every branch together and runs as structured code, where two
+    // waves need the block scheduler and its barriers.
     const u32 per_input =
         base::Max({1u, vertices_per_input, primitives_per_input});
+    const u32 lanes = per_input <= 64 ? 64u : 128u;
     const u32 inputs =
-        base::Min((regs[mmVGT_GS_ONCHIP_CNTL] >> 11) & 0x7ff, 128u / per_input);
+        base::Min((regs[mmVGT_GS_ONCHIP_CNTL] >> 11) & 0x7ff, lanes / per_input);
     const u32 vertices = inputs * vertices_per_input;
     const u32 primitives = inputs * primitives_per_input;
     const u32 lds = ((regs[mmSPI_SHADER_PGM_RSRC2_GS] >> 19) & 0xff) * 128;

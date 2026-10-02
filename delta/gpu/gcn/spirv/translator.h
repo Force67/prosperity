@@ -51,10 +51,12 @@ bool TraceEnabled();
 // Translator context: one SPIR-V module + the register-file model.
 // The lowest VGPR a v_movreld/v_movrels/v_movrelsd in `program` addresses:
 // from there up the register file has to stay indexable.
-inline u32 RelativeVgprFloor(const Program& program) {
+inline u32 RelativeVgprFloor(
+    const Program& program,
+    const base::HashMap<u32, base::Vector<u32>>& known = {}) {
   u32 lo = 256;
   for (const Inst& inst : program) {
-    if (inst.enc != Enc::kVop1)
+    if (inst.enc != Enc::kVop1 || known.count(inst.pc))
       continue;
     const u32 w = inst.raw[0], op = inst.opcode;
     const u32 vdst = (w >> 17) & 0xFF, src0 = w & 0x1FF;
@@ -75,6 +77,9 @@ struct Translator {
   // v_movrel* may index them.
   u32 vgpr_dyn_lo = 0;
   Id vgpr_regs[256] = {};
+  // v_movrel* pc -> the values M0 can hold there (rdna::PlanMovrelIndices):
+  // those index plain registers through a select chain.
+  base::HashMap<u32, base::Vector<u32>> movrel_m0;
   bool predicate_vector = false;
   // Mesh: only waves whose private PC names the selected block may change
   // state.
@@ -119,7 +124,7 @@ struct Translator {
   // the whole file one array.
   void InitTypes(const Program* program = nullptr,
                  const Program* second = nullptr) {
-    vgpr_dyn_lo = program ? RelativeVgprFloor(*program) : 0u;
+    vgpr_dyn_lo = program ? RelativeVgprFloor(*program, movrel_m0) : 0u;
     if (second)
       vgpr_dyn_lo = base::Min(vgpr_dyn_lo, RelativeVgprFloor(*second));
     t_void = m.TypeVoid();
@@ -373,6 +378,21 @@ struct Translator {
     if (predicate_vector)
       v = SelectB(LaneActive(Exec()), v, m.Load(t_u, ptr));
     StorePrivate(ptr, v);
+  }
+  // v[i + M0] for an M0 known to be one of `values`.
+  Id VgIndexed(u32 i, const base::Vector<u32>& values) {
+    const Id m0 = Sg(124);
+    Id v = Vg(base::Min(i + values.back(), 255u));
+    for (size_t k = values.size() - 1; k-- > 0;)
+      v = SelectB(Eq(m0, U32(values[k])), Vg(base::Min(i + values[k], 255u)), v);
+    return v;
+  }
+  void SetVgIndexed(u32 i, const base::Vector<u32>& values, Id v) {
+    const Id m0 = Sg(124);
+    for (u32 value : values) {
+      const u32 r = base::Min(i + value, 255u);
+      SetVg(r, SelectB(Eq(m0, U32(value)), v, Vg(r)));
+    }
   }
   Id VgF(u32 i) { return m.Bitcast(t_f, Vg(i)); }
   void SetVgF(u32 i, Id f) { SetVg(i, m.Bitcast(t_u, f)); }

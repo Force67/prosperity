@@ -811,6 +811,7 @@ bool TranslateCs(const Program& program,
                                    NeedsWaveLockstep(program);
   t.wave_size = wave32 ? 32 : 64;
   t.full_wave_masks = sc.wave_lockstep;
+  t.movrel_m0 = PlanMovrelIndices(program);
   t.InitTypes(&program);
   // Storage buffers: Buf { uint data[]; } at set 0, binding = resource index.
   const Id t_run = t.m.TypeRuntimeArray(t.t_u);

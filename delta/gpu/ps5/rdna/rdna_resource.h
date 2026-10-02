@@ -187,6 +187,11 @@ struct ScalarWrites {
 ScalarWrites PossibleScalarWrites(const gpu::gcn::Inst& inst,
                                   bool scc_trusted = false);
 
+// Per v_movrel* pc, every value M0 can hold there (a superset, sorted), from
+// the scalar code before it in its block. Absent: not known.
+base::HashMap<u32, base::Vector<u32>> PlanMovrelIndices(
+    const gpu::gcn::Program& program);
+
 // SGPRs whose live value ResolveBuffers reproduces faithfully: the replay walks
 // in order, so a use sees the LAST write before it; that is the wave's value
 // only if the write dominates the use, runs once per path, and ScalarEval
