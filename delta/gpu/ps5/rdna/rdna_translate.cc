@@ -3614,6 +3614,17 @@ bool TranslateMesh(Program es_program,
       t.m.TypePointer(spv::StorageClass::Workgroup, t.m.TypeArray(t.t_u, 2)),
       spv::StorageClass::Workgroup);
   const Id count_ptr = t.m.TypePointer(spv::StorageClass::Workgroup, t.t_u);
+  // Direct unless a half addresses memory from its own code (s_getpc): this
+  // module has no per-draw code address to give it.
+  const auto uses_pc = [](const Program& p) {
+    return base::AnyOf(p.begin(), p.end(), [](const Inst& inst) {
+      return inst.enc == Enc::kSop1 && inst.opcode == 0x1f;
+    });
+  };
+  r.direct_vs = r.direct && !uses_pc(es_program) && !uses_pc(gs_program);
+  StageContext direct_decl;
+  if (r.direct_vs)
+    gpu::gcn::DeclareDirectMemory(t, direct_decl);
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   const Id index = t.m.Load(t.t_u, local);
   t.xchg_index = index;
@@ -3667,22 +3678,27 @@ bool TranslateMesh(Program es_program,
     sc.lds_var = lds;
     sc.lds_dwords = cfg.lds_dwords;
     const Program& program = half ? gs_program : es_program;
-    base::Vector<ShaderCbuf> cbufs;
-    const u32 cb_base = static_cast<u32>(r.vs_cbufs.size());
-    if (!RdnaPlanCbufs(program, cb_base, cbufs, sc.cbuf_bind,
-                       sc.smem_cbuf_by_pc, gpu::gcn::kIndirectCbufBindings))
-      return false;
-    NoteCbufWindows(cbufs, sc);
-    for (auto& cb : cbufs) {
-      cb.from_gs = half != 0;
-      r.vs_cbufs.push_back(cb);
-    }
-    base::Vector<gpu::gcn::ShaderBuffer> buffers;
-    RdnaPlanGfxBuffers(program, static_cast<u32>(r.vs_bufs.size()), nullptr,
-                       buffers, sc.gfx_buf_bind);
-    for (auto& buf : buffers) {
-      buf.from_gs = half != 0;
-      r.vs_bufs.push_back(buf);
+    if (r.direct_vs) {
+      PlanDirect(program, sc);
+      sc.cs_guest_translate = direct_decl.cs_guest_translate;
+    } else {
+      base::Vector<ShaderCbuf> cbufs;
+      const u32 cb_base = static_cast<u32>(r.vs_cbufs.size());
+      if (!RdnaPlanCbufs(program, cb_base, cbufs, sc.cbuf_bind,
+                         sc.smem_cbuf_by_pc, gpu::gcn::kIndirectCbufBindings))
+        return false;
+      NoteCbufWindows(cbufs, sc);
+      for (auto& cb : cbufs) {
+        cb.from_gs = half != 0;
+        r.vs_cbufs.push_back(cb);
+      }
+      base::Vector<gpu::gcn::ShaderBuffer> buffers;
+      RdnaPlanGfxBuffers(program, static_cast<u32>(r.vs_bufs.size()), nullptr,
+                         buffers, sc.gfx_buf_bind);
+      for (auto& buf : buffers) {
+        buf.from_gs = half != 0;
+        r.vs_bufs.push_back(buf);
+      }
     }
     const auto image_plan = RdnaPlanMimg(program);
     if (!half && !image_plan.binding_srsrc.empty())

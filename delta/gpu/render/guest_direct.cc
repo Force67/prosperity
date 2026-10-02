@@ -14,6 +14,7 @@
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
+#include "gpu/render/renderer.h"
 #include "options/options.h"
 
 namespace gpu::render {
@@ -60,7 +61,17 @@ int FindDmemFd() {
   return found;
 }
 
+// Blocks a miss found in no view since the views were last read: missed
+// again, they are not looked up again until the views change.
+base::HashSet<u64> g_unmapped;
+u32 g_maps_read_at = ~0u;
+
 void ReadMaps() {
+  // Once a submit at most: a shader reading unmapped memory misses every frame.
+  if (g_maps_read_at == g_syncs)
+    return;
+  g_maps_read_at = g_syncs;
+  g_unmapped.clear();
   g_maps.clear();
   FILE* f = std::fopen("/proc/self/maps", "r");
   if (!f)
@@ -135,10 +146,15 @@ u64 EntryFor(u64 block) {
 }
 
 void Fill(u64 address) {
-  if (address < kDirectBase || address >= kDirectBase + kDirectSize)
+  if (address < kDirectBase || address >= kDirectBase + kDirectSize ||
+      g_unmapped.count(address & ~((1ull << kDirectBlockShift) - 1)))
     return;
   if (!FindMapping(address))
     ReadMaps();
+  if (!FindMapping(address)) {
+    g_unmapped.insert(address & ~((1ull << kDirectBlockShift) - 1));
+    return;
+  }
   // The whole 2 MiB around the miss: neighbours are read next.
   const u64 first = address & ~(kChunk - 1);
   for (u64 block = first; block < first + kChunk;
@@ -146,10 +162,13 @@ void Fill(u64 address) {
     const u64 index = (block - kDirectBase) >> kDirectBlockShift;
     if (index >= kBlocks)
       break;
-    if (g_redirected[index].load(base::memory_order_acquire))
+    if (g_redirected[index].load(base::memory_order_acquire)) {
       g_saved[index] = EntryFor(block);
-    else
+    } else if (const u64 cached = MirrorCacheBlock(block)) {
+      DirectRedirect(block, cached);
+    } else {
       Table()[index] = EntryFor(block);
+    }
     g_filled.insert(block);
   }
 }
@@ -178,7 +197,7 @@ bool InitGuestDirect() {
   rhi::BufferDesc desc;
   desc.size = kBlocks * 8;
   desc.usage = rhi::kBufferStorage | rhi::kBufferAddress;
-  desc.memory = rhi::MemoryKind::kUpload;
+  desc.memory = rhi::MemoryKind::kUploadDevice;
   desc.name = "guest direct table";
   g_table = Device().CreateBuffer(desc);
   desc.size = 8 + kDirectMissSlots * 8;
@@ -250,6 +269,7 @@ void SyncGuestDirect() {
         Table()[index] = EntryFor(block);
     }
   }
+  MirrorRecache();
   auto* misses = reinterpret_cast<volatile u32*>(g_misses->mapped());
   const u32 count = base::Min<u32>(misses[0], kDirectMissSlots);
   if (!count)

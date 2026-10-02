@@ -919,7 +919,7 @@ void ResolveRecompiledShaders(const Regs& regs,
     return;
   }
   const ResolvedBuffers gs_resources =
-      rc.mesh_spirv.empty()
+      rc.mesh_spirv.empty() || rc.direct_vs
           ? ResolvedBuffers{}
           : rdna::ResolveBuffers(ngg.gs_code, binding.vs_user_data,
                                  vs_user_sgprs, kUdBase, 4096,

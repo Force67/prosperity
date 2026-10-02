@@ -2,6 +2,7 @@
 #include <cstdio>
 #include "base/algorithm.h"
 #include "base/atomic.h"
+#include "base/containers/hash_map.h"
 #include "base/containers/vector.h"
 #include "base/math/value_bounds.h"
 #include "base/threading/lock_guard.h"
@@ -93,7 +94,19 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
         return true;
     return false;
   };
-  if (!base::AllOf(addresses.begin(), addresses.end(), known))
+  // Once per page and frame: a pointer into nothing stays unmapped, and
+  // parsing again for it on every dispatch was 13% of the submit thread.
+  static base::HashSet<u64> unmapped;
+  static u64 unmapped_generation = ~0ull;
+  if (unmapped_generation != gpu::MemoryGeneration()) {
+    unmapped.clear();
+    unmapped_generation = gpu::MemoryGeneration();
+  }
+  bool stale = false;
+  for (u64 address : addresses)
+    if (!known(address) && unmapped.insert(address & ~u64(0xFFF)).second)
+      stale = true;
+  if (stale)
     MarkHostMappingsStale();
   for (const HostMapping& m : HostMappings()) {
     const unsigned long long begin = m.begin, end = m.end, offset = m.offset,

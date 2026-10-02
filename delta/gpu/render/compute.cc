@@ -181,6 +181,8 @@ u64 g_stage_ro_bytes = 0, g_stage_rw_bytes = 0, g_stage_img_bytes = 0;
 u64 g_stage_guest_detile_bytes = 0, g_stage_guest_detile_n = 0;
 u64 g_mirror_wb_bytes = 0, g_mirror_wb_n = 0, g_mirror_own_bytes = 0;
 base::Atomic<u64> g_mirror_resolves{0};
+base::HashSet<u64> g_mirror_cached;
+base::Map<u64, u64> g_mirror_uncached;  // block -> frame the CPU last wrote it
 base::Map<u64, u64> g_mirror_wb_union;
 DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", false);
 // Staging-in halves: hashing guest memory to decide validity, CPU detiling,
@@ -4768,7 +4770,10 @@ bool MirrorEligible(const ComputeInfo::Res& r, u64 bytes) {
 
 // Copies [base, base+bytes) between the guest pages and the mirror, on the
 // batch list, piece by piece along the imports.
-bool MirrorCopy(u64 base, u64 bytes, bool to_guest) {
+bool MirrorCopy(u64 base,
+                u64 bytes,
+                bool to_guest,
+                rhi::CommandList* list = nullptr) {
   base::Vector<base::Pair<rhi::Buffer*, base::Pair<u64, u64>>> pieces;
   for (u64 at = base; at < base + bytes;) {
     u64 import_base = 0;
@@ -4780,7 +4785,8 @@ bool MirrorCopy(u64 base, u64 bytes, bool to_guest) {
     pieces.push_back({import, {at, end}});
     at = end;
   }
-  rhi::CommandList* const list = g_cs_list;
+  if (!list)
+    list = g_cs_list;
   list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
   for (const auto& [import, span] : pieces) {
     u64 import_base = 0;
@@ -4794,7 +4800,7 @@ bool MirrorCopy(u64 base, u64 bytes, bool to_guest) {
                        span.first - import_base, n);
   }
   list->Barrier(rhi::kAccessCopyWrite,
-                kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostRead);
+                kAccessAll | rhi::kAccessHostRead);
   return true;
 }
 
@@ -5058,6 +5064,65 @@ void MirrorWriteBack(u64 base, u64 bytes) {
   InvalidateTexRange(base, bytes);
 }
 
+// Direct reads of guest memory come from VRAM: a block is copied into the
+// mirror on its first read, watched, and handed back to the host pages while
+// the CPU writes it, to come back after a few quiet frames.
+
+u64 MirrorCacheBlock(u64 block) {
+  if (!kMirror || !Mirror() || !g_mirror->address() || !InMirror(block) ||
+      MirrorOwned(block) || !gpu::IsReadableRangeCached(block, kMirrorBlock))
+    return 0;
+  const u64 address = g_mirror->address() + (block - kMirrorBase);
+  if (g_mirror_cached.count(block))
+    return address;
+  if (!Device().CommitSparse(g_mirror, block - kMirrorBase, kMirrorBlock))
+    return 0;
+  if (!GuestWriteTracker().Arm(block, kMirrorBlock))
+    return 0;
+  rhi::CommandList* list = nullptr;
+  if (g_frame.recording) {
+    EndRegion();
+    list = g_frame.list;
+  } else {
+    CsBatchBeginImpl();
+    if (!g_cs_batch_open)
+      return 0;
+  }
+  if (!MirrorCopy(block, kMirrorBlock, /*to_guest=*/false, list))
+    return 0;
+  g_mirror_clean.insert(block);
+  g_mirror_cached.insert(block);
+  g_mirror_uncached.erase(block);
+  return address;
+}
+
+void MirrorUncache(u64 block) {
+  if (!g_mirror_cached.erase(block))
+    return;
+  if (!MirrorOwned(block))
+    DirectRestore(block);
+  g_mirror_uncached[block] = g_frame.num;
+}
+
+void MirrorRecache() {
+  constexpr u64 kQuietFrames = 3;
+  u32 budget = 32;
+  for (auto it = g_mirror_uncached.begin();
+       it != g_mirror_uncached.end() && budget;) {
+    const u64 block = it->first;
+    if (it->second + kQuietFrames > g_frame.num) {
+      ++it;
+      continue;
+    }
+    ++it;
+    budget--;
+    if (const u64 address = MirrorCacheBlock(block))
+      DirectRedirect(block, address);
+    else
+      g_mirror_uncached.erase(block);
+  }
+}
+
 // A texture over bytes a dispatch wrote through the mirror: detiled from the
 // mirror on the GPU, where reading the guest copy would wait for the write
 // back.
@@ -5145,8 +5210,11 @@ void MirrorNoteGuestWrites(u64 first, u64 end) {
     if ((lo & ~u64(0xFFF)) <= first && end <= ((hi + 0xFFF) & ~u64(0xFFF)))
       return;
   for (u64 block = first & ~(kMirrorBlock - 1); block < end;
-       block += kMirrorBlock)
+       block += kMirrorBlock) {
     g_mirror_clean.erase(block);
+    if (!g_mirror_cached.empty())
+      MirrorUncache(block);
+  }
 }
 
 void MirrorWritesCollected() {
