@@ -188,6 +188,7 @@ void RecordLabelWrite(u64 address, u64 value) {
   const u32 i =
       g_label_history_n.fetch_add(1) % base::ArraySize(g_label_history);
   g_label_history[i] = {address, value, base::TickClock::NowNs()};
+  NoteLabelWritten();
   base::LockGuard<base::Mutex> lock(g_parked_lock);
   for (auto& [queue, w] : g_parked) {
     (void)queue;
@@ -429,7 +430,7 @@ void HandleAtomicMem(const u32* body, u32 count) {
     BASE_LOGI("memwatch", "ATOMIC_MEM op={} {:#x} src={:#x}", op,
               (unsigned long)address, (unsigned long)src);
   if (!IsLabelAddress(address) || (address & (wide ? 7 : 3)) ||
-      !gpu::IsReadableRange(address, wide ? 8 : 4)) {
+      !gpu::IsReadableRangeCached(address, wide ? 8 : 4)) {
     static int n = 0;
     if (n++ < 4)
       BASE_LOGW("agc", "ATOMIC_MEM op={} at {:#x}: not guest memory", op,
@@ -542,7 +543,10 @@ bool WaitBriefly(u32 op, const u32* body, u32 count) {
   QueueState* const queue = g_queue;
   const u32 submit_queue = render::g_submit_queue;
   const auto start = base::TimeTicks::Now();
-  while (!WaitSatisfied(op, body, count)) {
+  for (;;) {
+    const u64 seen = LabelSequence();
+    if (WaitSatisfied(op, body, count))
+      break;
     // A held write is certain to land: only a wait on nothing in flight
     // gives up.
     if (base::TimeTicks::Now() - start >= base::Milliseconds(2) &&
@@ -552,7 +556,7 @@ bool WaitBriefly(u32 op, const u32* body, u32 count) {
       return false;
     }
     g_mutex.unlock();
-    base::SleepForMicroseconds(20);
+    WaitLabelWritten(seen, base::Microseconds(200));
     g_mutex.lock();
     g_queue = queue;
     render::g_submit_queue = submit_queue;
@@ -714,7 +718,7 @@ void HandleCopyData(const u32* body, u32 count) {
     return sel == 2 || sel == 4 || sel == 5;
   };
   if (!is_memory(dst_sel) || !dst || (dst & (bytes - 1)) ||
-      !IsLabelAddress(dst) || !gpu::IsReadableRange(dst, bytes))
+      !IsLabelAddress(dst) || !gpu::IsReadableRangeCached(dst, bytes))
     return;
   u64 value = 0;
   if (src_sel == 9 || src_sel == 18) {  // GPU clock / system clock
@@ -722,7 +726,7 @@ void HandleCopyData(const u32* body, u32 count) {
   } else if (src_sel == 10 || src_sel == 11) {  // immediate, in the packet
     value = src;
   } else if (is_memory(src_sel)) {
-    if (!IsLabelAddress(src) || !gpu::IsReadableRange(src, bytes))
+    if (!IsLabelAddress(src) || !gpu::IsReadableRangeCached(src, bytes))
       return;
     std::memcpy(&value, reinterpret_cast<const void*>(src), bytes);
   } else {
@@ -753,7 +757,7 @@ void HandleEventWrite(const u32* body, u32 count) {
   constexpr u32 kBlocks = 16;  // one begin/end pair per DB
   constexpr u64 kBytes = kBlocks * 2 * sizeof(u64);
   if (!address || (address & 7) || !IsLabelAddress(address) ||
-      !gpu::IsReadableRange(address, kBytes))
+      !gpu::IsReadableRangeCached(address, kBytes))
     return;
   constexpr u64 kReady = 1ull << 63;
   // The packet address selects the column of a one-pair-per-depth-block
@@ -772,10 +776,17 @@ void HandleEventWrite(const u32* body, u32 count) {
 }
 
 // A packet whose whole effect is a write to guest memory runs in label order.
-void PublishPacket(void (*handle)(const u32*, u32), const u32* body, u32 count) {
-  PublishLabel([handle, words = base::Vector<u32>(body, body + count)] {
-    handle(words.data(), static_cast<u32>(words.size()));
-  });
+// `base`/`bytes` bound what it writes: a wait elsewhere does not wait for it.
+void PublishPacket(void (*handle)(const u32*, u32),
+                   const u32* body,
+                   u32 count,
+                   u64 base = 0,
+                   u64 bytes = ~0ull) {
+  PublishLabel(
+      [handle, words = base::Vector<u32>(body, body + count)] {
+        handle(words.data(), static_cast<u32>(words.size()));
+      },
+      base, bytes);
 }
 
 // IT_DISPATCH_INDIRECT: the workgroup counts live in memory rather than in the
@@ -789,7 +800,7 @@ void HandleDispatchIndirect(render::Renderer& renderer,
     args = body[0] | (static_cast<u64>(body[1]) << 32);
   else if (count >= 1)  // offset form: an offset into the SET_BASE buffer
     args = g_queue->dispatch_indirect_base + body[0];
-  if (!args || !IsGuestAddress(args) || !gpu::IsReadableRange(args, 12))
+  if (!args || !IsGuestAddress(args) || !gpu::IsReadableRangeCached(args, 12))
     return;
   // Counts a dispatch produced stay on the GPU, which reads them itself.
   const u32 initiator = count >= 2 ? body[count - 1] : 5;
@@ -839,7 +850,7 @@ void HandleDrawIndirect(
   const u64 args = g_queue->draw_indirect_base + body[0];
   const u32 want = indexed ? 20u : 16u;
   if (!g_queue->draw_indirect_base || !IsGuestAddress(args) ||
-      !gpu::IsReadableRange(args, want))
+      !gpu::IsReadableRangeCached(args, want))
     return;
   if (!render::FlushCsWritesRange(renderer, args, want, "indirect-draw"))
     return;
@@ -1029,7 +1040,7 @@ u32 Walk(render::Renderer& renderer,
         // spun holding the lock the whole player waits on.
         const bool follow =
             ib_words && ib_words <= 0x40000 && IsGuestAddress(ib) &&
-            gpu::IsReadableRange(ib, static_cast<u64>(ib_words) * sizeof(u32));
+            gpu::IsReadableRangeCached(ib, static_cast<u64>(ib_words) * sizeof(u32));
         TraceIndirectBuffer(ib, ib_words, follow);
         if (follow) {
           // Re-enter where a stalled walk of this same buffer left off.
@@ -1199,13 +1210,15 @@ u32 Walk(render::Renderer& renderer,
         const u64 flag = (static_cast<u64>(body[1] & 0xFFFF) << 32) |
                          (body[0] & 0xFFFFFFFCu);
         const u32 skip = body[3] & 0x3FFF;
-        if (IsGuestAddress(flag) && gpu::IsReadableRange(flag, 4) &&
+        if (IsGuestAddress(flag) && gpu::IsReadableRangeCached(flag, 4) &&
             *reinterpret_cast<const volatile u32*>(flag) == 0)
           i += skip;  // the guarded block did not run on the real CP either
         break;
       }
       case 0x1e:  // ATOMIC_MEM
-        PublishPacket(HandleAtomicMem, body, count);
+        if (count >= 3)
+          PublishPacket(HandleAtomicMem, body, count,
+                        (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1], 8);
         break;
       case 0x12:  // CLEAR_STATE: context push/pop/clear
         HandleClearState(body, count);
@@ -1218,10 +1231,21 @@ u32 Walk(render::Renderer& renderer,
         HandleWriteData(body, count);
         break;
       case IT_COPY_DATA:
-        PublishPacket(HandleCopyData, body, count);
+        if (count >= 5) {
+          // Memory destinations (2/4/5) only; anything else writes nothing.
+          const u32 dst_sel = ((body[0] >> 8) & 0xF) << 1;
+          const bool to_memory = dst_sel == 2 || dst_sel == 4 || dst_sel == 5;
+          PublishPacket(HandleCopyData, body, count,
+                        body[3] | (static_cast<u64>(body[4]) << 32),
+                        to_memory ? 8 : 0);
+        }
         break;
       case IT_EVENT_WRITE:
-        PublishPacket(HandleEventWrite, body, count);
+        // Only an occlusion query (ZPASS_DONE) writes memory: 16 pairs.
+        if (count >= 3 && (body[0] & 0x3F) == 0x39 &&
+            ((body[0] >> 8) & 0x7) == 1)
+          PublishPacket(HandleEventWrite, body, count,
+                        body[1] | (static_cast<u64>(body[2]) << 32), 256);
         break;
       case IT_EVENT_WRITE_EOP:
         HandleEventWriteEop(body, count);
@@ -1341,7 +1365,17 @@ void EndFrame(u64 scanout_base) {
   // the early return, or a frame that ends with nothing active never advances
   // it and the cache stops revalidating at all.
   rdna::NextProgramGeneration();
-  gpu::NextMemoryGeneration();
+  // Every guest map and unmap is reported, so what was readable stays so
+  // until one: probing the pages again every frame was a thousand mincore
+  // and process_vm_readv calls a frame. Once a second regardless.
+  {
+    static u32 frames = 0;
+    if (gpu::MemoryRemapped().exchange(false, base::memory_order_acq_rel) ||
+        ++frames >= 60) {
+      frames = 0;
+      gpu::NextMemoryGeneration();
+    }
+  }
   render::Renderer& renderer = render::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;

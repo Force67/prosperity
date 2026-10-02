@@ -1,4 +1,5 @@
 #pragma once
+#include "base/time/time.h"
 
 #include "base/arch.h"
 #include "base/functional/function.h"
@@ -26,6 +27,11 @@ bool OverlayHeld(u64 base, u32 bytes, u8* out);
 // writes instead blocked every waitOnAddress check on the GPU, with the GPU
 // lock held.
 bool LabelPending(u64 base, u64 bytes);
+// A label write landed (held or not, any queue). Waiters take the sequence
+// before checking their condition, then sleep until it moves or `timeout`.
+u64 LabelSequence();
+void NoteLabelWritten();
+void WaitLabelWritten(u64 seen, base::TimeDelta timeout);
 // What the held writes wait for (a stuck waitOnAddress reports it).
 void ReportHeldLabels();
 }  // namespace gpu::ps5

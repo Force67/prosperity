@@ -14,6 +14,8 @@
 namespace gpu::ps5 {
 namespace {
 base::Atomic<bool> g_mappings_stale{true};
+// A dispatch named an address no parsed mapping holds: parse now.
+base::Atomic<bool> g_mappings_forced{false};
 base::Atomic<bool> g_remaps_reported{false};
 u64 g_mappings_version = 0;
 }  // namespace
@@ -37,12 +39,25 @@ void MarkHostMappingsStale() {
 const base::Vector<HostMapping>& HostMappings() {
   static u64 generation = ~0ull;
   static base::Vector<HostMapping> mappings;
+  // Remap reports alone parse at most twice a frame: a title that remaps
+  // all frame long otherwise has the maps parsed for every dispatch.
+  static u64 parsed_generation = ~0ull;
+  static u32 parsed_in_frame = 0;
+  if (parsed_generation != gpu::MemoryGeneration()) {
+    parsed_generation = gpu::MemoryGeneration();
+    parsed_in_frame = 0;
+  }
   const bool new_frame =
       generation != gpu::MemoryGeneration() &&
       !g_remaps_reported.load(base::memory_order_acquire);
-  if (!new_frame &&
-      !g_mappings_stale.exchange(false, base::memory_order_acq_rel))
+  const bool forced =
+      g_mappings_forced.exchange(false, base::memory_order_acq_rel);
+  if (!new_frame && !forced &&
+      (parsed_in_frame >= 2 ||
+       !g_mappings_stale.exchange(false, base::memory_order_acq_rel)))
     return mappings;
+  g_mappings_stale.store(false, base::memory_order_release);
+  parsed_in_frame++;
   generation = gpu::MemoryGeneration();
   g_mappings_version++;
   mappings.clear();
@@ -107,7 +122,7 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
     if (!known(address) && unmapped.insert(address & ~u64(0xFFF)).second)
       stale = true;
   if (stale)
-    MarkHostMappingsStale();
+    g_mappings_forced.store(true, base::memory_order_release);
   for (const HostMapping& m : HostMappings()) {
     const unsigned long long begin = m.begin, end = m.end, offset = m.offset,
                              inode = m.inode;

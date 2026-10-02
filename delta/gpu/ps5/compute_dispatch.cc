@@ -222,7 +222,7 @@ const u32* ResolveUniformImageTable(
       buffer.num_records > 2048)
     return nullptr;
   const u64 size = static_cast<u64>(buffer.stride) * buffer.num_records;
-  if (!gpu::IsReadableRange(buffer.base, size))
+  if (!gpu::IsReadableRangeCached(buffer.base, size))
     return nullptr;
   if (gcn::g_flush_guest_range)
     gcn::g_flush_guest_range(buffer.base, size);
@@ -254,7 +254,7 @@ bool ApplyFillKernel(render::Renderer& renderer,
                      const u32* ud) {
   if (threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
       groups[1] != 1 || groups[2] != 1 || user_sgpr != 8 ||
-      !(tgid_enable & 1) || !gpu::IsReadableRange(cs_addr, sizeof(kFillKernel)) ||
+      !(tgid_enable & 1) || !gpu::IsReadableRangeCached(cs_addr, sizeof(kFillKernel)) ||
       std::memcmp(reinterpret_cast<const void*>(cs_addr), kFillKernel,
                   sizeof(kFillKernel)))
     return false;
@@ -272,7 +272,7 @@ bool ApplyFillKernel(render::Renderer& renderer,
       base::Min<u64>(u64(groups[0]) * 64, dst.num_records) * dst.stride;
   // Over a render target this is how the title clears it (NoteMemoryFill), and
   // dispatch output under it stays on the GPU.
-  if (!bytes || !gpu::IsReadableRange(dst.base, bytes) ||
+  if (!bytes || !gpu::IsReadableRangeCached(dst.base, bytes) ||
       !render::CsFillStaysOnGpu(dst.base, bytes))
     return false;
   render::ApplyMemoryFill(renderer, dst.base, bytes, ud[4]);
@@ -332,7 +332,7 @@ void DispatchCompute(render::Renderer& renderer,
       !groups[1])
     return;
   if (kNoCs || !renderer.available() ||
-      !gpu::IsReadableRange(cs_addr, kMaxShaderBytes))
+      !gpu::IsReadableRangeCached(cs_addr, kMaxShaderBytes))
     return;
   if (!group_base[0] && !indirect_args &&
       ApplyFillKernel(renderer, cs_addr, groups, threads, user_sgpr,
@@ -501,7 +501,7 @@ void DispatchCompute(render::Renderer& renderer,
     if ((r.runtime_address || (r.kind == 2 && rc.guest_memory_binding >= 0)) &&
         !range.zero_fill &&
         (!range.ok || !range.base || !range.size ||
-         !gpu::IsReadableRange(range.base, range.size))) {
+         !gpu::IsReadableRangeCached(range.base, range.size))) {
       range = {};
       range.ok = true;
       range.zero_fill = true;
@@ -517,12 +517,12 @@ void DispatchCompute(render::Renderer& renderer,
     // mapping; stage the mapped prefix and let the tail live in the SSBO only.
     if (kCsAnyMem && r.kind == 1 && !range.zero_fill &&
         range.guest_size <= kMaxResource &&
-        !gpu::IsReadableRange(range.base, range.guest_size)) {
+        !gpu::IsReadableRangeCached(range.base, range.guest_size)) {
       constexpr u64 kGrain = 64 * 1024;
       u64 lo = 0, hi = range.guest_size / kGrain;
       while (lo < hi) {
         const u64 mid = (lo + hi + 1) / 2;
-        if (gpu::IsReadableRange(range.base, mid * kGrain))
+        if (gpu::IsReadableRangeCached(range.base, mid * kGrain))
           lo = mid;
         else
           hi = mid - 1;
@@ -542,7 +542,7 @@ void DispatchCompute(render::Renderer& renderer,
              (range.image_staging ? kMaxImageStaging : max_resource) ||
          (r.written && !kCsAnyMem && !r.runtime_address &&
           !IsGpuAddress(range.base)) ||
-         !gpu::IsReadableRange(range.base, range.guest_size))) {
+         !gpu::IsReadableRangeCached(range.base, range.guest_size))) {
       TraceCsInvalidRange(cs_addr, r, range.base, range.guest_size);
       return;
     }

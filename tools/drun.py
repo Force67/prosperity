@@ -549,6 +549,12 @@ class Perf:
         if os.environ.get("DRUN_PERF_CALLGRAPH"):
             cmd[cmd.index("4000")] = "1000"
             cmd[2:2] = ["--call-graph", "dwarf,16384"]
+        # DRUN_PERF_EVENT=sched:sched_switch: where the threads block.
+        if os.environ.get("DRUN_PERF_EVENT"):
+            i = cmd.index("cpu-clock:u")
+            cmd[i] = os.environ["DRUN_PERF_EVENT"]
+            j = cmd.index("-F")
+            del cmd[j:j + 2]
         self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)
 
@@ -768,6 +774,10 @@ def main():
         env["SDL_VIDEODRIVER"] = "offscreen"
     subprocess.run(["pkill", "-9", "-x", "ps4delta"])
     cmd = [BIN, a.pkg] + [f"+{o}" for o in opts]
+    # DRUN_WRAP="nsys profile ...": run the emulator under a tool.
+    if os.environ.get("DRUN_WRAP"):
+        import shlex
+        cmd = shlex.split(os.environ["DRUN_WRAP"]) + cmd
     log_path = os.path.join(a.out, "run.log")
     log = open(log_path, "w")
     log_budget = 300 << 20

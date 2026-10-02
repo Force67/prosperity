@@ -96,7 +96,7 @@ BlendObject ReadBlendObject(Regs& regs,
     const u32 joined = prev_pairs + num_pairs;
     const u32* q = reinterpret_cast<const u32*>(prev_addr);
     if (joined >= 24 && joined - 24 < prev_pairs &&
-        gpu::IsReadableRange(prev_addr, static_cast<u64>(prev_pairs) * 2 * 4)) {
+        gpu::IsReadableRangeCached(prev_addr, static_cast<u64>(prev_pairs) * 2 * 4)) {
       blend.applied = (q[(joined - 23) * 2] & (1u << 28)) != 0;
       if (blend.applied) {
         regs[mmCB_BLEND0_CONTROL] =
@@ -138,7 +138,7 @@ bool AnchorColorTarget(Regs& regs,
     const u32 w = ((attrib2 >> 14) & 0x3FFF) + 1;
     const u32 h = (attrib2 & 0x3FFF) + 1;
     if (!fmt || fmt > 22 || !IsGpuAddress(rt) ||
-        !gpu::IsReadableRange(rt, 0x1000) || w < 16 || h < 16 || w > 8192 ||
+        !gpu::IsReadableRangeCached(rt, 0x1000) || w < 16 || h < 16 || w > 8192 ||
         h > 8192)
       continue;
     regs[mmCB_COLOR0_BASE] = p[k * 2 + 1];
@@ -196,7 +196,7 @@ void LoadRegImage(Regs& regs, u32 base, const u32* body, u32 count) {
           source_dwords, off + base::Min<u32>(num, limit - base - off));
   }
   if (!source_dwords ||
-      !gpu::IsReadableRange(image, source_dwords * sizeof(u32)))
+      !gpu::IsReadableRangeCached(image, source_dwords * sizeof(u32)))
     return;
   const u32* src = reinterpret_cast<const u32*>(image);
   TraceRegImage(base, image, body, count);
@@ -263,7 +263,7 @@ void LoadRegBlock(Regs& regs, u32 base, const u32* body, u32 count) {
     NoteRegBlock(base, RegBlockOutcome::kNoPairs, address, 0);
     return;
   }
-  if (!gpu::IsReadableRange(address,
+  if (!gpu::IsReadableRangeCached(address,
                             static_cast<u64>(num_pairs) * 2 * sizeof(u32))) {
     NoteRegBlock(base, RegBlockOutcome::kUnreadable, address, num_pairs);
     return;

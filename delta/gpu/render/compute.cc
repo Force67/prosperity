@@ -7379,6 +7379,8 @@ void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
   if (!FillOverDirtyRanges(base, bytes, false) ||
       !FillOverDirtyRanges(base, bytes, true))
     FlushCsWritesRange(renderer, base, bytes, "fill");
+  // Announced first: armed pages open in runs, not with a fault per page.
+  host_memory::BeforeHostWrite(reinterpret_cast<void*>(base), bytes);
   u32* words = reinterpret_cast<u32*>(base);
   base::Fill(words, words + bytes / 4, value);
   CsForgetGuestRange(base, bytes);

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <limits>
 #include "base/arch.h"
+#include "base/atomic.h"
 #include "base/containers/hash_map.h"
 #include "base/containers/map.h"
 #include "base/containers/vector.h"
@@ -109,6 +110,12 @@ inline u64& MemoryGeneration() {
 
 inline void NextMemoryGeneration() {
   MemoryGeneration()++;
+}
+
+// The guest mapped or unmapped something since the generation last moved.
+inline base::Atomic<bool>& MemoryRemapped() {
+  static base::Atomic<bool> remapped{true};
+  return remapped;
 }
 
 inline bool IsReadableRangeCached(u64 address, u64 bytes) {

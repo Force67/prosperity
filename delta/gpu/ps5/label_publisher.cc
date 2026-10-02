@@ -31,6 +31,9 @@ base::Vector<Held> g_held;
 size_t g_head = 0;  // g_held[g_head..] have not run
 
 base::UniquePointer<base::Thread> g_thread;
+base::Mutex g_event_lock;
+base::ConditionVariable g_event;
+base::Atomic<u64> g_event_seq{0};
 
 void Run() {
   for (;;) {
@@ -54,9 +57,29 @@ void Run() {
       }
     }
     g_done.NotifyAll();
+    NoteLabelWritten();
   }
 }
 }  // namespace
+
+u64 LabelSequence() {
+  return g_event_seq.load(base::memory_order_acquire);
+}
+
+void NoteLabelWritten() {
+  {
+    base::LockGuard<base::Mutex> lock(g_event_lock);
+    g_event_seq.fetch_add(1, base::memory_order_acq_rel);
+  }
+  g_event.NotifyAll();
+}
+
+void WaitLabelWritten(u64 seen, base::TimeDelta timeout) {
+  base::UniqueLock<base::Mutex> lock(g_event_lock);
+  g_event.WaitFor(lock, timeout, [&] {
+    return g_event_seq.load(base::memory_order_acquire) != seen;
+  });
+}
 
 void PublishLabel(base::Function<void()> write,
                   u64 base,
@@ -80,10 +103,12 @@ void PublishLabel(base::Function<void()> write,
       write = nullptr;
     }
   }
-  if (write)
+  if (write) {
     write();
-  else
+    NoteLabelWritten();
+  } else {
     g_wake.NotifyAll();
+  }
 }
 
 void ReportHeldLabels() {
