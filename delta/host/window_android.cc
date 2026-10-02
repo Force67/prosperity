@@ -782,6 +782,8 @@ bool Ensure(const char*, u32, u32) {
   return Available();
 }
 
+void RefreshFrame(bool) {}
+
 void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
   if (g_present_failed.load(base::memory_order_acquire) ||
       g_present_stop_requested.load(base::memory_order_acquire) ||

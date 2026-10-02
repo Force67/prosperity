@@ -13,11 +13,11 @@
 #include "base/math/value_bounds.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
-#include "host/overlay_log.h"
-#include "host/overlay_theme.h"
 #include "imgui.h"
+#include "ui/overlay_log.h"
+#include "ui/overlay_theme.h"
 
-namespace host {
+namespace ui {
 namespace {
 
 // The ring holds exactly what the panel shows. Lines are truncated at capture,
@@ -69,7 +69,7 @@ LevelStyle GetLevelStyle(u8 level) {
     case logger::LogLevel::kTrace:
       return {"TRC", overlay_theme::kMuted};
     case logger::LogLevel::kDebug:
-      return {"DBG", overlay_theme::kCyan};
+      return {"DBG", overlay_theme::kSecondary};
     case logger::LogLevel::kWarning:
       return {"WRN", overlay_theme::kWarning};
     case logger::LogLevel::kError:
@@ -121,10 +121,10 @@ void OverlayLogBuild(u32 w, u32 h) {
   overlay_theme::DrawMark(dl, ImVec2(tl.x + pad, tl.y + pad));
   dl->AddText(ImGui::GetIO().FontDefault, 15.0f,
               ImVec2(tl.x + pad + 20, tl.y + pad), overlay_theme::kText,
-              "SESSION LOG");
-  const char* status = "LIVE / [F2]";
+              "Session log");
+  const char* status = "[F2]";
   const float status_w = ImGui::CalcTextSize(status).x;
-  dl->AddText(ImVec2(br.x - pad - status_w, tl.y + pad), overlay_theme::kAmber,
+  dl->AddText(ImVec2(br.x - pad - status_w, tl.y + pad), overlay_theme::kMuted,
               status);
   dl->AddLine(ImVec2(tl.x + pad, tl.y + pad + fs + 8),
               ImVec2(br.x - pad, tl.y + pad + fs + 8), overlay_theme::kBorder);
@@ -147,4 +147,4 @@ void OverlayLogToggle() {
   g_visible = !g_visible;
 }
 
-}  // namespace host
+}  // namespace ui

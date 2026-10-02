@@ -16,6 +16,7 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "gpu/d3d12/d3d12_internal.h"
+#include "ui/shader_activity.h"
 
 namespace gpu::d3d12::impl {
 
@@ -362,6 +363,7 @@ bool D3D12Device::CompileHlsl(const base::String& hlsl,
 
 rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
     const rhi::GraphicsPipelineDesc& desc) {
+  const ui::ShaderCompilation compilation;
   auto* layout = static_cast<D3D12PipelineLayout*>(desc.layout);
   if (desc.mesh) {
     BASE_LOGI("gpud3d12", "mesh pipelines are not supported");
@@ -516,6 +518,7 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
 
 rhi::Pipeline* D3D12Device::CreateComputePipeline(
     const rhi::ComputePipelineDesc& desc) {
+  const ui::ShaderCompilation compilation;
   auto* layout = static_cast<D3D12PipelineLayout*>(desc.layout);
   LowerOptions co;
   co.stage = rhi::kStageCompute;

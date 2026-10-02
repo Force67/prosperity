@@ -3,16 +3,16 @@
  */
 
 #include "gpu/render/perf.h"
-#include "gpu/rhi/device.h"
 #include "base/arch.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/render/buffer_cache.h"
 #include "gpu/render/command.h"
+#include "gpu/rhi/device.h"
 #include "gpu/write_tracker.h"
 
 #include "gpu/gcn/gcn_translate.h"
-#include "host/overlay.h"
 #include "host/window.h"
+#include "ui/overlay.h"
 
 #include <unistd.h>
 #include <cstdio>
@@ -447,8 +447,8 @@ void ReportFps() {
     CsSyncReport(f);
     // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
     // cost).
-    host::OverlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
-                         float(1000.0 * dt / frames));
+    ui::OverlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
+                       float(1000.0 * dt / frames));
     last = now;
     frames = 0;
     g_ns_draw = g_ns_end = g_ns_readback = g_ns_tex_up = 0;

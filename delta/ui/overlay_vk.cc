@@ -8,20 +8,20 @@
  * PRESENT_SRC, so gfx_vk's present path just calls OverlayVkRender.
  */
 
-#include "host/overlay_vk.h"
+#include "ui/overlay_vk.h"
 #include "base/arch.h"
 
 #include <cstdio>
-#include <cstring>
 
 #include "base/logging.h"
+#include "base/memory/mem_ops.h"
 
 #include "base/containers/vector.h"
-#include "host/overlay.h"
-#include "host/overlay_vk_shaders.h"
 #include "imgui.h"
+#include "ui/overlay.h"
+#include "ui/overlay_vk_shaders.h"
 
-namespace host {
+namespace ui {
 namespace {
 
 struct Frame {
@@ -263,7 +263,7 @@ bool UploadFont() {
              stg, stg_mem);
   void* map = nullptr;
   vkMapMemory(g_vk.device, stg_mem, 0, bytes, 0, &map);
-  std::memcpy(map, px, bytes);
+  base::MemCopy(map, px, bytes);
   vkUnmapMemory(g_vk.device, stg_mem);
 
   VkCommandBufferAllocateInfo ca{
@@ -474,10 +474,10 @@ bool OverlayVkRender(VkCommandBuffer cmd, u32 image_index) {
     auto* idx = static_cast<ImDrawIdx*>(frame.idx_map);
     for (int i = 0; i < dd->CmdListsCount; i++) {
       const ImDrawList* cl = dd->CmdLists[i];
-      std::memcpy(vtx, cl->VtxBuffer.Data,
-                  cl->VtxBuffer.Size * sizeof(ImDrawVert));
-      std::memcpy(idx, cl->IdxBuffer.Data,
-                  cl->IdxBuffer.Size * sizeof(ImDrawIdx));
+      base::MemCopy(vtx, cl->VtxBuffer.Data,
+                    cl->VtxBuffer.Size * sizeof(ImDrawVert));
+      base::MemCopy(idx, cl->IdxBuffer.Data,
+                    cl->IdxBuffer.Size * sizeof(ImDrawIdx));
       vtx += cl->VtxBuffer.Size;
       idx += cl->IdxBuffer.Size;
     }
@@ -556,4 +556,4 @@ bool OverlayVkReady() {
   return g_vk.ready && !g_vk.fbs.empty();
 }
 
-}  // namespace host
+}  // namespace ui

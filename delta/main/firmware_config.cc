@@ -10,11 +10,13 @@
 
 #include "base/environment_variables.h"
 #include "base/filesystem/file.h"
+#include "base/option.h"
 #include "base/option_file.h"
 #include "base/standard_streams.h"
 #include "base/strings/format.h"
 #include "base/strings/string_compare.h"
 #include "io/file.h"
+#include "io/path.h"
 
 namespace cli {
 namespace {
@@ -217,6 +219,34 @@ bool ImportModules(const base::String& sources,
 }
 
 }  // namespace
+
+bool FirmwareModulesReady(bool ps5) {
+  const auto* option =
+      base::FindOption(ps5 ? "DELTA_PS5_MODULES" : "DELTA_PS4_MODULES");
+  const char* configured =
+      option ? static_cast<const base::Option<const char*>*>(option)->get()
+             : nullptr;
+  const auto paths =
+      configured && *configured
+          ? base::String(configured)
+          : (ps5 ? base::String() : io::MakeAbsPath(base::String("modules")));
+  bool kernel = false;
+  bool libc = false;
+  mem_size begin = 0;
+  while (begin < paths.size()) {
+    const auto end = ps5 ? paths.find(':', begin) : base::String::npos;
+    const auto directory = paths.substr(
+        begin, end == base::String::npos ? base::String::npos : end - begin);
+    if (!directory.empty()) {
+      kernel |= HasModule(directory, "libkernel", ps5);
+      libc |= HasModule(directory, "libSceLibcInternal", ps5);
+    }
+    if (end == base::String::npos)
+      break;
+    begin = end + 1;
+  }
+  return kernel && libc;
+}
 
 bool ConfigureFirmware(const CommandLine& command) {
   const bool configuring =

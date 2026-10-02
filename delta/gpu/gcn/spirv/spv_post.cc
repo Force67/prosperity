@@ -10,6 +10,7 @@
 #include "base/arch.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gpu_perf.h"
+#include "ui/shader_activity.h"
 
 #include "base/logging.h"
 
@@ -221,6 +222,7 @@ struct Finalized {
 };
 
 Finalized RunFinalize(const base::Vector<u32>& spv, u64 key) {
+  const ui::ShaderCompilation compilation;
   Finalized f;
   f.valid = Validate(spv, &f.err);
   if (f.valid) {
@@ -390,6 +392,7 @@ bool Finalize(const base::Vector<u32>& spv,
   if (!valid)
     return false;
   t0 = NowNs();
+  const ui::ShaderCompilation compilation;
   *out = Optimize(spv);
   g_ns_spv_opt += NowNs() - t0;
   WriteEntry(key, *out);

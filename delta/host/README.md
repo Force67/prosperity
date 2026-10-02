@@ -1,7 +1,7 @@
 # delta/host
 
 The host machine as the emulator sees it: a window to present into, the input
-it receives, audio output and the on-screen overlay. Namespace `host`.
+it receives, and audio output. Namespace `host`.
 
 | unit | hides |
 |---|---|
@@ -11,5 +11,4 @@ it receives, audio output and the on-screen overlay. Namespace `host`.
 | `window_headless.cc` | Android adb runner: no window at all |
 | `gameplay_state.cc` | the renderer's "a run is underway" latch the pad autoskip reads |
 | `audio_output.h` | PCM playback ports (`audio_output_sdl.cc`, `_stub.cc` without SDL) |
-| `overlay*.cc` | the ImGui perf/controls/log overlay and its Vulkan pass |
-| `overlay_theme.h` | shared Delta palette, ImGui widget style, and overlay panel drawing |
+| `ui` | menus and overlays are in [`delta/ui`](../ui/README.md) |

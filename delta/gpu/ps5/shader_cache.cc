@@ -7,6 +7,7 @@
 
 #include "gpu/ps5/shader_cache.h"
 #include "base/arch.h"
+#include "ui/shader_activity.h"
 
 #include "gpu/gpu_perf.h"
 #include "gpu/ps5/cmd_trace.h"
@@ -101,6 +102,7 @@ struct ComputeKeyHash {
 // points are reached directly, so without this `sh=` on the FPS line reads zero
 // on PS5 no matter how long a burst of first-use shaders takes.
 struct RecompTimer {
+  ui::ShaderCompilation compilation;
   u64 t0 = NowNs();
   ~RecompTimer() {
     gcn::g_ns_recomp += NowNs() - t0;

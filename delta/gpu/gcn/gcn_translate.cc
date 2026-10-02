@@ -12,6 +12,7 @@
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/gcn/spirv/gcn_spirv.h"
+#include "ui/shader_activity.h"
 
 #include "base/algorithm.h"
 #include "base/time/time.h"
@@ -87,6 +88,7 @@ Recompiled Recompile(const u32* vs_code,
                      u32 col_format,
                      u32 tex_cube_mask) {
   DELTA_ZONE("gcn.recompile");
+  const ui::ShaderCompilation compilation;
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
     return r;
@@ -108,6 +110,7 @@ RecompiledCs RecompileCompute(const u32* cs_code,
                               u32 tgid_enable,
                               u32 lds_dwords) {
   DELTA_ZONE("gcn.recompile_cs");
+  const ui::ShaderCompilation compilation;
   RecompiledCs r;
   if (!cs_code)
     return r;

@@ -12,6 +12,7 @@ struct CommandLine {
   base::Vector<base::String> guest_args;
   base::Vector<base::String> options;
   bool dump_options = false;
+  bool headless = false;
   bool exit = false;
   int exit_code = 0;
 };

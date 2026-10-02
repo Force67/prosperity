@@ -31,8 +31,9 @@ void PrintHelp() {
 
   Prosperity | PlayStation 4 & 5 emulator
 
-Usage: ps4delta [options] <game> [-- guest arguments]
+Usage: ps4delta [options] [game] [-- guest arguments]
 
+Start without a game to open the home screen (Linux).
 Game: .pkg, .ffpkg, .zip, .rar, app directory, or eboot.bin
 
   -h, --help                Show this help
@@ -69,11 +70,6 @@ Setup: docs/installation.md
 
 CommandLine Parse(int argc, char** argv) {
   CommandLine result;
-  if (argc == 1) {
-    PrintHelp();
-    result.exit = true;
-    return result;
-  }
 
   bool passthrough = false;
   for (int i = 1; i < argc; ++i) {
@@ -101,6 +97,7 @@ CommandLine Parse(int argc, char** argv) {
         return result;
       }
       if (arg == "--headless") {
+        result.headless = true;
         result.options.emplace_back("+DELTA_GPU_NOPRESENT=1");
         continue;
       }
@@ -172,9 +169,9 @@ CommandLine Parse(int argc, char** argv) {
     else
       result.guest_args.push_back(arg);
   }
-  if (result.game.empty() && !result.dump_options &&
+  if (result.headless && result.game.empty() && !result.dump_options &&
       result.configure_ps4_fw.empty() && result.configure_ps5_fw.empty()) {
-    constexpr char kError[] = "ps4delta: missing game path (see --help)\n";
+    constexpr char kError[] = "ps4delta: --headless needs a game path\n";
     base::WriteStandardError(kError, sizeof(kError) - 1);
     result.exit = true;
     result.exit_code = 2;

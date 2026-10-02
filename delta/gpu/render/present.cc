@@ -34,10 +34,20 @@ void LatestFramePresenter::StartLocked() {
 void LatestFramePresenter::Run() {
   base::UniqueLock<base::Mutex> lock(mutex_);
   base::Vector<u8> local;
+  u64 last_frame_ns = 0;
   while (true) {
-    ready_.Wait(lock, [this] { return pending_ || stopping_; });
+    ready_.WaitFor(lock, base::Milliseconds(16),
+                   [this] { return pending_ || stopping_; });
     if (stopping_)
       return;
+    if (!pending_) {
+      lock.unlock();
+      if (last_frame_ns && host::PumpEvents() &&
+          NowNs() - last_frame_ns >= 150'000'000)
+        host::RefreshFrame(true);
+      lock.lock();
+      continue;
+    }
     const u32 w = width_;
     const u32 h = height_;
     const host::PixelFormat fmt = pending_fmt_;
@@ -59,6 +69,7 @@ void LatestFramePresenter::Run() {
     if (host::Ensure("prosperity", w, h) && host::PumpEvents())
       host::Present(src, w, h, w * 4, fmt);
     g_ns_gfx_present += NowNs() - tp;
+    last_frame_ns = NowNs();
     lock.lock();
     if (pending_src_ == src) {
       pending_src_ = nullptr;

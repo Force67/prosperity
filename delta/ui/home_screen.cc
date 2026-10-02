@@ -1,0 +1,455 @@
+#include "ui/home_screen.h"
+
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <SDL3/SDL.h>
+#include <stb_image.h>
+#include <sys/stat.h>
+
+#include "DroidSans.hpp"
+#include "base/algorithm.h"
+#include "base/memory/mem_ops.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
+#include "imgui.h"
+#include "ui/overlay.h"
+#include "ui/overlay_theme.h"
+
+namespace ui {
+namespace {
+struct Artwork {
+  int icon = -1;
+  int background = -1;
+};
+struct AtlasImage {
+  int rect;
+  u32 width, height;
+  base::Vector<u8> pixels;
+};
+
+bool g_active = false;
+bool g_ps4_ready = false;
+bool g_ps5_ready = false;
+bool g_done = false;
+const base::Vector<HomeGame>* g_games = nullptr;
+base::Vector<Artwork> g_artwork;
+mem_size g_selected = 0;
+mem_size g_first = 0;
+mem_size g_background_selection = 0;
+mem_size g_previous_background = 0;
+float g_background_transition = 1;
+ImFont* g_heading = nullptr;
+base::String g_result;
+base::String g_error;
+base::Mutex g_dialog_mutex;
+bool g_dialog_pending = false;
+base::String g_dialog_path;
+base::String g_dialog_error;
+
+int AddArtwork(const base::Vector<u8>& png,
+               u32 width,
+               u32 height,
+               base::Vector<AtlasImage>* images) {
+  if (png.empty() || png.size() > (16u << 20))
+    return -1;
+  int w, h, channels;
+  if (!stbi_info_from_memory(png.data(), static_cast<int>(png.size()), &w, &h,
+                             &channels) ||
+      w < 1 || h < 1 || w > 4096 || h > 4096)
+    return -1;
+  auto* pixels = stbi_load_from_memory(png.data(), static_cast<int>(png.size()),
+                                       &w, &h, &channels, STBI_rgb_alpha);
+  if (!pixels)
+    return -1;
+  AtlasImage image;
+  image.rect = ImGui::GetIO().Fonts->AddCustomRectRegular(width, height);
+  image.width = width;
+  image.height = height;
+  image.pixels.resize(width * height * 4);
+  // Crop to fill, so square icons and wide backdrops keep their proportions.
+  const float scale = base::Max(float(width) / w, float(height) / h);
+  const float left = (w - width / scale) * 0.5f;
+  const float top = (h - height / scale) * 0.5f;
+  for (u32 y = 0; y < height; ++y) {
+    const float sy = top + y / scale;
+    const int y0 = base::Min(static_cast<int>(sy), h - 1);
+    const int y1 = base::Min(y0 + 1, h - 1);
+    const float fy = sy - y0;
+    for (u32 x = 0; x < width; ++x) {
+      const float sx = left + x / scale;
+      const int x0 = base::Min(static_cast<int>(sx), w - 1);
+      const int x1 = base::Min(x0 + 1, w - 1);
+      const float fx = sx - x0;
+      for (int c = 0; c < 4; ++c) {
+        const float a = pixels[(y0 * w + x0) * 4 + c] * (1 - fx) +
+                        pixels[(y0 * w + x1) * 4 + c] * fx;
+        const float b = pixels[(y1 * w + x0) * 4 + c] * (1 - fx) +
+                        pixels[(y1 * w + x1) * 4 + c] * fx;
+        image.pixels[(y * width + x) * 4 + c] =
+            static_cast<u8>(a * (1 - fy) + b * fy);
+      }
+    }
+  }
+  stbi_image_free(pixels);
+  const int rect = image.rect;
+  images->push_back(base::move(image));
+  return rect;
+}
+
+void PrepareArtwork() {
+  ImGuiIO& io = ImGui::GetIO();
+  g_heading = io.Fonts->AddFontFromMemoryCompressedTTF(
+      tracy::DroidSans_compressed_data, tracy::DroidSans_compressed_size, 36);
+  io.Fonts->TexDesiredWidth = 2048;
+  base::Vector<AtlasImage> images;
+  g_artwork.clear();
+  for (const auto& game : *g_games) {
+    Artwork art;
+    art.icon = AddArtwork(game.icon, 192, 192, &images);
+    art.background = AddArtwork(game.artwork, 640, 360, &images);
+    g_artwork.push_back(art);
+  }
+  u8* atlas;
+  int width, height;
+  io.Fonts->GetTexDataAsRGBA32(&atlas, &width, &height);
+  for (const auto& image : images) {
+    const auto* rect = io.Fonts->GetCustomRectByIndex(image.rect);
+    for (u32 y = 0; y < image.height; ++y)
+      base::MemCopy(atlas + ((rect->Y + y) * width + rect->X) * 4,
+                    image.pixels.data() + y * image.width * 4, image.width * 4);
+  }
+}
+
+void DrawArtwork(ImDrawList* dl,
+                 int rect_index,
+                 ImVec2 tl,
+                 ImVec2 br,
+                 float rounding = 0,
+                 ImU32 tint = IM_COL32_WHITE) {
+  if (rect_index < 0)
+    return;
+  ImVec2 uv0, uv1;
+  auto* atlas = ImGui::GetIO().Fonts;
+  atlas->CalcCustomRectUV(atlas->GetCustomRectByIndex(rect_index), &uv0, &uv1);
+  const auto* rect = atlas->GetCustomRectByIndex(rect_index);
+  const float source_ratio = float(rect->Width) / rect->Height;
+  const float target_ratio = (br.x - tl.x) / (br.y - tl.y);
+  if (target_ratio > source_ratio) {
+    const float crop =
+        (uv1.y - uv0.y) * (1 - source_ratio / target_ratio) * 0.5f;
+    uv0.y += crop;
+    uv1.y -= crop;
+  } else {
+    const float crop =
+        (uv1.x - uv0.x) * (1 - target_ratio / source_ratio) * 0.5f;
+    uv0.x += crop;
+    uv1.x -= crop;
+  }
+  dl->AddImageRounded(atlas->TexID, tl, br, uv0, uv1, tint, rounding);
+}
+
+void Play(const base::String& path) {
+  struct stat info{};
+  if (::stat(path.c_str(), &info) != 0) {
+    g_error = "This game is no longer at its saved location.";
+    return;
+  }
+  g_result = path;
+  g_done = true;
+}
+
+void SDLCALL DialogResult(void*, const char* const* files, int) {
+  base::LockGuard<base::Mutex> lock(g_dialog_mutex);
+  g_dialog_pending = false;
+  if (!files)
+    g_dialog_error =
+        "Could not open the file picker. Check your desktop portal.";
+  else if (files[0])
+    g_dialog_path = files[0];
+}
+
+void OpenGame(bool folder) {
+  {
+    base::LockGuard<base::Mutex> lock(g_dialog_mutex);
+    if (g_dialog_pending)
+      return;
+    g_dialog_pending = true;
+  }
+  auto* window = SDL_GetKeyboardFocus();
+  static const SDL_DialogFileFilter kFilters[] = {
+      {"Games", "pkg;ffpkg;zip;rar;bin;elf"}, {"All files", "*"}};
+  if (folder)
+    SDL_ShowOpenFolderDialog(DialogResult, nullptr, window, nullptr, false);
+  else
+    SDL_ShowOpenFileDialog(DialogResult, nullptr, window, kFilters, 2, nullptr,
+                           false);
+}
+
+bool DialogPending() {
+  base::LockGuard<base::Mutex> lock(g_dialog_mutex);
+  return g_dialog_pending;
+}
+
+void ReadDialogResult() {
+  base::String path;
+  {
+    base::LockGuard<base::Mutex> lock(g_dialog_mutex);
+    path = base::move(g_dialog_path);
+    if (!g_dialog_error.empty())
+      g_error = base::move(g_dialog_error);
+  }
+  if (!path.empty())
+    Play(path);
+}
+void DrawFirmwareWarning(ImDrawList* dl, float width, float margin) {
+  const ImVec2 tl(margin, 72);
+  const ImVec2 br(width - margin, 172);
+  dl->AddRectFilled(tl, br, IM_COL32(37, 33, 26, 245), 50);
+  dl->AddRect(tl, br, IM_COL32(230, 192, 113, 55), 50);
+  const ImVec2 center(tl.x + 44, tl.y + 50);
+  dl->AddCircleFilled(center, 18, overlay_theme::kWarning);
+  dl->AddText(ImVec2(center.x - 2, center.y - 8), overlay_theme::kCanvas, "!");
+  const char* title = !g_ps4_ready && !g_ps5_ready
+                          ? "PS4 and PS5 firmware modules are missing"
+                          : (!g_ps4_ready ? "PS4 firmware modules are missing"
+                                          : "PS5 firmware modules are missing");
+  const char* command =
+      !g_ps4_ready && !g_ps5_ready
+          ? "ps4delta --configure-ps4-fw <folder>   |   ps4delta "
+            "--configure-ps5-fw <folders>"
+          : (!g_ps4_ready ? "ps4delta --configure-ps4-fw <folder>"
+                          : "ps4delta --configure-ps5-fw <folders>");
+  dl->AddText(ImVec2(tl.x + 80, tl.y + 18), overlay_theme::kText, title);
+  dl->AddText(ImVec2(tl.x + 80, tl.y + 42), overlay_theme::kSecondary,
+              "Install your decrypted firmware modules before playing.");
+  dl->AddText(overlay_theme::MonospaceFont(), 13, ImVec2(tl.x + 80, tl.y + 66),
+              overlay_theme::kWarning, command);
+}
+}  // namespace
+
+bool HomeScreenActive() {
+  return g_active;
+}
+
+void HomeScreenBuild(u32 width, u32 height) {
+  ReadDialogResult();
+  const float w = float(width), h = float(height);
+  const float margin = base::Clamp(w * 0.05f, 24.0f, 64.0f);
+  const float tile = base::Clamp(w * 0.09f, 72.0f, 120.0f);
+  const bool missing_firmware = !g_ps4_ready || !g_ps5_ready;
+  const float row_y =
+      base::Max(96.0f, h * 0.15f) + (missing_firmware ? 112.0f : 0.0f);
+  const mem_size visible = base::Max(
+      mem_size(1), static_cast<mem_size>((w - margin * 2) / (tile + 20)));
+  if (!DialogPending() && !g_games->empty()) {
+    if ((ImGui::IsKeyPressed(ImGuiKey_LeftArrow) ||
+         ImGui::GetIO().MouseWheel > 0) &&
+        g_selected)
+      --g_selected;
+    if ((ImGui::IsKeyPressed(ImGuiKey_RightArrow) ||
+         ImGui::GetIO().MouseWheel < 0) &&
+        g_selected + 1 < g_games->size())
+      ++g_selected;
+    if (ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+        ImGui::IsKeyPressed(ImGuiKey_Space))
+      Play((*g_games)[g_selected].path);
+  }
+  if (!DialogPending()) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+      g_done = true;
+    if (ImGui::IsKeyPressed(ImGuiKey_O))
+      OpenGame(false);
+  }
+  if (g_selected < g_first)
+    g_first = g_selected;
+  if (g_selected >= g_first + visible)
+    g_first = g_selected - visible + 1;
+
+  ImDrawList* bg = ImGui::GetBackgroundDrawList();
+  bg->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), overlay_theme::kCanvas);
+  if (!g_games->empty()) {
+    if (g_selected != g_background_selection) {
+      g_previous_background = g_background_selection;
+      g_background_selection = g_selected;
+      g_background_transition = 0;
+    }
+    g_background_transition = base::Min(
+        1.0f, g_background_transition + ImGui::GetIO().DeltaTime / 0.2f);
+    const float fade = g_background_transition * (2 - g_background_transition);
+    if (fade < 1)
+      DrawArtwork(bg, g_artwork[g_previous_background].background, ImVec2(0, 0),
+                  ImVec2(w, h), 0,
+                  IM_COL32(255, 255, 255, static_cast<int>(255 * (1 - fade))));
+    DrawArtwork(bg, g_artwork[g_background_selection].background, ImVec2(0, 0),
+                ImVec2(w, h), 0,
+                IM_COL32(255, 255, 255, static_cast<int>(255 * fade)));
+    bg->AddRectFilledMultiColor(
+        ImVec2(0, 0), ImVec2(w, h), IM_COL32(12, 13, 17, 210),
+        IM_COL32(12, 13, 17, 95), IM_COL32(12, 13, 17, 210),
+        IM_COL32(12, 13, 17, 245));
+  }
+  ImGui::SetNextWindowPos(ImVec2(0, 0));
+  ImGui::SetNextWindowSize(ImVec2(w, h));
+  ImGui::Begin("Home", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_NoBackground);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  dl->AddText(ImVec2(margin, 32), overlay_theme::kText, "Prosperity");
+  dl->AddText(ImVec2(margin + 108, 32), overlay_theme::kSecondary, "Games");
+  ImGui::SetCursorPos(ImVec2(w - margin - 256, 24));
+  ImGui::BeginDisabled(DialogPending());
+  if (ImGui::Button("Open game", ImVec2(120, 36)))
+    OpenGame(false);
+  ImGui::SameLine(0, 16);
+  if (ImGui::Button("Open folder", ImVec2(120, 36)))
+    OpenGame(true);
+  ImGui::EndDisabled();
+
+  if (missing_firmware)
+    DrawFirmwareWarning(dl, w, margin);
+
+  if (g_games->empty()) {
+    const ImVec2 tl(margin,
+                    base::Max(missing_firmware ? 196.0f : 120.0f, h * 0.30f));
+    const ImVec2 br(base::Min(w - margin, margin + 640), tl.y + 212);
+    overlay_theme::DrawPanel(dl, tl, br);
+    dl->AddText(g_heading, 32, ImVec2(tl.x + 24, tl.y + 24),
+                overlay_theme::kText, "Your next game starts here");
+    dl->AddText(ImVec2(tl.x + 24, tl.y + 80), overlay_theme::kSecondary,
+                "Open a game file or an extracted game folder.");
+    dl->AddText(ImVec2(tl.x + 24, tl.y + 104), overlay_theme::kSecondary,
+                "Games you launch will appear here with their artwork.");
+    ImGui::SetCursorPos(ImVec2(tl.x + 24, tl.y + 152));
+    if (ImGui::Button("Open a game", ImVec2(176, 40)))
+      OpenGame(false);
+  } else {
+    dl->AddText(ImVec2(margin, row_y - 28), overlay_theme::kSecondary,
+                "Recently played");
+    if (g_games->size() > visible) {
+      ImGui::SetCursorPos(ImVec2(w - margin - 84, row_y - 36));
+      ImGui::BeginDisabled(g_selected == 0 || DialogPending());
+      if (ImGui::Button("<", ImVec2(32, 28)))
+        --g_selected;
+      ImGui::EndDisabled();
+      ImGui::SameLine(0, 12);
+      ImGui::BeginDisabled(g_selected + 1 == g_games->size() ||
+                           DialogPending());
+      if (ImGui::Button(">", ImVec2(32, 28)))
+        ++g_selected;
+      ImGui::EndDisabled();
+    }
+    for (mem_size i = g_first;
+         i < base::Min(g_games->size(), g_first + visible); ++i) {
+      const auto& game = (*g_games)[i];
+      const ImVec2 tl(margin + (i - g_first) * (tile + 20), row_y);
+      const ImVec2 br(tl.x + tile, tl.y + tile);
+      dl->AddRectFilled(tl, br, overlay_theme::kRaised, 12);
+      if (g_artwork[i].icon >= 0)
+        DrawArtwork(
+            dl, g_artwork[i].icon, tl, br, 12,
+            game.available ? IM_COL32_WHITE : IM_COL32(255, 255, 255, 110));
+      else
+        dl->AddText(g_heading, 32, ImVec2(tl.x + 28, tl.y + tile * 0.35f),
+                    overlay_theme::kSecondary, game.is_ps5 ? "PS5" : "PS4");
+      const ImVec2 chip(tl.x, br.y + 10);
+      dl->AddRectFilled(chip, ImVec2(chip.x + 44, chip.y + 24),
+                        overlay_theme::kSurface, 6);
+      dl->AddText(ImVec2(chip.x + 9, chip.y + 4), overlay_theme::kText,
+                  game.is_ps5 ? "PS5" : "PS4");
+      ImGui::PushID(static_cast<int>(i));
+      ImGui::SetCursorPos(tl);
+      if (ImGui::InvisibleButton("game", ImVec2(tile, tile)))
+        g_selected = i;
+      if (!DialogPending() && ImGui::IsItemHovered() &&
+          ImGui::IsMouseDoubleClicked(0))
+        Play(game.path);
+      const bool focused = i == g_selected;
+      if (focused || ImGui::IsItemHovered())
+        dl->AddRect(ImVec2(tl.x - 4, tl.y - 4), ImVec2(br.x + 4, br.y + 4),
+                    focused ? overlay_theme::kText : overlay_theme::kMuted, 16,
+                    0, 2);
+      ImGui::PopID();
+    }
+    const auto& game = (*g_games)[g_selected];
+    const float title_y = base::Max(row_y + tile + 56, h * 0.55f);
+    const float title_size = base::Min(36.0f, w / 28);
+    const float title_width = w - margin * 2;
+    const auto size =
+        g_heading->CalcTextSizeA(title_size, title_width, 0, game.name.c_str());
+    dl->AddText(g_heading, title_size, ImVec2(margin, title_y),
+                overlay_theme::kText, game.name.c_str());
+    const auto subtitle =
+        base::String(game.is_ps5 ? "PS5" : "PS4") +
+        (game.title_id.empty() ? "" : "  /  " + game.title_id);
+    dl->AddText(ImVec2(margin, title_y + size.y + 10),
+                overlay_theme::kSecondary, subtitle.c_str());
+    ImGui::SetCursorPos(
+        ImVec2(margin, base::Min(title_y + size.y + 40, h - 80)));
+    ImGui::PushStyleColor(ImGuiCol_Button, overlay_theme::kText);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(216, 229, 255, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, overlay_theme::kAccent);
+    ImGui::PushStyleColor(ImGuiCol_Text, overlay_theme::kCanvas);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 22);
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
+    ImGui::BeginDisabled(!game.available || DialogPending());
+    if (ImGui::Button(game.available ? "Play" : "Game unavailable",
+                      ImVec2(200, 44)))
+      Play(game.path);
+    ImGui::EndDisabled();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(4);
+  }
+  dl->AddText(
+      ImVec2(margin, h - 36), overlay_theme::kSecondary,
+      "Arrow keys  Browse     Enter  Play     O  Open game     Esc  Exit");
+  if (!g_error.empty())
+    dl->AddText(ImVec2(margin, h - 64), overlay_theme::kWarning,
+                g_error.c_str());
+  ImGui::End();
+}
+
+void BeginHomeScreen(const base::Vector<HomeGame>& games,
+                     bool ps4_ready,
+                     bool ps5_ready) {
+  g_ps4_ready = ps4_ready;
+  g_ps5_ready = ps5_ready;
+  g_games = &games;
+  g_selected = g_first = 0;
+  g_background_selection = g_previous_background = 0;
+  g_background_transition = 1;
+  g_done = false;
+  g_result.clear();
+  g_error.clear();
+  OverlayEnsureImGui();
+  PrepareArtwork();
+  g_active = true;
+}
+
+bool HomeScreenDone() {
+  return g_done;
+}
+
+base::String EndHomeScreen() {
+  g_active = false;
+  g_games = nullptr;
+  g_artwork.clear();
+  ImGui::GetIO().ClearInputKeys();
+  return g_result;
+}
+
+}  // namespace ui
+#else
+namespace ui {
+void BeginHomeScreen(const base::Vector<HomeGame>&, bool, bool) {}
+bool HomeScreenDone() {
+  return true;
+}
+base::String EndHomeScreen() {
+  return {};
+}
+bool HomeScreenActive() {
+  return false;
+}
+void HomeScreenBuild(u32, u32) {}
+}  // namespace ui
+#endif

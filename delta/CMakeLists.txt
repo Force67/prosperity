@@ -21,6 +21,7 @@ endif()
 
 add_subdirectory(cpu)
 add_subdirectory(formats)
+add_subdirectory(ui)
 add_subdirectory(host)
 add_subdirectory(gpu)
 add_subdirectory(kern)

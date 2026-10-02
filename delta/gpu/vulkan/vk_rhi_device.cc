@@ -22,6 +22,7 @@
 #include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_rhi_internal.h"
 #include "profile/profile.h"
+#include "ui/shader_activity.h"
 
 namespace gpu::vk {
 
@@ -1258,6 +1259,7 @@ rhi::PipelineLayout* VulkanDevice::CreatePipelineLayout(
 rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
     const rhi::GraphicsPipelineDesc& desc) {
   DELTA_ZONE("vk.create_graphics_pipeline");
+  const ui::ShaderCompilation compilation;
   auto* layout = static_cast<VulkanPipelineLayout*>(desc.layout);
   VkDevice dev = native.device;
   VkShaderModule modules[3] = {};
@@ -1398,6 +1400,7 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
 rhi::Pipeline* VulkanDevice::CreateComputePipeline(
     const rhi::ComputePipelineDesc& desc) {
   DELTA_ZONE("vk.create_compute_pipeline");
+  const ui::ShaderCompilation compilation;
   auto* layout = static_cast<VulkanPipelineLayout*>(desc.layout);
   VkShaderModule module = MakeModule(native.device, desc.code);
   if (!module)

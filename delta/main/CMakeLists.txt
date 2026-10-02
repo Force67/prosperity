@@ -4,10 +4,12 @@
 set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/command_line.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/firmware_config.cc
+                 ${CMAKE_CURRENT_SOURCE_DIR}/recent_games.cc
+                 ${CMAKE_CURRENT_SOURCE_DIR}/home_screen.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc)
 
 set(MAIN_LIBS delta_deps delta_kern delta_runtime delta_formats
-              delta_host delta_cpu)
+              delta_host delta_ui delta_cpu)
 
 if(DELTA_ANDROID_APP)
   # NativeActivity shared lib loaded by android.app.NativeActivity. android_main
@@ -76,4 +78,8 @@ if(UNIX AND NOT APPLE)
   # Register the application/x-ps4-pkg MIME type so .pkg files open with us.
   install(FILES _res/ps4delta-pkg.xml
           DESTINATION share/mime/packages)
+endif()
+
+if(DELTA_BUILD_TESTS)
+  add_subdirectory(tests)
 endif()

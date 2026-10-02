@@ -19,9 +19,9 @@
 
 #include "base/arch.h"
 
-namespace host {
+namespace ui {
 
-// Start capturing log lines. Idempotent; OverlayEnsureImGui does it.
+// Start capturing log lines. Idempotent; called at startup.
 void OverlayLogAttach();
 
 // Draw the panel over a display of `w` by `h`. No-op while hidden or empty.
@@ -30,4 +30,4 @@ void OverlayLogBuild(u32 w, u32 h);
 // Bound to F2 by the window event pump. Visible by default.
 void OverlayLogToggle();
 
-}  // namespace host
+}  // namespace ui

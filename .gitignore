@@ -339,3 +339,6 @@ dcrun.sh
 desrun.sh
 .verify/
 build-rhi/
+
+# Local main-menu launcher
+/menurun.sh

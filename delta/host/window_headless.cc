@@ -31,6 +31,8 @@ bool CanPresent() {
   return false;
 }
 void RequestPresentStop() {}
+void RefreshFrame(bool) {}
+
 void Present(const void*, u32, u32, u32, PixelFormat) {}
 bool PumpEvents() {
   return true;

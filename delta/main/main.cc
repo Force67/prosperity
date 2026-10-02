@@ -25,11 +25,13 @@
 #include "base/threading/thread.h"
 #include "cpu/backend.h"
 #include "gpu/render/renderer.h"
-#include "host/overlay_log.h"
 #include "kern/guest_va_space.h"
 #include "main/command_line.h"
 #include "main/firmware_config.h"
+#include "main/home_screen.h"
 #include "main/launcher.h"
+#include "main/recent_games.h"
+#include "ui/overlay_log.h"
 
 static bool VerifyViability() {
 #ifdef _WIN32
@@ -149,7 +151,9 @@ int main(int argc, char** argv) {
   logger::RouteBaseLogging();
   // Before anything logs: the on-screen panel shows the tail of the log, and
   // the boot lines are the ones worth seeing before a title even presents.
-  host::OverlayLogAttach();
+#if !defined(__ANDROID__)
+  ui::OverlayLogAttach();
+#endif
   // Before anything else: every subsystem below reads its knobs from here, and
   // most latch the value the first time they run.
   base::Vector<char*> option_argv{argv[0]};
@@ -158,8 +162,16 @@ int main(int argc, char** argv) {
   int option_argc = static_cast<int>(option_argv.size());
   option_argv.push_back(nullptr);
   options::Init(option_argc, option_argv.data());
-  if (command.game.empty())
-    return 0;
+  if (command.game.empty()) {
+    if (command.dump_options || !command.configure_ps4_fw.empty() ||
+        !command.configure_ps5_fw.empty())
+      return 0;
+#if defined(__linux__) && !defined(__ANDROID__)
+    command.game = cli::ShowHomeScreen(cli::ReadRecentGames());
+#endif
+    if (command.game.empty())
+      return 0;
+  }
   // Bring the render Vulkan device up NOW, before any guest memory is mapped:
   // initialized lazily (first Gnm submit), the NVIDIA driver fails its
   // in-process setup once the guest's huge MAP_FIXED mappings exist

@@ -3,6 +3,26 @@
 Build first: [building.md](building.md). Commands below run from the repository
 root, inside `nix develop` if you built with Nix.
 
+## Home screen (Linux)
+
+Start without a game path:
+
+```bash
+./build/delta/main/ps4delta
+```
+
+Choose a recent game and press **Play**, or use **Open game** / **Open folder**.
+Each card shows a PS4 or PS5 badge from the game's metadata.
+A banner lists missing firmware modules and the setup commands to import them.
+Arrow keys browse the cards, Enter plays, O opens a file, and Esc exits.
+A controller's D-pad browses; Cross plays, Triangle opens, and Circle exits.
+Game paths on the command line still boot directly.
+
+The last 12 launches, titles, and artwork are saved in
+`~/.local/share/prosperity/recent-games` and `covers/` (under
+`$XDG_DATA_HOME/prosperity/` when set). Games at missing paths stay visible but
+cannot be played. Native file pickers use the desktop's XDG portal.
+
 ## Import firmware modules once
 
 Use a separate setup switch for each console:

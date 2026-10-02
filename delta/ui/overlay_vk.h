@@ -14,7 +14,7 @@
 #include <vulkan/vulkan.h>
 #include "base/containers/vector.h"
 
-namespace host {
+namespace ui {
 
 bool OverlayVkInit(VkPhysicalDevice phys,
                    VkDevice device,
@@ -33,4 +33,4 @@ bool OverlayVkRender(VkCommandBuffer cmd, u32 image_index);
 void OverlayVkShutdown();
 bool OverlayVkReady();
 
-}  // namespace host
+}  // namespace ui

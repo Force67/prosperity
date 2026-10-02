@@ -20,6 +20,7 @@
 #include "base/threading/mutex.h"
 #include "base/time/time.h"
 #include "gpu/opengl/gl_rhi_internal.h"
+#include "ui/shader_activity.h"
 
 namespace gpu::opengl {
 
@@ -771,6 +772,7 @@ rhi::Pipeline* GlDevice::BuildPipeline(
     u32 count,
     const rhi::GraphicsPipelineDesc* graphics,
     GlPipeline* raw) {
+  const ui::ShaderCompilation compilation;
   base::UniquePointer<GlPipeline> pipeline(raw);
   base::Vector<const rhi::BindGroupLayoutDesc*> groups;
   for (rhi::BindGroupLayout* g : layout.groups)

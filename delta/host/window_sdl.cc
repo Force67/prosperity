@@ -21,8 +21,6 @@
 #include "base/arch.h"
 
 #if defined(__linux__)
-#define STBI_ONLY_PNG
-#define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
 #include "prosperity_logo.h"
@@ -40,15 +38,16 @@
 #include "base/containers/array.h"
 #include "base/containers/vector.h"
 #include "base/math/value_bounds.h"
+#include "base/memory/mem_ops.h"
 #include "base/memory/move.h"
+#include "base/strings/xstring.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
-#include "base/strings/xstring.h"
-#include "host/overlay.h"
-#include "host/overlay_log.h"
-#include "host/overlay_vk.h"
 #include "options/options.h"
+#include "ui/input_sdl.h"
+#include "ui/overlay.h"
+#include "ui/overlay_vk.h"
 
 namespace {
 DELTA_OPTION(bool, kVkValidate, "DELTA_VK_VALIDATE", false);
@@ -112,6 +111,7 @@ struct State {
   // here for one whole swapchain generation before being destroyed.
   base::Vector<VkSemaphore> retired_render_sems;
   u32 next_slot = 0;
+  u32 last_frame_slot = kFrameSlotCount;
 
   // Framebuffer dimensions shared by the per-slot upload resources.
   u32 fb_w = 0, fb_h = 0;
@@ -414,7 +414,7 @@ bool CreateSwapchain() {
   auto discard_retired_swapchain = [&] {
     if (!old_swapchain)
       return;
-    OverlayVkSetSwapchain({}, {}, chosen.format);
+    ui::OverlayVkSetSwapchain({}, {}, chosen.format);
     RetireRenderSemaphores();
     vkDestroySwapchainKHR(g_window.device, old_swapchain, nullptr);
     g_window.swapchain = VK_NULL_HANDLE;
@@ -444,7 +444,7 @@ bool CreateSwapchain() {
 
   // This destroys framebuffers and views for the old images before their
   // swapchain is destroyed, then creates attachments for the replacement.
-  OverlayVkSetSwapchain(new_images, ext, chosen.format);  // no-op pre-init
+  ui::OverlayVkSetSwapchain(new_images, ext, chosen.format);  // no-op pre-init
   RetireRenderSemaphores();
   if (g_window.swapchain)
     vkDestroySwapchainKHR(g_window.device, g_window.swapchain, nullptr);
@@ -530,6 +530,7 @@ bool EnsureFrameResources(u32 w, u32 h, VkFormat fmt) {
   vkDeviceWaitIdle(g_window.device);
   for (FrameSlot& slot : g_window.slots)
     DestroyFrameResources(slot);
+  g_window.last_frame_slot = kFrameSlotCount;
   g_window.fb_w = w;
   g_window.fb_h = h;
   g_window.fb_format = fmt;
@@ -736,10 +737,11 @@ bool Init(const char* title, u32 width, u32 height) {
     return false;
   BASE_LOGI("gfx", "swapchain {}x{}, {} images", g_window.swap_extent.width,
             g_window.swap_extent.height, (u32)g_window.swap_images.size());
-  OverlayVkInit(g_window.phys, g_window.device, g_window.queue,
-                g_window.queue_family, g_window.cmd_pool, g_window.swap_format);
-  OverlayVkSetSwapchain(g_window.swap_images, g_window.swap_extent,
-                        g_window.swap_format);
+  ui::OverlayVkInit(g_window.phys, g_window.device, g_window.queue,
+                    g_window.queue_family, g_window.cmd_pool,
+                    g_window.swap_format);
+  ui::OverlayVkSetSwapchain(g_window.swap_images, g_window.swap_extent,
+                            g_window.swap_format);
   return true;
 }
 
@@ -766,10 +768,14 @@ void QueryVram(u64& used, u64& total) {
     }
 }
 
-void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
-  StopSplash();
+static void PresentFrame(const void* pixels,
+                         u32 w,
+                         u32 h,
+                         u32 src_pitch,
+                         PixelFormat fmt,
+                         bool frame_stalled) {
   if (!g_can_present.load(base::memory_order_acquire) || !g_window.device ||
-      !pixels || !w || !h)
+      !w || !h || (!pixels && g_window.last_frame_slot == kFrameSlotCount))
     return;
   if (g_window.need_recreate && !CreateSwapchain())
     return;
@@ -777,7 +783,7 @@ void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
     src_pitch = w * 4;
   VkFormat vkfmt = (fmt == PixelFormat::kBgra8) ? VK_FORMAT_B8G8R8A8_UNORM
                                                 : VK_FORMAT_R8G8B8A8_UNORM;
-  if (!EnsureFrameResources(w, h, vkfmt))
+  if (pixels && !EnsureFrameResources(w, h, vkfmt))
     return;
 
   FrameSlot& slot = g_window.slots[g_window.next_slot];
@@ -787,10 +793,13 @@ void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
     return;
 
   // Upload rows into the staging buffer (tightly packed w*4).
-  auto* dst = static_cast<u8*>(slot.staging_map);
-  auto* src = static_cast<const u8*>(pixels);
-  for (u32 y = 0; y < h; y++)
-    std::memcpy(dst + (size_t)y * w * 4, src + (size_t)y * src_pitch, w * 4);
+  if (pixels) {
+    auto* dst = static_cast<u8*>(slot.staging_map);
+    auto* src = static_cast<const u8*>(pixels);
+    for (u32 y = 0; y < h; y++)
+      base::MemCopy(dst + (size_t)y * w * 4, src + (size_t)y * src_pitch,
+                    w * 4);
+  }
 
   u32 idx = 0;
   VkResult result = vkResetFences(g_window.device, 1, &slot.acquire_fence);
@@ -821,8 +830,8 @@ void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
 
   u64 vram_used = 0, vram_total = 0;
   QueryVram(vram_used, vram_total);
-  OverlayBuildFrame(g_window.swap_extent.width, g_window.swap_extent.height,
-                    vram_used, vram_total);
+  ui::OverlayBuildFrame(g_window.swap_extent.width, g_window.swap_extent.height,
+                        vram_used, vram_total, frame_stalled);
 
   result = vkResetCommandBuffer(slot.cmd, 0);
   if (result != VK_SUCCESS) {
@@ -837,22 +846,26 @@ void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
     return;
   }
 
-  // staging buffer -> frame image (TRANSFER_DST)
-  ImageBarrier(slot.cmd, slot.frame_img, VK_IMAGE_LAYOUT_UNDEFINED,
-               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
-               VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-               VK_PIPELINE_STAGE_TRANSFER_BIT);
-  VkBufferImageCopy cp{};
-  cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  cp.imageExtent = {w, h, 1};
-  vkCmdCopyBufferToImage(slot.cmd, slot.staging, slot.frame_img,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
-
-  // frame image -> TRANSFER_SRC ; swapchain image -> TRANSFER_DST
-  ImageBarrier(slot.cmd, slot.frame_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-               VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+  const VkImage frame_image =
+      pixels ? slot.frame_img
+             : g_window.slots[g_window.last_frame_slot].frame_img;
+  if (pixels) {
+    ImageBarrier(slot.cmd, frame_image, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkBufferImageCopy cp{};
+    cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.imageExtent = {w, h, 1};
+    vkCmdCopyBufferToImage(slot.cmd, slot.staging, frame_image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+    ImageBarrier(slot.cmd, frame_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+  }
   ImageBarrier(slot.cmd, g_window.swap_images[idx], VK_IMAGE_LAYOUT_UNDEFINED,
                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -864,14 +877,14 @@ void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
   blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   blit.dstOffsets[1] = {(i32)g_window.swap_extent.width,
                         (i32)g_window.swap_extent.height, 1};
-  vkCmdBlitImage(slot.cmd, slot.frame_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+  vkCmdBlitImage(slot.cmd, frame_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  g_window.swap_images[idx],
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                  VK_FILTER_LINEAR);
 
   // The overlay's LOAD render pass draws over the blitted frame and transitions
   // the image to PRESENT_SRC; without it, do that transition directly.
-  if (!OverlayVkRender(slot.cmd, idx))
+  if (!ui::OverlayVkRender(slot.cmd, idx))
     ImageBarrier(slot.cmd, g_window.swap_images[idx],
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -902,6 +915,8 @@ void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
     StopPresenting("vkQueueSubmit", result);
     return;
   }
+  if (pixels)
+    g_window.last_frame_slot = g_window.next_slot;
   g_window.next_slot = (g_window.next_slot + 1) % kFrameSlotCount;
 
   VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -915,6 +930,17 @@ void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
     g_window.need_recreate = true;
   else if (pr != VK_SUCCESS)
     StopPresenting("vkQueuePresentKHR", pr);
+}
+
+void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
+  StopSplash();
+  if (pixels)
+    PresentFrame(pixels, w, h, src_pitch, fmt, false);
+}
+
+void RefreshFrame(bool frame_stalled) {
+  PresentFrame(nullptr, g_window.fb_w, g_window.fb_h, 0, PixelFormat::kRgba8,
+               frame_stalled);
 }
 
 void SetTitle(const char* title) {
@@ -949,13 +975,14 @@ void ShowSplash(base::Vector<u8> png) {
     if (pixels && Init("prosperity", 1920, 1080)) {
       BASE_LOGI("gfx", "splash {}x{} until the first frame", w, h);
       bool shown = false;
-      while (g_splash.load(base::memory_order_acquire) == 1 &&
-             CanPresent()) {
+      while (g_splash.load(base::memory_order_acquire) == 1 && CanPresent()) {
         // Again after a resize: the swapchain was rebuilt without it.
         if (!shown || g_window.need_recreate) {
           Present(pixels, static_cast<u32>(w), static_cast<u32>(h), 0,
                   PixelFormat::kRgba8);
           shown = true;
+        } else {
+          RefreshFrame(false);
         }
         PumpEvents();
         base::SleepForMicroseconds(16667);
@@ -1009,12 +1036,8 @@ bool PumpEvents() {
     if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
         e.type == SDL_EVENT_WINDOW_RESIZED)
       g_window.need_recreate = true;
-    if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
-        e.key.scancode == SDL_SCANCODE_F1)
-      OverlayToggle();
-    if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
-        e.key.scancode == SDL_SCANCODE_F2)
-      OverlayLogToggle();
+    ui::ProcessEvent(e, g_window.window, g_window.swap_extent.width,
+                     g_window.swap_extent.height);
     if (e.type == SDL_EVENT_GAMEPAD_ADDED && !g_window.gamepad)
       g_window.gamepad = SDL_OpenGamepad(e.gdevice.which);
     if (e.type == SDL_EVENT_GAMEPAD_REMOVED && g_window.gamepad &&
@@ -1120,7 +1143,8 @@ void SetRumble(u8 large_motor, u8 small_motor) {
 void Shutdown() {
   if (g_window.device)
     vkDeviceWaitIdle(g_window.device);
-  OverlayVkShutdown();
+  ui::OverlayVkShutdown();
+  ui::OverlayShutdownImGui();
   for (FrameSlot& slot : g_window.slots) {
     DestroyFrameResources(slot);
     if (slot.fence)

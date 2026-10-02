@@ -32,6 +32,9 @@
 #include "kern/vm_map.h"
 #include "logger/logger.h"
 #include "options/options.h"
+#if defined(__linux__) && !defined(__ANDROID__)
+#include "main/recent_games.h"
+#endif
 
 namespace {
 
@@ -198,16 +201,27 @@ void SetWindowTitle(const BootTitle& title) {
 }
 
 #if defined(__linux__) && !defined(__ANDROID__)
-void SetWindowArtwork(const BootTitle& title) {
+void SetWindowArtwork(const BootTitle& title, const base::String& path) {
   if (!title.icon.empty())
     host::SetIcon(title.icon.data(), title.icon.size());
-
-  io::File art = kern::vfs::OpenRead("/app0/sce_sys/pic0.png");
-  if (!art.Exists() || !art.IsOpen() || art.GetSize() == 0 ||
-      art.GetSize() > kMaxImageSize)
-    return;
-  base::Vector<u8> png(art.GetSize());
-  if (art.Read(png.data(), png.size()) == png.size())
+  base::Vector<u8> png;
+  for (const char* filename : {"pic0.png", "pic1.png"}) {
+    const auto relative = base::String("/sce_sys/") + filename;
+    io::File art =
+        title.mounted
+            ? kern::vfs::OpenRead(("/app0" + relative).c_str())
+            : io::File(ParentPath(path) + relative, io::FileMode::kRead);
+    if (!art.Exists() || !art.IsOpen() || art.GetSize() == 0 ||
+        art.GetSize() > kMaxImageSize)
+      continue;
+    png.resize(art.GetSize());
+    if (art.Read(png.data(), png.size()) == png.size())
+      break;
+    png.clear();
+  }
+  cli::RememberGame(path, title.name, title.title_id, title.is_ps5, title.icon,
+                    png);
+  if (!png.empty())
     host::ShowSplash(base::move(png));
 }
 #endif
@@ -269,7 +283,7 @@ void Launcher::Boot(const base::String& game_path) {
   gpu::ps4::SetPs4NeoMode(!title.is_ps5 && kern::ps4::IsNeoMode());
   SetWindowTitle(title);
 #if defined(__linux__) && !defined(__ANDROID__)
-  SetWindowArtwork(title);
+  SetWindowArtwork(title, path);
 #endif
   StartGuest(base::move(title));
 }

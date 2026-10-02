@@ -11,21 +11,18 @@
 #include "base/arch.h"
 
 #include "base/math/value_bounds.h"
-#include "base/threading/lock_guard.h"
-#include "base/threading/mutex.h"
-#include "host/overlay.h"
-#include "host/overlay_log.h"
-#include "host/overlay_theme.h"
 #include "imgui.h"
+#include "ui/home_screen.h"
+#include "ui/overlay.h"
+#include "ui/overlay_busy.h"
+#include "ui/overlay_log.h"
+#include "ui/overlay_theme.h"
 
-namespace host {
+namespace ui {
 namespace {
 
 bool g_visible = true;
 bool g_inited = false;
-
-base::Mutex g_perf_mtx;
-float g_fps = 0, g_gpu_ms = 0, g_frame_ms = 0;
 
 struct Row {
   const char *key, *button;
@@ -44,7 +41,7 @@ const Row kRows[] = {
     {"Enter / P", "Options  (start)"},
     {"Tab", "Touchpad  (map)"},
 };
-const char* kTitle = "CONTROLS";
+const char* kTitle = "Controls";
 
 void BuildLegend() {
   ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -71,7 +68,7 @@ void BuildLegend() {
   ImFont* mono = overlay_theme::MonospaceFont();
   const float shortcut_w = mono->CalcTextSizeA(13, FLT_MAX, 0, "[F1]").x;
   dl->AddText(mono, 13.0f, ImVec2(o.x + panel_w - pad - shortcut_w, y + 1),
-              overlay_theme::kAmber, "[F1]");
+              overlay_theme::kMuted, "[F1]");
   const float separator_y = y + lh;
   dl->AddLine(ImVec2(x, separator_y), ImVec2(o.x + panel_w - pad, separator_y),
               overlay_theme::kBorder);
@@ -81,7 +78,7 @@ void BuildLegend() {
               ImVec2(column_x, y + lh * IM_ARRAYSIZE(kRows) - 6),
               overlay_theme::kBorder);
   for (const auto& row : kRows) {
-    dl->AddText(ImVec2(x, y), overlay_theme::kCyan, row.key);
+    dl->AddText(ImVec2(x, y), overlay_theme::kText, row.key);
     dl->AddText(ImVec2(x + key_w + gap, y), overlay_theme::kSecondary,
                 row.button);
     y += lh;
@@ -102,22 +99,30 @@ void OverlayEnsureImGui() {
   g_inited = true;
 }
 
-void OverlaySetPerf(float fps, float gpu_ms, float frame_ms) {
-  base::LockGuard<base::Mutex> lk(g_perf_mtx);
-  g_fps = fps;
-  g_gpu_ms = gpu_ms;
-  g_frame_ms = frame_ms;
+void OverlayShutdownImGui() {
+  if (g_inited)
+    ImGui::DestroyContext();
+  g_inited = false;
 }
 
-void OverlayBuildFrame(u32 w, u32 h, u64 vram_used, u64 vram_total) {
+void OverlayBuildFrame(u32 w,
+                       u32 h,
+                       u64 vram_used,
+                       u64 vram_total,
+                       bool frame_stalled) {
   OverlayEnsureImGui();
   ImGuiIO& io = ImGui::GetIO();
   io.DisplaySize = ImVec2((float)w, (float)h);
   io.DeltaTime = 1.0f / 60.0f;
   ImGui::NewFrame();
-  if (g_visible)
-    BuildLegend();
-  OverlayLogBuild(w, h);
+  if (HomeScreenActive()) {
+    HomeScreenBuild(w, h);
+  } else {
+    if (g_visible)
+      BuildLegend();
+    OverlayLogBuild(w, h);
+    OverlayBusyBuild(w, h, frame_stalled);
+  }
   ImGui::Render();
 }
 
@@ -125,4 +130,4 @@ void OverlayToggle() {
   g_visible = !g_visible;
 }
 
-}  // namespace host
+}  // namespace ui

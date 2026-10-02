@@ -66,6 +66,10 @@ void Present(const void* pixels,
              u32 src_pitch = 0,
              PixelFormat fmt = PixelFormat::kRgba8);
 
+// Redraw the last uploaded frame with updated overlays, without a CPU upload.
+// Desktop only. Call on the same thread as Present.
+void RefreshFrame(bool frame_stalled);
+
 // Drain window events. Returns false once the user asks to close the window.
 bool PumpEvents();
 
