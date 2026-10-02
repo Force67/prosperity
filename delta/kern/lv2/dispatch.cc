@@ -25,6 +25,7 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
+#include "cpu/backend.h"
 #include "kern/crash.h"
 #include "kern/lv2/dispatch.h"
 #include "kern/module.h"
@@ -208,7 +209,7 @@ static const ___tracy_source_location_data* SyscallZoneLocation(u32 sid) {
   const char* name = SyscallGetname(sid);
   static const char* const kTooHot[] = {"sys_gettimeofday", "sys_clock_gettime",
                                         "sys_clock_getres", "sys_sched_yield",
-                                        "sys_thr_self", "sys_getpid"};
+                                        "sys_thr_self",     "sys_getpid"};
   for (const char* hot : kTooHot)
     if (name && std::strcmp(name, hot) == 0)
       return nullptr;
@@ -328,8 +329,8 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
       ret();
     }
   };
-  auto* gen = new BsdRet(reinterpret_cast<uintptr_t>(handler), sid, trace,
-                         count, own_stack, zone);
+  auto* gen = new BsdRet(cpu::MakeSyscallPauseThunk(handler), sid, trace, count,
+                         own_stack, zone);
   return reinterpret_cast<uintptr_t>(gen->getCode());
 }
 #endif  // DELTA_BACKEND_NATIVE
@@ -360,8 +361,7 @@ uintptr_t Lv2Trampoline(const void* handler, u32 sid) {
   if (sid != 1 && sid != 431)
     zone = SyscallZoneLocation(sid);
 #endif
-  uintptr_t tr =
-      EmitBsdTrampoline(handler, sid, kScerrTrace, g_sc_hist, zone);
+  uintptr_t tr = EmitBsdTrampoline(handler, sid, kScerrTrace, g_sc_hist, zone);
   tr_cache.emplace(key, tr);
   return tr;
 #else

@@ -11,6 +11,7 @@
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
 #include "guest_abi.h"
+#include "guest/pause.h"
 #include "logger/logger.h"
 
 #include <sys/mman.h>
@@ -479,6 +480,14 @@ class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
 
   u64 HandleSyscall(FEXCore::Core::CpuStateFrame* frame,
                     FEXCore::HLE::SyscallArguments* args) override {
+    guest::PausePoint();
+    const u64 result = DispatchSyscall(frame, args);
+    guest::PausePoint();
+    return result;
+  }
+
+  u64 DispatchSyscall(FEXCore::Core::CpuStateFrame* frame,
+                      FEXCore::HLE::SyscallArguments* args) {
     // Args->Argument[0] = syscall number (RAX); [1..6] = RDI,RSI,RDX,R10,R8,R9.
     const u32 num = static_cast<u32>(args->Argument[0]);
 
@@ -768,6 +777,10 @@ class FexBackend final : public Backend {
   void RunGuestThread(void* handle) override {
     auto* h = static_cast<FexThread*>(handle);
     t_cur_thread = h->thread;
+    guest::ThreadRegistration registration([](uintptr_t pc) {
+      return g_ctx_ptr && t_cur_thread &&
+             g_ctx_ptr->IsAddressInCodeBuffer(t_cur_thread, pc);
+    });
     kern::InstallSigAltStack();  // fatal handler must survive a blown guest
                                  // stack
     // Re-assert the fatal handler: FEXCore init may have registered its own

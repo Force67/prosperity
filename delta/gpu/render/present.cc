@@ -7,6 +7,7 @@
 
 #include "gpu/gpu_perf.h"
 #include "host/window.h"
+#include "ui/pause_menu.h"
 
 #include "base/containers/vector.h"
 #include "base/memory/move.h"
@@ -43,8 +44,8 @@ void LatestFramePresenter::Run() {
     if (!pending_) {
       lock.unlock();
       if (last_frame_ns && host::PumpEvents() &&
-          NowNs() - last_frame_ns >= 150'000'000)
-        host::RefreshFrame(true);
+          (ui::PauseMenuVisible() || NowNs() - last_frame_ns >= 150'000'000))
+        host::RefreshFrame(!ui::PauseMenuVisible());
       lock.lock();
       continue;
     }

@@ -44,11 +44,14 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
+#include "guest/pause.h"
+#include "host/audio_output.h"
 #include "options/options.h"
 #include "ui/home_screen.h"
 #include "ui/input_sdl.h"
 #include "ui/overlay.h"
 #include "ui/overlay_vk.h"
+#include "ui/pause_menu.h"
 
 namespace {
 DELTA_OPTION(bool, kVkValidate, "DELTA_VK_VALIDATE", false);
@@ -127,6 +130,7 @@ struct State {
 
 State g_window;
 base::Atomic<bool> g_can_present{true};
+base::Atomic<bool> g_suppress_pad{false};
 // The splash thread and the videoout HLE may both bring the window up.
 base::Mutex g_init_mutex;
 // 0: no splash, 1: the splash thread owns the window, 2: asked to hand it over.
@@ -935,8 +939,14 @@ static void PresentFrame(const void* pixels,
 
 void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
   StopSplash();
-  if (pixels && !t_splash_thread && !ui::HomeScreenActive())
+  if (pixels && !t_splash_thread && !ui::HomeScreenActive()) {
     ui::LaunchTransitionGameReady();
+    ui::PauseMenuGameReady();
+  }
+  if (guest::Paused()) {
+    RefreshFrame(false);
+    return;
+  }
   if (pixels)
     PresentFrame(pixels, w, h, src_pitch, fmt, false);
 }
@@ -1032,7 +1042,7 @@ bool Ensure(const char* title, u32 width, u32 height) {
   return true;
 }
 
-bool PumpEvents() {
+static bool DrainEvents() {
   StopSplash();
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
@@ -1056,17 +1066,52 @@ bool PumpEvents() {
   return true;
 }
 
+bool PumpEvents() {
+  bool alive = DrainEvents();
+  SetAudioPaused(guest::Paused());
+  if (guest::Paused())
+    g_suppress_pad.store(true);
+  if (guest::OnGuestThread()) {
+    while (alive && guest::Paused()) {
+      RefreshFrame(false);
+      base::SleepForMilliseconds(16);
+      alive = DrainEvents();
+      SetAudioPaused(guest::Paused());
+    }
+  }
+  if (!alive)
+    guest::SetPaused(false);
+  return alive;
+}
+
 // Keyboard->DS4 adapter, laid out for two-handed keyboard play: the left hand
 // moves (WASD) and works the action keys, the right hand aims (arrow keys).
 // Both hands reach a shoulder pair via the Shift keys. Keep this in sync with
 // the on-screen legend (overlay.cc).
 bool PollKeyboardPad(PadKeys& out) {
+  if (guest::Paused()) {
+    out = {};
+    return true;
+  }
   if (!g_window.window)
     return false;
   const bool* k = SDL_GetKeyboardState(nullptr);
   if (!k)
     return false;
   auto down = [&](SDL_Scancode s) { return k[s]; };
+  if (g_suppress_pad.load()) {
+    const bool held =
+        down(SDL_SCANCODE_LCTRL) || down(SDL_SCANCODE_RCTRL) ||
+        down(SDL_SCANCODE_RETURN) || down(SDL_SCANCODE_ESCAPE) ||
+        (g_window.gamepad &&
+         (SDL_GetGamepadButton(g_window.gamepad, SDL_GAMEPAD_BUTTON_SOUTH) ||
+          SDL_GetGamepadButton(g_window.gamepad, SDL_GAMEPAD_BUTTON_EAST)));
+    if (held) {
+      out = {};
+      return true;
+    }
+    g_suppress_pad.store(false);
+  }
 
   // Movement on the left stick (and the d-pad, for menus).
   out.left = down(SDL_SCANCODE_A);
@@ -1148,6 +1193,9 @@ void SetRumble(u8 large_motor, u8 small_motor) {
 }
 
 void Shutdown() {
+  guest::SetPaused(false);
+  g_suppress_pad.store(false);
+  SetAudioPaused(false);
   StopSplash();
   if (g_window.device)
     vkDeviceWaitIdle(g_window.device);

@@ -37,6 +37,7 @@ struct Port {
 base::Mutex g_mtx;
 base::Vector<Port> g_ports;
 bool g_init = false;
+bool g_paused = false;
 u64 g_frames_out = 0;
 
 }  // namespace
@@ -60,7 +61,8 @@ int OpenAudioPort(u32 freq, u32 channels, int is_float) {
     BASE_LOGI("audio", "open stream failed: {}", SDL_GetError());
     return -1;
   }
-  SDL_ResumeAudioStreamDevice(s);
+  if (!g_paused)
+    SDL_ResumeAudioStreamDevice(s);
   Port p;
   p.stream = s;
   p.channels = channels;
@@ -211,6 +213,21 @@ void CloseAudioPort(int handle) {
   if (g_ports[handle].stream) {
     SDL_DestroyAudioStream(g_ports[handle].stream);
     g_ports[handle].stream = nullptr;
+  }
+}
+
+void SetAudioPaused(bool paused) {
+  base::LockGuard<base::Mutex> lock(g_mtx);
+  if (g_paused == paused)
+    return;
+  g_paused = paused;
+  for (const auto& port : g_ports) {
+    if (!port.stream)
+      continue;
+    if (paused)
+      SDL_PauseAudioStreamDevice(port.stream);
+    else
+      SDL_ResumeAudioStreamDevice(port.stream);
   }
 }
 

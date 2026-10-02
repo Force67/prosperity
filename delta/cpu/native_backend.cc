@@ -11,8 +11,10 @@
 #include "base/arch.h"
 #include "base/containers/vector.h"
 #include "cpu/backend.h"
+#include "guest/pause.h"
 #include "guest_abi.h"
 #include "kern/crash.h"
+#include "kern/module.h"
 
 namespace cpu {
 
@@ -56,9 +58,11 @@ static thread_local std::jmp_buf* t_exit_jmp = nullptr;
 
 class NativeBackend final : public Backend {
  public:
-  void OnImageMapped(kern::ModuleInfo&) override {
-    // Nothing to do: the loader runs the lifter inline (runtime/code_lift),
-    // rewriting syscall/int/fs in the executable segment in place.
+  void OnImageMapped(kern::ModuleInfo& info) override {
+    guest::RegisterCode(reinterpret_cast<uintptr_t>(info.text_seg.addr),
+                        info.text_seg.size);
+    guest::RegisterCode(reinterpret_cast<uintptr_t>(info.rip_zone),
+                        info.rip_zone_size);
   }
 
   // Native execution shares the host CPU, so there's no guest CPU state to
@@ -79,6 +83,7 @@ class NativeBackend final : public Backend {
     // (and dumps the guest RIP) when the guest blows or corrupts its own RSP;
     // otherwise the kernel can't deliver SIGSEGV and silently core-dumps.
     kern::InstallSigAltStack();
+    guest::ThreadRegistration registration;
     SetThreadFsBase(t->fsbase);
     auto entry = t->entry;
     auto arg = t->arg;
@@ -93,7 +98,7 @@ class NativeBackend final : public Backend {
   }
 
   u64 RunGuestFunction(uintptr_t fn, u64 a0, u64 a1, u64 a2, u64 a3) override {
-    // Guest code runs natively on x86-64: a direct function-pointer call.
+    guest::ThreadRegistration registration;
     return reinterpret_cast<u64(PS4ABI*)(u64, u64, u64, u64)>(fn)(a0, a1, a2,
                                                                   a3);
   }
@@ -106,11 +111,7 @@ void ExitGuestThread() {
     std::longjmp(*t_exit_jmp, 1);
 }
 
-// Native host is x86-64: the guest can call the host function directly.
-uintptr_t MakeHostThunk(void* host_fn, const char* /*name*/) {
-  return reinterpret_cast<uintptr_t>(host_fn);
-}
-// No trampoline pool on native: an HLE import IS the host function pointer.
+// Native pause thunks do not carry export names.
 const char* HostThunkNameForAddr(uintptr_t, u32*) {
   return nullptr;
 }

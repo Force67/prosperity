@@ -14,4 +14,5 @@ int QueueAudio(int, const void*, u32 frames) {
 void SetAudioPortVolume(int, float) {}
 void CloseAudioPort(int) {}
 
+void SetAudioPaused(bool) {}
 }  // namespace host

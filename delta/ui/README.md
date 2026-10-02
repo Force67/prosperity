@@ -5,6 +5,7 @@ Desktop ImGui menus and overlays. Namespace `ui`.
 | Unit | Purpose |
 |---|---|
 | `home_screen.h` | Recent games, artwork, PS4/PS5 chips, native file pickers |
+| `pause_menu.h` | Guest pause, Resume, and keyboard controls |
 | `overlay.h` | ImGui context, frame building, controls legend |
 | `overlay_theme.h` | Palette, fonts, widget style, rounded panels |
 | `overlay_log.h` | Live log capture and panel |
@@ -23,12 +24,20 @@ stays visible with a loading indicator and a gentle artwork zoom during startup,
 then fades into the first game frame over 550 ms. The same window stays open.
 
 Rounded charcoal panels, white text, and blue focus highlights follow the PS5
-menu style. Logs use a monospace font.
+menu style. Covers ease into a soft focus halo; titles reveal as you browse.
+Keyboard hints use compact keycaps. Logs use a monospace font.
+
+On Linux, press either **Ctrl** key during gameplay to pause guest execution
+and audio. The last game frame stays behind an animated panel. Choose **Resume
+game**, or press **Ctrl** or **Esc**, to continue. **Controls** shows the keyboard
+mapping. Arrow keys and Enter navigate the menu; mouse input works too.
+**Exit emulator** closes the application from the pause menu.
+Pause becomes available after the first game frame.
 
 The toast reports slow shader translation, optimization, and pipeline builds.
 A 150 ms gap between game frames shows "Frame busy". The async presenter redraws
 the last GPU image while waiting. `DELTA_GPU_SYNCPRESENT=1` updates the UI only
-when the game presents a frame.
+when the game presents a frame. The pause menu keeps rendering in either mode.
 
 Android builds only the compiler activity tracker. The Android app uses its
 own touch controls.

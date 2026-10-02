@@ -746,7 +746,7 @@ bool Module::MapImage() {
     }
   }
 
-  // Tell the backend the image is in place: native no-op (lifting done above),
+  // Tell the backend the image is in place: native tracks pause-safe ranges,
   // FEX registers [base, base+codeSize) as an executable range for the JIT.
   cpu::GetBackend().OnImageMapped(info_);
 

@@ -32,6 +32,7 @@
 #include "kern/vm_map.h"
 #include "logger/logger.h"
 #include "options/options.h"
+#include "ui/pause_menu.h"
 #if defined(__linux__) && !defined(__ANDROID__)
 #include "main/recent_games.h"
 #endif
@@ -198,6 +199,7 @@ void SetWindowTitle(const BootTitle& title) {
                    title.is_ps5 ? "PS5" : "PS4");
   LOG_INFO("window title: {}", window_title.c_str());
   host::SetTitle(window_title.c_str());
+  ui::PauseMenuSetGameTitle(title.name);
 }
 
 #if defined(__linux__) && !defined(__ANDROID__)

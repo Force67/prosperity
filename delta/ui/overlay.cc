@@ -17,6 +17,7 @@
 #include "ui/overlay_busy.h"
 #include "ui/overlay_log.h"
 #include "ui/overlay_theme.h"
+#include "ui/pause_menu.h"
 
 namespace ui {
 namespace {
@@ -100,6 +101,7 @@ void OverlayEnsureImGui() {
 }
 
 void OverlayShutdownImGui() {
+  PauseMenuReset();
   if (g_inited)
     ImGui::DestroyContext();
   g_inited = false;
@@ -117,6 +119,8 @@ void OverlayBuildFrame(u32 w,
   ImGui::NewFrame();
   if (HomeScreenActive()) {
     HomeScreenBuild(w, h);
+  } else if (PauseMenuVisible()) {
+    PauseMenuBuild(w, h);
   } else {
     if (LaunchTransitionActive()) {
       LaunchTransitionBuild(w, h);

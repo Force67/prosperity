@@ -15,6 +15,7 @@
 
 #if defined(__linux__)
 #include <sys/prctl.h>
+#include <unistd.h>
 #endif
 
 #ifdef _WIN32
@@ -32,6 +33,7 @@
 #include "main/launcher.h"
 #include "main/recent_games.h"
 #include "ui/overlay_log.h"
+#include "ui/pause_menu.h"
 
 static bool VerifyViability() {
 #ifdef _WIN32
@@ -204,9 +206,13 @@ int main(int argc, char** argv) {
   }
   core.Boot(base::String(command.game.c_str()));
 
-  // Block forever; proc runs on a detached thread.
+  // Guest threads are detached, so exit without destroying their live state.
   for (;;) {
-    base::SleepForMilliseconds((1) * 1000);
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (ui::PauseMenuExitRequested())
+      ::_exit(0);
+#endif
+    base::SleepForMilliseconds(50);
   }
 
   return 0;

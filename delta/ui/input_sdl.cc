@@ -6,6 +6,7 @@
 #include "ui/home_screen.h"
 #include "ui/overlay.h"
 #include "ui/overlay_log.h"
+#include "ui/pause_menu.h"
 
 namespace ui {
 
@@ -13,7 +14,13 @@ void ProcessEvent(const SDL_Event& e,
                   SDL_Window* window,
                   u32 framebuffer_width,
                   u32 framebuffer_height) {
-  if (!HomeScreenActive()) {
+  if (!HomeScreenActive() && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+      (e.key.scancode == SDL_SCANCODE_LCTRL ||
+       e.key.scancode == SDL_SCANCODE_RCTRL)) {
+    PauseMenuToggle();
+    return;
+  }
+  if (!HomeScreenActive() && !PauseMenuVisible()) {
     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
       if (e.key.scancode == SDL_SCANCODE_F1)
         OverlayToggle();
@@ -40,6 +47,12 @@ void ProcessEvent(const SDL_Event& e,
   if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) {
     ImGuiKey key = ImGuiKey_None;
     switch (e.key.scancode) {
+      case SDL_SCANCODE_UP:
+        key = ImGuiKey_UpArrow;
+        break;
+      case SDL_SCANCODE_DOWN:
+        key = ImGuiKey_DownArrow;
+        break;
       case SDL_SCANCODE_LEFT:
         key = ImGuiKey_LeftArrow;
         break;
@@ -68,6 +81,12 @@ void ProcessEvent(const SDL_Event& e,
       e.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
     ImGuiKey key = ImGuiKey_None;
     switch (e.gbutton.button) {
+      case SDL_GAMEPAD_BUTTON_DPAD_UP:
+        key = ImGuiKey_UpArrow;
+        break;
+      case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
+        key = ImGuiKey_DownArrow;
+        break;
       case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
         key = ImGuiKey_LeftArrow;
         break;

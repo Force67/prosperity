@@ -50,7 +50,7 @@ class Backend {
   virtual ~Backend() = default;
 
   // Once per module, after segments are copied and before protections finalize.
-  // Native: no-op. FEX: register the executable range with the JIT.
+  // Native: register executable ranges for pausing. FEX: register with the JIT.
   virtual void OnImageMapped(kern::ModuleInfo& info) = 0;
 
   // Create a guest thread object without running it. MUST be called on the
@@ -87,10 +87,13 @@ class Backend {
 void ExitGuestThread();
 
 // Guest-callable address invoking host `hostFn` with the guest's integer args
-// (up to 14; args 7+ from the guest stack). Native: just `hostFn`. FEX: a small
-// x86 trampoline through the magic syscall; used to bind vprx HLE exports into
-// import slots. Thread-safe.
+// (up to 14; args 7+ from the guest stack). Native: a pause-aware call. FEX: a
+// small x86 trampoline through the magic syscall; used to bind vprx HLE exports
+// into import slots. Thread-safe.
 uintptr_t MakeHostThunk(void* host_fn, const char* name = nullptr);
+
+// Native lv2 handlers take register arguments on a separate kernel stack.
+uintptr_t MakeSyscallPauseThunk(const void* handler);
 
 // If `addr` is in the host-thunk pool: the "libname!NID" of the export whose
 // trampoline lives there ("" if unnamed), else null; names a fault through a
