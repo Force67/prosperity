@@ -160,6 +160,9 @@ void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
 // GPU: dropped where the fill covers it, its writeback keeping the filled
 // bytes where it does not. Otherwise the fill reads it back first.
 bool CsFillStaysOnGpu(u64 base, u64 bytes);
+// The CPU wrote [first, end): the guest mirror copies those blocks in again.
+void MirrorNoteGuestWrites(u64 first, u64 end);
+void MirrorWritesCollected();
 
 // Does `addr` fall inside a compute staging range, i.e. guest memory the
 // renderer snapshots and copies back? A guest fault on memory the guest alone

@@ -4108,15 +4108,24 @@ CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base) {
 }
 }  // namespace
 
+u64 MirrorRevision(u64 base, u64 bytes);
+bool MirrorSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
+
 u64 CsBufferRevision(u64 base, u64 bytes) {
   u64 range_base;
   const CsRange* e = BufferSource(base, bytes, &range_base);
-  return e ? e->write_seq : 0;
+  if (e)
+    return e->write_seq;
+  // Mirror revisions run in their own high half, apart from a range's.
+  const u64 mirror = MirrorRevision(base, bytes);
+  return mirror ? mirror | (1ull << 63) : 0;
 }
 
 bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   u64 range_base;
   CsRange* const found = BufferSource(base, bytes, &range_base);
+  if (!found && dst && MirrorRevision(base, bytes))
+    return MirrorSupplyBuffer(base, bytes, dst, dst_off);
   if (!found || !dst)
     return false;
   CsRange& e = *found;
@@ -4147,6 +4156,13 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   return true;
 }
 
+bool MirrorSupplyTexture(u64 base,
+                         const gcn::TextureLayout32& tiled,
+                         const gcn::TextureLayout32& linear,
+                         rhi::Texture* img,
+                         rhi::TextureState state,
+                         u64* seq);
+
 bool CsSupplyTextureFromBuffer(u64 base,
                                const gcn::TextureLayout32& tiled,
                                const gcn::TextureLayout32& linear,
@@ -4157,10 +4173,12 @@ bool CsSupplyTextureFromBuffer(u64 base,
                                u64* seq) {
   u64 range_base;
   CsRange* const found = BufferSource(base, tiled.size, &range_base);
-  if (!found || linear.mip_levels > 16 || linear.mips[0].width != w ||
+  if (linear.mip_levels > 16 || linear.mips[0].width != w ||
       linear.mips[0].height != h ||
       (img && img->desc().dim == rhi::TextureDim::k3D))
     return false;
+  if (!found)
+    return MirrorSupplyTexture(base, tiled, linear, img, state, seq);
   CsRange& e = *found;
   const TileTable* table = GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4);
   if (!table)
@@ -4651,6 +4669,275 @@ rhi::Buffer* ImportGuestPage(u64 page) {
   return buf;
 }
 
+// --- the guest mirror ---------------------------------------------------
+// DELTA_GPU_MIRROR: plain buffers a dispatch binds live in one sparse device
+// buffer at offset (guest address - kMirrorBase), a write-through cache of
+// guest memory. Before a dispatch the GPU copies the bytes in from the guest
+// pages (imported, so no CPU copy and no wait), and after it copies what the
+// dispatch wrote back out, as a pending guest write the labels wait for. The
+// dispatch itself runs out of VRAM; ranges alias each other because they are
+// the same memory.
+DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", false);
+constexpr u64 kMirrorBase = 0x300000000ull;
+constexpr u64 kMirrorSize = 0x1000000000ull;  // through 0x1300000000
+// Imports in chunks: a device allows only a few thousand allocations.
+constexpr u64 kMirrorImport = 2ull << 20;
+rhi::Buffer* g_mirror = nullptr;
+bool g_mirror_tried = false;
+base::HashMap<u64, rhi::Buffer*> g_mirror_imports;  // chunk -> import
+
+rhi::Buffer* Mirror() {
+  if (!g_mirror_tried) {
+    g_mirror_tried = true;
+    rhi::BufferDesc desc;
+    desc.size = kMirrorSize;
+    desc.sparse = true;
+    desc.usage = rhi::kBufferStorage | rhi::kBufferCopySrc |
+                 rhi::kBufferCopyDst | rhi::kBufferAddress |
+                 rhi::kBufferIndirect;
+    desc.name = "guest mirror";
+    if (Device().caps().sparse_buffer)
+      g_mirror = Device().CreateBuffer(desc);
+    BASE_LOGI("mirror", "guest mirror {:#x}+{:#x}: {}", kMirrorBase,
+              kMirrorSize, g_mirror ? "up" : "unavailable");
+  }
+  return g_mirror;
+}
+
+// The import that holds the guest bytes at `address`, and its base: a 2 MiB
+// chunk, or the 64 KiB page when the chunk spans unmapped memory.
+rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
+  const u64 chunk = address & ~(kMirrorImport - 1);
+  auto found = g_mirror_imports.find(chunk);
+  if (found == g_mirror_imports.end()) {
+    rhi::Buffer* buf = nullptr;
+    const rhi::Caps& caps = Device().caps();
+    if (caps.host_import && gpu::IsReadableRange(chunk, kMirrorImport)) {
+      GuestWriteTracker().Release(chunk, kMirrorImport);
+      rhi::BufferDesc desc;
+      desc.size = kMirrorImport;
+      desc.usage = rhi::kBufferCopyDst | rhi::kBufferCopySrc;
+      desc.host_pointer = reinterpret_cast<void*>(chunk);
+      buf = Device().CreateBuffer(desc);
+    }
+    found = g_mirror_imports.insert_or_assign(chunk, buf).first;
+  }
+  if (found->second) {
+    *import_base = chunk;
+    return found->second;
+  }
+  *import_base = address & ~(kGuestPageImport - 1);
+  return ImportGuestPage(*import_base);
+}
+
+bool MirrorEligible(const ComputeInfo::Res& r, u64 bytes) {
+  return kMirror && !r.zero_fill && !r.image_staging && bytes &&
+         r.base >= kMirrorBase && r.base + bytes <= kMirrorBase + kMirrorSize &&
+         !(r.base & 3) && Mirror();
+}
+
+// Copies [base, base+bytes) between the guest pages and the mirror, on the
+// batch list, piece by piece along the imports.
+bool MirrorCopy(u64 base, u64 bytes, bool to_guest) {
+  base::Vector<base::Pair<rhi::Buffer*, base::Pair<u64, u64>>> pieces;
+  for (u64 at = base; at < base + bytes;) {
+    u64 import_base = 0;
+    rhi::Buffer* import = MirrorImport(at, &import_base);
+    if (!import)
+      return false;
+    const u64 end =
+        base::Min(base + bytes, import_base + import->desc().size);
+    pieces.push_back({import, {at, end}});
+    at = end;
+  }
+  rhi::CommandList* const list = g_cs_list;
+  list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
+  for (const auto& [import, span] : pieces) {
+    u64 import_base = 0;
+    MirrorImport(span.first, &import_base);
+    const u64 n = span.second - span.first;
+    if (to_guest)
+      list->CopyBuffer(import, span.first - import_base, g_mirror,
+                       span.first - kMirrorBase, n);
+    else
+      list->CopyBuffer(g_mirror, span.first - kMirrorBase, import,
+                       span.first - import_base, n);
+  }
+  list->Barrier(rhi::kAccessCopyWrite,
+                kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostRead);
+  return true;
+}
+
+// Blocks whose mirror bytes are the guest's: copied in with the block armed
+// in the write tracker, and not written by the CPU since. The mirror's own
+// write backs are guest writes it already holds.
+constexpr u64 kMirrorBlock = 64 * 1024;
+base::HashSet<u64> g_mirror_clean;
+base::Vector<base::Pair<u64, u64>> g_mirror_self;
+
+// Before a dispatch reads it: backed, and holding the guest's bytes.
+bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
+  // A range still owned by the staging path is written back first.
+  if (CsRangeDirtyOverlapping(base, bytes) &&
+      !FlushCsWritesRange(renderer, base, bytes, "mirror"))
+    return false;
+  const u64 page = Device().caps().sparse_page;
+  const u64 lo = (base - kMirrorBase) & ~(page - 1);
+  const u64 hi = (base + bytes - kMirrorBase + page - 1) & ~(page - 1);
+  if (!Device().CommitSparse(g_mirror, lo, hi - lo))
+    return false;
+  CsBatchBeginImpl();
+  if (!g_cs_batch_open)
+    return false;
+  // Only the blocks the CPU may have changed: runs of them, one copy each.
+  const u64 end = base + bytes;
+  u64 run = 0;
+  bool in_run = false;
+  for (u64 block = base & ~(kMirrorBlock - 1); block < end;
+       block += kMirrorBlock) {
+    const bool clean = g_mirror_clean.count(block);
+    const u64 at = base::Max(block, base);
+    if (!clean && !in_run) {
+      run = at;
+      in_run = true;
+    }
+    if (clean && in_run) {
+      if (!MirrorCopy(run, at - run, /*to_guest=*/false))
+        return false;
+      in_run = false;
+    }
+    if (!clean && GuestWriteTracker().Arm(block, kMirrorBlock))
+      g_mirror_clean.insert(block);
+  }
+  return !in_run || MirrorCopy(run, end - run, /*to_guest=*/false);
+}
+
+// What dispatches wrote through the mirror: base -> end, and a revision a
+// texture made from it compares against.
+struct MirrorWrite {
+  u64 end = 0, seq = 0;
+};
+base::Map<u64, MirrorWrite> g_mirror_writes;
+u64 g_mirror_seq = 0;
+
+// The write that holds [base, base+bytes) whole, if one does.
+const MirrorWrite* MirrorWritten(u64 base, u64 bytes) {
+  auto it = g_mirror_writes.upper_bound(base);
+  if (it == g_mirror_writes.begin())
+    return nullptr;
+  --it;
+  return it->first <= base && base + bytes <= it->second.end ? &it->second
+                                                             : nullptr;
+}
+
+// After a dispatch wrote it: back out to the guest pages, in queue order.
+void MirrorWriteBack(u64 base, u64 bytes) {
+  MirrorWrite& w = g_mirror_writes[base];
+  w.end = base::Max(w.end, base + bytes);
+  w.seq = ++g_mirror_seq;
+  if (!MirrorCopy(base, bytes, /*to_guest=*/true))
+    return;
+  g_pending_guest_writes.push_back({base, base + bytes, g_cs_batch_id});
+  g_mirror_self.push_back({base, base + bytes});
+  NoteGuestWrite(base, bytes);
+  InvalidateTexRange(base, bytes);
+}
+
+// A texture over bytes a dispatch wrote through the mirror: detiled from the
+// mirror on the GPU, where reading the guest copy would wait for the write
+// back.
+bool MirrorSupplyTexture(u64 base,
+                         const gcn::TextureLayout32& tiled,
+                         const gcn::TextureLayout32& linear,
+                         rhi::Texture* img,
+                         rhi::TextureState state,
+                         u64* seq) {
+  const MirrorWrite* written = MirrorWritten(base, tiled.size);
+  if (!written || !g_frame.recording)
+    return false;
+  const TileTable* table =
+      GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4);
+  if (!table)
+    return false;
+  if (!img)
+    return true;
+  if (*seq == written->seq)
+    return true;
+  rhi::Buffer* scratch = AcquireScratch(linear.size);
+  if (!scratch)
+    return false;
+  rhi::BufferTextureCopy copies[16];
+  for (u32 mip = 0; mip < linear.mip_levels; mip++) {
+    const auto& level = linear.mips[mip];
+    copies[mip].buffer_offset = level.offset;
+    copies[mip].row_length = level.pitch;
+    copies[mip].image_height = level.stored_height;
+    copies[mip].region.mip = mip;
+    copies[mip].region.layers = linear.layers;
+    copies[mip].region.width = level.width;
+    copies[mip].region.height = level.height;
+  }
+  EndRegion();
+  rhi::CommandList* const list = g_frame.list;
+  list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+                rhi::kAccessCopyRead | rhi::kAccessComputeRead);
+  RecordImageTiling(list, *table, g_mirror, base - kMirrorBase, tiled.size,
+                    scratch, linear.size, /*detile=*/true);
+  rhi::TextureBarrier b;
+  b.texture = img;
+  b.before = state;
+  b.after = rhi::TextureState::kCopyDst;
+  b.range.mips = linear.mip_levels;
+  b.range.layers = linear.layers;
+  list->Barrier(0, 0, &b, 1);
+  list->CopyBufferToTexture(img, scratch, copies, linear.mip_levels);
+  b.before = rhi::TextureState::kCopyDst;
+  b.after = rhi::TextureState::kShaderRead;
+  list->Barrier(0, 0, &b, 1);
+  *seq = written->seq;
+  if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
+    g_cs_chunk_needs_batch = true;
+  g_tex_bridge_n++;
+  g_tex_bridge_bytes += tiled.size;
+  return true;
+}
+
+// A buffer read on the GPU (a draw's cbuffer or raw window) of bytes a
+// dispatch wrote through the mirror: copied from there.
+u64 MirrorRevision(u64 base, u64 bytes) {
+  const MirrorWrite* written = MirrorWritten(base, bytes);
+  return written && g_frame.recording ? written->seq : 0;
+}
+
+bool MirrorSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
+  EndRegion();
+  rhi::CommandList* const list = g_frame.list;
+  list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+                rhi::kAccessCopyRead);
+  list->CopyBuffer(dst, dst_off, g_mirror, base - kMirrorBase, bytes);
+  list->Barrier(rhi::kAccessCopyWrite, kAccessAll);
+  if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
+    g_cs_chunk_needs_batch = true;
+  g_buf_bridge_n++;
+  g_buf_bridge_bytes += bytes;
+  return true;
+}
+
+void MirrorNoteGuestWrites(u64 first, u64 end) {
+  if (g_mirror_clean.empty())
+    return;
+  for (const auto& [lo, hi] : g_mirror_self)
+    if ((lo & ~u64(0xFFF)) <= first && end <= ((hi + 0xFFF) & ~u64(0xFFF)))
+      return;
+  for (u64 block = first & ~(kMirrorBlock - 1); block < end;
+       block += kMirrorBlock)
+    g_mirror_clean.erase(block);
+}
+
+void MirrorWritesCollected() {
+  g_mirror_self.clear();
+}
+
 bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes) {
   const u64 page = dst & ~(kGuestPageImport - 1);
   if (!g_labels_deferrable || g_cs_failed || ((offset | bytes | dst) & 3u) ||
@@ -4700,7 +4987,7 @@ bool WaitPendingGuestWrites(u64 base, u64 bytes) {
       wait = base::Max(wait, w.batch);
   if (!wait)
     return true;
-  const WaitReaderScope reader("gpu-guest-write");
+  const WaitReaderScope reader(kMirror ? g_cs_wait_reader : "gpu-guest-write");
   return CsBatchWaitId(wait, kSyncWriteback);
 }
 
@@ -5090,6 +5377,11 @@ bool FindIndirectArgs(u64 args, IndirectArgs& out) {
     range_base = other;
     return false;
   });
+  if (!several && !found && kMirror && MirrorWritten(args, 12)) {
+    out = {g_mirror, args - kMirrorBase};
+    g_cs_indirect_n++;
+    return true;
+  }
   if (several || !found || !found->buf || found->imported ||
       (found->image_staging && !found->truth) || args < range_base ||
       args + 12 > range_base + base::Min(found->size, found->guest_bytes))
@@ -5101,7 +5393,9 @@ bool FindIndirectArgs(u64 args, IndirectArgs& out) {
 }
 
 bool CanDispatchIndirect(u64 args) {
-  return Device().caps().dispatch_indirect && CsRangeDirtyOverlapping(args, 12);
+  return Device().caps().dispatch_indirect &&
+         (CsRangeDirtyOverlapping(args, 12) ||
+          (kMirror && MirrorWritten(args, 12)));
 }
 
 // A dispatch's sampled image, resolved the way a draw resolves one: the live
@@ -5390,8 +5684,20 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     bind_buf[i] = view;
     return true;
   };
+  bool mirror_res[ComputeInfo::kMaxResources] = {};
+  for (u32 i = 0; i < ci.num_res; i++) {
+    const u64 bytes =
+        ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
+    const u64 span = base::Max<u64>(bytes, (ci.res[i].size + 3) & ~u64(3));
+    mirror_res[i] = MirrorEligible(ci.res[i], span) &&
+                    MirrorCopyIn(renderer, ci.res[i].base, bytes);
+  }
   for (u32 i = 0; i < ci.num_res; i++) {
     sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~u64(3)) : 4;
+    if (mirror_res[i]) {
+      bind_buf[i] = g_mirror;
+      continue;
+    }
     if (ci.res[i].zero_fill) {
       if (!CsEnsureStage(i, sz[i]))
         return CsDeclined(ci, "10");
@@ -5986,7 +6292,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   // Re-resolve handles: a later binding sharing an earlier binding's base may
   // have grown (destroyed + recreated) that range's buffer.
   for (u32 i = 0; i < ci.num_res; i++)
-    if (!ci.res[i].zero_fill && !truth_view[i])
+    if (!ci.res[i].zero_fill && !truth_view[i] && !mirror_res[i])
       bind_buf[i] =
           g_cs_ranges[parent_base[i] ? parent_base[i] : ci.res[i].base].buf;
   u64 bind_off[ComputeInfo::kMaxResources] = {};
@@ -5998,6 +6304,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                       ComputeInfo::kMaxTextures];
   for (u32 i = 0; i < ci.num_res; i++)
     bind_off[i] = ci.res[i].zero_fill ? 0
+                  : mirror_res[i]     ? ci.res[i].base - kMirrorBase
                   : truth_view[i]     ? 0
                   : parent_base[i]
                       ? parent_off[i]
@@ -6224,13 +6531,21 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   if (trace::Recording())
     trace::RecordDispatch(ci);
   for (u32 i = 0; i < ci.num_res; i++) {
-    if (ci.res[i].zero_fill)
+    if (ci.res[i].zero_fill || mirror_res[i])
       continue;
     auto it =
         g_cs_ranges.find(parent_base[i] ? parent_base[i] : ci.res[i].base);
     if (it != g_cs_ranges.end())
       MarkPending(it->second);
   }
+  for (u32 i = 0; i < ci.num_res; i++)
+    if (mirror_res[i] && ci.res[i].written) {
+      const auto& res = ci.res[i];
+      const u64 bytes = res.guest_size ? res.guest_size : res.size;
+      MirrorWriteBack(res.base,
+                      res.write_bytes ? base::Min(res.write_bytes, bytes)
+                                      : bytes);
+    }
   ++g_cs_batch_count;
 
   // Mark written ranges GPU-dirty. Guest memory catches up lazily at the next
@@ -6239,7 +6554,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   const u64 t_out0 = NowNs();
   bool kick = false;
   for (u32 i = 0; i < ci.num_res; i++) {
-    if (!ci.res[i].written || ci.res[i].zero_fill)
+    if (!ci.res[i].written || ci.res[i].zero_fill || mirror_res[i])
       continue;
     const u64 dirty_base = parent_base[i] ? parent_base[i] : ci.res[i].base;
     auto it = g_cs_ranges.find(dirty_base);
@@ -6564,8 +6879,11 @@ bool FlushCsWritesRange(Renderer& renderer,
                         u64 base,
                         u64 bytes,
                         const char* why) {
-  if (!g_pending_guest_writes.empty() && !WaitPendingGuestWrites(base, bytes))
-    return false;
+  if (!g_pending_guest_writes.empty()) {
+    const WaitReaderScope reader(why);
+    if (!WaitPendingGuestWrites(base, bytes))
+      return false;
+  }
   // Nothing dirty anywhere: answer without touching the page index, which
   // otherwise allocates a vector, hashes a lookup per page, then sorts and
   // dedups it. That is called once per guest read, and SotC issues 1.2M

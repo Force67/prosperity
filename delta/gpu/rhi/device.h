@@ -255,6 +255,12 @@ class Device {
 
   // Destroys any object created above. Null is ignored.
   virtual void Destroy(Object* object) = 0;
+  // Back [offset, offset+bytes) of a sparse buffer with zeroed device memory,
+  // page by page; pages already backed keep their contents. Done when it
+  // returns. False when the device has no sparse buffers or runs out.
+  virtual bool CommitSparse(Buffer* /*buffer*/, u64 /*offset*/, u64 /*bytes*/) {
+    return false;
+  }
   // A name for capture tools. Ignored unless Caps::debug_labels.
   virtual void SetName(Object* /*object*/, const char* /*name*/) {}
 

@@ -313,7 +313,9 @@ void CollectGuestWrites() {
     g_ib_staged.Invalidate(first, end);
     g_sbo_staged.Invalidate(first, end);
     CsNoteGuestWrites(first, end);
+    MirrorNoteGuestWrites(first, end);
   }
+  MirrorWritesCollected();
 }
 
 void NoteGuestRemap(u64 base, u64 bytes) {

@@ -642,6 +642,18 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   f.shaderStorageImageWriteWithoutFormat =
       a.shaderStorageImageWriteWithoutFormat;
   f.vertexPipelineStoresAndAtomics = a.vertexPipelineStoresAndAtomics;
+  {
+    u32 qn = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, nullptr);
+    base::Vector<VkQueueFamilyProperties> qs(qn);
+    vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, qs.data());
+    caps_.sparse_buffer = a.sparseBinding && a.sparseResidencyBuffer &&
+                          native.queue_family < qn &&
+                          (qs[native.queue_family].queueFlags &
+                           VK_QUEUE_SPARSE_BINDING_BIT);
+    f.sparseBinding = caps_.sparse_buffer;
+    f.sparseResidencyBuffer = caps_.sparse_buffer;
+  }
   f.fragmentStoresAndAtomics = a.fragmentStoresAndAtomics;
 
   const float prio = 1.0f;
@@ -782,6 +794,12 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
   VkDevice dev = native.device;
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = desc.size;
+  if (desc.sparse) {
+    if (!caps_.sparse_buffer || desc.host_pointer)
+      return nullptr;
+    bi.flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
+               VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
+  }
   if (desc.usage & rhi::kBufferVertex)
     bi.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
   if (desc.usage & rhi::kBufferIndex)
@@ -812,6 +830,24 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
     return nullptr;
   VkMemoryRequirements mr;
   vkGetBufferMemoryRequirements(dev, buffer->buffer, &mr);
+  if (desc.sparse) {
+    buffer->memory_type =
+        FindMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    caps_.sparse_page = mr.alignment;
+    if (buffer->memory_type == UINT32_MAX) {
+      vkDestroyBuffer(dev, buffer->buffer, nullptr);
+      return nullptr;
+    }
+    if (address) {
+      VkBufferDeviceAddressInfo info{
+          VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+      info.buffer = buffer->buffer;
+      buffer->SetAddress(vkGetBufferDeviceAddress(dev, &info));
+    }
+    if (desc.name)
+      SetName(&*buffer, desc.name);
+    return gpu::rhi::Release(buffer);
+  }
 
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   ai.allocationSize = mr.size;
@@ -1398,6 +1434,8 @@ void VulkanDevice::Destroy(rhi::Object* object) {
   if (auto* b = dynamic_cast<VulkanBuffer*>(object)) {
     vkDestroyBuffer(dev, b->buffer, nullptr);
     vkFreeMemory(dev, b->memory, nullptr);
+    for (VkDeviceMemory block : b->blocks)
+      vkFreeMemory(dev, block, nullptr);
   } else if (auto* t = dynamic_cast<VulkanTexture*>(object)) {
     vkDestroyImage(dev, t->image, nullptr);
     images_.Free(*this, t->allocation);
@@ -1418,6 +1456,69 @@ void VulkanDevice::Destroy(rhi::Object* object) {
     vkDestroyQueryPool(dev, q->pool, nullptr);
   }
   delete object;
+}
+
+bool VulkanDevice::CommitSparse(rhi::Buffer* buffer,
+                                u64 offset,
+                                u64 bytes) {
+  auto* b = static_cast<VulkanBuffer*>(buffer);
+  const u64 page = caps_.sparse_page;
+  if (!b || !b->desc().sparse || !page || !bytes ||
+      offset + bytes > b->desc().size)
+    return false;
+  // Pages are carved out of blocks of this size; a block is never returned
+  // before the buffer is.
+  constexpr u64 kBlock = 64ull << 20;
+  base::Vector<VkSparseMemoryBind> binds;
+  for (u64 at = offset & ~(page - 1); at < offset + bytes; at += page) {
+    if (b->committed.count(at))
+      continue;
+    if (b->blocks.empty() || b->block_used + page > kBlock) {
+      VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+      VkMemoryAllocateFlagsInfo flags{
+          VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+      if (b->address()) {
+        flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        ai.pNext = &flags;
+      }
+      ai.allocationSize = kBlock;
+      ai.memoryTypeIndex = b->memory_type;
+      VkDeviceMemory block;
+      if (vkAllocateMemory(native.device, &ai, nullptr, &block) != VK_SUCCESS)
+        return false;
+      b->blocks.push_back(block);
+      b->block_used = 0;
+    }
+    VkSparseMemoryBind bind{};
+    bind.resourceOffset = at;
+    bind.size = page;
+    bind.memory = b->blocks.back();
+    bind.memoryOffset = b->block_used;
+    b->block_used += page;
+    b->committed.insert(at);
+    binds.push_back(bind);
+  }
+  if (binds.empty())
+    return true;
+  VkSparseBufferMemoryBindInfo buffer_binds{b->buffer,
+                                            static_cast<u32>(binds.size()),
+                                            binds.data()};
+  VkBindSparseInfo info{VK_STRUCTURE_TYPE_BIND_SPARSE_INFO};
+  info.bufferBindCount = 1;
+  info.pBufferBinds = &buffer_binds;
+  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  VkFence fence;
+  if (vkCreateFence(native.device, &fi, nullptr, &fence) != VK_SUCCESS)
+    return false;
+  VkResult r;
+  {
+    base::LockGuard<base::Mutex> lock(queue_mutex);
+    r = vkQueueBindSparse(native.queue, 1, &info, fence);
+  }
+  if (r == VK_SUCCESS)
+    r = vkWaitForFences(native.device, 1, &fence, VK_TRUE, ~0ull);
+  vkDestroyFence(native.device, fence, nullptr);
+  return r == VK_SUCCESS;
 }
 
 void VulkanDevice::SetName(rhi::Object* object, const char* name) {

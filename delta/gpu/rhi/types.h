@@ -154,6 +154,9 @@ struct BufferDesc {
   // (Caps::host_import). Must be aligned to Caps::host_import_alignment in
   // both address and size, and outlive the buffer.
   void* host_pointer = nullptr;
+  // Reserve `size` of address space only (Caps::sparse_buffer): device memory
+  // backs a page once Device::CommitSparse commits it.
+  bool sparse = false;
   const char* name = nullptr;
 };
 
@@ -561,6 +564,8 @@ struct Caps {
   bool buffer_address = false;  // kBufferAddress + SPIR-V PhysicalStorageBuffer
   bool host_import = false;
   u64 host_import_alignment = 0;
+  bool sparse_buffer = false;
+  u64 sparse_page = 0;  // commit granularity
   bool texture_blit = true;
   bool dispatch_base = false;
   // CommandList::DispatchIndirect: group counts read by the GPU from a buffer.

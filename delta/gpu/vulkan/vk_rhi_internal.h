@@ -9,6 +9,7 @@
 
 #include "base/arch.h"
 #include "base/atomic.h"
+#include "base/containers/hash_map.h"
 #include "base/containers/vector.h"
 #include "base/strings/xstring.h"
 #include "base/threading/mutex.h"
@@ -49,6 +50,11 @@ class VulkanBuffer final : public rhi::Buffer {
   VulkanBuffer(const rhi::BufferDesc& desc) { desc_ = desc; }
   VkBuffer buffer = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
+  // A sparse buffer's committed pages, and the blocks they are carved from.
+  base::HashSet<u64> committed;
+  base::Vector<VkDeviceMemory> blocks;
+  u64 block_used = 0;
+  u32 memory_type = 0;
   void SetMapped(u8* p) { mapped_ = p; }
   void SetAddress(u64 a) { address_ = a; }
 };
@@ -256,6 +262,7 @@ class VulkanDevice final : public rhi::Device {
   void Destroy(rhi::Object* object) override;
   void SetName(rhi::Object* object, const char* name) override;
   bool SupportsFormat(rhi::Format format, u32 usage) const override;
+  bool CommitSparse(rhi::Buffer* buffer, u64 offset, u64 bytes) override;
   bool SupportsBlit(rhi::Format src, rhi::Format dst) const override;
   void QueryMemoryBudget(u64* used, u64* budget) const override;
   u64 Submit(rhi::CommandList* const* lists, u32 count) override;
