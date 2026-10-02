@@ -23,6 +23,7 @@
 #include "base/strings/xstring.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
+#include "base/threading/thread.h"
 #include "base/time/time.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gpu_perf.h"
@@ -147,13 +148,54 @@ u64 GpuClockTimestamp() {
 struct LabelWrite {
   u64 address, value, ns;
 };
-LabelWrite g_label_history[256];
+LabelWrite g_label_history[4096];
 base::Atomic<u32> g_label_history_n{0};
+
+bool Compares(u32 function, u64 value, u64 ref) {
+  switch (function) {
+    case 1:
+      return value < ref;
+    case 2:
+      return value <= ref;
+    case 3:
+      return value == ref;
+    case 4:
+      return value != ref;
+    case 5:
+      return value >= ref;
+    case 6:
+      return value > ref;
+    default:
+      return true;
+  }
+}
+
+// A ring queue parked on a wait, as the label writers see it. The CP polls its
+// wait all the time and sees a value the moment it lands, where our walker
+// looks again on the doorbell poller's next tick: Astro Bot's CPU resets a
+// label it saw written, and a queue parked on that label missed it and hung.
+// So a write that satisfies a parked wait is remembered for it.
+struct ParkedWait {
+  u64 address, ref, mask;
+  u32 function;
+  bool wide, hit;
+};
+base::Mutex g_parked_lock;
+base::Map<const void*, ParkedWait> g_parked;  // by QueueState
 
 void RecordLabelWrite(u64 address, u64 value) {
   const u32 i =
       g_label_history_n.fetch_add(1) % base::ArraySize(g_label_history);
   g_label_history[i] = {address, value, base::TickClock::NowNs()};
+  base::LockGuard<base::Mutex> lock(g_parked_lock);
+  for (auto& [queue, w] : g_parked) {
+    (void)queue;
+    if (w.hit || w.address != address)
+      continue;
+    const u64 now = w.wide ? *reinterpret_cast<const volatile u64*>(address)
+                           : *reinterpret_cast<const volatile u32*>(address);
+    w.hit = Compares(w.function, now & w.mask, w.ref);
+  }
 }
 
 // Our submit is synchronous: every draw in the buffer is finished by the time
@@ -277,9 +319,11 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       const auto* from = reinterpret_cast<const u8*>(src);
       PublishLabel([dst, data = base::Vector<u8>(from, from + bytes)] {
         std::memcpy(reinterpret_cast<void*>(dst), data.data(), data.size());
-        u32 first = 0;
-        std::memcpy(&first, data.data(), base::Min<size_t>(4, data.size()));
-        RecordLabelWrite(dst, first);
+        for (size_t k = 0; k + 4 <= data.size(); k += 4) {
+          u32 word;
+          std::memcpy(&word, data.data() + k, 4);
+          RecordLabelWrite(dst + k, word);
+        }
       });
     } else {
       std::memcpy(reinterpret_cast<void*>(dst),
@@ -463,33 +507,74 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
     value = *reinterpret_cast<const volatile u64*>(address);
   else
     value = *reinterpret_cast<const volatile u32*>(address);
-  value &= mask;
-  switch (function) {
-    case 1:
-      return value < ref;
-    case 2:
-      return value <= ref;
-    case 3:
-      return value == ref;
-    case 4:
-      return value != ref;
-    case 5:
-      return value >= ref;
-    case 6:
-      return value > ref;
-    default:
-      return true;
+  return Compares(function, value & mask, ref);
+}
+
+// The graphics queue waits too, but briefly: its walk runs on the title's
+// thread, inside the submit, so a flag the title sets after the submit returns
+// cannot come true while it waits. What the ring queues produce mostly lands
+// within a millisecond or two, and skipping those waits let the graphics queue
+// finish a frame before the compute queues it is ordered against, so the
+// title reset their labels under them. An address that keeps timing out is
+// not waited for again.
+bool WaitBriefly(u32 op, const u32* body, u32 count) {
+  const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
+  static base::Map<u64, u32> timeouts;
+  u32& missed = timeouts[address];
+  if (missed >= 3)
+    return false;
+  QueueState* const queue = g_queue;
+  const u32 submit_queue = render::g_submit_queue;
+  const auto start = base::TimeTicks::Now();
+  while (!WaitSatisfied(op, body, count)) {
+    if (base::TimeTicks::Now() - start >= base::Milliseconds(2)) {
+      if (++missed == 3)
+        BASE_LOGI("agc", "graphics no longer waits for {:#x}", address);
+      return false;
+    }
+    g_mutex.unlock();
+    base::SleepForMicroseconds(20);
+    g_mutex.lock();
+    g_queue = queue;
+    render::g_submit_queue = submit_queue;
   }
+  missed = 0;
+  return true;
 }
 
 // Suspend this queue until the comparison succeeds. Other queues remain
 // runnable and may produce the value this one is waiting for.
 bool StallOnWait(u32 op, const u32* body, u32 count) {
-  if (!g_queue->stall.ring_walk || WaitSatisfied(op, body, count))
+  if (!g_queue->stall.ring_walk) {
+    // Recorded with the top bit set: a wait the graphics queue went past
+    // unsatisfied, which the ring queues' hang report shows next to the
+    // writes.
+    if (!WaitSatisfied(op, body, count) && !WaitBriefly(op, body, count))
+      RecordLabelWrite(
+          ((static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1]) | (1ull << 63),
+          body[3]);
     return false;
+  }
   const bool wide = op == 0x93;
   const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
   const u64 ref = wide ? (static_cast<u64>(body[4]) << 32) | body[3] : body[3];
+  if (count >= (wide ? 8u : 6u)) {
+    // Parked before the check, so a write landing in between is not lost.
+    base::LockGuard<base::Mutex> lock(g_parked_lock);
+    ParkedWait& w = g_parked[g_queue];
+    if (w.address == address && w.ref == ref && w.hit) {
+      g_parked.erase(g_queue);
+      return false;
+    }
+    const u64 mask =
+        wide ? (static_cast<u64>(body[6]) << 32) | body[5] : body[4];
+    w = {address, ref, mask, body[0] & 0x7, wide, false};
+  }
+  if (WaitSatisfied(op, body, count)) {
+    base::LockGuard<base::Mutex> lock(g_parked_lock);
+    g_parked.erase(g_queue);
+    return false;
+  }
   const auto now = base::TimeTicks::Now();
   if (address != g_queue->stall.wait_addr || ref != g_queue->stall.wait_ref) {
     g_queue->stall.wait_addr = address;
@@ -511,9 +596,11 @@ bool StallOnWait(u32 op, const u32* body, u32 count) {
                 (unsigned long)*reinterpret_cast<const volatile u32*>(
                     s.stall.wait_addr));
       for (const LabelWrite& w : g_label_history)
-        if (w.address == s.stall.wait_addr)
-          BASE_LOGW("agc", "    written {:#x} {:.3f} s ago", w.value,
-                    (now_ns - w.ns) / 1e9);
+        if ((w.address & ~(1ull << 63)) == s.stall.wait_addr)
+          BASE_LOGW(
+              "agc", "    {} {:#x} {:.3f} s ago",
+              w.address >> 63 ? "graphics went past a wait for" : "written",
+              w.value, (now_ns - w.ns) / 1e9);
     }
     ReportHeldLabels();
     g_queue->stall.wait_since = now;
@@ -545,7 +632,8 @@ void HandleWriteData(const u32* body, u32 count) {
     PublishLabel([address, words = base::Vector<u32>(body + 3, body + count)] {
       std::memcpy(reinterpret_cast<void*>(address), words.data(),
                   words.size() * 4);
-      RecordLabelWrite(address, words[0]);
+      for (size_t k = 0; k < words.size(); k++)
+        RecordLabelWrite(address + k * 4, words[k]);
     });
 }
 
