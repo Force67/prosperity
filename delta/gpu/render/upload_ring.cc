@@ -229,7 +229,7 @@ bool EnsureLdsScratch() {
     return false;
   rhi::BufferDesc desc;
   desc.size = kLdsScratch;
-  desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
+  desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferCopySrc;
   desc.memory =
       kLdsDump ? rhi::MemoryKind::kReadback : rhi::MemoryKind::kDevice;
   desc.name = "shared lds";
@@ -257,9 +257,9 @@ bool EnsureRawBufferRing() {
     return true;
   if (!g_ring.sbo_layout)
     return false;
-  g_ring.sbo_buf =
-      HostBuffer(kSboRing, rhi::kBufferStorage | rhi::kBufferCopyDst,
-                 "raw buffer ring", &g_ring.sbo_map);
+  g_ring.sbo_buf = HostBuffer(
+      kSboRing, rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferCopySrc,
+      "raw buffer ring", &g_ring.sbo_map);
   if (!g_ring.sbo_buf)
     return false;
   std::memset(g_ring.sbo_map, 0, kSboRing);

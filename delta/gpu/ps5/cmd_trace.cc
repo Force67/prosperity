@@ -54,6 +54,8 @@ DELTA_OPTION(bool, kCsDump, "DELTA_GPU_CSDUMP", false);
 DELTA_OPTION(bool, kGpuDmatrace, "DELTA_GPU_DMATRACE", false);
 DELTA_OPTION(bool, kGpuDrawcensus, "DELTA_GPU_DRAWCENSUS", false);
 DELTA_OPTION(bool, kResTrace, "DELTA_GPU_CSRES", false);
+// Only the dispatch resources that cover this guest address.
+DELTA_OPTION(u64, kResTraceAt, "DELTA_GPU_CSRES_AT", 0);
 DELTA_OPTION(bool, kRtProbe, "DELTA_AGC_RTPROBE", false);
 DELTA_OPTION(bool, kTrace, "DELTA_AGC_TRACE", false);
 DELTA_OPTION(bool, kOpHist, "DELTA_AGC_OPHIST", false);
@@ -1130,7 +1132,9 @@ void TraceCsResource(u64 cs_addr,
                      u64 size,
                      u64 guest_size,
                      bool zero_fill) {
-  if (kResTrace)
+  static int at_shown = 0;
+  if (kResTrace || (kResTraceAt && base <= kResTraceAt &&
+                    kResTraceAt < base + guest_size && at_shown++ < 200))
     BASE_LOGI("csres",
               "cs={:#x} bind={} kind={} s{} pc={:#x} base={:#x} size={:#x} "
               "guest={:#x} written={} zero={}",

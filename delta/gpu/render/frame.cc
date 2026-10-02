@@ -992,6 +992,7 @@ void BeginFrame(Renderer& renderer) {
     ReleaseRetiredTargets();
     ReleaseRetiredCsBuffers();
   }
+  CsSubmitBatchBeforeFrame();
   if (!CreatePipeline())
     return;
   CreateTexPipeline();  // best-effort; colored path still works without it

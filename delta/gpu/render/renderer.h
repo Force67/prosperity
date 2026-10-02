@@ -156,6 +156,10 @@ void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
 // compute writes still pending under it land first, every cached copy of it is
 // retired, and NoteMemoryFill sees it.
 void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
+// Whether ApplyMemoryFill can leave the compute output under the fill on the
+// GPU: dropped where the fill covers it, its writeback keeping the filled
+// bytes where it does not. Otherwise the fill reads it back first.
+bool CsFillStaysOnGpu(u64 base, u64 bytes);
 
 // Does `addr` fall inside a compute staging range, i.e. guest memory the
 // renderer snapshots and copies back? A guest fault on memory the guest alone

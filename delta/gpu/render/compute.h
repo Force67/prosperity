@@ -62,6 +62,9 @@ bool CsRefreshRtFromTruth(u64 base);
 // The frame went on recording into a fresh command list (SubmitFrameChunk);
 // dispatches recorded into the frame list follow it.
 void CsFrameListChanged();
+// Put a compute batch opened between frames on the queue, ahead of the frame
+// about to begin: it may read targets the frame renders into.
+void CsSubmitBatchBeforeFrame();
 
 // Something other than a dispatch rewrote guest memory at [base, base+bytes):
 // ranges staged from it re-read it at their next use. Flush pending dispatch

@@ -148,6 +148,9 @@ DELTA_OPTION(u64, kCsFlushTrace, "DELTA_GPU_CSFLUSHTRACE", 0);
 // straddling another's unflushed output).
 DELTA_OPTION(int, kCsOverlapTrace, "DELTA_GPU_CSOVERLAP", 0);
 DELTA_OPTION(bool, kCsSyncReport, "DELTA_GPU_CSSYNC", false);
+// Every guest read that writes dispatch output back, and its cost, from this
+// frame on (a few frames' worth).
+DELTA_OPTION(int, kCsFlushFrom, "DELTA_GPU_CSFLUSH_FROM", 0);
 DELTA_OPTION(bool, kCsEagerReadback, "DELTA_GPU_CS_EAGER_READBACK", true);
 // Off by default: with the CP DMA flush narrowed, ranges a dispatch rewrites
 // every frame stay dirty indefinitely, and GTA:SA then shows ghosted
@@ -845,6 +848,9 @@ struct CsRange {
   // not written back (CsNoteGuestWrites), page aligned and coalesced. They
   // came after the dispatch, so they win over its output.
   base::Vector<base::Pair<u64, u64>> cpu_writes;
+  // Guest bytes a fill wrote over a linear image's footprint after its
+  // dispatch: the writeback keeps them, as it keeps cpu_writes.
+  base::Vector<base::Pair<u64, u64>> fill_kept;
   int dirty_frame = -1;  // frame the range last went dirty
   // Guest pages armed in the write tracker before the last hash or copy, and
   // no write reported since: the staging still holds what guest memory does.
@@ -903,6 +909,8 @@ void StampView(rhi::Buffer* view,
                u64 seq);
 bool CsRangeEnsureBuffer(CsRange& e, u64 size);
 void CsBatchBeginImpl();
+// Whether the open batch records into a list of its own (between frames).
+bool CsBatchOpenOutOfFrame();
 void MarkPending(CsRange& e);
 // The linear side of a bridge copy for a truth range (its own buffer holds
 // tiled bytes), used only inside the bridge's synchronous submit.
@@ -1531,21 +1539,39 @@ struct InFrameTarget {
   rhi::Format fmt = rhi::Format::kUndefined;  // the target's format key
 };
 
+const char* g_rec_why = "";
 bool RecordRtStageInFrame(const InFrameTarget& t,
                           const ComputeInfo::Res& res,
                           CsRange& e,
                           const AliasedCopyPlan& plan) {
   const CsAliasedImage& img = t.img;
-  if (!kCsInFrameBridge || !g_frame.recording || !e.buf || plan.widen ||
-      plan.depth16 || plan.layers != 1 || res.layers > 1 || img.layers != 1 ||
+  const u32 layers = base::Max(res.layers, 1u);
+  g_rec_why = !e.buf                                      ? "no-buf"
+              : plan.widen                                ? "widen"
+              : plan.depth16                              ? "depth16"
+              : t.layout == rhi::TextureState::kUndefined ? "layout-undef"
+              : (e.truth && plan.unpack)                  ? "truth-unpack"
+              : (e.truth && img.is_stencil)               ? "truth-stencil"
+                                                          : "layers";
+  if (!kCsInFrameBridge || !e.buf || plan.widen || plan.depth16 ||
       t.layout == rhi::TextureState::kUndefined ||
-      (e.truth && (plan.unpack || img.is_stencil)))
+      (e.truth && (plan.unpack || img.is_stencil)) ||
+      (layers == 1 ? plan.layers != 1 || img.layers != 1
+                   : plan.layers > layers || plan.unpack || img.is_stencil))
     return false;
+  g_rec_why = "late";
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(res, tiled, linear))
     return false;
   const auto& level = linear.mips[0];
+  // Layers sit one stored slice apart in the linear staging layout.
+  const u64 layer_bytes = static_cast<u64>(level.pitch) * level.stored_height *
+                          res.stage_elem_bytes;
+  if (layers > 1 && level.size != layer_bytes * layers)
+    return false;
+  // Layers the target lacks read as zero, as on the host path.
   const u64 copy_bytes =
+      layer_bytes * (plan.layers - 1) +
       static_cast<u64>(level.pitch) * plan.h * res.stage_elem_bytes;
   const TileTable* table = nullptr;
   rhi::Buffer* linear_buf = e.buf;
@@ -1573,8 +1599,15 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   if (plan.unpack && (!BlitsBetween((t.fmt), rhi::Format::kRGBA32Float) ||
                       !(float_image = GetBridgeFloatImage(plan.w, plan.h))))
     return false;
+  // Between frames the copy rides the compute batch, which goes on the queue
+  // after the frame that rendered the target and before the next one.
+  if (!g_frame.recording) {
+    CsBatchBeginImpl();
+    if (!CsBatchOpenOutOfFrame())
+      return false;
+  }
   EndRegion();
-  rhi::CommandList* const c = g_frame.list;
+  rhi::CommandList* const c = g_frame.recording ? g_frame.list : g_cs_list;
   c->Barrier(kAccessAll, kAccessCopyRW);
   constexpr rhi::TextureState kSrc = rhi::TextureState::kCopySrc;
   AliasedImageBarrier(c, img, t.layout, kSrc);
@@ -1597,6 +1630,7 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
     copy.image_height = packed.mips[0].stored_height;
   }
   copy.region.aspect = img.aspect;
+  copy.region.layers = plan.layers;
   copy.region.width = plan.w;
   copy.region.height = plan.h;
   if (plan.unpack) {
@@ -1622,7 +1656,7 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
                       /*detile=*/true, 1, 1);
   else if (table)
     RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, linear_buf, res.size,
-                      /*detile=*/false, 1, 1);
+                      /*detile=*/false, 1, layers);
   AliasedImageBarrier(c, img, kSrc, t.layout);
   c->Barrier(rhi::kAccessCopyWrite, kAccessAll);
   e.frame_ref = g_frame.num;
@@ -1681,9 +1715,23 @@ bool StageCsRangeFromRtInFrame(const ComputeInfo::Res& res, CsRange& e) {
   DELTA_ZONE("gpu.cs_stage_from_rt");
   InFrameTarget live;
   AliasedCopyPlan live_plan;
-  return LiveInFrameTarget(res.base, /*prefer_depth=*/res.dfmt == 4, live) &&
-         PlanAliasedCopy(live.img, res, "reads", live_plan) &&
-         RecordRtStageInFrame(live, res, e, live_plan);
+  const char* why = nullptr;
+  if (!LiveInFrameTarget(res.base, /*prefer_depth=*/res.dfmt == 4, live))
+    why = "no-live-target";
+  else if (!PlanAliasedCopy(live.img, res, "reads", live_plan))
+    why = "plan";
+  else if (!RecordRtStageInFrame(live, res, e, live_plan))
+    why = g_rec_why;
+  if (why && kCsSyncReport) {
+    static base::HashSet<u64> seen;
+    if (seen.size() < 64 && seen.insert(res.base).second)
+      BASE_LOGI("csbridge",
+                "{:#x} {}x{}x{} dfmt={} in frame: {} (img {}x{} "
+                "layers={} plan layers={})",
+                res.base, res.width, res.height, res.layers, res.dfmt, why,
+                live.img.w, live.img.h, live.img.layers, live_plan.layers);
+  }
+  return !why;
 }
 
 // The host-side bridge: the buffer must be idle.
@@ -1983,9 +2031,10 @@ base::Vector<u64> DirtyRangesOverlapping(u64 base,
 bool EnsureGdsBuffer() {
   if (g_gds.buf)
     return true;
-  g_gds.buf = CreateCsBuffer(GdsBuffer::kBytes,
-                             rhi::kBufferStorage | rhi::kBufferCopyDst,
-                             rhi::MemoryKind::kReadback);
+  g_gds.buf = CreateCsBuffer(
+      GdsBuffer::kBytes,
+      rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferCopySrc,
+      rhi::MemoryKind::kReadback);
   if (!g_gds.buf)
     return false;
   g_gds.map = g_gds.buf->mapped();
@@ -3266,6 +3315,14 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
                   hi - lo);
     }
   }
+  for (const auto& [lo, hi] : e.fill_kept) {
+    kept.spans.emplace_back(lo, hi);
+    const u64 at = kept.bytes.size();
+    kept.bytes.resize(at + (hi - lo));
+    std::memcpy(kept.bytes.data() + at, reinterpret_cast<const void*>(lo),
+                hi - lo);
+  }
+  e.fill_kept.clear();
   bool adopted = !kept.spans.empty();
   // DELTA_GPU_CS_SKIP_RETILE: an image the GPU refresh below can carry needs no
   // CPU retile into guest memory. Only readers that go through guest memory
@@ -3503,7 +3560,7 @@ bool CsEnsureStage(u32 i, u64 size) {
   // wants VRAM and no mapping at all.
   const bool vram = kCsVram && SplitVram();
   s.buf = CreateCsBuffer(
-      cap, rhi::kBufferStorage | rhi::kBufferCopyDst,
+      cap, rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferCopySrc,
       vram ? rhi::MemoryKind::kDevice : rhi::MemoryKind::kReadback);
   if (!s.buf)
     return false;
@@ -4585,7 +4642,8 @@ rhi::Buffer* ImportGuestPage(u64 page) {
     GuestWriteTracker().Release(page, kGuestPageImport);
     rhi::BufferDesc desc;
     desc.size = kGuestPageImport;
-    desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
+    desc.usage =
+        rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferCopySrc;
     desc.host_pointer = reinterpret_cast<void*>(page);
     buf = Device().CreateBuffer(desc);
   }
@@ -5567,8 +5625,21 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     // range. Treating that as a reshape restages the whole thing: Astro Bot
     // has two dispatches a frame that size one 39 MB buffer differently, and
     // each flip cost a full copy and a fence wait.
+    // So is an image bound with fewer of the same layers: each layer is one
+    // slice of the staging after the other. Astro Bot binds a 10240x320
+    // surface as two layers and as one, twice a frame each way.
+    const bool layer_prefix = [&] {
+      if (exact_shape || truth_i || e.truth || !e.buf || e.imported ||
+          !e.image_staging || !ci.res[i].image_staging ||
+          ci.res[i].layers >= e.res.layers || ci.res[i].mip_levels != 1 ||
+          e.size < static_cast<u64>(sz[i]) || e.guest_bytes < guest_bytes)
+        return false;
+      ComputeInfo::Res as_staged = ci.res[i];
+      as_staged.layers = e.res.layers;
+      return SameCsResourceShape(e.res, as_staged);
+    }();
     const bool subset =
-        raw_view || truth_sub ||
+        raw_view || truth_sub || layer_prefix ||
         (kCsSubset && !exact_shape && e.buf && !e.imported && !e.truth &&
          !ci.res[i].image_staging && !e.image_staging &&
          e.size >= static_cast<u64>(sz[i]) && e.guest_bytes >= guest_bytes);
@@ -5895,6 +5966,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         e.gpu_dirty = true;
         e.dirty_frame = g_frame.num;
       }
+      e.fill_kept.clear();
       e.write_seq++;
       e.dirty_stamp = ++g_cs_dirty_stamp;
       e.dirty_render_serial = g_render_serial;
@@ -6181,6 +6253,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (!it->second.gpu_dirty)
       it->second.dirty_frame = g_frame.num;
     it->second.gpu_dirty = true;
+    it->second.fill_kept.clear();
     it->second.write_seq++;
     it->second.dirty_stamp = ++g_cs_dirty_stamp;
     it->second.dirty_render_serial = g_render_serial;
@@ -6238,6 +6311,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       if (!e.gpu_dirty)
         e.dirty_frame = g_frame.num;
       e.gpu_dirty = true;
+      e.fill_kept.clear();
       e.write_seq++;
       e.dirty_stamp = ++g_cs_dirty_stamp;
       e.dirty_render_serial = g_render_serial;
@@ -6357,6 +6431,17 @@ bool CsBindsImages() {
 void CsFrameListChanged() {
   if (g_cs_batch_open && g_cs_batches[g_cs_batch_cur].in_frame)
     g_cs_list = g_frame.list;
+}
+
+namespace {
+bool CsBatchOpenOutOfFrame() {
+  return g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame;
+}
+}  // namespace
+
+void CsSubmitBatchBeforeFrame() {
+  if (CsBatchOpenOutOfFrame())
+    CsBatchSubmit();
 }
 
 bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
@@ -6551,6 +6636,30 @@ bool FlushCsWritesRange(Renderer& renderer,
     }
   }
   const WaitReaderScope reader(why);
+  struct FlushLog {
+    u64 base, bytes, t0;
+    const char* why;
+    base::Vector<u64> ranges;
+    ~FlushLog() {
+      static int shown = 0;
+      if (!kCsFlushFrom || g_frame.num < kCsFlushFrom || shown >= 400 ||
+          ranges.empty())
+        return;
+      shown++;
+      base::String line;
+      for (u64 r : ranges) {
+        auto f = g_cs_ranges.find(r);
+        if (f != g_cs_ranges.end())
+          base::FormatTo(line, " {:#x}+{:#x}{}", r, f->second.guest_bytes,
+                         f->second.truth           ? "/img"
+                         : f->second.image_staging ? "/lin"
+                                                   : "/buf");
+      }
+      BASE_LOGI("csflush", "f{} {} {:#x}+{:#x} {:.2f}ms <-{}",
+                (int)g_frame.num, why, base, bytes, (NowNs() - t0) / 1e6,
+                line.c_str());
+    }
+  } flush_log{base, bytes, NowNs(), why, overlapping};
   // Only the ranges this read overlaps are pulled across. Pulling every dirty
   // range along made later flushes wait-free while a blanket flush wrote them
   // all back each frame anyway; now most dirty ranges are never read on the
@@ -6593,11 +6702,70 @@ bool FlushCsWritesRange(Renderer& renderer,
   return all_current;
 }
 
+namespace {
+// The fill against each dirty range under it: `apply` false only asks.
+bool FillOverDirtyRanges(u64 base, u64 bytes, bool apply) {
+  const u64 end = base + bytes;
+  for (const PendingGuestWrite& w : g_pending_guest_writes)
+    if (w.base < end && base < w.end)
+      return false;
+  if (g_cs_dirty_pages.empty())
+    return true;
+  for (u64 d : DirtyRangesOverlapping(base, bytes)) {
+    auto found = g_cs_ranges.find(d);
+    if (found == g_cs_ranges.end() || !found->second.gpu_dirty)
+      continue;
+    CsRange& e = found->second;
+    if (e.imported)
+      return false;
+    if (d >= base && d + e.guest_bytes <= end) {
+      // Every byte it would write back is overwritten.
+      if (apply) {
+        UnindexDirtyRange(d, e.guest_bytes);
+        e.gpu_dirty = false;
+        e.cpu_writes.clear();
+        e.hash = 0;
+        e.last_validated_frame = -1;
+        e.mirror_current = false;
+        e.shadow_valid = false;
+        g_wb_why["fill-covered"]++;
+      }
+      continue;
+    }
+    // Output the fill covers in part keeps its own bytes, as it would under a
+    // dispatch that only writes: tiled surfaces that share memory are not each
+    // other's pixels. Only its writeback, which is older than the fill, keeps
+    // the filled bytes, the way it keeps any the CPU wrote since.
+    if (apply) {
+      u64 lo = base::Max(base, d), hi = base::Min(end, d + e.guest_bytes);
+      // Merged, or a range left dirty for many frames piles up one span per
+      // fill and its writeback copies them all.
+      base::EraseIf(e.fill_kept, [&](const base::Pair<u64, u64>& k) {
+        if (k.first > hi || lo > k.second)
+          return false;
+        lo = base::Min(lo, k.first);
+        hi = base::Max(hi, k.second);
+        return true;
+      });
+      e.fill_kept.emplace_back(lo, hi);
+      g_wb_why["fill-kept"]++;
+    }
+  }
+  return true;
+}
+}  // namespace
+
+bool CsFillStaysOnGpu(u64 base, u64 bytes) {
+  return FillOverDirtyRanges(base, bytes, false);
+}
+
 void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
   BumpTextureEpoch();
   if (!bytes)
     return;
-  FlushCsWritesRange(renderer, base, bytes, "fill");
+  if (!FillOverDirtyRanges(base, bytes, false) ||
+      !FillOverDirtyRanges(base, bytes, true))
+    FlushCsWritesRange(renderer, base, bytes, "fill");
   u32* words = reinterpret_cast<u32*>(base);
   base::Fill(words, words + bytes / 4, value);
   CsForgetGuestRange(base, bytes);

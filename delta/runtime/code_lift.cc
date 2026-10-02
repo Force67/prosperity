@@ -29,6 +29,8 @@
 
 namespace {
 DELTA_OPTION(bool, kSysliftTrace, "DELTA_SYSLIFT_TRACE", false);
+// Sweep every lifted segment afterwards and log the fs accesses left raw.
+DELTA_OPTION(bool, kSysliftVerify, "DELTA_SYSLIFT_VERIFY", false);
 }  // namespace
 
 namespace runtime {
@@ -162,6 +164,29 @@ bool CodeLift::Transform(u8* data, size_t size, u64 base) {
       }
   }
 
+  if (kSysliftVerify) {
+    u32 missed = 0;
+    for (size_t off = 0; off < size;) {
+      if (!decode_at(off)) {
+        off++;
+        continue;
+      }
+      const auto& x = insn_->detail->x86;
+      for (u8 i = 0; i < x.op_count; i++)
+        if (x.operands[i].type == X86_OP_MEM &&
+            x.operands[i].mem.segment == X86_REG_FS) {
+          if (missed++ < 64)
+            BASE_LOGI("fsverify", "raw fs access at {:#x} {} {}",
+                      (unsigned long)(data + off), insn_->mnemonic,
+                      insn_->op_str);
+          break;
+        }
+      off += insn_->size;
+    }
+    BASE_LOGI("fsverify", "segment {:#x}+{:#x}: {} raw fs accesses",
+              (unsigned long)base, size, missed);
+  }
+
   // libkernel's stub: `mov rax, imm32; mov r10, rcx; syscall`.
   static constexpr u8 kMovRax[] = {0x48, 0xc7, 0xc0};
   static constexpr u8 kSyscall[] = {0x0f, 0x05};
@@ -206,7 +231,7 @@ void CodeLift::EmitFsbase(u8* base) {
   // read `mov reg, fs:[disp]` and the write `mov fs:[disp], reg`; the write
   // form is what libc's TLS init uses, and leaving it raw lets it clobber the
   // host fs base. Only the absolute fs:[disp] form (no base/index) and 4/8-byte
-  // GPR operands are handled; anything else is left untouched
+  // GPR or immediate operands are handled; anything else is left untouched
   // (capstone_to_xbyak only maps 32/64-bit registers, so we must not feed it
   // sub-registers).
   int mem_idx = operands[0].type == X86_OP_MEM   ? 0
@@ -215,26 +240,33 @@ void CodeLift::EmitFsbase(u8* base) {
   int reg_idx = operands[0].type == X86_OP_REG   ? 0
                 : operands[1].type == X86_OP_REG ? 1
                                                  : -1;
-  if (mem_idx < 0 || reg_idx < 0)
+  // libkernel and libc also store immediates (`mov dword fs:[0x28], imm`, an
+  // error code); raw, that lands on the host's stack guard.
+  const bool imm_store = mem_idx == 0 && operands[1].type == X86_OP_IMM;
+  if (mem_idx < 0 || (reg_idx < 0 && !imm_store))
     return;
   auto& mem = operands[mem_idx];
-  auto& gpr = operands[reg_idx];
   if (mem.mem.segment != X86_REG_FS || mem.mem.base != X86_REG_INVALID ||
       mem.mem.index != X86_REG_INVALID)
     return;
-  if (gpr.size != 8 && gpr.size != 4)
+  const u8 size = imm_store ? mem.size : operands[reg_idx].size;
+  if (size != 8 && size != 4)
     return;
   if (insn_->size < 5)
     return;
 
-  const bool is_write = (mem_idx == 0);  // mov fs:[disp], reg
-  auto reg = Xbyak::Reg64(CapstoneToXbyak(gpr.reg));
+  const bool is_write = (mem_idx == 0);  // mov fs:[disp], reg/imm
+  auto reg = imm_store ? Xbyak::util::rax
+                       : Xbyak::Reg64(CapstoneToXbyak(operands[reg_idx].reg));
+  const i32 imm = imm_store ? static_cast<i32>(operands[1].imm) : 0;
 
   struct FsGen : Xbyak::CodeGenerator {
     FsGen(Xbyak::Reg64 reg,
           i32 disp,
           u8 size,
           bool is_write,
+          bool imm_store,
+          i32 imm,
           i32 guest_fs_offset,
           i32 scratch_offset) {
       if (!is_write) {
@@ -250,7 +282,11 @@ void CodeLift::EmitFsbase(u8* base) {
         mov(ptr[scratch_offset], tmp);
         putSeg(fs);
         mov(tmp, ptr[guest_fs_offset]);
-        if (size == 4)
+        if (imm_store && size == 4)
+          mov(dword[tmp + disp], imm);
+        else if (imm_store)
+          mov(qword[tmp + disp], imm);
+        else if (size == 4)
           mov(ptr[tmp + disp], reg.cvt32());
         else
           mov(ptr[tmp + disp], reg);
@@ -261,8 +297,8 @@ void CodeLift::EmitFsbase(u8* base) {
   };
 
   auto fs_disp = static_cast<i32>(mem.mem.disp);
-  FsGen gen(reg, fs_disp, gpr.size, is_write, cpu::HostGuestFsOffset(),
-            cpu::HostFsScratchOffset());
+  FsGen gen(reg, fs_disp, size, is_write, imm_store, imm,
+            cpu::HostGuestFsOffset(), cpu::HostFsScratchOffset());
 
   // Don't run past the rip-zone (sized to the segment in the loader). Leaving a
   // tail access raw is worse than ideal but far better than scribbling past the

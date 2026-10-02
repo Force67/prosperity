@@ -14,6 +14,7 @@
 #include "base/meta/traits.h"
 #include "options/options.h"
 
+#include "base/atomic.h"
 #include "base/containers/array.h"
 #include "base/containers/map.h"
 #include "base/containers/vector.h"
@@ -32,8 +33,8 @@
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/dmem_aliases.h"
 #include "gpu/ps5/draw_state.h"
-#include "gpu/ps5/label_publisher.h"
 #include "gpu/ps5/guest_address.h"
+#include "gpu/ps5/label_publisher.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/reg_state.h"
 #include "gpu/render/command.h"
@@ -141,6 +142,20 @@ u64 GpuClockTimestamp() {
   return static_cast<u64>((base::TickClock::NowNs()));
 }
 
+// The last label writes, read only when a wait has hung: logging them as they
+// happen changes the timing enough that the hang goes away.
+struct LabelWrite {
+  u64 address, value, ns;
+};
+LabelWrite g_label_history[256];
+base::Atomic<u32> g_label_history_n{0};
+
+void RecordLabelWrite(u64 address, u64 value) {
+  const u32 i =
+      g_label_history_n.fetch_add(1) % base::ArraySize(g_label_history);
+  g_label_history[i] = {address, value, base::TickClock::NowNs()};
+}
+
 // Our submit is synchronous: every draw in the buffer is finished by the time
 // the walk passes these packets, so the fence the GPU would signal is complete
 // the instant we process it. Writing it immediately is what lets the guest's
@@ -152,6 +167,7 @@ void WriteLabel(u64 address, u64 value, bool is_64bit) {
     *reinterpret_cast<volatile u64*>(address) = value;
   else
     *reinterpret_cast<volatile u32*>(address) = static_cast<u32>(value);
+  RecordLabelWrite(address, value);
 }
 
 // INT_SEL asks the CP to raise an end-of-pipe interrupt once the write lands.
@@ -261,6 +277,9 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       const auto* from = reinterpret_cast<const u8*>(src);
       PublishLabel([dst, data = base::Vector<u8>(from, from + bytes)] {
         std::memcpy(reinterpret_cast<void*>(dst), data.data(), data.size());
+        u32 first = 0;
+        std::memcpy(&first, data.data(), base::Min<size_t>(4, data.size()));
+        RecordLabelWrite(dst, first);
       });
     } else {
       std::memcpy(reinterpret_cast<void*>(dst),
@@ -277,8 +296,10 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
     if (bytes <= kLabelBytes) {
       PublishLabel([dst, bytes, fill] {
         u32* words = reinterpret_cast<u32*>(dst);
-        for (u32 k = 0; k < bytes / 4; k++)
+        for (u32 k = 0; k < bytes / 4; k++) {
           words[k] = fill;
+          RecordLabelWrite(dst + k * 4, fill);
+        }
       });
     } else {
       u32* words = reinterpret_cast<u32*>(dst);
@@ -480,6 +501,20 @@ bool StallOnWait(u32 op, const u32* body, u32 count) {
     BASE_LOGW("agc", "queue {} waitOnAddress {:#x} ref={:#x} remains pending",
               render::g_submit_queue, (unsigned long)address,
               (unsigned long)ref);
+    const u64 now_ns = base::TickClock::NowNs();
+    for (const auto& [q, s] : g_ring_queues) {
+      if (!s.stall.wait_addr)
+        continue;
+      BASE_LOGW("agc", "  queue {} last wait {:#x} ref={:#x} now={:#x}", q,
+                (unsigned long)s.stall.wait_addr,
+                (unsigned long)s.stall.wait_ref,
+                (unsigned long)*reinterpret_cast<const volatile u32*>(
+                    s.stall.wait_addr));
+      for (const LabelWrite& w : g_label_history)
+        if (w.address == s.stall.wait_addr)
+          BASE_LOGW("agc", "    written {:#x} {:.3f} s ago", w.value,
+                    (now_ns - w.ns) / 1e9);
+    }
     ReportHeldLabels();
     g_queue->stall.wait_since = now;
   }
@@ -510,6 +545,7 @@ void HandleWriteData(const u32* body, u32 count) {
     PublishLabel([address, words = base::Vector<u32>(body + 3, body + count)] {
       std::memcpy(reinterpret_cast<void*>(address), words.data(),
                   words.size() * 4);
+      RecordLabelWrite(address, words[0]);
     });
 }
 

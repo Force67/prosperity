@@ -42,6 +42,8 @@
 #include "options/options.h"
 #include "write_watch/write_watch.h"
 
+extern "C" char __executable_start, etext;  // linker-defined bounds
+
 namespace {
 DELTA_OPTION(uintptr_t, kBrkTrace, "DELTA_GUEST_BRK_TRACE", 0);
 DELTA_OPTION(const char*, kBrkDump, "DELTA_GUEST_BRK_DUMP", nullptr);
@@ -815,6 +817,12 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
       Symbolize(v, sym, sizeof(sym));
       if (std::strstr(sym, "(.text)")) {
         BASE_LOGI("crashHandler", "  sp+{:<5x} {:016x}  {}", i * 8, v, sym);
+      } else if (v >= reinterpret_cast<uintptr_t>(&__executable_start) &&
+                 v < reinterpret_cast<uintptr_t>(&etext)) {
+        // A host fault inside a library leaves no frame pointers to walk:
+        // our own return addresses on the stack are the backtrace.
+        BASE_LOGI("crashHandler", "  sp+{:<5x} {:016x}  host+{:#x}", i * 8, v,
+                  v - reinterpret_cast<uintptr_t>(&__executable_start));
       } else if (v >= 0x4000000000ull && v < 0x4100000000ull) {
         auto* s = reinterpret_cast<const char*>(v);
         int n = 0;

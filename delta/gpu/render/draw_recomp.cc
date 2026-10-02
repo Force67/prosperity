@@ -253,6 +253,7 @@ struct GpuStaged {
   int frame = -1;
 };
 base::HashMap<u64, GpuStaged> g_sbo_gpu;
+base::HashMap<u64, GpuStaged> g_ubo_gpu;
 
 // Drops every tracked entry the guest has written since the last call. Runs
 // when a new submission starts and whenever compute results have landed in
@@ -1327,6 +1328,72 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
   }
 
+  // Cbuffers a dispatch wrote and still holds in VRAM: copied into the ring on
+  // the GPU like the raw windows below, so the draw waits for no readback.
+  const u32 cbufs_used = d.recomp->indirect_cbufs
+                             ? gpu::gcn::kIndirectCbufBindings
+                             : kCbufBindings;
+  u64 cb_gpu_off[gpu::gcn::kIndirectCbufBindings];
+  base::Fill(cb_gpu_off, cb_gpu_off + base::ArraySize(cb_gpu_off), u64(-1));
+  if (EnsureCbufRing())
+    for (u32 i = 0; i < cbufs_used; i++) {
+      const auto& cb = d.cbufs[i];
+      const u32 planned = base::Min(cb.size, kCbufWindow);
+      if (!planned)
+        continue;
+      const u64 page_end = (cb.base + 0x1000) & ~u64{0xFFF};
+      const u32 n = kTightCbuf
+                        ? planned
+                        : base::Max(planned, static_cast<u32>(base::Min<u64>(
+                                                 kCbufWindow,
+                                                 page_end - cb.base)));
+      const u64 rev = CsBufferRevision(cb.base, n);
+      if (!rev)
+        continue;
+      GpuStaged& staged = g_ubo_gpu[cb.base];
+      if (staged.frame == g_frame.num && staged.rev == rev &&
+          staged.bytes >= n) {
+        cb_gpu_off[i] = staged.off;
+        continue;
+      }
+      const u64 off = (g_ring.ubo_offset + g_ring.ubo_align - 1) &
+                      ~(u64)(g_ring.ubo_align - 1);
+      if (off + n > g_ring.ubo_end ||
+          !CsSupplyBuffer(cb.base, n, g_ring.ubo_buf, off))
+        continue;  // the guest-memory path below takes it
+      g_ring.ubo_offset = off + n;
+      staged = {off, n, rev, g_frame.num};
+      cb_gpu_off[i] = off;
+    }
+
+  // Dispatch output this draw reads through guest memory is written back
+  // now, before the pass opens: in frame, the wait submits the open chunk and
+  // starts a new command list, and a pass already recording into the old one
+  // would keep going into a list that has ended.
+  {
+    for (u32 i = 0; i < cbufs_used; i++) {
+      const auto& cb = d.cbufs[i];
+      const u32 readable = base::Min(cb.size, kCbufWindow);
+      if (cb_gpu_off[i] == u64(-1) && readable &&
+          IsReadableThisFrame(cb.base, readable) &&
+          !FlushCsWritesRange(renderer, cb.base, kCbufWindow, "cb"))
+        return Decline(kNoRecomp);
+    }
+    if (rp->raw_bufs)
+      for (u32 i = 0; i < kRawBufBindings; i++) {
+        const auto& rb = d.bufs[i];
+        const u32 want = base::Min(rb.size, kRawBufWindow);
+        if (want && !CsBufferRevision(rb.base, want) &&
+            !FlushCsWritesRange(renderer, rb.base, want, "raw"))
+          return Decline(kNoRecomp);
+      }
+    for (u32 j = 0; j < nbind; j++)
+      if (bind_size[j] && vb_cached[j] == u64(-1) && !vb_kept[j].buffer &&
+          !FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.vbufs[j].data),
+                              bind_size[j], "vb"))
+        return Decline(kNoRecomp);
+  }
+
   // Raw windows a dispatch wrote and still holds in VRAM: copied into the ring
   // on the GPU, before the pass opens, instead of read back through guest
   // memory below (a fence wait and a readback each). GTA:SA reads one 4 MiB
@@ -1704,6 +1771,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     const bool have_cbuf = readable && IsReadableThisFrame(cb.base, readable);
     if (have_cbuf)
       cbuf_mask |= i < 32 ? 1u << i : 0;
+    if (cb_gpu_off[i] != u64(-1)) {
+      dyn_off[i] = static_cast<u32>(cb_gpu_off[i]);
+      continue;
+    }
     if (!have_cbuf && i != 0) {
       dyn_off[i] = 0;  // shared zero window (see BeginFrame)
       continue;
@@ -1729,7 +1800,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
     u8* cb_dst = g_ring.ubo_map + next;
     u32 n;
-    if (have_cbuf && !FlushCsWritesRange(renderer, cb.base, kCbufWindow, "cb"))
+    if (have_cbuf &&
+        (!FlushCsWritesRange(renderer, cb.base, kCbufWindow, "cb") ||
+         g_frame.list != list))
       return Decline(kNoRecomp);
     if (have_cbuf) {
       // Upload as much of the window as the base's page holds, not just the
@@ -1857,7 +1930,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       // is short and even in the second frame slot.
       if (off + reserve > g_ring.sbo_end || off + kRawBufWindow > kSboRing)
         return Decline(kRing);
-      if (!FlushCsWritesRange(renderer, rb.base, want, "raw"))
+      if (!FlushCsWritesRange(renderer, rb.base, want, "raw") ||
+          g_frame.list != list)
         return Decline(kNoRecomp);
       u8* dst = g_ring.sbo_map + off;
       const bool tracked = ArmForCache(rb.base, want);
@@ -1904,7 +1978,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     if (!bind_size[j] || vb_cached[j] != u64(-1) || vb_kept[j].buffer)
       continue;
     if (!FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.vbufs[j].data),
-                            bind_size[j], "vb"))
+                            bind_size[j], "vb") ||
+        g_frame.list != list)
       return Decline(kNoRecomp);
     const bool tracked =
         ArmForCache(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j]);
