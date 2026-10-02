@@ -8,14 +8,25 @@
 #include "DroidSans.hpp"
 #include "base/algorithm.h"
 #include "base/memory/mem_ops.h"
+#include "base/random/random.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
+#include "base/time/time.h"
 #include "imgui.h"
+#include "options/options.h"
+#include "ui/home_background.h"
 #include "ui/overlay.h"
 #include "ui/overlay_theme.h"
 
 namespace ui {
 namespace {
+DELTA_OPTION(
+    u32,
+    kBackgroundStyle,
+    "DELTA_UI_BACKGROUND",
+    0,
+    "home fallback: 0 random, 1 current, 2 liquid glass, 3 signal formation");
+
 struct Artwork {
   int icon = -1;
   int background = -1;
@@ -27,6 +38,7 @@ struct AtlasImage {
 };
 
 bool g_active = false;
+u32 g_background_style = 1;
 bool g_ps4_ready = false;
 bool g_ps5_ready = false;
 bool g_done = false;
@@ -37,6 +49,8 @@ mem_size g_first = 0;
 mem_size g_background_selection = 0;
 mem_size g_previous_background = 0;
 float g_background_transition = 1;
+u64 g_started_ns = 0;
+u64 g_selection_ns = 0;
 ImFont* g_heading = nullptr;
 base::String g_result;
 base::String g_error;
@@ -148,7 +162,7 @@ void DrawArtwork(ImDrawList* dl,
 }
 
 void Play(const base::String& path) {
-  struct stat info{};
+  struct stat info {};
   if (::stat(path.c_str(), &info) != 0) {
     g_error = "This game is no longer at its saved location.";
     return;
@@ -230,6 +244,18 @@ bool HomeScreenActive() {
   return g_active;
 }
 
+HomeBackground HomeScreenBackground() {
+  HomeBackground background;
+  if (!g_active)
+    return background;
+  background.visible = g_games->empty() || g_artwork[g_selected].background < 0;
+  background.style = g_background_style;
+  const auto now = base::TickClock::NowNs();
+  background.time = float(now - g_started_ns) / 1e9f;
+  background.pulse = g_selection_ns ? float(now - g_selection_ns) / 1e9f : 20;
+  return background;
+}
+
 void HomeScreenBuild(u32 width, u32 height) {
   ReadDialogResult();
   const float w = float(width), h = float(height);
@@ -265,12 +291,14 @@ void HomeScreenBuild(u32 width, u32 height) {
     g_first = g_selected - visible + 1;
 
   ImDrawList* bg = ImGui::GetBackgroundDrawList();
-  bg->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), overlay_theme::kCanvas);
+  if (!HomeScreenBackground().visible)
+    bg->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), overlay_theme::kCanvas);
   if (!g_games->empty()) {
     if (g_selected != g_background_selection) {
       g_previous_background = g_background_selection;
       g_background_selection = g_selected;
       g_background_transition = 0;
+      g_selection_ns = base::TickClock::NowNs();
     }
     g_background_transition = base::Min(
         1.0f, g_background_transition + ImGui::GetIO().DeltaTime / 0.2f);
@@ -282,10 +310,11 @@ void HomeScreenBuild(u32 width, u32 height) {
     DrawArtwork(bg, g_artwork[g_background_selection].background, ImVec2(0, 0),
                 ImVec2(w, h), 0,
                 IM_COL32(255, 255, 255, static_cast<int>(255 * fade)));
-    bg->AddRectFilledMultiColor(
-        ImVec2(0, 0), ImVec2(w, h), IM_COL32(12, 13, 17, 210),
-        IM_COL32(12, 13, 17, 95), IM_COL32(12, 13, 17, 210),
-        IM_COL32(12, 13, 17, 245));
+    if (!HomeScreenBackground().visible)
+      bg->AddRectFilledMultiColor(
+          ImVec2(0, 0), ImVec2(w, h), IM_COL32(12, 13, 17, 210),
+          IM_COL32(12, 13, 17, 95), IM_COL32(12, 13, 17, 210),
+          IM_COL32(12, 13, 17, 245));
   }
   ImGui::SetNextWindowPos(ImVec2(0, 0));
   ImGui::SetNextWindowSize(ImVec2(w, h));
@@ -405,12 +434,30 @@ void HomeScreenBuild(u32 width, u32 height) {
   if (!g_error.empty())
     dl->AddText(ImVec2(margin, h - 64), overlay_theme::kWarning,
                 g_error.c_str());
+  const auto background = HomeScreenBackground();
+  if (background.visible && background.style == 4 && background.time > 6) {
+    constexpr char kAnniversary[] = "EST 2019";
+    ImFont* font = overlay_theme::MonospaceFont();
+    const float opacity = base::Min((background.time - 6) / 2, 1.0f);
+    const float text_width = font->CalcTextSizeA(15, w, 0, kAnniversary).x;
+    const float x = w * 0.5f + h * 0.39f - text_width * 0.5f;
+    const float y = base::Min(h * 0.81f, h - 72);
+    dl->AddText(font, 15, ImVec2(x, y),
+                IM_COL32(220, 202, 167, static_cast<int>(opacity * 175)),
+                kAnniversary);
+  }
   ImGui::End();
 }
 
 void BeginHomeScreen(const base::Vector<HomeGame>& games,
                      bool ps4_ready,
                      bool ps5_ready) {
+  const u32 requested = kBackgroundStyle.get();
+  g_background_style = requested >= 1 && requested <= 3
+                           ? requested
+                           : ChooseHomeBackground(base::RandomUint(0, 767));
+  g_started_ns = base::TickClock::NowNs();
+  g_selection_ns = 0;
   g_ps4_ready = ps4_ready;
   g_ps5_ready = ps5_ready;
   g_games = &games;
@@ -449,6 +496,9 @@ base::String EndHomeScreen() {
 }
 bool HomeScreenActive() {
   return false;
+}
+HomeBackground HomeScreenBackground() {
+  return {};
 }
 void HomeScreenBuild(u32, u32) {}
 }  // namespace ui

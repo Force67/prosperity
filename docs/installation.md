@@ -13,6 +13,7 @@ Start without a game path:
 
 Choose a recent game and press **Play**, or use **Open game** / **Open folder**.
 Each card shows a PS4 or PS5 badge from the game's metadata.
+Games without background art use an animated Delta backdrop chosen at random.
 A banner lists missing firmware modules and the setup commands to import them.
 Arrow keys browse the cards, Enter plays, O opens a file, and Esc exits.
 A controller's D-pad browses; Cross plays, Triangle opens, and Circle exits.

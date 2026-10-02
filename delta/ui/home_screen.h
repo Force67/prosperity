@@ -22,7 +22,15 @@ void BeginHomeScreen(const base::Vector<HomeGame>& games,
 bool HomeScreenDone();
 // Returns the selected game path, or an empty string when the window closes.
 base::String EndHomeScreen();
+struct HomeBackground {
+  bool visible = false;
+  u32 style = 1;
+  float time = 0;
+  float pulse = 20;
+};
+
 bool HomeScreenActive();
+HomeBackground HomeScreenBackground();
 void HomeScreenBuild(u32 width, u32 height);
 
 }  // namespace ui

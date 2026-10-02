@@ -11,6 +11,7 @@ Desktop ImGui menus and overlays. Namespace `ui`.
 | `overlay_busy.h` | Animated shader compilation and frame busy toast |
 | `shader_activity.h` | Thread-safe compiler activity tracking |
 | `input_sdl.h` | SDL mouse, keyboard, and controller events for the UI |
+| `home_background_vk.h` | Procedural logo backgrounds when game artwork is missing |
 | `overlay_vk.h` | ImGui Vulkan pipeline and font texture |
 
 `host` owns the window, swapchain, and event pump. It forwards events and calls
@@ -27,3 +28,21 @@ when the game presents a frame.
 
 Android builds only the compiler activity tracker. The Android app uses its
 own touch controls.
+
+Each menu session chooses a fallback at random and keeps it while browsing.
+Delta current, liquid glass, and signal formation share the normal rotation.
+A gold anniversary scene appears with a 1-in-256 chance and reveals "EST 2019"
+after six seconds. Artwork takes priority; an empty library uses the fallback too.
+
+`+DELTA_UI_BACKGROUND=0` is the default random selection. For development,
+`=1`, `=2`, and `=3` select the normal styles. The anniversary scene is available
+only through the rare random selection.
+
+Shader sources are in `shaders/home_background.vert` and `.frag`. Rebuild their
+checked-in SPIR-V headers with `tools/gen_spv.sh` and `glslangValidator`:
+
+```bash
+tools/gen_spv.sh delta/ui/shaders/home_background.vert kHomeBackgroundVert delta/ui/shaders/home_background_vert.h
+tools/gen_spv.sh delta/ui/shaders/home_background.frag kHomeBackgroundFrag delta/ui/shaders/home_background_frag.h
+clang-format -i delta/ui/shaders/home_background_{vert,frag}.h
+```

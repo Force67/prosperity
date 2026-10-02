@@ -18,6 +18,8 @@
 
 #include "base/containers/vector.h"
 #include "imgui.h"
+#include "ui/home_background_vk.h"
+#include "ui/home_screen.h"
 #include "ui/overlay.h"
 #include "ui/overlay_vk_shaders.h"
 
@@ -421,6 +423,8 @@ bool OverlayVkInit(VkPhysicalDevice phys,
     BASE_LOGI("overlay", "Vulkan backend init failed");
     return false;
   }
+  if (!HomeBackgroundVkInit(g_vk.device, g_vk.pass))
+    BASE_LOGI("overlay", "home background pipeline unavailable");
   g_vk.ready = true;
   return true;
 }
@@ -488,6 +492,10 @@ bool OverlayVkRender(VkCommandBuffer cmd, u32 image_index) {
   rp.framebuffer = g_vk.fbs[image_index];
   rp.renderArea.extent = g_vk.extent;
   vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
+  const auto background = HomeScreenBackground();
+  if (background.visible)
+    HomeBackgroundVkDraw(cmd, fb_w, fb_h, background.time, background.style,
+                         background.pulse);
 
   if (dd && dd->TotalVtxCount > 0) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_vk.pipe);
@@ -529,6 +537,7 @@ void OverlayVkShutdown() {
     return;
   vkDeviceWaitIdle(g_vk.device);
   DestroyFramebuffers();
+  HomeBackgroundVkShutdown();
   for (Frame& frame : g_vk.frames)
     DestroyFrame(frame);
   if (g_vk.pipe)
