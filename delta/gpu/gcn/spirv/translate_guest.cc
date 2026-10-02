@@ -1,6 +1,7 @@
 /* PS4Delta: checked guest-address reads and writes for runtime compute. */
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 #include "base/containers/vector.h"
+#include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/spirv/translator.h"
 
 namespace gpu::gcn {
@@ -160,6 +161,90 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding) {
                {host, t.m.Emit(spv::Op::OpISub, wide, {args[0], base})});
   t.m.EmitVoid(spv::Op::OpReturnValue, {t.m.Emit(spv::Op::OpSelect, wide,
                                                  {valid, translated, zero64})});
+  t.m.EndFunction();
+}
+
+void DeclareDirectMemory(Translator& t, StageContext& sc) {
+  constexpr u64 kBase = 0x300000000ull, kSize = 0x1000000000ull;
+  constexpr u32 kShift = 16, kMissSlots = 63;
+  t.m.PhysicalStorageBuffers();
+  const Id wide = t.m.TypeInt(64, false);
+  const auto constant = [&](u64 v) {
+    return Pair(t, t.U32(static_cast<u32>(v)), t.U32(static_cast<u32>(v >> 32)));
+  };
+  base::Vector<Id> args;
+  sc.cs_guest_translate =
+      t.m.BeginFunction(wide, t.m.TypeFunction(wide, {wide, t.t_u, t.t_u}),
+                        {wide, t.t_u, t.t_u}, &args);
+  t.m.Name(sc.cs_guest_translate, "translate_direct_address");
+  const Id rel = t.m.Emit(spv::Op::OpISub, wide, {args[0], constant(kBase)});
+  const Id inside =
+      t.m.Emit(spv::Op::OpULessThan, t.t_bool, {rel, constant(kSize)});
+  const Id index = t.m.Emit(
+      spv::Op::OpSelect, wide,
+      {inside, t.m.Emit(spv::Op::OpShiftRightLogical, wide, {rel, t.U32(kShift)}),
+       constant(0)});
+  const Id u64_ptr =
+      t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, wide);
+  const Id slot = t.m.Emit(
+      spv::Op::OpIAdd, wide,
+      {constant(gpu::gcn::g_direct_table),
+       t.m.Emit(spv::Op::OpShiftLeftLogical, wide, {index, t.U32(3)})});
+  const Id entry = t.m.Emit(
+      spv::Op::OpLoad, wide,
+      {t.m.Emit(spv::Op::OpConvertUToPtr, u64_ptr, {slot}),
+       static_cast<u32>(spv::MemoryAccessMask::Aligned), 8});
+  const Id held =
+      t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {entry, constant(0)});
+  const Id reading = t.IsZero(args[2]);
+  const Id valid = t.LAnd(t.LAnd(inside, held), reading);
+  {
+    const Id report = t.LAnd(
+        t.LAnd(inside, t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {held})),
+        reading);
+    const Id record = t.m.NewBlock(), store = t.m.NewBlock(),
+             stored = t.m.NewBlock(), reported = t.m.NewBlock();
+    t.m.SelectionMerge(reported);
+    t.m.BranchConditional(report, record, reported);
+    t.m.OpenBlock(record);
+    const Id u32_ptr =
+        t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
+    const auto at = [&](Id byte) {
+      return t.m.Emit(spv::Op::OpConvertUToPtr, u32_ptr,
+                      {t.m.Emit(spv::Op::OpIAdd, wide,
+                                {constant(gpu::gcn::g_direct_misses),
+                                 Wide(t, byte)})});
+    };
+    const Id device = t.U32(static_cast<u32>(spv::Scope::Device));
+    const Id zero = t.U32(0);
+    const Id n = t.m.Emit(spv::Op::OpAtomicIAdd, t.t_u,
+                          {at(zero), device, zero, t.U32(1)});
+    const Id has_slot = t.Ult(n, t.U32(kMissSlots));
+    t.m.SelectionMerge(stored);
+    t.m.BranchConditional(has_slot, store, stored);
+    t.m.OpenBlock(store);
+    const Id offset = t.Add(t.U32(8), t.Mul(n, t.U32(8)));
+    t.m.Emit(spv::Op::OpAtomicExchange, t.t_u,
+             {at(offset), device, zero,
+              t.m.Emit(spv::Op::OpUConvert, t.t_u, {args[0]})});
+    t.m.Emit(spv::Op::OpAtomicExchange, t.t_u,
+             {at(t.Add(offset, t.U32(4))), device, zero,
+              t.m.Emit(spv::Op::OpUConvert, t.t_u,
+                       {t.m.Emit(spv::Op::OpShiftRightLogical, wide,
+                                 {args[0], t.U32(32)})})});
+    t.m.Branch(stored);
+    t.m.OpenBlock(stored);
+    t.m.Branch(reported);
+    t.m.OpenBlock(reported);
+  }
+  const Id within = t.m.Emit(
+      spv::Op::OpBitwiseAnd, wide,
+      {args[0], constant((1ull << kShift) - 1)});
+  t.m.EmitVoid(
+      spv::Op::OpReturnValue,
+      {t.m.Emit(spv::Op::OpSelect, wide,
+                {valid, t.m.Emit(spv::Op::OpIAdd, wide, {entry, within}),
+                 constant(0)})});
   t.m.EndFunction();
 }
 

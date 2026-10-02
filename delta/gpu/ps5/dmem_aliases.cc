@@ -8,6 +8,7 @@
 #include "base/math/value_bounds.h"
 #include "base/memory/move.h"
 #include "gpu/ps5/guest_memory_ranges.h"
+#include "gpu/render/guest_direct.h"
 #include "gpu/write_tracker.h"
 
 namespace gpu::ps5 {
@@ -27,7 +28,7 @@ struct Piece {
 base::Vector<Piece> FilePieces() {
   base::Vector<Piece> pieces;
   for (const HostMapping& m : HostMappings()) {
-    if (!m.inode)
+    if (!m.inode || render::InDirectAlias(m.begin))
       continue;
     const u64 file = (u64(m.major) << 40) ^ (u64(m.minor) << 32) ^ m.inode;
     const u64 bytes = m.end - m.begin;

@@ -140,6 +140,8 @@ int CsBindingFor(StageContext& sc, u32 pc) {
   auto it = sc.cs_bind.find(pc);
   if (it == sc.cs_bind.end())
     return -1;
+  if (sc.direct && sc.cs_runtime_resources.count(it->second))
+    return static_cast<int>(it->second);
   if (it->second >= sc.cs_ssbo.size()) {
     WarnUnsupported("cs.binding-for", pc, it->second,
                     static_cast<u32>(sc.cs_ssbo.size()));
@@ -1532,6 +1534,37 @@ static Id BeginCsIndexedStore(Translator& t, const Inst& inst) {
   return merge;
 }
 
+// gfx10.3's unified buffer format enum as the GCN (dfmt, nfmt) pair, at run
+// time: consecutive runs of one channel layout, each UNorm, SNorm, UScaled,
+// SScaled, UInt, SInt [, Float] (rdna::DecodeBufferFormat is the same table).
+void RdnaFormatPair(Translator& t, Id gfmt, Id& dfmt, Id& nfmt) {
+  struct Run {
+    u8 first, count, dfmt;
+    bool has_float;
+  };
+  static constexpr Run kRuns[] = {
+      {1, 6, 1, false},   {7, 7, 2, true},    {14, 6, 3, false},
+      {20, 3, 4, true},   {23, 7, 5, true},   {30, 7, 7, true},
+      {37, 7, 6, true},   {44, 6, 8, false},  {50, 6, 9, false},
+      {56, 6, 10, false}, {62, 3, 11, true},  {65, 7, 12, true},
+      {72, 3, 13, true},  {75, 3, 14, true},
+  };
+  dfmt = t.U32(0);
+  nfmt = t.U32(0);
+  for (const Run& r : kRuns) {
+    const Id i = t.Sub(gfmt, t.U32(r.first));
+    const Id in = t.Ult(i, t.U32(r.count));
+    Id n = i;
+    if (r.count == 3)
+      n = t.SelectB(t.Eq(i, t.U32(0)), t.U32(4),
+                    t.SelectB(t.Eq(i, t.U32(1)), t.U32(5), t.U32(7)));
+    else if (r.has_float)
+      n = t.SelectB(t.Eq(i, t.U32(6)), t.U32(7), i);
+    dfmt = t.SelectB(in, t.U32(r.dfmt), dfmt);
+    nfmt = t.SelectB(in, n, nfmt);
+  }
+}
+
 void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const u32 op = (w >> 18) & 0x7F, inst_offset = w & 0xFFF;
@@ -1654,6 +1687,19 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
       // Converted as the V#'s DATA_FORMAT / NUM_FORMAT say: a skinning job
       // storing xyz into an RGBA16F stream wrote 12 raw bytes, over the next
       // attribute and into the next vertex's position.
+      if (sc.direct && op <= 0x03) {
+        Id dfmt, nfmt;
+        RdnaFormatPair(t, t.And(t.Shr(t.Sg(srsrc + 3), t.U32(12)), t.U32(0x7F)),
+                       dfmt, nfmt);
+        const BufferFormat f = DecodeBufferFormat(t, dfmt, nfmt);
+        const auto load_word = [&](Id idx) {
+          return CsGuestLoad(t, sc, binding, idx);
+        };
+        for (u32 i = 0; i <= op; i++)
+          t.SetVg(vdata + i,
+                  FormattedComponentWith(t, f, load_word, byte_off, i));
+        break;
+      }
       if (sc.cs_runtime_resources.count(binding)) {
         if (op <= 0x03)
           load_dwords(op + 1);
@@ -1745,13 +1791,21 @@ void EmitCsMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   const u32 n = (op & 3) + 1;
-  if (!MtbufIsRawDwords(inst, n))
+  if (!sc.direct && !MtbufIsRawDwords(inst, n))
     WarnUnsupported("mtbuf.raw-format", op, w, w1);
   const u32 binding = static_cast<u32>(b);
   const Id byte_off = BufferByteOffset(t, inst, inst_offset, idxen, offen,
                                        vaddr, srsrc, soffset);
   const Id dword_idx = t.Shr(byte_off, t.U32(2));
-  if (op < 4) {  // tbuffer_load_format_x..xyzw
+  if (op < 4 && sc.direct) {
+    const BufferFormat f = DecodeBufferFormat(
+        t, t.U32((w >> 19) & 0xF), t.U32((w >> 23) & 0x7));
+    const auto load_word = [&](Id idx) {
+      return CsGuestLoad(t, sc, binding, idx);
+    };
+    for (u32 i = 0; i < n; i++)
+      t.SetVg(vdata + i, FormattedComponentWith(t, f, load_word, byte_off, i));
+  } else if (op < 4) {  // tbuffer_load_format_x..xyzw
     for (u32 i = 0; i < n; i++)
       t.SetVg(vdata + i,
               CsSsboLoad(t, sc, binding, t.Add(dword_idx, t.U32(i))));

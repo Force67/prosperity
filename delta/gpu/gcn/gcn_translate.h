@@ -158,6 +158,9 @@ struct Recompiled {
   u32 mesh_threads = 0, mesh_shared_bytes = 0;
   u32 mesh_vertices = 0, mesh_primitives = 0;
   bool indirect_cbufs = false;
+  // Every buffer read goes through the direct guest memory table: the draw
+  // binds no cbuffers or buffers and needs no descriptor replay for them.
+  bool direct = false;
   base::Vector<u32> gs_spirv;  // fixed RECTLIST expansion stage
   base::Vector<u32> fs_spirv;
   base::Vector<ShaderAttr> attrs;      // vertex inputs

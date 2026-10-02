@@ -28,6 +28,7 @@
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/guest_memory.h"
+#include "gpu/render/guest_direct.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps5/agc_regs.h"
 #include "gpu/ps5/cmd_trace.h"
@@ -1272,6 +1273,7 @@ u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
   base::LockGuard<base::Mutex> lock(g_mutex);
   render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);
+  render::SyncGuestDirect();
   const u32 words = size_bytes / 4;
   const u64 submission = ++g_total_submits;
   const bool dump = TraceSubmit(dcb, size_bytes, words, submission);
@@ -1309,6 +1311,7 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   render::g_ns_dcb_lock += t_held - t_enter;
   render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);
+  render::SyncGuestDirect();
   TraceRegShadowScan();
 
   const u32 words = size_bytes / 4;

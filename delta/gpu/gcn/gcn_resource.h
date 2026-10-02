@@ -196,4 +196,8 @@ void TrackVertexBuffers(base::Vector<VBuffer>& out,
 // left null, the replay just reads guest memory as it finds it.
 extern void (*g_flush_guest_range)(u64 address, u64 bytes);
 
+// Device addresses of the direct guest memory table and its miss list
+// (render/guest_direct.h), 0 when shaders do not read guest memory directly.
+extern u64 g_direct_table, g_direct_misses;
+
 }  // namespace gpu::gcn

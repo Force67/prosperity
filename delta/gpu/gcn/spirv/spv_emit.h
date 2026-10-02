@@ -186,7 +186,7 @@ class Module {
   void PutString(base::Vector<u32>& sec, const base::String& s);
 
   u32 bound_ = 1;
-  u32 version_ = 0x00010300u;
+  u32 version_ = 0x00010600u;
   base::Vector<Id> globals_;
   Id glsl_ext_ = 0;
 

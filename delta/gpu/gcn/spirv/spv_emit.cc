@@ -289,14 +289,10 @@ void Module::EntryPoint(spv::ExecutionModel model,
                         const base::Vector<Id>& interface) {
   base::Vector<u32> ops{static_cast<u32>(model), fn};
   PutString(ops, n);
-  if (model == spv::ExecutionModel::MeshEXT) {
-    // Mesh shading requires SPIR-V 1.4, whose entry-point interface includes
-    // every global variable used by the entry point, not only stage I/O.
-    version_ = 0x00010400u;
-    ops.insert(ops.end(), globals_.begin(), globals_.end());
-  } else {
-    ops.insert(ops.end(), interface.begin(), interface.end());
-  }
+  // SPIR-V 1.4 and later: the interface names every global variable the entry
+  // point uses, not only its stage inputs and outputs.
+  (void)interface;
+  ops.insert(ops.end(), globals_.begin(), globals_.end());
   Instr(entries_, spv::Op::OpEntryPoint, ops);
 }
 void Module::ExecMode(Id fn,

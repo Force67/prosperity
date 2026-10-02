@@ -56,6 +56,7 @@ DELTA_OPTION(int, kArenaProbe, "DELTA_GPU_ARENA_PROBE", 0);
 namespace gpu::gcn {
 
 void (*g_flush_guest_range)(u64 address, u64 bytes) = nullptr;
+u64 g_direct_table = 0, g_direct_misses = 0;
 
 namespace {
 

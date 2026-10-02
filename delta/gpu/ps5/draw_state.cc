@@ -907,7 +907,7 @@ void ResolveRecompiledShaders(const Regs& regs,
   // (gcn::g_flush_guest_range). A dropped draw still owes the next one that
   // flush.
   const ResolvedBuffers ps_resources =
-      binding.ps_addr
+      binding.ps_addr && !rc.direct
           ? rdna::ResolveBuffers(reinterpret_cast<const u32*>(binding.ps_addr),
                                  binding.ps_user_data, ps_user_sgprs)
           : ResolvedBuffers{};
@@ -926,10 +926,12 @@ void ResolveRecompiledShaders(const Regs& regs,
   ResolveRawBuffers(rc.vs_bufs, vs_resources, binding.vs_user_data,
                     vs_user_sgprs, d, true, &gs_resources);
   if (binding.ps_addr) {
-    ResolveCbufferBindings(rc.ps_cbufs, ps_resources, false, binding.ps_addr,
-                           d);
-    ResolveRawBuffers(rc.ps_bufs, ps_resources, binding.ps_user_data,
-                      ps_user_sgprs, d, false);
+    if (!rc.direct) {
+      ResolveCbufferBindings(rc.ps_cbufs, ps_resources, false, binding.ps_addr,
+                             d);
+      ResolveRawBuffers(rc.ps_bufs, ps_resources, binding.ps_user_data,
+                        ps_user_sgprs, d, false);
+    }
     if (!rc.ps_texs.empty())
       ResolvePsTextures(binding.ps_addr, binding.ps_user_data, ps_user_sgprs,
                         d);

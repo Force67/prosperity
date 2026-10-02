@@ -884,6 +884,9 @@ struct StageContext {
   Id cs_guest_table = 0, cs_guest_translate = 0;
   base::HashMap<u32, base::Pair<u32, u32>>
       cs_runtime_resources;  // binding -> kind, SGPR
+  // A graphics stage reading guest memory through the direct table: buffer
+  // loads convert their V#'s format at run time.
+  bool direct = false;
   base::HashSet<u32> cs_runtime_images;
   // Resource bindings this module samples as real images (mimg_plan).
   base::HashSet<u32> cs_native;
@@ -1098,6 +1101,9 @@ Id CsSsboPtr(Translator& t, StageContext& sc, u32 binding, Id dword_idx);
 Id CsSsboLoad(Translator& t, StageContext& sc, u32 binding, Id dword_idx);
 Id CsSsboBound(Translator& t, StageContext& sc, u32 binding);
 void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding);
+// As DeclareGuestMemory, through the direct table (render/guest_direct.h):
+// reads only, a block the table does not hold yet is reported and reads 0.
+void DeclareDirectMemory(Translator& t, StageContext& sc);
 Id CsGuestBase(Translator& t, StageContext& sc, u32 binding);
 Id CsGuestAddress(Translator& t,
                   StageContext& sc,

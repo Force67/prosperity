@@ -58,6 +58,7 @@ u64 FetchPlanHash(u64) {
 #include "base/strings/to_string.h"
 #include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_audit.h"
+#include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/gcn/spirv/translator.h"
 #include "gpu/guest_memory.h"
@@ -911,6 +912,38 @@ bool RdnaPlanCbufs(const Program& program,
 
 // Hand the emitter the window each binding was planned at, once every planner
 // that can widen one has run.
+// Direct graphics: every scalar load, buffer access and global access reads
+// guest memory through the direct table, addressed by the registers the
+// shader itself builds, so nothing is planned into cbuffer or buffer bindings.
+bool DirectGraphics() {
+  return gpu::gcn::g_direct_table != 0;
+}
+
+void PlanDirect(const Program& program, StageContext& sc) {
+  sc.direct = true;
+  u32 next = 0;
+  for (const Inst& inst : program) {
+    const u32 w1 = inst.raw[1];
+    u32 kind = 0, sgpr = 0;
+    if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode)) {
+      const Smem smem = DecodeSmem(inst);
+      kind = smem.op >= 0x08 ? 0 : 2;
+      sgpr = smem.sbase;
+    } else if (inst.enc == Enc::kMubuf || inst.enc == Enc::kMtbuf) {
+      sgpr = ((w1 >> 16) & 0x1F) * 4;
+    } else {
+      continue;
+    }
+    sc.cs_bind[inst.pc] = next;
+    sc.cs_runtime_resources[next++] = {kind, sgpr};
+  }
+}
+
+bool IsDirectMemory(const Inst& inst) {
+  return inst.enc == Enc::kSmrd || inst.enc == Enc::kMubuf ||
+         inst.enc == Enc::kMtbuf || inst.enc == Enc::kFlat;
+}
+
 void NoteCbufWindows(const base::Vector<ShaderCbuf>& cbufs, StageContext& sc) {
   for (const ShaderCbuf& cb : cbufs)
     if (cb.first_dword)
@@ -1877,7 +1910,8 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
   }
   // Compute reaches guest memory through the shared CS resource model (set-0
   // storage buffers), not through the graphics cbuf/vertex-fetch bindings.
-  if (sc.is_cs && EmitCsMemory(t, inst, sc))
+  if ((sc.is_cs || (sc.direct && IsDirectMemory(inst))) &&
+      EmitCsMemory(t, inst, sc))
     return;
   if (sc.is_mesh && inst.enc == Enc::kSopp && inst.opcode == 0x0a) {
     t.Barrier();
@@ -3766,14 +3800,18 @@ bool TranslatePs(const Program& program,
     t.last_texel_var =
         t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, t.t_v4),
                      spv::StorageClass::Private, t.m.ConstNull(t.t_v4));
-  if (!RdnaPlanCbufs(program, static_cast<u32>(r.vs_cbufs.size()), r.ps_cbufs,
-                     sc.cbuf_bind, sc.smem_cbuf_by_pc,
-                     r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
-                                      : kMaxCbufBindings))
-    return false;
-  RdnaPlanGfxBuffers(program, static_cast<u32>(r.vs_bufs.size()), nullptr,
-                     r.ps_bufs, sc.gfx_buf_bind);
-  NoteCbufWindows(r.ps_cbufs, sc);
+  if (r.direct) {
+    PlanDirect(program, sc);
+  } else {
+    if (!RdnaPlanCbufs(program, static_cast<u32>(r.vs_cbufs.size()),
+                       r.ps_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc,
+                       r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
+                                        : kMaxCbufBindings))
+      return false;
+    RdnaPlanGfxBuffers(program, static_cast<u32>(r.vs_bufs.size()), nullptr,
+                       r.ps_bufs, sc.gfx_buf_bind);
+    NoteCbufWindows(r.ps_cbufs, sc);
+  }
   PlanGraphicsLds(program, t, sc);
   const gpu::gcn::MimgBindingPlan mimg_plan = RdnaPlanMimg(program);
   if (mimg_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers) {
@@ -3791,6 +3829,8 @@ bool TranslatePs(const Program& program,
                          ((sc.tex_3d_mask >> i) & 1u) != 0});
 
   const Id user_data = DeclareUserData(t);
+  if (sc.direct)
+    gpu::gcn::DeclareDirectMemory(t, sc);
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   PlanCrossLane(program, t, sc, iface);
   SeedUserData(t, user_data, 0, user_sgprs);
@@ -4676,6 +4716,7 @@ Recompiled Recompile(const u32* vs_code,
                 gpu::gcn::UnsupportedOps().c_str());
     return r;
   }
+  r.direct = DirectGraphics();
   Translator tp;
   tp.rdna_sources = true;
   tp.indirect_cbufs = r.indirect_cbufs;
