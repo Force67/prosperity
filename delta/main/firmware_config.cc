@@ -1,12 +1,14 @@
 #include "main/firmware_config.h"
 
 #include <dirent.h>
+#include <elf.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cerrno>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "base/environment_variables.h"
 #include "base/filesystem/file.h"
@@ -71,6 +73,40 @@ bool HasModule(const base::String& directory, const char* name, bool ps5) {
     }
   }
   return false;
+}
+
+u32 ReadFirmwareVersion(io::File& file) {
+  Elf64_Ehdr header{};
+  if (file.Read(&header, sizeof(header)) != sizeof(header) ||
+      std::memcmp(header.e_ident, ELFMAG, SELFMAG) != 0 ||
+      header.e_ident[EI_CLASS] != ELFCLASS64 ||
+      header.e_ident[EI_DATA] != ELFDATA2LSB || header.e_machine != EM_X86_64 ||
+      header.e_phentsize != sizeof(Elf64_Phdr) || header.e_phnum > 128)
+    return 0;
+  const u64 size = file.GetSize();
+  if (header.e_phoff > size ||
+      u64(header.e_phnum) * sizeof(Elf64_Phdr) > size - header.e_phoff)
+    return 0;
+  for (u32 i = 0; i < header.e_phnum; ++i) {
+    const u64 offset = header.e_phoff + u64(i) * sizeof(Elf64_Phdr);
+    if (offset > size || sizeof(Elf64_Phdr) > size - offset)
+      return 0;
+    file.Seek(offset, io::SeekMode::kSeekSet);
+    Elf64_Phdr segment{};
+    if (file.Read(&segment, sizeof(segment)) != sizeof(segment))
+      return 0;
+    if (segment.p_type != 0x61000002)
+      continue;
+    // libkernel's SCE module parameters store the firmware at offset 0x14.
+    if (segment.p_filesz < 24 || segment.p_offset > size ||
+        segment.p_filesz > size - segment.p_offset)
+      return 0;
+    file.Seek(segment.p_offset + 0x14, io::SeekMode::kSeekSet);
+    u32 version = 0;
+    return file.Read(&version, sizeof(version)) == sizeof(version) ? version
+                                                                   : 0;
+  }
+  return 0;
 }
 
 bool ResolveModules(const base::String& input, bool ps5, base::String* output) {
@@ -219,6 +255,31 @@ bool ImportModules(const base::String& sources,
 }
 
 }  // namespace
+
+u32 Ps5FirmwareVersion() {
+  const auto* option = base::FindOption("DELTA_PS5_MODULES");
+  const char* configured =
+      option ? static_cast<const base::Option<const char*>*>(option)->get()
+             : nullptr;
+  if (!configured || !*configured)
+    return 0;
+  const base::String paths(configured);
+  mem_size begin = 0;
+  while (begin < paths.size()) {
+    const auto end = paths.find(':', begin);
+    const auto directory = paths.substr(
+        begin, end == base::String::npos ? base::String::npos : end - begin);
+    for (const char* name : {"libkernel.native.sprx", "libkernel.sprx"}) {
+      io::File file(directory + "/" + name, io::FileMode::kRead);
+      if (file.IsOpen())
+        return ReadFirmwareVersion(file);
+    }
+    if (end == base::String::npos)
+      break;
+    begin = end + 1;
+  }
+  return 0;
+}
 
 bool FirmwareModulesReady(bool ps5) {
   const auto* option =

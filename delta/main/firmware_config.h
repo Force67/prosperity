@@ -5,6 +5,7 @@
 namespace cli {
 
 bool FirmwareModulesReady(bool ps5);
+u32 Ps5FirmwareVersion();
 
 bool ConfigureFirmware(const CommandLine& command);
 

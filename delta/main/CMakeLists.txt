@@ -5,6 +5,7 @@ set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/command_line.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/firmware_config.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/game_directory.cc
+                 ${CMAKE_CURRENT_SOURCE_DIR}/game_firmware.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/recent_games.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/home_screen.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc)

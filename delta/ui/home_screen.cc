@@ -78,6 +78,8 @@ float LaunchOpacity() {
 ImFont* g_heading = nullptr;
 base::String g_result;
 base::String g_error;
+base::String g_launch_error;
+base::String (*g_check_game)(const base::String&) = nullptr;
 base::Mutex g_dialog_mutex;
 bool g_dialog_pending = false;
 base::String g_dialog_path;
@@ -191,6 +193,11 @@ void Play(const base::String& path) {
   if (::stat(path.c_str(), &info) != 0) {
     g_error = "This game is no longer at its saved location.";
     return;
+  }
+  if (g_check_game) {
+    g_launch_error = g_check_game(path);
+    if (!g_launch_error.empty())
+      return;
   }
   g_result = path;
   g_launch_ns = base::TickClock::NowNs();
@@ -323,7 +330,8 @@ void HomeScreenBuild(u32 width, u32 height) {
       base::Max(96.0f, h * 0.15f) + (missing_firmware ? 112.0f : 0.0f);
   const mem_size visible = base::Max(
       mem_size(1), static_cast<mem_size>((w - margin * 2) / (tile + 20)));
-  if (!g_launch_ns && !DialogPending() && !g_games->empty()) {
+  const bool launch_error = !g_launch_error.empty();
+  if (!g_launch_ns && !launch_error && !DialogPending() && !g_games->empty()) {
     if ((ImGui::IsKeyPressed(ImGuiKey_LeftArrow) ||
          ImGui::GetIO().MouseWheel > 0) &&
         g_selected)
@@ -336,7 +344,7 @@ void HomeScreenBuild(u32 width, u32 height) {
         ImGui::IsKeyPressed(ImGuiKey_Space))
       Play((*g_games)[g_selected].path);
   }
-  if (!g_launch_ns && !DialogPending()) {
+  if (!g_launch_ns && g_launch_error.empty() && !DialogPending()) {
     if (ImGui::IsKeyPressed(ImGuiKey_Escape))
       g_done = true;
     if (ImGui::IsKeyPressed(ImGuiKey_O))
@@ -381,7 +389,7 @@ void HomeScreenBuild(u32 width, u32 height) {
                    ImGuiWindowFlags_NoBackground);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const int first_vertex = dl->VtxBuffer.Size;
-  ImGui::BeginDisabled(g_launch_ns != 0);
+  ImGui::BeginDisabled(g_launch_ns != 0 || !g_launch_error.empty());
   overlay_theme::DrawMark(dl, ImVec2(margin, 34));
   dl->AddText(ImVec2(margin + 24, 32), overlay_theme::kText, "Prosperity");
   dl->AddRectFilled(ImVec2(margin + 132, 24), ImVec2(margin + 204, 56),
@@ -554,6 +562,53 @@ void HomeScreenBuild(u32 width, u32 height) {
     }
   }
   ImGui::End();
+  if (!g_launch_error.empty())
+    ImGui::OpenPopup("##firmware_error");
+  ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h * 0.5f), ImGuiCond_Always,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(base::Min(600.0f, w - 48), 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(40, 32));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16);
+  if (ImGui::BeginPopupModal("##firmware_error", nullptr,
+                             ImGuiWindowFlags_NoDecoration |
+                                 ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoSavedSettings |
+                                 ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::PushFont(g_heading);
+    ImGui::TextUnformatted("Can't start this game");
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, 16));
+    ImGui::SetWindowFontScale(1.25f);
+    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x +
+                           ImGui::GetCursorPosX());
+    ImGui::TextUnformatted(g_launch_error.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 28));
+    const float button_width =
+        base::Min(240.0f, ImGui::GetContentRegionAvail().x);
+    ImGui::SetCursorPosX((ImGui::GetWindowSize().x - button_width) * 0.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 22);
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.96f, 0.97f, 0.98f, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                          ImVec4(0.86f, 0.89f, 0.94f, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                          ImVec4(0.74f, 0.80f, 0.90f, 1));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.05f, 0.07f, 1));
+    if (ImGui::Button("OK", ImVec2(button_width, 44)) ||
+        (launch_error && (ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+                          ImGui::IsKeyPressed(ImGuiKey_Space) ||
+                          ImGui::IsKeyPressed(ImGuiKey_Escape)))) {
+      g_launch_error.clear();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SetItemDefaultFocus();
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(2);
+    ImGui::SetWindowFontScale(1);
+    ImGui::EndPopup();
+  }
+  ImGui::PopStyleVar(2);
 }
 
 bool LaunchTransitionActive() {
@@ -596,7 +651,8 @@ void LaunchTransitionBuild(u32 width, u32 height) {
 
 void BeginHomeScreen(const base::Vector<HomeGame>& games,
                      bool ps4_ready,
-                     bool ps5_ready) {
+                     bool ps5_ready,
+                     base::String (*check_game)(const base::String&)) {
   const u32 requested = kBackgroundStyle.get();
   g_background_style = requested >= 1 && requested <= 3
                            ? requested
@@ -617,6 +673,8 @@ void BeginHomeScreen(const base::Vector<HomeGame>& games,
   g_done = false;
   g_result.clear();
   g_error.clear();
+  g_launch_error.clear();
+  g_check_game = check_game;
   OverlayEnsureImGui();
   PrepareArtwork();
   g_active = true;
@@ -642,7 +700,10 @@ base::String EndHomeScreen() {
 }  // namespace ui
 #else
 namespace ui {
-void BeginHomeScreen(const base::Vector<HomeGame>&, bool, bool) {}
+void BeginHomeScreen(const base::Vector<HomeGame>&,
+                     bool,
+                     bool,
+                     base::String (*)(const base::String&)) {}
 bool HomeScreenDone() {
   return true;
 }

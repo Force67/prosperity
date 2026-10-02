@@ -18,7 +18,8 @@ struct HomeGame {
 // Prepare the artwork before the host creates the UI rendering backend.
 void BeginHomeScreen(const base::Vector<HomeGame>& games,
                      bool ps4_ready,
-                     bool ps5_ready);
+                     bool ps5_ready,
+                     base::String (*check_game)(const base::String&) = nullptr);
 bool HomeScreenDone();
 // Returns the selected game path, or an empty string when the window closes.
 base::String EndHomeScreen();

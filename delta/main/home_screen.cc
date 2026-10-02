@@ -1,6 +1,7 @@
 #include "main/home_screen.h"
 
 #include "main/firmware_config.h"
+#include "main/game_firmware.h"
 
 #if defined(__linux__) && !defined(__ANDROID__)
 #include "base/threading/thread.h"
@@ -10,7 +11,7 @@ namespace cli {
 
 base::String ShowHomeScreen(const base::Vector<ui::HomeGame>& games) {
   ui::BeginHomeScreen(games, FirmwareModulesReady(false),
-                      FirmwareModulesReady(true));
+                      FirmwareModulesReady(true), CheckGameFirmware);
   if (host::Init("Prosperity", 1280, 720)) {
     const u32 pixel = 0xff110d0c;
     host::Present(&pixel, 1, 1);
