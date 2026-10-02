@@ -15,13 +15,18 @@ ImVec4 Color(ImU32 value, float alpha = 1.0f) {
 
 }  // namespace
 
+ImFont* AddSansFont(float size) {
+  static constexpr ImWchar kGlyphRanges[] = {0x0020, 0x00ff, 0x2122, 0x2122, 0};
+  return ImGui::GetIO().Fonts->AddFontFromMemoryCompressedTTF(
+      tracy::DroidSans_compressed_data, tracy::DroidSans_compressed_size, size,
+      nullptr, kGlyphRanges);
+}
+
 void Apply() {
   ImGuiStyle& style = ImGui::GetStyle();
   style = ImGuiStyle();
   ImGuiIO& io = ImGui::GetIO();
-  io.FontDefault = io.Fonts->AddFontFromMemoryCompressedTTF(
-      tracy::DroidSans_compressed_data, tracy::DroidSans_compressed_size,
-      15.0f);
+  io.FontDefault = AddSansFont(15.0f);
   g_monospace_font = io.Fonts->AddFontDefault();
 
   style.WindowPadding = ImVec2(20.0f, 20.0f);

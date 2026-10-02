@@ -17,6 +17,7 @@ inline constexpr ImU32 kWarning = IM_COL32(230, 192, 113, 255);
 inline constexpr ImU32 kError = IM_COL32(243, 139, 149, 255);
 inline constexpr ImU32 kCritical = kError;
 
+ImFont* AddSansFont(float size);
 void Apply();
 ImFont* MonospaceFont();
 void DrawPanel(ImDrawList* draw_list,

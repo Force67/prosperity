@@ -8,6 +8,7 @@
 #include "imgui.h"
 #include "ui/home_screen.h"
 #include "ui/overlay.h"
+#include "ui/overlay_theme.h"
 #endif
 
 TEST(HomeBackground, NormalStylesAreEqualAndAnniversaryIsOneIn256) {
@@ -76,6 +77,14 @@ TEST(HomeBackground, ClosingDuringTheMenuFadeCancelsLaunch) {
   EXPECT_FALSE(ui::HomeScreenDone());
   EXPECT_TRUE(ui::EndHomeScreen().empty());
   EXPECT_FALSE(ui::LaunchTransitionActive());
+  ui::OverlayShutdownImGui();
+}
+TEST(HomeFonts, TrademarkGlyphIsAvailableForTextAndHeadings) {
+  ui::OverlayEnsureImGui();
+  auto* heading = ui::overlay_theme::AddSansFont(36);
+  ASSERT_TRUE(ImGui::GetIO().Fonts->Build());
+  EXPECT_NE(ImGui::GetIO().FontDefault->FindGlyphNoFallback(0x2122), nullptr);
+  EXPECT_NE(heading->FindGlyphNoFallback(0x2122), nullptr);
   ui::OverlayShutdownImGui();
 }
 #endif

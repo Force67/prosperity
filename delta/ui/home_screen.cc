@@ -5,7 +5,6 @@
 #include <stb_image.h>
 #include <sys/stat.h>
 
-#include "DroidSans.hpp"
 #include "base/algorithm.h"
 #include "base/memory/mem_ops.h"
 #include "base/random/random.h"
@@ -127,8 +126,7 @@ int AddArtwork(const base::Vector<u8>& png,
 
 void PrepareArtwork() {
   ImGuiIO& io = ImGui::GetIO();
-  g_heading = io.Fonts->AddFontFromMemoryCompressedTTF(
-      tracy::DroidSans_compressed_data, tracy::DroidSans_compressed_size, 36);
+  g_heading = overlay_theme::AddSansFont(36);
   io.Fonts->TexDesiredWidth = 2048;
   base::Vector<AtlasImage> images;
   g_artwork.clear();
