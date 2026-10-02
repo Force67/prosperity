@@ -68,6 +68,15 @@ class WriteTracker {
     void (*before_collect)() = nullptr;
   };
   void SetPolicy(const Policy& policy) { policy_ = policy; }
+  // Memory another owner keeps inaccessible (GPU-resident data). `resolve`
+  // runs first on every fault and host write: it makes [first, end) current
+  // and accessible, true when it owned any of it. `owns` keeps the tracker
+  // from protecting such pages itself.
+  static void SetOwner(bool (*resolve)(u64 first, u64 end),
+                       bool (*owns)(u64 first, u64 end));
+  // Async-signal-safe: the owner opened [first, end); armed pages there count
+  // as written.
+  static void OpenedByOwner(u64 first, u64 end);
 
   u64 armed_bytes() const { return armed_bytes_; }
   u64 collects() const { return collects_; }

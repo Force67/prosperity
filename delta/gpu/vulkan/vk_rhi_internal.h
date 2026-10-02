@@ -263,6 +263,12 @@ class VulkanDevice final : public rhi::Device {
   void SetName(rhi::Object* object, const char* name) override;
   bool SupportsFormat(rhi::Format format, u32 usage) const override;
   bool CommitSparse(rhi::Buffer* buffer, u64 offset, u64 bytes) override;
+  bool CopyAfter(rhi::Buffer* src,
+                 u64 src_offset,
+                 rhi::Buffer* dst,
+                 u64 dst_offset,
+                 u64 bytes,
+                 u64 after) override;
   bool SupportsBlit(rhi::Format src, rhi::Format dst) const override;
   void QueryMemoryBudget(u64* used, u64* budget) const override;
   u64 Submit(rhi::CommandList* const* lists, u32 count) override;
@@ -317,6 +323,12 @@ class VulkanDevice final : public rhi::Device {
   base::String pipeline_cache_path_;
   VkPipelineStageFlags shader_stages_ = 0;
   VkSemaphore timeline_ = VK_NULL_HANDLE;
+  // CopyAfter's queue, command buffer and fence, guarded by a spin flag.
+  VkQueue side_queue_ = VK_NULL_HANDLE;
+  VkCommandPool side_pool_ = VK_NULL_HANDLE;
+  VkCommandBuffer side_cmd_ = VK_NULL_HANDLE;
+  VkFence side_fence_ = VK_NULL_HANDLE;
+  base::Atomic<bool> side_busy_{false};
   u64 submitted_ = 0;
   ImageAllocator images_;
   base::Mutex set_pool_mutex_;

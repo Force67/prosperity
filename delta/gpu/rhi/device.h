@@ -261,6 +261,18 @@ class Device {
   virtual bool CommitSparse(Buffer* /*buffer*/, u64 /*offset*/, u64 /*bytes*/) {
     return false;
   }
+  // Copies once submission `after` has completed, on a queue of its own, and
+  // returns when the copy is done and visible to the host. Callable from any
+  // thread, a fault handler included. False when the device has no queue to
+  // spare.
+  virtual bool CopyAfter(Buffer* /*src*/,
+                         u64 /*src_offset*/,
+                         Buffer* /*dst*/,
+                         u64 /*dst_offset*/,
+                         u64 /*bytes*/,
+                         u64 /*after*/) {
+    return false;
+  }
   // A name for capture tools. Ignored unless Caps::debug_labels.
   virtual void SetName(Object* /*object*/, const char* /*name*/) {}
 

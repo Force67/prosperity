@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "base/atomic.h"
 #include "base/containers/hash_map.h"
 #include "base/containers/vector.h"
 #include "base/logging.h"
@@ -33,6 +34,9 @@ rhi::Buffer* g_misses = nullptr;
 base::HashMap<u64, rhi::Buffer*> g_chunks;  // memfd offset -> import
 base::Vector<Mapping> g_maps;               // guest views of the memfd
 base::HashSet<u64> g_filled;                // blocks with a table entry
+// Redirected blocks: the host entry they go back to, and whether they are.
+u64* g_saved = nullptr;
+base::Atomic<u8>* g_redirected = nullptr;
 u32 g_syncs = 0;
 
 int FindDmemFd() {
@@ -142,7 +146,10 @@ void Fill(u64 address) {
     const u64 index = (block - kDirectBase) >> kDirectBlockShift;
     if (index >= kBlocks)
       break;
-    Table()[index] = EntryFor(block);
+    if (g_redirected[index].load(base::memory_order_acquire))
+      g_saved[index] = EntryFor(block);
+    else
+      Table()[index] = EntryFor(block);
     g_filled.insert(block);
   }
 }
@@ -181,6 +188,13 @@ bool InitGuestDirect() {
   if (!g_table || !g_misses || !g_table->mapped() || !g_misses->mapped())
     return false;
   std::memset(g_table->mapped(), 0, kBlocks * 8);
+  void* saved = mmap(nullptr, kBlocks * 9, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (saved == MAP_FAILED)
+    return false;
+  g_saved = static_cast<u64*>(saved);
+  g_redirected =
+      reinterpret_cast<base::Atomic<u8>*>(static_cast<u8*>(saved) + kBlocks * 8);
   std::memset(g_misses->mapped(), 0, 8 + kDirectMissSlots * 8);
   ReadMaps();
   gcn::g_direct_table = g_table->address();
@@ -196,6 +210,31 @@ bool InDirectAlias(u64 va) {
          va < reinterpret_cast<u64>(g_alias) + g_alias_size;
 }
 
+void DirectRedirect(u64 block, u64 device_address) {
+  if (!gcn::g_direct_table || block < kDirectBase ||
+      block >= kDirectBase + kDirectSize)
+    return;
+  const u64 index = (block - kDirectBase) >> kDirectBlockShift;
+  if (!g_redirected[index].load(base::memory_order_acquire)) {
+    if (!FindMapping(block))
+      ReadMaps();
+    g_saved[index] = EntryFor(block);
+    g_filled.insert(block);
+  }
+  __atomic_store_n(&Table()[index], device_address, __ATOMIC_RELEASE);
+  g_redirected[index].store(1, base::memory_order_release);
+}
+
+void DirectRestore(u64 block) {
+  if (!gcn::g_direct_table || block < kDirectBase ||
+      block >= kDirectBase + kDirectSize)
+    return;
+  const u64 index = (block - kDirectBase) >> kDirectBlockShift;
+  if (!g_redirected[index].exchange(0, base::memory_order_acq_rel))
+    return;
+  __atomic_store_n(&Table()[index], g_saved[index], __ATOMIC_RELEASE);
+}
+
 void SyncGuestDirect() {
   if (!gcn::g_direct_table && !InitGuestDirect())
     return;
@@ -203,8 +242,13 @@ void SyncGuestDirect() {
   // refresh what the table already holds.
   if (++g_syncs % 256 == 0) {
     ReadMaps();
-    for (u64 block : g_filled)
-      Table()[(block - kDirectBase) >> kDirectBlockShift] = EntryFor(block);
+    for (u64 block : g_filled) {
+      const u64 index = (block - kDirectBase) >> kDirectBlockShift;
+      if (g_redirected[index].load(base::memory_order_acquire))
+        g_saved[index] = EntryFor(block);
+      else
+        Table()[index] = EntryFor(block);
+    }
   }
   auto* misses = reinterpret_cast<volatile u32*>(g_misses->mapped());
   const u32 count = base::Min<u32>(misses[0], kDirectMissSlots);

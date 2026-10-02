@@ -134,9 +134,15 @@ void Enqueue(u64 page) {
   __atomic_store_n(&g_queue[at % kQueueSize], page, __ATOMIC_RELEASE);
 }
 
+base::Atomic<bool (*)(u64, u64)> g_owner_resolve{nullptr};
+base::Atomic<bool (*)(u64, u64)> g_owner_owns{nullptr};
+
 // Async-signal-safe: atomics, the page table and one mprotect.
 bool OnWriteFault(uintptr_t addr) {
   const u64 page = addr & ~(kPage - 1);
+  if (const auto resolve = g_owner_resolve.load(base::memory_order_acquire);
+      resolve && resolve(page, page + kPage))
+    return true;
   auto* p = const_cast<GuestPageTable::Page*>(GuestPages().Find(page));
   if (!p || !p->ever_armed.load(base::memory_order_relaxed))
     return false;
@@ -156,6 +162,8 @@ void OnHostWrite(void* addr, size_t len) {
   const u64 first = reinterpret_cast<u64>(addr) & ~(kPage - 1);
   const u64 end =
       (reinterpret_cast<u64>(addr) + len + kPage - 1) & ~(kPage - 1);
+  if (const auto resolve = g_owner_resolve.load(base::memory_order_acquire))
+    resolve(first, end);
   const GuestPageTable& table = GuestPages();
   u64 run = 0;
   const auto flush = [&](u64 at) {
@@ -205,8 +213,28 @@ bool WriteTracker::EnableFault() {
   return true;
 }
 
+void WriteTracker::SetOwner(bool (*resolve)(u64, u64),
+                            bool (*owns)(u64, u64)) {
+  g_owner_owns.store(owns, base::memory_order_release);
+  g_owner_resolve.store(resolve, base::memory_order_release);
+}
+
+void WriteTracker::OpenedByOwner(u64 first, u64 end) {
+  const GuestPageTable& table = GuestPages();
+  for (u64 page = first; page < end; page += kPage) {
+    auto* p = const_cast<GuestPageTable::Page*>(table.Find(page));
+    u8 armed = kProtected;
+    if (p && p->armed.compare_exchange_strong(armed, kQueued,
+                                              base::memory_order_acq_rel))
+      Enqueue(page);
+  }
+}
+
 bool WriteTracker::ArmFault(u64 first, u64 end) {
   DELTA_ZONE("wt.arm");
+  if (const auto owns = g_owner_owns.load(base::memory_order_acquire);
+      owns && owns(first, end))
+    return false;
   if ((armed_bytes_ + (end - first)) / kPage >= kQueueSize / 2)
     return false;
   GuestPageTable& table = GuestPages();
@@ -299,6 +327,8 @@ void WriteTracker::TakeFaulted(base::Vector<Range>& out) {
 bool WriteTracker::EnableFault() {
   return false;
 }
+void WriteTracker::SetOwner(bool (*)(u64, u64), bool (*)(u64, u64)) {}
+void WriteTracker::OpenedByOwner(u64, u64) {}
 bool WriteTracker::ArmFault(u64, u64) {
   return false;
 }

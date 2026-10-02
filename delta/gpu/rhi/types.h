@@ -566,6 +566,7 @@ struct Caps {
   u64 host_import_alignment = 0;
   bool sparse_buffer = false;
   u64 sparse_page = 0;  // commit granularity
+  bool copy_after = false;  // Device::CopyAfter
   bool texture_blit = true;
   bool dispatch_base = false;
   // CommandList::DispatchIndirect: group counts read by the GPU from a buffer.

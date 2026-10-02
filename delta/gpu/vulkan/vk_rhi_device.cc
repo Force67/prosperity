@@ -400,6 +400,10 @@ VulkanDevice::~VulkanDevice() {
     vkDestroySemaphore(native.device, timeline_, nullptr);
   if (command_pool)
     vkDestroyCommandPool(native.device, command_pool, nullptr);
+  if (side_fence_)
+    vkDestroyFence(native.device, side_fence_, nullptr);
+  if (side_pool_)
+    vkDestroyCommandPool(native.device, side_pool_, nullptr);
   if (native.pipeline_cache)
     vkDestroyPipelineCache(native.device, native.pipeline_cache, nullptr);
   // Device memory blocks and the device itself are left to process exit:
@@ -656,11 +660,20 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   }
   f.fragmentStoresAndAtomics = a.fragmentStoresAndAtomics;
 
-  const float prio = 1.0f;
+  const float prios[2] = {1.0f, 1.0f};
+  u32 family_queues = 1;
+  {
+    u32 qn = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, nullptr);
+    base::Vector<VkQueueFamilyProperties> qs(qn);
+    vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, qs.data());
+    if (native.queue_family < qn)
+      family_queues = qs[native.queue_family].queueCount;
+  }
   VkDeviceQueueCreateInfo qc{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
   qc.queueFamilyIndex = native.queue_family;
-  qc.queueCount = 1;
-  qc.pQueuePriorities = &prio;
+  qc.queueCount = family_queues >= 2 ? 2 : 1;
+  qc.pQueuePriorities = prios;
   VkDeviceCreateInfo dc{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
   dc.pNext = &f13;
   dc.queueCreateInfoCount = 1;
@@ -674,6 +687,8 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   }
   VkDevice dev = native.device;
   vkGetDeviceQueue(dev, native.queue_family, 0, &native.queue);
+  if (qc.queueCount == 2)
+    vkGetDeviceQueue(dev, native.queue_family, 1, &side_queue_);
 
   cmd_begin_rendering = reinterpret_cast<PFN_vkCmdBeginRenderingKHR>(
       vkGetDeviceProcAddr(dev, "vkCmdBeginRendering"));
@@ -724,6 +739,17 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   sci.pNext = &sti;
   if (vkCreateSemaphore(dev, &sci, nullptr, &timeline_) != VK_SUCCESS)
     return false;
+  if (side_queue_) {
+    VkCommandBufferAllocateInfo cai{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    if (vkCreateCommandPool(dev, &cpi, nullptr, &side_pool_) != VK_SUCCESS ||
+        (cai.commandPool = side_pool_, cai.commandBufferCount = 1,
+         vkAllocateCommandBuffers(dev, &cai, &side_cmd_) != VK_SUCCESS) ||
+        vkCreateFence(dev, &fci, nullptr, &side_fence_) != VK_SUCCESS)
+      side_queue_ = VK_NULL_HANDLE;
+    caps_.copy_after = side_queue_ != VK_NULL_HANDLE;
+  }
 
   VkPhysicalDeviceSubgroupProperties subgroup{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
@@ -1456,6 +1482,51 @@ void VulkanDevice::Destroy(rhi::Object* object) {
     vkDestroyQueryPool(dev, q->pool, nullptr);
   }
   delete object;
+}
+
+bool VulkanDevice::CopyAfter(rhi::Buffer* src,
+                             u64 src_offset,
+                             rhi::Buffer* dst,
+                             u64 dst_offset,
+                             u64 bytes,
+                             u64 after) {
+  if (!side_queue_ || !src || !dst || !bytes)
+    return false;
+  while (side_busy_.exchange(true, base::memory_order_acquire)) {
+  }
+  VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  vkResetCommandBuffer(side_cmd_, 0);
+  vkBeginCommandBuffer(side_cmd_, &bi);
+  const VkBufferCopy region{src_offset, dst_offset, bytes};
+  vkCmdCopyBuffer(side_cmd_, static_cast<VulkanBuffer*>(src)->buffer,
+                  static_cast<VulkanBuffer*>(dst)->buffer, 1, &region);
+  VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+  mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+  vkCmdPipelineBarrier(side_cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0,
+                       nullptr);
+  vkEndCommandBuffer(side_cmd_);
+  const uint64_t wait_value = after;
+  VkTimelineSemaphoreSubmitInfo ti{
+      VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+  ti.waitSemaphoreValueCount = 1;
+  ti.pWaitSemaphoreValues = &wait_value;
+  const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.pNext = &ti;
+  si.waitSemaphoreCount = 1;
+  si.pWaitSemaphores = &timeline_;
+  si.pWaitDstStageMask = &stage;
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &side_cmd_;
+  vkResetFences(native.device, 1, &side_fence_);
+  VkResult r = vkQueueSubmit(side_queue_, 1, &si, side_fence_);
+  if (r == VK_SUCCESS)
+    r = vkWaitForFences(native.device, 1, &side_fence_, VK_TRUE, ~0ull);
+  side_busy_.store(false, base::memory_order_release);
+  return r == VK_SUCCESS;
 }
 
 bool VulkanDevice::CommitSparse(rhi::Buffer* buffer,

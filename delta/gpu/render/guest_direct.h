@@ -20,4 +20,8 @@ void SyncGuestDirect();
 // Inside the second mapping of direct memory. Only the GPU reads through it,
 // so it aliases nothing the write tracker has to worry about.
 bool InDirectAlias(u64 va);
+// The 64 KiB block at `block` reads from `device_address` instead, until
+// restored. Restoring is async-signal-safe.
+void DirectRedirect(u64 block, u64 device_address);
+void DirectRestore(u64 block);
 }  // namespace gpu::render

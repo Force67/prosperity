@@ -9,10 +9,12 @@
 
 #include "gpu/render/compute.h"
 #include "base/arch.h"
+#include "gpu/render/guest_direct.h"
 #include "gpu/render/guest_memory_table.h"
 #include "gpu/render/renderer.h"
 
 #include "gpu/gcn/gcn_detile.h"
+#include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gpu_check.h"
 #include "gpu/gpu_perf.h"
@@ -163,6 +165,8 @@ u64 g_cs_image_staged = 0;
 }  // namespace
 
 namespace gpu::render {
+void MirrorProtectSubmitted(u64 submission);
+
 namespace {
 // Writeback-half accounting (DELTA_GPU_CSSYNC); defined here because the
 // aliased-image bridge below is the thing being counted.
@@ -175,6 +179,10 @@ u64 g_guest_override_n = 0, g_guest_mirror_tiles = 0, g_cs_rt_variants_made = 0;
 u64 g_gds_imported_n = 0, g_guest_misses_n = 0, g_cs_indirect_n = 0;
 u64 g_stage_ro_bytes = 0, g_stage_rw_bytes = 0, g_stage_img_bytes = 0;
 u64 g_stage_guest_detile_bytes = 0, g_stage_guest_detile_n = 0;
+u64 g_mirror_wb_bytes = 0, g_mirror_wb_n = 0, g_mirror_own_bytes = 0;
+base::Atomic<u64> g_mirror_resolves{0};
+base::Map<u64, u64> g_mirror_wb_union;
+DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", false);
 // Staging-in halves: hashing guest memory to decide validity, CPU detiling,
 // the render-target bridge (its own submit+wait), and the plain copy.
 u64 g_in_hash_ns = 0, g_in_detile_ns = 0, g_in_rt_ns = 0, g_in_copy_ns = 0;
@@ -3101,6 +3109,7 @@ bool CsBatchSubmit() {
     return false;
   }
   b.submitted = true;
+  MirrorProtectSubmitted(b.submission);
   NoteBatchSubmitted(b.id, b.submission);
   g_cs_batch_cur = (g_cs_batch_cur + 1) % kCsBatchRing;
   return true;
@@ -3700,6 +3709,28 @@ void CsSyncReport(double frames) {
   g_tile_hin_bytes = g_tile_hout_bytes = 0;
   g_gpu_tiling_ns[0] = g_gpu_tiling_ns[1] = 0;
   g_gpu_tiling_n[0] = g_gpu_tiling_n[1] = 0;
+  if (kMirror)
+  {
+    u64 uni = 0, lo = 0, hi = 0;
+    for (const auto& [b0, e0] : g_mirror_wb_union) {
+      if (b0 > hi) {
+        uni += hi - lo;
+        lo = b0;
+        hi = e0;
+      } else {
+        hi = base::Max(hi, e0);
+      }
+    }
+    uni += hi - lo;
+    g_mirror_wb_union.clear();
+    BASE_LOGI("csstage", "mirror write-back {:.1f}MB x{:.1f} per frame, "
+              "{:.1f}MB distinct; kept {:.1f}MB, {:.1f} faults",
+              g_mirror_wb_bytes / frames / 1e6, g_mirror_wb_n / frames,
+              uni / frames / 1e6, g_mirror_own_bytes / frames / 1e6,
+              g_mirror_resolves.exchange(0) / frames);
+    g_mirror_own_bytes = 0;
+  }
+  g_mirror_wb_bytes = g_mirror_wb_n = 0;
   BASE_LOGI("csstage",
             "per frame ro={:.1f}MB rw={:.1f}MB img={:.1f}MB (guest-detile "
             "{:.1f}MB x{:.1f})",
@@ -4677,7 +4708,6 @@ rhi::Buffer* ImportGuestPage(u64 page) {
 // dispatch wrote back out, as a pending guest write the labels wait for. The
 // dispatch itself runs out of VRAM; ranges alias each other because they are
 // the same memory.
-DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", false);
 constexpr u64 kMirrorBase = 0x300000000ull;
 constexpr u64 kMirrorSize = 0x1000000000ull;  // through 0x1300000000
 // Imports in chunks: a device allows only a few thousand allocations.
@@ -4775,13 +4805,167 @@ constexpr u64 kMirrorBlock = 64 * 1024;
 base::HashSet<u64> g_mirror_clean;
 base::Vector<base::Pair<u64, u64>> g_mirror_self;
 
+// GPU-owned blocks (DELTA_GPU_MIRROR_OWN): a block a dispatch wrote stays in
+// the mirror, which the direct table then points at, and nothing is copied
+// back. Once the batch is submitted the guest pages are made inaccessible; the
+// first CPU touch faults, waits for the batch, copies the written span back on
+// a queue of its own and hands the block back to the host. A block the CPU
+// keeps touching is not taken again.
+DELTA_OPTION(bool, kMirrorOwn, "DELTA_GPU_MIRROR_OWN", true);
+constexpr u64 kOwnBlocks = kMirrorSize / kMirrorBlock;
+constexpr u64 kOwnProtected = 1ull << 63, kOwnPending = 1ull << 62,
+              kOwnBusy = 1ull << 61, kOwnSubmission = kOwnBusy - 1;
+constexpr u32 kOwnMaxFaults = 4;
+struct OwnBlock {
+  base::Atomic<u64> state;  // submission | flags; 0 = the host's
+  rhi::Buffer* import;      // the guest pages, as a device buffer
+  u64 import_offset;
+  u32 lo, hi;               // the span dispatches wrote, block-relative
+  base::Atomic<u32> faults;
+  base::Atomic<u8> cpu_dirty;  // the CPU wrote it since the mirror copied it
+};
+OwnBlock* g_own = nullptr;
+base::Vector<u64> g_own_unsubmitted;
+
+OwnBlock& OwnAt(u64 block) {
+  if (!g_own) {
+    void* p = mmap(nullptr, kOwnBlocks * sizeof(OwnBlock),
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    g_own = static_cast<OwnBlock*>(p);
+  }
+  return g_own[(block - kMirrorBase) / kMirrorBlock];
+}
+
+bool MirrorOwned(u64 block) {
+  return g_own && OwnAt(block).state.load(base::memory_order_acquire) != 0;
+}
+
+bool InMirror(u64 address) {
+  return address >= kMirrorBase && address < kMirrorBase + kMirrorSize;
+}
+
+// Any thread, from the fault handler too: hands every protected block of
+// [first, end) back to the host.
+bool MirrorResolve(u64 first, u64 end) {
+  if (!g_own)
+    return false;
+  bool resolved = false;
+  for (u64 block = first & ~(kMirrorBlock - 1); block < end;
+       block += kMirrorBlock) {
+    if (!InMirror(block))
+      continue;
+    OwnBlock& o = OwnAt(block);
+    for (;;) {
+      u64 s = o.state.load(base::memory_order_acquire);
+      if (!(s & kOwnProtected))
+        break;
+      if ((s & kOwnBusy) ||
+          !o.state.compare_exchange_weak(s, s | kOwnBusy,
+                                         base::memory_order_acq_rel))
+        continue;
+      if (o.hi > o.lo)
+        Device().CopyAfter(g_mirror, block - kMirrorBase + o.lo, o.import,
+                           o.import_offset + o.lo, o.hi - o.lo,
+                           s & kOwnSubmission);
+      ::mprotect(reinterpret_cast<void*>(block), kMirrorBlock,
+                 PROT_READ | PROT_WRITE | PROT_EXEC);
+      WriteTracker::OpenedByOwner(block, block + kMirrorBlock);
+      if (!(s & kOwnPending)) {
+        DirectRestore(block);
+        o.lo = o.hi = 0;
+      }
+      o.cpu_dirty.store(1, base::memory_order_relaxed);
+      o.faults.fetch_add(1, base::memory_order_relaxed);
+      g_mirror_resolves.fetch_add(1, base::memory_order_relaxed);
+      o.state.store(s & kOwnPending, base::memory_order_release);
+      resolved = true;
+      break;
+    }
+  }
+  return resolved;
+}
+
+bool MirrorOwnsAny(u64 first, u64 end) {
+  if (!g_own)
+    return false;
+  for (u64 block = first & ~(kMirrorBlock - 1); block < end;
+       block += kMirrorBlock)
+    if (InMirror(block) && MirrorOwned(block))
+      return true;
+  return false;
+}
+
+// Whether a dispatch's output at [base, base+bytes) can stay on the GPU.
+bool MirrorOwnable(u64 base, u64 bytes) {
+  if (!kMirrorOwn || !gcn::g_direct_table || !Device().caps().copy_after ||
+      !g_mirror->address())
+    return false;
+  for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
+       block += kMirrorBlock)
+    if (!gpu::IsReadableRangeCached(block, kMirrorBlock) ||
+        OwnAt(block).faults.load(base::memory_order_relaxed) >= kOwnMaxFaults)
+      return false;
+  return true;
+}
+
+rhi::Buffer* MirrorImport(u64 address, u64* import_base);
+
+void MirrorOwn(u64 base, u64 bytes) {
+  static bool hooked = false;
+  if (!hooked) {
+    hooked = true;
+    WriteTracker::SetOwner(&MirrorResolve, &MirrorOwnsAny);
+  }
+  const u64 end = base + bytes;
+  for (u64 block = base & ~(kMirrorBlock - 1); block < end;
+       block += kMirrorBlock) {
+    OwnBlock& o = OwnAt(block);
+    const u32 lo = static_cast<u32>(base::Max(block, base) - block);
+    const u32 hi = static_cast<u32>(base::Min(end, block + kMirrorBlock) - block);
+    const u64 s = o.state.load(base::memory_order_acquire);
+    if (!s) {
+      u64 import_base = 0;
+      o.import = MirrorImport(block, &import_base);
+      o.import_offset = block - import_base;
+      o.lo = lo;
+      o.hi = hi;
+      DirectRedirect(block, g_mirror->address() + (block - kMirrorBase));
+    } else {
+      o.lo = base::Min(o.lo, lo);
+      o.hi = base::Max(o.hi, hi);
+    }
+    if (!(o.state.fetch_or(kOwnPending, base::memory_order_acq_rel) &
+          kOwnPending))
+      g_own_unsubmitted.push_back(block);
+  }
+}
+
+// The batch that wrote them is on the queue: the blocks become inaccessible
+// to the CPU until it asks for them.
+void MirrorProtectSubmitted(u64 submission) {
+  if (g_own_unsubmitted.empty())
+    return;
+  for (u64 block : g_own_unsubmitted) {
+    OwnBlock& o = OwnAt(block);
+    u64 s = o.state.load(base::memory_order_acquire);
+    while ((s & kOwnBusy) ||
+           !o.state.compare_exchange_weak(s, kOwnBusy,
+                                          base::memory_order_acq_rel))
+      s = o.state.load(base::memory_order_acquire);
+    ::mprotect(reinterpret_cast<void*>(block), kMirrorBlock, PROT_NONE);
+    o.state.store(submission | kOwnProtected, base::memory_order_release);
+  }
+  g_own_unsubmitted.clear();
+}
+
 // Before a dispatch reads it: backed, and holding the guest's bytes.
 bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
   // A range still owned by the staging path is written back first.
   if (CsRangeDirtyOverlapping(base, bytes) &&
       !FlushCsWritesRange(renderer, base, bytes, "mirror"))
     return false;
-  const u64 page = Device().caps().sparse_page;
+  const u64 page = base::Max(Device().caps().sparse_page, kMirrorBlock);
   const u64 lo = (base - kMirrorBase) & ~(page - 1);
   const u64 hi = (base + bytes - kMirrorBase + page - 1) & ~(page - 1);
   if (!Device().CommitSparse(g_mirror, lo, hi - lo))
@@ -4790,26 +4974,40 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
   if (!g_cs_batch_open)
     return false;
   // Only the blocks the CPU may have changed: runs of them, one copy each.
+  // Whole blocks where they are mapped, as a block may become the GPU's. A
+  // block the GPU owns holds the newest bytes already.
   const u64 end = base + bytes;
-  u64 run = 0;
+  u64 run = 0, run_end = 0;
   bool in_run = false;
   for (u64 block = base & ~(kMirrorBlock - 1); block < end;
        block += kMirrorBlock) {
-    const bool clean = g_mirror_clean.count(block);
-    const u64 at = base::Max(block, base);
-    if (!clean && !in_run) {
-      run = at;
-      in_run = true;
+    const bool whole = gpu::IsReadableRangeCached(block, kMirrorBlock);
+    const u64 at = whole ? block : base::Max(block, base);
+    const u64 to = whole ? block + kMirrorBlock : base::Min(end, block + kMirrorBlock);
+    bool fresh = MirrorOwned(block);
+    if (!fresh) {
+      const bool cpu_dirty = OwnAt(block).cpu_dirty.exchange(0);
+      fresh = g_mirror_clean.count(block) && !cpu_dirty;
     }
-    if (clean && in_run) {
-      if (!MirrorCopy(run, at - run, /*to_guest=*/false))
+    if (!fresh && in_run && at != run_end) {
+      if (!MirrorCopy(run, run_end - run, /*to_guest=*/false))
         return false;
       in_run = false;
     }
-    if (!clean && GuestWriteTracker().Arm(block, kMirrorBlock))
+    if (!fresh) {
+      if (!in_run)
+        run = at;
+      in_run = true;
+      run_end = to;
+    } else if (in_run) {
+      if (!MirrorCopy(run, run_end - run, /*to_guest=*/false))
+        return false;
+      in_run = false;
+    }
+    if (!fresh && whole && GuestWriteTracker().Arm(block, kMirrorBlock))
       g_mirror_clean.insert(block);
   }
-  return !in_run || MirrorCopy(run, end - run, /*to_guest=*/false);
+  return !in_run || MirrorCopy(run, run_end - run, /*to_guest=*/false);
 }
 
 // What dispatches wrote through the mirror: base -> end, and a revision a
@@ -4832,6 +5030,23 @@ const MirrorWrite* MirrorWritten(u64 base, u64 bytes) {
 
 // After a dispatch wrote it: back out to the guest pages, in queue order.
 void MirrorWriteBack(u64 base, u64 bytes) {
+  if (MirrorOwnable(base, bytes)) {
+    MirrorWrite& w = g_mirror_writes[base];
+    w.end = base::Max(w.end, base + bytes);
+    w.seq = ++g_mirror_seq;
+    MirrorOwn(base, bytes);
+    g_mirror_own_bytes += bytes;
+    g_mirror_self.push_back({base, base + bytes});
+    NoteGuestWrite(base, bytes);
+    InvalidateTexRange(base, bytes);
+    return;
+  }
+  g_mirror_wb_bytes += bytes;
+  g_mirror_wb_n++;
+  {
+    u64& e = g_mirror_wb_union[base];
+    e = base::Max(e, base + bytes);
+  }
   MirrorWrite& w = g_mirror_writes[base];
   w.end = base::Max(w.end, base + bytes);
   w.seq = ++g_mirror_seq;
@@ -6879,6 +7094,18 @@ bool FlushCsWritesRange(Renderer& renderer,
                         u64 base,
                         u64 bytes,
                         const char* why) {
+  // GPU-owned bytes an open batch is still to write: submitted, the read
+  // faults and waits for them.
+  if (!g_own_unsubmitted.empty() && bytes) {
+    for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
+         block += kMirrorBlock)
+      if (InMirror(block) &&
+          (OwnAt(block).state.load(base::memory_order_acquire) & kOwnPending)) {
+        if (!CsBatchSubmit())
+          return false;
+        break;
+      }
+  }
   if (!g_pending_guest_writes.empty()) {
     const WaitReaderScope reader(why);
     if (!WaitPendingGuestWrites(base, bytes))
