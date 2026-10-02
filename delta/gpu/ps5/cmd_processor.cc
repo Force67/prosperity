@@ -482,6 +482,7 @@ void HandleClearState(const u32* body, u32 count) {
 // carries the compare function in [2:0] (0 always, 1 <, 2 <=, 3 ==, 4 !=,
 // 5 >=, 6 >), the poll address follows, then reference and mask.
 bool WaitSatisfied(u32 op, const u32* body, u32 count) {
+  DELTA_ZONE("ps5.wait_check");
   const bool wide = op == 0x93;
   if (count < (wide ? 8u : 6u))
     return true;
@@ -518,6 +519,7 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
 // title reset their labels under them. An address that keeps timing out is
 // not waited for again.
 bool WaitBriefly(u32 op, const u32* body, u32 count) {
+  DELTA_ZONE("ps5.gfx_wait");
   const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
   static base::Map<u64, u32> timeouts;
   u32& missed = timeouts[address];

@@ -23,6 +23,7 @@
 #include "base/containers/vector.h"
 #include "base/logging.h"
 #include "base/math/value_bounds.h"
+#include "base/memory/move.h"
 #include "base/memory/shared_pointer.h"
 #include "base/strings/xstring.h"
 #include "options/options.h"
@@ -270,8 +271,19 @@ void Gfx10ImgFormat(u32 gfmt, u32& dfmt, u32& nfmt) {
   }
 }
 
+DELTA_OPTION(bool, kResolveMemo, "DELTA_GPU_RESOLVE_MEMO", true);
+
+// One scalar load the replay made: where, and what it read.
+struct ReplayLoad {
+  u64 address = 0;
+  u32 dwords = 0;
+  u32 values[16] = {};
+};
+
 struct ScalarEval {
   static constexpr u32 kRegs = 136;
+  // Every load the replay makes, when set (see ResolveBuffers' memo).
+  base::Vector<ReplayLoad>* loads = nullptr;
   u32 sgpr[kRegs] = {};
   bool known[kRegs] = {};
   bool scc = false;
@@ -855,6 +867,12 @@ struct ScalarEval {
       SetDest(smem.sdst, i, src[i]);
       if (smem.sdst != 125 && smem.sdst + i < kRegs)
         src_addr[smem.sdst + i] = address + i * 4;
+    }
+    if (loads) {
+      ReplayLoad& load = loads->emplace_back();
+      load.address = address;
+      load.dwords = base::Min(dwords, 16u);
+      std::memcpy(load.values, src, load.dwords * 4);
     }
   }
 };
@@ -1969,9 +1987,73 @@ base::HashMap<u32, BufferResource> ResolveBuffers(const u32* code,
   base::HashMap<u32, BufferResource> out;
   if (!code || !user_data || !InGuest(reinterpret_cast<u64>(code)))
     return out;
+  // The replay is a pure function of the program, its user data and the
+  // memory its scalar loads read, and a frame replays the same few hundred
+  // shader/user-data pairs over and over: a third of Astro Bot's submit
+  // thread went to it. A memo answers when the program is the same, the user
+  // data is, and every word a load read still holds what it read (after the
+  // same flush the load itself runs, so a dispatch's newer bytes count).
+  struct Memo {
+    base::SharedPointer<const Program> program;
+    u32 user[32] = {};
+    u32 user_sgprs = 0, user_sgpr_base = 0;
+    u64 system_user_data_addr = 0;
+    base::Vector<ReplayLoad> loads;
+    base::HashMap<u32, BufferResource> out;
+  };
+  static base::HashMap<u64, Memo> memos;
+  const auto program = CachedReachableProgram(code, max_dwords);
+  const u32 user_n = base::Min(user_sgprs, 32u);
+  u64 key = reinterpret_cast<u64>(code) * 0x9E3779B97F4A7C15ull ^
+            (u64{user_sgprs} << 40 | u64{user_sgpr_base} << 32 | max_dwords) ^
+            system_user_data_addr;
+  for (u32 i = 0; i < user_n; i++)
+    key = (key ^ user_data[i]) * 0x100000001B3ull;
+  if (auto it = kResolveMemo ? memos.find(key) : memos.end();
+      it != memos.end()) {
+    const Memo& m = it->second;
+    bool hit = m.program == program && m.user_sgprs == user_sgprs &&
+               m.user_sgpr_base == user_sgpr_base &&
+               m.system_user_data_addr == system_user_data_addr &&
+               !std::memcmp(m.user, user_data, user_n * 4);
+    for (const ReplayLoad& load : m.loads) {
+      if (!hit)
+        break;
+      if (gpu::gcn::g_flush_guest_range)
+        gpu::gcn::g_flush_guest_range(load.address, load.dwords * 4ull);
+      hit = !std::memcmp(reinterpret_cast<const void*>(load.address),
+                         load.values, load.dwords * 4);
+    }
+    if (hit)
+      return m.out;
+  }
+  // Only scalar ALU and memory instructions move the replay, and only the
+  // resource users below read it: a shader's vector code, most of it, is
+  // skipped once per program instead of on every draw.
+  using Slice =
+      base::Pair<base::SharedPointer<const Program>, base::Vector<Inst>>;
+  static base::HashMap<const Program*, Slice> slices;
+  auto slice = slices.find(program.get());
+  if (slice == slices.end() || slice->second.first != program) {
+    if (slices.size() > 4096)
+      slices.clear();
+    base::Vector<Inst> kept;
+    for (const Inst& inst : *program)
+      if (inst.enc == Enc::kSop1 || inst.enc == Enc::kSop2 ||
+          inst.enc == Enc::kSopk || inst.enc == Enc::kSopc ||
+          inst.enc == Enc::kSmrd || inst.enc == Enc::kMimg ||
+          inst.enc == Enc::kFlat || inst.enc == Enc::kMubuf ||
+          inst.enc == Enc::kMtbuf)
+        kept.push_back(inst);
+    slice =
+        slices.insert_or_assign(program.get(), Slice(program, base::move(kept)))
+            .first;
+  }
+  base::Vector<ReplayLoad> loads;
   ScalarEval eval(user_data, user_sgprs, user_sgpr_base, system_user_data_addr);
   eval.code_addr = reinterpret_cast<u64>(code);
-  for (const Inst& inst : *CachedReachableProgram(code, max_dwords)) {
+  eval.loads = &loads;
+  for (const Inst& inst : slice->second.second) {
     if (inst.enc == Enc::kSmrd && SmemLoadCount(inst.opcode)) {
       const Smem smem = DecodeSmem(inst);
       // s_buffer_load reads through a V#, s_load through a bare 64-bit pointer.
@@ -2061,6 +2143,16 @@ base::HashMap<u32, BufferResource> ResolveBuffers(const u32* code,
     }
     eval.Step(inst);
   }
+  if (memos.size() > 8192)
+    memos.clear();
+  Memo& m = memos[key];
+  m.program = program;
+  std::memcpy(m.user, user_data, user_n * 4);
+  m.user_sgprs = user_sgprs;
+  m.user_sgpr_base = user_sgpr_base;
+  m.system_user_data_addr = system_user_data_addr;
+  m.loads = base::move(loads);
+  m.out = out;
   return out;
 }
 
