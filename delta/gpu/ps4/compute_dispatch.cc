@@ -8,6 +8,7 @@
 #include "gpu/ps4/compute_dispatch.h"
 #include "base/arch.h"
 #include "gpu/guest_memory.h"
+#include "guest/session.h"
 
 #include <cstring>
 
@@ -312,6 +313,8 @@ void DispatchCompute(render::Renderer& renderer,
     // Loud, not silently corrupting memory: an unsupported CS is content the
     // frame is missing, and one report per shader says which.
     static base::HashSet<u64> reported;
+    static const guest::SessionReset reset_reported(
+        [] { guest::ResetResource(reported); });
     if (reported.size() < 8 && reported.insert(cs_addr).second)
       BASE_LOGW("csgpu", "unsupported CS @{:#x} groups=[{} {} {}], skipped",
                 cs_addr, groups[0], groups[1], groups[2]);
@@ -346,6 +349,8 @@ void DispatchCompute(render::Renderer& renderer,
   };
   const u32 resolved_n = count_resolved();
   static base::HashSet<u64> retry_useless;
+  static const guest::SessionReset reset_retry_useless(
+      [] { guest::ResetResource(retry_useless); });
   if (resolved_n < rc.resources.size() && !retry_useless.contains(cs_addr)) {
     OwnRenderer("cs-unresolved");
     if (!render::FlushCsWrites(renderer, "cs-unresolved") &&

@@ -7,6 +7,7 @@
 
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/guest_memory.h"
@@ -1942,6 +1943,8 @@ const base::Vector<SliceInst>& ScalarSlice(
   using Slice =
       base::Pair<base::SharedPointer<const Program>, base::Vector<SliceInst>>;
   static base::HashMap<const Program*, Slice> slice_cache[2];
+  static const guest::SessionReset reset_slice_cache(
+      [] { guest::ResetResource(slice_cache); });
   auto& slices = slice_cache[full];
   if (full) {
     auto it = slices.find(program.get());

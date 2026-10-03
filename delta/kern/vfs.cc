@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "base/containers/vector.h"
 #include "base/logging.h"
@@ -502,4 +503,14 @@ bool ListDir(const char* path, base::Vector<DirEntry>& out) {
   closedir(d);
   return true;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_mounts);
+  guest::ResetResource(g_case_index);
+  guest::ResetResource(g_file_cache);
+  guest::ResetResource(g_title_id);
+});
+}  // namespace
+
 }  // namespace kern::vfs

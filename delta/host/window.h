@@ -106,6 +106,7 @@ void ReloadOverlay();
 base::Vector<base::String> GraphicsDevices();
 #endif
 
+void ResetGuest();
 void Shutdown();
 
 }  // namespace host

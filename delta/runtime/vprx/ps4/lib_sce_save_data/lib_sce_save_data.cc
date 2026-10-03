@@ -10,6 +10,7 @@
 #include "base/arch.h"
 #include "base/environment_variables.h"
 #include "base/logging.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <dirent.h>
@@ -376,6 +377,13 @@ int DoMount(const char* dir_name, u32 mode, void* result) {
               exists ? "existing" : "created");
   return kOk;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_next_slot);
+  guest::ResetResource(g_slots);
+});
+}  // namespace
 
 }  // namespace
 

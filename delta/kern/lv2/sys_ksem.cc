@@ -9,6 +9,7 @@
 #include <cstdio>
 #include "base/arch.h"
 #include "base/logging.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include "base/atomic.h"
@@ -130,7 +131,7 @@ int PS4ABI sys_ksem_wait(int id) {
   if (!s)
     return -SysError::eINVAL;
   base::UniqueLock<base::Mutex> lk(s->m);
-  s->cv.Wait(lk, [&] { return s->value > 0; });
+  guest::Wait(s->cv, lk, [&] { return s->value > 0; });
   s->value--;
   return 0;
 }
@@ -165,7 +166,7 @@ int PS4ABI sys_ksem_timedwait(int id, const struct ksem_timespec* abstime) {
     rel = base::TimeDelta();  // already expired -> poll once
 
   base::UniqueLock<base::Mutex> lk(s->m);
-  if (!s->cv.WaitFor(lk, rel, [&] { return s->value > 0; }))
+  if (!guest::WaitFor(s->cv, lk, rel, [&] { return s->value > 0; }))
     return -SysError::eTIMEDOUT;
   s->value--;
   return 0;
@@ -209,4 +210,15 @@ int PS4ABI sys_ksem_destroy(int id) {
   delete s;
   return 0;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  for (const auto& [id, sem] : g_ksem_by_id)
+    delete sem;
+  g_next_ksem_id.store(1);
+  guest::ResetResource(g_ksem_by_id);
+  guest::ResetResource(g_ksem_by_name);
+});
+}  // namespace
+
 }  // namespace kern

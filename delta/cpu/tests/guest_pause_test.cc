@@ -10,7 +10,10 @@
 #include "base/threading/thread.h"
 #include "cpu/backend.h"
 #include "guest/pause.h"
+#include "guest/session.h"
 #include "guest_abi.h"
+#include "host_memory/host_memory.h"
+#include "kern/lv2/sys_mem.h"
 
 namespace {
 template <class Predicate>
@@ -197,4 +200,137 @@ TEST(GuestPause, HostCallReleasesItsLockBeforeTheReturnGateParks) {
   EXPECT_TRUE(done.load());
   EXPECT_EQ(result.first, 41u);
   EXPECT_EQ(result.second, 42u);
+}
+
+TEST(GuestSession, StopsPausedGuestAndStartsAnotherSession) {
+  for (int session = 0; session < 3; ++session) {
+    guest::BeginSession();
+    base::Atomic<u64> counter{0};
+    Xbyak::CodeGenerator code(128);
+    code.mov(code.rax, reinterpret_cast<uintptr_t>(&counter));
+    Xbyak::Label loop;
+    code.L(loop);
+    code.lock();
+    code.inc(code.qword[code.rax]);
+    code.jmp(loop);
+    const auto entry = reinterpret_cast<uintptr_t>(code.getCode());
+    guest::RegisterCode(entry, code.getSize());
+    auto* handle = cpu::GetBackend().CreateGuestThread(entry, nullptr, 0);
+    ASSERT_TRUE(guest::SpawnThread("session-test", [handle] {
+      cpu::GetBackend().RunGuestThread(handle);
+    }));
+    EXPECT_TRUE(WaitFor([&] { return counter.load() != 0; }));
+    guest::SetPaused(true);
+    base::SleepForMilliseconds(20);
+    guest::RequestStop();
+    guest::JoinThreads();
+    EXPECT_EQ(guest::LiveThreads(), 0u);
+    guest::ResetCodeRanges();
+  }
+  guest::BeginSession();
+}
+
+TEST(GuestSession, StopsGuestAfterSwitchingStacks) {
+  guest::BeginSession();
+  constexpr size_t kStackSize = 0x20000;
+  void* stack = mmap(nullptr, kStackSize, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(stack, MAP_FAILED);
+  base::Atomic<u64> counter{0};
+  Xbyak::CodeGenerator code(128);
+  code.mov(code.rsp, reinterpret_cast<uintptr_t>(stack) + kStackSize - 0x100);
+  code.mov(code.rax, reinterpret_cast<uintptr_t>(&counter));
+  Xbyak::Label loop;
+  code.L(loop);
+  code.lock();
+  code.inc(code.qword[code.rax]);
+  code.jmp(loop);
+  const auto entry = reinterpret_cast<uintptr_t>(code.getCode());
+  guest::RegisterCode(entry, code.getSize());
+  auto* handle = cpu::GetBackend().CreateGuestThread(entry, nullptr, 0);
+  ASSERT_TRUE(guest::SpawnThread("stop-switched-stack", [handle] {
+    cpu::GetBackend().RunGuestThread(handle);
+  }));
+  EXPECT_TRUE(WaitFor([&] { return counter.load() != 0; }));
+  guest::RequestStop();
+  guest::JoinThreads();
+  EXPECT_EQ(guest::LiveThreads(), 0u);
+  munmap(stack, kStackSize);
+  guest::ResetCodeRanges();
+  guest::BeginSession();
+}
+
+TEST(GuestSession, StopLeavesHostLocksUnlocked) {
+  guest::BeginSession();
+  g_entered.store(false);
+  g_release.store(false);
+  const auto thunk =
+      cpu::MakeHostThunk(reinterpret_cast<void*>(&BlockingHostCall));
+  auto* handle = cpu::GetBackend().CreateGuestThread(thunk, nullptr, 0);
+  ASSERT_TRUE(guest::SpawnThread("stop-host-call", [handle] {
+    cpu::GetBackend().RunGuestThread(handle);
+  }));
+  EXPECT_TRUE(WaitFor([] { return g_entered.load(); }));
+  guest::RequestStop();
+  g_release.store(true);
+  guest::JoinThreads();
+  const bool unlocked = g_host_lock.try_lock();
+  EXPECT_TRUE(unlocked);
+  if (unlocked)
+    g_host_lock.unlock();
+  EXPECT_EQ(guest::LiveThreads(), 0u);
+  guest::BeginSession();
+}
+
+TEST(GuestSession, CancelsBackgroundSleepAndWait) {
+  guest::BeginSession();
+  base::Mutex mutex;
+  base::ConditionVariable cv;
+  base::Atomic<bool> waiting{false};
+  ASSERT_TRUE(guest::SpawnThread("stop-wait", [&] {
+    base::UniqueLock lock(mutex);
+    waiting.store(true);
+    EXPECT_FALSE(guest::Wait(cv, lock, [] { return false; }));
+  }));
+  ASSERT_TRUE(guest::SpawnThread("stop-sleep",
+                                 [] { guest::SleepForMilliseconds(60'000); }));
+  EXPECT_TRUE(WaitFor([&] { return waiting.load(); }));
+  const auto start = base::TimeTicks::Now();
+  guest::RequestStop();
+  guest::JoinThreads();
+  EXPECT_LT(base::TimeTicks::Now() - start, base::Seconds(1));
+  EXPECT_EQ(guest::LiveThreads(), 0u);
+  guest::BeginSession();
+}
+
+TEST(GuestSession, ReleasesReservationsAndReusesGuestArena) {
+  void* previous = nullptr;
+  for (int session = 0; session < 3; ++session) {
+    guest::BeginSession();
+    host_memory::BeginMemorySession();
+    auto* arena = kern::AllocLowGuest(0x10000);
+    ASSERT_NE(arena, nullptr);
+    if (previous)
+      EXPECT_EQ(arena, previous);
+    previous = arena;
+    void* reservation = host_memory::AllocMem(
+        nullptr, 0x10000, host_memory::PageProtection::kPriv,
+        host_memory::AllocationType::kReserve);
+    ASSERT_NE(reservation, nullptr);
+    ASSERT_NE(host_memory::AllocMem(reservation, 0x4000,
+                                    host_memory::PageProtection::kW,
+                                    host_memory::AllocationType::kCommit),
+              nullptr);
+    EXPECT_EQ(host_memory::SessionMappedBytes(), 0x20000u);
+    host_memory::FreeMem(static_cast<u8*>(reservation) + 0x4000, 0x4000);
+    EXPECT_EQ(host_memory::SessionMappedBytes(), 0x1c000u);
+    guest::RequestStop();
+    guest::JoinThreads();
+    guest::ResetSessionResources();
+    EXPECT_EQ(host_memory::EndMemorySession(), 0x1c000u);
+    EXPECT_EQ(host_memory::SessionMappedBytes(), 0u);
+    EXPECT_FALSE(host_memory::IsMemoryRangeMapped(arena, 0x10000));
+    EXPECT_FALSE(host_memory::IsMemoryRangeMapped(reservation, 0x4000));
+  }
+  guest::BeginSession();
 }

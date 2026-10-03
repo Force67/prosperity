@@ -46,6 +46,7 @@ bool Finalize(const base::Vector<u32>& spv,
 // Start finalizing `spv` on a worker thread; the Finalize that later asks for
 // the same module waits for it instead of redoing it.
 void Prefetch(const base::Vector<u32>& spv);
+void ResetPrefetch();
 
 // Hand the optimized form of `spv` to `then` on a worker thread, finalizing it
 // there first if nothing else has.

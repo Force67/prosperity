@@ -2,6 +2,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
+#include "guest/session.h"
 #include "kern/probe/probe.h"
 #include "kern/probe/probe_arm.h"
 #include "kern/probe/probe_internal.h"
@@ -133,6 +134,8 @@ JobTraceLogger(u64 hook_id, u64 a0, u64 a1, u64 a2, u64 a3, u64 ret) {
       // with element count a2=rdx. One line per DISTINCT block.
       static base::Mutex m;
       static base::HashSet<u64> seen;
+      static const guest::SessionReset reset_seen(
+          [] { guest::ResetResource(seen); });
       static u64 calls = 0;
       base::LockGuard lk(m);
       calls++;
@@ -158,6 +161,8 @@ JobTraceLogger(u64 hook_id, u64 a0, u64 a1, u64 a2, u64 a3, u64 ret) {
       const u64 wp = cb[2], end = cb[1];
       static base::Mutex m;
       static base::HashSet<u64> seen;
+      static const guest::SessionReset reset_seen(
+          [] { guest::ResetResource(seen); });
       static u64 n = 0;
       base::LockGuard lk(m);
       n++;
@@ -201,11 +206,11 @@ void SpawnJobWatcher(u64 base) {
   u64 expect = 0;
   if (!once.compare_exchange_strong(expect, base))
     return;
-  base::SpawnDetachedThread("probe_title", [base] {
+  guest::SpawnThread("probe_title", [base] {
     u64 prev[8] = {0};
     int persist = 0;
     for (;;) {
-      base::SleepForMilliseconds((30) * 1000);
+      guest::SleepForMilliseconds((30) * 1000);
       u64 slot[8];
       for (int i = 0; i < 8; i++)
         slot[i] =
@@ -757,14 +762,14 @@ base::Atomic<int> g_tree_reported{0};
 base::Atomic<bool> g_tree_armed{false};
 
 static void TreeWatchArm() {
-  base::SpawnDetachedThread("probe_title", [] {
+  guest::SpawnThread("probe_title", [] {
     const long pg = sysconf(_SC_PAGESIZE);
     void* page = reinterpret_cast<void*>(kSotcTreeNode & ~(u64)(pg - 1));
     // The walk reads the allocator STATE, the field watch reads the node: both
     // pages have to exist before either is allowed to dereference anything.
     void* spage = reinterpret_cast<void*>(kSotcTreeState & ~(u64)(pg - 1));
     for (;;) {
-      base::SleepForMilliseconds(200);
+      guest::SleepForMilliseconds(200);
       unsigned char vec = 0;
       if (mincore(page, 1, &vec) != 0 || mincore(spage, 1, &vec) != 0)
         continue;
@@ -1070,9 +1075,9 @@ void InstallAllocLock(Module& m) {
   }
   if (kSotcTreeWatch || kSotcTreeWalk)
     TreeWatchArm();
-  base::SpawnDetachedThread("probe_title", [] {
+  guest::SpawnThread("probe_title", [] {
     for (;;) {
-      base::SleepForMilliseconds((10) * 1000);
+      guest::SleepForMilliseconds((10) * 1000);
       if (kSotcHeapRoute)
         HeapRouteReport();
       if (kSotcTreeWatch)
@@ -1221,7 +1226,7 @@ void InvestigateDcbGate(Module& m) {
               (unsigned long long)off, exp_mod, (unsigned long long)exp_addr);
   }
   auto* slot = reinterpret_cast<volatile u64*>(base + 0x985a00);
-  base::SpawnDetachedThread("probe_title", [slot] {
+  guest::SpawnThread("probe_title", [slot] {
     u64 last = ~1ull;
     for (int i = 0; i < 400000; i++) {
       u64 v = *slot;
@@ -1230,7 +1235,7 @@ void InvestigateDcbGate(Module& m) {
                   i / 2, (unsigned long long)v);
         last = v;
       }
-      base::SleepForMicroseconds(500);
+      guest::SleepForMicroseconds(500);
     }
   });
 }
@@ -1272,7 +1277,7 @@ void BringUpRebirthSurfaceRegistry(Module& m) {
   // shows whether/when it gets allocated. Logs every transition.
   if (kGfxctxWatch) {
     auto* slot = reinterpret_cast<volatile u64*>(base + 0x687b30 + 0x38);
-    base::SpawnDetachedThread("probe_title", [slot] {
+    guest::SpawnThread("probe_title", [slot] {
       u64 last = ~0ull;
       for (int i = 0; i < 200000; i++) {
         u64 v = *slot;
@@ -1281,7 +1286,7 @@ void BringUpRebirthSurfaceRegistry(Module& m) {
                     i / 2);
           last = v;
         }
-        base::SleepForMicroseconds(500);
+        guest::SleepForMicroseconds(500);
       }
     });
   }
@@ -1333,7 +1338,7 @@ static void WatchVideoOutState(Module& m) {
   if (!kVoWatch)
     return;
   u8* base = m.GetInfo().base;
-  base::SpawnDetachedThread("probe_title", [base] {
+  guest::SpawnThread("probe_title", [base] {
     i32 lc = 0x7fffffff, li = 0x7fffffff;
     u32 lf[3] = {0xdead, 0xdead, 0xdead};
     for (int i = 0; i < 120000; i++) {
@@ -1375,7 +1380,7 @@ static void WatchVideoOutState(Module& m) {
         patched = true;
         BASE_LOGI("vowatch", "FORCE_CONNECT: cfg[{}] <- cfg[0], f0=4", idx);
       }
-      base::SleepForMicroseconds(500);
+      guest::SleepForMicroseconds(500);
     }
   });
 }

@@ -10,6 +10,8 @@ void PauseMenuToggle();
 bool PauseMenuVisible();
 bool PauseMenuExitRequested();
 void PauseMenuRequestExit();
+bool PauseMenuReturnRequested();
+void PauseMenuRequestReturn();
 void PauseMenuBuild(u32 width, u32 height);
 void PauseMenuReset();
 }  // namespace ui

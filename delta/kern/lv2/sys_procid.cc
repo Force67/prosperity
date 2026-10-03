@@ -6,6 +6,9 @@
  * in the root of the source tree.
  */
 
+#include "cpu/backend.h"
+#include "guest/session.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -355,7 +358,8 @@ int PS4ABI sys_abort2(const char* msg, int nargs, void** args) {
 }
 
 int PS4ABI sys_exit() {
-  __builtin_trap();
+  guest::RequestStop();
+  cpu::ExitGuestThread();
   return 0;
 }
 

@@ -23,6 +23,7 @@ class Launcher {
 
   bool Init();
   void Boot(const base::String& game_path);
+  void Stop();
 
   ArgvList argv;
 

@@ -8,6 +8,7 @@
 
 #include "gpu/gcn/spirv/gcn_spirv.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 // Backend disabled at build time (SPIRV-Tools/Headers unavailable). There is
@@ -206,6 +207,8 @@ bool TraceEnabled() {
 void NoteApproximated(const char* enc, u32 op) {
   AuditNote(enc, op);
   static base::HashSet<u64> seen;
+  static const guest::SessionReset reset_seen(
+      [] { guest::ResetResource(seen); });
   const u64 key =
       base::HashBytes(enc, std::strlen(enc)) ^ (static_cast<u64>(op) << 40);
   if (seen.size() > 512 || !seen.insert(key).second)
@@ -228,6 +231,8 @@ void WarnUnsupported(const char* enc, u32 op, u32 w0, u32 w1) {
   // warn-once dedup below only limits the stderr flood.
   AuditNote(enc, op);
   static base::HashSet<u64> seen;
+  static const guest::SessionReset reset_seen(
+      [] { guest::ResetResource(seen); });
   const u64 key =
       base::HashBytes(enc, std::strlen(enc)) ^ (static_cast<u64>(op) << 40);
   if (seen.size() > 512 || !seen.insert(key).second)
@@ -3308,6 +3313,8 @@ bool RecompileComputeSpirv(const u32* cs_code,
     // Name the reason and list the shader once: a skipped dispatch is missing
     // content, and without the listing the next step is always a second run.
     static base::HashSet<u64> listed;
+    static const guest::SessionReset reset_listed(
+        [] { guest::ResetResource(listed); });
     const u64 addr = reinterpret_cast<u64>(cs_code);
     if (listed.size() < 16 && listed.insert(addr).second) {
       BASE_LOGW("gcnspv", "CS rejected @{:#x}: {}", addr,

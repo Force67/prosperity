@@ -99,6 +99,19 @@ void Replayer::Init() {
                        GL_DYNAMIC_STORAGE_BIT);
 }
 
+void Replayer::ResetSession() {
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+  for (const auto& [key, fbo] : fbos_)
+    glDeleteFramebuffers(1, &fbo);
+  fbos_ = {};
+  glBindVertexArray(0);
+  vao_ = ~0u;
+  fbo_ = 0;
+  pipeline_ = nullptr;
+  program_ = ~0u;
+  have_raster_ = false;
+}
+
 void Replayer::Forget(rhi::Object* object) {
   if (auto* v = dynamic_cast<GlView*>(object)) {
     for (const FboKey& key : v->fbos) {

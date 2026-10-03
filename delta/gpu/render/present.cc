@@ -4,6 +4,7 @@
 
 #include "gpu/render/present.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "gpu/gpu_perf.h"
 #include "host/window.h"
@@ -84,7 +85,7 @@ void LatestFramePresenter::Present(const u8* pixels,
                                    u32 h,
                                    host::PixelFormat fmt) {
   base::LockGuard<base::Mutex> lock(mutex_);
-  if (stopping_)
+  if (stopping_ || guest::Stopping())
     return;
   StartLocked();
   pending_src_ = pixels;
@@ -100,7 +101,7 @@ void LatestFramePresenter::Present(base::Vector<u8>&& pixels,
                                    u32 h,
                                    host::PixelFormat fmt) {
   base::LockGuard<base::Mutex> lock(mutex_);
-  if (stopping_)
+  if (stopping_ || guest::Stopping())
     return;
   StartLocked();
   pending_pixels_.swap(pixels);

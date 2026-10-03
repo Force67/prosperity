@@ -26,6 +26,8 @@
 #include "base/threading/thread.h"
 #include "cpu/backend.h"
 #include "gpu/render/renderer.h"
+#include "guest/session.h"
+#include "host/window.h"
 #include "kern/guest_va_space.h"
 #include "main/command_line.h"
 #include "main/firmware_config.h"
@@ -204,16 +206,24 @@ int main(int argc, char** argv) {
     for (const auto& arg : command.guest_args)
       core.argv.emplace_back(arg.c_str());
   }
-  core.Boot(base::String(command.game.c_str()));
-
-  // Guest threads are detached, so exit without destroying their live state.
   for (;;) {
+    core.Boot(base::String(command.game.c_str()));
+    while (!ui::PauseMenuExitRequested() && !ui::PauseMenuReturnRequested() &&
+           !guest::Stopping())
+      base::SleepForMilliseconds(16);
+    const bool exit = ui::PauseMenuExitRequested();
+    core.Stop();
+    if (exit)
+      break;
 #if defined(__linux__) && !defined(__ANDROID__)
-    if (ui::PauseMenuExitRequested())
-      ::_exit(0);
+    command.game = cli::ShowHomeScreen(cli::ReadRecentGames()).c_str();
+#else
+    command.game.clear();
 #endif
-    base::SleepForMilliseconds(50);
+    if (command.game.empty())
+      break;
   }
+  host::Shutdown();
 
   return 0;
 }

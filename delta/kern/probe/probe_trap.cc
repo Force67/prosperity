@@ -18,6 +18,7 @@
  */
 
 #include "cpu/backend.h"
+#include "guest/session.h"
 #include "kern/probe/probe_arm.h"
 
 #include "base/arch.h"
@@ -1327,14 +1328,14 @@ void StartWriteWatch(uintptr_t addr,
     }
     return;
   }
-  base::SpawnDetachedThread("probe_trap", [addr, bytes, every_ms, trap_reads] {
+  guest::SpawnThread("probe_trap", [addr, bytes, every_ms, trap_reads] {
     const long pgsz = sysconf(_SC_PAGESIZE);
     const uintptr_t base = addr & ~((uintptr_t)pgsz - 1);
     const size_t span =
         (addr + bytes - base + (size_t)pgsz - 1) & ~((size_t)pgsz - 1);
     bool announced = false;
     for (;;) {
-      base::SleepForMilliseconds(every_ms);
+      guest::SleepForMilliseconds(every_ms);
       unsigned char vec = 0;
       if (mincore(reinterpret_cast<void*>(base), 1, &vec) != 0)
         continue;  // not mapped yet
@@ -1363,12 +1364,12 @@ void StartWriteWatch(uintptr_t addr,
 void StartWriteHist(uintptr_t addr, size_t bytes, unsigned every_ms) {
   if (!addr || !bytes)
     return;
-  base::SpawnDetachedThread("probe_trap", [addr, bytes, every_ms] {
+  guest::SpawnThread("probe_trap", [addr, bytes, every_ms] {
     const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
     const uintptr_t base = addr & ~(pgsz - 1);
     const size_t span = (bytes + pgsz - 1) & ~(pgsz - 1);
     for (;;) {
-      base::SleepForMilliseconds(200);
+      guest::SleepForMilliseconds(200);
       unsigned char vec = 0;
       if (mincore(reinterpret_cast<void*>(base), 1, &vec) == 0)
         break;
@@ -1380,7 +1381,7 @@ void StartWriteHist(uintptr_t addr, size_t bytes, unsigned every_ms) {
     unsigned since_report = 0;
     for (;;) {
       ::mprotect(reinterpret_cast<void*>(base), span, PROT_READ);
-      base::SleepForMilliseconds(every_ms);
+      guest::SleepForMilliseconds(every_ms);
       if ((since_report += every_ms) < 4000)
         continue;
       since_report = 0;
@@ -1415,10 +1416,10 @@ void StartWriteHist(uintptr_t addr, size_t bytes, unsigned every_ms) {
 void StartPopcntPrinter(uintptr_t addr, size_t bytes, unsigned every_ms) {
   if (!addr || !bytes)
     return;
-  base::SpawnDetachedThread("probe_trap", [addr, bytes, every_ms] {
+  guest::SpawnThread("probe_trap", [addr, bytes, every_ms] {
     const long pgsz = sysconf(_SC_PAGESIZE);
     for (;;) {
-      base::SleepForMilliseconds(every_ms);
+      guest::SleepForMilliseconds(every_ms);
       unsigned char vec = 0;
       if (mincore(reinterpret_cast<void*>(addr & ~((uintptr_t)pgsz - 1)), 1,
                   &vec) != 0)
@@ -1451,7 +1452,7 @@ void StartSumWatchPrinter(uintptr_t slot,
                           unsigned every_ms) {
   if (!slot || count <= 0 || count > 32)
     return;
-  base::SpawnDetachedThread("probe_trap", [slot, off, stride, count, every_ms] {
+  guest::SpawnThread("probe_trap", [slot, off, stride, count, every_ms] {
     const long pgsz = sysconf(_SC_PAGESIZE);
     auto readable = [pgsz](uintptr_t a) {
       unsigned char v = 0;
@@ -1460,7 +1461,7 @@ void StartSumWatchPrinter(uintptr_t slot,
                      &v) == 0;
     };
     for (;;) {
-      base::SleepForMilliseconds(every_ms);
+      guest::SleepForMilliseconds(every_ms);
       if (!readable(slot))
         continue;
       const uintptr_t obj = *reinterpret_cast<const uintptr_t*>(slot);
@@ -1486,7 +1487,7 @@ void StartSumWatchPrinter(uintptr_t slot,
 void StartPoolMap(uintptr_t addr, size_t bytes, unsigned every_ms) {
   if (!addr || !bytes)
     return;
-  base::SpawnDetachedThread("probe_trap", [addr, bytes, every_ms] {
+  guest::SpawnThread("probe_trap", [addr, bytes, every_ms] {
     const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
     const uintptr_t base = addr & ~(pgsz - 1);
     const size_t span = (bytes + pgsz - 1) & ~(pgsz - 1);
@@ -1495,7 +1496,7 @@ void StartPoolMap(uintptr_t addr, size_t bytes, unsigned every_ms) {
     const size_t pages_per_granule = granule / pgsz;
     base::Vector<unsigned char> vec(npages);
     for (;;) {
-      base::SleepForMilliseconds(every_ms);
+      guest::SleepForMilliseconds(every_ms);
       if (mincore(reinterpret_cast<void*>(base), span, vec.data()) != 0)
         continue;
       size_t resident = 0, nonzero = 0;
@@ -1529,10 +1530,10 @@ void StartPoolMap(uintptr_t addr, size_t bytes, unsigned every_ms) {
 // DELTA_POOLMAP=all[:<ms>]: the same survey over every guest mapping; a
 // "wrote a gigabyte somewhere" question needs the whole address space.
 void StartPoolCensus(unsigned every_ms) {
-  base::SpawnDetachedThread("probe_trap", [every_ms] {
+  guest::SpawnThread("probe_trap", [every_ms] {
     const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
     for (;;) {
-      base::SleepForMilliseconds(every_ms);
+      guest::SleepForMilliseconds(every_ms);
       FILE* f = std::fopen("/proc/self/maps", "r");
       if (!f)
         return;
@@ -1584,8 +1585,8 @@ void StartMemDump(uintptr_t addr,
   if (!addr || !bytes || !path)
     return;
   base::String out(path);
-  base::SpawnDetachedThread("probe_trap", [addr, bytes, after_ms, out] {
-    base::SleepForMilliseconds(after_ms);
+  guest::SpawnThread("probe_trap", [addr, bytes, after_ms, out] {
+    guest::SleepForMilliseconds(after_ms);
     const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
     const uintptr_t base = addr & ~(pgsz - 1);
     const size_t span = (bytes + pgsz - 1) & ~(pgsz - 1);
@@ -1619,10 +1620,10 @@ void StartFnWatchPrinter() {
   bool exp = false;
   if (!started.compare_exchange_strong(exp, true))
     return;
-  base::SpawnDetachedThread("probe_trap", [] {
+  guest::SpawnThread("probe_trap", [] {
     u64 last[kFnWatchMax] = {0};
     for (;;) {
-      base::SleepForMilliseconds((2) * 1000);
+      guest::SleepForMilliseconds((2) * 1000);
       base::String line;
       base::FormatTo(line, "[fnwatch]");
       for (int i = 0; i < g_fn_watch_count; i++) {
@@ -1636,5 +1637,33 @@ void StartFnWatchPrinter() {
     }
   });
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_alloc_trace_addr);
+  guest::ResetResource(g_heap_prof_addr);
+  guest::ResetResource(g_heap_prof_hook_count);
+  guest::ResetResource(g_heap_prof_scope_slot);
+  guest::ResetResource(g_cnt_trace_addr);
+  guest::ResetResource(g_fatal_trace_addr);
+  guest::ResetResource(g_hdr_trace_addrs);
+  guest::ResetResource(g_hdr_trace_count);
+  guest::ResetResource(g_rdoff_addr);
+  guest::ResetResource(g_manifest_fd);
+  guest::ResetResource(g_skip_fn_addrs);
+  guest::ResetResource(g_skip_fn_count);
+  guest::ResetResource(g_order_count);
+  guest::ResetResource(g_ret_count);
+  guest::ResetResource(g_call_skip_count);
+  guest::ResetResource(g_fn_watch_count);
+  guest::ResetResource(g_fn_args_count);
+  guest::ResetResource(g_wprot_base);
+  guest::ResetResource(g_wprot_len);
+  guest::ResetResource(g_wprot_report_base);
+  guest::ResetResource(g_wprot_report_len);
+  guest::ResetResource(g_whist_base);
+  guest::ResetResource(g_whist_len);
+});
+}  // namespace
 
 }  // namespace kern::probe

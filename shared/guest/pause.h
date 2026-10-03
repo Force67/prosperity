@@ -13,6 +13,8 @@ void PausePoint();
 bool OnGuestThread();
 const i32* PauseFlagAddress();
 void RegisterCode(uintptr_t address, mem_size size);
+void SetThreadExitHandler(void (*exit)());
+void ResetCodeRanges();
 
 class ThreadRegistration {
  public:

@@ -4,6 +4,7 @@
 
 #include "gpu/render/pipeline_cache.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gpu_perf.h"
@@ -480,6 +481,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     // title's record is full of exactly that mistake.
     if (per_ps) {
       static base::Vector<u64> said;
+      static const guest::SessionReset reset_said(
+          [] { guest::ResetResource(said); });
       if (base::Find(said.begin(), said.end(), d.ps_addr) == said.end()) {
         said.push_back(d.ps_addr);
         BASE_LOGI(
@@ -493,6 +496,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     const bool no_write = NoZWriteForPs(d.ps_addr);
     if (no_write) {
       static base::Vector<u64> said;
+      static const guest::SessionReset reset_said(
+          [] { guest::ResetResource(said); });
       if (base::Find(said.begin(), said.end(), d.ps_addr) == said.end()) {
         said.push_back(d.ps_addr);
         BASE_LOGI("nozwps", "depth write disabled for ps={:#x} (was {})",
@@ -502,6 +507,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     const bool force_write = ForceZWriteForPs(d.ps_addr);
     if (force_write) {
       static base::Vector<u64> said;
+      static const guest::SessionReset reset_said(
+          [] { guest::ResetResource(said); });
       if (base::Find(said.begin(), said.end(), d.ps_addr) == said.end()) {
         said.push_back(d.ps_addr);
         BASE_LOGI("zwps", "depth write FORCED for ps={:#x} (was {})",

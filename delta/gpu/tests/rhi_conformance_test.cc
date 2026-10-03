@@ -2155,4 +2155,28 @@ TEST_P(RhiConformance, FragmentBarycentrics) {
   EXPECT_EQ(dominant(kW - 2, kH * 3 / 4), 0) << "odd triangle, vertex 1";
 }
 
+TEST_P(RhiConformance, ReleasesAllSessionObjectsAndCanSubmitAgain) {
+  using namespace gpu::rhi;
+  for (int session = 0; session < 3; ++session) {
+    device_->ReleaseSessionObjects();
+    objects_.clear();
+    list_ = nullptr;
+    ASSERT_EQ(device_->LiveObjects(), 0u);
+    list_ = device_->CreateCommandList();
+    ASSERT_NE(list_, nullptr);
+    const u32 value = 0x12345678;
+    Buffer* src = Upload(&value, sizeof(value), kBufferCopySrc);
+    Buffer* dst = Readback(sizeof(value));
+    ASSERT_NE(src, nullptr);
+    ASSERT_NE(dst, nullptr);
+    list_->Begin();
+    list_->CopyBuffer(dst, 0, src, 0, sizeof(value));
+    list_->End();
+    const u64 submission = device_->Submit(list_);
+    ASSERT_TRUE(device_->Wait(submission));
+    EXPECT_EQ(*reinterpret_cast<const u32*>(dst->mapped()), value);
+    EXPECT_EQ(device_->LiveObjects(), 3u);
+  }
+}
+
 }  // namespace

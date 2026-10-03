@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "gpu/ps4/render_queue.h"
 #include "gpu/write_tracker.h"
+#include "guest/session.h"
 
 #include <cstring>
 
@@ -1360,6 +1361,30 @@ void SubmitRingDcb(const void* dcb, u32 size_bytes) {
   t_walk_ring = "acb";
   SubmitDcb(dcb, size_bytes);
   t_walk_ring = "gfx";
+}
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_total_submits);
+  guest::ResetResource(g_total_draws);
+  guest::ResetResource(g_presented_frames);
+  guest::ResetResource(g_ce_counter);
+  guest::ResetResource(g_de_counter);
+  guest::ResetResource(g_fence_labels);
+  guest::ResetResource(g_label_writes);
+  guest::ResetResource(g_ce);
+  guest::ResetResource(g_regs);
+  guest::ResetResource(g_renderer_started);
+  guest::ResetResource(g_frame_active);
+  guest::ResetResource(g_index);
+  guest::ResetResource(g_const_ram);
+  guest::ResetResource(g_failed_waits);
+  guest::ResetResource(g_failed_next);
+});
+}  // namespace
+
+void StopRenderQueue() {
+  GuestRenderQueue().Stop();
 }
 
 }  // namespace gpu::ps4

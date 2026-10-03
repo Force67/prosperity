@@ -464,7 +464,15 @@ struct tls_index {  // NOLINT(readability-identifier-naming): guest ABI name
 void* PS4ABI GuestTlsGetAddr(tls_index* ti) {
   // per-thread dynamic TLS blocks (module index -> block). Each thread gets its
   // own copy of every module's __thread storage, like a real DTV.
-  static thread_local base::HashMap<u32, u8*> t_blocks;
+  struct Blocks {
+    base::HashMap<u32, u8*> values;
+    ~Blocks() {
+      for (const auto& [id, block] : values)
+        std::free(block);
+    }
+  };
+  static thread_local Blocks blocks;
+  auto& t_blocks = blocks.values;
 
   auto it = t_blocks.find(ti->module_id);
   if (it != t_blocks.end())

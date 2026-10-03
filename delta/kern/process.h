@@ -42,6 +42,7 @@ class Process {
   enum class Platform { kPs4, kPs5 };
 
   Process();
+  ~Process();
   // Load the process. When fromVfs is set, path is a guest VFS path (e.g.
   // "/app0/eboot.bin") loaded through the mount table; otherwise a host file.
   bool Create(const base::String&, bool from_vfs = false);

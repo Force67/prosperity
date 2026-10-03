@@ -6,6 +6,7 @@
 #include "base/arch.h"
 #include "gpu/render/buffer_cache.h"
 #include "gpu/write_tracker.h"
+#include "guest/session.h"
 
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gpu_perf.h"
@@ -808,6 +809,8 @@ bool ReportRtContents(FrameSlot& owner) {
     // run, so the shader has to be named in the same run that observed the NaN.
     if (kNanDis && nan_half && rt.last_ps) {
       static base::Vector<u64> seen;
+      static const guest::SessionReset reset_seen(
+          [] { guest::ResetResource(seen); });
       if (base::Find(seen.begin(), seen.end(), rt.last_ps) == seen.end()) {
         seen.push_back(rt.last_ps);
         gcn::DisassembleAt(rt.last_ps, "nan.PS");
@@ -1449,6 +1452,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // needs no flip. (The old default Y-flip existed only to undo the heuristic
   // composite's upside-down output.)
   static base::Vector<u8> flipped;
+  static const guest::SessionReset reset_flipped(
+      [] { guest::ResetResource(flipped); });
   auto* rb = fin.readback ? fin.readback->mapped() : nullptr;
   // DELTA_GPU_RBTRACE: whether the bytes this present is about to show are
   // actually non-zero, and which slot's mapping they came from. "A black
@@ -1701,5 +1706,15 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     }
   }
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  g_pass_open = ~0u;
+  guest::ResetResource(g_free_lists);
+  guest::ResetResource(g_pass_draws_at_open);
+  guest::ResetResource(g_pass_totals);
+  guest::ResetResource(g_pass_frames);
+});
+}  // namespace
 
 }  // namespace gpu::render

@@ -716,6 +716,7 @@ class Replayer {
   void Execute(const GlCommandList& list);
   // Drops cached GL objects that name `object`, before it is deleted.
   void Forget(rhi::Object* object);
+  void ResetSession();
 
  private:
   void BeginPass(const CmdBeginPass& c);
@@ -807,6 +808,7 @@ class GlDevice final : public rhi::Device {
   bool IsComplete(u64 submission) override;
   bool Wait(u64 submission, u64 timeout_ns) override;
   void WaitIdle() override;
+  void ReleaseSessionObjects() override;
   u64 LastSubmission() const override { return submitted_; }
   bool ReadTimestamps(rhi::TimestampPool* pool,
                       u32 first,

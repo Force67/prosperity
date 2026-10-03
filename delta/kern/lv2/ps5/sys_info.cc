@@ -5,6 +5,7 @@
  */
 
 #include "kern/lv2/ps5/sys_info.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <cstring>
@@ -61,6 +62,8 @@ void CensusSysctl(int* name, u32 namelen, const void* newp, size_t newlen) {
   if (!kSysctlCensus)
     return;
   static base::Map<base::String, u64> hist;
+  static const guest::SessionReset reset_hist(
+      [] { guest::ResetResource(hist); });
   static base::Mutex lock;
   static u64 calls = 0;
   base::String key;

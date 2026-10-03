@@ -10,6 +10,7 @@
 
 #include <sys/mman.h>
 #include <unistd.h>
+#include "base/algorithm.h"
 #include "base/atomic.h"
 #include "base/containers/map.h"
 #include "base/containers/vector.h"
@@ -28,6 +29,8 @@ struct MappingRegistry {
   base::Mutex lock;
   base::Map<uintptr_t, Mapping> mappings;
   u64 next_identity = 0;
+  bool session = false;
+  base::Map<uintptr_t, uintptr_t> owned;
 };
 MappingRegistry& MappingState() {
   // AllocMem can be called while another translation unit initializes.
@@ -63,6 +66,22 @@ void TrackMemoryMapping(void* addr, size_t len) {
   base::LockGuard lock(state.lock);
   ForgetMapping(state, base, base + len);
   state.mappings.emplace(base, Mapping{base + len, ++state.next_identity});
+  if (state.session) {
+    uintptr_t first = base, end = base + len;
+    auto it = state.owned.upper_bound(first);
+    if (it != state.owned.begin())
+      --it;
+    while (it != state.owned.end() && it->first <= end) {
+      if (it->second < first) {
+        ++it;
+        continue;
+      }
+      first = base::Min(first, it->first);
+      end = base::Max(end, it->second);
+      it = state.owned.erase(it);
+    }
+    state.owned[first] = end;
+  }
 }
 
 void ForgetMemoryMapping(void* addr, size_t len) {
@@ -143,11 +162,70 @@ void* AllocMem(void* preferred_addr,
   return p;
 }
 
+void FreeMem(void* addr, size_t size) {
+  if (!addr || !size)
+    return;
+  ::munmap(addr, size);
+  const uintptr_t begin = reinterpret_cast<uintptr_t>(addr), end = begin + size;
+  auto& state = MappingState();
+  base::LockGuard lock(state.lock);
+  ForgetMapping(state, begin, end);
+  auto it = state.owned.upper_bound(begin);
+  if (it != state.owned.begin())
+    --it;
+  while (it != state.owned.end() && it->first < end) {
+    const auto [first, last] = *it;
+    if (last <= begin) {
+      ++it;
+      continue;
+    }
+    it = state.owned.erase(it);
+    if (first < begin)
+      state.owned.emplace(first, begin);
+    if (last > end)
+      state.owned.emplace(end, last);
+  }
+}
+
 void FreeMem(void* addr) {
-  // Without size we can't unmap precisely; this matches the Win32 semantic
-  // of "release the whole reservation" only loosely. Callers that care must
-  // track size externally.
-  ::munmap(addr, 0);
+  auto& state = MappingState();
+  size_t size = 0;
+  {
+    base::LockGuard lock(state.lock);
+    const auto it = state.mappings.find(reinterpret_cast<uintptr_t>(addr));
+    if (it != state.mappings.end())
+      size = it->second.end - it->first;
+  }
+  FreeMem(addr, size);
+}
+
+void BeginMemorySession() {
+  auto& state = MappingState();
+  base::LockGuard lock(state.lock);
+  state.session = true;
+}
+
+size_t SessionMappedBytes() {
+  auto& state = MappingState();
+  base::LockGuard lock(state.lock);
+  size_t bytes = 0;
+  for (const auto& [first, end] : state.owned)
+    bytes += end - first;
+  return bytes;
+}
+
+size_t EndMemorySession() {
+  auto& state = MappingState();
+  base::LockGuard lock(state.lock);
+  size_t bytes = 0;
+  for (const auto& [first, end] : state.owned) {
+    ::munmap(reinterpret_cast<void*>(first), end - first);
+    ForgetMapping(state, first, end);
+    bytes += end - first;
+  }
+  state.owned = {};
+  state.session = false;
+  return bytes;
 }
 
 bool ProtectMem(void* addr, size_t len, PageProtection prot) {

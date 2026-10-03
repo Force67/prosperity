@@ -14,6 +14,7 @@
 #include "base/logging.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
+#include "guest/session.h"
 
 #include <sys/mman.h>
 
@@ -159,6 +160,7 @@ struct AcqQueue {
 };
 
 static base::Mutex g_queue_lock;
+static bool g_polling = false;
 static base::Map<u32, AcqQueue> g_queues;  // by 1-based queue id
 
 // The doorbell value is the ring write pointer. Advance our own read pointer to
@@ -226,7 +228,7 @@ static void DrainQueue(AcqQueue& q, u64 doorbell) {
 static void DoorbellPoller() {
   u64 ticks = 0;
   for (;;) {
-    base::SleepForMicroseconds(500);
+    guest::SleepForMicroseconds(500);
     base::LockGuard<base::Mutex> lk(g_queue_lock);
     // Every 5s under DELTA_AGC_QSTAT: what each queue has published against
     // what we have walked. A consumer waiting on a fence one submit short is
@@ -291,10 +293,9 @@ static void RegisterAcqQueue(u32 qid,
                         ? *reinterpret_cast<volatile const u64*>(q.doorbell)
                         : 0;
   q.read_dw = static_cast<u32>(q.last_doorbell % (q.ring_bytes / 4));
-  static bool polling = false;
-  if (!polling) {
-    polling = true;
-    base::SpawnDetachedThread("gc_dev", DoorbellPoller);
+  if (!g_polling) {
+    g_polling = true;
+    guest::SpawnThread("gc_dev", DoorbellPoller);
   }
 }
 
@@ -339,6 +340,8 @@ i32 GcDevicePs5::Ioctl(u32 cmd, void* data) {
   if (kGcIoctlCensus) {
     static base::Mutex mtx;
     static base::Map<u32, u64> hist;
+    static const guest::SessionReset reset_hist(
+        [] { guest::ResetResource(hist); });
     static auto last = base::TimeTicks::Now();
     base::LockGuard<base::Mutex> lk(mtx);
     hist[cmd]++;
@@ -396,6 +399,8 @@ i32 GcDevicePs5::Ioctl(u32 cmd, void* data) {
       // submit read through it; hand back a real zeroed page ([+0] == 0 =
       // allowed).
       static u8* submit_state = nullptr;
+      static const guest::SessionReset reset_submit_state(
+          [] { submit_state = nullptr; });
       if (!submit_state)
         submit_state = AllocLowGuest(0x100);
       if (data)
@@ -911,4 +916,14 @@ u8* GcDevicePs5::Map(void* addr,
               p);
   return reinterpret_cast<u8*>(p);
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_polling);
+  guest::ResetResource(g_queues);
+  guest::ResetResource(g_acq_ring_lo);
+  guest::ResetResource(g_acq_ring_hi);
+});
+}  // namespace
+
 }  // namespace kern

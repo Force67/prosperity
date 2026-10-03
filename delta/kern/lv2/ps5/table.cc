@@ -18,6 +18,7 @@
 #include <cstring>
 #include "base/arch.h"
 #include "base/logging.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include "base/containers/set.h"
@@ -149,6 +150,8 @@ uintptr_t Lv2GetPs5(u32 sid) {
   const Ps5Sys* ex = Ps5Extra(sid);
 
   static base::Set<u32> seen;
+  static const guest::SessionReset reset_seen(
+      [] { guest::ResetResource(seen); });
   if (kPs5SysTrace && seen.insert(sid).second) {
     const char* name = ex ? ex->name : SyscallGetname(sid);
     BASE_LOGI("ps5sys", "{:4}  {}", sid, name ? name : "?");

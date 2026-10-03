@@ -41,6 +41,8 @@ bool PollKeyboardPad(PadKeys&) {
   return false;
 }
 void SetRumble(u8, u8) {}
+void ResetGuest() {}
+
 void Shutdown() {}
 void QueryVram(u64& used, u64& total) {
   used = total = 0;

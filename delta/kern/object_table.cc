@@ -182,7 +182,7 @@ bool ObjectTable::Release(u32 handle) {
   return true;
 }
 
-Object* ObjectTable::Get(u32 handle) {
+ObjectRef<Object> ObjectTable::Get(u32 handle) {
   base::LockGuard lock(omutex_);
 
   // Lower 2 bits are ignored.
@@ -199,7 +199,7 @@ Object* ObjectTable::Get(u32 handle) {
   // Retain the object pointer.
   if (obj) {
     obj->Retain();
-    return obj;
+    return ObjectRef<Object>(obj);
   }
 
   return nullptr;

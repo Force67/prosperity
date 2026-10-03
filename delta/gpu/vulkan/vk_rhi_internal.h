@@ -34,6 +34,7 @@ class ImageAllocator {
  public:
   bool Allocate(VulkanDevice& device, VkImage image, Allocation& out);
   void Free(VulkanDevice& device, Allocation& allocation);
+  void Release(VulkanDevice& device);
 
  private:
   struct Block {
@@ -285,6 +286,7 @@ class VulkanDevice final : public rhi::Device {
   bool IsComplete(u64 submission) override;
   bool Wait(u64 submission, u64 timeout_ns) override;
   void WaitIdle() override;
+  void ReleaseSessionObjects() override;
   u64 LastSubmission() const override { return submitted_; }
   bool ReadTimestamps(rhi::TimestampPool* pool,
                       u32 first,

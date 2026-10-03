@@ -11,6 +11,7 @@
 #include "base/logging.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
+#include "guest/session.h"
 #include "host_memory/host_memory.h"
 #include "io/file.h"
 #include "io/path.h"
@@ -55,11 +56,18 @@ Process::Process() : vmem_(env_) {
   g_active_proc = this;
 }
 
+Process::~Process() {
+  if (g_active_proc == this)
+    g_active_proc = nullptr;
+}
+
 Process* Process::GetActive() {
   return g_active_proc;
 }
 
 bool Process::Create(const base::String& path, bool from_vfs) {
+  if (guest::Stopping())
+    return false;
   /*register HLE prx overrides*/
   runtime::vprx::Init();
 
@@ -278,6 +286,8 @@ ModulePtr Process::LoadModule(base::StringRef name) {
 void Process::Start() {
   LOG_ASSERT(modules_[1]->GetInfo().name == "libkernel");
 
+  if (guest::Stopping())
+    return;
   InstallCrashHandler();
   probe::OnBeforeStart(*this);
 

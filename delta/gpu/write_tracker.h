@@ -36,6 +36,7 @@ class WriteTracker {
 
   // False when the host cannot track writes; every other call is then a no-op.
   bool Enable();
+  void Reset();
   bool enabled() const { return mode_ != Mode::kOff; }
 
   // Arms the pages of [base, base+bytes). False when they cannot be tracked,

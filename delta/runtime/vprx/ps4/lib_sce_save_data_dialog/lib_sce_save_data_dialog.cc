@@ -20,6 +20,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_save_data_dialog/lib_sce_save_data_dialog.h"
 #include "base/arch.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <cstring>
@@ -49,6 +50,16 @@ u32 g_mode = 0;
 u8 g_dir_name[kDirNameBytes] = {};
 bool g_have_dir_name = false;
 u64 g_user_data = 0;
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_status);
+  guest::ResetResource(g_mode);
+  guest::ResetResource(g_dir_name);
+  guest::ResetResource(g_have_dir_name);
+  guest::ResetResource(g_user_data);
+});
+}  // namespace
 
 }  // namespace
 

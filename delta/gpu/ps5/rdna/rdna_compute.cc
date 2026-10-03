@@ -6,6 +6,7 @@
 
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "gpu/guest_memory.h"
 
@@ -667,6 +668,8 @@ bool NoOpt() {
 // is otherwise invisible in the frame. One line per distinct shader.
 void ReportDecline(const u32* cs_code, size_t insts) {
   static base::HashSet<u64> reported;
+  static const guest::SessionReset reset_reported(
+      [] { guest::ResetResource(reported); });
   const u64 address = reinterpret_cast<uintptr_t>(cs_code);
   if (!reported.insert(address).second)
     return;

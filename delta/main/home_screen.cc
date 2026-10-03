@@ -16,9 +16,16 @@ namespace cli {
 
 base::String ShowHomeScreen(const base::Vector<ui::HomeGame>& games) {
   auto library = games;
+  const bool retained_window = host::Available();
+  if (retained_window) {
+    ui::OverlayVkShutdown();
+    ui::OverlayShutdownImGui();
+  }
   ui::BeginHomeScreen(library, FirmwareModulesReady(false),
                       FirmwareModulesReady(true), CheckGameFirmware);
   if (host::Init("Prosperity", 1280, 720)) {
+    if (retained_window)
+      host::ReloadOverlay();
     ui::ConfigureSettings(gpu::render::GraphicsBackends(),
                           host::GraphicsDevices());
     const u32 pixel = 0xff110d0c;

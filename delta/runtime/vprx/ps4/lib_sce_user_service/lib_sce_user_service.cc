@@ -1,5 +1,6 @@
 #include "runtime/vprx/ps4/lib_sce_user_service/lib_sce_user_service.h"
 #include "base/arch.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <cstring>
@@ -13,6 +14,13 @@ constexpr i32 kUserId = 1;
 constexpr i32 kInvalidUserId = -1;
 constexpr int kNoEvent = 0x80960007;  // SCE_USER_SERVICE_ERROR_NO_EVENT
 bool g_login_delivered = false;
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_login_delivered);
+});
+}  // namespace
+
 }  // namespace
 
 // Fully take over init/teardown so the LLE UserService never sets up its IPMI

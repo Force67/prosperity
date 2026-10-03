@@ -190,6 +190,28 @@ const GroupEntry* D3D12BindGroupLayout::Find(u32 binding) const {
 
 // D3D12Device
 
+void D3D12Device::ReleaseSessionObjects() {
+  WaitIdle();
+  ReleaseObjects();
+  shaders_ = {};
+  for (auto& [key, pso] : blit_psos_)
+    SafeRelease(pso);
+  blit_psos_ = {};
+  SafeRelease(blit_root_);
+  blit_vs_ = {};
+  blit_ps_ = {};
+  sampler_ids_ = {};
+  sampler_cpu_ = {};
+  sampler_tables_ = {};
+  sampler_heap_used_ = 0;
+  ++sampler_generation_;
+  views.Shutdown();
+  rtvs.Shutdown();
+  dsvs.Shutdown();
+  samplers.Shutdown();
+  Destroy(CreateSampler({}));
+}
+
 D3D12Device::~D3D12Device() {
   if (!device)
     return;
@@ -435,7 +457,7 @@ rhi::Buffer* D3D12Device::CreateBuffer(const rhi::BufferDesc& desc) {
   }
   if (desc.name)
     SetName(&*buffer, desc.name);
-  return gpu::rhi::Release(buffer);
+  return gpu::rhi::Release(buffer, this);
 }
 
 rhi::Texture* D3D12Device::CreateTexture(const rhi::TextureDesc& desc) {
@@ -490,7 +512,7 @@ rhi::Texture* D3D12Device::CreateTexture(const rhi::TextureDesc& desc) {
                          D3D12_RESOURCE_STATE_COMMON);
   if (desc.name)
     SetName(&*texture, desc.name);
-  return gpu::rhi::Release(texture);
+  return gpu::rhi::Release(texture, this);
 }
 
 rhi::TextureView* D3D12Device::CreateView(rhi::Texture* texture,
@@ -623,7 +645,7 @@ rhi::TextureView* D3D12Device::CreateView(rhi::Texture* texture,
 
   if (tex->flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
     Dsv(&*view, 0);
-  return gpu::rhi::Release(view);
+  return gpu::rhi::Release(view, this);
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Device::Dsv(D3D12View* view, u32 variant) {
@@ -659,7 +681,7 @@ rhi::Sampler* D3D12Device::CreateSampler(const rhi::SamplerDesc& desc) {
   auto it = sampler_ids_.find(key);
   if (it != sampler_ids_.end()) {
     sampler->id = it->second;
-    return gpu::rhi::Release(sampler);
+    return gpu::rhi::Release(sampler, this);
   }
   D3D12_SAMPLER_DESC sd{};
   const bool aniso = desc.max_anisotropy > 1.0f;
@@ -694,7 +716,7 @@ rhi::Sampler* D3D12Device::CreateSampler(const rhi::SamplerDesc& desc) {
   sampler->id = static_cast<u32>(sampler_cpu_.size());
   sampler_cpu_.push_back(range);
   sampler_ids_[key] = sampler->id;
-  return gpu::rhi::Release(sampler);
+  return gpu::rhi::Release(sampler, this);
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::SamplerTable(
@@ -780,7 +802,7 @@ rhi::BindGroupLayout* D3D12Device::CreateBindGroupLayout(
              });
   for (u32 d = 0; d < layout->dynamic_entries.size(); d++)
     layout->entries[layout->dynamic_entries[d]].dynamic_index = d;
-  return gpu::rhi::Release(layout);
+  return gpu::rhi::Release(layout, this);
 }
 
 void D3D12Device::WriteCbv(D3D12_CPU_DESCRIPTOR_HANDLE dst,
@@ -889,7 +911,7 @@ rhi::BindGroup* D3D12Device::CreateBindGroup(const rhi::BindGroupDesc& desc) {
   group->uses.resize(layout->entries.size());
   UpdateBindGroup(&*group, desc.writes.data(),
                   static_cast<u32>(desc.writes.size()));
-  return gpu::rhi::Release(group);
+  return gpu::rhi::Release(group, this);
 }
 
 void D3D12Device::UpdateBindGroup(rhi::BindGroup* bind_group,
@@ -971,17 +993,18 @@ rhi::TimestampPool* D3D12Device::CreateTimestampPool(u32 count) {
   }
   pool->results = static_cast<const u64*>(p);
   pool->count = count;
-  return gpu::rhi::Release(pool);
+  return gpu::rhi::Release(pool, this);
 }
 
 rhi::CommandList* D3D12Device::CreateCommandList() {
   auto list = base::MakeUnique<D3D12CommandList>(*this);
   if (!list->Init())
     return nullptr;
-  return gpu::rhi::Release(list);
+  return gpu::rhi::Release(list, this);
 }
 
 void D3D12Device::Destroy(rhi::Object* object) {
+  Forget(object);
   if (!object)
     return;
   if (auto* b = dynamic_cast<D3D12Buffer*>(object)) {

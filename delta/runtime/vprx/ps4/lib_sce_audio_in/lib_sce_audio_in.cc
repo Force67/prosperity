@@ -4,6 +4,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_audio_in/lib_sce_audio_in.h"
 #include "base/arch.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <cstring>
@@ -102,6 +103,12 @@ void FillStatus(i32 handle, void* status) {
     reinterpret_cast<u32*>(status)[2] = p->channels;
   }
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_ports);
+});
+}  // namespace
 
 }  // namespace
 

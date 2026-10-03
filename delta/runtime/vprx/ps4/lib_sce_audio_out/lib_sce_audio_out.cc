@@ -77,6 +77,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_audio_out/lib_sce_audio_out.h"
 #include "base/arch.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include "host/audio_output.h"
@@ -158,6 +159,12 @@ Port* FindPort(i32 handle) {
   Port& p = g_ports[handle - 1];
   return p.open ? &p : nullptr;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_ports);
+});
+}  // namespace
 
 }  // namespace
 

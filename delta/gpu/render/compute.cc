@@ -12,6 +12,7 @@
 #include "gpu/render/guest_direct.h"
 #include "gpu/render/guest_memory_table.h"
 #include "gpu/render/renderer.h"
+#include "guest/session.h"
 
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_resource.h"
@@ -1226,6 +1227,8 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
   // One line per address and direction. A flat cap spends itself on the level
   // load and then says nothing at all about the steady state.
   static base::HashSet<u64> warned;
+  static const guest::SessionReset reset_warned(
+      [] { guest::ResetResource(warned); });
   const u64 key = (res.base << 1) | (dir[0] == 'r' ? 1u : 0u);
   if (warned.size() < 256 && warned.insert(key).second)
     BASE_LOGI(
@@ -1503,6 +1506,8 @@ u64 g_in_frame_bridge_n = 0;
 
 bool BlitsBetween(rhi::Format a, rhi::Format b) {
   static base::HashMap<u64, bool> known;
+  static const guest::SessionReset reset_known(
+      [] { guest::ResetResource(known); });
   const u64 key = (u64(a) << 32) | u64(b);
   auto it = known.find(key);
   if (it != known.end())
@@ -1745,6 +1750,8 @@ bool StageCsRangeFromRtInFrame(const ComputeInfo::Res& res, CsRange& e) {
     why = g_rec_why;
   if (why && kCsSyncReport) {
     static base::HashSet<u64> seen;
+    static const guest::SessionReset reset_seen(
+        [] { guest::ResetResource(seen); });
     if (seen.size() < 64 && seen.insert(res.base).second)
       BASE_LOGI("csbridge",
                 "{:#x} {}x{}x{} dfmt={} in frame: {} (img {}x{} "
@@ -2710,6 +2717,8 @@ bool GpuTileable(const ComputeInfo::Res& r) {
   if (r.elem_bytes < 4 || r.elem_bytes != r.stage_elem_bytes)
     return false;
   static base::HashMap<u64, bool> known;
+  static const guest::SessionReset reset_known(
+      [] { guest::ResetResource(known); });
   u64 key = 1469598103934665603ull;
   for (u64 v : {u64(r.tiling_idx), u64(r.width), u64(r.height), u64(r.pitch),
                 u64(r.layers), u64(r.mip_levels), u64(r.elem_bytes),
@@ -3314,6 +3323,8 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
     // hundreds of surfaces spends a flat cap entirely on the first few, and
     // the one surface that stays empty is never among them.
     static base::HashSet<u64> seen;
+    static const guest::SessionReset reset_seen(
+        [] { guest::ResetResource(seen); });
     if (seen.size() < 4096 && seen.insert(base).second)
       BASE_LOGI("cswb",
                 "image base={:#x} {}x{} layers={} tiling={} staged {}/{} "
@@ -3933,6 +3944,8 @@ bool CsSupplyTexture(u64 base,
   auto declined = [&](const char* why) {
     if (kCsTexBridgeTrace) {
       static base::HashSet<u64> seen;
+      static const guest::SessionReset reset_seen(
+          [] { guest::ResetResource(seen); });
       if (seen.size() < 256 && seen.insert(base).second)
         BASE_LOGI("texbridge",
                   "{:#x} {}: cs {}x{} l={} m={} e={}/{} d={} t={} | tex "
@@ -4364,6 +4377,8 @@ bool CsVertexBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
 bool RtRefreshMiss(const char* why) {
   if (kCsSyncReport) {
     static base::Map<const char*, u64> counts;
+    static const guest::SessionReset reset_counts(
+        [] { guest::ResetResource(counts); });
     static u64 n = 0;
     counts[why]++;
     if (++n % 200 == 0) {
@@ -4503,6 +4518,8 @@ bool CsRefreshRtFromTruth(u64 base) {
 
 void ReleaseRetiredCsBuffers() {
   static base::Vector<rhi::Buffer*> aged;
+  static const guest::SessionReset reset_aged(
+      [] { guest::ResetResource(aged); });
   for (rhi::Buffer* buf : aged)
     Device().Destroy(buf);
   aged = base::move(g_cs_frame_retired);
@@ -5274,7 +5291,9 @@ bool WaitBatch(u64 batch) {
   u64 submission = 0;
   {
     base::UniqueLock<base::Mutex> lock(g_batch_ids_lock);
-    g_batch_ids_wake.Wait(lock, [&] { return g_last_submitted_id >= batch; });
+    if (!guest::Wait(g_batch_ids_wake, lock,
+                     [&] { return g_last_submitted_id >= batch; }))
+      return false;
     if (g_submitted[batch % 64].id == batch)
       submission = g_submitted[batch % 64].submission;
   }
@@ -5342,6 +5361,8 @@ bool FillGds(Renderer& renderer, u32 offset, u32 bytes, u32 value) {
 // line is one grep away and a prose reason at each of them would be noise.
 bool CsDeclined(const ComputeInfo& ci, const char* why) {
   static base::HashSet<base::String> reported;
+  static const guest::SessionReset reset_reported(
+      [] { guest::ResetResource(reported); });
   base::String key = base::ToString(ci.cs_addr) + why;
   if (reported.size() < 512 && reported.insert(key).second)
     BASE_LOGI("csgpu", "CS @{:#x} declined at exit {}", ci.cs_addr, why);
@@ -5903,6 +5924,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     };
     static base::Mutex m;
     static base::Map<u64, Cell> tbl;
+    static const guest::SessionReset reset_tbl(
+        [] { guest::ResetResource(tbl); });
     static auto last = base::TimeTicks::Now();
     base::LockGuard<base::Mutex> lk(m);
     for (u32 i = 0; i < ci.num_res; i++)
@@ -7443,5 +7466,74 @@ bool CsRangeMaybeDirty(u64 base, u64 bytes) {
 bool CsRangeDirtyOverlapping(u64 base, u64 bytes) {
   return AnyDirtyOverlapping(base, bytes, [](u64) { return true; });
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  host_memory::SetWriteFaultHandler(nullptr);
+  host_memory::SetHostWriteHook(nullptr);
+  if (g_own)
+    munmap(g_own, kOwnBlocks * sizeof(OwnBlock));
+  g_own = nullptr;
+  g_cs_writeback_gen = g_cs_batch_next_id = 1;
+  guest::ResetResource(g_mirror_cached);
+  guest::ResetResource(g_mirror_uncached);
+  guest::ResetResource(g_mirror_wb_union);
+  guest::ResetResource(g_wb_why);
+  guest::ResetResource(g_stage_stats);
+  guest::ResetResource(g_gds);
+  guest::ResetResource(g_cs_pipes);
+  guest::ResetResource(g_prebuilt);
+  guest::ResetResource(g_cs_stage);
+  guest::ResetResource(g_cs_list);
+  guest::ResetResource(g_truth_bridge_scratch);
+  guest::ResetResource(g_cs_scratch_owner);
+  guest::ResetResource(g_cs_scratch_bytes);
+  guest::ResetResource(g_cs_frame_retired);
+  guest::ResetResource(g_cs_free);
+  guest::ResetResource(g_cs_free_bytes);
+  guest::ResetResource(g_bridge);
+  guest::ResetResource(g_cs_failed);
+  guest::ResetResource(g_bridge_float_images);
+  guest::ResetResource(g_rt_unbridgeable);
+  guest::ResetResource(g_cs_ranges);
+  guest::ResetResource(g_cs_evict_next);
+  guest::ResetResource(g_cs_dirty_stamp);
+  guest::ResetResource(g_cs_pending);
+  guest::ResetResource(g_cs_range_bytes);
+  guest::ResetResource(g_cs_dirty_pages);
+  guest::ResetResource(g_cs_dirty_bases);
+  guest::ResetResource(g_cs_range_blocks);
+  guest::ResetResource(g_tile_tables);
+  guest::ResetResource(g_cs_scratch);
+  guest::ResetResource(g_cs_batch_open);
+  guest::ResetResource(g_cs_batch_count);
+  guest::ResetResource(g_cs_batch_id);
+  guest::ResetResource(g_cs_batch_done);
+  guest::ResetResource(g_pending_guest_writes);
+  guest::ResetResource(g_publish_batch);
+  guest::ResetResource(g_cs_batch_cur);
+  guest::ResetResource(g_cs_batch_log);
+  guest::ResetResource(g_cs_timestamps);
+  guest::ResetResource(g_cs_gpu_times);
+  guest::ResetResource(g_cs_heavy);
+  guest::ResetResource(g_cs_batch_access);
+  guest::ResetResource(g_cs_batches);
+  guest::ResetResource(g_cs_chunk_needs_batch);
+  guest::ResetResource(g_cs_reader_waits);
+  guest::ResetResource(g_cs_reader_wbs);
+  guest::ResetResource(g_submitted);
+  guest::ResetResource(g_last_submitted_id);
+  guest::ResetResource(g_guest_page_imports);
+  guest::ResetResource(g_labels_deferrable);
+  guest::ResetResource(g_mirror);
+  guest::ResetResource(g_mirror_tried);
+  guest::ResetResource(g_mirror_imports);
+  guest::ResetResource(g_mirror_clean);
+  guest::ResetResource(g_mirror_self);
+  guest::ResetResource(g_own_unsubmitted);
+  guest::ResetResource(g_mirror_writes);
+  guest::ResetResource(g_mirror_seq);
+});
+}  // namespace
 
 }  // namespace gpu::render

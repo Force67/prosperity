@@ -9,6 +9,7 @@
  */
 
 #include "base/arch.h"
+#include "base/atomic.h"
 #include "elf_types.h"
 #include "sce_types.h"
 
@@ -111,10 +112,14 @@ class Module {
   inline bool IsDynlib() { return elf_->type == ET_SCE_DYNAMIC; }
 
   /*traits -> ObjectRef TODO: properly implement*/
-  void Release() {};
-  void Retain() {};
+  void Release() {
+    if (references_.fetch_sub(1) == 1)
+      delete this;
+  }
+  void Retain() { references_.fetch_add(1); }
 
  private:
+  base::Atomic<u32> references_{1};
   ModuleInfo info_{};
 
   void DigestDynamic();

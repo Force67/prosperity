@@ -12,6 +12,7 @@
 #include "base/logging.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <sys/select.h>
@@ -103,7 +104,7 @@ static void WatchSocket(u32 fd) {
   if (!g_watch_started.compare_exchange_strong(expected, true))
     return;
   BASE_LOGI("kevent", "socket read-poll started");
-  base::SpawnDetachedThread("sys_event", [] {
+  guest::SpawnThread("sys_event", [] {
     for (;;) {
       fd_set rd;
       FD_ZERO(&rd);
@@ -112,7 +113,7 @@ static void WatchSocket(u32 fd) {
       {
         base::LockGuard<base::Mutex> lk(g_watch_m);
         for (u32 g : g_watched)
-          if (auto* s = FdToSocket(g)) {
+          if (auto s = FdToSocket(g)) {
             live.emplace_back(g, s->HostFd());
             FD_SET(s->HostFd(), &rd);
             max_fd = base::Max(max_fd, s->HostFd());
@@ -120,7 +121,7 @@ static void WatchSocket(u32 fd) {
       }
       timeval tv{0, 20000};  // 20 ms; also the retry tick when nothing is live
       if (max_fd < 0 || ::select(max_fd + 1, &rd, nullptr, nullptr, &tv) <= 0) {
-        base::SleepForMilliseconds(5);
+        guest::SleepForMilliseconds(5);
         continue;
       }
       for (auto& [guestFd, HostFd] : live)
@@ -137,10 +138,10 @@ static void StartVblankPump() {
   if (!g_vblank_started.compare_exchange_strong(expected, true))
     return;
   BASE_LOGI("vblank", "pump started (60 Hz, EVFILT_DISPLAY/VIDEOOUT)");
-  base::SpawnDetachedThread("sys_event", [] {
+  guest::SpawnThread("sys_event", [] {
     u64 count = 0;
     for (;;) {
-      base::SleepForMicroseconds(16667);  // ~60 Hz
+      guest::SleepForMicroseconds(16667);  // ~60 Hz
       ++count;
       // data>>16 = counter, bits 12..15 = 1..14 per-event sequence the title
       // polls for "new", bits 0..11 = TSC nonce. Packing only count<<16 left
@@ -388,18 +389,18 @@ int Equeue::Kevent(const kevent_t* changes,
     if (kEventStallSecs > 0) {
       const auto until =
           base::TimeTicks::Now() + base::Seconds(kEventStallSecs);
-      if (!cv_.WaitUntil(lk, until, pred)) {
+      if (!guest::WaitFor(cv_, lk, until - base::TimeTicks::Now(), pred)) {
         ReportRegistrationsLocked(handle());
-        cv_.Wait(lk, pred);
+        guest::Wait(cv_, lk, pred);
       }
     } else {
-      cv_.Wait(lk, pred);
+      guest::Wait(cv_, lk, pred);
     }
     ready = true;
   } else {
     auto dur =
         base::Seconds(to->tv_sec) + base::Microseconds((to->tv_nsec) / 1000);
-    ready = cv_.WaitFor(lk, dur, pred);
+    ready = guest::WaitFor(cv_, lk, dur, pred);
   }
   if (!ready) {
     if (kEventTrace)
@@ -541,7 +542,7 @@ int PS4ABI sys_kevent(int kq,
                       kevent_t* eventlist,
                       int nevents,
                       const ktimespec* to) {
-  auto* obj = Process::GetActive()->GetObjTable().Get(kq);
+  auto obj = Process::GetActive()->GetObjTable().Get(kq);
   if (!obj || obj->type() != Object::Type::kEqueue) {
     BASE_LOGI("kevent", "bad kq fd={}", kq);
     return -SysError::eBADF;
@@ -550,7 +551,7 @@ int PS4ABI sys_kevent(int kq,
   // the same "wedged title" question the umtx/semaphore probes answer, and it
   // was the one wait they could not see.
   WaitProbe wp("kevent", (long)kq, (long)nevents);
-  auto* eq = static_cast<Equeue*>(obj);
+  auto* eq = static_cast<Equeue*>(obj.get());
   const auto t0 = base::TimeTicks::Now();
   int r = eq->Kevent(changelist, nchanges, eventlist, nevents, to);
   // A wait this long is a title that is not going to wake up on its own. What
@@ -594,5 +595,18 @@ int PS4ABI sys_eport_open() {
 int PS4ABI sys_eport_close() {
   return 0;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_equeues);
+  guest::ResetResource(g_vblank_started);
+  guest::ResetResource(g_flip_count);
+  guest::ResetResource(g_watched);
+  guest::ResetResource(g_watch_started);
+  guest::ResetResource(g_eop_seq);
+  guest::ResetResource(g_last_eop_data);
+  guest::ResetResource(g_eop_raw);
+});
+}  // namespace
 
 }  // namespace kern

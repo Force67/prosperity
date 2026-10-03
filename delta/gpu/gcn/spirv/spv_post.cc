@@ -303,6 +303,13 @@ class FinalizePool {
     return true;
   }
 
+  void Reset() {
+    base::UniqueLock<base::Mutex> lock(mutex_);
+    idle_.Wait(lock, [this] { return queue_.empty() && active_ == 0; });
+    pending_ = {};
+    queue_ = {};
+  }
+
  private:
   void Work() {
     for (;;) {
@@ -312,19 +319,33 @@ class FinalizePool {
         ready_.Wait(lock, [this] { return !queue_.empty(); });
         job = base::move(queue_.front());
         queue_.pop_front();
+        ++active_;
       }
       job();
+      job = nullptr;
+      {
+        base::LockGuard<base::Mutex> lock(mutex_);
+        --active_;
+        idle_.NotifyAll();
+      }
     }
   }
 
   base::Mutex mutex_;
   base::ConditionVariable ready_;
+  base::ConditionVariable idle_;
+  size_t active_ = 0;
   base::SimpleDeque<base::Function<void()>> queue_;
   base::HashMap<u64, std::shared_future<Finalized>> pending_;
 };
 
+FinalizePool* g_pool = nullptr;
 FinalizePool& Pool() {
-  static FinalizePool* pool = new FinalizePool;
+  static FinalizePool* pool = [] {
+    auto* pool = new FinalizePool;
+    g_pool = pool;
+    return pool;
+  }();
   return *pool;
 }
 
@@ -337,6 +358,11 @@ PrefetchScope::PrefetchScope() {
 
 PrefetchScope::~PrefetchScope() {
   t_prefetching = false;
+}
+
+void ResetPrefetch() {
+  if (g_pool)
+    g_pool->Reset();
 }
 
 void Prefetch(const base::Vector<u32>& spv) {
@@ -402,3 +428,11 @@ bool Finalize(const base::Vector<u32>& spv,
 }  // namespace gpu::gcn::spirv
 
 #endif  // DELTA_HAVE_SPIRV_BACKEND
+
+namespace gpu::gcn {
+void ResetShaderWork() {
+#ifdef DELTA_HAVE_SPIRV_BACKEND
+  spirv::ResetPrefetch();
+#endif
+}
+}  // namespace gpu::gcn

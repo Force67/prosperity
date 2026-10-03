@@ -23,6 +23,7 @@
 
 #include "gpu/gcn/gcn_detile.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -1675,6 +1676,8 @@ bool BuildSeparableAddressTable(const TextureLayout32& layout,
   };
   static base::Mutex mutex;
   static base::HashMap<u64, Built> built;
+  static const guest::SessionReset reset_built(
+      [] { guest::ResetResource(built); });
   u64 key = 1469598103934665603ull;
   for (u64 v :
        {u64(layout.tiling_idx), u64(layout.elem_bytes), u64(layout.layers),

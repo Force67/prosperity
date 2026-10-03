@@ -27,6 +27,11 @@ add_delta_test(umtx_op_test
   SOURCES umtx_op_test.cc
   DEPS delta_kern)
 
+add_delta_test(mdbg_service_test
+  SOURCES mdbg_service_test.cc
+  DEPS delta_kern)
+set_tests_properties(mdbg_service_test PROPERTIES TIMEOUT 10)
+
 # A device now takes the object table it registers with rather than the whole
 # process, so these two build the unit under test into the test binary and link
 # no emulator at all -- which is the acceptance test for the boundary.

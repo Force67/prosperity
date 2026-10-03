@@ -104,6 +104,12 @@ void ReserveGuestVaSpace() {
 #endif
 }
 
+void RestoreGuestVaSpace() {
+  for (const auto& range : kRanges)
+    mmap(reinterpret_cast<void*>(range.base), range.size, PROT_NONE,
+         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+}
+
 bool IsGuestReservedVa(const void* addr, size_t len) {
   const auto a = reinterpret_cast<uintptr_t>(addr);
   if (!a || !len)

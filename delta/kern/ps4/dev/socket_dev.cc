@@ -7,9 +7,12 @@
  * the host unchanged.
  */
 
+#include <fcntl.h>
+#include <poll.h>
 #include <cerrno>
 #include <cstring>
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -153,8 +156,19 @@ i64 SocketDevice::Recvfrom(void* buf,
   sockaddr_storage sa;
   socklen_t n = sizeof(sa);
   host_memory::BeforeHostWrite(buf, len);
-  ssize_t r =
-      ::recvfrom(fd_, buf, len, flags, reinterpret_cast<sockaddr*>(&sa), &n);
+  const bool nonblocking =
+      (flags & MSG_DONTWAIT) || (fcntl(fd_, F_GETFL) & O_NONBLOCK);
+  ssize_t r;
+  for (;;) {
+    if (guest::Stopping())
+      return -SysError::eINTR;
+    r = ::recvfrom(fd_, buf, len, flags | MSG_DONTWAIT,
+                   reinterpret_cast<sockaddr*>(&sa), &n);
+    if (r >= 0 || nonblocking || (errno != EAGAIN && errno != EWOULDBLOCK))
+      break;
+    pollfd descriptor{fd_, POLLIN, 0};
+    ::poll(&descriptor, 1, 20);
+  }
   if (r < 0)
     return FromErrno();
   if (guest_addr && addr_len)
@@ -177,14 +191,18 @@ i32 SocketDevice::Ioctl(u32 command, void* args) {
   }
 }
 
-SocketDevice* FdToSocket(u32 fd) {
+ObjectRef<SocketDevice> FdToSocket(u32 fd) {
   auto* p = Process::GetActive();
   if (!p)
     return nullptr;
-  auto* obj = p->GetObjTable().Get(fd);
+  auto obj = p->GetObjTable().Get(fd);
   if (!obj || obj->type() != Object::Type::kDevice)
     return nullptr;
-  return dynamic_cast<SocketDevice*>(static_cast<Device*>(obj));
+  auto* socket = dynamic_cast<SocketDevice*>(static_cast<Device*>(obj.get()));
+  if (!socket)
+    return nullptr;
+  obj.Release();
+  return ObjectRef<SocketDevice>(socket);
 }
 
 }  // namespace kern

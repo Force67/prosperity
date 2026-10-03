@@ -2,6 +2,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 #include "gpu/write_tracker.h"
+#include "guest/session.h"
 
 #include "gpu/guest_page_table.h"
 #include "host_memory/host_memory.h"
@@ -193,6 +194,28 @@ WriteTracker& GuestWriteTracker() {
   static WriteTracker tracker;
   return tracker;
 }
+
+void WriteTracker::Reset() {
+  host_memory::SetWriteFaultHandler(nullptr);
+  host_memory::SetHostWriteHook(nullptr);
+  SetOwner(nullptr, nullptr);
+#if defined(__linux__)
+  if (g_queue)
+    munmap(g_queue, kQueueSize * sizeof(u64));
+  g_queue = nullptr;
+  g_queue_head.store(0);
+  g_queue_tail = 0;
+  if (uffd_ >= 0)
+    close(uffd_);
+  if (pagemap_ >= 0)
+    close(pagemap_);
+#endif
+  guest::ResetResource(*this);
+}
+
+namespace {
+const guest::SessionReset g_session_reset([] { GuestWriteTracker().Reset(); });
+}  // namespace
 
 bool WriteTracker::Enable() {
   if (enabled())

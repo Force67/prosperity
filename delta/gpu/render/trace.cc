@@ -4,6 +4,7 @@
 
 #include "gpu/render/trace.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_translate.h"
@@ -138,6 +139,8 @@ base::HashSet<TexKey, TexKeyHash> g_frame_texs;
 
 base::HashMap<u64, base::String>& NameTable() {
   static base::HashMap<u64, base::String> table;
+  static const guest::SessionReset reset_table(
+      [] { guest::ResetResource(table); });
   return table;
 }
 
@@ -1880,5 +1883,27 @@ void RecordMemoryFill(u64 base, u64 bytes, u32 value) {
       .Hex("value", value);
   l.Emit();
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  if (g_file)
+    std::fclose(g_file);
+  guest::ResetResource(g_file);
+  guest::ResetResource(g_recording);
+  guest::ResetResource(g_dir);
+  guest::ResetResource(g_prefix);
+  guest::ResetResource(g_frame_num);
+  guest::ResetResource(g_seq);
+  guest::ResetResource(g_draw_seq);
+  guest::ResetResource(g_frames_left);
+  guest::ResetResource(g_armed_frame);
+  guest::ResetResource(g_finished);
+  guest::ResetResource(g_start_ns);
+  guest::ResetResource(g_validation_messages);
+  guest::ResetResource(g_snapshots);
+  guest::ResetResource(g_frame_texs);
+  guest::ResetResource(g_frame_shaders);
+});
+}  // namespace
 
 }  // namespace gpu::render::trace

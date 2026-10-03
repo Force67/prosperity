@@ -1,4 +1,3 @@
-
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -12,6 +11,7 @@
 #include "base/strings/format.h"
 #include "base/strings/string_ref.h"
 #include "base/strings/xstring.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #ifdef _MSC_VER
@@ -83,6 +83,8 @@ static u64 GuestTscFreq() {
 // cannot flood the log. Guarded because sysctl runs on any guest thread.
 static base::Set<base::String>& LoggedOidNames() {
   static base::Set<base::String> names;
+  static const guest::SessionReset reset_names(
+      [] { guest::ResetResource(names); });
   return names;
 }
 static base::Mutex g_logged_oid_lock;

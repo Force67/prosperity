@@ -5,6 +5,7 @@
 #include "gpu/render/draw_recomp.h"
 #include "base/arch.h"
 #include "gpu/render/buffer_cache.h"
+#include "guest/session.h"
 
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
@@ -301,6 +302,8 @@ u32 g_collect_dcb = 0;
 
 void CollectGuestWrites() {
   static base::Vector<gpu::WriteTracker::Range> written;
+  static const guest::SessionReset reset_written(
+      [] { guest::ResetResource(written); });
   if (!gpu::GuestWriteTracker().enabled())
     return;
   g_collect_frame = g_frame.num;
@@ -1451,6 +1454,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // shows that it does.
   if (d.rt_array_base) {
     static base::HashMap<u64, int> written_frame;
+    static const guest::SessionReset reset_written_frame(
+        [] { guest::ResetResource(written_frame); });
     const auto first = g_rts.find(d.rt_array_base);
     int& frame = written_frame[d.rt_array_base];
     if (first != g_rts.end() && first->second.last_frame == g_frame.num &&
@@ -2473,5 +2478,18 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
   return true;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  g_collect_frame = -1;
+  guest::ResetResource(g_vb_staged);
+  guest::ResetResource(g_ib_staged);
+  guest::ResetResource(g_ubo_staged);
+  guest::ResetResource(g_sbo_staged);
+  guest::ResetResource(g_sbo_gpu);
+  guest::ResetResource(g_ubo_gpu);
+  guest::ResetResource(g_collect_dcb);
+});
+}  // namespace
 
 }  // namespace gpu::render

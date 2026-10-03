@@ -18,9 +18,7 @@ base::Atomic<u32> g_title_attributes{0};
 }  // namespace
 
 const HardwareModeProfile& GetHardwareModeProfile() {
-  static const HardwareModeProfile* const kProfile =
-      kNeoMode ? &kNeoProfile : &kBaseProfile;
-  return *kProfile;
+  return kNeoMode ? kNeoProfile : kBaseProfile;
 }
 
 void SetTitleAttributes(u32 attributes) {

@@ -11,6 +11,7 @@
 #include <cstring>
 #include "base/arch.h"
 #include "base/logging.h"
+#include "guest/session.h"
 
 #include "base/atomic.h"
 #include "base/time/time.h"
@@ -344,4 +345,14 @@ i32 DceDevice::Ioctl(u32 cmd, void* data) {
     BASE_LOGI("dce", "UNHANDLED ioctl {:#x} -> 0", cmd);
   return 0;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_dce_current_buffer);
+  guest::ResetResource(g_dce_flip_arg);
+  guest::ResetResource(g_dce_flip_count);
+  guest::ResetResource(g_dce_scanout_buffers);
+});
+}  // namespace
+
 }  // namespace kern

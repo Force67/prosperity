@@ -14,6 +14,8 @@
 
 namespace gpu::gcn {
 
+void ResetShaderWork();
+
 // Compute planner bound; the renderer also checks device descriptor limits.
 inline constexpr u32 kMaxCsResources = 128;
 // Set-0 binding of a compute shader's first natively bound image; the storage

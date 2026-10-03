@@ -8,6 +8,7 @@
 #include "base/arch.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/render_queue.h"
+#include "guest/session.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -1056,6 +1057,8 @@ void PrefetchDrawShaders(const Regs& regs) {
   const u64 ps_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);
   // Most draws reuse a shader pair; only a new one is worth resolving.
   static base::HashSet<u64> seen;
+  static const guest::SessionReset reset_seen(
+      [] { guest::ResetResource(seen); });
   if (!seen.insert(vs_addr * 0x9e3779b97f4a7c15ull ^ ps_addr).second)
     return;
   if (ShaderSkipped(vs_addr, ps_addr) || !IsGuestAddress(vs_addr) ||

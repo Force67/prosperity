@@ -24,7 +24,7 @@ VmMap::VmMap(ProcessInfo& info) : pinfo_(info) {}
 
 VmMap::~VmMap() {
   if (pinfo_.user_stack)
-    host_memory::FreeMem(pinfo_.user_stack);
+    host_memory::FreeMem(pinfo_.user_stack, pinfo_.user_stack_size);
 
   pinfo_.user_stack = nullptr;
 }
@@ -93,6 +93,7 @@ void SetMappingChangedHook(MappingChangedHook hook) {
 
 void VmMap::Add(u8* ptr, size_t size, Mprot prot, u32 sce_prot, bool reserved) {
   base::LockGuard lock(vmlock_);
+  host_memory::TrackMemoryMapping(ptr, size);
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
   rt_pages_.emplace_back(ptr, size, prot, sce_prot, reserved);
@@ -104,6 +105,7 @@ void VmMap::AddDirect(u8* ptr,
                       u32 sce_prot,
                       u64 phys_offset) {
   base::LockGuard lock(vmlock_);
+  host_memory::TrackMemoryMapping(ptr, size);
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
   rt_pages_.emplace_back(ptr, size, prot, sce_prot, false);

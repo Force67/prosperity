@@ -8,7 +8,11 @@
 
 #include <cstdlib>
 #include <ctime>
+#include <limits>
+#include "base/algorithm.h"
 #include "base/arch.h"
+#include "base/time/time.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <cstring>
@@ -82,17 +86,29 @@ int PS4ABI sys_nanosleep(const sce_timespec* rqtp, sce_timespec* rmtp) {
   if (!rqtp)
     return -SysError::eINVAL;
 
-  struct timespec req{};
-  req.tv_sec = static_cast<time_t>(rqtp->tv_sec);
-  req.tv_nsec = static_cast<long>(rqtp->tv_nsec);
-
-  struct timespec rem{};
-  int r = ::nanosleep(&req, &rem);
-  if (r != 0 && rmtp) {
-    rmtp->tv_sec = rem.tv_sec;
-    rmtp->tv_nsec = rem.tv_nsec;
+  if (rqtp->tv_sec < 0 || rqtp->tv_nsec < 0 || rqtp->tv_nsec >= 1'000'000'000 ||
+      rqtp->tv_sec >
+          (std::numeric_limits<i64>::max() - rqtp->tv_nsec) / 1'000'000'000)
+    return -SysError::eINVAL;
+  const auto deadline =
+      base::TimeTicks::Now() + base::Microseconds(rqtp->tv_sec * 1'000'000 +
+                                                  (rqtp->tv_nsec + 999) / 1000);
+  for (;;) {
+    const auto left = deadline - base::TimeTicks::Now();
+    if (left <= base::TimeDelta())
+      return 0;
+    const i64 ns = base::Min<i64>(left.InMicroseconds() * 1000, 20'000'000);
+    timespec req{0, static_cast<long>(ns)};
+    if (guest::Stopping() || ::nanosleep(&req, nullptr) != 0) {
+      if (rmtp) {
+        const i64 remaining = base::Max<i64>(
+            0, (deadline - base::TimeTicks::Now()).InMicroseconds() * 1000);
+        rmtp->tv_sec = remaining / 1'000'000'000;
+        rmtp->tv_nsec = remaining % 1'000'000'000;
+      }
+      return -SysError::eINTR;
+    }
   }
-  return r == 0 ? 0 : -SysError::eINTR;
 }
 }  // namespace kern
 

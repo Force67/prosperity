@@ -6,6 +6,7 @@
 
 #include "gpu/gcn/gcn_resource.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/guest_memory.h"
@@ -1016,6 +1017,8 @@ const ScalarPassInfo& CachedScalarInfo(
     ScalarPassInfo info;
   };
   static base::HashMap<const Program*, Entry> cache;
+  static const guest::SessionReset reset_cache(
+      [] { guest::ResetResource(cache); });
   // A draw's resolvers alternate between its VS and PS program.
   struct Recent {
     const Program* program = nullptr;
@@ -1977,6 +1980,8 @@ void TrackTextures(base::Vector<TImage>& result,
     // explainable from the code that publishes its address.
     if (kTexSrc && t.base >= (u64)kTexSrc) {
       static base::Set<u64> seen;
+      static const guest::SessionReset reset_seen(
+          [] { guest::ResetResource(seen); });
       if (seen.size() < 64 && seen.insert(t.base).second)
         BASE_LOGI("texsrc", "base={:#x} T# at {:#x} (sgpr{})",
                   static_cast<unsigned long>(t.base),

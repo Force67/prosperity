@@ -40,6 +40,7 @@ class RenderQueue {
   ~RenderQueue();
 
   void Start(render::Renderer& renderer);
+  void Stop();
   bool running() const { return running_; }
 
   // The slot the next PushDraw hands over, reset to a default DrawInfo. Owned

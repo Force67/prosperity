@@ -43,6 +43,10 @@ void* AllocMem(void* preferred_addr,
                PageProtection,
                AllocationType);
 void FreeMem(void* addr);
+void FreeMem(void* addr, size_t size);
+void BeginMemorySession();
+size_t EndMemorySession();
+size_t SessionMappedBytes();
 bool ProtectMem(void* addr, size_t len, PageProtection);
 bool IsMemoryRangeMapped(const void* addr, size_t len);
 

@@ -1,4 +1,5 @@
 #include "gpu/ps5/dmem_aliases.h"
+#include "guest/session.h"
 
 #include <cstring>
 
@@ -108,6 +109,8 @@ void Refresh() {
   g_aliased_version = HostMappingsVersion();
   // Most remaps leave file-backed memory as it was: nothing to redo then.
   static base::Vector<Piece> files;
+  static const guest::SessionReset reset_files(
+      [] { guest::ResetResource(files); });
   base::Vector<Piece> now_files = FilePieces();
   if (now_files.size() == files.size() &&
       !std::memcmp(now_files.data(), files.data(),
@@ -144,4 +147,12 @@ void InstallWriteTrackerPolicy() {
   GuestWriteTracker().SetPolicy(policy);
   ReportRemapsToHostMappings();
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  g_aliased_version = ~0ull;
+  guest::ResetResource(g_aliased);
+});
+}  // namespace
+
 }  // namespace gpu::ps5

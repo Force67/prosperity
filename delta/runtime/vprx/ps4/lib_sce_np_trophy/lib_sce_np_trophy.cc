@@ -9,6 +9,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_np_trophy/lib_sce_np_trophy.h"
 #include "base/arch.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <cstdio>
@@ -66,6 +67,14 @@ void ZeroSized(void* out) {
   std::memset(out, 0, size);
   *static_cast<u64*>(out) = size;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_ctx_used);
+  guest::ResetResource(g_ctx_reg);
+  guest::ResetResource(g_hnd_used);
+});
+}  // namespace
 
 }  // namespace
 

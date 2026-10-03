@@ -3,6 +3,7 @@
  */
 
 #include "gpu/ps4/render_queue.h"
+#include "guest/session.h"
 
 #include "gpu/render/renderer.h"
 
@@ -32,11 +33,27 @@ DELTA_OPTION(bool, kDrainTrace, "DELTA_GPU_DRAINTRACE", false);
 }
 
 RenderQueue::~RenderQueue() {
+  Stop();
+}
+
+void RenderQueue::Stop() {
   if (!running_)
     return;
   stop_.store(true);
   Wake(render_wake_);
+  Wake(walk_wake_);
   thread_->Join();
+  thread_ = {};
+  running_ = false;
+  commands_ = {};
+  draws_ = {};
+  pending_writes_ = {};
+  renderer_ = nullptr;
+  head_.store(0);
+  done_.store(0);
+  draws_done_.store(0);
+  draw_head_ = last_end_frame_ = 0;
+  stop_.store(false);
 }
 
 void RenderQueue::Start(render::Renderer& renderer) {
@@ -108,6 +125,8 @@ void RenderQueue::Drain(const char* why) {
   const u64 head = head_.load(base::memory_order_relaxed);
   if (kDrainTrace && done_.load(base::memory_order_acquire) != head) {
     static base::Map<const char*, u64> counts;
+    static const guest::SessionReset reset_counts(
+        [] { guest::ResetResource(counts); });
     static u64 n = 0;
     counts[why]++;
     if (++n % 2000 == 0) {
@@ -139,8 +158,10 @@ void RenderQueue::WaitDone(const base::Atomic<u64>& done,
   const auto start = base::TimeTicks::Now();
   {
     base::UniqueLock<base::Mutex> lock(wake_mutex_);
-    walk_wake_.Wait(
-        lock, [&] { return done.load(base::memory_order_acquire) >= target; });
+    guest::Wait(walk_wake_, lock, [&] {
+      return guest::Stopping() ||
+             done.load(base::memory_order_acquire) >= target;
+    });
   }
   const auto waited = base::TimeTicks::Now() - start;
   if (waited > base::Milliseconds(500)) {

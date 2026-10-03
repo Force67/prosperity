@@ -15,11 +15,20 @@
 #include "runtime/vprx/ps4/lib_sce_msg_dialog/lib_sce_msg_dialog.h"
 #include "base/arch.h"
 #include "base/atomic.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 namespace {
 base::Atomic<bool> g_initialized{false};
 base::Atomic<bool> g_open{false};
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_initialized);
+  guest::ResetResource(g_open);
+});
+}  // namespace
+
 }  // namespace
 
 extern "C" {

@@ -26,10 +26,14 @@
  * A backend is created by rhi::CreateDevice (rhi/backend.h).
  */
 
+#include <type_traits>
 #include "base/arch.h"
 #include "gpu/rhi/types.h"
 
+#include "base/containers/vector.h"
 #include "base/memory/unique_pointer.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 
 namespace gpu::rhi {
 
@@ -247,6 +251,35 @@ class CommandList : public Object {
 
 class Device {
  public:
+  void Track(Object* object) {
+    base::LockGuard lock(objects_mutex_);
+    objects_.push_back(object);
+  }
+  void Forget(Object* object) {
+    base::LockGuard lock(objects_mutex_);
+    for (auto it = objects_.begin(); it != objects_.end(); ++it)
+      if (*it == object) {
+        objects_.erase(it);
+        return;
+      }
+  }
+  void ReleaseObjects() {
+    for (;;) {
+      Object* object;
+      {
+        base::LockGuard lock(objects_mutex_);
+        if (objects_.empty())
+          break;
+        object = objects_.back();
+      }
+      Destroy(object);
+    }
+  }
+  size_t LiveObjects() const {
+    base::LockGuard lock(objects_mutex_);
+    return objects_.size();
+  }
+
   virtual ~Device() = default;
 
   virtual const Caps& caps() const = 0;               // NOLINT: accessor
@@ -318,6 +351,10 @@ class Device {
   // False on timeout or device loss.
   virtual bool Wait(u64 submission, u64 timeout_ns = ~0ull) = 0;
   virtual void WaitIdle() = 0;
+  virtual void ReleaseSessionObjects() {
+    WaitIdle();
+    ReleaseObjects();
+  }
   // The last id submitted.
   virtual u64 LastSubmission() const = 0;
 
@@ -332,13 +369,20 @@ class Device {
   virtual void* CaptureHandle() const { return nullptr; }
   // After a failed Wait: log what the backend knows about the device loss.
   virtual void ReportDeviceLoss() {}
+
+ private:
+  mutable base::Mutex objects_mutex_;
+  base::Vector<Object*> objects_;
 };
 
 // Hands a freshly built object to the caller, who frees it with Destroy.
 template <typename T>
-T* Release(base::UniquePointer<T>& object) {
+T* Release(base::UniquePointer<T>& object, Device* owner = nullptr) {
   T* raw = object.Get_UseOnlyIfYouKnowWhatYouareDoing();
   object.ResetUnchecked_UseOnlyIfYouKnowWhatYouareDoing();
+  if constexpr (std::is_base_of_v<Object, T>)
+    if (raw && owner)
+      owner->Track(raw);
   return raw;
 }
 

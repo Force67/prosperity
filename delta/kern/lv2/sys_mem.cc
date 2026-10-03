@@ -1,4 +1,3 @@
-
 /*
  * PS4Delta: PS4 emulation and research project
  * Copyright 2019-2020 Force67. See LICENSE in the root of the source tree.
@@ -9,6 +8,7 @@
 #include "base/logging.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 #include "host_memory/host_memory.h"
 #include "logger/logger.h"
@@ -135,6 +135,10 @@ bool WasGuestReleased(u8* ptr, size_t size) {
 // hands mmap(NULL) addresses far above that ceiling, so when we have to pick an
 // address ourselves, carve it from a dedicated low arena instead. Bump-only and
 // MAP_FIXED_NOREPLACE so we never clobber an existing mapping.
+namespace {
+base::Atomic<uintptr_t> g_low_next{kGuestArenaFloor};
+}
+
 u8* AllocLowGuest(size_t size, size_t align) {
 #ifdef __ANDROID__
   // 39-bit user VA: keep the guest arena clear of the module region (32..~224
@@ -152,18 +156,18 @@ u8* AllocLowGuest(size_t size, size_t align) {
   // 64 KiB, not just one page: GNM surfaces sub-allocated from a pool base
   // assert on weaker alignment (DOOM rhiTextureGnm).
   constexpr uintptr_t kAlign = 0x10000;
-  static base::Atomic<uintptr_t> next{kFloor};
+
   size = (size + 0x3FFF) & ~uintptr_t(0x3FFF);
   // MAP_ALIGNED(n) is contractual: SotC indexes its streaming arenas by VA>>20,
   // so a weaker base breaks every lookup.
   const uintptr_t al = align > kAlign ? align : kAlign;
   for (int tries = 0; tries < 8192; tries++) {
-    uintptr_t raw = next.load(base::memory_order_relaxed);
+    uintptr_t raw = g_low_next.load(base::memory_order_relaxed);
     uintptr_t base = (raw + (al - 1)) & ~(al - 1);  // align the base up
     if (base + size + 0x4000 > kCeil)
       return nullptr;  // doesn't fit; do NOT poison `next` (CAS, not fetch_add)
-    if (!next.compare_exchange_weak(raw, base + size + 0x4000,
-                                    base::memory_order_relaxed))
+    if (!g_low_next.compare_exchange_weak(raw, base + size + 0x4000,
+                                          base::memory_order_relaxed))
       continue;  // another thread advanced it; reload and retry
     void* p =
         ::mmap(reinterpret_cast<void*>(base), size, PROT_READ | PROT_WRITE,
@@ -279,6 +283,17 @@ void ShmAudioDumperMain(base::String dir,
   base::HashMap<base::String, FILE*> files;
   base::HashMap<base::String, base::Vector<u8>> prev;
   FILE* idx = std::fopen((dir + "/index.txt").c_str(), "w");
+  struct CloseFiles {
+    base::HashMap<base::String, FILE*>& files;
+    FILE* index;
+    ~CloseFiles() {
+      for (auto& [name, file] : files)
+        if (file)
+          std::fclose(file);
+      if (index)
+        std::fclose(index);
+    }
+  } close_files{files, idx};
   struct Reg {
     base::String n;
     u8* b;
@@ -333,13 +348,8 @@ void ShmAudioDumperMain(base::String dir,
     }
     if (idx)
       std::fflush(idx);
-    ::usleep(period_ms * 1000);
+    guest::SleepForMilliseconds(period_ms);
   }
-  for (auto& kv : files)
-    if (kv.second)
-      std::fclose(kv.second);
-  if (idx)
-    std::fclose(idx);
   BASE_LOGI("shmaudio", "dumper finished");
 }
 
@@ -356,7 +366,7 @@ void ShmAudioProbeMain(long period_us) {
   float peak_max = 0.f;
   auto last = ShmAudioNowUs();
   for (;;) {
-    ::usleep((useconds_t)period_us);
+    guest::SleepForMicroseconds(period_us);
     ticks++;
     u8* ctl_raw = nullptr;
     size_t ctl_size = 0;
@@ -464,8 +474,8 @@ void ShmAudioProbeMaybeStart() {
     return;
   const long us = std::strtol(v, nullptr, 0);
   BASE_LOGI("shmprobe", "consumer probe every {}us", us);
-  base::SpawnDetachedThread("shmprobe",
-                            [us] { ShmAudioProbeMain(us > 0 ? us : 10667); });
+  guest::SpawnThread("shmprobe",
+                     [us] { ShmAudioProbeMain(us > 0 ? us : 10667); });
 }
 
 // Start the periodic dumper once, on the first matching shm we see.
@@ -481,8 +491,8 @@ void ShmAudioDumpMaybeStart() {
   const size_t mx = kShmDumpMax;
   BASE_LOGI("shmaudio", "dumper -> {} every {}ms x{} (<={:#x} B){}", dir, ms, n,
             mx, kShmAudioDumpDelta ? " delta-only" : "");
-  base::SpawnDetachedThread("shmaudio", [dir = base::String(dir), ms, n, mx,
-                                         delta = kShmAudioDumpDelta.get()] {
+  guest::SpawnThread("shmaudio", [dir = base::String(dir), ms, n, mx,
+                                  delta = kShmAudioDumpDelta.get()] {
     ShmAudioDumperMain(dir, ms, n, mx, delta);
   });
 }
@@ -608,21 +618,22 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
   // A /dev/dmem mmap carries the direct-memory physical offset in `offset`.
   bool dmem_map = false;
   if (fd != -1) {
-    auto* obj = proc->GetObjTable().Get(fd);
+    auto obj = proc->GetObjTable().Get(fd);
     if (obj && obj->type() == Object::Type::kDevice &&
-        static_cast<Device*>(obj)->IsDirectMemory())
+        static_cast<Device*>(obj.get())->IsDirectMemory())
       dmem_map = true;
     if (kMmapfdTrace)
       BASE_LOGI("mmapfd", "fd={} addr={:p} size={:#x} off={:#x} objType={}", fd,
                 addr, size, offset, obj ? (int)obj->type() : -1);
     if (obj && obj->type() == Object::Type::kShm) {
       // Every mapper of this shm shares the backing (sized by ftruncate).
-      return ShmMap(static_cast<ShmObject*>(obj), size, offset);
+      return ShmMap(static_cast<ShmObject*>(obj.get()), size, offset);
     }
     if (obj) {
       // Device-backed mmap: use the region the device hands back; -1 = fall
       // through.
-      auto* m = static_cast<Device*>(obj)->Map(addr, size, prot, flags, offset);
+      auto* m =
+          static_cast<Device*>(obj.get())->Map(addr, size, prot, flags, offset);
       if (m != reinterpret_cast<u8*>(-1)) {
         auto gprot = static_cast<Ppt>(prot & static_cast<u32>(Ppt::kRwx));
         if (dmem_map)
@@ -695,12 +706,12 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
   // samples textures from the mapping); the read stops at EOF so an oversized
   // mapping keeps zeros past the file's end.
   if (fd != static_cast<u32>(-1)) {
-    if (auto* o = proc->GetObjTable().Get(fd))
+    if (auto o = proc->GetObjTable().Get(fd))
       if (o->type() == Object::Type::kDevice) {
         // The kernel hands back base + (offset & 0x3FFF), so the fill starts at
         // the page-aligned offset for that contract to hold.
         const i64 file_off = static_cast<i64>(offset & ~size_t(0x3FFF));
-        i64 got = static_cast<Device*>(o)->ReadAt(ptr, size, file_off);
+        i64 got = static_cast<Device*>(o.get())->ReadAt(ptr, size, file_off);
         if (got > 0 && kMmapfdTrace)
           BASE_LOGI("mmapfd", "  filled {:p} from fd={} off={:#x} -> {} bytes",
                     ptr, fd, (unsigned long long)file_off, (long long)got);
@@ -892,10 +903,10 @@ size_t ShmFstatSize(u32 fd) {
   auto* proc = Process::GetActive();
   if (!proc)
     return SIZE_MAX;
-  auto* obj = proc->GetObjTable().Get(fd);
+  auto obj = proc->GetObjTable().Get(fd);
   if (!obj || obj->type() != Object::Type::kShm)
     return SIZE_MAX;
-  auto* shm = static_cast<ShmObject*>(obj);
+  auto* shm = static_cast<ShmObject*>(obj.get());
   base::LockGuard<base::Mutex> lk(g_shm_mutex);
   return shm->backing->size;
 }
@@ -904,7 +915,7 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
   auto* proc = Process::GetActive();
   if (!proc || length < 0)
     return -SysError::eINVAL;
-  auto* obj = proc->GetObjTable().Get(fd);
+  auto obj = proc->GetObjTable().Get(fd);
   if (!obj)
     return -SysError::eBADF;
   // The kernel dispatches to the file type's truncate method; a type without
@@ -912,7 +923,7 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
   if (obj->type() != Object::Type::kShm)
     return -SysError::eINVAL;
 
-  auto* shm = static_cast<ShmObject*>(obj);
+  auto* shm = static_cast<ShmObject*>(obj.get());
   const size_t raw = static_cast<size_t>(length);
   const size_t want = (raw + 0x3FFF) & ~size_t(0x3FFF);
   base::LockGuard<base::Mutex> lk(g_shm_mutex);
@@ -1037,8 +1048,9 @@ int PS4ABI sys_mdbg_service(u32 op, void* arg1, void* arg2, void* a3) {
       // faults at boot). No debugger ever posts here; park the caller like the
       // kernel.
       LOG_INFO("mdbg wait-event: parking caller (no debugger attached)");
-      for (;;)
-        ::pause();
+      while (!guest::Stopping())
+        base::SleepForMilliseconds(20);
+      return -SysError::eINTR;
     default:
       // The kernel returns 78 (eNOSYS in our table) for unknown ops.
       return -SysError::eNOSYS;
@@ -1086,7 +1098,7 @@ int PS4ABI sys_munmap(void* addr, size_t len) {
     auto region = proc->GetVma().Get(static_cast<u8*>(addr));
     if (region && region->ptr == addr && region->size == len &&
         region->sce_prot == 0)
-      ::munmap(addr, len);
+      host_memory::FreeMem(addr, len);
     proc->GetVma().Remove(static_cast<u8*>(addr), len);
     NoteGuestReleased(static_cast<u8*>(addr), len);
     ForgetDmemVa(static_cast<u8*>(addr), len);
@@ -1627,5 +1639,15 @@ int PS4ABI sys_getpagesize() {
 int PS4ABI sys_blockpool_open() {
   return 0x4000;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  g_low_next.store(kGuestArenaFloor);
+  guest::ResetResource(g_released);
+  guest::ResetResource(g_shm_by_name);
+  guest::ResetResource(g_shm_audio_dumper);
+  guest::ResetResource(g_mdbg_flags);
+});
+}  // namespace
 
 }  // namespace kern

@@ -11,6 +11,7 @@
 #include "base/threading/mutex.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps5/guest_address.h"
+#include "guest/session.h"
 #include "host_memory/host_memory.h"
 
 namespace gpu::ps5 {
@@ -85,6 +86,8 @@ void MarkHostMappingsStale() {
 const base::Vector<HostMapping>& HostMappings() {
   static u64 generation = ~0ull;
   static base::Vector<HostMapping> mappings;
+  static const guest::SessionReset reset_mappings(
+      [] { guest::ResetResource(mappings); });
   // Remap reports alone parse at most twice a frame: a title that remaps
   // all frame long otherwise has the maps parsed for every dispatch.
   static u64 parsed_generation = ~0ull;
@@ -155,6 +158,8 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
   // Once per page and frame: a pointer into nothing stays unmapped, and
   // parsing again for it on every dispatch was 13% of the submit thread.
   static base::HashSet<u64> unmapped;
+  static const guest::SessionReset reset_unmapped(
+      [] { guest::ResetResource(unmapped); });
   static u64 unmapped_generation = ~0ull;
   if (unmapped_generation != gpu::MemoryGeneration()) {
     unmapped.clear();
@@ -235,4 +240,14 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
   return result;
 #endif
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  g_mappings_stale.store(true);
+  guest::ResetResource(g_mappings_forced);
+  guest::ResetResource(g_remaps_reported);
+  guest::ResetResource(g_mappings_version);
+});
+}  // namespace
+
 }  // namespace gpu::ps5

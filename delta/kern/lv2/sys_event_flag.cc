@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <unistd.h>
@@ -89,8 +90,8 @@ int EventFlag::Wait(u64 pattern, u32 mode, u64* result, u32* timeout_us) {
     // The timeout is an in/out parameter: the kernel writes back the remaining
     // microseconds after the wait (zero on exhaustion).
     auto start = base::TimeTicks::Now();
-    if (!cv_.WaitFor(lk, base::Microseconds(*timeout_us),
-                     [&] { return waiter.done; })) {
+    if (!guest::WaitFor(cv_, lk, base::Microseconds(*timeout_us),
+                        [&] { return waiter.done; })) {
       RemoveWaiter(&waiter);
       *timeout_us = 0;
       return -SysError::eTIMEDOUT;
@@ -99,7 +100,7 @@ int EventFlag::Wait(u64 pattern, u32 mode, u64* result, u32* timeout_us) {
     *timeout_us =
         elapsed < *timeout_us ? static_cast<u32>(*timeout_us - elapsed) : 0;
   } else {
-    cv_.Wait(lk, [&] { return waiter.done; });
+    guest::Wait(cv_, lk, [&] { return waiter.done; });
   }
   RemoveWaiter(&waiter);
   // A cancelled waiter is woken by evf_cancel, not by a matching set(). The
@@ -177,11 +178,11 @@ bool EvfSetByNameSubstr(const char* substr, u64 bits) {
   return false;
 }
 
-static EventFlag* FromId(int id) {
-  auto* obj = Process::GetActive()->GetObjTable().Get(id);
+static kern::ObjectRef<EventFlag> FromId(int id) {
+  auto obj = Process::GetActive()->GetObjTable().Get(id);
   if (!obj || obj->type() != Object::Type::kEventflag)
     return nullptr;
-  return static_cast<EventFlag*>(obj);
+  return kern::ObjectRef<EventFlag>(static_cast<EventFlag*>(obj.Release()));
 }
 
 // DELTA_EVF_TRACE[=substr]: log every evf op (optionally only for flags whose
@@ -315,7 +316,7 @@ int PS4ABI sys_evf_open(const char* name) {
 }
 
 int PS4ABI sys_evf_delete(int id) {
-  auto* ef = FromId(id);
+  auto ef = FromId(id);
   if (!ef)
     return -SysError::eSRCH;
   {
@@ -349,12 +350,12 @@ sys_evf_wait(int id, u64 pattern, u32 mode, u64* result, u32* timeout_us) {
       (mode & 0x30) == 0x30)
     return -SysError::eINVAL;
   WaitProbe wp("evf_wait", (long)id, (long)pattern);
-  auto* ef = FromId(id);
+  auto ef = FromId(id);
   if (!ef)
     return -SysError::eSRCH;
   // Trace the ENTRY too: a wait that never satisfies never reaches the exit
   // trace, which is exactly the wait one is usually hunting.
-  EvfTrace("waitE", id, ef, pattern, mode, 0, 0);
+  EvfTrace("waitE", id, ef.get(), pattern, mode, 0, 0);
   if (AudioMixAckUs() >= 0 &&
       ef->fname().find("sceAudioOutMix") != base::String::npos) {
     u32 to = static_cast<u32>(AudioMixAckUs());
@@ -367,14 +368,14 @@ sys_evf_wait(int id, u64 pattern, u32 mode, u64* result, u32* timeout_us) {
     }
     if (result)
       *result = ares;
-    EvfTrace("ackwait", id, ef, pattern, mode, ar, ares);
+    EvfTrace("ackwait", id, ef.get(), pattern, mode, ar, ares);
     return ar;
   }
   u64 res = 0;
   int r = ef->Wait(pattern, mode, &res, timeout_us);
   if (result)
     *result = res;
-  EvfTrace("wait", id, ef, pattern, mode, r, res);
+  EvfTrace("wait", id, ef.get(), pattern, mode, r, res);
   return r;
 }
 
@@ -382,7 +383,7 @@ int PS4ABI sys_evf_trywait(int id, u64 pattern, u32 mode, u64* result) {
   if (pattern == 0 || (mode & 3) == 0 || (mode & 3) == 3 ||
       (mode & 0x30) == 0x30)
     return -SysError::eINVAL;
-  auto* ef = FromId(id);
+  auto ef = FromId(id);
   if (!ef)
     return -SysError::eSRCH;
   u64 res = 0;
@@ -402,7 +403,7 @@ int PS4ABI sys_evf_trywait(int id, u64 pattern, u32 mode, u64* result) {
   }
   if (result)
     *result = res;
-  EvfTrace("poll", id, ef, pattern, mode, r, res);
+  EvfTrace("poll", id, ef.get(), pattern, mode, r, res);
   return r;
 }
 
@@ -413,6 +414,8 @@ static void EvfSetTally(int id) {
     return;
   static base::Mutex m;
   static base::HashMap<int, u64> hist;
+  static const guest::SessionReset reset_hist(
+      [] { guest::ResetResource(hist); });
   static auto last = base::TimeTicks::Now();
   base::LockGuard<base::Mutex> lk(m);
   hist[id]++;
@@ -429,20 +432,20 @@ static void EvfSetTally(int id) {
 
 int PS4ABI sys_evf_set(int id, u64 bits) {
   EvfSetTally(id);
-  auto* ef = FromId(id);
+  auto ef = FromId(id);
   if (!ef)
     return -SysError::eSRCH;
   ef->Set(bits);
-  EvfTrace("set", id, ef, bits, 0, 0, 0);
+  EvfTrace("set", id, ef.get(), bits, 0, 0, 0);
   return 0;
 }
 
 int PS4ABI sys_evf_clear(int id, u64 bits) {
-  auto* ef = FromId(id);
+  auto ef = FromId(id);
   if (!ef)
     return -SysError::eSRCH;
   ef->Clear(bits);
-  EvfTrace("clear", id, ef, bits, 0, 0, 0);
+  EvfTrace("clear", id, ef.get(), bits, 0, 0, 0);
   return 0;
 }
 
@@ -451,13 +454,20 @@ int PS4ABI sys_evf_cancel(int id, u64 pattern, int* num_waiters) {
   // reports how many were released via numWaiters. The woken waiters see
   // ETIMEDOUT (60) / EINTR (85) rather than a successful match, so a cancel is
   // an abort, not a satisfy.
-  auto* ef = FromId(id);
+  auto ef = FromId(id);
   if (!ef)
     return -SysError::eSRCH;
   int woken = ef->Cancel(pattern);
   if (num_waiters)
     *num_waiters = woken;
-  EvfTrace("cancel", id, ef, pattern, 0, 0, 0);
+  EvfTrace("cancel", id, ef.get(), pattern, 0, 0, 0);
   return 0;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_ef_by_name);
+});
+}  // namespace
+
 }  // namespace kern

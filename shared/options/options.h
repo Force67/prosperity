@@ -60,5 +60,7 @@ bool LoadFile(const char* path, bool optional = false);
 // the environment, an options file or the command line. DELTA_PROFILE names a
 // file to use instead, or "off" to boot the title with no profile at all.
 void LoadGameProfile(const char* title_id);
+void BeginGameSession();
+void EndGameSession();
 
 }  // namespace options

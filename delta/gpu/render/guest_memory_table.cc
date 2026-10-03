@@ -1,6 +1,7 @@
 /* PS4Delta: guest virtual addresses -> checked device buffer addresses. */
 #include "gpu/render/guest_memory_table.h"
 #include <cstring>
+#include "guest/session.h"
 
 #include "base/containers/array.h"
 #include "base/containers/span.h"
@@ -101,4 +102,14 @@ base::Vector<u64> TakeGuestMisses() {
   words[0] = 0;
   return misses;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_table);
+  guest::ResetResource(g_flags);
+  guest::ResetResource(g_misses);
+  guest::ResetResource(g_windows);
+});
+}  // namespace
+
 }  // namespace gpu::render

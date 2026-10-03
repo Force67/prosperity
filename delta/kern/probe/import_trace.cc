@@ -9,6 +9,7 @@
  * input" without a debugger. x86-64 native backend only.
  */
 
+#include "guest/session.h"
 #include "kern/probe/probe_internal.h"
 
 #include <sys/syscall.h>
@@ -52,6 +53,9 @@ constexpr u32 kMaxTraced = 4096;
 constexpr u64 kNamedCalls = 6;
 Traced g_traced[kMaxTraced];
 base::Atomic<u32> g_traced_n{0};
+#if defined(DELTA_BACKEND_NATIVE)
+base::Vector<Xbyak::CodeGenerator*> g_stubs;
+#endif
 
 struct Call {
   u32 index;
@@ -104,7 +108,7 @@ void Reporter(double start_s) {
   u64 shown = 0;
   base::TimeTicks last_hot = t0;
   for (;;) {
-    base::SleepForMilliseconds(250);
+    guest::SleepForMilliseconds(250);
     const double now_s = (base::TimeTicks::Now() - t0).InSecondsF();
     if (now_s >= start_s)
       g_armed.store(true);
@@ -175,7 +179,7 @@ uintptr_t MaybeTraceImport(const char* nid_name, uintptr_t real_addr) {
   if (char* sp = std::strchr(t.target, ' '))
     *sp = '\0';
   static const bool started = [start_s] {
-    base::SpawnDetachedThread("imptrace", [start_s] { Reporter(start_s); });
+    guest::SpawnThread("imptrace", [start_s] { Reporter(start_s); });
     return true;
   }();
   (void)started;
@@ -210,11 +214,27 @@ uintptr_t MaybeTraceImport(const char* nid_name, uintptr_t real_addr) {
     }
   };
   auto* stub = new Stub(index, real_addr);
+  g_stubs.push_back(stub);
   return reinterpret_cast<uintptr_t>(stub->getCode());
 #else
   (void)nid_name;
   return real_addr;
 #endif
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+#if defined(DELTA_BACKEND_NATIVE)
+  for (auto* stub : g_stubs)
+    delete stub;
+  g_stubs = {};
+#endif
+  guest::ResetResource(g_traced);
+  guest::ResetResource(g_traced_n);
+  guest::ResetResource(g_ring);
+  guest::ResetResource(g_ring_head);
+  guest::ResetResource(g_armed);
+});
+}  // namespace
 
 }  // namespace kern::probe

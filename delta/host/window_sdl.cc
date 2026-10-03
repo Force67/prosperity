@@ -45,6 +45,7 @@
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
 #include "guest/pause.h"
+#include "guest/session.h"
 #include "host/audio_output.h"
 #include "options/options.h"
 #include "ui/home_screen.h"
@@ -1025,7 +1026,7 @@ void ShowSplash(base::Vector<u8> png) {
     return;
   StopSplash();
   g_splash.store(1, base::memory_order_release);
-  base::SpawnDetachedThread("splash", [png = base::move(png)] {
+  guest::SpawnThread("splash", [png = base::move(png)] {
     t_splash_thread = true;
     int w = 0, h = 0, channels = 0;
     stbi_uc* pixels =
@@ -1118,12 +1119,14 @@ static bool DrainEvents() {
 }
 
 bool PumpEvents() {
+  if (guest::Stopping() && guest::OnGuestThread())
+    return false;
   bool alive = DrainEvents();
   SetAudioPaused(guest::Paused());
   if (guest::Paused())
     g_suppress_pad.store(true);
   if (guest::OnGuestThread()) {
-    while (alive && guest::Paused()) {
+    while (alive && guest::Paused() && !guest::Stopping()) {
       RefreshFrame(false);
       base::SleepForMilliseconds(16);
       alive = DrainEvents();
@@ -1250,6 +1253,25 @@ void SetRumble(u8 large_motor, u8 small_motor) {
   // continuously.
   SDL_RumbleGamepad(g_window.gamepad, (u16)(large_motor * 257),
                     (u16)(small_motor * 257), 0);
+}
+
+void ResetGuest() {
+  StopSplash();
+  if (g_window.device)
+    vkDeviceWaitIdle(g_window.device);
+  for (auto& slot : g_window.slots)
+    DestroyFrameResources(slot);
+  g_window.fb_w = g_window.fb_h = 0;
+  g_window.last_frame_slot = kFrameSlotCount;
+  ui::ResetMouseLook(g_window.window);
+  SetRumble(0, 0);
+  g_suppress_pad.store(true);
+  g_can_present.store(true, base::memory_order_release);
+  SetInGameplay(false);
+#if defined(__linux__)
+  g_icon_png = {};
+#endif
+  SetTitle("Prosperity");
 }
 
 void Shutdown() {

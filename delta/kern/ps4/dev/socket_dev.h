@@ -53,6 +53,6 @@ class SocketDevice : public Device {
 };
 
 // The socket behind an fd, or null when it isn't one.
-SocketDevice* FdToSocket(u32 fd);
+ObjectRef<SocketDevice> FdToSocket(u32 fd);
 
 }  // namespace kern

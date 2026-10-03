@@ -38,6 +38,8 @@ class GuestPageTable {
   static constexpr u32 kPageShift = 12;
   static constexpr u32 kBlockShift = 16;
 
+  void Reset();
+
   // The record for the page holding `address`, created on first use. Null
   // above user space.
   Page* At(u64 address);

@@ -155,6 +155,8 @@ VkClearColorValue ToVkClear(const rhi::ClearColor& c) {
 
 VulkanCommandList::~VulkanCommandList() {
   VkDevice dev = device_.native.device;
+  if (prof_pool_)
+    vkDestroyQueryPool(dev, prof_pool_, nullptr);
   if (cmd)
     vkFreeCommandBuffers(dev, device_.command_pool, 1, &cmd);
   for (VkDescriptorPool pool : transient_pools_)

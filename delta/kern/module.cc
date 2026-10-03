@@ -1,4 +1,3 @@
-
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -11,6 +10,7 @@
 #include "base/arch.h"
 #include "base/logging.h"
 #include "base/math/alignment.h"
+#include "guest/session.h"
 #include "host_memory/host_memory.h"
 #include "io/file.h"
 
@@ -49,6 +49,15 @@ DELTA_OPTION(bool, kRelocTrace, "DELTA_RELOC_TRACE", false);
 }  // namespace
 
 namespace kern {
+namespace {
+#ifdef __ANDROID__
+constexpr uintptr_t kModuleBase = 0x0000'0010'0000'0000ull;
+#else
+constexpr uintptr_t kModuleBase = 0x0000200000000000ull;
+#endif
+uintptr_t s_next_base = kModuleBase;
+}  // namespace
+
 Module::Module(Process* process) : process_(process) {
   /*-1 = no tls used*/
   info_.handle = -1;
@@ -449,8 +458,8 @@ static void StartNoExecWatch() {
     const size_t size = c1 ? std::strtoull(c1 + 1, nullptr, 16) : 0x1000;
     const char *c2 = c1 ? std::strchr(c1 + 1, ':') : nullptr;
     const u64 delay = c2 ? std::strtoull(c2 + 1, nullptr, 10) : 60;
-    base::SpawnDetachedThread("module", [addr, size, delay] {
-      base::SleepForMilliseconds((delay) * 1000);
+    guest::SpawnThread("module", [addr, size, delay] {
+      guest::SleepForMilliseconds((delay) * 1000);
       const int r = ::mprotect(reinterpret_cast<void *>(addr), size,
                                PROT_READ | PROT_WRITE);
       BASE_LOGI("noexec", "{:#x}+{:#x} -> rw ({})", (unsigned long long)addr,
@@ -490,8 +499,8 @@ void Module::PlantGuestBreakpoints() {
     // one being investigated; delaying past the earlier ones reaches it.
     if (const u64 delay = kBrkAfter) {
       const base::String name = info_.name;
-      base::SpawnDetachedThread("module", [at, off, delay, name] {
-        base::SleepForMilliseconds((delay) * 1000);
+      guest::SpawnThread("module", [at, off, delay, name] {
+        guest::SleepForMilliseconds((delay) * 1000);
         at[0] = 0x0F;
         at[1] = 0x0B;  // ud2
         BASE_LOGI("guestbrk", "{} +{:#x} -> ud2 at {:p} (armed after {}s)",
@@ -531,7 +540,7 @@ void Module::StartModuleWatch() {
   if (ranges->empty())
     return;
   const base::String name = info_.name;
-  base::SpawnDetachedThread("module", [ranges, name] {
+  guest::SpawnThread("module", [ranges, name] {
     base::Vector<u64> last(ranges->size(), 0);
     for (bool first = true;; first = false) {
       for (size_t i = 0; i < ranges->size(); i++) {
@@ -550,7 +559,7 @@ void Module::StartModuleWatch() {
         }
         last[i] = h;
       }
-      base::SleepForMilliseconds((2) * 1000);
+      guest::SleepForMilliseconds((2) * 1000);
     }
   });
 }
@@ -630,11 +639,11 @@ bool Module::MapImage() {
     // Pack modules in tight 2 GiB slots from 64 GiB: above the GNM driver's
     // fixed PS4 regions (~63.5 GiB) and internal memory (8 GiB), below the
     // guest arena/FEX heap.
-    constexpr size_t moduleSlot = 2ull * 1024ull * one_mb;   // 2 GiB
-    static uintptr_t s_nextBase = 0x0000'0010'0000'0000ull;  // 64 GiB
+    constexpr size_t kModuleSlot = 2ull * 1024ull * one_mb;  // 2 GiB
+                                                             // 64 GiB
 #else
     constexpr size_t kModuleSlot = kEightGb;
-    static uintptr_t s_next_base = 0x0000200000000000ull;
+
 #endif
     info_.base = static_cast<u8*>(
         host_memory::AllocMem(reinterpret_cast<void*>(s_next_base), kModuleSlot,
@@ -1366,4 +1375,9 @@ void Module::LogDbgInfo() {
     }
   }
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] { s_next_base = kModuleBase; });
+}  // namespace
+
 }  // namespace kern

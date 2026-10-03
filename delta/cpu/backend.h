@@ -48,6 +48,7 @@ constexpr u32 kHostThunkSyscallBase = 0x42000000u;
 class Backend {
  public:
   virtual ~Backend() = default;
+  virtual void ResetSession() {}
 
   // Once per module, after segments are copied and before protections finalize.
   // Native: register executable ranges for pausing. FEX: register with the JIT.
@@ -62,6 +63,7 @@ class Backend {
   // Run a previously-created guest thread to completion on the CURRENT host
   // thread (does the FEX per-thread registration first), then destroys it.
   virtual void RunGuestThread(void* handle) = 0;
+  virtual void DiscardGuestThread(void* handle) = 0;
 
   // Synchronously call guest `fn(a0..a3)` (SysV) and return its eax: how the
   // kernel runs a module's DT_INIT so it can self-register (libSceVideoOut's

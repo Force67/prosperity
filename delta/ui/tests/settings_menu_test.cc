@@ -4,12 +4,14 @@
 #include <filesystem>
 
 #include "base/environment_variables.h"
+#include "guest/pause.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "options/options.h"
 #include "ui/home_screen.h"
 #include "ui/mouse_look.h"
 #include "ui/overlay.h"
+#include "ui/pause_menu.h"
 #include "ui/settings.h"
 
 namespace {
@@ -124,3 +126,31 @@ TEST_F(SettingsMenuTest, MouseLookPreferencesSaveAndApplyImmediately) {
   ui::ConfigureMouseLook({});
 }
 }  // namespace
+
+TEST(PauseMenu, KeyboardCanReturnToMainMenuAndCannotResumeAfterRequest) {
+  ui::PauseMenuReset();
+  ui::OverlayEnsureImGui();
+  ImGui::GetIO().Fonts->Build();
+  ui::PauseMenuGameReady();
+  ui::PauseMenuToggle();
+  auto frame = [] { ui::OverlayBuildFrame(1280, 720, 0, 0); };
+  auto key = [&](ImGuiKey value) {
+    ImGui::GetIO().AddKeyEvent(value, true);
+    frame();
+    ImGui::GetIO().AddKeyEvent(value, false);
+    frame();
+  };
+  frame();
+  ASSERT_TRUE(guest::Paused());
+  key(ImGuiKey_DownArrow);
+  key(ImGuiKey_DownArrow);
+  key(ImGuiKey_Enter);
+  EXPECT_TRUE(ui::PauseMenuReturnRequested());
+  EXPECT_FALSE(ui::PauseMenuExitRequested());
+  ui::PauseMenuToggle();
+  EXPECT_TRUE(guest::Paused());
+  ui::PauseMenuReset();
+  EXPECT_FALSE(ui::PauseMenuReturnRequested());
+  EXPECT_FALSE(guest::Paused());
+  ui::OverlayShutdownImGui();
+}

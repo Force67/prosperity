@@ -16,6 +16,7 @@
 
 #include "kern/thread_names.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include <cstddef>
 #include <cstring>
@@ -101,5 +102,11 @@ void NameThreadsForRange(const void* ptr, size_t len, const char* name) {
       SetName(e.thread, name);
   }
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_stacks);
+});
+}  // namespace
 
 }  // namespace kern

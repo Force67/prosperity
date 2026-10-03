@@ -8,6 +8,15 @@
 
 #include "main/launcher.h"
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+#include "cpu/backend.h"
+#include "guest/pause.h"
+#include "guest/session.h"
+#include "host_memory/host_memory.h"
+#include "kern/guest_va_space.h"
+
 #include "base/arch.h"
 #include "base/containers/vector.h"
 #include "base/environment_variables.h"
@@ -239,19 +248,6 @@ void SetWindowArtwork(const BootTitle& title, const base::String& path) {
 }
 #endif
 
-void StartGuest(BootTitle title) {
-  base::SpawnDetachedThread(
-      "guest-main",
-      [main_module = base::move(title.main_module), mounted = title.mounted,
-       is_ps5 = title.is_ps5, sdk_version = title.sdk_version]() {
-        auto process = base::MakeUnique<kern::Process>();
-        if (is_ps5)
-          process->SetPlatform(kern::Process::Platform::kPs5);
-        process->SetSdkVersion(sdk_version);
-        if (process->Create(main_module, mounted))
-          process->Start();
-      });
-}
 
 }  // namespace
 
@@ -283,6 +279,9 @@ base::String cli::AddHomeGame(const base::String& game_path) {
 #endif
 
 void Launcher::Boot(const base::String& game_path) {
+  guest::BeginSession();
+  host_memory::BeginMemorySession();
+  options::BeginGameSession();
   base::String path = game_path;
 #ifdef _WIN32
   for (auto& c : path) {
@@ -292,8 +291,10 @@ void Launcher::Boot(const base::String& game_path) {
 #endif
 
   BootTitle title;
-  if (!LoadTitle(path, &title))
+  if (!LoadTitle(path, &title)) {
+    guest::RequestStop();
     return;
+  }
   kern::vfs::SetTitleId(title.title_id);
   if (title.mounted) {
     LOG_INFO("mounted title at /app0 ({}), boot module {}",
@@ -304,11 +305,49 @@ void Launcher::Boot(const base::String& game_path) {
   // Profiles must apply before platform settings and guest startup read
   // options.
   options::LoadGameProfile(title.title_id.c_str());
+  gpu::render::Init(gpu::render::DefaultRenderer());
   kern::ps4::SetTitleAttributes(title.is_ps5 ? 0 : title.attributes);
   gpu::ps4::SetPs4NeoMode(!title.is_ps5 && kern::ps4::IsNeoMode());
   SetWindowTitle(title);
 #if defined(__linux__) && !defined(__ANDROID__)
   SetWindowArtwork(title, path);
 #endif
-  StartGuest(base::move(title));
+  proc_ = base::MakeUnique<kern::Process>();
+  if (title.is_ps5)
+    proc_->SetPlatform(kern::Process::Platform::kPs5);
+  proc_->SetSdkVersion(title.sdk_version);
+  if (!guest::SpawnThread("guest-main",
+                          [this, main_module = base::move(title.main_module),
+                           mounted = title.mounted] {
+                            if (!proc_->Create(main_module, mounted)) {
+                              guest::RequestStop();
+                              return;
+                            }
+                            if (!guest::Stopping())
+                              proc_->Start();
+                          }))
+    guest::RequestStop();
+}
+
+void Launcher::Stop() {
+  guest::RequestStop();
+  gpu::render::StopPresentation();
+  guest::JoinThreads();
+  gpu::ps4::StopRenderQueue();
+  host::CloseAllAudioPorts();
+  gpu::render::ResetSession(gpu::render::DefaultRenderer());
+  cpu::GetBackend().ResetSession();
+  guest::ResetSessionResources();
+  proc_ = {};
+  guest::ResetCodeRanges();
+  const auto released = host_memory::EndMemorySession();
+  kern::RestoreGuestVaSpace();
+  options::EndGameSession();
+  host::ResetGuest();
+  ui::PauseMenuReset();
+#if defined(__GLIBC__)
+  malloc_trim(0);
+#endif
+  LOG_INFO("guest stopped: {} threads, released {} MiB of guest address space",
+           guest::LiveThreads(), released >> 20);
 }

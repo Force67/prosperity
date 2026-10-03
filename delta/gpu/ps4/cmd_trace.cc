@@ -6,6 +6,7 @@
 
 #include "gpu/ps4/cmd_trace.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include <cstring>
 
@@ -526,6 +527,8 @@ void TraceShaderCacheMiss(u64 vs_addr,
     base::HashSet<u64> fetches, states;
   };
   static base::HashMap<u64, Seen> seen;  // by content pair
+  static const guest::SessionReset reset_seen(
+      [] { guest::ResetResource(seen); });
   static u32 n_new = 0, n_addr = 0, n_fetch = 0, n_ena = 0, n_3d = 0, n_1d = 0,
              n_none = 0, n_total = 0;
   const u64 pair = vs_hash ^ (ps_hash * 0x9e3779b97f4a7c15ull);
@@ -1203,6 +1206,8 @@ void TraceComputeShader(const Regs& regs,
                         u32 tgid_enable,
                         u32 lds_dwords) {
   static base::HashSet<u64> dumped;
+  static const guest::SessionReset reset_dumped(
+      [] { guest::ResetResource(dumped); });
   if (!kCsDump || dumped.size() >= 32 || !IsGuestAddress(cs_addr) ||
       !dumped.insert(cs_addr).second)
     return;
@@ -1235,6 +1240,8 @@ bool ShouldTraceCsResources(u64 cs_addr) {
   if (kCsResTrace > 1)
     return cs_addr == (u64)kCsResTrace;
   static base::HashSet<u64> traced;
+  static const guest::SessionReset reset_traced(
+      [] { guest::ResetResource(traced); });
   return traced.size() < 64 && traced.insert(cs_addr).second;
 }
 
@@ -1251,6 +1258,8 @@ void TraceCsUnresolved(u64 cs_addr, const gcn::CsResource& res) {
 
 void TraceCsCode(u64 cs_addr) {
   static base::HashSet<u64> dumped;
+  static const guest::SessionReset reset_dumped(
+      [] { guest::ResetResource(dumped); });
   if (!kEudFail || !dumped.insert(cs_addr).second)
     return;
   const u32* code = reinterpret_cast<const u32*>(cs_addr);

@@ -3,11 +3,13 @@
  */
 
 #include "gpu/render/device.h"
+#include "gpu/gcn/gcn_translate.h"
 
 #include <sys/stat.h>
 
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include "base/threading/thread.h"
 
 #include "base/logging.h"
@@ -117,8 +119,12 @@ bool Init(Renderer& renderer) {
     return true;
   // A partial creation cannot safely be initialized over: its pools and
   // caches still contain objects from that attempt.
-  if (g_backend.device)
-    return false;
+  if (g_backend.device) {
+    if (!CreateFrameSlots() || !CreateUploadRings())
+      return false;
+    renderer.state = &g_backend;
+    return true;
+  }
   // Create the device from a clean host thread: Init() is reached on a FEX
   // guest thread (guest stack / TLS), where the NVIDIA ICD's
   // vk_icdGetInstanceProcAddr silently fails and enumeration falls back to
@@ -135,6 +141,23 @@ bool Init(Renderer& renderer) {
   std::atexit([] { g_backend.presenter.Stop(); });
   renderer.state = &g_backend;
   return true;
+}
+
+void StopPresentation() {
+  g_backend.presenter.Stop();
+}
+
+void ResetSession(Renderer& renderer) {
+  gcn::ResetShaderWork();
+  auto* device = g_backend.device;
+  if (device) {
+    device->ReleaseSessionObjects();
+    BASE_LOGI("gpu", "session stopped: {} GPU objects", device->LiveObjects());
+  }
+  g_backend.~BackendState();
+  new (&g_backend) BackendState;
+  delete device;
+  renderer.state = nullptr;
 }
 
 }  // namespace gpu::render

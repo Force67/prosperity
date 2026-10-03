@@ -21,9 +21,9 @@ int PS4ABI sys_ioctl(u32 fd, u32 cmd, void* data) {
   if (!proc)
     return -1;
 
-  auto* obj = proc->GetObjTable().Get(fd);
+  auto obj = proc->GetObjTable().Get(fd);
   if (obj)
-    return static_cast<Device*>(obj)->Ioctl(cmd, data);
+    return static_cast<Device*>(obj.get())->Ioctl(cmd, data);
 
   // Unknown fd (e.g. a stubbed socket from sys_socketex, or an ioctl probe on
   // stdio). Soft-succeed with a zeroed out-buffer rather than returning EBADF:

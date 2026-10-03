@@ -1,4 +1,3 @@
-
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -11,6 +10,7 @@
 #include "base/logging.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <pthread.h>
@@ -229,57 +229,25 @@ int PS4ABI sys_thr_new(thr_param* p, int size) {
   auto* gsb = p->stack_base;
   const size_t gss = p->stack_size;
   const char* hs_env = kHostStackMb;
+  size_t host_stack = 0;
   if (hs_env) {
-    struct Start {
-      void* gthread;
-      u32 tid;
-      base::SharedPointer<base::Atomic<bool>> started;
-      void* stack_base;
-      size_t stack_size;
-    };
-    auto* ctx = new Start{gthread, tid, started, gsb, gss};
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    size_t host_stack = (size_t)std::strtoull(hs_env, nullptr, 0) * 1024 * 1024;
+    host_stack = std::strtoull(hs_env, nullptr, 0) * 1024 * 1024;
     if (host_stack < 8ull * 1024 * 1024)
       host_stack = 256ull * 1024 * 1024;
-    pthread_attr_setstacksize(&attr, host_stack);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    auto trampoline = +[](void* pv) -> void* {
-      auto* c = static_cast<Start*>(pv);
-      t_tid = c->tid;
-      NoteGuestThreadHost(t_tid);
-      t_started = c->started.get();
-      void* gt = c->gthread;
-      RegisterGuestThreadStack(c->stack_base, c->stack_size);
-      delete c;
-      cpu::GetBackend().RunGuestThread(gt);
-      UnregisterGuestThreadStack();
-      return nullptr;
-    };
-    pthread_t th;
-    if (pthread_create(&th, &attr, trampoline, ctx) != 0) {
-      delete ctx;
-      base::SpawnDetachedThread("sys_thread",
-                                [gthread, tid, started, gsb, gss] {
-                                  t_tid = tid;
-                                  NoteGuestThreadHost(t_tid);
-                                  t_started = started.get();
-                                  RegisterGuestThreadStack(gsb, gss);
-                                  cpu::GetBackend().RunGuestThread(gthread);
-                                  UnregisterGuestThreadStack();
-                                });
-    }
-    pthread_attr_destroy(&attr);
-  } else {
-    base::SpawnDetachedThread("sys_thread", [gthread, tid, started, gsb, gss] {
-      t_tid = tid;
-      NoteGuestThreadHost(t_tid);
-      t_started = started.get();
-      RegisterGuestThreadStack(gsb, gss);
-      cpu::GetBackend().RunGuestThread(gthread);
-      UnregisterGuestThreadStack();
-    });
+  }
+  if (!guest::SpawnThread(
+          "sys_thread",
+          [gthread, tid, started, gsb, gss] {
+            t_tid = tid;
+            NoteGuestThreadHost(t_tid);
+            t_started = started.get();
+            RegisterGuestThreadStack(gsb, gss);
+            cpu::GetBackend().RunGuestThread(gthread);
+            UnregisterGuestThreadStack();
+          },
+          host_stack)) {
+    cpu::GetBackend().DiscardGuestThread(gthread);
+    return -static_cast<int>(SysError::eAGAIN);
   }
 
   // Wait for the new thread's first sync point so it wins the races the game
@@ -399,7 +367,7 @@ constexpr u32 UMUTEX_CONTESTED = 0x80000000u;
 // re-poll only; no wait returns to the guest because of it (engines deref
 // half-built state on a spurious return).
 base::TimeDelta UmtxTimeout() {
-  return base::Milliseconds(kUmtxTimeoutMs);
+  return base::Milliseconds(base::Min<long>(kUmtxTimeoutMs, 20));
 }
 
 // One report per stalled wait; the object word names who it waits for
@@ -770,9 +738,11 @@ void Dump() {
 // after a namespace-scope initializer would have asked.
 void StartTimer() {
   static const bool kOnce = [] {
-    base::SpawnDetachedThread("sys_thread", [] {
+    guest::SpawnThread("sys_thread", [] {
       for (;;) {
-        base::SleepForMilliseconds((20) * 1000);
+        if (guest::Stopping())
+          return;
+        guest::SleepForMilliseconds((20) * 1000);
         Dump();
       }
     });
@@ -914,7 +884,7 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       auto& ch = bk.chan[ptr];
       SimpleWaiter waiter;
       ch.QueueSimple(waiter);
-      while (!changed() && !waiter.selected) {
+      while (!guest::Stopping() && !changed() && !waiter.selected) {
         if (dl && base::TimeTicks::Now() >= *dl) {
           ch.RemoveSimple(waiter);
           return -SysError::eTIMEDOUT;
@@ -962,7 +932,8 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       // mutex doesn't degrade into a 2ms spin per waiter (a spurious exit is
       // harmless, libthr re-runs its CAS loop).
       StallReport stall{"MUTEX_WAIT", ptr};
-      while ((p->load() & ~UMUTEX_CONTESTED) != 0 && ch.gen == g0) {
+      while (!guest::Stopping() && (p->load() & ~UMUTEX_CONTESTED) != 0 &&
+             ch.gen == g0) {
         bk.cv.WaitFor(lk, UmtxTimeout());
         stall.Tick();
       }
@@ -1038,6 +1009,8 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       } dequeue{&ch, &queued};
       StallReport stall{"MUTEX_LOCK", ptr};
       for (;;) {
+        if (guest::Stopping())
+          return -static_cast<int>(SysError::eINTR);
         stall.Tick();
         u32 owner = p->load();
         u32 held = owner & ~UMUTEX_CONTESTED;
@@ -1153,6 +1126,8 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       int r = 0;
       StallReport stall{"CV_WAIT", ptr, a};
       for (;;) {
+        if (guest::Stopping())
+          return -static_cast<int>(SysError::eINTR);
         stall.Tick();
         if (ch.gen != g0)  // broadcast: releases every sleeper
           break;
@@ -1225,6 +1200,8 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
           reinterpret_cast<volatile u32*>(static_cast<u8*>(ptr))[1];
       base::UniqueLock<base::Mutex> lk(bk.m);
       for (;;) {
+        if (guest::Stopping())
+          return -static_cast<int>(SysError::eINTR);
         u32 st = p->load();
         if (wr) {
           // A writer needs the lock completely idle.
@@ -1268,6 +1245,8 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       base::UniqueLock<base::Mutex> lk(bk.m);
       u32 st = p->load();
       for (;;) {
+        if (guest::Stopping())
+          return -static_cast<int>(SysError::eINTR);
         u32 next;
         if (st & kWriteOwner)
           next = st & ~kWriteOwner;
@@ -1299,7 +1278,7 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       has_waiters->compare_exchange_strong(z, 1);  // publish "has waiters"
       auto& ch = bk.chan[ptr];
       const u64 g0 = ch.gen;
-      while (*count == 0 && ch.gen == g0) {
+      while (!guest::Stopping() && *count == 0 && ch.gen == g0) {
         if (dl && base::TimeTicks::Now() >= *dl)
           return -SysError::eTIMEDOUT;
         bk.cv.WaitFor(lk, UmtxTimeout());
@@ -1424,7 +1403,7 @@ int PS4ABI sys_thr_suspend(const void* timeout) {
     const i64 req = i64(ts->tv_sec) * 1000000 + i64(ts->tv_nsec) / 1000;
     us = base::Clamp<i64>(req, 0, 50000);
   }
-  base::SleepForMicroseconds(u64(us));
+  guest::SleepForMicroseconds(u64(us));
   return 0;
 }
 
@@ -1656,5 +1635,18 @@ int PS4ABI sys_sysarch(int num, void* args) {
       return -SysError::eINVAL;
   }
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  for (auto* acc : umtxwall::g_accs)
+    delete acc;
+  umtxwall::g_accs = {};
+  g_next_tid.store(2);
+  for (auto& bucket : g_umtx_buckets)
+    guest::ResetResource(bucket.chan);
+  guest::ResetResource(g_host_by_guest);
+  guest::ResetResource(g_guest_name);
+});
+}  // namespace
 
 }  // namespace kern

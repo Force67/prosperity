@@ -7,6 +7,7 @@
 
 #include "gpu/ps5/draw_state.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include <cstring>
 
@@ -562,6 +563,8 @@ void ResolveCbufferBindings(const base::Vector<gcn::ShaderCbuf>& cbufs,
   }
   if (kCbResolve && planned) {
     static base::HashSet<u64> seen;
+    static const guest::SessionReset reset_seen(
+        [] { guest::ResetResource(seen); });
     const u64 key = stage_addr * 2 + vertex_stage;
     if (seen.size() < 512 && seen.insert(key).second)
       BASE_LOGI("cbresolve", "{} {:#x} planned={} replayed={} mapped={}",

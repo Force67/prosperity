@@ -7,6 +7,7 @@
 
 #include "gpu/ps5/cmd_trace.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -418,9 +419,9 @@ void NoteDrawSeen() {
   if (!kGpuDrawcensus)
     return;
   static const bool kStarted = [] {
-    base::SpawnDetachedThread("cmd_trace", [] {
+    guest::SpawnThread("cmd_trace", [] {
       for (;;) {
-        base::SleepForMilliseconds((15) * 1000);
+        guest::SleepForMilliseconds((15) * 1000);
         BASE_LOGI("drawcensus", "seen={} issued={} dropped: no-shader={}",
                   g_draws_seen.load(), g_draws_issued.load(),
                   g_drop_no_shader.load());
@@ -443,6 +444,7 @@ void NoteDrawIssued(const render::DrawInfo& d) {
   // presents black while thousands of draws issue means none of them landed in
   // a registered display buffer, and this is the only way to see that.
   static base::Set<u64> rts;
+  static const guest::SessionReset reset_rts([] { guest::ResetResource(rts); });
   static base::Mutex lock;
   base::LockGuard<base::Mutex> lk(lock);
   if (rts.size() < 64 && rts.insert(d.rt_base).second)
@@ -477,6 +479,8 @@ void TraceNggState(const Regs& regs, u64 es_addr, u64 gs_addr) {
   if (!kGpuDrawcensus || !gs_addr || es_addr == gs_addr)
     return;
   static base::HashSet<u64> seen;
+  static const guest::SessionReset reset_seen(
+      [] { guest::ResetResource(seen); });
   const u64 key = gs_addr ^ (es_addr * 0x9e3779b97f4a7c15ull);
   if (seen.size() >= 128 || !seen.insert(key).second)
     return;
@@ -978,6 +982,8 @@ void NoteDispatch(u64 cs_addr, const u32 threads[3], u32 rsrc2) {
     return;
   static u64 n_total = 0, n_valid = 0;
   static base::HashSet<u64> seen;
+  static const guest::SessionReset reset_seen(
+      [] { guest::ResetResource(seen); });
   n_total++;
   if (IsGuestAddress(cs_addr))
     n_valid++;
@@ -1004,6 +1010,8 @@ void TraceComputeShader(const Regs& regs,
                         const u32 threads[3],
                         u32 rsrc2) {
   static base::HashSet<u64> dumped;
+  static const guest::SessionReset reset_dumped(
+      [] { guest::ResetResource(dumped); });
   if (!kCsDump || dumped.size() >= 24 || !IsGuestAddress(cs_addr) ||
       !gpu::IsReadableRange(cs_addr, kMaxShaderBytes) ||
       !dumped.insert(cs_addr).second)
@@ -1053,6 +1061,8 @@ void TraceCsUnsupported(u64 cs_addr,
   // Once per shader: a title dispatches the same unsupported shader every
   // frame, and repeating it would spend the whole skip budget on one of them.
   static base::HashSet<u64> reported;
+  static const guest::SessionReset reset_reported(
+      [] { guest::ResetResource(reported); });
   if (reported.insert(cs_addr).second && CsReport())
     BASE_LOGI("csgpu",
               "unsupported CS @{:#x} groups=[{} {} {}] tg=[{} {} {}] usgpr={} "
@@ -1075,6 +1085,8 @@ void TraceCsUnsupportedImage(u64 cs_addr,
                              const gcn::TImage& image,
                              const u32* descriptor) {
   static base::HashSet<u64> reported;
+  static const guest::SessionReset reset_reported(
+      [] { guest::ResetResource(reported); });
   if (reported.size() < 256 &&
       reported.insert((cs_addr << 8) | (binding & 0xFF)).second)
     BASE_LOGI("csgpu",
@@ -1121,6 +1133,8 @@ void TraceCsTooManyResources(u64 cs_addr, u32 max_resources) {
 // then says nothing about the dispatch that goes missing at the frontier.
 void TraceCsDispatchFailed(u64 cs_addr, u32 num_resources) {
   static base::HashSet<u64> reported;
+  static const guest::SessionReset reset_reported(
+      [] { guest::ResetResource(reported); });
   if (reported.size() < 256 && reported.insert(cs_addr).second)
     BASE_LOGI("csgpu", "CS @{:#x} dispatch failed ({} resources)", cs_addr,
               num_resources);
@@ -1155,9 +1169,9 @@ void NoteOpcode(u32 op) {
   if (!kOpCensus)
     return;
   static const bool kStarted = [] {
-    base::SpawnDetachedThread("cmd_trace", [] {
+    guest::SpawnThread("cmd_trace", [] {
       for (;;) {
-        base::SleepForMilliseconds((15) * 1000);
+        guest::SleepForMilliseconds((15) * 1000);
         BASE_LOGI("agc", "=== opcode census (tick) ===");
         DumpOpcodeHistogram();
       }

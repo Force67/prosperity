@@ -4,6 +4,7 @@
 
 #include "gpu/render/texture_cache.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_translate.h"
@@ -927,6 +928,8 @@ void PrevalidateTextures() {
     bool full;
   };
   static base::Vector<Job> jobs;
+  static const guest::SessionReset reset_jobs(
+      [] { guest::ResetResource(jobs); });
   jobs.clear();
   u64 bytes = 0;
   for (auto& [key, e] : g_tex_images) {
@@ -1122,6 +1125,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     };
     static base::Mutex m;
     static base::Map<u64, Cell> tbl;
+    static const guest::SessionReset reset_tbl(
+        [] { guest::ResetResource(tbl); });
     static auto last = base::TimeTicks::Now();
     base::LockGuard<base::Mutex> lk(m);
     Cell& c = tbl[base];
@@ -1159,6 +1164,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       gpu::IsReadableRange(base, footprint)) {
     static int rawn = 0;
     static base::HashSet<u64> raw_seen;
+    static const guest::SessionReset reset_raw_seen(
+        [] { guest::ResetResource(raw_seen); });
     if (rawn < 12 && raw_seen.insert(static_cast<u64>(w) << 32 | h).second) {
       char p[320];
       std::snprintf(p, sizeof(p),
@@ -1653,9 +1660,17 @@ void ReleaseRetiredTextures() {
   // extra BeginFrame in the `aged` generation before being destroyed, by
   // then every command buffer that could reference them has been fence-waited.
   static base::Vector<MultiTexSet> aged_mtex;
+  static const guest::SessionReset reset_aged_mtex(
+      [] { guest::ResetResource(aged_mtex); });
   static base::Vector<TexEntry> aged_tex_sets;
+  static const guest::SessionReset reset_aged_tex_sets(
+      [] { guest::ResetResource(aged_tex_sets); });
   static base::Vector<TexViewEntry> aged_tex_views;
+  static const guest::SessionReset reset_aged_tex_views(
+      [] { guest::ResetResource(aged_tex_views); });
   static base::Vector<TexImageEntry> aged_tex_images;
+  static const guest::SessionReset reset_aged_tex_images(
+      [] { guest::ResetResource(aged_tex_images); });
   for (const MultiTexSet& entry : aged_mtex)
     Device().Destroy(entry.set);
   for (const TexEntry& e : aged_tex_sets)
@@ -1882,5 +1897,24 @@ void InvalidateTexRange(u64 base, u64 size) {
     }
   }
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  g_tex_epoch = 1;
+  g_tex_memo_frame = -1;
+  guest::ResetResource(g_tex_images);
+  guest::ResetResource(g_tex_views);
+  guest::ResetResource(g_tex_cache);
+  guest::ResetResource(g_sampler_cache);
+  guest::ResetResource(g_texture_pages);
+  guest::ResetResource(g_tex_image_bytes);
+  guest::ResetResource(g_retired_tex_images);
+  guest::ResetResource(g_retired_tex_views);
+  guest::ResetResource(g_retired_tex_sets);
+  guest::ResetResource(g_tex_memo);
+  guest::ResetResource(g_mtex_cache);
+  guest::ResetResource(g_retired_mtex);
+});
+}  // namespace
 
 }  // namespace gpu::render

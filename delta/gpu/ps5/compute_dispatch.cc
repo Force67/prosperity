@@ -7,6 +7,7 @@
 
 #include "gpu/ps5/compute_dispatch.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include <cstring>
 
@@ -410,6 +411,8 @@ void DispatchCompute(render::Renderer& renderer,
 
   if (kCsProbe && std::strstr(probe_buf, kCsProbe)) {
     static base::HashSet<u64> reported;
+    static const guest::SessionReset reset_reported(
+        [] { guest::ResetResource(reported); });
     if (reported.insert(cs_addr).second) {
       for (const auto& r : rc.resources) {
         const auto it = resolved.find(r.use_pc);

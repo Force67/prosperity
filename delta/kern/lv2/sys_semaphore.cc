@@ -8,6 +8,7 @@
 
 #include "base/arch.h"
 #include "base/logging.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <cstdio>
@@ -76,9 +77,9 @@ int Semaphore::Wait(int need, u32* timeout_us) {
     waiters_++;
     bool ok = true;
     if (timeout_us)
-      ok = cv_.WaitFor(lk, base::Microseconds(*timeout_us), enough);
+      ok = guest::WaitFor(cv_, lk, base::Microseconds(*timeout_us), enough);
     else
-      cv_.Wait(lk, enough);
+      ok = guest::Wait(cv_, lk, enough);
     waiters_--;
     if (!ok)
       return -SysError::eTIMEDOUT;
@@ -131,11 +132,11 @@ int Semaphore::Cancel(int set_count, int* num_waiters) {
   return 0;
 }
 
-static Semaphore* FromId(int id) {
-  auto* obj = Process::GetActive()->GetObjTable().Get(id);
+static kern::ObjectRef<Semaphore> FromId(int id) {
+  auto obj = Process::GetActive()->GetObjTable().Get(id);
   if (!obj || obj->type() != Object::Type::kSemaphore)
     return nullptr;
-  return static_cast<Semaphore*>(obj);
+  return kern::ObjectRef<Semaphore>(static_cast<Semaphore*>(obj.Release()));
 }
 
 int PS4ABI sys_osem_create(const char* name, u32 attr, int init, int max) {
@@ -162,7 +163,7 @@ int PS4ABI sys_osem_open(const char* name) {
 }
 
 int PS4ABI sys_osem_delete(int id) {
-  auto* s = FromId(id);
+  auto s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
   {
@@ -180,7 +181,7 @@ int PS4ABI sys_osem_close(int id) {
 
 int PS4ABI sys_osem_wait(int id, int need, u32* timeout_us) {
   WaitProbe wp("osem_wait", (long)id, (long)need);
-  auto* s = FromId(id);
+  auto s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
   OsemTrace("wait", id, need, s->value());
@@ -203,14 +204,14 @@ int PS4ABI sys_osem_wait(int id, int need, u32* timeout_us) {
 }
 
 int PS4ABI sys_osem_trywait(int id, int need) {
-  auto* s = FromId(id);
+  auto s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
   return s->Trywait(need);
 }
 
 int PS4ABI sys_osem_post(int id, int count) {
-  auto* s = FromId(id);
+  auto s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
   const int r = s->Post(count);
@@ -219,9 +220,16 @@ int PS4ABI sys_osem_post(int id, int count) {
 }
 
 int PS4ABI sys_osem_cancel(int id, int set_count, int* num_waiters) {
-  auto* s = FromId(id);
+  auto s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
   return s->Cancel(set_count, num_waiters);
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_sem_by_name);
+});
+}  // namespace
+
 }  // namespace kern

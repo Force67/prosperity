@@ -5,6 +5,7 @@
 #include "base/atomic.h"
 #include "base/time/time.h"
 #include "guest/pause.h"
+#include "guest/session.h"
 #include "imgui.h"
 #include "ui/home_screen.h"
 #include "ui/mouse_look.h"
@@ -18,6 +19,7 @@ bool g_controls = false;
 int g_selection = 0;
 ImGuiConfigFlags g_nav_flags = 0;
 base::Atomic<bool> g_exit_requested{false};
+base::Atomic<bool> g_return_requested{false};
 float g_visibility = 0;
 u64 g_tick_ns = 0;
 
@@ -37,7 +39,8 @@ void PauseMenuGameReady() {
 }
 
 void PauseMenuToggle() {
-  if (!g_ready || HomeScreenActive() || LaunchTransitionActive())
+  if (guest::Stopping() || g_return_requested.load() || !g_ready ||
+      HomeScreenActive() || LaunchTransitionActive())
     return;
   if (guest::Paused()) {
     Resume();
@@ -62,6 +65,13 @@ bool PauseMenuExitRequested() {
   return g_exit_requested.load();
 }
 
+bool PauseMenuReturnRequested() {
+  return g_return_requested.load();
+}
+void PauseMenuRequestReturn() {
+  g_return_requested.store(true);
+}
+
 void PauseMenuBuild(u32 width, u32 height) {
   const auto now = base::TickClock::NowNs();
   const float dt =
@@ -71,7 +81,8 @@ void PauseMenuBuild(u32 width, u32 height) {
   g_visibility =
       base::Clamp(g_visibility + dt / (paused ? 0.18f : -0.20f), 0.0f, 1.0f);
   const float ease = g_visibility * g_visibility * (3 - 2 * g_visibility);
-  if (paused) {
+  const bool closing = g_return_requested.load() || g_exit_requested.load();
+  if (paused && !closing) {
     guest::PollPause();
     if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
       if (g_controls)
@@ -80,14 +91,16 @@ void PauseMenuBuild(u32 width, u32 height) {
         Resume();
     }
     if (!g_controls && ImGui::IsKeyPressed(ImGuiKey_UpArrow))
-      g_selection = (g_selection + 2) % 3;
+      g_selection = (g_selection + 3) % 4;
     if (!g_controls && ImGui::IsKeyPressed(ImGuiKey_DownArrow))
-      g_selection = (g_selection + 1) % 3;
+      g_selection = (g_selection + 1) % 4;
     if (!g_controls && ImGui::IsKeyPressed(ImGuiKey_Enter)) {
       if (g_selection == 0)
         Resume();
       else if (g_selection == 1)
         g_controls = true;
+      else if (g_selection == 2)
+        PauseMenuRequestReturn();
       else
         g_exit_requested.store(true);
     }
@@ -101,7 +114,7 @@ void PauseMenuBuild(u32 width, u32 height) {
   dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h),
                     IM_COL32(8, 10, 14, int(175 * ease)));
   const float panel_w = base::Min(480.0f, w - 48);
-  const float panel_h = base::Min(g_controls ? 600.0f : 392.0f, h - 32);
+  const float panel_h = base::Min(g_controls ? 600.0f : 448.0f, h - 32);
   const ImVec2 tl((w - panel_w) * 0.5f, (h - panel_h) * 0.5f + 12 * (1 - ease));
   const ImVec2 br(tl.x + panel_w, tl.y + panel_h);
   overlay_theme::DrawPanel(dl, tl, br, ease);
@@ -116,7 +129,9 @@ void PauseMenuBuild(u32 width, u32 height) {
                     ink, 2);
   auto* font = overlay_theme::HeadingFont();
   dl->AddText(font, 28, ImVec2(tl.x + 84, tl.y + 32), ink,
-              g_controls ? "Controls" : "Paused");
+              closing      ? "Closing game"
+              : g_controls ? "Controls"
+                           : "Paused");
   dl->AddText(ImGui::GetIO().FontDefault, 15, ImVec2(tl.x + 28, tl.y + 92),
               secondary, g_title.empty() ? "Your game" : g_title.c_str(),
               nullptr, panel_w - 56);
@@ -130,7 +145,7 @@ void PauseMenuBuild(u32 width, u32 height) {
                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                    ImGuiWindowFlags_NoSavedSettings |
                    ImGuiWindowFlags_NoBackground);
-  ImGui::BeginDisabled(!paused);
+  ImGui::BeginDisabled(!paused || closing);
   if (g_controls) {
     const char* rows[][2] = {{"WASD", "Move"},
                              {"Arrow keys", "Aim"},
@@ -188,11 +203,18 @@ void PauseMenuBuild(u32 width, u32 height) {
                                    ImGui::GetItemRectMin(),
                                    ImGui::GetItemRectMax(), 24, ease);
     ImGui::SetCursorPos(ImVec2(28, 268));
+    if (ImGui::Button("Return to main menu", ImVec2(panel_w - 56, 44)))
+      PauseMenuRequestReturn();
+    if (g_selection == 2 && paused)
+      overlay_theme::DrawFocusHalo(ImGui::GetWindowDrawList(),
+                                   ImGui::GetItemRectMin(),
+                                   ImGui::GetItemRectMax(), 24, ease);
+    ImGui::SetCursorPos(ImVec2(28, 324));
     ImGui::PushStyleColor(ImGuiCol_Text, overlay_theme::kSecondary);
     if (ImGui::Button("Exit emulator", ImVec2(panel_w - 56, 44)))
       g_exit_requested.store(true);
     ImGui::PopStyleColor();
-    if (g_selection == 2 && paused)
+    if (g_selection == 3 && paused)
       overlay_theme::DrawFocusHalo(ImGui::GetWindowDrawList(),
                                    ImGui::GetItemRectMin(),
                                    ImGui::GetItemRectMax(), 24, ease);
@@ -200,9 +222,10 @@ void PauseMenuBuild(u32 width, u32 height) {
   ImGui::EndDisabled();
   ImGui::End();
   ImGui::PopStyleVar(3);
-  dl->AddText(
-      ImVec2(tl.x + 28, br.y - 44), secondary,
-      g_controls ? "Esc  Back     Ctrl  Resume" : "Ctrl or Esc to resume");
+  dl->AddText(ImVec2(tl.x + 28, br.y - 44), secondary,
+              closing      ? "Stopping guest threads and releasing resources..."
+              : g_controls ? "Esc  Back     Ctrl  Resume"
+                           : "Ctrl or Esc to resume");
 }
 
 void PauseMenuReset() {
@@ -210,6 +233,7 @@ void PauseMenuReset() {
   g_ready = false;
   g_controls = false;
   g_exit_requested.store(false);
+  g_return_requested.store(false);
   g_visibility = 0;
   g_tick_ns = 0;
   g_title.clear();
@@ -224,6 +248,10 @@ bool PauseMenuVisible() {
   return false;
 }
 void PauseMenuRequestExit() {}
+void PauseMenuRequestReturn() {}
+bool PauseMenuReturnRequested() {
+  return false;
+}
 bool PauseMenuExitRequested() {
   return false;
 }

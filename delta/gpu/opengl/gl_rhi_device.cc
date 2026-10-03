@@ -448,7 +448,7 @@ rhi::Buffer* GlDevice::CreateBuffer(const rhi::BufferDesc& desc) {
       glMakeNamedBufferResidentNV(name, GL_READ_WRITE);
     });
   }
-  return gpu::rhi::Release(buffer);
+  return gpu::rhi::Release(buffer, this);
 }
 
 rhi::Texture* GlDevice::CreateTexture(const rhi::TextureDesc& desc) {
@@ -501,7 +501,7 @@ rhi::Texture* GlDevice::CreateTexture(const rhi::TextureDesc& desc) {
       glDeleteTextures(1, &t.name);
     glFinish();
   });
-  return ok ? gpu::rhi::Release(texture) : nullptr;
+  return ok ? gpu::rhi::Release(texture, this) : nullptr;
 }
 
 rhi::TextureView* GlDevice::CreateView(rhi::Texture* texture,
@@ -520,7 +520,7 @@ rhi::TextureView* GlDevice::CreateView(rhi::Texture* texture,
     view->internal = t->internal;
     view->level = static_cast<GLint>(desc.base_mip);
     view->layer = desc.layers == 1 ? static_cast<GLint>(desc.base_layer) : -1;
-    return gpu::rhi::Release(view);
+    return gpu::rhi::Release(view, this);
   }
   const GLenum target = ViewTarget(desc.dim);
   if ((target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_2D_ARRAY) &&
@@ -549,7 +549,7 @@ rhi::TextureView* GlDevice::CreateView(rhi::Texture* texture,
       glDeleteTextures(1, &v.name);
     glFinish();
   });
-  return ok ? gpu::rhi::Release(view) : nullptr;
+  return ok ? gpu::rhi::Release(view, this) : nullptr;
 }
 
 rhi::Sampler* GlDevice::CreateSampler(const rhi::SamplerDesc& desc) {
@@ -597,7 +597,7 @@ rhi::Sampler* GlDevice::CreateSampler(const rhi::SamplerDesc& desc) {
     sampler->nearest = filtered ? make(false) : sampler->name;
     glFinish();
   });
-  return gpu::rhi::Release(sampler);
+  return gpu::rhi::Release(sampler, this);
 }
 
 rhi::BindGroupLayout* GlDevice::CreateBindGroupLayout(
@@ -617,7 +617,7 @@ rhi::BindGroupLayout* GlDevice::CreateBindGroupLayout(
   layout->dynamic_index.assign(desc.bindings.size(), kNotDynamic);
   for (size_t i = 0; i < dynamic.size(); i++)
     layout->dynamic_index[dynamic[i].second] = static_cast<u8>(i);
-  return gpu::rhi::Release(layout);
+  return gpu::rhi::Release(layout, this);
 }
 
 void GlDevice::Resolve(const GlBindGroupLayout& layout,
@@ -676,7 +676,7 @@ rhi::BindGroup* GlDevice::CreateBindGroup(const rhi::BindGroupDesc& desc) {
   group->entries.resize(group->layout->desc().bindings.size());
   UpdateBindGroup(&*group, desc.writes.data(),
                   static_cast<u32>(desc.writes.size()));
-  return gpu::rhi::Release(group);
+  return gpu::rhi::Release(group, this);
 }
 
 void GlDevice::UpdateBindGroup(rhi::BindGroup* group,
@@ -692,7 +692,8 @@ rhi::PipelineLayout* GlDevice::CreatePipelineLayout(
   if (desc.groups.size() > kMaxGroups ||
       desc.push_constant_bytes > kMaxPushBytes)
     return nullptr;
-  return new GlPipelineLayout(desc);
+  auto layout = base::MakeUnique<GlPipelineLayout>(desc);
+  return rhi::Release(layout, this);
 }
 
 const SlotMap* GlDevice::InternSlots(const rhi::PipelineLayoutDesc& layout,
@@ -859,7 +860,7 @@ rhi::Pipeline* GlDevice::BuildPipeline(
     BASE_LOGI("gpugl", "program build failed: {}", error.c_str());
     return nullptr;
   }
-  return gpu::rhi::Release(pipeline);
+  return gpu::rhi::Release(pipeline, this);
 }
 
 rhi::Pipeline* GlDevice::CreateGraphicsPipeline(
@@ -945,14 +946,16 @@ rhi::TimestampPool* GlDevice::CreateTimestampPool(u32 count) {
     ok = pool->results && glGetError() == GL_NO_ERROR;
     glFinish();
   });
-  return ok ? gpu::rhi::Release(pool) : nullptr;
+  return ok ? gpu::rhi::Release(pool, this) : nullptr;
 }
 
 rhi::CommandList* GlDevice::CreateCommandList() {
-  return new GlCommandList(*this);
+  auto list = base::MakeUnique<GlCommandList>(*this);
+  return rhi::Release(list, this);
 }
 
 void GlDevice::Destroy(rhi::Object* object) {
+  Forget(object);
   if (!object)
     return;
   // After every submission queued so far, and after the render thread
@@ -1080,6 +1083,19 @@ bool GlDevice::Wait(u64 submission, u64 timeout_ns) {
   else
     completed_cv_.WaitFor(lock, base::Microseconds((timeout_ns) / 1000), done);
   return completed_ >= submission;
+}
+
+void GlDevice::ReleaseSessionObjects() {
+  WaitIdle();
+  ReleaseObjects();
+  render_.Run([this] {
+    replayer_->ResetSession();
+    for (const auto& [key, input] : vertex_inputs_)
+      if (input->vao)
+        glDeleteVertexArrays(1, &input->vao);
+  });
+  slot_maps_ = {};
+  vertex_inputs_ = {};
 }
 
 void GlDevice::WaitIdle() {

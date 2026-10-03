@@ -4,6 +4,7 @@
 
 #include "gpu/render/gpu_timeline.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include <cstring>
 
@@ -26,8 +27,18 @@ u16 g_next_query = 0;
 
 // A GPU timestamp taken now, to pair with the CPU clock for the new context.
 bool GpuNow(u64* ticks) {
-  static rhi::CommandList* list = Device().CreateCommandList();
-  static rhi::TimestampPool* pool = Device().CreateTimestampPool(1);
+  static rhi::CommandList* list = nullptr;
+  static rhi::TimestampPool* pool = nullptr;
+  static const guest::SessionReset reset([] {
+    list = nullptr;
+    pool = nullptr;
+    g_active = false;
+    g_next_query = 0;
+  });
+  if (!list)
+    list = Device().CreateCommandList();
+  if (!pool)
+    pool = Device().CreateTimestampPool(1);
   if (!list || !pool)
     return false;
   list->Begin();

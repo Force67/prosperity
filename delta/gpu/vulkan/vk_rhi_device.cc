@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include "guest/session.h"
 
 #include <unistd.h>
 #include "base/logging.h"
@@ -390,25 +391,61 @@ void ImageAllocator::Free(VulkanDevice& device, Allocation& allocation) {
   allocation = {};
 }
 
-VulkanDevice::~VulkanDevice() {
-  if (!native.device)
-    return;
+void ImageAllocator::Release(VulkanDevice& device) {
+  base::LockGuard lock(mutex_);
+  for (const auto& block : blocks_)
+    vkFreeMemory(device.native.device, block.memory, nullptr);
+  blocks_ = {};
+}
+
+void VulkanDevice::ReleaseSessionObjects() {
   vkDeviceWaitIdle(native.device);
-  SavePipelineCache(true);
-  for (VkDescriptorPool pool : set_pools_)
+  ReleaseObjects();
+  images_.Release(*this);
+  for (auto pool : set_pools_)
     vkDestroyDescriptorPool(native.device, pool, nullptr);
-  if (timeline_)
-    vkDestroySemaphore(native.device, timeline_, nullptr);
-  if (command_pool)
-    vkDestroyCommandPool(native.device, command_pool, nullptr);
-  if (side_fence_)
-    vkDestroyFence(native.device, side_fence_, nullptr);
+  set_pools_ = {};
+  vkResetCommandPool(native.device, command_pool,
+                     VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT);
   if (side_pool_)
-    vkDestroyCommandPool(native.device, side_pool_, nullptr);
-  if (native.pipeline_cache)
-    vkDestroyPipelineCache(native.device, native.pipeline_cache, nullptr);
-  // Device memory blocks and the device itself are left to process exit:
-  // the renderer owns objects that may still reference them.
+    vkResetCommandPool(native.device, side_pool_,
+                       VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT);
+  SavePipelineCache(true);
+  vkDestroyPipelineCache(native.device, native.pipeline_cache, nullptr);
+  VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+  vkCreatePipelineCache(native.device, &info, nullptr, &native.pipeline_cache);
+  last_cache_size_ = 0;
+  last_pipeline_build_ns_.store(0);
+}
+
+VulkanDevice::~VulkanDevice() {
+  if (native.device) {
+    vkDeviceWaitIdle(native.device);
+    SavePipelineCache(true);
+    for (VkDescriptorPool pool : set_pools_)
+      vkDestroyDescriptorPool(native.device, pool, nullptr);
+    if (timeline_)
+      vkDestroySemaphore(native.device, timeline_, nullptr);
+    if (command_pool)
+      vkDestroyCommandPool(native.device, command_pool, nullptr);
+    if (side_fence_)
+      vkDestroyFence(native.device, side_fence_, nullptr);
+    if (side_pool_)
+      vkDestroyCommandPool(native.device, side_pool_, nullptr);
+    if (native.pipeline_cache)
+      vkDestroyPipelineCache(native.device, native.pipeline_cache, nullptr);
+    images_.Release(*this);
+    vkDestroyDevice(native.device, nullptr);
+  }
+  if (messenger_) {
+    auto destroy = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+        vkGetInstanceProcAddr(native.instance,
+                              "vkDestroyDebugUtilsMessengerEXT"));
+    if (destroy)
+      destroy(native.instance, messenger_, nullptr);
+  }
+  if (native.instance)
+    vkDestroyInstance(native.instance, nullptr);
 }
 
 u32 VulkanDevice::FindMemoryType(u32 bits, VkMemoryPropertyFlags want) const {
@@ -873,7 +910,7 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
     }
     if (desc.name)
       SetName(&*buffer, desc.name);
-    return gpu::rhi::Release(buffer);
+    return gpu::rhi::Release(buffer, this);
   }
 
   VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -987,7 +1024,7 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
   }
   if (desc.name)
     SetName(&*buffer, desc.name);
-  return gpu::rhi::Release(buffer);
+  return gpu::rhi::Release(buffer, this);
 }
 
 rhi::Texture* VulkanDevice::CreateTexture(const rhi::TextureDesc& desc) {
@@ -1035,7 +1072,7 @@ rhi::Texture* VulkanDevice::CreateTexture(const rhi::TextureDesc& desc) {
                          : VK_IMAGE_ASPECT_COLOR_BIT;
   if (desc.name)
     SetName(&*texture, desc.name);
-  return gpu::rhi::Release(texture);
+  return gpu::rhi::Release(texture, this);
 }
 
 rhi::TextureView* VulkanDevice::CreateView(rhi::Texture* texture,
@@ -1054,7 +1091,7 @@ rhi::TextureView* VulkanDevice::CreateView(rhi::Texture* texture,
                          desc.base_layer, desc.layers};
   if (vkCreateImageView(native.device, &vi, nullptr, &view->view) != VK_SUCCESS)
     return nullptr;
-  return gpu::rhi::Release(view);
+  return gpu::rhi::Release(view, this);
 }
 
 rhi::Sampler* VulkanDevice::CreateSampler(const rhi::SamplerDesc& desc) {
@@ -1097,7 +1134,7 @@ rhi::Sampler* VulkanDevice::CreateSampler(const rhi::SamplerDesc& desc) {
   if (vkCreateSampler(native.device, &si, nullptr, &sampler->sampler) !=
       VK_SUCCESS)
     return nullptr;
-  return gpu::rhi::Release(sampler);
+  return gpu::rhi::Release(sampler, this);
 }
 
 rhi::BindGroupLayout* VulkanDevice::CreateBindGroupLayout(
@@ -1121,7 +1158,7 @@ rhi::BindGroupLayout* VulkanDevice::CreateBindGroupLayout(
   if (vkCreateDescriptorSetLayout(native.device, &li, nullptr,
                                   &layout->layout) != VK_SUCCESS)
     return nullptr;
-  return gpu::rhi::Release(layout);
+  return gpu::rhi::Release(layout, this);
 }
 
 VkDescriptorPool VulkanDevice::GrowSetPool() {
@@ -1209,7 +1246,7 @@ rhi::BindGroup* VulkanDevice::CreateBindGroup(const rhi::BindGroupDesc& desc) {
   }
   UpdateBindGroup(&*group, desc.writes.data(),
                   static_cast<u32>(desc.writes.size()));
-  return gpu::rhi::Release(group);
+  return gpu::rhi::Release(group, this);
 }
 
 void VulkanDevice::UpdateBindGroup(rhi::BindGroup* group,
@@ -1253,7 +1290,7 @@ rhi::PipelineLayout* VulkanDevice::CreatePipelineLayout(
   if (vkCreatePipelineLayout(native.device, &li, nullptr, &layout->layout) !=
       VK_SUCCESS)
     return nullptr;
-  return gpu::rhi::Release(layout);
+  return gpu::rhi::Release(layout, this);
 }
 
 rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
@@ -1394,7 +1431,7 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
   SaveAfterSlowBuild(started);
   if (desc.name)
     SetName(&*pipeline, desc.name);
-  return gpu::rhi::Release(pipeline);
+  return gpu::rhi::Release(pipeline, this);
 }
 
 rhi::Pipeline* VulkanDevice::CreateComputePipeline(
@@ -1430,7 +1467,7 @@ rhi::Pipeline* VulkanDevice::CreateComputePipeline(
   SaveAfterSlowBuild(started);
   if (desc.name)
     SetName(&*pipeline, desc.name);
-  return gpu::rhi::Release(pipeline);
+  return gpu::rhi::Release(pipeline, this);
 }
 
 rhi::TimestampPool* VulkanDevice::CreateTimestampPool(u32 count) {
@@ -1441,7 +1478,7 @@ rhi::TimestampPool* VulkanDevice::CreateTimestampPool(u32 count) {
   if (vkCreateQueryPool(native.device, &qi, nullptr, &pool->pool) != VK_SUCCESS)
     return nullptr;
   pool->count = count;
-  return gpu::rhi::Release(pool);
+  return gpu::rhi::Release(pool, this);
 }
 
 rhi::CommandList* VulkanDevice::CreateCommandList() {
@@ -1453,10 +1490,11 @@ rhi::CommandList* VulkanDevice::CreateCommandList() {
   ai.commandBufferCount = 1;
   if (vkAllocateCommandBuffers(native.device, &ai, &list->cmd) != VK_SUCCESS)
     return nullptr;
-  return gpu::rhi::Release(list);
+  return gpu::rhi::Release(list, this);
 }
 
 void VulkanDevice::Destroy(rhi::Object* object) {
+  Forget(object);
   if (!object)
     return;
   VkDevice dev = native.device;
@@ -1755,7 +1793,7 @@ void VulkanDevice::SavePipelineCache(bool force) {
     return;
   }
   cache_saving_.store(true);
-  base::SpawnDetachedThread("vk_rhi_device", [this] {
+  guest::SpawnThread("vk_rhi_device", [this] {
     WritePipelineCache(false);
     cache_saving_.store(false);
   });
@@ -1771,7 +1809,7 @@ void VulkanDevice::SaveAfterSlowBuild(u64 started) {
   if (cache_saving_.exchange(true))
     return;
   last_cache_write_ns_ = now;
-  base::SpawnDetachedThread("vk_rhi_device", [this] {
+  guest::SpawnThread("vk_rhi_device", [this] {
     for (;;) {
       while (save_requested_.exchange(false))
         WritePipelineCache(false);

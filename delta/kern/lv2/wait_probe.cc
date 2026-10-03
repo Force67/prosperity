@@ -8,6 +8,7 @@
  */
 
 #include "kern/lv2/wait_probe.h"
+#include "guest/session.h"
 
 #include "base/arch.h"
 
@@ -80,9 +81,9 @@ void ThreadComm(long tid, char* buf, size_t len) {
 
 void StartReporter() {
   static const bool kStarted = [] {
-    base::SpawnDetachedThread("wait_probe", [] {
+    guest::SpawnThread("wait_probe", [] {
       for (;;) {
-        base::SleepForMilliseconds((5) * 1000);
+        guest::SleepForMilliseconds((5) * 1000);
         const auto now = base::TimeTicks::Now();
         base::LockGuard<base::Mutex> lk(g_mtx);
         bool any = false;

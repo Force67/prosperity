@@ -1,10 +1,12 @@
 #include "runtime/vprx/ps4/lib_sce_av_player/lib_sce_av_player.h"
 #include "base/arch.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include "options/options.h"
 
 #include "base/logging.h"
@@ -63,9 +65,8 @@ struct PendingEvent {
 // context and TLS on both backends.
 void PS4ABI AvpEventThread(void* arg) {
   auto* pending = static_cast<PendingEvent*>(arg);
-  base::SleepForMilliseconds(pending->delay_ms);
+  guest::SleepForMilliseconds(pending->delay_ms);
   const i32 event = pending->event;
-  delete pending;
   if (!g_event_callback)
     return;
   if (kAvpTrace)
@@ -86,14 +87,16 @@ void PostEvent(i32 event, u32 delay_ms) {
   const u64 fsbase = cpu::CurrentGuestFsBase();
   // Create the guest thread on THIS thread (FEX requires it) and only run it on
   // the worker, exactly as sys_thr_new does.
+  auto pending = std::make_shared<PendingEvent>(PendingEvent{event, delay_ms});
   void* gthread = cpu::GetBackend().CreateGuestThread(
       cpu::MakeHostThunk(reinterpret_cast<void*>(&AvpEventThread), "avpEvent"),
-      new PendingEvent{event, delay_ms}, fsbase);
+      pending.get(), fsbase);
   if (!gthread)
     return;
-  base::SpawnDetachedThread("libSceAvPlayer", [gthread] {
-    cpu::GetBackend().RunGuestThread(gthread);
-  });
+  if (!guest::SpawnThread("libSceAvPlayer", [gthread, pending] {
+        cpu::GetBackend().RunGuestThread(gthread);
+      }))
+    cpu::GetBackend().DiscardGuestThread(gthread);
 }
 
 // DELTA_AVP_TRACE: count calls to the hot AvPlayer entrypoints. If a title
@@ -116,6 +119,15 @@ void AvpStep(const char* fn) {
     return;
   BASE_LOGI("avp", "-> {}", fn);
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_event_object);
+  guest::ResetResource(g_event_callback);
+  guest::ResetResource(g_start_ms);
+});
+}  // namespace
+
 }  // namespace
 
 // DELTA_AVP_TRACE: dump the init-data block as 16 pointers so the

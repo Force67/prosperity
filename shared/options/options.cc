@@ -10,6 +10,7 @@
 #include "options/settings.h"
 
 #include <cstring>
+#include "base/containers/vector.h"
 
 #include "base/option_file.h"
 #include "base/strings/xstring.h"
@@ -169,6 +170,39 @@ void Init(int& argc, char** argv) {
     else
       LOG_WARNING("options: cannot write {}", dump);
   }
+}
+
+namespace {
+struct SavedOption {
+  base::OptionBase* option;
+  base::String value;
+};
+base::Vector<SavedOption> g_saved_options;
+}  // namespace
+
+void BeginGameSession() {
+  g_saved_options.clear();
+  base::OptionBase::VisitAll([](const base::OptionBase* option) {
+    if (!option->overridden())
+      return;
+    base::Vector<char> buffer(256);
+    auto length = option->FormatValue(buffer.data(), buffer.size());
+    if (length >= buffer.size()) {
+      buffer.resize(length + 1);
+      length = option->FormatValue(buffer.data(), buffer.size());
+    }
+    g_saved_options.push_back({const_cast<base::OptionBase*>(option),
+                               base::String(buffer.data(), length)});
+  });
+}
+
+void EndGameSession() {
+  base::OptionBase::VisitAll([](const base::OptionBase* option) {
+    const_cast<base::OptionBase*>(option)->Reset();
+  });
+  for (const auto& saved : g_saved_options)
+    saved.option->SetFromString(saved.value.c_str());
+  g_saved_options = {};
 }
 
 }  // namespace options

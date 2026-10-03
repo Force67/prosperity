@@ -66,6 +66,7 @@
 
 #include "kern/ps4/audio_daemon.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "base/logging.h"
 #include "base/strings/number_parse.h"
@@ -422,7 +423,7 @@ void DaemonMain() {
     if (sleep_us < 250)
       sleep_us =
           250;  // never spin: worst case ~4k wakeups/s, all of them cheap
-    base::SleepForMicroseconds(sleep_us);
+    guest::SleepForMicroseconds(sleep_us);
   }
 }
 
@@ -511,7 +512,7 @@ void AudioDaemonNoticeShm(const char* name, u8* base, size_t size) {
               "WARNING: DELTA_AUDIOMIX_ACK is set. That research aid fakes the "
               "mix-flag grant on a timer, which races the daemon's real grant "
               "and breaks pacing.");
-  base::SpawnDetachedThread("audio_daemon", DaemonMain);
+  guest::SpawnThread("audio_daemon", DaemonMain);
 }
 
 }  // namespace kern
@@ -526,4 +527,14 @@ void SetAudioSink(const AudioSink& sink) {
 const AudioSink& GetAudioSink() {
   return g_sink;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_ctl);
+  guest::ResetResource(g_area);
+  guest::ResetResource(g_started);
+  guest::ResetResource(g_ps5_containers);
+});
+}  // namespace
+
 }  // namespace kern::ps4

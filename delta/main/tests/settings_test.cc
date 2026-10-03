@@ -145,3 +145,22 @@ TEST_F(SettingsTest, RejectsInvalidPreferencesWithoutReplacingSavedFile) {
   EXPECT_EQ(options::ReadSettings(), options::Settings{});
 }
 }  // namespace
+
+namespace {
+base::Option<int> kSessionDefault{"test.session.default", 3};
+base::Option<const char*> kSessionOverride{"test.session.override", nullptr};
+}  // namespace
+
+TEST(Settings, GameSessionRestoresOverridesAndClearsProfileValues) {
+  kSessionDefault.Reset();
+  kSessionOverride.SetFromString("firmware directory with spaces");
+  options::BeginGameSession();
+  kSessionDefault.SetFromString("42");
+  kSessionOverride.SetFromString("guest changed value");
+  options::EndGameSession();
+  EXPECT_EQ(kSessionDefault.get(), 3);
+  EXPECT_FALSE(kSessionDefault.overridden());
+  EXPECT_STREQ(kSessionOverride.get(), "firmware directory with spaces");
+  EXPECT_TRUE(kSessionOverride.overridden());
+  kSessionOverride.Reset();
+}

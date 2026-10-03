@@ -7,6 +7,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_video_out/lib_sce_video_out.h"
 #include "base/arch.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include <cstdio>
@@ -190,14 +191,14 @@ bool EnsureGfx(u32 w, u32 h) {
   return true;
 }
 
-Equeue* FindEqueue(int handle) {
+kern::ObjectRef<Equeue> FindEqueue(int handle) {
   auto* p = Process::GetActive();
   if (!p)
     return nullptr;
-  auto* obj = p->GetObjTable().Get(static_cast<u32>(handle));
+  auto obj = p->GetObjTable().Get(static_cast<u32>(handle));
   if (!obj || obj->type() != Object::Type::kEqueue)
     return nullptr;
-  return static_cast<Equeue*>(obj);
+  return kern::ObjectRef<Equeue>(static_cast<Equeue*>(obj.Release()));
 }
 
 // Present the most recently flipped scanout buffer to the window.
@@ -232,9 +233,9 @@ void StartFlipPump() {
   if (!g_flip_pump_started.compare_exchange_strong(expected, true))
     return;
   BASE_LOGI("videoout", "flip pump started (60 Hz)");
-  base::SpawnDetachedThread("libSceVideoOut", [] {
+  guest::SpawnThread("libSceVideoOut", [] {
     for (;;) {
-      base::SleepForMicroseconds(16667);
+      guest::SleepForMicroseconds(16667);
       // NB: do NOT present here. The window is driven solely by the GPU
       // renderer on the submit thread; the window has one swapchain/command
       // buffer and a present from this pump thread races it, intermittently
@@ -257,6 +258,15 @@ void StartFlipPump() {
     }
   });
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_port);
+  guest::ResetResource(g_gfx_state);
+  guest::ResetResource(g_flip_pump_started);
+  guest::ResetResource(g_gfx_up);
+});
+}  // namespace
 
 }  // namespace
 
@@ -388,7 +398,7 @@ int PS4ABI sceVideoOutAddFlipEvent(int eq_handle, int handle, void* udata) {
     BASE_LOGI("vofail", "addflip -> {}", r);
     return r;
   }
-  auto* eq = FindEqueue(eq_handle);
+  auto eq = FindEqueue(eq_handle);
   if (!eq)
     return -1;
   g_port.flip_equeue = eq_handle;
@@ -400,7 +410,7 @@ int PS4ABI sceVideoOutAddFlipEvent(int eq_handle, int handle, void* udata) {
 
 int PS4ABI sceVideoOutDeleteFlipEvent(int eq_handle, int handle) {
   BASE_LOGI("videoout", "deleteFlipEvent eq={} h={}", eq_handle, handle);
-  auto* eq = FindEqueue(eq_handle);
+  auto eq = FindEqueue(eq_handle);
   if (eq)
     eq->RemoveEvent(static_cast<u64>(kEventFlip), kFilterFlip);
   g_port.flip_equeue = -1;
@@ -410,7 +420,7 @@ int PS4ABI sceVideoOutDeleteFlipEvent(int eq_handle, int handle) {
 int PS4ABI sceVideoOutAddVblankEvent(int eq_handle, int handle, void* udata) {
   BASE_LOGI("videoout", "addVblankEvent eq={} h={} udata={:p}", eq_handle,
             handle, udata);
-  auto* eq = FindEqueue(eq_handle);
+  auto eq = FindEqueue(eq_handle);
   if (!eq)
     return -1;
   g_port.vblank_equeue = eq_handle;
@@ -485,7 +495,7 @@ int PS4ABI sceVideoOutSubmitFlip(int handle,
     udata = g_port.flip_udata;
   }
   if (eq_handle >= 0) {
-    if (auto* eq = FindEqueue(eq_handle))
+    if (auto eq = FindEqueue(eq_handle))
       eq->Trigger(kEventFlip, kFilterFlip,
                   static_cast<i64>(g_port.flip_count.load()));
   }
@@ -534,7 +544,7 @@ int PS4ABI sceVideoOutSubmitFlipEop(int handle,
 
   g_port.flip_count.fetch_add(1);
   if (eq_handle >= 0) {
-    if (auto* eq = FindEqueue(eq_handle))
+    if (auto eq = FindEqueue(eq_handle))
       eq->Trigger(kEventFlip, kFilterFlip,
                   static_cast<i64>(g_port.flip_count.load()));
   }

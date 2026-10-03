@@ -2,6 +2,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 #include "gpu/guest_page_table.h"
+#include "guest/session.h"
 
 #include <sys/mman.h>
 #include "base/math/value_bounds.h"
@@ -13,6 +14,16 @@ GuestPageTable& GuestPages() {
   static GuestPageTable* table = new GuestPageTable;
   return *table;
 }
+
+void GuestPageTable::Reset() {
+  for (auto& entry : chunks_)
+    if (auto* chunk = entry.exchange(nullptr))
+      munmap(chunk, sizeof(Chunk));
+}
+
+namespace {
+const guest::SessionReset g_session_reset([] { GuestPages().Reset(); });
+}  // namespace
 
 GuestPageTable::Chunk* GuestPageTable::ChunkAt(u64 address) {
   const u64 index = address >> kChunkShift;

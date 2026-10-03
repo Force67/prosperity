@@ -1,4 +1,5 @@
 #include "gpu/ps5/label_publisher.h"
+#include "guest/session.h"
 
 #include <cstring>
 
@@ -30,7 +31,7 @@ base::ConditionVariable g_done;  // a held write ran
 base::Vector<Held> g_held;
 size_t g_head = 0;  // g_held[g_head..] have not run
 
-base::UniquePointer<base::Thread> g_thread;
+bool g_started = false;
 base::Mutex g_event_lock;
 base::ConditionVariable g_event;
 base::Atomic<u64> g_event_seq{0};
@@ -40,7 +41,8 @@ void Run() {
     Held item;
     {
       base::UniqueLock<base::Mutex> lock(g_lock);
-      g_wake.Wait(lock, [] { return g_head < g_held.size(); });
+      if (!guest::Wait(g_wake, lock, [] { return g_head < g_held.size(); }))
+        return;
       item.batch = g_held[g_head].batch;
       item.write = base::move(g_held[g_head].write);
     }
@@ -100,9 +102,10 @@ void PublishLabel(base::Function<void()> write,
         held.data.assign(static_cast<const u8*>(data),
                          static_cast<const u8*>(data) + bytes);
       held.write = base::move(write);
-      if (!g_thread)
-        g_thread = base::MakeUnique<base::Thread>(
-            "agc-labels", [] { Run(); }, /*start_now=*/true);
+      if (!g_started) {
+        g_started = true;
+        guest::SpawnThread("agc-labels", [] { Run(); });
+      }
       write = nullptr;
     }
   }
@@ -150,4 +153,15 @@ bool LabelPending(u64 base, u64 bytes) {
     render::SubmitForPublishedLabels();
   return pending;
 }
+namespace {
+const bool kSessionReset = [] {
+  guest::RegisterSessionReset([] {
+    g_held = {};
+    g_head = 0;
+    g_started = false;
+    g_event_seq.store(0);
+  });
+  return true;
+}();
+}  // namespace
 }  // namespace gpu::ps5

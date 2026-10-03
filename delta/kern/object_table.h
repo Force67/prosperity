@@ -24,7 +24,7 @@ class ObjectTable {
   bool Remove(u32);
   bool Release(u32);
   bool Keep(u32);
-  Object* Get(u32);
+  ObjectRef<Object> Get(u32);
 
  private:
   bool Resize(u32 new_cap);

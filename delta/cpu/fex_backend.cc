@@ -10,8 +10,9 @@
 #include "base/logging.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
-#include "guest_abi.h"
 #include "guest/pause.h"
+#include "guest/session.h"
+#include "guest_abi.h"
 #include "logger/logger.h"
 
 #include <sys/mman.h>
@@ -173,9 +174,9 @@ static void StartWatchdog() {
     if (kSampleMs) {
       int ms = kSampleMs;
       if (ms <= 0) ms = 50;
-      base::SpawnDetachedThread("fex_backend", [ms] {
+      guest::SpawnThread("fex_backend", [ms] {
         for (u64 tick = 0;; tick++) {
-          base::SleepForMilliseconds(ms);
+          guest::SleepForMilliseconds(ms);
           base::LockGuard lk(g_live_mutex);
           for (auto &t : g_live) {
             auto &s = t.thread->CurrentFrame->State;
@@ -232,15 +233,18 @@ static void StartWatchdog() {
                             base::memory_order_release);
         };
         sigaction(SIGPROF, &sa, nullptr);
-        base::SpawnDetachedThread("fex_backend", [ms, ranges] {
+        guest::SpawnThread("fex_backend", [ms, ranges] {
           u64 rounds = 0, with_one = 0, with_two = 0, max_seen = 0, reported = 0,
                    answered = 0, with_two_tight = 0;
           for (;;) {
-            base::SleepForMilliseconds(ms);
+            guest::SleepForMilliseconds(ms);
             const u64 gen =
                 g_sample_gen.fetch_add(1, base::memory_order_relaxed) + 1;
-            struct Slot { u32 id; pid_t tid;
-                          base::Atomic<u64> *gp, *rp, *np; };
+            struct Slot {
+              u32 id;
+              pid_t tid;
+              base::Atomic<u64>*gp, *rp, *np;
+            };
             Slot slots[64];
             unsigned ns = 0;
             {
@@ -254,8 +258,12 @@ static void StartWatchdog() {
             }
             for (unsigned k = 0; k < ns; k++)
               ::syscall(SYS_tgkill, ::getpid(), slots[k].tid, SIGPROF);
-            base::SleepForMicroseconds(300);
-            struct Hit { u32 id; u64 rip; u64 ns; };
+            guest::SleepForMicroseconds(300);
+            struct Hit {
+              u32 id;
+              u64 rip;
+              u64 ns;
+            };
             Hit hits[64];
             unsigned n = 0;
             for (unsigned k = 0; k < ns; k++) {
@@ -273,8 +281,10 @@ static void StartWatchdog() {
                 }
             }
             rounds++;
-            if (n > max_seen) max_seen = n;
-            if (n == 1) with_one++;
+            if (n > max_seen)
+              max_seen = n;
+            if (n == 1)
+              with_one++;
             if (n >= 2) {
               with_two++;
               // Only a spread well under a microsecond means "both inside at once".
@@ -322,7 +332,7 @@ static void StartWatchdog() {
       if (ms <= 0) ms = 2000;
       const u64 base = kLoadWatchBase;
       const u64 goff = kLoadWatchGoff;
-      base::SpawnDetachedThread("fex_backend", [ms, base, goff] {
+      guest::SpawnThread("fex_backend", [ms, base, goff] {
         auto rd = [](u64 a, void *dst, size_t n) -> bool {
           long pg = sysconf(_SC_PAGESIZE);
           for (u64 p = a & ~((u64)pg - 1); p < a + n; p += pg) {
@@ -335,7 +345,7 @@ static void StartWatchdog() {
         u64 pobj = base + goff;
         int last_total = -1, plateau = 0;
         for (u64 tick = 0;; tick++) {
-          base::SleepForMilliseconds(ms);
+          guest::SleepForMilliseconds(ms);
           u64 obj = 0;
           if (!rd(pobj, &obj, 8) || obj < 0x1000) {
             BASE_LOGI("loadwatch", "{} obj ptr @{:#x} not ready (obj={:#x})",
@@ -349,14 +359,23 @@ static void StartWatchdog() {
           bool ok = true;
           for (int i = 0; i < 10; i++) {
             i32 v = 0;
-            if (!rd(obj + 0x110 + (u64)i * 0x28, &v, 4)) { ok = false; break; }
+            if (!rd(obj + 0x110 + (u64)i * 0x28, &v, 4)) {
+              ok = false;
+              break;
+            }
             c[i] = v;
             total += v;
           }
-          if (!ok) { BASE_LOGI("loadwatch", "{} obj={:#x} read fault",
-                               (unsigned long long)tick, (unsigned long long)obj);
-                     std::fflush(stderr); continue; }
-          if (total == last_total) plateau++; else plateau = 0;
+          if (!ok) {
+            BASE_LOGI("loadwatch", "{} obj={:#x} read fault",
+                      (unsigned long long)tick, (unsigned long long)obj);
+            std::fflush(stderr);
+            continue;
+          }
+          if (total == last_total)
+            plateau++;
+          else
+            plateau = 0;
           last_total = total;
           BASE_LOGI("loadwatch",
               "{} obj={:#x} REMAINING={} plateau={}x q=[{} {} {} {} {} {} {} {} {} {}]",
@@ -369,9 +388,9 @@ static void StartWatchdog() {
     if (!kWatchdog) return;
     int secs = kWatchdog;
     if (secs <= 0) secs = 20;
-    base::SpawnDetachedThread("fex_backend", [secs] {
+    guest::SpawnThread("fex_backend", [secs] {
       for (int round = 0;; round++) {
-        base::SleepForMilliseconds((secs) * 1000);
+        guest::SleepForMilliseconds((secs) * 1000);
         base::LockGuard lk(g_live_mutex);
         BASE_LOGI("watchdog", "=== WATCHDOG round {}: {} live guest threads ===",
                   round, g_live.size());
@@ -413,7 +432,8 @@ static void StartWatchdog() {
                             (ow & 0x80000000u) ? " CONTESTED" : "");
                   // Print what the owner thread is doing; its wait is the deadlock root.
                   for (auto &o : g_live) {
-                    if (!o.gtid || *o.gtid != owner_tid || &o == &t) continue;
+                    if (!o.gtid || *o.gtid != owner_tid || &o == &t)
+                      continue;
                     const TraceEvt *ot = o.trace;
                     u32 opos = o.trace_pos ? *o.trace_pos : 0;
                     const char *osc = "?";
@@ -421,7 +441,12 @@ static void StartWatchdog() {
                     u32 oid = 0;
                     if (ot && opos) {
                       const TraceEvt &le = ot[(opos - 1) % kTraceRing];
-                      if (le.kind == 's') { oid = le.id; osc = kern::SyscallGetname(le.id); oa0 = le.a0; oa1 = le.a1; }
+                      if (le.kind == 's') {
+                        oid = le.id;
+                        osc = kern::SyscallGetname(le.id);
+                        oa0 = le.a0;
+                        oa1 = le.a1;
+                      }
                     }
                     BASE_LOGI("watchdog",
                               "      ^^ OWNER is watchdog tid={} rip={:#x} scN={} last: sc {} {} ({:#x},{:#x})",
@@ -437,7 +462,8 @@ static void StartWatchdog() {
           int shown = 0;
           for (int i = 0; i < 1024 && shown < 12; i++) {
             u64 a = rsp + (u64)i * 8;
-            if (a < 0x1000) break;
+            if (a < 0x1000)
+              break;
             // Guard every read; the scan walks past stack tops.
             unsigned char mv = 0;
             long pg = sysconf(_SC_PAGESIZE);
@@ -447,10 +473,12 @@ static void StartWatchdog() {
             u64 v = 0;
             std::memcpy(&v, reinterpret_cast<void *>(a), 8);
             // a plausible code return address that lands in a named module range
-            if (v < 0x200000000000ull || v >= 0x210000000000ull) continue;
+            if (v < 0x200000000000ull || v >= 0x210000000000ull)
+              continue;
             char s2[256];
             SymRange(v, s2, sizeof(s2));
-            if (s2[0] == '0') continue;  // unnamed range -> skip noise
+            if (s2[0] == '0')
+              continue;  // unnamed range -> skip noise
             BASE_LOGI("watchdog", "      stk+{:#x} {:#x} ({})", i * 8,
                       (unsigned long long)v, s2);
             shown++;
@@ -675,6 +703,7 @@ class FexBackend final : public Backend {
     size_t stack_size;
     void* callret;
     size_t callret_size;
+    void* scratch_tls;
     FEXCore::Core::CPUState::gdt_segment gdt[32];
   };
 
@@ -765,6 +794,7 @@ class FexBackend final : public Backend {
       void* t = mmap(nullptr, kTls, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (t != MAP_FAILED) {
+        h->scratch_tls = t;
         fs = reinterpret_cast<u64>(t) + kTls / 2;
         *reinterpret_cast<u64*>(fs) = fs;
       }
@@ -772,6 +802,18 @@ class FexBackend final : public Backend {
     s.fs_cached = fs;
     s.gs_cached = fs;
     return h;
+  }
+
+  void DiscardGuestThread(void* handle) override {
+    auto* h = static_cast<FexThread*>(handle);
+    ctx_->DestroyThread(h->thread);
+    if (h->stack)
+      munmap(h->stack, h->stack_size);
+    if (h->callret)
+      munmap(h->callret, h->callret_size);
+    if (h->scratch_tls)
+      munmap(h->scratch_tls, 0x10000);
+    delete h;
   }
 
   void RunGuestThread(void* handle) override {
@@ -818,11 +860,14 @@ class FexBackend final : public Backend {
     // anyway.
     if (setjmp(t_exit_jmp) == 0) {
       t_exit_jmp_valid = true;
+      guest::SetThreadExitHandler(&ExitGuestThread);
+      guest::PausePoint();
       ctx_->ExecuteThread(h->thread);
     } else {
       LOG_INFO("fex: guest thread exited via thr_exit");
     }
     t_exit_jmp_valid = false;
+    guest::SetThreadExitHandler(nullptr);
     auto& end_s = h->thread->CurrentFrame->State;
     LOG_INFO("fex: guest thread returned rip={:#x}", (unsigned long)end_s.rip);
     if (kWatchdog) {
@@ -888,6 +933,8 @@ class FexBackend final : public Backend {
     FEXCore::Allocator::UninstallTLSData(h->thread);
     ctx_->DestroyThread(h->thread);
     t_cur_thread = nullptr;
+    if (h->scratch_tls)
+      munmap(h->scratch_tls, 0x10000);
     // Pool, never unmap: guest code may hold pointers into a retired stack.
     if (h->stack)
       PoolPut(stack_pool, h->stack, h->stack_size);
@@ -898,7 +945,7 @@ class FexBackend final : public Backend {
 
   u64 RunGuestFunction(uintptr_t fn, u64 a0, u64 a1, u64 a2, u64 a3) override {
     // Point a guest function's return address at a thunk that exits the thread.
-    static uintptr_t exit_thunk =
+    const uintptr_t exit_thunk =
         MakeHostThunk(reinterpret_cast<void*>(&GuestFnReturnExit));
 
     // Inherit the caller's fs base: module init calls libkernel, which reads
@@ -926,12 +973,15 @@ class FexBackend final : public Backend {
       base::UniqueLock<base::Mutex> lk(init_worker_m);
       if (!init_worker_started) {
         init_worker_started = true;
-        base::SpawnDetachedThread("fex_backend", [this] {
+        guest::SpawnThread("fex_backend", [this] {
           for (;;) {
             base::Function<void()> job;
             {
               base::UniqueLock<base::Mutex> wl(init_worker_m);
-              init_worker_cv.wait(wl, [this] { return (bool)init_worker_job; });
+              guest::Wait(init_worker_cv, wl,
+                          [this] { return (bool)init_worker_job; });
+              if (!init_worker_job)
+                return;
               job = base::move(init_worker_job);
               init_worker_job = nullptr;
             }
@@ -950,6 +1000,28 @@ class FexBackend final : public Backend {
       init_worker_cv.wait(lk, [this] { return init_worker_done; });
     }
     return 0;
+  }
+
+  void ResetSession() override {
+    init_worker_started = init_worker_done = false;
+    init_worker_job = nullptr;
+    for (const auto& [stack, size] : stack_pool)
+      munmap(stack, size);
+    for (const auto& [stack, size] : callret_pool)
+      munmap(stack, size);
+    guest::ResetResource(stack_pool);
+    guest::ResetResource(callret_pool);
+    g_ctx_ptr = nullptr;
+    ctx_.reset();
+    init_done_ = false;
+    if (g_thunk_pool)
+      munmap(g_thunk_pool, kThunkPoolSize);
+    g_thunk_pool = nullptr;
+    g_thunk_pool_used = 0;
+    guest::ResetResource(g_host_thunks);
+    guest::ResetResource(g_thunk_names);
+    guest::ResetResource(g_ranges);
+    guest::ResetResource(g_named);
   }
 
   base::Mutex init_worker_m;

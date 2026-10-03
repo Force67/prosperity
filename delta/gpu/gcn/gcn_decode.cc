@@ -7,6 +7,7 @@
 #include "gpu/gcn/gcn_decode.h"
 #include "base/arch.h"
 #include "gpu/guest_memory.h"
+#include "guest/session.h"
 
 #include <cstdio>
 #include <cstring>
@@ -458,6 +459,8 @@ base::SharedPointer<const Program> CachedProgram(u64 addr, u32 max_dwords) {
     base::SharedPointer<const Program> program;
   };
   static base::HashMap<u64, Entry> cache;
+  static const guest::SessionReset reset_cache(
+      [] { guest::ResetResource(cache); });
 
   const auto* code = reinterpret_cast<const u32*>(addr);
   if (!code)
@@ -508,6 +511,8 @@ u64 CachedCodeHash(u64 addr, u32 max_dwords) {
     u64 generation = 0;
   };
   static base::HashMap<u64, Entry> cache;
+  static const guest::SessionReset reset_cache(
+      [] { guest::ResetResource(cache); });
 
   auto it = cache.find(addr);
   if (it != cache.end() && it->second.generation == g_prog_cache_generation)

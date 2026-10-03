@@ -6,6 +6,7 @@
 #include "base/threading/mutex.h"
 #include "cpu/backend.h"
 #include "guest/pause.h"
+#include "guest/session.h"
 
 namespace cpu {
 namespace {
@@ -62,6 +63,14 @@ class HostThunk final : public Xbyak::CodeGenerator {
 };
 base::Mutex g_mutex;
 base::HashMap<uintptr_t, HostThunk*> g_hle_thunks, g_syscall_thunks;
+const guest::SessionReset g_session_reset([] {
+  for (auto& [target, thunk] : g_hle_thunks)
+    delete thunk;
+  for (auto& [target, thunk] : g_syscall_thunks)
+    delete thunk;
+  guest::ResetResource(g_hle_thunks);
+  guest::ResetResource(g_syscall_thunks);
+});
 uintptr_t FindThunk(uintptr_t target, bool stack_arguments) {
   base::LockGuard<base::Mutex> lock(g_mutex);
   auto& cache = stack_arguments ? g_hle_thunks : g_syscall_thunks;

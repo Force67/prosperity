@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "base/logging.h"
 #include "base/strings/format.h"
@@ -176,9 +177,9 @@ void Histogram(u32 op, const InvokeRequest* req) {
     }
   }
   static const bool kStarted = [] {
-    base::SpawnDetachedThread("ipmi", [] {
+    guest::SpawnThread("ipmi", [] {
       for (;;) {
-        base::SleepForMilliseconds((15) * 1000);
+        guest::SleepForMilliseconds((15) * 1000);
         for (u32 i = 0; i < 2048; i++)
           if (u64 c = g_op_hist[i].load(base::memory_order_relaxed))
             BASE_LOGI("ipmihist", "op={} {}", i, (unsigned long long)c);
@@ -475,7 +476,7 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
       // (the resource-arbitrator worker measured ~150k polls/s otherwise).
       DumpManagerOp(op, kid, out, in, insize);
       if (repeat_poll)
-        base::SleepForMilliseconds(2);
+        guest::SleepForMilliseconds(2);
       if (in && insize >= 40) {
         auto* b = static_cast<u8*>(in);
         u32 status = 0;
@@ -541,5 +542,13 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
       return 0;
   }
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  g_next_kid.store(1);
+  guest::ResetResource(g_clients);
+  guest::ResetResource(g_last_op);
+});
+}  // namespace
 
 }  // namespace kern::ipmi

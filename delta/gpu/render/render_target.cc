@@ -5,6 +5,7 @@
 #include "gpu/render/render_target.h"
 #include "base/arch.h"
 #include "gpu/gpu_perf.h"
+#include "guest/session.h"
 
 #include "gpu/guest_memory.h"
 #include "gpu/render/compute.h"
@@ -714,11 +715,15 @@ void RetireDepthTarget(const DepthTarget& t) {
 void ReleaseRetiredTargets() {
   // Two BeginFrames of rest, like ReleaseRetiredTextures.
   static base::Vector<RTarget> aged_rts;
+  static const guest::SessionReset reset_aged_rts(
+      [] { guest::ResetResource(aged_rts); });
   for (RTarget& t : aged_rts)
     DestroyRt(t);
   aged_rts = base::move(g_retired_rts);
   g_retired_rts.clear();
   static base::Vector<DepthTarget> aged;
+  static const guest::SessionReset reset_aged(
+      [] { guest::ResetResource(aged); });
   for (DepthTarget& t : aged) {
     Device().Destroy(t.set);
     for (rhi::TextureView* v : {t.view, t.stencil_view, t.attachment_view})
@@ -1716,5 +1721,15 @@ void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
       note(alt, kv.first);
   }
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_rt_variants);
+  guest::ResetResource(g_retired_rts);
+  guest::ResetResource(g_depth_variants);
+  guest::ResetResource(g_render_serial);
+  guest::ResetResource(g_retired_depths);
+});
+}  // namespace
 
 }  // namespace gpu::render

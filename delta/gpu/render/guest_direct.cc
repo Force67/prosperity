@@ -1,4 +1,5 @@
 #include "gpu/render/guest_direct.h"
+#include "guest/session.h"
 
 #include <dirent.h>
 #include <sys/mman.h>
@@ -39,6 +40,7 @@ base::HashSet<u64> g_filled;                // blocks with a table entry
 u64* g_saved = nullptr;
 base::Atomic<u8>* g_redirected = nullptr;
 u32 g_syncs = 0;
+int g_init_state = -1;
 
 int FindDmemFd() {
   DIR* dir = opendir("/proc/self/fd");
@@ -175,17 +177,16 @@ void Fill(u64 address) {
 }  // namespace
 
 bool InitGuestDirect() {
-  static int state = -1;
-  if (state >= 0)
-    return state;
-  state = 0;
+  if (g_init_state >= 0)
+    return g_init_state;
+  g_init_state = 0;
   if (!kDirect || !Device().caps().host_import ||
       !Device().caps().buffer_address)
     return false;
   const int fd = FindDmemFd();
   struct stat st;
   if (fd < 0 || fstat(fd, &st) != 0 || st.st_size <= 0) {
-    state = -1;  // no direct memory yet
+    g_init_state = -1;  // no direct memory yet
     return false;
   }
   g_alias_size = static_cast<u64>(st.st_size);
@@ -220,7 +221,7 @@ bool InitGuestDirect() {
   gcn::g_direct_misses = g_misses->address();
   BASE_LOGI("direct", "guest memory {:#x}+{:#x} through {} views of {} MiB",
             kDirectBase, kDirectSize, g_maps.size(), g_alias_size >> 20);
-  state = 1;
+  g_init_state = 1;
   return true;
 }
 
@@ -280,4 +281,28 @@ void SyncGuestDirect() {
     Fill(slots[i]);
   misses[0] = 0;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  if (g_alias)
+    munmap(g_alias, g_alias_size);
+  if (g_saved)
+    munmap(g_saved, kBlocks * 9);
+  g_init_state = -1;
+  g_maps_read_at = ~0u;
+  gcn::g_direct_table = gcn::g_direct_misses = 0;
+  guest::ResetResource(g_alias);
+  guest::ResetResource(g_alias_size);
+  guest::ResetResource(g_table);
+  guest::ResetResource(g_misses);
+  guest::ResetResource(g_chunks);
+  guest::ResetResource(g_maps);
+  guest::ResetResource(g_filled);
+  guest::ResetResource(g_saved);
+  guest::ResetResource(g_redirected);
+  guest::ResetResource(g_syncs);
+  guest::ResetResource(g_unmapped);
+});
+}  // namespace
+
 }  // namespace gpu::render

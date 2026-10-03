@@ -7,6 +7,7 @@
 
 #include "gpu/ps4/shader_cache.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "base/containers/hash_map.h"
 #include "base/containers/map.h"
@@ -158,6 +159,8 @@ GraphicsKey GraphicsKeyOf(const GraphicsShaderState& state) {
 
 base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash>& GraphicsCache() {
   static base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash> cache;
+  static const guest::SessionReset reset_cache(
+      [] { guest::ResetResource(cache); });
   return cache;
 }
 
@@ -194,6 +197,8 @@ const gcn::Recompiled& GetGraphicsShader(const Regs& regs,
 void PrefetchGraphicsShader(const Regs& regs,
                             const GraphicsShaderState& state) {
   static base::HashSet<GraphicsKey, GraphicsKeyHash> started;
+  static const guest::SessionReset reset_started(
+      [] { guest::ResetResource(started); });
   const GraphicsKey key = GraphicsKeyOf(state);
   if (GraphicsCache().count(key) || !started.insert(key).second)
     return;
@@ -213,6 +218,8 @@ ComputeKey ComputeKeyOf(const ComputeShaderState& state) {
 
 base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>& ComputeCache() {
   static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash> cache;
+  static const guest::SessionReset reset_cache(
+      [] { guest::ResetResource(cache); });
   return cache;
 }
 
@@ -235,6 +242,8 @@ const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
 
 void PrefetchComputeShader(const ComputeShaderState& state) {
   static base::HashSet<ComputeKey, ComputeKeyHash> started;
+  static const guest::SessionReset reset_started(
+      [] { guest::ResetResource(started); });
   const ComputeKey key = ComputeKeyOf(state);
   if (ComputeCache().count(key) || !started.insert(key).second)
     return;

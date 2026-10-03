@@ -12,6 +12,7 @@
  */
 
 #include "kern/lv2/sys_aio.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include "base/logging.h"
@@ -200,5 +201,12 @@ int PS4ABI sys_get_bio_usage_all() {
 int PS4ABI sys_aio_init() {
   return 0;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  g_next_id = 1;
+  guest::ResetResource(g_requests);
+});
+}  // namespace
 
 }  // namespace kern

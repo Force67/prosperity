@@ -129,7 +129,7 @@ int PS4ABI sys_netgetsockinfo(i32 fd, void* info, i32 n, i32 flags) {
     return -SysError::eFAULT;
   std::memset(info, 0, span);
 
-  auto* s = FdToSocket(fd);
+  auto s = FdToSocket(fd);
   if (!s)
     return -SysError::eBADF;
 
@@ -150,12 +150,12 @@ int PS4ABI sys_netgetsockinfo(i32 fd, void* info, i32 n, i32 flags) {
 }
 
 int PS4ABI sys_bind(i32 fd, const void* addr, u32 addrlen) {
-  auto* s = FdToSocket(fd);
+  auto s = FdToSocket(fd);
   return s ? s->Bind(addr, addrlen) : 0;
 }
 
 int PS4ABI sys_getsockname(i32 fd, void* addr, u32* addrlen) {
-  auto* s = FdToSocket(fd);
+  auto s = FdToSocket(fd);
   if (!s) {
     if (addr && addrlen)
       std::memset(addr, 0, *addrlen);
@@ -165,7 +165,7 @@ int PS4ABI sys_getsockname(i32 fd, void* addr, u32* addrlen) {
 }
 
 int PS4ABI sys_socketclose(i32 fd) {
-  auto* s = FdToSocket(fd);
+  auto s = FdToSocket(fd);
   if (s)
     s->ReleaseHandle();
   return 0;
@@ -189,7 +189,7 @@ i64 PS4ABI sys_sendto(i32 fd,
                       i32 flags,
                       const void* to,
                       u32 tolen) {
-  auto* s = FdToSocket(fd);
+  auto s = FdToSocket(fd);
   return s ? s->Sendto(buf, len, flags, to, tolen) : -SysError::eBADF;
 }
 
@@ -199,7 +199,7 @@ i64 PS4ABI sys_recvfrom(i32 fd,
                         i32 flags,
                         void* from,
                         u32* fromlen) {
-  auto* s = FdToSocket(fd);
+  auto s = FdToSocket(fd);
   return s ? s->Recvfrom(buf, len, flags, from, fromlen) : -SysError::eBADF;
 }
 

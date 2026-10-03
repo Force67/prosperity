@@ -1,3 +1,4 @@
+#include "guest/session.h"
 #ifdef DELTA_HAVE_AVCODEC
 #include "runtime/media/videodec.h"
 #include <cstring>
@@ -389,5 +390,13 @@ i32 PS4ABI Picture(const Output* out, void* first, void* second) {
   }
   return 0;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_decoders);
+  guest::ResetResource(g_pictures);
+});
+}  // namespace
+
 }  // namespace runtime::video
 #endif

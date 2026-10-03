@@ -2,6 +2,7 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 #include "gpu/render/buffer_cache.h"
+#include "guest/session.h"
 
 #include <cstring>
 
@@ -231,5 +232,17 @@ void BufferCacheEndFrame() {
 u64 CachedBufferBytes() {
   return g_live_bytes;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_blocks);
+  guest::ResetResource(g_pool);
+  guest::ResetResource(g_free_handles);
+  guest::ResetResource(g_by_base);
+  guest::ResetResource(g_index);
+  guest::ResetResource(g_retired);
+  guest::ResetResource(g_live_bytes);
+});
+}  // namespace
 
 }  // namespace gpu::render

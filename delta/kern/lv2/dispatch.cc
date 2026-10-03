@@ -1,4 +1,3 @@
-
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -11,6 +10,7 @@
 #include <cstdlib>
 #include "base/arch.h"
 #include "base/logging.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -119,7 +119,15 @@ extern "C" u32 SyscallErrno(u64 raw) {
 // guest callback's syscalls land on the already-switched stack.
 extern "C" u64 KernelStackTop() {
   constexpr size_t kSize = 1u << 20;  // 1 MiB, lazily backed
-  static thread_local u8* base = nullptr;
+  struct Stack {
+    u8* base = nullptr;
+    ~Stack() {
+      if (base)
+        munmap(base, 1u << 20);
+    }
+  };
+  static thread_local Stack stack;
+  auto& base = stack.base;
   const auto here = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
   if (base) {
     if (here > reinterpret_cast<uintptr_t>(base) &&
@@ -176,9 +184,9 @@ static const bool kScHistDump = [] {
   // The emulator is normally SIGKILLed, so also sample on a timer: what a title
   // is doing in STEADY STATE is a different question from what it did at boot,
   // and only a periodic dump answers it.
-  base::SpawnDetachedThread("dispatch", [] {
+  guest::SpawnThread("dispatch", [] {
     for (;;) {
-      base::SleepForMilliseconds((20) * 1000);
+      guest::SleepForMilliseconds((20) * 1000);
       DumpSyscallHist();
     }
   });
@@ -215,7 +223,12 @@ static const ___tracy_source_location_data* SyscallZoneLocation(u32 sid) {
       return nullptr;
   const base::String label =
       name ? base::String("sys.") + name : base::Format("sys.{}", sid);
+  static base::Map<u32, ___tracy_source_location_data*> locations;
+  auto it = locations.find(sid);
+  if (it != locations.end())
+    return it->second;
   auto* where = new ___tracy_source_location_data{};
+  locations[sid] = where;
   where->name = strdup(label.c_str());
   where->function = where->name;
   where->file = __FILE__;
@@ -329,8 +342,15 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
       ret();
     }
   };
+  static base::Vector<Xbyak::CodeGenerator*> generators;
+  static const guest::SessionReset reset_generators([] {
+    for (auto* generator : generators)
+      delete generator;
+    guest::ResetResource(generators);
+  });
   auto* gen = new BsdRet(cpu::MakeSyscallPauseThunk(handler), sid, trace, count,
                          own_stack, zone);
+  generators.push_back(gen);
   return reinterpret_cast<uintptr_t>(gen->getCode());
 }
 #endif  // DELTA_BACKEND_NATIVE
@@ -343,6 +363,8 @@ uintptr_t Lv2Trampoline(const void* handler, u32 sid) {
   // its own number, so key the cache by sid instead.
   static base::Mutex tr_mutex;
   static base::HashMap<u64, uintptr_t> tr_cache;
+  static const guest::SessionReset reset_tr_cache(
+      [] { guest::ResetResource(tr_cache); });
   base::LockGuard<base::Mutex> lk(tr_mutex);
 #if defined(DELTA_SYSCALL_ZONES)
   constexpr bool kPerSyscall = true;  // each zone names its own syscall

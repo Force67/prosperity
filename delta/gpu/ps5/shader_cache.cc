@@ -7,6 +7,7 @@
 
 #include "gpu/ps5/shader_cache.h"
 #include "base/arch.h"
+#include "guest/session.h"
 #include "ui/shader_activity.h"
 
 #include "gpu/gpu_perf.h"
@@ -153,6 +154,8 @@ void ReportMiss(const GraphicsKey& key,
 
 const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
   static base::HashMap<GraphicsKey, gcn::Recompiled, GraphicsKeyHash> cache;
+  static const guest::SessionReset reset_cache(
+      [] { guest::ResetResource(cache); });
   GraphicsKey key{CodeHash(state.vs_addr, 4096),
                   CodeHash(state.ps_addr, 4096),
                   rdna::FetchPlanHash(state.fetch_addr),
@@ -204,6 +207,8 @@ const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state,
                                           u64 uint_mask,
                                           bool plan_only) {
   static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash> cache;
+  static const guest::SessionReset reset_cache(
+      [] { guest::ResetResource(cache); });
   const ComputeKey key{
       CodeHash(state.cs_addr, rdna::ComputeCodeDwords(
                                   reinterpret_cast<const u32*>(state.cs_addr))),

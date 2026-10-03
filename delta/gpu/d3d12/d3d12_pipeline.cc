@@ -290,7 +290,7 @@ rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
   layout->root = SerializeRoot(rd);
   if (!layout->root)
     return nullptr;
-  return gpu::rhi::Release(layout);
+  return gpu::rhi::Release(layout, this);
 }
 
 bool D3D12Device::CompileStage(const rhi::ShaderCode& code,
@@ -513,7 +513,7 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
   pipeline->stencil_ref = desc.stencil_front.reference;
   if (desc.name)
     SetName(&*pipeline, desc.name);
-  return gpu::rhi::Release(pipeline);
+  return gpu::rhi::Release(pipeline, this);
 }
 
 rhi::Pipeline* D3D12Device::CreateComputePipeline(
@@ -546,7 +546,7 @@ rhi::Pipeline* D3D12Device::CreateComputePipeline(
   }
   if (desc.name)
     SetName(&*pipeline, desc.name);
-  return gpu::rhi::Release(pipeline);
+  return gpu::rhi::Release(pipeline, this);
 }
 
 bool D3D12Device::InitBlit() {

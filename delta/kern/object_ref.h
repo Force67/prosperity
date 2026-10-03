@@ -89,7 +89,9 @@ class ObjectRef {
 
   void Reset(T* value) noexcept { ObjectRef(value).Swap(*this); }
 
-  inline bool operator==(const T* right) noexcept { return value_ == right; }
+  inline bool operator==(const T* right) const noexcept {
+    return value_ == right;
+  }
 
  private:
   T* value_ = nullptr;

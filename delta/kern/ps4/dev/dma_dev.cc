@@ -1,4 +1,3 @@
-
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -13,6 +12,7 @@
 #include <cstring>
 #include "base/arch.h"
 #include "base/logging.h"
+#include "guest/session.h"
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -247,15 +247,15 @@ int DmemTypeForOffset(u64 off) {
 }
 
 int DmemBackingFd() {
-  static const bool kOnce = ([] {
+  base::LockGuard<base::Mutex> lk(g_dmem_mutex);
+  if (g_dmem_backing_fd < 0) {
     int fd = memfd_create("delta_dmem", 0);
     if (fd >= 0 && ftruncate(fd, static_cast<off_t>(DmemTotal())) != 0) {
       close(fd);
       fd = -1;
     }
     g_dmem_backing_fd = fd;
-  }(), true);
-  (void)kOnce;
+  }
   return g_dmem_backing_fd;
 }
 u64 DmemBackingSize() {
@@ -430,4 +430,14 @@ u8* DmaDevice::Map(void* addr, size_t len, u32, u32 flags, size_t offset) {
               offset, len, addr, (flags & MFlags::kFixed) ? 1 : 0);
   return reinterpret_cast<u8*>(-1);
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  if (g_dmem_backing_fd >= 0)
+    close(g_dmem_backing_fd);
+  g_dmem_backing_fd = -1;
+  guest::ResetResource(g_dmem_regions);
+});
+}  // namespace
+
 }  // namespace kern

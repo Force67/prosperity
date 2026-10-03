@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include "base/arch.h"
 #include "base/logging.h"
+#include "guest/session.h"
 
 #include <sys/mman.h>
 #include <cstring>
@@ -109,6 +110,10 @@ u8* DmaDevicePs5::Map(void* addr,
   // lives). Recognise that follow-up map and pin it too, or libSceAgc finds its
   // fetch-shader table away from the compiled-in 0xfe0040000.
   static bool s_gnm_took_base = false, s_agc_took_base = false;
+  static const guest::SessionReset reset_system_base([] {
+    s_gnm_took_base = false;
+    s_agc_took_base = false;
+  });
   const bool agc_system_block =
       !fixed && hint == kAgcSystemBase && len <= kAgcSystemSize;
   const bool agc_system_follow_up = !fixed && !va && len == kAgcSystemSize &&
@@ -167,4 +172,11 @@ u8* DmaDevicePs5::Map(void* addr,
               offset, len, addr, (int)fixed, p);
   return reinterpret_cast<u8*>(p);
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_dmem_va_len);
+});
+}  // namespace
+
 }  // namespace kern

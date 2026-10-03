@@ -7,6 +7,7 @@
 
 #include "gpu/ps5/cmd_processor.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include <cstring>
 
@@ -538,6 +539,8 @@ bool WaitBriefly(u32 op, const u32* body, u32 count) {
   DELTA_ZONE("ps5.gfx_wait");
   const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
   static base::Map<u64, u32> timeouts;
+  static const guest::SessionReset reset_timeouts(
+      [] { guest::ResetResource(timeouts); });
   u32& missed = timeouts[address];
   if (missed >= 3)
     return false;
@@ -545,6 +548,8 @@ bool WaitBriefly(u32 op, const u32* body, u32 count) {
   const u32 submit_queue = render::g_submit_queue;
   const auto start = base::TimeTicks::Now();
   for (;;) {
+    if (guest::Stopping())
+      return false;
     const u64 seen = LabelSequence();
     if (WaitSatisfied(op, body, count))
       break;
@@ -1401,6 +1406,20 @@ void EndFrame(u64 scanout_base) {
   render::EndFrame(renderer, scanout_base);
   g_frame_active = false;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  g_queue = &g_graphics_queue;
+  guest::ResetResource(g_graphics_queue);
+  guest::ResetResource(g_ring_queues);
+  guest::ResetResource(g_renderer_started);
+  guest::ResetResource(g_frame_active);
+  guest::ResetResource(g_total_submits);
+  guest::ResetResource(g_parked);
+  guest::ResetResource(g_label_history);
+  guest::ResetResource(g_label_history_n);
+});
+}  // namespace
 
 }  // namespace gpu::ps5
 

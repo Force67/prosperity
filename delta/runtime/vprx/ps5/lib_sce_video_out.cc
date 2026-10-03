@@ -13,6 +13,7 @@
  */
 
 #include "base/arch.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 #include "runtime/vprx/vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 
@@ -121,8 +122,10 @@ VideoPort g_port;  // dedicated PS5 port state
 // PM4 it builds, and the command processor's label range check rightly refuses
 // to write host .bss.
 u64* VideoLabels() {
-  static u64* labels =
-      reinterpret_cast<u64*>(kern::AllocLowGuest(16 * sizeof(u64)));
+  static u64* labels = nullptr;
+  static const guest::SessionReset reset_labels([] { labels = nullptr; });
+  if (!labels)
+    labels = reinterpret_cast<u64*>(kern::AllocLowGuest(16 * sizeof(u64)));
   return labels;
 }
 
@@ -148,14 +151,14 @@ bool EnsureGfx(u32 w, u32 h) {
   return true;
 }
 
-Equeue* FindEqueue(int handle) {
+kern::ObjectRef<Equeue> FindEqueue(int handle) {
   auto* p = Process::GetActive();
   if (!p)
     return nullptr;
-  auto* obj = p->GetObjTable().Get(static_cast<u32>(handle));
+  auto obj = p->GetObjTable().Get(static_cast<u32>(handle));
   if (!obj || obj->type() != Object::Type::kEqueue)
     return nullptr;
-  return static_cast<Equeue*>(obj);
+  return kern::ObjectRef<Equeue>(static_cast<Equeue*>(obj.Release()));
 }
 
 base::Atomic<bool> g_flip_pump_started{false};
@@ -168,9 +171,9 @@ void StartFlipPump() {
   if (!g_flip_pump_started.compare_exchange_strong(expected, true))
     return;
   BASE_LOGI("videoout/ps5", "flip pump started (60 Hz)");
-  base::SpawnDetachedThread("libSceVideoOut_", [] {
+  guest::SpawnThread("libSceVideoOut_", [] {
     for (;;) {
-      base::SleepForMicroseconds(16667);
+      guest::SleepForMicroseconds(16667);
       u64 c = g_port.flip_count.fetch_add(1) + 1;
       // The label is a flip-completion flag, not a counter: the title leaves it
       // at 0 when it queues a flip and waits for the display controller to
@@ -305,7 +308,7 @@ int PS4ABI VideoOutSetFlipRate(int, int rate) {
 }
 
 int PS4ABI VideoOutAddFlipEvent(int eq_handle, int, void* udata) {
-  auto* eq = FindEqueue(eq_handle);
+  auto eq = FindEqueue(eq_handle);
   if (!eq)
     return -1;
   g_port.flip_equeue = eq_handle;
@@ -316,7 +319,7 @@ int PS4ABI VideoOutAddFlipEvent(int eq_handle, int, void* udata) {
 }
 
 int PS4ABI VideoOutDeleteFlipEvent(int eq_handle, int) {
-  auto* eq = FindEqueue(eq_handle);
+  auto eq = FindEqueue(eq_handle);
   if (eq)
     eq->RemoveEvent(static_cast<u64>(kEventFlip), kFilterFlip);
   g_port.flip_equeue = -1;
@@ -324,7 +327,7 @@ int PS4ABI VideoOutDeleteFlipEvent(int eq_handle, int) {
 }
 
 int PS4ABI VideoOutAddVblankEvent(int eq_handle, int, void* udata) {
-  auto* eq = FindEqueue(eq_handle);
+  auto eq = FindEqueue(eq_handle);
   if (!eq)
     return -1;
   g_port.vblank_equeue = eq_handle;
@@ -393,7 +396,7 @@ int PS4ABI VideoOutSubmitFlip(int, int buffer_index, int, i64 flip_arg) {
     eq_handle = g_port.flip_equeue;
   }
   if (eq_handle >= 0)
-    if (auto* eq = FindEqueue(eq_handle))
+    if (auto eq = FindEqueue(eq_handle))
       eq->Trigger(kEventFlip, kFilterFlip,
                   static_cast<i64>(g_port.flip_count.load()));
   return 0;
@@ -430,7 +433,7 @@ int PS4ABI VideoOutSubmitFlipEop(int,
     *static_cast<volatile u64*>(eop_label) = 1;
   g_port.flip_count.fetch_add(1);
   if (eq_handle >= 0)
-    if (auto* eq = FindEqueue(eq_handle))
+    if (auto eq = FindEqueue(eq_handle))
       eq->Trigger(kEventFlip, kFilterFlip,
                   static_cast<i64>(g_port.flip_count.load()));
   return 0;
@@ -484,6 +487,15 @@ int PS4ABI VideoOutColorSettingsSetGamma(void*, float) {
 int PS4ABI VideoOutModeSetAny(int, void*) {
   return 0;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_port);
+  guest::ResetResource(g_gfx_state);
+  guest::ResetResource(g_flip_pump_started);
+  guest::ResetResource(g_current_scanout);
+});
+}  // namespace
 
 }  // namespace
 

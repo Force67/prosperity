@@ -10,6 +10,7 @@
  */
 
 #include "base/arch.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 #include "runtime/vprx/vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
 
@@ -79,6 +80,13 @@ int PS4ABI UserServiceGetUserName(i32, char* name, u64 size) {
   }
   return 0;
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_login_delivered);
+});
+}  // namespace
+
 }  // namespace
 
 static const runtime::vprx::ExportEntry kExports[] = {

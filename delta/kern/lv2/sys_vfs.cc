@@ -1,4 +1,3 @@
-
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -12,6 +11,7 @@
 #include "base/arch.h"
 #include "base/logging.h"
 #include "base/strings/string_ref.h"
+#include "guest/session.h"
 #include "guest_abi.h"
 
 #include "kern/crash.h"
@@ -297,11 +297,11 @@ int PS4ABI sys_open(const char* path, u32 flags, u32 mode) {
 }
 
 // Resolve an fd (object-table handle) back to the device that backs it.
-static Device* FdToDevice(u32 fd) {
-  auto* obj = Process::GetActive()->GetObjTable().Get(fd);
+static kern::ObjectRef<Device> FdToDevice(u32 fd) {
+  auto obj = Process::GetActive()->GetObjTable().Get(fd);
   if (!obj || obj->type() != Object::Type::kDevice)
     return nullptr;
-  return static_cast<Device*>(obj);
+  return kern::ObjectRef<Device>(static_cast<Device*>(obj.Release()));
 }
 
 // DELTA_FD_STATS: bytes read per fd, dumped periodically; "opened but never
@@ -316,9 +316,9 @@ void FdReadStat(u32 fd, i64 n) {
   bytes[fd].fetch_add(static_cast<u64>(n), base::memory_order_relaxed);
   calls[fd].fetch_add(1, base::memory_order_relaxed);
   static const bool kStarted = [] {
-    base::SpawnDetachedThread("sys_vfs", [] {
+    guest::SpawnThread("sys_vfs", [] {
       for (;;) {
-        base::SleepForMilliseconds((20) * 1000);
+        guest::SleepForMilliseconds((20) * 1000);
         BASE_LOGI("fdstats", "--- bytes read per fd ---");
         for (u32 i = 0; i < 4096; i++)
           if (u64 b = bytes[i].load(base::memory_order_relaxed))
@@ -356,11 +356,11 @@ void ThrottleIo(i64 bytes) {
   }
   const base::TimeDelta wait = until - base::TimeTicks::Now();
   if (wait > base::TimeDelta())
-    base::SleepForMicroseconds(u64(wait.InMicroseconds()));
+    guest::SleepForMicroseconds(u64(wait.InMicroseconds()));
 }
 
 i64 PS4ABI sys_read(u32 fd, void* buf, size_t nbytes) {
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d) {
     // The standard descriptors exist but read nothing: report EOF, not EBADF.
     // Skyrim's INI parser falls back to stderr when the file is missing and its
@@ -395,7 +395,7 @@ i64 PS4ABI sys_read(u32 fd, void* buf, size_t nbytes) {
 }
 
 i64 PS4ABI sys_lseek(u32 fd, i64 offset, int whence) {
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
   return d->Lseek(offset, whence);
@@ -475,7 +475,7 @@ int PS4ABI sys_fstat(u32 fd, void* stat) {
     }
     return 0;
   }
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d) {
     // The standard descriptors are not device-backed here; report them as
     // character devices, not EBADF (Skyrim's INI parser stats its stderr
@@ -491,6 +491,8 @@ int PS4ABI sys_fstat(u32 fd, void* stat) {
     if (kFstatTrace) {
       static base::Mutex m;
       static base::HashMap<u32, u64> bad;
+      static const guest::SessionReset reset_bad(
+          [] { guest::ResetResource(bad); });
       base::LockGuard<base::Mutex> lk(m);
       if (bad[fd]++ == 0)
         BASE_LOGI("fstat", "fd={} -> EBADF (unknown descriptor)", fd);
@@ -528,7 +530,7 @@ int PS4ABI sys_stat(const char* path, void* stat) {
 }
 
 i64 PS4ABI sys_getdents(u32 fd, void* buf, size_t nbytes) {
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
   return d->Getdents(buf, nbytes);
@@ -551,7 +553,7 @@ int PS4ABI sys_close(u32 fd) {
   if (proc && fd != -1) {
     if (kRdall)
       BASE_LOGI("close", "fd={}", fd);
-    auto* d = FdToDevice(fd);
+    auto d = FdToDevice(fd);
     if (d && d->IsRegularFile()) {
       u32 evict = static_cast<u32>(-1);
       {
@@ -748,7 +750,7 @@ void MarkQarFd(u32 fd, bool v) {
 void ThrottleIo(i64 bytes);
 
 i64 PS4ABI sys_pread(u32 fd, void* buf, size_t nbytes, i64 offset) {
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d) {
     if (kRdall)
       BASE_LOGI("pread", "fd={} off={} -> EBADF (no device)", fd,
@@ -807,6 +809,8 @@ i64 PS4ABI sys_pread(u32 fd, void* buf, size_t nbytes, i64 offset) {
     };
     static base::Mutex m;
     static base::HashMap<u32, FdIo> tbl;
+    static const guest::SessionReset reset_tbl(
+        [] { guest::ResetResource(tbl); });
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     long now_ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
@@ -842,7 +846,7 @@ i64 PS4ABI sys_pread(u32 fd, void* buf, size_t nbytes, i64 offset) {
 }
 
 i64 PS4ABI sys_pwrite(u32 fd, const void* buf, size_t nbytes, i64 offset) {
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
   i64 saved = d->Lseek(0, kSeekCur);
@@ -878,7 +882,7 @@ i64 PS4ABI sys_writev(u32 fd, const void* iov, int iovcnt) {
     return total;
   }
 
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
   i64 total = 0;
@@ -896,7 +900,7 @@ i64 PS4ABI sys_readv(u32 fd, const void* iov, int iovcnt) {
   if (!segs || iovcnt < 0)
     return -SysError::eINVAL;
 
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
   i64 total = 0;
@@ -918,7 +922,7 @@ i64 PS4ABI sys_preadv(u32 fd, const void* iov, int iovcnt, i64 offset) {
   auto* segs = static_cast<const sce_iovec*>(iov);
   if (!segs || iovcnt < 0 || offset < 0)
     return -SysError::eINVAL;
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
   const i64 saved = d->Lseek(0, kSeekCur);
@@ -945,7 +949,7 @@ i64 PS4ABI sys_pwritev(u32 fd, const void* iov, int iovcnt, i64 offset) {
   auto* segs = static_cast<const sce_iovec*>(iov);
   if (!segs || iovcnt < 0 || offset < 0)
     return -SysError::eINVAL;
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
   const i64 saved = d->Lseek(0, kSeekCur);
@@ -1030,7 +1034,7 @@ int PS4ABI sys_select(int nfds,
                e = FdIsSet(exceptfds, fd);
     if (!r && !w && !e)
       continue;
-    auto* s = FdToSocket(static_cast<u32>(fd));
+    auto s = FdToSocket(static_cast<u32>(fd));
     if (!s) {
       if (r) {
         FdSet(always_read, fd);
@@ -1070,7 +1074,7 @@ int PS4ABI sys_select(int nfds,
         ::select(host_max + 1, &host_read, &host_write, &host_except, &tv);
     if (n > 0) {
       for (int fd = 0; fd < nfds; fd++) {
-        auto* s = FdToSocket(static_cast<u32>(fd));
+        auto s = FdToSocket(static_cast<u32>(fd));
         if (!s)
           continue;
         const int h = s->HostFd();
@@ -1171,7 +1175,7 @@ int PS4ABI sys_renameat(int fd_old,
 }
 
 i64 PS4ABI sys_getdirentries(u32 fd, void* buf, size_t nbytes, i64* basep) {
-  auto* d = FdToDevice(fd);
+  auto d = FdToDevice(fd);
   if (!d) {
     if (kVfsTrace)
       BASE_LOGI("getdirentries", "fd={} BADF", fd);
@@ -1324,14 +1328,21 @@ int PS4ABI sys_write(u32 fd, const void* buf, size_t nbytes) {
   // accept the bytes; libkernel writes debug output to fds we don't model, and
   // trapping there kills the boot.
   if (auto* proc = Process::GetActive()) {
-    auto* obj = proc->GetObjTable().Get(fd);
+    auto obj = proc->GetObjTable().Get(fd);
     if (obj && obj->type() == Object::Type::kDevice) {
-      i64 r = static_cast<Device*>(obj)->Write(buf, nbytes);
+      i64 r = static_cast<Device*>(obj.get())->Write(buf, nbytes);
       if (r >= 0)
         return static_cast<int>(r);
     }
   }
   return static_cast<int>(nbytes);
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_deferred);
+  guest::ResetResource(g_qar_fd);
+});
+}  // namespace
 
 }  // namespace kern

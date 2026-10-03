@@ -55,6 +55,11 @@ namespace cpu {
 // restores SP/IP directly, so it unwinds straight back to RunGuestThread
 // without touching the guest frames.
 static thread_local std::jmp_buf* t_exit_jmp = nullptr;
+#if defined(__GLIBC__)
+// The guest switches stacks, so glibc's same-stack fortify check cannot apply.
+extern "C" void GuestLongjmp(std::jmp_buf, int) asm("longjmp")
+    __attribute__((noreturn));
+#endif
 
 class NativeBackend final : public Backend {
  public:
@@ -77,6 +82,10 @@ class NativeBackend final : public Backend {
     return new NativeThread{entry, arg, fsbase};
   }
 
+  void DiscardGuestThread(void* handle) override {
+    delete static_cast<NativeThread*>(handle);
+  }
+
   void RunGuestThread(void* handle) override {
     auto* t = static_cast<NativeThread*>(handle);
     // Give this guest thread a signal alt-stack so the fatal handler still runs
@@ -92,23 +101,42 @@ class NativeBackend final : public Backend {
     // guest entry may also just return naturally (setjmp returns 0 first time).
     std::jmp_buf jb;
     t_exit_jmp = &jb;
-    if (setjmp(jb) == 0)
+    if (setjmp(jb) == 0) {
+      guest::SetThreadExitHandler(&ExitGuestThread);
+      guest::PausePoint();
       reinterpret_cast<void(PS4ABI*)(void*)>(entry)(arg);
+    }
+    guest::SetThreadExitHandler(nullptr);
     t_exit_jmp = nullptr;
   }
 
   u64 RunGuestFunction(uintptr_t fn, u64 a0, u64 a1, u64 a2, u64 a3) override {
     guest::ThreadRegistration registration;
-    return reinterpret_cast<u64(PS4ABI*)(u64, u64, u64, u64)>(fn)(a0, a1, a2,
-                                                                  a3);
+    std::jmp_buf jb;
+    auto* previous = t_exit_jmp;
+    t_exit_jmp = &jb;
+    u64 result = 0;
+    if (setjmp(jb) == 0) {
+      guest::SetThreadExitHandler(&ExitGuestThread);
+      guest::PausePoint();
+      result = reinterpret_cast<u64(PS4ABI*)(u64, u64, u64, u64)>(fn)(a0, a1,
+                                                                      a2, a3);
+    }
+    t_exit_jmp = previous;
+    return result;
   }
 };
 
 // Native: unwind out of the guest call chain back to RunGuestThread so the
 // host thread ends, instead of returning into the guest pthread trampoline.
 void ExitGuestThread() {
-  if (t_exit_jmp)
+  if (t_exit_jmp) {
+#if defined(__GLIBC__)
+    GuestLongjmp(*t_exit_jmp, 1);
+#else
     std::longjmp(*t_exit_jmp, 1);
+#endif
+  }
 }
 
 // Native pause thunks do not carry export names.

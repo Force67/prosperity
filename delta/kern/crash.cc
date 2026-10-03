@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include "base/logging.h"
 #include "base/strings/format.h"
@@ -1308,9 +1309,19 @@ void GuestStackTrace(const char* tag, int max_frames) {
 }
 
 void InstallSigAltStack() {
-  // One alt stack per thread; 256 KiB easily holds our dump path. Leaked on
-  // purpose (lives for the thread's lifetime, freed at process exit).
-  static thread_local stack_t s_alt{};
+  struct AltStack {
+    stack_t stack{};
+    ~AltStack() {
+      if (!stack.ss_sp)
+        return;
+      stack_t disabled{};
+      disabled.ss_flags = SS_DISABLE;
+      sigaltstack(&disabled, nullptr);
+      std::free(stack.ss_sp);
+    }
+  };
+  static thread_local AltStack alt;
+  auto& s_alt = alt.stack;
   if (s_alt.ss_sp)
     return;  // already installed for this thread
   constexpr size_t kAltSz = 256 * 1024;
@@ -1368,4 +1379,12 @@ void InstallCrashHandler() {
   sigaction(SIGUSR1, &pa, nullptr);
 #endif
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_null_guards);
+  guest::ResetResource(g_null_guard_count);
+});
+}  // namespace
+
 }  // namespace kern

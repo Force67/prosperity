@@ -1,3 +1,4 @@
+#include "guest/session.h"
 
 // Copyright (C) Force67
 
@@ -156,7 +157,7 @@ void StartMemWatch() {
   }
   if (addrs.empty())
     return;
-  base::SpawnDetachedThread("libScePad", [addrs] {
+  guest::SpawnThread("libScePad", [addrs] {
     const auto t0 = base::TimeTicks::Now();
     base::Vector<u64> last(addrs.size(), 0xdeadbeefdeadbeefull);
     for (;;) {
@@ -173,7 +174,7 @@ void StartMemWatch() {
         }
       }
       (void)any;
-      base::SleepForMilliseconds(250);
+      guest::SleepForMilliseconds(250);
     }
   });
 }
@@ -238,7 +239,7 @@ void StartMemPoke() {
   }
   if (specs.empty())
     return;
-  base::SpawnDetachedThread("libScePad", [specs] {
+  guest::SpawnThread("libScePad", [specs] {
     const auto t0 = base::TimeTicks::Now();
     base::Vector<bool> announced(specs.size(), false);
     for (;;) {
@@ -279,7 +280,7 @@ void StartMemPoke() {
                     p.width);
         }
       }
-      base::SleepForMilliseconds(200);
+      guest::SleepForMilliseconds(200);
     }
   });
 }
@@ -728,6 +729,12 @@ void FillPadState(PadData* d) {
     BASE_LOGI("pad", "readSeq={} buttons={:#x}", (unsigned long long)g_read_seq,
               buttons);
 }
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_read_seq);
+});
+}  // namespace
 
 }  // namespace
 

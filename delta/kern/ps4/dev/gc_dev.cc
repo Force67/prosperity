@@ -1,3 +1,4 @@
+#include "guest/session.h"
 
 // Copyright (C) Force67 2019
 
@@ -293,6 +294,8 @@ i32 GcDevice::Ioctl(u32 cmd, void* data) {
       // A bogus value faults that deref; hand back a zeroed guest struct
       // (trace-disabled).
       static u8* trace_info = nullptr;
+      static const guest::SessionReset reset_trace_info(
+          [] { trace_info = nullptr; });
       if (!trace_info)
         trace_info =
             AllocLowGuest(0x100);  // zero-filled; [+0] = trace flag (off)
@@ -596,6 +599,7 @@ u8* GcDevice::Map(void*, size_t size, u32, u32, size_t offset) {
   // no lock across device::map, so lazy creation needs its own.
   static base::Mutex pool_lock;
   static u8* pool = nullptr;
+  static const guest::SessionReset reset_pool([] { pool = nullptr; });
   base::LockGuard<base::Mutex> lk(pool_lock);
   if (!pool) {
     pool = AllocLowGuest(kPoolSize);

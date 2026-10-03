@@ -16,6 +16,7 @@ namespace kern {
 // possible, before the CPU backend reserves its JIT heap and before any guest
 // module maps. Safe to call twice (the second call is a no-op).
 void ReserveGuestVaSpace();
+void RestoreGuestVaSpace();
 
 // True when [addr, addr+len) lies wholly inside a range reserved above. A guest
 // mmap whose hint lands here must be COMMITTED there rather than relocated: the

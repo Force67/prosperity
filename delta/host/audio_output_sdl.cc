@@ -216,6 +216,16 @@ void CloseAudioPort(int handle) {
   }
 }
 
+void CloseAllAudioPorts() {
+  base::LockGuard lock(g_mtx);
+  for (const auto& port : g_ports)
+    if (port.stream)
+      SDL_DestroyAudioStream(port.stream);
+  g_ports = {};
+  g_paused = false;
+  g_frames_out = 0;
+}
+
 void SetAudioPaused(bool paused) {
   base::LockGuard<base::Mutex> lock(g_mtx);
   if (g_paused == paused)

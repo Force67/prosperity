@@ -1,4 +1,5 @@
 #include "guest/pause.h"
+#include "guest/session.h"
 
 #include <cerrno>
 
@@ -22,6 +23,7 @@ namespace guest {
 namespace {
 base::Atomic<i32> g_paused{0};
 thread_local bool t_guest = false;
+thread_local void (*t_exit)() = nullptr;
 thread_local bool (*t_is_guest_pc)(uintptr_t) = nullptr;
 thread_local base::Atomic<bool> t_parked{false};
 base::Mutex g_mutex;
@@ -80,7 +82,7 @@ void PausePoint() {
     return;
   const int saved_errno = errno;
   t_parked.store(true, base::memory_order_release);
-  while (Paused()) {
+  while (Paused() && !Stopping()) {
 #if defined(__linux__)
     ::syscall(SYS_futex, &g_paused, FUTEX_WAIT_PRIVATE, 1, nullptr, nullptr, 0);
 #else
@@ -89,6 +91,8 @@ void PausePoint() {
   }
   t_parked.store(false, base::memory_order_release);
   errno = saved_errno;
+  if (Stopping() && t_exit)
+    t_exit();
 }
 
 void PollPause() {
@@ -106,14 +110,12 @@ void PollPause() {
 
 void SetPaused(bool paused) {
   g_paused.store(paused ? 1 : 0, base::memory_order_release);
-  if (paused) {
-    PollPause();
-  } else {
 #if defined(__linux__)
-    ::syscall(SYS_futex, &g_paused, FUTEX_WAKE_PRIVATE, 0x7fffffff, nullptr,
-              nullptr, 0);
+  ::syscall(SYS_futex, &g_paused, FUTEX_WAKE_PRIVATE, 0x7fffffff, nullptr,
+            nullptr, 0);
 #endif
-  }
+  if (paused)
+    PollPause();
 }
 
 bool OnGuestThread() {
@@ -129,6 +131,16 @@ void RegisterCode(uintptr_t address, mem_size size) {
     g_code[count] = {address, address + size};
     g_code_count.store(count + 1, base::memory_order_release);
   }
+}
+
+void SetThreadExitHandler(void (*exit)()) {
+  t_exit = exit;
+}
+
+void ResetCodeRanges() {
+  base::LockGuard lock(g_mutex);
+  g_threads = {};
+  g_code_count.store(0);
 }
 
 ThreadRegistration::ThreadRegistration(bool (*is_guest_pc)(uintptr_t)) {
@@ -154,7 +166,6 @@ ThreadRegistration::ThreadRegistration(bool (*is_guest_pc)(uintptr_t)) {
   sigaddset(&signals, SIGUSR2);
   ::pthread_sigmask(SIG_UNBLOCK, &signals, nullptr);
 #endif
-  PausePoint();
 }
 
 ThreadRegistration::~ThreadRegistration() {
@@ -171,6 +182,7 @@ ThreadRegistration::~ThreadRegistration() {
 #endif
   t_guest = false;
   t_is_guest_pc = nullptr;
+  t_exit = nullptr;
 }
 
 }  // namespace guest

@@ -8,6 +8,7 @@
 
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "base/arch.h"
+#include "guest/session.h"
 
 #include <cstdio>
 #include "base/algorithm.h"
@@ -528,6 +529,8 @@ base::SharedPointer<const Program> CachedReachableProgram(const u32* code,
     base::SharedPointer<const Program> program;
   };
   static base::HashMap<u64, Entry> cache;
+  static const guest::SessionReset reset_cache(
+      [] { guest::ResetResource(cache); });
 
   if (!code)
     return base::MakeShared<const Program>();
@@ -581,6 +584,8 @@ u64 CachedCodeHash(const u32* code, u32 max_dwords) {
     u64 generation = 0;
   };
   static base::HashMap<u64, Entry> cache;
+  static const guest::SessionReset reset_cache(
+      [] { guest::ResetResource(cache); });
 
   if (!code)
     return 0;
