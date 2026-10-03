@@ -8,11 +8,13 @@
  */
 
 #include <cfloat>
+#include <cstring>
 #include "base/arch.h"
 
 #include "base/math/value_bounds.h"
 #include "imgui.h"
 #include "ui/home_screen.h"
+#include "ui/mouse_look.h"
 #include "ui/overlay.h"
 #include "ui/overlay_busy.h"
 #include "ui/overlay_log.h"
@@ -42,6 +44,8 @@ const Row kRows[] = {
     {"Right Shift", "R2"},
     {"Enter / P", "Options  (start)"},
     {"Tab", "Touchpad  (map)"},
+    {"F3", "Mouse look on / off"},
+    {"Ctrl", "Pause / release cursor"},
 };
 const char* kTitle = "Controls";
 
@@ -79,10 +83,20 @@ void BuildLegend() {
   dl->AddLine(ImVec2(column_x, y - 2),
               ImVec2(column_x, y + lh * IM_ARRAYSIZE(kRows) - 6),
               overlay_theme::kBorder);
+  const bool mouse_look = GetMouseLookSettings().enabled;
   for (const auto& row : kRows) {
-    dl->AddText(ImVec2(x, y), overlay_theme::kText, row.key);
-    dl->AddText(ImVec2(x + key_w + gap, y), overlay_theme::kSecondary,
-                row.button);
+    const char* key = row.key;
+    const char* button = row.button;
+    if (mouse_look && !std::strcmp(key, "Arrow Keys"))
+      key = "Mouse / Arrows";
+    if (mouse_look && !std::strcmp(key, "Left Shift"))
+      key = "RMB / LShift";
+    if (mouse_look && !std::strcmp(key, "Right Shift"))
+      key = "LMB / RShift";
+    if (!std::strcmp(key, "F3"))
+      button = mouse_look ? "Mouse look: On" : "Mouse look: Off";
+    dl->AddText(ImVec2(x, y), overlay_theme::kText, key);
+    dl->AddText(ImVec2(x + key_w + gap, y), overlay_theme::kSecondary, button);
     y += lh;
   }
 }
@@ -130,6 +144,13 @@ void OverlayBuildFrame(u32 w,
       if (g_visible)
         BuildLegend();
       OverlayLogBuild(w, h);
+      if (const char* notice = MouseLookNotice()) {
+        auto* dl = ImGui::GetForegroundDrawList();
+        const auto size = ImGui::CalcTextSize(notice);
+        const ImVec2 tl((w - size.x - 32) * 0.5f, 20);
+        overlay_theme::DrawPanel(dl, tl, ImVec2(tl.x + size.x + 32, tl.y + 44));
+        dl->AddText(ImVec2(tl.x + 16, tl.y + 14), overlay_theme::kText, notice);
+      }
     }
     OverlayBusyBuild(w, h, frame_stalled);
   }

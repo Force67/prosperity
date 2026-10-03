@@ -18,6 +18,7 @@ to launch. Unpacked games are saved by their root folder.
 | `overlay_busy.h` | Animated shader compilation and frame busy toast |
 | `shader_activity.h` | Thread-safe compiler activity tracking |
 | `input_sdl.h` | SDL mouse, keyboard, and controller events for the UI |
+| `mouse_look.h` | Optional mouse capture and right-stick camera input |
 | `home_background_vk.h` | Procedural logo backgrounds when game artwork is missing |
 | `overlay_vk.h` | ImGui Vulkan pipeline and font texture |
 
@@ -65,3 +66,15 @@ tools/gen_spv.sh delta/ui/shaders/home_background.vert kHomeBackgroundVert delta
 tools/gen_spv.sh delta/ui/shaders/home_background.frag kHomeBackgroundFrag delta/ui/shaders/home_background_frag.h
 clang-format -i delta/ui/shaders/home_background_{vert,frag}.h
 ```
+
+Mouse look is off by default. Enable it in **Settings > Controls**, or press
+**F3** during play. **Ctrl > Controls** provides sensitivity (10–300%) and
+invert-Y adjustments for the current session. Save defaults in home Settings.
+Left click maps to R2, right click to L2. WASD, arrow keys, and controllers
+remain available. Pausing, switching windows, and returning home release the
+cursor and clear mouse input. Resume restores capture without forwarding a
+held menu click. Movement emulates a controller stick, so each game's camera
+speed and controller settings still apply.
+
+Options: `DELTA_MOUSE_LOOK`, `DELTA_MOUSE_SENSITIVITY` (percent, default 100),
+and `DELTA_MOUSE_INVERT_Y`.

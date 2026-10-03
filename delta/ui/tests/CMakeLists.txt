@@ -18,3 +18,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
   target_include_directories(settings_menu_test PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor/equilibrium/external/tracy/imgui)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+  add_delta_test(mouse_look_test
+    SOURCES mouse_look_test.cc
+    DEPS delta_ui)
+endif()

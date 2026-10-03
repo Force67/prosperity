@@ -12,6 +12,9 @@ struct Settings {
   u32 background = 0;
   bool performance = true;
   bool validation = false;
+  bool mouse_look = false;
+  u32 mouse_sensitivity = 100;
+  bool mouse_invert_y = false;
 
   bool operator==(const Settings&) const = default;
 };

@@ -46,6 +46,13 @@ Settings ReadSettings() {
     settings.background = static_cast<u32>(style);
   settings.performance = Value("DELTA_GPU_OVERLAY") != "false";
   settings.validation = Value("DELTA_VK_VALIDATE") == "true";
+  settings.mouse_look = Value("DELTA_MOUSE_LOOK") == "true";
+  const auto sensitivity = Value("DELTA_MOUSE_SENSITIVITY");
+  u64 percent = 0;
+  if (base::ParseUnsigned(sensitivity.c_str(), percent) && percent >= 10 &&
+      percent <= 300)
+    settings.mouse_sensitivity = static_cast<u32>(percent);
+  settings.mouse_invert_y = Value("DELTA_MOUSE_INVERT_Y") == "true";
   return settings;
 }
 
@@ -54,7 +61,8 @@ bool SaveSettings(const Settings& settings) {
        settings.backend != "d3d12") ||
       (!settings.vsync.empty() && settings.vsync != "0" &&
        settings.vsync != "1") ||
-      settings.background > 3 ||
+      settings.background > 3 || settings.mouse_sensitivity < 10 ||
+      settings.mouse_sensitivity > 300 ||
       settings.gpu.find_first_of("\r\n") != base::String::npos)
     return false;
   const auto path = SettingsPath();
@@ -69,9 +77,11 @@ bool SaveSettings(const Settings& settings) {
       "+DELTA_GPU_BACKEND={}\n+DELTA_VK_GPU=\"{}\"\n"
       "+DELTA_GPU_VSYNC=\"{}\"\n+DELTA_GPU_SYNCPRESENT={}\n"
       "+DELTA_UI_BACKGROUND={}\n+DELTA_GPU_OVERLAY={}\n"
-      "+DELTA_VK_VALIDATE={}\n",
+      "+DELTA_VK_VALIDATE={}\n+DELTA_MOUSE_LOOK={}\n"
+      "+DELTA_MOUSE_SENSITIVITY={}\n+DELTA_MOUSE_INVERT_Y={}\n",
       settings.backend, settings.gpu, settings.vsync, !settings.async_present,
-      settings.background, settings.performance, settings.validation);
+      settings.background, settings.performance, settings.validation,
+      settings.mouse_look, settings.mouse_sensitivity, settings.mouse_invert_y);
   const auto temporary = path + ".tmp";
   std::ofstream file(temporary.c_str(), std::ios::binary | std::ios::trunc);
   file.write(text.data(), text.size());

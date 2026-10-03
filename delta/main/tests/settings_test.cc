@@ -17,6 +17,9 @@ DELTA_OPTION(bool, kSync, "DELTA_GPU_SYNCPRESENT", false);
 DELTA_OPTION(u32, kBackground, "DELTA_UI_BACKGROUND", 0);
 DELTA_OPTION(bool, kPerformance, "DELTA_GPU_OVERLAY", true);
 DELTA_OPTION(bool, kValidation, "DELTA_VK_VALIDATE", false);
+DELTA_OPTION(bool, kMouseLook, "DELTA_MOUSE_LOOK", false);
+DELTA_OPTION(u32, kMouseSensitivity, "DELTA_MOUSE_SENSITIVITY", 100);
+DELTA_OPTION(bool, kMouseInvertY, "DELTA_MOUSE_INVERT_Y", false);
 
 class SettingsTest : public testing::Test {
  protected:
@@ -35,6 +38,9 @@ class SettingsTest : public testing::Test {
     kBackground.Reset();
     kPerformance.Reset();
     kValidation.Reset();
+    kMouseLook.Reset();
+    kMouseSensitivity.Reset();
+    kMouseInvertY.Reset();
   }
   void TearDown() override {
     if (had_config_)
@@ -59,6 +65,9 @@ TEST_F(SettingsTest,
   settings.background = 2;
   settings.performance = false;
   settings.validation = true;
+  settings.mouse_look = true;
+  settings.mouse_sensitivity = 175;
+  settings.mouse_invert_y = true;
   ASSERT_TRUE(options::SaveSettings(settings));
   EXPECT_EQ(options::ReadSettings(), options::Settings{});
   ASSERT_TRUE(options::LoadFile(options::SettingsPath().c_str()));
@@ -126,6 +135,11 @@ TEST_F(SettingsTest, RejectsInvalidPreferencesWithoutReplacingSavedFile) {
   EXPECT_FALSE(options::SaveSettings(settings));
   settings = {};
   settings.background = 4;
+  EXPECT_FALSE(options::SaveSettings(settings));
+  settings = {};
+  settings.mouse_sensitivity = 0;
+  EXPECT_FALSE(options::SaveSettings(settings));
+  settings.mouse_sensitivity = 301;
   EXPECT_FALSE(options::SaveSettings(settings));
   ASSERT_TRUE(options::LoadFile(options::SettingsPath().c_str()));
   EXPECT_EQ(options::ReadSettings(), options::Settings{});

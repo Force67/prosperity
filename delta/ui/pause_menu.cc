@@ -7,6 +7,7 @@
 #include "guest/pause.h"
 #include "imgui.h"
 #include "ui/home_screen.h"
+#include "ui/mouse_look.h"
 #include "ui/overlay_theme.h"
 
 namespace ui {
@@ -15,12 +16,14 @@ base::String g_title;
 bool g_ready = false;
 bool g_controls = false;
 int g_selection = 0;
+ImGuiConfigFlags g_nav_flags = 0;
 base::Atomic<bool> g_exit_requested{false};
 float g_visibility = 0;
 u64 g_tick_ns = 0;
 
 void Resume() {
   guest::SetPaused(false);
+  ImGui::GetIO().ConfigFlags = g_nav_flags;
   ImGui::GetIO().ClearInputKeys();
 }
 }  // namespace
@@ -41,6 +44,7 @@ void PauseMenuToggle() {
   } else {
     g_controls = false;
     g_selection = 0;
+    g_nav_flags = ImGui::GetIO().ConfigFlags;
     ImGui::GetIO().ClearInputKeys();
     guest::SetPaused(true);
   }
@@ -75,14 +79,12 @@ void PauseMenuBuild(u32 width, u32 height) {
       else
         Resume();
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+    if (!g_controls && ImGui::IsKeyPressed(ImGuiKey_UpArrow))
       g_selection = (g_selection + 2) % 3;
-    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+    if (!g_controls && ImGui::IsKeyPressed(ImGuiKey_DownArrow))
       g_selection = (g_selection + 1) % 3;
-    if (ImGui::IsKeyPressed(ImGuiKey_Enter)) {
-      if (g_controls)
-        g_controls = false;
-      else if (g_selection == 0)
+    if (!g_controls && ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+      if (g_selection == 0)
         Resume();
       else if (g_selection == 1)
         g_controls = true;
@@ -90,12 +92,16 @@ void PauseMenuBuild(u32 width, u32 height) {
         g_exit_requested.store(true);
     }
   }
+  if (paused)
+    ImGui::GetIO().ConfigFlags =
+        g_controls ? g_nav_flags | ImGuiConfigFlags_NavEnableKeyboard
+                   : g_nav_flags;
   const float w = float(width), h = float(height);
   auto* dl = ImGui::GetBackgroundDrawList();
   dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h),
                     IM_COL32(8, 10, 14, int(175 * ease)));
   const float panel_w = base::Min(480.0f, w - 48);
-  const float panel_h = g_controls ? 432.0f : 392.0f;
+  const float panel_h = base::Min(g_controls ? 600.0f : 392.0f, h - 32);
   const ImVec2 tl((w - panel_w) * 0.5f, (h - panel_h) * 0.5f + 12 * (1 - ease));
   const ImVec2 br(tl.x + panel_w, tl.y + panel_h);
   overlay_theme::DrawPanel(dl, tl, br, ease);
@@ -131,11 +137,34 @@ void PauseMenuBuild(u32 width, u32 height) {
                              {"Space / Esc / F / R", "Face buttons"},
                              {"Enter / P", "Options"},
                              {"Tab", "Touchpad"}};
-    for (int i = 0; i < 5; ++i) {
-      dl->AddText(ImVec2(tl.x + 28, tl.y + 140 + i * 32), ink, rows[i][0]);
-      dl->AddText(ImVec2(tl.x + panel_w - 144, tl.y + 140 + i * 32), secondary,
-                  rows[i][1]);
+    ImGui::SetCursorPos(ImVec2(28, 132));
+    ImGui::BeginChild("controls_body", ImVec2(panel_w - 56, panel_h - 240));
+    auto settings = GetMouseLookSettings();
+    bool changed = ImGui::Checkbox("Mouse look", &settings.enabled);
+    ImGui::SameLine();
+    ImGui::TextDisabled("F3 during play");
+    ImGui::BeginDisabled(!settings.enabled);
+    int sensitivity = static_cast<int>(settings.sensitivity);
+    ImGui::SetNextItemWidth(base::Max(80.0f, panel_w - 180));
+    if (ImGui::SliderInt("Sensitivity", &sensitivity, 10, 300, "%d%%")) {
+      settings.sensitivity = static_cast<u32>(sensitivity);
+      changed = true;
     }
+    changed |= ImGui::Checkbox("Invert vertical look", &settings.invert_y);
+    ImGui::EndDisabled();
+    if (changed)
+      ConfigureMouseLook(settings);
+    ImGui::TextWrapped(
+        "Left / right click: R2 / L2. Ctrl releases the cursor.");
+    ImGui::TextDisabled("Session only. Save defaults in home Settings.");
+    ImGui::Spacing();
+    ImGui::Separator();
+    for (const auto& row : rows) {
+      ImGui::TextUnformatted(row[0]);
+      ImGui::SameLine(base::Max(160.0f, panel_w - 200));
+      ImGui::TextDisabled("%s", row[1]);
+    }
+    ImGui::EndChild();
     ImGui::SetCursorPos(ImVec2(28, panel_h - 100));
     if (ImGui::Button("Back", ImVec2(panel_w - 56, 44)))
       g_controls = false;

@@ -8,6 +8,7 @@
 #include "imgui_internal.h"
 #include "options/options.h"
 #include "ui/home_screen.h"
+#include "ui/mouse_look.h"
 #include "ui/overlay.h"
 #include "ui/settings.h"
 
@@ -96,5 +97,30 @@ TEST_F(SettingsMenuTest, GearOpensSettingsAndEscapeProtectsUnsavedChanges) {
   EXPECT_GE(panel->Pos.y, 0);
   EXPECT_LE(panel->Pos.x + panel->Size.x, 640);
   EXPECT_LE(panel->Pos.y + panel->Size.y, 480);
+}
+
+TEST_F(SettingsMenuTest, MouseLookPreferencesSaveAndApplyImmediately) {
+  ui::SettingsOpen();
+  Frame();
+  auto* panel = ImGui::FindWindowByName("##settings_lounge");
+  ASSERT_NE(panel, nullptr);
+  const float tab_width = (panel->Size.x - 56 - 12) / 4;
+  Click(ImVec2(panel->Pos.x + 28 + 2 * (tab_width + 4) + tab_width * 0.5f,
+               panel->Pos.y + 118));
+  auto* body = panel->DC.ChildWindows[0];
+  const ImVec2 origin(body->Pos.x + body->WindowPadding.x,
+                      body->Pos.y + body->WindowPadding.y);
+  Click(ImVec2(origin.x + body->Size.x - 224 + 20, origin.y + 28));
+  Click(ImVec2(origin.x + body->Size.x - 224 + 20, origin.y + 56 * 2 + 28));
+  Click(ImVec2(panel->Pos.x + panel->Size.x - 108,
+               panel->Pos.y + panel->Size.y - 42));
+  const auto settings = ui::GetMouseLookSettings();
+  EXPECT_TRUE(settings.enabled);
+  EXPECT_TRUE(settings.invert_y);
+  EXPECT_EQ(settings.sensitivity, 100u);
+  Frame(640, 480);
+  Frame(640, 480);
+  EXPECT_LE(panel->Pos.y + panel->Size.y, 480);
+  ui::ConfigureMouseLook({});
 }
 }  // namespace

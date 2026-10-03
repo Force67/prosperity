@@ -4,6 +4,7 @@
 
 #include "imgui.h"
 #include "ui/home_screen.h"
+#include "ui/mouse_look.h"
 #include "ui/overlay.h"
 #include "ui/overlay_log.h"
 #include "ui/pause_menu.h"
@@ -18,14 +19,23 @@ void ProcessEvent(const SDL_Event& e,
       (e.key.scancode == SDL_SCANCODE_LCTRL ||
        e.key.scancode == SDL_SCANCODE_RCTRL)) {
     PauseMenuToggle();
+    SyncMouseLook(window);
     return;
   }
+  SyncMouseLook(window);
+  ProcessMouseLookEvent(e);
   if (!HomeScreenActive() && !PauseMenuVisible()) {
     if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
       if (e.key.scancode == SDL_SCANCODE_F1)
         OverlayToggle();
       if (e.key.scancode == SDL_SCANCODE_F2)
         OverlayLogToggle();
+      if (e.key.scancode == SDL_SCANCODE_F3) {
+        auto settings = GetMouseLookSettings();
+        settings.enabled = !settings.enabled;
+        ConfigureMouseLook(settings);
+        SyncMouseLook(window);
+      }
     }
     return;
   }

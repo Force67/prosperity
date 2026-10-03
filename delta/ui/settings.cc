@@ -8,6 +8,7 @@
 #include "imgui.h"
 #include "options/settings.h"
 #include "ui/home_screen.h"
+#include "ui/mouse_look.h"
 #include "ui/overlay_theme.h"
 
 namespace ui {
@@ -52,6 +53,11 @@ bool Save() {
   }
   auto running = g_running;
   running.background = g_draft.background;
+  running.mouse_look = g_draft.mouse_look;
+  running.mouse_sensitivity = g_draft.mouse_sensitivity;
+  running.mouse_invert_y = g_draft.mouse_invert_y;
+  ConfigureMouseLook(
+      {g_draft.mouse_look, g_draft.mouse_sensitivity, g_draft.mouse_invert_y});
   g_restart = running != g_draft;
   if (g_saved.background != g_draft.background)
     HomeScreenSetBackground(g_draft.background);
@@ -225,6 +231,31 @@ void Appearance() {
       "overlay changes after restarting.");
 }
 
+void Controls() {
+  float y = Row("Mouse look", "Move the mouse to control the camera.");
+  Toggle("mouse_look", &g_draft.mouse_look);
+  EndRow(y);
+  ImGui::BeginDisabled(!g_draft.mouse_look);
+  y = Row("Sensitivity", "Adjust how quickly the camera turns.");
+  int sensitivity = static_cast<int>(g_draft.mouse_sensitivity);
+  if (ImGui::SliderInt("##mouse_sensitivity", &sensitivity, 10, 300, "%d%%"))
+    g_draft.mouse_sensitivity = static_cast<u32>(sensitivity);
+  EndRow(y);
+  y = Row("Invert vertical look", "Move the mouse up to look down.");
+  Toggle("mouse_invert_y", &g_draft.mouse_invert_y);
+  EndRow(y);
+  ImGui::EndDisabled();
+  ImGui::Dummy(ImVec2(0, 16));
+  ImGui::TextWrapped(
+      "During play: F3 toggles mouse look. Ctrl opens the pause "
+      "menu and releases the cursor. Left / right click send "
+      "R2 / L2. Capture also releases when you switch windows.");
+  ImGui::Dummy(ImVec2(0, 8));
+  ImGui::TextWrapped(
+      "Saved controls apply immediately. Camera speed also "
+      "depends on the game's controller settings.");
+}
+
 void Advanced() {
   const float y =
       Row("Vulkan validation", "Extra diagnostics for graphics issues.");
@@ -327,10 +358,10 @@ void SettingsBuild(u32 width, u32 height) {
               ImVec2(close_pos.x + 14, close_pos.y + 24),
               overlay_theme::kSecondary, 1.5f);
   ImGui::SetCursorPos(ImVec2(origin.x, origin.y + 76));
-  const char* tabs[] = {"Graphics", "Appearance", "Advanced"};
+  const char* tabs[] = {"Graphics", "Appearance", "Controls", "Advanced"};
   ImGui::SetWindowFontScale(panel_w < 450 ? 0.85f : 1.0f);
-  const float tab_width = (ImGui::GetContentRegionAvail().x - 8) / 3;
-  for (int i = 0; i < 3; ++i) {
+  const float tab_width = (ImGui::GetContentRegionAvail().x - 12) / 4;
+  for (int i = 0; i < 4; ++i) {
     if (i)
       ImGui::SameLine(0, 4);
     ImGui::PushStyleColor(ImGuiCol_Button, i == g_tab ? overlay_theme::kRaised
@@ -351,6 +382,8 @@ void SettingsBuild(u32 width, u32 height) {
     Graphics();
   else if (g_tab == 1)
     Appearance();
+  else if (g_tab == 2)
+    Controls();
   else
     Advanced();
   ImGui::EndChild();

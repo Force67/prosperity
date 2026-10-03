@@ -49,6 +49,7 @@
 #include "options/options.h"
 #include "ui/home_screen.h"
 #include "ui/input_sdl.h"
+#include "ui/mouse_look.h"
 #include "ui/overlay.h"
 #include "ui/overlay_vk.h"
 #include "ui/pause_menu.h"
@@ -1088,6 +1089,7 @@ bool Ensure(const char* title, u32 width, u32 height) {
 
 static bool DrainEvents() {
   StopSplash();
+  ui::SyncMouseLook(g_window.window);
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
     if (e.type == SDL_EVENT_QUIT ||
@@ -1110,6 +1112,8 @@ static bool DrainEvents() {
       g_window.gamepad = nullptr;
     }
   }
+  ui::SyncMouseLook(g_window.window);
+  ui::UpdateMouseLook();
   return true;
 }
 
@@ -1136,7 +1140,9 @@ bool PumpEvents() {
 // Both hands reach a shoulder pair via the Shift keys. Keep this in sync with
 // the on-screen legend (overlay.cc).
 bool PollKeyboardPad(PadKeys& out) {
-  if (guest::Paused()) {
+  if (guest::Paused() || ui::HomeScreenActive() || ui::PauseMenuVisible() ||
+      (g_window.window &&
+       !(SDL_GetWindowFlags(g_window.window) & SDL_WINDOW_INPUT_FOCUS))) {
     out = {};
     return true;
   }
@@ -1179,6 +1185,17 @@ bool PollKeyboardPad(PadKeys& out) {
   out.options =
       down(SDL_SCANCODE_RETURN) || down(SDL_SCANCODE_P);  // start / pause
   out.touchpad = down(SDL_SCANCODE_TAB);                  // map / select
+
+  u8 mouse_x, mouse_y;
+  bool mouse_left, mouse_right;
+  if (ui::PollMouseLook(mouse_x, mouse_y, mouse_left, mouse_right)) {
+    if (mouse_x != 128)
+      out.rx = mouse_x;
+    if (mouse_y != 128)
+      out.ry = mouse_y;
+    out.r2 |= mouse_left;
+    out.l2 |= mouse_right;
+  }
 
   // Overlay a real controller when one is connected (it takes precedence over
   // keyboard for any button/axis it actively asserts).
@@ -1236,6 +1253,7 @@ void SetRumble(u8 large_motor, u8 small_motor) {
 }
 
 void Shutdown() {
+  ui::ResetMouseLook(g_window.window);
   guest::SetPaused(false);
   g_suppress_pad.store(false);
   SetAudioPaused(false);

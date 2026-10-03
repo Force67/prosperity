@@ -2,7 +2,7 @@
 if(ANDROID)
   add_delta_module(ui)
   set_source_files_properties(
-    pause_menu.cc home_screen.cc home_background_vk.cc image.cc input_sdl.cc overlay.cc overlay_busy.cc
+    pause_menu.cc home_screen.cc home_background_vk.cc image.cc input_sdl.cc mouse_look.cc overlay.cc overlay_busy.cc
     overlay_log.cc overlay_theme.cc overlay_vk.cc
     PROPERTIES HEADER_FILE_ONLY ON)
 else()
