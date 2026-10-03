@@ -1,15 +1,19 @@
 # Prosperity <img src="https://i.imgur.com/zOaZAH2.png" width="40" height="40" />
 
-Prosperity: a continuation of PS4Delta.
+Prosperity (formerly known as PS4Delta) is a PS4 and PS5 emulator for Linux and Android.
 
-I started PS4Delta in 2019 as a PlayStation 4 emulator for Linux and Android. After losing motivation and making it closed source, I eventually added PS5 support and renamed it Prosperity.
+Join the community on [Discord](https://discord.gg/3FKUEk2FWP).
 
 ## Platform support
-Works great on Linux (AMD64). Linux ARM64 and Android are also supported.
-Windows support is planned for a later release, mainly because I do not own a Windows PC (community help would be appreciated).
 
-As for emulation, CPU code runs directly on AMD64 hosts. On ARM64 hosts, FEX is used to execute the CPU code.
-The PS4/PS5 GPU is entirely emulated, with graphics code lifted to SPIR-V and then recompiled for your GPU.
+| Platform | Tier | Status |
+| --- | --- | --- |
+| Linux (AMD64) | 1 | Works well |
+| Linux (ARM64) | 2 | Supported |
+| Android | 2 | Supported |
+| Windows | 3 | Planned, community help welcome |
+
+CPU code runs directly on AMD64 or through FEX on ARM64. PS4/PS5 graphics are translated to SPIR-V and recompiled for your GPU.
 
 ## Showcase
 
