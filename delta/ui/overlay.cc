@@ -13,11 +13,13 @@
 
 #include "base/math/value_bounds.h"
 #include "imgui.h"
+#include "memory_debug/memory_debug.h"
 #include "ui/home_screen.h"
 #include "ui/mouse_look.h"
 #include "ui/overlay.h"
 #include "ui/overlay_busy.h"
 #include "ui/overlay_log.h"
+#include "ui/overlay_memory.h"
 #include "ui/overlay_theme.h"
 #include "ui/pause_menu.h"
 #include "ui/settings.h"
@@ -45,6 +47,9 @@ const Row kRows[] = {
     {"Enter / P", "Options  (start)"},
     {"Tab", "Touchpad  (map)"},
     {"F3", "Mouse look on / off"},
+#if defined(DELTA_MEMORY_DEBUG)
+    {"F4", "Memory: off / compact / full"},
+#endif
     {"Ctrl", "Pause / release cursor"},
 };
 const char* kTitle = "Controls";
@@ -106,6 +111,7 @@ void BuildLegend() {
 void OverlayEnsureImGui() {
   if (g_inited)
     return;
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kDebugger);
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   overlay_theme::Apply();
@@ -116,6 +122,7 @@ void OverlayEnsureImGui() {
 }
 
 void OverlayShutdownImGui() {
+  MemoryOverlayReset();
   PauseMenuReset();
   SettingsReset();
   if (g_inited)
@@ -128,6 +135,7 @@ void OverlayBuildFrame(u32 w,
                        u64 vram_used,
                        u64 vram_total,
                        bool frame_stalled) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kDebugger);
   OverlayEnsureImGui();
   ImGuiIO& io = ImGui::GetIO();
   io.DisplaySize = ImVec2((float)w, (float)h);
@@ -141,10 +149,13 @@ void OverlayBuildFrame(u32 w,
     if (LaunchTransitionActive()) {
       LaunchTransitionBuild(w, h);
     } else {
-      if (g_visible)
+      if (g_visible && !MemoryOverlayFull())
         BuildLegend();
-      OverlayLogBuild(w, h);
-      if (const char* notice = MouseLookNotice()) {
+      if (!MemoryOverlayFull())
+        OverlayLogBuild(w, h);
+      MemoryOverlayBuild(w, h);
+      if (const char* notice =
+              MemoryOverlayFull() ? nullptr : MouseLookNotice()) {
         auto* dl = ImGui::GetForegroundDrawList();
         const auto size = ImGui::CalcTextSize(notice);
         const ImVec2 tl((w - size.x - 32) * 0.5f, 20);
@@ -152,7 +163,8 @@ void OverlayBuildFrame(u32 w,
         dl->AddText(ImVec2(tl.x + 16, tl.y + 14), overlay_theme::kText, notice);
       }
     }
-    OverlayBusyBuild(w, h, frame_stalled);
+    if (!MemoryOverlayFull())
+      OverlayBusyBuild(w, h, frame_stalled);
   }
   ImGui::Render();
 }

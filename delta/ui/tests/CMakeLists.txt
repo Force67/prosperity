@@ -23,4 +23,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
   add_delta_test(mouse_look_test
     SOURCES mouse_look_test.cc
     DEPS delta_ui)
+
+  add_delta_test(overlay_memory_test
+    SOURCES overlay_memory_test.cc
+    DEPS delta_ui)
+  target_include_directories(overlay_memory_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/vendor/equilibrium/external/tracy/imgui)
 endif()

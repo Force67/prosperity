@@ -53,6 +53,7 @@
 #include "ui/input_sdl.h"
 #include "ui/mouse_look.h"
 #include "ui/overlay.h"
+#include "ui/overlay_memory.h"
 #include "ui/overlay_vk.h"
 #include "ui/pause_menu.h"
 
@@ -1168,6 +1169,7 @@ bool PumpEvents() {
 // the on-screen legend (overlay.cc).
 bool PollKeyboardPad(PadKeys& out) {
   if (guest::Paused() || ui::HomeScreenActive() || ui::PauseMenuVisible() ||
+      ui::MemoryOverlayBlocksInput() ||
       (g_window.window &&
        !(SDL_GetWindowFlags(g_window.window) & SDL_WINDOW_INPUT_FOCUS))) {
     out = {};

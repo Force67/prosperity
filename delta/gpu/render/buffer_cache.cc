@@ -3,6 +3,7 @@
  */
 #include "gpu/render/buffer_cache.h"
 #include "guest/session.h"
+#include "memory_debug/memory_debug.h"
 
 #include <cstring>
 
@@ -154,6 +155,7 @@ bool FindCachedBuffer(u64 base, u64 bytes, CachedBuffer& out) {
 }
 
 bool CacheGuestBuffer(u64 base, u64 bytes, CachedBuffer& out) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   if (!bytes)
     return false;
   u32 block;

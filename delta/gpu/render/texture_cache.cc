@@ -5,6 +5,7 @@
 #include "gpu/render/texture_cache.h"
 #include "base/arch.h"
 #include "guest/session.h"
+#include "memory_debug/memory_debug.h"
 
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/gcn/gcn_translate.h"
@@ -986,6 +987,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
                                             u32 depth,
                                             bool is_3d,
                                             TexKey& key_out) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   ScopeNs lookup_timer(&g_ns_tex_lookup);
   g_tex_lookup_n++;
   constexpr u64 kMaxTextureBytes = 256ull * 1024 * 1024;
@@ -1572,6 +1574,7 @@ rhi::TextureView* TexViewFor(const DrawInfo::DrawTex& t) {
 }
 
 static rhi::TextureView* ResolveTexViewUncached(const DrawInfo::DrawTex& t) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   // Each exit here leaves the binding on the white fallback, so each one needs
   // to be able to say so (DELTA_GPU_TEXFAIL): an unsupported format and an
   // unmapped surface look identical from the draw side.
@@ -1716,6 +1719,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
                                const rhi::TextureState* resolved_layouts,
                                const rhi::Format* resolved_formats,
                                const u64* depth_src) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   ScopeNs set_timer(&g_ns_tex_set);
   g_tex_set_n++;
   // What the draw resolved, and what the layout declares. A shader may declare

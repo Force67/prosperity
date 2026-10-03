@@ -5,6 +5,7 @@
 #include "gpu/render/pipeline_cache.h"
 #include "base/arch.h"
 #include "guest/session.h"
+#include "memory_debug/memory_debug.h"
 
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gpu_perf.h"
@@ -295,6 +296,7 @@ bool CreateTexPipeline() {
 // Build (or fetch) the pipeline for a recompiled draw, keyed by the shader pair
 // + blend state + vertex layout.
 RecompPipe* GetRecompPipe(const DrawInfo& d) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
   if (d.recomp->ps_texs.size() > kMaxTex)
     return nullptr;
   u32 mrt_n = base::Min(d.mrt_count, 8u);

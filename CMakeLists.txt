@@ -120,6 +120,7 @@ else()
   set(_delta_tracy_default ON)
 endif()
 option(DELTA_TRACY "Build with the Tracy profiler client" ${_delta_tracy_default})
+option(DELTA_MEMORY_DEBUG "Allocation tags and memory overlays" ${_delta_tracy_default})
 
 add_subdirectory(vendor)
 add_subdirectory(shared)

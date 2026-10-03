@@ -347,6 +347,8 @@ bool ImageAllocator::Allocate(VulkanDevice& device,
     ai.allocationSize = kImageBlockSize;
     ai.memoryTypeIndex = type;
     if (vkAllocateMemory(dev, &ai, nullptr, &block.memory) == VK_SUCCESS) {
+      block.debug_backing.Set(memory_debug::Bucket::kImagePool, 0,
+                              kImageBlockSize);
       block.spans.Reset(kImageBlockSize);
       blocks_.push_back(base::move(block));
       if (try_block(blocks_.back()))
@@ -369,6 +371,7 @@ bool ImageAllocator::Allocate(VulkanDevice& device,
     return false;
   }
   out = {memory, 0, mr.size, type, true};
+  out.debug_backing.Set(memory_debug::Bucket::kImagePool, 0, mr.size);
   return true;
 }
 
@@ -854,6 +857,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
 }
 
 rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   auto buffer = base::MakeUnique<VulkanBuffer>(desc);
   VkDevice dev = native.device;
   VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -910,6 +914,7 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
     }
     if (desc.name)
       SetName(&*buffer, desc.name);
+    buffer->debug_memory.Set(memory_debug::Bucket::kBufferMirror, 0, 0);
     return gpu::rhi::Release(buffer, this);
   }
 
@@ -1024,10 +1029,21 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
   }
   if (desc.name)
     SetName(&*buffer, desc.name);
+  if (desc.host_pointer) {
+    memory_debug::ChangeImported(desc.size);
+  } else {
+    const auto bucket = desc.memory == rhi::MemoryKind::kReadback
+                            ? memory_debug::Bucket::kReadback
+                        : desc.memory == rhi::MemoryKind::kDevice
+                            ? memory_debug::Bucket::kBufferMirror
+                            : memory_debug::Bucket::kUpload;
+    buffer->debug_memory.Set(bucket, desc.size, ai.allocationSize);
+  }
   return gpu::rhi::Release(buffer, this);
 }
 
 rhi::Texture* VulkanDevice::CreateTexture(const rhi::TextureDesc& desc) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   auto texture = base::MakeUnique<VulkanTexture>(desc);
   const rhi::FormatInfo& fi = rhi::GetFormatInfo(desc.format);
   VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -1072,11 +1088,17 @@ rhi::Texture* VulkanDevice::CreateTexture(const rhi::TextureDesc& desc) {
                          : VK_IMAGE_ASPECT_COLOR_BIT;
   if (desc.name)
     SetName(&*texture, desc.name);
+  const bool target =
+      desc.usage & (rhi::kTextureColorTarget | rhi::kTextureDepthTarget);
+  texture->debug_memory.Set(target ? memory_debug::Bucket::kRenderTargets
+                                   : memory_debug::Bucket::kTextures,
+                            texture->allocation.size, 0);
   return gpu::rhi::Release(texture, this);
 }
 
 rhi::TextureView* VulkanDevice::CreateView(rhi::Texture* texture,
                                            const rhi::TextureViewDesc& desc) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   auto* tex = static_cast<VulkanTexture*>(texture);
   auto view = base::MakeUnique<VulkanView>(texture, desc);
   VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -1095,6 +1117,7 @@ rhi::TextureView* VulkanDevice::CreateView(rhi::Texture* texture,
 }
 
 rhi::Sampler* VulkanDevice::CreateSampler(const rhi::SamplerDesc& desc) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   auto sampler = base::MakeUnique<VulkanSampler>();
   VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
   si.magFilter = ToVkFilter(desc.mag);
@@ -1139,6 +1162,7 @@ rhi::Sampler* VulkanDevice::CreateSampler(const rhi::SamplerDesc& desc) {
 
 rhi::BindGroupLayout* VulkanDevice::CreateBindGroupLayout(
     const rhi::BindGroupLayoutDesc& desc) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   auto layout = base::MakeUnique<VulkanBindGroupLayout>(desc);
   base::Vector<VkDescriptorSetLayoutBinding> bindings;
   for (const auto& b : desc.bindings) {
@@ -1218,6 +1242,7 @@ void VulkanDevice::FillWrite(VkDescriptorType type,
 }
 
 rhi::BindGroup* VulkanDevice::CreateBindGroup(const rhi::BindGroupDesc& desc) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   auto* layout = static_cast<VulkanBindGroupLayout*>(desc.layout);
   auto group = base::MakeUnique<VulkanBindGroup>();
   group->layout = layout;
@@ -1275,6 +1300,7 @@ void VulkanDevice::UpdateBindGroup(rhi::BindGroup* group,
 
 rhi::PipelineLayout* VulkanDevice::CreatePipelineLayout(
     const rhi::PipelineLayoutDesc& desc) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
   auto layout = base::MakeUnique<VulkanPipelineLayout>(desc);
   base::Vector<VkDescriptorSetLayout> sets;
   for (rhi::BindGroupLayout* g : desc.groups)
@@ -1295,6 +1321,7 @@ rhi::PipelineLayout* VulkanDevice::CreatePipelineLayout(
 
 rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
     const rhi::GraphicsPipelineDesc& desc) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
   DELTA_ZONE("vk.create_graphics_pipeline");
   const ui::ShaderCompilation compilation;
   auto* layout = static_cast<VulkanPipelineLayout*>(desc.layout);
@@ -1436,6 +1463,7 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
 
 rhi::Pipeline* VulkanDevice::CreateComputePipeline(
     const rhi::ComputePipelineDesc& desc) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
   DELTA_ZONE("vk.create_compute_pipeline");
   const ui::ShaderCompilation compilation;
   auto* layout = static_cast<VulkanPipelineLayout*>(desc.layout);
@@ -1471,6 +1499,7 @@ rhi::Pipeline* VulkanDevice::CreateComputePipeline(
 }
 
 rhi::TimestampPool* VulkanDevice::CreateTimestampPool(u32 count) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   auto pool = base::MakeUnique<VulkanTimestampPool>();
   VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
   qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -1482,6 +1511,7 @@ rhi::TimestampPool* VulkanDevice::CreateTimestampPool(u32 count) {
 }
 
 rhi::CommandList* VulkanDevice::CreateCommandList() {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kCommands);
   auto list = base::MakeUnique<VulkanCommandList>(*this);
   VkCommandBufferAllocateInfo ai{
       VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -1494,11 +1524,14 @@ rhi::CommandList* VulkanDevice::CreateCommandList() {
 }
 
 void VulkanDevice::Destroy(rhi::Object* object) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   Forget(object);
   if (!object)
     return;
   VkDevice dev = native.device;
   if (auto* b = dynamic_cast<VulkanBuffer*>(object)) {
+    if (b->desc().host_pointer)
+      memory_debug::ChangeImported(-static_cast<i64>(b->desc().size));
     vkDestroyBuffer(dev, b->buffer, nullptr);
     vkFreeMemory(dev, b->memory, nullptr);
     for (VkDeviceMemory block : b->blocks)
@@ -1570,9 +1603,8 @@ bool VulkanDevice::CopyAfter(rhi::Buffer* src,
   return r == VK_SUCCESS;
 }
 
-bool VulkanDevice::CommitSparse(rhi::Buffer* buffer,
-                                u64 offset,
-                                u64 bytes) {
+bool VulkanDevice::CommitSparse(rhi::Buffer* buffer, u64 offset, u64 bytes) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   auto* b = static_cast<VulkanBuffer*>(buffer);
   const u64 page = caps_.sparse_page;
   if (!b || !b->desc().sparse || !page || !bytes ||
@@ -1599,6 +1631,7 @@ bool VulkanDevice::CommitSparse(rhi::Buffer* buffer,
       if (vkAllocateMemory(native.device, &ai, nullptr, &block) != VK_SUCCESS)
         return false;
       b->blocks.push_back(block);
+      b->debug_memory.AddBacking(kBlock);
       b->block_used = 0;
     }
     VkSparseMemoryBind bind{};
@@ -1608,6 +1641,7 @@ bool VulkanDevice::CommitSparse(rhi::Buffer* buffer,
     bind.memoryOffset = b->block_used;
     b->block_used += page;
     b->committed.insert(at);
+    b->debug_memory.AddLive(page);
     binds.push_back(bind);
   }
   if (binds.empty())

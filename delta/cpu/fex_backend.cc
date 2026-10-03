@@ -56,6 +56,7 @@
 #include "kern/lv2/sys_thread.h"
 #include "kern/module.h"
 #include "kern/process.h"
+#include "memory_debug/memory_debug.h"
 #include "options/options.h"
 
 namespace {
@@ -495,6 +496,28 @@ static void StartWatchdog() {
 // trampoline via the kHostThunkSyscallBase magic syscall. See MakeHostThunk.
 base::Mutex g_thunk_mutex;
 base::Vector<void*> g_host_thunks;
+void* CpuMap(void* address,
+             size_t size,
+             int protection,
+             int flags,
+             int fd,
+             off_t offset) {
+  void* result = ::mmap(address, size, protection, flags, fd, offset);
+  if (result != MAP_FAILED && protection != PROT_NONE)
+    memory_debug::TrackMapping(result, size, memory_debug::CurrentBucket(),
+                               (flags & MAP_FIXED) != 0);
+  else if (result != MAP_FAILED && (flags & MAP_FIXED))
+    memory_debug::ForgetMapping(result, size);
+  return result;
+}
+
+int CpuUnmap(void* address, size_t size) {
+  const int result = ::munmap(address, size);
+  if (result == 0)
+    memory_debug::ForgetMapping(address, size);
+  return result;
+}
+
 // Bump-allocated pool of guest-executable trampolines (one per bound HLE
 // export).
 u8* g_thunk_pool = nullptr;
@@ -508,6 +531,7 @@ class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
 
   u64 HandleSyscall(FEXCore::Core::CpuStateFrame* frame,
                     FEXCore::HLE::SyscallArguments* args) override {
+    const memory_debug::Scope memory_scope(memory_debug::Bucket::kRuntime);
     guest::PausePoint();
     const u64 result = DispatchSyscall(frame, args);
     guest::PausePoint();
@@ -733,6 +757,7 @@ class FexBackend final : public Backend {
   }
 
   void* CreateGuestThread(uintptr_t entry, void* arg, u64 fsbase) override {
+    const memory_debug::Scope memory_scope(memory_debug::Bucket::kThreadStacks);
     EnsureInit();
     auto* h = new FexThread{};
 
@@ -741,8 +766,8 @@ class FexBackend final : public Backend {
     h->stack_size = 8ull * 1024 * 1024;
     h->stack = PoolTake(stack_pool, h->stack_size);
     if (!h->stack)
-      h->stack = mmap(nullptr, h->stack_size, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      h->stack = CpuMap(nullptr, h->stack_size, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     u64 rsp =
         (reinterpret_cast<u64>(h->stack) + h->stack_size - 0x200) & ~0xFULL;
 
@@ -759,12 +784,14 @@ class FexBackend final : public Backend {
       h->callret_size = kSize + 2 * kPage;
       void* alloc = PoolTake(callret_pool, h->callret_size);
       if (!alloc)
-        alloc = mmap(nullptr, h->callret_size, PROT_NONE,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        alloc = CpuMap(nullptr, h->callret_size, PROT_NONE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (alloc != MAP_FAILED) {
         h->callret = alloc;
         void* cr_base = reinterpret_cast<u8*>(alloc) + kPage;
-        mprotect(cr_base, kSize, PROT_READ | PROT_WRITE);
+        if (mprotect(cr_base, kSize, PROT_READ | PROT_WRITE) == 0)
+          memory_debug::TrackMapping(cr_base, kSize,
+                                     memory_debug::Bucket::kThreadStacks);
         thread->CallRetStackBase = cr_base;
         s.callret_sp = reinterpret_cast<u64>(cr_base) + kSize / 4;
       }
@@ -791,8 +818,8 @@ class FexBackend final : public Backend {
     u64 fs = fsbase;
     if (fs == 0) {
       constexpr size_t kTls = 0x10000;
-      void* t = mmap(nullptr, kTls, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      void* t = CpuMap(nullptr, kTls, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (t != MAP_FAILED) {
         h->scratch_tls = t;
         fs = reinterpret_cast<u64>(t) + kTls / 2;
@@ -808,15 +835,16 @@ class FexBackend final : public Backend {
     auto* h = static_cast<FexThread*>(handle);
     ctx_->DestroyThread(h->thread);
     if (h->stack)
-      munmap(h->stack, h->stack_size);
+      CpuUnmap(h->stack, h->stack_size);
     if (h->callret)
-      munmap(h->callret, h->callret_size);
+      CpuUnmap(h->callret, h->callret_size);
     if (h->scratch_tls)
-      munmap(h->scratch_tls, 0x10000);
+      CpuUnmap(h->scratch_tls, 0x10000);
     delete h;
   }
 
   void RunGuestThread(void* handle) override {
+    const memory_debug::Scope memory_scope(memory_debug::Bucket::kJit);
     auto* h = static_cast<FexThread*>(handle);
     t_cur_thread = h->thread;
     guest::ThreadRegistration registration([](uintptr_t pc) {
@@ -934,7 +962,7 @@ class FexBackend final : public Backend {
     ctx_->DestroyThread(h->thread);
     t_cur_thread = nullptr;
     if (h->scratch_tls)
-      munmap(h->scratch_tls, 0x10000);
+      CpuUnmap(h->scratch_tls, 0x10000);
     // Pool, never unmap: guest code may hold pointers into a retired stack.
     if (h->stack)
       PoolPut(stack_pool, h->stack, h->stack_size);
@@ -1006,16 +1034,16 @@ class FexBackend final : public Backend {
     init_worker_started = init_worker_done = false;
     init_worker_job = nullptr;
     for (const auto& [stack, size] : stack_pool)
-      munmap(stack, size);
+      CpuUnmap(stack, size);
     for (const auto& [stack, size] : callret_pool)
-      munmap(stack, size);
+      CpuUnmap(stack, size);
     guest::ResetResource(stack_pool);
     guest::ResetResource(callret_pool);
     g_ctx_ptr = nullptr;
     ctx_.reset();
     init_done_ = false;
     if (g_thunk_pool)
-      munmap(g_thunk_pool, kThunkPoolSize);
+      CpuUnmap(g_thunk_pool, kThunkPoolSize);
     g_thunk_pool = nullptr;
     g_thunk_pool_used = 0;
     guest::ResetResource(g_host_thunks);
@@ -1032,6 +1060,7 @@ class FexBackend final : public Backend {
 
  private:
   void EnsureInit() {
+    const memory_debug::Scope memory_scope(memory_debug::Bucket::kJit);
     base::LockGuard<base::Mutex> lk(init_m_);
     if (init_done_)
       return;
@@ -1098,9 +1127,10 @@ void* FexInternalMmap(void* addr,
                       int flags,
                       int fd,
                       off_t off) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kJit);
   // MAP_FIXED means FEX requires that exact address; honour it.
   if ((flags & MAP_FIXED) || !g_fex_heap_end)
-    return ::mmap(addr, len, prot, flags, fd, off);
+    return CpuMap(addr, len, prot, flags, fd, off);
   // A bare hint is advisory and the kernel may place the mapping in a range the
   // guest MAP_FIXEDs later; the window matters more, so drop the hint.
   (void)addr;
@@ -1109,13 +1139,13 @@ void* FexInternalMmap(void* addr,
   const size_t alen = (len + 0xFFFull) & ~0xFFFull;
   uintptr_t base = g_fex_heap_next.fetch_add(alen, base::memory_order_relaxed);
   if (base + alen > g_fex_heap_end)
-    return ::mmap(nullptr, len, prot, flags, fd,
+    return CpuMap(nullptr, len, prot, flags, fd,
                   off);  // window exhausted: fall back
-  return ::mmap(reinterpret_cast<void*>(base), len, prot, flags | MAP_FIXED, fd,
+  return CpuMap(reinterpret_cast<void*>(base), len, prot, flags | MAP_FIXED, fd,
                 off);
 }
 int FexInternalMunmap(void* addr, size_t len) {
-  return ::munmap(addr, len);
+  return CpuUnmap(addr, len);
 }
 }  // namespace
 
@@ -1123,12 +1153,12 @@ void EarlyInit() {
   // Reserve PROT_NONE before any guest mapping, then hook FEXCore's allocator.
   int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
 #ifdef MAP_FIXED_NOREPLACE
-  void* r = ::mmap(reinterpret_cast<void*>(kFexHeapBase), kFexHeapSize,
+  void* r = CpuMap(reinterpret_cast<void*>(kFexHeapBase), kFexHeapSize,
                    PROT_NONE, flags | MAP_FIXED_NOREPLACE, -1, 0);
   if (r == MAP_FAILED || r != reinterpret_cast<void*>(kFexHeapBase))
-    r = ::mmap(nullptr, kFexHeapSize, PROT_NONE, flags, -1, 0);
+    r = CpuMap(nullptr, kFexHeapSize, PROT_NONE, flags, -1, 0);
 #else
-  void* r = ::mmap(nullptr, kFexHeapSize, PROT_NONE, flags, -1, 0);
+  void* r = CpuMap(nullptr, kFexHeapSize, PROT_NONE, flags, -1, 0);
 #endif
   if (r == MAP_FAILED) {
     LOG_WARNING(
@@ -1176,13 +1206,14 @@ const char* HostThunkNameForAddr(uintptr_t addr, u32* idx_out) {
 // Plant a guest x86 trampoline bouncing into native hostFn via the magic
 // syscall; preserves rcx into r10 before `syscall` clobbers rcx.
 uintptr_t MakeHostThunk(void* host_fn, const char* name) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kJit);
   base::LockGuard lk(g_thunk_mutex);
   g_thunk_names.resize(g_host_thunks.size() + 1);
   g_thunk_names[g_host_thunks.size()] = name ? name : "";
   if (!g_thunk_pool) {
-    g_thunk_pool = static_cast<u8*>(mmap(nullptr, kThunkPoolSize,
-                                         PROT_READ | PROT_WRITE | PROT_EXEC,
-                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    g_thunk_pool = static_cast<u8*>(CpuMap(nullptr, kThunkPoolSize,
+                                           PROT_READ | PROT_WRITE | PROT_EXEC,
+                                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     if (g_thunk_pool == MAP_FAILED) {
       g_thunk_pool = nullptr;
       LOG_ERROR("fex: host-thunk pool mmap failed");
@@ -1227,11 +1258,12 @@ uintptr_t MakeGuestReturnHook(void* real_target,
                               u32 hook_id,
                               void* logger_fn,
                               const char* name) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kJit);
   base::LockGuard lk(g_thunk_mutex);
   if (!g_thunk_pool) {
-    g_thunk_pool = static_cast<u8*>(mmap(nullptr, kThunkPoolSize,
-                                         PROT_READ | PROT_WRITE | PROT_EXEC,
-                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    g_thunk_pool = static_cast<u8*>(CpuMap(nullptr, kThunkPoolSize,
+                                           PROT_READ | PROT_WRITE | PROT_EXEC,
+                                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     if (g_thunk_pool == MAP_FAILED) {
       g_thunk_pool = nullptr;
       LOG_ERROR("fex: guest-hook pool mmap failed");
@@ -1305,11 +1337,12 @@ uintptr_t MakeGuestLockWrapper(void* real_target,
                                void* lock_fn,
                                void* unlock_fn,
                                const char* name) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kJit);
   base::LockGuard lk(g_thunk_mutex);
   if (!g_thunk_pool) {
-    g_thunk_pool = static_cast<u8*>(mmap(nullptr, kThunkPoolSize,
-                                         PROT_READ | PROT_WRITE | PROT_EXEC,
-                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    g_thunk_pool = static_cast<u8*>(CpuMap(nullptr, kThunkPoolSize,
+                                           PROT_READ | PROT_WRITE | PROT_EXEC,
+                                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     if (g_thunk_pool == MAP_FAILED) {
       g_thunk_pool = nullptr;
       return 0;
@@ -1378,11 +1411,12 @@ uintptr_t MakeGuestLockWrapper(void* real_target,
 uintptr_t MakeGuestTrampoline(const void* fn_bytes,
                               u32 prologue_len,
                               const void* continue_at) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kJit);
   base::LockGuard lk(g_thunk_mutex);
   if (!g_thunk_pool) {
-    g_thunk_pool = static_cast<u8*>(mmap(nullptr, kThunkPoolSize,
-                                         PROT_READ | PROT_WRITE | PROT_EXEC,
-                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    g_thunk_pool = static_cast<u8*>(CpuMap(nullptr, kThunkPoolSize,
+                                           PROT_READ | PROT_WRITE | PROT_EXEC,
+                                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     if (g_thunk_pool == MAP_FAILED) {
       g_thunk_pool = nullptr;
       return 0;

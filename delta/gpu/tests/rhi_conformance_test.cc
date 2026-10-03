@@ -18,6 +18,7 @@
 #include "gpu/rhi/device.h"
 #include "gpu/tests/rhi_conformance_extra_spv.h"
 #include "gpu/tests/rhi_conformance_spv.h"
+#include "memory_debug/memory_debug.h"
 
 namespace {
 
@@ -184,6 +185,47 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
   CommandList* list_ = nullptr;
   base::Vector<Object*> objects_;
 };
+
+#if defined(DELTA_MEMORY_DEBUG)
+TEST_P(RhiConformance, MemoryBucketsBalanceResourcesAndRetainImageBacking) {
+  if (GetParam() != Backend::kVulkan)
+    GTEST_SKIP() << "Allocation buckets currently cover Vulkan";
+  using memory_debug::Bucket;
+  const auto index = [](Bucket bucket) { return static_cast<u32>(bucket); };
+  const auto before = memory_debug::ReadSnapshot();
+  TextureDesc td;
+  td.format = Format::kRGBA8Unorm;
+  td.width = td.height = kW;
+  td.usage = kTextureSampled | kTextureCopyDst;
+  Texture* texture = device_->CreateTexture(td);
+  ASSERT_NE(texture, nullptr);
+  BufferDesc bd;
+  bd.size = 4096;
+  bd.memory = MemoryKind::kUpload;
+  bd.usage = kBufferCopySrc;
+  Buffer* buffer = device_->CreateBuffer(bd);
+  ASSERT_NE(buffer, nullptr);
+  const auto allocated = memory_debug::ReadSnapshot();
+  EXPECT_GT(allocated.buckets[index(Bucket::kTextures)].live,
+            before.buckets[index(Bucket::kTextures)].live);
+  EXPECT_EQ(allocated.buckets[index(Bucket::kTextures)].backing, 0);
+  EXPECT_EQ(allocated.buckets[index(Bucket::kUpload)].live,
+            before.buckets[index(Bucket::kUpload)].live + bd.size);
+  EXPECT_GE(allocated.buckets[index(Bucket::kImagePool)].backing,
+            allocated.buckets[index(Bucket::kTextures)].live);
+  device_->Destroy(buffer);
+  device_->Destroy(texture);
+  const auto freed = memory_debug::ReadSnapshot();
+  EXPECT_EQ(freed.buckets[index(Bucket::kTextures)].live,
+            before.buckets[index(Bucket::kTextures)].live);
+  EXPECT_EQ(freed.buckets[index(Bucket::kUpload)].live,
+            before.buckets[index(Bucket::kUpload)].live);
+  EXPECT_EQ(freed.buckets[index(Bucket::kUpload)].backing,
+            before.buckets[index(Bucket::kUpload)].backing);
+  EXPECT_EQ(freed.buckets[index(Bucket::kImagePool)].backing,
+            allocated.buckets[index(Bucket::kImagePool)].backing);
+}
+#endif
 
 TEST_P(RhiConformance, ClearByLoadOp) {
   Texture* t = Target();

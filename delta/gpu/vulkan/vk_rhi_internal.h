@@ -16,6 +16,7 @@
 #include "gpu/rhi/device.h"
 #include "gpu/vulkan/vk_memory_span.h"
 #include "gpu/vulkan/vk_rhi.h"
+#include "memory_debug/memory_debug.h"
 
 namespace gpu::vk::rhi_impl {
 
@@ -27,6 +28,7 @@ struct Allocation {
   VkDeviceSize size = 0;
   u32 type = 0;
   bool dedicated = false;
+  [[no_unique_address]] memory_debug::Record debug_backing;
 };
 
 // Device-local image memory: small images share 256 MiB blocks.
@@ -41,6 +43,7 @@ class ImageAllocator {
     VkDeviceMemory memory = VK_NULL_HANDLE;
     u32 type = 0;
     MemorySpanAllocator spans;
+    [[no_unique_address]] memory_debug::Record debug_backing;
   };
   base::Mutex mutex_;
   base::Vector<Block> blocks_;
@@ -56,6 +59,7 @@ class VulkanBuffer final : public rhi::Buffer {
   base::Vector<VkDeviceMemory> blocks;
   u64 block_used = 0;
   u32 memory_type = 0;
+  [[no_unique_address]] memory_debug::Record debug_memory;
   void SetMapped(u8* p) { mapped_ = p; }
   void SetAddress(u64 a) { address_ = a; }
 };
@@ -65,6 +69,7 @@ class VulkanTexture final : public rhi::Texture {
   VulkanTexture(const rhi::TextureDesc& desc) { desc_ = desc; }
   VkImage image = VK_NULL_HANDLE;
   Allocation allocation;
+  [[no_unique_address]] memory_debug::Record debug_memory;
   VkImageAspectFlags aspects = 0;
 };
 

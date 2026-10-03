@@ -12,6 +12,7 @@
 
 #include "gpu/ps5/rdna/rdna_translate.h"
 #include "base/arch.h"
+#include "memory_debug/memory_debug.h"
 
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 namespace gpu::rdna {
@@ -32,6 +33,7 @@ gpu::gcn::Recompiled Recompile(const u32*,
                                const u32*,
                                u32,
                                const NggConfig*) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
   return {};
 }
 u64 FetchPlanHash(u64) {
@@ -4697,6 +4699,7 @@ Recompiled Recompile(const u32* vs_code,
                      const u32* ps_in_cntl,
                      u32 ps_num_interp,
                      const NggConfig* ngg) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
   Recompiled r;
   if (!vs_code || !vs_user_data || !ps_user_data)
     return r;

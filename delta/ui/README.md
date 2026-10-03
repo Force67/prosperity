@@ -15,6 +15,7 @@ to launch. Unpacked games are saved by their root folder.
 | `overlay.h` | ImGui context, frame building, controls legend |
 | `overlay_theme.h` | Palette, fonts, widget style, rounded panels |
 | `overlay_log.h` | Live log capture and panel |
+| `overlay_memory.h` | Compact memory dock and full allocation bucket tiles |
 | `overlay_busy.h` | Animated shader compilation and frame busy toast |
 | `shader_activity.h` | Thread-safe compiler activity tracking |
 | `input_sdl.h` | SDL mouse, keyboard, and controller events for the UI |
@@ -78,3 +79,14 @@ speed and controller settings still apply.
 
 Options: `DELTA_MOUSE_LOOK`, `DELTA_MOUSE_SENSITIVITY` (percent, default 100),
 and `DELTA_MOUSE_INVERT_Y`.
+
+**F4** cycles memory views during play: off, compact dock, full tiles. **Esc**
+or controller Circle/B returns from full to compact. The guest keeps running;
+the full view releases mouse capture and blocks guest input. Each tile shows
+live bytes, backing, free bytes, allocation count, and up to 60 seconds of
+growth. Blue, amber, and rose indicate used/backing occupancy, not device-wide
+memory pressure. The background stays translucent.
+
+Set `DELTA_MEMORY_OVERLAY=1` or `2` for the initial view. Allocation tracking
+is controlled by CMake `DELTA_MEMORY_DEBUG`, on by default for desktop and
+off for Android. See [tracking details](../../shared/memory_debug/README.md).

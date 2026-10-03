@@ -10,6 +10,7 @@
 #include "options/options.h"
 #include "options/settings.h"
 #include "ui/home_screen.h"
+#include "ui/overlay_memory.h"
 #include "ui/pause_menu.h"
 
 namespace {
@@ -85,6 +86,7 @@ void SyncMouseLook(SDL_Window* window) {
   Load();
   const bool capture = window && g_settings.enabled && !HomeScreenActive() &&
                        !LaunchTransitionActive() && !PauseMenuVisible() &&
+                       !MemoryOverlayBlocksInput() &&
                        (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS);
   if (capture == g_captured || (capture && g_failed))
     return;

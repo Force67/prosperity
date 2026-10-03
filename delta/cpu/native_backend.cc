@@ -15,6 +15,7 @@
 #include "guest_abi.h"
 #include "kern/crash.h"
 #include "kern/module.h"
+#include "memory_debug/memory_debug.h"
 
 namespace cpu {
 
@@ -79,6 +80,7 @@ class NativeBackend final : public Backend {
   };
 
   void* CreateGuestThread(uintptr_t entry, void* arg, u64 fsbase) override {
+    const memory_debug::Scope memory_scope(memory_debug::Bucket::kThreadStacks);
     return new NativeThread{entry, arg, fsbase};
   }
 

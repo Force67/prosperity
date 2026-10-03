@@ -53,11 +53,17 @@ bool IsMemoryRangeMapped(const void* addr, size_t len);
 // Identity of backing pages allocated through the guest memory helpers. A
 // remap gets a new identity even when its address, size and permissions match.
 // Unknown or only partially tracked ranges return zero and cannot be cached.
-void TrackMemoryMapping(void* addr, size_t len);
+void TrackMemoryMapping(void* addr, size_t len, bool reserved = false);
 void ForgetMemoryMapping(void* addr, size_t len);
 u64 MemoryMappingIdentity(const void* addr, size_t len);
 
 size_t MappedMemoryPrefix(const void* addr, size_t max_len);
+
+struct MappingStats {
+  u64 mapped = 0;
+  u64 reserved = 0;
+};
+MappingStats GetMappingStats();
 
 size_t GetAvailableMem();
 

@@ -1,6 +1,6 @@
 #include "guest/session.h"
+#include "memory_debug/memory_debug.h"
 #ifdef DELTA_HAVE_AVCODEC
-#include "runtime/media/videodec.h"
 #include <cstring>
 #include "base/containers/array.h"
 #include "base/containers/hash_map.h"
@@ -13,6 +13,7 @@
 #include "guest_abi.h"
 #include "host_memory/host_memory.h"
 #include "options/options.h"
+#include "runtime/media/videodec.h"
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/buffer.h>
@@ -264,6 +265,7 @@ i32 PS4ABI QueryMemory(const Config* c, Memory* m) {
   return 0;
 }
 i32 PS4ABI Create(const Config* c, const Memory* m, void** result) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMedia);
   if (!ValidConfig(c) || !Sized(m) || !Readable(result, sizeof(*result)))
     return kConfig;
   *result = nullptr;
@@ -300,6 +302,7 @@ i32 PS4ABI Decode(void* handle,
                   const Input* input,
                   FrameBuffer* target,
                   Output* out) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMedia);
   if (!Sized(input) || !Readable(input->data, input->bytes) ||
       input->bytes > 64 * 1024 * 1024)
     return kPointer;
@@ -339,6 +342,7 @@ i32 PS4ABI Decode(void* handle,
   return Receive(d, *target, *out);
 }
 i32 PS4ABI Flush(void* handle, FrameBuffer* target, Output* out) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMedia);
   if (const i32 error = OutputArgs(target, out))
     return error;
   base::LockGuard guard(g_lock);

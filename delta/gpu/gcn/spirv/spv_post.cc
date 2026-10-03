@@ -10,6 +10,7 @@
 #include "base/arch.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gpu_perf.h"
+#include "memory_debug/memory_debug.h"
 #include "ui/shader_activity.h"
 
 #include "base/logging.h"
@@ -312,6 +313,7 @@ class FinalizePool {
 
  private:
   void Work() {
+    const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
     for (;;) {
       base::Function<void()> job;
       {

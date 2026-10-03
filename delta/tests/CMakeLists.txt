@@ -7,3 +7,7 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_module_layering.py
             ${CMAKE_SOURCE_DIR})
 endif()
+
+add_delta_test(memory_debug_test
+  SOURCES memory_debug_test.cc
+  DEPS delta_deps)

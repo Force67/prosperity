@@ -24,6 +24,7 @@ namespace {
 struct Mapping {
   uintptr_t end;
   u64 identity;
+  bool reserved;
 };
 struct MappingRegistry {
   base::Mutex lock;
@@ -31,6 +32,7 @@ struct MappingRegistry {
   u64 next_identity = 0;
   bool session = false;
   base::Map<uintptr_t, uintptr_t> owned;
+  MappingStats stats;
 };
 MappingRegistry& MappingState() {
   // AllocMem can be called while another translation unit initializes.
@@ -50,22 +52,28 @@ void ForgetMapping(MappingRegistry& state, uintptr_t begin, uintptr_t end) {
       continue;
     }
     it = mappings.erase(it);
+    const uintptr_t removed_begin = base::Max(base, begin);
+    const uintptr_t removed_end = base::Min(prior.end, end);
+    auto& bytes = prior.reserved ? state.stats.reserved : state.stats.mapped;
+    bytes -= removed_end - removed_begin;
     if (base < begin)
-      mappings.emplace(base, Mapping{begin, prior.identity});
+      mappings.emplace(base, Mapping{begin, prior.identity, prior.reserved});
     if (prior.end > end)
-      mappings.emplace(end, Mapping{prior.end, prior.identity});
+      mappings.emplace(end, Mapping{prior.end, prior.identity, prior.reserved});
   }
 }
 }  // namespace
 
-void TrackMemoryMapping(void* addr, size_t len) {
+void TrackMemoryMapping(void* addr, size_t len, bool reserved) {
   const uintptr_t base = reinterpret_cast<uintptr_t>(addr);
   if (!base || !len || len > UINTPTR_MAX - base)
     return;
   auto& state = MappingState();
   base::LockGuard lock(state.lock);
   ForgetMapping(state, base, base + len);
-  state.mappings.emplace(base, Mapping{base + len, ++state.next_identity});
+  state.mappings.emplace(base,
+                         Mapping{base + len, ++state.next_identity, reserved});
+  (reserved ? state.stats.reserved : state.stats.mapped) += len;
   if (state.session) {
     uintptr_t first = base, end = base + len;
     auto it = state.owned.upper_bound(first);
@@ -158,14 +166,15 @@ void* AllocMem(void* preferred_addr,
   void* p = ::mmap(preferred_addr, length, posix_prot, flags, -1, 0);
   if (p == MAP_FAILED)
     return nullptr;
-  TrackMemoryMapping(p, length);
+  TrackMemoryMapping(p, length, type == AllocationType::kReserve);
   return p;
 }
 
 void FreeMem(void* addr, size_t size) {
   if (!addr || !size)
     return;
-  ::munmap(addr, size);
+  if (::munmap(addr, size) != 0)
+    return;
   const uintptr_t begin = reinterpret_cast<uintptr_t>(addr), end = begin + size;
   auto& state = MappingState();
   base::LockGuard lock(state.lock);
@@ -203,6 +212,12 @@ void BeginMemorySession() {
   auto& state = MappingState();
   base::LockGuard lock(state.lock);
   state.session = true;
+}
+
+MappingStats GetMappingStats() {
+  auto& state = MappingState();
+  base::LockGuard lock(state.lock);
+  return state.stats;
 }
 
 size_t SessionMappedBytes() {

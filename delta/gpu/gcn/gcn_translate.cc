@@ -8,6 +8,7 @@
 
 #include "gpu/gcn/gcn_translate.h"
 #include "base/arch.h"
+#include "memory_debug/memory_debug.h"
 
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_disasm.h"
@@ -87,6 +88,7 @@ Recompiled Recompile(const u32* vs_code,
                      u32 int_attr_mask,
                      u32 col_format,
                      u32 tex_cube_mask) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
   DELTA_ZONE("gcn.recompile");
   const ui::ShaderCompilation compilation;
   Recompiled r;
@@ -109,6 +111,7 @@ RecompiledCs RecompileCompute(const u32* cs_code,
                               u32 user_sgpr,
                               u32 tgid_enable,
                               u32 lds_dwords) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
   DELTA_ZONE("gcn.recompile_cs");
   const ui::ShaderCompilation compilation;
   RecompiledCs r;

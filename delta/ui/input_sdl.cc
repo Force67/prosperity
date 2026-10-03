@@ -7,6 +7,7 @@
 #include "ui/mouse_look.h"
 #include "ui/overlay.h"
 #include "ui/overlay_log.h"
+#include "ui/overlay_memory.h"
 #include "ui/pause_menu.h"
 
 namespace ui {
@@ -15,6 +16,35 @@ void ProcessEvent(const SDL_Event& e,
                   SDL_Window* window,
                   u32 framebuffer_width,
                   u32 framebuffer_height) {
+  if (e.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+    MemoryOverlayEscape(false);
+    MemoryOverlayEscape(false, true);
+  } else if (e.type == SDL_EVENT_GAMEPAD_REMOVED) {
+    MemoryOverlayEscape(false, true);
+  }
+  if (!HomeScreenActive() && !PauseMenuVisible() &&
+      e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+      e.key.scancode == SDL_SCANCODE_F4) {
+    MemoryOverlayToggle();
+    ImGui::GetIO().ClearInputKeys();
+    SyncMouseLook(window);
+    return;
+  }
+  if ((e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) &&
+      e.key.scancode == SDL_SCANCODE_ESCAPE &&
+      MemoryOverlayEscape(e.type == SDL_EVENT_KEY_DOWN)) {
+    ImGui::GetIO().ClearInputKeys();
+    SyncMouseLook(window);
+    return;
+  }
+  if ((e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+       e.type == SDL_EVENT_GAMEPAD_BUTTON_UP) &&
+      e.gbutton.button == SDL_GAMEPAD_BUTTON_EAST &&
+      MemoryOverlayEscape(e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN, true)) {
+    ImGui::GetIO().ClearInputKeys();
+    SyncMouseLook(window);
+    return;
+  }
   if (!HomeScreenActive() && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
       (e.key.scancode == SDL_SCANCODE_LCTRL ||
        e.key.scancode == SDL_SCANCODE_RCTRL)) {
@@ -37,11 +67,13 @@ void ProcessEvent(const SDL_Event& e,
         SyncMouseLook(window);
       }
     }
-    return;
+    if (GetMemoryOverlayMode() == MemoryOverlayMode::kOff)
+      return;
   }
   ImGuiIO& io = ImGui::GetIO();
-  int width, height;
-  SDL_GetWindowSize(window, &width, &height);
+  int width = framebuffer_width, height = framebuffer_height;
+  if (window)
+    SDL_GetWindowSize(window, &width, &height);
   const float sx = width ? float(framebuffer_width) / width : 1;
   const float sy = height ? float(framebuffer_height) / height : 1;
   if (e.type == SDL_EVENT_MOUSE_MOTION)
