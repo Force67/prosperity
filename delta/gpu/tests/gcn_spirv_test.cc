@@ -72,6 +72,8 @@ bool HasBuiltin(const base::Vector<u32>& spirv, u32 builtin) {
 
 bool Recompile(base::Vector<u32> code) {
   code.push_back(kEndPgm);
+  // The recompiler scans 4096 dwords for shader metadata.
+  code.resize(4096);
   const u32 user_data[16] = {};
   return gpu::gcn::Recompile(code.data(), nullptr, user_data, user_data).ok;
 }
@@ -110,10 +112,10 @@ TEST(RdnaScalarReplay, CompareWritesOnlyItsSelectedMaskRegister) {
 
 TEST(RdnaSpirv, NoColorExportDoesNotSynthesizeWhiteOutput) {
   const u32 user_data[32] = {};
-  const u32 vs[64] = {kEndPgm};
-  const u32 no_export[64] = {kEndPgm};
-  const u32 null_export[64] = {0xf8000890, 0, kEndPgm};
-  const u32 color_export[64] = {0x7e0002f2, 0xf800080f, 0,
+  const u32 vs[4096] = {kEndPgm};
+  const u32 no_export[4096] = {kEndPgm};
+  const u32 null_export[4096] = {0xf8000890, 0, kEndPgm};
+  const u32 color_export[4096] = {0x7e0002f2, 0xf800080f, 0,
                                 kEndPgm};  // v0=1; exp mrt0 v0,v0,v0,v0
   for (const u32* ps : {no_export, null_export, color_export}) {
     gpu::rdna::NextProgramGeneration();
@@ -124,7 +126,7 @@ TEST(RdnaSpirv, NoColorExportDoesNotSynthesizeWhiteOutput) {
 }
 
 TEST(RdnaSpirv, ReloadedDescriptorUsesItsOwnGraphicsBuffer) {
-  const u32 vs[64] = {
+  const u32 vs[4096] = {
       0xf4080404, 0xfa000000,  // s_load_dwordx4 s[16:19], s[8:9], 0
       0xe0300000, 0x80040000,  // v0 = buffer A[0]
       0xe0300004, 0x80040100,  // v1 = buffer A[1], same descriptor
@@ -405,8 +407,8 @@ TEST(GcnSpirv, PlansScalarLoadedCbufferDescriptor) {
 
 TEST(GcnSpirv, SeedsPixelPositionFromFragCoord) {
   const IsaScope base(gpu::gcn::IsaMode::kBase);
-  const u32 vs[] = {kEndPgm};
-  const u32 ps[] = {
+  const u32 vs[4096] = {kEndPgm};
+  const u32 ps[4096] = {
       0x7e080f02,              // v_cvt_u32_f32 v4, v2
       0x7e0a0f03,              // v_cvt_u32_f32 v5, v3
       0xf800000f, 0x07060504,  // exp mrt0 v4, v5, v6, v7

@@ -21,18 +21,20 @@ Binary: `build/delta/main/ps4delta`.
 Next: [install system modules and run a game](installation.md).
 Keep the Nix shell open when running the binary.
 
-CI uses `nix develop .#ci`, a build and software-rendering shell without the
-debuggers, profiler tools, or custom RenderDoc build. Its Nix store cache is
-keyed by the flake and runner architecture and saved before compilation.
-ccache is restored across commits and saved even when compilation fails.
-To reproduce CI locally:
+## Ubuntu CI and release packages
 
-```bash
-nix develop .#ci
-cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-cmake --build build/ci --parallel
-ctest --test-dir build/ci --output-on-failure
-```
+CI builds natively on Ubuntu 24.04 with GCC 14 and Ubuntu's development packages.
+GCC 13 miscompiles the packed buffer format conversion at release optimization.
+SDL3 3.4.2 is built from a pinned commit and linked statically. Vulkan and OpenGL
+are enabled; D3D12 is disabled. The shader recompiler and FFmpeg video decoder
+use Ubuntu's SPIRV-Tools and FFmpeg packages.
+
+Every successful build produces a `prosperity-ubuntu-24.04-amd64` artifact with a
+`.deb` package. CI installs it in a clean Ubuntu 24.04 container and checks the
+CLI and installed files. Pushing a `v*` tag publishes the tested package as a
+GitHub release. Tag versions must be valid Debian versions, for example `v0.1.0`.
+
+Nix remains available for local development.
 
 ## Linux without Nix
 

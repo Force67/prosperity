@@ -8,6 +8,8 @@
  * in the root of the source tree.
  */
 
+#include <cstdint>
+
 #include "base/arch.h"
 #include "guest_abi.h"
 

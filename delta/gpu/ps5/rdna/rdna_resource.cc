@@ -12,6 +12,7 @@
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/guest_memory.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

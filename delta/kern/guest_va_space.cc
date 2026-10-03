@@ -31,6 +31,8 @@
 
 #include "kern/guest_va_space.h"
 
+#include <cstdint>
+
 #include "logger/logger.h"
 
 #include <sys/mman.h>

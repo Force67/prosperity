@@ -137,3 +137,7 @@ if(NOT ANDROID)
   add_subdirectory(tools/archive_extract)
   add_subdirectory(tools/window_test)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  include(PackageLinux)
+endif()

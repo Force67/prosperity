@@ -15,6 +15,7 @@
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 
+#include <cstdint>
 #include <initializer_list>
 #include "base/arch.h"
 

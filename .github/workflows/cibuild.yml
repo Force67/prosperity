@@ -1,6 +1,11 @@
 name: CI
 
-on: [push, workflow_dispatch]
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,6 +19,7 @@ env:
   CCACHE_BASEDIR: ${{ github.workspace }}
   CCACHE_COMPILERCHECK: content
   CCACHE_MAXSIZE: 2G
+  SDL_COMMIT: 683181b47cfabd293e3ea409f838915b8297a4fd
 
 jobs:
   build:
@@ -24,45 +30,69 @@ jobs:
       with:
         submodules: recursive
 
-    - uses: nixbuild/nix-quick-install-action@v35
-      with:
-        nix_conf: |
-          keep-env-derivations = true
-          keep-outputs = true
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential gcc-14 g++-14 cmake ninja-build pkg-config ccache dpkg-dev file \
+          libvulkan-dev mesa-vulkan-drivers libavcodec-dev libavutil-dev \
+          spirv-tools spirv-headers libepoxy-dev libegl-dev libopengl-dev \
+          libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev \
+          libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+          libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev libdecor-0-dev
 
-    - name: Restore Nix store
-      id: nix-cache
-      uses: nix-community/cache-nix-action/restore@v7
+    - name: Restore SDL3
+      id: sdl-cache
+      uses: actions/cache/restore@v4
       with:
-        primary-key: nix-ci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
-        restore-prefixes-first-match: nix-ci-${{ runner.os }}-${{ runner.arch }}-
+        path: ${{ runner.temp }}/sdl3
+        key: sdl3-ubuntu-24.04-static-${{ env.SDL_COMMIT }}
 
-    - name: Prepare CI shell
-      run: nix develop .#ci --profile "$RUNNER_TEMP/nix-ci-profile" --command true
+    - name: Build SDL3
+      if: steps.sdl-cache.outputs.cache-hit != 'true'
+      run: |
+        curl -fL "https://github.com/libsdl-org/SDL/archive/$SDL_COMMIT.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+        cmake -S "$RUNNER_TEMP/SDL-$SDL_COMMIT" -B "$RUNNER_TEMP/sdl-build" -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/sdl3" \
+          -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST_LIBRARY=OFF -DSDL_TESTS=OFF
+        cmake --build "$RUNNER_TEMP/sdl-build" --parallel "$(nproc)"
+        cmake --install "$RUNNER_TEMP/sdl-build"
 
-    # Save the toolchain before building, so failures still leave a warm cache.
-    - name: Save Nix store
-      if: steps.nix-cache.outputs.hit-primary-key != 'true'
-      uses: nix-community/cache-nix-action/save@v7
+    - name: Save SDL3
+      if: steps.sdl-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
       with:
-        primary-key: ${{ steps.nix-cache.outputs.primary-key }}
-        gc-max-store-size-linux: 5G
+        path: ${{ runner.temp }}/sdl3
+        key: ${{ steps.sdl-cache.outputs.cache-primary-key }}
 
     - name: Restore ccache
       id: ccache
       uses: actions/cache/restore@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        key: ccache-ubuntu-24.04-${{ hashFiles('**/CMakeLists.txt', 'cmake/**', '.github/workflows/cibuild.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
-          ccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-
-          ccache-${{ runner.os }}-${{ runner.arch }}-
+          ccache-ubuntu-24.04-${{ hashFiles('**/CMakeLists.txt', 'cmake/**', '.github/workflows/cibuild.yml') }}-
+          ccache-ubuntu-24.04-
 
     - name: Configure
       id: configure
-      run: nix develop .#ci --command cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      run: |
+        version="0.0.0+git.$(git rev-parse --short HEAD)"
+        if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+          version="${GITHUB_REF_NAME#v}"
+        fi
+        cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/sdl3" -DCMAKE_INSTALL_PREFIX=/usr \
+          -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          -DDELTA_GPU_D3D12=OFF -DDELTA_PACKAGE_VERSION="$version"
+        for dependency in SPIRVTOOLS SPIRVHEADERS AVCODEC; do
+          grep -q "^${dependency}_FOUND:INTERNAL=1$" build/CMakeCache.txt
+        done
+
     - name: Build
-      run: nix develop .#ci --command cmake --build build --parallel "$(nproc)"
+      run: cmake --build build --parallel "$(nproc)" -- -k 0
 
     - name: Save ccache
       if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
@@ -72,12 +102,51 @@ jobs:
         key: ${{ steps.ccache.outputs.cache-primary-key }}
 
     - name: Test
-      run: nix develop .#ci --command ctest --test-dir build --output-on-failure
-    - name: ccache stats
-      if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
-      run: nix develop .#ci --command ccache -s
+      env:
+        LIBGL_ALWAYS_SOFTWARE: '1'
+        EGL_PLATFORM: surfaceless
+      run: ctest --test-dir build --output-on-failure
+
+    - name: Package
+      run: cpack --config build/CPackConfig.cmake -B dist
 
     - uses: actions/upload-artifact@v4
       with:
-        name: ps4delta
-        path: build/delta/main/ps4delta
+        name: prosperity-ubuntu-24.04-amd64
+        path: dist/*.deb
+        if-no-files-found: error
+
+  install:
+    needs: build
+    runs-on: ubuntu-24.04
+    container: ubuntu:24.04
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: prosperity-ubuntu-24.04-amd64
+        path: dist
+    - name: Install and smoke test
+      run: |
+        apt-get update
+        apt-get install -y ./dist/*.deb
+        ps4delta --version
+        ps4delta --help
+        test -f /usr/bin/game_profiles/README.md
+        test -f /usr/share/applications/ps4delta.desktop
+        ! ldd /usr/bin/ps4delta | grep -E 'not found|/nix/store'
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: install
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: prosperity-ubuntu-24.04-amd64
+        path: dist
+    - name: Publish release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh release create "$GITHUB_REF_NAME" dist/*.deb --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
