@@ -50,6 +50,10 @@ bool PauseMenuVisible() {
   return guest::Paused() || g_visibility > 0;
 }
 
+void PauseMenuRequestExit() {
+  g_exit_requested.store(true);
+}
+
 bool PauseMenuExitRequested() {
   return g_exit_requested.load();
 }
@@ -190,6 +194,7 @@ void PauseMenuToggle() {}
 bool PauseMenuVisible() {
   return false;
 }
+void PauseMenuRequestExit() {}
 bool PauseMenuExitRequested() {
   return false;
 }

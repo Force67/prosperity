@@ -11,6 +11,7 @@
 #include <cstddef>
 #include "base/arch.h"
 #include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 
 // SDL3 window backed by a Vulkan swapchain. present() uploads a CPU framebuffer
 // and blits it to the swapchain, scaling to the window size. The VideoOut flip
@@ -99,6 +100,11 @@ void SetRumble(u8 large_motor, u8 small_motor);
 // on (a run started).
 void SetInGameplay(bool v);
 bool InGameplay();
+
+#if defined(__linux__) && !defined(__ANDROID__)
+void ReloadOverlay();
+base::Vector<base::String> GraphicsDevices();
+#endif
 
 void Shutdown();
 

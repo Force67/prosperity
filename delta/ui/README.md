@@ -2,12 +2,14 @@
 
 Desktop ImGui menus and overlays. Namespace `ui`.
 
-**Open game** accepts packages, archives, standalone executables, and an
-unpacked game's `eboot.bin`. **Open folder** selects its root instead. The
-launcher mounts the whole game folder and saves that folder in recent games.
+**Add game** accepts packages, archives, standalone executables, and an
+unpacked game's `eboot.bin`. **Add folder** selects its root instead. Both add
+the game and its artwork to the home menu without starting it. Select **Play**
+to launch. Unpacked games are saved by their root folder.
 
 | Unit | Purpose |
 |---|---|
+| `settings.h` | Lounge settings panel, API cards, preferences, and save/discard |
 | `home_screen.h` | Recent games, artwork, PS4/PS5 chips, native file pickers |
 | `pause_menu.h` | Guest pause, Resume, and keyboard controls |
 | `overlay.h` | ImGui context, frame building, controls legend |

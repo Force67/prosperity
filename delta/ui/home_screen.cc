@@ -17,6 +17,7 @@
 #include "ui/home_background.h"
 #include "ui/overlay.h"
 #include "ui/overlay_theme.h"
+#include "ui/settings.h"
 
 namespace ui {
 namespace {
@@ -83,6 +84,7 @@ base::String (*g_check_game)(const base::String&) = nullptr;
 base::Mutex g_dialog_mutex;
 bool g_dialog_pending = false;
 base::String g_dialog_path;
+base::String g_add_path;
 base::String g_dialog_error;
 
 int AddArtwork(const base::Vector<u8>& png,
@@ -255,7 +257,7 @@ void ReadDialogResult() {
       g_error = base::move(g_dialog_error);
   }
   if (!path.empty())
-    Play(path);
+    g_add_path = base::move(path);
 }
 float DrawShortcut(ImDrawList* dl,
                    float x,
@@ -331,7 +333,8 @@ void HomeScreenBuild(u32 width, u32 height) {
   const mem_size visible = base::Max(
       mem_size(1), static_cast<mem_size>((w - margin * 2) / (tile + 20)));
   const bool launch_error = !g_launch_error.empty();
-  if (!g_launch_ns && !launch_error && !DialogPending() && !g_games->empty()) {
+  if (!SettingsVisible() && !g_launch_ns && !launch_error && !DialogPending() &&
+      !g_games->empty()) {
     if ((ImGui::IsKeyPressed(ImGuiKey_LeftArrow) ||
          ImGui::GetIO().MouseWheel > 0) &&
         g_selected)
@@ -344,11 +347,14 @@ void HomeScreenBuild(u32 width, u32 height) {
         ImGui::IsKeyPressed(ImGuiKey_Space))
       Play((*g_games)[g_selected].path);
   }
-  if (!g_launch_ns && g_launch_error.empty() && !DialogPending()) {
+  if (!SettingsVisible() && !g_launch_ns && g_launch_error.empty() &&
+      !DialogPending()) {
     if (ImGui::IsKeyPressed(ImGuiKey_Escape))
       g_done = true;
     if (ImGui::IsKeyPressed(ImGuiKey_O))
       OpenGame(false);
+    if (ImGui::IsKeyPressed(ImGuiKey_S))
+      SettingsOpen();
   }
   if (g_selected < g_first)
     g_first = g_selected;
@@ -389,20 +395,24 @@ void HomeScreenBuild(u32 width, u32 height) {
                    ImGuiWindowFlags_NoBackground);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const int first_vertex = dl->VtxBuffer.Size;
-  ImGui::BeginDisabled(g_launch_ns != 0 || !g_launch_error.empty());
+  ImGui::BeginDisabled(SettingsVisible() || g_launch_ns != 0 ||
+                       !g_launch_error.empty());
   overlay_theme::DrawMark(dl, ImVec2(margin, 34));
   dl->AddText(ImVec2(margin + 24, 32), overlay_theme::kText, "Prosperity");
   dl->AddRectFilled(ImVec2(margin + 132, 24), ImVec2(margin + 204, 56),
                     overlay_theme::WithOpacity(overlay_theme::kText, 0.06f),
                     16);
   dl->AddText(ImVec2(margin + 148, 32), overlay_theme::kText, "Games");
-  ImGui::SetCursorPos(ImVec2(w - margin - 256, 24));
+  ImGui::SetCursorPos(ImVec2(w - margin - 312, 24));
   ImGui::BeginDisabled(DialogPending());
-  if (ImGui::Button("Open game", ImVec2(120, 36)))
+  if (ImGui::Button("Add game", ImVec2(120, 36)))
     OpenGame(false);
   ImGui::SameLine(0, 16);
-  if (ImGui::Button("Open folder", ImVec2(120, 36)))
+  if (ImGui::Button("Add folder", ImVec2(120, 36)))
     OpenGame(true);
+  ImGui::SameLine(0, 16);
+  if (SettingsButton())
+    SettingsOpen();
   ImGui::EndDisabled();
 
   if (missing_firmware)
@@ -416,11 +426,11 @@ void HomeScreenBuild(u32 width, u32 height) {
     dl->AddText(g_heading, 32, ImVec2(tl.x + 24, tl.y + 24),
                 overlay_theme::kText, "Your next game starts here");
     dl->AddText(ImVec2(tl.x + 24, tl.y + 80), overlay_theme::kSecondary,
-                "Open a game file or an extracted game folder.");
+                "Add a game file or an extracted game folder.");
     dl->AddText(ImVec2(tl.x + 24, tl.y + 104), overlay_theme::kSecondary,
-                "Games you launch will appear here with their artwork.");
+                "Added games appear here. Select Play when you are ready.");
     ImGui::SetCursorPos(ImVec2(tl.x + 24, tl.y + 152));
-    if (ImGui::Button("Open a game", ImVec2(176, 40)))
+    if (ImGui::Button("Add a game", ImVec2(176, 40)))
       OpenGame(false);
   } else {
     dl->AddText(ImVec2(margin, row_y - 28), overlay_theme::kSecondary,
@@ -533,7 +543,8 @@ void HomeScreenBuild(u32 width, u32 height) {
   float hint_x = margin;
   hint_x = DrawShortcut(dl, hint_x, h - 40, "< >", "Browse");
   hint_x = DrawShortcut(dl, hint_x, h - 40, "Enter", "Play");
-  hint_x = DrawShortcut(dl, hint_x, h - 40, "O", "Open game");
+  hint_x = DrawShortcut(dl, hint_x, h - 40, "O", "Add game");
+  hint_x = DrawShortcut(dl, hint_x, h - 40, "S", "Settings");
   DrawShortcut(dl, hint_x, h - 40, "Esc", "Exit");
   if (!g_error.empty())
     dl->AddText(ImVec2(margin, h - 64), overlay_theme::kWarning,
@@ -551,6 +562,10 @@ void HomeScreenBuild(u32 width, u32 height) {
                 kAnniversary);
   }
   ImGui::EndDisabled();
+  if (SettingsVisible())
+    dl->AddRectFilled(
+        ImVec2(0, 0), ImVec2(w, h),
+        overlay_theme::WithOpacity(overlay_theme::kCanvas, 0.65f));
   if (g_launch_ns) {
     const float fade = FadeProgress(g_launch_ns, 0.35f);
     for (int i = first_vertex; i < dl->VtxBuffer.Size; ++i) {
@@ -609,6 +624,7 @@ void HomeScreenBuild(u32 width, u32 height) {
     ImGui::EndPopup();
   }
   ImGui::PopStyleVar(2);
+  SettingsBuild(width, height);
 }
 
 bool LaunchTransitionActive() {
@@ -649,6 +665,14 @@ void LaunchTransitionBuild(u32 width, u32 height) {
   bg->AddText(ImVec2(text_x + 24, y + 36), ink, "Starting game");
 }
 
+void HomeScreenSetBackground(u32 style) {
+  kBackgroundStyle.set(style);
+  g_background_style = style >= 1 && style <= 3
+                           ? style
+                           : ChooseHomeBackground(base::RandomUint(0, 767));
+  g_started_ns = base::TickClock::NowNs();
+}
+
 void BeginHomeScreen(const base::Vector<HomeGame>& games,
                      bool ps4_ready,
                      bool ps5_ready,
@@ -680,6 +704,14 @@ void BeginHomeScreen(const base::Vector<HomeGame>& games,
   g_active = true;
 }
 
+base::String TakeHomeScreenAddPath() {
+  return base::move(g_add_path);
+}
+
+void HomeScreenSetError(const base::String& error) {
+  g_error = error;
+}
+
 bool HomeScreenDone() {
   return g_done || (g_launch_ns && FadeProgress(g_launch_ns, 0.35f) >= 1);
 }
@@ -704,6 +736,10 @@ void BeginHomeScreen(const base::Vector<HomeGame>&,
                      bool,
                      bool,
                      base::String (*)(const base::String&)) {}
+base::String TakeHomeScreenAddPath() {
+  return {};
+}
+void HomeScreenSetError(const base::String&) {}
 bool HomeScreenDone() {
   return true;
 }
@@ -713,6 +749,7 @@ base::String EndHomeScreen() {
 bool HomeScreenActive() {
   return false;
 }
+void HomeScreenSetBackground(u32) {}
 HomeBackground HomeScreenBackground() {
   return {};
 }

@@ -26,6 +26,7 @@
 // (tests/check_layering.py) accepts; all modules share that include root, so
 // internal headers are kept private by the check, not by the build.
 #include "base/containers/vector.h"
+#include "base/strings/xstring.h"
 #include "gpu/render/command.h"
 
 namespace gpu::render {
@@ -190,5 +191,7 @@ void NoteGuestRemap(u64 base, u64 bytes);
 // it through this accessor because the guest-called entry points cannot thread
 // a handle. The single point of ambient state at this seam.
 Renderer& DefaultRenderer();
+
+base::Vector<base::String> GraphicsBackends();
 
 }  // namespace gpu::render

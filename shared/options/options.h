@@ -38,15 +38,16 @@
 
 namespace options {
 
-// Applies the environment, then the options files named by --options=<path> or
-// DELTA_OPTIONS, then '+Name=Value' arguments, in that order: the later source
-// wins. Consumes the arguments it handles (--options=, --dump-options, +Name=)
-// so the caller's own parsing never sees them. Call once at startup, before
-// anything reads an option.
+// Applies saved settings, the environment, then files named by --options=<path>
+// or DELTA_OPTIONS, then '+Name=Value' arguments, in that order: the later
+// source wins. Consumes the arguments it handles (--options=, --dump-options,
+// +Name=) so the caller's own parsing never sees them. Call once at startup,
+// before anything reads an option.
 void Init(int& argc, char** argv);
 
 // The same, for hosts that have no command line of their own (the Android
-// activity). Options come from the environment and DELTA_OPTIONS.
+// activity). Options come from saved settings, the environment and
+// DELTA_OPTIONS.
 void Init();
 
 // Applies a single options file. `optional` is for the paths we probe rather

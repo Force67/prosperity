@@ -35,6 +35,7 @@
 #include "options/options.h"
 #include "ui/pause_menu.h"
 #if defined(__linux__) && !defined(__ANDROID__)
+#include "main/home_screen.h"
 #include "main/recent_games.h"
 #endif
 
@@ -207,9 +208,8 @@ void SetWindowTitle(const BootTitle& title) {
 }
 
 #if defined(__linux__) && !defined(__ANDROID__)
-void SetWindowArtwork(const BootTitle& title, const base::String& path) {
-  if (!title.icon.empty())
-    host::SetIcon(title.icon.data(), title.icon.size());
+base::Vector<u8> ReadTitleArtwork(const BootTitle& title,
+                                  const base::String& path) {
   base::Vector<u8> png;
   for (const char* filename : {"pic0.png", "pic1.png"}) {
     const auto relative = base::String("/sce_sys/") + filename;
@@ -225,6 +225,13 @@ void SetWindowArtwork(const BootTitle& title, const base::String& path) {
       break;
     png.clear();
   }
+  return png;
+}
+
+void SetWindowArtwork(const BootTitle& title, const base::String& path) {
+  if (!title.icon.empty())
+    host::SetIcon(title.icon.data(), title.icon.size());
+  auto png = ReadTitleArtwork(title, path);
   cli::RememberGame(path, title.name, title.title_id, title.is_ps5, title.icon,
                     png);
   if (!png.empty())
@@ -262,6 +269,18 @@ bool Launcher::Init() {
                            host::SetAudioPortVolume, host::CloseAudioPort});
   return true;
 }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+base::String cli::AddHomeGame(const base::String& game_path) {
+  base::String path = game_path;
+  BootTitle title;
+  if (!LoadTitle(path, &title))
+    return "Could not read this game.";
+  RememberGame(path, title.name, title.title_id, title.is_ps5, title.icon,
+               ReadTitleArtwork(title, path));
+  return {};
+}
+#endif
 
 void Launcher::Boot(const base::String& game_path) {
   base::String path = game_path;

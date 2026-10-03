@@ -750,6 +750,50 @@ bool Init(const char* title, u32 width, u32 height) {
   return true;
 }
 
+base::Vector<base::String> GraphicsDevices() {
+  base::Vector<base::String> result;
+  if (!g_window.instance)
+    return result;
+  u32 count = 0;
+  if (vkEnumeratePhysicalDevices(g_window.instance, &count, nullptr) !=
+      VK_SUCCESS)
+    return result;
+  base::Vector<VkPhysicalDevice> devices(count);
+  if (vkEnumeratePhysicalDevices(g_window.instance, &count, devices.data()) !=
+      VK_SUCCESS)
+    return result;
+  for (u32 i = 0; i < count; ++i) {
+    u32 family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &family_count,
+                                             nullptr);
+    base::Vector<VkQueueFamilyProperties> families(family_count);
+    vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &family_count,
+                                             families.data());
+    bool presentable = false;
+    for (u32 family = 0; family < family_count; ++family) {
+      VkBool32 present = VK_FALSE;
+      vkGetPhysicalDeviceSurfaceSupportKHR(devices[i], family, g_window.surface,
+                                           &present);
+      presentable |=
+          present && (families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT);
+    }
+    if (!presentable)
+      continue;
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(devices[i], &properties);
+    result.emplace_back(properties.deviceName);
+  }
+  return result;
+}
+
+void ReloadOverlay() {
+  ui::OverlayVkInit(g_window.phys, g_window.device, g_window.queue,
+                    g_window.queue_family, g_window.cmd_pool,
+                    g_window.swap_format);
+  ui::OverlayVkSetSwapchain(g_window.swap_images, g_window.swap_extent,
+                            g_window.swap_format);
+}
+
 void QueryVram(u64& used, u64& total) {
   used = total = 0;
   // Callers outside the present path (the GPU perf overlay) can ask before the
@@ -1046,7 +1090,10 @@ static bool DrainEvents() {
   StopSplash();
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
-    if (e.type == SDL_EVENT_QUIT) {
+    if (e.type == SDL_EVENT_QUIT ||
+        (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
+         e.window.windowID == SDL_GetWindowID(g_window.window))) {
+      ui::PauseMenuRequestExit();
       g_can_present.store(false, base::memory_order_release);
       return false;
     }

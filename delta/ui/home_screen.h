@@ -20,6 +20,8 @@ void BeginHomeScreen(const base::Vector<HomeGame>& games,
                      bool ps4_ready,
                      bool ps5_ready,
                      base::String (*check_game)(const base::String&) = nullptr);
+base::String TakeHomeScreenAddPath();
+void HomeScreenSetError(const base::String& error);
 bool HomeScreenDone();
 // Returns the selected game path, or an empty string when the window closes.
 base::String EndHomeScreen();
@@ -32,6 +34,7 @@ struct HomeBackground {
 };
 
 bool HomeScreenActive();
+void HomeScreenSetBackground(u32 style);
 HomeBackground HomeScreenBackground();
 void HomeScreenBuild(u32 width, u32 height);
 bool LaunchTransitionActive();

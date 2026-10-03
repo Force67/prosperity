@@ -45,8 +45,15 @@ void ProcessEvent(const SDL_Event& e,
   if (e.type == SDL_EVENT_MOUSE_WHEEL)
     io.AddMouseWheelEvent(e.wheel.x, e.wheel.y);
   if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) {
+    io.AddKeyEvent(ImGuiKey_ModShift, (e.key.mod & SDL_KMOD_SHIFT) != 0);
     ImGuiKey key = ImGuiKey_None;
     switch (e.key.scancode) {
+      case SDL_SCANCODE_S:
+        key = ImGuiKey_S;
+        break;
+      case SDL_SCANCODE_TAB:
+        key = ImGuiKey_Tab;
+        break;
       case SDL_SCANCODE_UP:
         key = ImGuiKey_UpArrow;
         break;

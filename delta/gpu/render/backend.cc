@@ -3,6 +3,7 @@
  */
 
 #include "gpu/render/backend.h"
+#include "gpu/render/renderer.h"
 
 #include "gpu/vulkan/vk_rhi.h"
 #if DELTA_GPU_OPENGL
@@ -27,6 +28,13 @@ base::Vector<rhi::Backend> CompiledBackends() {
       rhi::Backend::kD3D12,
 #endif
   };
+}
+
+base::Vector<base::String> GraphicsBackends() {
+  base::Vector<base::String> names;
+  for (const auto backend : CompiledBackends())
+    names.emplace_back(rhi::BackendName(backend));
+  return names;
 }
 
 base::UniquePointer<rhi::Device> CreateBackendDevice(

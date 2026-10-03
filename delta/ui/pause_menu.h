@@ -9,6 +9,7 @@ void PauseMenuGameReady();
 void PauseMenuToggle();
 bool PauseMenuVisible();
 bool PauseMenuExitRequested();
+void PauseMenuRequestExit();
 void PauseMenuBuild(u32 width, u32 height);
 void PauseMenuReset();
 }  // namespace ui

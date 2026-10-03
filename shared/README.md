@@ -11,6 +11,6 @@ Host-side foundations every other layer may use. Depends only on equilibrium
 | `host_memory/` | host virtual memory: reserve, commit, protect, mapping identity |
 | `io/` | host file streams and paths relative to the executable |
 | `logger/` | the asynchronous log and its sinks (`LOG_*`) |
-| `options/` | `DELTA_OPTION` knobs from environment, options files and arguments |
+| `options/` | `DELTA_OPTION` knobs and saved UI preferences, followed by environment, files and arguments |
 | `profile/` | Tracy zones, frame marks and plots (`DELTA_ZONE`), no-ops without `DELTA_TRACY` |
 | `write_watch/` | lets any layer arm the kernel's guest write-watch probe |

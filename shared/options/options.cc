@@ -7,6 +7,7 @@
  */
 
 #include "options/options.h"
+#include "options/settings.h"
 
 #include <cstring>
 
@@ -120,6 +121,9 @@ void LoadGameProfile(const char* title_id) {
 }
 
 void Init() {
+  const auto settings = SettingsPath();
+  if (!settings.empty())
+    LoadFile(settings.c_str(), true);
   base::InitOptionsFromEnv();
 
   if (const char* list = kOptionFiles)

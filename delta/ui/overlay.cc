@@ -18,6 +18,7 @@
 #include "ui/overlay_log.h"
 #include "ui/overlay_theme.h"
 #include "ui/pause_menu.h"
+#include "ui/settings.h"
 
 namespace ui {
 namespace {
@@ -102,6 +103,7 @@ void OverlayEnsureImGui() {
 
 void OverlayShutdownImGui() {
   PauseMenuReset();
+  SettingsReset();
   if (g_inited)
     ImGui::DestroyContext();
   g_inited = false;
