@@ -347,19 +347,22 @@ int PS4ABI sys_sysctl(int* name,
     return 0;
   }
 
-  // kern.sdk_version (synthetic {0x1337,6}), encoded 0x0MMMmmpp. The real
-  // kernel reports the CALLING PROCESS's SDK version; PS5 libkernel compares
-  // every module's param stamp against it, and reporting less than the firmware
-  // the modules come from gets every LoadStartModule unloaded with 0x8002002d
-  // (Demon's Souls: libSceMouse/Rudp rejected -> Dantelion2 panic). PS4
-  // keeps 5.05.
+  // System SDK supported by the installed firmware. Module load-start checks
+  // this against the firmware stamp at module-param +0x14, independently of
+  // the title's compiled SDK returned by kern.proc.36.
   else if (name[0] == 0x1337 && name[1] == 6 && namelen == 2) {
     if (oldp && oldlenp && *oldlenp >= sizeof(u32)) {
       u32 v = 0x05050001;
-      if (const auto* active = Process::GetActive();
-          active && active->GetPlatform() == Process::Platform::kPs5 &&
-          active->GetSdkVersion())
-        v = active->GetSdkVersion();
+      if (auto* active = Process::GetActive();
+          active && active->GetPlatform() == Process::Platform::kPs5) {
+        auto kernel = active->GetModule("libkernel");
+        if (kernel && kernel->GetInfo().module_param &&
+            kernel->GetInfo().module_param_size >= 0x18) {
+          std::memcpy(&v, kernel->GetInfo().module_param + 0x14, sizeof(v));
+        } else if (active->GetSdkVersion()) {
+          v = active->GetSdkVersion();
+        }
+      }
       *reinterpret_cast<u32*>(oldp) = v;
       *oldlenp = sizeof(u32);
     }

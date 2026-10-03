@@ -22,6 +22,7 @@
 #include "gpu/guest_page_table.h"
 #include "gpu/render/capture.h"
 #include "gpu/render/compute_hazard.h"
+#include "gpu/render/compute_writeback.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/guest_format.h"
@@ -3448,48 +3449,21 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
       constexpr u64 kMergeBlocksPerChunk = 1024;  // 64 KiB a chunk
       const u32 chunks = static_cast<u32>((blocks + kMergeBlocksPerChunk - 1) /
                                           kMergeBlocksPerChunk);
-      struct ChunkCounts {
-        u64 wrote = 0, adopted = 0, conflicts = 0;
-      };
-      base::Vector<ChunkCounts> counts(chunks);
+      base::Vector<ComputeWritebackCounts> counts(chunks);
       gcn::DetileParallelWork(chunks, blocks * 64, [&](u32 c0, u32 c1) {
         for (u32 c = c0; c < c1; c++) {
           const u64 first = u64(c) * kMergeBlocksPerChunk;
           const u64 last = base::Min<u64>(first + kMergeBlocksPerChunk, blocks);
-          ChunkCounts local;
+          ComputeWritebackCounts local;
           for (u64 b = first; b < last; b++) {
             const u64 o = b * 64;
-            const bool gpu = std::memcmp(src + o, shd + o, 64) != 0;
-            const bool cpu = std::memcmp(dst + o, shd + o, 64) != 0;
-            if (cpu && gpu) {
-              // Both changed the block: merge it word by word, the CPU's
-              // word winning where both changed the same one.
-              local.conflicts++;
-              for (u64 w = o; w < o + 64; w += 4) {
-                if (std::memcmp(dst + w, shd + w, 4) != 0) {
-                  std::memcpy(src + w, dst + w, 4);
-                  local.adopted += 4;
-                } else if (std::memcmp(src + w, shd + w, 4) != 0) {
-                  std::memcpy(dst + w, src + w, 4);
-                  local.wrote += 4;
-                }
-                std::memcpy(shd + w, src + w, 4);
-              }
-            } else if (cpu) {
-              std::memcpy(src + o, dst + o, 64);
-              std::memcpy(shd + o, dst + o, 64);
-              local.adopted += 64;
-            } else if (gpu) {
-              std::memcpy(dst + o, src + o, 64);
-              std::memcpy(shd + o, src + o, 64);
-              local.wrote += 64;
-            }
+            MergeComputeWritebackBlock(dst + o, src + o, shd + o, local);
           }
           counts[c] = local;
         }
       });
       u64 adopted_bytes = 0;
-      for (const ChunkCounts& c : counts) {
+      for (const ComputeWritebackCounts& c : counts) {
         wrote += c.wrote;
         adopted_bytes += c.adopted;
         g_cs_wb_conflicts += c.conflicts;
@@ -6504,12 +6478,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       // as it stands BEFORE any dispatch runs. Comparing against it is the only
       // way the writeback can tell a shader's output from a byte it merely
       // staged in and would otherwise copy back over the CPU's newer value.
-      // Imported ranges never write back, and images retile through
-      // WritebackCsImage.
-      if (!ci.res[i].image_staging && !e.imported && !stage_bytes) {
+      // Imported ranges never write back. Raw image staging needs the same
+      // baseline to preserve untouched guest padding; linear images retile
+      // through WritebackCsImage.
+      if ((!ci.res[i].image_staging || stage_bytes) && !e.imported) {
         const u64 ts = NowNs();
-        e.shadow.resize(sz[i]);
-        std::memcpy(e.shadow.data(), e.map, sz[i]);
+        const u64 shadow_bytes = stage_bytes ? stage_bytes : sz[i];
+        e.shadow.resize(shadow_bytes);
+        std::memcpy(e.shadow.data(), e.map, shadow_bytes);
         e.shadow_valid = true;
         g_in_shadow_ns += NowNs() - ts;
       } else {

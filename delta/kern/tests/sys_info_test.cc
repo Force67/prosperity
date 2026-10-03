@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "kern/lv2/sys_info.h"
+#include "kern/process.h"
 #include "kern/ps4/hardware_mode.h"
 
 namespace {
@@ -46,6 +47,35 @@ TEST(SysInfo, ReportsPs4PageSize) {
   EXPECT_EQ(kern::sys_sysctl(mib, 2, &page_size, &result_size, nullptr, 0), 0);
   EXPECT_EQ(result_size, sizeof(page_size));
   EXPECT_EQ(page_size, 0x4000u);
+}
+
+TEST(SysInfo, ReportsFirmwareSdkSeparatelyFromTitleSdk) {
+  static kern::Process process;
+  process.SetPlatform(kern::Process::Platform::kPs5);
+  process.SetSdkVersion(0x09000000);
+  struct Restore {
+    kern::Process& process;
+    ~Restore() {
+      process.GetModuleList().clear();
+      process.SetPlatform(kern::Process::Platform::kPs4);
+      process.SetSdkVersion(0);
+    }
+  } restore{process};
+  u32 param[8]{};
+  param[4] = 0x13590001;
+  param[5] = 0x13600007;
+  kern::ModulePtr kernel(new kern::Module(&process));
+  kernel->GetInfo().name = "libkernel";
+  kernel->GetInfo().module_param = reinterpret_cast<u8*>(param);
+  kernel->GetInfo().module_param_size = sizeof(param);
+  process.GetModuleList().push_back(base::move(kernel));
+
+  EXPECT_EQ(ReadSysctlByName("kern.sdk_version"), 0x13600007u);
+  int compiled_mib[] = {1, 14, 36};
+  u32 compiled = 0;
+  size_t size = sizeof(compiled);
+  ASSERT_EQ(kern::sys_sysctl(compiled_mib, 3, &compiled, &size, nullptr, 0), 0);
+  EXPECT_EQ(compiled, 0x09000000u);
 }
 
 TEST(SysInfo, ReportsConfiguredPs4HardwareMode) {

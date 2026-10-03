@@ -85,6 +85,9 @@ void PublishLabel(base::Function<void()> write,
                   u64 base,
                   u64 bytes,
                   const void* data) {
+  // Staged shader outputs must reach guest memory before their completion
+  // labels let the CPU reuse or free those buffers.
+  render::FlushCsWrites(render::DefaultRenderer(), "label");
   const u64 point = render::GuestWritePublishBatch();
   {
     base::LockGuard<base::Mutex> lock(g_lock);
