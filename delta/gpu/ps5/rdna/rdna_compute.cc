@@ -52,6 +52,7 @@ RecompileCompute(const u32*,
 }  // namespace gpu::rdna
 #else
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

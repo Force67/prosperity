@@ -8,6 +8,8 @@
  * in the root of the source tree.
  */
 
+#include <cstdint>
+
 #include "base/arch.h"
 #include "logger/logger.h"
 #include "runtime/vprx/init_function.h"
