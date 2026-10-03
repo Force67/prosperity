@@ -1,6 +1,17 @@
 // Minecraft (PPSA17221, PS5)
-// The UI is pixel-correct and Create New World opens; the blocker is a V8 fatal
-// inside Gameface (2026-07-31).
+// Status 2026-10-03: gameplay renders at 63-72 fps in the settled forest scene
+// on a Ryzen 7 5800X / RTX 3080 Ti. Streaming and first-use shaders still hitch.
+// Continuous camera turns averaged 59-65 fps after faster host-map parsing,
+// up from ~34 fps with the same settings before that change.
+// Measured with gfx_viewdistance:96 (6 chunks), fancy graphics, transparent
+// leaves, smooth lighting, fancy skies and texel AA off in the game's options.
+// The stock 36-chunk setting ran at ~11 fps after streaming settled.
+
+// Small compute buffers are consumed by the CPU at completion labels every
+// frame. Host memory avoids the extra VRAM readback at those boundaries.
+DELTA_GPU_CSVRAM=false
+DELTA_GPU_VSYNC=0
+DELTA_SCHED_YIELD_REAL=true
 
 // +DELTA_PS5_SYSTRACE=1
 // +DELTA_SAVEDATA_TRACE=1

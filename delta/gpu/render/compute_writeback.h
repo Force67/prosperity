@@ -28,8 +28,8 @@ inline void MergeComputeWritebackBlock(u8* guest, u8* staged, u8* shadow,
         std::memcpy(guest + w, staged + w, 4);
         counts.wrote += 4;
       }
-      std::memcpy(shadow + w, staged + w, 4);
     }
+    std::memcpy(shadow, staged, 64);
   } else if (cpu) {
     std::memcpy(staged, guest, 64);
     std::memcpy(shadow, guest, 64);

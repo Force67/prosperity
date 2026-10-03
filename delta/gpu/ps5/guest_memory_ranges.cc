@@ -1,5 +1,7 @@
 #include "gpu/ps5/guest_memory_ranges.h"
+#include <charconv>
 #include <cstdio>
+#include <cstring>
 #include "base/algorithm.h"
 #include "base/atomic.h"
 #include "base/containers/hash_map.h"
@@ -19,6 +21,50 @@ base::Atomic<bool> g_mappings_forced{false};
 base::Atomic<bool> g_remaps_reported{false};
 u64 g_mappings_version = 0;
 }  // namespace
+
+bool ParseHostMapping(std::string_view line, HostMapping& mapping) {
+  if (line.empty())
+    return false;
+  const char* cursor = line.data();
+  const char* end = cursor + line.size();
+  const auto skip_space = [&] {
+    while (cursor != end && (*cursor == ' ' || *cursor == '\t'))
+      ++cursor;
+  };
+  const auto number = [&](auto& value, int radix) {
+    skip_space();
+    const auto result = std::from_chars(cursor, end, value, radix);
+    cursor = result.ptr;
+    return result.ec == std::errc{};
+  };
+  const auto separator = [&](char expected) {
+    if (cursor == end || *cursor != expected)
+      return false;
+    ++cursor;
+    return true;
+  };
+  HostMapping parsed{};
+  if (!number(parsed.begin, 16) || !separator('-') || !number(parsed.end, 16) ||
+      !separator(' ') || parsed.begin >= parsed.end)
+    return false;
+  skip_space();
+  if (end - cursor < 5 || cursor[4] != ' ' ||
+      (cursor[0] != 'r' && cursor[0] != '-') ||
+      (cursor[1] != 'w' && cursor[1] != '-') ||
+      (cursor[2] != 'x' && cursor[2] != '-') ||
+      (cursor[3] != 'p' && cursor[3] != 's'))
+    return false;
+  std::memcpy(parsed.perm, cursor, 4);
+  cursor += 4;
+  if (!number(parsed.offset, 16) || !separator(' ') ||
+      !number(parsed.major, 16) || !separator(':') ||
+      !number(parsed.minor, 16) || !separator(' ') ||
+      !number(parsed.inode, 10) ||
+      (cursor != end && *cursor != ' ' && *cursor != '\n'))
+    return false;
+  mapping = parsed;
+  return true;
+}
 
 void ReportRemapsToHostMappings() {
   g_remaps_reported.store(true, base::memory_order_release);
@@ -47,9 +93,8 @@ const base::Vector<HostMapping>& HostMappings() {
     parsed_generation = gpu::MemoryGeneration();
     parsed_in_frame = 0;
   }
-  const bool new_frame =
-      generation != gpu::MemoryGeneration() &&
-      !g_remaps_reported.load(base::memory_order_acquire);
+  const bool new_frame = generation != gpu::MemoryGeneration() &&
+                         !g_remaps_reported.load(base::memory_order_acquire);
   const bool forced =
       g_mappings_forced.exchange(false, base::memory_order_acq_rel);
   if (!new_frame && !forced &&
@@ -67,9 +112,7 @@ const base::Vector<HostMapping>& HostMappings() {
   char line[1024];
   while (std::fgets(line, sizeof(line), maps)) {
     HostMapping m{};
-    if (std::sscanf(line, "%llx-%llx %4s %llx %x:%x %llu", &m.begin, &m.end,
-                    m.perm, &m.offset, &m.major, &m.minor, &m.inode) == 7 &&
-        m.perm[0] == 'r')
+    if (ParseHostMapping(line, m) && m.perm[0] == 'r')
       mappings.push_back(m);
   }
   std::fclose(maps);

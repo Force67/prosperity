@@ -49,6 +49,10 @@ add_delta_test(agc_queue_test
   SOURCES agc_queue_test.cc
   DEPS delta_gpu)
 
+add_delta_test(guest_memory_ranges_test
+  SOURCES guest_memory_ranges_test.cc ../ps5/guest_memory_ranges.cc
+  DEPS delta_deps)
+
 add_delta_test(agc_label_publish_test
   SOURCES agc_label_publish_test.cc ../ps5/label_publisher.cc
   DEPS delta_deps)

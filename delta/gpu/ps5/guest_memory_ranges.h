@@ -1,4 +1,5 @@
 #pragma once
+#include <string_view>
 #include "base/containers/vector.h"
 #include "gpu/render/command.h"
 
@@ -9,6 +10,7 @@ struct HostMapping {
   unsigned major, minor;
   char perm[5];
 };
+bool ParseHostMapping(std::string_view line, HostMapping& mapping);
 // Parsed at most once a frame, or again after MarkHostMappingsStale.
 const base::Vector<HostMapping>& HostMappings();
 // Thread safe: the next HostMappings() parses again.
