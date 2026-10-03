@@ -47,10 +47,19 @@ sys_regmgr_call(u32 op, u32 id, void* result, void* value, u64 type) {
       return 0;
     }
 
-    // The remaining keys are Sony's obfuscated registry ids we can't decode, so
-    // the guest's "key not available" handling (use defaults) is safer than
-    // inventing a value. Clear the output anyway so a reader despite the error
-    // gets no garbage.
+    // AGC polls 0x33236083918938b1 and 0x508d69bde3d3a6ac for optional shader
+    // instrumentation settings during GPU work preparation. Missing settings
+    // leave application-requested instrumentation in effect and do not block
+    // startup. These checks may help diagnose guest shader compatibility;
+    // enabling them requires support for instrumented shaders and reporting.
+    if (int_value->encoded_id == 0x33236083918938B1ull ||
+        int_value->encoded_id == 0x508D69BDE3D3A6ACull) {
+      int_value->value = 0;
+      return 0x800D0203;
+    }
+
+    // For unsupported keys, let the guest use defaults. Clear the output so
+    // readers that ignore the error do not consume garbage.
     int_value->value = 0;
     BASE_LOGI("regmgr", "get-int unknown encoded_id={:#x}",
               (unsigned long long)int_value->encoded_id);
