@@ -12,6 +12,7 @@
 #include "base/logging.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
+#include "guest/display.h"
 #include "guest/session.h"
 #include "guest_abi.h"
 
@@ -141,8 +142,14 @@ static void StartVblankPump() {
   guest::SpawnThread("sys_event", [] {
     u64 count = 0;
     for (;;) {
-      guest::SleepForMicroseconds(16667);  // ~60 Hz
-      ++count;
+      if (guest::display::kEmulateTiming) {
+        guest::display::WaitVblank();
+        count = guest::display::VblankCount();
+      } else {
+        guest::SleepForMicroseconds(16667);
+        ++count;
+      }
+      TriggerAllEqueues(1, -15, static_cast<i64>(count));
       // data>>16 = counter, bits 12..15 = 1..14 per-event sequence the title
       // polls for "new", bits 0..11 = TSC nonce. Packing only count<<16 left
       // the sequence 0: the title woke every tick but saw "no new event".
@@ -156,7 +163,7 @@ static void StartVblankPump() {
       // real flip (during loading, any value is "out of range"); afterwards it
       // rides g_flipCount.
       u64 flips = g_flip_count.load();
-      if (flips > 0) {
+      if (flips > 0 && !guest::display::kEmulateTiming) {
         u64 idx = flips - 1;
         i64 fdata =
             static_cast<i64>((idx << 16) | ((idx % 14 + 1) << 12) | tsc);
@@ -294,7 +301,8 @@ int Equeue::Kevent(const kevent_t* changes,
       notes_.push_back({c, false});
     }
     // First vblank registration kicks off the synthetic 60 Hz pump.
-    if (c.filter == kEVFILT_DISPLAY || c.filter == kEVFILT_VIDEOOUT)
+    if (c.filter == kEVFILT_DISPLAY || c.filter == kEVFILT_VIDEOOUT ||
+        c.filter == -15)
       StartVblankPump();
     // A read knote on a socket is the only knote whose source lives outside the
     // guest, so nothing here can set it active. Watch the host fd instead.
@@ -347,13 +355,12 @@ int Equeue::Kevent(const kevent_t* changes,
           k.ev.ident >= kGnmIdentMax || k.eop_seen >= eop)
         continue;
       k.active = true;
-      k.ev.data =
-          g_eop_raw.load(base::memory_order_relaxed)
-              ? static_cast<i64>(
-                    g_last_eop_ctx.load(base::memory_order_relaxed))
-              : ((g_last_eop_data.load(base::memory_order_relaxed) &
-                  ~static_cast<i64>(0xFFFF)) |
-                 static_cast<i64>(k.ev.ident));
+      k.ev.data = g_eop_raw.load(base::memory_order_relaxed)
+                      ? static_cast<i64>(
+                            g_last_eop_ctx.load(base::memory_order_relaxed))
+                      : ((g_last_eop_data.load(base::memory_order_relaxed) &
+                          ~static_cast<i64>(0xFFFF)) |
+                         static_cast<i64>(k.ev.ident));
     }
   }
 
@@ -457,7 +464,7 @@ void Equeue::AddEvent(u64 ident, i16 filter, void* udata) {
   } else {
     notes_.push_back({ev, false});
   }
-  if (filter == kEVFILT_DISPLAY || filter == kEVFILT_VIDEOOUT)
+  if (filter == kEVFILT_DISPLAY || filter == kEVFILT_VIDEOOUT || filter == -15)
     StartVblankPump();
 }
 

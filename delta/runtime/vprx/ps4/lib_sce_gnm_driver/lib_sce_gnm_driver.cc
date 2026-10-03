@@ -46,7 +46,9 @@ DELTA_OPTION(bool, kWaitWatch, "DELTA_GPU_WAITWATCH", false);
 
 // VideoOut HLE flip bridge (same delta_runtime library).
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
-extern "C" void prosperity_videoout_set_flip(int buffer_index, i64 flip_arg);
+extern "C" void prosperity_videoout_set_flip(int buffer_index,
+                                             i64 flip_arg,
+                                             int mode);
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" u64 prosperity_videoout_buffer(int buffer_index);
 
@@ -159,7 +161,7 @@ extern "C" void prosperity_gc_flip(u64 scanout_base,
   prosperity_gc_drain_acb(kGcAcbFrame);
   gpu::ps4::EndFrame(scanout_base);
   if (display_buffer_index >= 0)
-    prosperity_videoout_set_flip(display_buffer_index, flip_arg);
+    prosperity_videoout_set_flip(display_buffer_index, flip_arg, 1);
 }
 // NOLINTEND(readability-identifier-naming)
 
@@ -314,8 +316,8 @@ int PS4ABI sceGnmSubmitAndFlipCommandBuffers(u32 count,
       // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
       prosperity_videoout_buffer(static_cast<int>(display_buffer_index)));
   // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
-  prosperity_videoout_set_flip(static_cast<int>(display_buffer_index),
-                               flip_arg);
+  prosperity_videoout_set_flip(static_cast<int>(display_buffer_index), flip_arg,
+                               flip_mode);
   // NOLINTEND(readability-identifier-naming)
   return 0;
 }
@@ -339,8 +341,8 @@ sceGnmSubmitAndFlipCommandBuffersForWorkload(u32 workload,
       // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
       prosperity_videoout_buffer(static_cast<int>(display_buffer_index)));
   // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
-  prosperity_videoout_set_flip(static_cast<int>(display_buffer_index),
-                               flip_arg);
+  prosperity_videoout_set_flip(static_cast<int>(display_buffer_index), flip_arg,
+                               flip_mode);
   // NOLINTEND(readability-identifier-naming)
   return 0;
 }

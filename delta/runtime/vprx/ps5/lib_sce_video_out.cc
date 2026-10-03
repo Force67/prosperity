@@ -13,6 +13,7 @@
  */
 
 #include "base/arch.h"
+#include "guest/display.h"
 #include "guest/session.h"
 #include "guest_abi.h"
 #include "runtime/vprx/vprx.h"  // PS4ABI (via <guest_abi.h>), MODULE_INIT_PS5
@@ -61,7 +62,7 @@ namespace {
 
 constexpr u32 kFmtA8R8G8B8_SRGB = 0x80000000u;
 constexpr i16 kFilterFlip = -10;
-constexpr i16 kFilterVblank = -13;
+constexpr i16 kFilterVblank = -15;
 constexpr int kEventFlip = 0;
 constexpr int kEventVblank = 1;
 
@@ -106,6 +107,8 @@ struct VideoPort {
   int buffer_count = 0;
   base::Atomic<u64> flip_count{0};
   base::Atomic<u64> submit_count{0};
+  base::Atomic<u64> last_submit_tsc{0};
+  base::Atomic<u64> last_flip_tsc{0};
   i64 last_flip_arg = -1;
   int current_buffer = -1;
   int flip_equeue = -1;
@@ -122,6 +125,7 @@ VideoPort g_port;  // dedicated PS5 port state
 // PM4 it builds, and the command processor's label range check rightly refuses
 // to write host .bss.
 u64* VideoLabels() {
+  base::LockGuard lock(g_mtx);
   static u64* labels = nullptr;
   static const guest::SessionReset reset_labels([] { labels = nullptr; });
   if (!labels)
@@ -161,12 +165,49 @@ kern::ObjectRef<Equeue> FindEqueue(int handle) {
   return kern::ObjectRef<Equeue>(static_cast<Equeue*>(obj.Release()));
 }
 
+bool QueueVideoFlip(int buffer_index,
+                    int mode,
+                    i64 flip_arg,
+                    void* label = nullptr,
+                    bool wait = false) {
+  g_port.last_submit_tsc.store(static_cast<u64>(base::TickClock::NowNs()));
+  g_port.submit_count.fetch_add(1);
+  auto complete = [=] {
+    int eq_handle;
+    u64 count;
+    {
+      base::LockGuard lock(g_mtx);
+      g_port.current_buffer = buffer_index;
+      g_port.last_flip_arg = flip_arg;
+      const u64 now = static_cast<u64>(base::TickClock::NowNs());
+      g_port.last_flip_tsc.store(now);
+      count = g_port.flip_count.fetch_add(1) + 1;
+      eq_handle = g_port.flip_equeue;
+    }
+    if (guest::display::kEmulateTiming && buffer_index >= 0 &&
+        buffer_index < kMaxBuffers)
+      if (u64* labels = VideoLabels())
+        labels[buffer_index] = 1;
+    if (host_memory::IsMemoryRangeMapped(label, sizeof(u64)))
+      *static_cast<volatile u64*>(label) = 1;
+    if (eq_handle >= 0)
+      if (auto eq = FindEqueue(eq_handle))
+        eq->Trigger(kEventFlip, kFilterFlip, static_cast<i64>(count));
+    if (guest::display::kEmulateTiming)
+      NoteFlip();
+  };
+  return wait ? guest::display::WaitFlip(mode, complete)
+              : guest::display::QueueFlip(mode, complete);
+}
+
 base::Atomic<bool> g_flip_pump_started{false};
 
 // Synthesize flip completion (labels + events) so a title that flips via
 // Gnm/AGC and blocks on the flip equeue keeps advancing. Does NOT present (the
 // GPU renderer owns the swapchain; presenting here would race it).
 void StartFlipPump() {
+  if (guest::display::kEmulateTiming)
+    return;
   bool expected = false;
   if (!g_flip_pump_started.compare_exchange_strong(expected, true))
     return;
@@ -304,6 +345,7 @@ int PS4ABI VideoOutUnregisterBuffers(int, int) {
 
 int PS4ABI VideoOutSetFlipRate(int, int rate) {
   g_port.flip_rate = rate;
+  guest::display::SetFlipRate(rate);
   return 0;
 }
 
@@ -365,24 +407,23 @@ static void TraceSubmit(const char* what, int buffer_index, i64 flip_arg) {
               (unsigned long long)i, buffer_index, (long long)flip_arg);
 }
 
-int PS4ABI VideoOutSubmitFlip(int, int buffer_index, int, i64 flip_arg) {
+int PS4ABI VideoOutSubmitFlip(int handle,
+                              int buffer_index,
+                              int flip_mode,
+                              i64 flip_arg) {
   TraceSubmit("submitFlip", buffer_index, flip_arg);
   void* fb = nullptr;
   u32 w, h, pitch, fmt;
-  int eq_handle;
   {
-    base::LockGuard<base::Mutex> lk(g_mtx);
+    base::LockGuard lock(g_mtx);
     if (buffer_index >= 0 && buffer_index < kMaxBuffers)
       fb = g_port.buffers[buffer_index];
     w = g_port.width;
     h = g_port.height;
     pitch = g_port.pitch;
     fmt = g_port.pixel_format;
-    g_port.current_buffer = buffer_index;
     g_current_scanout.store(reinterpret_cast<u64>(fb),
                             base::memory_order_relaxed);
-    g_port.last_flip_arg = flip_arg;
-    g_port.submit_count.fetch_add(1);
   }
   if (fb && EnsureGfx(w, h)) {
     auto pf =
@@ -390,68 +431,52 @@ int PS4ABI VideoOutSubmitFlip(int, int buffer_index, int, i64 flip_arg) {
     host::Present(fb, w, h, pitch * 4, pf);
     host::PumpEvents();
   }
-  g_port.flip_count.fetch_add(1);
-  {
-    base::LockGuard<base::Mutex> lk(g_mtx);
-    eq_handle = g_port.flip_equeue;
-  }
-  if (eq_handle >= 0)
-    if (auto eq = FindEqueue(eq_handle))
-      eq->Trigger(kEventFlip, kFilterFlip,
-                  static_cast<i64>(g_port.flip_count.load()));
-  return 0;
+  return QueueVideoFlip(buffer_index, flip_mode, flip_arg) ? 0 : -1;
 }
 
-// The EOP variant the AGC path flips through. eopLabel is the GPU completion
-// label: the title queues the flip, then spins until the display controller
-// writes 1 there. Our present is synchronous, so the flip is already done by
-// the time we return. Write the label or the title waits on it forever (bgfx's
-// RendererContextAGC parks on `*label == 1` and never submits another frame).
-int PS4ABI VideoOutSubmitFlipEop(int,
+int PS4ABI VideoOutSubmitFlipEop(int handle,
                                  int buffer_index,
-                                 int,
+                                 int flip_mode,
                                  i64 flip_arg,
                                  void* eop_label) {
   TraceSubmit("submitFlipEop", buffer_index, flip_arg);
   u64 scanout = 0;
-  int eq_handle;
   {
-    base::LockGuard<base::Mutex> lk(g_mtx);
-    if (buffer_index >= 0 && buffer_index < kMaxBuffers) {
+    base::LockGuard lock(g_mtx);
+    if (buffer_index >= 0 && buffer_index < kMaxBuffers)
       scanout = reinterpret_cast<u64>(g_port.buffers[buffer_index]);
-      g_port.current_buffer = buffer_index;
-    }
     g_current_scanout.store(scanout, base::memory_order_relaxed);
-    g_port.last_flip_arg = flip_arg;
-    g_port.submit_count.fetch_add(1);
-    eq_handle = g_port.flip_equeue;
   }
-  // PS5 always presents through the AGC command processor's render target.
-  // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
   prosperity_agc_flip(scanout);
-  if (host_memory::IsMemoryRangeMapped(eop_label, sizeof(u64)))
-    *static_cast<volatile u64*>(eop_label) = 1;
-  g_port.flip_count.fetch_add(1);
-  if (eq_handle >= 0)
-    if (auto eq = FindEqueue(eq_handle))
-      eq->Trigger(kEventFlip, kFilterFlip,
-                  static_cast<i64>(g_port.flip_count.load()));
-  return 0;
+  // AGC can pass a temporary stack label. Complete it before this call returns.
+  return QueueVideoFlip(buffer_index, flip_mode, flip_arg, eop_label, true)
+             ? 0
+             : -1;
 }
 
 int PS4ABI VideoOutGetFlipStatus(int, void* status) {
   if (!status)
     return -1;
+  base::LockGuard lock(g_mtx);
   auto* s = static_cast<FlipStatus*>(status);
   std::memset(s, 0, sizeof(*s));
   s->count = g_port.flip_count.load();
   s->flip_arg = g_port.last_flip_arg;
   s->current_buffer = g_port.current_buffer;
+  s->tsc = g_port.last_flip_tsc.load();
+  s->submit_tsc = g_port.last_submit_tsc.load();
+  s->process_time = s->tsc / 1000;
+  s->flip_pending_num =
+      guest::display::kEmulateTiming
+          ? g_port.submit_count.load() - g_port.flip_count.load()
+          : 0;
   return 0;
 }
 
 int PS4ABI VideoOutIsFlipPending(int) {
-  return 0;
+  return guest::display::kEmulateTiming
+             ? g_port.submit_count.load() - g_port.flip_count.load()
+             : 0;
 }
 
 int PS4ABI VideoOutGetVblankStatus(int, void* status) {
@@ -459,11 +484,14 @@ int PS4ABI VideoOutGetVblankStatus(int, void* status) {
     return -1;
   auto* s = static_cast<VblankStatus*>(status);
   std::memset(s, 0, sizeof(*s));
-  s->count = g_port.flip_count.load();
+  s->count = guest::display::VblankCount();
+  s->tsc = guest::display::VblankTimeNs();
+  s->process_time = s->tsc / 1000;
   return 0;
 }
 
 int PS4ABI VideoOutWaitVblank(int) {
+  guest::display::WaitVblank();
   return 0;
 }
 
@@ -498,6 +526,23 @@ const guest::SessionReset g_session_reset([] {
 }  // namespace
 
 }  // namespace
+
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+extern "C" void prosperity_ps5_complete_flip() {
+  if (!guest::display::kEmulateTiming)
+    return;
+  int index = -1;
+  {
+    base::LockGuard lock(g_mtx);
+    for (int i = 0; i < g_port.buffer_count && i < kMaxBuffers; ++i)
+      if (reinterpret_cast<u64>(g_port.buffers[i]) ==
+          g_current_scanout.load()) {
+        index = i;
+        break;
+      }
+  }
+  QueueVideoFlip(index, 1, 0);
+}
 
 // Is this address one of the display buffers the title registered? The AGC
 // frame end uses it to tell "this frame rendered straight into a display

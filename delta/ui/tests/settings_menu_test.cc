@@ -2,8 +2,10 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 
 #include "base/environment_variables.h"
+#include "guest/display.h"
 #include "guest/pause.h"
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -124,6 +126,24 @@ TEST_F(SettingsMenuTest, MouseLookPreferencesSaveAndApplyImmediately) {
   Frame(640, 480);
   EXPECT_LE(panel->Pos.y + panel->Size.y, 480);
   ui::ConfigureMouseLook({});
+}
+
+TEST_F(SettingsMenuTest, DisplayTimingSavesWithoutChangingRunningSession) {
+  guest::display::kEmulateTiming.SetFromString("true");
+  ui::SettingsOpen();
+  Frame();
+  auto* panel = ImGui::FindWindowByName("##settings_lounge");
+  ASSERT_NE(panel, nullptr);
+  auto* body = panel->DC.ChildWindows[0];
+  Click(ImVec2(body->Pos.x + body->Size.x - 224 + 20,
+               body->Pos.y + 131 + 56 + 28));
+  Click(ImVec2(panel->Pos.x + panel->Size.x - 108,
+               panel->Pos.y + panel->Size.y - 42));
+  std::ifstream file((root_ + "/prosperity/settings.txt").c_str());
+  const std::string text((std::istreambuf_iterator<char>(file)), {});
+  EXPECT_NE(text.find("+DELTA_DISPLAY_TIMING=false\n"), std::string::npos);
+  EXPECT_TRUE(guest::display::kEmulateTiming);
+  guest::display::kEmulateTiming.Reset();
 }
 }  // namespace
 

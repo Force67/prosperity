@@ -5,6 +5,7 @@
 #include <fstream>
 
 #include "base/environment_variables.h"
+#include "guest/display.h"
 #include "options/options.h"
 #include "options/settings.h"
 
@@ -35,6 +36,7 @@ class SettingsTest : public testing::Test {
     kHostGpu.Reset();
     kVsync.Reset();
     kSync.Reset();
+    guest::display::kEmulateTiming.Reset();
     kBackground.Reset();
     kPerformance.Reset();
     kValidation.Reset();
@@ -62,6 +64,7 @@ TEST_F(SettingsTest,
   settings.gpu = "GPU with spaces and \"quotes\"";
   settings.vsync = "0";
   settings.async_present = false;
+  settings.display_timing = false;
   settings.background = 2;
   settings.performance = false;
   settings.validation = true;

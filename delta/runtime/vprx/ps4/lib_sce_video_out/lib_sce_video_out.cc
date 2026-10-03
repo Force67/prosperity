@@ -7,6 +7,7 @@
 
 #include "runtime/vprx/ps4/lib_sce_video_out/lib_sce_video_out.h"
 #include "base/arch.h"
+#include "guest/display.h"
 #include "guest/session.h"
 #include "guest_abi.h"
 
@@ -50,7 +51,7 @@ constexpr u32 kFmtA8R8G8B8_SRGB = 0x80000000u;
 // already uses it). Flip completions are a distinct source, so give them their
 // own filter so the 60 Hz vblank pump never spuriously fires a flip knote.
 constexpr i16 kFilterFlip = -10;
-constexpr i16 kFilterVblank = -13;
+constexpr i16 kFilterVblank = -15;
 
 // videoout event ids returned by sceVideoOutGetEventId.
 constexpr int kEventFlip = 0;
@@ -222,6 +223,38 @@ void PresentScanout() {
   host::PumpEvents();
 }
 
+bool QueueVideoFlip(int buffer_index,
+                    int mode,
+                    i64 flip_arg,
+                    void* label = nullptr) {
+  g_port.last_submit_tsc.store(static_cast<u64>(base::TickClock::NowNs()));
+  g_port.submit_count.fetch_add(1);
+  return guest::display::QueueFlip(mode, [=] {
+    int eq_handle;
+    u64 count;
+    {
+      base::LockGuard lock(g_mtx);
+      // A PS4 scanout buffer becomes reusable when its replacement is
+      // displayed.
+      if (guest::display::kEmulateTiming && g_port.labels &&
+          g_port.current_buffer >= 0 && g_port.current_buffer < kMaxBuffers)
+        g_port.labels[g_port.current_buffer] = 0;
+      g_port.current_buffer = buffer_index;
+      g_port.last_flip_arg = flip_arg;
+      const u64 now = static_cast<u64>(base::TickClock::NowNs());
+      g_port.last_flip_tsc.store(now);
+      g_port.last_process_time.store(now / 1000);
+      count = g_port.flip_count.fetch_add(1) + 1;
+      eq_handle = g_port.flip_equeue;
+    }
+    if (eq_handle >= 0)
+      if (auto eq = FindEqueue(eq_handle))
+        eq->Trigger(kEventFlip, kFilterFlip, static_cast<i64>(count));
+    if (guest::display::kEmulateTiming)
+      NoteFlip();
+  });
+}
+
 base::Atomic<bool> g_flip_pump_started{false};
 
 // The game flips through Gnm (a PM4 prepareFlip), then blocks in kevent on the
@@ -229,6 +262,8 @@ base::Atomic<bool> g_flip_pump_started{false};
 // ~60 Hz pump presenting the current scanout buffer and posting the flip event
 // to registrants.
 void StartFlipPump() {
+  if (guest::display::kEmulateTiming)
+    return;
   bool expected = false;
   if (!g_flip_pump_started.compare_exchange_strong(expected, true))
     return;
@@ -388,6 +423,7 @@ int PS4ABI sceVideoOutSetFlipRate(int handle, int rate) {
     return r;
   }
   g_port.flip_rate = rate;
+  guest::display::SetFlipRate(rate);
   return 0;
 }
 
@@ -458,48 +494,22 @@ int PS4ABI sceVideoOutSubmitFlip(int handle,
                                  i64 flip_arg) {
   void* fb = nullptr;
   u32 w, h, pitch, fmt;
-  int eq_handle;
-  void* udata;
   {
-    base::LockGuard<base::Mutex> lk(g_mtx);
+    base::LockGuard lock(g_mtx);
     if (buffer_index >= 0 && buffer_index < kMaxBuffers)
       fb = g_port.buffers[buffer_index];
     w = g_port.width;
     h = g_port.height;
     pitch = g_port.pitch;
     fmt = g_port.pixel_format;
-    g_port.current_buffer = buffer_index;
-    g_port.last_flip_arg = flip_arg;
-    const u64 t = NowNs();
-    g_port.last_submit_tsc.store(t);
-    g_port.last_flip_tsc.store(t);
-    g_port.last_process_time.store(t / 1000);
-    g_port.submit_count.fetch_add(1);
   }
-
-  // present the scanout buffer (guest pointers are identity-mapped, so the
-  // guest address is directly readable on the host). Until the Gnm->Vulkan
-  // path detiles real GPU output this is the linear scanout contents.
   if (fb && EnsureGfx(w, h)) {
     auto pf =
         (fmt & 0x2200u) ? host::PixelFormat::kRgba8 : host::PixelFormat::kBgra8;
     host::Present(fb, w, h, pitch * 4, pf);
     host::PumpEvents();
   }
-
-  // flip "completes" immediately: bump the count and wake the flip equeue.
-  g_port.flip_count.fetch_add(1);
-  {
-    base::LockGuard<base::Mutex> lk(g_mtx);
-    eq_handle = g_port.flip_equeue;
-    udata = g_port.flip_udata;
-  }
-  if (eq_handle >= 0) {
-    if (auto eq = FindEqueue(eq_handle))
-      eq->Trigger(kEventFlip, kFilterFlip,
-                  static_cast<i64>(g_port.flip_count.load()));
-  }
-  return 0;
+  return QueueVideoFlip(buffer_index, flip_mode, flip_arg) ? 0 : -1;
 }
 
 int PS4ABI sceVideoOutSubmitFlipEop(int handle,
@@ -507,61 +517,34 @@ int PS4ABI sceVideoOutSubmitFlipEop(int handle,
                                     int flip_mode,
                                     i64 flip_arg,
                                     void* eop_label) {
-  // The real libSceGnmDriver (LLE) flips through this internal videoout entry,
-  // the EOP-label variant (eopLabel = the GPU completion label we don't need;
-  // our submit is synchronous). Present the GPU's render target here
-  // (endFrame), not the raw guest scanout buffer the title never CPU-writes;
-  // then complete like SubmitFlip.
   u64 scanout = 0;
-  int eq_handle;
-  void* udata;
   {
-    base::LockGuard<base::Mutex> lk(g_mtx);
-    if (buffer_index >= 0 && buffer_index < kMaxBuffers) {
+    base::LockGuard lock(g_mtx);
+    if (buffer_index >= 0 && buffer_index < kMaxBuffers)
       scanout = reinterpret_cast<u64>(g_port.buffers[buffer_index]);
-      g_port.current_buffer = buffer_index;
-      const u64 t = NowNs();
-      g_port.last_submit_tsc.store(t);
-      g_port.last_flip_tsc.store(t);
-      g_port.last_process_time.store(t / 1000);
-    }
-    g_port.last_flip_arg = flip_arg;
-    g_port.submit_count.fetch_add(1);
-    eq_handle = g_port.flip_equeue;
-    udata = g_port.flip_udata;
   }
-  // endFrame takes the GPU's own lock; call it outside g_mtx. It presents the
-  // RT matching `scanout`, falling back to the last RT rendered when it isn't
-  // one. On PS5 the frame was rendered by the AGC command processor (gpu::ps5),
-  // so route the present there; the PS4 Gnm path uses gpu::ps4::EndFrame.
   auto* active = Process::GetActive();
   if (active && active->GetPlatform() == Process::Platform::kPs5)
-    // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
     prosperity_agc_flip(scanout);
   else
     gpu::ps4::EndFrame(scanout);
-  (void)udata;
-
-  g_port.flip_count.fetch_add(1);
-  if (eq_handle >= 0) {
-    if (auto eq = FindEqueue(eq_handle))
-      eq->Trigger(kEventFlip, kFilterFlip,
-                  static_cast<i64>(g_port.flip_count.load()));
-  }
-  return 0;
+  return QueueVideoFlip(buffer_index, flip_mode, flip_arg, eop_label) ? 0 : -1;
 }
 
 int PS4ABI sceVideoOutGetFlipStatus(int handle, void* status) {
   if (!status)
     return -1;
+  base::LockGuard lock(g_mtx);
   auto* s = static_cast<FlipStatus*>(status);
   std::memset(s, 0, sizeof(*s));
   s->count = g_port.flip_count.load();
   s->flip_arg = g_port.last_flip_arg;
   s->current_buffer = g_port.current_buffer;
   s->gc_queue_num = 0;
-  // pending = submitted but not yet "completed"; we complete synchronously.
-  s->flip_pending_num = 0;
+  s->flip_pending_num =
+      guest::display::kEmulateTiming
+          ? g_port.submit_count.load() - g_port.flip_count.load()
+          : 0;
   s->tsc = g_port.last_flip_tsc.load();
   s->submit_tsc = g_port.last_submit_tsc.load();
   s->process_time = g_port.last_process_time.load();
@@ -569,7 +552,9 @@ int PS4ABI sceVideoOutGetFlipStatus(int handle, void* status) {
 }
 
 int PS4ABI sceVideoOutIsFlipPending(int handle) {
-  return 0;  // never pending: flips complete synchronously
+  return guest::display::kEmulateTiming
+             ? g_port.submit_count.load() - g_port.flip_count.load()
+             : 0;
 }
 
 int PS4ABI sceVideoOutGetVblankStatus(int handle, void* status) {
@@ -577,14 +562,14 @@ int PS4ABI sceVideoOutGetVblankStatus(int handle, void* status) {
     return -1;
   auto* s = static_cast<VblankStatus*>(status);
   std::memset(s, 0, sizeof(*s));
-  s->count = g_port.flip_count.load();
-  s->flags = 0;
-  s->tsc = g_port.last_flip_tsc.load();
-  s->process_time = g_port.last_process_time.load();
+  s->count = guest::display::VblankCount();
+  s->tsc = guest::display::VblankTimeNs();
+  s->process_time = s->tsc / 1000;
   return 0;
 }
 
 int PS4ABI sceVideoOutWaitVblank(int handle) {
+  guest::display::WaitVblank();
   return 0;
 }
 
@@ -614,7 +599,11 @@ int PS4ABI sceVideoOutModeSetAny_(int handle, void* arg) {
 // buffer here; the flip pump then presents it and posts the flip-complete
 // event.
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
-void prosperity_videoout_set_flip(int buffer_index, i64 flip_arg) {
+void prosperity_videoout_set_flip(int buffer_index, i64 flip_arg, int mode) {
+  if (guest::display::kEmulateTiming) {
+    QueueVideoFlip(buffer_index, mode, flip_arg);
+    return;
+  }
   base::LockGuard<base::Mutex> lk(g_mtx);
   if (buffer_index >= 0 && buffer_index < kMaxBuffers)
     g_port.current_buffer = buffer_index;

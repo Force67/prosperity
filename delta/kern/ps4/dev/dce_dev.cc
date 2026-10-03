@@ -11,6 +11,7 @@
 #include <cstring>
 #include "base/arch.h"
 #include "base/logging.h"
+#include "guest/display.h"
 #include "guest/session.h"
 
 #include "base/atomic.h"
@@ -37,9 +38,7 @@ static u64 NowNs() {
   return static_cast<u64>(base::TickClock::NowNs());
 }
 static u64 VblankCount() {
-  static const i64 kStart = base::TickClock::NowNs();
-  const i64 ns = base::TickClock::NowNs() - kStart;
-  return static_cast<u64>(ns / 16666667);  // ~59.94 Hz
+  return guest::display::VblankCount();
 }
 // A TSC value in the same domain/rate as the guest's rdtsc, so
 // flip/vblank-status tsc fields stay comparable with rdtsc the title reads
@@ -49,7 +48,7 @@ static u64 GuestTsc() {
 #if defined(DELTA_BACKEND_NATIVE)
   return __builtin_ia32_rdtsc();
 #else
-  return nowNs() * 16 / 10;  // ns -> 1.6 GHz ticks
+  return NowNs() * 16 / 10;  // ns -> 1.6 GHz ticks
 #endif
 }
 
@@ -204,6 +203,10 @@ i32 DceDevice::Ioctl(u32 cmd, void* data) {
         // id.
         if (PlausiblePtr(s[4]))
           *reinterpret_cast<u64*>(s[4]) = next_handle_++;
+        return 0;
+      case 6:
+        // libSceVideoOut's flip-rate backend passes {6, handle, rate}.
+        guest::display::SetFlipRate(static_cast<int>(s[2]));
         return 0;
       case 9: {
         // Sub-op 9 (scanout-pool offset query): the kernel writes offset=0x4000

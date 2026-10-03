@@ -1,3 +1,4 @@
+#include "guest/display.h"
 #include "guest/session.h"
 
 // Copyright (C) Force67 2019
@@ -203,7 +204,8 @@ i32 GcDevice::Ioctl(u32 cmd, void* data) {
       u32 buffer_index = DceCurrentBuffer();
       prosperity_gc_flip(DceScanoutBuffer(buffer_index),
                          static_cast<int>(buffer_index), DceCurrentFlipArg());
-      NoteFlip();  // advance the flip count + post the display event for pacing
+      if (!guest::display::kEmulateTiming)
+        NoteFlip();
       return 0;
     }
     case 0xC0088101:  // kernel: wait-suspend-done. Suspend/resume handshake;
@@ -598,8 +600,8 @@ void GcDevice::DrainQueue(ComputeQueue& q, u32 budget_dw) {
             reinterpret_cast<const void*>(q.read_ptr), sizeof(u32)))
       *reinterpret_cast<u32*>(q.read_ptr) = off;
     if (kGcTrace)
-      BASE_LOGI("acbscan", "{}/{}/{} drained {} dwords -> {:#x}", q.me,
-                q.pipe, q.queue, consumed, off);
+      BASE_LOGI("acbscan", "{}/{}/{} drained {} dwords -> {:#x}", q.me, q.pipe,
+                q.queue, consumed, off);
   }
 }
 

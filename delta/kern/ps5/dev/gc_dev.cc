@@ -61,6 +61,8 @@ extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
 // PS5 present bridge: end the frame and present the rendered RT to the window.
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_agc_flip(u64 scanout_base);
+// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+extern "C" void prosperity_ps5_complete_flip();
 // Is this address inside a pool the title mapped for the GPU (gpu/ps5)?
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" int prosperity_gpu_is_aperture(u64 address);
@@ -390,6 +392,7 @@ i32 GcDevicePs5::Ioctl(u32 cmd, void* data) {
       u64 scanout = prosperity_ps5_scanout_base();
       TraceFlip("0xC020810C", scanout);
       prosperity_agc_flip(scanout);  // present the flipped display buffer
+      prosperity_ps5_complete_flip();
       return 0;
     }
     case 0xC008811B: {

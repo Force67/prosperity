@@ -199,6 +199,10 @@ void Graphics() {
     ImGui::EndCombo();
   }
   EndRow(y);
+  y = Row("Emulate display timing",
+          "Keep PS4 and PS5 gameplay at the intended speed.");
+  Toggle("display_timing", &g_draft.display_timing);
+  EndRow(y);
   y = Row("Vertical sync", "Automatic balances pacing and latency.");
   const char* modes[] = {"Automatic", "On", "Off"};
   int mode = g_draft.vsync == "1" ? 1 : (g_draft.vsync == "0" ? 2 : 0);

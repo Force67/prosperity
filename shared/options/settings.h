@@ -9,6 +9,7 @@ struct Settings {
   base::String gpu;
   base::String vsync;
   bool async_present = true;
+  bool display_timing = true;
   u32 background = 0;
   bool performance = true;
   bool validation = false;

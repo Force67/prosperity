@@ -7,6 +7,7 @@
 #include "base/option.h"
 #include "base/option_file.h"
 #include "base/strings/format.h"
+#include "guest/display.h"
 
 namespace options {
 namespace {
@@ -40,6 +41,7 @@ Settings ReadSettings() {
   settings.gpu = Value("DELTA_VK_GPU");
   settings.vsync = Value("DELTA_GPU_VSYNC");
   settings.async_present = Value("DELTA_GPU_SYNCPRESENT") != "true";
+  settings.display_timing = guest::display::kEmulateTiming;
   const auto background = Value("DELTA_UI_BACKGROUND");
   u64 style = 0;
   if (base::ParseUnsigned(background.c_str(), style) && style <= 3)
@@ -78,10 +80,12 @@ bool SaveSettings(const Settings& settings) {
       "+DELTA_GPU_VSYNC=\"{}\"\n+DELTA_GPU_SYNCPRESENT={}\n"
       "+DELTA_UI_BACKGROUND={}\n+DELTA_GPU_OVERLAY={}\n"
       "+DELTA_VK_VALIDATE={}\n+DELTA_MOUSE_LOOK={}\n"
-      "+DELTA_MOUSE_SENSITIVITY={}\n+DELTA_MOUSE_INVERT_Y={}\n",
+      "+DELTA_MOUSE_SENSITIVITY={}\n+DELTA_MOUSE_INVERT_Y={}\n"
+      "+DELTA_DISPLAY_TIMING={}\n",
       settings.backend, settings.gpu, settings.vsync, !settings.async_present,
       settings.background, settings.performance, settings.validation,
-      settings.mouse_look, settings.mouse_sensitivity, settings.mouse_invert_y);
+      settings.mouse_look, settings.mouse_sensitivity, settings.mouse_invert_y,
+      settings.display_timing);
   const auto temporary = path + ".tmp";
   std::ofstream file(temporary.c_str(), std::ios::binary | std::ios::trunc);
   file.write(text.data(), text.size());
