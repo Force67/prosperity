@@ -43,7 +43,7 @@ jobs:
 
     - name: Restore SDL3
       id: sdl-cache
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: ${{ runner.temp }}/sdl3
         key: sdl3-ubuntu-24.04-static-${{ env.SDL_COMMIT }}
@@ -57,6 +57,13 @@ jobs:
           -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST_LIBRARY=OFF -DSDL_TESTS=OFF
         cmake --build "$RUNNER_TEMP/sdl-build" --parallel "$(nproc)"
         cmake --install "$RUNNER_TEMP/sdl-build"
+
+    - name: Save SDL3
+      if: steps.sdl-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/sdl3
+        key: ${{ steps.sdl-cache.outputs.cache-primary-key }}
 
     - name: Restore ccache
       id: ccache
@@ -84,7 +91,7 @@ jobs:
         done
 
     - name: Build
-      run: cmake --build build --parallel "$(nproc)"
+      run: cmake --build build --parallel "$(nproc)" -- -k 0
 
     - name: Save ccache
       if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
