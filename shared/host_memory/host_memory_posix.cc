@@ -249,12 +249,14 @@ bool ProtectMem(void* addr, size_t len, PageProtection prot) {
 }
 
 bool IsMemoryRangeMapped(const void* addr, size_t len) {
-  DELTA_ZONE("mem.mincore");
+  DELTA_ZONE("mem.mapping_check");
   if (!addr || !len)
     return false;
   const uintptr_t begin = reinterpret_cast<uintptr_t>(addr);
   if (len > UINTPTR_MAX - begin)
     return false;
+  if (MemoryMappingIdentity(addr, len))
+    return true;
   const long page_size_raw = ::sysconf(_SC_PAGE_SIZE);
   if (page_size_raw <= 0)
     return false;

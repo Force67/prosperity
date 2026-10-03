@@ -103,11 +103,7 @@ Id ApplyOmod(Translator& t, Id value, u32 omod) {
 }
 
 Id MadF32(Translator& t, Id a, Id b, Id c) {
-  const Id product = t.FMul(a, b);
-  t.m.Decorate(product, spv::Decoration::NoContraction);
-  const Id result = t.FAdd(product, c);
-  t.m.Decorate(result, spv::Decoration::NoContraction);
-  return result;
+  return t.FAdd(t.FMul(a, b), c);
 }
 
 Id MadF16(Translator& t, Id a, Id b, Id c) {

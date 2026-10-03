@@ -1302,6 +1302,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     rhi::Texture* convert = nullptr;
     if (kFlipMode == 0 && rt.fmt != rhi::Format::kBGRA8Unorm &&
         rt.fmt != rhi::Format::kRGBA8Unorm &&
+        rt.fmt != rhi::Format::kBGRA8Srgb &&
+        rt.fmt != rhi::Format::kRGBA8Srgb &&
         Device().SupportsBlit(rt.fmt, rhi::Format::kBGRA8Unorm))
       convert = PresentConvertTarget(rt.w, rt.h);
     const rhi::Format read_fmt = convert ? rhi::Format::kBGRA8Unorm : rt.fmt;
@@ -1481,13 +1483,15 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   // What `pixels` holds. The swapchain takes either order, so a readback that
   // is already one of them is presented without being touched.
   host::PixelFormat pixel_fmt = host::PixelFormat::kBgra8;
-  if (kFlipMode == 0 && fin.fmt == rhi::Format::kBGRA8Unorm) {
+  if (kFlipMode == 0 && (fin.fmt == rhi::Format::kBGRA8Unorm ||
+                         fin.fmt == rhi::Format::kBGRA8Srgb)) {
     // Common case: the readback is already BGRA8 in presentation order; the
     // consumers below (WritePpm/present) read it in place, so skip the 8 MB
     // per-pixel convert-and-copy entirely. ReportRtContents (the only other
     // readback-buffer user) runs after the last consumer.
     pixels = rb;
-  } else if (kFlipMode == 0 && fin.fmt == rhi::Format::kRGBA8Unorm) {
+  } else if (kFlipMode == 0 && (fin.fmt == rhi::Format::kRGBA8Unorm ||
+                                fin.fmt == rhi::Format::kRGBA8Srgb)) {
     // A COMP_SWAP=STD scanout differs from presentation order only in red and
     // blue, which the swapchain upload does for free. Converting here instead
     // cost Skyrim 40% of its frame rate at 3840x2160.

@@ -423,6 +423,44 @@ RTarget* ActivateRtVariant(RTarget& live,
     alt = &parked.back();
     RegisterRtPages(base, w, h, fmt);
   }
+  const bool srgb_alias =
+      (live.fmt == rhi::Format::kRGBA8Unorm &&
+       fmt == rhi::Format::kRGBA8Srgb) ||
+      (live.fmt == rhi::Format::kRGBA8Srgb &&
+       fmt == rhi::Format::kRGBA8Unorm) ||
+      (live.fmt == rhi::Format::kBGRA8Unorm &&
+       fmt == rhi::Format::kBGRA8Srgb) ||
+      (live.fmt == rhi::Format::kBGRA8Srgb && fmt == rhi::Format::kBGRA8Unorm);
+  if (srgb_alias && live.w == w && live.h == h && live.depth == depth &&
+      live.ever_rendered && g_frame.recording) {
+    // Changing the transfer function reinterprets the same guest bytes.
+    EndRegion();
+    const rhi::TextureState old_state = live.layout;
+    TransitionImage(g_frame.list, live.texture, live.layout,
+                    rhi::TextureState::kCopySrc);
+    TransitionImage(g_frame.list, alt->texture, alt->layout,
+                    rhi::TextureState::kCopyDst);
+    rhi::TextureRegion region;
+    region.width = w;
+    region.height = h;
+    region.depth = depth;
+    g_frame.list->CopyTexture(alt->texture, region, live.texture, region);
+    TransitionImage(g_frame.list, live.texture, live.layout, old_state);
+    alt->ever_rendered = true;
+    alt->dirty_for_read = true;
+    alt->render_serial = live.render_serial;
+    alt->last_frame = live.last_frame;
+    alt->used_this_frame = live.used_this_frame;
+    alt->accumulated = live.accumulated;
+    if (alt->dcc_base == live.dcc_base) {
+      alt->dcc_clear_pending = live.dcc_clear_pending;
+      alt->dcc_code_known = live.dcc_code_known;
+      alt->dcc_clear_code = live.dcc_clear_code;
+    }
+    alt->clear_pending = live.clear_pending;
+    alt->clear_value = live.clear_value;
+    alt->clear_src = live.clear_src;
+  }
   base::Swap(live, *alt);
   if (trace::Recording())
     trace::RecordVariantSwap(base, reinterpret_cast<u64>(alt->texture), alt->w,
@@ -887,7 +925,8 @@ u64 ResolveSampledRT(u64 addr, u32 w, u32 h) {
     auto it = g_rt_pages.find(p);
     if (it != g_rt_pages.end())
       for (u64 b0 : it->second)
-        consider(b0);
+        if (p == base::Max(a0 >> kRtPageShift, b0 >> kRtPageShift))
+          consider(b0);
   }
   if (kResolveTrace && ties) {
     static base::Atomic<u64> n{0};
@@ -1024,6 +1063,20 @@ void NoteDccWrite(u64 base, u64 bytes, const u32* fill) {
       continue;
     for (DepthTarget& alt : v->second)
       note_depth(alt);
+  }
+}
+
+void NoteExpandedHtile(u64 base) {
+  const auto note = [&](DepthTarget& dt) {
+    if (dt.htile_base == base)
+      dt.htile_clear_pending = false;
+  };
+  for (auto& kv : g_depths) {
+    note(kv.second);
+    auto v = g_depth_variants.find(kv.first);
+    if (v != g_depth_variants.end())
+      for (DepthTarget& alt : v->second)
+        note(alt);
   }
 }
 
@@ -1670,6 +1723,70 @@ bool BeginRegion(const u64* mrt_base,
 }  // namespace gpu::render
 
 namespace gpu::render {
+
+bool CanClearMemoryFill64(u64 base, u64 bytes) {
+  if (!g_frame.recording || !bytes || (base & 7) || (bytes & 7) ||
+      base + bytes < base)
+    return false;
+  const u64 end = base + bytes;
+  const auto hits = [&](u64 at, u64 n) { return at < end && base < at + n; };
+  for (const auto& [at, d] : g_depths)
+    if (hits(at, u64(d.w) * d.h * 4 * base::Max(1u, d.layers)))
+      return false;
+  for (const auto& [at, variants] : g_depth_variants)
+    for (const auto& d : variants)
+      if (hits(at, u64(d.w) * d.h * 4 * base::Max(1u, d.layers)))
+        return false;
+  bool found = false;
+  const auto supported = [&](u64 at, const RTarget& rt) {
+    const u64 size = RtByteSize(rt);
+    if (!hits(at, size))
+      return true;
+    found = true;
+    return base <= at && end >= at + size && !((at - base) & 7) &&
+           FormatBytes(rt.fmt) == 8 && rt.cb_info &&
+           ColorTargetFormat(rt.cb_info) == rt.fmt;
+  };
+  for (const auto& [at, rt] : g_rts)
+    if (!supported(at, rt))
+      return false;
+  for (const auto& [at, variants] : g_rt_variants)
+    for (const auto& rt : variants)
+      if (!supported(at, rt))
+        return false;
+  return found;
+}
+
+void NoteMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value) {
+  if (!renderer.available() || !g_frame.recording)
+    return;
+  if (trace::Recording())
+    trace::RecordMemoryFill(base, bytes, value, 8);
+  EndRegion();
+  const auto clear = [&](u64 at, RTarget& rt) {
+    if (at >= base + bytes || base >= at + RtByteSize(rt))
+      return;
+    const auto color = ColorTargetClearValue(
+        rt.cb_info, static_cast<u32>(value), static_cast<u32>(value >> 32));
+    const auto from = rt.layout;
+    TransitionImage(g_frame.list, rt.texture, rt.layout,
+                    rhi::TextureState::kCopyDst);
+    g_frame.list->ClearTexture(rt.texture, rhi::TextureState::kCopyDst, {},
+                               color);
+    if (from != rhi::TextureState::kUndefined)
+      TransitionImage(g_frame.list, rt.texture, rt.layout, from);
+    rt.clear_pending = false;
+    rt.ever_rendered = true;
+    rt.dirty_for_read = true;
+    rt.last_frame = g_frame.num;
+    rt.render_serial = ++g_render_serial;
+  };
+  for (auto& [at, rt] : g_rts)
+    clear(at, rt);
+  for (auto& [at, variants] : g_rt_variants)
+    for (auto& rt : variants)
+      clear(at, rt);
+}
 
 void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
   if (!renderer.available() || !bytes)

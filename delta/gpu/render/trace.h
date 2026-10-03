@@ -83,7 +83,7 @@ void RecordBarrier(const char* aspect,
                    rhi::TextureState from,
                    rhi::TextureState to);
 
-void RecordMemoryFill(u64 base, u64 bytes, u32 value);
+void RecordMemoryFill(u64 base, u64 bytes, u64 value, u32 pattern_bytes = 4);
 
 // The live image at `base` changed (see ActivateRtVariant): every later record
 // naming that base is about a different image than the ones before it.

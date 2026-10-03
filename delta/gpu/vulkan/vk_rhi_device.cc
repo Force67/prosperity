@@ -1104,13 +1104,28 @@ rhi::TextureView* VulkanDevice::CreateView(rhi::Texture* texture,
   VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vi.image = tex->image;
   vi.viewType = ToVkViewType(desc.dim);
-  vi.format =
-      ToVkFormat(desc.format == rhi::Format::kUndefined ? texture->desc().format
-                                                        : desc.format);
+  const rhi::Format format = desc.format == rhi::Format::kUndefined
+                                 ? texture->desc().format
+                                 : desc.format;
+  vi.format = ToVkFormat(format);
   vi.components = {ToVkSwizzle(desc.swizzle[0]), ToVkSwizzle(desc.swizzle[1]),
                    ToVkSwizzle(desc.swizzle[2]), ToVkSwizzle(desc.swizzle[3])};
   vi.subresourceRange = {ToVkAspect(desc.aspect), desc.base_mip, desc.mips,
                          desc.base_layer, desc.layers};
+  VkImageViewUsageCreateInfo usage{
+      VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+  if ((texture->desc().usage & rhi::kTextureStorage) &&
+      rhi::GetFormatInfo(format).is_srgb) {
+    if (texture->desc().usage & rhi::kTextureSampled)
+      usage.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (texture->desc().usage & rhi::kTextureColorTarget)
+      usage.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (texture->desc().usage & rhi::kTextureCopySrc)
+      usage.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (texture->desc().usage & rhi::kTextureCopyDst)
+      usage.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    vi.pNext = &usage;
+  }
   if (vkCreateImageView(native.device, &vi, nullptr, &view->view) != VK_SUCCESS)
     return nullptr;
   return gpu::rhi::Release(view, this);

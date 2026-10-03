@@ -190,7 +190,6 @@ void RenderQueue::Run() {
       case Kind::kDraw:
         render::Draw(*renderer_, draws_[c.arg]);
         draws_done_.fetch_add(1, base::memory_order_release);
-        Wake(walk_wake_);
         break;
       case Kind::kBeginFrame:
         render::BeginFrame(*renderer_);

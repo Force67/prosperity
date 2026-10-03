@@ -1240,7 +1240,7 @@ void SnapshotOpenRegion(u32 draw_index) {
                   depth_base, true, draw_index, dt.layout);
   }
   const u64 watch = kRtWatch.get();
-  if (watch && base::Find(mrt, mrt + n, watch) == mrt + n) {
+  if (watch && (watch_only || base::Find(mrt, mrt + n, watch) == mrt + n)) {
     auto wit = g_rts.find(watch);
     if (wit != g_rts.end())
       QueueSnapshot(wit->second.texture, rhi::kAspectColor, wit->second.w,
@@ -1872,7 +1872,7 @@ void RecordBridge(const char* dir, u64 base, u64 image, u32 w, u32 h) {
   l.Emit();
 }
 
-void RecordMemoryFill(u64 base, u64 bytes, u32 value) {
+void RecordMemoryFill(u64 base, u64 bytes, u64 value, u32 pattern_bytes) {
   if (!g_recording)
     return;
   Line l("memory_fill");
@@ -1880,7 +1880,8 @@ void RecordMemoryFill(u64 base, u64 bytes, u32 value) {
       .Int("after_draw", int(g_draw_seq))
       .Hex("base", base)
       .U("bytes", bytes)
-      .Hex("value", value);
+      .Hex("value", value)
+      .U("pattern_bytes", pattern_bytes);
   l.Emit();
 }
 

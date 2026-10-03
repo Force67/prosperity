@@ -36,6 +36,7 @@
 #include "base/logging.h"
 #include "base/math/value_bounds.h"
 #include "base/memory/move.h"
+#include "base/memory/unique_pointer.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
 #include "base/threading/lock_guard.h"
@@ -216,6 +217,11 @@ struct TexImageEntry {
   // Revision of the compute range the image was last copied from
   // (CsSupplyTexture); 0 when it holds guest memory.
   u64 cs_seq = 0;
+  u64 tail_hash = 0;
+  u64 tail_sample_hash = 0;
+  u32 tail_first_mip = 0;
+  u32 tail_check_interval = 1;
+  int tail_full_frame = -1;
   // This frame's validation, computed ahead on the worker pool for every image
   // the last frame used (PrevalidateTextures); pre_frame says for which frame.
   int pre_frame = -1;
@@ -223,6 +229,7 @@ struct TexImageEntry {
   bool pre_full = false;  // pre_hash holds a whole-content hash
   u64 pre_sample = 0;
   u64 pre_hash = 0;
+  gcn::TextureLayout32 layout;
 };
 
 struct TexViewEntry {
@@ -577,9 +584,9 @@ rhi::Sampler* SamplerFor(const SamplerKey& key) {
   return sampler;
 }
 
-u64 TextureLinearBytes(const gcn::TextureLayout32& layout) {
+u64 TextureLinearBytes(const gcn::TextureLayout32& layout, u32 first_mip = 0) {
   u64 bytes = 0;
-  for (u32 mip = 0; mip < layout.mip_levels; mip++)
+  for (u32 mip = first_mip; mip < layout.mip_levels; mip++)
     bytes += static_cast<u64>(layout.mips[mip].width) *
              layout.mips[mip].height * layout.layers * layout.elem_bytes;
   return bytes;
@@ -592,13 +599,14 @@ void PackTexPixels(u8* linear,
                    u32 texel_w,
                    u32 texel_h,
                    rhi::BufferTextureCopy* copies,
-                   bool is_3d) {
+                   bool is_3d,
+                   u32 first_mip = 0) {
   const u32 elem = layout.elem_bytes;
   const u8* src = reinterpret_cast<const u8*>(base);
   u64 linear_offset = 0;
-  for (u32 mip = 0; mip < layout.mip_levels; mip++) {
+  for (u32 mip = first_mip; mip < layout.mip_levels; mip++) {
     const auto& level = layout.mips[mip];
-    rhi::BufferTextureCopy& copy = copies[mip];
+    rhi::BufferTextureCopy& copy = copies[mip - first_mip];
     copy = {};
     copy.buffer_offset = buffer_offset + linear_offset;
     // A volume's slices are the layout's layers, but the copy takes them as
@@ -625,6 +633,8 @@ void PackTexPixels(u8* linear,
     }
     linear_offset += layer_bytes * layout.layers;
   }
+  if (first_mip)
+    return;
   // DELTA_GPU_TEXDUMP_BASE=<guest addr>: write the post-detile mip 0 of ONE
   // named texture to <dumpdir>/tex_<addr>.bin, whatever its size or format.
   // The size-capped text dump below cannot reach a 2048x2048 compressed
@@ -815,9 +825,10 @@ bool RecordTexPixels(rhi::Texture* img,
                      const gcn::TextureLayout32& layout,
                      u32 texel_w,
                      u32 texel_h,
-                     bool is_3d) {
+                     bool is_3d,
+                     u32 first_mip = 0) {
   DELTA_ZONE("gpu.tex_upload");
-  const u64 bytes = TextureLinearBytes(layout);
+  const u64 bytes = TextureLinearBytes(layout, first_mip);
   const u32 barrier_layers = is_3d ? 1 : layout.layers;
   TextureUploadSlice upload;
   if (!AllocateTextureUpload(g_frame.slot_idx, bytes,
@@ -826,7 +837,7 @@ bool RecordTexPixels(rhi::Texture* img,
   const u64 start = NowNs();
   rhi::BufferTextureCopy copies[16]{};
   PackTexPixels(upload.map, upload.offset, base, layout, texel_w, texel_h,
-                copies, is_3d);
+                copies, is_3d, first_mip);
   EndRegion();
   rhi::TextureRange range;
   range.mips = layout.mip_levels;
@@ -834,7 +845,7 @@ bool RecordTexPixels(rhi::Texture* img,
   rhi::TextureBarrier b{img, old_state, rhi::TextureState::kCopyDst, range};
   g_frame.list->Barrier(0, 0, &b, 1);
   g_frame.list->CopyBufferToTexture(img, upload.buffer, copies,
-                                    layout.mip_levels);
+                                    layout.mip_levels - first_mip);
   b.before = rhi::TextureState::kCopyDst;
   b.after = rhi::TextureState::kShaderRead;
   g_frame.list->Barrier(0, 0, &b, 1);
@@ -1079,31 +1090,45 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   const u32 lw = bc ? (w + 3) / 4 : w;
   const u32 lh = bc ? (h + 3) / 4 : h;
   const u32 lpitch = bc ? ((pitch ? pitch : w) + 3) / 4 : (pitch ? pitch : w);
-  gcn::TextureLayout32 layout;
-  // DELTA_GPU_TEXFAIL: why a guest texture declines to upload. Skyrim's font
-  // atlas fell out here and every glyph then sampled the white default, which
-  // fills each glyph quad solid instead of masking it.
-  // The layout's layer axis is the volume's slice axis.
-  if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch, is_3d ? depth : layers,
-                                 mip_levels, tiling, pow2_pad, elem_bytes)) {
-    if (kTexFail) {
-      static int n = 0;
-      if (n++ < 12)
-        BASE_LOGI(
-            "texfail", "layout {:#x} {}x{} pitch={} tiling={} elem={} mips={}",
-            (unsigned long)base, w, h, lpitch, tiling, elem_bytes, mip_levels);
+  TexKey& key = key_out;
+  key = TextureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers, base_array,
+                   view_layers, mip_levels, base_mip, view_mips, min_lod,
+                   pow2_pad, sampler, sampler_valid, arrayed, force_lod_zero,
+                   depth_compare, swizzle, depth, is_3d);
+  auto image_it = g_tex_images.find(key.image);
+  base::UniquePointer<gcn::TextureLayout32> new_layout;
+  if (image_it == g_tex_images.end()) {
+    new_layout = base::MakeUnique<gcn::TextureLayout32>();
+    auto& layout = *new_layout;
+    // DELTA_GPU_TEXFAIL: why a guest texture declines to upload. Skyrim's font
+    // atlas fell out here and every glyph then sampled the white default, which
+    // fills each glyph quad solid instead of masking it.
+    // The layout's layer axis is the volume's slice axis.
+    if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch,
+                                   is_3d ? depth : layers, mip_levels, tiling,
+                                   pow2_pad, elem_bytes)) {
+      if (kTexFail) {
+        static int n = 0;
+        if (n++ < 12)
+          BASE_LOGI("texfail",
+                    "layout {:#x} {}x{} pitch={} tiling={} elem={} mips={}",
+                    (unsigned long)base, w, h, lpitch, tiling, elem_bytes,
+                    mip_levels);
+      }
+      return nullptr;
     }
-    return nullptr;
+    // gfx10 sizes each level in blocks as ceil(blocks / 2^mip), which is the
+    // hardware's, but a level holds ceil(texels / 4) blocks of real data: a
+    // 1600-wide chain is 13 blocks at 50 texels where halving says 12.
+    if (bc && gfx10)
+      for (u32 mip = 0; mip < mip_levels; mip++) {
+        auto& level = layout.mips[mip];
+        level.width = (base::Max(w >> mip, 1u) + 3) / 4;
+        level.height = (base::Max(h >> mip, 1u) + 3) / 4;
+      }
   }
-  // gfx10 sizes each level in blocks as ceil(blocks / 2^mip), which is the
-  // hardware's, but a level holds ceil(texels / 4) blocks of real data: a
-  // 1600-wide chain is 13 blocks at 50 texels where halving says 12.
-  if (bc && gfx10)
-    for (u32 mip = 0; mip < mip_levels; mip++) {
-      auto& level = layout.mips[mip];
-      level.width = (base::Max(w >> mip, 1u) + 3) / 4;
-      level.height = (base::Max(h >> mip, 1u) + 3) / 4;
-    }
+  const auto& layout =
+      image_it == g_tex_images.end() ? *new_layout : image_it->second.layout;
   u64 footprint = layout.size;
   if (footprint > kMaxTextureBytes) {
     if (kTexFail) {
@@ -1155,11 +1180,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       std::fflush(stderr);
     }
   }
-  TexKey& key = key_out;
-  key = TextureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers, base_array,
-                   view_layers, mip_levels, base_mip, view_mips, min_lod,
-                   pow2_pad, sampler, sampler_valid, arrayed, force_lod_zero,
-                   depth_compare, swizzle, depth, is_3d);
   // DELTA_GPU_TEXRAW: write each large texture's raw tiled footprint, with its
   // layout in the name, so a swizzle can be worked out offline.
   if (kTexRaw && w >= 256 && h >= 128 &&
@@ -1213,15 +1233,19 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       tdn++;
     }
   }
-  auto image_it = g_tex_images.find(key.image);
   // A dispatch's output for this surface still in VRAM is copied straight into
   // the image; the guest bytes under it are stale and stay that way.
   // A raw range a dispatch wrote through a V# holds the guest layout itself.
   gcn::TextureLayout32 linear;
-  const bool cs_image =
-      (!is_3d || mip_levels == 1) &&
-      CsSupplyTexture(base, layout, w, h, nullptr,
-                      rhi::TextureState::kUndefined, nullptr);
+  u32 supplied_mips = layout.mip_levels;
+  u64* checked_seq = image_it != g_tex_images.end() &&
+                             image_it->second.last_checked_frame == g_frame.num
+                         ? &image_it->second.cs_seq
+                         : nullptr;
+  const bool cs_image = (!is_3d || mip_levels == 1) &&
+                        CsSupplyTexture(base, layout, w, h, nullptr,
+                                        rhi::TextureState::kUndefined,
+                                        checked_seq, bc, &supplied_mips);
   const bool cs_buffer =
       !cs_image && !bc && !is_3d &&
       gcn::BuildTextureLayout32(linear, lw, lh, lpitch, layers, mip_levels, 8,
@@ -1229,15 +1253,51 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       CsSupplyTextureFromBuffer(base, layout, linear, w, h, nullptr,
                                 rhi::TextureState::kUndefined, nullptr);
   const bool cs_supplies = cs_image || cs_buffer;
-  const auto cs_supply = [&](rhi::Texture* img, rhi::TextureState state,
-                             u64* seq) {
-    return cs_image ? CsSupplyTexture(base, layout, w, h, img, state, seq)
-                    : CsSupplyTextureFromBuffer(base, layout, linear, w, h,
-                                                img, state, seq);
+  const auto cs_supply = [&](TexImageEntry& entry, rhi::TextureState state) {
+    if (cs_image) {
+      if (supplied_mips < layout.mip_levels &&
+          entry.last_checked_frame != g_frame.num) {
+        if (!gpu::IsReadableRange(base, footprint))
+          return false;
+        const u64 start = NowNs();
+        const u64 offset = layout.mips[supplied_mips].offset;
+        const u64 tail_base = base + offset, tail_bytes = footprint - offset;
+        const u64 sample = TexSampleHash(tail_base, tail_bytes);
+        g_tex_hash_bytes += base::Min<u64>(tail_bytes, 16384);
+        bool changed = entry.tail_first_mip != supplied_mips ||
+                       entry.tail_sample_hash != sample;
+        u64 hash = entry.tail_hash;
+        if (changed || g_frame.num - entry.tail_full_frame >=
+                           static_cast<int>(entry.tail_check_interval)) {
+          hash = TexHash(tail_base, tail_bytes);
+          g_tex_hash_bytes += tail_bytes;
+          changed |= entry.tail_hash != hash;
+          entry.tail_full_frame = g_frame.num;
+          if (!changed && entry.tail_check_interval < kMaxCheckInterval)
+            entry.tail_check_interval *= 2;
+        }
+        g_ns_tex_hash += NowNs() - start;
+        if (changed) {
+          if (!RecordTexPixels(entry.image, state, base, layout, w, h, is_3d,
+                               supplied_mips))
+            return false;
+          state = rhi::TextureState::kShaderRead;
+          entry.tail_hash = hash;
+          entry.tail_sample_hash = sample;
+          entry.tail_first_mip = supplied_mips;
+          entry.tail_check_interval = 1;
+        }
+      } else if (supplied_mips == layout.mip_levels) {
+        entry.tail_first_mip = 0;
+      }
+      return CsSupplyTexture(base, layout, w, h, entry.image, state,
+                             &entry.cs_seq, bc, &supplied_mips);
+    }
+    return CsSupplyTextureFromBuffer(base, layout, linear, w, h, entry.image,
+                                     state, &entry.cs_seq);
   };
   if (cs_supplies && image_it != g_tex_images.end()) {
-    if (!cs_supply(image_it->second.image, rhi::TextureState::kShaderRead,
-                   &image_it->second.cs_seq))
+    if (!cs_supply(image_it->second, rhi::TextureState::kShaderRead))
       return nullptr;
     image_it->second.last_checked_frame = g_frame.num;
     image_it->second.hash_valid = false;
@@ -1342,9 +1402,10 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       return nullptr;
     TexImageEntry image_entry;
     image_entry.footprint = footprint;
+    image_entry.layout = layout;
     image_entry.hash_valid = false;
     image_entry.sample_hash = TexSampleHash(base, footprint);
-    image_entry.last_checked_frame = g_frame.num;
+    image_entry.last_checked_frame = -1;
     image_entry.last_full_frame = g_frame.num;
     image_entry.last_used_frame = g_frame.num;
     // Budget on LIVE image bytes. Retired images are only destroyed two
@@ -1365,14 +1426,12 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     td.depth = is_3d ? depth : 1;
     td.layers = layers;
     td.mips = mip_levels;
-    td.usage = rhi::kTextureSampled | rhi::kTextureCopyDst;
+    td.usage = rhi::kTextureSampled | rhi::kTextureCopyDst | rhi::kTextureCopySrc;
     image_entry.image = Device().CreateTexture(td);
     if (!image_entry.image)
       return nullptr;
     const bool cs_uploaded =
-        cs_supplies && cs_supply(image_entry.image,
-                                 rhi::TextureState::kUndefined,
-                                 &image_entry.cs_seq);
+        cs_supplies && cs_supply(image_entry, rhi::TextureState::kUndefined);
     if (!cs_uploaded) {  // see the refresh above: hash before the upload
       image_entry.hash = TexHash(base, footprint);
       image_entry.hash_valid = true;
@@ -1390,6 +1449,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       Device().Destroy(image_entry.image);
       return nullptr;
     }
+    image_entry.last_checked_frame = g_frame.num;
     image_entry.allocation_size = bytes;
     if (Device().caps().debug_labels) {
       char name[96];
@@ -1896,6 +1956,8 @@ void InvalidateTexRange(u64 base, u64 size) {
       found->second.last_checked_frame = -1;
       found->second.last_full_frame = -1;
       found->second.check_interval = 1;
+      found->second.tail_full_frame = -1;
+      found->second.tail_check_interval = 1;
       // Its prevalidated hashes read the bytes from before this change.
       found->second.pre_frame = -1;
     }

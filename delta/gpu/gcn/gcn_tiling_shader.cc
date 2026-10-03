@@ -101,6 +101,33 @@ base::Vector<u32> BuildImageTilingShader() {
   const Id lshift = m.Emit(
       Op::OpSelect, u,
       {is_packed, mul(op(Op::OpBitwiseAnd, lin_byte, c(3)), c(8)), c(0)});
+  // Plain dwords need no packing or depth conversion.
+  const Id plain =
+      m.Emit(Op::OpLogicalAnd, m.TypeBool(),
+             {m.Emit(Op::OpLogicalNot, m.TypeBool(), {narrow}),
+              m.Emit(Op::OpIEqual, m.TypeBool(),
+                     {op(Op::OpBitwiseOr,
+                         op(Op::OpBitwiseOr, param(12), param(13)), param(14)),
+                      c(0)})});
+  const Id plain_copy = m.NewBlock(), formatted_copy = m.NewBlock();
+  m.SelectionMerge(formatted_copy);
+  m.BranchConditional(plain, plain_copy, formatted_copy);
+  m.OpenBlock(plain_copy);
+  const Id copy_out = m.NewBlock(), copy_in = m.NewBlock(),
+           copy_done = m.NewBlock();
+  const Id copy_detile =
+      m.Emit(Op::OpINotEqual, m.TypeBool(), {param(10), c(0)});
+  m.SelectionMerge(copy_done);
+  m.BranchConditional(copy_detile, copy_out, copy_in);
+  m.OpenBlock(copy_out);
+  m.Store(at(1, linear_dw), m.Load(u, at(0, tiled)));
+  m.Branch(copy_done);
+  m.OpenBlock(copy_in);
+  m.Store(at(0, tiled), m.Load(u, at(1, linear_dw)));
+  m.Branch(copy_done);
+  m.OpenBlock(copy_done);
+  m.ReturnVoid();
+  m.OpenBlock(formatted_copy);
   // R11G11B10F from three floats, rounded to nearest with ties away, as the
   // host's PackUnsignedFloat: NaN keeps a mantissa bit, negatives are zero.
   const Id t_bool = m.TypeBool();

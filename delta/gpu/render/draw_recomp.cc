@@ -440,6 +440,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       draw_count) {
     // Clear commands can retain the preceding pass's shader and textures.
     // Resolve attachments before any sampling checks or shader uploads.
+    EndRegion();
     if (!BeginRegion(d.mrt_base, d.mrt_info, d.mrt_count, d.rt_w, d.rt_h,
                      d.depth_base, d.depth_clear, d.stencil_base,
                      d.stencil_clear, false, DepthW(d), DepthH(d), d.mrt_surf_w,

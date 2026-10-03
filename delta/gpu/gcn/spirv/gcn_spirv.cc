@@ -1119,6 +1119,14 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
       const u32 v[4] = {w1 & 0xFF, (w1 >> 8) & 0xFF, (w1 >> 16) & 0xFF,
                         (w1 >> 24) & 0xFF};
       if (sc.is_ps) {
+        const Id export_block = t.m.NewBlock(), after_export = t.m.NewBlock();
+        const Id active = t.LaneActive(t.Exec());
+        if ((w & (1u << 12)) && sc.color_written_var)
+          t.m.Store(sc.color_written_var,
+                    t.SelectB(active, t.U32(1), t.U32(0)));
+        t.m.SelectionMerge(after_export);
+        t.m.BranchConditional(active, export_block, after_export);
+        t.m.OpenBlock(export_block);
         if (target <= 7 && en && !((sc.mrt_bound_mask >> target) & 1u)) {
           // The pass binds no attachment at this slot, so the export has
           // nowhere to land. The instruction still matters: reaching it is what
@@ -1189,6 +1197,8 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
                     : t.VgF(v[0]);
           t.m.Store(PsDepthOut(t, sc), depth);
         }
+        t.m.Branch(after_export);
+        t.m.OpenBlock(after_export);
       } else {
         if (target == 12) {  // POS0 -> gl_Position
           Id c[4];
@@ -2492,8 +2502,7 @@ bool TranslatePs(const Program& program,
     }
   }
 
-  const bool cfg = ForceCfg() || HasControlFlow(program);
-  if (cfg && has_color_export) {
+  if (has_color_export) {
     // Default MRT0 to transparent so a fragment that never reaches an export
     // leaves a defined value even if the discard lowering is bypassed.
     // The default has to match the output's declared type: an integer target

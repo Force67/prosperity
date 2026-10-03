@@ -20,6 +20,7 @@ u64 g_tex_hash_n = 0, g_tex_probe_n = 0, g_ns_tex_lookup = 0,
     g_tex_lookup_n = 0;
 u64 g_ns_tex_set = 0, g_tex_set_n = 0, g_ns_region = 0, g_ns_cs_flush = 0;
 u64 g_ns_build_draw = 0, g_build_draw_n = 0;
+u64 g_ns_memory_fill = 0, g_memory_fill_bytes = 0, g_memory_fill_n = 0;
 u64 g_ns_pipe_build = 0, g_pipe_build_n = 0;
 u64 g_ns_gfx_present = 0, g_ns_borrow_wait = 0;
 // Bytes the draw path copied into its upload rings, per ring.

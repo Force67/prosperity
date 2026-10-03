@@ -37,6 +37,7 @@ extern u64 g_tex_hash_n, g_tex_probe_n, g_ns_tex_lookup, g_tex_lookup_n;
 extern u64 g_ns_tex_set, g_tex_set_n, g_ns_region, g_ns_cs_flush;
 // Turning a draw packet's registers into a DrawInfo.
 extern u64 g_ns_build_draw, g_build_draw_n;
+extern u64 g_ns_memory_fill, g_memory_fill_bytes, g_memory_fill_n;
 // Driver pipeline compiles: the vkCreate*Pipelines calls themselves, which are
 // where a first-time shader costs tens of milliseconds inside one draw.
 extern u64 g_ns_pipe_build, g_pipe_build_n;

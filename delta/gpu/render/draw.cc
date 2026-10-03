@@ -29,7 +29,7 @@
 #include <cstring>
 #include "base/algorithm.h"
 #include "base/logging.h"
-#include "base/optional.h"
+#include "base/memory/unique_pointer.h"
 #include "options/options.h"
 #include "profile/profile.h"
 
@@ -53,9 +53,9 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     return;
   // DELTA_GPU_SWAPTEX01: bisect a suspected sampler-binding order mismatch by
   // exchanging the first two textures of every multi-texture draw.
-  base::Optional<DrawInfo> swapped;
+  base::UniquePointer<DrawInfo> swapped;
   if (kSwapTex && d_in.num_texs >= 2) {
-    swapped = d_in;
+    swapped = base::MakeUnique<DrawInfo>(d_in);
     base::Swap(swapped->texs[0], swapped->texs[1]);
   }
   const DrawInfo& d_sw = swapped ? *swapped : d_in;
@@ -91,10 +91,10 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
         detach_depth = true;
   }
   // Copied only when patched: DrawInfo is ~10 KB and this runs every draw.
-  base::Optional<DrawInfo> patched_copy;
+  base::UniquePointer<DrawInfo> patched_copy;
   const bool patched = kNoDepth || kNoCull || kNoMask || detach_depth;
   if (patched) {
-    patched_copy = d_sw;
+    patched_copy = base::MakeUnique<DrawInfo>(d_sw);
     DrawInfo& dd = *patched_copy;
     if (kNoDepth) {
       dd.depth_test_enable = false;

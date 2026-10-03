@@ -26,6 +26,7 @@
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/gpu_perf.h"
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/pm4.h"
@@ -991,6 +992,8 @@ bool BuildDrawInfo(render::Renderer& renderer,
                    const DrawPacket& packet,
                    render::DrawInfo& d) {
   DELTA_ZONE("ps4.build_draw_info");
+  ScopeNs build_timer(&g_ns_build_draw);
+  g_build_draw_n++;
   const gcn::ScalarReplayScope replays;
   d.prim_type = regs[mmVGT_PRIMITIVE_TYPE];
   gcn::GsPipeline gs;

@@ -17,14 +17,18 @@ namespace gpu::render {
 // on the frame command list, leave the image in kShaderRead and return true;
 // guest memory is then never involved. `seq` is the range revision the image
 // already holds, and a match records nothing. A null `img` only asks whether
-// the range could supply it.
+// the range could supply it. For compressed images, layout uses blocks while
+// w and h remain pixel dimensions. With supplied_mips, a matching prefix of
+// the mip chain is allowed; the caller must supply the remaining levels.
 bool CsSupplyTexture(u64 base,
                      const gcn::TextureLayout32& layout,
                      u32 w,
                      u32 h,
                      rhi::Texture* img,
                      rhi::TextureState state,
-                     u64* seq);
+                     u64* seq,
+                     bool compressed = false,
+                     u32* supplied_mips = nullptr);
 
 // The same for a texture inside a raw range a dispatch wrote through a V#:
 // the tiling shader detiles the range's bytes (`tiled`) into `linear` first.

@@ -241,6 +241,7 @@ bool PreserveCsDepthBeforeClear(u64 base);
 // next bind. `fill` = the dword when the packet carries it; a compute write is
 // read back at the next bind.
 void NoteDccWrite(u64 base, u64 bytes, const u32* fill);
+void NoteExpandedHtile(u64 base);
 
 // A dispatch wrote the pixels of any target overlapping `base`: an earlier DCC
 // fast clear of it no longer describes its content.

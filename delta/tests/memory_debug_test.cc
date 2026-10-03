@@ -125,6 +125,7 @@ TEST(MemoryDebug, GuestReservationsAndCommitsAreSeparate) {
                                          host_memory::PageProtection::kPriv,
                                          host_memory::AllocationType::kReserve);
   ASSERT_NE(reserved, nullptr);
+  EXPECT_TRUE(host_memory::IsMemoryRangeMapped(reserved, page * 4));
   EXPECT_EQ(host_memory::GetMappingStats().reserved,
             before.reserved + page * 4);
   EXPECT_EQ(host_memory::GetMappingStats().mapped, before.mapped);
@@ -141,5 +142,37 @@ TEST(MemoryDebug, GuestReservationsAndCommitsAreSeparate) {
   host_memory::FreeMem(reserved, page * 4);
   EXPECT_EQ(host_memory::GetMappingStats().mapped, before.mapped);
   EXPECT_EQ(host_memory::GetMappingStats().reserved, before.reserved);
+}
+TEST(HostMemory, MappingChecksFollowHolesRemapsAndExternalMappings) {
+  const size_t page = sysconf(_SC_PAGESIZE);
+  auto* memory = static_cast<char*>(
+      host_memory::AllocMem(nullptr, page * 3, host_memory::PageProtection::kW,
+                            host_memory::AllocationType::kCommit));
+  ASSERT_NE(memory, nullptr);
+  EXPECT_TRUE(host_memory::IsMemoryRangeMapped(memory + 1, page * 3 - 1));
+  host_memory::FreeMem(memory + page, page);
+  EXPECT_TRUE(host_memory::IsMemoryRangeMapped(memory, page));
+  EXPECT_TRUE(host_memory::IsMemoryRangeMapped(memory + page * 2, page));
+  EXPECT_FALSE(host_memory::IsMemoryRangeMapped(memory + page, page));
+  EXPECT_FALSE(host_memory::IsMemoryRangeMapped(memory, page * 3));
+  ASSERT_EQ(host_memory::AllocMem(memory + page, page,
+                                  host_memory::PageProtection::kW,
+                                  host_memory::AllocationType::kCommit),
+            memory + page);
+  EXPECT_TRUE(host_memory::IsMemoryRangeMapped(memory, page * 3));
+  host_memory::FreeMem(memory, page * 3);
+  EXPECT_FALSE(host_memory::IsMemoryRangeMapped(memory, page * 3));
+
+  void* external = mmap(nullptr, page, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(external, MAP_FAILED);
+  EXPECT_EQ(host_memory::MemoryMappingIdentity(external, page), 0u);
+  EXPECT_TRUE(host_memory::IsMemoryRangeMapped(external, page));
+  ASSERT_EQ(munmap(external, page), 0);
+  EXPECT_FALSE(host_memory::IsMemoryRangeMapped(external, page));
+  EXPECT_FALSE(host_memory::IsMemoryRangeMapped(nullptr, page));
+  EXPECT_FALSE(host_memory::IsMemoryRangeMapped(memory, 0));
+  EXPECT_FALSE(host_memory::IsMemoryRangeMapped(
+      reinterpret_cast<void*>(UINTPTR_MAX - 1), 4));
 }
 }  // namespace

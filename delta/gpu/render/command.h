@@ -329,6 +329,8 @@ struct ComputeInfo {
   static constexpr u32 kMaxResources = 128;
 
   u64 cs_addr = 0;            // pipeline cache key
+  // A recognized kernel writes an expanded ZMASK to the first HTILE word.
+  u64 expanded_htile_base = 0;
   u32 groups[3] = {1, 1, 1};  // workgroup counts
   u32 group_base[3] = {};     // first workgroup ID in each dimension
   // DISPATCH_INDIRECT: the guest address of the three group counts, read by

@@ -1564,7 +1564,8 @@ u8 SrgbToLinear(u8 c) {
 TEST_P(RhiConformance, ViewSwizzleAndFormatAlias) {
   TextureDesc td;
   td.format = Format::kRGBA8Unorm;
-  td.usage = kTextureSampled | kTextureCopyDst | kTextureMutableFormat;
+  td.usage = kTextureSampled | kTextureStorage | kTextureCopyDst |
+             kTextureMutableFormat;
   Texture* tex = Own(device_->CreateTexture(td));
   const u32 texel = Rgba(64, 128, 192, 255);
   Buffer* staging = Upload(&texel, 4, 0);

@@ -159,6 +159,9 @@ void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
 // compute writes still pending under it land first, every cached copy of it is
 // retired, and NoteMemoryFill sees it.
 void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
+void ApplyMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value);
+bool CanClearMemoryFill64(u64 base, u64 bytes);
+void NoteMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value);
 // Whether ApplyMemoryFill can leave the compute output under the fill on the
 // GPU: dropped where the fill covers it, its writeback keeping the filled
 // bytes where it does not. Otherwise the fill reads it back first.

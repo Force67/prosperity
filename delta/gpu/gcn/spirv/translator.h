@@ -422,7 +422,12 @@ struct Translator {
   // ---- float ALU ----
   Id Ext1(u32 op, Id a) { return m.ExtInst(t_f, op, {a}); }
   Id Ext2(u32 op, Id a, Id b) { return m.ExtInst(t_f, op, {a, b}); }
-  Id FMul(Id a, Id b) { return m.Emit(spv::Op::OpFMul, t_f, {a, b}); }
+  // Preserve guest instruction rounding; only FMA may fuse a multiply and add.
+  Id FMul(Id a, Id b) {
+    const Id value = m.Emit(spv::Op::OpFMul, t_f, {a, b});
+    m.Decorate(value, spv::Decoration::NoContraction);
+    return value;
+  }
   // V_*_LEGACY_F32: zero times anything is zero, even inf/NaN.
   Id LegacyMul(Id a, Id b) {
     const Id zero = F32(0.f);
@@ -432,8 +437,16 @@ struct Translator {
                 m.Emit(spv::Op::OpFOrdEqual, t_bool, {b, zero})});
     return SelectF(any_zero, zero, FMul(a, b));
   }
-  Id FAdd(Id a, Id b) { return m.Emit(spv::Op::OpFAdd, t_f, {a, b}); }
-  Id FSub(Id a, Id b) { return m.Emit(spv::Op::OpFSub, t_f, {a, b}); }
+  Id FAdd(Id a, Id b) {
+    const Id value = m.Emit(spv::Op::OpFAdd, t_f, {a, b});
+    m.Decorate(value, spv::Decoration::NoContraction);
+    return value;
+  }
+  Id FSub(Id a, Id b) {
+    const Id value = m.Emit(spv::Op::OpFSub, t_f, {a, b});
+    m.Decorate(value, spv::Decoration::NoContraction);
+    return value;
+  }
   Id FDiv(Id a, Id b) { return m.Emit(spv::Op::OpFDiv, t_f, {a, b}); }
   Id FNeg(Id a) { return m.Emit(spv::Op::OpFNegate, t_f, {a}); }
   // The clamp output modifier: GCN takes a NaN to 0, which NClamp does and

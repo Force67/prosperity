@@ -6,6 +6,12 @@ add_delta_test(dma_dev_test
   SOURCES dma_dev_test.cc
   DEPS delta_kern)
 
+add_delta_test(gc_dev_test
+  SOURCES gc_dev_test.cc
+  DEPS delta_kern)
+set_tests_properties(gc_dev_test PROPERTIES ENVIRONMENT
+  "DELTA_GPU_RENDER_THREAD=0;DELTA_GPU_NOPRESENT=1;SDL_VIDEODRIVER=offscreen")
+
 add_delta_test(audio_queue_test
   SOURCES audio_queue_test.cc
   DEPS delta_deps)

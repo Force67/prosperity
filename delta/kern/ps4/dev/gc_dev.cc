@@ -526,9 +526,8 @@ base::Mutex GcDevice::g_compute_mutex;
 // SotC spreads async compute over seven queues; only 1/0/0 arrives as a
 // DingDong ioctl, the other six sit at read=0 all run, so their doorbell
 // reaches the hardware some other way (the driver can write its /dev/gc
-// mapping). Consume a ring entry only when it is a complete IB packet whose
-// target resolves, advance readOffsetDw past it, stop at the first non-packet
-// word. Caller must hold g_compute_mutex (not recursive; locking here too
+// mapping). A doorbell publishes a complete range of PM4, including direct
+// packets. Caller must hold g_compute_mutex (not recursive; locking here too
 // deadlocked on the first doorbell). The ring id a doorbell names is the
 // queue's VQUEUE field from the map ioctl's +0x0c (GTA:SA maps vqueue 0x29 and
 // rings 41; not pipe + me*8).
@@ -544,8 +543,20 @@ void GcDevice::RingDoorbell(u32 ring_id, u32 write_offset_dw) {
     // every queue ran Uncharted 2's other ring early, before the title reset
     // the labels that work sets, so its graphics waited on labels already
     // wiped and skinned from tables not yet written.
-    if (pending)
-      DrainQueue(q, pending);
+    if (pending) {
+      const auto* ring = reinterpret_cast<const u32*>(q.ring_base);
+      if (!host_memory::IsMemoryRangeMapped(
+              ring, static_cast<u64>(q.ring_size_dw) * 4))
+        return;
+      base::Vector<u32> commands(pending);
+      for (u32 i = 0; i < pending; i++)
+        commands[i] = ring[(q.read_offset_dw + i) & (q.ring_size_dw - 1)];
+      prosperity_gc_submit_acb(commands.data(), pending * 4);
+      q.read_offset_dw = write_offset_dw;
+      if (host_memory::IsMemoryRangeMapped(
+              reinterpret_cast<const void*>(q.read_ptr), sizeof(u32)))
+        *reinterpret_cast<u32*>(q.read_ptr) = write_offset_dw;
+    }
     return;
   }
 }
@@ -617,9 +628,7 @@ u8* GcDevice::Map(void*, size_t size, u32, u32, size_t offset) {
 
 // sceGnmDingDong(ringId, offset) publishes a queue's write pointer. The real
 // driver writes it into its /dev/gc mapping, so no ioctl announces it; draining
-// only at flip time recycles buffers under us (SIGSEGV in Tomb Raider). Called
-// once per flip so the backlog is not charged to whichever frame rang the
-// doorbell.
+// only at flip time recycles buffers under us (SIGSEGV in Tomb Raider).
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gc_dingdong(u32 ring_id, u32 offset_dw) {
   base::LockGuard lock(kern::GcDevice::g_compute_mutex);

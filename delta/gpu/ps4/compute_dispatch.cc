@@ -56,6 +56,38 @@ bool IsMappedGuestRange(u64 address, u64 bytes) {
          gpu::IsReadableRangeCached(address, bytes);
 }
 
+u64 ExpandedHtileBase(const render::ComputeInfo& ci,
+                      const u32* threads,
+                      u32 user_sgpr,
+                      u32 tgid_enable) {
+  if (user_sgpr != 16 || (tgid_enable & 3) != 3 || threads[0] != 8 ||
+      threads[1] != 8 || threads[2] != 1 || !ci.groups[2] ||
+      !IsMappedGuestRange(ci.cs_addr, 291 * sizeof(u32)))
+    return 0;
+  const auto* code = reinterpret_cast<const u32*>(ci.cs_addr);
+  if (code[0] != 0xbeeb03ff || code[1] != 0x92)
+    return 0;
+  u64 hash = 1469598103934665603ull;
+  for (u32 i = 0; i < 291; ++i)
+    hash = (hash ^ code[i]) * 1099511628211ull;
+  // Both output branches OR 15 into ZMASK. Group zero's first lane stores
+  // word zero regardless of the source HTILE layout or reduction parameters.
+  if (hash != 0xe043b9bd71a7d375ull)
+    return 0;
+  const gcn::VBuffer dst = gcn::DecodeVBuffer(ci.user_data + 8);
+  if (!dst.base || dst.stride != 4 || !dst.num_records || dst.dfmt != 4 ||
+      (dst.nfmt != 4 && dst.nfmt != 5 && dst.nfmt != 7) ||
+      (ci.user_data[9] >> 31) || (ci.user_data[11] & (1u << 23)))
+    return 0;
+  for (u32 i = 0; i < ci.num_res; ++i) {
+    const auto& res = ci.res[i];
+    if (res.base == dst.base && res.written && !res.zero_fill &&
+        !res.image_staging && res.size >= 4 && !res.view_offset)
+      return dst.base;
+  }
+  return 0;
+}
+
 // One resource's live guest range and how it has to be staged.
 struct ResourceRange {
   u64 base = 0;
@@ -264,6 +296,76 @@ bool RunFillKernelOnCpu(render::Renderer& renderer,
   return true;
 }
 
+// One dword fills plain buffers; two dwords can clear a whole 64-bit target.
+constexpr u32 kRepeatFillKernel[] = {
+    0xbeeb03ff, 0x0000001c, 0x8f008610, 0x4a000000, 0xc2400d00, 0xbf8c007f,
+    0x7d880000, 0xbe82246a, 0x7e020c01, 0xbf88002c, 0x7e025501, 0x100202ff,
+    0x4f800000, 0x7e020f01, 0xd2d20002, 0x00020201, 0xd2d40003, 0x00020201,
+    0x4c080480, 0xd10a0002, 0x00020680, 0xd2000002, 0x000a0504, 0xd2d40002,
+    0x00020302, 0x4c060501, 0x4a020501, 0xd2000001, 0x000a0701, 0xd2d40001,
+    0x00020101, 0xd2d20001, 0x00000301, 0x4c040300, 0xd18c0002, 0x00020300,
+    0xd18c000c, 0x00000302, 0x4e020401, 0x87ea0c02, 0x00020302, 0x4a040201,
+    0xd2000001, 0x000a0302, 0xd10a006a, 0x00000280, 0x000202c1, 0xe0002000,
+    0x80010101, 0x7d88000a, 0xbe80246a, 0xbf8c0f70, 0xe0102000, 0x80020100,
+    0xbf810000,
+};
+
+bool RunRepeatFillKernelOnCpu(render::Renderer& renderer,
+                              u64 cs_addr,
+                              const u32 groups[3],
+                              const u32 threads[3],
+                              u32 user_sgpr,
+                              u32 tgid_enable,
+                              const u32* user_data) {
+  if (!kCpuFill || threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
+      groups[1] != 1 || groups[2] != 1 || user_sgpr != 16 || tgid_enable != 1 ||
+      !IsMappedGuestRange(cs_addr, sizeof(kRepeatFillKernel)) ||
+      std::memcmp(reinterpret_cast<const void*>(cs_addr), kRepeatFillKernel,
+                  sizeof(kRepeatFillKernel)))
+    return false;
+  const gcn::VBuffer src = gcn::DecodeVBuffer(user_data + 4);
+  const gcn::VBuffer dst = gcn::DecodeVBuffer(user_data + 8);
+  const gcn::VBuffer params = gcn::DecodeVBuffer(user_data + 12);
+  if (src.stride != 4 || (src.num_records != 1 && src.num_records != 2) ||
+      dst.stride != 4 || src.dfmt != 4 || dst.dfmt != 4 ||
+      src.nfmt != dst.nfmt ||
+      (dst.nfmt != 4 && dst.nfmt != 5 && dst.nfmt != 7) ||
+      (user_data[7] & 7) != 4 || (user_data[5] >> 31) || (user_data[9] >> 31) ||
+      (user_data[7] & (1u << 23)) || (user_data[11] & (1u << 23)) ||
+      u64(params.stride) * params.num_records < 8 ||
+      !IsMappedGuestRange(params.base, 8) || !IsMappedGuestRange(src.base, 4))
+    return false;
+  OwnRenderer("fill");
+  if (!render::FlushCsWritesRange(renderer, params.base, 8, "fill"))
+    return false;
+  u32 config[2];
+  std::memcpy(config, reinterpret_cast<const void*>(params.base),
+              sizeof(config));
+  if (config[1] != src.num_records)
+    return false;
+  const u64 bytes =
+      base::Min<u64>(base::Min<u64>(u64(groups[0]) * 64, config[0]),
+                     dst.num_records) *
+      4;
+  const bool wide = config[1] == 2;
+  if (!bytes || !IsMappedGuestRange(dst.base, bytes) ||
+      (wide ? !render::CanClearMemoryFill64(dst.base, bytes)
+            : render::OverlapsLiveTarget(dst.base, bytes)) ||
+      !IsMappedGuestRange(src.base, wide ? 8 : 4) ||
+      !render::FlushCsWritesRange(renderer, src.base, wide ? 8 : 4, "fill"))
+    return false;
+  if (wide) {
+    u64 value;
+    std::memcpy(&value, reinterpret_cast<const void*>(src.base), 8);
+    render::ApplyMemoryFill64(renderer, dst.base, bytes, value);
+    return true;
+  }
+  u32 value;
+  std::memcpy(&value, reinterpret_cast<const void*>(src.base), 4);
+  render::ApplyMemoryFill(renderer, dst.base, bytes, value);
+  return true;
+}
+
 void PrefetchComputeDispatch(const Regs& regs) {
   const ComputeShaderState state = ComputeStateOf(regs);
   if (!kNoCs && IsGuestAddress(state.cs_addr) && state.thread_x &&
@@ -303,7 +405,9 @@ void DispatchCompute(render::Renderer& renderer,
   if (kNoCs || !renderer.available())
     return;
   if (RunFillKernelOnCpu(renderer, cs_addr, groups, threads, user_sgpr,
-                         tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0)))
+                         tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0)) ||
+      RunRepeatFillKernelOnCpu(renderer, cs_addr, groups, threads, user_sgpr,
+                               tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0)))
     return;
 
   const gcn::RecompiledCs& rc =
@@ -430,11 +534,14 @@ void DispatchCompute(render::Renderer& renderer,
     out.elem_bytes = range.elem_bytes;
     out.stage_elem_bytes = range.stage_elem_bytes;
     out.dfmt = range.image.dfmt;
+    out.nfmt = range.image.nfmt;
     out.pow2_pad = range.image.pow2_pad;
   }
   ci.gds_binding = rc.gds_binding;
   if (!ci.num_res)
     return;
+  ci.expanded_htile_base =
+      ExpandedHtileBase(ci, threads, user_sgpr, tgid_enable);
 
   // Queued behind the draws, so the walk moves on while the renderer thread
   // records. What it writes is announced as pending: a walk read of those
