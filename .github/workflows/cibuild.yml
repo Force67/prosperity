@@ -79,6 +79,9 @@ jobs:
           -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/sdl3" -DCMAKE_INSTALL_PREFIX=/usr \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
           -DDELTA_GPU_D3D12=OFF -DDELTA_PACKAGE_VERSION="$version"
+        for dependency in SPIRVTOOLS SPIRVHEADERS AVCODEC; do
+          grep -q "^${dependency}_FOUND:INTERNAL=1$" build/CMakeCache.txt
+        done
 
     - name: Build
       run: cmake --build build --parallel "$(nproc)"

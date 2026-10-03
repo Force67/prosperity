@@ -1,6 +1,7 @@
 #include "gpu/gcn/gcn_translate.h"
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
+#include <cstdint>
 #include <spirv/unified1/GLSL.std.450.h>
 #include "base/containers/vector.h"
 #include "base/logging.h"
