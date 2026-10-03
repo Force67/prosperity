@@ -40,5 +40,9 @@ void HomeScreenBuild(u32 width, u32 height);
 bool LaunchTransitionActive();
 void LaunchTransitionGameReady();
 void LaunchTransitionBuild(u32 width, u32 height);
+void ReturnTransitionBuild(u32 width,
+                           u32 height,
+                           const base::String& title,
+                           u64 started_ns);
 
 }  // namespace ui

@@ -37,7 +37,8 @@ class LatestFramePresenter {
   // Block until a lent buffer has been copied out, for a caller that is about
   // to write over the one it lent.
   void WaitForBorrowed();
-  void Stop();
+  // Keep the window usable when handing presentation to the exit animation.
+  void Stop(bool interrupt_present = true);
 
  private:
   void StartLocked();

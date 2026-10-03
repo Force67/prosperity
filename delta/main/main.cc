@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
       base::SleepForMilliseconds(16);
     const bool exit = ui::PauseMenuExitRequested();
     core.Stop();
-    if (exit)
+    if (exit || ui::PauseMenuExitRequested())
       break;
 #if defined(__linux__) && !defined(__ANDROID__)
     command.game = cli::ShowHomeScreen(cli::ReadRecentGames()).c_str();

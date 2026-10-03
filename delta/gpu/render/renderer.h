@@ -47,7 +47,7 @@ struct Renderer {
 // renderer is then left unavailable and the emulator runs without graphics).
 // Idempotent: calling again on an available renderer is a no-op success.
 bool Init(Renderer& renderer);
-void StopPresentation();
+void StopPresentation(bool interrupt_present = true);
 void ResetSession(Renderer& renderer);
 
 // Frame lifecycle. BeginFrame starts recording; EndFrame submits, reads back

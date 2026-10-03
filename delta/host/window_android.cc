@@ -941,6 +941,8 @@ bool PollKeyboardPad(PadKeys& out) {
 // service; no-op until that's wired through the NativeActivity.
 void SetRumble(u8, u8) {}
 
+void ShowExitTransition() {}
+
 void ResetGuest() {}
 
 void Shutdown() {

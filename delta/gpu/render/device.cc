@@ -143,8 +143,8 @@ bool Init(Renderer& renderer) {
   return true;
 }
 
-void StopPresentation() {
-  g_backend.presenter.Stop();
+void StopPresentation(bool interrupt_present) {
+  g_backend.presenter.Stop(interrupt_present);
 }
 
 void ResetSession(Renderer& renderer) {

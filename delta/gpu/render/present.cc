@@ -121,7 +121,7 @@ void LatestFramePresenter::WaitForBorrowed() {
   g_ns_borrow_wait += NowNs() - t0;
 }
 
-void LatestFramePresenter::Stop() {
+void LatestFramePresenter::Stop(bool interrupt_present) {
   base::UniquePointer<base::Thread> thread;
   {
     base::LockGuard<base::Mutex> lock(mutex_);
@@ -131,7 +131,7 @@ void LatestFramePresenter::Stop() {
     thread = base::move(thread_);
   }
   released_.NotifyAll();
-  if (thread)
+  if (thread && interrupt_present)
     host::RequestPresentStop();
   ready_.NotifyOne();
   if (thread)

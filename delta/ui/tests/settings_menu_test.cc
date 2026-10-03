@@ -154,3 +154,23 @@ TEST(PauseMenu, KeyboardCanReturnToMainMenuAndCannotResumeAfterRequest) {
   EXPECT_FALSE(guest::Paused());
   ui::OverlayShutdownImGui();
 }
+
+TEST(PauseMenu, ReturnTransitionRemainsVisibleWithoutPausedGuest) {
+  ui::PauseMenuReset();
+  ui::OverlayEnsureImGui();
+  ImGui::GetIO().Fonts->Build();
+  ui::PauseMenuRequestReturn();
+  EXPECT_FALSE(guest::Paused());
+  EXPECT_TRUE(ui::PauseMenuVisible());
+  ui::OverlayBuildFrame(640, 480, 0, 0);
+  EXPECT_GT(ImGui::GetDrawData()->TotalVtxCount, 0);
+  EXPECT_TRUE(ui::HomeScreenBackground().visible);
+  ImGui::GetIO().AddKeyEvent(ImGuiKey_Escape, true);
+  ui::OverlayBuildFrame(640, 480, 0, 0);
+  EXPECT_TRUE(ui::PauseMenuReturnRequested());
+  EXPECT_FALSE(guest::Paused());
+  ui::PauseMenuReset();
+  EXPECT_FALSE(ui::PauseMenuVisible());
+  EXPECT_FALSE(ui::PauseMenuReturnRequested());
+  ui::OverlayShutdownImGui();
+}

@@ -17,6 +17,7 @@
 #include "ui/home_background.h"
 #include "ui/overlay.h"
 #include "ui/overlay_theme.h"
+#include "ui/pause_menu.h"
 #include "ui/settings.h"
 
 namespace ui {
@@ -63,6 +64,7 @@ u64 g_selection_ns = 0;
 u64 g_launch_ns = 0;
 u64 g_game_frame_ns = 0;
 u64 g_boot_ns = 0;
+u64 g_return_ns = 0;
 bool g_booting = false;
 Artwork g_launch_artwork;
 base::String g_launch_name;
@@ -297,6 +299,30 @@ void DrawFirmwareWarning(ImDrawList* dl, float width, float margin) {
   dl->AddText(overlay_theme::MonospaceFont(), 13, ImVec2(tl.x + 80, tl.y + 66),
               overlay_theme::kWarning, command);
 }
+
+void DrawTransitionCaption(ImDrawList* bg,
+                           float w,
+                           float h,
+                           const Artwork& artwork,
+                           const base::String& title,
+                           const char* status,
+                           float enter,
+                           float opacity,
+                           float angle) {
+  const float x = base::Clamp(w * 0.05f, 24.0f, 64.0f);
+  const float y = h - 100 + 16 * (1 - enter);
+  const auto ink = IM_COL32(240, 244, 250, int(255 * opacity * enter));
+  if (artwork.icon >= 0)
+    DrawArtwork(bg, artwork.icon, ImVec2(x, y - 4), ImVec2(x + 64, y + 60), 14,
+                ink);
+  const float text_x = x + (artwork.icon >= 0 ? 84 : 0);
+  bg->AddText(overlay_theme::HeadingFont(), 26, ImVec2(text_x, y), ink,
+              title.c_str());
+  bg->PathArcTo(ImVec2(text_x + 8, y + 44), 6, angle, angle + 4.5f, 24);
+  bg->PathStroke(ink, 0, 1.5f);
+  bg->AddText(ImVec2(text_x + 24, y + 36), ink, status);
+}
+
 }  // namespace
 
 bool HomeScreenActive() {
@@ -305,6 +331,14 @@ bool HomeScreenActive() {
 
 HomeBackground HomeScreenBackground() {
   HomeBackground background;
+  if (PauseMenuReturnRequested()) {
+    background.visible = !g_booting || g_launch_artwork.background < 0;
+    background.opacity = g_return_ns ? FadeProgress(g_return_ns, 0.45f) : 0;
+    background.style = g_background_style;
+    background.time =
+        g_return_ns ? float(base::TickClock::NowNs() - g_return_ns) / 1e9f : 0;
+    return background;
+  }
   if (!g_active && !LaunchTransitionActive())
     return background;
   background.visible =
@@ -651,18 +685,33 @@ void LaunchTransitionBuild(u32 width, u32 height) {
       IM_COL32(12, 13, 17, int(95 * (1 - enter) * opacity)),
       IM_COL32(12, 13, 17, int((210 - 30 * enter) * opacity)),
       IM_COL32(12, 13, 17, int((245 - 65 * enter) * opacity)));
-  const float x = base::Clamp(w * 0.05f, 24.0f, 64.0f);
-  const float y = h - 100 + 16 * (1 - enter);
-  const auto ink = IM_COL32(240, 244, 250, int(255 * opacity * enter));
-  if (g_launch_artwork.icon >= 0)
-    DrawArtwork(bg, g_launch_artwork.icon, ImVec2(x, y - 4),
-                ImVec2(x + 64, y + 60), 14, ink);
-  const float text_x = x + (g_launch_artwork.icon >= 0 ? 84 : 0);
-  bg->AddText(g_heading, 26, ImVec2(text_x, y), ink, g_launch_name.c_str());
   const float angle = float(base::TickClock::NowNs() - g_launch_ns) / 1e9f * 4;
-  bg->PathArcTo(ImVec2(text_x + 8, y + 44), 6, angle, angle + 4.5f, 24);
-  bg->PathStroke(ink, 0, 1.5f);
-  bg->AddText(ImVec2(text_x + 24, y + 36), ink, "Starting game");
+  DrawTransitionCaption(bg, w, h, g_launch_artwork, g_launch_name,
+                        "Starting game", enter, opacity, angle);
+}
+
+void ReturnTransitionBuild(u32 width,
+                           u32 height,
+                           const base::String& title,
+                           u64 started_ns) {
+  g_return_ns = started_ns;
+  const float w = float(width), h = float(height);
+  const float enter = FadeProgress(started_ns, 0.45f);
+  auto* bg = ImGui::GetBackgroundDrawList();
+  const Artwork artwork = g_booting ? g_launch_artwork : Artwork{};
+  const float zoom = 0.025f * (1 - enter);
+  DrawArtwork(bg, artwork.background, ImVec2(-w * zoom, -h * zoom),
+              ImVec2(w * (1 + zoom), h * (1 + zoom)), 0,
+              IM_COL32(255, 255, 255, int(255 * enter)));
+  bg->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, h),
+                              IM_COL32(12, 13, 17, int(180 * enter)),
+                              IM_COL32(12, 13, 17, int(95 * enter)),
+                              IM_COL32(12, 13, 17, int(180 * enter)),
+                              IM_COL32(12, 13, 17, int(245 * enter)));
+  const float angle = float(base::TickClock::NowNs() - started_ns) / 1e9f * 4;
+  DrawTransitionCaption(bg, w, h, artwork,
+                        title.empty() ? base::String("Closing game") : title,
+                        "Returning to main menu", enter, 1, angle);
 }
 
 void HomeScreenSetBackground(u32 style) {
@@ -683,7 +732,7 @@ void BeginHomeScreen(const base::Vector<HomeGame>& games,
                            : ChooseHomeBackground(base::RandomUint(0, 767));
   g_started_ns = base::TickClock::NowNs();
   g_selection_ns = 0;
-  g_launch_ns = g_game_frame_ns = g_boot_ns = 0;
+  g_launch_ns = g_game_frame_ns = g_boot_ns = g_return_ns = 0;
   g_booting = false;
   g_ps4_ready = ps4_ready;
   g_ps5_ready = ps5_ready;
@@ -759,5 +808,6 @@ bool LaunchTransitionActive() {
 }
 void LaunchTransitionGameReady() {}
 void LaunchTransitionBuild(u32, u32) {}
+void ReturnTransitionBuild(u32, u32, const base::String&, u64) {}
 }  // namespace ui
 #endif

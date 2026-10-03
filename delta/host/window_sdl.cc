@@ -40,6 +40,7 @@
 #include "base/math/value_bounds.h"
 #include "base/memory/mem_ops.h"
 #include "base/memory/move.h"
+#include "base/memory/unique_pointer.h"
 #include "base/strings/xstring.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
@@ -135,6 +136,18 @@ base::Atomic<bool> g_can_present{true};
 base::Atomic<bool> g_suppress_pad{false};
 // The splash thread and the videoout HLE may both bring the window up.
 base::Mutex g_init_mutex;
+base::Mutex g_ui_mutex;
+base::Atomic<bool> g_exit_animation{false};
+base::UniquePointer<base::Thread> g_exit_thread;
+thread_local bool t_exit_thread = false;
+
+void StopExitAnimation() {
+  if (!g_exit_thread)
+    return;
+  g_exit_animation.store(false, base::memory_order_release);
+  g_exit_thread->Join();
+  g_exit_thread = {};
+}
 // 0: no splash, 1: the splash thread owns the window, 2: asked to hand it over.
 base::Atomic<int> g_splash{0};
 thread_local bool t_splash_thread = false;
@@ -985,12 +998,16 @@ static void PresentFrame(const void* pixels,
 
 void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
   StopSplash();
+  base::LockGuard<base::Mutex> lock(g_ui_mutex);
+  if (g_exit_animation.load(base::memory_order_acquire) && !t_exit_thread)
+    return;
   if (pixels && !t_splash_thread && !ui::HomeScreenActive()) {
     ui::LaunchTransitionGameReady();
     ui::PauseMenuGameReady();
   }
   if (guest::Paused()) {
-    RefreshFrame(false);
+    PresentFrame(nullptr, g_window.fb_w, g_window.fb_h, 0,
+                 PixelFormat::kRgba8, false);
     return;
   }
   if (pixels)
@@ -998,6 +1015,9 @@ void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
 }
 
 void RefreshFrame(bool frame_stalled) {
+  base::LockGuard<base::Mutex> lock(g_ui_mutex);
+  if (g_exit_animation.load(base::memory_order_acquire) && !t_exit_thread)
+    return;
   PresentFrame(nullptr, g_window.fb_w, g_window.fb_h, 0, PixelFormat::kRgba8,
                frame_stalled);
 }
@@ -1089,7 +1109,6 @@ bool Ensure(const char* title, u32 width, u32 height) {
 }
 
 static bool DrainEvents() {
-  StopSplash();
   ui::SyncMouseLook(g_window.window);
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
@@ -1119,6 +1138,10 @@ static bool DrainEvents() {
 }
 
 bool PumpEvents() {
+  StopSplash();
+  base::LockGuard<base::Mutex> lock(g_ui_mutex);
+  if (g_exit_animation.load(base::memory_order_acquire) && !t_exit_thread)
+    return false;
   if (guest::Stopping() && guest::OnGuestThread())
     return false;
   bool alive = DrainEvents();
@@ -1127,7 +1150,8 @@ bool PumpEvents() {
     g_suppress_pad.store(true);
   if (guest::OnGuestThread()) {
     while (alive && guest::Paused() && !guest::Stopping()) {
-      RefreshFrame(false);
+      PresentFrame(nullptr, g_window.fb_w, g_window.fb_h, 0,
+                   PixelFormat::kRgba8, false);
       base::SleepForMilliseconds(16);
       alive = DrainEvents();
       SetAudioPaused(guest::Paused());
@@ -1255,7 +1279,39 @@ void SetRumble(u8 large_motor, u8 small_motor) {
                     (u16)(small_motor * 257), 0);
 }
 
+void ShowExitTransition() {
+#if defined(__linux__)
+  StopSplash();
+  if (!Available() || !CanPresent() || g_exit_thread)
+    return;
+  {
+    // Take ownership after the game presenter and any inline window calls
+    // have returned.
+    base::LockGuard<base::Mutex> lock(g_ui_mutex);
+    g_exit_animation.store(true, base::memory_order_release);
+  }
+  g_exit_thread = base::MakeUnique<base::Thread>(
+      "exit-ui",
+      [] {
+        t_exit_thread = true;
+        while (g_exit_animation.load(base::memory_order_acquire) &&
+               CanPresent()) {
+          if (!PumpEvents())
+            break;
+          RefreshFrame(false);
+          base::SleepForMilliseconds(16);
+        }
+      },
+      true);
+  if (!g_exit_thread->good()) {
+    g_exit_thread = {};
+    g_exit_animation.store(false, base::memory_order_release);
+  }
+#endif
+}
+
 void ResetGuest() {
+  StopExitAnimation();
   StopSplash();
   if (g_window.device)
     vkDeviceWaitIdle(g_window.device);
@@ -1275,6 +1331,7 @@ void ResetGuest() {
 }
 
 void Shutdown() {
+  StopExitAnimation();
   ui::ResetMouseLook(g_window.window);
   guest::SetPaused(false);
   g_suppress_pad.store(false);

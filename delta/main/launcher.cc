@@ -331,7 +331,11 @@ void Launcher::Boot(const base::String& game_path) {
 
 void Launcher::Stop() {
   guest::RequestStop();
-  gpu::render::StopPresentation();
+  const bool returning =
+      ui::PauseMenuReturnRequested() && !ui::PauseMenuExitRequested();
+  gpu::render::StopPresentation(!returning);
+  if (returning)
+    host::ShowExitTransition();
   guest::JoinThreads();
   gpu::ps4::StopRenderQueue();
   host::CloseAllAudioPorts();
@@ -344,7 +348,10 @@ void Launcher::Stop() {
   kern::RestoreGuestVaSpace();
   options::EndGameSession();
   host::ResetGuest();
+  const bool exit = ui::PauseMenuExitRequested();
   ui::PauseMenuReset();
+  if (exit)
+    ui::PauseMenuRequestExit();
 #if defined(__GLIBC__)
   malloc_trim(0);
 #endif

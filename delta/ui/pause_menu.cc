@@ -22,6 +22,14 @@ base::Atomic<bool> g_exit_requested{false};
 base::Atomic<bool> g_return_requested{false};
 float g_visibility = 0;
 u64 g_tick_ns = 0;
+u64 g_return_ns = 0;
+
+void BuildReturnTransition(u32 width, u32 height) {
+  const auto now = base::TickClock::NowNs();
+  if (!g_return_ns)
+    g_return_ns = now;
+  ReturnTransitionBuild(width, height, g_title, g_return_ns);
+}
 
 void Resume() {
   guest::SetPaused(false);
@@ -54,7 +62,7 @@ void PauseMenuToggle() {
 }
 
 bool PauseMenuVisible() {
-  return guest::Paused() || g_visibility > 0;
+  return g_return_requested.load() || guest::Paused() || g_visibility > 0;
 }
 
 void PauseMenuRequestExit() {
@@ -73,6 +81,10 @@ void PauseMenuRequestReturn() {
 }
 
 void PauseMenuBuild(u32 width, u32 height) {
+  if (g_return_requested.load()) {
+    BuildReturnTransition(width, height);
+    return;
+  }
   const auto now = base::TickClock::NowNs();
   const float dt =
       g_tick_ns ? base::Min(float(now - g_tick_ns) / 1e9f, 0.05f) : 1.0f / 60;
@@ -236,6 +248,7 @@ void PauseMenuReset() {
   g_return_requested.store(false);
   g_visibility = 0;
   g_tick_ns = 0;
+  g_return_ns = 0;
   g_title.clear();
 }
 }  // namespace ui

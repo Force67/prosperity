@@ -106,6 +106,9 @@ void ReloadOverlay();
 base::Vector<base::String> GraphicsDevices();
 #endif
 
+// Animate the return to the library after the game presenter has joined.
+// ResetGuest stops this independent UI worker before releasing frame resources.
+void ShowExitTransition();
 void ResetGuest();
 void Shutdown();
 
