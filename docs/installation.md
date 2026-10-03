@@ -1,7 +1,20 @@
 # Install modules and run
 
-Build first: [building.md](building.md). Commands below run from the repository
-root, inside `nix develop` if you built with Nix.
+## Ubuntu 24.04 package
+
+Download the `.deb` from a GitHub release, then install it with:
+
+```bash
+sudo apt install ./prosperity_*.deb
+ps4delta
+```
+
+APT installs the runtime libraries. The package includes game profiles and desktop
+integration. Supply your own firmware modules and games as described below.
+Use `ps4delta` in place of `./build/delta/main/ps4delta` in the commands below.
+
+For a source build, see [building.md](building.md). Source-build commands run from
+the repository root, inside `nix develop` if you built with Nix.
 
 ## Home screen (Linux)
 

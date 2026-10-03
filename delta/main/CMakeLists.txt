@@ -70,17 +70,17 @@ endif()
 # On linux the .ico is useless, so install the converted png plus a desktop
 # entry that points at it.
 if(UNIX AND NOT APPLE)
-  install(TARGETS ps4delta RUNTIME DESTINATION bin)
+  install(TARGETS ps4delta RUNTIME DESTINATION bin COMPONENT Runtime)
   install(FILES _res/logo.png
           DESTINATION share/icons/hicolor/256x256/apps
-          RENAME ps4delta.png)
+          RENAME ps4delta.png COMPONENT Runtime)
   install(FILES _res/ps4delta.desktop
-          DESTINATION share/applications)
+          DESTINATION share/applications COMPONENT Runtime)
   install(DIRECTORY ${CMAKE_SOURCE_DIR}/game_profiles
-          DESTINATION bin)
+          DESTINATION bin COMPONENT Runtime)
   # Register the application/x-ps4-pkg MIME type so .pkg files open with us.
   install(FILES _res/ps4delta-pkg.xml
-          DESTINATION share/mime/packages)
+          DESTINATION share/mime/packages COMPONENT Runtime)
 endif()
 
 if(DELTA_BUILD_TESTS)
