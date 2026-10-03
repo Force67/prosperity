@@ -34,7 +34,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          build-essential cmake ninja-build pkg-config ccache dpkg-dev \
+          build-essential gcc-14 g++-14 cmake ninja-build pkg-config ccache dpkg-dev file \
           libvulkan-dev mesa-vulkan-drivers libavcodec-dev libavutil-dev \
           spirv-tools spirv-headers libepoxy-dev libegl-dev libopengl-dev \
           libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev \
@@ -84,6 +84,7 @@ jobs:
         fi
         cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/sdl3" -DCMAKE_INSTALL_PREFIX=/usr \
+          -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
           -DDELTA_GPU_D3D12=OFF -DDELTA_PACKAGE_VERSION="$version"
         for dependency in SPIRVTOOLS SPIRVHEADERS AVCODEC; do

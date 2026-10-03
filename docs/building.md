@@ -23,7 +23,8 @@ Keep the Nix shell open when running the binary.
 
 ## Ubuntu CI and release packages
 
-CI builds natively on Ubuntu 24.04 with GCC and Ubuntu's development packages.
+CI builds natively on Ubuntu 24.04 with GCC 14 and Ubuntu's development packages.
+GCC 13 miscompiles the packed buffer format conversion at release optimization.
 SDL3 3.4.2 is built from a pinned commit and linked statically. Vulkan and OpenGL
 are enabled; D3D12 is disabled. The shader recompiler and FFmpeg video decoder
 use Ubuntu's SPIRV-Tools and FFmpeg packages.

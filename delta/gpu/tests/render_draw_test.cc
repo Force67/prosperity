@@ -329,9 +329,9 @@ TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
-  const u32 vs[64] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
                       0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   const u32 user_data[32]{};
   static auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
@@ -417,10 +417,10 @@ TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
     GTEST_SKIP() << "Mesh shading is required";
   if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
     GTEST_SKIP() << "LLVMpipe crashes compiling the split NGG mesh shader";
-  const u32 es[64] = {0x34000a82,              // v0 = ES vertex ID * 4
+  const u32 es[4096] = {0x34000a82,              // v0 = ES vertex ID * 4
                       0xd8340000, 0x00000500,  // LDS[v0] = ES vertex ID
                       0xbe802006};  // s_setpc_b64 s[6:7] -> separately bound GS
-  const u32 gs[64] = {
+  const u32 gs[4096] = {
       0xd8d80000, 0x02000000,  // v2 = LDS[primitive vertex offset]
       0x7e000d02,              // v0 = float(v2)
       0x100000f0, 0x060000f1,  // x = id * .5 - .5
@@ -433,7 +433,7 @@ TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
       0xf8000941, 0x00000004, 0xbefe04c1,
       0xbefc03ff, 0x00001003,  // allocation: 3 vertices, 1 primitive
       0xbf900009, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   const u32 user_data[32]{};
   const gpu::rdna::NggConfig cfg{gs, 64, 3, 3, 1, 128};
@@ -484,7 +484,7 @@ TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
       0xf8000941, 0x00000004, 0xbefe04c1,
       0xbefc03ff, 0x00001003,  // allocation: 3 vertices, 1 primitive
       0xbf900009, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   const u32 user_data[32]{};
   const gpu::rdna::NggConfig cfg{gs, 64, 3, 3, 1, 128, 0, false};
@@ -631,7 +631,7 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
     GTEST_SKIP() << "Mesh shading is required";
   if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
     GTEST_SKIP() << "LLVMpipe crashes compiling the mesh constant-window shader";
-  const u32 es[64] = {0x34000a82, 0xd8340000, 0x00000500, 0xbe802006};
+  const u32 es[4096] = {0x34000a82, 0xd8340000, 0x00000500, 0xbe802006};
   base::Array<u32, 256> gs{};
   u32 pc = 0;
   // One scalar load in each of 17 disjoint constant-buffer windows. The
@@ -648,7 +648,7 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
                       0x00000004, 0xbefe04c1, 0xbefc03ff, 0x00001003,
                       0xbf900009, 0xbf810000};
   base::Copy(body, body + base::ArraySize(body), gs.begin() + pc);
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   const u32 user_data[32]{};
   const gpu::rdna::NggConfig cfg{gs.data(), 64, 3, 3, 1, 128};
@@ -697,12 +697,12 @@ TEST(VkDraw, SplitNggUserWindowsAndHighPixelRegistersRemainDistinct) {
     GTEST_SKIP() << "Mesh shading is required";
   if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
     GTEST_SKIP() << "LLVMpipe crashes compiling NGG mesh shaders";
-  const u32 es[64] = {0x34000a83,              // v0 = vertex ID * 8
+  const u32 es[4096] = {0x34000a83,              // v0 = vertex ID * 8
                       0x7e0c0208,              // v6 = ES user data in s8
                       0xd8340000, 0x00000500,  // LDS[v0] = vertex ID
                       0xd8340004, 0x00000600,  // LDS[v0+4] = ES offset
                       0xbe802006};
-  const u32 gs[64] = {0x34000a83,  // address matching the ES record
+  const u32 gs[4096] = {0x34000a83,  // address matching the ES record
                       0xd8d80000, 0x02000000, 0xd8d80004, 0x06000000,
                       0x7e000d02, 0x100000f0, 0x060000f1, 0x06000000,
                       0x06000106,  // x += GS user s0 + offset written by ES
@@ -711,7 +711,7 @@ TEST(VkDraw, SplitNggUserWindowsAndHighPixelRegistersRemainDistinct) {
                       0x7e0802ff, 0x00200400, 0xbefe0481, 0xf8000941,
                       0x00000004, 0xbefe04c1, 0xbefc03ff, 0x00001003,
                       0xbf900009, 0xbf810000};
-  const u32 ps[64] = {0x7e00021d,  // red = user s29, beyond the old push window
+  const u32 ps[4096] = {0x7e00021d,  // red = user s29, beyond the old push window
                       0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
   u32 user_data[32]{};
   user_data[0] = 0x3e800000;  // ES contributes +.25; GS changes independently
@@ -771,10 +771,10 @@ TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  const u32 vs[64] = {0x7e00021f, 0x7e0202ff, 0x3d800000,
+  const u32 vs[4096] = {0x7e00021f, 0x7e0202ff, 0x3d800000,
                       0x7e040280, 0x7e0602f2, 0xf80008cf,
                       0x03020100, 0xbf810000};  // x = s31 (user23)
-  const u32 ps[64] = {0x7e00021d, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e00021d, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};  // red = s29
   const u32 user_data[32]{};
   static const auto kProgram =
@@ -815,9 +815,9 @@ TEST(VkDraw, PixelShaderUsesDppOperand) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  const u32 vs[64] = {0x7e0002ff, 0x3d800000, 0x7e040280, 0x7e0602f2,
+  const u32 vs[4096] = {0x7e0002ff, 0x3d800000, 0x7e040280, 0x7e0602f2,
                       0xf80008cf, 0x03020000, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2,              // v0 = 1
+  const u32 ps[4096] = {0x7e0002f2,              // v0 = 1
                       0x7e0002fa, 0xff00e400,  // v0 = quad_perm[0,1,2,3](v0)
                       0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
   const u32 user_data[32]{};
@@ -865,7 +865,7 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
       {2, 1, 0xbfe00000, 0xffff0000}, {3, 1, 0xbfe00000, 0xff000000},
       {4, 1, 0xbfe00000, 0xffffffff}, {5, 1, 0xbfe00000, 0xffff0000},
       {0, 1, 0x4301c000, 0xffffff81}, {4, 1, 0x449a5800, 0x000004d2}};
-  const u32 vs[64] = {0x7e0002ff, 0x3d800000, 0x7e040280, 0x7e0602f2,
+  const u32 vs[4096] = {0x7e0002ff, 0x3d800000, 0x7e040280, 0x7e0602f2,
                       0xf80008cf, 0x03020000, 0xbf810000};
   static base::Array<gpu::gcn::Recompiled, base::ArraySize(cases) * 2> programs;
   alignas(65536) static base::Array<base::Array<u8, 65536>,
@@ -875,7 +875,7 @@ TEST(VkDraw, SdwaAluWritesSelectedBytesAndPreservesOtherBits) {
     const auto& c = cases[i % base::ArraySize(cases)];
     const bool binary = i >= base::ArraySize(cases);
     SCOPED_TRACE(i);
-    u32 ps[64] = {0x7e000200, 0x7e020201};  // old bits and float input
+    u32 ps[4096] = {0x7e000200, 0x7e020201};  // old bits and float input
     u32 pc = 2;
     if (binary) {
       ps[pc++] = 0x7e021101;  // convert v1 to integer before the binary op
@@ -920,10 +920,10 @@ TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
     GTEST_SKIP() << "Mesh shading is required";
   if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
     GTEST_SKIP() << "LLVMpipe crashes compiling NGG mesh shaders";
-  const u32 es[64] = {0x34000a82, 0xd8340000, 0x00000500, 0xbe802006};
+  const u32 es[4096] = {0x34000a82, 0xd8340000, 0x00000500, 0xbe802006};
   // Two guest waves take different scalar branches. Their triangles use
   // vertices in the upper half of each wave and a ballot spanning both halves.
-  const u32 gs[128] = {
+  const u32 gs[4096] = {
       0x9380ff03, 0x00040018,  // s0 = wave index from merged_wave_info
       0xbf068000,              // s_cmp_eq_u32 s0, 0
       0xbf850003,              // wave zero jumps to the negative offset
@@ -958,7 +958,7 @@ TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
       0xf8000941, 0x00000004, 0xbefc03ff, 0x00002063,  // 99 vertices, 2
                                                        // primitives
       0xbf900009, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   const u32 user_data[32]{};
   const gpu::rdna::NggConfig cfg{gs, 128, 99, 128, 2, 128};
@@ -994,7 +994,7 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
     GTEST_SKIP() << "A Vulkan device is required";
   // Read the launch IDs before an inline fetch overwrites v5. Two vertices
   // in two instances should cover four separate points, one per quadrant.
-  const u32 vs[64] = {
+  const u32 vs[4096] = {
       0x7e280d05, 0x7e2a0d08,  // v20=float(v5), v21=float(v8)
       0xf4080404, 0,           // s_load_dwordx4 s[16:19], s[8:9], 0
       0xe0002000, 0x80040505,  // buffer_load_format_x v5, v5, s[16:19], 0
@@ -1002,7 +1002,7 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
       0x7e2c0280,              // v22=0
       0xf80008cf, 0x05161514,  // position=(v20,v21,v22,v5)
       0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   const base::Array<float, 2> vertices = {1.f, 1.f};
   const u64 vb = reinterpret_cast<u64>(vertices.data());
@@ -1051,12 +1051,12 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  const u32 vs[64] = {
+  const u32 vs[4096] = {
       0xf4080404, 0xfa000000,  // s[16:19] = descriptor from s[8:9]
       0xe0302000, 0x80040005,  // v0 = buffer[vertex ID], using descriptor
                                // stride
       0x7e020280, 0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   const base::Array<float, 4> vertices = {-.5f, 99.f, .5f, 99.f};
   const u64 vb = reinterpret_cast<u64>(vertices.data());
@@ -1176,9 +1176,9 @@ TEST(VkDraw, IndexedTypedLoadUsesLiveStrideAndInstructionFormat) {
   // Inline V# at s[8:11], indexed by v5. The instruction requests float4
   // even though the descriptor advertises R32_UINT. Padding must not become
   // vertex data, and changing the stride must work with the same module.
-  const u32 vs[64] = {0xea6b2000, 0x80020005, 0xf80008cf, 0x03020100,
+  const u32 vs[4096] = {0xea6b2000, 0x80020005, 0xf80008cf, 0x03020100,
                       0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   base::Array<float, 32> vertices;
   const u64 vb = reinterpret_cast<u64>(vertices.data());
@@ -1235,13 +1235,13 @@ TEST(VkDraw, BulkDescriptorLoadPreservesInteriorBufferStride) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  const u32 vs[64] = {
+  const u32 vs[4096] = {
       0xf4100204, 0xfa000000,  // s[8:23] = four descriptors from s[8:9]
       0xf4200804, 0xfa000000,  // a scalar load uses the first descriptor
       0xe0302000, 0x80040005,  // v0 = buffer[vertex ID], using descriptor
                                // stride
       0x7e020280, 0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   const base::Array<float, 4> vertices = {-.5f, 99.f, .5f, 99.f};
   const u64 vb = reinterpret_cast<u64>(vertices.data());
@@ -1370,9 +1370,9 @@ TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  const u32 vs[64] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
                       0xbf810000};
-  const u32 ps[64] = {
+  const u32 ps[4096] = {
       0x7e000284,  // v0 = byte offset 4
       0xe8001004 | (56u << 19) | (3u << 16), 0x88020000,
       // tbuffer_load_format_xyzw v[0:3], v0, s[8:11], 8 offen offset:4
@@ -1423,9 +1423,9 @@ TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  const u32 vs[64] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
                       0xbf810000};
-  const u32 ps[64] = {
+  const u32 ps[4096] = {
       0x7e0002f0, 0xf09c0f00, 0x00400400,  // sample_lz 1D at x=.5
       0xbefc03ff, 256,                     // M0 = 256
       0xdac00000, 0x00000400,              // spill red at M0 + lane*4
@@ -1484,12 +1484,12 @@ TEST(VkDraw, RawVertexBufferReadsPastOneMiB) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  const u32 vs[64] = {
+  const u32 vs[4096] = {
       0xd5690000, 0x00020aff, 0x001fffff,  // v0 = vertex ID * (2M - 1)
       0x4a000081,                          // v0 += 1
       0xe0302000, 0x80020000,              // v0 = raw buffer s[8:11][v0]
       0x7e020280, 0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100, 0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   base::Vector<float> vertices(4 * 1024 * 1024);
   const u32 indices[] = {1, 2 * 1024 * 1024, u32(vertices.size() - 1)};
@@ -1539,9 +1539,9 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   // A procedural point at the origin, shaded opaque red.
-  const u32 vs[64] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
                       0xbf810000};
-  const u32 ps[64] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   const u32 user_data[32] = {};
   static const auto kProgram =
@@ -1631,9 +1631,9 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
   // A half-red point in an R8/R16 target, whose guest bytes remain zero.
-  const u32 vs[64] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
                       0xbf810000};
-  const u32 ps[64] = {0x7e0002f0, 0x7e020280, 0xf800080f, 0x00010100,
+  const u32 ps[4096] = {0x7e0002f0, 0x7e020280, 0xf800080f, 0x00010100,
                       0xbf810000};
   const u32 user_data[32] = {};
   static const auto kProgram =
