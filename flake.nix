@@ -80,6 +80,21 @@
         packages.default = ps4delta;
         packages.ps4delta = ps4delta;
 
+        devShells.ci = pkgs.mkShell {
+          nativeBuildInputs = ps4delta.nativeBuildInputs;
+          buildInputs = ps4delta.buildInputs;
+          packages = with pkgs; [ ccache python3 mesa ];
+          shellHook = ''
+            for icd in ${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.*.json; do
+              export VK_ICD_FILENAMES="$icd"
+            done
+            export LIBGL_ALWAYS_SOFTWARE=1
+            export EGL_PLATFORM=surfaceless
+            export __EGL_VENDOR_LIBRARY_FILENAMES="${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json"
+            export LD_LIBRARY_PATH="${pkgs.vulkan-loader}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          '';
+        };
+
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             cmake

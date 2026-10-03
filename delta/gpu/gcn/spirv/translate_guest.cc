@@ -267,12 +267,29 @@ Id CsGuestAddress(Translator& t,
                   {sc.cs_guest_translate, address, bytes, t.U32(write)});
 }
 
-Id CsPhysicalLoad(Translator& t, Id address) {
+Id CsPhysicalLoad(Translator& t, StageContext& sc, Id address) {
+  const Id wide = t.m.TypeInt(64, false);
+  const Id valid = t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
+                            {address, t.m.ConstNull(wide)});
+  const Id fallback = sc.direct
+                          ? Pair(t, t.U32(u32(g_direct_misses)),
+                                  t.U32(u32(g_direct_misses >> 32)))
+                          : t.m.Load(
+                                wide, t.m.AccessChain(
+                                          t.m.TypePointer(
+                                              spv::StorageClass::StorageBuffer,
+                                              wide),
+                                          sc.cs_guest_table,
+                                          {t.U32(0), t.U32(2)}));
+  // LLVMpipe can hoist a uniform physical load out of its validity branch.
+  address = t.m.Emit(spv::Op::OpSelect, wide, {valid, address, fallback});
   const Id pointer =
       t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
   const Id p = t.m.Emit(spv::Op::OpConvertUToPtr, pointer, {address});
-  return t.m.Emit(spv::Op::OpLoad, t.t_u,
-                  {p, static_cast<u32>(spv::MemoryAccessMask::Aligned), 4});
+  const Id value = t.m.Emit(
+      spv::Op::OpLoad, t.t_u,
+      {p, static_cast<u32>(spv::MemoryAccessMask::Aligned), 4});
+  return t.SelectB(valid, value, t.U32(0));
 }
 
 Id CsGuestLoad(Translator& t,
@@ -302,15 +319,8 @@ Id CsGuestLoad(Translator& t,
                                                  {offset, Wide(t, t.U32(4))}),
                          bytes}));
   }
-  const Id from = t.m.CurrentBlock(), load = t.m.NewBlock(),
-           done = t.m.NewBlock();
-  t.m.SelectionMerge(done);
-  t.m.BranchConditional(valid, load, done);
-  t.m.OpenBlock(load);
-  const Id value = CsPhysicalLoad(t, address);
-  t.m.Branch(done);
-  t.m.OpenBlock(done);
-  return t.m.Emit(spv::Op::OpPhi, t.t_u, {value, load, t.U32(0), from});
+  const Id value = CsPhysicalLoad(t, sc, address);
+  return t.SelectB(valid, value, t.U32(0));
 }
 
 namespace {
@@ -428,11 +438,11 @@ void EmitGuestGlobal(Translator& t, const Inst& inst, StageContext& sc) {
     const Id from = t.m.CurrentBlock(), access = t.m.NewBlock(),
              done = t.m.NewBlock();
     t.m.SelectionMerge(done);
-    t.m.BranchConditional(valid, access, done);
+    t.m.BranchConditional(store ? valid : t.m.ConstBool(true), access, done);
     t.m.OpenBlock(access);
     Id result = 0;
     if (!store) {
-      result = CsPhysicalLoad(t, phys);
+      result = CsPhysicalLoad(t, sc, phys);
       if (subword) {
         const Id shift = t.Mul(t.And(low, t.U32(3)), t.U32(8));
         result = t.And(t.Shr(result, shift), t.U32((1u << bits) - 1));
@@ -475,7 +485,8 @@ void EmitGuestGlobal(Translator& t, const Inst& inst, StageContext& sc) {
     t.m.OpenBlock(done);
     if (!store)
       values.push_back(
-          t.m.Emit(spv::Op::OpPhi, t.t_u, {result, end, t.U32(0), from}));
+          t.SelectB(valid, t.m.Emit(spv::Op::OpPhi, t.t_u,
+                                    {result, end, t.U32(0), from}), t.U32(0)));
   }
   if (!store)
     for (u32 i = 0; i < count; ++i)
@@ -649,7 +660,7 @@ void EmitCsLinearImage(Translator& t,
       t.m.BranchConditional(mapped, read, read_done);
       t.m.OpenBlock(read);
       const Id raw =
-          t.And(t.Shr(CsPhysicalLoad(t, physical), shift), value_mask);
+          t.And(t.Shr(CsPhysicalLoad(t, sc, physical), shift), value_mask);
       t.m.Branch(read_done);
       t.m.OpenBlock(read_done);
       value =

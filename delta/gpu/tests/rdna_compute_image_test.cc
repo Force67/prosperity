@@ -10,6 +10,7 @@
 #include "base/memory/bit_cast.h"
 #include "gpu/gcn/gcn_detile.h"
 #include "gpu/render/compute.h"
+#include "gpu/render/frame.h"
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
@@ -1558,6 +1559,8 @@ TEST(RdnaComputeImageConversion,
                                              false, 16));
   ASSERT_EQ(blocks.size, input.size());
   ASSERT_EQ(pixels.size, 0x100b0000u);
+  if (pixels.size > gpu::render::Device().caps().max_storage_buffer_range)
+    GTEST_SKIP() << "The device cannot bind the expanded BC6 image";
   base::Array<u8, 16> encoded{};
   u32 bit = 0;
   const auto put = [&](u32 value, u32 count) {
@@ -1697,6 +1700,8 @@ TEST(RdnaComputeImageConversion, LargeShadowArrayReadsPastRawBufferLimit) {
   ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(layout, 1024, 1024, 1024, 80, 1,
                                              0x118, false, 4));
   ASSERT_EQ(layout.size, input.size());
+  if (layout.size > gpu::render::Device().caps().max_storage_buffer_range)
+    GTEST_SKIP() << "The device cannot bind the shadow array";
   base::Vector<u32> pixels(1024 * 1024, base::BitCast<u32>(0.75f));
   ASSERT_TRUE(
       gpu::gcn::RetileTextureMip32(pixels.data(), input.data(), layout, 0, 79));

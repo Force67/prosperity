@@ -9,6 +9,7 @@
 #include "gpu/ps5/cmd_processor.h"
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/draw_state.h"
+#include "gpu/write_tracker.h"
 
 // Exercise the real packet walker with a backend that records dispatch state.
 // Queue scheduling must work independently of a host graphics device.
@@ -213,6 +214,7 @@ TEST(AgcQueue, DmaDataCopiesAndClearsGdsCounters) {
 }  // namespace
 
 namespace gpu::ps5 {
+void InstallWriteTrackerPolicy() {}
 bool BuildDrawInfo(const Regs&,
                    const DrawPacket& packet,
                    render::DrawInfo& draw) {
@@ -224,7 +226,8 @@ bool BuildDrawInfo(const Regs&,
 void DispatchCompute(render::Renderer&,
                      const Regs& regs,
                      const u32* body,
-                     u32) {
+                     u32,
+                     u64) {
   g_dispatch_values.push_back(regs[mmCOMPUTE_USER_DATA_0]);
   g_dispatch_groups.push_back({body[0], body[1], body[2]});
 }
@@ -244,6 +247,15 @@ bool Init(Renderer& renderer) {
   renderer.state = &state;
   return true;
 }
+void DeferLabelsToGpu() {}
+void RecordComputeInFrame() {}
+void SyncGuestDirect() {}
+bool CanDispatchIndirect(u64) { return false; }
+bool GpuIndirectArgs(u64, u64) { return false; }
+u64 GuestWritePublishBatch() { return 0; }
+bool WaitBatch(u64) { return true; }
+void SubmitForPublishedLabels() {}
+void ReportBatchState() {}
 void BeginFrame(Renderer&) {}
 void EndFrame(Renderer&, u64 base) {
   g_presented = base;
@@ -254,6 +266,10 @@ bool FlushCsWrites(Renderer&, const char*) {
 }
 bool ReadGds(Renderer&, u32 offset, void* data, u32 bytes) {
   std::memcpy(data, g_gds.data() + offset, bytes);
+  return true;
+}
+bool CopyGdsToGuest(u32 offset, u64 address, u32 bytes) {
+  std::memcpy(reinterpret_cast<void*>(address), g_gds.data() + offset, bytes);
   return true;
 }
 bool WriteGds(Renderer&, u32 offset, const void* data, u32 bytes) {
@@ -276,6 +292,18 @@ bool FlushCsWritesRange(Renderer&, u64 base, u64 bytes, const char*) {
 }
 void NoteMemoryFill(Renderer&, u64, u64, u32) {}
 }  // namespace gpu::render
+
+namespace gpu {
+WriteTracker& GuestWriteTracker() {
+  static WriteTracker tracker;
+  return tracker;
+}
+bool WriteTracker::Enable() { return false; }
+}  // namespace gpu
+
+namespace gpu::gcn {
+void (*g_flush_guest_range)(u64, u64) = nullptr;
+}  // namespace gpu::gcn
 
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" bool prosperity_ps5_is_display_buffer(u64 base) {

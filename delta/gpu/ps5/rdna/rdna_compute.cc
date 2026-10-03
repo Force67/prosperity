@@ -262,7 +262,14 @@ bool PlanResources(const Program& program,
     keys.push_back(key);
     bind[pc] = idx;
     r.resources.push_back(
-        {base_sgpr, pc, idx, kind, written, reads, min_bytes, runtime_address});
+        {.base_sgpr = base_sgpr,
+         .use_pc = pc,
+         .binding = idx,
+         .kind = kind,
+         .written = written,
+         .read = reads,
+         .min_bytes = min_bytes,
+         .runtime_address = runtime_address});
     r.resources.back().inline_user_data = inline_user_data;
     return true;
   };
@@ -675,6 +682,12 @@ bool NeedsWaveLockstep(const Program& program) {
   u32 lds = 0;
   for (const Inst& inst : program) {
     lds |= LdsAccess(inst);
+    if (inst.extension == gpu::gcn::InstExtension::kDpp ||
+        inst.extension == gpu::gcn::InstExtension::kDpp8 ||
+        inst.extension == gpu::gcn::InstExtension::kDpp8Fi ||
+        (inst.enc == Enc::kVop3 &&
+         (inst.opcode == 0x377 || inst.opcode == 0x378)))
+      return true;
     if (inst.enc == Enc::kVop3 &&
         (inst.opcode == 0x365 || inst.opcode == 0x366))
       return true;  // v_mbcnt

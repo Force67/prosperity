@@ -1128,7 +1128,7 @@ Id CsGuestLoad(Translator& t,
                u32 binding,
                Id dword_idx,
                Id required_end = 0);
-Id CsPhysicalLoad(Translator& t, Id address);
+Id CsPhysicalLoad(Translator& t, StageContext& sc, Id address);
 void CsGuestStoreMasked(Translator& t,
                         StageContext& sc,
                         Id address,

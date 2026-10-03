@@ -12,6 +12,7 @@
 #include "base/math/value_bounds.h"
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
+#include "gpu/guest_memory.h"
 #include "gpu/ps5/guest_memory_ranges.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
@@ -447,6 +448,8 @@ TEST_F(RdnaGlobal, ReadOnlyMappingRejectsStoresButAllowsLoads) {
   auto* source = static_cast<u32*>(memory);
   source[0] = 0x12345678;
   ASSERT_EQ(mprotect(memory, 65536, PROT_READ), 0);
+  gpu::ps5::MarkHostMappingsStale();
+  gpu::NextMemoryGeneration();
   gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(memory), 65536);
   auto& dest = PageForDispatch();
   Mov(1, 0xffffffff);
@@ -457,6 +460,8 @@ TEST_F(RdnaGlobal, ReadOnlyMappingRejectsStoresButAllowsLoads) {
   EXPECT_EQ(source[0], 0x12345678);
   EXPECT_EQ(dest[0], 0x12345678);
   ASSERT_EQ(mprotect(memory, 65536, PROT_READ | PROT_WRITE), 0);
+  gpu::ps5::MarkHostMappingsStale();
+  gpu::NextMemoryGeneration();
 }
 #endif
 

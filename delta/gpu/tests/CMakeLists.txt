@@ -46,8 +46,17 @@ add_delta_test(pm4_test
   DEPS delta_deps)
 
 add_delta_test(agc_queue_test
-  SOURCES agc_queue_test.cc
-  DEPS delta_gpu)
+  SOURCES
+    agc_queue_test.cc
+    ../ps5/cmd_processor.cc
+    ../ps5/cmd_trace.cc
+    ../ps5/reg_state.cc
+    ../ps5/label_publisher.cc
+    ../ps5/rdna/rdna_decode.cc
+    ../gcn/gcn_detile.cc
+    ../guest_page_table.cc
+    ../render/gds_dma.cc
+  DEPS delta_deps)
 
 add_delta_test(guest_memory_ranges_test
   SOURCES guest_memory_ranges_test.cc ../ps5/guest_memory_ranges.cc

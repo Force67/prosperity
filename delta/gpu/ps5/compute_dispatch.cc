@@ -447,6 +447,12 @@ void DispatchCompute(render::Renderer& renderer,
     ci.guest_memory = GuestMemoryRanges(bases);
     if (ci.guest_memory.empty())
       return;
+    for (u32 i = 0; i + 1 < ud_dwords; ++i) {
+      const u64 address = u64(ud[i]) | (u64(ud[i + 1]) << 32);
+      u64 pool_base = 0, pool_end = 0;
+      if (GpuPoolRange(address, pool_base, pool_end))
+        ci.guest_memory_seeds.push_back(address);
+    }
   }
 
   // Every resource becomes a range, pointer bases included: a shader that
@@ -495,6 +501,12 @@ void DispatchCompute(render::Renderer& renderer,
       }
     } else {
       range = ResolveBufferResource(r, desc);
+    }
+    if (r.runtime_address && range.base && !range.zero_fill) {
+      u64 pool_base = 0, pool_end = 0;
+      if (GpuPoolRange(range.base, pool_base, pool_end))
+        range.size = base::Max<u64>(
+            range.size, base::Min<u64>(pool_end - range.base, 64ull << 10));
     }
     // A pointer the shader offsets at run time may start anywhere, mapped or
     // not; it only lacks a buffer of its own then.

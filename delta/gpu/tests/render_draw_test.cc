@@ -415,6 +415,8 @@ TEST(VkDraw, SplitNggStagesTransferLdsAndExportConnectivity) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
+  if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
+    GTEST_SKIP() << "LLVMpipe crashes compiling the split NGG mesh shader";
   const u32 es[64] = {0x34000a82,              // v0 = ES vertex ID * 4
                       0xd8340000, 0x00000500,  // LDS[v0] = ES vertex ID
                       0xbe802006};  // s_setpc_b64 s[6:7] -> separately bound GS
@@ -466,6 +468,8 @@ TEST(VkDraw, UnifiedNggProgramExportsTriangleConnectivity) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
+  if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
+    GTEST_SKIP() << "LLVMpipe crashes compiling the unified NGG mesh shader";
   // The shader probe reads 16 KiB and caches its result by address.
   alignas(16384) static const u32 gs[4096] = {
       0x7e040305,              // v2 = input vertex ID
@@ -517,6 +521,8 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
+  if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
+    GTEST_SKIP() << "LLVMpipe crashes compiling NGG mesh shaders";
   base::Array<u32, 4096> code{};
   u32 pc = 0;
   const auto v1 = [&](u32 op, u32 dst, u32 src) {
@@ -623,6 +629,8 @@ TEST(VkDraw, MeshConstantWindowsExceedTheDynamicDescriptorLimit) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
+  if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
+    GTEST_SKIP() << "LLVMpipe crashes compiling the mesh constant-window shader";
   const u32 es[64] = {0x34000a82, 0xd8340000, 0x00000500, 0xbe802006};
   base::Array<u32, 256> gs{};
   u32 pc = 0;
@@ -687,6 +695,8 @@ TEST(VkDraw, SplitNggUserWindowsAndHighPixelRegistersRemainDistinct) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
+  if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
+    GTEST_SKIP() << "LLVMpipe crashes compiling NGG mesh shaders";
   const u32 es[64] = {0x34000a83,              // v0 = vertex ID * 8
                       0x7e0c0208,              // v6 = ES user data in s8
                       0xd8340000, 0x00000500,  // LDS[v0] = vertex ID
@@ -908,6 +918,8 @@ TEST(VkDraw, NggWavesKeepIndependentBranchesAndFullBallots) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer) || !gpu::render::Device().caps().mesh_shader)
     GTEST_SKIP() << "Mesh shading is required";
+  if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
+    GTEST_SKIP() << "LLVMpipe crashes compiling NGG mesh shaders";
   const u32 es[64] = {0x34000a82, 0xd8340000, 0x00000500, 0xbe802006};
   // Two guest waves take different scalar branches. Their triangles use
   // vertices in the upper half of each wave and a ballot spanning both halves.

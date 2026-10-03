@@ -2360,7 +2360,7 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
           gpu::gcn::WarnUnsupported("vop3.permlane", op, w, w1);
           break;
         }
-        const Id lane = t.m.Load(t.t_u, sc.subgroup_local_id);
+        const Id lane = t.WaveLane();
         const Id selectors =
             t.SelectB(t.IsZero(t.And(lane, t.U32(8))),
                       t.SrcRaw(s1, inst.literal), t.SrcRaw(s2, inst.literal));
@@ -2373,6 +2373,8 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         const Id source_lane = t.Or(row, selected);
         const Id scope = t.U32(static_cast<u32>(spv::Scope::Subgroup));
         const auto shuffle = [&](Id value) {
+          if (t.CanExchange())
+            return t.WaveExchange(value, source_lane);
           return t.m.Emit(spv::Op::OpGroupNonUniformShuffle, t.t_u,
                           {scope, value, source_lane});
         };

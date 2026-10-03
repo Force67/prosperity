@@ -154,7 +154,12 @@ void EmitBvh(Translator& t,
       const Id bytes =
           t.m.Emit(spv::Op::OpUConvert, wide_type, {t.Mul(word, t.U32(4))});
       return gpu::gcn::CsPhysicalLoad(
-          t, t.m.Emit(spv::Op::OpIAdd, wide_type, {physical, bytes}));
+          t, sc,
+          t.m.Emit(spv::Op::OpSelect, wide_type,
+                   {t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
+                             {physical, t.m.ConstNull(wide_type)}),
+                    t.m.Emit(spv::Op::OpIAdd, wide_type, {physical, bytes}),
+                    t.m.ConstNull(wide_type)}));
     }
     return gpu::gcn::CsSsboLoad(t, sc, binding, t.Add(offset, word));
   };

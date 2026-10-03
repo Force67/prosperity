@@ -21,6 +21,19 @@ Binary: `build/delta/main/ps4delta`.
 Next: [install system modules and run a game](installation.md).
 Keep the Nix shell open when running the binary.
 
+CI uses `nix develop .#ci`, a build and software-rendering shell without the
+debuggers, profiler tools, or custom RenderDoc build. Its Nix store cache is
+keyed by the flake and runner architecture and saved before compilation.
+ccache is restored across commits and saved even when compilation fails.
+To reproduce CI locally:
+
+```bash
+nix develop .#ci
+cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+cmake --build build/ci --parallel
+ctest --test-dir build/ci --output-on-failure
+```
+
 ## Linux without Nix
 
 Install a C++20 compiler, CMake 3.20+, Ninja, pkg-config, and development

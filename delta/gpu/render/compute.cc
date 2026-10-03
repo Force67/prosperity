@@ -5579,6 +5579,8 @@ bool GuestWindows(const ComputeInfo& ci,
   // what it found nowhere gets a buffer now.
   for (u64 address : TakeGuestMisses())
     MaterializeGuestRange(address);
+  for (u64 address : ci.guest_memory_seeds)
+    MaterializeGuestRange(address);
   // The part [base + skip, base + skip + n) of a range inside one mapping.
   struct Candidate {
     u64 base, skip, n;

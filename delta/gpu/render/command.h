@@ -370,6 +370,7 @@ struct ComputeInfo {
   // has no ds_append/ds_consume.
   int gds_binding = -1;
   base::Vector<GuestMemoryRange> guest_memory;
+  base::Vector<u64> guest_memory_seeds;
   // Images the module samples through real views, each at its set-0 binding
   // (RecompiledCs::textures).
   struct Tex {
