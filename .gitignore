@@ -311,6 +311,7 @@ Thumbs.db
 vendor/*tar.gz
 vendor/*tar
 /build-dbg
+/build-deck
 
 # aarch64 / FEX build tree
 build-arm/

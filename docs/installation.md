@@ -42,6 +42,26 @@ The last 12 launches, titles, and artwork are saved in
 `$XDG_DATA_HOME/prosperity/` when set). Games at missing paths stay visible but
 cannot be played. Native file pickers use the desktop's XDG portal.
 
+## Steam Deck
+
+From a Linux PC with Nix, build and copy Prosperity to a Deck in developer
+mode, with SSH access, and add a **Prosperity** shortcut to Steam:
+
+```bash
+tools/deploy_deck.sh --shortcut deck@steamdeck
+```
+
+The script builds for Zen 2 and uses the libraries of SteamOS. It
+installs into `~/prosperity`. Run it again without `--shortcut` to update.
+Import firmware once over SSH with `~/prosperity/ps4delta
+--configure-ps4-fw` and `--configure-ps5-fw`. Keep games on the SD card;
+`/home` is small.
+
+In Game Mode, Prosperity fills the screen, sizes its menus for the handheld,
+and keeps games in their aspect ratio. Add games with **Add game**; the file
+picker accepts touch and the trackpads. The log is `~/prosperity/last.log`.
+`+DELTA_UI_SCALE=<percent>` overrides the menu size, on any display.
+
 ## Import firmware modules once
 
 Use a separate setup switch for each console:
