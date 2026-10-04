@@ -28,7 +28,6 @@
 #include "kern/probe/probe.h"
 #include "kern/ps4/hardware_mode.h"
 #include "kern/vfs.h"
-#include "runtime/vprx/vprx.h"
 
 #include <cctype>
 #include <cstdio>
@@ -68,9 +67,6 @@ Process* Process::GetActive() {
 bool Process::Create(const base::String& path, bool from_vfs) {
   if (guest::Stopping())
     return false;
-  /*register HLE prx overrides*/
-  runtime::vprx::Init();
-
   /*init memory manager*/
   LOG_ASSERT(vmem_.Init());
 
@@ -249,8 +245,8 @@ ModulePtr Process::LoadModule(base::StringRef name) {
   if (is_packaged_sdk_module && load_packaged_module())
     return lib;
 
-  // HLE/system modules ship with the emulator; prefer those for modules that
-  // are not supplied by the application.
+  // Prefer the configured firmware modules for modules not supplied by the
+  // application.
   base::String host_rel("modules/");
   if (is_ps4_gnm_driver)
     host_rel += ps4::GnmDriverModule();
@@ -304,9 +300,19 @@ void Process::Start() {
     u64 val;
   } stack[128];
 
-  stack[0].val = 1 + 0;  // argc
+  // argc/argv block, then envp and auxv
+  base::Vector<const char*> argv_ptrs;
+  if (args_.empty()) {
+    argv_ptrs.push_back(info.name.c_str());
+  } else {
+    if (args_.front().empty())
+      args_.front() = info.name;
+    for (auto& arg : args_) argv_ptrs.push_back(arg.c_str());
+  }
+
+  stack[0].val = argv_ptrs.size();
   auto s = reinterpret_cast<stack_entry*>(&stack[1]);
-  (*s++).ptr = info.name.c_str();
+  for (auto* arg : argv_ptrs) (*s++).ptr = arg;
   (*s++).ptr = nullptr;
   (*s++).ptr = nullptr;
   (*s++).val = 9ull;
@@ -314,8 +320,6 @@ void Process::Start() {
   (*s++).ptr = nullptr;
   (*s++).ptr = nullptr;
 
-  // Enter libkernel's entry with the PS4 convention (arg block in rdi). The
-  // backend runs it natively (x86 host) or via the FEXCore JIT (aarch64 host).
   // PS5 starts with the TCB its kernel would have installed; libkernel reads
   // fs:0x10 before it gets around to setting up its own (see MakeInitialTcb).
   const u64 fsbase = plat_ == Platform::kPs5 ? ps5::MakeInitialTcb() : 0;

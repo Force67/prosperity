@@ -12,6 +12,18 @@
 #include "kern/lv2/sys_thread.h"
 
 namespace {
+TEST(UmtxOp, MutexUnlockPreservesAnotherOwner) {
+  constexpr u32 contested = 0x80000000u;
+  i64 self = 0;
+  ASSERT_EQ(kern::sys_thr_self(&self), 0);
+  base::Atomic<u32> mutex{static_cast<u32>(self + 1) | contested};
+  EXPECT_EQ(kern::sys_umtx_op(&mutex, 6, 0, nullptr, nullptr), -1);
+  EXPECT_EQ(mutex.load(), static_cast<u32>(self + 1) | contested);
+  mutex.store(static_cast<u32>(self) | contested);
+  EXPECT_EQ(kern::sys_umtx_op(&mutex, 6, 0, nullptr, nullptr), 0);
+  EXPECT_EQ(mutex.load(), 0u);
+}
+
 // Joins on scope exit, like std::jthread.
 struct JoinedThread {
   base::Thread thread;

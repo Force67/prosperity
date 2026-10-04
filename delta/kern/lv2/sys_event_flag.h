@@ -108,6 +108,7 @@ class EventFlag : public Object {
 // handle and touches no object table, so a HOST thread with no guest proc (the
 // audio daemon stand-in, kern/ps4/audio_daemon.cc) can signal a guest flag.
 bool EvfSetByNameSubstr(const char* substr, u64 bits);
+bool EvfClearByNameSubstr(const char* substr, u64 keep_mask);
 
 int PS4ABI sys_evf_create(const char* name, u32 attr, u64 init_pattern);
 int PS4ABI sys_evf_delete(int id);

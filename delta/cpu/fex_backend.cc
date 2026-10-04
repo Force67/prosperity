@@ -655,6 +655,10 @@ class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
     u64 ret = fn(args->Argument[1], args->Argument[2], args->Argument[3],
                  args->Argument[4], args->Argument[5], args->Argument[6]);
     const u32 error = kern::SyscallErrno(ret);
+    if (num == 42 && !error) {
+      frame->State.gregs[FEXCore::X86State::REG_RDX] = ret >> 32;
+      ret = static_cast<u32>(ret);
+    }
     if (error)
       ret = error;
     ev.ret = ret;

@@ -63,11 +63,11 @@ class Process {
   Platform GetPlatform() const { return plat_; }
   void SetPlatform(Platform p) { plat_ = p; }
 
-  // SDK version the title was built against, 0xMMmmpppp (PS5 titles carry it in
-  // sce_sys/param.json). libkernel reads it back through sysctl kern.proc.36
-  // and branches on it; 0 makes it take pre-1.70 code paths.
+  // SDK version the title was built against, 0xMMmmpppp
   u32 GetSdkVersion() const { return sdk_version_; }
   void SetSdkVersion(u32 v) { sdk_version_ = v; }
+
+  void SetArgs(base::Vector<base::String> a) { args_ = base::move(a); }
 
  private:
   VmMap vmem_;
@@ -83,6 +83,8 @@ class Process {
   // libkernel uses this as the DTV slot; it must be unique and non-negative
   // (-1 corrupts DTPMOD relocations and the DTV).
   u16 NextFreeTls() { return tls_counter_++; }
+
+  base::Vector<base::String> args_;
 };
 
 }  // namespace kern

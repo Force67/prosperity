@@ -4,6 +4,7 @@
 
 #include "kern/vfs_providers.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -146,8 +147,14 @@ class PkgProvider : public kern::vfs::VirtualProvider {
   base::UniquePointer<kern::vfs::VirtualFile> Open(const char* rel) override {
     MaybeDump();
     const auto* node = fs_.Find(rel);
-    if (!node)
+    if (!node) {
+      if (std::strcmp(rel, "/sce_sys/param.sfo") == 0) {
+        base::Vector<u8> data;
+        if (fs_.ReadPkgEntry(0x1000, data) > 0 && data.size() <= kMaxSfoSize)
+          return base::MakeUnique<MetadataFile>(base::move(data));
+      }
       return nullptr;
+    }
     return base::MakeUnique<PkgFile>(&fs_, *node);
   }
   void MaybeDump() {
@@ -171,8 +178,16 @@ class PkgProvider : public kern::vfs::VirtualProvider {
   }
   bool Stat(const char* rel, i64& size) override {
     const auto* node = fs_.Find(rel);
-    if (!node)
+    if (!node) {
+      if (std::strcmp(rel, "/sce_sys/param.sfo") == 0) {
+        auto file = Open(rel);
+        if (file) {
+          size = file->Size();
+          return true;
+        }
+      }
       return false;
+    }
     size = static_cast<i64>(node->size);
     return true;
   }
@@ -203,6 +218,21 @@ class PkgProvider : public kern::vfs::VirtualProvider {
   }
 
  private:
+  struct MetadataFile : kern::vfs::VirtualFile {
+    base::Vector<u8> data;
+    explicit MetadataFile(base::Vector<u8> bytes) : data(base::move(bytes)) {}
+    i64 Read(void* buffer, i64 offset, i64 length) override {
+      if (offset < 0 || length < 0)
+        return -1;
+      if (static_cast<u64>(offset) >= data.size())
+        return 0;
+      const auto size = std::min<u64>(length, data.size() - offset);
+      std::memcpy(buffer, data.data() + offset, size);
+      return size;
+    }
+    i64 Size() override { return data.size(); }
+  };
+
   struct PkgFile : kern::vfs::VirtualFile {
     formats::PkgFilesystem* fs;
     formats::PkgFilesystem::Node node;

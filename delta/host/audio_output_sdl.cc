@@ -61,8 +61,9 @@ int OpenAudioPort(u32 freq, u32 channels, int is_float) {
     BASE_LOGI("audio", "open stream failed: {}", SDL_GetError());
     return -1;
   }
-  if (!g_paused)
-    SDL_ResumeAudioStreamDevice(s);
+  // The stream stays paused until QueueAudio has buffered a small cushion
+  // (see below): the feeder hands us one grain at a time in real time, and a
+  // device that starts dry cracks as soon as a push lands late.
   Port p;
   p.stream = s;
   p.channels = channels;
@@ -126,12 +127,12 @@ int QueueAudio(int handle, const void* samples, u32 frames) {
     std::fwrite(samples, 1, bytes, pf);
     std::fflush(pf);
   }
-  // The real sceAudioOutOutput blocks until the previous grain plays, pacing
+  // The real audio output submission blocks until the previous grain plays, pacing
   // the audio thread; our queue is non-blocking, so a looping Output (FMOD)
   // pins a core at 100% and starves the game thread. Block until the queue
   // drains below a small target, bounded so a headless/stalled device can't
   // hang the thread.
-  const u32 target = bytes * 3;  // keep ~3 buffers of latency
+  const u32 target = bytes * 6;  // keep ~6 buffers of latency
   int prev_q = -1;
   for (int i = 0; i < 64; i++) {
     int q = SDL_GetAudioStreamQueued(stream);  // thread-safe
@@ -151,7 +152,7 @@ int QueueAudio(int handle, const void* samples, u32 frames) {
   // wait (no real playback to pace against, e.g. headless), drop this buffer
   // rather than accumulate seconds of delay.
   int queued = SDL_GetAudioStreamQueued(stream);
-  if (queued >= 0 && static_cast<u32>(queued) < bytes * 8) {
+  if (queued >= 0 && static_cast<u32>(queued) < bytes * 10) {
     if (gain >= 0.999f) {
       SDL_PutAudioStreamData(stream, samples, static_cast<int>(bytes));
     } else {
@@ -173,6 +174,14 @@ int QueueAudio(int handle, const void* samples, u32 frames) {
       SDL_PutAudioStreamData(stream, scratch.data(), static_cast<int>(bytes));
     }
   }
+
+  // Start playback once ~4 buffers are queued: the device callback wants
+  // chunks larger than one grain, so a stream that starts dry underruns every
+  // other callback and sounds crunchy. From here on the feeder's real-time
+  // cadence keeps the cushion topped up.
+  if (!g_paused && SDL_AudioStreamDevicePaused(stream) && queued >= 0 &&
+      static_cast<u32>(queued) >= bytes * 4)
+    SDL_ResumeAudioStreamDevice(stream);
   if (kAudioTrace && ((g_frames_out += frames) % (48000 * 2) < frames)) {
     // Peak level over this buffer (confirms real audio vs. silence -> tells PCM
     // working from a missing decode upstream).

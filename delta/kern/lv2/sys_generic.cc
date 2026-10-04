@@ -13,6 +13,7 @@
 
 namespace {
 DELTA_OPTION(bool, kIoctlTrace, "DELTA_IOCTL_TRACE", false);
+DELTA_OPTION(bool, kIoctlDevTrace, "DELTA_IOCTL_DEV_TRACE", false);
 }  // namespace
 
 namespace kern {
@@ -22,8 +23,12 @@ int PS4ABI sys_ioctl(u32 fd, u32 cmd, void* data) {
     return -1;
 
   auto obj = proc->GetObjTable().Get(fd);
-  if (obj)
+  if (obj) {
+    static u64 n = 0;
+    if (kIoctlDevTrace && n++ % 1000 == 0)
+      BASE_LOGI("ioctl", "fd={} obj={} cmd={:#x}", fd, obj->GetName().c_str(), cmd);
     return static_cast<Device*>(obj.get())->Ioctl(cmd, data);
+  }
 
   // Unknown fd (e.g. a stubbed socket from sys_socketex, or an ioctl probe on
   // stdio). Soft-succeed with a zeroed out-buffer rather than returning EBADF:

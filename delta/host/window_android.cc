@@ -940,6 +940,7 @@ bool PollKeyboardPad(PadKeys& out) {
 // Haptics on the touch-gamepad build would need a JNI call to the Vibrator
 // service; no-op until that's wired through the NativeActivity.
 void SetRumble(u8, u8) {}
+void SetControllerLight(u8, u8, u8) {}
 
 void ShowExitTransition() {}
 

@@ -1387,4 +1387,8 @@ void StopRenderQueue() {
   GuestRenderQueue().Stop();
 }
 
+void WaitForFrame() {
+  GuestRenderQueue().Drain("display flip");
+}
+
 }  // namespace gpu::ps4

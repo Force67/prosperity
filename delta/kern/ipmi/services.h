@@ -16,16 +16,20 @@ namespace kern::ipmi {
 // The one running title's appId, as ShellCore would have assigned it. It leaks
 // into guest-visible state in two places that must agree: the SceLncService
 // GetAppStatus reply, and the SceShellCoreUtilAppFocus/CtrlFocus event-flag
-// patterns (libSceSystemService's GetStatus reports the app backgrounded or
+// patterns (system service client's GetStatus reports the app backgrounded or
 // overlaid unless the flag pattern equals its own appId).
 constexpr u32 kForegroundAppId = 0x60000001;
 
 Service& PlayGoService();
-// The title's PlayGo chunk count, as the daemon reports it.
-u32 PlayGoChunkCount();
+Service& AppContentService();
+Service& ImeService();
+Service& SaveDataService();
+Service& NetCtlService();
 Service& NpManagerService();
 Service& NpWebService();
 Service& UserService();
+Service& AudioSystemService();
+Service& MbusService();
 Service& LncService();
 Service& ArbitratorIpcService();
 

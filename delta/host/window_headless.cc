@@ -41,6 +41,7 @@ bool PollKeyboardPad(PadKeys&) {
   return false;
 }
 void SetRumble(u8, u8) {}
+void SetControllerLight(u8, u8, u8) {}
 void ShowExitTransition() {}
 
 void ResetGuest() {}

@@ -24,13 +24,18 @@ struct DirEntry {
 };
 // Map a guest path prefix (e.g. "/app0") onto a host directory. Longest prefix
 // wins at resolve time.
-void Mount(const char* guest_prefix, const char* host_dir);
+void Mount(const char* guest_prefix,
+           const char* host_dir,
+           bool save_quota = false);
 
 // Like mount(), but the mount is writable: guest opens with a write/create flag
 // create/modify files on the host underneath it (used for savedata). The host
 // directory is created if absent. Read-only titles never open host mounts for
 // write, so this cannot affect them.
-void MountWritable(const char* guest_prefix, const char* host_dir);
+void MountWritable(const char* guest_prefix,
+                   const char* host_dir,
+                   bool save_quota = false);
+base::String SaveQuotaRoot(const char* guest_path);
 
 // Remove the most recently added mount for a guest prefix.
 void Unmount(const char* guest_prefix);

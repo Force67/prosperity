@@ -55,6 +55,9 @@ void SetUnknownWaitHook(void (*hook)(u64 address));
 // videoout flip buffer). Called by the Gnm submit-and-flip HLE.
 void EndFrame(u64 scanout_base);
 
+// Wait until queued rendering and presentation have finished.
+void WaitForFrame();
+
 void StopRenderQueue();
 
 }  // namespace gpu::ps4

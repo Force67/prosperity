@@ -1,5 +1,5 @@
-# Dynamic runtime: x86 code lifting (capstone + xbyak) and the vprx HLE module
-# loader. Co-dependent with kern (cycle declared in delta/CMakeLists.txt).
+# Dynamic runtime: x86 code lifting, NID encoding, and media decoding.
+# Co-dependent with kern (cycle declared in delta/CMakeLists.txt).
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
   pkg_check_modules(AVCODEC QUIET IMPORTED_TARGET libavcodec>=60 libavutil)

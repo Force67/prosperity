@@ -26,7 +26,7 @@ MODULES = ('cpu', 'formats', 'host', 'ui', 'gpu', 'kern', 'main', 'runtime')
 # The one-way design. Read down: a module may only include modules below it.
 #
 #   main        composition root; wires everything, owns no policy
-#   runtime     the HLE modules a title imports (vprx) + the code lifter
+#   runtime     the NID codec, media decoding, and the code lifter
 #   kern        the process model, lv2 syscalls, devices, VFS
 #   gpu         guest command streams -> rendered frames
 #   host        the host platform shell (window, input, audio)
@@ -55,11 +55,8 @@ GRANDFATHERED = {
     # as kern::setCsRangeDescriber and kern::ps4::setAudioSink.
     ('kern', 'cpu'),
     ('cpu', 'kern'),
-    # kern -> runtime is the loader asking vprx to resolve an HLE import and
-    # the lifter rewriting guest code; runtime -> kern is every HLE module
-    # calling the kernel it sits on. Either invert the resolver (kern declares
-    # it, runtime registers into it) or declare kern+runtime one layer and say
-    # so here, but decide, because right now neither is written down.
+    # kern -> runtime is the loader decoding NIDs and lifting guest code;
+    # runtime -> kern is the lifter using kernel dispatch and process state.
     ('kern', 'runtime'),
 }
 

@@ -3,10 +3,8 @@
 /*
  * PS4Delta : PS4 emulation and research project
  *
- * Host audio output bridge (SDL3). The libSceAudioOut HLE (delta_runtime)
- * drives these to play the game's PCM. Mirrors the videoout flip bridge: the
- * HLE module stays free of SDL, the device lives here in delta_host (which
- * links SDL3). On Android (no SDL) these are no-ops.
+ * Host audio output bridge used by the kernel audio consumer.
+ * SDL3 owns playback streams. On Android these operations are no-ops.
  */
 
 #include "base/arch.h"

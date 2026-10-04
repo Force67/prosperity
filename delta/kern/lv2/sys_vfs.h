@@ -34,6 +34,9 @@ enum FcFlags {
 
 int PS4ABI sys_open(const char* path, u32 flags, u32 mode);
 int PS4ABI sys_close(u32 fd);
+int PS4ABI sys_truncate(const char* path, i64 length);
+// Packed read/write descriptors, split into rax/rdx by the syscall bridge.
+u64 PS4ABI sys_pipe();
 i64 PS4ABI sys_read(u32 fd, void* buf, size_t nbytes);
 void FdReadStat(u32 fd, i64 n);
 i64 PS4ABI sys_lseek(u32 fd, i64 offset, int whence);

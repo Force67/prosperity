@@ -263,6 +263,11 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
         inc(qword[rax]);
       }
       // The lifted site enters with `call`, so rsp is 16-aligned here.
+      // The pipe syscall retains rdi and returns both result registers.
+      if (sid == 42) {
+        push(rdi);
+        sub(rsp, 8);
+      }
       push(rbx);      // save guest rbx (callee-saved: survives the calls)
       mov(rbx, rsp);  // remember the guest stack
       if (own_stack) {
@@ -333,11 +338,24 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
         pop(rax);  // restore errno
       }
       pop(rbx);
+      if (sid == 42) {
+        add(rsp, 8);
+        pop(rdi);
+      }
       stc();  // error: rax already = positive errno
       ret();
       L(ok);
       mov(rax, r11);  // success: restore the raw result
+      if (sid == 42) {
+        mov(rdx, rax);
+        shr(rdx, 32);
+        mov(eax, eax);
+      }
       pop(rbx);
+      if (sid == 42) {
+        add(rsp, 8);
+        pop(rdi);
+      }
       clc();
       ret();
     }

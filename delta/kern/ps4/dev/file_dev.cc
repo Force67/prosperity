@@ -15,6 +15,7 @@
 
 #include "base/strings/xstring.h"
 #include "kern/ps4/dev/file_dev.h"
+#include "kern/save_storage.h"
 #include "options/options.h"
 
 namespace {
@@ -35,7 +36,20 @@ void FillStat(SceKernelStat& out, u16 mode, i64 size) {
 
 FileDevice::FileDevice(ObjectTable& objects) : Device(objects) {}
 
-bool FileDevice::Open(const base::String& host_path, u32 /*flags*/) {
+FileDevice::~FileDevice() {
+  save_storage::Close(file_);
+}
+
+bool FileDevice::Open(const base::String& host_path,
+                      u32 /*flags*/,
+                      const base::String& quota_root) {
+  if (!quota_root.empty()) {
+    if (!save_storage::OpenRead(file_, quota_root, host_path))
+      return false;
+    quota_root_ = quota_root;
+    open_ = true;
+    return true;
+  }
   // Read-only: the disc image is immutable.
   io::File tmp(host_path, io::FileMode::kRead);
   // Exists() only means a PhysFile object was constructed; IsOpen() means the
@@ -51,42 +65,22 @@ bool FileDevice::Open(const base::String& host_path, u32 /*flags*/) {
 
 bool FileDevice::OpenWritable(const base::String& host_path,
                               bool create,
-                              bool truncate) {
-  // Probe existence (open-read then close) to pick the fopen mode: an existing
-  // file opens rb+ (keep contents), else wb+ when creating.
-  io::File probe(host_path, io::FileMode::kRead);
-  const bool exists = probe.Exists() && probe.IsOpen();
-  probe.Close();
-
-  io::FileMode mode;
-  if (truncate || (!exists && create))
-    mode = io::FileMode::kCreate;  // wb+ : create/truncate, read+write
-  else if (exists)
-    mode = io::FileMode::kReadWrite;  // rb+ : keep contents, read+write
-  else
-    return false;  // open-existing for write, but absent and no create
-
-  io::File f(host_path, mode);
-  if (!f.Exists() || !f.IsOpen())
+                              bool truncate,
+                              const base::String& quota_root) {
+  if (!save_storage::OpenWritable(file_, quota_root, host_path, create,
+                                  truncate))
     return false;
-  file_.Reset(f.GetBase());
+  quota_root_ = quota_root;
   open_ = true;
   writable_ = true;
   return true;
 }
 
 i64 FileDevice::Write(const void* buf, size_t n) {
+  std::lock_guard lock(io_mutex_);
   if (!open_ || !writable_)
     return -SysError::eBADF;
-  // PhysFile::Write returns 1 on a complete fwrite; report bytes written.
-  if (!file_.Write(buf, n))
-    return 0;
-  // Flush every guest write: the emulator is normally SIGKILLed, which discards
-  // whatever is still sitting in the stdio buffer. Without this a save only
-  // ever reached disk in whole 4 KiB buffer flushes, so every savedata file
-  // ended up 0 bytes or truncated mid-record at exactly 4096.
-  file_.Flush();
-  return static_cast<i64>(n);
+  return save_storage::Write(file_, quota_root_, buf, n);
 }
 
 bool FileDevice::Adopt(io::File&& file) {
@@ -98,6 +92,7 @@ bool FileDevice::Adopt(io::File&& file) {
 }
 
 i64 FileDevice::Read(void* buf, size_t n) {
+  std::lock_guard lock(io_mutex_);
   if (!open_)
     return -SysError::eBADF;
   if (seq_)
@@ -118,6 +113,7 @@ i64 FileDevice::Read(void* buf, size_t n) {
 }
 
 i64 FileDevice::Lseek(i64 off, int whence) {
+  std::lock_guard lock(io_mutex_);
   if (!open_)
     return -SysError::eBADF;
   // Sequential mode (manifest): ignore the engine's bogus absolute seeks; only
@@ -182,6 +178,7 @@ i64 FileDevice::Lseek(i64 off, int whence) {
 // pread: read at an absolute offset without disturbing the file position (the
 // guest keeps its own position for sequential reads). Backs a file mmap.
 i64 FileDevice::ReadAt(void* buf, size_t n, i64 off) {
+  std::lock_guard lock(io_mutex_);
   if (!open_)
     return -SysError::eBADF;
   if (seq_) {  // ignore the bogus offset; serve in order from the cursor
@@ -206,7 +203,30 @@ i64 FileDevice::ReadAt(void* buf, size_t n, i64 off) {
   return r;
 }
 
+i64 FileDevice::WriteAt(const void* buf, size_t n, i64 off) {
+  std::lock_guard lock(io_mutex_);
+  if (!open_ || !writable_)
+    return -SysError::eBADF;
+  if (off < 0)
+    return -SysError::eINVAL;
+  const u64 saved = file_.Tell();
+  if (static_cast<i64>(file_.Seek(off, io::SeekMode::kSeekSet)) < 0)
+    return -SysError::eINVAL;
+  const i64 result =
+      save_storage::Write(file_, quota_root_, buf, n);
+  file_.Seek(saved, io::SeekMode::kSeekSet);
+  return result;
+}
+
+i32 FileDevice::Truncate(i64 length) {
+  std::lock_guard lock(io_mutex_);
+  if (!open_ || !writable_)
+    return -SysError::eINVAL;
+  return save_storage::Truncate(file_, quota_root_, length);
+}
+
 int FileDevice::Fstat(void* stat) {
+  std::lock_guard lock(io_mutex_);
   if (!open_)
     return -SysError::eBADF;
   FillStat(*reinterpret_cast<SceKernelStat*>(stat), kSceFileModeReg,

@@ -43,12 +43,13 @@ set_tests_properties(mdbg_service_test PROPERTIES TIMEOUT 10)
 # no emulator at all -- which is the acceptance test for the boundary.
 add_delta_test(console_dev_test
   SOURCES console_dev_test.cc
-    ../ps4/dev/console_dev.cc ../ps4/dev/file_dev.cc
+    ../ps4/dev/console_dev.cc ../ps4/dev/file_dev.cc ../save_storage.cc
     ../object.cc ../object_table.cc
   DEPS delta_deps)
 
 add_delta_test(hid_dev_test
   SOURCES hid_dev_test.cc
-    ../ps4/dev/hid_dev.cc ../ps4/dev/file_dev.cc
+    ../ps4/dev/hid_dev.cc ../ps4/dev/file_dev.cc ../ps4/controller_ports.cc
+    ../save_storage.cc
     ../object.cc ../object_table.cc
   DEPS delta_deps)

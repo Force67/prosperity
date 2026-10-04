@@ -1275,10 +1275,15 @@ void SetRumble(u8 large_motor, u8 small_motor) {
   if (!g_window.gamepad)
     return;
   // DS4 motors are 0..255; SDL rumble is 0..65535. Large = low-freq, small =
-  // high-freq. Duration 0 means "until the next call"; the game re-issues
-  // continuously.
+  // high-freq. Keep SDL's periodic refresh active until the next output or
+  // explicit stop on handle close/session reset.
   SDL_RumbleGamepad(g_window.gamepad, (u16)(large_motor * 257),
-                    (u16)(small_motor * 257), 0);
+                    (u16)(small_motor * 257), SDL_MAX_UINT32);
+}
+
+void SetControllerLight(u8 red, u8 green, u8 blue) {
+  if (g_window.gamepad)
+    SDL_SetGamepadLED(g_window.gamepad, red, green, blue);
 }
 
 void ShowExitTransition() {

@@ -5,7 +5,7 @@
 # executable.
 
 # Include root shared by every module so cross-module includes resolve, e.g.
-# <kern/process.h> -> delta/kern/process.h, "runtime/vprx/vprx.h" -> delta/runtime/...
+# <kern/process.h> -> delta/kern/process.h, "runtime/nid.h" -> delta/runtime/...
 set(DELTA_ROOT ${CMAKE_CURRENT_SOURCE_DIR} CACHE INTERNAL "delta module include root")
 
 # Foundation every module links: the shared utility library (which itself
@@ -33,7 +33,7 @@ if(DELTA_BUILD_TESTS)
 endif()
 
 # kern and runtime are co-dependent: kern drives the JIT runtime
-# (proc -> vprx/code_lift) and the runtime calls back into kern
+# (proc -> nid/code_lift) and the runtime calls back into kern
 # (code_lift -> proc::getActive). delta_cpu is likewise co-dependent with kern:
 # the loader/proc/threads call cpu::GetBackend(), and the FEX backend calls back
 # into kern (lv2_get, ModuleInfo). Declare the static-lib cycles so the linker
@@ -46,7 +46,8 @@ endif()
 target_link_libraries(delta_kern    PUBLIC delta_runtime delta_cpu)
 target_link_libraries(delta_runtime PUBLIC delta_kern delta_gpu)
 target_link_libraries(delta_cpu     PUBLIC delta_kern)
+set_property(TARGET delta_runtime PROPERTY LINK_INTERFACE_MULTIPLICITY 3)
 
-# delta_gpu (GCN PM4 -> Vulkan) is driven by the Gnm HLE in delta_runtime and
-# renders through delta_host's Vulkan device.
+# delta_gpu executes the command buffers submitted through the kernel GC
+# devices and renders through delta_host's Vulkan device.
 target_link_libraries(delta_gpu     PUBLIC delta_host)

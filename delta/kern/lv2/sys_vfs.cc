@@ -6,11 +6,13 @@
  * in the root of the source tree.
  */
 
+#include <poll.h>
 #include <unistd.h>
 #include <cstdio>
 #include "base/arch.h"
 #include "base/logging.h"
 #include "base/strings/string_ref.h"
+#include "base/time/time.h"
 #include "guest/session.h"
 #include "guest_abi.h"
 
@@ -36,6 +38,7 @@
 #include "kern/ps4/dev/npdrm_dev.h"
 #include "kern/ps4/dev/null_dev.h"
 #include "kern/ps4/dev/pfsctl_dev.h"
+#include "kern/ps4/dev/pipe_dev.h"
 #include "kern/ps4/dev/random_dev.h"
 #include "kern/ps4/dev/scegp_dev.h"
 #include "kern/ps4/dev/srtc_dev.h"
@@ -43,8 +46,10 @@
 #include "kern/ps4/dev/usbctl_dev.h"
 #include "kern/ps4/dev/vtrm_dev.h"
 #include "kern/ps4/dev/zero_dev.h"
+#include "kern/ps5/dev/dce_dev.h"
 #include "kern/ps5/dev/dma_dev.h"  // PS5 /dev/dmem (shared-memfd mapping)
 #include "kern/ps5/dev/gc_dev.h"   // PS5 AGC /dev/gc device
+#include "kern/save_storage.h"
 #include "kern/vfs.h"
 
 #include <sys/select.h>
@@ -64,13 +69,13 @@
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
 #include "base/time/time.h"
+#include "host_memory/host_memory.h"
 #include "kern/lv2/error_table.h"
 #include "kern/object_ref.h"
 #include "kern/ps4/dev/device.h"
 #include "kern/ps4/dev/socket_dev.h"  // FdToSocket, for select over real sockets
 #include "logger/logger.h"
 #include "options/options.h"
-#include "host_memory/host_memory.h"
 
 namespace {
 DELTA_OPTION(bool, kQuietGuest, "DELTA_QUIET_GUEST", false);
@@ -87,6 +92,15 @@ DELTA_OPTION(bool, kIoprogress, "DELTA_IOPROGRESS", false);
 }  // namespace
 
 namespace kern {
+
+u64 PS4ABI sys_pipe() {
+  auto* process = Process::GetActive();
+  if (!process)
+    return -SysError::eINVAL;
+  u32 reader, writer;
+  CreatePipe(process->GetObjTable(), reader, writer);
+  return reader | (static_cast<u64>(writer) << 32);
+}
 // Scan the (guest) stack for the first return address inside any guest module's
 // .text and print it as <module>+offset, to pin which guest code issued an
 // open. Native backend runs handlers on the guest stack. Gated; for tracing
@@ -147,6 +161,8 @@ static Device* MakeDevice(const char* device_name) {
     dev = new PfsctlDevice(proc->GetObjTable());
   if (xname == "usbctl")
     dev = new UsbctlDevice(proc->GetObjTable());
+  if (xname == "ugen1.1" || xname == "usb/1.1.0")
+    dev = new UgenDevice(proc->GetObjTable());
   if (xname == "hid")
     dev = new HidDevice(proc->GetObjTable());
   if (xname == "sceGp")
@@ -156,7 +172,9 @@ static Device* MakeDevice(const char* device_name) {
               ? static_cast<Device*>(new GcDevicePs5(proc->GetObjTable()))
               : static_cast<Device*>(new GcDevice(proc->GetObjTable()));
   if (xname == "dce")
-    dev = new DceDevice(proc->GetObjTable());
+    dev = proc->GetPlatform() == Process::Platform::kPs5
+              ? static_cast<Device*>(new DceDevicePs5(proc->GetObjTable()))
+              : static_cast<Device*>(new DceDevice(proc->GetObjTable()));
   if (xname == "dipsw")
     dev = new DipswDevice(proc->GetObjTable());
   if (xname == "random" || xname == "urandom")
@@ -168,7 +186,8 @@ static Device* MakeDevice(const char* device_name) {
       proc->GetPlatform() == kern::Process::Platform::kPs5)
     dev = new RandomDevice(proc->GetObjTable());
   if (xname == "ajm")
-    dev = new AjmDevice(proc->GetObjTable());
+    dev = new AjmDevice(proc->GetObjTable(),
+                        proc && proc->GetPlatform() == Process::Platform::kPs5);
   /*there are multiple of these*/
   if (xname.find("dmem", 0, 4) != base::StringRef::npos)
     dev = (proc && proc->GetPlatform() == kern::Process::Platform::kPs5)
@@ -192,7 +211,8 @@ int PS4ABI sys_open(const char* path, u32 flags, u32 mode) {
     return -SysError::eINVAL;
 
   if (kVfsTrace)
-    BASE_LOGI("open", "{} flags={:#x} mode={:#x}", path, flags, mode);
+    BASE_LOGI("open", "tid={:d} {} flags={:#x} mode={:#x}", (long)gettid(),
+              path, flags, mode);
   if (std::strstr(path, ".psarc"))
     PrintOpenCaller(path);
 
@@ -254,7 +274,8 @@ int PS4ABI sys_open(const char* path, u32 flags, u32 mode) {
     if (!host.empty()) {
       auto* file = new FileDevice(Process::GetActive()->GetObjTable());
       if (file->OpenWritable(host, (flags & O_CREAT) != 0,
-                             (flags & O_TRUNC) != 0)) {
+                             (flags & O_TRUNC) != 0,
+                             vfs::SaveQuotaRoot(path))) {
         if (kVfsTrace)
           BASE_LOGI("open", "  -> writable fd={} {}", file->handle(),
                     host.c_str());
@@ -263,9 +284,18 @@ int PS4ABI sys_open(const char* path, u32 flags, u32 mode) {
       file->ReleaseHandle();
       return -SysError::eNOENT;
     }
+    return -SysError::eROFS;
   }
 
   // Regular file: resolve through the VFS (host + virtual mounts).
+  const auto quota_root = vfs::SaveQuotaRoot(path);
+  if (!quota_root.empty()) {
+    auto* file = new FileDevice(Process::GetActive()->GetObjTable());
+    if (file->Open(vfs::Resolve(path), flags, quota_root))
+      return file->handle();
+    file->ReleaseHandle();
+    return -SysError::eNOENT;
+  }
   io::File vf = vfs::OpenRead(path);
   if (!vf.Exists()) {
     if (kVfsTrace)
@@ -382,8 +412,10 @@ i64 PS4ABI sys_read(u32 fd, void* buf, size_t nbytes) {
   // buffer, to see whether texture data lands in the GPU texture region (0x41x)
   // directly or a staging buffer the game later copies from.
   if (kReadTrace && nbytes >= 0x4000)
-    BASE_LOGI("read", "fd={} buf={:p} nbytes={:#x} -> {}", fd, buf, nbytes,
-              (long long)r);
+    BASE_LOGI("read", "t={}.{:03} fd={} buf={:p} nbytes={:#x} -> {}",
+              (long)(base::TickClock::NowNs() / 1000000000),
+              (int)((base::TickClock::NowNs() / 1000000) % 1000), fd, buf,
+              nbytes, (long long)r);
   if (kRdall) {
     u32 f4 = 0;
     if (buf && r >= 4)
@@ -554,7 +586,8 @@ int PS4ABI sys_close(u32 fd) {
     if (kRdall)
       BASE_LOGI("close", "fd={}", fd);
     auto d = FdToDevice(fd);
-    if (d && d->IsRegularFile()) {
+    if (d && d->IsRegularFile() &&
+        !static_cast<FileDevice*>(d.get())->HasSaveQuota()) {
       u32 evict = static_cast<u32>(-1);
       {
         base::LockGuard<base::Mutex> lk(g_defer_m);
@@ -646,6 +679,17 @@ int PS4ABI sys_fstatat(int fd, const char* path, void* stat, int flag) {
 // 11/12/13. Flags and advisory locks unmodelled: GETFD/GETFL report 0, locks
 // accept silently.
 int PS4ABI sys_fcntl(u32 fd, int cmd, i64 arg) {
+  auto device = FdToDevice(fd);
+  if (!device && fd > 2)
+    return -SysError::eBADF;
+  if (auto* pipe = dynamic_cast<PipeDevice*>(device.get())) {
+    if (cmd == 3)
+      return pipe->GetFlags();
+    if (cmd == 4) {
+      pipe->SetFlags(static_cast<u32>(arg));
+      return 0;
+    }
+  }
   enum {
     // FreeBSD fcntl(2) command spelling.
     // NOLINTBEGIN(readability-identifier-naming)
@@ -849,12 +893,7 @@ i64 PS4ABI sys_pwrite(u32 fd, const void* buf, size_t nbytes, i64 offset) {
   auto d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
-  i64 saved = d->Lseek(0, kSeekCur);
-  d->Lseek(offset, kSeekSet);
-  i64 r = d->Write(buf, nbytes);
-  if (saved >= 0)
-    d->Lseek(saved, kSeekSet);
-  return r;
+  return d->WriteAt(buf, nbytes, offset);
 }
 
 i64 PS4ABI sys_writev(u32 fd, const void* iov, int iovcnt) {
@@ -952,36 +991,59 @@ i64 PS4ABI sys_pwritev(u32 fd, const void* iov, int iovcnt, i64 offset) {
   auto d = FdToDevice(fd);
   if (!d)
     return -SysError::eBADF;
-  const i64 saved = d->Lseek(0, kSeekCur);
   i64 total = 0;
   for (int i = 0; i < iovcnt; ++i) {
-    d->Lseek(offset + total, kSeekSet);
-    i64 r = d->Write(segs[i].iov_base, segs[i].iov_len);
-    if (r < 0) {
-      if (saved >= 0)
-        d->Lseek(saved, kSeekSet);
+    if (total > INT64_MAX - offset)
+      return total ? total : -static_cast<i32>(SysError::eFBIG);
+    i64 r = d->WriteAt(segs[i].iov_base, segs[i].iov_len, offset + total);
+    if (r < 0)
       return total ? total : r;
-    }
     total += r;
     if (static_cast<size_t>(r) < segs[i].iov_len)
       break;
   }
-  if (saved >= 0)
-    d->Lseek(saved, kSeekSet);
   return total;
 }
 
-// We have no pollable fds. Returning 0 (zero ready) immediately would turn a
-// timed poll into a busy-spin, so honour the caller's timeout by sleeping it
-// first (capped). timeout is in milliseconds; negative means "wait forever",
-// which we treat as the cap rather than hanging.
 int PS4ABI sys_poll(void* fds, u32 nfds, int timeout) {
-  int ms = timeout;
-  if (ms < 0 || ms > 50)
-    ms = 50;
-  if (ms > 0)
-    ::usleep(static_cast<useconds_t>(ms) * 1000);
-  return 0;
+  struct PollFd {
+    i32 fd;
+    u16 events, returned;
+  };
+  if (nfds > 65536)
+    return -SysError::eINVAL;
+  if (nfds && !host_memory::IsMemoryRangeMapped(fds, nfds * sizeof(PollFd)))
+    return -SysError::eFAULT;
+  auto* entries = static_cast<PollFd*>(fds);
+  const auto start = base::TimeTicks::Now();
+  for (;;) {
+    int ready = 0;
+    for (u32 i = 0; i < nfds; ++i) {
+      auto& entry = entries[i];
+      entry.returned = 0;
+      if (entry.fd < 0)
+        continue;
+      auto device = FdToDevice(entry.fd);
+      if (!device) {
+        entry.returned = 0x20;  // POLLNVAL
+      } else if (auto socket = FdToSocket(entry.fd)) {
+        pollfd host{socket->HostFd(), static_cast<short>(entry.events), 0};
+        if (::poll(&host, 1, 0) > 0)
+          entry.returned = host.revents;
+      } else {
+        entry.returned = device->Poll(entry.events);
+      }
+      if (entry.returned)
+        ++ready;
+    }
+    if (ready || timeout == 0 ||
+        (timeout > 0 &&
+         (base::TimeTicks::Now() - start).InMilliseconds() >= timeout))
+      return ready;
+    if (guest::Stopping())
+      return -SysError::eINTR;
+    guest::SleepForMilliseconds(1);
+  }
 }
 
 // FreeBSD and Linux lay an fd_set out the same way: a bitmap of 64-bit words,
@@ -1107,6 +1169,20 @@ int PS4ABI sys_openat(int fd, const char* path, u32 flags, u32 mode) {
   return sys_open(path, flags, mode);
 }
 
+int PS4ABI sys_truncate(const char* path, i64 length) {
+  if (!path || length < 0)
+    return -SysError::eINVAL;
+  i64 size;
+  bool directory;
+  if (vfs::Stat(path, size, directory) && directory)
+    return -SysError::eISDIR;
+  const auto host = vfs::ResolveWritable(path);
+  if (host.empty())
+    return vfs::Stat(path, size, directory) ? -SysError::eROFS
+                                           : -SysError::eNOENT;
+  return save_storage::Truncate(vfs::SaveQuotaRoot(path), host, length);
+}
+
 int PS4ABI sys_chdir(const char* path) {
   return 0;
 }
@@ -1119,6 +1195,11 @@ int PS4ABI sys_fchdir(u32 fd) {
 // here being readable back, that read returns stale VFS data and this trace is
 // the only sign of why.
 int PS4ABI sys_unlink(const char* path) {
+  const auto quota = vfs::SaveQuotaRoot(path);
+  if (!quota.empty()) {
+    const auto host = vfs::ResolveWritable(path);
+    return host.empty() ? -SysError::eROFS : save_storage::Remove(quota, host);
+  }
   // Under a writable mount (savedata, /download0) do the real thing: a title
   // that rewrites a file by unlink+create reads back stale content otherwise.
   if (path && vfs::RemoveFile(path))
@@ -1147,6 +1228,15 @@ int PS4ABI sys_mkdir(const char* path, u32 mode) {
 int PS4ABI sys_rename(const char* from, const char* to) {
   base::String hf = from ? vfs::ResolveWritable(from) : base::String();
   base::String ht = to ? vfs::ResolveWritable(to) : base::String();
+  const auto source_quota = vfs::SaveQuotaRoot(from);
+  const auto target_quota = vfs::SaveQuotaRoot(to);
+  if (!source_quota.empty() || !target_quota.empty()) {
+    if (source_quota != target_quota)
+      return -SysError::eXDEV;
+    if (hf.empty() || ht.empty())
+      return -SysError::eROFS;
+    return save_storage::Rename(source_quota, hf, ht);
+  }
   if (!hf.empty() && !ht.empty() && std::rename(hf.c_str(), ht.c_str()) == 0)
     return 0;
   BASE_LOGI("vfs", "rename('{}' -> '{}') ignored (read-only host)",
@@ -1331,8 +1421,7 @@ int PS4ABI sys_write(u32 fd, const void* buf, size_t nbytes) {
     auto obj = proc->GetObjTable().Get(fd);
     if (obj && obj->type() == Object::Type::kDevice) {
       i64 r = static_cast<Device*>(obj.get())->Write(buf, nbytes);
-      if (r >= 0)
-        return static_cast<int>(r);
+      return static_cast<int>(r);
     }
   }
   return static_cast<int>(nbytes);

@@ -29,6 +29,7 @@
 #include "guest/session.h"
 #include "host/window.h"
 #include "kern/guest_va_space.h"
+#include "kern/lv2/dispatch.h"
 #include "main/command_line.h"
 #include "main/firmware_config.h"
 #include "main/home_screen.h"
@@ -166,6 +167,15 @@ int main(int argc, char** argv) {
   int option_argc = static_cast<int>(option_argv.size());
   option_argv.push_back(nullptr);
   options::Init(option_argc, option_argv.data());
+  // The static initializer that used to arm this ran before Init and read the
+  // default; spawn the periodic histogram dumper here instead.
+  if (kern::g_sc_hist)
+    guest::SpawnThread("dispatch", [] {
+      for (;;) {
+        guest::SleepForMilliseconds((20) * 1000);
+        kern::DumpSyscallHist();
+      }
+    });
   if (command.game.empty()) {
     if (command.dump_options || !command.configure_ps4_fw.empty() ||
         !command.configure_ps5_fw.empty())

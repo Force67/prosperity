@@ -29,8 +29,10 @@ class GcDevice : public Device {
   // The CALLER must hold g_compute_mutex (the doorbell handler already does).
   static void DrainQueues(u32 budget_dw);
   // A doorbell ring: execute queue `ringId` up to the write pointer the guest
-  // just published. See prosperity_gc_dingdong.
+  // just published.
   static void RingDoorbell(u32 ring_id, u32 write_offset_dw);
+  static bool IsDoorbellAddress(uintptr_t address);
+  static bool WriteDoorbell(uintptr_t address, u32 value);
 
   struct ComputeQueue {
     u32 me = 0;

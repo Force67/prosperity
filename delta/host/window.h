@@ -92,6 +92,7 @@ bool PollKeyboardPad(PadKeys& out);
 // intensities (0..255). Routed to SDL gamepad rumble (PC) or the device
 // vibrator (Android); a no-op when no haptic device is present.
 void SetRumble(u8 large_motor, u8 small_motor);
+void SetControllerLight(u8 red, u8 green, u8 blue);
 
 // Harness signal shared between the GPU renderer and the input layer. The
 // renderer raises it once sustained gameplay (room rendering) is on screen, so

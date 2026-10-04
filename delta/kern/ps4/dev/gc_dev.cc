@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "base/arch.h"
+#include "base/atomic.h"
 #include "base/logging.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
@@ -19,14 +20,17 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "host_memory/host_memory.h"
+#include "gpu/ps4/cmd_processor.h"
 #include "kern/lv2/sys_event.h"
 #include "kern/lv2/sys_mem.h"
 #include "kern/process.h"
 #include "kern/ps4/dev/dce_dev.h"
 #include "kern/ps4/dev/gc_dev.h"
+#include "kern/ps4/dev/gc_submit.h"
 #include "options/options.h"
 
 namespace {
+DELTA_OPTION(u32, kGcAcbFrame, "DELTA_GPU_ACB_FRAME", 0);
 DELTA_OPTION(bool, kGcCaller, "DELTA_GC_CALLER", false);
 // Execute the async-compute rings a title maps and rings doorbells on. P.T.
 // streams every texture as a compute copy on ring 1/0/0 and renders nothing
@@ -41,9 +45,7 @@ DELTA_OPTION(bool, kGcTrace, "DELTA_GC_TRACE", false);
 DELTA_OPTION(u32, kGcTraceMax, "DELTA_GC_TRACE_MAX", 0);
 }  // namespace
 
-// LLE GPU submit bridge: real libSceGnmDriver.sprx submits PM4 through these
-// ioctls; forward the descriptor array to the GPU command processor
-// (see prosperity_gc_submit in lib_sce_gnm_driver.cc).
+// GPU end-of-pipe interrupts feed the kernel event queues.
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe() {
   kern::NoteGpuEndOfPipe();
@@ -53,17 +55,6 @@ extern "C" void prosperity_gpu_end_of_pipe() {
 extern "C" void prosperity_gpu_end_of_pipe_ctx(u64 ctx) {
   kern::NoteGpuEndOfPipeCtx(ctx);
 }
-// NOLINTEND(readability-identifier-naming)
-
-// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
-extern "C" void prosperity_gc_submit(const void* desc_array, u32 desc_count);
-// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
-extern "C" void prosperity_gc_submit_acb(const void* commands, u32 bytes);
-
-// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
-extern "C" void prosperity_gc_flip(u64 scanout_base,
-                                   int display_buffer_index,
-                                   i64 flip_arg);
 // NOLINTEND(readability-identifier-naming)
 
 // NOTE: the PS5 AGC /dev/gc protocol lives in a separate device,
@@ -148,7 +139,7 @@ i32 GcDevice::Ioctl(u32 cmd, void* data) {
         u64 desc_ptr;
       };
       auto* a = static_cast<Argl*>(data);
-      prosperity_gc_submit(reinterpret_cast<const void*>(a->desc_ptr),
+      SubmitGcDescriptors(reinterpret_cast<const void*>(a->desc_ptr),
                            a->count);
       return 0;
     }
@@ -164,7 +155,7 @@ i32 GcDevice::Ioctl(u32 cmd, void* data) {
         u64 desc_ptr;  // +0x10
       };
       auto* a = static_cast<Argl*>(data);
-      prosperity_gc_submit(reinterpret_cast<const void*>(a->desc_ptr),
+      SubmitGcDescriptors(reinterpret_cast<const void*>(a->desc_ptr),
                            a->count);
       return 0;
     }
@@ -199,13 +190,17 @@ i32 GcDevice::Ioctl(u32 cmd, void* data) {
                     d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
         }
       }
-      prosperity_gc_submit(reinterpret_cast<const void*>(a->desc_ptr),
+      SubmitGcDescriptors(reinterpret_cast<const void*>(a->desc_ptr),
                            a->count);
-      u32 buffer_index = DceCurrentBuffer();
-      prosperity_gc_flip(DceScanoutBuffer(buffer_index),
-                         static_cast<int>(buffer_index), DceCurrentFlipArg());
-      if (!guest::display::kEmulateTiming)
-        NoteFlip();
+      u32 buffer_index = DceSubmittedBuffer();
+      if (kGcAcbFrame) {
+        base::LockGuard lock(g_compute_mutex);
+        DrainQueues(kGcAcbFrame);
+      }
+      gpu::ps4::EndFrame(DceScanoutBuffer(buffer_index));
+      gpu::ps4::WaitForFrame();
+      if (!DceCompleteGpuFlips())
+        return -static_cast<i32>(SysError::eINTR);
       return 0;
     }
     case 0xC0088101:  // kernel: wait-suspend-done. Suspend/resume handshake;
@@ -460,7 +455,7 @@ i32 GcDevice::Ioctl(u32 cmd, void* data) {
                 BASE_LOGI("gc", "{}", acb_words.c_str());
               }
             }
-            prosperity_gc_submit_acb(commands.data(), available * 4);
+            gpu::ps4::SubmitRingDcb(commands.data(), available * 4);
           }
           entry.read_offset_dw = next;
           if (host_memory::IsMemoryRangeMapped(
@@ -524,6 +519,33 @@ i32 GcDevice::Ioctl(u32 cmd, void* data) {
 // to anon.
 base::Array<GcDevice::ComputeQueue, 64> GcDevice::g_compute_queues{};
 base::Mutex GcDevice::g_compute_mutex;
+static base::Atomic<uintptr_t> g_doorbell_base{0};
+
+bool GcDevice::IsDoorbellAddress(uintptr_t address) {
+  const uintptr_t base = g_doorbell_base.load();
+  return base && address >= base && address - base < 0x1000;
+}
+
+bool GcDevice::WriteDoorbell(uintptr_t address, u32 value) {
+  if (!IsDoorbellAddress(address) || (address & 3))
+    return false;
+  const u32 doorbell = (address - g_doorbell_base.load()) / 4;
+  base::LockGuard lock(g_compute_mutex);
+  for (const ComputeQueue& queue : g_compute_queues) {
+    if (queue.mapped && queue.me &&
+        (queue.me - 1) * 32 + queue.pipe * 8 + queue.queue == doorbell) {
+      if (kGcTrace) {
+        static u32 traced = 0;
+        if (traced++ < 20)
+          BASE_LOGI("gc", "mapped doorbell queue={} offset={:#x}", queue.vqueue,
+                    value);
+      }
+      RingDoorbell(queue.vqueue, value);
+      break;
+    }
+  }
+  return true;
+}
 
 // SotC spreads async compute over seven queues; only 1/0/0 arrives as a
 // DingDong ioctl, the other six sit at read=0 all run, so their doorbell
@@ -553,7 +575,7 @@ void GcDevice::RingDoorbell(u32 ring_id, u32 write_offset_dw) {
       base::Vector<u32> commands(pending);
       for (u32 i = 0; i < pending; i++)
         commands[i] = ring[(q.read_offset_dw + i) & (q.ring_size_dw - 1)];
-      prosperity_gc_submit_acb(commands.data(), pending * 4);
+      gpu::ps4::SubmitRingDcb(commands.data(), pending * 4);
       q.read_offset_dw = write_offset_dw;
       if (host_memory::IsMemoryRangeMapped(
               reinterpret_cast<const void*>(q.read_ptr), sizeof(u32)))
@@ -590,7 +612,7 @@ void GcDevice::DrainQueue(ComputeQueue& q, u32 budget_dw) {
         !host_memory::IsMemoryRangeMapped(reinterpret_cast<const void*>(addr),
                                           static_cast<u64>(dw) * 4))
       break;
-    prosperity_gc_submit_acb(w, sizeof(w));
+    gpu::ps4::SubmitRingDcb(w, sizeof(w));
     off = (off + 4) & mask;
     consumed += 4;
   }
@@ -612,7 +634,13 @@ u8* GcDevice::Map(void*, size_t size, u32, u32, size_t offset) {
   // no lock across device::map, so lazy creation needs its own.
   static base::Mutex pool_lock;
   static u8* pool = nullptr;
-  static const guest::SessionReset reset_pool([] { pool = nullptr; });
+  static const guest::SessionReset reset_pool([] {
+    pool = nullptr;
+    g_doorbell_base.store(0);
+    base::LockGuard lock(g_compute_mutex);
+    for (ComputeQueue& queue : g_compute_queues)
+      queue = {};
+  });
   base::LockGuard<base::Mutex> lk(pool_lock);
   if (!pool) {
     pool = AllocLowGuest(kPoolSize);
@@ -622,27 +650,16 @@ u8* GcDevice::Map(void*, size_t size, u32, u32, size_t offset) {
   pool_base = pool;
   pool_size = kPoolSize;
   // The guest picks the offset, so bound each side: offset + size wraps.
+  if (offset == 0 && size == 0x4000) {
+    // GNM maps a doorbell aperture and derives each register address from
+    // ((me - 1) * 32 + pipe * 8 + queue) * 4. Keep writes faulting so the CPU
+    // backend can dispatch them to the device without opening the page.
+    if (!host_memory::ProtectMem(pool, 0x1000, host_memory::PageProtection::kR))
+      return reinterpret_cast<u8*>(-1);
+    g_doorbell_base.store(reinterpret_cast<uintptr_t>(pool));
+  }
   if (offset < kPoolSize && size <= kPoolSize - offset)
     return pool + offset;
   return reinterpret_cast<u8*>(-1);
 }
 }  // namespace kern
-
-// sceGnmDingDong(ringId, offset) publishes a queue's write pointer. The real
-// driver writes it into its /dev/gc mapping, so no ioctl announces it; draining
-// only at flip time recycles buffers under us (SIGSEGV in Tomb Raider).
-// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
-extern "C" void prosperity_gc_dingdong(u32 ring_id, u32 offset_dw) {
-  base::LockGuard lock(kern::GcDevice::g_compute_mutex);
-  kern::GcDevice::RingDoorbell(ring_id, offset_dw);
-}
-// NOLINTEND(readability-identifier-naming)
-
-// NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
-extern "C" void prosperity_gc_drain_acb(u32 budget_dw) {
-  if (!budget_dw)
-    return;
-  base::LockGuard lock(kern::GcDevice::g_compute_mutex);
-  kern::GcDevice::DrainQueues(budget_dw);
-}
-// NOLINTEND(readability-identifier-naming)

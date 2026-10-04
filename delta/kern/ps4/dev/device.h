@@ -70,11 +70,14 @@ class Device : public Object {
   // success (byte count / offset), negative SysError on failure.
   virtual i64 Read(void*, size_t) { return -SysError::eNODEV; }
   virtual i64 Write(const void*, size_t) { return -SysError::eNODEV; }
+  virtual u16 Poll(u16) { return 0; }
   virtual i64 Lseek(i64, int) { return -SysError::eNODEV; }
   // Read `n` bytes at absolute `off` into `buf` WITHOUT moving the file
   // position (pread). Used to back a file mmap with the file's content. Returns
   // bytes read (0 at/after EOF), or -1 if this device isn't a readable file.
   virtual i64 ReadAt(void*, size_t, i64) { return -1; }
+  virtual i64 WriteAt(const void*, size_t, i64) { return -SysError::eSPIPE; }
+  virtual i32 Truncate(i64) { return -SysError::eINVAL; }
   virtual int Fstat(void* /*SceKernelStat*/) { return -SysError::eNODEV; }
   // Directory enumeration (FreeBSD dirents). Non-directories aren't one.
   virtual i64 Getdents(void*, size_t) { return -SysError::eNOTDIR; }

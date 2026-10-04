@@ -25,6 +25,7 @@
 #include "kern/crash.h"
 #include "kern/ipmi/ipmi.h"
 #include "kern/ipmi/services.h"
+#include "kern/lv2/error_table.h"
 #include "options/options.h"
 
 namespace {
@@ -38,20 +39,23 @@ DELTA_OPTION(bool, kIpmiTrace, "DELTA_IPMI_TRACE", false);
 namespace kern::ipmi {
 namespace {
 
-// Manager command numbers (libSceIpmi op -> syscall 622).
+// Manager command numbers (IPMI client op -> syscall 622).
 enum {
-  kCreateClient = 2,       // sceIpmiMgrCreateClient  -> result = client kid
-  kDestroyClient = 3,      // sceIpmiMgrDestroyClient -> result = 0 (asserted)
-  kStopSession = 784,      // StopSession/Disconnect
+  kCreateClient = 2,   // sceIpmiMgrCreateClient  -> result = client kid
+  kDestroyClient = 3,  // sceIpmiMgrDestroyClient -> result = 0 (asserted)
+  kStopSession = 784,  // StopSession/Disconnect
+  kInvokeAsync = 577,
+  kGetAsyncResult = 579,
   kInvokeSync = 800,       // sceIpmiClientInvokeSyncMethod
   kPollAsyncReply = 1168,  // async-reply poll, paired with the invoke before it
   kConnect = 1024,         // sceIpmiClientConnect (carries the service name)
-  kWaitEventFlag = 594,    // client event-flag wait (see the case below)
+  kReceiveEvent = 594,     // receive a daemon notification
 };
 
 // A guest descriptor that says "n bytes here" is not to be trusted: clamp what
 // we are willing to read or write through one.
-constexpr u64 kMaxBuffer = 0x10000;
+// SaveData parameter calls serialize a fixed buffer of about 114 KiB.
+constexpr u64 kMaxBuffer = 0x20000;
 
 // The request block op=800 passes, plus its descriptor arrays.
 struct InvokeRequest {
@@ -79,6 +83,7 @@ bool Readable(const void* p, u64 n) {
 struct Client {
   base::String service;
   Service* impl = nullptr;
+  u32 event_cursor = 0;
 };
 
 base::Mutex g_clients_mtx;
@@ -86,7 +91,7 @@ base::HashMap<u32, Client> g_clients;
 base::Atomic<u32> g_next_kid{1};
 
 // Previous manager op per client. A repeated consecutive async-reply poll is a
-// client waiting on something (libSceIpmi runs event-flag waits as a 1168 poll
+// client waiting on something (IPMI client runs event-flag waits as a 1168 poll
 // loop), not collecting an invoke's reply; see kPollAsyncReply.
 base::HashMap<u32, u32> g_last_op;
 
@@ -101,9 +106,11 @@ bool IsRepeatPoll(u32 op, u32 kid) {
 Service* FindService(const char* name) {
   if (!name)
     return nullptr;
-  Service* all[] = {&PlayGoService(), &NpManagerService(),
-                    &NpWebService(),  &UserService(),
-                    &LncService(),    &ArbitratorIpcService()};
+  Service* all[] = {
+      &PlayGoService(),      &NpManagerService(), &NpWebService(),
+      &UserService(),        &LncService(),       &ArbitratorIpcService(),
+      &AudioSystemService(), &NetCtlService(),    &MbusService(),
+      &AppContentService(),  &ImeService(),       &SaveDataService()};
   for (Service* s : all)
     if (std::strcmp(s->Name(), name) == 0)
       return s;
@@ -265,7 +272,7 @@ void DumpManagerOp(u32 op, u32 kid, void* out, void* in, u64 insize) {
   if (!kIpmiOpDump || op != kIpmiOpDump)
     return;
   static base::Atomic<int> seen{0};
-  if (seen.fetch_add(1) >= 3)
+  if (seen.fetch_add(1) >= 60)
     return;
 
   BASE_LOGI("ipmiop", "op={} kid={} out={:p} in={:p} insize={:#x}", op, kid,
@@ -314,7 +321,8 @@ void DumpManagerOp(u32 op, u32 kid, void* out, void* in, u64 insize) {
 
 // ---------------------------------------------------------------- Invocation
 
-Invocation::Invocation(void* request) : req_(request) {}
+Invocation::Invocation(void* request, u32 client)
+    : req_(request), client_(client) {}
 
 u32 Invocation::Method() const {
   return static_cast<InvokeRequest*>(req_)->method_id;
@@ -332,6 +340,8 @@ const void* Invocation::Input(u32 i, u64& size) const {
   if (i >= r->num_in || !r->in_desc)
     return nullptr;
   const u64* d = r->in_desc + i * kInDescWords;
+  if (!Readable(d, kInDescWords * sizeof(u64)))
+    return nullptr;
   auto* p = reinterpret_cast<const void*>(d[0]);
   if (!Readable(p, d[1]))
     return nullptr;
@@ -342,7 +352,7 @@ const void* Invocation::Input(u32 i, u64& size) const {
 // Only the data pointer and capacity are acted on. The third word is not a
 // "bytes transferred" slot: dumps caught it holding a literal 1 and, on the
 // next descriptor of the same call, a stale return address. Writing through it
-// made libSceSystemService fault on a clobbered object pointer, so leave it
+// made system service client fault on a clobbered object pointer, so leave it
 // alone.
 bool Invocation::OutSlot(u32 i, u8*& data, u64& cap) const {
   data = nullptr;
@@ -351,12 +361,20 @@ bool Invocation::OutSlot(u32 i, u8*& data, u64& cap) const {
   if (i >= r->num_out || !r->out_desc)
     return false;
   const u64* d = r->out_desc + i * kOutDescWords;
+  if (!Readable(d, kOutDescWords * sizeof(u64)))
+    return false;
   auto* p = reinterpret_cast<u8*>(d[0]);
-  if (!Readable(p, d[1]))
+  if (d[1] && !Readable(p, d[1]))
     return false;
   data = p;
   cap = d[1];
   return true;
+}
+
+bool Invocation::CanReply(u32 i, u64 size) const {
+  u8* data;
+  u64 cap;
+  return OutSlot(i, data, cap) && cap >= size;
 }
 
 bool Invocation::Reply(u32 i, const void* data, u64 size) {
@@ -365,7 +383,8 @@ bool Invocation::Reply(u32 i, const void* data, u64 size) {
   if (!OutSlot(i, p, cap))
     return false;
   const u64 n = size < cap ? size : cap;
-  std::memcpy(p, data, n);
+  if (n)
+    std::memcpy(p, data, n);
   if (n < cap)
     std::memset(p + n, 0, cap - n);
   return true;
@@ -380,7 +399,8 @@ bool Invocation::ReplyFill(u32 i, u8 byte) {
   u64 cap;
   if (!OutSlot(i, p, cap))
     return false;
-  std::memset(p, byte, cap);
+  if (cap)
+    std::memset(p, byte, cap);
   return true;
 }
 
@@ -429,6 +449,9 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
     }
 
     case kDestroyClient: {
+      Client c = LookupClient(kid);
+      if (c.impl)
+        c.impl->DestroyClient(kid);
       base::LockGuard<base::Mutex> lk(g_clients_mtx);
       g_clients.erase(kid);
       set_result(0);
@@ -436,6 +459,8 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
     }
 
     case kConnect: {
+      if (!Readable(in, insize))
+        return -static_cast<i32>(SysError::eFAULT);
       // The connect payload names the service too; a client created without a
       // recognisable name still gets bound here.
       const char* svc = in ? PayloadServiceName(in, insize) : nullptr;
@@ -447,6 +472,28 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
           c.impl = FindService(svc);
         }
       }
+      Client c = LookupClient(kid);
+      if (c.impl) {
+        struct ConnectRequest {
+          const void* data;
+          u64 size;
+          i32* result;
+          const void* timeout;
+        };
+        if (insize != sizeof(ConnectRequest) || !Readable(in, insize))
+          return -static_cast<i32>(SysError::eINVAL);
+        ConnectRequest request;
+        std::memcpy(&request, in, sizeof(request));
+        if ((request.size && !Readable(request.data, request.size)) ||
+            (request.result &&
+             !host_memory::IsMemoryRangeMapped(request.result, sizeof(i32))))
+          return -static_cast<i32>(SysError::eFAULT);
+        const i32 result = c.impl->Connect(request.data, request.size);
+        if (request.result)
+          std::memcpy(request.result, &result, sizeof(result));
+        if (result < 0)
+          return -static_cast<i32>(SysError::eACCES);
+      }
       set_result(0);
       return 0;
     }
@@ -454,7 +501,7 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
     case kInvokeSync: {
       if (req) {
         Client c = LookupClient(kid);
-        Invocation inv(req);
+        Invocation inv(req, kid);
         inv.SetResult(0);  // SCE_OK unless the service says otherwise
         TraceInvoke(kid, c.service.c_str(), req, c.impl != nullptr);
         DumpInvoke(kid, c.service.c_str(), req);
@@ -464,6 +511,73 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
           inv.ReplyEmpty();
       }
       set_result(0);
+      return 0;
+    }
+
+    case kInvokeAsync: {
+      struct Request {
+        u32 method, timeout;
+        u64 reserved;
+        u32 num_in, pad;
+        const u64* inputs;
+        u32* request_id;
+        u32 flags, pad1;
+      };
+      if (insize != sizeof(Request) || !Readable(in, insize))
+        return -static_cast<i32>(SysError::eINVAL);
+      Request request;
+      std::memcpy(&request, in, sizeof(request));
+      if (!Readable(out, sizeof(u32)) ||
+          !Readable(request.request_id, sizeof(u32)))
+        return -static_cast<i32>(SysError::eFAULT);
+      if (request.num_in > 16 ||
+          (request.num_in && !Readable(request.inputs, request.num_in * 16)))
+        return -static_cast<i32>(SysError::eINVAL);
+      for (u32 i = 0; i < request.num_in; ++i) {
+        const auto* descriptor = request.inputs + i * kInDescWords;
+        if (descriptor[1] &&
+            !Readable(reinterpret_cast<const void*>(descriptor[0]),
+                      descriptor[1]))
+          return -static_cast<i32>(SysError::eFAULT);
+      }
+      Client client = LookupClient(kid);
+      i32 method_result = 0;
+      InvokeRequest call{request.method, request.num_in, 0, 0, request.inputs,
+                         nullptr,        &method_result};
+      Invocation invocation(&call, kid);
+      u32 id = 0;
+      const i32 result = client.impl ? client.impl->InvokeAsync(invocation, id)
+                                     : -static_cast<i32>(SysError::eNOSYS);
+      if (!result)
+        std::memcpy(request.request_id, &id, sizeof(id));
+      set_result(result);
+      return 0;
+    }
+    case kGetAsyncResult: {
+      struct Request {
+        u32 method, request_id;
+        i32* result;
+        u32 num_out, pad;
+        const u64* outputs;
+        u32 flags, pad1;
+      };
+      if (insize != sizeof(Request) || !Readable(in, insize))
+        return -static_cast<i32>(SysError::eINVAL);
+      Request request;
+      std::memcpy(&request, in, sizeof(request));
+      if (!Readable(out, sizeof(u32)) || !Readable(request.result, sizeof(i32)))
+        return -static_cast<i32>(SysError::eFAULT);
+      if (request.num_out)
+        return -static_cast<i32>(SysError::eNOSYS);
+      Client client = LookupClient(kid);
+      i32 method_result = 0;
+      const i32 result = client.impl ? client.impl->GetAsyncResult(
+                                           kid, request.method,
+                                           request.request_id, method_result)
+                                     : -static_cast<i32>(SysError::eNOSYS);
+      if (!result)
+        std::memcpy(request.result, &method_result, sizeof(method_result));
+      set_result(result);
       return 0;
     }
 
@@ -497,7 +611,7 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
     }
 
     case kStopSession:
-      // The payload's first field points at a guest status word that libSceIpmi
+      // The payload's first field points at a guest status word that IPMI client
       // asserts is zero once the manager syscall returns.
       if (in && insize >= sizeof(u64)) {
         u32* status = nullptr;
@@ -508,22 +622,30 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
       set_result(0);
       return 0;
 
-    // Client event-flag wait. libSceUserService creates
-    // "SceUserServiceClientEventFlag" and waits on it from
-    // sceUserServiceGetEvent (callers libSceUserService+0x1c45 -> +0x1ded) for
-    // the daemon to publish a login/logout event. Request block insize 0x20:
-    // +0x00 flag index, +0x04 pattern, +0x08 and +0x10 out pointers, +0x18
-    // size. One local user, permanently signed in, so no event is ever pending
-    // and the wait must report UNSATISFIED. Answering generic "empty success"
-    // instead makes sceUserServiceGetEvent allocate an event record out of
-    // libkernel's 16 MiB SceKernelInternalMemory arena, find nothing in it, and
-    // retry, leaking per iteration until libkernel throws std::bad_alloc and
-    // std::terminate lands on a UD2 in libSceLibcInternal. Failing the wait is
-    // what makes GetEvent return "no event" and let the caller proceed.
-    case kWaitEventFlag:
+    // Receive a daemon notification. The PS4/PS5 request has its destination
+    // at +8, size output at +16, and capacity at +24. Empty queues must fail:
+    // a false success makes UserService allocate phantom events until the
+    // guest's internal-memory arena is exhausted.
+    case kReceiveEvent:
       DumpManagerOp(op, kid, out, in, insize);
+      if (Readable(in, 0x20) && insize >= 0x20) {
+        const auto* args = static_cast<const u64*>(in);
+        void* data = reinterpret_cast<void*>(args[1]);
+        auto* size = reinterpret_cast<u64*>(args[2]);
+        const u64 capacity = args[3];
+        if (Readable(data, capacity) && Readable(size, sizeof(*size))) {
+          base::LockGuard lock(g_clients_mtx);
+          auto it = g_clients.find(kid);
+          if (it != g_clients.end() && it->second.impl &&
+              it->second.impl->ReceiveEvent(kid, it->second.event_cursor, data,
+                                            capacity, *size)) {
+            set_result(0);
+            return 0;
+          }
+        }
+      }
       // Leaves the wrapper's pre-set -1 result in place, which is what
-      // libSceIpmi reads back as the call's value.
+      // IPMI client reads back as the call's value.
       return -1;
 
     // DELTA_IPMI_FAILOP=<op>: answer one op as a hard failure instead of "empty

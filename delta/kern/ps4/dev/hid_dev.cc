@@ -8,16 +8,15 @@
 #include <cstdio>
 #include <cstring>
 
+#include "host_memory/host_memory.h"
 #include "options/options.h"
 
+#include "kern/ps4/controller_ports.h"
 #include "kern/ps4/dev/file_dev.h"
 #include "kern/ps4/dev/hid_dev.h"
 
 namespace {
-// The opt-in that turns /dev/hid into a real device. Off (default) mirrors the
-// real kernel where only system processes can use /dev/hid and games reach
-// input through libScePad; commands soft-succeed. On, the guest read commands
-// pull the host's evdev state and the write commands drive a uinput device.
+// Legacy host evdev/uinput access. Pad handle management is independent of it.
 DELTA_OPTION(bool, kHidPassthrough, "DELTA_HID_PASSTHROUGH", false);
 
 // ---------------------------------------------------------------------------
@@ -616,16 +615,6 @@ void SetRumble(HidSource& src, u8 large, u8 small) {
   ::write(src.uinput_fd, &ev, sizeof(ev));
 }
 
-void SetLight(HidSource& src, u8 r, u8 g, u8 b) {
-  if (src.uinput_fd < 0)
-    return;
-  InputEvent ev = {};
-  ev.type = kEvLed;
-  ev.code = 0x08;  // LED_MISC
-  ev.value = (r || g || b) ? 1 : 0;
-  ::write(src.uinput_fd, &ev, sizeof(ev));
-}
-
 // ------------------------------------------------------------------ dispatch
 
 struct GuestArgsAt {
@@ -675,26 +664,240 @@ int RunVibration(HidSource& src, void* data) {
   return 0;
 }
 
-// SetLightBar / ResetLightBar: { r, g, b, reserved } (reset passes zeroes).
-int RunLight(HidSource& src, void* data, bool reset) {
-  if (!GuestArgsAt::Valid(data))
-    return 0;
-  const u8* p = static_cast<const u8*>(GuestArgsAt::Buffer(data));
-  OpenUinput(src);
-  if (p)
-    SetLight(src, reset ? 0 : p[0], reset ? 0 : p[1], reset ? 0 : p[2]);
-  else
-    SetLight(src, 0, 0, 0);
-  return 0;
-}
-
 }  // namespace
 
 namespace kern {
 HidDevice::HidDevice(ObjectTable& objects) : Device(objects) {}
 
+HidDevice::~HidDevice() {
+  for (u32 handle : controller_handles_)
+    ReleaseControllerHandle(handle);
+}
+
+i32 HidDevice::ReadControllerReports(u32 handle,
+                                     void* reports,
+                                     u32 count,
+                                     u32* connection,
+                                     u32* extended,
+                                     u32 stride) {
+  if (!controller_handles_.count(handle) || !IsControllerHandle(handle))
+    return -static_cast<i32>(SysError::eBADF);
+  if (count == 0 || count > 64)
+    return -static_cast<i32>(SysError::eINVAL);
+  if (!host_memory::IsMemoryRangeMapped(reports, count * stride) ||
+      !host_memory::IsMemoryRangeMapped(connection, sizeof(u32)) ||
+      !host_memory::IsMemoryRangeMapped(extended, sizeof(u32)))
+    return -static_cast<i32>(SysError::eFAULT);
+  *extended = 0;
+  guest::ControllerState state;
+  if (!ReadControllerPort(handle, state)) {
+    *connection = 0;
+    return 0;
+  }
+  *connection = 1;
+  u8 report[0xb8]{};
+  std::memcpy(report, &state.timestamp, sizeof(state.timestamp));
+  std::memcpy(report + 0xc, &state.buttons, sizeof(state.buttons));
+  report[0x10] = state.lx;
+  report[0x11] = state.ly;
+  report[0x12] = state.rx;
+  report[0x13] = state.ry;
+  report[0x14] = state.l2;
+  report[0x15] = state.r2;
+  std::memcpy(reports, report, stride);
+  return 1;
+}
+
 i32 HidDevice::Ioctl(u32 cmd, void* data) {
-  // Passthrough off: mirror the real device's system-only soft-fail.
+  if (cmd == 0x80104850) {
+    struct ControlArgs {
+      u8 operation, reserved[7];
+      u32 handle, reserved1;
+    };
+    static_assert(sizeof(ControlArgs) == 16);
+    if (!host_memory::IsMemoryRangeMapped(data, sizeof(ControlArgs)))
+      return -static_cast<i32>(SysError::eFAULT);
+    const auto& args = *static_cast<const ControlArgs*>(data);
+    if (args.operation != 4)
+      return -static_cast<i32>(SysError::eNOTSUP);
+    std::lock_guard lock(handles_mutex_);
+    if (!controller_handles_.count(args.handle))
+      return -static_cast<i32>(SysError::eBADF);
+    return ResetControllerLight(args.handle);
+  }
+  if (cmd == 0x80104821 || cmd == 0x80044825) {
+    struct LightArgs {
+      u32 handle, reserved;
+      const u8* color;
+    };
+    if (!host_memory::IsMemoryRangeMapped(data, cmd == 0x80044825 ? 4 : 16))
+      return -static_cast<i32>(SysError::eFAULT);
+    const u32 handle = *static_cast<const u32*>(data);
+    std::lock_guard lock(handles_mutex_);
+    if (!controller_handles_.count(handle))
+      return -static_cast<i32>(SysError::eBADF);
+    if (cmd == 0x80044825)
+      return ResetControllerLight(handle);
+    const auto& args = *static_cast<const LightArgs*>(data);
+    if (!host_memory::IsMemoryRangeMapped(args.color, 4))
+      return -static_cast<i32>(SysError::eFAULT);
+    if (args.color[3])
+      return -static_cast<i32>(SysError::eNOTSUP);
+    return LightControllerPort(handle, args.color[0], args.color[1],
+                               args.color[2]);
+  }
+  if (cmd == 0xc0484851) {
+    struct ReadArgs {
+      u8 operation, reserved[3];
+      u32 handle, count, reserved1, flags, reserved2;
+      u64 reserved3;
+      u32* connection;
+      u32* extended;
+      u64 reserved4[2];
+      void* reports;
+    };
+    static_assert(sizeof(ReadArgs) == 0x48);
+    if (!host_memory::IsMemoryRangeMapped(data, sizeof(ReadArgs)))
+      return -static_cast<i32>(SysError::eFAULT);
+    const auto& args = *static_cast<const ReadArgs*>(data);
+    if (args.operation != 6)
+      return -static_cast<i32>(SysError::eNOTSUP);
+    std::lock_guard lock(handles_mutex_);
+    return ReadControllerReports(args.handle, args.reports, args.count,
+                                 args.connection, args.extended, 0xb8);
+  }
+  if (cmd == 0x8008485b) {
+    if (!host_memory::IsMemoryRangeMapped(data, 8))
+      return -static_cast<i32>(SysError::eFAULT);
+    const auto* args = static_cast<const u32*>(data);
+    std::lock_guard lock(handles_mutex_);
+    if (!controller_handles_.count(args[0]) || !IsControllerHandle(args[0]))
+      return -static_cast<i32>(SysError::eBADF);
+    // Both compatibility modes read the virtual controller's normalized data.
+    return args[1] <= 1 ? 0 : -static_cast<i32>(SysError::eINVAL);
+  }
+  if (cmd == 0xc0184852) {
+    struct InfoArgs {
+      u8 operation, reserved[3];
+      u32 id;
+      u64 reserved1;
+      void* output;
+    };
+    static_assert(sizeof(InfoArgs) == 24);
+    if (!host_memory::IsMemoryRangeMapped(data, sizeof(InfoArgs)))
+      return -static_cast<i32>(SysError::eFAULT);
+    const auto& args = *static_cast<const InfoArgs*>(data);
+    if (args.operation > 1)
+      return -static_cast<i32>(SysError::eNOTSUP);
+    if (!host_memory::IsMemoryRangeMapped(args.output, 0xa8))
+      return -static_cast<i32>(SysError::eFAULT);
+    if (args.operation == 0 ? args.id != 1 || !HasControllerSource()
+                            : !ControllerPortConnected(args.id))
+      return -static_cast<i32>(SysError::eNODEV);
+    u8 info[0xa8]{};
+    auto word = [&](u32 offset, u16 value) {
+      std::memcpy(info + offset, &value, sizeof(value));
+    };
+    word(0x10, 0x054c);
+    word(0x12, 0x05c4);
+    if (args.operation == 1) {
+      const u32 physical = 1;
+      std::memcpy(info + 4, &physical, sizeof(physical));
+      word(0x9c, 4486);
+      word(0xa0, 1920);
+      word(0xa2, 942);
+      info[0xa4] = info[0xa5] = 12;
+    }
+    std::memcpy(args.output, info, sizeof(info));
+    return 0;
+  }
+  if (cmd == 0x80184822) {
+    struct VibrationArgs {
+      u32 handle, reserved;
+      const u8* motors;
+      u8 flags, reserved1[7];
+    };
+    static_assert(sizeof(VibrationArgs) == 24);
+    if (!host_memory::IsMemoryRangeMapped(data, sizeof(VibrationArgs)))
+      return -static_cast<i32>(SysError::eFAULT);
+    const auto& args = *static_cast<const VibrationArgs*>(data);
+    std::lock_guard lock(handles_mutex_);
+    if (!controller_handles_.count(args.handle))
+      return -static_cast<i32>(SysError::eBADF);
+    if (!host_memory::IsMemoryRangeMapped(args.motors, 4))
+      return -static_cast<i32>(SysError::eFAULT);
+    if (args.flags)
+      return -static_cast<i32>(SysError::eNOTSUP);
+    return VibrateControllerPort(args.handle, args.motors[0], args.motors[1]);
+  }
+  if (cmd == 0x80104801 || cmd == 0x8010480e) {
+    struct InfoArgs {
+      u32 id, reserved;
+      void* output;
+    };
+    if (!host_memory::IsMemoryRangeMapped(data, sizeof(InfoArgs)))
+      return -SysError::eFAULT;
+    const auto& args = *static_cast<const InfoArgs*>(data);
+    if (!host_memory::IsMemoryRangeMapped(args.output, 0x40))
+      return -SysError::eFAULT;
+    if (cmd == 0x80104801 ? args.id != 1 || !HasControllerSource()
+                          : !ControllerPortConnected(args.id))
+      return -SysError::eNODEV;
+    u8 info[0x40]{};
+    auto word = [&](u32 offset, u16 value) {
+      std::memcpy(info + offset, &value, sizeof(value));
+    };
+    if (cmd == 0x80104801) {
+      word(0x10, 0x054c);
+      word(0x12, 0x05c4);
+    } else {
+      const u32 physical = 1;
+      std::memcpy(info + 4, &physical, sizeof(physical));
+      word(0x34, 4486);
+      word(0x38, 1920);
+      word(0x3a, 942);
+      info[0x3c] = info[0x3d] = 12;
+    }
+    std::memcpy(args.output, info, sizeof(info));
+    return 0;
+  }
+  // PS4 controller open, close, and read request layouts.
+  if (cmd == 0x800c4802 || cmd == 0x80084803 || cmd == 0x8030482e) {
+    if (!host_memory::IsMemoryRangeMapped(data, (cmd >> 16) & 0x1fff))
+      return -SysError::eFAULT;
+    std::lock_guard lock(handles_mutex_);
+    if (cmd == 0x800c4802) {
+      const auto* args = static_cast<const u32*>(data);
+      if (args[0] != ~u32(0) || args[1] != 3 || args[2] != 0)
+        return -SysError::eINVAL;
+      const i32 handle = AllocateControllerHandle();
+      if (handle < 0)
+        return handle;
+      controller_handles_.insert(handle);
+      return handle;
+    }
+    if (cmd == 0x80084803) {
+      const auto* args = static_cast<const u32*>(data);
+      if (args[0] != 3)
+        return -SysError::eINVAL;
+      if (!controller_handles_.erase(args[1]))
+        return -SysError::eBADF;
+      return ReleaseControllerHandle(args[1]) ? 0 : -SysError::eBADF;
+    }
+    struct ControllerReadArgs {
+      u32 handle, reserved;
+      void* buffer;
+      u32 count, reserved1;
+      u32* connection;
+      u32* extended;
+      u32 flags, reserved2;
+    };
+    static_assert(sizeof(ControllerReadArgs) == 0x30);
+    const auto& args = *static_cast<const ControllerReadArgs*>(data);
+    return ReadControllerReports(args.handle, args.buffer, args.count,
+                                 args.connection, args.extended, 0xa8);
+  }
+
   if (!kHidPassthrough) {
     if (data && (cmd & 0x40000000u)) {
       const u32 len = (cmd >> 16) & 0x1fff;
@@ -720,10 +923,6 @@ i32 HidDevice::Ioctl(u32 cmd, void* data) {
       return RunRead(src, data, FillController);
     case 0x80104822:  // SetVibration
       return RunVibration(src, data);
-    case 0x80104821:  // SetLightBar
-      return RunLight(src, data, false);
-    case 0x80044825:  // ResetLightBar
-      return RunLight(src, data, true);
     default:
       // The system-only and informational commands the kernel gates on
       // system credentials: soft-succeed with a zeroed out-buffer.

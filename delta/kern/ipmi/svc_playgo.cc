@@ -7,11 +7,16 @@
  * installed title, which is what a whole-pkg mount is.
  */
 
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <unordered_set>
 #include "base/arch.h"
 
 #include "base/containers/vector.h"
+#include "guest/session.h"
 #include "kern/ipmi/services.h"
 #include "kern/vfs.h"
 #include "options/options.h"
@@ -25,7 +30,16 @@ namespace {
 
 enum {
   kOpen = 0x30000,
+  kClose = 0x30001,
+  kSetSpeed = 0x30002,
+  kGetSpeed = 0x30003,
+  kSetLanguage = 0x30004,
+  kGetLanguage = 0x30005,
   kGetLoci = 0x30008,
+  kSetTodo = 0x30009,
+  kGetTodo = 0x3000a,
+  kPrefetch = 0x3000b,
+  kGetEta = 0x3000c,
   kGetProgress = 0x3000d,
   kGetChunkIds = 0x3000e,
   kGetChunkCount = 0x3000f,
@@ -35,7 +49,18 @@ enum {
 constexpr u32 kMaxChunks = 0x3e8;
 
 // Per-chunk availability.
-enum { kLocusNotDownloaded = 0, kLocusLocalSlow = 2, kLocusLocalFast = 3 };
+constexpr u8 kLocusLocalFast = 3;
+constexpr i32 kInvalidArgument = static_cast<i32>(0x80b20004u);
+constexpr i32 kBadHandle = static_cast<i32>(0x80b20009u);
+constexpr i32 kBadChunkId = static_cast<i32>(0x80b2000cu);
+constexpr i32 kBadSpeed = static_cast<i32>(0x80b2000du);
+
+std::mutex g_mutex;
+std::unordered_set<u32> g_handles;
+u32 g_next_handle = 1;
+u32 g_chunk_count = 0;
+u32 g_speed = 2;
+u64 g_language_mask = ~u64(0);
 
 bool ReadAll(const char* path, base::Vector<char>& out) {
   io::File f = vfs::OpenRead(path);
@@ -54,7 +79,7 @@ void ScanIds(const char* p, const char* end, u32& max_id, bool& any) {
     if (*p >= '0' && *p <= '9') {
       u32 v = 0;
       while (p < end && *p >= '0' && *p <= '9')
-        v = v * 10 + static_cast<u32>(*p++ - '0');
+        v = std::min(kMaxChunks, v * 10 + static_cast<u32>(*p++ - '0'));
       if (v < kMaxChunks) {
         if (v > max_id)
           max_id = v;
@@ -121,18 +146,18 @@ u32 Ps5ChunkCount() {
 // loop when the count is too small. Default 0x50 ("standard set, fully
 // installed"); DELTA_PLAYGO_CHUNKS overrides.
 u32 ChunkCount() {
-  static u32 cached = 0;
+  u32& cached = g_chunk_count;
   if (cached)
     return cached;
   if (kPlaygoChunks > 0) {
-    cached = kPlaygoChunks;
+    cached = std::min(static_cast<u32>(kPlaygoChunks), kMaxChunks);
     return cached;
   }
   cached = 0x50;
   io::File f = vfs::OpenRead("/app0/sce_sys/playgo-chunk.dat");
   u8 hdr[0x10] = {};
   if (f.Exists() && f.Read(hdr, sizeof(hdr)) == sizeof(hdr) && hdr[0] == 'p' &&
-      hdr[1] == 'g' && hdr[2] == 'd') {
+      hdr[1] == 'g' && hdr[2] == 'd' && hdr[3] == 0) {
     u32 cc = static_cast<u32>(hdr[0x0a] | (hdr[0x0b] << 8));
     if (cc > 0)
       cached = cc;
@@ -144,45 +169,167 @@ u32 ChunkCount() {
   return cached;
 }
 
+bool ReadInput(Invocation& inv, u32 slot, void* dest, u64 bytes) {
+  u64 size = 0;
+  const void* input = inv.Input(slot, size);
+  if (!input || size < bytes) {
+    inv.SetResult(kInvalidArgument);
+    return false;
+  }
+  std::memcpy(dest, input, bytes);
+  return true;
+}
+
+bool Output(Invocation& inv, u32 slot, u64 bytes) {
+  if (inv.CanReply(slot, bytes))
+    return true;
+  inv.SetResult(kInvalidArgument);
+  return false;
+}
+
+bool ValidateChunks(Invocation& inv, u32 count, bool todo = false) {
+  if (count > kMaxChunks) {
+    inv.SetResult(kInvalidArgument);
+    return false;
+  }
+  if (!count)
+    return true;
+  u64 size = 0;
+  const auto* ids = static_cast<const u8*>(inv.Input(1, size));
+  const u32 stride = todo ? 4 : 2;
+  if (!ids || size < count * stride) {
+    inv.SetResult(kInvalidArgument);
+    return false;
+  }
+  for (u32 i = 0; i < count; ++i) {
+    u16 id;
+    std::memcpy(&id, ids + i * stride, sizeof(id));
+    if (id >= ChunkCount()) {
+      inv.SetResult(kBadChunkId);
+      return false;
+    }
+    if (todo && ids[i * stride + 2] > kLocusLocalFast) {
+      inv.SetResult(kInvalidArgument);
+      return false;
+    }
+  }
+  return true;
+}
+
 struct PlayGo : Service {
   const char* Name() const override { return "ScePlayGo"; }
 
   void Invoke(Invocation& inv) override {
-    switch (inv.Method()) {
-      case kOpen:  // server-side handle; must be neither 0 nor -1
-        inv.ReplyU32(0, 1);
+    std::lock_guard lock(g_mutex);
+    const u32 method = inv.Method();
+    if (method == kOpen) {
+      if (!Output(inv, 0, sizeof(u32)))
+        return;
+      const u32 handle = g_next_handle++;
+      g_handles.insert(handle);
+      inv.ReplyU32(0, handle);
+      return;
+    }
+    u32 handle;
+    if (!ReadInput(inv, 0, &handle, sizeof(handle)))
+      return;
+    if (!g_handles.contains(handle)) {
+      inv.SetResult(kBadHandle);
+      return;
+    }
+    struct Request {
+      u32 handle, count;
+    } request{};
+    switch (method) {
+      case kClose:
+        g_handles.erase(handle);
         break;
-      case kGetChunkCount:  // 0 makes scePlayGoOpen fatal
-        inv.ReplyU32(0, ChunkCount());
+      case kSetSpeed:
+        if (!ReadInput(inv, 0, &request, sizeof(request)))
+          return;
+        if (request.count > 2) {
+          inv.SetResult(kBadSpeed);
+          return;
+        }
+        g_speed = request.count;
         break;
-      case kGetLoci:  // byte array indexed by the requested chunk-id list
-        inv.ReplyFill(0, kLocusLocalFast);
+      case kGetSpeed:
+        if (Output(inv, 0, sizeof(g_speed)))
+          inv.ReplyU32(0, g_speed);
         break;
-      case kGetChunkIds: {  // in {u32 handle, u32 max}; out u16 ids[], u32
-                            // count.
-        // scePlayGoOpen (PS5) fails 0x80b20001 on count 0 and scePlayGoGetLocus
-        // rejects any requested id missing from this list, so it must cover
-        // every chunk the title's own data names.
-        u64 sz = 0;
-        auto* in = static_cast<const u32*>(inv.Input(0, sz));
-        u32 n = ChunkCount();
-        if (in && sz >= 8 && in[1] < n)
-          n = in[1];
-        u16 ids[kMaxChunks];
-        for (u32 i = 0; i < n; i++)
-          ids[i] = static_cast<u16>(i);
-        inv.Reply(0, ids, n * sizeof(u16));
-        inv.ReplyU32(1, n);
+      case kSetLanguage: {
+        struct Language {
+          u32 handle, pad;
+          u64 mask;
+        } language;
+        if (ReadInput(inv, 0, &language, sizeof(language)))
+          g_language_mask = language.mask;
         break;
       }
-      case kGetProgress: {  // { uint64 progressSize; uint64 totalSize }
-        const u64 done[2] = {1, 1};  // == 100%
-        inv.Reply(0, done, sizeof(done));
+      case kGetLanguage:
+        if (Output(inv, 0, sizeof(g_language_mask)))
+          inv.Reply(0, &g_language_mask, sizeof(g_language_mask));
+        break;
+      case kGetChunkCount:
+        if (Output(inv, 0, sizeof(u32)))
+          inv.ReplyU32(0, ChunkCount());
+        break;
+      case kGetChunkIds: {
+        if (!ReadInput(inv, 0, &request, sizeof(request)))
+          return;
+        const u32 count = std::min(ChunkCount(), request.count);
+        if (!Output(inv, 0, count * sizeof(u16)) ||
+            !Output(inv, 1, sizeof(u32)))
+          return;
+        std::array<u16, kMaxChunks> ids;
+        for (u32 i = 0; i < count; ++i)
+          ids[i] = static_cast<u16>(i);
+        inv.Reply(0, ids.data(), count * sizeof(u16));
+        inv.ReplyU32(1, count);
+        break;
+      }
+      case kGetTodo:
+        if (!ReadInput(inv, 0, &request, sizeof(request)) ||
+            !Output(inv, 0, 0) || !Output(inv, 1, sizeof(u32)))
+          return;
+        inv.ReplyFill(0, 0);
+        inv.ReplyU32(1, 0);
+        break;
+      case kGetLoci:
+      case kGetProgress:
+      case kGetEta:
+      case kSetTodo:
+      case kPrefetch: {
+        if (!ReadInput(inv, 0, &request, sizeof(request)) ||
+            !ValidateChunks(inv, request.count, method == kSetTodo))
+          return;
+        if (method == kPrefetch) {
+          struct Prefetch {
+            u32 handle, count;
+            u8 locus, pad[3];
+          } prefetch;
+          if (!ReadInput(inv, 0, &prefetch, sizeof(prefetch)))
+            return;
+          if (prefetch.locus > kLocusLocalFast)
+            inv.SetResult(kInvalidArgument);
+        } else if (method == kGetLoci) {
+          if (!Output(inv, 0, request.count))
+            return;
+          std::array<u8, kMaxChunks> loci;
+          loci.fill(kLocusLocalFast);
+          inv.Reply(0, loci.data(), request.count);
+        } else if (method == kGetProgress) {
+          const u64 done[2] = {1, 1};
+          if (Output(inv, 0, sizeof(done)))
+            inv.Reply(0, done, sizeof(done));
+        } else if (method == kGetEta) {
+          const i64 eta = 0;
+          if (Output(inv, 0, sizeof(eta)))
+            inv.Reply(0, &eta, sizeof(eta));
+        }
         break;
       }
       default:
-        // Remaining getters (todo list, eta, install speed, language) and every
-        // setter: a zeroed reply already reads as "installed, nothing pending".
         inv.ReplyEmpty();
         break;
     }
@@ -190,15 +337,19 @@ struct PlayGo : Service {
 };
 
 PlayGo g_play_go;
+const guest::SessionReset g_session_reset([] {
+  std::lock_guard lock(g_mutex);
+  g_handles.clear();
+  g_next_handle = 1;
+  g_chunk_count = 0;
+  g_speed = 2;
+  g_language_mask = ~u64(0);
+});
 
 }  // namespace
 
 Service& PlayGoService() {
   return g_play_go;
-}
-
-u32 PlayGoChunkCount() {
-  return ChunkCount();
 }
 
 }  // namespace kern::ipmi

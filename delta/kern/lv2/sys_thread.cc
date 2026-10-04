@@ -1040,17 +1040,14 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       }
     }
     case 6: {  // UMTX_OP_MUTEX_UNLOCK
-      // libthr only reaches kernel unlock for a CONTESTED mutex and its
-      // userland path has already verified ownership (and cleared the tid for
-      // the contested PI/PROTECT release). Re-checking would EPERM and make
-      // libthr skip dequeueing ("Fatal error 'mutex is on list'"). Just release
-      // and wake.
       auto& bk = UmtxBucket(ptr);
       auto* p = static_cast<base::Atomic<u32>*>(ptr);
       base::UniqueLock<base::Mutex> lk(bk.m);
       auto& ch = bk.chan[ptr];
       u32 owner = p->load();
       UmtxTrace(6, ptr, t_tid, owner);
+      if ((owner & ~UMUTEX_CONTESTED) != t_tid)
+        return -static_cast<int>(SysError::ePERM);
       // FreeBSD do_unlock_normal: UNOWNED at <=1 waiter, CONTESTED otherwise. A
       // blind 0 with 2+ waiters queued hands the next acquirer an UNCONTESTED
       // word, so its release stays in userland and never wakes the rest: the

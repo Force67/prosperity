@@ -34,10 +34,12 @@
 
 #include "base/atomic.h"
 #include "cpu/backend.h"
+#include "cpu/mmio.h"
 #include "host_memory/host_memory.h"
 #include "kern/lv2/sys_thread.h"
 #include "kern/module.h"
 #include "kern/process.h"
+#include "kern/ps4/dev/gc_dev.h"
 #include "kern/vfs.h"
 #include "logger/logger.h"
 #include "options/options.h"
@@ -376,6 +378,11 @@ struct NullGuard {
 NullGuard g_null_guards[16] = {};
 int g_null_guard_count = 0;
 static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
+  if (sig == SIGSEGV && si && si->si_code == SEGV_ACCERR &&
+      GcDevice::IsDoorbellAddress(reinterpret_cast<uintptr_t>(si->si_addr)) &&
+      cpu::HandleMmioWrite(ucv, reinterpret_cast<uintptr_t>(si->si_addr),
+                           GcDevice::WriteDoorbell))
+    return;
   // A write to a page a cache protected: opened and noted, resume.
   if (sig == SIGSEGV && si && si->si_code == SEGV_ACCERR &&
       host_memory::HandleWriteFault(reinterpret_cast<uintptr_t>(si->si_addr)))

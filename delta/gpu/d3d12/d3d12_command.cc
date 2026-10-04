@@ -304,9 +304,10 @@ void D3D12CommandList::Barrier(u32 src_access,
                                const rhi::TextureBarrier* textures,
                                u32 num_textures) {
   (void)dst_access;
-  // Buffers change state where they are used; a write followed by a read in
-  // the same (UAV) state still needs this.
-  if (src_access & (rhi::kAccessShaderWrite | rhi::kAccessComputeWrite)) {
+  // FillBuffer uses UAV writes even though the RHI classifies it as a copy.
+  // Consecutive fills in the same resource state still need ordering.
+  if (src_access & (rhi::kAccessShaderWrite | rhi::kAccessComputeWrite |
+                    rhi::kAccessCopyWrite)) {
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     barriers_.push_back(b);

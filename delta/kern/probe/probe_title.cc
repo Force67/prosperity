@@ -28,7 +28,6 @@
 #include "kern/module.h"
 #include "kern/process.h"
 #include "kern/vfs.h"
-#include "runtime/vprx/vprx.h"
 
 #include <cctype>
 #include <cstdio>
@@ -45,7 +44,7 @@
 #include "base/threading/thread.h"
 #include "base/time/time.h"
 #include "kern/lv2/sys_thread.h"
-#include "runtime/vprx/nid.h"
+#include "runtime/nid.h"
 
 namespace {
 DELTA_OPTION(bool, kVoForceConnect, "DELTA_VO_FORCE_CONNECT", false);
@@ -247,8 +246,7 @@ void SpawnJobWatcher(u64 base) {
       // tests 1<<worker-ordinal against it. A stuck finalize job shows a mask
       // the 4 workers (0xF) cannot satisfy. The claim (0x38d40) scans 8
       // priority buckets at [jobsys+0x1478] + lvl*0x2078 with TWO consumer
-      // paths, both taken from disassembly (an earlier guessed layout read
-      // zeros):
+      // paths:
       //   scan A (0x38fa7, [bucket+0x2038] != 0): slot array at
       //   [bucket+0x2070],
       //     stride 0x120, affinity at slot+0xf0, tested at 0x38fc5.
@@ -1328,12 +1326,8 @@ void BringUpRebirthEbootRegistry(Module& m) {
            (void*)buckets, kRegistryOff);
 }
 
-// DIAGNOSTIC DELTA_VO_PATCH: patch real libSceVideoOut exports to `mov eax,<v>;
-// ret` to isolate which setup function's error makes rebirth skip DCB creation
-// (open returns 1, the rest 0). DELTA_VO_WATCH: poll the driver's internal
-// display
-// config (count/idx/cfg stride 0x140) during the natural flow, to pin what it
-// fails to set (Open needs the connected state f0==4).
+// DELTA_VO_PATCH replaces video setup return values (open: 1, others: 0).
+// DELTA_VO_WATCH logs display configuration changes (stride 0x140).
 static void WatchVideoOutState(Module& m) {
   if (!kVoWatch)
     return;
@@ -1480,22 +1474,6 @@ static void ForceReturn0(Process& p, const char* mod, u32 off) {
 }
 
 // Patch a (rdi=paramId, rsi=int* out) getter to `*out = val; return 0`.
-static void ForceGetterOk(Process& p, const char* mod, u32 off, u32 val) {
-  auto m = p.GetModule(base::StringRef(mod));
-  if (!m)
-    return;
-  u8* c = m->GetInfo().base + off;
-  host_memory::ProtectMem(
-      reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
-      0x1000, host_memory::PageProtection::kRwx);
-  c[0] = 0xC7;
-  c[1] = 0x06;  // mov dword [rsi], imm32
-  std::memcpy(c + 2, &val, 4);
-  c[6] = 0x31;
-  c[7] = 0xC0;  // xor eax, eax
-  c[8] = 0xC3;  // ret
-}
-
 // Boot patches applied before entering the guest, needed by every boot path
 // (modexec and the real pkg boot), not just the modexec harness.
 void ApplyBootPatches(Process& p) {
@@ -1704,11 +1682,5 @@ void ApplyBootPatches(Process& p) {
   }
   ps5::MaybePrependCtor(p);
   ForceReturn0(p, "libkernel", 0x287e0);  // module-gen lib-id validator
-  ForceReturn0(p, "libSceAppContentUtil", 0x1a00);  // AppContent IPMI init
-  // AppContent's IPMI client is stubbed, so Initialize/AppParamGetInt error out
-  // and GameSystemInit asserts; force SCE_OK and SKU_FLAG = FULL (3).
-  ForceReturn0(p, "libSceAppContentUtil", 0x1610);  // sceAppContentInitialize
-  ForceGetterOk(p, "libSceAppContentUtil", 0x1630,
-                3);  // sceAppContentAppParamGetInt
 }
 }  // namespace kern::probe

@@ -84,8 +84,7 @@ class Module {
   bool FromMem(base::UniquePointer<u8[]>);
 
   uintptr_t GetSymbol(u64);
-  // LLE-only export lookup by NID (GetSymbol without the HLE/vprx override),
-  // for the PS5 global-NID resolver.
+  // Indexed export lookup by NID for the PS5 global-NID resolver.
   uintptr_t GetExport(u64 nid);
   uintptr_t GetSymbolFullName(const char* name);
   uintptr_t GetSymbol2(const char* name);

@@ -4,7 +4,6 @@
 #include "base/containers/array.h"
 #include "base/containers/vector.h"
 #include "runtime/tests/video_fixture.h"
-#include "runtime/vprx/vprx.h"
 using namespace runtime::video;
 
 TEST(VideoDecode, ReordersPixelsAndMetadataDrainsAndResets) {
@@ -88,12 +87,8 @@ TEST(VideoDecode, ReordersPixelsAndMetadataDrainsAndResets) {
   }
 }
 
-TEST(VideoDecode, RejectsInvalidArgumentsAndExportsDecoder) {
+TEST(VideoDecode, RejectsInvalidArguments) {
   EXPECT_NE(QueryMemory(nullptr, nullptr), 0);
   EXPECT_NE(Decode(nullptr, nullptr, nullptr, nullptr), 0);
   EXPECT_NE(Delete(nullptr), 0);
-  runtime::vprx::Init();
-  EXPECT_NE(
-      runtime::vprx::LookupForced("libSceVideodec2", 0xF39D85E7EABAFA23ull),
-      0u);
 }

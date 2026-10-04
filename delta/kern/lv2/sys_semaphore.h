@@ -38,6 +38,7 @@ class Process;
 class Semaphore : public Object {
  public:
   Semaphore(ObjectTable& objects, const char* name, int init, int max);
+  ~Semaphore() override;
 
   // Block until at least `need` units are available, then take them. Waits up
   // to *timeoutUs micros (null = forever). Returns 0, -eTIMEDOUT, or -errno. If

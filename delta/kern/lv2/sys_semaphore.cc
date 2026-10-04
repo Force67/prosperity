@@ -12,6 +12,7 @@
 #include "guest_abi.h"
 
 #include <cstdio>
+#include <cstring>
 #include "kern/lv2/wait_probe.h"
 
 #include "base/containers/hash_map.h"
@@ -20,6 +21,7 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "base/time/time.h"
+#include "kern/ipmi/services.h"
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_mem.h"
 #include "kern/lv2/sys_semaphore.h"
@@ -62,6 +64,13 @@ Semaphore::Semaphore(ObjectTable& objects, const char* nm, int init, int max)
     base::LockGuard<base::Mutex> lk(g_sem_reg_m);
     g_sem_by_name[nm] = this;
   }
+}
+
+Semaphore::~Semaphore() {
+  base::LockGuard lock(g_sem_reg_m);
+  const auto it = g_sem_by_name.find(name_);
+  if (it != g_sem_by_name.end() && it->second == this)
+    g_sem_by_name.erase(it);
 }
 
 int Semaphore::Wait(int need, u32* timeout_us) {
@@ -153,10 +162,17 @@ int PS4ABI sys_osem_open(const char* name) {
     if (it != g_sem_by_name.end())
       return it->second->handle();
   }
+  if (name && std::strncmp(name, "SceSaveData", 11) == 0)
+    return -SysError::eNOENT;
   // Auto-create unknown named semaphores (a system service makes them on real
   // hw); creating on first open gives producer+consumer a shared one.
-  auto* s =
-      new Semaphore(Process::GetActive()->GetObjTable(), name, 0, 0x7fffffff);
+  char suspend_name[40];
+  std::snprintf(suspend_name, sizeof(suspend_name), "SceLncSuspendBlock%08x",
+                ipmi::kForegroundAppId);
+  // LNC grants the running title a permit to prevent suspension while saving.
+  const bool suspend = name && std::strcmp(name, suspend_name) == 0;
+  auto* s = new Semaphore(Process::GetActive()->GetObjTable(), name,
+                          suspend ? 1 : 0, suspend ? 1 : 0x7fffffff);
   BASE_LOGI("osem", "open '{}' (auto-created) -> id={}", name ? name : "",
             s->handle());
   return s->handle();
@@ -168,8 +184,9 @@ int PS4ABI sys_osem_delete(int id) {
     return -SysError::eSRCH;
   {
     base::LockGuard<base::Mutex> lk(g_sem_reg_m);
-    if (!s->fname().empty())
-      g_sem_by_name.erase(s->fname().c_str());
+    const auto it = g_sem_by_name.find(s->fname());
+    if (it != g_sem_by_name.end() && it->second == s.get())
+      g_sem_by_name.erase(it);
   }
   Process::GetActive()->GetObjTable().Release(id);
   return 0;

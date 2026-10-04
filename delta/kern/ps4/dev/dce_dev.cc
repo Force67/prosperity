@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <mutex>
 #include "base/arch.h"
 #include "base/logging.h"
 #include "guest/display.h"
@@ -22,6 +24,8 @@
 #include "kern/process.h"
 #include "kern/ps4/dev/dce_dev.h"
 #include "options/options.h"
+#include "host_memory/host_memory.h"
+#include "gpu/ps4/cmd_processor.h"
 
 namespace {
 DELTA_OPTION(bool, kDceTrace, "DELTA_DCE_TRACE", false);
@@ -52,31 +56,101 @@ static u64 GuestTsc() {
 #endif
 }
 
-// The last flip submitted via 0xc0488204. A title flips buffer N then polls
-// GetFlipStatus until currentBuffer == N; reporting 0 always made flips to
-// buffers 1/2 spin to a ~1s timeout (Doom64 at ~1fps). Record and report it.
-static base::Atomic<u32> g_dce_current_buffer{0};
+// Submitted targets drive GC presentation; completed targets drive status.
+static base::Atomic<u32> g_dce_current_buffer{UINT32_MAX};
 static base::Atomic<i64> g_dce_flip_arg{0};
 static base::Atomic<u64> g_dce_flip_count{0};
 static base::Atomic<u64> g_dce_scanout_buffers[16]{};
+static base::Atomic<bool> g_dce_active{false};
+static base::Atomic<u32> g_dce_submitted_buffer{0};
+static base::Atomic<i64> g_dce_submitted_arg{0};
+static base::Atomic<u64> g_dce_submit_count{0};
+static base::Atomic<u64> g_dce_flip_time{0};
+static base::Atomic<u64> g_dce_flip_tsc{0};
+static base::Atomic<u64> g_dce_submit_tsc{0};
+struct PendingFlip {
+  int index, mode;
+  i64 arg;
+};
+static std::mutex g_dce_mutex;
+static std::deque<PendingFlip> g_dce_gpu_flips;
+static u64* g_dce_labels = nullptr;
 
-u32 DceCurrentBuffer() {
-  return g_dce_current_buffer.load();
+bool DceActive() {
+  return g_dce_active.load();
 }
 
-i64 DceCurrentFlipArg() {
-  return g_dce_flip_arg.load();
+u32 DceSubmittedBuffer() {
+  return g_dce_submitted_buffer.load();
+}
+
+i64 DceSubmittedFlipArg() {
+  return g_dce_submitted_arg.load();
 }
 
 u64 DceScanoutBuffer(u32 index) {
   return index < 16 ? g_dce_scanout_buffers[index].load() : 0;
 }
 
+static bool QueueFlip(PendingFlip flip) {
+  return guest::display::QueueFlip(flip.mode, [flip] {
+    {
+      std::lock_guard lock(g_dce_mutex);
+      // PS4 releases the previous scanout buffer when its replacement flips.
+      if (g_dce_labels && g_dce_current_buffer.load() < 16)
+        g_dce_labels[g_dce_current_buffer.load()] = 0;
+      g_dce_current_buffer.store(flip.index);
+      g_dce_flip_arg.store(flip.arg);
+      g_dce_flip_time.store(NowNs() / 1000);
+      g_dce_flip_tsc.store(GuestTsc());
+      g_dce_flip_count.fetch_add(1);
+    }
+    NoteFlip();
+  });
+}
+
+bool DceSubmitFlip(int index, int mode, i64 arg, bool wait_for_gpu) {
+  if (index < -1 || index >= 16 || mode < 0 || mode > 2)
+    return false;
+  g_dce_submitted_buffer.store(index);
+  g_dce_submitted_arg.store(arg);
+  g_dce_submit_tsc.store(GuestTsc());
+  g_dce_submit_count.fetch_add(1);
+  PendingFlip flip{index, mode, arg};
+  if (wait_for_gpu) {
+    std::lock_guard lock(g_dce_mutex);
+    g_dce_gpu_flips.push_back(flip);
+    return true;
+  }
+  gpu::ps4::WaitForFrame();
+  if (QueueFlip(flip))
+    return true;
+  g_dce_submit_count.fetch_sub(1);
+  return false;
+}
+
+bool DceCompleteGpuFlips() {
+  std::deque<PendingFlip> flips;
+  {
+    std::lock_guard lock(g_dce_mutex);
+    flips.swap(g_dce_gpu_flips);
+  }
+  size_t remaining = flips.size();
+  for (auto flip : flips) {
+    if (!QueueFlip(flip)) {
+      g_dce_submit_count.fetch_sub(remaining);
+      return false;
+    }
+    --remaining;
+  }
+  return true;
+}
+
 static bool DceTrace() {
   return kDceTrace;
 }
 
-// Scan the raw stack for the first return address in libSceVideoOut's .text
+// Scan the raw stack for the first return address in video output client's .text
 // (the native backend runs handlers on the guest stack) to pin which wrapper
 // issued each ioctl.
 static void PrintVideoOutCaller() {
@@ -115,11 +189,12 @@ static void PrintVideoOutCaller() {
 }
 
 bool DceDevice::Init(const char*, u32, u32) {
+  g_dce_active.store(true);
   return true;
 }
 
 // Guard dereferences to a sane userspace range. NB: under FEX the guest stack
-// is a host mmap up at 0xffff_xxxx_xxxx, so real libSceVideoOut passes out-slot
+// is a host mmap up at 0xffff_xxxx_xxxx, so real video output client passes out-slot
 // pointers above the old 0x8000_0000_0000 ceiling; accept the full 48-bit user
 // range or every stack out-slot write is silently dropped (open then mmaps an
 // uninitialised offset/size and fails).
@@ -158,11 +233,11 @@ u64 DceDevice::PoolAlloc(u64 bytes) {
 
 u8* DceDevice::Map(void*, size_t size, u32, u32, size_t offset) {
   // The kernel only maps /dev/dce at offsets < 0x8000 (physical flip-target
-  // status page; offset/0x4000 picks the target). Our libSceVideoOut maps what
+  // status page; offset/0x4000 picks the target). Our video output client maps what
   // sub-op 9 hands back, whose offsets exceed that window, so substitute a
   // slice of the scanout pool: real, zeroed, shared, CP-usable memory in the
   // same shape.
-  if (pool_base_ && offset + size <= pool_size_)
+  if (pool_base_ && offset <= pool_used_ && size <= pool_used_ - offset)
     return pool_base_ + offset;
   return reinterpret_cast<u8*>(-1);
 }
@@ -170,7 +245,7 @@ u8* DceDevice::Map(void*, size_t size, u32, u32, size_t offset) {
 // 11.00 dce ioctl dispatch: scanin ioctls are system-credential-gated (a game
 // gets EINVAL); 0xC0308203 -> flip control (sub-ops 0..0x19), 0xC0308206/07 ->
 // register buffer(/attr), 0xC0488204 -> submit flip, 0xc0588212 not in the
-// dispatch (EINVAL). Layouts verified against the 11.00 libSceVideoOut callers.
+// dispatch (EINVAL).
 i32 DceDevice::Ioctl(u32 cmd, void* data) {
   if (DceTrace()) {
     u32 len = (cmd >> 16) & 0x1FFF;
@@ -183,7 +258,7 @@ i32 DceDevice::Ioctl(u32 cmd, void* data) {
   auto* s = static_cast<u64*>(data);
 
   // Scanin ioctls + the non-existent 0xc0588212: EINVAL from a game context,
-  // which is what a game's libSceVideoOut is built against.
+  // which is what a game's video output client is built against.
   switch (cmd) {
     case 0x80108210:  // start dual capture mode
     case 0xC068820C:  // start capture buffer manager
@@ -205,7 +280,7 @@ i32 DceDevice::Ioctl(u32 cmd, void* data) {
           *reinterpret_cast<u64*>(s[4]) = next_handle_++;
         return 0;
       case 6:
-        // libSceVideoOut's flip-rate backend passes {6, handle, rate}.
+        // video output client's flip-rate backend passes {6, handle, rate}.
         guest::display::SetFlipRate(static_cast<int>(s[2]));
         return 0;
       case 9: {
@@ -226,6 +301,10 @@ i32 DceDevice::Ioctl(u32 cmd, void* data) {
           *reinterpret_cast<u64*>(s[2]) = off;
         if (PlausiblePtr(s[3]))
           *reinterpret_cast<u64*>(s[3]) = want;
+        {
+          std::lock_guard lock(g_dce_mutex);
+          g_dce_labels = reinterpret_cast<u64*>(pool_base_ + off + 0xa0);
+        }
         return 0;
       }
       case 0x19: {
@@ -246,26 +325,22 @@ i32 DceDevice::Ioctl(u32 cmd, void* data) {
       case 0xa: {
         // Get flip status: s[2] = out ptr (0x48). Kernel layout: [0x00] flipArg
         // [0x10] count [0x18] processTime [0x20] tsc [0x28] currentBuffer
-        // [0x2c]+[0x34] flipPendingNum [0x30] gcQueueNum [0x38] submitTsc. Our
-        // flip is synchronous, so report advancing count, pending 0.
+        // [0x2c]+[0x34] flipPendingNum [0x30] gcQueueNum [0x38] submitTsc.
         if (PlausiblePtr(s[2])) {
           auto* o = reinterpret_cast<u8*>(s[2]);
           std::memset(o, 0, 0x48);
-          u64 now = NowNs();
+          std::lock_guard lock(g_dce_mutex);
           *reinterpret_cast<i64*>(o + 0x00) = g_dce_flip_arg.load();  // flipArg
-          *reinterpret_cast<u64*>(o + 0x10) = g_dce_flip_count.load()
-                                                  ? g_dce_flip_count.load()
-                                                  : FlipCount();  // count
-          *reinterpret_cast<u64*>(o + 0x18) = now;                // processTime
-          *reinterpret_cast<u64*>(o + 0x20) = GuestTsc();         // tsc
-          // currentBuffer = the buffer the last submitted flip displays. A
-          // title waits for this to equal the index it just flipped before
-          // reusing a buffer; reporting it (vs a stuck 0) is what unblocks the
-          // per-frame wait.
+          *reinterpret_cast<u64*>(o + 0x10) = g_dce_flip_count.load();
+          *reinterpret_cast<u64*>(o + 0x18) = g_dce_flip_time.load();
+          *reinterpret_cast<u64*>(o + 0x20) = g_dce_flip_tsc.load();
+          // Polling this index must not release a buffer before completion.
           *reinterpret_cast<i32*>(o + 0x28) = (i32)g_dce_current_buffer.load();
-          *reinterpret_cast<u64*>(o + 0x38) = GuestTsc();  // submitTsc
-          // flipPendingNum / gcQueueNum left 0 (our flip is synchronous: none
-          // pending).
+          *reinterpret_cast<u64*>(o + 0x38) = g_dce_submit_tsc.load();
+          const u32 gc_pending = g_dce_gpu_flips.size();
+          *reinterpret_cast<u32*>(o + 0x2c) =
+              g_dce_submit_count.load() - g_dce_flip_count.load() - gc_pending;
+          *reinterpret_cast<u32*>(o + 0x30) = gc_pending;
         }
         return 0;
       }
@@ -326,21 +401,22 @@ i32 DceDevice::Ioctl(u32 cmd, void* data) {
   }
 
   if (cmd == 0xc0488204 && data) {
-    // Submit flip (72-byte arg): record it as immediately complete so
-    // GetFlipStatus reports currentBuffer == the just-flipped index
-    // (Undertale's documented blocker; not Doom64's separate ~1fps busy-wait).
-    g_dce_current_buffer.store(static_cast<u32>(s[1]));
-    g_dce_flip_arg.store(static_cast<i64>(s[3]));
-    g_dce_flip_count.fetch_add(
-        1);  // a per-flip count reported back in GetFlipStatus
+    if ((s[1] >= 16 && s[1] != UINT64_MAX) || s[2] < 1 || s[2] > 6 ||
+        !host_memory::IsMemoryRangeMapped(reinterpret_cast<void*>(s[8]), 8))
+      return -static_cast<i32>(SysError::eINVAL);
+    // The EOP out-slot belongs to the caller's stack. Retain only flip values;
+    // GC queues completion after executing the submitted command buffers.
+    if (!s[5])
+      gpu::ps4::EndFrame(DceScanoutBuffer(static_cast<u32>(s[1])));
+    if (!DceSubmitFlip(static_cast<int>(s[1]), (s[2] - 1) % 3 == 1 ? 2 : 1,
+                       static_cast<i64>(s[3]), s[5] != 0))
+      return -static_cast<i32>(SysError::eINTR);
     if (DceTrace())
       BASE_LOGI("dce", "submitFlip buf={} flipArg={:#x}", (int)s[1],
                 (unsigned long long)s[3]);
-    // Report success: arg[0x40] (s[8]) holds a pointer to the status out-slot
-    // the kernel copyouts 8 bytes to (0 on clean success, 88 when a flip is
-    // already pending). The caller checks it for 0x58 = ok.
+    // A zero result is success; 0x58 makes the library refresh its scaler.
     if (PlausiblePtr(s[8]))
-      *reinterpret_cast<u64*>(s[8]) = 0x58;
+      *reinterpret_cast<u64*>(s[8]) = 0;
     return 0;
   }
 
@@ -351,10 +427,20 @@ i32 DceDevice::Ioctl(u32 cmd, void* data) {
 
 namespace {
 const guest::SessionReset g_session_reset([] {
-  guest::ResetResource(g_dce_current_buffer);
+  std::lock_guard lock(g_dce_mutex);
+  g_dce_current_buffer.store(UINT32_MAX);
   guest::ResetResource(g_dce_flip_arg);
   guest::ResetResource(g_dce_flip_count);
   guest::ResetResource(g_dce_scanout_buffers);
+  guest::ResetResource(g_dce_active);
+  guest::ResetResource(g_dce_submitted_buffer);
+  guest::ResetResource(g_dce_submitted_arg);
+  guest::ResetResource(g_dce_submit_count);
+  guest::ResetResource(g_dce_flip_time);
+  guest::ResetResource(g_dce_flip_tsc);
+  guest::ResetResource(g_dce_submit_tsc);
+  g_dce_gpu_flips.clear();
+  g_dce_labels = nullptr;
 });
 }  // namespace
 

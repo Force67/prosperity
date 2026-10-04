@@ -83,7 +83,7 @@ static const SyscallReg kSyscallDpt[] = {
     {39, (void*)&sys_getppid},     // sys_getppid
     {40, (void*)&sys_lstat},       // sys_lstat
     {41, (void*)&sys_dup},         // sys_dup
-    {42, (void*)&Lv2StubSyscall},  // sys_pipe
+    {42, (void*)&sys_pipe},
     {43, (void*)&sys_getegid},     // sys_getegid
     {44, (void*)&Lv2StubSyscall},  // sys_profil
     {45, (void*)&Lv2StubSyscall},  // sys_ktrace
@@ -466,7 +466,7 @@ static const SyscallReg kSyscallDpt[] = {
     {477, (void*)&sys_mmap},
     {478,
      (void*)&sys_lseek},  // modern lseek (the game uses 478, not the old 19)
-    {479, (void*)&Lv2StubSyscall},  // sys_truncate
+    {479, (void*)&sys_truncate},
     {480, (void*)&sys_ftruncate},
     {481, (void*)&sys_thr_kill2},  // sys_thr_kill2
     {482, (void*)&sys_shm_open},

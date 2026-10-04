@@ -39,6 +39,7 @@
 #include "kern/ps4/audio_daemon.h"
 #include "kern/ps4/dev/dma_dev.h"  // DmemBackingFd/Size (shared physical dmem store)
 #include "kern/ps5/dev/dma_dev.h"
+#include "kern/system_settings.h"
 #include "kern/thread_names.h"
 #include "options/options.h"
 
@@ -185,24 +186,98 @@ u8* AllocLowGuest(size_t size, size_t align) {
   return nullptr;
 }
 
-// POSIX shared memory (shm_open/shm_unlink/ftruncate + fd-backed mmap). In a
-// single guest process the same name resolves to one backing block; ftruncate
-// or the first mmap allocates it.
+// Named shared objects own a file backing; each mmap owns an independent view.
 namespace {
+base::Atomic<u64> g_shm_identity{1};
 struct ShmBacking {
+  const u64 identity = g_shm_identity.fetch_add(1);
+  int fd = memfd_create("delta_shm", MFD_CLOEXEC);
   u8* base = nullptr;
-  size_t size = 0;
+  size_t size = 0, map_size = 0;
+  ~ShmBacking() {
+    if (base) {
+      AudioDaemonForgetRange(base, map_size);
+      host_memory::FreeMem(base, map_size);
+    }
+    if (fd >= 0)
+      ::close(fd);
+  }
 };
 using ShmRef = base::SharedPointer<ShmBacking>;
 base::Mutex g_shm_mutex;
 // name -> backing. The backing outlives the name (shmObject holds a shared
 // ref), like the kernel refcounting the shm object by fd.
 base::HashMap<base::String, ShmRef> g_shm_by_name;
+struct ShmMapping {
+  u8* base;
+  size_t size;
+  ShmRef backing;
+};
+base::Vector<ShmMapping> g_shm_maps;
+
+bool ResizeShm(ShmBacking& b, size_t size) {
+  if (b.fd < 0 || size > SIZE_MAX - 0x3fff)
+    return false;
+  const size_t rounded = (size + 0x3fff) & ~size_t(0x3fff);
+  // Retire the consumer view before a truncate can invalidate its pages.
+  if (b.base) {
+    AudioDaemonForgetRange(b.base, b.map_size);
+    host_memory::FreeMem(b.base, b.map_size);
+    b.base = nullptr;
+    b.map_size = 0;
+  }
+  // Guest pages are 16 KiB. Keep the final guest page accessible even when
+  // the reported object length ends inside it (AudioOut uses that padding).
+  const size_t old_size = b.size;
+  if (::ftruncate(b.fd, rounded) != 0)
+    return false;
+  b.size = size;
+  if (!rounded)
+    return true;
+  void* view =
+      ::mmap(nullptr, rounded, PROT_READ | PROT_WRITE, MAP_SHARED, b.fd, 0);
+  if (view == MAP_FAILED)
+    return false;
+  b.base = static_cast<u8*>(view);
+  b.map_size = rounded;
+  host_memory::TrackMemoryMapping(view, rounded);
+  if (size < old_size)
+    std::memset(b.base + size, 0, rounded - size);
+  return true;
+}
+
+void UnmapShm(u8* ptr, size_t size) {
+  base::LockGuard lock(g_shm_mutex);
+  const uintptr_t first = reinterpret_cast<uintptr_t>(ptr), end = first + size;
+  base::Vector<ShmMapping> remaining;
+  base::Vector<ShmRef> unmapped;
+  for (const auto& map : g_shm_maps) {
+    const uintptr_t lo = reinterpret_cast<uintptr_t>(map.base);
+    const uintptr_t hi = lo + map.size;
+    if (lo >= end || hi <= first) {
+      remaining.push_back(map);
+      continue;
+    }
+    const uintptr_t a = base::Max(lo, first), b = base::Min(hi, end);
+    host_memory::FreeMem(reinterpret_cast<void*>(a), b - a);
+    unmapped.push_back(map.backing);
+    if (lo < a)
+      remaining.push_back({map.base, a - lo, map.backing});
+    if (b < hi)
+      remaining.push_back({reinterpret_cast<u8*>(b), hi - b, map.backing});
+  }
+  g_shm_maps = base::move(remaining);
+  for (const auto& backing : unmapped) {
+    bool mapped = false;
+    for (const auto& map : g_shm_maps)
+      mapped |= map.backing == backing;
+    if (!mapped && backing->base)
+      AudioDaemonForgetRange(backing->base, backing->map_size);
+  }
+}
 
 // ---------------------------------------------------------------------------
-// RESEARCH INSTRUMENTATION (env-gated, default OFF), for reverse-engineering
-// the LLE libSceAudioOut shared-memory mixer protocol (see the note at the
-// head of runtime/vprx/ps4/libSceAudioOut):
+// Shared-memory audio tracing (env-gated, default OFF):
 //   DELTA_SHM_AUDIO_TRACE=1        log shm_open/ftruncate/mmap for matching
 //   names DELTA_SHM_AUDIO_FILTER=<sub>   name substring to match (default
 //   "shm_") DELTA_SHM_AUDIO_DUMP=<dir>     periodically snapshot every matching
@@ -305,9 +380,11 @@ void ShmAudioDumperMain(base::String dir,
     {
       base::LockGuard<base::Mutex> lk(g_shm_mutex);
       for (auto& kv : g_shm_by_name)
-        if (kv.second && kv.second->base && kv.second->size &&
+        if (kv.second && kv.second->base && kv.second->map_size &&
             ShmAudioMatch(kv.first))
-          regs.push_back({kv.first, kv.second->base, kv.second->size});
+          // map_size, not size: AudioOut writes its port slots into the page
+          // padding beyond the ftruncate'd length (see audio_daemon.cc).
+          regs.push_back({kv.first, kv.second->base, kv.second->map_size});
     }
     const u64 t = ShmAudioNowUs();
     for (auto& r : regs) {
@@ -355,7 +432,7 @@ void ShmAudioDumperMain(base::String dir,
 
 // ---------------------------------------------------------------------------
 // DELTA_SHM_AUDIO_PROBE=<us>: SPEC VALIDATION HARNESS, default OFF. Plays
-// nothing; performs the consumer half of the LLE libSceAudioOut handshake:
+// nothing; performs the consumer half of the LLE audio output client handshake:
 // walk the 26 port slots of "/shm_<pid>_C", read a block from the matching
 // "_A" region, compute a peak, zero +0x00 to release the port. Pair with
 // DELTA_AUDIOMIX_ACK. Correct layout => peaks track the HLE reference.
@@ -499,33 +576,54 @@ void ShmAudioDumpMaybeStart() {
 
 class ShmObject : public Object {
  public:
-  ShmObject(ObjectTable& objects, base::String nm, ShmRef b)
+  ShmObject(ObjectTable& objects, base::String nm, ShmRef b, bool write)
       : Object(objects, Object::Type::kShm),
         shm_name(base::move(nm)),
-        backing(base::move(b)) {}
+        backing(base::move(b)),
+        writable(write) {}
   base::String shm_name;  // diagnostics / audio protocol key
   ShmRef backing;         // keeps the backing alive while this fd is open
+  bool writable;
 };
 
-// Backing block for a shm, grown to cover the requested range. Caller must not
-// hold g_shmMutex; -1 on failure.
-u8* ShmMap(ShmObject* shm, size_t size, size_t offset) {
-  base::LockGuard<base::Mutex> lk(g_shm_mutex);
+u8* ShmMap(ShmObject* shm,
+           void* addr,
+           size_t size,
+           size_t offset,
+           u32 prot,
+           u32 flags) {
+  if ((offset & 0x3fff) || offset > INT64_MAX || size > INT64_MAX - offset ||
+      (flags & 3) == 0 || (flags & 3) == 3)
+    return reinterpret_cast<u8*>(-SysError::eINVAL);
+  if ((flags & 1) && (prot & 2) && !shm->writable)
+    return reinterpret_cast<u8*>(-SysError::eACCES);
+  if (flags & MFlags::kFixed)
+    UnmapShm(static_cast<u8*>(addr), size);
+  base::LockGuard lock(g_shm_mutex);
   auto& b = *shm->backing;
-  size_t need = (offset + size + 0x3FFF) & ~size_t(0x3FFF);
-  if (!b.base && need) {
-    b.base = AllocLowGuest(need);
-    if (!b.base)
-      return reinterpret_cast<u8*>(-1);
-    b.size = need;
-    Process::GetActive()->GetVma().Add(b.base, need, Ppt::kW);
+  if (b.fd < 0)
+    return reinterpret_cast<u8*>(-SysError::eNOMEM);
+  int host_flags = (flags & 2) ? MAP_PRIVATE : MAP_SHARED;
+  if (flags & MFlags::kFixed)
+    host_flags |= MAP_FIXED;
+  else {
+    // Reserve an address in the guest arena before installing the file view.
+    addr = AllocLowGuest(size);
+    if (!addr)
+      return reinterpret_cast<u8*>(-SysError::eNOMEM);
+    host_flags |= MAP_FIXED;
   }
-  if (!b.base || offset > b.size)
-    return reinterpret_cast<u8*>(-1);
-  ShmAudioTrace("mmap", shm->shm_name, b.base + offset, size, offset);
-  // Announce here too: a region mmap'd without ftruncate allocates above.
-  AudioDaemonNoticeShm(shm->shm_name.c_str(), b.base, b.size);
-  return b.base + offset;
+  void* view = ::mmap(addr, size, prot & 7, host_flags, b.fd, offset);
+  if (view == MAP_FAILED)
+    return reinterpret_cast<u8*>(-SysError::eNOMEM);
+  auto* ptr = static_cast<u8*>(view);
+  host_memory::TrackMemoryMapping(ptr, size);
+  Process::GetActive()->GetVma().Add(ptr, size, static_cast<Ppt>(prot & 7),
+                                     prot);
+  g_shm_maps.push_back({ptr, size, shm->backing});
+  ShmAudioTrace("mmap", shm->shm_name, ptr, size, offset);
+  AudioDaemonNoticeShm(shm->shm_name.c_str(), b.base, b.map_size);
+  return ptr;
 }
 }  // namespace
 
@@ -627,7 +725,8 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
                 addr, size, offset, obj ? (int)obj->type() : -1);
     if (obj && obj->type() == Object::Type::kShm) {
       // Every mapper of this shm shares the backing (sized by ftruncate).
-      return ShmMap(static_cast<ShmObject*>(obj.get()), size, offset);
+      return ShmMap(static_cast<ShmObject*>(obj.get()), addr, size, offset,
+                    prot, flags);
     }
     if (obj) {
       // Device-backed mmap: use the region the device hands back; -1 = fall
@@ -669,6 +768,7 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
       void* want = addr;
       if (flags & MFlags::kStack)
         want = static_cast<u8*>(addr) - size;
+      UnmapShm(static_cast<u8*>(want), size);
       ForgetDmemVa(static_cast<u8*>(want), size);
       ptr = host_memory::AllocMem(want, size, Ppt::kW, Alt::kReservecommit);
       if (!ptr)
@@ -832,6 +932,8 @@ int PS4ABI sys_shm_open(const char* path, u32 flags, u16 mode) {
     base::LockGuard<base::Mutex> lk(g_shm_mutex);
     auto it = g_shm_by_name.find(name);
     if (it == g_shm_by_name.end()) {
+      if (!(flags & kO_CREAT) && std::strncmp(path, "/SceSaveData", 12) == 0)
+        return -SysError::eNOENT;
       if (!(flags & kO_CREAT) && kShmNoAuto) {
         // DIAGNOSTIC: fail opens of system shms the guest didn't create
         // (tests whether auto-providing masks a missing ShellCore handshake).
@@ -843,12 +945,10 @@ int PS4ABI sys_shm_open(const char* path, u32 flags, u16 mode) {
         // block): auto-provide a zeroed backing so the title fstats a real
         // size instead of failing init.
         backing = base::MakeShared<ShmBacking>();
-        backing->size = 0x10000;  // 64 KiB, ample for a settings block
-        backing->base = AllocLowGuest(backing->size);
-        if (backing->base) {
-          std::memset(backing->base, 0, backing->size);
-          proc->GetVma().Add(backing->base, backing->size, Ppt::kW);
-        }
+        if (!ResizeShm(*backing, 0x10000))
+          return -SysError::eNOMEM;
+        if (name == "/SceShellCoreUtil")
+          InitializeShellCoreSharedMemory(backing->base, backing->map_size);
         BASE_LOGI("shm_open", "auto-provide system shm '{}' size={:#x}",
                   name.c_str(), backing->size);
         g_shm_by_name.emplace(name, backing);
@@ -865,22 +965,82 @@ int PS4ABI sys_shm_open(const char* path, u32 flags, u16 mode) {
       // empty backing, exactly like the real object.
       if ((flags & 0x403) == 0x402) {
         ShmAudioTrace("trunc", name, backing->base, 0, 0);
-        backing->size = 0;
-        if (backing->base)
-          AudioDaemonNoticeShm(name.c_str(), backing->base, 0);
+        if (!ResizeShm(*backing, 0))
+          return -SysError::eNOMEM;
       }
     }
   }
 
   // A fresh fd per open, all sharing the named backing.
-  auto* obj =
-      new ShmObject(proc->GetObjTable(), base::move(name), base::move(backing));
+  auto* obj = new ShmObject(proc->GetObjTable(), base::move(name),
+                            base::move(backing), (flags & 2) != 0);
   BASE_LOGI("shm_open", "'{}' flags={:#x} -> fd={}", path, flags,
             obj->handle());
   ShmAudioTrace("shm_open", obj->shm_name, nullptr, 0, flags);
   ShmAudioDumpMaybeStart();
   ShmAudioProbeMaybeStart();
   return obj->handle();
+}
+
+int ShmCreate(const char* name, size_t size) {
+  if (!name || !*name || size > SIZE_MAX - 0x3fff)
+    return -static_cast<int>(SysError::eINVAL);
+  base::LockGuard lock(g_shm_mutex);
+  if (g_shm_by_name.find(name) != g_shm_by_name.end())
+    return -static_cast<int>(SysError::eEXIST);
+  auto backing = base::MakeShared<ShmBacking>();
+  if (!ResizeShm(*backing, size))
+    return -static_cast<int>(SysError::eNOMEM);
+  g_shm_by_name.emplace(name, base::move(backing));
+  return 0;
+}
+
+namespace {
+int CopyShm(const char* name,
+            size_t offset,
+            void* output,
+            const void* input,
+            size_t size,
+            u64 identity) {
+  if (!name || !*name || (size && !output && !input))
+    return -static_cast<int>(SysError::eINVAL);
+  base::LockGuard lock(g_shm_mutex);
+  const auto it = g_shm_by_name.find(name);
+  if (it == g_shm_by_name.end())
+    return -static_cast<int>(SysError::eNOENT);
+  const auto& backing = *it->second;
+  if (identity && identity != backing.identity)
+    return -static_cast<int>(SysError::eNOENT);
+  if (offset > backing.size || size > backing.size - offset)
+    return -static_cast<int>(SysError::eINVAL);
+  if (size) {
+    if (!backing.base)
+      return -static_cast<int>(SysError::eNOMEM);
+    if (output)
+      std::memcpy(output, backing.base + offset, size);
+    else
+      std::memcpy(backing.base + offset, input, size);
+  }
+  return 0;
+}
+}  // namespace
+
+u64 ShmIdentity(const char* name) {
+  if (!name || !*name)
+    return 0;
+  base::LockGuard lock(g_shm_mutex);
+  const auto it = g_shm_by_name.find(name);
+  return it == g_shm_by_name.end() ? 0 : it->second->identity;
+}
+
+int ShmRead(const char* name, size_t offset, void* data, size_t size,
+            u64 identity) {
+  return CopyShm(name, offset, data, nullptr, size, identity);
+}
+
+int ShmWrite(const char* name, size_t offset, const void* data, size_t size,
+             u64 identity) {
+  return CopyShm(name, offset, nullptr, data, size, identity);
 }
 
 int PS4ABI sys_shm_unlink(const char* path) {
@@ -918,6 +1078,8 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
   auto obj = proc->GetObjTable().Get(fd);
   if (!obj)
     return -SysError::eBADF;
+  if (obj->type() == Object::Type::kDevice)
+    return static_cast<Device*>(obj.get())->Truncate(length);
   // The kernel dispatches to the file type's truncate method; a type without
   // one (e.g. a device) is EINVAL, not EBADF.
   if (obj->type() != Object::Type::kShm)
@@ -925,34 +1087,19 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
 
   auto* shm = static_cast<ShmObject*>(obj.get());
   const size_t raw = static_cast<size_t>(length);
-  const size_t want = (raw + 0x3FFF) & ~size_t(0x3FFF);
-  base::LockGuard<base::Mutex> lk(g_shm_mutex);
+  if (!shm->writable)
+    return -SysError::eINVAL;
+  base::LockGuard lock(g_shm_mutex);
   auto& b = *shm->backing;
-  // The RAW length matters for the protocol spec (the rounded `want` hides it).
-  ShmAudioTrace("ftruncate", shm->shm_name, b.base, raw, want);
-  if (want < b.size) {
-    // Shrink (the kernel frees the tail pages); the host block stays put, a
-    // later grow reallocates and copies `size` bytes.
-    b.size = want;
-    AudioDaemonNoticeShm(shm->shm_name.c_str(), b.base, b.size);
-    return 0;
+  ShmAudioTrace("ftruncate", shm->shm_name, b.base, raw, 0);
+  if (raw != b.size) {
+    const bool fresh = b.size == 0;
+    if (!ResizeShm(b, raw))
+      return -SysError::eNOMEM;
+    if (fresh)
+      ShmAudioPoison(shm->shm_name, b.base, b.map_size);
   }
-  if (want == b.size)
-    return 0;
-  u8* nb = AllocLowGuest(want);
-  if (!nb)
-    return -SysError::eNOMEM;
-  if (b.base)
-    std::memcpy(nb, b.base,
-                b.size);  // grow before first mmap: preserve contents
-  b.base = nb;
-  b.size = want;
-  proc->GetVma().Add(b.base, want, Ppt::kW);
-  ShmAudioTrace("sized", shm->shm_name, b.base, want, 0);
-  ShmAudioPoison(shm->shm_name, b.base, want);
-  // The LLE audio regions become consumable here; the base can MOVE on a later
-  // grow, hence the fresh pointer each time.
-  AudioDaemonNoticeShm(shm->shm_name.c_str(), b.base, b.size);
+  AudioDaemonNoticeShm(shm->shm_name.c_str(), b.base, b.map_size);
   return 0;
 }
 
@@ -1090,6 +1237,7 @@ int PS4ABI sys_munmap(void* addr, size_t len) {
         "only the VMA bookkeeping is released",
         static_cast<const void*>(addr), len);
   if (auto* proc = Process::GetActive(); proc && addr && len) {
+    UnmapShm(static_cast<u8*>(addr), len);
     AudioDaemonForgetRange(addr, len);
     // Exception to "keep the host pages": a whole PROT_NONE reservation holds
     // no data and leaving it mapped makes the next reservation there relocate.
@@ -1097,7 +1245,7 @@ int PS4ABI sys_munmap(void* addr, size_t len) {
     // padding should fault where the mistake is.
     auto region = proc->GetVma().Get(static_cast<u8*>(addr));
     if (region && region->ptr == addr && region->size == len &&
-        region->sce_prot == 0)
+        region->sce_prot == 0 && region->prot == Ppt::kPriv)
       host_memory::FreeMem(addr, len);
     proc->GetVma().Remove(static_cast<u8*>(addr), len);
     NoteGuestReleased(static_cast<u8*>(addr), len);
@@ -1310,14 +1458,14 @@ int PS4ABI sys_virtual_query(const void* addr,
   // +0x10 = the region's direct-memory offset, exact for /dev/dmem ranges: SotC
   // turns (offset + addr - start) into a 64 KiB heap-map block index and marks
   // nothing when out of range. Elsewhere we have no dmem pool
-  // (identity-mapped), but libSceVideoOut rejects a scanout buffer unless the
+  // (identity-mapped), but video output client rejects a scanout buffer unless the
   // offset shares the VA's low 16 bits (tiling alignment), so report the VA
   // there; zero failed every scanout register.
   u64 offset =
       region->has_phys ? region->phys_offset : reinterpret_cast<u64>(start);
   std::memcpy(vq + 0x10, &offset, sizeof(u64));
   // GPU-accessible memory (guest asked bits 0x10/0x20) is direct/physical in
-  // SCE terms: report WC_GARLIC (memType 3) + direct bit, what libSceVideoOut
+  // Report write-combined memory (type 3) with the direct bit, as the client
   // checks before registering a scanout buffer; plain CPU memory stays flexible
   // WB_ONION.
   bool gpu = (region->sce_prot & 0x30) != 0;
@@ -1644,6 +1792,9 @@ namespace {
 const guest::SessionReset g_session_reset([] {
   g_low_next.store(kGuestArenaFloor);
   guest::ResetResource(g_released);
+  for (const auto& map : g_shm_maps)
+    host_memory::FreeMem(map.base, map.size);
+  guest::ResetResource(g_shm_maps);
   guest::ResetResource(g_shm_by_name);
   guest::ResetResource(g_shm_audio_dumper);
   guest::ResetResource(g_mdbg_flags);

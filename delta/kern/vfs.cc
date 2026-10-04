@@ -26,6 +26,7 @@
 #include "base/strings/xstring.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
+#include "kern/save_storage.h"
 #include "kern/vfs.h"
 #include "options/options.h"
 
@@ -43,14 +44,16 @@ struct MountPoint {
   base::String host;                              // host mount
   base::SharedPointer<VirtualProvider> provider;  // virtual mount (else null)
   bool writable = false;  // host mount opened for writing
+  bool save_quota = false;
 };
 
 static base::Vector<MountPoint> g_mounts;
 static base::Mutex g_mounts_mutex;
 
-void Mount(const char* guest, const char* host) {
+void Mount(const char* guest, const char* host, bool save_quota) {
   base::LockGuard<base::Mutex> lock(g_mounts_mutex);
-  g_mounts.push_back({base::String(guest), base::String(host), nullptr, false});
+  g_mounts.push_back(
+      {base::String(guest), base::String(host), nullptr, false, save_quota});
 }
 
 // Create hostDir and each parent (mkdir -p).
@@ -66,10 +69,11 @@ static void MakeHostDirs(const char* host_dir) {
   ::mkdir(p.c_str(), 0755);
 }
 
-void MountWritable(const char* guest, const char* host) {
+void MountWritable(const char* guest, const char* host, bool save_quota) {
   MakeHostDirs(host);
   base::LockGuard<base::Mutex> lock(g_mounts_mutex);
-  g_mounts.push_back({base::String(guest), base::String(host), nullptr, true});
+  g_mounts.push_back(
+      {base::String(guest), base::String(host), nullptr, true, save_quota});
 }
 
 void Unmount(const char* guest) {
@@ -129,6 +133,7 @@ static bool FindMount(const char* path,
   result.host = best->host;
   result.provider = best->provider;
   result.writable = best->writable;
+  result.save_quota = best->save_quota;
   return true;
 }
 
@@ -370,10 +375,24 @@ base::String ResolveWritable(const char* path) {
   return JoinHost(m.host, path + len);
 }
 
+base::String SaveQuotaRoot(const char* path) {
+  if (!path)
+    return {};
+  const auto normalized = NormalizePath(path, "/download0/");
+  size_t length = 0;
+  MountPoint mount;
+  if (!FindMount(normalized.c_str(), false, mount, length) || !mount.save_quota)
+    return {};
+  return mount.host;
+}
+
 bool MakeDir(const char* path) {
   base::String host = ResolveWritable(path);
   if (host.empty())
     return false;
+  const auto quota = SaveQuotaRoot(path);
+  if (!quota.empty())
+    return save_storage::MakeDir(quota, host);
   MakeHostDirs(host.c_str());
   return true;
 }
@@ -382,6 +401,9 @@ bool RemoveFile(const char* path) {
   base::String host = ResolveWritable(path);
   if (host.empty())
     return false;
+  const auto quota = SaveQuotaRoot(path);
+  if (!quota.empty())
+    return save_storage::Remove(quota, host) == 0;
   return std::remove(host.c_str()) == 0;
 }
 

@@ -65,6 +65,15 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length);
 // Size of a shm fd's backing for fstat (SIZE_MAX if fd isn't a shm).
 size_t ShmFstatSize(u32 fd);
 
+// Service access uses the named backing without allocating guest descriptors.
+// Copies exclude resize/unlink; callers still synchronize with guest writers.
+int ShmCreate(const char* name, size_t size);
+u64 ShmIdentity(const char* name);
+int ShmRead(const char* name, size_t offset, void* data, size_t size,
+            u64 identity = 0);
+int ShmWrite(const char* name, size_t offset, const void* data, size_t size,
+             u64 identity = 0);
+
 /*direct memory access*/
 int PS4ABI sys_dmem_container(u32 op);
 }  // namespace kern

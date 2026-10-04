@@ -17,7 +17,7 @@
 #   isaac-boot          a digest of Isaac's boot log with timestamps, addresses
 #                       and line numbers normalised away, then sorted. Measured
 #                       stable across repeated runs of the same binary, and it
-#                       covers module loading, syscall dispatch and HLE
+#                       covers module loading, syscall dispatch and native service
 #                       bring-up: the parts a kern refactor can break.
 #                       NOTE: the presented FRAME is not usable here. Three runs
 #                       of one binary produced three different frames (the
@@ -147,10 +147,9 @@ if run isaac-armed 120 "$ISAAC" \
 fi
 
 # --- the LLE audio daemon actually reaches its sink ------------------------
-# A default boot never gets there (the HLE shim answers instead), so the
-# daemon's four calls into the host sink would otherwise be uncovered.
+# Trace the daemon's calls into the host sink during a native-library boot.
 # `dropped` is the useful number: it counts blocks the sink refused.
-if run lle-audio 45 "$ISAAC" DELTA_LLE=libSceAudioOut DELTA_AUDIO_TRACE=1; then
+if run lle-audio 45 "$ISAAC" DELTA_AUDIO_TRACE=1; then
   say lle-audio "sinks=$(grep -cE '\[audiod\] port [0-9]+ -> sink' "$OUT/lle-audio.log"),$(grep -oE "dropped=[0-9]+" "$OUT/lle-audio.log" | tail -1)"
 fi
 

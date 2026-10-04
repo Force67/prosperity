@@ -10,6 +10,7 @@
 #include "host_memory/host_memory.h"
 #include "kern/crash.h"
 #include "kern/lv2/error_table.h"
+#include "kern/system_settings.h"
 
 namespace kern {
 
@@ -23,7 +24,7 @@ struct NonsysInt {
       u16 checksum;
     } encoded_id_parts;
   };
-  u32 unknown;
+  u32 index;
   u32 value;
 };
 
@@ -34,30 +35,31 @@ struct NonsysBin {
   u8 data[];
 };
 
-/*TODO: clearly does not belong here*/
 int PS4ABI
 sys_regmgr_call(u32 op, u32 id, void* result, void* value, u64 type) {
-  if (op == 0x19)  // non-system get int
-  {
-    auto int_value = static_cast<NonsysInt*>(value);
-
-    if (int_value->encoded_id == 0x0CAE671ADF3AEB34ull ||
-        int_value->encoded_id == 0x338660835BDE7CB1ull) {
-      int_value->value = 0;
+  if (!host_memory::IsMemoryRangeMapped(result, sizeof(u32)))
+    return -static_cast<i32>(SysError::eFAULT);
+  if (op == 0x18 || op == 0x19) {
+    if (type != sizeof(NonsysInt))
+      return -static_cast<i32>(SysError::eINVAL);
+    if (!host_memory::IsMemoryRangeMapped(value, sizeof(NonsysInt)))
+      return -static_cast<i32>(SysError::eFAULT);
+    auto* int_value = static_cast<NonsysInt*>(value);
+    i32 setting;
+    const bool known =
+        int_value->index == 0 &&
+        (op == 0x18 ? SetRegistryInt(int_value->encoded_id, int_value->value)
+                    : GetRegistryInt(int_value->encoded_id, setting));
+    if (known) {
+      if (op == 0x19)
+        int_value->value = setting;
+      *static_cast<u32*>(result) = 0;
       return 0;
     }
-
-    // AGC polls 0x33236083918938b1 and 0x508d69bde3d3a6ac for optional shader
-    // instrumentation settings during GPU work preparation. Missing settings
-    // leave application-requested instrumentation in effect and do not block
-    // startup. These checks may help diagnose guest shader compatibility;
-    // enabling them requires support for instrumented shaders and reporting.
-    if (int_value->encoded_id == 0x33236083918938B1ull ||
-        int_value->encoded_id == 0x508D69BDE3D3A6ACull) {
-      int_value->value = 0;
-      return 0x800D0203;
+    if (op == 0x18) {
+      *static_cast<u32*>(result) = 0x800d0203;
+      return 0;
     }
-
     // For unsupported keys, let the guest use defaults. Clear the output so
     // readers that ignore the error do not consume garbage.
     int_value->value = 0;
@@ -83,7 +85,8 @@ sys_regmgr_call(u32 op, u32 id, void* result, void* value, u64 type) {
     }
     if (fresh)
       GuestStackTrace("regmgr", 8);
-    return 0x800D0203;
+    *static_cast<u32*>(result) = 0x800d0203;
+    return 0;
   }
 
   // The non-system registry family (libSceRegMgr wrappers around syscall 532,
@@ -94,9 +97,15 @@ sys_regmgr_call(u32 op, u32 id, void* result, void* value, u64 type) {
   {
     // {u64 encoded_id, u32 index, u32 pad, u64 size, u8 data[size]}, with the
     // payload returned in place; `type` is the whole struct, 0x18 + size.
+    if (type < sizeof(NonsysBin))
+      return -static_cast<i32>(SysError::eINVAL);
+    if (!host_memory::IsMemoryRangeMapped(value, sizeof(NonsysBin)))
+      return -static_cast<i32>(SysError::eFAULT);
     auto* bin = static_cast<NonsysBin*>(value);
-    if (type < sizeof(NonsysBin) || bin->size != type - sizeof(NonsysBin))
-      return 0x800D0203;
+    if (bin->size != type - sizeof(NonsysBin))
+      return -static_cast<i32>(SysError::eINVAL);
+    if (!host_memory::IsMemoryRangeMapped(value, type))
+      return -static_cast<i32>(SysError::eFAULT);
 
     // Every key here is an obfuscated id, and get-str may NOT fail:
     // libSceNpCommon reads 0x6b976df7f847ea43 (a 17-byte per-console blob)
@@ -133,11 +142,9 @@ sys_regmgr_call(u32 op, u32 id, void* result, void* value, u64 type) {
       BASE_LOGI("regmgr", "  value[]:{}", words.c_str());
     }
   }
-  // Same reasoning as the op-25 unknown-key path: a caller that reads the
-  // result despite the error should see zero rather than stack garbage.
-  if (result && host_memory::IsMemoryRangeMapped(result, sizeof(u32)))
-    *static_cast<u32*>(result) = 0;
-  return 0x800D0203;
+  // Registry failures use the method result, separate from transport status.
+  *static_cast<u32*>(result) = 0x800d0203;
+  return 0;
 }
 
 }  // namespace kern

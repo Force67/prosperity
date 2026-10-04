@@ -53,7 +53,9 @@ class File {
 
  public:
   File() = default;
-  File(const base::String&, FileMode mode = FileMode::kRead);
+  File(const base::String&,
+       FileMode mode = FileMode::kRead,
+       bool buffered = true);
   File(const void*, size_t);
   File(base::UniquePointer<FileBase>&&);
   ~File();
@@ -84,7 +86,7 @@ class File {
   inline u64 GetSize() { return file_->GetSize(); }
   inline u64 Tell() { return file_->Tell(); }
   inline NativeHandle GetNativeHandle() { return file_->GetNativeHandle(); }
-  inline bool IsOpen() { return file_->IsOpen(); }
+  inline bool IsOpen() { return file_ && file_->IsOpen(); }
   inline bool Exists() { return static_cast<bool>(file_); }
 
   // POD to base::Vector

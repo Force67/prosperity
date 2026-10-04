@@ -10,6 +10,10 @@
 #include "io/file.h"
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <io.h>
+#endif
 #include "base/algorithm.h"
 #include "base/arch.h"
 #include "base/math/value_bounds.h"
@@ -25,7 +29,8 @@ class PhysFile final : public FileBase {
   std::FILE* fptr_;
 
  public:
-  PhysFile(const base::String& name, FileMode mode) : fptr_(nullptr) {
+  PhysFile(const base::String& name, FileMode mode, bool buffered)
+      : fptr_(nullptr) {
     // convert access mode. The writable modes open "+" (read+write) so a
     // caller can read a file back after writing it (savedata round-trips a save
     // within one mount); `write` stays create-or-truncate but is now also
@@ -43,6 +48,8 @@ class PhysFile final : public FileBase {
       mode_str = "ab+";
 
     fptr_ = std::fopen(name.c_str(), mode_str);
+    if (fptr_ && !buffered)
+      std::setvbuf(fptr_, nullptr, _IONBF, 0);
 
     // Cache the initial size for any mode that opens an existing file (read or
     // read-write); the write/create/trunc modes start empty.
@@ -78,8 +85,10 @@ class PhysFile final : public FileBase {
   }
 
   u64 Write(const void* buf, size_t size) override {
-    size_tracker_ += size;
-    return std::fwrite(buf, size, 1, fptr_);
+    const u64 written = std::fwrite(buf, size, 1, fptr_);
+    if (written)
+      size_tracker_ = base::Max<u64>(size_tracker_, Tell());
+    return written;
   }
 
   void Flush() override {
@@ -108,9 +117,9 @@ class PhysFile final : public FileBase {
       // GiB (e.g. files deep in a multi-GiB pkg's inner PFS image -> wrong file
       // offset).
 #ifdef _WIN32
-    i64 x = _fseeki64(fptr, ofs, origin);
+    i64 x = _fseeki64(fptr_, ofs, origin);
     if (x == 0)
-      return static_cast<u64>(_ftelli64(fptr));
+      return static_cast<u64>(_ftelli64(fptr_));
 #else
     i64 x = fseeko(fptr_, static_cast<off_t>(ofs), origin);
     if (x == 0)
@@ -119,17 +128,26 @@ class PhysFile final : public FileBase {
     return static_cast<u64>(x);
   }
 
-  u64 Tell() override { return std::ftell(fptr_); }
+  u64 Tell() override {
+#ifdef _WIN32
+    return _ftelli64(fptr_);
+#else
+    return ftello(fptr_);
+#endif
+  }
 
   u64 GetSize() override {
-    /*if (sizeTracker == 0) {
-            std::FILE* fptr = static_cast<std::FILE*>(handle);
-
-            std::fseek(fptr, 0, SEEK_END);
-            sizeTracker = static_cast<size_t>(std::ftell(fptr));
-            std::fseek(fptr, 0, SEEK_SET);
-    }*/
-
+    if (fptr_) {
+      Flush();
+#ifdef _WIN32
+      struct _stat64 status;
+      if (_fstat64(_fileno(fptr_), &status) == 0)
+#else
+      struct stat status;
+      if (fstat(fileno(fptr_), &status) == 0)
+#endif
+        return static_cast<u64>(status.st_size);
+    }
     return size_tracker_;
   }
 
@@ -191,8 +209,8 @@ class MemStream final : public FileBase {
 };
 }  // namespace
 
-File::File(const base::String& dir, FileMode mode /* = FileMode::kRead */)
-    : file_(base::MakeUnique<PhysFile>(dir, mode)) {}
+File::File(const base::String& dir, FileMode mode, bool buffered)
+    : file_(base::MakeUnique<PhysFile>(dir, mode, buffered)) {}
 
 File::File(const void* ptr, size_t size)
     : file_(base::MakeUnique<MemStream>(ptr, size)) {}

@@ -18,7 +18,6 @@
 #include "runtime/code_lift.h"
 #endif
 #include "cpu/backend.h"
-#include "runtime/vprx/vprx.h"
 
 #include "formats/fself.h"
 
@@ -35,7 +34,7 @@
 #include "kern/process.h"
 #include "kern/vfs.h"
 #include "options/options.h"
-#include "runtime/vprx/nid.h"
+#include "runtime/nid.h"
 
 namespace {
 DELTA_OPTION(const char*, kDumpModule, "DELTA_DUMP_MODULE", nullptr);
@@ -188,6 +187,20 @@ bool Module::FromMem(base::UniquePointer<u8[]> data) {
             info_.name.c_str(), reinterpret_cast<uintptr_t>(info_.base),
             info_.code_size + info_.rip_zone_size,
             reinterpret_cast<uintptr_t>(info_.eh_frame_addr));
+
+  // Log audio output entry points for diagnostics.
+  if (info_.name.find("AudioOut") != base::String::npos) {
+    struct { const char* n; u64 id; } ks[] = {
+        {"open", 0x7a436fb13db6aec6ull},
+        {"output", 0x40e42d6de0eab13eull},
+        {"set_connections", 0xa3838b410aaa03ddull},
+        {"set_volume", 0x6feb8057cf489711ull},
+        {"get_port_state", 0x1ab43db3822b35a4ull},
+        {"close", 0xb35fffb84f66045cull},
+    };
+    for (auto& k : ks)
+      BASE_LOGI("modmap", "  export {} -> {:#x}", k.n, GetExport(k.id));
+  }
 
   PlantGuestBreakpoints();
   StartModuleWatch();
@@ -796,36 +809,12 @@ static bool DecodeNid(const char* name, u64& lid, u64& mid) {
 }
 
 bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
-  // PS5: impLibs/impModules aren't populated, so resolve by global NID across
-  // all loaded modules. LLE only: PS4 HLE stubs must not hijack a Prospero
-  // import.
+  // PS5 imports resolve by NID, preferring the named module before searching
+  // all loaded modules.
   if (ps5_layout_) {
     u64 hid = 0;
     if (!runtime::nid::Decode(name, 11, hid))
       return false;
-    // System libraries forced to HLE on PS5 because their LLE backend needs a
-    // daemon we don't host: libSceVideoOut (port table never registers; real
-    // Open returns 0x802900ff, null DCB crash), libSceUserService (spins on the
-    // IPMI daemon), libScePad (reads pad-daemon state; HLE feeds SDL),
-    // libSceSaveData (IPMI session; Skyrim's boot state machine spins at 100%
-    // CPU), libSceIme/ libSceSystemService (abort or fail fatally). NIDs are
-    // globally unique, so probing by name is safe; everything else (incl.
-    // GnmDriver/AGC) stays LLE.
-    static const char* const kPs5ForcedHle[] = {
-        "libSceVideoOut",   "libSceUserService",   "libScePad",
-        "libSceSaveData",   "libSceSystemService", "libSceIme",
-        "libSceAppContent", "libSceVideodec2"};
-    auto bind_hle = [&](const char* lib, uintptr_t hle) {
-      char tn[64];
-      std::snprintf(tn, sizeof(tn), "%s!%.11s", lib, name);
-      ptr_out = cpu::MakeHostThunk(reinterpret_cast<void*>(hle), tn);
-    };
-    for (const char* lib : kPs5ForcedHle) {
-      if (uintptr_t hle = runtime::vprx::LookupForced(lib, hid)) {
-        bind_hle(lib, hle);
-        return true;
-      }
-    }
     // Bind to the module the import names: a title shipping SDK modules gets
     // the same NIDs from its own libc.prx and the firmware's
     // libSceLibcInternal, but only the named one has SceLibcMallocReplace
@@ -850,19 +839,6 @@ bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
         return true;
       }
 
-    // Shims for exports a given firmware lacks (see vprx/ps5/);
-    // consulted only when no loaded module exports the NID. The seven AGC shims
-    // are real exports from firmware 13.60 on; forcing them there would shadow
-    // working code.
-    static const char* const kPs5MissingExportShims[] = {
-        "libkernel", "libSceAgcDriver", "libSceAgc", "libSceNgs2",
-        "libSceFiber"};
-    for (const char* lib : kPs5MissingExportShims) {
-      if (uintptr_t hle = runtime::vprx::LookupForced(lib, hid)) {
-        bind_hle(lib, hle);
-        return true;
-      }
-    }
     return false;
   }
 
@@ -885,23 +861,6 @@ bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
 
   if (!libname)
     return false;
-
-  // HLE override: a registered vprx module wins over the loaded LLE module
-  // (e.g. libSceVideoOut's .bss device table is never populated here).
-  {
-    u64 hid = 0;
-    if (runtime::nid::Decode(name, 11, hid)) {
-      if (uintptr_t hle = runtime::vprx::Lookup(libname, hid)) {
-        // The HLE handler is a native host function; on FEX the guest can't
-        // jump to it directly, so bind a guest trampoline. Native returns it
-        // as-is.
-        char tn[64];
-        std::snprintf(tn, sizeof(tn), "%s!%.11s", libname, name);
-        ptr_out = cpu::MakeHostThunk(reinterpret_cast<void*>(hle), tn);
-        return true;
-      }
-    }
-  }
 
   for (auto& mod : imp_modules_) {
     if (mod.id == static_cast<i32>(modid)) {
@@ -1093,11 +1052,6 @@ bool Module::ApplyRelocations() {
 }
 
 uintptr_t Module::GetSymbol(u64 nid) {
-  // are there any overrides for me?
-  auto imp = runtime::vprx::Lookup(info_.name.c_str(), nid);
-  if (imp != 0)
-    return imp;
-
   for (u32 i = 0; i < num_symbols_; i++) {
     const auto* s = &symbols_[i];
 

@@ -39,7 +39,7 @@ namespace cpu {
 // syscall number.
 constexpr u32 kTlsGetAddrSyscall = 0x40000001u;
 
-// Magic syscall range for guest->native HLE calls (vprx PRX overrides): an
+// Magic syscall range for guest->host function calls: an
 // import slot can't point at a host ARM function, so it gets a guest trampoline
 // issuing `mov eax,<base|idx>; syscall`, dispatched by index in HandleSyscall.
 // Top byte tags the range, low 24 bits are the thunk index.
@@ -66,7 +66,7 @@ class Backend {
   virtual void DiscardGuestThread(void* handle) = 0;
 
   // Synchronously call guest `fn(a0..a3)` (SysV) and return its eax: how the
-  // kernel runs a module's DT_INIT so it can self-register (libSceVideoOut's
+  // kernel runs a module's DT_INIT so it can self-register (video output client's
   // display driver). Native: direct call. FEX: on a fresh JIT thread unwinding
   // via ExitGuestThread. Guest memory + deps must already be mapped and
   // relocated.
@@ -90,8 +90,7 @@ void ExitGuestThread();
 
 // Guest-callable address invoking host `hostFn` with the guest's integer args
 // (up to 14; args 7+ from the guest stack). Native: a pause-aware call. FEX: a
-// small x86 trampoline through the magic syscall; used to bind vprx HLE exports
-// into import slots. Thread-safe.
+// small x86 trampoline through the magic syscall. Thread-safe.
 uintptr_t MakeHostThunk(void* host_fn, const char* name = nullptr);
 
 // Native lv2 handlers take register arguments on a separate kernel stack.

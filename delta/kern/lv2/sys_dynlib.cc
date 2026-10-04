@@ -33,8 +33,7 @@
 #include "base/strings/xstring.h"
 #include "kern/lv2/sys_mem.h"
 #include "options/options.h"
-#include "runtime/vprx/nid.h"
-#include "runtime/vprx/vprx.h"
+#include "runtime/nid.h"
 
 namespace {
 DELTA_OPTION(const char*, kVoInitOff, "DELTA_VO_INIT_OFF", nullptr);
@@ -293,12 +292,6 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
   if (std::getenv("DELTA_LOADPRX_STACK"))
     GuestStackTrace("load_prx", 10);
 
-  // Modules whose LLE module_start needs a backend we don't emulate, by how the
-  // guest reacts to a failed load-start. kLoadOk: the app load-starts them
-  // directly and ASSERTS success (Doom64), so report success with a real handle
-  // and skip the LLE module_start (a preloaded dup whose IPMI init is
-  // scout-patched).
-  static const char* kLoadOk[] = {"libSceAppContent"};
   // kSkipNotFound: libkernel PRELOADS these and strictly verifies they started,
   // aborting (0x80020064) on a load we can't start (module_start unresolved,
   // e.g. libSceNet faults on a __thread errno with no DTV TLS). Report genuine
@@ -311,14 +304,6 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
   // degrades to not-found).
   auto* proc = Process::GetActive();
   const bool is_ps5 = proc->GetPlatform() == kern::Process::Platform::kPs5;
-  bool skip_init = false;
-  for (auto* s : kLoadOk) {
-    if (std::strcmp(name.c_str(), s) == 0) {
-      BASE_LOGI("load_prx", "{}: load-start ok, skipping LLE module_start", s);
-      skip_init = true;
-      break;
-    }
-  }
   if (!is_ps5) {
     for (auto* s : kSkipNotFound) {
       if (std::strcmp(name.c_str(), s) == 0) {
@@ -360,7 +345,7 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
   // Always relocate: a DT_NEEDED dep added by LoadModule is never relocated, so
   // its init_array holds raw offsets and module_start calls a bad pointer.
   // Idempotent.
-  if ((!mod->ResolveImports() || !mod->ApplyRelocations()) && !skip_init) {
+  if (!mod->ResolveImports() || !mod->ApplyRelocations()) {
     LOG_ERROR("load_prx: relocate failed for {}", name.c_str());
     return -SysError::eNOEXEC;
   }
@@ -374,13 +359,13 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
       other->ResolveImports();
 
   // Run DT_INIT (module_start) at load-start, as the kernel does: system
-  // modules self-register their service (libSceVideoOut registers its display
+  // modules self-register their service (video output client registers its display
   // driver; without it sceVideoOutOpen errors and LLE titles crash in their
   // renderer). Some inits fault on backend paths we don't emulate, so scope to
   // the verified ones.
   static const char* kRunInit[] = {"libSceVideoOut"};
   for (auto* s : kRunInit) {
-    if (!skip_init && std::strcmp(name.c_str(), s) == 0 &&
+    if (std::strcmp(name.c_str(), s) == 0 &&
         !mod->GetInfo().init_ran) {
       mod->GetInfo().init_ran = true;
       auto base_addr = reinterpret_cast<uintptr_t>(mod->GetInfo().base);
@@ -402,7 +387,7 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
         cpu::GetBackend().RunGuestFunction(a, 0, 0, 0);
         BASE_LOGI("modinit", "{} init @ returned", s);
       }
-      // DELTA_VO_LLE_FIX: run libSceVideoOut's lazy init now (0xd530 sets
+      // DELTA_VO_LLE_FIX: run video output client's lazy init now (0xd530 sets
       // display-config defaults and tail-calls 0x28f0, opening /dev/dce and
       // registering the driver into cfg[0]). The driver would mark the MAIN
       // display connected off a /dev/dce report we don't emulate, so synthesize

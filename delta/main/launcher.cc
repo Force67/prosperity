@@ -30,11 +30,13 @@
 #include "gpu/ps4/cmd_processor.h"
 #include "gpu/render/renderer.h"
 #include "host/audio_output.h"
+#include "host/controller_input.h"
 #include "host/window.h"
 #include "io/file.h"
 #include "kern/crash.h"
 #include "kern/probe/probe_arm.h"
 #include "kern/ps4/audio_sink.h"
+#include "kern/ps4/controller_ports.h"
 #include "kern/ps4/hardware_mode.h"
 #include "kern/vfs.h"
 #include "kern/vfs_providers.h"
@@ -189,6 +191,10 @@ bool LoadTitle(base::String& path, BootTitle* title) {
   }
 
   kern::vfs::Mount("/app0", path.c_str());
+  // HDD-booted titles resolve their data through /data/app
+  // (HDD_GAME_DIRECTORY_BASE in R* builds); give them the same tree instead of
+  // a second copy.
+  kern::vfs::Mount("/data/app", path.c_str());
   title->mounted = true;
   title->main_module = directory.main_module;
   ReadTitleIcon(path, title);
@@ -248,7 +254,6 @@ void SetWindowArtwork(const BootTitle& title, const base::String& path) {
 }
 #endif
 
-
 }  // namespace
 
 Launcher::Launcher() = default;
@@ -263,6 +268,10 @@ bool Launcher::Init() {
   kern::SetMappingChangedHook(&gpu::render::NoteGuestRemap);
   kern::ps4::SetAudioSink({host::OpenAudioPort, host::QueueAudio,
                            host::SetAudioPortVolume, host::CloseAudioPort});
+  kern::SetControllerSource(host::PollControllerInput);
+  kern::SetControllerOpen(host::OpenControllerInput);
+  kern::SetControllerRumble(host::SetRumble);
+  kern::SetControllerLight(host::SetControllerLight);
   return true;
 }
 
@@ -316,6 +325,8 @@ void Launcher::Boot(const base::String& game_path) {
   if (title.is_ps5)
     proc_->SetPlatform(kern::Process::Platform::kPs5);
   proc_->SetSdkVersion(title.sdk_version);
+  if (!argv.empty())
+    proc_->SetArgs(argv);
   if (!guest::SpawnThread("guest-main",
                           [this, main_module = base::move(title.main_module),
                            mounted = title.mounted] {

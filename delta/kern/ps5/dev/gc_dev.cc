@@ -30,6 +30,7 @@
 #include "kern/process.h"
 #include "kern/ps4/dev/dma_dev.h"  // DmemBackingFd/Size (shared physical dmem store)
 #include "kern/ps5/dev/gc_dev.h"
+#include "kern/ps5/dev/dce_dev.h"
 #include "options/options.h"
 
 namespace {
@@ -61,17 +62,10 @@ extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
 // PS5 present bridge: end the frame and present the rendered RT to the window.
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_agc_flip(u64 scanout_base);
-// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
-extern "C" void prosperity_ps5_complete_flip();
+
 // Is this address inside a pool the title mapped for the GPU (gpu/ps5)?
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" int prosperity_gpu_is_aperture(u64 address);
-
-// Guest address of the most recently flipped display buffer, resolved from
-// sceVideoOutSubmitFlip's bufferIndex; the AGC flip ioctls carry no buffer
-// field.
-// NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
-extern "C" u64 prosperity_ps5_scanout_base();
 
 // DELTA_FLIP_TRACE: log the scanout base each AGC flip presents, so the derived
 // per-flip buffer can be checked against the registered display buffers.
@@ -389,10 +383,9 @@ i32 GcDevicePs5::Ioctl(u32 cmd, void* data) {
       auto* a = static_cast<Argl*>(data);
       if (a)
         SubmitGnmDescArray(a->desc_ptr, a->count);
-      u64 scanout = prosperity_ps5_scanout_base();
+      u64 scanout = DcePs5ScanoutBuffer();
       TraceFlip("0xC020810C", scanout);
       prosperity_agc_flip(scanout);  // present the flipped display buffer
-      prosperity_ps5_complete_flip();
       return 0;
     }
     case 0xC008811B: {

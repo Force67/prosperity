@@ -3,4 +3,4 @@
 # Uses xbyak to emit thunks. Co-dependent with the runtime module (cycle
 # declared in delta/CMakeLists.txt). Links formats for fake-SELF -> ELF on load
 # and the container -> VFS providers behind /app0.
-add_delta_module(kern DEPS xbyak delta_formats)
+add_delta_module(kern DEPS xbyak delta_formats atrac9)

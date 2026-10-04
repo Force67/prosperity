@@ -8,6 +8,7 @@
  * in the root of the source tree.
  */
 
+#include <mutex>
 #include "base/arch.h"
 
 #include "io/file.h"
@@ -50,20 +51,27 @@ void FillStat(SceKernelStat& out, u16 mode, i64 size);
 class FileDevice : public Device {
  public:
   explicit FileDevice(ObjectTable& objects);
+  ~FileDevice() override;
 
   // Open the resolved host path. Returns false if it doesn't exist.
-  bool Open(const base::String& host_path, u32 flags);
+  bool Open(const base::String& host_path,
+            u32 flags,
+            const base::String& quota_root = {});
 
   // Open a resolved host path for writing (savedata). `create` creates the file
   // if absent; `truncate` discards existing contents. The file is opened
   // read+write so the guest can read back what it wrote. Returns false on
   // failure (e.g. open-existing with no create and the file is absent).
-  bool OpenWritable(const base::String& host_path, bool create, bool truncate);
+  bool OpenWritable(const base::String& host_path,
+                    bool create,
+                    bool truncate,
+                    const base::String& quota_root = {});
 
   // Back this device with an already-opened file (e.g. a virtual VFS stream).
   bool Adopt(io::File&& file);
 
   bool IsRegularFile() const override { return true; }
+  bool HasSaveQuota() const { return !quota_root_.empty(); }
 
   // SOTTR's TAFS loader issues manifest reads with a garbage offset, so the
   // header at 0 never loads. Sequential mode ignores the bogus absolute offsets
@@ -81,10 +89,14 @@ class FileDevice : public Device {
   i64 Write(const void* buf, size_t n) override;
   i64 Lseek(i64 off, int whence) override;
   i64 ReadAt(void* buf, size_t n, i64 off) override;
+  i64 WriteAt(const void* buf, size_t n, i64 off) override;
+  i32 Truncate(i64 length) override;
   int Fstat(void* stat) override;
 
  private:
   io::File file_;
+  std::mutex io_mutex_;
+  base::String quota_root_;
   bool open_ = false;
   bool writable_ = false;  // opened for writing (savedata)
   bool seq_ = false;       // manifest sequential-read mode

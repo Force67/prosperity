@@ -8,12 +8,15 @@
 namespace kern {
 class Process;
 
-u32 DceCurrentBuffer();
-i64 DceCurrentFlipArg();
+bool DceActive();
+u32 DceSubmittedBuffer();
+i64 DceSubmittedFlipArg();
 u64 DceScanoutBuffer(u32 index);
+bool DceSubmitFlip(int index, int mode, i64 arg, bool wait_for_gpu = false);
+bool DceCompleteGpuFlips();
 
 // /dev/dce: the Display Control Engine (framebuffer scanout). The real
-// libSceVideoOut.sprx (LLE) opens it and drives the whole display pipe through
+// video output client.sprx (LLE) opens it and drives the whole display pipe through
 // it: a multiplexed control ioctl (0xc0308203, sub-op in arg[0]),
 // scanout-buffer registration (0xc0308207) and flip submit (0xc0488204). We
 // emulate the client contract the 11.00 module relies on: hand back a display

@@ -13,6 +13,12 @@ TEST(Vfs, ReportsRootDirectory) {
   EXPECT_TRUE(is_dir);
 }
 
+TEST(Vfs, MissingFileCanBeQueriedWithoutDereferencingAnEmptyStream) {
+  auto file = kern::vfs::OpenRead(nullptr);
+  EXPECT_FALSE(file.IsOpen());
+  EXPECT_FALSE(file.Exists());
+}
+
 TEST(Vfs, UnmountRemovesGuestPrefix) {
   kern::vfs::Mount("/vfs-unmount-test", "/tmp");
   EXPECT_FALSE(kern::vfs::Resolve("/vfs-unmount-test/file").empty());

@@ -26,6 +26,7 @@
 #include "base/threading/mutex.h"
 #include "base/time/time.h"
 #include "kern/crash.h"
+#include "kern/ipmi/common_dialog.h"
 #include "kern/ipmi/services.h"
 #include "kern/lv2/sys_event_flag.h"
 #include "kern/process.h"
@@ -178,6 +179,19 @@ bool EvfSetByNameSubstr(const char* substr, u64 bits) {
   return false;
 }
 
+bool EvfClearByNameSubstr(const char* substr, u64 keep_mask) {
+  if (!substr)
+    return false;
+  base::LockGuard<base::Mutex> lock(g_ef_reg_m);
+  for (auto& [name, flag] : g_ef_by_name) {
+    if (name.find(substr) == base::String::npos)
+      continue;
+    flag->Clear(keep_mask);
+    return true;
+  }
+  return false;
+}
+
 static kern::ObjectRef<EventFlag> FromId(int id) {
   auto obj = Process::GetActive()->GetObjTable().Get(id);
   if (!obj || obj->type() != Object::Type::kEventflag)
@@ -269,7 +283,7 @@ static u64 SystemFlagInit(const char* name) {
     return 0;
   base::StringRef n(name);
   // ShellCore keeps the focus flags' pattern equal to the appId of the app
-  // that holds focus; libSceSystemService's GetStatus compares it against the
+  // that holds focus; system service client's GetStatus compares it against the
   // title's own appId (from SceLncService GetAppStatus) and any other value
   // reads as backgrounded/overlaid. Same value also satisfies OR-waits.
   if (n.find("AppFocus", 0, 8) != base::StringRef::npos ||
@@ -285,16 +299,16 @@ static u64 SystemFlagInit(const char* name) {
   // The PS5 AudioOut2 daemon acks container/port/bed/master deletion by
   // setting the requester's bit on these flags after processing the delete
   // command. The IPMI side already answers those commands as done, so keep
-  // every deletion ack pre-granted or LLE libSceAudioOut waits forever.
+  // every deletion ack pre-granted or LLE audio output client waits forever.
   if (n.find("SceAuOut2", 0, 9) != base::StringRef::npos &&
       n.find("DelEvf", 0, 6) != base::StringRef::npos)
     return ~0ull;
   // The settings service raises bit 32 after publishing /SceAvSetting. We
   // provide that shared-memory block in sys_shm_open, so publish its matching
-  // ready state as well; otherwise the real libSceVideoOut blocks during open.
+  // ready state as well; otherwise the real video output client blocks during open.
   if (n == "SceAvSettingEvf")
     return 1ull << 32;
-  return 0;
+  return ipmi::CommonDialogProcessStatus(name);
 }
 
 int PS4ABI sys_evf_open(const char* name) {
@@ -304,12 +318,16 @@ int PS4ABI sys_evf_open(const char* name) {
     if (it != g_ef_by_name.end())
       return it->second->handle();
   }
+  if (name && std::strncmp(name, "SceSaveDataMemoryRUI", 20) == 0)
+    return -SysError::eNOENT;
   // Auto-create unknown named flags: on real hw a system service creates them;
   // here both producer and consumer just open by name, so creating on first
   // open gives them a shared flag and the sync actually works.
   u64 seed = SystemFlagInit(name);
+  const u64 sticky =
+      name && std::strncmp(name, "SceLncUtilAppStatus", 19) == 0 ? 0 : seed;
   auto* ef =
-      new EventFlag(Process::GetActive()->GetObjTable(), name, seed, seed);
+      new EventFlag(Process::GetActive()->GetObjTable(), name, seed, sticky);
   BASE_LOGI("evf", "open '{}' (auto-created) -> id={}", name ? name : "",
             ef->handle());
   return ef->handle();
@@ -333,7 +351,7 @@ int PS4ABI sys_evf_close(int id) {
 }
 
 // RESEARCH INSTRUMENTATION, default OFF. DELTA_AUDIOMIX_ACK=<us>: the LLE
-// libSceAudioOut mixer waits on bit <port> of "sceAudioOutMix<pid>" for the
+// The audio output mixer waits on bit <port> of its per-process flag for the
 // daemon to take its block; we host no daemon, so a port produces exactly one
 // block ever. This makes the wait succeed after <us> WITHOUT consuming, keeping
 // the mixer cycling so its ring can be observed. Not a daemon.
