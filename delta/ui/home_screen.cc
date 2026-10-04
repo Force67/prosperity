@@ -15,6 +15,7 @@
 #include "imgui.h"
 #include "options/options.h"
 #include "ui/home_background.h"
+#include "ui/input_sdl.h"
 #include "ui/overlay.h"
 #include "ui/overlay_theme.h"
 #include "ui/pause_menu.h"
@@ -574,12 +575,20 @@ void HomeScreenBuild(u32 width, u32 height) {
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(4);
   }
+  const bool pad = UsingGamepad();
   float hint_x = margin;
-  hint_x = DrawShortcut(dl, hint_x, h - 40, "< >", "Browse");
-  hint_x = DrawShortcut(dl, hint_x, h - 40, "Enter", "Play");
-  hint_x = DrawShortcut(dl, hint_x, h - 40, "O", "Add game");
-  hint_x = DrawShortcut(dl, hint_x, h - 40, "S", "Settings");
-  DrawShortcut(dl, hint_x, h - 40, "Esc", "Exit");
+  hint_x = DrawShortcut(dl, hint_x, h - 40, pad ? "D-pad" : "< >", "Browse");
+  hint_x = DrawShortcut(
+      dl, hint_x, h - 40,
+      pad ? GamepadButtonName(SDL_GAMEPAD_BUTTON_SOUTH) : "Enter", "Play");
+  hint_x = DrawShortcut(dl, hint_x, h - 40,
+                        pad ? GamepadButtonName(SDL_GAMEPAD_BUTTON_NORTH) : "O",
+                        "Add game");
+  hint_x = DrawShortcut(dl, hint_x, h - 40,
+                        pad ? GamepadButtonName(SDL_GAMEPAD_BUTTON_START) : "S",
+                        "Settings");
+  DrawShortcut(dl, hint_x, h - 40,
+               pad ? GamepadButtonName(SDL_GAMEPAD_BUTTON_EAST) : "Esc", "Exit");
   if (!g_error.empty())
     dl->AddText(ImVec2(margin, h - 64), overlay_theme::kWarning,
                 g_error.c_str());

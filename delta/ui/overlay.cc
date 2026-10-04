@@ -17,6 +17,7 @@
 #include "memory_debug/memory_debug.h"
 #include "options/options.h"
 #include "ui/home_screen.h"
+#include "ui/input_sdl.h"
 #include "ui/mouse_look.h"
 #include "ui/overlay.h"
 #include "ui/overlay_busy.h"
@@ -126,6 +127,7 @@ void OverlayEnsureImGui() {
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
+  io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
   g_inited = true;
 }
 
@@ -165,10 +167,13 @@ void OverlayBuildFrame(u32 w,
     if (LaunchTransitionActive()) {
       LaunchTransitionBuild(w, h);
     } else {
-      if (g_visible && !MemoryOverlayFull())
-        BuildLegend();
-      if (!MemoryOverlayFull())
+      // The keyboard legend and the log toggle on F1/F2, which a controller
+      // player cannot reach.
+      if (!UsingGamepad() && !MemoryOverlayFull()) {
+        if (g_visible)
+          BuildLegend();
         OverlayLogBuild(w, h);
+      }
       MemoryOverlayBuild(w, h);
       if (const char* notice =
               MemoryOverlayFull() ? nullptr : MouseLookNotice()) {

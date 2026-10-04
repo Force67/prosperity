@@ -33,7 +33,9 @@ then fades into the first game frame over 550 ms. The same window stays open.
 
 Rounded charcoal panels, white text, and blue focus highlights follow the PS5
 menu style. Covers ease into a soft focus halo; titles reveal as you browse.
-Keyboard hints use compact keycaps. Logs use a monospace font.
+Keyboard hints use compact keycaps. After controller input, hints name the
+controller's buttons and the F1 legend and F2 log stay hidden until a key is
+pressed. Logs use a monospace font.
 
 The UI is laid out in logical units and scaled at draw time. Under gamescope
 (SteamOS Game Mode), the window is fullscreen and the scale is the display
@@ -41,7 +43,8 @@ height over 600 (1.33 on a Steam Deck). Elsewhere it is 1.
 `+DELTA_UI_SCALE=<percent>` overrides it.
 
 On Linux, press either **Ctrl** key during gameplay to pause guest execution
-and audio. The last game frame stays behind an animated panel. Choose **Resume
+and audio. On a controller, press View + Menu (Create + Options) or the guide
+button. The last game frame stays behind an animated panel. Choose **Resume
 game**, or press **Ctrl** or **Esc**, to continue. **Controls** shows the keyboard
 mapping. Arrow keys and Enter navigate the menu; mouse input works too.
 **Exit emulator** closes the application from the pause menu.

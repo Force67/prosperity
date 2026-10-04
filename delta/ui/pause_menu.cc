@@ -1,6 +1,8 @@
 #include "ui/pause_menu.h"
 
 #if defined(__linux__) && !defined(__ANDROID__)
+#include <SDL3/SDL.h>
+
 #include "base/algorithm.h"
 #include "base/atomic.h"
 #include "base/time/time.h"
@@ -8,6 +10,7 @@
 #include "guest/session.h"
 #include "imgui.h"
 #include "ui/home_screen.h"
+#include "ui/input_sdl.h"
 #include "ui/mouse_look.h"
 #include "ui/overlay_theme.h"
 
@@ -126,7 +129,9 @@ void PauseMenuBuild(u32 width, u32 height) {
   dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h),
                     IM_COL32(8, 10, 14, int(175 * ease)));
   const float panel_w = base::Min(480.0f, w - 48);
-  const float panel_h = base::Min(g_controls ? 600.0f : 448.0f, h - 32);
+  const bool pad = UsingGamepad();
+  const float panel_h =
+      base::Min(g_controls && !pad ? 600.0f : 448.0f, h - 32);
   const ImVec2 tl((w - panel_w) * 0.5f, (h - panel_h) * 0.5f + 12 * (1 - ease));
   const ImVec2 br(tl.x + panel_w, tl.y + panel_h);
   overlay_theme::DrawPanel(dl, tl, br, ease);
@@ -159,37 +164,48 @@ void PauseMenuBuild(u32 width, u32 height) {
                    ImGuiWindowFlags_NoBackground);
   ImGui::BeginDisabled(!paused || closing);
   if (g_controls) {
-    const char* rows[][2] = {{"WASD", "Move"},
+    const char* keys[][2] = {{"WASD", "Move"},
                              {"Arrow keys", "Aim"},
                              {"Space / Esc / F / R", "Face buttons"},
                              {"Enter / P", "Options"},
                              {"Tab", "Touchpad"}};
+    const char* buttons[][2] = {{"View + Menu", "Pause menu"},
+                                {"Menu", "Options"},
+                                {"View", "Touchpad"},
+                                {"Stick clicks", "L3 / R3"}};
+    auto show = [&](const auto& rows) {
+      for (const auto& row : rows) {
+        ImGui::TextUnformatted(row[0]);
+        ImGui::SameLine(base::Max(160.0f, panel_w - 200));
+        ImGui::TextDisabled("%s", row[1]);
+      }
+    };
     ImGui::SetCursorPos(ImVec2(28, 132));
     ImGui::BeginChild("controls_body", ImVec2(panel_w - 56, panel_h - 240));
-    auto settings = GetMouseLookSettings();
-    bool changed = ImGui::Checkbox("Mouse look", &settings.enabled);
-    ImGui::SameLine();
-    ImGui::TextDisabled("F3 during play");
-    ImGui::BeginDisabled(!settings.enabled);
-    int sensitivity = static_cast<int>(settings.sensitivity);
-    ImGui::SetNextItemWidth(base::Max(80.0f, panel_w - 180));
-    if (ImGui::SliderInt("Sensitivity", &sensitivity, 10, 300, "%d%%")) {
-      settings.sensitivity = static_cast<u32>(sensitivity);
-      changed = true;
-    }
-    changed |= ImGui::Checkbox("Invert vertical look", &settings.invert_y);
-    ImGui::EndDisabled();
-    if (changed)
-      ConfigureMouseLook(settings);
-    ImGui::TextWrapped(
-        "Left / right click: R2 / L2. Ctrl releases the cursor.");
-    ImGui::TextDisabled("Session only. Save defaults in home Settings.");
-    ImGui::Spacing();
-    ImGui::Separator();
-    for (const auto& row : rows) {
-      ImGui::TextUnformatted(row[0]);
-      ImGui::SameLine(base::Max(160.0f, panel_w - 200));
-      ImGui::TextDisabled("%s", row[1]);
+    if (pad) {
+      show(buttons);
+    } else {
+      auto settings = GetMouseLookSettings();
+      bool changed = ImGui::Checkbox("Mouse look", &settings.enabled);
+      ImGui::SameLine();
+      ImGui::TextDisabled("F3 during play");
+      ImGui::BeginDisabled(!settings.enabled);
+      int sensitivity = static_cast<int>(settings.sensitivity);
+      ImGui::SetNextItemWidth(base::Max(80.0f, panel_w - 180));
+      if (ImGui::SliderInt("Sensitivity", &sensitivity, 10, 300, "%d%%")) {
+        settings.sensitivity = static_cast<u32>(sensitivity);
+        changed = true;
+      }
+      changed |= ImGui::Checkbox("Invert vertical look", &settings.invert_y);
+      ImGui::EndDisabled();
+      if (changed)
+        ConfigureMouseLook(settings);
+      ImGui::TextWrapped(
+          "Left / right click: R2 / L2. Ctrl releases the cursor.");
+      ImGui::TextDisabled("Session only. Save defaults in home Settings.");
+      ImGui::Spacing();
+      ImGui::Separator();
+      show(keys);
     }
     ImGui::EndChild();
     ImGui::SetCursorPos(ImVec2(28, panel_h - 100));
@@ -234,10 +250,14 @@ void PauseMenuBuild(u32 width, u32 height) {
   ImGui::EndDisabled();
   ImGui::End();
   ImGui::PopStyleVar(3);
-  dl->AddText(ImVec2(tl.x + 28, br.y - 44), secondary,
-              closing      ? "Stopping guest threads and releasing resources..."
-              : g_controls ? "Esc  Back     Ctrl  Resume"
-                           : "Ctrl or Esc to resume");
+  const base::String back =
+      UsingGamepad() ? GamepadButtonName(SDL_GAMEPAD_BUTTON_EAST) : "Esc";
+  const base::String toggle = UsingGamepad() ? "View + Menu" : "Ctrl";
+  const base::String hint =
+      closing      ? "Stopping guest threads and releasing resources..."
+      : g_controls ? back + "  Back     " + toggle + "  Resume"
+                   : toggle + " or " + back + " to resume";
+  dl->AddText(ImVec2(tl.x + 28, br.y - 44), secondary, hint.c_str());
 }
 
 void PauseMenuReset() {

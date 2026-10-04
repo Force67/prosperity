@@ -566,6 +566,10 @@ void FillControllerState(guest::ControllerState* d) {
       buttons |= kL2;
     if (k.r2)
       buttons |= kR2;
+    if (k.l3)
+      buttons |= kL3;
+    if (k.r3)
+      buttons |= kR3;
     if (k.options)
       buttons |= kOptions;
     if (k.touchpad)

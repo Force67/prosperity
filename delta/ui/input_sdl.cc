@@ -11,11 +11,80 @@
 #include "ui/pause_menu.h"
 
 namespace ui {
+namespace {
+bool g_gamepad_input = false;
+SDL_JoystickID g_gamepad_id = 0;
+
+void TrackInputDevice(const SDL_Event& e) {
+  if (e.type == SDL_EVENT_GAMEPAD_ADDED ||
+      e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+    g_gamepad_input = true;
+    g_gamepad_id = e.type == SDL_EVENT_GAMEPAD_ADDED ? e.gdevice.which
+                                                     : e.gbutton.which;
+  } else if (e.type == SDL_EVENT_KEY_DOWN)
+    g_gamepad_input = false;
+  else if (e.type == SDL_EVENT_GAMEPAD_REMOVED)
+    g_gamepad_input = SDL_HasGamepad();
+}
+
+// View + Menu together, or the guide button where the system leaves it to us.
+bool PauseChord(const SDL_GamepadButtonEvent& e) {
+  if (e.button == SDL_GAMEPAD_BUTTON_GUIDE)
+    return true;
+  SDL_Gamepad* pad = SDL_GetGamepadFromID(e.which);
+  if (!pad)
+    return false;
+  return (e.button == SDL_GAMEPAD_BUTTON_START &&
+          SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK)) ||
+         (e.button == SDL_GAMEPAD_BUTTON_BACK &&
+          SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_START));
+}
+}  // namespace
+
+bool UsingGamepad() {
+  return g_gamepad_input;
+}
+
+const char* GamepadButtonName(int button) {
+  const auto type = SDL_GetGamepadTypeForID(g_gamepad_id);
+  switch (SDL_GetGamepadButtonLabelForType(
+      type, static_cast<SDL_GamepadButton>(button))) {
+    case SDL_GAMEPAD_BUTTON_LABEL_A:
+      return "A";
+    case SDL_GAMEPAD_BUTTON_LABEL_B:
+      return "B";
+    case SDL_GAMEPAD_BUTTON_LABEL_X:
+      return "X";
+    case SDL_GAMEPAD_BUTTON_LABEL_Y:
+      return "Y";
+    case SDL_GAMEPAD_BUTTON_LABEL_CROSS:
+      return "Cross";
+    case SDL_GAMEPAD_BUTTON_LABEL_CIRCLE:
+      return "Circle";
+    case SDL_GAMEPAD_BUTTON_LABEL_SQUARE:
+      return "Square";
+    case SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE:
+      return "Triangle";
+    default:
+      break;
+  }
+  const bool playstation =
+      type == SDL_GAMEPAD_TYPE_PS4 || type == SDL_GAMEPAD_TYPE_PS5;
+  switch (button) {
+    case SDL_GAMEPAD_BUTTON_BACK:
+      return playstation ? "Create" : "View";
+    case SDL_GAMEPAD_BUTTON_START:
+      return playstation ? "Options" : "Menu";
+    default:
+      return "?";
+  }
+}
 
 void ProcessEvent(const SDL_Event& e,
                   SDL_Window* window,
                   u32 framebuffer_width,
                   u32 framebuffer_height) {
+  TrackInputDevice(e);
   if (e.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
     MemoryOverlayEscape(false);
     MemoryOverlayEscape(false, true);
@@ -45,9 +114,11 @@ void ProcessEvent(const SDL_Event& e,
     SyncMouseLook(window);
     return;
   }
-  if (!HomeScreenActive() && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
-      (e.key.scancode == SDL_SCANCODE_LCTRL ||
-       e.key.scancode == SDL_SCANCODE_RCTRL)) {
+  if (!HomeScreenActive() &&
+      ((e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+        (e.key.scancode == SDL_SCANCODE_LCTRL ||
+         e.key.scancode == SDL_SCANCODE_RCTRL)) ||
+       (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && PauseChord(e.gbutton)))) {
     PauseMenuToggle();
     SyncMouseLook(window);
     return;
@@ -130,34 +201,47 @@ void ProcessEvent(const SDL_Event& e,
   }
   if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
       e.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
-    ImGuiKey key = ImGuiKey_None;
+    // Each button drives the menus' keys and ImGui's own gamepad navigation.
+    ImGuiKey key = ImGuiKey_None, nav = ImGuiKey_None;
     switch (e.gbutton.button) {
       case SDL_GAMEPAD_BUTTON_DPAD_UP:
         key = ImGuiKey_UpArrow;
+        nav = ImGuiKey_GamepadDpadUp;
         break;
       case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
         key = ImGuiKey_DownArrow;
+        nav = ImGuiKey_GamepadDpadDown;
         break;
       case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
         key = ImGuiKey_LeftArrow;
+        nav = ImGuiKey_GamepadDpadLeft;
         break;
       case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:
         key = ImGuiKey_RightArrow;
+        nav = ImGuiKey_GamepadDpadRight;
         break;
       case SDL_GAMEPAD_BUTTON_SOUTH:
         key = ImGuiKey_Enter;
+        nav = ImGuiKey_GamepadFaceDown;
         break;
       case SDL_GAMEPAD_BUTTON_EAST:
         key = ImGuiKey_Escape;
+        nav = ImGuiKey_GamepadFaceRight;
         break;
       case SDL_GAMEPAD_BUTTON_NORTH:
         key = ImGuiKey_O;
         break;
+      case SDL_GAMEPAD_BUTTON_START:
+        key = ImGuiKey_S;
+        break;
       default:
         break;
     }
+    const bool down = e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
     if (key != ImGuiKey_None)
-      io.AddKeyEvent(key, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+      io.AddKeyEvent(key, down);
+    if (nav != ImGuiKey_None)
+      io.AddKeyEvent(nav, down);
   }
 }
 

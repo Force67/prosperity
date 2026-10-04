@@ -81,6 +81,7 @@ struct PadKeys {
   bool cross = false, circle = false, square = false, triangle = false;
   bool up = false, down = false, left = false, right = false;
   bool l1 = false, r1 = false, l2 = false, r2 = false;
+  bool l3 = false, r3 = false;
   bool options = false, touchpad = false;
   u8 lx = 128, ly = 128, rx = 128, ry = 128;
 };

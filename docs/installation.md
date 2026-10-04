@@ -31,8 +31,11 @@ Each card shows a PS4 or PS5 badge from the game's metadata.
 Games without background art use an animated Delta backdrop chosen at random.
 A banner lists missing firmware modules and the setup commands to import them.
 Arrow keys browse the cards, Enter plays, O opens a file, and Esc exits.
-A controller's D-pad browses; Cross plays, Triangle opens, and Circle exits.
-Game paths on the command line still boot directly.
+A controller's D-pad browses; Cross plays, Triangle opens, Options opens
+Settings, and Circle exits. Hints show the controller's buttons once you use it.
+In a game, press Create + Options (View + Menu on Xbox-style pads) or the guide
+button to pause. Create alone is the touchpad click. Game paths on the command
+line still boot directly.
 
 The last 12 launches, titles, and artwork are saved in
 `~/.local/share/prosperity/recent-games` and `covers/` (under

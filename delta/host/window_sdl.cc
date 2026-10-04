@@ -1228,7 +1228,9 @@ bool PollKeyboardPad(PadKeys& out) {
         down(SDL_SCANCODE_RETURN) || down(SDL_SCANCODE_ESCAPE) ||
         (g_window.gamepad &&
          (SDL_GetGamepadButton(g_window.gamepad, SDL_GAMEPAD_BUTTON_SOUTH) ||
-          SDL_GetGamepadButton(g_window.gamepad, SDL_GAMEPAD_BUTTON_EAST)));
+          SDL_GetGamepadButton(g_window.gamepad, SDL_GAMEPAD_BUTTON_EAST) ||
+          SDL_GetGamepadButton(g_window.gamepad, SDL_GAMEPAD_BUTTON_START) ||
+          SDL_GetGamepadButton(g_window.gamepad, SDL_GAMEPAD_BUTTON_BACK)));
     if (held) {
       out = {};
       return true;
@@ -1283,8 +1285,11 @@ bool PollKeyboardPad(PadKeys& out) {
     out.right |= b(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
     out.l1 |= b(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
     out.r1 |= b(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+    out.l3 |= b(SDL_GAMEPAD_BUTTON_LEFT_STICK);
+    out.r3 |= b(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
     out.options |= b(SDL_GAMEPAD_BUTTON_START);
-    out.touchpad |= b(SDL_GAMEPAD_BUTTON_TOUCHPAD);
+    // Pads without a touchpad click (Xbox layout, Steam Deck) use View.
+    out.touchpad |= b(SDL_GAMEPAD_BUTTON_TOUCHPAD) || b(SDL_GAMEPAD_BUTTON_BACK);
     // Sticks: map [-32768,32767] to [0,255]; only override the centred keyboard
     // value.
     auto axis = [&](SDL_GamepadAxis n) -> int {
