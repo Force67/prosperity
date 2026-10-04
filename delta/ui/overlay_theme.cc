@@ -7,6 +7,7 @@ namespace {
 
 ImFont* g_monospace_font = nullptr;
 ImFont* g_heading_font = nullptr;
+float g_scale = 1;
 
 ImVec4 Color(ImU32 value, float alpha = 1.0f) {
   ImVec4 color = ImGui::ColorConvertU32ToFloat4(value);
@@ -19,16 +20,22 @@ ImVec4 Color(ImU32 value, float alpha = 1.0f) {
 ImFont* AddSansFont(float size) {
   static constexpr ImWchar kGlyphRanges[] = {0x0020, 0x00ff, 0x2122, 0x2122, 0};
   return ImGui::GetIO().Fonts->AddFontFromMemoryCompressedTTF(
-      tracy::DroidSans_compressed_data, tracy::DroidSans_compressed_size, size,
-      nullptr, kGlyphRanges);
+      tracy::DroidSans_compressed_data, tracy::DroidSans_compressed_size,
+      size * g_scale, nullptr, kGlyphRanges);
 }
 
-void Apply() {
+void Apply(float scale) {
   ImGuiStyle& style = ImGui::GetStyle();
   style = ImGuiStyle();
   ImGuiIO& io = ImGui::GetIO();
+  // Glyphs are rasterised at the output size; layout stays in logical units.
+  g_scale = scale;
+  io.FontGlobalScale = 1 / scale;
+  io.DisplayFramebufferScale = ImVec2(scale, scale);
   io.FontDefault = AddSansFont(15.0f);
-  g_monospace_font = io.Fonts->AddFontDefault();
+  ImFontConfig monospace;
+  monospace.SizePixels = 13 * scale;
+  g_monospace_font = io.Fonts->AddFontDefault(&monospace);
   g_heading_font = AddSansFont(36);
 
   style.WindowPadding = ImVec2(20.0f, 20.0f);

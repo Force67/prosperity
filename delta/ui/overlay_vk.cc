@@ -15,6 +15,7 @@
 
 #include "base/logging.h"
 #include "base/memory/mem_ops.h"
+#include "base/math/value_bounds.h"
 
 #include "base/containers/vector.h"
 #include "imgui.h"
@@ -503,7 +504,9 @@ bool OverlayVkRender(VkCommandBuffer cmd, u32 image_index) {
                             g_vk.pipe_layout, 0, 1, &g_vk.desc_set, 0, nullptr);
     VkViewport vpt{0, 0, (float)fb_w, (float)fb_h, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vpt);
-    float push[4] = {2.0f / fb_w, 2.0f / fb_h, -1.0f, -1.0f};
+    const ImVec2 scale = dd->FramebufferScale;
+    float push[4] = {2.0f * scale.x / fb_w, 2.0f * scale.y / fb_h, -1.0f,
+                     -1.0f};
     vkCmdPushConstants(cmd, g_vk.pipe_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
                        sizeof(push), push);
     VkDeviceSize off = 0;
@@ -515,11 +518,15 @@ bool OverlayVkRender(VkCommandBuffer cmd, u32 image_index) {
     for (int i = 0; i < dd->CmdListsCount; i++) {
       const ImDrawList* cl = dd->CmdLists[i];
       for (const ImDrawCmd& c : cl->CmdBuffer) {
+        const float x0 = base::Max(c.ClipRect.x * scale.x, 0.0f);
+        const float y0 = base::Max(c.ClipRect.y * scale.y, 0.0f);
+        const float x1 = base::Min(c.ClipRect.z * scale.x, float(fb_w));
+        const float y1 = base::Min(c.ClipRect.w * scale.y, float(fb_h));
+        if (x1 <= x0 || y1 <= y0)
+          continue;
         VkRect2D sc{};
-        sc.offset.x = (i32)(c.ClipRect.x > 0 ? c.ClipRect.x : 0);
-        sc.offset.y = (i32)(c.ClipRect.y > 0 ? c.ClipRect.y : 0);
-        sc.extent.width = (u32)(c.ClipRect.z - sc.offset.x);
-        sc.extent.height = (u32)(c.ClipRect.w - sc.offset.y);
+        sc.offset = {(i32)x0, (i32)y0};
+        sc.extent = {(u32)(x1 - x0), (u32)(y1 - y0)};
         vkCmdSetScissor(cmd, 0, 1, &sc);
         vkCmdDrawIndexed(cmd, c.ElemCount, 1, c.IdxOffset + idx_off,
                          c.VtxOffset + vtx_off, 0);

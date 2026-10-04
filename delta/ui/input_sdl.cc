@@ -74,8 +74,10 @@ void ProcessEvent(const SDL_Event& e,
   int width = framebuffer_width, height = framebuffer_height;
   if (window)
     SDL_GetWindowSize(window, &width, &height);
-  const float sx = width ? float(framebuffer_width) / width : 1;
-  const float sy = height ? float(framebuffer_height) / height : 1;
+  const float sx = (width ? float(framebuffer_width) / width : 1) /
+                   io.DisplayFramebufferScale.x;
+  const float sy = (height ? float(framebuffer_height) / height : 1) /
+                   io.DisplayFramebufferScale.y;
   if (e.type == SDL_EVENT_MOUSE_MOTION)
     io.AddMousePosEvent(e.motion.x * sx, e.motion.y * sy);
   if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||

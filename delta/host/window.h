@@ -104,6 +104,9 @@ bool InGameplay();
 
 #if defined(__linux__) && !defined(__ANDROID__)
 void ReloadOverlay();
+// Menu and overlay size for this display (1 on a desktop). Callable before
+// Init.
+float UiScale();
 base::Vector<base::String> GraphicsDevices();
 #endif
 

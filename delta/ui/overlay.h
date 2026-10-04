@@ -15,6 +15,10 @@ namespace ui {
 void OverlayEnsureImGui();
 void OverlayShutdownImGui();
 
+// UI size for contexts created from now on: `automatic` unless the
+// DELTA_UI_SCALE option overrides it. 1 is the desktop size.
+void OverlaySetScale(float automatic);
+
 // Per-frame perf stats, pushed by the GPU renderer (delta_gpu).
 void OverlaySetPerf(float fps, float gpu_ms, float frame_ms);
 

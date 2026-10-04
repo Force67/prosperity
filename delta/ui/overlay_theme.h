@@ -18,7 +18,7 @@ inline constexpr ImU32 kError = IM_COL32(243, 139, 149, 255);
 inline constexpr ImU32 kCritical = kError;
 
 ImFont* AddSansFont(float size);
-void Apply();
+void Apply(float scale = 1);
 ImFont* MonospaceFont();
 ImFont* HeadingFont();
 ImU32 WithOpacity(ImU32 color, float opacity);

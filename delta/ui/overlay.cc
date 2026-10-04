@@ -11,9 +11,11 @@
 #include <cstring>
 #include "base/arch.h"
 
+#include "base/algorithm.h"
 #include "base/math/value_bounds.h"
 #include "imgui.h"
 #include "memory_debug/memory_debug.h"
+#include "options/options.h"
 #include "ui/home_screen.h"
 #include "ui/mouse_look.h"
 #include "ui/overlay.h"
@@ -26,9 +28,15 @@
 
 namespace ui {
 namespace {
+DELTA_OPTION(u32,
+             kUiScale,
+             "DELTA_UI_SCALE",
+             0,
+             "menu and overlay size in percent, 0 picks one for the display");
 
 bool g_visible = true;
 bool g_inited = false;
+float g_scale = 1;
 
 struct Row {
   const char *key, *button;
@@ -114,11 +122,16 @@ void OverlayEnsureImGui() {
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kDebugger);
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
-  overlay_theme::Apply();
+  overlay_theme::Apply(g_scale);
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
   g_inited = true;
+}
+
+void OverlaySetScale(float automatic) {
+  const u32 percent = kUiScale.get();
+  g_scale = percent ? base::Clamp(percent / 100.0f, 0.5f, 4.0f) : automatic;
 }
 
 void OverlayShutdownImGui() {
@@ -138,6 +151,9 @@ void OverlayBuildFrame(u32 w,
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kDebugger);
   OverlayEnsureImGui();
   ImGuiIO& io = ImGui::GetIO();
+  // Builders lay out in logical units; the renderer scales them to pixels.
+  w = u32(w / io.DisplayFramebufferScale.x + 0.5f);
+  h = u32(h / io.DisplayFramebufferScale.y + 0.5f);
   io.DisplaySize = ImVec2((float)w, (float)h);
   io.DeltaTime = 1.0f / 60.0f;
   ImGui::NewFrame();

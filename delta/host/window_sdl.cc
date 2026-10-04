@@ -34,6 +34,7 @@
 
 #include "base/logging.h"
 
+#include "base/algorithm.h"
 #include "base/atomic.h"
 #include "base/containers/array.h"
 #include "base/containers/vector.h"
@@ -149,6 +150,12 @@ void StopExitAnimation() {
   g_exit_thread->Join();
   g_exit_thread = {};
 }
+// Gamescope (SteamOS Game Mode, Big Picture) is a fullscreen handheld or couch
+// session: fill the display and size the UI for that viewing distance.
+bool InGamescope() {
+  return SDL_getenv("GAMESCOPE_WAYLAND_DISPLAY") != nullptr;
+}
+
 // 0: no splash, 1: the splash thread owns the window, 2: asked to hand it over.
 base::Atomic<int> g_splash{0};
 thread_local bool t_splash_thread = false;
@@ -563,6 +570,15 @@ bool EnsureFrameResources(u32 w, u32 h, VkFormat fmt) {
 
 }  // namespace
 
+float UiScale() {
+  if (!InGamescope() || !SDL_InitSubSystem(SDL_INIT_VIDEO))
+    return 1;
+  const SDL_DisplayMode* mode =
+      SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+  // 1280x800 (Steam Deck) gives 1.33, a 1080p TV 1.8.
+  return mode ? base::Clamp(mode->h / 600.0f, 1.0f, 4.0f) : 1.0f;
+}
+
 bool Init(const char* title, u32 width, u32 height) {
   base::LockGuard<base::Mutex> lock(g_init_mutex);
   if (Available())
@@ -586,9 +602,10 @@ bool Init(const char* title, u32 width, u32 height) {
     BASE_LOGI("gfx", "SDL_Vulkan_LoadLibrary failed: {}", SDL_GetError());
     return false;
   }
-  g_window.window =
-      SDL_CreateWindow(g_title.empty() ? title : g_title.c_str(), (int)width,
-                       (int)height, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+  g_window.window = SDL_CreateWindow(
+      g_title.empty() ? title : g_title.c_str(), (int)width, (int)height,
+      SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE |
+          (InGamescope() ? SDL_WINDOW_FULLSCREEN : 0));
   if (!g_window.window) {
     BASE_LOGI("gfx", "SDL_CreateWindow failed: {}", SDL_GetError());
     return false;
@@ -758,6 +775,7 @@ bool Init(const char* title, u32 width, u32 height) {
     return false;
   BASE_LOGI("gfx", "swapchain {}x{}, {} images", g_window.swap_extent.width,
             g_window.swap_extent.height, (u32)g_window.swap_images.size());
+  ui::OverlaySetScale(UiScale());
   ui::OverlayVkInit(g_window.phys, g_window.device, g_window.queue,
                     g_window.queue_family, g_window.cmd_pool,
                     g_window.swap_format);
@@ -936,12 +954,35 @@ static void PresentFrame(const void* pixels,
                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                VK_PIPELINE_STAGE_TRANSFER_BIT);
 
+  // Keep the frame's aspect ratio and fill the rest black. A 1x1 frame is a
+  // plain backdrop and fills the window.
+  const i32 sw = (i32)g_window.swap_extent.width;
+  const i32 sh = (i32)g_window.swap_extent.height;
+  i32 dw = sw, dh = sh;
+  if (w > 1 && h > 1) {
+    const float fit = base::Min(float(sw) / w, float(sh) / h);
+    dw = base::Min(sw, (i32)(w * fit + 0.5f));
+    dh = base::Min(sh, (i32)(h * fit + 0.5f));
+  }
+  if (dw != sw || dh != sh) {
+    const VkClearColorValue black{};
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(slot.cmd, g_window.swap_images[idx],
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
+                         &range);
+    ImageBarrier(slot.cmd, g_window.swap_images[idx],
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+  }
   VkImageBlit blit{};
   blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   blit.srcOffsets[1] = {(i32)w, (i32)h, 1};
   blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  blit.dstOffsets[1] = {(i32)g_window.swap_extent.width,
-                        (i32)g_window.swap_extent.height, 1};
+  blit.dstOffsets[0] = {(sw - dw) / 2, (sh - dh) / 2, 0};
+  blit.dstOffsets[1] = {(sw + dw) / 2, (sh + dh) / 2, 1};
   vkCmdBlitImage(slot.cmd, frame_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  g_window.swap_images[idx],
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,

@@ -21,6 +21,7 @@ base::String ShowHomeScreen(const base::Vector<ui::HomeGame>& games) {
     ui::OverlayVkShutdown();
     ui::OverlayShutdownImGui();
   }
+  ui::OverlaySetScale(host::UiScale());
   ui::BeginHomeScreen(library, FirmwareModulesReady(false),
                       FirmwareModulesReady(true), CheckGameFirmware);
   if (host::Init("Prosperity", 1280, 720)) {
