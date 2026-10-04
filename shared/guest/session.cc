@@ -1,11 +1,13 @@
 #include "guest/session.h"
 
 #include <pthread.h>
+#include <time.h>
 #include <algorithm>
 #include <memory>
 #include <vector>
 
 #include "base/atomic.h"
+#include "base/logging.h"
 #include "base/strings/xstring.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
@@ -91,8 +93,20 @@ void JoinThreads() {
     }
     if (threads.empty())
       break;
-    for (auto thread : threads)
+    for (auto thread : threads) {
+#if defined(__GLIBC__)
+      // A thread that never notices the stop hangs the session here; name it.
+      timespec deadline;
+      clock_gettime(CLOCK_REALTIME, &deadline);
+      deadline.tv_sec += 5;
+      if (pthread_timedjoin_np(thread, nullptr, &deadline) == 0)
+        continue;
+      char name[32] = "?";
+      pthread_getname_np(thread, name, sizeof(name));
+      BASE_LOGW("guest", "still waiting for thread '{}' to stop", name);
+#endif
       pthread_join(thread, nullptr);
+    }
   }
 }
 size_t LiveThreads() {

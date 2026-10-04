@@ -141,7 +141,7 @@ static void StartVblankPump() {
   BASE_LOGI("vblank", "pump started (60 Hz, EVFILT_DISPLAY/VIDEOOUT)");
   guest::SpawnThread("sys_event", [] {
     u64 count = 0;
-    for (;;) {
+    while (!guest::Stopping()) {
       if (guest::display::kEmulateTiming) {
         guest::display::WaitVblank();
         count = guest::display::VblankCount();

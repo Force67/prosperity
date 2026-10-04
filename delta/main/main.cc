@@ -14,6 +14,7 @@
 #include <cstring>
 
 #if defined(__linux__)
+#include <pthread.h>
 #include <sys/prctl.h>
 #include <unistd.h>
 #endif
@@ -138,6 +139,19 @@ static void win32PostInit() {
 }
 #endif
 
+#if defined(__linux__)
+// Leaving must not hang on a guest thread that ignores the stop.
+static void StartExitWatchdog() {
+  pthread_t thread;
+  if (pthread_create(&thread, nullptr, [](void*) -> void* {
+        sleep(10);
+        LOG_WARNING("shutdown is taking over 10 s, exiting anyway");
+        _exit(0);
+      }, nullptr) == 0)
+    pthread_detach(thread);
+}
+#endif
+
 int main(int argc, char** argv) {
   auto command = cli::Parse(argc, argv);
   if (command.exit)
@@ -222,6 +236,10 @@ int main(int argc, char** argv) {
            !guest::Stopping())
       base::SleepForMilliseconds(16);
     const bool exit = ui::PauseMenuExitRequested();
+#if defined(__linux__)
+    if (exit)
+      StartExitWatchdog();
+#endif
     core.Stop();
     if (exit || ui::PauseMenuExitRequested())
       break;
