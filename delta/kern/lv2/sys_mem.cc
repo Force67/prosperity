@@ -1565,8 +1565,10 @@ int PS4ABI sys_batch_map(u32 /*handle*/,
                            PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
                            static_cast<off_t>(op.offset));
           if (p != MAP_FAILED) {
-            pr->GetVma().Add(reinterpret_cast<u8*>(p), op.length,
-                             host_memory::PageProtection::kW);
+            pr->GetVma().AddDirect(
+                reinterpret_cast<u8*>(p), op.length,
+                static_cast<host_memory::PageProtection>(op.prot & 7), op.prot,
+                op.offset);
             break;
           }
         }

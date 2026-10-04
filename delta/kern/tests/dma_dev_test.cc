@@ -32,6 +32,22 @@ TEST(DmaDevice, Ps5MainAllocationsUseTheReportedPool) {
   ASSERT_EQ(kern::sys_virtual_query(mapping, 0, info, sizeof(info)), 0);
   EXPECT_EQ(info[2], allocation[0]);
   EXPECT_EQ(kern::DmemTypeForOffset(info[2]), 12);
+  struct {
+    u64 start, offset, length;
+    u8 prot, type;
+    u16 pad;
+    u32 operation;
+  } entry{reinterpret_cast<u64>(mapping), allocation[0], 0x4000, 0x33, 12, 0,
+          0};
+  int processed = 0;
+  ASSERT_EQ(kern::sys_batch_map(0, 0, &entry, 1, &processed), 0);
+  ASSERT_EQ(processed, 1);
+  ASSERT_EQ(kern::sys_virtual_query(mapping, 0, info, sizeof(info)), 0);
+  EXPECT_EQ(info[2], allocation[0]);
+  const auto* bytes = reinterpret_cast<const u8*>(info);
+  EXPECT_EQ(bytes[0x18], 0x33);
+  EXPECT_EQ(bytes[0x1c], 12);
+  EXPECT_EQ(bytes[0x20] & 0x12, 0x12);
   *mapping = 42;
   auto mapped_region = process.GetVma().Get(mapping);
   ASSERT_TRUE(mapped_region);
