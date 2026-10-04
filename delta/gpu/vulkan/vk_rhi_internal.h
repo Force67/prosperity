@@ -334,11 +334,18 @@ class VulkanDevice final : public rhi::Device {
   // waiting for a quiet frame end loses it to a run that never has one.
   void SaveAfterSlowBuild(u64 started);
   void WritePipelineCache(bool force);
+  void PinSubgroupSize(VkPipelineShaderStageCreateInfo& stage,
+                       VkPipelineShaderStageRequiredSubgroupSizeCreateInfo&
+                           required) const;
 
   rhi::Caps caps_;
   base::String device_name_;
   base::String pipeline_cache_path_;
   VkPipelineStageFlags shader_stages_ = 0;
+  // Stages compiled at exactly caps_.subgroup_size lanes. The recompiler
+  // relies on it, and SPIR-V 1.6 otherwise lets the driver pick (RADV runs
+  // small compute groups as wave32).
+  VkShaderStageFlags pinned_subgroup_stages_ = 0;
   VkSemaphore timeline_ = VK_NULL_HANDLE;
   // CopyAfter's queue, command buffer and fence, guarded by a spin flag.
   VkQueue side_queue_ = VK_NULL_HANDLE;

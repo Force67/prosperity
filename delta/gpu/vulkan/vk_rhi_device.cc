@@ -588,8 +588,11 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   VkPhysicalDevice phys = native.phys;
   vkGetPhysicalDeviceMemoryProperties(phys, &memory_properties);
 
+  VkPhysicalDeviceVulkan13Features avail13{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
   VkPhysicalDeviceVulkan12Features avail12{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+  avail12.pNext = &avail13;
   VkPhysicalDeviceFeatures2 avail{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
   avail.pNext = &avail12;
   vkGetPhysicalDeviceFeatures2(phys, &avail);
@@ -610,6 +613,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
   f13.pNext = &f12;
   f13.dynamicRendering = VK_TRUE;
+  f13.subgroupSizeControl = avail13.subgroupSizeControl;
   void** chain = &f13.pNext;
   (void)chain;
 
@@ -794,9 +798,12 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
 
   VkPhysicalDeviceSubgroupProperties subgroup{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+  VkPhysicalDeviceSubgroupSizeControlProperties size_control{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
   VkPhysicalDeviceExternalMemoryHostPropertiesEXT host{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
-  subgroup.pNext = caps_.host_import ? &host : nullptr;
+  subgroup.pNext = &size_control;
+  size_control.pNext = caps_.host_import ? &host : nullptr;
   VkPhysicalDeviceProperties2 props2{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
   props2.pNext = &subgroup;
@@ -822,6 +829,10 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   caps_.timestamp_period_ns = lim.timestampPeriod;
   caps_.timestamp_bits = native.timestamp_valid_bits;
   caps_.subgroup_size = subgroup.subgroupSize ? subgroup.subgroupSize : 32;
+  if (f13.subgroupSizeControl &&
+      caps_.subgroup_size >= size_control.minSubgroupSize &&
+      caps_.subgroup_size <= size_control.maxSubgroupSize)
+    pinned_subgroup_stages_ = size_control.requiredSubgroupSizeStages;
   caps_.max_dynamic_uniform_buffers = lim.maxDescriptorSetUniformBuffersDynamic;
   caps_.max_dynamic_storage_buffers = lim.maxDescriptorSetStorageBuffersDynamic;
   caps_.max_storage_buffers_per_stage = lim.maxPerStageDescriptorStorageBuffers;
@@ -1343,6 +1354,7 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
   VkDevice dev = native.device;
   VkShaderModule modules[3] = {};
   VkPipelineShaderStageCreateInfo stages[3]{};
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo required[3]{};
   u32 stage_count = 0;
   auto add_stage = [&](const rhi::ShaderCode& code,
                        VkShaderStageFlagBits stage) {
@@ -1356,6 +1368,7 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
     stages[stage_count].stage = stage;
     stages[stage_count].module = m;
     stages[stage_count].pName = "main";
+    PinSubgroupSize(stages[stage_count], required[stage_count]);
     stage_count++;
     return true;
   };
@@ -1491,6 +1504,8 @@ rhi::Pipeline* VulkanDevice::CreateComputePipeline(
   ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
   ci.stage.module = module;
   ci.stage.pName = "main";
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo required{};
+  PinSubgroupSize(ci.stage, required);
   ci.layout = layout->layout;
   if (desc.dispatch_base)
     ci.flags = VK_PIPELINE_CREATE_DISPATCH_BASE_BIT;
@@ -1814,6 +1829,17 @@ bool VulkanDevice::ReadTimestamps(rhi::TimestampPool* pool,
   return vkGetQueryPoolResults(native.device, p->pool, first, count,
                                count * sizeof(u64), out, sizeof(u64),
                                VK_QUERY_RESULT_64_BIT) == VK_SUCCESS;
+}
+
+void VulkanDevice::PinSubgroupSize(
+    VkPipelineShaderStageCreateInfo& stage,
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo& required) const {
+  if (!(pinned_subgroup_stages_ & stage.stage))
+    return;
+  required = {
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO};
+  required.requiredSubgroupSize = caps_.subgroup_size;
+  stage.pNext = &required;
 }
 
 void VulkanDevice::SavePipelineCache(bool force) {
