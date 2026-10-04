@@ -1,19 +1,14 @@
 # Prosperity <img src="https://i.imgur.com/zOaZAH2.png" width="40" height="40" />
 
-Prosperity (formerly known as PS4Delta) is a PS4 and PS5 emulator for Linux and Android.
+Prosperity (formerly known as PS4Delta) is a PS4 and PS5 emulator.
 
-Join the community on [Discord](https://discord.gg/3FKUEk2FWP).
+> Join the community on [Discord](https://discord.gg/3FKUEk2FWP).
 
-## Platform support
+CPU code runs directly on AMD64 or through FEX on ARM64.
+PS4 and PS5 graphics are translated to SPIR-V and recompiled for your GPU.
 
-| Platform | Tier | Status |
-| --- | --- | --- |
-| Linux (AMD64) | 1 | Works well |
-| Linux (ARM64) | 2 | Supported |
-| Android | 2 | Supported |
-| Windows | 3 | Planned, community help welcome |
-
-CPU code runs directly on AMD64 or through FEX on ARM64. PS4/PS5 graphics are translated to SPIR-V and recompiled for your GPU.
+Prosperity aims to provide a low-level emulation (LLE) sandbox where games run
+with their original system modules.
 
 ## Showcase
 
@@ -47,7 +42,7 @@ with flakes enabled and your own console dumps. See [building](docs/building.md)
 for other build targets and [installation & running](docs/installation.md) for PS5 modules,
 TTY use, and CLI options.
 
-## Requirements
+## Requirements and platform support
 
 ### On Linux
 * __Processor__: x86-64 (made in the last 10 years) with AVX, SSE4.2 and BMI1, or an aarch64 host.
@@ -58,6 +53,13 @@ TTY use, and CLI options.
 * __Processor__: Preferably something new, like one of those fancy new Snapdragons.
 * __RAM__: 12 GB of RAM (8 GB may work, depending on the type of game you want to run).
 * __Graphics__: A GPU with support for Vulkan 1.4+.
+
+| Platform | Tier | Status |
+| --- | --- | --- |
+| Linux (AMD64) | 1 | Works well |
+| Linux (ARM64) | 2 | Supported |
+| Android | 2 | Supported |
+| Windows | 3 | Planned, community help welcome |
 
 ## Thanks and credits
 - zecoaxco
