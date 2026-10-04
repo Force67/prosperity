@@ -296,6 +296,7 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
         L(keep);
       }
       and_(rsp, -16);  // the guest rsp is safe in rbx either way
+#if defined(DELTA_SYSCALL_ZONES)
       if (zone) {
         // [rsp, +48) the six arg registers, +48 the zone, +56 the result.
         const Xbyak::Reg64 args[] = {rdi, rsi, rdx, rcx, r8, r9};
@@ -315,7 +316,9 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
         mov(rax, reinterpret_cast<uintptr_t>(&SyscallZoneEnd));
         call(rax);
         mov(rax, qword[rsp + 56]);
-      } else {
+      } else
+#endif
+      {
         mov(rax, handler);
         call(rax);  // handler(rdi,rsi,rdx,rcx,r8,r9) -> rax (args intact)
       }
