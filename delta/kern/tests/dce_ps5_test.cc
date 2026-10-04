@@ -3,6 +3,7 @@
 #include "guest/display.h"
 #include "guest/session.h"
 #include "kern/lv2/error_table.h"
+#include "kern/lv2/sys_event.h"
 #include "kern/object_table.h"
 #include "kern/ps5/dev/dce_dev.h"
 #include "options/options.h"
@@ -105,6 +106,29 @@ TEST_P(DcePs5SubmissionTest,
   EXPECT_FALSE(kern::DcePs5IsDisplayBuffer(buffer[2]));
 }
 
+TEST_P(DcePs5SubmissionTest, BlankFlipCompletesWithoutARegisteredBuffer) {
+  u64 label = 0;
+  u64 flip[9]{};
+  flip[1] = ~u64(0);
+  flip[2] = 1 | (static_cast<u64>(GetParam()) << 32);
+  flip[3] = 42;
+  flip[6] = reinterpret_cast<u64>(&label);
+  ASSERT_EQ(Call({.op = 0x36,
+                  .size = sizeof(flip),
+                  .data = reinterpret_cast<u64>(flip)}),
+            0);
+  EXPECT_EQ(label, 1u);
+  EXPECT_EQ(kern::DcePs5ScanoutBuffer(), 0u);
+  u64 status[16]{};
+  ASSERT_EQ(Call({.op = 0xa,
+                  .size = sizeof(status),
+                  .data = reinterpret_cast<u64>(status)}),
+            0);
+  EXPECT_EQ(status[0], 42u);
+  EXPECT_EQ(status[2], 1u);
+  EXPECT_EQ(reinterpret_cast<i32*>(status)[10], -1);
+}
+
 INSTANTIATE_TEST_SUITE_P(Firmware,
                          DcePs5SubmissionTest,
                          testing::Values(0u, 1u, 5u, 9u));
@@ -164,3 +188,56 @@ TEST_F(DcePs5Test, RejectsInvalidPayloadsAndUnknownRequests) {
   }
 }
 }  // namespace
+
+TEST_F(DcePs5Test, VblankAndFlipEventsHaveSeparateSources) {
+  guest::RequestStop();
+  auto& queue = *new kern::Equeue(objects, "videoout");
+  constexpr u64 flip = 0x6010000000000;
+  constexpr u64 vblank = 0x7010000000000;
+  queue.AddEvent(flip, -13, nullptr);
+  queue.AddEvent(vblank, -13, nullptr);
+  kern::kevent_t events[2]{};
+  const kern::ktimespec timeout{};
+
+  queue.Trigger(-1, -13, 123, true);
+  ASSERT_EQ(queue.Kevent(nullptr, 0, events, 2, &timeout), 1);
+  EXPECT_EQ(events[0].ident, vblank);
+  EXPECT_EQ(events[0].data, 123);
+
+  queue.Trigger(-1, -13, 456);
+  ASSERT_EQ(queue.Kevent(nullptr, 0, events, 2, &timeout), 1);
+  EXPECT_EQ(events[0].ident, flip);
+  EXPECT_EQ(events[0].data, 456);
+}
+
+TEST_F(DcePs5Test, UnregisterBuffersClearsScanoutAndAllowsReplacement) {
+  u64 buffer[6]{};
+  buffer[2] = 0x1200000000ull;
+  ASSERT_EQ(Call({.op = 0x37,
+                  .size = sizeof(buffer),
+                  .data = reinterpret_cast<u64>(buffer)}),
+            0);
+  EXPECT_TRUE(kern::DcePs5IsDisplayBuffer(buffer[2]));
+  u64 other[6]{};
+  other[2] = 0x1400000000ull;
+  ASSERT_EQ(Call({.op = 0x37,
+                  .size = sizeof(other),
+                  .data = reinterpret_cast<u64>(other),
+                  .value = 1}),
+            0);
+  ASSERT_EQ(Call({.op = 4}), 0);
+  EXPECT_TRUE(kern::DcePs5IsDisplayBuffer(other[2]));
+  ASSERT_EQ(Call({.op = 4, .value = 1}), 0);
+  EXPECT_FALSE(kern::DcePs5IsDisplayBuffer(other[2]));
+  EXPECT_EQ(Call({.op = 5}), 0);
+  EXPECT_FALSE(kern::DcePs5IsDisplayBuffer(buffer[2]));
+  EXPECT_EQ(kern::DcePs5ScanoutBuffer(), 0u);
+  buffer[2] = 0x1300000000ull;
+  ASSERT_EQ(Call({.op = 0x37,
+                  .size = sizeof(buffer),
+                  .data = reinterpret_cast<u64>(buffer)}),
+            0);
+  EXPECT_EQ(kern::DcePs5ScanoutBuffer(), buffer[2]);
+  EXPECT_EQ(Call({.op = 4, .value = 16}),
+            -static_cast<i32>(kern::SysError::eINVAL));
+}

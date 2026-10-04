@@ -158,6 +158,7 @@ static void StartVblankPump() {
       // Vblank (-14): a free-running tick for vblank waiters / frame timing.
       i64 vdata = static_cast<i64>((count << 16) | (seq << 12) | tsc);
       TriggerAllEqueues(-1, kEVFILT_VIDEOOUT, vdata);
+      TriggerAllEqueues(-1, kEVFILT_DISPLAY, vdata, true);
       // Flip (-13): the engine reads data>>16 as the LAST flipped frame index
       // and asserts unless the sim has produced it. Never post before the first
       // real flip (during loading, any value is "out of range"); afterwards it
@@ -500,7 +501,7 @@ void Equeue::TriggerGnm(i64 data, bool raw_data) {
     cv_.NotifyAll();
 }
 
-void Equeue::Trigger(i64 ident, i16 filter, i64 data) {
+void Equeue::Trigger(i64 ident, i16 filter, i64 data, bool vblank) {
   base::LockGuard<base::Mutex> lk(m_);
   bool any = false;
   for (auto& k : notes_) {
@@ -516,6 +517,9 @@ void Equeue::Trigger(i64 ident, i16 filter, i64 data) {
     if (filter == kEVFILT_VIDEOOUT && k.ev.ident < kGnmIdentMax &&
         !(kIdent0Vblank && k.ev.ident == 0))
       continue;
+    // PS5 VideoOut encodes vblank as event type 7 in ident bits 48..63.
+    if (filter == kEVFILT_DISPLAY && ((k.ev.ident >> 48) == 7) != vblank)
+      continue;
     k.active = true;
     k.ev.data = data;
     any = true;
@@ -524,10 +528,10 @@ void Equeue::Trigger(i64 ident, i16 filter, i64 data) {
     cv_.NotifyAll();
 }
 
-void TriggerAllEqueues(i64 ident, i16 filter, i64 data) {
+void TriggerAllEqueues(i64 ident, i16 filter, i64 data, bool vblank) {
   base::LockGuard<base::Mutex> lk(g_eq_reg_m);
   for (auto* eq : g_equeues)
-    eq->Trigger(ident, filter, data);
+    eq->Trigger(ident, filter, data, vblank);
 }
 
 int PS4ABI sys_kqueue() {

@@ -157,6 +157,20 @@ i32 DceDevicePs5::Ioctl(u32 command, void* args) {
       host::Init("prosperity", static_cast<u32>(p[3]),
                  static_cast<u32>(p[3] >> 32));
       break;
+    case 4: {
+      if (r.size || r.value >= 16)
+        return -static_cast<i32>(SysError::eINVAL);
+      std::lock_guard lock(g_mutex);
+      if (g_port.scanout == g_port.buffers[r.value])
+        g_port.scanout = 0;
+      g_port.buffers[r.value] = 0;
+      reinterpret_cast<u64*>(pool_ + 0xa0)[r.value] = 0;
+      break;
+    }
+    case 5:
+      if (r.size || r.value >= 16)
+        return -static_cast<i32>(SysError::eINVAL);
+      break;
     case 6:
       if (r.value > 2)
         return -static_cast<i32>(SysError::eINVAL);
@@ -176,11 +190,13 @@ i32 DceDevicePs5::Ioctl(u32 command, void* args) {
         return -static_cast<i32>(SysError::eINVAL);
       const u32 flip_mode = static_cast<u32>(p[2]);
       const u32 submission = static_cast<u32>(p[2] >> 32);
-      if (p[1] >= 16 || !flip_mode || flip_mode > 9 || flip_mode == 7 ||
+      const bool blank = p[1] == ~u64(0) || p[1] == ~u32(0);
+      if ((!blank && p[1] >= 16) || !flip_mode || flip_mode > 9 ||
+          flip_mode == 7 ||
           (submission != 0 && submission != 1 && submission != 5 &&
            submission != 9))
         return -static_cast<i32>(SysError::eINVAL);
-      const int index = static_cast<int>(p[1]);
+      const int index = blank ? -1 : static_cast<int>(p[1]);
       const int mode = (flip_mode - 1) % 3 == 1 ? 2 : 1;
       const i64 arg = static_cast<i64>(p[3]);
       auto* label = reinterpret_cast<u64*>(p[6]);
@@ -190,13 +206,14 @@ i32 DceDevicePs5::Ioctl(u32 command, void* args) {
       u64 scanout;
       {
         std::lock_guard lock(g_mutex);
-        scanout = g_port.buffers[index];
-        if (!scanout)
+        scanout = blank ? 0 : g_port.buffers[index];
+        if (!blank && !scanout)
           return -static_cast<i32>(SysError::eINVAL);
         g_port.scanout = scanout;
         g_port.submit_tsc = GuestTsc();
       }
-      prosperity_agc_flip(scanout);
+      if (!blank)
+        prosperity_agc_flip(scanout);
       if (r.result && r.result_size == 8)
         *reinterpret_cast<u64*>(r.result) = 0;
       // AGC passes a stack label, so completion must precede returning.
@@ -208,7 +225,8 @@ i32 DceDevicePs5::Ioctl(u32 command, void* args) {
               g_port.time = static_cast<u64>(base::TickClock::NowNs());
               g_port.tsc = GuestTsc();
               ++g_port.count;
-              labels[index] = 1;
+              if (!blank)
+                labels[index] = 1;
             }
             if (label)
               *label = 1;

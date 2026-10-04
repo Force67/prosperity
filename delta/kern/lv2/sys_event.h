@@ -66,7 +66,7 @@ class Equeue : public Object {
 
   // Mark every knote matching (ident,filter) ready and wake waiters. ident<0
   // matches any ident. Called by the vblank pump / dce on flip.
-  void Trigger(i64 ident, i16 filter, i64 data);
+  void Trigger(i64 ident, i16 filter, i64 data, bool vblank = false);
   void TriggerGnm(i64 data, bool raw_data = false);
 
   // Register a knote directly (no kevent syscall). Used by the HLE VideoOut
@@ -105,7 +105,7 @@ class Equeue : public Object {
 
 // Fan a (filter,data) trigger out to every live equeue. The vblank pump uses
 // this so it needn't know which equeue a flip event landed on.
-void TriggerAllEqueues(i64 ident, i16 filter, i64 data);
+void TriggerAllEqueues(i64 ident, i16 filter, i64 data, bool vblank = false);
 
 // Count one submitted flip and post a display event with the new count. The
 // engine's pacing reads data>>16 as "frames flipped", so it must track real
