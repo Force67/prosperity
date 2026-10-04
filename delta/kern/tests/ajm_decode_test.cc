@@ -24,10 +24,10 @@ struct StreamResult {
 };
 static_assert(sizeof(StreamResult) == 32);
 
-class AjmDecodeTest : public testing::TestWithParam<bool> {
+class AjmDecodeTest : public testing::Test {
  protected:
   void SetUp() override {
-    device = new kern::AjmDevice(objects, GetParam());
+    device = new kern::AjmDevice(objects);
     std::array<u8, 40> command{};
     u32 codec = 1;
     std::memcpy(command.data() + 8, &codec, 4);
@@ -64,21 +64,11 @@ class AjmDecodeTest : public testing::TestWithParam<bool> {
   void Start() {
     const u32 size = batch.size() - 8;
     std::memcpy(batch.data() + 4, &size, 4);
-    struct BatchInfo {
-      const void* buffer;
-      u64 offset, size;
-      void* last_job;
-      const void* last_job_ra;
-    } info{batch.data(), batch.size(), batch.size(), nullptr, nullptr};
     std::array<u8, 40> command{};
-    const u64 address = GetParam() ? reinterpret_cast<u64>(batch.data())
-                                   : reinterpret_cast<u64>(&info);
+    const u64 address = reinterpret_cast<u64>(batch.data());
+    const u32 span = batch.size();
     std::memcpy(command.data() + 8, &address, 8);
-    std::memcpy(command.data() + 16, &size, 4);
-    if (GetParam()) {
-      const u32 span = batch.size();
-      std::memcpy(command.data() + 16, &span, 4);
-    }
+    std::memcpy(command.data() + 16, &span, 4);
     Ioctl(0xc0288907, command);
     batch.clear();
   }
@@ -123,7 +113,7 @@ class AjmDecodeTest : public testing::TestWithParam<bool> {
   std::vector<u8> batch;
 };
 
-TEST_P(AjmDecodeTest, ValidFrameDecodesNonzeroPcmAndResetRestartsHistory) {
+TEST_F(AjmDecodeTest, ValidFrameDecodesNonzeroPcmAndResetRestartsHistory) {
   Initialize();
   std::array<i16, 257> pcm;
   pcm.fill(0x5a5a);
@@ -145,7 +135,7 @@ TEST_P(AjmDecodeTest, ValidFrameDecodesNonzeroPcmAndResetRestartsHistory) {
   EXPECT_EQ(pcm, repeated);
 }
 
-TEST_P(AjmDecodeTest, PartialInputDoesNotConsumeOrWriteAndCanBeRetried) {
+TEST_F(AjmDecodeTest, PartialInputDoesNotConsumeOrWriteAndCanBeRetried) {
   Initialize();
   std::array<i16, 257> pcm;
   pcm.fill(0x5a5a);
@@ -164,7 +154,7 @@ TEST_P(AjmDecodeTest, PartialInputDoesNotConsumeOrWriteAndCanBeRetried) {
   EXPECT_EQ(pcm[256], 0x5a5a);
 }
 
-TEST_P(AjmDecodeTest, SmallOutputDoesNotAdvanceDecoderAndCanBeRetried) {
+TEST_F(AjmDecodeTest, SmallOutputDoesNotAdvanceDecoderAndCanBeRetried) {
   Initialize();
   std::array<i16, 257> pcm;
   pcm.fill(0x5a5a);
@@ -183,7 +173,7 @@ TEST_P(AjmDecodeTest, SmallOutputDoesNotAdvanceDecoderAndCanBeRetried) {
   EXPECT_EQ(pcm[256], 0x5a5a);
 }
 
-TEST_P(AjmDecodeTest, MultipleSuperframesReportConsumedPaddingAndSampleCount) {
+TEST_F(AjmDecodeTest, MultipleSuperframesReportConsumedPaddingAndSampleCount) {
   Initialize();
   std::array<u8, 192> input;
   for (u32 i = 0; i < 3; ++i)
@@ -199,11 +189,4 @@ TEST_P(AjmDecodeTest, MultipleSuperframesReportConsumedPaddingAndSampleCount) {
   CheckPcm(pcm.data());
   EXPECT_EQ(pcm[768], 0x5a5a);
 }
-
-INSTANTIATE_TEST_SUITE_P(Platforms,
-                         AjmDecodeTest,
-                         testing::Bool(),
-                         [](const testing::TestParamInfo<bool>& info) {
-                           return info.param ? "Ps5" : "Ps4";
-                         });
 }  // namespace

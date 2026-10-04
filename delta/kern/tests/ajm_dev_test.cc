@@ -84,15 +84,6 @@ constexpr u64 kFlagStream = 1ull << 47;
 constexpr u64 kFlagMultipleFrames = 1ull << 12;
 constexpr u64 kFlagControlInitialize = 1ull << 14;
 
-// batch-info block, as PS4's audio job client records it.
-struct BatchInfo {
-  void* pBuffer;
-  u64 szOffset;
-  u64 szBuffer;
-  void* pLastGoodJob;
-  const void* pLastGoodJobRa;
-};
-
 u32 IoctlResult(const std::array<u8, 40>& block) {
   u32 v;
   std::memcpy(&v, block.data(), 4);
@@ -101,7 +92,7 @@ u32 IoctlResult(const std::array<u8, 40>& block) {
 
 TEST(AjmDevice, InitializeAndInstanceCreate) {
   kern::ObjectTable table;
-  auto& device = *new kern::AjmDevice(table, true);
+  auto& device = *new kern::AjmDevice(table);
 
   std::array<u8, 40> init{};
   ASSERT_EQ(device.Ioctl(0xC02889C8, init.data()), 0);
@@ -136,7 +127,7 @@ TEST(AjmDevice, InitializeAndInstanceCreate) {
 // sideband result, with the stream/mframe blocks still laid out).
 TEST(AjmDevice, BatchStartDecodesAt9Frame) {
   kern::ObjectTable table;
-  auto& device = *new kern::AjmDevice(table, true);
+  auto& device = *new kern::AjmDevice(table);
 
   std::array<u8, 40> create{};
   const u64 flags = kInstanceFlag2ChS16;
@@ -207,7 +198,7 @@ TEST(AjmDevice, BatchStartDecodesAt9Frame) {
 // A malformed command word must report the malformed-batch error.
 TEST(AjmDevice, MalformedBatchIsRejected) {
   kern::ObjectTable table;
-  auto& device = *new kern::AjmDevice(table, true);
+  auto& device = *new kern::AjmDevice(table);
 
   std::vector<u8> bitstream(16, 0);
   BatchWriter writer(bitstream);
@@ -221,31 +212,6 @@ TEST(AjmDevice, MalformedBatchIsRejected) {
   std::memcpy(start.data() + 0x10, &offset, 4);
   ASSERT_EQ(device.Ioctl(0xC0288907, start.data()), 0);
   EXPECT_EQ(IoctlResult(start), 0x80930011u);
-}
-
-// PS4's batch start passes the batch-info block pointer instead of fields.
-TEST(AjmDevice, Ps4BatchStartReadsBatchInfo) {
-  kern::ObjectTable table;
-  auto& device = *new kern::AjmDevice(table, false);
-
-  std::vector<u8> bitstream(16, 0);
-  BatchWriter writer(bitstream);
-  writer.JobHeader(1, 16);
-  std::memset(bitstream.data() + 8, 0, 8);
-
-  BatchInfo info{};
-  info.pBuffer = bitstream.data();
-  info.szOffset = bitstream.size();
-  info.szBuffer = bitstream.size();
-
-  std::array<u8, 40> start{};
-  const u64 info_ptr = (u64)&info;
-  std::memcpy(start.data() + 8, &info_ptr, 8);
-  ASSERT_EQ(device.Ioctl(0xC0288907, start.data()), 0);
-  EXPECT_EQ(IoctlResult(start), 0x80930011u);  // malformed (empty job)
-  u32 batch;
-  std::memcpy(&batch, start.data() + 0x20, 4);
-  EXPECT_EQ(batch, 0u);
 }
 
 }  // namespace

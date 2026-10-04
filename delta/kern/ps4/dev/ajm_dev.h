@@ -37,9 +37,7 @@ namespace kern {
 // batch wait returns (which we always let succeed).
 class AjmDevice : public Device {
  public:
-  // PS4 passes a batch-info pointer; PS5 passes buffer and offset fields.
-  // The platform selects the batch-start layout.
-  AjmDevice(ObjectTable& objects, bool ps5);
+  explicit AjmDevice(ObjectTable& objects);
   i32 Ioctl(u32 command, void* args) override;
 
  private:
@@ -49,7 +47,6 @@ class AjmDevice : public Device {
   bool ExecuteBatch(void* pBuffer, size_t offset);
   InstanceState* FindInstance(u32 id);
 
-  const bool ps5_;
   std::mutex mutex_;
   u32 next_instance_ = 1;
   u32 next_batch_ = 1;

@@ -96,16 +96,6 @@ const char* CodecName(u32 codec) {
   }
 }
 
-// batch-info block, as the client records it (PS4's batch start passes a
-// pointer to one of these; PS5 passes the fields extracted).
-struct BatchInfo {
-  void* pBuffer;
-  u64 szOffset;
-  u64 szBuffer;
-  void* pLastGoodJob;
-  const void* pLastGoodJobRa;
-};
-
 void TraceHex(const char* tag, const void* data, size_t size) {
   base::String line;
   base::FormatTo(line, "ajm: {} ({} bytes):", tag, size);
@@ -132,8 +122,7 @@ struct AjmDevice::Job {
   bool is_control = false;
 };
 
-AjmDevice::AjmDevice(ObjectTable& objects, bool ps5)
-    : Device(objects), ps5_(ps5) {}
+AjmDevice::AjmDevice(ObjectTable& objects) : Device(objects) {}
 
 // One job = a type-0 header (instance id, total size) followed by typed
 // commands. Command words: bits 0-3 type, bit 4 marks output buffers,
@@ -397,20 +386,9 @@ i32 AjmDevice::Ioctl(u32 cmd, void* data) {
         instances_.erase(Rd32(data, kAOff));
         return 0;
       }
-      case 0xC0288907: {  // batch start
-        void* buffer;
-        size_t offset;
-        if (ps5_) {
-          buffer = reinterpret_cast<void*>(Rd64(data, kAOff));
-          offset = Rd32(data, kBOff);
-        } else {
-          // PS4 passes the batch-info block pointer; pull the fields out.
-          auto* info = reinterpret_cast<BatchInfo*>(Rd64(data, kAOff));
-          if (!info)
-            return kErrInvalidParameter;
-          buffer = info->pBuffer;
-          offset = (size_t)info->szOffset;
-        }
+      case 0xC0288907: {  // batch start {pBuffer, size, priority, pBatchError}
+        void* buffer = reinterpret_cast<void*>(Rd64(data, kAOff));
+        const size_t offset = Rd32(data, kBOff);
         if (!buffer || !offset)
           return kErrInvalidParameter;
         if (kAjmTrace)

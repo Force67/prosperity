@@ -186,8 +186,7 @@ static Device* MakeDevice(const char* device_name) {
       proc->GetPlatform() == kern::Process::Platform::kPs5)
     dev = new RandomDevice(proc->GetObjTable());
   if (xname == "ajm")
-    dev = new AjmDevice(proc->GetObjTable(),
-                        proc && proc->GetPlatform() == Process::Platform::kPs5);
+    dev = new AjmDevice(proc->GetObjTable());
   /*there are multiple of these*/
   if (xname.find("dmem", 0, 4) != base::StringRef::npos)
     dev = (proc && proc->GetPlatform() == kern::Process::Platform::kPs5)

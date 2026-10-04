@@ -545,9 +545,12 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
       InvokeRequest call{request.method, request.num_in, 0, 0, request.inputs,
                          nullptr,        &method_result};
       Invocation invocation(&call, kid);
+      TraceInvoke(kid, client.service.c_str(), &call, client.impl != nullptr);
+      // With no service behind the client, accept the call like the sync path
+      // does; its result then reads back as an empty success.
       u32 id = 0;
-      const i32 result = client.impl ? client.impl->InvokeAsync(invocation, id)
-                                     : -static_cast<i32>(SysError::eNOSYS);
+      const i32 result =
+          client.impl ? client.impl->InvokeAsync(invocation, id) : 0;
       if (!result)
         std::memcpy(request.request_id, &id, sizeof(id));
       set_result(result);
@@ -567,14 +570,21 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
       std::memcpy(&request, in, sizeof(request));
       if (!Readable(out, sizeof(u32)) || !Readable(request.result, sizeof(i32)))
         return -static_cast<i32>(SysError::eFAULT);
+      Client client = LookupClient(kid);
+      if (!client.impl) {
+        InvokeRequest call{request.method, 0,       request.num_out, 0,
+                           nullptr,        request.outputs, request.result};
+        Invocation empty(&call, kid);
+        empty.ReplyEmpty();
+        empty.SetResult(0);
+        set_result(0);
+        return 0;
+      }
       if (request.num_out)
         return -static_cast<i32>(SysError::eNOSYS);
-      Client client = LookupClient(kid);
       i32 method_result = 0;
-      const i32 result = client.impl ? client.impl->GetAsyncResult(
-                                           kid, request.method,
-                                           request.request_id, method_result)
-                                     : -static_cast<i32>(SysError::eNOSYS);
+      const i32 result = client.impl->GetAsyncResult(
+          kid, request.method, request.request_id, method_result);
       if (!result)
         std::memcpy(request.result, &method_result, sizeof(method_result));
       set_result(result);
