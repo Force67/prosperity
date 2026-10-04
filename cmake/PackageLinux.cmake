@@ -19,5 +19,6 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS
   "libegl1, libopengl0, libasound2t64, libpulse0, libudev1, libdbus-1-3, libx11-6, libxext6, libxrandr2, libxcursor1, libxfixes3, libxi6, libxss1, libxtst6, libxkbcommon0, libwayland-client0, libwayland-cursor0, libwayland-egl1, libdecor-0-0")
 
 install(FILES "${CMAKE_SOURCE_DIR}/LICENSE"
+              "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.txt"
         DESTINATION share/doc/prosperity COMPONENT Runtime)
 include(CPack)

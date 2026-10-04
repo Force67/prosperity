@@ -67,6 +67,8 @@
           installPhase = ''
             mkdir -p $out/bin
             cp ps4delta $out/bin/
+            install -Dm644 LICENSE $out/share/doc/prosperity/LICENSE
+            install -Dm644 THIRD_PARTY_NOTICES.txt $out/share/doc/prosperity/THIRD_PARTY_NOTICES.txt
           '';
 
           meta = with pkgs.lib; {

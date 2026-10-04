@@ -72,3 +72,6 @@ TTY use, and CLI options.
 Prosperity ships no Sony code. You must supply your own decrypted system modules
 and games, dumped from hardware you own. See
 [docs/installation.md](docs/installation.md).
+
+Dependency licenses and copyright notices are collected in
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
