@@ -190,3 +190,25 @@ if(DELTA_TRACY)
   target_compile_options(tracy_client PRIVATE -w)
   target_link_libraries(tracy_client PUBLIC pthread dl)
 endif()
+
+# --------------------------------------------------------------------------
+# LibAtrac9 (MIT, Alex Barney): ATRAC9 decoder. Plain C99, no config needed.
+# The /dev/ajm device links this to decode the streams the guest's own
+# audio job client submits (see delta/kern/ps4/dev/ajm_dev.cc).
+# --------------------------------------------------------------------------
+add_library(atrac9 STATIC
+  libatrac9/src/band_extension.c
+  libatrac9/src/bit_allocation.c
+  libatrac9/src/bit_reader.c
+  libatrac9/src/decinit.c
+  libatrac9/src/decoder.c
+  libatrac9/src/huffCodes.c
+  libatrac9/src/imdct.c
+  libatrac9/src/libatrac9.c
+  libatrac9/src/quantization.c
+  libatrac9/src/scale_factors.c
+  libatrac9/src/tables.c
+  libatrac9/src/unpack.c
+  libatrac9/src/utility.c
+)
+target_include_directories(atrac9 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/libatrac9/src)
