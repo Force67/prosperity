@@ -429,14 +429,10 @@ i32 MemorySubscription(ClientState& state, const Pending& pending, bool add) {
   return 0;
 }
 
-i32 SaveHost(const u8* data, base::String& host, bool& exists) {
-  base::String dir, title;
-  if (Read<i32>(data, 0x400) != 1 || !String(data + 0x414, 32, dir) ||
-      !Component(dir) || !String(data + 0x404, 16, title))
+i32 SaveHost(const base::String& dir, base::String& host, bool& exists) {
+  if (!Component(dir))
     return kParameter;
-  if (!title.empty())
-    return kUnsupported;
-  title = vfs::TitleId();
+  base::String title = vfs::TitleId();
   if (title.empty())
     title = "SAVEDATA";
   if (!Component(title))
@@ -457,6 +453,16 @@ i32 SaveHost(const u8* data, base::String& host, bool& exists) {
       std::filesystem::is_symlink(host.c_str(), error))
     return kParameter;
   return 0;
+}
+
+i32 SaveHost(const u8* data, base::String& host, bool& exists) {
+  base::String dir, title;
+  if (Read<i32>(data, 0x400) != 1 || !String(data + 0x414, 32, dir) ||
+      !Component(dir) || !String(data + 0x404, 16, title))
+    return kParameter;
+  if (!title.empty())
+    return kUnsupported;
+  return SaveHost(dir, host, exists);
 }
 
 i32 CreateSave(const base::String& host, u64 blocks) {
@@ -686,22 +692,19 @@ i32 SyncMemory(ClientState& state, const u8* data) {
   return 0;
 }
 
-i32 Mount(ClientState& state, const Pending& pending, std::vector<u8>& reply) {
-  const auto* data = pending.data.data();
-  base::String host;
-  bool exists = false;
-  if (const auto result = SaveHost(data, host, exists))
-    return result;
+i32 MountHost(ClientState& state,
+              const base::String& host,
+              bool exists,
+              u32 mode,
+              u32 original_mode,
+              u64 blocks,
+              std::vector<u8>& reply) {
   if (MemoryWriting(host))
     return kBusy;
-  if (data[0x434])
-    return kUnsupported;
-  const u32 mode = Read<u32>(data, 0x490);
-  const u32 original_mode = Read<u32>(data, 0x494);
   if ((mode & ~0x2fu) || !(mode & 3) || (mode & 3) == 3 || !original_mode ||
       (original_mode & ~0x27u) || (original_mode & 0x24) == 0x24 ||
       ((original_mode & 1) && (original_mode & 0x24)) ||
-      ((original_mode & 0x24) && Read<u64>(data, 0x488) < 96))
+      ((original_mode & 0x24) && blocks < 96))
     return kParameter;
   const auto available =
       std::find(g_mount_slots.begin(), g_mount_slots.end(), false);
@@ -713,7 +716,6 @@ i32 Mount(ClientState& state, const Pending& pending, std::vector<u8>& reply) {
   if (exists && (original_mode & 4))
     return kExists;
   if (!exists) {
-    const u64 blocks = Read<u64>(data, 0x488);
     if (const auto result = CreateSave(host, blocks))
       return result;
   }
@@ -731,13 +733,43 @@ i32 Mount(ClientState& state, const Pending& pending, std::vector<u8>& reply) {
   return 0;
 }
 
-i32 Unmount(ClientState& state,
-            const Pending& pending,
-            std::vector<u8>& reply) {
-  base::String point;
-  if (!String(pending.data.data(), 16, point))
+i32 Mount(ClientState& state, const Pending& pending, std::vector<u8>& reply) {
+  const auto* data = pending.data.data();
+  base::String host;
+  bool exists = false;
+  if (const auto result = SaveHost(data, host, exists))
+    return result;
+  if (data[0x434])
+    return kUnsupported;
+  return MountHost(state, host, exists, Read<u32>(data, 0x490),
+                   Read<u32>(data, 0x494), Read<u64>(data, 0x488), reply);
+}
+
+// The PS5 library's mount: user at 0, directory at 4, blocks at 0x28 and the
+// mount mode at 0x38. The reply matches the PS4 one. PS5 titles pass create
+// together with create-if-missing (0x20), and block counts below the PS4
+// minimum; both mean create-if-missing here.
+i32 MountPs5(ClientState& state,
+             const Pending& pending,
+             std::vector<u8>& reply) {
+  const auto* data = pending.data.data();
+  base::String dir, host;
+  bool exists = false;
+  if (Read<i32>(data, 0) != 1 || !String(data + 4, 32, dir))
     return kParameter;
-  const u32 backup = Read<u32>(pending.data.data(), 16);
+  if (const auto result = SaveHost(dir, host, exists))
+    return result;
+  u32 mode = Read<u32>(data, 0x38);
+  if (mode & 0x20)
+    mode &= ~4u;
+  return MountHost(state, host, exists, mode & 0x2f, mode & 0x27,
+                   std::max<u64>(Read<u64>(data, 0x28), 96), reply);
+}
+
+i32 UnmountPoint(ClientState& state,
+                 const base::String& point,
+                 u32 backup,
+                 std::vector<u8>& reply) {
   if (backup > 1)
     return kParameter;
   const auto it =
@@ -765,6 +797,38 @@ i32 Unmount(ClientState& state,
   g_mount_slots[it->slot] = false;
   state.mounts.erase(it);
   return 0;
+}
+
+i32 Unmount(ClientState& state,
+            const Pending& pending,
+            std::vector<u8>& reply) {
+  base::String point;
+  if (!String(pending.data.data(), 16, point))
+    return kParameter;
+  return UnmountPoint(state, point, Read<u32>(pending.data.data(), 16), reply);
+}
+
+// The PS5 library's unmount: the PS4 request behind a word of flags (the
+// upper half is set after a commit).
+i32 UnmountPs5(ClientState& state,
+               const Pending& pending,
+               std::vector<u8>& reply) {
+  base::String point;
+  if (!String(pending.data.data() + 4, 16, point))
+    return kParameter;
+  return UnmountPoint(state, point, Read<u32>(pending.data.data(), 20), reply);
+}
+
+// The PS5 library's commit of a mount point (at 4). Writes already land in
+// the host directory, so there is nothing to apply.
+i32 CommitPs5(ClientState& state, const Pending& pending) {
+  base::String point;
+  if (!String(pending.data.data() + 4, 16, point))
+    return kParameter;
+  const bool mounted =
+      std::any_of(state.mounts.begin(), state.mounts.end(),
+                  [&](const auto& mount) { return mount.point == point; });
+  return mounted ? 0 : kNotMounted;
 }
 
 struct CommandSizes {
@@ -811,6 +875,12 @@ CommandSizes Sizes(u32 command) {
     case 1:
     case 60:
       return {0x4a0, 32};
+    case 90:
+      return {200, 32};
+    case 92:
+      return {148, 132};
+    case 101:
+      return {88, 64};
     default:
       return {};
   }
@@ -1194,8 +1264,10 @@ i32 RestoreNotification(ClientState& state, const Pending& pending) {
 
 struct SaveData : Service {
   const char* Name() const override { return "SceSaveData"; }
+  // PS4 clients connect with their 4-byte SDK version, PS5 native ones with a
+  // 44-byte block.
   i32 Connect(const void* data, u64 size) override {
-    return data && size == 4 ? 0 : kParameter;
+    return data && (size == 4 || size == 44) ? 0 : kParameter;
   }
   void DestroyClient(u32 client) override {
     std::lock_guard lock(g_mutex);
@@ -1234,13 +1306,17 @@ struct SaveData : Service {
       const u64 size = command == 34 || command == 42 || command == 81 ? 0
                        : command == 43                                 ? 60
                        : command == 56                                 ? 4
+                       : command == 88                                 ? 68
                                                                        : 140;
       if (command != 34 && command != 42 && command != 56 && command != 63 &&
-          command != 81 && command != 43) {
+          command != 81 && command != 43 && command != 88) {
         inv.SetResult(kUnsupported);
         return;
       }
-      const u64 input_size = command == 42 ? 84 : command == 81 ? 60 : 4;
+      const u64 input_size = command == 42   ? 84
+                             : command == 81 ? 60
+                             : command == 88 ? 68
+                                             : 4;
       const auto* data = Input(inv, 1, input_size);
       if (!data || Read<u64>(header, 8) != input_size ||
           Read<u64>(header, 16) != size || !inv.CanReply(0, size)) {
@@ -1294,6 +1370,14 @@ struct SaveData : Service {
         }
       } else if (command == 56) {
         g_clients.try_emplace(inv.Client());
+      } else if (command == 88) {
+        // The PS5 library's initialize; its 68-byte reply is left zeroed.
+        g_clients.try_emplace(inv.Client());
+        const std::array<u8, 68> reply{};
+        inv.Reply(0, reply.data(), reply.size());
+        const u64 written = reply.size();
+        inv.Reply(1, &written, sizeof(written));
+        return;
       } else {
         const auto it = g_clients.find(inv.Client());
         if (it != g_clients.end()) {
@@ -1406,6 +1490,15 @@ struct SaveData : Service {
         case 1:
         case 60:
           result = Mount(state, *it, reply);
+          break;
+        case 90:
+          result = MountPs5(state, *it, reply);
+          break;
+        case 92:
+          result = UnmountPs5(state, *it, reply);
+          break;
+        case 101:
+          result = CommitPs5(state, *it);
           break;
         case 2:
           result = Unmount(state, *it, reply);
