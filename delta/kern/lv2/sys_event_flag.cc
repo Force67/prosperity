@@ -308,6 +308,9 @@ static u64 SystemFlagInit(const char* name) {
   // ready state as well; otherwise the real video output client blocks during open.
   if (n == "SceAvSettingEvf")
     return 1ull << 32;
+  // A/V shared-memory readiness: firmware 08.40 waits on bit 34, 13.60 on 40.
+  if (n == "SceAvControlEvf")
+    return (1ull << 34) | (1ull << 40);
   return ipmi::CommonDialogProcessStatus(name);
 }
 

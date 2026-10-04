@@ -7,6 +7,7 @@
 #include "guest/session.h"
 #include "kern/ipmi/ipmi.h"
 #include "kern/lv2/error_table.h"
+#include "kern/lv2/sys_event_flag.h"
 #include "kern/lv2/sys_mem.h"
 #include "kern/lv2/sys_regmgr.h"
 #include "kern/lv2/sys_semaphore.h"
@@ -67,6 +68,23 @@ TEST_F(SystemSettingsTest, ConsoleDefaults) {
   EXPECT_EQ(Get(0x123d6328eff5667b), 0);
   EXPECT_EQ(Get(0x3a73688d92700623), 0);
   EXPECT_EQ(Get(0x03d261027dfff0a4), 0);
+}
+
+TEST_F(SystemSettingsTest, VideoControlReadySurvivesRepeatedWaits) {
+  const int flag = kern::sys_evf_open("SceAvControlEvf");
+  ASSERT_GT(flag, 0);
+  for (const u64 pattern : {1ull << 34, 1ull << 40, 1ull << 34}) {
+    u64 result = 0;
+    u32 timeout = 0;
+    ASSERT_EQ(kern::sys_evf_wait(flag, pattern,
+                               kern::kEvfAnd | kern::kEvfClearPat, &result,
+                               &timeout),
+              0);
+    EXPECT_EQ(result, (1ull << 34) | (1ull << 40));
+  }
+  u64 result = 0;
+  EXPECT_EQ(kern::sys_evf_trywait(flag, 1, kern::kEvfAnd, &result),
+            -static_cast<i32>(kern::SysError::eBUSY));
 }
 
 TEST_F(SystemSettingsTest, ForegroundSuspendPermitIsExclusiveAndReusable) {
