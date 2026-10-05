@@ -3356,6 +3356,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
     if (!CsBatchWaitRange(e, kSyncImported))
       return false;
     NoteGuestWrite(base, e.guest_bytes);
+    CsForgetGuestRange(base, e.guest_bytes);
     e.gpu_dirty = false;
     e.cpu_writes.clear();
     return true;
@@ -3633,6 +3634,8 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
   // so the next dispatch does not read them as CPU writes after it.
   if (CsTracksGuestWrites())
     CollectGuestWrites();
+  if (!gpu_carries)
+    CsForgetGuestRange(base, e.guest_bytes);
   e.gpu_dirty = false;
   e.cpu_writes.clear();
   // The buffer lacks CPU bytes the merge adopted into guest memory: stage it
@@ -4768,6 +4771,7 @@ void CsForgetGuestRange(u64 base, u64 bytes) {
     CsRange& e = found->second;
     if (range_base >= end || base >= range_base + e.guest_bytes || e.gpu_dirty)
       continue;
+    e.wt_clean = false;
     e.last_validated_frame = -1;
     e.hash = 0;
     e.mirror_current = false;
