@@ -21,6 +21,9 @@ add_delta_test(savedata_lle_test
 add_delta_test(flexible_memory_lle_test
   SOURCES flexible_memory_lle_test.cc
   DEPS delta_kern xbyak)
+add_delta_test(ret_trace_test
+  SOURCES ret_trace_test.cc
+  DEPS delta_kern xbyak)
 
 add_delta_test(usb_dev_test
   SOURCES usb_dev_test.cc

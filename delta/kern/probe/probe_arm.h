@@ -74,11 +74,15 @@ void SetCallSkip(uintptr_t addr, long rax_val, int insn_len);
 // path (which functions run, in what order, before the null-DCB crash).
 void SetOrderTrace(uintptr_t addr, const char* label);
 
-// Return-value trace: int3 at a `mov ebx,eax` (89 c3) or `test eax,eax` (85 c0)
-// site right after a call; logs eax, emulates the instruction, and resumes.
+// Return-value trace at MOV EBX/ECX,EAX or TEST EAX/RAX after a call.
+// Logs the return value, emulates the instruction, and resumes.
 // Pins which sub-call in a run-once init returns the non-zero error that blocks
 // the bring-up. DELTA_RETTRACE="hexoff:label,..." arms it by eboot offset.
-void SetRetTrace(uintptr_t addr, const char* label, bool is_test = false);
+enum class RetTraceInstruction { kMovEbxEax, kMovEcxEax, kTestEax, kTestRax };
+void SetRetTrace(
+    uintptr_t addr,
+    const char* label,
+    RetTraceInstruction instruction = RetTraceInstruction::kMovEbxEax);
 
 // DELTA_FNWATCH="off:label,...": int3 hit-COUNTER at function entries, totals
 // printed every 2s, safe at any call frequency (unlike SetOrderTrace's per-hit

@@ -357,7 +357,7 @@ static int g_order_count = 0;
 static timespec g_order_start;
 static uintptr_t g_ret_addrs[8];
 static const char* g_ret_labels[8];
-static bool g_ret_is_test[8];  // site was `test eax,eax`, not `mov ebx,eax`
+static RetTraceInstruction g_ret_instructions[8];
 static int g_ret_count = 0;
 
 // DELTA_PS5_GLYPHGUARD call-skip (see crash.h): int3 planted over a blocking
@@ -786,27 +786,33 @@ bool OnSignal(int sig, siginfo_t* si, void* ucv) {
         gr[REG_RAX] = 0;
         eax = 0;
       }
-      char m[128];
-      int n = std::snprintf(m, sizeof(m), "[ret] %s eax=%#x\n", g_ret_labels[i],
-                            eax);
+      char m[256];
+      int n = std::snprintf(
+          m, sizeof(m), "[ret] %s eax=%#x rax=%#llx rbx=%#llx r15=%#llx\n",
+          g_ret_labels[i], eax, (unsigned long long)gr[REG_RAX],
+          (unsigned long long)gr[REG_RBX], (unsigned long long)gr[REG_R15]);
       if (n > 0) {
-        ssize_t w = write(2, m, (size_t)n);
+        ssize_t w =
+            write(2, m, base::Min(static_cast<size_t>(n), sizeof(m) - 1));
         (void)w;
       }
-      if (g_ret_is_test[i]) {
-        // emulate `test eax,eax`: CF/OF cleared, ZF/SF/PF from the result
+      const auto instruction = g_ret_instructions[i];
+      const bool wide = instruction == RetTraceInstruction::kTestRax;
+      if (instruction == RetTraceInstruction::kTestEax || wide) {
+        const u64 value = wide ? static_cast<u64>(gr[REG_RAX]) : eax;
         greg_t fl = gr[REG_EFL] & ~(greg_t)(0x8d5);  // CF PF AF ZF SF OF
-        if (eax == 0)
+        if (value == 0)
           fl |= 0x40;
-        if (eax & 0x80000000u)
+        if (value & (wide ? 1ull << 63 : 1ull << 31))
           fl |= 0x80;
-        if (__builtin_parity(eax & 0xff) == 0)
+        if (__builtin_parity(value & 0xff) == 0)
           fl |= 0x4;
         gr[REG_EFL] = fl;
       } else {
-        gr[REG_RBX] = eax;  // emulate `mov ebx,eax` (zero-extends)
+        gr[instruction == RetTraceInstruction::kMovEcxEax ? REG_RCX : REG_RBX] =
+            eax;
       }
-      gr[REG_RIP] = g_ret_addrs[i] + 2;  // resume past the 2-byte insn
+      gr[REG_RIP] = g_ret_addrs[i] + (wide ? 3 : 2);
       return true;
     }
   }
@@ -1259,11 +1265,13 @@ void SetOrderTrace(uintptr_t addr, const char* label) {
   g_order_labels[g_order_count] = label;
   g_order_count++;
 }
-void SetRetTrace(uintptr_t addr, const char* label, bool is_test) {
+void SetRetTrace(uintptr_t addr,
+                 const char* label,
+                 RetTraceInstruction instruction) {
   if (g_ret_count < 8) {
     g_ret_addrs[g_ret_count] = addr;
     g_ret_labels[g_ret_count] = label;
-    g_ret_is_test[g_ret_count] = is_test;
+    g_ret_instructions[g_ret_count] = instruction;
     g_ret_count++;
   }
 }

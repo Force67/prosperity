@@ -83,7 +83,7 @@ static void InvestigateMemDump();
 static void InvestigateRetTrace(Process&);
 
 // DELTA_RETTRACE="[module+]hexoff:label,...": return-value trace at each
-// `mov ebx,eax` / `test eax,eax` after a call, eboot-relative unless a module
+// MOV EBX/ECX,EAX or TEST EAX/RAX after a call, eboot-relative unless a module
 // is named, so a failure can be followed into the system module reporting it.
 static void InvestigateRetTrace(Process& pr) {
   const char* e = kRetTrace;
@@ -130,15 +130,26 @@ static void InvestigateRetTrace(Process& pr) {
     host_memory::ProtectMem(
         reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(c) & ~0xFFFull),
         0x1000, host_memory::PageProtection::kRwx);
-    const bool is_test = c[0] == 0x85 && c[1] == 0xc0;
-    if ((c[0] == 0x89 && c[1] == 0xc3) || is_test) {
+    RetTraceInstruction instruction;
+    bool supported = true;
+    if (c[0] == 0x89 && c[1] == 0xc3)
+      instruction = RetTraceInstruction::kMovEbxEax;
+    else if (c[0] == 0x89 && c[1] == 0xc1)
+      instruction = RetTraceInstruction::kMovEcxEax;
+    else if (c[0] == 0x85 && c[1] == 0xc0)
+      instruction = RetTraceInstruction::kTestEax;
+    else if (c[0] == 0x48 && c[1] == 0x85 && c[2] == 0xc0)
+      instruction = RetTraceInstruction::kTestRax;
+    else
+      supported = false;
+    if (supported) {
       c[0] = 0xCC;
-      SetRetTrace(reinterpret_cast<uintptr_t>(c), label, is_test);
+      SetRetTrace(reinterpret_cast<uintptr_t>(c), label, instruction);
       LOG_INFO("rettrace: armed {} @ {}+{:#x}", label, where, off);
     } else {
       LOG_WARNING(
-          "rettrace: {}+{:#x} bytes {:#x} {:#x} is neither "
-          "mov ebx,eax nor test eax,eax",
+          "rettrace: {}+{:#x} bytes {:#x} {:#x} is not "
+          "a supported return-trace instruction",
           where, off, c[0], c[1]);
     }
   }
