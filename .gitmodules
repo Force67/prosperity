@@ -22,3 +22,10 @@
 [submodule "vendor/tracy"]
 	path = vendor/tracy
 	url = https://github.com/wolfpld/tracy
+[submodule "vendor/SPIRV-Headers"]
+	path = vendor/SPIRV-Headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers
+[submodule "vendor/SPIRV-Tools"]
+	path = vendor/SPIRV-Tools
+	url = https://github.com/Force67/SPIRV-Tools
+	branch = prosperity

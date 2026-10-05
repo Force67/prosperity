@@ -66,26 +66,24 @@ add_delta_test(agc_label_publish_test
   SOURCES agc_label_publish_test.cc ../ps5/label_publisher.cc
   DEPS delta_deps)
 
-if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
-  add_delta_test(gcn_spirv_test
-    SOURCES gcn_spirv_test.cc
-    DEPS delta_gpu)
-  add_delta_test(rdna_compute_image_test
-    SOURCES rdna_compute_image_test.cc
-    DEPS delta_gpu)
-  add_delta_test(rdna_global_test
-    SOURCES rdna_global_test.cc
-    DEPS delta_gpu)
-  add_delta_test(rdna_bvh_test
-    SOURCES rdna_bvh_test.cc
-    DEPS delta_gpu)
-  add_delta_test(render_draw_test
-    SOURCES render_draw_test.cc
-    DEPS delta_gpu)
-  target_include_directories(render_draw_test PRIVATE ${SPIRVHEADERS_INCLUDE_DIRS})
-  set_tests_properties(render_draw_test PROPERTIES
-    ENVIRONMENT "SDL_VIDEODRIVER=offscreen;DELTA_GPU_NOPRESENT=1;DELTA_GPU_SNAPEVERY=1000000;DELTA_GPU_SNAPEVERY_MAX=0")
-endif()
+add_delta_test(gcn_spirv_test
+  SOURCES gcn_spirv_test.cc
+  DEPS delta_gpu)
+add_delta_test(rdna_compute_image_test
+  SOURCES rdna_compute_image_test.cc
+  DEPS delta_gpu)
+add_delta_test(rdna_global_test
+  SOURCES rdna_global_test.cc
+  DEPS delta_gpu)
+add_delta_test(rdna_bvh_test
+  SOURCES rdna_bvh_test.cc
+  DEPS delta_gpu)
+add_delta_test(render_draw_test
+  SOURCES render_draw_test.cc
+  DEPS delta_gpu)
+target_link_libraries(render_draw_test PRIVATE spirv_tools_iface)
+set_tests_properties(render_draw_test PROPERTIES
+  ENVIRONMENT "SDL_VIDEODRIVER=offscreen;DELTA_GPU_NOPRESENT=1;DELTA_GPU_SNAPEVERY=1000000;DELTA_GPU_SNAPEVERY_MAX=0")
 
 add_delta_test(vk_memory_span_test
   SOURCES

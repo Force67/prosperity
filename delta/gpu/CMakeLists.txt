@@ -7,14 +7,6 @@
 # default include/link paths (CMake's FindVulkan doesn't locate them), so link
 # the plain `vulkan` library instead of going through find_package.
 
-# Discover the optional SPIR-V backend before add_delta_module enters tests/;
-# clean builds must register the backend's tests on their first configure.
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-  pkg_check_modules(SPIRVTOOLS QUIET SPIRV-Tools)
-  pkg_check_modules(SPIRVHEADERS QUIET SPIRV-Headers)
-endif()
-
 # Optional OpenGL 4.6 rhi backend (opengl/): headless EGL contexts, entry
 # points through libepoxy, SPIR-V lowered to GLSL by the vendored SPIRV-Cross.
 # libEGL/libOpenGL are linked so that epoxy's dlopen finds glvnd's dispatch.
@@ -71,24 +63,10 @@ target_include_directories(delta_gpu PRIVATE ${CMAKE_SOURCE_DIR}/vendor/tracy/se
 # the shared DELTA_ROOT include dir already resolves -- no extra include roots.
 
 # Direct GCN->SPIR-V backend (gcn/spirv): emits SPIR-V from the GCN bytecode then
-# runs a SPIRV-Tools optimize/validate pass. Needs SPIRV-Headers (spirv.hpp11) and
-# SPIRV-Tools (static lib: the C++ Optimizer + the C validation API). When the
-# packages are unavailable the backend self-disables at build time (no shader
-# recompilation at all -- guest draws/dispatches are skipped) via the
-# DELTA_HAVE_SPIRV_BACKEND define.
-if(SPIRVTOOLS_FOUND AND SPIRVHEADERS_FOUND)
-  # PRIVATE: SPIRV-Tools is an implementation detail of the recompiler; no
-  # header on the public surface needs it, and keeping it off dependents'
-  # include paths stops accidental use outside the module. LINK_LIBRARIES
-  # (absolute paths) instead of LIBRARIES+link_directories so the link
-  # requirement still reaches the final executable through the static lib.
-  target_link_libraries(delta_gpu PRIVATE ${SPIRVTOOLS_LINK_LIBRARIES})
-  target_include_directories(delta_gpu PRIVATE ${SPIRVTOOLS_INCLUDE_DIRS}
-                             ${SPIRVHEADERS_INCLUDE_DIRS})
-  target_compile_definitions(delta_gpu PRIVATE DELTA_HAVE_SPIRV_BACKEND=1)
-else()
-  message(STATUS "SPIRV-Tools/Headers not found; direct GCN->SPIR-V backend disabled")
-endif()
+# runs a SPIRV-Tools optimize/validate pass, built from vendor/SPIRV-Tools.
+# PRIVATE: SPIRV-Tools is an implementation detail of the recompiler.
+target_link_libraries(delta_gpu PRIVATE spirv_tools_iface)
+target_compile_definitions(delta_gpu PRIVATE DELTA_HAVE_SPIRV_BACKEND=1)
 
 file(GLOB _delta_gl_srcs ${CMAKE_CURRENT_SOURCE_DIR}/opengl/*.cc)
 if(DELTA_GPU_OPENGL)
