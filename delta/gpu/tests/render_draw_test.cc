@@ -67,6 +67,32 @@ TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
   gpu::render::EndFrame(renderer, 0);
 }
 
+TEST(VkDraw, RenderTargetVariantCanExceedCacheBudget) {
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  constexpr u64 base = 0x81f6000000;
+  constexpr auto format = gpu::rhi::Format::kRGBA16Float;
+  gpu::render::BeginFrame(renderer);
+  auto* small = gpu::render::GetRT(base, 1280, 720, format);
+  ASSERT_NE(small, nullptr);
+  auto* small_texture = small->texture;
+  auto* large = gpu::render::GetRT(base, 3840, 2160, format);
+  ASSERT_NE(large, nullptr);
+  EXPECT_EQ(large->w, 3840u);
+  EXPECT_EQ(large->h, 2160u);
+  auto* large_texture = large->texture;
+  ASSERT_NE(large_texture, small_texture);
+  small = gpu::render::GetRT(base, 1280, 720, format);
+  ASSERT_NE(small, nullptr);
+  EXPECT_EQ(small->texture, small_texture);
+  large = gpu::render::GetRT(base, 3840, 2160, format);
+  ASSERT_NE(large, nullptr);
+  EXPECT_EQ(large->texture, large_texture);
+  gpu::render::EndFrame(renderer, 0);
+}
+
 TEST(RenderQueue, ExecutesAcrossIdleWakesAndCommandWraparound) {
   gpu::ps4::RenderQueue queue;
   queue.Start(gpu::render::DefaultRenderer());

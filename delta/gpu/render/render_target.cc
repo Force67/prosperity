@@ -385,13 +385,15 @@ RTarget* ActivateRtVariant(RTarget& live,
   if (!alt) {
     u64 parked_bytes = 0;
     for (const RTarget& v : parked)
-      parked_bytes += RtByteSizeWH(v.w, v.h, v.fmt);
+      parked_bytes += RtByteSizeWH(v.w, v.h, v.fmt) * v.depth;
+    const u64 retiring_bytes =
+        RtByteSizeWH(live.w, live.h, live.fmt) * live.depth;
     // Make room by retiring the variants rendered longest ago. Gameface
     // renders every glyph into one scratch address at the glyph's own size,
     // so without this the address fills up within a minute and every later
     // glyph is declined.
     while (parked.size() >= kMaxRtVariants ||
-           parked_bytes + RtByteSizeWH(w, h, fmt) > kMaxRtVariantBytes) {
+           parked_bytes + retiring_bytes > kMaxRtVariantBytes) {
       size_t oldest = parked.size();
       for (size_t i = 0; i < parked.size(); i++)
         if (parked[i].last_frame < g_frame.num &&
@@ -401,26 +403,13 @@ RTarget* ActivateRtVariant(RTarget& live,
       if (oldest == parked.size())
         break;
       parked_bytes -=
-          RtByteSizeWH(parked[oldest].w, parked[oldest].h, parked[oldest].fmt);
+          RtByteSizeWH(parked[oldest].w, parked[oldest].h, parked[oldest].fmt) *
+          parked[oldest].depth;
       RetireRt(parked[oldest]);
       parked.erase(parked.begin() + oldest);
     }
-    if (parked.size() >= kMaxRtVariants ||
-        parked_bytes + RtByteSizeWH(w, h, fmt) > kMaxRtVariantBytes) {
-      // Never hand back the live target at ITS geometry: the caller opens a
-      // render area of w x h over it, and if that is bigger than the image the
-      // region is invalid outright (VUID-VkRenderingInfo-pNext-06079/06080) and
-      // the draw writes outside the attachment. Declining loses the draw, which
-      // is at least a defined outcome.
-      static int n = 0;
-      if (n++ < 8)
-        BASE_LOGI("gpuvk",
-                  "RT {:#x}: {} variants ({} KiB) and no room for {}x{} fmt={} "
-                  "-- declining the draw",
-                  (unsigned long)base, parked.size(),
-                  (unsigned long)(parked_bytes >> 10), w, h, (int)fmt);
-      return nullptr;
-    }
+    // The active image is required by this draw. An oversized parked image or
+    // variants still used by this frame may exceed the cache budget.
     RTarget t;
     if (!CreateRtImage(t, base, w, h, fmt, depth))
       return nullptr;
