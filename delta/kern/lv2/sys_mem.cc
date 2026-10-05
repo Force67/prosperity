@@ -35,6 +35,7 @@
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/stub_log.h"
 #include "kern/lv2/sys_mem.h"
+#include "kern/module.h"
 #include "kern/process.h"
 #include "kern/ps4/audio_daemon.h"
 #include "kern/ps4/dev/dma_dev.h"  // DmemBackingFd/Size (shared physical dmem store)
@@ -152,7 +153,7 @@ u8* AllocLowGuest(size_t size, size_t align) {
   // a 128 MB pool exactly on the old 256 GiB floor, clobbering the primary
   // TCB).
   constexpr uintptr_t kFloor = kGuestArenaFloor;  // 512 GiB
-  constexpr uintptr_t kCeil = 0x10000000000ull;   // 2^40, the PS4 user ceiling
+  constexpr uintptr_t kCeil = kModuleRegionBase;  // 768 GiB
 #endif
   // 64 KiB, not just one page: GNM surfaces sub-allocated from a pool base
   // assert on weaker alignment (DOOM rhiTextureGnm).

@@ -474,7 +474,7 @@ static void StartWatchdog() {
             u64 v = 0;
             std::memcpy(&v, reinterpret_cast<void *>(a), 8);
             // a plausible code return address that lands in a named module range
-            if (v < 0x200000000000ull || v >= 0x210000000000ull)
+            if (!kern::InModuleRegion(v))
               continue;
             char s2[256];
             SymRange(v, s2, sizeof(s2));
@@ -912,7 +912,7 @@ class FexBackend final : public Backend {
           "=== THREAD tid={} RETURNED entry={:#x} ({}) ret={:#x} ({}) ===",
           my_id, (unsigned long long)entry_rip, es,
           (unsigned long long)end_s.rip, rs);
-      if (end_s.rip >= 0x200000000000ull && end_s.rip < 0x210000000000ull) {
+      if (kern::InModuleRegion(end_s.rip)) {
         const u8* b = reinterpret_cast<const u8*>(end_s.rip);
         BASE_LOGI("watchdog",
                   "      bytes@rip: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
@@ -925,7 +925,7 @@ class FexBackend final : public Backend {
         if (a < 0x1000)
           break;
         std::memcpy(&v, reinterpret_cast<void*>(a), 8);
-        if (v < 0x200000000000ull || v >= 0x210000000000ull)
+        if (!kern::InModuleRegion(v))
           continue;
         char s2[256];
         SymRange(v, s2, sizeof(s2));
@@ -949,7 +949,7 @@ class FexBackend final : public Backend {
       if (rsp) {
         for (int i = 0; i < 64; i++) {
           u64 v = reinterpret_cast<u64*>(rsp)[i];
-          if (v >= 0x200000000000ull && v < 0x206000000000ull)
+          if (kern::InModuleRegion(v))
             BASE_LOGI("fex", "  stk+{:#x} = {:#x}", i * 8, (unsigned long)v);
         }
       }

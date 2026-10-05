@@ -26,6 +26,22 @@ class File;
 
 namespace kern {
 class Process;
+
+// Relocatable modules are packed into fixed slots of this window. It stays
+// under 2^40 as on hardware: the GPU runs shaders straight out of module images
+// (the video decoder's compute shaders) and Gnm rejects a shader above 1 TiB.
+#ifdef __ANDROID__
+inline constexpr uintptr_t kModuleRegionBase = 0x10'0000'0000ull;  // 64 GiB
+inline constexpr uintptr_t kModuleRegionEnd = 0x40'0000'0000ull;   // 256 GiB
+#else
+inline constexpr uintptr_t kModuleRegionBase = 0xC0'0000'0000ull;  // 768 GiB
+inline constexpr uintptr_t kModuleRegionEnd = 0x100'0000'0000ull;  // 1 TiB
+#endif
+
+inline bool InModuleRegion(u64 address) {
+  return address >= kModuleRegionBase && address < kModuleRegionEnd;
+}
+
 struct ModuleSeg {
   u8* addr;
   u32 size;

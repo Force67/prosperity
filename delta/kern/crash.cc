@@ -1006,8 +1006,7 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
         // Prefer the stack-recovered tracker/key; fall back to the regs if the
         // stack slot doesn't look like a mapped module-space pointer.
         auto plausible = [](u64 t) {
-          return t >= 0x200000000000ull && t < 0x210000000000ull &&
-                 trkMincore(t);
+          return InModuleRegion(t) && trkMincore(t);
         };
         u64 tracker = plausible(trkStk) ? trkStk : g[R13];
         u64 key = (haveStk && keyStk) ? keyStk : g[R14];
@@ -1069,7 +1068,7 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
       const char* rn[] = {"rax", "rbx", "rdi", "rsi", "rcx", "rdx"};
       for (int r = 0; r < 6; r++) {
         u64 base = regs[r];
-        if (base < 0x200000000000ull || base >= 0x210000000000ull)
+        if (!InModuleRegion(base))
           continue;  // only the module VA window is reliably mapped to read
         auto* q = reinterpret_cast<const u64*>(base);
         // rax/rbx are the usual object/this pointers: dump deep enough for a

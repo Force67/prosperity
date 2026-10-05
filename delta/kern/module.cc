@@ -49,12 +49,7 @@ DELTA_OPTION(bool, kRelocTrace, "DELTA_RELOC_TRACE", false);
 
 namespace kern {
 namespace {
-#ifdef __ANDROID__
-constexpr uintptr_t kModuleBase = 0x0000'0010'0000'0000ull;
-#else
-constexpr uintptr_t kModuleBase = 0x0000200000000000ull;
-#endif
-uintptr_t s_next_base = kModuleBase;
+uintptr_t s_next_base = kModuleRegionBase;
 }  // namespace
 
 Module::Module(Process* process) : process_(process) {
@@ -597,9 +592,7 @@ bool Module::MapImage() {
   if (code_size == 0)
     return false;
 
-  // reserve a region from xxxxxxxx00000000 - xxxxxxxxFFFFFFFF
   constexpr size_t kOneMb = 1024ull * 1024ull;
-  constexpr size_t kEightGb = 8ull * 1024ull * kOneMb;
 
   // A fixed (non-PIC) ET_SCE_EXEC embeds absolute references (segments at vaddr
   // 0x400000) and must map IN PLACE with zero bias (GetAddress(vaddr) ==
@@ -647,17 +640,12 @@ bool Module::MapImage() {
   } else {
     // ASLR off: fixed sequential bases so a guest crash reproduces at the same
     // address while the boot is being worked on; switch to kernel-chosen later.
-#ifdef __ANDROID__
-    // Android user VA is 39-bit; the x86 layout's 32 TiB base is unmappable.
-    // Pack modules in tight 2 GiB slots from 64 GiB: above the GNM driver's
-    // fixed PS4 regions (~63.5 GiB) and internal memory (8 GiB), below the
-    // guest arena/FEX heap.
-    constexpr size_t kModuleSlot = 2ull * 1024ull * one_mb;  // 2 GiB
-                                                             // 64 GiB
-#else
-    constexpr size_t kModuleSlot = kEightGb;
-
-#endif
+    // The largest image (an eboot) is well under 100 MiB with its rip-zone.
+    constexpr size_t kModuleSlot = 2ull * 1024ull * kOneMb;
+    if (s_next_base + kModuleSlot > kModuleRegionEnd) {
+      LOG_ERROR("mapImage: module region full at {:#x}", s_next_base);
+      return false;
+    }
     info_.base = static_cast<u8*>(
         host_memory::AllocMem(reinterpret_cast<void*>(s_next_base), kModuleSlot,
                               host_memory::PageProtection::kW,
@@ -1331,7 +1319,9 @@ void Module::LogDbgInfo() {
 }
 
 namespace {
-const guest::SessionReset g_session_reset([] { s_next_base = kModuleBase; });
+const guest::SessionReset g_session_reset([] {
+  s_next_base = kModuleRegionBase;
+});
 }  // namespace
 
 }  // namespace kern
