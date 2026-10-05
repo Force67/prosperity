@@ -49,7 +49,7 @@ const Description& Describe(Bucket bucket) {
 
 #if defined(DELTA_MEMORY_DEBUG)
 // Keeps the replacement new/delete object linked out of the static library.
-void HeapTrackingLinked();
+void FlushHeapChanges();
 u64 DroppedMappings();
 
 Bucket CurrentBucket() {
@@ -77,7 +77,7 @@ void ChangeImported(i64 bytes) {
 }
 
 Snapshot ReadSnapshot() {
-  HeapTrackingLinked();
+  FlushHeapChanges();
   Snapshot result;
   for (u32 i = 0; i < kBucketCount; ++i) {
     i64 live = 0, backing = 0, allocations = 0;
