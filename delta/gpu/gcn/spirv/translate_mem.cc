@@ -445,13 +445,33 @@ void StoreFormattedComponent(Translator& t,
   raw = t.SelectB(is(7), half, raw);
   // A 32-bit component (or an unknown format) is the register as it is.
   raw = t.SelectB(f.is32, value, raw);
-  const Id shift = t.Shl(t.And(at, t.U32(3)), t.U32(3));
-  const Id old = CsSsboLoad(t, sc, binding, idx);
-  const Id merged = t.SelectB(
-      f.is32, raw,
-      t.m.Emit(spv::Op::OpBitFieldInsert, t.t_u, {old, raw, shift, f.bits}));
   const Id keep = t.Ult(t.U32(i), t.SelectB(f.dfmt_known, f.ncomp, t.U32(4)));
-  CsSsboStore(t, sc, binding, idx, t.SelectB(keep, merged, old));
+  const Id write = t.m.NewBlock(), done = t.m.NewBlock();
+  t.m.SelectionMerge(done);
+  t.m.BranchConditional(keep, write, done);
+  t.m.OpenBlock(write);
+  const Id full = t.m.NewBlock(), packed = t.m.NewBlock();
+  const Id merged = t.m.NewBlock();
+  t.m.SelectionMerge(merged);
+  t.m.BranchConditional(f.is32, full, packed);
+  t.m.OpenBlock(full);
+  CsSsboStore(t, sc, binding, idx, raw);
+  t.m.Branch(merged);
+  t.m.OpenBlock(packed);
+  // Independent byte or halfword stores may share a storage-buffer dword.
+  const Id shift = t.Shl(t.And(at, t.U32(3)), t.U32(3));
+  const Id mask = t.Shl(t.Sub(t.Shl(t.U32(1), f.bits), t.U32(1)), shift);
+  const Id ptr = CsSsboPtr(t, sc, binding, idx);
+  const Id scope = t.U32(static_cast<u32>(spv::Scope::Device));
+  const Id relaxed = t.U32(0);
+  t.m.Emit(spv::Op::OpAtomicAnd, t.t_u,
+           {ptr, scope, relaxed, t.Xor(mask, t.U32(~0u))});
+  t.m.Emit(spv::Op::OpAtomicOr, t.t_u,
+           {ptr, scope, relaxed, t.And(t.Shl(raw, shift), mask)});
+  t.m.Branch(merged);
+  t.m.OpenBlock(merged);
+  t.m.Branch(done);
+  t.m.OpenBlock(done);
 }
 
 // Sub-dword store: read-modify-write the containing dword.
