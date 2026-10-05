@@ -87,12 +87,24 @@ base::Vector<u32> Optimize(const base::Vector<u32>& spv) {
   // every register access stayed a memory access in the finished shader.
   opt.RegisterPass(spvtools::CreatePrivateToLocalPass());
   opt.RegisterPass(spvtools::CreateScalarReplacementPass(0));
-  opt.RegisterLegalizationPasses();
-  if (kOptLevel >= 2)
-    opt.RegisterPerformancePasses();
+  opt.RegisterPass(spvtools::CreateLocalSingleBlockLoadStoreElimPass());
+  opt.RegisterPass(spvtools::CreateLocalSingleStoreElimPass());
+  opt.RegisterPass(spvtools::CreateSSARewritePass());
+  opt.RegisterPass(spvtools::CreateAggressiveDCEPass());
+  // Not the stock legalization + performance recipes: they run ADCE 13 times
+  // and redundancy elimination twice, and cost twice this for the same output
+  // size. Everything we emit is one function (plus DontInline helpers), so
+  // their inlining and return merging have nothing to do.
+  if (kOptLevel >= 2) {
+    opt.RegisterPass(spvtools::CreateSimplificationPass());
+    opt.RegisterPass(spvtools::CreateRedundancyEliminationPass());
+    opt.RegisterPass(spvtools::CreateAggressiveDCEPass());
+  }
   // SPIRV-Tools hands the result back in a std::vector.
   std::vector<u32> out;
-  if (!opt.Run(spv.data(), spv.size(), &out) || out.empty())
+  spvtools::OptimizerOptions options;
+  options.set_run_validator(false);  // Finalize validated it already
+  if (!opt.Run(spv.data(), spv.size(), &out, options) || out.empty())
     return spv;  // keep the valid-but-unoptimized binary on failure
   return base::Vector<u32>(out.data(), out.data() + out.size());
 }
@@ -102,7 +114,12 @@ bool Validate(const base::Vector<u32>& spv, base::String* err) {
   spv_context ctx = spvContextCreate(env);
   spv_diagnostic diag = nullptr;
   spv_const_binary_t bin{spv.data(), spv.size()};
-  spv_result_t r = spvValidate(ctx, &bin, &diag);
+  // Friendly names only decorate error messages, but the mapper is built for
+  // every module up front.
+  spv_validator_options options = spvValidatorOptionsCreate();
+  spvValidatorOptionsSetFriendlyNames(options, false);
+  spv_result_t r = spvValidateWithOptions(ctx, options, &bin, &diag);
+  spvValidatorOptionsDestroy(options);
   bool ok = r == SPV_SUCCESS;
   if (!ok && err && diag)
     *err = diag->error;
@@ -124,7 +141,7 @@ DELTA_OPTION(const char*, kRawDump, "DELTA_GPU_SPV_RAW_DUMP", nullptr);
 // Bump when anything that changes the optimizer's OUTPUT changes: the pass
 // list here, or the SPIRV-Tools version the build links. Entries from an older
 // generation are never looked up.
-constexpr u32 kCacheGeneration = 2;
+constexpr u32 kCacheGeneration = 3;
 
 u64 HashWords(const base::Vector<u32>& w) {
   u64 h = 1469598103934665603ull;  // FNV-1a
