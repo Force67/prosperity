@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include "base/logging.h"
 #include "base/time/time.h"
@@ -49,7 +50,15 @@ struct Port {
   u64 submit_tsc = 0;
   i64 arg = 0;
   i32 index = -1;
+  u32 next_context = 0;
 };
+struct PendingFlip {
+  u64 context, scanout;
+  int index, mode;
+  i64 arg;
+  bool ready = false;
+};
+std::deque<PendingFlip> g_pending_flips;
 u64 GuestTsc() {
 #if defined(DELTA_BACKEND_NATIVE)
   return __builtin_ia32_rdtsc();
@@ -62,6 +71,7 @@ Port g_port;
 const guest::SessionReset g_reset([] {
   std::lock_guard lock(g_mutex);
   g_port = {};
+  g_pending_flips.clear();
 });
 }  // namespace
 
@@ -83,6 +93,48 @@ bool DcePs5IsDisplayBuffer(u64 address) {
     if (buffer == address)
       return true;
   return false;
+}
+
+bool DcePs5BeginEopFlip(u64 context, u64* scanout) {
+  std::lock_guard lock(g_mutex);
+  for (auto& flip : g_pending_flips) {
+    if (flip.context == context && !flip.ready) {
+      flip.ready = true;
+      *scanout = flip.scanout;
+      return true;
+    }
+  }
+  return false;
+}
+
+void DcePs5CompleteEopFlip(u64 context) {
+  PendingFlip flip{};
+  u8* pool;
+  {
+    std::lock_guard lock(g_mutex);
+    auto it = g_pending_flips.begin();
+    while (it != g_pending_flips.end() && it->context != context)
+      ++it;
+    if (it == g_pending_flips.end() || !it->ready)
+      return;
+    flip = *it;
+    pool = g_port.pool;
+    g_pending_flips.erase(it);
+  }
+  guest::display::WaitFlip(flip.mode, [=] {
+    {
+      std::lock_guard lock(g_mutex);
+      g_port.scanout = flip.scanout;
+      g_port.index = flip.index;
+      g_port.arg = flip.arg;
+      g_port.time = static_cast<u64>(base::TickClock::NowNs());
+      g_port.tsc = GuestTsc();
+      ++g_port.count;
+      if (flip.index >= 0)
+        reinterpret_cast<volatile u64*>(pool + 0xa0)[flip.index] = 0;
+    }
+    NoteFlip();
+  });
 }
 
 DceDevicePs5::DceDevicePs5(ObjectTable& objects) : Device(objects) {}
@@ -202,13 +254,23 @@ i32 DceDevicePs5::Ioctl(u32 command, void* args) {
       auto* label = reinterpret_cast<u64*>(p[6]);
       if (label && !host_memory::IsMemoryRangeMapped(label, sizeof(*label)))
         return -static_cast<i32>(SysError::eFAULT);
-      auto* labels = reinterpret_cast<u64*>(pool_ + 0xa0);
       u64 scanout;
       {
         std::lock_guard lock(g_mutex);
         scanout = blank ? 0 : g_port.buffers[index];
         if (!blank && !scanout)
           return -static_cast<i32>(SysError::eINVAL);
+        if (p[5] == 1) {
+          if (!label)
+            return -static_cast<i32>(SysError::eINVAL);
+          const u64 context = ++g_port.next_context;
+          g_pending_flips.push_back({context, scanout, index, mode, arg});
+          *label = context;
+          if (r.result && r.result_size == 8)
+            *reinterpret_cast<u64*>(r.result) = 0;
+          g_port.submit_tsc = GuestTsc();
+          break;
+        }
         g_port.scanout = scanout;
         g_port.submit_tsc = GuestTsc();
       }
@@ -225,8 +287,6 @@ i32 DceDevicePs5::Ioctl(u32 command, void* args) {
               g_port.time = static_cast<u64>(base::TickClock::NowNs());
               g_port.tsc = GuestTsc();
               ++g_port.count;
-              if (!blank)
-                labels[index] = 1;
             }
             if (label)
               *label = 1;
@@ -276,4 +336,12 @@ i32 DceDevicePs5::Ioctl(u32 command, void* args) {
 
 extern "C" bool prosperity_ps5_is_display_buffer(u64 address) {
   return kern::DcePs5IsDisplayBuffer(address);
+}
+
+extern "C" bool prosperity_ps5_begin_eop_flip(u64 context, u64* scanout) {
+  return kern::DcePs5BeginEopFlip(context, scanout);
+}
+
+extern "C" void prosperity_ps5_complete_eop_flip(u64 context) {
+  kern::DcePs5CompleteEopFlip(context);
 }

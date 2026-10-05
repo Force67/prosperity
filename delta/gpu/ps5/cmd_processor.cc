@@ -23,6 +23,7 @@
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
 #include "base/threading/lock_guard.h"
+#include "base/threading/condition_variable.h"
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
 #include "base/time/time.h"
@@ -64,6 +65,7 @@ DELTA_OPTION(u64, kLabelWatchSize, "DELTA_AGC_LABELWATCH_SIZE", 0x4000000);
 }  // namespace
 
 namespace gpu::ps5 {
+static void FinishGraphicsFlip(u64 scanout_base);
 namespace {
 
 // The register file is the state of one GPU: two submit threads walking it
@@ -77,9 +79,8 @@ bool MemWatchHit(u64 base, u64 bytes) {
 
 // A waitOnAddress the memory does not satisfy yet stalls the QUEUE it sits
 // in, exactly as the command processor would: the ring walk stops at the
-// packet and resumes there on a later doorbell poll. Only ring walks can be
-// resumed (an ioctl submit is handed over whole, so those keep skipping the
-// wait). Astro Bot's async compute queue clears the exposure texel its
+// packet and resumes there on a later doorbell poll. Graphics waits release
+// the GPU lock while their submission worker polls. Astro Bot clears its
 // scanout composite reads, gated on a label the graphics queue writes after
 // the composite; walked in submission order, the clear ran first and the
 // frame was black.
@@ -126,6 +127,22 @@ QueueState g_graphics_queue;
 base::Map<u32, QueueState> g_ring_queues;
 QueueState* g_queue = &g_graphics_queue;  // protected by g_mutex
 
+struct GraphicsJob {
+  base::Vector<u32> words;
+  u64 sequence = 0;
+  u64 scanout = 0;
+  u32 tag = 0;
+  bool flip = false;
+};
+base::Mutex g_graphics_lock;
+base::ConditionVariable g_graphics_wake;
+base::Vector<GraphicsJob> g_graphics_jobs;
+size_t g_graphics_head = 0;
+u64 g_graphics_sequence = 0, g_graphics_done = 0;
+bool g_graphics_started = false;
+void RunGraphics();
+u64 EnqueueGraphics(GraphicsJob job);
+
 // A cycle in the IB chain would recurse until the stack overflowed. Real
 // submissions are flat or a couple of levels deep.
 constexpr u32 kMaxIbDepth = 8;
@@ -140,8 +157,7 @@ bool IsLabelAddress(u64 address) {
 
 // EOP/RELEASE_MEM DATA_SEL 3 (GPU clock) and 4 (system clock) tell the GPU to
 // write its current 64-bit clock counter into the label, NOT the packet's
-// immediate data (which is 0 for these). Our submit is synchronous, so any
-// advancing non-zero value reads as "already complete".
+// immediate data (which is 0 for these).
 u64 GpuClockTimestamp() {
   return static_cast<u64>((base::TickClock::NowNs()));
 }
@@ -173,7 +189,7 @@ bool Compares(u32 function, u64 value, u64 ref) {
   }
 }
 
-// A ring queue parked on a wait, as the label writers see it. The CP polls its
+// A queue parked on a wait, as the label writers see it. The CP polls its
 // wait all the time and sees a value the moment it lands, where our walker
 // looks again on the doorbell poller's next tick: Astro Bot's CPU resets a
 // label it saw written, and a queue parked on that label missed it and hung.
@@ -202,10 +218,7 @@ void RecordLabelWrite(u64 address, u64 value) {
   }
 }
 
-// Our submit is synchronous: every draw in the buffer is finished by the time
-// the walk passes these packets, so the fence the GPU would signal is complete
-// the instant we process it. Writing it immediately is what lets the guest's
-// CPU-side polls make progress.
+// Called after PublishLabel has waited for the GPU writes the label announces.
 void WriteLabel(u64 address, u64 value, bool is_64bit) {
   if (!IsLabelAddress(address))
     return;
@@ -224,6 +237,8 @@ void WriteLabel(u64 address, u64 value, bool is_64bit) {
 extern "C" void prosperity_gpu_end_of_pipe();
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe_ctx(u64 context_id);
+extern "C" bool prosperity_ps5_begin_eop_flip(u64 context, u64* scanout);
+extern "C" void prosperity_ps5_complete_eop_flip(u64 context);
 
 // The label write shared by EOP and RELEASE_MEM, which encode DATA_SEL the same
 // way: 1 = 32-bit immediate, 2 = 64-bit immediate, 3/4 = a clock counter.
@@ -528,46 +543,46 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
   return Compares(function, value & mask, ref);
 }
 
-// The graphics queue waits too, but briefly: its walk runs on the title's
-// thread, inside the submit, so a flag the title sets after the submit returns
-// cannot come true while it waits. What the ring queues produce mostly lands
-// within a millisecond or two, and skipping those waits let the graphics queue
-// finish a frame before the compute queues it is ordered against, so the
-// title reset their labels under them. An address that keeps timing out is
-// not waited for again.
-bool WaitBriefly(u32 op, const u32* body, u32 count) {
-  DELTA_ZONE("ps5.gfx_wait");
+bool CheckWait(u32 op, const u32* body, u32 count) {
+  const bool wide = op == 0x93;
+  if (count < (wide ? 8u : 6u))
+    return true;
   const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
-  static base::Map<u64, u32> timeouts;
-  static const guest::SessionReset reset_timeouts(
-      [] { guest::ResetResource(timeouts); });
-  u32& missed = timeouts[address];
-  if (missed >= 3)
+  const u64 ref = wide ? (static_cast<u64>(body[4]) << 32) | body[3] : body[3];
+  const u64 mask = wide ? (static_cast<u64>(body[6]) << 32) | body[5] : body[4];
+  {
+    base::LockGuard<base::Mutex> lock(g_parked_lock);
+    ParkedWait& w = g_parked[g_queue];
+    if (w.address == address && w.ref == ref && w.hit) {
+      g_parked.erase(g_queue);
+      return true;
+    }
+    w = {address, ref, mask, body[0] & 0x7, wide, false};
+  }
+  if (!WaitSatisfied(op, body, count))
     return false;
+  base::LockGuard<base::Mutex> lock(g_parked_lock);
+  g_parked.erase(g_queue);
+  return true;
+}
+
+bool WaitGraphics(u32 op, const u32* body, u32 count) {
+  DELTA_ZONE("ps5.gfx_wait");
   QueueState* const queue = g_queue;
   const u32 submit_queue = render::g_submit_queue;
-  const auto start = base::TimeTicks::Now();
   for (;;) {
     if (guest::Stopping())
       return false;
     const u64 seen = LabelSequence();
-    if (WaitSatisfied(op, body, count))
+    if (CheckWait(op, body, count))
       break;
-    // A held write is certain to land: only a wait on nothing in flight
-    // gives up.
-    if (base::TimeTicks::Now() - start >= base::Milliseconds(2) &&
-        !LabelPending(address, op == 0x93 ? 8 : 4)) {
-      if (++missed == 3)
-        BASE_LOGI("agc", "graphics no longer waits for {:#x}", address);
-      return false;
-    }
+    render::SubmitForPublishedLabels();
     g_mutex.unlock();
     WaitLabelWritten(seen, base::Microseconds(200));
     g_mutex.lock();
     g_queue = queue;
     render::g_submit_queue = submit_queue;
   }
-  missed = 0;
   return true;
 }
 
@@ -575,35 +590,13 @@ bool WaitBriefly(u32 op, const u32* body, u32 count) {
 // runnable and may produce the value this one is waiting for.
 bool StallOnWait(u32 op, const u32* body, u32 count) {
   if (!g_queue->stall.ring_walk) {
-    // Recorded with the top bit set: a wait the graphics queue went past
-    // unsatisfied, which the ring queues' hang report shows next to the
-    // writes.
-    if (!WaitSatisfied(op, body, count) && !WaitBriefly(op, body, count))
-      RecordLabelWrite(
-          ((static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1]) | (1ull << 63),
-          body[3]);
-    return false;
+    return !WaitGraphics(op, body, count);
   }
+  if (CheckWait(op, body, count))
+    return false;
   const bool wide = op == 0x93;
   const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
   const u64 ref = wide ? (static_cast<u64>(body[4]) << 32) | body[3] : body[3];
-  if (count >= (wide ? 8u : 6u)) {
-    // Parked before the check, so a write landing in between is not lost.
-    base::LockGuard<base::Mutex> lock(g_parked_lock);
-    ParkedWait& w = g_parked[g_queue];
-    if (w.address == address && w.ref == ref && w.hit) {
-      g_parked.erase(g_queue);
-      return false;
-    }
-    const u64 mask =
-        wide ? (static_cast<u64>(body[6]) << 32) | body[5] : body[4];
-    w = {address, ref, mask, body[0] & 0x7, wide, false};
-  }
-  if (WaitSatisfied(op, body, count)) {
-    base::LockGuard<base::Mutex> lock(g_parked_lock);
-    g_parked.erase(g_queue);
-    return false;
-  }
   const auto now = base::TimeTicks::Now();
   if (address != g_queue->stall.wait_addr || ref != g_queue->stall.wait_ref) {
     g_queue->stall.wait_addr = address;
@@ -692,6 +685,15 @@ void HandleReleaseMem(const u32* body, u32 count) {
   // interrupt against.
   WriteEventLabel(address, (body[1] >> 29) & 0x7, value, (body[1] >> 24) & 0x7,
                   count >= 7 ? body[6] : 0);
+  const u64 context = count >= 7 && body[6] ? body[6] : value;
+  u64 scanout = 0;
+  if (((body[1] >> 24) & 0x7) &&
+      prosperity_ps5_begin_eop_flip(context, &scanout)) {
+    if (scanout)
+      FinishGraphicsFlip(scanout);
+    PublishLabel([context] { prosperity_ps5_complete_eop_flip(context); });
+    render::SubmitForPublishedLabels();
+  }
 }
 
 // body: eventCtrl, addrLo, addrHi+cmd, data
@@ -1148,8 +1150,6 @@ u32 Walk(render::Renderer& renderer,
       // waitOnAddress: stall until a value in memory satisfies a comparison.
       // 0x3c takes a 32-bit value in 6 dwords, 0x93 a 64-bit one in 8:
       // [function/mem_space/engine, addrLo, addrHi, ref.., mask.., interval].
-      // Our submit runs to completion inside SubmitDcb, so whatever it waits
-      // for has already happened by the time the walk reaches it.
       // 0x93 is NOT a register write, however plausibly one reads: body[0] is
       // 0x113 (function 3, memory space, engine 1), which taken as an SH offset
       // aims the following seven dwords (poll address, reference, mask,
@@ -1347,7 +1347,7 @@ u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
   return done;
 }
 
-void SubmitDcb(const void* dcb, u32 size_bytes) {
+static void ProcessGraphicsDcb(const void* dcb, u32 size_bytes, u32 tag) {
   DELTA_ZONE("ps5.submit_dcb");
   if (!dcb || size_bytes < 4)
     return;
@@ -1355,6 +1355,9 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   base::LockGuard<base::Mutex> lock(g_mutex);
   const u64 t_held = NowNs();
   render::g_ns_dcb_lock += t_held - t_enter;
+  g_queue = &g_graphics_queue;
+  g_queue->stall.stalled = false;
+  render::g_submit_queue = tag;
   render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);
   render::SyncGuestDirect();
@@ -1370,18 +1373,24 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
     TraceWalkDone();
   render::g_ns_dcb += NowNs() - t_held;
   render::g_dcb_n++;
+  render::g_submit_queue = 0;
+}
+
+void SubmitDcb(const void* dcb, u32 size_bytes, u32 tag) {
+  if (!dcb || size_bytes < 4)
+    return;
+  GraphicsJob job;
+  const auto* words = static_cast<const u32*>(dcb);
+  job.words.assign(words, words + size_bytes / 4);
+  job.tag = tag;
+  EnqueueGraphics(base::move(job));
 }
 
 void SubmitCcb(const void* ccb, u32 size_bytes) {
-  if (!ccb || size_bytes < 4)
-    return;
-  base::LockGuard<base::Mutex> lock(g_mutex);
-  Walk(render::DefaultRenderer(), static_cast<const u32*>(ccb), size_bytes / 4,
-       false, 0);
+  SubmitDcb(ccb, size_bytes);
 }
 
-void EndFrame(u64 scanout_base) {
-  base::LockGuard<base::Mutex> lock(g_mutex);
+static void FinishGraphicsFlip(u64 scanout_base) {
   // New frame -> shader code may have been rewritten; let the cached programs
   // revalidate each address once next frame instead of once per draw. Before
   // the early return, or a frame that ends with nothing active never advances
@@ -1407,8 +1416,83 @@ void EndFrame(u64 scanout_base) {
   g_frame_active = false;
 }
 
+static void ProcessGraphicsFlip(u64 scanout_base) {
+  base::LockGuard<base::Mutex> lock(g_mutex);
+  FinishGraphicsFlip(scanout_base);
+}
+
+void EndFrame(u64 scanout_base) {
+  {
+    base::LockGuard<base::Mutex> lock(g_graphics_lock);
+    if (!g_graphics_started) {
+      ProcessGraphicsFlip(scanout_base);
+      return;
+    }
+  }
+  GraphicsJob job;
+  job.scanout = scanout_base;
+  job.flip = true;
+  const u64 sequence = EnqueueGraphics(base::move(job));
+  if (!sequence)
+    return;
+  base::LockGuard<base::Mutex> lock(g_graphics_lock);
+  guest::Wait(g_graphics_wake, g_graphics_lock,
+              [&] { return g_graphics_done >= sequence; });
+}
+
 namespace {
+void RunGraphics() {
+  for (;;) {
+    GraphicsJob job;
+    {
+      base::LockGuard<base::Mutex> lock(g_graphics_lock);
+      if (!guest::Wait(
+              g_graphics_wake, g_graphics_lock,
+              [] { return g_graphics_head < g_graphics_jobs.size(); }) ||
+          guest::Stopping())
+        return;
+      job = base::move(g_graphics_jobs[g_graphics_head++]);
+      if (g_graphics_head == g_graphics_jobs.size()) {
+        g_graphics_jobs.clear();
+        g_graphics_head = 0;
+      }
+    }
+    if (job.flip)
+      ProcessGraphicsFlip(job.scanout);
+    else
+      ProcessGraphicsDcb(job.words.data(), job.words.size() * 4, job.tag);
+    {
+      base::LockGuard<base::Mutex> lock(g_graphics_lock);
+      g_graphics_done = job.sequence;
+    }
+    g_graphics_wake.NotifyAll();
+  }
+}
+
+u64 EnqueueGraphics(GraphicsJob job) {
+  base::LockGuard<base::Mutex> lock(g_graphics_lock);
+  if (guest::Stopping())
+    return 0;
+  if (!g_graphics_started) {
+    if (!guest::SpawnThread("agc-graphics", RunGraphics)) {
+      BASE_LOGW("agc", "cannot start graphics submission worker");
+      guest::RequestStop();
+      return 0;
+    }
+    g_graphics_started = true;
+  }
+  const u64 sequence = job.sequence = ++g_graphics_sequence;
+  g_graphics_jobs.push_back(base::move(job));
+  g_graphics_wake.NotifyOne();
+  return sequence;
+}
+
 const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_graphics_jobs);
+  guest::ResetResource(g_graphics_head);
+  guest::ResetResource(g_graphics_sequence);
+  guest::ResetResource(g_graphics_done);
+  guest::ResetResource(g_graphics_started);
   g_queue = &g_graphics_queue;
   guest::ResetResource(g_graphics_queue);
   guest::ResetResource(g_ring_queues);
@@ -1423,8 +1507,7 @@ const guest::SessionReset g_session_reset([] {
 
 }  // namespace gpu::ps5
 
-// LLE submit bridge: the kernel /dev/gc AGC ioctls (gc_dev.cc) forward the DCB
-// here, mirroring prosperity_gc_submit on the PS4 path.
+// LLE submit bridge: the kernel /dev/gc AGC ioctls enqueue the DCB here.
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_agc_submit(u64 dcb_base, u32 size_bytes) {
   gpu::ps5::SubmitDcb(reinterpret_cast<const void*>(dcb_base), size_bytes);
@@ -1437,9 +1520,7 @@ extern "C" void prosperity_agc_submit(u64 dcb_base, u32 size_bytes) {
 extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
                                              u32 size_bytes,
                                              u32 tag) {
-  gpu::render::g_submit_queue = tag;
-  gpu::ps5::SubmitDcb(reinterpret_cast<const void*>(dcb_base), size_bytes);
-  gpu::render::g_submit_queue = 0;
+  gpu::ps5::SubmitDcb(reinterpret_cast<const void*>(dcb_base), size_bytes, tag);
 }
 // NOLINTEND(readability-identifier-naming)
 

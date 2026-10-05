@@ -38,6 +38,76 @@ class DcePs5Test : public testing::Test {
 class DcePs5SubmissionTest : public DcePs5Test,
                              public testing::WithParamInterface<u32> {};
 
+TEST_F(DcePs5Test, EopFlipWaitsForGpuContextAndReleasesOnlyItsBuffer) {
+  u64 buffer[6]{};
+  buffer[2] = 0x1200000000ull;
+  ASSERT_EQ(Call({.op = 0x37,
+                  .size = sizeof(buffer),
+                  .data = reinterpret_cast<u64>(buffer)}),
+            0);
+  auto* labels = reinterpret_cast<u64*>(
+      device.Map(nullptr, 0x4000, 0, 0, 0) + 0xa0);
+  labels[1] = 7;
+  const u64 before = kern::FlipCount();
+  u64 context = 0;
+  u64 flip[9]{};
+  flip[2] = 1;
+  flip[3] = 91;
+  flip[5] = 1;
+  flip[6] = reinterpret_cast<u64>(&context);
+  ASSERT_EQ(Call({.op = 0x36,
+                  .size = sizeof(flip),
+                  .data = reinterpret_cast<u64>(flip)}),
+            0);
+  ASSERT_NE(context, 0u);
+  EXPECT_EQ(kern::FlipCount(), before);
+  EXPECT_EQ(labels[0], 0u);
+  u64 scanout = 0;
+  EXPECT_FALSE(kern::DcePs5BeginEopFlip(context + 1, &scanout));
+  kern::DcePs5CompleteEopFlip(context);
+  EXPECT_EQ(kern::FlipCount(), before);
+  ASSERT_TRUE(kern::DcePs5BeginEopFlip(context, &scanout));
+  EXPECT_EQ(scanout, buffer[2]);
+  EXPECT_FALSE(kern::DcePs5BeginEopFlip(context, &scanout));
+  labels[0] = 1;
+  kern::DcePs5CompleteEopFlip(context);
+  EXPECT_EQ(kern::FlipCount(), before + 1);
+  EXPECT_EQ(labels[0], 0u);
+  EXPECT_EQ(labels[1], 7u);
+  kern::DcePs5CompleteEopFlip(context);
+  EXPECT_EQ(kern::FlipCount(), before + 1);
+}
+
+TEST_F(DcePs5Test, FlipsPreserveGuestBufferLeases) {
+  for (u32 index : {0u, 1u}) {
+    u64 buffer[6]{};
+    buffer[2] = 0x1200000000ull + index * 0x100000;
+    ASSERT_EQ(Call({.op = 0x37,
+                    .size = sizeof(buffer),
+                    .data = reinterpret_cast<u64>(buffer),
+                    .value = index}),
+              0);
+  }
+  auto* pool = device.Map(nullptr, 0x4000, 0, 0, 0);
+  auto* labels = reinterpret_cast<u64*>(pool + 0xa0);
+  labels[0] = 1;
+  labels[1] = 7;
+  for (int index : {0, 1, 0, -1}) {
+    u64 completion = 0;
+    u64 flip[9]{};
+    flip[1] = index < 0 ? ~u64(0) : static_cast<u64>(index);
+    flip[2] = 1;
+    flip[6] = reinterpret_cast<u64>(&completion);
+    ASSERT_EQ(Call({.op = 0x36,
+                    .size = sizeof(flip),
+                    .data = reinterpret_cast<u64>(flip)}),
+              0);
+    EXPECT_EQ(completion, 1u);
+    EXPECT_EQ(labels[0], 1u);
+    EXPECT_EQ(labels[1], 7u);
+  }
+}
+
 TEST_F(DcePs5Test, PoolQueryReturnsAddressAndLabelsAreMapped) {
   u64 address = 0, size = 0;
   ASSERT_EQ(Call({.op = 9,
@@ -88,7 +158,7 @@ TEST_P(DcePs5SubmissionTest,
             0);
   EXPECT_GT(guest::display::VblankCount(), before);
   EXPECT_EQ(label, 1u);
-  EXPECT_EQ(reinterpret_cast<u64*>(pool + 0xa0)[2], 1u);
+  EXPECT_EQ(reinterpret_cast<u64*>(pool + 0xa0)[2], 0u);
   EXPECT_EQ(result, 0u);
   EXPECT_EQ(kern::DcePs5ScanoutBuffer(), buffer[2]);
   u64 status[16]{};
@@ -187,7 +257,6 @@ TEST_F(DcePs5Test, RejectsInvalidPayloadsAndUnknownRequests) {
               -static_cast<i32>(kern::SysError::eINVAL));
   }
 }
-}  // namespace
 
 TEST_F(DcePs5Test, VblankAndFlipEventsHaveSeparateSources) {
   guest::RequestStop();
@@ -241,3 +310,16 @@ TEST_F(DcePs5Test, UnregisterBuffersClearsScanoutAndAllowsReplacement) {
   EXPECT_EQ(Call({.op = 4, .value = 16}),
             -static_cast<i32>(kern::SysError::eINVAL));
 }
+
+TEST_F(DcePs5Test, VblankWakesBeforeTheFirstFlip) {
+  auto& queue = *new kern::Equeue(objects, "videoout");
+  constexpr u64 vblank = 0x7010000000000;
+  queue.AddEvent(vblank, -13, nullptr);
+  kern::kevent_t event{};
+  const kern::ktimespec timeout{1, 0};
+  ASSERT_EQ(queue.Kevent(nullptr, 0, &event, 1, &timeout), 1);
+  EXPECT_EQ(event.ident, vblank);
+  EXPECT_GT(event.data >> 16, 0);
+  EXPECT_EQ(kern::FlipCount(), 0u);
+}
+}  // namespace

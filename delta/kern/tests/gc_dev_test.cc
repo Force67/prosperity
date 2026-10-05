@@ -6,7 +6,23 @@
 #include "kern/object_table.h"
 #include "kern/ps4/dev/gc_dev.h"
 #include "kern/ps4/dev/gc_submit.h"
+#include "kern/ps5/dev/gc_dev.h"
 #include "options/options.h"
+
+TEST(GcDevicePs5, SubmissionCompletionClearsStatusAndPreservesRequest) {
+  options::Init();
+  kern::ObjectTable objects;
+  auto& device = *new kern::GcDevicePs5(objects);
+  ASSERT_TRUE(device.Init("gc", 0, 0));
+  u32 request[] = {4, 1};
+  ASSERT_EQ(device.Ioctl(0xc0088133, request), 0);
+  EXPECT_EQ(request[0], 4u);
+  EXPECT_EQ(request[1], 0u);
+  request[1] = 7;
+  ASSERT_EQ(device.Ioctl(0x80088133, request), 0);
+  EXPECT_EQ(request[0], 4u);
+  EXPECT_EQ(request[1], 7u);
+}
 
 TEST(GcDevice, MappedDoorbellExecutesPacketsWithoutHleAndResets) {
   options::Init();

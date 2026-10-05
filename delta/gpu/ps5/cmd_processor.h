@@ -18,9 +18,8 @@
  * (reg_state.h). The renderer (gpu/render) and the DrawInfo contract are shared
  * with the PS4 path.
  *
- * Submission is synchronous: a submit returns once the whole buffer has been
- * walked, so every fence label the packets ask the GPU to write is complete by
- * the time the walk passes it.
+ * Graphics submits run in order on a session worker. Packet waits remain
+ * pending until their comparison succeeds; flips wait for preceding submits.
  */
 
 #include "base/arch.h"
@@ -30,7 +29,7 @@ namespace gpu::ps5 {
 // Process one AGC draw command buffer (guest GPU address, identity-mapped to a
 // host pointer; size in bytes). Walks the packet stream, updating register
 // state and issuing draws.
-void SubmitDcb(const void* dcb, u32 size_bytes);
+void SubmitDcb(const void* dcb, u32 size_bytes, u32 tag = 0);
 // A submit taken from a queue's ring: may stop early at an unsatisfied wait
 // and returns the dwords consumed (see RingStall).
 u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue);

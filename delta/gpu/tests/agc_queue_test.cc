@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cstring>
 
 #include <gtest/gtest.h>
@@ -10,6 +11,7 @@
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/draw_state.h"
 #include "gpu/write_tracker.h"
+#include "guest/session.h"
 
 // Exercise the real packet walker with a backend that records dispatch state.
 // Queue scheduling must work independently of a host graphics device.
@@ -24,6 +26,8 @@ base::Array<u32, 3> g_pending_groups{};
 bool g_flush_succeeds = true;
 bool g_accept_draw = false;
 u64 g_presented = 0;
+u64 g_eop_context = 0;
+u64* g_eop_label = nullptr;
 constexpr u64 kDrawTarget = 0x500000000;
 using Words = base::Vector<u32>;
 
@@ -51,6 +55,106 @@ Words Indirect(const Words& words) {
 }
 u32 Submit(const Words& words, u32 queue) {
   return gpu::ps5::SubmitDcbRing(words.data(), words.size() * 4, queue);
+}
+
+class AgcGraphics : public testing::Test {
+ protected:
+  void SetUp() override { guest::BeginSession(); }
+  void TearDown() override {
+    guest::RequestStop();
+    guest::JoinThreads();
+    guest::ResetSessionResources();
+    guest::BeginSession();
+  }
+};
+
+TEST_F(AgcGraphics, EopFlipPresentsBeforeReleasingBufferForLaterPackets) {
+  u64 label = 0;
+  g_presented = 0;
+  g_eop_context = 91;
+  g_eop_label = &label;
+  g_accept_draw = true;
+  Words words;
+  Packet(words, 0x2d, {3, 0});
+  Packet(words, 0x49,
+         {0, (2u << 29) | (2u << 24), Lo(&label), Hi(&label), 1, 0, 91});
+  Packet(words, 0x93, {0x13, Lo(&label), Hi(&label), 0, 0, ~0u, ~0u, 0x40});
+  EXPECT_EQ(Submit(words, 202), words.size());
+  EXPECT_EQ(g_presented, kDrawTarget);
+  EXPECT_EQ(label, 0u);
+  EXPECT_EQ(g_eop_context, 0u);
+  g_eop_label = nullptr;
+  g_eop_context = 0;
+  g_accept_draw = false;
+}
+
+TEST_F(AgcGraphics, WaitsForComputeBeforeLaterSubmitsAndFlip) {
+  u32 ready = 0, count = 0;
+  Words first, second, check;
+  g_dispatch_values.clear();
+  Add(first, &count);
+  Packet(first, 0x76, {gpu::ps5::mmCOMPUTE_USER_DATA_0 - gpu::kShRegBase, 11});
+  Wait(first, &ready);
+  Packet(first, 0x15, {1, 1, 1, 1});
+  Add(first, &count);
+  Add(second, &count);
+  Packet(second, 0x76, {gpu::ps5::mmCOMPUTE_USER_DATA_0 - gpu::kShRegBase, 33});
+  Packet(second, 0x15, {1, 1, 1, 1});
+  Wait(check, &count);
+  gpu::ps5::SubmitDcb(first.data(), first.size() * 4);
+  gpu::ps5::SubmitDcb(second.data(), second.size() * 4);
+  first.assign(first.size(), 0);
+  bool entered = false;
+  for (int i = 0; i < 200 && !entered; ++i) {
+    entered = Submit(check, 201) == check.size();
+    if (!entered)
+      base::SleepForMilliseconds(1);
+  }
+  if (!entered) {
+    guest::RequestStop();
+    guest::JoinThreads();
+  }
+  ASSERT_TRUE(entered);
+  std::atomic<bool> flipped{false};
+  const bool spawned = guest::SpawnThread("agc-test-flip", [&] {
+    gpu::ps5::EndFrame(0);
+    flipped.store(true);
+  });
+  if (!spawned) {
+    guest::RequestStop();
+    guest::JoinThreads();
+  }
+  ASSERT_TRUE(spawned);
+  base::SleepForMilliseconds(300);
+  EXPECT_FALSE(flipped.load());
+  EXPECT_EQ(Submit(check, 201), check.size());
+  Words producer;
+  Packet(producer, 0x76,
+         {gpu::ps5::mmCOMPUTE_USER_DATA_0 - gpu::kShRegBase, 22});
+  Packet(producer, 0x15, {1, 1, 1, 1});
+  Packet(producer, 0x37, {0x500, Lo(&ready), Hi(&ready), 1});
+  Packet(producer, 0x37, {0x500, Lo(&ready), Hi(&ready), 0});
+  EXPECT_EQ(Submit(producer, 202), producer.size());
+  for (int i = 0; i < 2000 && !flipped.load(); ++i)
+    base::SleepForMilliseconds(1);
+  const bool completed = flipped.load();
+  guest::RequestStop();
+  guest::JoinThreads();
+  EXPECT_TRUE(completed);
+  EXPECT_EQ(count, 3u);
+  EXPECT_EQ(g_dispatch_values, (base::Vector<u32>{22, 11, 33}));
+}
+
+TEST_F(AgcGraphics, StopCancelsAnUnsatisfiedGraphicsWait) {
+  u32 ready = 0, count = 0;
+  Words words;
+  Wait(words, &ready);
+  Add(words, &count);
+  gpu::ps5::SubmitDcb(words.data(), words.size() * 4);
+  base::SleepForMilliseconds(10);
+  guest::RequestStop();
+  guest::JoinThreads();
+  EXPECT_EQ(count, 0u);
 }
 
 TEST(AgcQueue, NestedWaitsResumeEachQueueWithoutReplayingWrites) {
@@ -250,10 +354,18 @@ bool Init(Renderer& renderer) {
 void DeferLabelsToGpu() {}
 void RecordComputeInFrame() {}
 void SyncGuestDirect() {}
-bool CanDispatchIndirect(u64) { return false; }
-bool GpuIndirectArgs(u64, u64) { return false; }
-u64 GuestWritePublishBatch() { return 0; }
-bool WaitBatch(u64) { return true; }
+bool CanDispatchIndirect(u64) {
+  return false;
+}
+bool GpuIndirectArgs(u64, u64) {
+  return false;
+}
+u64 GuestWritePublishBatch() {
+  return 0;
+}
+bool WaitBatch(u64) {
+  return true;
+}
 void SubmitForPublishedLabels() {}
 void ReportBatchState() {}
 void BeginFrame(Renderer&) {}
@@ -298,7 +410,9 @@ WriteTracker& GuestWriteTracker() {
   static WriteTracker tracker;
   return tracker;
 }
-bool WriteTracker::Enable() { return false; }
+bool WriteTracker::Enable() {
+  return false;
+}
 }  // namespace gpu
 
 namespace gpu::gcn {
@@ -314,3 +428,17 @@ extern "C" bool prosperity_ps5_is_display_buffer(u64 base) {
 extern "C" void prosperity_gpu_end_of_pipe() {}
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe_ctx(u64) {}
+extern "C" bool prosperity_ps5_begin_eop_flip(u64 context, u64* scanout) {
+  if (!g_eop_label || context != g_eop_context)
+    return false;
+  *scanout = kDrawTarget;
+  return true;
+}
+extern "C" void prosperity_ps5_complete_eop_flip(u64 context) {
+  ASSERT_EQ(context, g_eop_context);
+  EXPECT_EQ(g_presented, kDrawTarget);
+  ASSERT_NE(g_eop_label, nullptr);
+  EXPECT_EQ(*g_eop_label, 1u);
+  *g_eop_label = 0;
+  g_eop_context = 0;
+}

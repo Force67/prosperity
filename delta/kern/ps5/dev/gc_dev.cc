@@ -772,7 +772,7 @@ i32 GcDevicePs5::Ioctl(u32 cmd, void* data) {
                         // buffer.
       if (kAgcQstat)
         BASE_LOGI("agcq", "submit done 8133");
-      ClearSubmitStatus(cmd, data, 0);
+      ClearSubmitStatus(cmd, data, 4);
       return 0;
     }
 
