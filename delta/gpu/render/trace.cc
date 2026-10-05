@@ -15,6 +15,7 @@
 #include "gpu/render/guest_format.h"
 #include "gpu/render/png.h"
 #include "gpu/render/render_target.h"
+#include "gpu/render/renderer.h"
 
 #include <sys/stat.h>
 #include <cmath>
@@ -40,6 +41,8 @@ namespace {
 DELTA_OPTION(int, kCaptureFrame, "DELTA_GPU_CAPTURE", 0);
 DELTA_OPTION(float, kCaptureAfter, "DELTA_GPU_CAPTURE_AFTER", 0.f);
 DELTA_OPTION(int, kCaptureBusy, "DELTA_GPU_CAPTURE_BUSY", 0);
+DELTA_OPTION(u64, kCaptureCs, "DELTA_GPU_CAPTURE_CS", 0);
+DELTA_OPTION(u64, kCaptureCsEnd, "DELTA_GPU_CAPTURE_CS_END", 0);
 DELTA_OPTION(int, kCaptureCount, "DELTA_GPU_CAPTURE_COUNT", 1);
 DELTA_OPTION(const char*, kCaptureDir, "DELTA_GPU_CAPTURE_DIR", nullptr);
 // DELTA_GPU_RTWATCH=<guest base>: include this render target in every
@@ -97,6 +100,8 @@ u32 g_draw_seq = 0;
 int g_frames_left = 0;
 int g_armed_frame = 0;  // resolved frame number once a trigger fires
 bool g_finished = false;
+bool g_cs_trigger = false;
+base::Set<u64> g_cs_captured;
 u64 g_start_ns = 0;
 u32 g_validation_messages = 0;
 
@@ -153,7 +158,7 @@ u64 NowNs() {
 bool Armed() {
   static const bool kArmed = kCaptureFrame.get() > 0 ||
                              kCaptureAfter.get() > 0.f ||
-                             kCaptureBusy.get() > 0;
+                             kCaptureBusy.get() > 0 || kCaptureCs.get() != 0;
   return kArmed;
 }
 
@@ -1451,7 +1456,7 @@ void FrameBegin(int frame_num) {
     // Called before the frame counters reset, so g_frame.draws still holds the
     // PREVIOUS frame's count, which is what the busy trigger needs (a frame's
     // own draw count is not known until it ends).
-    bool trigger = false;
+    bool trigger = g_cs_trigger;
     if (kCaptureFrame.get() > 0 && frame_num == kCaptureFrame.get())
       trigger = true;
     if (kCaptureAfter.get() > 0.f &&
@@ -1761,9 +1766,15 @@ void RecordDecline(const char* reason) {
   l.Emit();
 }
 
-void RecordDispatch(const render::ComputeInfo& ci) {
+static void RecordDispatchInfo(const render::ComputeInfo& ci, const char* type) {
   if (!g_recording)
     return;
+  Arr textures;
+  for (u32 i = 0; i < ci.num_tex && i < render::ComputeInfo::kMaxTextures;
+       i++) {
+    textures.Add(TexObj(ci.tex[i].binding, ci.tex[i].tex, nullptr));
+    NoteTexture(ci.tex[i].tex);
+  }
   Arr res;
   for (u32 i = 0; i < ci.num_res && i < render::ComputeInfo::kMaxResources;
        i++) {
@@ -1796,7 +1807,7 @@ void RecordDispatch(const render::ComputeInfo& ci) {
     groups.Add(Line::IntText(ci.groups[i]));
     group_base.Add(Line::IntText(ci.group_base[i]));
   }
-  Line l("dispatch");
+  Line l(type);
   l.U("seq", g_seq++)
       .Int("frame", g_frame_num)
       .Int("after_draw", int(g_draw_seq))
@@ -1804,9 +1815,119 @@ void RecordDispatch(const render::ComputeInfo& ci) {
       .Raw("cs", ShaderObj(ci.cs_addr, ci.recomp ? &ci.recomp->spirv : nullptr))
       .Raw("groups", groups.Done())
       .Raw("group_base", group_base.Done())
+      .Raw("textures", textures.Done())
       .Raw("resources", res.Done())
       .Raw("user_data", ud.Done());
   l.Emit();
+}
+
+void RecordDispatch(const render::ComputeInfo& ci) {
+  RecordDispatchInfo(ci, "dispatch");
+}
+
+namespace {
+void DumpDispatchBytes(const char* phase,
+                       const char* kind,
+                       u64 cs,
+                       u32 binding,
+                       u64 base,
+                       u64 bytes,
+                       const void* data = nullptr,
+                       u64 offset = 0) {
+  if (!kCaptureRaw || !bytes || (!data && !gpu::IsReadableRange(base, bytes)))
+    return;
+  char path[512];
+  std::snprintf(path, sizeof path, "%s_cs_%llx_%s_%s_%u_%llx.bin",
+                g_prefix.c_str(), (unsigned long long)cs, phase, kind, binding,
+                (unsigned long long)base);
+  std::FILE* f = std::fopen(path, "wb");
+  if (!f)
+    return;
+  const bool ok = std::fwrite(data ? data : reinterpret_cast<const void*>(base),
+                              1, bytes, f) == bytes;
+  std::fclose(f);
+  Line l("dispatch_dump");
+  l.U("seq", g_seq++)
+      .Str("phase", phase)
+      .Str("kind", kind)
+      .Hex("cs", cs)
+      .U("binding", binding)
+      .Hex("base", base)
+      .U("offset", offset)
+      .U("bytes", bytes)
+      .Str("file", ok ? path : "");
+  l.Emit();
+}
+}  // namespace
+
+bool CaptureDispatchInputs(Renderer& renderer, const render::ComputeInfo& ci) {
+  const u64 end = kCaptureCsEnd ? kCaptureCsEnd.get() : kCaptureCs.get();
+  if (!kCaptureCs || ci.cs_addr < kCaptureCs || ci.cs_addr > end ||
+      g_finished || g_cs_captured.count(ci.cs_addr))
+    return false;
+  g_cs_trigger = true;
+  if (!g_recording)
+    FrameBegin(g_frame.num);
+  if (!g_recording)
+    return false;
+  if (!kCaptureRaw || !FlushCsWrites(renderer, "capture-inputs"))
+    return false;
+  g_cs_captured.insert(ci.cs_addr);
+  RecordDispatchInfo(ci, "dispatch_inputs");
+  u32 dwords = 0;
+  GuestCodeHash(ci.cs_addr, &dwords);
+  DumpDispatchBytes("input", "shader", ci.cs_addr, 0, ci.cs_addr,
+                    u64(dwords) * 4);
+  for (u32 i = 0; i < ci.num_res; i++) {
+    const auto& r = ci.res[i];
+    DumpDispatchBytes("input", "buffer", ci.cs_addr, r.binding, r.base,
+                      r.guest_size ? r.guest_size : r.size);
+  }
+  for (u32 i = 0; i < ci.num_tex; i++) {
+    const auto& t = ci.tex[i].tex;
+    const bool compressed = GuestFormatBlockCompressed(t.dfmt);
+    const u32 w = compressed ? (t.w + 3) / 4 : t.w;
+    const u32 h = compressed ? (t.h + 3) / 4 : t.h;
+    const u32 pitch = t.pitch ? t.pitch : t.w;
+    gcn::TextureLayout32 layout;
+    if (gcn::BuildTextureLayout32(
+            layout, w, h, compressed ? (pitch + 3) / 4 : pitch,
+            base::Max(1u, t.layers), base::Max(1u, t.mip_levels), t.tiling,
+            t.pow2_pad, GuestFormatElemBytes(t.dfmt)))
+      DumpDispatchBytes("input", "texture", ci.cs_addr, ci.tex[i].binding,
+                        t.base, layout.size);
+  }
+  return true;
+}
+
+void CaptureDispatchOutputs(const render::ComputeInfo& ci) {
+  if (!g_recording)
+    return;
+  for (u32 i = 0; i < ci.num_res; i++) {
+    const auto& r = ci.res[i];
+    if (r.written)
+      DumpDispatchBytes("output", "buffer", ci.cs_addr, r.binding, r.base,
+                        r.guest_size ? r.guest_size : r.size);
+  }
+}
+
+void CaptureDispatchBindings(const render::ComputeInfo& ci,
+                             const u32* push_constants,
+                             u32 push_dwords,
+                             const rhi::BindingWrite* bindings,
+                             rhi::Buffer* const* snapshots) {
+  if (!g_recording)
+    return;
+  DumpDispatchBytes("bound", "spirv", ci.cs_addr, 0, ci.cs_addr,
+                    ci.recomp->spirv.size() * sizeof(u32),
+                    ci.recomp->spirv.data());
+  DumpDispatchBytes("bound", "push", ci.cs_addr, 0, ci.cs_addr,
+                    push_dwords * sizeof(u32), push_constants);
+  for (u32 i = 0; i < ci.num_res; i++)
+    if (snapshots[i])
+      DumpDispatchBytes("bound", "buffer", ci.cs_addr, bindings[i].binding,
+                        ci.res[i].base, bindings[i].range,
+                        snapshots[i]->mapped(), bindings[i].offset);
 }
 
 void RecordBarrier(const char* aspect,
@@ -1899,6 +2020,8 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_frames_left);
   guest::ResetResource(g_armed_frame);
   guest::ResetResource(g_finished);
+  guest::ResetResource(g_cs_trigger);
+  guest::ResetResource(g_cs_captured);
   guest::ResetResource(g_start_ns);
   guest::ResetResource(g_validation_messages);
   guest::ResetResource(g_snapshots);

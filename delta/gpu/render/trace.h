@@ -16,6 +16,10 @@
 #include "gpu/render/command.h"
 #include "gpu/rhi/device.h"
 
+namespace gpu::render {
+struct Renderer;
+}
+
 namespace gpu::render::trace {
 
 // True only while an armed frame is recording. Call sites test this before
@@ -73,6 +77,16 @@ void RecordDraw(const render::DrawInfo& draw,
 void RecordDecline(const char* reason);
 
 void RecordDispatch(const render::ComputeInfo& dispatch);
+// CAPTURE_CS starts at the selected shader. RAW snapshots bracket its
+// execution.
+bool CaptureDispatchInputs(Renderer& renderer,
+                           const render::ComputeInfo& dispatch);
+void CaptureDispatchOutputs(const render::ComputeInfo& dispatch);
+void CaptureDispatchBindings(const render::ComputeInfo& dispatch,
+                             const u32* push_constants,
+                             u32 push_dwords,
+                             const rhi::BindingWrite* bindings,
+                             rhi::Buffer* const* snapshots);
 
 // Every layout transition the backend records, named after the guest resource
 // the image holds.

@@ -6040,6 +6040,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   }
   if (!renderer.available() || !ci.recomp || !ci.recomp->ok || !ci.num_res)
     return CsDeclined(ci, "2");
+  const bool capture_dispatch = trace::CaptureDispatchInputs(renderer, ci);
   // The group counts of an indirect dispatch stay on the GPU while a dispatch
   // output holds them: the GPU reads them when this one runs.
   IndirectArgs indirect;
@@ -7014,6 +7015,26 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   }
   if (hazard_src)
     g_cs_list->Barrier(hazard_src, hazard_dst);
+  base::Vector<rhi::Buffer*> capture_buffers;
+  if (capture_dispatch) {
+    capture_buffers.resize(ci.num_res, nullptr);
+    g_cs_list->Barrier(rhi::kAccessAllWrite, rhi::kAccessCopyRead);
+    for (u32 i = 0; i < ci.num_res; i++) {
+      rhi::Buffer* snapshot = CreateCsBuffer(wr[i].range, rhi::kBufferCopyDst,
+                                             rhi::MemoryKind::kReadback);
+      if (!snapshot || !snapshot->mapped()) {
+        if (snapshot)
+          Device().Destroy(snapshot);
+        continue;
+      }
+      capture_buffers[i] = snapshot;
+      g_cs_frame_retired.push_back(snapshot);
+      g_cs_list->CopyBuffer(snapshot, 0, wr[i].buffer, wr[i].offset,
+                            wr[i].range);
+    }
+    g_cs_list->Barrier(rhi::kAccessCopyRead | rhi::kAccessCopyWrite,
+                       kAccessComputeRW | rhi::kAccessHostRead);
+  }
   if (caps.debug_labels) {
     char label[96];
     std::snprintf(label, sizeof(label), "dispatch cs=%#llx %ux%ux%u res=%u",
@@ -7219,6 +7240,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   g_ns_cs_out += NowNs() - t_out0;
   if (ci.expanded_htile_base)
     NoteExpandedHtile(ci.expanded_htile_base);
+  if (capture_dispatch) {
+    if (!FlushCsWrites(renderer, "capture-outputs") ||
+        !CsBatchFlush(kSyncStageHazard))
+      return false;
+    trace::CaptureDispatchBindings(ci, pc, kCsPushDwords, wr,
+                                   capture_buffers.data());
+    trace::CaptureDispatchOutputs(ci);
+  }
   return true;
 }
 
