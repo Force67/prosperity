@@ -204,14 +204,18 @@ void TransitionImage(rhi::CommandList* list,
                      u8 aspect = rhi::kAspectColor,
                      u32 layers = 1);
 
-rhi::TextureView* SampledView(RTarget& rt, u32 swizzle, bool feedback = false);
+rhi::TextureView* SampledView(RTarget& rt,
+                              u32 swizzle,
+                              bool feedback = false,
+                              bool arrayed = false);
 // Sampled view reinterpreted into `want` (same texel size) so the numeric type
 // matches the shader's OpTypeImage; `used` returns the format actually created,
 // which the caller needs to decide whether the binding may be filtered.
 rhi::TextureView* SampledViewAs(RTarget& rt,
                                 u32 swizzle,
                                 rhi::Format want,
-                                rhi::Format* used = nullptr);
+                                rhi::Format* used = nullptr,
+                                bool arrayed = false);
 rhi::TextureView* SampledView(DepthTarget& depth, u32 swizzle);
 
 // Resolve a sampled guest address to its live image (0 = none), making the

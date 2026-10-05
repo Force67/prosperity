@@ -533,7 +533,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // Render targets hold one mip. A mip chain at the same guest base must use
   // the texture upload, including its mip offsets and sampler levels.
   const bool tex_rt_eligible =
-      !d.tex_arrayed && !d.tex_is_3d && d.tex_mip_levels == 1 &&
+      (!d.tex_arrayed || (d.tex_layers == 1 && d.tex_base_array == 0 &&
+                          d.tex_view_layers == 1)) &&
+      !d.tex_is_3d && d.tex_mip_levels == 1 &&
       !GuestFormatBlockCompressed(d.tex_dfmt);
   if (tex_base && tex_rt_eligible && !g_rts.count(tex_base) &&
       !g_depths.count(tex_base)) {
@@ -556,9 +558,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // attachment and sampled image. Declining it instead sent SotC's whole
   // lighting pass down the heuristic quad path, which produced nothing.
   const bool depth_self_read =
-      tex_rt_eligible && tex_base && tex_base == d.depth_base &&
+      tex_rt_eligible && !d.tex_arrayed && tex_base && tex_base == d.depth_base &&
       !d.depth_write_enable && g_depths.count(tex_base);
-  bool depth_as_tex = tex_rt_eligible && tex_base &&
+  bool depth_as_tex = tex_rt_eligible && !d.tex_arrayed && tex_base &&
                       (tex_base != d.depth_base || depth_self_read) &&
                       g_depths.count(tex_base);
   bool rt_as_tex = color_as_tex || feedback_as_tex || depth_as_tex;
@@ -1156,8 +1158,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         continue;
       }
       const bool rt_eligible =
-          !t.arrayed && !t.is_3d && t.mip_levels == 1 &&
-          !GuestFormatBlockCompressed(t.dfmt);
+          (!t.arrayed ||
+           (t.layers == 1 && t.base_array == 0 && t.view_layers == 1)) &&
+          !t.is_3d && t.mip_levels == 1 && !GuestFormatBlockCompressed(t.dfmt);
       // One base can hold several render-target geometries, and only the live
       // one answers to the address. Pick the variant this sample is asking for
       // before deciding what the binding resolves to, but never while the
@@ -1223,12 +1226,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         multi_transition_source |=
             g_rts[base].layout != rhi::TextureState::kShaderRead ||
             g_rts[base].dirty_for_read;
-      } else if (base && rt_eligible && g_depths.count(base) &&
+      } else if (base && rt_eligible && !t.arrayed && g_depths.count(base) &&
                  (base != d.depth_base || !d.depth_write_enable)) {
         multi_depth[i] = base;
         multi_transition_source |=
             g_depths[base].layout != rhi::TextureState::kDepthRead;
-      } else if (base && rt_eligible && ResolveSampledStencil(base)) {
+      } else if (base && rt_eligible && !t.arrayed &&
+                 ResolveSampledStencil(base)) {
         // A deferred lighting pass reads the material id it stencilled during
         // the G-buffer pass. That plane lives in the depth image, not in any
         // colour target, so without this the address resolved to whatever RT
@@ -1602,7 +1606,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           multi_formats[i] = g_rts[multi_storage[i]].fmt;
         } else if (multi_feedback[i]) {
           auto& src = g_rts[multi_feedback[i]];
-          multi_views[i] = SampledView(src, d.texs[i].swizzle, true);
+          multi_views[i] = SampledView(src, d.texs[i].swizzle, true,
+                                       d.texs[i].arrayed);
           multi_layouts[i] = rhi::TextureState::kShaderRead;
           multi_formats[i] = src.fmt;
         } else if (multi_color[i]) {
@@ -1613,7 +1618,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           multi_views[i] =
               SampledViewAs(g_rts[multi_color[i]], d.texs[i].swizzle,
                             GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt),
-                            &multi_formats[i]);
+                            &multi_formats[i], d.texs[i].arrayed);
           multi_layouts[i] = rhi::TextureState::kShaderRead;
         } else if (multi_stencil_src[i]) {
           multi_views[i] = StencilSampledView(g_depths[multi_stencil_src[i]]);
@@ -1657,13 +1662,14 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           multi_formats[i] = g_rts[multi_storage[i]].fmt;
         } else if (multi_feedback[i]) {
           multi_views[i] =
-              SampledView(g_rts[multi_feedback[i]], d.texs[i].swizzle, true);
+              SampledView(g_rts[multi_feedback[i]], d.texs[i].swizzle, true,
+                           d.texs[i].arrayed);
           multi_formats[i] = g_rts[multi_feedback[i]].fmt;
         } else if (multi_color[i]) {
           multi_views[i] =
               SampledViewAs(g_rts[multi_color[i]], d.texs[i].swizzle,
                             GuestTextureFormat(d.texs[i].dfmt, d.texs[i].nfmt),
-                            &multi_formats[i]);
+                            &multi_formats[i], d.texs[i].arrayed);
         } else if (multi_stencil_src[i]) {
           multi_views[i] = StencilSampledView(g_depths[multi_stencil_src[i]]);
           multi_layouts[i] = rhi::TextureState::kDepthRead;
@@ -1684,7 +1690,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     rhi::TextureView* views[kMaxTex] = {};
     rhi::TextureState layouts[kMaxTex] = {};
     rhi::Format formats[kMaxTex] = {};
-    views[0] = SampledView(g_rts[tex_base], d.tex_swizzle, true);
+    views[0] = SampledView(g_rts[tex_base], d.tex_swizzle, true, d.tex_arrayed);
     layouts[0] = rhi::TextureState::kShaderRead;
     formats[0] = g_rts[tex_base].fmt;
     tex_set =
@@ -1701,9 +1707,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // In the T#'s own format, as the multi-texture path does: the swizzle
     // is written against the guest's memory order, which a BGRA target's
     // native view has already undone (GTA:SA's final copy swapped R and B).
-    views[0] =
-        SampledViewAs(src, d.tex_swizzle,
-                      GuestTextureFormat(d.tex_dfmt, d.tex_nfmt), &formats[0]);
+    views[0] = SampledViewAs(src, d.tex_swizzle,
+                             GuestTextureFormat(d.tex_dfmt, d.tex_nfmt),
+                             &formats[0], d.tex_arrayed);
     layouts[0] = rhi::TextureState::kShaderRead;
     tex_set =
         GetMultiTexSet(d, g_tex.layout, 1, views, layouts, formats, nullptr);

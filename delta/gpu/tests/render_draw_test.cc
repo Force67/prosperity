@@ -1806,6 +1806,81 @@ TEST(VkDraw, PixelTypedLoadConvertsPackedDataWithByteOffsets) {
   EXPECT_EQ(colored, 1u);
 }
 
+TEST(VkDraw, SingleLayerArraySamplesRenderedImage) {
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  alignas(65536) static base::Array<u8, 65536> source{}, targets[2]{};
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                        0xbf810000};
+  const u32 shaders[2][4096] = {
+      {0x7e0002f0, 0x7e0202f0, 0x7e040280, 0xf09c4f00, 0x00400400, 0xf800080f,
+       0x07060504, 0xbf810000},
+      {0x7e0002f0, 0x7e0202f0, 0x7e040280, 0xf09c4f00, 0x00400400, 0xf09c4f00,
+       0x00420900, 0xf800080f, 0x07060504, 0xbf810000}};
+  const u64 address = reinterpret_cast<u64>(source.data());
+  u32 user_data[32]{};
+  user_data[0] = address >> 8;
+  user_data[1] = ((address >> 40) & 0xff) | (56u << 20) | (3u << 30);
+  user_data[2] = 15 | (15u << 14);
+  user_data[3] = 0xd0000fac;
+  base::CopyN(user_data, 4, user_data + 8);
+  for (u32 trial = 0; trial < 2; ++trial) {
+    SCOPED_TRACE(trial);
+    const u32* ps = shaders[trial];
+    const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
+    ASSERT_TRUE(program.ok);
+    gpu::render::BeginFrame(renderer);
+    auto* rt =
+        gpu::render::GetRT(address, 16, 16, gpu::rhi::Format::kRGBA8Unorm);
+    ASSERT_NE(rt, nullptr);
+    gpu::render::TransitionImage(gpu::render::g_frame.list, rt->texture,
+                                 rt->layout, gpu::rhi::TextureState::kCopyDst);
+    gpu::render::g_frame.list->ClearTexture(rt->texture, rt->layout, {},
+                                            gpu::rhi::ClearColor{{0, 0, 1, 1}});
+    rt->ever_rendered = true;
+    gpu::render::DrawInfo draw;
+    draw.recomp = &program;
+    draw.vs_addr = reinterpret_cast<u64>(vs);
+    draw.ps_addr = reinterpret_cast<u64>(ps);
+    base::CopyN(user_data, 32, draw.ps_user_data);
+    draw.prim_type = draw.vertex_count = 1;
+    draw.num_texs = trial + 1;
+    auto& tex = draw.texs[0];
+    tex.base = address;
+    tex.w = tex.h = tex.pitch = 16;
+    tex.dfmt = 10;
+    tex.tiling = 256;
+    tex.arrayed = true;
+    draw.texs[1] = tex;
+    draw.tex_base = address;
+    draw.tex_w = draw.tex_h = draw.tex_pitch = 16;
+    draw.tex_dfmt = 10;
+    draw.tex_tiling = 256;
+    draw.tex_arrayed = true;
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[trial].data());
+    draw.rt_w = draw.rt_h = 16;
+    draw.mrt_count = draw.mrt_bound_mask = 1;
+    draw.mrt_info[0] = 10u << 2;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+    const u32 slot_index = gpu::render::g_frame.slot_idx;
+    gpu::render::EndFrame(renderer, draw.rt_base);
+    const auto& slot = gpu::render::g_frame.slots[slot_index];
+    ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+    ASSERT_TRUE(slot.presentable);
+    const auto* pixels = slot.readback->mapped();
+    u32 blue = 0;
+    for (u32 i = 0; i < 256; ++i)
+      blue += pixels[i * 4] == 0 && pixels[i * 4 + 1] == 0 &&
+              pixels[i * 4 + 2] == 255 && pixels[i * 4 + 3] == 255;
+    EXPECT_EQ(blue, 1u);
+    EXPECT_TRUE(
+        std::all_of(source.begin(), source.end(), [](u8 v) { return v == 0; }));
+  }
+}
+
 TEST(VkDraw, PixelOneDimensionalSampleSurvivesAddtidSpill) {
   options::Init();
   auto& renderer = gpu::render::DefaultRenderer();

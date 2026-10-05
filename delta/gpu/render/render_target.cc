@@ -112,9 +112,10 @@ rhi::TextureView* SampledImageView(rhi::Texture* texture,
                                    rhi::ViewDim dim = rhi::ViewDim::k2D) {
   rhi::TextureViewDesc desc;
   TextureSwizzle(swizzle, desc.swizzle);
-  if (IdentitySwizzle(desc.swizzle))
+  if (identity && IdentitySwizzle(desc.swizzle))
     return identity;
-  const auto it = views.find(swizzle);
+  const u32 key = swizzle | (static_cast<u32>(dim) << 24);
+  const auto it = views.find(key);
   if (it != views.end())
     return it->second;
   desc.dim = dim;
@@ -123,7 +124,7 @@ rhi::TextureView* SampledImageView(rhi::Texture* texture,
   rhi::TextureView* view = Device().CreateView(texture, desc);
   if (!view)
     return nullptr;
-  views.emplace(swizzle, view);
+  views.emplace(key, view);
   return view;
 }
 
@@ -133,7 +134,8 @@ rhi::TextureView* SampledImageView(rhi::Texture* texture,
 rhi::TextureView* SampledViewAs(RTarget& rt,
                                 u32 swizzle,
                                 rhi::Format want,
-                                rhi::Format* used) {
+                                rhi::Format* used,
+                                bool arrayed) {
   const auto own = [&](rhi::TextureView* v) {
     if (used)
       *used = rt.fmt;
@@ -147,25 +149,31 @@ rhi::TextureView* SampledViewAs(RTarget& rt,
   // instead of the target's own content.
   if (want == rhi::Format::kUndefined || want == rt.fmt ||
       FormatBytes(want) != FormatBytes(rt.fmt) || FormatBlockCompressed(want))
-    return own(SampledView(rt, swizzle));
+    return own(SampledView(rt, swizzle, false, arrayed));
   if (used)
     *used = want;
-  const u32 key = swizzle | (static_cast<u32>(want) << 16);
+  const u32 key = swizzle | (static_cast<u32>(want) << 16) |
+                  (static_cast<u32>(arrayed) << 31);
   const auto it = rt.alias_views.find(key);
   if (it != rt.alias_views.end())
     return it->second;
   rhi::TextureViewDesc desc;
-  desc.dim = rt.depth > 1 ? rhi::ViewDim::k3D : rhi::ViewDim::k2D;
+  desc.dim = rt.depth > 1 ? rhi::ViewDim::k3D
+             : arrayed    ? rhi::ViewDim::k2DArray
+                          : rhi::ViewDim::k2D;
   desc.format = (want);
   TextureSwizzle(swizzle, desc.swizzle);
   rhi::TextureView* v = Device().CreateView(rt.texture, desc);
   if (!v)
-    return own(SampledView(rt, swizzle));
+    return own(SampledView(rt, swizzle, false, arrayed));
   rt.alias_views[key] = v;
   return v;
 }
 
-rhi::TextureView* SampledView(RTarget& rt, u32 swizzle, bool feedback) {
+rhi::TextureView* SampledView(RTarget& rt,
+                              u32 swizzle,
+                              bool feedback,
+                              bool arrayed) {
   // A target that became live at this address after the draw took its snapshot
   // (an alias switch, see ActivateRtVariant) has no copy of its own yet.
   // Sampling the attachment instead would be the feedback loop the copy exists
@@ -173,15 +181,17 @@ rhi::TextureView* SampledView(RTarget& rt, u32 swizzle, bool feedback) {
   if (feedback && !rt.feedback_texture)
     return nullptr;
   if (feedback)
-    return SampledImageView(rt.feedback_texture, rt.feedback_view, rt.fmt,
-                            rhi::kAspectColor, swizzle,
-                            rt.feedback_sampled_views);
+    return SampledImageView(
+        rt.feedback_texture, arrayed ? nullptr : rt.feedback_view, rt.fmt,
+        rhi::kAspectColor, swizzle, rt.feedback_sampled_views,
+        arrayed ? rhi::ViewDim::k2DArray : rhi::ViewDim::k2D);
   if (rt.depth > 1)
     return SampledImageView(rt.texture, rt.volume_view, rt.fmt,
                             rhi::kAspectColor, swizzle, rt.sampled_views,
                             rhi::ViewDim::k3D);
-  return SampledImageView(rt.texture, rt.view, rt.fmt, rhi::kAspectColor,
-                          swizzle, rt.sampled_views);
+  return SampledImageView(rt.texture, arrayed ? nullptr : rt.view, rt.fmt,
+                          rhi::kAspectColor, swizzle, rt.sampled_views,
+                          arrayed ? rhi::ViewDim::k2DArray : rhi::ViewDim::k2D);
 }
 
 rhi::TextureView* SampledView(DepthTarget& depth, u32 swizzle) {
