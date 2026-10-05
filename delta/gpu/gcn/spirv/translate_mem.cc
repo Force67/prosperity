@@ -2126,7 +2126,9 @@ static void EmitCsMimgStaged(Translator& t,
   // RGBA8_SINT used by the native video decoder.
   const Id is_unorm =
       t.rdna_sources ? is_gfmt({1, 7, 14, 23, 56, 65, 169}) : t.IsZero(nfmt);
-  const Id is_signed8 = t.rdna_sources ? is_gfmt({61}) : t.m.ConstBool(false);
+  const Id is_signed8 =
+      t.rdna_sources ? is_gfmt({61})
+                     : t.LAnd(t.Eq(dfmt, t.U32(10)), t.Eq(nfmt, t.U32(5)));
   const Id is_srgb =
       t.rdna_sources ? is_gfmt({130, 170}) : t.Eq(nfmt, t.U32(9));
   const auto srgb_decode = [&](Id value) {
@@ -2142,8 +2144,10 @@ static void EmitCsMimgStaged(Translator& t,
   const Id is_rgba8 = t.rdna_sources
                           ? is_gfmt({56, 60, 61, 130, 1, 5, 169,
                                      170})  // R8 stages as an RGBA8 texel
-                          : t.LAnd(t.Eq(dfmt, t.U32(10)),
-                                   logical_or(is_unorm, t.Eq(nfmt, t.U32(4))));
+                          : t.LAnd(logical_or(t.Eq(dfmt, t.U32(10)),
+                                              t.Eq(dfmt, t.U32(1))),
+                                   logical_or(logical_or(is_unorm, is_signed8),
+                                              t.Eq(nfmt, t.U32(4))));
   const Id is_r32 = t.rdna_sources
                         ? is_gfmt({20, 21, 22})
                         : t.LAnd(t.Eq(dfmt, t.U32(4)),
@@ -2153,9 +2157,13 @@ static void EmitCsMimgStaged(Translator& t,
   const Id is_rg16f = t.rdna_sources
                           ? is_gfmt({29})
                           : t.LAnd(t.Eq(dfmt, t.U32(5)), t.Eq(nfmt, t.U32(7)));
-  const Id is_rg16i = t.rdna_sources ? is_gfmt({27, 28}) : t.m.ConstBool(false);
   const Id is_rg16_signed =
-      t.rdna_sources ? is_gfmt({28}) : t.m.ConstBool(false);
+      t.rdna_sources ? is_gfmt({28})
+                     : t.LAnd(t.Eq(dfmt, t.U32(5)), t.Eq(nfmt, t.U32(5)));
+  const Id is_rg16i =
+      t.rdna_sources ? is_gfmt({27, 28})
+                     : logical_or(is_rg16_signed, t.LAnd(t.Eq(dfmt, t.U32(5)),
+                                                         t.Eq(nfmt, t.U32(4))));
   const Id is_r16_unorm =
       t.rdna_sources ? is_gfmt({7}) : t.LAnd(t.Eq(dfmt, t.U32(2)), is_unorm);
   const Id is_r16 = logical_or(
@@ -2288,6 +2296,10 @@ static void EmitCsMimgStaged(Translator& t,
     sample_fy =
         t.FSub(t.FMul(t.FClamp01(t.FSub(addr_vgf(1), cube_bias)), height_f),
                t.F32(0.5f));
+    if (sample) {
+      sample_fx = t.SelectF(is_int, t.FAdd(sample_fx, t.F32(.5f)), sample_fx);
+      sample_fy = t.SelectF(is_int, t.FAdd(sample_fy, t.F32(.5f)), sample_fy);
+    }
     const Id fx0 =
         t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fx, t.F32(0.f)));
     const Id fy0 =
@@ -2559,7 +2571,9 @@ static void EmitCsMimgStaged(Translator& t,
           continue;
         const Id top = mix(c00[i], c10[i], wx);
         const Id bot = mix(c01[i], c11[i], wx);
-        t.SetVgF(vdata + out++, mix(top, bot, wy));
+        t.SetVg(vdata + out++,
+                t.SelectB(is_int, t.m.Bitcast(t.t_u, c00[i]),
+                          t.m.Bitcast(t.t_u, mix(top, bot, wy))));
       }
     }
   } else if (atomic) {
