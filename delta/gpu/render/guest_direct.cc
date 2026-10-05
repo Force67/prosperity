@@ -22,7 +22,7 @@ namespace gpu::render {
 namespace {
 DELTA_OPTION(bool, kDirect, "DELTA_GPU_DIRECT", false);
 
-constexpr u64 kBlocks = kDirectSize >> kDirectBlockShift;
+constexpr u64 kBlocks = kDirectBlocks;
 constexpr u64 kChunk = 2ull << 20;
 
 struct Mapping {
@@ -148,7 +148,7 @@ u64 EntryFor(u64 block) {
 }
 
 void Fill(u64 address) {
-  if (address < kDirectBase || address >= kDirectBase + kDirectSize ||
+  if (GuestDirectIndex(address) == ~0ull ||
       g_unmapped.count(address & ~((1ull << kDirectBlockShift) - 1)))
     return;
   if (!FindMapping(address))
@@ -161,7 +161,7 @@ void Fill(u64 address) {
   const u64 first = address & ~(kChunk - 1);
   for (u64 block = first; block < first + kChunk;
        block += 1ull << kDirectBlockShift) {
-    const u64 index = (block - kDirectBase) >> kDirectBlockShift;
+    const u64 index = GuestDirectIndex(block);
     if (index >= kBlocks)
       break;
     if (g_redirected[index].load(base::memory_order_acquire)) {
@@ -219,8 +219,10 @@ bool InitGuestDirect() {
   ReadMaps();
   gcn::g_direct_table = g_table->address();
   gcn::g_direct_misses = g_misses->address();
-  BASE_LOGI("direct", "guest memory {:#x}+{:#x} through {} views of {} MiB",
-            kDirectBase, kDirectSize, g_maps.size(), g_alias_size >> 20);
+  BASE_LOGI("direct",
+            "guest memory {:#x}/{:#x}+{:#x} through {} views of {} MiB",
+            kDirectBase, kDirectPs5Base, kDirectSize, g_maps.size(),
+            g_alias_size >> 20);
   g_init_state = 1;
   return true;
 }
@@ -231,10 +233,9 @@ bool InDirectAlias(u64 va) {
 }
 
 void DirectRedirect(u64 block, u64 device_address) {
-  if (!gcn::g_direct_table || block < kDirectBase ||
-      block >= kDirectBase + kDirectSize)
+  const u64 index = GuestDirectIndex(block);
+  if (!gcn::g_direct_table || index == ~0ull)
     return;
-  const u64 index = (block - kDirectBase) >> kDirectBlockShift;
   if (!g_redirected[index].load(base::memory_order_acquire)) {
     if (!FindMapping(block))
       ReadMaps();
@@ -246,10 +247,9 @@ void DirectRedirect(u64 block, u64 device_address) {
 }
 
 void DirectRestore(u64 block) {
-  if (!gcn::g_direct_table || block < kDirectBase ||
-      block >= kDirectBase + kDirectSize)
+  const u64 index = GuestDirectIndex(block);
+  if (!gcn::g_direct_table || index == ~0ull)
     return;
-  const u64 index = (block - kDirectBase) >> kDirectBlockShift;
   if (!g_redirected[index].exchange(0, base::memory_order_acq_rel))
     return;
   __atomic_store_n(&Table()[index], g_saved[index], __ATOMIC_RELEASE);
@@ -263,7 +263,7 @@ void SyncGuestDirect() {
   if (++g_syncs % 256 == 0) {
     ReadMaps();
     for (u64 block : g_filled) {
-      const u64 index = (block - kDirectBase) >> kDirectBlockShift;
+      const u64 index = GuestDirectIndex(block);
       if (g_redirected[index].load(base::memory_order_acquire))
         g_saved[index] = EntryFor(block);
       else

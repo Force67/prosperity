@@ -1,5 +1,6 @@
 #pragma once
 #include "base/arch.h"
+#include "gpu/gcn/gcn_resource.h"
 
 namespace gpu::render {
 // DELTA_GPU_DIRECT: shaders read the title's direct memory where it lives.
@@ -7,10 +8,13 @@ namespace gpu::render {
 // imported 2 MiB at a time as the GPU first touches it; a table of 64 KiB
 // guest blocks gives each block's device address. Nothing is copied, and the
 // CPU never resolves what a shader reads.
-constexpr u64 kDirectBase = 0x300000000ull;
-constexpr u64 kDirectSize = 0x1000000000ull;
-constexpr u32 kDirectBlockShift = 16;
-constexpr u32 kDirectMissSlots = 63;
+using gcn::GuestDirectIndex;
+using gcn::kDirectBase;
+using gcn::kDirectBlocks;
+using gcn::kDirectBlockShift;
+using gcn::kDirectMissSlots;
+using gcn::kDirectPs5Base;
+using gcn::kDirectSize;
 
 // Sets up the table and publishes it to the recompiler; false when the
 // option is off or the device cannot import host memory.

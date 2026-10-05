@@ -165,8 +165,8 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding) {
 }
 
 void DeclareDirectMemory(Translator& t, StageContext& sc) {
-  constexpr u64 kBase = 0x300000000ull, kSize = 0x1000000000ull;
-  constexpr u32 kShift = 16, kMissSlots = 63;
+  constexpr u64 kBase = kDirectBase, kSize = kDirectSize;
+  constexpr u32 kShift = kDirectBlockShift;
   t.m.PhysicalStorageBuffers();
   const Id wide = t.m.TypeInt(64, false);
   const auto constant = [&](u64 v) {
@@ -177,9 +177,20 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
       t.m.BeginFunction(wide, t.m.TypeFunction(wide, {wide, t.t_u, t.t_u}),
                         {wide, t.t_u, t.t_u}, &args);
   t.m.Name(sc.cs_guest_translate, "translate_direct_address");
-  const Id rel = t.m.Emit(spv::Op::OpISub, wide, {args[0], constant(kBase)});
+  const Id ps4_rel =
+      t.m.Emit(spv::Op::OpISub, wide, {args[0], constant(kBase)});
+  const Id ps5_rel =
+      t.m.Emit(spv::Op::OpISub, wide, {args[0], constant(kDirectPs5Base)});
+  const Id ps4_inside =
+      t.m.Emit(spv::Op::OpULessThan, t.t_bool, {ps4_rel, constant(kSize)});
+  const Id ps5_inside =
+      t.m.Emit(spv::Op::OpULessThan, t.t_bool, {ps5_rel, constant(kSize)});
   const Id inside =
-      t.m.Emit(spv::Op::OpULessThan, t.t_bool, {rel, constant(kSize)});
+      t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {ps4_inside, ps5_inside});
+  const Id rel =
+      t.m.Emit(spv::Op::OpSelect, wide,
+               {ps4_inside, ps4_rel,
+                t.m.Emit(spv::Op::OpIAdd, wide, {ps5_rel, constant(kSize)})});
   const Id index = t.m.Emit(
       spv::Op::OpSelect, wide,
       {inside, t.m.Emit(spv::Op::OpShiftRightLogical, wide, {rel, t.U32(kShift)}),
@@ -219,7 +230,7 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
     const Id zero = t.U32(0);
     const Id n = t.m.Emit(spv::Op::OpAtomicIAdd, t.t_u,
                           {at(zero), device, zero, t.U32(1)});
-    const Id has_slot = t.Ult(n, t.U32(kMissSlots));
+    const Id has_slot = t.Ult(n, t.U32(kDirectMissSlots));
     t.m.SelectionMerge(stored);
     t.m.BranchConditional(has_slot, store, stored);
     t.m.OpenBlock(store);
