@@ -281,6 +281,52 @@ TEST(RdnaComputeImageConversion, R8UnormStoreWritesBackByteImage) {
   EXPECT_EQ(dest[3], 0xa5);  // no overwrite of the adjacent guest byte
 }
 
+TEST(RdnaComputeImageConversion, WritesMappedImagesOutsideGpuPools) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required for this integration test";
+  alignas(65536) static base::Array<u32, 16384> source{};
+  alignas(65536) static base::Array<u8, 65536> dest{};
+  alignas(65536) static const base::Array<u8, 65536> readonly{0xa5};
+  alignas(256) static base::Array<u32, 4096> code{};
+  source[0] = base::BitCast<u32>(1.f);
+  dest.fill(0xa5);
+  ASSERT_FALSE(gpu::ps5::IsGpuAddress(reinterpret_cast<u64>(dest.data())));
+  ASSERT_FALSE(gpu::ps5::IsGpuAddress(reinterpret_cast<u64>(readonly.data())));
+  code[0] = 0x7e020280;
+  code[1] = 0xf0000100;
+  code[2] = 0x00000400;
+  code[3] = 0xf0200100;
+  code[4] = 0x00020400;
+  code[5] = 0xbf810000;
+  gpu::rdna::NextProgramGeneration();
+  gpu::ps5::Regs regs;
+  const u64 pc = reinterpret_cast<u64>(code.data());
+  regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+  regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+  regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 16 << 1;
+  const auto descriptor = [&](u32 first, const void* memory, u32 format) {
+    const u64 address = reinterpret_cast<u64>(memory);
+    regs[first] = address >> 8;
+    regs[first + 1] = ((address >> 40) & 0xff) | (format << 20);
+    regs[first + 3] = 0x80000fac;
+  };
+  descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0, source.data(), 22);
+  const u32 dispatch[] = {1, 1, 1, 1};
+  for (const u8* output :
+       {static_cast<const u8*>(dest.data()), readonly.data()}) {
+    descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, output, 1);
+    gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  }
+  EXPECT_EQ(dest[0], 255);
+  EXPECT_EQ(dest[1], 0xa5);
+  EXPECT_EQ(readonly[0], 0xa5);
+}
+
 class RdnaR16Unorm : public testing::TestWithParam<u32> {};
 
 TEST(RdnaComputeImageConversion, LargeNarrowStoresPreserveUntouchedTexels) {

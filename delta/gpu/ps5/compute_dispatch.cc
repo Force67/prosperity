@@ -40,8 +40,7 @@
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
 DELTA_OPTION(const char*, kCsProbe, "DELTA_GPU_CSPROBE", nullptr);
-// The video decoder writes frames into its own mappings, outside every GPU
-// pool; off by default because a written range is only as safe as the V#.
+// Diagnostic allowance for oversized descriptors and partially mapped images.
 DELTA_OPTION(bool, kCsAnyMem, "DELTA_PS5_CSANYMEM", false);
 // Images a dispatch only reads are sampled through real views (the render
 // targets and textures draws use) instead of staged buffers.
@@ -555,8 +554,8 @@ void DispatchCompute(render::Renderer& renderer,
          range.size > (range.image_staging ? kMaxImageStaging : max_resource) ||
          range.guest_size >
              (range.image_staging ? kMaxImageStaging : max_resource) ||
-         (r.written && !kCsAnyMem && !r.runtime_address &&
-          !IsGpuAddress(range.base)) ||
+         (r.written && !r.runtime_address && !IsGpuAddress(range.base) &&
+          !IsGuestWritable(range.base, range.guest_size)) ||
          !gpu::IsReadableRangeCached(range.base, range.guest_size))) {
       TraceCsInvalidRange(cs_addr, r, range.base, range.guest_size);
       return;
