@@ -1303,6 +1303,76 @@ int PS4ABI sys_minherit(void*, size_t, int) {
   return 0;
 }
 
+// The host's own view of an address, for ranges the guest VMA never recorded.
+struct HostMapping {
+  u64 start = 0;
+  u64 end = 0;
+  u32 prot = 0;  // SCE r/w/x bits, 0 when the address is not mapped at all
+};
+
+namespace {
+// /proc/self/maps, parsed. Reading it costs ~1 ms, and UC2's video decoder
+// queries its own module image on every frame it decodes.
+struct HostMapSnapshot {
+  base::Mutex lock;
+  base::Vector<HostMapping> maps;
+  u64 taken_ns = 0;
+};
+
+void ParseHostMaps(base::Vector<HostMapping>& out) {
+  out.clear();
+  std::FILE* f = std::fopen("/proc/self/maps", "re");
+  if (!f)
+    return;
+  char line[512];
+  while (std::fgets(line, sizeof(line), f)) {
+    unsigned long long lo = 0, hi = 0;
+    char perms[8] = {};
+    if (std::sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) != 3)
+      continue;
+    out.push_back({lo, hi,
+                   (perms[0] == 'r' ? 1u : 0u) | (perms[1] == 'w' ? 2u : 0u) |
+                       (perms[2] == 'x' ? 4u : 0u)});
+  }
+  std::fclose(f);
+}
+
+const HostMapping* FindHostMapping(const base::Vector<HostMapping>& maps,
+                                   u64 addr) {
+  size_t lo = 0, hi = maps.size();
+  while (lo < hi) {
+    const size_t mid = (lo + hi) / 2;
+    if (maps[mid].end <= addr)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return lo < maps.size() && maps[lo].start <= addr ? &maps[lo] : nullptr;
+}
+}  // namespace
+
+// A hit in a recent snapshot is trusted (protections of these ranges rarely
+// change). A miss is only trusted from a very fresh one, so a new mapping is
+// not reported unmapped for long; the decoder also probes unmapped addresses.
+HostMapping HostMappingOf(const void* addr) {
+  constexpr u64 kMaxAgeNs = 250'000'000, kMaxMissAgeNs = 20'000'000;
+  static HostMapSnapshot snapshot;
+  const u64 want = reinterpret_cast<u64>(addr);
+  base::LockGuard<base::Mutex> lock(snapshot.lock);
+  const u64 now = base::TickClock::NowNs();
+  const u64 age = now - snapshot.taken_ns;
+  if (age < kMaxAgeNs) {
+    if (const HostMapping* m = FindHostMapping(snapshot.maps, want))
+      return *m;
+    if (age < kMaxMissAgeNs)
+      return {};
+  }
+  ParseHostMaps(snapshot.maps);
+  snapshot.taken_ns = now;
+  const HostMapping* m = FindHostMapping(snapshot.maps, want);
+  return m ? *m : HostMapping{};
+}
+
 // sceKernelQueryMemoryProtection(addr, &start, &end, &prot). The libkernel
 // wrapper passes one scratch struct as arg2 for the kernel to fill, then
 // distributes: {start@0, end@8, prot@0x10}, per the wrapper at libkernel
@@ -1312,11 +1382,21 @@ int PS4ABI sys_query_memory_protection(void* addr, void* info) {
   auto* proc = Process::GetActive();
   if (!proc || !info)
     return -SysError::eINVAL;
-  auto region = proc->GetVma().Get(static_cast<u8*>(addr));
-  if (!region)
-    return -SysError::eACCES;
-
   auto* qp = static_cast<u8*>(info);
+  auto region = proc->GetVma().Get(static_cast<u8*>(addr));
+  if (!region) {
+    // Module images live outside the guest VMA. libSceVdecCore queries its own
+    // data segment while allocating a compute queue.
+    const HostMapping host = HostMappingOf(addr);
+    if (!host.prot)
+      return -SysError::eACCES;
+    std::memset(qp, 0, 0x18);
+    std::memcpy(qp + 0x00, &host.start, sizeof(u64));
+    std::memcpy(qp + 0x08, &host.end, sizeof(u64));
+    std::memcpy(qp + 0x10, &host.prot, sizeof(u32));
+    return 0;
+  }
+
   std::memset(qp, 0, 0x18);
   void* start = region->ptr;
   void* end = region->ptr + region->size;
@@ -1327,37 +1407,6 @@ int PS4ABI sys_query_memory_protection(void* addr, void* info) {
   std::memcpy(qp + 0x08, &end, sizeof(void*));
   std::memcpy(qp + 0x10, &prot, sizeof(u32));
   return 0;
-}
-
-// The host's own view of an address, for ranges the guest VMA never recorded.
-struct HostMapping {
-  u64 start = 0;
-  u64 end = 0;
-  u32 prot = 0;  // SCE r/w/x bits, 0 when the address is not mapped at all
-};
-
-HostMapping HostMappingOf(const void* addr) {
-  HostMapping out;
-  const u64 want = reinterpret_cast<u64>(addr);
-  std::FILE* f = std::fopen("/proc/self/maps", "re");
-  if (!f)
-    return out;
-  char line[512];
-  while (std::fgets(line, sizeof(line), f)) {
-    unsigned long long lo = 0, hi = 0;
-    char perms[8] = {};
-    if (std::sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) != 3)
-      continue;
-    if (want < lo || want >= hi)
-      continue;
-    out.start = lo;
-    out.end = hi;
-    out.prot = (perms[0] == 'r' ? 1u : 0u) | (perms[1] == 'w' ? 2u : 0u) |
-               (perms[2] == 'x' ? 4u : 0u);
-    break;
-  }
-  std::fclose(f);
-  return out;
 }
 
 // sceKernelVirtualQuery(addr, flags, info, size); layout verified against the
