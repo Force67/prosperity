@@ -22,6 +22,9 @@
 [submodule "vendor/tracy"]
 	path = vendor/tracy
 	url = https://github.com/wolfpld/tracy
+[submodule "vendor/mimalloc"]
+	path = vendor/mimalloc
+	url = https://github.com/microsoft/mimalloc
 [submodule "vendor/SPIRV-Headers"]
 	path = vendor/SPIRV-Headers
 	url = https://github.com/KhronosGroup/SPIRV-Headers

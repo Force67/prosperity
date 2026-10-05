@@ -48,6 +48,11 @@ target_include_directories(ps4delta PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/_res)
 
 target_link_libraries(ps4delta PRIVATE ${MAIN_LIBS})
 
+# mimalloc's object, not an archive member, so its malloc override always links.
+if(TARGET mimalloc-obj)
+  target_sources(ps4delta PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+endif()
+
 # main.cc uses xbyak_util for the CPU feature probe only on the native x86 path.
 if(DELTA_BACKEND STREQUAL "NATIVE")
   target_link_libraries(ps4delta PRIVATE xbyak)

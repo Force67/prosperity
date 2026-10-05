@@ -214,6 +214,38 @@ add_library(atrac9 STATIC
 target_include_directories(atrac9 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/libatrac9/src)
 
 # --------------------------------------------------------------------------
+# mimalloc: the process allocator. MI_OVERRIDE defines malloc/free and friends;
+# ps4delta links the object library directly so the override is always pulled
+# in, which a static archive does not guarantee. Not on Android: the app is a
+# dlopen'd .so, where the override would mix bionic and mimalloc heaps.
+# --------------------------------------------------------------------------
+if(NOT ANDROID)
+  set(MI_OVERRIDE ON CACHE BOOL "" FORCE)
+  set(MI_USE_CXX OFF CACHE STRING "" FORCE)
+  set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  set(MI_BUILD_STATIC OFF CACHE BOOL "" FORCE)
+  set(MI_BUILD_OBJECT ON CACHE BOOL "" FORCE)
+  set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(MI_INSTALL_TOPLEVEL OFF CACHE BOOL "" FORCE)
+  add_subdirectory(mimalloc EXCLUDE_FROM_ALL)
+  # shared/memory_debug owns operator new/delete (they allocate through malloc,
+  # so through mimalloc); rename mimalloc's mangled definitions out of its way.
+  if(DELTA_MEMORY_DEBUG)
+    foreach(op
+        _ZdlPv _ZdaPv _ZdlPvm _ZdaPvm
+        _ZdlPvSt11align_val_t _ZdaPvSt11align_val_t
+        _ZdlPvmSt11align_val_t _ZdaPvmSt11align_val_t
+        _ZdlPvRKSt9nothrow_t _ZdaPvRKSt9nothrow_t
+        _ZdlPvSt11align_val_tRKSt9nothrow_t _ZdaPvSt11align_val_tRKSt9nothrow_t
+        _Znwm _Znam _ZnwmRKSt9nothrow_t _ZnamRKSt9nothrow_t
+        _ZnwmSt11align_val_t _ZnamSt11align_val_t
+        _ZnwmSt11align_val_tRKSt9nothrow_t _ZnamSt11align_val_tRKSt9nothrow_t)
+      target_compile_definitions(mimalloc-obj PRIVATE ${op}=mi_unused${op})
+    endforeach()
+  endif()
+endif()
+
+# --------------------------------------------------------------------------
 # SPIRV-Tools + SPIRV-Headers (vulkan-sdk-1.4.341.0): the recompiler's
 # optimizer and validator. SPIRV-Tools is our fork (Force67/SPIRV-Tools,
 # branch `prosperity`): upstream's tag plus optimizer speedups as commits.
