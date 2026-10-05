@@ -1251,6 +1251,45 @@ bool SortedContains(const base::Vector<u32>& sorted, u32 value) {
   return at != sorted.end() && *at == value;
 }
 
+// A compute memory access by a lane EXEC has switched off must not happen. The
+// VGPR file is predicated, but stores are not, and a compiler is free to run a
+// short block under a narrowed EXEC with no s_cbranch_execz around it: lanes
+// outside the mask then stored their stale registers into LDS and the video
+// decoder's buffers (UC2's grainy movies). The DS forms that exchange data
+// across the wave stay unguarded: every lane takes part in their barriers.
+bool NeedsExecGuard(const Translator& t,
+                    const Inst& inst,
+                    const StageContext& sc) {
+  if (!sc.is_cs || t.rdna_sources)
+    return false;
+  switch (inst.enc) {
+    case Enc::kMubuf:
+    case Enc::kMtbuf:
+    case Enc::kMimg:
+      return true;
+    case Enc::kDs:
+      return !((inst.raw[0] >> 17) & 1) && inst.opcode != 0x35 &&
+             inst.opcode != 178 && inst.opcode != 179;
+    default:
+      return false;
+  }
+}
+
+void EmitInstGuarded(Translator& t, const Inst& inst, StageContext& sc) {
+  if (!NeedsExecGuard(t, inst, sc)) {
+    EmitInst(t, inst, sc);
+    return;
+  }
+  const Id active = t.LaneActive(t.Exec());
+  const Id body = t.m.NewBlock(), merge = t.m.NewBlock();
+  t.m.SelectionMerge(merge);
+  t.m.BranchConditional(active, body, merge);
+  t.m.OpenBlock(body);
+  EmitInst(t, inst, sc);
+  t.m.Branch(merge);
+  t.m.OpenBlock(merge);
+}
+
 void EmitInstAudited(Translator& t,
                      const Inst& inst,
                      u32 index,
@@ -1263,7 +1302,7 @@ void EmitInstAudited(Translator& t,
   if (!sc.lds_barrier_at.empty() && SortedContains(sc.lds_barrier_at, index))
     t.m.EmitVoid(spv::Op::OpControlBarrier, {t.U32(2), t.U32(2), t.U32(0x108)});
   if (!ShaderDebugEnabled()) {
-    EmitInst(t, inst, sc);
+    EmitInstGuarded(t, inst, sc);
     CapturePsVgprs(t, inst);
     return;
   }
@@ -1274,7 +1313,7 @@ void EmitInstAudited(Translator& t,
     t.m.Line(t.dbg_file, inst.pc);
   }
   const size_t before = t.m.BodyWords();
-  EmitInst(t, inst, sc);
+  EmitInstGuarded(t, inst, sc);
   CapturePsVgprs(t, inst);
   AuditInstEnd(index, static_cast<u32>(t.m.BodyWords() - before));
 }
