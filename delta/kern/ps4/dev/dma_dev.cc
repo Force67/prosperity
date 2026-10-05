@@ -20,6 +20,7 @@
 #include "base/containers/vector.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
+#include "kern/guest_va_space.h"
 #include "kern/lv2/sys_mem.h"
 #include "kern/process.h"
 #include "kern/ps4/dev/dma_dev.h"
@@ -422,13 +423,53 @@ i32 DmaDevice::IoctlImpl(u32 cmd, void* data) {
   return 0;
 }
 
-// /dev/dmem has no device-backed mapping on PS4; fall back to anon in sys_mmap
-// (the PS5 shared-memfd coherency mapping lives in the PS5 override).
+// A /dev/dmem mapping is a view of the shared physical store, so two mappings
+// of one offset see the same bytes, as on hardware. UC2 maps a 1.6 GiB pool,
+// then maps pieces of it again for its video decoder: the decoder's CPU side
+// wrote the coefficients through one view and the GPU read zeros through the
+// other. (batch_map still maps private pages, see sys_batch_map.)
 u8* DmaDevice::Map(void* addr, size_t len, u32, u32 flags, size_t offset) {
+  const bool fixed = flags & MFlags::kFixed;
+  const int fd = DmemBackingFd();
+  if (fd < 0 || !len || offset + len > DmemBackingSize()) {
+    if (kDmemTrace)
+      BASE_LOGI("dmem", "devmap off={:#x} len={:#x} want={:p} fixed={} -> anon",
+                offset, len, addr, fixed ? 1 : 0);
+    return reinterpret_cast<u8*>(-1);
+  }
+  const off_t off = static_cast<off_t>(offset);
+  void* p = MAP_FAILED;
+  // A hint inside a range ReserveGuestVaSpace() holds is guest-owned, as in
+  // sys_mmap: Gnm's embedded shaders must land at 0xfe0000000, over our
+  // PROT_NONE placeholder.
+  if (addr && (fixed || IsGuestReservedVa(addr, len))) {
+    p = ::mmap(addr, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
+               off);
+  } else {
+    if (addr) {
+      p = ::mmap(addr, len, PROT_READ | PROT_WRITE,
+                 MAP_SHARED | MAP_FIXED_NOREPLACE, fd, off);
+      if (p != MAP_FAILED && p != addr) {
+        ::munmap(p, len);
+        p = MAP_FAILED;
+      }
+    }
+    if (p == MAP_FAILED) {
+      u8* base = AllocLowGuest(len);
+      if (!base)
+        return reinterpret_cast<u8*>(-1);
+      p = ::mmap(base, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
+                 off);
+    }
+  }
+  if (p == MAP_FAILED)
+    return reinterpret_cast<u8*>(-1);
+  NoteGuestTaken(static_cast<u8*>(p), len);
   if (kDmemTrace)
-    BASE_LOGI("dmem", "devmap off={:#x} len={:#x} want={:p} fixed={} -> anon",
-              offset, len, addr, (flags & MFlags::kFixed) ? 1 : 0);
-  return reinterpret_cast<u8*>(-1);
+    BASE_LOGI("dmem",
+              "devmap off={:#x} len={:#x} want={:p} fixed={} -> {:p} (shared)",
+              offset, len, addr, fixed ? 1 : 0, p);
+  return static_cast<u8*>(p);
 }
 
 namespace {
