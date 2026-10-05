@@ -181,7 +181,8 @@ struct ResolvedCsResource {
 void ResolveCsResources(base::Vector<ResolvedCsResource>& out,
                         const Program& program,
                         const RecompiledCs& plan,
-                        const u32* user_data);
+                        const u32* user_data,
+                        u64 code_base);
 
 // Given a decoded fetch shader + the 16 VS user-data SGPRs, recover the vertex-
 // attribute buffers in attribute order (the common s_load_dwordx4 from the

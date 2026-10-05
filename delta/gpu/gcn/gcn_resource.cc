@@ -546,6 +546,11 @@ struct ScalarEval {
   u64 src[kRegs] = {};  // guest address each dword was s_loaded from
   bool trace = false;
   u64 code_base = 0;  // guest address of the program, for s_getpc_b64
+  // The carry of the last s_add_u32/s_sub_u32, which 64-bit pointer math
+  // (s_getpc_b64 + offset) feeds into s_addc_u32/s_subb_u32. Anything else
+  // that steps forgets it.
+  bool carry_known = false;
+  u32 carry = 0;
 
   // A shader out of SGPRs parks scalars in the LANES of a VGPR with
   // v_writelane_b32 and reads them back with v_readlane_b32. Both of the pair's
@@ -577,6 +582,32 @@ struct ScalarEval {
       if (!known[s + i])
         return false;
     return true;
+  }
+  // Keeps only what `other` agrees on, the state after two paths join.
+  // Returns whether anything was dropped.
+  bool Meet(const ScalarEval& other) {
+    bool changed = false;
+    for (u32 i = 0; i < kRegs; i++) {
+      if (known[i] && (!other.known[i] || other.sgpr[i] != sgpr[i])) {
+        known[i] = false;
+        changed = true;
+      }
+      if (src[i] != other.src[i])
+        src[i] = 0;
+    }
+    const auto differs = [](const auto& theirs) {
+      return [&theirs](const auto& slot) {
+        const auto it = theirs.find(slot.first);
+        return it == theirs.end() || it->second != slot.second;
+      };
+    };
+    if (carry_known && (!other.carry_known || other.carry != carry)) {
+      carry_known = false;
+      changed = true;
+    }
+    changed |= base::EraseIf(lane_spill, differs(other.lane_spill)) > 0;
+    base::EraseIf(lane_spill_src, differs(other.lane_spill_src));
+    return changed;
   }
   void Set(u32 s, u32 v) {
     if (s < kRegs) {
@@ -704,6 +735,8 @@ struct ScalarEval {
   // cbuffer through a V# and is a consumer, not a pointer op, so it is ignored
   // here.
   void Step(const Inst& inst) {
+    const bool had_carry = carry_known;
+    carry_known = false;
     if (inst.enc == Enc::kSop1) {
       const u32 w = inst.raw[0];
       const u32 sdst = (w >> 16) & 0x7F, ssrc0 = w & 0xFF;
@@ -821,11 +854,27 @@ struct ScalarEval {
                               : ((a >> (b & 31)) & ((1u << width) - 1));
           break;
         }
-        case 0x00:
+        case 0x00:  // s_add_u32
+        case 0x04:  // s_addc_u32
+        case 0x01:  // s_sub_u32
+        case 0x05: {  // s_subb_u32
+          const bool with_carry = op >= 0x04;
+          if (with_carry && !had_carry) {
+            Clear(sdst);
+            return;
+          }
+          const u64 in = with_carry ? carry : 0;
+          const bool add = op == 0x00 || op == 0x04;
+          const u64 wide = add ? u64(a) + b + in : u64(a) - b - in;
+          value = static_cast<u32>(wide);
+          carry = static_cast<u32>((wide >> 32) & 1);
+          Set(sdst, value);
+          carry_known = true;
+          return;
+        }
         case 0x02:
           value = a + b;
           break;
-        case 0x01:
         case 0x03:
           value = a - b;
           break;
@@ -2186,15 +2235,144 @@ void ResolveShaderBuffers(base::Vector<VBuffer>& result,
   return;
 }
 
+namespace {
+
+// The linear walk folds every path into one, so an SGPR a skipped branch
+// clobbers poisons each later use of it (UC2's video decoder rebuilds V#s from
+// its user-data pointer after a branch around a v_cmp into the same pair).
+// Walk the control-flow graph instead: a block starts from what all of its
+// predecessors agree on, which holds whichever way the wave branches.
+void ResolveAlongCfg(base::Vector<ResolvedCsResource>& result,
+                     const Program& program,
+                     const RecompiledCs& plan,
+                     const u32* user_data,
+                     u64 code_base) {
+  const u32 n = static_cast<u32>(program.size());
+  if (!n)
+    return;
+  base::HashMap<u32, u32> index_of;  // pc -> instruction index
+  for (u32 i = 0; i < n; i++)
+    index_of[program[i].pc] = i;
+
+  // Constant data after s_endpgm decodes as instructions too, so a computed
+  // jump or a wild branch only ends the walk once a reached block holds it.
+  constexpr u32 kNone = ~0u, kUnknown = ~1u;
+  base::Vector<u32> target(n, kNone);
+  base::Vector<bool> leader(n, false), falls_through(n, true);
+  leader[0] = true;
+  for (u32 i = 0; i < n; i++) {
+    const Inst& inst = program[i];
+    const u32 op = inst.opcode;
+    if ((inst.enc == Enc::kSop1 && (op == 0x20 || op == 0x21 || op == 0x32)) ||
+        (inst.enc == Enc::kSop2 && op == 0x2b) ||
+        (inst.enc == Enc::kSopk && op == 0x11)) {
+      target[i] = kUnknown;
+      if (i + 1 < n)
+        leader[i + 1] = true;
+      continue;
+    }
+    if (inst.enc != Enc::kSopp)
+      continue;
+    const bool jump = op == 0x02;
+    const bool cond = (op >= 0x04 && op <= 0x09) || (op >= 0x17 && op <= 0x1a);
+    if (op == 0x01 || jump)
+      falls_through[i] = false;
+    if (jump || cond) {
+      const i32 simm = static_cast<i16>(inst.raw[0] & 0xFFFF);
+      const auto it = index_of.find(static_cast<u32>(
+          static_cast<i32>(inst.pc + inst.size) + simm));
+      target[i] = it == index_of.end() ? kUnknown : it->second;
+      if (it != index_of.end())
+        leader[it->second] = true;
+    }
+    if ((op == 0x01 || jump || cond) && i + 1 < n)
+      leader[i + 1] = true;
+  }
+
+  base::Vector<u32> block_of(n, 0), starts;
+  for (u32 i = 0; i < n; i++) {
+    if (leader[i])
+      starts.push_back(i);
+    block_of[i] = static_cast<u32>(starts.size() - 1);
+  }
+  const u32 blocks = static_cast<u32>(starts.size());
+  base::Vector<ScalarEval> in(blocks, ScalarEval(user_data, code_base));
+  base::Vector<bool> reached(blocks, false), queued(blocks, false);
+  base::Vector<u32> work;
+  reached[0] = queued[0] = true;
+  work.push_back(0);
+  // Meeting only ever drops knowledge, so this settles; the cap is a guard.
+  for (u32 budget = blocks * 16; !work.empty() && budget; budget--) {
+    const u32 b = work.back();
+    work.pop_back();
+    queued[b] = false;
+    ScalarEval eval = in[b];
+    const u32 end = b + 1 < blocks ? starts[b + 1] : n;
+    for (u32 i = starts[b]; i < end; i++)
+      eval.Step(program[i]);
+    const u32 last = end - 1;
+    if (target[last] == kUnknown)
+      return;
+    u32 succ[2] = {kNone, kNone};
+    if (target[last] != kNone)
+      succ[0] = block_of[target[last]];
+    if (falls_through[last] && end < n)
+      succ[1] = block_of[end];
+    for (u32 s : succ) {
+      if (s == kNone)
+        continue;
+      bool changed = !reached[s];
+      if (changed) {
+        in[s] = eval;
+        reached[s] = true;
+      } else {
+        changed = in[s].Meet(eval);
+      }
+      if (changed && !queued[s]) {
+        queued[s] = true;
+        work.push_back(s);
+      }
+    }
+  }
+  if (!work.empty())
+    return;  // did not settle: keep what the linear walk found
+
+  for (u32 b = 0; b < blocks; b++) {
+    if (!reached[b])
+      continue;
+    ScalarEval eval = in[b];
+    const u32 end = b + 1 < blocks ? starts[b + 1] : n;
+    for (u32 i = starts[b]; i < end; i++) {
+      const Inst& inst = program[i];
+      for (const CsResource& resource : plan.resources) {
+        if (resource.use_pc != inst.pc || resource.binding >= result.size() ||
+            result[resource.binding].valid)
+          continue;
+        const u32 dwords = resource.kind == 1 ? 8 : resource.kind == 2 ? 2 : 4;
+        if (!eval.AllKnown(resource.base_sgpr, dwords))
+          continue;
+        ResolvedCsResource& resolved = result[resource.binding];
+        std::memcpy(resolved.descriptor, &eval.sgpr[resource.base_sgpr],
+                    dwords * sizeof(u32));
+        resolved.valid = true;
+      }
+      eval.Step(inst);
+    }
+  }
+}
+
+}  // namespace
+
 void ResolveCsResources(base::Vector<ResolvedCsResource>& result,
                         const Program& program,
                         const RecompiledCs& plan,
-                        const u32* user_data) {
+                        const u32* user_data,
+                        u64 code_base) {
   result.assign(plan.resources.size(), ResolvedCsResource{});
   if (!user_data)
     return;
 
-  ScalarEval eval(user_data);
+  ScalarEval eval(user_data, code_base);
   for (const Inst& inst : program) {
     // Capture before Step(): an s_load may use a pointer in the same SGPR range
     // it overwrites with the loaded descriptor.
@@ -2211,7 +2389,12 @@ void ResolveCsResources(base::Vector<ResolvedCsResource>& result,
     }
     eval.Step(inst);
   }
-  return;
+  for (const ResolvedCsResource& resolved : result) {
+    if (!resolved.valid) {
+      ResolveAlongCfg(result, program, plan, user_data, code_base);
+      break;
+    }
+  }
 }
 
 }  // namespace gpu::gcn

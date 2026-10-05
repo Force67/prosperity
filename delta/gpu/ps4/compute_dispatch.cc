@@ -437,7 +437,7 @@ void DispatchCompute(render::Renderer& renderer,
 
   const auto cs_program = gcn::CachedProgram(cs_addr, 4096);
   thread_local base::Vector<gcn::ResolvedCsResource> resolved;
-  gcn::ResolveCsResources(resolved, *cs_program, rc, user_data);
+  gcn::ResolveCsResources(resolved, *cs_program, rc, user_data, cs_addr);
   // Descriptor chains live in guest memory, which an earlier dispatch may have
   // written, and writebacks are lazy. The replay already lands pending writes
   // under every table it reads, so a binding left unresolved is normally one
@@ -460,7 +460,7 @@ void DispatchCompute(render::Renderer& renderer,
     if (!render::FlushCsWrites(renderer, "cs-unresolved") &&
         !renderer.available())
       return;
-    gcn::ResolveCsResources(resolved, *cs_program, rc, user_data);
+    gcn::ResolveCsResources(resolved, *cs_program, rc, user_data, cs_addr);
     if (count_resolved() > resolved_n) {
       static u32 helped = 0;
       if (helped++ < 8)
