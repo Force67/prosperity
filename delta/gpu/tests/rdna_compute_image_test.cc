@@ -168,6 +168,74 @@ TEST(Gfx10GpuTiling, PacksR11G11B10LikeTheHost) {
 // must leave the other channels untouched.
 class RdnaComputeImage : public testing::TestWithParam<u32> {};
 
+TEST(RdnaComputeImageConversion, ReadsDescriptorChannelsAndConstants) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required for this integration test";
+  alignas(65536) static base::Array<base::Array<u32, 16384>, 8> inputs{},
+      outputs{};
+  alignas(256) static base::Array<u32, 4096> code{};
+  for (u32 trial = 0; trial < 8; trial++) {
+    if (trial == 4) {
+      gpu::render::RecordComputeInFrame();
+      gpu::render::BeginFrame(renderer);
+      ASSERT_TRUE(gpu::render::CsBindsImages());
+    }
+    const bool integer = trial & 2;
+    const bool sample = trial & 1;
+    SCOPED_TRACE(testing::Message() << "trial=" << trial);
+    inputs[trial][0] = 0x80402010;
+    inputs[trial][1] = 0xa0603018;
+    outputs[trial].fill(0xdeadbeef);
+    gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(inputs[trial].data()),
+                          sizeof(inputs[trial]));
+    gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(outputs[trial].data()),
+                          sizeof(outputs[trial]));
+    const u32 program[] = {0x7e0002ff,
+                           integer && sample ? 0x3f19999au : 0u,
+                           0x7e020280,
+                           sample ? 0xf09c0f08u : 0xf0000f08u,
+                           sample ? 0x00600400u : 0x00000400u,
+                           0xe0780000,
+                           0x80020400,
+                           0xbf810000};
+    base::Copy(program, program + base::ArraySize(program), code.begin());
+    gpu::rdna::NextProgramGeneration();
+    gpu::ps5::Regs regs;
+    const u64 pc = reinterpret_cast<u64>(code.data());
+    regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+    regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 1;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+    regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 16 << 1;
+    const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
+    const u64 src = reinterpret_cast<u64>(inputs[trial].data());
+    regs[ud] = src >> 8;
+    regs[ud + 1] =
+        ((src >> 40) & 255) | ((integer ? 60u : 56u) << 20) | (1u << 30);
+    regs[ud + 3] = 0x90000226;  // B, R, zero, one
+    const u64 dst = reinterpret_cast<u64>(outputs[trial].data());
+    regs[ud + 8] = dst;
+    regs[ud + 9] = (dst >> 32) & 0xffff;
+    regs[ud + 10] = 16;
+    regs[ud + 11] = 0x20000;
+    const u32 dispatch[] = {1, 1, 1, 1};
+    gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    const base::Array<u32, 4> values = {integer && sample ? 96u : 64u,
+                                        integer && sample ? 24u : 16u, 0, 1};
+    for (u32 i = 0; i < values.size(); i++) {
+      if (integer)
+        EXPECT_EQ(outputs[trial][i], values[i]);
+      else
+        EXPECT_FLOAT_EQ(base::BitCast<float>(outputs[trial][i]),
+                        i == 3 ? 1.f : values[i] / 255.f);
+    }
+  }
+  gpu::render::EndFrame(renderer, 0);
+}
+
 TEST_P(RdnaComputeImage, Raw32LoadStorePreservesUnwrittenChannels) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))

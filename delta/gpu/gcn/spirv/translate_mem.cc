@@ -2369,6 +2369,17 @@ static void EmitCsMimgStaged(Translator& t,
                               logical_or(is_block2, is_rgba32_raw));
   const Id wide4 = logical_or(is_r11g11b10f, is_rgba32_raw);
 
+  const auto swizzle = [&](const Id values[4], u32 component) {
+    const Id selector = field(3, component * 3, 7);
+    const Id one = t.SelectB(is_int, t.U32(1), t.U32(0x3f800000));
+    const Id vector = t.m.CompositeConstruct(
+        t.m.TypeVec(t.t_u, 4), {values[0], values[1], values[2], values[3]});
+    const Id value = t.m.Emit(spv::Op::OpVectorExtractDynamic, t.t_u,
+                              {vector, t.And(selector, t.U32(3))});
+    return t.SelectB(t.Uge(selector, t.U32(4)), value,
+                     t.SelectB(t.Eq(selector, t.U32(1)), one, t.U32(0)));
+  };
+
   if (load) {
     const Id raw = CsSsboLoad(t, sc, binding, dword_idx);
     const Id has_second = wide2;
@@ -2384,10 +2395,8 @@ static void EmitCsMimgStaged(Translator& t,
     const Id halfs = unpack16(raw);
     const Id halfs_hi = unpack16(raw_hi);
     const Id float_component[4] = {raw, raw_hi, raw_2, raw_3};
-    u32 out = 0;
+    Id values[4];
     for (int i = 0; i < 4; i++) {
-      if (!(dmask & (1 << i)))
-        continue;
       const Id byte = t.And(t.Shr(raw, t.U32(i * 8u)), t.U32(0xFF));
       Id normalized = t.FMul(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {byte}),
                              t.F32(1.0f / 255.0f));
@@ -2425,8 +2434,12 @@ static void EmitCsMimgStaged(Translator& t,
       value = t.SelectB(is_rg32_raw,
                         i == 0 ? raw : (i == 1 ? raw_hi : t.U32(0)), value);
       value = t.SelectB(is_rgba32_raw, float_component[i], value);
-      t.SetVg(vdata + out++, value);
+      values[i] = value;
     }
+    u32 out = 0;
+    for (u32 i = 0; i < 4; i++)
+      if (dmask & (1u << i))
+        t.SetVg(vdata + out++, swizzle(values, i));
   } else if (sample || gather) {
     const Id has_second = wide2;
     // Storage-buffer index of texel (xx,yy) in the current mip/layer, scaled
@@ -2481,6 +2494,11 @@ static void EmitCsMimgStaged(Translator& t,
         v = t.SelectF(is_rgba32_raw, t.m.Bitcast(t.t_f, fcomp[i]), v);
         out[i] = v;
       }
+      Id values[4];
+      for (u32 i = 0; i < 4; i++)
+        values[i] = t.m.Bitcast(t.t_u, out[i]);
+      for (u32 i = 0; i < 4; i++)
+        out[i] = t.m.Bitcast(t.t_f, swizzle(values, i));
     };
     const Id x1 = t.UMin(t.Add(x, t.U32(1)), t.Sub(width, t.U32(1)));
     const Id y1 = t.UMin(t.Add(y, t.U32(1)), t.Sub(height, t.U32(1)));
