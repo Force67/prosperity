@@ -583,6 +583,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                 (int)d.depth_write_enable, d.num_texs);
     return Decline(kSelf);
   }
+  // A pending CS write into the sampled target must reach its image first, as
+  // on the multi-texture path. UC2's movie player converts each frame into the
+  // scanout with a dispatch and copies it out with a single-texture blit, which
+  // otherwise read the stale image: every logo movie played black.
+  if ((color_as_tex || feedback_as_tex) && !CsRefreshRtFromTruth(tex_base))
+    render::FlushCsWritesAt(renderer, tex_base, "rt-tex");
   // Indexed draws derive the copied vertex range from their indices.
   // DRAW_INDEX_AUTO consumes the packet's sequential vertex count directly.
   // These three all report as "norecomp", which lumps a vertex-count cap in
