@@ -271,19 +271,54 @@ bool IsMemoryRangeMapped(const void* addr, size_t len) {
 
 size_t MappedMemoryPrefix(const void* addr, size_t max_len) {
   DELTA_ZONE("mem.mapped_prefix");
-  if (!addr || !max_len)
+  const uintptr_t base = reinterpret_cast<uintptr_t>(addr);
+  if (!base || !max_len || max_len > UINTPTR_MAX - base)
     return 0;
-  size_t mapped = 0, remaining = max_len;
-  while (remaining) {
-    const size_t probe = mapped + remaining / 2 + remaining % 2;
-    if (IsMemoryRangeMapped(addr, probe)) {
-      mapped = probe;
-      remaining = max_len - mapped;
-    } else {
-      remaining = probe - mapped - 1;
+  // The tracked mappings answer most of it in one walk; each mincore probe of
+  // a large range that runs off the end costs hundreds of microseconds.
+  size_t mapped = 0;
+  {
+    auto& state = MappingState();
+    base::LockGuard lock(state.lock);
+    auto it = state.mappings.upper_bound(base);
+    if (it != state.mappings.begin()) {
+      --it;
+      uintptr_t cursor = base;
+      while (it != state.mappings.end() && it->first <= cursor &&
+             it->second.end > cursor && cursor - base < max_len) {
+        cursor = it->second.end;
+        ++it;
+      }
+      mapped = base::Min<size_t>(cursor - base, max_len);
     }
   }
-  return mapped;
+  if (mapped == max_len)
+    return mapped;
+  // Past the tracked part, binary-search the number of whole pages mapped.
+  const long page_size_raw = ::sysconf(_SC_PAGE_SIZE);
+  const uintptr_t page = page_size_raw > 0 ? page_size_raw : 4096;
+  const uintptr_t end = base + max_len;
+  const uintptr_t first =
+      base::Min<uintptr_t>((base + mapped + page - 1) / page * page, end);
+  const auto length = [&](size_t pages) {
+    return static_cast<size_t>(
+        base::Min<uintptr_t>(first + pages * page, end) - base);
+  };
+  if (length(0) > mapped && !IsMemoryRangeMapped(addr, length(0)))
+    return mapped;
+  // Usually the tracked part ends at a hole: one page settles that.
+  if (first < end && !IsMemoryRangeMapped(reinterpret_cast<void*>(first),
+                                          length(1) - length(0)))
+    return length(0);
+  size_t lo = 0, hi = (end - first + page - 1) / page;
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo + 1) / 2;
+    if (IsMemoryRangeMapped(addr, length(mid)))
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  return length(lo);
 }
 
 size_t GetAvailableMem() {
