@@ -1044,6 +1044,57 @@ TEST(RdnaComputeAlu, DppRowXmaskKeepsEachExchangeInsideItsRow) {
       EXPECT_EQ(dest[lane * 4 + i], lane ^ kMasks[i]) << lane << ":" << i;
 }
 
+TEST(RdnaComputeAlu, DppInvalidSourcePreservesDestination) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  alignas(65536) static base::Array<u32, 16384> dest{};
+  alignas(256) static base::Array<u32, 4096> code{};
+  u32 n = 0;
+  const auto mov = [&](u32 reg, u32 value) {
+    code[n++] = 0x7e0002ff | (reg << 17);
+    code[n++] = value;
+  };
+  mov(1, 7);
+  for (u32 reg = 4; reg <= 7; reg++)
+    mov(reg, 1000 + reg);
+  const auto add_dpp = [&](u32 reg, u32 control, bool zero) {
+    code[n++] = (0x25u << 25) | (reg << 17) | (1u << 9) | 250;
+    code[n++] = 0xff000000 | (control << 8) | (u32(zero) << 19);
+  };
+  add_dpp(4, 0x111, false);
+  add_dpp(5, 0x111, true);
+  add_dpp(6, 0x101, false);
+  code[n++] = (0x25u << 25) | (7u << 17) | (1u << 9) | 256;
+  code[n++] = 0xe0782000;
+  code[n++] = 0x80020400;
+  code[n++] = 0xbf810000;
+  gpu::rdna::NextProgramGeneration();
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(dest.data()), sizeof(dest));
+  gpu::ps5::Regs regs;
+  const u64 pc = reinterpret_cast<u64>(code.data());
+  regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+  regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 64;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+  regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 16 << 1;
+  const u64 address = reinterpret_cast<u64>(dest.data());
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8] = address;
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 9] = (address >> 32) | (16u << 16);
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 10] = 64;
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 11] = 0x14004;
+  const u32 dispatch[] = {1, 1, 1, 1};
+  gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  for (u32 lane = 0; lane < 64; lane++) {
+    EXPECT_EQ(dest[lane * 4], (lane & 15) ? lane + 6 : 1004) << lane;
+    EXPECT_EQ(dest[lane * 4 + 1], (lane & 15) ? lane + 6 : 7) << lane;
+    EXPECT_EQ(dest[lane * 4 + 2], (lane & 15) != 15 ? lane + 8 : 1006) << lane;
+    EXPECT_EQ(dest[lane * 4 + 3], lane + 7) << lane;
+  }
+}
+
 TEST(RdnaComputeImage, GatherOffsetAndCompareUseFourDepthTaps) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))

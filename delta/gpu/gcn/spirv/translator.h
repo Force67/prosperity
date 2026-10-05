@@ -81,6 +81,7 @@ struct Translator {
   // those index plain registers through a select chain.
   base::HashMap<u32, base::Vector<u32>> movrel_m0;
   bool predicate_vector = false;
+  Id vector_write_guard = 0;
   // Mesh: only waves whose private PC names the selected block may change
   // state.
   Id block_active = 0;
@@ -363,6 +364,8 @@ struct Translator {
       SetSg(base + offset, v);
   }
   void SetVg(u32 i, Id v) {
+    if (vector_write_guard)
+      v = SelectB(vector_write_guard, v, Vg(i));
     if (predicate_vector)
       v = SelectB(LaneActive(Exec()), v, Vg(i));
     StorePrivate(VgPtr(i), v);

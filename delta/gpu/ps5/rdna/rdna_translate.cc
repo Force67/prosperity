@@ -1812,12 +1812,10 @@ Id RdnaDppSrc0(Translator& t, StageContext& sc, const Inst& inst) {
                              : t.m.Emit(spv::Op::OpGroupNonUniformShuffle,
                                         t.t_u, {scope, own, sel.lane});
   if (sel.valid) {
-    // Out of the row: BOUND_CTRL reads zero, otherwise the hardware leaves the
-    // destination alone. We have no per-lane write mask here, so the lane keeps
-    // its own value: the same shape, and the case a prefix sum never hits.
-    if (!bound_ctrl)
-      gpu::gcn::NoteApproximated("dpp.bound", ctrl);
-    value = t.SelectB(sel.valid, value, bound_ctrl ? t.U32(0) : own);
+    if (bound_ctrl)
+      value = t.SelectB(sel.valid, value, t.U32(0));
+    else
+      t.vector_write_guard = sel.valid;
   }
   return value;
 }
@@ -1874,7 +1872,9 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
               t.m.Load(t.t_u,
                        t.m.AccessChain(p_priv, sc.cs_probe_var, {t.U32(i)})));
   }
+  const Id write_guard = t.vector_write_guard;
   RdnaEmitInstBody(t, inst, sc);
+  t.vector_write_guard = write_guard;
   // 1000 + n names SGPR n and 2000 + n VGPR n as an integer; both are
   // stored as floats so a colour target shows them.
   if (probing && inst.pc == kCsVgprPc)
