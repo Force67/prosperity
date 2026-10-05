@@ -555,7 +555,10 @@ bool StageCsImage(const ComputeInfo::Res& res, void* dst) {
   const bool bc6 = res.dfmt == 40;
   const bool bc1 = res.dfmt == 35;
   const bool direct = !bc6 && !bc1 && res.elem_bytes == res.stage_elem_bytes;
-  bool fills_complete_layout = direct;
+  // Every path but the block decodes writes each staged texel whole, so a
+  // tightly packed layout needs no clearing first (the widened 8/16-bit planes
+  // of UC2's video decoder spent more time in the memset than in the copy).
+  bool fills_complete_layout = !bc6 && !bc1;
   u64 filled_bytes = 0;
   for (u32 mip = 0; fills_complete_layout && mip < linear.mip_levels; ++mip) {
     const auto& level = linear.mips[mip];
@@ -2762,10 +2765,16 @@ bool TruthAvailable() {
 
 // The tiling shader handles every gfx10 swizzle, and a Liverpool layout once
 // its address terms are shown to be separable (4-byte and wider texels).
+bool WidensLinear(const ComputeInfo::Res& r) {
+  return gcn::TilingIsLinear(r.tiling_idx) &&
+         (r.elem_bytes == 1 || r.elem_bytes == 2) && r.stage_elem_bytes == 4;
+}
+
 bool GpuTileable(const ComputeInfo::Res& r) {
   if (r.tiling_idx >= gcn::kGfx10TilingBase)
     return true;
-  if (r.elem_bytes < 4 || r.elem_bytes != r.stage_elem_bytes)
+  if ((r.elem_bytes < 4 || r.elem_bytes != r.stage_elem_bytes) &&
+      !WidensLinear(r))
     return false;
   static base::HashMap<u64, bool> known;
   static const guest::SessionReset reset_known(
@@ -2814,7 +2823,10 @@ bool CanGpuTile(const ComputeInfo::Res& res, const CsRange& e) {
           ((res.elem_bytes == 1 || res.elem_bytes == 2) &&
            res.stage_elem_bytes == 4)) &&
          res.dfmt != 35 && res.dfmt != 40 &&
-         !gcn::TilingIsLinear(res.tiling_idx) && GpuTileable(res);
+         // A linear surface only needs the GPU when its texels widen: the
+         // video decoder's 8/16-bit planes, staged on the CPU per dispatch.
+         (!gcn::TilingIsLinear(res.tiling_idx) || WidensLinear(res)) &&
+         GpuTileable(res);
 }
 
 bool ConvertCsRangeImage(const ComputeInfo::Res& res, CsRange& e, bool detile) {
