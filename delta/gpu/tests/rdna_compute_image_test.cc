@@ -767,6 +767,49 @@ TEST(RdnaComputeAlu, HalfPrecisionOpsSelectHalvesAndPackResults) {
   EXPECT_EQ(dest[3], 0x44000000u);
 }
 
+TEST(RdnaComputeAlu, ReadlaneCrossesSubgroupsWithExecEmpty) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  alignas(65536) static base::Array<u32, 16384> dest{};
+  alignas(256) static base::Array<u32, 4096> code{};
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(dest.data()), sizeof(dest));
+  const u32 shader[] = {
+      0xbefe0380, 0xbeff0380,
+      0xd760000c, 256 | (168 << 9),
+      0xd760000d, 256 | (129 << 9),
+      0xbefe03c1, 0xbeff03c1,
+      0x7e08020c, 0x7e0a020d,
+      0xf0200300, 0x00000400, 0xbf810000};
+  base::Copy(shader, shader + base::ArraySize(shader), code.begin());
+  gpu::rdna::NextProgramGeneration();
+  gpu::ps5::Regs regs;
+  const u64 pc = reinterpret_cast<u64>(code.data());
+  regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+  regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 64;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+  regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+  regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 8 << 1;
+  const u64 address = reinterpret_cast<u64>(dest.data());
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0] = address >> 8;
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 1] =
+      ((address >> 40) & 0xff) | (62 << 20) | (63u << 30);
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 2] = 63 >> 2;
+  regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 3] = 0x80000fac;
+  for (bool wave32 : {false, true}) {
+    dest.fill(0);
+    const u32 dispatch[] = {1, 1, 1, 1u | (u32(wave32) << 15)};
+    gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    for (u32 lane = 0; lane < 64; lane++) {
+      const u32 wave_base = wave32 ? lane & ~31u : 0;
+      EXPECT_EQ(dest[lane * 2], wave_base + (wave32 ? 8u : 40u)) << lane;
+      EXPECT_EQ(dest[lane * 2 + 1], wave_base + 1) << lane;
+    }
+  }
+}
+
 TEST(RdnaComputeAlu, LockstepWaveBranchesOnFullExecMask) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))

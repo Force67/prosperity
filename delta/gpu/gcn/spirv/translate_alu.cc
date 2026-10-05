@@ -976,11 +976,12 @@ bool EmitMbcntOfExec(Translator& t,
 // index at all, so they keep the single-lane reading.
 
 Id ReadLane(Translator& t, Id value, Id lane) {
-  if (!t.xchg_lanes)
+  if (!t.lane_id)
     return value;  // no wave-lane index exists here
+  lane = t.And(lane, t.U32(t.wave_size - 1));
   if (t.CanExchange())
     return t.WaveExchange(value, lane);
-  if (WaveSplitsAcrossSubgroups())
+  if (t.wave_size == 64 && WaveSplitsAcrossSubgroups())
     NoteApproximated("v_readlane.no-sync-point", 0x01);
   return t.SubgroupShuffle(value, lane);
 }

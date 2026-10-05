@@ -690,7 +690,8 @@ bool NeedsWaveLockstep(const Program& program) {
         inst.extension == gpu::gcn::InstExtension::kDpp8 ||
         inst.extension == gpu::gcn::InstExtension::kDpp8Fi ||
         (inst.enc == Enc::kVop3 &&
-         (inst.opcode == 0x377 || inst.opcode == 0x378)))
+         (inst.opcode == 0x360 || inst.opcode == 0x377 ||
+          inst.opcode == 0x378)))
       return true;
     if (inst.enc == Enc::kVop3 &&
         (inst.opcode == 0x365 || inst.opcode == 0x366))
