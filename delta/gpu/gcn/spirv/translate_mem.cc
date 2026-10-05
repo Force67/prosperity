@@ -2004,7 +2004,8 @@ static void EmitCsMimgStaged(Translator& t,
   // a bias nor a z-compare, so word 0 is the packed offset and the coordinates
   // start one word later, which is what addr_shift below is for.
   const bool offset = op == 0x37;
-  const bool sample = op == 0x24 || op == 0x27 || offset;
+  const bool gradients = op == 0x22;
+  const bool sample = op == 0x24 || op == 0x27 || offset || gradients;
   // image_gather4_lz: the same 2x2 footprint the bilinear path already fetches,
   // returned as four texels instead of blended. Only the plain form works:
   // the
@@ -2031,7 +2032,9 @@ static void EmitCsMimgStaged(Translator& t,
   // them over already loaded. Without this a 2D load reads y from vaddr+1,
   // which on an NSA instruction is some unrelated register, so the source image
   // is then addressed by x alone and the result is vertical stripes.
-  const u32 addr_shift = offset ? 1u : 0u;
+  const u32 dim = (w >> 3) & 7;
+  const u32 derivative_dims = dim == 0 || dim == 4 ? 1u : dim == 2 ? 3u : 2u;
+  const u32 addr_shift = gradients ? derivative_dims * 2 : offset ? 1u : 0u;
   const auto addr_vg = [&](u32 i) {
     return address ? address[i + addr_shift] : t.Vg(vaddr + i + addr_shift);
   };
@@ -2239,6 +2242,26 @@ static void EmitCsMimgStaged(Translator& t,
     const Id lod_addr =
         t.SelectF(is_1d_img, addr_vgf(da ? 2 : 1), addr_vgf(da ? 3 : 2));
     const Id lod = t.m.ExtInst(t.t_f, GLSLstd450FMax, {lod_addr, t.F32(0.f)});
+    requested_mip = t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {lod});
+  }
+  if (gradients) {
+    Id footprint = t.F32(1.f);
+    for (u32 axis = 0; axis < 2; ++axis) {
+      Id length = t.F32(0.f);
+      for (u32 component = 0; component < derivative_dims; ++component) {
+        const Id extent = component == 0   ? base_width
+                          : component == 1 ? base_height
+                                           : descriptor_layers;
+        const Id size = t.m.Emit(spv::Op::OpConvertUToF, t.t_f,
+                                 {Max1(t, t.Shr(extent, base_mip))});
+        const u32 index = axis * derivative_dims + component;
+        const Id raw = address ? address[index] : t.Vg(vaddr + index);
+        const Id derivative = t.FMul(t.m.Bitcast(t.t_f, raw), size);
+        length = t.FAdd(length, t.FMul(derivative, derivative));
+      }
+      footprint = t.Ext2(GLSLstd450FMax, footprint, length);
+    }
+    const Id lod = t.FMul(t.Ext1(GLSLstd450Log2, footprint), t.F32(.5f));
     requested_mip = t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {lod});
   }
   const Id view_mip = t.UMin(requested_mip, t.Sub(safe_last_mip, base_mip));

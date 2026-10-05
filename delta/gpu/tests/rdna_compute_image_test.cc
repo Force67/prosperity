@@ -1498,6 +1498,75 @@ TEST(RdnaComputeImageConversion,
   }
 }
 
+TEST(RdnaComputeImageConversion, ExplicitGradientsSelectTheImageMip) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "Vulkan is required";
+  alignas(65536) static base::Array<u8, 65536> input{};
+  alignas(65536) static base::Array<base::Array<u32, 16384>, 6> outputs{};
+  alignas(256) static base::Array<u32, 4096> code{};
+  gpu::gcn::TextureLayout32 layout;
+  ASSERT_TRUE(
+      gpu::gcn::BuildTextureLayout32(layout, 8, 8, 8, 1, 4, 0x109, false, 4));
+  for (u32 mip = 0; mip < 4; ++mip) {
+    base::Vector<u32> pixels((8u >> mip) * (8u >> mip),
+                             0xff000000u | (32 + mip * 64));
+    ASSERT_TRUE(gpu::gcn::RetileTextureMip32(pixels.data(), input.data(),
+                                             layout, mip, 0));
+  }
+  const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
+  for (u32 trial = 0; trial < 6; ++trial) {
+    const u32 mip = trial % 3;
+    if (trial == 3) {
+      gpu::render::RecordComputeInFrame();
+      gpu::render::BeginFrame(renderer);
+      ASSERT_TRUE(gpu::render::CsBindsImages());
+    }
+    auto& output = outputs[trial];
+    u32 pc = 0;
+    const float step = float(1u << mip) / 8.f;
+    const float address[] = {step, 0.f, 0.f, step, .5f, .5f};
+    for (u32 i = 0; i < 6; ++i) {
+      code[pc++] = 0x7e0002ff | ((4 + i) << 17);
+      code[pc++] = base::BitCast<u32>(address[i]);
+    }
+    code[pc++] = 0xf0880f08;
+    code[pc++] = 0x00601004;
+    code[pc++] = 0xe0780000;
+    code[pc++] = 0x80021000;
+    code[pc++] = 0xbf810000;
+    gpu::rdna::NextProgramGeneration();
+    gpu::ps5::Regs regs;
+    const u64 program = reinterpret_cast<u64>(code.data());
+    regs[gpu::ps5::mmCOMPUTE_PGM_LO] = program >> 8;
+    regs[gpu::ps5::mmCOMPUTE_PGM_HI] = program >> 40;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 1;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+    regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 16 << 1;
+    const u64 src = reinterpret_cast<u64>(input.data());
+    regs[ud] = src >> 8;
+    regs[ud + 1] = ((src >> 40) & 255) | (56u << 20) | (3u << 30);
+    regs[ud + 2] = 1 | (7 << 14);
+    regs[ud + 3] = 0x90930fac;
+    regs[ud + 5] = 3 << 4;
+    const u64 dst = reinterpret_cast<u64>(output.data());
+    regs[ud + 8] = dst;
+    regs[ud + 9] = (dst >> 32) & 0xffff;
+    regs[ud + 10] = 16;
+    regs[ud + 11] = 0x20000;
+    regs[ud + 13] = 3 << 20;
+    regs[ud + 14] = 1 << 26;
+    const u32 dispatch[] = {1, 1, 1, 1};
+    gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    EXPECT_NEAR(base::BitCast<float>(output[0]), (32 + mip * 64) / 255.f,
+                1e-6f);
+    EXPECT_FLOAT_EQ(base::BitCast<float>(output[3]), 1.f);
+  }
+  gpu::render::EndFrame(renderer, 0);
+}
+
 TEST(RdnaComputeImageConversion,
      DecoderRg16IntegerLoadsSignExtendBothComponents) {
   auto& renderer = gpu::render::DefaultRenderer();

@@ -150,6 +150,7 @@ bool CsMimgSupported(u32 op) {
     case 0x18:
     case 0x19:
     case 0x1a:
+    case 0x22:  // image_sample_d
     case 0x24:  // image_sample_l
     case 0x27:  // image_sample_lz
     case 0x2c:  // image_sample_c_l
@@ -712,6 +713,7 @@ bool NativeMimgForm(u32 op) {
   switch (op) {
     case 0x00:
     case 0x01:
+    case 0x22:
     case 0x24:
     case 0x27:
     case 0x2c:
