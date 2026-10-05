@@ -38,6 +38,31 @@ extern "C" bool prosperity_ps5_is_display_buffer(u64) {
   return false;
 }
 
+TEST(RTargetResolution, RejectsContainedTextureWithDifferentGeometry) {
+  constexpr u64 target_base = 0x81bda00000;
+  constexpr u64 texture_base = 0x81bf000000;
+  constexpr u64 page = texture_base >> gpu::render::kRtPageShift;
+  ASSERT_EQ(gpu::render::g_rts.count(target_base), 0u);
+  ASSERT_EQ(gpu::render::g_rt_pages.count(page), 0u);
+  gpu::render::RTarget target;
+  target.w = 3840;
+  target.h = 2160;
+  target.fmt = gpu::rhi::Format::kRGBA16Float;
+  target.ever_rendered = true;
+  target.last_frame = 100;
+  gpu::render::g_rts[target_base] = target;
+  gpu::render::g_rt_pages[page].push_back(target_base);
+
+  EXPECT_EQ(gpu::render::ResolveSampledRT(texture_base, 820, 1440), 0u);
+  EXPECT_EQ(gpu::render::ResolveSampledRT(target_base, 3840, 2160),
+            target_base);
+  EXPECT_EQ(gpu::render::ResolveSampledRT(texture_base, 3840, 2160),
+            target_base);
+
+  gpu::render::g_rt_pages.erase(page);
+  gpu::render::g_rts.erase(target_base);
+}
+
 TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
   options::Init();
   auto& renderer = gpu::render::DefaultRenderer();

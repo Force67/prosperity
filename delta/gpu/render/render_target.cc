@@ -839,8 +839,8 @@ DepthTarget* GetDepthRT(u64 base, u32 w, u32 h, u64 stencil_base, u32 layers) {
 // sampled region's pages and resolve by IDENTITY, not recency: an exact base
 // whose size matches wins outright (the guest bound that buffer, so a more
 // recently rendered overlapping buffer must never override it); only when no
-// exact match exists fall back to the best-fitting overlapper (dimension match,
-// then the freshest). Returns the g_rts key, or 0.
+// exact match exists fall back to an overlapper with matching dimensions,
+// choosing the freshest. Returns the g_rts key, or 0.
 // This path also activates a variant, because only the RT-bind path used to:
 // P.T. renders its fullscreen composite and a 64x64 pass to the same address,
 // and when the small one was live the present blit resolved to nothing, a black
@@ -896,14 +896,9 @@ u64 ResolveSampledRT(u64 addr, u32 w, u32 h) {
     if (!(a0 < b1 && b0 < a1))
       return;  // no interval overlap
     bool dim_match = (!w || !h) || (rt.w == w && rt.h == h);
-    // A target may answer for an address only if it is the geometry being
-    // sampled, or if it at least CONTAINS the sampled footprint. Bare interval
-    // overlap is not enough: P.T. samples a 2048x1024 compute-written surface
-    // whose 8 MB footprint runs across a pool of 480x270 targets, and seven of
-    // them tied on freshness, so an arbitrary half-megabyte target answered
-    // for it, and which one depended on the guest addresses of that run. A
-    // surface that is not a render target belongs to the texture cache.
-    if (!dim_match && !(b0 <= a0 && b1 >= a1))
+    // A contained allocation can be a separate texture in a reused heap.
+    // Sampling the whole target cannot represent that texture's geometry.
+    if (!dim_match)
       return;
     long score = (long)rt.last_frame;
     if (dim_match)
