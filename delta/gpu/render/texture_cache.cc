@@ -1001,7 +1001,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   ScopeNs lookup_timer(&g_ns_tex_lookup);
   g_tex_lookup_n++;
-  constexpr u64 kMaxTextureBytes = 256ull * 1024 * 1024;
+  constexpr u64 kMaxTextureBytes = 512ull * 1024 * 1024;
   // DELTA_GPU_TEXWATCH=<base>: the head of one texture's guest memory, once per
   // frame it is bound. A surface the guest fills after our first upload reads
   // as its initial contents forever, and no other trace distinguishes that from
