@@ -136,6 +136,7 @@ if(NOT ANDROID)
   add_subdirectory(tools/ffpkg_extract)
   add_subdirectory(tools/archive_extract)
   add_subdirectory(tools/window_test)
+  add_subdirectory(tools/spv_bench)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
