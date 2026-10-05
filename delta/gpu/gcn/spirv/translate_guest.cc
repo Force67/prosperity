@@ -33,9 +33,12 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding) {
   t.m.Decorate(sc.cs_guest_table, spv::Decoration::NonWritable);
   t.m.Name(sc.cs_guest_table, "guest_address_map");
   base::Vector<Id> args;
+  // Every memory access calls this. Inlined at each of ~700 call sites, one
+  // Demon's Souls shader took spirv-opt 16 s instead of 4.
   sc.cs_guest_translate =
       t.m.BeginFunction(wide, t.m.TypeFunction(wide, {wide, t.t_u, t.t_u}),
-                        {wide, t.t_u, t.t_u}, &args);
+                        {wide, t.t_u, t.t_u}, &args,
+                        spv::FunctionControlMask::DontInline);
   t.m.Name(sc.cs_guest_translate, "translate_guest_address");
   const Id function_ptr = t.m.TypePointer(spv::StorageClass::Function, t.t_u);
   const Id lo = t.m.Emit(spv::Op::OpVariable, function_ptr,
@@ -175,7 +178,8 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
   base::Vector<Id> args;
   sc.cs_guest_translate =
       t.m.BeginFunction(wide, t.m.TypeFunction(wide, {wide, t.t_u, t.t_u}),
-                        {wide, t.t_u, t.t_u}, &args);
+                        {wide, t.t_u, t.t_u}, &args,
+                        spv::FunctionControlMask::DontInline);
   t.m.Name(sc.cs_guest_translate, "translate_direct_address");
   const Id ps4_rel =
       t.m.Emit(spv::Op::OpISub, wide, {args[0], constant(kBase)});

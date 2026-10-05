@@ -176,6 +176,53 @@ struct Translator {
     return lane_masks ? SelectB(MaskLaneHigh(), hi, lo) : lo;
   }
   Id SgMask(u32 sgpr) { return MaskWord(Sg(sgpr), Sg(sgpr + 1)); }
+
+  // ---- register value cache ----
+  // What a register holds, as the SSA value of its last load or store in the
+  // current block, so a re-read emits nothing. Every cached store also reaches
+  // memory, so raw loads stay correct; raw stores go through StorePrivate,
+  // which forgets the VGPRs. The optimizer used to rebuild all of this from
+  // the load/store stream, for every register access of every instruction.
+  static constexpr u32 kRegVgpr = 136, kRegScc = kRegVgpr + 256,
+                       kRegState = kRegScc + 1, kRegCount = kRegState + 1;
+  struct KnownValue {
+    Id block = 0, value = 0;
+  };
+  KnownValue known_regs[kRegCount];
+  Id KnownReg(u32 key) const {
+    const KnownValue& k = known_regs[key];
+    return k.block && k.block == m.CurrentBlock() ? k.value : 0;
+  }
+  void KnowReg(u32 key, Id value) { known_regs[key] = {m.CurrentBlock(), value}; }
+  Id LoadReg(u32 key, Id pointer) {
+    if (const Id v = KnownReg(key))
+      return v;
+    const Id v = m.Load(t_u, pointer);
+    KnowReg(key, v);
+    return v;
+  }
+  void StoreReg(u32 key, Id pointer, Id value) {
+    if (block_active)
+      value = SelectB(block_active, value, LoadReg(key, pointer));
+    m.Store(pointer, value);
+    KnowReg(key, value);
+  }
+  bool CachedVgpr(u32 i) const { return i < vgpr_dyn_lo && i < 256; }
+
+  // Per-block memo of one derived value, keyed by up to two operand ids.
+  struct Memo {
+    Id block = 0, a = 0, b = 0, value = 0;
+  };
+  template <typename Make>
+  Id Memoized(Memo& memo, Id a, Id b, Make make) {
+    const Id block = m.CurrentBlock();
+    if (block && memo.block == block && memo.a == a && memo.b == b)
+      return memo.value;
+    const Id value = make();
+    memo = {block, a, b, value};
+    return value;
+  }
+  Memo exec_memo, lane_active_memo;
   // A wave32 mask is one SGPR; the next one is an ordinary register the
   // compiler may still hold a live value in (a descriptor table pointer, say).
   void SetMask(u32 sgpr, Id value) {
@@ -233,19 +280,31 @@ struct Translator {
   }
   // Whether this invocation's lane is set in a wave mask.
   Id LaneActive(Id mask) {
-    return InBlock((wave_masks || lane_masks)
-                       ? IsNonZero(And(Shr(mask, And(lane_masks ? mask_lane_id
-                                                                : WaveLane(),
-                                                     U32(31))),
-                                       U32(1)))
-                       : IsNonZero(mask));
+    return Memoized(lane_active_memo, mask, block_active, [&] {
+      if (!wave_masks && !lane_masks)
+        return InBlock(IsNonZero(mask));
+      const Id lane_bit = IsNonZero(
+          And(Shr(mask, And(lane_masks ? mask_lane_id : WaveLane(), U32(31))),
+              U32(1)));
+      // The full-mask test is what lets the optimizer fold every guard of a
+      // shader that never writes EXEC: it cannot see that (~0 >> lane) & 1
+      // is 1, but it can compare the seeded constant.
+      return InBlock(m.Emit(spv::Op::OpLogicalOr, t_bool,
+                            {Eq(mask, U32(~0u)), lane_bit}));
+    });
   }
   Id InBlock(Id condition) {
     return block_active ? m.Emit(spv::Op::OpLogicalAnd, t_bool,
                                  {block_active, condition})
                         : condition;
   }
+  // A store the register cache cannot see: it may be a VGPR it holds.
   void StorePrivate(Id pointer, Id value) {
+    for (u32 i = kRegVgpr; i < kRegScc; i++)
+      known_regs[i] = {};
+    StoreUncached(pointer, value);
+  }
+  void StoreUncached(Id pointer, Id value) {
     m.Store(pointer, block_active
                          ? SelectB(block_active, value, m.Load(t_u, pointer))
                          : value);
@@ -330,13 +389,16 @@ struct Translator {
   }
 
   // ---- SCC / EXEC / CFG-state ----
-  Id Scc() { return m.Load(t_u, scc_var); }
-  void SetScc(Id v) { StorePrivate(scc_var, v); }
+  Id Scc() { return LoadReg(kRegScc, scc_var); }
+  void SetScc(Id v) { StoreReg(kRegScc, scc_var, v); }
   void SetSccBool(Id b) { SetScc(SelectB(b, U32(1), U32(0))); }
-  Id Exec() { return SgMask(126); }
-  Id State() { return m.Load(t_u, state_var); }
-  void SetState(u32 s) { StorePrivate(state_var, U32(s)); }
-  void SetStateId(Id s) { StorePrivate(state_var, s); }
+  Id Exec() {
+    const Id lo = Sg(126), hi = Sg(127);
+    return Memoized(exec_memo, lo, hi, [&] { return MaskWord(lo, hi); });
+  }
+  Id State() { return LoadReg(kRegState, state_var); }
+  void SetState(u32 s) { StoreReg(kRegState, state_var, U32(s)); }
+  void SetStateId(Id s) { StoreReg(kRegState, state_var, s); }
 
   // ---- register file ----
   Id SgPtr(u32 i) { return m.AccessChain(p_priv_u, sgpr, {U32(i)}); }
@@ -349,12 +411,22 @@ struct Translator {
     return vgpr_regs[i];
   }
   Id Sg(u32 i) {
-    return rdna_sources && i == 125 ? U32(0) : m.Load(t_u, SgPtr(i));
+    if (rdna_sources && i == 125)
+      return U32(0);
+    if (const Id v = KnownReg(i))
+      return v;
+    return LoadReg(i, SgPtr(i));
   }
-  Id Vg(u32 i) { return m.Load(t_u, VgPtr(i)); }
+  Id Vg(u32 i) {
+    if (!CachedVgpr(i))
+      return m.Load(t_u, VgPtr(i));
+    if (const Id v = KnownReg(kRegVgpr + i))
+      return v;
+    return LoadReg(kRegVgpr + i, VgPtr(i));
+  }
   void SetSg(u32 i, Id v) {
     if (!rdna_sources || i != 125)
-      StorePrivate(SgPtr(i), v);
+      StoreReg(i, SgPtr(i), v);
   }
   Id Sdst(u32 base, u32 offset = 0) {
     return rdna_sources && base == 125 ? U32(0) : Sg(base + offset);
@@ -368,7 +440,10 @@ struct Translator {
       v = SelectB(vector_write_guard, v, Vg(i));
     if (predicate_vector)
       v = SelectB(LaneActive(Exec()), v, Vg(i));
-    StorePrivate(VgPtr(i), v);
+    if (CachedVgpr(i))
+      StoreReg(kRegVgpr + i, VgPtr(i), v);
+    else
+      StoreUncached(VgPtr(i), v);  // the indexable part, never cached
   }
   // v_movrel*: a VGPR indexed at run time by M0 (the register file is a
   // Private array, so this is an ordinary dynamic access).

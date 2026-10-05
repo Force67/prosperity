@@ -23,6 +23,7 @@
 #include "base/containers/map.h"
 #include "base/containers/pair.h"
 #include "base/containers/vector.h"
+#include "base/math/value_bounds.h"
 #include "base/strings/xstring.h"
 
 namespace gpu::gcn::spirv {
@@ -115,7 +116,9 @@ class Module {
   Id BeginFunction(Id ret_type,
                    Id fn_type,
                    const base::Vector<Id>& parameter_types = {},
-                   base::Vector<Id>* parameter_ids = nullptr);
+                   base::Vector<Id>* parameter_ids = nullptr,
+                   spv::FunctionControlMask control =
+                       spv::FunctionControlMask::MaskNone);
   Id NewBlock();             // allocate a label id (not yet opened)
   void OpenBlock(Id label);  // emit OpLabel for a previously allocated id
   Id CurrentBlock() const { return cur_block_; }
@@ -184,6 +187,42 @@ class Module {
   void PutWord(base::Vector<u32>& sec, u32 w) { sec.push_back(w); }
   void Instr(base::Vector<u32>& sec, spv::Op op, const base::Vector<u32>& ops);
   void PutString(base::Vector<u32>& sec, const base::String& s);
+
+  // Result type of every id made through Emit and the constant makers, and
+  // the source of every bitcast, so Bitcast can fold round trips.
+  void NoteType(Id id, Id type) {
+    if (id >= type_of_.size())  // resize grows to exactly what it is asked for
+      type_of_.resize(base::Max<size_t>(id + 1, type_of_.size() * 2), 0);
+    type_of_[id] = type;
+  }
+  Id TypeOf(Id id) const { return id < type_of_.size() ? type_of_[id] : 0; }
+  base::Vector<Id> type_of_;
+  base::HashMap<Id, Id> bitcast_source_;
+  base::HashMap<Id, u32> const_bits_;  // 32-bit scalar constant -> its bits
+  base::HashMap<Id, bool> const_bools_;
+
+  // Side-effect-free results this block already computed, keyed by their
+  // instruction words: the translator re-derives the same masks, selects and
+  // texel-format dispatch at every access. Only reused within one block.
+  // The entry points at the instruction in fn_body_, which is compared word
+  // for word (all but the result id) before it is reused.
+  struct Computed {
+    Id block = 0, id = 0;
+    u32 offset = 0;
+  };
+  base::HashMap<u64, Computed> computed_;
+  Id computed_block_ = 0;
+  // `head` is {opcode, result type}; `rest` the words after the result id.
+  Id Reuse(const u32 (&head)[2],
+           const u32* rest,
+           size_t count,
+           u64* key) const;
+  void Remember(u64 key, Id id, u32 offset);
+  Id t_u32_ = 0, t_i32_ = 0, t_bool_ = 0;
+  // A constant for an instruction whose operands are all constants (or a
+  // select that does not depend on its condition); 0 when it does not fold.
+  Id Fold(spv::Op op, Id result_type, const base::Vector<Id>& operands);
+  base::HashSet<u64> decorated_;  // (target, decoration) without operands
 
   u32 bound_ = 1;
   u32 version_ = 0x00010600u;
