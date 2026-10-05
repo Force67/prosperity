@@ -1919,6 +1919,16 @@ bool DirtyFilterClear(u64 base, u64 end) {
 // range (thousands of them against a few dozen dirty ones).
 // Dirty range base -> end of the footprint its index entries cover.
 base::HashMap<u64, u64> g_cs_dirty_bases;
+// Where that footprint starts when it is not the range base: a merged range
+// whose dispatches wrote only one child. UC2's video decoder merges a 2 MiB
+// output into a 16 MiB unbounded window that also holds its descriptor tables,
+// and indexing the whole window made every 4-byte table read write 17 MiB back.
+base::HashMap<u64, u64> g_cs_dirty_lo;
+
+u64 DirtyLo(u64 base) {
+  auto it = g_cs_dirty_lo.find(base);
+  return it == g_cs_dirty_lo.end() ? base : it->second;
+}
 // Bumped whenever compute results land in guest memory (writeback or an
 // executed batch of importing dispatches). The draw path's per-frame staging
 // caches stamp entries with this and re-copy when it has moved: a cached
@@ -1929,23 +1939,41 @@ u64 RangeEnd(u64 base, u64 bytes) {
   return bytes > UINT64_MAX - base ? UINT64_MAX : base + bytes;
 }
 
-void IndexDirtyRange(u64 base, u64 bytes) {
+// Index [lo, end) of the range at `base` as dirty, growing what it covers.
+void IndexDirtySpan(u64 base, u64 lo, u64 end) {
   BumpTextureEpoch();
-  if (!bytes)
+  if (end <= lo)
     return;
-  const u64 end = RangeEnd(base, bytes);
-  u64& indexed = g_cs_dirty_bases[base];
-  if (end <= indexed)
-    return;
-  const u64 first_page = indexed ? ((indexed - 1) >> kCsDirtyPageShift) + 1
-                                 : base >> kCsDirtyPageShift;
-  if (indexed)
-    NoteDirtyFilter(base, indexed, -1);
-  indexed = end;
-  NoteDirtyFilter(base, indexed, 1);
-  for (u64 page = first_page;
-       page <= (end - 1) >> kCsDirtyPageShift; page++)
+  u64 old_lo = lo, old_end = 0;
+  if (auto found = g_cs_dirty_bases.find(base);
+      found != g_cs_dirty_bases.end()) {
+    old_lo = DirtyLo(base);
+    old_end = found->second;
+    if (lo >= old_lo && end <= old_end)
+      return;
+    NoteDirtyFilter(old_lo, old_end, -1);
+  }
+  const u64 new_lo = old_end ? base::Min(lo, old_lo) : lo;
+  const u64 new_end = base::Max(end, old_end);
+  g_cs_dirty_bases[base] = new_end;
+  if (new_lo == base)
+    g_cs_dirty_lo.erase(base);
+  else
+    g_cs_dirty_lo[base] = new_lo;
+  NoteDirtyFilter(new_lo, new_end, 1);
+  for (u64 page = new_lo >> kCsDirtyPageShift;
+       page <= (new_end - 1) >> kCsDirtyPageShift; page++) {
+    const u64 page_lo = page << kCsDirtyPageShift;
+    const u64 page_end = page_lo + (u64(1) << kCsDirtyPageShift);
+    if (old_end && page_lo < old_end && old_lo < page_end)
+      continue;  // already listed
     g_cs_dirty_pages[page].push_back(base);
+  }
+}
+
+void IndexDirtyRange(u64 base, u64 bytes) {
+  if (bytes)
+    IndexDirtySpan(base, base, RangeEnd(base, bytes));
 }
 
 void UnindexDirtyRange(u64 base, u64 bytes) {
@@ -1955,9 +1983,10 @@ void UnindexDirtyRange(u64 base, u64 bytes) {
   u64 end = RangeEnd(base, bytes);
   if (auto found = g_cs_dirty_bases.find(base);
       found != g_cs_dirty_bases.end()) {
-    NoteDirtyFilter(base, found->second, -1);
+    NoteDirtyFilter(DirtyLo(base), found->second, -1);
     end = base::Max(end, found->second);
     g_cs_dirty_bases.erase(found);
+    g_cs_dirty_lo.erase(base);
   }
   for (u64 page = base >> kCsDirtyPageShift;
        page <= (end - 1) >> kCsDirtyPageShift; page++) {
@@ -2012,7 +2041,7 @@ bool AnyDirtyOverlapping(u64 base, u64 bytes, Fn&& fn) {
     return false;
   const auto hits = [&](u64 other) {
     auto indexed = g_cs_dirty_bases.find(other);
-    if (indexed == g_cs_dirty_bases.end() || other >= end ||
+    if (indexed == g_cs_dirty_bases.end() || DirtyLo(other) >= end ||
         base >= indexed->second)
       return false;
     auto range = g_cs_ranges.find(other);
@@ -2075,8 +2104,8 @@ base::Vector<u64> DirtyRangesOverlapping(u64 base,
                        if (other == exclude)
                          return true;
                        auto indexed = g_cs_dirty_bases.find(other);
-                       if (indexed == g_cs_dirty_bases.end() || other >= end ||
-                           base >= indexed->second)
+                       if (indexed == g_cs_dirty_bases.end() ||
+                           DirtyLo(other) >= end || base >= indexed->second)
                          return true;
                        auto found = g_cs_ranges.find(other);
                        return found == g_cs_ranges.end() ||
@@ -6266,7 +6295,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           s.hash = 0;
           s.mirror_current = false;
           MarkPending(s);
-          IndexDirtyRange(pbase, parent->guest_bytes);
+          IndexDirtySpan(pbase, base, RangeEnd(base, n));
           parent->write_seq++;
           parent->dirty_stamp = ++g_cs_dirty_stamp;
           parent->dirty_render_serial = g_render_serial;
@@ -6745,7 +6774,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         // Still owed to guest memory: its dirty footprint grows with it, or a
         // reader of the new part would find nothing to flush.
         if (e.gpu_dirty)
-          IndexDirtyRange(base, guest_bytes);
+          IndexDirtySpan(base, DirtyLo(base), RangeEnd(base, guest_bytes));
       }
       e.guest_bytes = guest_bytes;
       e.image_staging = ci.res[i].image_staging;
@@ -6775,7 +6804,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       s.hash = 0;
       s.mirror_current = false;
       MarkPending(s);
-      IndexDirtyRange(base, e.guest_bytes);
+      IndexDirtySpan(base, folds[k], RangeEnd(folds[k], n));
       if (!e.gpu_dirty) {
         e.gpu_dirty = true;
         e.dirty_frame = g_frame.num;
@@ -7071,10 +7100,26 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (it == g_cs_ranges.end())
       continue;
     const auto& res = ci.res[i];
-    const u64 written = !parent_base[i] && !res.image_staging && res.write_bytes
-                            ? base::Min(res.write_bytes, it->second.guest_bytes)
-                            : it->second.guest_bytes;
-    IndexDirtyRange(dirty_base, written);
+    if (parent_base[i] && !res.image_staging) {
+      // A merged range: only this binding's own window can have changed.
+      const u64 child = res.guest_size ? res.guest_size : res.size;
+      const u64 lo = dirty_base + parent_off[i];
+      IndexDirtySpan(dirty_base, lo,
+                     RangeEnd(lo, res.write_bytes
+                                      ? base::Min(res.write_bytes, child)
+                                      : child));
+    } else {
+      const u64 written =
+          !parent_base[i] && !res.image_staging && res.write_bytes
+              ? base::Min(res.write_bytes, it->second.guest_bytes)
+              : it->second.guest_bytes;
+      // A binding merged into a wider range (MergeOverlapping) starts at its
+      // view offset; nothing below that was written.
+      const u64 lo = !parent_base[i] && !res.image_staging
+                         ? dirty_base + base::Min(res.view_offset, written)
+                         : dirty_base;
+      IndexDirtySpan(dirty_base, lo, RangeEnd(dirty_base, written));
+    }
     if (!it->second.gpu_dirty)
       it->second.dirty_frame = g_frame.num;
     it->second.gpu_dirty = true;
@@ -7721,6 +7766,7 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_cs_range_bytes);
   guest::ResetResource(g_cs_dirty_pages);
   guest::ResetResource(g_cs_dirty_bases);
+  guest::ResetResource(g_cs_dirty_lo);
   guest::ResetResource(g_cs_range_blocks);
   guest::ResetResource(g_tile_tables);
   guest::ResetResource(g_cs_scratch);
