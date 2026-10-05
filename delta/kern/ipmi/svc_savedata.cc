@@ -87,6 +87,7 @@ struct MemoryJob {
 struct ClientState {
   std::vector<Pending> pending;
   std::vector<Mounted> mounts;
+  std::vector<u32> transaction_resources;
   MemoryState memory;
   std::unordered_map<std::string, MemoryState> memory_slots;
   base::String memory_directory = "sdmemory";
@@ -98,6 +99,7 @@ struct ClientState {
   std::unordered_map<std::string, i32> restore_results;
 };
 std::mutex g_mutex;
+u32 g_next_transaction_resource = 0;
 std::unordered_map<u32, ClientState> g_clients;
 std::array<bool, 16> g_mount_slots{};
 
@@ -185,6 +187,7 @@ void Clear(ClientState& state) {
     g_mount_slots[point.slot] = false;
   }
   state.mounts.clear();
+  state.transaction_resources.clear();
   state.pending.clear();
   state.memory_work->results.clear();
   state.memory_acknowledgements = 0;
@@ -831,6 +834,21 @@ i32 CommitPs5(ClientState& state, const Pending& pending) {
   return mounted ? 0 : kNotMounted;
 }
 
+i32 CommitTransactionPs5(ClientState& state, const Pending& pending) {
+  const auto* data = pending.data.data();
+  if (Read<u32>(data, 4) > 1 ||
+      std::any_of(data + 8, data + 72, [](u8 value) { return value != 0; }))
+    return kParameter;
+  const auto resource = Read<u32>(data, 0);
+  const auto& resources = state.transaction_resources;
+  // Save writes already reach the host backing directory. The transaction
+  // resource is acquired separately from the mount point.
+  return std::find(resources.begin(), resources.end(), resource) !=
+                 resources.end()
+             ? 0
+             : kParameter;
+}
+
 struct CommandSizes {
   u64 input, output;
 };
@@ -877,6 +895,8 @@ CommandSizes Sizes(u32 command) {
       return {0x4a0, 32};
     case 90:
       return {200, 32};
+    case 91:
+      return {72, 64};
     case 92:
       return {148, 132};
     case 101:
@@ -1307,16 +1327,17 @@ struct SaveData : Service {
                        : command == 43                                 ? 60
                        : command == 56                                 ? 4
                        : command == 88                                 ? 68
+                       : command == 89                                 ? 64
                                                                        : 140;
       if (command != 34 && command != 42 && command != 56 && command != 63 &&
-          command != 81 && command != 43 && command != 88) {
+          command != 81 && command != 43 && command != 88 && command != 89) {
         inv.SetResult(kUnsupported);
         return;
       }
-      const u64 input_size = command == 42   ? 84
-                             : command == 81 ? 60
-                             : command == 88 ? 68
-                                             : 4;
+      const u64 input_size = command == 42                    ? 84
+                             : command == 81                  ? 60
+                             : command == 88 || command == 89 ? 68
+                                                              : 4;
       const auto* data = Input(inv, 1, input_size);
       if (!data || Read<u64>(header, 8) != input_size ||
           Read<u64>(header, 16) != size || !inv.CanReply(0, size)) {
@@ -1371,9 +1392,38 @@ struct SaveData : Service {
       } else if (command == 56) {
         g_clients.try_emplace(inv.Client());
       } else if (command == 88) {
-        // The PS5 library's initialize; its 68-byte reply is left zeroed.
-        g_clients.try_emplace(inv.Client());
-        const std::array<u8, 68> reply{};
+        if (std::any_of(data + 4, data + 68,
+                        [](u8 value) { return value != 0; }) ||
+            g_next_transaction_resource >= INT32_MAX) {
+          inv.SetResult(kParameter);
+          return;
+        }
+        auto& state = g_clients.try_emplace(inv.Client()).first->second;
+        const u32 resource = g_next_transaction_resource++;
+        state.transaction_resources.push_back(resource);
+        std::array<u8, 68> reply{};
+        std::memcpy(reply.data(), &resource, sizeof(resource));
+        inv.Reply(0, reply.data(), reply.size());
+        const u64 written = reply.size();
+        inv.Reply(1, &written, sizeof(written));
+        return;
+      } else if (command == 89) {
+        const auto client = g_clients.find(inv.Client());
+        if (client == g_clients.end()) {
+          inv.SetResult(kNotInitialized);
+          return;
+        }
+        auto& resources = client->second.transaction_resources;
+        const auto resource = Read<u32>(data, 0);
+        const auto it = std::find(resources.begin(), resources.end(), resource);
+        if (it == resources.end() ||
+            std::any_of(data + 4, data + 68,
+                        [](u8 value) { return value != 0; })) {
+          inv.SetResult(kParameter);
+          return;
+        }
+        resources.erase(it);
+        const std::array<u8, 64> reply{};
         inv.Reply(0, reply.data(), reply.size());
         const u64 written = reply.size();
         inv.Reply(1, &written, sizeof(written));
@@ -1494,6 +1544,9 @@ struct SaveData : Service {
         case 90:
           result = MountPs5(state, *it, reply);
           break;
+        case 91:
+          result = CommitTransactionPs5(state, *it);
+          break;
         case 92:
           result = UnmountPs5(state, *it, reply);
           break;
@@ -1544,6 +1597,7 @@ const guest::SessionReset g_reset([] {
   for (auto& [id, state] : g_clients)
     Clear(state);
   g_clients.clear();
+  g_next_transaction_resource = 0;
   g_mount_slots.fill(false);
   std::lock_guard jobs_lock(g_jobs_mutex);
   g_jobs.clear();

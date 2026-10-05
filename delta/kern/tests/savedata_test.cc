@@ -518,6 +518,49 @@ class SaveDataTest : public testing::Test {
       return result;
     return Collect();
   }
+  i32 TransactionResource(u32 command, u32 value, u32* resource = nullptr) {
+    const u64 output_size = command == 88 ? 68 : 64;
+    const u64 request[] = {command, 68, output_size};
+    std::array<u8, 68> payload{};
+    std::memcpy(payload.data(), &value, sizeof(value));
+    std::array<u8, 80> output;
+    output.fill(0xa5);
+    u64 received = ~u64(0);
+    const auto result =
+        Invoke(0x12340002,
+               {{request, sizeof(request)}, {payload.data(), payload.size()}},
+               {{output.data(), output_size}, {&received, 8}});
+    if (!result) {
+      EXPECT_EQ(received, output_size);
+      if (resource)
+        std::memcpy(resource, output.data(), sizeof(*resource));
+      for (size_t i = 4; i < output_size; ++i)
+        EXPECT_EQ(output[i], 0u);
+      for (size_t i = output_size; i < output.size(); ++i)
+        EXPECT_EQ(output[i], 0xa5);
+    }
+    return result;
+  }
+  i32 CommitTransaction(u32 resource, u32 mode = 0, u8 reserved = 0) {
+    data.fill(0);
+    const u32 command = 91;
+    std::memcpy(header.data() + 4, &command, 4);
+    std::memcpy(data.data(), &resource, 4);
+    std::memcpy(data.data() + 4, &mode, 4);
+    data[8] = reserved;
+    if (const auto result = Submit(72))
+      return result;
+    reply.fill(0xa5);
+    const auto result = Collect(64, 64);
+    if (result)
+      return result;
+    EXPECT_EQ(written, 64u);
+    for (size_t i = 0; i < 64; ++i)
+      EXPECT_EQ(reply[i], 0u);
+    for (size_t i = 64; i < reply.size(); ++i)
+      EXPECT_EQ(reply[i], 0xa5);
+    return result;
+  }
   i32 Unmount(u32 backup = 0) {
     const u64 input_size = 20, output_size = 132;
     std::array<u8, 132> unmount_header{};
@@ -562,6 +605,56 @@ class SaveDataTest : public testing::Test {
   std::array<u8, 148> reply{};
   u64 written = 0;
 };
+
+TEST_F(SaveDataTest, Ps5TransactionCommitPreservesNativeSaveWrites) {
+  u32 resource = ~0u;
+  ASSERT_EQ(TransactionResource(88, 0xc0000, &resource), 0);
+  ASSERT_EQ(SmallMount(), 0);
+  const int writer =
+      kern::sys_open("/savedata0/USR-DATA", kern::O_RDWR | kern::O_CREAT, 0600);
+  ASSERT_GE(writer, 0);
+  const char payload[] = "options profile";
+  ASSERT_EQ(kern::sys_write(writer, payload, sizeof(payload)), sizeof(payload));
+  ASSERT_EQ(kern::sys_close(writer), 0);
+  ASSERT_EQ(CommitTransaction(resource), 0);
+  ASSERT_EQ(CommitTransaction(resource, 1), 0);
+  std::ifstream saved(root / "CUSA00792" / "TESTSAVE" / "USR-DATA",
+                      std::ios::binary);
+  ASSERT_TRUE(saved);
+  std::array<char, sizeof(payload)> loaded{};
+  saved.read(loaded.data(), loaded.size());
+  EXPECT_EQ(std::memcmp(loaded.data(), payload, sizeof(payload)), 0);
+  ASSERT_EQ(TransactionResource(89, resource), 0);
+  EXPECT_EQ(static_cast<u32>(CommitTransaction(resource)), 0x809f0000u);
+}
+
+TEST_F(SaveDataTest, Ps5TransactionResourcesAreDistinctAndOwnedByClient) {
+  u32 first, second;
+  ASSERT_EQ(TransactionResource(88, 0xc0000, &first), 0);
+  ASSERT_EQ(TransactionResource(88, 0xc0000, &second), 0);
+  ASSERT_NE(first, second);
+  const u32 owner = kid;
+  const char* name = "SceSaveData";
+  u64 request = reinterpret_cast<u64>(name);
+  ASSERT_EQ(kern::ipmi::ManagerCall(2, 0, &kid, &request, sizeof(request)), 0);
+  ASSERT_EQ(Initialize(), 0);
+  EXPECT_EQ(static_cast<u32>(CommitTransaction(first)), 0x809f0000u);
+  EXPECT_EQ(static_cast<u32>(TransactionResource(89, first)), 0x809f0000u);
+  kid = owner;
+  ASSERT_EQ(CommitTransaction(first), 0);
+  ASSERT_EQ(TransactionResource(89, first), 0);
+  EXPECT_EQ(static_cast<u32>(TransactionResource(89, first)), 0x809f0000u);
+  ASSERT_EQ(CommitTransaction(second), 0);
+}
+
+TEST_F(SaveDataTest, Ps5TransactionCommitRejectsInvalidModeAndReservedBytes) {
+  u32 resource;
+  ASSERT_EQ(TransactionResource(88, 0xc0000, &resource), 0);
+  EXPECT_EQ(static_cast<u32>(CommitTransaction(resource, 2)), 0x809f0000u);
+  EXPECT_EQ(static_cast<u32>(CommitTransaction(resource, 0, 1)), 0x809f0000u);
+  EXPECT_EQ(static_cast<u32>(CommitTransaction(~0u)), 0x809f0000u);
+  ASSERT_EQ(CommitTransaction(resource), 0);
+}
 
 TEST_F(SaveDataTest, MemorySetupProvisionsNativeBuffersControlAndSemaphore) {
   ASSERT_EQ(MemoryClear(), 0);
