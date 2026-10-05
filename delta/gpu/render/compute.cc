@@ -2554,6 +2554,16 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
     Device().Destroy(t.buf);
     t.buf = nullptr;
   }
+  if (!t.buf) {
+    t.buf = CreateCsBuffer(t.bytes, rhi::kBufferStorage,
+                           rhi::MemoryKind::kUpload);
+    if (t.buf && t.buf->mapped())
+      BASE_LOGI("csgpu", "tiling table {} bytes uses host memory", t.bytes);
+  }
+  if (t.buf && !t.buf->mapped()) {
+    Device().Destroy(t.buf);
+    t.buf = nullptr;
+  }
   if (!t.buf)
     return nullptr;
   std::memcpy(t.buf->mapped(), table.data(), t.bytes);
