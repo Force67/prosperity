@@ -1583,6 +1583,35 @@ u8 Gfx10FormatPair(u32 gfmt) {
   return 0;
 }
 
+BufferFormat DecodeBufferDescriptor(Translator& t, StageContext& sc, Id w3) {
+  if (!t.rdna_sources)
+    return DecodeBufferFormat(t, t.And(t.Shr(w3, t.U32(15)), t.U32(0xF)),
+                              t.And(t.Shr(w3, t.U32(12)), t.U32(0x7)));
+  Id dfmt, nfmt;
+  if (!sc.direct_formats) {
+    base::Vector<Id> words;
+    for (u32 i = 0; i < kGfx10Formats / 4; i++) {
+      u32 packed = 0;
+      for (u32 k = 0; k < 4; k++)
+        packed |= u32{Gfx10FormatPair(i * 4 + k)} << (k * 8);
+      words.push_back(t.U32(packed));
+    }
+    const Id array = t.m.TypeArray(t.t_u, kGfx10Formats / 4);
+    sc.direct_formats = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::Private, array),
+        spv::StorageClass::Private, t.m.ConstComposite(array, words));
+  }
+  const Id gfmt = t.And(t.Shr(w3, t.U32(12)), t.U32(0x7F));
+  const Id packed = t.m.Load(
+      t.t_u, t.m.AccessChain(t.m.TypePointer(spv::StorageClass::Private, t.t_u),
+                             sc.direct_formats, {t.Shr(gfmt, t.U32(2))}));
+  const Id pair_bits =
+      t.And(t.Shr(packed, t.Shl(t.And(gfmt, t.U32(3)), t.U32(3))), t.U32(0xFF));
+  dfmt = t.And(pair_bits, t.U32(0xF));
+  nfmt = t.Shr(pair_bits, t.U32(4));
+  return DecodeBufferFormat(t, dfmt, nfmt);
+}
+
 // Direct graphics loads (render/guest_direct.h): one translation per
 // instruction and no branches. An address the table does not hold, or one
 // past the descriptor's records, reads 0 out of the table itself.
@@ -1710,37 +1739,13 @@ bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
     t.SetVg(vdata, value);
     return true;
   }
-  Id dfmt, nfmt;
+  BufferFormat f;
   if (typed) {
     const u8 fmt = Gfx10FormatPair((w >> 19) & 0x7F);
-    dfmt = t.U32(fmt & 0xF);
-    nfmt = t.U32(fmt >> 4);
+    f = DecodeBufferFormat(t, t.U32(fmt & 0xF), t.U32(fmt >> 4));
   } else {
-    if (!sc.direct_formats) {
-      base::Vector<Id> words;
-      for (u32 i = 0; i < kGfx10Formats / 4; i++) {
-        u32 packed = 0;
-        for (u32 k = 0; k < 4; k++)
-          packed |= u32{Gfx10FormatPair(i * 4 + k)} << (k * 8);
-        words.push_back(t.U32(packed));
-      }
-      const Id array = t.m.TypeArray(t.t_u, kGfx10Formats / 4);
-      sc.direct_formats = t.m.Variable(
-          t.m.TypePointer(spv::StorageClass::Private, array),
-          spv::StorageClass::Private, t.m.ConstComposite(array, words));
-    }
-    const Id gfmt = t.And(t.Shr(t.Sg(srsrc + 3), t.U32(12)), t.U32(0x7F));
-    const Id packed = t.m.Load(
-        t.t_u,
-        t.m.AccessChain(t.m.TypePointer(spv::StorageClass::Private, t.t_u),
-                        sc.direct_formats, {t.Shr(gfmt, t.U32(2))}));
-    const Id pair_bits =
-        t.And(t.Shr(packed, t.Shl(t.And(gfmt, t.U32(3)), t.U32(3))),
-              t.U32(0xFF));
-    dfmt = t.And(pair_bits, t.U32(0xF));
-    nfmt = t.Shr(pair_bits, t.U32(4));
+    f = DecodeBufferDescriptor(t, sc, t.Sg(srsrc + 3));
   }
-  const BufferFormat f = DecodeBufferFormat(t, dfmt, nfmt);
   const u32 n = (op & 3) + 1;
   for (u32 i = 0; i < n; i++)
     t.SetVg(vdata + i, FormattedComponentWith(t, f, word_at, byte_off, i));
@@ -1877,9 +1882,7 @@ void EmitCsMubuf(Translator& t, const Inst& inst, StageContext& sc) {
         break;
       }
       const Id w3 = t.Sg(srsrc + 3);
-      const BufferFormat f =
-          DecodeBufferFormat(t, t.And(t.Shr(w3, t.U32(15)), t.U32(0xF)),
-                             t.And(t.Shr(w3, t.U32(12)), t.U32(0x7)));
+      const BufferFormat f = DecodeBufferDescriptor(t, sc, w3);
       if (op <= 0x03) {
         const auto load_word = [&](Id idx) {
           return CsSsboLoad(t, sc, binding, idx);

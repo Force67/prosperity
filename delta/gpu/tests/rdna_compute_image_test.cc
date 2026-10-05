@@ -767,6 +767,70 @@ TEST(RdnaComputeAlu, HalfPrecisionOpsSelectHalvesAndPackResults) {
   EXPECT_EQ(dest[3], 0x44000000u);
 }
 
+TEST(RdnaComputeAlu, FormattedBuffersDecodeRdnaIntegerChannels) {
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A Vulkan device is required";
+  alignas(65536) static base::Array<base::Array<u32, 16384>, 3> sources{},
+      packed{}, raw{};
+  alignas(256) static base::Array<u32, 4096> code{};
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(sources.data()), sizeof(sources));
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(packed.data()), sizeof(packed));
+  gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(raw.data()), sizeof(raw));
+  const u32 shader[] = {0xe0042000, 0x80000400, 0xe0142000, 0x80010400,
+                        0xe0742000, 0x80020400, 0xbf810000};
+  base::Copy(shader, shader + base::ArraySize(shader), code.begin());
+  for (u32 run = 0; run < 3; run++) {
+    auto& source = sources[run];
+    source[0] = 0xffff8001;
+    source[1] = 0x7fff1234;
+    source[2] = 0x80007ffe;
+    packed[run].fill(0xa5a5a5a5);
+    gpu::rdna::NextProgramGeneration();
+    gpu::ps5::Regs regs;
+    const u64 pc = reinterpret_cast<u64>(code.data());
+    regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
+    regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_X] = 3;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Y] = 1;
+    regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
+    regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 12 << 1;
+    const u32 format = run == 0 ? 12 : run == 1 ? 28 : 21;
+    const u32 stride = run ? 4 : 2;
+    const auto descriptor = [&](u32 first, const void* memory, u32 bytes,
+                                u32 fmt) {
+      const u64 address = reinterpret_cast<u64>(memory);
+      regs[first] = address;
+      regs[first + 1] = ((address >> 32) & 0xffff) | (bytes << 16);
+      regs[first + 2] = 3;
+      regs[first + 3] = (fmt << 12) | 0x2c;
+    };
+    const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
+    descriptor(ud, source.data(), stride, format);
+    descriptor(ud + 4, packed[run].data(), stride, format);
+    descriptor(ud + 8, raw[run].data(), 8, 0);
+    const u32 dispatch[] = {1, 1, 1, 1};
+    gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
+    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    for (u32 lane = 0; lane < 3; lane++) {
+      for (u32 component = 0; component < 2; component++) {
+        const u32 index = run ? lane * 2 + component : lane;
+        const u32 bits = (source[index / 2] >> ((index & 1) * 16)) & 0xffff;
+        const u32 expected =
+            run == 2 ? (component ? 0 : source[lane])
+            : !run && component
+                ? 0
+                : static_cast<u32>(static_cast<i32>(static_cast<i16>(bits)));
+        EXPECT_EQ(raw[run][lane * 2 + component], expected)
+            << run << ':' << lane;
+      }
+    }
+    EXPECT_EQ(packed[run][0], source[0]);
+    EXPECT_EQ(packed[run][1], run ? source[1] : 0xa5a51234u);
+    EXPECT_EQ(packed[run][2], run ? source[2] : 0xa5a5a5a5u);
+  }
+}
+
 TEST(RdnaComputeAlu, ReadlaneCrossesSubgroupsWithExecEmpty) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
