@@ -22,6 +22,7 @@
 #include "gpu/gpu_check.h"
 #include "gpu/guest_memory.h"
 #include "gpu/guest_page_table.h"
+#include "gpu/write_tracker.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/hash.h"
 #include "guest/session.h"
@@ -361,15 +362,25 @@ rhi::CommandList* g_cs_list = nullptr;
 
 void SnapshotCsShadow(CsRange& range, const ComputeInfo::Res& res, u64 bytes) {
   const u64 start = NowNs();
+  if (range.shadow.size() != bytes)
+    range.shadow_guest_clean = false;
   range.shadow.resize(bytes);
   if (range.rt_sourced) {
     // GPU staging bypasses the host mirror; bridges compare guest bytes.
     const u64 guest_bytes =
         base::Min<u64>(bytes, res.guest_size ? res.guest_size : res.size);
+    CollectGuestWritesForSubmission();
+    if (range.shadow_guest_clean && range.shadow.size() == bytes) {
+      range.shadow_valid = true;
+      return;
+    }
+    range.shadow_guest_clean =
+        GuestWriteTracker().Arm(res.base, guest_bytes);
     ParallelCopy(range.shadow.data(), reinterpret_cast<const void*>(res.base),
                  guest_bytes);
     std::memset(range.shadow.data() + guest_bytes, 0, bytes - guest_bytes);
   } else {
+    range.shadow_guest_clean = false;
     ParallelCopy(range.shadow.data(), range.map, bytes);
   }
   range.shadow_valid = true;

@@ -466,7 +466,9 @@ bool WidensLinear(const ComputeInfo::Res& r) {
 bool GpuTileable(const ComputeInfo::Res& r) {
   if (r.tiling_idx >= gcn::kGfx10TilingBase)
     return true;
-  if ((r.elem_bytes < 4 || r.elem_bytes != r.stage_elem_bytes) &&
+  const bool expanded =
+      (r.elem_bytes == 1 || r.elem_bytes == 2) && r.stage_elem_bytes == 4;
+  if (!expanded && (r.elem_bytes < 4 || r.elem_bytes != r.stage_elem_bytes) &&
       !WidensLinear(r))
     return false;
   static base::HashMap<u64, bool> known;

@@ -306,6 +306,9 @@ struct CsRange {
   // Guest pages armed in the write tracker before the last hash or copy, and
   // no write reported since: the staging still holds what guest memory does.
   bool wt_clean = false;
+  // The shadow of an RT-sourced range is the guest bytes, watched since it was
+  // taken: still those bytes while this holds.
+  bool shadow_guest_clean = false;
   // When the staging last copied guest memory (g_cs_dirty_stamp's clock).
   u64 staged_stamp = 0;
   // The image in guest layout, tiled on the GPU for pointer-chasing
@@ -624,7 +627,7 @@ extern u32 g_cs_batch_count;
 // submissions complete; a reader waits for the one batch its range was last
 // recorded into (CsBatchWaitId), and only then. The GPU then executes batch N
 // while the walk records N+1, where a synchronous flush idled both in turn.
-constexpr u32 kCsBatchRing = 6;
+constexpr u32 kCsBatchRing = 32;
 
 extern u64 g_cs_batch_id;
 extern u64 g_cs_batch_next_id;
@@ -789,15 +792,18 @@ rhi::Buffer* ImportGuestPage(u64 page);
 // dispatch itself runs out of VRAM; ranges alias each other because they are
 // the same memory.
 // The PS4 and the PS5 GPU-visible windows, back to back.
-constexpr u64 kMirrorPs4Base = 0x300000000ull, kMirrorPs5Base = 0x8000000000ull;
+// Low guest memory (every PS4 mapping, PS5 labels and heaps) and the PS5
+// direct-memory window.
+constexpr u64 kMirrorPs4Base = 0, kMirrorPs5Base = 0x8000000000ull;
+constexpr u64 kMirrorLowWindow = 0x4000000000ull;
 constexpr u64 kMirrorWindow = 0x1000000000ull;
-constexpr u64 kMirrorSize = 2 * kMirrorWindow;
+constexpr u64 kMirrorSize = kMirrorLowWindow + kMirrorWindow;
 constexpr u64 kNotMirrored = ~0ull;
 constexpr u64 MirrorOffset(u64 address) {
-  if (address - kMirrorPs4Base < kMirrorWindow)
+  if (address - kMirrorPs4Base < kMirrorLowWindow)
     return address - kMirrorPs4Base;
   if (address - kMirrorPs5Base < kMirrorWindow)
-    return kMirrorWindow + (address - kMirrorPs5Base);
+    return kMirrorLowWindow + (address - kMirrorPs5Base);
   return kNotMirrored;
 }
 // [base, base+bytes) lies in one window.

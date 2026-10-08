@@ -233,6 +233,7 @@ void CsForgetGuestRange(u64 base, u64 bytes) {
     if (range_base >= end || base >= range_base + e.guest_bytes || e.gpu_dirty)
       continue;
     e.wt_clean = false;
+    e.shadow_guest_clean = false;
     e.last_validated_frame = -1;
     e.hash = 0;
     e.mirror_current = false;
@@ -275,6 +276,7 @@ void CsNoteGuestWrites(u64 first, u64 end) {
     // The CPU wrote it: the staging no longer holds what guest memory does,
     // whatever this frame already checked.
     e.wt_clean = false;
+    e.shadow_guest_clean = false;
     if (!e.gpu_dirty)
       e.last_validated_frame = -1;
     if (!CsTracksGuestWrites())

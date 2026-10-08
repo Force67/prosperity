@@ -36,12 +36,12 @@ rhi::Buffer* Mirror() {
     desc.sparse = true;
     desc.usage = rhi::kBufferStorage | rhi::kBufferCopySrc |
                  rhi::kBufferCopyDst | rhi::kBufferAddress |
-                 rhi::kBufferIndirect;
+                 rhi::kBufferIndirect | rhi::kBufferVertex;
     desc.name = "guest mirror";
     if (Device().caps().sparse_buffer)
       g_mirror = Device().CreateBuffer(desc);
-    BASE_LOGI("mirror", "guest mirror {:#x},{:#x} +{:#x} each: {}",
-              kMirrorPs4Base, kMirrorPs5Base, kMirrorWindow,
+    BASE_LOGI("mirror", "guest mirror {:#x}+{:#x}, {:#x}+{:#x}: {}",
+              kMirrorPs4Base, kMirrorLowWindow, kMirrorPs5Base, kMirrorWindow,
               g_mirror ? "up" : "unavailable");
   }
   return g_mirror;
@@ -134,19 +134,34 @@ bool RecordGuestRead(rhi::CommandList* list,
                      u64 base,
                      u64 bytes,
                      rhi::Buffer* dst) {
-  for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
-       block += kMirrorBlock)
-    if (InMirror(block) && MirrorOwned(block))
+  // A block the mirror owns holds its newest bytes there, not in the pages.
+  const auto owned = [](u64 at) {
+    return InMirror(at) && MirrorOwned(at & ~(kMirrorBlock - 1));
+  };
+  const auto block_end = [&](u64 at) {
+    return base::Min(base + bytes, (at & ~(kMirrorBlock - 1)) + kMirrorBlock);
+  };
+  for (u64 at = base; at < base + bytes; at = block_end(at))
+    if (!owned(at) && !GuestImportable(at, block_end(at) - at))
       return false;
-  if (!GuestImportable(base, bytes))
-    return false;
   list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
   for (u64 at = base; at < base + bytes;) {
-    u64 import_base = 0;
-    rhi::Buffer* import = MirrorImport(at, &import_base);
-    const u64 end = base::Min(base + bytes, import_base + import->desc().size);
-    list->CopyBuffer(dst, at - base, import, at - import_base, end - at);
-    at = end;
+    const bool from_mirror = owned(at);
+    u64 end = block_end(at);
+    while (end < base + bytes && owned(end) == from_mirror)
+      end = block_end(end);
+    if (from_mirror) {
+      list->CopyBuffer(dst, at - base, g_mirror, MirrorOffset(at), end - at);
+      at = end;
+      continue;
+    }
+    while (at < end) {
+      u64 import_base = 0;
+      rhi::Buffer* import = MirrorImport(at, &import_base);
+      const u64 to = base::Min(end, import_base + import->desc().size);
+      list->CopyBuffer(dst, at - base, import, at - import_base, to - at);
+      at = to;
+    }
   }
   if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
     g_cs_chunk_needs_batch = true;

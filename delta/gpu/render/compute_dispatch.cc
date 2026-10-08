@@ -1201,7 +1201,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         e.rt_serial = AliasedImageRenderSerial(base);
         staged_in_frame = StageCsRangeFromRtInFrame(ci.res[i], e);
       }
-      if (!staged_in_frame && !CsBatchWaitRange(e, kSyncStageHazard)) {
+      // The host copy is about to be written: whatever reads it has to be
+      // done. Staging on the GPU below touches no host copy.
+      if (rt_attempt && !staged_in_frame &&
+          !CsBatchWaitRange(e, kSyncStageHazard)) {
         renderer.state = nullptr;
         return CsDeclined(ci, "16");
       }
@@ -1225,11 +1228,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           return CsDeclined(ci, "17");
         }
       }
+      bool staged_on_gpu = false;
       if (!rt_attempt || !e.rt_sourced) {
-        if (!guest_settled()) {
-          renderer.state = nullptr;
-          return CsDeclined(ci, "guest-write");
-        }
         // Armed before the copy, so a write racing it is reported.
         if (!same_shape || rt_attempt) {
           e.wt_clean = !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
@@ -1239,7 +1239,38 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         }
         e.cpu_writes.clear();
         bool gpu_staged = false;
-        if (stage_bytes) {
+        // Bytes that are only read, or a truth whose output goes back through
+        // the mirror: the GPU copies them out of the guest pages, in queue
+        // order behind any write still on its way there.
+        const u64 copy_bytes = stage_bytes ? stage_bytes : ci.res[i].size;
+        const bool read_only = !ci.res[i].written && !ci.res[i].shader_writes;
+        if ((read_only || (e.truth && stage_bytes && !CsAliasedBase(base) &&
+                           MirrorCovers(base, copy_bytes))) &&
+            (stage_bytes || !ci.res[i].image_staging) && e.device_local &&
+            e.buf && !(copy_bytes & 3) && !(sz[i] & 3)) {
+          CsBatchBeginImpl();
+          if (g_cs_batch_open &&
+              RecordGuestRead(g_cs_list, base, copy_bytes, e.buf)) {
+            if (!stage_bytes && sz[i] > copy_bytes)
+              g_cs_list->FillBuffer(e.buf, copy_bytes, sz[i] - copy_bytes, 0);
+            g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW);
+            g_cs_batch_access.erase(e.buf);
+            MarkPending(e);
+            e.mirror_current = false;
+            gpu_staged = true;
+            staged_on_gpu = true;
+          }
+        }
+        if (!gpu_staged && !CsBatchWaitRange(e, kSyncStageHazard)) {
+          renderer.state = nullptr;
+          return CsDeclined(ci, "16");
+        }
+        if (!gpu_staged && !guest_settled()) {
+          renderer.state = nullptr;
+          return CsDeclined(ci, "guest-write");
+        }
+        if (gpu_staged) {
+        } else if (stage_bytes) {
           g_truth_stage_bytes += stage_bytes;
           const u64 tm = NowNs();
           ParallelCopy(e.map, reinterpret_cast<const void*>(base), stage_bytes);
@@ -1279,7 +1310,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       // Imported ranges never write back. Raw image staging needs the same
       // baseline to preserve untouched guest padding; linear images retile
       // through WritebackCsImage.
-      if ((!ci.res[i].image_staging || stage_bytes) && !e.imported &&
+      // Staged on the GPU, the host copy never saw the bytes.
+      if (staged_on_gpu) {
+        e.shadow_valid = false;
+      } else if ((!ci.res[i].image_staging || stage_bytes) && !e.imported &&
           (!e.rt_sourced || ci.res[i].written || ci.res[i].shader_writes)) {
         SnapshotCsShadow(e, ci.res[i], stage_bytes ? stage_bytes : sz[i]);
       } else {

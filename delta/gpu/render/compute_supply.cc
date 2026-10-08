@@ -626,9 +626,21 @@ CsRange* VertexSource(u64 base, u64 bytes, u64* range_base) {
   return bad ? nullptr : found;
 }
 
+// The mirror holds the newest bytes of a window a dispatch wrote through it
+// while their copy out to the guest pages is still on its way.
+bool MirrorHoldsNewest(u64 base, u64 bytes) {
+  if (!MirrorWritten(base, bytes))
+    return false;
+  for (const PendingGuestWrite& w : g_pending_guest_writes)
+    if (w.base < base + bytes && base < w.end)
+      return true;
+  return false;
+}
+
 bool CsHoldsVertices(u64 base, u64 bytes) {
   u64 range_base;
-  return kCsVtxBridge && VertexSource(base, bytes, &range_base);
+  return kCsVtxBridge && (VertexSource(base, bytes, &range_base) ||
+                          MirrorHoldsNewest(base, bytes));
 }
 
 bool CsVertexBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
@@ -636,6 +648,17 @@ bool CsVertexBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
     return false;
   u64 range_base;
   CsRange* const found = VertexSource(base, bytes, &range_base);
+  if (!found && MirrorHoldsNewest(base, bytes)) {
+    EndRegion();
+    g_frame.list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+                          kAccessAll);
+    if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
+      g_cs_chunk_needs_batch = true;
+    g_vtx_bridge_n++;
+    *buffer = g_mirror;
+    *offset = MirrorOffset(base);
+    return true;
+  }
   if (!found)
     return false;
   CsRange& e = *found;
