@@ -35,6 +35,13 @@ struct FrameSlot {
   bool submitted = false;    // submitted and not yet waited
   bool presentable = false;  // the frame copied pixels into `readback`
   bool present_to_window = false;
+  // Filled on the GPU instead of `readback` when the window's device can
+  // import it (host::PresentShared): the frame never reaches the CPU.
+  rhi::Texture* shared = nullptr;
+  int shared_fd = -1;
+  u32 shared_id = 0;
+  u64 shared_bytes = 0;
+  bool shared_frame = false;
   // Metadata of the recorded frame, consumed when it is presented.
   u32 w = 0, h = 0;
   rhi::Format fmt = rhi::Format::kUndefined;

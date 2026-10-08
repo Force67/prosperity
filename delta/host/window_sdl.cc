@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 #include "base/arch.h"
 
 #if defined(__linux__)
@@ -131,9 +132,20 @@ struct State {
 
   bool need_recreate = false;
   bool has_mem_budget = false;
+  bool has_memory_import = false;
+  u8 uuid[VK_UUID_SIZE] = {};
+};
+
+// Another device's exported frame image, imported once per id.
+struct SharedImage {
+  u32 id = 0;
+  VkImage image = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
 };
 
 State g_window;
+base::Vector<SharedImage> g_shared;
+base::Atomic<bool> g_import_ready{false};
 base::Atomic<bool> g_can_present{true};
 base::Atomic<bool> g_suppress_pad{false};
 // The splash thread and the videoout HLE may both bring the window up.
@@ -730,11 +742,26 @@ bool Init(const char* title, u32 width, u32 height) {
     base::Vector<VkExtensionProperties> ext(ne);
     vkEnumerateDeviceExtensionProperties(g_window.phys, nullptr, &ne,
                                          ext.data());
-    for (auto& e : ext)
+    for (auto& e : ext) {
       if (!std::strcmp(e.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
         dev_exts.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
         g_window.has_mem_budget = true;
       }
+      if (!std::strcmp(e.extensionName,
+                       VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) {
+        dev_exts.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+        g_window.has_memory_import = true;
+      }
+    }
+  }
+  {
+    VkPhysicalDeviceIDProperties id{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+    VkPhysicalDeviceProperties2 props{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    props.pNext = &id;
+    vkGetPhysicalDeviceProperties2(g_window.phys, &props);
+    std::memcpy(g_window.uuid, id.deviceUUID, VK_UUID_SIZE);
   }
   VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
   dci.queueCreateInfoCount = 1;
@@ -781,6 +808,7 @@ bool Init(const char* title, u32 width, u32 height) {
                     g_window.swap_format);
   ui::OverlayVkSetSwapchain(g_window.swap_images, g_window.swap_extent,
                             g_window.swap_format);
+  g_import_ready.store(g_window.has_memory_import, base::memory_order_release);
   return true;
 }
 
@@ -856,9 +884,11 @@ static void PresentFrame(const void* pixels,
                          u32 h,
                          u32 src_pitch,
                          PixelFormat fmt,
-                         bool frame_stalled) {
+                         bool frame_stalled,
+                         VkImage shared = VK_NULL_HANDLE) {
+  const bool fresh = pixels || shared;
   if (!g_can_present.load(base::memory_order_acquire) || !g_window.device ||
-      !w || !h || (!pixels && g_window.last_frame_slot == kFrameSlotCount))
+      !w || !h || (!fresh && g_window.last_frame_slot == kFrameSlotCount))
     return;
   if (g_window.need_recreate && !CreateSwapchain())
     return;
@@ -866,7 +896,7 @@ static void PresentFrame(const void* pixels,
     src_pitch = w * 4;
   VkFormat vkfmt = (fmt == PixelFormat::kBgra8) ? VK_FORMAT_B8G8R8A8_UNORM
                                                 : VK_FORMAT_R8G8B8A8_UNORM;
-  if (pixels && !EnsureFrameResources(w, h, vkfmt))
+  if (fresh && !EnsureFrameResources(w, h, vkfmt))
     return;
 
   FrameSlot& slot = g_window.slots[g_window.next_slot];
@@ -930,9 +960,30 @@ static void PresentFrame(const void* pixels,
   }
 
   const VkImage frame_image =
-      pixels ? slot.frame_img
-             : g_window.slots[g_window.last_frame_slot].frame_img;
-  if (pixels) {
+      fresh ? slot.frame_img
+            : g_window.slots[g_window.last_frame_slot].frame_img;
+  if (shared) {
+    ImageBarrier(slot.cmd, frame_image, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+    ImageBarrier(slot.cmd, shared, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0,
+                 VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkImageCopy cp{};
+    cp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.dstSubresource = cp.srcSubresource;
+    cp.extent = {w, h, 1};
+    vkCmdCopyImage(slot.cmd, shared, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   frame_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+    ImageBarrier(slot.cmd, frame_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+  } else if (pixels) {
     ImageBarrier(slot.cmd, frame_image, VK_IMAGE_LAYOUT_UNDEFINED,
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1021,7 +1072,7 @@ static void PresentFrame(const void* pixels,
     StopPresenting("vkQueueSubmit", result);
     return;
   }
-  if (pixels)
+  if (fresh)
     g_window.last_frame_slot = g_window.next_slot;
   g_window.next_slot = (g_window.next_slot + 1) % kFrameSlotCount;
 
@@ -1036,6 +1087,75 @@ static void PresentFrame(const void* pixels,
     g_window.need_recreate = true;
   else if (pr != VK_SUCCESS)
     StopPresenting("vkQueuePresentKHR", pr);
+  // The exporter writes the image again once this returns.
+  if (shared)
+    WaitForPresentFence(slot.fence, "vkWaitForFences(shared)");
+}
+
+void DestroySharedImages() {
+  for (SharedImage& s : g_shared) {
+    vkDestroyImage(g_window.device, s.image, nullptr);
+    vkFreeMemory(g_window.device, s.memory, nullptr);
+  }
+  g_shared.clear();
+}
+
+VkImage ImportShared(u32 id, int fd, u64 bytes, u32 w, u32 h, VkFormat fmt) {
+  for (const SharedImage& s : g_shared)
+    if (s.id == id)
+      return s.image;
+  // The exporter replaced its images (a new size): the old ones are done with.
+  if (g_shared.size() >= 4) {
+    vkDeviceWaitIdle(g_window.device);
+    DestroySharedImages();
+  }
+  VkExternalMemoryImageCreateInfo external{
+      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+  external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+  VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  ii.pNext = &external;
+  ii.imageType = VK_IMAGE_TYPE_2D;
+  ii.format = fmt;
+  ii.extent = {w, h, 1};
+  ii.mipLevels = 1;
+  ii.arrayLayers = 1;
+  ii.samples = VK_SAMPLE_COUNT_1_BIT;
+  ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+  ii.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  SharedImage s{id};
+  if (vkCreateImage(g_window.device, &ii, nullptr, &s.image) != VK_SUCCESS)
+    return VK_NULL_HANDLE;
+  VkMemoryRequirements mr;
+  vkGetImageMemoryRequirements(g_window.device, s.image, &mr);
+  VkMemoryDedicatedAllocateInfo dedicated{
+      VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+  dedicated.image = s.image;
+  // A successful import owns the fd it is given.
+  VkImportMemoryFdInfoKHR import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
+  import.pNext = &dedicated;
+  import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+  import.fd = dup(fd);
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.pNext = &import;
+  ai.allocationSize = bytes;
+  ai.memoryTypeIndex =
+      FindMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  if (import.fd < 0 || ai.memoryTypeIndex == UINT32_MAX ||
+      vkAllocateMemory(g_window.device, &ai, nullptr, &s.memory) !=
+          VK_SUCCESS) {
+    if (import.fd >= 0)
+      close(import.fd);
+    vkDestroyImage(g_window.device, s.image, nullptr);
+    return VK_NULL_HANDLE;
+  }
+  if (vkBindImageMemory(g_window.device, s.image, s.memory, 0) != VK_SUCCESS) {
+    vkDestroyImage(g_window.device, s.image, nullptr);
+    vkFreeMemory(g_window.device, s.memory, nullptr);
+    return VK_NULL_HANDLE;
+  }
+  g_shared.push_back(s);
+  return s.image;
 }
 
 void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
@@ -1054,6 +1174,34 @@ void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
   }
   if (pixels)
     PresentFrame(pixels, w, h, src_pitch, fmt, false);
+}
+
+bool CanPresentShared(const u8* uuid) {
+  return g_import_ready.load(base::memory_order_acquire) &&
+         !std::memcmp(uuid, g_window.uuid, VK_UUID_SIZE);
+}
+
+bool PresentShared(u32 id, int fd, u64 bytes, u32 w, u32 h, PixelFormat fmt) {
+  StopSplash();
+  base::LockGuard<base::Mutex> lock(g_ui_mutex);
+  if (g_exit_animation.load(base::memory_order_acquire) && !t_exit_thread)
+    return true;
+  if (!t_splash_thread && !ui::HomeScreenActive()) {
+    ui::LaunchTransitionGameReady();
+    ui::PauseMenuGameReady();
+  }
+  const VkImage image =
+      ImportShared(id, fd, bytes, w, h,
+                   fmt == PixelFormat::kBgra8 ? VK_FORMAT_B8G8R8A8_UNORM
+                                              : VK_FORMAT_R8G8B8A8_UNORM);
+  if (!image)
+    return false;
+  if (guest::Paused())
+    PresentFrame(nullptr, g_window.fb_w, g_window.fb_h, 0,
+                 PixelFormat::kRgba8, false);
+  else
+    PresentFrame(nullptr, w, h, 0, fmt, false, image);
+  return true;
 }
 
 void RefreshFrame(bool frame_stalled) {
@@ -1370,6 +1518,7 @@ void ResetGuest() {
     vkDeviceWaitIdle(g_window.device);
   for (auto& slot : g_window.slots)
     DestroyFrameResources(slot);
+  DestroySharedImages();
   g_window.fb_w = g_window.fb_h = 0;
   g_window.last_frame_slot = kFrameSlotCount;
   ui::ResetMouseLook(g_window.window);
@@ -1394,6 +1543,8 @@ void Shutdown() {
     vkDeviceWaitIdle(g_window.device);
   ui::OverlayVkShutdown();
   ui::OverlayShutdownImGui();
+  g_import_ready.store(false, base::memory_order_release);
+  DestroySharedImages();
   for (FrameSlot& slot : g_window.slots) {
     DestroyFrameResources(slot);
     if (slot.fence)

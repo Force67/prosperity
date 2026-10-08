@@ -629,6 +629,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
       want_ext(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
   native.push_descriptor = want_ext(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
   caps_.host_import = want_ext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+  caps_.memory_export = want_ext(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
 
   VkPhysicalDeviceFaultFeaturesEXT fault{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
@@ -745,6 +746,10 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
     cmd_end_rendering = reinterpret_cast<PFN_vkCmdEndRenderingKHR>(
         vkGetDeviceProcAddr(dev, "vkCmdEndRenderingKHR"));
   }
+  if (caps_.memory_export)
+    get_memory_fd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+        vkGetDeviceProcAddr(dev, "vkGetMemoryFdKHR"));
+  caps_.memory_export = get_memory_fd != nullptr;
   if (!cmd_begin_rendering) {
     BASE_LOGI("gpuvk", "no dynamic rendering");
     return false;
@@ -804,10 +809,14 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
   subgroup.pNext = &size_control;
   size_control.pNext = caps_.host_import ? &host : nullptr;
+  VkPhysicalDeviceIDProperties id{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+  id.pNext = &subgroup;
   VkPhysicalDeviceProperties2 props2{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-  props2.pNext = &subgroup;
+  props2.pNext = &id;
   vkGetPhysicalDeviceProperties2(phys, &props2);
+  std::memcpy(caps_.device_uuid, id.deviceUUID, VK_UUID_SIZE);
   const VkPhysicalDeviceLimits& lim = props2.properties.limits;
   device_name_ = props2.properties.deviceName;
 
@@ -1053,6 +1062,53 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
   return gpu::rhi::Release(buffer, this);
 }
 
+// Its own memory, which another device imports whole.
+bool VulkanDevice::AllocateExported(VkImage image, Allocation& out) {
+  VkMemoryRequirements mr;
+  vkGetImageMemoryRequirements(native.device, image, &mr);
+  u32 type = FindMemoryType(mr.memoryTypeBits,
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  if (type == UINT32_MAX)
+    return false;
+  VkMemoryDedicatedAllocateInfo dedicated{
+      VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+  dedicated.image = image;
+  VkExportMemoryAllocateInfo exported{
+      VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+  exported.pNext = &dedicated;
+  exported.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.pNext = &exported;
+  ai.allocationSize = mr.size;
+  ai.memoryTypeIndex = type;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  if (vkAllocateMemory(native.device, &ai, nullptr, &memory) != VK_SUCCESS)
+    return false;
+  if (vkBindImageMemory(native.device, image, memory, 0) != VK_SUCCESS) {
+    vkFreeMemory(native.device, memory, nullptr);
+    return false;
+  }
+  out.memory = memory;
+  out.size = mr.size;
+  out.type = type;
+  out.dedicated = true;
+  return true;
+}
+
+int VulkanDevice::ExportFd(rhi::Texture* texture, u64* bytes) {
+  auto* t = static_cast<VulkanTexture*>(texture);
+  if (!get_memory_fd || !t || !(t->desc().usage & rhi::kTextureExportable))
+    return -1;
+  VkMemoryGetFdInfoKHR info{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
+  info.memory = t->allocation.memory;
+  info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+  int fd = -1;
+  if (get_memory_fd(native.device, &info, &fd) != VK_SUCCESS)
+    return -1;
+  *bytes = t->allocation.size;
+  return fd;
+}
+
 rhi::Texture* VulkanDevice::CreateTexture(const rhi::TextureDesc& desc) {
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   auto texture = base::MakeUnique<VulkanTexture>(desc);
@@ -1087,9 +1143,19 @@ rhi::Texture* VulkanDevice::CreateTexture(const rhi::TextureDesc& desc) {
     ii.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
   if (desc.usage & rhi::kTextureArrayCompatible)
     ii.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+  const bool exported = desc.usage & rhi::kTextureExportable;
+  if (exported && !caps_.memory_export)
+    return nullptr;
+  VkExternalMemoryImageCreateInfo external{
+      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+  external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+  if (exported)
+    ii.pNext = &external;
   if (vkCreateImage(native.device, &ii, nullptr, &texture->image) != VK_SUCCESS)
     return nullptr;
-  if (!images_.Allocate(*this, texture->image, texture->allocation)) {
+  if (exported ? !AllocateExported(texture->image, texture->allocation)
+               : !images_.Allocate(*this, texture->image,
+                                   texture->allocation)) {
     vkDestroyImage(native.device, texture->image, nullptr);
     return nullptr;
   }

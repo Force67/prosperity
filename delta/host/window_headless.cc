@@ -34,6 +34,12 @@ void RequestPresentStop() {}
 void RefreshFrame(bool) {}
 
 void Present(const void*, u32, u32, u32, PixelFormat) {}
+bool CanPresentShared(const u8*) {
+  return false;
+}
+bool PresentShared(u32, int, u64, u32, u32, PixelFormat) {
+  return false;
+}
 bool PumpEvents() {
   return true;
 }

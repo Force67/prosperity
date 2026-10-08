@@ -784,6 +784,14 @@ bool Ensure(const char*, u32, u32) {
 
 void RefreshFrame(bool) {}
 
+bool CanPresentShared(const u8*) {
+  return false;
+}
+
+bool PresentShared(u32, int, u64, u32, u32, PixelFormat) {
+  return false;
+}
+
 void Present(const void* pixels, u32 w, u32 h, u32 src_pitch, PixelFormat fmt) {
   if (g_present_failed.load(base::memory_order_acquire) ||
       g_present_stop_requested.load(base::memory_order_acquire) ||

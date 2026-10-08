@@ -68,6 +68,17 @@ void Present(const void* pixels,
              u32 src_pitch = 0,
              PixelFormat fmt = PixelFormat::kRgba8);
 
+// True when PresentShared can import memory exported by the device `uuid`
+// names (the same GPU this window presents on).
+bool CanPresentShared(const u8* uuid);
+
+// Present a frame another device rendered into an exported image (`fmt`,
+// w by h, optimal tiling, transfer src+dst usage, left in transfer-src
+// layout) without it passing through the CPU. `id` names the image: its `fd`,
+// which stays the caller's, is imported the first time the id is seen.
+// Returns once the GPU has read the image; false when it cannot be imported.
+bool PresentShared(u32 id, int fd, u64 bytes, u32 w, u32 h, PixelFormat fmt);
+
 // Redraw the last uploaded frame with updated overlays, without a CPU upload.
 // Desktop only. Call on the same thread as Present.
 void RefreshFrame(bool frame_stalled);

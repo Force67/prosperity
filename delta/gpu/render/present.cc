@@ -58,6 +58,9 @@ void LatestFramePresenter::Run() {
     // already does into its upload buffer, 6.5 ms for nothing. The borrow is
     // held until present returns; the renderer waits for that in BeginFrame
     // before it lets the GPU write the buffer again.
+    const bool shared = pending_is_shared_;
+    const Shared frame = pending_shared_;
+    pending_is_shared_ = false;
     const u8* src = pending_src_;
     if (!src) {
       // Steal the pending buffer (the allocations ping-pong, no per-frame
@@ -68,8 +71,12 @@ void LatestFramePresenter::Run() {
     pending_ = false;
     lock.unlock();
     const u64 tp = NowNs();
-    if (host::Ensure("prosperity", w, h) && host::PumpEvents())
-      host::Present(src, w, h, w * 4, fmt);
+    if (host::Ensure("prosperity", w, h) && host::PumpEvents()) {
+      if (!shared)
+        host::Present(src, w, h, w * 4, fmt);
+      else if (!host::PresentShared(frame.id, frame.fd, frame.bytes, w, h, fmt))
+        shared_works_.store(false, base::memory_order_release);
+    }
     g_ns_gfx_present += NowNs() - tp;
     last_frame_ns = NowNs();
     lock.lock();
@@ -89,6 +96,28 @@ void LatestFramePresenter::Present(const u8* pixels,
     return;
   StartLocked();
   pending_src_ = pixels;
+  pending_is_shared_ = false;
+  width_ = w;
+  height_ = h;
+  pending_fmt_ = fmt;
+  pending_ = true;
+  ready_.NotifyOne();
+}
+
+void LatestFramePresenter::PresentShared(const void* token,
+                                         u32 id,
+                                         int fd,
+                                         u64 bytes,
+                                         u32 w,
+                                         u32 h,
+                                         host::PixelFormat fmt) {
+  base::LockGuard<base::Mutex> lock(mutex_);
+  if (stopping_ || guest::Stopping())
+    return;
+  StartLocked();
+  pending_src_ = static_cast<const u8*>(token);
+  pending_shared_ = {id, fd, bytes};
+  pending_is_shared_ = true;
   width_ = w;
   height_ = h;
   pending_fmt_ = fmt;
@@ -106,6 +135,7 @@ void LatestFramePresenter::Present(base::Vector<u8>&& pixels,
   StartLocked();
   pending_pixels_.swap(pixels);
   pending_src_ = nullptr;
+  pending_is_shared_ = false;
   released_.NotifyAll();
   width_ = w;
   height_ = h;

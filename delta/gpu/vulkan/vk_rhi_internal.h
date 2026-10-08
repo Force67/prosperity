@@ -279,6 +279,8 @@ class VulkanDevice final : public rhi::Device {
   void SetName(rhi::Object* object, const char* name) override;
   bool SupportsFormat(rhi::Format format, u32 usage) const override;
   bool CommitSparse(rhi::Buffer* buffer, u64 offset, u64 bytes) override;
+  int ExportFd(rhi::Texture* texture, u64* bytes) override;
+  bool AllocateExported(VkImage image, Allocation& out);
   bool CopyAfter(rhi::Buffer* src,
                  u64 src_offset,
                  rhi::Buffer* dst,
@@ -318,6 +320,7 @@ class VulkanDevice final : public rhi::Device {
   PFN_vkCmdBeginRenderingKHR cmd_begin_rendering = nullptr;
   PFN_vkCmdEndRenderingKHR cmd_end_rendering = nullptr;
   PFN_vkCmdPushDescriptorSetKHR cmd_push_descriptor_set = nullptr;
+  PFN_vkGetMemoryFdKHR get_memory_fd = nullptr;
   PFN_vkCmdDrawMeshTasksEXT cmd_draw_mesh_tasks = nullptr;
   PFN_vkCmdSetCheckpointNV cmd_set_checkpoint = nullptr;
   PFN_vkSetDebugUtilsObjectNameEXT set_object_name = nullptr;

@@ -328,6 +328,9 @@ class Device {
                          u64 /*after*/) {
     return false;
   }
+  // An opaque fd for a kTextureExportable texture's memory, owned by the
+  // caller, and the memory's size; -1 when it cannot be exported.
+  virtual int ExportFd(Texture* /*texture*/, u64* /*bytes*/) { return -1; }
   // A name for capture tools. Ignored unless Caps::debug_labels.
   virtual void SetName(Object* /*object*/, const char* /*name*/) {}
 

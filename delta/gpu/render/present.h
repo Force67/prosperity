@@ -10,6 +10,7 @@
 #include "base/arch.h"
 
 #include "base/containers/vector.h"
+#include "base/atomic.h"
 #include "base/memory/unique_pointer.h"
 #include "base/threading/condition_variable.h"
 #include "base/threading/mutex.h"
@@ -34,6 +35,19 @@ class LatestFramePresenter {
                u32 w,
                u32 h,
                host::PixelFormat fmt = host::PixelFormat::kBgra8);
+  // Lend an exported image instead (host::PresentShared): the GPU copies it
+  // to the window. `token` stands for it in WaitForBorrowed.
+  void PresentShared(const void* token,
+                     u32 id,
+                     int fd,
+                     u64 bytes,
+                     u32 w,
+                     u32 h,
+                     host::PixelFormat fmt);
+  // False once the window failed to import a shared image.
+  bool SharedWorks() const {
+    return shared_works_.load(base::memory_order_acquire);
+  }
   // Block until a lent buffer has been copied out, for a caller that is about
   // to write over the one it lent.
   void WaitForBorrowed();
@@ -52,6 +66,14 @@ class LatestFramePresenter {
   // Set instead of pending_pixels_ when the caller lends us its buffer: the
   // presenter thread copies out of it, under the lock, before releasing it.
   const u8* pending_src_ = nullptr;
+  struct Shared {
+    u32 id = 0;
+    int fd = -1;
+    u64 bytes = 0;
+  };
+  Shared pending_shared_;
+  bool pending_is_shared_ = false;
+  base::Atomic<bool> shared_works_{true};
   host::PixelFormat pending_fmt_ = host::PixelFormat::kBgra8;
   u32 width_ = 0;
   u32 height_ = 0;

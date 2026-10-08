@@ -175,6 +175,8 @@ enum TextureUsage : u32 {
   kTextureCubeCompatible = 1u << 7,
   // 3D: slices may be viewed (and rendered) as a 2D array.
   kTextureArrayCompatible = 1u << 8,
+  // Memory another device on the same GPU can import (Device::ExportFd).
+  kTextureExportable = 1u << 9,
 };
 
 struct TextureDesc {
@@ -567,6 +569,8 @@ struct Caps {
   bool sparse_buffer = false;
   u64 sparse_page = 0;  // commit granularity
   bool copy_after = false;  // Device::CopyAfter
+  bool memory_export = false;  // kTextureExportable
+  u8 device_uuid[16] = {};
   bool texture_blit = true;
   bool dispatch_base = false;
   // CommandList::DispatchIndirect: group counts read by the GPU from a buffer.

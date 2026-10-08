@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 #include <limits>
 
 #include "base/algorithm.h"
@@ -349,6 +350,52 @@ rhi::Texture* PresentConvertTarget(u32 w, u32 h) {
   image_w = image ? w : 0;
   image_h = image ? h : 0;
   return image;
+}
+
+// The slot's image for host::PresentShared, in the byte order of `fmt` (a
+// 4-byte 8-bit colour format). False when it cannot be shared.
+bool EnsureSharedImage(FrameSlot& slot, u32 w, u32 h, rhi::Format fmt) {
+  const bool bgra =
+      fmt == rhi::Format::kBGRA8Unorm || fmt == rhi::Format::kBGRA8Srgb;
+  const bool rgba =
+      fmt == rhi::Format::kRGBA8Unorm || fmt == rhi::Format::kRGBA8Srgb;
+  if (kFlipMode != 0 || kSyncPresent || (!bgra && !rgba) ||
+      !Device().caps().memory_export ||
+      !g_backend.presenter.SharedWorks() ||
+      !host::CanPresentShared(Device().caps().device_uuid))
+    return false;
+  const rhi::Format want =
+      bgra ? rhi::Format::kBGRA8Unorm : rhi::Format::kRGBA8Unorm;
+  if (slot.shared && slot.shared->desc().width == w &&
+      slot.shared->desc().height == h && slot.shared->desc().format == want)
+    return true;
+  static u32 next_id = 0;
+  if (slot.shared) {
+    Device().WaitIdle();
+    Device().Destroy(slot.shared);
+    close(slot.shared_fd);
+    slot.shared = nullptr;
+    slot.shared_fd = -1;
+  }
+  rhi::TextureDesc desc;
+  desc.format = want;
+  desc.width = w;
+  desc.height = h;
+  desc.usage =
+      rhi::kTextureCopySrc | rhi::kTextureCopyDst | rhi::kTextureExportable;
+  desc.name = "present shared";
+  slot.shared = Device().CreateTexture(desc);
+  if (!slot.shared)
+    return false;
+  slot.shared_fd = Device().ExportFd(slot.shared, &slot.shared_bytes);
+  if (slot.shared_fd < 0) {
+    Device().Destroy(slot.shared);
+    slot.shared = nullptr;
+    return false;
+  }
+  slot.shared_id = ++next_id;
+  BASE_LOGI("present", "shared frame image {} {}x{}", slot.shared_id, w, h);
+  return true;
 }
 
 namespace {
@@ -1307,7 +1354,10 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
         Device().SupportsBlit(rt.fmt, rhi::Format::kBGRA8Unorm))
       convert = PresentConvertTarget(rt.w, rt.h);
     const rhi::Format read_fmt = convert ? rhi::Format::kBGRA8Unorm : rt.fmt;
-    EnsureReadback(rt.w, rt.h, read_fmt);
+    const bool shared = present_to_window && !g_dump && !kNeedsCpuCapture &&
+                        EnsureSharedImage(cur, rt.w, rt.h, read_fmt);
+    if (!shared)
+      EnsureReadback(rt.w, rt.h, read_fmt);
     if (kClearRedTransfer) {
       TransitionImage(g_frame.list, rt.texture, rt.layout,
                       rhi::TextureState::kCopyDst);
@@ -1336,10 +1386,26 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
       g_frame.list->Barrier(0, 0, &barrier, 1);
       read_src = convert;
     }
-    rhi::BufferTextureCopy copy;
-    copy.region.width = rt.w;
-    copy.region.height = rt.h;
-    g_frame.list->CopyTextureToBuffer(g_frame.readback, read_src, &copy, 1);
+    if (shared) {
+      rhi::TextureRegion region;
+      region.width = rt.w;
+      region.height = rt.h;
+      rhi::TextureBarrier barrier;
+      barrier.texture = cur.shared;
+      barrier.before = rhi::TextureState::kUndefined;
+      barrier.after = rhi::TextureState::kCopyDst;
+      g_frame.list->Barrier(0, 0, &barrier, 1);
+      g_frame.list->CopyTexture(cur.shared, region, read_src, region);
+      barrier.before = rhi::TextureState::kCopyDst;
+      barrier.after = rhi::TextureState::kCopySrc;
+      g_frame.list->Barrier(0, 0, &barrier, 1);
+    } else {
+      rhi::BufferTextureCopy copy;
+      copy.region.width = rt.w;
+      copy.region.height = rt.h;
+      g_frame.list->CopyTextureToBuffer(g_frame.readback, read_src, &copy, 1);
+    }
+    cur.shared_frame = shared;
     cur.presentable = true;
     cur.w = rt.w;
     cur.h = rt.h;
@@ -1431,7 +1497,18 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   PushStageSample();
   if (waited && (g_dump || kDeclines) && fin.frame_num % 30 == 0)
     ReportDeclines();
-  if (!waited || !fin.presentable) {
+  if (!waited || !fin.presentable || fin.shared_frame) {
+    if (waited && fin.shared_frame && fin.present_to_window) {
+      ScopeNs present_timer(&g_ns_present);
+      ScopeNs frame_present_timer(&g_fr_present);
+      renderer.state->presenter.PresentShared(
+          fin.shared, fin.shared_id, fin.shared_fd, fin.shared_bytes, fin.w,
+          fin.h,
+          fin.shared->desc().format == rhi::Format::kRGBA8Unorm
+              ? host::PixelFormat::kRgba8
+              : host::PixelFormat::kBgra8);
+      Device().Maintain();
+    }
     if (!ReportRtContents(cur)) {
       renderer.state = nullptr;
       return;
