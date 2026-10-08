@@ -269,6 +269,10 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
   if (CsRangeDirtyOverlapping(base, bytes) &&
       !FlushCsWritesRange(renderer, base, bytes, "mirror"))
     return false;
+  return MirrorCopyInGuest(base, bytes);
+}
+
+bool MirrorCopyInGuest(u64 base, u64 bytes) {
   const u64 page = base::Max(Device().caps().sparse_page, kMirrorBlock);
   const u64 lo = MirrorOffset(base) & ~(page - 1);
   const u64 hi = (MirrorOffset(base) + bytes + page - 1) & ~(page - 1);
@@ -312,6 +316,43 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
       g_mirror_clean.insert(block);
   }
   return !in_run || MirrorCopy(run, run_end - run, /*to_guest=*/false);
+}
+
+// DELTA_GPU_CS_MIRROR_WB: a staged truth range is written back by handing
+// its bytes to the mirror on the GPU, which owns them from then on: a label
+// behind it no longer waits for a readback, and a CPU reader faults the bytes
+// out when it touches them. Demon's Souls wrote ~66 images back this way a
+// frame, each a GPU wait at a label.
+DELTA_OPTION(bool, kCsMirrorWb, "DELTA_GPU_CS_MIRROR_WB", true);
+
+bool MirrorTakeRange(u64 base, CsRange& e) {
+  // A truth aliasing a live target is refreshed into it at frame end
+  // (CsRefreshRtInFrame), which needs it still dirty then.
+  if (!kMirror || !kCsMirrorWb || !e.truth || !e.buf || !e.device_local ||
+      e.imported || (base & 3) || CsAliasedBase(base) || !Mirror())
+    return false;
+  const u64 n = e.guest_bytes ? base::Min(e.size, e.guest_bytes) : e.size;
+  if (!MirrorCovers(base, n))
+    return false;
+  // CPU writes since the range was staged are merged word by word on the
+  // staged path; a whole copy would revert them.
+  if (CsTracksGuestWrites())
+    CollectGuestWritesForSubmission();
+  if (!e.cpu_writes.empty() || !e.fill_kept.empty())
+    return false;
+  // The rest of each block it touches has to be the guest's too.
+  if (!MirrorCopyInGuest(base, n))
+    return false;
+  CsBatchBeginImpl();
+  if (!g_cs_batch_open)
+    return false;
+  g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+  g_cs_list->CopyBuffer(g_mirror, MirrorOffset(base), e.buf, 0, n);
+  g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
+  // The buffer is read by the copy: not recycled before the batch is done.
+  MarkPending(e);
+  MirrorWriteBack(base, n);
+  return true;
 }
 
 base::Map<u64, MirrorWrite> g_mirror_writes;

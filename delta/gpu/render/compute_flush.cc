@@ -60,6 +60,22 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
     e.cpu_writes.clear();
     return true;
   }
+  if (MirrorTakeRange(base, e)) {
+    UploadCsRangeToRt(base, e);
+    InvalidateTexRange(base, e.guest_bytes);
+    UnindexDirtyRange(base, e.guest_bytes);
+    g_cs_writeback_gen++;
+    if (CsTracksGuestWrites())
+      CollectGuestWrites();
+    CsForgetGuestRange(base, e.guest_bytes);
+    e.gpu_dirty = false;
+    e.cpu_writes.clear();
+    // Guest memory is the dispatch's now, the shadow the stage-in's.
+    e.shadow_valid = false;
+    e.last_validated_frame = g_frame.num;
+    g_wb_why["mirror/img"]++;
+    return true;
+  }
   if (CsTracksGuestWrites())
     CollectGuestWritesForSubmission();
   // Results live in VRAM: pull them into the host mirror on the same batch that

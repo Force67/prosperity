@@ -844,6 +844,11 @@ bool InMirror(u64 address);
 void MirrorProtectSubmitted(u64 submission);
 
 bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes);
+// MirrorCopyIn without writing staged ranges back first.
+bool MirrorCopyInGuest(u64 base, u64 bytes);
+// Writes a dirty truth range back by giving its bytes to the mirror (GPU copy,
+// no wait); false when it has to take the staged path.
+bool MirrorTakeRange(u64 base, CsRange& e);
 
 // What dispatches wrote through the mirror: base -> end, and a revision a
 // texture made from it compares against.
