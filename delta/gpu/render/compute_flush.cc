@@ -390,7 +390,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
   DELTA_ZONE("gpu.cs_flush_frame_end");
   ReportGpuMemory();
   const WaitReaderScope reader("frame-end");
-  if (g_cs_failed) {
+  if (g_cs_failed || !SettleUnwaitedWrites()) {
     renderer.state = nullptr;
     return false;
   }

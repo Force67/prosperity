@@ -270,6 +270,93 @@ void MaterializeGuestRange(u64 address) {
   g_guest_misses_n++;
 }
 
+// The ranges behind windows a pointer-chasing shader stored into hold
+// GPU-newer bytes now.
+void MarkWrittenWindows(u64 cs_addr,
+                        const base::Vector<GuestWindowOwner>& owners,
+                        const base::Vector<u32>& written) {
+  for (u32 w : written) {
+    if (w >= owners.size())
+      continue;
+    const GuestWindowOwner& owner = owners[w];
+    auto found = g_cs_ranges.find(owner.range);
+    if (found == g_cs_ranges.end())
+      continue;
+    if (owner.mirror) {
+      static int shown = 0;
+      if (shown++ < 8)
+        BASE_LOGW("csgpu",
+                  "CS @{:#x} wrote into a mirrored image; the write is lost",
+                  cs_addr);
+      continue;
+    }
+    CsRange& e = found->second;
+    IndexDirtyRange(owner.range, e.guest_bytes);
+    if (!e.gpu_dirty)
+      e.dirty_frame = g_frame.num;
+    e.gpu_dirty = true;
+    e.fill_kept.clear();
+    e.write_seq++;
+    e.dirty_stamp = ++g_cs_dirty_stamp;
+    e.dirty_render_serial = g_render_serial;
+    e.mirror_current = false;
+    e.readback_pending = false;
+    BumpTextureEpoch();
+  }
+}
+
+// A pointer-chasing shader that may store through guest pointers is waited
+// for after each dispatch, to learn which windows it wrote. Demon's Souls
+// runs ~5 a frame that have never written one (200 windows each), and those
+// waits were a quarter of the frame. After kQuietAfter dispatches without a
+// write the shader is no longer waited for: its flags are read where the GPU
+// is waited for anyway (before the next such dispatch, at frame end), and a
+// write found there marks the ranges late and puts the shader back on the
+// waited path for good.
+constexpr u32 kQuietAfter = 16;
+struct WriterHistory {
+  u32 quiet = 0;
+  bool writes = false;
+};
+base::HashMap<u64, WriterHistory> g_writer_history;
+struct UncheckedWrites {
+  u64 cs_addr = 0;
+  base::Vector<GuestWindowOwner> owners;
+};
+base::Vector<UncheckedWrites> g_unchecked;  // at most one: the flags are shared
+
+// The GPU is past the last pointer-chasing dispatch (the caller waited).
+void CheckUnwaitedWrites() {
+  for (UncheckedWrites& u : g_unchecked) {
+    const auto written = TakeWrittenWindows();
+    if (written.empty())
+      continue;
+    BASE_LOGW("csgpu",
+              "CS @{:#x} stored through guest pointers after {} quiet "
+              "dispatches; waited for again",
+              u.cs_addr, kQuietAfter);
+    g_writer_history[u.cs_addr].writes = true;
+    MarkWrittenWindows(u.cs_addr, u.owners, written);
+  }
+  g_unchecked.clear();
+}
+
+const guest::SessionReset g_writers_reset([] {
+  guest::ResetResource(g_writer_history);
+  guest::ResetResource(g_unchecked);
+});
+
+// Frame end: the flags of an unwaited dispatch are read before the frame's
+// writebacks, so a late write still reaches guest memory this frame.
+bool cs::SettleUnwaitedWrites() {
+  if (g_unchecked.empty())
+    return true;
+  if (!CsBatchFlush(kSyncBatchCap))
+    return false;
+  CheckUnwaitedWrites();
+  return true;
+}
+
 bool GuestWindows(const ComputeInfo& ci,
                   base::Vector<GuestMemoryWindow>& out,
                   base::Vector<GuestWindowOwner>& owners) {
@@ -1353,6 +1440,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     // dispatch has to be done with them.
     if (!CsBatchFlush(kSyncBatchCap))
       return CsDeclined(ci, "guest-address-map");
+    CheckUnwaitedWrites();
     if (!GuestWindows(ci, windows, window_owners))
       return CsDeclined(ci, "guest-windows");
     if (!PrepareGuestMemory(windows, guest_table, guest_table_bytes,
@@ -1652,38 +1740,22 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     return CsDeclined(ci, "21");
   }
   if (ci.recomp->guest_memory_written) {
-    // Stores through guest pointers landed in the windows' own buffers: the
-    // ranges behind the written windows hold GPU-newer bytes now.
-    CsBatchBeginImpl();
-    g_cs_list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
-    if (!CsBatchFlush(kSyncBatchCap))
-      return CsDeclined(ci, "guest-writeback");
-    const auto written_windows = TakeWrittenWindows();
-    for (u32 w : written_windows) {
-      const GuestWindowOwner& owner = window_owners[w];
-      auto found = g_cs_ranges.find(owner.range);
-      if (found == g_cs_ranges.end())
-        continue;
-      if (owner.mirror) {
-        static int shown = 0;
-        if (shown++ < 8)
-          BASE_LOGW("csgpu",
-                    "CS @{:#x} wrote into a mirrored image; the write is lost",
-                    ci.cs_addr);
-        continue;
+    WriterHistory& history = g_writer_history[ci.cs_addr];
+    if (!history.writes && history.quiet >= kQuietAfter) {
+      g_unchecked.push_back({ci.cs_addr, window_owners});
+    } else {
+      // Stores through guest pointers landed in the windows' own buffers.
+      CsBatchBeginImpl();
+      g_cs_list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
+      if (!CsBatchFlush(kSyncBatchCap))
+        return CsDeclined(ci, "guest-writeback");
+      const auto written = TakeWrittenWindows();
+      if (written.empty()) {
+        history.quiet++;
+      } else {
+        history.writes = true;
+        MarkWrittenWindows(ci.cs_addr, window_owners, written);
       }
-      CsRange& e = found->second;
-      IndexDirtyRange(owner.range, e.guest_bytes);
-      if (!e.gpu_dirty)
-        e.dirty_frame = g_frame.num;
-      e.gpu_dirty = true;
-      e.fill_kept.clear();
-      e.write_seq++;
-      e.dirty_stamp = ++g_cs_dirty_stamp;
-      e.dirty_render_serial = g_render_serial;
-      e.mirror_current = false;
-      e.readback_pending = false;
-      BumpTextureEpoch();
     }
   }
   g_ns_cs_out += NowNs() - t_out0;

@@ -735,6 +735,9 @@ bool CsBatchSubmit();
 bool CsBatchWaitRange(const CsRange& e, CsSyncWhy why);
 
 bool CsBatchFlush(CsSyncWhy why = kSyncWriteback);
+// Reads the written-window flags of a pointer-chasing dispatch nothing waited
+// for (compute_dispatch.cc), waiting for it first.
+bool SettleUnwaitedWrites();
 
 bool CsLazyKept(u64 base, const CsRange& e);
 
