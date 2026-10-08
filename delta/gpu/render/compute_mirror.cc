@@ -40,8 +40,9 @@ rhi::Buffer* Mirror() {
     desc.name = "guest mirror";
     if (Device().caps().sparse_buffer)
       g_mirror = Device().CreateBuffer(desc);
-    BASE_LOGI("mirror", "guest mirror {:#x}+{:#x}: {}", kMirrorBase,
-              kMirrorSize, g_mirror ? "up" : "unavailable");
+    BASE_LOGI("mirror", "guest mirror {:#x},{:#x} +{:#x} each: {}",
+              kMirrorPs4Base, kMirrorPs5Base, kMirrorWindow,
+              g_mirror ? "up" : "unavailable");
   }
   return g_mirror;
 }
@@ -74,7 +75,7 @@ rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
 
 bool MirrorEligible(const ComputeInfo::Res& r, u64 bytes) {
   return kMirror && !r.zero_fill && !r.image_staging && bytes &&
-         r.base >= kMirrorBase && r.base + bytes <= kMirrorBase + kMirrorSize &&
+         MirrorCovers(r.base, bytes) &&
          !(r.base & 3) && Mirror();
 }
 
@@ -105,9 +106,9 @@ bool MirrorCopy(u64 base,
     const u64 n = span.second - span.first;
     if (to_guest)
       list->CopyBuffer(import, span.first - import_base, g_mirror,
-                       span.first - kMirrorBase, n);
+                       MirrorOffset(span.first), n);
     else
-      list->CopyBuffer(g_mirror, span.first - kMirrorBase, import,
+      list->CopyBuffer(g_mirror, MirrorOffset(span.first), import,
                        span.first - import_base, n);
   }
   list->Barrier(rhi::kAccessCopyWrite,
@@ -137,7 +138,7 @@ OwnBlock& OwnAt(u64 block) {
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     g_own = static_cast<OwnBlock*>(p);
   }
-  return g_own[(block - kMirrorBase) / kMirrorBlock];
+  return g_own[MirrorOffset(block) / kMirrorBlock];
 }
 
 bool MirrorOwned(u64 block) {
@@ -145,7 +146,7 @@ bool MirrorOwned(u64 block) {
 }
 
 bool InMirror(u64 address) {
-  return address >= kMirrorBase && address < kMirrorBase + kMirrorSize;
+  return MirrorOffset(address) != kNotMirrored;
 }
 
 // Any thread, from the fault handler too: hands every protected block of
@@ -168,7 +169,7 @@ bool MirrorResolve(u64 first, u64 end) {
                                          base::memory_order_acq_rel))
         continue;
       if (o.hi > o.lo)
-        Device().CopyAfter(g_mirror, block - kMirrorBase + o.lo, o.import,
+        Device().CopyAfter(g_mirror, MirrorOffset(block) + o.lo, o.import,
                            o.import_offset + o.lo, o.hi - o.lo,
                            s & kOwnSubmission);
       ::mprotect(reinterpret_cast<void*>(block), kMirrorBlock,
@@ -233,7 +234,7 @@ void MirrorOwn(u64 base, u64 bytes) {
       o.import_offset = block - import_base;
       o.lo = lo;
       o.hi = hi;
-      DirectRedirect(block, g_mirror->address() + (block - kMirrorBase));
+      DirectRedirect(block, g_mirror->address() + MirrorOffset(block));
     } else {
       o.lo = base::Min(o.lo, lo);
       o.hi = base::Max(o.hi, hi);
@@ -269,8 +270,8 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
       !FlushCsWritesRange(renderer, base, bytes, "mirror"))
     return false;
   const u64 page = base::Max(Device().caps().sparse_page, kMirrorBlock);
-  const u64 lo = (base - kMirrorBase) & ~(page - 1);
-  const u64 hi = (base + bytes - kMirrorBase + page - 1) & ~(page - 1);
+  const u64 lo = MirrorOffset(base) & ~(page - 1);
+  const u64 hi = (MirrorOffset(base) + bytes + page - 1) & ~(page - 1);
   if (!Device().CommitSparse(g_mirror, lo, hi - lo))
     return false;
   CsBatchBeginImpl();
@@ -364,10 +365,10 @@ u64 MirrorCacheBlock(u64 block) {
   if (!kMirror || !Mirror() || !g_mirror->address() || !InMirror(block) ||
       MirrorOwned(block) || !gpu::IsReadableRangeCached(block, kMirrorBlock))
     return 0;
-  const u64 address = g_mirror->address() + (block - kMirrorBase);
+  const u64 address = g_mirror->address() + MirrorOffset(block);
   if (g_mirror_cached.count(block))
     return address;
-  if (!Device().CommitSparse(g_mirror, block - kMirrorBase, kMirrorBlock))
+  if (!Device().CommitSparse(g_mirror, MirrorOffset(block), kMirrorBlock))
     return 0;
   if (!GuestWriteTracker().Arm(block, kMirrorBlock))
     return 0;
@@ -402,7 +403,7 @@ bool GpuIndirectArgs(u64 args, u64 bytes) {
 }
 
 rhi::Buffer* IndirectArgsBuffer(u64 args, u64* offset) {
-  *offset = args - kMirrorBase;
+  *offset = MirrorOffset(args);
   return g_mirror;
 }
 
@@ -471,7 +472,7 @@ bool MirrorSupplyTexture(u64 base,
   rhi::CommandList* const list = g_frame.list;
   list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                 rhi::kAccessCopyRead | rhi::kAccessComputeRead);
-  RecordImageTiling(list, *table, g_mirror, base - kMirrorBase, tiled.size,
+  RecordImageTiling(list, *table, g_mirror, MirrorOffset(base), tiled.size,
                     scratch, linear.size, /*detile=*/true);
   rhi::TextureBarrier b;
   b.texture = img;
@@ -504,7 +505,7 @@ bool MirrorSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   rhi::CommandList* const list = g_frame.list;
   list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                 rhi::kAccessCopyRead);
-  list->CopyBuffer(dst, dst_off, g_mirror, base - kMirrorBase, bytes);
+  list->CopyBuffer(dst, dst_off, g_mirror, MirrorOffset(base), bytes);
   list->Barrier(rhi::kAccessCopyWrite, kAccessAll);
   if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
     g_cs_chunk_needs_batch = true;

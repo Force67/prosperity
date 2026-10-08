@@ -782,15 +782,30 @@ constexpr u64 kGuestPageImport = 64 * 1024;
 rhi::Buffer* ImportGuestPage(u64 page);
 
 // DELTA_GPU_MIRROR: plain buffers a dispatch binds live in one sparse device
-// buffer at offset (guest address - kMirrorBase), a write-through cache of
+// buffer at MirrorOffset(guest address), a write-through cache of
 // guest memory. Before a dispatch the GPU copies the bytes in from the guest
 // pages (imported, so no CPU copy and no wait), and after it copies what the
 // dispatch wrote back out, as a pending guest write the labels wait for. The
 // dispatch itself runs out of VRAM; ranges alias each other because they are
 // the same memory.
-constexpr u64 kMirrorBase = 0x300000000ull;
-
-constexpr u64 kMirrorSize = 0x1000000000ull;  // through 0x1300000000
+// The PS4 and the PS5 GPU-visible windows, back to back.
+constexpr u64 kMirrorPs4Base = 0x300000000ull, kMirrorPs5Base = 0x8000000000ull;
+constexpr u64 kMirrorWindow = 0x1000000000ull;
+constexpr u64 kMirrorSize = 2 * kMirrorWindow;
+constexpr u64 kNotMirrored = ~0ull;
+constexpr u64 MirrorOffset(u64 address) {
+  if (address - kMirrorPs4Base < kMirrorWindow)
+    return address - kMirrorPs4Base;
+  if (address - kMirrorPs5Base < kMirrorWindow)
+    return kMirrorWindow + (address - kMirrorPs5Base);
+  return kNotMirrored;
+}
+// [base, base+bytes) lies in one window.
+constexpr bool MirrorCovers(u64 base, u64 bytes) {
+  const u64 at = MirrorOffset(base);
+  return bytes && at != kNotMirrored &&
+         MirrorOffset(base + bytes - 1) == at + bytes - 1;
+}
 
 extern rhi::Buffer* g_mirror;
 extern bool g_mirror_tried;

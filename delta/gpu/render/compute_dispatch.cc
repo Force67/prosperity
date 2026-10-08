@@ -472,7 +472,7 @@ bool FindIndirectArgs(u64 args, IndirectArgs& out) {
     return false;
   });
   if (!several && !found && kMirror && MirrorWritten(args, 12)) {
-    out = {g_mirror, args - kMirrorBase};
+    out = {g_mirror, MirrorOffset(args)};
     g_cs_indirect_n++;
     return true;
   }
@@ -1404,7 +1404,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                       ComputeInfo::kMaxTextures];
   for (u32 i = 0; i < ci.num_res; i++)
     bind_off[i] = ci.res[i].zero_fill ? 0
-                  : mirror_res[i]     ? ci.res[i].base - kMirrorBase
+                  : mirror_res[i]     ? MirrorOffset(ci.res[i].base)
                   : truth_view[i]     ? 0
                   : parent_base[i]
                       ? parent_off[i]
