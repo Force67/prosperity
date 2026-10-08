@@ -558,9 +558,10 @@ bool FlushCsWritesRange(Renderer& renderer,
         break;
       }
   }
-  if (!SettleGuestWrites(base, bytes, why))
-    return false;
-  return FlushDirtyRanges(renderer, base, bytes, why);
+  // Dirty ranges first: their write-back may itself be a GPU copy on its way
+  // to the pages, which the CPU reader then waits for with the rest.
+  return FlushDirtyRanges(renderer, base, bytes, why) &&
+         SettleGuestWrites(base, bytes, why);
 }
 
 static bool FlushDirtyRanges(Renderer& renderer,

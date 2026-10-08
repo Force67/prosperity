@@ -854,13 +854,13 @@ bool DetileTextureOnGpu(u64 base,
   const u32 elem = tiled.elem_bytes;
   // A linear surface is copied as it lies; a tiled one is detiled into the
   // linear layout first.
-  const bool linear_in = tiled.tiling_idx == 8;
+  const bool linear_in = gcn::TilingIsLinear(tiled.tiling_idx);
   // Block-compressed: the layout counts 4x4 blocks, the copy texels.
   const u32 block = (elem == 8 || elem == 16) && texel_w > tiled.mips[0].width
                         ? 4u
                         : 1u;
   gcn::TextureLayout32 linear = tiled;
-  if (!g_frame.recording || !elem || elem > 16 ||
+  if (!g_frame.list || !elem || elem > 16 ||
       (!linear_in &&
        !gcn::BuildTextureLayout32(linear, tiled.mips[0].width,
                                   tiled.mips[0].height, tiled.mips[0].pitch,

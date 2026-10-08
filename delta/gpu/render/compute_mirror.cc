@@ -318,7 +318,7 @@ void MirrorProtectSubmitted(u64 submission) {
 bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
   // A range still owned by the staging path is written back first.
   if (CsRangeDirtyOverlapping(base, bytes) &&
-      !FlushCsWritesRange(renderer, base, bytes, "mirror"))
+      !FlushCsWritesForGpu(renderer, base, bytes, "mirror"))
     return false;
   return MirrorCopyInGuest(base, bytes);
 }

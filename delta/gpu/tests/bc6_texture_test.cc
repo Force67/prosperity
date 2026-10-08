@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include "base/containers/array.h"
+#include "host_memory/host_memory.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
@@ -44,14 +45,21 @@ TEST(Bc6Texture, NativeUploadsSupportSignedUnsignedTiledMipArrays) {
     GTEST_SKIP() << "Device does not support BC textures";
   ASSERT_TRUE(gpu::render::CreateTextureDescriptors());
   // Zero BC6 blocks encode black. Separate allocations avoid cache aliasing.
-  alignas(65536) static base::Array<base::Array<u8, 1048576>, 4> images{};
+  // Guest memory, as every texture is: uploads read it on the GPU.
+  constexpr u64 kBytes = 4 * 1048576;
+  auto* images = static_cast<u8*>(
+      host_memory::AllocMem(reinterpret_cast<void*>(0x1214000000ull), kBytes,
+                            host_memory::PageProtection::kW,
+                            host_memory::AllocationType::kReservecommit));
+  ASSERT_NE(images, nullptr);
   u32 allocation = 0;
   for (u32 nfmt : {0u, 1u}) {
     for (u32 tiling : {8u, 0x109u}) {
       const auto set = gpu::render::GetTexture(
-          reinterpret_cast<u64>(images[allocation++].data()), 16, 8, 40, nfmt,
-          tiling, 16, 2, 0, 2, 3, 0, 3, 0, false, nullptr, false, true);
+          reinterpret_cast<u64>(images + 1048576 * allocation++), 16, 8, 40,
+          nfmt, tiling, 16, 2, 0, 2, 3, 0, 3, 0, false, nullptr, false, true);
       EXPECT_NE(set, nullptr) << "nfmt=" << nfmt << " tiling=" << tiling;
     }
   }
+  host_memory::FreeMem(images, kBytes);
 }

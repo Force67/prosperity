@@ -48,14 +48,10 @@
 
 namespace {
 DELTA_OPTION(int, kForceTile, "DELTA_GPU_FORCETILE", -1);
-DELTA_OPTION(u32, kDumpMin, "DELTA_GPU_TEXDUMP_MIN", 128);
 DELTA_OPTION(u64, kTextureMb, "DELTA_GPU_TEX_MB", 1024);
 DELTA_OPTION(bool, kDefaultSampler, "DELTA_GPU_DEFSAMPLER", false);
-DELTA_OPTION(bool, kDumpUpload, "DELTA_GPU_TEXDUMP_UPLOAD", false);
 DELTA_OPTION(bool, kForceWhite, "DELTA_GPU_FORCEWHITE", false);
-DELTA_OPTION(bool, kNoDetile, "DELTA_GPU_NODETILE", false);
 DELTA_OPTION(bool, kTexDump, "DELTA_GPU_TEXDUMP", false);
-DELTA_OPTION(u64, kDumpBase, "DELTA_GPU_TEXDUMP_BASE", 0);
 DELTA_OPTION(bool, kForceNearest, "DELTA_GPU_FORCENEAREST", false);
 DELTA_OPTION(bool, kTexFail, "DELTA_GPU_TEXFAIL", false);
 DELTA_OPTION(bool, kTexMiss, "DELTA_GPU_TEXMISS", false);
@@ -597,183 +593,8 @@ u64 TextureLinearBytes(const gcn::TextureLayout32& layout, u32 first_mip = 0) {
   return bytes;
 }
 
-void PackTexPixels(u8* linear,
-                   u64 buffer_offset,
-                   u64 base,
-                   const gcn::TextureLayout32& layout,
-                   u32 texel_w,
-                   u32 texel_h,
-                   rhi::BufferTextureCopy* copies,
-                   bool is_3d,
-                   u32 first_mip = 0) {
-  const u32 elem = layout.elem_bytes;
-  const u8* src = reinterpret_cast<const u8*>(base);
-  u64 linear_offset = 0;
-  for (u32 mip = first_mip; mip < layout.mip_levels; mip++) {
-    const auto& level = layout.mips[mip];
-    rhi::BufferTextureCopy& copy = copies[mip - first_mip];
-    copy = {};
-    copy.buffer_offset = buffer_offset + linear_offset;
-    // A volume's slices are the layout's layers, but the copy takes them as
-    // `depth` z-slices of a single-layer image.
-    copy.region.mip = mip;
-    copy.region.layers = is_3d ? 1u : layout.layers;
-    copy.region.width = base::Max(texel_w >> mip, 1u);
-    copy.region.height = base::Max(texel_h >> mip, 1u);
-    copy.region.depth = is_3d ? layout.layers : 1u;
-    const u64 layer_bytes = static_cast<u64>(level.width) * level.height * elem;
-    for (u32 layer = 0; layer < layout.layers; layer++) {
-      u8* dst = linear + linear_offset + layer * layer_bytes;
-      if (!kNoDetile) {
-        gcn::DetileTextureMip32(src, dst, layout, mip, layer);
-      } else {
-        const u8* level_src =
-            src + level.offset +
-            static_cast<u64>(layer) * level.pitch * level.stored_height * elem;
-        for (u32 y = 0; y < level.height; y++)
-          std::memcpy(dst + static_cast<size_t>(y) * level.width * elem,
-                      level_src + static_cast<size_t>(y) * level.pitch * elem,
-                      static_cast<size_t>(level.width) * elem);
-      }
-    }
-    linear_offset += layer_bytes * layout.layers;
-  }
-  if (first_mip)
-    return;
-  // DELTA_GPU_TEXDUMP_BASE=<guest addr>: write the post-detile mip 0 of ONE
-  // named texture to <dumpdir>/tex_<addr>.bin, whatever its size or format.
-  // The size-capped text dump below cannot reach a 2048x2048 compressed
-  // atlas, and a light cookie's decoded ALPHA is what shapes P.T.'s light
-  // pools. There is no way to tell a ragged cookie from a ragged decode of
-  // a smooth one without looking at the texels.
-  // Dump the LAST upload seen, not the first: a once-only guard reports the
-  // state at first sample, which for a surface the title fills later is zero
-  // and says nothing about what the shader eventually reads.
-  if (kDumpBase && base == kDumpBase.get()) {
-    {
-      char dp[256];
-      std::snprintf(dp, sizeof(dp), "%s/tex_%lx.bin", DumpDir(),
-                    (unsigned long)base);
-      if (FILE* df = std::fopen(dp, "wb")) {
-        std::fwrite(linear, 1,
-                    static_cast<size_t>(layout.mips[0].width) *
-                        layout.mips[0].height * elem,
-                    df);
-        std::fclose(df);
-      }
-      BASE_LOGI("texdumpbase",
-                "{:#x} mip0 {}x{} texel={}x{} elem={} "
-                "tiling={} mips={} -> {}",
-                (unsigned long)base, layout.mips[0].width,
-                layout.mips[0].height, texel_w, texel_h, elem,
-                layout.tiling_idx, layout.mip_levels, dp);
-    }
-  }
-  // DELTA_GPU_TEXDUMP_UPLOAD: dump the post-detile pixels that Vulkan
-  // receives. This differs from DELTA_GPU_TEXDUMP, which inspects raw guest
-  // memory and is intentionally useful for spotting tiling rather than
-  // validating the detiler.
-  // DELTA_GPU_TEXDUMP_MIN: smallest edge to dump (default 128, i.e. content
-  // atlases only). Lower it to reach the tiny nine-slice UI surfaces, which are
-  // a handful of texels each and are best read as text.
-  static int dump_small_count = 0;
-  if (kDumpUpload && dump_small_count < 24 && elem == 4 && texel_w <= 32 &&
-      texel_h <= 32 && texel_w >= kDumpMin && texel_h >= kDumpMin) {
-    dump_small_count++;
-    base::String line;
-    base::FormatTo(line,
-                   "base={:#x} {}x{} layers={} tiling={} pitch={} "
-                   "stored_h={} raw:",
-                   (unsigned long)base, texel_w, texel_h, layout.layers,
-                   layout.tiling_idx, layout.mips[0].pitch,
-                   layout.mips[0].stored_height);
-    base::FormatTo(line, "\n");
-    char rp[256];
-    std::snprintf(rp, sizeof(rp), "%s/rawblk_%02d_%ux%u.bin", DumpDir(),
-                  dump_small_count - 1, texel_w, texel_h);
-    if (FILE* rf = std::fopen(rp, "wb")) {
-      std::fwrite(src, 1,
-                  static_cast<size_t>(layout.mips[0].pitch) *
-                      layout.mips[0].stored_height * elem,
-                  rf);
-      std::fclose(rf);
-    }
-    for (u32 y = 0; y < texel_h; y++) {
-      base::FormatTo(line, "  ");
-      for (u32 x = 0; x < texel_w; x++) {
-        const u8* p = linear + (static_cast<u64>(y) * texel_w + x) * 4;
-        base::FormatTo(line, "{:02x}{:02x}{:02x}{:02x} ", p[0], p[1], p[2],
-                       p[3]);
-      }
-      base::FormatTo(line, "\n");
-    }
-    BASE_LOGI("texsmall", "{}", line.c_str());
-  }
-  static int dump_upload_count = 0;
-  if (kDumpUpload && dump_upload_count < 32 && elem == 4 && texel_w >= 128 &&
-      texel_h >= 128) {
-    // Every layer, so an array/cube surface can be inspected face by face.
-    for (u32 l = 1; l < layout.layers && l < 8; l++) {
-      char lp[256];
-      std::snprintf(lp, sizeof(lp), "%s/tex_layer%u_%02d_%#lx_%ux%u.ppm",
-                    DumpDir(), l, dump_upload_count, (unsigned long)base,
-                    texel_w, texel_h);
-      if (FILE* lf = std::fopen(lp, "wb")) {
-        std::fprintf(lf, "P6\n%u %u\n255\n", texel_w, texel_h);
-        const u8* lp8 = linear + static_cast<u64>(l) * texel_w * texel_h * 4;
-        for (u64 i = 0; i < static_cast<u64>(texel_w) * texel_h; i++) {
-          std::fputc(lp8[i * 4], lf);
-          std::fputc(lp8[i * 4 + 1], lf);
-          std::fputc(lp8[i * 4 + 2], lf);
-        }
-        std::fclose(lf);
-      }
-    }
-    u64 rgb_nonzero = 0, alpha_nonzero = 0;
-    const u64 pixels = static_cast<u64>(texel_w) * texel_h;
-    for (u64 i = 0; i < pixels; i++) {
-      const u8* p = linear + i * 4;
-      if (p[0] || p[1] || p[2])
-        rgb_nonzero++;
-      if (p[3])
-        alpha_nonzero++;
-    }
-    char path[256];
-    std::snprintf(path, sizeof(path), "%s/tex_upload_%02d_%#lx_%ux%u.ppm",
-                  DumpDir(), dump_upload_count, (unsigned long)base, texel_w,
-                  texel_h);
-    FILE* file = std::fopen(path, "wb");
-    if (file) {
-      std::fprintf(file, "P6\n%u %u\n255\n", texel_w, texel_h);
-      for (u64 i = 0; i < pixels; i++) {
-        const u8* p = linear + i * 4;
-        std::fputc(p[0], file);
-        std::fputc(p[1], file);
-        std::fputc(p[2], file);
-      }
-      std::fclose(file);
-    }
-    if (texel_w == 1024 && texel_h == 2048) {
-      char alpha_path[256];
-      std::snprintf(alpha_path, sizeof(alpha_path),
-                    "%s/tex_upload_alpha_%#lx.pgm", DumpDir(),
-                    (unsigned long)base);
-      if (FILE* alpha = std::fopen(alpha_path, "wb")) {
-        std::fprintf(alpha, "P5\n%u %u\n255\n", texel_w, texel_h);
-        for (u64 i = 0; i < pixels; i++)
-          std::fputc(linear[i * 4 + 3], alpha);
-        std::fclose(alpha);
-      }
-    }
-    BASE_LOGI("texupload", "{} base={:#x} {}x{} rgb={} alpha={}/{} -> {}",
-              dump_upload_count, (unsigned long)base, texel_w, texel_h,
-              (unsigned long)rgb_nonzero, (unsigned long)alpha_nonzero,
-              (unsigned long)pixels, path);
-    dump_upload_count++;
-  }
-}
-
-// One-time initialization upload used before frame recording starts.
+// One-time initialization upload of a host texel (the 1x1 defaults) before
+// frame recording starts.
 bool UploadTexPixelsImmediate(rhi::Texture* img,
                               u64 base,
                               const gcn::TextureLayout32& layout,
@@ -782,7 +603,6 @@ bool UploadTexPixelsImmediate(rhi::Texture* img,
                               bool is_3d) {
   DELTA_ZONE("gpu.tex_upload_immediate");
   const u64 sz = TextureLinearBytes(layout);
-  const u32 barrier_layers = is_3d ? 1 : layout.layers;
   rhi::BufferDesc desc;
   desc.size = sz;
   desc.usage = rhi::kBufferCopySrc;
@@ -790,36 +610,27 @@ bool UploadTexPixelsImmediate(rhi::Texture* img,
   rhi::Buffer* staging = Device().CreateBuffer(desc);
   if (!staging)
     return false;
-  rhi::BufferTextureCopy copies[16]{};
-  PackTexPixels(staging->mapped(), 0, base, layout, texel_w, texel_h, copies,
-                is_3d);
+  std::memcpy(staging->mapped(), reinterpret_cast<const void*>(base), sz);
   rhi::CommandList* list = BeginImmediate();
   if (!list) {
     Device().Destroy(staging);
     return false;
   }
+  rhi::BufferTextureCopy copy;
+  copy.region.width = texel_w;
+  copy.region.height = texel_h;
+  copy.region.layers = is_3d ? 1 : layout.layers;
+  copy.region.depth = is_3d ? layout.layers : 1;
   rhi::TextureRange range;
-  range.mips = layout.mip_levels;
-  range.layers = barrier_layers;
+  range.layers = is_3d ? 1 : layout.layers;
   rhi::TextureBarrier b{img, rhi::TextureState::kUndefined,
                         rhi::TextureState::kCopyDst, range};
   list->Barrier(rhi::kAccessHostWrite, rhi::kAccessCopyRead, &b, 1);
-  list->CopyBufferToTexture(img, staging, copies, layout.mip_levels);
+  list->CopyBufferToTexture(img, staging, &copy, 1);
   b.before = rhi::TextureState::kCopyDst;
   b.after = rhi::TextureState::kShaderRead;
   list->Barrier(0, 0, &b, 1);
-  const u64 t0 = NowNs();
   const bool ok = EndImmediate(list, "imm.tex_upload");
-  if (!ok)
-    BASE_LOGI("gpuvk",
-              "tex upload DEVICE FAULT: base={:#x} {}x{} mips={} layers={} "
-              "bytes={}",
-              (unsigned long)base, layout.mips[0].width, layout.mips[0].height,
-              layout.mip_levels, layout.layers, (unsigned long long)sz);
-  const u64 dt = NowNs() - t0;
-  g_ns_tex_up += dt;
-  g_fr_tex_up += dt;
-  g_tex_ups++;
   Device().Destroy(staging);
   return ok;
 }
@@ -837,40 +648,16 @@ bool RecordTexPixels(rhi::Texture* img,
   // upload is recorded; wait for it rather than read the old bytes.
   if (is_3d && !SettleGuestWrites(base, layout.size, "tex-3d"))
     return false;
-  if (!kNoDetile && !kDumpBase && !kDumpUpload) {
-    const u64 start = NowNs();
-    if (DetileTextureOnGpu(base, layout, texel_w, texel_h, img, old_state,
-                           is_3d, first_mip)) {
-      const u64 elapsed = NowNs() - start;
-      g_ns_tex_up += elapsed;
-      g_fr_tex_up += elapsed;
-      g_tex_ups++;
-      return true;
-    }
-  }
-  const u64 bytes = TextureLinearBytes(layout, first_mip);
-  const u32 barrier_layers = is_3d ? 1 : layout.layers;
-  if (!SettleGuestWrites(base, layout.size, "tex-cpu"))
-    return false;
-  TextureUploadSlice upload;
-  if (!AllocateTextureUpload(g_frame.slot_idx, bytes,
-                             base::Max<u32>(16, layout.elem_bytes), upload))
-    return false;
   const u64 start = NowNs();
-  rhi::BufferTextureCopy copies[16]{};
-  PackTexPixels(upload.map, upload.offset, base, layout, texel_w, texel_h,
-                copies, is_3d, first_mip);
-  EndRegion();
-  rhi::TextureRange range;
-  range.mips = layout.mip_levels;
-  range.layers = barrier_layers;
-  rhi::TextureBarrier b{img, old_state, rhi::TextureState::kCopyDst, range};
-  g_frame.list->Barrier(0, 0, &b, 1);
-  g_frame.list->CopyBufferToTexture(img, upload.buffer, copies,
-                                    layout.mip_levels - first_mip);
-  b.before = rhi::TextureState::kCopyDst;
-  b.after = rhi::TextureState::kShaderRead;
-  g_frame.list->Barrier(0, 0, &b, 1);
+  if (!DetileTextureOnGpu(base, layout, texel_w, texel_h, img, old_state,
+                          is_3d, first_mip)) {
+    static int n = 0;
+    if (n++ < 16)
+      BASE_LOGW("gpuvk", "texture {:#x} {}x{} tiling={} elem={}: no GPU upload",
+                (unsigned long)base, texel_w, texel_h, layout.tiling_idx,
+                layout.elem_bytes);
+    return false;
+  }
   const u64 elapsed = NowNs() - start;
   g_ns_tex_up += elapsed;
   g_fr_tex_up += elapsed;
