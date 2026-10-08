@@ -849,6 +849,10 @@ bool MirrorCopyInGuest(u64 base, u64 bytes);
 // Writes a dirty truth range back by giving its bytes to the mirror (GPU copy,
 // no wait); false when it has to take the staged path.
 bool MirrorTakeRange(u64 base, CsRange& e);
+bool MirrorOwned(u64 block);
+bool MirrorFill(u64 base, u64 bytes, u32 value);
+bool RecordGuestRead(rhi::CommandList* list, u64 base, u64 bytes,
+                     rhi::Buffer* dst);
 
 // What dispatches wrote through the mirror: base -> end, and a revision a
 // texture made from it compares against.

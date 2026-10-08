@@ -41,6 +41,16 @@ bool CsSupplyTextureFromBuffer(u64 base,
                                rhi::TextureState state,
                                u64* seq);
 
+// A tiled 4-byte texture uploaded from guest memory: the GPU copies its bytes
+// out of the guest pages and detiles them into `img` (left in kShaderRead). False when the
+// layout has no GPU tiling table; the caller detiles on the CPU then.
+bool DetileTextureOnGpu(u64 base,
+                        const gcn::TextureLayout32& tiled,
+                        u32 texel_w,
+                        u32 texel_h,
+                        rhi::Texture* img,
+                        rhi::TextureState state);
+
 // The buffer counterpart. When [base, base+bytes) lies inside one range a
 // dispatch wrote and has not written back, CsBufferRevision is its write
 // revision (0 otherwise) and CsSupplyBuffer copies it VRAM->`dst`+`dst_off`

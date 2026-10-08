@@ -317,6 +317,7 @@ void CollectGuestWrites() {
     g_sbo_staged.Invalidate(first, end);
     CsNoteGuestWrites(first, end);
     MirrorNoteGuestWrites(first, end);
+    InvalidateTexRange(first, end - first);
   }
   MirrorWritesCollected();
 }

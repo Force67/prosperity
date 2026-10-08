@@ -117,6 +117,42 @@ bool MirrorCopy(u64 base,
   return true;
 }
 
+// Guest bytes copied by the GPU straight out of the host pages into `dst`.
+// False when a page cannot be imported or a block's bytes live in the mirror.
+bool GuestImportable(u64 base, u64 bytes) {
+  for (u64 at = base; at < base + bytes;) {
+    u64 import_base = 0;
+    rhi::Buffer* import = MirrorImport(at, &import_base);
+    if (!import)
+      return false;
+    at = base::Min(base + bytes, import_base + import->desc().size);
+  }
+  return true;
+}
+
+bool RecordGuestRead(rhi::CommandList* list,
+                     u64 base,
+                     u64 bytes,
+                     rhi::Buffer* dst) {
+  for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
+       block += kMirrorBlock)
+    if (InMirror(block) && MirrorOwned(block))
+      return false;
+  if (!GuestImportable(base, bytes))
+    return false;
+  list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
+  for (u64 at = base; at < base + bytes;) {
+    u64 import_base = 0;
+    rhi::Buffer* import = MirrorImport(at, &import_base);
+    const u64 end = base::Min(base + bytes, import_base + import->desc().size);
+    list->CopyBuffer(dst, at - base, import, at - import_base, end - at);
+    at = end;
+  }
+  if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
+    g_cs_chunk_needs_batch = true;
+  return true;
+}
+
 base::HashSet<u64> g_mirror_clean;
 base::Vector<base::Pair<u64, u64>> g_mirror_self;
 
@@ -396,6 +432,28 @@ void MirrorWriteBack(u64 base, u64 bytes) {
   g_mirror_self.push_back({base, base + bytes});
   NoteGuestWrite(base, bytes);
   InvalidateTexRange(base, bytes);
+}
+
+// A fill done by the GPU: into the mirror, then written through like a
+// dispatch's output, with no CPU touching the bytes.
+bool MirrorFill(u64 base, u64 bytes, u32 value) {
+  if (!kMirror || !Mirror() || (base & 3) || (bytes & 3) ||
+      !MirrorCovers(base, bytes) ||
+      (!MirrorOwnable(base, bytes) && !GuestImportable(base, bytes)))
+    return false;
+  const u64 page = base::Max(Device().caps().sparse_page, kMirrorBlock);
+  const u64 lo = MirrorOffset(base) & ~(page - 1);
+  const u64 hi = (MirrorOffset(base) + bytes + page - 1) & ~(page - 1);
+  if (!Device().CommitSparse(g_mirror, lo, hi - lo))
+    return false;
+  CsBatchBeginImpl();
+  if (!g_cs_batch_open)
+    return false;
+  g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
+  g_cs_list->FillBuffer(g_mirror, MirrorOffset(base), bytes, value);
+  g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
+  MirrorWriteBack(base, bytes);
+  return true;
 }
 
 // Direct reads of guest memory come from VRAM: a block is copied into the

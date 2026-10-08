@@ -820,4 +820,55 @@ bool CsRefreshRtFromTruth(u64 base) {
   return e.rt_seq == e.write_seq || CsRefreshRtInFrame(base, e);
 }
 
+bool DetileTextureOnGpu(u64 base,
+                        const gcn::TextureLayout32& tiled,
+                        u32 texel_w,
+                        u32 texel_h,
+                        rhi::Texture* img,
+                        rhi::TextureState state) {
+  gcn::TextureLayout32 linear;
+  if (!g_frame.recording || tiled.elem_bytes != 4 ||
+      !gcn::BuildTextureLayout32(linear, tiled.mips[0].width,
+                                 tiled.mips[0].height, tiled.mips[0].pitch,
+                                 tiled.layers, tiled.mip_levels, 8, false, 4))
+    return false;
+  rhi::BufferTextureCopy copies[16]{};
+  for (u32 mip = 0; mip < linear.mip_levels; mip++) {
+    const auto& level = linear.mips[mip];
+    auto& copy = copies[mip];
+    copy.buffer_offset = level.offset;
+    copy.row_length = level.pitch;
+    copy.image_height = level.stored_height;
+    copy.region.mip = mip;
+    copy.region.layers = linear.layers;
+    copy.region.width = base::Max(texel_w >> mip, 1u);
+    copy.region.height = base::Max(texel_h >> mip, 1u);
+    if (copy.region.width > level.width || copy.region.height > level.height)
+      return false;
+  }
+  const TileTable* table = GetTileTable(tiled, linear);
+  if (!table)
+    return false;
+  g_cs_scratch_owner++;
+  rhi::Buffer* raw = AcquireScratch(tiled.size);
+  rhi::Buffer* pixels = raw ? AcquireScratch(linear.size) : nullptr;
+  if (!pixels)
+    return false;
+  EndRegion();
+  rhi::CommandList* const list = g_frame.list;
+  if (!RecordGuestRead(list, base, tiled.size, raw))
+    return false;
+  RecordImageTiling(list, *table, raw, 0, tiled.size, pixels, linear.size,
+                    /*detile=*/true);
+  rhi::TextureBarrier barrier{img, state, rhi::TextureState::kCopyDst};
+  barrier.range.mips = linear.mip_levels;
+  barrier.range.layers = linear.layers;
+  list->Barrier(0, 0, &barrier, 1);
+  list->CopyBufferToTexture(img, pixels, copies, linear.mip_levels);
+  barrier.before = rhi::TextureState::kCopyDst;
+  barrier.after = rhi::TextureState::kShaderRead;
+  list->Barrier(0, 0, &barrier, 1);
+  return true;
+}
+
 }  // namespace gpu::render

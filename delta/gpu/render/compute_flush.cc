@@ -65,14 +65,19 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
     InvalidateTexRange(base, e.guest_bytes);
     UnindexDirtyRange(base, e.guest_bytes);
     g_cs_writeback_gen++;
-    if (CsTracksGuestWrites())
-      CollectGuestWrites();
+    // Our own write is collected while the range is still dirty, so it is not
+    // mistaken for a CPU write that would restage the range next frame.
+    CollectGuestWrites();
     CsForgetGuestRange(base, e.guest_bytes);
     e.gpu_dirty = false;
     e.cpu_writes.clear();
     // Guest memory is the dispatch's now, the shadow the stage-in's.
     e.shadow_valid = false;
     e.last_validated_frame = g_frame.num;
+    // The buffer is what guest memory will hold once the copy lands: current
+    // until the CPU writes. Owned pages are the mirror's, not trackable.
+    if (!MirrorOwned(base & ~(kMirrorBlock - 1)))
+      e.wt_clean = GuestWriteTracker().Arm(base, e.guest_bytes);
     g_wb_why["mirror/img"]++;
     return true;
   }
@@ -748,6 +753,12 @@ void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
   if (!FillOverDirtyRanges(base, bytes, false) ||
       !FillOverDirtyRanges(base, bytes, true))
     FlushCsWritesRange(renderer, base, bytes, "fill");
+  if (MirrorFill(base, bytes, value)) {
+    CsForgetGuestRange(base, bytes);
+    NoteMemoryFill(renderer, base, bytes, value);
+    g_cs_writeback_gen++;
+    return;
+  }
   // Announced first: armed pages open in runs, not with a fault per page.
   host_memory::BeforeHostWrite(reinterpret_cast<void*>(base), bytes);
   // Split over the detile pool: one thread memsetting ~20 MB a frame was the
@@ -786,6 +797,12 @@ void ApplyMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value) {
   if (!FillOverDirtyRanges(base, bytes, false) ||
       !FillOverDirtyRanges(base, bytes, true))
     FlushCsWritesRange(renderer, base, bytes, "fill");
+  if (u32(value) == u32(value >> 32) && MirrorFill(base, bytes, u32(value))) {
+    CsForgetGuestRange(base, bytes);
+    NoteMemoryFill64(renderer, base, bytes, value);
+    g_cs_writeback_gen++;
+    return;
+  }
   host_memory::BeforeHostWrite(reinterpret_cast<void*>(base), bytes);
   constexpr u64 kChunk = 256 * 1024;
   auto* words = reinterpret_cast<u64*>(base);
