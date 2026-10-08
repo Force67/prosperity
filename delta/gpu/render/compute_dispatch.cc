@@ -805,13 +805,15 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     const u64 guest_bytes =
         ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
     // Staging copies guest bytes on the CPU: a GPU write still on its way
-    // there has to land first. An imported range reads them in queue order.
-    if (!g_pending_guest_writes.empty()) {
+    // there has to land first. An imported range reads them in queue order,
+    // and a buffer that is already current reads none.
+    const auto guest_settled = [&] {
+      if (g_pending_guest_writes.empty())
+        return true;
       const auto own = g_cs_ranges.find(base);
-      if ((own == g_cs_ranges.end() || !own->second.imported) &&
-          !WaitPendingGuestWrites(base, guest_bytes))
-        return CsDeclined(ci, "guest-write");
-    }
+      return (own != g_cs_ranges.end() && own->second.imported) ||
+             WaitPendingGuestWrites(base, guest_bytes);
+    };
     const bool truth_i = TruthEligible(ci.res[i]);
     u64 folds[ComputeInfo::kMaxResources];
     u32 fold_count = 0;
@@ -1072,6 +1074,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       g_wb_why["reshape-superseded"]++;
     }
     if (!same_shape && e.gpu_dirty) {
+      if (!guest_settled())
+        return CsDeclined(ci, "guest-write");
       const u64 trs = NowNs();
       g_wb_why["reshape"]++;
       g_wb_why_bytes += e.size;
@@ -1222,6 +1226,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         }
       }
       if (!rt_attempt || !e.rt_sourced) {
+        if (!guest_settled()) {
+          renderer.state = nullptr;
+          return CsDeclined(ci, "guest-write");
+        }
         // Armed before the copy, so a write racing it is reported.
         if (!same_shape || rt_attempt) {
           e.wt_clean = !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
