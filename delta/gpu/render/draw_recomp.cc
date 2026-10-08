@@ -1092,8 +1092,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   const u64 t_pipe = NowNs();
   RecompPipe* rp = GetRecompPipe(d);
   g_ns_dr_pipe += NowNs() - t_pipe;
-  if (!rp)
+  if (!rp || rp->failed)
     return Decline(kNoPipe);
+  if (!rp->pipe) {
+    g_pipe_pending_draws++;  // still compiling: the draw is dropped, not stalled
+    return true;
+  }
   const u64 t_tex = NowNs();
   // Guest-texture source resolved up front; an RT-as-texture source is resolved
   // after the region switch (transitioning it to readable must happen outside a

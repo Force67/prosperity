@@ -293,6 +293,43 @@ bool CreateTexPipeline() {
   return true;
 }
 
+namespace {
+// DELTA_GPU_ASYNC_PIPELINES: compile graphics pipelines on the shader workers
+// and skip the draws that need one until it is ready, instead of stalling the
+// render thread for the driver (up to 2 s for one GTA:SA pixel shader).
+DELTA_OPTION(bool, kAsyncPipelines, "DELTA_GPU_ASYNC_PIPELINES", true);
+
+void AdoptBuilt(RecompPipe& rp) {
+  if (!rp.pending || !rp.pending->done.load(base::memory_order_acquire))
+    return;
+  rp.pipe = rp.pending->pipe;
+  rp.failed = !rp.pipe;
+  rp.pending = nullptr;
+}
+
+void BuildLater(RecompPipe& rp, const rhi::GraphicsPipelineDesc& pd) {
+  auto pending = base::MakeShared<PendingPipeline>();
+  const auto copy = [](const rhi::ShaderCode& code, base::Vector<u32>& to) {
+    to.assign(code.words, code.words + code.count);
+    return rhi::Code(to);
+  };
+  pending->desc = pd;
+  pending->desc.vertex = copy(pd.vertex, pending->vertex);
+  pending->desc.geometry = copy(pd.geometry, pending->geometry);
+  pending->desc.fragment = copy(pd.fragment, pending->fragment);
+  pending->name = pd.name ? pd.name : "";
+  pending->desc.name = pending->name.c_str();
+  rp.pending = pending;
+  gcn::PostShaderWork([pending] {
+    pending->pipe = Device().CreateGraphicsPipeline(pending->desc);
+    pending->vertex = {};
+    pending->geometry = {};
+    pending->fragment = {};
+    pending->done.store(true, base::memory_order_release);
+  });
+}
+}  // namespace
+
 // Build (or fetch) the pipeline for a recompiled draw, keyed by the shader pair
 // + blend state + vertex layout.
 RecompPipe* GetRecompPipe(const DrawInfo& d) {
@@ -360,8 +397,10 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     key = HashWord(key, d.vattrs[i].dfmt);
     key = HashWord(key, d.vattrs[i].nfmt);
   }
-  if (RecompPipe* pipeline = g_recomp_cache.Find(key))
+  if (RecompPipe* pipeline = g_recomp_cache.Find(key)) {
+    AdoptBuilt(*pipeline);
     return pipeline;
+  }
   RecompPipe rp;
   const bool mesh = !d.recomp->mesh_spirv.empty();
   const rhi::Caps& caps = Device().caps();
@@ -583,6 +622,10 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   std::snprintf(name, sizeof(name), "recomp vs=%#llx ps=%#llx",
                 (unsigned long long)d.vs_addr, (unsigned long long)d.ps_addr);
   pd.name = name;
+  if (kAsyncPipelines) {
+    BuildLater(rp, pd);
+    return g_recomp_cache.Store(key, base::move(rp));
+  }
   rp.pipe = Device().CreateGraphicsPipeline(pd);
   if (!rp.pipe)
     return nullptr;

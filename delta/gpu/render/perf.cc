@@ -400,13 +400,14 @@ void ReportFps() {
     // Stutter, said out loud. Always on when it happens: the average above
     // reports a window that contained a 400 ms frame as merely slow, and the
     // whole point of the shader work is the frames this line counts.
-    if (g_frame_hitch_n || g_pipe_build_n)
+    if (g_frame_hitch_n || g_pipe_build_n || g_pipe_pending_draws)
       BASE_LOGI(
           "hitch",
-          "worst={:.0f}ms over{}ms={} | pipe={:.0f}ms x{} recomp={:.0f}ms "
-          "x{} (val={:.0f}ms opt={:.0f}ms spv {}hit/{}miss)",
+          "worst={:.0f}ms over{}ms={} | pipe={:.0f}ms x{} skipped={} "
+          "recomp={:.0f}ms x{} (val={:.0f}ms opt={:.0f}ms spv {}hit/{}miss)",
           g_frame_worst_ms, (u32)kHitchMs, g_frame_hitch_n,
-          g_ns_pipe_build / 1e6, g_pipe_build_n, gcn::g_ns_recomp / 1e6,
+          g_ns_pipe_build / 1e6, g_pipe_build_n, g_pipe_pending_draws,
+          gcn::g_ns_recomp / 1e6,
           gcn::g_recomp_n, gcn::g_ns_spv_val / 1e6, gcn::g_ns_spv_opt / 1e6,
           gcn::g_spv_hit_n, gcn::g_spv_miss_n);
     if (kDrawProf)
@@ -469,7 +470,7 @@ void ReportFps() {
     g_ns_tex_set = g_tex_set_n = g_ns_region = g_ns_cs_flush = 0;
     g_ns_build_draw = g_build_draw_n = 0;
     g_ns_memory_fill = g_memory_fill_bytes = g_memory_fill_n = 0;
-    g_ns_pipe_build = g_pipe_build_n = 0;
+    g_ns_pipe_build = g_pipe_build_n = g_pipe_pending_draws = 0;
     g_frame_worst_ms = 0;
     g_frame_hitch_n = 0;
     g_ns_gfx_present = g_ns_borrow_wait = 0;

@@ -63,6 +63,10 @@ namespace {
 // driver, at 626 ms a pipeline. The performance passes on top are the part that
 // is optional.
 DELTA_OPTION(u32, kOptLevel, "DELTA_GPU_SPIRV_OPT", 2);
+// Threads that build pipelines for PostShaderWork; 0 = a quarter of the
+// hardware threads. They are not the optimizer's: a driver compile can take
+// seconds, and the submit thread waits on optimizer jobs queued behind it.
+DELTA_OPTION(u32, kCompilerThreads, "DELTA_GPU_COMPILER_THREADS", 0);
 }  // namespace
 
 static spv_target_env TargetEnv(const base::Vector<u32>& spv) {
@@ -256,10 +260,9 @@ Finalized RunFinalize(const base::Vector<u32>& spv, u64 key) {
 // sat idle.
 class FinalizePool {
  public:
-  FinalizePool() {
-    const u32 n = base::Max(2u, std::thread::hardware_concurrency() / 2);
-    for (u32 i = 0; i < n; i++)
-      base::SpawnDetachedThread("spv_post", [this] { Work(); });
+  FinalizePool(u32 threads, const char* name) {
+    for (u32 i = 0; i < threads; i++)
+      base::SpawnDetachedThread(name, [this] { Work(); });
   }
 
   void Start(const base::Vector<u32>& spv, u64 key) {
@@ -307,6 +310,12 @@ class FinalizePool {
       if (f.valid)
         then(f.spv);
     });
+    ready_.NotifyOne();
+  }
+
+  void Post(base::Function<void()> job) {
+    base::LockGuard<base::Mutex> lock(mutex_);
+    queue_.push_back(base::move(job));
     ready_.NotifyOne();
   }
 
@@ -361,8 +370,21 @@ class FinalizePool {
 FinalizePool* g_pool = nullptr;
 FinalizePool& Pool() {
   static FinalizePool* pool = [] {
-    auto* pool = new FinalizePool;
+    auto* pool = new FinalizePool(
+        base::Max(2u, std::thread::hardware_concurrency() / 2), "spv_post");
     g_pool = pool;
+    return pool;
+  }();
+  return *pool;
+}
+
+FinalizePool* g_pipeline_pool = nullptr;
+FinalizePool& PipelinePool() {
+  static FinalizePool* pool = [] {
+    const u32 n = kCompilerThreads ? kCompilerThreads.get()
+                                   : base::Max(2u, std::thread::hardware_concurrency() / 4);
+    auto* pool = new FinalizePool(n, "pipe_build");
+    g_pipeline_pool = pool;
     return pool;
   }();
   return *pool;
@@ -382,6 +404,8 @@ PrefetchScope::~PrefetchScope() {
 void ResetPrefetch() {
   if (g_pool)
     g_pool->Reset();
+  if (g_pipeline_pool)
+    g_pipeline_pool->Reset();
 }
 
 void Prefetch(const base::Vector<u32>& spv) {
@@ -452,6 +476,14 @@ namespace gpu::gcn {
 void ResetShaderWork() {
 #ifdef DELTA_HAVE_SPIRV_BACKEND
   spirv::ResetPrefetch();
+#endif
+}
+
+void PostShaderWork(base::Function<void()> job) {
+#ifdef DELTA_HAVE_SPIRV_BACKEND
+  spirv::PipelinePool().Post(base::move(job));
+#else
+  job();
 #endif
 }
 }  // namespace gpu::gcn

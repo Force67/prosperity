@@ -11,6 +11,10 @@
 
 #include "base/containers/hash_map.h"
 #include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/memory/shared_pointer.h"
+#include "base/strings/xstring.h"
+#include "base/atomic.h"
 #include "gpu/render/command.h"
 #include "gpu/rhi/device.h"
 
@@ -36,8 +40,21 @@ rhi::Pipeline* GetPipeline(bool textured,
                            bool en,
                            rhi::Format color_format);
 
-struct RecompPipe {
+// A graphics pipeline compiling on a shader worker. The worker owns the inputs
+// until it publishes the result.
+struct PendingPipeline {
+  base::Vector<u32> vertex, geometry, fragment;
+  base::String name;
+  rhi::GraphicsPipelineDesc desc;
   rhi::Pipeline* pipe = nullptr;
+  base::Atomic<bool> done{false};
+};
+
+struct RecompPipe {
+  // Null while `pending` compiles: draws that need it are skipped meanwhile.
+  rhi::Pipeline* pipe = nullptr;
+  base::SharedPointer<PendingPipeline> pending;
+  bool failed = false;  // an async build that produced nothing
   rhi::PipelineLayout* layout = nullptr;
   rhi::BindGroupLayout* tex_set_layout = nullptr;
   // Bindings tex_set_layout declares. The shader may declare more samplers than

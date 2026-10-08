@@ -9,12 +9,16 @@
 #include "base/arch.h"
 
 #include "base/containers/vector.h"
+#include "base/functional/function.h"
 #include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_decode.h"
 
 namespace gpu::gcn {
 
+// Waits for every queued shader job, PostShaderWork's included.
 void ResetShaderWork();
+// Run `job` on the shader worker pool, behind the jobs already queued.
+void PostShaderWork(base::Function<void()> job);
 
 // Compute planner bound; the renderer also checks device descriptor limits.
 inline constexpr u32 kMaxCsResources = 128;

@@ -41,6 +41,8 @@ extern u64 g_ns_memory_fill, g_memory_fill_bytes, g_memory_fill_n;
 // Driver pipeline compiles: the vkCreate*Pipelines calls themselves, which are
 // where a first-time shader costs tens of milliseconds inside one draw.
 extern u64 g_ns_pipe_build, g_pipe_build_n;
+// Draws skipped because their pipeline was still compiling.
+extern u64 g_pipe_pending_draws;
 // The present path: the presenter thread's own time, and what the frame loop
 // waits for it before reusing the scanout buffer it lent.
 extern u64 g_ns_gfx_present, g_ns_borrow_wait;
