@@ -340,6 +340,10 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       bytes <= 0x1000000u && src != dst && addressable(src) &&
       addressable(src + bytes) && addressable(dst) &&
       addressable(dst + bytes)) {
+    // The source may be compute output still in VRAM, and a dirty range under
+    // the destination would land over the copy when it is written back.
+    render::FlushCsWritesRange(renderer, src, bytes, "dma");
+    render::FlushCsWritesRange(renderer, dst, bytes, "dma");
     if (bytes <= kLabelBytes) {
       const auto* from = reinterpret_cast<const u8*>(src);
       PublishLabel(
@@ -1067,6 +1071,10 @@ u32 Walk(render::Renderer& renderer,
             gpu::IsReadableRangeCached(ib, static_cast<u64>(ib_words) * sizeof(u32));
         TraceIndirectBuffer(ib, ib_words, follow);
         if (follow) {
+          // A command buffer a dispatch wrote is read from guest memory.
+          render::FlushCsWritesRange(renderer, ib,
+                                     static_cast<u64>(ib_words) * sizeof(u32),
+                                     "ib");
           // Re-enter where a stalled walk of this same buffer left off.
           u32 start = 0;
           if (g_queue->stall.ib[depth + 1] == ib) {
@@ -1232,9 +1240,12 @@ u32 Walk(render::Renderer& renderer,
         const u64 flag = (static_cast<u64>(body[1] & 0xFFFF) << 32) |
                          (body[0] & 0xFFFFFFFCu);
         const u32 skip = body[3] & 0x3FFF;
-        if (IsGuestAddress(flag) && gpu::IsReadableRangeCached(flag, 4) &&
-            *reinterpret_cast<const volatile u32*>(flag) == 0)
-          i += skip;  // the guarded block did not run on the real CP either
+        if (IsGuestAddress(flag) && gpu::IsReadableRangeCached(flag, 4)) {
+          // The flag may be compute output still in VRAM.
+          render::FlushCsWritesRange(renderer, flag, 4, "cond");
+          if (*reinterpret_cast<const volatile u32*>(flag) == 0)
+            i += skip;  // the guarded block did not run on the real CP either
+        }
         break;
       }
       case 0x1e:  // ATOMIC_MEM
