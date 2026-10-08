@@ -12,13 +12,11 @@
 
 namespace gpu::render {
 
-// False when the draw cannot be handled; the caller then falls back to the
-// heuristic quad path.
+// False when the draw cannot be handled; it is then not drawn.
 bool DrawRecomp(render::Renderer& renderer, const render::DrawInfo& d);
 
 // DELTA_GPU_SKIP_PS / DELTA_GPU_ONLY_PS: whether this draw is filtered out.
-// Asked before either draw path, so a shader that never recompiled is dropped
-// too instead of reaching the heuristic renderer.
+// Asked before recompiling, so a shader that never recompiled is dropped too.
 bool ShaderFilterDrops(u64 ps_addr);
 
 // Log the tally of why draws declined the recompiled path.

@@ -66,8 +66,8 @@ struct DrawBindings {
   u32 rawbuf_mask = 0;  // bit i: set-2 binding i staged real memory
 };
 
-// A draw the recompiled path issued (`path` = "recomp"), or the heuristic quad
-// fallback ("quad"). `bindings` may be null for paths that resolve no samplers.
+// A draw the recompiled path issued (`path` = "recomp"). `bindings` may be null
+// for paths that resolve no samplers.
 void RecordDraw(const render::DrawInfo& draw,
                 const char* path,
                 const DrawBindings* bindings);

@@ -41,7 +41,6 @@ DELTA_OPTION(bool, kIntegerRt, "DELTA_GPU_INT_RT", true);
 DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
 DELTA_OPTION(bool, kNoStencil, "DELTA_GPU_NOSTENCIL", false);
 DELTA_OPTION(bool, kPreflushResources, "DELTA_GPU_PREFLUSHRES", false);
-DELTA_OPTION(bool, kRecompOn, "DELTA_GPU_RECOMP", true);
 DELTA_OPTION(bool, kSkipStale, "DELTA_GPU_SKIPSTALE", false);
 DELTA_OPTION(const char*, kSkipShList, "DELTA_GPU_SKIPSH", nullptr);
 
@@ -475,9 +474,9 @@ u64 FetchShaderAddress(const u32* vud, u64 vs_addr) {
   return IsGuestAddress(fetch) ? fetch : 0;
 }
 
-// The transform buffer and vertex streams the heuristic quad path uses when the
-// recompiled path below declines the draw.
-void ResolveHeuristicSources(const u32* vud,
+// The default transform buffer and vertex stream: the recompiled path keys its
+// pipelines on the stride and falls back to this cbuffer.
+void ResolveDefaultSources(const u32* vud,
                              u64 fetch_addr,
                              render::DrawInfo& d) {
   // Default to the sgpr[4..7] V# (the common VS cbuffer slot); the recompiled
@@ -496,24 +495,6 @@ void ResolveHeuristicSources(const u32* vud,
   d.vertex_data = reinterpret_cast<const void*>(vbs[0].base);
   d.vertex_count = vbs[0].num_records;
   d.vertex_stride = vbs[0].stride;
-  d.pos_offset = 0;
-  // Per-attribute offsets from the fetch shader's V# bases: each attribute's V#
-  // points at vertexBase + attributeOffset. dfmt 11 = 32_32 (float2 uv), dfmt
-  // 10 = 8_8_8_8 (rgba8 colour). Generalises the old hardcoded sprite offsets
-  // (pos@0, color@0x10, uv@0x1c), which remain the fallback.
-  u32 uv_off = 0, col_off = 0;
-  for (size_t i = 1; i < vbs.size(); i++) {
-    const u64 off = vbs[i].base - vbs[0].base;
-    if (off == 0 || off >= d.vertex_stride)
-      continue;
-    if (vbs[i].dfmt == 11 && !uv_off)
-      uv_off = static_cast<u32>(off);
-    else if (vbs[i].dfmt == 10 && !col_off)
-      col_off = static_cast<u32>(off);
-  }
-  d.uv_offset = uv_off ? uv_off : (d.vertex_stride >= 0x1c ? 0x1c : 0);
-  d.color_offset =
-      col_off ? col_off : (d.vertex_stride >= 0x1c ? 0x10 : 0xFFFFFFFFu);
 }
 
 // --- sampled images --------------------------------------------------------
@@ -570,10 +551,6 @@ base::SharedPointer<const gcn::Program> ResolvePsTextures(
   d.tex_depth_compare = first.depth_compare;
   d.tex_null_descriptor = first.null_descriptor;
   d.tex_swizzle = gcn::PackDstSel(first.dst_sel);
-  // Isaac's textured sprite vertex format is {pos.xyzw @0, color @0x10, uv.xy
-  // @0x1c} in a 64-byte vertex, so the UV lives in the position buffer.
-  d.uv_data = d.vertex_data;
-  d.uv_stride = d.vertex_stride;
 
   d.num_texs =
       static_cast<u32>(base::Min<size_t>(texs.size(), kMaxTrackedTextures));
@@ -859,8 +836,6 @@ RecompStatus ResolveRecompiledShaders(
     render::DrawInfo& d) {
   if (ShaderSkipped(vs_addr, ps_addr))
     return RecompStatus::kSkipped;
-  if (!kRecompOn)
-    return RecompStatus::kDisabled;
   if (!IsGuestAddress(vs_addr) || (ps_addr && !IsGuestAddress(ps_addr)))
     return RecompStatus::kBadAddress;
 
@@ -1019,7 +994,7 @@ bool BuildDrawInfo(render::Renderer& renderer,
   ResolveRasterState(regs, d);
 
   const u64 fetch_addr = FetchShaderAddress(vud, vs_addr);
-  ResolveHeuristicSources(vud, fetch_addr, d);
+  ResolveDefaultSources(vud, fetch_addr, d);
 
   TextureMasks masks;
   const auto ps_prog =
@@ -1051,8 +1026,6 @@ bool BuildDrawInfo(render::Renderer& renderer,
 }
 
 void PrefetchDrawShaders(const Regs& regs) {
-  if (!kRecompOn)
-    return;
   gcn::GsPipeline gs;
   const bool has_gs = ResolveGsPipeline(regs, regs[mmVGT_PRIMITIVE_TYPE], gs);
   const u64 vs_addr = has_gs ? regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES)

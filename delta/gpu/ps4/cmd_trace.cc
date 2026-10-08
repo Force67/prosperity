@@ -153,8 +153,6 @@ const char* RecompStatusName(RecompStatus status) {
   switch (status) {
     case RecompStatus::kOk:
       return "ok";
-    case RecompStatus::kDisabled:
-      return "disabled";
     case RecompStatus::kSkipped:
       return "skipsh";
     case RecompStatus::kBadAddress:

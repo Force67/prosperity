@@ -17,10 +17,6 @@
 #include "gpu/render/render_target.h"
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/upload_ring.h"
-#include "gpu/shaders/quad_frag_spv.h"
-#include "gpu/shaders/quad_vert_spv.h"
-#include "gpu/shaders/tex_frag_spv.h"
-#include "gpu/shaders/tex_vert_spv.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -183,114 +179,6 @@ RecompPipe* RecompiledPipelineCache::Find(u64 key) {
 
 RecompPipe* RecompiledPipelineCache::Store(u64 key, RecompPipe pipeline) {
   return &pipelines_.emplace(key, base::move(pipeline)).first->second;
-}
-
-// Build a graphics pipeline for the colored (textured=false) or textured quad
-// with the given colour-blend attachment. Shaders + layout selected by
-// `textured`.
-rhi::Pipeline* BuildPipeline(bool textured,
-                             const rhi::BlendAttachment& blend,
-                             rhi::Format color_format) {
-  rhi::GraphicsPipelineDesc desc;
-  desc.layout = textured ? g_quad.tex_layout : g_quad.layout;
-  desc.vertex =
-      textured ? rhi::ShaderCode{tex_vert_spv, base::ArraySize(tex_vert_spv)}
-               : rhi::ShaderCode{quad_vert_spv, base::ArraySize(quad_vert_spv)};
-  desc.fragment =
-      textured ? rhi::ShaderCode{tex_frag_spv, base::ArraySize(tex_frag_spv)}
-               : rhi::ShaderCode{quad_frag_spv, base::ArraySize(quad_frag_spv)};
-  // Interleaved repacked vertex: pos.xy@0, color.rgba@8, uv.xy@24, stride 32.
-  desc.vertex_buffers = {{32, false}};
-  desc.vertex_attributes = {{0, 0, rhi::Format::kRG32Float, 0},
-                            {1, 0, rhi::Format::kRGBA32Float, 8},
-                            {2, 0, rhi::Format::kRG32Float, 24}};
-  // GNM draws are indexed triangle LISTS (VGT_PRIMITIVE_TYPE 4); the previous
-  // hardcoded strip connected separate sprites into long diagonal triangles.
-  desc.topology = rhi::Topology::kTriangleList;
-  desc.color_count = 1;
-  desc.color_formats[0] = (color_format);
-  desc.blend[0] = blend;
-  desc.name = textured ? "quad textured" : "quad";
-  return Device().CreateGraphicsPipeline(desc);
-}
-
-// Pipeline for a draw's blend state, cached. Returns the default src-alpha
-// pipeline when the per-state build fails so a draw never silently drops.
-rhi::Pipeline* GetPipeline(bool textured,
-                           u32 bc,
-                           bool en,
-                           rhi::Format color_format) {
-  u64 key = (textured ? 1ull : 0) | (en ? 2ull : 0) |
-            ((u64)(en ? (bc & 0x7FFFFFFFu) : 0u) << 2);
-  key = HashWord(key, static_cast<u64>(color_format));
-  auto it = g_quad.cache.find(key);
-  if (it != g_quad.cache.end())
-    return it->second;
-  rhi::Pipeline* p =
-      BuildPipeline(textured, BlendAttachment(bc, en), color_format);
-  if (!p && color_format == kDefaultRtFormat)
-    p = textured ? g_quad.tex_pipeline : g_quad.pipeline;
-  g_quad.cache[key] = p;
-  return p;
-}
-
-namespace {
-
-// Classic src-alpha over (the default quad blend).
-rhi::BlendAttachment SrcAlphaOver(rhi::BlendFactor dst_alpha) {
-  rhi::BlendAttachment b;
-  b.enable = true;
-  b.src_color = rhi::BlendFactor::kSrcAlpha;
-  b.dst_color = rhi::BlendFactor::kOneMinusSrcAlpha;
-  b.src_alpha = rhi::BlendFactor::kOne;
-  b.dst_alpha = dst_alpha;
-  return b;
-}
-
-}  // namespace
-
-bool CreatePipeline() {
-  if (g_quad.pipeline)
-    return true;
-  rhi::PipelineLayoutDesc layout;
-  layout.push_constant_bytes = 64;  // mat4
-  layout.push_constant_stages = rhi::kStageVertex;
-  g_quad.layout = Device().CreatePipelineLayout(layout);
-  if (!g_quad.layout)
-    return false;
-  // Default colored pipeline: classic src-alpha (used as the fallback / for
-  // draws that don't enable blend the cache builds an opaque one on demand).
-  g_quad.pipeline = BuildPipeline(false, SrcAlphaOver(rhi::BlendFactor::kZero),
-                                  kDefaultRtFormat);
-  if (!g_quad.pipeline) {
-    BASE_LOGI("gpuvk", "pipeline failed");
-    return false;
-  }
-  return true;
-}
-
-bool CreateTexPipeline() {
-  if (g_quad.tex_pipeline)
-    return true;
-  if (!CreateTextureDescriptors())
-    return false;
-  rhi::PipelineLayoutDesc layout;
-  layout.groups = {g_tex.layout};
-  layout.push_constant_bytes = 68;  // mat4 + clipUV flag
-  layout.push_constant_stages = rhi::kStageVertex;
-  g_quad.tex_layout = Device().CreatePipelineLayout(layout);
-  if (!g_quad.tex_layout)
-    return false;
-  // Default textured pipeline: src-alpha over (the common sprite blend).
-  // Per-draw blend states build their own pipeline on demand via GetPipeline().
-  g_quad.tex_pipeline =
-      BuildPipeline(true, SrcAlphaOver(rhi::BlendFactor::kOneMinusSrcAlpha),
-                    kDefaultRtFormat);
-  if (!g_quad.tex_pipeline) {
-    BASE_LOGI("gpuvk", "tex pipeline failed");
-    return false;
-  }
-  return true;
 }
 
 namespace {

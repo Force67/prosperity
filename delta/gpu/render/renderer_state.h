@@ -31,7 +31,6 @@ struct BackendState {
   rhi::Device* device = nullptr;
   FrameState frame;
   UploadRings rings;
-  QuadPipelines quad;
   RecompiledPipelineCache recompiled_pipelines;
   TextureBindings tex;
 

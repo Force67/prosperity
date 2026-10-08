@@ -53,7 +53,6 @@ struct DrawInfo {
   const void* vertex_data = nullptr;  // base of attribute-0 (position) buffer
   u32 vertex_count = 0;
   u32 vertex_stride = 0;  // bytes per vertex in the source buffer
-  u32 pos_offset = 0;     // byte offset of the float2 position
   u32 prim_type = 0;      // VGT_PRIMITIVE_TYPE (4 = triangle list)
 
   // Index buffer (DRAW_INDEX_2); non-null means indexed (type: 0=16, 1=32, 2=8
@@ -67,9 +66,9 @@ struct DrawInfo {
   // over an index buffer uploaded whole.
   u64 indirect_args = 0;
   float mvp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-  // Legacy transform fields for heuristic rendering, mirroring the first
-  // resolved VS cbuffer; recompiled shaders use cbufs[] (set 1, bindings 0..7).
-  // mvp[] stays binding 0's fallback when the VS descriptor cannot be resolved.
+  // The first resolved VS cbuffer; recompiled shaders use cbufs[] (set 1,
+  // bindings 0..7). mvp[] is binding 0's fallback when the VS descriptor
+  // cannot be resolved.
   u64 cbuf_base = 0;
   u32 cbuf_size = 0;
   struct DrawCbuf {
@@ -115,10 +114,6 @@ struct DrawInfo {
   // Texturing (optional). tex_base preserves every valid T# address so the
   // renderer can resolve non-RGBA guest formats to live render targets. Direct
   // guest-memory uploads remain limited to formats the upload path can decode.
-  const void* uv_data = nullptr;
-  u32 uv_stride = 0;
-  u32 uv_offset = 0;  // byte offset of the float2 uv within the vertex
-  u32 color_offset = 0xFFFFFFFFu;  // byte offset of float3 color; ~0 = white
   u64 tex_base = 0;
   u32 tex_w = 0, tex_h = 0;
   u32 tex_dfmt = 0, tex_nfmt = 0;
@@ -272,10 +267,9 @@ struct DrawInfo {
   // depth-sampling pass the wrong numbers, not just a shifted test.
   float viewport_z_scale = 1.0f, viewport_z_offset = 0.0f;
 
-  // Recompiled-shader path: non-null recomp runs the game's actual VS/PS
-  // instead of the heuristic quad; vertex_data/stride is the raw interleaved
-  // buffer, vattrs the inputs, mvp the pushed constant buffer, tex_base the
-  // sampler.
+  // Non-null recomp runs the game's actual VS/PS; vertex_data/stride is the raw
+  // interleaved buffer, vattrs the inputs, mvp the pushed constant buffer,
+  // tex_base the sampler.
   u64 vs_addr = 0, ps_addr = 0;  // pipeline cache key
   // gfx10.3 merged NGG: both half addresses the draw programmed, and which one
   // vs_addr picked. Captured so a pass that never rasterizes can name the half

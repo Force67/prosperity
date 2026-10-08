@@ -2242,7 +2242,6 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
       if (pixels[i * 4] || pixels[i * 4 + 1] || pixels[i * 4 + 2])
         ++colored;
     EXPECT_EQ(colored, 1u) << "indexed=" << indexed;
-    EXPECT_EQ(gpu::render::g_frame.heuristic, 0u);
 
     // Read the point through a compute image, swap red/green, and publish it
     // back into the same live render target. Guest bytes still contain 0xA5:
@@ -2347,7 +2346,6 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
       if (red(pixels, i) >= half - 1 && red(pixels, i) <= half)
         ++colored;
     EXPECT_EQ(colored, 1u) << "format=" << format_index;
-    EXPECT_EQ(gpu::render::g_frame.heuristic, 0u);
 
     // Halve the live red channel in compute, then present the modified image.
     alignas(256) static base::Array<u32, 4096> cs{};

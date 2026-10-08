@@ -20,7 +20,6 @@ render::BackendState g_backend;
 // unbound; no other TU touches these during static initialization.
 FrameState& g_frame = g_backend.frame;
 UploadRings& g_ring = g_backend.rings;
-QuadPipelines& g_quad = g_backend.quad;
 RecompiledPipelineCache& g_recomp_cache = g_backend.recompiled_pipelines;
 TextureBindings& g_tex = g_backend.tex;
 RenderRegion& g_region = g_backend.region;

@@ -27,7 +27,6 @@ namespace gpu::ps4 {
 // renders nothing looks the same either way from the outside.
 enum class RecompStatus {
   kOk,
-  kDisabled,      // DELTA_GPU_RECOMP=0
   kSkipped,       // DELTA_GPU_SKIPSH names this VS or PS
   kBadAddress,    // VS/PS program address outside the guest window
   kRejected,      // the translator declined the shader pair

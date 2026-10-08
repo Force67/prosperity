@@ -61,7 +61,6 @@ struct FrameState {
 
   int num = 0;  // monotonic frame counter; the caches age against it
   u32 draws = 0;
-  u32 heuristic = 0;  // draws that fell back to the heuristic quad path
   u32 max_idx = 0;    // largest index_count this frame (3D detector)
   bool recording = false;
   bool had_room = false;   // this frame sampled a room-sized (~832w) RT

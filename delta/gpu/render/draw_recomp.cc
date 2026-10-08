@@ -88,12 +88,10 @@ using render::FlushCsWritesRange;
 
 namespace {
 
-// Why a draw declined the recompiled path (falls back to the heuristic).
-// Tallied per reason so the remaining heuristic draws can be driven to zero;
-// dumped with the periodic frame log.
+// Why a draw declined the recompiled path (it is then not drawn). Tallied per
+// reason and dumped with the periodic frame log.
 enum DeclineReason {
   kNoRecomp,
-  kNoTexPipe,
   kSelf,
   kRing,
   kGuestTex,
@@ -102,7 +100,7 @@ enum DeclineReason {
   kMaxDeclineReason
 };
 static const char* kDeclineName[kMaxDeclineReason] = {
-    "norecomp", "notexpipe", "self", "ring", "guesttex", "midregion", "nopipe"};
+    "norecomp", "self", "ring", "guesttex", "midregion", "nopipe"};
 u32 g_decline[kMaxDeclineReason] = {0};
 inline bool Decline(DeclineReason r) {
   g_decline[r]++;
@@ -517,9 +515,6 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     g_frame.draws++;
     return true;
   }
-  if (!g_quad.tex_pipeline)
-    return Decline(
-        kNoTexPipe);  // need the descriptor infra (ds_pool/ds_layout)
   // Resolve the sampled texture address to an overlapping live RT
   // (resource-model page-table lookup), so an RT-as-texture sample binds the
   // live image for cycled/aliased RT addresses instead of stale guest memory.

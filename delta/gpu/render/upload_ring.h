@@ -78,8 +78,7 @@ constexpr u64 kLdsScratch =
     u64(gpu::gcn::kLdsWaves) * gpu::gcn::kLdsMaxDwords * 4;
 
 struct UploadRings {
-  // Vertex ring: interleaved pos+colour+uv for the heuristic path, the raw
-  // guest vertex records for the recompiled path.
+  // Vertex ring: the raw guest vertex records the recompiled shaders fetch.
   rhi::Buffer* vb = nullptr;
   u8* vb_map = nullptr;
   u64 vb_offset = 0, vb_end = kVbRing;

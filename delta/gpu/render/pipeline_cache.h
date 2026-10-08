@@ -3,9 +3,8 @@
  */
 #pragma once
 
-// Graphics pipelines, cached by the guest state that shapes them: the heuristic
-// quad pipelines (blend state + colour format) and the recompiled-shader
-// pipelines (shader pair + blend + vertex layout + depth/raster state).
+// Graphics pipelines for the recompiled shaders, cached by the guest state that
+// shapes them (shader pair + blend + vertex layout + depth/raster state).
 
 #include "base/arch.h"
 
@@ -22,24 +21,6 @@ namespace gpu::render {
 
 // The heuristic quad path: a coloured and a textured pipeline, plus the
 // per-blend-state variants built on demand.
-struct QuadPipelines {
-  rhi::PipelineLayout* layout = nullptr;
-  rhi::Pipeline* pipeline = nullptr;
-  rhi::PipelineLayout* tex_layout = nullptr;
-  rhi::Pipeline* tex_pipeline = nullptr;
-  // Keyed by (textured<<0, enable<<1, blend_control<<2), mixed with the format.
-  base::HashMap<u64, rhi::Pipeline*> cache;
-};
-
-extern QuadPipelines& g_quad;
-
-bool CreatePipeline();
-bool CreateTexPipeline();
-rhi::Pipeline* GetPipeline(bool textured,
-                           u32 bc,
-                           bool en,
-                           rhi::Format color_format);
-
 // A graphics pipeline compiling on a shader worker. The worker owns the inputs
 // until it publishes the result.
 struct PendingPipeline {

@@ -1050,15 +1050,13 @@ void BeginFrame(Renderer& renderer) {
     ReleaseRetiredCsBuffers();
   }
   CsSubmitBatchBeforeFrame();
-  if (!CreatePipeline())
+  if (!CreateTextureDescriptors())
     return;
-  CreateTexPipeline();  // best-effort; colored path still works without it
   // Frame debugger (DELTA_GPU_CAPTURE*): armed before the counters reset, so
   // the busy trigger can still see the frame that just ended.
   trace::FrameBegin(g_frame.num + 1);
   g_frame.draws = 0;
   g_frame.draws_at_chunk = 0;
-  g_frame.heuristic = 0;
   g_frame.max_idx = 0;
   g_frame.num++;
   // DELTA_GPU_FORCECLEAR=<rt address>: clear that target at the top of every
@@ -1715,8 +1713,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   }
   if (g_dump && fin.frame_num % 200 == 0) {
     BASE_LOGI("gpuvk",
-              "frame {} draws={} heuristic={} rt={:#x} {}x{}  scanout={:#x}",
-              fin.frame_num, fin.frame_draws, g_frame.heuristic,
+              "frame {} draws={} rt={:#x} {}x{}  scanout={:#x}",
+              fin.frame_num, fin.frame_draws,
               (unsigned long)fin.present_base, fin.w, fin.h,
               (unsigned long)fin.scanout_base);
     for (auto& kv : g_rts)

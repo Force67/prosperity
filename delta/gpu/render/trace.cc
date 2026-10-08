@@ -1521,7 +1521,6 @@ void FrameEnd(u64 scanout_base) {
       .Int("frame", g_frame_num)
       .U("draws", g_draw_seq)
       .U("backend_draws", g_frame.draws)
-      .U("heuristic_draws", g_frame.heuristic)
       .U("validation_messages", g_validation_messages)
       .Hex("scanout", scanout_base);
   l.Emit();
