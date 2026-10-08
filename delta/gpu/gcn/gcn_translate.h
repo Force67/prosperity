@@ -288,6 +288,11 @@ struct ImageTilingParams {
 
 base::Vector<u32> BuildImageTilingShader();
 
+// One invocation: dst[pc.1] = 1 when the CMASK (pc.2 == 0) or HTILE (pc.2 != 0)
+// word src[pc.0] marks a fast-cleared tile, else 0. A conditional clear reads
+// it, so the CPU never has to look at the word.
+base::Vector<u32> BuildClearPredicateShader();
+
 // Diagnostic: disassemble the shader at a guest address (they move between
 // runs).
 void DisassembleAt(u64 code_address, const char* tag);

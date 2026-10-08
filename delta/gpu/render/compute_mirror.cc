@@ -436,10 +436,14 @@ void MirrorWriteBack(u64 base, u64 bytes) {
 
 // A fill done by the GPU: into the mirror, then written through like a
 // dispatch's output, with no CPU touching the bytes.
+bool MirrorFillable(u64 base, u64 bytes) {
+  return kMirror && Mirror() && !(base & 3) && !(bytes & 3) &&
+         MirrorCovers(base, bytes) &&
+         (MirrorOwnable(base, bytes) || GuestImportable(base, bytes));
+}
+
 bool MirrorFill(u64 base, u64 bytes, u32 value) {
-  if (!kMirror || !Mirror() || (base & 3) || (bytes & 3) ||
-      !MirrorCovers(base, bytes) ||
-      (!MirrorOwnable(base, bytes) && !GuestImportable(base, bytes)))
+  if (!MirrorFillable(base, bytes))
     return false;
   const u64 page = base::Max(Device().caps().sparse_page, kMirrorBlock);
   const u64 lo = MirrorOffset(base) & ~(page - 1);

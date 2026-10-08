@@ -313,5 +313,63 @@ base::Vector<u32> BuildImageTilingShader() {
   return code;
 }
 
+base::Vector<u32> BuildClearPredicateShader() {
+  using namespace spirv;
+  using spv::Op;
+  using spv::StorageClass;
+  Module m;
+  const Id u = m.TypeInt();
+  const Id boolean = m.TypeBool();
+  const Id array = m.TypeRuntimeArray(u);
+  m.Decorate(array, spv::Decoration::ArrayStride, {4});
+  const Id block = m.TypeStruct({array});
+  m.Decorate(block, spv::Decoration::Block);
+  m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
+  const Id ptr = m.TypePointer(StorageClass::StorageBuffer, u);
+  Id buffers[2];
+  for (u32 i = 0; i < 2; i++) {
+    buffers[i] = m.Variable(m.TypePointer(StorageClass::StorageBuffer, block),
+                            StorageClass::StorageBuffer);
+    m.Decorate(buffers[i], spv::Decoration::DescriptorSet, {0});
+    m.Decorate(buffers[i], spv::Decoration::Binding, {i});
+  }
+  const Id pc_type = m.TypeStruct({u, u, u});
+  m.Decorate(pc_type, spv::Decoration::Block);
+  for (u32 i = 0; i < 3; i++)
+    m.MemberDecorate(pc_type, i, spv::Decoration::Offset, {i * 4});
+  const Id pc = m.Variable(m.TypePointer(StorageClass::PushConstant, pc_type),
+                           StorageClass::PushConstant);
+  const Id fn = m.BeginFunction(m.TypeVoid(), m.TypeFunction(m.TypeVoid()));
+  m.EntryPoint(spv::ExecutionModel::GLCompute, fn, "main", {});
+  m.ExecMode(fn, spv::ExecutionMode::LocalSize, {1, 1, 1});
+  const auto c = [&](u32 v) { return m.ConstU32(v); };
+  const auto param = [&](u32 i) {
+    return m.Load(u, m.AccessChain(m.TypePointer(StorageClass::PushConstant, u),
+                                   pc, {c(i)}));
+  };
+  const auto at = [&](u32 binding, Id index) {
+    return m.AccessChain(ptr, buffers[binding], {c(0), index});
+  };
+  const Id word = m.Load(u, at(0, param(0)));
+  const Id mask = m.Emit(Op::OpBitwiseAnd, u, {word, c(0xF)});
+  const Id cleared = m.Emit(Op::OpIEqual, boolean, {mask, c(0)});
+  // HTILE's ZMASK has a second clear state, 13.
+  const Id htile = m.Emit(Op::OpINotEqual, boolean, {param(2), c(0)});
+  const Id zclear = m.Emit(
+      Op::OpLogicalAnd, boolean,
+      {htile, m.Emit(Op::OpIEqual, boolean, {mask, c(13)})});
+  const Id clear = m.Emit(Op::OpLogicalOr, boolean, {cleared, zclear});
+  m.Store(at(1, param(1)), m.Emit(Op::OpSelect, u, {clear, c(1), c(0)}));
+  m.ReturnVoid();
+  m.EndFunction();
+  auto code = m.Assemble();
+  base::String error;
+  if (!Validate(code, &error)) {
+    BASE_LOGI("gpuvk", "clear predicate shader invalid: {}", error.c_str());
+    return {};
+  }
+  return code;
+}
+
 }  // namespace gpu::gcn
 #endif

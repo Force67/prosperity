@@ -1572,27 +1572,40 @@ bool BuildLiverpoolAddressTable(const TextureLayout32& layout,
                                 base::Vector<u32>& terms,
                                 u32& block_mask,
                                 u64& slice_stride) {
+  const u32 eb = layout.elem_bytes;
   if (TilingIsGfx10(layout.tiling_idx) || TilingIsLinear(layout.tiling_idx) ||
-      layout.elem_bytes < 4 || mip >= layout.mip_levels ||
+      !eb || (eb < 4 && 4 % eb) || mip >= layout.mip_levels ||
       layout.size > UINT32_MAX)
     return false;
   const auto& level = layout.mips[mip];
   const u32 w = level.width, h = level.height, layers = layout.layers;
-  const u32 words = layout.elem_bytes / 4;
   if (!w || !h || !layers)
     return false;
-  base::Vector<u32> identity(layout.size / 4);
-  for (size_t i = 0; i < identity.size(); i++)
-    identity[i] = static_cast<u32>(i * 4);
-  base::Vector<u32> address(size_t(w) * h * layers);
-  base::Vector<u32> texels(size_t(w) * h * words);
-  for (u32 z = 0; z < layers; z++) {
-    if (!DetileTextureMip32(identity.data(), texels.data(), layout, mip, z))
-      return false;
-    for (size_t i = 0; i < size_t(w) * h; i++)
-      address[z * size_t(w) * h + i] =
-          texels[i * words] - static_cast<u32>(level.offset);
+  // Each element is tagged with its own byte address and detiled. A narrow
+  // element holds only part of the address, so those take one pass per part.
+  const u32 tag_bytes = base::Min<u32>(eb, 4);
+  const u32 passes = 4 / tag_bytes;
+  base::Vector<u8> tagged(layout.size);
+  base::Vector<u8> texels(size_t(w) * h * eb);
+  base::Vector<u32> address(size_t(w) * h * layers, 0);
+  for (u32 pass = 0; pass < passes; pass++) {
+    const u32 shift = pass * tag_bytes * 8;
+    for (u64 at = 0; at + tag_bytes <= layout.size; at += eb) {
+      const u32 tag = static_cast<u32>(at) >> shift;
+      std::memcpy(&tagged[at], &tag, tag_bytes);
+    }
+    for (u32 z = 0; z < layers; z++) {
+      if (!DetileTextureMip32(tagged.data(), texels.data(), layout, mip, z))
+        return false;
+      for (size_t i = 0; i < size_t(w) * h; i++) {
+        u32 part = 0;
+        std::memcpy(&part, &texels[i * eb], tag_bytes);
+        address[z * size_t(w) * h + i] |= part << shift;
+      }
+    }
   }
+  for (u32& a : address)
+    a -= static_cast<u32>(level.offset);
   const auto at = [&](u32 x, u32 y, u32 z) {
     return address[(size_t(z) * h + y) * w + x];
   };

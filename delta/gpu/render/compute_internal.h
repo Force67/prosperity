@@ -850,6 +850,7 @@ bool MirrorCopyInGuest(u64 base, u64 bytes);
 // no wait); false when it has to take the staged path.
 bool MirrorTakeRange(u64 base, CsRange& e);
 bool MirrorOwned(u64 block);
+bool MirrorFillable(u64 base, u64 bytes);
 bool MirrorFill(u64 base, u64 bytes, u32 value);
 bool RecordGuestRead(rhi::CommandList* list, u64 base, u64 bytes,
                      rhi::Buffer* dst);

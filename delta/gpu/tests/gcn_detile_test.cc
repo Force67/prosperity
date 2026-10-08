@@ -250,9 +250,10 @@ TEST(GcnDetile, SeparableTermsMatchTheDetiler) {
   };
   u32 macro_ok = 0;
   for (const Shape& shape :
-       {Shape{1680, 948, 1680, 1, 1}, Shape{263, 137, 271, 3, 4}}) {
+       {Shape{1680, 948, 1680, 1, 1}, Shape{263, 137, 271, 3, 4},
+        Shape{32, 32, 32, 32, 1}}) {
     for (u32 tiling = 0; tiling <= 26; ++tiling) {
-      for (u32 elem : {4u, 8u, 16u}) {
+      for (u32 elem : {1u, 2u, 4u, 8u, 16u}) {
         gpu::gcn::TextureLayout32 layout;
         if (gpu::gcn::TilingIsLinear(tiling) ||
             !gpu::gcn::BuildTextureLayout32(layout, shape.width, shape.height,

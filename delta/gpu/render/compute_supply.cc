@@ -825,49 +825,186 @@ bool DetileTextureOnGpu(u64 base,
                         u32 texel_w,
                         u32 texel_h,
                         rhi::Texture* img,
-                        rhi::TextureState state) {
-  gcn::TextureLayout32 linear;
-  if (!g_frame.recording || tiled.elem_bytes != 4 ||
-      !gcn::BuildTextureLayout32(linear, tiled.mips[0].width,
-                                 tiled.mips[0].height, tiled.mips[0].pitch,
-                                 tiled.layers, tiled.mip_levels, 8, false, 4))
+                        rhi::TextureState state,
+                        bool is_3d,
+                        u32 first_mip) {
+  const u32 elem = tiled.elem_bytes;
+  // A linear surface is copied as it lies; a tiled one is detiled into the
+  // linear layout first.
+  const bool linear_in = tiled.tiling_idx == 8;
+  // Block-compressed: the layout counts 4x4 blocks, the copy texels.
+  const u32 block = (elem == 8 || elem == 16) && texel_w > tiled.mips[0].width
+                        ? 4u
+                        : 1u;
+  gcn::TextureLayout32 linear = tiled;
+  if (!g_frame.recording || !elem || elem > 16 ||
+      (!linear_in &&
+       !gcn::BuildTextureLayout32(linear, tiled.mips[0].width,
+                                  tiled.mips[0].height, tiled.mips[0].pitch,
+                                  tiled.layers, tiled.mip_levels, 8, false,
+                                  elem)))
+    return false;
+  if (first_mip >= linear.mip_levels)
     return false;
   rhi::BufferTextureCopy copies[16]{};
-  for (u32 mip = 0; mip < linear.mip_levels; mip++) {
+  for (u32 mip = first_mip; mip < linear.mip_levels; mip++) {
     const auto& level = linear.mips[mip];
-    auto& copy = copies[mip];
+    auto& copy = copies[mip - first_mip];
     copy.buffer_offset = level.offset;
-    copy.row_length = level.pitch;
-    copy.image_height = level.stored_height;
+    copy.row_length = level.pitch * block;
+    copy.image_height = level.stored_height * block;
     copy.region.mip = mip;
-    copy.region.layers = linear.layers;
+    copy.region.layers = is_3d ? 1u : linear.layers;
+    copy.region.depth = is_3d ? linear.layers : 1u;
     copy.region.width = base::Max(texel_w >> mip, 1u);
     copy.region.height = base::Max(texel_h >> mip, 1u);
-    if (copy.region.width > level.width || copy.region.height > level.height)
+    if (copy.region.width > level.width * block ||
+        copy.region.height > level.height * block || (level.offset % elem))
       return false;
   }
-  const TileTable* table = GetTileTable(tiled, linear);
-  if (!table)
+  const TileTable* table =
+      linear_in ? nullptr : GetTileTable(tiled, linear, /*packed=*/elem < 4);
+  if (!linear_in && !table)
     return false;
   g_cs_scratch_owner++;
-  rhi::Buffer* raw = AcquireScratch(tiled.size);
-  rhi::Buffer* pixels = raw ? AcquireScratch(linear.size) : nullptr;
+  const u64 raw_bytes = (tiled.size + 3) & ~u64(3);
+  rhi::Buffer* raw = AcquireScratch(raw_bytes);
+  rhi::Buffer* pixels =
+      linear_in || !raw ? raw : AcquireScratch((linear.size + 3) & ~u64(3));
   if (!pixels)
     return false;
   EndRegion();
   rhi::CommandList* const list = g_frame.list;
   if (!RecordGuestRead(list, base, tiled.size, raw))
     return false;
-  RecordImageTiling(list, *table, raw, 0, tiled.size, pixels, linear.size,
-                    /*detile=*/true);
+  if (table)
+    RecordImageTiling(list, *table, raw, 0, raw_bytes, pixels,
+                      (linear.size + 3) & ~u64(3), /*detile=*/true);
+  else
+    list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessCopyRead);
   rhi::TextureBarrier barrier{img, state, rhi::TextureState::kCopyDst};
   barrier.range.mips = linear.mip_levels;
-  barrier.range.layers = linear.layers;
+  barrier.range.layers = is_3d ? 1u : linear.layers;
   list->Barrier(0, 0, &barrier, 1);
-  list->CopyBufferToTexture(img, pixels, copies, linear.mip_levels);
+  list->CopyBufferToTexture(img, pixels, copies,
+                            linear.mip_levels - first_mip);
   barrier.before = rhi::TextureState::kCopyDst;
   barrier.after = rhi::TextureState::kShaderRead;
   list->Barrier(0, 0, &barrier, 1);
+  return true;
+}
+
+bool CsClearPredicate(u64 address,
+                      u64 expand,
+                      bool htile,
+                      rhi::Buffer** predicate,
+                      u64* offset) {
+  constexpr u32 kPredicates = 1024;
+  struct Pipe {
+    rhi::BindGroupLayout* set = nullptr;
+    rhi::PipelineLayout* layout = nullptr;
+    rhi::Pipeline* pipe = nullptr;
+    rhi::Buffer* buf = nullptr;
+    bool tried = false;
+  };
+  static Pipe p;
+  static int frame = -1;
+  static u32 used = 0;
+  const bool mark = expand != 0;
+  expand = (base::Max<u64>(expand, 4) + 3) & ~u64(3);
+  if (!Device().caps().conditional || !CsBindsImages() || (address & 3))
+    return false;
+  u64 range_base;
+  CsRange* const e = BufferSource(address, expand, &range_base);
+  // Otherwise the newest word is in the mirror while its copy out to the
+  // guest pages is still on its way, which is exactly when reading it would
+  // wait.
+  bool pending = false;
+  for (const PendingGuestWrite& w : g_pending_guest_writes)
+    pending |= w.base < address + 4 && address < w.end;
+  if (!e && !(pending && MirrorWritten(address, 4) &&
+              MirrorFillable(address, expand)))
+    return false;
+  if (!p.tried) {
+    p.tried = true;
+#ifdef DELTA_HAVE_SPIRV_BACKEND
+    const auto code = gcn::BuildClearPredicateShader();
+#else
+    const base::Vector<u32> code;
+#endif
+    rhi::BindGroupLayoutDesc set;
+    for (u32 i = 0; i < 2; i++)
+      set.bindings.push_back(
+          {i, rhi::BindingType::kStorageBuffer, rhi::kStageCompute});
+    set.push = true;
+    p.set = code.empty() ? nullptr : Device().CreateBindGroupLayout(set);
+    rhi::PipelineLayoutDesc layout;
+    layout.groups = {p.set};
+    layout.push_constant_bytes = 12;
+    layout.push_constant_stages = rhi::kStageCompute;
+    p.layout = p.set ? Device().CreatePipelineLayout(layout) : nullptr;
+    rhi::ComputePipelineDesc pipe;
+    pipe.layout = p.layout;
+    pipe.code = rhi::Code(code);
+    p.pipe = p.layout ? Device().CreateComputePipeline(pipe) : nullptr;
+    rhi::BufferDesc desc;
+    desc.size = 2 * kPredicates * 4;
+    desc.usage = rhi::kBufferStorage | rhi::kBufferPredicate;
+    p.buf = p.pipe ? Device().CreateBuffer(desc) : nullptr;
+  }
+  if (frame != g_frame.num) {
+    frame = g_frame.num;
+    used = 0;
+  }
+  if (!p.buf || used == kPredicates)
+    return false;
+  // One half per frame slot: the other may still be read in flight.
+  const u32 index = g_frame.slot_idx * kPredicates + used++;
+  rhi::Buffer* const src = e ? e->buf : g_mirror;
+  const u64 at = e ? address - range_base : MirrorOffset(address);
+  const u64 window = at & ~(u64(Device().caps().storage_offset_alignment) - 1);
+  // On the batch list, where the dispatch that wrote the word and the fill
+  // below are: the next bind's predicate then sees this one's fill.
+  EndRegion();
+  CsBatchBeginImpl();
+  if (!g_cs_batch_open)
+    return false;
+  rhi::CommandList* const list = g_cs_list;
+  list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessComputeRead);
+  list->SetPipeline(p.pipe);
+  rhi::BindingWrite writes[2];
+  writes[0].binding = 0;
+  writes[0].buffer = src;
+  writes[0].offset = window;
+  writes[0].range = at + 4 - window;
+  writes[1].binding = 1;
+  writes[1].buffer = p.buf;
+  writes[1].range = p.buf->desc().size;
+  list->PushBindGroup(0, p.set, writes, 2);
+  const u32 params[3] = {static_cast<u32>((at - window) / 4), index,
+                         htile ? 1u : 0u};
+  list->SetPushConstants(0, sizeof(params), params);
+  list->Dispatch(1, 1, 1);
+  list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessComputeRead,
+                rhi::kAccessPredicateRead | rhi::kAccessCopyWrite);
+  if (!mark) {
+  } else if (e) {
+    list->FillBuffer(e->buf, at, expand, ~0u);
+    list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
+    e->write_seq++;
+    e->frame_ref = g_frame.num;
+    e->chunk_ref = g_frame.chunk_seq;
+    if (e->pending_batch)
+      g_cs_chunk_needs_batch = true;
+  } else {
+    MirrorFill(address, expand, ~0u);
+  }
+  // The clear on the frame list reads the predicate.
+  if (!g_cs_batches[g_cs_batch_cur].in_frame)
+    g_cs_chunk_needs_batch = true;
+  BumpTextureEpoch();
+  *predicate = p.buf;
+  *offset = u64(index) * 4;
   return true;
 }
 

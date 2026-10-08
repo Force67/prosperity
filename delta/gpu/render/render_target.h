@@ -94,6 +94,10 @@ struct RTarget {
   u64 dcc_base = 0;
   bool dcc_is_cmask = false;  // dcc_base is GCN CMASK (see ResolveDccClear)
   bool dcc_clear_pending = false;
+  // A fast clear the GPU decides (CsClearPredicate): cleared to
+  // `clear_pred_value` where the predicate says so, once the pass begins.
+  rhi::Buffer* clear_pred = nullptr;
+  u64 clear_pred_offset = 0;
   bool dcc_code_known = false;  // an immediate fill carried its value
   u32 dcc_clear_code = 0;
   // CB_COLORn_INFO of the last bind as a colour target (0: never bound): the
@@ -155,6 +159,9 @@ struct DepthTarget {
   // ours (Astro Bot's depth prepass lands a frame early).
   u64 htile_base = 0;
   bool htile_clear_pending = false;
+  // As RTarget::clear_pred, for a depth clear the HTILE decides.
+  rhi::Buffer* clear_pred = nullptr;
+  u64 clear_pred_offset = 0;
   bool htile_code_known = false;
   u32 htile_clear_code = 0;
 };

@@ -181,6 +181,10 @@ class VulkanCommandList final : public rhi::CommandList {
   void Dispatch(u32 x, u32 y, u32 z) override;
   void DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) override;
   void DispatchIndirect(rhi::Buffer* args, u64 offset) override;
+  void BeginConditional(rhi::Buffer* predicate,
+                        u64 offset,
+                        bool inverted) override;
+  void EndConditional() override;
   void DrawIndexedIndirect(rhi::Buffer* args, u64 offset) override;
   void ClearAttachment(u32 attachment,
                        const rhi::ClearColor& color,
@@ -321,6 +325,8 @@ class VulkanDevice final : public rhi::Device {
   PFN_vkCmdEndRenderingKHR cmd_end_rendering = nullptr;
   PFN_vkCmdPushDescriptorSetKHR cmd_push_descriptor_set = nullptr;
   PFN_vkGetMemoryFdKHR get_memory_fd = nullptr;
+  PFN_vkCmdBeginConditionalRenderingEXT cmd_begin_conditional = nullptr;
+  PFN_vkCmdEndConditionalRenderingEXT cmd_end_conditional = nullptr;
   PFN_vkCmdDrawMeshTasksEXT cmd_draw_mesh_tasks = nullptr;
   PFN_vkCmdSetCheckpointNV cmd_set_checkpoint = nullptr;
   PFN_vkSetDebugUtilsObjectNameEXT set_object_name = nullptr;

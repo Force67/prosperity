@@ -27,6 +27,8 @@ VkAccessFlags AccessFor(u32 a) {
     out |= VK_ACCESS_UNIFORM_READ_BIT;
   if (a & rhi::kAccessIndirectRead)
     out |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+  if (a & rhi::kAccessPredicateRead)
+    out |= VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT;
   if (a & (rhi::kAccessShaderRead | rhi::kAccessComputeRead))
     out |= VK_ACCESS_SHADER_READ_BIT;
   if (a & (rhi::kAccessShaderWrite | rhi::kAccessComputeWrite))
@@ -54,6 +56,8 @@ VkPipelineStageFlags StagesFor(u32 a, VkPipelineStageFlags shader) {
     out |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
   if (a & rhi::kAccessIndirectRead)
     out |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+  if (a & rhi::kAccessPredicateRead)
+    out |= VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT;
   if (a & (rhi::kAccessUniformRead | rhi::kAccessShaderRead |
            rhi::kAccessShaderWrite))
     out |= shader;
@@ -458,6 +462,21 @@ void VulkanCommandList::DrawMeshTasks(u32 x, u32 y, u32 z) {
 
 void VulkanCommandList::Dispatch(u32 x, u32 y, u32 z) {
   vkCmdDispatch(cmd, x, y, z);
+}
+
+void VulkanCommandList::BeginConditional(rhi::Buffer* predicate,
+                                         u64 offset,
+                                         bool inverted) {
+  VkConditionalRenderingBeginInfoEXT info{
+      VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT};
+  info.buffer = Buf(predicate)->buffer;
+  info.offset = offset;
+  info.flags = inverted ? VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT : 0;
+  device_.cmd_begin_conditional(cmd, &info);
+}
+
+void VulkanCommandList::EndConditional() {
+  device_.cmd_end_conditional(cmd);
 }
 
 void VulkanCommandList::DispatchIndirect(rhi::Buffer* args, u64 offset) {

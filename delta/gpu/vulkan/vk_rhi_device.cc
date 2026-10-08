@@ -630,6 +630,14 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   native.push_descriptor = want_ext(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
   caps_.host_import = want_ext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
   caps_.memory_export = want_ext(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+  VkPhysicalDeviceConditionalRenderingFeaturesEXT conditional{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT};
+  if (want_ext(VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME)) {
+    caps_.conditional = true;
+    conditional.conditionalRendering = VK_TRUE;
+    conditional.pNext = f13.pNext;
+    f13.pNext = &conditional;
+  }
 
   VkPhysicalDeviceFaultFeaturesEXT fault{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
@@ -749,6 +757,15 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   if (caps_.memory_export)
     get_memory_fd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
         vkGetDeviceProcAddr(dev, "vkGetMemoryFdKHR"));
+  if (caps_.conditional) {
+    cmd_begin_conditional =
+        reinterpret_cast<PFN_vkCmdBeginConditionalRenderingEXT>(
+            vkGetDeviceProcAddr(dev, "vkCmdBeginConditionalRenderingEXT"));
+    cmd_end_conditional =
+        reinterpret_cast<PFN_vkCmdEndConditionalRenderingEXT>(
+            vkGetDeviceProcAddr(dev, "vkCmdEndConditionalRenderingEXT"));
+    caps_.conditional = cmd_begin_conditional && cmd_end_conditional;
+  }
   caps_.memory_export = get_memory_fd != nullptr;
   if (!cmd_begin_rendering) {
     BASE_LOGI("gpuvk", "no dynamic rendering");
@@ -896,6 +913,8 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
     bi.usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
   if (desc.usage & rhi::kBufferStorage)
     bi.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  if (desc.usage & rhi::kBufferPredicate)
+    bi.usage |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
   if (desc.usage & rhi::kBufferIndirect)
     bi.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
   if (desc.usage & rhi::kBufferCopySrc)

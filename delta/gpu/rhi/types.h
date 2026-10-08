@@ -144,6 +144,8 @@ enum BufferUsage : u32 {
   kBufferCopyDst = 1u << 6,
   // Readable in a shader through a 64-bit address (Caps::buffer_address).
   kBufferAddress = 1u << 7,
+  // Holds CommandList::BeginConditional predicates (Caps::conditional).
+  kBufferPredicate = 1u << 8,
 };
 
 struct BufferDesc {
@@ -289,6 +291,7 @@ enum Access : u32 {
   // these does not wait for (or hold back) graphics shading.
   kAccessComputeRead = 1u << 12,
   kAccessComputeWrite = 1u << 13,
+  kAccessPredicateRead = 1u << 14,  // BeginConditional
   kAccessAllRead = kAccessVertexRead | kAccessIndexRead | kAccessUniformRead |
                    kAccessIndirectRead | kAccessShaderRead | kAccessCopyRead |
                    kAccessHostRead | kAccessComputeRead,
@@ -570,6 +573,7 @@ struct Caps {
   u64 sparse_page = 0;  // commit granularity
   bool copy_after = false;  // Device::CopyAfter
   bool memory_export = false;  // kTextureExportable
+  bool conditional = false;    // CommandList::BeginConditional
   u8 device_uuid[16] = {};
   bool texture_blit = true;
   bool dispatch_base = false;

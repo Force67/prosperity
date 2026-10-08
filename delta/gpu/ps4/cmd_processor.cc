@@ -1265,6 +1265,7 @@ void StartRendererOnce(render::Renderer& renderer) {
     return;
   g_renderer_started = true;
   render::Init(renderer);
+  render::RecordComputeInFrame();
   // PS4 memory is mapped once per address (no aliases), so the CPU writes the
   // tracker sees are all of them: the draw path may keep guest copies across
   // submissions.

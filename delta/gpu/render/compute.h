@@ -41,15 +41,30 @@ bool CsSupplyTextureFromBuffer(u64 base,
                                rhi::TextureState state,
                                u64* seq);
 
-// A tiled 4-byte texture uploaded from guest memory: the GPU copies its bytes
-// out of the guest pages and detiles them into `img` (left in kShaderRead). False when the
-// layout has no GPU tiling table; the caller detiles on the CPU then.
+// A texture uploaded from guest memory: the GPU copies its bytes out of the
+// guest pages, detiles them when tiled, and copies mips `first_mip` on into
+// `img` (left in kShaderRead). A volume's slices are the layout's layers. False when a tiled layout has no GPU tiling table; the caller
+// detiles on the CPU then.
 bool DetileTextureOnGpu(u64 base,
                         const gcn::TextureLayout32& tiled,
                         u32 texel_w,
                         u32 texel_h,
                         rhi::Texture* img,
-                        rhi::TextureState state);
+                        rhi::TextureState state,
+                        bool is_3d = false,
+                        u32 first_mip = 0);
+
+// The fast-clear state of the CMASK (`htile` false) or HTILE word at `address`
+// when a dispatch wrote it and its output is still on the GPU: the GPU turns
+// the word into a predicate for BeginConditional, then marks `expand` bytes
+// from `address` expanded (0xFF), as the CPU does with a CMASK it read (0
+// leaves the word alone). False
+// when the word is not there or the device has no predicates.
+bool CsClearPredicate(u64 address,
+                      u64 expand,
+                      bool htile,
+                      rhi::Buffer** predicate,
+                      u64* offset);
 
 // The buffer counterpart. When [base, base+bytes) lies inside one range a
 // dispatch wrote and has not written back, CsBufferRevision is its write

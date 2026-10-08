@@ -1237,6 +1237,12 @@ void NoteCmaskBind(RTarget& rt) {
   const u64 bytes = base::Max<u64>(4, (u64(rt.w) * rt.h) / 128);
   if (!gpu::IsReadableRangeCached(rt.dcc_base, bytes))
     return;
+  // A dispatch's word still on the GPU: the GPU decides, nobody waits.
+  if (CsClearPredicate(rt.dcc_base, bytes, false, &rt.clear_pred,
+                       &rt.clear_pred_offset)) {
+    rt.dcc_clear_pending = false;
+    return;
+  }
   render::FlushCsWritesRange(render::DefaultRenderer(), rt.dcc_base, 4,
                              "cmask");
   auto* cmask = reinterpret_cast<u32*>(rt.dcc_base);
@@ -1563,6 +1569,11 @@ bool BeginRegion(const u64* mrt_base,
   if (dt) {
     if (depth_htile_base)
       dt->htile_base = depth_htile_base;
+    // A clear has to be able to write, so a read-only pass asks the CPU.
+    if (dt->htile_clear_pending && !dt->htile_code_known && !depth_read_only &&
+        CsClearPredicate(dt->htile_base, 0, true, &dt->clear_pred,
+                         &dt->clear_pred_offset))
+      dt->htile_clear_pending = false;
     if (dt->htile_clear_pending)
       ResolveHtileClear(*dt, depth_base, depth_clear);
     if (dt->clear_pending && dt->layers > 1) {
@@ -1575,7 +1586,7 @@ bool BeginRegion(const u64* mrt_base,
     // Async compute is currently serialized ahead of the next graphics frame.
     // Keep this frame's scene depth in its persistent CS range before a later
     // pass clears the shared depth image, or next frame's compute sees zero.
-    if (clear_depth && dt->used_this_frame)
+    if ((clear_depth || dt->clear_pred) && dt->used_this_frame)
       PreserveCsDepthBeforeClear(depth_base);
     // A pass that samples the depth it tests against keeps the image in the
     // read-only layout, which is what makes attachment and sampled view legal
@@ -1687,7 +1698,50 @@ bool BeginRegion(const u64* mrt_base,
   CmdBeginLabel(g_frame.list, "region rt=%#llx %ux%u mrt=%u depth=%#llx",
                 (unsigned long long)base, w, h, g_region.cur_mrt_count,
                 (unsigned long long)depth_base);
+  // A clear covers the whole surface: a surface larger than the render area
+  // takes the GPU-decided one in a pass of its own.
+  if (dt && dt->clear_pred && depth_att.depth_load != rhi::LoadOp::kClear &&
+      (dt->w > w || dt->h > h)) {
+    rhi::RenderPassDesc whole;
+    whole.depth = depth_att;
+    whole.depth.stencil = false;
+    whole.width = dt->w;
+    whole.height = dt->h;
+    g_frame.list->BeginRenderPass(whole);
+    g_frame.list->BeginConditional(dt->clear_pred, dt->clear_pred_offset,
+                                   false);
+    g_frame.list->ClearAttachment(~0u, {}, depth_clear, 0, rhi::kAspectDepth, 0,
+                                  0, dt->w, dt->h);
+    g_frame.list->EndConditional();
+    g_frame.list->EndRenderPass();
+    dt->clear_pred = nullptr;
+  }
   g_frame.list->BeginRenderPass(pass);
+  for (u32 i = 0; i < mrt_count; i++) {
+    RTarget& rt = *targets[i];
+    if (!rt.clear_pred)
+      continue;
+    const u32* word = mrt_clear_word ? mrt_clear_word[i] : nullptr;
+    if (word && colors[i].load != rhi::LoadOp::kClear) {
+      g_frame.list->BeginConditional(rt.clear_pred, rt.clear_pred_offset,
+                                     false);
+      g_frame.list->ClearAttachment(
+          i, ColorTargetClearValue(mrt_info[i], word[0], word[1]), 0, 0,
+          rhi::kAspectColor, 0, 0, w, h);
+      g_frame.list->EndConditional();
+    }
+    rt.clear_pred = nullptr;
+  }
+  if (dt && dt->clear_pred) {
+    if (depth_att.depth_load != rhi::LoadOp::kClear) {
+      g_frame.list->BeginConditional(dt->clear_pred, dt->clear_pred_offset,
+                                     false);
+      g_frame.list->ClearAttachment(~0u, {}, depth_clear, 0, rhi::kAspectDepth,
+                                    0, 0, w, h);
+      g_frame.list->EndConditional();
+    }
+    dt->clear_pred = nullptr;
+  }
   PassProfBegin(mrt_count ? mrt_base[0] : depth_base);
   g_region.open = true;
   g_region.depth_read_only = depth_base && depth_read_only;

@@ -523,6 +523,25 @@ bool FlushCsWritesAt(Renderer& renderer, u64 base, const char* why) {
 // The per-draw guest readers (texture upload, vertex copy, cbuffer ring) call
 // this instead of the full flush: flushing every dirty range at every draw
 // re-tiled the whole post chain ~19x/frame.
+bool SettleGuestWrites(u64 base, u64 bytes, const char* why) {
+  if (g_pending_guest_writes.empty())
+    return true;
+  const WaitReaderScope reader(why);
+  return WaitPendingGuestWrites(base, bytes);
+}
+
+static bool FlushDirtyRanges(Renderer& renderer,
+                             u64 base,
+                             u64 bytes,
+                             const char* why);
+
+bool FlushCsWritesForGpu(Renderer& renderer,
+                         u64 base,
+                         u64 bytes,
+                         const char* why) {
+  return FlushDirtyRanges(renderer, base, bytes, why);
+}
+
 bool FlushCsWritesRange(Renderer& renderer,
                         u64 base,
                         u64 bytes,
@@ -539,11 +558,15 @@ bool FlushCsWritesRange(Renderer& renderer,
         break;
       }
   }
-  if (!g_pending_guest_writes.empty()) {
-    const WaitReaderScope reader(why);
-    if (!WaitPendingGuestWrites(base, bytes))
-      return false;
-  }
+  if (!SettleGuestWrites(base, bytes, why))
+    return false;
+  return FlushDirtyRanges(renderer, base, bytes, why);
+}
+
+static bool FlushDirtyRanges(Renderer& renderer,
+                             u64 base,
+                             u64 bytes,
+                             const char* why) {
   // Nothing dirty anywhere: answer without touching the page index, which
   // otherwise allocates a vector, hashes a lookup per page, then sorts and
   // dedups it. That is called once per guest read, and SotC issues 1.2M

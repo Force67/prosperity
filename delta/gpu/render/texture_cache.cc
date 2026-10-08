@@ -833,10 +833,14 @@ bool RecordTexPixels(rhi::Texture* img,
                      bool is_3d,
                      u32 first_mip = 0) {
   DELTA_ZONE("gpu.tex_upload");
-  if (!is_3d && !first_mip && !kNoDetile && !kDumpBase && !kDumpUpload &&
-      layout.tiling_idx != 8) {
+  // UC2 builds its grading volume with a write still on its way when the
+  // upload is recorded; wait for it rather than read the old bytes.
+  if (is_3d && !SettleGuestWrites(base, layout.size, "tex-3d"))
+    return false;
+  if (!kNoDetile && !kDumpBase && !kDumpUpload) {
     const u64 start = NowNs();
-    if (DetileTextureOnGpu(base, layout, texel_w, texel_h, img, old_state)) {
+    if (DetileTextureOnGpu(base, layout, texel_w, texel_h, img, old_state,
+                           is_3d, first_mip)) {
       const u64 elapsed = NowNs() - start;
       g_ns_tex_up += elapsed;
       g_fr_tex_up += elapsed;
@@ -846,6 +850,8 @@ bool RecordTexPixels(rhi::Texture* img,
   }
   const u64 bytes = TextureLinearBytes(layout, first_mip);
   const u32 barrier_layers = is_3d ? 1 : layout.layers;
+  if (!SettleGuestWrites(base, layout.size, "tex-cpu"))
+    return false;
   TextureUploadSlice upload;
   if (!AllocateTextureUpload(g_frame.slot_idx, bytes,
                              base::Max<u32>(16, layout.elem_bytes), upload))
@@ -1273,7 +1279,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     if (cs_image) {
       if (supplied_mips < layout.mip_levels &&
           entry.last_checked_frame != g_frame.num) {
-        if (!gpu::IsReadableRange(base, footprint))
+        if (!gpu::IsReadableRange(base, footprint) ||
+            !SettleGuestWrites(base, footprint, "tex-tail"))
           return false;
         const u64 start = NowNs();
         const u64 offset = layout.mips[supplied_mips].offset;
@@ -1319,8 +1326,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     image_it->second.hash_valid = false;
     image_it->second.wt_clean = false;
   }
-  if (!cs_supplies && !render::FlushCsWritesRange(render::DefaultRenderer(),
-                                                  base, footprint, "tex"))
+  if (!cs_supplies && !render::FlushCsWritesForGpu(render::DefaultRenderer(),
+                                                   base, footprint, "tex"))
     return nullptr;
   static int prevalidated_frame = -1;
   if (kTexPrevalidate && prevalidated_frame != g_frame.num) {
@@ -1378,6 +1385,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       }
     } else if (image_it != g_tex_images.end()) {
       TexImageEntry& e = image_it->second;
+      if (!SettleGuestWrites(base, footprint, "tex-hash"))
+        return nullptr;
       e.last_checked_frame = g_frame.num;
       // Cheap windowed check every frame, whole-content sweep on the backoff.
       // The sweep alone would let a guest CPU write sit unnoticed for as long
@@ -1440,7 +1449,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     image_entry.footprint = footprint;
     image_entry.layout = layout;
     image_entry.hash_valid = false;
-    image_entry.sample_hash = TexSampleHash(base, footprint);
     image_entry.last_checked_frame = -1;
     image_entry.last_full_frame = g_frame.num;
     image_entry.last_used_frame = g_frame.num;
@@ -1472,6 +1480,11 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       image_entry.wt_armed = image_entry.wt_clean =
           GuestWriteTracker().Arm(base, footprint);
     if (!cs_uploaded && !image_entry.wt_armed) {
+      if (!SettleGuestWrites(base, footprint, "tex-new")) {
+        Device().Destroy(image_entry.image);
+        return nullptr;
+      }
+      image_entry.sample_hash = TexSampleHash(base, footprint);
       // See the refresh above: hash before the upload.
       image_entry.hash = TexHash(base, footprint);
       image_entry.hash_valid = true;

@@ -93,6 +93,15 @@ bool FlushCsWritesRange(Renderer& renderer,
                         u64 base,
                         u64 bytes,
                         const char* why = "cp");
+// The same for a reader on the GPU: it reads in queue order, behind any copy
+// out to the guest pages still on its way, so only dirty ranges are flushed.
+bool FlushCsWritesForGpu(Renderer& renderer,
+                         u64 base,
+                         u64 bytes,
+                         const char* why);
+// Before the CPU reads [base, base+bytes): wait for GPU writes on their way
+// there. False on a lost device.
+bool SettleGuestWrites(u64 base, u64 bytes, const char* why);
 // The frame-end flush: FlushCsWrites, except that an image range only the GPU
 // reads stays in VRAM, and the open dispatch batch is submitted so the frame's
 // own command buffer lands behind it. `writeback` false submits only.
