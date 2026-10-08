@@ -20,7 +20,7 @@
 
 namespace gpu::render {
 namespace {
-DELTA_OPTION(bool, kDirect, "DELTA_GPU_DIRECT", false);
+DELTA_OPTION(bool, kDirect, "DELTA_GPU_DIRECT", true);
 
 constexpr u64 kBlocks = kDirectBlocks;
 constexpr u64 kChunk = 2ull << 20;

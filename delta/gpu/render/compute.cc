@@ -143,7 +143,7 @@ base::Atomic<u64> g_mirror_resolves{0};
 base::HashSet<u64> g_mirror_cached;
 base::Map<u64, u64> g_mirror_uncached;  // block -> frame the CPU last wrote it
 base::Map<u64, u64> g_mirror_wb_union;
-DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", false);
+DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", true);
 DELTA_OPTION(bool, kCsListProf, "DELTA_GPU_LISTPROF", false);
 // Staging-in halves: hashing guest memory to decide validity, CPU detiling,
 // the render-target bridge (its own submit+wait), and the plain copy.

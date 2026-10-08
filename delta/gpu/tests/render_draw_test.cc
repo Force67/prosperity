@@ -22,6 +22,7 @@
 #include "gpu/ps5/rdna/rdna_translate.h"
 #include "gpu/ps5/shader_cache.h"
 #include "gpu/render/compute.h"
+#include "gpu/render/compute_internal.h"
 #include "gpu/render/device.h"
 #include "gpu/render/draw_recomp.h"
 #include "gpu/render/frame.h"
@@ -225,7 +226,16 @@ TEST(GcnCompute, MultiplyAddPreservesSeparateRounding) {
   }
 }
 
+// The staged compute path, whose ranges these tests inspect: the mirror keeps
+// dispatch output elsewhere.
+struct StagedComputeOnly {
+  bool was = gpu::render::cs::kMirror;
+  StagedComputeOnly() { gpu::render::cs::kMirror.set(false); }
+  ~StagedComputeOnly() { gpu::render::cs::kMirror.set(was); }
+};
+
 TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {
+  const StagedComputeOnly staged;
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
@@ -2388,6 +2398,7 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
 
 TEST(GcnCompute, ExpandedHtileAvoidsReadbackAndRejectsChangedKernel) {
   options::Init();
+  const StagedComputeOnly staged;
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
