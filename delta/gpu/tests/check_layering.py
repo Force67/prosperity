@@ -67,7 +67,8 @@ PUBLIC = ('gpu/render/renderer.h', 'gpu/render/command.h',
 # surface does not apply.
 INTERNAL_HARNESSES = tuple(
     os.path.join('tools', f)
-    for f in ('spv_selftest.cc', 'rdna_selftest.cc', 'astro_cs_probe.cc'))
+    for f in ('spv_selftest.cc', 'rdna_selftest.cc', 'astro_cs_probe.cc',
+              os.path.join('spv_bench', 'spv_bench.cc')))
 
 # Quoted or angle form: DELTA_ROOT is a plain -I directory, so both spellings
 # resolve and both must be policed.

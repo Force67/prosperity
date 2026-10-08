@@ -83,7 +83,7 @@ add_delta_test(render_draw_test
   DEPS delta_gpu)
 target_link_libraries(render_draw_test PRIVATE spirv_tools_iface)
 set_tests_properties(render_draw_test PROPERTIES
-  ENVIRONMENT "SDL_VIDEODRIVER=offscreen;DELTA_GPU_NOPRESENT=1;DELTA_GPU_SNAPEVERY=1000000;DELTA_GPU_SNAPEVERY_MAX=0")
+  ENVIRONMENT "SDL_VIDEODRIVER=offscreen;DELTA_GPU_NOPRESENT=1;DELTA_GPU_SNAPEVERY=1000000;DELTA_GPU_SNAPEVERY_MAX=0;DELTA_GPU_ASYNC_PIPELINES=0")
 
 add_delta_test(vk_memory_span_test
   SOURCES
