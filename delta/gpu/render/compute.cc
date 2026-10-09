@@ -113,6 +113,12 @@ u64 g_buf_bridge_n = 0, g_buf_bridge_bytes = 0, g_buf_bridge_declined = 0;
 u64 g_vtx_bridge_n = 0;
 u64 g_guest_override_n = 0, g_guest_mirror_tiles = 0, g_cs_rt_variants_made = 0;
 u64 g_gds_imported_n = 0, g_guest_misses_n = 0, g_cs_indirect_n = 0;
+u64 g_indirect_staged_n = 0;
+rhi::Buffer* g_indirect_ring = nullptr;
+u64 g_indirect_head = 0, g_indirect_frame_n = 0;
+int g_indirect_frame = -1;
+rhi::Buffer* g_predicate = nullptr;
+u64 g_predicate_offset = 0;
 u64 g_stage_ro_bytes = 0, g_stage_rw_bytes = 0, g_stage_img_bytes = 0;
 u64 g_stage_guest_detile_bytes = 0, g_stage_guest_detile_n = 0;
 u64 g_mirror_wb_bytes = 0, g_mirror_wb_n = 0, g_mirror_own_bytes = 0;
@@ -634,6 +640,11 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_own_unsubmitted);
   guest::ResetResource(g_mirror_writes);
   guest::ResetResource(g_mirror_seq);
+  guest::ResetResource(g_indirect_ring);
+  guest::ResetResource(g_predicate);
+  guest::ResetResource(g_indirect_head);
+  guest::ResetResource(g_indirect_frame);
+  guest::ResetResource(g_indirect_frame_n);
 });
 
 }  // namespace gpu::render::cs

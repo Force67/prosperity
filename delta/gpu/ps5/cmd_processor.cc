@@ -876,13 +876,15 @@ void HandleDispatchIndirect(render::Renderer& renderer,
     args = g_queue->dispatch_indirect_base + body[0];
   if (!args || !IsGuestAddress(args) || !gpu::IsReadableRangeCached(args, 12))
     return;
-  // Counts a dispatch produced stay on the GPU, which reads them itself.
+  // Counts a dispatch produced, or a GPU write is still on its way to, stay
+  // on the GPU, which reads them itself.
   const u32 initiator = count >= 2 ? body[count - 1] : 5;
   const bool starts_at_zero =
       (initiator & 4) || (!g_queue->regs[mmCOMPUTE_START_X] &&
                           !g_queue->regs[mmCOMPUTE_START_Y] &&
                           !g_queue->regs[mmCOMPUTE_START_Z]);
-  if (starts_at_zero && render::CanDispatchIndirect(args)) {
+  if (starts_at_zero && (render::CanDispatchIndirect(args) ||
+                         !render::GuestBytesSettled(args, 12))) {
     const u32 placeholder[4] = {1, 1, 1, initiator};
     DispatchCompute(renderer, g_queue->regs, placeholder, 4, args);
     return;
@@ -926,18 +928,29 @@ void HandleDrawIndirect(
   if (!g_queue->draw_indirect_base || !IsGuestAddress(args) ||
       !gpu::IsReadableRangeCached(args, want))
     return;
-  // Indexed and not NGG: the GPU reads the arguments where a dispatch left
-  // them, over the whole index buffer, and nothing waits for them here.
+  // Not NGG: the GPU reads the arguments where a dispatch left them, or once
+  // a GPU write still on its way lands, and nothing waits for them here. An
+  // indexed draw covers the whole index buffer; a plain one whose vertices
+  // are staged reads its count below (HandleDrawPacket).
   const bool ngg = (g_queue->regs[mmVGT_SHADER_STAGES_EN] >> 7) & 1;
-  if (indexed && !ngg && g_queue->index.max && g_queue->index.base &&
-      render::GpuIndirectArgs(args, want)) {
-    const u32 initiator = count >= 4 ? body[3] : 0;
+  const bool gpu_args = !ngg && render::CanDrawIndirect() &&
+                        (render::GpuIndirectArgs(args, want) ||
+                         !render::GuestBytesSettled(args, want));
+  const u32 initiator = count >= 4 ? body[3] : 0;
+  if (gpu_args && indexed && g_queue->index.max && g_queue->index.base) {
     const u64 base = g_queue->index.base;
     const u32 idx_body[5] = {g_queue->index.max, static_cast<u32>(base),
                              static_cast<u32>(base >> 32), g_queue->index.max,
                              initiator};
     g_queue->indirect_args = args;
     issue(renderer, IT_DRAW_INDEX_2, idx_body, 5);
+    g_queue->indirect_args = 0;
+    return;
+  }
+  if (gpu_args && !indexed) {
+    const u32 auto_body[2] = {3, initiator};
+    g_queue->indirect_args = args;
+    issue(renderer, IT_DRAW_INDEX_AUTO, auto_body, 2);
     g_queue->indirect_args = 0;
     return;
   }
@@ -951,7 +964,6 @@ void HandleDrawIndirect(
               op, args, body, a[0], a[1], a[2], a[3], indexed ? a[4] : 0);
   if (!a[0] || !a[1])
     return;
-  const u32 initiator = count >= 4 ? body[3] : 0;
   const u32 saved_instances = g_queue->index.num_instances;
   g_queue->index.num_instances = a[1];
   if (!indexed) {
@@ -990,6 +1002,18 @@ void HandleDrawPacket(render::Renderer& renderer,
   d.Reset();
   if (!BuildDrawInfo(g_queue->regs, packet, d))
     return;
+  // Staged vertex buffers are sized by the count: read it after all.
+  if (d.indirect_args && !d.index_data && d.num_vattrs) {
+    if (!render::FlushCsWritesRange(renderer, d.indirect_args, 16,
+                                    "indirect-draw"))
+      return;
+    const u32* a = reinterpret_cast<const u32*>(d.indirect_args);
+    if (!a[0] || !a[1])
+      return;
+    d.vertex_count = a[0];
+    d.instance_count = a[1];
+    d.indirect_args = 0;
+  }
   if (!g_frame_active) {
     TraceBeginFrame();
     render::BeginFrame(renderer);
@@ -1004,6 +1028,28 @@ void HandleDrawPacket(render::Renderer& renderer,
 bool IsDraw(u32 op) {
   return op == IT_DRAW_INDEX_AUTO || op == IT_DRAW_INDEX_2 ||
          op == IT_DRAW_INDEX_OFFSET_2 || op == IT_DRAW_INDEX_MULTI_AUTO;
+}
+
+// Whether the `dwords` from `at` are whole packets that only draw: nothing
+// in them changes state the packets after the block see.
+bool OnlyDraws(const u32* p, u32 at, u32 dwords, u32 words) {
+  const u32 end = at + dwords;
+  if (!dwords || end > words)
+    return false;
+  while (at < end) {
+    const u32 hdr = p[at];
+    if (Pm4TypeOf(hdr) != Pm4Type::kType3)
+      return false;
+    const u32 op = Pm4Opcode(hdr);
+    if (op == IT_NOP && ((hdr >> 16) & 0x3FFF) == 0x3FFF) {
+      at++;
+      continue;
+    }
+    if (!IsDraw(op) && op != IT_NOP)
+      return false;
+    at += 1 + Pm4Count(hdr);
+  }
+  return at == end;
 }
 
 // --- the walk --------------------------------------------------------------
@@ -1027,7 +1073,13 @@ u32 Walk(render::Renderer& renderer,
   u32 trail_n = 0;
   // The opcode walked before the current one, for the unhandled-opcode census.
   u32 last_op = 0;
+  // Where the block a COND_EXEC predicates on the GPU ends; 0 outside one.
+  u32 predicate_end = 0;
   while (i < words) {
+    if (predicate_end && i >= predicate_end) {
+      render::EndGuestPredicate();
+      predicate_end = 0;
+    }
     const u32 hdr = p[i];
     const Pm4Type type = Pm4TypeOf(hdr);
     trail_pos[trail_n & 31] = i;
@@ -1302,12 +1354,21 @@ u32 Walk(render::Renderer& renderer,
         const u64 flag = (static_cast<u64>(body[1] & 0xFFFF) << 32) |
                          (body[0] & 0xFFFFFFFCu);
         const u32 skip = body[3] & 0x3FFF;
-        if (IsGuestAddress(flag) && gpu::IsReadableRangeCached(flag, 4)) {
-          // The flag may be compute output still in VRAM.
-          render::FlushCsWritesRange(renderer, flag, 4, "cond");
-          if (*reinterpret_cast<const volatile u32*>(flag) == 0)
-            i += skip;  // the guarded block did not run on the real CP either
+        if (!IsGuestAddress(flag) || !gpu::IsReadableRangeCached(flag, 4))
+          break;
+        // A flag the GPU is still writing over a block of nothing but draws:
+        // the GPU decides each draw itself, and the walk goes on.
+        const u32 block = i + 1 + count;
+        if (!predicate_end && !render::GuestBytesSettled(flag, 4) &&
+            OnlyDraws(p, block, skip, words) &&
+            render::BeginGuestPredicate(flag)) {
+          predicate_end = block + skip;
+          break;
         }
+        // The flag may be compute output still in VRAM.
+        render::FlushCsWritesRange(renderer, flag, 4, "cond");
+        if (*reinterpret_cast<const volatile u32*>(flag) == 0)
+          i += skip;  // the guarded block did not run on the real CP either
         break;
       }
       case 0x1e:  // ATOMIC_MEM
@@ -1361,6 +1422,8 @@ u32 Walk(render::Renderer& renderer,
     last_op = op;
     i += 1 + count;
   }
+  if (predicate_end)
+    render::EndGuestPredicate();
   return words;
 }
 

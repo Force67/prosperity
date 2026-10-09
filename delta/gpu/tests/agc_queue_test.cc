@@ -412,6 +412,13 @@ void NoteMemoryFill(Renderer&, u64, u64, u32) {}
 bool GuestBytesSettled(u64, u64) {
   return true;
 }
+bool CanDrawIndirect() {
+  return false;
+}
+bool BeginGuestPredicate(u64) {
+  return false;
+}
+void EndGuestPredicate() {}
 bool ApplyMemoryCopy(Renderer&, u64 dst, u64 src, u64 bytes) {
   std::memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src),
               bytes);

@@ -15,6 +15,7 @@
 #include "base/strings/format.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/guest_memory.h"
+#include "gpu/guest_page_table.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/texture_cache.h"
 #include "gpu/write_tracker.h"
@@ -550,6 +551,10 @@ bool ApplyMemoryCopy(Renderer& renderer, u64 dst, u64 src, u64 bytes) {
   InvalidateTexRange(dst, bytes);
   g_cs_writeback_gen++;
   return true;
+}
+
+bool GuestWriteMaybePending(u64 base, u64 bytes) {
+  return bytes && !GuestPages().PendingWriteClear(base, base + bytes);
 }
 
 bool GuestBytesSettled(u64 base, u64 bytes) {

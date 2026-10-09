@@ -132,5 +132,16 @@ bool QueueCheckArmed();
 
 // The buffer and offset the GPU reads GpuIndirectArgs' arguments at.
 rhi::Buffer* IndirectArgsBuffer(u64 args, u64* offset);
+// While set, the draw call itself runs only when the staged guest flag is
+// non-zero (BeginGuestPredicate); null otherwise.
+rhi::Buffer* GuestPredicate(u64* offset);
+
+// Indirect arguments anywhere in guest memory, copied on `list` by the GPU
+// into a buffer the draw or dispatch then reads at `offset`; behind any GPU
+// write on its way to them. Null when they cannot be staged.
+rhi::Buffer* StageIndirectArgs(rhi::CommandList* list,
+                               u64 args,
+                               u64 bytes,
+                               u64* offset);
 
 }  // namespace gpu::render

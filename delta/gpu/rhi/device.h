@@ -175,6 +175,8 @@ class CommandList : public Object {
   virtual void DispatchIndirect(Buffer* /*args*/, u64 /*offset*/) {}
   // One indexed draw whose five u32 arguments the GPU reads at `offset`.
   virtual void DrawIndexedIndirect(Buffer* /*args*/, u64 /*offset*/) {}
+  // One draw whose four u32 arguments the GPU reads at `offset`.
+  virtual void DrawIndirect(Buffer* /*args*/, u64 /*offset*/) {}
   // Until EndConditional, draws, dispatches and ClearAttachment run only when
   // the u32 at `offset` in `predicate` (kBufferPredicate) is non-zero, or zero
   // when `inverted`. The GPU reads it as the commands execute.

@@ -243,6 +243,15 @@ RenderQueue& GuestRenderQueue() {
   return *queue;
 }
 
+bool WalkReadWouldWait(u64 base, u64 bytes) {
+  RenderQueue& queue = GuestRenderQueue();
+  if (!queue.running())
+    return !render::GuestBytesSettled(base, bytes);
+  return queue.PendingWriteOverlaps(base, bytes) ||
+         render::CsRangeMaybeDirty(base, bytes) ||
+         render::GuestWriteMaybePending(base, bytes);
+}
+
 void FlushForWalkRead(render::Renderer& renderer,
                       u64 base,
                       u64 bytes,
@@ -252,7 +261,8 @@ void FlushForWalkRead(render::Renderer& renderer,
   RenderQueue& queue = GuestRenderQueue();
   if (queue.running() && queue.PendingWriteOverlaps(base, bytes))
     OwnRenderer("pending-write");
-  if (queue.running() && !render::CsRangeMaybeDirty(base, bytes))
+  if (queue.running() && !render::CsRangeMaybeDirty(base, bytes) &&
+      !render::GuestWriteMaybePending(base, bytes))
     return;
   OwnRenderer(why);
   render::FlushCsWritesRange(renderer, base, bytes, why);

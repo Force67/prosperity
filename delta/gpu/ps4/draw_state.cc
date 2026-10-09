@@ -167,6 +167,44 @@ void BindTexture(render::DrawInfo& d,
 
 // --- packet decode ---------------------------------------------------------
 
+// The counts of an indirect draw, read here:
+//   indirect:       vertexCount, instanceCount, startVertex, startInstance
+//   index-indirect: indexCount,  instanceCount, startIndex, baseVertex, ...
+void ReadIndirectArgs(render::Renderer& renderer,
+                      const DrawPacket& packet,
+                      u64 args,
+                      render::DrawInfo& d) {
+  const u32 op = packet.op;
+  const u32 need = op == IT_DRAW_INDIRECT ? 16u : 20u;
+  // Compute results stay GPU-resident and are written back lazily, so reading
+  // guest memory without flushing that range first yields the stale zeros the
+  // buffer was allocated with.
+  FlushForWalkRead(renderer, args, need, "indirect");
+  const bool mapped = host_memory::IsMemoryRangeMapped(
+      reinterpret_cast<const void*>(args), need);
+  u32 a[5] = {};
+  if (mapped)
+    std::memcpy(a, reinterpret_cast<const void*>(args), need);
+  TraceIndirectArgs(op, args, packet.indirect_base, packet.body[0], mapped, a);
+  if (!mapped || !a[0] || a[0] > kMaxElementCount)
+    return;
+  if (op == IT_DRAW_INDIRECT) {
+    d.vertex_count = a[0];
+  } else if (packet.index_base) {
+    const u32 index_bytes = packet.index_type == 1 ? 4 : 2;
+    const u64 base = packet.index_base + static_cast<u64>(a[2]) * index_bytes;
+    if (host_memory::IsMemoryRangeMapped(
+            reinterpret_cast<const void*>(base),
+            static_cast<u64>(a[0]) * index_bytes)) {
+      d.index_data = reinterpret_cast<const void*>(base);
+      d.index_count = a[0];
+      d.index_type = packet.index_type;
+    }
+  }
+  if (a[1])
+    d.instance_count = a[1];
+}
+
 // The draws are indexed triangle lists; without the index buffer (drawing raw
 // vertices as a strip) batched sprites smear into long diagonal triangles.
 // DRAW_INDEX_AUTO has no index buffer (sequential verts).
@@ -191,41 +229,33 @@ void ResolveIndexBuffer(render::Renderer& renderer,
   }
 
   // DRAW_INDIRECT / DRAW_INDEX_INDIRECT take their counts from a struct in
-  // guest memory at IT_SET_BASE(1) + dataOffset, not from the packet:
-  //   indirect:       vertexCount, instanceCount, startVertex, startInstance
-  //   index-indirect: indexCount,  instanceCount, startIndex, baseVertex, ...
+  // guest memory at IT_SET_BASE(1) + dataOffset, not from the packet.
+  // Arguments a GPU write is still on its way to stay on the GPU, which reads
+  // them when the draw runs: an indexed draw covers the whole index buffer.
   if ((op == IT_DRAW_INDIRECT || op == IT_DRAW_INDEX_INDIRECT) && count >= 1 &&
       packet.indirect_base) {
     const u64 args = packet.indirect_base + body[0];
-    const u32 need = op == IT_DRAW_INDIRECT ? 16u : 20u;
-    // The args are usually produced ON the GPU (a compute pass writes the
-    // counts a later draw consumes). Compute results stay GPU-resident and are
-    // written back lazily, so reading guest memory without flushing that range
-    // first yields the stale zeros the buffer was allocated with.
-    FlushForWalkRead(renderer, args, need, "indirect");
-    const bool mapped = host_memory::IsMemoryRangeMapped(
-        reinterpret_cast<const void*>(args), need);
-    u32 a[5] = {};
-    if (mapped)
-      std::memcpy(a, reinterpret_cast<const void*>(args), need);
-    TraceIndirectArgs(op, args, packet.indirect_base, body[0], mapped, a);
-    if (mapped && a[0] && a[0] <= kMaxElementCount) {
-      if (op == IT_DRAW_INDIRECT) {
-        d.vertex_count = a[0];
-      } else if (packet.index_base) {
-        const u32 index_bytes = packet.index_type == 1 ? 4 : 2;
-        const u64 base =
-            packet.index_base + static_cast<u64>(a[2]) * index_bytes;
-        if (host_memory::IsMemoryRangeMapped(
-                reinterpret_cast<const void*>(base),
-                static_cast<u64>(a[0]) * index_bytes)) {
-          d.index_data = reinterpret_cast<const void*>(base);
-          d.index_count = a[0];
-          d.index_type = packet.index_type;
-        }
+    const bool indexed = op == IT_DRAW_INDEX_INDIRECT;
+    const u32 index_bytes = packet.index_type == 1 ? 4 : 2;
+    const bool whole_buffer =
+        packet.index_base && packet.index_max &&
+        packet.index_max <= kMaxElementCount &&
+        host_memory::IsMemoryRangeMapped(
+            reinterpret_cast<const void*>(packet.index_base),
+            static_cast<u64>(packet.index_max) * index_bytes);
+    if (render::CanDrawIndirect() && d.prim_type != 19 &&
+        (!indexed || whole_buffer) &&
+        WalkReadWouldWait(args, indexed ? 20 : 16)) {
+      d.indirect_args = args;
+      if (indexed) {
+        d.index_data = reinterpret_cast<const void*>(packet.index_base);
+        d.index_count = packet.index_max;
+        d.index_type = packet.index_type;
+      } else {
+        d.vertex_count = 3;
       }
-      if (a[1])
-        d.instance_count = a[1];
+    } else {
+      ReadIndirectArgs(renderer, packet, args, d);
     }
   }
 
@@ -1022,6 +1052,18 @@ bool BuildDrawInfo(render::Renderer& renderer,
   // menu background) so the menu items drawn on top become readable.
   if (kSkipStale && d.tex_base && d.tex_w >= 2048)
     return false;
+  // Vertices staged here are sized by the counts: read them after all.
+  if (d.indirect_args) {
+    bool sized = !d.index_data && d.num_vattrs;
+    for (u32 j = 0; j < d.num_vbufs; j++)
+      sized |= d.vbufs[j].per_instance;
+    if (sized) {
+      const u64 args = d.indirect_args;
+      d.indirect_args = 0;
+      d.index_data = nullptr;
+      ReadIndirectArgs(renderer, packet, args, d);
+    }
+  }
   return d.vertex_data || (d.recomp && d.recomp->ok && d.num_vattrs == 0);
 }
 

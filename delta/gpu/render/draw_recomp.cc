@@ -1419,8 +1419,15 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   rhi::Buffer* indirect_buf = nullptr;
   u64 indirect_off = 0;
   if (d.indirect_args) {
-    indirect_buf = IndirectArgsBuffer(d.indirect_args, &indirect_off);
+    const u64 bytes = indexed ? 20 : 16;
     EndRegion();
+    if (GpuIndirectArgs(d.indirect_args, bytes))
+      indirect_buf = IndirectArgsBuffer(d.indirect_args, &indirect_off);
+    else if (FlushCsWritesForGpu(renderer, d.indirect_args, bytes, "indirect"))
+      indirect_buf = StageIndirectArgs(g_frame.list, d.indirect_args, bytes,
+                                       &indirect_off);
+    if (!indirect_buf)
+      return Decline(kNoRecomp);
     g_frame.list->Barrier(rhi::kAccessAllWrite, rhi::kAccessIndirectRead);
   }
 
@@ -2073,16 +2080,24 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     g_region.write_through_tile = d.rt_tile_mode;
   }
   DrawProfBegin(d.ps_addr);
+  u64 predicate_off = 0;
+  rhi::Buffer* const predicate = GuestPredicate(&predicate_off);
+  if (predicate)
+    list->BeginConditional(predicate, predicate_off, false);
   if (mesh)
     list->DrawMeshTasks((draw_count - 1) / d.recomp->mesh_input_primitives + 1,
                         d.instance_count ? d.instance_count : 1, 1);
   else if (indexed && indirect_buf && !quads)
     list->DrawIndexedIndirect(indirect_buf, indirect_off);
+  else if (indirect_buf)
+    list->DrawIndirect(indirect_buf, indirect_off);
   else if (indexed)
     list->DrawIndexed(upload_indices,
                       d.instance_count ? d.instance_count : 1, 0, 0, 0);
   else
     list->Draw(d.vertex_count, d.instance_count ? d.instance_count : 1, 0, 0);
+  if (predicate)
+    list->EndConditional();
   DrawProfEnd();
   DrawCheckpoint(g_frame.list, g_frame.num, g_frame.draws, true);
   // DELTA_GPU_DRAWSEQ=<n>: the first n draws of the run in record order, with

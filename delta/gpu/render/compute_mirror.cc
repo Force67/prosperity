@@ -469,7 +469,7 @@ static void RecordGuestWrite(rhi::CommandList* c,
   if (mirrored) {
     MirrorWriteBack(base, n);
   } else {
-    g_pending_guest_writes.push_back({base, base + n, g_cs_batch_id});
+    NotePendingGuestWrite(base, base + n);
     NoteGuestWrite(base, n);
   }
 }
@@ -614,7 +614,7 @@ void MirrorWriteBack(u64 base, u64 bytes) {
   w.seq = ++g_mirror_seq;
   if (!MirrorCopy(base, bytes, /*to_guest=*/true))
     return;
-  g_pending_guest_writes.push_back({base, base + bytes, g_cs_batch_id});
+  NotePendingGuestWrite(base, base + bytes);
   g_mirror_self.push_back({base, base + bytes});
   NoteGuestWrite(base, bytes);
   InvalidateTexRange(base, bytes);
@@ -744,9 +744,82 @@ bool GpuIndirectArgs(u64 args, u64 bytes) {
   return MirrorCacheBlock(block) != 0;
 }
 
+bool CanDrawIndirect() {
+  return Device().caps().draw_indirect;
+}
+
 rhi::Buffer* IndirectArgsBuffer(u64 args, u64* offset) {
   *offset = MirrorOffset(args);
   return g_mirror;
+}
+
+// Indirect arguments the mirror does not hold, copied by the GPU out of guest
+// memory, in queue order, into a ring the draw or dispatch reads. At most two
+// frames are in flight, so a quarter of the ring per frame is never reused
+// under a reader.
+constexpr u64 kIndirectRing = 4ull << 20;
+constexpr u64 kIndirectEntry = 32;
+
+static rhi::Buffer* StageArgs(rhi::CommandList* list,
+                              u64 args,
+                              u64 bytes,
+                              u64* offset,
+                              u32 dst_access) {
+  if (bytes > kIndirectEntry || !gpu::IsReadableRangeCached(args, bytes))
+    return nullptr;
+  if (!g_indirect_ring) {
+    rhi::BufferDesc desc;
+    desc.size = kIndirectRing;
+    desc.usage = rhi::kBufferIndirect | rhi::kBufferCopyDst |
+                 rhi::kBufferStorage;
+    if (Device().caps().conditional)
+      desc.usage |= rhi::kBufferPredicate;
+    desc.name = "indirect args";
+    g_indirect_ring = Device().CreateBuffer(desc);
+    if (!g_indirect_ring)
+      return nullptr;
+  }
+  if (g_indirect_frame != g_frame.num) {
+    g_indirect_frame = g_frame.num;
+    g_indirect_frame_n = 0;
+  }
+  if (++g_indirect_frame_n > kIndirectRing / kIndirectEntry / 4)
+    return nullptr;
+  *offset = g_indirect_head;
+  g_indirect_head = (g_indirect_head + kIndirectEntry) % kIndirectRing;
+  if (!RecordGuestRead(list, args, bytes, g_indirect_ring, *offset))
+    return nullptr;
+  list->Barrier(rhi::kAccessCopyWrite, dst_access);
+  g_indirect_staged_n++;
+  return g_indirect_ring;
+}
+
+rhi::Buffer* StageIndirectArgs(rhi::CommandList* list,
+                               u64 args,
+                               u64 bytes,
+                               u64* offset) {
+  return StageArgs(list, args, bytes, offset, rhi::kAccessIndirectRead);
+}
+
+// A COND_EXEC flag a GPU write is still on its way to: copied behind it, and
+// every draw until EndGuestPredicate runs only when it is non-zero.
+bool BeginGuestPredicate(u64 flag) {
+  if (!Device().caps().conditional || !g_frame.recording || g_predicate ||
+      !FlushCsWritesForGpu(DefaultRenderer(), flag, 4, "cond"))
+    return false;
+  EndRegion();
+  g_predicate = StageArgs(g_frame.list, flag, 4, &g_predicate_offset,
+                          rhi::kAccessPredicateRead);
+  return g_predicate != nullptr;
+}
+
+void EndGuestPredicate() {
+  g_predicate = nullptr;
+}
+
+rhi::Buffer* GuestPredicate(u64* offset) {
+  *offset = g_predicate_offset;
+  return g_predicate;
 }
 
 void MirrorUncache(u64 block) {

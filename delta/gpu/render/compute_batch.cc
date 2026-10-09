@@ -17,6 +17,7 @@
 #include "base/strings/format.h"
 #include "base/threading/lock_guard.h"
 #include "gpu/gcn/gcn_resource.h"
+#include "gpu/guest_page_table.h"
 #include "gpu/guest_memory.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/gpu_timeline.h"
@@ -36,6 +37,11 @@ u64 g_cs_batch_id = 0;  // the open batch
 u64 g_cs_batch_next_id = 1;
 u64 g_cs_batch_done = 0;  // every batch with an id <= this has completed
 base::Vector<PendingGuestWrite> g_pending_guest_writes;
+
+void NotePendingGuestWrite(u64 base, u64 end) {
+  g_pending_guest_writes.push_back({base, end, g_cs_batch_id});
+  GuestPages().AddPendingWrite(base, end, 1);
+}
 // The newest batch a held label waits for (SubmitForPublishedLabels).
 u64 g_publish_batch = 0;
 u32 g_cs_batch_cur = 0;   // ring slot the open batch records into
@@ -143,7 +149,10 @@ void CsBatchFinalize(CsBatch& b) {
   }
   g_cs_batch_done = base::Max(g_cs_batch_done, b.id);
   base::EraseIf(g_pending_guest_writes, [](const PendingGuestWrite& w) {
-    return w.batch <= g_cs_batch_done;
+    if (w.batch > g_cs_batch_done)
+      return false;
+    GuestPages().AddPendingWrite(w.base, w.end, -1);
+    return true;
   });
   CheckSpeculatedReads();
   base::EraseIf(g_cs_pending, [](CsRange* range) {

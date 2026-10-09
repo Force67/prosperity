@@ -80,6 +80,7 @@ struct IndexState {
   u64 base = 0;           // IT_INDEX_BASE (DRAW_INDEX_2 carries its own)
   u64 indirect_base = 0;  // IT_SET_BASE(1): where indirect args live
   u32 num_instances = 1;  // IT_NUM_INSTANCES, for the following draw(s)
+  u32 max = 0;            // IT_INDEX_BUFFER_SIZE: indices the buffer holds
 };
 IndexState g_index;
 
@@ -581,6 +582,7 @@ void HandleDrawPacket(render::Renderer& renderer,
     packet.index_type = g_index.type;
     packet.index_base = g_index.base;
     packet.indirect_base = g_index.indirect_base;
+    packet.index_max = g_index.max;
     packet.num_instances = g_index.num_instances;
     packet.frame = frame;
 
@@ -1035,6 +1037,10 @@ u32 WalkDcb(render::Renderer& renderer,
         if (count >= 3 && (body[0] & 0xF) == 1)
           g_index.indirect_base =
               (static_cast<u64>(body[2] & 0xFF) << 32) | (body[1] & ~0x3u);
+        break;
+      case IT_INDEX_BUFFER_SIZE:
+        if (count >= 1)
+          g_index.max = body[0];
         break;
       case IT_NUM_INSTANCES:
         g_index.num_instances = (count >= 1 && body[0]) ? body[0] : 1;

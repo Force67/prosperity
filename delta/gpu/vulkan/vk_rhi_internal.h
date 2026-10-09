@@ -186,6 +186,7 @@ class VulkanCommandList final : public rhi::CommandList {
                         bool inverted) override;
   void EndConditional() override;
   void DrawIndexedIndirect(rhi::Buffer* args, u64 offset) override;
+  void DrawIndirect(rhi::Buffer* args, u64 offset) override;
   void ClearAttachment(u32 attachment,
                        const rhi::ClearColor& color,
                        float depth,

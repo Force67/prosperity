@@ -177,6 +177,8 @@ void NoteMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value);
 // A CP DMA copy run on the GPU, in command stream order: for bytes a GPU
 // write is still on its way to, which the CPU would have to wait for.
 bool ApplyMemoryCopy(Renderer& renderer, u64 dst, u64 src, u64 bytes);
+// A GPU write may still be on its way to [base, base+bytes). Any thread.
+bool GuestWriteMaybePending(u64 base, u64 bytes);
 // No GPU write is pending under [base, base+bytes): the CPU reads the bytes
 // without waiting.
 bool GuestBytesSettled(u64 base, u64 bytes);
@@ -191,6 +193,14 @@ void MirrorRecache();
 // them (written there by a dispatch, or copied in now), so the draw reads
 // them indirectly instead of the CPU waiting for them.
 bool GpuIndirectArgs(u64 args, u64 bytes);
+// The device draws with arguments it reads itself (DrawInfo::indirect_args).
+bool CanDrawIndirect();
+// COND_EXEC over a block of draws whose flag a GPU write is still on its way
+// to: the draws until EndGuestPredicate run only when the u32 at `flag` is
+// non-zero as the GPU reaches them. False when that cannot be set up; the
+// caller then reads the flag itself.
+bool BeginGuestPredicate(u64 flag);
+void EndGuestPredicate();
 void MirrorWritesCollected();
 
 // Does `addr` fall inside a compute staging range, i.e. guest memory the

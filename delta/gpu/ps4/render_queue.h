@@ -120,5 +120,7 @@ void FlushForWalkRead(render::Renderer& renderer,
                       u64 base,
                       u64 bytes,
                       const char* why);
+// Whether that read would have to wait for the renderer or the GPU.
+bool WalkReadWouldWait(u64 base, u64 bytes);
 
 }  // namespace gpu::ps4

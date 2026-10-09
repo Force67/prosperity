@@ -155,7 +155,7 @@ void CsSyncReport(double frames) {
             "(declined {:.1f}) vtxbridge={:.1f}x chunks={:.1f} "
             "guest-override={:.1f}x "
             "mirror-tiles={:.1f}x rt-variants={:.1f}x gds-imported={:.1f}x "
-            "guest-misses={:.1f}x gpu-indirect={:.1f}x",
+            "guest-misses={:.1f}x gpu-indirect={:.1f}x staged-indirect={:.1f}x",
             g_out_rt_submits / frames,
             g_tex_bridge_n / frames, g_tex_bridge_bytes / frames / 1e6,
             g_buf_bridge_n / frames, g_buf_bridge_bytes / frames / 1e6,
@@ -163,8 +163,9 @@ void CsSyncReport(double frames) {
             g_cs_chunk_splits / frames, g_guest_override_n / frames,
             g_guest_mirror_tiles / frames, g_cs_rt_variants_made / frames,
             g_gds_imported_n / frames, g_guest_misses_n / frames,
-            g_cs_indirect_n / frames);
+            g_cs_indirect_n / frames, g_indirect_staged_n / frames);
   g_guest_override_n = 0;
+  g_indirect_staged_n = 0;
   g_guest_mirror_tiles = g_cs_rt_variants_made = g_gds_imported_n = 0;
   g_guest_misses_n = g_cs_indirect_n = 0;
   g_buf_bridge_n = g_buf_bridge_bytes = g_buf_bridge_declined = 0;

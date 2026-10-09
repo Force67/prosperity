@@ -29,6 +29,7 @@ struct DrawPacket {
   u32 index_type = 0;     // IT_INDEX_TYPE: 0 = 16-bit, 1 = 32-bit
   u64 index_base = 0;     // IT_INDEX_BASE (DRAW_INDEX_2 carries its own)
   u64 indirect_base = 0;  // IT_SET_BASE(1): where indirect args live
+  u32 index_max = 0;      // IT_INDEX_BUFFER_SIZE
   u32 num_instances = 1;  // IT_NUM_INSTANCES
   u32 frame = 0;          // presented frames + 1, for the frame gates
 };

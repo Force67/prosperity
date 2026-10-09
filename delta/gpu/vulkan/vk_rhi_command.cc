@@ -493,6 +493,11 @@ void VulkanCommandList::DrawIndexedIndirect(rhi::Buffer* args, u64 offset) {
                            sizeof(VkDrawIndexedIndirectCommand));
 }
 
+void VulkanCommandList::DrawIndirect(rhi::Buffer* args, u64 offset) {
+  vkCmdDrawIndirect(cmd, Buf(args)->buffer, offset, 1,
+                    sizeof(VkDrawIndirectCommand));
+}
+
 void VulkanCommandList::DispatchBase(u32 bx,
                                      u32 by,
                                      u32 bz,

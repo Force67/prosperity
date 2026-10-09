@@ -588,15 +588,28 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   const bool capture_dispatch = trace::CaptureDispatchInputs(renderer, ci);
   // The group counts of an indirect dispatch stay on the GPU while a dispatch
   // output holds them: the GPU reads them when this one runs.
+  // Elsewhere they are read here when no GPU write is on its way to them,
+  // and copied on the GPU, behind that write, when one is.
   IndirectArgs indirect;
   u32 groups[3] = {ci.groups[0], ci.groups[1], ci.groups[2]};
   if (ci.indirect_args && !FindIndirectArgs(ci.indirect_args, indirect)) {
-    if (!FlushCsWritesRange(renderer, ci.indirect_args, 12, "indirect-cs") ||
-        !gpu::IsReadableRange(ci.indirect_args, 12))
+    if (!gpu::IsReadableRange(ci.indirect_args, 12))
       return CsDeclined(ci, "indirect");
-    std::memcpy(groups, reinterpret_cast<const void*>(ci.indirect_args), 12);
-    if (!groups[0] || !groups[1] || !groups[2])
-      return true;
+    if (Device().caps().dispatch_indirect &&
+        !GuestBytesSettled(ci.indirect_args, 12) &&
+        FlushCsWritesForGpu(renderer, ci.indirect_args, 12, "indirect-cs")) {
+      CsBatchBeginImpl();
+      if (g_cs_batch_open)
+        indirect.buffer = StageIndirectArgs(g_cs_list, ci.indirect_args, 12,
+                                            &indirect.offset);
+    }
+    if (!indirect.buffer) {
+      if (!FlushCsWritesRange(renderer, ci.indirect_args, 12, "indirect-cs"))
+        return CsDeclined(ci, "indirect");
+      std::memcpy(groups, reinterpret_cast<const void*>(ci.indirect_args), 12);
+      if (!groups[0] || !groups[1] || !groups[2])
+        return true;
+    }
   }
   // Only a range still holding dispatch output needs the guest's latest
   // writes before this runs; the rest revalidate against guest memory.

@@ -126,7 +126,7 @@ bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes) {
   g_cs_list->CopyBuffer(target, dst - page, g_gds.buf, offset, bytes);
   g_cs_list->Barrier(rhi::kAccessCopyWrite,
                      kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostRead);
-  g_pending_guest_writes.push_back({dst, dst + bytes, g_cs_batch_id});
+  NotePendingGuestWrite(dst, dst + bytes);
   NoteGuestWrite(dst, bytes);
   InvalidateTexRange(dst, bytes);
   g_gds_imported_n++;

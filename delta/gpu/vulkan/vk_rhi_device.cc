@@ -867,6 +867,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   caps_.texture_blit = true;
   caps_.dispatch_base = true;
   caps_.dispatch_indirect = true;
+  caps_.draw_indirect = true;
   caps_.timestamps =
       lim.timestampComputeAndGraphics && native.timestamp_valid_bits != 0;
   caps_.timestamp_period_ns = lim.timestampPeriod;

@@ -73,6 +73,12 @@ extern u64 g_buf_bridge_n, g_buf_bridge_bytes, g_buf_bridge_declined;
 extern u64 g_vtx_bridge_n;
 extern u64 g_guest_override_n, g_guest_mirror_tiles, g_cs_rt_variants_made;
 extern u64 g_gds_imported_n, g_guest_misses_n, g_cs_indirect_n;
+extern u64 g_indirect_staged_n;
+extern rhi::Buffer* g_indirect_ring;
+extern rhi::Buffer* g_predicate;
+extern u64 g_predicate_offset;
+extern u64 g_indirect_head, g_indirect_frame_n;
+extern int g_indirect_frame;
 extern u64 g_stage_ro_bytes, g_stage_rw_bytes, g_stage_img_bytes;
 extern u64 g_stage_guest_detile_bytes, g_stage_guest_detile_n;
 extern u64 g_mirror_wb_bytes, g_mirror_wb_n, g_mirror_own_bytes;
@@ -582,6 +588,9 @@ struct PendingGuestWrite {
 };
 
 extern base::Vector<PendingGuestWrite> g_pending_guest_writes;
+// A GPU write the open batch makes into the guest pages; the walk sees it
+// through the guest page table (GuestWriteMaybePending).
+void NotePendingGuestWrite(u64 base, u64 end);
 extern u64 g_publish_batch;
 extern u32 g_cs_batch_cur;
 extern u64 g_cs_submit_n;

@@ -49,19 +49,33 @@ class GuestPageTable {
 
   // GPU-dirty compute ranges touching each 64 KiB block. Written by the
   // renderer's owner, read from any thread.
-  void AddCsDirty(u64 first, u64 end, int delta);
+  void AddCsDirty(u64 first, u64 end, int delta) {
+    AddCount(kCsDirty, first, end, delta);
+  }
   // No GPU-dirty compute range touches [first, end).
-  bool CsClear(u64 first, u64 end) const;
+  bool CsClear(u64 first, u64 end) const {
+    return CountClear(kCsDirty, first, end);
+  }
+  // GPU writes still on their way to the guest pages, the same way.
+  void AddPendingWrite(u64 first, u64 end, int delta) {
+    AddCount(kPendingWrite, first, end, delta);
+  }
+  bool PendingWriteClear(u64 first, u64 end) const {
+    return CountClear(kPendingWrite, first, end);
+  }
 
  private:
   static constexpr u32 kChunkShift = 30;
   static constexpr u64 kChunks = 1ull << (47 - kChunkShift);
   static constexpr u64 kPagesPerChunk = 1ull << (kChunkShift - kPageShift);
   static constexpr u64 kBlocksPerChunk = 1ull << (kChunkShift - kBlockShift);
+  enum Count { kCsDirty, kPendingWrite, kCounts };
   struct Chunk {
     Page pages[kPagesPerChunk];
-    base::Atomic<u16> cs_dirty[kBlocksPerChunk];
+    base::Atomic<u16> counts[kCounts][kBlocksPerChunk];
   };
+  void AddCount(Count count, u64 first, u64 end, int delta);
+  bool CountClear(Count count, u64 first, u64 end) const;
 
   Chunk* ChunkAt(u64 address);
   const Chunk* FindChunk(u64 address) const {

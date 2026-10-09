@@ -46,7 +46,7 @@ GuestPageTable::Chunk* GuestPageTable::ChunkAt(u64 address) {
   return chunk;
 }
 
-void GuestPageTable::AddCsDirty(u64 first, u64 end, int delta) {
+void GuestPageTable::AddCount(Count count, u64 first, u64 end, int delta) {
   end = base::Min<u64>(end, kChunks << kChunkShift);
   if (first >= end)
     return;
@@ -55,12 +55,12 @@ void GuestPageTable::AddCsDirty(u64 first, u64 end, int delta) {
     Chunk* chunk = ChunkAt(block << kBlockShift);
     if (!chunk)
       return;
-    chunk->cs_dirty[block & (kBlocksPerChunk - 1)].fetch_add(
+    chunk->counts[count][block & (kBlocksPerChunk - 1)].fetch_add(
         static_cast<u16>(delta), base::memory_order_relaxed);
   }
 }
 
-bool GuestPageTable::CsClear(u64 first, u64 end) const {
+bool GuestPageTable::CountClear(Count count, u64 first, u64 end) const {
   if (first >= end)
     return true;
   if ((end - 1) >> kChunkShift >= kChunks)
@@ -72,7 +72,7 @@ bool GuestPageTable::CsClear(u64 first, u64 end) const {
       block = (block | (kBlocksPerChunk - 1)) + 1;
       continue;
     }
-    if (chunk->cs_dirty[block & (kBlocksPerChunk - 1)].load(
+    if (chunk->counts[count][block & (kBlocksPerChunk - 1)].load(
             base::memory_order_relaxed))
       return false;
     block++;

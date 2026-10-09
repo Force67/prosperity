@@ -579,6 +579,8 @@ struct Caps {
   bool dispatch_base = false;
   // CommandList::DispatchIndirect: group counts read by the GPU from a buffer.
   bool dispatch_indirect = false;
+  // CommandList::DrawIndirect and DrawIndexedIndirect.
+  bool draw_indirect = false;
   // One memory type is both device-local and host-cached: a kReadback buffer
   // is as fast for the GPU as kDevice.
   bool unified_memory = false;
