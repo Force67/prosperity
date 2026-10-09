@@ -59,7 +59,6 @@ extern base::Option<bool> kCsMergeOverlap;
 extern base::Option<bool> kCsKeepOverlap;
 extern base::Option<u32> kCsBatchCap;
 extern base::Option<bool> kCsTexBridgeTrace;
-extern base::Option<bool> kFrameChunks;
 extern base::Option<u64> kCsFlushTrace;
 extern base::Option<int> kCsOverlapTrace;
 extern base::Option<bool> kCsSyncReport;
@@ -218,17 +217,10 @@ u32 PackR11G11B10(const u8* src);
 // current (FlushCsWrites), not after every dispatch.
 struct CsRange {
   rhi::Buffer* buf = nullptr;
-  void* map = nullptr;
   u64 cap = 0;
-  // DELTA_GPU_CSVRAM: `buf` is in VRAM (what the shaders bind) and `map` is a
-  // separate host-cached mirror, moved across by DMA at the staging edges. The
-  // shaders then read and write at VRAM bandwidth instead of over PCIe, which
-  // is worth ~6x of the GPU time in a SotC frame; the CPU keeps a cached
-  // pointer, which the mapped-VRAM alternative does not.
-  rhi::Buffer* host_buf = nullptr;
+  // DELTA_GPU_CSVRAM: `buf` is in VRAM, where the shaders read and write at
+  // VRAM bandwidth instead of over PCIe (~6x of the GPU time in a SotC frame).
   bool device_local = false;
-  bool readback_pending = false;  // copy recorded, not yet waited on
-  bool mirror_current = false;    // map holds the buffer's contents
   u64 size = 0;                   // active staged (linear) byte size
   u64 guest_bytes = 0;            // guest footprint (hash + overlap checks)
   u64 hash = 0;                   // TexHash of guest content when last in sync
@@ -335,7 +327,6 @@ void StampView(rhi::Buffer* view,
                const TileTable* table,
                u64 seq);
 
-extern CsRange g_truth_bridge_scratch;
 extern u64 g_cs_scratch_owner;
 extern u64 g_cs_scratch_bytes;
 
@@ -344,16 +335,12 @@ bool CsFrameReferenced(const CsRange& e);
 
 extern u64 g_cs_free_bytes, g_cs_recycled_n;
 
-void RecordStagingCopy(rhi::CommandList* c,
-                       CsRange& e,
-                       u64 bytes,
-                       bool to_device);
 
 bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b);
 
 // A live image (color RT or depth target) aliasing a CS resource's guest
-// range. Both bridge directions (StageCsRangeFromRt / UploadCsRangeToRt) use
-// the same lookup, shape checks and barrier recipe.
+// range. Both bridge directions (StageCsRangeFromRtInFrame and
+// UploadCsRangeToRt) use the same lookup, shape checks and barrier recipe.
 struct CsAliasedImage {
   rhi::Texture* texture = nullptr;
   u32 w = 0, h = 0;
@@ -364,11 +351,6 @@ struct CsAliasedImage {
   bool is_stencil = false;
   u32 layers = 1;
 };
-
-bool FindCsAliasedImage(u64 base,
-                        CsAliasedImage& out,
-                        bool for_write = false,
-                        bool prefer_depth = false);
 
 bool LiveTargetOfSize(u64 base, u32 w, u32 h);
 
@@ -404,18 +386,6 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
                      const char* dir,
                      AliasedCopyPlan& plan);
 
-// A host-visible scratch the format-converting bridge copies through: the
-// image side is packed at the image's own element size, the staging side
-// holds the unpacked floats, and no image<->buffer copy converts between the
-// two in one step.
-struct CsBridgeScratch {
-  rhi::Buffer* buf = nullptr;
-  void* map = nullptr;
-  u64 cap = 0;
-};
-
-extern CsBridgeScratch g_bridge;
-
 extern bool g_cs_failed;
 
 // A float scratch image the packed-float bridge blits through: no
@@ -436,8 +406,6 @@ bool StageCsRangeFromRtInFrame(const ComputeInfo::Res& res, CsRange& e);
 
 extern base::HashSet<u64> g_rt_unbridgeable;
 u64 RtShapeKey(const ComputeInfo::Res& res);
-
-bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e);
 
 bool UploadCsRangeToRt(u64 base, CsRange& e);
 
@@ -697,7 +665,6 @@ struct WaitReaderScope {
 
 void CsBatchBeginImpl();
 
-void CsCopyStaging(CsRange& e, u64 bytes, bool to_device);
 
 extern u64 g_submit_why[6];
 

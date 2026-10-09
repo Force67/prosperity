@@ -410,7 +410,7 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
 // buffer no longer holds what guest memory does.
 bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
   *kept = false;
-  if (!e.buf || !e.device_local || e.imported || (base & 3))
+  if (!e.buf || e.imported || (base & 3))
     return false;
   // An image staged in the shader's layout is tiled again on the way out.
   // Block-compressed staging holds decoded texels, which cannot go back.

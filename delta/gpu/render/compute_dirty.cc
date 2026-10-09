@@ -236,7 +236,6 @@ void CsForgetGuestRange(u64 base, u64 bytes) {
     e.staged_clean = false;
     e.last_validated_frame = -1;
     e.hash = 0;
-    e.mirror_current = false;
     e.rt_sourced = false;
   }
 }

@@ -53,82 +53,6 @@ bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b) {
          a.pow2_pad == b.pow2_pad;
 }
 
-// True when `base` names a live target the compute bridges apply to. The
-// UNDEFINED-submitted-layout case (target created this frame, no submission
-// yet) reports false: there is nothing real to copy either way yet.
-// `for_write`: the dispatch produces the surface, so an image nothing has
-// rendered into yet is still the one to fill. Its layout anchor may be missing:
-// a parked variant (see ActivateRtVariant) has no submitted-layout stamp, but
-// one untouched this frame has nothing recorded against it either, so the
-// layout its last frame left it in IS the one on the GPU.
-// `prefer_depth`: the resource is a single 32-bit channel, which is what a
-// depth surface looks like to a dispatch. One address can hold a colour target
-// AND a depth target (Astro Bot's bloom pyramid and its half-res scene depth
-// share 0x53a500000 in different passes); the colour one answered first, so the
-// depth downsample landed in the bloom image.
-bool FindCsAliasedImage(u64 base,
-                        CsAliasedImage& out,
-                        bool for_write,
-                        bool prefer_depth) {
-  if (prefer_depth) {
-    auto depth_it = g_depths.find(base);
-    if (depth_it != g_depths.end() && depth_it->second.texture) {
-      DepthTarget& depth = depth_it->second;
-      rhi::TextureState anchor = depth.submitted_layout;
-      if (anchor == rhi::TextureState::kUndefined && for_write &&
-          depth.last_frame != g_frame.num)
-        anchor = depth.layout;
-      out = {depth.texture, depth.w, depth.h, 4,           rhi::kAspectDepth,
-             anchor,        true,    false,   depth.layers};
-      return out.submitted != rhi::TextureState::kUndefined;
-    }
-  }
-  auto rt_it = g_rts.find(base);
-  if (rt_it != g_rts.end()) {
-    RTarget& rt = rt_it->second;
-    if (!rt.texture || rt.is_depth || (!for_write && !rt.ever_rendered))
-      return false;
-    rhi::TextureState anchor = rt.submitted_layout;
-    if (anchor == rhi::TextureState::kUndefined && for_write &&
-        rt.last_frame != g_frame.num)
-      anchor = rt.layout;
-    out = {rt.texture,        rt.w,   rt.h,  FormatBytes(rt.fmt),
-           rhi::kAspectColor, anchor, false, false};
-    return out.submitted != rhi::TextureState::kUndefined;
-  }
-  auto depth_it = g_depths.find(base);
-  if (depth_it != g_depths.end()) {
-    DepthTarget& depth = depth_it->second;
-    if (!depth.texture)
-      return false;
-    out = {depth.texture,
-           depth.w,
-           depth.h,
-           4,  // kDepthFormat == D32_SFLOAT
-           rhi::kAspectDepth,
-           depth.submitted_layout,
-           true,
-           false,
-           depth.layers};
-    return out.submitted != rhi::TextureState::kUndefined;
-  }
-  for (auto& [depth_base, depth] : g_depths) {
-    (void)depth_base;
-    if (depth.stencil_base != base || !depth.texture)
-      continue;
-    out = {depth.texture,
-           depth.w,
-           depth.h,
-           1,
-           rhi::kAspectStencil,
-           depth.submitted_stencil_layout,
-           false,
-           true};
-    return out.submitted != rhi::TextureState::kUndefined;
-  }
-  return false;
-}
-
 bool LiveTargetOfSize(u64 base, u32 w, u32 h) {
   const auto rt = g_rts.find(base);
   if (rt != g_rts.end()) {
@@ -172,23 +96,6 @@ u64 AliasedImageRenderSerial(u64 base) {
       return depth.render_serial;
   }
   return UINT64_MAX;
-}
-
-int AliasedImageLastRender(u64 base) {
-  auto rt = g_rts.find(base);
-  if (rt != g_rts.end())
-    return rt->second.last_frame;
-  auto d = g_depths.find(base);
-  if (d != g_depths.end())
-    return d->second.last_frame;
-  return INT_MAX;
-}
-
-// Draws into the target at `base` are still in the frame's open chunk: a
-// bridge submitted now would execute before them.
-bool RenderedInOpenChunk(u64 base) {
-  return kFrameChunks && AliasedImageLastRender(base) == g_frame.num &&
-         g_frame.draws != g_frame.draws_at_chunk;
 }
 
 // A barrier on the aliased image's aspect over every layer. Global ALL/ALL
@@ -258,231 +165,10 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
   return false;
 }
 
-CsBridgeScratch g_bridge;
-
-bool EnsureBridgeScratch(u64 bytes) {
-  if (g_bridge.cap >= bytes)
-    return true;
-  Device().Destroy(g_bridge.buf);
-  g_bridge = CsBridgeScratch{};
-  const u64 cap = (bytes + 0xFFFF) & ~u64(0xFFFF);
-  g_bridge.buf = CreateCsBuffer(cap, rhi::kBufferCopySrc | rhi::kBufferCopyDst,
-                                rhi::MemoryKind::kReadback);
-  if (!g_bridge.buf)
-    return false;
-  g_bridge.map = g_bridge.buf->mapped();
-  g_bridge.cap = cap;
-  return true;
-}
-
-// Record one bridge copy (image->buffer or buffer->image), submit and wait.
 // Device is lost: every later submit fails regardless of what it records, so
 // work that only waits must not pretend its failure is a per-staging miss and
-// keep recording. Declared before its first possible setter (RunAliasedCopy).
+// keep recording.
 bool g_cs_failed = false;
-
-bool RunAliasedCopy(const CsAliasedImage& img,
-                    const ComputeInfo::Res& res,
-                    CsRange& e,
-                    bool to_image,
-                    const AliasedCopyPlan& plan) {
-  gcn::TextureLayout32 tiled, linear;
-  if (!BuildCsImageLayouts(res, tiled, linear))
-    return false;
-  const auto& level = linear.mips[0];
-  const u64 texels = static_cast<u64>(level.pitch) * plan.h;
-  const u64 copy_bytes = texels * res.stage_elem_bytes;
-  if (level.offset + copy_bytes > e.cap)
-    return false;
-  // Layers sit one stored slice apart in the linear staging layout.
-  const u64 layer_bytes = static_cast<u64>(level.pitch) * level.stored_height *
-                          res.stage_elem_bytes;
-  if (res.layers > 1 && (level.size != layer_bytes * res.layers ||
-                         level.offset + level.size > e.cap || plan.unpack ||
-                         plan.widen || img.is_stencil))
-    return false;
-  // The converting path copies at the IMAGE's element size, through a scratch
-  // the CPU then unpacks into (or packs out of) the staged layout.
-  const u64 packed_bytes = texels * img.elem_bytes;
-  const bool convert = plan.unpack || plan.widen;
-  // The staging lives in VRAM: an upload that packs its texels on the CPU
-  // has nothing current to pack (CsRefreshRtInFrame converts on the GPU).
-  if (to_image && (convert || (img.is_stencil && !e.truth)))
-    return false;
-  if (convert && !EnsureBridgeScratch(packed_bytes))
-    return false;
-  // A truth range holds no linear pixels: the copy goes through the tiling
-  // scratch, detiled from the truth before an upload and retiled into it
-  // after a readback. Only the direct copies are bridged that way.
-  const bool truth = e.truth;
-  if (truth && convert)
-    return false;
-  // A stencil truth goes through the tiling shader's packed form: one byte
-  // per texel on the linear side, which is what the stencil aspect copies.
-  const bool stencil_truth = truth && img.is_stencil;
-  // Only the tiling shader converts float depth to UNORM16.
-  if (plan.depth16 && !truth)
-    return false;
-  gcn::TextureLayout32 t_tiled, t_linear, s_linear;
-  const TileTable* table = nullptr;
-  if (truth && !BuildCsImageLayouts(res, t_tiled, t_linear))
-    return false;
-  if (stencil_truth &&
-      (res.layers > 1 ||
-       !gcn::BuildTextureLayout32(s_linear, res.width, res.height, res.pitch, 1,
-                                  1, 8, res.pow2_pad, 1) ||
-       !(table = GetTileTable(t_tiled, s_linear, /*packed=*/true))))
-    return false;
-  if (truth && !stencil_truth && !(table = GetTileTable(t_tiled, t_linear)))
-    return false;
-  if (truth && !CsRangeEnsureBuffer(g_truth_bridge_scratch, res.size))
-    return false;
-  rhi::Buffer* const copy_buf = convert ? g_bridge.buf
-                                : truth ? g_truth_bridge_scratch.buf
-                                        : e.buf;
-  auto* scratch = static_cast<u32*>(g_bridge.map);
-  // The host copy is about to be written: whatever reads it has to be done.
-  const bool host_write =
-      (!to_image && (convert || level.offset != 0 || copy_bytes < res.size)) ||
-      (img.is_stencil && !truth);
-  if (host_write && !CsBatchWaitRange(e, kSyncStageHazard))
-    return false;
-  // Host-zero any padding an image->buffer copy does not cover (host writes
-  // are made available by the submission).
-  if (!to_image && (convert || level.offset != 0 || copy_bytes < res.size))
-    std::memset(e.map, 0, res.size);
-  if (img.is_stencil && !truth) {
-    if (level.offset || texels > e.cap)
-      return false;
-    std::memset(e.map, 0, res.size);
-  }
-
-  base::String where;
-  base::FormatTo(where, "bridge base={:#x}", (unsigned long long)res.base);
-  if (!QueueCheck(where.c_str())) {
-    BASE_LOGI("gpuvk", "cs {} bridge copy failed: queue check (base={:#x})",
-              to_image ? "upload" : "staging", (unsigned long long)res.base);
-    g_cs_failed = true;
-    Device().ReportDeviceLoss();
-    return false;
-  }
-  // Whatever the batch does with the buffer, the dispatch that wrote it or
-  // one still reading it, reaches the queue first.
-  if (!CsBatchSubmit())
-    return false;
-  rhi::CommandList* c = BeginImmediate();
-  if (!c)
-    return false;
-  // A frame chunk submitted just before this may still read the buffer.
-  c->Barrier(kAccessAll, kAccessAll);
-  // The dispatch result already lives in VRAM. An ordinary buffer->image copy
-  // must read it there, without uploading the identical host readback again.
-  // Stencil packing changes the host bytes, and image->buffer staging may have
-  // zeroed padding, so those directions still need the host preparation copy.
-  // Format conversion uses the separate scratch buffer.
-  if (!truth && !convert && (!to_image || img.is_stencil))
-    RecordStagingCopy(c, e, e.cap, /*to_device=*/true);
-  if (truth && to_image)
-    RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, copy_buf, res.size,
-                      /*detile=*/true, 1, plan.layers, plan.depth16);
-  if (truth && !to_image &&
-      (plan.w < res.width || plan.h < res.height || plan.layers < res.layers ||
-       stencil_truth)) {
-    // The retile below covers the whole mip; texels the copy leaves alone
-    // must not carry a previous conversion's bytes into the truth.
-    if (stencil_truth)
-      c->FillBuffer(copy_buf, 0, (s_linear.size + 3) & ~u64(3), 0);
-    else
-      c->FillBuffer(copy_buf, level.offset,
-                    layer_bytes * base::Max(res.layers, 1u), 0);
-    c->Barrier(rhi::kAccessCopyWrite, rhi::kAccessCopyWrite);
-  }
-  // Chain from, and restore, the SUBMITTED layout: this copy executes
-  // before the current frame's still-recording barriers, whose layout chain
-  // must stay intact.
-  const rhi::TextureState transfer =
-      to_image ? rhi::TextureState::kCopyDst : rhi::TextureState::kCopySrc;
-  if (to_image) {
-    // The buffer was last written by the dispatch (submitted before) or the
-    // host; make those writes available to the transfer.
-    c->Barrier(rhi::kAccessComputeWrite | rhi::kAccessHostWrite,
-               rhi::kAccessCopyRead);
-  }
-  AliasedImageBarrier(c, img, img.submitted, transfer);
-  rhi::BufferTextureCopy copy;
-  copy.buffer_offset = (img.is_stencil || convert) ? 0 : level.offset;
-  copy.row_length = level.pitch;
-  copy.image_height = level.stored_height;
-  if (stencil_truth) {
-    copy.buffer_offset = s_linear.mips[0].offset;
-    copy.row_length = s_linear.mips[0].pitch;
-    copy.image_height = s_linear.mips[0].stored_height;
-  }
-  copy.region.aspect = img.aspect;
-  copy.region.layers = plan.layers;
-  copy.region.width = plan.w;
-  copy.region.height = plan.h;
-  if (to_image)
-    c->CopyBufferToTexture(img.texture, copy_buf, &copy, 1);
-  else
-    c->CopyTextureToBuffer(copy_buf, img.texture, &copy, 1);
-  if (truth && !to_image) {
-    RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, copy_buf, res.size,
-                      /*detile=*/false, 1, base::Max(res.layers, 1u),
-                      plan.depth16);
-    e.mirror_current = false;
-  }
-  AliasedImageBarrier(c, img, transfer, img.submitted);
-  if (!to_image)
-    c->Barrier(rhi::kAccessCopyWrite,
-               rhi::kAccessComputeRead | rhi::kAccessHostRead);
-  const bool ok = EndImmediate(c, "imm.aliased_copy");
-  g_out_rt_submits++;
-  if (!ok) {
-    // A device loss is not a "shape mismatch": the queue is dead and every
-    // fallback the caller would keep recording with is already doomed. Latch
-    // the failure so the caller stops instead of building more work on a
-    // lost device.
-    BASE_LOGI("gpuvk", "cs {} bridge copy failed (base={:#x})",
-              to_image ? "upload" : "staging", (unsigned long long)res.base);
-    g_cs_failed = true;
-    Device().ReportDeviceLoss();
-    return false;
-  }
-  if (trace::Recording())
-    trace::RecordBridge(to_image ? "upload" : "stage", res.base,
-                        reinterpret_cast<u64>(img.texture), plan.w, plan.h);
-  if (img.is_stencil && !truth) {
-    auto* packed = static_cast<u8*>(e.map);
-    auto* expanded = static_cast<u32*>(e.map);
-    for (u64 i = texels; i-- > 0;)
-      expanded[i] = packed[i];
-  }
-  if (convert && !to_image) {
-    gcn::DetileParallelRows(plan.h, [&](u32 y0, u32 y1) {
-      for (u32 y = y0; y < y1; y++) {
-        u8* row = static_cast<u8*>(e.map) + level.offset +
-                  static_cast<u64>(y) * level.pitch * res.stage_elem_bytes;
-        for (u32 x = 0; x < plan.w; x++) {
-          const u64 i = static_cast<u64>(y) * level.pitch + x;
-          u8* texel = row + static_cast<u64>(x) * res.stage_elem_bytes;
-          if (plan.unpack)
-            UnpackR11G11B10(scratch[i], texel);
-          else {
-            u32 expanded = 0;
-            std::memcpy(
-                &expanded,
-                static_cast<const u8*>(g_bridge.map) + i * img.elem_bytes,
-                img.elem_bytes);
-            std::memcpy(texel, &expanded, 4);
-          }
-        }
-      }
-    });
-    CsCopyStaging(e, e.cap, /*to_device=*/true);
-  }
-  return true;
-}
 
 base::Vector<BridgeFloatImage> g_bridge_float_images;
 u64 g_in_frame_bridge_n = 0;
@@ -556,17 +242,17 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   const CsAliasedImage& img = t.img;
   const u32 layers = base::Max(res.layers, 1u);
   g_rec_why = !e.buf                                      ? "no-buf"
-              : plan.widen                                ? "widen"
-              : plan.depth16                              ? "depth16"
+              : (e.truth && plan.widen)                   ? "truth-widen"
+              : (!e.truth && plan.depth16)                ? "depth16"
               : t.layout == rhi::TextureState::kUndefined ? "layout-undef"
               : (e.truth && plan.unpack)                  ? "truth-unpack"
-              : (e.truth && img.is_stencil)               ? "truth-stencil"
                                                           : "layers";
-  if (!kCsInFrameBridge || !e.buf || plan.widen || plan.depth16 ||
-      t.layout == rhi::TextureState::kUndefined ||
-      (e.truth && (plan.unpack || img.is_stencil)) ||
+  if (!kCsInFrameBridge || !e.buf || (e.truth && plan.widen) ||
+      (!e.truth && plan.depth16) ||
+      t.layout == rhi::TextureState::kUndefined || (e.truth && plan.unpack) ||
       (layers == 1 ? plan.layers != 1 || img.layers != 1
-                   : plan.layers > layers || plan.unpack || img.is_stencil))
+                   : plan.layers > layers || plan.unpack || img.is_stencil ||
+                         plan.widen))
     return false;
   g_rec_why = "late";
   gcn::TextureLayout32 tiled, linear;
@@ -584,23 +270,27 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
       static_cast<u64>(level.pitch) * plan.h * res.stage_elem_bytes;
   const TileTable* table = nullptr;
   rhi::Buffer* linear_buf = e.buf;
-  // A staged stencil holds a dword per texel: the plane is copied out packed,
-  // one byte a texel, and the tiling shader widens it into the staging, which
-  // the host path did on the CPU behind a wait for the whole queue.
-  const bool widen_stencil = img.is_stencil && !e.truth;
+  // A staged stencil or 8/16-bit colour target holds a dword per texel: the
+  // plane is copied out packed and the tiling shader widens it into the
+  // staging. A stencil truth is retiled from the packed plane.
+  const bool widen_packed = !e.truth && (img.is_stencil || plan.widen);
+  const bool packed_truth = e.truth && img.is_stencil;
+  const u32 packed_elem = img.is_stencil ? 1 : res.elem_bytes;
   gcn::TextureLayout32 packed;
-  if (widen_stencil &&
-      (res.elem_bytes != 1 || res.stage_elem_bytes != 4 ||
+  if ((widen_packed || packed_truth) &&
+      (res.elem_bytes != packed_elem ||
+       (widen_packed && res.stage_elem_bytes != 4) || plan.layers != 1 ||
        !gcn::BuildTextureLayout32(packed, res.width, res.height, res.pitch, 1,
-                                  1, 8, res.pow2_pad, 1) ||
-       !(table = GetTileTable(packed, linear)) ||
+                                  1, 8, res.pow2_pad, packed_elem) ||
+       !(table = packed_truth ? GetTileTable(tiled, packed, /*packed=*/true)
+                              : GetTileTable(packed, linear)) ||
        !(linear_buf = AcquireScratch(packed.size)) || res.size > e.cap))
     return false;
-  if (e.truth) {
+  if (e.truth && !packed_truth) {
     if (!(table = GetTileTable(tiled, linear)) ||
         !(linear_buf = AcquireScratch(res.size)))
       return false;
-  } else if (!widen_stencil &&
+  } else if (!widen_packed && !packed_truth &&
              (level.offset + copy_bytes > e.cap || res.size > e.cap)) {
     return false;
   }
@@ -622,7 +312,7 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   AliasedImageBarrier(c, img, t.layout, kSrc);
   // Staging bytes the copy does not reach read as zero, as the host path's
   // cleared mirror did.
-  if (widen_stencil) {
+  if (widen_packed) {
     c->FillBuffer(e.buf, 0, res.size & ~u64(3), 0);
     c->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
   } else if (level.offset || copy_bytes < res.size || plan.w < level.pitch) {
@@ -633,7 +323,7 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   copy.buffer_offset = level.offset;
   copy.row_length = level.pitch;
   copy.image_height = level.stored_height;
-  if (widen_stencil) {
+  if (widen_packed || packed_truth) {
     copy.buffer_offset = packed.mips[0].offset;
     copy.row_length = packed.mips[0].pitch;
     copy.image_height = packed.mips[0].stored_height;
@@ -660,19 +350,120 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   } else {
     c->CopyTextureToBuffer(linear_buf, img.texture, &copy, 1);
   }
-  if (widen_stencil)
+  if (widen_packed)
     RecordImageTiling(c, *table, linear_buf, 0, packed.size, e.buf, res.size,
                       /*detile=*/true, 1, 1);
+  else if (packed_truth)
+    RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, linear_buf,
+                      packed.size, /*detile=*/false, 1, 1);
   else if (table)
     RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, linear_buf, res.size,
-                      /*detile=*/false, 1, layers);
+                      /*detile=*/false, 1, layers, plan.depth16);
   AliasedImageBarrier(c, img, kSrc, t.layout);
   c->Barrier(rhi::kAccessCopyWrite, kAccessAll);
   e.frame_ref = g_frame.num;
-  e.mirror_current = false;
-  e.readback_pending = false;
   g_in_frame_bridge_n++;
   return CsSplitFrameChunk();
+}
+
+// The reverse of RecordRtStageInFrame: a dispatch's output copied into the
+// live target it aliases, on the frame's list behind the draws recorded so
+// far (between frames on the batch, ahead of the next frame).
+bool RecordRtUploadInFrame(const InFrameTarget& t,
+                           const ComputeInfo::Res& res,
+                           CsRange& e,
+                           const AliasedCopyPlan& plan) {
+  const CsAliasedImage& img = t.img;
+  if (!kCsInFrameBridge || !e.buf || plan.layers != 1 ||
+      (e.truth && (plan.unpack || plan.widen)) ||
+      (!e.truth && plan.depth16) || t.layout == rhi::TextureState::kUndefined)
+    return false;
+  gcn::TextureLayout32 tiled, linear, packed;
+  if (!BuildCsImageLayouts(res, tiled, linear))
+    return false;
+  // A stencil plane and 8/16-bit colour go in packed: from a truth by a
+  // detile straight to the packed form, from a widened staging by a retile.
+  const bool narrow = img.is_stencil || plan.widen;
+  const u32 packed_elem = img.is_stencil ? 1 : res.elem_bytes;
+  const TileTable* table = nullptr;
+  rhi::Buffer* src = e.buf;
+  if (narrow) {
+    if (res.elem_bytes != packed_elem ||
+        (!e.truth && res.stage_elem_bytes != 4) ||
+        !gcn::BuildTextureLayout32(packed, res.width, res.height, res.pitch, 1,
+                                   1, 8, res.pow2_pad, packed_elem) ||
+        !(table = e.truth ? GetTileTable(tiled, packed, /*packed=*/true)
+                          : GetTileTable(packed, linear)) ||
+        !(src = AcquireScratch((packed.size + 3) & ~u64(3))))
+      return false;
+  } else if (e.truth) {
+    if (!(table = GetTileTable(tiled, linear)) ||
+        !(src = AcquireScratch(res.size)))
+      return false;
+  } else if (linear.mips[0].offset +
+                 u64(linear.mips[0].pitch) * plan.h * res.stage_elem_bytes >
+             e.cap) {
+    return false;
+  }
+  rhi::Texture* float_image = nullptr;
+  if (plan.unpack && (!BlitsBetween(rhi::Format::kRGBA32Float, t.fmt) ||
+                      !(float_image = GetBridgeFloatImage(plan.w, plan.h))))
+    return false;
+  if (!g_frame.recording) {
+    CsBatchBeginImpl();
+    if (!CsBatchOpenOutOfFrame())
+      return false;
+  }
+  EndRegion();
+  rhi::CommandList* const c = g_frame.recording ? g_frame.list : g_cs_list;
+  c->Barrier(kAccessAll, kAccessComputeRW | kAccessCopyRW);
+  const u64 packed_bytes = (packed.size + 3) & ~u64(3);
+  if (narrow && e.truth)
+    RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, src, packed_bytes,
+                      /*detile=*/true, 1, 1);
+  else if (narrow)
+    RecordImageTiling(c, *table, src, 0, packed_bytes, e.buf, res.size,
+                      /*detile=*/false, 1, 1);
+  else if (e.truth)
+    RecordImageTiling(c, *table, e.buf, 0, e.guest_bytes, src, res.size,
+                      /*detile=*/true, 1, 1, plan.depth16);
+  const auto& level = narrow ? packed.mips[0] : linear.mips[0];
+  rhi::BufferTextureCopy copy;
+  copy.buffer_offset = level.offset;
+  copy.row_length = level.pitch;
+  copy.image_height = level.stored_height;
+  copy.region.aspect = img.aspect;
+  copy.region.width = plan.w;
+  copy.region.height = plan.h;
+  constexpr rhi::TextureState kDst = rhi::TextureState::kCopyDst;
+  if (plan.unpack) {
+    rhi::TextureBarrier fb;
+    fb.texture = float_image;
+    fb.before = rhi::TextureState::kUndefined;
+    fb.after = kDst;
+    c->Barrier(0, 0, &fb, 1);
+    c->CopyBufferToTexture(float_image, src, &copy, 1);
+    fb.before = kDst;
+    fb.after = rhi::TextureState::kCopySrc;
+    c->Barrier(0, 0, &fb, 1);
+    rhi::TextureRegion region;
+    region.width = plan.w;
+    region.height = plan.h;
+    AliasedImageBarrier(c, img, t.layout, kDst);
+    c->BlitTexture(img.texture, region, float_image, region,
+                   rhi::Filter::kNearest);
+  } else {
+    AliasedImageBarrier(c, img, t.layout, kDst);
+    c->CopyBufferToTexture(img.texture, src, &copy, 1);
+  }
+  AliasedImageBarrier(c, img, kDst, t.layout);
+  c->Barrier(rhi::kAccessCopyWrite, kAccessAll);
+  e.rt_seq = e.write_seq;
+  e.frame_ref = g_frame.num;
+  if (e.pending_batch && g_frame.recording)
+    g_cs_chunk_needs_batch = true;
+  g_in_frame_bridge_n++;
+  return true;
 }
 
 // The live colour or depth target at `base` the bridge would pick (the
@@ -753,25 +544,6 @@ u64 RtShapeKey(const ComputeInfo::Res& res) {
          res.layers;
 }
 
-// The host-side bridge: the buffer must be idle.
-bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
-  DELTA_ZONE("gpu.cs_stage_from_rt");
-  // The draws that produced it this frame must be on the queue before the
-  // copy is, or the dispatch reads last frame's pixels.
-  if (RenderedInOpenChunk(res.base) && !CsSplitFrameChunk())
-    return false;
-  CsAliasedImage img;
-  if (!FindCsAliasedImage(res.base, img, /*for_write=*/false,
-                          /*prefer_depth=*/res.dfmt == 4))
-    return false;
-  AliasedCopyPlan plan;
-  if (!PlanAliasedCopy(img, res, "reads", plan)) {
-    g_rt_unbridgeable.insert(RtShapeKey(res));
-    return false;
-  }
-  return RunAliasedCopy(img, res, e, /*to_image=*/false, plan);
-}
-
 // The reverse: a CS result written to a range that a live render/depth target
 // aliases must also land in the image, because draws sample the image,
 // never guest memory (SotC's exposure/bloom compute writes the adapted scene
@@ -780,7 +552,6 @@ bool StageCsRangeFromRt(const ComputeInfo::Res& res, CsRange& e) {
 // dispatch produced, so upload straight from it. Guest memory was refreshed
 // by the caller either way; a shape mismatch just leaves the image stale.
 bool UploadCsRangeToRt(u64 base, CsRange& e) {
-  CsAliasedImage img;
   if (!e.image_staging)
     return true;
   // The frame list already copied this revision into the target
@@ -794,13 +565,10 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
   // A base rendered at several geometries: the dispatch names which one it
   // writes, and only the live image answers to the address.
   ActivateWrittenRtVariant(base, e.res.width, e.res.height);
-  // Draws into the target earlier this frame would otherwise execute after
-  // this upload and paint over the dispatch's result.
-  if (RenderedInOpenChunk(base) && !CsSplitFrameChunk())
-    return false;
-  if (!FindCsAliasedImage(base, img, /*for_write=*/true,
-                          /*prefer_depth=*/e.res.dfmt == 4))
+  InFrameTarget live;
+  if (!LiveInFrameTarget(base, /*prefer_depth=*/e.res.dfmt == 4, live))
     return true;  // nothing to refresh
+  const CsAliasedImage& img = live.img;
   AliasedCopyPlan plan;
   if (!PlanAliasedCopy(img, e.res, "writes", plan)) {
     // The guest reused this address with an incompatible image layout. The
@@ -817,16 +585,12 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
     }
     return true;
   }
-  if (!RunAliasedCopy(img, e.res, e, /*to_image=*/true, plan))
+  if (!RecordRtUploadInFrame(live, e.res, e, plan))
     return false;
   if (!img.is_depth) {
     RTarget& rt = g_rts[base];
     rt.ever_rendered = true;  // CS content is real content
     rt.last_frame = g_frame.num;
-    // The copy chained from and restored the anchor, so that is the layout
-    // on the GPU now whether or not a frame end had stamped it.
-    if (rt.submitted_layout == rhi::TextureState::kUndefined)
-      rt.submitted_layout = img.submitted;
   } else if (!img.is_stencil) {
     // A depth surface a dispatch produced is this frame's content: the first
     // pass to bind it must LOAD it, where an untouched depth target is

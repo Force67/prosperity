@@ -232,13 +232,19 @@ struct GuestWindowOwner {
   bool mirror;
 };
 
-void RefreshGuestWindow(u64 base, CsRange& e, u64 n) {
-  // Armed before the copy, so a CPU write racing it is reported.
+// The guest's bytes copied into the range's buffer on the GPU.
+bool RefreshGuestWindow(u64 base, CsRange& e, u64 n) {
+  // Armed before the copy, which runs later: a CPU write from here on is
+  // reported.
   e.wt_clean = GuestWriteTracker().Arm(base, n);
-  std::memcpy(e.map, reinterpret_cast<const void*>(base), n);
-  CsCopyStaging(e, n, /*to_device=*/true);
+  CsBatchBeginImpl();
+  if (!g_cs_batch_open || !RecordGuestRead(g_cs_list, base, n, e.buf))
+    return false;
+  g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW);
+  MarkPending(e);
   e.last_validated_frame = g_frame.num;
   e.staged_stamp = ++g_cs_dirty_stamp;
+  return true;
 }
 
 // A buffer for guest memory a pointer-chasing dispatch reached outside every
@@ -266,7 +272,10 @@ void MaterializeGuestRange(u64 address) {
   e.size = e.guest_bytes = kMissChunk;
   e.last_used_frame = g_frame.num;
   IndexCsRange(base, kMissChunk);
-  RefreshGuestWindow(base, e, kMissChunk);
+  if (!RefreshGuestWindow(base, e, kMissChunk)) {
+    EraseCsRange(g_cs_ranges.find(base));
+    return;
+  }
   g_guest_misses_n++;
 }
 
@@ -299,8 +308,6 @@ void MarkWrittenWindows(u64 cs_addr,
     e.write_seq++;
     e.dirty_stamp = ++g_cs_dirty_stamp;
     e.dirty_render_serial = g_render_serial;
-    e.mirror_current = false;
-    e.readback_pending = false;
     BumpTextureEpoch();
   }
 }
@@ -400,10 +407,12 @@ bool GuestWindows(const ComputeInfo& ci,
     u64 address = 0, n = c.skip + c.n;
     bool mirror = false;
     if (!e.image_staging || e.truth) {
-      if (!e.gpu_dirty && !e.wt_clean && e.last_validated_frame != g_frame.num)
-        RefreshGuestWindow(c.base, e,
-                           e.guest_bytes ? base::Min(e.size, e.guest_bytes)
-                                         : e.size);
+      if (!e.gpu_dirty && !e.wt_clean &&
+          e.last_validated_frame != g_frame.num &&
+          !RefreshGuestWindow(c.base, e,
+                              e.guest_bytes ? base::Min(e.size, e.guest_bytes)
+                                            : e.size))
+        continue;
       address = e.buf->address();
     } else if (e.gpu_dirty) {
       address = GuestMirror(e, n);
@@ -804,16 +813,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     const u64 base = ci.res[i].base;
     const u64 guest_bytes =
         ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
-    // Staging copies guest bytes on the CPU: a GPU write still on its way
-    // there has to land first. An imported range reads them in queue order,
-    // and a buffer that is already current reads none.
-    const auto guest_settled = [&] {
-      if (g_pending_guest_writes.empty())
-        return true;
-      const auto own = g_cs_ranges.find(base);
-      return (own != g_cs_ranges.end() && own->second.imported) ||
-             WaitPendingGuestWrites(base, guest_bytes);
-    };
     const bool truth_i = TruthEligible(ci.res[i]);
     u64 folds[ComputeInfo::kMaxResources];
     u32 fold_count = 0;
@@ -858,14 +857,11 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           s.gpu_dirty = false;
           s.last_validated_frame = -1;
           s.hash = 0;
-          s.mirror_current = false;
           MarkPending(s);
           IndexDirtySpan(pbase, base, RangeEnd(base, n));
           parent->write_seq++;
           parent->dirty_stamp = ++g_cs_dirty_stamp;
           parent->dirty_render_serial = g_render_serial;
-          parent->mirror_current = false;
-          parent->readback_pending = false;
           BumpTextureEpoch();
         }
       }
@@ -1070,12 +1066,9 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       UnindexDirtyRange(base, e.guest_bytes);
       e.gpu_dirty = false;
       e.cpu_writes.clear();
-      e.readback_pending = false;
       g_wb_why["reshape-superseded"]++;
     }
     if (!same_shape && e.gpu_dirty) {
-      if (!guest_settled())
-        return CsDeclined(ci, "guest-write");
       const u64 trs = NowNs();
       g_wb_why["reshape"]++;
       g_wb_why_bytes += e.size;
@@ -1134,8 +1127,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       e.cpu_writes.clear();
       e.hash = 0;
       e.last_validated_frame = -1;
-      e.mirror_current = false;
-      e.readback_pending = false;
       g_wb_why["rt-superseded"]++;
     }
     const bool rt_stale = kCsRtCache && e.rt_sourced && e.last_rt_frame >= 0 &&
@@ -1203,7 +1194,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       }
       if (rt_attempt) {
         const u64 tr = NowNs();
-        e.rt_sourced = staged_in_frame || StageCsRangeFromRt(ci.res[i], e);
+        e.rt_sourced = staged_in_frame;
         if (e.rt_sourced)
           e.staged_clean =
               !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
@@ -1252,18 +1243,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
             staged = StageImageOnGpu(ci.res[i], e);
           }
         }
-        // Pages the device cannot import (read-only mappings) reach the GPU
-        // through the range's own host buffer: the one CPU touch.
-        if (!staged && g_cs_batch_open && e.host_buf && e.map &&
-            (stage_bytes || !ci.res[i].image_staging) && guest_settled() &&
-            gpu::IsReadableRange(base, copy_bytes)) {
-          std::memcpy(e.map, reinterpret_cast<const void*>(base), copy_bytes);
-          if (!stage_bytes && sz[i] > copy_bytes)
-            std::memset(static_cast<u8*>(e.map) + copy_bytes, 0,
-                        sz[i] - copy_bytes);
-          CsCopyStaging(e, stage_bytes ? stage_bytes : sz[i], /*to_device=*/true);
-          staged = true;
-        }
         if (!staged)
           return CsDeclined(ci, "stage");
         // Armed once the read is recorded and the release of any page it
@@ -1275,7 +1254,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                            kAccessComputeRW);
         g_cs_batch_access.erase(e.buf);
         MarkPending(e);
-        e.mirror_current = false;
         e.rt_sourced = false;
         e.staged_stamp = ++g_cs_dirty_stamp;
       }
@@ -1361,7 +1339,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       s.gpu_dirty = false;
       s.last_validated_frame = -1;
       s.hash = 0;
-      s.mirror_current = false;
       MarkPending(s);
       IndexDirtySpan(base, folds[k], RangeEnd(folds[k], n));
       if (!e.gpu_dirty) {
@@ -1373,8 +1350,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       e.dirty_stamp = ++g_cs_dirty_stamp;
       e.dirty_render_serial = g_render_serial;
       BumpTextureEpoch();
-      e.mirror_current = false;
-      e.readback_pending = false;
       MarkPending(e);
       g_truth_fold_n++;
     }

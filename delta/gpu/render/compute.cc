@@ -86,10 +86,6 @@ DELTA_OPTION(bool, kCsKeepOverlap, "DELTA_GPU_CS_KEEP_OVERLAP", true);
 DELTA_OPTION(u32, kCsBatchCap, "DELTA_GPU_CS_BATCH_CAP", 8);
 // Why a sampled surface a dispatch wrote still takes the guest round trip.
 DELTA_OPTION(bool, kCsTexBridgeTrace, "DELTA_GPU_CS_TEXBRIDGE_TRACE", false);
-// A compute bridge to or from a target drawn into this frame submits the
-// frame's open chunk first (SubmitFrameChunk), so it executes after those
-// draws instead of a frame early. =0 restores the old one-frame latency.
-DELTA_OPTION(bool, kFrameChunks, "DELTA_GPU_FRAME_CHUNKS", true);
 DELTA_OPTION(u64, kCsFlushTrace, "DELTA_GPU_CSFLUSHTRACE", 0);
 // DELTA_GPU_CSOVERLAP=<frame>: from that frame on, name the binding and the
 // dirty range behind the next "overlap" writebacks (a dispatch input
@@ -341,7 +337,6 @@ rhi::CommandList* g_cs_list = nullptr;
 // Whether the open batch records into a list of its own (between frames).
 // The linear side of a bridge copy for a truth range (its own buffer holds
 // tiled bytes), used only inside the bridge's synchronous submit.
-CsRange g_truth_bridge_scratch;
 u64 g_cs_scratch_owner = 0;  // the dispatch or bridge being recorded
 u64 g_cs_scratch_bytes = 0;
 
@@ -360,8 +355,6 @@ bool CsFrameReferenced(const CsRange& e) {
 // and 20-60 ms of driver time.
 struct CsFreeBuffer {
   rhi::Buffer* buf = nullptr;
-  rhi::Buffer* host_buf = nullptr;
-  void* map = nullptr;
   u64 cap = 0;
   bool device_local = false;
 };
@@ -371,30 +364,6 @@ u64 g_cs_free_bytes = 0, g_cs_recycled_n = 0;
 // Move a split range between its host mirror and its VRAM buffer, bracketed by
 // barriers against the dispatches on either side. Recorded rather than
 // submitted, so the caller decides which command list carries it.
-void RecordStagingCopy(rhi::CommandList* c,
-                       CsRange& e,
-                       u64 bytes,
-                       bool to_device) {
-  if (!e.device_local || !e.host_buf || !e.buf || !bytes)
-    return;
-  if (bytes > e.cap)
-    bytes = e.cap;
-  // TRANSFER on both sides, not just compute and host. A batch stages the same
-  // range more than once (GTA:SA restages some buffers ~170 times in one cs
-  // batch), and a barrier that names only COMPUTE|HOST as its source leaves
-  // copy-after-copy on the same buffer unordered. The later copy may then land
-  // first and the dispatch reads the OLDER guest snapshot.
-  c->Barrier(kAccessComputeRW | rhi::kAccessHostWrite | kAccessCopyRW,
-             to_device ? rhi::kAccessCopyWrite : rhi::kAccessCopyRead);
-  if (to_device)
-    c->CopyBuffer(e.buf, 0, e.host_buf, 0, bytes);
-  else
-    c->CopyBuffer(e.host_buf, 0, e.buf, 0, bytes);
-  // Global, so it also covers host_buf, which the readback direction writes.
-  c->Barrier(rhi::kAccessCopyWrite,
-             kAccessComputeRW | rhi::kAccessHostRead | kAccessCopyRW);
-}
-
 // The GDS scratchpad, created once. Zeroed at creation; after that it is the
 // title's own counter store, so nothing here resets it.
 bool EnsureGdsBuffer() {
@@ -433,10 +402,8 @@ base::HashMap<u64, CsRange>::iterator EraseCsRange(
 bool CsReleaseMemory(const CsRange& keep) {
   const auto drop_free_list = [] {
     const bool any = !g_cs_free.empty();
-    for (const CsFreeBuffer& f : g_cs_free) {
+    for (const CsFreeBuffer& f : g_cs_free)
       Device().Destroy(f.buf);
-      Device().Destroy(f.host_buf);
-    }
     g_cs_free.clear();
     g_cs_free_bytes = 0;
     return any;
@@ -466,18 +433,14 @@ bool CsReleaseMemory(const CsRange& keep) {
 bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
   if (e.buf && e.cap >= size)
     return true;
-  e.map = nullptr;
   if (CsFrameReferenced(e) || e.pending_batch) {
     g_cs_frame_retired.push_back(e.buf);
-    g_cs_frame_retired.push_back(e.host_buf);
     e.frame_ref = -1;
     e.pending_batch = false;
   } else {
     Device().Destroy(e.buf);
-    Device().Destroy(e.host_buf);
   }
   e.buf = nullptr;
-  e.host_buf = nullptr;
   e.device_local = false;
   e.imported = false;
   if (!e.imported)
@@ -489,8 +452,6 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
     if (f.cap != cap || f.device_local != static_cast<bool>(kCsVram))
       continue;
     e.buf = f.buf;
-    e.host_buf = f.host_buf;
-    e.map = f.map;
     e.device_local = f.device_local;
     e.cap = cap;
     g_cs_free_bytes -= cap;
@@ -500,15 +461,15 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
     return true;
   }
   // CopyDst: RT-backed inputs are staged by an image->buffer copy on the
-  // queue (StageCsRangeFromRt) instead of a CPU memcpy from guest memory.
+  // queue (StageCsRangeFromRtInFrame) instead of a CPU memcpy from guest
+  // memory.
   // Vertex: a draw may fetch a dispatch's output in place (CsVertexBuffer).
   u32 usage = rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferVertex |
               rhi::kBufferIndirect;
   // A pointer-chasing dispatch may read the range in place (GuestOverrides).
   if (Device().caps().buffer_address)
     usage |= rhi::kBufferAddress;
-  if (kCsVram)
-    usage |= rhi::kBufferCopySrc;  // readback of results
+  usage |= rhi::kBufferCopySrc;  // the write-back copies out of it
   const bool split = kCsVram && SplitVram();
   const rhi::MemoryKind memory =
       split ? rhi::MemoryKind::kDevice : rhi::MemoryKind::kReadback;
@@ -516,18 +477,7 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
   if (!e.buf &&
       (!CsReleaseMemory(e) || !(e.buf = CreateCsBuffer(cap, usage, memory))))
     return false;
-  // VRAM cannot be mapped usefully (uncached reads are ~100 MB/s), so the CPU
-  // side gets its own host-cached buffer and the two are joined by DMA.
-  if (split) {
-    e.host_buf = CreateCsBuffer(cap, rhi::kBufferCopySrc | rhi::kBufferCopyDst,
-                                rhi::MemoryKind::kReadback);
-    if (!e.host_buf)
-      return false;
-    e.map = e.host_buf->mapped();
-    e.device_local = true;
-  } else {
-    e.map = e.buf->mapped();
-  }
+  e.device_local = split;
   e.cap = cap;
   g_cs_range_bytes += cap;
   return true;
@@ -544,16 +494,12 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
 // than removing it (SotC gains ~7% overall), and no title that currently
 // renders through the compute path could be used to gate the change.
 bool CsRangeRename(CsRange& e, u64 size) {
-  e.map = nullptr;
   if (e.buf)
     g_cs_frame_retired.push_back(e.buf);
-  if (e.host_buf)
-    g_cs_frame_retired.push_back(e.host_buf);
   e.frame_ref = -1;
   e.pending_batch = false;
   g_cs_range_bytes -= e.cap;
   e.buf = nullptr;
-  e.host_buf = nullptr;
   e.device_local = false;
   e.cap = 0;
   return CsRangeEnsureBuffer(e, size);
@@ -565,19 +511,16 @@ void CsRangeDestroy(CsRange& e) {
     g_cs_frame_retired.push_back(e.mirror);
   if (!e.imported && !CsFrameReferenced(e) && !e.pending_batch && e.buf &&
       e.cap && g_cs_free_bytes + e.cap <= (256ull << 20)) {
-    g_cs_free.push_back({e.buf, e.host_buf, e.map, e.cap, e.device_local});
+    g_cs_free.push_back({e.buf, e.cap, e.device_local});
     g_cs_free_bytes += e.cap;
     g_cs_range_bytes -= e.cap;
     e = CsRange{};
     return;
   }
-  if (CsFrameReferenced(e) || e.pending_batch) {
+  if (CsFrameReferenced(e) || e.pending_batch)
     g_cs_frame_retired.push_back(e.buf);
-    g_cs_frame_retired.push_back(e.host_buf);
-  } else {
+  else
     Device().Destroy(e.buf);
-    Device().Destroy(e.host_buf);
-  }
   g_cs_range_bytes -= e.cap;
   e = CsRange{};
 }
@@ -644,13 +587,11 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_prebuilt);
   guest::ResetResource(g_cs_stage);
   guest::ResetResource(g_cs_list);
-  guest::ResetResource(g_truth_bridge_scratch);
   guest::ResetResource(g_cs_scratch_owner);
   guest::ResetResource(g_cs_scratch_bytes);
   guest::ResetResource(g_cs_frame_retired);
   guest::ResetResource(g_cs_free);
   guest::ResetResource(g_cs_free_bytes);
-  guest::ResetResource(g_bridge);
   guest::ResetResource(g_cs_failed);
   guest::ResetResource(g_bridge_float_images);
   guest::ResetResource(g_rt_unbridgeable);

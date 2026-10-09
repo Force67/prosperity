@@ -287,15 +287,14 @@ void ReportGpuMemory() {
   u64 scratch = 0;
   for (const CsScratch& c : g_cs_scratch)
     scratch += c.cap;
-  const u64 tiling = g_truth_bridge_scratch.cap + g_bridge.cap;
   u64 heap_used = 0, heap_budget = 0;
   Device().QueryMemoryBudget(&heap_used, &heap_budget);
   constexpr double kMb = 1024.0 * 1024.0;
   BASE_LOGI("memstat",
             "f{} device heaps {:.0f}/{:.0f}MB | tex {:.0f}MB "
-            "scratch {:.0f}MB tiling {:.0f}MB",
+            "scratch {:.0f}MB",
             g_frame.num, heap_used / kMb, heap_budget / kMb,
-            gpu::render::g_tex_image_bytes / kMb, scratch / kMb, tiling / kMb);
+            gpu::render::g_tex_image_bytes / kMb, scratch / kMb);
   BASE_LOGI("memstat",
             "f{} cs ranges={} {:.0f}MB (dirty {:.0f} truth {:.0f} cold {:.0f}) "
             "free {:.0f}MB | rt {} {:.0f}MB parked {:.0f}MB | depth {:.0f}MB",

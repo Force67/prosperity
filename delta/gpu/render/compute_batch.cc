@@ -153,11 +153,6 @@ void CsBatchFinalize(CsBatch& b) {
     if (e.batch_id > g_cs_batch_done)
       return false;
     e.pending_batch = false;
-    // Every readback recorded into it is in the host mirror now.
-    if (e.readback_pending) {
-      e.readback_pending = false;
-      e.mirror_current = true;
-    }
     return true;
   });
   b.submitted = false;
@@ -247,21 +242,6 @@ void CsBatchBeginImpl() {
     g_cs_list->Barrier(kAccessAll, kAccessAll);
   }
   g_cs_batch_open = true;
-}
-
-// Record the staging move into the batch, and mark the range as referenced by
-// it so a later grow/rename does not pull the buffer out from under the copy.
-void CsCopyStaging(CsRange& e, u64 bytes, bool to_device) {
-  if (!e.device_local || !e.host_buf || !e.buf || !bytes)
-    return;
-  CsBatchBeginImpl();
-  RecordStagingCopy(g_cs_list, e, bytes, to_device);
-  g_cs_batch_access.erase(e.buf);
-  MarkPending(e);
-  if (to_device)
-    e.mirror_current = true;  // both sides now hold what the CPU just wrote
-  else
-    e.readback_pending = true;
 }
 
 // Put the open batch on the queue and go on recording into the next slot.
