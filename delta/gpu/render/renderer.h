@@ -102,6 +102,9 @@ bool FlushCsWritesForGpu(Renderer& renderer,
 // Before the CPU reads [base, base+bytes): wait for GPU writes on their way
 // there. False on a lost device.
 bool SettleGuestWrites(u64 base, u64 bytes, const char* why);
+// A descriptor read a GPU write is still on its way to: true when the bytes
+// the last write left may be taken without waiting (checked once it lands).
+bool SpeculateGuestRead(u64 base, u64 bytes);
 // The frame-end flush: FlushCsWrites, except that an image range only the GPU
 // reads stays in VRAM, and the open dispatch batch is submitted so the frame's
 // own command buffer lands behind it. `writeback` false submits only.

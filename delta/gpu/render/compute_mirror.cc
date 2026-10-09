@@ -132,14 +132,16 @@ bool GuestImportable(u64 base, u64 bytes) {
   return true;
 }
 
-// Guest bytes copied by the GPU into `dst`: out of the mirror where a block is
-// the mirror's, straight out of the imported pages elsewhere. Pages the device
-// cannot import (read-only mappings) go up through an upload buffer, the one
-// place the CPU touches them. False when the bytes are not readable at all.
+// Guest bytes copied by the GPU into `dst` at `dst_off`: out of the mirror
+// where a block is the mirror's, straight out of the imported pages elsewhere.
+// Pages the device cannot import (read-only mappings) go up through an upload
+// buffer, the one place the CPU touches them. False when the bytes are not
+// readable at all.
 bool RecordGuestRead(rhi::CommandList* list,
                      u64 base,
                      u64 bytes,
-                     rhi::Buffer* dst) {
+                     rhi::Buffer* dst,
+                     u64 dst_off) {
   const auto owned = [](u64 at) {
     return InMirror(at) && MirrorOwned(at & ~(kMirrorBlock - 1));
   };
@@ -152,7 +154,7 @@ bool RecordGuestRead(rhi::CommandList* list,
       return kMirrorSource;
     return GuestImportable(at, block_end(at) - at) ? kImport : kUpload;
   };
-  list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
+  list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
   for (u64 at = base; at < base + bytes;) {
     const Source from = source(at);
     u64 end = block_end(at);
@@ -160,14 +162,15 @@ bool RecordGuestRead(rhi::CommandList* list,
       end = block_end(end);
     const u64 n = end - at;
     if (from == kMirrorSource) {
-      list->CopyBuffer(dst, at - base, g_mirror, MirrorOffset(at), n);
+      list->CopyBuffer(dst, dst_off + at - base, g_mirror, MirrorOffset(at),
+                       n);
     } else if (from == kImport) {
       for (u64 piece = at; piece < end;) {
         u64 import_base = 0;
         rhi::Buffer* import = MirrorImport(piece, &import_base);
         const u64 to = base::Min(end, import_base + import->desc().size);
-        list->CopyBuffer(dst, piece - base, import, piece - import_base,
-                         to - piece);
+        list->CopyBuffer(dst, dst_off + piece - base, import,
+                         piece - import_base, to - piece);
         piece = to;
       }
     } else {
@@ -188,7 +191,8 @@ bool RecordGuestRead(rhi::CommandList* list,
         upload = {own, 0, static_cast<u8*>(own->mapped())};
       }
       std::memcpy(upload.map, reinterpret_cast<const void*>(at), n);
-      list->CopyBuffer(dst, at - base, upload.buffer, upload.offset, n);
+      list->CopyBuffer(dst, dst_off + at - base, upload.buffer, upload.offset,
+                       n);
     }
     at = end;
   }
@@ -353,49 +357,50 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
 }
 
 bool MirrorCopyInGuest(u64 base, u64 bytes) {
-  const u64 page = base::Max(Device().caps().sparse_page, kMirrorBlock);
-  const u64 lo = MirrorOffset(base) & ~(page - 1);
-  const u64 hi = (MirrorOffset(base) + bytes + page - 1) & ~(page - 1);
-  if (!Device().CommitSparse(g_mirror, lo, hi - lo))
-    return false;
   CsBatchBeginImpl();
   if (!g_cs_batch_open)
     return false;
-  // Only the blocks the CPU may have changed: runs of them, one copy each.
-  // Whole blocks where they are mapped, as a block may become the GPU's. A
-  // block the GPU owns holds the newest bytes already.
+  // Only the blocks the CPU may have changed: runs of them, backed and copied
+  // once each. Whole blocks where they are mapped, as a block may become the
+  // GPU's. A block the GPU owns, or one watched since its copy, holds the
+  // newest bytes already, and was backed then.
+  const u64 page = base::Max(Device().caps().sparse_page, kMirrorBlock);
   const u64 end = base + bytes;
   u64 run = 0, run_end = 0;
   bool in_run = false;
+  const auto copy_run = [&] {
+    in_run = false;
+    const u64 lo = MirrorOffset(run) & ~(page - 1);
+    const u64 hi = (MirrorOffset(run_end - 1) + page) & ~(page - 1);
+    return Device().CommitSparse(g_mirror, lo, hi - lo) &&
+           MirrorCopy(run, run_end - run, /*to_guest=*/false);
+  };
   for (u64 block = base & ~(kMirrorBlock - 1); block < end;
        block += kMirrorBlock) {
-    const bool whole = gpu::IsReadableRangeCached(block, kMirrorBlock);
-    const u64 at = whole ? block : base::Max(block, base);
-    const u64 to = whole ? block + kMirrorBlock : base::Min(end, block + kMirrorBlock);
     bool fresh = MirrorOwned(block);
     if (!fresh) {
       const bool cpu_dirty = OwnAt(block).cpu_dirty.exchange(0);
       fresh = g_mirror_clean.count(block) && !cpu_dirty;
     }
-    if (!fresh && in_run && at != run_end) {
-      if (!MirrorCopy(run, run_end - run, /*to_guest=*/false))
+    if (fresh) {
+      if (in_run && !copy_run())
         return false;
-      in_run = false;
+      continue;
     }
-    if (!fresh) {
-      if (!in_run)
-        run = at;
-      in_run = true;
-      run_end = to;
-    } else if (in_run) {
-      if (!MirrorCopy(run, run_end - run, /*to_guest=*/false))
-        return false;
-      in_run = false;
-    }
-    if (!fresh && whole && GuestWriteTracker().Arm(block, kMirrorBlock))
+    const bool whole = gpu::IsReadableRangeCached(block, kMirrorBlock);
+    const u64 at = whole ? block : base::Max(block, base);
+    const u64 to =
+        whole ? block + kMirrorBlock : base::Min(end, block + kMirrorBlock);
+    if (in_run && at != run_end && !copy_run())
+      return false;
+    if (!in_run)
+      run = at;
+    in_run = true;
+    run_end = to;
+    if (whole && GuestWriteTracker().Arm(block, kMirrorBlock))
       g_mirror_clean.insert(block);
   }
-  return !in_run || MirrorCopy(run, run_end - run, /*to_guest=*/false);
+  return !in_run || copy_run();
 }
 
 // A dirty range written back on the GPU: into the mirror, which owns the

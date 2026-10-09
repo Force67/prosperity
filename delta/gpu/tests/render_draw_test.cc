@@ -2125,6 +2125,7 @@ TEST(VkDraw, SrgbScanoutPreservesEncodedBytes) {
           bgra ? gpu::rhi::Format::kBGRA8Unorm : gpu::rhi::Format::kRGBA8Unorm);
       ASSERT_TRUE(parked);
       parked->dcc_base = draw.mrt_dcc_base[0];
+      gpu::render::NoteMetadataBase(parked->dcc_base);
       const u32 clear = 0;
       gpu::render::NoteDccWrite(draw.mrt_dcc_base[0], 4, &clear);
     }
@@ -2494,6 +2495,7 @@ TEST(GcnCompute, ExpandedHtileAvoidsReadbackAndRejectsChangedKernel) {
         reinterpret_cast<u64>(memory + 204800 + trial * 4096), 8, 8);
     ASSERT_NE(depth, nullptr);
     depth->htile_base = base;
+    gpu::render::NoteMetadataBase(base);
     depth->clear_pending = false;
     gpu::Regs regs;
     const u64 pc = reinterpret_cast<u64>(code);

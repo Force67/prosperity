@@ -240,6 +240,62 @@ static bool FlushDirtyRanges(Renderer& renderer,
                              u64 bytes,
                              const char* why);
 
+// The descriptor replay reads tables a dispatch rewrites every frame, almost
+// always with the same bytes. Waiting for each rewrite to land stalled DeS's
+// walk 3.5 times a frame; instead the bytes the previous rewrite left are taken
+// and compared once this one lands. An address whose bytes changed waits from
+// then on, as does any address on its first read.
+DELTA_OPTION(bool, kSpeculateReads, "DELTA_GPU_SPECULATE_READS", true);
+struct SpeculatedRead {
+  u64 base, bytes, batch;
+  u8 seen[64];
+};
+base::Vector<SpeculatedRead> g_speculated;
+base::HashSet<u64> g_spec_known, g_spec_volatile;
+u64 g_spec_misses = 0;
+const guest::SessionReset g_spec_reset([] {
+  guest::ResetResource(g_speculated);
+  guest::ResetResource(g_spec_known);
+  guest::ResetResource(g_spec_volatile);
+  guest::ResetResource(g_spec_misses);
+});
+
+bool SpeculateGuestRead(u64 base, u64 bytes) {
+  if (!kSpeculateReads || !bytes || bytes > sizeof(SpeculatedRead::seen) ||
+      g_speculated.size() >= 4096 || g_spec_volatile.count(base) ||
+      CsRangeDirtyOverlapping(base, bytes))
+    return false;
+  const u64 batch = PendingGuestWriteBatch(base, bytes);
+  if (!batch || g_spec_known.insert(base).second ||
+      !gpu::IsReadableRangeCached(base, bytes))
+    return false;
+  // A block the GPU owns is read through a fault that waits anyway.
+  for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
+       block += kMirrorBlock)
+    if (InMirror(block) && MirrorOwned(block))
+      return false;
+  SpeculatedRead& r = g_speculated.emplace_back();
+  r.base = base;
+  r.bytes = bytes;
+  r.batch = batch;
+  std::memcpy(r.seen, reinterpret_cast<const void*>(base), bytes);
+  return true;
+}
+
+void CheckSpeculatedReads() {
+  base::EraseIf(g_speculated, [](const SpeculatedRead& r) {
+    if (r.batch > g_cs_batch_done)
+      return false;
+    if (std::memcmp(r.seen, reinterpret_cast<const void*>(r.base), r.bytes)) {
+      g_spec_volatile.insert(r.base);
+      if (g_spec_misses++ < 8)
+        BASE_LOGI("gpuvk", "speculated read {:#x}+{} changed; it waits now",
+                  (unsigned long long)r.base, (unsigned long long)r.bytes);
+    }
+    return true;
+  });
+}
+
 bool FlushCsWritesForGpu(Renderer& renderer,
                          u64 base,
                          u64 bytes,

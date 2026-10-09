@@ -69,6 +69,18 @@ DELTA_OPTION(u64, kBindTrace, "DELTA_GPU_BINDTRACE", 0);
 DELTA_OPTION(bool, kRawBufTrace, "DELTA_GPU_RAWBUF", false);
 DELTA_OPTION(bool, kSelfTrace, "DELTA_GPU_SELFTRACE", false);
 DELTA_OPTION(bool, kTightCbuf, "DELTA_GPU_TIGHTCBUF", false);
+
+// The bytes a cbuffer upload takes: the planned size widened to the rest of
+// its page, which a shader indexing its constants reads past.
+u32 CbufCopyBytes(u64 base, u32 size) {
+  const u32 planned = base::Min(size, gpu::render::kCbufWindow);
+  const u64 page_end = (base + 0x1000) & ~u64{0xFFF};
+  return kTightCbuf ? planned
+                    : base::Max(planned, static_cast<u32>(base::Min<u64>(
+                                             gpu::render::kCbufWindow,
+                                             page_end - base)));
+}
+
 // DELTA_GPU_CBSTAGED=<vs addr> (or 1 for every draw): the bytes that reached
 // the ring slot the descriptor points at (what the SPIR-V actually loads,
 // as opposed to the guest buffer the CPU-side trace prints).
@@ -1354,15 +1366,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   if (EnsureCbufRing())
     for (u32 i = 0; i < cbufs_used; i++) {
       const auto& cb = d.cbufs[i];
-      const u32 planned = base::Min(cb.size, kCbufWindow);
-      if (!planned)
+      if (!base::Min(cb.size, kCbufWindow))
         continue;
-      const u64 page_end = (cb.base + 0x1000) & ~u64{0xFFF};
-      const u32 n = kTightCbuf
-                        ? planned
-                        : base::Max(planned, static_cast<u32>(base::Min<u64>(
-                                                 kCbufWindow,
-                                                 page_end - cb.base)));
+      const u32 n = CbufCopyBytes(cb.base, cb.size);
       const u64 rev = CsBufferRevision(cb.base, n);
       if (!rev)
         continue;
@@ -1392,7 +1398,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       const u32 readable = base::Min(cb.size, kCbufWindow);
       if (cb_gpu_off[i] == u64(-1) && readable &&
           IsReadableThisFrame(cb.base, readable) &&
-          !FlushCsWritesRange(renderer, cb.base, kCbufWindow, "cb"))
+          !FlushCsWritesRange(renderer, cb.base,
+                              CbufCopyBytes(cb.base, cb.size), "cb"))
         return Decline(kNoRecomp);
     }
     if (rp->raw_bufs)
@@ -1812,11 +1819,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // earlier this frame is byte-identical, and the draw just rebinds it.
     u32 cache_n = 0;
     if (have_cbuf) {
-      const u32 planned = cb.size < kCbufWindow ? cb.size : kCbufWindow;
-      const u64 page_end = (cb.base + 0x1000) & ~u64{0xFFF};
-      const u32 avail =
-          static_cast<u32>(base::Min<u64>(kCbufWindow, page_end - cb.base));
-      cache_n = kTightCbuf ? planned : base::Max(planned, avail);
+      cache_n = CbufCopyBytes(cb.base, cb.size);
       if (kRingDedup) {
         const u64 cached = StagedOffset(g_ubo_staged.Find(cb.base, cache_n));
         if (cached != u64(-1)) {
@@ -1828,7 +1831,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     u8* cb_dst = g_ring.ubo_map + next;
     u32 n;
     if (have_cbuf &&
-        (!FlushCsWritesRange(renderer, cb.base, kCbufWindow, "cb") ||
+        (!FlushCsWritesRange(renderer, cb.base, cache_n, "cb") ||
          g_frame.list != list))
       return Decline(kNoRecomp);
     if (have_cbuf) {

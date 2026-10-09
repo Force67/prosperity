@@ -363,6 +363,12 @@ bool GpuIndirectArgs(u64, u64) {
 u64 GuestWritePublishBatch() {
   return 0;
 }
+bool SpeculateGuestRead(u64, u64) {
+  return false;
+}
+bool FlushCsWritesForGpu(Renderer&, u64, u64, const char*) {
+  return true;
+}
 bool WaitBatch(u64) {
   return true;
 }

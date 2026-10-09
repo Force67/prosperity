@@ -251,6 +251,9 @@ bool PreserveCsDepthBeforeClear(u64 base);
 // the metadata and never touches pixels); turned into the lazy clear at the
 // next bind. `fill` = the dword when the packet carries it; a compute write is
 // read back at the next bind.
+// Every DCC/CMASK/HTILE base a target was given, so a write NoteDccWrite sees
+// can be told apart from one under no metadata without a walk of the targets.
+void NoteMetadataBase(u64 base);
 void NoteDccWrite(u64 base, u64 bytes, const u32* fill);
 void NoteExpandedHtile(u64 base);
 

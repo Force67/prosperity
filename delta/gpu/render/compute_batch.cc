@@ -145,6 +145,7 @@ void CsBatchFinalize(CsBatch& b) {
   base::EraseIf(g_pending_guest_writes, [](const PendingGuestWrite& w) {
     return w.batch <= g_cs_batch_done;
   });
+  CheckSpeculatedReads();
   base::EraseIf(g_cs_pending, [](CsRange* range) {
     CsRange& e = *range;
     if (!e.pending_batch)

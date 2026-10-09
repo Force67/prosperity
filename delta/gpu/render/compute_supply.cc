@@ -464,14 +464,28 @@ CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base) {
 
 namespace gpu::render {
 
+// The newest batch still writing into [base, base+bytes) of the guest pages.
+u64 PendingGuestWriteBatch(u64 base, u64 bytes) {
+  u64 batch = 0;
+  for (const PendingGuestWrite& w : g_pending_guest_writes)
+    if (w.base < base + bytes && base < w.end)
+      batch = base::Max(batch, w.batch);
+  return batch;
+}
+
 u64 CsBufferRevision(u64 base, u64 bytes) {
   u64 range_base;
   const CsRange* e = BufferSource(base, bytes, &range_base);
   if (e)
     return e->write_seq;
-  // Mirror revisions run in their own high half, apart from a range's.
+  // Mirror revisions run in their own high half, apart from a range's, and
+  // writes still on their way to the guest pages in the quarter below.
   const u64 mirror = MirrorRevision(base, bytes);
-  return mirror ? mirror | (1ull << 63) : 0;
+  if (mirror)
+    return mirror | (1ull << 63);
+  const u64 pending =
+      g_frame.recording ? PendingGuestWriteBatch(base, bytes) : 0;
+  return pending ? pending | (1ull << 62) : 0;
 }
 
 bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
@@ -479,6 +493,19 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   CsRange* const found = BufferSource(base, bytes, &range_base);
   if (!found && dst && MirrorRevision(base, bytes))
     return MirrorSupplyBuffer(base, bytes, dst, dst_off);
+  // Read on the GPU after the batch that writes them, not on the CPU after a
+  // wait for it.
+  if (!found && dst && g_frame.recording &&
+      PendingGuestWriteBatch(base, bytes)) {
+    EndRegion();
+    rhi::CommandList* const list = g_frame.list;
+    if (!RecordGuestRead(list, base, bytes, dst, dst_off))
+      return false;
+    list->Barrier(rhi::kAccessCopyWrite, kAccessAll);
+    g_buf_bridge_n++;
+    g_buf_bridge_bytes += bytes;
+    return true;
+  }
   if (!found || !dst)
     return false;
   CsRange& e = *found;

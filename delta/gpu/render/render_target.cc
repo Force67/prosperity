@@ -1025,8 +1025,24 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
   return best;
 }
 
+base::Map<u64, bool>& MetadataBases() {
+  static base::Map<u64, bool> bases;
+  static const guest::SessionReset reset_bases(
+      [] { guest::ResetResource(bases); });
+  return bases;
+}
+
+void NoteMetadataBase(u64 base) {
+  if (base)
+    MetadataBases()[base] = true;
+}
+
 void NoteDccWrite(u64 base, u64 bytes, const u32* fill) {
   if (!base || !bytes)
+    return;
+  const auto& bases = MetadataBases();
+  const auto it = bases.lower_bound(base);
+  if (it == bases.end() || it->first >= base + bytes)
     return;
   const auto note = [&](RTarget& rt) {
     if (!rt.dcc_base || rt.dcc_base < base || rt.dcc_base >= base + bytes)
@@ -1447,6 +1463,7 @@ bool BeginRegion(const u64* mrt_base,
     targets[i]->cb_info = mrt_info[i];
     if (mrt_dcc_base && mrt_dcc_base[i]) {
       targets[i]->dcc_base = mrt_dcc_base[i];
+      NoteMetadataBase(mrt_dcc_base[i]);
       targets[i]->dcc_is_cmask = meta_cmask;
     }
     if (meta_cmask && mrt_dcc_base && mrt_dcc_base[i])
@@ -1567,8 +1584,10 @@ bool BeginRegion(const u64* mrt_base,
                 (unsigned long)depth_base);
   }
   if (dt) {
-    if (depth_htile_base)
+    if (depth_htile_base) {
       dt->htile_base = depth_htile_base;
+      NoteMetadataBase(depth_htile_base);
+    }
     // A clear has to be able to write, so a read-only pass asks the CPU.
     if (dt->htile_clear_pending && !dt->htile_code_known && !depth_read_only &&
         CsClearPredicate(dt->htile_base, 0, true, &dt->clear_pred,

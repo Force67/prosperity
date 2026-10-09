@@ -59,118 +59,6 @@ bool InitTiling() {
   return s.pipe != nullptr;
 }
 
-bool ConvertGfx10ImageImpl(const gcn::TextureLayout32& tiled,
-                           const gcn::TextureLayout32& linear,
-                           const void* src,
-                           void* dst,
-                           bool detile,
-                           rhi::Buffer* linear_buffer = nullptr,
-                           bool pack11 = false) {
-  const bool expanded = (tiled.elem_bytes == 1 || tiled.elem_bytes == 2) &&
-                        linear.elem_bytes == 4;
-  if (!g_backend.device || g_cs_failed ||
-      (pack11 && (tiled.elem_bytes != 4 || linear.elem_bytes != 16)))
-    return false;
-  const u64 max_range = Device().caps().max_storage_buffer_range;
-  if ((!expanded && !pack11 &&
-       (tiled.elem_bytes < 4 || tiled.elem_bytes != linear.elem_bytes)) ||
-      linear.tiling_idx != 8 || tiled.layers != linear.layers ||
-      tiled.mip_levels != linear.mip_levels || tiled.size > max_range ||
-      linear.size > max_range || tiled.size > UINT32_MAX ||
-      linear.size > UINT32_MAX)
-    return false;
-  base::Vector<u32> table, terms;
-  base::Vector<gcn::ImageTilingParams> params;
-  for (u32 mip = 0; mip < tiled.mip_levels; mip++) {
-    const auto& t = tiled.mips[mip];
-    const auto& l = linear.mips[mip];
-    u32 mask;
-    u64 stride;
-    if (t.width != l.width || t.height != l.height ||
-        !gcn::BuildSeparableAddressTable(tiled, mip, terms, mask, stride))
-      return false;
-    params.push_back({t.width, t.height, pack11 ? 1u : linear.elem_bytes / 4,
-                      static_cast<u32>(table.size()), mask,
-                      static_cast<u32>(t.offset), static_cast<u32>(stride),
-                      static_cast<u32>(l.offset / 4), l.pitch,
-                      l.pitch * l.stored_height * (linear.elem_bytes / 4),
-                      detile ? 1u : 0u, tiled.elem_bytes, 0u, 0u,
-                      pack11 ? 1u : 0u});
-    table.insert(table.end(), terms.begin(), terms.end());
-  }
-  if (params.empty() || !InitTiling())
-    return false;
-  auto& s = g_tiling;
-  const u64 sizes[] = {tiled.size, linear.size, table.size() * 4};
-  rhi::BindingWrite writes[3];
-  for (u32 i = 0; i < 3; i++) {
-    const bool bound = i == 1 && linear_buffer;
-    if (!bound &&
-        (!CsRangeEnsureBuffer(s.buffers[i], sizes[i]) || !s.buffers[i].map))
-      return false;
-    writes[i].binding = i;
-    writes[i].buffer = bound ? linear_buffer : s.buffers[i].buf;
-    writes[i].range = sizes[i];
-  }
-  const u32 input = detile ? 0 : 1, output = detile ? 1 : 0;
-  // Whichever half is bound to memory the shader reaches directly needs no
-  // copy: the linear side is the caller's own buffer, the tiled side is guest
-  // memory.
-  const bool input_bound =
-      input == 1 && linear_buffer;
-  const bool output_bound =
-      output == 1 && linear_buffer;
-  const u64 t_hin = NowNs();
-  if (!input_bound) {
-    ParallelCopy(s.buffers[input].map, src, sizes[input]);
-    g_tile_hin_bytes += sizes[input];
-  }
-  if (!output_bound && !s.buffers[output].device_local)
-    std::memset(s.buffers[output].map, 0, sizes[output]);
-  std::memcpy(s.buffers[2].map, table.data(), sizes[2]);
-  g_tile_hin_ns += NowNs() - t_hin;
-  rhi::CommandList* c = BeginImmediate();
-  if (!c)
-    return false;
-  c->Barrier(kAccessAll, rhi::kAccessCopyWrite);
-  if (!input_bound)
-    RecordStagingCopy(c, s.buffers[input], sizes[input], true);
-  RecordStagingCopy(c, s.buffers[2], sizes[2], true);
-  if (output_bound || s.buffers[output].device_local)
-    c->FillBuffer(writes[output].buffer, writes[output].offset, sizes[output],
-                  0);
-  c->Barrier(rhi::kAccessAllWrite, kAccessComputeRW);
-  c->SetPipeline(s.pipe);
-  c->PushBindGroup(0, s.set_layout, writes, 3);
-  for (const auto& p : params) {
-    c->SetPushConstants(0, sizeof(p), &p);
-    c->Dispatch((p.width * p.words + 63) / 64, p.height, tiled.layers);
-  }
-  if (!output_bound) {
-    RecordStagingCopy(c, s.buffers[output], sizes[output], false);
-  }
-  c->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
-             rhi::kAccessHostRead | kAccessComputeRW);
-  const u64 t_sync = NowNs();
-  const bool ok = EndImmediate(c, "imm.image_tiling");
-  g_tile_sync_ns += NowNs() - t_sync;
-  if (!ok) {
-    BASE_LOGI("gpuvk", "image conversion failed");
-    g_cs_failed = true;
-    return false;
-  }
-  const u64 t_hout = NowNs();
-  if (detile && !linear_buffer) {
-    ParallelCopy(dst, s.buffers[output].map, sizes[output]);
-    g_tile_hout_bytes += sizes[output];
-  } else if (!detile) {
-    gcn::CopyImageContents(tiled, s.buffers[output].map, dst);
-    g_tile_hout_bytes += tiled.size;
-  }
-  g_tile_hout_ns += NowNs() - t_hout;
-  return true;
-}
-
 // ---- Tiled-truth ranges (DELTA_GPU_CS_TRUTH) ----
 
 u64 TileTableKey(const gcn::TextureLayout32& t,
@@ -651,13 +539,54 @@ bool ConvertGfx10Image(const gcn::TextureLayout32& tiled,
                        bool detile,
                        bool pack11) {
 #ifdef DELTA_HAVE_SPIRV_BACKEND
-  const u64 started = NowNs();
-  const bool ok = ConvertGfx10ImageImpl(tiled, linear, src, dst, detile,
-                                        nullptr, pack11);
-  if (ok && CsSyncReporting()) {
-    g_gpu_tiling_ns[detile] += NowNs() - started;
-    g_gpu_tiling_n[detile]++;
+  if (!g_backend.device || g_cs_failed)
+    return false;
+  const TileTable* table = GetTileTable(tiled, linear, false, pack11);
+  if (!table)
+    return false;
+  const u64 tiled_bytes = (tiled.size + 3) & ~u64(3);
+  const u64 linear_bytes = (linear.size + 3) & ~u64(3);
+  const u64 in_bytes = detile ? tiled.size : linear.size;
+  const u64 out_bytes = detile ? linear_bytes : tiled_bytes;
+  const auto make = [](u64 size, rhi::MemoryKind memory, u32 usage) {
+    rhi::BufferDesc desc;
+    desc.size = size;
+    desc.usage = usage;
+    desc.memory = memory;
+    return Device().CreateBuffer(desc);
+  };
+  constexpr u32 kStorage =
+      rhi::kBufferStorage | rhi::kBufferCopySrc | rhi::kBufferCopyDst;
+  rhi::Buffer* tiled_buf = make(tiled_bytes, rhi::MemoryKind::kDevice, kStorage);
+  rhi::Buffer* linear_buf =
+      make(linear_bytes, rhi::MemoryKind::kDevice, kStorage);
+  rhi::Buffer* upload =
+      make(in_bytes, rhi::MemoryKind::kUpload, rhi::kBufferCopySrc);
+  rhi::Buffer* readback =
+      make(out_bytes, rhi::MemoryKind::kReadback, rhi::kBufferCopyDst);
+  rhi::CommandList* c = tiled_buf && linear_buf && upload && readback &&
+                                upload->mapped() && readback->mapped()
+                            ? BeginImmediate()
+                            : nullptr;
+  bool ok = c != nullptr;
+  if (ok) {
+    std::memcpy(upload->mapped(), src, in_bytes);
+    rhi::Buffer* in = detile ? tiled_buf : linear_buf;
+    rhi::Buffer* out = detile ? linear_buf : tiled_buf;
+    c->FillBuffer(out, 0, out_bytes, 0);
+    c->CopyBuffer(in, 0, upload, 0, in_bytes);
+    RecordImageTiling(c, *table, tiled_buf, 0, tiled_bytes, linear_buf,
+                      linear_bytes, detile);
+    c->CopyBuffer(readback, 0, out, 0, out_bytes);
+    c->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
+    ok = EndImmediate(c, "imm.image_tiling");
   }
+  if (ok && detile)
+    std::memcpy(dst, readback->mapped(), linear.size);
+  else if (ok)
+    gcn::CopyImageContents(tiled, readback->mapped(), dst);
+  for (rhi::Buffer* b : {tiled_buf, linear_buf, upload, readback})
+    Device().Destroy(b);
   return ok;
 #else
   return false;

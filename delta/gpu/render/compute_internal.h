@@ -96,10 +96,7 @@ extern base::Map<base::String, u64> g_wb_why;
 extern u64 g_wb_why_bytes;
 extern u64 g_lazy_kept_n, g_lazy_kept_bytes;
 extern u64 g_out_rt_submits;
-extern u64 g_gpu_tiling_ns[2], g_gpu_tiling_n[2];
 
-extern u64 g_tile_hin_ns, g_tile_sync_ns, g_tile_hout_ns;
-extern u64 g_tile_hin_bytes, g_tile_hout_bytes;
 
 // Staging a 4K surface is tens of megabytes, and one core copies ~4 GB/s of
 // memory the GPU has just written. Split anything big enough to be worth the
@@ -555,7 +552,6 @@ struct TilingState {
   rhi::BindGroupLayout* set_layout = nullptr;
   rhi::PipelineLayout* layout = nullptr;
   rhi::Pipeline* pipe = nullptr;
-  CsRange buffers[3];
 };
 
 extern TilingState g_tiling;
@@ -834,7 +830,12 @@ bool MirrorFillable(u64 base, u64 bytes);
 bool GuestImportable(u64 base, u64 bytes);
 bool MirrorFill(u64 base, u64 bytes, u32 value);
 bool RecordGuestRead(rhi::CommandList* list, u64 base, u64 bytes,
-                     rhi::Buffer* dst);
+                     rhi::Buffer* dst, u64 dst_off = 0);
+// The newest batch still writing into [base, base+bytes) of the guest pages.
+u64 PendingGuestWriteBatch(u64 base, u64 bytes);
+// Compares the reads SpeculateGuestRead let through with the bytes the writes
+// they ran ahead of left, once those writes have landed.
+void CheckSpeculatedReads();
 
 // What dispatches wrote through the mirror: base -> end, and a revision a
 // texture made from it compares against.

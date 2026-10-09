@@ -93,27 +93,6 @@ void CsSyncReport(double frames) {
   g_truth_stage_bytes = g_truth_import_n = g_truth_detile_n = 0;
   g_truth_retile_n = g_truth_parent_n = g_truth_fold_n = g_truth_rt_n = 0;
   g_lazy_kept_n = g_lazy_kept_bytes = 0;
-  BASE_LOGI("cstiling",
-            "GPU conversion including copies: in={:.1f}ms x{:.1f} "
-            "out={:.1f}ms x{:.1f}",
-            g_gpu_tiling_ns[1] / frames / 1e6, g_gpu_tiling_n[1] / frames,
-            g_gpu_tiling_ns[0] / frames / 1e6, g_gpu_tiling_n[0] / frames);
-  // Where that conversion time goes: "rest" is the address-table build, the
-  // descriptor writes and the command recording.
-  const double tile_all =
-      double(g_gpu_tiling_ns[0] + g_gpu_tiling_ns[1]) / frames / 1e6;
-  BASE_LOGI("cstilesplit",
-            "host-in={:.1f}ms {:.1f}MB gpu-wait={:.1f}ms host-out={:.1f}ms "
-            "{:.1f}MB rest={:.1f}ms",
-            g_tile_hin_ns / frames / 1e6, g_tile_hin_bytes / frames / 1e6,
-            g_tile_sync_ns / frames / 1e6, g_tile_hout_ns / frames / 1e6,
-            g_tile_hout_bytes / frames / 1e6,
-            tile_all - (g_tile_hin_ns + g_tile_sync_ns + g_tile_hout_ns) /
-                           frames / 1e6);
-  g_tile_hin_ns = g_tile_sync_ns = g_tile_hout_ns = 0;
-  g_tile_hin_bytes = g_tile_hout_bytes = 0;
-  g_gpu_tiling_ns[0] = g_gpu_tiling_ns[1] = 0;
-  g_gpu_tiling_n[0] = g_gpu_tiling_n[1] = 0;
   if (kMirror)
   {
     u64 uni = 0, lo = 0, hi = 0;
@@ -308,9 +287,7 @@ void ReportGpuMemory() {
   u64 scratch = 0;
   for (const CsScratch& c : g_cs_scratch)
     scratch += c.cap;
-  const u64 tiling = g_tiling.buffers[0].cap + g_tiling.buffers[1].cap +
-                     g_tiling.buffers[2].cap + g_truth_bridge_scratch.cap +
-                     g_bridge.cap;
+  const u64 tiling = g_truth_bridge_scratch.cap + g_bridge.cap;
   u64 heap_used = 0, heap_budget = 0;
   Device().QueryMemoryBudget(&heap_used, &heap_budget);
   constexpr double kMb = 1024.0 * 1024.0;

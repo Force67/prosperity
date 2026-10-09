@@ -146,13 +146,6 @@ base::Map<base::String, u64> g_wb_why;
 u64 g_wb_why_bytes = 0;
 u64 g_lazy_kept_n = 0, g_lazy_kept_bytes = 0;
 u64 g_out_rt_submits = 0;
-u64 g_gpu_tiling_ns[2] = {}, g_gpu_tiling_n[2] = {};
-// Inside one GPU conversion: the host copies either side of it, the table
-// build and command recording, and the submit+fence wait. 34 conversions a
-// frame is 125 ms in Demon's Souls, and which of these four it is decides
-// whether to batch the submits or to stop copying.
-u64 g_tile_hin_ns = 0, g_tile_sync_ns = 0, g_tile_hout_ns = 0;
-u64 g_tile_hin_bytes = 0, g_tile_hout_bytes = 0;
 
 void ParallelCopy(void* dst, const void* src, u64 bytes) {
   if (bytes < kParallelCopyMin) {

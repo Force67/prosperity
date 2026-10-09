@@ -341,6 +341,12 @@ bool RunAliasedCopy(const CsAliasedImage& img,
                                 : truth ? g_truth_bridge_scratch.buf
                                         : e.buf;
   auto* scratch = static_cast<u32*>(g_bridge.map);
+  // The host copy is about to be written: whatever reads it has to be done.
+  const bool host_write =
+      (!to_image && (convert || level.offset != 0 || copy_bytes < res.size)) ||
+      (img.is_stencil && !truth);
+  if (host_write && !CsBatchWaitRange(e, kSyncStageHazard))
+    return false;
   // Host-zero any padding an image->buffer copy does not cover (host writes
   // are made available by the submission).
   if (!to_image && (convert || level.offset != 0 || copy_bytes < res.size))
@@ -360,8 +366,9 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     Device().ReportDeviceLoss();
     return false;
   }
-  // The dispatch that wrote the buffer reaches the queue first.
-  if (to_image && !CsBatchSubmit())
+  // Whatever the batch does with the buffer, the dispatch that wrote it or
+  // one still reading it, reaches the queue first.
+  if (!CsBatchSubmit())
     return false;
   rhi::CommandList* c = BeginImmediate();
   if (!c)

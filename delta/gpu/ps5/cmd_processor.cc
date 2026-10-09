@@ -1315,10 +1315,13 @@ void StartRendererOnce(render::Renderer& renderer) {
   GuestWriteTracker().Enable();
   // The descriptor replay reads SRT tables out of guest memory a previous
   // dispatch may still own, and it sits below the renderer, so it cannot ask
-  // for the flush itself.
+  // for the flush itself. The write-back is queued, and the bytes it replaces
+  // are taken where they have not been changing.
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
-    render::FlushCsWritesRange(render::DefaultRenderer(), address, bytes,
-                               "srt");
+    render::Renderer& renderer = render::DefaultRenderer();
+    if (!render::FlushCsWritesForGpu(renderer, address, bytes, "srt") ||
+        !render::SpeculateGuestRead(address, bytes))
+      render::FlushCsWritesRange(renderer, address, bytes, "srt");
   };
 }
 

@@ -1201,13 +1201,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         e.rt_serial = AliasedImageRenderSerial(base);
         staged_in_frame = StageCsRangeFromRtInFrame(ci.res[i], e);
       }
-      // The host copy is about to be written: whatever reads it has to be
-      // done. Staging on the GPU below touches no host copy.
-      if (rt_attempt && !staged_in_frame &&
-          !CsBatchWaitRange(e, kSyncStageHazard)) {
-        renderer.state = nullptr;
-        return CsDeclined(ci, "16");
-      }
       if (rt_attempt) {
         const u64 tr = NowNs();
         e.rt_sourced = staged_in_frame || StageCsRangeFromRt(ci.res[i], e);
