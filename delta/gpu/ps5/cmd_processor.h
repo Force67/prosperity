@@ -32,7 +32,10 @@ namespace gpu::ps5 {
 void SubmitDcb(const void* dcb, u32 size_bytes, u32 tag = 0);
 // A submit taken from a queue's ring: may stop early at an unsatisfied wait
 // and returns the dwords consumed (see RingStall).
-u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue);
+u32 SubmitDcbRing(const void* dcb,
+                  u32 size_bytes,
+                  u32 queue,
+                  u64 visible_ns = 0);
 
 // Process one AGC constant command buffer. Framed identically, so it is the
 // same walk; AGC has no separate constant engine to model.

@@ -52,7 +52,8 @@ extern "C" void prosperity_agc_submit(u64 dcb_base, u32 size_bytes);
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" u32 prosperity_agc_submit_ring(u64 dcb_base,
                                           u32 size_bytes,
-                                          u32 queue);
+                                          u32 queue,
+                                          u64 visible_ns);
 // NOLINTEND(readability-identifier-naming)
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
@@ -149,6 +150,8 @@ struct AcqQueue {
   // The walk stopped at a wait the memory did not satisfy; poll again even
   // though the doorbell has not moved.
   bool stalled = false;
+  // When the walk's current position was first seen behind a doorbell.
+  u64 seen_ns = 0, visible_ns = 0;
   u32 id = 0;
   // The doorbell page stays mapped once it is: asking every poll was a
   // mincore per queue per tick.
@@ -166,6 +169,9 @@ static void DrainQueue(AcqQueue& q, u64 doorbell) {
   if (!ring_dw)
     return;
   const u32 write = static_cast<u32>(doorbell % ring_dw);
+  // A stalled packet keeps the time it first became visible.
+  if (!q.stalled)
+    q.visible_ns = q.seen_ns;
   q.stalled = false;
   if (write == q.read_dw) {
     // The doorbell moved but lands where we already are: the title wrapped a
@@ -184,7 +190,8 @@ static void DrainQueue(AcqQueue& q, u64 doorbell) {
     if (!dwords)
       return true;
     if (GuestReadable(at, static_cast<size_t>(dwords) * 4)) {
-      const u32 done = prosperity_agc_submit_ring(at, dwords * 4, q.id);
+      const u32 done =
+          prosperity_agc_submit_ring(at, dwords * 4, q.id, q.visible_ns);
       if (done < dwords) {
         q.read_dw = (first_dw + done) % ring_dw;
         q.stalled = true;
@@ -263,6 +270,8 @@ static void DoorbellPoller() {
                   (unsigned long)q.last_doorbell, (unsigned long)now,
                   (unsigned long)q.dcb, q.ring_bytes);
       }
+      if (now != q.last_doorbell)
+        q.seen_ns = base::TickClock::NowNs();
       q.last_doorbell = now;
       DrainQueue(q, now);
     }

@@ -95,6 +95,8 @@ struct RingStall {
   u64 wait_addr = 0;
   u64 wait_ref = 0;
   base::TimeTicks wait_since;
+  // When the title submitted the packets being walked (rang the doorbell).
+  u64 visible_ns = 0;
 };
 u64 g_total_submits = 0;
 bool g_renderer_started = false;
@@ -131,6 +133,7 @@ struct GraphicsJob {
   base::Vector<u32> words;
   u64 sequence = 0;
   u64 scanout = 0;
+  u64 enqueued_ns = 0;
   u32 tag = 0;
   bool flip = false;
 };
@@ -165,7 +168,7 @@ u64 GpuClockTimestamp() {
 // The last label writes, read only when a wait has hung: logging them as they
 // happen changes the timing enough that the hang goes away.
 struct LabelWrite {
-  u64 address, value, ns;
+  u64 address, value, old, ns;
 };
 LabelWrite g_label_history[4096];
 base::Atomic<u32> g_label_history_n{0};
@@ -202,10 +205,11 @@ struct ParkedWait {
 base::Mutex g_parked_lock;
 base::Map<const void*, ParkedWait> g_parked;  // by QueueState
 
-void RecordLabelWrite(u64 address, u64 value) {
+// `old`: what the label held just before, which a waiter could have seen too.
+void RecordLabelWrite(u64 address, u64 value, u64 old) {
   const u32 i =
       g_label_history_n.fetch_add(1) % base::ArraySize(g_label_history);
-  g_label_history[i] = {address, value, base::TickClock::NowNs()};
+  g_label_history[i] = {address, value, old, base::TickClock::NowNs()};
   NoteLabelWritten();
   base::LockGuard<base::Mutex> lock(g_parked_lock);
   for (auto& [queue, w] : g_parked) {
@@ -222,11 +226,15 @@ void RecordLabelWrite(u64 address, u64 value) {
 void WriteLabel(u64 address, u64 value, bool is_64bit) {
   if (!IsLabelAddress(address))
     return;
-  if (is_64bit)
+  u64 old;
+  if (is_64bit) {
+    old = *reinterpret_cast<volatile u64*>(address);
     *reinterpret_cast<volatile u64*>(address) = value;
-  else
+  } else {
+    old = *reinterpret_cast<volatile u32*>(address);
     *reinterpret_cast<volatile u32*>(address) = static_cast<u32>(value);
-  RecordLabelWrite(address, value);
+  }
+  RecordLabelWrite(address, value, old);
 }
 
 // INT_SEL asks the CP to raise an end-of-pipe interrupt once the write lands.
@@ -348,12 +356,16 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       const auto* from = reinterpret_cast<const u8*>(src);
       PublishLabel(
           [dst, data = base::Vector<u8>(from, from + bytes)] {
-            std::memcpy(reinterpret_cast<void*>(dst), data.data(), data.size());
             for (size_t k = 0; k + 4 <= data.size(); k += 4) {
-              u32 word;
+              u32 word, old;
               std::memcpy(&word, data.data() + k, 4);
-              RecordLabelWrite(dst + k, word);
+              std::memcpy(&old, reinterpret_cast<const void*>(dst + k), 4);
+              std::memcpy(reinterpret_cast<void*>(dst + k), &word, 4);
+              RecordLabelWrite(dst + k, word, old);
             }
+            const size_t tail = data.size() & ~size_t(3);
+            std::memcpy(reinterpret_cast<void*>(dst + tail), data.data() + tail,
+                        data.size() - tail);
           },
           dst, bytes, from);
     } else {
@@ -376,8 +388,9 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
           [dst, bytes, fill] {
             u32* words = reinterpret_cast<u32*>(dst);
             for (u32 k = 0; k < bytes / 4; k++) {
+              const u32 old = words[k];
               words[k] = fill;
-              RecordLabelWrite(dst + k * 4, fill);
+              RecordLabelWrite(dst + k * 4, fill, old);
             }
           },
           dst, bytes, filled);
@@ -547,6 +560,31 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
   return Compares(function, value & mask, ref);
 }
 
+// A queue's packets reach us only when the walk holding the processor lets go,
+// which can be after the title has seen the label it waits on come true and
+// recycled it (Astro Bot zeroes a frame slot's sync labels once the graphics
+// queue says the frame is done). The wait counts as met if the label held a
+// satisfying value at any point since the title submitted it.
+bool WrittenSinceVisible(u64 address, u64 ref, u64 mask, u32 control) {
+  const u64 since = g_queue->stall.visible_ns;
+  if (!since)
+    return false;
+  // A write since then: the label held both its old and its new value. The
+  // newest write before then is what it held when the title submitted.
+  const u32 function = control & 0x7;
+  const LabelWrite* before = nullptr;
+  for (const LabelWrite& w : g_label_history) {
+    if (w.address != address)
+      continue;
+    if (w.ns >= since && (Compares(function, w.value & mask, ref) ||
+                          Compares(function, w.old & mask, ref)))
+      return true;
+    if (w.ns < since && (!before || w.ns > before->ns))
+      before = &w;
+  }
+  return before && Compares(function, before->value & mask, ref);
+}
+
 bool CheckWait(u32 op, const u32* body, u32 count) {
   const bool wide = op == 0x93;
   if (count < (wide ? 8u : 6u))
@@ -563,7 +601,8 @@ bool CheckWait(u32 op, const u32* body, u32 count) {
     }
     w = {address, ref, mask, body[0] & 0x7, wide, false};
   }
-  if (!WaitSatisfied(op, body, count))
+  if (!WaitSatisfied(op, body, count) && !WrittenSinceVisible(address, ref,
+                                                              mask, body[0]))
     return false;
   base::LockGuard<base::Mutex> lock(g_parked_lock);
   g_parked.erase(g_queue);
@@ -574,12 +613,28 @@ bool WaitGraphics(u32 op, const u32* body, u32 count) {
   DELTA_ZONE("ps5.gfx_wait");
   QueueState* const queue = g_queue;
   const u32 submit_queue = render::g_submit_queue;
+  const auto since = base::TimeTicks::Now();
+  bool told = false;
   for (;;) {
     if (guest::Stopping())
       return false;
     const u64 seen = LabelSequence();
     if (CheckWait(op, body, count))
       break;
+    if (!told && base::TimeTicks::Now() - since >= base::Seconds(5)) {
+      told = true;
+      const u64 address = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
+      BASE_LOGW("agc", "graphics waitOnAddress {:#x} ref={:#x} fn={} pending",
+                (unsigned long)address, (unsigned long)body[3], body[0] & 7);
+      const u64 now_ns = base::TickClock::NowNs();
+      for (const LabelWrite& w : g_label_history)
+        if ((w.address & ~(1ull << 63)) == address)
+          BASE_LOGW("agc", "    written {:#x} {:.3f} s ago", w.value,
+                    (now_ns - w.ns) / 1e9);
+      BASE_LOGW("agc", "    now {:#x}, submitted {:.3f} s ago",
+                *reinterpret_cast<const volatile u32*>(address),
+                (now_ns - g_queue->stall.visible_ns) / 1e9);
+    }
     render::SubmitForPublishedLabels();
     g_mutex.unlock();
     WaitLabelWritten(seen, base::Microseconds(200));
@@ -657,10 +712,12 @@ void HandleWriteData(const u32* body, u32 count) {
       IsLabelAddress(address + static_cast<u64>(dwords) * 4))
     PublishLabel(
         [address, words = base::Vector<u32>(body + 3, body + count)] {
-          std::memcpy(reinterpret_cast<void*>(address), words.data(),
-                      words.size() * 4);
-          for (size_t k = 0; k < words.size(); k++)
-            RecordLabelWrite(address + k * 4, words[k]);
+          auto* dst = reinterpret_cast<u32*>(address);
+          for (size_t k = 0; k < words.size(); k++) {
+            const u32 old = dst[k];
+            dst[k] = words[k];
+            RecordLabelWrite(address + k * 4, words[k], old);
+          }
         },
         address, static_cast<u64>(dwords) * 4, body + 3);
 }
@@ -1327,7 +1384,10 @@ void StartRendererOnce(render::Renderer& renderer) {
 
 }  // namespace
 
-u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
+u32 SubmitDcbRing(const void* dcb,
+                  u32 size_bytes,
+                  u32 queue,
+                  u64 visible_ns) {
   if (!dcb || size_bytes < 4)
     return size_bytes / 4;
   base::LockGuard<base::Mutex> lock(g_mutex);
@@ -1345,6 +1405,7 @@ u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
     found = g_ring_queues.emplace(queue, QueueState{}).first;
   g_queue = &found->second;
   g_queue->stall.ring_walk = true;
+  g_queue->stall.visible_ns = visible_ns;
   g_queue->stall.stalled = false;
   const u32 done = Walk(renderer, static_cast<const u32*>(dcb), words, dump, 0);
   render::SubmitForPublishedLabels();
@@ -1361,7 +1422,10 @@ u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue) {
   return done;
 }
 
-static void ProcessGraphicsDcb(const void* dcb, u32 size_bytes, u32 tag) {
+static void ProcessGraphicsDcb(const void* dcb,
+                               u32 size_bytes,
+                               u32 tag,
+                               u64 visible_ns) {
   DELTA_ZONE("ps5.submit_dcb");
   if (!dcb || size_bytes < 4)
     return;
@@ -1371,6 +1435,7 @@ static void ProcessGraphicsDcb(const void* dcb, u32 size_bytes, u32 tag) {
   render::g_ns_dcb_lock += t_held - t_enter;
   g_queue = &g_graphics_queue;
   g_queue->stall.stalled = false;
+  g_queue->stall.visible_ns = visible_ns;
   render::g_submit_queue = tag;
   render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);
@@ -1474,7 +1539,8 @@ void RunGraphics() {
     if (job.flip)
       ProcessGraphicsFlip(job.scanout);
     else
-      ProcessGraphicsDcb(job.words.data(), job.words.size() * 4, job.tag);
+      ProcessGraphicsDcb(job.words.data(), job.words.size() * 4, job.tag,
+                         job.enqueued_ns);
     {
       base::LockGuard<base::Mutex> lock(g_graphics_lock);
       g_graphics_done = job.sequence;
@@ -1496,6 +1562,7 @@ u64 EnqueueGraphics(GraphicsJob job) {
     g_graphics_started = true;
   }
   const u64 sequence = job.sequence = ++g_graphics_sequence;
+  job.enqueued_ns = base::TickClock::NowNs();
   g_graphics_jobs.push_back(base::move(job));
   g_graphics_wake.NotifyOne();
   return sequence;
@@ -1544,9 +1611,10 @@ extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" u32 prosperity_agc_submit_ring(u64 dcb_base,
                                           u32 size_bytes,
-                                          u32 queue) {
+                                          u32 queue,
+                                          u64 visible_ns) {
   return gpu::ps5::SubmitDcbRing(reinterpret_cast<const void*>(dcb_base),
-                                 size_bytes, queue);
+                                 size_bytes, queue, visible_ns);
 }
 // NOLINTEND(readability-identifier-naming)
 
