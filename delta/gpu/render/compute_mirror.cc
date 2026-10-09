@@ -133,10 +133,10 @@ bool GuestImportable(u64 base, u64 bytes) {
 }
 
 // Guest bytes copied by the GPU into `dst` at `dst_off`: out of the mirror
-// where a block is the mirror's, straight out of the imported pages elsewhere.
-// Pages the device cannot import (read-only mappings) go up through an upload
-// buffer, the one place the CPU touches them. False when the bytes are not
-// readable at all.
+// where a block is the mirror's, straight out of the imported pages elsewhere,
+// read-only direct memory through its second view. Host pages the device
+// cannot import at all go up through an upload buffer, the one place the CPU
+// touches them. False when the bytes are not readable at all.
 bool RecordGuestRead(rhi::CommandList* list,
                      u64 base,
                      u64 bytes,
@@ -148,11 +148,20 @@ bool RecordGuestRead(rhi::CommandList* list,
   const auto block_end = [&](u64 at) {
     return base::Min(base + bytes, (at & ~(kMirrorBlock - 1)) + kMirrorBlock);
   };
-  enum Source { kMirrorSource, kImport, kUpload };
+  // Direct memory the guest maps read-only imports through the second view.
+  const auto direct = [](u64 at, u64 end) {
+    for (u64 offset, n; at < end; at += n)
+      if (!DirectImportAt(at, &offset, &n))
+        return false;
+    return true;
+  };
+  enum Source { kMirrorSource, kImport, kDirect, kUpload };
   const auto source = [&](u64 at) {
     if (owned(at))
       return kMirrorSource;
-    return GuestImportable(at, block_end(at) - at) ? kImport : kUpload;
+    if (GuestImportable(at, block_end(at) - at))
+      return kImport;
+    return direct(at, block_end(at)) ? kDirect : kUpload;
   };
   list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
   for (u64 at = base; at < base + bytes;) {
@@ -173,8 +182,16 @@ bool RecordGuestRead(rhi::CommandList* list,
                          piece - import_base, to - piece);
         piece = to;
       }
+    } else if (from == kDirect) {
+      for (u64 piece = at, offset, len; piece < end; piece += len) {
+        rhi::Buffer* import = DirectImportAt(piece, &offset, &len);
+        len = base::Min(len, end - piece);
+        list->CopyBuffer(dst, dst_off + piece - base, import, offset, len);
+      }
     } else {
-      if (!gpu::IsReadableRange(at, n) || !SettleGuestWrites(at, n, "upload"))
+      // Host memory the device cannot map at all (a read-only module page):
+      // it goes up through the upload ring. No GPU write reaches such pages.
+      if (!gpu::IsReadableRange(at, n))
         return false;
       // The frame's upload ring, or a buffer of its own where the ring cannot
       // grow (a host that pins little memory).
@@ -403,11 +420,63 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
   return !in_run || copy_run();
 }
 
-// A dirty range written back on the GPU: into the mirror, which owns the
-// bytes or writes them through, or straight into the imported guest pages
-// where the mirror does not reach. A label behind it waits for no readback.
-// `kept`: bytes the CPU wrote since staging were left as they are, so the
-// buffer no longer holds what guest memory does.
+// Before the GPU writes [base, base+bytes) of guest memory: the mirror blocks
+// it touches hold the guest's bytes around it, or the pages import.
+static bool PrepareGuestWrite(u64 base, u64 bytes, bool* mirrored) {
+  *mirrored = kMirror && Mirror() && MirrorCovers(base, bytes);
+  if (CsTracksGuestWrites())
+    CollectGuestWritesForSubmission();
+  return *mirrored ? MirrorCopyInGuest(base, bytes)
+                   : GuestImportable(base, bytes);
+}
+
+// `src` copied over guest memory at `base` on the open batch, around the
+// `skip` spans: into the mirror, which owns the bytes or writes them through,
+// or straight into the imported guest pages where the mirror does not reach.
+static void RecordGuestWrite(rhi::CommandList* c,
+                             bool mirrored,
+                             u64 base,
+                             u64 n,
+                             rhi::Buffer* src,
+                             const base::Vector<base::Pair<u64, u64>>& skip,
+                             u64 src_off = 0) {
+  c->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+  const auto copy = [&](u64 lo, u64 hi) {
+    if (mirrored) {
+      c->CopyBuffer(g_mirror, MirrorOffset(lo), src, src_off + lo - base,
+                    hi - lo);
+      return;
+    }
+    for (u64 at = lo; at < hi;) {
+      u64 import_base = 0;
+      rhi::Buffer* import = MirrorImport(at, &import_base);
+      const u64 to = base::Min(hi, import_base + import->desc().size);
+      c->CopyBuffer(import, at - import_base, src, src_off + at - base,
+                    to - at);
+      at = to;
+    }
+  };
+  u64 at = base;
+  for (const auto& [lo, hi] : skip) {
+    if (at < lo)
+      copy(at, lo);
+    at = base::Max(at, hi);
+  }
+  if (at < base + n)
+    copy(at, base + n);
+  c->Barrier(rhi::kAccessCopyWrite,
+             kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostRead);
+  if (mirrored) {
+    MirrorWriteBack(base, n);
+  } else {
+    g_pending_guest_writes.push_back({base, base + n, g_cs_batch_id});
+    NoteGuestWrite(base, n);
+  }
+}
+
+// A dirty range written back on the GPU. A label behind it waits for no
+// readback. `kept`: bytes the CPU wrote since staging were left as they are,
+// so the buffer no longer holds what guest memory does.
 bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
   *kept = false;
   if (!e.buf || e.imported || (base & 3))
@@ -430,11 +499,8 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
   const u64 n = retile         ? tiled.size
                 : e.guest_bytes ? base::Min(e.size, e.guest_bytes)
                                 : e.size;
-  const bool mirrored = kMirror && Mirror() && MirrorCovers(base, n);
-  if (CsTracksGuestWrites())
-    CollectGuestWritesForSubmission();
-  // The rest of each mirror block it touches has to be the guest's too.
-  if (mirrored ? !MirrorCopyInGuest(base, n) : !GuestImportable(base, n))
+  bool mirrored = false;
+  if (!PrepareGuestWrite(base, n, &mirrored))
     return false;
   CsBatchBeginImpl();
   if (!g_cs_batch_open)
@@ -450,7 +516,6 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
     RecordImageTiling(c, *table, src, 0, padded, e.buf,
                       (linear.size + 3) & ~u64(3), /*detile=*/false);
   }
-  c->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
   // Bytes the CPU wrote since staging are newer than the dispatch's.
   base::Vector<base::Pair<u64, u64>> skip;
   for (const auto* spans : {&e.cpu_writes, &e.fill_kept})
@@ -459,38 +524,56 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
         skip.emplace_back(base::Max(lo, base), base::Min(hi, base + n));
   base::Sort(skip.begin(), skip.end());
   *kept = !skip.empty();
-  const auto copy = [&](u64 lo, u64 hi) {
-    if (mirrored) {
-      c->CopyBuffer(g_mirror, MirrorOffset(lo), src, lo - base, hi - lo);
-      return;
-    }
-    for (u64 at = lo; at < hi;) {
-      u64 import_base = 0;
-      rhi::Buffer* import = MirrorImport(at, &import_base);
-      const u64 to = base::Min(hi, import_base + import->desc().size);
-      c->CopyBuffer(import, at - import_base, src, at - base, to - at);
-      at = to;
-    }
-  };
-  u64 at = base;
-  for (const auto& [lo, hi] : skip) {
-    if (at < lo)
-      copy(at, lo);
-    at = base::Max(at, hi);
-  }
-  if (at < base + n)
-    copy(at, base + n);
+  RecordGuestWrite(c, mirrored, base, n, src, skip);
   e.fill_kept.clear();
-  c->Barrier(rhi::kAccessCopyWrite,
-             kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostRead);
   // The buffer is read by the copy: not recycled before the batch is done.
   MarkPending(e);
-  if (mirrored) {
-    MirrorWriteBack(base, n);
-  } else {
-    g_pending_guest_writes.push_back({base, base + n, g_cs_batch_id});
-    NoteGuestWrite(base, n);
+  return true;
+}
+
+bool WriteTextureToGuest(rhi::Texture* texture,
+                         rhi::TextureState& state,
+                         u64 base,
+                         const gcn::TextureLayout32& tiled,
+                         const gcn::TextureLayout32& linear) {
+  const TileTable* table =
+      GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4);
+  if (!table || !g_frame.recording)
+    return false;
+  // On the frame's list, behind the draws that rendered the texture.
+  CsBatchBeginImpl();
+  if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame) {
+    if (!CsBatchSubmit())
+      return false;
+    CsBatchBeginImpl();
   }
+  if (!g_cs_batch_open || !g_cs_batches[g_cs_batch_cur].in_frame)
+    return false;
+  g_cs_scratch_owner++;
+  const u64 tiled_bytes = (tiled.size + 3) & ~u64(3);
+  const u64 linear_bytes = (linear.size + 3) & ~u64(3);
+  rhi::Buffer* raw = AcquireScratch(tiled_bytes);
+  rhi::Buffer* pixels = raw ? AcquireScratch(linear_bytes) : nullptr;
+  bool mirrored = false;
+  if (!pixels || !PrepareGuestWrite(base, tiled.size, &mirrored))
+    return false;
+  rhi::CommandList* const c = g_cs_list;
+  // Over the guest's bytes, so padding the layout skips keeps them.
+  if (!RecordGuestRead(c, base, tiled.size, raw))
+    return false;
+  const auto& level = linear.mips[0];
+  rhi::BufferTextureCopy copy;
+  copy.row_length = level.pitch;
+  copy.image_height = level.stored_height;
+  copy.region.width = level.width;
+  copy.region.height = level.height;
+  const rhi::TextureState old_state = state;
+  TransitionImage(c, texture, state, rhi::TextureState::kCopySrc);
+  c->CopyTextureToBuffer(pixels, texture, &copy, 1);
+  TransitionImage(c, texture, state, old_state);
+  RecordImageTiling(c, *table, raw, 0, tiled_bytes, pixels, linear_bytes,
+                    /*detile=*/false);
+  RecordGuestWrite(c, mirrored, base, tiled.size, raw, {});
   return true;
 }
 
@@ -566,6 +649,53 @@ bool MirrorFill(u64 base, u64 bytes, u32 value) {
   g_cs_list->FillBuffer(g_mirror, MirrorOffset(base), bytes, value);
   g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
   MirrorWriteBack(base, bytes);
+  return true;
+}
+
+bool GpuFill(u64 base, u64 bytes, u32 lo, u32 hi) {
+  if (!bytes || ((base | bytes) & (lo == hi ? 3 : 7)))
+    return false;
+  if (lo == hi && MirrorFill(base, bytes, lo))
+    return true;
+  // Elsewhere the pattern is built in scratch and copied over the pages.
+  CsBatchBeginImpl();
+  if (!g_cs_batch_open)
+    return false;
+  g_cs_scratch_owner++;
+  rhi::Buffer* src = AcquireScratch(bytes);
+  if (!src)
+    return false;
+  rhi::CommandList* const c = g_cs_list;
+  c->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
+  if (lo == hi) {
+    c->FillBuffer(src, 0, bytes, lo);
+  } else {
+    const u32 pattern[2] = {lo, hi};
+    c->UpdateBuffer(src, 0, sizeof(pattern), pattern);
+    for (u64 n = sizeof(pattern); n < bytes; n *= 2) {
+      c->Barrier(rhi::kAccessCopyWrite, kAccessCopyRW);
+      c->CopyBuffer(src, n, src, 0, base::Min(n, bytes - n));
+    }
+  }
+  return GpuWriteGuest(base, bytes, src, 0);
+}
+
+bool GpuCopy(u64 dst, u64 src, u64 bytes) {
+  CsBatchBeginImpl();
+  if (!bytes || !g_cs_batch_open)
+    return false;
+  g_cs_scratch_owner++;
+  rhi::Buffer* tmp = AcquireScratch(bytes);
+  return tmp && RecordGuestRead(g_cs_list, src, bytes, tmp) &&
+         GpuWriteGuest(dst, bytes, tmp, 0);
+}
+
+bool GpuWriteGuest(u64 dst, u64 bytes, rhi::Buffer* src, u64 src_off) {
+  CsBatchBeginImpl();
+  bool mirrored = false;
+  if (!g_cs_batch_open || !PrepareGuestWrite(dst, bytes, &mirrored))
+    return false;
+  RecordGuestWrite(g_cs_list, mirrored, dst, bytes, src, {}, src_off);
   return true;
 }
 

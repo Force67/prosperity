@@ -2539,12 +2539,12 @@ TEST(GcnCompute, RepeatFillMatchesGpuAndClearsRenderTargetVariants) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
-  base::OptionBase* cpu_fill = nullptr;
+  base::OptionBase* fill_kernels = nullptr;
   base::OptionBase::VisitAll([&](const base::OptionBase* option) {
-    if (std::strcmp(option->name(), "DELTA_GPU_CPU_FILL") == 0)
-      cpu_fill = const_cast<base::OptionBase*>(option);
+    if (std::strcmp(option->name(), "DELTA_GPU_FILL_KERNELS") == 0)
+      fill_kernels = const_cast<base::OptionBase*>(option);
   });
-  ASSERT_NE(cpu_fill, nullptr);
+  ASSERT_NE(fill_kernels, nullptr);
   auto* memory = static_cast<u32*>(
       host_memory::AllocMem(reinterpret_cast<void*>(0x1200000000ull), 65536,
                             host_memory::PageProtection::kW,
@@ -2606,7 +2606,7 @@ TEST(GcnCompute, RepeatFillMatchesGpuAndClearsRenderTargetVariants) {
     for (const char* enabled : {"0", "1"}) {
       result = memory + 1024 + trial++ * 512;
       descriptor(8, result, 4, c.records);
-      ASSERT_TRUE(cpu_fill->SetFromString(enabled));
+      ASSERT_TRUE(fill_kernels->SetFromString(enabled));
       std::fill(result, result + 256, 0xfeedface);
       gpu::render::BeginFrame(renderer);
       gpu::ps4::DispatchCompute(renderer, regs, groups, 4);
@@ -2616,7 +2616,7 @@ TEST(GcnCompute, RepeatFillMatchesGpuAndClearsRenderTargetVariants) {
       for (u32 i = 0; i < 256; i++) {
         const u32 count = std::min(std::min(c.limit, c.records), 128u);
         EXPECT_EQ(result[i], i < count ? source[i % c.pattern] : 0xfeedface)
-            << "limit=" << c.limit << " cpu=" << enabled << " i=" << i;
+            << "limit=" << c.limit << " kernels=" << enabled << " i=" << i;
       }
     }
   }
@@ -2630,7 +2630,7 @@ TEST(GcnCompute, RepeatFillMatchesGpuAndClearsRenderTargetVariants) {
   descriptor(4, source, 4, 2);
   descriptor(8, result, 4, 256);
   descriptor(12, params, 16, 1);
-  ASSERT_TRUE(cpu_fill->SetFromString("1"));
+  ASSERT_TRUE(fill_kernels->SetFromString("1"));
   gpu::render::BeginFrame(renderer);
   for (u32 width : {32u, 16u}) {
     auto* rt = gpu::render::GetRT(target_base, width, 4,
@@ -2643,6 +2643,8 @@ TEST(GcnCompute, RepeatFillMatchesGpuAndClearsRenderTargetVariants) {
   EXPECT_FALSE(gpu::render::CanClearMemoryFill64(target_base + 4, 1024));
   const u32 wide_groups[] = {4, 1, 1, 1};
   gpu::ps4::DispatchCompute(renderer, regs, wide_groups, 4);
+  ASSERT_TRUE(gpu::render::FlushCsWritesRange(renderer, target_base, 1024,
+                                              "test-fill"));
   for (u32 i = 0; i < 256; i++)
     EXPECT_EQ(result[i], source[i & 1]);
   gpu::rhi::BufferDesc readback_desc;
@@ -2678,6 +2680,6 @@ TEST(GcnCompute, RepeatFillMatchesGpuAndClearsRenderTargetVariants) {
   for (u32 i = 0; i < 1536 / 4; i++)
     EXPECT_EQ(pixels[i], source[i & 1]) << "word=" << i;
   gpu::render::Device().Destroy(readback);
-  cpu_fill->Reset();
+  fill_kernels->Reset();
   host_memory::FreeMem(memory, 65536);
 }

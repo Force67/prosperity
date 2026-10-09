@@ -456,146 +456,106 @@ static bool FlushDirtyRanges(Renderer& renderer,
 
 namespace gpu::render::cs {
 
-// The fill against each dirty range under it: `apply` false only asks.
-bool FillOverDirtyRanges(u64 base, u64 bytes, bool apply) {
+// The fill against each dirty range under it.
+void FillOverDirtyRanges(u64 base, u64 bytes) {
   const u64 end = base + bytes;
-  for (const PendingGuestWrite& w : g_pending_guest_writes)
-    if (w.base < end && base < w.end)
-      return false;
   if (g_cs_dirty_pages.empty())
-    return true;
+    return;
   for (u64 d : DirtyRangesOverlapping(base, bytes)) {
     auto found = g_cs_ranges.find(d);
     if (found == g_cs_ranges.end() || !found->second.gpu_dirty)
       continue;
     CsRange& e = found->second;
+    // Written in place, ahead of the fill on the queue.
     if (e.imported)
-      return false;
+      continue;
     if (d >= base && d + e.guest_bytes <= end) {
       // Every byte it would write back is overwritten.
-      if (apply) {
-        UnindexDirtyRange(d, e.guest_bytes);
-        e.gpu_dirty = false;
-        e.cpu_writes.clear();
-        e.hash = 0;
-        e.last_validated_frame = -1;
-        g_wb_why["fill-covered"]++;
-      }
+      UnindexDirtyRange(d, e.guest_bytes);
+      e.gpu_dirty = false;
+      e.cpu_writes.clear();
+      e.hash = 0;
+      e.last_validated_frame = -1;
+      g_wb_why["fill-covered"]++;
       continue;
     }
     // Output the fill covers in part keeps its own bytes, as it would under a
     // dispatch that only writes: tiled surfaces that share memory are not each
     // other's pixels. Only its writeback, which is older than the fill, keeps
     // the filled bytes, the way it keeps any the CPU wrote since.
-    if (apply) {
-      u64 lo = base::Max(base, d), hi = base::Min(end, d + e.guest_bytes);
-      // Merged, or a range left dirty for many frames piles up one span per
-      // fill and its writeback copies them all.
-      base::EraseIf(e.fill_kept, [&](const base::Pair<u64, u64>& k) {
-        if (k.first > hi || lo > k.second)
-          return false;
-        lo = base::Min(lo, k.first);
-        hi = base::Max(hi, k.second);
-        return true;
-      });
-      e.fill_kept.emplace_back(lo, hi);
-      g_wb_why["fill-kept"]++;
-    }
+    u64 lo = base::Max(base, d), hi = base::Min(end, d + e.guest_bytes);
+    // Merged, or a range left dirty for many frames piles up one span per
+    // fill and its writeback copies them all.
+    base::EraseIf(e.fill_kept, [&](const base::Pair<u64, u64>& k) {
+      if (k.first > hi || lo > k.second)
+        return false;
+      lo = base::Min(lo, k.first);
+      hi = base::Max(hi, k.second);
+      return true;
+    });
+    e.fill_kept.emplace_back(lo, hi);
+    g_wb_why["fill-kept"]++;
   }
-  return true;
 }
 
 }  // namespace gpu::render::cs
 
 namespace gpu::render {
 
-bool CsFillStaysOnGpu(u64 base, u64 bytes) {
-  return FillOverDirtyRanges(base, bytes, false);
+static bool ApplyGpuFill(u64 base, u64 bytes, u32 lo, u32 hi) {
+  BumpTextureEpoch();
+  if (!bytes)
+    return false;
+  // Output under the fill is dropped or keeps the filled bytes; anything
+  // already on its way to the pages lands first, in queue order.
+  FillOverDirtyRanges(base, bytes);
+  if (!GpuFill(base, bytes, lo, hi)) {
+    static int n = 0;
+    if (n++ < 8)
+      BASE_LOGW("gpuvk", "fill {:#x}+{:#x} cannot run on the GPU, dropped",
+                (unsigned long long)base, (unsigned long long)bytes);
+    return false;
+  }
+  CsForgetGuestRange(base, bytes);
+  InvalidateTexRange(base, bytes);
+  g_cs_writeback_gen++;
+  return true;
 }
 
 void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
   ScopeNs fill_timer(&g_ns_memory_fill);
   g_memory_fill_bytes += bytes;
   g_memory_fill_n++;
-  BumpTextureEpoch();
-  if (!bytes)
-    return;
-  if (!FillOverDirtyRanges(base, bytes, false) ||
-      !FillOverDirtyRanges(base, bytes, true))
-    FlushCsWritesRange(renderer, base, bytes, "fill");
-  if (MirrorFill(base, bytes, value)) {
-    CsForgetGuestRange(base, bytes);
+  if (ApplyGpuFill(base, bytes & ~u64(3), value, value))
     NoteMemoryFill(renderer, base, bytes, value);
-    g_cs_writeback_gen++;
-    return;
-  }
-  // Announced first: armed pages open in runs, not with a fault per page.
-  host_memory::BeforeHostWrite(reinterpret_cast<void*>(base), bytes);
-  // Split over the detile pool: one thread memsetting ~20 MB a frame was the
-  // submit thread's largest item.
-  constexpr u64 kChunk = 256 * 1024;
-  u32* words = reinterpret_cast<u32*>(base);
-  if (bytes < kParallelCopyMin) {
-    if (!value)
-      std::memset(words, 0, bytes);
-    else
-      base::Fill(words, words + bytes / 4, value);
-  } else {
-    const u32 chunks = static_cast<u32>((bytes + kChunk - 1) / kChunk);
-    gcn::DetileParallelWork(chunks, bytes, [&, value](u32 c0, u32 c1) {
-      const u64 off = u64(c0) * kChunk / 4;
-      const u64 end = base::Min<u64>(u64(c1) * kChunk, bytes) / 4;
-      if (!value)
-        std::memset(words + off, 0, (end - off) * sizeof(*words));
-      else
-        base::Fill(words + off, words + end, value);
-    });
-  }
-  CsForgetGuestRange(base, bytes);
-  InvalidateTexRange(base, bytes);
-  NoteMemoryFill(renderer, base, bytes, value);
-  g_cs_writeback_gen++;
 }
 
 void ApplyMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value) {
   ScopeNs fill_timer(&g_ns_memory_fill);
   g_memory_fill_bytes += bytes;
   g_memory_fill_n++;
-  BumpTextureEpoch();
-  if (!bytes)
-    return;
-  if (!FillOverDirtyRanges(base, bytes, false) ||
-      !FillOverDirtyRanges(base, bytes, true))
-    FlushCsWritesRange(renderer, base, bytes, "fill");
-  if (u32(value) == u32(value >> 32) && MirrorFill(base, bytes, u32(value))) {
-    CsForgetGuestRange(base, bytes);
+  if (ApplyGpuFill(base, bytes & ~u64(7), u32(value), u32(value >> 32)))
     NoteMemoryFill64(renderer, base, bytes, value);
-    g_cs_writeback_gen++;
-    return;
-  }
-  host_memory::BeforeHostWrite(reinterpret_cast<void*>(base), bytes);
-  constexpr u64 kChunk = 256 * 1024;
-  auto* words = reinterpret_cast<u64*>(base);
-  if (bytes < kParallelCopyMin) {
-    if (!value)
-      std::memset(words, 0, bytes);
-    else
-      base::Fill(words, words + bytes / 8, value);
-  } else {
-    const u32 chunks = static_cast<u32>((bytes + kChunk - 1) / kChunk);
-    gcn::DetileParallelWork(chunks, bytes, [&, value](u32 c0, u32 c1) {
-      const u64 off = u64(c0) * kChunk / 8;
-      const u64 end = base::Min<u64>(u64(c1) * kChunk, bytes) / 8;
-      if (!value)
-        std::memset(words + off, 0, (end - off) * sizeof(*words));
-      else
-        base::Fill(words + off, words + end, value);
-    });
-  }
-  CsForgetGuestRange(base, bytes);
-  InvalidateTexRange(base, bytes);
-  NoteMemoryFill64(renderer, base, bytes, value);
+}
+
+bool ApplyMemoryCopy(Renderer& renderer, u64 dst, u64 src, u64 bytes) {
+  // Output still in a staged range on either side is written back first.
+  if (!FlushCsWritesForGpu(renderer, src, bytes, "dma") ||
+      !FlushCsWritesForGpu(renderer, dst, bytes, "dma"))
+    return false;
+  BumpTextureEpoch();
+  if (!GpuCopy(dst, src, bytes))
+    return false;
+  CsForgetGuestRange(dst, bytes);
+  InvalidateTexRange(dst, bytes);
   g_cs_writeback_gen++;
+  return true;
+}
+
+bool GuestBytesSettled(u64 base, u64 bytes) {
+  return !CsRangeDirtyOverlapping(base, bytes) &&
+         !PendingGuestWriteBatch(base, bytes) &&
+         !MirrorOwnsAny(base, base + bytes);
 }
 
 }  // namespace gpu::render

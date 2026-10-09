@@ -54,6 +54,15 @@ bool DetileTextureOnGpu(u64 base,
                         bool is_3d = false,
                         u32 first_mip = 0);
 
+// `texture`'s first mip tiled into guest memory at `base` on the GPU, behind
+// the draws recorded so far. `state` is the texture's layout on the frame's
+// list, kept. False when the layout has no GPU tiling table.
+bool WriteTextureToGuest(rhi::Texture* texture,
+                         rhi::TextureState& state,
+                         u64 base,
+                         const gcn::TextureLayout32& tiled,
+                         const gcn::TextureLayout32& linear);
+
 // The fast-clear state of the CMASK (`htile` false) or HTILE word at `address`
 // when a dispatch wrote it and its output is still on the GPU: the GPU turns
 // the word into a predicate for BeginConditional, then marks `expand` bytes
@@ -79,6 +88,10 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
 bool CsVertexBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
 // Whether CsVertexBuffer can serve the window, without binding anything.
 bool CsHoldsVertices(u64 base, u64 bytes);
+
+// The frame's list while one records, else the compute batch, which goes on
+// the queue ahead of the next frame. Null when neither can open.
+rhi::CommandList* FrameOrBatchList();
 
 // Destroy range buffers retired two frames ago; called once per BeginFrame.
 void ReleaseRetiredCsBuffers();

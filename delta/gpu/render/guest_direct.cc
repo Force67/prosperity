@@ -255,6 +255,25 @@ void DirectRestore(u64 block) {
   __atomic_store_n(&Table()[index], g_saved[index], __ATOMIC_RELEASE);
 }
 
+rhi::Buffer* DirectImportAt(u64 address, u64* offset, u64* bytes) {
+  if (!g_alias && !InitGuestDirect())
+    return nullptr;
+  if (!FindMapping(address))
+    ReadMaps();
+  const Mapping* m = FindMapping(address);
+  if (!m)
+    return nullptr;
+  const u64 at = m->offset + (address - m->start);
+  if (at >= g_alias_size)
+    return nullptr;
+  rhi::Buffer* chunk = ChunkAt(at);
+  if (!chunk)
+    return nullptr;
+  *offset = at & (kChunk - 1);
+  *bytes = base::Min(kChunk - *offset, m->end - address);
+  return chunk;
+}
+
 void SyncGuestDirect() {
   if (!gcn::g_direct_table && !InitGuestDirect())
     return;

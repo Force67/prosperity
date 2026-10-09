@@ -48,9 +48,6 @@ DELTA_OPTION(u32, kWaitTraceFrom, "DELTA_GPU_WAITTRACE", 0);
 DELTA_OPTION(bool, kRenderThread, "DELTA_GPU_RENDER_THREAD", true);
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
 DELTA_OPTION(bool, kFenceFlush, "DELTA_GPU_CS_FENCE_FLUSH", true);
-// Every CP DMA copy writes back every dirty compute range, not only those
-// under its source and destination (the behaviour before lazy writeback).
-DELTA_OPTION(bool, kDmaFlushAll, "DELTA_GPU_CS_DMA_FLUSH_ALL", false);
 DELTA_OPTION(bool, kPrefetchShaders, "DELTA_GPU_PREFETCH_SHADERS", true);
 }  // namespace
 
@@ -418,19 +415,17 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       addressable(src + bytes) && addressable(dst) &&
       addressable(dst + bytes) && GpuWriteMapped("DMA_DATA", dst, bytes) &&
       host_memory::IsMemoryRangeMapped(reinterpret_cast<void*>(src), bytes)) {
-    // src may be CS-written; land pending writes first, and those under dst
-    // before the copy lands over them. Copy even if the flush fails: a
-    // possibly-stale source beats silently dropping the copy.
-    if (kDmaFlushAll) {
-      render::FlushCsWrites(renderer, "dma");
-    } else {
-      render::FlushCsWritesRange(renderer, src, bytes, "dma");
-      render::FlushCsWritesRange(renderer, dst, bytes, "dma");
-    }
     NoteGpuWriteNear("DMA_DATA", dst, bytes);
-    std::memcpy(reinterpret_cast<void*>(dst),
-                reinterpret_cast<const void*>(src), bytes);
-    copied = true;
+    // Bytes the CPU sees as they are are copied here; where a GPU write is
+    // still on its way to either side, the copy runs on the GPU behind it.
+    if (render::GuestBytesSettled(src, bytes) &&
+        render::GuestBytesSettled(dst, bytes)) {
+      std::memcpy(reinterpret_cast<void*>(dst),
+                  reinterpret_cast<const void*>(src), bytes);
+      copied = true;
+    } else {
+      copied = render::ApplyMemoryCopy(renderer, dst, src, bytes);
+    }
   }
   // src_sel 2 = the packet's own dword, repeated: a fill. GNM clears surfaces
   // and their CMASK/HTILE metadata this way, so apply it to guest memory and

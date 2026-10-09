@@ -32,8 +32,8 @@ extern u64 g_win_draws, g_win_declines;
 extern u64 g_ns_dr_pre, g_ns_dr_pipe, g_ns_dr_tex, g_ns_dr_bind;
 // The two candidates inside the texture bind: re-hashing guest content to see
 // whether it changed, and probing that the range is mapped.
-extern u64 g_ns_tex_hash, g_tex_hash_bytes, g_ns_tex_probe;
-extern u64 g_tex_hash_n, g_tex_probe_n, g_ns_tex_lookup, g_tex_lookup_n;
+extern u64 g_ns_tex_refresh, g_tex_refresh_bytes, g_ns_tex_probe;
+extern u64 g_tex_refresh_n, g_tex_probe_n, g_ns_tex_lookup, g_tex_lookup_n;
 extern u64 g_ns_tex_set, g_tex_set_n, g_ns_region, g_ns_cs_flush;
 // Turning a draw packet's registers into a DrawInfo.
 extern u64 g_ns_build_draw, g_build_draw_n;

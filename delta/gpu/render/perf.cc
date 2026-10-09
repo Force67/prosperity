@@ -411,11 +411,11 @@ void ReportFps() {
       BASE_LOGI(
           "drawprof",
           "per-frame pre={:.2f}ms pipe={:.2f}ms tex={:.2f}ms "
-          "bind={:.2f}ms | hash={:.2f}ms x{:.0f} {:.1f}MB "
+          "bind={:.2f}ms | refresh={:.2f}ms x{:.0f} {:.1f}MB "
           "probe={:.2f}ms x{:.0f} lookup={:.2f}ms x{:.0f}",
           g_ns_dr_pre / f / 1e6, g_ns_dr_pipe / f / 1e6, g_ns_dr_tex / f / 1e6,
-          g_ns_dr_bind / f / 1e6, g_ns_tex_hash / f / 1e6, g_tex_hash_n / f,
-          g_tex_hash_bytes / f / 1e6, g_ns_tex_probe / f / 1e6,
+          g_ns_dr_bind / f / 1e6, g_ns_tex_refresh / f / 1e6, g_tex_refresh_n / f,
+          g_tex_refresh_bytes / f / 1e6, g_ns_tex_probe / f / 1e6,
           g_tex_probe_n / f, g_ns_tex_lookup / f / 1e6, g_tex_lookup_n / f);
     if (kDrawProf) {
       // The guest write tracker's side of the ring copies it saves.
@@ -462,8 +462,8 @@ void ReportFps() {
     g_cs_count = g_cs_stage_n = g_cs_flush_n = 0;
     g_win_draws = g_win_declines = 0;
     g_ns_dr_pre = g_ns_dr_pipe = g_ns_dr_tex = g_ns_dr_bind = 0;
-    g_ns_tex_hash = g_tex_hash_bytes = g_ns_tex_probe = 0;
-    g_tex_hash_n = g_tex_probe_n = g_ns_tex_lookup = g_tex_lookup_n = 0;
+    g_ns_tex_refresh = g_tex_refresh_bytes = g_ns_tex_probe = 0;
+    g_tex_refresh_n = g_tex_probe_n = g_ns_tex_lookup = g_tex_lookup_n = 0;
     g_ns_tex_set = g_tex_set_n = g_ns_region = g_ns_cs_flush = 0;
     g_ns_build_draw = g_build_draw_n = 0;
     g_ns_memory_fill = g_memory_fill_bytes = g_memory_fill_n = 0;

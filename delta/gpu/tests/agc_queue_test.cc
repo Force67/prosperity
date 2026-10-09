@@ -409,6 +409,19 @@ bool FlushCsWritesRange(Renderer&, u64 base, u64 bytes, const char*) {
   return true;
 }
 void NoteMemoryFill(Renderer&, u64, u64, u32) {}
+bool GuestBytesSettled(u64, u64) {
+  return true;
+}
+bool ApplyMemoryCopy(Renderer&, u64 dst, u64 src, u64 bytes) {
+  std::memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src),
+              bytes);
+  return true;
+}
+void ApplyMemoryFill(Renderer&, u64 base, u64 bytes, u32 value) {
+  u32* words = reinterpret_cast<u32*>(base);
+  for (u64 i = 0; i < bytes / 4; i++)
+    words[i] = value;
+}
 }  // namespace gpu::render
 
 namespace gpu {

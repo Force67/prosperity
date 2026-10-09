@@ -166,18 +166,20 @@ bool CanDispatchIndirect(u64 args);
 // this hardware), so the target takes a pending clear with the filled value.
 void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
 
-// Fill guest memory with one dword on the CPU, as the command stream orders
-// it (a CP DMA fill, or a compute fill kernel run here instead of on the GPU):
-// compute writes still pending under it land first, every cached copy of it is
-// retired, and NoteMemoryFill sees it.
+// Fill guest memory with one dword on the GPU, in command stream order (a CP
+// DMA fill, or a recognised compute fill kernel): compute output under it is
+// dropped or keeps the filled bytes, every cached copy of it is retired, and
+// NoteMemoryFill sees it.
 void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
 void ApplyMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value);
 bool CanClearMemoryFill64(u64 base, u64 bytes);
 void NoteMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value);
-// Whether ApplyMemoryFill can leave the compute output under the fill on the
-// GPU: dropped where the fill covers it, its writeback keeping the filled
-// bytes where it does not. Otherwise the fill reads it back first.
-bool CsFillStaysOnGpu(u64 base, u64 bytes);
+// A CP DMA copy run on the GPU, in command stream order: for bytes a GPU
+// write is still on its way to, which the CPU would have to wait for.
+bool ApplyMemoryCopy(Renderer& renderer, u64 dst, u64 src, u64 bytes);
+// No GPU write is pending under [base, base+bytes): the CPU reads the bytes
+// without waiting.
+bool GuestBytesSettled(u64 base, u64 bytes);
 // The CPU wrote [first, end): the guest mirror copies those blocks in again.
 void MirrorNoteGuestWrites(u64 first, u64 end, bool announced);
 // The mirror's device address for the 64 KiB guest block, copied in and

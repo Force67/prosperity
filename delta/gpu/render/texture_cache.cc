@@ -63,11 +63,7 @@ DELTA_OPTION(int, kTexCensus, "DELTA_GPU_TEXCENSUS", 0);
 // uploads its mip chain progressively, so "this surface is fine" from a
 // close-up view says nothing about the levels a minified one samples.
 DELTA_OPTION(int, kForceLod, "DELTA_GPU_FORCELOD", -1);
-// How far the content re-check of a texture that keeps holding still may back
-// off. 1 restores the old every-frame validation.
-DELTA_OPTION(u32, kMaxCheckInterval, "DELTA_GPU_TEXRECHECK", 32);
 DELTA_OPTION(bool, kTexMemo, "DELTA_GPU_TEXMEMO", true);
-DELTA_OPTION(bool, kTexPrevalidate, "DELTA_GPU_TEXPREVALIDATE", true);
 }  // namespace
 
 namespace gpu::render {
@@ -197,38 +193,17 @@ struct TexImageEntry {
   rhi::Texture* image = nullptr;
   u64 footprint = 0;
   u64 allocation_size = 0;
-  u64 hash = 0;         // whole-content, from the periodic sweep
-  u64 sample_hash = 0;  // 16 KB of windows, checked every frame
   int last_checked_frame = -1;
-  int last_full_frame = -1;
   int last_used_frame = -1;
-  // Frames between full sweeps. Doubles while the content holds still and snaps
-  // back to 1 the moment it moves: reading every bound texture in full every
-  // frame was 269 MB and 12 ms of a Dead Cells frame, and none of it changed.
-  u32 check_interval = 1;
-  // False while `hash` predates the image's current contents. A refresh already
-  // reads the whole surface to upload it; hashing it again in the same breath
-  // is a second cold pass over tens of megabytes, and the value is only ever
-  // needed by the next full sweep, which recomputes it anyway.
-  bool hash_valid = true;
   // Revision of the compute range the image was last copied from
   // (CsSupplyTexture); 0 when it holds guest memory.
   u64 cs_seq = 0;
-  u64 tail_hash = 0;
-  u64 tail_sample_hash = 0;
+  // The mips past what a dispatch supplies come from guest memory: the first
+  // of them, and whether the write tracker has seen their pages unchanged.
   u32 tail_first_mip = 0;
-  u32 tail_check_interval = 1;
-  int tail_full_frame = -1;
-  // This frame's validation, computed ahead on the worker pool for every image
-  // the last frame used (PrevalidateTextures); pre_frame says for which frame.
-  int pre_frame = -1;
-  bool pre_readable = false;
-  bool pre_full = false;  // pre_hash holds a whole-content hash
-  u64 pre_sample = 0;
-  u64 pre_hash = 0;
-  // The write tracker watches the pages (wt_armed): unchanged while wt_clean,
-  // and nothing is hashed. Pages it cannot watch are hashed as above.
-  bool wt_armed = false;
+  bool tail_clean = false;
+  // The write tracker watches the pages: unchanged while wt_clean. Pages it
+  // cannot watch are uploaded again each frame the image is used.
   bool wt_clean = false;
   gcn::TextureLayout32 layout;
 };
@@ -644,10 +619,6 @@ bool RecordTexPixels(rhi::Texture* img,
                      bool is_3d,
                      u32 first_mip = 0) {
   DELTA_ZONE("gpu.tex_upload");
-  // UC2 builds its grading volume with a write still on its way when the
-  // upload is recorded; wait for it rather than read the old bytes.
-  if (is_3d && !SettleGuestWrites(base, layout.size, "tex-3d"))
-    return false;
   const u64 start = NowNs();
   if (!DetileTextureOnGpu(base, layout, texel_w, texel_h, img, old_state,
                           is_3d, first_mip)) {
@@ -734,51 +705,6 @@ bool EvictTextures(u64 bytes, u64 budget) {
   }
   RetireTextureImages(retire);
   return true;
-}
-
-// The once-a-frame validation of every image last frame used, as one parallel
-// pass instead of ~1.4k serial cold reads as the draws reach them. It runs at
-// the frame's first texture resolve, a little earlier than the checks it
-// replaces, which are themselves once a frame: a write after it is seen next
-// frame, as one after the first use always was.
-void PrevalidateTextures() {
-  DELTA_ZONE("gpu.tex_prevalidate");
-  struct Job {
-    TexImageEntry* entry;
-    u64 base;
-    bool full;
-  };
-  static base::Vector<Job> jobs;
-  static const guest::SessionReset reset_jobs(
-      [] { guest::ResetResource(jobs); });
-  jobs.clear();
-  u64 bytes = 0;
-  for (auto& [key, e] : g_tex_images) {
-    if (e.last_used_frame != g_frame.num - 1 ||
-        e.last_checked_frame == g_frame.num || e.wt_armed)
-      continue;
-    const bool full =
-        g_frame.num - e.last_full_frame >= static_cast<int>(e.check_interval);
-    jobs.push_back({&e, key.base, full});
-    bytes += full ? e.footprint : base::Min<u64>(e.footprint, 16384);
-  }
-  if (jobs.empty())
-    return;
-  gcn::DetileParallelWork(
-      static_cast<u32>(jobs.size()), bytes, [](u32 first, u32 end) {
-        for (u32 i = first; i < end; i++) {
-          const Job& job = jobs[i];
-          TexImageEntry& e = *job.entry;
-          e.pre_readable = gpu::IsReadableRange(job.base, e.footprint);
-          e.pre_full = e.pre_readable && job.full;
-          if (e.pre_readable)
-            e.pre_sample = TexSampleHash(job.base, e.footprint);
-          if (e.pre_full)
-            e.pre_hash = TexHashSerial(job.base, e.footprint);
-        }
-      });
-  for (const Job& job : jobs)
-    job.entry->pre_frame = g_frame.num;
 }
 
 // Uploads/validates the image and returns its view for this binding, or null.
@@ -1065,38 +991,20 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   const auto cs_supply = [&](TexImageEntry& entry, rhi::TextureState state) {
     if (cs_image) {
       if (supplied_mips < layout.mip_levels &&
-          entry.last_checked_frame != g_frame.num) {
-        if (!gpu::IsReadableRange(base, footprint) ||
-            !SettleGuestWrites(base, footprint, "tex-tail"))
+          entry.last_checked_frame != g_frame.num &&
+          (entry.tail_first_mip != supplied_mips || !entry.tail_clean)) {
+        if (!RecordTexPixels(entry.image, state, base, layout, w, h, is_3d,
+                             supplied_mips))
           return false;
-        const u64 start = NowNs();
+        state = rhi::TextureState::kShaderRead;
+        entry.tail_first_mip = supplied_mips;
+        // Armed behind the upload: a write from here on is reported.
+        CollectGuestWrites();
         const u64 offset = layout.mips[supplied_mips].offset;
-        const u64 tail_base = base + offset, tail_bytes = footprint - offset;
-        const u64 sample = TexSampleHash(tail_base, tail_bytes);
-        g_tex_hash_bytes += base::Min<u64>(tail_bytes, 16384);
-        bool changed = entry.tail_first_mip != supplied_mips ||
-                       entry.tail_sample_hash != sample;
-        u64 hash = entry.tail_hash;
-        if (changed || g_frame.num - entry.tail_full_frame >=
-                           static_cast<int>(entry.tail_check_interval)) {
-          hash = TexHash(tail_base, tail_bytes);
-          g_tex_hash_bytes += tail_bytes;
-          changed |= entry.tail_hash != hash;
-          entry.tail_full_frame = g_frame.num;
-          if (!changed && entry.tail_check_interval < kMaxCheckInterval)
-            entry.tail_check_interval *= 2;
-        }
-        g_ns_tex_hash += NowNs() - start;
-        if (changed) {
-          if (!RecordTexPixels(entry.image, state, base, layout, w, h, is_3d,
-                               supplied_mips))
-            return false;
-          state = rhi::TextureState::kShaderRead;
-          entry.tail_hash = hash;
-          entry.tail_sample_hash = sample;
-          entry.tail_first_mip = supplied_mips;
-          entry.tail_check_interval = 1;
-        }
+        entry.tail_clean =
+            GuestWriteTracker().Arm(base + offset, footprint - offset);
+        g_tex_refresh_n++;
+        g_tex_refresh_bytes += footprint - offset;
       } else if (supplied_mips == layout.mip_levels) {
         entry.tail_first_mip = 0;
       }
@@ -1110,31 +1018,18 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     if (!cs_supply(image_it->second, rhi::TextureState::kShaderRead))
       return nullptr;
     image_it->second.last_checked_frame = g_frame.num;
-    image_it->second.hash_valid = false;
     image_it->second.wt_clean = false;
   }
   if (!cs_supplies && !render::FlushCsWritesForGpu(render::DefaultRenderer(),
                                                    base, footprint, "tex"))
     return nullptr;
-  static int prevalidated_frame = -1;
-  if (kTexPrevalidate && prevalidated_frame != g_frame.num) {
-    prevalidated_frame = g_frame.num;
-    PrevalidateTextures();
-  }
-  if (image_it == g_tex_images.end() ||
-      image_it->second.last_checked_frame != g_frame.num) {
-    const bool pre = image_it != g_tex_images.end() &&
-                     image_it->second.pre_frame == g_frame.num &&
-                     image_it->second.footprint == footprint;
-    // Mapping probes are syscall-heavy. Perform one alongside the
-    // once-per-frame content validation rather than on every draw that reuses
-    // this image.
-    // A clean watched image is reused without touching guest memory at all.
-    const bool clean = image_it != g_tex_images.end() &&
-                       image_it->second.wt_armed && image_it->second.wt_clean;
+  const bool known = image_it != g_tex_images.end();
+  if (!known || image_it->second.last_checked_frame != g_frame.num) {
+    // Mapping probes are syscall-heavy: one alongside the once-per-frame
+    // check, and none for a clean watched image.
     const u64 t_probe = NowNs();
-    const bool readable = clean || (pre ? image_it->second.pre_readable
-                                        : gpu::IsReadableRange(base, footprint));
+    const bool readable = (known && image_it->second.wt_clean) ||
+                          gpu::IsReadableRange(base, footprint);
     g_ns_tex_probe += NowNs() - t_probe;
     g_tex_probe_n++;
     if (!readable) {
@@ -1152,81 +1047,32 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       }
       return nullptr;
     }
-    const u64 t_hash = NowNs();
-    // A brand new image takes its reference hash at the upload below.
-    if (image_it != g_tex_images.end() && image_it->second.wt_armed) {
-      TexImageEntry& e = image_it->second;
-      CollectGuestWritesForSubmission();
-      e.last_checked_frame = g_frame.num;
-      if (!e.wt_clean) {
-        e.hash_valid = false;
-        e.last_full_frame = g_frame.num;
-        e.check_interval = 1;
-        if (!RecordTexPixels(e.image, rhi::TextureState::kShaderRead, base,
-                             layout, w, h, is_3d)) {
-          g_ns_tex_hash += NowNs() - t_hash;
-          return nullptr;
+  }
+  if (known && image_it->second.last_checked_frame != g_frame.num) {
+    TexImageEntry& e = image_it->second;
+    CollectGuestWritesForSubmission();
+    e.last_checked_frame = g_frame.num;
+    if (!e.wt_clean) {
+      const u64 t_refresh = NowNs();
+      if (!RecordTexPixels(e.image, rhi::TextureState::kShaderRead, base,
+                           layout, w, h, is_3d)) {
+        if (kTexFail) {
+          static int n = 0;
+          if (n++ < 12)
+            BASE_LOGI("texfail", "refresh {:#x} {}x{}x{} tiling={}",
+                      (unsigned long)base, w, h, is_3d ? depth : layers,
+                      tiling);
         }
-        // The GPU reads the pages when the upload runs: armed now, after the
-        // release of any page the upload imported, a later write is reported.
-        CollectGuestWrites();
-        e.wt_armed = e.wt_clean = GuestWriteTracker().Arm(base, footprint);
-      }
-    } else if (image_it != g_tex_images.end()) {
-      TexImageEntry& e = image_it->second;
-      if (!SettleGuestWrites(base, footprint, "tex-hash"))
         return nullptr;
-      e.last_checked_frame = g_frame.num;
-      // Cheap windowed check every frame, whole-content sweep on the backoff.
-      // The sweep alone would let a guest CPU write sit unnoticed for as long
-      // as the interval (nothing calls InvalidateTexRange for those, only
-      // compute writeback does), and the windows alone can miss a small one.
-      const u64 sample = pre ? e.pre_sample : TexSampleHash(base, footprint);
-      g_tex_hash_bytes += base::Min<u64>(footprint, 16384);
-      bool changed = sample != e.sample_hash;
-      if (!changed && g_frame.num - e.last_full_frame >=
-                          static_cast<int>(e.check_interval)) {
-        const u64 hsh =
-            pre && e.pre_full ? e.pre_hash : TexHash(base, footprint);
-        g_tex_hash_bytes += footprint;
-        // With no reference hash the sweep has nothing to compare against, and
-        // the windowed check has already said the surface is holding still –
-        // so adopt this value as the reference rather than forcing a refresh.
-        changed = e.hash_valid && hsh != e.hash;
-        e.hash = hsh;
-        e.hash_valid = true;
-        e.last_full_frame = g_frame.num;
-        if (!changed && e.check_interval < kMaxCheckInterval)
-          e.check_interval *= 2;
       }
-      if (changed) {
-        // The reference hash is taken BEFORE the upload. Left to the next
-        // sweep, a surface the guest was still writing while we read it (a
-        // texture streaming in) got its finished contents adopted as the
-        // reference and the half-written upload kept for good. Hashed first,
-        // a write that lands after the hash reads as a change next sweep.
-        e.hash = TexHash(base, footprint);
-        g_tex_hash_bytes += footprint;
-        if (!RecordTexPixels(e.image, rhi::TextureState::kShaderRead, base,
-                             layout, w, h, is_3d)) {
-          if (kTexFail) {
-            static int n = 0;
-            if (n++ < 12)
-              BASE_LOGI("texfail", "refresh {:#x} {}x{}x{} tiling={}",
-                        (unsigned long)base, w, h, is_3d ? depth : layers,
-                        tiling);
-          }
-          g_ns_tex_hash += NowNs() - t_hash;
-          return nullptr;
-        }
-        e.hash_valid = true;
-        e.sample_hash = sample;
-        e.last_full_frame = g_frame.num;
-        e.check_interval = 1;
-      }
+      // The GPU reads the pages when the upload runs: armed now, after the
+      // release of any page the upload imported, a later write is reported.
+      CollectGuestWrites();
+      e.wt_clean = GuestWriteTracker().Arm(base, footprint);
+      g_ns_tex_refresh += NowNs() - t_refresh;
+      g_tex_refresh_n++;
+      g_tex_refresh_bytes += footprint;
     }
-    g_ns_tex_hash += NowNs() - t_hash;
-    g_tex_hash_n++;
   }
   if (image_it == g_tex_images.end()) {
     static const u64 kTextureBudget =
@@ -1237,9 +1083,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     TexImageEntry image_entry;
     image_entry.footprint = footprint;
     image_entry.layout = layout;
-    image_entry.hash_valid = false;
     image_entry.last_checked_frame = -1;
-    image_entry.last_full_frame = g_frame.num;
     image_entry.last_used_frame = g_frame.num;
     // Budget on LIVE image bytes. Retired images are only destroyed two
     // BeginFrames later (ReleaseRetiredTextures), so actual allocated memory
@@ -1265,20 +1109,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       return nullptr;
     const bool cs_uploaded =
         cs_supplies && cs_supply(image_entry, rhi::TextureState::kUndefined);
-    if (!cs_uploaded)
-      image_entry.wt_armed = image_entry.wt_clean =
-          GuestWriteTracker().Arm(base, footprint);
-    if (!cs_uploaded && !image_entry.wt_armed) {
-      if (!SettleGuestWrites(base, footprint, "tex-new")) {
-        Device().Destroy(image_entry.image);
-        return nullptr;
-      }
-      image_entry.sample_hash = TexSampleHash(base, footprint);
-      // See the refresh above: hash before the upload.
-      image_entry.hash = TexHash(base, footprint);
-      image_entry.hash_valid = true;
-      g_tex_hash_bytes += footprint;
-    }
     if (!cs_uploaded &&
         !RecordTexPixels(image_entry.image, rhi::TextureState::kUndefined, base,
                          layout, w, h, is_3d)) {
@@ -1291,10 +1121,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       Device().Destroy(image_entry.image);
       return nullptr;
     }
-    if (image_entry.wt_armed) {
+    if (!cs_uploaded) {
       CollectGuestWrites();
-      image_entry.wt_armed = image_entry.wt_clean =
-          GuestWriteTracker().Arm(base, footprint);
+      image_entry.wt_clean = GuestWriteTracker().Arm(base, footprint);
     }
     image_entry.last_checked_frame = g_frame.num;
     image_entry.allocation_size = bytes;
@@ -1802,12 +1631,7 @@ void InvalidateTexRange(u64 base, u64 size) {
         base < key.base + found->second.footprint) {
       found->second.last_checked_frame = -1;
       found->second.wt_clean = false;
-      found->second.last_full_frame = -1;
-      found->second.check_interval = 1;
-      found->second.tail_full_frame = -1;
-      found->second.tail_check_interval = 1;
-      // Its prevalidated hashes read the bytes from before this change.
-      found->second.pre_frame = -1;
+      found->second.tail_clean = false;
     }
   }
 }

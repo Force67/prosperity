@@ -270,10 +270,8 @@ bool ApplyFillKernel(render::Renderer& renderer,
       return false;
   const u64 bytes =
       base::Min<u64>(u64(groups[0]) * 64, dst.num_records) * dst.stride;
-  // Over a render target this is how the title clears it (NoteMemoryFill), and
-  // dispatch output under it stays on the GPU.
-  if (!bytes || !gpu::IsReadableRangeCached(dst.base, bytes) ||
-      !render::CsFillStaysOnGpu(dst.base, bytes))
+  // Over a render target this is how the title clears it (NoteMemoryFill).
+  if (!bytes || !gpu::IsReadableRangeCached(dst.base, bytes))
     return false;
   render::ApplyMemoryFill(renderer, dst.base, bytes, ud[4]);
   return true;

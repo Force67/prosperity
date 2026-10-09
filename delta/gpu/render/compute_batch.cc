@@ -487,4 +487,13 @@ void CsSubmitBatchBeforeFrame() {
     CsBatchSubmit();
 }
 
+rhi::CommandList* FrameOrBatchList() {
+  if (g_frame.recording) {
+    EndRegion();
+    return g_frame.list;
+  }
+  CsBatchBeginImpl();
+  return g_cs_batch_open ? g_cs_list : nullptr;
+}
+
 }  // namespace gpu::render

@@ -233,19 +233,17 @@ void RegisterRtPages(u64 base, u32 w, u32 h, rhi::Format fmt) {
 // 65504 that then bloom into blown-white blobs. Guest memory a title renders
 // into holds defined values; an undefined image is our artefact, so define it.
 void ClearNewRt(RTarget& t) {
-  rhi::CommandList* list = BeginImmediate();
+  const bool in_frame = g_frame.recording;
+  rhi::CommandList* list = FrameOrBatchList();
   if (!list)
     return;
-  rhi::TextureState layout = rhi::TextureState::kUndefined;
-  TransitionImage(list, t.texture, layout, rhi::TextureState::kCopyDst);
+  TransitionImage(list, t.texture, t.layout, rhi::TextureState::kCopyDst);
   list->ClearTexture(t.texture, rhi::TextureState::kCopyDst, {},
                      rhi::ClearColor{});
-  TransitionImage(list, t.texture, layout, rhi::TextureState::kShaderRead);
-  if (EndImmediate(list, "imm.clear_new_rt")) {
-    // Submitted and waited, so this layout is the real one on both timelines.
-    t.layout = layout;
-    t.submitted_layout = layout;
-  }
+  TransitionImage(list, t.texture, t.layout, rhi::TextureState::kShaderRead);
+  // The batch is on the queue before anything the next frame records.
+  if (!in_frame)
+    t.submitted_layout = t.layout;
 }
 
 bool CreateRtImage(RTarget& t,
@@ -1334,46 +1332,19 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
     return false;
   RTarget& rt = it->second;
   const u32 elem = FormatBytes(rt.fmt);
-  gcn::TextureLayout32 layout;
+  gcn::TextureLayout32 tiled, linear;
   if (!elem ||
-      !gcn::BuildTextureLayout32(layout, rt.w, rt.h, rt.w, 1, 1, tile_mode,
+      !gcn::BuildTextureLayout32(tiled, rt.w, rt.h, rt.w, 1, 1, tile_mode,
                                  false, elem) ||
-      !gpu::IsReadableRange(base, layout.size))
+      !gcn::BuildTextureLayout32(linear, rt.w, rt.h, rt.w, 1, 1, 8, false,
+                                 elem) ||
+      !gpu::IsReadableRange(base, tiled.size) ||
+      !render::FlushCsWritesForGpu(render::DefaultRenderer(), base, tiled.size,
+                                   "rt-write-through") ||
+      !WriteTextureToGuest(rt.texture, rt.layout, base, tiled, linear))
     return false;
-  static rhi::Buffer* buf = nullptr;
-  const u64 bytes = static_cast<u64>(rt.w) * rt.h * elem;
-  if (!buf || buf->desc().size < bytes) {
-    Device().WaitIdle();
-    Device().Destroy(buf);
-    rhi::BufferDesc desc;
-    desc.size = bytes;
-    desc.usage = rhi::kBufferCopyDst;
-    desc.memory = rhi::MemoryKind::kReadback;
-    desc.name = "rt write-through";
-    buf = Device().CreateBuffer(desc);
-    if (!buf)
-      return false;
-  }
-  void* map = buf->mapped();
-  render::FlushCsWritesRange(render::DefaultRenderer(), base, layout.size,
-                             "rt-write-through");
-  rhi::CommandList* list = BeginImmediate();
-  if (!list)
-    return false;
-  const rhi::TextureState old_layout = rt.layout;
-  TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopySrc);
-  rhi::BufferTextureCopy copy;
-  copy.region.width = rt.w;
-  copy.region.height = rt.h;
-  list->CopyTextureToBuffer(buf, rt.texture, &copy, 1);
-  TransitionImage(list, rt.texture, rt.layout, old_layout);
-  list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessHostRead);
-  const bool ok = EndImmediate(list, "imm.rt_to_guest");
-  if (!ok || !gcn::RetileTextureMip32(map, reinterpret_cast<void*>(base),
-                                      layout, 0, 0))
-    return false;
-  InvalidateTexRange(base, layout.size);
-  CsForgetGuestRange(base, layout.size);
+  InvalidateTexRange(base, tiled.size);
+  CsForgetGuestRange(base, tiled.size);
   return true;
 }
 

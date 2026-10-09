@@ -251,25 +251,24 @@ ComputeShaderState ComputeStateOf(const Regs& regs) {
 // The SDK's buffer fill kernel: 64 threads a group, and thread i stores the
 // first dword of the constant buffer at s[4:7] to element i of the V# at
 // s[0:3], bounded by its num_records. UE4 clears CMASK and HTILE with it
-// several times a frame and the next bind reads the result back; on the GPU
-// that is a dispatch and a fence wait for 16 KB. Run here it is a memset,
-// for metadata and plain buffers; a fill over a render target stays on the
-// GPU.
+// several times a frame. Recognised, it is a buffer fill instead of a
+// dispatch, for metadata and plain buffers; a fill over a render target runs
+// as the shader.
 constexpr u32 kFillKernel[] = {0xbeeb03ff, 0x00000009, 0xc2020500, 0x8f6a8608,
                                0xd2ba0000, 0x0401006a, 0xbf8c007f, 0x7e020204,
                                0xd1a80004, 0x00020002, 0xe0102000, 0x80000100,
                                0xbf810000};
 
-DELTA_OPTION(bool, kCpuFill, "DELTA_GPU_CPU_FILL", true);
+DELTA_OPTION(bool, kFillKernels, "DELTA_GPU_FILL_KERNELS", true);
 
-bool RunFillKernelOnCpu(render::Renderer& renderer,
+bool RunFillKernelAsFill(render::Renderer& renderer,
                         u64 cs_addr,
                         const u32 groups[3],
                         const u32 threads[3],
                         u32 user_sgpr,
                         u32 tgid_enable,
                         const u32* user_data) {
-  if (!kCpuFill || threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
+  if (!kFillKernels || threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
       groups[1] != 1 || groups[2] != 1 || user_sgpr != 8 ||
       !(tgid_enable & 1) || !IsMappedGuestRange(cs_addr, sizeof(kFillKernel)) ||
       std::memcmp(reinterpret_cast<const void*>(cs_addr), kFillKernel,
@@ -290,9 +289,10 @@ bool RunFillKernelOnCpu(render::Renderer& renderer,
       !IsMappedGuestRange(src.base, 4))
     return false;
   OwnRenderer("fill");
-  if (render::OverlapsLiveTarget(dst.base, bytes))
+  // A value the GPU is still writing: the kernel runs there instead.
+  if (render::OverlapsLiveTarget(dst.base, bytes) ||
+      !render::GuestBytesSettled(src.base, 4))
     return false;
-  render::FlushCsWritesRange(renderer, src.base, 4, "fill");
   u32 value;
   std::memcpy(&value, reinterpret_cast<const void*>(src.base), 4);
   render::ApplyMemoryFill(renderer, dst.base, bytes, value);
@@ -313,14 +313,14 @@ constexpr u32 kRepeatFillKernel[] = {
     0xbf810000,
 };
 
-bool RunRepeatFillKernelOnCpu(render::Renderer& renderer,
+bool RunRepeatFillKernelAsFill(render::Renderer& renderer,
                               u64 cs_addr,
                               const u32 groups[3],
                               const u32 threads[3],
                               u32 user_sgpr,
                               u32 tgid_enable,
                               const u32* user_data) {
-  if (!kCpuFill || threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
+  if (!kFillKernels || threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
       groups[1] != 1 || groups[2] != 1 || user_sgpr != 16 || tgid_enable != 1 ||
       !IsMappedGuestRange(cs_addr, sizeof(kRepeatFillKernel)) ||
       std::memcmp(reinterpret_cast<const void*>(cs_addr), kRepeatFillKernel,
@@ -339,7 +339,7 @@ bool RunRepeatFillKernelOnCpu(render::Renderer& renderer,
       !IsMappedGuestRange(params.base, 8) || !IsMappedGuestRange(src.base, 4))
     return false;
   OwnRenderer("fill");
-  if (!render::FlushCsWritesRange(renderer, params.base, 8, "fill"))
+  if (!render::GuestBytesSettled(params.base, 8))
     return false;
   u32 config[2];
   std::memcpy(config, reinterpret_cast<const void*>(params.base),
@@ -355,7 +355,7 @@ bool RunRepeatFillKernelOnCpu(render::Renderer& renderer,
       (wide ? !render::CanClearMemoryFill64(dst.base, bytes)
             : render::OverlapsLiveTarget(dst.base, bytes)) ||
       !IsMappedGuestRange(src.base, wide ? 8 : 4) ||
-      !render::FlushCsWritesRange(renderer, src.base, wide ? 8 : 4, "fill"))
+      !render::GuestBytesSettled(src.base, wide ? 8 : 4))
     return false;
   if (wide) {
     u64 value;
@@ -407,9 +407,9 @@ void DispatchCompute(render::Renderer& renderer,
   }
   if (kNoCs || !renderer.available())
     return;
-  if (RunFillKernelOnCpu(renderer, cs_addr, groups, threads, user_sgpr,
+  if (RunFillKernelAsFill(renderer, cs_addr, groups, threads, user_sgpr,
                          tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0)) ||
-      RunRepeatFillKernelOnCpu(renderer, cs_addr, groups, threads, user_sgpr,
+      RunRepeatFillKernelAsFill(renderer, cs_addr, groups, threads, user_sgpr,
                                tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0)))
     return;
 

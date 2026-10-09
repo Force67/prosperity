@@ -107,6 +107,14 @@ bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes) {
       bytes > GdsBuffer::kBytes - offset || dst + bytes > page + kGuestPageImport ||
       !EnsureGdsBuffer() || CsRangeDirtyOverlapping(dst, bytes))
     return false;
+  // A block the GPU owns holds the newest bytes in the mirror: written there.
+  if (MirrorOwnsAny(dst, dst + bytes)) {
+    if (!GpuWriteGuest(dst, bytes, g_gds.buf, offset))
+      return false;
+    InvalidateTexRange(dst, bytes);
+    g_gds_imported_n++;
+    return true;
+  }
   rhi::Buffer* target = ImportGuestPage(page);
   if (!target)
     return false;

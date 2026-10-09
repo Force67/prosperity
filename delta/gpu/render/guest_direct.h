@@ -1,6 +1,7 @@
 #pragma once
 #include "base/arch.h"
 #include "gpu/gcn/gcn_resource.h"
+#include "gpu/rhi/device.h"
 
 namespace gpu::render {
 // DELTA_GPU_DIRECT: shaders read the title's direct memory where it lives.
@@ -28,4 +29,9 @@ bool InDirectAlias(u64 va);
 // restored. Restoring is async-signal-safe.
 void DirectRedirect(u64 block, u64 device_address);
 void DirectRestore(u64 block);
+// The import of direct memory holding the guest byte at `address`, through
+// the second mapping and so whatever the guest's protection: `offset` is the
+// byte's place in it and `bytes` how many follow contiguously. Null where no
+// view of direct memory holds the address.
+rhi::Buffer* DirectImportAt(u64 address, u64* offset, u64* bytes);
 }  // namespace gpu::render

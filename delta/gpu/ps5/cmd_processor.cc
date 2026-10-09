@@ -348,11 +348,11 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       bytes <= 0x1000000u && src != dst && addressable(src) &&
       addressable(src + bytes) && addressable(dst) &&
       addressable(dst + bytes)) {
-    // The source may be compute output still in VRAM, and a dirty range under
-    // the destination would land over the copy when it is written back.
-    render::FlushCsWritesRange(renderer, src, bytes, "dma");
-    render::FlushCsWritesRange(renderer, dst, bytes, "dma");
     if (bytes <= kLabelBytes) {
+      // The source may be compute output still in VRAM, and a dirty range
+      // under the destination would land over the copy when written back.
+      render::FlushCsWritesRange(renderer, src, bytes, "dma");
+      render::FlushCsWritesRange(renderer, dst, bytes, "dma");
       const auto* from = reinterpret_cast<const u8*>(src);
       PublishLabel(
           [dst, data = base::Vector<u8>(from, from + bytes)] {
@@ -368,11 +368,17 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
                         data.size() - tail);
           },
           dst, bytes, from);
-    } else {
+      copied = true;
+    } else if (render::GuestBytesSettled(src, bytes) &&
+               render::GuestBytesSettled(dst, bytes)) {
+      // Bytes the CPU sees as they are are copied here, where the command
+      // processor reads them next (a context shadow for LOAD_CONTEXT_REG).
       std::memcpy(reinterpret_cast<void*>(dst),
                   reinterpret_cast<const void*>(src), bytes);
+      copied = true;
+    } else {
+      copied = render::ApplyMemoryCopy(renderer, dst, src, bytes);
     }
-    copied = true;
   }
   // src_sel 2 = the packet's own dword, repeated: a fill. That is how a title
   // clears a surface, since there is no clear packet, so apply it to guest
@@ -394,12 +400,11 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
             }
           },
           dst, bytes, filled);
+      render::NoteMemoryFill(renderer, dst, bytes, fill);
     } else {
-      u32* words = reinterpret_cast<u32*>(dst);
-      for (u32 k = 0; k < bytes / 4; k++)
-        words[k] = fill;
+      render::ApplyMemoryFill(renderer, dst, bytes, fill);
     }
-    render::NoteMemoryFill(renderer, dst, bytes, fill);
+    copied = true;
   }
   TraceDmaData(control, src, dst, bytes, copied);
 }

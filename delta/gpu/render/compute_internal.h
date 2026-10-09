@@ -793,9 +793,17 @@ bool MirrorCopyInGuest(u64 base, u64 bytes);
 // Writes a dirty range back to guest memory on the GPU (compute_mirror.cc).
 bool GpuWriteBack(u64 base, CsRange& e, bool* kept);
 bool MirrorOwned(u64 block);
+bool MirrorOwnsAny(u64 first, u64 end);
 bool MirrorFillable(u64 base, u64 bytes);
 bool GuestImportable(u64 base, u64 bytes);
 bool MirrorFill(u64 base, u64 bytes, u32 value);
+// [base, base+bytes) filled on the GPU with the dword pair lo, hi (lo == hi
+// for a dword fill). False when the GPU cannot write the pages.
+bool GpuFill(u64 base, u64 bytes, u32 lo, u32 hi);
+// [src, src+bytes) copied over [dst, dst+bytes) on the GPU, in queue order.
+bool GpuCopy(u64 dst, u64 src, u64 bytes);
+// `src` from `src_off` on copied over [dst, dst+bytes) on the GPU.
+bool GpuWriteGuest(u64 dst, u64 bytes, rhi::Buffer* src, u64 src_off);
 bool RecordGuestRead(rhi::CommandList* list, u64 base, u64 bytes,
                      rhi::Buffer* dst, u64 dst_off = 0);
 // The newest batch still writing into [base, base+bytes) of the guest pages.
