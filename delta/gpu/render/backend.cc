@@ -6,6 +6,7 @@
 #include "gpu/render/renderer.h"
 
 #include "gpu/vulkan/vk_rhi.h"
+#include "options/options.h"
 #if DELTA_GPU_OPENGL
 #include "gpu/opengl/gl_rhi.h"
 #endif
@@ -15,6 +16,12 @@
 #include "base/strings/xstring.h"
 #include "gpu/d3d12/d3d12_rhi.h"
 #endif
+
+namespace {
+// VK_KHR_unified_image_layouts. Off: on NVIDIA 610 it more than doubled
+// UC2's GPU time (28 -> 40-90 ms a frame), targets left in GENERAL.
+DELTA_OPTION(bool, kVkUnifiedLayouts, "DELTA_VK_UNIFIED_LAYOUTS", false);
+}  // namespace
 
 namespace gpu::render {
 
@@ -53,6 +60,7 @@ base::UniquePointer<rhi::Device> CreateBackendDevice(
       vo.on_message = options.on_message;
       vo.sync_validation = options.sync_validation;
       vo.checkpoints = options.checkpoints;
+      vo.unified_layouts = kVkUnifiedLayouts;
       vo.pipeline_cache_path = cache.empty() ? nullptr : cache.c_str();
       return vk::CreateVulkanDevice(vo);
     }

@@ -265,7 +265,8 @@ void VulkanCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
     const rhi::ColorAttachment& c = pass.colors[i];
     colors[i] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     colors[i].imageView = Native(c.view);
-    colors[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colors[i].imageLayout = FixedLayout(c.view->texture(),
+                                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     colors[i].loadOp = ToVkLoad(c.load);
     colors[i].storeOp = c.store == rhi::StoreOp::kStore
                             ? VK_ATTACHMENT_STORE_OP_STORE
@@ -278,8 +279,10 @@ void VulkanCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
       VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
   if (d.view && d.depth) {
     depth.imageView = Native(d.view);
-    depth.imageLayout = d.read_only ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
-                                    : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depth.imageLayout =
+        FixedLayout(d.view->texture(),
+                    d.read_only ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
+                                : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
     depth.loadOp = ToVkLoad(d.depth_load);
     depth.storeOp = d.read_only ? VK_ATTACHMENT_STORE_OP_NONE
                                 : VK_ATTACHMENT_STORE_OP_STORE;
@@ -287,9 +290,11 @@ void VulkanCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
   }
   if (d.view && d.stencil) {
     stencil.imageView = Native(d.view);
-    stencil.imageLayout = d.stencil_read_only
-                              ? VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL
-                              : VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+    stencil.imageLayout =
+        FixedLayout(d.view->texture(),
+                    d.stencil_read_only
+                        ? VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL
+                        : VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL);
     stencil.loadOp = ToVkLoad(d.stencil_load);
     stencil.storeOp = d.stencil_read_only ? VK_ATTACHMENT_STORE_OP_NONE
                                           : VK_ATTACHMENT_STORE_OP_STORE;
@@ -540,8 +545,9 @@ void VulkanCommandList::CopyBufferToTexture(
     const u32 n = count - done > 16 ? 16 : count - done;
     for (u32 i = 0; i < n; i++)
       vk[i] = ToVkCopy(regions[done + i]);
-    vkCmdCopyBufferToImage(cmd, Buf(src)->buffer, Tex(dst)->image,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, n, vk);
+    vkCmdCopyBufferToImage(
+        cmd, Buf(src)->buffer, Tex(dst)->image,
+        FixedLayout(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL), n, vk);
     done += n;
   }
 }
@@ -557,9 +563,10 @@ void VulkanCommandList::CopyTextureToBuffer(
     const u32 n = count - done > 16 ? 16 : count - done;
     for (u32 i = 0; i < n; i++)
       vk[i] = ToVkCopy(regions[done + i]);
-    vkCmdCopyImageToBuffer(cmd, Tex(src)->image,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           Buf(dst)->buffer, n, vk);
+    vkCmdCopyImageToBuffer(
+        cmd, Tex(src)->image,
+        FixedLayout(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
+        Buf(dst)->buffer, n, vk);
     done += n;
   }
 }
@@ -575,8 +582,10 @@ void VulkanCommandList::CopyTexture(rhi::Texture* dst,
   c.dstSubresource = Layers(dst_region);
   c.dstOffset = {dst_region.x, dst_region.y, dst_region.z};
   c.extent = {src_region.width, src_region.height, src_region.depth};
-  vkCmdCopyImage(cmd, Tex(src)->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 Tex(dst)->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+  vkCmdCopyImage(cmd, Tex(src)->image,
+                 FixedLayout(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
+                 Tex(dst)->image,
+                 FixedLayout(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL), 1, &c);
 }
 
 void VulkanCommandList::BlitTexture(rhi::Texture* dst,
@@ -597,8 +606,9 @@ void VulkanCommandList::BlitTexture(rhi::Texture* dst,
                      dst_region.y + static_cast<i32>(dst_region.height),
                      dst_region.z + static_cast<i32>(dst_region.depth)};
   vkCmdBlitImage(
-      cmd, Tex(src)->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-      Tex(dst)->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+      cmd, Tex(src)->image,
+      FixedLayout(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL), Tex(dst)->image,
+      FixedLayout(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL), 1, &b,
       filter == rhi::Filter::kLinear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
 }
 
@@ -611,7 +621,8 @@ void VulkanCommandList::ClearTexture(rhi::Texture* texture,
   const VkImageSubresourceRange r{ToVkAspect(range.aspect), range.base_mip,
                                   range.mips, range.base_layer, range.layers};
   vkCmdClearColorImage(cmd, Tex(texture)->image,
-                       ToVkLayout(state, range.aspect), &v, 1, &r);
+                       ToVkLayout(state, range.aspect, Exported(texture)), &v,
+                       1, &r);
 }
 
 void VulkanCommandList::ClearDepthStencil(rhi::Texture* texture,
@@ -622,8 +633,9 @@ void VulkanCommandList::ClearDepthStencil(rhi::Texture* texture,
   const VkClearDepthStencilValue v{depth, stencil};
   const VkImageSubresourceRange r{ToVkAspect(range.aspect), range.base_mip,
                                   range.mips, range.base_layer, range.layers};
-  vkCmdClearDepthStencilImage(cmd, Tex(texture)->image,
-                              ToVkLayout(state, range.aspect), &v, 1, &r);
+  vkCmdClearDepthStencilImage(
+      cmd, Tex(texture)->image,
+      ToVkLayout(state, range.aspect, Exported(texture)), &v, 1, &r);
 }
 
 void VulkanCommandList::FillBuffer(rhi::Buffer* buffer,
@@ -667,8 +679,9 @@ void VulkanCommandList::Barrier(u32 src_access,
     ib[i] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     ib[i].srcAccessMask = src_a;
     ib[i].dstAccessMask = dst_a;
-    ib[i].oldLayout = ToVkLayout(t.before, t.range.aspect);
-    ib[i].newLayout = ToVkLayout(t.after, t.range.aspect);
+    const bool exported = Exported(t.texture);
+    ib[i].oldLayout = ToVkLayout(t.before, t.range.aspect, exported);
+    ib[i].newLayout = ToVkLayout(t.after, t.range.aspect, exported);
     ib[i].srcQueueFamilyIndex = ib[i].dstQueueFamilyIndex =
         VK_QUEUE_FAMILY_IGNORED;
     ib[i].image = Tex(t.texture)->image;

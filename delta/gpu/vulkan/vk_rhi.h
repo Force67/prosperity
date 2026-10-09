@@ -20,6 +20,7 @@ struct VulkanOptions {
   const char* validation_layer = nullptr;  // enable this layer when present
   bool sync_validation = false;
   bool checkpoints = false;  // VK_NV_device_diagnostic_checkpoints
+  bool unified_layouts = false;  // VK_KHR_unified_image_layouts when offered
   // Where the driver's pipeline cache blob persists; empty disables it.
   const char* pipeline_cache_path = nullptr;
   // Receives validation-layer messages: severity, id, label stack, text.
@@ -66,7 +67,15 @@ void UnlockQueue(rhi::Device* device);
 
 VkFormat ToVkFormat(rhi::Format format);
 rhi::Format FromVkFormat(VkFormat format);
-VkImageLayout ToVkLayout(rhi::TextureState state, u8 aspect);
+VkImageLayout ToVkLayout(rhi::TextureState state,
+                         u8 aspect,
+                         bool exported = false);
+// `optimal`, or GENERAL under VK_KHR_unified_image_layouts.
+VkImageLayout FixedLayout(rhi::Texture* texture, VkImageLayout optimal);
+extern bool g_unified_layouts;
+inline bool Exported(rhi::Texture* texture) {
+  return texture->desc().usage & rhi::kTextureExportable;
+}
 rhi::TextureState FromVkLayout(VkImageLayout layout);
 
 }  // namespace gpu::vk

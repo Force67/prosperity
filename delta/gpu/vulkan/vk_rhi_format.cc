@@ -104,8 +104,14 @@ rhi::Format FromVkFormat(VkFormat format) {
   return Format::kUndefined;
 }
 
-VkImageLayout ToVkLayout(rhi::TextureState state, u8 aspect) {
+bool g_unified_layouts = false;
+
+VkImageLayout ToVkLayout(rhi::TextureState state, u8 aspect, bool exported) {
   using rhi::TextureState;
+  // VK_KHR_unified_image_layouts: GENERAL everywhere, at no cost. An exported
+  // image keeps the layouts the importing device assumes.
+  if (g_unified_layouts && !exported && state != TextureState::kUndefined)
+    return VK_IMAGE_LAYOUT_GENERAL;
   const bool depth = aspect & rhi::kAspectDepth;
   const bool stencil = aspect & rhi::kAspectStencil;
   switch (state) {
@@ -135,6 +141,11 @@ VkImageLayout ToVkLayout(rhi::TextureState state, u8 aspect) {
       return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   }
   return VK_IMAGE_LAYOUT_GENERAL;
+}
+
+VkImageLayout FixedLayout(rhi::Texture* texture, VkImageLayout optimal) {
+  return g_unified_layouts && !Exported(texture) ? VK_IMAGE_LAYOUT_GENERAL
+                                                 : optimal;
 }
 
 rhi::TextureState FromVkLayout(VkImageLayout layout) {

@@ -639,6 +639,23 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
     f13.pNext = &conditional;
   }
 
+  VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR unified{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR};
+  g_unified_layouts = false;
+  if (options.unified_layouts &&
+      HasExtension(exts, VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME)) {
+    VkPhysicalDeviceFeatures2 query{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    query.pNext = &unified;
+    vkGetPhysicalDeviceFeatures2(phys, &query);
+    if (unified.unifiedImageLayouts) {
+      unified.unifiedImageLayoutsVideo = VK_FALSE;
+      unified.pNext = f13.pNext;
+      f13.pNext = &unified;
+      dev_exts.push_back(VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME);
+      g_unified_layouts = true;
+    }
+  }
   VkPhysicalDeviceFaultFeaturesEXT fault{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
   if (want_ext(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
@@ -889,7 +906,8 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
     shader_stages_ |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
   if (caps_.mesh_shader)
     shader_stages_ |= VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
-  BASE_LOGI("gpuvk", "device: {}", device_name_.c_str());
+  BASE_LOGI("gpuvk", "device: {}{}", device_name_.c_str(),
+            g_unified_layouts ? " (unified image layouts)" : "");
   return true;
 }
 
@@ -1338,7 +1356,8 @@ void VulkanDevice::FillWrite(VkDescriptorType type,
           type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
               ? VK_IMAGE_LAYOUT_GENERAL
               : ToVkLayout(in.view_state,
-                           view ? view->desc().aspect : rhi::kAspectColor);
+                           view ? view->desc().aspect : rhi::kAspectColor,
+                           view && Exported(view->texture()));
       write.pImageInfo = &image;
       break;
     }
