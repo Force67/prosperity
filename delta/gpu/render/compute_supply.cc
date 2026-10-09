@@ -114,13 +114,14 @@ bool CsSupplyTextureParts(u64 base,
     return false;
   u64 cursor = base;
   u64 revision = 14695981039346656037ull;
+  CollectGuestWrites();
   for (u64 part : parts) {
     const auto& e = g_cs_ranges.find(part)->second;
     const u64 lo = base::Max(base, part);
     const u64 hi = base::Min(base + tiled.size, part + e.guest_bytes);
     if (lo != cursor || !e.buf || e.imported || (e.image_staging && !e.truth) ||
         !e.cpu_writes.empty() || !e.fill_kept.empty() || hi - part > e.size ||
-        !e.shadow_valid || e.shadow.size() < hi - part)
+        !e.staged_clean)
       return false;
     cursor = hi;
     revision = HashWord(HashWord(revision, part), e.write_seq);
@@ -153,15 +154,6 @@ bool CsSupplyTextureParts(u64 base,
     return false;
   if (seq && *seq == revision)
     return true;
-  // A range's untouched bytes still belong to its guest snapshot.
-  for (u64 part : parts) {
-    const auto& e = g_cs_ranges.find(part)->second;
-    const u64 lo = base::Max(base, part);
-    const u64 hi = base::Min(base + tiled.size, part + e.guest_bytes);
-    if (std::memcmp(e.shadow.data() + lo - part,
-                    reinterpret_cast<const void*>(lo), hi - lo))
-      return false;
-  }
   if (!img)
     return true;
   g_cs_scratch_owner++;
@@ -495,9 +487,8 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   // there since. Only while the guest still holds what was staged are the two
   // the same bytes.
   const u64 off = base - range_base;
-  if (!e.shadow_valid || e.shadow.size() < off + bytes ||
-      std::memcmp(e.shadow.data() + off, reinterpret_cast<const void*>(base),
-                  bytes)) {
+  CollectGuestWrites();
+  if (!e.staged_clean) {
     g_buf_bridge_declined++;
     return false;
   }
@@ -545,9 +536,8 @@ bool CsSupplyTextureFromBuffer(u64 base,
   // As for CsSupplyBuffer: the bytes around the output are the staged guest
   // bytes, so they must still be what the guest holds.
   const u64 off = base - range_base;
-  if (!e.shadow_valid || e.shadow.size() < off + tiled.size ||
-      std::memcmp(e.shadow.data() + off, reinterpret_cast<const void*>(base),
-                  tiled.size)) {
+  CollectGuestWrites();
+  if (!e.staged_clean) {
     g_buf_bridge_declined++;
     return false;
   }
@@ -665,9 +655,8 @@ bool CsVertexBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
   // As for CsSupplyBuffer: only while the guest still holds what was staged
   // do the buffer's bytes around the output equal guest memory's.
   const u64 off = base - range_base;
-  if (!e.shadow_valid || e.shadow.size() < off + bytes ||
-      std::memcmp(e.shadow.data() + off, reinterpret_cast<const void*>(base),
-                  bytes)) {
+  CollectGuestWrites();
+  if (!e.staged_clean) {
     g_buf_bridge_declined++;
     return false;
   }
@@ -724,10 +713,13 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
     return RtRefreshMiss("state");
   const ComputeInfo::Res& r = e.res;
   // A linear staging holds the texels as they are, except 11/11/10, which is
-  // staged unpacked to RGBA32F and packed again by a blit.
+  // staged unpacked to RGBA32F and packed again by a blit, and 8/16-bit
+  // texels, staged widened to dwords and narrowed again by the tiling shader.
   const bool unpacked = r.dfmt == 6 && r.stage_elem_bytes == 16;
+  const bool widened =
+      (r.elem_bytes == 1 || r.elem_bytes == 2) && r.stage_elem_bytes == 4;
   if (r.mip_levels != 1 || r.layers != 1 ||
-      (!unpacked && r.elem_bytes != r.stage_elem_bytes))
+      (!unpacked && !widened && r.elem_bytes != r.stage_elem_bytes))
     return RtRefreshMiss(r.mip_levels != 1 ? "mips"
                          : r.layers != 1   ? "layers"
                                            : "elem");
@@ -761,8 +753,11 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
     return RtRefreshMiss(FormatBytes(rt.fmt) != r.elem_bytes ? "rt-format"
                                                              : "rt-size");
   }
-  gcn::TextureLayout32 tiled, linear;
-  if (!BuildCsImageLayouts(r, tiled, linear))
+  gcn::TextureLayout32 tiled, linear, packed;
+  if (!BuildCsImageLayouts(r, tiled, linear) ||
+      (widened && !gcn::BuildTextureLayout32(packed, r.width, r.height, r.pitch,
+                                             1, 1, 8, r.pow2_pad,
+                                             r.elem_bytes)))
     return RtRefreshMiss("layout");
   const u32 w = base::Min(rt.w, r.width), h = base::Min(rt.h, r.height);
   rhi::Texture* float_image = nullptr;
@@ -772,7 +767,20 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   rhi::Buffer* src = e.buf;
   bool fresh = false;
   const TileTable* table = nullptr;
-  if (e.truth) {
+  const TileTable* narrow = nullptr;
+  static CsRange guest_scratch, packed_scratch;
+  if (widened) {
+    // Narrowed through the guest layout: out of the staging (or the truth as
+    // it is), then detiled packed.
+    if (!(narrow = GetTileTable(tiled, packed, /*packed=*/true)) ||
+        (!e.truth && !(table = GetTileTable(tiled, linear))))
+      return RtRefreshMiss("table");
+    if ((!e.truth && !CsRangeEnsureBuffer(guest_scratch, tiled.size)) ||
+        !CsRangeEnsureBuffer(packed_scratch, packed.size))
+      return false;
+    guest_scratch.frame_ref = packed_scratch.frame_ref = g_frame.num;
+    src = packed_scratch.buf;
+  } else if (e.truth) {
     if (!(table = GetTileTable(tiled, linear)))
       return RtRefreshMiss("table");
     g_cs_scratch_owner++;
@@ -788,9 +796,21 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   if (fresh)
     RecordImageTiling(list, *table, e.buf, 0, e.guest_bytes, src, linear.size,
                       /*detile=*/true, 1, 1);
+  if (widened) {
+    rhi::Buffer* guest = e.buf;
+    u64 guest_bytes = e.guest_bytes;
+    if (!e.truth) {
+      guest = guest_scratch.buf;
+      guest_bytes = (tiled.size + 3) & ~u64(3);
+      RecordImageTiling(list, *table, guest, 0, guest_bytes, e.buf,
+                        (linear.size + 3) & ~u64(3), /*detile=*/false, 1, 1);
+    }
+    RecordImageTiling(list, *narrow, guest, 0, guest_bytes, src,
+                      (packed.size + 3) & ~u64(3), /*detile=*/true, 1, 1);
+  }
   const rhi::TextureState from = rt.layout;
   TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopyDst);
-  const auto& level = linear.mips[0];
+  const auto& level = widened ? packed.mips[0] : linear.mips[0];
   rhi::BufferTextureCopy copy;
   copy.buffer_offset = level.offset;
   copy.row_length = level.pitch;

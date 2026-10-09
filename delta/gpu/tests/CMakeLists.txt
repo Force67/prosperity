@@ -104,10 +104,6 @@ add_delta_test(render_compute_hazard_test
     render_compute_hazard_test.cc
   DEPS delta_deps)
 
-add_delta_test(render_compute_writeback_test
-  SOURCES render_compute_writeback_test.cc
-  DEPS delta_deps)
-
 add_delta_test(render_hash_test
   SOURCES render_hash_test.cc
   DEPS delta_gpu)

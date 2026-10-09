@@ -44,8 +44,9 @@ class WriteTracker {
   bool Arm(u64 base, u64 bytes);
 
   // Appends every armed range written (or remapped) since the last call, and
-  // arms it again. Announced writes are included.
-  void Collect(base::Vector<Range>& out);
+  // arms it again. Announced writes are included, and come first: the count of
+  // them is returned.
+  size_t Collect(base::Vector<Range>& out);
 
   // Thread safe. A write the tracker cannot see (another mapping, a device).
   void NoteWrite(u64 base, u64 bytes);
@@ -101,7 +102,7 @@ class WriteTracker {
   bool ArmRange(u64 first, u64 end);
   void Disarm(u64 first, u64 end);
   bool Scan(u64 first, u64 end, base::Vector<Range>& out);
-  void Drain(base::Vector<Range>& out);
+  size_t Drain(base::Vector<Range>& out);
   static long MinorFaults();
 
   Mode mode_ = Mode::kOff;

@@ -35,7 +35,6 @@ using namespace cs;
 
 namespace gpu::render::cs {
 
-extern base::Option<u64> kDetileDump;
 extern base::Option<bool> kCsList;
 extern base::Option<int> kCsHist;
 extern base::Option<bool> kCsRtTrace;
@@ -44,14 +43,10 @@ extern base::Option<bool> kCsRename;
 extern base::Option<bool> kCsRtCache;
 extern base::Option<bool> kCsSubset;
 
-extern base::Option<bool> kCsSkipRetile;
 extern base::Option<bool> kCsSkipUpload;
 extern u64 g_cs_skip_n;
-extern base::Option<bool> kCsWbFull;
-extern base::Option<bool> kCsWbAudit;
 
 extern base::Option<bool> kCsVram;
-extern base::Option<bool> kCsGpuTiling;
 
 extern base::Option<bool> kCsTexBridge;
 extern base::Option<bool> kCsInFrame;
@@ -69,16 +64,11 @@ extern base::Option<u64> kCsFlushTrace;
 extern base::Option<int> kCsOverlapTrace;
 extern base::Option<bool> kCsSyncReport;
 extern base::Option<int> kCsFlushFrom;
-extern base::Option<bool> kCsEagerReadback;
 
 extern base::Option<bool> kCsTrack;
 extern base::Option<bool> kCsAged;
-extern base::Option<bool> kGpuCsgpuVerbose;
 bool CsSyncReporting();
-extern u64 g_cs_image_staged;
 
-extern u64 g_out_retile_ns, g_out_rt_ns, g_out_tail_ns;
-extern u64 g_out_buffer_ns;
 extern u64 g_tex_bridge_n, g_tex_bridge_bytes, g_cs_chunk_splits;
 extern u64 g_buf_bridge_n, g_buf_bridge_bytes, g_buf_bridge_declined;
 extern u64 g_vtx_bridge_n;
@@ -97,7 +87,7 @@ extern u64 g_in_hash_ns, g_in_detile_ns, g_in_rt_ns, g_in_copy_ns;
 extern u64 g_in_hash_n, g_in_rt_n, g_in_wt_skips;
 extern u64 g_in_hash_bytes, g_wb_hash_bytes, g_wb_hash_ns;
 extern u64 g_in_overlap_ns, g_in_reshape_ns, g_in_alloc_ns;
-extern u64 g_in_membuf_ns, g_in_shadow_ns;
+extern u64 g_in_membuf_ns;
 extern u64 g_in_overlap_n, g_in_reshape_n, g_in_alloc_n;
 extern u64 g_truth_stage_bytes, g_truth_import_n, g_truth_detile_n,
     g_truth_retile_n, g_truth_parent_n, g_truth_fold_n, g_truth_rt_n;
@@ -105,7 +95,7 @@ extern u64 g_truth_stage_bytes, g_truth_import_n, g_truth_detile_n,
 extern base::Map<base::String, u64> g_wb_why;
 extern u64 g_wb_why_bytes;
 extern u64 g_lazy_kept_n, g_lazy_kept_bytes;
-extern u64 g_out_retile_n, g_out_rt_submits;
+extern u64 g_out_rt_submits;
 extern u64 g_gpu_tiling_ns[2], g_gpu_tiling_n[2];
 
 extern u64 g_tile_hin_ns, g_tile_sync_ns, g_tile_hout_ns;
@@ -221,10 +211,6 @@ void UnpackR11G11B10(u32 packed, u8* dst);
 
 u32 PackR11G11B10(const u8* src);
 
-bool StageCsImage(const ComputeInfo::Res& res, void* dst);
-
-bool WritebackCsImage(const ComputeInfo::Res& res, const void* src);
-
 // GPU-resident compute working set. Each guest range a CS touches gets a
 // persistent host-visible storage buffer keyed by its base address. Staged
 // content persists across dispatches and frames: a range the GPU wrote
@@ -270,13 +256,6 @@ struct CsRange {
   // (CsRefreshRtInFrame): rendered past it, the target is the newer copy.
   u64 refreshed_serial = 0;
   ComputeInfo::Res res;  // writeback needs the full layout description
-  // A copy of the guest bytes as they were staged IN, kept so the writeback can
-  // tell "the shader wrote this word" from "the shader never touched it".
-  // Without it the writeback has to assume the whole range is GPU output and
-  // copies the stale snapshot back over anything the CPU changed meanwhile –
-  // see CsRangeFlushOne.
-  base::Vector<u8> shadow;
-  bool shadow_valid = false;
   // Bumped whenever the buffer's contents change (a dispatch wrote it, or it
   // was staged in again), so a texture bridged from it knows when to re-copy.
   u64 write_seq = 1;
@@ -306,9 +285,10 @@ struct CsRange {
   // Guest pages armed in the write tracker before the last hash or copy, and
   // no write reported since: the staging still holds what guest memory does.
   bool wt_clean = false;
-  // The shadow of an RT-sourced range is the guest bytes, watched since it was
-  // taken: still those bytes while this holds.
-  bool shadow_guest_clean = false;
+  // Guest pages watched since the buffer was last staged from them, with no
+  // write reported: around a dispatch's output the buffer still holds what
+  // guest memory does, so the buffer can stand in for it.
+  bool staged_clean = false;
   // When the staging last copied guest memory (g_cs_dirty_stamp's clock).
   u64 staged_stamp = 0;
   // The image in guest layout, tiled on the GPU for pointer-chasing
@@ -325,8 +305,6 @@ struct CsRange {
   // holds newer bytes than the range does.
   u64 dirty_render_serial = 0;
 };
-
-void SnapshotCsShadow(CsRange& range, const ComputeInfo::Res& res, u64 bytes);
 
 // The tiled-truth conversions (compute_tiling.cc).
 struct TileTable;
@@ -411,10 +389,10 @@ void AliasedImageBarrier(rhi::CommandList* c,
 // reasons that are not defects: the IMAGE is sized from CB_COLOR's
 // pitch/slice while the CS descriptor carries the surface's own width and
 // height, and a target the shader reads as R11G11B10F is staged as four
-// floats per texel because that is what StageCsImage produces on the
-// guest-memory path. Demanding exact agreement rejected GTA:SA's scene
-// target on both counts, so its whole compute post chain read the guest
-// bytes under the target, which draws never write, i.e. black.
+// floats per texel because that is how such an image is staged. Demanding
+// exact agreement rejected GTA:SA's scene target on both counts, so its whole
+// compute post chain read the guest bytes under the target, which draws never
+// write, i.e. black.
 struct AliasedCopyPlan {
   u32 w = 0;
   u32 h = 0;
@@ -616,9 +594,10 @@ namespace gpu::render::cs {
 
 bool TruthEligible(const ComputeInfo::Res& r);
 
-bool CanGpuTile(const ComputeInfo::Res& res, const CsRange& e);
+// Detile the image a binding names from its guest pages into `e.buf`, on the
+// batch list. False when the layout has no GPU tiling table.
+bool StageImageOnGpu(const ComputeInfo::Res& res, CsRange& e);
 
-bool ConvertCsRangeImage(const ComputeInfo::Res& res, CsRange& e, bool detile);
 
 extern bool g_cs_batch_open;
 extern u32 g_cs_batch_count;
@@ -744,11 +723,7 @@ bool SettleUnwaitedWrites();
 
 bool CsLazyKept(u64 base, const CsRange& e);
 
-void CsStageReadback(u64 base, CsRange& e, bool all);
-
 base::Vector<u64> DirtyBases(bool ordered);
-
-void CsStageReadbacks(bool all = true);
 
 bool CsSplitFrameChunk();
 
@@ -852,11 +827,11 @@ void MirrorProtectSubmitted(u64 submission);
 bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes);
 // MirrorCopyIn without writing staged ranges back first.
 bool MirrorCopyInGuest(u64 base, u64 bytes);
-// Writes a dirty truth range back by giving its bytes to the mirror (GPU copy,
-// no wait); false when it has to take the staged path.
-bool MirrorTakeRange(u64 base, CsRange& e);
+// Writes a dirty range back to guest memory on the GPU (compute_mirror.cc).
+bool GpuWriteBack(u64 base, CsRange& e, bool* kept);
 bool MirrorOwned(u64 block);
 bool MirrorFillable(u64 base, u64 bytes);
+bool GuestImportable(u64 base, u64 bytes);
 bool MirrorFill(u64 base, u64 bytes, u32 value);
 bool RecordGuestRead(rhi::CommandList* list, u64 base, u64 bytes,
                      rhi::Buffer* dst);

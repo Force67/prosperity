@@ -63,15 +63,14 @@ void CsSyncReport(double frames) {
       "csin2",
       "overlap-wb={:.1f}ms x{:.1f} reshape-wb={:.1f}ms x{:.1f} "
       "alloc={:.1f}ms x{:.1f} recycled={:.1f} ranges={} {:.0f}MB "
-      "membuf={:.1f}ms "
-      "shadow={:.1f}ms lazy-kept={:.1f}x {:.1f}MB | truth stage={:.1f}MB "
+      "membuf={:.1f}ms lazy-kept={:.1f}x {:.1f}MB | truth stage={:.1f}MB "
       "import={:.1f} detile={:.1f} retile={:.1f} parent={:.1f} "
       "fold={:.1f} rt={:.1f} view-hits={:.1f} scratch={:.0f}MB",
       g_in_overlap_ns / frames / 1e6, g_in_overlap_n / frames,
       g_in_reshape_ns / frames / 1e6, g_in_reshape_n / frames,
       g_in_alloc_ns / frames / 1e6, g_in_alloc_n / frames,
       g_cs_recycled_n / frames, g_cs_ranges.size(), g_cs_range_bytes / 1e6,
-      g_in_membuf_ns / frames / 1e6, g_in_shadow_ns / frames / 1e6,
+      g_in_membuf_ns / frames / 1e6,
       g_lazy_kept_n / frames, g_lazy_kept_bytes / frames / 1e6,
       g_truth_stage_bytes / frames / 1e6, g_truth_import_n / frames,
       g_truth_detile_n / frames, g_truth_retile_n / frames,
@@ -89,7 +88,7 @@ void CsSyncReport(double frames) {
     g_wb_why_bytes = 0;
   }
   g_in_overlap_ns = g_in_reshape_ns = g_in_alloc_ns = 0;
-  g_in_membuf_ns = g_in_shadow_ns = 0;
+  g_in_membuf_ns = 0;
   g_in_overlap_n = g_in_reshape_n = g_in_alloc_n = g_cs_recycled_n = 0;
   g_truth_stage_bytes = g_truth_import_n = g_truth_detile_n = 0;
   g_truth_retile_n = g_truth_parent_n = g_truth_fold_n = g_truth_rt_n = 0;
@@ -172,16 +171,13 @@ void CsSyncReport(double frames) {
   }
   g_stage_stats.clear();
   BASE_LOGI("csout",
-            "retile={:.1f}ms x{:.1f} buffers={:.1f}ms "
-            "rt-upload={:.1f}ms x{:.1f} tail={:.1f}ms "
+            "rt-upload={:.1f}x "
             "texbridge={:.1f}x {:.1f}MB bufbridge={:.1f}x {:.1f}MB "
             "(declined {:.1f}) vtxbridge={:.1f}x chunks={:.1f} "
             "guest-override={:.1f}x "
             "mirror-tiles={:.1f}x rt-variants={:.1f}x gds-imported={:.1f}x "
             "guest-misses={:.1f}x gpu-indirect={:.1f}x",
-            g_out_retile_ns / frames / 1e6, g_out_retile_n / frames,
-            g_out_buffer_ns / frames / 1e6, g_out_rt_ns / frames / 1e6,
-            g_out_rt_submits / frames, g_out_tail_ns / frames / 1e6,
+            g_out_rt_submits / frames,
             g_tex_bridge_n / frames, g_tex_bridge_bytes / frames / 1e6,
             g_buf_bridge_n / frames, g_buf_bridge_bytes / frames / 1e6,
             g_buf_bridge_declined / frames, g_vtx_bridge_n / frames,
@@ -194,10 +190,8 @@ void CsSyncReport(double frames) {
   g_guest_misses_n = g_cs_indirect_n = 0;
   g_buf_bridge_n = g_buf_bridge_bytes = g_buf_bridge_declined = 0;
   g_vtx_bridge_n = 0;
-  g_out_retile_ns = g_out_rt_ns = g_out_tail_ns = 0;
-  g_out_buffer_ns = 0;
   g_tex_bridge_n = g_tex_bridge_bytes = g_cs_chunk_splits = 0;
-  g_out_retile_n = g_out_rt_submits = 0;
+  g_out_rt_submits = 0;
   base::String syncs;
   base::FormatTo(syncs, "{:.1f} syncs/frame ({:.1f} submits):", total / frames,
                  g_cs_submit_n / frames);
@@ -265,11 +259,11 @@ bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
     std::snprintf(out, out_size,
                   "base=%#llx +%#llx (addr is base+%#llx) staged=%#llx "
                   "gpu_dirty=%d imported=%d rt_sourced=%d image=%d "
-                  "shadow=%d last_used_frame=%d",
+                  "last_used_frame=%d",
                   (unsigned long long)base, (unsigned long long)n,
                   (unsigned long long)(addr - base), (unsigned long long)e.size,
                   (int)e.gpu_dirty, (int)e.imported, (int)e.rt_sourced,
-                  (int)e.image_staging, (int)e.shadow_valid, e.last_used_frame);
+                  (int)e.image_staging, e.last_used_frame);
     return true;
   }
   return false;

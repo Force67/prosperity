@@ -307,14 +307,15 @@ void CollectGuestWrites() {
   g_collect_frame = g_frame.num;
   g_collect_dcb = render::g_dcb_n;
   written.clear();
-  gpu::GuestWriteTracker().Collect(written);
-  for (const auto& [first, end] : written) {
+  const size_t announced = gpu::GuestWriteTracker().Collect(written);
+  for (size_t i = 0; i < written.size(); i++) {
+    const auto [first, end] = written[i];
     InvalidateCachedBuffers(first, end);
     g_vb_staged.Invalidate(first, end);
     g_ib_staged.Invalidate(first, end);
     g_sbo_staged.Invalidate(first, end);
     CsNoteGuestWrites(first, end);
-    MirrorNoteGuestWrites(first, end);
+    MirrorNoteGuestWrites(first, end, i < announced);
     InvalidateTexRange(first, end - first);
   }
   MirrorWritesCollected();

@@ -14,6 +14,12 @@
 #include "gpu/ps5/shader_cache.h"
 
 namespace {
+// Dispatch output written back, and landed in guest memory for the CPU.
+bool FlushCsWritesLanded(gpu::render::Renderer& renderer) {
+  return gpu::render::FlushCsWrites(renderer) &&
+         gpu::render::SettleGuestWrites(0, ~0ull >> 1, "test");
+}
+
 constexpr u32 kInvalid = 0xffffffff;
 u32 Bits(float value) {
   return base::BitCast<u32>(value);
@@ -172,7 +178,7 @@ class RdnaBvh : public testing::Test {
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, dispatch,
                               4);
-    EXPECT_TRUE(gpu::render::FlushCsWrites(gpu::render::DefaultRenderer()));
+    EXPECT_TRUE(FlushCsWritesLanded(gpu::render::DefaultRenderer()));
     if (changing) {
       EXPECT_EQ(
           (base::Array<u32, 4>{output[4], output[5], output[6], output[7]}),
@@ -301,7 +307,7 @@ TEST_F(RdnaBvh, DynamicRawBuffersAndScalarPointersWithoutBvh) {
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, dispatch,
                               4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(gpu::render::DefaultRenderer()));
+    ASSERT_TRUE(FlushCsWritesLanded(gpu::render::DefaultRenderer()));
     for (u32 i = 0; i < 4; ++i)
       EXPECT_EQ(output[i], scalar || i < 2 ? input[i] : 0u);
     EXPECT_EQ(output[4], 0xa5a5a5a5);

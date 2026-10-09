@@ -30,7 +30,6 @@
 
 namespace gpu::render::cs {
 
-DELTA_OPTION(u64, kDetileDump, "DELTA_GPU_DETILEDUMP", 0);
 DELTA_OPTION(bool, kCsList, "DELTA_GPU_CSLIST", false);
 DELTA_OPTION(int, kCsHist, "DELTA_GPU_CSHIST", 0);
 DELTA_OPTION(bool, kCsRtTrace, "DELTA_GPU_CSRT", false);
@@ -43,28 +42,15 @@ DELTA_OPTION(bool, kCsRtCache, "DELTA_GPU_CS_RT_CACHE", true);
 // Reuse a staged plain buffer when a later dispatch binds a smaller window of
 // it instead of restaging the range. =0 restores the exact-size match.
 DELTA_OPTION(bool, kCsSubset, "DELTA_GPU_CS_SUBSET", true);
-// A compute result whose address is a live GPU image is refreshed on the GPU by
-// UploadCsRangeToRt; retiling the same bytes into guest memory as well is only
-// there for readers that go through guest memory. Skipping it is the single
-// biggest CPU saving in a compute-heavy frame (Astro Bot: ~50 ms).
-DELTA_OPTION(bool, kCsSkipRetile, "DELTA_GPU_CS_SKIP_RETILE", false);
 // Skip staging in a compute range the shader never reads (see the use in
 // compute_dispatch.cc).
 DELTA_OPTION(bool, kCsSkipUpload, "DELTA_GPU_CS_SKIP_UPLOAD", false);
 u64 g_cs_skip_n = 0;
-// Revert to copying every staged byte back to guest memory, shader-written or
-// not (the behaviour before the write-coverage merge). Kept for A/B only: it
-// reverts CPU writes that share a staged range and corrupts SotC's heap.
-DELTA_OPTION(bool, kCsWbFull, "DELTA_GPU_CS_WB_FULL", false);
-// Report every writeback whose dispatch did not write the whole range: the
-// difference is guest memory we would have reverted.
-DELTA_OPTION(bool, kCsWbAudit, "DELTA_GPU_CS_WB_AUDIT", false);
 // Put compute range buffers in VRAM rather than system RAM, with a host-cached
 // mirror for the staging edges. The GPU reads and writes these every dispatch,
 // and doing that across PCIe was 282 ms of a 457 ms SotC frame. No-op on a UMA
 // part, where one buffer is already both (see SplitVram).
 DELTA_OPTION(bool, kCsVram, "DELTA_GPU_CSVRAM", true);
-DELTA_OPTION(bool, kCsGpuTiling, "DELTA_GPU_CS_GPU_TILING", true);
 // Bind the guest pages of a tiled surface straight into the tiling shader
 // instead of copying them through a staging buffer both ways. =0 restores the
 // copies for A/B.
@@ -114,24 +100,18 @@ DELTA_OPTION(int, kCsSyncFrom, "DELTA_GPU_CSSYNC_FROM", 0);
 // Every guest read that writes dispatch output back, and its cost, from this
 // frame on (a few frames' worth).
 DELTA_OPTION(int, kCsFlushFrom, "DELTA_GPU_CSFLUSH_FROM", 0);
-DELTA_OPTION(bool, kCsEagerReadback, "DELTA_GPU_CS_EAGER_READBACK", true);
 // Off by default: with the CP DMA flush narrowed, ranges a dispatch rewrites
 // every frame stay dirty indefinitely, and GTA:SA then shows ghosted
 // post-processing (DELTA_GPU_CS_AGED lists those ranges). Some reader of them
 // still misses its flush; the global DMA flush hides it.
 DELTA_OPTION(bool, kCsTrack, "DELTA_GPU_CS_TRACK", false);
 DELTA_OPTION(bool, kCsAged, "DELTA_GPU_CS_AGED", false);
-DELTA_OPTION(bool, kGpuCsgpuVerbose, "DELTA_GPU_CSGPU_VERBOSE", false);
 bool CsSyncReporting() {
   return kCsSyncReport && gpu::render::g_frame.num >= kCsSyncFrom;
 }
 
-u64 g_cs_image_staged = 0;
-
 // Writeback-half accounting (DELTA_GPU_CSSYNC), counting what the aliased-image
 // bridge (compute_alias.cc) does among others.
-u64 g_out_retile_ns = 0, g_out_rt_ns = 0, g_out_tail_ns = 0;
-u64 g_out_buffer_ns = 0;
 u64 g_tex_bridge_n = 0, g_tex_bridge_bytes = 0, g_cs_chunk_splits = 0;
 u64 g_buf_bridge_n = 0, g_buf_bridge_bytes = 0, g_buf_bridge_declined = 0;
 u64 g_vtx_bridge_n = 0;
@@ -155,7 +135,7 @@ u64 g_in_hash_bytes = 0, g_wb_hash_bytes = 0, g_wb_hash_ns = 0;
 // reshape (each a GPU wait plus a retile), buffer allocation, the plain guest
 // memcpy and its shadow copy. Without these `in=` is mostly unattributed.
 u64 g_in_overlap_ns = 0, g_in_reshape_ns = 0, g_in_alloc_ns = 0;
-u64 g_in_membuf_ns = 0, g_in_shadow_ns = 0;
+u64 g_in_membuf_ns = 0;
 u64 g_in_overlap_n = 0, g_in_reshape_n = 0, g_in_alloc_n = 0;
 u64 g_truth_stage_bytes = 0, g_truth_import_n = 0, g_truth_detile_n = 0,
     g_truth_retile_n = 0, g_truth_parent_n = 0, g_truth_fold_n = 0,
@@ -165,7 +145,7 @@ u64 g_truth_stage_bytes = 0, g_truth_import_n = 0, g_truth_detile_n = 0,
 base::Map<base::String, u64> g_wb_why;
 u64 g_wb_why_bytes = 0;
 u64 g_lazy_kept_n = 0, g_lazy_kept_bytes = 0;
-u64 g_out_retile_n = 0, g_out_rt_submits = 0;
+u64 g_out_rt_submits = 0;
 u64 g_gpu_tiling_ns[2] = {}, g_gpu_tiling_n[2] = {};
 // Inside one GPU conversion: the host copies either side of it, the table
 // build and command recording, and the submit+fence wait. 34 conversions a
@@ -359,33 +339,6 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
 CsStage g_cs_stage[ComputeInfo::kMaxResources];
 // The open batch's command list.
 rhi::CommandList* g_cs_list = nullptr;
-
-void SnapshotCsShadow(CsRange& range, const ComputeInfo::Res& res, u64 bytes) {
-  const u64 start = NowNs();
-  if (range.shadow.size() != bytes)
-    range.shadow_guest_clean = false;
-  range.shadow.resize(bytes);
-  if (range.rt_sourced) {
-    // GPU staging bypasses the host mirror; bridges compare guest bytes.
-    const u64 guest_bytes =
-        base::Min<u64>(bytes, res.guest_size ? res.guest_size : res.size);
-    CollectGuestWritesForSubmission();
-    if (range.shadow_guest_clean && range.shadow.size() == bytes) {
-      range.shadow_valid = true;
-      return;
-    }
-    range.shadow_guest_clean =
-        GuestWriteTracker().Arm(res.base, guest_bytes);
-    ParallelCopy(range.shadow.data(), reinterpret_cast<const void*>(res.base),
-                 guest_bytes);
-    std::memset(range.shadow.data() + guest_bytes, 0, bytes - guest_bytes);
-  } else {
-    range.shadow_guest_clean = false;
-    ParallelCopy(range.shadow.data(), range.map, bytes);
-  }
-  range.shadow_valid = true;
-  g_in_shadow_ns += NowNs() - start;
-}
 
 // `packed`: narrow texels stay packed on the linear side (a texture upload)
 // instead of being expanded to dwords (a shader view).

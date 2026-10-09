@@ -17,6 +17,12 @@
 #include "gpu/render/tiling.h"
 
 namespace {
+// Dispatch output written back, and landed in guest memory for the CPU.
+bool FlushCsWritesLanded(gpu::render::Renderer& renderer) {
+  return gpu::render::FlushCsWrites(renderer) &&
+         gpu::render::SettleGuestWrites(0, ~0ull >> 1, "test");
+}
+
 TEST(Gfx10GpuTiling, MatchesCpuAcrossMipsLayersAndPadding) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
@@ -222,7 +228,7 @@ TEST(RdnaComputeImageConversion, ReadsDescriptorChannelsAndConstants) {
     regs[ud + 11] = 0x20000;
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     const base::Array<u32, 4> values = {integer && sample ? 96u : 64u,
                                         integer && sample ? 24u : 16u, 0, 1};
     for (u32 i = 0; i < values.size(); i++) {
@@ -289,7 +295,7 @@ TEST_P(RdnaComputeImage, Raw32LoadStorePreservesUnwrittenChannels) {
   descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, dest.data());
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   for (u32 x = 0; x < 3; x++) {
     EXPECT_EQ(dest[x * channels], kValues[x * channels]) << "texel " << x;
     EXPECT_EQ(dest[x * channels + 1], kUntouched) << "texel " << x;
@@ -342,7 +348,7 @@ TEST(RdnaComputeImageConversion, R8UnormStoreWritesBackByteImage) {
   descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, dest.data(), 1);
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   EXPECT_EQ(dest[0], 0);
   EXPECT_EQ(dest[1], 255);
   EXPECT_EQ(dest[2], 64);
@@ -388,7 +394,7 @@ TEST(RdnaComputeImageConversion, WritesMappedImagesOutsideGpuPools) {
        {static_cast<const u8*>(dest.data()), readonly.data()}) {
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, output, 1);
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
   }
   EXPECT_EQ(dest[0], 255);
   EXPECT_EQ(dest[1], 0xa5);
@@ -452,7 +458,7 @@ TEST(RdnaComputeImageConversion, LargeNarrowStoresPreserveUntouchedTexels) {
                elem == 1 ? 1 : 7, 24);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     EXPECT_EQ(base::Vector<u8>(dest.begin(), dest.end()), expected)
         << "elem=" << elem;
   }
@@ -530,7 +536,7 @@ TEST_P(RdnaR16Unorm, MipArrayLoadAndClampedStorePreserveAdjacentTexels) {
       descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, dst.data(), dfmt, dtile);
       const u32 dispatch[] = {1, 1, 1, 1};
       gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-      ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+      ASSERT_TRUE(FlushCsWritesLanded(renderer));
     };
     transfer(packed, 7, swizzle, loaded, 22, 0);
     transfer(floats, 22, 0, stored, 7, swizzle);
@@ -662,7 +668,7 @@ TEST_P(RdnaBc6Image, HdrLoadAndCubeSamplePreserveBlocksMipsAndLayers) {
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, output.data(), 77, 0);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     for (u32 layer = 0; layer < layer_count; ++layer) {
       base::Array<float, 8 * 8 * 4> result{};
       ASSERT_TRUE(gpu::gcn::DetileTextureMip32(output.data(), result.data(),
@@ -736,7 +742,7 @@ TEST(RdnaComputeImageConversion, Rgba16UnormLoadAndMaskedClampedStore) {
     descriptor(gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8, dst, dfmt);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    return gpu::render::FlushCsWrites(renderer);
+    return FlushCsWritesLanded(renderer);
   };
   ASSERT_TRUE(transfer(packed.data(), 65, result.data(), 77));
   for (u32 x = 0; x < 3; x++) {
@@ -796,7 +802,7 @@ TEST(RdnaComputeAlu, Scalar64CompareUsesHighDwordAndInlineSignExtension) {
   regs[ud + 12] = regs[ud + 13] = 0xffffffff;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   const base::Array<u32, 4> expected = {0, 1, 1, 0};
   for (u32 i = 0; i < 4; ++i)
     EXPECT_EQ(output[i], expected[i]);
@@ -832,7 +838,7 @@ TEST(RdnaComputeAlu, XadUsesXorBeforeWrappingAdd) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 3] = 0x80000fac;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   EXPECT_EQ(dest[0], 1u);
   EXPECT_EQ(dest[1], 0u);
   EXPECT_EQ(dest[2], 0xffffffffu);
@@ -874,7 +880,7 @@ TEST(RdnaComputeAlu, HalfPrecisionOpsSelectHalvesAndPackResults) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 3] = 0x80000fac;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   EXPECT_EQ(dest[0], 0x00004500u);
   EXPECT_EQ(dest[1], 0x00003800u);
   EXPECT_EQ(dest[2], 0xabcd4000u);
@@ -923,7 +929,7 @@ TEST(RdnaComputeAlu, WritebackInvalidatesOverlappingCachedBuffers) {
     descriptor(ud + 4, dest, records);
     const u32 groups[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, groups, 4);
-    EXPECT_TRUE(gpu::render::FlushCsWrites(renderer));
+    EXPECT_TRUE(FlushCsWritesLanded(renderer));
   };
   dispatch(copy_code.data(), parent.data() + 8, output.data(), 1);
   EXPECT_EQ(output[0], 0x11223344u);
@@ -978,7 +984,7 @@ TEST(RdnaComputeAlu, FormattedBuffersDecodeRdnaIntegerChannels) {
     descriptor(ud + 8, raw[run].data(), 8, 0);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     for (u32 lane = 0; lane < 3; lane++) {
       for (u32 component = 0; component < 2; component++) {
         const u32 index = run ? lane * 2 + component : lane;
@@ -1032,7 +1038,7 @@ TEST(RdnaComputeAlu, ReadlaneCrossesSubgroupsWithExecEmpty) {
     dest.fill(0);
     const u32 dispatch[] = {1, 1, 1, 1u | (u32(wave32) << 15)};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     for (u32 lane = 0; lane < 64; lane++) {
       const u32 wave_base = wave32 ? lane & ~31u : 0;
       EXPECT_EQ(dest[lane * 2], wave_base + (wave32 ? 8u : 40u)) << lane;
@@ -1074,7 +1080,7 @@ TEST(RdnaComputeAlu, LockstepWaveBranchesOnFullExecMask) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 3] = 0x80000fac;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   for (u32 x = 0; x < 64; x++)
     EXPECT_EQ(dest[x], x < 40 ? x + 1 : 0u) << "lane " << x;
 }
@@ -1113,7 +1119,7 @@ TEST(RdnaComputeAlu, BitfieldMaskWrapsWidthAndOffset) {
     regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 8 + i] = operands[i];
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   const base::Array<u32, 4> expected = {0, 0x7fffffff, 0xf00, 0xf0000000};
   for (u32 i = 0; i < expected.size(); i++)
     EXPECT_EQ(dest[i], expected[i]);
@@ -1159,7 +1165,7 @@ TEST(RdnaComputeAlu, FmaMixSelectsPrecisionHalvesAndSourceModifiers) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 10] = 0x3c00c000;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   const base::Array<float, 4> expected = {5.f, 6.f, 1.f, 2.f};
   for (u32 i = 0; i < expected.size(); i++)
     EXPECT_FLOAT_EQ(base::BitCast<float>(dest[i]), expected[i]);
@@ -1210,7 +1216,7 @@ TEST(RdnaComputeAlu, FmaMixHalfResultsPreserveTheOtherHalf) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 10] = 0x3c00c000;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   const base::Array<u32, 4> expected = {0x12344500, 0x46005678, 0x40003c00,
                                         0x3c005678};
   for (u32 i = 0; i < expected.size(); i++)
@@ -1266,7 +1272,7 @@ TEST(RdnaComputeAlu, PermlaneSelectsRowsAndHonorsInactiveLanes) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 9] = 0x01234567;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   for (u32 lane = 0; lane < 64; lane++) {
     const u32 selected = (lane & ~15u) | (15 - (lane & 15));
     EXPECT_EQ(dest[lane * 4], (lane & 1) ? 0x12345678 : selected) << lane;
@@ -1312,7 +1318,7 @@ TEST(RdnaComputeAlu, DppRowXmaskKeepsEachExchangeInsideItsRow) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 9] = 0x01234567;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   for (u32 lane = 0; lane < 64; lane++)
     for (u32 i = 0; i < kMasks.size(); i++)
       EXPECT_EQ(dest[lane * 4 + i], lane ^ kMasks[i]) << lane << ":" << i;
@@ -1360,7 +1366,7 @@ TEST(RdnaComputeAlu, DppInvalidSourcePreservesDestination) {
   regs[gpu::ps5::mmCOMPUTE_USER_DATA_0 + 11] = 0x14004;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   for (u32 lane = 0; lane < 64; lane++) {
     EXPECT_EQ(dest[lane * 4], (lane & 15) ? lane + 6 : 1004) << lane;
     EXPECT_EQ(dest[lane * 4 + 1], (lane & 15) ? lane + 6 : 7) << lane;
@@ -1422,7 +1428,7 @@ TEST(RdnaComputeImage, GatherOffsetAndCompareUseFourDepthTaps) {
     regs[ud + 11] = 0x80000fac;
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     constexpr base::Array<u32, 4> kTaps = {6, 7, 3, 2};
     for (u32 i = 0; i < kTaps.size(); i++) {
       const u32 depth = kTaps[i] + (func == 9 ? 3 : 0);
@@ -1476,7 +1482,7 @@ TEST(RdnaComputeImageConversion, SrgbReadAndUnormMipWriteShareStorage) {
   }
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   base::Array<u32, 64> base{};
   base::Array<u32, 16> mip{};
   ASSERT_TRUE(
@@ -1540,7 +1546,7 @@ TEST(RdnaComputeImageConversion,
     regs[ud + 11] = 0x20000;
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     const base::Array<float, 4> expected =
         run == 2 ? base::Array<float, 4>{.5f, .5f, .5f, 128.f / 255.f}
                  : base::Array<float, 4>{.2158605f, .2158605f,
@@ -1612,7 +1618,7 @@ TEST(RdnaComputeImageConversion, ExplicitGradientsSelectTheImageMip) {
     regs[ud + 14] = 1 << 26;
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     EXPECT_NEAR(base::BitCast<float>(output[0]), (32 + mip * 64) / 255.f,
                 1e-6f);
     EXPECT_FLOAT_EQ(base::BitCast<float>(output[3]), 1.f);
@@ -1659,7 +1665,7 @@ TEST(RdnaComputeImageConversion,
     regs[ud + 11] = 0x20000;
     const u32 launch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     EXPECT_EQ(output[0], run ? 0xffffffffu : 0xffffu);
     EXPECT_EQ(output[1], run ? 0xffff8001u : 0x8001u);
     EXPECT_EQ(output[2], 0xa5a5a5a5);
@@ -1713,7 +1719,7 @@ TEST(RdnaComputeImageConversion, DecoderRg16IntegerStoresPackComponents) {
                signed_format ? 28 : 27);
     const u32 launch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     for (u32 x = 0; x < 3; ++x) {
       const u32 red = green_only ? 0x1234 : source[x * 2] & 0xffff;
       const u32 green = source[x * 2 + (green_only ? 0 : 1)] & 0xffff;
@@ -1791,7 +1797,7 @@ TEST(RdnaComputeImageConversion,
                  pass ? 76 : c.format);
       const u32 launch[] = {1, 1, 1, 1};
       gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
-      ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+      ASSERT_TRUE(FlushCsWritesLanded(renderer));
     }
     for (u32 x = 0; x < 3; ++x) {
       for (u32 channel = 0; channel < c.channels; ++channel) {
@@ -1871,7 +1877,7 @@ TEST(RdnaComputeImageConversion,
       gpu::render::CsNoteGuestWrites(u64(block.data()),
                                      u64(block.data()) + sizeof(block));
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     if (!pass)
       continue;
     EXPECT_EQ(memory[1][0], reverse ? 0xdead66efu : 0x56u);
@@ -1931,7 +1937,7 @@ TEST(RdnaComputeImageConversion,
       gpu::render::CsNoteGuestWrites(u64(block.data()),
                                      u64(block.data()) + sizeof(block));
     gpu::ps5::DispatchCompute(renderer, regs, launch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     EXPECT_EQ(memory[1], expected) << "base layer " << base_layer;
   }
 }
@@ -2001,7 +2007,7 @@ TEST(RdnaComputeImageConversion,
   regs[ud + 11] = 0x20000;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   const float expected[] = {0, 1.5146484375f, 65504, 1};
   for (u32 i = 0; i < 4; ++i)
     EXPECT_FLOAT_EQ(base::BitCast<float>(output[i]), expected[i]);
@@ -2065,7 +2071,7 @@ TEST(RdnaComputeImageConversion, Bc1LoadsRespectTilingMipsLayersAndSrgb) {
         regs[ud + 11] = 0x20000;
         const u32 dispatch[] = {1, 1, 1, 1};
         gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-        ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+        ASSERT_TRUE(FlushCsWritesLanded(renderer));
         const u16 color = kColors[(mip + layer + (mip ? 0 : 3)) % 4];
         const u32 rgb[] = {((color >> 11) * 527 + 23) >> 6,
                            (((color >> 5) & 63) * 259 + 33) >> 6,
@@ -2127,7 +2133,7 @@ TEST(RdnaComputeImageConversion, LargeShadowArrayReadsPastRawBufferLimit) {
   regs[ud + 11] = 0x20000;
   const u32 dispatch[] = {1, 1, 1, 1};
   gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   EXPECT_FLOAT_EQ(base::BitCast<float>(output[0]), 0.75f);
 }
 
@@ -2202,7 +2208,7 @@ TEST(RdnaComputeImageConversion,
     regs[ud + 15] = 0x14004;
     const u32 dispatch[] = {3, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     if (variant == 0) {
       EXPECT_FLOAT_EQ(base::BitCast<float>(output[0]), .25f);
       EXPECT_FLOAT_EQ(base::BitCast<float>(output[1]), .5f);
@@ -2265,7 +2271,7 @@ TEST(RdnaComputeImageConversion, PlainStoresValidateOnlyTheAccessedMip) {
     regs[ud + 5] = 0x00700080;
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     for (u32 level = 0; level < layout.mip_levels; level++) {
       base::Vector<u32> pixels(layout.mips[level].width *
                                layout.mips[level].height * 4);

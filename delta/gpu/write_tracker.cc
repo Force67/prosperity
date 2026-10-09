@@ -548,10 +548,12 @@ bool WriteTracker::Scan(u64, u64, base::Vector<Range>&) {
 
 #endif
 
-void WriteTracker::Drain(base::Vector<Range>& out) {
+size_t WriteTracker::Drain(base::Vector<Range>& out) {
   base::Vector<Range> remapped;
+  size_t announced = 0;
   {
     base::LockGuard lock(noted_lock_);
+    announced = noted_.size();
     out.insert(out.end(), noted_.begin(), noted_.end());
     noted_.clear();
     remapped.swap(remapped_);
@@ -562,6 +564,7 @@ void WriteTracker::Drain(base::Vector<Range>& out) {
     armed_bytes_ -= EraseArmed(first, end);
     out.emplace_back(first, end);
   }
+  return announced;
 }
 
 bool WriteTracker::AllArmed(u64 first, u64 end) const {
@@ -593,15 +596,15 @@ u64 WriteTracker::EraseArmed(u64 first, u64 end) {
   return EraseRun(armed_, first, end);
 }
 
-void WriteTracker::Collect(base::Vector<Range>& out) {
+size_t WriteTracker::Collect(base::Vector<Range>& out) {
   if (enabled() && policy_.before_collect)
     policy_.before_collect();
   DELTA_ZONE("wt.collect");
   if (!enabled())
-    return;
+    return 0;
   collects_++;
   const auto t0 = base::TimeTicks::Now();
-  Drain(out);
+  const size_t announced = Drain(out);
   const size_t first_new = out.size();
   if (mode_ == Mode::kFault)
     TakeFaulted(out);
@@ -642,6 +645,7 @@ void WriteTracker::Collect(base::Vector<Range>& out) {
       p->reports++;
     }
   collect_ns_ += ((base::TimeTicks::Now() - t0).InMicroseconds() * 1000);
+  return announced;
 }
 
 void WriteTracker::NoteWrite(u64 base, u64 bytes) {

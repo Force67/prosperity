@@ -1211,6 +1211,9 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       if (rt_attempt) {
         const u64 tr = NowNs();
         e.rt_sourced = staged_in_frame || StageCsRangeFromRt(ci.res[i], e);
+        if (e.rt_sourced)
+          e.staged_clean =
+              !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
         g_in_rt_ns += NowNs() - tr;
         g_in_rt_n++;
         // DELTA_GPU_CSRT: trace every RT-backed staging decision.
@@ -1228,7 +1231,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           return CsDeclined(ci, "17");
         }
       }
-      bool staged_on_gpu = false;
       if (!rt_attempt || !e.rt_sourced) {
         // Armed before the copy, so a write racing it is reported.
         if (!same_shape || rt_attempt) {
@@ -1238,86 +1240,51 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           GuestWriteTracker().Arm(base, hash_bytes);
         }
         e.cpu_writes.clear();
-        bool gpu_staged = false;
-        // Bytes that are only read, or a truth whose output goes back through
-        // the mirror: the GPU copies them out of the guest pages, in queue
-        // order behind any write still on its way there.
+        // The GPU copies the bytes out of the guest pages, in queue order
+        // behind any write still on its way there; an image is detiled on the
+        // way into the buffer.
         const u64 copy_bytes = stage_bytes ? stage_bytes : ci.res[i].size;
-        const bool read_only = !ci.res[i].written && !ci.res[i].shader_writes;
-        if ((read_only || (e.truth && stage_bytes && !CsAliasedBase(base) &&
-                           MirrorCovers(base, copy_bytes))) &&
-            (stage_bytes || !ci.res[i].image_staging) && e.device_local &&
-            e.buf && !(copy_bytes & 3) && !(sz[i] & 3)) {
-          CsBatchBeginImpl();
-          if (g_cs_batch_open &&
-              RecordGuestRead(g_cs_list, base, copy_bytes, e.buf)) {
-            if (!stage_bytes && sz[i] > copy_bytes)
-              g_cs_list->FillBuffer(e.buf, copy_bytes, sz[i] - copy_bytes, 0);
-            g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW);
-            g_cs_batch_access.erase(e.buf);
-            MarkPending(e);
-            e.mirror_current = false;
-            gpu_staged = true;
-            staged_on_gpu = true;
+        CsBatchBeginImpl();
+        bool staged = false;
+        if (g_cs_batch_open && e.buf) {
+          if (stage_bytes || !ci.res[i].image_staging) {
+            const u64 tail = copy_bytes & ~u64(3);
+            if (!stage_bytes && sz[i] > tail)
+              g_cs_list->FillBuffer(e.buf, tail, ((sz[i] + 3) & ~u64(3)) - tail,
+                                    0);
+            staged = RecordGuestRead(g_cs_list, base, copy_bytes, e.buf);
+          } else {
+            g_stage_guest_detile_bytes += sz[i];
+            g_stage_guest_detile_n++;
+            staged = StageImageOnGpu(ci.res[i], e);
           }
         }
-        if (!gpu_staged && !CsBatchWaitRange(e, kSyncStageHazard)) {
-          renderer.state = nullptr;
-          return CsDeclined(ci, "16");
+        // Pages the device cannot import (read-only mappings) reach the GPU
+        // through the range's own host buffer: the one CPU touch.
+        if (!staged && g_cs_batch_open && e.host_buf && e.map &&
+            (stage_bytes || !ci.res[i].image_staging) && guest_settled() &&
+            gpu::IsReadableRange(base, copy_bytes)) {
+          std::memcpy(e.map, reinterpret_cast<const void*>(base), copy_bytes);
+          if (!stage_bytes && sz[i] > copy_bytes)
+            std::memset(static_cast<u8*>(e.map) + copy_bytes, 0,
+                        sz[i] - copy_bytes);
+          CsCopyStaging(e, stage_bytes ? stage_bytes : sz[i], /*to_device=*/true);
+          staged = true;
         }
-        if (!gpu_staged && !guest_settled()) {
-          renderer.state = nullptr;
-          return CsDeclined(ci, "guest-write");
-        }
-        if (gpu_staged) {
-        } else if (stage_bytes) {
-          g_truth_stage_bytes += stage_bytes;
-          const u64 tm = NowNs();
-          ParallelCopy(e.map, reinterpret_cast<const void*>(base), stage_bytes);
-          g_in_membuf_ns += NowNs() - tm;
-        } else if (ci.res[i].image_staging) {
-          g_stage_guest_detile_bytes += sz[i];
-          g_stage_guest_detile_n++;
-          const u64 td = NowNs();
-          gpu_staged = ConvertCsRangeImage(ci.res[i], e, true);
-          const bool ok =
-              gpu_staged || (!g_cs_failed && StageCsImage(ci.res[i], e.map));
-          g_in_detile_ns += NowNs() - td;
-          if (!ok)
-            return CsDeclined(ci, "18");
-        } else {
-          const u64 tm = NowNs();
-          std::memcpy(e.map, reinterpret_cast<const void*>(base),
-                      ci.res[i].size);
-          if (sz[i] > ci.res[i].size)
-            std::memset(static_cast<u8*>(e.map) + ci.res[i].size, 0,
-                        sz[i] - ci.res[i].size);
-          g_in_membuf_ns += NowNs() - tm;
-        }
+        if (!staged)
+          return CsDeclined(ci, "stage");
+        // Armed once the read is recorded and the release of any page it
+        // imported is collected: the copy runs later, so a write from here on
+        // is reported.
+        CollectGuestWrites();
+        e.staged_clean = !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
+        g_cs_list->Barrier(rhi::kAccessCopyWrite | kAccessComputeRW,
+                           kAccessComputeRW);
+        g_cs_batch_access.erase(e.buf);
+        MarkPending(e);
+        e.mirror_current = false;
         e.rt_sourced = false;
         e.staged_stamp = ++g_cs_dirty_stamp;
-        // The CPU wrote the host mirror; the shaders bind the VRAM copy.
-        const u64 tc = NowNs();
-        if (!gpu_staged)
-          CsCopyStaging(e, stage_bytes ? stage_bytes : sz[i],
-                        /*to_device=*/true);
-        g_in_copy_ns += NowNs() - tc;
-      }
-      // Baseline for the writeback's write-coverage merge: the staging buffer
-      // as it stands BEFORE any dispatch runs. Comparing against it is the only
-      // way the writeback can tell a shader's output from a byte it merely
-      // staged in and would otherwise copy back over the CPU's newer value.
-      // Imported ranges never write back. Raw image staging needs the same
-      // baseline to preserve untouched guest padding; linear images retile
-      // through WritebackCsImage.
-      // Staged on the GPU, the host copy never saw the bytes.
-      if (staged_on_gpu) {
-        e.shadow_valid = false;
-      } else if ((!ci.res[i].image_staging || stage_bytes) && !e.imported &&
-          (!e.rt_sourced || ci.res[i].written || ci.res[i].shader_writes)) {
-        SnapshotCsShadow(e, ci.res[i], stage_bytes ? stage_bytes : sz[i]);
-      } else {
-        e.shadow_valid = false;
       }
       e.gpu_dirty = false;
       e.write_seq++;
@@ -1364,10 +1331,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       else
         g_stage_ro_bytes += sz[i];
     }
-    if (e.rt_sourced && !e.shadow_valid && !e.imported &&
-        (ci.res[i].written || ci.res[i].shader_writes) &&
-        (!ci.res[i].image_staging || stage_bytes))
-      SnapshotCsShadow(e, ci.res[i], stage_bytes ? stage_bytes : sz[i]);
     // A subset bind keeps the entry at the larger footprint it was staged and
     // hashed at: shrinking it here is what made the next full-size bind look
     // like a reshape.
@@ -1386,8 +1349,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       e.truth = truth_i;
       e.res = ci.res[i];
     }
-    if (ci.res[i].image_staging)
-      g_cs_image_staged++;
     e.last_used_frame = g_frame.num;
     for (u32 k = 0; k < fold_count && e.buf; k++) {
       auto f = g_cs_ranges.find(folds[k]);
@@ -1717,7 +1678,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   // flush point (draw / DMA / frame end). Writing every dispatch's outputs
   // back immediately (the image retile especially) was ~100ms/frame.
   const u64 t_out0 = NowNs();
-  bool kick = false;
   for (u32 i = 0; i < ci.num_res; i++) {
     if (!ci.res[i].written || ci.res[i].zero_fill || mirror_res[i])
       continue;
@@ -1757,26 +1717,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (truth_view[i])
       StampView(truth_view[i], dirty_base, parent_off[i], truth_table[i],
                 it->second.write_seq);
-    it->second.mirror_current = false;    // the dispatch outran the host mirror
-    it->second.readback_pending = false;  // and any readback still queued
-    if (it->second.cpu_reader && kCsEagerReadback) {
-      CsStageReadback(dirty_base, it->second, /*all=*/false);
-      kick = true;
-    }
-    if (kGpuCsgpuVerbose) {
-      const u8* b = static_cast<const u8*>(it->second.map);
-      u64 nz = 0, step = ci.res[i].size > 65536 ? ci.res[i].size / 65536 : 1;
-      for (u64 k = 0; k < ci.res[i].size; k += step)
-        nz += b[k] != 0;
-      BASE_LOGI("csgpu", "gpu wrote base={:#x} size={} nonzero={}/{}",
-                (unsigned long)ci.res[i].base, (unsigned long)ci.res[i].size,
-                (unsigned long)nz, (unsigned long)(ci.res[i].size / step));
-    }
   }
-  // A CPU reader is coming for what this batch wrote: start it now.
-  (void)kick;  // the readback rides the batch; its reader submits it
-  if ((g_cs_batch_count >= base::Max<u32>(1, kCsBatchCap) || heavy ||
-       kGpuCsgpuVerbose) &&
+  if ((g_cs_batch_count >= base::Max<u32>(1, kCsBatchCap) || heavy) &&
       (++g_submit_why[4], !CsBatchSubmit())) {
     renderer.state = nullptr;
     return CsDeclined(ci, "21");

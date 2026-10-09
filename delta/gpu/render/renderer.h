@@ -176,7 +176,7 @@ void NoteMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value);
 // bytes where it does not. Otherwise the fill reads it back first.
 bool CsFillStaysOnGpu(u64 base, u64 bytes);
 // The CPU wrote [first, end): the guest mirror copies those blocks in again.
-void MirrorNoteGuestWrites(u64 first, u64 end);
+void MirrorNoteGuestWrites(u64 first, u64 end, bool announced);
 // The mirror's device address for the 64 KiB guest block, copied in and
 // watched; 0 when the block stays in host memory.
 u64 MirrorCacheBlock(u64 block);

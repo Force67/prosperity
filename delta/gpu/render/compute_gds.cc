@@ -87,7 +87,7 @@ rhi::Buffer* ImportGuestPage(u64 page) {
   rhi::Buffer* buf = nullptr;
   if (caps.host_import && caps.host_import_alignment &&
       !(kGuestPageImport % caps.host_import_alignment) &&
-      gpu::IsReadableRange(page, kGuestPageImport)) {
+      gpu::IsWritableRange(page, kGuestPageImport)) {
     GuestWriteTracker().Release(page, kGuestPageImport);
     rhi::BufferDesc desc;
     desc.size = kGuestPageImport;

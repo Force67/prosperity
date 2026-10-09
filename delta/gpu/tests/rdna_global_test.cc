@@ -22,6 +22,12 @@
 #include "host_memory/host_memory.h"
 
 namespace {
+// Dispatch output written back, and landed in guest memory for the CPU.
+bool FlushCsWritesLanded(gpu::render::Renderer& renderer) {
+  return gpu::render::FlushCsWrites(renderer) &&
+         gpu::render::SettleGuestWrites(0, ~0ull >> 1, "test");
+}
+
 class RdnaGlobal : public testing::Test {
  protected:
   void SetUp() override {
@@ -85,7 +91,7 @@ class RdnaGlobal : public testing::Test {
     const u32 launch[] = {group_end_[0], group_end_[1], group_end_[2],
                           initiator_};
     gpu::ps5::DispatchCompute(gpu::render::DefaultRenderer(), regs, launch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(gpu::render::DefaultRenderer()));
+    ASSERT_TRUE(FlushCsWritesLanded(gpu::render::DefaultRenderer()));
   }
 };
 

@@ -388,14 +388,6 @@ bool CsLazyKept(u64 base, const CsRange& e) {
          !e.imported && !CsAliasedBase(base);
 }
 
-// `all`: every dirty range, or only those nothing keeps in VRAM on purpose.
-void CsStageReadback(u64 base, CsRange& e, bool all) {
-  if (e.gpu_dirty && e.device_local && !e.mirror_current &&
-      !e.readback_pending && !e.imported &&
-      (!CanGpuTile(e.res, e) || e.truth) && (all || !CsLazyKept(base, e)))
-    CsCopyStaging(e, e.size ? e.size : e.cap, /*to_device=*/false);
-}
-
 // A copy: staging can open a batch, and finalizing an old one may unindex.
 // `ordered`: oldest write first, as every writeback of overlapping ranges.
 base::Vector<u64> DirtyBases(bool ordered) {
@@ -406,14 +398,6 @@ base::Vector<u64> DirtyBases(bool ordered) {
   if (ordered)
     SortByDirtyOrder(bases);
   return bases;
-}
-
-void CsStageReadbacks(bool all) {
-  for (u64 base : DirtyBases(/*ordered=*/false)) {
-    auto found = g_cs_ranges.find(base);
-    if (found != g_cs_ranges.end())
-      CsStageReadback(base, found->second, all);
-  }
 }
 
 // Submit the frame's open chunk, behind the open batch when the chunk copies

@@ -511,33 +511,129 @@ bool TruthEligible(const ComputeInfo::Res& r) {
          TruthAvailable() && GpuTileable(r);
 }
 
-bool CanGpuTile(const ComputeInfo::Res& res, const CsRange& e) {
-  return kCsGpuTiling && !kDetileDump && !kCsWbAudit && e.device_local &&
-         res.image_staging && res.size >= 256 * 1024 &&
-         ((res.elem_bytes >= 4 && res.elem_bytes == res.stage_elem_bytes) ||
-          ((res.elem_bytes == 1 || res.elem_bytes == 2) &&
-           res.stage_elem_bytes == 4)) &&
-         res.dfmt != 35 && res.dfmt != 40 &&
-         // A linear surface only needs the GPU when its texels widen: the
-         // video decoder's 8/16-bit planes, staged on the CPU per dispatch.
-         (!gcn::TilingIsLinear(res.tiling_idx) || WidensLinear(res)) &&
-         GpuTileable(res);
+#ifdef DELTA_HAVE_SPIRV_BACKEND
+// A block-compressed image a dispatch reads as plain texels (BC1 as RGBA8,
+// BC6H as RGBA32F): the texture units decode it. The blocks are detiled into a
+// compressed image, blitted into a plain one, and its texels copied into the
+// buffer in the staged layout.
+bool StageBcImageOnGpu(const ComputeInfo::Res& res,
+                       CsRange& e,
+                       const gcn::TextureLayout32& tiled,
+                       const gcn::TextureLayout32& linear) {
+  const bool bc6 = res.dfmt == 40;
+  const rhi::Format block_format =
+      bc6 ? (res.nfmt == 1 ? rhi::Format::kBC6HSfloat
+                           : rhi::Format::kBC6HUfloat)
+          : rhi::Format::kBC1Unorm;
+  const rhi::Format plain_format =
+      bc6 ? rhi::Format::kRGBA32Float : rhi::Format::kRGBA8Unorm;
+  gcn::TextureLayout32 blocks;
+  if (!Device().SupportsBlit(block_format, plain_format) ||
+      !gcn::BuildTextureLayout32(blocks, tiled.mips[0].width,
+                                 tiled.mips[0].height, tiled.mips[0].pitch,
+                                 tiled.layers, tiled.mip_levels, 8, false,
+                                 tiled.elem_bytes))
+    return false;
+  const TileTable* table = GetTileTable(tiled, blocks);
+  if (!table)
+    return false;
+  struct Images {
+    rhi::Texture* block = nullptr;
+    rhi::Texture* plain = nullptr;
+  };
+  static base::HashMap<u64, Images> images;
+  static const guest::SessionReset reset_images(
+      [] { guest::ResetResource(images); });
+  u64 key = 1469598103934665603ull;
+  for (u64 v : {u64(block_format), u64(res.width), u64(res.height),
+                u64(res.layers), u64(res.mip_levels)})
+    key = (key ^ v) * 1099511628211ull;
+  Images& im = images[key];
+  if (!im.block || !im.plain) {
+    rhi::TextureDesc desc;
+    desc.width = res.width;
+    desc.height = res.height;
+    desc.layers = res.layers;
+    desc.mips = res.mip_levels;
+    desc.usage = rhi::kTextureCopySrc | rhi::kTextureCopyDst;
+    desc.format = block_format;
+    desc.name = "cs bc blocks";
+    im.block = Device().CreateTexture(desc);
+    desc.format = plain_format;
+    desc.name = "cs bc decoded";
+    im.plain = Device().CreateTexture(desc);
+    if (!im.block || !im.plain)
+      return false;
+  }
+  const u64 raw_bytes = (tiled.size + 3) & ~u64(3);
+  const u64 block_bytes = (blocks.size + 3) & ~u64(3);
+  rhi::Buffer* raw = AcquireScratch(raw_bytes);
+  rhi::Buffer* linear_blocks = raw ? AcquireScratch(block_bytes) : nullptr;
+  if (!linear_blocks || !RecordGuestRead(g_cs_list, res.base, tiled.size, raw))
+    return false;
+  rhi::CommandList* const c = g_cs_list;
+  RecordImageTiling(c, *table, raw, 0, raw_bytes, linear_blocks, block_bytes,
+                    /*detile=*/true);
+  rhi::BufferTextureCopy in[16]{}, out[16]{};
+  rhi::TextureRegion regions[16];
+  for (u32 mip = 0; mip < res.mip_levels; mip++) {
+    const u32 w = base::Max(res.width >> mip, 1u);
+    const u32 h = base::Max(res.height >> mip, 1u);
+    rhi::TextureRegion& r = regions[mip];
+    r.mip = mip;
+    r.layers = res.layers;
+    r.width = w;
+    r.height = h;
+    in[mip].buffer_offset = blocks.mips[mip].offset;
+    in[mip].row_length = blocks.mips[mip].pitch * 4;
+    in[mip].image_height = blocks.mips[mip].stored_height * 4;
+    in[mip].region = r;
+    out[mip].buffer_offset = linear.mips[mip].offset;
+    out[mip].row_length = linear.mips[mip].pitch;
+    out[mip].image_height = linear.mips[mip].stored_height;
+    out[mip].region = r;
+  }
+  rhi::TextureRange all;
+  all.mips = res.mip_levels;
+  all.layers = res.layers;
+  rhi::TextureBarrier b[2] = {
+      {im.block, rhi::TextureState::kUndefined, rhi::TextureState::kCopyDst,
+       all},
+      {im.plain, rhi::TextureState::kUndefined, rhi::TextureState::kCopyDst,
+       all}};
+  c->Barrier(kAccessComputeRW, rhi::kAccessCopyRead, b, 2);
+  c->CopyBufferToTexture(im.block, linear_blocks, in, res.mip_levels);
+  b[0].before = rhi::TextureState::kCopyDst;
+  b[0].after = rhi::TextureState::kCopySrc;
+  c->Barrier(0, 0, b, 1);
+  for (u32 mip = 0; mip < res.mip_levels; mip++)
+    c->BlitTexture(im.plain, regions[mip], im.block, regions[mip],
+                   rhi::Filter::kNearest);
+  b[1].before = rhi::TextureState::kCopyDst;
+  b[1].after = rhi::TextureState::kCopySrc;
+  c->Barrier(0, 0, &b[1], 1);
+  c->FillBuffer(e.buf, 0, (res.size + 3) & ~u64(3), 0);
+  c->Barrier(rhi::kAccessCopyWrite, rhi::kAccessCopyWrite);
+  c->CopyTextureToBuffer(e.buf, im.plain, out, res.mip_levels);
+  return true;
 }
+#endif
 
-bool ConvertCsRangeImage(const ComputeInfo::Res& res, CsRange& e, bool detile) {
+bool StageImageOnGpu(const ComputeInfo::Res& res, CsRange& e) {
 #ifdef DELTA_HAVE_SPIRV_BACKEND
   gcn::TextureLayout32 tiled, linear;
-  if (!CanGpuTile(res, e) || !BuildCsImageLayouts(res, tiled, linear))
+  if (!BuildCsImageLayouts(res, tiled, linear))
     return false;
-  const u64 started = NowNs();
-  if (!ConvertGfx10ImageImpl(tiled, linear, reinterpret_cast<void*>(res.base),
-                             reinterpret_cast<void*>(res.base), detile, e.buf))
+  if (res.dfmt == 35 || res.dfmt == 40)
+    return StageBcImageOnGpu(res, e, tiled, linear);
+  const TileTable* table =
+      GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4 &&
+                                      linear.elem_bytes == tiled.elem_bytes);
+  rhi::Buffer* raw = table ? AcquireScratch((tiled.size + 3) & ~u64(3)) : nullptr;
+  if (!raw || !RecordGuestRead(g_cs_list, res.base, tiled.size, raw))
     return false;
-  if (CsSyncReporting()) {
-    g_gpu_tiling_ns[detile] += NowNs() - started;
-    g_gpu_tiling_n[detile]++;
-  }
-  e.mirror_current = false;
+  RecordImageTiling(g_cs_list, *table, raw, 0, (tiled.size + 3) & ~u64(3),
+                    e.buf, (linear.size + 3) & ~u64(3), /*detile=*/true);
   return true;
 #else
   return false;

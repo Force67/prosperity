@@ -94,6 +94,33 @@ inline bool IsReadableRange(u64 address, u64 bytes) {
   return true;
 }
 
+// Whether the first and last page of the range take a write: each byte is
+// written back to itself through the kernel, which faults on a read-only page.
+inline bool IsWritableRange(u64 address, u64 bytes) {
+  if (!IsReadableRange(address, bytes))
+    return false;
+  static const pid_t kSelf = getpid();
+  static const long kPageSize = sysconf(_SC_PAGESIZE);
+  const u64 last = (address + bytes - 1) & ~(static_cast<u64>(kPageSize) - 1);
+  for (u64 at : {address, last > address ? last : address}) {
+    // A page the write tracker armed is read-only to the host for now, but the
+    // guest's own mapping takes writes.
+    const GuestPageTable::Page* p = GuestPages().Find(at);
+    if (p && p->armed.load(base::memory_order_relaxed))
+      continue;
+    u8 byte = *reinterpret_cast<const volatile u8*>(at);
+    iovec local{&byte, 1};
+    iovec remote{reinterpret_cast<void*>(at), 1};
+    ssize_t wrote;
+    do {
+      wrote = syscall(SYS_process_vm_writev, kSelf, &local, 1, &remote, 1, 0);
+    } while (wrote < 0 && errno == EINTR);
+    if (wrote != 1)
+      return false;
+  }
+  return true;
+}
+
 // The same answer, remembered until the generation advances.
 //
 // The probe costs three syscalls and a draw asks it about the same handful of

@@ -1159,8 +1159,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       CollectGuestWritesForSubmission();
       e.last_checked_frame = g_frame.num;
       if (!e.wt_clean) {
-        // Armed before the upload, so a write racing it is reported.
-        e.wt_armed = e.wt_clean = GuestWriteTracker().Arm(base, footprint);
         e.hash_valid = false;
         e.last_full_frame = g_frame.num;
         e.check_interval = 1;
@@ -1169,6 +1167,10 @@ static rhi::TextureView* ResolveTextureView(u64 base,
           g_ns_tex_hash += NowNs() - t_hash;
           return nullptr;
         }
+        // The GPU reads the pages when the upload runs: armed now, after the
+        // release of any page the upload imported, a later write is reported.
+        CollectGuestWrites();
+        e.wt_armed = e.wt_clean = GuestWriteTracker().Arm(base, footprint);
       }
     } else if (image_it != g_tex_images.end()) {
       TexImageEntry& e = image_it->second;
@@ -1288,6 +1290,11 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       }
       Device().Destroy(image_entry.image);
       return nullptr;
+    }
+    if (image_entry.wt_armed) {
+      CollectGuestWrites();
+      image_entry.wt_armed = image_entry.wt_clean =
+          GuestWriteTracker().Arm(base, footprint);
     }
     image_entry.last_checked_frame = g_frame.num;
     image_entry.allocation_size = bytes;

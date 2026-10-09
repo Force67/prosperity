@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cstring>
+#include <signal.h>
 #include "options/options.h"
 
 #include "base/algorithm.h"
@@ -31,12 +32,19 @@
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/upload_ring.h"
 #include "host_memory/host_memory.h"
+#include "gpu/write_tracker.h"
 
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe() {}
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" bool prosperity_ps5_is_display_buffer(u64) {
   return false;
+}
+
+// Dispatch output written back, and landed in guest memory for the CPU.
+static bool FlushCsWritesLanded(gpu::render::Renderer& renderer) {
+  return gpu::render::FlushCsWrites(renderer) &&
+         gpu::render::SettleGuestWrites(0, ~0ull >> 1, "test");
 }
 
 TEST(RTargetResolution, RejectsContainedTextureWithDifferentGeometry) {
@@ -175,7 +183,7 @@ TEST(GcnCompute, LockstepBranchSeesEitherHalfOfWave) {
     ci.user_data[2] = 64;
     ci.user_data[3] = (4u << 15) | (4u << 12);
     ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     for (u32 lane = 0; lane < 64; lane++)
       EXPECT_EQ(dest[trial][lane], lanes[trial] < 64 ? 1u : 0u)
           << "predicate lane " << lanes[trial] << ", output lane " << lane;
@@ -220,7 +228,7 @@ TEST(GcnCompute, MultiplyAddPreservesSeparateRounding) {
     ci.user_data[4] = 0x3f800001;
     ci.user_data[5] = 0x3f7ffffe;
     ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     for (u32 value : dest[trial])
       EXPECT_EQ(value, trial ? 0xa8800000u : 0u) << "fused=" << trial;
   }
@@ -239,6 +247,16 @@ TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A Vulkan device is required";
+  // The buffer stands in for guest memory only while the tracker vouches for
+  // the pages around the output.
+  gpu::GuestWriteTracker().Enable();
+  struct sigaction fault{};
+  fault.sa_flags = SA_SIGINFO;
+  fault.sa_sigaction = [](int, siginfo_t* si, void*) {
+    if (!host_memory::HandleWriteFault(reinterpret_cast<uintptr_t>(si->si_addr)))
+      std::abort();
+  };
+  sigaction(SIGSEGV, &fault, nullptr);
   auto* memory = static_cast<u8*>(
       host_memory::AllocMem(reinterpret_cast<void*>(0x1210000000ull), 1048576,
                             host_memory::PageProtection::kW,
@@ -382,15 +400,16 @@ TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {
           gpu::rhi::TextureState::kShaderRead, nullptr, true, &supplied_mips));
       EXPECT_EQ(supplied_mips, mips);
       auto* tail_guest = reinterpret_cast<u8*>(tail_base);
-      tail_guest[0] = 0x11;
-      EXPECT_FALSE(gpu::render::CsSupplyTexture(
-          base, sampled, width, height, nullptr,
-          gpu::rhi::TextureState::kShaderRead, nullptr, true, &supplied_mips));
-      tail_guest[0] = 0xa5;
       ASSERT_TRUE(gpu::render::CsSupplyTexture(
           base, sampled, width, height, image,
           gpu::rhi::TextureState::kShaderRead, &seq, true, &supplied_mips));
       EXPECT_EQ(tail_guest[0], 0xa5);
+      // A CPU write to the pages since staging: the buffer no longer stands
+      // in for them, whatever value the write left.
+      tail_guest[0] = 0xa5;
+      EXPECT_FALSE(gpu::render::CsSupplyTexture(
+          base, sampled, width, height, nullptr,
+          gpu::rhi::TextureState::kShaderRead, nullptr, true, &supplied_mips));
     }
     EXPECT_NE(seq, 0u);
     EXPECT_EQ(guest[0], 0xa5);
@@ -437,7 +456,7 @@ TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {
     gpu::render::Device().Destroy(result);
     gpu::render::Device().Destroy(image);
   }
-  ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+  ASSERT_TRUE(FlushCsWritesLanded(renderer));
   host_memory::FreeMem(memory, 1048576);
 }
 
@@ -722,7 +741,7 @@ TEST(GcnCompute, DirtyExtentTracksStoresRatherThanStagingPadding) {
     ASSERT_TRUE(dispatch(32, 128, 5));
     EXPECT_TRUE(gpu::render::CsRangeDirtyOverlapping(base + 65536, 4));
     EXPECT_TRUE(gpu::render::CsRangeMaybeDirty(base + 65536, 4));
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     EXPECT_FALSE(gpu::render::CsRangeDirtyOverlapping(base, sizeof(dest[trial])));
     EXPECT_FALSE(gpu::render::CsRangeMaybeDirty(base + 65536, 4));
     for (u32 lane = 0; lane < 64; lane++)
@@ -730,7 +749,7 @@ TEST(GcnCompute, DirtyExtentTracksStoresRatherThanStagingPadding) {
     EXPECT_EQ(dest[trial][16384], 9u);
     gpu::render::EndFrame(renderer, 0);
     ASSERT_TRUE(dispatch(0, 128, 6));
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     for (u32 lane = 0; lane < 64; lane++)
       EXPECT_EQ(dest[trial][lane], lane < 32 ? 5u : 4u);
   }
@@ -2280,7 +2299,7 @@ TEST(VkDraw, SinglePointRendersWithAndWithoutIndices) {
     regs[gpu::ps5::mmCOMPUTE_PGM_LO] = pc >> 8;
     regs[gpu::ps5::mmCOMPUTE_PGM_HI] = pc >> 40;
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     const u32 compute_slot_index = gpu::render::g_frame.slot_idx;
     gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& compute_slot = gpu::render::g_frame.slots[compute_slot_index];
@@ -2379,7 +2398,7 @@ TEST(VkDraw, NarrowRenderTargetsRoundTripThroughCompute) {
     gpu::render::BeginFrame(renderer);
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
-    ASSERT_TRUE(gpu::render::FlushCsWrites(renderer));
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
     const u32 compute_slot_index = gpu::render::g_frame.slot_idx;
     gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& compute_slot = gpu::render::g_frame.slots[compute_slot_index];

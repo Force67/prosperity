@@ -305,6 +305,10 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   // the CPU then unpacks into (or packs out of) the staged layout.
   const u64 packed_bytes = texels * img.elem_bytes;
   const bool convert = plan.unpack || plan.widen;
+  // The staging lives in VRAM: an upload that packs its texels on the CPU
+  // has nothing current to pack (CsRefreshRtInFrame converts on the GPU).
+  if (to_image && (convert || (img.is_stencil && !e.truth)))
+    return false;
   if (convert && !EnsureBridgeScratch(packed_bytes))
     return false;
   // A truth range holds no linear pixels: the copy goes through the tiling
@@ -337,24 +341,6 @@ bool RunAliasedCopy(const CsAliasedImage& img,
                                 : truth ? g_truth_bridge_scratch.buf
                                         : e.buf;
   auto* scratch = static_cast<u32*>(g_bridge.map);
-  if (convert && to_image) {
-    gcn::DetileParallelRows(plan.h, [&](u32 y0, u32 y1) {
-      for (u32 y = y0; y < y1; y++) {
-        const u8* row =
-            static_cast<const u8*>(e.map) + level.offset +
-            static_cast<u64>(y) * level.pitch * res.stage_elem_bytes;
-        for (u32 x = 0; x < plan.w; x++) {
-          const u64 i = static_cast<u64>(y) * level.pitch + x;
-          const u8* texel = row + static_cast<u64>(x) * res.stage_elem_bytes;
-          if (plan.unpack)
-            scratch[i] = PackR11G11B10(texel);
-          else
-            std::memcpy(static_cast<u8*>(g_bridge.map) + i * img.elem_bytes,
-                        texel, img.elem_bytes);
-        }
-      }
-    });
-  }
   // Host-zero any padding an image->buffer copy does not cover (host writes
   // are made available by the submission).
   if (!to_image && (convert || level.offset != 0 || copy_bytes < res.size))
@@ -362,14 +348,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   if (img.is_stencil && !truth) {
     if (level.offset || texels > e.cap)
       return false;
-    if (!to_image)
-      std::memset(e.map, 0, res.size);
-    else {
-      auto* packed = static_cast<u8*>(e.map);
-      auto* expanded = static_cast<u32*>(e.map);
-      for (u64 i = 0; i < texels; i++)
-        packed[i] = static_cast<u8>(expanded[i]);
-    }
+    std::memset(e.map, 0, res.size);
   }
 
   base::String where;
@@ -381,6 +360,9 @@ bool RunAliasedCopy(const CsAliasedImage& img,
     Device().ReportDeviceLoss();
     return false;
   }
+  // The dispatch that wrote the buffer reaches the queue first.
+  if (to_image && !CsBatchSubmit())
+    return false;
   rhi::CommandList* c = BeginImmediate();
   if (!c)
     return false;
@@ -414,7 +396,7 @@ bool RunAliasedCopy(const CsAliasedImage& img,
   const rhi::TextureState transfer =
       to_image ? rhi::TextureState::kCopyDst : rhi::TextureState::kCopySrc;
   if (to_image) {
-    // The buffer was last written by the dispatch (already waited) or the
+    // The buffer was last written by the dispatch (submitted before) or the
     // host; make those writes available to the transfer.
     c->Barrier(rhi::kAccessComputeWrite | rhi::kAccessHostWrite,
                rhi::kAccessCopyRead);
@@ -798,6 +780,9 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
   // (CsRefreshRtInFrame); uploading it again would paint over whatever was
   // rendered into it since.
   if (e.rt_seq == e.write_seq)
+    return true;
+  // On the frame's own list, behind the draws already recorded.
+  if (g_frame.recording && CsRefreshRtInFrame(base, e))
     return true;
   // A base rendered at several geometries: the dispatch names which one it
   // writes, and only the live image answers to the address.
