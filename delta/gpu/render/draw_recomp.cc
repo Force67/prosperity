@@ -1520,11 +1520,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         continue;
       const u32 n = CbufCopyBytes(cb.base, cb.size);
       const u64 rev = CsBufferRevision(cb.base, n);
-      if (kCbufBind && !d.recomp->indirect_cbufs && n == kCbufWindow) {
+      if (kCbufBind && !d.recomp->indirect_cbufs) {
         CachedBuffer binding;
         if (!CsStorageBuffer(cb.base, n, &binding.buffer, &binding.offset,
-                             g_ring.ubo_align) &&
-            kDirectBind && !rev) {
+                             g_ring.ubo_align, kCbufWindow) &&
+            n == kCbufWindow && kDirectBind && !rev) {
           binding.buffer = DirectBindAt(cb.base, n, &binding.offset);
           cb_barrier |= binding.buffer && CsRangeDirtyOverlapping(cb.base, n);
         }
@@ -1583,8 +1583,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       const auto& cb = d.cbufs[i];
       const u32 readable = base::Min(cb.size, kCbufWindow);
       if (i < kCbufBindings && cb_direct[i].buffer) {
-        if (!CsBufferRevision(cb.base, kCbufWindow) &&
-            !FlushCsWritesForGpu(renderer, cb.base, kCbufWindow, "cb"))
+        const u32 n = CbufCopyBytes(cb.base, cb.size);
+        if (!CsBufferRevision(cb.base, n) &&
+            !FlushCsWritesForGpu(renderer, cb.base, n, "cb"))
           return Decline(kNoRecomp);
         continue;
       }

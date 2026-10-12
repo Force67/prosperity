@@ -157,7 +157,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       gpu::gcn::spirv::Finalize(module.Assemble(), &geometry.vs_spirv, &error))
       << error.c_str();
   ASSERT_TRUE(gpu::render::InitGuestDirect());
-  alignas(65536) static base::Array<u8, 65536> targets[21]{};
+  alignas(65536) static base::Array<u8, 65536> targets[23]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
   imported.recomp = &constants;
@@ -700,11 +700,12 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     }
     EXPECT_EQ(pixels, 2u);
   }
-  for (u32 mode = 0; mode < 2; ++mode) {
+  for (u32 mode = 0; mode < 4; ++mode) {
     SCOPED_TRACE(mode);
     const u64 owned = base + (7ull << 20) + gpu::render::kMirrorBlock;
     const u64 constants_base = owned + 4;
-    gpu::render::cs::g_cs_in_frame = mode != 0;
+    const u32 bytes = mode < 2 ? gpu::render::kCbufWindow : 4096;
+    gpu::render::cs::g_cs_in_frame = (mode & 1) != 0;
     ASSERT_TRUE(gpu::render::GpuFill(owned, gpu::render::kMirrorBlock,
                                      0x3e800000, 0x3e800000));
     ASSERT_TRUE(gpu::render::cs::CsBatchSubmit());
@@ -717,7 +718,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     gpu::render::DrawInfo draw = imported;
     draw.ps_user_data[0] = u32(constants_base);
     draw.ps_user_data[1] = u32(constants_base >> 32);
-    draw.cbufs[0] = {constants_base, gpu::render::kCbufWindow};
+    draw.cbufs[0] = {constants_base, bytes};
     draw.rt_base = draw.mrt_base[0] =
         reinterpret_cast<u64>(targets[19 + mode].data());
     draw.viewport_x_offset = 4;
@@ -732,9 +733,10 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), resolves);
     EXPECT_EQ(gpu::g_ring_cb_bytes, cpu_copies);
     EXPECT_EQ(gpu::render::g_ring.ubo_offset, ring);
-    const bool aligned = constants_base % gpu::render::g_ring.ubo_align == 0;
+    const bool direct = bytes == gpu::render::kCbufWindow &&
+                        constants_base % gpu::render::g_ring.ubo_align == 0;
     EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes,
-              copies + (aligned ? 0 : 2 * gpu::render::kCbufWindow));
+              copies + (direct ? 0 : 2 * bytes));
     EXPECT_EQ(gpu::g_bind_bytes, bound + 3 * gpu::render::kCbufWindow);
     const u32 slot_index = gpu::render::g_frame.slot_idx;
     gpu::render::EndFrame(renderer, draw.rt_base);

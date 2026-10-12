@@ -91,12 +91,14 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
 bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
 // Bind a raw shader or constant window, gathering mixed CPU/GPU data into
 // device buffers with the same lifetime and ordering as geometry. Offsets
-// satisfy `alignment`; unaligned output is copied on the GPU.
+// satisfy `alignment`; unaligned output is copied on the GPU. Short windows
+// are zero-padded to `padded_bytes` in device memory.
 bool CsStorageBuffer(u64 base,
                      u64 bytes,
                      rhi::Buffer** buffer,
                      u64* offset,
-                     u64 alignment);
+                     u64 alignment,
+                     u64 padded_bytes = 0);
 // Whether CsGeometryBuffer can serve the window, without binding anything.
 bool CsHoldsGeometry(u64 base, u64 bytes);
 

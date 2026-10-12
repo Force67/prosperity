@@ -734,7 +734,11 @@ bool GatherDrawBuffer(u64 base,
                       u64 bytes,
                       rhi::Buffer** buffer,
                       u64* offset,
-                      CsRange* source = nullptr) {
+                      CsRange* source = nullptr,
+                      u64 padded_bytes = 0) {
+  padded_bytes = base::Max(bytes, padded_bytes);
+  if (padded_bytes > bytes && ((bytes | padded_bytes) & 3))
+    return false;
   if (!bytes || !g_frame.recording ||
       (!source && !MirrorOwnsAny(base, base + bytes) &&
        !PendingGuestWriteBatch(base, bytes)))
@@ -749,7 +753,7 @@ bool GatherDrawBuffer(u64 base,
   struct Gathered {
     rhi::Buffer* buffer = nullptr;
     rhi::Buffer* source = nullptr;
-    u64 bytes = 0, revision = 0, stamp = 0;
+    u64 bytes = 0, padded_bytes = 0, revision = 0, stamp = 0;
     int last_frame = 0;
   };
   static base::Vector<Gathered> slots[2];
@@ -783,8 +787,9 @@ bool GatherDrawBuffer(u64 base,
     const auto found = latest.find(base);
     if (found != latest.end()) {
       const auto& cached = pool[found->second];
-      if (cached.bytes == bytes && cached.revision == revision &&
-          cached.source == source_buffer && cached.stamp == stamp) {
+      if (cached.bytes == bytes && cached.padded_bytes == padded_bytes &&
+          cached.revision == revision && cached.source == source_buffer &&
+          cached.stamp == stamp) {
         *buffer = cached.buffer;
         *offset = 0;
         return true;
@@ -795,11 +800,12 @@ bool GatherDrawBuffer(u64 base,
     pool.emplace_back();
   auto& gathered = pool[used++];
   gathered.last_frame = g_frame.num;
-  if (!gathered.buffer || gathered.buffer->desc().size < bytes) {
+  if (!gathered.buffer || gathered.buffer->desc().size < padded_bytes) {
     rhi::BufferDesc desc;
-    desc.size = (bytes + 65535) & ~u64(65535);
+    desc.size = (padded_bytes + 65535) & ~u64(65535);
     desc.usage = rhi::kBufferVertex | rhi::kBufferIndex | rhi::kBufferUniform |
-                 rhi::kBufferStorage | rhi::kBufferCopyDst;
+                 rhi::kBufferStorage | rhi::kBufferCopyDst |
+                 rhi::kBufferCopySrc;
     desc.name = "gathered draw buffer";
     auto* replacement = Device().CreateBuffer(desc);
     if (!replacement)
@@ -808,10 +814,15 @@ bool GatherDrawBuffer(u64 base,
       Device().Destroy(gathered.buffer);
     gathered.buffer = replacement;
   }
+  if (padded_bytes > bytes) {
+    EndRegion();
+    g_frame.list->FillBuffer(gathered.buffer, bytes, padded_bytes - bytes, 0);
+  }
   if (!(source ? CsSupplyBuffer(base, bytes, gathered.buffer, 0)
                : MirrorSupplyBuffer(base, bytes, gathered.buffer, 0)))
     return false;
   gathered.bytes = bytes;
+  gathered.padded_bytes = padded_bytes;
   gathered.revision = revision;
   gathered.source = source_buffer;
   gathered.stamp = stamp;
@@ -838,21 +849,23 @@ bool CsStorageBuffer(u64 base,
                      u64 bytes,
                      rhi::Buffer** buffer,
                      u64* offset,
-                     u64 alignment) {
+                     u64 alignment,
+                     u64 padded_bytes) {
   if (!kCsBufBridge)
     return false;
   u64 range_base = 0;
   CsRange* found = BufferSource(base, bytes, &range_base);
   rhi::Buffer* resident = nullptr;
   u64 resident_offset = 0;
-  if (BindComputeBuffer(base, bytes, found, range_base, &resident,
+  if (bytes >= padded_bytes &&
+      BindComputeBuffer(base, bytes, found, range_base, &resident,
                         &resident_offset) &&
       !(resident_offset % base::Max<u64>(alignment, 1))) {
     *buffer = resident;
     *offset = resident_offset;
     return true;
   }
-  return GatherDrawBuffer(base, bytes, buffer, offset, found);
+  return GatherDrawBuffer(base, bytes, buffer, offset, found, padded_bytes);
 }
 
 // The live colour target at `base` takes the truth's pixels on the frame

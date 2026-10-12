@@ -105,8 +105,9 @@ separate device buffers until the frame slot retires. Buffers are reused across
 frames; windows without a complete mirror revision gather on every use.
 Full 16 KiB constant windows can bind compute output or direct-memory imports
 as uniform buffers, also skipping their ring copy. GPU-produced windows with
-unaligned native offsets use aligned copies in device memory. Short and packed
-indirect constant windows retain staging. `DELTA_GPU_CBUF_BIND=0` disables this
+unaligned native offsets use aligned copies in device memory. Short GPU
+constant windows use device copies with zero-filled tails. Packed indirect
+constant windows retain staging. `DELTA_GPU_CBUF_BIND=0` disables this
 path for comparison.
 `DELTA_GPU_RAW_BIND=0` restores raw-window copies for comparison. A compute
 pass widens eight-bit indices and expands quad lists into a device-local index

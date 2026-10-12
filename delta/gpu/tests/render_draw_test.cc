@@ -2080,9 +2080,10 @@ TEST(VkDraw, ConstantBuffersReadResidentComputeOutputInPlace) {
     SCOPED_TRACE(trial);
     const u32 offset = trial == 2 ? 260 : 256;
     const u32 bytes = trial == 3 ? 4096 : gpu::render::kCbufWindow;
-    const bool bind = trial && bytes == gpu::render::kCbufWindow;
+    const bool bind = trial != 0;
     const bool aligned =
         !(offset % gpu::render::Device().caps().uniform_offset_alignment);
+    const bool copy = !aligned || bytes < gpu::render::kCbufWindow;
     ASSERT_TRUE(cbuf_bind->SetFromString(trial ? "1" : "0"));
     gpu::render::BeginFrame(renderer);
     gpu::render::ComputeInfo ci;
@@ -2124,7 +2125,7 @@ TEST(VkDraw, ConstantBuffersReadResidentComputeOutputInPlace) {
     const u64 bound = gpu::g_bind_bytes;
     const u64 ring = gpu::render::g_ring.ubo_offset;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
-    if (bind && !aligned) {
+    if (bind && copy) {
       const u64 copied = gpu::render::cs::g_buf_bridge_bytes;
       ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
       EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copied);
@@ -2138,19 +2139,48 @@ TEST(VkDraw, ConstantBuffersReadResidentComputeOutputInPlace) {
     EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
     if (bind) {
       EXPECT_LE(gpu::render::g_ring.ubo_offset, ring + 8192);
-      if (aligned)
+      if (!copy)
         EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies);
       else
         EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies + 2 * bytes);
-      EXPECT_EQ(gpu::g_bind_bytes, bound + (aligned ? 2 : 3) * bytes);
+      EXPECT_EQ(gpu::g_bind_bytes,
+                bound + (copy ? 3 : 2) * gpu::render::kCbufWindow);
     } else {
       EXPECT_GT(gpu::render::cs::g_buf_bridge_bytes, copies);
       EXPECT_EQ(gpu::g_bind_bytes, bound);
+    }
+    gpu::rhi::Buffer* padding = nullptr;
+    if (bind && bytes < gpu::render::kCbufWindow) {
+      gpu::rhi::Buffer* buffer = nullptr;
+      u64 buffer_offset = 0;
+      const u64 copied = gpu::render::cs::g_buf_bridge_bytes;
+      ASSERT_TRUE(gpu::render::CsStorageBuffer(
+          draw.cbufs[0].base, bytes, &buffer, &buffer_offset,
+          gpu::render::g_ring.ubo_align, gpu::render::kCbufWindow));
+      EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copied);
+      gpu::rhi::BufferDesc desc;
+      desc.size = gpu::render::kCbufWindow;
+      desc.usage = gpu::rhi::kBufferCopyDst;
+      desc.memory = gpu::rhi::MemoryKind::kReadback;
+      padding = gpu::render::Device().CreateBuffer(desc);
+      ASSERT_NE(padding, nullptr);
+      gpu::render::EndRegion();
+      auto* list = gpu::render::g_frame.list;
+      list->Barrier(gpu::rhi::kAccessAllWrite, gpu::rhi::kAccessCopyRead);
+      list->CopyBuffer(padding, 0, buffer, buffer_offset, desc.size);
+      list->Barrier(gpu::rhi::kAccessCopyWrite, gpu::rhi::kAccessHostRead);
     }
     const u32 slot_index = gpu::render::g_frame.slot_idx;
     gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::render::g_frame.slots[slot_index];
     ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+    if (padding) {
+      const auto* words = reinterpret_cast<const u32*>(padding->mapped());
+      EXPECT_EQ(words[0], 0x3f400000u);
+      for (u32 i = bytes / 4; i < gpu::render::kCbufWindow / 4; ++i)
+        EXPECT_EQ(words[i], 0u) << i;
+      gpu::render::Device().Destroy(padding);
+    }
     ASSERT_TRUE(slot.presentable);
     const auto* pixels = slot.readback->mapped();
     u32 colored = 0;
