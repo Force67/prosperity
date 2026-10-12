@@ -371,7 +371,7 @@ struct MirrorDraw {
 const guest::SessionReset reset_mirror_draw(
     [] { guest::ResetResource(g_mirror_draw); });
 
-bool OrderMirrorAfterDraw() {
+bool OrderMirrorAfterFrameRead() {
   if (g_mirror_draw.frame != g_frame.num ||
       g_mirror_draw.chunk != g_frame.chunk_seq)
     return true;
@@ -381,14 +381,15 @@ bool OrderMirrorAfterDraw() {
   if (!g_cs_batch_open)
     return false;
   g_cs_list->Barrier(rhi::kAccessVertexRead | rhi::kAccessIndexRead |
-                         rhi::kAccessShaderRead | rhi::kAccessUniformRead,
+                         rhi::kAccessShaderRead | rhi::kAccessUniformRead |
+                         rhi::kAccessCopyRead | rhi::kAccessComputeRead,
                      kAccessComputeRW | kAccessCopyRW);
   g_mirror_draw.frame = -1;
   return true;
 }
 }  // namespace
 
-void MirrorDrawRead() {
+void MirrorFrameRead() {
   g_mirror_draw = {g_frame.num, g_frame.chunk_seq};
 }
 
@@ -402,7 +403,7 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
 }
 
 bool MirrorCopyInGuest(u64 base, u64 bytes) {
-  if (!OrderMirrorAfterDraw())
+  if (!OrderMirrorAfterFrameRead())
     return false;
   CsBatchBeginImpl();
   if (!g_cs_batch_open)
@@ -616,16 +617,36 @@ const MirrorWrite* MirrorWritten(u64 base, u64 bytes) {
   if (it == g_mirror_writes.begin())
     return nullptr;
   --it;
-  return it->first <= base && base + bytes <= it->second.end ? &it->second
-                                                             : nullptr;
+  return base + bytes <= it->second.end ? &it->second : nullptr;
 }
+
+namespace {
+// A partial write must also invalidate cached views of the wider window.
+void RecordMirrorWrite(u64 first, u64 bytes) {
+  u64 end = first + bytes;
+  auto it = g_mirror_writes.upper_bound(first);
+  if (it != g_mirror_writes.begin()) {
+    --it;
+    if (end <= it->second.end) {
+      it->second.seq = ++g_mirror_seq;
+      return;
+    }
+    if (it->second.end < first)
+      ++it;
+  }
+  while (it != g_mirror_writes.end() && it->first <= end) {
+    first = base::Min(first, it->first);
+    end = base::Max(end, it->second.end);
+    it = g_mirror_writes.erase(it);
+  }
+  g_mirror_writes[first] = {end, ++g_mirror_seq};
+}
+}  // namespace
 
 // After a dispatch wrote it: back out to the guest pages, in queue order.
 void MirrorWriteBack(u64 base, u64 bytes) {
   if (MirrorOwnable(base, bytes)) {
-    MirrorWrite& w = g_mirror_writes[base];
-    w.end = base::Max(w.end, base + bytes);
-    w.seq = ++g_mirror_seq;
+    RecordMirrorWrite(base, bytes);
     MirrorOwn(base, bytes);
     g_mirror_own_bytes += bytes;
     g_mirror_self.push_back({base, base + bytes});
@@ -639,9 +660,7 @@ void MirrorWriteBack(u64 base, u64 bytes) {
     u64& e = g_mirror_wb_union[base];
     e = base::Max(e, base + bytes);
   }
-  MirrorWrite& w = g_mirror_writes[base];
-  w.end = base::Max(w.end, base + bytes);
-  w.seq = ++g_mirror_seq;
+  RecordMirrorWrite(base, bytes);
   if (!MirrorCopy(base, bytes, /*to_guest=*/true))
     return;
   NotePendingGuestWrite(base, base + bytes);
@@ -659,7 +678,7 @@ bool MirrorFillable(u64 base, u64 bytes) {
 }
 
 bool MirrorFill(u64 base, u64 bytes, u32 value) {
-  if (!MirrorFillable(base, bytes) || !OrderMirrorAfterDraw())
+  if (!MirrorFillable(base, bytes) || !OrderMirrorAfterFrameRead())
     return false;
   // A block the fill makes the GPU's holds the guest's bytes around it.
   if (MirrorOwnable(base, bytes)) {
@@ -881,6 +900,33 @@ void MirrorRecache() {
   }
 }
 
+namespace {
+void AdvanceMirrorWindows(u64 first, u64 end) {
+  auto it = g_mirror_writes.upper_bound(first);
+  if (it != g_mirror_writes.begin())
+    --it;
+  u64 revision = 0;
+  for (; it != g_mirror_writes.end() && it->first < end; ++it)
+    if (first < it->second.end) {
+      if (!revision)
+        revision = ++g_mirror_seq;
+      it->second.seq = revision;
+    }
+}
+
+bool WatchMirrorHostReads(u64 base, u64 bytes) {
+  bool tracked = true;
+  for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
+       block += kMirrorBlock)
+    if (!MirrorOwned(block)) {
+      const u64 lo = base::Max(base, block);
+      const u64 hi = base::Min(base + bytes, block + kMirrorBlock);
+      tracked &= GuestWriteTracker().Arm(lo, hi - lo);
+    }
+  return tracked;
+}
+}  // namespace
+
 // A texture over bytes a dispatch wrote through the mirror: detiled from the
 // mirror on the GPU, where reading the guest copy would wait for the write
 // back.
@@ -901,8 +947,12 @@ bool MirrorSupplyTexture(u64 base,
     return true;
   if (*seq == written->seq)
     return true;
+  const u64 revision = written->seq;
+  g_cs_scratch_owner++;
   rhi::Buffer* scratch = AcquireScratch(linear.size);
-  if (!scratch)
+  const bool mirrored = MirrorHoldsNewest(base, tiled.size);
+  rhi::Buffer* source = mirrored ? g_mirror : AcquireScratch(tiled.size);
+  if (!scratch || !source)
     return false;
   rhi::BufferTextureCopy copies[16];
   for (u32 mip = 0; mip < linear.mip_levels; mip++) {
@@ -919,8 +969,13 @@ bool MirrorSupplyTexture(u64 base,
   rhi::CommandList* const list = g_frame.list;
   list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                 rhi::kAccessCopyRead | rhi::kAccessComputeRead);
-  RecordImageTiling(list, *table, g_mirror, MirrorOffset(base), tiled.size,
-                    scratch, linear.size, /*detile=*/true);
+  if (!mirrored && !RecordGuestRead(list, base, tiled.size, source))
+    return false;
+  list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessComputeRead);
+  RecordImageTiling(list, *table, source, mirrored ? MirrorOffset(base) : 0,
+                    tiled.size, scratch, linear.size, /*detile=*/true);
+  if (mirrored || MirrorOwnsAny(base, base + tiled.size))
+    MirrorFrameRead();
   rhi::TextureBarrier b;
   b.texture = img;
   b.before = state;
@@ -932,7 +987,9 @@ bool MirrorSupplyTexture(u64 base,
   b.before = rhi::TextureState::kCopyDst;
   b.after = rhi::TextureState::kShaderRead;
   list->Barrier(0, 0, &b, 1);
-  *seq = written->seq;
+  *seq = revision;
+  if (!mirrored && !WatchMirrorHostReads(base, tiled.size))
+    AdvanceMirrorWindows(base, base + tiled.size);
   if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
     g_cs_chunk_needs_batch = true;
   g_tex_bridge_n++;
@@ -952,8 +1009,16 @@ bool MirrorSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   rhi::CommandList* const list = g_frame.list;
   list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                 rhi::kAccessCopyRead);
-  list->CopyBuffer(dst, dst_off, g_mirror, MirrorOffset(base), bytes);
+  const bool mirrored = MirrorHoldsNewest(base, bytes);
+  if (mirrored)
+    list->CopyBuffer(dst, dst_off, g_mirror, MirrorOffset(base), bytes);
+  else if (!RecordGuestRead(list, base, bytes, dst, dst_off))
+    return false;
+  if (mirrored || MirrorOwnsAny(base, base + bytes))
+    MirrorFrameRead();
   list->Barrier(rhi::kAccessCopyWrite, kAccessAll);
+  if (!mirrored && !WatchMirrorHostReads(base, bytes))
+    AdvanceMirrorWindows(base, base + bytes);
   if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
     g_cs_chunk_needs_batch = true;
   g_buf_bridge_n++;
@@ -962,7 +1027,11 @@ bool MirrorSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
 }
 
 void MirrorNoteGuestWrites(u64 first, u64 end, bool announced) {
-  if (g_mirror_clean.empty())
+  if (g_mirror_clean.empty() && g_mirror_writes.empty())
+    return;
+  if (first >= end ||
+      (first >= kMirrorLowWindow &&
+       (end <= kMirrorPs5Base || first >= kMirrorPs5Base + kMirrorWindow)))
     return;
   // Our own write-through, announced. A CPU write the tracker saw in the
   // same pages is not, and the mirror misses its bytes.
@@ -970,8 +1039,11 @@ void MirrorNoteGuestWrites(u64 first, u64 end, bool announced) {
     for (const auto& [lo, hi] : g_mirror_self)
       if ((lo & ~u64(0xFFF)) <= first && end <= ((hi + 0xFFF) & ~u64(0xFFF)))
         return;
+  AdvanceMirrorWindows(first, end);
   for (u64 block = first & ~(kMirrorBlock - 1); block < end;
        block += kMirrorBlock) {
+    if (g_own && InMirror(block) && !MirrorOwned(block))
+      OwnAt(block).cpu_dirty.store(1, base::memory_order_release);
     g_mirror_clean.erase(block);
     if (!g_mirror_cached.empty())
       MirrorUncache(block);

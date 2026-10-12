@@ -650,12 +650,11 @@ bool MirrorHoldsNewest(u64 base, u64 bytes) {
     return false;
   bool owned = true;
   for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
-       block += kMirrorBlock)
-    if (!MirrorOwned(block) ||
-        OwnAt(block).cpu_dirty.load(base::memory_order_acquire)) {
-      owned = false;
-      break;
-    }
+       block += kMirrorBlock) {
+    if (g_own && OwnAt(block).cpu_dirty.load(base::memory_order_acquire))
+      return false;
+    owned &= MirrorOwned(block);
+  }
   if (owned)
     return true;
   for (const PendingGuestWrite& w : g_pending_guest_writes)
@@ -699,7 +698,7 @@ bool BindComputeBuffer(u64 base, u64 bytes, CsRange* found, u64 range_base,
       g_cs_chunk_needs_batch = true;
     *buffer = g_mirror;
     *offset = MirrorOffset(base);
-    MirrorDrawRead();
+    MirrorFrameRead();
     return true;
   }
   if (!found)

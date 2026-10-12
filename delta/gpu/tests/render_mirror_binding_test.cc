@@ -7,6 +7,7 @@
 #include "base/containers/array.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/guest_page_table.h"
 #include "gpu/ps5/rdna/rdna_translate.h"
 #include "gpu/render/compute_internal.h"
 #include "gpu/render/device.h"
@@ -84,8 +85,9 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   ASSERT_EQ(sigaction(SIGSEGV, &fault, nullptr), 0);
   const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
                         0xbf810000};
-  const u32 ps[4096] = {0x7e000280, 0xe8001000 | (56u << 19) | (3u << 16),
-                        0x80020000, 0xf800080f, 0x03020100, 0xbf810000};
+  const u32 ps[4096] = {0x7e000204, 0xe8001000 | (56u << 19) | (3u << 16),
+                        0x80020000, 0xf800080f,
+                        0x03020100, 0xbf810000};
   const u64 base = DirectMemory::kBase;
   const u32 user_data[32] = {u32(base), u32(base >> 32),
                             DirectMemory::kBytes, 0x14fac};
@@ -108,7 +110,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   ASSERT_TRUE(compute.ok);
   ASSERT_EQ(compute.resources.size(), 1u);
   ASSERT_TRUE(gpu::render::InitGuestDirect());
-  alignas(65536) static base::Array<u8, 65536> targets[4]{};
+  alignas(65536) static base::Array<u8, 65536> targets[6]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
   imported.recomp = &constants;
@@ -143,6 +145,12 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       ++imported_pixels;
     }
   EXPECT_EQ(imported_pixels, 1u);
+  for (u32 block : {2u, 3u})
+    ASSERT_TRUE(gpu::render::GpuFill(base + block * gpu::render::kMirrorBlock,
+                                     gpu::render::kMirrorBlock, 0, 0));
+  EXPECT_NE(gpu::render::MirrorWritten(base + 2 * gpu::render::kMirrorBlock,
+                                       2 * gpu::render::kMirrorBlock),
+            nullptr);
   gpu::render::ComputeInfo ci;
   ci.cs_addr = reinterpret_cast<u64>(cs);
   ci.recomp = &compute;
@@ -157,6 +165,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   ci.user_data[1] = (base >> 32) | (4u << 16);
   ci.user_data[2] = DirectMemory::kBytes / 4;
   ci.user_data[3] = (4u << 15) | (4u << 12);
+  u64 latest_revision = 0;
   for (u32 trial = 0; trial < 3; ++trial) {
     SCOPED_TRACE(trial);
     gpu::render::BeginFrame(renderer);
@@ -227,6 +236,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     EXPECT_EQ(gpu::g_bind_bytes,
               bound + 2 * DirectMemory::kBytes + 2 * gpu::render::kCbufWindow);
     EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), resolves);
+    latest_revision = gpu::render::CsBufferRevision(base, DirectMemory::kBytes);
     const u32 slot_index = gpu::render::g_frame.slot_idx;
     gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::render::g_frame.slots[slot_index];
@@ -251,6 +261,155 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     gpu::render::CollectGuestWrites();
     EXPECT_FALSE(gpu::render::CsHoldsGeometry(base, DirectMemory::kBytes));
     EXPECT_GT(gpu::render::cs::g_mirror_resolves.load(), resolves);
+  }
+  for (u32 mode = 0; mode < 2; ++mode) {
+    SCOPED_TRACE(mode);
+    gpu::render::cs::g_cs_in_frame = mode != 0;
+    ASSERT_TRUE(gpu::render::GpuFill(base + gpu::render::kMirrorBlock,
+                                     gpu::render::kMirrorBlock, 0x3f400000,
+                                     0x3f400000));
+    ASSERT_TRUE(gpu::render::cs::CsBatchSubmit());
+    *static_cast<volatile u32*>(memory.memory) = 0x3e800000;
+    gpu::render::CollectGuestWrites();
+    gpu::render::BeginFrame(renderer);
+    EXPECT_GT(gpu::render::CsBufferRevision(base, DirectMemory::kBytes),
+              latest_revision);
+    ASSERT_TRUE(gpu::render::MirrorOwned(base + gpu::render::kMirrorBlock));
+    const u64 mixed_resolves = gpu::render::cs::g_mirror_resolves.load();
+    const u64 mixed_copies = gpu::render::cs::g_buf_bridge_bytes;
+    const u64 mixed_cpu_raw = gpu::g_ring_raw_bytes;
+    const u64 mixed_cpu_cb = gpu::g_ring_cb_bytes;
+    gpu::render::DrawInfo mixed = imported;
+    mixed.rt_base = mixed.mrt_base[0] =
+        reinterpret_cast<u64>(targets[4 + mode].data());
+    mixed.viewport_x_offset = mixed.viewport_y_offset = 4;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, mixed));
+    gpu::render::DrawInfo raw = mixed;
+    raw.recomp = &program;
+    raw.ps_addr = reinterpret_cast<u64>(ps);
+    raw.num_cbufs = 0;
+    raw.cbufs[0] = {};
+    raw.bufs[0] = {base, DirectMemory::kBytes};
+    raw.num_bufs = 1;
+    raw.viewport_y_offset = 12;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, raw));
+    raw.ps_user_data[4] = gpu::render::kMirrorBlock;
+    raw.viewport_x_offset = 12;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, raw));
+    gpu::gcn::TextureLayout32 layout;
+    ASSERT_TRUE(gpu::gcn::BuildTextureLayout32(layout, 256, 256, 256, 1, 1, 8,
+                                               false, 4));
+    gpu::rhi::TextureDesc texture_desc;
+    texture_desc.width = texture_desc.height = 256;
+    texture_desc.format = gpu::rhi::Format::kRGBA8Unorm;
+    texture_desc.usage = gpu::rhi::kTextureSampled | gpu::rhi::kTextureCopyDst |
+                         gpu::rhi::kTextureCopySrc;
+    auto* texture = gpu::render::Device().CreateTexture(texture_desc);
+    ASSERT_NE(texture, nullptr);
+    gpu::rhi::BufferDesc readback_desc;
+    readback_desc.size = 2 * layout.size;
+    readback_desc.usage = gpu::rhi::kBufferCopyDst;
+    readback_desc.memory = gpu::rhi::MemoryKind::kReadback;
+    auto* readback = gpu::render::Device().CreateBuffer(readback_desc);
+    ASSERT_NE(readback, nullptr);
+    u64 texture_revision = 0;
+    auto texture_state = gpu::rhi::TextureState::kUndefined;
+    const u64 texture_copies = gpu::render::cs::g_tex_bridge_bytes;
+    const auto supply_texture = [&](u32 pass) {
+      if (!gpu::render::MirrorSupplyTexture(base, layout, layout, texture,
+                                            texture_state, &texture_revision))
+        return false;
+      gpu::rhi::TextureBarrier barrier{texture,
+                                       gpu::rhi::TextureState::kShaderRead,
+                                       gpu::rhi::TextureState::kCopySrc};
+      auto* list = gpu::render::g_frame.list;
+      list->Barrier(gpu::rhi::kAccessShaderRead, gpu::rhi::kAccessCopyRead,
+                    &barrier, 1);
+      gpu::rhi::BufferTextureCopy copy;
+      copy.buffer_offset = pass * layout.size;
+      copy.region.width = copy.region.height = 256;
+      list->CopyTextureToBuffer(readback, texture, &copy, 1);
+      barrier.before = gpu::rhi::TextureState::kCopySrc;
+      barrier.after = gpu::rhi::TextureState::kShaderRead;
+      list->Barrier(gpu::rhi::kAccessCopyRead, gpu::rhi::kAccessShaderRead,
+                    &barrier, 1);
+      texture_state = gpu::rhi::TextureState::kShaderRead;
+      return true;
+    };
+    ASSERT_TRUE(supply_texture(0));
+    const u64 before_fill =
+        gpu::render::CsBufferRevision(base, DirectMemory::kBytes);
+    ASSERT_TRUE(gpu::render::GpuFill(base + gpu::render::kMirrorBlock,
+                                     gpu::render::kMirrorBlock, 0x3f800000,
+                                     0x3f800000));
+    EXPECT_GT(gpu::render::CsBufferRevision(base, DirectMemory::kBytes),
+              before_fill);
+    EXPECT_NE(gpu::render::MirrorWritten(base + gpu::render::kMirrorBlock,
+                                         2 * gpu::render::kMirrorBlock),
+              nullptr);
+    ASSERT_TRUE(gpu::render::SubmitFrameChunk());
+    const auto& mixed_slot =
+        gpu::render::g_frame.slots[gpu::render::g_frame.slot_idx];
+    ASSERT_TRUE(gpu::render::Device().Wait(mixed_slot.submission));
+    const u64 before_cpu_write =
+        gpu::render::CsBufferRevision(base, DirectMemory::kBytes);
+    const auto* page = gpu::GuestPages().Find(base);
+    ASSERT_NE(page, nullptr);
+    const bool tracked = page->armed.load(base::memory_order_acquire) != 0;
+    *static_cast<volatile u32*>(memory.memory) = 0x3f000000;
+    gpu::render::CollectGuestWrites();
+    if (tracked)
+      EXPECT_GT(gpu::render::CsBufferRevision(base, DirectMemory::kBytes),
+                before_cpu_write);
+    mixed.viewport_x_offset = 12;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, mixed));
+    ASSERT_TRUE(supply_texture(1));
+    gpu::render::g_frame.list->Barrier(gpu::rhi::kAccessCopyWrite,
+                                       gpu::rhi::kAccessHostRead);
+    EXPECT_EQ(gpu::g_ring_raw_bytes, mixed_cpu_raw);
+    EXPECT_EQ(gpu::g_ring_cb_bytes, mixed_cpu_cb);
+    EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), mixed_resolves);
+    EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes,
+              mixed_copies + (tracked ? 1 : 2) * DirectMemory::kBytes +
+                  2 * gpu::render::kCbufWindow);
+    EXPECT_EQ(gpu::render::cs::g_tex_bridge_bytes,
+              texture_copies + 2 * layout.size);
+    gpu::render::EndFrame(renderer, mixed.rt_base);
+    ASSERT_TRUE(gpu::render::Device().Wait(mixed_slot.submission));
+    ASSERT_TRUE(mixed_slot.presentable);
+    u32 mixed_pixels = 0;
+    for (u32 i = 0; i < 256; ++i) {
+      const auto* pixel = mixed_slot.readback->mapped() + i * 4;
+      if (!pixel[3])
+        continue;
+      ++mixed_pixels;
+      const bool first = i % 16 < 8;
+      if (i / 16 < 8) {
+        EXPECT_NEAR(pixel[0], first ? 64 : 128, 1);
+        EXPECT_EQ(pixel[1], 0);
+        EXPECT_EQ(pixel[2], 0);
+        EXPECT_EQ(pixel[3], 255);
+      } else {
+        EXPECT_EQ(pixel[0], 0);
+        EXPECT_EQ(pixel[1], 0);
+        EXPECT_EQ(pixel[2], first ? 128 : 64);
+        EXPECT_EQ(pixel[3], first ? 62 : 63);
+      }
+    }
+    EXPECT_EQ(mixed_pixels, 4u);
+    for (u32 pass = 0; pass < 2; ++pass) {
+      u32 first, owned;
+      std::memcpy(&first, readback->mapped() + pass * layout.size,
+                  sizeof(first));
+      std::memcpy(
+          &owned,
+          readback->mapped() + pass * layout.size + gpu::render::kMirrorBlock,
+          sizeof(owned));
+      EXPECT_EQ(first, pass ? 0x3f000000u : 0x3e800000u);
+      EXPECT_EQ(owned, pass ? 0x3f800000u : 0x3f400000u);
+    }
+    gpu::render::Device().Destroy(texture);
+    gpu::render::Device().Destroy(readback);
   }
 }
 

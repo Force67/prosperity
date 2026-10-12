@@ -803,8 +803,8 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes);
 bool MirrorCopyInGuest(u64 base, u64 bytes);
 // Writes a dirty range back to guest memory on the GPU (compute_mirror.cc).
 bool GpuWriteBack(u64 base, CsRange& e, bool* kept);
-// A native graphics binding reads the mirror on the current frame chunk.
-void MirrorDrawRead();
+// A graphics binding or copy reads the mirror on the current frame chunk.
+void MirrorFrameRead();
 bool MirrorOwned(u64 block);
 bool MirrorOwnsAny(u64 first, u64 end);
 bool MirrorFillable(u64 base, u64 bytes);
@@ -825,8 +825,7 @@ u64 PendingGuestWriteBatch(u64 base, u64 bytes);
 // they ran ahead of left, once those writes have landed.
 void CheckSpeculatedReads();
 
-// What dispatches wrote through the mirror: base -> end, and a revision a
-// texture made from it compares against.
+// Disjoint windows containing dispatch output, with revisions for cached views.
 struct MirrorWrite {
   u64 end = 0, seq = 0;
 };
@@ -838,6 +837,7 @@ const MirrorWrite* MirrorWritten(u64 base, u64 bytes);
 void MirrorWriteBack(u64 base, u64 bytes);
 
 u64 MirrorRevision(u64 base, u64 bytes);
+bool MirrorHoldsNewest(u64 base, u64 bytes);
 
 bool MirrorSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
 

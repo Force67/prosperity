@@ -94,6 +94,10 @@ windows retain staging.
 GPU-owned mirror output also binds in place, with GPU ordering between draws
 and later compute writes or fills. A CPU write makes the binding ineligible
 until the GPU has the current bytes again.
+For raw buffers, constants and textures that mix CPU writes with GPU output,
+GPU copies gather current host pages and owned mirror blocks. Watched host
+pages invalidate cached copies; pages that cannot be watched are recopied on
+each use. Partial GPU writes also invalidate wider cached views.
 Full 16 KiB constant windows can bind compute output or direct-memory imports
 as uniform buffers, also skipping their ring copy. Short, unaligned and packed
 indirect constant windows retain staging. `DELTA_GPU_CBUF_BIND=0` disables this
