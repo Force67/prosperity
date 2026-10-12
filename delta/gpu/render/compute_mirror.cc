@@ -362,6 +362,35 @@ void MirrorProtectSubmitted(u64 submission) {
   g_own_unsubmitted.clear();
 }
 
+namespace {
+struct MirrorDraw {
+  int frame = -1;
+  u64 chunk = 0;
+} g_mirror_draw;
+const guest::SessionReset reset_mirror_draw(
+    [] { guest::ResetResource(g_mirror_draw); });
+
+bool OrderMirrorAfterDraw() {
+  if (g_mirror_draw.frame != g_frame.num ||
+      g_mirror_draw.chunk != g_frame.chunk_seq)
+    return true;
+  if (!CsSplitFrameChunk())
+    return false;
+  CsBatchBeginImpl();
+  if (!g_cs_batch_open)
+    return false;
+  g_cs_list->Barrier(rhi::kAccessVertexRead | rhi::kAccessIndexRead |
+                        rhi::kAccessShaderRead,
+                    kAccessComputeRW | kAccessCopyRW);
+  g_mirror_draw.frame = -1;
+  return true;
+}
+}  // namespace
+
+void MirrorDrawRead() {
+  g_mirror_draw = {g_frame.num, g_frame.chunk_seq};
+}
+
 // Before a dispatch reads it: backed, and holding the guest's bytes.
 bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
   // A range still owned by the staging path is written back first.
@@ -372,6 +401,8 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
 }
 
 bool MirrorCopyInGuest(u64 base, u64 bytes) {
+  if (!OrderMirrorAfterDraw())
+    return false;
   CsBatchBeginImpl();
   if (!g_cs_batch_open)
     return false;
@@ -627,7 +658,7 @@ bool MirrorFillable(u64 base, u64 bytes) {
 }
 
 bool MirrorFill(u64 base, u64 bytes, u32 value) {
-  if (!MirrorFillable(base, bytes))
+  if (!MirrorFillable(base, bytes) || !OrderMirrorAfterDraw())
     return false;
   // A block the fill makes the GPU's holds the guest's bytes around it.
   if (MirrorOwnable(base, bytes)) {

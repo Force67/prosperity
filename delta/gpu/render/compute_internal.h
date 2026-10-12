@@ -803,6 +803,8 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes);
 bool MirrorCopyInGuest(u64 base, u64 bytes);
 // Writes a dirty range back to guest memory on the GPU (compute_mirror.cc).
 bool GpuWriteBack(u64 base, CsRange& e, bool* kept);
+// A native graphics binding reads the mirror on the current frame chunk.
+void MirrorDrawRead();
 bool MirrorOwned(u64 block);
 bool MirrorOwnsAny(u64 first, u64 end);
 bool MirrorFillable(u64 base, u64 bytes);

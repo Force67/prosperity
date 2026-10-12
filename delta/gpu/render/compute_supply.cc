@@ -644,11 +644,20 @@ CsRange* VertexSource(u64 base, u64 bytes, u64* range_base) {
   return bad ? nullptr : found;
 }
 
-// The mirror holds the newest bytes of a window a dispatch wrote through it
-// while their copy out to the guest pages is still on its way.
+// A written window still owned by the GPU, or awaiting its guest copy.
 bool MirrorHoldsNewest(u64 base, u64 bytes) {
-  if (!MirrorWritten(base, bytes))
+  if (!bytes || !MirrorWritten(base, bytes))
     return false;
+  bool owned = true;
+  for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
+       block += kMirrorBlock)
+    if (!MirrorOwned(block) ||
+        OwnAt(block).cpu_dirty.load(base::memory_order_acquire)) {
+      owned = false;
+      break;
+    }
+  if (owned)
+    return true;
   for (const PendingGuestWrite& w : g_pending_guest_writes)
     if (w.base < base + bytes && base < w.end)
       return true;
@@ -662,32 +671,35 @@ bool CsHoldsGeometry(u64 base, u64 bytes) {
 }
 
 namespace {
-void MakeComputeBufferReadable(u64 batch) {
-  static u64 covered_chunk = ~0ull, covered_batch = 0;
+void MakeComputeBufferReadable(u64 batch, u64 mirror_seq = 0) {
+  static u64 covered_chunk = ~0ull, covered_batch = 0, covered_mirror = 0;
   static const guest::SessionReset reset_coverage([] {
     covered_chunk = ~0ull;
-    covered_batch = 0;
+    covered_batch = covered_mirror = 0;
   });
   if (covered_chunk != g_frame.chunk_seq) {
     covered_chunk = g_frame.chunk_seq;
-    covered_batch = 0;
+    covered_batch = covered_mirror = 0;
   }
-  if (batch > covered_batch) {
+  if (batch > covered_batch || mirror_seq > covered_mirror) {
     EndRegion();
     g_frame.list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                           kAccessAll);
     covered_batch = g_cs_batch_open ? g_cs_batch_id : g_cs_batch_next_id - 1;
+    covered_mirror = g_mirror_seq;
   }
 }
 
 bool BindComputeBuffer(u64 base, u64 bytes, CsRange* found, u64 range_base,
                        rhi::Buffer** buffer, u64* offset) {
   if (!found && MirrorHoldsNewest(base, bytes)) {
-    MakeComputeBufferReadable(PendingGuestWriteBatch(base, bytes));
+    MakeComputeBufferReadable(PendingGuestWriteBatch(base, bytes),
+                              MirrorWritten(base, bytes)->seq);
     if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
       g_cs_chunk_needs_batch = true;
     *buffer = g_mirror;
     *offset = MirrorOffset(base);
+    MirrorDrawRead();
     return true;
   }
   if (!found)

@@ -91,6 +91,9 @@ also let vertex and index fetch read guest bytes without a ring copy. Raw
 shader windows can bind compute buffers or direct-memory imports in place,
 skipping the raw-ring copy. Loads past a binding return zero. Unaligned
 windows retain staging.
+GPU-owned mirror output also binds in place, with GPU ordering between draws
+and later compute writes or fills. A CPU write makes the binding ineligible
+until the GPU has the current bytes again.
 `DELTA_GPU_RAW_BIND=0` restores raw-window copies for comparison. A compute
 pass widens eight-bit indices and expands quad lists into a device-local index
 ring, including streams produced by a dispatch without CPU readback. Converted
