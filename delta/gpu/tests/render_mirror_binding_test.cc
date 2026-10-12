@@ -7,6 +7,8 @@
 #include "base/containers/array.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/gcn/spirv/spv_emit.h"
+#include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/guest_page_table.h"
 #include "gpu/ps5/rdna/rdna_translate.h"
 #include "gpu/render/compute_internal.h"
@@ -29,30 +31,31 @@ namespace {
 struct DirectMemory {
   static constexpr u64 kBase = gpu::gcn::kDirectBase + (16ull << 20);
   static constexpr u64 kBytes = 4ull << 20;
+  static constexpr u64 kMappedBytes = 2 * kBytes;
   int fd = memfd_create("delta_dmem_test", 0);
   void* memory = MAP_FAILED;
 
   DirectMemory() {
-    if (fd >= 0 && !ftruncate(fd, kBytes))
-      memory = mmap(reinterpret_cast<void*>(kBase), kBytes,
-                    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED_NOREPLACE,
-                    fd, 0);
+    if (fd >= 0 && !ftruncate(fd, kMappedBytes))
+      memory =
+          mmap(reinterpret_cast<void*>(kBase), kMappedBytes,
+               PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED_NOREPLACE, fd, 0);
   }
 
   ~DirectMemory() {
     if (memory != MAP_FAILED) {
       if (gpu::render::g_mirror) {
         gpu::render::cs::CsBatchSubmit();
-        for (u64 at = kBase; at < kBase + kBytes;
+        for (u64 at = kBase; at < kBase + kMappedBytes;
              at += gpu::render::kMirrorBlock)
           if (gpu::render::MirrorOwned(at)) {
             const u32 value = *reinterpret_cast<volatile const u32*>(at);
             (void)value;
           }
       }
-      gpu::GuestWriteTracker().Release(kBase, kBytes);
-      munmap(memory, kBytes);
-      gpu::render::NoteGuestRemap(kBase, kBytes);
+      gpu::GuestWriteTracker().Release(kBase, kMappedBytes);
+      munmap(memory, kMappedBytes);
+      gpu::render::NoteGuestRemap(kBase, kMappedBytes);
     }
     if (fd >= 0)
       close(fd);
@@ -109,8 +112,44 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   gpu::gcn::SetDefaultIsaMode(previous_isa);
   ASSERT_TRUE(compute.ok);
   ASSERT_EQ(compute.resources.size(), 1u);
+  const u32 red_ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                            0xbf810000};
+  auto geometry = gpu::rdna::Recompile(vs, red_ps, user_data, user_data);
+  ASSERT_TRUE(geometry.ok);
+  using gpu::gcn::spirv::Id;
+  gpu::gcn::spirv::Module module;
+  const Id f = module.TypeFloat(), v4 = module.TypeVec(f, 4);
+  const Id vertex =
+      module.Variable(module.TypePointer(spv::StorageClass::Input, f),
+                      spv::StorageClass::Input);
+  module.Decorate(vertex, spv::Decoration::Location, {0});
+  const Id position =
+      module.Variable(module.TypePointer(spv::StorageClass::Output, v4),
+                      spv::StorageClass::Output);
+  module.Decorate(position, spv::Decoration::BuiltIn,
+                  {static_cast<u32>(spv::BuiltIn::Position)});
+  const Id point_size =
+      module.Variable(module.TypePointer(spv::StorageClass::Output, f),
+                      spv::StorageClass::Output);
+  module.Decorate(point_size, spv::Decoration::BuiltIn,
+                  {static_cast<u32>(spv::BuiltIn::PointSize)});
+  const Id main = module.BeginFunction(
+      module.TypeVoid(), module.TypeFunction(module.TypeVoid(), {}));
+  module.Store(position,
+               module.Emit(spv::Op::OpCompositeConstruct, v4,
+                           {module.Load(f, vertex), module.ConstF32(0),
+                            module.ConstF32(0), module.ConstF32(1)}));
+  module.Store(point_size, module.ConstF32(1));
+  module.ReturnVoid();
+  module.EndFunction();
+  module.EntryPoint(spv::ExecutionModel::Vertex, main, "main",
+                    {vertex, position, point_size});
+  base::String error;
+  ASSERT_TRUE(
+      gpu::gcn::spirv::Finalize(module.Assemble(), &geometry.vs_spirv, &error))
+      << error.c_str();
   ASSERT_TRUE(gpu::render::InitGuestDirect());
-  alignas(65536) static base::Array<u8, 65536> targets[6]{};
+  alignas(65536) static base::Array<u8, 65536> targets[15]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
   imported.recomp = &constants;
@@ -410,6 +449,120 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     }
     gpu::render::Device().Destroy(texture);
     gpu::render::Device().Destroy(readback);
+  }
+  alignas(65536) static u32 host_indices[2][32768]{};
+  for (u32 trial = 0; trial < 9; ++trial) {
+    SCOPED_TRACE(trial);
+    const bool vertices = trial % 3 == 0;
+    const bool host = trial >= 7;
+    const bool partial = (trial >= 3 && trial < 6) || host;
+    const u64 geometry_base =
+        host ? reinterpret_cast<u64>(host_indices[trial - 7])
+             : base + (trial == 6 ? 7ull << 20
+                       : partial  ? u64(trial + 1) << 20
+                                  : 0);
+    const u32 element = trial % 3 == 1 ? 2 : 4;
+    const u64 bytes = 2 * gpu::render::kMirrorBlock;
+    gpu::render::cs::g_cs_in_frame = trial % 2 == 0;
+    const u32 initial = vertices ? 0x3f000000 : element == 2 ? 0x00010001 : 1;
+    if (!host) {
+      ASSERT_TRUE(gpu::render::GpuFill(
+          geometry_base + (partial ? gpu::render::kMirrorBlock : 0),
+          partial ? gpu::render::kMirrorBlock : bytes, initial, initial));
+      ASSERT_TRUE(gpu::render::cs::CsBatchSubmit());
+      ASSERT_TRUE(gpu::render::SettleGuestWrites(geometry_base, bytes, "test"));
+    }
+    if (vertices)
+      *reinterpret_cast<volatile float*>(geometry_base) = -.5f;
+    else
+      std::memset(reinterpret_cast<void*>(geometry_base), 0,
+                  gpu::render::kMirrorBlock);
+    auto* auxiliary = reinterpret_cast<u32*>(base + (2ull << 20));
+    if (vertices) {
+      auxiliary[0] = 0;
+      auxiliary[1] = gpu::render::kMirrorBlock / 16;
+    } else {
+      const float positions[] = {-.5f, 0, .5f};
+      std::memcpy(auxiliary, positions, sizeof(positions));
+    }
+    gpu::render::CollectGuestWrites();
+    gpu::render::BeginFrame(renderer);
+    if (host)
+      ASSERT_TRUE(
+          gpu::render::GpuFill(geometry_base + gpu::render::kMirrorBlock,
+                               gpu::render::kMirrorBlock, initial, initial));
+    EXPECT_TRUE(gpu::render::CsHoldsGeometry(geometry_base, bytes));
+    if (partial)
+      EXPECT_EQ(gpu::render::MirrorRevision(geometry_base, bytes), 0u);
+    const u64 resolves = gpu::render::cs::g_mirror_resolves.load();
+    const u64 cpu_vertices = gpu::g_ring_vb_bytes;
+    const u64 cpu_indices = gpu::g_ring_ib_bytes;
+    const u64 copies = gpu::render::cs::g_buf_bridge_bytes;
+    gpu::render::DrawInfo draw;
+    draw.recomp = &geometry;
+    draw.prim_type = 1;
+    draw.vertex_count = vertices ? 1 : 3;
+    draw.vertex_data = reinterpret_cast<const void*>(
+        vertices ? geometry_base : reinterpret_cast<u64>(auxiliary));
+    draw.vertex_stride = vertices ? 16 : 4;
+    draw.num_vbufs = draw.num_vattrs = 1;
+    draw.vbufs[0] = {draw.vertex_data, draw.vertex_stride,
+                     vertices ? u32(bytes / 16) : 3u};
+    draw.vattrs[0] = {0, 0, 0, 1, 4, 7};
+    draw.index_data =
+        vertices ? auxiliary : reinterpret_cast<void*>(geometry_base);
+    draw.index_count = vertices ? 2 : bytes / element;
+    draw.index_type = vertices || element == 4 ? 1 : 0;
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[6 + trial].data());
+    draw.rt_w = draw.rt_h = 16;
+    draw.viewport_x_scale = draw.viewport_y_scale = 8;
+    draw.viewport_x_offset = 8.5f;
+    draw.viewport_y_offset = 4.5f;
+    draw.mrt_count = draw.mrt_bound_mask = 1;
+    draw.mrt_info[0] = 10u << 2;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+    const u64 repeat_copies = gpu::render::cs::g_buf_bridge_bytes;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+    if (trial == 6)
+      EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, repeat_copies);
+    if (partial)
+      EXPECT_GT(gpu::render::cs::g_buf_bridge_bytes, repeat_copies);
+    EXPECT_GT(gpu::render::cs::g_buf_bridge_bytes, copies);
+    const u32 updated = vertices ? 0xbe800000 : element == 2 ? 0x00020002 : 2;
+    ASSERT_TRUE(gpu::render::GpuFill(geometry_base + gpu::render::kMirrorBlock,
+                                     gpu::render::kMirrorBlock, updated,
+                                     updated));
+    ASSERT_TRUE(gpu::render::SubmitFrameChunk());
+    const auto& slot =
+        gpu::render::g_frame.slots[gpu::render::g_frame.slot_idx];
+    ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+    if (vertices)
+      *reinterpret_cast<volatile float*>(geometry_base) = 0;
+    else if (element == 2)
+      std::fill_n(reinterpret_cast<u16*>(geometry_base),
+                  gpu::render::kMirrorBlock / 2, 1);
+    else
+      std::fill_n(reinterpret_cast<u32*>(geometry_base),
+                  gpu::render::kMirrorBlock / 4, 1);
+    gpu::render::CollectGuestWrites();
+    draw.viewport_y_offset = 12.5f;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+    EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), resolves);
+    EXPECT_EQ(gpu::g_ring_vb_bytes, cpu_vertices);
+    EXPECT_EQ(gpu::g_ring_ib_bytes, cpu_indices);
+    gpu::render::EndFrame(renderer, draw.rt_base);
+    ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+    ASSERT_TRUE(slot.presentable);
+    const u32 expected[] = {4 * 16 + 4, 4 * 16 + (vertices ? 12u : 8u),
+                            12 * 16 + (vertices ? 6u : 8u),
+                            12 * 16 + (vertices ? 8u : 12u)};
+    for (u32 pixel : expected)
+      EXPECT_EQ(slot.readback->mapped()[pixel * 4], 255);
+    u32 pixels = 0;
+    for (u32 i = 0; i < 256; ++i)
+      pixels += slot.readback->mapped()[i * 4] != 0;
+    EXPECT_EQ(pixels, 4u);
   }
 }
 

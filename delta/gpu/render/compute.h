@@ -86,7 +86,8 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
 // The same window bound in place as a vertex or index stream:
 // `*buffer`+`*offset` is the range's own buffer, made visible to geometry fetch
 // on the frame list. Skinning output read by the next draws then never goes
-// through guest memory.
+// through guest memory. Mixed CPU/GPU windows gather into immutable buffers
+// on the GPU, retained until the active frame slot retires.
 bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
 // Bind a raw shader window in place, with the same lifetime and ordering.
 bool CsStorageBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);

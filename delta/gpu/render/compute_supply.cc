@@ -665,8 +665,10 @@ bool MirrorHoldsNewest(u64 base, u64 bytes) {
 
 bool CsHoldsGeometry(u64 base, u64 bytes) {
   u64 range_base;
-  return kCsVtxBridge && (VertexSource(base, bytes, &range_base) ||
-                          MirrorHoldsNewest(base, bytes));
+  return kCsVtxBridge && bytes && g_frame.recording &&
+         (VertexSource(base, bytes, &range_base) ||
+          MirrorHoldsNewest(base, bytes) || MirrorOwnsAny(base, base + bytes) ||
+          PendingGuestWriteBatch(base, bytes));
 }
 
 namespace {
@@ -726,6 +728,83 @@ bool BindComputeBuffer(u64 base, u64 bytes, CsRange* found, u64 range_base,
   *offset = off;
   return true;
 }
+
+// Every revision gets a separate buffer until its frame slot retires.
+bool GatherGeometryBuffer(u64 base,
+                          u64 bytes,
+                          rhi::Buffer** buffer,
+                          u64* offset) {
+  if (!bytes || !g_frame.recording ||
+      (!MirrorOwnsAny(base, base + bytes) &&
+       !PendingGuestWriteBatch(base, bytes)))
+    return false;
+  struct Gathered {
+    rhi::Buffer* buffer = nullptr;
+    u64 bytes = 0, revision = 0;
+    int last_frame = 0;
+  };
+  static base::Vector<Gathered> slots[2];
+  static base::HashMap<u64, size_t> latest;
+  static int frame = -1;
+  static size_t used = 0;
+  static const guest::SessionReset reset_gathered([] {
+    guest::ResetResource(slots);
+    guest::ResetResource(latest);
+    frame = -1;
+    used = 0;
+  });
+  auto& pool = slots[g_frame.slot_idx];
+  if (frame != g_frame.num) {
+    frame = g_frame.num;
+    latest.clear();
+    used = 0;
+    for (size_t i = 0; i < pool.size();) {
+      if (g_frame.num - pool[i].last_frame < 600) {
+        ++i;
+        continue;
+      }
+      Device().Destroy(pool[i].buffer);
+      pool.erase(pool.begin() + i);
+    }
+  }
+  CollectGuestWrites();
+  const u64 revision = MirrorRevision(base, bytes);
+  if (revision) {
+    const auto found = latest.find(base);
+    if (found != latest.end()) {
+      const auto& cached = pool[found->second];
+      if (cached.bytes == bytes && cached.revision == revision) {
+        *buffer = cached.buffer;
+        *offset = 0;
+        return true;
+      }
+    }
+  }
+  if (used == pool.size())
+    pool.emplace_back();
+  auto& gathered = pool[used++];
+  gathered.last_frame = g_frame.num;
+  if (!gathered.buffer || gathered.buffer->desc().size < bytes) {
+    rhi::BufferDesc desc;
+    desc.size = (bytes + 65535) & ~u64(65535);
+    desc.usage = rhi::kBufferVertex | rhi::kBufferIndex | rhi::kBufferCopyDst;
+    desc.name = "gathered geometry";
+    auto* replacement = Device().CreateBuffer(desc);
+    if (!replacement)
+      return false;
+    if (gathered.buffer)
+      Device().Destroy(gathered.buffer);
+    gathered.buffer = replacement;
+  }
+  if (!MirrorSupplyBuffer(base, bytes, gathered.buffer, 0))
+    return false;
+  gathered.bytes = bytes;
+  gathered.revision = revision;
+  latest[base] = used - 1;
+  *buffer = gathered.buffer;
+  *offset = 0;
+  return true;
+}
 }  // namespace
 
 bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
@@ -734,7 +813,8 @@ bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
   u64 range_base = 0;
   CsRange* found = VertexSource(base, bytes, &range_base);
   const bool bound =
-      BindComputeBuffer(base, bytes, found, range_base, buffer, offset);
+      BindComputeBuffer(base, bytes, found, range_base, buffer, offset) ||
+      GatherGeometryBuffer(base, bytes, buffer, offset);
   g_vtx_bridge_n += bound;
   return bound;
 }

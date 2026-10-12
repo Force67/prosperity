@@ -1146,6 +1146,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         CsGeometryBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
                          &vb_kept[j].buffer, &vb_kept[j].offset))
       continue;
+    if (bind_size[j] &&
+        CsHoldsGeometry(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j]))
+      return Decline(kRing);
     if (kRingDedup && bind_size[j] && TrackingGuestWrites()) {
       SyncGuestWrites();
       if (FindCachedBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
@@ -1200,6 +1203,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   if (indexed && !quads && d.index_type != 2) {
     ib_gpu = CsGeometryBuffer(reinterpret_cast<u64>(d.index_data), index_bytes,
                               &ib_bind.buffer, &ib_bind.offset);
+    if (!ib_bind.buffer &&
+        CsHoldsGeometry(reinterpret_cast<u64>(d.index_data), index_bytes))
+      return Decline(kRing);
     if (!ib_bind.buffer && kDirectBind)
       ib_bind.buffer = DirectBindAt(reinterpret_cast<u64>(d.index_data),
                                     index_bytes, &ib_bind.offset);

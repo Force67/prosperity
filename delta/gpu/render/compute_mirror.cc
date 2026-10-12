@@ -290,7 +290,9 @@ bool MirrorResolve(u64 first, u64 end) {
 }
 
 bool MirrorOwnsAny(u64 first, u64 end) {
-  if (!g_own)
+  if (!g_own || first >= end ||
+      (first >= kMirrorLowWindow &&
+       (end <= kMirrorPs5Base || first >= kMirrorPs5Base + kMirrorWindow)))
     return false;
   for (u64 block = first & ~(kMirrorBlock - 1); block < end;
        block += kMirrorBlock)
@@ -457,6 +459,8 @@ static bool PrepareGuestWrite(u64 base, u64 bytes, bool* mirrored) {
   *mirrored = kMirror && Mirror() && MirrorCovers(base, bytes);
   if (CsTracksGuestWrites())
     CollectGuestWritesForSubmission();
+  if (!OrderMirrorAfterFrameRead())
+    return false;
   return *mirrored ? MirrorCopyInGuest(base, bytes)
                    : GuestImportable(base, bytes);
 }
@@ -918,7 +922,7 @@ bool WatchMirrorHostReads(u64 base, u64 bytes) {
   bool tracked = true;
   for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
        block += kMirrorBlock)
-    if (!MirrorOwned(block)) {
+    if (!InMirror(block) || !MirrorOwned(block)) {
       const u64 lo = base::Max(base, block);
       const u64 hi = base::Min(base + bytes, block + kMirrorBlock);
       tracked &= GuestWriteTracker().Arm(lo, hi - lo);
@@ -974,8 +978,7 @@ bool MirrorSupplyTexture(u64 base,
   list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessComputeRead);
   RecordImageTiling(list, *table, source, mirrored ? MirrorOffset(base) : 0,
                     tiled.size, scratch, linear.size, /*detile=*/true);
-  if (mirrored || MirrorOwnsAny(base, base + tiled.size))
-    MirrorFrameRead();
+  MirrorFrameRead();
   rhi::TextureBarrier b;
   b.texture = img;
   b.before = state;
@@ -1014,8 +1017,7 @@ bool MirrorSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
     list->CopyBuffer(dst, dst_off, g_mirror, MirrorOffset(base), bytes);
   else if (!RecordGuestRead(list, base, bytes, dst, dst_off))
     return false;
-  if (mirrored || MirrorOwnsAny(base, base + bytes))
-    MirrorFrameRead();
+  MirrorFrameRead();
   list->Barrier(rhi::kAccessCopyWrite, kAccessAll);
   if (!mirrored && !WatchMirrorHostReads(base, bytes))
     AdvanceMirrorWindows(base, base + bytes);
