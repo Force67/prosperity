@@ -15,6 +15,7 @@
 #include "gpu/render/guest_direct.h"
 #include "gpu/render/render_target.h"
 #include "gpu/render/renderer.h"
+#include "gpu/render/upload_ring.h"
 #include "gpu/write_tracker.h"
 #include "host_memory/host_memory.h"
 #include "options/options.h"
@@ -91,6 +92,14 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
   ASSERT_EQ(program.ps_bufs.size(), 1u);
+  const u32 cbuf_ps[4096] = {0xf4000100, 0xfa000000, 0x7e000204,
+                             0x7e020280, 0x7e040280, 0x7e0602f2,
+                             0xf800080f, 0x03020100, 0xbf810000};
+  const auto constants =
+      gpu::rdna::Recompile(vs, cbuf_ps, user_data, user_data, 0, false, 8, 8);
+  ASSERT_TRUE(constants.ok);
+  ASSERT_EQ(constants.ps_cbufs.size(), 1u);
+  ASSERT_FALSE(constants.indirect_cbufs);
   const u32 cs[4096] = {0x7e020204, 0xe0702000, 0x80000100, 0xbf810000};
   const auto previous_isa = gpu::gcn::DefaultIsaMode();
   gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
@@ -99,7 +108,41 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   ASSERT_TRUE(compute.ok);
   ASSERT_EQ(compute.resources.size(), 1u);
   ASSERT_TRUE(gpu::render::InitGuestDirect());
-  alignas(65536) static base::Array<u8, 65536> targets[3]{};
+  alignas(65536) static base::Array<u8, 65536> targets[4]{};
+  *static_cast<u32*>(memory.memory) = 0x3e800000;
+  gpu::render::DrawInfo imported;
+  imported.recomp = &constants;
+  imported.vs_addr = reinterpret_cast<u64>(vs);
+  imported.ps_addr = reinterpret_cast<u64>(cbuf_ps);
+  std::memcpy(imported.ps_user_data, user_data, sizeof(user_data));
+  imported.prim_type = imported.vertex_count = 1;
+  imported.cbufs[0] = {base, gpu::render::kCbufWindow};
+  imported.num_cbufs = 1;
+  imported.rt_base = imported.mrt_base[0] =
+      reinterpret_cast<u64>(targets[3].data());
+  imported.rt_w = imported.rt_h = 16;
+  imported.viewport_x_scale = imported.viewport_y_scale = 8;
+  imported.viewport_x_offset = imported.viewport_y_offset = 8;
+  imported.mrt_count = imported.mrt_bound_mask = 1;
+  imported.mrt_info[0] = 10u << 2;
+  gpu::render::BeginFrame(renderer);
+  const u64 imported_bytes = gpu::g_bind_bytes;
+  const u64 imported_copies = gpu::g_ring_cb_bytes;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, imported));
+  EXPECT_EQ(gpu::g_bind_bytes, imported_bytes + gpu::render::kCbufWindow);
+  EXPECT_EQ(gpu::g_ring_cb_bytes, imported_copies);
+  const u32 imported_slot = gpu::render::g_frame.slot_idx;
+  gpu::render::EndFrame(renderer, imported.rt_base);
+  const auto& slot = gpu::render::g_frame.slots[imported_slot];
+  ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+  ASSERT_TRUE(slot.presentable);
+  u32 imported_pixels = 0;
+  for (u32 i = 0; i < 256; ++i)
+    if (const u8 red = slot.readback->mapped()[i * 4]) {
+      EXPECT_EQ(red, 64);
+      ++imported_pixels;
+    }
+  EXPECT_EQ(imported_pixels, 1u);
   gpu::render::ComputeInfo ci;
   ci.cs_addr = reinterpret_cast<u64>(cs);
   ci.recomp = &compute;
@@ -148,6 +191,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     const u64 resolves = gpu::render::cs::g_mirror_resolves.load();
     const u64 copies = gpu::render::cs::g_buf_bridge_bytes;
     const u64 cpu_copies = gpu::g_ring_raw_bytes;
+    const u64 cpu_constants = gpu::g_ring_cb_bytes;
     const u64 bound = gpu::g_bind_bytes;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
     ci.user_data[4] = 0xff804020;
@@ -158,9 +202,30 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
     draw.viewport_x_offset = 12;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+    gpu::render::DrawInfo cb_draw = draw;
+    cb_draw.recomp = &constants;
+    cb_draw.ps_addr = reinterpret_cast<u64>(cbuf_ps);
+    cb_draw.cbufs[0] = {base, gpu::render::kCbufWindow};
+    cb_draw.num_cbufs = 1;
+    cb_draw.num_bufs = 0;
+    cb_draw.bufs[0] = {};
+    cb_draw.viewport_x_offset = cb_draw.viewport_y_offset = 4;
+    ci.user_data[4] = 0x3e800000;
+    ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, cb_draw));
+    ci.user_data[4] = 0x3f400000;
+    if (trial == 2)
+      ASSERT_TRUE(gpu::render::GpuFill(base, DirectMemory::kBytes,
+                                       ci.user_data[4], ci.user_data[4]));
+    else
+      ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+    cb_draw.viewport_x_offset = 12;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, cb_draw));
     EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies);
     EXPECT_EQ(gpu::g_ring_raw_bytes, cpu_copies);
-    EXPECT_EQ(gpu::g_bind_bytes, bound + 2 * DirectMemory::kBytes);
+    EXPECT_EQ(gpu::g_ring_cb_bytes, cpu_constants);
+    EXPECT_EQ(gpu::g_bind_bytes,
+              bound + 2 * DirectMemory::kBytes + 2 * gpu::render::kCbufWindow);
     EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), resolves);
     const u32 slot_index = gpu::render::g_frame.slot_idx;
     gpu::render::EndFrame(renderer, draw.rt_base);
@@ -170,16 +235,17 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     const auto* pixels = slot.readback->mapped();
     u32 colored = 0;
     for (u32 i = 0; i < 256; ++i) {
-      if (!pixels[i * 4 + 2])
+      if (!pixels[i * 4])
         continue;
       ++colored;
       const bool first = i % 16 < 8;
-      EXPECT_EQ(pixels[i * 4], first ? 64 : 32);
-      EXPECT_EQ(pixels[i * 4 + 1], first ? 128 : 64);
-      EXPECT_EQ(pixels[i * 4 + 2], first ? 255 : 128);
+      const bool cbuf = i / 16 < 6;
+      EXPECT_EQ(pixels[i * 4], first ? 64 : cbuf ? 191 : 32);
+      EXPECT_EQ(pixels[i * 4 + 1], cbuf ? 0 : first ? 128 : 64);
+      EXPECT_EQ(pixels[i * 4 + 2], cbuf ? 0 : first ? 255 : 128);
       EXPECT_EQ(pixels[i * 4 + 3], 255);
     }
-    EXPECT_EQ(colored, 2u);
+    EXPECT_EQ(colored, 4u);
     EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), resolves);
     *static_cast<volatile u32*>(memory.memory) = 0xff0000ff;
     gpu::render::CollectGuestWrites();

@@ -37,9 +37,10 @@ rhi::Buffer* Mirror() {
     rhi::BufferDesc desc;
     desc.size = kMirrorSize;
     desc.sparse = true;
-    desc.usage = rhi::kBufferStorage | rhi::kBufferCopySrc |
-                 rhi::kBufferCopyDst | rhi::kBufferAddress |
-                 rhi::kBufferIndirect | rhi::kBufferVertex | rhi::kBufferIndex;
+    desc.usage = rhi::kBufferStorage | rhi::kBufferUniform |
+                 rhi::kBufferCopySrc | rhi::kBufferCopyDst |
+                 rhi::kBufferAddress | rhi::kBufferIndirect |
+                 rhi::kBufferVertex | rhi::kBufferIndex;
     desc.name = "guest mirror";
     if (Device().caps().sparse_buffer)
       g_mirror = Device().CreateBuffer(desc);
@@ -380,8 +381,8 @@ bool OrderMirrorAfterDraw() {
   if (!g_cs_batch_open)
     return false;
   g_cs_list->Barrier(rhi::kAccessVertexRead | rhi::kAccessIndexRead |
-                        rhi::kAccessShaderRead,
-                    kAccessComputeRW | kAccessCopyRW);
+                         rhi::kAccessShaderRead | rhi::kAccessUniformRead,
+                     kAccessComputeRW | kAccessCopyRW);
   g_mirror_draw.frame = -1;
   return true;
 }

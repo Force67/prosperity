@@ -94,6 +94,10 @@ windows retain staging.
 GPU-owned mirror output also binds in place, with GPU ordering between draws
 and later compute writes or fills. A CPU write makes the binding ineligible
 until the GPU has the current bytes again.
+Full 16 KiB constant windows can bind compute output or direct-memory imports
+as uniform buffers, also skipping their ring copy. Short, unaligned and packed
+indirect constant windows retain staging. `DELTA_GPU_CBUF_BIND=0` disables this
+path for comparison.
 `DELTA_GPU_RAW_BIND=0` restores raw-window copies for comparison. A compute
 pass widens eight-bit indices and expands quad lists into a device-local index
 ring, including streams produced by a dispatch without CPU readback. Converted

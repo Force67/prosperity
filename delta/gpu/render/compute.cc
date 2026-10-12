@@ -470,8 +470,8 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
   // queue (StageCsRangeFromRtInFrame) instead of a CPU memcpy from guest
   // memory.
   // Vertex: a draw may fetch a dispatch's output in place (CsGeometryBuffer).
-  u32 usage = rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferVertex |
-              rhi::kBufferIndirect | rhi::kBufferIndex;
+  u32 usage = rhi::kBufferStorage | rhi::kBufferUniform | rhi::kBufferCopyDst |
+              rhi::kBufferVertex | rhi::kBufferIndirect | rhi::kBufferIndex;
   // A pointer-chasing dispatch may read the range in place (GuestOverrides).
   if (Device().caps().buffer_address)
     usage |= rhi::kBufferAddress;
