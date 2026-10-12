@@ -27,12 +27,13 @@
 #include "gpu/render/device.h"
 #include "gpu/render/draw_recomp.h"
 #include "gpu/render/frame.h"
-#include "gpu/render/renderer.h"
+#include "gpu/render/pipeline_cache.h"
 #include "gpu/render/render_target.h"
+#include "gpu/render/renderer.h"
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/upload_ring.h"
-#include "host_memory/host_memory.h"
 #include "gpu/write_tracker.h"
+#include "host_memory/host_memory.h"
 
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe() {}
@@ -327,6 +328,118 @@ static void EnableWriteTracking() {
       std::abort();
   };
   sigaction(SIGSEGV, &fault, nullptr);
+}
+
+TEST(VkDraw, ConstantBindingsFollowTheShaderPlan) {
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A graphics device is required";
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                        0xbf810000};
+  const u32 ps_one[4096] = {0xf4000100, 0xfa000000, 0x7e000204,
+                            0x7e020280, 0x7e040280, 0x7e0602f2,
+                            0xf800080f, 0x03020100, 0xbf810000};
+  const u32 ps_two[4096] = {0xf4000100, 0xfa000000, 0xf4000141, 0xfa000000,
+                            0x7e000204, 0x7e020205, 0x7e040280, 0x7e0602f2,
+                            0xf800080f, 0x03020100, 0xbf810000};
+  alignas(65536) static float red[16384] = {.25f}, green[16384] = {.75f};
+  alignas(65536) static base::Array<u8, 65536> target{};
+  const u64 red_base = reinterpret_cast<u64>(red);
+  const u64 green_base = reinterpret_cast<u64>(green);
+  const u32 user_data[32] = {u32(red_base), u32(red_base >> 32),
+                             u32(green_base), u32(green_base >> 32)};
+  static const auto one =
+      gpu::rdna::Recompile(vs, ps_one, user_data, user_data, 0, false, 8, 8);
+  static const auto two =
+      gpu::rdna::Recompile(vs, ps_two, user_data, user_data, 0, false, 8, 8);
+  ASSERT_TRUE(one.ok);
+  ASSERT_TRUE(two.ok);
+  ASSERT_FALSE(one.indirect_cbufs);
+  ASSERT_FALSE(two.indirect_cbufs);
+  ASSERT_EQ(one.ps_cbufs.size(), 1u);
+  ASSERT_EQ(two.ps_cbufs.size(), 2u);
+  static auto sparse = one;
+  sparse.ps_cbufs[0].binding = 2;
+  for (size_t i = 5; i < sparse.fs_spirv.size();) {
+    const u32 instruction = sparse.fs_spirv[i];
+    if ((instruction & 0xffff) == u32(spv::Op::OpDecorate) &&
+        sparse.fs_spirv[i + 2] == u32(spv::Decoration::Binding))
+      sparse.fs_spirv[i + 3] = 2;
+    i += instruction >> 16;
+  }
+  gpu::render::BeginFrame(renderer);
+  gpu::render::DrawInfo draw;
+  draw.recomp = &one;
+  draw.vs_addr = reinterpret_cast<u64>(vs);
+  draw.ps_addr = reinterpret_cast<u64>(ps_one);
+  base::CopyN(user_data, 32, draw.ps_user_data);
+  draw.prim_type = draw.vertex_count = 1;
+  draw.cbufs[0] = {red_base, sizeof(float)};
+  draw.cbufs[1] = {green_base, sizeof(float)};
+  draw.num_cbufs = 2;
+  draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
+  draw.rt_w = draw.rt_h = 16;
+  draw.viewport_x_scale = draw.viewport_y_scale = 8;
+  draw.viewport_x_offset = 4.5f;
+  draw.viewport_y_offset = 8.5f;
+  draw.mrt_count = draw.mrt_bound_mask = 1;
+  draw.mrt_info[0] = 10u << 2;
+  const u64 copied = gpu::g_ring_cb_bytes;
+  auto* pipeline = gpu::render::GetRecompPipe(draw);
+  ASSERT_NE(pipeline, nullptr);
+  EXPECT_EQ(pipeline->cbuf_count, 1u);
+  EXPECT_EQ(pipeline->cbuf_mask, 1u);
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::g_ring_cb_bytes, copied + 4096);
+  draw.recomp = &two;
+  draw.ps_addr = reinterpret_cast<u64>(ps_two);
+  draw.viewport_x_offset = 8.5f;
+  pipeline = gpu::render::GetRecompPipe(draw);
+  ASSERT_NE(pipeline, nullptr);
+  EXPECT_EQ(pipeline->cbuf_count, 2u);
+  EXPECT_EQ(pipeline->cbuf_mask, 3u);
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::g_ring_cb_bytes, copied + 8192);
+  const u64 uploaded = gpu::render::g_ring.ubo_offset;
+  draw.recomp = &sparse;
+  draw.cbufs[0] = {};
+  draw.cbufs[2] = {red_base, sizeof(float)};
+  draw.num_cbufs = 3;
+  draw.viewport_x_offset = 12.5f;
+  pipeline = gpu::render::GetRecompPipe(draw);
+  ASSERT_NE(pipeline, nullptr);
+  EXPECT_EQ(pipeline->cbuf_count, 3u);
+  EXPECT_EQ(pipeline->cbuf_mask, 4u);
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.ubo_offset, uploaded);
+  EXPECT_EQ(gpu::g_ring_cb_bytes, copied + 8192);
+  draw.recomp = &one;
+  draw.ps_addr = reinterpret_cast<u64>(ps_one);
+  draw.cbufs[0] = {red_base, sizeof(float)};
+  draw.viewport_x_offset = 14.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.ubo_offset, uploaded);
+  EXPECT_EQ(gpu::g_ring_cb_bytes, copied + 8192);
+  for (u32 count : {1u, 2u, 3u}) {
+    const auto& groups = gpu::render::g_ring.cbuf_bindings[count];
+    ASSERT_NE(groups.layout, nullptr);
+    EXPECT_EQ(groups.layout->desc().bindings.size(), count);
+    EXPECT_NE(groups.upload, nullptr);
+  }
+  const u32 slot_index = gpu::render::g_frame.slot_idx;
+  gpu::render::EndFrame(renderer, draw.rt_base);
+  const auto& slot = gpu::render::g_frame.slots[slot_index];
+  ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+  ASSERT_TRUE(slot.presentable);
+  for (u32 x : {4u, 8u, 12u, 14u}) {
+    SCOPED_TRACE(x);
+    const auto* pixel = slot.readback->mapped() + (8 * 16 + x) * 4;
+    EXPECT_NEAR(pixel[0], 64, 1);
+    EXPECT_NEAR(pixel[1], x == 8 ? 191 : 0, 1);
+    EXPECT_EQ(pixel[2], 0);
+    EXPECT_EQ(pixel[3], 255);
+  }
 }
 
 TEST(VkDraw, ResidentGeometryDefersUploadRingsUntilCpuStaging) {
@@ -1750,6 +1863,8 @@ TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
       gpu::rdna::Recompile(vs, ps, user_data, user_data, 0, false, 24, 30);
   ASSERT_TRUE(kProgram.ok);
   ASSERT_TRUE(kProgram.indirect_cbufs);
+  ASSERT_TRUE(kProgram.vs_cbufs.empty());
+  ASSERT_TRUE(kProgram.ps_cbufs.empty());
   ASSERT_TRUE(kProgram.mesh_spirv.empty());
   alignas(65536) static base::Array<base::Array<u8, 65536>, 2> targets{};
   for (u32 frame = 0; frame < 2; ++frame) {
@@ -1765,7 +1880,13 @@ TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
     gpu::render::BeginFrame(renderer);
+    const u64 start = gpu::render::g_ring.ubo_offset;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+    const u64 alignment = gpu::render::g_ring.ubo_align;
+    const u64 table_bytes =
+        (gpu::gcn::kIndirectDrawDwords * sizeof(u32) + alignment - 1) &
+        ~(alignment - 1);
+    EXPECT_EQ(gpu::render::g_ring.ubo_offset - start, table_bytes);
     const u32 slot_index = gpu::render::g_frame.slot_idx;
     gpu::render::EndFrame(renderer, draw.rt_base);
     const auto& slot = gpu::render::g_frame.slots[slot_index];

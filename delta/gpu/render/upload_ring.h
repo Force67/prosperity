@@ -77,6 +77,12 @@ constexpr u32 kRawBufBindings = gpu::gcn::kMaxGfxBuffers;
 constexpr u64 kLdsScratch =
     u64(gpu::gcn::kLdsWaves) * gpu::gcn::kLdsMaxDwords * 4;
 
+struct CbufBindGroups {
+  rhi::BindGroupLayout* layout = nullptr;
+  rhi::BindGroup* upload = nullptr;
+  rhi::BindGroup* zero = nullptr;
+};
+
 struct UploadRings {
   // Vertex ring: the raw guest vertex records the recompiled shaders fetch.
   rhi::Buffer* vb = nullptr;
@@ -99,11 +105,9 @@ struct UploadRings {
   u64 ubo_offset = 0, ubo_end = kUboRing;
   u32 ubo_align = 256;
   u64 ubo_stride = kCbufWindow;
-  rhi::BindGroupLayout* ubo_layout = nullptr;
+  CbufBindGroups cbuf_bindings[kCbufBindings + 1]{};
   rhi::BindGroupLayout* empty_layout = nullptr;
-  rhi::BindGroup* ubo_set = nullptr;
   rhi::Buffer* ubo_zero = nullptr;
-  rhi::BindGroup* ubo_zero_set = nullptr;
   rhi::BindGroupLayout* indirect_cbuf_layout = nullptr;
   rhi::BindGroup* indirect_cbuf_sets[2]{};
 
@@ -148,6 +152,8 @@ bool EnsureVertexRing();
 bool EnsureIndexRing();
 bool EnsureCbufRing();
 bool EnsureCbufZero();
+rhi::BindGroupLayout* GetCbufLayout(u32 count);
+rhi::BindGroup* GetCbufBindGroup(u32 count);
 // Allocate the raw-buffer ring + its descriptor set when a draw needs staging.
 // Resident draws use a device zero window for unresolved descriptor slots.
 bool EnsureRawBufferRing();

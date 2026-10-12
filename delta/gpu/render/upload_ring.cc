@@ -82,26 +82,10 @@ bool CreateUploadRings() {
   const rhi::Caps& caps = Device().caps();
   // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
   g_ring.ubo_align = base::Max(caps.uniform_offset_alignment, 1u);
-  if (caps.max_dynamic_uniform_buffers < kCbufBindings)
-    BASE_LOGI("gpuvk",
-              "only {}/{} dynamic UBOs available; set 1 is an "
-              "out-of-spec layout on this device and a cbuffer may "
-              "silently read zero",
-              caps.max_dynamic_uniform_buffers, kCbufBindings);
   g_ring.ubo_stride =
       (kCbufWindow + g_ring.ubo_align - 1) & ~(u64)(g_ring.ubo_align - 1);
-  // kMaxCbufBindings, not 8: a shader pair whose constant buffers exceed the
-  // cap is planned only up to it, and every s_buffer_load from a dropped base
-  // emits nothing, leaving its destination SGPRs zero. Skyrim's UI shaders
-  // sit right at 8 cbufs, so their transform matrix read back as an all-zero
-  // matrix and collapsed every vertex position.
-  rhi::BindGroupLayoutDesc ubo;
-  for (u32 i = 0; i < kCbufBindings; i++)
-    ubo.bindings.push_back(
-        {i, rhi::BindingType::kUniformBufferDynamic, GraphicsStages()});
-  g_ring.ubo_layout = Device().CreateBindGroupLayout(ubo);
   g_ring.empty_layout = Device().CreateBindGroupLayout({});
-  if (!g_ring.ubo_layout || !g_ring.empty_layout)
+  if (!g_ring.empty_layout)
     return false;
   // Mesh stages can need more windows than the dynamic UBO limit allows.
   // Bind the current frame's half of the existing ring as one read-only
@@ -189,18 +173,6 @@ bool EnsureCbufRing() {
   g_ring.ubo_stride =
       (kCbufWindow + g_ring.ubo_align - 1) & ~(u64)(g_ring.ubo_align - 1);
 
-  rhi::BindGroupDesc set;
-  set.layout = g_ring.ubo_layout;
-  for (u32 i = 0; i < kCbufBindings; i++) {
-    rhi::BindingWrite w;
-    w.binding = i;
-    w.buffer = g_ring.ubo_buf;
-    w.range = kCbufWindow;
-    set.writes.push_back(w);
-  }
-  g_ring.ubo_set = Device().CreateBindGroup(set);
-  if (!g_ring.ubo_set)
-    return false;
   if (g_ring.indirect_cbuf_layout) {
     for (u32 slot = 0; slot < 2; ++slot) {
       rhi::BindGroupDesc indirect;
@@ -261,35 +233,64 @@ bool EnsureLdsScratch() {
   return true;
 }
 
+rhi::BindGroupLayout* GetCbufLayout(u32 count) {
+  if (!count || count > kCbufBindings)
+    return nullptr;
+  auto& groups = g_ring.cbuf_bindings[count];
+  if (!groups.layout) {
+    const u32 limit = Device().caps().max_dynamic_uniform_buffers;
+    if (count > limit)
+      BASE_LOGI("gpuvk", "shader needs {} dynamic UBOs, device supports {}",
+                count, limit);
+    rhi::BindGroupLayoutDesc desc;
+    for (u32 i = 0; i < count; ++i)
+      desc.bindings.push_back(
+          {i, rhi::BindingType::kUniformBufferDynamic, GraphicsStages()});
+    groups.layout = Device().CreateBindGroupLayout(desc);
+  }
+  return groups.layout;
+}
+
+rhi::BindGroup* GetCbufBindGroup(u32 count) {
+  auto* layout = GetCbufLayout(count);
+  if (!layout)
+    return nullptr;
+  auto& groups = g_ring.cbuf_bindings[count];
+  auto*& set = g_ring.ubo_buf ? groups.upload : groups.zero;
+  if (set)
+    return set;
+  rhi::Buffer* buffer = g_ring.ubo_buf ? g_ring.ubo_buf : g_ring.ubo_zero;
+  if (!buffer)
+    return nullptr;
+  rhi::BindGroupDesc desc;
+  desc.layout = layout;
+  for (u32 i = 0; i < count; ++i) {
+    rhi::BindingWrite write;
+    write.binding = i;
+    write.buffer = buffer;
+    write.range = kCbufWindow;
+    desc.writes.push_back(write);
+  }
+  set = Device().CreateBindGroup(desc);
+  return set;
+}
+
 bool EnsureCbufZero() {
-  if (g_ring.ubo_zero_set)
+  if (g_ring.ubo_zero)
     return true;
-  if (!g_ring.ubo_layout || !g_frame.recording)
+  if (!g_frame.recording)
     return false;
-  if (!g_ring.ubo_zero) {
-    rhi::BufferDesc desc;
-    desc.size = kCbufWindow;
-    desc.usage =
-        rhi::kBufferUniform | rhi::kBufferStorage | rhi::kBufferCopyDst;
-    desc.name = "zero constant buffer";
-    g_ring.ubo_zero = Device().CreateBuffer(desc);
-    if (!g_ring.ubo_zero)
-      return false;
-    EndRegion();
-    g_frame.list->FillBuffer(g_ring.ubo_zero, 0, kCbufWindow, 0);
-    g_frame.list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessUniformRead);
-  }
-  rhi::BindGroupDesc set;
-  set.layout = g_ring.ubo_layout;
-  for (u32 i = 0; i < kCbufBindings; ++i) {
-    rhi::BindingWrite w;
-    w.binding = i;
-    w.buffer = g_ring.ubo_zero;
-    w.range = kCbufWindow;
-    set.writes.push_back(w);
-  }
-  g_ring.ubo_zero_set = Device().CreateBindGroup(set);
-  return g_ring.ubo_zero_set != nullptr;
+  rhi::BufferDesc desc;
+  desc.size = kCbufWindow;
+  desc.usage = rhi::kBufferUniform | rhi::kBufferStorage | rhi::kBufferCopyDst;
+  desc.name = "zero constant buffer";
+  g_ring.ubo_zero = Device().CreateBuffer(desc);
+  if (!g_ring.ubo_zero)
+    return false;
+  EndRegion();
+  g_frame.list->FillBuffer(g_ring.ubo_zero, 0, kCbufWindow, 0);
+  g_frame.list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessUniformRead);
+  return true;
 }
 
 bool EnsureRawBufferZero() {

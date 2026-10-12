@@ -284,6 +284,7 @@ base::HashMap<u64, GpuStaged> g_ubo_gpu;
 struct BufferBindingKey {
   static constexpr u32 kCount =
       kRawBufBindings > kCbufBindings ? kRawBufBindings : kCbufBindings;
+  u32 count = 0;
   rhi::Buffer* buffers[kCount]{};
   u64 offsets[kCount]{};
   u32 bytes[kCount]{};
@@ -292,8 +293,8 @@ struct BufferBindingKey {
 
 struct BufferBindingKeyHash {
   mem_size operator()(const BufferBindingKey& key) const {
-    u64 h = 1469598103934665603ull;
-    for (u32 i = 0; i < BufferBindingKey::kCount; i++) {
+    u64 h = 1469598103934665603ull ^ key.count;
+    for (u32 i = 0; i < key.count; i++) {
       h = (h ^ reinterpret_cast<u64>(key.buffers[i])) * 1099511628211ull;
       h = (h ^ key.offsets[i]) * 1099511628211ull;
       h = (h ^ key.bytes[i]) * 1099511628211ull;
@@ -330,6 +331,7 @@ rhi::BindGroup* BufferBindings(const BufferBindingKey& key,
 rhi::BindGroup* RawBufferBindings(const CachedBuffer* direct,
                                   const DrawInfo& d) {
   BufferBindingKey key;
+  key.count = g_ring.sbo_count;
   rhi::Buffer* fallback = g_ring.sbo_buf ? g_ring.sbo_buf : g_ring.sbo_zero;
   for (u32 i = 0; i < g_ring.sbo_count; i++) {
     key.buffers[i] = direct[i].buffer ? direct[i].buffer : fallback;
@@ -341,15 +343,16 @@ rhi::BindGroup* RawBufferBindings(const CachedBuffer* direct,
                         g_raw_bindings[g_frame.num % 3]);
 }
 
-rhi::BindGroup* CbufBindings(const CachedBuffer* direct) {
+rhi::BindGroup* CbufBindings(const CachedBuffer* direct, u32 count) {
   BufferBindingKey key;
+  key.count = count;
   rhi::Buffer* fallback = g_ring.ubo_buf ? g_ring.ubo_buf : g_ring.ubo_zero;
-  for (u32 i = 0; i < kCbufBindings; i++) {
+  for (u32 i = 0; i < count; i++) {
     key.buffers[i] = direct[i].buffer ? direct[i].buffer : fallback;
     key.offsets[i] = direct[i].buffer ? direct[i].offset : 0;
     key.bytes[i] = kCbufWindow;
   }
-  return BufferBindings(key, g_ring.ubo_layout, kCbufBindings,
+  return BufferBindings(key, GetCbufLayout(count), count,
                         g_cbuf_bindings[g_frame.num % 3]);
 }
 
@@ -1508,10 +1511,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
 
   // Resident cbuffer windows bind in place. Other dispatch output reaches the
   // ring through a GPU copy, so the draw waits for no readback.
-  const u32 cbufs_used = !rp->cbufs ? 0
-                         : d.recomp->indirect_cbufs
-                             ? gpu::gcn::kIndirectCbufBindings
-                             : kCbufBindings;
+  const u32 cbufs_used = rp->cbuf_count;
   CachedBuffer cb_direct[kCbufBindings]{};
   bool cb_barrier = false;
   u64 cb_gpu_off[gpu::gcn::kIndirectCbufBindings];
@@ -1520,6 +1520,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   if (cb_upload && !EnsureCbufRing())
     return Decline(kRing);
   for (u32 i = 0; i < cbufs_used; i++) {
+    if (!(rp->cbuf_mask & (1ull << i)))
+      continue;
     const auto& cb = d.cbufs[i];
     if (!base::Min(cb.size, kCbufWindow))
       continue;
@@ -1559,6 +1561,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     cb_gpu_off[i] = off;
   }
   for (u32 i = 0; i < cbufs_used && !cb_upload; ++i) {
+    if (!(rp->cbuf_mask & (1ull << i)))
+      continue;
     if (cb_direct[i].buffer || cb_gpu_off[i] != u64(-1))
       continue;
     const auto& cb = d.cbufs[i];
@@ -1600,6 +1604,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // would keep going into a list that has ended.
   {
     for (u32 i = 0; i < cbufs_used; i++) {
+      if (!(rp->cbuf_mask & (1ull << i)))
+        continue;
       const auto& cb = d.cbufs[i];
       const u32 readable = base::Min(cb.size, kCbufWindow);
       if (i < kCbufBindings && cb_direct[i].buffer) {
@@ -2065,6 +2071,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   u32 cbuf_mask = 0;
   u64 next = cb_off;
   for (u32 i = 0; i < cbuf_count; i++) {
+    if (!(rp->cbuf_mask & (1ull << i)))
+      continue;
     const auto& cb = d.cbufs[i];
     const u32 readable = base::Min(cb.size, kCbufWindow);
     const bool resident =
@@ -2179,13 +2187,14 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     next = (next + sizeof(offsets) + g_ring.ubo_align - 1) &
            ~(u64)(g_ring.ubo_align - 1);
   } else if (cbuf_count) {
-    rhi::BindGroup* set = g_ring.ubo_buf ? g_ring.ubo_set : g_ring.ubo_zero_set;
-    if (base::AnyOf(cb_direct, cb_direct + kCbufBindings,
-                    [](const CachedBuffer& b) { return b.buffer != nullptr; }))
-      set = CbufBindings(cb_direct);
+    rhi::BindGroup* set =
+        base::AnyOf(cb_direct, cb_direct + cbuf_count,
+                    [](const CachedBuffer& b) { return b.buffer != nullptr; })
+            ? CbufBindings(cb_direct, cbuf_count)
+            : GetCbufBindGroup(cbuf_count);
     if (!set)
       return Decline(kRing);
-    list->SetBindGroup(1, set, dyn_off, kCbufBindings);
+    list->SetBindGroup(1, set, dyn_off, cbuf_count);
   }
   g_ring.ubo_offset = next;
   // Stage the raw buffers the shader indexes by hand (set 2). Only the leading
