@@ -730,14 +730,26 @@ bool BindComputeBuffer(u64 base, u64 bytes, CsRange* found, u64 range_base,
 }
 
 // Every revision gets a separate buffer until its frame slot retires.
-bool GatherDrawBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
+bool GatherDrawBuffer(u64 base,
+                      u64 bytes,
+                      rhi::Buffer** buffer,
+                      u64* offset,
+                      CsRange* source = nullptr) {
   if (!bytes || !g_frame.recording ||
-      (!MirrorOwnsAny(base, base + bytes) &&
+      (!source && !MirrorOwnsAny(base, base + bytes) &&
        !PendingGuestWriteBatch(base, bytes)))
     return false;
+  CollectGuestWrites();
+  if (source && !source->staged_clean) {
+    source = nullptr;
+    if (!MirrorOwnsAny(base, base + bytes) &&
+        !PendingGuestWriteBatch(base, bytes))
+      return false;
+  }
   struct Gathered {
     rhi::Buffer* buffer = nullptr;
-    u64 bytes = 0, revision = 0;
+    rhi::Buffer* source = nullptr;
+    u64 bytes = 0, revision = 0, stamp = 0;
     int last_frame = 0;
   };
   static base::Vector<Gathered> slots[2];
@@ -764,13 +776,15 @@ bool GatherDrawBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
       pool.erase(pool.begin() + i);
     }
   }
-  CollectGuestWrites();
-  const u64 revision = MirrorRevision(base, bytes);
+  const u64 revision = source ? source->write_seq : MirrorRevision(base, bytes);
+  const u64 stamp = source ? source->staged_stamp : 0;
+  rhi::Buffer* source_buffer = source ? source->buf : nullptr;
   if (revision) {
     const auto found = latest.find(base);
     if (found != latest.end()) {
       const auto& cached = pool[found->second];
-      if (cached.bytes == bytes && cached.revision == revision) {
+      if (cached.bytes == bytes && cached.revision == revision &&
+          cached.source == source_buffer && cached.stamp == stamp) {
         *buffer = cached.buffer;
         *offset = 0;
         return true;
@@ -794,10 +808,13 @@ bool GatherDrawBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
       Device().Destroy(gathered.buffer);
     gathered.buffer = replacement;
   }
-  if (!MirrorSupplyBuffer(base, bytes, gathered.buffer, 0))
+  if (!(source ? CsSupplyBuffer(base, bytes, gathered.buffer, 0)
+               : MirrorSupplyBuffer(base, bytes, gathered.buffer, 0)))
     return false;
   gathered.bytes = bytes;
   gathered.revision = revision;
+  gathered.source = source_buffer;
+  gathered.stamp = stamp;
   latest[base] = used - 1;
   *buffer = gathered.buffer;
   *offset = 0;
@@ -817,13 +834,25 @@ bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
   return bound;
 }
 
-bool CsStorageBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
+bool CsStorageBuffer(u64 base,
+                     u64 bytes,
+                     rhi::Buffer** buffer,
+                     u64* offset,
+                     u64 alignment) {
   if (!kCsBufBridge)
     return false;
   u64 range_base = 0;
   CsRange* found = BufferSource(base, bytes, &range_base);
-  return BindComputeBuffer(base, bytes, found, range_base, buffer, offset) ||
-         GatherDrawBuffer(base, bytes, buffer, offset);
+  rhi::Buffer* resident = nullptr;
+  u64 resident_offset = 0;
+  if (BindComputeBuffer(base, bytes, found, range_base, &resident,
+                        &resident_offset) &&
+      !(resident_offset % base::Max<u64>(alignment, 1))) {
+    *buffer = resident;
+    *offset = resident_offset;
+    return true;
+  }
+  return GatherDrawBuffer(base, bytes, buffer, offset, found);
 }
 
 // The live colour target at `base` takes the truth's pixels on the frame

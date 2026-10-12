@@ -1522,7 +1522,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       const u64 rev = CsBufferRevision(cb.base, n);
       if (kCbufBind && !d.recomp->indirect_cbufs && n == kCbufWindow) {
         CachedBuffer binding;
-        if (!CsStorageBuffer(cb.base, n, &binding.buffer, &binding.offset) &&
+        if (!CsStorageBuffer(cb.base, n, &binding.buffer, &binding.offset,
+                             g_ring.ubo_align) &&
             kDirectBind && !rev) {
           binding.buffer = DirectBindAt(cb.base, n, &binding.offset);
           cb_barrier |= binding.buffer && CsRangeDirtyOverlapping(cb.base, n);
@@ -1562,7 +1563,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       if (!want || (want & 3))
         continue;
       CachedBuffer binding;
-      if (!CsStorageBuffer(rb.base, want, &binding.buffer, &binding.offset) &&
+      if (!CsStorageBuffer(rb.base, want, &binding.buffer, &binding.offset,
+                           align) &&
           kDirectBind && !CsBufferRevision(rb.base, want)) {
         binding.buffer = DirectBindAt(rb.base, want, &binding.offset);
         raw_barrier |= binding.buffer && CsRangeDirtyOverlapping(rb.base, want);

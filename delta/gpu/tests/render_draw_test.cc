@@ -2080,8 +2080,8 @@ TEST(VkDraw, ConstantBuffersReadResidentComputeOutputInPlace) {
     SCOPED_TRACE(trial);
     const u32 offset = trial == 2 ? 260 : 256;
     const u32 bytes = trial == 3 ? 4096 : gpu::render::kCbufWindow;
-    const bool bind =
-        trial && bytes == gpu::render::kCbufWindow &&
+    const bool bind = trial && bytes == gpu::render::kCbufWindow;
+    const bool aligned =
         !(offset % gpu::render::Device().caps().uniform_offset_alignment);
     ASSERT_TRUE(cbuf_bind->SetFromString(trial ? "1" : "0"));
     gpu::render::BeginFrame(renderer);
@@ -2122,7 +2122,13 @@ TEST(VkDraw, ConstantBuffersReadResidentComputeOutputInPlace) {
     const u64 copies = gpu::render::cs::g_buf_bridge_bytes;
     const u64 cpu_copies = gpu::g_ring_cb_bytes;
     const u64 bound = gpu::g_bind_bytes;
+    const u64 ring = gpu::render::g_ring.ubo_offset;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+    if (bind && !aligned) {
+      const u64 copied = gpu::render::cs::g_buf_bridge_bytes;
+      ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+      EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copied);
+    }
     ci.user_data[4] = 0x3f400000;
     draw.viewport_x_offset = 12;
     ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
@@ -2131,8 +2137,12 @@ TEST(VkDraw, ConstantBuffersReadResidentComputeOutputInPlace) {
     EXPECT_LE(gpu::g_ring_cb_bytes, cpu_copies + 8192);
     EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
     if (bind) {
-      EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies);
-      EXPECT_EQ(gpu::g_bind_bytes, bound + 2 * bytes);
+      EXPECT_LE(gpu::render::g_ring.ubo_offset, ring + 8192);
+      if (aligned)
+        EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies);
+      else
+        EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies + 2 * bytes);
+      EXPECT_EQ(gpu::g_bind_bytes, bound + (aligned ? 2 : 3) * bytes);
     } else {
       EXPECT_GT(gpu::render::cs::g_buf_bridge_bytes, copies);
       EXPECT_EQ(gpu::g_bind_bytes, bound);
@@ -2199,7 +2209,8 @@ TEST(VkDraw, RawBuffersReadResidentComputeOutputInPlace) {
     const u32 bytes = trial == 2   ? 16
                       : trial == 4 ? gpu::render::kRawBufWindow
                                    : 4u * 1024 * 1024;
-    const bool bind = trial &&
+    const bool bind = trial != 0;
+    const bool aligned =
         !(offset % gpu::render::Device().caps().storage_offset_alignment);
     ASSERT_TRUE(raw_bind->SetFromString(trial ? "1" : "0"));
     gpu::render::BeginFrame(renderer);
@@ -2239,7 +2250,13 @@ TEST(VkDraw, RawBuffersReadResidentComputeOutputInPlace) {
     const u64 copies = gpu::render::cs::g_buf_bridge_bytes;
     const u64 cpu_copies = gpu::g_ring_raw_bytes;
     const u64 bound = gpu::g_bind_bytes;
+    const u64 ring = gpu::render::g_ring.sbo_offset;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+    if (bind && !aligned) {
+      const u64 copied = gpu::render::cs::g_buf_bridge_bytes;
+      ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+      EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copied);
+    }
     ci.user_data[4] = 0xff804020;
     draw.viewport_x_offset = 12;
     ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
@@ -2247,8 +2264,12 @@ TEST(VkDraw, RawBuffersReadResidentComputeOutputInPlace) {
     EXPECT_EQ(gpu::g_ring_raw_bytes, cpu_copies);
     EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
     if (bind) {
-      EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies);
-      EXPECT_EQ(gpu::g_bind_bytes, bound + 2 * bytes);
+      EXPECT_EQ(gpu::render::g_ring.sbo_offset, ring);
+      if (aligned)
+        EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies);
+      else
+        EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies + 2 * bytes);
+      EXPECT_EQ(gpu::g_bind_bytes, bound + (aligned ? 2 : 3) * bytes);
     } else {
       EXPECT_GT(gpu::render::cs::g_buf_bridge_bytes, copies);
       EXPECT_EQ(gpu::g_bind_bytes, bound);

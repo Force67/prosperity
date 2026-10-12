@@ -90,8 +90,13 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
 // on the GPU, retained until the active frame slot retires.
 bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
 // Bind a raw shader or constant window, gathering mixed CPU/GPU data into
-// device buffers with the same lifetime and ordering as geometry.
-bool CsStorageBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
+// device buffers with the same lifetime and ordering as geometry. Offsets
+// satisfy `alignment`; unaligned output is copied on the GPU.
+bool CsStorageBuffer(u64 base,
+                     u64 bytes,
+                     rhi::Buffer** buffer,
+                     u64* offset,
+                     u64 alignment);
 // Whether CsGeometryBuffer can serve the window, without binding anything.
 bool CsHoldsGeometry(u64 base, u64 bytes);
 

@@ -104,7 +104,8 @@ Mixed index windows also avoid CPU index scans. Gathered revisions keep
 separate device buffers until the frame slot retires. Buffers are reused across
 frames; windows without a complete mirror revision gather on every use.
 Full 16 KiB constant windows can bind compute output or direct-memory imports
-as uniform buffers, also skipping their ring copy. Short, unaligned and packed
+as uniform buffers, also skipping their ring copy. GPU-produced windows with
+unaligned native offsets use aligned copies in device memory. Short and packed
 indirect constant windows retain staging. `DELTA_GPU_CBUF_BIND=0` disables this
 path for comparison.
 `DELTA_GPU_RAW_BIND=0` restores raw-window copies for comparison. A compute
