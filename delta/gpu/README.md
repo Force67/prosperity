@@ -89,8 +89,9 @@ first instance remain GPU inputs. Native index streams need no CPU scan when
 using indirect arguments or resident compute output. Direct-memory imports
 also let vertex and index fetch read guest bytes without a ring copy. Raw
 shader windows can bind compute buffers or direct-memory imports in place,
-skipping the raw-ring copy. Loads past a binding return zero. Unaligned
-windows retain staging.
+skipping the raw-ring copy. Loads past a binding return zero. Resident raw draws
+use one 16 MiB device zero window for unresolved slots and defer the 512 MiB
+upload ring until staging is needed.
 GPU-owned mirror output also binds in place, with GPU ordering between draws
 and later compute writes or fills. A CPU write makes the binding ineligible
 until the GPU has the current bytes again.

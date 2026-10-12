@@ -8,6 +8,7 @@
 #include "gpu/gpu_check.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
+#include "gpu/render/render_target.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -123,7 +124,7 @@ bool CreateUploadRings() {
 
   // Raw-buffer set layout (set 2). Every recompiled pipeline layout that has a
   // shader reading buffers by hand names it, so it exists from the start; the
-  // ring behind it is allocated only if such a shader actually appears.
+  // ring behind it is allocated only when a buffer needs staging.
   g_ring.sbo_align = base::Max(caps.storage_offset_alignment, 4u);
   // These are DYNAMIC storage buffers, whose device limit has a floor of 4
   // while real desktop parts report 16+. Take what the device offers (up to
@@ -250,6 +251,36 @@ bool EnsureLdsScratch() {
   BASE_LOGI("gpuvk", "shared LDS scratch: {} MB ({} waves)",
             (unsigned long long)(kLdsScratch >> 20), gpu::gcn::kLdsWaves);
   return true;
+}
+
+bool EnsureRawBufferZero() {
+  if (g_ring.sbo_zero_set)
+    return true;
+  if (!g_ring.sbo_layout || !g_frame.recording)
+    return false;
+  if (!g_ring.sbo_zero) {
+    rhi::BufferDesc desc;
+    desc.size = kRawBufWindow;
+    desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
+    desc.name = "zero raw buffer";
+    g_ring.sbo_zero = Device().CreateBuffer(desc);
+    if (!g_ring.sbo_zero)
+      return false;
+    EndRegion();
+    g_frame.list->FillBuffer(g_ring.sbo_zero, 0, kRawBufWindow, 0);
+    g_frame.list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessShaderRead);
+  }
+  rhi::BindGroupDesc set;
+  set.layout = g_ring.sbo_layout;
+  for (u32 i = 0; i < g_ring.sbo_count; ++i) {
+    rhi::BindingWrite w;
+    w.binding = i;
+    w.buffer = g_ring.sbo_zero;
+    w.range = kRawBufWindow;
+    set.writes.push_back(w);
+  }
+  g_ring.sbo_zero_set = Device().CreateBindGroup(set);
+  return g_ring.sbo_zero_set != nullptr;
 }
 
 bool EnsureRawBufferRing() {

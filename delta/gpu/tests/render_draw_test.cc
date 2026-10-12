@@ -262,6 +262,118 @@ static void EnableWriteTracking() {
   sigaction(SIGSEGV, &fault, nullptr);
 }
 
+TEST(VkDraw, ResidentRawBuffersDeferUploadRingUntilCpuStaging) {
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A graphics device is required";
+  if (gpu::render::g_ring.sbo_buf)
+    GTEST_SKIP() << "Run this initialization test in a fresh renderer";
+  const StagedComputeOnly staged;
+  EnableWriteTracking();
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                        0xbf810000};
+  const u32 ps[4096] = {0x7e000284, 0xe8001004 | (56u << 19) | (3u << 16),
+                        0x88020000, 0x7e0602f2,
+                        0xf800080f, 0x03020100,
+                        0xbf810000};
+  alignas(256) static const u32 cs[4096] = {0x7e020204, 0xe0702100, 0x80000100,
+                                            0xbf810000};
+  alignas(65536) static u32 source[65536 / 4]{};
+  alignas(65536) static u32 cpu[65536 / 4]{};
+  alignas(65536) static base::Array<u8, 65536> target{};
+  std::fill_n(cpu, base::ArraySize(cpu), 0xff201008);
+  constexpr u32 bytes = 16384;
+  const u64 base = reinterpret_cast<u64>(source);
+  u32 user_data[32] = {u32(base + 256), u32((base + 256) >> 32), bytes,
+                       0x14fac};
+  static const auto program =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(program.ok);
+  ASSERT_EQ(program.ps_bufs.size(), 1u);
+  const auto previous_isa = gpu::gcn::DefaultIsaMode();
+  gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+  static const auto compute = gpu::gcn::RecompileCompute(cs, 64, 1, 1, 5, 0, 0);
+  gpu::gcn::SetDefaultIsaMode(previous_isa);
+  ASSERT_TRUE(compute.ok);
+  gpu::render::BeginFrame(renderer);
+  gpu::render::ComputeInfo ci;
+  ci.cs_addr = reinterpret_cast<u64>(cs);
+  ci.recomp = &compute;
+  ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
+  ci.num_res = 1;
+  auto& resource = ci.res[0];
+  resource.base = base;
+  resource.size = resource.guest_size = sizeof(source);
+  resource.binding = compute.resources[0].binding;
+  resource.written = resource.shader_writes = true;
+  ci.user_data[0] = u32(base);
+  ci.user_data[1] = (base >> 32) | (4u << 16);
+  ci.user_data[2] = sizeof(source) / 4;
+  ci.user_data[3] = (4u << 15) | (4u << 12);
+  ci.user_data[4] = 0xffff8040;
+  ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+  gpu::render::DrawInfo draw;
+  draw.recomp = &program;
+  draw.vs_addr = reinterpret_cast<u64>(vs);
+  draw.ps_addr = reinterpret_cast<u64>(ps);
+  base::CopyN(user_data, 32, draw.ps_user_data);
+  draw.prim_type = draw.vertex_count = 1;
+  draw.bufs[0] = {base + 256, bytes};
+  draw.num_bufs = 1;
+  draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
+  draw.rt_w = draw.rt_h = 16;
+  draw.viewport_x_scale = draw.viewport_y_scale = 8;
+  draw.viewport_x_offset = 4.5f;
+  draw.viewport_y_offset = 8.5f;
+  draw.mrt_count = draw.mrt_bound_mask = 1;
+  draw.mrt_info[0] = 10u << 2;
+  const u64 cpu_copies = gpu::g_ring_raw_bytes;
+  const u64 copies = gpu::render::cs::g_buf_bridge_bytes;
+  const u64 bound = gpu::g_bind_bytes;
+  const u64 writeback = gpu::render::g_wb_why_bytes;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies);
+  EXPECT_EQ(gpu::g_bind_bytes, bound + bytes);
+  EXPECT_EQ(gpu::render::g_ring.sbo_buf, nullptr);
+  EXPECT_EQ(gpu::render::g_ring.sbo_map, nullptr);
+  EXPECT_EQ(gpu::g_ring_raw_bytes, cpu_copies);
+  ASSERT_NE(gpu::render::g_ring.sbo_zero, nullptr);
+  EXPECT_EQ(gpu::render::g_ring.sbo_zero->desc().size,
+            gpu::render::kRawBufWindow);
+  EXPECT_EQ(gpu::render::g_ring.sbo_zero->desc().memory,
+            gpu::rhi::MemoryKind::kDevice);
+  draw.bufs[0] = {};
+  draw.viewport_x_offset = 2.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.sbo_buf, nullptr);
+  const u64 cpu_base = reinterpret_cast<u64>(cpu) + 256;
+  draw.bufs[0] = {cpu_base, bytes};
+  draw.ps_user_data[0] = u32(cpu_base);
+  draw.ps_user_data[1] = u32(cpu_base >> 32);
+  draw.viewport_x_offset = 8.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  ASSERT_NE(gpu::render::g_ring.sbo_map, nullptr);
+  EXPECT_EQ(gpu::g_ring_raw_bytes, cpu_copies + bytes);
+  draw.bufs[0] = {base + 256, bytes};
+  base::CopyN(user_data, 32, draw.ps_user_data);
+  draw.viewport_x_offset = 12.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::g_ring_raw_bytes, cpu_copies + bytes);
+  EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
+  const u32 slot_index = gpu::render::g_frame.slot_idx;
+  gpu::render::EndFrame(renderer, draw.rt_base);
+  const auto& slot = gpu::render::g_frame.slots[slot_index];
+  ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+  ASSERT_TRUE(slot.presentable);
+  const u32 locations[] = {8 * 16 + 2, 8 * 16 + 4, 8 * 16 + 8, 8 * 16 + 12};
+  const u32 colors[] = {0xff000000, 0xffff8040, 0xff201008, 0xffff8040};
+  for (u32 i = 0; i < base::ArraySize(locations); ++i)
+    for (u32 channel = 0; channel < 4; ++channel)
+      EXPECT_EQ(slot.readback->mapped()[locations[i] * 4 + channel],
+                (colors[i] >> (channel * 8)) & 255);
+}
+
 TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {
   const StagedComputeOnly staged;
   auto& renderer = gpu::render::DefaultRenderer();

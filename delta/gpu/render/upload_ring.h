@@ -122,6 +122,9 @@ struct UploadRings {
   base::Vector<u32> sbo_written;
   rhi::BindGroupLayout* sbo_layout = nullptr;
   rhi::BindGroup* sbo_set = nullptr;
+  // Resident draws need zero descriptors before they need an upload ring.
+  rhi::Buffer* sbo_zero = nullptr;
+  rhi::BindGroup* sbo_zero_set = nullptr;
 
   // Shared LDS (set 3): one device-local block per wave for a graphics stage
   // that stages through LDS. Nothing reads it back on the CPU and nothing
@@ -141,11 +144,10 @@ extern UploadRings& g_ring;
 
 bool CreateUploadRings();
 bool EnsureCbufRing();
-// Allocate the raw-buffer ring + its descriptor set. Deferred to the first
-// draw that needs one: the ring is large, and a title whose vertex fetches the
-// vertex-input state already covers never binds set 2 at all. The set layout
-// itself is created up front, because pipeline layouts name it.
+// Allocate the raw-buffer ring + its descriptor set when a draw needs staging.
+// Resident draws use a device zero window for unresolved descriptor slots.
 bool EnsureRawBufferRing();
+bool EnsureRawBufferZero();
 // The shared-LDS scratch buffer and its set-3 descriptor, created on first use
 // by a shader that declares LDS in a graphics stage.
 bool EnsureLdsScratch();
