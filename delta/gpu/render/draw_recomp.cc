@@ -2315,6 +2315,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       g_vb_kept_bytes += bind_size[j];
       continue;
     }
+    if (!EnsureVertexRing())
+      return Decline(kRing);
     std::memcpy(g_ring.vb_map + voff + bind_off[j], d.vbufs[j].data,
                 (size_t)bind_size[j]);
     g_ring_vb_bytes += bind_size[j];
@@ -2328,6 +2330,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         ArmForCache(reinterpret_cast<u64>(d.index_data),
                     u64(d.index_count) * GuestIndexElementBytes(d.index_type));
     if (!convert_indices) {
+      if (!EnsureIndexRing())
+        return Decline(kRing);
       CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
                        d.index_type);
       g_ring_ib_bytes += index_bytes;
@@ -2350,6 +2354,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         bufs[j] = vb_bind[j].buffer;
         offs[j] = vb_bind[j].offset;
       } else {
+        if (!EnsureVertexRing())
+          return Decline(kRing);
         bufs[j] = g_ring.vb;
         offs[j] = vb_cached[j] != u64(-1) ? vb_cached[j] : voff + bind_off[j];
       }

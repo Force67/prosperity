@@ -87,8 +87,10 @@ native index streams can bind the compute buffer directly, and indirect draws
 retain the full vertex descriptor bounds so their counts, first vertex and
 first instance remain GPU inputs. Native index streams need no CPU scan when
 using indirect arguments or resident compute output. Direct-memory imports
-also let vertex and index fetch read guest bytes without a ring copy. Raw
-shader windows can bind compute buffers or direct-memory imports in place,
+also let vertex and index fetch read guest bytes without a ring copy. The
+vertex and index upload rings allocate only when a draw needs host staging,
+so resident geometry and GPU index conversion skip those host allocations.
+Raw shader windows can bind compute buffers or direct-memory imports in place,
 skipping the raw-ring copy. Loads past a binding return zero. Resident raw draws
 use one 16 MiB device zero window for unresolved slots and defer the 512 MiB
 upload ring until staging is needed. Resident constant draws use one 16 KiB

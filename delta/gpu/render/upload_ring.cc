@@ -80,13 +80,6 @@ u32 GraphicsStages() {
 
 bool CreateUploadRings() {
   const rhi::Caps& caps = Device().caps();
-  g_ring.vb =
-      HostBuffer(VbRingBytes(), rhi::kBufferVertex | rhi::kBufferCopyDst,
-                 "vertex ring", &g_ring.vb_map);
-  g_ring.ib =
-      HostBuffer(kIbRing, rhi::kBufferIndex, "index ring", &g_ring.ib_map);
-  if (!g_ring.vb || !g_ring.ib)
-    return false;
   // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
   g_ring.ubo_align = base::Max(caps.uniform_offset_alignment, 1u);
   if (caps.max_dynamic_uniform_buffers < kCbufBindings)
@@ -162,6 +155,21 @@ bool CreateUploadRings() {
                                 (caps.mesh_shader ? rhi::kStageMesh : 0u), true});
   g_ring.sbo_layout = Device().CreateBindGroupLayout(sbo);
   return g_ring.sbo_layout != nullptr;
+}
+
+bool EnsureVertexRing() {
+  if (!g_ring.vb)
+    g_ring.vb =
+        HostBuffer(VbRingBytes(), rhi::kBufferVertex | rhi::kBufferCopyDst,
+                   "vertex ring", &g_ring.vb_map);
+  return g_ring.vb_map != nullptr;
+}
+
+bool EnsureIndexRing() {
+  if (!g_ring.ib)
+    g_ring.ib =
+        HostBuffer(kIbRing, rhi::kBufferIndex, "index ring", &g_ring.ib_map);
+  return g_ring.ib_map != nullptr;
 }
 
 // The device is initialized before guest mappings exist, but the title profile

@@ -144,6 +144,8 @@ struct UploadRings {
 extern UploadRings& g_ring;
 
 bool CreateUploadRings();
+bool EnsureVertexRing();
+bool EnsureIndexRing();
 bool EnsureCbufRing();
 bool EnsureCbufZero();
 // Allocate the raw-buffer ring + its descriptor set when a draw needs staging.
