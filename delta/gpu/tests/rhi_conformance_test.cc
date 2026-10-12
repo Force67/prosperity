@@ -709,23 +709,26 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
   constexpr u32 kCount = 71, kOffset = 5, kCapacity = 128;
   for (u32 type = 0; type < 3; type++) {
     for (bool quads : {false, true}) {
-      for (u32 trial = 0; trial < (quads ? 8u : 1u); trial++) {
+      for (u32 trial = 0; trial < (quads ? 9u : 1u); trial++) {
         const bool indirect = trial != 0;
-        const u32 capacity = trial == 7 ? 3 : kCount;
+        const bool strided = indirect && ((trial & 1) || trial == 8);
+        const u32 capacity = trial == 8 ? 65536 : trial == 7 ? 3 : kCount;
+        const u32 source_count = trial == 8 ? capacity : kCount;
+        const u32 maximum = quads ? capacity / 4 * 6 : capacity;
         constexpr u32 requests[][2] = {{0, 0},   {0, 0},  {3, 0},
                                        {4, 1},   {11, 3}, {~0u, kCount - 4},
-                                       {8, ~0u}, {4, 0}};
+                                       {8, ~0u}, {4, 0},  {~0u, 1}};
         const u32 requested = requests[trial][0], first = requests[trial][1];
         SCOPED_TRACE(trial);
         SCOPED_TRACE(type);
         SCOPED_TRACE(quads);
         const u32 bytes = type == 1 ? 4 : type == 2 ? 1 : 2;
-        base::Vector<u8> source((kCount * bytes + 3) & ~3u, 0xa5);
-        base::Vector<u32> indices(kCount);
-        for (u32 i = 0; i < kCount; i++) {
+        base::Vector<u8> source((source_count * bytes + 3) & ~3u, 0xa5);
+        base::Vector<u32> indices(source_count);
+        for (u32 i = 0; i < source_count; i++) {
           indices[i] = type == 1   ? 0x12340000u + i
-                       : type == 0 ? 0x3400u + i
-                                   : i;
+                       : type == 0 ? (0x3400u + i) & 0xffffu
+                                   : i & 0xffu;
           std::memcpy(source.data() + i * bytes, &indices[i], bytes);
         }
         const u32 argument_at = source.size() / 4;
@@ -741,7 +744,7 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
         Buffer* input = Own(device_->CreateBuffer(input_desc));
         Buffer* input_readback = Readback(source.size());
         BufferDesc bd;
-        bd.size = kCapacity * 4;
+        bd.size = u64(base::Max(kCapacity, kOffset + maximum + 5)) * 4;
         bd.usage = kBufferStorage | kBufferCopySrc | kBufferCopyDst;
         Buffer* output = Own(device_->CreateBuffer(bd));
         Buffer* readback = Readback(bd.size);
@@ -758,15 +761,21 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
         pl.push_constant_stages = kStageCompute;
         ComputePipelineDesc cp;
         cp.layout = Own(device_->CreatePipelineLayout(pl));
-        const auto code =
-            gpu::gcn::BuildIndexConversionShader(type, quads, indirect);
+        const auto code = gpu::gcn::BuildIndexConversionShader(
+            type, quads,
+            strided    ? gpu::gcn::IndexConversionMode::kIndirectStrided
+            : indirect ? gpu::gcn::IndexConversionMode::kIndirect
+                       : gpu::gcn::IndexConversionMode::kDirect);
         ASSERT_FALSE(code.empty());
         cp.code = Code(code);
         Pipeline* pipe = Own(device_->CreateComputePipeline(cp));
         ASSERT_NE(pipe, nullptr);
         list_->Begin();
         list_->FillBuffer(output, 0, bd.size, ~0u);
-        list_->UpdateBuffer(input, 0, source.size(), source.data());
+        for (u64 offset = 0; offset < source.size(); offset += 65536)
+          list_->UpdateBuffer(input, offset,
+                               base::Min<u64>(65536, source.size() - offset),
+                               source.data() + offset);
         list_->Barrier(kAccessCopyWrite | kAccessHostWrite,
                        kAccessComputeRead | kAccessComputeWrite);
         list_->SetPipeline(pipe);
@@ -777,7 +786,6 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
         writes[1].buffer = output;
         writes[1].range = bd.size;
         list_->PushBindGroup(0, set, writes, 2);
-        const u32 maximum = quads ? capacity / 4 * 6 : capacity;
         const u32 available = first < capacity ? capacity - first : 0;
         const u32 count =
             indirect ? base::Min(requested, available) / 4 * 6 : maximum;
@@ -785,7 +793,7 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
         const u32 params[] = {indirect ? capacity : maximum, kOffset,
                               argument_at, output_args};
         list_->SetPushConstants(0, indirect ? sizeof(params) : 8, params);
-        list_->Dispatch(base::Max(1u, (maximum + 63) / 64), 1, 1);
+        list_->Dispatch(strided ? 3 : base::Max(1u, (maximum + 63) / 64), 1, 1);
         list_->Barrier(kAccessComputeWrite, kAccessCopyRead);
         list_->CopyBuffer(readback, 0, output, 0, bd.size);
         list_->CopyBuffer(input_readback, 0, input, 0, source.size());
@@ -797,7 +805,7 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
             std::memcmp(input_readback->mapped(), source.data(), source.size()),
             0);
         constexpr u32 corners[] = {0, 1, 2, 0, 2, 3};
-        for (u32 i = 0; i < kCapacity; i++) {
+        for (u32 i = 0; i < bd.size / 4; i++) {
           const u32 j = i - kOffset;
           u32 expected = ~0u;
           if (i >= kOffset && j < count)
@@ -830,7 +838,8 @@ TEST_P(RhiConformance, IndirectQuadConversionFeedsDrawWithoutReadback) {
   pl.push_constant_stages = kStageCompute;
   ComputePipelineDesc cp;
   cp.layout = Own(device_->CreatePipelineLayout(pl));
-  const auto code = gpu::gcn::BuildIndexConversionShader(2, true, true);
+  const auto code = gpu::gcn::BuildIndexConversionShader(
+      2, true, gpu::gcn::IndexConversionMode::kIndirectStrided);
   cp.code = Code(code);
   Pipeline* compute = Own(device_->CreateComputePipeline(cp));
   Pipeline* graphics =

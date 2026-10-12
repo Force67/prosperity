@@ -292,9 +292,16 @@ base::Vector<u32> BuildImageTilingShader();
 // destination dword offset. QUADLIST emits (a, b, c), (a, c, d).
 // Indirect QUADLIST: source capacity, destination dword offset, source
 // argument dword offset and destination argument dword offset.
+enum class IndexConversionMode {
+  kDirect,
+  kIndirect,
+  kIndirectStrided
+};
+constexpr u32 kIndexConversionGroups = 2048;
 base::Vector<u32> BuildIndexConversionShader(u32 index_type,
                                             bool quads,
-                                            bool indirect = false);
+                                            IndexConversionMode mode =
+                                                IndexConversionMode::kDirect);
 
 // One invocation: dst[pc.1] = 1 when the CMASK (pc.2 == 0) or HTILE (pc.2 != 0)
 // word src[pc.0] marks a fast-cleared tile, else 0. A conditional clear reads

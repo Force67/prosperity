@@ -119,6 +119,10 @@ add_delta_test(rhi_conformance_test
   SOURCES rhi_conformance_test.cc
   DEPS delta_gpu)
 
+# Developer benchmark: GPU index conversion for sparse and dense draws.
+add_executable(index_convert_bench index_convert_bench.cc)
+target_link_libraries(index_convert_bench PRIVATE delta_gpu)
+
 # Developer tool (not a test): lowers the recompiler's SPIR-V cache through the
 # OpenGL backend's GLSL path and compiles it with the driver.
 if(DELTA_GPU_OPENGL)

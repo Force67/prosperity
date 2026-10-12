@@ -10,7 +10,9 @@ namespace gpu::gcn {
 
 base::Vector<u32> BuildIndexConversionShader(u32 index_type,
                                              bool quads,
-                                             bool indirect) {
+                                             IndexConversionMode mode) {
+  const bool indirect = mode != IndexConversionMode::kDirect;
+  const bool strided = mode == IndexConversionMode::kIndirectStrided;
   using namespace spirv;
   using spv::Op;
   using spv::StorageClass;
@@ -41,8 +43,20 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type,
       m.Variable(m.TypePointer(StorageClass::Input, vec), StorageClass::Input);
   m.Decorate(gid, spv::Decoration::BuiltIn,
              {static_cast<u32>(spv::BuiltIn::GlobalInvocationId)});
+  Id groups = 0;
+  if (strided) {
+    groups = m.Variable(m.TypePointer(StorageClass::Input, vec),
+                        StorageClass::Input);
+    m.Decorate(groups, spv::Decoration::BuiltIn,
+               {static_cast<u32>(spv::BuiltIn::NumWorkgroups)});
+  }
   const Id fn = m.BeginFunction(m.TypeVoid(), m.TypeFunction(m.TypeVoid()));
-  m.EntryPoint(spv::ExecutionModel::GLCompute, fn, "main", {gid});
+  const Id cursor =
+      strided ? m.Emit(Op::OpVariable, m.TypePointer(StorageClass::Function, u),
+                       {static_cast<u32>(StorageClass::Function)})
+              : 0;
+  m.EntryPoint(spv::ExecutionModel::GLCompute, fn, "main",
+               strided ? base::Vector<Id>{gid, groups} : base::Vector<Id>{gid});
   m.ExecMode(fn, spv::ExecutionMode::LocalSize, {64, 1, 1});
   const auto c = [&](u32 v) { return m.ConstU32(v); };
   const auto op = [&](Op code, Id a, Id b) { return m.Emit(code, u, {a, b}); };
@@ -53,7 +67,7 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type,
   const auto at = [&](u32 binding, Id index) {
     return m.AccessChain(ptr, buffers[binding], {c(0), index});
   };
-  const Id index = m.CompositeExtract(u, m.Load(vec, gid), 0);
+  Id index = m.CompositeExtract(u, m.Load(vec, gid), 0);
   Id count = param(0), first = c(0);
   if (indirect) {
     const auto argument = [&](u32 i) {
@@ -83,9 +97,24 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type,
     m.Branch(args_done);
     m.OpenBlock(args_done);
   }
+  Id header = 0, next = 0;
+  Id stride = 0;
+  if (strided) {
+    stride =
+        op(Op::OpIMul, m.CompositeExtract(u, m.Load(vec, groups), 0), c(64));
+    m.Store(cursor, index);
+    header = m.NewBlock();
+    next = m.NewBlock();
+    m.Branch(header);
+    m.OpenBlock(header);
+    index = m.Load(u, cursor);
+  }
   const Id body = m.NewBlock(), end = m.NewBlock();
   const Id valid = m.Emit(Op::OpULessThan, m.TypeBool(), {index, count});
-  m.SelectionMerge(end);
+  if (strided)
+    m.LoopMerge(end, next);
+  else
+    m.SelectionMerge(end);
   m.BranchConditional(valid, body, end);
   m.OpenBlock(body);
   Id source = index;
@@ -111,11 +140,20 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type,
                c(bytes == 1 ? 0xff : 0xffff));
   }
   m.Store(at(1, op(Op::OpIAdd, index, param(1))), value);
-  m.Branch(end);
+  if (strided) {
+    m.Branch(next);
+    m.OpenBlock(next);
+    m.Store(cursor, op(Op::OpIAdd, index, stride));
+    m.Branch(header);
+  } else {
+    m.Branch(end);
+  }
   m.OpenBlock(end);
   m.ReturnVoid();
   m.EndFunction();
   auto code = m.Assemble();
+  if (strided)
+    code = Optimize(code);
   base::String error;
   if (!Validate(code, &error)) {
     BASE_LOGI("gpuvk", "index conversion shader invalid: {}", error.c_str());

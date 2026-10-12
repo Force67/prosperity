@@ -91,14 +91,18 @@ also let vertex and index fetch read guest bytes without a ring copy. A compute
 pass widens eight-bit indices and expands quad lists into a device-local index
 ring, including streams produced by a dispatch without CPU readback. Converted
 streams are reused within the frame until their source revision changes.
-`DELTA_GPU_DRAWPROF` reports conversion counts and bytes;
+`DELTA_GPU_DRAWPROF` reports conversion counts and reserved index bytes;
 `DELTA_GPU_LISTPROF` includes their GPU time.
 
 Vulkan, OpenGL and D3D12 support indirect drawing and compute dispatch. OpenGL
 adjusts indexed arguments on the GPU when the bound index buffer has an offset.
 D3D12 supplies shader draw parameters and workgroup counts from GPU argument
 copies when needed. Indexed indirect quad lists expand their selected indices
-and generate triangle draw arguments in the same compute pass. Non-indexed
+and generate triangle draw arguments in the same compute pass. Large indirect
+streams use a bounded set of workers that follow the GPU count, so a small draw
+does not launch one invocation for every possible output index.
+`index_convert_bench [vulkan|opengl|d3d12]` compares GPU timestamps for sparse
+and dense streams across buffer capacities. Non-indexed
 quad lists and D3D12 triangle fans retain their direct draw paths.
 
 The heuristic quad path in `draw` predates the recompiler and is still the

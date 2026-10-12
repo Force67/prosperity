@@ -1572,7 +1572,7 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
       {4, 0, 0, 1}, {-.5f, 0, 0, 1}, {.5f, 0, 0, 1}};
   const base::Array<float, 4> instances[] = {
       {0, 4, 0, 0}, {0, -.5f, 0, 0}, {0, .5f, 0, 0}};
-  alignas(65536) static u32 indices[11][16384]{};
+  alignas(65536) static u32 indices[11][262144]{};
   alignas(65536) static u32 args[2][16384] = {{2, 2, 1, 1}, {2, 2, 1, 0, 1}};
   alignas(65536) static u32 quad_args[3][16384] = {
       {0, 1, 1, u32(-1), 1}, {0, 1, 1, 0, 1}, {0, 1, 1, 0, 1}};
@@ -1622,12 +1622,12 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
       ci.num_res = 1;
       auto& resource = ci.res[0];
       resource.base = index_base;
-      resource.size = resource.guest_size = 256;
+      resource.size = resource.guest_size = trial == 9 ? 200000 * 4 : 256;
       resource.binding = ci.recomp->resources[0].binding;
       resource.written = resource.shader_writes = true;
       ci.user_data[0] = static_cast<u32>(index_base);
       ci.user_data[1] = (index_base >> 32) | (4u << 16);
-      ci.user_data[2] = 64;
+      ci.user_data[2] = trial == 9 ? 200000 : 64;
       ci.user_data[3] = (4u << 15) | (4u << 12);
       ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
       ASSERT_TRUE(gpu::render::CsHoldsGeometry(index_base, 256));
@@ -1652,7 +1652,9 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
     if (indexed) {
       draw.index_data = reinterpret_cast<const void*>(
           index_base + (narrow && !quads ? 3 : 0));
-      draw.index_count = indirect_quads ? 9 : quads ? 7 : direct ? 3 : 64;
+      draw.index_count = trial == 9 ? 200000
+                         : indirect_quads ? 9
+                         : quads ? 7 : direct ? 3 : 64;
       draw.index_type = trial == 8 || trial == 11 ? 0 : narrow ? 2 : 1;
     }
     draw.rt_base = draw.mrt_base[0] =

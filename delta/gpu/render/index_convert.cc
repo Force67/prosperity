@@ -24,21 +24,26 @@ bool ConvertGuestIndices(Renderer& renderer,
                          rhi::Buffer** indirect_buffer,
                          u64* indirect_offset) {
   const bool indirect = indirect_buffer && *indirect_buffer;
+  const u32 output_count = quads ? count / 4 * 6 : count;
+  const bool strided =
+      indirect && output_count > gcn::kIndexConversionGroups * 64;
+  const auto mode = strided    ? gcn::IndexConversionMode::kIndirectStrided
+                    : indirect ? gcn::IndexConversionMode::kIndirect
+                               : gcn::IndexConversionMode::kDirect;
   struct Pipe {
     rhi::BindGroupLayout* set = nullptr;
     rhi::PipelineLayout* layout = nullptr;
     rhi::Pipeline* pipe = nullptr;
     bool tried = false;
   };
-  static Pipe pipes[2][2][3];
+  static Pipe pipes[3][2][3];
   if (index_type > 2 || (indirect && (!quads || !indirect_offset)))
     return false;
-  Pipe& p = pipes[indirect][quads][index_type];
+  Pipe& p = pipes[static_cast<u32>(mode)][quads][index_type];
   if (!p.tried) {
     p.tried = true;
 #ifdef DELTA_HAVE_SPIRV_BACKEND
-    const auto code =
-        gcn::BuildIndexConversionShader(index_type, quads, indirect);
+    const auto code = gcn::BuildIndexConversionShader(index_type, quads, mode);
 #else
     const base::Vector<u32> code;
 #endif
@@ -69,7 +74,6 @@ bool ConvertGuestIndices(Renderer& renderer,
   }
   if (!g_ring.converted_ib)
     return false;
-  const u32 output_count = quads ? count / 4 * 6 : count;
   if (!output_count && !indirect)
     return true;
   const u64 bytes = u64(count) * GuestIndexElementBytes(index_type);
@@ -120,7 +124,9 @@ bool ConvertGuestIndices(Renderer& renderer,
                         static_cast<u32>(padded / 4),
                         static_cast<u32>((offset - window) / 4 + output_count)};
   list->SetPushConstants(0, indirect ? sizeof(params) : 8, params);
-  list->Dispatch(base::Max(1u, (output_count + 63) / 64), 1, 1);
+  list->Dispatch(strided ? gcn::kIndexConversionGroups
+                         : base::Max(1u, (output_count + 63) / 64),
+                 1, 1);
   list->ProfileEnd();
   g_index_convert_n++;
   g_index_convert_bytes += u64(output_count) * 4;
