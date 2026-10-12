@@ -825,8 +825,8 @@ static rhi::Buffer* StageArgs(rhi::CommandList* list,
   if (!g_indirect_ring) {
     rhi::BufferDesc desc;
     desc.size = kIndirectRing;
-    desc.usage =
-        rhi::kBufferIndirect | rhi::kBufferCopyDst | rhi::kBufferStorage;
+    desc.usage = rhi::kBufferIndirect | rhi::kBufferCopySrc |
+                 rhi::kBufferCopyDst | rhi::kBufferStorage;
     if (Device().caps().conditional)
       desc.usage |= rhi::kBufferPredicate;
     desc.name = "indirect args";
