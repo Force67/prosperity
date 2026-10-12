@@ -34,4 +34,9 @@ void DirectRestore(u64 block);
 // byte's place in it and `bytes` how many follow contiguously. Null where no
 // view of direct memory holds the address.
 rhi::Buffer* DirectImportAt(u64 address, u64* offset, u64* bytes);
+// One imported buffer around the guest bytes at `address` for a vertex or
+// index bind, so the fetcher reads them where they lie: `offset` is the
+// span's place in it. The whole span has to stay inside one view. Null
+// where it does not or the import failed; the caller copies then.
+rhi::Buffer* DirectBindAt(u64 address, u64 bytes, u64* offset);
 }  // namespace gpu::render

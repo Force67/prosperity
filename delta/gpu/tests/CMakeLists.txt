@@ -17,6 +17,7 @@ add_delta_test(gcn_decode_test
   SOURCES
     gcn_decode_test.cc
     ../gcn/gcn_decode.cc
+    ../guest_page_table.cc
   DEPS delta_deps)
 
 add_delta_test(rdna_decode_test
@@ -24,6 +25,7 @@ add_delta_test(rdna_decode_test
     rdna_decode_test.cc
     ../ps5/rdna/rdna_decode.cc
     ../gcn/gcn_decode.cc
+    ../guest_page_table.cc
   DEPS delta_deps)
 
 add_delta_test(gcn_disasm_test
@@ -31,6 +33,7 @@ add_delta_test(gcn_disasm_test
     gcn_disasm_test.cc
     ../gcn/gcn_disasm.cc
     ../gcn/gcn_decode.cc
+    ../guest_page_table.cc
   DEPS delta_deps)
 
 add_delta_test(gcn_audit_test
@@ -39,6 +42,7 @@ add_delta_test(gcn_audit_test
     ../gcn/gcn_audit.cc
     ../gcn/gcn_disasm.cc
     ../gcn/gcn_decode.cc
+    ../guest_page_table.cc
   DEPS delta_deps)
 
 add_delta_test(pm4_test

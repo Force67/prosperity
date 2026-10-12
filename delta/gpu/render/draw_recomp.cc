@@ -14,8 +14,10 @@
 #include "gpu/render/compute.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
+#include "gpu/render/guest_direct.h"
 #include "gpu/render/guest_format.h"
 #include "gpu/render/index_upload.h"
+#include "gpu/render/index_convert.h"
 #include "gpu/render/labels.h"
 #include "gpu/render/pipeline_cache.h"
 #include "gpu/render/render_target.h"
@@ -43,8 +45,8 @@
 #include "base/time/time.h"
 #include "host_memory/host_memory.h"
 #include "options/options.h"
-#include "write_watch/write_watch.h"
 #include "profile/profile.h"
+#include "write_watch/write_watch.h"
 
 namespace {
 DELTA_OPTION(bool, kNoWipe, "DELTA_GPU_NOWIPE", true);
@@ -69,16 +71,20 @@ DELTA_OPTION(u64, kBindTrace, "DELTA_GPU_BINDTRACE", 0);
 DELTA_OPTION(bool, kRawBufTrace, "DELTA_GPU_RAWBUF", false);
 DELTA_OPTION(bool, kSelfTrace, "DELTA_GPU_SELFTRACE", false);
 DELTA_OPTION(bool, kTightCbuf, "DELTA_GPU_TIGHTCBUF", false);
+// Bind the title's own vertex and index bytes through the direct alias
+// instead of copying them into the ring. DELTA_GPU_DIRECT also gates it.
+DELTA_OPTION(bool, kDirectBind, "DELTA_GPU_DIRECT_BIND", true);
 
 // The bytes a cbuffer upload takes: the planned size widened to the rest of
 // its page, which a shader indexing its constants reads past.
 u32 CbufCopyBytes(u64 base, u32 size) {
   const u32 planned = base::Min(size, gpu::render::kCbufWindow);
   const u64 page_end = (base + 0x1000) & ~u64{0xFFF};
-  return kTightCbuf ? planned
-                    : base::Max(planned, static_cast<u32>(base::Min<u64>(
-                                             gpu::render::kCbufWindow,
-                                             page_end - base)));
+  return kTightCbuf
+             ? planned
+             : base::Max(planned,
+                         static_cast<u32>(base::Min<u64>(
+                             gpu::render::kCbufWindow, page_end - base)));
 }
 
 // DELTA_GPU_CBSTAGED=<vs addr> (or 1 for every draw): the bytes that reached
@@ -172,6 +178,8 @@ struct StageCache {
   struct Entry {
     u64 off;
     u64 bytes;
+    u64 source_bytes;
+    u64 revision;
     u64 gen;
     u32 dcb;
     bool tracked;
@@ -217,23 +225,28 @@ struct StageCache {
               u32 salt,
               u64 off,
               bool tracked = false,
-              u32 max_index = ~0u) {
+              u32 max_index = ~0u,
+              u64 source_bytes = 0,
+              u64 revision = 0) {
     RollFrame();
     const StageCacheKey key{base, salt};
     auto& e = map[key];
-    if (e.bytes >= bytes && Live(e))
+    if (e.bytes >= bytes && Live(e) && e.revision == revision)
       return;
-    e = {off, bytes, render::CsWritebackGeneration(), dcb, tracked, max_index};
+    if (!source_bytes)
+      source_bytes = bytes;
+    e = {off, bytes,   source_bytes, revision, render::CsWritebackGeneration(),
+         dcb, tracked, max_index};
     if (tracked)
-      for (u64 b = base >> kBlockShift; b <= (base + bytes - 1) >> kBlockShift;
-           b++)
+      for (u64 b = base >> kBlockShift;
+           b <= (base + source_bytes - 1) >> kBlockShift; b++)
         blocks[b].push_back(key);
   }
   void Invalidate(u64 first, u64 end) {
     const auto drop = [&](const base::Vector<StageCacheKey>& keys) {
       for (const StageCacheKey& key : keys) {
         Entry* e = map.find(key);
-        if (e && key.base < end && first < key.base + e->bytes)
+        if (e && key.base < end && first < key.base + e->source_bytes)
           map.erase(key);
       }
     };
@@ -288,7 +301,8 @@ const StageCache::Entry* StageCache::Find(u64 base, u64 bytes, u32 salt) {
   SyncGuestWrites();
   const Entry* e = map.find({base, salt});
   if (!e || e->bytes < bytes || !Live(*e) ||
-      render::CsRangeDirtyOverlapping(base, bytes))
+      (e->revision ? CsBufferRevision(base, e->source_bytes) != e->revision
+                   : render::CsRangeDirtyOverlapping(base, e->source_bytes)))
     return nullptr;
   return e;
 }
@@ -566,9 +580,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // write depth: the image sits in DEPTH_READ_ONLY_OPTIMAL and serves as both
   // attachment and sampled image. Declining it instead sent SotC's whole
   // lighting pass down the heuristic quad path, which produced nothing.
-  const bool depth_self_read =
-      tex_rt_eligible && !d.tex_arrayed && tex_base && tex_base == d.depth_base &&
-      !d.depth_write_enable && g_depths.count(tex_base);
+  const bool depth_self_read = tex_rt_eligible && !d.tex_arrayed && tex_base &&
+                               tex_base == d.depth_base &&
+                               !d.depth_write_enable &&
+                               g_depths.count(tex_base);
   bool depth_as_tex = tex_rt_eligible && !d.tex_arrayed && tex_base &&
                       (tex_base != d.depth_base || depth_self_read) &&
                       g_depths.count(tex_base);
@@ -620,11 +635,23 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // QUADLIST has no host topology: each quad uploads as two triangles.
   const bool quads = indexed && d.prim_type == 19;
   const u32 upload_indices = quads ? d.index_count / 4 * 6 : d.index_count;
+  const bool convert_indices = indexed && (quads || d.index_type == 2);
   const u32 ib_tag = 1u + d.index_type + (quads ? 4u : 0u);
-  const u64 index_bytes = indexed ? static_cast<u64>(upload_indices) *
-                                        UploadedIndexElementBytes(d.index_type)
-                                  : 0;
-  if (indexed) {
+  const u64 index_bytes =
+      indexed
+          ? static_cast<u64>(upload_indices) *
+                (convert_indices ? 4 : UploadedIndexElementBytes(d.index_type))
+          : 0;
+  const bool descriptor_bounds =
+      d.indirect_args ||
+      (indexed && CsHoldsGeometry(reinterpret_cast<u64>(d.index_data),
+                                  u64(d.index_count) *
+                                      GuestIndexElementBytes(d.index_type)));
+  if (indexed && d.num_vattrs && !descriptor_bounds) {
+    if (!FlushCsWritesRange(
+            renderer, reinterpret_cast<u64>(d.index_data),
+            u64(d.index_count) * GuestIndexElementBytes(d.index_type), "index"))
+      return vtx_decline("cs-index", d.index_count);
     const StageCache::Entry* staged =
         kRingDedup ? g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
                                       index_bytes, ib_tag)
@@ -637,17 +664,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       return vtx_decline("max-index", max_index);
     nv = max_index + 1;
   }
-  if (nv > 200000u || (d.num_vattrs && (!d.vertex_data || !d.vertex_stride)))
+  if ((d.num_vattrs && !descriptor_bounds && nv > 200000u) ||
+      (d.num_vattrs && !d.vertex_data))
     return vtx_decline(nv > 200000u ? "nv-cap" : "no-vertex-data", nv);
-  // A window a dispatch still holds is bound from its buffer below
-  // (CsVertexBuffer); anything that falls back is flushed per binding there.
-  if (d.vertex_data && d.vertex_stride &&
-      !CsHoldsVertices(reinterpret_cast<u64>(d.vertex_data),
-                       static_cast<u64>(nv) * d.vertex_stride) &&
-      !FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.vertex_data),
-                          static_cast<u64>(nv) * d.vertex_stride, "vtx"))
-    return vtx_decline("cs-flush", nv);
-
   // GNM's fast clear (see DrawInfo::is_clear_rect): a RECT_LIST draw with no
   // pixel shader whose colour lives in CB_COLORn_CLEAR_WORD0/1. Rasterising it
   // writes nothing, so leaving it to the normal path silently turns every clear
@@ -1016,11 +1035,17 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   u64 vb_cached[8] = {};
   // Bindings served from the cross-frame buffer cache (buffer set).
   CachedBuffer vb_kept[8] = {};
+  // Bindings the fetcher reads in place through the direct alias.
+  CachedBuffer vb_bind[8] = {};
   u64 vneed = 0;
   for (u32 j = 0; j < nbind; j++) {
     if (d.vbufs[j].stride) {
-      const u32 records =
-          d.vbufs[j].per_instance ? base::Max(1u, d.instance_count) : nv;
+      // GPU arguments include firstVertex/baseVertex and firstInstance, so
+      // retain the descriptor's full range instead of guessing the count.
+      const u32 records = descriptor_bounds ? d.vbufs[j].num_records
+                          : d.vbufs[j].per_instance
+                              ? base::Max(1u, d.instance_count)
+                              : nv;
       bind_size[j] = (u64)records * d.vbufs[j].stride;
     } else {
       // Stride-0 (constant) binding: upload a single record large enough to
@@ -1036,8 +1061,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     vb_cached[j] = u64(-1);
     // A dispatch's unflushed output (skinning) is fetched from its own buffer.
     if (bind_size[j] &&
-        CsVertexBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
-                       &vb_kept[j].buffer, &vb_kept[j].offset))
+        CsGeometryBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
+                         &vb_kept[j].buffer, &vb_kept[j].offset))
       continue;
     if (kRingDedup && bind_size[j] && TrackingGuestWrites()) {
       SyncGuestWrites();
@@ -1052,6 +1077,19 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
             : u64(-1);
     if (vb_cached[j] != u64(-1))
       continue;
+    // The alias is the guest's own bytes: binding them skips the ring copy
+    // and the ring space, and later writes reach the fetcher as they would
+    // on hardware. A span no single view holds falls through to the copy.
+    if (bind_size[j] && kDirectBind) {
+      u64 inner = 0;
+      if (rhi::Buffer* b = DirectBindAt(reinterpret_cast<u64>(d.vbufs[j].data),
+                                        bind_size[j], &inner)) {
+        vb_bind[j] = {b, inner};
+        g_bind_bytes += bind_size[j];
+        g_bind_n++;
+        continue;
+      }
+    }
     // A V# may name more records than are mapped; the GPU only faults on the
     // ones it fetches, but staging copies them all.
     if (bind_size[j] &&
@@ -1074,17 +1112,38 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
     return Decline(kRing);
   }
-  // The IB cache key carries the index type: CopyGuestIndices widens 16-bit
-  // sources, so the same guest bytes at two types are two different uploads.
+  const u64 index_align = convert_indices || d.index_type == 1 ? 4 : 2;
+  CachedBuffer ib_bind{};
+  bool ib_gpu = false;
+  if (indexed && !quads && d.index_type != 2) {
+    ib_gpu = CsGeometryBuffer(reinterpret_cast<u64>(d.index_data), index_bytes,
+                              &ib_bind.buffer, &ib_bind.offset);
+    if (!ib_bind.buffer && kDirectBind)
+      ib_bind.buffer = DirectBindAt(reinterpret_cast<u64>(d.index_data),
+                                    index_bytes, &ib_bind.offset);
+    if (ib_bind.offset % index_align) {
+      ib_bind = {};
+      ib_gpu = false;
+    }
+    if (ib_bind.buffer) {
+      g_bind_bytes += index_bytes;
+      g_bind_n++;
+    }
+  }
   const u64 ib_cached =
-      kRingDedup && indexed
+      kRingDedup && indexed && !ib_bind.buffer
           ? StagedOffset(g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
                                           index_bytes, ib_tag))
           : u64(-1);
-  const u64 index_align = d.index_type == 1 ? 4 : 2;
+  const u64 index_revision =
+      convert_indices
+          ? CsBufferRevision(
+                reinterpret_cast<u64>(d.index_data),
+                u64(d.index_count) * GuestIndexElementBytes(d.index_type))
+          : 0;
   const u64 aligned_ioff =
       (g_ring.ib_offset + index_align - 1) & ~(index_align - 1);
-  if (indexed && ib_cached == u64(-1) &&
+  if (indexed && ib_cached == u64(-1) && !ib_bind.buffer &&
       aligned_ioff + index_bytes > g_ring.ib_end) {
     if (kGpuDecltrace) {
       static int n = 0;
@@ -1104,7 +1163,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   if (!rp || rp->failed)
     return Decline(kNoPipe);
   if (!rp->pipe) {
-    g_pipe_pending_draws++;  // still compiling: the draw is dropped, not stalled
+    g_pipe_pending_draws++;  // still compiling: the draw is dropped, not
+                             // stalled
     return true;
   }
   const u64 t_tex = NowNs();
@@ -1410,11 +1470,35 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
             !FlushCsWritesRange(renderer, rb.base, want, "raw"))
           return Decline(kNoRecomp);
       }
-    for (u32 j = 0; j < nbind; j++)
-      if (bind_size[j] && vb_cached[j] == u64(-1) && !vb_kept[j].buffer &&
-          !FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.vbufs[j].data),
-                              bind_size[j], "vb"))
+    for (u32 j = 0; j < nbind; j++) {
+      if (!bind_size[j] || vb_cached[j] != u64(-1) || vb_kept[j].buffer)
+        continue;
+      const u64 base = reinterpret_cast<u64>(d.vbufs[j].data);
+      if (!(vb_bind[j].buffer
+                ? FlushCsWritesForGpu(renderer, base, bind_size[j], "vb")
+                : FlushCsWritesRange(renderer, base, bind_size[j], "vb")))
         return Decline(kNoRecomp);
+    }
+    if (indexed && ib_cached == u64(-1) && !ib_gpu && !convert_indices) {
+      const u64 base = reinterpret_cast<u64>(d.index_data);
+      const u64 bytes =
+          u64(d.index_count) * GuestIndexElementBytes(d.index_type);
+      if (!(ib_bind.buffer
+                ? FlushCsWritesForGpu(renderer, base, bytes, "index")
+                : FlushCsWritesRange(renderer, base, bytes, "index")))
+        return Decline(kNoRecomp);
+    }
+  }
+  if (convert_indices && ib_cached == u64(-1) &&
+      !ConvertGuestIndices(renderer, reinterpret_cast<u64>(d.index_data),
+                           d.index_count, d.index_type, quads, aligned_ioff))
+    return Decline(kNoRecomp);
+  if (ib_bind.buffer ||
+      base::AnyOf(vb_bind, vb_bind + nbind,
+                  [](const CachedBuffer& b) { return b.buffer != nullptr; })) {
+    EndRegion();
+    g_frame.list->Barrier(rhi::kAccessAllWrite,
+                          rhi::kAccessVertexRead | rhi::kAccessIndexRead);
   }
   rhi::Buffer* indirect_buf = nullptr;
   u64 indirect_off = 0;
@@ -1627,8 +1711,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           multi_formats[i] = g_rts[multi_storage[i]].fmt;
         } else if (multi_feedback[i]) {
           auto& src = g_rts[multi_feedback[i]];
-          multi_views[i] = SampledView(src, d.texs[i].swizzle, true,
-                                       d.texs[i].arrayed);
+          multi_views[i] =
+              SampledView(src, d.texs[i].swizzle, true, d.texs[i].arrayed);
           multi_layouts[i] = rhi::TextureState::kShaderRead;
           multi_formats[i] = src.fmt;
         } else if (multi_color[i]) {
@@ -1684,7 +1768,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         } else if (multi_feedback[i]) {
           multi_views[i] =
               SampledView(g_rts[multi_feedback[i]], d.texs[i].swizzle, true,
-                           d.texs[i].arrayed);
+                          d.texs[i].arrayed);
           multi_formats[i] = g_rts[multi_feedback[i]].fmt;
         } else if (multi_color[i]) {
           multi_views[i] =
@@ -1837,9 +1921,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
     u8* cb_dst = g_ring.ubo_map + next;
     u32 n;
-    if (have_cbuf &&
-        (!FlushCsWritesRange(renderer, cb.base, cache_n, "cb") ||
-         g_frame.list != list))
+    if (have_cbuf && (!FlushCsWritesRange(renderer, cb.base, cache_n, "cb") ||
+                      g_frame.list != list))
       return Decline(kNoRecomp);
     if (have_cbuf) {
       // Upload as much of the window as the base's page holds, not just the
@@ -2012,7 +2095,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // cbuffer decision has succeeded. Bindings served by the per-frame cache
   // were copied by an earlier draw and only rebind.
   for (u32 j = 0; j < nbind; j++) {
-    if (!bind_size[j] || vb_cached[j] != u64(-1) || vb_kept[j].buffer)
+    if (!bind_size[j] || vb_cached[j] != u64(-1) || vb_kept[j].buffer ||
+        vb_bind[j].buffer)
       continue;
     if (!FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.vbufs[j].data),
                             bind_size[j], "vb") ||
@@ -2034,36 +2118,48 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       g_vb_staged.Insert(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
                          0, voff + bind_off[j], tracked);
   }
-  if (indexed && ib_cached == u64(-1)) {
+  if (indexed && ib_cached == u64(-1) && !ib_bind.buffer) {
     const bool tracked =
         ArmForCache(reinterpret_cast<u64>(d.index_data),
-                    u64(d.index_count) * (d.index_type == 1 ? 4 : 2));
-    if (quads)
-      CopyGuestQuadIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
-                           d.index_type);
-    else
+                    u64(d.index_count) * GuestIndexElementBytes(d.index_type));
+    if (!convert_indices) {
       CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
                        d.index_type);
-    g_ring_ib_bytes += index_bytes;
+      g_ring_ib_bytes += index_bytes;
+    }
     if (kRingDedup)
-      g_ib_staged.Insert(reinterpret_cast<u64>(d.index_data), index_bytes,
-                         ib_tag, ioff, tracked, nv - 1);
+      g_ib_staged.Insert(
+          reinterpret_cast<u64>(d.index_data), index_bytes, ib_tag, ioff,
+          tracked, d.num_vattrs && !descriptor_bounds ? nv - 1 : ~0u,
+          u64(d.index_count) * GuestIndexElementBytes(d.index_type),
+          index_revision);
   }
   if (nbind) {
     rhi::Buffer* bufs[8];
     u64 offs[8];
     for (u32 j = 0; j < nbind; j++) {
-      bufs[j] = vb_kept[j].buffer ? vb_kept[j].buffer : g_ring.vb;
-      offs[j] = vb_kept[j].buffer         ? vb_kept[j].offset
-                : vb_cached[j] != u64(-1) ? vb_cached[j]
-                                          : voff + bind_off[j];
+      if (vb_kept[j].buffer) {
+        bufs[j] = vb_kept[j].buffer;
+        offs[j] = vb_kept[j].offset;
+      } else if (vb_bind[j].buffer) {
+        bufs[j] = vb_bind[j].buffer;
+        offs[j] = vb_bind[j].offset;
+      } else {
+        bufs[j] = g_ring.vb;
+        offs[j] = vb_cached[j] != u64(-1) ? vb_cached[j] : voff + bind_off[j];
+      }
     }
     list->SetVertexBuffers(0, nbind, bufs, offs);
   }
   if (indexed)
     list->SetIndexBuffer(
-        g_ring.ib, ib_cached != u64(-1) ? ib_cached : ioff,
-        d.index_type == 1 ? rhi::IndexType::kUint32 : rhi::IndexType::kUint16);
+        ib_bind.buffer    ? ib_bind.buffer
+        : convert_indices ? g_ring.converted_ib
+                          : g_ring.ib,
+        ib_bind.buffer ? ib_bind.offset
+                       : (ib_cached != u64(-1) ? ib_cached : ioff),
+        (convert_indices || d.index_type == 1) ? rhi::IndexType::kUint32
+                                               : rhi::IndexType::kUint16);
   if (kDrawTrace && draw_count >= 300) {
     static int n = 0;
     if (n++ < 40)
@@ -2092,8 +2188,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   else if (indirect_buf)
     list->DrawIndirect(indirect_buf, indirect_off);
   else if (indexed)
-    list->DrawIndexed(upload_indices,
-                      d.instance_count ? d.instance_count : 1, 0, 0, 0);
+    list->DrawIndexed(upload_indices, d.instance_count ? d.instance_count : 1,
+                      0, 0, 0);
   else
     list->Draw(d.vertex_count, d.instance_count ? d.instance_count : 1, 0, 0);
   if (predicate)
@@ -2456,7 +2552,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     target.last_frame = g_frame.num;
   }
   g_ring.vb_offset += vneed;
-  if (indexed && ib_cached == u64(-1))
+  if (indexed && ib_cached == u64(-1) && !ib_bind.buffer)
     g_ring.ib_offset = ioff + index_bytes;
   g_frame.draws++;
   for (u32 i = 0; i < g_region.cur_mrt_count; i++) {

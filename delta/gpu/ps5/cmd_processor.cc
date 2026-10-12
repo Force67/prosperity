@@ -22,15 +22,14 @@
 #include "base/math/value_bounds.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
-#include "base/threading/lock_guard.h"
 #include "base/threading/condition_variable.h"
+#include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
 #include "base/time/time.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/guest_memory.h"
-#include "gpu/render/guest_direct.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps5/agc_regs.h"
 #include "gpu/ps5/cmd_trace.h"
@@ -42,6 +41,7 @@
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/reg_state.h"
 #include "gpu/render/command.h"
+#include "gpu/render/guest_direct.h"
 #include "gpu/render/renderer.h"
 #include "gpu/write_tracker.h"
 #include "profile/profile.h"
@@ -120,7 +120,8 @@ struct QueueState {
   RingStall stall;
   IndexState index;
   u64 draw_indirect_base = 0;
-  u64 indirect_args = 0;  // the draw being issued reads its arguments on the GPU
+  u64 indirect_args =
+      0;  // the draw being issued reads its arguments on the GPU
   u64 dispatch_indirect_base = 0;
   base::Array<u32, 0x400> pushed_context{};
   bool context_pushed = false;
@@ -606,8 +607,8 @@ bool CheckWait(u32 op, const u32* body, u32 count) {
     }
     w = {address, ref, mask, body[0] & 0x7, wide, false};
   }
-  if (!WaitSatisfied(op, body, count) && !WrittenSinceVisible(address, ref,
-                                                              mask, body[0]))
+  if (!WaitSatisfied(op, body, count) &&
+      !WrittenSinceVisible(address, ref, mask, body[0]))
     return false;
   base::LockGuard<base::Mutex> lock(g_parked_lock);
   g_parked.erase(g_queue);
@@ -880,9 +881,9 @@ void HandleDispatchIndirect(render::Renderer& renderer,
   // on the GPU, which reads them itself.
   const u32 initiator = count >= 2 ? body[count - 1] : 5;
   const bool starts_at_zero =
-      (initiator & 4) || (!g_queue->regs[mmCOMPUTE_START_X] &&
-                          !g_queue->regs[mmCOMPUTE_START_Y] &&
-                          !g_queue->regs[mmCOMPUTE_START_Z]);
+      (initiator & 4) ||
+      (!g_queue->regs[mmCOMPUTE_START_X] && !g_queue->regs[mmCOMPUTE_START_Y] &&
+       !g_queue->regs[mmCOMPUTE_START_Z]);
   if (starts_at_zero && (render::CanDispatchIndirect(args) ||
                          !render::GuestBytesSettled(args, 12))) {
     const u32 placeholder[4] = {1, 1, 1, initiator};
@@ -930,12 +931,13 @@ void HandleDrawIndirect(
     return;
   // Not NGG: the GPU reads the arguments where a dispatch left them, or once
   // a GPU write still on its way lands, and nothing waits for them here. An
-  // indexed draw covers the whole index buffer; a plain one whose vertices
-  // are staged reads its count below (HandleDrawPacket).
+  // indexed draw covers the whole index buffer; vertex bindings cover their
+  // descriptor bounds.
   const bool ngg = (g_queue->regs[mmVGT_SHADER_STAGES_EN] >> 7) & 1;
-  const bool gpu_args = !ngg && render::CanDrawIndirect() &&
-                        (render::GpuIndirectArgs(args, want) ||
-                         !render::GuestBytesSettled(args, want));
+  const bool gpu_args =
+      !ngg && render::CanDrawIndirect(g_queue->regs[mmVGT_PRIMITIVE_TYPE]) &&
+      (render::GpuIndirectArgs(args, want) ||
+       !render::GuestBytesSettled(args, want));
   const u32 initiator = count >= 4 ? body[3] : 0;
   if (gpu_args && indexed && g_queue->index.max && g_queue->index.base) {
     const u64 base = g_queue->index.base;
@@ -1002,18 +1004,6 @@ void HandleDrawPacket(render::Renderer& renderer,
   d.Reset();
   if (!BuildDrawInfo(g_queue->regs, packet, d))
     return;
-  // Staged vertex buffers are sized by the count: read it after all.
-  if (d.indirect_args && !d.index_data && d.num_vattrs) {
-    if (!render::FlushCsWritesRange(renderer, d.indirect_args, 16,
-                                    "indirect-draw"))
-      return;
-    const u32* a = reinterpret_cast<const u32*>(d.indirect_args);
-    if (!a[0] || !a[1])
-      return;
-    d.vertex_count = a[0];
-    d.instance_count = a[1];
-    d.indirect_args = 0;
-  }
   if (!g_frame_active) {
     TraceBeginFrame();
     render::BeginFrame(renderer);
@@ -1180,15 +1170,15 @@ u32 Walk(render::Renderer& renderer,
         // Astro Bot, well under the aperture floor), and skipping those left
         // its completion fence one submit short forever, so the decode thread
         // spun holding the lock the whole player waits on.
-        const bool follow =
-            ib_words && ib_words <= 0x40000 && IsGuestAddress(ib) &&
-            gpu::IsReadableRangeCached(ib, static_cast<u64>(ib_words) * sizeof(u32));
+        const bool follow = ib_words && ib_words <= 0x40000 &&
+                            IsGuestAddress(ib) &&
+                            gpu::IsReadableRangeCached(
+                                ib, static_cast<u64>(ib_words) * sizeof(u32));
         TraceIndirectBuffer(ib, ib_words, follow);
         if (follow) {
           // A command buffer a dispatch wrote is read from guest memory.
-          render::FlushCsWritesRange(renderer, ib,
-                                     static_cast<u64>(ib_words) * sizeof(u32),
-                                     "ib");
+          render::FlushCsWritesRange(
+              renderer, ib, static_cast<u64>(ib_words) * sizeof(u32), "ib");
           // Re-enter where a stalled walk of this same buffer left off.
           u32 start = 0;
           if (g_queue->stall.ib[depth + 1] == ib) {
@@ -1374,7 +1364,8 @@ u32 Walk(render::Renderer& renderer,
       case 0x1e:  // ATOMIC_MEM
         if (count >= 3)
           PublishPacket(HandleAtomicMem, body, count,
-                        (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1], 8);
+                        (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1],
+                        8);
         break;
       case 0x12:  // CLEAR_STATE: context push/pop/clear
         HandleClearState(body, count);
@@ -1452,10 +1443,7 @@ void StartRendererOnce(render::Renderer& renderer) {
 
 }  // namespace
 
-u32 SubmitDcbRing(const void* dcb,
-                  u32 size_bytes,
-                  u32 queue,
-                  u64 visible_ns) {
+u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue, u64 visible_ns) {
   if (!dcb || size_bytes < 4)
     return size_bytes / 4;
   base::LockGuard<base::Mutex> lock(g_mutex);
@@ -1543,17 +1531,7 @@ static void FinishGraphicsFlip(u64 scanout_base) {
   // the early return, or a frame that ends with nothing active never advances
   // it and the cache stops revalidating at all.
   rdna::NextProgramGeneration();
-  // Every guest map and unmap is reported, so what was readable stays so
-  // until one: probing the pages again every frame was a thousand mincore
-  // and process_vm_readv calls a frame. Once a second regardless.
-  {
-    static u32 frames = 0;
-    if (gpu::MemoryRemapped().exchange(false, base::memory_order_acq_rel) ||
-        ++frames >= 60) {
-      frames = 0;
-      gpu::NextMemoryGeneration();
-    }
-  }
+  gpu::FrameMemoryGeneration();
   render::Renderer& renderer = render::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;

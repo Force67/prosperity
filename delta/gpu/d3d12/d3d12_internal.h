@@ -192,6 +192,13 @@ class D3D12PipelineLayout final : public rhi::PipelineLayout {
     desc_ = desc;
   }
   ID3D12RootSignature* root = nullptr;
+  ID3D12CommandSignature* indirect[3]{};
+#if defined(_WIN32)
+  static constexpr bool parameter_buffers = false;
+#else
+  // vkd3d's ExecuteIndirect does not consume root-constant arguments.
+  static constexpr bool parameter_buffers = true;
+#endif
   i32 push_constants = -1;  // root constants
   i32 push_cbv = -1;        // push constants from upload memory
   u32 push_dwords = 0;
@@ -293,8 +300,11 @@ class D3D12CommandList final : public rhi::CommandList {
                    u32 first_index,
                    i32 vertex_offset,
                    u32 first_instance) override;
+  void DrawIndirect(rhi::Buffer* args, u64 offset) override;
+  void DrawIndexedIndirect(rhi::Buffer* args, u64 offset) override;
   void DrawMeshTasks(u32 x, u32 y, u32 z) override;
   void Dispatch(u32 x, u32 y, u32 z) override;
+  void DispatchIndirect(rhi::Buffer* args, u64 offset) override;
   void DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) override;
   void ClearAttachment(u32 attachment,
                        const rhi::ClearColor& color,
@@ -372,6 +382,9 @@ class D3D12CommandList final : public rhi::CommandList {
   UploadAlloc AllocateUpload(u64 bytes, u64 alignment);
   // A DEFAULT-heap region for repacking copies, in COPY_DEST.
   UploadAlloc AllocateScratch(u64 bytes);
+  UploadAlloc PackIndirectArguments(D3D12Buffer* args, u64 offset,
+                                     u32 constant_offset, u32 constants,
+                                     u32 argument_words);
   void ReleaseTransient();
 
   // Buffer states are per list: every buffer decays to COMMON between
@@ -400,6 +413,8 @@ class D3D12CommandList final : public rhi::CommandList {
                        u64 offset,
                        u64 range);
   void FlushState(bool compute);
+  bool SetDrawParameters(i32 first_vertex, u32 first_instance);
+  void ExecuteIndirect(rhi::Buffer* args, u64 offset, u32 kind);
   void ApplyVertexBuffers();
 
   void CopyBufferTexture(D3D12Texture* texture,

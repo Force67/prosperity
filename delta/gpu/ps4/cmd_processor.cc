@@ -1166,7 +1166,20 @@ u32 WalkDcb(render::Renderer& renderer,
 // Look ahead through a command buffer for the shaders its draws will need, so
 // they compile on worker threads before the walk reaches them. Only register
 // writes are followed; a draw whose state this misreads just compiles in line
-// as it always did.
+// as it always did. It writes straight into the live registers and logs what
+// it overwrote, so the caller restores them instead of copying the whole file.
+struct RegUndo {
+  u32 off, old;
+};
+base::Vector<RegUndo> g_prefetch_undo;
+
+void PrefetchSet(Regs& regs, u32 off, u32 value) {
+  if (off >= kRegFileSize || regs[off] == value)
+    return;
+  g_prefetch_undo.push_back({off, regs[off]});
+  regs[off] = value;
+}
+
 void PrefetchWalk(Regs& regs, const u32* p, u32 words, u32 depth) {
   u32 i = 0;
   while (i < words) {
@@ -1180,8 +1193,7 @@ void PrefetchWalk(Regs& regs, const u32* p, u32 words, u32 depth) {
     if (type == Pm4Type::kType0) {
       const u32 base = Pm4Type0Reg(hdr);
       for (u32 k = 0; k < count && i + 1 + k < words; k++)
-        if (base + k < kRegFileSize)
-          regs[base + k] = p[i + 1 + k];
+        PrefetchSet(regs, base + k, p[i + 1 + k]);
       i += 1 + count;
       continue;
     }
@@ -1240,8 +1252,7 @@ void PrefetchWalk(Regs& regs, const u32* p, u32 words, u32 depth) {
     if (reg_base && count) {
       const u32 first = Pm4SetRegAddress(reg_base, body[0]);
       for (u32 k = 1; k < count; k++)
-        if (first + k - 1 < kRegFileSize)
-          regs[first + k - 1] = body[k];
+        PrefetchSet(regs, first + k - 1, body[k]);
     }
     i += 1 + count;
   }
@@ -1274,7 +1285,7 @@ void StartRendererOnce(render::Renderer& renderer) {
   // The resource replay reads descriptor tables out of guest memory a compute
   // dispatch may still own; it is below the renderer, so it cannot ask itself.
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
-    FlushForWalkRead(render::DefaultRenderer(), address, bytes, "desc");
+    SpeculateWalkRead(render::DefaultRenderer(), address, bytes);
   };
   if (kRenderThread && renderer.available())
     GuestRenderQueue().Start(renderer);
@@ -1297,7 +1308,7 @@ void EndFrame(u64 scanout_base) {
   // New frame -> shader code may have been rewritten; let CachedProgram
   // revalidate each address once next frame instead of once per draw.
   gcn::NextProgramCacheGeneration();
-  gpu::NextMemoryGeneration();
+  gpu::FrameMemoryGeneration();
   render::Renderer& renderer = render::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;
@@ -1343,9 +1354,10 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   TraceDcbStat(words);
 
   if (kPrefetchShaders && renderer.available()) {
-    static Regs prefetch_regs;
-    prefetch_regs = g_regs;
-    PrefetchWalk(prefetch_regs, p, words, 0);
+    PrefetchWalk(g_regs, p, words, 0);
+    for (u32 k = g_prefetch_undo.size(); k-- > 0;)
+      g_regs[g_prefetch_undo[k].off] = g_prefetch_undo[k].old;
+    g_prefetch_undo.clear();
   }
   const u32 walked = WalkDcb(renderer, p, words, 0, dump);
   FinishCe(renderer);

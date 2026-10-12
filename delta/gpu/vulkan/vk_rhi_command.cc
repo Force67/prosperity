@@ -184,6 +184,7 @@ struct AutoSpan {
 }  // namespace
 
 void VulkanCommandList::Begin() {
+  dispatch_based_ = false;
   // The previous recording has retired (the list is being reused): fold its
   // span into its tag.
   if (prof_pending_) {
@@ -466,6 +467,7 @@ void VulkanCommandList::DrawMeshTasks(u32 x, u32 y, u32 z) {
 }
 
 void VulkanCommandList::Dispatch(u32 x, u32 y, u32 z) {
+  dispatch_based_ = false;
   vkCmdDispatch(cmd, x, y, z);
 }
 
@@ -485,6 +487,10 @@ void VulkanCommandList::EndConditional() {
 }
 
 void VulkanCommandList::DispatchIndirect(rhi::Buffer* args, u64 offset) {
+  // Lavapipe retains the previous dispatch base for an indirect dispatch.
+  if (dispatch_based_ && std::strstr(device_.caps().device_name, "llvmpipe"))
+    vkCmdDispatch(cmd, 0, 0, 0);
+  dispatch_based_ = false;
   vkCmdDispatchIndirect(cmd, Buf(args)->buffer, offset);
 }
 
@@ -504,6 +510,7 @@ void VulkanCommandList::DispatchBase(u32 bx,
                                      u32 x,
                                      u32 y,
                                      u32 z) {
+  dispatch_based_ = bx || by || bz;
   vkCmdDispatchBase(cmd, bx, by, bz, x, y, z);
 }
 

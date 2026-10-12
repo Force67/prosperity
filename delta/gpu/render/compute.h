@@ -43,8 +43,9 @@ bool CsSupplyTextureFromBuffer(u64 base,
 
 // A texture uploaded from guest memory: the GPU copies its bytes out of the
 // guest pages, detiles them when tiled, and copies mips `first_mip` on into
-// `img` (left in kShaderRead). A volume's slices are the layout's layers. False when a tiled layout has no GPU tiling table; the caller
-// detiles on the CPU then.
+// `img` (left in kShaderRead). A volume's slices are the layout's layers. False
+// when a tiled layout has no GPU tiling table; the caller detiles on the CPU
+// then.
 bool DetileTextureOnGpu(u64 base,
                         const gcn::TextureLayout32& tiled,
                         u32 texel_w,
@@ -82,12 +83,13 @@ bool CsClearPredicate(u64 address,
 // reading a dispatch's output then costs no readback and no wait.
 u64 CsBufferRevision(u64 base, u64 bytes);
 bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
-// The same window bound in place as a vertex stream: `*buffer`+`*offset` is
-// the range's own buffer, made visible to vertex fetch on the frame list.
-// Skinning output read by the next draws then never goes through guest memory.
-bool CsVertexBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
-// Whether CsVertexBuffer can serve the window, without binding anything.
-bool CsHoldsVertices(u64 base, u64 bytes);
+// The same window bound in place as a vertex or index stream:
+// `*buffer`+`*offset` is the range's own buffer, made visible to geometry fetch
+// on the frame list. Skinning output read by the next draws then never goes
+// through guest memory.
+bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
+// Whether CsGeometryBuffer can serve the window, without binding anything.
+bool CsHoldsGeometry(u64 base, u64 bytes);
 
 // The frame's list while one records, else the compute batch, which goes on
 // the queue ahead of the next frame. Null when neither can open.

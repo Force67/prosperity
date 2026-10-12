@@ -260,7 +260,10 @@ enum class Op : u8 {
   kBlendConstants,
   kDraw,
   kDrawIndexed,
+  kDrawIndirect,
+  kDrawIndexedIndirect,
   kDispatch,
+  kDispatchIndirect,
   kClearAttachment,
   kCopyBuffer,
   kBufferToTexture,
@@ -409,11 +412,33 @@ struct CmdDrawIndexed {
   u64 offset;  // bytes into the index buffer
 };
 
+struct CmdDrawIndirect {
+  static constexpr Op kOp = Op::kDrawIndirect;
+  Cmd h;
+  GLuint buffer;
+  u64 offset;
+};
+
+struct CmdDrawIndexedIndirect {
+  static constexpr Op kOp = Op::kDrawIndexedIndirect;
+  Cmd h;
+  GLuint buffer;
+  GLenum type;
+  u64 offset, index_offset;
+};
+
 struct CmdDispatch {
   static constexpr Op kOp = Op::kDispatch;
   Cmd h;
   u32 base[3];
   u32 x, y, z;
+};
+
+struct CmdDispatchIndirect {
+  static constexpr Op kOp = Op::kDispatchIndirect;
+  Cmd h;
+  GLuint buffer;
+  u64 offset;
 };
 
 struct CmdClearAttachment {
@@ -598,8 +623,11 @@ class GlCommandList final : public rhi::CommandList {
                    u32 first_index,
                    i32 vertex_offset,
                    u32 first_instance) override;
+  void DrawIndirect(rhi::Buffer* args, u64 offset) override;
+  void DrawIndexedIndirect(rhi::Buffer* args, u64 offset) override;
   void DrawMeshTasks(u32 x, u32 y, u32 z) override;
   void Dispatch(u32 x, u32 y, u32 z) override;
+  void DispatchIndirect(rhi::Buffer* args, u64 offset) override;
   void DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) override;
   void ClearAttachment(u32 attachment,
                        const rhi::ClearColor& color,
@@ -726,6 +754,7 @@ class Replayer {
   void ApplyBlend(u32 i, const BlendState& b);
   void ApplyStencil(GLenum face, const StencilState& s, StencilState& have);
   void UseProgram(GLuint program);
+  void DrawIndexedIndirect(const CmdDrawIndexedIndirect& c);
   void BindVao(VertexInput* input);
   GLuint Vao(VertexInput* input);
   // Every colour, depth and stencil write enabled, as clears and blits need.
@@ -756,6 +785,8 @@ class Replayer {
   base::HashMap<FboKey, GLuint, FboKeyHash> fbos_;
   GLuint scratch_read_ = 0, scratch_draw_ = 0;
   GLuint push_ubo_ = 0;
+  GLuint indirect_args_ = 0, indirect_program_ = 0;
+  CmdBindBuffer storage_zero_{};
   GLuint pixel_pack_ = 0, pixel_unpack_ = 0;
 
   // The pipeline the next draw uses, and what GL currently has.

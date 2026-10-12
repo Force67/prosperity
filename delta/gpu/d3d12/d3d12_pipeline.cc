@@ -208,7 +208,8 @@ rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
     for (const GroupEntry& e : gl->entries)
       dynamic_ubos += e.type == rhi::BindingType::kUniformBufferDynamic;
   }
-  constexpr u32 kInternal = 1 + 2 + 3 + 3;
+  constexpr u32 kInternal =
+      1 + 2 + (D3D12PipelineLayout::parameter_buffers ? 2 : 3) + 3;
   bool root_ubos = true;
   bool push_root_constants = true;
   if (layout->push_dwords + kInternal + tables + 2 * dynamic_ubos >
@@ -235,9 +236,16 @@ rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
   layout->raster = static_cast<i32>(params.size());
   params.push_back(Constants(kRasterRegister, 1));
   layout->draw = static_cast<i32>(params.size());
-  params.push_back(Constants(kDrawRegister, 2));
-  layout->dispatch = static_cast<i32>(params.size());
-  params.push_back(Constants(kDispatchRegister, 3));
+  for (u32 reg : {kDrawRegister, kDispatchRegister}) {
+    auto parameter = Constants(reg, reg == kDrawRegister ? 2 : 3);
+    if (layout->parameter_buffers) {
+      parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+      parameter.Descriptor = {reg, kInternalSpace};
+    }
+    if (reg == kDispatchRegister)
+      layout->dispatch = static_cast<i32>(params.size());
+    params.push_back(parameter);
+  }
   layout->group_base = static_cast<i32>(params.size());
   params.push_back(Constants(kGroupBaseRegister, 3));
 
@@ -290,6 +298,33 @@ rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
   layout->root = SerializeRoot(rd);
   if (!layout->root)
     return nullptr;
+  const D3D12_INDIRECT_ARGUMENT_TYPE types[] = {
+      D3D12_INDIRECT_ARGUMENT_TYPE_DRAW,
+      D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED,
+      D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH};
+  const u32 strides[] = {24, 28, 24};
+  for (u32 i = 0; i < 3; i++) {
+    D3D12_INDIRECT_ARGUMENT_DESC arguments[2]{};
+    arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+    arguments[0].Constant.RootParameterIndex =
+        i == 2 ? layout->dispatch : layout->draw;
+    arguments[0].Constant.Num32BitValuesToSet = i == 2 ? 3 : 2;
+    arguments[1].Type = types[i];
+    D3D12_COMMAND_SIGNATURE_DESC signature{};
+    signature.ByteStride =
+        layout->parameter_buffers ? strides[i] - (i == 2 ? 12 : 8) : strides[i];
+    signature.NumArgumentDescs = layout->parameter_buffers ? 1 : 2;
+    signature.pArgumentDescs = arguments + (layout->parameter_buffers ? 1 : 0);
+    if (FAILED(device->CreateCommandSignature(
+            &signature, layout->parameter_buffers ? nullptr : layout->root,
+            IID_ID3D12CommandSignature,
+            reinterpret_cast<void**>(&layout->indirect[i])))) {
+      for (auto*& command : layout->indirect)
+        SafeRelease(command);
+      SafeRelease(layout->root);
+      return nullptr;
+    }
+  }
   return gpu::rhi::Release(layout, this);
 }
 

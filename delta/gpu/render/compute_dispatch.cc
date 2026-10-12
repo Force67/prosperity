@@ -316,61 +316,70 @@ void MarkWrittenWindows(u64 cs_addr,
 // for after each dispatch, to learn which windows it wrote. Demon's Souls
 // runs ~5 a frame that have never written one (200 windows each), and those
 // waits were a quarter of the frame. After kQuietAfter dispatches without a
-// write the shader is no longer waited for: its flags are read where the GPU
-// is waited for anyway (before the next such dispatch, at frame end), and a
-// write found there marks the ranges late and puts the shader back on the
-// waited path for good.
+// write the shader is no longer waited for: its flags are read once its batch
+// has completed, and a write found there marks the ranges late and puts the
+// shader back on the waited path for good.
 constexpr u32 kQuietAfter = 16;
 struct WriterHistory {
   u32 quiet = 0;
   bool writes = false;
 };
 base::HashMap<u64, WriterHistory> g_writer_history;
-struct UncheckedWrites {
+// A pointer-chasing dispatch's table set, until its batch has completed.
+struct PendingTable {
+  u32 set = 0;
+  u64 batch = 0;
   u64 cs_addr = 0;
+  // A quiet writer: its flags are only read here.
+  bool check_writes = false;
   base::Vector<GuestWindowOwner> owners;
 };
-base::Vector<UncheckedWrites> g_unchecked;  // at most one: the flags are shared
-
-// The GPU is past the last pointer-chasing dispatch (the caller waited).
-void CheckUnwaitedWrites() {
-  for (UncheckedWrites& u : g_unchecked) {
-    const auto written = TakeWrittenWindows();
-    if (written.empty())
-      continue;
-    BASE_LOGW("csgpu",
-              "CS @{:#x} stored through guest pointers after {} quiet "
-              "dispatches; waited for again",
-              u.cs_addr, kQuietAfter);
-    g_writer_history[u.cs_addr].writes = true;
-    MarkWrittenWindows(u.cs_addr, u.owners, written);
-  }
-  g_unchecked.clear();
-}
+base::Vector<PendingTable> g_pending_tables;
+constexpr size_t kMaxPendingTables = 64;
 
 const guest::SessionReset g_writers_reset([] {
   guest::ResetResource(g_writer_history);
-  guest::ResetResource(g_unchecked);
+  guest::ResetResource(g_pending_tables);
 });
 
-// Frame end: the flags of an unwaited dispatch are read before the frame's
-// writebacks, so a late write still reaches guest memory this frame.
-bool cs::SettleUnwaitedWrites() {
-  if (g_unchecked.empty())
+// Hands a set back unless the dispatch it was prepared for got recorded.
+struct TableSetGuard {
+  u32 set = ~0u;
+  ~TableSetGuard() {
+    if (set != ~0u)
+      ReleaseGuestMemory(set);
+  }
+};
+
+// The pointer-chasing dispatches the GPU has finished: addresses they found in
+// no window get a buffer, and a quiet writer that did store marks its ranges
+// late and is waited for from then on. Never waits for the GPU.
+void cs::HarvestGuestTables() {
+  CsBatchReap();
+  base::EraseIf(g_pending_tables, [](PendingTable& p) {
+    if (p.batch > g_cs_batch_done)
+      return false;
+    for (u64 address : TakeGuestMisses(p.set))
+      MaterializeGuestRange(address);
+    if (p.check_writes) {
+      const auto written = TakeWrittenWindows(p.set);
+      if (!written.empty()) {
+        BASE_LOGW("csgpu",
+                  "CS @{:#x} stored through guest pointers after {} quiet "
+                  "dispatches; waited for again",
+                  p.cs_addr, kQuietAfter);
+        g_writer_history[p.cs_addr].writes = true;
+        MarkWrittenWindows(p.cs_addr, p.owners, written);
+      }
+    }
+    ReleaseGuestMemory(p.set);
     return true;
-  if (!CsBatchFlush(kSyncBatchCap))
-    return false;
-  CheckUnwaitedWrites();
-  return true;
+  });
 }
 
 bool GuestWindows(const ComputeInfo& ci,
                   base::Vector<GuestMemoryWindow>& out,
                   base::Vector<GuestWindowOwner>& owners) {
-  // The previous pointer-chasing dispatch has completed (the caller waited):
-  // what it found nowhere gets a buffer now.
-  for (u64 address : TakeGuestMisses())
-    MaterializeGuestRange(address);
   for (u64 address : ci.guest_memory_seeds)
     MaterializeGuestRange(address);
   // The part [base + skip, base + skip + n) of a range inside one mapping.
@@ -640,6 +649,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   u64 guest_table_bytes = 0;
   base::Vector<GuestMemoryWindow> windows;
   base::Vector<GuestWindowOwner> window_owners;
+  TableSetGuard guest_set;
   ScopeCs cs;
   for (u32 i = 0; i < ci.num_res; i++)
     g_cs_bytes += ci.res[i].size;
@@ -1420,15 +1430,15 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   }
   if (ci.recomp->guest_memory_binding >= 0) {
     // After this dispatch's own resources are staged: they are windows too.
-    // The table and its flags are reused, so the previous pointer-chasing
-    // dispatch has to be done with them.
-    if (!CsBatchFlush(kSyncBatchCap))
+    // Pointer-chasing dispatches still in flight keep their own tables.
+    if (g_pending_tables.size() >= kMaxPendingTables &&
+        !CsBatchWaitId(g_pending_tables.front().batch, kSyncBatchCap))
       return CsDeclined(ci, "guest-address-map");
-    CheckUnwaitedWrites();
+    HarvestGuestTables();
     if (!GuestWindows(ci, windows, window_owners))
       return CsDeclined(ci, "guest-windows");
     if (!PrepareGuestMemory(windows, guest_table, guest_table_bytes,
-                            ci.recomp->guest_memory_written))
+                            ci.recomp->guest_memory_written, guest_set.set))
       return CsDeclined(ci, "guest-address-map");
     wr[nwrite].binding = ci.recomp->guest_memory_binding;
     wr[nwrite].buffer = guest_table;
@@ -1704,24 +1714,34 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     renderer.state = nullptr;
     return CsDeclined(ci, "21");
   }
-  if (ci.recomp->guest_memory_written) {
-    WriterHistory& history = g_writer_history[ci.cs_addr];
-    if (!history.writes && history.quiet >= kQuietAfter) {
-      g_unchecked.push_back({ci.cs_addr, window_owners});
-    } else {
-      // Stores through guest pointers landed in the windows' own buffers.
-      CsBatchBeginImpl();
+  if (guest_table) {
+    PendingTable pending{guest_set.set, g_cs_batch_id, ci.cs_addr};
+    guest_set.set = ~0u;
+    if (g_cs_batch_open)
       g_cs_list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
-      if (!CsBatchFlush(kSyncBatchCap))
-        return CsDeclined(ci, "guest-writeback");
-      const auto written = TakeWrittenWindows();
-      if (written.empty()) {
-        history.quiet++;
+    if (ci.recomp->guest_memory_written) {
+      WriterHistory& history = g_writer_history[ci.cs_addr];
+      if (!history.writes && history.quiet >= kQuietAfter) {
+        pending.check_writes = true;
+        pending.owners = base::move(window_owners);
       } else {
-        history.writes = true;
-        MarkWrittenWindows(ci.cs_addr, window_owners, written);
+        // Stores through guest pointers landed in the windows' own buffers.
+        CsBatchBeginImpl();
+        g_cs_list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
+        if (!CsBatchFlush(kSyncBatchCap)) {
+          ReleaseGuestMemory(pending.set);
+          return CsDeclined(ci, "guest-writeback");
+        }
+        const auto written = TakeWrittenWindows(pending.set);
+        if (written.empty()) {
+          history.quiet++;
+        } else {
+          history.writes = true;
+          MarkWrittenWindows(ci.cs_addr, window_owners, written);
+        }
       }
     }
+    g_pending_tables.push_back(base::move(pending));
   }
   g_ns_cs_out += NowNs() - t_out0;
   if (ci.expanded_htile_base)

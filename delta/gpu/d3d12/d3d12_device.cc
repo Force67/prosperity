@@ -385,6 +385,8 @@ bool D3D12Device::Init(const D3D12Options& options) {
   caps_.storage_offset_alignment = D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT;
   caps_.max_texture_size = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
   caps_.max_texture_size_3d = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
+  caps_.dispatch_indirect = true;
+  caps_.draw_indirect = true;
   caps_.dispatch_base = true;  // an id offset in the lowered shader
   caps_.max_compute_resources = 64;
   caps_.texture_blit = InitBlit();
@@ -1024,6 +1026,8 @@ void D3D12Device::Destroy(rhi::Object* object) {
   } else if (auto* g = dynamic_cast<D3D12BindGroup*>(object)) {
     views.Free(g->table);
   } else if (auto* pl = dynamic_cast<D3D12PipelineLayout*>(object)) {
+    for (auto*& signature : pl->indirect)
+      SafeRelease(signature);
     SafeRelease(pl->root);
   } else if (auto* p = dynamic_cast<D3D12Pipeline*>(object)) {
     SafeRelease(p->pso);

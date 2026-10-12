@@ -83,8 +83,10 @@ struct UploadRings {
   u8* vb_map = nullptr;
   u64 vb_offset = 0, vb_end = kVbRing;
 
-  // Index ring: 32-bit indices (16-bit guest indices are widened on upload).
+  // Native index uploads and device-local converted indices share offsets.
   rhi::Buffer* ib = nullptr;
+  rhi::Buffer* converted_ib = nullptr;
+  rhi::Buffer* index_convert_src = nullptr;
   u8* ib_map = nullptr;
   u64 ib_offset = 0, ib_end = kIbRing;
 

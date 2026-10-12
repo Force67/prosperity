@@ -120,6 +120,10 @@ void FlushForWalkRead(render::Renderer& renderer,
                       u64 base,
                       u64 bytes,
                       const char* why);
+// The same for a descriptor table read: bytes a GPU rewrite is still landing
+// are taken as they are where they have not been changing, and checked once
+// it lands (render::SpeculateGuestRead).
+void SpeculateWalkRead(render::Renderer& renderer, u64 base, u64 bytes);
 // Whether that read would have to wait for the renderer or the GPU.
 bool WalkReadWouldWait(u64 base, u64 bytes);
 

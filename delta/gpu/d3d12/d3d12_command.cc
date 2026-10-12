@@ -729,6 +729,23 @@ void D3D12CommandList::FlushState(bool compute) {
   }
 }
 
+bool D3D12CommandList::SetDrawParameters(i32 first_vertex, u32 first_instance) {
+  if (!pipeline_->uses_draw_params)
+    return true;
+  auto* layout = pipeline_->layout;
+  const u32 params[] = {static_cast<u32>(first_vertex), first_instance};
+  if (layout->parameter_buffers) {
+    const auto upload = AllocateUpload(sizeof(params), 256);
+    if (!upload.cpu)
+      return false;
+    std::memcpy(upload.cpu, params, sizeof(params));
+    cmd->SetGraphicsRootConstantBufferView(layout->draw, upload.va);
+  } else {
+    cmd->SetGraphicsRoot32BitConstants(layout->draw, 2, params, 0);
+  }
+  return true;
+}
+
 void D3D12CommandList::Draw(u32 vertex_count,
                             u32 instance_count,
                             u32 first_vertex,
@@ -751,18 +768,16 @@ void D3D12CommandList::Draw(u32 vertex_count,
     const D3D12_INDEX_BUFFER_VIEW ib{a.va, n * 4, DXGI_FORMAT_R32_UINT};
     cmd->IASetIndexBuffer(&ib);
     index_dirty_ = true;
-    const i32 params[2] = {static_cast<i32>(first_vertex),
-                           static_cast<i32>(first_instance)};
-    cmd->SetGraphicsRoot32BitConstants(layout->draw, 2, params, 0);
+    if (!SetDrawParameters(first_vertex, first_instance))
+      return;
     cmd->DrawIndexedInstanced(n, instance_count, 0,
                               static_cast<INT>(first_vertex), first_instance);
     return;
   }
   // SV_VertexID and SV_InstanceID count from zero; gl_VertexIndex and
   // gl_InstanceIndex count from the first vertex and instance.
-  const i32 params[2] = {static_cast<i32>(first_vertex),
-                         static_cast<i32>(first_instance)};
-  cmd->SetGraphicsRoot32BitConstants(layout->draw, 2, params, 0);
+  if (!SetDrawParameters(first_vertex, first_instance))
+    return;
   cmd->DrawInstanced(vertex_count, instance_count, first_vertex,
                      first_instance);
 }
@@ -780,16 +795,98 @@ void D3D12CommandList::DrawIndexed(u32 index_count,
     return;
   }
   FlushState(false);
-  const i32 params[2] = {vertex_offset, static_cast<i32>(first_instance)};
-  cmd->SetGraphicsRoot32BitConstants(pipeline_->layout->draw, 2, params, 0);
+  if (!SetDrawParameters(vertex_offset, first_instance))
+    return;
   cmd->DrawIndexedInstanced(index_count, instance_count, first_index,
                             vertex_offset, first_instance);
+}
+
+UploadAlloc D3D12CommandList::PackIndirectArguments(D3D12Buffer* args,
+                                                    u64 offset,
+                                                    u32 constant_offset,
+                                                    u32 constants,
+                                                    u32 argument_words) {
+  const UploadAlloc packed = AllocateScratch((constants + argument_words) * 4);
+  if (!packed.resource)
+    return {};
+  Require(args, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  RequireScratch(packed.resource, D3D12_RESOURCE_STATE_COPY_DEST);
+  FlushBarriers();
+  cmd->CopyBufferRegion(packed.resource, packed.offset, args->resource,
+                        offset + constant_offset, constants * 4);
+  cmd->CopyBufferRegion(packed.resource, packed.offset + constants * 4,
+                        args->resource, offset, argument_words * 4);
+  RequireScratch(packed.resource,
+                 D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT |
+                     D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+  return packed;
+}
+
+void D3D12CommandList::ExecuteIndirect(rhi::Buffer* args,
+                                       u64 offset,
+                                       u32 kind) {
+  const bool compute = kind == 2;
+  if (!pipeline_ || pipeline_->compute != compute ||
+      (!compute && pipeline_->fan))
+    return;
+  auto* layout = pipeline_->layout;
+  auto* source = Buf(args);
+  const bool parameters =
+      compute ? pipeline_->uses_workgroup_count : pipeline_->uses_draw_params;
+  bool pack = parameters || !layout->parameter_buffers;
+  for (u32 i = 0; i < layout->groups.size() && i < 8; i++)
+    for (const auto& use : groups_[i].uses)
+      pack |= use.buffer == source && (use.state & kWriteStates);
+  const u32 constants = compute ? 3 : 2;
+  UploadAlloc arguments{source->resource, offset, nullptr, 0};
+  if (pack) {
+    arguments = PackIndirectArguments(source, offset,
+                                      kind == 0   ? 8
+                                      : kind == 1 ? 12
+                                                  : 0,
+                                      constants,
+                                      kind == 0   ? 4
+                                      : kind == 1 ? 5
+                                                  : 3);
+    if (!arguments.resource)
+      return;
+  } else {
+    Require(source, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+  }
+  FlushState(compute);
+  if (layout->parameter_buffers && parameters) {
+    if (compute)
+      cmd->SetComputeRootConstantBufferView(layout->dispatch, arguments.va);
+    else
+      cmd->SetGraphicsRootConstantBufferView(layout->draw, arguments.va);
+  }
+  if (compute && pipeline_->dispatch_base) {
+    const u32 base[3]{};
+    cmd->SetComputeRoot32BitConstants(layout->group_base, 3, base, 0);
+  }
+  cmd->ExecuteIndirect(
+      layout->indirect[kind], 1, arguments.resource,
+      arguments.offset +
+          (pack && layout->parameter_buffers ? constants * 4 : 0),
+      nullptr, 0);
+}
+
+void D3D12CommandList::DrawIndirect(rhi::Buffer* args, u64 offset) {
+  ExecuteIndirect(args, offset, 0);
+}
+
+void D3D12CommandList::DrawIndexedIndirect(rhi::Buffer* args, u64 offset) {
+  ExecuteIndirect(args, offset, 1);
 }
 
 void D3D12CommandList::DrawMeshTasks(u32, u32, u32) {}
 
 void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
   DispatchBase(0, 0, 0, x, y, z);
+}
+
+void D3D12CommandList::DispatchIndirect(rhi::Buffer* args, u64 offset) {
+  ExecuteIndirect(args, offset, 2);
 }
 
 void D3D12CommandList::DispatchBase(u32 bx,
@@ -800,7 +897,18 @@ void D3D12CommandList::DispatchBase(u32 bx,
                                     u32 z) {
   FlushState(true);
   const u32 groups[3] = {x, y, z};
-  cmd->SetComputeRoot32BitConstants(pipeline_->layout->dispatch, 3, groups, 0);
+  if (pipeline_->uses_workgroup_count) {
+    auto* layout = pipeline_->layout;
+    if (layout->parameter_buffers) {
+      const auto upload = AllocateUpload(sizeof(groups), 256);
+      if (!upload.cpu)
+        return;
+      std::memcpy(upload.cpu, groups, sizeof(groups));
+      cmd->SetComputeRootConstantBufferView(layout->dispatch, upload.va);
+    } else {
+      cmd->SetComputeRoot32BitConstants(layout->dispatch, 3, groups, 0);
+    }
+  }
   if (pipeline_->dispatch_base) {
     const u32 base[3] = {bx, by, bz};
     cmd->SetComputeRoot32BitConstants(pipeline_->layout->group_base, 3, base,

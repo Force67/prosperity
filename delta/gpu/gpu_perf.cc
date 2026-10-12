@@ -25,9 +25,12 @@ u64 g_ns_pipe_build = 0, g_pipe_build_n = 0;
 u64 g_pipe_pending_draws = 0;
 u64 g_ns_gfx_present = 0, g_ns_borrow_wait = 0;
 // Bytes the draw path copied into its upload rings, per ring.
+u64 g_index_convert_n = 0, g_index_convert_bytes = 0;
 u64 g_ring_vb_bytes = 0, g_ring_ib_bytes = 0, g_ring_cb_bytes = 0,
     g_ring_raw_bytes = 0;
 u64 g_vb_kept_bytes = 0;
+u64 g_bind_bytes = 0;
+u32 g_bind_n = 0;
 u64 g_ns_submit = 0, g_ns_present = 0;
 u32 g_tex_ups = 0;
 u32 g_cs_stage_n = 0, g_cs_flush_n = 0;

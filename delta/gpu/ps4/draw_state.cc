@@ -191,7 +191,7 @@ void ReadIndirectArgs(render::Renderer& renderer,
   if (op == IT_DRAW_INDIRECT) {
     d.vertex_count = a[0];
   } else if (packet.index_base) {
-    const u32 index_bytes = packet.index_type == 1 ? 4 : 2;
+    const u32 index_bytes = packet.index_type == 1 ? 4 : packet.index_type == 2 ? 1 : 2;
     const u64 base = packet.index_base + static_cast<u64>(a[2]) * index_bytes;
     if (host_memory::IsMemoryRangeMapped(
             reinterpret_cast<const void*>(base),
@@ -236,15 +236,16 @@ void ResolveIndexBuffer(render::Renderer& renderer,
       packet.indirect_base) {
     const u64 args = packet.indirect_base + body[0];
     const bool indexed = op == IT_DRAW_INDEX_INDIRECT;
-    const u32 index_bytes = packet.index_type == 1 ? 4 : 2;
+    const u32 index_bytes = packet.index_type == 1   ? 4
+                            : packet.index_type == 2 ? 1
+                                                     : 2;
     const bool whole_buffer =
         packet.index_base && packet.index_max &&
         packet.index_max <= kMaxElementCount &&
         host_memory::IsMemoryRangeMapped(
             reinterpret_cast<const void*>(packet.index_base),
             static_cast<u64>(packet.index_max) * index_bytes);
-    if (render::CanDrawIndirect() && d.prim_type != 19 &&
-        (!indexed || whole_buffer) &&
+    if (render::CanDrawIndirect(d.prim_type) && (!indexed || whole_buffer) &&
         WalkReadWouldWait(args, indexed ? 20 : 16)) {
       d.indirect_args = args;
       if (indexed) {
@@ -267,7 +268,7 @@ void ResolveIndexBuffer(render::Renderer& renderer,
   // having fewer than 3 vertices.
   if (op == IT_DRAW_INDEX_OFFSET_2 && count >= 3) {
     const u32 index_offset = body[1], index_count = body[2];
-    const u32 index_bytes = packet.index_type == 1 ? 4 : 2;
+    const u32 index_bytes = packet.index_type == 1 ? 4 : packet.index_type == 2 ? 1 : 2;
     const u64 base =
         packet.index_base + static_cast<u64>(index_offset) * index_bytes;
     const bool accepted =
@@ -1052,18 +1053,6 @@ bool BuildDrawInfo(render::Renderer& renderer,
   // menu background) so the menu items drawn on top become readable.
   if (kSkipStale && d.tex_base && d.tex_w >= 2048)
     return false;
-  // Vertices staged here are sized by the counts: read them after all.
-  if (d.indirect_args) {
-    bool sized = !d.index_data && d.num_vattrs;
-    for (u32 j = 0; j < d.num_vbufs; j++)
-      sized |= d.vbufs[j].per_instance;
-    if (sized) {
-      const u64 args = d.indirect_args;
-      d.indirect_args = 0;
-      d.index_data = nullptr;
-      ReadIndirectArgs(renderer, packet, args, d);
-    }
-  }
   return d.vertex_data || (d.recomp && d.recomp->ok && d.num_vattrs == 0);
 }
 

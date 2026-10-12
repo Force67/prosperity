@@ -63,7 +63,7 @@ Behind it, one unit per decision, roughly in dependency order:
 | `guest_format` | every guest encoding -> `rhi` mapping (surface, vertex, blend, topology) |
 | `hash` | key mixing and the guest-memory content fingerprint |
 | `guest_memory_table` | which guest pages are imported as GPU memory |
-| `index_upload` | guest index decoding (8-bit widened to 16) and the upload element policy |
+| `index_upload`, `index_convert` | native index uploads and GPU index widening / quad expansion |
 | `upload_ring` | how per-draw vertices, indices and constants reach the GPU each frame |
 | `texture_cache` | guest textures: descriptors, upload, revalidation, retirement |
 | `render_target` | render targets keyed by guest address, the address -> image page table, the rendering region |
@@ -78,8 +78,27 @@ Behind it, one unit per decision, roughly in dependency order:
 | `capture` / `present` / `png` | frames out to disk / to the window |
 
 Rendering is offscreen: there is no swapchain on the device. Each draw renders
-into the image for its `rt_base`, and `EndFrame` reads back the target at the
-scanout address and hands the pixels to the window (or to a PPM, headless).
+into the image for its `rt_base`. Presentation shares an exported GPU image
+with the host compositor when supported. Readback serves captures and hosts
+that cannot share images.
+
+Compute output stays resident for subsequent draws and dispatches. Vertex and
+native index streams can bind the compute buffer directly, and indirect draws
+retain the full vertex descriptor bounds so their counts, first vertex and
+first instance remain GPU inputs. Native index streams need no CPU scan when
+using indirect arguments or resident compute output. Direct-memory imports
+also let vertex and index fetch read guest bytes without a ring copy. A compute
+pass widens eight-bit indices and expands quad lists into a device-local index
+ring, including streams produced by a dispatch without CPU readback. Converted
+streams are reused within the frame until their source revision changes.
+`DELTA_GPU_DRAWPROF` reports conversion counts and bytes;
+`DELTA_GPU_LISTPROF` includes their GPU time.
+
+Vulkan, OpenGL and D3D12 support indirect drawing and compute dispatch. OpenGL
+adjusts indexed arguments on the GPU when the bound index buffer has an offset.
+D3D12 supplies shader draw parameters and workgroup counts from GPU argument
+copies when needed. Indirect quad lists and D3D12 triangle fans retain their
+direct draw paths.
 
 The heuristic quad path in `draw` predates the recompiler and is still the
 fallback for draws `draw_recomp` declines; `DELTA_GPU_DECLINES=1` reports why

@@ -552,7 +552,8 @@ bool CsSupplyTextureFromBuffer(u64 base,
   if (!found)
     return MirrorSupplyTexture(base, tiled, linear, img, state, seq);
   CsRange& e = *found;
-  const TileTable* table = GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4);
+  const TileTable* table =
+      GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4);
   if (!table)
     return false;
   if (!img)
@@ -585,8 +586,8 @@ bool CsSupplyTextureFromBuffer(u64 base,
                 rhi::kAccessCopyRead);
   g_cs_scratch_owner++;
   bool fresh = true;
-  rhi::Buffer* src = AcquireView(linear.size, range_base, off, table,
-                                 e.write_seq, &fresh);
+  rhi::Buffer* src =
+      AcquireView(linear.size, range_base, off, table, e.write_seq, &fresh);
   if (!src)
     return false;
   if (fresh) {
@@ -654,13 +655,13 @@ bool MirrorHoldsNewest(u64 base, u64 bytes) {
   return false;
 }
 
-bool CsHoldsVertices(u64 base, u64 bytes) {
+bool CsHoldsGeometry(u64 base, u64 bytes) {
   u64 range_base;
   return kCsVtxBridge && (VertexSource(base, bytes, &range_base) ||
                           MirrorHoldsNewest(base, bytes));
 }
 
-bool CsVertexBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
+bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
   if (!kCsVtxBridge)
     return false;
   u64 range_base;
@@ -757,9 +758,8 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   // The dispatch wrote an image of its own shape here (dynamic resolution
   // writes 2432x1368 where a 1080p target lives): give it a variant of that
   // shape rather than taking the whole range through the CPU.
-  if (!unpacked &&
-      (rt_it->second.w != r.width || rt_it->second.h != r.height ||
-       FormatBytes(rt_it->second.fmt) != r.elem_bytes)) {
+  if (!unpacked && (rt_it->second.w != r.width || rt_it->second.h != r.height ||
+                    FormatBytes(rt_it->second.fmt) != r.elem_bytes)) {
     const rhi::Format fmt = GuestTextureFormat(r.dfmt, r.nfmt);
     if (FormatBytes(fmt) == r.elem_bytes &&
         ActivateRtVariantAs(base, r.width, r.height, fmt)) {
@@ -769,8 +769,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   }
   RTarget& rt = rt_it->second;
   if (rt.w + 8 < r.width || rt.h + 8 < r.height ||
-      FormatBytes(rt.fmt) != r.elem_bytes)
-  {
+      FormatBytes(rt.fmt) != r.elem_bytes) {
     static int shown = 0;
     if (CsSyncReporting() && shown++ < 12)
       BASE_LOGI("rtrefresh",
@@ -782,9 +781,9 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   }
   gcn::TextureLayout32 tiled, linear, packed;
   if (!BuildCsImageLayouts(r, tiled, linear) ||
-      (widened && !gcn::BuildTextureLayout32(packed, r.width, r.height, r.pitch,
-                                             1, 1, 8, r.pow2_pad,
-                                             r.elem_bytes)))
+      (widened &&
+       !gcn::BuildTextureLayout32(packed, r.width, r.height, r.pitch, 1, 1, 8,
+                                  r.pow2_pad, r.elem_bytes)))
     return RtRefreshMiss("layout");
   const u32 w = base::Min(rt.w, r.width), h = base::Min(rt.h, r.height);
   rhi::Texture* float_image = nullptr;
@@ -903,16 +902,14 @@ bool DetileTextureOnGpu(u64 base,
   // linear layout first.
   const bool linear_in = gcn::TilingIsLinear(tiled.tiling_idx);
   // Block-compressed: the layout counts 4x4 blocks, the copy texels.
-  const u32 block = (elem == 8 || elem == 16) && texel_w > tiled.mips[0].width
-                        ? 4u
-                        : 1u;
+  const u32 block =
+      (elem == 8 || elem == 16) && texel_w > tiled.mips[0].width ? 4u : 1u;
   gcn::TextureLayout32 linear = tiled;
   if (!g_frame.list || !elem || elem > 16 ||
-      (!linear_in &&
-       !gcn::BuildTextureLayout32(linear, tiled.mips[0].width,
-                                  tiled.mips[0].height, tiled.mips[0].pitch,
-                                  tiled.layers, tiled.mip_levels, 8, false,
-                                  elem)))
+      (!linear_in && !gcn::BuildTextureLayout32(
+                         linear, tiled.mips[0].width, tiled.mips[0].height,
+                         tiled.mips[0].pitch, tiled.layers, tiled.mip_levels, 8,
+                         false, elem)))
     return false;
   if (first_mip >= linear.mip_levels)
     return false;
@@ -956,8 +953,7 @@ bool DetileTextureOnGpu(u64 base,
   barrier.range.mips = linear.mip_levels;
   barrier.range.layers = is_3d ? 1u : linear.layers;
   list->Barrier(0, 0, &barrier, 1);
-  list->CopyBufferToTexture(img, pixels, copies,
-                            linear.mip_levels - first_mip);
+  list->CopyBufferToTexture(img, pixels, copies, linear.mip_levels - first_mip);
   barrier.before = rhi::TextureState::kCopyDst;
   barrier.after = rhi::TextureState::kShaderRead;
   list->Barrier(0, 0, &barrier, 1);
@@ -995,6 +991,31 @@ bool CsClearPredicate(u64 address,
   if (!e && !(pending && MirrorWritten(address, 4) &&
               MirrorFillable(address, expand)))
     return false;
+  // Our own expand is still the newest write: every tile reads expanded, so
+  // this bind is not a clear, and no predicate is needed.
+  // A range's write count restarts when it is staged again, so its stamp is
+  // part of the revision; the mirror's revisions are global.
+  struct Revision {
+    u64 stamp = 0, seq = 0;
+    bool operator==(const Revision&) const = default;
+  };
+  static base::HashMap<u64, Revision> expanded;
+  static const guest::SessionReset reset_expanded(
+      [] { guest::ResetResource(expanded); });
+  const u64 block = address & ~(kMirrorBlock - 1);
+  const auto revision = [&]() -> Revision {
+    if (e)
+      return e->staged_stamp ? Revision{e->staged_stamp, e->write_seq}
+                             : Revision{};
+    return {0, MirrorOwned(block) ? MirrorRevision(address, 4) : 0};
+  };
+  if (mark && revision().seq) {
+    const auto it = expanded.find(address);
+    if (it != expanded.end() && it->second == revision()) {
+      *predicate = nullptr;
+      return true;
+    }
+  }
   if (!p.tried) {
     p.tried = true;
 #ifdef DELTA_HAVE_SPIRV_BACKEND
@@ -1066,8 +1087,12 @@ bool CsClearPredicate(u64 address,
     e->chunk_ref = g_frame.chunk_seq;
     if (e->pending_batch)
       g_cs_chunk_needs_batch = true;
+    if (revision().seq)
+      expanded[address] = revision();
   } else {
     MirrorFill(address, expand, ~0u);
+    if (revision().seq)
+      expanded[address] = revision();
   }
   // The clear on the frame list reads the predicate.
   if (!g_cs_batches[g_cs_batch_cur].in_frame)

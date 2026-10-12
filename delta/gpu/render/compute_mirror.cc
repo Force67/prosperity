@@ -21,6 +21,7 @@
 #include "gpu/render/upload_ring.h"
 #include "gpu/write_tracker.h"
 #include "guest/session.h"
+#include "profile/profile.h"
 
 namespace gpu::render {
 
@@ -38,7 +39,7 @@ rhi::Buffer* Mirror() {
     desc.sparse = true;
     desc.usage = rhi::kBufferStorage | rhi::kBufferCopySrc |
                  rhi::kBufferCopyDst | rhi::kBufferAddress |
-                 rhi::kBufferIndirect | rhi::kBufferVertex;
+                 rhi::kBufferIndirect | rhi::kBufferVertex | rhi::kBufferIndex;
     desc.name = "guest mirror";
     if (Device().caps().sparse_buffer)
       g_mirror = Device().CreateBuffer(desc);
@@ -58,6 +59,7 @@ rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
     rhi::Buffer* buf = nullptr;
     const rhi::Caps& caps = Device().caps();
     if (caps.host_import && gpu::IsWritableRange(chunk, kMirrorImport)) {
+      DELTA_ZONE("mirror.import");
       GuestWriteTracker().Release(chunk, kMirrorImport);
       rhi::BufferDesc desc;
       desc.size = kMirrorImport;
@@ -77,8 +79,7 @@ rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
 
 bool MirrorEligible(const ComputeInfo::Res& r, u64 bytes) {
   return kMirror && !r.zero_fill && !r.image_staging && bytes &&
-         MirrorCovers(r.base, bytes) &&
-         !(r.base & 3) && Mirror();
+         MirrorCovers(r.base, bytes) && !(r.base & 3) && Mirror();
 }
 
 // Copies [base, base+bytes) between the guest pages and the mirror, on the
@@ -93,8 +94,7 @@ bool MirrorCopy(u64 base,
     rhi::Buffer* import = MirrorImport(at, &import_base);
     if (!import)
       return false;
-    const u64 end =
-        base::Min(base + bytes, import_base + import->desc().size);
+    const u64 end = base::Min(base + bytes, import_base + import->desc().size);
     pieces.push_back({import, {at, end}});
     at = end;
   }
@@ -113,8 +113,7 @@ bool MirrorCopy(u64 base,
       list->CopyBuffer(g_mirror, MirrorOffset(span.first), import,
                        span.first - import_base, n);
   }
-  list->Barrier(rhi::kAccessCopyWrite,
-                kAccessAll | rhi::kAccessHostRead);
+  list->Barrier(rhi::kAccessCopyWrite, kAccessAll | rhi::kAccessHostRead);
   list->ProfileEnd();
   return true;
 }
@@ -171,8 +170,7 @@ bool RecordGuestRead(rhi::CommandList* list,
       end = block_end(end);
     const u64 n = end - at;
     if (from == kMirrorSource) {
-      list->CopyBuffer(dst, dst_off + at - base, g_mirror, MirrorOffset(at),
-                       n);
+      list->CopyBuffer(dst, dst_off + at - base, g_mirror, MirrorOffset(at), n);
     } else if (from == kImport) {
       for (u64 piece = at; piece < end;) {
         u64 import_base = 0;
@@ -234,9 +232,9 @@ base::Vector<u64> g_own_unsubmitted;
 
 OwnBlock& OwnAt(u64 block) {
   if (!g_own) {
-    void* p = mmap(nullptr, kOwnBlocks * sizeof(OwnBlock),
-                   PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    void* p =
+        mmap(nullptr, kOwnBlocks * sizeof(OwnBlock), PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     g_own = static_cast<OwnBlock*>(p);
   }
   return g_own[MirrorOffset(block) / kMirrorBlock];
@@ -265,9 +263,8 @@ bool MirrorResolve(u64 first, u64 end) {
       u64 s = o.state.load(base::memory_order_acquire);
       if (!(s & kOwnProtected))
         break;
-      if ((s & kOwnBusy) ||
-          !o.state.compare_exchange_weak(s, s | kOwnBusy,
-                                         base::memory_order_acq_rel))
+      if ((s & kOwnBusy) || !o.state.compare_exchange_weak(
+                                s, s | kOwnBusy, base::memory_order_acq_rel))
         continue;
       if (o.hi > o.lo)
         Device().CopyAfter(g_mirror, MirrorOffset(block) + o.lo, o.import,
@@ -327,7 +324,8 @@ void MirrorOwn(u64 base, u64 bytes) {
        block += kMirrorBlock) {
     OwnBlock& o = OwnAt(block);
     const u32 lo = static_cast<u32>(base::Max(block, base) - block);
-    const u32 hi = static_cast<u32>(base::Min(end, block + kMirrorBlock) - block);
+    const u32 hi =
+        static_cast<u32>(base::Min(end, block + kMirrorBlock) - block);
     const u64 s = o.state.load(base::memory_order_acquire);
     if (!s) {
       u64 import_base = 0;
@@ -351,12 +349,12 @@ void MirrorOwn(u64 base, u64 bytes) {
 void MirrorProtectSubmitted(u64 submission) {
   if (g_own_unsubmitted.empty())
     return;
+  DELTA_ZONE("mirror.protect");
   for (u64 block : g_own_unsubmitted) {
     OwnBlock& o = OwnAt(block);
     u64 s = o.state.load(base::memory_order_acquire);
-    while ((s & kOwnBusy) ||
-           !o.state.compare_exchange_weak(s, kOwnBusy,
-                                          base::memory_order_acq_rel))
+    while ((s & kOwnBusy) || !o.state.compare_exchange_weak(
+                                 s, kOwnBusy, base::memory_order_acq_rel))
       s = o.state.load(base::memory_order_acquire);
     ::mprotect(reinterpret_cast<void*>(block), kMirrorBlock, PROT_NONE);
     o.state.store(submission | kOwnProtected, base::memory_order_release);
@@ -496,7 +494,7 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
     if (!table)
       return false;
   }
-  const u64 n = retile         ? tiled.size
+  const u64 n = retile          ? tiled.size
                 : e.guest_bytes ? base::Min(e.size, e.guest_bytes)
                                 : e.size;
   bool mirrored = false;
@@ -734,7 +732,8 @@ u64 MirrorCacheBlock(u64 block) {
 bool GpuIndirectArgs(u64 args, u64 bytes) {
   if (!kMirror || !gcn::g_direct_table || !Mirror() || !g_mirror->address() ||
       (args & 3) || !InMirror(args) ||
-      (args & ~(kMirrorBlock - 1)) != ((args + bytes - 1) & ~(kMirrorBlock - 1)))
+      (args & ~(kMirrorBlock - 1)) !=
+          ((args + bytes - 1) & ~(kMirrorBlock - 1)))
     return false;
   const u64 block = args & ~(kMirrorBlock - 1);
   if (MirrorOwned(block))
@@ -744,8 +743,9 @@ bool GpuIndirectArgs(u64 args, u64 bytes) {
   return MirrorCacheBlock(block) != 0;
 }
 
-bool CanDrawIndirect() {
-  return Device().caps().draw_indirect;
+bool CanDrawIndirect(u32 prim_type) {
+  return Device().caps().draw_indirect && prim_type != 19 &&
+         !(Device().caps().backend == rhi::Backend::kD3D12 && prim_type == 5);
 }
 
 rhi::Buffer* IndirectArgsBuffer(u64 args, u64* offset) {
@@ -770,8 +770,8 @@ static rhi::Buffer* StageArgs(rhi::CommandList* list,
   if (!g_indirect_ring) {
     rhi::BufferDesc desc;
     desc.size = kIndirectRing;
-    desc.usage = rhi::kBufferIndirect | rhi::kBufferCopyDst |
-                 rhi::kBufferStorage;
+    desc.usage =
+        rhi::kBufferIndirect | rhi::kBufferCopyDst | rhi::kBufferStorage;
     if (Device().caps().conditional)
       desc.usage |= rhi::kBufferPredicate;
     desc.name = "indirect args";

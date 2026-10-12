@@ -268,4 +268,17 @@ void FlushForWalkRead(render::Renderer& renderer,
   render::FlushCsWritesRange(renderer, base, bytes, why);
 }
 
+void SpeculateWalkRead(render::Renderer& renderer, u64 base, u64 bytes) {
+  RenderQueue& queue = GuestRenderQueue();
+  if (queue.running() && queue.PendingWriteOverlaps(base, bytes))
+    OwnRenderer("pending-write");
+  if (queue.running() && !render::CsRangeMaybeDirty(base, bytes) &&
+      !render::GuestWriteMaybePending(base, bytes))
+    return;
+  OwnRenderer("desc");
+  if (!render::FlushCsWritesForGpu(renderer, base, bytes, "desc") ||
+      !render::SpeculateGuestRead(base, bytes))
+    render::FlushCsWritesRange(renderer, base, bytes, "desc");
+}
+
 }  // namespace gpu::ps4

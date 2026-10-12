@@ -34,6 +34,12 @@ u64 g_alias_size = 0;
 rhi::Buffer* g_table = nullptr;
 rhi::Buffer* g_misses = nullptr;
 base::HashMap<u64, rhi::Buffer*> g_chunks;  // memfd offset -> import
+// Whole-chunk imports for binds, keyed by chunk start and span size class.
+struct BindImport {
+  rhi::Buffer* buffer;
+  u64 bytes;
+};
+base::HashMap<u64, BindImport> g_binds;
 base::Vector<Mapping> g_maps;               // guest views of the memfd
 base::HashSet<u64> g_filled;                // blocks with a table entry
 // Redirected blocks: the host entry they go back to, and whether they are.
@@ -274,6 +280,58 @@ rhi::Buffer* DirectImportAt(u64 address, u64* offset, u64* bytes) {
   return chunk;
 }
 
+namespace {
+// Spans round up to a power-of-two chunk count, so neighbouring bindings of
+// a title share imports: starts are chunk-aligned, the class fits the key's
+// free low bits.
+u64 BindClass(u64 chunks) {
+  u64 cls = 1;
+  while (cls < chunks && cls < 32)
+    cls *= 2;
+  return cls;
+}
+
+BindImport BindSpan(u64 start, u64 cls) {
+  const u64 key = start | cls;
+  auto it = g_binds.find(key);
+  if (it != g_binds.end())
+    return it->second;
+  const u64 size = base::Min(cls * kChunk, g_alias_size - start);
+  rhi::BufferDesc desc;
+  desc.size = size;
+  desc.usage = rhi::kBufferVertex | rhi::kBufferIndex;
+  desc.host_pointer = g_alias + start;
+  desc.name = "guest direct bind";
+  const BindImport imp{Device().CreateBuffer(desc), size};
+  g_binds.insert_or_assign(key, imp);
+  return imp;
+}
+}  // namespace
+
+rhi::Buffer* DirectBindAt(u64 address, u64 bytes, u64* offset) {
+  if (!bytes || (!g_alias && !InitGuestDirect()))
+    return nullptr;
+  if (!FindMapping(address))
+    ReadMaps();
+  const Mapping* m = FindMapping(address);
+  // The fetch reads one contiguous span: it has to stay in this view.
+  if (!m || address + bytes > m->end)
+    return nullptr;
+  const u64 at = m->offset + (address - m->start);
+  if (at >= g_alias_size)
+    return nullptr;
+  const u64 start = at & ~(kChunk - 1);
+  const u64 inner = at - start;
+  const u64 cls = BindClass((inner + bytes + kChunk - 1) / kChunk);
+  if (start + cls * kChunk > g_alias_size)
+    return nullptr;
+  const BindImport imp = BindSpan(start, cls);
+  if (!imp.buffer || inner + bytes > imp.bytes)
+    return nullptr;
+  *offset = inner;
+  return imp.buffer;
+}
+
 void SyncGuestDirect() {
   if (!gcn::g_direct_table && !InitGuestDirect())
     return;
@@ -315,6 +373,7 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_table);
   guest::ResetResource(g_misses);
   guest::ResetResource(g_chunks);
+  guest::ResetResource(g_binds);
   guest::ResetResource(g_maps);
   guest::ResetResource(g_filled);
   guest::ResetResource(g_saved);

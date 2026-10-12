@@ -363,7 +363,7 @@ void ReportFps() {
                                             "mirror",  "tiling",   "rt-bridge",
                                             "present", "copy",     "fill/clear",
                                             "barrier",       "buf->tex", "tex->buf",
-                                            "tex->tex", "blit",     "copy-host", "15"};
+                                            "tex->tex", "blit",     "copy-host", "index"};
       base::String line;
       for (u32 i = 1; i < rhi::kProfCats; i++)
         if (rhi::g_prof_cat_ns[i])
@@ -428,7 +428,7 @@ void ReportFps() {
           "gfxpres={:.2f}ms borrowwait={:.2f}ms | ring vb={:.1f}MB "
           "ib={:.1f}MB cb={:.1f}MB raw={:.1f}MB | track armed={:.0f}MB "
           "runs={} collect={:.2f}ms x{:.0f} written={:.0f}p | kept={:.0f}MB "
-          "+{:.1f}MB/f",
+          "+{:.1f}MB/f | bind={:.1f}MB x{:.0f}",
           g_ns_tex_set / f / 1e6, g_tex_set_n / f, g_ns_region / f / 1e6,
           g_ns_cs_flush / f / 1e6, g_ns_build_draw / f / 1e6,
           g_build_draw_n / f, g_ns_gfx_present / f / 1e6,
@@ -437,10 +437,13 @@ void ReportFps() {
           g_ring_raw_bytes / f / 1e6, t.armed_bytes() / 1e6, t.runs(),
           (t.collect_ns() - collect_ns) / f / 1e6,
           (t.collects() - collects) / f, (t.written_pages() - pages) / f,
-          CachedBufferBytes() / 1e6, g_vb_kept_bytes / f / 1e6);
+          CachedBufferBytes() / 1e6, g_vb_kept_bytes / f / 1e6,
+          g_bind_bytes / f / 1e6, g_bind_n / f);
       collects = t.collects();
       pages = t.written_pages();
       collect_ns = t.collect_ns();
+      BASE_LOGI("indexprof", "per-frame GPU conversion x{:.0f} {:.1f}MB",
+                g_index_convert_n / f, g_index_convert_bytes / f / 1e6);
       BASE_LOGI("fillprof", "per-frame fill={:.2f}ms x{:.0f} {:.1f}MB",
                 g_ns_memory_fill / f / 1e6, g_memory_fill_n / f,
                 g_memory_fill_bytes / f / 1e6);
@@ -472,7 +475,10 @@ void ReportFps() {
     g_frame_hitch_n = 0;
     g_ns_gfx_present = g_ns_borrow_wait = 0;
     g_ring_vb_bytes = g_ring_ib_bytes = g_ring_cb_bytes = g_ring_raw_bytes = 0;
+    g_index_convert_n = g_index_convert_bytes = 0;
     g_vb_kept_bytes = 0;
+    g_bind_bytes = 0;
+    g_bind_n = 0;
     g_cs_stage_bytes = 0;
     gcn::g_ns_recomp = 0;
     gcn::g_recomp_n = 0;

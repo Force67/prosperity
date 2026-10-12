@@ -334,6 +334,7 @@ bool GlDevice::InitRenderThread() {
   caps_.storage_image_write_without_format = true;
   caps_.texture_blit = true;
   caps_.dispatch_base = true;
+  caps_.dispatch_indirect = true;
   caps_.debug_labels = debug_;
   GLint bits = 0;
   glGetQueryiv(GL_TIMESTAMP, GL_QUERY_COUNTER_BITS, &bits);

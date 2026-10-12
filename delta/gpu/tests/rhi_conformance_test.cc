@@ -14,6 +14,8 @@
 #include "base/memory/unique_pointer.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
+#include "gpu/gcn/gcn_translate.h"
+#include "gpu/gcn/spirv/spv_emit.h"
 #include "gpu/render/backend.h"
 #include "gpu/rhi/device.h"
 #include "gpu/tests/rhi_conformance_extra_spv.h"
@@ -560,6 +562,218 @@ TEST_P(RhiConformance, DispatchBase) {
   EXPECT_EQ(v[8], 200u) << "based dispatch";
   EXPECT_EQ(v[11], 203u);
   EXPECT_EQ(v[12], ~0u);
+}
+
+TEST_P(RhiConformance, DispatchIndirectReadsGpuArgumentsAndResetsBase) {
+  if (!device_->caps().dispatch_indirect || !device_->caps().dispatch_base)
+    GTEST_SKIP() << "no indirect dispatch or dispatch base";
+  constexpr u32 kN = 16;
+  BufferDesc bd;
+  bd.size = kN * 4;
+  bd.usage = kBufferStorage | kBufferCopySrc | kBufferCopyDst;
+  Buffer* buf = Own(device_->CreateBuffer(bd));
+  Buffer* rb = Readback(kN * 4);
+  bd.size = 32;
+  bd.usage = kBufferIndirect | kBufferCopyDst;
+  Buffer* args = Own(device_->CreateBuffer(bd));
+  BindGroupLayoutDesc ld;
+  ld.bindings.push_back({0, BindingType::kStorageBuffer, kStageCompute});
+  ld.push = true;
+  BindGroupLayout* set0 = Own(device_->CreateBindGroupLayout(ld));
+  PipelineLayoutDesc pl;
+  pl.groups = {set0};
+  ComputePipelineDesc cp;
+  cp.layout = Own(device_->CreatePipelineLayout(pl));
+  cp.code = Spv(k_dispatch_base_comp_spv);
+  cp.dispatch_base = true;
+  Pipeline* pipe = Own(device_->CreateComputePipeline(cp));
+  ASSERT_NE(pipe, nullptr);
+
+  list_->Begin();
+  list_->FillBuffer(buf, 0, kN * 4, ~0u);
+  list_->FillBuffer(args, 16, 12, 1);
+  list_->Barrier(kAccessCopyWrite, kAccessComputeWrite | kAccessIndirectRead);
+  list_->SetPipeline(pipe);
+  BindingWrite w;
+  w.buffer = buf;
+  w.range = kN * 4;
+  list_->PushBindGroup(0, set0, &w, 1);
+  list_->DispatchBase(2, 0, 0, 1, 1, 1);
+  list_->Barrier(kAccessComputeWrite, kAccessComputeWrite);
+  list_->DispatchIndirect(args, 16);
+  list_->Barrier(kAccessComputeWrite, kAccessCopyRead);
+  list_->CopyBuffer(rb, 0, buf, 0, kN * 4);
+  list_->Barrier(kAccessCopyWrite, kAccessHostRead);
+  Submit();
+  list_->End();
+  const u32* v = reinterpret_cast<const u32*>(rb->mapped());
+  EXPECT_EQ(v[0], 0u);
+  EXPECT_EQ(v[3], 3u);
+  EXPECT_EQ(v[4], ~0u);
+  EXPECT_EQ(v[8], 200u);
+  EXPECT_EQ(v[11], 203u);
+  EXPECT_EQ(v[12], ~0u);
+}
+
+TEST_P(RhiConformance, DispatchIndirectReportsGpuWorkgroupCounts) {
+  if (!device_->caps().dispatch_indirect)
+    GTEST_SKIP() << "no indirect dispatch";
+  using gpu::gcn::spirv::Id;
+  using spv::StorageClass;
+  gpu::gcn::spirv::Module m;
+  const Id u = m.TypeInt(), vec = m.TypeVec(u, 3);
+  const Id array = m.TypeRuntimeArray(u);
+  m.Decorate(array, spv::Decoration::ArrayStride, {4});
+  const Id block = m.TypeStruct({array});
+  m.Decorate(block, spv::Decoration::Block);
+  m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
+  const Id buffer =
+      m.Variable(m.TypePointer(StorageClass::StorageBuffer, block),
+                 StorageClass::StorageBuffer);
+  m.Decorate(buffer, spv::Decoration::DescriptorSet, {0});
+  m.Decorate(buffer, spv::Decoration::Binding, {0});
+  const Id gid =
+      m.Variable(m.TypePointer(StorageClass::Input, vec), StorageClass::Input);
+  const Id count =
+      m.Variable(m.TypePointer(StorageClass::Input, vec), StorageClass::Input);
+  m.Decorate(gid, spv::Decoration::BuiltIn,
+             {u32(spv::BuiltIn::GlobalInvocationId)});
+  m.Decorate(count, spv::Decoration::BuiltIn,
+             {u32(spv::BuiltIn::NumWorkgroups)});
+  const Id main = m.BeginFunction(m.TypeVoid(), m.TypeFunction(m.TypeVoid()));
+  const Id groups = m.Load(vec, count), global = m.Load(vec, gid);
+  const Id x = m.CompositeExtract(u, groups, 0);
+  const Id y = m.CompositeExtract(u, groups, 1);
+  const Id z = m.CompositeExtract(u, groups, 2);
+  const Id index = m.Emit(
+      spv::Op::OpIAdd, u,
+      {m.CompositeExtract(u, global, 0),
+       m.Emit(spv::Op::OpIMul, u, {m.CompositeExtract(u, global, 1), x})});
+  const Id value =
+      m.Emit(spv::Op::OpIAdd, u,
+             {x, m.Emit(spv::Op::OpIAdd, u,
+                        {m.Emit(spv::Op::OpIMul, u, {y, m.ConstU32(16)}),
+                         m.Emit(spv::Op::OpIMul, u, {z, m.ConstU32(256)})})});
+  m.Store(m.AccessChain(m.TypePointer(StorageClass::StorageBuffer, u), buffer,
+                        {m.ConstU32(0), index}),
+          value);
+  m.ReturnVoid();
+  m.EndFunction();
+  m.EntryPoint(spv::ExecutionModel::GLCompute, main, "main", {gid, count});
+  m.ExecMode(main, spv::ExecutionMode::LocalSize, {1, 1, 1});
+  const auto code = m.Assemble();
+  BufferDesc bd;
+  bd.size = 32;
+  bd.usage = kBufferStorage | kBufferCopySrc | kBufferCopyDst;
+  Buffer* output = Own(device_->CreateBuffer(bd));
+  Buffer* readback = Readback(bd.size);
+  bd.usage = kBufferIndirect | kBufferCopyDst;
+  Buffer* args = Own(device_->CreateBuffer(bd));
+  BindGroupLayoutDesc ld;
+  ld.bindings.push_back({0, BindingType::kStorageBuffer, kStageCompute});
+  ld.push = true;
+  BindGroupLayout* set = Own(device_->CreateBindGroupLayout(ld));
+  PipelineLayoutDesc pl;
+  pl.groups = {set};
+  ComputePipelineDesc cp;
+  cp.layout = Own(device_->CreatePipelineLayout(pl));
+  cp.code = Code(code);
+  Pipeline* pipeline = Own(device_->CreateComputePipeline(cp));
+  ASSERT_NE(pipeline, nullptr);
+  list_->Begin();
+  list_->FillBuffer(output, 0, bd.size, ~0u);
+  const u32 groups_xyz[] = {2, 3, 1};
+  list_->UpdateBuffer(args, 16, sizeof(groups_xyz), groups_xyz);
+  list_->Barrier(kAccessCopyWrite, kAccessComputeWrite | kAccessIndirectRead);
+  list_->SetPipeline(pipeline);
+  BindingWrite write;
+  write.buffer = output;
+  write.range = bd.size;
+  list_->PushBindGroup(0, set, &write, 1);
+  list_->Dispatch(1, 1, 1);
+  list_->Barrier(kAccessComputeWrite, kAccessComputeWrite);
+  list_->DispatchIndirect(args, 16);
+  list_->Barrier(kAccessComputeWrite, kAccessCopyRead);
+  list_->CopyBuffer(readback, 0, output, 0, bd.size);
+  list_->Barrier(kAccessCopyWrite, kAccessHostRead);
+  Submit();
+  list_->End();
+  const auto* result = reinterpret_cast<const u32*>(readback->mapped());
+  for (u32 i = 0; i < 6; i++)
+    EXPECT_EQ(result[i], 2u + 3u * 16 + 256);
+  EXPECT_EQ(result[6], ~0u);
+  EXPECT_EQ(result[7], ~0u);
+}
+
+TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
+  constexpr u32 kCount = 71, kOffset = 5, kCapacity = 128;
+  for (u32 type = 0; type < 3; type++) {
+    for (bool quads : {false, true}) {
+      SCOPED_TRACE(type);
+      SCOPED_TRACE(quads);
+      const u32 bytes = type == 1 ? 4 : type == 2 ? 1 : 2;
+      base::Vector<u8> source((kCount * bytes + 3) & ~3u, 0xa5);
+      base::Vector<u32> indices(kCount);
+      for (u32 i = 0; i < kCount; i++) {
+        indices[i] = type == 1 ? 0x12340000u + i : type == 0 ? 0x3400u + i : i;
+        std::memcpy(source.data() + i * bytes, &indices[i], bytes);
+      }
+      Buffer* input = Upload(source.data(), source.size(), kBufferStorage);
+      BufferDesc bd;
+      bd.size = kCapacity * 4;
+      bd.usage = kBufferStorage | kBufferCopySrc | kBufferCopyDst;
+      Buffer* output = Own(device_->CreateBuffer(bd));
+      Buffer* readback = Readback(bd.size);
+      BindGroupLayoutDesc ld;
+      for (u32 i = 0; i < 2; i++)
+        ld.bindings.push_back({i, BindingType::kStorageBuffer, kStageCompute});
+      ld.bindings[0].read_only = true;
+      ld.push = true;
+      BindGroupLayout* set = Own(device_->CreateBindGroupLayout(ld));
+      PipelineLayoutDesc pl;
+      pl.groups = {set};
+      pl.push_constant_bytes = 8;
+      pl.push_constant_stages = kStageCompute;
+      ComputePipelineDesc cp;
+      cp.layout = Own(device_->CreatePipelineLayout(pl));
+      const auto code = gpu::gcn::BuildIndexConversionShader(type, quads);
+      ASSERT_FALSE(code.empty());
+      cp.code = Code(code);
+      Pipeline* pipe = Own(device_->CreateComputePipeline(cp));
+      ASSERT_NE(pipe, nullptr);
+      list_->Begin();
+      list_->FillBuffer(output, 0, bd.size, ~0u);
+      list_->Barrier(kAccessCopyWrite | kAccessHostWrite,
+                     kAccessComputeRead | kAccessComputeWrite);
+      list_->SetPipeline(pipe);
+      BindingWrite writes[2];
+      writes[0].buffer = input;
+      writes[0].range = source.size();
+      writes[1].binding = 1;
+      writes[1].buffer = output;
+      writes[1].range = bd.size;
+      list_->PushBindGroup(0, set, writes, 2);
+      const u32 count = quads ? kCount / 4 * 6 : kCount;
+      const u32 params[] = {count, kOffset};
+      list_->SetPushConstants(0, sizeof(params), params);
+      list_->Dispatch((count + 63) / 64, 1, 1);
+      list_->Barrier(kAccessComputeWrite, kAccessCopyRead);
+      list_->CopyBuffer(readback, 0, output, 0, bd.size);
+      list_->Barrier(kAccessCopyWrite, kAccessHostRead);
+      Submit();
+      list_->End();
+      const u32* result = reinterpret_cast<const u32*>(readback->mapped());
+      constexpr u32 corners[] = {0, 1, 2, 0, 2, 3};
+      for (u32 i = 0; i < kCapacity; i++) {
+        const u32 j = i - kOffset;
+        EXPECT_EQ(result[i],
+                  i < kOffset || j >= count
+                      ? ~0u
+                      : indices[quads ? j / 6 * 4 + corners[j % 6] : j])
+            << i;
+      }
+    }
+  }
 }
 
 TEST_P(RhiConformance, StorageImageWrite) {
@@ -1831,6 +2045,195 @@ TEST_P(RhiConformance, DrawParameters) {
   EXPECT_EQ(px[24], Rgba(4, 2, 0, 255));
   EXPECT_EQ(px[35], Rgba(5, 3, 0, 255)) << "indexed, vertex offset 5";
   EXPECT_EQ(px[37], Rgba(7, 3, 0, 255));
+}
+
+TEST_P(RhiConformance, IndirectDrawParametersPreserveBufferOffsets) {
+  if (!device_->caps().draw_indirect)
+    GTEST_SKIP() << "no indirect drawing";
+  GraphicsPipelineDesc gp;
+  gp.layout = EmptyLayout();
+  gp.vertex = Spv(k_x_drawid_vert_spv);
+  gp.fragment = Spv(k_x_color_frag_spv);
+  gp.topology = Topology::kPointList;
+  gp.vertex_buffers = {{4, false}, {4, true}};
+  gp.vertex_attributes = {{0, 0, Format::kR32Float, 0},
+                          {1, 1, Format::kR32Float, 0}};
+  gp.color_count = 1;
+  gp.color_formats[0] = Format::kRGBA8Unorm;
+  Pipeline* pipe = Own(device_->CreateGraphicsPipeline(gp));
+  ASSERT_NE(pipe, nullptr);
+  float slots[16];
+  for (u32 i = 0; i < 16; i++)
+    slots[i] = static_cast<float>(i);
+  const float instance_slots[] = {0, 10, 20, 30};
+  Buffer* vb = Upload(slots, sizeof(slots), kBufferVertex);
+  Buffer* instances =
+      Upload(instance_slots, sizeof(instance_slots), kBufferVertex);
+  for (u32 bytes : {2u, 4u}) {
+    for (u32 index_offset : {0u, 16u}) {
+      SCOPED_TRACE(bytes);
+      SCOPED_TRACE(index_offset);
+      base::Vector<u8> indices(64, 0);
+      for (u32 i = 0; i < 3; i++) {
+        const u32 index = 8 + i;
+        std::memcpy(indices.data() + index_offset + (i + 2) * bytes, &index,
+                    bytes);
+      }
+      Buffer* index = Upload(indices.data(), indices.size(), kBufferIndex);
+      BufferDesc bd;
+      bd.size = 64;
+      bd.usage = kBufferIndirect | kBufferCopySrc | kBufferCopyDst;
+      Buffer* args = Own(device_->CreateBuffer(bd));
+      Buffer* readback = Readback(bd.size);
+      Texture* color = Target();
+      TextureView* view = View(color);
+      list_->Begin();
+      list_->FillBuffer(args, 0, bd.size, ~0u);
+      list_->Barrier(kAccessCopyWrite, kAccessCopyWrite);
+      const u32 draw_args[] = {3, 2, 2, 1};
+      const u32 indexed_args[] = {3, 1, 2, u32(-3), 3};
+      list_->UpdateBuffer(args, 16, sizeof(draw_args), draw_args);
+      list_->UpdateBuffer(args, 36, sizeof(indexed_args), indexed_args);
+      TextureBarrier b{color, TextureState::kUndefined,
+                       TextureState::kColorTarget};
+      list_->Barrier(kAccessCopyWrite | kAccessHostWrite,
+                     kAccessIndirectRead | kAccessVertexRead | kAccessIndexRead,
+                     &b, 1);
+      list_->BeginRenderPass(ClearPass(view));
+      list_->SetPipeline(pipe);
+      YUpViewport();
+      BindVertices(vb, instances);
+      list_->DrawIndirect(args, 16);
+      list_->SetIndexBuffer(
+          index, index_offset,
+          bytes == 2 ? IndexType::kUint16 : IndexType::kUint32);
+      list_->DrawIndexedIndirect(args, 36);
+      list_->DrawIndexedIndirect(args, 36);
+      list_->Draw(1, 1, 8, 0);
+      list_->EndRenderPass();
+      list_->Barrier(kAccessAllWrite, kAccessCopyRead);
+      list_->CopyBuffer(readback, 0, args, 0, bd.size);
+      list_->Barrier(kAccessCopyWrite, kAccessHostRead);
+      const auto pixels = ReadPixels(color, TextureState::kColorTarget);
+      list_->End();
+      EXPECT_EQ(pixels[8], Rgba(8, 0, 0, 255));
+      EXPECT_EQ(pixels[12], Rgba(2, 1, 0, 255));
+      EXPECT_EQ(pixels[14], Rgba(4, 1, 0, 255));
+      EXPECT_EQ(pixels[22], Rgba(2, 2, 0, 255));
+      EXPECT_EQ(pixels[24], Rgba(4, 2, 0, 255));
+      EXPECT_EQ(pixels[35], Rgba(5, 3, 0, 255));
+      EXPECT_EQ(pixels[37], Rgba(7, 3, 0, 255));
+      EXPECT_EQ(std::memcmp(readback->mapped() + 36, indexed_args,
+                            sizeof(indexed_args)),
+                0);
+    }
+  }
+}
+
+TEST_P(RhiConformance, IndirectGpuArgumentsPreserveStorageBindings) {
+  if (!device_->caps().draw_indirect)
+    GTEST_SKIP() << "no indirect drawing";
+  using gpu::gcn::spirv::Id;
+  using spv::StorageClass;
+  gpu::gcn::spirv::Module m;
+  const Id f = m.TypeFloat(), v4 = m.TypeVec(f, 4);
+  const Id block = m.TypeStruct({v4});
+  m.Decorate(block, spv::Decoration::Block);
+  m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
+  const Id colors =
+      m.Variable(m.TypePointer(StorageClass::StorageBuffer, block),
+                 StorageClass::StorageBuffer);
+  m.Decorate(colors, spv::Decoration::DescriptorSet, {0});
+  m.Decorate(colors, spv::Decoration::Binding, {0});
+  const Id output =
+      m.Variable(m.TypePointer(StorageClass::Output, v4), StorageClass::Output);
+  m.Decorate(output, spv::Decoration::Location, {0});
+  const Id main = m.BeginFunction(m.TypeVoid(), m.TypeFunction(m.TypeVoid()));
+  m.Store(output, m.Load(v4, m.AccessChain(
+                                 m.TypePointer(StorageClass::StorageBuffer, v4),
+                                 colors, {m.ConstU32(0)})));
+  m.ReturnVoid();
+  m.EndFunction();
+  m.EntryPoint(spv::ExecutionModel::Fragment, main, "main", {output});
+  m.ExecMode(main, spv::ExecutionMode::OriginUpperLeft, {});
+  const auto fragment = m.Assemble();
+  BindGroupLayoutDesc ld;
+  ld.bindings.push_back(
+      {0, BindingType::kStorageBuffer, kStageCompute | kStageFragment});
+  ld.push = true;
+  BindGroupLayout* set = Own(device_->CreateBindGroupLayout(ld));
+  PipelineLayoutDesc pl;
+  pl.groups = {set};
+  pl.push_constant_bytes = 4;
+  pl.push_constant_stages = kStageCompute;
+  PipelineLayout* layout = Own(device_->CreatePipelineLayout(pl));
+  ComputePipelineDesc cp;
+  cp.layout = layout;
+  cp.code = Spv(k_double_comp_spv);
+  Pipeline* compute = Own(device_->CreateComputePipeline(cp));
+  GraphicsPipelineDesc gp = PosPipeline(layout);
+  gp.fragment = Code(fragment);
+  Pipeline* graphics = Own(device_->CreateGraphicsPipeline(gp));
+  ASSERT_NE(compute, nullptr);
+  ASSERT_NE(graphics, nullptr);
+  BufferDesc bd;
+  bd.size = 256;
+  bd.usage = kBufferStorage | kBufferIndirect | kBufferCopySrc | kBufferCopyDst;
+  Buffer* args = Own(device_->CreateBuffer(bd));
+  Buffer* readback = Readback(bd.size);
+  const u32 initial_args[] = {3, 1, 1, 0, 0};
+  const float cyan[] = {0, 1, 1, 1};
+  bd.size = sizeof(cyan);
+  bd.usage = kBufferStorage | kBufferCopyDst;
+  Buffer* color = Own(device_->CreateBuffer(bd));
+  const Vertex vertices[] = {
+      {-1, -1, 0, 0}, {1, -1, 0, 0}, {1, 1, 0, 0}, {-1, 1, 0, 0}};
+  Buffer* vb = Upload(vertices, sizeof(vertices), kBufferVertex);
+  Buffer* instances = Instances({0, 0, 0, 0});
+  const u16 indices[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 0, 2, 3};
+  Buffer* index = Upload(indices, sizeof(indices), kBufferIndex);
+  Texture* target = Target();
+  TextureView* view = View(target);
+  list_->Begin();
+  list_->FillBuffer(args, 0, args->desc().size, 0);
+  list_->Barrier(kAccessCopyWrite, kAccessCopyWrite);
+  list_->UpdateBuffer(args, 0, sizeof(initial_args), initial_args);
+  list_->UpdateBuffer(color, 0, sizeof(cyan), cyan);
+  list_->Barrier(kAccessCopyWrite | kAccessHostWrite,
+                 kAccessComputeRead | kAccessComputeWrite | kAccessVertexRead |
+                     kAccessIndexRead | kAccessShaderRead);
+  list_->SetPipeline(compute);
+  const u32 add = 0;
+  list_->SetPushConstants(0, sizeof(add), &add);
+  BindingWrite binding;
+  binding.buffer = args;
+  binding.range = args->desc().size;
+  list_->PushBindGroup(0, set, &binding, 1);
+  list_->Dispatch(1, 1, 1);
+  TextureBarrier b{target, TextureState::kUndefined,
+                   TextureState::kColorTarget};
+  list_->Barrier(kAccessComputeWrite, kAccessIndirectRead | kAccessShaderRead,
+                 &b, 1);
+  list_->BeginRenderPass(ClearPass(view));
+  list_->SetPipeline(graphics);
+  YUpViewport();
+  BindVertices(vb, instances);
+  binding.buffer = color;
+  binding.range = sizeof(cyan);
+  list_->PushBindGroup(0, set, &binding, 1);
+  list_->SetIndexBuffer(index, 16, IndexType::kUint16);
+  list_->DrawIndexedIndirect(args, 0);
+  list_->EndRenderPass();
+  list_->Barrier(kAccessComputeWrite, kAccessCopyRead);
+  list_->CopyBuffer(readback, 0, args, 0, args->desc().size);
+  list_->Barrier(kAccessCopyWrite, kAccessHostRead);
+  const auto pixels = ReadPixels(target, TextureState::kColorTarget);
+  list_->End();
+  for (u32 pixel : pixels)
+    EXPECT_EQ(pixel, Rgba(0, 255, 255, 255));
+  const u32 expected_args[] = {6, 2, 2, 0, 0};
+  EXPECT_EQ(
+      std::memcmp(readback->mapped(), expected_args, sizeof(expected_args)), 0);
 }
 
 // A counter-clockwise quad in y-up clip space faces front through a y-up

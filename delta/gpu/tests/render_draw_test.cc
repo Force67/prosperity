@@ -198,11 +198,14 @@ TEST(GcnCompute, MultiplyAddPreservesSeparateRounding) {
   alignas(256) static u32 code[2][4096] = {};
   static gpu::gcn::RecompiledCs programs[2];
   for (u32 trial = 0; trial < 2; ++trial) {
-    const u32 shader[] = {
-        0x7e020204, 0x7e040205, 0x7e0602f3,
+    const u32 shader[] = {0x7e020204,
+                          0x7e040205,
+                          0x7e0602f3,
         trial ? 0xd2960001u : 0xd2820001u,
         257u | (258u << 9) | (259u << 18),
-        0xe0702000, 0x80000100, 0xbf810000};
+                          0xe0702000,
+                          0x80000100,
+                          0xbf810000};
     std::memcpy(code[trial], shader, sizeof(shader));
     const auto previous_isa = gpu::gcn::DefaultIsaMode();
     gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
@@ -242,6 +245,23 @@ struct StagedComputeOnly {
   ~StagedComputeOnly() { gpu::render::cs::kMirror.set(was); }
 };
 
+static void EnableWriteTracking() {
+  gpu::GuestWriteTracker().Enable();
+  static u8 fault_stack[65536];
+  stack_t stack{};
+  stack.ss_sp = fault_stack;
+  stack.ss_size = sizeof(fault_stack);
+  sigaltstack(&stack, nullptr);
+  struct sigaction fault{};
+  fault.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  fault.sa_sigaction = [](int, siginfo_t* si, void*) {
+    if (!host_memory::HandleWriteFault(
+            reinterpret_cast<uintptr_t>(si->si_addr)))
+      std::abort();
+  };
+  sigaction(SIGSEGV, &fault, nullptr);
+}
+
 TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {
   const StagedComputeOnly staged;
   auto& renderer = gpu::render::DefaultRenderer();
@@ -249,14 +269,7 @@ TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {
     GTEST_SKIP() << "A Vulkan device is required";
   // The buffer stands in for guest memory only while the tracker vouches for
   // the pages around the output.
-  gpu::GuestWriteTracker().Enable();
-  struct sigaction fault{};
-  fault.sa_flags = SA_SIGINFO;
-  fault.sa_sigaction = [](int, siginfo_t* si, void*) {
-    if (!host_memory::HandleWriteFault(reinterpret_cast<uintptr_t>(si->si_addr)))
-      std::abort();
-  };
-  sigaction(SIGSEGV, &fault, nullptr);
+  EnableWriteTracking();
   auto* memory = static_cast<u8*>(
       host_memory::AllocMem(reinterpret_cast<void*>(0x1210000000ull), 1048576,
                             host_memory::PageProtection::kW,
@@ -730,19 +743,20 @@ TEST(GcnCompute, DirtyExtentTracksStoresRatherThanStagingPadding) {
     ASSERT_TRUE(dispatch(32, 128, 3));
     EXPECT_TRUE(gpu::render::CsRangeDirtyOverlapping(base + 255, 1));
     EXPECT_FALSE(gpu::render::CsRangeDirtyOverlapping(base + 256, 1));
-    ASSERT_TRUE(gpu::render::FlushCsWritesRange(renderer, base, 256,
-                                               "test-extent"));
+    ASSERT_TRUE(
+        gpu::render::FlushCsWritesRange(renderer, base, 256, "test-extent"));
     for (u32 lane = 0; lane < 64; lane++)
       EXPECT_EQ(dest[trial][lane], lane < 32 ? 3u : 2u);
     // An unknown bound covers the whole footprint until its results are read.
     gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(dispatch(64, 0, 4));
-    EXPECT_TRUE(gpu::render::CsHoldsVertices(base, sizeof(dest[trial])));
+    EXPECT_TRUE(gpu::render::CsHoldsGeometry(base, sizeof(dest[trial])));
     ASSERT_TRUE(dispatch(32, 128, 5));
     EXPECT_TRUE(gpu::render::CsRangeDirtyOverlapping(base + 65536, 4));
     EXPECT_TRUE(gpu::render::CsRangeMaybeDirty(base + 65536, 4));
     ASSERT_TRUE(FlushCsWritesLanded(renderer));
-    EXPECT_FALSE(gpu::render::CsRangeDirtyOverlapping(base, sizeof(dest[trial])));
+    EXPECT_FALSE(
+        gpu::render::CsRangeDirtyOverlapping(base, sizeof(dest[trial])));
     EXPECT_FALSE(gpu::render::CsRangeMaybeDirty(base + 65536, 4));
     for (u32 lane = 0; lane < 64; lane++)
       EXPECT_EQ(dest[trial][lane], lane < 32 ? 5u : 4u);
@@ -1510,6 +1524,186 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
   EXPECT_EQ(quadrants, (base::Array<u32, 4>{1, 1, 1, 1}));
 }
 
+TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) ||
+      !gpu::render::Device().caps().draw_indirect ||
+      !gpu::render::Device().caps().host_import)
+    GTEST_SKIP() << "Indirect draws and host imports are required";
+  EnableWriteTracking();
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                        0xbf810000};
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                        0xbf810000};
+  const u32 user_data[32]{};
+  static auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(program.ok);
+  using gpu::gcn::spirv::Id;
+  gpu::gcn::spirv::Module m;
+  const Id f = m.TypeFloat(), v4 = m.TypeVec(f, 4);
+  const Id input = m.TypePointer(spv::StorageClass::Input, v4);
+  const Id vertex = m.Variable(input, spv::StorageClass::Input);
+  const Id instance = m.Variable(input, spv::StorageClass::Input);
+  m.Decorate(vertex, spv::Decoration::Location, {0});
+  m.Decorate(instance, spv::Decoration::Location, {1});
+  const Id position = m.Variable(m.TypePointer(spv::StorageClass::Output, v4),
+                                 spv::StorageClass::Output);
+  m.Decorate(position, spv::Decoration::BuiltIn,
+             {static_cast<u32>(spv::BuiltIn::Position)});
+  const Id point_size = m.Variable(m.TypePointer(spv::StorageClass::Output, f),
+                                   spv::StorageClass::Output);
+  m.Decorate(point_size, spv::Decoration::BuiltIn,
+             {static_cast<u32>(spv::BuiltIn::PointSize)});
+  const Id main =
+      m.BeginFunction(m.TypeVoid(), m.TypeFunction(m.TypeVoid(), {}));
+  m.Store(position, m.Emit(spv::Op::OpFAdd, v4,
+                           {m.Load(v4, vertex), m.Load(v4, instance)}));
+  m.Store(point_size, m.ConstF32(1));
+  m.ReturnVoid();
+  m.EndFunction();
+  m.EntryPoint(spv::ExecutionModel::Vertex, main, "main",
+               {vertex, instance, position, point_size});
+  base::String error;
+  ASSERT_TRUE(
+      gpu::gcn::spirv::Finalize(m.Assemble(), &program.vs_spirv, &error))
+      << error.c_str();
+  const base::Array<float, 4> vertices[] = {
+      {4, 0, 0, 1}, {-.5f, 0, 0, 1}, {.5f, 0, 0, 1}};
+  const base::Array<float, 4> instances[] = {
+      {0, 4, 0, 0}, {0, -.5f, 0, 0}, {0, .5f, 0, 0}};
+  alignas(65536) static u32 indices[8][16384]{};
+  alignas(65536) static u32 args[2][16384] = {{2, 2, 1, 1}, {2, 2, 1, 0, 1}};
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 9> targets{};
+  alignas(256) static const u32 cs[4096] = {
+      0xe0702000, 0x80000000, 0xbf810000};  // Store the lane ID as an index.
+  alignas(256) static const u32 packed_cs[4096] = {
+      0x7e0202ff, 0x03020100, 0xe0702000, 0x80000100, 0xbf810000};
+  const base::Array<float, 4> quad_vertices[] = {{-.5f, -.5f, 0, 1},
+                                                 {.5f, -.5f, 0, 1},
+                                                 {.5f, .5f, 0, 1},
+                                                 {-.5f, .5f, 0, 1}};
+  static gpu::gcn::RecompiledCs compiled, packed_compiled;
+  const auto previous_isa = gpu::gcn::DefaultIsaMode();
+  gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+  compiled = gpu::gcn::RecompileCompute(cs, 64, 1, 1, 4, 0, 0);
+  packed_compiled = gpu::gcn::RecompileCompute(packed_cs, 64, 1, 1, 4, 0, 0);
+  gpu::gcn::SetDefaultIsaMode(previous_isa);
+  ASSERT_TRUE(compiled.ok);
+  ASSERT_EQ(compiled.resources.size(), 1u);
+  ASSERT_TRUE(packed_compiled.ok);
+  ASSERT_EQ(packed_compiled.resources.size(), 1u);
+  for (u32 trial = 0; trial < 9; ++trial) {
+    SCOPED_TRACE(trial);
+    const bool indexed = trial != 0;
+    const bool quads = trial >= 5;
+    const bool direct = trial == 2 || trial == 3 || quads;
+    const bool narrow = trial == 3 || trial == 4 || trial == 6 || trial == 7;
+    const bool cpu_source = trial >= 7;
+    gpu::render::BeginFrame(renderer);
+    const u64 index_base =
+        reinterpret_cast<u64>(indices[trial ? trial - 1 : 0]);
+    gpu::render::ComputeInfo ci;
+    if (cpu_source) {
+      for (u32 i = 0; i < 64; i++)
+        indices[trial - 1][i] = narrow    ? 0x03020100
+                                : (i & 1) ? 0x00030002
+                                          : 0x00010000;
+    } else if (indexed) {
+      std::fill_n(indices[trial - 1], 64, 0xdeadbeefu);
+      ci.cs_addr = reinterpret_cast<u64>(trial == 6 ? packed_cs : cs);
+      ci.recomp = trial == 6 ? &packed_compiled : &compiled;
+      ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
+      ci.num_res = 1;
+      auto& resource = ci.res[0];
+      resource.base = index_base;
+      resource.size = resource.guest_size = 256;
+      resource.binding = ci.recomp->resources[0].binding;
+      resource.written = resource.shader_writes = true;
+      ci.user_data[0] = static_cast<u32>(index_base);
+      ci.user_data[1] = (index_base >> 32) | (4u << 16);
+      ci.user_data[2] = 64;
+      ci.user_data[3] = (4u << 15) | (4u << 12);
+      ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+      ASSERT_TRUE(gpu::render::CsHoldsGeometry(index_base, 256));
+    }
+    gpu::render::DrawInfo draw;
+    draw.recomp = &program;
+    draw.prim_type = quads ? 19 : 1;
+    draw.vertex_count = direct ? 3 : 1;
+    draw.instance_count = direct ? 2 : 1;
+    draw.vertex_data = quads ? quad_vertices : vertices;
+    draw.vertex_stride = 16;
+    draw.num_vbufs = draw.num_vattrs = 2;
+    draw.vbufs[0] = {draw.vertex_data, 16, quads ? 4u : 3u};
+    draw.vbufs[1] = {instances, 16, 3, true};
+    draw.vattrs[0] = {0, 0, 0, 4, 14, 7};
+    draw.vattrs[1] = {1, 1, 0, 4, 14, 7};
+    if (!direct)
+      draw.indirect_args = reinterpret_cast<u64>(args[indexed]);
+    if (indexed) {
+      draw.index_data = reinterpret_cast<const void*>(
+          index_base + (narrow && !quads ? 3 : 0));
+      draw.index_count = quads ? 7 : direct ? 3 : 64;
+      draw.index_type = trial == 8 ? 0 : narrow ? 2 : 1;
+    }
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[trial].data());
+    draw.rt_w = draw.rt_h = 16;
+    draw.mrt_count = draw.mrt_bound_mask = 1;
+    draw.mrt_info[0] = 10u << 2;
+    const u64 writeback = gpu::render::g_wb_why_bytes;
+    const u32 draws = gpu::render::g_frame.draws;
+    const u64 conversions = gpu::g_index_convert_n;
+    const u64 cpu_indices = gpu::g_ring_ib_bytes;
+    gpu::render::Draw(renderer, draw);
+    EXPECT_EQ(gpu::render::g_frame.draws, draws + 1);
+    if (narrow || quads) {
+      EXPECT_EQ(gpu::g_index_convert_n, conversions + 1);
+      EXPECT_EQ(gpu::g_ring_ib_bytes, cpu_indices);
+      gpu::render::Draw(renderer, draw);
+      EXPECT_EQ(gpu::render::g_frame.draws, draws + 2);
+      EXPECT_EQ(gpu::g_index_convert_n, conversions + 1);
+      if (cpu_source) {
+        *reinterpret_cast<volatile u32*>(indices[trial - 1]) =
+            narrow ? 0x03020100 : 0x00010000;
+        gpu::render::CollectGuestWrites();
+      } else {
+        ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+      }
+      gpu::render::Draw(renderer, draw);
+      EXPECT_EQ(gpu::render::g_frame.draws, draws + 3);
+      EXPECT_EQ(gpu::g_index_convert_n, conversions + 2);
+    }
+    EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
+    if (indexed && !cpu_source)
+      EXPECT_TRUE(gpu::render::CsRangeDirtyOverlapping(index_base, 256));
+    const u32 slot_index = gpu::render::g_frame.slot_idx;
+    gpu::render::EndFrame(renderer, draw.rt_base);
+    const auto& slot = gpu::render::g_frame.slots[slot_index];
+    ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+    ASSERT_TRUE(slot.presentable);
+    const auto* pixels = slot.readback->mapped();
+    base::Array<u32, 4> quadrants{};
+    for (u32 y = 0; y < 16; ++y)
+      for (u32 x = 0; x < 16; ++x)
+        if (pixels[(y * 16 + x) * 4] == 255)
+          ++quadrants[(y / 8) * 2 + x / 8];
+    if (quads) {
+      EXPECT_EQ(quadrants[0] + quadrants[1] + quadrants[2] + quadrants[3], 64u);
+    } else if (trial == 3) {
+      EXPECT_EQ(quadrants[0] + quadrants[2], 1u);
+      EXPECT_EQ(quadrants[1] + quadrants[3], 0u);
+    } else if (trial == 4) {
+      EXPECT_EQ(quadrants, (base::Array<u32, 4>{1, 0, 1, 0}));
+    } else if (trial == 2) {
+      EXPECT_EQ(quadrants[0] + quadrants[2], 1u);
+      EXPECT_EQ(quadrants[1] + quadrants[3], 1u);
+    } else
+      EXPECT_EQ(quadrants, (base::Array<u32, 4>{1, 1, 1, 1}));
+  }
+}
+
 TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
   options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
@@ -1521,7 +1715,7 @@ TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {
                                // stride
       0x7e020280, 0x7e040280, 0x7e0602f2, 0xf80008cf, 0x03020100, 0xbf810000};
   const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
-                      0xbf810000};
+                        0xbf810000};
   const base::Array<float, 4> vertices = {-.5f, 99.f, .5f, 99.f};
   const u64 vb = reinterpret_cast<u64>(vertices.data());
   const u32 descriptor[4] = {u32(vb), u32(vb >> 32) | (8u << 16), 2,

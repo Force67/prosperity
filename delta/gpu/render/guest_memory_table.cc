@@ -17,8 +17,14 @@ struct Buffer {
   u64 address = 0;
   u64 size = 0;
 };
-Buffer g_table, g_flags, g_misses;
-u32 g_windows = 0;
+// One per dispatch still in flight: a set is reused only once the caller has
+// taken its results, so no dispatch waits for the one before it.
+struct TableSet {
+  Buffer table, flags, misses;
+  u32 windows = 0;
+  bool busy = false;
+};
+base::Vector<TableSet> g_sets;
 // Entry 0 of the table is a header the search can never match (an empty
 // window at 0): its third field names the miss buffer, a u32 count then up
 // to kMissSlots addresses the shader found in no window.
@@ -51,51 +57,61 @@ bool Ensure(Buffer& out, u64 bytes) {
 bool PrepareGuestMemory(base::Span<const GuestMemoryWindow> windows,
                         rhi::Buffer*& table,
                         u64& table_bytes,
-                        bool writes) {
+                        bool writes,
+                        u32& set) {
   if (!Device().caps().buffer_address)
     return false;
-  if (!g_misses.buffer) {
-    if (!Ensure(g_misses, 8 + kMissSlots * 8))
+  set = 0;
+  while (set < g_sets.size() && g_sets[set].busy)
+    set++;
+  if (set == g_sets.size())
+    g_sets.emplace_back();
+  TableSet& s = g_sets[set];
+  if (!s.misses.buffer) {
+    if (!Ensure(s.misses, 8 + kMissSlots * 8))
       return false;
-    std::memset(g_misses.mapped, 0, g_misses.size);
+    std::memset(s.misses.mapped, 0, s.misses.size);
   }
   // One u32 written flag per window: entry i + 1's dirty field names flag i.
   const u64 bytes = (windows.size() + 1) * sizeof(base::Array<u64, 4>);
-  if (!Ensure(g_table, bytes) ||
-      (writes && !Ensure(g_flags, windows.size() * 4 + 4)))
+  if (!Ensure(s.table, bytes) ||
+      (writes && !Ensure(s.flags, windows.size() * 4 + 4)))
     return false;
-  auto* entries = static_cast<base::Array<u64, 4>*>(g_table.mapped);
-  entries[0] = {0, 0, g_misses.address, 0};
+  auto* entries = static_cast<base::Array<u64, 4>*>(s.table.mapped);
+  entries[0] = {0, 0, s.misses.address, 0};
   for (size_t i = 0; i < windows.size(); i++) {
     const GuestMemoryWindow& w = windows[i];
     // No flag: the shader drops stores into a read-only window.
     entries[i + 1] = {w.base, w.base + w.size, w.address,
-                      writes && w.writable ? g_flags.address + i * 4 : 0};
+                      writes && w.writable ? s.flags.address + i * 4 : 0};
   }
   if (writes)
-    std::memset(g_flags.mapped, 0, windows.size() * 4);
-  g_windows = writes ? static_cast<u32>(windows.size()) : 0;
-  table = g_table.buffer;
+    std::memset(s.flags.mapped, 0, windows.size() * 4);
+  s.windows = writes ? static_cast<u32>(windows.size()) : 0;
+  s.busy = true;
+  table = s.table.buffer;
   table_bytes = bytes;
   return true;
 }
 
-base::Vector<u32> TakeWrittenWindows() {
+base::Vector<u32> TakeWrittenWindows(u32 set) {
   base::Vector<u32> written;
-  auto* flags = static_cast<u32*>(g_flags.mapped);
-  for (u32 i = 0; i < g_windows; i++)
+  TableSet& s = g_sets[set];
+  auto* flags = static_cast<u32*>(s.flags.mapped);
+  for (u32 i = 0; i < s.windows; i++)
     if (flags[i]) {
       written.push_back(i);
       flags[i] = 0;
     }
-  g_windows = 0;
+  s.windows = 0;
   return written;
 }
-base::Vector<u64> TakeGuestMisses() {
+
+base::Vector<u64> TakeGuestMisses(u32 set) {
   base::Vector<u64> misses;
-  if (!g_misses.mapped)
+  auto* words = static_cast<u32*>(g_sets[set].misses.mapped);
+  if (!words)
     return misses;
-  auto* words = static_cast<u32*>(g_misses.mapped);
   const u32 count = words[0] < kMissSlots ? words[0] : kMissSlots;
   for (u32 i = 0; i < count; i++)
     misses.push_back(words[2 + i * 2] | (u64(words[3 + i * 2]) << 32));
@@ -103,13 +119,13 @@ base::Vector<u64> TakeGuestMisses() {
   return misses;
 }
 
+void ReleaseGuestMemory(u32 set) {
+  g_sets[set].busy = false;
+}
+
 namespace {
-const guest::SessionReset g_session_reset([] {
-  guest::ResetResource(g_table);
-  guest::ResetResource(g_flags);
-  guest::ResetResource(g_misses);
-  guest::ResetResource(g_windows);
-});
+const guest::SessionReset g_session_reset(
+    [] { guest::ResetResource(g_sets); });
 }  // namespace
 
 }  // namespace gpu::render

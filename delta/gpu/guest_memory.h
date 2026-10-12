@@ -145,6 +145,19 @@ inline base::Atomic<bool>& MemoryRemapped() {
   return remapped;
 }
 
+// At a frame boundary. Every guest map and unmap is reported, so what was
+// readable stays so until one: probing the pages again every frame was a
+// thousand mincore and process_vm_readv calls a frame. Once a second
+// regardless.
+inline void FrameMemoryGeneration() {
+  static u32 frames = 0;
+  if (MemoryRemapped().exchange(false, base::memory_order_acq_rel) ||
+      ++frames >= 60) {
+    frames = 0;
+    NextMemoryGeneration();
+  }
+}
+
 inline bool IsReadableRangeCached(u64 address, u64 bytes) {
   constexpr u64 kPageShift = GuestPageTable::kPageShift;
   // Longer spans go through the exact-address cache below.

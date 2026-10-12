@@ -47,8 +47,12 @@ extern u64 g_pipe_pending_draws;
 // waits for it before reusing the scanout buffer it lent.
 extern u64 g_ns_gfx_present, g_ns_borrow_wait;
 extern u64 g_ring_vb_bytes, g_ring_ib_bytes, g_ring_cb_bytes, g_ring_raw_bytes;
+extern u64 g_index_convert_n, g_index_convert_bytes;
 // Vertex bytes copied into the cross-frame buffer cache instead of the ring.
 extern u64 g_vb_kept_bytes;
+// Bytes bound in place through the direct alias, with no copy at all.
+extern u64 g_bind_bytes;
+extern u32 g_bind_n;
 extern u32 g_gpu_exec_samples;
 extern u32 g_cs_stage_n, g_cs_flush_n;
 extern u64 g_cs_stage_bytes;

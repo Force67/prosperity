@@ -16,16 +16,18 @@ struct GuestMemoryWindow {
   bool mirror = false;
 };
 // `windows` are sorted and disjoint. `table` and `table_bytes` are the
-// translation table the shader binds. Caller must retire the preceding
-// compute batch first: the table and its flags are reused.
+// translation table the shader binds, out of `set`, which stays the
+// dispatch's until ReleaseGuestMemory.
 bool PrepareGuestMemory(base::Span<const GuestMemoryWindow> windows,
                         rhi::Buffer*& table,
                         u64& table_bytes,
-                        bool writes);
+                        bool writes,
+                        u32& set);
 // After the dispatch fence: which windows the shader stored into, by index
-// into the last PrepareGuestMemory's `windows`. Resets the flags.
-base::Vector<u32> TakeWrittenWindows();
+// into that PrepareGuestMemory's `windows`.
+base::Vector<u32> TakeWrittenWindows(u32 set);
 // After the dispatch fence: guest addresses the shader reached outside every
-// window (up to 63). Resets them.
-base::Vector<u64> TakeGuestMisses();
+// window (up to 63).
+base::Vector<u64> TakeGuestMisses(u32 set);
+void ReleaseGuestMemory(u32 set);
 }  // namespace gpu::render

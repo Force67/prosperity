@@ -118,7 +118,8 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
   DELTA_ZONE("gpu.cs_flush_frame_end");
   ReportGpuMemory();
   const WaitReaderScope reader("frame-end");
-  if (g_cs_failed || !SettleUnwaitedWrites()) {
+  HarvestGuestTables();
+  if (g_cs_failed) {
     renderer.state = nullptr;
     return false;
   }
@@ -244,26 +245,41 @@ static bool FlushDirtyRanges(Renderer& renderer,
 // The descriptor replay reads tables a dispatch rewrites every frame, almost
 // always with the same bytes. Waiting for each rewrite to land stalled DeS's
 // walk 3.5 times a frame; instead the bytes the previous rewrite left are taken
-// and compared once this one lands. An address whose bytes changed waits from
-// then on, as does any address on its first read.
+// and compared once this one lands. An address waits on its first read, and
+// from its kSpecMaxChanges-th changed read on: a table the GPU fills once and
+// then keeps (UC2 writes its constants over zeroed memory) changes exactly
+// once, and waiting for it every frame after that cost two waits a frame.
 DELTA_OPTION(bool, kSpeculateReads, "DELTA_GPU_SPECULATE_READS", true);
 struct SpeculatedRead {
   u64 base, bytes, batch;
   u8 seen[64];
 };
 base::Vector<SpeculatedRead> g_speculated;
-base::HashSet<u64> g_spec_known, g_spec_volatile;
+constexpr u8 kSpecMaxChanges = 3;
+base::HashSet<u64> g_spec_known;
+// Per address: changed reads, counted once a frame (one rewrite read twice is
+// one change).
+struct SpecChanges {
+  u8 n = 0;
+  int frame = -1;
+};
+base::HashMap<u64, SpecChanges> g_spec_changes;
 u64 g_spec_misses = 0;
 const guest::SessionReset g_spec_reset([] {
   guest::ResetResource(g_speculated);
   guest::ResetResource(g_spec_known);
-  guest::ResetResource(g_spec_volatile);
+  guest::ResetResource(g_spec_changes);
   guest::ResetResource(g_spec_misses);
 });
 
+bool SpecVolatile(u64 base) {
+  const auto it = g_spec_changes.find(base);
+  return it != g_spec_changes.end() && it->second.n >= kSpecMaxChanges;
+}
+
 bool SpeculateGuestRead(u64 base, u64 bytes) {
   if (!kSpeculateReads || !bytes || bytes > sizeof(SpeculatedRead::seen) ||
-      g_speculated.size() >= 4096 || g_spec_volatile.count(base) ||
+      g_speculated.size() >= 4096 || SpecVolatile(base) ||
       CsRangeDirtyOverlapping(base, bytes))
     return false;
   const u64 batch = PendingGuestWriteBatch(base, bytes);
@@ -288,10 +304,14 @@ void CheckSpeculatedReads() {
     if (r.batch > g_cs_batch_done)
       return false;
     if (std::memcmp(r.seen, reinterpret_cast<const void*>(r.base), r.bytes)) {
-      g_spec_volatile.insert(r.base);
-      if (g_spec_misses++ < 8)
-        BASE_LOGI("gpuvk", "speculated read {:#x}+{} changed; it waits now",
-                  (unsigned long long)r.base, (unsigned long long)r.bytes);
+      SpecChanges& c = g_spec_changes[r.base];
+      if (c.frame != g_frame.num) {
+        c.frame = g_frame.num;
+        if (++c.n == kSpecMaxChanges && g_spec_misses++ < 8)
+          BASE_LOGI("gpuvk",
+                    "speculated read {:#x}+{} keeps changing; it waits now",
+                    (unsigned long long)r.base, (unsigned long long)r.bytes);
+      }
     }
     return true;
   });

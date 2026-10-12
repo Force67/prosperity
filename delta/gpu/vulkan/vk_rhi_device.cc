@@ -429,6 +429,8 @@ VulkanDevice::~VulkanDevice() {
       vkDestroyDescriptorPool(native.device, pool, nullptr);
     if (timeline_)
       vkDestroySemaphore(native.device, timeline_, nullptr);
+    if (sparse_timeline_)
+      vkDestroySemaphore(native.device, sparse_timeline_, nullptr);
     if (command_pool)
       vkDestroyCommandPool(native.device, command_pool, nullptr);
     if (side_fence_)
@@ -713,6 +715,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   f.samplerAnisotropy = a.samplerAnisotropy;
   f.geometryShader = a.geometryShader;
   f.independentBlend = a.independentBlend;
+  f.drawIndirectFirstInstance = a.drawIndirectFirstInstance;
   f.dualSrcBlend = a.dualSrcBlend;
   f.shaderStorageImageWriteWithoutFormat =
       a.shaderStorageImageWriteWithoutFormat;
@@ -722,10 +725,10 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
     vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, nullptr);
     base::Vector<VkQueueFamilyProperties> qs(qn);
     vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, qs.data());
-    caps_.sparse_buffer = a.sparseBinding && a.sparseResidencyBuffer &&
-                          native.queue_family < qn &&
-                          (qs[native.queue_family].queueFlags &
-                           VK_QUEUE_SPARSE_BINDING_BIT);
+    caps_.sparse_buffer =
+        a.sparseBinding && a.sparseResidencyBuffer &&
+        native.queue_family < qn &&
+        (qs[native.queue_family].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT);
     f.sparseBinding = caps_.sparse_buffer;
     f.sparseResidencyBuffer = caps_.sparse_buffer;
   }
@@ -778,9 +781,8 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
     cmd_begin_conditional =
         reinterpret_cast<PFN_vkCmdBeginConditionalRenderingEXT>(
             vkGetDeviceProcAddr(dev, "vkCmdBeginConditionalRenderingEXT"));
-    cmd_end_conditional =
-        reinterpret_cast<PFN_vkCmdEndConditionalRenderingEXT>(
-            vkGetDeviceProcAddr(dev, "vkCmdEndConditionalRenderingEXT"));
+    cmd_end_conditional = reinterpret_cast<PFN_vkCmdEndConditionalRenderingEXT>(
+        vkGetDeviceProcAddr(dev, "vkCmdEndConditionalRenderingEXT"));
     caps_.conditional = cmd_begin_conditional && cmd_end_conditional;
   }
   caps_.memory_export = get_memory_fd != nullptr;
@@ -821,7 +823,8 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   sti.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
   VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
   sci.pNext = &sti;
-  if (vkCreateSemaphore(dev, &sci, nullptr, &timeline_) != VK_SUCCESS)
+  if (vkCreateSemaphore(dev, &sci, nullptr, &timeline_) != VK_SUCCESS ||
+      vkCreateSemaphore(dev, &sci, nullptr, &sparse_timeline_) != VK_SUCCESS)
     return false;
   if (side_queue_) {
     VkCommandBufferAllocateInfo cai{
@@ -867,7 +870,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   caps_.texture_blit = true;
   caps_.dispatch_base = true;
   caps_.dispatch_indirect = true;
-  caps_.draw_indirect = true;
+  caps_.draw_indirect = f.drawIndirectFirstInstance;
   caps_.timestamps =
       lim.timestampComputeAndGraphics && native.timestamp_valid_bits != 0;
   caps_.timestamp_period_ns = lim.timestampPeriod;
@@ -1046,10 +1049,9 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
       type = FindMemoryType(mr.memoryTypeBits, 0);
   }
   ai.memoryTypeIndex = type;
-  const VkResult allocated = type == UINT32_MAX
-                                 ? VK_ERROR_FEATURE_NOT_PRESENT
-                                 : vkAllocateMemory(dev, &ai, nullptr,
-                                                    &buffer->memory);
+  const VkResult allocated =
+      type == UINT32_MAX ? VK_ERROR_FEATURE_NOT_PRESENT
+                         : vkAllocateMemory(dev, &ai, nullptr, &buffer->memory);
   if (allocated == VK_SUCCESS && desc.host_pointer) {
     static u64 total = 0, count = 0;
     total += desc.size;
@@ -1104,8 +1106,8 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
 bool VulkanDevice::AllocateExported(VkImage image, Allocation& out) {
   VkMemoryRequirements mr;
   vkGetImageMemoryRequirements(native.device, image, &mr);
-  u32 type = FindMemoryType(mr.memoryTypeBits,
-                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  u32 type =
+      FindMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   if (type == UINT32_MAX)
     return false;
   VkMemoryDedicatedAllocateInfo dedicated{
@@ -1191,9 +1193,9 @@ rhi::Texture* VulkanDevice::CreateTexture(const rhi::TextureDesc& desc) {
     ii.pNext = &external;
   if (vkCreateImage(native.device, &ii, nullptr, &texture->image) != VK_SUCCESS)
     return nullptr;
-  if (exported ? !AllocateExported(texture->image, texture->allocation)
-               : !images_.Allocate(*this, texture->image,
-                                   texture->allocation)) {
+  if (exported
+          ? !AllocateExported(texture->image, texture->allocation)
+          : !images_.Allocate(*this, texture->image, texture->allocation)) {
     vkDestroyImage(native.device, texture->image, nullptr);
     return nullptr;
   }
@@ -1781,25 +1783,32 @@ bool VulkanDevice::CommitSparse(rhi::Buffer* buffer, u64 offset, u64 bytes) {
   }
   if (binds.empty())
     return true;
-  VkSparseBufferMemoryBindInfo buffer_binds{b->buffer,
-                                            static_cast<u32>(binds.size()),
-                                            binds.data()};
+  // Nothing the GPU already runs touches pages bound only now, so the bind is
+  // not waited for: it is ordered behind the previous bind and ahead of the
+  // next submission by a timeline of its own.
+  DELTA_ZONE("vk.commit_sparse");
+  VkSparseBufferMemoryBindInfo buffer_binds{
+      b->buffer, static_cast<u32>(binds.size()), binds.data()};
+  base::LockGuard<base::Mutex> lock(queue_mutex);
+  const uint64_t wait = sparse_value_, signal = sparse_value_ + 1;
+  VkTimelineSemaphoreSubmitInfo ti{
+      VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+  ti.waitSemaphoreValueCount = 1;
+  ti.pWaitSemaphoreValues = &wait;
+  ti.signalSemaphoreValueCount = 1;
+  ti.pSignalSemaphoreValues = &signal;
   VkBindSparseInfo info{VK_STRUCTURE_TYPE_BIND_SPARSE_INFO};
+  info.pNext = &ti;
+  info.waitSemaphoreCount = 1;
+  info.pWaitSemaphores = &sparse_timeline_;
+  info.signalSemaphoreCount = 1;
+  info.pSignalSemaphores = &sparse_timeline_;
   info.bufferBindCount = 1;
   info.pBufferBinds = &buffer_binds;
-  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  VkFence fence;
-  if (vkCreateFence(native.device, &fi, nullptr, &fence) != VK_SUCCESS)
+  if (vkQueueBindSparse(native.queue, 1, &info, VK_NULL_HANDLE) != VK_SUCCESS)
     return false;
-  VkResult r;
-  {
-    base::LockGuard<base::Mutex> lock(queue_mutex);
-    r = vkQueueBindSparse(native.queue, 1, &info, fence);
-  }
-  if (r == VK_SUCCESS)
-    r = vkWaitForFences(native.device, 1, &fence, VK_TRUE, ~0ull);
-  vkDestroyFence(native.device, fence, nullptr);
-  return r == VK_SUCCESS;
+  sparse_value_ = signal;
+  return true;
 }
 
 void VulkanDevice::SetName(rhi::Object* object, const char* name) {
@@ -1885,6 +1894,16 @@ u64 VulkanDevice::Submit(rhi::CommandList* const* lists, u32 count) {
   ti.pSignalSemaphoreValues = &value;
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.pNext = &ti;
+  // Behind the sparse binds made since the last submission.
+  const uint64_t sparse = sparse_value_;
+  const VkPipelineStageFlags sparse_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+  if (sparse != sparse_waited_) {
+    ti.waitSemaphoreValueCount = 1;
+    ti.pWaitSemaphoreValues = &sparse;
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &sparse_timeline_;
+    si.pWaitDstStageMask = &sparse_stage;
+  }
   si.commandBufferCount = count;
   si.pCommandBuffers = cmds.data();
   si.signalSemaphoreCount = 1;
@@ -1895,6 +1914,7 @@ u64 VulkanDevice::Submit(rhi::CommandList* const* lists, u32 count) {
     ReportDeviceLoss();
     return submitted_;
   }
+  sparse_waited_ = sparse;
   submitted_ = value;
   return value;
 }

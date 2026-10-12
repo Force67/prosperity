@@ -455,10 +455,41 @@ void GlCommandList::DrawIndexed(u32 index_count,
               u64(first_index) * (index_type_ == GL_UNSIGNED_INT ? 4 : 2);
 }
 
+void GlCommandList::DrawIndirect(rhi::Buffer* args, u64 offset) {
+  if (!pipeline_ || pipeline_->compute)
+    return;
+  FlushBindings();
+  FlushVertexInput(false);
+  auto* c = stream_.Add<CmdDrawIndirect>();
+  c->buffer = Name(args);
+  c->offset = offset;
+}
+
+void GlCommandList::DrawIndexedIndirect(rhi::Buffer* args, u64 offset) {
+  if (!pipeline_ || pipeline_->compute)
+    return;
+  FlushBindings();
+  FlushVertexInput(true);
+  auto* c = stream_.Add<CmdDrawIndexedIndirect>();
+  c->buffer = Name(args);
+  c->offset = offset;
+  c->type = index_type_;
+  c->index_offset = index_offset_;
+}
+
 void GlCommandList::DrawMeshTasks(u32 /*x*/, u32 /*y*/, u32 /*z*/) {}
 
 void GlCommandList::Dispatch(u32 x, u32 y, u32 z) {
   DispatchBase(0, 0, 0, x, y, z);
+}
+
+void GlCommandList::DispatchIndirect(rhi::Buffer* args, u64 offset) {
+  if (!pipeline_ || !pipeline_->compute)
+    return;
+  FlushBindings();
+  auto* c = stream_.Add<CmdDispatchIndirect>();
+  c->buffer = Name(args);
+  c->offset = offset;
 }
 
 void GlCommandList::DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) {

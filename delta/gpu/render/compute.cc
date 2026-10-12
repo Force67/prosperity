@@ -22,9 +22,9 @@
 #include "gpu/gpu_check.h"
 #include "gpu/guest_memory.h"
 #include "gpu/guest_page_table.h"
-#include "gpu/write_tracker.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/hash.h"
+#include "gpu/write_tracker.h"
 #include "guest/session.h"
 #include "host_memory/host_memory.h"
 
@@ -294,8 +294,8 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
       return &g_cs_pipes[key];
     }
   }
-  cp.set_layout = CsSetLayout(ci.num_res, ci.gds_binding,
-                              ci.recomp->guest_memory_binding,
+  cp.set_layout =
+      CsSetLayout(ci.num_res, ci.gds_binding, ci.recomp->guest_memory_binding,
                               ci.recomp->textures);
   if (!cp.set_layout)
     return nullptr;
@@ -469,9 +469,9 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
   // CopyDst: RT-backed inputs are staged by an image->buffer copy on the
   // queue (StageCsRangeFromRtInFrame) instead of a CPU memcpy from guest
   // memory.
-  // Vertex: a draw may fetch a dispatch's output in place (CsVertexBuffer).
+  // Vertex: a draw may fetch a dispatch's output in place (CsGeometryBuffer).
   u32 usage = rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferVertex |
-              rhi::kBufferIndirect;
+              rhi::kBufferIndirect | rhi::kBufferIndex;
   // A pointer-chasing dispatch may read the range in place (GuestOverrides).
   if (Device().caps().buffer_address)
     usage |= rhi::kBufferAddress;

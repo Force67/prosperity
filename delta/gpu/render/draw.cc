@@ -14,7 +14,6 @@
 #include "gpu/render/draw_recomp.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/guest_format.h"
-#include "gpu/render/index_upload.h"
 #include "gpu/render/labels.h"
 #include "gpu/render/pipeline_cache.h"
 #include "gpu/render/render_target.h"
@@ -114,13 +113,6 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   ScopeNs draw_timer(&g_ns_draw);
   ScopeNs frame_draw_timer(&g_fr_draw);
   g_win_draws++;
-  if (d.index_data && d.index_count) {
-    const u64 index_bytes =
-        static_cast<u64>(d.index_count) * GuestIndexElementBytes(d.index_type);
-    if (!FlushCsWritesRange(renderer, reinterpret_cast<u64>(d.index_data),
-                            index_bytes))
-      return;
-  }
   if (ShaderFilterDrops(d.ps_addr)) {
     g_frame.draws++;
     return;

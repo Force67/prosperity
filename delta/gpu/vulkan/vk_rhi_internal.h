@@ -249,6 +249,7 @@ class VulkanCommandList final : public rhi::CommandList {
  private:
   VulkanDevice& device_;
   VulkanPipeline* pipeline_ = nullptr;
+  bool dispatch_based_ = false;
   // Sets for PushBindGroup on a device without push descriptors; reset at
   // Begin, which is only legal once the previous submission retired.
   base::Vector<VkDescriptorPool> transient_pools_;
@@ -357,6 +358,10 @@ class VulkanDevice final : public rhi::Device {
   // small compute groups as wave32).
   VkShaderStageFlags pinned_subgroup_stages_ = 0;
   VkSemaphore timeline_ = VK_NULL_HANDLE;
+  // Sparse binds, waited for by the next Submit.
+  VkSemaphore sparse_timeline_ = VK_NULL_HANDLE;
+  u64 sparse_value_ = 0;
+  u64 sparse_waited_ = 0;
   // CopyAfter's queue, command buffer and fence, guarded by a spin flag.
   VkQueue side_queue_ = VK_NULL_HANDLE;
   VkCommandPool side_pool_ = VK_NULL_HANDLE;

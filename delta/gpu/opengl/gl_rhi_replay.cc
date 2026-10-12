@@ -97,6 +97,25 @@ void Replayer::Init() {
   glCreateBuffers(1, &push_ubo_);
   glNamedBufferStorage(push_ubo_, kMaxPushBytes, nullptr,
                        GL_DYNAMIC_STORAGE_BIT);
+  glCreateBuffers(1, &indirect_args_);
+  glNamedBufferStorage(indirect_args_, 20, nullptr, GL_DYNAMIC_STORAGE_BIT);
+  const char* source = R"(#version 430 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Arguments { uint args[5]; };
+layout(location = 0) uniform uint index_base;
+void main() { args[2] += index_base; }
+)";
+  indirect_program_ = glCreateShaderProgramv(GL_COMPUTE_SHADER, 1, &source);
+  GLint linked = 0;
+  glGetProgramiv(indirect_program_, GL_LINK_STATUS, &linked);
+  if (!linked) {
+    char log[1024]{};
+    glGetProgramInfoLog(indirect_program_, sizeof(log), nullptr, log);
+    BASE_LOGI("gpugl", "indirect argument shader failed: {}", log);
+    glDeleteProgram(indirect_program_);
+    indirect_program_ = 0;
+  }
+  device_.caps_.draw_indirect = indirect_program_ != 0;
 }
 
 void Replayer::ResetSession() {
@@ -110,6 +129,7 @@ void Replayer::ResetSession() {
   pipeline_ = nullptr;
   program_ = ~0u;
   have_raster_ = false;
+  storage_zero_ = {};
 }
 
 void Replayer::Forget(rhi::Object* object) {
@@ -132,6 +152,8 @@ void Replayer::Forget(rhi::Object* object) {
       pixel_pack_ = 0;
     if (pixel_unpack_ == b->name)
       pixel_unpack_ = 0;
+    if (storage_zero_.name == b->name)
+      storage_zero_ = {};
   } else if (auto* p = dynamic_cast<GlPipeline*>(object)) {
     if (pipeline_ == p)
       pipeline_ = nullptr;
@@ -692,6 +714,38 @@ void Replayer::ClearDepthStencil(const CmdClearDepthStencil& c) {
   DetachScratch(scratch_draw_);
 }
 
+void Replayer::DrawIndexedIndirect(const CmdDrawIndexedIndirect& c) {
+  GLuint buffer = c.buffer;
+  u64 offset = c.offset;
+  if (c.index_offset) {
+    // GL's firstIndex addresses the whole element buffer, whereas the rhi's
+    // firstIndex is relative to the currently bound index-buffer offset.
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glCopyNamedBufferSubData(buffer, indirect_args_,
+                             static_cast<GLintptr>(offset), 0, 20);
+    UseProgram(indirect_program_);
+    glProgramUniform1ui(
+        indirect_program_, 0,
+        static_cast<GLuint>(c.index_offset /
+                            (c.type == GL_UNSIGNED_INT ? 4 : 2)));
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, indirect_args_);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_COMMAND_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    if (storage_zero_.name)
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, storage_zero_.name,
+                        static_cast<GLintptr>(storage_zero_.offset),
+                        static_cast<GLsizeiptr>(storage_zero_.size));
+    else
+      glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, 0);
+    buffer = indirect_args_;
+    offset = 0;
+  }
+  ApplyGraphics();
+  glBindBuffer(GL_DRAW_INDIRECT_BUFFER, buffer);
+  glDrawElementsIndirect(pipeline_->mode, c.type,
+                         reinterpret_cast<const void*>(offset));
+}
+
 void Replayer::Execute(const GlCommandList& list) {
   pipeline_ = nullptr;
   const CommandStream& stream = list.stream();
@@ -709,6 +763,8 @@ void Replayer::Execute(const GlCommandList& list) {
         break;
       case Op::kBindBuffer: {
         const auto& c = As<CmdBindBuffer>(p);
+        if (c.target == GL_SHADER_STORAGE_BUFFER && c.slot == 0)
+          storage_zero_ = c;
         if (c.name)
           glBindBufferRange(c.target, c.slot, c.name,
                             static_cast<GLintptr>(c.offset),
@@ -798,6 +854,17 @@ void Replayer::Execute(const GlCommandList& list) {
             c.first_instance);
         break;
       }
+      case Op::kDrawIndirect: {
+        const auto& c = As<CmdDrawIndirect>(p);
+        ApplyGraphics();
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, c.buffer);
+        glDrawArraysIndirect(pipeline_->mode,
+                              reinterpret_cast<const void*>(c.offset));
+        break;
+      }
+      case Op::kDrawIndexedIndirect:
+        DrawIndexedIndirect(As<CmdDrawIndexedIndirect>(p));
+        break;
       case Op::kDispatch: {
         const auto& c = As<CmdDispatch>(p);
         UseProgram(pipeline_->program);
@@ -808,6 +875,20 @@ void Replayer::Execute(const GlCommandList& list) {
           std::memcpy(pipeline_->base, c.base, sizeof(c.base));
         }
         glDispatchCompute(c.x, c.y, c.z);
+        break;
+      }
+      case Op::kDispatchIndirect: {
+        const auto& c = As<CmdDispatchIndirect>(p);
+        UseProgram(pipeline_->program);
+        const u32 base[3]{};
+        if (pipeline_->base_location >= 0 &&
+            std::memcmp(pipeline_->base, base, sizeof(base))) {
+          glProgramUniform3ui(pipeline_->program, pipeline_->base_location, 0,
+                              0, 0);
+          std::memcpy(pipeline_->base, base, sizeof(base));
+        }
+        glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, c.buffer);
+        glDispatchComputeIndirect(static_cast<GLintptr>(c.offset));
         break;
       }
       case Op::kClearAttachment: {

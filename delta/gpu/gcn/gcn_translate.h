@@ -288,6 +288,10 @@ struct ImageTilingParams {
 
 base::Vector<u32> BuildImageTilingShader();
 
+// Packed guest indices to 32-bit indices. Push constants: output count and
+// destination dword offset. QUADLIST emits (a, b, c), (a, c, d).
+base::Vector<u32> BuildIndexConversionShader(u32 index_type, bool quads);
+
 // One invocation: dst[pc.1] = 1 when the CMASK (pc.2 == 0) or HTILE (pc.2 != 0)
 // word src[pc.0] marks a fast-cleared tile, else 0. A conditional clear reads
 // it, so the CPU never has to look at the word.

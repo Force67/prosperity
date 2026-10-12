@@ -226,7 +226,7 @@ u32 CodeLength(const u32* code, u32 max_dwords) {
   if (code[0] == 0xBEEB03FFu) {
     const u64 d = (static_cast<u64>(code[1]) + 1) * 2;
     if (d >= 2 && d + 2 <= kMaxShaderDwords &&
-        IsReadableRange(reinterpret_cast<u64>(code), (d + 2) * 4) &&
+        IsReadableRangeCached(reinterpret_cast<u64>(code), (d + 2) * 4) &&
         OrbShdrAt(code, static_cast<u32>(d) * 4))
       return static_cast<u32>(d);
   }
