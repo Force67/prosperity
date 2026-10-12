@@ -661,18 +661,31 @@ bool CsHoldsGeometry(u64 base, u64 bytes) {
                           MirrorHoldsNewest(base, bytes));
 }
 
-bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
-  if (!kCsVtxBridge)
-    return false;
-  u64 range_base;
-  CsRange* const found = VertexSource(base, bytes, &range_base);
-  if (!found && MirrorHoldsNewest(base, bytes)) {
+namespace {
+void MakeComputeBufferReadable(u64 batch) {
+  static u64 covered_chunk = ~0ull, covered_batch = 0;
+  static const guest::SessionReset reset_coverage([] {
+    covered_chunk = ~0ull;
+    covered_batch = 0;
+  });
+  if (covered_chunk != g_frame.chunk_seq) {
+    covered_chunk = g_frame.chunk_seq;
+    covered_batch = 0;
+  }
+  if (batch > covered_batch) {
     EndRegion();
     g_frame.list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                           kAccessAll);
+    covered_batch = g_cs_batch_open ? g_cs_batch_id : g_cs_batch_next_id - 1;
+  }
+}
+
+bool BindComputeBuffer(u64 base, u64 bytes, CsRange* found, u64 range_base,
+                       rhi::Buffer** buffer, u64* offset) {
+  if (!found && MirrorHoldsNewest(base, bytes)) {
+    MakeComputeBufferReadable(PendingGuestWriteBatch(base, bytes));
     if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
       g_cs_chunk_needs_batch = true;
-    g_vtx_bridge_n++;
     *buffer = g_mirror;
     *offset = MirrorOffset(base);
     return true;
@@ -692,26 +705,35 @@ bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
   // of skinned draws ends once, not per draw. A later dispatch into a range
   // this chunk reads splits the chunk (chunk_ref), so the draw still sees the
   // output it was recorded against.
-  static u64 covered_chunk = ~0ull, covered_batch = 0;
-  if (covered_chunk != g_frame.chunk_seq) {
-    covered_chunk = g_frame.chunk_seq;
-    covered_batch = 0;
-  }
-  if (e.batch_id > covered_batch) {
-    EndRegion();
-    g_frame.list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
-                          kAccessAll);
-    covered_batch = g_cs_batch_open ? g_cs_batch_id : g_cs_batch_next_id - 1;
-  }
+  MakeComputeBufferReadable(e.batch_id);
   e.last_used_frame = g_frame.num;
   e.frame_ref = g_frame.num;
   e.chunk_ref = g_frame.chunk_seq;
   if (e.pending_batch)
     g_cs_chunk_needs_batch = true;
-  g_vtx_bridge_n++;
   *buffer = e.buf;
   *offset = off;
   return true;
+}
+}  // namespace
+
+bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
+  if (!kCsVtxBridge)
+    return false;
+  u64 range_base = 0;
+  CsRange* found = VertexSource(base, bytes, &range_base);
+  const bool bound =
+      BindComputeBuffer(base, bytes, found, range_base, buffer, offset);
+  g_vtx_bridge_n += bound;
+  return bound;
+}
+
+bool CsStorageBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
+  if (!kCsBufBridge)
+    return false;
+  u64 range_base = 0;
+  CsRange* found = BufferSource(base, bytes, &range_base);
+  return BindComputeBuffer(base, bytes, found, range_base, buffer, offset);
 }
 
 // The live colour target at `base` takes the truth's pixels on the frame

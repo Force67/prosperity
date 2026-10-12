@@ -88,6 +88,8 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
 // on the frame list. Skinning output read by the next draws then never goes
 // through guest memory.
 bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
+// Bind a raw shader window in place, with the same lifetime and ordering.
+bool CsStorageBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
 // Whether CsGeometryBuffer can serve the window, without binding anything.
 bool CsHoldsGeometry(u64 base, u64 bytes);
 

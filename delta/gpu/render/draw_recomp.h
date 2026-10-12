@@ -19,6 +19,9 @@ bool DrawRecomp(render::Renderer& renderer, const render::DrawInfo& d);
 // Asked before recompiling, so a shader that never recompiled is dropped too.
 bool ShaderFilterDrops(u64 ps_addr);
 
+// Release raw-buffer descriptor sets after their in-flight frames retire.
+void ReleaseDrawBufferBindings();
+
 // Log the tally of why draws declined the recompiled path.
 void ReportDeclines();
 

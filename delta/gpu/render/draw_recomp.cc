@@ -74,6 +74,7 @@ DELTA_OPTION(bool, kTightCbuf, "DELTA_GPU_TIGHTCBUF", false);
 // Bind the title's own vertex and index bytes through the direct alias
 // instead of copying them into the ring. DELTA_GPU_DIRECT also gates it.
 DELTA_OPTION(bool, kDirectBind, "DELTA_GPU_DIRECT_BIND", true);
+DELTA_OPTION(bool, kRawBind, "DELTA_GPU_RAW_BIND", true);
 
 // The bytes a cbuffer upload takes: the planned size widened to the rest of
 // its page, which a shader indexing its constants reads past.
@@ -279,6 +280,55 @@ struct GpuStaged {
 base::HashMap<u64, GpuStaged> g_sbo_gpu;
 base::HashMap<u64, GpuStaged> g_ubo_gpu;
 
+struct RawBindingKey {
+  rhi::Buffer* buffers[kRawBufBindings]{};
+  u64 offsets[kRawBufBindings]{};
+  u32 bytes[kRawBufBindings]{};
+  bool operator==(const RawBindingKey&) const = default;
+};
+
+struct RawBindingKeyHash {
+  mem_size operator()(const RawBindingKey& key) const {
+    u64 h = 1469598103934665603ull;
+    for (u32 i = 0; i < kRawBufBindings; i++) {
+      h = (h ^ reinterpret_cast<u64>(key.buffers[i])) * 1099511628211ull;
+      h = (h ^ key.offsets[i]) * 1099511628211ull;
+      h = (h ^ key.bytes[i]) * 1099511628211ull;
+    }
+    return static_cast<mem_size>(h);
+  }
+};
+base::HashMap<RawBindingKey, rhi::BindGroup*, RawBindingKeyHash>
+    g_raw_bindings[3];
+
+rhi::BindGroup* RawBufferBindings(const CachedBuffer* direct,
+                                 const DrawInfo& d) {
+  RawBindingKey key;
+  for (u32 i = 0; i < g_ring.sbo_count; i++) {
+    key.buffers[i] = direct[i].buffer ? direct[i].buffer : g_ring.sbo_buf;
+    key.offsets[i] = direct[i].buffer ? direct[i].offset : 0;
+    key.bytes[i] = direct[i].buffer ? base::Min(d.bufs[i].size, kRawBufWindow)
+                                    : kRawBufWindow;
+  }
+  auto& cache = g_raw_bindings[g_frame.num % 3];
+  if (auto found = cache.find(key); found != cache.end())
+    return found->second;
+  rhi::BindGroupDesc desc;
+  desc.layout = g_ring.sbo_layout;
+  for (u32 i = 0; i < g_ring.sbo_count; i++) {
+    rhi::BindingWrite w;
+    w.binding = i;
+    w.buffer = key.buffers[i];
+    w.offset = key.offsets[i];
+    w.range = key.bytes[i];
+    desc.writes.push_back(w);
+  }
+  auto* set = Device().CreateBindGroup(desc);
+  if (set)
+    cache.emplace(key, set);
+  return set;
+}
+
 // Drops every tracked entry the guest has written since the last call. Runs
 // when a new submission starts and whenever compute results have landed in
 // guest memory, which are CPU writes the tracker reports like any other.
@@ -370,6 +420,13 @@ static void WhyDrop(const render::DrawInfo& d, const char* where) {
   BASE_LOGI("whydrop", "ps={:#x} exit={} rt={:#x} mrt={} depth={:#x}",
             (unsigned long)d.ps_addr, where, (unsigned long)d.rt_base,
             d.mrt_count, (unsigned long)d.depth_base);
+}
+
+void ReleaseDrawBufferBindings() {
+  auto& cache = g_raw_bindings[g_frame.num % 3];
+  for (const auto& [key, set] : cache)
+    Device().Destroy(set);
+  cache.clear();
 }
 
 void ReportDeclines() {
@@ -1449,6 +1506,26 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       cb_gpu_off[i] = off;
     }
 
+  CachedBuffer raw_direct[kRawBufBindings]{};
+  bool raw_barrier = false;
+  if (rp->raw_bufs && kRawBind && EnsureRawBufferRing()) {
+    const u64 align = base::Max(Device().caps().storage_offset_alignment, 1u);
+    for (u32 i = 0; i < g_ring.sbo_count; i++) {
+      const auto& rb = d.bufs[i];
+      const u32 want = base::Min(rb.size, kRawBufWindow);
+      if (!want || (want & 3))
+        continue;
+      CachedBuffer binding;
+      if (!CsStorageBuffer(rb.base, want, &binding.buffer, &binding.offset) &&
+          kDirectBind && !CsBufferRevision(rb.base, want)) {
+        binding.buffer = DirectBindAt(rb.base, want, &binding.offset);
+        raw_barrier |= binding.buffer && CsRangeDirtyOverlapping(rb.base, want);
+      }
+      if (binding.buffer && !(binding.offset % align))
+        raw_direct[i] = binding;
+    }
+  }
+
   // Dispatch output this draw reads through guest memory is written back
   // now, before the pass opens: in frame, the wait submits the open chunk and
   // starts a new command list, and a pass already recording into the old one
@@ -1468,7 +1545,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         const auto& rb = d.bufs[i];
         const u32 want = base::Min(rb.size, kRawBufWindow);
         if (want && !CsBufferRevision(rb.base, want) &&
-            !FlushCsWritesRange(renderer, rb.base, want, "raw"))
+            !(raw_direct[i].buffer
+                  ? FlushCsWritesForGpu(renderer, rb.base, want, "raw")
+                  : FlushCsWritesRange(renderer, rb.base, want, "raw")))
           return Decline(kNoRecomp);
       }
     for (u32 j = 0; j < nbind; j++) {
@@ -1490,12 +1569,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         return Decline(kNoRecomp);
     }
   }
-  if (ib_bind.buffer ||
+  if (ib_bind.buffer || raw_barrier ||
       base::AnyOf(vb_bind, vb_bind + nbind,
                   [](const CachedBuffer& b) { return b.buffer != nullptr; })) {
     EndRegion();
     g_frame.list->Barrier(rhi::kAccessAllWrite,
-                          rhi::kAccessVertexRead | rhi::kAccessIndexRead);
+                          rhi::kAccessVertexRead | rhi::kAccessIndexRead |
+                              rhi::kAccessShaderRead);
   }
   rhi::Buffer* indirect_buf = nullptr;
   u64 indirect_off = 0;
@@ -1529,7 +1609,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       const auto& rb = d.bufs[i];
       const u32 want = base::Min(rb.size, kRawBufWindow);
       const u64 rev = want ? CsBufferRevision(rb.base, want) : 0;
-      if (!rev)
+      if (!rev || raw_direct[i].buffer)
         continue;
       GpuStaged& staged = g_sbo_gpu[rb.base];
       if (staged.frame == g_frame.num && staged.rev == rev &&
@@ -2018,6 +2098,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       const u32 want = base::Min(rb.size, kRawBufWindow);
       if (!want || !IsReadableThisFrame(rb.base, want))
         continue;  // unresolved descriptor: the shared zero window at offset 0
+      if (raw_direct[i].buffer) {
+        sbo_dyn[i] = 0;
+        rawbuf_mask |= 1u << i;
+        g_bind_bytes += want;
+        g_bind_n++;
+        continue;
+      }
       // Same per-frame cache as the vertex/index/cbuffer rings. Unlike
       // the plain map this replaced, a window whose range a dispatch has
       // rewritten since it was staged (generation moved, or dirty right now)
@@ -2074,7 +2161,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     // is the device-derived sbo_count, not the compile-time ceiling. Passing
     // the ceiling is a spec violation on every device that reports fewer than
     // 16 (the Vulkan floor is 4).
-    list->SetBindGroup(2, g_ring.sbo_set, sbo_dyn, g_ring.sbo_count);
+    rhi::BindGroup* raw_set = g_ring.sbo_set;
+    if (base::AnyOf(raw_direct, raw_direct + g_ring.sbo_count,
+                     [](const CachedBuffer& b) { return b.buffer != nullptr; }))
+      raw_set = RawBufferBindings(raw_direct, d);
+    if (!raw_set)
+      return Decline(kRing);
+    list->SetBindGroup(2, raw_set, sbo_dyn, g_ring.sbo_count);
     // DELTA_GPU_RAWBUF: which set-2 bindings a draw actually got, so a shader
     // reading zeros can be told apart from one reading real guest data.
     if (kRawBufTrace) {
@@ -2618,6 +2711,8 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_ib_staged);
   guest::ResetResource(g_ubo_staged);
   guest::ResetResource(g_sbo_staged);
+  for (auto& cache : g_raw_bindings)
+    guest::ResetResource(cache);
   guest::ResetResource(g_sbo_gpu);
   guest::ResetResource(g_ubo_gpu);
   guest::ResetResource(g_collect_dcb);

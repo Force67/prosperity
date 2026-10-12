@@ -87,7 +87,11 @@ native index streams can bind the compute buffer directly, and indirect draws
 retain the full vertex descriptor bounds so their counts, first vertex and
 first instance remain GPU inputs. Native index streams need no CPU scan when
 using indirect arguments or resident compute output. Direct-memory imports
-also let vertex and index fetch read guest bytes without a ring copy. A compute
+also let vertex and index fetch read guest bytes without a ring copy. Raw
+shader windows can bind compute buffers or direct-memory imports in place,
+skipping the raw-ring copy. Loads past a binding return zero. Unaligned
+windows retain staging.
+`DELTA_GPU_RAW_BIND=0` restores raw-window copies for comparison. A compute
 pass widens eight-bit indices and expands quad lists into a device-local index
 ring, including streams produced by a dispatch without CPU readback. Converted
 streams are reused within the frame until their source revision changes.

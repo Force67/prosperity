@@ -53,6 +53,11 @@ Id SsboPtr(Translator& t, Id var, Id dword_idx) {
 Id SsboLoad(Translator& t, Id var, Id dword_idx) {
   return t.m.Load(t.t_u, SsboPtr(t, var, dword_idx));
 }
+Id GfxSsboLoad(Translator& t, Id var, Id dword_idx) {
+  const Id count = t.m.Emit(spv::Op::OpArrayLength, t.t_u, {var, 0});
+  const Id index = t.UMin(dword_idx, t.Sub(count, t.U32(1)));
+  return t.SelectB(t.Ult(dword_idx, count), SsboLoad(t, var, index), t.U32(0));
+}
 }  // namespace
 
 // Exported: the compute resource model itself is ISA-neutral (a guest range
@@ -288,7 +293,7 @@ Id LoadSubDword(Translator& t,
                 Id byte_off,
                 u32 bits,
                 bool sign_extend) {
-  const Id word = SsboLoad(t, var, t.Shr(byte_off, t.U32(2)));
+  const Id word = GfxSsboLoad(t, var, t.Shr(byte_off, t.U32(2)));
   const Id shift = t.Shl(t.And(byte_off, t.U32(3)), t.U32(3));
   if (sign_extend)
     return t.m.Bitcast(
@@ -400,7 +405,7 @@ Id FormattedComponent(Translator& t,
   return FormattedComponentWith(
       t, f,
       [&](Id idx) {
-        return SsboLoad(t, var, t.UMin(idx, t.U32(kGfxBufferDwords - 1)));
+        return GfxSsboLoad(t, var, t.UMin(idx, t.U32(kGfxBufferDwords - 1)));
       },
       byte_off, i);
 }
@@ -1118,12 +1123,8 @@ void EmitGfxMubuf(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   const Id var = t.EnsureGfxBuffer(it->second);
-  // Clamp into the staged window. The index is whatever the shader computed,
-  // and the renderer stages only a fixed prefix of the resource, so an
-  // unclamped access could read outside the bound range. Hardware returns zero
-  // past NUM_RECORDS; pinning to the window's last dword keeps this in bounds
-  // without a per-load branch, and the stride/record fields needed for exact
-  // bounds are not reliably live in a graphics stage's SGPRs.
+  // Keep the renderer's window cap. GfxSsboLoad also checks the descriptor's
+  // length, so a shorter resource bound in place cannot read its neighbours.
   const Id byte_off = t.UMin(BufferByteOffset(t, inst, inst_offset, idxen,
                                               offen, vaddr, srsrc, soffset),
                              t.U32(kGfxBufferDwords * 4 - 4));
@@ -1144,7 +1145,7 @@ void EmitGfxMubuf(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   for (u32 i = 0; i < n; i++)
-    t.SetVg(vdata + i, SsboLoad(t, var,
+    t.SetVg(vdata + i, GfxSsboLoad(t, var,
                                 t.UMin(t.Add(dword_idx, t.U32(i)),
                                        t.U32(kGfxBufferDwords - 1))));
 }
@@ -1177,7 +1178,7 @@ void EmitGfxMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
                              t.U32(kGfxBufferDwords * 4 - 4));
   const Id dword_idx = t.Shr(byte_off, t.U32(2));
   for (u32 i = 0; i < n; i++)
-    t.SetVg(vdata + i, SsboLoad(t, var,
+    t.SetVg(vdata + i, GfxSsboLoad(t, var,
                                 t.UMin(t.Add(dword_idx, t.U32(i)),
                                        t.U32(kGfxBufferDwords - 1))));
 }

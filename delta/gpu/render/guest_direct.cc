@@ -299,7 +299,7 @@ BindImport BindSpan(u64 start, u64 cls) {
   const u64 size = base::Min(cls * kChunk, g_alias_size - start);
   rhi::BufferDesc desc;
   desc.size = size;
-  desc.usage = rhi::kBufferVertex | rhi::kBufferIndex;
+  desc.usage = rhi::kBufferVertex | rhi::kBufferIndex | rhi::kBufferStorage;
   desc.host_pointer = g_alias + start;
   desc.name = "guest direct bind";
   const BindImport imp{Device().CreateBuffer(desc), size};

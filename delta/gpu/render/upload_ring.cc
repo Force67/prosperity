@@ -158,7 +158,7 @@ bool CreateUploadRings() {
   for (u32 i = 0; i < g_ring.sbo_count; i++)
     sbo.bindings.push_back({i, rhi::BindingType::kStorageBufferDynamic,
                             rhi::kStageVertex | rhi::kStageFragment |
-                                (caps.mesh_shader ? rhi::kStageMesh : 0u)});
+                                (caps.mesh_shader ? rhi::kStageMesh : 0u), true});
   g_ring.sbo_layout = Device().CreateBindGroupLayout(sbo);
   return g_ring.sbo_layout != nullptr;
 }

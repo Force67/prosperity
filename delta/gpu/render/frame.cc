@@ -1059,6 +1059,7 @@ void BeginFrame(Renderer& renderer) {
   g_frame.draws_at_chunk = 0;
   g_frame.max_idx = 0;
   g_frame.num++;
+  ReleaseDrawBufferBindings();
   // DELTA_GPU_FORCECLEAR=<rt address>: clear that target at the top of every
   // frame. Diagnostic for a target the title clears by a means we do not see –
   // additive passes into it otherwise accumulate frame over frame.

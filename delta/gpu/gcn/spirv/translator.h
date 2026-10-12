@@ -728,6 +728,7 @@ struct Translator {
         spv::StorageClass::StorageBuffer);
     m.Decorate(v, spv::Decoration::DescriptorSet, {2});
     m.Decorate(v, spv::Decoration::Binding, {binding});
+    m.Decorate(v, spv::Decoration::NonWritable);
     m.Name(v, "rawbuf" + base::ToString(binding));
     gfx_buf_vars[binding] = v;
     return v;

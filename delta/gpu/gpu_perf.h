@@ -50,7 +50,7 @@ extern u64 g_ring_vb_bytes, g_ring_ib_bytes, g_ring_cb_bytes, g_ring_raw_bytes;
 extern u64 g_index_convert_n, g_index_convert_bytes;
 // Vertex bytes copied into the cross-frame buffer cache instead of the ring.
 extern u64 g_vb_kept_bytes;
-// Bytes bound in place through the direct alias, with no copy at all.
+// Vertex, index and raw bytes bound in place without a ring copy.
 extern u64 g_bind_bytes;
 extern u32 g_bind_n;
 extern u32 g_gpu_exec_samples;
