@@ -2028,7 +2028,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   for (u32 i = 0; i < cbuf_count; i++) {
     const auto& cb = d.cbufs[i];
     const u32 readable = base::Min(cb.size, kCbufWindow);
-    const bool have_cbuf = readable && IsReadableThisFrame(cb.base, readable);
+    const bool resident =
+        (!indirect_cbufs && cb_direct[i].buffer) || cb_gpu_off[i] != u64(-1);
+    const bool have_cbuf =
+        readable && (resident || IsReadableThisFrame(cb.base, readable));
     if (have_cbuf)
       cbuf_mask |= i < 32 ? 1u << i : 0;
     if (!indirect_cbufs && cb_direct[i].buffer) {
@@ -2159,8 +2162,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     for (u32 i = 0; i < kRawBufBindings; i++) {
       const auto& rb = d.bufs[i];
       const u32 want = base::Min(rb.size, kRawBufWindow);
-      if (!want || !IsReadableThisFrame(rb.base, want))
-        continue;  // unresolved descriptor: the shared zero window at offset 0
+      if (!want)
+        continue;
       if (raw_direct[i].buffer) {
         sbo_dyn[i] = 0;
         rawbuf_mask |= 1u << i;
@@ -2177,6 +2180,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         rawbuf_mask |= 1u << i;
         continue;
       }
+      if (!IsReadableThisFrame(rb.base, want))
+        continue;  // unresolved descriptor: the shared zero window at offset 0
       const u64 cached = StagedOffset(g_sbo_staged.Find(rb.base, want));
       if (cached != u64(-1)) {
         sbo_dyn[i] = static_cast<u32>(cached);

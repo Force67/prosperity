@@ -730,10 +730,7 @@ bool BindComputeBuffer(u64 base, u64 bytes, CsRange* found, u64 range_base,
 }
 
 // Every revision gets a separate buffer until its frame slot retires.
-bool GatherGeometryBuffer(u64 base,
-                          u64 bytes,
-                          rhi::Buffer** buffer,
-                          u64* offset) {
+bool GatherDrawBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
   if (!bytes || !g_frame.recording ||
       (!MirrorOwnsAny(base, base + bytes) &&
        !PendingGuestWriteBatch(base, bytes)))
@@ -787,8 +784,9 @@ bool GatherGeometryBuffer(u64 base,
   if (!gathered.buffer || gathered.buffer->desc().size < bytes) {
     rhi::BufferDesc desc;
     desc.size = (bytes + 65535) & ~u64(65535);
-    desc.usage = rhi::kBufferVertex | rhi::kBufferIndex | rhi::kBufferCopyDst;
-    desc.name = "gathered geometry";
+    desc.usage = rhi::kBufferVertex | rhi::kBufferIndex | rhi::kBufferUniform |
+                 rhi::kBufferStorage | rhi::kBufferCopyDst;
+    desc.name = "gathered draw buffer";
     auto* replacement = Device().CreateBuffer(desc);
     if (!replacement)
       return false;
@@ -814,7 +812,7 @@ bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
   CsRange* found = VertexSource(base, bytes, &range_base);
   const bool bound =
       BindComputeBuffer(base, bytes, found, range_base, buffer, offset) ||
-      GatherGeometryBuffer(base, bytes, buffer, offset);
+      GatherDrawBuffer(base, bytes, buffer, offset);
   g_vtx_bridge_n += bound;
   return bound;
 }
@@ -824,7 +822,8 @@ bool CsStorageBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
     return false;
   u64 range_base = 0;
   CsRange* found = BufferSource(base, bytes, &range_base);
-  return BindComputeBuffer(base, bytes, found, range_base, buffer, offset);
+  return BindComputeBuffer(base, bytes, found, range_base, buffer, offset) ||
+         GatherDrawBuffer(base, bytes, buffer, offset);
 }
 
 // The live colour target at `base` takes the truth's pixels on the frame

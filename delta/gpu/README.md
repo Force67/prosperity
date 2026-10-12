@@ -98,10 +98,11 @@ For raw buffers, constants and textures that mix CPU writes with GPU output,
 GPU copies gather current host pages and owned mirror blocks. Watched host
 pages invalidate cached copies; pages that cannot be watched are recopied on
 each use. Partial GPU writes also invalidate wider cached views.
-Mixed vertex and native index windows also gather on the GPU, avoiding CPU
-index scans and stale direct aliases. Gathered revisions keep separate device
-buffers until the frame slot retires. Buffers are reused across frames; windows
-without a complete mirror revision gather on every use.
+Mixed vertex, native index, raw shader and full constant windows share a
+GPU gather pool, avoiding stale direct aliases and host-visible ring copies.
+Mixed index windows also avoid CPU index scans. Gathered revisions keep
+separate device buffers until the frame slot retires. Buffers are reused across
+frames; windows without a complete mirror revision gather on every use.
 Full 16 KiB constant windows can bind compute output or direct-memory imports
 as uniform buffers, also skipping their ring copy. Short, unaligned and packed
 indirect constant windows retain staging. `DELTA_GPU_CBUF_BIND=0` disables this
