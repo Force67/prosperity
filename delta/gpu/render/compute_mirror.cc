@@ -743,8 +743,8 @@ bool GpuIndirectArgs(u64 args, u64 bytes) {
   return MirrorCacheBlock(block) != 0;
 }
 
-bool CanDrawIndirect(u32 prim_type) {
-  return Device().caps().draw_indirect && prim_type != 19 &&
+bool CanDrawIndirect(u32 prim_type, bool indexed) {
+  return Device().caps().draw_indirect && (prim_type != 19 || indexed) &&
          !(Device().caps().backend == rhi::Backend::kD3D12 && prim_type == 5);
 }
 

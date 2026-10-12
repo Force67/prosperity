@@ -245,7 +245,8 @@ void ResolveIndexBuffer(render::Renderer& renderer,
         host_memory::IsMemoryRangeMapped(
             reinterpret_cast<const void*>(packet.index_base),
             static_cast<u64>(packet.index_max) * index_bytes);
-    if (render::CanDrawIndirect(d.prim_type) && (!indexed || whole_buffer) &&
+    if (render::CanDrawIndirect(d.prim_type, indexed) &&
+        (!indexed || whole_buffer) &&
         WalkReadWouldWait(args, indexed ? 20 : 16)) {
       d.indirect_args = args;
       if (indexed) {

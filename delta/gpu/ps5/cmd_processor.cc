@@ -935,7 +935,8 @@ void HandleDrawIndirect(
   // descriptor bounds.
   const bool ngg = (g_queue->regs[mmVGT_SHADER_STAGES_EN] >> 7) & 1;
   const bool gpu_args =
-      !ngg && render::CanDrawIndirect(g_queue->regs[mmVGT_PRIMITIVE_TYPE]) &&
+      !ngg &&
+      render::CanDrawIndirect(g_queue->regs[mmVGT_PRIMITIVE_TYPE], indexed) &&
       (render::GpuIndirectArgs(args, want) ||
        !render::GuestBytesSettled(args, want));
   const u32 initiator = count >= 4 ? body[3] : 0;

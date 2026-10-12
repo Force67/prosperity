@@ -634,6 +634,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   u32 nv = d.vertex_count;
   // QUADLIST has no host topology: each quad uploads as two triangles.
   const bool quads = indexed && d.prim_type == 19;
+  const bool indirect_quads = quads && d.indirect_args;
   const u32 upload_indices = quads ? d.index_count / 4 * 6 : d.index_count;
   const bool convert_indices = indexed && (quads || d.index_type == 2);
   const u32 ib_tag = 1u + d.index_type + (quads ? 4u : 0u);
@@ -1131,7 +1132,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
   }
   const u64 ib_cached =
-      kRingDedup && indexed && !ib_bind.buffer
+      kRingDedup && indexed && !ib_bind.buffer && !indirect_quads
           ? StagedOffset(g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
                                           index_bytes, ib_tag))
           : u64(-1);
@@ -1144,7 +1145,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   const u64 aligned_ioff =
       (g_ring.ib_offset + index_align - 1) & ~(index_align - 1);
   if (indexed && ib_cached == u64(-1) && !ib_bind.buffer &&
-      aligned_ioff + index_bytes > g_ring.ib_end) {
+      aligned_ioff + index_bytes + (indirect_quads ? 20 : 0) > g_ring.ib_end) {
     if (kGpuDecltrace) {
       static int n = 0;
       if (n++ < 32)
@@ -1489,10 +1490,6 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         return Decline(kNoRecomp);
     }
   }
-  if (convert_indices && ib_cached == u64(-1) &&
-      !ConvertGuestIndices(renderer, reinterpret_cast<u64>(d.index_data),
-                           d.index_count, d.index_type, quads, aligned_ioff))
-    return Decline(kNoRecomp);
   if (ib_bind.buffer ||
       base::AnyOf(vb_bind, vb_bind + nbind,
                   [](const CachedBuffer& b) { return b.buffer != nullptr; })) {
@@ -1514,6 +1511,12 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       return Decline(kNoRecomp);
     g_frame.list->Barrier(rhi::kAccessAllWrite, rhi::kAccessIndirectRead);
   }
+  if (convert_indices && ib_cached == u64(-1) &&
+      !ConvertGuestIndices(renderer, reinterpret_cast<u64>(d.index_data),
+                           d.index_count, d.index_type, quads, aligned_ioff,
+                           indirect_quads ? &indirect_buf : nullptr,
+                           indirect_quads ? &indirect_off : nullptr))
+    return Decline(kNoRecomp);
 
   // Raw windows a dispatch wrote and still holds in VRAM: copied into the ring
   // on the GPU, before the pass opens, instead of read back through guest
@@ -2120,6 +2123,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
   if (indexed && ib_cached == u64(-1) && !ib_bind.buffer) {
     const bool tracked =
+        !indirect_quads &&
         ArmForCache(reinterpret_cast<u64>(d.index_data),
                     u64(d.index_count) * GuestIndexElementBytes(d.index_type));
     if (!convert_indices) {
@@ -2127,7 +2131,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                        d.index_type);
       g_ring_ib_bytes += index_bytes;
     }
-    if (kRingDedup)
+    if (kRingDedup && !indirect_quads)
       g_ib_staged.Insert(
           reinterpret_cast<u64>(d.index_data), index_bytes, ib_tag, ioff,
           tracked, d.num_vattrs && !descriptor_bounds ? nv - 1 : ~0u,
@@ -2183,7 +2187,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   if (mesh)
     list->DrawMeshTasks((draw_count - 1) / d.recomp->mesh_input_primitives + 1,
                         d.instance_count ? d.instance_count : 1, 1);
-  else if (indexed && indirect_buf && !quads)
+  else if (indexed && indirect_buf)
     list->DrawIndexedIndirect(indirect_buf, indirect_off);
   else if (indirect_buf)
     list->DrawIndirect(indirect_buf, indirect_off);
@@ -2553,7 +2557,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
   g_ring.vb_offset += vneed;
   if (indexed && ib_cached == u64(-1) && !ib_bind.buffer)
-    g_ring.ib_offset = ioff + index_bytes;
+    g_ring.ib_offset = ioff + index_bytes + (indirect_quads ? 20 : 0);
   g_frame.draws++;
   for (u32 i = 0; i < g_region.cur_mrt_count; i++) {
     if (!g_region.cur_mrt[i])

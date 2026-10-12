@@ -709,71 +709,184 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
   constexpr u32 kCount = 71, kOffset = 5, kCapacity = 128;
   for (u32 type = 0; type < 3; type++) {
     for (bool quads : {false, true}) {
-      SCOPED_TRACE(type);
-      SCOPED_TRACE(quads);
-      const u32 bytes = type == 1 ? 4 : type == 2 ? 1 : 2;
-      base::Vector<u8> source((kCount * bytes + 3) & ~3u, 0xa5);
-      base::Vector<u32> indices(kCount);
-      for (u32 i = 0; i < kCount; i++) {
-        indices[i] = type == 1 ? 0x12340000u + i : type == 0 ? 0x3400u + i : i;
-        std::memcpy(source.data() + i * bytes, &indices[i], bytes);
-      }
-      Buffer* input = Upload(source.data(), source.size(), kBufferStorage);
-      BufferDesc bd;
-      bd.size = kCapacity * 4;
-      bd.usage = kBufferStorage | kBufferCopySrc | kBufferCopyDst;
-      Buffer* output = Own(device_->CreateBuffer(bd));
-      Buffer* readback = Readback(bd.size);
-      BindGroupLayoutDesc ld;
-      for (u32 i = 0; i < 2; i++)
-        ld.bindings.push_back({i, BindingType::kStorageBuffer, kStageCompute});
-      ld.bindings[0].read_only = true;
-      ld.push = true;
-      BindGroupLayout* set = Own(device_->CreateBindGroupLayout(ld));
-      PipelineLayoutDesc pl;
-      pl.groups = {set};
-      pl.push_constant_bytes = 8;
-      pl.push_constant_stages = kStageCompute;
-      ComputePipelineDesc cp;
-      cp.layout = Own(device_->CreatePipelineLayout(pl));
-      const auto code = gpu::gcn::BuildIndexConversionShader(type, quads);
-      ASSERT_FALSE(code.empty());
-      cp.code = Code(code);
-      Pipeline* pipe = Own(device_->CreateComputePipeline(cp));
-      ASSERT_NE(pipe, nullptr);
-      list_->Begin();
-      list_->FillBuffer(output, 0, bd.size, ~0u);
-      list_->Barrier(kAccessCopyWrite | kAccessHostWrite,
-                     kAccessComputeRead | kAccessComputeWrite);
-      list_->SetPipeline(pipe);
-      BindingWrite writes[2];
-      writes[0].buffer = input;
-      writes[0].range = source.size();
-      writes[1].binding = 1;
-      writes[1].buffer = output;
-      writes[1].range = bd.size;
-      list_->PushBindGroup(0, set, writes, 2);
-      const u32 count = quads ? kCount / 4 * 6 : kCount;
-      const u32 params[] = {count, kOffset};
-      list_->SetPushConstants(0, sizeof(params), params);
-      list_->Dispatch((count + 63) / 64, 1, 1);
-      list_->Barrier(kAccessComputeWrite, kAccessCopyRead);
-      list_->CopyBuffer(readback, 0, output, 0, bd.size);
-      list_->Barrier(kAccessCopyWrite, kAccessHostRead);
-      Submit();
-      list_->End();
-      const u32* result = reinterpret_cast<const u32*>(readback->mapped());
-      constexpr u32 corners[] = {0, 1, 2, 0, 2, 3};
-      for (u32 i = 0; i < kCapacity; i++) {
-        const u32 j = i - kOffset;
-        EXPECT_EQ(result[i],
-                  i < kOffset || j >= count
-                      ? ~0u
-                      : indices[quads ? j / 6 * 4 + corners[j % 6] : j])
-            << i;
+      for (u32 trial = 0; trial < (quads ? 8u : 1u); trial++) {
+        const bool indirect = trial != 0;
+        const u32 capacity = trial == 7 ? 3 : kCount;
+        constexpr u32 requests[][2] = {{0, 0},   {0, 0},  {3, 0},
+                                       {4, 1},   {11, 3}, {~0u, kCount - 4},
+                                       {8, ~0u}, {4, 0}};
+        const u32 requested = requests[trial][0], first = requests[trial][1];
+        SCOPED_TRACE(trial);
+        SCOPED_TRACE(type);
+        SCOPED_TRACE(quads);
+        const u32 bytes = type == 1 ? 4 : type == 2 ? 1 : 2;
+        base::Vector<u8> source((kCount * bytes + 3) & ~3u, 0xa5);
+        base::Vector<u32> indices(kCount);
+        for (u32 i = 0; i < kCount; i++) {
+          indices[i] = type == 1   ? 0x12340000u + i
+                       : type == 0 ? 0x3400u + i
+                                   : i;
+          std::memcpy(source.data() + i * bytes, &indices[i], bytes);
+        }
+        const u32 argument_at = source.size() / 4;
+        const u32 arguments[] = {requested, 2, first, u32(-3), 5};
+        if (indirect) {
+          source.resize(source.size() + sizeof(arguments));
+          std::memcpy(source.data() + argument_at * 4, arguments,
+                      sizeof(arguments));
+        }
+        BufferDesc input_desc;
+        input_desc.size = source.size();
+        input_desc.usage = kBufferStorage | kBufferCopyDst | kBufferCopySrc;
+        Buffer* input = Own(device_->CreateBuffer(input_desc));
+        Buffer* input_readback = Readback(source.size());
+        BufferDesc bd;
+        bd.size = kCapacity * 4;
+        bd.usage = kBufferStorage | kBufferCopySrc | kBufferCopyDst;
+        Buffer* output = Own(device_->CreateBuffer(bd));
+        Buffer* readback = Readback(bd.size);
+        BindGroupLayoutDesc ld;
+        for (u32 i = 0; i < 2; i++)
+          ld.bindings.push_back(
+              {i, BindingType::kStorageBuffer, kStageCompute});
+        ld.bindings[0].read_only = true;
+        ld.push = true;
+        BindGroupLayout* set = Own(device_->CreateBindGroupLayout(ld));
+        PipelineLayoutDesc pl;
+        pl.groups = {set};
+        pl.push_constant_bytes = indirect ? 16 : 8;
+        pl.push_constant_stages = kStageCompute;
+        ComputePipelineDesc cp;
+        cp.layout = Own(device_->CreatePipelineLayout(pl));
+        const auto code =
+            gpu::gcn::BuildIndexConversionShader(type, quads, indirect);
+        ASSERT_FALSE(code.empty());
+        cp.code = Code(code);
+        Pipeline* pipe = Own(device_->CreateComputePipeline(cp));
+        ASSERT_NE(pipe, nullptr);
+        list_->Begin();
+        list_->FillBuffer(output, 0, bd.size, ~0u);
+        list_->UpdateBuffer(input, 0, source.size(), source.data());
+        list_->Barrier(kAccessCopyWrite | kAccessHostWrite,
+                       kAccessComputeRead | kAccessComputeWrite);
+        list_->SetPipeline(pipe);
+        BindingWrite writes[2];
+        writes[0].buffer = input;
+        writes[0].range = source.size();
+        writes[1].binding = 1;
+        writes[1].buffer = output;
+        writes[1].range = bd.size;
+        list_->PushBindGroup(0, set, writes, 2);
+        const u32 maximum = quads ? capacity / 4 * 6 : capacity;
+        const u32 available = first < capacity ? capacity - first : 0;
+        const u32 count =
+            indirect ? base::Min(requested, available) / 4 * 6 : maximum;
+        const u32 output_args = kOffset + maximum;
+        const u32 params[] = {indirect ? capacity : maximum, kOffset,
+                              argument_at, output_args};
+        list_->SetPushConstants(0, indirect ? sizeof(params) : 8, params);
+        list_->Dispatch(base::Max(1u, (maximum + 63) / 64), 1, 1);
+        list_->Barrier(kAccessComputeWrite, kAccessCopyRead);
+        list_->CopyBuffer(readback, 0, output, 0, bd.size);
+        list_->CopyBuffer(input_readback, 0, input, 0, source.size());
+        list_->Barrier(kAccessCopyWrite, kAccessHostRead);
+        Submit();
+        list_->End();
+        const u32* result = reinterpret_cast<const u32*>(readback->mapped());
+        EXPECT_EQ(
+            std::memcmp(input_readback->mapped(), source.data(), source.size()),
+            0);
+        constexpr u32 corners[] = {0, 1, 2, 0, 2, 3};
+        for (u32 i = 0; i < kCapacity; i++) {
+          const u32 j = i - kOffset;
+          u32 expected = ~0u;
+          if (i >= kOffset && j < count)
+            expected = indices[(indirect ? first : 0) +
+                               (quads ? j / 6 * 4 + corners[j % 6] : j)];
+          if (indirect && i >= output_args && i < output_args + 5) {
+            const u32 argument = i - output_args;
+            expected = argument == 0   ? count
+                       : argument == 2 ? 0
+                                       : arguments[argument];
+          }
+          EXPECT_EQ(result[i], expected) << i;
+        }
       }
     }
   }
+}
+
+TEST_P(RhiConformance, IndirectQuadConversionFeedsDrawWithoutReadback) {
+  if (!device_->caps().draw_indirect)
+    GTEST_SKIP() << "no indirect drawing";
+  BindGroupLayoutDesc ld;
+  ld.bindings = {{0, BindingType::kStorageBuffer, kStageCompute, true},
+                 {1, BindingType::kStorageBuffer, kStageCompute}};
+  ld.push = true;
+  BindGroupLayout* set = Own(device_->CreateBindGroupLayout(ld));
+  PipelineLayoutDesc pl;
+  pl.groups = {set};
+  pl.push_constant_bytes = 16;
+  pl.push_constant_stages = kStageCompute;
+  ComputePipelineDesc cp;
+  cp.layout = Own(device_->CreatePipelineLayout(pl));
+  const auto code = gpu::gcn::BuildIndexConversionShader(2, true, true);
+  cp.code = Code(code);
+  Pipeline* compute = Own(device_->CreateComputePipeline(cp));
+  Pipeline* graphics =
+      Own(device_->CreateGraphicsPipeline(PosPipeline(EmptyLayout())));
+  ASSERT_NE(compute, nullptr);
+  ASSERT_NE(graphics, nullptr);
+  BufferDesc bd;
+  bd.size = 64;
+  bd.usage = kBufferStorage | kBufferCopyDst;
+  Buffer* input = Own(device_->CreateBuffer(bd));
+  bd.size = 96;
+  bd.usage = kBufferStorage | kBufferIndex | kBufferIndirect;
+  Buffer* output = Own(device_->CreateBuffer(bd));
+  const u8 indices[12] = {99, 99, 99, 1, 2, 3, 4, 99, 99, 99, 99, 99};
+  const u32 arguments[] = {0, 1, 3, u32(-1), 1};
+  const Vertex vertices[] = {{-1, -1, 0, Rgba(0, 255, 0, 255)},
+                             {1, -1, 0, Rgba(0, 255, 0, 255)},
+                             {1, 1, 0, Rgba(0, 255, 0, 255)},
+                             {-1, 1, 0, Rgba(0, 255, 0, 255)}};
+  Buffer* vb = Upload(vertices, sizeof(vertices), kBufferVertex);
+  Buffer* instances = Instances({4, 4, 0, 0});
+  Texture* target = Target();
+  TextureView* view = View(target);
+  list_->Begin();
+  list_->UpdateBuffer(input, 0, sizeof(indices), indices);
+  list_->UpdateBuffer(input, 32, sizeof(arguments), arguments);
+  list_->Barrier(kAccessCopyWrite, kAccessCopyWrite);
+  list_->FillBuffer(input, 32, 4, 7);
+  list_->Barrier(kAccessCopyWrite | kAccessHostWrite,
+                 kAccessComputeRead | kAccessComputeWrite | kAccessVertexRead);
+  list_->SetPipeline(compute);
+  BindingWrite writes[2];
+  writes[0].buffer = input;
+  writes[0].range = input->desc().size;
+  writes[1].binding = 1;
+  writes[1].buffer = output;
+  writes[1].range = output->desc().size;
+  list_->PushBindGroup(0, set, writes, 2);
+  const u32 params[] = {11, 4, 8, 16};
+  list_->SetPushConstants(0, sizeof(params), params);
+  list_->Dispatch(1, 1, 1);
+  TextureBarrier barrier{target, TextureState::kUndefined,
+                         TextureState::kColorTarget};
+  list_->Barrier(kAccessComputeWrite, kAccessIndexRead | kAccessIndirectRead,
+                 &barrier, 1);
+  list_->BeginRenderPass(ClearPass(view));
+  list_->SetPipeline(graphics);
+  YUpViewport();
+  BindVertices(vb, instances);
+  list_->SetIndexBuffer(output, 16, IndexType::kUint32);
+  list_->DrawIndexedIndirect(output, 64);
+  list_->EndRenderPass();
+  const auto pixels = ReadPixels(target, TextureState::kColorTarget);
+  list_->End();
+  for (u32 pixel : pixels)
+    EXPECT_EQ(pixel, Rgba(0, 255, 0, 255));
 }
 
 TEST_P(RhiConformance, StorageImageWrite) {

@@ -412,7 +412,7 @@ void NoteMemoryFill(Renderer&, u64, u64, u32) {}
 bool GuestBytesSettled(u64, u64) {
   return true;
 }
-bool CanDrawIndirect(u32) {
+bool CanDrawIndirect(u32, bool) {
   return false;
 }
 bool BeginGuestPredicate(u64) {

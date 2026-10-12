@@ -8,7 +8,9 @@
 
 namespace gpu::gcn {
 
-base::Vector<u32> BuildIndexConversionShader(u32 index_type, bool quads) {
+base::Vector<u32> BuildIndexConversionShader(u32 index_type,
+                                             bool quads,
+                                             bool indirect) {
   using namespace spirv;
   using spv::Op;
   using spv::StorageClass;
@@ -27,9 +29,10 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type, bool quads) {
     m.Decorate(buffers[i], spv::Decoration::DescriptorSet, {0});
     m.Decorate(buffers[i], spv::Decoration::Binding, {i});
   }
-  const Id pc_type = m.TypeStruct({u, u});
+  const Id pc_type =
+      indirect ? m.TypeStruct({u, u, u, u}) : m.TypeStruct({u, u});
   m.Decorate(pc_type, spv::Decoration::Block);
-  for (u32 i = 0; i < 2; i++)
+  for (u32 i = 0; i < (indirect ? 4u : 2u); i++)
     m.MemberDecorate(pc_type, i, spv::Decoration::Offset, {i * 4});
   const Id pc = m.Variable(m.TypePointer(StorageClass::PushConstant, pc_type),
                            StorageClass::PushConstant);
@@ -51,8 +54,37 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type, bool quads) {
     return m.AccessChain(ptr, buffers[binding], {c(0), index});
   };
   const Id index = m.CompositeExtract(u, m.Load(vec, gid), 0);
+  Id count = param(0), first = c(0);
+  if (indirect) {
+    const auto argument = [&](u32 i) {
+      return m.Load(u, at(0, op(Op::OpIAdd, param(2), c(i))));
+    };
+    first = argument(2);
+    const Id available =
+        m.Emit(Op::OpSelect, u,
+               {m.Emit(Op::OpULessThan, m.TypeBool(), {first, count}),
+                op(Op::OpISub, count, first), c(0)});
+    const Id requested = argument(0);
+    count =
+        m.Emit(Op::OpSelect, u,
+               {m.Emit(Op::OpULessThan, m.TypeBool(), {requested, available}),
+                requested, available});
+    count = op(Op::OpIMul, op(Op::OpUDiv, count, c(4)), c(6));
+    const Id write_args = m.NewBlock(), args_done = m.NewBlock();
+    const Id first_invocation =
+        m.Emit(Op::OpIEqual, m.TypeBool(), {index, c(0)});
+    m.SelectionMerge(args_done);
+    m.BranchConditional(first_invocation, write_args, args_done);
+    m.OpenBlock(write_args);
+    for (u32 i = 0; i < 5; i++)
+      m.Store(at(1, op(Op::OpIAdd, param(3), c(i))), i == 0   ? count
+                                                     : i == 2 ? c(0)
+                                                              : argument(i));
+    m.Branch(args_done);
+    m.OpenBlock(args_done);
+  }
   const Id body = m.NewBlock(), end = m.NewBlock();
-  const Id valid = m.Emit(Op::OpULessThan, m.TypeBool(), {index, param(0)});
+  const Id valid = m.Emit(Op::OpULessThan, m.TypeBool(), {index, count});
   m.SelectionMerge(end);
   m.BranchConditional(valid, body, end);
   m.OpenBlock(body);
@@ -69,6 +101,7 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type, bool quads) {
     source = op(Op::OpIAdd, op(Op::OpIMul, op(Op::OpUDiv, index, c(6)), c(4)),
                 vertex);
   }
+  source = op(Op::OpIAdd, source, first);
   const u32 bytes = index_type == 1 ? 4 : index_type == 2 ? 1 : 2;
   const Id address = op(Op::OpIMul, source, c(bytes));
   Id value = m.Load(u, at(0, op(Op::OpShiftRightLogical, address, c(2))));

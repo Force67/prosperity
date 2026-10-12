@@ -194,7 +194,7 @@ void MirrorRecache();
 // them indirectly instead of the CPU waiting for them.
 bool GpuIndirectArgs(u64 args, u64 bytes);
 // The device draws with arguments it reads itself (DrawInfo::indirect_args).
-bool CanDrawIndirect(u32 prim_type);
+bool CanDrawIndirect(u32 prim_type, bool indexed);
 // COND_EXEC over a block of draws whose flag a GPU write is still on its way
 // to: the draws until EndGuestPredicate run only when the u32 at `flag` is
 // non-zero as the GPU reaches them. False when that cannot be set up; the

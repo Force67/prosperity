@@ -97,8 +97,9 @@ streams are reused within the frame until their source revision changes.
 Vulkan, OpenGL and D3D12 support indirect drawing and compute dispatch. OpenGL
 adjusts indexed arguments on the GPU when the bound index buffer has an offset.
 D3D12 supplies shader draw parameters and workgroup counts from GPU argument
-copies when needed. Indirect quad lists and D3D12 triangle fans retain their
-direct draw paths.
+copies when needed. Indexed indirect quad lists expand their selected indices
+and generate triangle draw arguments in the same compute pass. Non-indexed
+quad lists and D3D12 triangle fans retain their direct draw paths.
 
 The heuristic quad path in `draw` predates the recompiler and is still the
 fallback for draws `draw_recomp` declines; `DELTA_GPU_DECLINES=1` reports why

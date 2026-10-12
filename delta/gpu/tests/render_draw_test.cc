@@ -1572,9 +1572,11 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
       {4, 0, 0, 1}, {-.5f, 0, 0, 1}, {.5f, 0, 0, 1}};
   const base::Array<float, 4> instances[] = {
       {0, 4, 0, 0}, {0, -.5f, 0, 0}, {0, .5f, 0, 0}};
-  alignas(65536) static u32 indices[8][16384]{};
+  alignas(65536) static u32 indices[11][16384]{};
   alignas(65536) static u32 args[2][16384] = {{2, 2, 1, 1}, {2, 2, 1, 0, 1}};
-  alignas(65536) static base::Array<base::Array<u8, 65536>, 9> targets{};
+  alignas(65536) static u32 quad_args[3][16384] = {
+      {0, 1, 1, u32(-1), 1}, {0, 1, 1, 0, 1}, {0, 1, 1, 0, 1}};
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 12> targets{};
   alignas(256) static const u32 cs[4096] = {
       0xe0702000, 0x80000000, 0xbf810000};  // Store the lane ID as an index.
   alignas(256) static const u32 packed_cs[4096] = {
@@ -1593,13 +1595,16 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
   ASSERT_EQ(compiled.resources.size(), 1u);
   ASSERT_TRUE(packed_compiled.ok);
   ASSERT_EQ(packed_compiled.resources.size(), 1u);
-  for (u32 trial = 0; trial < 9; ++trial) {
+  for (u32 trial = 0; trial < 12; ++trial) {
     SCOPED_TRACE(trial);
     const bool indexed = trial != 0;
     const bool quads = trial >= 5;
-    const bool direct = trial == 2 || trial == 3 || quads;
-    const bool narrow = trial == 3 || trial == 4 || trial == 6 || trial == 7;
-    const bool cpu_source = trial >= 7;
+    const bool indirect_quads = trial >= 9;
+    const bool direct = trial == 2 || trial == 3 || (quads && !indirect_quads);
+    const bool narrow =
+        trial == 3 || trial == 4 || trial == 6 || trial == 7 || trial == 10;
+    const bool cpu_source = trial == 7 || trial == 8 || trial == 11;
+    const bool packed_source = trial == 6 || trial == 10;
     gpu::render::BeginFrame(renderer);
     const u64 index_base =
         reinterpret_cast<u64>(indices[trial ? trial - 1 : 0]);
@@ -1611,8 +1616,8 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
                                           : 0x00010000;
     } else if (indexed) {
       std::fill_n(indices[trial - 1], 64, 0xdeadbeefu);
-      ci.cs_addr = reinterpret_cast<u64>(trial == 6 ? packed_cs : cs);
-      ci.recomp = trial == 6 ? &packed_compiled : &compiled;
+      ci.cs_addr = reinterpret_cast<u64>(packed_source ? packed_cs : cs);
+      ci.recomp = packed_source ? &packed_compiled : &compiled;
       ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
       ci.num_res = 1;
       auto& resource = ci.res[0];
@@ -1640,12 +1645,15 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
     draw.vattrs[0] = {0, 0, 0, 4, 14, 7};
     draw.vattrs[1] = {1, 1, 0, 4, 14, 7};
     if (!direct)
-      draw.indirect_args = reinterpret_cast<u64>(args[indexed]);
+      draw.indirect_args = reinterpret_cast<u64>(
+          indirect_quads ? quad_args[trial - 9] : args[indexed]);
+    if (indirect_quads)
+      gpu::render::ApplyMemoryFill(renderer, draw.indirect_args, 4, 7);
     if (indexed) {
       draw.index_data = reinterpret_cast<const void*>(
           index_base + (narrow && !quads ? 3 : 0));
-      draw.index_count = quads ? 7 : direct ? 3 : 64;
-      draw.index_type = trial == 8 ? 0 : narrow ? 2 : 1;
+      draw.index_count = indirect_quads ? 9 : quads ? 7 : direct ? 3 : 64;
+      draw.index_type = trial == 8 || trial == 11 ? 0 : narrow ? 2 : 1;
     }
     draw.rt_base = draw.mrt_base[0] =
         reinterpret_cast<u64>(targets[trial].data());
@@ -1663,7 +1671,7 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
       EXPECT_EQ(gpu::g_ring_ib_bytes, cpu_indices);
       gpu::render::Draw(renderer, draw);
       EXPECT_EQ(gpu::render::g_frame.draws, draws + 2);
-      EXPECT_EQ(gpu::g_index_convert_n, conversions + 1);
+      EXPECT_EQ(gpu::g_index_convert_n, conversions + (indirect_quads ? 2 : 1));
       if (cpu_source) {
         *reinterpret_cast<volatile u32*>(indices[trial - 1]) =
             narrow ? 0x03020100 : 0x00010000;
@@ -1673,7 +1681,7 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
       }
       gpu::render::Draw(renderer, draw);
       EXPECT_EQ(gpu::render::g_frame.draws, draws + 3);
-      EXPECT_EQ(gpu::g_index_convert_n, conversions + 2);
+      EXPECT_EQ(gpu::g_index_convert_n, conversions + (indirect_quads ? 3 : 2));
     }
     EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
     if (indexed && !cpu_source)
