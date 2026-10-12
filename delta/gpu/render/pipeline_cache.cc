@@ -326,12 +326,15 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     rp.tex_bindings = n_bind;
     set0 = rp.tex_set_layout;
   }
+  rp.cbufs = d.recomp->indirect_cbufs || !d.recomp->vs_cbufs.empty() ||
+             !d.recomp->gs_cbufs.empty() || !d.recomp->ps_cbufs.empty();
   rp.raw_bufs = !d.recomp->vs_bufs.empty() || !d.recomp->ps_bufs.empty();
   // A stage that stages through LDS needs the set-3 scratch, and a descriptor
   // set is positional: taking it means taking set 2 as well, whether or not
   // the shader reads a raw buffer.
   rp.shared_lds = d.recomp->shared_lds && EnsureLdsScratch();
-  rhi::BindGroupLayout* cbuf_layout = d.recomp->indirect_cbufs
+  rhi::BindGroupLayout* cbuf_layout = !rp.cbufs ? g_ring.empty_layout
+                                      : d.recomp->indirect_cbufs
                                           ? g_ring.indirect_cbuf_layout
                                           : g_ring.ubo_layout;
   if (!cbuf_layout)

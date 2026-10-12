@@ -95,11 +95,10 @@ struct UploadRings {
   // empty_layout fills set 0 for untextured recomp draws.
   rhi::Buffer* ubo_buf = nullptr;
   u8* ubo_map = nullptr;
-  u64 ubo_bytes = 0;  // latched when allocated after title settings load
+  u64 ubo_bytes = 0;  // latched at the first frame after title settings load
   u64 ubo_offset = 0, ubo_end = kUboRing;
   u32 ubo_align = 256;
   u64 ubo_stride = kCbufWindow;
-  bool zero_window_initialized = false;
   rhi::BindGroupLayout* ubo_layout = nullptr;
   rhi::BindGroupLayout* empty_layout = nullptr;
   rhi::BindGroup* ubo_set = nullptr;

@@ -92,13 +92,80 @@ TEST(VkDraw, ConstantBufferBudgetAppliesAfterDeviceInitialization) {
             base::Min<u64>(
                 512ull << 20,
                 gpu::render::Device().caps().max_storage_buffer_range * 2));
-  ASSERT_NE(gpu::render::g_ring.ubo_map, nullptr);
-  EXPECT_GE(gpu::render::g_ring.ubo_buf->desc().size, capacity);
+  EXPECT_EQ(gpu::render::g_ring.ubo_buf, nullptr);
+  EXPECT_EQ(gpu::render::g_ring.ubo_map, nullptr);
+  gpu::render::EndFrame(renderer, 0);
+  gpu::render::BeginFrame(renderer);
+  EXPECT_EQ(gpu::render::g_ring.ubo_buf, nullptr);
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                        0xbf810000};
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0x7e040280, 0x7e0602f2,
+                        0xf800080f, 0x03020100, 0xbf810000};
+  const u32 cb_ps[4096] = {0xf4000100, 0xfa000000, 0x7e000204,
+                           0x7e020280, 0x7e040280, 0x7e0602f2,
+                           0xf800080f, 0x03020100, 0xbf810000};
+  alignas(65536) static float constants[4096] = {.5f};
+  alignas(65536) static base::Array<u8, 65536> target{};
+  const u64 base = reinterpret_cast<u64>(constants);
+  u32 user_data[32] = {u32(base), u32(base >> 32)};
+  static const auto plain =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data, 0, false, 8, 8);
+  static const auto cbuf =
+      gpu::rdna::Recompile(vs, cb_ps, user_data, user_data, 0, false, 8, 8);
+  ASSERT_TRUE(plain.ok);
+  ASSERT_FALSE(plain.indirect_cbufs);
+  ASSERT_TRUE(plain.vs_cbufs.empty());
+  ASSERT_TRUE(plain.ps_cbufs.empty());
+  ASSERT_TRUE(cbuf.ok);
+  ASSERT_EQ(cbuf.ps_cbufs.size(), 1u);
+  gpu::render::DrawInfo draw;
+  draw.recomp = &plain;
+  draw.vs_addr = reinterpret_cast<u64>(vs);
+  draw.ps_addr = reinterpret_cast<u64>(ps);
+  draw.prim_type = draw.vertex_count = 1;
+  draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
+  draw.rt_w = draw.rt_h = 16;
+  draw.viewport_x_scale = draw.viewport_y_scale = 8;
+  draw.viewport_x_offset = 4.5f;
+  draw.viewport_y_offset = 8.5f;
+  draw.mrt_count = draw.mrt_bound_mask = 1;
+  draw.mrt_info[0] = 10u << 2;
+  const u64 start = gpu::render::g_ring.ubo_offset;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.ubo_buf, nullptr);
+  EXPECT_EQ(gpu::render::g_ring.ubo_offset, start);
   // Later option changes cannot move offsets beyond the existing allocation.
   ASSERT_TRUE(budget->SetFromString("1024"));
   EXPECT_EQ(gpu::render::UboRingBytes(), capacity);
+  draw.recomp = &cbuf;
+  draw.ps_addr = reinterpret_cast<u64>(cb_ps);
+  base::CopyN(user_data, 32, draw.ps_user_data);
+  draw.cbufs[0] = {base, sizeof(float)};
+  draw.num_cbufs = 1;
+  draw.viewport_x_offset = 8.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  ASSERT_NE(gpu::render::g_ring.ubo_map, nullptr);
+  EXPECT_EQ(gpu::render::g_ring.ubo_buf->desc().size, capacity);
+  const u64 staged = gpu::render::g_ring.ubo_offset;
+  EXPECT_GT(staged, start);
+  draw.recomp = &plain;
+  draw.ps_addr = reinterpret_cast<u64>(ps);
+  draw.viewport_x_offset = 12.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.ubo_offset, staged);
   budget->Reset();
-  gpu::render::EndFrame(renderer, 0);
+  const u32 slot_index = gpu::render::g_frame.slot_idx;
+  gpu::render::EndFrame(renderer, draw.rt_base);
+  const auto& slot = gpu::render::g_frame.slots[slot_index];
+  ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+  ASSERT_TRUE(slot.presentable);
+  for (u32 x : {4u, 8u, 12u}) {
+    const auto* pixel = slot.readback->mapped() + (8 * 16 + x) * 4;
+    EXPECT_NEAR(pixel[0], x == 8 ? 128 : 255, 1);
+    EXPECT_EQ(pixel[1], 0);
+    EXPECT_EQ(pixel[2], 0);
+    EXPECT_EQ(pixel[3], 255);
+  }
 }
 
 TEST(VkDraw, RenderTargetVariantCanExceedCacheBudget) {
@@ -269,6 +336,7 @@ TEST(VkDraw, ResidentRawBuffersDeferUploadRingUntilCpuStaging) {
     GTEST_SKIP() << "A graphics device is required";
   if (gpu::render::g_ring.sbo_buf)
     GTEST_SKIP() << "Run this initialization test in a fresh renderer";
+  const bool had_constants = gpu::render::g_ring.ubo_buf != nullptr;
   const StagedComputeOnly staged;
   EnableWriteTracking();
   const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
@@ -288,8 +356,9 @@ TEST(VkDraw, ResidentRawBuffersDeferUploadRingUntilCpuStaging) {
   u32 user_data[32] = {u32(base + 256), u32((base + 256) >> 32), bytes,
                        0x14fac};
   static const auto program =
-      gpu::rdna::Recompile(vs, ps, user_data, user_data);
+      gpu::rdna::Recompile(vs, ps, user_data, user_data, 0, false, 8, 8);
   ASSERT_TRUE(program.ok);
+  ASSERT_FALSE(program.indirect_cbufs);
   ASSERT_EQ(program.ps_bufs.size(), 1u);
   const auto previous_isa = gpu::gcn::DefaultIsaMode();
   gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
@@ -328,6 +397,7 @@ TEST(VkDraw, ResidentRawBuffersDeferUploadRingUntilCpuStaging) {
   draw.viewport_y_offset = 8.5f;
   draw.mrt_count = draw.mrt_bound_mask = 1;
   draw.mrt_info[0] = 10u << 2;
+  const u64 constants_offset = gpu::render::g_ring.ubo_offset;
   const u64 cpu_copies = gpu::g_ring_raw_bytes;
   const u64 copies = gpu::render::cs::g_buf_bridge_bytes;
   const u64 bound = gpu::g_bind_bytes;
@@ -361,6 +431,10 @@ TEST(VkDraw, ResidentRawBuffersDeferUploadRingUntilCpuStaging) {
   ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
   EXPECT_EQ(gpu::g_ring_raw_bytes, cpu_copies + bytes);
   EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
+  if (!had_constants) {
+    EXPECT_EQ(gpu::render::g_ring.ubo_buf, nullptr);
+    EXPECT_EQ(gpu::render::g_ring.ubo_offset, constants_offset);
+  }
   const u32 slot_index = gpu::render::g_frame.slot_idx;
   gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::render::g_frame.slots[slot_index];

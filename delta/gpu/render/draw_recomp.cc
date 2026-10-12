@@ -1507,52 +1507,53 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
 
   // Full cbuffer windows bind in place. Other dispatch output reaches the
   // ring through a GPU copy, so the draw waits for no readback.
-  const u32 cbufs_used = d.recomp->indirect_cbufs
+  const u32 cbufs_used = !rp->cbufs ? 0
+                         : d.recomp->indirect_cbufs
                              ? gpu::gcn::kIndirectCbufBindings
                              : kCbufBindings;
   CachedBuffer cb_direct[kCbufBindings]{};
   bool cb_barrier = false;
   u64 cb_gpu_off[gpu::gcn::kIndirectCbufBindings];
   base::Fill(cb_gpu_off, cb_gpu_off + base::ArraySize(cb_gpu_off), u64(-1));
-  if (EnsureCbufRing())
-    for (u32 i = 0; i < cbufs_used; i++) {
-      const auto& cb = d.cbufs[i];
-      if (!base::Min(cb.size, kCbufWindow))
-        continue;
-      const u32 n = CbufCopyBytes(cb.base, cb.size);
-      const u64 rev = CsBufferRevision(cb.base, n);
-      if (kCbufBind && !d.recomp->indirect_cbufs) {
-        CachedBuffer binding;
-        if (!CsStorageBuffer(cb.base, n, &binding.buffer, &binding.offset,
-                             g_ring.ubo_align, kCbufWindow) &&
-            n == kCbufWindow && kDirectBind && !rev) {
-          binding.buffer = DirectBindAt(cb.base, n, &binding.offset);
-          cb_barrier |= binding.buffer && CsRangeDirtyOverlapping(cb.base, n);
-        }
-        if (binding.buffer &&
-            (binding.buffer->desc().usage & rhi::kBufferUniform) &&
-            !(binding.offset % g_ring.ubo_align)) {
-          cb_direct[i] = binding;
-          continue;
-        }
+  if (cbufs_used && !EnsureCbufRing())
+    return Decline(kRing);
+  for (u32 i = 0; i < cbufs_used; i++) {
+    const auto& cb = d.cbufs[i];
+    if (!base::Min(cb.size, kCbufWindow))
+      continue;
+    const u32 n = CbufCopyBytes(cb.base, cb.size);
+    const u64 rev = CsBufferRevision(cb.base, n);
+    if (kCbufBind && !d.recomp->indirect_cbufs) {
+      CachedBuffer binding;
+      if (!CsStorageBuffer(cb.base, n, &binding.buffer, &binding.offset,
+                           g_ring.ubo_align, kCbufWindow) &&
+          n == kCbufWindow && kDirectBind && !rev) {
+        binding.buffer = DirectBindAt(cb.base, n, &binding.offset);
+        cb_barrier |= binding.buffer && CsRangeDirtyOverlapping(cb.base, n);
       }
-      if (!rev)
-        continue;
-      GpuStaged& staged = g_ubo_gpu[cb.base];
-      if (staged.frame == g_frame.num && staged.rev == rev &&
-          staged.bytes >= n) {
-        cb_gpu_off[i] = staged.off;
+      if (binding.buffer &&
+          (binding.buffer->desc().usage & rhi::kBufferUniform) &&
+          !(binding.offset % g_ring.ubo_align)) {
+        cb_direct[i] = binding;
         continue;
       }
-      const u64 off = (g_ring.ubo_offset + g_ring.ubo_align - 1) &
-                      ~(u64)(g_ring.ubo_align - 1);
-      if (off + n > g_ring.ubo_end ||
-          !CsSupplyBuffer(cb.base, n, g_ring.ubo_buf, off))
-        continue;  // the guest-memory path below takes it
-      g_ring.ubo_offset = off + n;
-      staged = {off, n, rev, g_frame.num};
-      cb_gpu_off[i] = off;
     }
+    if (!rev)
+      continue;
+    GpuStaged& staged = g_ubo_gpu[cb.base];
+    if (staged.frame == g_frame.num && staged.rev == rev && staged.bytes >= n) {
+      cb_gpu_off[i] = staged.off;
+      continue;
+    }
+    const u64 off = (g_ring.ubo_offset + g_ring.ubo_align - 1) &
+                    ~(u64)(g_ring.ubo_align - 1);
+    if (off + n > g_ring.ubo_end ||
+        !CsSupplyBuffer(cb.base, n, g_ring.ubo_buf, off))
+      continue;  // the guest-memory path below takes it
+    g_ring.ubo_offset = off + n;
+    staged = {off, n, rev, g_frame.num};
+    cb_gpu_off[i] = off;
+  }
 
   CachedBuffer raw_direct[kRawBufBindings]{};
   bool raw_barrier = false;
@@ -2026,13 +2027,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // Vulkan requires one dynamic offset for every dynamic descriptor in the set
   // layout.
   const bool indirect_cbufs = d.recomp->indirect_cbufs;
-  const u32 cbuf_count =
-      indirect_cbufs ? gpu::gcn::kIndirectCbufBindings : kCbufBindings;
+  const u32 cbuf_count = cbufs_used;
   u64 cb_off =
       (g_ring.ubo_offset + g_ring.ubo_align - 1) & ~(u64)(g_ring.ubo_align - 1);
   u64 cb_stride = g_ring.ubo_stride;
-  if (cb_off + cb_stride * (cbuf_count + (indirect_cbufs ? 1 : 0)) >
-      g_ring.ubo_end) {
+  if (cbuf_count &&
+      cb_off + cb_stride * (cbuf_count + (indirect_cbufs ? 1 : 0)) >
+          g_ring.ubo_end) {
     if (kGpuDecltrace) {
       static int n = 0;
       if (n++ < 32)
@@ -2159,7 +2160,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                        &table_offset, 1);
     next = (next + sizeof(offsets) + g_ring.ubo_align - 1) &
            ~(u64)(g_ring.ubo_align - 1);
-  } else {
+  } else if (cbuf_count) {
     rhi::BindGroup* set = g_ring.ubo_set;
     if (base::AnyOf(cb_direct, cb_direct + kCbufBindings,
                     [](const CachedBuffer& b) { return b.buffer != nullptr; }))

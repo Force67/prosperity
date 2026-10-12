@@ -1039,8 +1039,8 @@ void BeginFrame(Renderer& renderer) {
   timeline::Refresh();
   if (!renderer.available())
     return;
-  if (!EnsureCbufRing())
-    return;
+  if (!g_ring.ubo_bytes)
+    g_ring.ubo_bytes = UboRingBytes();
   // Objects retired two frames ago are past every in-flight command buffer
   // (see ReleaseRetiredTextures) and safe to destroy now.
   {
@@ -1103,7 +1103,7 @@ void BeginFrame(Renderer& renderer) {
     static u64 peak_vb = 0, peak_ib = 0, peak_ubo = 0, peak_sbo = 0;
     const u64 used_vb = g_ring.vb_offset - prev_vb;
     const u64 used_ib = g_ring.ib_offset - prev_ib;
-    const u64 used_ubo = g_ring.ubo_offset - prev_ubo;
+    const u64 used_ubo = g_ring.ubo_map ? g_ring.ubo_offset - prev_ubo : 0;
     const u64 used_sbo = g_ring.sbo_map ? g_ring.sbo_offset - prev_sbo : 0;
     peak_vb = base::Max(peak_vb, used_vb);
     peak_ib = base::Max(peak_ib, used_ib);
@@ -1137,19 +1137,10 @@ void BeginFrame(Renderer& renderer) {
   g_ring.vb_end = vb_base + VbRingBytes() / 2;
   g_ring.ib_offset = ib_base;
   g_ring.ib_end = ib_base + kIbRing / 2;
-  g_ring.ubo_offset = ubo_base;
-  g_ring.ubo_end = ubo_base + UboRingBytes() / 2;
   // Reserve one zero window in each half. Legacy dynamic UBOs address the
   // first one; an indirect cbuffer table addresses its current frame's half.
-  if (g_ring.ubo_map) {
-    if (!g_ring.zero_window_initialized) {
-      g_ring.zero_window_initialized = true;
-      std::memset(g_ring.ubo_map, 0, kCbufWindow);
-      std::memset(g_ring.ubo_map + UboRingBytes() / 2, 0, kCbufWindow);
-    }
-    g_ring.ubo_offset = ubo_base + ((kCbufWindow + g_ring.ubo_align - 1) &
-                                    ~(u64)(g_ring.ubo_align - 1));
-  }
+  g_ring.ubo_offset = ubo_base + g_ring.ubo_stride;
+  g_ring.ubo_end = ubo_base + UboRingBytes() / 2;
   // Raw-buffer ring: same slot split and same permanently-zero window 0, which
   // is where a binding whose descriptor did not resolve points.
   const u64 sbo_base = g_frame.slot_idx * (kSboRing / 2);

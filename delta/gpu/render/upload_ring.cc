@@ -30,8 +30,8 @@ DELTA_OPTION(u32, kUboRingMb, "DELTA_GPU_UBORING_MB", 256);
 namespace gpu::render {
 
 u64 UboRingBytes() {
-  // Once allocated, the physical buffer determines the capacity. A later
-  // option update must not make offsets escape the mapped allocation.
+  // The first frame fixes the budget before any draw can allocate the ring.
+  // Later option updates must not change the frame slots' offsets.
   if (g_ring.ubo_bytes)
     return g_ring.ubo_bytes;
   const u64 requested =
@@ -165,8 +165,8 @@ bool CreateUploadRings() {
 }
 
 // The device is initialized before guest mappings exist, but the title profile
-// is loaded later. Allocate constants at the first frame so its budget applies
-// to both the allocation and the offsets used to address it.
+// is loaded later. The first frame latches its budget; allocation waits until
+// a shader needs constants or draw data.
 bool EnsureCbufRing() {
   if (g_ring.ubo_buf)
     return g_ring.ubo_map != nullptr;
