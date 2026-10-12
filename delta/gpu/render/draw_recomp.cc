@@ -343,8 +343,9 @@ rhi::BindGroup* RawBufferBindings(const CachedBuffer* direct,
 
 rhi::BindGroup* CbufBindings(const CachedBuffer* direct) {
   BufferBindingKey key;
+  rhi::Buffer* fallback = g_ring.ubo_buf ? g_ring.ubo_buf : g_ring.ubo_zero;
   for (u32 i = 0; i < kCbufBindings; i++) {
-    key.buffers[i] = direct[i].buffer ? direct[i].buffer : g_ring.ubo_buf;
+    key.buffers[i] = direct[i].buffer ? direct[i].buffer : fallback;
     key.offsets[i] = direct[i].buffer ? direct[i].offset : 0;
     key.bytes[i] = kCbufWindow;
   }
@@ -1505,7 +1506,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
   }
 
-  // Full cbuffer windows bind in place. Other dispatch output reaches the
+  // Resident cbuffer windows bind in place. Other dispatch output reaches the
   // ring through a GPU copy, so the draw waits for no readback.
   const u32 cbufs_used = !rp->cbufs ? 0
                          : d.recomp->indirect_cbufs
@@ -1515,7 +1516,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   bool cb_barrier = false;
   u64 cb_gpu_off[gpu::gcn::kIndirectCbufBindings];
   base::Fill(cb_gpu_off, cb_gpu_off + base::ArraySize(cb_gpu_off), u64(-1));
-  if (cbufs_used && !EnsureCbufRing())
+  bool cb_upload = d.recomp->indirect_cbufs;
+  if (cb_upload && !EnsureCbufRing())
     return Decline(kRing);
   for (u32 i = 0; i < cbufs_used; i++) {
     const auto& cb = d.cbufs[i];
@@ -1545,14 +1547,30 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       cb_gpu_off[i] = staged.off;
       continue;
     }
+    if (!EnsureCbufRing())
+      return Decline(kRing);
     const u64 off = (g_ring.ubo_offset + g_ring.ubo_align - 1) &
                     ~(u64)(g_ring.ubo_align - 1);
-    if (off + n > g_ring.ubo_end ||
+    if (off + n > g_ring.ubo_end || off + kCbufWindow > UboRingBytes() ||
         !CsSupplyBuffer(cb.base, n, g_ring.ubo_buf, off))
       continue;  // the guest-memory path below takes it
     g_ring.ubo_offset = off + n;
     staged = {off, n, rev, g_frame.num};
     cb_gpu_off[i] = off;
+  }
+  for (u32 i = 0; i < cbufs_used && !cb_upload; ++i) {
+    if (cb_direct[i].buffer || cb_gpu_off[i] != u64(-1))
+      continue;
+    const auto& cb = d.cbufs[i];
+    const u32 readable = base::Min(cb.size, kCbufWindow);
+    cb_upload = i == 0 || (readable && IsReadableThisFrame(cb.base, readable));
+  }
+  if (cb_upload) {
+    if (!EnsureCbufRing())
+      return Decline(kRing);
+  } else if (cbufs_used && !g_ring.ubo_buf && !EnsureCbufZero() &&
+             !EnsureCbufRing()) {
+    return Decline(kRing);
   }
 
   CachedBuffer raw_direct[kRawBufBindings]{};
@@ -2031,7 +2049,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   u64 cb_off =
       (g_ring.ubo_offset + g_ring.ubo_align - 1) & ~(u64)(g_ring.ubo_align - 1);
   u64 cb_stride = g_ring.ubo_stride;
-  if (cbuf_count &&
+  if (cb_upload &&
       cb_off + cb_stride * (cbuf_count + (indirect_cbufs ? 1 : 0)) >
           g_ring.ubo_end) {
     if (kGpuDecltrace) {
@@ -2161,7 +2179,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     next = (next + sizeof(offsets) + g_ring.ubo_align - 1) &
            ~(u64)(g_ring.ubo_align - 1);
   } else if (cbuf_count) {
-    rhi::BindGroup* set = g_ring.ubo_set;
+    rhi::BindGroup* set = g_ring.ubo_buf ? g_ring.ubo_set : g_ring.ubo_zero_set;
     if (base::AnyOf(cb_direct, cb_direct + kCbufBindings,
                     [](const CachedBuffer& b) { return b.buffer != nullptr; }))
       set = CbufBindings(cb_direct);

@@ -91,9 +91,11 @@ also let vertex and index fetch read guest bytes without a ring copy. Raw
 shader windows can bind compute buffers or direct-memory imports in place,
 skipping the raw-ring copy. Loads past a binding return zero. Resident raw draws
 use one 16 MiB device zero window for unresolved slots and defer the 512 MiB
-upload ring until staging is needed. Constant upload-ring allocation waits
-until a shader needs constants or an indirect draw-data table. Shaders using
-neither skip fallback MVP uploads and set-1 bindings.
+upload ring until staging is needed. Resident constant draws use one 16 KiB
+device zero window for unresolved slots and defer the 256 MiB host ring until
+constant staging, an indirect draw-data table or the fallback MVP needs it.
+Shaders using neither constants nor draw data skip fallback MVP uploads and
+set-1 bindings.
 GPU-owned mirror output also binds in place, with GPU ordering between draws
 and later compute writes or fills. A CPU write makes the binding ineligible
 until the GPU has the current bytes again.

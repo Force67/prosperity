@@ -166,7 +166,7 @@ bool CreateUploadRings() {
 
 // The device is initialized before guest mappings exist, but the title profile
 // is loaded later. The first frame latches its budget; allocation waits until
-// a shader needs constants or draw data.
+// a draw needs constant staging or draw data.
 bool EnsureCbufRing() {
   if (g_ring.ubo_buf)
     return g_ring.ubo_map != nullptr;
@@ -251,6 +251,37 @@ bool EnsureLdsScratch() {
   BASE_LOGI("gpuvk", "shared LDS scratch: {} MB ({} waves)",
             (unsigned long long)(kLdsScratch >> 20), gpu::gcn::kLdsWaves);
   return true;
+}
+
+bool EnsureCbufZero() {
+  if (g_ring.ubo_zero_set)
+    return true;
+  if (!g_ring.ubo_layout || !g_frame.recording)
+    return false;
+  if (!g_ring.ubo_zero) {
+    rhi::BufferDesc desc;
+    desc.size = kCbufWindow;
+    desc.usage =
+        rhi::kBufferUniform | rhi::kBufferStorage | rhi::kBufferCopyDst;
+    desc.name = "zero constant buffer";
+    g_ring.ubo_zero = Device().CreateBuffer(desc);
+    if (!g_ring.ubo_zero)
+      return false;
+    EndRegion();
+    g_frame.list->FillBuffer(g_ring.ubo_zero, 0, kCbufWindow, 0);
+    g_frame.list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessUniformRead);
+  }
+  rhi::BindGroupDesc set;
+  set.layout = g_ring.ubo_layout;
+  for (u32 i = 0; i < kCbufBindings; ++i) {
+    rhi::BindingWrite w;
+    w.binding = i;
+    w.buffer = g_ring.ubo_zero;
+    w.range = kCbufWindow;
+    set.writes.push_back(w);
+  }
+  g_ring.ubo_zero_set = Device().CreateBindGroup(set);
+  return g_ring.ubo_zero_set != nullptr;
 }
 
 bool EnsureRawBufferZero() {

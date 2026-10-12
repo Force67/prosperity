@@ -329,6 +329,135 @@ static void EnableWriteTracking() {
   sigaction(SIGSEGV, &fault, nullptr);
 }
 
+TEST(VkDraw, ResidentConstantsDeferUploadRingUntilCpuStaging) {
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A graphics device is required";
+  if (gpu::render::g_ring.ubo_buf)
+    GTEST_SKIP() << "Run this initialization test in a fresh renderer";
+  const StagedComputeOnly staged;
+  EnableWriteTracking();
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                        0xbf810000};
+  const u32 ps[4096] = {0xf4000100, 0xfa000000, 0xf4000141, 0xfa000000,
+                        0x7e000204, 0x7e020205, 0x7e040280, 0x7e0602f2,
+                        0xf800080f, 0x03020100, 0xbf810000};
+  alignas(256) static const u32 cs[4096] = {0x7e020204, 0xe0702100, 0x80000100,
+                                            0xbf810000};
+  alignas(65536) static u32 source[65536 / 4]{};
+  alignas(65536) static float cpu[4096] = {.5f};
+  alignas(65536) static base::Array<u8, 65536> target{};
+  const u64 base = reinterpret_cast<u64>(source);
+  const u64 cpu_base = reinterpret_cast<u64>(cpu);
+  u32 user_data[32] = {u32(base + 256), u32((base + 256) >> 32), u32(cpu_base),
+                       u32(cpu_base >> 32)};
+  static const auto program =
+      gpu::rdna::Recompile(vs, ps, user_data, user_data, 0, false, 8, 8);
+  ASSERT_TRUE(program.ok);
+  ASSERT_FALSE(program.indirect_cbufs);
+  ASSERT_EQ(program.ps_cbufs.size(), 2u);
+  const auto previous_isa = gpu::gcn::DefaultIsaMode();
+  gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+  static const auto compute = gpu::gcn::RecompileCompute(cs, 64, 1, 1, 5, 0, 0);
+  gpu::gcn::SetDefaultIsaMode(previous_isa);
+  ASSERT_TRUE(compute.ok);
+  gpu::render::BeginFrame(renderer);
+  gpu::render::EndFrame(renderer, 0);
+  gpu::render::BeginFrame(renderer);
+  gpu::render::ComputeInfo ci;
+  ci.cs_addr = reinterpret_cast<u64>(cs);
+  ci.recomp = &compute;
+  ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
+  ci.num_res = 1;
+  auto& resource = ci.res[0];
+  resource.base = base;
+  resource.size = resource.guest_size = sizeof(source);
+  resource.binding = compute.resources[0].binding;
+  resource.written = resource.shader_writes = true;
+  ci.user_data[0] = u32(base);
+  ci.user_data[1] = (base >> 32) | (4u << 16);
+  ci.user_data[2] = sizeof(source) / 4;
+  ci.user_data[3] = (4u << 15) | (4u << 12);
+  ci.user_data[4] = 0x3e800000;
+  ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+  gpu::render::DrawInfo draw;
+  draw.recomp = &program;
+  draw.vs_addr = reinterpret_cast<u64>(vs);
+  draw.ps_addr = reinterpret_cast<u64>(ps);
+  base::CopyN(user_data, 32, draw.ps_user_data);
+  draw.prim_type = draw.vertex_count = 1;
+  draw.cbufs[0] = {base + 256, sizeof(float)};
+  draw.num_cbufs = 1;
+  draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
+  draw.rt_w = draw.rt_h = 16;
+  draw.viewport_x_scale = draw.viewport_y_scale = 8;
+  draw.viewport_x_offset = 2.5f;
+  draw.viewport_y_offset = 8.5f;
+  draw.mrt_count = draw.mrt_bound_mask = 1;
+  draw.mrt_info[0] = 10u << 2;
+  const u64 cpu_copies = gpu::g_ring_cb_bytes;
+  const u64 writeback = gpu::render::g_wb_why_bytes;
+  const u64 ring = gpu::render::g_ring.ubo_offset;
+  const u64 bound = gpu::g_bind_bytes;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.ubo_buf, nullptr);
+  EXPECT_EQ(gpu::render::g_ring.ubo_map, nullptr);
+  EXPECT_EQ(gpu::render::g_ring.ubo_offset, ring);
+  ASSERT_NE(gpu::render::g_ring.ubo_zero, nullptr);
+  EXPECT_EQ(gpu::render::g_ring.ubo_zero->desc().size,
+            gpu::render::kCbufWindow);
+  EXPECT_EQ(gpu::render::g_ring.ubo_zero->desc().memory,
+            gpu::rhi::MemoryKind::kDevice);
+  const auto* zero = gpu::render::g_ring.ubo_zero;
+  ci.user_data[4] = 0x3f400000;
+  ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+  draw.cbufs[0].size = gpu::render::kCbufWindow;
+  draw.viewport_x_offset = 4.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.ubo_buf, nullptr);
+  EXPECT_EQ(gpu::render::g_ring.ubo_offset, ring);
+  EXPECT_EQ(gpu::g_ring_cb_bytes, cpu_copies);
+  draw.cbufs[0] = {cpu_base, sizeof(float)};
+  draw.ps_user_data[0] = u32(cpu_base);
+  draw.ps_user_data[1] = u32(cpu_base >> 32);
+  draw.viewport_x_offset = 8.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  ASSERT_NE(gpu::render::g_ring.ubo_map, nullptr);
+  EXPECT_EQ(gpu::g_ring_cb_bytes, cpu_copies + 4096);
+  const u64 uploaded = gpu::render::g_ring.ubo_offset;
+  EXPECT_EQ(gpu::render::g_ring.ubo_zero, zero);
+  draw.cbufs[0] = {base + 256, gpu::render::kCbufWindow};
+  base::CopyN(user_data, 32, draw.ps_user_data);
+  draw.viewport_x_offset = 12.5f;
+  gpu::render::g_ring.ubo_offset = gpu::render::g_ring.ubo_end;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.ubo_offset, gpu::render::g_ring.ubo_end);
+  gpu::render::g_ring.ubo_offset = uploaded;
+  EXPECT_EQ(gpu::g_bind_bytes, bound + 3 * gpu::render::kCbufWindow);
+  draw.cbufs[0] = {};
+  draw.mvp[0] = .125f;
+  draw.viewport_x_offset = 14.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_GT(gpu::render::g_ring.ubo_offset, uploaded);
+  EXPECT_EQ(gpu::g_ring_cb_bytes, cpu_copies + 4096);
+  EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
+  const u32 slot_index = gpu::render::g_frame.slot_idx;
+  gpu::render::EndFrame(renderer, draw.rt_base);
+  const auto& slot = gpu::render::g_frame.slots[slot_index];
+  ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+  ASSERT_TRUE(slot.presentable);
+  const u32 xs[] = {2, 4, 8, 12, 14};
+  const u32 red[] = {64, 191, 128, 191, 32};
+  for (u32 i = 0; i < base::ArraySize(xs); ++i) {
+    const auto* pixel = slot.readback->mapped() + (8 * 16 + xs[i]) * 4;
+    EXPECT_NEAR(pixel[0], red[i], 1);
+    EXPECT_EQ(pixel[1], 0);
+    EXPECT_EQ(pixel[2], 0);
+    EXPECT_EQ(pixel[3], 255);
+  }
+}
+
 TEST(VkDraw, ResidentRawBuffersDeferUploadRingUntilCpuStaging) {
   options::Init();
   auto& renderer = gpu::render::DefaultRenderer();

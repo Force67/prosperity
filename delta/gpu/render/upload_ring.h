@@ -102,6 +102,8 @@ struct UploadRings {
   rhi::BindGroupLayout* ubo_layout = nullptr;
   rhi::BindGroupLayout* empty_layout = nullptr;
   rhi::BindGroup* ubo_set = nullptr;
+  rhi::Buffer* ubo_zero = nullptr;
+  rhi::BindGroup* ubo_zero_set = nullptr;
   rhi::BindGroupLayout* indirect_cbuf_layout = nullptr;
   rhi::BindGroup* indirect_cbuf_sets[2]{};
 
@@ -143,6 +145,7 @@ extern UploadRings& g_ring;
 
 bool CreateUploadRings();
 bool EnsureCbufRing();
+bool EnsureCbufZero();
 // Allocate the raw-buffer ring + its descriptor set when a draw needs staging.
 // Resident draws use a device zero window for unresolved descriptor slots.
 bool EnsureRawBufferRing();
