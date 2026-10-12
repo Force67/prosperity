@@ -305,8 +305,6 @@ bool D3D12Device::Init(const D3D12Options& options) {
   device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &o1, sizeof(o1));
   D3D12_FEATURE_DATA_D3D12_OPTIONS3 o3{};
   device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &o3, sizeof(o3));
-  D3D12_FEATURE_DATA_ARCHITECTURE arch{};
-  device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &arch, sizeof(arch));
 
   D3D12_COMMAND_QUEUE_DESC qd{};
   qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -368,7 +366,8 @@ bool D3D12Device::Init(const D3D12Options& options) {
   caps_.storage_image_write_without_format = true;
   caps_.buffer_address = false;
   caps_.host_import = false;
-  caps_.unified_memory = arch.UMA && arch.CacheCoherentUMA;
+  // Readback heaps cannot serve UAVs, even on coherent UMA devices.
+  caps_.unified_memory = false;
   caps_.debug_labels = options.debug_labels;
   debug_labels = options.debug_labels;
   caps_.timestamps = frequency != 0;
