@@ -848,7 +848,8 @@ TEST(VkDraw, ResidentRawBuffersDeferUploadRingUntilCpuStaging) {
   base::CopyN(user_data, 32, draw.ps_user_data);
   draw.prim_type = draw.vertex_count = 1;
   draw.bufs[0] = {base + 256, bytes};
-  draw.num_bufs = 1;
+  draw.bufs[1] = draw.bufs[0];
+  draw.num_bufs = 2;
   draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
   draw.rt_w = draw.rt_h = 16;
   draw.viewport_x_scale = draw.viewport_y_scale = 8;
@@ -905,6 +906,212 @@ TEST(VkDraw, ResidentRawBuffersDeferUploadRingUntilCpuStaging) {
     for (u32 channel = 0; channel < 4; ++channel)
       EXPECT_EQ(slot.readback->mapped()[locations[i] * 4 + channel],
                 (colors[i] >> (channel * 8)) & 255);
+}
+
+TEST(VkDraw, RawBindingsFollowTheShaderPlan) {
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A graphics device is required";
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                        0xbf810000};
+  const u32 ps_one[4096] = {0x7e080280, 0xe0302000, 0x80000004,
+                            0x7e020280, 0x7e040280, 0x7e0602f2,
+                            0xf800080f, 0x03020100, 0xbf810000};
+  const u32 ps_two[4096] = {0x7e080280, 0xe0302000, 0x80000004, 0xe0302000,
+                            0x80010104, 0x7e040280, 0x7e0602f2, 0xf800080f,
+                            0x03020100, 0xbf810000};
+  alignas(65536) static float red[16384] = {.25f}, green[16384] = {.75f};
+  alignas(65536) static base::Array<u8, 65536> target{};
+  const u64 red_base = reinterpret_cast<u64>(red);
+  const u64 green_base = reinterpret_cast<u64>(green);
+  const u32 user_data[32] = {u32(red_base),
+                             u32(red_base >> 32) | (4u << 16),
+                             1,
+                             (4u << 15) | (7u << 12),
+                             u32(green_base),
+                             u32(green_base >> 32) | (4u << 16),
+                             1,
+                             (4u << 15) | (7u << 12)};
+  static const auto one =
+      gpu::rdna::Recompile(vs, ps_one, user_data, user_data, 0, false, 8, 8);
+  static const auto two =
+      gpu::rdna::Recompile(vs, ps_two, user_data, user_data, 0, false, 8, 8);
+  ASSERT_TRUE(one.ok);
+  ASSERT_TRUE(two.ok);
+  ASSERT_EQ(one.ps_bufs.size(), 1u);
+  ASSERT_EQ(two.ps_bufs.size(), 2u);
+  static auto sparse = one;
+  sparse.ps_bufs[0].binding = 2;
+  for (size_t i = 5; i < sparse.fs_spirv.size();) {
+    const u32 instruction = sparse.fs_spirv[i];
+    if ((instruction & 0xffff) == u32(spv::Op::OpDecorate) &&
+        sparse.fs_spirv[i + 2] == u32(spv::Decoration::Binding))
+      sparse.fs_spirv[i + 3] = 2;
+    i += instruction >> 16;
+  }
+  gpu::render::BeginFrame(renderer);
+  gpu::render::DrawInfo draw;
+  draw.recomp = &one;
+  draw.vs_addr = reinterpret_cast<u64>(vs);
+  draw.ps_addr = reinterpret_cast<u64>(ps_one);
+  base::CopyN(user_data, 32, draw.ps_user_data);
+  draw.prim_type = draw.vertex_count = 1;
+  draw.bufs[0] = {red_base, sizeof(float)};
+  draw.bufs[1] = {green_base, sizeof(float)};
+  draw.num_bufs = 2;
+  draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
+  draw.rt_w = draw.rt_h = 16;
+  draw.viewport_x_scale = draw.viewport_y_scale = 8;
+  draw.viewport_x_offset = 4.5f;
+  draw.viewport_y_offset = 8.5f;
+  draw.mrt_count = draw.mrt_bound_mask = 1;
+  draw.mrt_info[0] = 10u << 2;
+  const u64 copied = gpu::g_ring_raw_bytes;
+  auto* pipeline = gpu::render::GetRecompPipe(draw);
+  ASSERT_NE(pipeline, nullptr);
+  EXPECT_EQ(pipeline->raw_count, 1u);
+  EXPECT_EQ(pipeline->raw_mask, 1u);
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::g_ring_raw_bytes, copied + sizeof(float));
+  draw.recomp = &two;
+  draw.ps_addr = reinterpret_cast<u64>(ps_two);
+  draw.viewport_x_offset = 8.5f;
+  pipeline = gpu::render::GetRecompPipe(draw);
+  ASSERT_NE(pipeline, nullptr);
+  EXPECT_EQ(pipeline->raw_count, 2u);
+  EXPECT_EQ(pipeline->raw_mask, 3u);
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::g_ring_raw_bytes, copied + 2 * sizeof(float));
+  const u64 uploaded = gpu::render::g_ring.sbo_offset;
+  draw.recomp = &sparse;
+  draw.bufs[0] = {};
+  draw.bufs[2] = {red_base, sizeof(float)};
+  draw.num_bufs = 3;
+  draw.viewport_x_offset = 12.5f;
+  pipeline = gpu::render::GetRecompPipe(draw);
+  ASSERT_NE(pipeline, nullptr);
+  EXPECT_EQ(pipeline->raw_count, 3u);
+  EXPECT_EQ(pipeline->raw_mask, 4u);
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.sbo_offset, uploaded);
+  EXPECT_EQ(gpu::g_ring_raw_bytes, copied + 2 * sizeof(float));
+  draw.recomp = &one;
+  draw.ps_addr = reinterpret_cast<u64>(ps_one);
+  draw.bufs[0] = {red_base, sizeof(float)};
+  draw.viewport_x_offset = 14.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.sbo_offset, uploaded);
+  for (u32 count : {1u, 2u, 3u}) {
+    const auto& groups = gpu::render::g_ring.raw_bindings[count];
+    ASSERT_NE(groups.layout, nullptr);
+    EXPECT_EQ(groups.layout->desc().bindings.size(), count);
+    EXPECT_NE(groups.upload, nullptr);
+  }
+  const u32 slot_index = gpu::render::g_frame.slot_idx;
+  gpu::render::EndFrame(renderer, draw.rt_base);
+  const auto& slot = gpu::render::g_frame.slots[slot_index];
+  ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+  ASSERT_TRUE(slot.presentable);
+  for (u32 x : {4u, 8u, 12u, 14u}) {
+    SCOPED_TRACE(x);
+    const auto* pixel = slot.readback->mapped() + (8 * 16 + x) * 4;
+    EXPECT_NEAR(pixel[0], 64, 1);
+    EXPECT_NEAR(pixel[1], x == 8 ? 191 : 0, 1);
+    EXPECT_EQ(pixel[2], 0);
+    EXPECT_EQ(pixel[3], 255);
+  }
+}
+
+TEST(VkDraw, LdsBindingsDoNotRequireRawBufferDescriptors) {
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A graphics device is required";
+  const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
+                        0xbf810000};
+  const u32 ps[4096] = {0x7e0002f2, 0x7e020280, 0x7e040280, 0x7e0602f2,
+                        0xf800080f, 0x03020100, 0xbf810000};
+  const u32 user_data[32]{};
+  static auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
+  ASSERT_TRUE(program.ok);
+  ASSERT_TRUE(program.vs_bufs.empty());
+  ASSERT_TRUE(program.ps_bufs.empty());
+  program.shared_lds = true;
+  using gpu::gcn::spirv::Id;
+  gpu::gcn::spirv::Module module;
+  const Id f = module.TypeFloat(), v4 = module.TypeVec(f, 4);
+  const Id array = module.TypeRuntimeArray(f);
+  module.Decorate(array, spv::Decoration::ArrayStride, {4});
+  const Id block = module.TypeStruct({array});
+  module.Decorate(block, spv::Decoration::Block);
+  module.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
+  const Id buffer = module.Variable(
+      module.TypePointer(spv::StorageClass::StorageBuffer, block),
+      spv::StorageClass::StorageBuffer);
+  module.Decorate(buffer, spv::Decoration::DescriptorSet, {3});
+  module.Decorate(buffer, spv::Decoration::Binding, {0});
+  const Id position =
+      module.Variable(module.TypePointer(spv::StorageClass::Output, v4),
+                      spv::StorageClass::Output);
+  module.Decorate(position, spv::Decoration::BuiltIn,
+                  {u32(spv::BuiltIn::Position)});
+  const Id point_size =
+      module.Variable(module.TypePointer(spv::StorageClass::Output, f),
+                      spv::StorageClass::Output);
+  module.Decorate(point_size, spv::Decoration::BuiltIn,
+                  {u32(spv::BuiltIn::PointSize)});
+  const Id main = module.BeginFunction(
+      module.TypeVoid(), module.TypeFunction(module.TypeVoid(), {}));
+  const Id first = module.AccessChain(
+      module.TypePointer(spv::StorageClass::StorageBuffer, f), buffer,
+      {module.ConstU32(0), module.ConstU32(0)});
+  module.Store(position, module.Emit(spv::Op::OpCompositeConstruct, v4,
+                                     {module.Load(f, first), module.ConstF32(0),
+                                      module.ConstF32(0), module.ConstF32(1)}));
+  module.Store(point_size, module.ConstF32(1));
+  module.ReturnVoid();
+  module.EndFunction();
+  module.EntryPoint(spv::ExecutionModel::Vertex, main, "main",
+                    {buffer, position, point_size});
+  base::String error;
+  ASSERT_TRUE(
+      gpu::gcn::spirv::Finalize(module.Assemble(), &program.vs_spirv, &error))
+      << error.c_str();
+  alignas(65536) static base::Array<u8, 65536> target{};
+  gpu::render::BeginFrame(renderer);
+  gpu::render::DrawInfo draw;
+  draw.recomp = &program;
+  draw.prim_type = draw.vertex_count = 1;
+  draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(target.data());
+  draw.rt_w = draw.rt_h = 16;
+  draw.viewport_x_scale = draw.viewport_y_scale = 8;
+  draw.viewport_x_offset = draw.viewport_y_offset = 8.5f;
+  draw.mrt_count = draw.mrt_bound_mask = 1;
+  draw.mrt_info[0] = 10u << 2;
+  auto* pipeline = gpu::render::GetRecompPipe(draw);
+  ASSERT_NE(pipeline, nullptr);
+  EXPECT_EQ(pipeline->raw_count, 0u);
+  EXPECT_EQ(pipeline->raw_mask, 0u);
+  ASSERT_EQ(pipeline->layout->desc().groups.size(), 4u);
+  EXPECT_EQ(pipeline->layout->desc().groups[2],
+            gpu::render::g_ring.empty_layout);
+  const float x = .25f;
+  gpu::render::g_frame.list->UpdateBuffer(gpu::render::g_ring.lds_buf, 0,
+                                          sizeof(x), &x);
+  gpu::render::g_frame.list->Barrier(gpu::rhi::kAccessCopyWrite,
+                                     gpu::rhi::kAccessShaderRead);
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  const u32 slot_index = gpu::render::g_frame.slot_idx;
+  gpu::render::EndFrame(renderer, draw.rt_base);
+  const auto& slot = gpu::render::g_frame.slots[slot_index];
+  ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+  ASSERT_TRUE(slot.presentable);
+  const auto* pixel = slot.readback->mapped() + (8 * 16 + 10) * 4;
+  EXPECT_EQ(pixel[0], 255);
+  EXPECT_EQ(pixel[1], 0);
+  EXPECT_EQ(pixel[2], 0);
+  EXPECT_EQ(pixel[3], 255);
 }
 
 TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {

@@ -337,7 +337,14 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       rp.cbuf_mask |= 1ull << cb.binding;
     }
   }
-  rp.raw_bufs = !d.recomp->vs_bufs.empty() || !d.recomp->ps_bufs.empty();
+  for (const auto* plans : {&d.recomp->vs_bufs, &d.recomp->ps_bufs}) {
+    for (const auto& buffer : *plans) {
+      if (buffer.binding >= g_ring.sbo_count)
+        return nullptr;
+      rp.raw_count = base::Max(rp.raw_count, buffer.binding + 1);
+      rp.raw_mask |= 1u << buffer.binding;
+    }
+  }
   // A stage that stages through LDS needs the set-3 scratch, and a descriptor
   // set is positional: taking it means taking set 2 as well, whether or not
   // the shader reads a raw buffer.
@@ -350,8 +357,13 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     return nullptr;
   rhi::PipelineLayoutDesc layout;
   layout.groups = {set0, cbuf_layout};
-  if (rp.raw_bufs || rp.shared_lds)
-    layout.groups.push_back(g_ring.sbo_layout);
+  if (rp.raw_count || rp.shared_lds) {
+    auto* raw_layout =
+        rp.raw_count ? GetRawBufferLayout(rp.raw_count) : g_ring.empty_layout;
+    if (!raw_layout)
+      return nullptr;
+    layout.groups.push_back(raw_layout);
+  }
   if (rp.shared_lds)
     layout.groups.push_back(g_ring.lds_layout);
   // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total

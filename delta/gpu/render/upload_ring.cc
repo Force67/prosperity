@@ -99,9 +99,8 @@ bool CreateUploadRings() {
     g_ring.indirect_cbuf_layout = Device().CreateBindGroupLayout(indirect);
   }
 
-  // Raw-buffer set layout (set 2). Every recompiled pipeline layout that has a
-  // shader reading buffers by hand names it, so it exists from the start; the
-  // ring behind it is allocated only when a buffer needs staging.
+  // Raw-buffer limits (set 2). Layouts follow each shader's plan; the ring
+  // behind them is allocated only when a buffer needs staging.
   g_ring.sbo_align = base::Max(caps.storage_offset_alignment, 4u);
   // These are DYNAMIC storage buffers, whose device limit has a floor of 4
   // while real desktop parts report 16+. Take what the device offers (up to
@@ -132,13 +131,7 @@ bool CreateUploadRings() {
                 : "");
   g_ring.sbo_stride =
       (kRawBufWindow + g_ring.sbo_align - 1) & ~(u64)(g_ring.sbo_align - 1);
-  rhi::BindGroupLayoutDesc sbo;
-  for (u32 i = 0; i < g_ring.sbo_count; i++)
-    sbo.bindings.push_back({i, rhi::BindingType::kStorageBufferDynamic,
-                            rhi::kStageVertex | rhi::kStageFragment |
-                                (caps.mesh_shader ? rhi::kStageMesh : 0u), true});
-  g_ring.sbo_layout = Device().CreateBindGroupLayout(sbo);
-  return g_ring.sbo_layout != nullptr;
+  return true;
 }
 
 bool EnsureVertexRing() {
@@ -294,40 +287,26 @@ bool EnsureCbufZero() {
 }
 
 bool EnsureRawBufferZero() {
-  if (g_ring.sbo_zero_set)
+  if (g_ring.sbo_zero)
     return true;
-  if (!g_ring.sbo_layout || !g_frame.recording)
+  if (!g_frame.recording)
     return false;
-  if (!g_ring.sbo_zero) {
-    rhi::BufferDesc desc;
-    desc.size = kRawBufWindow;
-    desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
-    desc.name = "zero raw buffer";
-    g_ring.sbo_zero = Device().CreateBuffer(desc);
-    if (!g_ring.sbo_zero)
-      return false;
-    EndRegion();
-    g_frame.list->FillBuffer(g_ring.sbo_zero, 0, kRawBufWindow, 0);
-    g_frame.list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessShaderRead);
-  }
-  rhi::BindGroupDesc set;
-  set.layout = g_ring.sbo_layout;
-  for (u32 i = 0; i < g_ring.sbo_count; ++i) {
-    rhi::BindingWrite w;
-    w.binding = i;
-    w.buffer = g_ring.sbo_zero;
-    w.range = kRawBufWindow;
-    set.writes.push_back(w);
-  }
-  g_ring.sbo_zero_set = Device().CreateBindGroup(set);
-  return g_ring.sbo_zero_set != nullptr;
+  rhi::BufferDesc desc;
+  desc.size = kRawBufWindow;
+  desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
+  desc.name = "zero raw buffer";
+  g_ring.sbo_zero = Device().CreateBuffer(desc);
+  if (!g_ring.sbo_zero)
+    return false;
+  EndRegion();
+  g_frame.list->FillBuffer(g_ring.sbo_zero, 0, kRawBufWindow, 0);
+  g_frame.list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessShaderRead);
+  return true;
 }
 
 bool EnsureRawBufferRing() {
   if (g_ring.sbo_map)
     return true;
-  if (!g_ring.sbo_layout)
-    return false;
   g_ring.sbo_buf = HostBuffer(
       kSboRing, rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferCopySrc,
       "raw buffer ring", &g_ring.sbo_map);
@@ -338,22 +317,50 @@ bool EnsureRawBufferRing() {
       static_cast<size_t>((kSboRing + g_ring.sbo_stride - 1) /
                           g_ring.sbo_stride),
       0);
-  rhi::BindGroupDesc set;
-  set.layout = g_ring.sbo_layout;
-  for (u32 i = 0; i < g_ring.sbo_count; i++) {
-    rhi::BindingWrite w;
-    w.binding = i;
-    w.buffer = g_ring.sbo_buf;
-    w.range = kRawBufWindow;
-    set.writes.push_back(w);
-  }
-  g_ring.sbo_set = Device().CreateBindGroup(set);
-  if (!g_ring.sbo_set)
-    return false;
-  BASE_LOGI("gpuvk", "raw-buffer ring: {} MB, {} KB windows, {} bindings",
-            (unsigned long long)(kSboRing >> 20), kRawBufWindow >> 10,
-            g_ring.sbo_count);
+  BASE_LOGI("gpuvk", "raw-buffer ring: {} MB, {} KB windows",
+            (unsigned long long)(kSboRing >> 20), kRawBufWindow >> 10);
   return true;
+}
+
+rhi::BindGroupLayout* GetRawBufferLayout(u32 count) {
+  if (!count || count > g_ring.sbo_count)
+    return nullptr;
+  auto& groups = g_ring.raw_bindings[count];
+  if (!groups.layout) {
+    const auto& caps = Device().caps();
+    rhi::BindGroupLayoutDesc desc;
+    for (u32 i = 0; i < count; ++i)
+      desc.bindings.push_back({i, rhi::BindingType::kStorageBufferDynamic,
+                               rhi::kStageVertex | rhi::kStageFragment |
+                                   (caps.mesh_shader ? rhi::kStageMesh : 0u),
+                               true});
+    groups.layout = Device().CreateBindGroupLayout(desc);
+  }
+  return groups.layout;
+}
+
+rhi::BindGroup* GetRawBufferBindGroup(u32 count) {
+  auto* layout = GetRawBufferLayout(count);
+  if (!layout)
+    return nullptr;
+  auto& groups = g_ring.raw_bindings[count];
+  auto*& set = g_ring.sbo_buf ? groups.upload : groups.zero;
+  if (set)
+    return set;
+  rhi::Buffer* buffer = g_ring.sbo_buf ? g_ring.sbo_buf : g_ring.sbo_zero;
+  if (!buffer)
+    return nullptr;
+  rhi::BindGroupDesc desc;
+  desc.layout = layout;
+  for (u32 i = 0; i < count; ++i) {
+    rhi::BindingWrite write;
+    write.binding = i;
+    write.buffer = buffer;
+    write.range = kRawBufWindow;
+    desc.writes.push_back(write);
+  }
+  set = Device().CreateBindGroup(desc);
+  return set;
 }
 
 bool AllocateTextureUpload(u32 slot,

@@ -329,17 +329,18 @@ rhi::BindGroup* BufferBindings(const BufferBindingKey& key,
 }
 
 rhi::BindGroup* RawBufferBindings(const CachedBuffer* direct,
-                                  const DrawInfo& d) {
+                                  const DrawInfo& d,
+                                  u32 count) {
   BufferBindingKey key;
-  key.count = g_ring.sbo_count;
+  key.count = count;
   rhi::Buffer* fallback = g_ring.sbo_buf ? g_ring.sbo_buf : g_ring.sbo_zero;
-  for (u32 i = 0; i < g_ring.sbo_count; i++) {
+  for (u32 i = 0; i < count; i++) {
     key.buffers[i] = direct[i].buffer ? direct[i].buffer : fallback;
     key.offsets[i] = direct[i].buffer ? direct[i].offset : 0;
     key.bytes[i] = direct[i].buffer ? base::Min(d.bufs[i].size, kRawBufWindow)
                                     : kRawBufWindow;
   }
-  return BufferBindings(key, g_ring.sbo_layout, g_ring.sbo_count,
+  return BufferBindings(key, GetRawBufferLayout(count), count,
                         g_raw_bindings[g_frame.num % 3]);
 }
 
@@ -1622,9 +1623,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
 
   CachedBuffer raw_direct[kRawBufBindings]{};
   bool raw_barrier = false;
-  if (rp->raw_bufs && kRawBind) {
+  if (rp->raw_count && kRawBind) {
     const u64 align = base::Max(Device().caps().storage_offset_alignment, 1u);
-    for (u32 i = 0; i < g_ring.sbo_count; i++) {
+    for (u32 i = 0; i < rp->raw_count; i++) {
+      if (!(rp->raw_mask & (1u << i)))
+        continue;
       const auto& rb = d.bufs[i];
       const u32 want = base::Min(rb.size, kRawBufWindow);
       if (!want || (want & 3))
@@ -1664,8 +1667,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                               CbufCopyBytes(cb.base, cb.size), "cb"))
         return Decline(kNoRecomp);
     }
-    if (rp->raw_bufs)
-      for (u32 i = 0; i < kRawBufBindings; i++) {
+    if (rp->raw_count)
+      for (u32 i = 0; i < rp->raw_count; i++) {
+        if (!(rp->raw_mask & (1u << i)))
+          continue;
         const auto& rb = d.bufs[i];
         const u32 want = base::Min(rb.size, kRawBufWindow);
         if (want && !CsBufferRevision(rb.base, want) &&
@@ -1728,8 +1733,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // compute output this way six times a frame.
   u64 raw_gpu_off[kRawBufBindings];
   base::Fill(raw_gpu_off, raw_gpu_off + base::ArraySize(raw_gpu_off), u64(-1));
-  if (rp->raw_bufs) {
-    for (u32 i = 0; i < kRawBufBindings; i++) {
+  if (rp->raw_count) {
+    for (u32 i = 0; i < rp->raw_count; i++) {
+      if (!(rp->raw_mask & (1u << i)))
+        continue;
       const auto& rb = d.bufs[i];
       const u32 want = base::Min(rb.size, kRawBufWindow);
       const u64 rev = want ? CsBufferRevision(rb.base, want) : 0;
@@ -1761,7 +1768,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
     if (!g_ring.sbo_buf) {
       bool staging = false;
-      for (u32 i = 0; i < g_ring.sbo_count; ++i) {
+      for (u32 i = 0; i < rp->raw_count; ++i) {
+        if (!(rp->raw_mask & (1u << i)))
+          continue;
         const auto& rb = d.bufs[i];
         const u32 want = base::Min(rb.size, kRawBufWindow);
         if (want && !raw_direct[i].buffer && raw_gpu_off[i] == u64(-1) &&
@@ -2246,9 +2255,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   // recompiled shader clamps into that window. Repeats within a frame (the
   // same skinning palette across a character's draws) reuse one upload.
   u32 rawbuf_mask = 0;
-  if (rp->raw_bufs) {
+  if (rp->raw_count) {
     u32 sbo_dyn[kRawBufBindings] = {};
-    for (u32 i = 0; i < kRawBufBindings; i++) {
+    for (u32 i = 0; i < rp->raw_count; i++) {
+      if (!(rp->raw_mask & (1u << i)))
+        continue;
       const auto& rb = d.bufs[i];
       const u32 want = base::Min(rb.size, kRawBufWindow);
       if (!want)
@@ -2316,18 +2327,14 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       g_sbo_staged.Insert(rb.base, want, 0, off, tracked);
       rawbuf_mask |= 1u << i;
     }
-    // One dynamic offset per dynamic descriptor the SET actually holds, which
-    // is the device-derived sbo_count, not the compile-time ceiling. Passing
-    // the ceiling is a spec violation on every device that reports fewer than
-    // 16 (the Vulkan floor is 4).
     rhi::BindGroup* raw_set =
-        g_ring.sbo_buf ? g_ring.sbo_set : g_ring.sbo_zero_set;
-    if (base::AnyOf(raw_direct, raw_direct + g_ring.sbo_count,
-                     [](const CachedBuffer& b) { return b.buffer != nullptr; }))
-      raw_set = RawBufferBindings(raw_direct, d);
+        base::AnyOf(raw_direct, raw_direct + rp->raw_count,
+                    [](const CachedBuffer& b) { return b.buffer != nullptr; })
+            ? RawBufferBindings(raw_direct, d, rp->raw_count)
+            : GetRawBufferBindGroup(rp->raw_count);
     if (!raw_set)
       return Decline(kRing);
-    list->SetBindGroup(2, raw_set, sbo_dyn, g_ring.sbo_count);
+    list->SetBindGroup(2, raw_set, sbo_dyn, rp->raw_count);
     // DELTA_GPU_RAWBUF: which set-2 bindings a draw actually got, so a shader
     // reading zeros can be told apart from one reading real guest data.
     if (kRawBufTrace) {

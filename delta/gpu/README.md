@@ -102,8 +102,9 @@ device zero window for unresolved slots and defer the 256 MiB host ring until
 constant staging, an indirect draw-data table or the fallback MVP needs it.
 Shaders using neither constants nor draw data skip fallback MVP uploads and
 set-1 bindings.
-Constant descriptor sets use the shader plan's binding span, and draws stage
-only its consumed slots. Indirect user-data tables remain available to shaders
+Constant and raw-buffer descriptor sets use the shader plan's binding span,
+and draws resolve, flush and stage only its consumed slots.
+Indirect user-data tables remain available to shaders
 with no constant loads, without uploading a fallback MVP.
 GPU-owned mirror output also binds in place, with GPU ordering between draws
 and later compute writes or fills. A CPU write makes the binding ineligible

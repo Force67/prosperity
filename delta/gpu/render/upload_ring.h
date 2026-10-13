@@ -77,7 +77,7 @@ constexpr u32 kRawBufBindings = gpu::gcn::kMaxGfxBuffers;
 constexpr u64 kLdsScratch =
     u64(gpu::gcn::kLdsWaves) * gpu::gcn::kLdsMaxDwords * 4;
 
-struct CbufBindGroups {
+struct BufferBindGroups {
   rhi::BindGroupLayout* layout = nullptr;
   rhi::BindGroup* upload = nullptr;
   rhi::BindGroup* zero = nullptr;
@@ -105,7 +105,7 @@ struct UploadRings {
   u64 ubo_offset = 0, ubo_end = kUboRing;
   u32 ubo_align = 256;
   u64 ubo_stride = kCbufWindow;
-  CbufBindGroups cbuf_bindings[kCbufBindings + 1]{};
+  BufferBindGroups cbuf_bindings[kCbufBindings + 1]{};
   rhi::BindGroupLayout* empty_layout = nullptr;
   rhi::Buffer* ubo_zero = nullptr;
   rhi::BindGroupLayout* indirect_cbuf_layout = nullptr;
@@ -118,18 +118,15 @@ struct UploadRings {
   rhi::Buffer* sbo_buf = nullptr;
   u8* sbo_map = nullptr;
   u64 sbo_offset = 0, sbo_end = kSboRing;
-  // Bindings actually created, = min(device dynamic-SSBO limit,
-  // kRawBufBindings). The recompiler is told this via gcn::SetMaxGfxBuffers so
-  // it never plans a binding the layout does not have.
+  // Planning limit, = min(device dynamic-SSBO limit, kRawBufBindings).
+  // Each shader's descriptor layout uses only its planned binding span.
   u32 sbo_count = gpu::gcn::kMinGfxBuffers;
   u32 sbo_align = 256;
   u64 sbo_stride = kRawBufWindow;
   base::Vector<u32> sbo_written;
-  rhi::BindGroupLayout* sbo_layout = nullptr;
-  rhi::BindGroup* sbo_set = nullptr;
+  BufferBindGroups raw_bindings[kRawBufBindings + 1]{};
   // Resident draws need zero descriptors before they need an upload ring.
   rhi::Buffer* sbo_zero = nullptr;
-  rhi::BindGroup* sbo_zero_set = nullptr;
 
   // Shared LDS (set 3): one device-local block per wave for a graphics stage
   // that stages through LDS. Nothing reads it back on the CPU and nothing
@@ -158,6 +155,8 @@ rhi::BindGroup* GetCbufBindGroup(u32 count);
 // Resident draws use a device zero window for unresolved descriptor slots.
 bool EnsureRawBufferRing();
 bool EnsureRawBufferZero();
+rhi::BindGroupLayout* GetRawBufferLayout(u32 count);
+rhi::BindGroup* GetRawBufferBindGroup(u32 count);
 // The shared-LDS scratch buffer and its set-3 descriptor, created on first use
 // by a shader that declares LDS in a graphics stage.
 bool EnsureLdsScratch();
