@@ -226,7 +226,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   EXPECT_EQ(late_import, gpu::render::DirectBindAt(DirectMemory::kLateBase, 4,
                                                    &late_offset));
   EXPECT_EQ(late_offset, first_offset + gpu::render::kMirrorBlock);
-  alignas(65536) static base::Array<u8, 65536> targets[64]{};
+  alignas(65536) static base::Array<u8, 65536> targets[68]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
   imported.recomp = &constants;
@@ -1339,6 +1339,46 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     EXPECT_EQ(pixels[(8 * 16 + 4) * 4 + 3], 255);
     EXPECT_EQ(pixels[(8 * 16 + 12) * 4 + 3], 255);
   }
+  const u32 tail_pixels[][4096] = {
+      {0x7e000280, 0xe0301000, 0x80000000, 0x7e020280, 0x7e040280, 0x7e0602f2,
+       0xf800080f, 0x03020100, 0xbf810000},
+      {0x7e000280, 0xeba01000, 0x80000000, 0x7e020280, 0x7e040280, 0x7e0602f2,
+       0xf800080f, 0x03020100, 0xbf810000},
+      {0x7e000280, 0xe00c1000, 0x80000000, 0x7e020280, 0x7e040280, 0x7e0602f2,
+       0xf800080f, 0x03020100, 0xbf810000},
+      {0x7e000280, 0xeba31000, 0x80000000, 0xf800080f, 0x03020100, 0xbf810000}};
+  gpu::gcn::Recompiled tail_programs[base::ArraySize(tail_pixels)];
+  const u64 tail = partial + 8192 - 4;
+  for (u32 trial = 0; trial < base::ArraySize(tail_pixels); ++trial) {
+    SCOPED_TRACE(trial);
+    *reinterpret_cast<u32*>(tail) = trial == 2 ? 0x00000040 : 0x3e800000;
+    gpu::render::CollectGuestWrites();
+    gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+    auto& tail_program = tail_programs[trial];
+    tail_program =
+        gpu::gcn::Recompile(vs, tail_pixels[trial], user_data, user_data);
+    gpu::gcn::SetDefaultIsaMode(previous_isa);
+    ASSERT_TRUE(tail_program.ok);
+    ASSERT_TRUE(tail_program.direct_reads);
+    direct_draw.recomp = &tail_program;
+    direct_draw.ps_user_data[0] = u32(tail);
+    direct_draw.ps_user_data[1] = u32(tail >> 32);
+    direct_draw.ps_user_data[2] = 4;
+    direct_draw.ps_user_data[3] = 10u << 15;
+    direct_draw.viewport_x_offset = 4.5f;
+    direct_draw.rt_base = direct_draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[64 + trial].data());
+    gpu::render::BeginFrame(renderer);
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, direct_draw));
+    const auto& slot =
+        gpu::render::g_frame.slots[gpu::render::g_frame.slot_idx];
+    gpu::render::EndFrame(renderer, direct_draw.rt_base);
+    ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+    ASSERT_TRUE(slot.presentable);
+    EXPECT_EQ(slot.readback->mapped()[(8 * 16 + 4) * 4], 64);
+    EXPECT_EQ(slot.readback->mapped()[(8 * 16 + 4) * 4 + 3], 255);
+  }
+  direct_draw.viewport_x_offset = 12.5f;
   for (u32 trial = 0; trial < 3; ++trial) {
     SCOPED_TRACE(trial);
     const u64 address = trial ? readonly : HostMemory::kBase;

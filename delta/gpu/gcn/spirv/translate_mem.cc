@@ -1614,7 +1614,7 @@ BufferFormat DecodeBufferDescriptor(Translator& t, StageContext& sc, Id w3) {
 }
 
 // Direct graphics loads (render/guest_direct.h): one translation per
-// instruction and no branches. An address the table does not hold, or one
+// instruction. An address the table does not hold, or one
 // past the descriptor's records, reads 0 out of the table itself.
 bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
   const Id wide = t.m.TypeInt(64, false);
@@ -1634,8 +1634,8 @@ bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
                         t.U32(static_cast<u32>(g_direct_table >> 32)));
   const Id u32_ptr =
       t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
-  const auto translate = [&](Id address, u32 bytes) {
-    return CsGuestAddress(t, sc, address, t.U32(bytes));
+  const auto translate = [&](Id address, Id bytes) {
+    return CsGuestAddress(t, sc, address, bytes);
   };
   const auto load = [&](Id ptr, Id valid, Id byte) {
     const Id at = t.m.Emit(spv::Op::OpSelect, wide,
@@ -1674,7 +1674,8 @@ bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
                                 : t.U32(offset.dwords * 4);
     }
     byte_off = t.And(byte_off, t.U32(~3u));
-    const Id ptr = translate(add64(base_of(sbase), to64(byte_off)), n * 4);
+    const Id ptr =
+        translate(add64(base_of(sbase), to64(byte_off)), t.U32(n * 4));
     const Id held = t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {ptr, null64});
     // s_buffer_load: within max(stride, 1) * NUM_RECORDS bytes.
     Id limit = 0;
@@ -1720,8 +1721,29 @@ bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
     byte_off = BufferByteOffset(t, inst, w & 0xFFF, idxen, offen, vaddr,
                                 srsrc, soffset);
   }
+  const u32 n = typed ? op + 1 : GfxMubufLoadDwords(op);
+  BufferFormat f;
+  Id read_bytes = t.U32(n * 4);
+  if (format) {
+    if (typed) {
+      if (t.rdna_sources) {
+        const u8 fmt = Gfx10FormatPair((w >> 19) & 0x7F);
+        f = DecodeBufferFormat(t, t.U32(fmt & 0xF), t.U32(fmt >> 4));
+      } else {
+        f = DecodeBufferFormat(t, t.U32((w >> 19) & 0xF),
+                               t.U32((w >> 23) & 0x7));
+      }
+    } else {
+      f = DecodeBufferDescriptor(t, sc, t.Sg(srsrc + 3));
+    }
+    const Id components =
+        t.SelectB(f.dfmt_known, t.UMin(t.U32(n), f.ncomp), t.U32(n));
+    const Id within = t.SelectB(f.is32, t.U32(0), t.And(byte_off, t.U32(3)));
+    read_bytes = t.And(
+        t.Add(t.Add(within, t.Mul(f.bytes, components)), t.U32(3)), t.U32(~3u));
+  }
   const Id aligned = t.And(byte_off, t.U32(~3u));
-  const Id ptr = translate(add64(base_of(srsrc), to64(aligned)), 16);
+  const Id ptr = translate(add64(base_of(srsrc), to64(aligned)), read_bytes);
   const Id stride = t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF));
   const Id limit = t.m.Emit(
       spv::Op::OpIMul, wide,
@@ -1730,12 +1752,11 @@ bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
       t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {ptr, null64}),
       t.m.Emit(spv::Op::OpULessThan, t.t_bool, {to64(byte_off), limit}));
   const auto word_at = [&](Id dword_idx) {
-    return load(ptr, held,
-                t.Sub(t.Shl(dword_idx, t.U32(2)), aligned));
+    const Id offset = t.Sub(t.Shl(dword_idx, t.U32(2)), aligned);
+    return load(ptr, t.LAnd(held, t.Ult(offset, read_bytes)), offset);
   };
   const Id first = t.Shr(byte_off, t.U32(2));
   if (dwords) {
-    const u32 n = op == 0x0C ? 1 : op == 0x0D ? 2 : op == 0x0E ? 4 : 3;
     for (u32 i = 0; i < n; i++)
       t.SetVg(vdata + i, word_at(t.Add(first, t.U32(i))));
     return true;
@@ -1750,18 +1771,6 @@ bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
     t.SetVg(vdata, value);
     return true;
   }
-  BufferFormat f;
-  if (typed) {
-    if (t.rdna_sources) {
-      const u8 fmt = Gfx10FormatPair((w >> 19) & 0x7F);
-      f = DecodeBufferFormat(t, t.U32(fmt & 0xF), t.U32(fmt >> 4));
-    } else {
-      f = DecodeBufferFormat(t, t.U32((w >> 19) & 0xF), t.U32((w >> 23) & 0x7));
-    }
-  } else {
-    f = DecodeBufferDescriptor(t, sc, t.Sg(srsrc + 3));
-  }
-  const u32 n = (op & 3) + 1;
   for (u32 i = 0; i < n; i++)
     t.SetVg(vdata + i, FormattedComponentWith(t, f, word_at, byte_off, i));
   return true;
