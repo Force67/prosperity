@@ -43,6 +43,7 @@ rhi::TimestampPool* g_cs_timestamps = nullptr;
 base::HashMap<u64, CsGpuTime> g_cs_gpu_times;
 DELTA_OPTION(u32, kCsHeavyUs, "DELTA_GPU_CS_ISOLATE_HEAVY", 4000);
 base::HashSet<u64> g_cs_heavy;
+base::HashMap<u64, int> g_cs_heavy_sampled;
 base::HashMap<rhi::Buffer*, ComputeBufferAccess> g_cs_batch_access;
 
 CsBatch g_cs_batches[kCsBatchRing];
@@ -96,38 +97,34 @@ void CsBatchLogFault(const CsBatch& b, const char* what) {
 void CsBatchFinalize(CsBatch& b) {
   if (b.timestamps && !b.log.empty()) {
     base::Array<u64, 256> stamps{};
-    const u32 count = static_cast<u32>(b.log.size());
-    const bool any_traced =
-        base::AnyOf(b.log.begin(), b.log.end(),
-                    [](const BatchedDispatch& d) { return d.traced; });
-    const bool read =
-        (CsSyncReporting() || any_traced || kCsHeavyUs) &&
-        Device().ReadTimestamps(b.timestamps, 0, count * 2, stamps.data());
-    if (read && kCsHeavyUs) {
-      const rhi::Caps& caps = Device().caps();
-      const u64 mask = UINT64_MAX >> (64 - caps.timestamp_bits);
-      for (u32 i = 0; i < count; ++i) {
-        const double us = ((stamps[i * 2 + 1] - stamps[i * 2]) & mask) *
-                          caps.timestamp_period_ns / 1000.0;
-        if (us > kCsHeavyUs)
+    base::Array<bool, 128> valid{};
+    const u32 count = base::Min<u32>(static_cast<u32>(b.log.size()), 128);
+    for (u32 i = 0; i < count; ++i)
+      valid[i] =
+          b.log[i].stamped &&
+          Device().ReadTimestamps(b.timestamps, i * 2, 2, &stamps[i * 2]);
+    const rhi::Caps& caps = Device().caps();
+    const u64 mask = UINT64_MAX >> (64 - caps.timestamp_bits);
+    const auto elapsed_ns = [&](u32 i) {
+      return ((stamps[i * 2 + 1] - stamps[i * 2]) & mask) *
+             caps.timestamp_period_ns;
+    };
+    for (u32 i = 0; i < count; ++i) {
+      if (b.log[i].traced) {
+        timeline::Time(b.log[i].query, valid[i] ? stamps[i * 2] : 0);
+        timeline::Time(b.log[i].query + 1, valid[i] ? stamps[i * 2 + 1] : 0);
+      }
+      if (!valid[i])
+        continue;
+      if (kCsHeavyUs) {
+        if (elapsed_ns(i) > kCsHeavyUs * 1000.0)
           g_cs_heavy.insert(b.log[i].cs_addr);
         else
           g_cs_heavy.erase(b.log[i].cs_addr);
       }
-    }
-    for (u32 i = 0; i < count; ++i) {
-      if (!b.log[i].traced)
-        continue;
-      timeline::Time(b.log[i].query, read ? stamps[i * 2] : 0);
-      timeline::Time(b.log[i].query + 1, read ? stamps[i * 2 + 1] : 0);
-    }
-    if (read && CsSyncReporting()) {
-      const rhi::Caps& caps = Device().caps();
-      const u64 mask = UINT64_MAX >> (64 - caps.timestamp_bits);
-      for (u32 i = 0; i < count; ++i) {
+      if (CsSyncReporting()) {
         auto& time = g_cs_gpu_times[b.log[i].cs_addr];
-        time.ns += ((stamps[i * 2 + 1] - stamps[i * 2]) & mask) *
-                   caps.timestamp_period_ns;
+        time.ns += elapsed_ns(i);
         ++time.count;
       }
     }

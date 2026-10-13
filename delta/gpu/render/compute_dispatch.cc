@@ -1375,8 +1375,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                   (unsigned long long)ci.cs_addr);
     query = timeline::Begin(name);
   }
-  const bool stamp =
-      g_cs_timestamps && (CsSyncReporting() || traced || kCsHeavyUs);
+  bool sample = false;
+  if (kCsHeavyUs) {
+    int& last = g_cs_heavy_sampled[ci.cs_addr];
+    sample = last == 0 || last + 60 <= g_frame.num;
+    if (sample)
+      last = g_frame.num ? g_frame.num : 1;
+  }
+  const bool stamp = g_cs_timestamps && (CsSyncReporting() || traced || sample);
   if (stamp)
     g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2, true);
   DispatchCheckpoint(g_cs_list, ci.cs_addr, false);
@@ -1430,6 +1436,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         bd.res_write |= static_cast<u8>(1u << i);
     }
     bd.traced = traced;
+    bd.stamped = stamp;
     bd.query = query;
     g_cs_batch_log.push_back(bd);
   }

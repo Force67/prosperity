@@ -509,6 +509,7 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_cs_timestamps);
   guest::ResetResource(g_cs_gpu_times);
   guest::ResetResource(g_cs_heavy);
+  guest::ResetResource(g_cs_heavy_sampled);
   guest::ResetResource(g_cs_batch_access);
   guest::ResetResource(g_cs_batches);
   guest::ResetResource(g_cs_chunk_needs_batch);

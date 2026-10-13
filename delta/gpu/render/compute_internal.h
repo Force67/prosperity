@@ -490,6 +490,7 @@ struct BatchedDispatch {
   u8 res_img;
   u8 res_write;
   bool traced = false;
+  bool stamped = false;
   u16 query = 0;
 };
 
@@ -504,6 +505,7 @@ struct CsGpuTime {
 extern base::HashMap<u64, CsGpuTime> g_cs_gpu_times;
 extern base::Option<u32> kCsHeavyUs;
 extern base::HashSet<u64> g_cs_heavy;
+extern base::HashMap<u64, int> g_cs_heavy_sampled;
 extern base::HashMap<rhi::Buffer*, ComputeBufferAccess> g_cs_batch_access;
 
 struct CsBatch {
