@@ -26,24 +26,25 @@ extern "C" bool prosperity_ps5_is_display_buffer(u64) {
 namespace {
 struct GuestMemory {
   static constexpr u64 kBytes = gpu::render::kMirrorBlock;
-  u64 address;
+  u64 address, bytes;
   int fd = -1;
   void* memory = MAP_FAILED;
 
-  GuestMemory(u64 base, bool direct) : address(base) {
+  GuestMemory(u64 base, bool direct, u64 size = kBytes)
+      : address(base), bytes(size) {
     if (direct) {
       fd = memfd_create("delta_dmem_late", 0);
-      if (fd < 0 || ftruncate(fd, kBytes))
+      if (fd < 0 || ftruncate(fd, bytes))
         return;
     }
     memory =
-        mmap(reinterpret_cast<void*>(address), kBytes, PROT_READ | PROT_WRITE,
+        mmap(reinterpret_cast<void*>(address), bytes, PROT_READ | PROT_WRITE,
              MAP_FIXED_NOREPLACE |
                  (direct ? MAP_SHARED : MAP_PRIVATE | MAP_ANONYMOUS),
              fd, 0);
     if (memory != MAP_FAILED) {
-      host_memory::TrackMemoryMapping(memory, kBytes);
-      gpu::render::NoteGuestRemap(address, kBytes);
+      host_memory::TrackMemoryMapping(memory, bytes);
+      gpu::render::NoteGuestRemap(address, bytes);
     }
   }
 
@@ -54,10 +55,10 @@ struct GuestMemory {
         const u32 value = *static_cast<volatile const u32*>(memory);
         (void)value;
       }
-      gpu::GuestWriteTracker().Release(address, kBytes);
-      munmap(memory, kBytes);
-      host_memory::ForgetMemoryMapping(memory, kBytes);
-      gpu::render::NoteGuestRemap(address, kBytes);
+      gpu::GuestWriteTracker().Release(address, bytes);
+      munmap(memory, bytes);
+      host_memory::ForgetMemoryMapping(memory, bytes);
+      gpu::render::NoteGuestRemap(address, bytes);
     }
     if (fd >= 0)
       close(fd);
@@ -123,7 +124,7 @@ TEST(VkGuestDirect, AttachesLatePoolWithoutChangingShaderTable) {
   ASSERT_TRUE(program.ok);
   ASSERT_TRUE(program.direct_reads);
   ASSERT_TRUE(program.ps_cbufs.empty());
-  alignas(65536) static base::Array<u8, 65536> targets[11]{};
+  alignas(65536) static base::Array<u8, 65536> targets[32]{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
@@ -178,7 +179,8 @@ TEST(VkGuestDirect, AttachesLatePoolWithoutChangingShaderTable) {
     SCOPED_TRACE(trial);
     words[0] = trial == 1 ? 0 : 1;
     words[1] = trial == 2 ? 0 : 1;
-    words[2] = words[3] = 0;
+    words[2] = 0;
+    words[3] = 0;
     draw.rt_base = draw.mrt_base[0] =
         reinterpret_cast<u64>(targets[frame++].data());
     const u64 staged = gpu::render::cs::g_indirect_staged_n;
@@ -218,5 +220,67 @@ TEST(VkGuestDirect, AttachesLatePoolWithoutChangingShaderTable) {
   draw.recomp = &direct_shader;
   draw.ps_addr = reinterpret_cast<u64>(rdna_ps);
   ASSERT_NO_FATAL_FAILURE(read(host.address, 191));
+
+  const u64 high_addresses[] = {0x10000000000ull, 0x201400000000ull,
+                                0x201480000000ull, 0x201500000000ull};
+  for (u32 i = 0; i < base::ArraySize(high_addresses); ++i) {
+    SCOPED_TRACE(high_addresses[i]);
+    GuestMemory high(high_addresses[i], false);
+    ASSERT_NE(high.memory, MAP_FAILED);
+    *static_cast<float*>(high.memory) = i & 1 ? .75f : .25f;
+    draw.recomp = i & 1 ? &program : &direct_shader;
+    draw.ps_addr = reinterpret_cast<u64>(i & 1 ? ps : rdna_ps);
+    ASSERT_NO_FATAL_FAILURE(read(high.address, 0));
+    ASSERT_NO_FATAL_FAILURE(read(high.address, i & 1 ? 191 : 64));
+    *static_cast<float*>(high.memory) = .5f;
+    gpu::render::CollectGuestWrites();
+    ASSERT_NO_FATAL_FAILURE(read(high.address, 128));
+  }
+
+  GuestMemory partial(0x201600001000ull, false, 4096);
+  GuestMemory readonly(0x201600008000ull, false, 4096);
+  ASSERT_NE(partial.memory, MAP_FAILED);
+  ASSERT_NE(readonly.memory, MAP_FAILED);
+  *static_cast<float*>(partial.memory) = .25f;
+  *static_cast<float*>(readonly.memory) = .75f;
+  ASSERT_EQ(mprotect(readonly.memory, readonly.bytes, PROT_READ), 0);
+  gpu::render::NoteGuestRemap(readonly.address, readonly.bytes);
+  ASSERT_NO_FATAL_FAILURE(read(partial.address, 0));
+  ASSERT_NO_FATAL_FAILURE(read(partial.address, 64));
+  ASSERT_NO_FATAL_FAILURE(read(readonly.address, 191));
+  ASSERT_NO_FATAL_FAILURE(read(partial.address + 12288, 0));
+
+  gpu::rhi::BufferDesc desc;
+  desc.size = GuestMemory::kBytes;
+  desc.usage = gpu::rhi::kBufferStorage | gpu::rhi::kBufferAddress;
+  desc.memory = gpu::rhi::MemoryKind::kUploadDevice;
+  auto* redirected = gpu::render::Device().CreateBuffer(desc);
+  ASSERT_NE(redirected, nullptr);
+  ASSERT_NE(redirected->mapped(), nullptr);
+  ASSERT_NE(redirected->address(), 0u);
+  constexpr u64 last_block = 0xffffffff0000ull;
+  *reinterpret_cast<float*>(redirected->mapped() + desc.size - 4) = .25f;
+  gpu::render::DirectRedirect(last_block, redirected->address());
+  ASSERT_NO_FATAL_FAILURE(read(last_block + desc.size - 4, 64));
+  struct sigaction restore{};
+  restore.sa_handler = [](int) { gpu::render::DirectRestore(last_block); };
+  ASSERT_EQ(sigaction(SIGUSR1, &restore, nullptr), 0);
+  ASSERT_EQ(raise(SIGUSR1), 0);
+  ASSERT_NO_FATAL_FAILURE(read(last_block + desc.size - 4, 0));
+  gpu::render::Device().Destroy(redirected);
+
+  GuestMemory alias(0x201700000000ull, false);
+  ASSERT_NE(alias.memory, MAP_FAILED);
+  *static_cast<float*>(alias.memory) = .25f;
+  ASSERT_NO_FATAL_FAILURE(read(alias.address, 0));
+  ASSERT_NO_FATAL_FAILURE(read(alias.address, 64));
+  ASSERT_EQ(mmap(alias.memory, alias.bytes, PROT_READ | PROT_WRITE,
+                 MAP_SHARED | MAP_FIXED, pool.fd, 0),
+            alias.memory);
+  host_memory::TrackMemoryMapping(alias.memory, alias.bytes);
+  gpu::render::NoteGuestRemap(alias.address, alias.bytes);
+  gpu::render::SyncGuestDirect();
+  ASSERT_NO_FATAL_FAILURE(read(alias.address, 191));
+  EXPECT_EQ(gpu::gcn::g_direct_table, table);
 }
 }  // namespace

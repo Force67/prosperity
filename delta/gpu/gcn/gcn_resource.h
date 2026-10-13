@@ -202,14 +202,23 @@ extern void (*g_flush_guest_range)(u64 address, u64 bytes);
 extern u64 g_direct_table, g_direct_misses;
 
 constexpr u64 kDirectBase = 0;
-constexpr u64 kDirectSize = 0x10000000000ull;
+constexpr u64 kDirectSize = 0x1000000000000ull;
+constexpr u64 kDirectFlatSize = 0x10000000000ull;
 constexpr u32 kDirectBlockShift = 16;
 constexpr u32 kDirectPageShift = 12;
-// Aligned addresses leave low bits for page-table and unmapped entries.
+// Aligned addresses leave low bits for directory, page-table and unmapped
+// entries.
 constexpr u64 kDirectLeaf = 1;
 constexpr u64 kDirectUnmapped = 2;
+constexpr u64 kDirectDirectory = 4;
+constexpr u32 kDirectDirectoryShift = 32;
 constexpr u32 kDirectMissSlots = 63;
 constexpr u64 kDirectBlocks = kDirectSize >> kDirectBlockShift;
+constexpr u64 kDirectFlatBlocks = kDirectFlatSize >> kDirectBlockShift;
+constexpr u64 kDirectDirectoryEntries = kDirectSize >> kDirectDirectoryShift;
+constexpr u64 kDirectDirectoryBlocks =
+    1ull << (kDirectDirectoryShift - kDirectBlockShift);
+constexpr u64 kDirectTableEntries = kDirectFlatBlocks + kDirectDirectoryEntries;
 
 constexpr u64 GuestDirectIndex(u64 address) {
   if (address - kDirectBase < kDirectSize)

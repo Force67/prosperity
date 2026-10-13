@@ -8,12 +8,13 @@
 namespace gpu::ps5 {
 namespace {
 
-TEST(GuestDirectAddress, CoversGpuApertureWithoutAliasing) {
+TEST(GuestDirectAddress, CoversShaderAddressesWithoutAliasing) {
   using namespace gpu::render;
   EXPECT_EQ(GuestDirectIndex(kDirectBase), 0u);
   EXPECT_EQ(GuestDirectIndex(kDirectBase + kDirectSize - 1), kDirectBlocks - 1);
   for (u64 address : {0x20013ebd04ull, 0x4000000000ull, 0x80bc200000ull,
-                      0x9000000000ull, 0xc000000000ull, 0xffffffffffull})
+                      0x9000000000ull, 0xc000000000ull, 0xffffffffffull,
+                      0x10000000000ull, 0x201400000000ull, 0xffffffffffffull})
     EXPECT_EQ(GuestDirectIndex(address), address >> kDirectBlockShift);
   for (u64 address : {kDirectBase - 1, kDirectBase + kDirectSize, ~0ull})
     EXPECT_EQ(GuestDirectIndex(address), ~0ull);

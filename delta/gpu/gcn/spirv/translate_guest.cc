@@ -184,21 +184,55 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
   const Id rel = t.m.Emit(spv::Op::OpISub, wide, {args[0], constant(kBase)});
   const Id inside =
       t.m.Emit(spv::Op::OpULessThan, t.t_bool, {rel, constant(kDirectSize)});
-  const Id index = t.m.Emit(
+  const Id flat = t.m.Emit(spv::Op::OpULessThan, t.t_bool,
+                           {rel, constant(kDirectFlatSize)});
+  const Id root_index = t.m.Emit(
       spv::Op::OpSelect, wide,
-      {inside,
-       t.m.Emit(spv::Op::OpShiftRightLogical, wide, {rel, t.U32(kShift)}),
-       constant(0)});
+      {flat, t.m.Emit(spv::Op::OpShiftRightLogical, wide, {rel, t.U32(kShift)}),
+       t.m.Emit(spv::Op::OpIAdd, wide,
+                {constant(kDirectFlatBlocks),
+                 t.m.Emit(spv::Op::OpShiftRightLogical, wide,
+                          {rel, t.U32(kDirectDirectoryShift)})})});
+  const Id index =
+      t.m.Emit(spv::Op::OpSelect, wide, {inside, root_index, constant(0)});
   const Id u64_ptr =
       t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, wide);
   const Id slot = t.m.Emit(
       spv::Op::OpIAdd, wide,
       {constant(gpu::gcn::g_direct_table),
        t.m.Emit(spv::Op::OpShiftLeftLogical, wide, {index, t.U32(3)})});
-  const Id entry = t.m.Emit(
-      spv::Op::OpLoad, wide,
-      {t.m.Emit(spv::Op::OpConvertUToPtr, u64_ptr, {slot}),
-       static_cast<u32>(spv::MemoryAccessMask::Aligned), 8});
+  const Id root =
+      t.m.Emit(spv::Op::OpLoad, wide,
+               {t.m.Emit(spv::Op::OpConvertUToPtr, u64_ptr, {slot}),
+                static_cast<u32>(spv::MemoryAccessMask::Aligned), 8});
+  const Id directory = t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
+                                {t.m.Emit(spv::Op::OpBitwiseAnd, wide,
+                                          {root, constant(kDirectDirectory)}),
+                                 constant(0)});
+  const Id high = t.m.NewBlock(), low = t.m.NewBlock(),
+           resolved = t.m.NewBlock();
+  t.m.SelectionMerge(resolved);
+  t.m.BranchConditional(directory, high, low);
+  t.m.OpenBlock(high);
+  const Id inner = t.m.Emit(
+      spv::Op::OpBitwiseAnd, wide,
+      {t.m.Emit(spv::Op::OpShiftRightLogical, wide, {rel, t.U32(kShift)}),
+       constant(kDirectDirectoryBlocks - 1)});
+  const Id high_slot = t.m.Emit(
+      spv::Op::OpIAdd, wide,
+      {t.m.Emit(spv::Op::OpBitwiseAnd, wide,
+                {root, constant(~kDirectDirectory)}),
+       t.m.Emit(spv::Op::OpShiftLeftLogical, wide, {inner, t.U32(3)})});
+  const Id high_entry =
+      t.m.Emit(spv::Op::OpLoad, wide,
+               {t.m.Emit(spv::Op::OpConvertUToPtr, u64_ptr, {high_slot}),
+                static_cast<u32>(spv::MemoryAccessMask::Aligned), 8});
+  t.m.Branch(resolved);
+  t.m.OpenBlock(low);
+  t.m.Branch(resolved);
+  t.m.OpenBlock(resolved);
+  const Id entry =
+      t.m.Emit(spv::Op::OpPhi, wide, {high_entry, high, root, low});
   const Id held =
       t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {entry, constant(0)});
   const Id reading = t.IsZero(args[2]);

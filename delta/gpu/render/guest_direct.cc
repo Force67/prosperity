@@ -29,6 +29,10 @@ namespace {
 DELTA_OPTION(bool, kDirect, "DELTA_GPU_DIRECT", true);
 
 constexpr u64 kBlocks = kDirectBlocks;
+constexpr u64 kFlatBlocks = gcn::kDirectFlatBlocks;
+constexpr u64 kDirectoryBlocks = gcn::kDirectDirectoryBlocks;
+constexpr u64 kDirectoryEntries = gcn::kDirectDirectoryEntries;
+constexpr u64 kTableBytes = gcn::kDirectTableEntries * sizeof(u64);
 constexpr u64 kChunk = 2ull << 20;
 
 struct Mapping {
@@ -87,6 +91,17 @@ base::HashSet<u64> g_filled;                // blocks with a table entry
 // Redirected blocks: the host entry they go back to, and whether they are.
 u64* g_saved = nullptr;
 base::Atomic<u8>* g_redirected = nullptr;
+struct HighTable {
+  u64* entries;
+  u64* saved;
+  base::Atomic<u8>* redirected;
+};
+base::Atomic<HighTable*> g_high[kDirectoryEntries]{};
+struct Block {
+  u64* entry = nullptr;
+  u64* saved = nullptr;
+  base::Atomic<u8>* redirected = nullptr;
+};
 u32 g_syncs = 0;
 int g_init_state = -1;
 
@@ -209,6 +224,45 @@ rhi::Buffer* ChunkAt(u64 offset) {
 
 u64* Table() {
   return reinterpret_cast<u64*>(g_table->mapped());
+}
+
+Block BlockAt(u64 index, bool create = false) {
+  if (index < kFlatBlocks)
+    return {Table() + index, g_saved + index, g_redirected + index};
+  const u64 directory = index / kDirectoryBlocks;
+  auto* high = g_high[directory].load(base::memory_order_acquire);
+  if (!high && create) {
+    rhi::BufferDesc desc;
+    desc.size = kDirectoryBlocks * sizeof(u64);
+    desc.usage = rhi::kBufferStorage | rhi::kBufferAddress;
+    desc.memory = rhi::MemoryKind::kUploadDevice;
+    desc.name = "guest high address table";
+    auto* buffer = Device().CreateBuffer(desc);
+    if (!buffer || !buffer->mapped() || !buffer->address()) {
+      if (buffer)
+        Device().Destroy(buffer);
+      return {};
+    }
+    void* saved = mmap(nullptr, kDirectoryBlocks * 9, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (saved == MAP_FAILED) {
+      Device().Destroy(buffer);
+      return {};
+    }
+    std::memset(buffer->mapped(), 0, desc.size);
+    high = new HighTable{
+        reinterpret_cast<u64*>(buffer->mapped()), static_cast<u64*>(saved),
+        reinterpret_cast<base::Atomic<u8>*>(static_cast<u8*>(saved) +
+                                            kDirectoryBlocks * sizeof(u64))};
+    g_high[directory].store(high, base::memory_order_release);
+    __atomic_store_n(&Table()[kFlatBlocks + directory],
+                     buffer->address() | gcn::kDirectDirectory,
+                     __ATOMIC_RELEASE);
+  }
+  if (!high)
+    return {};
+  const u64 inner = index % kDirectoryBlocks;
+  return {high->entries + inner, high->saved + inner, high->redirected + inner};
 }
 
 void Retire(rhi::Buffer* buffer, u32 slot = ~0u) {
@@ -448,9 +502,12 @@ void Fill(u64 address) {
     const u64 index = GuestDirectIndex(block);
     if (index >= kBlocks)
       break;
+    const Block target = BlockAt(index, true);
+    if (!target.entry)
+      continue;
     const u64 entry = EntryFor(block);
-    if (g_redirected[index].load(base::memory_order_acquire)) {
-      g_saved[index] = entry;
+    if (target.redirected->load(base::memory_order_acquire)) {
+      *target.saved = entry;
     } else {
       const Mapping* host = FindMappingIn(g_host_maps, block);
       const bool cacheable =
@@ -461,7 +518,7 @@ void Fill(u64 address) {
       if (cached)
         DirectRedirect(block, cached);
       else
-        Table()[index] = entry;
+        *target.entry = entry;
     }
     g_filled.insert(block);
   }
@@ -480,7 +537,7 @@ bool InitGuestDirect() {
     return false;
   AttachDirectAlias();
   rhi::BufferDesc desc;
-  desc.size = kBlocks * 8;
+  desc.size = kTableBytes;
   desc.usage = rhi::kBufferStorage | rhi::kBufferAddress;
   desc.memory = rhi::MemoryKind::kUploadDevice;
   desc.name = "guest direct table";
@@ -492,14 +549,14 @@ bool InitGuestDirect() {
   if (!g_table || !g_misses || !g_table->mapped() || !g_misses->mapped() ||
       !g_table->address() || !g_misses->address())
     return false;
-  std::memset(g_table->mapped(), 0, kBlocks * 8);
-  void* saved = mmap(nullptr, kBlocks * 9, PROT_READ | PROT_WRITE,
+  std::memset(g_table->mapped(), 0, kTableBytes);
+  void* saved = mmap(nullptr, kFlatBlocks * 9, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (saved == MAP_FAILED)
     return false;
   g_saved = static_cast<u64*>(saved);
-  g_redirected =
-      reinterpret_cast<base::Atomic<u8>*>(static_cast<u8*>(saved) + kBlocks * 8);
+  g_redirected = reinterpret_cast<base::Atomic<u8>*>(static_cast<u8*>(saved) +
+                                                     kFlatBlocks * 8);
   std::memset(g_misses->mapped(), 0, 8 + kDirectMissSlots * 8);
   ReadMaps();
   gcn::g_direct_table = g_table->address();
@@ -526,22 +583,27 @@ void DirectRedirect(u64 block, u64 device_address) {
   const u64 index = GuestDirectIndex(block);
   if (!gcn::g_direct_table || index == ~0ull)
     return;
-  if (!g_redirected[index].load(base::memory_order_acquire)) {
+  const Block target = BlockAt(index, true);
+  if (!target.entry)
+    return;
+  if (!target.redirected->load(base::memory_order_acquire)) {
     ReadMaps();
-    g_saved[index] = EntryFor(block);
+    *target.saved = EntryFor(block);
     g_filled.insert(block);
   }
-  __atomic_store_n(&Table()[index], device_address, __ATOMIC_RELEASE);
-  g_redirected[index].store(1, base::memory_order_release);
+  __atomic_store_n(target.entry, device_address, __ATOMIC_RELEASE);
+  target.redirected->store(1, base::memory_order_release);
 }
 
 void DirectRestore(u64 block) {
   const u64 index = GuestDirectIndex(block);
   if (!gcn::g_direct_table || index == ~0ull)
     return;
-  if (!g_redirected[index].exchange(0, base::memory_order_acq_rel))
+  const Block target = BlockAt(index);
+  if (!target.entry ||
+      !target.redirected->exchange(0, base::memory_order_acq_rel))
     return;
-  __atomic_store_n(&Table()[index], g_saved[index], __ATOMIC_RELEASE);
+  __atomic_store_n(target.entry, *target.saved, __ATOMIC_RELEASE);
 }
 
 rhi::Buffer* DirectImportAt(u64 address, u64* offset, u64* bytes) {
@@ -634,10 +696,13 @@ void SyncGuestDirect() {
     g_maps_changed = false;
     for (u64 block : g_filled) {
       const u64 index = GuestDirectIndex(block);
-      if (g_redirected[index].load(base::memory_order_acquire))
-        g_saved[index] = EntryFor(block);
+      const Block target = BlockAt(index);
+      if (!target.entry)
+        continue;
+      if (target.redirected->load(base::memory_order_acquire))
+        *target.saved = EntryFor(block);
       else
-        Table()[index] = EntryFor(block);
+        *target.entry = EntryFor(block);
     }
   }
   ReapImports();
@@ -658,7 +723,13 @@ const guest::SessionReset g_session_reset([] {
   if (g_alias)
     munmap(g_alias, g_alias_size);
   if (g_saved)
-    munmap(g_saved, kBlocks * 9);
+    munmap(g_saved, kFlatBlocks * 9);
+  for (auto& entry : g_high) {
+    if (auto* high = entry.exchange(nullptr, base::memory_order_acq_rel)) {
+      munmap(high->saved, kDirectoryBlocks * 9);
+      delete high;
+    }
+  }
   g_init_state = -1;
   g_maps_read_at = ~0ull;
   g_maps_changed = false;
