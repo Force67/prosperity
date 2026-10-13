@@ -181,20 +181,9 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
       wide, t.m.TypeFunction(wide, {wide, t.t_u, t.t_u}), {wide, t.t_u, t.t_u},
       &args, spv::FunctionControlMask::DontInline);
   t.m.Name(sc.cs_guest_translate, "translate_direct_address");
-  const Id ps4_rel =
-      t.m.Emit(spv::Op::OpISub, wide, {args[0], constant(kBase)});
-  const Id ps5_rel =
-      t.m.Emit(spv::Op::OpISub, wide, {args[0], constant(kDirectPs5Base)});
-  const Id ps4_inside = t.m.Emit(spv::Op::OpULessThan, t.t_bool,
-                                 {ps4_rel, constant(kDirectLowSize)});
-  const Id ps5_inside = t.m.Emit(spv::Op::OpULessThan, t.t_bool,
-                                 {ps5_rel, constant(kDirectSize)});
+  const Id rel = t.m.Emit(spv::Op::OpISub, wide, {args[0], constant(kBase)});
   const Id inside =
-      t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {ps4_inside, ps5_inside});
-  const Id rel = t.m.Emit(
-      spv::Op::OpSelect, wide,
-      {ps4_inside, ps4_rel,
-       t.m.Emit(spv::Op::OpIAdd, wide, {ps5_rel, constant(kDirectLowSize)})});
+      t.m.Emit(spv::Op::OpULessThan, t.t_bool, {rel, constant(kDirectSize)});
   const Id index = t.m.Emit(
       spv::Op::OpSelect, wide,
       {inside,

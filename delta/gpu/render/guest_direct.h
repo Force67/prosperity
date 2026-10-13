@@ -12,9 +12,7 @@ using gcn::GuestDirectIndex;
 using gcn::kDirectBase;
 using gcn::kDirectBlocks;
 using gcn::kDirectBlockShift;
-using gcn::kDirectLowSize;
 using gcn::kDirectMissSlots;
-using gcn::kDirectPs5Base;
 using gcn::kDirectSize;
 
 // Sets up the table and publishes it to the recompiler; false when the

@@ -249,7 +249,8 @@ OwnBlock& OwnAt(u64 block) {
 }
 
 bool MirrorOwned(u64 block) {
-  return g_own && OwnAt(block).state.load(base::memory_order_acquire) != 0;
+  return g_own && InMirror(block) &&
+         OwnAt(block).state.load(base::memory_order_acquire) != 0;
 }
 
 bool InMirror(u64 address) {
