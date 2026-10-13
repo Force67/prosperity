@@ -666,6 +666,7 @@ bool MirrorCopyInGuest(u64 base, u64 bytes);
 bool GpuWriteBack(u64 base, CsRange& e, bool* kept);
 void MirrorFrameRead();
 bool MirrorOwned(u64 block);
+bool MirrorOwnable(u64 base, u64 bytes);
 bool MirrorOwnsAny(u64 first, u64 end);
 bool MirrorFillable(u64 base, u64 bytes);
 bool GuestImportable(u64 base, u64 bytes);

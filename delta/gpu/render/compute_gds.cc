@@ -88,12 +88,20 @@ rhi::Buffer* ImportGuestPage(u64 page) {
 
 bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes) {
   const u64 page = dst & ~(kGuestPageImport - 1);
-  if (!g_labels_deferrable || g_cs_failed || ((offset | bytes | dst) & 3u) ||
-      !bytes || offset > GdsBuffer::kBytes ||
+  const bool owned = MirrorCovers(dst, bytes) && MirrorOwnable(dst, bytes);
+  if ((!g_labels_deferrable && !owned) || g_cs_failed ||
+      ((offset | bytes | dst) & 3u) || !bytes || offset > GdsBuffer::kBytes ||
       bytes > GdsBuffer::kBytes - offset ||
       dst + bytes > page + kGuestPageImport || !EnsureGdsBuffer() ||
       CsRangeDirtyOverlapping(dst, bytes))
     return false;
+  if (!g_labels_deferrable) {
+    if (!GpuWriteGuest(dst, bytes, g_gds.buf, offset) || !CsBatchSubmit())
+      return false;
+    InvalidateTexRange(dst, bytes);
+    g_gds_imported_n++;
+    return true;
+  }
   if (MirrorOwnsAny(dst, dst + bytes)) {
     if (!GpuWriteGuest(dst, bytes, g_gds.buf, offset))
       return false;
