@@ -170,6 +170,7 @@ struct RenderRegion {
   u64 busiest_rt = 0;
   u32 busiest_rt_draws = 0;
   bool open = false;
+  bool reads_synced = false;
   bool depth_read_only = false;
   u64 write_through = 0;
   u32 write_through_tile = 0;

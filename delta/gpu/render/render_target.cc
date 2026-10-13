@@ -1058,7 +1058,7 @@ void NoteCmaskBind(RTarget& rt) {
     return;
   }
   render::FlushCsWritesRange(render::DefaultRenderer(), rt.dcc_base, 4,
-                             "cmask");
+                             "cmask-bind");
   auto* cmask = reinterpret_cast<u32*>(rt.dcc_base);
   if (*cmask & 0xF)
     return;
@@ -1073,7 +1073,7 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
   u32 code = rt.dcc_clear_code;
   if (!rt.dcc_code_known) {
     render::FlushCsWritesRange(render::DefaultRenderer(), rt.dcc_base, 4,
-                               "cmask");
+                               "cmask-resolve");
     if (!gpu::IsReadableRangeCached(rt.dcc_base, 4))
       return;
     std::memcpy(&code, reinterpret_cast<const void*>(rt.dcc_base), 4);
@@ -1103,6 +1103,7 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
 }
 
 void EndRegion() {
+  g_region.reads_synced = false;
   if (!g_region.open)
     return;
   PassProfEnd();

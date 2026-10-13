@@ -382,6 +382,8 @@ void DeferLabelsToGpu() {
 }
 
 bool WaitPendingGuestWrites(u64 base, u64 bytes) {
+  if (GuestPages().PendingWriteClear(base, base + bytes))
+    return true;
   u64 wait = 0;
   for (const PendingGuestWrite& w : g_pending_guest_writes)
     if (w.base < base + bytes && base < w.end)

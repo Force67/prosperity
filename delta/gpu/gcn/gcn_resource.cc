@@ -1516,6 +1516,8 @@ void TrackVertexBuffers(base::Vector<VBuffer>& result,
     if (so.in_sgpr)
       continue;
     const u32 byte_off = so.dwords * 4;
+    if (!IsReadableRangeCached(table + byte_off, 16))
+      continue;
     const VBuffer v =
         DecodeVBuffer(reinterpret_cast<const u32*>(table + byte_off));
     if (v.base >= kGuestLo && v.base < kGuestHi && v.stride &&

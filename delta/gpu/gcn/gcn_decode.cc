@@ -426,7 +426,8 @@ base::SharedPointer<const Program> CachedProgram(u64 addr, u32 max_dwords) {
     return base::MakeShared<const Program>();
   const IsaMode mode = DefaultIsaMode();
 
-  auto it = cache.find(addr);
+  const u64 key = addr ^ (static_cast<u64>(max_dwords) << 48);
+  auto it = cache.find(key);
   if (it != cache.end() && it->second.generation == g_prog_cache_generation &&
       it->second.mode == mode)
     return it->second.program;
@@ -441,7 +442,9 @@ base::SharedPointer<const Program> CachedProgram(u64 addr, u32 max_dwords) {
     return it->second.program;
   }
 
-  if (cache.size() > 4096) {
+  static u64 swept = 0;
+  if (cache.size() > 4096 && swept != g_prog_cache_generation) {
+    swept = g_prog_cache_generation;
     base::EraseIf(cache, [](const auto& kv) {
       return kv.second.generation + 60 < g_prog_cache_generation;
     });
@@ -450,7 +453,7 @@ base::SharedPointer<const Program> CachedProgram(u64 addr, u32 max_dwords) {
   }
   auto program =
       base::MakeShared<const Program>(DecodeShader(code, max_dwords, mode));
-  cache[addr] = {hash, hashed, g_prog_cache_generation, mode, program};
+  cache[key] = {hash, hashed, g_prog_cache_generation, mode, program};
   return program;
 }
 

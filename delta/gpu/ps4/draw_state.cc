@@ -769,11 +769,11 @@ RecompStatus ResolveRecompiledShaders(
     if (a.direct_fetch) {
       vb = direct_vbs[i];
     } else {
-      const u64 table = UserDataPointer(vud, a.table_sgpr);
-      if (!IsGuestAddress(table))
+      const u64 table =
+          UserDataPointer(vud, a.table_sgpr) + a.vbuf_dword_off * 4;
+      if (!IsGuestAddress(table) || !gpu::IsReadableRangeCached(table, 16))
         return RecompStatus::kBadAttrs;
-      vb = gcn::DecodeVBuffer(
-          reinterpret_cast<const u32*>(table + a.vbuf_dword_off * 4));
+      vb = gcn::DecodeVBuffer(reinterpret_cast<const u32*>(table));
     }
     if (!IsGuestAddress(vb.base))
       return RecompStatus::kBadAttrs;

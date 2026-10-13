@@ -1436,13 +1436,17 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         return Decline(kNoRecomp);
     }
   }
-  if (ib_bind.buffer || raw_barrier || cb_barrier ||
-      base::AnyOf(vb_bind, vb_bind + nbind,
-                  [](const CachedBuffer& b) { return b.buffer != nullptr; })) {
+  bool reads_synced = false;
+  if ((ib_bind.buffer || raw_barrier || cb_barrier ||
+       base::AnyOf(
+           vb_bind, vb_bind + nbind,
+           [](const CachedBuffer& b) { return b.buffer != nullptr; })) &&
+      !(g_region.open && g_region.reads_synced)) {
     EndRegion();
     g_frame.list->Barrier(rhi::kAccessAllWrite,
                           rhi::kAccessVertexRead | rhi::kAccessIndexRead |
                               rhi::kAccessUniformRead | rhi::kAccessShaderRead);
+    reads_synced = true;
   }
   rhi::Buffer* indirect_buf = nullptr;
   u64 indirect_off = 0;
@@ -1707,6 +1711,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                      d.rt_layers, d.mrt_meta_cmask))
       return true;
   }
+  if (reads_synced)
+    g_region.reads_synced = g_region.open;
   if (rp->multi_tex) {
     if (!tex_set) {
       rhi::Format multi_formats[kMaxTex] = {};

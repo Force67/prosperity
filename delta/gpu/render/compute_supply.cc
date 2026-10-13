@@ -10,6 +10,7 @@
 #include "base/math/value_bounds.h"
 #include "base/strings/format.h"
 #include "gpu/gcn/gcn_resource.h"
+#include "gpu/guest_page_table.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/guest_format.h"
 #include "gpu/render/hash.h"
@@ -434,6 +435,8 @@ CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base) {
 namespace gpu::render {
 
 u64 PendingGuestWriteBatch(u64 base, u64 bytes) {
+  if (GuestPages().PendingWriteClear(base, base + bytes))
+    return 0;
   u64 batch = 0;
   for (const PendingGuestWrite& w : g_pending_guest_writes)
     if (w.base < base + bytes && base < w.end)
@@ -610,6 +613,8 @@ bool MirrorHoldsNewest(u64 base, u64 bytes) {
   }
   if (owned)
     return true;
+  if (GuestPages().PendingWriteClear(base, base + bytes))
+    return false;
   for (const PendingGuestWrite& w : g_pending_guest_writes)
     if (w.base < base + bytes && base < w.end)
       return true;
@@ -1087,8 +1092,9 @@ bool CsClearPredicate(u64 address,
   u64 range_base;
   CsRange* const e = BufferSource(address, expand, &range_base);
   bool pending = false;
-  for (const PendingGuestWrite& w : g_pending_guest_writes)
-    pending |= w.base < address + 4 && address < w.end;
+  if (!GuestPages().PendingWriteClear(address, address + 4))
+    for (const PendingGuestWrite& w : g_pending_guest_writes)
+      pending |= w.base < address + 4 && address < w.end;
   if (!e && !(pending && MirrorWritten(address, 4) &&
               MirrorFillable(address, expand)))
     return false;
@@ -1102,11 +1108,10 @@ bool CsClearPredicate(u64 address,
   const u64 block = address & ~(kMirrorBlock - 1);
   const auto revision = [&]() -> Revision {
     if (e)
-      return e->staged_stamp ? Revision{e->staged_stamp, e->write_seq}
-                             : Revision{};
-    return {0, MirrorOwned(block) ? MirrorRevision(address, 4) : 0};
+      return Revision{e->staged_stamp, e->write_seq};
+    return {0, MirrorRevision(address, 4)};
   };
-  if (mark && revision().seq) {
+  if (mark && (revision().seq || revision().stamp)) {
     const auto it = expanded.find(address);
     if (it != expanded.end() && it->second == revision()) {
       *predicate = nullptr;
@@ -1181,8 +1186,7 @@ bool CsClearPredicate(u64 address,
     e->chunk_ref = g_frame.chunk_seq;
     if (e->pending_batch)
       g_cs_chunk_needs_batch = true;
-    if (revision().seq)
-      expanded[address] = revision();
+    expanded[address] = revision();
   } else {
     MirrorFill(address, expand, ~0u);
     if (revision().seq)
