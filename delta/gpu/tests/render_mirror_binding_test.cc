@@ -168,7 +168,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       gpu::gcn::spirv::Finalize(module.Assemble(), &geometry.vs_spirv, &error))
       << error.c_str();
   ASSERT_TRUE(gpu::render::InitGuestDirect());
-  alignas(65536) static base::Array<u8, 65536> targets[32]{};
+  alignas(65536) static base::Array<u8, 65536> targets[34]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
   imported.recomp = &constants;
@@ -968,29 +968,57 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   ASSERT_TRUE(direct_vertices.direct_vs);
   ASSERT_TRUE(direct_vertices.direct_reads);
   ASSERT_TRUE(direct_vertices.vs_cbufs.empty());
-  ci.res[0].base = direct_base;
+  const u32 descriptor_ps[4096] = {
+      0xf4080100, 0xfa000000, 0x7e000280, 0xe0301000, 0x80010000, 0x7e020280,
+      0x7e040280, 0x7e0602f2, 0xf800080f, 0x03020100, 0xbf810000};
+  const auto direct_descriptors = gpu::rdna::Recompile(
+      vs, descriptor_ps, user_data, user_data, 0, false, 8, 8);
+  ASSERT_TRUE(direct_descriptors.ok);
+  ASSERT_TRUE(direct_descriptors.direct_reads);
+  ASSERT_TRUE(direct_descriptors.ps_cbufs.empty());
+  ASSERT_TRUE(direct_descriptors.ps_bufs.empty());
+  gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+  const auto descriptor_compute =
+      gpu::gcn::RecompileCompute(cs, 1, 1, 1, 5, 0, 0);
+  gpu::gcn::SetDefaultIsaMode(previous_isa);
+  ASSERT_TRUE(descriptor_compute.ok);
+  const u64 descriptor_base = direct_base + gpu::render::kMirrorBlock;
   ci.res[0].size = ci.res[0].guest_size = gpu::render::kMirrorBlock;
-  ci.user_data[0] = u32(direct_base);
-  ci.user_data[1] = u32(direct_base >> 32) | (4u << 16);
   ci.user_data[2] = gpu::render::kMirrorBlock / 4;
-  for (u32 mode = 0; mode < 6; ++mode) {
+  for (u32 mode = 0; mode < 8; ++mode) {
     SCOPED_TRACE(mode);
-    const bool vertex = mode >= 4;
+    const bool vertex = mode == 4 || mode == 5;
+    const bool descriptor = mode >= 6;
     gpu::render::cs::g_cs_in_frame = (mode & 1) != 0;
     gpu::render::BeginFrame(renderer);
-    direct_draw.recomp = vertex ? &direct_vertices : &direct_program;
+    direct_draw.recomp = descriptor ? &direct_descriptors
+                         : vertex   ? &direct_vertices
+                                    : &direct_program;
+    const u64 source = descriptor ? descriptor_base : direct_base;
+    ci.recomp = descriptor ? &descriptor_compute : &compute;
+    ci.res[0].base = source;
+    ci.user_data[0] = u32(source);
+    ci.user_data[1] = u32(source >> 32) | (4u << 16);
     std::memcpy(direct_draw.vs_user_data, ci.user_data, sizeof(ci.user_data));
-    direct_draw.ps_user_data[0] = u32(direct_base);
-    direct_draw.ps_user_data[1] = u32(direct_base >> 32);
+    direct_draw.ps_user_data[0] = u32(source);
+    direct_draw.ps_user_data[1] = u32(source >> 32);
     direct_draw.rt_base = direct_draw.mrt_base[0] =
         reinterpret_cast<u64>(targets[26 + mode].data());
     direct_draw.viewport_x_offset = 4.5f;
     direct_draw.viewport_x_scale = vertex ? 4 : 8;
+    if (descriptor) {
+      ASSERT_TRUE(gpu::render::GpuFill(direct_base, 4, 0x3e800000, 0x3e800000));
+      ASSERT_TRUE(
+          gpu::render::GpuFill(direct_base + 4, 4, 0x3f400000, 0x3f400000));
+      ASSERT_TRUE(gpu::render::GpuFill(descriptor_base, 8, u32(direct_base),
+                                       u32(direct_base >> 32) | (4u << 16)));
+      ASSERT_TRUE(gpu::render::GpuFill(descriptor_base + 8, 8, 64, 0));
+    }
     if (mode < 2) {
       ASSERT_TRUE(gpu::render::GpuFill(direct_base, gpu::render::kMirrorBlock,
                                        0x3e800000, 0x3e800000));
     } else {
-      ci.user_data[4] = 0x3e800000;
+      ci.user_data[4] = descriptor ? u32(direct_base) : 0x3e800000;
       ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
     }
     const u64 resolves = gpu::render::cs::g_mirror_resolves.load();
@@ -1000,7 +1028,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       ASSERT_TRUE(gpu::render::GpuFill(direct_base, gpu::render::kMirrorBlock,
                                        0x3f400000, 0x3f400000));
     } else {
-      ci.user_data[4] = 0x3f400000;
+      ci.user_data[4] = descriptor ? u32(direct_base + 4) : 0x3f400000;
       ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
     }
     direct_draw.viewport_x_offset = 12.5f;
