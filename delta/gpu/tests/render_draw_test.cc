@@ -1349,6 +1349,7 @@ TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {
       gpu::rhi::TextureBarrier init{image, gpu::rhi::TextureState::kUndefined,
                                     gpu::rhi::TextureState::kCopyDst};
       init.range.mips = mips;
+      init.range.layers = layers;
       gpu::render::g_frame.list->Barrier(gpu::rhi::kAccessHostWrite,
                                          gpu::rhi::kAccessCopyRead, &init, 1);
       gpu::rhi::BufferTextureCopy copies[2]{};
@@ -1421,6 +1422,7 @@ TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {
     gpu::rhi::TextureBarrier barrier{image, gpu::rhi::TextureState::kShaderRead,
                                      gpu::rhi::TextureState::kCopySrc};
     barrier.range.mips = mips;
+    barrier.range.layers = layers;
     gpu::render::g_frame.list->Barrier(0, 0, &barrier, 1);
     gpu::rhi::BufferTextureCopy copies[3]{};
     for (u32 mip = 0, offset = 0; mip < mips; ++mip) {
@@ -3639,9 +3641,9 @@ TEST(VkDraw, SingleLayerArraySamplesRenderedImage) {
   const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
                         0xbf810000};
   const u32 shaders[2][4096] = {
-      {0x7e0002f0, 0x7e0202f0, 0x7e040280, 0xf09c4f00, 0x00400400, 0xf800080f,
+      {0x7e0002f0, 0x7e0202f0, 0x7e040280, 0xf09c0f28, 0x00400400, 0xf800080f,
        0x07060504, 0xbf810000},
-      {0x7e0002f0, 0x7e0202f0, 0x7e040280, 0xf09c4f00, 0x00400400, 0xf09c4f00,
+      {0x7e0002f0, 0x7e0202f0, 0x7e040280, 0xf09c0f28, 0x00400400, 0xf09c0f28,
        0x00420900, 0xf800080f, 0x07060504, 0xbf810000}};
   const u64 address = reinterpret_cast<u64>(source.data());
   u32 user_data[32]{};
