@@ -384,7 +384,8 @@ bool OrderMirrorAfterFrameRead() {
     return false;
   g_cs_list->Barrier(rhi::kAccessVertexRead | rhi::kAccessIndexRead |
                          rhi::kAccessShaderRead | rhi::kAccessUniformRead |
-                         rhi::kAccessCopyRead | rhi::kAccessComputeRead,
+                         rhi::kAccessCopyRead | rhi::kAccessComputeRead |
+                         rhi::kAccessIndirectRead,
                      kAccessComputeRW | kAccessCopyRW);
   g_mirror_draw.frame = -1;
   return true;
@@ -804,6 +805,7 @@ bool CanDrawIndirect(u32 prim_type, bool indexed) {
 }
 
 rhi::Buffer* IndirectArgsBuffer(u64 args, u64* offset) {
+  MirrorFrameRead();
   *offset = MirrorOffset(args);
   return g_mirror;
 }

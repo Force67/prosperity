@@ -158,7 +158,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       gpu::gcn::spirv::Finalize(module.Assemble(), &geometry.vs_spirv, &error))
       << error.c_str();
   ASSERT_TRUE(gpu::render::InitGuestDirect());
-  alignas(65536) static base::Array<u8, 65536> targets[24]{};
+  alignas(65536) static base::Array<u8, 65536> targets[25]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
   imported.recomp = &constants;
@@ -847,6 +847,48 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   }
   gpu::render::Device().Destroy(conversion_readback);
   gpu::render::Device().WaitIdle();
+  const u32 literal_ps[4096] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100,
+                                0xbf810000};
+  const auto indirect_program =
+      gpu::rdna::Recompile(vs, literal_ps, user_data, user_data);
+  ASSERT_TRUE(indirect_program.ok);
+  ASSERT_TRUE(indirect_program.vs_bufs.empty());
+  ASSERT_TRUE(indirect_program.ps_bufs.empty());
+  auto* draw_arguments = reinterpret_cast<u32*>(base + (7ull << 20) +
+                                                2 * gpu::render::kMirrorBlock);
+  draw_arguments[0] = 0;
+  draw_arguments[1] = 1;
+  draw_arguments[2] = draw_arguments[3] = 0;
+  gpu::render::CollectGuestWrites();
+  gpu::render::cs::g_cs_in_frame = false;
+  gpu::render::BeginFrame(renderer);
+  const u64 argument_address = reinterpret_cast<u64>(draw_arguments);
+  ASSERT_TRUE(gpu::render::GpuFill(argument_address, 4, 1, 1));
+  gpu::render::DrawInfo indirect_draw = imported;
+  indirect_draw.recomp = &indirect_program;
+  indirect_draw.cbufs[0] = {};
+  indirect_draw.num_cbufs = 0;
+  indirect_draw.indirect_args = argument_address;
+  indirect_draw.rt_base = indirect_draw.mrt_base[0] =
+      reinterpret_cast<u64>(targets[24].data());
+  indirect_draw.viewport_x_offset = 4.5f;
+  indirect_draw.viewport_y_offset = 8.5f;
+  const u64 argument_resolves = gpu::render::cs::g_mirror_resolves.load();
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, indirect_draw));
+  const u64 argument_chunk = gpu::render::g_frame.chunk_seq;
+  ASSERT_TRUE(gpu::render::GpuFill(argument_address, 4, 0, 0));
+  EXPECT_GT(gpu::render::g_frame.chunk_seq, argument_chunk);
+  indirect_draw.viewport_x_offset = 12.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, indirect_draw));
+  EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), argument_resolves);
+  const auto& argument_slot =
+      gpu::render::g_frame.slots[gpu::render::g_frame.slot_idx];
+  gpu::render::EndFrame(renderer, indirect_draw.rt_base);
+  ASSERT_TRUE(gpu::render::Device().Wait(argument_slot.submission));
+  ASSERT_TRUE(argument_slot.presentable);
+  const auto* argument_pixels = argument_slot.readback->mapped();
+  EXPECT_EQ(argument_pixels[(8 * 16 + 4) * 4], 255);
+  EXPECT_EQ(argument_pixels[(8 * 16 + 12) * 4], 0);
 }
 
 }  // namespace
