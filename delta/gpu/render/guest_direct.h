@@ -16,7 +16,8 @@ using gcn::kDirectMissSlots;
 using gcn::kDirectSize;
 
 // Sets up the table and publishes it to the recompiler; false when the
-// option is off or the device cannot import host memory.
+// option is off or the device cannot import host memory. A direct pool may
+// attach later without moving the addresses compiled into shaders.
 bool InitGuestDirect();
 // Before a submit: imports what the GPU reported missing, and follows remaps.
 void SyncGuestDirect();

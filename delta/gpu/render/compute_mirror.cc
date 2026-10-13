@@ -800,6 +800,7 @@ bool GpuIndirectArgs(u64 args, u64 bytes) {
       (args & ~(kMirrorBlock - 1)) !=
           ((args + bytes - 1) & ~(kMirrorBlock - 1)))
     return false;
+  CollectGuestWrites();
   const u64 block = args & ~(kMirrorBlock - 1);
   if (MirrorOwned(block))
     return !(OwnAt(block).state.load(base::memory_order_acquire) &

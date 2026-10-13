@@ -113,6 +113,29 @@ int FindDmemFd() {
 
 u64 g_maps_read_at = ~0ull;
 bool g_maps_changed = false;
+u64 g_alias_probe_at = ~0ull;
+
+void AttachDirectAlias(bool force = false) {
+  if (g_alias)
+    return;
+  const u64 generation =
+      gpu::GuestMappingGeneration().load(base::memory_order_acquire);
+  if (!force && g_alias_probe_at == generation)
+    return;
+  g_alias_probe_at = generation;
+  const int fd = FindDmemFd();
+  struct stat st;
+  if (fd < 0 || fstat(fd, &st) != 0 || st.st_size <= 0)
+    return;
+  const u64 size = static_cast<u64>(st.st_size);
+  void* alias = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                     MAP_SHARED | MAP_NORESERVE, fd, 0);
+  if (alias == MAP_FAILED)
+    return;
+  g_alias = static_cast<u8*>(alias);
+  g_alias_size = size;
+  g_maps_read_at = ~0ull;
+}
 
 void ReadMaps(bool force = false) {
   const u64 generation =
@@ -446,24 +469,16 @@ void Fill(u64 address) {
 }  // namespace
 
 bool InitGuestDirect() {
-  if (g_init_state >= 0)
+  if (g_init_state >= 0) {
+    if (g_init_state)
+      AttachDirectAlias();
     return g_init_state;
+  }
   g_init_state = 0;
   if (!kDirect || !Device().caps().host_import ||
       !Device().caps().buffer_address)
     return false;
-  const int fd = FindDmemFd();
-  struct stat st;
-  if (fd < 0 || fstat(fd, &st) != 0 || st.st_size <= 0) {
-    g_init_state = -1;  // no direct memory yet
-    return false;
-  }
-  g_alias_size = static_cast<u64>(st.st_size);
-  void* alias = mmap(nullptr, g_alias_size, PROT_READ | PROT_WRITE,
-                     MAP_SHARED | MAP_NORESERVE, fd, 0);
-  if (alias == MAP_FAILED)
-    return false;
-  g_alias = static_cast<u8*>(alias);
+  AttachDirectAlias();
   rhi::BufferDesc desc;
   desc.size = kBlocks * 8;
   desc.usage = rhi::kBufferStorage | rhi::kBufferAddress;
@@ -474,7 +489,8 @@ bool InitGuestDirect() {
   desc.memory = rhi::MemoryKind::kReadback;
   desc.name = "guest direct misses";
   g_misses = Device().CreateBuffer(desc);
-  if (!g_table || !g_misses || !g_table->mapped() || !g_misses->mapped())
+  if (!g_table || !g_misses || !g_table->mapped() || !g_misses->mapped() ||
+      !g_table->address() || !g_misses->address())
     return false;
   std::memset(g_table->mapped(), 0, kBlocks * 8);
   void* saved = mmap(nullptr, kBlocks * 9, PROT_READ | PROT_WRITE,
@@ -611,7 +627,9 @@ void SyncGuestDirect() {
   InvalidateCopiedImports();
   // Refresh imported addresses after a remap, with periodic refreshes for
   // host mappings that bypass the guest notification.
-  ReadMaps(++g_syncs % 256 == 0);
+  const bool periodic = ++g_syncs % 256 == 0;
+  AttachDirectAlias(periodic);
+  ReadMaps(periodic);
   if (g_maps_changed) {
     g_maps_changed = false;
     for (u64 block : g_filled) {
@@ -644,6 +662,7 @@ const guest::SessionReset g_session_reset([] {
   g_init_state = -1;
   g_maps_read_at = ~0ull;
   g_maps_changed = false;
+  g_alias_probe_at = ~0ull;
   gcn::g_direct_table = gcn::g_direct_misses = 0;
   guest::ResetResource(g_alias);
   guest::ResetResource(g_alias_size);
