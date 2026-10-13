@@ -226,9 +226,9 @@ bool InitGuestDirect() {
   gcn::g_direct_table = g_table->address();
   gcn::g_direct_misses = g_misses->address();
   BASE_LOGI("direct",
-            "guest memory {:#x}/{:#x}+{:#x} through {} views of {} MiB",
-            kDirectBase, kDirectPs5Base, kDirectSize, g_maps.size(),
-            g_alias_size >> 20);
+            "guest memory {:#x}+{:#x}, {:#x}+{:#x} through {} views of {} MiB",
+            kDirectBase, kDirectLowSize, kDirectPs5Base, kDirectSize,
+            g_maps.size(), g_alias_size >> 20);
   g_init_state = 1;
   return true;
 }

@@ -10,19 +10,18 @@ namespace {
 
 TEST(GuestDirectAddress, SeparatesPs4AndPs5Windows) {
   using namespace gpu::render;
-  const u64 window_blocks = kDirectSize >> kDirectBlockShift;
+  const u64 window_blocks = kDirectLowSize >> kDirectBlockShift;
   EXPECT_EQ(GuestDirectIndex(kDirectBase), 0u);
-  EXPECT_EQ(GuestDirectIndex(kDirectBase + kDirectSize - 1), window_blocks - 1);
+  EXPECT_EQ(GuestDirectIndex(kDirectBase + kDirectLowSize - 1),
+            window_blocks - 1);
+  EXPECT_EQ(GuestDirectIndex(0x20013ebd04), 0x20013eull);
   EXPECT_EQ(GuestDirectIndex(kDirectPs5Base), window_blocks);
   EXPECT_EQ(GuestDirectIndex(kDirectPs5Base + kDirectSize - 1),
             kDirectBlocks - 1);
   EXPECT_EQ(GuestDirectIndex(0x80bc200000),
             window_blocks + (0xbc200000 >> kDirectBlockShift));
-  const u64 outside[] = {0,
-                         kDirectBase - 1,
-                         kDirectBase + kDirectSize,
-                         kDirectPs5Base - 1,
-                         kDirectPs5Base + kDirectSize,
+  const u64 outside[] = {kDirectBase - 1, kDirectBase + kDirectLowSize,
+                         kDirectPs5Base - 1, kDirectPs5Base + kDirectSize,
                          ~0ull};
   for (u64 address : outside)
     EXPECT_EQ(GuestDirectIndex(address), ~0ull);

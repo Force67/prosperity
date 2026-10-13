@@ -30,33 +30,42 @@ extern "C" bool prosperity_ps5_is_display_buffer(u64) { return false; }
 namespace {
 
 struct DirectMemory {
-  static constexpr u64 kBase = gpu::gcn::kDirectBase + (16ull << 20);
+  static constexpr u64 kBase = 0x2001000000ull;
+  static constexpr u64 kHighBase = gpu::gcn::kDirectPs5Base + (16ull << 20);
   static constexpr u64 kBytes = 4ull << 20;
   static constexpr u64 kMappedBytes = 2 * kBytes;
   int fd = memfd_create("delta_dmem_test", 0);
   void* memory = MAP_FAILED;
+  void* high_memory = MAP_FAILED;
 
   DirectMemory() {
     if (fd >= 0 && !ftruncate(fd, kMappedBytes))
       memory =
           mmap(reinterpret_cast<void*>(kBase), kMappedBytes,
                PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED_NOREPLACE, fd, 0);
+    if (memory != MAP_FAILED)
+      high_memory =
+          mmap(reinterpret_cast<void*>(kHighBase), kMappedBytes,
+               PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED_NOREPLACE, fd, 0);
   }
 
   ~DirectMemory() {
-    if (memory != MAP_FAILED) {
+    for (const u64 base : {kBase, kHighBase}) {
+      void* mapping = base == kBase ? memory : high_memory;
+      if (mapping == MAP_FAILED)
+        continue;
       if (gpu::render::g_mirror) {
         gpu::render::cs::CsBatchSubmit();
-        for (u64 at = kBase; at < kBase + kMappedBytes;
+        for (u64 at = base; at < base + kMappedBytes;
              at += gpu::render::kMirrorBlock)
           if (gpu::render::MirrorOwned(at)) {
             const u32 value = *reinterpret_cast<volatile const u32*>(at);
             (void)value;
           }
       }
-      gpu::GuestWriteTracker().Release(kBase, kMappedBytes);
-      munmap(memory, kMappedBytes);
-      gpu::render::NoteGuestRemap(kBase, kMappedBytes);
+      gpu::GuestWriteTracker().Release(base, kMappedBytes);
+      munmap(mapping, kMappedBytes);
+      gpu::render::NoteGuestRemap(base, kMappedBytes);
     }
     if (fd >= 0)
       close(fd);
@@ -67,6 +76,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   options::Init();
   DirectMemory memory;
   ASSERT_NE(memory.memory, MAP_FAILED);
+  ASSERT_NE(memory.high_memory, MAP_FAILED);
   auto& renderer = gpu::render::DefaultRenderer();
   if (!gpu::render::Init(renderer))
     GTEST_SKIP() << "A graphics device is required";
@@ -158,7 +168,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       gpu::gcn::spirv::Finalize(module.Assemble(), &geometry.vs_spirv, &error))
       << error.c_str();
   ASSERT_TRUE(gpu::render::InitGuestDirect());
-  alignas(65536) static base::Array<u8, 65536> targets[25]{};
+  alignas(65536) static base::Array<u8, 65536> targets[26]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
   imported.recomp = &constants;
@@ -889,6 +899,65 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   const auto* argument_pixels = argument_slot.readback->mapped();
   EXPECT_EQ(argument_pixels[(8 * 16 + 4) * 4], 255);
   EXPECT_EQ(argument_pixels[(8 * 16 + 12) * 4], 0);
+
+  const auto direct_program =
+      gpu::rdna::Recompile(vs, cbuf_ps, user_data, user_data, 0, false, 8, 8);
+  ASSERT_TRUE(direct_program.ok);
+  ASSERT_TRUE(direct_program.direct);
+  ASSERT_TRUE(direct_program.ps_cbufs.empty());
+  const u64 direct_base = base + (7ull << 20) + 3 * gpu::render::kMirrorBlock;
+  gpu::render::DrawInfo direct_draw = imported;
+  direct_draw.recomp = &direct_program;
+  direct_draw.cbufs[0] = {};
+  direct_draw.num_cbufs = 0;
+  direct_draw.ps_user_data[0] = u32(direct_base);
+  direct_draw.ps_user_data[1] = u32(direct_base >> 32);
+  direct_draw.rt_base = direct_draw.mrt_base[0] =
+      reinterpret_cast<u64>(targets[25].data());
+  direct_draw.viewport_x_offset = 4.5f;
+  direct_draw.viewport_y_offset = 8.5f;
+  gpu::render::BeginFrame(renderer);
+  gpu::render::RecordComputeInFrame();
+  ASSERT_TRUE(gpu::render::GpuFill(direct_base, gpu::render::kMirrorBlock,
+                                   0x3e800000, 0x3e800000));
+  const u64 direct_resolves = gpu::render::cs::g_mirror_resolves.load();
+  const u64 direct_copies = gpu::g_ring_cb_bytes;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, direct_draw));
+  ASSERT_TRUE(gpu::render::cs::CsBatchSubmit());
+  const auto& direct_slot =
+      gpu::render::g_frame.slots[gpu::render::g_frame.slot_idx];
+  ASSERT_TRUE(gpu::render::Device().Wait(direct_slot.submission));
+  *reinterpret_cast<volatile u32*>(direct_base) = 0x3f400000;
+  gpu::render::CollectGuestWrites();
+  const u64 direct_cpu_resolves = gpu::render::cs::g_mirror_resolves.load();
+  EXPECT_EQ(direct_cpu_resolves, direct_resolves + 1);
+  direct_draw.viewport_x_offset = 12.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, direct_draw));
+  EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), direct_cpu_resolves);
+  EXPECT_EQ(gpu::g_ring_cb_bytes, direct_copies);
+  gpu::render::EndFrame(renderer, direct_draw.rt_base);
+  ASSERT_TRUE(gpu::render::Device().Wait(direct_slot.submission));
+  ASSERT_TRUE(direct_slot.presentable);
+  const auto* direct_pixels = direct_slot.readback->mapped();
+  EXPECT_EQ(direct_pixels[(8 * 16 + 4) * 4], 64);
+  EXPECT_EQ(direct_pixels[(8 * 16 + 12) * 4], 191);
+
+  const u64 high_address = DirectMemory::kHighBase + direct_base - base;
+  direct_draw.ps_user_data[0] = u32(high_address);
+  direct_draw.ps_user_data[1] = u32(high_address >> 32);
+  for (u32 trial = 0; trial < 2; ++trial) {
+    SCOPED_TRACE(trial);
+    gpu::render::BeginFrame(renderer);
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, direct_draw));
+    const u32 high_slot_index = gpu::render::g_frame.slot_idx;
+    gpu::render::EndFrame(renderer, direct_draw.rt_base);
+    const auto& high_slot = gpu::render::g_frame.slots[high_slot_index];
+    ASSERT_TRUE(gpu::render::Device().Wait(high_slot.submission));
+    ASSERT_TRUE(high_slot.presentable);
+    const auto* high_pixels = high_slot.readback->mapped();
+    EXPECT_EQ(high_pixels[(8 * 16 + 12) * 4], trial ? 191 : 0);
+    gpu::render::SyncGuestDirect();
+  }
 }
 
 }  // namespace

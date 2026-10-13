@@ -201,18 +201,20 @@ extern void (*g_flush_guest_range)(u64 address, u64 bytes);
 // (render/guest_direct.h), 0 when shaders do not read guest memory directly.
 extern u64 g_direct_table, g_direct_misses;
 
-constexpr u64 kDirectBase = 0x300000000ull;
+constexpr u64 kDirectBase = 0;
 constexpr u64 kDirectPs5Base = 0x8000000000ull;
+constexpr u64 kDirectLowSize = 0x4000000000ull;
 constexpr u64 kDirectSize = 0x1000000000ull;
 constexpr u32 kDirectBlockShift = 16;
 constexpr u32 kDirectMissSlots = 63;
-constexpr u64 kDirectBlocks = 2 * (kDirectSize >> kDirectBlockShift);
+constexpr u64 kDirectBlocks =
+    (kDirectLowSize + kDirectSize) >> kDirectBlockShift;
 
 constexpr u64 GuestDirectIndex(u64 address) {
-  if (address - kDirectBase < kDirectSize)
+  if (address - kDirectBase < kDirectLowSize)
     return (address - kDirectBase) >> kDirectBlockShift;
   if (address - kDirectPs5Base < kDirectSize)
-    return (kDirectSize + address - kDirectPs5Base) >> kDirectBlockShift;
+    return (kDirectLowSize + address - kDirectPs5Base) >> kDirectBlockShift;
   return ~0ull;
 }
 
