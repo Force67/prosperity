@@ -217,7 +217,8 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
   {
     const Id report = t.LAnd(
         t.LAnd(inside, t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {held})),
-        reading);
+        t.LAnd(reading, t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
+                                 {args[0], constant(0)})));
     const Id record = t.m.NewBlock(), store = t.m.NewBlock(),
              stored = t.m.NewBlock(), reported = t.m.NewBlock();
     t.m.SelectionMerge(reported);
@@ -233,11 +234,18 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
     };
     const Id device = t.U32(static_cast<u32>(spv::Scope::Device));
     const Id zero = t.U32(0);
+    const Id count =
+        t.m.Emit(spv::Op::OpAtomicLoad, t.t_u, {at(zero), device, zero});
+    const Id reserve = t.m.NewBlock(), reserved = t.m.NewBlock();
+    const Id has_room = t.Ult(count, t.U32(kDirectMissSlots));
+    t.m.SelectionMerge(stored);
+    t.m.BranchConditional(has_room, reserve, stored);
+    t.m.OpenBlock(reserve);
     const Id n = t.m.Emit(spv::Op::OpAtomicIAdd, t.t_u,
                           {at(zero), device, zero, t.U32(1)});
     const Id has_slot = t.Ult(n, t.U32(kDirectMissSlots));
-    t.m.SelectionMerge(stored);
-    t.m.BranchConditional(has_slot, store, stored);
+    t.m.SelectionMerge(reserved);
+    t.m.BranchConditional(has_slot, store, reserved);
     t.m.OpenBlock(store);
     const Id offset = t.Add(t.U32(8), t.Mul(n, t.U32(8)));
     t.m.Emit(spv::Op::OpAtomicExchange, t.t_u,
@@ -248,6 +256,8 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
               t.m.Emit(spv::Op::OpUConvert, t.t_u,
                        {t.m.Emit(spv::Op::OpShiftRightLogical, wide,
                                  {args[0], t.U32(32)})})});
+    t.m.Branch(reserved);
+    t.m.OpenBlock(reserved);
     t.m.Branch(stored);
     t.m.OpenBlock(stored);
     t.m.Branch(reported);

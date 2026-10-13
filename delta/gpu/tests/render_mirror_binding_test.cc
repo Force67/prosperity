@@ -168,7 +168,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       gpu::gcn::spirv::Finalize(module.Assemble(), &geometry.vs_spirv, &error))
       << error.c_str();
   ASSERT_TRUE(gpu::render::InitGuestDirect());
-  alignas(65536) static base::Array<u8, 65536> targets[44]{};
+  alignas(65536) static base::Array<u8, 65536> targets[47]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
   imported.recomp = &constants;
@@ -1143,6 +1143,76 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       EXPECT_EQ(pixels[(8 * 16 + (vertex ? 15 : 12)) * 4], vertex ? 255 : 191);
     }
   }
+  gpu::rhi::BufferDesc miss_desc;
+  miss_desc.size = 8 + gpu::gcn::kDirectMissSlots * sizeof(u64);
+  miss_desc.usage = gpu::rhi::kBufferStorage | gpu::rhi::kBufferAddress;
+  miss_desc.memory = gpu::rhi::MemoryKind::kReadback;
+  auto* miss_buffer = gpu::render::Device().CreateBuffer(miss_desc);
+  ASSERT_NE(miss_buffer, nullptr);
+  ASSERT_NE(miss_buffer->mapped(), nullptr);
+  std::memset(miss_buffer->mapped(), 0, miss_desc.size);
+  const u64 previous_misses = gpu::gcn::g_direct_misses;
+  gpu::gcn::g_direct_misses = miss_buffer->address();
+  gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+  const auto missing_program =
+      gpu::gcn::Recompile(vs, gcn_scalar_ps, user_data, user_data);
+  gpu::gcn::SetDefaultIsaMode(previous_isa);
+  gpu::gcn::g_direct_misses = previous_misses;
+  ASSERT_TRUE(missing_program.ok);
+  const u64 missing_base = base + 2 * DirectMemory::kMappedBytes;
+  direct_draw.recomp = &missing_program;
+  direct_draw.ps_user_data[0] = u32(missing_base);
+  direct_draw.ps_user_data[1] = u32(missing_base >> 32);
+  direct_draw.instance_count = 8192;
+  u32 full_count = 0;
+  for (u32 trial = 0; trial < 2; ++trial) {
+    SCOPED_TRACE(trial);
+    direct_draw.rt_base = direct_draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[44 + trial].data());
+    gpu::render::BeginFrame(renderer);
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, direct_draw));
+    const u32 slot_index = gpu::render::g_frame.slot_idx;
+    gpu::render::EndFrame(renderer, direct_draw.rt_base);
+    const auto& slot = gpu::render::g_frame.slots[slot_index];
+    ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+    const u32 count = *reinterpret_cast<const u32*>(miss_buffer->mapped());
+    EXPECT_GE(count, gpu::gcn::kDirectMissSlots);
+    if (trial)
+      EXPECT_EQ(count, full_count);
+    full_count = count;
+    const auto* addresses =
+        reinterpret_cast<const u64*>(miss_buffer->mapped() + 8);
+    for (u32 i = 0; i < gpu::gcn::kDirectMissSlots; ++i)
+      EXPECT_EQ(addresses[i], missing_base);
+    const auto* pixel = slot.readback->mapped() + (8 * 16 + 12) * 4;
+    EXPECT_EQ(pixel[0], 0);
+    EXPECT_EQ(pixel[3], 255);
+  }
+  std::memset(miss_buffer->mapped(), 0, miss_desc.size);
+  direct_draw.ps_user_data[0] = direct_draw.ps_user_data[1] = 0;
+  direct_draw.rt_base = direct_draw.mrt_base[0] =
+      reinterpret_cast<u64>(targets[46].data());
+  gpu::render::BeginFrame(renderer);
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, direct_draw));
+  const u32 null_slot_index = gpu::render::g_frame.slot_idx;
+  gpu::render::EndFrame(renderer, direct_draw.rt_base);
+  const auto& null_slot = gpu::render::g_frame.slots[null_slot_index];
+  ASSERT_TRUE(gpu::render::Device().Wait(null_slot.submission));
+  EXPECT_EQ(*reinterpret_cast<const u32*>(miss_buffer->mapped()), 0u);
+  const auto* null_pixel = null_slot.readback->mapped() + (8 * 16 + 12) * 4;
+  EXPECT_EQ(null_pixel[0], 0);
+  EXPECT_EQ(null_pixel[3], 255);
+  direct_draw.ps_user_data[0] = u32(missing_base);
+  direct_draw.ps_user_data[1] = u32(missing_base >> 32);
+  gpu::render::BeginFrame(renderer);
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, direct_draw));
+  const u32 reset_slot_index = gpu::render::g_frame.slot_idx;
+  gpu::render::EndFrame(renderer, direct_draw.rt_base);
+  const auto& reset_slot = gpu::render::g_frame.slots[reset_slot_index];
+  ASSERT_TRUE(gpu::render::Device().Wait(reset_slot.submission));
+  EXPECT_GE(*reinterpret_cast<const u32*>(miss_buffer->mapped()),
+            gpu::gcn::kDirectMissSlots);
+  gpu::render::Device().Destroy(miss_buffer);
 }
 
 }  // namespace
