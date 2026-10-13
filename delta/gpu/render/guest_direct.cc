@@ -17,6 +17,7 @@
 #include "base/threading/mutex.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/guest_memory.h"
+#include "gpu/render/compute.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/renderer.h"
@@ -273,7 +274,8 @@ void ReapImports() {
   for (size_t i = 0; i < g_retired.size();) {
     const auto& retired = g_retired[i];
     if (retired.frame + 2 > g_frame.num ||
-        !Device().IsComplete(retired.submission)) {
+        !Device().IsComplete(retired.submission) ||
+        (retired.buffer && MirrorUsesImport(retired.buffer))) {
       ++i;
       continue;
     }
@@ -321,6 +323,35 @@ bool WritableMapping(const Mapping& map, u64 start, u64 end) {
   return true;
 }
 
+bool ImportValid(u64 start, const HostImport& imported) {
+  const u64 identity = host_memory::MemoryMappingIdentity(
+      reinterpret_cast<void*>(start), imported.end - start);
+  if (!identity || identity != imported.identity)
+    return false;
+  for (u64 at = start; at < imported.end;) {
+    const Mapping* map = FindMappingIn(g_host_maps, at);
+    if (!map)
+      return false;
+    const u64 end = base::Min(imported.end, map->end);
+    if (imported.readonly && WritableMapping(*map, at, end))
+      return false;
+    at = end;
+  }
+  return true;
+}
+
+void PruneImports() {
+  for (auto it = g_host_imports.begin(); it != g_host_imports.end();) {
+    if (!ImportValid(it->first, it->second)) {
+      Retire(it->second.buffer);
+      it = g_host_imports.erase(it);
+    } else {
+      it->second.snapshot = g_map_snapshot;
+      ++it;
+    }
+  }
+}
+
 HostImport* HostImportAt(u64 address, u64* base, bool retry = true) {
   const Mapping* map = FindMappingIn(g_host_maps, address);
   if (!map)
@@ -334,12 +365,7 @@ HostImport* HostImportAt(u64 address, u64* base, bool retry = true) {
         *base = prior->first;
         return &imported;
       }
-      const u64 identity = host_memory::MemoryMappingIdentity(
-          reinterpret_cast<void*>(prior->first), imported.end - prior->first);
-      if (identity && identity == imported.identity &&
-          (!imported.readonly ||
-           !WritableMapping(*map, address & ~(kPage - 1),
-                            base::Min(imported.end, map->end)))) {
+      if (ImportValid(prior->first, imported)) {
         imported.snapshot = g_map_snapshot;
         *base = prior->first;
         return &imported;
@@ -693,6 +719,7 @@ void SyncGuestDirect() {
   AttachDirectAlias(periodic);
   ReadMaps(periodic);
   if (g_maps_changed) {
+    PruneImports();
     g_maps_changed = false;
     for (u64 block : g_filled) {
       const u64 index = GuestDirectIndex(block);
@@ -706,7 +733,7 @@ void SyncGuestDirect() {
     }
   }
   ReapImports();
-  MirrorRecache();
+  MirrorRefreshCached();
   auto* misses = reinterpret_cast<volatile u32*>(g_misses->mapped());
   const u32 count = base::Min<u32>(misses[0], kDirectMissSlots);
   if (!count)

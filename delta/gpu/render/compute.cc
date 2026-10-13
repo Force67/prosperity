@@ -124,7 +124,9 @@ u64 g_stage_guest_detile_bytes = 0, g_stage_guest_detile_n = 0;
 u64 g_mirror_wb_bytes = 0, g_mirror_wb_n = 0, g_mirror_own_bytes = 0;
 base::Atomic<u64> g_mirror_resolves{0};
 base::HashSet<u64> g_mirror_cached;
-base::Map<u64, u64> g_mirror_uncached;  // block -> frame the CPU last wrote it
+base::Vector<base::Pair<u64, u64>> g_mirror_stale;
+base::HashSet<u64> g_mirror_hot;
+base::HashSet<u64> g_mirror_was_owned;
 base::Map<u64, u64> g_mirror_wb_union;
 DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", true);
 DELTA_OPTION(bool, kCsListProf, "DELTA_GPU_LISTPROF", false);
@@ -584,7 +586,9 @@ const guest::SessionReset g_session_reset([] {
   g_own = nullptr;
   g_cs_writeback_gen = g_cs_batch_next_id = 1;
   guest::ResetResource(g_mirror_cached);
-  guest::ResetResource(g_mirror_uncached);
+  guest::ResetResource(g_mirror_stale);
+  guest::ResetResource(g_mirror_hot);
+  guest::ResetResource(g_mirror_was_owned);
   guest::ResetResource(g_mirror_wb_union);
   guest::ResetResource(g_wb_why);
   guest::ResetResource(g_stage_stats);

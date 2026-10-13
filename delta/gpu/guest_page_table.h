@@ -33,6 +33,7 @@ class GuestPageTable {
     u32 report_frame = 0;     // frame of the latest write report
     u32 previous_report = 0;  // frame of the report before that frame
     u32 volatile_until = 0;   // frame before which the page is not armed
+    u8 kept = 0;              // armed even when hot (WriteTracker::Arm)
   };
   static constexpr u32 kUnreadable = 1u << 31;
   static constexpr u32 kPageShift = 12;

@@ -40,8 +40,9 @@ class WriteTracker {
   bool enabled() const { return mode_ != Mode::kOff; }
 
   // Arms the pages of [base, base+bytes). False when they cannot be tracked,
-  // or are written too often to be worth it.
-  bool Arm(u64 base, u64 bytes);
+  // or are written too often to be worth it. `hot` arms them anyway and keeps
+  // them armed, for a copy that costs more to refresh blindly than a fault.
+  bool Arm(u64 base, u64 bytes, bool hot = false);
 
   // Appends every armed range written (or remapped) since the last call, and
   // arms it again. Announced writes are included, and come first: the count of
@@ -91,7 +92,7 @@ class WriteTracker {
 
   bool EnableScan();
   bool EnableFault();
-  bool ArmFault(u64 first, u64 end);
+  bool ArmFault(u64 first, u64 end, bool hot);
   void DisarmFault(u64 first, u64 end);
   void TakeFaulted(base::Vector<Range>& out);
   bool Register(u64 first, u64 end);
@@ -99,7 +100,7 @@ class WriteTracker {
   // Mirrors armed_ into the guest page table, one run at a time.
   void MarkArmed(u64 first, u64 end, bool armed);
   u64 EraseArmed(u64 first, u64 end);
-  bool ArmRange(u64 first, u64 end);
+  bool ArmRange(u64 first, u64 end, bool hot = false);
   void Disarm(u64 first, u64 end);
   bool Scan(u64 first, u64 end, base::Vector<Range>& out);
   size_t Drain(base::Vector<Range>& out);

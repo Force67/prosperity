@@ -34,6 +34,7 @@
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/ps4/compute_dispatch.h"
 #include "gpu/ps4/draw_state.h"
+#include "gpu/ps4/gpu_labels.h"
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/liverpool.h"
 #include "gpu/ps4/pm4.h"
@@ -203,16 +204,19 @@ void WriteEventLabel(const char* packet,
   // those results go to guest memory before the fence does.
   if (data_sel && kFenceFlush && render::CsTracksGuestWrites())
     render::FlushCsWrites(render::DefaultRenderer(), "fence");
-  if (data_sel == 1)
-    WriteLabel(address, value, false);
-  else if (data_sel == 2)
-    WriteLabel(address, value, true);
-  else if (data_sel >= 3)
-    WriteLabel(address, GpuClockTimestamp(), true);
-  TraceLabelWrite(packet, address, data_sel, value);
-  if (int_sel)
-    // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
-    prosperity_gpu_end_of_pipe();
+  const u64 written = data_sel >= 3 ? GpuClockTimestamp() : value;
+  WriteAfterGpu(
+      [=] {
+        if (data_sel == 1)
+          WriteLabel(address, written, false);
+        else if (data_sel >= 2)
+          WriteLabel(address, written, true);
+        TraceLabelWrite(packet, address, data_sel, value);
+        if (int_sel)
+          // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
+          prosperity_gpu_end_of_pipe();
+      },
+      address, data_sel == 1 ? 4 : data_sel ? 8 : 0, written);
 }
 
 // --- constant engine RAM ---------------------------------------------------
@@ -359,7 +363,12 @@ void HandleWaitRegMem(const u32* body, u32 count) {
   if (count < 5)
     return;
   const volatile u32* polled = WaitRegMemTarget(body);
-  const auto passes = [&](u32 value) { return WaitRegMemPasses(body, value); };
+  const auto passes = [&](u32 value) {
+    u32 held = 0;
+    return WaitRegMemPasses(body, value) ||
+           (HeldWriteValue(reinterpret_cast<u64>(polled), &held) &&
+            WaitRegMemPasses(body, held));
+  };
   if (!polled) {
     NoteUnknownWait(body);
     return;
@@ -465,8 +474,18 @@ void HandleWriteData(const u32* body, u32 count) {
   NoteGpuWriteNear("WRITE_DATA", address, body[3]);
   if (IsLabelAddress(address) && IsLabelAddress(address + (u64)dwords * 4) &&
       GpuWriteMapped("WRITE_DATA", address, (u64)dwords * 4)) {
-    std::memcpy(reinterpret_cast<void*>(address), &body[3], (size_t)dwords * 4);
     g_fence_labels.Note(address);
+    // The CP writes it on reaching it, but never ahead of an end-of-pipe
+    // write to the same word that came first.
+    const auto write = [address, words = base::Vector<u32>(body + 3,
+                                                            body + count)] {
+      std::memcpy(reinterpret_cast<void*>(address), words.data(),
+                  words.size() * 4);
+    };
+    if (HeldWriteOverlaps(address, (u64)dwords * 4))
+      WriteAfterGpu(write);
+    else
+      write();
   }
   TraceDataWrite(address, dwords, dwords ? body[3] : 0);
 }
@@ -543,10 +562,14 @@ void HandleEventWrite(const u32* body, u32 count) {
     return;
   static base::Atomic<u64> samples{0};
   const u64 value = (1ull << 63) | (samples.fetch_add(1) + 1);
-  for (u32 rb = 0; rb < kRenderBackends; rb++)
-    WriteLabel(address + rb * 16, value, true);
   g_fence_labels.Note(address);
-  TraceLabelWrite("EVENT_WRITE", address, 2, value);
+  WriteAfterGpu(
+      [=] {
+        for (u32 rb = 0; rb < kRenderBackends; rb++)
+          WriteLabel(address + rb * 16, value, true);
+        TraceLabelWrite("EVENT_WRITE", address, 2, value);
+      },
+      address);
 }
 
 // body: eventCtrl, addrLo, addrHi+cmd, data
@@ -559,8 +582,12 @@ void HandleEventWriteEos(const u32* body, u32 count) {
     return;
   const u64 address =
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
-  WriteLabel(address, body[3], false);
-  TraceEosLabel(address, body[3]);
+  WriteAfterGpu(
+      [address, value = body[3]] {
+        WriteLabel(address, value, false);
+        TraceEosLabel(address, value);
+      },
+      address, 4, body[3]);
 }
 
 void HandleDrawPacket(render::Renderer& renderer,
@@ -1080,7 +1107,11 @@ u32 WalkDcb(render::Renderer& renderer,
               NoteUnknownWait(body);
               break;
             }
-            if (WaitRegMemPasses(body, *polled))
+            // A held fence write lands before what follows on the GPU.
+            u32 held = 0;
+            if (WaitRegMemPasses(body, *polled) ||
+                (HeldWriteValue(reinterpret_cast<u64>(polled), &held) &&
+                 WaitRegMemPasses(body, held)))
               break;
             OwnRenderer("wait-reg-mem");
           }
@@ -1383,6 +1414,10 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   }
   const u32 walked = WalkDcb(renderer, p, words, 0, dump);
   FinishCe(renderer);
+  if (GuestRenderQueue().running())
+    GuestRenderQueue().PushCall(&SubmitHeldWrites);
+  else
+    SubmitHeldWrites();
 
   if (dump)
     TraceDcbWalkResult(p, words, walked);

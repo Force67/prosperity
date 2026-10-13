@@ -448,6 +448,7 @@ void CollectGuestWrites() {
     InvalidateTexRange(first, end - first);
   }
   MirrorWritesCollected();
+  MirrorRefreshWritten();
 }
 
 void NoteGuestRemap(u64 base, u64 bytes) {

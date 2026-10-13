@@ -16,6 +16,7 @@
 #include "gpu/render/renderer.h"
 #include "gpu/write_tracker.h"
 #include "host_memory/host_memory.h"
+#include "memory_debug/memory_debug.h"
 #include "options/options.h"
 
 extern "C" void prosperity_gpu_end_of_pipe() {}
@@ -124,7 +125,7 @@ TEST(VkGuestDirect, AttachesLatePoolWithoutChangingShaderTable) {
   ASSERT_TRUE(program.ok);
   ASSERT_TRUE(program.direct_reads);
   ASSERT_TRUE(program.ps_cbufs.empty());
-  alignas(65536) static base::Array<u8, 65536> targets[32]{};
+  alignas(65536) static base::Array<u8, 65536> targets[38]{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
@@ -282,5 +283,67 @@ TEST(VkGuestDirect, AttachesLatePoolWithoutChangingShaderTable) {
   gpu::render::SyncGuestDirect();
   ASSERT_NO_FATAL_FAILURE(read(alias.address, 191));
   EXPECT_EQ(gpu::gcn::g_direct_table, table);
+
+  const auto drain_retired = [&] {
+    gpu::render::SyncGuestDirect();
+    for (u32 i = 0; i < 3; ++i) {
+      gpu::render::BeginFrame(renderer);
+      const u32 slot_index = gpu::render::g_frame.slot_idx;
+      gpu::render::EndFrame(renderer, 0);
+      ASSERT_TRUE(gpu::render::Device().Wait(
+          gpu::render::g_frame.slots[slot_index].submission));
+      gpu::render::SyncGuestDirect();
+    }
+  };
+  ASSERT_NO_FATAL_FAILURE(drain_retired());
+#if defined(DELTA_MEMORY_DEBUG)
+  const u64 imported_before = memory_debug::ReadSnapshot().imported;
+#endif
+  {
+    GuestMemory transient(0x201700010000ull, false);
+    ASSERT_NE(transient.memory, MAP_FAILED);
+    *static_cast<float*>(transient.memory) = .25f;
+    ASSERT_NO_FATAL_FAILURE(read(transient.address, 0));
+    ASSERT_NO_FATAL_FAILURE(read(transient.address, 64));
+#if defined(DELTA_MEMORY_DEBUG)
+    EXPECT_EQ(memory_debug::ReadSnapshot().imported,
+              imported_before + transient.bytes);
+#endif
+  }
+  ASSERT_NO_FATAL_FAILURE(drain_retired());
+#if defined(DELTA_MEMORY_DEBUG)
+  EXPECT_EQ(memory_debug::ReadSnapshot().imported, imported_before);
+#endif
+
+  {
+    GuestMemory retained(0x2200200000ull, false, 2 * GuestMemory::kBytes);
+    ASSERT_NE(retained.memory, MAP_FAILED);
+    *static_cast<float*>(retained.memory) = .25f;
+    ASSERT_NO_FATAL_FAILURE(read(retained.address, 0));
+    ASSERT_NO_FATAL_FAILURE(read(retained.address, 64));
+    ASSERT_TRUE(gpu::render::GpuFill(retained.address, GuestMemory::kBytes,
+                                     0x3f400000, 0x3f400000));
+    ASSERT_TRUE(gpu::render::MirrorOwned(retained.address));
+    auto* removed = static_cast<u8*>(retained.memory) + GuestMemory::kBytes;
+    ASSERT_EQ(munmap(removed, GuestMemory::kBytes), 0);
+    host_memory::ForgetMemoryMapping(removed, GuestMemory::kBytes);
+    gpu::render::NoteGuestRemap(retained.address + GuestMemory::kBytes,
+                                GuestMemory::kBytes);
+    retained.bytes = GuestMemory::kBytes;
+    ASSERT_NO_FATAL_FAILURE(drain_retired());
+#if defined(DELTA_MEMORY_DEBUG)
+    EXPECT_GE(memory_debug::ReadSnapshot().imported,
+              imported_before + 2 * GuestMemory::kBytes);
+#endif
+    ASSERT_NO_FATAL_FAILURE(read(retained.address, 191));
+    EXPECT_EQ(*static_cast<volatile float*>(retained.memory), .75f);
+    ASSERT_FALSE(gpu::render::MirrorOwned(retained.address));
+    ASSERT_NO_FATAL_FAILURE(drain_retired());
+    ASSERT_NO_FATAL_FAILURE(read(retained.address, 191));
+  }
+  ASSERT_NO_FATAL_FAILURE(drain_retired());
+#if defined(DELTA_MEMORY_DEBUG)
+  EXPECT_EQ(memory_debug::ReadSnapshot().imported, imported_before);
+#endif
 }
 }  // namespace

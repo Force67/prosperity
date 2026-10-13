@@ -84,7 +84,15 @@ extern u64 g_stage_guest_detile_bytes, g_stage_guest_detile_n;
 extern u64 g_mirror_wb_bytes, g_mirror_wb_n, g_mirror_own_bytes;
 extern base::Atomic<u64> g_mirror_resolves;
 extern base::HashSet<u64> g_mirror_cached;
-extern base::Map<u64, u64> g_mirror_uncached;
+// Cached blocks the CPU wrote since their copy, as [first, end) spans, and
+// pages of cached blocks it writes too often to watch. Both are copied in
+// again before the next submission (MirrorRefreshCached).
+extern base::Vector<base::Pair<u64, u64>> g_mirror_stale;
+extern base::HashSet<u64> g_mirror_hot;
+// Blocks a dispatch's output made the GPU's: once the CPU takes one back, its
+// direct reads move to VRAM again.
+extern base::HashSet<u64> g_mirror_was_owned;
+constexpr u64 kMirrorHotPage = 4096;
 extern base::Map<u64, u64> g_mirror_wb_union;
 extern base::Option<bool> kMirror;
 extern base::Option<bool> kCsListProf;

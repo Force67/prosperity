@@ -11,6 +11,9 @@
 
 namespace gpu::render {
 
+// A GPU-owned block still needs this imported buffer for CPU writeback.
+bool MirrorUsesImport(rhi::Buffer* buffer);
+
 // A draw is about to sample the surface at `base` (`w`x`h` texels, guest
 // layout `layout`) through `img`, which is in `state`. If a dispatch's output
 // for exactly that surface is sitting in a range buffer, copy it VRAM->image

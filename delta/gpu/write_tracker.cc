@@ -254,7 +254,7 @@ void WriteTracker::OpenedByOwner(u64 first, u64 end) {
   }
 }
 
-bool WriteTracker::ArmFault(u64 first, u64 end) {
+bool WriteTracker::ArmFault(u64 first, u64 end, bool hot) {
   DELTA_ZONE("wt.arm");
   if (const auto owns = g_owner_owns.load(base::memory_order_acquire);
       owns && owns(first, end))
@@ -264,7 +264,7 @@ bool WriteTracker::ArmFault(u64 first, u64 end) {
   GuestPageTable& table = GuestPages();
   for (u64 page = first; page < end; page += kPage) {
     const GuestPageTable::Page* p = table.Find(page);
-    if (p && (p->volatile_until > frame_ ||
+    if (p && ((!hot && p->volatile_until > frame_) ||
               p->armed.load(base::memory_order_acquire) == kQueued))
       return false;  // hot, or its last write is not collected yet
   }
@@ -292,6 +292,7 @@ bool WriteTracker::ArmFault(u64 first, u64 end) {
       continue;
     }
     p->ever_armed.store(1, base::memory_order_relaxed);
+    p->kept |= hot;
     p->armed.store(kProtected, base::memory_order_release);
     if (!run)
       run = page;
@@ -353,7 +354,7 @@ bool WriteTracker::EnableFault() {
 }
 void WriteTracker::SetOwner(bool (*)(u64, u64), bool (*)(u64, u64)) {}
 void WriteTracker::OpenedByOwner(u64, u64) {}
-bool WriteTracker::ArmFault(u64, u64) {
+bool WriteTracker::ArmFault(u64, u64, bool) {
   return false;
 }
 void WriteTracker::DisarmFault(u64, u64) {}
@@ -417,9 +418,9 @@ bool WriteTracker::Register(u64 first, u64 end) {
   return true;
 }
 
-bool WriteTracker::ArmRange(u64 first, u64 end) {
+bool WriteTracker::ArmRange(u64 first, u64 end, bool hot) {
   if (mode_ == Mode::kFault)
-    return ArmFault(first, end);
+    return ArmFault(first, end, hot);
   DELTA_ZONE("wt.arm");
   const GuestPageTable& table = GuestPages();
   for (u64 page = first; page < end; page += kPage)
@@ -441,7 +442,7 @@ bool WriteTracker::ArmRange(u64 first, u64 end) {
   return true;
 }
 
-bool WriteTracker::Arm(u64 base, u64 bytes) {
+bool WriteTracker::Arm(u64 base, u64 bytes, bool hot) {
   if (!enabled() || !bytes)
     return false;
   const u64 first = PageDown(base), end = PageUp(base + bytes);
@@ -453,7 +454,7 @@ bool WriteTracker::Arm(u64 base, u64 bytes) {
   // Fault mode protects exactly what it is asked to: a gap page may be code,
   // a guard page or another mapping, and costs nothing to leave alone.
   if (mode_ == Mode::kFault)
-    return ArmRange(first, end);
+    return ArmRange(first, end, hot);
   // Close a small gap to a neighbouring armed run: every separate run is a
   // mapping of its own after registration, and the scan pays per mapping
   // (GTA:SA held ~2700 runs, ~10 ms a frame of scans).
@@ -526,16 +527,16 @@ bool WriteTracker::EnableScan() {
 bool WriteTracker::Register(u64, u64) {
   return false;
 }
-bool WriteTracker::Arm(u64 base, u64 bytes) {
+bool WriteTracker::Arm(u64 base, u64 bytes, bool hot) {
   if (mode_ != Mode::kFault || !bytes)
     return false;
   const u64 first = PageDown(base), end = PageUp(base + bytes);
   if (policy_.arm_filter && !policy_.arm_filter(first, end))
     return false;
-  return AllArmed(first, end) || ArmFault(first, end);
+  return AllArmed(first, end) || ArmFault(first, end, hot);
 }
-bool WriteTracker::ArmRange(u64 first, u64 end) {
-  return mode_ == Mode::kFault && ArmFault(first, end);
+bool WriteTracker::ArmRange(u64 first, u64 end, bool hot) {
+  return mode_ == Mode::kFault && ArmFault(first, end, hot);
 }
 void WriteTracker::Disarm(u64 first, u64 end) {
   DisarmFault(first, end);
@@ -686,7 +687,8 @@ void WriteTracker::EndFrame() {
   base::Vector<u64> demote;
   for (u64 page : reported_) {
     const GuestPageTable::Page* p = table.Find(page);
-    if (p && (p->reports >= kHotReports || p->previous_report + 1 == frame_))
+    if (p && !p->kept &&
+        (p->reports >= kHotReports || p->previous_report + 1 == frame_))
       demote.push_back(page);
   }
   reported_.clear();

@@ -131,6 +131,9 @@ bool WaitPendingGuestWrites(u64 base, u64 bytes);
 // The compute batch after which every pending GPU write into guest memory has
 // landed; 0 when none is pending. Does not submit it.
 u64 GuestWritePublishBatch();
+// Submits what the frame and the compute batch recorded so far, without
+// waiting: the submission after which all of it has run, 0 on failure.
+u64 SubmitRecordedWork();
 // End of a command-buffer walk: submit the open batch if a held label waits
 // for it, once, instead of at every label.
 void SubmitForPublishedLabels();
@@ -138,6 +141,8 @@ void SubmitForPublishedLabels();
 void ReportBatchState();
 // Thread safe: blocks until compute batch `batch` was submitted and completed.
 bool WaitBatch(u64 batch);
+// Thread safe: blocks until device submission `submission` completed.
+bool WaitSubmission(u64 submission);
 // A CP DMA_DATA whose source or destination selector is GDS (1). `data` is
 // the packet's immediate dword, used when src_sel is 2 (a fill). Returns
 // whether the transfer landed.
@@ -187,8 +192,11 @@ void MirrorNoteGuestWrites(u64 first, u64 end, bool announced);
 // The mirror's device address for the 64 KiB guest block, copied in and
 // watched; 0 when the block stays in host memory.
 u64 MirrorCacheBlock(u64 block);
-// Blocks the CPU stopped writing go back to VRAM.
-void MirrorRecache();
+// The cached spans the CPU wrote, collected just now, are copied in again
+// ahead of the next draw or dispatch.
+void MirrorRefreshWritten();
+// Before a submission: what the CPU may have written unwatched is copied in.
+void MirrorRefreshCached();
 // Draw arguments the GPU can read where they are: true when the mirror holds
 // them (written there by a dispatch, or copied in now), so the draw reads
 // them indirectly instead of the CPU waiting for them.

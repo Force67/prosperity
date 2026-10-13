@@ -309,6 +309,18 @@ bool MirrorOwnsAny(u64 first, u64 end) {
   return false;
 }
 
+bool MirrorUsesImport(rhi::Buffer* buffer) {
+  const u64 first = reinterpret_cast<u64>(buffer->desc().host_pointer);
+  const u64 end = first + buffer->desc().size;
+  if (!MirrorOwnsAny(first, end))
+    return false;
+  for (u64 block = first & ~(kMirrorBlock - 1); block < end;
+       block += kMirrorBlock)
+    if (MirrorOwned(block) && OwnAt(block).import == buffer)
+      return true;
+  return false;
+}
+
 // Whether a dispatch's output at [base, base+bytes) can stay on the GPU.
 bool MirrorOwnable(u64 base, u64 bytes) {
   if (!kMirrorOwn || !gcn::g_direct_table || !Device().caps().copy_after ||
@@ -345,6 +357,7 @@ void MirrorOwn(u64 base, u64 bytes) {
       o.lo = lo;
       o.hi = hi;
       DirectRedirect(block, g_mirror->address() + MirrorOffset(block));
+      g_mirror_was_owned.insert(block);
     } else {
       o.lo = base::Min(o.lo, lo);
       o.hi = base::Max(o.hi, hi);
@@ -762,8 +775,21 @@ bool GpuWriteGuest(u64 dst, u64 bytes, rhi::Buffer* src, u64 src_off) {
 }
 
 // Direct reads of guest memory come from VRAM: a block is copied into the
-// mirror on its first read, watched, and handed back to the host pages while
-// the CPU writes it, to come back after a few quiet frames.
+// mirror on its first read and stays there. What the CPU writes later is copied
+// in again before the next submission: the pages it wrote when they are
+// watched, the whole block when it writes them too often to watch.
+
+// Watches [first, end), however often the CPU writes it: a fault per written
+// page costs less than copying unwritten ones. Pages that cannot be watched
+// are copied in before every submission instead.
+static bool MirrorWatch(u64 first, u64 end) {
+  if (GuestWriteTracker().Arm(first, end - first, /*hot=*/true))
+    return true;
+  for (u64 page = first; page < end; page += kMirrorHotPage)
+    if (!GuestWriteTracker().Arm(page, kMirrorHotPage, /*hot=*/true))
+      g_mirror_hot.insert(page);
+  return false;
+}
 
 u64 MirrorCacheBlock(u64 block) {
   if (!kMirror || !Mirror() || !g_mirror->address() || !InMirror(block) ||
@@ -774,9 +800,9 @@ u64 MirrorCacheBlock(u64 block) {
     return address;
   if (!Device().CommitSparse(g_mirror, MirrorOffset(block), kMirrorBlock))
     return 0;
-  if (!GuestImportable(block, kMirrorBlock) ||
-      !GuestWriteTracker().Arm(block, kMirrorBlock))
+  if (!GuestImportable(block, kMirrorBlock))
     return 0;
+  const bool watched = MirrorWatch(block, block + kMirrorBlock);
   rhi::CommandList* list = nullptr;
   if (g_frame.recording) {
     EndRegion();
@@ -788,9 +814,9 @@ u64 MirrorCacheBlock(u64 block) {
   }
   if (!MirrorCopy(block, kMirrorBlock, /*to_guest=*/false, list))
     return 0;
-  g_mirror_clean.insert(block);
+  if (watched)
+    g_mirror_clean.insert(block);
   g_mirror_cached.insert(block);
-  g_mirror_uncached.erase(block);
   return address;
 }
 
@@ -893,30 +919,73 @@ rhi::Buffer* GuestPredicate(u64* offset) {
   return g_predicate;
 }
 
-void MirrorUncache(u64 block) {
-  if (!g_mirror_cached.erase(block))
-    return;
-  if (!MirrorOwned(block))
-    DirectRestore(block);
-  g_mirror_uncached[block] = g_frame.num;
+namespace {
+bool MirrorLive(u64 at) {
+  const u64 block = at & ~(kMirrorBlock - 1);
+  return g_mirror_cached.count(block) && !MirrorOwned(block);
 }
 
-void MirrorRecache() {
-  constexpr u64 kQuietFrames = 3;
-  u32 budget = 32;
-  for (auto it = g_mirror_uncached.begin();
-       it != g_mirror_uncached.end() && budget;) {
-    const u64 block = it->first;
-    if (it->second + kQuietFrames > g_frame.num) {
-      ++it;
+// Where a copy into the mirror goes so the next draw or dispatch sees it.
+rhi::CommandList* MirrorRefreshList() {
+  if (g_frame.recording) {
+    EndRegion();
+    return g_frame.list;
+  }
+  CsBatchBeginImpl();
+  return g_cs_batch_open ? g_cs_list : nullptr;
+}
+}  // namespace
+
+void MirrorRefreshWritten() {
+  if (g_mirror_stale.empty())
+    return;
+  rhi::CommandList* list = MirrorRefreshList();
+  if (!list)
+    return;
+  // Earlier draws may still read the bytes about to be replaced.
+  list->Barrier(kAccessAll, rhi::kAccessCopyWrite);
+  for (const auto& [first, end] : g_mirror_stale) {
+    if (!MirrorLive(first))
       continue;
-    }
-    ++it;
-    budget--;
+    if (MirrorWatch(first, end))
+      g_mirror_clean.insert(first & ~(kMirrorBlock - 1));
+    MirrorCopy(first, end - first, /*to_guest=*/false, list);
+  }
+  g_mirror_stale.clear();
+}
+
+void MirrorRefreshCached() {
+  CollectGuestWrites();
+  // The CPU took these back; its fault waited for their bytes to land.
+  base::Vector<u64> released;
+  for (u64 block : g_mirror_was_owned)
+    if (!MirrorOwned(block))
+      released.push_back(block);
+  for (u64 block : released) {
+    g_mirror_was_owned.erase(block);
+    g_mirror_cached.erase(block);
     if (const u64 address = MirrorCacheBlock(block))
       DirectRedirect(block, address);
-    else
-      g_mirror_uncached.erase(block);
+  }
+  if (g_mirror_hot.empty())
+    return;
+  rhi::CommandList* list = MirrorRefreshList();
+  if (!list)
+    return;
+  list->Barrier(kAccessAll, rhi::kAccessCopyWrite);
+  base::Vector<u64> pages(g_mirror_hot.begin(), g_mirror_hot.end());
+  base::Sort(pages.begin(), pages.end());
+  for (size_t i = 0; i < pages.size();) {
+    const u64 first = pages[i];
+    u64 end = first + kMirrorHotPage;
+    for (++i; i < pages.size() && pages[i] == end; ++i)
+      end += kMirrorHotPage;
+    const bool copy = MirrorLive(first);
+    for (u64 page = first; page < end; page += kMirrorHotPage)
+      if (!copy || GuestWriteTracker().Arm(page, kMirrorHotPage, /*hot=*/true))
+        g_mirror_hot.erase(page);
+    if (copy)
+      MirrorCopy(first, end - first, /*to_guest=*/false, list);
   }
 }
 
@@ -1063,8 +1132,9 @@ void MirrorNoteGuestWrites(u64 first, u64 end, bool announced) {
     if (g_own && InMirror(block) && !MirrorOwned(block))
       OwnAt(block).cpu_dirty.store(1, base::memory_order_release);
     g_mirror_clean.erase(block);
-    if (!g_mirror_cached.empty())
-      MirrorUncache(block);
+    if (g_mirror_cached.count(block))
+      g_mirror_stale.push_back({base::Max(first, block),
+                                base::Min(end, block + kMirrorBlock)});
   }
 }
 

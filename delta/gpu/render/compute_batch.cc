@@ -423,6 +423,10 @@ bool WaitBatch(u64 batch) {
   return Device().Wait(submission ? submission : Device().LastSubmission());
 }
 
+bool WaitSubmission(u64 submission) {
+  return !submission || Device().Wait(submission);
+}
+
 void DeferLabelsToGpu() {
   g_labels_deferrable = true;
 }
@@ -457,6 +461,15 @@ void ReportBatchState() {
             g_cs_batch_done, g_last_submitted_id, g_publish_batch,
             (int)g_cs_batches[g_cs_batch_cur].in_frame, (int)g_frame.recording,
             writes.c_str());
+}
+
+u64 SubmitRecordedWork() {
+  if (g_cs_batch_open && !CsBatchSubmit())
+    return 0;
+  if (g_frame.recording && g_frame.draws != g_frame.draws_at_chunk &&
+      !SubmitFrameChunk())
+    return 0;
+  return Device().LastSubmission();
 }
 
 void SubmitForPublishedLabels() {
