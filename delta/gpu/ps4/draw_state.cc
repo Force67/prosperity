@@ -1,7 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * How Liverpool register state becomes one renderer draw. See draw_state.h.
  */
 
 #include "gpu/ps4/draw_state.h"
@@ -49,18 +47,9 @@ DELTA_OPTION(const char*, kSkipShList, "DELTA_GPU_SKIPSH", nullptr);
 namespace gpu::ps4 {
 namespace {
 
-// Sampler bindings tracked per draw. This has to be the number the recompiler
-// and the descriptor set layout use, not a smaller one of its own: texs[i] IS
-// the module's set-0 binding i, and a vertex texture is numbered after the last
-// pixel one. Truncating the pixel list here left every vertex binding one short
-// per dropped entry, so a shader with 17+ samplers had a volume view land on a
-// binding its module had declared 2D, and its last bindings written by nothing
-// at all (VUID-vkCmdDrawIndexed-viewType-07752 / -None-08114).
 constexpr u32 kMaxTrackedTextures = render::DrawInfo::kMaxDrawTextures;
-// An index or vertex count beyond this is a decode error, not a draw.
 constexpr u32 kMaxElementCount = 0x100000;
 
-// Which sampled images need a different module than their code alone implies.
 struct TextureMasks {
   u32 tex_3d = 0;
   u32 tex_1d = 0;
@@ -68,7 +57,6 @@ struct TextureMasks {
   u32 tex_cube = 0;
 };
 
-// Bytes per texel of a CB_COLORn_INFO.FORMAT, or 0 for one this does not know.
 u32 CbFormatBytes(u32 format) {
   switch (format) {
     case 1:
@@ -100,8 +88,6 @@ u32 CbFormatBytes(u32 format) {
   }
 }
 
-// The CB registers carry a pitch and a slice, not a width and a height, so the
-// screen scissor is the only place the render-target geometry appears.
 u32 FbWidth(const Regs& regs) {
   const u32 w = regs[mmPA_SC_SCREEN_SCISSOR_BR] & 0xFFFF;
   return w ? w : 1920;
@@ -146,8 +132,6 @@ void FillDrawTex(render::DrawInfo::DrawTex& dt, const gcn::TImage& t) {
   dt.src = t.src;
 }
 
-// Bind one tracked image, recording what its descriptor forces the module to
-// be built with.
 void BindTexture(render::DrawInfo& d,
                  const gcn::TImage& t,
                  u32 slot,
@@ -159,26 +143,18 @@ void BindTexture(render::DrawInfo& d,
     masks.tex_1d |= 1u << slot;
   if (t.type == 11)
     masks.tex_cube |= 1u << slot;
-  // T# NUM_FORMAT 4/5 are UINT/SINT: the texels are packed bits, not a colour,
-  // and must reach the shader unconverted.
   if (kIntegerRt && !t.storage && (t.nfmt == 4 || t.nfmt == 5))
     masks.tex_uint |= 1u << slot;
 }
 
-// --- packet decode ---------------------------------------------------------
-
-// The counts of an indirect draw, read here:
-//   indirect:       vertexCount, instanceCount, startVertex, startInstance
-//   index-indirect: indexCount,  instanceCount, startIndex, baseVertex, ...
 void ReadIndirectArgs(render::Renderer& renderer,
                       const DrawPacket& packet,
                       u64 args,
                       render::DrawInfo& d) {
   const u32 op = packet.op;
   const u32 need = op == IT_DRAW_INDIRECT ? 16u : 20u;
-  // Compute results stay GPU-resident and are written back lazily, so reading
-  // guest memory without flushing that range first yields the stale zeros the
-  // buffer was allocated with.
+  // Compute results are written back lazily, so guest memory is read only after
+  // its range is flushed.
   FlushForWalkRead(renderer, args, need, "indirect");
   const bool mapped = host_memory::IsMemoryRangeMapped(
       reinterpret_cast<const void*>(args), need);
@@ -191,7 +167,9 @@ void ReadIndirectArgs(render::Renderer& renderer,
   if (op == IT_DRAW_INDIRECT) {
     d.vertex_count = a[0];
   } else if (packet.index_base) {
-    const u32 index_bytes = packet.index_type == 1 ? 4 : packet.index_type == 2 ? 1 : 2;
+    const u32 index_bytes = packet.index_type == 1   ? 4
+                            : packet.index_type == 2 ? 1
+                                                     : 2;
     const u64 base = packet.index_base + static_cast<u64>(a[2]) * index_bytes;
     if (host_memory::IsMemoryRangeMapped(
             reinterpret_cast<const void*>(base),
@@ -205,16 +183,12 @@ void ReadIndirectArgs(render::Renderer& renderer,
     d.instance_count = a[1];
 }
 
-// The draws are indexed triangle lists; without the index buffer (drawing raw
-// vertices as a strip) batched sprites smear into long diagonal triangles.
-// DRAW_INDEX_AUTO has no index buffer (sequential verts).
 void ResolveIndexBuffer(render::Renderer& renderer,
                         const DrawPacket& packet,
                         render::DrawInfo& d) {
   const u32 op = packet.op, count = packet.count;
   const u32* body = packet.body;
 
-  // DRAW_INDEX_2 (5 dwords): maxSize, baseLo, baseHi, index_count, initiator.
   if (op == IT_DRAW_INDEX_2 && count >= 4) {
     const u64 base = (static_cast<u64>(body[2] & 0xFF) << 32) | body[1];
     const u32 index_count = body[3];
@@ -228,10 +202,6 @@ void ResolveIndexBuffer(render::Renderer& renderer,
     }
   }
 
-  // DRAW_INDIRECT / DRAW_INDEX_INDIRECT take their counts from a struct in
-  // guest memory at IT_SET_BASE(1) + dataOffset, not from the packet.
-  // The GPU reads resident or staged arguments when the draw runs. Indexed
-  // draws cover the whole index buffer until those arguments select a range.
   if ((op == IT_DRAW_INDIRECT || op == IT_DRAW_INDEX_INDIRECT) && count >= 1 &&
       packet.indirect_base) {
     const u64 args = packet.indirect_base + body[0];
@@ -261,15 +231,11 @@ void ResolveIndexBuffer(render::Renderer& renderer,
     }
   }
 
-  // DRAW_INDEX_OFFSET_2 (maxSize, indexOffset, indexCount, initiator) draws
-  // from the index buffer IT_INDEX_BASE already set, starting indexOffset
-  // entries in. SotC submits ~47% of its draws this way, and leaving the packet
-  // undecoded left them with no index buffer at all: they fell back to the
-  // vertex count, which a hand-fetch V# reports as 1, and then declined for
-  // having fewer than 3 vertices.
   if (op == IT_DRAW_INDEX_OFFSET_2 && count >= 3) {
     const u32 index_offset = body[1], index_count = body[2];
-    const u32 index_bytes = packet.index_type == 1 ? 4 : packet.index_type == 2 ? 1 : 2;
+    const u32 index_bytes = packet.index_type == 1   ? 4
+                            : packet.index_type == 2 ? 1
+                                                     : 2;
     const u64 base =
         packet.index_base + static_cast<u64>(index_offset) * index_bytes;
     const bool accepted =
@@ -286,14 +252,8 @@ void ResolveIndexBuffer(render::Renderer& renderer,
   }
 }
 
-// --- register state --------------------------------------------------------
-
-// A stale CB_COLORn_BASE remains programmed during depth-only passes, so a
-// target counts as bound only when its write mask and its CB_COLORn_INFO format
-// are both live. Returns the mask of targets with an integer texel format: the
-// PS must declare an integer output for one, so that belongs to the module's
-// identity. Kept as raw register bits rather than a VkFormat: this layer must
-// not depend on the backend.
+// A stale CB_COLORn_BASE stays programmed in depth-only passes, so a target is
+// bound only with a live mask and format.
 u32 ResolveRenderTargets(const Regs& regs,
                          render::DrawInfo& d,
                          u64 vs_addr,
@@ -303,9 +263,6 @@ u32 ResolveRenderTargets(const Regs& regs,
   d.scissor_tl = regs[mmPA_SC_VPORT_SCISSOR_0_TL];
   d.scissor_br = regs[mmPA_SC_VPORT_SCISSOR_0_BR];
 
-  // Surface geometry of MRT0, independent of how much of it this draw touches.
-  // PITCH_TILE_MAX counts 8-texel tiles minus one; SLICE_TILE_MAX counts
-  // 64-texel tiles of the whole slice, so height = slice / pitch.
   const u32 pitch = ((regs[mmCB_COLOR0_PITCH] & 0x7FFu) + 1u) * 8u;
   const u64 slice =
       static_cast<u64>((regs[mmCB_COLOR0_SLICE] & 0x3FFFFFu) + 1u) * 64u;
@@ -324,8 +281,6 @@ u32 ResolveRenderTargets(const Regs& regs,
     d.mrt_info[rt] = info;
     d.mrt_count = rt + 1;
     d.mrt_bound_mask |= 1u << rt;
-    // Each target carries its own geometry; the screen scissor is one global
-    // that says how much of them this pass draws into.
     const u32 rt_pitch =
         ((regs[mmCB_COLOR0_PITCH + rt * kCbColorStride] & 0x7FFu) + 1u) * 8u;
     const u64 rt_slice =
@@ -334,9 +289,6 @@ u32 ResolveRenderTargets(const Regs& regs,
         64u;
     d.mrt_surf_w[rt] = rt_pitch;
     d.mrt_surf_h[rt] = rt_pitch ? static_cast<u32>(rt_slice / rt_pitch) : 0u;
-    // One slice of an array or cube surface lives rt_slice texels further on;
-    // rendering every slice into the base's image made the six faces of a cube
-    // overwrite each other. A layered pass (START < MAX) keeps the base.
     if (rt == 0) {
       d.rt_tile_mode = regs[mmCB_COLOR0_ATTRIB] & 0x1Fu;
       const u32 view = regs[mmCB_COLOR0_VIEW];
@@ -347,7 +299,6 @@ u32 ResolveRenderTargets(const Regs& regs,
         d.mrt_base[rt] = base + first * rt_slice * bytes;
       }
     }
-    // A FAST_CLEAR target is cleared by writing its CMASK, never its pixels.
     if ((info >> 13) & 1u) {
       d.mrt_dcc_base[rt] =
           static_cast<u64>(regs[mmCB_COLOR0_CMASK + rt * kCbColorStride]) << 8;
@@ -362,23 +313,14 @@ u32 ResolveRenderTargets(const Regs& regs,
       mrt_uint_mask |= 1u << rt;
   }
   d.rt_base = d.mrt_count ? d.mrt_base[0] : 0;
-  // A gap in the bound targets (slot 0 masked off while a higher slot is live)
-  // leaves the primary null and drops the whole draw downstream, taking with it
-  // a pass that renders only into MRT1.
   TraceMrtSlotZeroGap(d, target_mask, vs_addr, ps_addr);
   TraceNoMrtBound(regs, d, target_mask, vs_addr, ps_addr);
   return mrt_uint_mask;
 }
 
-// Blend, write masks and GNM's fast clear. Bit 30 of CB_BLENDn_CONTROL is the
-// per-target blend enable; when clear the draw writes opaquely. Isaac's room
-// vignette and its additive overlays rely on that: rendered with a single
-// hardcoded blend they came out opaque and blacked out the scene.
 void ResolveColorState(const Regs& regs, u64 ps_addr, render::DrawInfo& d) {
   d.blend_control = regs[mmCB_BLEND0_CONTROL];
   d.blend_enable = (d.blend_control >> 30) & 1u;
-  // Target 0 mirrors blend_control/blend_enable, so the single-RT path is
-  // unchanged; an MRT draw blends each attachment as the guest programmed it.
   d.mrt_blend[0] = d.blend_control;
   if (d.blend_enable)
     d.mrt_blend_mask |= 1u;
@@ -396,10 +338,6 @@ void ResolveColorState(const Regs& regs, u64 ps_addr, render::DrawInfo& d) {
   d.shader_mask = regs[mmCB_SHADER_MASK];
   d.col_format = regs[mmSPI_SHADER_COL_FORMAT];
 
-  // GNM fast clear: RECT_LIST (VGT prim 17), no pixel shader, no vertex
-  // attributes, at least one colour target bound. The colour is in
-  // CB_COLORn_CLEAR_WORD0/1, encoded in each target's own format. A depth-only
-  // pass looks similar but binds no colour target, so mrt_count separates them.
   d.is_clear_rect =
       d.prim_type == 17 && !ps_addr && !d.num_vattrs && d.mrt_count != 0;
   if (d.is_clear_rect) {
@@ -413,10 +351,6 @@ void ResolveColorState(const Regs& regs, u64 ps_addr, render::DrawInfo& d) {
   d.color_control = regs[mmCB_COLOR_CONTROL];
 }
 
-// A 3D title binds a Z buffer and Z-tests the world; 2D titles leave DB_Z_INFO
-// invalid so no depth attachment is bound. Z and stencil render into one Vulkan
-// depth/stencil image; compute bridges expose their separate guest bases when
-// later shaders consume either plane.
 void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
   const u32 depth_control = regs[mmDB_DEPTH_CONTROL];
   d.depth_control = depth_control;
@@ -429,8 +363,8 @@ void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
   const u32 render_control = regs[mmDB_RENDER_CONTROL];
   d.render_control = render_control;
   const u32 size = regs[mmDB_DEPTH_SIZE];
-  d.depth_w = ((size & 0x7FFu) + 1u) * 8u;          // PITCH_TILE_MAX
-  d.depth_h = (((size >> 11) & 0x7FFu) + 1u) * 8u;  // HEIGHT_TILE_MAX
+  d.depth_w = ((size & 0x7FFu) + 1u) * 8u;
+  d.depth_h = (((size >> 11) & 0x7FFu) + 1u) * 8u;
   d.depth_clear_draw = (render_control & 1u) != 0;
   d.stencil_clear_draw = ((render_control >> 1) & 1u) != 0;
   d.depth_valid = (z_info & 0x3) != 0;
@@ -447,8 +381,6 @@ void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
     std::memcpy(&d.depth_clear, regs.At(mmDB_DEPTH_CLEAR), 4);
     if (!(d.depth_clear >= 0.0f && d.depth_clear <= 1.0f))
       d.depth_clear = 1.0f;
-    // DB_Z_INFO.TILE_SURFACE_ENABLE: the surface has HTILE, and a fill of it
-    // is a depth clear (GTA:SA clears its scene depth with a compute fill).
     if ((z_info >> 29) & 1u) {
       const u64 htile = static_cast<u64>(regs[mmDB_HTILE_DATA_BASE]) << 8;
       if (IsGuestAddress(htile))
@@ -465,22 +397,18 @@ void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
       d.stencil_refmask_bf = regs[mmDB_STENCILREFMASK_BF];
     }
   }
-  // DELTA_GPU_FORCEDEPTH: exercise the depth attachment/clear/pipeline path on
-  // titles that bind no Z buffer, to validate it end to end. func=ALWAYS so no
-  // fragment is hidden (visible output unchanged); depth_base keys a synthetic
-  // depth image off the RT.
   if (kForceDepth && !d.depth_base && d.rt_base) {
     d.depth_base = d.rt_base;
     d.depth_test_enable = true;
     d.depth_write_enable = true;
-    d.depth_func = 7;  // ALWAYS
+    d.depth_func = 7;
     d.depth_clear = 1.0f;
   }
 }
 
 void ResolveRasterState(const Regs& regs, render::DrawInfo& d) {
   const u32 mode = regs[mmPA_SU_SC_MODE_CNTL];
-  d.cull_mode = mode & 0x3;  // CULL_FRONT[0] | CULL_BACK[1]
+  d.cull_mode = mode & 0x3;
   d.front_ccw = ((mode >> 2) & 1u) == 0;
   std::memcpy(&d.viewport_x_scale, regs.At(mmPA_CL_VPORT_XSCALE), 4);
   std::memcpy(&d.viewport_x_offset, regs.At(mmPA_CL_VPORT_XOFFSET), 4);
@@ -490,14 +418,6 @@ void ResolveRasterState(const Regs& regs, render::DrawInfo& d) {
   std::memcpy(&d.viewport_z_offset, regs.At(mmPA_CL_VPORT_ZOFFSET), 4);
 }
 
-// --- the heuristic (pre-recompiler) fallback -------------------------------
-
-// The fetch shader the VS calls, or 0. s0:s1 is only a fetch-shader pointer
-// when the VS actually calls one (s_swappc_b64). SotC parks its per-draw
-// shader-resource-table pointer there instead: treating THAT as a fetch shader
-// tracked phantom vertex buffers out of live constant data, and hashing the
-// pointee into the shader key made a fresh key nearly every draw: 96% of all
-// recompile-cache misses (4183 of 4352 over 210s).
 u64 FetchShaderAddress(const u32* vud, u64 vs_addr) {
   if (!IsGuestAddress(vs_addr) ||
       !gcn::CallsFetchShader(*gcn::CachedProgram(vs_addr, 4096)))
@@ -506,13 +426,9 @@ u64 FetchShaderAddress(const u32* vud, u64 vs_addr) {
   return IsGuestAddress(fetch) ? fetch : 0;
 }
 
-// The default transform buffer and vertex stream: the recompiled path keys its
-// pipelines on the stride and falls back to this cbuffer.
 void ResolveDefaultSources(const u32* vud,
-                             u64 fetch_addr,
-                             render::DrawInfo& d) {
-  // Default to the sgpr[4..7] V# (the common VS cbuffer slot); the recompiled
-  // path re-resolves it from the SGPR the VS actually reads.
+                           u64 fetch_addr,
+                           render::DrawInfo& d) {
   const u64 cbuf = UserDataPointer(vud, 4);
   if (IsGuestAddress(cbuf)) {
     std::memcpy(d.mvp, reinterpret_cast<const void*>(cbuf), 64);
@@ -529,10 +445,6 @@ void ResolveDefaultSources(const u32* vud,
   d.vertex_stride = vbs[0].stride;
 }
 
-// --- sampled images --------------------------------------------------------
-
-// The images the pixel shader samples, in its set-0 binding order. Returns the
-// decoded program, which the recompiled path reuses.
 base::SharedPointer<const gcn::Program> ResolvePsTextures(
     render::Renderer& renderer,
     const Regs& regs,
@@ -554,9 +466,8 @@ base::SharedPointer<const gcn::Program> ResolvePsTextures(
   if (texs.empty())
     return ps_prog;
 
-  // Preserve every valid GFX7 T# address. Format support is relevant only when
-  // uploading guest memory; a T# with R32F/RG16F/RGBA16F semantics may alias a
-  // live renderer RT and must still resolve to that image.
+  // Keep every valid T# address: a format may alias a live renderer RT and must
+  // still resolve to it.
   const gcn::TImage& first = texs[0];
   d.tex_base = first.valid ? first.base : 0;
   d.tex_w = first.width;
@@ -592,10 +503,6 @@ base::SharedPointer<const gcn::Program> ResolvePsTextures(
   return ps_prog;
 }
 
-// A vertex texture fetch takes its own set-0 bindings, numbered after the PS's,
-// so its descriptors continue the same list. Bloodborne's character sheet draws
-// that way; without it the draw is rejected and falls back to the heuristic
-// quad renderer, which paints the atlas as a staircase.
 void ResolveVsTextures(const u32* vud,
                        u64 vs_addr,
                        render::DrawInfo& d,
@@ -612,10 +519,6 @@ void ResolveVsTextures(const u32* vud,
   }
 }
 
-// --- the recompiled-shader path --------------------------------------------
-
-// DELTA_GPU_SKIPSH=addr[,addr...] (hex): refuse to recompile draws whose VS or
-// PS lives at one of these guest addresses, for shader-hang bisection.
 bool ShaderSkipped(u64 vs_addr, u64 ps_addr) {
   static const base::Vector<u64> kSkipped = [] {
     base::Vector<u64> list;
@@ -636,11 +539,6 @@ bool ShaderSkipped(u64 vs_addr, u64 ps_addr) {
                                           ps_addr) != kSkipped.end());
 }
 
-// Group the attributes' V#s into vertex bindings. Attributes that interleave in
-// one buffer (same stride, base within one stride of the binding base) share a
-// binding with distinct offsets; attributes fed from a separate buffer get
-// their own. SotC streams position/normal/uv from distinct buffers with
-// distinct strides, which the old single-stream model declined outright.
 RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
                                   const gcn::VBuffer* attr_vbs,
                                   u32 attr_count,
@@ -676,28 +574,19 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
     }
     attr_binding[i] = static_cast<u32>(sel);
   }
-  // Second pass: offsets are relative to each binding's final (lowest) base.
   for (u32 i = 0; i < attr_count; i++) {
     const gcn::ShaderAttr& a = rc.attrs[i];
     const gcn::VBuffer& vb = attr_vbs[i];
     const u32 binding = attr_binding[i];
     const u64 offset = vb.base - reinterpret_cast<u64>(d.vbufs[binding].data);
-    // Strided bindings must keep every attribute inside one record; a stride-0
-    // (constant) binding has no record extent to bound.
     if (d.vbufs[binding].stride && offset >= d.vbufs[binding].stride)
       return RecompStatus::kAttrOffset;
-    // A typed fetch (tbuffer_load_format_*) states its own format and the
-    // hardware ignores the V#'s; only untyped fetches read it.
     const u32 dfmt = a.inst_dfmt ? a.inst_dfmt : vb.dfmt;
     const u32 nfmt = a.inst_dfmt ? a.inst_nfmt : vb.nfmt;
     d.vattrs[d.num_vattrs++] = {a.location,  binding, static_cast<u32>(offset),
                                 a.num_comps, dfmt,    nfmt};
   }
 
-  // vertex_data/vertex_stride mirror the first per-vertex (strided) binding for
-  // the heuristic fallback and clear detection; vertex_count is bounded by the
-  // smallest strided binding's record count (stride-0 constant bindings do not
-  // constrain it).
   u32 primary = 0;
   while (primary < d.num_vbufs &&
          (!d.vbufs[primary].stride || d.vbufs[primary].per_instance))
@@ -712,8 +601,6 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
   return RecompStatus::kOk;
 }
 
-// Bit n: vertex input location n is 8- or 16-bit UINT; bit 16+n: SINT. The
-// backend fetches those through a SCALED format (see VertexFormat).
 u32 IntAttrMask(const gcn::Recompiled& rc,
                 const gcn::VBuffer* attr_vbs,
                 u32 attr_count) {
@@ -730,10 +617,6 @@ u32 IntAttrMask(const gcn::Recompiled& rc,
   return mask;
 }
 
-// Resolve every cbuffer V# an emitted stage reads, following EUD/SRT pointer
-// chains (FOX loads the V# through an extended-user-data pointer, so it is not
-// sitting directly in user data at cb.ud_sgpr). Bindings are assigned by the
-// translator and shared across both stages in descriptor set 1.
 void ResolveCbufferBindings(
     const base::Vector<gcn::ShaderCbuf>& cbufs,
     const u32* user_data,
@@ -752,13 +635,11 @@ void ResolveCbufferBindings(
     gcn::VBuffer vb{};
     if (const gcn::VBuffer* found = gcn::FindCbuf(
             resolved, gcn::CbufKey(cb.ud_sgpr, cb.pointer, cb.version)))
-      vb = *found;  // EUD-resolved V# (handles indirection)
+      vb = *found;
     else if (cb.pointer && cb.ud_sgpr + 1 < 16)
-      vb.base = UserDataPointer(user_data, cb.ud_sgpr);  // flat pointer inline
+      vb.base = UserDataPointer(user_data, cb.ud_sgpr);
     else if (!cb.pointer && cb.ud_sgpr + 3 < 16)
-      vb = gcn::DecodeVBuffer(&user_data[cb.ud_sgpr]);  // inline V#
-    // An s_load table carries no size; the shader's own highest read bounds the
-    // window.
+      vb = gcn::DecodeVBuffer(&user_data[cb.ud_sgpr]);
     u64 bytes = vb.stride ? (u64)vb.stride * vb.num_records : vb.num_records;
     if (cb.pointer)
       bytes = (u64)cb.num_dwords * 4;
@@ -767,7 +648,7 @@ void ResolveCbufferBindings(
     d.cbufs[cb.binding] = {vb.base, static_cast<u32>(bytes)};
     d.num_cbufs = base::Max(d.num_cbufs, cb.binding + 1);
     if (cb.pointer)
-      continue;  // an SRT root is not a transform buffer
+      continue;
     if (vertex_stage && !resolved_vs_cbuf) {
       resolved_vs_cbuf = true;
       d.cbuf_base = vb.base;
@@ -780,9 +661,6 @@ void ResolveCbufferBindings(
   }
 }
 
-// The live V# behind every raw buffer an emitted stage reads with MUBUF. Same
-// scalar replay as the cbuffers: the descriptor is read at the instruction that
-// consumes it, so an SRT-chained V# lands here as well as an inline one.
 void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
                        const u32* user_data,
                        const base::SharedPointer<const gcn::Program>& program,
@@ -812,11 +690,6 @@ void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
   }
 }
 
-// Run the game's own shaders for this draw: recompile the VS/PS pair (cached)
-// and resolve the live buffers they read. The heuristic fields stay populated
-// as the fallback for a draw this declines.
-// The module identity of a draw: everything GetGraphicsShader keys on except
-// the vertex-input masks, which need the module's attribute list first.
 GraphicsShaderState ShaderStateOf(const Regs& regs,
                                   u64 vs_addr,
                                   const gcn::GsPipeline* gs,
@@ -833,14 +706,6 @@ GraphicsShaderState ShaderStateOf(const Regs& regs,
   state.fetch_addr = fetch_addr;
   state.ps_input_ena = regs[mmSPI_PS_INPUT_ENA];
   state.ps_in_cntl = ps_in_cntl;
-  // A PS names an input SLOT; SPI_PS_INPUT_CNTL_<slot>.OFFSET names the VS
-  // parameter export that slot reads, and it is routinely not the identity.
-  // GTA:SA's UI shader has slot 1 -> param 3: assuming identity handed it the
-  // clip position as a texture coordinate and the vertex colour as a scale, so
-  // every UI quad sampled texel (0,0) and multiplied it by zero, a black
-  // screen over a main menu that was otherwise drawing correctly.
-  // DELTA_GPU_PSCNTL_APPLY=0 goes back to the identity, =<ps addr> applies the
-  // mapping to one shader (Isaac/Undertale/Doom64 are unchanged either way).
   state.honour_ps_in_cntl =
       kCntlApply != 0 && (kCntlApply == 1 || ps_addr == (u64)kCntlApply);
   state.ps_num_interp = regs[mmSPI_PS_IN_CONTROL] & 0x3F;
@@ -912,14 +777,8 @@ RecompStatus ResolveRecompiledShaders(
     }
     if (!IsGuestAddress(vb.base))
       return RecompStatus::kBadAttrs;
-    // A stride-0 V# is a per-draw constant input (all vertices read the same
-    // record) and becomes a stride-0 Vulkan binding. Instance stepping uses a
-    // normal stride indexed by the fetch shader, so a zero stride is
-    // unambiguously a constant.
     attr_vbs[attr_count++] = vb;
   }
-  // The V# formats are not in the code, so a vertex shader fed narrow integer
-  // attributes is a different module; the attribute list is the same in both.
   state.int_attr_mask = IntAttrMask(*rc, attr_vbs, attr_count);
   if (state.int_attr_mask) {
     rc = &GetGraphicsShader(regs, state);
@@ -968,9 +827,6 @@ RecompStatus ResolveRecompiledShaders(
   return RecompStatus::kOk;
 }
 
-// The ES -> GS pipeline shape when the draw enables a geometry shader
-// (VGT_SHADER_STAGES_EN: ES_EN[4:3] = 2 real ES, GS_EN[5]), with no
-// tessellation in front of it. The ES then plays the vertex shader.
 bool ResolveGsPipeline(const Regs& regs, u32 prim_type, gcn::GsPipeline& gs) {
   const u32 stages = regs[mmVGT_SHADER_STAGES_EN];
   if (!((stages >> 5) & 1) || ((stages >> 3) & 3) != 2 || (stages & 7))
@@ -1007,7 +863,6 @@ bool BuildDrawInfo(render::Renderer& renderer,
   d.prim_type = regs[mmVGT_PRIMITIVE_TYPE];
   gcn::GsPipeline gs;
   const bool has_gs = ResolveGsPipeline(regs, d.prim_type, gs);
-  // Under a GS the vertex stage is the ES; the VS slot holds its copy shader.
   const u64 vs_addr = has_gs ? regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES)
                              : regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS);
   const u32* vud = regs.At(has_gs ? mmSPI_SHADER_USER_DATA_ES_0
@@ -1040,7 +895,6 @@ bool BuildDrawInfo(render::Renderer& renderer,
       masks, mrt_uint_mask, d.mrt_bound_mask, d);
   if (auto_vertex_count && auto_vertex_count <= kMaxElementCount)
     d.vertex_count = auto_vertex_count;
-  // CB_COLOR0_VIEW.SLICE_MAX[23:13]: the slices a layered pass can reach.
   if (status == RecompStatus::kOk && d.recomp->writes_layer)
     d.rt_layers = ((regs[mmCB_COLOR0_VIEW] >> 13) & 0x7FF) + 1;
 
@@ -1051,9 +905,6 @@ bool BuildDrawInfo(render::Renderer& renderer,
   TraceVertexAttrs(d);
   TraceWorldGeometry(regs, d);
 
-  // DELTA_GPU_SKIPSTALE: drop draws that sample a wide (>=2048) buffer, to
-  // hide a title's stale full-screen video-buffer blit (Doom64's undecoded 4K
-  // menu background) so the menu items drawn on top become readable.
   if (kSkipStale && d.tex_base && d.tex_w >= 2048)
     return false;
   return d.vertex_data || (d.recomp && d.recomp->ok && d.num_vattrs == 0);
@@ -1065,7 +916,6 @@ void PrefetchDrawShaders(const Regs& regs) {
   const u64 vs_addr = has_gs ? regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES)
                              : regs.ShaderAddr(mmSPI_SHADER_PGM_LO_VS);
   const u64 ps_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS);
-  // Most draws reuse a shader pair; only a new one is worth resolving.
   static base::HashSet<u64> seen;
   static const guest::SessionReset reset_seen(
       [] { guest::ResetResource(seen); });

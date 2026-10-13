@@ -2,18 +2,6 @@
 
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * Minimal SPIR-V module builder. Emits a valid SPIR-V binary word stream
- * directly, so the GCN recompiler can translate straight to SPIR-V and hand
- * the result to a SPIRV-Tools optimize pass. The translator models the GCN
- * register file as Private-storage variables and relies on spirv-opt's SSA
- * rewrite + performance passes to legalise and optimise the naive output.
- *
- * Scope: enough of SPIR-V 1.3 (Vulkan 1.1) to express the shaders the
- * recompiler needs: scalar/vector int+float arithmetic, GLSL.std.450
- * ext-inst, sampled images, input/output/private/pushconstant/uniform/
- * storage-buffer/workgroup variables, structured control flow. Not a general
- * assembler.
  */
 
 #include "base/arch.h"
@@ -30,26 +18,19 @@ namespace gpu::gcn::spirv {
 
 using Id = u32;
 
-// SSA-ish module builder. Instructions are accumulated into the SPIR-V logical
-// sections (the layout rules require a fixed section order); Assemble()
-// concatenates them behind the 5-word header. Types and constants are de-duped
-// through a packed-integer cache (struct/function types through an exact
-// member-list map).
 class Module {
  public:
   Module();
 
-  // ---- id + assembly ----
   Id Alloc() { return bound_++; }
   base::Vector<u32> Assemble() const;
 
-  // ---- types (cached) ----
   Id TypeVoid();
   Id TypeBool();
   Id TypeInt(u32 width = 32, bool sign = false);
   Id TypeFloat(u32 width = 32);
   Id TypeVec(Id comp, u32 count);
-  Id TypeArray(Id elem, u32 len);  // length via an emitted u32 const
+  Id TypeArray(Id elem, u32 len);
   Id TypeRuntimeArray(Id elem);
   Id TypeStruct(const base::Vector<Id>& members);
   Id TypePointer(spv::StorageClass sc, Id pointee);
@@ -63,15 +44,13 @@ class Module {
                spv::ImageFormat fmt);
   Id TypeSampledImage(Id image_type);
 
-  // ---- constants (cached) ----
   Id ConstU32(u32 v);
   Id ConstI32(i32 v);
   Id ConstF32(float v);
   Id ConstBool(bool v);
-  Id ConstComposite(Id type, const base::Vector<Id>& parts);  // not cached
+  Id ConstComposite(Id type, const base::Vector<Id>& parts);
   Id ConstNull(Id type);
 
-  // ---- global variables / decorations ----
   Id Variable(Id ptr_type, spv::StorageClass sc, Id init = 0);
   void Decorate(Id target,
                 spv::Decoration dec,
@@ -83,18 +62,10 @@ class Module {
   void Name(Id target, const base::String& n);
   void MemberName(Id struct_type, u32 member, const base::String& n);
 
-  // ---- debug info ----
-  // OpString (debug section); the id is what OpLine references as a file.
   Id String(const base::String& s);
-  // OpLine marker in the function body: subsequent instructions carry
-  // (file, line) until the next marker. The GCN recompiler uses line == the
-  // instruction's dword pc, so spirv-dis output maps back to the guest code.
   void Line(Id file, u32 line);
-  // Function-body words emitted so far; the delta across an emission tells a
-  // caller exactly how much SPIR-V one guest instruction produced.
   size_t BodyWords() const { return fn_body_.size(); }
 
-  // entry point + exec modes
   void EntryPoint(spv::ExecutionModel model,
                   Id fn,
                   const base::String& name,
@@ -103,33 +74,26 @@ class Module {
                 spv::ExecutionMode mode,
                 const base::Vector<u32>& operands = {});
   void Capability(spv::Capability cap);
-  // OpExtension: the SPIR-V extension string a capability belongs to. Emitted
-  // after the capabilities and before the ext-inst imports, per the module's
-  // required section order.
   void Extension(const base::String& name);
   void PhysicalStorageBuffers();
 
   Id GlslExt() const { return glsl_ext_; }
 
-  // ---- function + block construction ----
-  // Begin a function (emits OpFunction + the entry OpLabel); returns the fn id.
-  Id BeginFunction(Id ret_type,
-                   Id fn_type,
-                   const base::Vector<Id>& parameter_types = {},
-                   base::Vector<Id>* parameter_ids = nullptr,
-                   spv::FunctionControlMask control =
-                       spv::FunctionControlMask::MaskNone);
-  Id NewBlock();             // allocate a label id (not yet opened)
-  void OpenBlock(Id label);  // emit OpLabel for a previously allocated id
+  Id BeginFunction(
+      Id ret_type,
+      Id fn_type,
+      const base::Vector<Id>& parameter_types = {},
+      base::Vector<Id>* parameter_ids = nullptr,
+      spv::FunctionControlMask control = spv::FunctionControlMask::MaskNone);
+  Id NewBlock();
+  void OpenBlock(Id label);
   Id CurrentBlock() const { return cur_block_; }
   void EndFunction();
 
-  // generic instruction emitters into the current function body
   Id Emit(spv::Op op, Id result_type, const base::Vector<Id>& operands);
   void EmitVoid(spv::Op op, const base::Vector<Id>& operands);
   Id ExtInst(Id result_type, u32 glsl_op, const base::Vector<Id>& operands);
 
-  // common ops
   Id Load(Id type, Id ptr);
   void Store(Id ptr, Id value);
   Id AccessChain(Id ptr_type, Id base, const base::Vector<Id>& indices);
@@ -138,22 +102,18 @@ class Module {
   Id CompositeConstruct(Id type, const base::Vector<Id>& parts);
   Id VectorShuffle(Id type, Id a, Id b, const base::Vector<u32>& comps);
 
-  // structured control flow helpers
   void SelectionMerge(Id merge_block);
   void LoopMerge(Id merge_block, Id continue_block);
   void Branch(Id target);
   void BranchConditional(Id cond, Id t, Id f);
-  // OpSwitch: selector + default label + (literal, label) cases.
   void Switch(Id selector,
               Id default_label,
               const base::Vector<base::Pair<u32, Id>>& cases);
   void ReturnVoid();
   void Unreachable();
-  void Kill();  // OpKill (PS discard)
+  void Kill();
 
  private:
-  // Packed cache key: kind (8 bits) | a (32 bits) | b (24 bits). Exact, every
-  // cached entity maps to a unique key, no hashing of the payload.
   enum class CacheKind : u8 {
     kVoid,
     kBool,
@@ -188,41 +148,28 @@ class Module {
   void Instr(base::Vector<u32>& sec, spv::Op op, const base::Vector<u32>& ops);
   void PutString(base::Vector<u32>& sec, const base::String& s);
 
-  // Result type of every id made through Emit and the constant makers, and
-  // the source of every bitcast, so Bitcast can fold round trips.
   void NoteType(Id id, Id type) {
-    if (id >= type_of_.size())  // resize grows to exactly what it is asked for
+    if (id >= type_of_.size())
       type_of_.resize(base::Max<size_t>(id + 1, type_of_.size() * 2), 0);
     type_of_[id] = type;
   }
   Id TypeOf(Id id) const { return id < type_of_.size() ? type_of_[id] : 0; }
   base::Vector<Id> type_of_;
   base::HashMap<Id, Id> bitcast_source_;
-  base::HashMap<Id, u32> const_bits_;  // 32-bit scalar constant -> its bits
+  base::HashMap<Id, u32> const_bits_;
   base::HashMap<Id, bool> const_bools_;
 
-  // Side-effect-free results this block already computed, keyed by their
-  // instruction words: the translator re-derives the same masks, selects and
-  // texel-format dispatch at every access. Only reused within one block.
-  // The entry points at the instruction in fn_body_, which is compared word
-  // for word (all but the result id) before it is reused.
   struct Computed {
     Id block = 0, id = 0;
     u32 offset = 0;
   };
   base::HashMap<u64, Computed> computed_;
   Id computed_block_ = 0;
-  // `head` is {opcode, result type}; `rest` the words after the result id.
-  Id Reuse(const u32 (&head)[2],
-           const u32* rest,
-           size_t count,
-           u64* key) const;
+  Id Reuse(const u32 (&head)[2], const u32* rest, size_t count, u64* key) const;
   void Remember(u64 key, Id id, u32 offset);
   Id t_u32_ = 0, t_i32_ = 0, t_bool_ = 0;
-  // A constant for an instruction whose operands are all constants (or a
-  // select that does not depend on its condition); 0 when it does not fold.
   Id Fold(spv::Op op, Id result_type, const base::Vector<Id>& operands);
-  base::HashSet<u64> decorated_;  // (target, decoration) without operands
+  base::HashSet<u64> decorated_;
 
   u32 bound_ = 1;
   u32 version_ = 0x00010600u;
@@ -231,11 +178,9 @@ class Module {
 
   base::Vector<u32> caps_, exts_, ext_imports_, mem_model_, entries_,
       exec_modes_;
-  // strings_ holds OpStrings, which the debug-section layout places before
-  // the OpNames in debug_.
   base::Vector<u32> strings_, debug_, decos_, types_consts_, fn_body_;
   base::HashMap<u64, Id> cache_;
-  base::Map<base::Vector<Id>, Id> struct_cache_;  // member-list keyed (exact)
+  base::Map<base::Vector<Id>, Id> struct_cache_;
   base::Map<base::Vector<Id>, Id> fn_type_cache_;
   Id cur_block_ = 0;
 };

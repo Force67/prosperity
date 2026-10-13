@@ -1,9 +1,5 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * RDNA2 (gfx10.3) instruction decoder. See rdna_decode.h. Produces the shared
- * gpu::gcn::Inst representation; the RDNA2-specific opcode semantics are
- * applied by the dispatch in rdna_translate.cc.
  */
 
 #include "gpu/ps5/rdna/rdna_decode.h"
@@ -20,28 +16,18 @@
 namespace gpu::rdna {
 namespace {
 
-// The 'OrbShdr'-style ShaderBinaryInfo signature at byte offset `off`. The AGC
-// toolchain reuses the same 7-byte-signature footer scheme; we only need its
-// position (== code length), not its bytes, so match either the PS4 magic or a
-// generic printable 7-byte token beginning with a capital letter.
 bool BinaryInfoAt(const u32* code, u32 off) {
   const char* s = reinterpret_cast<const char*>(code) + off;
-  // PS4/Orbis: "OrbShdr". PS5 keeps a 7-byte signature; accept the Orbis magic
-  // (still emitted by many AGC blobs) as the reliable anchor.
   return s[0] == 'O' && s[1] == 'r' && s[2] == 'b' && s[3] == 'S' &&
          s[4] == 'h' && s[5] == 'd' && s[6] == 'r';
 }
 
-// A source-operand field selects a trailing 32-bit literal when it == 255.
-// Scalar sources are 8-bit ([7:0] / [15:8]); vector src0 is 9-bit ([8:0]).
 bool Scalar2HasLit(u32 w) {
   return (w & 0xFF) == 255 || ((w >> 8) & 0xFF) == 255;
 }
 bool Scalar1HasLit(u32 w) {
   return (w & 0xFF) == 255;
 }
-// VALU src0 (9-bit [8:0]) values that append an extension dword. DPP forms are
-// valid only for VOP1/VOP2; SDWA and literals are also valid for VOPC.
 gpu::gcn::InstExtension ValuExtension(Enc enc, u32 w) {
   switch (w & 0x1FF) {
     case 233:
@@ -65,25 +51,21 @@ gpu::gcn::InstExtension ValuExtension(Enc enc, u32 w) {
   }
 }
 
-// Family classification, mirroring the gfx10.3 encoding-family dispatch. The
-// VALU branch (bit31 == 0) further resolves VOP1/VOPC from the VOP2 opcode
-// field; we resolve it here so the shared translator sees the right Enc.
 Enc Classify(u32 w, u32& opcode) {
-  if ((w & 0x80000000u) ==
-      0u) {  // VALU 32-bit: VOP2, or VOP1/VOPC via op field
+  if ((w & 0x80000000u) == 0u) {
     u32 vop2_op = (w >> 25) & 0x3F;
-    if (vop2_op == 0x3F) {  // VOP1
+    if (vop2_op == 0x3F) {
       opcode = (w >> 9) & 0xFF;
       return Enc::kVop1;
     }
-    if (vop2_op == 0x3E) {  // VOPC
+    if (vop2_op == 0x3E) {
       opcode = (w >> 17) & 0xFF;
       return Enc::kVopc;
     }
     opcode = vop2_op;
     return Enc::kVop2;
   }
-  if ((w & 0xC0000000u) == 0x80000000u) {  // scalar
+  if ((w & 0xC0000000u) == 0x80000000u) {
     u32 sub = (w >> 23) & 0x7F;
     if (sub == 0x7D) {
       opcode = (w >> 8) & 0xFF;
@@ -104,7 +86,7 @@ Enc Classify(u32 w, u32& opcode) {
     opcode = (w >> 23) & 0x7F;
     return Enc::kSop2;
   }
-  switch (w >> 26) {  // top bits 11
+  switch (w >> 26) {
     case 0x32:
       opcode = (w >> 16) & 0x3;
       return Enc::kVintrp;
@@ -117,10 +99,8 @@ Enc Classify(u32 w, u32& opcode) {
       return Enc::kVop3p;
     case 0x35:
       opcode = (w >> 16) & 0x3FF;
-      return Enc::kVop3;  // 10-bit opcode
+      return Enc::kVop3;
     case 0x36:
-      // gfx10 moved the DS opcode up a bit (GDS took bit 17), so the gfx9
-      // field reads as op*2 + gds here.
       opcode = (w >> 18) & 0xFF;
       return Enc::kDs;
     case 0x37:
@@ -129,8 +109,6 @@ Enc Classify(u32 w, u32& opcode) {
     case 0x38:
       opcode = ((w >> 18) & 0x7F) | (((w >> 25) & 1) << 7);
       return Enc::kMubuf;
-    // MTBUF carries op[2:0] here and op[3] in word1[21]; Decode() adds that bit
-    // once the second dword is in hand. word0[25:19] is the unified format.
     case 0x3A:
       opcode = (w >> 16) & 0x7;
       return Enc::kMtbuf;
@@ -139,9 +117,7 @@ Enc Classify(u32 w, u32& opcode) {
       return Enc::kMimg;
     case 0x3D:
       opcode = (w >> 18) & 0xFF;
-      return Enc::kSmrd;  // SMEM (replaces GCN SMRD)
-    // Observed NGG streams use the reserved 0b110001 prefix only for null
-    // exports. Do not let non-null forms acquire ordinary EXP semantics.
+      return Enc::kSmrd;
     case 0x31:
       if (w & 0xF) {
         opcode = 0;
@@ -149,8 +125,6 @@ Enc Classify(u32 w, u32& opcode) {
       }
       opcode = (w >> 4) & 0x3F;
       return Enc::kExp;
-    // RDNA2 EXP is 0b111110 (0xf8 prefix), same slot as GCN; target/en live in
-    // [9:4]/[3:0] (see EmitExport).
     case 0x3E:
       opcode = (w >> 4) & 0x3F;
       return Enc::kExp;
@@ -160,15 +134,13 @@ Enc Classify(u32 w, u32& opcode) {
   }
 }
 
-// Base dword count (excluding any trailing literal). RDNA2 two-dword encodings:
-// VOP3/VOP3P, SMEM, DS, MUBUF/MTBUF, FLAT, MIMG, EXP. MIMG adds NSA words.
 u32 BaseSize(Enc e, u32 w) {
   if ((w >> 26) == 0x31)
-    return 2;  // reserved NGG export slot retains the EXP-shaped width
+    return 2;
   switch (e) {
     case Enc::kVop3:
     case Enc::kVop3p:
-    case Enc::kSmrd:  // SMEM is 2 dwords on RDNA2 (was 1 on GCN SMRD)
+    case Enc::kSmrd:
     case Enc::kDs:
     case Enc::kFlat:
     case Enc::kMubuf:
@@ -176,7 +148,7 @@ u32 BaseSize(Enc e, u32 w) {
     case Enc::kExp:
       return 2;
     case Enc::kMimg: {
-      u32 nsa = (w >> 1) & 0x3;  // NSA (non-sequential address) extra dwords
+      u32 nsa = (w >> 1) & 0x3;
       return 2 + nsa;
     }
     default:
@@ -206,15 +178,15 @@ u32 Vop3SourceCountImpl(Enc enc, u32 op) {
     }
   }
   if (op < 0x100)
-    return 2;  // VOPC aliases
+    return 2;
   if (op == 0x101 || (op >= 0x128 && op <= 0x12a))
     return 3;
   if (op >= 0x100 && op < 0x140)
-    return 2;  // VOP2 aliases
+    return 2;
   if (op >= 0x180 && op < 0x200)
-    return 1;  // VOP1 aliases
+    return 1;
   if (op >= 0x270 && op <= 0x272)
-    return 2;  // VINTRP aliases
+    return 2;
   return 3;
 }
 
@@ -223,33 +195,23 @@ base::Vector<u8> ComputeRdnaReachability(const Program& program) {
   if (program.empty())
     return reachable;
 
-  // 0=ordinary, 1=unconditional relative, 2=conditional/call relative,
-  // An s_setpc_b64 that returns from an s_call_b64 goes back to the call's
-  // fall-through, which kind 2 has already marked, so in a program that
-  // calls, the return is a terminator and not a jump to anywhere. Reading it as
-  // indirect control flow instead floods every block reachable, including the
-  // debug-name string a shader binary carries between its code and its footer:
-  // the translator then decodes ASCII as instructions and declines the whole
-  // shader. Astro Bot's scene pair (vs 0x500704f00) is exactly that, and it
-  // costs 45% of the title's draws.
   bool has_call = false;
   for (const Inst& inst : program)
     if (inst.enc == Enc::kSopk && inst.opcode == 0x16) {
       has_call = true;
       break;
     }
-  // 3=program end, 4=indirect control flow.
   const auto branch_kind = [has_call](const Inst& inst) {
     if (inst.enc == Enc::kSopk) {
       if (inst.opcode == 0x16 || inst.opcode == 0x1b || inst.opcode == 0x1c)
-        return 2;  // s_call_b64 / subvector loops
+        return 2;
       return 0;
     }
     if (inst.enc == Enc::kSop1) {
       if (inst.opcode == 0x20 && has_call)
-        return 3;  // s_setpc_b64: the return of the call above
+        return 3;
       if (inst.opcode >= 0x20 && inst.opcode <= 0x22)
-        return 4;  // setpc/swappc/rfe
+        return 4;
       return 0;
     }
     if (inst.enc != Enc::kSopp)
@@ -273,10 +235,6 @@ base::Vector<u8> ComputeRdnaReachability(const Program& program) {
       case 0x18:
       case 0x19:
       case 0x1a:
-        // COND_DBG_SYS/USER are unset: the emulator does not attach a guest
-        // shader debugger. These branches fall through, matching emission.
-        // Following their debug stubs can encounter an indirect trap call
-        // and incorrectly mark the shader's name/footer as executable code.
         return 0;
       default:
         return 0;
@@ -360,9 +318,6 @@ u32 Vop3SourceCount(Enc enc, u32 op) {
 u32 CodeLength(const u32* code, u32 max_dwords) {
   if (!code || max_dwords < 2)
     return 0;
-  // Fast path: the toolchain emits "s_mov_b32 vcc_hi/null, #imm" (0xBEEB03FF)
-  // as the first instruction, with the ShaderBinaryInfo footer at
-  // code[(imm+1)*2].
   if (code[0] == 0xBEEB03FFu) {
     u64 d = static_cast<u64>(code[1] + 1) * 2;
     if (d >= 2 && d + 2 <= max_dwords &&
@@ -379,10 +334,6 @@ Program Decode(const u32* code, u32 max_dwords, bool stop_at_endpgm) {
   Program out;
   if (!code)
     return out;
-  // The furthest forward branch target seen. A program's early-out block
-  // routinely sits PAST its main s_endpgm (Astro Bot's SMAA edge pass jumps
-  // over it to "exec = 0; null export; s_endpgm"), so an endpgm-bounded scan
-  // must not stop while a branch still points beyond it.
   u32 furthest_target = 0;
   u32 i = 0;
   while (i < max_dwords) {
@@ -405,9 +356,6 @@ Program Decode(const u32* code, u32 max_dwords, bool stop_at_endpgm) {
     if (in.enc == Enc::kMtbuf)
       in.opcode |= ((in.raw[1] >> 21) & 1) << 3;
 
-    // Trailing 32-bit literal (the 1-dword ALU encodings, and VOP3 when a
-    // source selects LITERAL_CONST). VOP2 madmk/madak/fmamk/fmaak always carry
-    // a K.
     bool lit = false;
     switch (in.enc) {
       case Enc::kSop2:
@@ -418,7 +366,7 @@ Program Decode(const u32* code, u32 max_dwords, bool stop_at_endpgm) {
         lit = Scalar1HasLit(code[i]);
         break;
       case Enc::kSopk:
-        lit = in.opcode == 0x15;  // s_setreg_imm32_b32
+        lit = in.opcode == 0x15;
         break;
       case Enc::kVop2:
         in.extension = ValuExtension(in.enc, code[i]);
@@ -433,7 +381,6 @@ Program Decode(const u32* code, u32 max_dwords, bool stop_at_endpgm) {
         break;
       case Enc::kVop3:
       case Enc::kVop3p:
-        // Only architecturally used sources can select the shared literal.
         for (u32 src = 0; src < Vop3SourceCount(in.enc, in.opcode); src++)
           lit |= ((in.raw[1] >> (src * 9)) & 0x1ff) == 255;
         break;
@@ -456,13 +403,11 @@ Program Decode(const u32* code, u32 max_dwords, bool stop_at_endpgm) {
       in.opcode = 0;
     }
     if (in.size == 0)
-      in.size = 1;  // never stall
+      in.size = 1;
 
     out.push_back(in);
 
     if (in.enc == Enc::kSopp) {
-      // s_branch and the s_cbranch_* family: a signed dword offset from the
-      // next instruction.
       const bool branch = in.opcode == 0x02 ||
                           (in.opcode >= 0x04 && in.opcode <= 0x09) ||
                           (in.opcode >= 0x17 && in.opcode <= 0x1A);
@@ -473,9 +418,6 @@ Program Decode(const u32* code, u32 max_dwords, bool stop_at_endpgm) {
             static_cast<u64>(target) < max_dwords)
           furthest_target = static_cast<u32>(target);
       }
-      // s_code_end is a hard executable-code marker. Ordinary and ordered PS
-      // endpgm operations stop an unbounded scan, but a footer-bounded decode
-      // retains later branch targets.
       if (in.opcode == 0x1F ||
           (stop_at_endpgm && i + in.size > furthest_target &&
            (in.opcode == 0x01 || in.opcode == 0x1B || in.opcode == 0x1E)))
@@ -489,8 +431,8 @@ Program Decode(const u32* code, u32 max_dwords, bool stop_at_endpgm) {
 Program DecodeShader(const u32* code, u32 max_dwords) {
   u32 len = CodeLength(code, max_dwords);
   if (len && len <= max_dwords)
-    return Decode(code, len, /*stop_at_endpgm=*/false);
-  return Decode(code, max_dwords, /*stop_at_endpgm=*/true);
+    return Decode(code, len, false);
+  return Decode(code, max_dwords, true);
 }
 
 Program ReachableProgram(const Program& program) {
@@ -536,26 +478,19 @@ base::SharedPointer<const Program> CachedReachableProgram(const u32* code,
     return base::MakeShared<const Program>();
   const u64 addr = reinterpret_cast<u64>(code);
 
-  // Already revalidated this frame: the three per-draw walks that share a
-  // shader hit this and do no work at all.
   auto it = cache.find(addr);
   if (it != cache.end() && it->second.generation == g_generation)
     return it->second.program;
-  // Revalidating: the span the entry hashed is still the one to hash; code
-  // rewritten in place changes it. Finding the length again meant decoding
-  // the whole shader after every generation bump.
   if (it != cache.end() &&
       it->second.hash == HashCode(code, it->second.hashed_dwords)) {
     it->second.generation = g_generation;
     return it->second.program;
   }
 
-  // Hash the real code span (footer-bounded when there is one) so a shader
-  // rewritten in place at the same address invalidates the entry.
   u32 len = CodeLength(code, max_dwords);
   if (!len) {
     len = max_dwords;
-    for (const Inst& inst : Decode(code, max_dwords, /*stop_at_endpgm=*/true))
+    for (const Inst& inst : Decode(code, max_dwords, true))
       if (inst.enc == Enc::kSopp && inst.opcode == 0x01) {
         len = inst.pc + inst.size;
         break;
@@ -570,7 +505,7 @@ base::SharedPointer<const Program> CachedReachableProgram(const u32* code,
   }
 
   if (cache.size() > 16384)
-    cache.clear();  // unbounded-growth backstop
+    cache.clear();
   auto program = base::MakeShared<const Program>(
       ReachableProgram(DecodeShader(code, max_dwords)));
   cache[addr] = {hash, hashed, g_generation, program};
@@ -600,11 +535,8 @@ u64 CachedCodeHash(const u32* code, u32 max_dwords) {
 
   u32 len = CodeLength(code, max_dwords);
   if (!len) {
-    // No footer: hash up to the terminator rather than a fixed window, or the
-    // unrelated bytes that follow give two copies of one shader two hashes,
-    // which is the miss this cache exists to avoid.
     len = max_dwords;
-    for (const Inst& inst : Decode(code, max_dwords, /*stop_at_endpgm=*/true)) {
+    for (const Inst& inst : Decode(code, max_dwords, true)) {
       const bool ends = inst.enc == Enc::kSopp && inst.opcode == 0x01;
       if (ends) {
         len = inst.pc + inst.size;
@@ -614,7 +546,7 @@ u64 CachedCodeHash(const u32* code, u32 max_dwords) {
   }
   const u64 hash = HashCode(code, len);
   if (cache.size() > 16384)
-    cache.clear();  // unbounded-growth backstop
+    cache.clear();
   cache[addr] = {hash, len, g_generation};
   return hash;
 }

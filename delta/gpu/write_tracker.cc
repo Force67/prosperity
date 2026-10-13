@@ -11,9 +11,9 @@
 
 #if defined(__linux__)
 #include <fcntl.h>
+#include <immintrin.h>
 #include <linux/fs.h>
 #include <linux/userfaultfd.h>
-#include <immintrin.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -43,7 +43,6 @@ constexpr u64 kPage = 4096;
 constexpr u64 kRegisterAlign = 4096;
 constexpr u64 kScanGap = 1024 * 1024;
 constexpr u64 kCoalesceGap = 64 * 1024;
-// A page reported this many times in one frame is written continuously.
 constexpr u32 kHotReports = 3;
 constexpr u32 kVolatileFrames = 600;
 
@@ -54,7 +53,6 @@ u64 PageUp(u64 v) {
   return (v + kPage - 1) & ~(kPage - 1);
 }
 
-// Adds [first, end) to a coalesced run map; returns the bytes newly covered.
 u64 InsertRun(base::Map<u64, u64>& runs, u64 first, u64 end) {
   u64 added = end - first;
   auto it = runs.upper_bound(first);
@@ -72,7 +70,6 @@ u64 InsertRun(base::Map<u64, u64>& runs, u64 first, u64 end) {
   return added;
 }
 
-// Removes [first, end) from a run map; returns the bytes it covered.
 u64 EraseRun(base::Map<u64, u64>& runs, u64 first, u64 end) {
   u64 removed = 0;
   auto it = runs.upper_bound(first);
@@ -94,7 +91,6 @@ u64 EraseRun(base::Map<u64, u64>& runs, u64 first, u64 end) {
   return removed;
 }
 
-// The parts of [first, end) no run covers.
 base::Vector<base::Pair<u64, u64>> Gaps(const base::Map<u64, u64>& runs,
                                         u64 first,
                                         u64 end) {
@@ -114,20 +110,15 @@ base::Vector<base::Pair<u64, u64>> Gaps(const base::Map<u64, u64>& runs,
 }
 
 #if defined(__linux__)
-// Fault mode. A page's `armed` state: open, protected, or written and waiting
-// in the queue for Collect. Only the owner arms (open -> protected); a writer
-// takes protected -> queued, so a page is never re-armed while the write that
-// opened it is still in flight, and never queued twice.
+// Page states: open, protected (owner arms it), queued (writer took it).
 constexpr u8 kOpen = 0, kProtected = 1, kQueued = 2;
-// Pages protected at once are at most half of this, so the queue of written
-// pages can never fill.
+// Protected pages are at most half the queue, so it can never fill.
 constexpr u64 kQueueSize = 1u << 20;
-u64* g_queue = nullptr;  // written pages; 0 = slot not filled yet
+u64* g_queue = nullptr;
 base::Atomic<u64> g_queue_head{0};
-u64 g_queue_tail = 0;  // owner only
+u64 g_queue_tail = 0;
 
-// Readable, executable too: a protected page may hold code, and it faults on
-// execution then as well; opening it must not leave it unexecutable.
+// Protected pages stay executable: they may hold code.
 constexpr int kOpenProt = PROT_READ | PROT_WRITE | PROT_EXEC;
 
 void Enqueue(u64 page) {
@@ -153,12 +144,9 @@ bool OnWriteFault(uintptr_t addr) {
     ::mprotect(reinterpret_cast<void*>(page), kPage, kOpenProt);
     Enqueue(page);
   }
-  // Otherwise another thread is opening it right now: retrying the write is
-  // all that is left to do.
   return true;
 }
 
-// Any thread: the host kernel is about to write [addr, addr+len).
 void OnHostWrite(void* addr, size_t len) {
   const u64 first = reinterpret_cast<u64>(addr) & ~(kPage - 1);
   const u64 end =
@@ -236,8 +224,7 @@ bool WriteTracker::EnableFault() {
   return true;
 }
 
-void WriteTracker::SetOwner(bool (*resolve)(u64, u64),
-                            bool (*owns)(u64, u64)) {
+void WriteTracker::SetOwner(bool (*resolve)(u64, u64), bool (*owns)(u64, u64)) {
   g_owner_owns.store(owns, base::memory_order_release);
   g_owner_resolve.store(resolve, base::memory_order_release);
   SetGuestOwnerHolds(owns);
@@ -266,16 +253,16 @@ bool WriteTracker::ArmFault(u64 first, u64 end, bool hot) {
     const GuestPageTable::Page* p = table.Find(page);
     if (p && ((!hot && p->volatile_until > frame_) ||
               p->armed.load(base::memory_order_acquire) == kQueued))
-      return false;  // hot, or its last write is not collected yet
+      return false;
   }
-  // Protect each run of open pages; mark before protecting, so a write in
-  // between is one the fault handler can take.
+  // Mark before protecting, so a write in between is one the fault handler
+  // takes.
   u64 run = 0;
   const auto protect = [&](u64 at) {
     if (!run)
       return true;
-    const bool ok = ::mprotect(reinterpret_cast<void*>(run), at - run,
-                               PROT_READ) == 0;
+    const bool ok =
+        ::mprotect(reinterpret_cast<void*>(run), at - run, PROT_READ) == 0;
     if (!ok)
       for (u64 page = run; page < at; page += kPage)
         table.At(page)->armed.store(kOpen, base::memory_order_release);
@@ -325,7 +312,6 @@ void WriteTracker::TakeFaulted(base::Vector<Range>& out) {
   for (u64 at = g_queue_tail; at < head; at++) {
     u64* slot = &g_queue[at % kQueueSize];
     u64 page;
-    // A writer between claiming the slot and filling it: a few instructions.
     while (!(page = __atomic_exchange_n(slot, 0, __ATOMIC_ACQUIRE)))
       _mm_pause();
     pages.push_back(page);
@@ -394,9 +380,8 @@ bool WriteTracker::EnableScan() {
 bool WriteTracker::Register(u64 first, u64 end) {
   DELTA_ZONE("wt.register");
   for (const auto& [lo, hi] : Gaps(registered_, first, end)) {
-    // Coarser than the pages asked for, so neighbouring buffers do not each
-    // split the mapping again; a range that runs into a hole falls back to the
-    // exact pages.
+    // Rounded to coarser bounds so neighbouring buffers do not re-split the
+    // mapping.
     const u64 wide_lo = lo & ~(kRegisterAlign - 1);
     const u64 wide_hi = (hi + kRegisterAlign - 1) & ~(kRegisterAlign - 1);
     bool registered = false;
@@ -448,16 +433,11 @@ bool WriteTracker::Arm(u64 base, u64 bytes, bool hot) {
   const u64 first = PageDown(base), end = PageUp(base + bytes);
   if (policy_.arm_filter && !policy_.arm_filter(first, end))
     return false;
-  // Most calls ask again about pages armed long ago.
   if (AllArmed(first, end))
     return true;
-  // Fault mode protects exactly what it is asked to: a gap page may be code,
-  // a guard page or another mapping, and costs nothing to leave alone.
+  // Protects only what is asked: a gap page may be code or a guard page.
   if (mode_ == Mode::kFault)
     return ArmRange(first, end, hot);
-  // Close a small gap to a neighbouring armed run: every separate run is a
-  // mapping of its own after registration, and the scan pays per mapping
-  // (GTA:SA held ~2700 runs, ~10 ms a frame of scans).
   u64 wide_first = first, wide_end = end;
   auto next = armed_.lower_bound(first);
   if (next != armed_.begin()) {
@@ -474,8 +454,7 @@ bool WriteTracker::Arm(u64 base, u64 bytes, bool hot) {
   return ArmRange(first, end);
 }
 
-// Unregistered too: the span scan arms every registered page it walks, and a
-// page left registered would be armed again at the next one.
+// Unregistered too, or the span scan would arm it again.
 void WriteTracker::Disarm(u64 first, u64 end) {
   if (mode_ == Mode::kFault) {
     DisarmFault(first, end);
@@ -493,8 +472,6 @@ void WriteTracker::Disarm(u64 first, u64 end) {
   armed_bytes_ -= EraseArmed(first, end);
 }
 
-// The walk costs ~0.3 us a mapping in [first, end), registered or not, and a
-// few ns a page.
 bool WriteTracker::Scan(u64 first, u64 end, base::Vector<Range>& out) {
   DELTA_ZONE("wt.scan");
   page_region regions[256];
@@ -560,7 +537,6 @@ size_t WriteTracker::Drain(base::Vector<Range>& out) {
     noted_.clear();
     remapped.swap(remapped_);
   }
-  // A new mapping is not registered, whatever the old one was.
   for (const auto& [first, end] : remapped) {
     EraseRun(registered_, first, end);
     armed_bytes_ -= EraseArmed(first, end);
@@ -586,8 +562,6 @@ void WriteTracker::MarkArmed(u64 first, u64 end, bool armed) {
       p->armed.store(armed ? 1 : 0, base::memory_order_release);
 }
 
-// EraseRun on armed_, clearing only the pages that were armed: a remap can
-// span gigabytes of which a few pages ever were.
 u64 WriteTracker::EraseArmed(u64 first, u64 end) {
   auto it = armed_.upper_bound(first);
   if (it != armed_.begin())
@@ -610,23 +584,16 @@ size_t WriteTracker::Collect(base::Vector<Range>& out) {
   const size_t first_new = out.size();
   if (mode_ == Mode::kFault)
     TakeFaulted(out);
-  // A write to an armed page is a page fault, counted in the faulting task's
-  // minor faults whether the task was in user or kernel mode. No fault
-  // anywhere in the process since the last scan: nothing armed was written,
-  // and the scan (~36 ns an armed page, ~60 times a frame) can be skipped.
-  // Four in five collects in GTA:SA are that quiet.
+  // No minor fault since the last scan means no armed page was written.
   const long faults = mode_ == Mode::kScan ? MinorFaults() : faults_at_scan_;
   if (faults != faults_at_scan_) {
-    // Runs close together are scanned as one span; a wide gap is not, since
-    // the walk pays for every mapping in it (GTA:SA keeps ~37k 64 KiB guest
-    // mappings between its buffers).
     for (auto it = armed_.begin(); it != armed_.end();) {
       const u64 first = it->first;
       u64 end = it->second;
       for (++it; it != armed_.end() && it->first - end < kScanGap; ++it)
         end = it->second;
       if (!Scan(first, end, out))
-        out.emplace_back(first, end);  // not expected: trust nothing in it
+        out.emplace_back(first, end);
     }
   }
   faults_at_scan_ = faults;
@@ -680,9 +647,6 @@ void WriteTracker::NoteRemap(u64 base, u64 bytes) {
 void WriteTracker::EndFrame() {
   if (!enabled())
     return;
-  // Written this frame and the one before, or several times in this one: data
-  // the title rewrites every frame. A copy of it is good for one submission at
-  // most, and keeping it armed costs a fault and a scan every frame.
   GuestPageTable& table = GuestPages();
   base::Vector<u64> demote;
   for (u64 page : reported_) {
@@ -703,7 +667,6 @@ void WriteTracker::EndFrame() {
       if (GuestPageTable::Page* p = table.At(page))
         p->volatile_until = frame_ + kVolatileFrames;
     Disarm(first, end);
-    // Unarmed, its writes go unreported: whoever holds a copy must drop it.
     NoteWrite(first, end - first);
   }
 }

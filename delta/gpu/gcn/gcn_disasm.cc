@@ -1,9 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * GCN GFX7 disassembler. See gcn_disasm.h. Mnemonic tables follow the Sea
- * Islands ISA opcode numbering; gaps render as "<enc>_op0x<n>" so an unmapped
- * opcode is still uniquely identifiable in logs and audit reports.
  */
 
 #include "gpu/gcn/gcn_disasm.h"
@@ -24,9 +20,6 @@ base::String Hex(u32 v) {
   return buf;
 }
 
-// ---- register / operand naming ---------------------------------------------
-
-// Scalar register name for a plain 7-bit SGPR-file index (SDST fields).
 base::String SName(u32 i) {
   if (i <= 103)
     return "s" + base::ToString(i);
@@ -53,7 +46,6 @@ base::String SName(u32 i) {
   return "s" + base::ToString(i);
 }
 
-// Aligned scalar range (64-bit pairs, V#/T#/S# quads and up).
 base::String SRange(u32 base, u32 count) {
   if (count <= 1)
     return SName(base);
@@ -76,8 +68,6 @@ base::String VRange(u32 base, u32 count) {
          "]";
 }
 
-// Full source-operand field (SSRC/SRC encoding: SGPRs, inline constants,
-// literal, VGPRs).
 base::String Src(u32 field,
                  const Inst& inst,
                  u32 count = 1,
@@ -134,7 +124,6 @@ base::String Src(u32 field,
   return "src" + base::ToString(field);
 }
 
-// A mnemonic naming a 64-bit operation operates on register pairs.
 bool Is64(const base::String& name) {
   return name.size() >= 2 && name.compare(name.size() - 2, 2, "64") == 0;
 }
@@ -146,8 +135,6 @@ base::String Fallback(const char* enc, u32 op) {
 const char* Lookup(const char* const* table, u32 n, u32 op) {
   return op < n ? table[op] : nullptr;
 }
-
-// ---- opcode tables (Sea Islands numbering) ----------------------------------
 
 const char* const kSop1[] = {
     // clang-format off
@@ -337,7 +324,6 @@ const char* NeoVop2Name(u32 op) {
   }
 }
 
-// VOP3-only range (0x140..0x17f).
 const char* const kVop3Only[] = {
     // clang-format off
     "v_mad_legacy_f32", "v_mad_f32", "v_mad_i32_i24", "v_mad_u32_u24",
@@ -403,7 +389,6 @@ base::String VopcName(u32 op, IsaMode isa) {
       "u", "nge", "nlg", "ngt", "nle", "neq", "nlt", "tru"};
   static const char* const kIntCond[8] = {"f",  "lt", "eq", "le",
                                           "gt", "ne", "ge", "t"};
-  // Row layout: op[7:4] selects (cmp family, type), op[3:0] the condition.
   static const struct {
     const char* prefix;
     const char* type;
@@ -523,7 +508,7 @@ base::String Vop3Name(u32 op, IsaMode isa) {
     return VopcName(op, isa);
   if (op >= 0x100 && op < 0x140) {
     if (op == 0x120 || op == 0x121)
-      return Fallback("vop3", op);  // compact-only literal forms
+      return Fallback("vop3", op);
     if (isa == IsaMode::kNeo) {
       const u32 reflected = op - 0x100;
       if (reflected != 0x37 && reflected != 0x38)
@@ -852,11 +837,6 @@ base::String MimgName(u32 op) {
     return base::String("image_sample") + kSample[op - 0x20];
   if (op >= 0x30 && op <= 0x3f)
     return base::String("image_sample") + kSample[op - 0x30] + "_o";
-  // Same suffix layout as kSample: low three bits are the LOD mode, bit 3
-  // adds the compare. Gather4 has no derivative forms, so the
-  // _d / _d_cl slots are holes. The old table omitted those holes and shifted
-  // every entry after them: 0x44 (_l) printed as "_b_cl", and 0x47 (_lz), the
-  // one gather the translator has always handled, printed as "_c_cl".
   static const char* const kGather[16] = {
       "",   "_cl",   nullptr, nullptr, "_l",   "_b",   "_b_cl",   "_lz",
       "_c", "_c_cl", nullptr, nullptr, "_c_l", "_c_b", "_c_b_cl", "_c_lz"};
@@ -889,7 +869,6 @@ base::String ExpTarget(u32 target) {
   return "target" + base::ToString(target);
 }
 
-// SMRD destination width in dwords (from the opcode's x2/x4/... suffix).
 u32 SmrdCount(u32 op) {
   switch (op & 7) {
     case 0:
@@ -907,10 +886,9 @@ u32 SmrdCount(u32 op) {
   }
 }
 
-// MUBUF data-register count.
 u32 MubufCount(u32 op) {
   if (op <= 0x07)
-    return (op & 3) + 1;  // format x..xyzw
+    return (op & 3) + 1;
   switch (op) {
     case 0x0d:
     case 0x1d:
@@ -973,9 +951,7 @@ base::String CompactSource(const Inst& inst, u32 index, u32 vsrc1, u32 count) {
     const bool abs = (m >> (index == 0 ? 21 : 23)) & 1;
     return SourceMods(Src(field, inst, count), neg, abs);
   }
-  return index == 0 ? Src(inst.raw[0] & 0x1ff, inst, count,
-                          /*allow_lds_direct=*/true,
-                          /*allow_literal=*/true)
+  return index == 0 ? Src(inst.raw[0] & 0x1ff, inst, count, true, true)
                     : VRange(vsrc1, count);
 }
 
@@ -1061,17 +1037,14 @@ base::String CompactControls(const Inst& inst, bool has_src1, bool is_vopc) {
   return "";
 }
 
-// ---- per-encoding operand rendering
-// ------------------------------------------
-
 base::String OperandsSop1(const Inst& inst, const base::String& name) {
   const u32 w = inst.raw[0];
   const u32 sdst = (w >> 16) & 0x7F, ssrc = w & 0xFF;
-  if (inst.opcode == 0x1f)  // s_getpc_b64
+  if (inst.opcode == 0x1f)
     return SRange(sdst, 2);
-  if (inst.opcode == 0x20 || inst.opcode == 0x22)  // setpc/rfe
+  if (inst.opcode == 0x20 || inst.opcode == 0x22)
     return Src(ssrc, inst, 2, false, true);
-  if (inst.opcode == 0x32)  // s_cbranch_join
+  if (inst.opcode == 0x32)
     return Src(ssrc, inst, 1, false, true);
   u32 dst_count = Is64(name) ? 2 : 1;
   u32 src_count = dst_count;
@@ -1095,7 +1068,7 @@ base::String OperandsSop1(const Inst& inst, const base::String& name) {
 base::String OperandsSop2(const Inst& inst, const base::String& name) {
   const u32 w = inst.raw[0];
   const u32 sdst = (w >> 16) & 0x7F;
-  if (inst.opcode == 0x2b)  // s_cbranch_g_fork
+  if (inst.opcode == 0x2b)
     return Src(w & 0xff, inst, 2, false, true) + ", " +
            Src((w >> 8) & 0xff, inst, 2, false, true);
   const u32 dst_count = Is64(name) ? 2 : 1;
@@ -1149,7 +1122,7 @@ base::String OperandsSopp(const Inst& inst) {
   const u32 w = inst.raw[0];
   const u32 simm = w & 0xFFFF;
   switch (inst.opcode) {
-    case 0x01:  // s_endpgm
+    case 0x01:
       return "";
     case 0x02:
     case 0x04:
@@ -1157,7 +1130,7 @@ base::String OperandsSopp(const Inst& inst) {
     case 0x06:
     case 0x07:
     case 0x08:
-    case 0x09: {  // branches: render the absolute dword target
+    case 0x09: {
       const i32 rel = static_cast<i16>(simm);
       const i64 target = static_cast<i64>(inst.pc) + inst.size + rel;
       char buf[32];
@@ -1176,7 +1149,7 @@ base::String OperandsSopp(const Inst& inst) {
                     static_cast<unsigned long long>(target));
       return buf;
     }
-    case 0x0c: {  // s_waitcnt bitfields
+    case 0x0c: {
       char buf[64];
       std::snprintf(buf, sizeof(buf), "vmcnt(%u) expcnt(%u) lgkmcnt(%u)",
                     simm & 0xF, (simm >> 4) & 0x7, (simm >> 8) & 0x1F);
@@ -1200,7 +1173,7 @@ base::String OperandsSmrd(const Inst& inst) {
   base::String s = SRange(sdst, SmrdCount(inst.opcode)) + ", " +
                    SRange(sbase, buffer ? 4 : 2) + ", ";
   if (imm)
-    s += Hex(off);  // dword offset
+    s += Hex(off);
   else if (off == 255)
     s += Hex(inst.literal);
   else
@@ -1211,7 +1184,7 @@ base::String OperandsSmrd(const Inst& inst) {
 base::String OperandsVop1(const Inst& inst, const base::String& name) {
   const u32 w = inst.raw[0];
   if (inst.opcode == 0x00 || inst.opcode == 0x41)
-    return "";  // v_nop / v_clrexcp
+    return "";
   u32 dst_count = Is64(name) ? 2 : 1;
   u32 src_count = dst_count;
   switch (inst.opcode) {
@@ -1242,9 +1215,6 @@ base::String OperandsVop2(const Inst& inst) {
   const u32 w = inst.raw[0];
   const u32 vsrc1 = (w >> 9) & 0xff;
   const base::String src0 = CompactSource(inst, 0, vsrc1, 1);
-  // The lane operand of the read/writelane pair is an 8-bit SSRC field, so it
-  // takes inline constants too: printing it as a register name turns "lane 4"
-  // into "s132" and reads as a live scalar the shader never had.
   const base::String src1 = inst.opcode == 0x01 || inst.opcode == 0x02
                                 ? Src(vsrc1, inst, 1)
                                 : CompactSource(inst, 1, vsrc1, 1);
@@ -1257,7 +1227,6 @@ base::String OperandsVop2(const Inst& inst) {
     s += Hex(inst.literal) + ", " + src1;
   else
     s += src1;
-  // v_madmk/v_madak carry a mandatory literal K.
   if (inst.opcode == 0x20 || inst.opcode == 0x21 ||
       (inst.isa == IsaMode::kNeo && inst.opcode == 0x38))
     s += ", " + Hex(inst.literal);
@@ -1334,8 +1303,8 @@ void Vop3OperandWidths(u32 op,
     case 0x161:
     case 0x162:
     case 0x163:
-    case 0x168:  // v_ldexp_f64
-    case 0x174:  // v_trig_preop_f64
+    case 0x168:
+    case 0x174:
       dst_count = 2;
       src_count[0] = 2;
       src_count[1] = 1;
@@ -1373,13 +1342,12 @@ base::String OperandsVop3(const Inst& inst, const base::String& name) {
   u32 dst_count, src_count[3];
   Vop3OperandWidths(op, name, dst_count, src_count);
   base::String s;
-  if (op < 0x100) {  // VOPC via VOP3: destination is an SGPR pair
+  if (op < 0x100) {
     s = SRange(w & 0xFF, 2);
   } else if (op == 0x101 || op == 0x182) {
     s = SName(w & 0xff);
   } else {
     s = VRange(w & 0xFF, dst_count);
-    // VOP3b (carry ops, div_scale): explicit scalar carry destination.
     const u32 sdst = (w >> 8) & 0x7F;
     if (vop3b)
       s += ", " + SRange(sdst, 2);
@@ -1477,7 +1445,7 @@ base::String OperandsVintrp(const Inst& inst) {
   const u32 vdst = (w >> 18) & 0xFF;
   static const char kChan[4] = {'x', 'y', 'z', 'w'};
   base::String s = VRange(vdst, 1) + ", ";
-  if (inst.opcode == 2) {  // v_interp_mov: source is P10/P20/P0 selector
+  if (inst.opcode == 2) {
     static const char* const kParam[] = {"p10", "p20", "p0"};
     s += vsrc < 3 ? kParam[vsrc] : "p" + base::ToString(vsrc);
   } else
@@ -1503,7 +1471,7 @@ base::String OperandsDs(const Inst& inst) {
     data1_count = op == 0x0c || (op >= 0x0e && op <= 0x11) ? 1 : 0;
     split_offsets = op == 0x0e || op == 0x0f;
   } else if (op >= 0x18 && op <= 0x1d) {
-    has_addr = false;  // GWS operands are encoded through M0/OFFSET fields.
+    has_addr = false;
   } else if (op == 0x1e || op == 0x1f) {
     data0_count = 1;
   } else if (op >= 0x20 && op <= 0x34) {
@@ -1581,8 +1549,6 @@ base::String OperandsMubuf(const Inst& inst, u32 count, bool typed) {
   const u32 offset = w & 0xFFF;
   const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1, glc = (w >> 14) & 1;
   const bool addr64 = (w >> 15) & 1;
-  // Only MUBUF encodes an LDS destination at bit 16; in MTBUF that bit is
-  // OP[0], so reading it there hides the real destination register.
   const bool lds = !typed && ((w >> 16) & 1);
   const u32 vaddr = w1 & 0xFF, vdata = (w1 >> 8) & 0xFF;
   const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
@@ -1649,7 +1615,7 @@ base::String OperandsMimg(const Inst& inst) {
     n++;
   base::String s = VRange(vdata, n) + ", " + VRange(vaddr, 1) + ", " +
                    SRange(srsrc, r128 ? 4 : 8);
-  if (inst.opcode >= 0x20)  // sample/gather ops also name an S#
+  if (inst.opcode >= 0x20)
     s += ", " + SRange(ssamp, 4);
   s += " dmask:" + Hex(dmask);
   if (unorm)
@@ -1877,7 +1843,7 @@ base::String DisasmLine(const Inst& inst) {
   if (inst.size >= 2 && !inst.has_literal)
     std::snprintf(head, sizeof(head), "%04x: %08x %08x          ", inst.pc,
                   inst.raw[0], inst.raw[1]);
-  else if (inst.size >= 3)  // two encoding words + literal
+  else if (inst.size >= 3)
     std::snprintf(head, sizeof(head), "%04x: %08x %08x %08x ", inst.pc,
                   inst.raw[0], inst.raw[1], inst.literal);
   else if (inst.has_literal)

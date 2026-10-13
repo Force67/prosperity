@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
-#include <cstring>
 #include <signal.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <cstring>
 
 #include "base/containers/array.h"
 #include "gpu/gcn/gcn_resource.h"
@@ -25,7 +25,9 @@
 #include "options/options.h"
 
 extern "C" void prosperity_gpu_end_of_pipe() {}
-extern "C" bool prosperity_ps5_is_display_buffer(u64) { return false; }
+extern "C" bool prosperity_ps5_is_display_buffer(u64) {
+  return false;
+}
 
 namespace {
 
@@ -138,7 +140,8 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   const auto& caps = gpu::render::Device().caps();
   if (!caps.sparse_buffer || !caps.host_import || !caps.buffer_address ||
       !caps.copy_after)
-    GTEST_SKIP() << "Sparse buffers, host imports and ordered copies are required";
+    GTEST_SKIP()
+        << "Sparse buffers, host imports and ordered copies are required";
   gpu::GuestWriteTracker().Enable();
   static u8 fault_stack[65536];
   stack_t stack{};
@@ -148,7 +151,8 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
   struct sigaction fault{};
   fault.sa_flags = SA_SIGINFO | SA_ONSTACK;
   fault.sa_sigaction = [](int, siginfo_t* si, void*) {
-    if (!host_memory::HandleWriteFault(reinterpret_cast<uintptr_t>(si->si_addr)))
+    if (!host_memory::HandleWriteFault(
+            reinterpret_cast<uintptr_t>(si->si_addr)))
       std::abort();
   };
   ASSERT_EQ(sigaction(SIGSEGV, &fault, nullptr), 0);
@@ -158,8 +162,8 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
                         0x80020000, 0xf800080f,
                         0x03020100, 0xbf810000};
   const u64 base = DirectMemory::kBase;
-  const u32 user_data[32] = {u32(base), u32(base >> 32),
-                            DirectMemory::kBytes, 0x14fac};
+  const u32 user_data[32] = {u32(base), u32(base >> 32), DirectMemory::kBytes,
+                             0x14fac};
   const auto program = gpu::rdna::Recompile(vs, ps, user_data, user_data);
   ASSERT_TRUE(program.ok);
   ASSERT_EQ(program.ps_bufs.size(), 1u);
@@ -315,7 +319,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     gpu::rhi::Buffer* buffer = nullptr;
     u64 offset = 0;
     ASSERT_TRUE(gpu::render::CsGeometryBuffer(base, DirectMemory::kBytes,
-                                             &buffer, &offset));
+                                              &buffer, &offset));
     EXPECT_EQ(buffer, gpu::render::g_mirror);
     EXPECT_EQ(offset, gpu::render::MirrorOffset(base));
     gpu::render::DrawInfo draw;
@@ -326,7 +330,8 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     draw.prim_type = draw.vertex_count = 1;
     draw.bufs[0] = {base, DirectMemory::kBytes};
     draw.num_bufs = 1;
-    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[trial].data());
+    draw.rt_base = draw.mrt_base[0] =
+        reinterpret_cast<u64>(targets[trial].data());
     draw.rt_w = draw.rt_h = 16;
     draw.viewport_x_scale = draw.viewport_y_scale = 8;
     draw.viewport_x_offset = 4;
@@ -342,7 +347,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     ci.user_data[4] = 0xff804020;
     if (trial == 2)
       ASSERT_TRUE(gpu::render::GpuFill(base, DirectMemory::kBytes,
-                                      ci.user_data[4], ci.user_data[4]));
+                                       ci.user_data[4], ci.user_data[4]));
     else
       ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
     draw.viewport_x_offset = 12;

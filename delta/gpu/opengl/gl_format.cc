@@ -13,9 +13,6 @@ constexpr GLenum kUS = GL_UNSIGNED_SHORT, kS = GL_SHORT;
 constexpr GLenum kUI = GL_UNSIGNED_INT, kI = GL_INT;
 constexpr GLenum kF = GL_FLOAT, kH = GL_HALF_FLOAT;
 
-// Texture: internal format, transfer format and type. Vertex: size, type
-// and whether it is normalized; an integer texture format is an integer
-// attribute, and a scaled one converts to float without normalizing.
 constexpr GlFormat Tex(GLenum internal, GLenum format, GLenum type) {
   return {internal, format, type, 0, 0, false};
 }
@@ -30,7 +27,6 @@ constexpr GlFormat Vtx(GLint size, GLenum type) {
   return {0, 0, 0, size, type, false};
 }
 
-// In rhi::Format order.
 constexpr GlFormat kFormats[] = {
     {},
     Both(GL_R8, GL_RED, kUB, 1, true),
@@ -52,7 +48,6 @@ constexpr GlFormat kFormats[] = {
     Vtx(4, kUB),
     Vtx(4, kB),
     Tex(GL_SRGB8_ALPHA8, GL_RGBA, kUB),
-    // Stored as RGBA; transfers swap to and from the BGRA memory order.
     Both(GL_RGBA8, GL_BGRA, kUB, GL_BGRA, true),
     Tex(GL_SRGB8_ALPHA8, GL_BGRA, kUB),
     Both(GL_R16, GL_RED, kUS, 1, true),

@@ -35,28 +35,14 @@
 #include "options/options.h"
 
 namespace {
-// DELTA_GPU_CLEARTRACE=<n>: print up to n clear-opening lines. A small cap only
-// ever shows the loading screens; a lazy clear that lands on the wrong draw in
-// a steady-state frame needs a cap large enough to reach that frame.
 DELTA_OPTION(u32, kMaxRenderTargets, "DELTA_GPU_RT_MAX", 256);
 DELTA_OPTION(int, kClearTrace, "DELTA_GPU_CLEARTRACE", 0);
 DELTA_OPTION(bool, kLazyClear, "DELTA_GPU_LAZYCLEAR", true);
 DELTA_OPTION(bool, kClearRed, "DELTA_GPU_CLEARRED", false);
 DELTA_OPTION(bool, kForceClear, "DELTA_GPU_CLEARCOLOR", false);
-// DELTA_GPU_FILLTRACE=<n>: print up to n fill-clears. Fills happen every
-// frame, so a fixed cap only ever shows the first seconds.
 DELTA_OPTION(int, kGpuFilltrace, "DELTA_GPU_FILLTRACE", 0);
 DELTA_OPTION(bool, kRegTrace, "DELTA_GPU_REGTRACE", false);
-// DELTA_GPU_RESOLVETRACE=1: report a sampled address that more than one live
-// render target can answer for. The winner is scored by freshness, and two
-// targets rendered in the same frame TIE, broken by page-table insertion
-// order, i.e. by the guest addresses of the run. That is a per-run coin flip
-// deciding which image a pass reads.
 DELTA_OPTION(bool, kResolveTrace, "DELTA_GPU_RESOLVETRACE", false);
-// DELTA_GPU_NOVARIANT=1: never swap in a parked geometry variant. One base
-// rendered at two geometries owns two images, and which one answers to the
-// address depends on draw order, so an artefact that alternates frame to
-// frame has to be tested against variant switching before anything else.
 DELTA_OPTION(bool, kNoVariant, "DELTA_GPU_NOVARIANT", false);
 DELTA_OPTION(u64, kDepthResolveTrace, "DELTA_GPU_DEPTHRESOLVE", 0);
 DELTA_OPTION(u64, kFrameClearRt, "DELTA_GPU_FRAMECLEAR", 0);
@@ -77,15 +63,12 @@ bool IdentitySwizzle(const rhi::Swizzle (&sw)[4]) {
 
 }  // namespace
 
-// Transition `texture` from `current` to `state` and record the new state.
-// `layers` covers every layer the barrier must reach.
 void TransitionImage(rhi::CommandList* list,
                      rhi::Texture* texture,
                      rhi::TextureState& current,
                      rhi::TextureState state,
                      u8 aspect,
                      u32 layers) {
-  // A depth or stencil plane that is sampled is in the read-only depth state.
   if (aspect != rhi::kAspectColor && state == rhi::TextureState::kShaderRead)
     state = rhi::TextureState::kDepthRead;
   rhi::TextureBarrier b;
@@ -128,9 +111,6 @@ rhi::TextureView* SampledImageView(rhi::Texture* texture,
   return view;
 }
 
-// Sampled view of a colour target in `want` rather than the target's own
-// format, when the two are the same size (so the reinterpretation is legal and
-// the bytes line up). Falls back to the target's format when they are not.
 rhi::TextureView* SampledViewAs(RTarget& rt,
                                 u32 swizzle,
                                 rhi::Format want,
@@ -141,12 +121,6 @@ rhi::TextureView* SampledViewAs(RTarget& rt,
       *used = rt.fmt;
     return v;
   };
-  // Equal size is not the whole rule: a mutable-format view may only take
-  // another format of the same COMPATIBILITY CLASS, and a block-compressed one
-  // shares no class with the uncompressed format every render target has. A
-  // T# naming BC1/BC5 over a target is a resolution accident, and asking for
-  // that view fails outright, leaving the binding on the white default
-  // instead of the target's own content.
   if (want == rhi::Format::kUndefined || want == rt.fmt ||
       FormatBytes(want) != FormatBytes(rt.fmt) || FormatBlockCompressed(want))
     return own(SampledView(rt, swizzle, false, arrayed));
@@ -174,10 +148,6 @@ rhi::TextureView* SampledView(RTarget& rt,
                               u32 swizzle,
                               bool feedback,
                               bool arrayed) {
-  // A target that became live at this address after the draw took its snapshot
-  // (an alias switch, see ActivateRtVariant) has no copy of its own yet.
-  // Sampling the attachment instead would be the feedback loop the copy exists
-  // to avoid, so leave the caller its default texture.
   if (feedback && !rt.feedback_texture)
     return nullptr;
   if (feedback)
@@ -203,7 +173,6 @@ u64 RtByteSizeWH(u32 w, u32 h, rhi::Format fmt) {
   return (u64)w * h * FormatBytes(fmt);
 }
 
-// Register an RT's footprint pages so the page table can find it by overlap.
 void RegisterRtPages(u64 base, u32 w, u32 h, rhi::Format fmt) {
   u64 lo = base >> kRtPageShift;
   u64 hi = (base + RtByteSizeWH(w, h, fmt) - 1) >> kRtPageShift;
@@ -220,18 +189,6 @@ void RegisterRtPages(u64 base, u32 w, u32 h, rhi::Format fmt) {
   }
 }
 
-// Allocate the image, view and sampler descriptor backing one target. Split out
-// of GetRT because an address the guest renders to at two geometries needs a
-// second image (see ActivateRtVariant).
-// A freshly created image's contents are UNDEFINED. That is invisible for a
-// target whose first use is a clear or a full-screen draw, but not for one a
-// pass READS before it writes: P.T.'s light buffer is consumed by a feedback
-// pass (ps=0x80b54b4000) that un-premultiplies it, out.rgb = rgb / (1 - alpha),
-// which can only ever INCREASE a texel. Fed undefined memory on its first
-// frame, whatever garbage the allocation held is amplified every frame until it
-// saturates fp16 and can never recover; the frame ends up with texels pinned at
-// 65504 that then bloom into blown-white blobs. Guest memory a title renders
-// into holds defined values; an undefined image is our artefact, so define it.
 void ClearNewRt(RTarget& t) {
   const bool in_frame = g_frame.recording;
   rhi::CommandList* list = FrameOrBatchList();
@@ -241,7 +198,6 @@ void ClearNewRt(RTarget& t) {
   list->ClearTexture(t.texture, rhi::TextureState::kCopyDst, {},
                      rhi::ClearColor{});
   TransitionImage(list, t.texture, t.layout, rhi::TextureState::kShaderRead);
-  // The batch is on the queue before anything the next frame records.
   if (!in_frame)
     t.submitted_layout = t.layout;
 }
@@ -254,10 +210,6 @@ bool CreateRtImage(RTarget& t,
                    u32 depth = 1) {
   if (!w || !h || !depth)
     return false;
-  // Robustness: reject render targets with implausible dimensions or an
-  // undefined format. A garbage CB_COLOR base/scissor (e.g. a stray shader-pool
-  // RT address on the PS5 path) would otherwise feed the driver an invalid
-  // image and hard-crash it.
   if (w > 8192 || h > 8192 || fmt == rhi::Format::kUndefined) {
     BASE_LOGI("gpuvk", "skip bad RT {:#x} {}x{} fmt={}", (unsigned long)base, w,
               h, (int)fmt);
@@ -275,20 +227,9 @@ bool CreateRtImage(RTarget& t,
   td.depth = depth;
   td.usage = rhi::kTextureColorTarget | rhi::kTextureSampled |
              rhi::kTextureCopySrc | rhi::kTextureCopyDst;
-  // An SRGB format cannot be a storage image, and asking for it makes every
-  // view of this image invalid. A compute shader that wants to write this
-  // surface reaches it through the linear alias anyway, which is what the
-  // mutable format is here for.
   if (fmt != rhi::Format::kRGBA8Srgb && fmt != rhi::Format::kBGRA8Srgb)
     td.usage |= rhi::kTextureStorage;
-  // The colour format a pass RENDERS with and the format a later shader SAMPLES
-  // the same memory with are independent on PS4: a G-buffer plane written as
-  // UINT is read back through a T# that may name a different numeric type, and
-  // the view's numeric type has to match the shader's sampled type. A mutable
-  // format lets SampledViewAs() hand out a view in the format the descriptor
-  // asked for instead of the one the attachment was created with.
   td.usage |= rhi::kTextureMutableFormat;
-  // A layered pass renders the slices of a volume through a 2D-array view.
   if (depth > 1)
     td.usage |= rhi::kTextureArrayCompatible;
   t.texture = Device().CreateTexture(td);
@@ -308,8 +249,6 @@ bool CreateRtImage(RTarget& t,
     vd.layers = 1;
     t.volume_view = Device().CreateView(t.texture, vd);
   }
-  // A group so this RT can be sampled (render-to-texture); a 2D-array view of
-  // a volume is an attachment only.
   if (g_tex.descriptors_ready && depth == 1)
     t.set = SampledTextureGroup(t.view, g_tex.sampler);
   ClearNewRt(t);
@@ -324,21 +263,7 @@ bool CreateRtImage(RTarget& t,
   return true;
 }
 
-// The images of a base the guest renders to at more than one geometry, minus
-// the one that is live in g_rts. P.T. renders a fullscreen pass and then a
-// 512x512 pass to the same address inside one frame; sharing one image lands
-// the small pass in a corner of the big one and every later sample of that
-// address reads mostly stale pixels. Every lookup in the backend names a target
-// by address alone, so g_rts keeps holding the live target and the other
-// geometries wait here until a draw asks for them again.
 base::HashMap<u64, base::Vector<RTarget>> g_rt_variants;
-// Budgeted by MEMORY, not by count. A flat cap of three is generous for an
-// address aliased at 1920x1080 and hopeless for one aliased at 48x48, and
-// Gameface renders every glyph into the same scratch address at the glyph's own
-// size, a dozen geometries and counting. 32 MiB still leaves the big case at
-// three images; the count is only a backstop against an address that cycles
-// forever, so it has to sit well above any real font (GTA:SA's four glyph
-// targets each want more than 32 geometries and together they come to 201 KiB.
 constexpr u64 kMaxRtVariantBytes = 32ull << 20;
 constexpr size_t kMaxRtVariants = 256;
 
@@ -346,7 +271,6 @@ base::Vector<RTarget> g_retired_rts;
 
 void RetireRt(RTarget& t) {
   g_retired_rts.push_back(base::move(t));
-  // Cached multi-texture groups may name its views.
   ClearMultiTexCache();
 }
 
@@ -363,8 +287,6 @@ void DestroyRt(RTarget& t) {
   device.Destroy(t.texture);
 }
 
-// Make the image of geometry (w, h, fmt) the live target at `base`, creating it
-// on first use.
 RTarget* ActivateRtVariant(RTarget& live,
                            u64 base,
                            u32 w,
@@ -386,10 +308,6 @@ RTarget* ActivateRtVariant(RTarget& live,
       parked_bytes += RtByteSizeWH(v.w, v.h, v.fmt) * v.depth;
     const u64 retiring_bytes =
         RtByteSizeWH(live.w, live.h, live.fmt) * live.depth;
-    // Make room by retiring the variants rendered longest ago. Gameface
-    // renders every glyph into one scratch address at the glyph's own size,
-    // so without this the address fills up within a minute and every later
-    // glyph is declined.
     while (parked.size() >= kMaxRtVariants ||
            parked_bytes + retiring_bytes > kMaxRtVariantBytes) {
       size_t oldest = parked.size();
@@ -406,8 +324,6 @@ RTarget* ActivateRtVariant(RTarget& live,
       RetireRt(parked[oldest]);
       parked.erase(parked.begin() + oldest);
     }
-    // The active image is required by this draw. An oversized parked image or
-    // variants still used by this frame may exceed the cache budget.
     RTarget t;
     if (!CreateRtImage(t, base, w, h, fmt, depth))
       return nullptr;
@@ -430,7 +346,6 @@ RTarget* ActivateRtVariant(RTarget& live,
       (live.fmt == rhi::Format::kBGRA8Srgb && fmt == rhi::Format::kBGRA8Unorm);
   if (srgb_alias && live.w == w && live.h == h && live.depth == depth &&
       live.ever_rendered && g_frame.recording) {
-    // Changing the transfer function reinterprets the same guest bytes.
     EndRegion();
     const rhi::TextureState old_state = live.layout;
     TransitionImage(g_frame.list, live.texture, live.layout,
@@ -463,26 +378,12 @@ RTarget* ActivateRtVariant(RTarget& live,
     trace::RecordVariantSwap(base, reinterpret_cast<u64>(alt->texture), alt->w,
                              alt->h, reinterpret_cast<u64>(live.texture),
                              live.w, live.h);
-  // BeginFrame's per-frame reset only walks the live targets, so one that slept
-  // through a frame boundary catches up here.
   if (live.last_frame != g_frame.num) {
     live.used_this_frame = false;
     live.draws = 0;
-    // ...including the orphaned lazy clear BeginFrame drops. Without this a
-    // parked variant freezes whatever clear was pending when it was swapped
-    // out, and re-applies it on EVERY later activation: P.T. aliases its
-    // 1920x1080 composite with a 64x64 target, so one clear the guest asked
-    // for once came back five times a frame and wiped the scene right before
-    // the tonemap sampled it.
     live.clear_pending = false;
     live.clear_src = "none";
   }
-  // The parked target keeps its submitted-layout stamp: EndFrame stamps
-  // parked variants as well as live ones, so the stamp is the layout the GPU
-  // holds whatever this frame has recorded since. Resetting it to UNDEFINED
-  // here made every variant re-activated mid-frame unreadable to the compute
-  // bridge until the next frame end, and Astro Bot's upscaler read its
-  // 1080p input from guest memory (zeros) every frame because of it.
   return &live;
 }
 
@@ -507,21 +408,11 @@ bool ActivateVolumeRt(u64 base, u32 w, u32 h, u32 depth) {
   return live.ever_rendered;
 }
 
-// The extent an attachment's IMAGE needs, given the target's own surface
-// geometry (CB_COLORn_PITCH/SLICE) and the region this pass draws into.
-// The drawn region normally IS the target, padded: a 1920x1080 surface reports
-// 1920x1088 because the slice is tile-aligned, and sizing the image from that
-// would make every scanout eight rows taller than the display. So the surface
-// only wins when the drawn region cannot be it even after rounding up a full
-// tile, which is the case the screen scissor gets wrong (GTA:SA binding its
-// 1792x960 G-buffer under a 256x256 scissor, losing 164 draws a frame into a
-// 256x256 image).
 u32 RtSurfaceExtent(u32 surface, u32 drawn, u32 tile) {
   const u32 padded = (drawn + tile - 1) & ~(tile - 1);
   return (surface > padded && surface <= 8192) ? surface : drawn;
 }
 
-// Find or create the render target at guest address `base` (dimensions w x h).
 RTarget* GetRT(u64 base, u32 w, u32 h, rhi::Format fmt, u32 depth) {
   auto it = g_rts.find(base);
   if (it != g_rts.end()) {
@@ -530,13 +421,6 @@ RTarget* GetRT(u64 base, u32 w, u32 h, rhi::Format fmt, u32 depth) {
       return ActivateRtVariant(live, base, w, h, fmt, depth);
     return &live;
   }
-  // A cap that a title exceeds does not degrade, it deletes: the target is
-  // never created, every draw into it is dropped, and a later pass that SAMPLES
-  // it resolves by overlap to whatever else happens to cover the address.
-  // GTA:SA's world hit 64 during its level load, lost the shadow buffer at
-  // 0x202b800000, and its lighting then sampled a shadow atlas that merely
-  // overlapped, which is what made the scene black. Kept as a backstop
-  // against a title that cycles addresses forever, not as a budget.
   if (g_rts.size() >= kMaxRenderTargets) {
     static int n = 0;
     if (n++ < 4)
@@ -557,7 +441,7 @@ RTarget* GetRT(u64 base, u32 w, u32 h, rhi::Format fmt, u32 depth) {
   g_rts[base] = t;
   if (!g_region.first_rt)
     g_region.first_rt = base;
-  RegisterRtPages(base, w, h, fmt);  // resource-model page table
+  RegisterRtPages(base, w, h, fmt);
   return &g_rts[base];
 }
 
@@ -600,14 +484,6 @@ rhi::BindGroup* SnapshotRT(RTarget& rt) {
 u64 RtByteSize(const RTarget& rt) {
   return RtByteSizeWH(rt.w, rt.h, rt.fmt);
 }
-// Find or create the depth target at guest address `base` (dimensions w x h).
-// The images of a depth base the guest renders to at more than one geometry,
-// minus the one live in g_depths, the same arrangement the colour targets
-// use (see g_rt_variants). Without it, the first geometry to touch a base
-// fixed it forever and every later pass at another size rendered into a corner
-// of that image: P.T.'s 1920x1080 depth buffer had a 960x540 clear in its
-// top-left quadrant and nothing anywhere else, so every pass that sampled the
-// depth (SSAO first, then the whole post chain) read zero.
 base::HashMap<u64, base::Vector<DepthTarget>> g_depth_variants;
 constexpr size_t kMaxDepthVariants = 3;
 
@@ -628,8 +504,6 @@ bool CreateDepthImage(DepthTarget& t,
   td.width = w;
   td.height = h;
   td.layers = layers;
-  // Copy src/dst: the compute path bridges CS reads/writes of a live depth
-  // target through image<->buffer copies (see vk_compute.cc).
   td.usage = rhi::kTextureDepthTarget | rhi::kTextureSampled |
              rhi::kTextureCopySrc | rhi::kTextureCopyDst;
   t.texture = Device().CreateTexture(td);
@@ -660,8 +534,6 @@ bool CreateDepthImage(DepthTarget& t,
   return true;
 }
 
-// Make the image of geometry (w, h) the live depth target at `base`, creating
-// it on first use. Mirrors ActivateRtVariant.
 DELTA_OPTION(bool, kDepthVariants, "DELTA_GPU_DEPTHVARIANTS", true);
 
 DepthTarget* ActivateDepthVariant(DepthTarget& live,
@@ -670,15 +542,8 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
                                   u32 h,
                                   u64 stencil_base,
                                   u32 layers = 1) {
-  // A depth attachment must COVER the render area: Vulkan lets it be larger,
-  // never smaller (VUID-VkRenderingInfo-pNext-06079/06080). Handing the live
-  // target back whatever its geometry is how P.T. began a 512x512 region with a
-  // 64x64 depth view and LOST THE DEVICE (its environment-probe bake requests
-  // one depth base at five geometries, so the three-variant cap is reached and
-  // the cap path fires; the guest walks away with the device gone: no EndFrame,
-  // no present, black window). Declining the draw (nullptr -> BeginRegion
-  // false) is the only safe fallback: a dropped draw costs one pass, a lost
-  // device costs the run.
+  // A depth attachment must cover the render area
+  // (VUID-VkRenderingInfo-pNext-06079).
   const auto covers = [&](DepthTarget* t) -> DepthTarget* {
     return (t && t->w >= w && t->h >= h && t->layers >= layers) ? t : nullptr;
   };
@@ -695,8 +560,6 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
     if (parked.size() >= kMaxDepthVariants)
       return covers(&live);
     DepthTarget t;
-    // A variant that replaces the live one at the same geometry only because
-    // it needs more layers keeps the larger count.
     const u32 want =
         live.w == w && live.h == h ? base::Max(layers, live.layers) : layers;
     if (!CreateDepthImage(t, base, w, h, stencil_base, want))
@@ -712,13 +575,9 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
     live.used_this_frame = false;
     live.stencil_used_this_frame = false;
   }
-  return &live;  // see ActivateRtVariant: the parked stamp stays valid
+  return &live;
 }
 
-// The depth counterpart of ActivateSampledRtVariant: a sample names a depth
-// target by address, and the live geometry at that address is whichever pass
-// ran last, routinely the small half-resolution one. P.T.'s SSAO samples the
-// full-resolution scene depth and was handed the 960x540 variant instead.
 bool ActivateSampledDepthVariant(u64 base, u32 w, u32 h) {
   if (!base || !w || !h)
     return false;
@@ -743,12 +602,10 @@ base::Vector<DepthTarget> g_retired_depths;
 
 void RetireDepthTarget(const DepthTarget& t) {
   g_retired_depths.push_back(t);
-  // Cached descriptor sets may name its views.
   ClearMultiTexCache();
 }
 
 void ReleaseRetiredTargets() {
-  // Two BeginFrames of rest, like ReleaseRetiredTextures.
   static base::Vector<RTarget> aged_rts;
   static const guest::SessionReset reset_aged_rts(
       [] { guest::ResetResource(aged_rts); });
@@ -773,7 +630,6 @@ void ReleaseRetiredTargets() {
   g_retired_depths.clear();
 }
 
-// The attachment view of one array layer; layer 0 is the target's own.
 rhi::TextureView* DepthLayerView(DepthTarget& t, u32 layer) {
   if (!layer || layer >= t.layers)
     return t.attachment_view;
@@ -797,8 +653,6 @@ DepthTarget* GetDepthRT(u64 base, u32 w, u32 h, u64 stencil_base, u32 layers) {
       live.stencil_base = stencil_base;
     if (!w || !h || (live.w == w && live.h == h && live.layers >= layers))
       return &live;
-    // DB_DEPTH_VIEW names the slice being drawn, never the array's size: the
-    // array grows in place, and the old image goes once the GPU is done.
     if (live.w == w && live.h == h) {
       u32 want = 4;
       while (want < layers)
@@ -811,7 +665,6 @@ DepthTarget* GetDepthRT(u64 base, u32 w, u32 h, u64 stencil_base, u32 layers) {
       grown.guest_h = live.guest_h;
       grown.last_frame = live.last_frame;
       grown.used_this_frame = live.used_this_frame;
-      // A new image holds nothing: each layer clears on its first bind.
       grown.clear_layers = ~0u;
       grown.clear_value = live.clear_value;
       RetireDepthTarget(live);
@@ -829,20 +682,6 @@ DepthTarget* GetDepthRT(u64 base, u32 w, u32 h, u64 stencil_base, u32 layers) {
   return &g_depths[base];
 }
 
-// Resolve a sampled texture address to the live RT image that backs it (the
-// resource model's "the page table collects all overlappers" lookup). The game
-// cycles/aliases RT addresses (double-buffered room layers, a pool of scene
-// buffers), so a composite often samples an address that does not exactly match
-// the RT base it was rendered into. Gather every RT whose footprint touches the
-// sampled region's pages and resolve by IDENTITY, not recency: an exact base
-// whose size matches wins outright (the guest bound that buffer, so a more
-// recently rendered overlapping buffer must never override it); only when no
-// exact match exists fall back to an overlapper with matching dimensions,
-// choosing the freshest. Returns the g_rts key, or 0.
-// This path also activates a variant, because only the RT-bind path used to:
-// P.T. renders its fullscreen composite and a 64x64 pass to the same address,
-// and when the small one was live the present blit resolved to nothing, a black
-// screen with the whole scene one variant away.
 bool ActivateSampledRtVariant(u64 base, u32 w, u32 h) {
   if (!base || !w || !h)
     return false;
@@ -856,9 +695,6 @@ bool ActivateSampledRtVariant(u64 base, u32 w, u32 h) {
   if (parked == g_rt_variants.end())
     return false;
   for (const RTarget& v : parked->second) {
-    // Only swap in something the guest has actually drawn into: an empty
-    // variant of the right size is no better than the wrong-size one, and
-    // swapping would lose the live target's content for later samples.
     if (v.w != w || v.h != h || !v.ever_rendered)
       continue;
     return ActivateRtVariant(live, base, w, h, v.fmt) != nullptr;
@@ -871,10 +707,6 @@ u64 ResolveSampledRT(u64 addr, u32 w, u32 h) {
     return 0;
   u64 req_size = w && h ? (u64)w * h * 4 : 4;
   u64 a0 = addr, a1 = addr + req_size;
-  // Exact-identity hit: the guest sampled this exact base and it is a live RT
-  // of the requested size. That is unambiguously the right image, so return it
-  // before any freshness comparison can pick an overlapping cycled buffer
-  // instead.
   auto ex = g_rts.find(addr);
   if (ex != g_rts.end() && ex->second.ever_rendered &&
       ((!w || !h) || (ex->second.w == w && ex->second.h == h)))
@@ -889,13 +721,11 @@ u64 ResolveSampledRT(u64 addr, u32 w, u32 h) {
       return;
     const RTarget& rt = it->second;
     if (!rt.ever_rendered)
-      return;  // never sample an RT with no content
+      return;
     u64 b1 = b0 + RtByteSize(rt);
     if (!(a0 < b1 && b0 < a1))
-      return;  // no interval overlap
+      return;
     bool dim_match = (!w || !h) || (rt.w == w && rt.h == h);
-    // A contained allocation can be a separate texture in a reused heap.
-    // Sampling the whole target cannot represent that texture's geometry.
     if (!dim_match)
       return;
     long score = (long)rt.last_frame;
@@ -935,10 +765,6 @@ u64 ResolveSampledRT(u64 addr, u32 w, u32 h) {
   return best;
 }
 
-// Depth images use a separate registry from color RTs. A GFX7 depth surface may
-// be sampled through an R32_FLOAT descriptor whose base denotes an overlapping
-// view rather than DB_Z_WRITE_BASE, so resolve typed depth aliases by footprint
-// too.
 u64 ResolveSampledStencil(u64 addr) {
   if (!addr)
     return 0;
@@ -967,11 +793,6 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
   for (const auto& [base, depth] : g_depths) {
     if (depth.last_frame <= -1000)
       continue;
-    // A base can hold several geometries and only one of them is live, but a
-    // sample names the address, not the geometry. Score against every variant:
-    // otherwise a base whose small variant happens to be live stops covering
-    // an address its full-resolution one does, and the sample falls through to
-    // guest memory, which for a depth buffer is empty.
     u64 span = depth.guest_w && depth.guest_h
                    ? (u64)depth.guest_w * depth.guest_h * 4
                    : RtByteSizeWH(depth.w, depth.h, kDepthFormat);
@@ -988,9 +809,6 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
     u64 b1 = base + span;
     if (!(addr < b1 && base < a1))
       continue;
-    // As for colour targets: overlap alone lets a texture that merely borders
-    // a depth allocation read the depth image. GTA:SA's material textures sit
-    // right below its shadow maps and sampled them as red depth.
     if (!dim_match && !(base <= addr && b1 >= a1))
       continue;
     long score = depth.last_frame;
@@ -1003,10 +821,6 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
       best = base;
     }
   }
-  // DELTA_GPU_DEPTHRESOLVE=<addr>: why a sampled address did or did not land on
-  // a depth target. An address INSIDE a depth allocation that misses resolves
-  // to a guest upload of undefined bytes, which reads as depth 0, i.e. the
-  // far plane, and nothing downstream looks wrong.
   if (kDepthResolveTrace && addr == (u64)kDepthResolveTrace) {
     static int n = 0;
     if (n++ < 6) {
@@ -1088,9 +902,6 @@ void NoteExpandedHtile(u64 base) {
   }
 }
 
-// The depth counterpart of ResolveDccClear. HTILE's low nibble is ZMASK:
-// 0 and 13 are the clear states (a title fills 0 or 0xfffffff0), 0xF is an
-// expanded tile, the rest are partially compressed tiles no fill produces.
 void ResolveHtileClear(DepthTarget& dt, u64 base, float depth_clear) {
   dt.htile_clear_pending = false;
   u32 code = dt.htile_clear_code;
@@ -1143,8 +954,6 @@ void NoteRawWrite(u64 base, u64 bytes) {
   if (!base || !bytes)
     return;
   const auto note = [&](RTarget& rt, u64 rt_base) {
-    // Rendered this frame: the image is the newer one, and a partial raw
-    // write (a region update) must not turn its next bind into a clear.
     if (rt.last_frame == g_frame.num || !rt.ever_rendered)
       return;
     const u64 end = rt_base + RtByteSize(rt);
@@ -1212,8 +1021,6 @@ bool ActivateWrittenRtVariant(u64 base, u32 w, u32 h) {
   return false;
 }
 
-// The DCC clear codes (gfx8..gfx10): four fixed colours, one that names
-// CB_COLORn_CLEAR_WORD0/1, and "uncompressed", which is not a clear.
 bool DccClearColor(u32 code,
                    u32 info,
                    const u32* clear_word,
@@ -1241,17 +1048,10 @@ bool DccClearColor(u32 code,
   }
 }
 
-// A FAST_CLEAR target reads cleared wherever its CMASK nibble is 0, and the
-// eliminate pass that follows rendering writes the clear colour in and marks
-// the tiles expanded (0xF). Our targets are never compressed and eliminate is
-// a no-op, so do both here: a cleared CMASK at bind is the clear, and marking
-// it expanded lets the guest's next clear show up as a write back to 0 however
-// it lands, which is not always a packet we see.
 void NoteCmaskBind(RTarget& rt) {
   const u64 bytes = base::Max<u64>(4, (u64(rt.w) * rt.h) / 128);
   if (!gpu::IsReadableRangeCached(rt.dcc_base, bytes))
     return;
-  // A dispatch's word still on the GPU: the GPU decides, nobody waits.
   if (CsClearPredicate(rt.dcc_base, bytes, false, &rt.clear_pred,
                        &rt.clear_pred_offset)) {
     rt.dcc_clear_pending = false;
@@ -1268,8 +1068,6 @@ void NoteCmaskBind(RTarget& rt) {
   std::memset(cmask, 0xFF, bytes);
 }
 
-// A pending DCC write is about to be followed by a draw into the target:
-// find out what it wrote and make it the target's clear.
 void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
   rt.dcc_clear_pending = false;
   u32 code = rt.dcc_clear_code;
@@ -1283,7 +1081,6 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
   rhi::ClearColor value{};
   bool clear;
   if (rt.dcc_is_cmask) {
-    // A CMASK nibble of 0 is a fast-cleared tile; 0xF is an expanded one.
     clear = (code & 0xF) == 0 && clear_word;
     if (clear)
       value = ColorTargetClearValue(info, clear_word[0], clear_word[1]);
@@ -1305,8 +1102,6 @@ void ResolveDccClear(RTarget& rt, u64 base, u32 info, const u32* clear_word) {
   }
 }
 
-// End the current dynamic-rendering region. Attachments remain in attachment
-// layouts until an actual sampled/transfer consumer requests a transition.
 void EndRegion() {
   if (!g_region.open)
     return;
@@ -1355,15 +1150,7 @@ void SetGuestViewport(const DrawInfo& d) {
       !std::isfinite(d.viewport_y_offset) || d.viewport_x_scale <= 0.0f ||
       d.viewport_y_scale == 0.0f)
     return;
-  // Depth range: the hardware computes window_z = ndc_z * ZSCALE + ZOFFSET,
-  // which is exactly Vulkan's minDepth + ndc_z * (maxDepth - minDepth). Both
-  // ends must land in [0,1]; a descriptor that does not is left at the full
-  // range rather than clamped into a different transform.
-  // PA_CL_VPORT_ZSCALE/ZOFFSET are deliberately NOT applied here: doing so
-  // collapses P.T.'s depth range (every fragment lands on one value, the scene
-  // stops rendering), so whatever this title puts in those registers is not the
-  // plain window_z transform. The registers are read into DrawInfo, and the
-  // next person to try this needs to explain that first.
+  // window_z = ndc_z * ZSCALE + ZOFFSET matches Vulkan's depth range transform.
   const float min_depth = 0.0f, max_depth = 1.0f;
   g_frame.list->SetViewport(d.viewport_x_offset - d.viewport_x_scale,
                             d.viewport_y_offset - d.viewport_y_scale,
@@ -1371,11 +1158,6 @@ void SetGuestViewport(const DrawInfo& d) {
                             d.viewport_y_scale * 2.0f, min_depth, max_depth);
 }
 
-// Begin a dynamic-rendering region binding mrt_count color targets (mrt_base[0]
-// is the primary). The common single-RT case (mrt_count == 1) binds exactly one
-// attachment. depth_base != 0 additionally binds a depth attachment (cleared to
-// depth_clear on its first use each frame, loaded thereafter); depth_base == 0
-// leaves depth unbound (the 2D path).
 bool BeginRegion(const u64* mrt_base,
                  const u32* mrt_info,
                  u32 mrt_count,
@@ -1397,9 +1179,6 @@ bool BeginRegion(const u64* mrt_base,
                  u32 layers,
                  bool meta_cmask) {
   ScopeNs region_timer(&g_ns_region);
-  // DELTA_GPU_QCHECK also gates this path: a checkpoint that fails here names
-  // the DRAWS that ran before this region as the device loss, which is the
-  // attribution the compute-side checkpoints cannot reach.
   if (QueueCheckArmed()) {
     char where[64];
     std::snprintf(
@@ -1426,8 +1205,6 @@ bool BeginRegion(const u64* mrt_base,
         GetRT(mrt_base[i], iw, ih, ColorTargetFormat(mrt_info[i]), layers);
     if (!targets[i])
       return false;
-    // A dispatch wrote these pixels since the image last saw them. Ranges the
-    // target only overlaps keep their bytes: the target now owns its own.
     if (!CsRefreshRtFromTruth(mrt_base[i]))
       render::FlushCsWritesAt(render::DefaultRenderer(), mrt_base[i],
                               "rt-bind");
@@ -1446,17 +1223,6 @@ bool BeginRegion(const u64* mrt_base,
     g_region.cur_w[i] = iw;
     g_region.cur_h[i] = ih;
   }
-  // Depth gets the same surface-vs-drawn sizing as colour. A pass whose screen
-  // scissor is smaller than the surface it binds (GTA:SA opens a 256x256
-  // scissor over a 1792x960 Z buffer) otherwise builds a 256x256 depth image,
-  // and everything that reads scene depth afterwards (the deferred lights'
-  // world-position reconstruction, and every compute post pass, which falls
-  // back to the zeroed guest bytes) reads a corner of the frame and garbage
-  // elsewhere. RtSurfaceExtent only ever grows the image to the surface, so a
-  // genuinely half-resolution Z bound to a full-resolution pass keeps the drawn
-  // extent.
-  // The depth views are single-layer, and every attachment of a layered pass
-  // has to cover all its layers.
   if (layers > 1)
     depth_base = 0;
   const u32 dw = RtSurfaceExtent(depth_w, w, 256);
@@ -1474,15 +1240,6 @@ bool BeginRegion(const u64* mrt_base,
     rt.dirty_for_read = true;
     auto& color = colors[i];
     color.view = rt.view;
-    // Lazy clear (DELTA_GPU_LAZYCLEAR, default on): persist RT content across
-    // frames (LOAD), clearing only when the game explicitly requested a clear
-    // (clear_pending) or the RT was never rendered. Per-frame auto-clear wiped
-    // baked-once content (room floor) whose redraw lands on a different frame
-    // than its clear.
-    // DELTA_GPU_FRAMECLEAR=<base>: force this target to load CLEAR on the FIRST
-    // region of each frame (not every region, which would wipe a pass before a
-    // later one in the same frame reads it). Setting clear_pending from
-    // EndFrame does not work, it never reaches this gate.
     if (kFrameClearRt && mrt_base[i] == (u64)kFrameClearRt) {
       static int cleared_frame = -1;
       if (cleared_frame != g_frame.num) {
@@ -1493,8 +1250,6 @@ bool BeginRegion(const u64* mrt_base,
       }
     }
     if (kLazyClear) {
-      // DELTA_GPU_CLEARTRACE: which draw opens a region with a clear, and to
-      // what.
       if (kClearTrace && (rt.clear_pending || !rt.ever_rendered)) {
         static int n = 0;
         if (n++ < kClearTrace)
@@ -1514,9 +1269,6 @@ bool BeginRegion(const u64* mrt_base,
     rt.clear_pending = false;
     rt.ever_rendered = true;
     color.clear = rt.clear_value;
-    // DELTA_GPU_CLEARCOLOR / DELTA_GPU_CLEARRED: diagnostic knobs that force
-    // every bound RT to clear to a solid colour this frame, to verify which RTs
-    // are bound.
     if (kForceClear) {
       color.load = rhi::LoadOp::kClear;
       color.clear = rhi::ClearColor{{0.f, 1.f, 0.f, 1.f}};
@@ -1533,16 +1285,8 @@ bool BeginRegion(const u64* mrt_base,
   g_region.cur_mrt_count = mrt_count;
   RTarget* primary = mrt_count ? targets[0] : nullptr;
   u64 base = primary ? mrt_base[0] : 0;
-  // Depth attachment (3D). Cleared to the guest DB_DEPTH_CLEAR value on its
-  // first use this frame, then loaded so multiple regions in a frame share one
-  // Z buffer.
   rhi::DepthAttachment& depth_att = pass.depth;
   if (dt && depth_w && depth_h) {
-    // The IMAGE has to cover the render area, but the guest FOOTPRINT is the
-    // Z surface's own padded geometry. Keeping them apart is what stops a
-    // half-resolution depth buffer bound to a full-resolution pass from
-    // claiming several megabytes it does not own, and swallowing a
-    // neighbouring surface in the sampled-address lookup.
     dt->guest_w = depth_w;
     dt->guest_h = depth_h;
   }
@@ -1559,7 +1303,6 @@ bool BeginRegion(const u64* mrt_base,
       dt->htile_base = depth_htile_base;
       NoteMetadataBase(depth_htile_base);
     }
-    // A clear has to be able to write, so a read-only pass asks the CPU.
     if (dt->htile_clear_pending && !dt->htile_code_known && !depth_read_only &&
         CsClearPredicate(dt->htile_base, 0, true, &dt->clear_pred,
                          &dt->clear_pred_offset))
@@ -1573,14 +1316,8 @@ bool BeginRegion(const u64* mrt_base,
     const bool layer_clear = (dt->clear_layers >> depth_slice) & 1;
     const bool clear_depth = dt->clear_pending || layer_clear ||
                              (!dt->used_this_frame && !dt->htile_base);
-    // Async compute is currently serialized ahead of the next graphics frame.
-    // Keep this frame's scene depth in its persistent CS range before a later
-    // pass clears the shared depth image, or next frame's compute sees zero.
     if ((clear_depth || dt->clear_pred) && dt->used_this_frame)
       PreserveCsDepthBeforeClear(depth_base);
-    // A pass that samples the depth it tests against keeps the image in the
-    // read-only layout, which is what makes attachment and sampled view legal
-    // at the same time. A clear still needs write access, so never both.
     const bool read_only = depth_read_only && !clear_depth;
     TransitionImage(g_frame.list, dt->texture, dt->layout,
                     read_only ? rhi::TextureState::kDepthRead
@@ -1624,9 +1361,6 @@ bool BeginRegion(const u64* mrt_base,
       g_region.cur_stencil = stencil_base;
     }
   }
-  // A pending clear covers the whole surface, but loadOp=CLEAR only reaches
-  // the render area. GTA:SA clears its depth and G-buffer inside a 256x256
-  // capture pass, which left the rest of the frame holding last frame's depth.
   for (u32 i = 0; i < g_region.cur_mrt_count; i++) {
     RTarget& rt = *targets[i];
     if (colors[i].load != rhi::LoadOp::kClear || (rt.w <= w && rt.h <= h))
@@ -1688,8 +1422,6 @@ bool BeginRegion(const u64* mrt_base,
   CmdBeginLabel(g_frame.list, "region rt=%#llx %ux%u mrt=%u depth=%#llx",
                 (unsigned long long)base, w, h, g_region.cur_mrt_count,
                 (unsigned long long)depth_base);
-  // A clear covers the whole surface: a surface larger than the render area
-  // takes the GPU-decided one in a pass of its own.
   if (dt && dt->clear_pred && depth_att.depth_load != rhi::LoadOp::kClear &&
       (dt->w > w || dt->h > h)) {
     rhi::RenderPassDesc whole;
@@ -1735,11 +1467,6 @@ bool BeginRegion(const u64* mrt_base,
   PassProfBegin(mrt_count ? mrt_base[0] : depth_base);
   g_region.open = true;
   g_region.depth_read_only = depth_base && depth_read_only;
-  // Negative-height (y-up) viewport: GCN/PS4 rasterises y-up, so we do too.
-  // This stores render-target content upright, so render-to-texture composites
-  // (the scene->scanout copy, effect overlays) sample it with aligned UVs when
-  // run through the game's real recompiled shader, and the presented scanout is
-  // already upright (no readback flip needed; DELTA_GPU_FLIP defaults to 0).
   g_frame.list->SetViewport(0, static_cast<float>(h), static_cast<float>(w),
                             -static_cast<float>(h), 0, 1);
   g_frame.list->SetScissor(0, 0, w, h);
@@ -1835,16 +1562,8 @@ void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
   const u64 end = base + bytes;
   const auto note = [&](RTarget& rt, u64 rt_base) {
     const u64 rt_end = rt_base + RtByteSize(rt);
-    // Only a fill that covers the whole surface is a clear; a partial one is a
-    // buffer update that happens to overlap.
     if (base > rt_base || end < rt_end)
       return;
-    // The fill repeats one dword, so each texel holds that dword pattern in
-    // the target's own guest format: decode it the way a fast-clear word is.
-    // Reading it as four 8-bit channels made a float target (UE4's exposure
-    // targets) clear to garbage, and the scene blew out from there on. A
-    // target never bound as colour has no known encoding; zero is zero in all
-    // of them, anything else reloads from the guest bytes instead.
     if (rt.cb_info) {
       rt.clear_value = ColorTargetClearValue(rt.cb_info, value, value);
     } else if (value == 0) {
@@ -1867,8 +1586,6 @@ void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
   };
   for (auto& kv : g_rts) {
     note(kv.second, kv.first);
-    // A parked alias variant occupies the same address, so a fill that covers
-    // it is its clear too.
     auto v = g_rt_variants.find(kv.first);
     if (v == g_rt_variants.end())
       continue;

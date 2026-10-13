@@ -9,8 +9,6 @@
 
 namespace gpu::render {
 
-// Writes 32-bit indices into the device-local ring before the render pass.
-// Indirect quad draws also get triangle arguments written into the ring.
 bool ConvertGuestIndices(Renderer& renderer,
                          u64 base,
                          u32 count,

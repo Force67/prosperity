@@ -37,7 +37,6 @@
 #include "base/time/time.h"
 
 namespace {
-// Arming. Any one of these turns the debugger on; everything else follows.
 DELTA_OPTION(int, kCaptureFrame, "DELTA_GPU_CAPTURE", 0);
 DELTA_OPTION(float, kCaptureAfter, "DELTA_GPU_CAPTURE_AFTER", 0.f);
 DELTA_OPTION(int, kCaptureBusy, "DELTA_GPU_CAPTURE_BUSY", 0);
@@ -45,40 +44,16 @@ DELTA_OPTION(u64, kCaptureCs, "DELTA_GPU_CAPTURE_CS", 0);
 DELTA_OPTION(u64, kCaptureCsEnd, "DELTA_GPU_CAPTURE_CS_END", 0);
 DELTA_OPTION(int, kCaptureCount, "DELTA_GPU_CAPTURE_COUNT", 1);
 DELTA_OPTION(const char*, kCaptureDir, "DELTA_GPU_CAPTURE_DIR", nullptr);
-// DELTA_GPU_RTWATCH=<guest base>: include this render target in every
-// CAPTURE_AT snapshot even while it is not bound. A target that loses its
-// content between the region that fills it and the region that reads it is
-// invisible otherwise: snapshots only cover the targets a region has open,
-// so the window where the content actually disappears is the one window with
-// no measurement in it.
 DELTA_OPTION(u64, kRtWatch, "DELTA_GPU_RTWATCH", 0);
-// DELTA_GPU_RTWATCH_ONLY=1: a CAPTURE_AT snapshot covers the watched target
-// alone. Snapshotting every attachment of a 3-MRT 1080p region at every draw
-// of a 140-draw frame is gigabytes of readback for one question.
 DELTA_OPTION(bool, kRtWatchOnly, "DELTA_GPU_RTWATCH_ONLY", false);
-// What to read back and write as PNG when the frame closes: any of
-// rt, depth, tex, all, none (comma separated).
 DELTA_OPTION(const char*, kCaptureDump, "DELTA_GPU_CAPTURE_DUMP", "rt,depth");
-// Display scale for single-channel 32-bit float guest textures (a resolved
-// depth plane). See DecodeGuestTexel case 4: the values are tiny, a fixed scale
-// invents "flat" surfaces out of correct ones, so this is adjustable and the
-// value used is recorded next to the dump.
 DELTA_OPTION(float, kR32Scale, "DELTA_GPU_CAPTURE_R32_SCALE", 8.f);
-// Mid-frame snapshots: a comma list of draw indices, "every:N", or "all".
 DELTA_OPTION(const char*, kCaptureAt, "DELTA_GPU_CAPTURE_AT", nullptr);
 DELTA_OPTION(float, kCaptureExposure, "DELTA_GPU_CAPTURE_EXPOSURE", 1.f);
 DELTA_OPTION(float, kCaptureGamma, "DELTA_GPU_CAPTURE_GAMMA", 2.2f);
-// Bytes of each constant buffer written into the capture (0 = the whole
-// binding).
 DELTA_OPTION(int, kCaptureCbufBytes, "DELTA_GPU_CAPTURE_CBUF_BYTES", 1024);
-// Also write the untouched readback bytes next to each PNG.
 DELTA_OPTION(bool, kCaptureRaw, "DELTA_GPU_CAPTURE_RAW", false);
 DELTA_OPTION(bool, kValidate, "DELTA_GPU_VALIDATE", false);
-// DELTA_GPU_SYNCVALIDATE=1: add the layer's synchronization validation, which
-// names a missing barrier and the two accesses that race over it. Separate
-// from DELTA_GPU_VALIDATE because it costs several times more frame time, and
-// because a hazard is the one class of bug that a diagnostic doing its own
-// submits will hide rather than report.
 DELTA_OPTION(bool, kSyncValidate, "DELTA_GPU_SYNCVALIDATE", false);
 DELTA_OPTION(bool, kExitAfter, "DELTA_GPU_CAPTURE_EXIT", false);
 }  // namespace
@@ -89,24 +64,20 @@ bool g_recording = false;
 
 namespace {
 
-// --- state -----------------------------------------------------------------
-
 std::FILE* g_file = nullptr;
 base::String g_dir;
-base::String g_prefix;  // "<dir>/frame_<n>"
+base::String g_prefix;
 int g_frame_num = 0;
 u64 g_seq = 0;
 u32 g_draw_seq = 0;
 int g_frames_left = 0;
-int g_armed_frame = 0;  // resolved frame number once a trigger fires
+int g_armed_frame = 0;
 bool g_finished = false;
 bool g_cs_trigger = false;
 base::Set<u64> g_cs_captured;
 u64 g_start_ns = 0;
 u32 g_validation_messages = 0;
 
-// Mid-frame readbacks recorded into the frame's own command buffer; drained
-// once the queue is idle at FrameEnd.
 struct Snapshot {
   rhi::Buffer* buffer = nullptr;
   u64 bytes = 0;
@@ -119,8 +90,6 @@ struct Snapshot {
 };
 base::Vector<Snapshot> g_snapshots;
 
-// Every distinct guest texture descriptor the frame bound, for the end-of-
-// frame dump.
 struct TexKey {
   u64 base = 0;
   u32 w = 0, h = 0, dfmt = 0, nfmt = 0, tiling = 0, pitch = 0;
@@ -153,8 +122,6 @@ u64 NowNs() {
   return (base::TickClock::NowNs());
 }
 
-// --- arming ----------------------------------------------------------------
-
 bool Armed() {
   static const bool kArmed = kCaptureFrame.get() > 0 ||
                              kCaptureAfter.get() > 0.f ||
@@ -162,7 +129,6 @@ bool Armed() {
   return kArmed;
 }
 
-// A comma list of draw indices, "every:N", or "all".
 struct SnapshotPlan {
   bool all = false;
   u32 every = 0;
@@ -213,10 +179,6 @@ bool DumpWanted(const char* what) {
          kSpec.find(what) != base::String::npos;
 }
 
-// --- JSON ------------------------------------------------------------------
-
-// A capture line. JSON, one object per line, so a query tool can stream a
-// frame of any size and grep can find a draw without a parser.
 class Line {
  public:
   explicit Line(const char* type) {
@@ -235,9 +197,6 @@ class Line {
     std::snprintf(buf, sizeof buf, "%llu", v);
     return Raw(key, buf);
   }
-  // Guest addresses and register words are hex STRINGS: they survive every
-  // JSON reader unchanged, and they grep against the rest of the module's
-  // logs by eye.
   Line& Hex(const char* key, u64 v) {
     char buf[32];
     std::snprintf(buf, sizeof buf, "\"0x%llx\"", (unsigned long long)v);
@@ -267,10 +226,6 @@ class Line {
     return *this;
   }
 
-  // Non-finite floats are not JSON, but every JSON reader in this loop
-  // (Python's included) accept the bare literals. A NaN in a viewport
-  // or a constant is exactly what a capture exists to show, so it must not be
-  // silently rewritten to null.
   static base::String NumText(double v) {
     if (std::isnan(v))
       return "NaN";
@@ -297,7 +252,6 @@ class Line {
   base::String s_;
 };
 
-// An array/object under construction inside a Line.
 class Obj {
  public:
   Obj() : s_("{") {}
@@ -358,8 +312,6 @@ void Line::Emit() {
   std::fwrite(s_.data(), 1, s_.size(), g_file);
 }
 
-// --- guest memory ----------------------------------------------------------
-
 struct MemStat {
   bool readable = false;
   u64 hash = 0;
@@ -397,8 +349,6 @@ base::String GuestObj(u64 base, u64 bytes) {
     o.Hex("hash", s.hash);
     o.U("nonzero", s.nonzero);
     o.U("sampled", s.sampled);
-    // A 1x1 exposure or adaptation texel is worth more as its bytes than as
-    // a count of the non-zero ones.
     if (bytes <= 64)
       o.Str("data", HexBytes(base, static_cast<u32>(bytes)).c_str());
   }
@@ -420,9 +370,6 @@ base::String HexBytes(u64 base, u32 bytes) {
   return s;
 }
 
-// A stable fingerprint of a guest shader: the code from its entry point up to
-// s_endpgm. Guest shader ADDRESSES move between runs (titles stream shader
-// code), so the address alone cannot identify a program across captures.
 u64 GuestCodeHash(u64 addr, u32* out_dwords) {
   if (out_dwords)
     *out_dwords = 0;
@@ -436,7 +383,7 @@ u64 GuestCodeHash(u64 addr, u32* out_dwords) {
     h = (h ^ code[i]) * 1099511628211ull;
     if (out_dwords)
       *out_dwords = i + 1;
-    if (code[i] == 0xBF810000u)  // s_endpgm
+    if (code[i] == 0xBF810000u)
       break;
   }
   return h;
@@ -448,8 +395,6 @@ u64 SpirvHash(const base::Vector<u32>& spirv) {
     h = (h ^ w) * 1099511628211ull;
   return h;
 }
-
-// --- format names / decode -------------------------------------------------
 
 const char* LayoutName(rhi::TextureState layout) {
   switch (layout) {
@@ -513,8 +458,6 @@ float PackedUfloat(u32 value, u32 mantissa_bits) {
                     static_cast<int>(exponent) - 15);
 }
 
-// True when the texel is a floating-point (HDR) encoding, i.e. the exposure
-// knob applies. Fills rgba with the raw channel values.
 bool DecodeTexel(const u8* src, rhi::Format fmt, float rgba[4], bool* is_hdr) {
   u32 packed;
   *is_hdr = false;
@@ -597,7 +540,7 @@ bool DecodeTexel(const u8* src, rhi::Format fmt, float rgba[4], bool* is_hdr) {
 
 u8 ToByte(float v, bool hdr) {
   if (!std::isfinite(v))
-    return hdr ? 255 : 0;  // a NaN in an HDR target must be visible, not black
+    return hdr ? 255 : 0;
   if (hdr) {
     v *= kCaptureExposure.get();
     const float gamma = kCaptureGamma.get();
@@ -607,11 +550,6 @@ u8 ToByte(float v, bool hdr) {
   return static_cast<u8>(std::lround(base::Clamp(v, 0.0f, 1.0f) * 255.0f));
 }
 
-// --- image readback --------------------------------------------------------
-
-// One-shot copy of an image to host memory: a private command buffer submitted
-// on the device's diagnostic fence, exactly like the RTSTAT readback. Only a
-// captured frame runs it, so the stall it costs buys a complete answer.
 bool ReadImage(rhi::Texture* image,
                u8 aspect,
                u32 w,
@@ -646,9 +584,6 @@ bool ReadImage(rhi::Texture* image,
   return ok;
 }
 
-// Convert readback bytes to RGBA8 and write the PNG, returning the per-channel
-// statistics the capture records next to it (a dump nobody looks at still has
-// to say whether the target was black).
 struct PixelStats {
   double min[4] = {1e30, 1e30, 1e30, 1e30};
   double max[4] = {-1e30, -1e30, -1e30, -1e30};
@@ -717,9 +652,6 @@ bool WriteImagePng(const base::String& path,
   return WritePngRgba8(path.c_str(), rgba.data(), w, h);
 }
 
-// Depth is a single float per texel with no meaningful absolute range (a
-// reversed-Z target lives in [0.996, 1]), so it is normalised against its own
-// extent and the extent is recorded.
 bool WriteDepthPng(const base::String& path,
                    const u8* src,
                    u32 w,
@@ -771,8 +703,6 @@ void WriteRawSidecar(const base::String& path, const u8* src, u64 bytes) {
   }
 }
 
-// --- guest texture decode --------------------------------------------------
-
 void Bc1Colors(const u8* block, u8 out[4][4], bool punchthrough) {
   u16 c0 = u16(block[0] | (block[1] << 8));
   u16 c1 = u16(block[2] | (block[3] << 8));
@@ -820,11 +750,9 @@ void Bc4Alpha(const u8* block, u8 out[16]) {
     out[i] = a[(bits >> (3 * i)) & 7];
 }
 
-// Decode one 4x4 block into rgba (row-major, 16 texels). Returns false for a
-// format this does not decode (recorded as a skip reason, never guessed at).
 bool DecodeBlock(u32 dfmt, const u8* block, u8 rgba[16][4]) {
   switch (dfmt) {
-    case 35: {  // BC1
+    case 35: {
       u8 palette[4][4];
       Bc1Colors(block, palette, true);
       u32 idx;
@@ -833,7 +761,7 @@ bool DecodeBlock(u32 dfmt, const u8* block, u8 rgba[16][4]) {
         std::memcpy(rgba[i], palette[(idx >> (2 * i)) & 3], 4);
       return true;
     }
-    case 36: {  // BC2: 4-bit explicit alpha + BC1 colour
+    case 36: {
       u8 palette[4][4];
       Bc1Colors(block + 8, palette, false);
       u32 idx;
@@ -845,7 +773,7 @@ bool DecodeBlock(u32 dfmt, const u8* block, u8 rgba[16][4]) {
       }
       return true;
     }
-    case 37: {  // BC3: BC4 alpha + BC1 colour
+    case 37: {
       u8 alpha[16];
       Bc4Alpha(block, alpha);
       u8 palette[4][4];
@@ -858,7 +786,7 @@ bool DecodeBlock(u32 dfmt, const u8* block, u8 rgba[16][4]) {
       }
       return true;
     }
-    case 38: {  // BC4: single channel
+    case 38: {
       u8 red[16];
       Bc4Alpha(block, red);
       for (int i = 0; i < 16; i++) {
@@ -867,7 +795,7 @@ bool DecodeBlock(u32 dfmt, const u8* block, u8 rgba[16][4]) {
       }
       return true;
     }
-    case 39: {  // BC5: two BC4 channels
+    case 39: {
       u8 red[16], green[16];
       Bc4Alpha(block, red);
       Bc4Alpha(block + 8, green);
@@ -884,15 +812,14 @@ bool DecodeBlock(u32 dfmt, const u8* block, u8 rgba[16][4]) {
   }
 }
 
-// One linear (already de-tiled) element -> RGBA8.
 bool DecodeGuestTexel(u32 dfmt, u32 nfmt, const u8* src, u8 out[4]) {
   u32 packed;
   switch (dfmt) {
-    case 1:  // 8
+    case 1:
       out[0] = out[1] = out[2] = src[0];
       out[3] = 255;
       return true;
-    case 2:  // 16
+    case 2:
       if (nfmt == 7) {
         out[0] = out[1] = out[2] =
             ToByte(HalfToFloat(u16(src[0] | (src[1] << 8))), true);
@@ -901,49 +828,37 @@ bool DecodeGuestTexel(u32 dfmt, u32 nfmt, const u8* src, u8 out[4]) {
       }
       out[3] = 255;
       return true;
-    case 3:  // 8_8
+    case 3:
       out[0] = src[0];
       out[1] = src[1];
       out[2] = 0;
       out[3] = 255;
       return true;
-    case 10:  // 8_8_8_8
+    case 10:
       out[0] = src[0];
       out[1] = src[1];
       out[2] = src[2];
       out[3] = src[3];
       return true;
-    case 6:  // 10_11_11 / 11_11_10 float
+    case 6:
       std::memcpy(&packed, src, 4);
       out[0] = ToByte(PackedUfloat(packed & 0x7FF, 6), true);
       out[1] = ToByte(PackedUfloat((packed >> 11) & 0x7FF, 6), true);
       out[2] = ToByte(PackedUfloat((packed >> 22) & 0x3FF, 5), true);
       out[3] = 255;
       return true;
-    case 8:  // 2_10_10_10 (ARGB)
-    case 9:  // 2_10_10_10 (ABGR)
+    case 8:
+    case 9:
       std::memcpy(&packed, src, 4);
       out[dfmt == 8 ? 2 : 0] = u8(((packed & 0x3FF) * 255) / 1023);
       out[1] = u8((((packed >> 10) & 0x3FF) * 255) / 1023);
       out[dfmt == 8 ? 0 : 2] = u8((((packed >> 20) & 0x3FF) * 255) / 1023);
       out[3] = u8(((packed >> 30) & 3) * 85);
       return true;
-    case 4: {  // 32: a single-channel 32-bit texel, which is how a title
-               // hands a resolved DEPTH plane to a later pass. Without this the
-               // dump reported `skipped: format` and the one surface a deferred
-               // renderer reconstructs world position from stayed invisible.
+    case 4: {
       if (nfmt == 7) {
         float f;
         std::memcpy(&f, src, 4);
-        // A reversed-Z depth resolve lives in a narrow band near zero (P.T.'s
-        // is 0.013..0.025), so a 1:1 decode is a black frame. Scaling makes it
-        // visible, but a FIXED scale is a trap: at x8 that band lands in
-        // bytes 92..122, and 31 low-contrast levels read as a flat gradient
-        // even when every value is correct. That cost a wrong root-cause
-        // claim. The depth dumps normalise against their own extent; this path
-        // cannot (it decodes one texel at a time), so the scale is a knob and
-        // the number is printed with the file name. Sweep it, and never judge
-        // "flat vs structured" from one scale.
         out[0] = out[1] = out[2] = ToByte(f * kR32Scale, true);
       } else {
         std::memcpy(&packed, src, 4);
@@ -952,7 +867,7 @@ bool DecodeGuestTexel(u32 dfmt, u32 nfmt, const u8* src, u8 out[4]) {
       out[3] = 255;
       return true;
     }
-    case 5:  // 16_16
+    case 5:
       if (nfmt == 7) {
         const auto* h = reinterpret_cast<const u16*>(src);
         out[0] = ToByte(HalfToFloat(h[0]), true);
@@ -964,13 +879,13 @@ bool DecodeGuestTexel(u32 dfmt, u32 nfmt, const u8* src, u8 out[4]) {
       out[2] = 0;
       out[3] = 255;
       return true;
-    case 12: {  // 16_16_16_16
+    case 12: {
       const auto* h = reinterpret_cast<const u16*>(src);
       for (int i = 0; i < 4; i++)
         out[i] = nfmt == 7 ? ToByte(HalfToFloat(h[i]), i < 3) : u8(h[i] >> 8);
       return true;
     }
-    case 14: {  // 32_32_32_32 float
+    case 14: {
       const auto* f = reinterpret_cast<const float*>(src);
       for (int i = 0; i < 4; i++)
         out[i] = ToByte(f[i], i < 3);
@@ -981,9 +896,6 @@ bool DecodeGuestTexel(u32 dfmt, u32 nfmt, const u8* src, u8 out[4]) {
   }
 }
 
-// Read a guest texture out of guest memory, de-tile it (the layout the GPU
-// stores, not the one a linear read sees) and write mip 0 layer 0 as a PNG.
-// `reason` receives why it could not be written.
 bool DumpGuestTexture(const TexKey& t,
                       const base::String& path,
                       const char** reason) {
@@ -1049,10 +961,6 @@ bool DumpGuestTexture(const TexKey& t,
   return WritePngRgba8(path.c_str(), rgba.data(), t.w, t.h);
 }
 
-// --- draw serialization ----------------------------------------------------
-
-// Each distinct shader of the frame is disassembled once next to the capture
-// (<prefix>_sh_<addr>.s), so reading one needs no second run.
 base::Set<u64> g_frame_shaders;
 
 void DumpShaderListing(u64 addr, u32 dwords) {
@@ -1064,7 +972,6 @@ void DumpShaderListing(u64 addr, u32 dwords) {
   std::FILE* f = std::fopen(path, "wb");
   if (!f)
     return;
-  // Bounded by the OrbShdr footer, so code past an early s_endpgm is listed.
   u32 span = 8192;
   while (span > dwords && !gpu::IsReadableRange(addr, span * 4ull))
     span /= 2;
@@ -1093,8 +1000,6 @@ base::String TexObj(u32 index,
   Obj o;
   o.U("i", index);
   o.Hex("base", t.base);
-  // The address the descriptor itself was s_loaded from: a binding that
-  // resolves to zeros is only diagnosable from the memory behind it.
   o.Hex("src", t.src);
   o.U("w", t.w);
   o.U("h", t.h);
@@ -1125,7 +1030,6 @@ base::String TexObj(u32 index,
   for (u32 i = 0; i < 4; i++)
     sampler.Add(Line::HexText(t.sampler[i]));
   o.Raw("sampler", sampler.Done());
-  // How the binding actually resolved, the whole point of a capture.
   const char* how = "unknown";
   u64 resolved = 0;
   if (b && index < b->tex_count) {
@@ -1144,7 +1048,7 @@ base::String TexObj(u32 index,
     } else if (b->tex_guest && b->tex_guest[index]) {
       how = "guest";
     } else {
-      how = "default";  // the 1x1 white/zero fallback: nothing resolved
+      how = "default";
     }
   }
   o.Str("resolved", how);
@@ -1175,8 +1079,6 @@ void NoteTexture(const render::DrawInfo::DrawTex& t) {
   k.pow2_pad = t.pow2_pad;
   g_frame_texs.insert(k);
 }
-
-// --- mid-frame snapshots ---------------------------------------------------
 
 void QueueSnapshot(rhi::Texture* image,
                    u8 aspect,
@@ -1216,10 +1118,6 @@ void QueueSnapshot(rhi::Texture* image,
   g_snapshots.push_back(s);
 }
 
-// Snapshot every attachment of the region that is open right now. A copy
-// cannot be recorded inside dynamic rendering, so the region is closed first;
-// the next draw reopens it with loadOp LOAD, which is what it would have done
-// anyway for an already-rendered target.
 void SnapshotOpenRegion(u32 draw_index) {
   if (!g_region.open)
     return;
@@ -1287,8 +1185,6 @@ void DrainSnapshots() {
   g_snapshots.clear();
 }
 
-// --- end-of-frame dumps ----------------------------------------------------
-
 void DumpFrameResources() {
   if (DumpWanted("rt")) {
     for (auto& kv : g_rts) {
@@ -1299,8 +1195,6 @@ void DumpFrameResources() {
       if (!ReadImage(rt.texture, rhi::kAspectColor, rt.w, rt.h,
                      FormatBytes(rt.fmt), rt.layout, bytes))
         continue;
-      // The frame's submission has already stamped submitted_layout; this
-      // readback executes after it, so the anchor moves with it.
       rt.submitted_layout = rt.layout;
       char name[256];
       std::snprintf(name, sizeof name, "%s_end_rt_%#llx_%ux%u.png",
@@ -1361,8 +1255,6 @@ void DumpFrameResources() {
   if (DumpWanted("tex")) {
     for (const TexKey& t : g_frame_texs) {
       char name[256];
-      // dfmt 4 float carries its display scale in the name: the image is
-      // meaningless without it (see DecodeGuestTexel case 4).
       if (t.dfmt == 4 && t.nfmt == 7) {
         std::snprintf(name, sizeof name, "%s_tex_%#llx_%ux%u_d%u_n%u_x%g.png",
                       g_prefix.c_str(), (unsigned long long)t.base, t.w, t.h,
@@ -1391,11 +1283,7 @@ void DumpFrameResources() {
   }
 }
 
-// --- validation ------------------------------------------------------------
-
 }  // namespace
-
-// --- public ----------------------------------------------------------------
 
 bool WantValidation() {
   static const bool kWant = kValidate.get() || kSyncValidate.get();
@@ -1453,9 +1341,6 @@ void FrameBegin(int frame_num) {
   if (!g_start_ns)
     g_start_ns = NowNs();
   if (!g_frames_left) {
-    // Called before the frame counters reset, so g_frame.draws still holds the
-    // PREVIOUS frame's count, which is what the busy trigger needs (a frame's
-    // own draw count is not known until it ends).
     bool trigger = g_cs_trigger;
     if (kCaptureFrame.get() > 0 && frame_num == kCaptureFrame.get())
       trigger = true;
@@ -1473,8 +1358,6 @@ void FrameBegin(int frame_num) {
     ::mkdir(g_dir.c_str(), 0755);
   }
 
-  // A frame that died before EndFrame (a device fault) leaves the file open;
-  // do not leak it into the next one.
   if (g_file) {
     std::fclose(g_file);
     g_file = nullptr;
@@ -1687,18 +1570,10 @@ void RecordDraw(const render::DrawInfo& d,
   viewport.Num("x_offset", d.viewport_x_offset);
   viewport.Num("y_scale", d.viewport_y_scale);
   viewport.Num("y_offset", d.viewport_y_offset);
-  // The rectangle the backend actually sets (a negative height is the y-up
-  // guest raster, not a bug).
   viewport.Num("vk_x", d.viewport_x_offset - d.viewport_x_scale);
   viewport.Num("vk_y", d.viewport_y_offset - d.viewport_y_scale);
   viewport.Num("vk_w", d.viewport_x_scale * 2.0f);
   viewport.Num("vk_h", d.viewport_y_scale * 2.0f);
-  // PA_CL_VPORT_ZSCALE/ZOFFSET. The backend deliberately does not apply these
-  // (see SetGuestViewport), so a pass whose depth comes out wrong is only
-  // diagnosable if the capture says what the guest asked for: (1, 0) is
-  // identity, (0.5, 0.5) is the GL [-1,1]->[0,1] mapping that the VS z remap
-  // handles instead, and which of the two a draw uses has to be readable per
-  // draw, not per title.
   viewport.Num("z_scale", d.viewport_z_scale);
   viewport.Num("z_offset", d.viewport_z_offset);
 
@@ -1765,7 +1640,8 @@ void RecordDecline(const char* reason) {
   l.Emit();
 }
 
-static void RecordDispatchInfo(const render::ComputeInfo& ci, const char* type) {
+static void RecordDispatchInfo(const render::ComputeInfo& ci,
+                               const char* type) {
   if (!g_recording)
     return;
   Arr textures;

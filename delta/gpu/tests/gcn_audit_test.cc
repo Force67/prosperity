@@ -23,7 +23,6 @@ base::String ReportString() {
   return s;
 }
 
-// One process-wide fixture: the audit latches its gates on first use.
 class GcnAuditTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
@@ -34,22 +33,19 @@ class GcnAuditTest : public ::testing::Test {
 TEST_F(GcnAuditTest, ClassifiesSilentAndUnsupportedAndDeduplicates) {
   ASSERT_TRUE(gpu::gcn::ShaderDebugEnabled());
   const u32 code[] = {
-      0xbe800301,              // s_mov_b32 s0, s1
-      0x7e020280,              // v_mov_b32 v1, 0
-      0xd2820000, 0x040a0300,  // v_mad_f32 v0, v0, v1, v2
-      0xbf810000,              // s_endpgm
+      0xbe800301, 0x7e020280, 0xd2820000, 0x040a0300, 0xbf810000,
   };
   const gpu::gcn::Program program = gpu::gcn::Decode(code, 5);
   ASSERT_EQ(program.size(), 4u);
 
-  for (int round = 0; round < 2; round++) {  // second round must deduplicate
+  for (int round = 0; round < 2; round++) {
     gpu::gcn::AuditBegin("vs", code, program);
     gpu::gcn::AuditInstBegin(0, 0);
-    gpu::gcn::AuditInstEnd(0, 3);  // translated: emitted 3 words
+    gpu::gcn::AuditInstEnd(0, 3);
     gpu::gcn::AuditInstBegin(1, 1);
-    gpu::gcn::AuditInstEnd(1, 0);  // silent: 0 words, no warning
+    gpu::gcn::AuditInstEnd(1, 0);
     gpu::gcn::AuditInstBegin(2, 2);
-    gpu::gcn::AuditNote("vop3", 0x141);  // warned unsupported
+    gpu::gcn::AuditNote("vop3", 0x141);
     gpu::gcn::AuditInstEnd(2, 0);
     gpu::gcn::AuditEnd(nullptr);
   }
@@ -59,16 +55,14 @@ TEST_F(GcnAuditTest, ClassifiesSilentAndUnsupportedAndDeduplicates) {
       << report.c_str();
   EXPECT_NE(report.find("vop3 op=0x141 (v_mad_f32)"), base::String::npos)
       << report.c_str();
-  // The silent drop is reported under its mnemonic; the translated and the
-  // warned instructions are not.
   EXPECT_NE(report.find("v_mov_b32"), base::String::npos) << report.c_str();
   EXPECT_EQ(report.find("s_mov_b32"), base::String::npos) << report.c_str();
 }
 
 TEST_F(GcnAuditTest, DeclinedShaderIsListedWithReason) {
   const u32 code[] = {
-      0xbf8c0070,  // s_waitcnt
-      0xbf810000,  // s_endpgm
+      0xbf8c0070,
+      0xbf810000,
   };
   const gpu::gcn::Program program = gpu::gcn::Decode(code, 2);
   gpu::gcn::AuditBegin("cs", code, program);
@@ -83,8 +77,8 @@ TEST_F(GcnAuditTest, DeclinedShaderIsListedWithReason) {
 
 TEST_F(GcnAuditTest, ExpectedNoOpsAreNotSilent) {
   const u32 code[] = {
-      0xbf8c0070,  // s_waitcnt: expected to emit nothing
-      0xbf810000,  // s_endpgm
+      0xbf8c0070,
+      0xbf810000,
   };
   const gpu::gcn::Program program = gpu::gcn::Decode(code, 2);
   gpu::gcn::AuditBegin("ps", code, program);
@@ -98,7 +92,7 @@ TEST_F(GcnAuditTest, ExpectedNoOpsAreNotSilent) {
 
 TEST_F(GcnAuditTest, VintrpP2IsNotHiddenAsAnExpectedNoOp) {
   const u32 code[] = {
-      (0x32u << 26) | (1u << 16),  // v_interp_p2_f32
+      (0x32u << 26) | (1u << 16),
       0xbf810000,
   };
   const gpu::gcn::Program program = gpu::gcn::Decode(code, 2);

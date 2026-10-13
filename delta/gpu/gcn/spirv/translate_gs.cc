@@ -1,9 +1,5 @@
 /*
- * PS4Delta: the legacy ES -> GS pipeline. The ES writes its outputs into the
- * ESGS ring, the GS reads them back per input vertex and writes the GSVS ring,
- * and the copy shader in the VS slot moves GSVS data into exports. Vulkan
- * passes vertex data between stages itself, so the rings become the stage
- * interface and the copy shader is only read for its export map.
+ * PS4Delta : PS4 emulation and research project
  */
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 
@@ -21,10 +17,6 @@ constexpr u32 kBufferLoadDword = 0x0c;
 constexpr u32 kBufferStoreDword = 0x1c;
 constexpr u32 kExpPos0 = 12, kExpPos1 = 13, kExpParam0 = 32;
 
-// Byte offset of a ring access within one lane's item. The ring base the
-// hardware passes in an SGPR is seeded as zero, so the offsets the compiler
-// adds on top are all that is left. A component is 64 lanes of dwords apart,
-// and a GS vertex offset VGPR selects the lane.
 Id RingAddress(Translator& t, const Inst& inst) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   Id address =
@@ -36,7 +28,7 @@ Id RingAddress(Translator& t, const Inst& inst) {
 
 bool RingDwordOp(const Inst& inst, u32 op) {
   const u32 w = inst.raw[0];
-  return ((w >> 18) & 0x7F) == op && !((w >> 13) & 1);  // no IDXEN
+  return ((w >> 18) & 0x7F) == op && !((w >> 13) & 1);
 }
 
 }  // namespace
@@ -76,16 +68,16 @@ bool ParseCopyShader(const Program& program,
     const u32 w = inst.raw[0], w1 = inst.raw[1];
     switch (inst.enc) {
       case Enc::kSopp:
-        if (inst.opcode == 0x01)  // s_endpgm
+        if (inst.opcode == 0x01)
           return true;
         if (inst.opcode >= 0x02 && inst.opcode <= 0x09)
-          return false;  // a branch: more than one stream
+          return false;
         break;
       case Enc::kSopk: {
         const u32 sdst = (w >> 16) & 0x7F;
         if (sdst < 128)
           sgpr[sdst] =
-              inst.opcode == 0x00  // s_movk_i32
+              inst.opcode == 0x00
                   ? Value{Value::kConst, static_cast<u32>(static_cast<i16>(w))}
                   : Value{};
         break;
@@ -94,7 +86,7 @@ bool ParseCopyShader(const Program& program,
         const u32 sdst = (w >> 16) & 0x7F;
         Value v;
         if (inst.opcode == 0x03 && constant(w & 0xFF, inst.literal, v.bits))
-          v.kind = Value::kConst;  // s_mov_b32
+          v.kind = Value::kConst;
         if (sdst < 128)
           sgpr[sdst] = v;
         break;
@@ -125,7 +117,7 @@ bool ParseCopyShader(const Program& program,
       case Enc::kVop1: {
         const u32 vdst = (w >> 17) & 0xFF, src0 = w & 0x1FF;
         Value v;
-        if (inst.opcode == 0x01) {  // v_mov_b32
+        if (inst.opcode == 0x01) {
           if (src0 >= 256)
             v = vgpr[src0 - 256];
           else if (constant(src0, inst.literal, v.bits))
@@ -143,7 +135,7 @@ bool ParseCopyShader(const Program& program,
       case Enc::kExp: {
         const u32 en = w & 0xF, target = (w >> 4) & 0x3F;
         if ((w >> 10) & 1)
-          return false;  // COMPR
+          return false;
         const bool pos = target >= kExpPos0 && target <= kExpPos0 + 3;
         const bool param = target >= kExpParam0 && target < kExpParam0 + 32;
         if (!pos && !param)
@@ -207,8 +199,6 @@ void EmitGsRingAccess(Translator& t, const Inst& inst, StageContext& sc) {
 
 namespace {
 
-// Write GSVS vertex `vertex` to the stage outputs the copy shader would have
-// exported it through.
 void WriteGsVertex(Translator& t, StageContext& sc, Id vertex) {
   Id pos[4] = {t.F32(0.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)};
   bool wrote_pos = false;
@@ -267,14 +257,14 @@ void EmitGsMessage(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 simm = inst.raw[0] & 0xFFFF;
   const u32 msg = simm & 0xF, op = (simm >> 4) & 3, stream = (simm >> 8) & 3;
   if (msg == 3)
-    return;  // GS_DONE
+    return;
   if (msg != 2 || !sc.gs_exports) {
     WarnUnsupported("sendmsg", simm);
     return;
   }
   if (stream != 0 || op == 0)
-    return;  // only stream 0 reaches the rasterizer
-  // The hardware counts a vertex for each lane EXEC has on at the message.
+    return;
+  // The hardware counts a vertex per EXEC lane active at the message.
   const Id emitted = t.m.Load(t.t_u, sc.gs_emitted);
   Id go = t.LaneActive(t.Exec());
   if (op & 2)

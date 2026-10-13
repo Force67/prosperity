@@ -61,7 +61,6 @@ bool HasBuiltin(const base::Vector<u32>& spirv, u32 builtin) {
     const u32 opcode = spirv[i] & 0xFFFF;
     if (!word_count || i + word_count > spirv.size())
       return false;
-    // OpDecorate target BuiltIn <builtin>.
     if (opcode == 71 && word_count >= 4 && spirv[i + 2] == 11 &&
         spirv[i + 3] == builtin)
       return true;
@@ -72,15 +71,12 @@ bool HasBuiltin(const base::Vector<u32>& spirv, u32 builtin) {
 
 bool Recompile(base::Vector<u32> code) {
   code.push_back(kEndPgm);
-  // The recompiler scans 4096 dwords for shader metadata.
   code.resize(4096);
   const u32 user_data[16] = {};
   return gpu::gcn::Recompile(code.data(), nullptr, user_data, user_data).ok;
 }
 
 TEST(RdnaScalarReplay, CompareWritesOnlyItsSelectedMaskRegister) {
-  // Astro's compare uses VCC. Bits 14:8 are zero but do not name s[0:1]
-  // unless SD is set. Inventing that write rejected its later buffer atomic.
   const u32 code[] = {0x7c041ef9, 0x86860080, kEndPgm};
   auto program = gpu::rdna::DecodeShader(code, base::ArraySize(code));
   auto writes = gpu::rdna::PossibleScalarWrites(program[0]);
@@ -90,7 +86,6 @@ TEST(RdnaScalarReplay, CompareWritesOnlyItsSelectedMaskRegister) {
   auto replay = gpu::rdna::PlanScalarReplay(program);
   EXPECT_EQ(replay.LossAt(0, 4, 1), gpu::rdna::ScalarReplayPlan::kCovered);
 
-  // Selecting s[20:21] leaves VCC intact instead.
   program[0].raw[1] = 0x0686946a;
   writes = gpu::rdna::PossibleScalarWrites(program[0]);
   EXPECT_EQ(writes.range[0].first, 20u);
@@ -99,7 +94,6 @@ TEST(RdnaScalarReplay, CompareWritesOnlyItsSelectedMaskRegister) {
   EXPECT_EQ(replay.LossAt(106, 2, 1), gpu::rdna::ScalarReplayPlan::kCovered);
   EXPECT_EQ(replay.LossAt(20, 2, 1), gpu::rdna::ScalarReplayPlan::kUnmodelled);
 
-  // RDNA CMPX writes EXEC, regardless of SDST or the VOP3 destination field.
   program[0].opcode |= 0x10;
   writes = gpu::rdna::PossibleScalarWrites(program[0]);
   EXPECT_EQ(writes.range[0].first, 126u);
@@ -115,8 +109,7 @@ TEST(RdnaSpirv, NoColorExportDoesNotSynthesizeWhiteOutput) {
   const u32 vs[4096] = {kEndPgm};
   const u32 no_export[4096] = {kEndPgm};
   const u32 null_export[4096] = {0xf8000890, 0, kEndPgm};
-  const u32 color_export[4096] = {0x7e0002f2, 0xf800080f, 0,
-                                kEndPgm};  // v0=1; exp mrt0 v0,v0,v0,v0
+  const u32 color_export[4096] = {0x7e0002f2, 0xf800080f, 0, kEndPgm};
   for (const u32* ps : {no_export, null_export, color_export}) {
     gpu::rdna::NextProgramGeneration();
     const auto result = gpu::rdna::Recompile(vs, ps, user_data, user_data);
@@ -126,13 +119,9 @@ TEST(RdnaSpirv, NoColorExportDoesNotSynthesizeWhiteOutput) {
 }
 
 TEST(RdnaSpirv, ReloadedDescriptorUsesItsOwnGraphicsBuffer) {
-  const u32 vs[4096] = {
-      0xf4080404, 0xfa000000,  // s_load_dwordx4 s[16:19], s[8:9], 0
-      0xe0300000, 0x80040000,  // v0 = buffer A[0]
-      0xe0300004, 0x80040100,  // v1 = buffer A[1], same descriptor
-      0xf4080404, 0xfa000010,  // reload s[16:19] with buffer B's descriptor
-      0xe0300000, 0x80040200,  // v2 = buffer B[0]
-      kEndPgm};
+  const u32 vs[4096] = {0xf4080404, 0xfa000000, 0xe0300000, 0x80040000,
+                        0xe0300004, 0x80040100, 0xf4080404, 0xfa000010,
+                        0xe0300000, 0x80040200, kEndPgm};
   const u32 values[4] = {1, 2, 3, 4};
   const u64 a = reinterpret_cast<u64>(values);
   const u64 b = reinterpret_cast<u64>(values + 2);
@@ -164,7 +153,7 @@ TEST(GcnSpirv, AcceptsImplementedNeoVectorFamilies) {
     code.push_back(Vop2(op));
   for (u32 op : {0x37, 0x38}) {
     code.push_back(Vop2(op));
-    code.push_back(0x00003c00);  // Mandatory FP16 literal.
+    code.push_back(0x00003c00);
   }
   EXPECT_TRUE(Recompile(base::move(code))) << "VOP2";
 
@@ -177,7 +166,7 @@ TEST(GcnSpirv, AcceptsImplementedNeoVectorFamilies) {
   AppendVop3(code, 0x18a);
   AppendVop3(code, 0x18b);
   for (u32 op = 0x1d0; op <= 0x1e5; op++) {
-    if (op != 0x1e2)  // v_sat_pk_u8_i16 is VOP1-only.
+    if (op != 0x1e2)
       AppendVop3(code, op);
   }
   EXPECT_TRUE(Recompile(base::move(code))) << "VOP3 reflected VOP1";
@@ -193,11 +182,11 @@ TEST(GcnSpirv, AcceptsImplementedNeoVectorFamilies) {
   }
   AppendVop3Literal(code, 0x303);
   AppendVop3(code, 0x341);
-  code.back() |= 1u << 27;  // OMOD:*2
+  code.back() |= 1u << 27;
   AppendVop3(code, 0x373);
-  code[code.size() - 2] |= 1u << 11;  // Saturating U32 clamp.
+  code[code.size() - 2] |= 1u << 11;
   AppendVop3(code, 0x375);
-  code[code.size() - 2] |= 1u << 11;  // Saturating I32 clamp.
+  code[code.size() - 2] |= 1u << 11;
   EXPECT_TRUE(Recompile(base::move(code))) << "VOP3";
 
   code.clear();
@@ -211,22 +200,19 @@ TEST(GcnSpirv, AcceptsImplementedNeoVectorFamilies) {
 TEST(GcnSpirv, RejectsUnsupportedNeoForms) {
   const IsaScope neo(gpu::gcn::IsaMode::kNeo);
 
-  EXPECT_FALSE(Recompile({Vop1(0x50, 249), 0}));  // SDWA control dword.
+  EXPECT_FALSE(Recompile({Vop1(0x50, 249), 0}));
 
   base::Vector<u32> interp;
-  AppendVop3(interp, 0x342);  // Requires pixel-stage interpolation state.
+  AppendVop3(interp, 0x342);
   EXPECT_FALSE(Recompile(base::move(interp)));
 
   base::Vector<u32> div_fixup;
   AppendVop3(div_fixup, 0x35f);
   EXPECT_FALSE(Recompile(base::move(div_fixup)));
 
-  EXPECT_FALSE(Recompile({Vop1(0x50, 254)}));  // LDS_DIRECT is not modeled.
+  EXPECT_FALSE(Recompile({Vop1(0x50, 254)}));
 }
 
-// A wave64 guest compiler omits the s_barrier between an LDS write and an LDS
-// read when the threadgroup is one wave; on a 32-wide host those 64 lanes are
-// two subgroups and the read races the write.
 class WaveScope {
  public:
   explicit WaveScope(u32 lanes) : old_(gpu::gcn::HostSubgroupSize()) {
@@ -238,7 +224,6 @@ class WaveScope {
   u32 old_;
 };
 
-// ds_write_b32 v0, v0  /  ds_read_b32 v1, v0
 constexpr u32 kDsWrite0 = 0xd8340000, kDsWrite1 = 0x00000000;
 constexpr u32 kDsRead0 = 0xd8d80000, kDsRead1 = 0x01000000;
 
@@ -256,60 +241,49 @@ bool NoBarriers(const gpu::gcn::LdsBarrierPlan& p) {
 TEST(GcnSpirv, Wave64LdsBarriersAreReinsertedOnlyWhereNeeded) {
   const WaveScope split(32);
 
-  // Straight-line write-then-read: one barrier, immediately before the read.
   const base::Vector<u32> raw{kDsWrite0, kDsWrite1, kDsRead0, kDsRead1,
                               kEndPgm};
   const gpu::gcn::LdsBarrierPlan plan = PlanBarriers(raw, 64);
   ASSERT_EQ(plan.at.size(), 1u);
-  EXPECT_EQ(plan.at[0], 1u);  // instruction index of the ds_read
+  EXPECT_EQ(plan.at[0], 1u);
   EXPECT_FALSE(plan.lockstep);
 
-  // More than one wave per group: the guest compiler had to emit its own.
   EXPECT_TRUE(NoBarriers(PlanBarriers(raw, 128)));
   EXPECT_TRUE(NoBarriers(PlanBarriers(raw, 256)));
 
-  // Reads only, or writes only: nothing to order.
   EXPECT_TRUE(NoBarriers(PlanBarriers({kDsRead0, kDsRead1, kEndPgm}, 64)));
   EXPECT_TRUE(NoBarriers(PlanBarriers({kDsWrite0, kDsWrite1, kEndPgm}, 64)));
 
-  // A host subgroup at least a wave wide keeps the guest's own guarantee.
   const WaveScope whole(64);
   EXPECT_TRUE(NoBarriers(PlanBarriers(raw, 64)));
 }
 
 TEST(GcnSpirv, BranchyWave64LdsSyncsPerDispatchIteration) {
   const WaveScope split(32);
-  // write ; if(execz) skip a second write ; read
   const base::Vector<u32> code{
-      kDsWrite0,  kDsWrite1,
-      0xbf880002,  // s_cbranch_execz pc+2 -> the read
-      kDsWrite0,  kDsWrite1, kDsRead0, kDsRead1, kEndPgm,
+      kDsWrite0, kDsWrite1, 0xbf880002, kDsWrite0,
+      kDsWrite1, kDsRead0,  kDsRead1,   kEndPgm,
   };
   const gpu::gcn::LdsBarrierPlan plan = PlanBarriers(code, 64);
-  // A branchy shader gets wave-uniform control flow, which puts every
-  // invocation in the same block on the same iteration; the barrier can then
-  // go inline at the read, after both writes.
   EXPECT_TRUE(plan.lockstep);
   ASSERT_EQ(plan.at.size(), 1u);
-  EXPECT_EQ(plan.at[0], 3u);  // the ds_read
+  EXPECT_EQ(plan.at[0], 3u);
 }
 
 TEST(GcnSpirv, OnlyTheEntryBlockIsAUniformPointInABranchyShader) {
   base::Vector<u32> code{
-      kDsWrite0,  kDsWrite1,
-      0xbf880002,  // s_cbranch_execz
-      kDsWrite0,  kDsWrite1, kDsRead0, kDsRead1, kEndPgm,
+      kDsWrite0, kDsWrite1, 0xbf880002, kDsWrite0,
+      kDsWrite1, kDsRead0,  kDsRead1,   kEndPgm,
   };
   const gpu::gcn::Program p =
       gpu::gcn::Decode(code.data(), (u32)code.size(), false);
   const base::Vector<u8> at = gpu::gcn::UniformPoints(p);
   ASSERT_GE(at.size(), 4u);
-  EXPECT_TRUE(at[0]);   // ds_write, entry block
-  EXPECT_TRUE(at[1]);   // the branch itself, still the entry block
-  EXPECT_FALSE(at[2]);  // conditional block
-  EXPECT_FALSE(at[3]);  // reached on differing iterations
+  EXPECT_TRUE(at[0]);
+  EXPECT_TRUE(at[1]);
+  EXPECT_FALSE(at[2]);
+  EXPECT_FALSE(at[3]);
 
-  // With no branches at all every point is uniform.
   const base::Vector<u32> flat{kDsWrite0, kDsWrite1, kDsRead0, kDsRead1,
                                kEndPgm};
   const gpu::gcn::Program fp =
@@ -324,7 +298,7 @@ TEST(GcnSpirv, RejectsNeoOnlyEncodingsInBaseMode) {
 
   EXPECT_FALSE(Recompile({sop2_pack}));
   EXPECT_FALSE(Recompile({(0x17du << 23) | (3u << 8) | 248u}));
-  EXPECT_FALSE(Recompile({Vop1(0x01, 248)}));  // Neo INV_2PI inline value.
+  EXPECT_FALSE(Recompile({Vop1(0x01, 248)}));
 
   base::Vector<u32> literal;
   AppendVop3(literal, 0x103);
@@ -335,8 +309,8 @@ TEST(GcnSpirv, RejectsNeoOnlyEncodingsInBaseMode) {
 TEST(GcnSpirv, BaseVop3OutputModifiersAreNotIgnored) {
   const IsaScope base(gpu::gcn::IsaMode::kBase);
   base::Vector<u32> floating;
-  AppendVop3(floating, 0x103);  // v_add_f32
-  floating.back() |= 1u << 27;  // OMOD:*2
+  AppendVop3(floating, 0x103);
+  floating.back() |= 1u << 27;
   EXPECT_TRUE(Recompile(base::move(floating)));
 
   base::Vector<u32> cvt_f16;
@@ -346,11 +320,8 @@ TEST(GcnSpirv, BaseVop3OutputModifiersAreNotIgnored) {
   cvt_f16.back() |= 1u << 27;
   EXPECT_TRUE(Recompile(base::move(cvt_f16)));
 
-  // An integer result IGNORES the output modifier on hardware ("Integer and
-  // non-specific instructions ignore output modifiers", Sea Islands ISA), so
-  // dropping it is exact. Declining the shader over it was the defect.
   base::Vector<u32> integer;
-  AppendVop3(integer, 0x169);  // v_mul_lo_u32
+  AppendVop3(integer, 0x169);
   integer.back() |= 1u << 27;
   EXPECT_TRUE(Recompile(base::move(integer)));
 }
@@ -358,10 +329,10 @@ TEST(GcnSpirv, BaseVop3OutputModifiersAreNotIgnored) {
 TEST(GcnSpirv, BaseSeaIslandsCorrectionsAreAcceptedOrRejectedExplicitly) {
   const IsaScope base(gpu::gcn::IsaMode::kBase);
 
-  EXPECT_TRUE(Recompile({Vopc(0x88)}));                    // v_cmp_class_f32
-  EXPECT_TRUE(Recompile({(0xbu << 28) | (0x10u << 23)}));  // s_mulk_i32
-  EXPECT_TRUE(Recompile({0xbf960000}));   // s_cbranch_cdbgsys to fallthrough
-  EXPECT_FALSE(Recompile({0xbf960001}));  // meaningful debug branch unsupported
+  EXPECT_TRUE(Recompile({Vopc(0x88)}));
+  EXPECT_TRUE(Recompile({(0xbu << 28) | (0x10u << 23)}));
+  EXPECT_TRUE(Recompile({0xbf960000}));
+  EXPECT_FALSE(Recompile({0xbf960001}));
 
   base::Vector<u32> shift64;
   AppendVop3(shift64, 0x161);
@@ -371,8 +342,6 @@ TEST(GcnSpirv, BaseSeaIslandsCorrectionsAreAcceptedOrRejectedExplicitly) {
   AppendVop3(mad64, 0x176);
   EXPECT_TRUE(Recompile(base::move(mad64)));
 
-  // The legacy multiply differs from the IEEE one only for zero times inf or
-  // NaN, so it lowers to the same OpFMul rather than costing the shader.
   EXPECT_TRUE(Recompile({Vop2(0x07)}));
 
   base::Vector<u32> div_scale;
@@ -380,7 +349,7 @@ TEST(GcnSpirv, BaseSeaIslandsCorrectionsAreAcceptedOrRejectedExplicitly) {
   EXPECT_FALSE(Recompile(base::move(div_scale)));
 
   EXPECT_FALSE(Recompile({
-      (0x37u << 26) | (0x0cu << 18),  // recognized but untranslated FLAT
+      (0x37u << 26) | (0x0cu << 18),
       2u << 24,
   }));
 }
@@ -388,11 +357,8 @@ TEST(GcnSpirv, BaseSeaIslandsCorrectionsAreAcceptedOrRejectedExplicitly) {
 TEST(GcnSpirv, PlansScalarLoadedCbufferDescriptor) {
   const IsaScope base(gpu::gcn::IsaMode::kBase);
   const u32 code[] = {
-      0xbeeb03ff, 0x00000002,  // Shader footer starts at dword 6.
-      0xc08e0104,              // s_load_dwordx4 s[28:31], s[0:1], 0x4
-      0xc28c1d08,              // s_buffer_load_dwordx4 s[24:27], s[28:31], 0x8
-      0xc2d41d00,              // s_buffer_load_dwordx8 s[40:47], s[28:31], 0x0
-      kEndPgm,    0x5362724f, 0x00726468,  // "OrbShdr"
+      0xbeeb03ff, 0x00000002, 0xc08e0104, 0xc28c1d08,
+      0xc2d41d00, kEndPgm,    0x5362724f, 0x00726468,
   };
   const u32 user_data[16] = {};
   const auto recompiled =
@@ -409,20 +375,16 @@ TEST(GcnSpirv, SeedsPixelPositionFromFragCoord) {
   const IsaScope base(gpu::gcn::IsaMode::kBase);
   const u32 vs[4096] = {kEndPgm};
   const u32 ps[4096] = {
-      0x7e080f02,              // v_cvt_u32_f32 v4, v2
-      0x7e0a0f03,              // v_cvt_u32_f32 v5, v3
-      0xf800000f, 0x07060504,  // exp mrt0 v4, v5, v6, v7
-      kEndPgm,
+      0x7e080f02, 0x7e0a0f03, 0xf800000f, 0x07060504, kEndPgm,
   };
   const u32 user_data[16] = {};
-  // PERSP_CENTER consumes v0:v1, placing POS_X/Y at v2:v3.
   const u32 ps_input_ena = (1u << 1) | (1u << 8) | (1u << 9);
 
   const auto recompiled =
       gpu::gcn::Recompile(vs, ps, user_data, user_data, ps_input_ena);
 
   ASSERT_TRUE(recompiled.ok);
-  EXPECT_TRUE(HasBuiltin(recompiled.fs_spirv, 15));  // FragCoord
+  EXPECT_TRUE(HasBuiltin(recompiled.fs_spirv, 15));
 }
 
 }  // namespace

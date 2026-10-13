@@ -168,7 +168,6 @@ VulkanCommandList::~VulkanCommandList() {
 }
 
 namespace {
-// A command profiled on its own when no wider span is open.
 struct AutoSpan {
   VulkanCommandList* list;
   bool opened;
@@ -185,8 +184,6 @@ struct AutoSpan {
 
 void VulkanCommandList::Begin() {
   dispatch_based_ = false;
-  // The previous recording has retired (the list is being reused): fold its
-  // span into its tag.
   if (prof_pending_) {
     static u64 stamps[2 + 2 * kProfSpans];
     const u32 n = 2 + 2 * spans_pending_;
@@ -266,8 +263,8 @@ void VulkanCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
     const rhi::ColorAttachment& c = pass.colors[i];
     colors[i] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     colors[i].imageView = Native(c.view);
-    colors[i].imageLayout = FixedLayout(c.view->texture(),
-                                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    colors[i].imageLayout = FixedLayout(
+        c.view->texture(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     colors[i].loadOp = ToVkLoad(c.load);
     colors[i].storeOp = c.store == rhi::StoreOp::kStore
                             ? VK_ATTACHMENT_STORE_OP_STORE
@@ -291,11 +288,10 @@ void VulkanCommandList::BeginRenderPass(const rhi::RenderPassDesc& pass) {
   }
   if (d.view && d.stencil) {
     stencil.imageView = Native(d.view);
-    stencil.imageLayout =
-        FixedLayout(d.view->texture(),
-                    d.stencil_read_only
-                        ? VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL
-                        : VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL);
+    stencil.imageLayout = FixedLayout(
+        d.view->texture(), d.stencil_read_only
+                               ? VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL
+                               : VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL);
     stencil.loadOp = ToVkLoad(d.stencil_load);
     stencil.storeOp = d.stencil_read_only ? VK_ATTACHMENT_STORE_OP_NONE
                                           : VK_ATTACHMENT_STORE_OP_STORE;
@@ -346,7 +342,6 @@ void VulkanCommandList::PushBindGroup(u32 index,
     for (size_t b = 0; b < bindings.size(); b++)
       if (bindings[b].binding == writes[i].binding) {
         VkDescriptorType type = l->types[b];
-        // Dynamic types cannot be pushed; the offset is in the write.
         if (type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
           type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         if (type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
@@ -361,7 +356,6 @@ void VulkanCommandList::PushBindGroup(u32 index,
                                     vk_writes);
     return;
   }
-  // No push descriptors: a set from this list's own pools.
   VkDevice dev = device_.native.device;
   VkDescriptorSetAllocateInfo ai{
       VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -546,7 +540,6 @@ void VulkanCommandList::CopyBuffer(rhi::Buffer* dst,
                                    rhi::Buffer* src,
                                    u64 src_offset,
                                    u64 bytes) {
-  // 14: one side is host memory, so the copy crosses the bus.
   AutoSpan span(this, src->mapped() || dst->mapped() ? 14 : 7);
   const VkBufferCopy region{src_offset, dst_offset, bytes};
   vkCmdCopyBuffer(cmd, Buf(src)->buffer, Buf(dst)->buffer, 1, &region);

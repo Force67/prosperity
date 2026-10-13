@@ -11,74 +11,35 @@
 
 namespace gpu {
 
-// Which guest pages were written since a cache copied them, for caches that
-// keep a copy of guest memory longer than one submission.
-//
-// Default (fault mode): an armed page is made read-only. The first write to it
-// faults; the kernel's SIGSEGV handler hands it here (host_memory::
-// HandleWriteFault), the page is made writable, queued, and the write resumes.
-// Collect drains the queue: no syscall and no scan, so the cost is paid per
-// written page rather than per question. A written page stays open until a
-// cache arms it again. The host kernel does not fault on a protected page but
-// fails the call, so code that lets it write guest memory (read(), recv())
-// announces the range first (host_memory::BeforeHostWrite).
-//
-// DELTA_GPU_WT_SCAN=1 (scan mode): userfaultfd async write protection plus
-// the PAGEMAP_SCAN ioctl (Linux 6.7). Faults resolve in the kernel and a scan
-// finds the written pages; each scan costs per mapping walked.
-//
-// Only CPU writes through the armed mapping are seen. A write through another
-// mapping of the same memory, or by a device into imported pages, must be
-// announced with NoteWrite.
+// Guest pages written since a cache copied them. Fault mode by default,
+// DELTA_GPU_WT_SCAN=1 selects scan mode. Writes through another mapping or by a
+// device need NoteWrite. Host-kernel writes need host_memory::BeforeHostWrite.
 class WriteTracker {
  public:
-  using Range = base::Pair<u64, u64>;  // [first, end), page aligned
+  using Range = base::Pair<u64, u64>;
 
-  // False when the host cannot track writes; every other call is then a no-op.
   bool Enable();
   void Reset();
   bool enabled() const { return mode_ != Mode::kOff; }
 
-  // Arms the pages of [base, base+bytes). False when they cannot be tracked,
-  // or are written too often to be worth it. `hot` arms them anyway and keeps
-  // them armed, for a copy that costs more to refresh blindly than a fault.
   bool Arm(u64 base, u64 bytes, bool hot = false);
 
-  // Appends every armed range written (or remapped) since the last call, and
-  // arms it again. Announced writes are included, and come first: the count of
-  // them is returned.
   size_t Collect(base::Vector<Range>& out);
 
-  // Thread safe. A write the tracker cannot see (another mapping, a device).
   void NoteWrite(u64 base, u64 bytes);
-  // Unprotects [base, base+bytes) and reports it as written, for a host API
-  // that refuses protected memory (a Vulkan import of guest pages).
   void Release(u64 base, u64 bytes);
-  // Thread safe. The guest mapped or unmapped [base, base+bytes): the pages
-  // there are no longer the ones that were armed, and count as written.
   void NoteRemap(u64 base, u64 bytes);
 
-  // Once a frame: pages reported more than a few times in the frame are hot
-  // CPU data, and a fault on every write to them costs more than copying.
   void EndFrame();
-  // Platform policy for memory the tracker cannot fully see. `arm_filter`
-  // refuses [first, end) when another mapping could write it unseen;
-  // `on_remap` hears every NoteRemap (any thread, kernel VM lock held).
   struct Policy {
     bool (*arm_filter)(u64 first, u64 end) = nullptr;
     void (*on_remap)(u64 base, u64 bytes) = nullptr;
-    // Runs first in Collect: the policy may NoteWrite what it cannot arm.
     void (*before_collect)() = nullptr;
   };
   void SetPolicy(const Policy& policy) { policy_ = policy; }
-  // Memory another owner keeps inaccessible (GPU-resident data). `resolve`
-  // runs first on every fault and host write: it makes [first, end) current
-  // and accessible, true when it owned any of it. `owns` keeps the tracker
-  // from protecting such pages itself.
   static void SetOwner(bool (*resolve)(u64 first, u64 end),
                        bool (*owns)(u64 first, u64 end));
-  // Async-signal-safe: the owner opened [first, end); armed pages there count
-  // as written.
+  // Async-signal-safe.
   static void OpenedByOwner(u64 first, u64 end);
 
   u64 armed_bytes() const { return armed_bytes_; }
@@ -97,7 +58,6 @@ class WriteTracker {
   void TakeFaulted(base::Vector<Range>& out);
   bool Register(u64 first, u64 end);
   bool AllArmed(u64 first, u64 end) const;
-  // Mirrors armed_ into the guest page table, one run at a time.
   void MarkArmed(u64 first, u64 end, bool armed);
   u64 EraseArmed(u64 first, u64 end);
   bool ArmRange(u64 first, u64 end, bool hot = false);
@@ -110,12 +70,11 @@ class WriteTracker {
   Policy policy_;
   int uffd_ = -1;
   int pagemap_ = -1;
-  base::Map<u64, u64> armed_;       // first -> end, coalesced
-  base::Map<u64, u64> registered_;  // first -> end, coalesced
+  base::Map<u64, u64> armed_;
+  base::Map<u64, u64> registered_;
   u64 armed_bytes_ = 0;
   base::Mutex noted_lock_;
   base::Vector<Range> noted_, remapped_;
-  // Pages reported this frame; their counts live in the guest page table.
   base::Vector<u64> reported_;
   u32 frame_ = 1;
   u64 collects_ = 0, written_pages_ = 0, collect_ns_ = 0;

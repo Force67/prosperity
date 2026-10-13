@@ -3,9 +3,6 @@
  */
 #pragma once
 
-// Headless desktop GL 4.6 core contexts over EGL, and the threads that keep
-// one current.
-
 #include <epoxy/egl.h>
 
 #include "base/memory/unique_pointer.h"
@@ -24,21 +21,15 @@ namespace gpu::opengl {
 
 struct EglDevice {
   EGLDisplay display = EGL_NO_DISPLAY;
-  base::String renderer;  // GL_RENDERER
+  base::String renderer;
 };
 
-// The best EGL device with GL 4.6 core: a hardware GPU over a software
-// rasteriser, or the one whose GL_RENDERER contains `filter`.
 bool OpenEglDevice(const char* filter, EglDevice* out);
 
-// A surfaceless GL 4.6 core context sharing objects with `share`.
 EGLContext CreateGlContext(EGLDisplay display, EGLContext share, bool debug);
 
-// What the lowering may use, from the current context.
 GlslFeatures QueryGlslFeatures();
 
-// Threads that each keep their own context current and drain one FIFO of
-// tasks between them.
 class GlWorker {
  public:
   GlWorker() = default;
@@ -46,8 +37,6 @@ class GlWorker {
   GlWorker& operator=(const GlWorker&) = delete;
   ~GlWorker() { Stop(); }
 
-  // One thread per context; the worker owns the contexts from here on.
-  // `init` runs once on each thread once its context is current.
   void Start(EGLDisplay display,
              base::Vector<EGLContext> contexts,
              const char* name,
@@ -55,7 +44,6 @@ class GlWorker {
   void Stop();
 
   void Post(base::Function<void()> task);
-  // Runs `task` on a worker thread and waits for it.
   void Run(const base::Function<void()>& task);
 
  private:

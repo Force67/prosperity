@@ -17,12 +17,6 @@
 
 namespace gpu::render {
 
-// host::Present blocks on the window swapchain (previous-present fence, vsync /
-// compositor pacing) and, on a software Vulkan driver, rasterizes the blit on
-// the CPU, ~10ms+ that used to sit on the frame loop. A dedicated presenter
-// thread owns the window (creation, event pump, and present all happen on it)
-// and always shows the newest completed frame; the frame loop just snapshots
-// the pixels and signals. DELTA_GPU_SYNCPRESENT=1 restores the inline call.
 LatestFramePresenter::~LatestFramePresenter() {
   Stop();
 }
@@ -53,18 +47,11 @@ void LatestFramePresenter::Run() {
     const u32 w = width_;
     const u32 h = height_;
     const host::PixelFormat fmt = pending_fmt_;
-    // A lent buffer is presented in place. Staging it into `local` first would
-    // be a second 33 MB copy of a 4K scanout on top of the one host::Present
-    // already does into its upload buffer, 6.5 ms for nothing. The borrow is
-    // held until present returns; the renderer waits for that in BeginFrame
-    // before it lets the GPU write the buffer again.
     const bool shared = pending_is_shared_;
     const Shared frame = pending_shared_;
     pending_is_shared_ = false;
     const u8* src = pending_src_;
     if (!src) {
-      // Steal the pending buffer (the allocations ping-pong, no per-frame
-      // alloc).
       local.swap(pending_pixels_);
       src = local.data();
     }

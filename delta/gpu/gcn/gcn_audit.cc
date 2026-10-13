@@ -1,7 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * Shader translation audit. See gcn_audit.h.
  */
 
 #include "gpu/gcn/gcn_audit.h"
@@ -48,16 +46,14 @@ u64 Fnv1a(const void* data, size_t bytes) {
   return h;
 }
 
-// An instruction the translator is expected to emit nothing for; not a
-// silent drop.
 bool ExpectedSilent(const Inst& inst) {
   switch (inst.enc) {
     case Enc::kSopp:
-      return true;  // waitcnt/nop/hints; branches are CFG terminators
+      return true;
     case Enc::kVintrp:
-      return inst.opcode == 0;  // P1 is a no-op in the interpolation model
+      return inst.opcode == 0;
     case Enc::kExp:
-      return (inst.raw[0] & 0xF) == 0;  // null export
+      return (inst.raw[0] & 0xF) == 0;
     default:
       return false;
   }
@@ -82,11 +78,10 @@ struct Active {
   const Program* program = nullptr;
   base::Vector<InstRecord> insts;
   base::Vector<u8> reachable;
-  // note key ("mubuf.ps op=0x0 buffer_load_format_x") -> stats
   base::Map<base::String, EventStat> events;
   base::Vector<base::String> plan;
   base::String decline;
-  u32 cur = ~0u;  // program index currently being emitted
+  u32 cur = ~0u;
 };
 
 struct ShaderRecord {
@@ -99,20 +94,16 @@ struct ShaderRecord {
   bool declined = false;
   base::String decline_reason;
   base::Map<base::String, EventStat> events;
-  base::Map<base::String, EventStat> silent;  // mnemonic -> stats
+  base::Map<base::String, EventStat> silent;
 };
 
 Active g_active;
 base::Vector<ShaderRecord> g_records;
-base::HashMap<u64, size_t> g_by_key;  // hash^stage -> record index
+base::HashMap<u64, size_t> g_by_key;
 bool g_atexit_registered = false;
 
-// Rewrite the report file after every new shader. The emulator is routinely
-// stopped with SIGKILL (it ignores TERM), which skips atexit, so an
-// exit-only report would usually be lost.
 void MaybeWriteReportFile() {
   const char* v = AuditEnv();
-  // Any value other than a plain enable flag names a report file.
   if (!v || !*v || std::strcmp(v, "1") == 0)
     return;
   if (std::FILE* f = std::fopen(v, "w")) {
@@ -141,23 +132,15 @@ void WriteDumpFiles(const ShaderRecord& rec,
     return;
   ::mkdir(dir, 0755);
 
-  // The guest address goes in the name, not just the hash. Every other
-  // diagnostic in the tree names a shader by the address the guest set it from
-  // (RTSTAT's last_ps, the draw trace, the capture), so a dump keyed only by
-  // content hash could not be tied back to any of them, which is what stopped
-  // an investigation dead once already. Address first so the files sort by it.
   char stem[256];
   std::snprintf(stem, sizeof(stem), "%s/%s_%llx_%016llx", dir,
                 rec.stage.c_str(), static_cast<unsigned long long>(rec.guest),
                 static_cast<unsigned long long>(rec.hash));
 
-  // Raw bytecode.
   if (std::FILE* f = std::fopen((base::String(stem) + ".gcn").c_str(), "wb")) {
     std::fwrite(a.code, 4, rec.dwords, f);
     std::fclose(f);
   }
-  // Unoptimized SPIR-V (with OpLine pc markers when the translator saw the
-  // dump env).
   if (spirv && !spirv->empty()) {
     if (std::FILE* f =
             std::fopen((base::String(stem) + ".spv").c_str(), "wb")) {
@@ -191,7 +174,6 @@ void WriteDumpFiles(const ShaderRecord& rec,
         return n;
       }(),
       rec.silent_count);
-  // Shader-level events (no pc attribution: binding-plan overflows etc.).
   for (const auto& e : a.events)
     if (e.second.first_pc == ~0u)
       std::fprintf(f, "; NOTE %s (x%u)\n", e.first.c_str(), e.second.sites);
@@ -368,14 +350,9 @@ void WriteAuditReport(std::FILE* f) {
   }
   std::fprintf(f, "), declined: %u\n", declined);
 
-  // Aggregate events / silents across shaders: key -> (#shaders, #sites,
-  // example).
   struct Agg {
     u32 shaders = 0, sites = 0;
     base::String example;
-    // Every shader carrying this op, not just the first. One example is enough
-    // to know an op is unhandled, but not to answer "is the pass I am chasing
-    // one of them", which is the question that actually comes up.
     base::Vector<base::String> all;
   };
   const auto example_of = [](const ShaderRecord& r, const EventStat& st) {

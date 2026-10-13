@@ -2,11 +2,6 @@
 
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * RDNA2 (gfx10.3) resource decode + tracking: the gfx10.3 128/256-bit T# layout
- * and the per-draw resolution of the T#/S# a pixel shader samples. Kept out of
- * the SPIR-V-gated translator so the command processor can resolve textures
- * even in a build without the recompiler backend.
  */
 
 #include "base/arch.h"
@@ -29,14 +24,9 @@ struct Smem {
 
 struct BufferResource {
   u64 base = 0;
-  // 4 dwords for a V#, 8 for an image T#; descriptor_dwords says which.
   u32 descriptor[8] = {};
   u32 descriptor_dwords = 0;
   bool descriptor_valid = false;
-  // Byte offset the fetch adds on top of the descriptor. For a structured V#
-  // the hardware computes base + soffset + index*stride, and Sony's compiler
-  // uses it to place each attribute inside the vertex: the three attributes of
-  // one stream share a base and differ only here.
   u32 soffset = 0;
   bool soffset_valid = false;
 };
@@ -51,8 +41,6 @@ inline Smem DecodeSmem(const gpu::gcn::Inst& inst) {
   };
 }
 
-// Dwords an SMEM s_load / s_buffer_load reads (x1/x2/x4/x8/x16). 0 = not a
-// load.
 inline u32 SmemLoadCount(u32 op) {
   switch (op) {
     case 0x00:
@@ -80,40 +68,34 @@ struct ScalarWrite {
   u32 count = 0;
 };
 
-// SGPRs an SOP1 writes, from the gfx10 opcode table (LLVM SOP1_Real_gfx10).
-// RDNA renumbered the block: the 64-bit saveexec family stays at 0x24-0x2b,
-// gfx10 adds wave32 forms at 0x3c-0x47 and four more 64-bit ones at 0x37-0x3b
-// (incl. s_andn1_saveexec_b64, used by Demon's Souls' G-buffer shaders).
-// Reading one as a single-dword write leaves the second SGPR passing for live
-// user data.
 inline u32 Sop1WriteDwords(u32 op) {
   switch (op) {
-    case 0x03:  // s_mov_b32
-    case 0x05:  // s_cmov_b32
-    case 0x07:  // s_not_b32
-    case 0x09:  // s_wqm_b32
-    case 0x0b:  // s_brev_b32
-    case 0x0d:  // s_bcnt0_i32_b32
-    case 0x0e:  // s_bcnt0_i32_b64   (64-bit source, 32-bit result)
-    case 0x0f:  // s_bcnt1_i32_b32
-    case 0x10:  // s_bcnt1_i32_b64
-    case 0x11:  // s_ff0_i32_b32
-    case 0x12:  // s_ff0_i32_b64
-    case 0x13:  // s_ff1_i32_b32
-    case 0x14:  // s_ff1_i32_b64
-    case 0x15:  // s_flbit_i32_b32
-    case 0x16:  // s_flbit_i32_b64
-    case 0x17:  // s_flbit_i32
-    case 0x18:  // s_flbit_i32_i64
-    case 0x19:  // s_sext_i32_i8
-    case 0x1a:  // s_sext_i32_i16
-    case 0x1b:  // s_bitset0_b32
-    case 0x1d:  // s_bitset1_b32
-    case 0x2c:  // s_quadmask_b32
-    case 0x2e:  // s_movrels_b32
-    case 0x30:  // s_movreld_b32
-    case 0x34:  // s_abs_i32
-    case 0x3c:  // s_and_saveexec_b32 .. s_andn2_wrexec_b32
+    case 0x03:
+    case 0x05:
+    case 0x07:
+    case 0x09:
+    case 0x0b:
+    case 0x0d:
+    case 0x0e:
+    case 0x0f:
+    case 0x10:
+    case 0x11:
+    case 0x12:
+    case 0x13:
+    case 0x14:
+    case 0x15:
+    case 0x16:
+    case 0x17:
+    case 0x18:
+    case 0x19:
+    case 0x1a:
+    case 0x1b:
+    case 0x1d:
+    case 0x2c:
+    case 0x2e:
+    case 0x30:
+    case 0x34:
+    case 0x3c:
     case 0x3d:
     case 0x3e:
     case 0x3f:
@@ -125,10 +107,10 @@ inline u32 Sop1WriteDwords(u32 op) {
     case 0x45:
     case 0x46:
     case 0x47:
-    case 0x49:  // s_movrelsd_2_b32
+    case 0x49:
       return 1;
-    case 0x20:  // s_setpc_b64 writes no SGPR at all
-    case 0x22:  // s_rfe_b64
+    case 0x20:
+    case 0x22:
       return 0;
     default:
       return 2;
@@ -172,10 +154,6 @@ inline ScalarWrite DecodeScalarWrite(const gpu::gcn::Inst& inst) {
   return {};
 }
 
-// Every SGPR an instruction may write, over-approximated; `exact` when
-// ScalarEval reproduces the value or clears the register. Wider than
-// DecodeScalarWrite (which covers scalar ALU only), so a clobbered register
-// doesn't pass for user data; scc_trusted gates s_cselect exactness.
 struct ScalarWrites {
   struct Range {
     u32 first = 0;
@@ -187,37 +165,25 @@ struct ScalarWrites {
 ScalarWrites PossibleScalarWrites(const gpu::gcn::Inst& inst,
                                   bool scc_trusted = false);
 
-// Per v_movrel* pc, every value M0 can hold there (a superset, sorted), from
-// the scalar code before it in its block. Absent: not known.
 base::HashMap<u32, base::Vector<u32>> PlanMovrelIndices(
     const gpu::gcn::Program& program);
 
-// SGPRs whose live value ResolveBuffers reproduces faithfully: the replay walks
-// in order, so a use sees the LAST write before it; that is the wave's value
-// only if the write dominates the use, runs once per path, and ScalarEval
-// models it. A descriptor built from a register failing any of the three is
-// declined, with the reason reported.
 struct ScalarReplayPlan {
   static constexpr u32 kRegs = 136;
   enum Loss : u8 {
     kCovered = 0,
-    kUnmodelled,   // written by an op ScalarEval does not evaluate
-    kConditional,  // written under a branch that a path around it skips
-    kLoopBody,     // written inside a loop, so the wave ran it more than once
-    kLoopCarried,  // a later write a back edge can run before the use
+    kUnmodelled,
+    kConditional,
+    kLoopBody,
+    kLoopCarried,
   };
   struct Write {
     u32 index;
     u32 first;
     u32 count;
     bool exact;
-    // Inside a loop, does this write produce the same value on every
-    // iteration? A descriptor s_loaded from a user-data table at a constant
-    // offset does, and that is most of what a loop body holds; only a write
-    // whose own inputs the loop changes is beyond the replay.
     bool loop_invariant;
   };
-  // Instruction indices. A back edge is a branch whose target precedes it.
   struct BackEdge {
     u32 target;
     u32 source;
@@ -225,18 +191,12 @@ struct ScalarReplayPlan {
   base::Vector<Write> writes;
   base::Vector<BackEdge> back_edges;
   base::Vector<u32> targets;
-  bool indirect = false;  // s_setpc: control may reach anywhere from anywhere
-  // Dominators, not "a branch lands between": a descriptor is routinely built
-  // in one if-arm and used at the join. The question is whether the write
-  // DOMINATES the use (Astro Bot's frame is largely compute; the blunt test
-  // declined its biggest passes).
+  bool indirect = false;
   static constexpr u32 kNoBlock = ~0u;
-  base::Vector<u32> block_of;  // instruction index -> block id
-  base::Vector<u32> idom;      // block id -> immediate dominator (entry: self)
+  base::Vector<u32> block_of;
+  base::Vector<u32> idom;
   bool Dominates(u32 write_index, u32 use_index) const;
 
-  // Does the replay hold the live value of sgpr[dwords] at instruction
-  // use_index, and if not, why not?
   Loss LossAt(u32 sgpr, u32 dwords, u32 use_index) const;
   bool Covers(u32 sgpr, u32 dwords, u32 use_index) const {
     return LossAt(sgpr, dwords, use_index) == kCovered;
@@ -245,47 +205,26 @@ struct ScalarReplayPlan {
 
 ScalarReplayPlan PlanScalarReplay(const Program& program);
 
-// MIMGs reading the same T#/S# descriptor share one set-0 binding, in first-use
-// order. Both the recompiler (EmitMimg declarations) and TrackTextures pair
-// against this, so the resolved textures line up 1:1 with the shader's
-// samplers.
 gpu::gcn::MimgBindingPlan RdnaPlanMimg(const Program& program);
 
-// Decode a gfx10.3 image resource. R128 selects the compact four-dword form;
-// ordinary resources contain eight dwords.
 gpu::gcn::TImage DecodeTImage(const u32* dwords, bool r128 = false);
 bool CanAccessLinearIntegerImage(const gpu::gcn::TImage& image);
 
-// A decoded gfx10.3 buffer resource (V#, four dwords): base48 = w0 |
-// (w1[15:0] << 32), stride w1[29:16], num_records w2, format w3[18:12].
 struct VBuffer {
   u64 base = 0;
   u32 stride = 0;
   u32 num_records = 0;
-  // The GCN (data, number) format pair the shared renderer speaks, mapped from
-  // `gfmt`, which is what the descriptor actually encodes.
   u32 dfmt = 0;
   u32 nfmt = 0;
   u32 gfmt = 0;
 };
 
-// gfx10.3 buffer V#s carry a UNIFIED 7-bit format enum where GCN has separate
-// dfmt/nfmt; map descriptors and typed fetches back onto the GCN pair. Vertex
-// attribute formats only; unknowns yield (0,0), harmless if never reaching
-// VertexFormat().
 void DecodeBufferFormat(u32 gfmt, u32& dfmt, u32& nfmt);
 
 VBuffer DecodeVBuffer(const u32* dwords);
 
-// A V# read from an unbound or stale SGPR slot decodes to an in-range but bogus
-// buffer: a depth-only pre-pass with an inactive vertex slot yielded stride
-// 14915 over 480622080 records, which then segfaulted reading the vertex ring.
-// Mirrors the PS4 fetch-shader sanity gate (gpu/gcn/gcn_resource.cc).
 bool PlausibleVBuffer(const VBuffer& v);
 
-// Resolve the live T#/S# each MIMG samples, in binding order. user_sgprs is
-// SPI_SHADER_PGM_RSRC2_*.USER_SGPR: a descriptor inline beyond that window is
-// not user data, just whatever the previous draw left in those registers.
 base::Vector<gpu::gcn::TImage> TrackTextures(const u32* ps_code,
                                              const u32* ps_user_data,
                                              u32 user_sgprs,
@@ -293,7 +232,6 @@ base::Vector<gpu::gcn::TImage> TrackTextures(const u32* ps_code,
                                              u64 system_user_data_addr = 0,
                                              u32 max_dwords = 4096);
 
-// Resolve buffer bases and complete V#s at their consuming instruction PCs.
 base::HashMap<u32, BufferResource> ResolveBuffers(
     const u32* code,
     const u32* user_data,

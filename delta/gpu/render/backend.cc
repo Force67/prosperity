@@ -18,8 +18,6 @@
 #endif
 
 namespace {
-// VK_KHR_unified_image_layouts. Off: on NVIDIA 610 it more than doubled
-// UC2's GPU time (28 -> 40-90 ms a frame), targets left in GENERAL.
 DELTA_OPTION(bool, kVkUnifiedLayouts, "DELTA_VK_UNIFIED_LAYOUTS", false);
 }  // namespace
 

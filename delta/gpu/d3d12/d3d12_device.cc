@@ -6,7 +6,6 @@
 
 #include "base/logging.h"
 
-// The IID constants are defined here and only here (dxguid on Windows).
 #if !defined(_WIN32)
 #define INITGUID
 #endif
@@ -68,8 +67,6 @@ u32 ToComponent(rhi::Swizzle s, u32 identity) {
   return identity;
 }
 
-// The view's swizzle, applied over `base` (which maps each output to a
-// memory component; the stencil plane arrives in green).
 UINT Mapping(const rhi::TextureViewDesc& desc, const u32 base[4]) {
   u32 c[4];
   for (u32 i = 0; i < 4; i++) {
@@ -102,8 +99,6 @@ base::String PackSampler(const rhi::SamplerDesc& d) {
 }
 
 }  // namespace
-
-// CpuDescriptorPool
 
 void CpuDescriptorPool::Init(ID3D12Device* device,
                              D3D12_DESCRIPTOR_HEAP_TYPE type,
@@ -187,8 +182,6 @@ const GroupEntry* D3D12BindGroupLayout::Find(u32 binding) const {
       return &e;
   return nullptr;
 }
-
-// D3D12Device
 
 void D3D12Device::ReleaseSessionObjects() {
   WaitIdle();
@@ -314,8 +307,6 @@ bool D3D12Device::Init(const D3D12Options& options) {
                                  reinterpret_cast<void**>(&fence_))))
     return false;
 
-  // The shader-visible ring: as large as the device allows, up to the
-  // resource binding tier 1/2 limit of one million.
   for (u32 size : {1000000u, 500000u, 262144u, 65536u}) {
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -349,7 +340,6 @@ bool D3D12Device::Init(const D3D12Options& options) {
   rtvs.Init(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1024);
   dsvs.Init(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1024);
   samplers.Init(device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 256);
-  // Sampler id 0: what an unwritten sampled-texture binding samples with.
   Destroy(CreateSampler({}));
 
   UINT64 frequency = 0;
@@ -366,7 +356,6 @@ bool D3D12Device::Init(const D3D12Options& options) {
   caps_.storage_image_write_without_format = true;
   caps_.buffer_address = false;
   caps_.host_import = false;
-  // Readback heaps cannot serve UAVs, even on coherent UMA devices.
   caps_.unified_memory = false;
   caps_.debug_labels = options.debug_labels;
   debug_labels = options.debug_labels;
@@ -386,7 +375,7 @@ bool D3D12Device::Init(const D3D12Options& options) {
   caps_.max_texture_size_3d = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
   caps_.dispatch_indirect = true;
   caps_.draw_indirect = true;
-  caps_.dispatch_base = true;  // an id offset in the lowered shader
+  caps_.dispatch_base = true;
   caps_.max_compute_resources = 64;
   caps_.texture_blit = InitBlit();
   BASE_LOGI("gpud3d12", "device: {} (shader model {}.{})", device_name_.c_str(),
@@ -421,7 +410,6 @@ rhi::Buffer* D3D12Device::CreateBuffer(const rhi::BufferDesc& desc) {
   if (desc.host_pointer)
     return nullptr;
   auto buffer = base::MakeUnique<D3D12Buffer>(desc);
-  // 256-byte multiples: a constant buffer view rounds its size up to that.
   buffer->alloc_size = AlignUp(base::Max<u64>(desc.size, 1), 256);
   D3D12_HEAP_TYPE heap = D3D12_HEAP_TYPE_DEFAULT;
   D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -485,8 +473,6 @@ rhi::Texture* D3D12Device::CreateTexture(const rhi::TextureDesc& desc) {
   if (depth) {
     rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
   } else {
-    // Render-target capable whenever the format is, so ClearTexture and
-    // BlitTexture can draw into a copy destination.
     D3D12_FEATURE_DATA_FORMAT_SUPPORT fs{fi.format};
     const bool renderable =
         SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs,
@@ -526,8 +512,6 @@ rhi::TextureView* D3D12Device::CreateView(rhi::Texture* texture,
   if (!fi.texture)
     return nullptr;
   if (format != td.format && fi.typeless != Dxgi(td.format).typeless) {
-    // Casting across format families needs relaxed casting, which this
-    // backend does not use.
     BASE_LOGI("gpud3d12", "view {} of a {} texture is not castable",
               rhi::FormatName(format), rhi::FormatName(td.format));
     return nullptr;
@@ -735,8 +719,6 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::SamplerTable(
     offset = it->second;
   } else {
     if (sampler_heap_used_ + ids.size() > kSamplerHeapSize) {
-      // Every table is rebuilt on its next bind. Work in flight still reads
-      // the old ones, so it has to finish first.
       BASE_LOGI("gpud3d12", "sampler heap full: {} tables, starting over",
                 sampler_tables_.size());
       WaitIdle();
@@ -790,7 +772,6 @@ rhi::BindGroupLayout* D3D12Device::CreateBindGroupLayout(
       e.sampler_slot = layout->sampler_count++;
     layout->entries.push_back(e);
   }
-  // Dynamic offsets arrive in binding order, as in Vulkan.
   for (u32 i = 0; i < layout->entries.size(); i++) {
     const rhi::BindingType t = layout->entries[i].type;
     if (t == rhi::BindingType::kUniformBufferDynamic ||
@@ -1035,8 +1016,6 @@ void D3D12Device::Destroy(rhi::Object* object) {
     SafeRelease(q->heap);
     SafeRelease(q->readback);
   }
-  // Samplers stay in the deduplicated table: tables built from their id may
-  // still be bound.
   delete object;
 }
 
@@ -1120,8 +1099,6 @@ D3D12_RESOURCE_STATES D3D12Device::TextureState(const D3D12Texture* texture,
 
 u64 D3D12Device::Submit(rhi::CommandList* const* lists, u32 count) {
   base::LockGuard<base::Mutex> lock(queue_mutex_);
-  // One ExecuteCommandLists per list: buffers decay to COMMON between calls,
-  // which is what each list's own state tracking starts from.
   for (u32 i = 0; i < count; i++) {
     ID3D12CommandList* cmd = static_cast<D3D12CommandList*>(lists[i])->cmd;
     queue->ExecuteCommandLists(1, &cmd);

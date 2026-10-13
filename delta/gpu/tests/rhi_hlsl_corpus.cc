@@ -1,13 +1,3 @@
-// Developer tool, not a test: runs real recompiler SPIR-V through the D3D12
-// backend's shader path. For each module it derives a binding layout from the
-// decorations, lowers to HLSL (SPIRV-Cross), compiles to DXIL (DXC) and, with
-// --pso, builds a pipeline on the D3D12 device (vkd3d on Linux, which also
-// translates the DXIL). Prints per-stage counts and the top failure reasons.
-//
-//   rhi_hlsl_corpus [--pso] [--dump | --fails] [--limit N] [--sm 61] [--jobs N]
-//                   [dir|file.spv]...
-//
-// The default input is ~/.cache/ps4delta/spirv.
 
 #include <spirv_cross.hpp>
 
@@ -51,14 +41,12 @@ struct Module {
   bool buffer_address = false;
   base::Map<u32, base::Vector<rhi::BindingLayout>> sets;
   u32 push_bytes = 0;
-  base::Vector<base::Pair<u32, rhi::Format>>
-      inputs;  // vertex: location, format
-  base::Vector<base::Pair<u32, DXGI_FORMAT>> outputs;  // fragment targets
+  base::Vector<base::Pair<u32, rhi::Format>> inputs;
+  base::Vector<base::Pair<u32, DXGI_FORMAT>> outputs;
   bool writes_depth = false;
-  u32 separate = 0;  // separate images/samplers the rhi cannot bind
+  u32 separate = 0;
 };
 
-// The *.spv files directly inside `dir`.
 void ListSpirv(const base::String& dir, base::Vector<base::String>* files) {
   DIR* d = ::opendir(dir.c_str());
   if (!d)
@@ -156,8 +144,7 @@ bool Reflect(const base::Vector<u32>& words, Module* m, base::String* error) {
       add(res, rhi::BindingType::kSampledTexture, false);
     for (const sc::Resource& res : r.storage_images)
       add(res, rhi::BindingType::kStorageTexture, false);
-    // Separate images and samplers: bound by position only, as SRVs and
-    // samplers of the same registers. The rhi has no such binding type.
+    // Separate images and samplers have no rhi binding type.
     for (const sc::Resource& res : r.separate_images) {
       add(res, rhi::BindingType::kSampledTexture, false);
       m->separate++;
@@ -192,8 +179,6 @@ bool Reflect(const base::Vector<u32>& words, Module* m, base::String* error) {
   }
 }
 
-// The first line of a diagnostic, without the file:line: prefix or numbers
-// that would split one cause into many.
 base::String Reason(const base::String& text) {
   size_t start = text.find("error: ");
   start = start == base::String::npos ? 0 : text.rfind('\n', start) + 1;
@@ -224,7 +209,6 @@ class PsoChecker {
         "vs_6_0", &passthrough_vs_, &error);
   }
 
-  // Empty on success.
   base::String Check(const Module& m, const base::Vector<u8>& dxil) {
     base::Vector<rhi::Object*> objects;
     base::String result = Build(m, dxil, objects);
@@ -283,8 +267,6 @@ class PsoChecker {
       objects.push_back(p);
       return "";
     }
-    // Fragment and geometry stages go straight to D3D12 with a stand-in
-    // vertex shader: only the stage under test matters here.
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
     pd.pRootSignature = root.root;
     pd.VS = {passthrough_vs_.data(), passthrough_vs_.size()};
@@ -453,8 +435,6 @@ int main(int argc, char** argv) {
         if (b.type == rhi::BindingType::kStorageBuffer && b.read_only)
           o.read_only_storage.emplace_back(set, b.binding);
     LoweredShader lowered;
-    // As the backend on a device without SM 6.1: barycentrics that are read
-    // come from a generated geometry shader.
     o.emulate_barycentrics = o.shader_model < 61;
     const bool ok = LowerToHlsl(m.words.data(), m.words.size(), o, &lowered);
     const bool sm61 = lowered.hlsl.find(": DELTABARY") != base::String::npos;

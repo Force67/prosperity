@@ -1,7 +1,5 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * RDNA2 -> GLCompute SPIR-V. See rdna_compute.h.
  */
 
 #include "gpu/ps5/rdna/rdna_compute.h"
@@ -15,7 +13,6 @@ u32 ComputeCodeDwords(const u32* code) {
   if (!code)
     return 0;
   const u64 base = reinterpret_cast<u64>(code);
-  // Probe only mapped memory, then let the decoder stop at the actual endpgm.
   u32 lo = 0, hi = 64 * 1024 / 4;
   if (gpu::IsReadableRange(base, u64(hi) * 4))
     return hi;
@@ -33,20 +30,19 @@ u32 ComputeCodeDwords(const u32* code) {
 #ifndef DELTA_HAVE_SPIRV_BACKEND
 namespace gpu::rdna {
 
-gpu::gcn::RecompiledCs
-RecompileCompute(const u32*,
-                 u32,
-                 u32,
-                 u32,
-                 u32,
-                 u32,
-                 u32,
-                 bool,
-                 bool,
-                 u64,
-                 u64,
-                 bool) {
-  return {};  // no SPIR-V backend: the caller skips the dispatch
+gpu::gcn::RecompiledCs RecompileCompute(const u32*,
+                                        u32,
+                                        u32,
+                                        u32,
+                                        u32,
+                                        u32,
+                                        u32,
+                                        bool,
+                                        bool,
+                                        u64,
+                                        u64,
+                                        bool) {
+  return {};
 }
 
 }  // namespace gpu::rdna
@@ -96,9 +92,6 @@ using gpu::gcn::RecompiledCs;
 using gpu::gcn::StageContext;
 using gpu::gcn::Translator;
 
-// The decoded compute program, instruction by instruction, under the same knob
-// the vertex and pixel stages use. A declined dispatch says which register it
-// could not follow; this is what says what wrote it.
 void DumpCsProgram(const Program& program) {
   if (!kGpuShtrace && !kAgcTrace)
     return;
@@ -115,9 +108,6 @@ void DumpCsProgram(const Program& program) {
   }
 }
 
-// Why a descriptor the replay could not follow was declined, as its own tag:
-// the three take different fixes, and one line per shader is all the
-// visibility a skipped pass gets.
 const char* LossTag(ScalarReplayPlan::Loss loss) {
   switch (loss) {
     case ScalarReplayPlan::kUnmodelled:
@@ -131,15 +121,13 @@ const char* LossTag(ScalarReplayPlan::Loss loss) {
   }
 }
 
-// MIMG forms the compute path serves: the shared emitter's own set, plus the
-// ones EmitCsMemory lowers onto it (see EmitLoweredMimg).
 bool CsMimgSupported(u32 op) {
   switch (op) {
-    case 0x00:  // image_load
-    case 0x01:  // image_load_mip
-    case 0x08:  // image_store
-    case 0x09:  // image_store_mip
-    case 0x0f:  // image_atomic_swap .. image_atomic_xor
+    case 0x00:
+    case 0x01:
+    case 0x08:
+    case 0x09:
+    case 0x0f:
     case 0x10:
     case 0x11:
     case 0x12:
@@ -150,33 +138,23 @@ bool CsMimgSupported(u32 op) {
     case 0x18:
     case 0x19:
     case 0x1a:
-    case 0x22:  // image_sample_d
-    case 0x24:  // image_sample_l
-    case 0x27:  // image_sample_lz
-    case 0x2c:  // image_sample_c_l
-    case 0x2f:  // image_sample_c_lz
-    case 0x34:  // image_sample_l_o
-    case 0x37:  // image_sample_lz_o
-    case 0x44:  // image_gather4_l
-    case 0x47:  // image_gather4_lz
-    case 0x57:  // image_gather4_lz_o
-    case 0x5f:  // image_gather4_c_lz_o
+    case 0x22:
+    case 0x24:
+    case 0x27:
+    case 0x2c:
+    case 0x2f:
+    case 0x34:
+    case 0x37:
+    case 0x44:
+    case 0x47:
+    case 0x57:
+    case 0x5f:
       return true;
     default:
       return false;
   }
 }
 
-// One set-0 storage buffer per distinct descriptor, mirroring the GFX7 planner
-// (gpu/gcn PlanCsResources) with RDNA2's SMEM decode.
-//
-// A descriptor either sits INLINE in the COMPUTE_USER_DATA window, where the
-// dispatch path reads it straight out of base_sgpr, or an SRT chain produced it
-// (the shader s_loads a table pointer out of user data and the real V# out of
-// that table). The dispatch path recovers the second kind by replaying the
-// shader's scalar ops (rdna::ResolveBuffers), keyed on use_pc. What the replay
-// cannot follow faithfully is declined, not guessed: a compute dispatch writes
-// guest memory.
 bool PlanResources(const Program& program,
                    u32 lds_dwords,
                    u32 user_sgpr,
@@ -185,23 +163,17 @@ bool PlanResources(const Program& program,
   const ScalarReplayPlan replay = PlanScalarReplay(program);
   bool uses_gds = false;
   base::HashSet<u32> image_candidates, staged_images;
-  // COMPUTE_USER_DATA is 16 dwords wide; the dispatch path reads no further.
   const u32 ud_dwords = base::Min(user_sgpr, 16u);
   bool scalar_written[136] = {};
-  u32 version[136] = {};  // instruction index of the last write
+  u32 version[136] = {};
 
-  // Uses of the same registers with no write in between are the same
-  // descriptor and share a binding. A reloaded quad gets its own, or the
-  // second buffer would silently inherit the first one's range.
   struct BindingKey {
     u32 base_sgpr;
     u32 kind;
     u32 versions[8];
   };
   base::Vector<BindingKey> keys;
-  u32 index = 0;  // instruction index of the use being planned
-  // `reads`: the use returns data (a load, a sample, an atomic); a resource
-  // only ever stored to is write-only and needs nothing staged in.
+  u32 index = 0;
   const auto resource = [&](u32 pc, u32 base_sgpr, u32 dwords, u8 kind,
                             bool written, u32 min_bytes, bool reads = true) {
     if (base_sgpr + dwords > 136) {
@@ -211,20 +183,12 @@ bool PlanResources(const Program& program,
     bool untouched = true;
     for (u32 k = 0; k < dwords; k++)
       untouched = untouched && !scalar_written[base_sgpr + k];
-    // A descriptor the shader never wrote and that fits the COMPUTE_USER_DATA
-    // window is that window's, verbatim. Anything else (an SRT chain, or a
-    // load over the shader's own user data) reaches the dispatch through the
-    // replay, which prefers its own result over the window for exactly this
-    // reason, so it is only as good as the replay is.
     const bool inline_user_data = base_sgpr + dwords <= ud_dwords && untouched;
     bool runtime_address = false;
     if (!inline_user_data) {
       const ScalarReplayPlan::Loss loss =
           replay.LossAt(base_sgpr, dwords, index);
       if (loss != ScalarReplayPlan::kCovered) {
-        // The replay would hand the dispatch a descriptor the wave never had.
-        // A read only stages a copy of guest memory and can at worst come out
-        // as wrong pixels; a write would land in the wrong place.
         if (written && kind == 1) {
           gpu::gcn::WarnUnsupported(LossTag(loss), base_sgpr);
           return false;
@@ -264,15 +228,14 @@ bool PlanResources(const Program& program,
     }
     keys.push_back(key);
     bind[pc] = idx;
-    r.resources.push_back(
-        {.base_sgpr = base_sgpr,
-         .use_pc = pc,
-         .binding = idx,
-         .kind = kind,
-         .written = written,
-         .read = reads,
-         .min_bytes = min_bytes,
-         .runtime_address = runtime_address});
+    r.resources.push_back({.base_sgpr = base_sgpr,
+                           .use_pc = pc,
+                           .binding = idx,
+                           .kind = kind,
+                           .written = written,
+                           .read = reads,
+                           .min_bytes = min_bytes,
+                           .runtime_address = runtime_address});
     r.resources.back().inline_user_data = inline_user_data;
     return true;
   };
@@ -283,14 +246,11 @@ bool PlanResources(const Program& program,
       case Enc::kSmrd: {
         const Smem smem = DecodeSmem(inst);
         const u32 n = SmemLoadCount(smem.op);
-        // A negative immediate reads below the descriptor's base, which the
-        // staged range cannot cover.
         if (!n || smem.offset < 0) {
           gpu::gcn::WarnUnsupported("smem.cs.rdna", smem.op, w, w1);
           return false;
         }
-        const bool buffer = smem.op >= 0x08;  // s_buffer_load_* takes a V#
-        // The immediate is a BYTE offset on RDNA2 (a dword index on GFX7).
+        const bool buffer = smem.op >= 0x08;
         if (!resource(inst.pc, smem.sbase, buffer ? 4 : 2, buffer ? 0 : 2,
                       false, static_cast<u32>(smem.offset) + n * 4))
           return false;
@@ -301,13 +261,10 @@ bool PlanResources(const Program& program,
         const bool load = op <= 0x03 || (op >= 0x08 && op <= 0x0f);
         const bool store = (op >= 0x04 && op <= 0x07) || op == 0x18 ||
                            op == 0x1a || (op >= 0x1c && op <= 0x1f);
-        // The atomics read-modify-write the same storage buffer a store lands
-        // in; the emitter names the handful with no single SPIR-V op itself.
         const bool atomic =
             (op >= 0x30 && op <= 0x3f) || (op >= 0x50 && op <= 0x5f);
-        // Anything else is a d16 form, and the shared emitter masks the opcode
-        // to 7 bits, so the 0x80+ format variants would alias a plain load.
-        // LDS and TFE add a destination it has no model for.
+        // GFX10 keeps the format in 7 bits, so the 0x80+ variants would alias a
+        // plain load.
         if ((!load && !store && !atomic) || ((w >> 16) & 1) ||
             ((w1 >> 23) & 1)) {
           gpu::gcn::WarnUnsupported("mubuf.cs.rdna", op, w, w1);
@@ -320,7 +277,7 @@ bool PlanResources(const Program& program,
       }
       case Enc::kMtbuf: {
         const u32 op = inst.opcode;
-        if (op > 0x07 || ((w1 >> 23) & 1)) {  // op[3] selects the d16 forms
+        if (op > 0x07 || ((w1 >> 23) & 1)) {
           gpu::gcn::WarnUnsupported("mtbuf.cs.rdna", op, w, w1);
           return false;
         }
@@ -330,10 +287,7 @@ bool PlanResources(const Program& program,
         break;
       }
       case Enc::kDs: {
-        // ds_swizzle is a cross-lane move rather than an LDS access, so it is
-        // the one DS op that runs without an LDS allocation. The GDS bit picks
-        // the global scratchpad instead of LDS; the counter pair that lives
-        // there (append / consume) we do model, the rest we do not.
+        // ds_swizzle is the one DS op that runs without an LDS allocation.
         const bool gds = ((w >> 17) & 1) != 0;
         const bool counter = inst.opcode == 0x3d || inst.opcode == 0x3e;
         if (gds && counter) {
@@ -347,14 +301,11 @@ bool PlanResources(const Program& program,
         break;
       }
       case Enc::kMimg: {
-        // The shared emitter reads the T# with the gfx10.3 field positions when
-        // the translator is in RDNA mode, so the plan is the same as GCN's.
         const u32 op = inst.opcode;
         const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
         if (op == 0xe6 || op == 0xe7) {
           const u32 nsa = (w >> 1) & 3;
           const u32 addresses = ((w1 >> 30) & 1 ? 8u : 11u) + (op == 0xe7);
-          // DIM=0, DMASK=15, UNRM=R128=1, TFE=LWE=D16=SSAMP=0.
           if ((w & 0x39f38u) != 0x9f00u || (w1 & 0xbfe00000u) ||
               (nsa && 1 + nsa * 4 < addresses) ||
               (!nsa && (w1 & 255) + addresses > 256) ||
@@ -367,15 +318,14 @@ bool PlanResources(const Program& program,
           break;
         }
         if (op == 0x0e)
-          break;  // get_resinfo reads only descriptor SGPRs
+          break;
         const bool store =
             op == 0x08 || op == 0x09 || (op >= 0x0f && op <= 0x1a);
         if (!CsMimgSupported(op) || ((w >> 15) & 1) || srsrc + 7 >= 136) {
           gpu::gcn::WarnUnsupported("mimg.cs.rdna", inst.opcode, w, w1);
           return false;
         }
-        if (!resource(inst.pc, srsrc, 8, 1, store, 0,
-                      op != 0x08 && op != 0x09))
+        if (!resource(inst.pc, srsrc, 8, 1, store, 0, op != 0x08 && op != 0x09))
           return false;
         (op == 0 || op == 8 ? image_candidates : staged_images)
             .insert(bind[inst.pc]);
@@ -391,8 +341,6 @@ bool PlanResources(const Program& program,
               smem.sdst == srsrc && !(smem.offset & 31) && smem.soffset < 125 &&
               replay.block_of[writer] == replay.block_of[index] &&
               replay.Covers(smem.sbase, 4, writer)) {
-            // A complete T# selected with index*32 from one V# table. Keeping
-            // the shift and load in one block proves alignment on every path.
             for (u32 previous = writer; previous-- > 0;) {
               const auto& shift = program[previous];
               bool writes_offset = false;
@@ -414,9 +362,6 @@ bool PlanResources(const Program& program,
         break;
       }
       case Enc::kFlat: {
-        // GLOBAL uses a live 64-bit SGPR base plus an unsigned VGPR byte
-        // offset, or a full VGPR pair when SADDR=NULL. The signed immediate
-        // is added in 64 bits; a CPU-guessed SSBO window cannot model this.
         const u32 seg = (w >> 14) & 3;
         const u32 op = inst.opcode;
         const u32 saddr = (w1 >> 16) & 0x7f;
@@ -436,8 +381,6 @@ bool PlanResources(const Program& program,
       default:
         break;
     }
-    // Bookkeeping runs after the use: an s_load may take its pointer from the
-    // same SGPRs it lands the descriptor in.
     for (const ScalarWrites::Range& range : PossibleScalarWrites(inst).range)
       for (u32 k = 0; k < range.count && range.first + k < 136; k++) {
         scalar_written[range.first + k] = true;
@@ -447,8 +390,6 @@ bool PlanResources(const Program& program,
   }
   if (uses_gds)
     r.gds_binding = static_cast<int>(r.resources.size());
-  // Reuse the guest-address capability only in shaders that already require
-  // it. Ordinary image shaders retain their portable staged implementation.
   const bool has_runtime =
       base::AnyOf(r.resources.begin(), r.resources.end(),
                   [](const CsResource& res) { return res.runtime_address; });
@@ -461,8 +402,6 @@ bool PlanResources(const Program& program,
                   [](const CsResource& res) {
                     return res.runtime_address || res.runtime_image;
                   })) {
-    // Traversal follows pointers through scalar tables before reaching a BVH.
-    // All read-only raw resources in this shader use their live GPU address.
     const bool writes = base::AnyOf(r.resources.begin(), r.resources.end(),
                                     [](const CsResource& res) {
                                       return res.runtime_address && res.written;
@@ -478,8 +417,6 @@ bool PlanResources(const Program& program,
   return true;
 }
 
-// s_load / s_buffer_load: scalar reads of guest memory, served from the storage
-// buffer planned for this instruction.
 void EmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
   const Smem smem = DecodeSmem(inst);
   const u32 n = SmemLoadCount(smem.op);
@@ -488,15 +425,11 @@ void EmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
     sc.cs_unsupported = true;
     return;
   }
-  // Both offsets are in BYTES on RDNA2 (GFX7's immediate was a dword index);
-  // soffset field 125 is NULL, meaning no register offset at all.
   const Id immediate = t.U32(static_cast<u32>(smem.offset));
   const Id byte_off = smem.soffset == 125
                           ? immediate
                           : t.Add(t.SrcRaw(smem.soffset, 0), immediate);
   const Id dword0 = t.Shr(byte_off, t.U32(2));
-  // The destination may overwrite the pointer/descriptor pair itself.
-  // Read every component using the original SGPRs before updating any of them.
   base::Vector<Id> values;
   for (u32 k = 0; k < n; k++)
     values.push_back(gpu::gcn::CsSsboLoad(t, sc, static_cast<u32>(b),
@@ -505,10 +438,6 @@ void EmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
     t.SetSdst(smem.sdst, k, values[k]);
 }
 
-// MIMG address components in VGPR order: NSA names each in its own register,
-// the sequential form numbers them up from VADDR. Slots past the ones an
-// instruction actually uses still have to hold a valid id, because the shared
-// emitter indexes a fixed few of them whatever the image type turns out to be.
 base::Array<Id, 8> MimgAddress(Translator& t, const Inst& inst) {
   const u32 nsa = (inst.raw[0] >> 1) & 0x3;
   const u32 vaddr = inst.raw[1] & 0xFF;
@@ -524,9 +453,6 @@ base::Array<Id, 8> MimgAddress(Translator& t, const Inst& inst) {
   return address;
 }
 
-// Width and height of the level a sample reads, derived from the gfx10.3 T#
-// exactly as the shared emitter derives them: a lowering that steps by whole
-// texels has to agree with it or it lands in a different one.
 struct LevelExtent {
   Id width;
   Id height;
@@ -550,22 +476,11 @@ Id ToFloat(Translator& t, Id u) {
   return t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {u});
 }
 
-// Move a normalised coordinate by whole texels of the sampled level.
 Id StepTexels(Translator& t, Id coord, Id texels, Id extent) {
   return t.m.Bitcast(t.t_u, t.FAdd(t.m.Bitcast(t.t_f, coord),
                                    t.FDiv(texels, ToFloat(t, extent))));
 }
 
-// The gfx10.3 sample forms the shared emitter has no model for, expressed with
-// the two it does (explicit-LOD and LOD-zero fetches of the staged image):
-//   _c       the leading address dword is the depth reference, so fetch the
-//            texel and then compare against it the way the S# asks.
-//   _o       the leading address dword packs a signed per-axis texel offset,
-//            and one texel is 1/extent of the normalised coordinate.
-//   gather4  returns one component of the 2x2 footprint: four fetches, each
-//            stepped onto its own texel.
-// Declining one of these drops the whole dispatch, and with it every render
-// target the pass was meant to fill.
 void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
   const bool explicit_lod = op == 0x2c || op == 0x34 || op == 0x44;
@@ -584,8 +499,6 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 prefix = u32(compare) + u32(offset);
   for (u32 i = 0; i + prefix < address.size(); i++)
     address[i] = address[i + prefix];
-  // The 1D forms park the LOD one component earlier; they do not reach a
-  // compute sampler in practice, so the extents follow the 2D placement.
   const Id lod = explicit_lod
                      ? t.m.Emit(spv::Op::OpConvertFToU, t.t_u,
                                 {t.Ext2(GLSLstd450FMax,
@@ -599,8 +512,6 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
 
   if (offset) {
     const LevelExtent extent = MimgLevelExtent(t, srsrc, lod);
-    // Six signed bits per axis: [5:0] x, [13:8] y. A z offset would need the
-    // volume's depth, which only a 3D sample carries.
     const auto texels = [&](u32 shift) {
       const Id raw = t.And(t.Shr(packed_offset, t.U32(shift)), t.U32(0x3F));
       const Id value = ToFloat(t, raw);
@@ -617,10 +528,7 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
     gpu::gcn::EmitCsMimg(t, plain, sc, address.data());
   } else if (gather) {
     const LevelExtent extent = MimgLevelExtent(t, srsrc, lod);
-    // One component only, so each tap lands in its own destination register.
     const u32 component = dmask & (~dmask + 1u);
-    // gather4 reports the footprint counter-clockwise from its lower left:
-    // (x0,y1) (x1,y1) (x1,y0) (x0,y0).
     static const float kStep[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
     for (u32 tap = 0; tap < 4; tap++) {
       base::Array<Id, 8> tapped = address;
@@ -638,15 +546,16 @@ void EmitLoweredMimg(Translator& t, const Inst& inst, StageContext& sc) {
     gpu::gcn::EmitCsMimg(t, plain, sc, address.data());
   if (!compare)
     return;
-  // S# word 0 [15:13] names the comparison; the fetch left the depth in the
-  // first destination register.
   const Id func = t.And(t.Shr(t.Sg(ssamp), t.U32(13)), t.U32(0x7));
   static const spv::Op kCompare[8] = {
-      spv::Op::OpFOrdEqual,  // 0 never, selected away below
-      spv::Op::OpFOrdLessThan,      spv::Op::OpFOrdEqual,
-      spv::Op::OpFOrdLessThanEqual, spv::Op::OpFOrdGreaterThan,
-      spv::Op::OpFOrdNotEqual,      spv::Op::OpFOrdGreaterThanEqual,
-      spv::Op::OpFOrdEqual,  // 7 always, selected away below
+      spv::Op::OpFOrdEqual,
+      spv::Op::OpFOrdLessThan,
+      spv::Op::OpFOrdEqual,
+      spv::Op::OpFOrdLessThanEqual,
+      spv::Op::OpFOrdGreaterThan,
+      spv::Op::OpFOrdNotEqual,
+      spv::Op::OpFOrdGreaterThanEqual,
+      spv::Op::OpFOrdEqual,
   };
   for (u32 tap = 0; tap < (gather ? 4u : 1u); tap++) {
     const Id depth = t.m.Bitcast(t.t_f, t.Vg(vdata + tap));
@@ -666,8 +575,6 @@ bool NoOpt() {
   return kGpuSpirvNoopt;
 }
 
-// A declined dispatch leaves the buffers it was meant to fill untouched, which
-// is otherwise invisible in the frame. One line per distinct shader.
 void ReportDecline(const u32* cs_code, size_t insts) {
   static base::HashSet<u64> reported;
   static const guest::SessionReset reset_reported(
@@ -680,9 +587,6 @@ void ReportDecline(const u32* cs_code, size_t insts) {
             gpu::gcn::UnsupportedOps().c_str());
 }
 
-// A 64-lane wave split over two host subgroups loses the lockstep its
-// compiler relied on wherever lanes talk to each other: through LDS without a
-// barrier, or through a lane mask read as a number.
 bool NeedsWaveLockstep(const Program& program) {
   u32 lds = 0;
   for (const Inst& inst : program) {
@@ -696,19 +600,15 @@ bool NeedsWaveLockstep(const Program& program) {
       return true;
     if (inst.enc == Enc::kVop3 &&
         (inst.opcode == 0x365 || inst.opcode == 0x366))
-      return true;  // v_mbcnt
+      return true;
     if (inst.enc == Enc::kSop1 && inst.opcode >= 0x0d && inst.opcode <= 0x16)
-      return true;  // s_bcnt / s_ff / s_flbit
+      return true;
     if (inst.enc == Enc::kDs && inst.opcode == 0xb3)
-      return true;  // ds_bpermute
+      return true;
   }
   return lds == 3;
 }
 
-// The MIMG forms a natively bound image serves: the shared emitter's fetches
-// and level-explicit samples, and the compare/offset/gather forms
-// EmitLoweredMimg reduces to them. gather4_l is not one: its taps are point
-// samples, which a filtering sampler would blend.
 bool NativeMimgForm(u32 op) {
   switch (op) {
     case 0x00:
@@ -729,9 +629,6 @@ bool NativeMimgForm(u32 op) {
   }
 }
 
-// Image resources every use of which a real sampled view can serve: never
-// written, no cube addressing (whose face bias the staged path keeps), and no
-// control bits the emitter does not model.
 u64 NativeImageCandidates(const Program& program,
                           const RecompiledCs& r,
                           const base::HashMap<u32, u32>& bind) {
@@ -744,15 +641,15 @@ u64 NativeImageCandidates(const Program& program,
       continue;
     const u32 w = inst.raw[0], w1 = inst.raw[1];
     const u32 dim = (w >> 3) & 0x7;
-    const bool plain = !((w >> 12) & 1) && !((w >> 15) & 0x7) &&
-                       !((w1 >> 30) & 0x3);  // unrm, r128/tfe/lwe, a16/d16
+    const bool plain =
+        !((w >> 12) & 1) && !((w >> 15) & 0x7) && !((w1 >> 30) & 0x3);
     (NativeMimgForm(inst.opcode) && plain && dim <= 5 && dim != 3 ? ok : bad) |=
         1ull << it->second;
   }
   u64 out = ok & ~bad;
   for (const CsResource& res : r.resources)
-    if (res.binding < 64 && (res.kind != 1 || res.written || res.runtime_image ||
-                             res.runtime_address))
+    if (res.binding < 64 && (res.kind != 1 || res.written ||
+                             res.runtime_image || res.runtime_address))
       out &= ~(1ull << res.binding);
   return out;
 }
@@ -775,15 +672,13 @@ bool TranslateCs(const Program& program,
   DumpCsProgram(program);
   StageContext sc;
   sc.is_cs = true;
-  sc.lds_dwords = lds_dwords * 128;  // RSRC2.LDS_SIZE is in 128-dword granules
+  sc.lds_dwords = lds_dwords * 128;
   if (!PlanResources(program, sc.lds_dwords, user_sgpr, r, sc.cs_bind) ||
       r.resources.empty())
     return false;
   r.native_candidates = NativeImageCandidates(program, r, sc.cs_bind);
   if (plan_only)
     return true;
-  // Images bound as real views sample through set-0 combined samplers numbered
-  // like a pixel shader's, so the dispatch resolves them with TrackTextures.
   const u64 native = native_mask & r.native_candidates;
   gpu::gcn::MimgBindingPlan image_plan;
   if (native) {
@@ -808,10 +703,6 @@ bool TranslateCs(const Program& program,
     }
   }
 
-  // Cross-lane work needs this invocation's lane. ds_swizzle is not the only
-  // way a program asks for it: a DPP modifier is a lane shuffle too, and a
-  // compute shader that used one without a lane id was rejected outright.
-  // Astro Bot's world map skips a dozen dispatches that way.
   bool uses_lane_id = false;
   for (const Inst& inst : program)
     if ((inst.enc == Enc::kDs &&
@@ -833,7 +724,6 @@ bool TranslateCs(const Program& program,
   t.full_wave_masks = sc.wave_lockstep;
   t.movrel_m0 = PlanMovrelIndices(program);
   t.InitTypes(&program);
-  // Storage buffers: Buf { uint data[]; } at set 0, binding = resource index.
   const Id t_run = t.m.TypeRuntimeArray(t.t_u);
   t.m.Decorate(t_run, spv::Decoration::ArrayStride, {4});
   const Id t_buf = t.m.TypeStruct({t_run});
@@ -853,8 +743,6 @@ bool TranslateCs(const Program& program,
       sc.cs_runtime_images.insert(res.binding);
   }
 
-  // GDS: the append/consume counters, in a buffer of their own past the
-  // resources. It is device memory the title never names, so it needs no range.
   if (r.gds_binding >= 0) {
     const Id v = t.m.Variable(p_buf, spv::StorageClass::StorageBuffer);
     t.m.Decorate(v, spv::Decoration::DescriptorSet, {0});
@@ -863,13 +751,7 @@ bool TranslateCs(const Program& program,
     t.m.Name(v, "gds");
     sc.gds_var = v;
   }
-  // The GDS counters and the lockstep scheduler both need a workgroup channel
-  // to reach every lane of the guest wave; the scheduler keeps its chosen
-  // block in the slot past the lanes.
   if (r.gds_binding >= 0 || sc.wave_lockstep) {
-    // Counters return one pre-operation value to the entire guest wave,
-    // including when it spans two host subgroups. The CFG only enables this
-    // exchange channel at points where the whole workgroup can synchronize.
     t.xchg_lanes = base::Max(num_thread_x, 1u) * base::Max(num_thread_y, 1u) *
                    base::Max(num_thread_z, 1u);
     const Id exchange = t.m.TypeArray(t.t_u, t.xchg_lanes * 2 + 1);
@@ -879,7 +761,6 @@ bool TranslateCs(const Program& program,
     t.m.Name(t.xchg_var, "wave_exchange");
   }
 
-  // LDS: a Workgroup-storage uint array sized by RSRC2.
   if (sc.lds_dwords) {
     const Id lds_arr = t.m.TypeArray(t.t_u, sc.lds_dwords);
     sc.lds_var =
@@ -888,11 +769,6 @@ bool TranslateCs(const Program& program,
     t.m.Name(sc.lds_var, "lds");
   }
 
-  // Push constant: the 16 COMPUTE_USER_DATA dwords seed s0.. (descriptors +
-  // params), then one bound (in dwords) per SSBO binding; 0 = unbounded. The
-  // bounds come from the range the dispatch actually mapped: an OOB access
-  // from the shader runs into whatever comes next if the emitted reads kept
-  // going.
   constexpr u32 kUdWords = 16;
   constexpr u32 kBoundWords = 48;
   const Id t_arr16 = t.m.TypeArray(t.t_u, kUdWords);
@@ -909,8 +785,6 @@ bool TranslateCs(const Program& program,
   t.m.Name(pc_var, "user_data");
   sc.cs_bounds_var = pc_var;
 
-  // Builtins: gl_LocalInvocationID (-> v0..v2) and gl_WorkGroupID (-> the
-  // SGPRs after the user data, per tgid_enable).
   const Id t_uv3 = t.m.TypeVec(t.t_u, 3);
   const Id p_in_v3 = t.m.TypePointer(spv::StorageClass::Input, t_uv3);
   const Id local_id = t.m.Variable(p_in_v3, spv::StorageClass::Input);
@@ -936,7 +810,7 @@ bool TranslateCs(const Program& program,
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   sc.main_fn = main_fn;
   const Id p_pc_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
-  for (u32 i = 0; i < 16; i++)  // user data -> s0..s15
+  for (u32 i = 0; i < 16; i++)
     t.SetSg(i, t.m.Load(t.t_u,
                         t.m.AccessChain(p_pc_u, pc_var, {t.U32(0), t.U32(i)})));
   const Id p_in_u = t.m.TypePointer(spv::StorageClass::Input, t.t_u);
@@ -950,7 +824,7 @@ bool TranslateCs(const Program& program,
     t.SetSg(sg++, group_comp(1));
   if ((tgid_enable & 4) && sg < 106)
     t.SetSg(sg++, group_comp(2));
-  for (u32 c = 0; c < 3; c++)  // local invocation id (tidig) -> v0..v2
+  for (u32 c = 0; c < 3; c++)
     t.SetVg(c, t.m.Load(t.t_u, t.m.AccessChain(p_in_u, local_id, {t.U32(c)})));
   t.lane_masks = true;
   const Id local_index = t.Add(
@@ -960,9 +834,6 @@ bool TranslateCs(const Program& program,
   t.mask_lane_id = t.And(local_index, t.U32(t.wave_size - 1));
   t.xchg_index = local_index;
   t.wave_base = t.And(local_index, t.U32(~(t.wave_size - 1)));
-  // MBCNT and LDS add-tid address the guest wave, whose upper half can live
-  // in a second host subgroup. They also need a lane ID without any shuffle
-  // instruction in the program. Keep the host subgroup builtin for shuffles.
   t.lane_id = t.mask_lane_id;
   t.SeedExec();
   t.predicate_vector = true;
@@ -999,9 +870,6 @@ static bool EmitCsMemoryUnpredicated(Translator& t,
       gpu::gcn::EmitCsMubuf(t, inst, sc);
       return true;
     case Enc::kMtbuf: {
-      // GFX10 combines the format in seven bits. The shared GCN emitter
-      // expects separate DFMT/NFMT fields; passing the original word made
-      // Skyrim's R32G32_FLOAT depth-filter load look like a packed format.
       u32 dfmt = 0, nfmt = 0;
       DecodeBufferFormat((inst.raw[0] >> 19) & 0x7f, dfmt, nfmt);
       Inst lowered = inst;
@@ -1011,7 +879,6 @@ static bool EmitCsMemoryUnpredicated(Translator& t,
       return true;
     }
     case Enc::kDs:
-      // The GDS bit picks the global counters, not LDS.
       if (((inst.raw[0] >> 17) & 1) && sc.gds_var)
         gpu::gcn::EmitGdsCounter(t, inst, sc);
       else
@@ -1022,15 +889,12 @@ static bool EmitCsMemoryUnpredicated(Translator& t,
         EmitBvh(t, inst, sc);
         return true;
       }
-      // Same lowering as the graphics path: dim 3 (cube) and 5 (2D array)
-      // become the shared emitter's DA bit, and NSA names each address
-      // component in its own VGPR.
       const u32 w = inst.raw[0];
       const u32 dim = (w >> 3) & 0x7;
       const bool arrayed_dim = dim == 3 || dim == 5;
       Inst lowered = inst;
       lowered.raw[0] = (w & ~0x4000u) | (arrayed_dim ? 0x4000u : 0u);
-      switch (inst.opcode) {  // the depth-compare, offset and gather forms
+      switch (inst.opcode) {
         case 0x2c:
         case 0x2f:
         case 0x34:
@@ -1066,15 +930,8 @@ bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
   if (inst.enc == Enc::kDs && ((inst.raw[0] >> 17) & 1) &&
       (inst.opcode == 0x3d || inst.opcode == 0x3e) && t.CanExchange()) {
     // All lanes must reach the broadcast barriers, even with EXEC disabled.
-    // EmitGdsCounter applies EXEC to the active count and destination writes.
     return EmitCsMemoryUnpredicated(t, inst, sc);
   }
-  // Predicating VGPR assignments does not suppress stores or atomic effects.
-  // Inactive lanes must not touch memory with their stale address/data VGPRs.
-  // Loads already predicate their VGPR assignments. Avoid branching around
-  // every load: large decoder kernels otherwise make the driver compiler
-  // spend minutes and gigabytes processing redundant control flow. GLOBAL
-  // stores have their own guard; subgroup DS swizzle must keep all lanes live.
   const u32 op = inst.opcode;
   const bool writes =
       (inst.enc == Enc::kMubuf &&
@@ -1123,8 +980,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
     gpu::gcn::WarnUnsupported("cs.truncated.rdna", last.pc);
     return r;
   }
-  // RDNA2 STATUS.TRAP_EN=0 makes S_TRAP a hardware NOP. A present trap
-  // handler still requires trap emulation and follows the unsupported path.
+  // RDNA2 STATUS.TRAP_EN=0 makes S_TRAP a hardware NOP.
   if (!trap_present)
     for (Inst& inst : program)
       if (inst.enc == Enc::kSopp && inst.opcode == 0x12) {
@@ -1134,7 +990,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
 
   Translator t;
   SetComputeAddress(reinterpret_cast<u64>(cs_code));
-  RecompiledCs tmp;  // build into a temp so a mid-emit failure leaves r intact
+  RecompiledCs tmp;
   gpu::gcn::ResetUnsupported();
   if (!TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
                    tgid_enable, lds_dwords, wave32, native_mask, uint_mask,
@@ -1149,11 +1005,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
   }
 
   const base::Vector<u32> spv_bin = t.m.Assemble();
-  // A module the translator emitted but the validator rejects is a translator
-  // bug (wrong codegen, not a guest gap): always loud.
   base::String err;
-  // Use the same content-addressed optimizer cache as graphics. Large native
-  // decoder kernels otherwise repeat legalization on every game launch.
   const bool no_opt = NoOpt();
   const bool valid = no_opt
                          ? gpu::gcn::spirv::Validate(spv_bin, &err)
@@ -1173,4 +1025,4 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
 
 }  // namespace gpu::rdna
 
-#endif  // DELTA_HAVE_SPIRV_BACKEND
+#endif

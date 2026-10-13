@@ -1,11 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * GCN -> SPIR-V: scalar + vector ALU emitters. Shared by all stages (VS/PS/CS):
- * integer ops bitcast through the uint/int types as needed, so passing
- * float-typed sources is lossless. Opcode numbering is the GFX7 (Sea Islands /
- * Liverpool) ISA:
- * https://docs.amd.com/v/u/en-US/sea-islands-instruction-set-architecture_0
  */
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
@@ -49,14 +43,11 @@ CarryResult SubBorrow(Translator& t, Id a, Id b, Id borrow = 0) {
   return {value, flag};
 }
 
-// Signed-overflow bit for a + b = r: (a^r) & (b^r), sign bit.
 Id SignedAddOverflow(Translator& t, Id a, Id b, Id r) {
   return t.IsNonZero(
       t.And(t.And(t.Xor(a, r), t.Xor(b, r)), t.U32(0x80000000u)));
 }
 
-// EXEC combiners the saveexec/wrexec families share, in the order both ISAs
-// number them. andn1/orn1 exist only from gfx10 on.
 enum class ExecOp {
   kAnd,
   kOr,
@@ -95,10 +86,6 @@ Id CombineExec(Translator& t, ExecOp kind, Id exec, Id src) {
   }
 }
 
-// EXEC = combine(EXEC, ssrc); sdst takes the SAVED mask, or the modified one
-// for the wrexec forms. SCC = (new EXEC != 0). One lane lives in bit 0 here, so
-// the whole family is one bit wide and the wave32/wave64 forms differ only in
-// how many dwords of sdst they write.
 void SaveExec(Translator& t,
               ExecOp kind,
               u32 sdst,
@@ -130,8 +117,6 @@ void SaveExec(Translator& t,
   t.SetSccBool(t.IsNonZero(new_exec));
 }
 
-// Lowest set bit of the {lo, hi} pair, or -1 when neither half has one. GLSL's
-// FindILsb already answers -1 for a zero input, which is the ISA's result too.
 Id FirstSet64(Translator& t, Id lo, Id hi) {
   const Id none = t.U32(0xFFFFFFFFu);
   const Id l = t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {lo});
@@ -140,8 +125,6 @@ Id FirstSet64(Translator& t, Id lo, Id hi) {
   return t.SelectB(t.Eq(l, none), upper, l);
 }
 
-// Bits from the MSB of the 64-bit pair down to its highest set bit; -1 when the
-// whole pair is zero.
 Id LeadingZeros64(Translator& t, Id lo, Id hi) {
   const Id l = t.m.ExtInst(t.t_u, GLSLstd450FindUMsb, {lo});
   const Id h = t.m.ExtInst(t.t_u, GLSLstd450FindUMsb, {hi});
@@ -150,25 +133,21 @@ Id LeadingZeros64(Translator& t, Id lo, Id hi) {
   return t.SelectB(t.IsZero(hi), from_lo, t.Sub(t.U32(31), h));
 }
 
-// The SOP1 opcodes gfx10 added above GFX7's last one (s_abs_i32, 0x34): the
-// andn1/orn1 EXEC combiners, the wrexec family and the wave32 32-bit saveexec
-// set. Numbering per LLVM's gfx10 SOP1 tables. Returns false for the slots that
-// stay refused.
 bool EmitGfx10Sop1(Translator& t, u32 op, u32 sdst, Id a, Id a_hi) {
   switch (op) {
     case 0x37:
       SaveExec(t, ExecOp::kAndn1, sdst, a, true, false, a_hi);
-      return true;  // s_andn1_saveexec_b64
+      return true;
     case 0x38:
       SaveExec(t, ExecOp::kOrn1, sdst, a, true, false, a_hi);
-      return true;  // s_orn1_saveexec_b64
+      return true;
     case 0x39:
       SaveExec(t, ExecOp::kAndn1, sdst, a, true, true, a_hi);
-      return true;  // s_andn1_wrexec_b64
+      return true;
     case 0x3a:
       SaveExec(t, ExecOp::kAndn2, sdst, a, true, true, a_hi);
-      return true;  // s_andn2_wrexec_b64
-    case 0x3b: {    // s_bitreplicate_b64_b32: every source bit doubled
+      return true;
+    case 0x3b: {
       const auto spread = [&](Id half) {
         Id x = half;
         x = t.And(t.Or(x, t.Shl(x, t.U32(8))), t.U32(0x00FF00FFu));
@@ -189,22 +168,20 @@ bool EmitGfx10Sop1(Translator& t, u32 op, u32 sdst, Id a, Id a_hi) {
     case 0x41:
     case 0x42:
     case 0x43:
-      // s_{and,or,xor,andn2,orn2,nand,nor,xnor}_saveexec_b32, in the same
-      // order as the b64 block at 0x24.
       SaveExec(t, static_cast<ExecOp>(op - 0x3c), sdst, a, false, false);
       return true;
     case 0x44:
       SaveExec(t, ExecOp::kAndn1, sdst, a, false, false);
-      return true;  // s_andn1_saveexec_b32
+      return true;
     case 0x45:
       SaveExec(t, ExecOp::kOrn1, sdst, a, false, false);
-      return true;  // s_orn1_saveexec_b32
+      return true;
     case 0x46:
       SaveExec(t, ExecOp::kAndn1, sdst, a, false, true);
-      return true;  // s_andn1_wrexec_b32
+      return true;
     case 0x47:
       SaveExec(t, ExecOp::kAndn2, sdst, a, false, true);
-      return true;  // s_andn2_wrexec_b32
+      return true;
     default:
       return false;
   }
@@ -229,7 +206,6 @@ bool IsVop3b(u32 op) {
   return (op >= 0x125 && op <= 0x12a) || op == 0x16d || op == 0x16e;
 }
 
-// ---- SOP1 -------------------------------------------------------------------
 void EmitSop1(Translator& t, const Inst& inst) {
   const u32 w = inst.raw[0];
   const u32 op = inst.opcode, sdst = (w >> 16) & 0x7F, ssrc0 = w & 0xFF;
@@ -238,92 +214,90 @@ void EmitSop1(Translator& t, const Inst& inst) {
   switch (op) {
     case 0x03:
       t.SetSdst(sdst, 0, a);
-      break;    // s_mov_b32
-    case 0x04:  // s_mov_b64
+      break;
+    case 0x04:
       t.SetSdst(sdst, 0, a);
       t.SetSdst(sdst, 1, a_hi);
       break;
-    case 0x05:  // s_cmov_b32: SCC ? src : dst
+    case 0x05:
       t.SetSdst(sdst, 0, t.SelectNz(t.Scc(), a, t.Sdst(sdst)));
       break;
-    case 0x06:  // s_cmov_b64
+    case 0x06:
       t.SetSdst(sdst, 0, t.SelectNz(t.Scc(), a, t.Sdst(sdst)));
       t.SetSdst(sdst, 1, t.SelectNz(t.Scc(), a_hi, t.Sdst(sdst, 1)));
       break;
-    case 0x07: {  // s_not_b32
+    case 0x07: {
       const Id r = t.Not(a);
       t.SetSdst(sdst, 0, r);
       t.SetSccBool(t.IsNonZero(r));
       break;
     }
-    case 0x08: {  // s_not_b64
+    case 0x08: {
       const Id lo = t.Not(a), hi = t.Not(a_hi);
       t.SetSdst(sdst, 0, lo);
       t.SetSdst(sdst, 1, hi);
       t.SetSccBool(t.IsNonZero(t.Or(lo, hi)));
       break;
     }
-    // s_wqm (whole quad mode): a lane's bit is set if any lane in its quad is.
-    // Single-lane model -> identity; SCC = (result != 0).
-    case 0x09:  // s_wqm_b32
+    case 0x09:
       t.SetSdst(sdst, 0, a);
       t.SetSccBool(t.IsNonZero(a));
       break;
-    case 0x0a:  // s_wqm_b64
+    case 0x0a:
       t.SetSdst(sdst, 0, a);
       t.SetSdst(sdst, 1, a_hi);
       t.SetSccBool(t.IsNonZero(t.Or(a, a_hi)));
       break;
     case 0x0b:
       t.SetSdst(sdst, 0, t.BitRev(a));
-      break;      // s_brev_b32
-    case 0x0d: {  // s_bcnt0_i32_b32
+      break;
+    case 0x0d: {
       const Id r = t.Sub(t.U32(32), t.PopCount(a));
       t.SetSdst(sdst, 0, r);
       t.SetSccBool(t.IsNonZero(r));
       break;
     }
-    case 0x0e: {  // s_bcnt0_i32_b64
+    case 0x0e: {
       const Id r = t.Sub(t.U32(64), t.Add(t.PopCount(a), t.PopCount(a_hi)));
       t.SetSdst(sdst, 0, r);
       t.SetSccBool(t.IsNonZero(r));
       break;
     }
-    case 0x0f: {  // s_bcnt1_i32_b32
+    case 0x0f: {
       const Id r = t.PopCount(a);
       t.SetSdst(sdst, 0, r);
       t.SetSccBool(t.IsNonZero(r));
       break;
     }
-    case 0x10: {  // s_bcnt1_i32_b64
+    case 0x10: {
       const Id r = t.Add(t.PopCount(a), t.PopCount(a_hi));
       t.SetSdst(sdst, 0, r);
       t.SetSccBool(t.IsNonZero(r));
       break;
     }
-    case 0x11:  // s_ff0_i32_b32
+    case 0x11:
       t.SetSdst(sdst, 0, t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {t.Not(a)}));
       break;
-    case 0x12:  // s_ff0_i32_b64
+    case 0x12:
       t.SetSdst(sdst, 0, FirstSet64(t, t.Not(a), t.Not(a_hi)));
       break;
-    case 0x13:  // s_ff1_i32_b32
+    case 0x13:
       t.SetSdst(sdst, 0, t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {a}));
       break;
-    case 0x14:  // s_ff1_i32_b64
+    case 0x14:
       t.SetSdst(sdst, 0, FirstSet64(t, a, a_hi));
       break;
-    case 0x15: {  // s_flbit_i32_b32: count from the MSB; -1 if src == 0
+    case 0x15: {
       const Id msb = t.m.ExtInst(t.t_u, GLSLstd450FindUMsb, {a});
       t.SetSdst(
           sdst, 0,
           t.SelectB(t.IsZero(a), t.U32(0xFFFFFFFFu), t.Sub(t.U32(31), msb)));
       break;
     }
-    case 0x16:  // s_flbit_i32_b64
+    case 0x16:
       t.SetSdst(sdst, 0, LeadingZeros64(t, a, a_hi));
       break;
-    case 0x17: {  // s_flbit_i32: leading-sign-bit count; -1 if src is 0 or -1
+    case 0x17: {
       const Id smsb = t.m.Bitcast(t.t_u, t.m.ExtInst(t.t_i, GLSLstd450FindSMsb,
                                                      {t.m.Bitcast(t.t_i, a)}));
       t.SetSdst(sdst, 0,
@@ -331,13 +305,12 @@ void EmitSop1(Translator& t, const Inst& inst) {
                           t.Sub(t.U32(31), smsb)));
       break;
     }
-    case 0x19:  // s_sext_i32_i8
-    case 0x1a:  // s_sext_i32_i16
+    case 0x19:
+    case 0x1a:
       t.SetSdst(sdst, 0,
                 t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_u,
                          {a, t.U32(0), t.U32(op == 0x19 ? 8 : 16)}));
       break;
-    // s_bitset0/1: read-modify-write of sdst, with ssrc0 naming the bit.
     case 0x1b:
     case 0x1d: {
       const Id bit = t.Shl(t.U32(1), t.And(a, t.U32(31)));
@@ -362,12 +335,9 @@ void EmitSop1(Translator& t, const Inst& inst) {
                       : t.Or(t.Sdst(sdst, 1), hi_bit));
       break;
     }
-    // The main VS uses these to call/return from its fetch shader. Vertex
-    // attributes are decoded from that fetch program and supplied as Vulkan
-    // inputs, so no runtime jump remains in the translated shader.
     case 0x20:
     case 0x21:
-      break;  // s_setpc_b64 / s_swappc_b64
+      break;
     case 0x24:
     case 0x25:
     case 0x26:
@@ -376,28 +346,18 @@ void EmitSop1(Translator& t, const Inst& inst) {
     case 0x29:
     case 0x2a:
     case 0x2b:
-      // s_{and,or,xor,andn2,orn2,nand,nor,xnor}_saveexec_b64
       SaveExec(t, static_cast<ExecOp>(op - 0x24), sdst, a, true, false, a_hi);
       break;
-    case 0x34: {  // s_abs_i32
+    case 0x34: {
       const Id r = t.m.Bitcast(
           t.t_u, t.m.ExtInst(t.t_i, GLSLstd450SAbs, {t.m.Bitcast(t.t_i, a)}));
       t.SetSdst(sdst, 0, r);
       t.SetSccBool(t.IsNonZero(r));
       break;
     }
-    case 0x1f: {  // s_getpc_b64: sdst = PC + 4, i.e. the NEXT instruction
-      // Shaders use this to build an absolute address from their own location
-      // (typically s_getpc_b64 / s_add_u32 / s_addc_u32 / s_load_dwordx*, to
-      // reach a descriptor the toolchain stored next to the code. Guest memory
-      // is identity-mapped, so the program's guest address is its code pointer,
-      // and s_getpc is one dword wide.
+    case 0x1f: {
       const u32 next_off = (inst.pc + 1) * 4u;
       if (t.pc_base_var) {
-        // Graphics: the module is cached by code CONTENT and reused wherever
-        // the title streams this shader, so the address arrives per draw in
-        // the push range. 64-bit add from u32 halves (no Int64 capability);
-        // the carry is (lo + off) having wrapped below off.
         const Id p_u = t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u);
         const auto half = [&](u32 i) {
           return t.m.Load(t.t_u,
@@ -409,7 +369,7 @@ void EmitSop1(Translator& t, const Inst& inst) {
             t.SelectB(t.Ult(lo, t.U32(next_off)), t.U32(1), t.U32(0));
         t.SetSdst(sdst, 0, lo);
         t.SetSdst(sdst, 1, t.Add(half(1), carry));
-      } else {  // compute (address-keyed cache), or the 128-byte push floor
+      } else {
         const u64 next = t.program_base + next_off;
         t.SetSdst(sdst, 0, t.U32(static_cast<u32>(next)));
         t.SetSdst(sdst, 1, t.U32(static_cast<u32>(next >> 32)));
@@ -417,15 +377,12 @@ void EmitSop1(Translator& t, const Inst& inst) {
       break;
     }
     default:
-      // gfx10 keeps GFX7's numbering right through s_abs_i32 and appends its
-      // own block above it, so only an RDNA program can mean anything there.
       if (!t.rdna_sources || !EmitGfx10Sop1(t, op, sdst, a, a_hi))
         WarnUnsupported("sop1", op);
       break;
   }
 }
 
-// ---- SOP2 -------------------------------------------------------------------
 void EmitSop2(Translator& t, const Inst& inst) {
   const u32 w = inst.raw[0];
   const u32 op = inst.opcode, sdst = (w >> 16) & 0x7F;
@@ -436,7 +393,6 @@ void EmitSop2(Translator& t, const Inst& inst) {
   Id r = 0, r_hi = 0;
   bool scc = false, wide_scc = false;
 
-  // 64-bit shifts: kind 0 = logical left, 1 = logical right, 2 = arithmetic.
   const auto shift64 = [&](u32 kind) {
     const Id n = t.And(b, t.U32(63)), n_lo = t.And(n, t.U32(31));
     const Id ge32 = t.Uge(n, t.U32(32));
@@ -459,68 +415,68 @@ void EmitSop2(Translator& t, const Inst& inst) {
   };
 
   switch (op) {
-    case 0x00: {  // s_add_u32: SCC = unsigned carry-out
+    case 0x00: {
       const CarryResult c = AddCarry(t, a, b);
       r = c.value;
       t.SetSccBool(t.IsNonZero(c.flag));
       break;
     }
-    case 0x01: {  // s_sub_u32: SCC = unsigned borrow
+    case 0x01: {
       const CarryResult c = SubBorrow(t, a, b);
       r = c.value;
       t.SetSccBool(t.IsNonZero(c.flag));
       break;
     }
-    case 0x02:  // s_add_i32: SCC = signed overflow
+    case 0x02:
       r = t.Add(a, b);
       t.SetSccBool(SignedAddOverflow(t, a, b, r));
       break;
-    case 0x03:  // s_sub_i32: overflow = (a^b) & (a^r), sign bit
+    case 0x03:
       r = t.Sub(a, b);
       t.SetSccBool(t.IsNonZero(
           t.And(t.And(t.Xor(a, b), t.Xor(a, r)), t.U32(0x80000000u))));
       break;
-    case 0x04: {  // s_addc_u32: a + b + SCC, SCC = carry-out
+    case 0x04: {
       const CarryResult c = AddCarry(t, a, b, t.Scc());
       r = c.value;
       t.SetSccBool(t.IsNonZero(c.flag));
       break;
     }
-    case 0x05: {  // s_subb_u32: a - b - SCC, SCC = borrow-out
+    case 0x05: {
       const CarryResult c = SubBorrow(t, a, b, t.Scc());
       r = c.value;
       t.SetSccBool(t.IsNonZero(c.flag));
       break;
     }
-    case 0x06:  // s_min_i32
+    case 0x06:
       r = t.SMin(a, b);
       t.SetSccBool(t.m.Emit(spv::Op::OpSLessThan, t.t_bool,
                             {t.m.Bitcast(t.t_i, a), t.m.Bitcast(t.t_i, b)}));
       break;
-    case 0x07:  // s_min_u32
+    case 0x07:
       r = t.UMin(a, b);
       t.SetSccBool(t.Ult(a, b));
       break;
-    case 0x08:  // s_max_i32
+    case 0x08:
       r = t.SMax(a, b);
       t.SetSccBool(t.m.Emit(spv::Op::OpSGreaterThan, t.t_bool,
                             {t.m.Bitcast(t.t_i, a), t.m.Bitcast(t.t_i, b)}));
       break;
-    case 0x09:  // s_max_u32
+    case 0x09:
       r = t.UMax(a, b);
       t.SetSccBool(t.m.Emit(spv::Op::OpUGreaterThan, t.t_bool, {a, b}));
       break;
     case 0x0a:
       r = t.SelectNz(t.Scc(), a, b);
-      break;    // s_cselect_b32
-    case 0x0b:  // s_cselect_b64
+      break;
+    case 0x0b:
       r = t.SelectNz(t.Scc(), a, b);
       r_hi = t.SelectNz(t.Scc(), a_hi, b_hi);
       break;
     case 0x0e:
       r = t.And(a, b);
       scc = true;
-      break;  // s_and_b32
+      break;
     case 0x0f:
       r = t.And(a, b);
       r_hi = t.And(a_hi, b_hi);
@@ -529,7 +485,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x10:
       r = t.Or(a, b);
       scc = true;
-      break;  // s_or_b32
+      break;
     case 0x11:
       r = t.Or(a, b);
       r_hi = t.Or(a_hi, b_hi);
@@ -538,7 +494,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x12:
       r = t.Xor(a, b);
       scc = true;
-      break;  // s_xor_b32
+      break;
     case 0x13:
       r = t.Xor(a, b);
       r_hi = t.Xor(a_hi, b_hi);
@@ -547,7 +503,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x14:
       r = t.And(a, t.Not(b));
       scc = true;
-      break;  // s_andn2_b32
+      break;
     case 0x15:
       r = t.And(a, t.Not(b));
       r_hi = t.And(a_hi, t.Not(b_hi));
@@ -556,7 +512,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x16:
       r = t.Or(a, t.Not(b));
       scc = true;
-      break;  // s_orn2_b32
+      break;
     case 0x17:
       r = t.Or(a, t.Not(b));
       r_hi = t.Or(a_hi, t.Not(b_hi));
@@ -565,7 +521,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x18:
       r = t.Not(t.And(a, b));
       scc = true;
-      break;  // s_nand_b32
+      break;
     case 0x19:
       r = t.Not(t.And(a, b));
       r_hi = t.Not(t.And(a_hi, b_hi));
@@ -574,7 +530,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x1a:
       r = t.Not(t.Or(a, b));
       scc = true;
-      break;  // s_nor_b32
+      break;
     case 0x1b:
       r = t.Not(t.Or(a, b));
       r_hi = t.Not(t.Or(a_hi, b_hi));
@@ -583,7 +539,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x1c:
       r = t.Not(t.Xor(a, b));
       scc = true;
-      break;  // s_xnor_b32
+      break;
     case 0x1d:
       r = t.Not(t.Xor(a, b));
       r_hi = t.Not(t.Xor(a_hi, b_hi));
@@ -592,30 +548,30 @@ void EmitSop2(Translator& t, const Inst& inst) {
     case 0x1e:
       r = t.Shl(a, b);
       scc = true;
-      break;  // s_lshl_b32
+      break;
     case 0x1f:
       shift64(0);
-      break;  // s_lshl_b64
+      break;
     case 0x20:
       r = t.Shr(a, b);
       scc = true;
-      break;  // s_lshr_b32
+      break;
     case 0x21:
       shift64(1);
-      break;  // s_lshr_b64
+      break;
     case 0x22:
       r = t.Sar(a, b);
       scc = true;
-      break;  // s_ashr_i32
+      break;
     case 0x23:
       shift64(2);
-      break;      // s_ashr_i64
-    case 0x24: {  // s_bfm_b32: mask = ((1 << width) - 1) << offset
+      break;
+    case 0x24: {
       const Id width = t.And(a, t.U32(31)), off = t.And(b, t.U32(31));
       r = t.Shl(t.Sub(t.Shl(t.U32(1), width), t.U32(1)), off);
       break;
     }
-    case 0x25: {  // s_bfm_b64: ((1 << width) - 1) << offset, 64 bits wide
+    case 0x25: {
       const Id width = t.And(a, t.U32(63)), off = t.And(b, t.U32(63));
       const Id w_wide = t.Uge(width, t.U32(32));
       const Id lo_ones =
@@ -636,8 +592,8 @@ void EmitSop2(Translator& t, const Inst& inst) {
     }
     case 0x26:
       r = t.Mul(a, b);
-      break;      // s_mul_i32
-    case 0x27: {  // s_bfe_u32: offset = b[4:0], width = b[22:16]
+      break;
+    case 0x27: {
       const Id off = t.And(b, t.U32(31));
       const Id width = t.UMin(t.And(t.Shr(b, t.U32(16)), t.U32(0x7F)),
                               t.Sub(t.U32(32), off));
@@ -645,7 +601,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
       scc = true;
       break;
     }
-    case 0x28: {  // s_bfe_i32: signed
+    case 0x28: {
       const Id off = t.And(b, t.U32(31));
       const Id width = t.UMin(t.And(t.Shr(b, t.U32(16)), t.U32(0x7F)),
                               t.Sub(t.U32(32), off));
@@ -654,12 +610,10 @@ void EmitSop2(Translator& t, const Inst& inst) {
       scc = true;
       break;
     }
-    case 0x29: {  // s_bfe_u64: 64-bit unsigned bitfield extract (off=b[5:0],
-                  // width=b[22:16])
+    case 0x29: {
       const Id off = t.And(b, t.U32(63));
       const Id width = t.UMin(t.And(t.Shr(b, t.U32(16)), t.U32(0x7F)),
                               t.Sub(t.U32(64), off));
-      // 64-bit logical shift-right of {a, a_hi} by off.
       const Id n_lo = t.And(off, t.U32(31));
       const Id ge32 = t.Uge(off, t.U32(32));
       const Id inv = t.And(t.Sub(t.U32(32), n_lo), t.U32(31));
@@ -667,7 +621,6 @@ void EmitSop2(Translator& t, const Inst& inst) {
       const Id lo_small = t.Or(t.Shr(a, n_lo), cross);
       const Id sh_lo = t.SelectB(ge32, t.Shr(a_hi, n_lo), lo_small);
       const Id sh_hi = t.SelectB(ge32, t.U32(0), t.Shr(a_hi, n_lo));
-      // Mask the low/high words to `width` bits.
       const Id wge32 = t.Uge(width, t.U32(32));
       const Id wge64 = t.Uge(width, t.U32(64));
       const Id w_lo = t.And(width, t.U32(31));
@@ -681,14 +634,14 @@ void EmitSop2(Translator& t, const Inst& inst) {
       scc = wide_scc = true;
       break;
     }
-    case 0x2c:  // s_absdiff_i32: |a - b|
+    case 0x2c:
       r = t.m.Bitcast(t.t_u, t.m.ExtInst(t.t_i, GLSLstd450SAbs,
                                          {t.m.Bitcast(t.t_i, t.Sub(a, b))}));
       scc = true;
       break;
-    case 0x2e:  // s_lshl1_add_u32 .. s_lshl4_add_u32: (a << n) + b. RDNA-only
-    case 0x2f:  // numbering; these opcodes mean something else pre-gfx10, so
-    case 0x30:  // the PS4 decoder must not reach them.
+    case 0x2e:
+    case 0x2f:
+    case 0x30:
     case 0x31: {
       if (!t.rdna_sources) {
         WarnUnsupported("sop2", op);
@@ -700,7 +653,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
       t.SetSccBool(t.IsNonZero(c.flag));
       break;
     }
-    case 0x32:  // s_pack_ll_b32_b16: {b[15:0], a[15:0]}
+    case 0x32:
       if (inst.isa != IsaMode::kNeo) {
         WarnUnsupported("sop2", op);
         r = a;
@@ -709,7 +662,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
       r = t.Or(t.And(a, t.U32(0xFFFF)),
                t.Shl(t.And(b, t.U32(0xFFFF)), t.U32(16)));
       break;
-    case 0x33:  // s_pack_lh_b32_b16: {b[31:16], a[15:0]}
+    case 0x33:
       if (inst.isa != IsaMode::kNeo) {
         WarnUnsupported("sop2", op);
         r = a;
@@ -717,7 +670,7 @@ void EmitSop2(Translator& t, const Inst& inst) {
       }
       r = t.Or(t.And(a, t.U32(0xFFFF)), t.And(b, t.U32(0xFFFF0000u)));
       break;
-    case 0x34:  // s_pack_hh_b32_b16: {b[31:16], a[31:16]}
+    case 0x34:
       if (inst.isa != IsaMode::kNeo) {
         WarnUnsupported("sop2", op);
         r = a;
@@ -739,7 +692,6 @@ void EmitSop2(Translator& t, const Inst& inst) {
   }
 }
 
-// ---- SOPC (s_cmp_* -> SCC) --------------------------------------------------
 void EmitSopc(Translator& t, const Inst& inst) {
   const u32 w = inst.raw[0];
   const u32 op = inst.opcode, s0f = w & 0xFF, s1f = (w >> 8) & 0xFF;
@@ -783,16 +735,16 @@ void EmitSopc(Translator& t, const Inst& inst) {
     case 0x0b:
       c = t.Ule(a, b);
       break;
-    case 0x0c: {  // s_bitcmp0_b32: SCC = (a[b[4:0]] == 0)
+    case 0x0c: {
       c = t.IsZero(t.And(t.Shr(a, b), t.U32(1)));
       break;
     }
-    case 0x0d: {  // s_bitcmp1_b32
+    case 0x0d: {
       c = t.IsNonZero(t.And(t.Shr(a, b), t.U32(1)));
       break;
     }
-    case 0x12:    // RDNA s_cmp_eq_u64
-    case 0x13: {  // RDNA s_cmp_lg_u64
+    case 0x12:
+    case 0x13: {
       if (!t.rdna_sources) {
         WarnUnsupported("sopc", op);
         break;
@@ -812,15 +764,14 @@ void EmitSopc(Translator& t, const Inst& inst) {
     t.SetSccBool(c);
 }
 
-// ---- SOPK -------------------------------------------------------------------
 void EmitSopk(Translator& t, const Inst& inst) {
   const u32 w = inst.raw[0];
   const u32 op = inst.opcode, sdst = (w >> 16) & 0x7F;
   const u32 simm_bits = w & 0xFFFF;
   const u32 sext =
       static_cast<u32>(static_cast<i32>(static_cast<i16>(simm_bits)));
-  const Id imm_i = t.U32(sext);       // sign-extended immediate
-  const Id imm_u = t.U32(simm_bits);  // zero-extended immediate
+  const Id imm_i = t.U32(sext);
+  const Id imm_u = t.U32(simm_bits);
 
   const auto cmp = [&](spv::Op cmp_op, bool is_signed) {
     const Id s0 = t.Sg(sdst);
@@ -835,54 +786,54 @@ void EmitSopk(Translator& t, const Inst& inst) {
   switch (op) {
     case 0x00:
       t.SetSdst(sdst, 0, imm_i);
-      break;    // s_movk_i32
-    case 0x02:  // s_cmovk_i32
+      break;
+    case 0x02:
       t.SetSdst(sdst, 0, t.SelectNz(t.Scc(), imm_i, t.Sdst(sdst)));
       break;
     case 0x03:
       cmp(spv::Op::OpIEqual, true);
-      break;  // s_cmpk_eq_i32
+      break;
     case 0x04:
       cmp(spv::Op::OpINotEqual, true);
-      break;  // s_cmpk_lg_i32
+      break;
     case 0x05:
       cmp(spv::Op::OpSGreaterThan, true);
-      break;  // s_cmpk_gt_i32
+      break;
     case 0x06:
       cmp(spv::Op::OpSGreaterThanEqual, true);
-      break;  // s_cmpk_ge_i32
+      break;
     case 0x07:
       cmp(spv::Op::OpSLessThan, true);
-      break;  // s_cmpk_lt_i32
+      break;
     case 0x08:
       cmp(spv::Op::OpSLessThanEqual, true);
-      break;  // s_cmpk_le_i32
+      break;
     case 0x09:
       cmp(spv::Op::OpIEqual, false);
-      break;  // s_cmpk_eq_u32
+      break;
     case 0x0a:
       cmp(spv::Op::OpINotEqual, false);
-      break;  // s_cmpk_lg_u32
+      break;
     case 0x0b:
       cmp(spv::Op::OpUGreaterThan, false);
-      break;  // s_cmpk_gt_u32
+      break;
     case 0x0c:
       cmp(spv::Op::OpUGreaterThanEqual, false);
-      break;  // s_cmpk_ge_u32
+      break;
     case 0x0d:
       cmp(spv::Op::OpULessThan, false);
-      break;  // s_cmpk_lt_u32
+      break;
     case 0x0e:
       cmp(spv::Op::OpULessThanEqual, false);
-      break;      // s_cmpk_le_u32
-    case 0x0f: {  // s_addk_i32: sdst += simm16, SCC = signed overflow
+      break;
+    case 0x0f: {
       const Id s0 = t.Sg(sdst);
       const Id r = t.Add(s0, imm_i);
       t.SetSdst(sdst, 0, r);
       t.SetSccBool(SignedAddOverflow(t, s0, imm_i, r));
       break;
     }
-    case 0x10: {  // s_mulk_i32: SCC reports signed overflow
+    case 0x10: {
       const Id lhs = t.Sg(sdst);
       const Id product =
           t.m.Emit(spv::Op::OpSMulExtended, t.PairType(), {lhs, imm_i});
@@ -893,8 +844,6 @@ void EmitSopk(Translator& t, const Inst& inst) {
           t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {hi, t.Sar(lo, t.U32(31))}));
       break;
     }
-    // s_getreg/s_setreg touch hardware state registers (mode/trap) that have
-    // no analogue here; reading returns 0.
     case 0x12:
       t.SetSdst(sdst, 0, t.U32(0));
       WarnUnsupported("sopk", op);
@@ -908,7 +857,6 @@ void EmitSopk(Translator& t, const Inst& inst) {
   }
 }
 
-// ---- SGPR spills parked in a VGPR's lanes -----------------------------------
 base::HashSet<u32> PlanLaneSpills(const Program& program, const u8* reachable) {
   base::HashSet<u32> spills;
   u32 index = 0;
@@ -930,19 +878,16 @@ bool EmitLaneSpill(Translator& t,
                    u32 src0,
                    u32 src1,
                    u32 literal) {
-  if (op == 0x01) {  // v_readlane_b32 sdst, vsrc, lane
+  if (op == 0x01) {
     if (src0 < 256 || !t.IsSpillVgpr(src0 - 256))
       return false;
     t.SetSg(dst,
             t.m.Load(t.t_u, t.SpillAt(src0 - 256, t.SrcRaw(src1, literal))));
     return true;
   }
-  if (op == 0x02) {  // v_writelane_b32 vdst, ssrc, lane
+  if (op == 0x02) {
     if (!t.IsSpillVgpr(dst))
       return false;
-    // Publish into the slot array, then report NOT consumed so the general
-    // lowering still updates the VGPR itself: a stage that has a lane index
-    // keeps exactly the behaviour it had, and this is purely additive.
     t.StorePrivate(t.SpillAt(dst, t.SrcRaw(src1, literal)),
                    t.SrcRaw(src0, literal));
     return false;
@@ -950,10 +895,6 @@ bool EmitLaneSpill(Translator& t,
   return false;
 }
 
-// v_mbcnt over EXEC in the one-bit EXEC model, where EXEC is this lane's own
-// flag rather than a lane mask, so it cannot rank the lane. Its use is ranking
-// lanes after a GDS ds_append, which here already hands every lane its own
-// slot, so the rank is 0.
 bool EmitMbcntOfExec(Translator& t,
                      u32 op,
                      u32 dst,
@@ -967,17 +908,9 @@ bool EmitMbcntOfExec(Translator& t,
   return true;
 }
 
-// ---- cross-lane -------------------------------------------------------------
-// A GCN wave is 64 lanes; the host subgroup may be half that. Compute gets an
-// exact channel (a Workgroup array indexed the way GCN packs threads into
-// waves) wherever the group can legally be synchronised; elsewhere a subgroup
-// shuffle answers correctly within one subgroup and is recorded as short of
-// the ISA when the wave spans more than one. Graphics stages have no wave-lane
-// index at all, so they keep the single-lane reading.
-
 Id ReadLane(Translator& t, Id value, Id lane) {
   if (!t.lane_id)
-    return value;  // no wave-lane index exists here
+    return value;
   lane = t.And(lane, t.U32(t.wave_size - 1));
   if (t.CanExchange())
     return t.WaveExchange(value, lane);
@@ -986,13 +919,7 @@ Id ReadLane(Translator& t, Id value, Id lane) {
   return t.SubgroupShuffle(value, lane);
 }
 
-// The lowest EXEC-active lane's value, or lane 0's when EXEC is empty. EXEC is
-// per-invocation here and is NOT the set of invocations the host considers
-// active, so the ballot has to be taken over our own bit rather than implied
-// by OpGroupNonUniformBroadcastFirst.
 Id ReadFirstLane(Translator& t, Id value) {
-  // Proven the same in every active lane: our own lane IS the first active
-  // one's, exactly, with no shuffle and no barrier.
   if (t.readfirstlane_uniform)
     return value;
   if (!t.xchg_lanes)
@@ -1008,7 +935,7 @@ Id ReadFirstLane(Translator& t, Id value) {
   }
   t.RequireSubgroup(spv::Capability::GroupNonUniformBallot);
   t.RequireSubgroup(spv::Capability::GroupNonUniformVote);
-  const Id scope = t.U32(3);  // Subgroup
+  const Id scope = t.U32(3);
   const Id active = t.LaneActive(t.Exec());
   const Id ballot = t.m.Emit(spv::Op::OpGroupNonUniformBallot,
                              t.m.TypeVec(t.t_u, 4), {scope, active});
@@ -1016,7 +943,6 @@ Id ReadFirstLane(Translator& t, Id value) {
       t.m.Emit(spv::Op::OpGroupNonUniformAny, t.t_bool, {scope, active});
   const Id first =
       t.m.Emit(spv::Op::OpGroupNonUniformBallotFindLSB, t.t_u, {scope, ballot});
-  // Half-uniform: the first active lane of THIS subgroup, or lane 0.
   const Id half = t.SubgroupShuffle(value, t.SelectB(any, first, t.U32(0)));
   if (!WaveSplitsAcrossSubgroups())
     return half;
@@ -1024,8 +950,6 @@ Id ReadFirstLane(Translator& t, Id value) {
     NoteApproximated("v_readfirstlane.no-sync-point", 0x02);
     return half;
   }
-  // Cross the halves: the lower one wins whenever it has an active lane, and
-  // its value is also the ISA's EXEC-empty fallback.
   t.WavePublish(half, 0);
   t.WavePublish(t.SelectB(any, t.U32(1), t.U32(0)), 1);
   t.Barrier();
@@ -1036,58 +960,50 @@ Id ReadFirstLane(Translator& t, Id value) {
   return t.SelectB(t.IsNonZero(lo_any), lo, hi);
 }
 
-// ---- VOP1 -------------------------------------------------------------------
 void EmitVop1(Translator& t, u32 op, u32 vdst, Id s0, bool clamp, u32 omod) {
   const auto set_f = [&](Id f) {
     f = ApplyOutputModifier(t, f, omod);
     t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
   };
-  // OMOD on an integer result is IGNORED by the hardware, not unsupported:
-  // "Integer and non-specific instructions (such as moves) ignore output
-  // modifiers" (Sea Islands ISA, Output Modifier Options). Warning here set
-  // HadUnsupported() and DECLINED the whole shader over a modifier the GPU
-  // discards. Same reasoning at the vop2/vop3 set_u below.
   const auto set_u = [&](Id u) { t.SetVg(vdst, u); };
   const Id u0 = t.m.Bitcast(t.t_u, s0);
   switch (op) {
     case 0x00:
-      break;  // v_nop
+      break;
     case 0x01:
       set_u(u0);
-      break;  // v_mov_b32
+      break;
     case 0x02:
       t.SetSg(vdst, ReadFirstLane(t, u0));
-      break;    // v_readfirstlane_b32
-    case 0x05:  // v_cvt_f32_i32
+      break;
+    case 0x05:
       set_f(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {t.m.Bitcast(t.t_i, s0)}));
       break;
     case 0x06:
       set_f(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {u0}));
-      break;  // cvt_f32_u32
+      break;
     case 0x07:
       set_u(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {s0}));
-      break;    // cvt_u32_f32
-    case 0x08:  // cvt_i32_f32
+      break;
+    case 0x08:
       set_u(t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpConvertFToS, t.t_i, {s0})));
       break;
-    case 0x0c:  // cvt_rpi_i32_f32: floor(s + 0.5)
+    case 0x0c:
       set_u(t.m.Bitcast(
           t.t_u, t.m.Emit(spv::Op::OpConvertFToS, t.t_i,
                           {t.Ext1(GLSLstd450Floor, t.FAdd(s0, t.F32(0.5f)))})));
       break;
-    case 0x0d:  // cvt_flr_i32_f32
+    case 0x0d:
       set_u(t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpConvertFToS, t.t_i,
                                         {t.Ext1(GLSLstd450Floor, s0)})));
       break;
-    case 0x0e: {  // v_cvt_off_f32_i4: signed low nibble in sixteenths
+    case 0x0e: {
       const Id nibble = t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
                                  {t.m.Bitcast(t.t_i, u0), t.U32(0), t.U32(4)});
       set_f(t.FMul(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {nibble}),
                    t.F32(1.0f / 16.0f)));
       break;
     }
-    // f16 <-> f32. cvt_f16_f32 packs the half into the low half-word (high
-    // half zero); cvt_f32_f16 reads it back.
     case 0x0a: {
       Id value = ApplyOutputModifier(t, s0, omod);
       if (clamp)
@@ -1104,60 +1020,57 @@ void EmitVop1(Translator& t, u32 op, u32 vdst, Id s0, bool clamp, u32 omod) {
     case 0x11:
     case 0x12:
     case 0x13:
-    case 0x14: {  // cvt_f32_ubyte0..3
+    case 0x14: {
       const Id b = t.And(t.Shr(u0, t.U32((op - 0x11) * 8)), t.U32(0xFF));
       set_f(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {b}));
       break;
     }
     case 0x20:
       set_f(t.Ext1(GLSLstd450Fract, s0));
-      break;  // v_fract_f32
+      break;
     case 0x21:
       set_f(t.Ext1(GLSLstd450Trunc, s0));
-      break;  // v_trunc_f32
+      break;
     case 0x22:
       set_f(t.Ext1(GLSLstd450Ceil, s0));
-      break;  // v_ceil_f32
+      break;
     case 0x23:
       set_f(t.Ext1(GLSLstd450RoundEven, s0));
-      break;  // v_rndne_f32
+      break;
     case 0x24:
       set_f(t.Ext1(GLSLstd450Floor, s0));
-      break;  // v_floor_f32
+      break;
     case 0x25:
       set_f(t.Ext1(GLSLstd450Exp2, s0));
-      break;    // v_exp_f32
-    case 0x26:  // v_log_clamp_f32 = ClampInfToFltMax(Log2(x))
+      break;
+    case 0x26:
       set_f(t.ClampInfToFltMax(t.Ext1(GLSLstd450Log2, s0)));
       break;
     case 0x27:
       set_f(t.Ext1(GLSLstd450Log2, s0));
-      break;    // v_log_f32
-    case 0x28:  // v_rcp_clamp_f32 = ClampInfToFltMax(Rcp(x))
+      break;
+    case 0x28:
       set_f(t.ClampInfToFltMax(t.FDiv(t.F32(1.0f), s0)));
       break;
-    case 0x29:  // v_rcp_legacy_f32 = ConvertInfToZero(Rcp(x))
+    case 0x29:
       set_f(t.ConvertInfToZero(t.FDiv(t.F32(1.0f), s0)));
       break;
     case 0x2a:
     case 0x2b:
       set_f(t.FDiv(t.F32(1.0f), s0));
-      break;    // v_rcp[_iflag]_f32
-    case 0x2c:  // v_rsq_clamp_f32 = ClampInfToFltMax(Rsqrt(x)). The old FMin
-                // against FLT_MAX also turned a NaN result into +FLT_MAX, since
-                // GLSL FMin returns the non-NaN operand.
+      break;
+    case 0x2c:
       set_f(t.ClampInfToFltMax(t.Ext1(GLSLstd450InverseSqrt, s0)));
       break;
-    case 0x2d:  // v_rsq_legacy_f32 = ConvertInfToZero(Rsqrt(x))
+    case 0x2d:
       set_f(t.ConvertInfToZero(t.Ext1(GLSLstd450InverseSqrt, s0)));
       break;
     case 0x2e:
       set_f(t.Ext1(GLSLstd450InverseSqrt, s0));
-      break;  // v_rsq_f32
+      break;
     case 0x33:
       set_f(t.Ext1(GLSLstd450Sqrt, s0));
-      break;  // v_sqrt_f32
-    // GCN trig takes the argument in revolutions (1.0 == 2*pi).
+      break;
     case 0x35:
       set_f(t.Ext1(GLSLstd450Sin, t.FMul(s0, t.F32(6.28318530718f))));
       break;
@@ -1166,19 +1079,19 @@ void EmitVop1(Translator& t, u32 op, u32 vdst, Id s0, bool clamp, u32 omod) {
       break;
     case 0x37:
       set_u(t.Not(u0));
-      break;  // v_not_b32
+      break;
     case 0x38:
       set_u(t.BitRev(u0));
-      break;      // v_bfrev_b32
-    case 0x39: {  // v_ffbh_u32: count leading zeros; -1 if src == 0
+      break;
+    case 0x39: {
       const Id msb = t.m.ExtInst(t.t_u, GLSLstd450FindUMsb, {u0});
       set_u(t.SelectB(t.IsZero(u0), t.U32(0xFFFFFFFFu), t.Sub(t.U32(31), msb)));
       break;
     }
     case 0x3a:
       set_u(t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {u0}));
-      break;      // v_ffbl_b32
-    case 0x3b: {  // v_ffbh_i32: leading-sign-bit count; -1 if src is 0 or -1
+      break;
+    case 0x3b: {
       const Id smsb = t.m.Bitcast(t.t_u, t.m.ExtInst(t.t_i, GLSLstd450FindSMsb,
                                                      {t.m.Bitcast(t.t_i, u0)}));
       set_u(t.SelectB(t.Eq(smsb, t.U32(0xFFFFFFFFu)), t.U32(0xFFFFFFFFu),
@@ -1187,12 +1100,11 @@ void EmitVop1(Translator& t, u32 op, u32 vdst, Id s0, bool clamp, u32 omod) {
     }
     default:
       WarnUnsupported("vop1", op);
-      set_u(u0);  // mov fallback
+      set_u(u0);
       break;
   }
 }
 
-// ---- VOP2 -------------------------------------------------------------------
 void EmitVop2(Translator& t,
               u32 op,
               u32 vdst,
@@ -1205,9 +1117,7 @@ void EmitVop2(Translator& t,
     f = ApplyOutputModifier(t, f, omod);
     t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
   };
-  const auto set_u = [&](Id u) {
-    t.SetVg(vdst, u);
-  };  // OMOD ignored: see EmitVop1
+  const auto set_u = [&](Id u) { t.SetVg(vdst, u); };
   const Id u0 = t.m.Bitcast(t.t_u, s0), u1 = t.m.Bitcast(t.t_u, s1);
   const Id i0 = t.m.Bitcast(t.t_i, s0), i1 = t.m.Bitcast(t.t_i, s1);
   const auto mul24_hi = [&](spv::Op wide_mul, Id a, Id b) {
@@ -1215,19 +1125,14 @@ void EmitVop2(Translator& t,
     return t.m.CompositeExtract(t.t_u, prod, 1);
   };
   switch (op) {
-    case 0x00: {  // v_cndmask_b32: this lane's bit of VCC picks s1 or s0
+    case 0x00: {
       set_f(t.SelectF(t.LaneActive(t.SgMask(106)), s1, s0));
       break;
     }
-    // v_readlane / v_writelane name one lane of the wave and both ignore EXEC.
     case 0x01:
       t.SetSg(vdst, ReadLane(t, u0, u1));
       break;
     case 0x02: {
-      // Only the named lane takes the value; the rest keep theirs. src0 is an
-      // SGPR, i.e. wave-uniform, so every invocation already holds what the
-      // write publishes and no cross-lane channel is needed. Not SetVg: a lane
-      // write is not EXEC-predicated.
       const Id keep = t.m.Load(t.t_u, t.VgPtr(vdst));
       t.StorePrivate(
           t.VgPtr(vdst),
@@ -1236,122 +1141,103 @@ void EmitVop2(Translator& t,
     }
     case 0x03:
       set_f(t.FAdd(s0, s1));
-      break;  // v_add_f32
+      break;
     case 0x04:
       set_f(t.FSub(s0, s1));
-      break;  // v_sub_f32
+      break;
     case 0x05:
       set_f(t.FSub(s1, s0));
-      break;  // v_subrev_f32
-    // The legacy multiply forms differ from the IEEE ones in returning ZERO
-    // when a multiplicand is zero, whatever the other one is, including inf
-    // and NaN, where IEEE gives NaN. Shaders use exactly that to kill a term
-    // guarded by a reciprocal: mul_legacy(guard, 1/d) is 0 when the guard is 0,
-    // even where d was 0 and the reciprocal is inf. Lowering it as a plain
-    // multiply produces NaN there, and a later clamp turns NaN or inf into 1.0,
-    // a saturated pixel, with nothing left in the buffer to show it was ever
-    // either. That is why nan and inf counts can read zero on a target full of
-    // blown highlights.
+      break;
     case 0x06:
       set_f(t.FAdd(t.LegacyMul(s0, s1), t.VgF(vdst)));
-      break;  // v_mac_legacy_f32
+      break;
     case 0x07:
       set_f(t.LegacyMul(s0, s1));
-      break;  // v_mul_legacy_f32
+      break;
     case 0x08:
       set_f(t.FMul(s0, s1));
-      break;  // v_mul_f32
+      break;
     case 0x09:
       set_u(t.Mul(t.Sext24(u0), t.Sext24(u1)));
-      break;    // v_mul_i32_i24
-    case 0x0a:  // v_mul_hi_i32_i24
+      break;
+    case 0x0a:
       set_u(mul24_hi(spv::Op::OpSMulExtended, t.Sext24(u0), t.Sext24(u1)));
       break;
     case 0x0b:
       set_u(t.Mul(t.Low24(u0), t.Low24(u1)));
-      break;    // v_mul_u32_u24
-    case 0x0c:  // v_mul_hi_u32_u24
+      break;
+    case 0x0c:
       set_u(mul24_hi(spv::Op::OpUMulExtended, t.Low24(u0), t.Low24(u1)));
       break;
-    // v_min_legacy_f32 / v_max_legacy_f32 = min_dx9 / max_dx9. The ISA is
-    // explicit: "If one or both inputs are NaN values then vsrc1 is always
-    // returned", and IEEE mode has no effect. An ordered compare is exactly
-    // that: it is false whenever either operand is NaN, so the select falls
-    // to vsrc1. The plain min/max below return the non-NaN operand, which is
-    // GLSL NMin/NMax; FMin/FMax leave a NaN operand undefined, and a title's
-    // max(x, 0) NaN scrub then lets the NaN through into its history buffers.
     case 0x0d:
+      // Legacy min/max return vsrc1 on NaN, unlike FMin/FMax.
       set_f(t.SelectF(t.FLt(s0, s1), s0, s1));
       break;
     case 0x0f:
       set_f(t.Ext2(GLSLstd450NMin, s0, s1));
-      break;  // v_min_f32
+      break;
     case 0x0e:
       set_f(t.SelectF(t.FGt(s0, s1), s0, s1));
       break;
     case 0x10:
       set_f(t.Ext2(GLSLstd450NMax, s0, s1));
-      break;  // v_max_f32
+      break;
     case 0x11:
       set_u(t.SMin(u0, u1));
-      break;  // v_min_i32
+      break;
     case 0x12:
       set_u(t.SMax(u0, u1));
-      break;  // v_max_i32
+      break;
     case 0x13:
       set_u(t.UMin(u0, u1));
-      break;  // v_min_u32
+      break;
     case 0x14:
       set_u(t.UMax(u0, u1));
-      break;  // v_max_u32
+      break;
     case 0x15:
       set_u(t.Shr(u0, u1));
-      break;  // v_lshr_b32
+      break;
     case 0x16:
       set_u(t.Shr(u1, u0));
-      break;  // v_lshrrev_b32
+      break;
     case 0x17:
       set_u(t.Sar(u0, u1));
-      break;  // v_ashr_i32
+      break;
     case 0x18:
       set_u(t.Sar(u1, u0));
-      break;  // v_ashrrev_i32
+      break;
     case 0x19:
       set_u(t.Shl(u0, u1));
-      break;  // v_lshl_b32
+      break;
     case 0x1a:
       set_u(t.Shl(u1, u0));
-      break;  // v_lshlrev_b32
+      break;
     case 0x1b:
       set_u(t.And(u0, u1));
-      break;  // v_and_b32
+      break;
     case 0x1c:
       set_u(t.Or(u0, u1));
-      break;  // v_or_b32
+      break;
     case 0x1d:
       set_u(t.Xor(u0, u1));
-      break;      // v_xor_b32
-    case 0x1e: {  // v_bfm_b32: ((1 << s0[4:0]) - 1) << s1[4:0]
+      break;
+    case 0x1e: {
       const Id ones = t.Sub(t.Shl(t.U32(1), u0), t.U32(1));
       set_u(t.Shl(ones, u1));
       break;
     }
     case 0x1f:
       set_f(t.FAdd(t.FMul(s0, s1), t.VgF(vdst)));
-      break;    // v_mac_f32
-    case 0x20:  // v_madmk_f32: s0 * K + s1
+      break;
+    case 0x20:
       set_f(t.FAdd(t.FMul(s0, t.m.Bitcast(t.t_f, t.U32(literal))), s1));
       break;
-    case 0x21:  // v_madak_f32: s0 * s1 + K
+    case 0x21:
       set_f(t.FAdd(t.FMul(s0, s1), t.m.Bitcast(t.t_f, t.U32(literal))));
       break;
     case 0x22:
       set_u(t.Add(t.PopCount(u0), u1));
-      break;  // v_bcnt_u32_b32
-    // v_mbcnt_lo/hi: D = popcount(S0 & ThreadMask_half) + S1, where ThreadMask
-    // is (1 << lane) - 1 over the 64 lanes and the two opcodes take its low
-    // and high halves. The pair with S0 = -1 is the ISA's canonical lane-id
-    // sequence, and comes out exact.
+      break;
     case 0x23:
     case 0x24: {
       const Id lane = t.WaveLane();
@@ -1366,66 +1252,66 @@ void EmitVop2(Translator& t,
       set_u(t.Add(t.PopCount(t.And(u0, mask)), u1));
       break;
     }
-    case 0x25: {  // v_add_i32: carry-out -> VCC
+    case 0x25: {
       const CarryResult r = AddCarry(t, u0, u1);
       set_u(t.Add(u0, u1));
       t.SetLaneFlag(106, r.flag);
       break;
     }
-    case 0x26: {  // v_sub_i32
+    case 0x26: {
       const CarryResult r = SubBorrow(t, u0, u1);
       set_u(r.value);
       t.SetLaneFlag(106, r.flag);
       break;
     }
-    case 0x27: {  // v_subrev_i32
+    case 0x27: {
       const CarryResult r = SubBorrow(t, u1, u0);
       set_u(r.value);
       t.SetLaneFlag(106, r.flag);
       break;
     }
-    case 0x28: {  // v_addc_u32: s0 + s1 + VCC, carry-out -> VCC
+    case 0x28: {
       const CarryResult r = AddCarry(t, u0, u1, t.LaneFlag(106));
       set_u(r.value);
       t.SetLaneFlag(106, r.flag);
       break;
     }
-    case 0x29: {  // v_subb_u32
+    case 0x29: {
       const CarryResult r = SubBorrow(t, u0, u1, t.LaneFlag(106));
       set_u(r.value);
       t.SetLaneFlag(106, r.flag);
       break;
     }
-    case 0x2a: {  // v_subbrev_u32
+    case 0x2a: {
       const CarryResult r = SubBorrow(t, u1, u0, t.LaneFlag(106));
       set_u(r.value);
       t.SetLaneFlag(106, r.flag);
       break;
     }
-    case 0x2b:  // v_ldexp_f32
+    case 0x2b:
       set_f(t.m.ExtInst(t.t_f, GLSLstd450Ldexp, {s0, i1}));
       break;
-    case 0x2d:  // v_cvt_pknorm_i16_f32
+    case 0x2d:
       set_u(t.m.ExtInst(t.t_u, GLSLstd450PackSnorm2x16,
                         {t.m.CompositeConstruct(t.t_v2, {s0, s1})}));
       break;
-    case 0x2e:  // v_cvt_pknorm_u16_f32
+    case 0x2e:
       set_u(t.m.ExtInst(t.t_u, GLSLstd450PackUnorm2x16,
                         {t.m.CompositeConstruct(t.t_v2, {s0, s1})}));
       break;
-    case 0x2f:  // v_cvt_pkrtz_f16_f32
+    case 0x2f:
       if (clamp || omod)
         WarnUnsupported("vop2.cvt_pkrtz-output-modifier", op);
       t.SetVg(vdst, t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
                                 {t.m.CompositeConstruct(t.t_v2, {s0, s1})}));
       break;
-    case 0x30: {  // v_cvt_pk_u16_u32: {u16(S1), u16(S0)}, unsigned-saturating
+    case 0x30: {
       const Id lo = t.m.ExtInst(t.t_u, GLSLstd450UMin, {u0, t.U32(0xFFFFu)});
       const Id hi = t.m.ExtInst(t.t_u, GLSLstd450UMin, {u1, t.U32(0xFFFFu)});
       set_u(t.Or(lo, t.Shl(hi, t.U32(16))));
       break;
     }
-    case 0x31: {  // v_cvt_pk_i16_i32: {i16(S1), i16(S0)}, signed-saturating
+    case 0x31: {
       const auto sat = [&](Id v) {
         const Id c =
             t.m.ExtInst(t.t_i, GLSLstd450SClamp,
@@ -1443,11 +1329,8 @@ void EmitVop2(Translator& t,
   (void)i0;
 }
 
-// ---- VOPC -------------------------------------------------------------------
 namespace {
 
-// Float predicate for the low opcode nibble (F/LT/EQ/LE/GT/LG/GE/O/U/NGE/NLG/
-// NGT/NLE/NEQ/NLT/TRU). Returns 0 for none (F handled by caller).
 Id FloatPredicate(Translator& t, u32 lo, Id a, Id b) {
   const auto f = [&](spv::Op o) { return t.m.Emit(o, t.t_bool, {a, b}); };
   const auto is_nan = [&](Id x) {
@@ -1463,35 +1346,34 @@ Id FloatPredicate(Translator& t, u32 lo, Id a, Id b) {
     case 4:
       return f(spv::Op::OpFOrdGreaterThan);
     case 5:
-      return f(spv::Op::OpFOrdNotEqual);  // LG
+      return f(spv::Op::OpFOrdNotEqual);
     case 6:
       return f(spv::Op::OpFOrdGreaterThanEqual);
-    case 7:  // O: neither operand NaN
+    case 7:
       return t.m.Emit(
           spv::Op::OpLogicalNot, t.t_bool,
           {t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is_nan(a), is_nan(b)})});
-    case 8:  // U: either operand NaN
+    case 8:
       return t.m.Emit(spv::Op::OpLogicalOr, t.t_bool, {is_nan(a), is_nan(b)});
     case 9:
-      return f(spv::Op::OpFUnordLessThan);  // NGE
+      return f(spv::Op::OpFUnordLessThan);
     case 10:
-      return f(spv::Op::OpFUnordEqual);  // NLG
+      return f(spv::Op::OpFUnordEqual);
     case 11:
-      return f(spv::Op::OpFUnordLessThanEqual);  // NGT
+      return f(spv::Op::OpFUnordLessThanEqual);
     case 12:
-      return f(spv::Op::OpFUnordGreaterThan);  // NLE
+      return f(spv::Op::OpFUnordGreaterThan);
     case 13:
-      return f(spv::Op::OpFUnordNotEqual);  // NEQ
+      return f(spv::Op::OpFUnordNotEqual);
     case 14:
-      return f(spv::Op::OpFUnordGreaterThanEqual);  // NLT
+      return f(spv::Op::OpFUnordGreaterThanEqual);
     case 15:
-      return t.m.ConstBool(true);  // TRU
+      return t.m.ConstBool(true);
     default:
-      return 0;  // F (always false)
+      return 0;
   }
 }
 
-// Integer predicate for the low 3 bits (F/LT/EQ/LE/GT/NE/GE/T).
 Id IntPredicate(Translator& t, u32 lo, bool is_signed, Id a, Id b) {
   const Id ai = t.m.Bitcast(t.t_i, a), bi = t.m.Bitcast(t.t_i, b);
   const auto s = [&](spv::Op o) { return t.m.Emit(o, t.t_bool, {ai, bi}); };
@@ -1519,13 +1401,6 @@ Id IntPredicate(Translator& t, u32 lo, bool is_signed, Id a, Id b) {
   }
 }
 
-// ---- exact 64-bit compares, assembled from dword pairs ----------------------
-// These families used to be evaluated on the low dword alone, which is a
-// different answer for any value whose halves disagree. Building them out of
-// 32-bit halves (rather than OpTypeInt 64 / OpTypeFloat 64) keeps the emitted
-// module free of the Int64 and Float64 capabilities, and so free of the
-// shaderInt64 / shaderFloat64 device features, which the Android targets do
-// not all advertise.
 struct Dword2 {
   Id lo, hi;
 };
@@ -1543,7 +1418,6 @@ Id Slt32(Translator& t, Id a, Id b) {
 Id U64Eq(Translator& t, Dword2 a, Dword2 b) {
   return t.LAnd(t.Eq(a.lo, b.lo), t.Eq(a.hi, b.hi));
 }
-// Lexicographic on (hi, lo); only the high half's comparison differs in sign.
 Id U64Lt(Translator& t, Dword2 a, Dword2 b) {
   return LOr(t, t.Ult(a.hi, b.hi), t.LAnd(t.Eq(a.hi, b.hi), t.Ult(a.lo, b.lo)));
 }
@@ -1578,17 +1452,14 @@ Id Int64Predicate(Translator& t, u32 lo, bool is_signed, Dword2 a, Dword2 b) {
   }
 }
 
-// IEEE-754 binary64 predicates over the raw halves.
 Id F64IsNan(Translator& t, Dword2 x) {
   return t.LAnd(
       t.Eq(t.And(x.hi, t.U32(0x7ff00000u)), t.U32(0x7ff00000u)),
       LOr(t, t.IsNonZero(t.And(x.hi, t.U32(0x000fffffu))), t.IsNonZero(x.lo)));
 }
-Id F64IsZero(Translator& t, Dword2 x) {  // +0.0 and -0.0 alike
+Id F64IsZero(Translator& t, Dword2 x) {
   return t.LAnd(t.IsZero(t.And(x.hi, t.U32(0x7fffffffu))), t.IsZero(x.lo));
 }
-// Monotonic unsigned key: ordering the key as a 64-bit unsigned reproduces the
-// ordering of the doubles (negatives invert, positives gain the sign bit).
 Dword2 F64OrderKey(Translator& t, Dword2 x) {
   const Id neg = t.IsNonZero(t.And(x.hi, t.U32(0x80000000u)));
   return {t.SelectB(neg, t.Not(x.lo), x.lo),
@@ -1599,7 +1470,6 @@ Id F64Eq(Translator& t, Dword2 a, Dword2 b) {
       LNot(t, LOr(t, F64IsNan(t, a), F64IsNan(t, b))),
       LOr(t, U64Eq(t, a, b), t.LAnd(F64IsZero(t, a), F64IsZero(t, b))));
 }
-// The order key would rank -0.0 below +0.0, so equal zeroes are excluded.
 Id F64Lt(Translator& t, Dword2 a, Dword2 b) {
   return t.LAnd(LNot(t, LOr(t, F64IsNan(t, a), F64IsNan(t, b))),
                 t.LAnd(U64Lt(t, F64OrderKey(t, a), F64OrderKey(t, b)),
@@ -1610,37 +1480,37 @@ Id Float64Predicate(Translator& t, u32 lo, Dword2 a, Dword2 b) {
   const Id nan = LOr(t, F64IsNan(t, a), F64IsNan(t, b));
   switch (lo) {
     case 0:
-      return t.m.ConstBool(false);  // F
+      return t.m.ConstBool(false);
     case 1:
-      return F64Lt(t, a, b);  // LT
+      return F64Lt(t, a, b);
     case 2:
-      return F64Eq(t, a, b);  // EQ
+      return F64Eq(t, a, b);
     case 3:
-      return LOr(t, F64Lt(t, a, b), F64Eq(t, a, b));  // LE
+      return LOr(t, F64Lt(t, a, b), F64Eq(t, a, b));
     case 4:
-      return F64Lt(t, b, a);  // GT
+      return F64Lt(t, b, a);
     case 5:
-      return t.LAnd(LNot(t, nan), LNot(t, F64Eq(t, a, b)));  // LG
+      return t.LAnd(LNot(t, nan), LNot(t, F64Eq(t, a, b)));
     case 6:
-      return LOr(t, F64Lt(t, b, a), F64Eq(t, a, b));  // GE
+      return LOr(t, F64Lt(t, b, a), F64Eq(t, a, b));
     case 7:
-      return LNot(t, nan);  // O
+      return LNot(t, nan);
     case 8:
-      return nan;  // U
+      return nan;
     case 9:
-      return LOr(t, nan, F64Lt(t, a, b));  // NGE
+      return LOr(t, nan, F64Lt(t, a, b));
     case 10:
-      return LOr(t, nan, F64Eq(t, a, b));  // NLG
+      return LOr(t, nan, F64Eq(t, a, b));
     case 11:
-      return LOr(t, nan, LOr(t, F64Lt(t, a, b), F64Eq(t, a, b)));  // NGT
+      return LOr(t, nan, LOr(t, F64Lt(t, a, b), F64Eq(t, a, b)));
     case 12:
-      return LOr(t, nan, F64Lt(t, b, a));  // NLE
+      return LOr(t, nan, F64Lt(t, b, a));
     case 13:
-      return LNot(t, F64Eq(t, a, b));  // NEQ
+      return LNot(t, F64Eq(t, a, b));
     case 14:
-      return LOr(t, nan, LOr(t, F64Lt(t, b, a), F64Eq(t, a, b)));  // NLT
+      return LOr(t, nan, LOr(t, F64Lt(t, b, a), F64Eq(t, a, b)));
     case 15:
-      return t.m.ConstBool(true);  // TRU
+      return t.m.ConstBool(true);
     default:
       return 0;
   }
@@ -1671,8 +1541,8 @@ Id FloatClassPredicate(Translator& t, Id bits, Id mask) {
   const auto add_class = [&](u32 bit, Id condition) {
     classes = t.Or(classes, t.SelectB(condition, t.U32(1u << bit), t.U32(0)));
   };
-  add_class(0, t.LAnd(nan, logical_not(quiet)));  // signaling NaN
-  add_class(1, t.LAnd(nan, quiet));               // quiet NaN
+  add_class(0, t.LAnd(nan, logical_not(quiet)));
+  add_class(1, t.LAnd(nan, quiet));
   add_class(2, t.LAnd(infinity, negative));
   add_class(3, t.LAnd(normal, negative));
   add_class(4, t.LAnd(subnormal, negative));
@@ -1695,13 +1565,6 @@ void EmitVopc(Translator& t,
               u32 dst,
               Id s0_hi,
               Id s1_hi) {
-  // Opcode space: f32 0x00-0x1F, f64 0x20-0x3F, i32 0x80-0x9F, i64 0xA0-0xBF,
-  // u32 0xC0-0xDF, u64 0xE0-0xFF. Bit 4 of each 32-op family selects the
-  // EXEC-writing cmpx form. The 64-bit families read a register PAIR, so they
-  // are evaluated on both halves (see the Dword2 predicates above). The only
-  // caller that omits the high dwords is translate_neo's f16 path, which maps
-  // onto the 32-bit families exclusively, so the zero default is dead there.
-  // It is not a safe fallback, since {lo, 0} reads as a denormal.
   const Dword2 a{s0u, s0_hi ? s0_hi : t.U32(0)};
   const Dword2 b{s1u, s1_hi ? s1_hi : t.U32(0)};
   Id cond = 0;
@@ -1711,9 +1574,6 @@ void EmitVopc(Translator& t,
     cond = op >= 0x20 ? Float64Predicate(t, op & 0xF, a, b)
                       : FloatPredicate(t, op & 0xF, s0f, s1f);
   } else if (op <= 0x7F) {
-    // 0x40-0x7F are V_CMPS[X]_*: the signalling forms of 0x00-0x3F. They differ
-    // only in raising an FP exception on a quiet NaN, which nothing here
-    // models, so they take the same predicate.
     cond = op >= 0x60 ? Float64Predicate(t, op & 0xF, a, b)
                       : FloatPredicate(t, op & 0xF, s0f, s1f);
   } else {
@@ -1722,21 +1582,14 @@ void EmitVopc(Translator& t,
     cond = is_64 ? Int64Predicate(t, op & 0x7, is_signed, a, b)
                  : IntPredicate(t, op & 0x7, is_signed, s0u, s1u);
   }
-  const Id predicate = cond ? t.MaskOf(cond) : t.U32(0);  // F -> 0
+  const Id predicate = cond ? t.MaskOf(cond) : t.U32(0);
   const Id result = t.And(predicate, t.Exec());
-  // cmpx replaces EXEC. GCN also wrote VCC (or the VOP3 destination); RDNA
-  // does not, and a gfx10 compiler leans on that: Astro Bot's scanout
-  // composite parks EXEC in VCC, runs three v_cmpx highlight-compression
-  // blocks and restores `exec = vcc` after each. With VCC clobbered by the
-  // compare, the restore left every lane whose colour was not over 1.0
-  // masked off for the rest of the shader, and the frame was black.
   if (!(op & 0x10) || !t.rdna_sources)
     t.SetMask(dst, result);
   if (op & 0x10)
     t.SetMask(126, result);
 }
 
-// ---- VOP3 -------------------------------------------------------------------
 void EmitVop3(Translator& t,
               u32 op,
               u32 vdst,
@@ -1749,30 +1602,23 @@ void EmitVop3(Translator& t,
               bool clamp,
               u32 omod,
               Id s1_hi) {
-  // VOP3 reflects the VOPC (0x000-0x0FF), VOP2 (0x100-0x13F) and VOP1
-  // (0x180-0x1FF) encodings; only 0x140-0x17F are VOP3-exclusive.
   const Id u0 = t.m.Bitcast(t.t_u, s0), u1 = t.m.Bitcast(t.t_u, s1),
            u2 = t.m.Bitcast(t.t_u, s2);
   const auto set_f = [&](Id f) {
     f = ApplyOutputModifier(t, f, omod);
     t.SetVgF(vdst, clamp ? t.FClamp01(f) : f);
   };
-  const auto set_u = [&](Id u) {
-    t.SetVg(vdst, u);
-  };  // OMOD ignored: see EmitVop1
+  const auto set_u = [&](Id u) { t.SetVg(vdst, u); };
 
-  if (op < 0x100) {  // VOPC in VOP3 form: predicate written to sgpr[vdst]
-    // OMOD applies only to instructions with a float OUTPUT; a VOPC writes a
-    // lane mask to an SGPR, so the hardware ignores the modifier. Dropping it
-    // is exact, not an approximation.
+  if (op < 0x100) {
     EmitVopc(t, op, s0, s1, u0, u1, vdst, s0_hi, s1_hi);
     return;
   }
-  if (op == 0x100) {  // VOP3 cndmask uses explicit S2 instead of implicit VCC
+  if (op == 0x100) {
     set_u(t.SelectB(t.LaneActive(u2), u1, u0));
     return;
   }
-  if (op >= 0x125 && op <= 0x12a) {  // VOP3B integer add/sub + explicit SDST
+  if (op >= 0x125 && op <= 0x12a) {
     CarryResult r;
     if (op == 0x125)
       r = AddCarry(t, u0, u1);
@@ -1803,55 +1649,50 @@ void EmitVop3(Translator& t,
     return;
   }
 
-  const auto mul_hi = [&](spv::Op wide_mul) {  // high 32 bits of the product
+  const auto mul_hi = [&](spv::Op wide_mul) {
     return t.m.CompositeExtract(t.t_u,
                                 t.m.Emit(wide_mul, t.PairType(), {u0, u1}), 1);
   };
-  // Median of 3 (no GLSL medN): max(min(a,b), min(max(a,b), c)).
   const auto med3 = [&](Id (Translator::*mn)(Id, Id),
                         Id (Translator::*mx)(Id, Id)) {
     return (t.*mx)((t.*mn)(u0, u1), (t.*mn)((t.*mx)(u0, u1), u2));
   };
   switch (op) {
-    case 0x140:  // v_mad_legacy_f32: legacy zero handling, see EmitVop2 0x06
+    case 0x140:
       set_f(t.FAdd(t.LegacyMul(s0, s1), s2));
       break;
     case 0x141:
       set_f(t.FAdd(t.FMul(s0, s1), s2));
       break;
-    case 0x14b:  // v_fma_f32
+    case 0x14b:
       set_f(t.m.ExtInst(t.t_f, GLSLstd450Fma, {s0, s1, s2}));
       break;
-    case 0x142:  // v_mad_i32_i24
+    case 0x142:
       set_u(t.Add(t.Mul(t.Sext24(u0), t.Sext24(u1)), u2));
       break;
-    case 0x143:  // v_mad_u32_u24
+    case 0x143:
       set_u(t.Add(t.Mul(t.Low24(u0), t.Low24(u1)), u2));
       break;
-    case 0x148:  // v_bfe_u32
-    {
+    case 0x148: {
       const Id off = t.And(u1, t.U32(31));
       const Id width = t.UMin(t.And(u2, t.U32(31)), t.Sub(t.U32(32), off));
       set_u(t.m.Emit(spv::Op::OpBitFieldUExtract, t.t_u, {u0, off, width}));
       break;
     }
-    case 0x149:  // v_bfe_i32
-    {
+    case 0x149: {
       const Id off = t.And(u1, t.U32(31));
       const Id width = t.UMin(t.And(u2, t.U32(31)), t.Sub(t.U32(32), off));
       set_u(t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpBitFieldSExtract, t.t_i,
                                         {t.m.Bitcast(t.t_i, u0), off, width})));
       break;
     }
-    case 0x14a:  // v_bfi_b32: (s0 & s1) | (~s0 & s2)
+    case 0x14a:
       set_u(t.Or(t.And(u0, u1), t.And(t.Not(u0), u2)));
       break;
     case 0x144:
     case 0x145:
     case 0x146:
-    case 0x147: {  // v_cube{id,sc,tc,ma}_f32
-      // GFX7 cube-coordinate preparation, with the ISA's Z > Y > X tie
-      // priority.
+    case 0x147: {
       const Id ax = t.Ext1(GLSLstd450FAbs, s0);
       const Id ay = t.Ext1(GLSLstd450FAbs, s1);
       const Id az = t.Ext1(GLSLstd450FAbs, s2);
@@ -1872,26 +1713,26 @@ void EmitVop3(Translator& t,
           t.m.Emit(spv::Op::OpFOrdLessThan, t.t_bool, {s2, t.F32(0.0f)});
 
       Id result;
-      if (op == 0x144) {  // face: +X,-X,+Y,-Y,+Z,-Z => 0..5
+      if (op == 0x144) {
         const Id x_face = t.SelectF(x_neg, t.F32(1.0f), t.F32(0.0f));
         const Id y_face = t.SelectF(y_neg, t.F32(3.0f), t.F32(2.0f));
         const Id z_face = t.SelectF(z_neg, t.F32(5.0f), t.F32(4.0f));
         result = t.SelectF(z_major, z_face, t.SelectF(y_major, y_face, x_face));
-      } else if (op == 0x145) {  // horizontal face coordinate
+      } else if (op == 0x145) {
         const Id x_sc = t.SelectF(x_neg, s2, t.FNeg(s2));
         const Id z_sc = t.SelectF(z_neg, t.FNeg(s0), s0);
         result = t.SelectF(z_major, z_sc, t.SelectF(y_major, s0, x_sc));
-      } else if (op == 0x146) {  // vertical face coordinate
+      } else if (op == 0x146) {
         const Id y_tc = t.SelectF(y_neg, t.FNeg(s2), s2);
         result = t.SelectF(y_major, y_tc, t.FNeg(s1));
-      } else {  // signed twice-major-axis value used for normalization
+      } else {
         const Id major = t.SelectF(z_major, s2, t.SelectF(y_major, s1, s0));
         result = t.FMul(t.F32(2.0f), major);
       }
       set_f(result);
       break;
     }
-    case 0x14d: {  // v_lerp_u8: per-byte (a + b + (c & 1)) >> 1
+    case 0x14d: {
       Id r = t.U32(0);
       for (int b = 0; b < 4; b++) {
         const Id sh = t.U32(static_cast<u32>(b) * 8), mask = t.U32(0xFF);
@@ -1904,7 +1745,7 @@ void EmitVop3(Translator& t,
       set_u(r);
       break;
     }
-    case 0x14e: {  // v_alignbit_b32: ({S0,S1} >> S2[4:0])[31:0] (S0 hi, S1 lo)
+    case 0x14e: {
       const Id sh = t.And(u2, t.U32(31));
       const Id lo = t.Shr(u1, sh);
       const Id hi =
@@ -1912,7 +1753,7 @@ void EmitVop3(Translator& t,
       set_u(t.Or(lo, hi));
       break;
     }
-    case 0x14f: {  // v_alignbyte_b32: byte-granular funnel shift
+    case 0x14f: {
       const Id sh = t.Mul(t.And(u2, t.U32(3)), t.U32(8));
       const Id lo = t.Shr(u1, sh);
       const Id hi =
@@ -1922,23 +1763,23 @@ void EmitVop3(Translator& t,
     }
     case 0x151:
       set_f(t.Ext2(GLSLstd450NMin, t.Ext2(GLSLstd450NMin, s0, s1), s2));
-      break;  // v_min3_f32
+      break;
     case 0x152:
       set_u(t.SMin(t.SMin(u0, u1), u2));
-      break;  // v_min3_i32
+      break;
     case 0x153:
       set_u(t.UMin(t.UMin(u0, u1), u2));
-      break;  // v_min3_u32
+      break;
     case 0x154:
       set_f(t.Ext2(GLSLstd450NMax, t.Ext2(GLSLstd450NMax, s0, s1), s2));
-      break;  // v_max3_f32
+      break;
     case 0x155:
       set_u(t.SMax(t.SMax(u0, u1), u2));
-      break;  // v_max3_i32
+      break;
     case 0x156:
       set_u(t.UMax(t.UMax(u0, u1), u2));
-      break;       // v_max3_u32
-    case 0x157: {  // v_med3_f32 = clamp(s2, min(s0,s1), max(s0,s1))
+      break;
+    case 0x157: {
       const Id lo = t.Ext2(GLSLstd450NMin, s0, s1);
       const Id hi = t.Ext2(GLSLstd450NMax, s0, s1);
       set_f(t.m.ExtInst(t.t_f, GLSLstd450NClamp, {s2, lo, hi}));
@@ -1946,14 +1787,14 @@ void EmitVop3(Translator& t,
     }
     case 0x158:
       set_u(med3(&Translator::SMin, &Translator::SMax));
-      break;  // v_med3_i32
+      break;
     case 0x159:
       set_u(med3(&Translator::UMin, &Translator::UMax));
-      break;     // v_med3_u32
-    case 0x15d:  // v_sad_u32: |s0 - s1| + s2
+      break;
+    case 0x15d:
       set_u(t.Add(t.Sub(t.UMax(u0, u1), t.UMin(u0, u1)), u2));
       break;
-    case 0x15e: {  // v_cvt_pk_u8_f32: insert cvt_u8(S0) into byte S1 of S2
+    case 0x15e: {
       const Id sat = t.m.ExtInst(t.t_f, GLSLstd450NClamp,
                                  {s0, t.F32(0.0f), t.F32(255.0f)});
       const Id byte =
@@ -1963,43 +1804,38 @@ void EmitVop3(Translator& t,
       set_u(t.Or(t.And(u2, t.Not(mask)), t.And(t.Shl(byte, shift), mask)));
       break;
     }
-    // IEEE divide sequence (div_scale -> rcp -> div_fmas -> div_fixup),
-    // shortened to an exact divide at the fixup (S2/S1): div_scale is an
-    // identity passthrough and div_fmas an FMA feeding the estimate the fixup
-    // ignores.
     case 0x15f:
       WarnUnsupported("vop3.div-fixup", op);
       set_f(t.FDiv(s2, s1));
-      break;     // v_div_fixup_f32
-    case 0x16d:  // v_div_scale_f32: identity
+      break;
+    case 0x16d:
       WarnUnsupported("vop3.div-scale", op);
       set_f(s0);
       t.SetSdst(sdst, 0, t.U32(0));
       break;
     case 0x16f:
       set_f(t.m.ExtInst(t.t_f, GLSLstd450Fma, {s0, s1, s2}));
-      break;  // v_div_fmas_f32
+      break;
     case 0x169:
     case 0x16b:
       set_u(t.Mul(u0, u1));
-      break;  // v_mul_lo_u32/i32
+      break;
     case 0x16a:
       set_u(mul_hi(spv::Op::OpUMulExtended));
-      break;  // v_mul_hi_u32
+      break;
     case 0x16c:
       set_u(mul_hi(spv::Op::OpSMulExtended));
-      break;  // v_mul_hi_i32
+      break;
     case 0x161:
     case 0x162:
-    case 0x163: {  // v_lshl/lshr/ashr_b64 (low result)
-      // 64-bit shifts on a VGPR pair; reuse the scalar shift64 shape.
+    case 0x163: {
       const Id n = t.And(u1, t.U32(63)), n_lo = t.And(n, t.U32(31));
       const Id ge32 = t.Uge(n, t.U32(32));
       const Id zero = t.IsZero(n);
       const Id inv = t.And(t.Sub(t.U32(32), n_lo), t.U32(31));
       const Id lo_in = u0, hi_in = s0_hi;
       Id lo, hi;
-      if (op == 0x161) {  // lshl
+      if (op == 0x161) {
         const Id cross = t.SelectB(zero, t.U32(0), t.Shr(lo_in, inv));
         lo = t.SelectB(ge32, t.U32(0), t.Shl(lo_in, n_lo));
         hi = t.SelectB(ge32, t.Shl(lo_in, n_lo),
@@ -2018,7 +1854,7 @@ void EmitVop3(Translator& t,
       break;
     }
     case 0x176:
-    case 0x177: {  // v_mad_u64_u32 / v_mad_i64_i32
+    case 0x177: {
       const bool sgn = (op == 0x177);
       const Id prod =
           t.m.Emit(sgn ? spv::Op::OpSMulExtended : spv::Op::OpUMulExtended,
@@ -2037,9 +1873,6 @@ void EmitVop3(Translator& t,
       t.SetSdst(sdst, 0, t.And(bit64, t.U32(1)));
       break;
     }
-    // gfx10 gave v_readlane/v_writelane their own VOP3 opcodes; GFX7 kept them
-    // in the VOP2 slots that hold v_cndmask and v_add there, so the VOP3
-    // numbering below 0x200 could not carry them.
     case 0x360:
     case 0x361:
       if (!t.rdna_sources) {
@@ -2058,4 +1891,4 @@ void EmitVop3(Translator& t,
 
 }  // namespace gpu::gcn
 
-#endif  // DELTA_HAVE_SPIRV_BACKEND
+#endif

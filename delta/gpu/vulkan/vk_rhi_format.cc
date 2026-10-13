@@ -108,8 +108,7 @@ bool g_unified_layouts = false;
 
 VkImageLayout ToVkLayout(rhi::TextureState state, u8 aspect, bool exported) {
   using rhi::TextureState;
-  // VK_KHR_unified_image_layouts: GENERAL everywhere, at no cost. An exported
-  // image keeps the layouts the importing device assumes.
+  // Exported images keep the layouts the importing device assumes.
   if (g_unified_layouts && !exported && state != TextureState::kUndefined)
     return VK_IMAGE_LAYOUT_GENERAL;
   const bool depth = aspect & rhi::kAspectDepth;

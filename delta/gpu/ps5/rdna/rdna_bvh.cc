@@ -1,34 +1,5 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * RDNA2 IMAGE_BVH[64]_INTERSECT_RAY: one node test, not a traversal.
- * The guest continues traversal using the four returned child pointers.
- *
- * Box/triangle arithmetic adapted from AMD GPURT IntersectCommon.hlsl,
- * revision 7b226d48b46b7e92fec3b9ecc5712e5bf2bf3dd9. Node vertex mapping
- * follows AMD Radeon Raytracing Analyzer's TriangleNode::GetTriangle,
- * revision 28d0a0e5c93d46006cb4c10316aab97bfcf5b2d6.
- *
- * Copyright (c) 2018-2025 Advanced Micro Devices, Inc. All Rights Reserved.
- * Copyright (c) 2022-2026 Advanced Micro Devices, Inc. All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
  */
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
@@ -71,7 +42,6 @@ void EmitBvh(Translator& t,
   const u32 nsa = (w >> 1) & 3, srsrc = ((w1 >> 16) & 31) * 4;
   const u32 dest = (w1 >> 8) & 255, wide = inst.opcode == 0xe7;
   const bool a16 = (w1 >> 30) & 1;
-  // Read ALL addresses before overwriting VDATA: Astro aliases vaddr/vdata.
   base::Array<Id, 12> a{};
   const u32 count = (a16 ? 8 : 11) + wide;
   for (u32 i = 0; i < count; i++) {
@@ -110,8 +80,6 @@ void EmitBvh(Translator& t,
   const Id index = t.Shr(a[0], t.U32(3));
   const Id words = t.SelectB(box32, t.U32(32), t.U32(16));
   const bool runtime = sc.cs_runtime_resources.count(binding);
-  // Runtime descriptors supply their node extent; the address map separately
-  // checks that the entire node has readable backing before any load.
   const Id bound =
       runtime ? t.U32(0xffffffff) : gpu::gcn::CsSsboBound(t, sc, binding);
   Id physical = 0;
@@ -126,8 +94,6 @@ void EmitBvh(Translator& t,
                  {gpu::gcn::CsGuestBase(t, sc, binding), offset64}),
         t.Mul(words, t.U32(4)));
   }
-  // Check the entire node before any SSBO load. Generic SSBO loads clamp,
-  // which would turn a bad pointer into fabricated geometry here.
   Id valid = t.LAnd(t.Uge(bound, words),
                     t.Ule(index, t.Shr(t.Sub(bound, words), t.U32(4))));
   valid = t.LAnd(
@@ -168,7 +134,6 @@ void EmitBvh(Translator& t,
   t.m.SelectionMerge(node_done);
   t.m.BranchConditional(triangle, tri_block, box_block);
   t.m.OpenBlock(tri_block);
-  // Four compressed triangles share five vertex slots in a 64-byte node.
   const Id mapping = t.SelectB(
       t.Eq(type, t.U32(0)), t.U32(0x210),
       t.SelectB(t.Eq(type, t.U32(1)), t.U32(0x231),
@@ -188,8 +153,6 @@ void EmitBvh(Translator& t,
   const Id in = Dot(t, e3, s1), jn = Dot(t, direction, s2);
   const Id distance = t.FDiv(tn, den), u = t.FDiv(in, den), v = t.FDiv(jn, den);
   const Id zero = t.F32(0), one = t.F32(1);
-  // Ordered tests also reject zero-area/NaN triangles. Triangle distance is
-  // deliberately not clipped to extent: the instruction clips boxes only.
   Id hit = t.LAnd(FLe(t, zero, u), FLe(t, u, one));
   hit = t.LAnd(hit, t.LAnd(FLe(t, zero, v), FLe(t, t.FAdd(u, v), one)));
   hit = t.LAnd(hit, FLe(t, zero, distance));
@@ -243,8 +206,6 @@ void EmitBvh(Translator& t,
         limits[side] = t.SelectF(box16, half, as_float(word));
       }
       box_valid = t.LAnd(box_valid, FLe(t, limits[0], limits[1]));
-      // Box tests consume the supplied inverse direction; the direction
-      // operands are used only by the triangle test.
       const Id parallel = t.IsInf(inverse[axis]);
       const Id inside = t.LAnd(FLe(t, limits[0], origin[axis]),
                                FLe(t, origin[axis], limits[1]));
@@ -255,7 +216,6 @@ void EmitBvh(Translator& t,
               {t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {parallel}), inside}));
       const Id lo = t.FMul(t.FSub(limits[0], origin[axis]), inverse[axis]);
       const Id hi = t.FMul(t.FSub(limits[1], origin[axis]), inverse[axis]);
-      // Parallel rays on a slab boundary must not produce 0*infinity NaNs.
       const Id axis_near =
           t.SelectF(parallel, t.FNeg(infinity),
                     t.m.ExtInst(t.t_f, GLSLstd450FMin, {lo, hi}));

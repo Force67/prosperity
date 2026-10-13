@@ -1,8 +1,5 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * The DELTA_AGC_* / DELTA_GPU_* probes of the PS5 command stream. See
- * cmd_trace.h.
  */
 
 #include "gpu/ps5/cmd_trace.h"
@@ -55,7 +52,6 @@ DELTA_OPTION(bool, kCsDump, "DELTA_GPU_CSDUMP", false);
 DELTA_OPTION(bool, kGpuDmatrace, "DELTA_GPU_DMATRACE", false);
 DELTA_OPTION(bool, kGpuDrawcensus, "DELTA_GPU_DRAWCENSUS", false);
 DELTA_OPTION(bool, kResTrace, "DELTA_GPU_CSRES", false);
-// Only the dispatch resources that cover this guest address.
 DELTA_OPTION(u64, kResTraceAt, "DELTA_GPU_CSRES_AT", 0);
 DELTA_OPTION(bool, kRtProbe, "DELTA_AGC_RTPROBE", false);
 DELTA_OPTION(bool, kTrace, "DELTA_AGC_TRACE", false);
@@ -64,8 +60,6 @@ DELTA_OPTION(bool, kWalkStat, "DELTA_AGC_WALKSTAT", false);
 DELTA_OPTION(bool, kOpCensus, "DELTA_AGC_OPCENSUS", false);
 }  // namespace
 
-// Whether the target of a draw is a buffer the title registered for display,
-// which is what makes "thousands of draws, black frame" readable.
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" bool prosperity_ps5_is_display_buffer(u64 addr);
 
@@ -74,26 +68,18 @@ namespace {
 
 constexpr u64 kMaxShaderBytes = 4096 * sizeof(u32);
 
-// Draw accounting. The counters the census reports and the index every
-// detail probe below gates on.
 base::Atomic<u64> g_draws_seen{0}, g_draws_issued{0}, g_drop_no_shader{0};
 
-// Draws that have reached shader resolution. The one being reported on is the
-// last, so its index is one less.
 u64 g_detailed = 0;
 u64 CurrentDraw() {
   return g_detailed ? g_detailed - 1 : 0;
 }
 
-// The window of draws the detail probes cover: enough to walk into steady
-// state, bounded so a run does not drown in its own trace.
 DELTA_OPTION(u64, kDetailDraws, "DELTA_AGC_DETAIL_DRAWS", 5000);
 bool Detail() {
   return kTrace && g_detailed <= kDetailDraws;
 }
 
-// Shared budget for the dispatch-skip reports: a title that dispatches every
-// frame would otherwise flood the log with one line per reason per dispatch.
 bool CsReport() {
   static int n = 0;
   return n++ < 32;
@@ -101,10 +87,6 @@ bool CsReport() {
 
 u32 g_op_hist[256] = {};
 
-// The opcodes the walk did not act on. An opcode nothing looked at is state or
-// a draw the title expects to happen, and the only symptom downstream is
-// whatever it never set, so a skip we chose records why, and one we did not
-// choose stands out as the census entry worth chasing.
 bool g_skipped[256] = {};
 const char* g_skip_reason[256] = {};
 
@@ -126,17 +108,14 @@ const char* const kEncName[19] = {"?",     "sop1", "sop2", "sopk", "sopc",
                                   "vop3p", "vopc", "vint", "ds",   "mubuf",
                                   "mtbuf", "mimg", "exp",  "flat"};
 
-// One decoded shader, instruction by instruction.
 base::String Words(const u32* p, u32 count);
 
-// sh_<address>.bin in the working directory, for an offline disassembler.
 void WriteShaderFile(u64 address) {
   if (!IsGuestAddress(address) ||
       !gpu::IsReadableRange(address, kMaxShaderBytes))
     return;
   char path[64];
   std::snprintf(path, sizeof(path), "sh_%llx.bin", (unsigned long long)address);
-  // Compute programs run past 4096 dwords; take what is mapped, up to 64 KiB.
   u64 bytes = kMaxShaderBytes;
   while (bytes < 4 * kMaxShaderBytes &&
          gpu::IsReadableRange(address, bytes + kMaxShaderBytes))
@@ -163,7 +142,6 @@ void DumpProgram(const char* what, u64 address) {
       base::FormatTo(line, " lit={:08x}", in.literal);
     BASE_LOGI("agc", "{}", line.c_str());
   }
-  // The dwords past the decoded end, for a branch that lands there.
   if (!prog.empty()) {
     const u32 end = prog.back().pc + prog.back().size;
     BASE_LOGI("agc", "  after {:#x}:{}", end,
@@ -180,16 +158,12 @@ base::String Words(const u32* p, u32 count) {
 
 }  // namespace
 
-// --- register writes -------------------------------------------------------
-
 void NoteRegisterWrite(const char* source, u32 reg, u32 value) {
   if (kAgcCliptrace && reg == mmPA_CL_CLIP_CNTL) {
     static int n = 0;
     if (n++ < 12)
       BASE_LOGI("agc", "CLIP_CNTL <- {:#x} by {}", value, source);
   }
-  // Skyrim's grading pass reads a texture descriptor from s16..s23; if nothing
-  // in the command stream programs those, the shader samples what was left.
   if (kAgcUdtrace && value && reg >= mmSPI_SHADER_USER_DATA_PS_0 + 16 &&
       reg < mmSPI_SHADER_USER_DATA_PS_0 + 32) {
     static int n = 0;
@@ -197,12 +171,8 @@ void NoteRegisterWrite(const char* source, u32 reg, u32 value) {
       BASE_LOGI("agc", "PS ud{} <- {:08x} by {}",
                 reg - mmSPI_SHADER_USER_DATA_PS_0, value, source);
   }
-  // A title that programs its shader state at offsets we do not read leaves the
-  // ones we do read at zero, and then every descriptor the vertex stage names
-  // resolves against nothing.
   if (kAgcShcensus && value && reg >= kShRegBase && reg < kShRegBase + 0x300) {
-    static base::Map<u32, base::Pair<u64, u32>>
-        hist;  // offset -> {count, last}
+    static base::Map<u32, base::Pair<u64, u32>> hist;
     static base::Mutex lock;
     static u64 dumps = 0;
     base::LockGuard<base::Mutex> lk(lock);
@@ -217,8 +187,6 @@ void NoteRegisterWrite(const char* source, u32 reg, u32 value) {
                   v.second);
     }
   }
-  // A shader at 0x8001xxxxxx has a PGM_LO of ~0x800xxxxx: report SH-space
-  // writes that look like one, to find the register a pipeline binds through.
   if (kTrace && reg >= kShRegBase && (value >> 24) == 0x80) {
     static int n = 0;
     if (n++ < 20)
@@ -226,8 +194,6 @@ void NoteRegisterWrite(const char* source, u32 reg, u32 value) {
                 reg - kShRegBase, value, static_cast<u64>(value) << 8, source);
   }
 }
-
-// --- register images -------------------------------------------------------
 
 u64 TraceRegImagePrefixDwords() {
   return kTrace ? 0x400 : 0;
@@ -237,10 +203,6 @@ void TraceRegImage(u32 base, u64 image, const u32* body, u32 count) {
   if (!kTrace)
     return;
   const u32* src = reinterpret_cast<const u32*>(image);
-  // Coherency census: a title that drives its whole context through register
-  // shadows is invisible if those images read zero. Sample one late, once
-  // rendering has started; an early shadow may be empty because it
-  // has not.
   static int s_img_n = 0;
   if (base == kContextRegBase && ++s_img_n >= 100 && s_img_n <= 106) {
     u32 nz = 0, first = 0;
@@ -261,15 +223,9 @@ void TraceRegImage(u32 base, u64 image, const u32* body, u32 count) {
     BASE_LOGI("agc", "  LOADimg base={:#x} mem={:#x}:{}", base, image,
               Words(src, 16).c_str());
 
-  // A LOAD_SH_REG image could be offset-INDEXED (image[reg_off] = value, a full
-  // reg-file shadow) or CURSOR-based (ranges packed contiguously from the
-  // image). Dump both readings plus the range list, and scan the whole image
-  // for a program pointer, to settle where the shader PGM actually is.
   static int s_shimg = 0, s_shcnt = 0;
   if (base != kShRegBase)
     return;
-  // Fire on the first few SH loads and on a batch ~5000 in, once the title is
-  // past its loading screen and issuing real draws.
   const bool late_window = s_shcnt >= 5000 && s_shcnt < 5006;
   s_shcnt++;
   if (s_shimg >= 3 && !late_window)
@@ -306,8 +262,6 @@ void TraceRegImage(u32 base, u64 image, const u32* body, u32 count) {
     }
   }
 }
-
-// --- state blocks ----------------------------------------------------------
 
 void NoteRegBlock(u32 base,
                   RegBlockOutcome outcome,
@@ -412,8 +366,6 @@ void TraceShaderBind(u64 address, u32 gs_pgm_lo, u32 ps_pgm_lo) {
               address, gs_pgm_lo, ps_pgm_lo);
 }
 
-// --- draw accounting -------------------------------------------------------
-
 void NoteDrawSeen() {
   g_draws_seen.fetch_add(1, base::memory_order_relaxed);
   if (!kGpuDrawcensus)
@@ -440,9 +392,6 @@ void NoteDrawIssued(const render::DrawInfo& d) {
   g_draws_issued.fetch_add(1, base::memory_order_relaxed);
   if (!kGpuDrawcensus)
     return;
-  // Which targets the frame actually renders into, once each. A frame that
-  // presents black while thousands of draws issue means none of them landed in
-  // a registered display buffer, and this is the only way to see that.
   static base::Set<u64> rts;
   static const guest::SessionReset reset_rts([] { guest::ResetResource(rts); });
   static base::Mutex lock;
@@ -472,8 +421,6 @@ void NoteDrawDropped(const render::DrawInfo& d,
               vs_addr, ps_addr, d.prim_type, d.vertex_count, d.mrt_count,
               d.rt_base, d.num_vattrs, shader_attrs, d.num_vbufs);
 }
-
-// --- one draw, in detail ---------------------------------------------------
 
 void TraceNggState(const Regs& regs, u64 es_addr, u64 gs_addr) {
   if (!kGpuDrawcensus || !gs_addr || es_addr == gs_addr)
@@ -511,9 +458,6 @@ void TraceUserData(const u32* gs_user_data, const u32* es_user_data) {
   BASE_LOGI("agc", "  UD ES:{}", Words(es_user_data, 16).c_str());
 }
 
-// Which user-data window a draw's vertex stage actually got, per shader. A
-// merged NGG stage can be programmed through either the GS or the ES bank, and
-// a stage that reads an empty one resolves every descriptor against zeros.
 void TraceVsUserData(u64 vs_addr,
                      const u32* gs_user_data,
                      const u32* es_user_data,
@@ -531,10 +475,6 @@ void TraceVsUserData(u64 vs_addr,
             es_user_data[2], es_user_data[3]);
 }
 
-// Every non-zero SH register a draw sees. A vertex stage whose user-data window
-// reads all zeros is either a stage we are reading from the wrong block or one
-// the title programs somewhere else entirely, and only the whole file says
-// which.
 void TraceShRegs(const Regs& regs) {
   if (!kTrace)
     return;
@@ -569,8 +509,6 @@ void TraceUserDataPointers(const u32* vs_user_data, const u32* ps_user_data) {
   static int n = 0;
   if (n++ >= 3)
     return;
-  // The pipeline handle / program address likely lives in a descriptor, so
-  // follow every GPU-aperture pointer in user data one level.
   for (int which = 0; which < 2; which++) {
     const u32* ud = which ? ps_user_data : vs_user_data;
     BASE_LOGI("agc", "  {}UD:{}", which ? "ps" : "gs", Words(ud, 16).c_str());
@@ -648,8 +586,6 @@ void TraceRecompile(u64 vs_addr, u64 ps_addr, u32 ps_input_ena) {
     return;
   const u32* vc = reinterpret_cast<const u32*>(vs_addr);
   const u32* pc = ps_addr ? reinterpret_cast<const u32*>(ps_addr) : nullptr;
-  // AGC shader code starts with the 0xBEEB03FF sentinel; a ps_addr that does
-  // not (e.g. the 0xffc9dfe7 poison fill) means the PS PGM_LO never landed.
   BASE_LOGI("agc", "DL recompile vs={:#x} ({:08x}) ps={:#x} ({:08x} {:08x})...",
             vs_addr, vc[0], ps_addr, pc ? pc[0] : 0, pc ? pc[1] : 0);
   BASE_LOGI("agc", "DL psInputEna={:#x} (frag-coord/face VGPR seed)",
@@ -706,10 +642,6 @@ void TraceAttr(u32 index,
               vb.base, vb.stride, vb.num_records, vb.gfmt, vb.dfmt, vb.nfmt);
 }
 
-// A raw (set-2) buffer the shader indexes itself: whether the draw could name
-// it at all. A shader reading an unbound one reads zeros, which is
-// indistinguishable from a shader whose maths produced zero, and an NGG
-// vertex program gates its whole body on such a read.
 void TraceRawBufBinding(bool vertex_stage,
                         u32 binding,
                         u32 use_pc,
@@ -719,9 +651,6 @@ void TraceRawBufBinding(bool vertex_stage,
                         u64 bytes) {
   if (!Detail())
     return;
-  // With the head of the window: a resolved binding says only that the draw
-  // could name a buffer, and a buffer of zeros produces exactly the degenerate
-  // geometry an unbound one does.
   base::String head;
   if (bytes && gpu::IsReadableRange(base, 32)) {
     const u32* w = reinterpret_cast<const u32*>(base);
@@ -745,10 +674,6 @@ void TraceCbufBinding(bool vertex_stage,
                       u32 num_dwords) {
   if (!Detail())
     return;
-  // With the head of the window, as hex and as the float it usually is. A
-  // resolved binding says only that the shader has something to read; what it
-  // reads is what decides the pixel, and a scale factor sitting at zero looks
-  // exactly like a shader that never ran.
   base::String head;
   const u32 shown = base::Min(num_dwords, 4u);
   if (gpu::IsReadableRange(base, static_cast<u64>(shown) * 4)) {
@@ -798,9 +723,6 @@ void TraceVertexDump(const render::DrawInfo& d,
       static_cast<u64>(d.vertex_stride) * (d.vertex_count ? d.vertex_count : 4),
       128);
   static int n = 0;
-  // A procedural pass has no attributes and no vertex buffer, and every
-  // composite and post draw in a modern title is one, so the dump has to
-  // cover them too, or the draws that matter most are the ones it cannot show.
   const bool has_vertices =
       d.num_vattrs && d.vertex_data && vertex_bytes &&
       IsGuestAddress(reinterpret_cast<u64>(d.vertex_data)) &&
@@ -838,14 +760,12 @@ void TraceVertexDump(const render::DrawInfo& d,
             "  mvp=[{} {} {} {} / {} {} {} {} / {} {} {} {} / {} {} {} {}]",
             m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10],
             m[11], m[12], m[13], m[14], m[15]);
-  // The VS loads its real vertex V# via SMEM from a pointer in GS user data
-  // [4..7]; follow each one level to locate the vertex source.
   for (int k = 4; k <= 6; k += 2) {
     const u64 p = (static_cast<u64>(vs_user_data[k + 1] & 0xFFFF) << 32) |
                   vs_user_data[k];
     const int dwords = k == 4 ? 32 : 8;
     if (!IsGpuAddress(p) || !gpu::IsReadableRange(p, dwords * sizeof(u32)))
-      continue;  // user data holds non-pointers too
+      continue;
     const u32* pw = reinterpret_cast<const u32*>(p);
     base::String line;
     base::FormatTo(line, "  ud[{}]->{:#x} dwords:{}  floats:", k, p,
@@ -857,13 +777,6 @@ void TraceVertexDump(const render::DrawInfo& d,
     }
     BASE_LOGI("agc", "{}", line.c_str());
   }
-  // Project this draw's first vertices on the host with the 4x3 world matrix
-  // and the view-projection, and print the NDC the shader ought to produce:
-  // comparing that with the drawn extent says whether the transform chain in
-  // the recompiled VS is the thing that is wrong. A cbuffer window holds
-  // several matrices and only the shader knows which, so
-  // <world binding>:<vp binding>:<vp dword> names them (read them off the
-  // SPIR-V's sgpr <- cbuf loads).
   if (const char* proj = kVdumpProj) {
     u32 world_binding = 1, vp_binding = 2, vp_dword = 32;
     std::sscanf(proj, "%u:%u:%u", &world_binding, &vp_binding, &vp_dword);
@@ -896,8 +809,6 @@ void TraceVertexDump(const render::DrawInfo& d,
                 c[3], c[3] ? c[0] / c[3] : 0.f, c[3] ? c[1] / c[3] : 0.f);
     }
   }
-  // How many floats of each bound cbuffer to print: the default shows the head,
-  // but a transform hides further in (a 48-dword window holds several).
   for (u32 b = 0; b < d.num_cbufs; b++) {
     const int count = base::Min<int>(kCbFloats, d.cbufs[b].size / 4);
     if (count <= 0 ||
@@ -952,7 +863,6 @@ void TraceDrawDone() {
     BASE_LOGI("agc", "DL draw#{} done", CurrentDraw());
 }
 
-// DELTA_AGC_DUMPSH=<addr>[,<addr>...]: list each program once and write it out.
 void TraceShaderListing(u64 address) {
   if (!kDumpSh)
     return;
@@ -974,8 +884,6 @@ void TraceShaderListing(u64 address) {
   DumpProgram("SHADER", address);
   WriteShaderFile(address);
 }
-
-// --- compute ---------------------------------------------------------------
 
 void NoteDispatch(u64 cs_addr, const u32 threads[3], u32 rsrc2) {
   if (!kCsDump)
@@ -1021,8 +929,6 @@ void TraceComputeShader(const Regs& regs,
             cs_addr, groups[0], groups[1], groups[2], threads[0], threads[1],
             threads[2], rsrc2);
   BASE_LOGI("cs", "  user_data:{}", Words(ud, 16).c_str());
-  // Follow each user-data pointer pair one level: the descriptor tables the CS
-  // dereferences say which surfaces it actually reads and writes.
   for (int k = 0; k < 15; k++) {
     const u64 p = (static_cast<u64>(ud[k + 1] & 0xFFFF) << 32) | ud[k];
     if (!IsGpuAddress(p) || !gpu::IsReadableRange(p, 8 * sizeof(u32)))
@@ -1058,8 +964,6 @@ void TraceCsUnsupported(u64 cs_addr,
                         const u32 groups[3],
                         const u32 threads[3],
                         u32 user_sgpr) {
-  // Once per shader: a title dispatches the same unsupported shader every
-  // frame, and repeating it would spend the whole skip budget on one of them.
   static base::HashSet<u64> reported;
   static const guest::SessionReset reset_reported(
       [] { guest::ResetResource(reported); });
@@ -1129,8 +1033,6 @@ void TraceCsTooManyResources(u64 cs_addr, u32 max_resources) {
               cs_addr, max_resources);
 }
 
-// One line per shader: a global cap spends itself on the loading screens and
-// then says nothing about the dispatch that goes missing at the frontier.
 void TraceCsDispatchFailed(u64 cs_addr, u32 num_resources) {
   static base::HashSet<u64> reported;
   static const guest::SessionReset reset_reported(
@@ -1162,8 +1064,6 @@ void TraceCsDispatch(u64 cs_addr, bool executed, u32 num_resources) {
               executed ? "executed" : "failed", num_resources);
 }
 
-// --- the packet stream -----------------------------------------------------
-
 void NoteOpcode(u32 op) {
   g_op_hist[op & 0xFF]++;
   if (!kOpCensus)
@@ -1194,8 +1094,6 @@ void NoteUnhandledOpcode(u32 op,
                          u32 count,
                          u32 prev_op) {
   g_skipped[op & 0xFF] = true;
-  // One line per distinct opcode, 32 lines total per boot: the census dump
-  // carries the counts beyond that.
   static u32 logged[32] = {};
   static int n_logged = 0;
   for (int k = 0; k < n_logged; k++)
@@ -1248,8 +1146,6 @@ void TraceDcbPacket(u32 position, u32 op, const u32* body, u32 count) {
   const u32 shown = (op == 0x93 || op == 0x79) ? count : base::Min(count, 6u);
   for (u32 b = 0; b < shown && b < 24; b++)
     base::FormatTo(line, " {:08x}", body[b]);
-  // An indirect register packet references a GPU buffer at body[0..1]; dump it
-  // so the register layout it carries can be read off.
   if ((op == 0x9f || op == 0x64 || op == 0x7a || op == 0x63) && count >= 2) {
     const u64 a = (static_cast<u64>(body[1] & 0xFFFF) << 32) | body[0];
     if (IsGpuAddress(a) && gpu::IsReadableRange(a, 12 * sizeof(u32)))
@@ -1259,8 +1155,6 @@ void TraceDcbPacket(u32 position, u32 op, const u32* body, u32 count) {
   BASE_LOGI("agc", "{}", line.c_str());
 }
 
-// Followed vs refused INDIRECT_BUFFERs. A chain we refuse takes every draw in
-// it with it, and the only symptom is a frame that renders nothing.
 void TraceIndirectBuffer(u64 address, u32 words, bool followed) {
   static base::Atomic<u64> ok{0}, skipped{0};
   (followed ? ok : skipped).fetch_add(1, base::memory_order_relaxed);
@@ -1274,8 +1168,6 @@ void TraceIndirectBuffer(u64 address, u32 words, bool followed) {
               (unsigned long)address, words, followed ? "ok" : "REFUSED");
 }
 
-// The first few occlusion-query dumps: a title that never gets one waits for a
-// result bit that never arrives, and that is invisible in any other log.
 void TraceOcclusionQuery(u64 address, u64 value) {
   static base::Atomic<u64> n{0};
   const u64 i = n.fetch_add(1);
@@ -1311,11 +1203,7 @@ void TraceDmaData(u32 control, u64 src, u64 dst, u32 bytes, bool copied) {
               dst, bytes, copied ? " COPIED" : "");
 }
 
-// --- submissions -----------------------------------------------------------
-
 namespace {
-// The all-zero ACQRB ring submits (the 0xC0408121 path is empty for the mode-1
-// titles) say nothing; a submission is interesting once it carries packets.
 bool NonEmpty(const void* dcb, u32 words) {
   const u32* w = static_cast<const u32*>(dcb);
   return words >= 2 && (w[0] || w[1]);
@@ -1331,7 +1219,7 @@ bool TraceSubmit(const void* dcb, u32 size_bytes, u32 words, u64 submission) {
   BASE_LOGI("agc",
             "=== dcb walk #{} (size={} words={} hdr0={:#x}) ===", submission,
             size_bytes, words, w[0]);
-  const u32 raw_n = base::Min(words, 100u);  // enough of a big draw buffer
+  const u32 raw_n = base::Min(words, 100u);
   base::String raw;
   base::FormatTo(raw, "  raw[0..{}]:{}", raw_n, Words(w, raw_n).c_str());
   BASE_LOGI("agc", "{}", raw.c_str());

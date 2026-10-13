@@ -1,7 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * The DELTA_GPU_* instrumentation of the PS4 command stream. See cmd_trace.h.
  */
 
 #include "gpu/ps4/cmd_trace.h"
@@ -28,12 +26,6 @@
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/pm4.h"
-
-// Each probe logs on its own channel, named after the tag it has always
-// printed, so the lines still grep as [drawpkt], [csres] and so on, and one
-// probe can be silenced with base::SetChannelMinLevel. Delivery is the async
-// sink the composition root installs: a trace that blocks the submit thread
-// distorts the frame timings it exists to explain.
 
 namespace {
 
@@ -87,10 +79,6 @@ DELTA_OPTION(int, kTexTrackFrame, "DELTA_GPU_TEXTRACK_FRAME", -1);
 DELTA_OPTION(bool, kVattrDump, "DELTA_GPU_VATTRDUMP", false);
 DELTA_OPTION(bool, kWaitTrace, "DELTA_GPU_WAITTRACE", false);
 
-// Several probes only begin logging once the run is past its opening floods (a
-// title screen, a level load). Each keeps its own epoch: they are asked
-// different questions ("N seconds after the first draw", "after the first
-// walk") and one shared clock would start wherever it was first read.
 class Elapsed {
  public:
   double Seconds() {
@@ -111,15 +99,12 @@ class Elapsed {
 namespace gpu::ps4 {
 namespace {
 
-// Where each register was last written from, and how often the colour masks
-// have been programmed. Nothing but the probes below reads either.
 const u32* g_reg_sources[kRegFileSize] = {};
 u32 g_shader_mask_writes = 0;
 u32 g_target_mask_writes = 0;
 
 WriteWatchFn g_write_watch = nullptr;
 
-// Opcode histogram and per-opcode walk time of the draw command buffers.
 u32 g_op_hist[256] = {};
 u64 g_op_ns[256] = {};
 u64 g_dcb_words = 0;
@@ -134,8 +119,6 @@ const u32* UserData(const Regs& regs, u32 first_reg) {
   return regs.At(first_reg);
 }
 
-// base::FormatTo appends, so a line assembled a piece at a time is one log
-// entry rather than one per piece.
 base::String HexRun(const u32* values, u32 count) {
   base::String out;
   for (u32 i = 0; i < count; i++)
@@ -169,8 +152,6 @@ const char* RecompStatusName(RecompStatus status) {
   return "?";
 }
 
-// --- register file ---------------------------------------------------------
-
 void NoteRegisterWrites(u32 first_reg,
                         const u32* values,
                         u32 count,
@@ -183,15 +164,8 @@ void NoteRegisterWrites(u32 first_reg,
       g_shader_mask_writes++;
     else if (reg == mmCB_TARGET_MASK)
       g_target_mask_writes++;
-    // SET_*_REG packets only. A type-0 write (packet_base 0) reaches the same
-    // registers but would spend this probe's budget on a packet class it was
-    // never asked about.
     if (!kCbInfoTrace || !packet_base)
       continue;
-    // Every write of a CB_COLORn_INFO, with the packet that carried it. A
-    // colour target whose INFO stays zero is never bound, so a whole pass
-    // renders into nothing; this says whether the title wrote a zero or we
-    // never saw the write at all.
     for (int rt = 0; rt < 8; rt++) {
       if (reg != mmCB_COLOR0_INFO + rt * kCbColorStride)
         continue;
@@ -212,8 +186,6 @@ void NoteRegisterWrites(u32 first_reg,
     }
   }
 }
-
-// --- draws -----------------------------------------------------------------
 
 void SetWriteWatch(WriteWatchFn watch) {
   g_write_watch = watch;
@@ -293,7 +265,6 @@ void TraceFirstTexturedPs(const Regs& regs, u64 ps_addr) {
   BASE_LOGI("gpu", "  TrackTextures -> {}", texs.size());
   if (texs.empty() || !texs[0].valid)
     return;
-  // Dump the texture as a LINEAR interpretation (to inspect tiling).
   const auto& t = texs[0];
   FILE* f = std::fopen("/tmp/tex_raw.bin", "wb");
   if (!f)
@@ -307,8 +278,6 @@ void TraceFirstTexturedPs(const Regs& regs, u64 ps_addr) {
 void TraceDrawOpcode(u32 op, u32 prim_type, u32 auto_count) {
   if (!kDrawPkt)
     return;
-  // A histogram over the WHOLE run, not the first N draws: the counts that
-  // decline downstream are not the ones a first-N sample catches.
   struct Bucket {
     u32 op, prim, auto_count, n;
   };
@@ -487,9 +456,6 @@ void TracePsInputCntl(const Regs& regs,
                       const u32* ps_in_cntl) {
   if (!kPsInCntl || !ps_input_ena)
     return;
-  // With DELTA_GPU_PSINCNTL=1, report only shaders whose mapping is NOT the
-  // identity: an identity mapping is a no-op by construction, so those are the
-  // only ones honouring these registers can change.
   bool non_identity = false;
   for (u32 i = 0; i < 16; i++)
     non_identity |= (ps_in_cntl[i] & 0x1F) != i;
@@ -498,8 +464,6 @@ void TracePsInputCntl(const Regs& regs,
   static int n = 0;
   if (n++ >= 30)
     return;
-  // NUM_INTERP says how many of the 32 slots are meaningful; slots at or above
-  // it are don't-care and their zero is not evidence of anything.
   base::String slots;
   for (u32 i = 0; i < 8; i++)
     base::FormatTo(slots, " {}:off={}(raw={:#x})", i,
@@ -524,7 +488,7 @@ void TraceShaderCacheMiss(u64 vs_addr,
     u32 ena = 0, t3d = 0, t1d = 0;
     base::HashSet<u64> fetches, states;
   };
-  static base::HashMap<u64, Seen> seen;  // by content pair
+  static base::HashMap<u64, Seen> seen;
   static const guest::SessionReset reset_seen(
       [] { guest::ResetResource(seen); });
   static u32 n_new = 0, n_addr = 0, n_fetch = 0, n_ena = 0, n_3d = 0, n_1d = 0,
@@ -690,10 +654,6 @@ void TraceDrawList(const Regs& regs,
                    u64 ps_addr,
                    u64 fetch_addr,
                    RecompStatus status) {
-  // The title/menu floods the early run, so logging starts
-  // DELTA_GPU_DRAWLIST_AFTER seconds (default 90) after the first draw, by
-  // when the level has loaded. Then every draw, to capture the in-level
-  // pattern.
   static Elapsed since_first_draw;
   const double elapsed = since_first_draw.Seconds();
   static int n = 0;
@@ -716,8 +676,6 @@ void TraceColorMasks(const Regs& regs,
                      RecompStatus status) {
   if (!kMaskTrace)
     return;
-  // From the first draw of the run, not the first one this reports: with
-  // DELTA_GPU_MASKTRACE_RT set those are far apart.
   static Elapsed since_first_draw;
   const double elapsed = since_first_draw.Seconds();
   static int n = 0;
@@ -849,7 +807,7 @@ void TraceVertexAttrs(const render::DrawInfo& d) {
     const auto& attr = d.vattrs[a];
     const auto& vb = d.vbufs[attr.binding < d.num_vbufs ? attr.binding : 0];
     const auto* p = static_cast<const u8*>(vb.data);
-    constexpr u32 kBytes = 8;  // covers every <=64-bit attribute format
+    constexpr u32 kBytes = 8;
     base::String v0;
     if (p && host_memory::IsMemoryRangeMapped(p + attr.offset, kBytes))
       for (u32 b = 0; b < kBytes; b++)
@@ -864,8 +822,6 @@ void TraceVertexAttrs(const render::DrawInfo& d) {
 }
 
 void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
-  // Sample periodically across the WHOLE run (every 100th qualifying world
-  // draw) so we can see whether the camera/view ever moves.
   static int n = 0, seen = 0;
   if (!kGeomDump || d.index_count < kGeomMin || !d.vertex_data)
     return;
@@ -892,9 +848,6 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
               "{:.3f}]",
               cb[0], cb[1], cb[2], cb[3], cb[4], cb[5], cb[6], cb[7], cb[8],
               cb[9], cb[10], cb[11], cb[12], cb[13], cb[14], cb[15]);
-  // Project a handful of vertices through the cbuf MVP (both row- and
-  // column-major) and count how many land in NDC [-1,1]: on-screen means the
-  // black is a PS/sampling issue, off-screen a VS/cbuffer-resolution one.
   if (cb) {
     auto proj = [&](const float* p, bool col_major, float out[4]) {
       float v[4] = {p[0], p[1], p[2], 1.0f};
@@ -919,16 +872,12 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
       return x >= -1 && x <= 1 && y >= -1 && y <= 1 && z >= -1 && z <= 1;
     };
     for (int i = 0; i < count; i++) {
-      // Use the INDEX buffer to fetch the real vertex (these are indexed draws;
-      // a linear 0..n read hits unused verts at the buffer head).
       u32 idx = i16 ? i16[i] : i32 ? i32[i] : (u32)i;
       const float* p = reinterpret_cast<const float*>(
           vb + (size_t)idx * d.vertex_stride + d.vattrs[0].offset);
       float r4[4], c4[4];
       proj(p, false, r4);
       proj(p, true, c4);
-      // Same but with z negated: does flipping the position z bring the
-      // geometry on-screen?
       float pf[3] = {p[0], p[1], -p[2]}, rf[4], cf[4];
       proj(pf, false, rf);
       proj(pf, true, cf);
@@ -954,9 +903,6 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
               count, on_r, on_c, on_rfz, on_cfz, first_r[0], first_r[1],
               first_r[2], first_r[3], first_c[0], first_c[1], first_c[2],
               first_c[3]);
-    // The game is in real gameplay, so a valid view transform exists. Maybe the
-    // VS projects a DIFFERENT attribute than attr0. Project EACH >=3-comp attr
-    // (over the indexed verts) and report which, if any, lands on-screen.
     u32 first_idx = i16 ? i16[0] : i32 ? i32[0] : 0;
     for (u32 a = 0; a < d.num_vattrs && a < 8; a++) {
       if (d.vattrs[a].num_comps < 3)
@@ -980,10 +926,6 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
                 pv[0], pv[1], pv[2], on_a);
     }
   }
-  // Sample the bound texture's ALPHA: is the source genuinely alpha=0 (so the
-  // PS must compute opacity elsewhere / a recompiler alpha bug) or alpha=255
-  // (so our load zeroes it)? This decides why the src-alpha blend makes walls
-  // invisible.
   if (IsGuestAddress(d.tex_base) && d.tex_w && d.tex_h) {
     const u32* tp = reinterpret_cast<const u32*>(d.tex_base);
     u64 total = (u64)d.tex_w * d.tex_h, step = total > 4096 ? total / 4096 : 1,
@@ -999,8 +941,6 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
               "  texAlpha: px0={:#010x} alphaNonZero={}/{} rgbNonZero={}",
               tp[0], a_nz, total / step, rgb_nz);
   }
-  // The PS's texture-load pattern: SMRD (op/sdst/sbase/imm/off) + MIMG srsrc,
-  // plus the first user-data dwords, to see how the T#s are loaded.
   auto ps_insts = gcn::Decode(reinterpret_cast<const u32*>(d.ps_addr), 4096);
   const u32* pud = UserData(regs, mmSPI_SHADER_USER_DATA_PS_0);
   BASE_LOGI("geom", "  ps_ud=[{}]", HexRun(pud, 8).c_str());
@@ -1014,9 +954,6 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
       BASE_LOGI("geom", "  mimg srsrc={}", ((inst.raw[1] >> 16) & 0x1F) * 4);
     }
   }
-  // The world VS's cbuffer reads: for each s_buffer_load, resolve the V# from
-  // the VS user data and print the 16 floats it actually reads (the REAL matrix
-  // the VS uses) against the heuristic cbuf above.
   if (!IsGuestAddress(d.vs_addr))
     return;
   auto vs_insts = gcn::Decode(reinterpret_cast<const u32*>(d.vs_addr), 4096);
@@ -1032,9 +969,6 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
     shown++;
     const u32 b2 = sbase * 2;
     const u32 boff = imm ? off * 4 : 0;
-    // op<8 = s_load (64-bit pointer in ud[b2..b2+1]); op>=8 = s_buffer_load (V#
-    // in ud[b2..b2+3], base in the low 44 bits). A 2nd matrix here would be the
-    // missing view transform.
     u64 base = 0;
     if (b2 + 1 < 16) {
       if (op < 0x08)
@@ -1061,9 +995,6 @@ void TraceWorldGeometry(const Regs& regs, const render::DrawInfo& d) {
 
 namespace {
 
-// The embedded "OrbShdr" BinaryInfo in a shader's GCN code, which carries its
-// length and hash. Layout: if code[0] == 0xBEEB03FF the info is at code +
-// (code[1]+1)*2 dwords; else scan for the 7-byte signature.
 void ProbeShaderBinaryInfo(const char* tag, u64 addr) {
   const auto* code = reinterpret_cast<const u32*>(addr);
   const u8* info = nullptr;
@@ -1085,13 +1016,11 @@ void ProbeShaderBinaryInfo(const char* tag, u64 addr) {
   u32 len_field;
   std::memcpy(&len_field, info + 8, 4);
   u64 hash;
-  std::memcpy(&hash, info + 0xC, 8);  // approx offsets
+  std::memcpy(&hash, info + 0xC, 8);
   BASE_LOGI("gpu", "  {} shader @{:#x} OrbShdr len={} hash={:#x}", tag,
             (unsigned long)addr, len_field & 0xFFFFFF, (unsigned long)hash);
 }
 
-// The user-data SGPRs, decoding any dword pair that forms a plausible guest
-// pointer as a V# (base44, stride, num_records).
 void DumpUserDataDescriptors(const char* tag, const u32* ud) {
   LogUserData("gpu", base::Format("  {} user_data:", tag).c_str(), ud);
   for (int k = 0; k + 1 < 16; k += 2) {
@@ -1102,7 +1031,6 @@ void DumpUserDataDescriptors(const char* tag, const u32* ud) {
     const u32 nrec = ud[k + 2];
     BASE_LOGI("gpu", "    sgpr[{}..]: ptr={:#x} stride={} nrec={} fmt={:#x}", k,
               (unsigned long)base, stride, nrec, ud[k + 3]);
-    // A small vertex buffer (a quad): dump it as floats to learn the layout.
     if (!stride || stride > 64 || !nrec || nrec > 8)
       continue;
     const auto* f = reinterpret_cast<const float*>(base);
@@ -1117,8 +1045,6 @@ void DumpUserDataDescriptors(const char* tag, const u32* ud) {
   }
 }
 
-// A descriptor table a user-data pointer points at: V# (4 dwords: base48,
-// stride, num_records) and T# (8 dwords: base + width/height) heuristics.
 void DumpDescriptorTable(const char* tag, u64 ptr) {
   if (!IsGuestAddress(ptr))
     return;
@@ -1131,7 +1057,6 @@ void DumpDescriptorTable(const char* tag, u64 ptr) {
       BASE_LOGI("gpu",
                 "    +{:02x} V#? base={:#x} stride={} nrec={} dfmt={:#x}",
                 k * 4, (unsigned long)b, stride, t[k + 2], t[k + 3]);
-    // T# heuristic: dword2 has width-1[0:13], height-1[14:27]
     const u64 tb = ((u64)(t[k + 1] & 0xFFFFFF) << 32) | t[k];
     const u32 w = (t[k + 2] & 0x3FFF) + 1, h = ((t[k + 2] >> 14) & 0x3FFF) + 1;
     if (IsGuestAddress(tb) && w > 4 && w <= 8192 && h > 4 && h <= 8192)
@@ -1170,8 +1095,6 @@ void TraceDrawRegisters(const Regs& regs, u32 op, const u32* body, u32 count) {
   DumpDescriptorTable("VS.sgpr0", ((u64)(vud[1] & 0xFFFF) << 32) | vud[0]);
   DumpDescriptorTable("VS.sgpr2", ((u64)(vud[3] & 0xFFFF) << 32) | vud[2]);
 
-  // The fetch shader (sgpr0 ptr, just past the VS code) does the s_load(V#
-  // table) + buffer_load(attributes).
   gcn::Disassemble(reinterpret_cast<const u32*>(vs), 512, "VS");
   gcn::Disassemble(reinterpret_cast<const u32*>(ps), 512, "PS");
   const u64 fetch = ((u64)(vud[1] & 0xFFFF) << 32) | vud[0];
@@ -1193,8 +1116,6 @@ void TraceDrawRegisters(const Regs& regs, u32 op, const u32* body, u32 count) {
     }
   }
 }
-
-// --- compute ---------------------------------------------------------------
 
 void TraceComputeShader(const Regs& regs,
                         u64 cs_addr,
@@ -1315,9 +1236,6 @@ void TraceCsResource(u64 cs_addr,
                      const gcn::TImage& image,
                      u32 elem_bytes,
                      u32 stage_elem_bytes) {
-  // Non-zero bytes currently in the guest range. A copy whose SOURCE is empty
-  // and one whose destination never receives the write look the same from the
-  // descriptor alone.
   u64 nonzero = 0;
   if (base && guest_size && guest_size <= (1u << 24) &&
       IsGuestRange(base, guest_size) &&
@@ -1348,8 +1266,6 @@ void TraceCsDispatch(u64 cs_addr, bool executed, u32 num_resources) {
             (unsigned long)cs_addr, executed ? "executed" : "failed",
             num_resources);
 }
-
-// --- the packet stream -----------------------------------------------------
 
 void NotePacket(u32 op) {
   g_op_hist[op & 0xFF]++;
@@ -1398,8 +1314,6 @@ void TraceConstRam(const char* what,
   if (seq < (u64)kCeTraceMax.get())
     BASE_LOGI("ce", "{:<8} ceoff={:#x} ndw={} addr={:#x} {} data0={:#x}", what,
               ce_offset, num_dwords, (unsigned long)addr, verdict, first_dword);
-  // The tail reports the destination span every dump landed in, which is what
-  // names the ring.
   if (seq && (seq % 20000) == 0)
     BASE_LOGI("ce", "{} packets; dump/load span {:#x}..{:#x}",
               (unsigned long long)seq, (unsigned long)dst_lo.load(),
@@ -1450,10 +1364,6 @@ void TraceDmaData(u32 control,
                   bool copied) {
   if (!kDmaTrace)
     return;
-  // Shader prefetches (src==dst) outnumber real transfers by thousands to one
-  // and used to eat the whole trace cap, which made "this title never CP-DMAs
-  // anything" unfalsifiable. Count every packet by class and spend the cap on
-  // transfers only.
   static base::Atomic<u64> n_all{0}, n_prefetch{0}, n_copy{0}, n_reject{0};
   static int shown = 0;
   n_all.fetch_add(1);
@@ -1486,10 +1396,6 @@ void TraceAddrWatch(const char* packet,
   if (!kAddrWatch || dst > (u64)kAddrWatch ||
       (u64)kAddrWatch >= dst + (bytes ? bytes : 4))
     return;
-  // One budget per packet class, keyed by the caller's literal. A shared cap
-  // lets whichever packet type hits first spend it all, and "nothing writes
-  // this address via X" is then unfalsifiable, which is the question the knob
-  // exists to answer.
   struct Site {
     const char* packet = nullptr;
     u32 hits = 0;
@@ -1568,8 +1474,6 @@ void TraceDesync(u32 position, u32 words, u32 type, u32 hdr, bool force) {
             hdr);
 }
 
-// --- submissions -----------------------------------------------------------
-
 bool ShouldDumpDcb(u32 size_bytes) {
   static bool dumped = false;
   if (!kTrace || dumped || size_bytes <= 4000)
@@ -1602,8 +1506,6 @@ void TraceSubmit(const void* dcb,
 void TraceDcbWalkResult(const u32* dcb, u32 words, u32 words_walked) {
   BASE_LOGI("gpu", "=== big dcb walk done: {}/{} words ===", words_walked,
             words);
-  // Brute-scan the whole buffer for draw-opcode headers (in case the walker
-  // desynced and missed a draw), and dump raw words around the stop point.
   int found = 0;
   for (u32 w = 0; w < words; w++) {
     const u32 hdr = dcb[w];
@@ -1633,9 +1535,6 @@ void TraceDcbStat(u32 words) {
   if ((now - last).InSecondsF() < 2.0)
     return;
   last = now;
-  // Not the numerous packets that cost: on SotC's load phase DISPATCH_DIRECT is
-  // half the walk's time and DRAW_INDEX_INDIRECT another quarter, while NOP is
-  // 37% of the PACKETS and free.
   u32 top_op[5] = {}, top_n[5] = {}, slow_op[5] = {};
   u64 slow_ns[5] = {};
   for (u32 o = 0; o < 256; o++) {
@@ -1672,10 +1571,6 @@ void MaybeDumpOpcodeHistogram(u32 words_walked, u32 words) {
     BASE_LOGI("gpu", "dcb done: walked {}/{} words", words_walked, words);
   if (kTrace && ++g_dcb_seen <= 4)
     DumpOpcodeHistogram();
-  // Time-gated (default 100s) so the cumulative histogram includes the in-level
-  // command stream (level-load compute/copies), not just the title, and only
-  // once the walker has seen packets: the first buffer after the gate is often
-  // empty, which used to latch the dump on nothing.
   static bool dumped = false;
   if (kOpHist && !dumped && words_walked > 0 && elapsed >= kOhAfter) {
     dumped = true;

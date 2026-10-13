@@ -23,7 +23,6 @@ ClearKind ClearKindOf(rhi::Format format) {
              : ClearKind::kUint;
 }
 
-// Barrier bits that make incoherent (shader) writes visible to `access`.
 GLbitfield AccessBits(u32 access) {
   GLbitfield bits = 0;
   if (access & rhi::kAccessVertexRead)
@@ -200,7 +199,6 @@ void GlCommandList::PushBindGroup(u32 index,
   entries.assign(l->desc().bindings.size(), BoundResource{});
   for (u32 i = 0; i < num_writes; i++)
     device_.Resolve(*l, writes[i], entries.data());
-  // Pushed dynamic bindings take their whole offset from the write.
   for (BoundResource& r : entries)
     r.dynamic = kNotDynamic;
   BoundGroup& b = groups_[index];
@@ -364,8 +362,6 @@ void GlCommandList::FlushBindings() {
     FlushGroup(i, map->groups[i]);
     g.dirty = false;
   }
-  // The pointer table and push constants are uniforms of the program, so a
-  // new program needs them again even when the data did not change.
   if (pipeline_->pointer_count &&
       (pointers_dirty_ || flushed_pointers_ != pipeline_)) {
     const u32 count = base::Min(pipeline_->pointer_count, kMaxPointers);
@@ -477,7 +473,7 @@ void GlCommandList::DrawIndexedIndirect(rhi::Buffer* args, u64 offset) {
   c->index_offset = index_offset_;
 }
 
-void GlCommandList::DrawMeshTasks(u32 /*x*/, u32 /*y*/, u32 /*z*/) {}
+void GlCommandList::DrawMeshTasks(u32, u32, u32) {}
 
 void GlCommandList::Dispatch(u32 x, u32 y, u32 z) {
   DispatchBase(0, 0, 0, x, y, z);
@@ -590,7 +586,7 @@ void GlCommandList::BlitTexture(rhi::Texture* dst,
 }
 
 void GlCommandList::ClearTexture(rhi::Texture* texture,
-                                 rhi::TextureState /*state*/,
+                                 rhi::TextureState,
                                  const rhi::TextureRange& range,
                                  const rhi::ClearColor& color) {
   auto* c = stream_.Add<CmdClearTexture>();
@@ -600,7 +596,7 @@ void GlCommandList::ClearTexture(rhi::Texture* texture,
 }
 
 void GlCommandList::ClearDepthStencil(rhi::Texture* texture,
-                                      rhi::TextureState /*state*/,
+                                      rhi::TextureState,
                                       const rhi::TextureRange& range,
                                       float depth,
                                       u8 stencil) {
@@ -637,8 +633,6 @@ void GlCommandList::Barrier(u32 src_access,
                             u32 dst_access,
                             const rhi::TextureBarrier* textures,
                             u32 num_textures) {
-  // GL orders and makes visible everything but shader stores and client
-  // mappings on its own.
   GLbitfield bits = 0;
   if (src_access & rhi::kAccessShaderWrite)
     bits |= AccessBits(dst_access);
@@ -660,10 +654,7 @@ void GlCommandList::ResetTimestamps(rhi::TimestampPool* pool,
   c->count = count;
 }
 
-// glQueryCounter stamps once earlier commands are done, which serves both.
-void GlCommandList::WriteTimestamp(rhi::TimestampPool* pool,
-                                   u32 index,
-                                   bool /*start*/) {
+void GlCommandList::WriteTimestamp(rhi::TimestampPool* pool, u32 index, bool) {
   auto* c = stream_.Add<CmdWriteTimestamp>();
   c->pool = static_cast<GlTimestampPool*>(pool);
   c->first = index;

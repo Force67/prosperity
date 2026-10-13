@@ -241,9 +241,6 @@ TEST(GcnDetile, AllModesAndElementWidthsMatchReferenceDigest) {
   EXPECT_EQ(hash, 0xe0e2ac1035064882ull);
 }
 
-// Every address the separable terms produce agrees with the detiler, for each
-// layout they are offered for; and the macro modes compute targets use get
-// them.
 TEST(GcnDetile, SeparableTermsMatchTheDetiler) {
   struct Shape {
     u32 width, height, pitch, layers, mips;
@@ -310,8 +307,8 @@ TEST(GcnDetile, Gfx10SingleMipStartsAtTheBlockOrigin) {
     base::Vector<u8> tiled(layout.size, 0);
     tiled[0] = 42;
     base::Vector<u8> linear(16 * 16 * 4, 0);
-    ASSERT_TRUE(gpu::gcn::DetileTextureMip32(
-        tiled.data(), linear.data(), layout, 0, 0));
+    ASSERT_TRUE(gpu::gcn::DetileTextureMip32(tiled.data(), linear.data(),
+                                             layout, 0, 0));
     EXPECT_EQ(linear[0], 42);
   }
 }
@@ -349,8 +346,6 @@ TEST(GcnDetile, PitchedTransfersLeaveLinearPaddingUntouched) {
 }
 
 TEST(GcnDetile, ByteWritebackRoundTripsAcrossMipsLayersAndPaddedRows) {
-  // Include Astro's 64KB_R_X byte-image layout (0x11b), as well as linear
-  // and GCN tiled layouts. Each layer is written before any are read back.
   for (u32 tiling : {8u, 14u, 31u, 0x11bu}) {
     SCOPED_TRACE(tiling);
     gpu::gcn::TextureLayout32 layout;
@@ -426,7 +421,6 @@ TEST(GcnDetile, ConcurrentRepeatedRegionsFinishEveryRowBeforeReturning) {
 
 }  // namespace
 
-// gfx10 linear surfaces take the plain row terms, slices and mips included.
 TEST(GcnDetile, SeparableTermsMatchTheDetilerForGfx10Linear) {
   const u32 tiling = gpu::gcn::kGfx10TilingBase;
   ASSERT_TRUE(gpu::gcn::TilingIsLinear(tiling));
@@ -434,14 +428,14 @@ TEST(GcnDetile, SeparableTermsMatchTheDetilerForGfx10Linear) {
     u32 width, height, pitch, layers, mips;
   };
   u32 checked = 0;
-  for (const Shape& shape : {Shape{240, 135, 240, 64, 1},
-                             Shape{263, 137, 271, 3, 4},
-                             Shape{960, 540, 960, 1, 1}}) {
+  for (const Shape& shape :
+       {Shape{240, 135, 240, 64, 1}, Shape{263, 137, 271, 3, 4},
+        Shape{960, 540, 960, 1, 1}}) {
     for (u32 elem : {4u, 8u, 16u}) {
       gpu::gcn::TextureLayout32 layout;
       if (!gpu::gcn::BuildTextureLayout32(layout, shape.width, shape.height,
-                                          shape.pitch, shape.layers,
-                                          shape.mips, tiling, false, elem))
+                                          shape.pitch, shape.layers, shape.mips,
+                                          tiling, false, elem))
         continue;
       base::Vector<u8> tiled(layout.size);
       for (size_t i = 0; i < tiled.size(); ++i)
@@ -455,8 +449,8 @@ TEST(GcnDetile, SeparableTermsMatchTheDetilerForGfx10Linear) {
         const auto& level = layout.mips[mip];
         base::Vector<u8> linear(size_t(level.width) * level.height * elem);
         for (u32 layer = 0; layer < layout.layers; ++layer) {
-          ASSERT_TRUE(gpu::gcn::DetileTextureMip32(
-              tiled.data(), linear.data(), layout, mip, layer));
+          ASSERT_TRUE(gpu::gcn::DetileTextureMip32(tiled.data(), linear.data(),
+                                                   layout, mip, layer));
           const u32 zt = terms[level.width + level.height + layer];
           for (u32 y = 0; y < level.height; ++y)
             for (u32 x = 0; x < level.width; ++x) {

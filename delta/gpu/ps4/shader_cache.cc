@@ -1,8 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * Which recompiled module a given piece of guest state needs. See
- * shader_cache.h.
  */
 
 #include "gpu/ps4/shader_cache.h"
@@ -29,8 +26,6 @@ void MixHash(u64& hash, u64 value) {
   hash ^= value + kGoldenRatio64 + (hash << 6) + (hash >> 2);
 }
 
-// Two draws share a module iff their keys match. `vs`/`ps` are code content
-// hashes rather than addresses (see GraphicsKeyOf).
 struct GraphicsKey {
   u64 vs = 0, ps = 0, fetch = 0, direct_table = 0;
   u32 ps_input_ena = 0;
@@ -43,8 +38,6 @@ struct GraphicsKey {
   u32 mrt_bound_mask = 0xFF;
   bool gl_clip = false;
   bool neo = false;
-  // ES and GS code plus the GS registers the modules bake in; zero without a
-  // GS.
   u64 es = 0, gs = 0, gs_shape = 0;
   u32 int_attr_mask = 0;
   u32 col_format = 0;
@@ -106,9 +99,6 @@ bool UsesGetPc(const gcn::Program& program) {
   return false;
 }
 
-// FNV-1a over the OFFSET field of every input-control slot plus NUM_INTERP: the
-// module bakes the mapping into its input Locations, so the same code under a
-// different mapping is another module.
 u32 PsInputCntlHash(const u32* ps_in_cntl, u32 num_interp) {
   u32 hash = 2166136261u;
   for (u32 i = 0; i < 32; i++)
@@ -119,12 +109,8 @@ u32 PsInputCntlHash(const u32* ps_in_cntl, u32 num_interp) {
 GraphicsKey GraphicsKeyOf(const GraphicsShaderState& state) {
   GraphicsKey key;
   key.direct_table = gcn::DirectGcnEnabled() ? gcn::g_direct_table : 0;
-  // The VS/PS by CONTENT, like the fetch shader: SotC streams shader code to
-  // fresh guest addresses as the title progresses, so an address key misses
-  // forever and the frame drowns in recompiles. s_getpc_b64 stays sound because
-  // the module reads its own address from the push range per draw
-  // (PushCodeBase); at the 128-byte push floor, where the address is baked into
-  // the module instead, getpc programs keep the address key.
+  // Content keys stay sound with s_getpc_b64 only because the module reads its
+  // address from the push range.
   key.vs = gcn::CachedCodeHash(state.vs_addr, 4096);
   key.ps = state.ps_addr ? gcn::CachedCodeHash(state.ps_addr, 4096) : 0;
   if (!gcn::PushCodeBase() &&
@@ -134,8 +120,6 @@ GraphicsKey GraphicsKeyOf(const GraphicsShaderState& state) {
     key.vs = state.vs_addr;
     key.ps = state.ps_addr;
   }
-  // The fetch shader by CONTENT too: titles that generate one per draw into
-  // scratch memory (Tomb Raider does) would otherwise miss on every draw.
   key.fetch = gcn::CachedCodeHash(state.fetch_addr, 64);
   key.ps_input_ena = state.ps_input_ena;
   key.ps_in_cntl_hash = PsInputCntlHash(state.ps_in_cntl, state.ps_num_interp);
@@ -256,9 +240,6 @@ void PrefetchComputeShader(const ComputeShaderState& state) {
     gcn::spirv::PrefetchScope prefetch;
     rc = RecompileCompute(state);
   }
-  // A compute pipeline depends on nothing but the module and its resource
-  // count, so the driver's compile can run ahead as well: GTA:SA's largest
-  // dispatch alone takes the driver half a minute.
   if (rc.ok)
     gcn::spirv::PrefetchThen(
         rc.spirv,

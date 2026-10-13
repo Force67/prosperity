@@ -33,7 +33,6 @@ class Lowerer : public spirv_cross::CompilerGLSL {
                t, spirv_cross::BufferPackingStd140EnhancedLayout);
   }
 
-  // 'f', 'i' or 'u' when every scalar in the block has that type.
   char CommonType(u32 type_id) {
     SPIRType::BaseType base;
     if (!get_common_basic_type(get<SPIRType>(type_id), base))
@@ -50,7 +49,6 @@ class Lowerer : public spirv_cross::CompilerGLSL {
     }
   }
 
-  // Consecutive locations an input of this type takes.
   u32 LocationCount(u32 type_id) {
     const SPIRType& t = get<SPIRType>(type_id);
     u32 n = t.columns;
@@ -63,8 +61,6 @@ class Lowerer : public spirv_cross::CompilerGLSL {
     return static_cast<u32>(get_declared_struct_size(get<SPIRType>(type_id)));
   }
 
-  // The element type of a block that is one tightly packed runtime array,
-  // which a pointer can stand in for; empty for any other block.
   std::string PointerElement(u32 type_id) {
     const SPIRType& t = get<SPIRType>(type_id);
     if (t.member_types.size() != 1)
@@ -80,7 +76,6 @@ class Lowerer : public spirv_cross::CompilerGLSL {
     return type_to_glsl(m);
   }
 
-  // Reads and writes `var` through entry `index` of the pointer table.
   void Spill(u32 var, u32 type_id, u32 index) {
     const std::string name = "DELTA_BUF_" + std::to_string(index);
     set_name(var, name);
@@ -91,8 +86,6 @@ class Lowerer : public spirv_cross::CompilerGLSL {
                     std::to_string(index) + "].xy))");
   }
 
-  // GLSL for GL_KHR_shader_subgroup is the same as Vulkan's; SPIRV-Cross
-  // only knows that it is, not that GL has it.
   void emit_subgroup_op(const spirv_cross::Instruction& instr) override {
     if (!khr_subgroup_ || is_supported_subgroup_op_in_opengl(
                               static_cast<spv::Op>(instr.op), stream(instr)))
@@ -123,7 +116,6 @@ class Lowerer : public spirv_cross::CompilerGLSL {
       CompilerGLSL::emit_buffer_block(var);
   }
 
-  // A spilled block is its array: `ptr[i]`, not `block._m0[i]`.
   std::string to_member_reference(u32 base,
                                   const SPIRType& type,
                                   u32 index,
@@ -150,8 +142,6 @@ class Lowerer : public spirv_cross::CompilerGLSL {
         return;
       }
     }
-    // GLSL's imulExtended/umulExtended take only int/uint operands, which
-    // SPIR-V does not require of OpSMulExtended/OpUMulExtended.
     if ((op != spv::OpSMulExtended && op != spv::OpUMulExtended) ||
         instr.length < 4)
       return CompilerGLSL::emit_instruction(instr);
@@ -177,8 +167,6 @@ class Lowerer : public spirv_cross::CompilerGLSL {
     statement(result, ".", to_member_name(type, 1), " = ", m, "(", hi, ");");
   }
 
-  // A uniform block std140 cannot express becomes a read-only storage block:
-  // GLSL has no std430 uniform blocks.
   void MakeStorageBlock(u32 type_id) {
     unset_decoration(type_id, spv::DecorationBlock);
     set_decoration(type_id, spv::DecorationBufferBlock);
@@ -234,8 +222,6 @@ u64 Key(u32 set, u32 binding) {
   return (u64(set) << 32) | binding;
 }
 
-// Atomics take a pointer, not an lvalue behind one: atomicAdd(P[i], v)
-// becomes atomicAdd((P + (i)), v) for the spilled buffers.
 void RewritePointerAtomics(std::string& s) {
   static constexpr char kCall[] = "(DELTA_BUF_";
   for (size_t at = s.find(kCall); at != std::string::npos;
@@ -271,8 +257,7 @@ void ReplaceAll(std::string& s, const char* from, const char* to) {
     s.replace(at, n, to);
 }
 
-// GL orders the vertices of an odd triangle in a strip (i+1, i, i+2), Vulkan
-// (i, i+2, i+1): remap the barycentrics and per-vertex inputs to Vulkan's.
+// GL and Vulkan order the vertices of odd strip triangles differently.
 void ReorderStripVertices(std::string& s) {
   static const std::regex kDecl(
       R"((layout\(location = \d+\) (?:flat )?pervertexEXT in )(\w+) (\w+)\[3\];)");
@@ -412,8 +397,6 @@ bool LowerProgram(const StageCode* stages,
         return false;
     }
 
-    // Storage buffers past the per-stage limit, highest bindings first,
-    // become pointers in every stage.
     for (Stage& s : parsed) {
       std::vector<u64> keys;
       auto collect =
@@ -524,8 +507,6 @@ bool LowerProgram(const StageCode* stages,
             std::string("delta_push_") + StageSuffix(s.stage);
         c.set_name(pc.base_type_id, name);
         if (t) {
-          // A default-block uniform array: GL's nearest thing to push
-          // constants, and free of std140's 16-byte array strides.
           c.flatten_buffer_block(pc.id);
           program->push_uniforms.push_back(
               {s.stage, base::String(name.c_str(), name.size()),
@@ -539,10 +520,6 @@ bool LowerProgram(const StageCode* stages,
       if (s.dispatch_base)
         c.AddDispatchBase();
       if (s.stage == rhi::kStageVertex) {
-        // Vulkan allows more attribute locations than GL does (16 on some
-        // drivers), and the recompiler leaves gaps: pack them, keeping their
-        // order so that multi-location inputs and components sharing a
-        // location stay together.
         std::map<u32, u32> packed;
         for (const auto& res : s.resources.stage_inputs) {
           const u32 location =
@@ -569,7 +546,6 @@ bool LowerProgram(const StageCode* stages,
       std::string source = c.compile();
       if (spills)
         RewritePointerAtomics(source);
-      // Per-vertex inputs take no interpolation qualifier.
       ReplaceAll(source, "flat pervertex", "pervertex");
       if (s.strip_order)
         ReorderStripVertices(source);

@@ -1,8 +1,5 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * Compute dispatches, from COMPUTE_* registers to the renderer. See
- * compute_dispatch.h.
  */
 
 #include "gpu/ps5/compute_dispatch.h"
@@ -40,10 +37,7 @@
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
 DELTA_OPTION(const char*, kCsProbe, "DELTA_GPU_CSPROBE", nullptr);
-// Diagnostic allowance for oversized descriptors and partially mapped images.
 DELTA_OPTION(bool, kCsAnyMem, "DELTA_PS5_CSANYMEM", false);
-// Images a dispatch only reads are sampled through real views (the render
-// targets and textures draws use) instead of staged buffers.
 DELTA_OPTION(bool, kCsNativeImages, "DELTA_GPU_CS_NATIVE_IMAGES", true);
 }  // namespace
 
@@ -51,28 +45,23 @@ namespace gpu::ps5 {
 namespace {
 
 constexpr u64 kMaxShaderBytes = 4096 * sizeof(u32);
-// Images need larger ranges than raw buffers: array layers, decompression,
-// and padded staging can each exceed the raw-buffer limit.
 constexpr u64 kMaxResource = 256ull * 1024 * 1024;
 constexpr u64 kMaxImageStaging = 1024ull * 1024 * 1024;
 
-// One resource's live guest range and how it has to be staged.
 struct ResourceRange {
   u64 base = 0;
-  u64 size = 0;        // bytes the dispatch reads/writes through it
-  u64 guest_size = 0;  // bytes it occupies in guest memory
+  u64 size = 0;
+  u64 guest_size = 0;
   gcn::TImage image;
-  bool image_staging = false;  // tiled or reformatted: stage, don't alias
-  bool zero_fill = false;      // no live range: hand the shader zeros
+  bool image_staging = false;
+  bool zero_fill = false;
   u32 elem_bytes = 4;
   u32 stage_elem_bytes = 4;
   bool ok = true;
 };
 
-// An image the compute backend can stage in and out again. The formats listed
-// are the ones whose texels survive the round trip through a linear SSBO; a
-// swizzle mode with no address equation, or a layout we cannot rebuild, would
-// scramble what the staging copy writes back into guest memory.
+// Only formats whose texels survive a linear SSBO round trip can be staged in
+// and out.
 ResourceRange ResolveImageResource(u64 cs_addr,
                                    const gcn::CsResource& res,
                                    const u32* descriptor) {
@@ -85,8 +74,6 @@ ResourceRange ResolveImageResource(u64 cs_addr,
       view[3] = (view[3] & ~0xf0000u) | (base_mip << 16);
     descriptor = view.data();
   }
-  // Plain loads/stores only access BASE_LEVEL. Keep MAX_MIP for the physical
-  // layout, without requiring unused levels advertised by LAST_LEVEL.
   const gcn::TImage t = rdna::DecodeTImage(descriptor);
   const bool r8 = t.dfmt == 1 && (t.nfmt == 0 || t.nfmt == 4);
   const bool rgba8 =
@@ -100,14 +87,9 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   const bool rgba16 = t.dfmt == 12 && (t.nfmt == 0 || t.nfmt == 4 ||
                                        t.nfmt == 5 || t.nfmt == 7);
   const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
-  // 32_32: two full dwords per texel, so it stages unchanged like the other
-  // 32-bit-per-channel forms, just twice as wide.
   const bool rg32 = t.dfmt == 11 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   const bool block128 =
       t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
-  // BC1 and BC6H are read-only: decompress their 4x4 blocks into staging.
-  // As in graphics uploads, non-power-of-two mip chains and volumes need a
-  // different block layout and are not supported here yet.
   const bool bc1 = t.dfmt == 35 && (t.nfmt == 0 || t.nfmt == 9) &&
                    !res.written && t.type != 10 &&
                    (t.mip_levels == 1 || (!(t.width & (t.width - 1)) &&
@@ -126,9 +108,6 @@ ResourceRange ResolveImageResource(u64 cs_addr,
                          : bc1               ? 4u
                                              : base::Max(out.elem_bytes, 4u);
 
-  // type 10 is a volume: DecodeTImage already reports its depth as layers and
-  // the shared emitter addresses 3D slice-major, so it stages like the 2D
-  // forms.
   const bool supported_type = t.type >= 8 && t.type <= 13;
   const bool supported_format = r8 || rgba8 || r32 || rg16f || rg16i || r16 ||
                                 rg8 || rgba16 || r11g11b10f || rg32 ||
@@ -141,9 +120,6 @@ ResourceRange ResolveImageResource(u64 cs_addr,
           compressed ? (t.height + 3) / 4 : t.height,
           compressed ? (t.pitch + 3) / 4 : t.pitch, t.layers, t.mip_levels,
           t.tiling_idx, t.pow2_pad, out.elem_bytes)) {
-    // One descriptor we cannot stage used to skip the whole dispatch, taking
-    // every other binding's work with it. Hand this one zeros instead and let
-    // the rest of the shader run.
     TraceCsUnsupportedImage(cs_addr, res.binding, t, descriptor);
     out.zero_fill = true;
     out.size = base::Max<u64>(res.min_bytes, 16);
@@ -151,10 +127,6 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   }
   out.base = t.base;
   out.guest_size = layout.size;
-  // Even gfx10 LINEAR has a physical layout: 256-byte row alignment and a
-  // layer-major mip chain. The shared compute emitter addresses the staged
-  // image as a mip-major, linear-aligned SSBO, so linear images need the same
-  // layout conversion as tiled ones (including byte/halfword expansion).
   out.image_staging = true;
   gcn::TextureLayout32 linear;
   if (!gcn::BuildTextureLayout32(linear, t.width, t.height, t.pitch, t.layers,
@@ -172,7 +144,7 @@ ResourceRange ResolveImageResource(u64 cs_addr,
 ResourceRange ResolveBufferResource(const gcn::CsResource& res,
                                     const u32* descriptor) {
   ResourceRange out;
-  if (res.kind == 3) {  // RDNA BVH T#: base in 256-byte units, 64-byte nodes
+  if (res.kind == 3) {
     out.base = ((static_cast<u64>(descriptor[1] & 0xff) << 32) | descriptor[0])
                << 8;
     const u64 last_node =
@@ -181,12 +153,9 @@ ResourceRange ResolveBufferResource(const gcn::CsResource& res,
     out.ok = (descriptor[3] >> 28) == 8;
     return out;
   }
-  if (res.kind == 2) {  // a raw pointer into an SRT/descriptor table
+  if (res.kind == 2) {
     out.base = (static_cast<u64>(descriptor[1] & 0xFFFF) << 32) | descriptor[0];
     out.size = res.min_bytes;
-    // A global_* base has no extent in the instruction. Its own allocation is
-    // the bound the hardware would fault at, so use that.
-    // A pointer the shader offsets at run time may reach anywhere in it.
     constexpr u64 kMaxWindow = 64ull << 20;
     u64 pool_base = 0, pool_end = 0;
     if ((res.min_bytes >= 0x10000 || res.runtime_address) && out.base &&
@@ -236,11 +205,6 @@ const u32* ResolveUniformImageTable(
 
 }  // namespace
 
-// The titles' metadata clear kernel: thread i of 64-wide groups stores the
-// four user-data dwords s[4:7] to element i of the V# in s[0:3]. The value is
-// in the packet, so the fill is known when it is recorded: applied here it is
-// a memset with nothing to read back, where on the GPU it was a dispatch and,
-// for the CMASK/DCC/HTILE reader that followed, a wait.
 constexpr u32 kFillKernel[] = {0xd7460004, 0x04010c08, 0x7e000204,
                                0x7e020205, 0x7e040206, 0x7e060207,
                                0xe01c2000, 0x80000004, 0xbf810000};
@@ -254,14 +218,16 @@ bool ApplyFillKernel(render::Renderer& renderer,
                      const u32* ud) {
   if (threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
       groups[1] != 1 || groups[2] != 1 || user_sgpr != 8 ||
-      !(tgid_enable & 1) || !gpu::IsReadableRangeCached(cs_addr, sizeof(kFillKernel)) ||
+      !(tgid_enable & 1) ||
+      !gpu::IsReadableRangeCached(cs_addr, sizeof(kFillKernel)) ||
       std::memcmp(reinterpret_cast<const void*>(cs_addr), kFillKernel,
                   sizeof(kFillKernel)))
     return false;
   const rdna::VBuffer dst = rdna::DecodeVBuffer(ud);
-  // Plain elements: no swizzle, no ADD_TID; 32-bit channels stored as they
-  // are, every one of them the same word.
-  const u32 channels = dst.dfmt == 4 ? 1 : dst.dfmt == 11 ? 2 : dst.dfmt == 14 ? 4 : 0;
+  const u32 channels = dst.dfmt == 4    ? 1
+                       : dst.dfmt == 11 ? 2
+                       : dst.dfmt == 14 ? 4
+                                        : 0;
   if (!channels || dst.stride != channels * 4 || (ud[1] >> 30) ||
       (ud[3] & (1u << 23)) || (dst.nfmt != 4 && dst.nfmt != 5 && dst.nfmt != 7))
     return false;
@@ -270,7 +236,6 @@ bool ApplyFillKernel(render::Renderer& renderer,
       return false;
   const u64 bytes =
       base::Min<u64>(u64(groups[0]) * 64, dst.num_records) * dst.stride;
-  // Over a render target this is how the title clears it (NoteMemoryFill).
   if (!bytes || !gpu::IsReadableRangeCached(dst.base, bytes))
     return false;
   render::ApplyMemoryFill(renderer, dst.base, bytes, ud[4]);
@@ -290,7 +255,6 @@ void DispatchCompute(render::Renderer& renderer,
   if (!(initiator & 4))
     for (u32 axis = 0; axis < 3; ++axis) {
       group_base[axis] = regs[mmCOMPUTE_START_X + axis];
-      // COMPUTE_DIM is an exclusive end, not a count, when START is nonzero.
       if (groups[axis] <= group_base[axis])
         return;
       groups[axis] -= group_base[axis];
@@ -337,8 +301,6 @@ void DispatchCompute(render::Renderer& renderer,
                       (rsrc2 >> 7) & 0x7, regs.At(mmCOMPUTE_USER_DATA_0)))
     return;
 
-  // Recompile the CS to a Vulkan compute pipeline (cached), resolve the guest
-  // ranges its descriptors name, and run it on the shared compute backend.
   const ComputeShaderState shader{.cs_addr = cs_addr,
                                   .thread_x = threads[0],
                                   .thread_y = threads[1],
@@ -350,13 +312,7 @@ void DispatchCompute(render::Renderer& renderer,
                                   .wave32 = (initiator & (1u << 15)) != 0};
   const u32* ud = regs.At(mmCOMPUTE_USER_DATA_0);
   const u32 ud_dwords = base::Min(user_sgpr, 16u);
-  // The images it only reads are sampled through real views: their T#/S# in
-  // the image plan's order, and an integer format changes the module.
-  const gcn::RecompiledCs& plan =
-      GetComputeShader(shader, 0, 0, /*plan_only=*/true);
-  // Descriptors an SRT chain produced are not in the user-data window; replay
-  // the shader's scalar ops to recover the one each resource's instruction
-  // actually used.
+  const gcn::RecompiledCs& plan = GetComputeShader(shader, 0, 0, true);
   const auto resolved = rdna::ResolveBuffers(
       reinterpret_cast<const u32*>(cs_addr), ud, ud_dwords, 0,
       rdna::ComputeCodeDwords(reinterpret_cast<const u32*>(cs_addr)));
@@ -372,7 +328,8 @@ void DispatchCompute(render::Renderer& renderer,
       if (images[i].nfmt == 4 || images[i].nfmt == 5)
         uint_mask |= 1ull << i;
   }
-  const gcn::RecompiledCs* module = &GetComputeShader(shader, native, uint_mask);
+  const gcn::RecompiledCs* module =
+      &GetComputeShader(shader, native, uint_mask);
   if (!module->ok && native) {
     native = 0;
     module = &GetComputeShader(shader);
@@ -390,7 +347,6 @@ void DispatchCompute(render::Renderer& renderer,
     render::ComputeInfo::Tex& tex = ci.tex[ci.num_tex++];
     tex.binding = static_cast<u32>(rc.textures[i]);
     TexFromImage(images[i], tex.tex);
-    // The module's declaration wins, as for a draw (ReconcileTextureDims).
     tex.tex.is_3d = (rc.textures_3d >> i) & 1;
   }
 
@@ -404,7 +360,6 @@ void DispatchCompute(render::Renderer& renderer,
   ci.recomp = &rc;
   for (int k = 0; k < 16; k++)
     ci.user_data[k] = ud[k];
-
 
   if (kCsProbe && std::strstr(probe_buf, kCsProbe)) {
     static base::HashSet<u64> reported;
@@ -455,23 +410,15 @@ void DispatchCompute(render::Renderer& renderer,
     }
   }
 
-  // Every resource becomes a range, pointer bases included: a shader that
-  // follows guest pointers reads them through the ranges' own buffers.
   for (const gcn::CsResource& r : rc.resources) {
     const u32 dwords = r.kind == 1 ? 8u : r.kind == 2 ? 2u : 4u;
-    // Compute seeds user data straight into s0.., so a plan naming an SGPR past
-    // the loaded window names one an SRT load produced, which nothing here
-    // replays. The replay seeds from this same user data, so what it recovered
-    // is at least as good: preferring the window would bind whatever the CPU
-    // left there for a shader that loaded a descriptor over its own user data.
-    // Sampled through a real view: its storage buffer stays an empty stub.
     const bool sampled = r.binding < 64 && ((native >> r.binding) & 1);
     const u32* desc = nullptr;
     base::Array<u32, 8> table_descriptor;
     if (sampled) {
     } else if (const auto it = resolved.find(r.use_pc);
-        it != resolved.end() && it->second.descriptor_valid &&
-        it->second.descriptor_dwords >= dwords) {
+               it != resolved.end() && it->second.descriptor_valid &&
+               it->second.descriptor_dwords >= dwords) {
       desc = it->second.descriptor;
     } else if (r.inline_user_data && r.base_sgpr + dwords <= ud_dwords) {
       desc = &ud[r.base_sgpr];
@@ -487,14 +434,10 @@ void DispatchCompute(render::Renderer& renderer,
       range.zero_fill = true;
       range.size = 16;
     } else if (base::AllOf(desc, desc + dwords, [](u32 w) { return w == 0; })) {
-      // A null descriptor is a real binding on a path this launch does not
-      // take; the translator guards it and reads zero.
       range.zero_fill = true;
       range.size = base::Max<u64>(r.min_bytes, 16);
     } else if (r.kind == 1) {
       range = ResolveImageResource(cs_addr, r, desc);
-      // Read and written through its guest addresses: the guest bytes as
-      // they are, not a staged image.
       if (r.runtime_image && range.ok && !range.zero_fill) {
         range.image_staging = false;
         range.size = range.guest_size ? range.guest_size : range.size;
@@ -508,8 +451,6 @@ void DispatchCompute(render::Renderer& renderer,
         range.size = base::Max<u64>(
             range.size, base::Min<u64>(pool_end - range.base, 64ull << 10));
     }
-    // A pointer the shader offsets at run time may start anywhere, mapped or
-    // not; it only lacks a buffer of its own then.
     if ((r.runtime_address || (r.kind == 2 && rc.guest_memory_binding >= 0)) &&
         !range.zero_fill &&
         (!range.ok || !range.base || !range.size ||
@@ -525,8 +466,6 @@ void DispatchCompute(render::Renderer& renderer,
       range.guest_size = range.size;
     TraceCsResource(cs_addr, r, range.base, range.size, range.guest_size,
                     range.zero_fill);
-    // The decoder's frame-pool T# is a 2D array whose layout runs past its
-    // mapping; stage the mapped prefix and let the tail live in the SSBO only.
     if (kCsAnyMem && r.kind == 1 && !range.zero_fill &&
         range.guest_size <= kMaxResource &&
         !gpu::IsReadableRangeCached(range.base, range.guest_size)) {
@@ -542,10 +481,6 @@ void DispatchCompute(render::Renderer& renderer,
       if (lo)
         range.guest_size = lo * kGrain;
     }
-    // A dispatch writes guest memory, so a range that does not check out skips
-    // the whole dispatch rather than binding something wrong.
-    // A read-only table may sit anywhere readable: the video decoder keeps its
-    // shaders' constants in its own module image, outside the GPU aperture.
     const u64 max_resource = kCsAnyMem ? 2 * kMaxResource : kMaxResource;
     if (!range.zero_fill &&
         (range.size < r.min_bytes ||
@@ -569,11 +504,9 @@ void DispatchCompute(render::Renderer& renderer,
     out.binding = r.binding;
     out.read = r.read;
     out.shader_writes = r.written;
-    // A pointer into memory the guest cannot write: its stores are dropped
-    // (the window is read-only), never written back.
-    out.written = r.written && !range.zero_fill &&
-                  !(r.runtime_address &&
-                    !IsGuestWritable(range.base, range.guest_size));
+    out.written =
+        r.written && !range.zero_fill &&
+        !(r.runtime_address && !IsGuestWritable(range.base, range.guest_size));
     out.zero_fill = range.zero_fill;
     out.image_staging = range.image_staging;
     if (!range.image_staging)
@@ -590,9 +523,6 @@ void DispatchCompute(render::Renderer& renderer,
     out.nfmt = range.image.nfmt;
     out.pow2_pad = range.image.pow2_pad;
   }
-  // A single-mip array and a view of its leading slices stage the same bytes
-  // (slices are consecutive), so the shorter view takes the whole array's
-  // range. The GI atlas writer binds the array and its first slice this way.
   for (u32 i = 0; i < ci.num_res; i++)
     for (u32 j = 0; j < ci.num_res; j++) {
       auto& a = ci.res[i];

@@ -2,9 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// Dispatch batches: recording, submission, the batch ring and the waits that
-// retire it.
-
 #include "gpu/render/compute_internal.h"
 
 #include <cstdio>
@@ -17,8 +14,8 @@
 #include "base/strings/format.h"
 #include "base/threading/lock_guard.h"
 #include "gpu/gcn/gcn_resource.h"
-#include "gpu/guest_page_table.h"
 #include "gpu/guest_memory.h"
+#include "gpu/guest_page_table.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/gpu_timeline.h"
 #include "gpu/render/render_target.h"
@@ -27,39 +24,29 @@
 
 namespace gpu::render::cs {
 
-// Dispatch batching: dispatches are recorded into one command buffer and
-// submitted/waited only when something needs their results (a flush point,
-// a staging hazard, or the batch cap). 228 individual submit+fence round
-// trips per frame were ~40% of the whole compute cost.
 bool g_cs_batch_open = false;
 u32 g_cs_batch_count = 0;
-u64 g_cs_batch_id = 0;  // the open batch
+u64 g_cs_batch_id = 0;
 u64 g_cs_batch_next_id = 1;
-u64 g_cs_batch_done = 0;  // every batch with an id <= this has completed
+u64 g_cs_batch_done = 0;
 base::Vector<PendingGuestWrite> g_pending_guest_writes;
 
 void NotePendingGuestWrite(u64 base, u64 end) {
   g_pending_guest_writes.push_back({base, end, g_cs_batch_id});
   GuestPages().AddPendingWrite(base, end, 1);
 }
-// The newest batch a held label waits for (SubmitForPublishedLabels).
 u64 g_publish_batch = 0;
-u32 g_cs_batch_cur = 0;   // ring slot the open batch records into
+u32 g_cs_batch_cur = 0;
 u64 g_cs_submit_n = 0;
 base::Vector<BatchedDispatch> g_cs_batch_log;
 rhi::TimestampPool* g_cs_timestamps = nullptr;
 base::HashMap<u64, CsGpuTime> g_cs_gpu_times;
-// DELTA_GPU_CS_ISOLATE_HEAVY: a shader whose last dispatch ran longer than
-// this goes into a submission of its own, so a wait on the work queued before
-// it does not also wait for it (UC2's 22 ms skinning pass).
 DELTA_OPTION(u32, kCsHeavyUs, "DELTA_GPU_CS_ISOLATE_HEAVY", 4000);
 base::HashSet<u64> g_cs_heavy;
 base::HashMap<rhi::Buffer*, ComputeBufferAccess> g_cs_batch_access;
 
 CsBatch g_cs_batches[kCsBatchRing];
 
-// The batch a range referenced now belongs to: the open one, or the one that
-// opens next when nothing is recording yet.
 void MarkPending(CsRange& e) {
   if (!e.pending_batch)
     g_cs_pending.push_back(&e);
@@ -76,9 +63,8 @@ bool CsBatchInit() {
       b.list->SetProfileTag(2);
     if (!b.list)
       return false;
-    // Two timestamps for each of at most 128 dispatches.
 #if defined(DELTA_TRACY)
-    constexpr bool kTimeline = true;  // dispatches on the Tracy GPU timeline
+    constexpr bool kTimeline = true;
 #else
     constexpr bool kTimeline = false;
 #endif
@@ -107,14 +93,13 @@ void CsBatchLogFault(const CsBatch& b, const char* what) {
   g_cs_failed = true;
 }
 
-// The batch's submission has completed: what it produced is real now.
 void CsBatchFinalize(CsBatch& b) {
   if (b.timestamps && !b.log.empty()) {
     base::Array<u64, 256> stamps{};
     const u32 count = static_cast<u32>(b.log.size());
-    const bool any_traced = base::AnyOf(
-        b.log.begin(), b.log.end(),
-        [](const BatchedDispatch& d) { return d.traced; });
+    const bool any_traced =
+        base::AnyOf(b.log.begin(), b.log.end(),
+                    [](const BatchedDispatch& d) { return d.traced; });
     const bool read =
         (CsSyncReporting() || any_traced || kCsHeavyUs) &&
         Device().ReadTimestamps(b.timestamps, 0, count * 2, stamps.data());
@@ -167,13 +152,9 @@ void CsBatchFinalize(CsBatch& b) {
   b.submitted = false;
   b.log.clear();
   b.count = 0;
-  // Imported ranges are written by the dispatches this batch executed,
-  // straight into guest memory, and no writeback step will announce them, so
-  // the batch itself is the visibility point for the staging caches.
   g_cs_writeback_gen++;
 }
 
-// Retire, in order, every submitted batch that has completed.
 void CsBatchReap() {
   for (;;) {
     CsBatch* oldest = nullptr;
@@ -186,22 +167,15 @@ void CsBatchReap() {
   }
 }
 
-// The frame's open chunk copies a texture out of a range the open batch
-// writes: the batch has to be on the queue before the chunk is.
 bool g_cs_chunk_needs_batch = false;
 u64 g_cs_sync_n[kSyncCount] = {};
 u64 g_cs_sync_ns[kSyncCount] = {};
-// The guest reader a writeback wait is paid for (FlushCsWritesRange's `why`).
 const char* g_cs_wait_reader = "other";
 base::Map<base::String, base::Pair<u64, u64>> g_cs_reader_waits;
-// Range writebacks by the reader that asked for them: count, ns.
 base::Map<base::String, base::Pair<u64, u64>> g_cs_reader_wbs;
 
-// Open the batch command buffer. Staging copies are recorded into the same
-// buffer as the dispatches, so this has to be callable before the first one.
 void CsBatchBeginImpl() {
   if (g_cs_batch_open) {
-    // Draws may have opened a render pass on the shared list since.
     if (g_cs_batches[g_cs_batch_cur].in_frame)
       EndRegion();
     return;
@@ -211,7 +185,6 @@ void CsBatchBeginImpl() {
   CsBatchReap();
   CsBatch& b = g_cs_batches[g_cs_batch_cur];
   if (b.submitted) {
-    // The ring has come round to a batch still in flight.
     const u64 t0 = NowNs();
     DELTA_ZONE("gpu.cs_ring_full");
     if (!Device().Wait(b.submission))
@@ -230,7 +203,6 @@ void CsBatchBeginImpl() {
     g_cs_list = g_frame.list;
     if (g_cs_timestamps)
       g_cs_list->ResetTimestamps(g_cs_timestamps, 0, 256);
-    // Whatever the draws recorded so far did, the dispatches see it.
     g_cs_list->Barrier(kAccessAll, kAccessAll);
     g_cs_batch_open = true;
     return;
@@ -246,17 +218,12 @@ void CsBatchBeginImpl() {
     g_cs_list->PushLabel(label);
   }
   if (kCsTexBridge) {
-    // A frame command list submitted before this batch may still be copying
-    // a bridged texture out of a range the batch overwrites.
     g_cs_list->Barrier(kAccessAll, kAccessAll);
   }
   g_cs_batch_open = true;
 }
 
-// Put the open batch on the queue and go on recording into the next slot.
 u64 g_submit_why[6] = {};
-// Batch id -> submission, for the label publisher's thread: a label waits for
-// the batch its bytes ride in, which is submitted when the walk gets to it.
 base::Mutex g_batch_ids_lock;
 base::ConditionVariable g_batch_ids_wake;
 SubmittedBatch g_submitted[64];
@@ -286,15 +253,12 @@ bool CsBatchSubmit() {
     }
   }
   if (Device().caps().debug_labels && !b.in_frame)
-    g_cs_list->PopLabel();  // close the "cs batch" scope
+    g_cs_list->PopLabel();
   b.count = g_cs_batch_count;
   b.log = base::move(g_cs_batch_log);
   g_cs_batch_log.clear();
-  // A failed submit returns an id that has already been handed out.
   const u64 before = Device().LastSubmission();
   if (b.in_frame) {
-    // The batch rides in the frame chunk: submitting it submits the draws
-    // recorded around it too, in order.
     g_cs_batch_open = false;
     if (!SubmitFrameChunk()) {
       g_cs_failed = true;
@@ -321,14 +285,14 @@ bool CsBatchSubmit() {
   return true;
 }
 
-// Wait until batch `id` (and so every earlier one) has completed.
 bool CsBatchWaitId(u64 id, CsSyncWhy why) {
   DELTA_ZONE("gpu.cs_wait");
   if (g_cs_failed)
     return false;
   if (!id || id <= g_cs_batch_done)
     return true;
-  if (g_cs_batch_open && id >= g_cs_batch_id && (++g_submit_why[0], !CsBatchSubmit()))
+  if (g_cs_batch_open && id >= g_cs_batch_id &&
+      (++g_submit_why[0], !CsBatchSubmit()))
     return false;
   const u64 t0 = NowNs();
   for (;;) {
@@ -359,27 +323,18 @@ bool CsBatchWaitRange(const CsRange& e, CsSyncWhy why) {
   return !e.pending_batch || CsBatchWaitId(e.batch_id, why);
 }
 
-// Everything recorded so far, complete.
 bool CsBatchFlush(CsSyncWhy why) {
   const u64 last = g_cs_batch_open ? g_cs_batch_id : g_cs_batch_next_id - 1;
   return CsBatchWaitId(last, why);
 }
 
-// Record the VRAM->host readback for every dirty range in [first, last), so
-// the single flush that follows covers all of them.
-// A truth is what every GPU consumer reads from, so only a CPU reader ever
-// needs its guest bytes, and those ask on demand; a live target aliasing it
-// still wants the image refreshed at frame end.
 bool CsLazyKept(u64 base, const CsRange& e) {
-  // A linear image is served to draws from its buffer as a tiled truth is.
   const bool linear_image =
       e.image_staging && gcn::TilingIsLinear(e.res.tiling_idx);
   return kCsImageLazyWb && (e.truth || linear_image) && e.gpu_dirty &&
          !e.imported && !CsAliasedBase(base);
 }
 
-// A copy: staging can open a batch, and finalizing an old one may unindex.
-// `ordered`: oldest write first, as every writeback of overlapping ranges.
 base::Vector<u64> DirtyBases(bool ordered) {
   base::Vector<u64> bases;
   bases.reserve(g_cs_dirty_bases.size());
@@ -390,10 +345,7 @@ base::Vector<u64> DirtyBases(bool ordered) {
   return bases;
 }
 
-// Submit the frame's open chunk, behind the open batch when the chunk copies
-// out of a range that batch writes.
 bool CsSplitFrameChunk() {
-  // One list: the chunk and every batch are already in order.
   if (g_cs_in_frame && g_frame.recording)
     return true;
   if (g_cs_chunk_needs_batch && (++g_submit_why[1], !CsBatchSubmit()))
@@ -418,8 +370,6 @@ bool WaitBatch(u64 batch) {
     if (g_submitted[batch % 64].id == batch)
       submission = g_submitted[batch % 64].submission;
   }
-  // Fallen out of the window: long submitted, and the queue runs in order,
-  // so the newest submission covers it.
   return Device().Wait(submission ? submission : Device().LastSubmission());
 }
 

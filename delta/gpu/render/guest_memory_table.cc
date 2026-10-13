@@ -17,17 +17,12 @@ struct Buffer {
   u64 address = 0;
   u64 size = 0;
 };
-// One per dispatch still in flight: a set is reused only once the caller has
-// taken its results, so no dispatch waits for the one before it.
 struct TableSet {
   Buffer table, flags, misses;
   u32 windows = 0;
   bool busy = false;
 };
 base::Vector<TableSet> g_sets;
-// Entry 0 of the table is a header the search can never match (an empty
-// window at 0): its third field names the miss buffer, a u32 count then up
-// to kMissSlots addresses the shader found in no window.
 constexpr u32 kMissSlots = 63;
 
 bool Ensure(Buffer& out, u64 bytes) {
@@ -72,7 +67,6 @@ bool PrepareGuestMemory(base::Span<const GuestMemoryWindow> windows,
       return false;
     std::memset(s.misses.mapped, 0, s.misses.size);
   }
-  // One u32 written flag per window: entry i + 1's dirty field names flag i.
   const u64 bytes = (windows.size() + 1) * sizeof(base::Array<u64, 4>);
   if (!Ensure(s.table, bytes) ||
       (writes && !Ensure(s.flags, windows.size() * 4 + 4)))
@@ -81,7 +75,6 @@ bool PrepareGuestMemory(base::Span<const GuestMemoryWindow> windows,
   entries[0] = {0, 0, s.misses.address, 0};
   for (size_t i = 0; i < windows.size(); i++) {
     const GuestMemoryWindow& w = windows[i];
-    // No flag: the shader drops stores into a read-only window.
     entries[i + 1] = {w.base, w.base + w.size, w.address,
                       writes && w.writable ? s.flags.address + i * 4 : 0};
   }
@@ -124,8 +117,7 @@ void ReleaseGuestMemory(u32 set) {
 }
 
 namespace {
-const guest::SessionReset g_session_reset(
-    [] { guest::ResetResource(g_sets); });
+const guest::SessionReset g_session_reset([] { guest::ResetResource(g_sets); });
 }  // namespace
 
 }  // namespace gpu::render

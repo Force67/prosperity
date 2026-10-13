@@ -15,10 +15,6 @@
 #include "options/options.h"
 
 namespace {
-// A colour target whose NUMBER_TYPE is UINT/SINT holds packed bits, not a
-// colour. Mapping one to UNORM clamps every export into [0,1] and the target
-// reads back black; SotC lost two whole G-buffer planes that way. On by
-// default; DELTA_GPU_INT_RT=0 restores the old UNORM mapping.
 DELTA_OPTION(bool, kIntegerRt, "DELTA_GPU_INT_RT", true);
 DELTA_OPTION(bool, kNoBlend, "DELTA_GPU_NOBLEND", false);
 DELTA_OPTION(bool, kNoSwizzle, "DELTA_GPU_NOSWIZZLE", false);
@@ -80,8 +76,6 @@ i32 SignExtend(u32 value, u32 bits) {
 }  // namespace
 
 rhi::Format GuestTextureFormat(u32 dfmt, u32 nfmt) {
-  // Narrow and float channel counts: RDNA2 titles sample single-channel masks
-  // and packed HDR buffers that the PS4 titles never used.
   if (dfmt == 1 && nfmt == 0)
     return rhi::Format::kR8Unorm;
   if (dfmt == 1 && nfmt == 1)
@@ -132,7 +126,6 @@ rhi::Format GuestTextureFormat(u32 dfmt, u32 nfmt) {
     return rhi::Format::kRGBA8Unorm;
   if (dfmt == 10 && nfmt == 9)
     return rhi::Format::kRGBA8Srgb;
-  // Block-compressed (IMG_DATA_FORMAT_BC1..BC7 = 35..41); sampled natively.
   if (dfmt == 35)
     return nfmt == 9 ? rhi::Format::kBC1Srgb : rhi::Format::kBC1Unorm;
   if (dfmt == 36)
@@ -150,14 +143,10 @@ rhi::Format GuestTextureFormat(u32 dfmt, u32 nfmt) {
   return rhi::Format::kUndefined;
 }
 
-// Block-compressed guest formats: 4x4-texel blocks of 8 or 16 bytes. The
-// detiler and upload then work in block ("element") space.
 bool GuestFormatBlockCompressed(u32 dfmt) {
   return dfmt >= 35 && dfmt <= 41;
 }
 
-// The host side of the same question: a block-compressed rhi::Format shares no
-// view-compatibility class with any uncompressed one.
 bool FormatBlockCompressed(rhi::Format format) {
   switch (format) {
     case rhi::Format::kBC1Unorm:
@@ -183,30 +172,25 @@ bool FormatBlockCompressed(rhi::Format format) {
 u32 GuestFormatElemBytes(u32 dfmt) {
   switch (dfmt) {
     case 1:
-      return 1;  // 8
+      return 1;
     case 2:
     case 3:
-      return 2;  // 16, 8_8
+      return 2;
     case 11:
     case 12:
-      return 8;  // 32_32, 16_16_16_16
+      return 8;
     case 13:
-      return 12;  // 32_32_32
+      return 12;
     case 14:
-      return 16;  // 32_32_32_32
+      return 16;
     case 35:
     case 38:
-      return 8;  // BC1/BC4 block
+      return 8;
     default:
-      return GuestFormatBlockCompressed(dfmt) ? 16  // BC2/3/5/6/7 block
-                                              : 4;  // all 32-bit texel formats
+      return GuestFormatBlockCompressed(dfmt) ? 16 : 4;
   }
 }
 
-// CB_COLORn_INFO uses the GFX7 SurfaceFormat/SurfaceNumber encodings. Keep the
-// established BGRA8 host path for 8_8_8_8 targets; floating-point effect
-// buffers must retain their native precision or HDR/negative values clamp to
-// black.
 bool IsIntegerColorFormat(rhi::Format format) {
   switch (format) {
     case rhi::Format::kR8Uint:
@@ -283,9 +267,6 @@ rhi::Format ColorTargetFormat(u32 info) {
         break;
     }
   }
-  // An SRGB target encodes what the shader exports; left UNORM it stores the
-  // linear value, and a pass reading it through its SRGB T# decodes it again
-  // (GTA:SA's base colour plane, which darkened every lit material).
   if (nfmt == 6 && dfmt == 10)
     return ((info >> 11) & 3) == 1 ? rhi::Format::kBGRA8Srgb
                                    : rhi::Format::kRGBA8Srgb;
@@ -300,18 +281,9 @@ rhi::Format ColorTargetFormat(u32 info) {
       case 5:
         return rhi::Format::kRG16Unorm;
       case 10:
-        // COMP_SWAP (bits 12:11) names the order the hardware writes the four
-        // components in: STD puts red in the first byte, ALT puts blue there.
-        // Answering BGRA for both is invisible on screen (the present path
-        // swaps back), but a pass that SAMPLES the target aliases the image in
-        // the T#'s own format, and there an STD target comes back with red and
-        // blue exchanged (Dead Cells' scene composite renders purple).
+        // COMP_SWAP sets the byte order the hardware writes components in.
         return ((info >> 11) & 3) == 1 ? rhi::Format::kBGRA8Unorm
                                        : rhi::Format::kRGBA8Unorm;
-      // The same host formats the sampled path picks for these T#s. Left to
-      // the default, a 2_10_10_10 target was BGRA8, and a pass sampling it
-      // read 8-bit texels as 10-bit fields (GTA:SA's grading LUT, which tints
-      // every frame through the tonemapper).
       case 8:
         return rhi::Format::kA2R10G10B10Unorm;
       case 9:
@@ -325,11 +297,6 @@ rhi::Format ColorTargetFormat(u32 info) {
   return kDefaultRtFormat;
 }
 
-// CB_COLORn_CLEAR_WORD0/1 hold the fast-clear colour already encoded in the
-// target's own surface format, component 0 at bit 0. Vulkan takes a clear value
-// in R,G,B,A component order and applies the format's channel order itself, so
-// the guest components map straight across even though ColorTargetFormat picks
-// a BGRA host format for 8_8_8_8.
 rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
   const u32 dfmt = (info >> 2) & 0x1F;
   const u32 nfmt = (info >> 8) & 0x7;
@@ -344,42 +311,40 @@ rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
   };
   u32 width[4] = {0, 0, 0, 0};
   switch (dfmt) {
-    case 1:  // 8
+    case 1:
       width[0] = 8;
       break;
-    case 2:  // 16
+    case 2:
       width[0] = 16;
       break;
-    case 3:  // 8_8
+    case 3:
       width[0] = width[1] = 8;
       break;
-    case 4:  // 32
+    case 4:
       width[0] = 32;
       break;
-    case 5:  // 16_16
+    case 5:
       width[0] = width[1] = 16;
       break;
-    case 6:  // 10_11_11
+    case 6:
       width[0] = width[1] = 11;
       width[2] = 10;
       break;
-    case 9:  // 2_10_10_10
+    case 9:
       width[0] = width[1] = width[2] = 10;
       width[3] = 2;
       break;
-    case 10:  // 8_8_8_8
+    case 10:
       width[0] = width[1] = width[2] = width[3] = 8;
       break;
-    case 11:  // 32_32
+    case 11:
       width[0] = width[1] = 32;
       break;
-    case 12:  // 16_16_16_16
+    case 12:
       width[0] = width[1] = width[2] = width[3] = 16;
       break;
-    case 13:  // 32_32_32
-    case 14:  // 32_32_32_32
-      // The clear words are 64 bits, so only the low two components of a wider
-      // texel are representable at all.
+    case 13:
+    case 14:
       width[0] = width[1] = 32;
       break;
     default:
@@ -387,8 +352,6 @@ rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
   }
   const u64 packed = static_cast<u64>(word0) | static_cast<u64>(word1) << 32;
   rhi::ClearColor out{};
-  // Seed opaque: a format with fewer than four components never writes alpha,
-  // and a transparent target is a hole in a deferred composite.
   if (nfmt == 4 || nfmt == 5)
     out.u[3] = 1;
   else
@@ -400,23 +363,22 @@ rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
     const u32 raw = static_cast<u32>((packed >> shift) & mask);
     shift += bits;
     switch (nfmt) {
-      case 0:  // UNORM
-      case 6:  // SRGB: ColorTargetFormat gives it a UNORM host image, so the
-               // encoded value has to pass through unconverted
+      case 0:
+      case 6:
         out.f[i] = static_cast<float>(raw) / static_cast<float>(mask);
         break;
-      case 1:  // SNORM
+      case 1:
         out.f[i] = base::Max(static_cast<float>(SignExtend(raw, bits)) /
                                  static_cast<float>((1u << (bits - 1)) - 1),
                              -1.0f);
         break;
-      case 4:  // UINT
+      case 4:
         out.u[i] = raw;
         break;
-      case 5:  // SINT
+      case 5:
         out.i[i] = SignExtend(raw, bits);
         break;
-      case 7:  // FLOAT
+      case 7:
         if (bits == 32)
           std::memcpy(&out.f[i], &raw, sizeof(raw));
         else if (bits == 16)
@@ -497,7 +459,6 @@ u32 FormatBytes(rhi::Format fmt) {
   }
 }
 
-// GNM blend multiplier (CB_BLENDn_CONTROL factor field) -> Vulkan blend factor.
 rhi::BlendFactor BlendFactor(u32 f) {
   switch (f) {
     case 0:
@@ -512,14 +473,7 @@ rhi::BlendFactor BlendFactor(u32 f) {
       return rhi::BlendFactor::kSrcAlpha;
     case 5:
       return rhi::BlendFactor::kOneMinusSrcAlpha;
-    // 6 upwards is neither the D3D order nor SRC_ALPHA_SATURATE-first: the
-    // hardware enum (V_028780_BLEND_*) runs DST_ALPHA, DST_COLOR,
-    // SRC_ALPHA_SATURATE, the two BOTH_* forms, the constants and only then
-    // the dual-source factors at 0x0f..0x12. That last range is what pins it:
-    // KytyPS5's IsDualSourceBlendFactor tests exactly 0x0f..0x12. Reading
-    // 0x0d (CONSTANT_COLOR) as SRC1_COLOR gave a shader with no Index-1
-    // output an undefined second source, which comes out as a black colour
-    // term (Astro Bot's whole composite chain).
+    // Blend enums 0x0f..0x12 are the dual-source factors, not the D3D order.
     case 6:
       return rhi::BlendFactor::kDstAlpha;
     case 7:
@@ -530,9 +484,6 @@ rhi::BlendFactor BlendFactor(u32 f) {
       return rhi::BlendFactor::kOneMinusDstColor;
     case 10:
       return rhi::BlendFactor::kSrcAlphaSaturate;
-    // BOTH_SRC_ALPHA / BOTH_INV_SRC_ALPHA set the colour and alpha factors
-    // together on hardware; Vulkan has no such factor, and the pair they
-    // stand for is (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) per channel.
     case 11:
       return rhi::BlendFactor::kSrcAlpha;
     case 12:
@@ -558,7 +509,6 @@ rhi::BlendFactor BlendFactor(u32 f) {
   }
 }
 
-// GNM blend function (combine fcn) -> blend op.
 rhi::BlendOp BlendOp(u32 f) {
   switch (f) {
     case 0:
@@ -588,15 +538,8 @@ u8 ColorWriteMask(u32 target_mask,
   return static_cast<u8>(mask);
 }
 
-// Decode CB_BLEND0_CONTROL into a colour-blend attachment. `en` is the
-// per-target blend enable (bit 30). Falls back to a sensible src-alpha blend
-// when the guest enables blend but the control word is zero (default state, not
-// yet set).
 rhi::BlendAttachment BlendAttachment(u32 bc, bool en) {
   rhi::BlendAttachment cba;
-  // DELTA_GPU_NOBLEND: force opaque (diagnostic) to test whether a draw
-  // vanishes because its src-alpha blend multiplies by a zero texel alpha
-  // (Doom64 3D walls).
   if (kNoBlend)
     en = false;
   if (!en)
@@ -616,23 +559,10 @@ rhi::BlendAttachment BlendAttachment(u32 bc, bool en) {
   return cba;
 }
 
-// GCN data format -> Vulkan vertex format.
 rhi::Format VertexFormat(u32 dfmt, u32 nfmt) {
-  // The recompiled vertex shader declares every attribute as a float vector,
-  // so an integer attribute format is a type mismatch and the attribute reads
-  // undefined (VUID-VkGraphicsPipelineCreateInfo-Input-08733). The SCALED
-  // forms deliver the same integer VALUE as a float, which is what a shader
-  // that fetches an integer attribute and converts it ends up with. 32-bit
-  // integers have no SCALED form but need none: the module BITCASTS every
-  // attribute component into its VGPR (what the hardware does for an integer
-  // number format), and a 32-bit SFLOAT attribute delivers those same 32 bits
-  // to a float input, so the SFLOAT twin is both bit-exact and correctly
-  // typed.
-  // GCN number formats: 0 UNORM, 1 SNORM, 2 USCALED, 3 SSCALED, 4 UINT,
-  // 5 SINT, 7 FLOAT. The scaled forms deliver the integer value as a float,
-  // which is what Vulkan's *_SSCALED/_USCALED do.
+  // Integer attributes are bitcast into the VGPR; the SFLOAT twin is bit-exact.
   switch (dfmt) {
-    case 1:  // 8
+    case 1:
       switch (nfmt) {
         case 1:
           return rhi::Format::kR8Snorm;
@@ -647,7 +577,7 @@ rhi::Format VertexFormat(u32 dfmt, u32 nfmt) {
         default:
           return rhi::Format::kR8Unorm;
       }
-    case 2:  // 16
+    case 2:
       switch (nfmt) {
         case 1:
           return rhi::Format::kR16Snorm;
@@ -664,7 +594,7 @@ rhi::Format VertexFormat(u32 dfmt, u32 nfmt) {
         default:
           return rhi::Format::kR16Unorm;
       }
-    case 3:  // 8_8
+    case 3:
       switch (nfmt) {
         case 1:
           return rhi::Format::kRG8Snorm;
@@ -679,9 +609,9 @@ rhi::Format VertexFormat(u32 dfmt, u32 nfmt) {
         default:
           return rhi::Format::kRG8Unorm;
       }
-    case 4:  // 32
+    case 4:
       return rhi::Format::kR32Float;
-    case 5:  // 16_16
+    case 5:
       switch (nfmt) {
         case 0:
           return rhi::Format::kRG16Unorm;
@@ -699,10 +629,10 @@ rhi::Format VertexFormat(u32 dfmt, u32 nfmt) {
           return rhi::Format::kRG16Float;
       }
     case 8:
-      return rhi::Format::kA2R10G10B10Unorm;  // 10_10_10_2
+      return rhi::Format::kA2R10G10B10Unorm;
     case 9:
-      return rhi::Format::kA2B10G10R10Unorm;  // 2_10_10_10
-    case 10:                                  // 8_8_8_8
+      return rhi::Format::kA2B10G10R10Unorm;
+    case 10:
       switch (nfmt) {
         case 1:
           return rhi::Format::kRGBA8Snorm;
@@ -719,7 +649,7 @@ rhi::Format VertexFormat(u32 dfmt, u32 nfmt) {
       }
     case 11:
       return rhi::Format::kRG32Float;
-    case 12:  // 16_16_16_16
+    case 12:
       switch (nfmt) {
         case 0:
           return rhi::Format::kRGBA16Unorm;
@@ -745,44 +675,38 @@ rhi::Format VertexFormat(u32 dfmt, u32 nfmt) {
   }
 }
 
-// Byte size of one vertex element in the given GCN data format; must match
-// the rhi::Format VertexFormat() selects. Used to size a stride-0 (constant)
-// binding's upload, where there is no source stride to derive the record extent
-// from.
 u32 VertexFormatBytes(u32 dfmt) {
   switch (dfmt) {
     case 1:
-      return 1;  // R8
+      return 1;
     case 3:
-      return 2;  // R8G8
+      return 2;
     case 2:
-      return 2;  // R16
+      return 2;
     case 4:
-      return 4;  // R32
+      return 4;
     case 5:
-      return 4;  // R16G16
+      return 4;
     case 6:
-      return 4;  // R11G11B10
+      return 4;
     case 8:
     case 9:
-      return 4;  // 10_10_10_2 / 2_10_10_10
+      return 4;
     case 10:
-      return 4;  // R8G8B8A8
+      return 4;
     case 11:
-      return 8;  // R32G32
+      return 8;
     case 12:
-      return 8;  // R16G16B16A16
+      return 8;
     case 13:
-      return 12;  // R32G32B32
+      return 12;
     case 14:
-      return 16;  // R32G32B32A32
+      return 16;
     default:
       return 16;
   }
 }
 
-// VGT_PRIMITIVE_TYPE -> Vulkan topology. Unknown/2D types fall back to triangle
-// list (the previous hardcoded topology), so the 2D path is unchanged.
 rhi::Topology PrimitiveTopology(u32 prim) {
   switch (prim) {
     case 1:
@@ -795,7 +719,7 @@ rhi::Topology PrimitiveTopology(u32 prim) {
       return rhi::Topology::kTriangleFan;
     case 6:
       return rhi::Topology::kTriangleStrip;
-    case 4:  // triangle list
+    case 4:
     default:
       return rhi::Topology::kTriangleList;
   }

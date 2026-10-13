@@ -14,9 +14,8 @@
 
 namespace gpu::ps5 {
 namespace {
-using Range = base::Pair<u64, u64>;  // [first, end) of guest VA
+using Range = base::Pair<u64, u64>;
 
-// VA ranges whose backing is also mapped somewhere else, sorted and merged.
 base::Vector<Range> g_aliased;
 u64 g_aliased_version = ~0ull;
 
@@ -24,8 +23,6 @@ struct Piece {
   u64 file, offset, offset_end, va;
 };
 
-// File-backed mappings, with the pieces the write tracker's own protection
-// splits a mapping into joined again, so they only change on a real remap.
 base::Vector<Piece> FilePieces() {
   base::Vector<Piece> pieces;
   for (const HostMapping& m : HostMappings()) {
@@ -35,8 +32,8 @@ base::Vector<Piece> FilePieces() {
     const u64 bytes = m.end - m.begin;
     if (!pieces.empty()) {
       Piece& last = pieces.back();
-      if (last.file == file && last.va + (last.offset_end - last.offset) ==
-                                   m.begin &&
+      if (last.file == file &&
+          last.va + (last.offset_end - last.offset) == m.begin &&
           last.offset_end == m.offset) {
         last.offset_end += bytes;
         continue;
@@ -63,10 +60,9 @@ base::Vector<Range> FindAliased(base::Vector<Piece> pieces) {
       if (first < end)
         aliased.push_back({p.va + first - p.offset, p.va + end - p.offset});
     };
-    // Earlier pieces can only overlap a prefix. Merge later overlaps before
-    // emitting, rather than materializing every pair of aliases.
-    for (size_t j = i + 1; j < pieces.size() && pieces[j].file == pieces[i].file &&
-                           pieces[j].offset < p.offset_end && end < p.offset_end;
+    for (size_t j = i + 1;
+         j < pieces.size() && pieces[j].file == pieces[i].file &&
+         pieces[j].offset < p.offset_end && end < p.offset_end;
          j++) {
       const u64 lo = pieces[j].offset;
       const u64 hi = base::Min(p.offset_end, pieces[j].offset_end);
@@ -100,14 +96,11 @@ bool Overlaps(const base::Vector<Range>& set, u64 first, u64 end) {
   return it != set.end() && it->first < end;
 }
 
-// Newly aliased memory may have been written through the new mapping already:
-// report it, so whatever the tracker vouched for is checked again.
 void Refresh() {
-  HostMappings();  // parses again if a remap made them stale
+  HostMappings();
   if (g_aliased_version == HostMappingsVersion())
     return;
   g_aliased_version = HostMappingsVersion();
-  // Most remaps leave file-backed memory as it was: nothing to redo then.
   static base::Vector<Piece> files;
   static const guest::SessionReset reset_files(
       [] { guest::ResetResource(files); });
@@ -119,9 +112,9 @@ void Refresh() {
   files = now_files;
   base::Vector<Range> now = FindAliased(base::move(now_files));
   for (const Range& r : now) {
-    const Range* known = base::LowerBound(
-        g_aliased.begin(), g_aliased.end(), r.first,
-        [](const Range& a, u64 v) { return a.first < v; });
+    const Range* known =
+        base::LowerBound(g_aliased.begin(), g_aliased.end(), r.first,
+                         [](const Range& a, u64 v) { return a.first < v; });
     if (known == g_aliased.end() || known->first != r.first ||
         known->second != r.second)
       GuestWriteTracker().NoteWrite(r.first, r.second - r.first);

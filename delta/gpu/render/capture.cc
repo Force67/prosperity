@@ -23,9 +23,6 @@ namespace {
 int g_dumped_frames = 0;
 }  // namespace
 
-// Directory frame dumps go to. Defaults to /tmp; Android has no /tmp, so the
-// runner sets DELTA_GPU_DUMP_DIR to a writable path (e.g. the cwd under
-// /data/local/tmp). Returned without a trailing slash.
 const char* DumpDir() {
   const char* d = kDumpDir;
   return (d && *d) ? d : "/tmp";

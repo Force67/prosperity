@@ -3,8 +3,6 @@
  */
 #pragma once
 
-// FNV-1a mixing for descriptor keys.
-
 #include "base/arch.h"
 
 namespace gpu::render {

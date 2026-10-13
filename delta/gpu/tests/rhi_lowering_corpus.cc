@@ -1,11 +1,3 @@
-// Developer tool, not a test: lowers every SPIR-V module in a directory (by
-// default the recompiler's cache, ~/.cache/ps4delta/spirv) to GLSL the way
-// the OpenGL backend does, compiles and links it with the GL driver, and
-// reports per-stage success counts and the most common failure reasons.
-//
-//   rhi_lowering_corpus [dir] [--threads N] [--limit N] [--dump DIR]
-//
-// --dump writes the GLSL and the error of each failure to DIR.
 
 #include <epoxy/gl.h>
 
@@ -41,7 +33,6 @@ struct Result {
   base::String reason;
 };
 
-// The *.spv files directly inside `dir`.
 void ListSpirv(const base::String& dir, base::Vector<base::String>* files) {
   DIR* d = ::opendir(dir.c_str());
   if (!d)
@@ -72,8 +63,7 @@ base::Vector<u32> ReadWords(const base::String& path) {
   return words;
 }
 
-// Modules that need a capability the backend reports absent: Vulkan never
-// gets them either on such a device, so they are skipped, not failed.
+// Vulkan never gets these on such a device, so skip rather than fail.
 const char* Unsupported(const base::Vector<u32>& words) {
   constexpr u32 kOpCapability = 17;
   constexpr u32 kPhysicalStorageBufferAddresses = 5347;
@@ -121,8 +111,6 @@ const char* StageName(u32 stage) {
   }
 }
 
-// The first line of a log, with line/column numbers and identifiers in
-// quotes blanked so that equal causes group together.
 base::String Reason(const base::String& log) {
   base::String line = log.substr(0, log.find('\n'));
   base::String out;
@@ -208,8 +196,7 @@ Result Process(const base::String& path,
     r.outcome = Outcome::kCompile;
     log = InfoLog(shader, false);
   } else if (r.stage != rhi::kStageGeometry) {
-    // Linked alone, as the backend links whole programs: a geometry shader
-    // cannot link without a vertex shader, so it is only compiled.
+    // Geometry shaders cannot link without a vertex shader.
     const GLuint prog = glCreateProgram();
     glAttachShader(prog, shader);
     glLinkProgram(prog);

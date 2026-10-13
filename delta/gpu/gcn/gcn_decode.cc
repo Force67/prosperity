@@ -1,7 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * GCN GFX7 instruction decoder. See gcn_decode.h.
  */
 
 #include "gpu/gcn/gcn_decode.h"
@@ -21,14 +19,11 @@
 namespace gpu::gcn {
 namespace {
 
-// The 'OrbShdr' ShaderBinaryInfo signature at byte offset `off` in `code`?
 bool OrbShdrAt(const u32* code, u32 off) {
   const char* s = reinterpret_cast<const char*>(code) + off;
   return std::memcmp(s, "OrbShdr", 7) == 0;
 }
 
-// A 32-bit-encoded scalar/vector op carries a trailing 32-bit literal when a
-// source-operand field selects LITERAL_CONST (255).
 bool Sop2HasLiteral(u32 w) {
   return (w & 0xFF) == 255 || ((w >> 8) & 0xFF) == 255;
 }
@@ -49,10 +44,8 @@ InstExtension VopExtension(u32 w, IsaMode mode) {
   }
 }
 
-// Encoding classification by the fixed top bits. Returns the family and fills
-// the encoding-relative opcode.
 Enc Classify(u32 w, IsaMode mode, u32& opcode) {
-  if ((w >> 30) == 0x2) {  // 10b => scalar
+  if ((w >> 30) == 0x2) {
     const u32 top9 = w >> 23;
     if (top9 == 0x17F) {
       opcode = (w >> 16) & 0x7F;
@@ -131,7 +124,6 @@ Enc Classify(u32 w, IsaMode mode, u32& opcode) {
   return Enc::kUnknown;
 }
 
-// Dwords occupied (excluding any trailing literal).
 u32 BaseSize(Enc e) {
   switch (e) {
     case Enc::kVop3:
@@ -156,14 +148,10 @@ bool HasTrailingLiteral(const Inst& inst, u32 w) {
     case Enc::kSop1:
       return Sop1HasLiteral(w);
     case Enc::kSopk:
-      return inst.opcode == 0x15;  // s_setreg_imm32_b32
+      return inst.opcode == 0x15;
     case Enc::kSmrd:
-      // With IMM=0, SOFFSET uses the scalar-source encoding; 255 selects a
-      // trailing literal byte offset instead of an SGPR.
       return ((w >> 8) & 1) == 0 && (w & 0xFF) == 255;
     case Enc::kVop2:
-      // V_MADMK_F32 (0x20) and V_MADAK_F32 (0x21) always carry a trailing
-      // 32-bit literal (the K constant), independent of src0=LITERAL_CONST.
       return VopExtension(w, inst.isa) == InstExtension::kLiteral ||
              inst.opcode == 0x20 || inst.opcode == 0x21 ||
              (inst.isa == IsaMode::kNeo &&
@@ -184,7 +172,6 @@ bool HasTrailingLiteral(const Inst& inst, u32 w) {
   }
 }
 
-// FNV-1a over the code dwords; validates program-cache entries.
 u64 HashCode(const u32* code, u32 dwords) {
   u64 h = 0xcbf29ce484222325ull;
   for (u32 i = 0; i < dwords; i++)
@@ -207,22 +194,11 @@ void SetDefaultIsaMode(IsaMode mode) {
   NextProgramCacheGeneration();
 }
 
-// A hard ceiling on a shader the footer hint claims. 256 KiB of GCN is far
-// past anything a compiler emits; beyond it the hint is not a length.
 constexpr u32 kMaxShaderDwords = 64 * 1024;
 
 u32 CodeLength(const u32* code, u32 max_dwords) {
   if (!code || max_dwords < 2)
     return 0;
-  // Fast path: the toolchain emits "s_mov_b32 vcc_hi, #imm" (0xBEEB03FF) as the
-  // first instruction, where the ShaderBinaryInfo footer sits at
-  // code[(imm+1)*2].
-  // The hint is authoritative, so honour it even past the caller's window: a
-  // shader LONGER than the window is exactly the case worth getting right.
-  // Decoding a prefix stops at the first s_endpgm, which in a shader with an
-  // early-out is not the end, and every branch past that point then lands on
-  // whatever follows the code (0xd0d0d0d0 fill, in GTA:SA's deferred
-  // lighting dispatch, which the translator rejected as an unknown encoding.
   if (code[0] == 0xBEEB03FFu) {
     const u64 d = (static_cast<u64>(code[1]) + 1) * 2;
     if (d >= 2 && d + 2 <= kMaxShaderDwords &&
@@ -230,8 +206,6 @@ u32 CodeLength(const u32* code, u32 max_dwords) {
         OrbShdrAt(code, static_cast<u32>(d) * 4))
       return static_cast<u32>(d);
   }
-  // General case: scan (dword-aligned) for the footer signature. The GCN code
-  // ends exactly where its footer begins, so the footer's offset is the length.
   for (u32 d = 1; d + 2 <= max_dwords; d++)
     if (OrbShdrAt(code, d * 4))
       return d;
@@ -293,13 +267,10 @@ Program Decode(const u32* code,
       }
     }
     if (inst.size == 0)
-      inst.size = 1;  // safety: never stall
+      inst.size = 1;
 
     out.push_back(inst);
 
-    // s_endpgm (SOPP opcode 1) terminates a basic block. When bounded by the
-    // real code length it is not an end-of-stream marker, so keep decoding: a
-    // block reached only after an early-out s_endpgm must still be lifted.
     if (stop_at_endpgm && inst.enc == Enc::kSopp && inst.opcode == 1)
       break;
     i += inst.size;
@@ -310,8 +281,8 @@ Program Decode(const u32* code,
 Program DecodeShader(const u32* code, u32 max_dwords, IsaMode mode) {
   const u32 len = CodeLength(code, max_dwords);
   if (len)
-    return Decode(code, len, /*stop_at_endpgm=*/false, mode);
-  return Decode(code, max_dwords, /*stop_at_endpgm=*/true, mode);
+    return Decode(code, len, false, mode);
+  return Decode(code, max_dwords, true, mode);
 }
 
 base::Vector<u8> ComputeReachability(const Program& program) {
@@ -319,28 +290,18 @@ base::Vector<u8> ComputeReachability(const Program& program) {
   if (program.empty())
     return reachable;
 
-  // 0=ordinary, 1=unconditional relative, 2=conditional relative, 3=end,
-  // 4=indirect control flow. Indirect targets cannot be recovered statically.
   const auto branch_kind = [](const Inst& inst) {
     if (inst.enc == Enc::kSopk && inst.opcode == 0x11)
-      return 2;  // s_cbranch_i_fork
+      return 2;
     if (inst.enc == Enc::kSop2 && inst.opcode == 0x2b)
-      return 4;  // s_cbranch_g_fork
+      return 4;
     if (inst.enc == Enc::kSop1) {
       switch (inst.opcode) {
-        case 0x20:  // s_setpc_b64
-        case 0x22:  // s_rfe_b64
-        case 0x32:  // s_cbranch_join
+        case 0x20:
+        case 0x22:
+        case 0x32:
           return 4;
-        // s_swappc_b64 is a CALL: it parks the return address in the same pair
-        // it jumps through, and the callee returns with s_setpc_b64. Its
-        // successor is therefore the next instruction, not "any block". Every
-        // vertex shader that reaches its fetch shader this way opens with one,
-        // so calling it indirect retained the whole program, including the
-        // compiler's padding past the final s_endpgm, which decodes as garbage.
-        // GTA:SA lost 59 of its 128 vertex shaders to unsupported ops that its
-        // code does not contain.
-        case 0x21:  // s_swappc_b64
+        case 0x21:
         default:
           return 0;
       }
@@ -418,8 +379,6 @@ base::Vector<u8> ComputeReachability(const Program& program) {
       if (kind == 3)
         break;
       if (kind == 4) {
-        // An indirect target may be any decoded block. Conservatively retain
-        // all blocks rather than misreporting valid code as dead.
         base::Fill(block_reachable.begin(), block_reachable.end(), 1);
         worklist.clear();
         break;
@@ -467,16 +426,11 @@ base::SharedPointer<const Program> CachedProgram(u64 addr, u32 max_dwords) {
     return base::MakeShared<const Program>();
   const IsaMode mode = DefaultIsaMode();
 
-  // Fast path: already revalidated this generation (frame). A draw touches the
-  // same shader several times (textures, cbuffers, attributes), so skipping the
-  // footer scan + code hash on repeats is what keeps this per-draw-affordable.
   auto it = cache.find(addr);
   if (it != cache.end() && it->second.generation == g_prog_cache_generation &&
       it->second.mode == mode)
     return it->second.program;
 
-  // Hash the real code span (footer-bounded when available) so an in-place
-  // rewrite at the same address invalidates the entry.
   const u32 len = CodeLength(code, max_dwords);
   const u32 hashed = len ? len : (max_dwords < 64 ? max_dwords : 64);
   const u64 hash = HashCode(code, hashed);
@@ -487,9 +441,6 @@ base::SharedPointer<const Program> CachedProgram(u64 addr, u32 max_dwords) {
     return it->second.program;
   }
 
-  // Unbounded-growth backstop. A title draws with thousands of shaders
-  // (GTA:SA well over 512), so clearing the lot at a small cap re-decoded
-  // every live shader each frame; drop only the ones idle for a while.
   if (cache.size() > 4096) {
     base::EraseIf(cache, [](const auto& kv) {
       return kv.second.generation + 60 < g_prog_cache_generation;
@@ -521,16 +472,12 @@ u64 CachedCodeHash(u64 addr, u32 max_dwords) {
   const auto* code = reinterpret_cast<const u32*>(addr);
   u32 len = CodeLength(code, max_dwords);
   if (!len) {
-    // No footer: hash up to the terminator instead of a fixed window, or the
-    // bytes that happen to follow the shader make every instance of the same
-    // code hash differently.
     const auto program = CachedProgram(addr, max_dwords);
     len = max_dwords;
     for (const Inst& inst : *program) {
-      const bool ends =
-          (inst.enc == Enc::kSopp && inst.opcode == 0x01) ||  // s_endpgm
-          (inst.enc == Enc::kSop1 &&
-           (inst.opcode == 0x20 || inst.opcode == 0x21));  // s_setpc/s_swappc
+      const bool ends = (inst.enc == Enc::kSopp && inst.opcode == 0x01) ||
+                        (inst.enc == Enc::kSop1 &&
+                         (inst.opcode == 0x20 || inst.opcode == 0x21));
       if (ends) {
         len = inst.pc + inst.size;
         break;
@@ -539,14 +486,14 @@ u64 CachedCodeHash(u64 addr, u32 max_dwords) {
   }
   const u64 hash = HashCode(code, len);
   if (cache.size() > 4096)
-    cache.clear();  // unbounded-growth backstop
+    cache.clear();
   cache[addr] = {hash, g_prog_cache_generation};
   return hash;
 }
 
 bool CallsFetchShader(const Program& program) {
   for (const Inst& inst : program)
-    if (inst.enc == Enc::kSop1 && inst.opcode == 0x21)  // s_swappc_b64
+    if (inst.enc == Enc::kSop1 && inst.opcode == 0x21)
       return true;
   return false;
 }

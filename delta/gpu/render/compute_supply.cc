@@ -2,9 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// Handing dispatch output to draws: textures, buffers and vertices read
-// straight from the compute ranges.
-
 #include "gpu/render/compute_internal.h"
 
 #include <cstring>
@@ -66,12 +63,8 @@ bool PreserveCsDepthBeforeClear(u64 base) {
                 rhi::kAccessComputeRead | rhi::kAccessHostRead);
   AliasedImageBarrier(list, image, rhi::TextureState::kCopySrc, old_state);
 
-  // Compute for frame N runs before graphics N. This graphics-side snapshot
-  // is therefore the input for compute N+1, and must suppress that frame's
-  // usual copy from the now-cleared depth image.
   range.rt_sourced = true;
   range.last_rt_frame = static_cast<int>(g_frame.num) + 1;
-  // The clear about to be bound takes the next serial: that one is not news.
   range.rt_serial = g_render_serial + 1;
   if (kCsRtTrace) {
     static int logged = 0;
@@ -82,7 +75,6 @@ bool PreserveCsDepthBeforeClear(u64 base) {
   return true;
 }
 
-// Disjoint raw/truth ranges can carry a streamed image's complete guest layout.
 bool CsSupplyTextureParts(u64 base,
                           const gcn::TextureLayout32& tiled,
                           u32 w,
@@ -175,7 +167,7 @@ bool CsSupplyTextureParts(u64 base,
     }
     list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessComputeRead);
     RecordImageTiling(list, *table, assembled, 0, tiled.size, pixels,
-                      linear.size, /*detile=*/true);
+                      linear.size, true);
     StampView(pixels, base, 0, table, revision);
   }
   rhi::TextureBarrier barrier{img, state, rhi::TextureState::kCopyDst};
@@ -242,30 +234,19 @@ bool CsSupplyTexture(u64 base,
     }
     return false;
   };
-  // Only a raw-staged surface is byte for byte what the image samples; the
-  // unpacked (11/11/10), widened (8/16-bit) and decoded (BCn) stagings are
-  // not. A live target's address belongs to the render-target path.
   const u32 width = compressed ? (w + 3) / 4 : w;
   const u32 height = compressed ? (h + 3) / 4 : h;
   if (r.width != width || r.height != height)
     return declined("extent");
-  // Texture streamers write BC blocks through 64/128-bit integer images.
   if (compressed &&
       ((r.nfmt != 4 && r.nfmt != 5) ||
        (r.dfmt != 11 && r.dfmt != 12 && r.dfmt != 14) ||
        (img && (!rhi::GetFormatInfo(img->desc().format).compressed ||
                 rhi::GetFormatInfo(img->desc().format).bytes != r.elem_bytes))))
     return declined("block format");
-  // A texture may name fewer layers than the dispatch's view of the same
-  // memory (a cube read as its six faces of an eight-slice array): checked
-  // against the tiled layouts below.
   if (r.layers < layout.layers || r.mip_levels > layout.mip_levels ||
       (!supplied_mips && r.mip_levels != layout.mip_levels))
     return declined("layers/mips");
-  // A truth's narrow texels come out packed by the tiling shader. An 11/11/10
-  // surface is staged unpacked to RGBA32F: it goes through a float image and
-  // a blit, which packs it. Every other converted staging (BCn decoded, widened
-  // 8/16-bit) has no image the copy could land in.
   const bool narrow = e.truth && r.elem_bytes < 4 && r.stage_elem_bytes == 4;
   const bool unpacked = r.dfmt == 6 && !e.truth && r.stage_elem_bytes == 16 &&
                         r.mip_levels == 1 && r.layers == 1;
@@ -278,13 +259,8 @@ bool CsSupplyTexture(u64 base,
       ((img && !BlitsBetween(rhi::Format::kRGBA32Float, img->desc().format)) ||
        !GetBridgeFloatImage(w, h)))
     return declined("no blit");
-  // A live target answers for its own geometry only; a view of the same
-  // memory at another size (a 2432x1368 upscale over a 1080p target's pages)
-  // is this range's.
   if (LiveTargetOfSize(base, w, h))
     return declined("live target");
-  // Another dirty range inside the footprint (a mip generator binding one
-  // level at its own address) holds bytes this buffer does not.
   if (!DirtyRangesOverlapping(base, layout.size, base).empty())
     return declined("dirty sibling");
   gcn::TextureLayout32 tiled, linear;
@@ -327,7 +303,6 @@ bool CsSupplyTexture(u64 base,
     *supplied_mips = linear.mip_levels;
   if (!img)
     return true;
-  // A volume's layers are its depth slices.
   const bool volume = img->desc().dim == rhi::TextureDim::k3D;
   if (volume) {
     if (linear.mip_levels != 1)
@@ -351,7 +326,7 @@ bool CsSupplyTexture(u64 base,
       return false;
     if (fresh) {
       RecordImageTiling(list, *table, e.buf, 0, e.guest_bytes, src, linear.size,
-                        /*detile=*/true);
+                        true);
       StampView(src, base, 0, table, e.write_seq);
     }
   }
@@ -363,8 +338,6 @@ bool CsSupplyTexture(u64 base,
   b.range.layers = volume ? 1 : layout.layers;
   list->Barrier(0, 0, &b, 1);
   if (unpacked) {
-    // RGBA32F texels into the float image, then a blit packs them into the
-    // texture's 11/11/10.
     rhi::Texture* float_image = GetBridgeFloatImage(w, h);
     rhi::TextureBarrier fb;
     fb.texture = float_image;
@@ -403,11 +376,8 @@ DELTA_OPTION(bool, kBufMemo, "DELTA_GPU_BUFMEMO", true);
 
 namespace gpu::render::cs {
 
-// The one dirty raw range holding all of [base, base+bytes), or null.
 CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base);
 
-// Asked once per raw buffer per draw, and the answer only moves when compute
-// state does, which bumps the texture epoch.
 CsRange* BufferSource(u64 base, u64 bytes, u64* range_base) {
   if (!kCsBufBridge || !kCsVram || g_cs_failed || !bytes || !g_frame.recording)
     return nullptr;
@@ -451,7 +421,6 @@ CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base) {
   if (several || !only)
     return nullptr;
   CsRange& e = g_cs_ranges.find(only)->second;
-  // Raw bytes only: an image staging or a truth holds another layout.
   const u64 valid = base::Min<u64>(e.size, e.guest_bytes);
   if (!e.buf || e.image_staging || e.truth || e.imported || base < only ||
       base + bytes > only + valid)
@@ -464,7 +433,6 @@ CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base) {
 
 namespace gpu::render {
 
-// The newest batch still writing into [base, base+bytes) of the guest pages.
 u64 PendingGuestWriteBatch(u64 base, u64 bytes) {
   u64 batch = 0;
   for (const PendingGuestWrite& w : g_pending_guest_writes)
@@ -478,8 +446,6 @@ u64 CsBufferRevision(u64 base, u64 bytes) {
   const CsRange* e = BufferSource(base, bytes, &range_base);
   if (e)
     return e->write_seq;
-  // Mirror revisions run in their own high half, apart from a range's, and
-  // writes still on their way to the guest pages in the quarter below.
   const u64 mirror = MirrorRevision(base, bytes);
   if (mirror)
     return mirror | (1ull << 63);
@@ -493,8 +459,6 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   CsRange* const found = BufferSource(base, bytes, &range_base);
   if (!found && dst && MirrorRevision(base, bytes))
     return MirrorSupplyBuffer(base, bytes, dst, dst_off);
-  // Read on the GPU after the batch that writes them, not on the CPU after a
-  // wait for it.
   if (!found && dst && g_frame.recording &&
       PendingGuestWriteBatch(base, bytes)) {
     EndRegion();
@@ -509,10 +473,6 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   if (!found || !dst)
     return false;
   CsRange& e = *found;
-  // The buffer holds the dispatch's output plus, around it, the guest bytes as
-  // they were staged in; the writeback would merge in whatever the CPU wrote
-  // there since. Only while the guest still holds what was staged are the two
-  // the same bytes.
   const u64 off = base - range_base;
   CollectGuestWrites();
   if (!e.staged_clean) {
@@ -552,8 +512,7 @@ bool CsSupplyTextureFromBuffer(u64 base,
   if (!found)
     return MirrorSupplyTexture(base, tiled, linear, img, state, seq);
   CsRange& e = *found;
-  const TileTable* table =
-      GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4);
+  const TileTable* table = GetTileTable(tiled, linear, tiled.elem_bytes < 4);
   if (!table)
     return false;
   if (!img)
@@ -561,8 +520,6 @@ bool CsSupplyTextureFromBuffer(u64 base,
   e.last_used_frame = g_frame.num;
   if (*seq == e.write_seq)
     return true;
-  // As for CsSupplyBuffer: the bytes around the output are the staged guest
-  // bytes, so they must still be what the guest holds.
   const u64 off = base - range_base;
   CollectGuestWrites();
   if (!e.staged_clean) {
@@ -592,7 +549,7 @@ bool CsSupplyTextureFromBuffer(u64 base,
     return false;
   if (fresh) {
     RecordImageTiling(list, *table, e.buf, off, tiled.size, src, linear.size,
-                      /*detile=*/true);
+                      true);
     StampView(src, range_base, off, table, e.write_seq);
   }
   rhi::TextureBarrier b;
@@ -616,9 +573,6 @@ bool CsSupplyTextureFromBuffer(u64 base,
   return true;
 }
 
-// The range holding a draw's vertex window. Unlike a raw window, neighbours
-// may touch its ends: a mesh's streams are written through V#s whose extents
-// run a few bytes into the next mesh's vertices without writing them.
 CsRange* VertexSource(u64 base, u64 bytes, u64* range_base) {
   if (!kCsBufBridge || !kCsVram || g_cs_failed || !bytes || !g_frame.recording)
     return nullptr;
@@ -644,7 +598,6 @@ CsRange* VertexSource(u64 base, u64 bytes, u64* range_base) {
   return bad ? nullptr : found;
 }
 
-// A written window still owned by the GPU, or awaiting its guest copy.
 bool MirrorHoldsNewest(u64 base, u64 bytes) {
   if (!bytes || !MirrorWritten(base, bytes))
     return false;
@@ -691,8 +644,12 @@ void MakeComputeBufferReadable(u64 batch, u64 mirror_seq = 0) {
   }
 }
 
-bool BindComputeBuffer(u64 base, u64 bytes, CsRange* found, u64 range_base,
-                       rhi::Buffer** buffer, u64* offset) {
+bool BindComputeBuffer(u64 base,
+                       u64 bytes,
+                       CsRange* found,
+                       u64 range_base,
+                       rhi::Buffer** buffer,
+                       u64* offset) {
   if (!found && MirrorHoldsNewest(base, bytes)) {
     MakeComputeBufferReadable(PendingGuestWriteBatch(base, bytes),
                               MirrorWritten(base, bytes)->seq);
@@ -706,18 +663,12 @@ bool BindComputeBuffer(u64 base, u64 bytes, CsRange* found, u64 range_base,
   if (!found)
     return false;
   CsRange& e = *found;
-  // As for CsSupplyBuffer: only while the guest still holds what was staged
-  // do the buffer's bytes around the output equal guest memory's.
   const u64 off = base - range_base;
   CollectGuestWrites();
   if (!e.staged_clean) {
     g_buf_bridge_declined++;
     return false;
   }
-  // One barrier outside the pass covers every batch recorded so far, so a pass
-  // of skinned draws ends once, not per draw. A later dispatch into a range
-  // this chunk reads splits the chunk (chunk_ref), so the draw still sees the
-  // output it was recorded against.
   MakeComputeBufferReadable(e.batch_id);
   e.last_used_frame = g_frame.num;
   e.frame_ref = g_frame.num;
@@ -729,7 +680,6 @@ bool BindComputeBuffer(u64 base, u64 bytes, CsRange* found, u64 range_base,
   return true;
 }
 
-// Every revision gets a separate buffer until its frame slot retires.
 bool GatherDrawBuffer(u64 base,
                       u64 bytes,
                       rhi::Buffer** buffer,
@@ -887,10 +837,6 @@ bool CsStorageBuffer(u64 base,
   return GatherDrawBuffer(base, bytes, buffer, offset, found, padded_bytes);
 }
 
-// The live colour target at `base` takes the truth's pixels on the frame
-// command list: detile into a scratch, copy into the image, and leave the
-// image in the layout the recording expects. No writeback, no wait.
-// DELTA_GPU_CSSYNC: why a sampled target fell back to the CPU writeback.
 bool RtRefreshMiss(const char* why) {
   if (CsSyncReporting()) {
     static base::Map<const char*, u64> counts;
@@ -913,9 +859,6 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
       e.rt_seq == e.write_seq || !g_frame.recording)
     return RtRefreshMiss("state");
   const ComputeInfo::Res& r = e.res;
-  // A linear staging holds the texels as they are, except 11/11/10, which is
-  // staged unpacked to RGBA32F and packed again by a blit, and 8/16-bit
-  // texels, staged widened to dwords and narrowed again by the tiling shader.
   const bool unpacked = r.dfmt == 6 && r.stage_elem_bytes == 16;
   const bool widened =
       (r.elem_bytes == 1 || r.elem_bytes == 2) && r.stage_elem_bytes == 4;
@@ -928,9 +871,6 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   auto rt_it = g_rts.find(base);
   if (rt_it == g_rts.end() || !rt_it->second.texture || rt_it->second.is_depth)
     return RtRefreshMiss("no-rt");
-  // The dispatch wrote an image of its own shape here (dynamic resolution
-  // writes 2432x1368 where a 1080p target lives): give it a variant of that
-  // shape rather than taking the whole range through the CPU.
   if (!unpacked && (rt_it->second.w != r.width || rt_it->second.h != r.height ||
                     FormatBytes(rt_it->second.fmt) != r.elem_bytes)) {
     const rhi::Format fmt = GuestTextureFormat(r.dfmt, r.nfmt);
@@ -969,9 +909,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   const TileTable* narrow = nullptr;
   static CsRange guest_scratch, packed_scratch;
   if (widened) {
-    // Narrowed through the guest layout: out of the staging (or the truth as
-    // it is), then detiled packed.
-    if (!(narrow = GetTileTable(tiled, packed, /*packed=*/true)) ||
+    if (!(narrow = GetTileTable(tiled, packed, true)) ||
         (!e.truth && !(table = GetTileTable(tiled, linear))))
       return RtRefreshMiss("table");
     if ((!e.truth && !CsRangeEnsureBuffer(guest_scratch, tiled.size)) ||
@@ -991,10 +929,9 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   rhi::CommandList* const list = g_frame.list;
   list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                 rhi::kAccessCopyRead);
-  // A partial conversion (mip 0, slice 0) is not a whole view: stamp nothing.
   if (fresh)
     RecordImageTiling(list, *table, e.buf, 0, e.guest_bytes, src, linear.size,
-                      /*detile=*/true, 1, 1);
+                      true, 1, 1);
   if (widened) {
     rhi::Buffer* guest = e.buf;
     u64 guest_bytes = e.guest_bytes;
@@ -1002,10 +939,10 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
       guest = guest_scratch.buf;
       guest_bytes = (tiled.size + 3) & ~u64(3);
       RecordImageTiling(list, *table, guest, 0, guest_bytes, e.buf,
-                        (linear.size + 3) & ~u64(3), /*detile=*/false, 1, 1);
+                        (linear.size + 3) & ~u64(3), false, 1, 1);
     }
     RecordImageTiling(list, *narrow, guest, 0, guest_bytes, src,
-                      (packed.size + 3) & ~u64(3), /*detile=*/true, 1, 1);
+                      (packed.size + 3) & ~u64(3), true, 1, 1);
   }
   const rhi::TextureState from = rt.layout;
   TransitionImage(list, rt.texture, rt.layout, rhi::TextureState::kCopyDst);
@@ -1033,8 +970,6 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   } else {
     list->CopyBufferToTexture(rt.texture, src, &copy, 1);
   }
-  // Back to the layout the recording had it in; a target nothing had laid
-  // out yet stays a copy destination.
   if (from != rhi::TextureState::kUndefined)
     TransitionImage(list, rt.texture, rt.layout, from);
   rt.dirty_for_read = true;
@@ -1058,7 +993,6 @@ bool CsRefreshRtFromTruth(u64 base) {
   CsRange& e = it->second;
   if ((!e.truth && !e.image_staging) || !e.gpu_dirty)
     return RtRefreshMiss(e.gpu_dirty ? "buffer-range" : "clean");
-  // Already holds this revision: nothing to flush either.
   return e.rt_seq == e.write_seq || CsRefreshRtInFrame(base, e);
 }
 
@@ -1071,10 +1005,7 @@ bool DetileTextureOnGpu(u64 base,
                         bool is_3d,
                         u32 first_mip) {
   const u32 elem = tiled.elem_bytes;
-  // A linear surface is copied as it lies; a tiled one is detiled into the
-  // linear layout first.
   const bool linear_in = gcn::TilingIsLinear(tiled.tiling_idx);
-  // Block-compressed: the layout counts 4x4 blocks, the copy texels.
   const u32 block =
       (elem == 8 || elem == 16) && texel_w > tiled.mips[0].width ? 4u : 1u;
   gcn::TextureLayout32 linear = tiled;
@@ -1103,7 +1034,7 @@ bool DetileTextureOnGpu(u64 base,
       return false;
   }
   const TileTable* table =
-      linear_in ? nullptr : GetTileTable(tiled, linear, /*packed=*/elem < 4);
+      linear_in ? nullptr : GetTileTable(tiled, linear, elem < 4);
   if (!linear_in && !table)
     return false;
   g_cs_scratch_owner++;
@@ -1119,7 +1050,7 @@ bool DetileTextureOnGpu(u64 base,
     return false;
   if (table)
     RecordImageTiling(list, *table, raw, 0, raw_bytes, pixels,
-                      (linear.size + 3) & ~u64(3), /*detile=*/true);
+                      (linear.size + 3) & ~u64(3), true);
   else
     list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessCopyRead);
   rhi::TextureBarrier barrier{img, state, rhi::TextureState::kCopyDst};
@@ -1155,19 +1086,12 @@ bool CsClearPredicate(u64 address,
     return false;
   u64 range_base;
   CsRange* const e = BufferSource(address, expand, &range_base);
-  // Otherwise the newest word is in the mirror while its copy out to the
-  // guest pages is still on its way, which is exactly when reading it would
-  // wait.
   bool pending = false;
   for (const PendingGuestWrite& w : g_pending_guest_writes)
     pending |= w.base < address + 4 && address < w.end;
   if (!e && !(pending && MirrorWritten(address, 4) &&
               MirrorFillable(address, expand)))
     return false;
-  // Our own expand is still the newest write: every tile reads expanded, so
-  // this bind is not a clear, and no predicate is needed.
-  // A range's write count restarts when it is staged again, so its stamp is
-  // part of the revision; the mirror's revisions are global.
   struct Revision {
     u64 stamp = 0, seq = 0;
     bool operator==(const Revision&) const = default;
@@ -1222,13 +1146,10 @@ bool CsClearPredicate(u64 address,
   }
   if (!p.buf || used == kPredicates)
     return false;
-  // One half per frame slot: the other may still be read in flight.
   const u32 index = g_frame.slot_idx * kPredicates + used++;
   rhi::Buffer* const src = e ? e->buf : g_mirror;
   const u64 at = e ? address - range_base : MirrorOffset(address);
   const u64 window = at & ~(u64(Device().caps().storage_offset_alignment) - 1);
-  // On the batch list, where the dispatch that wrote the word and the fill
-  // below are: the next bind's predicate then sees this one's fill.
   EndRegion();
   CsBatchBeginImpl();
   if (!g_cs_batch_open)
@@ -1267,7 +1188,6 @@ bool CsClearPredicate(u64 address,
     if (revision().seq)
       expanded[address] = revision();
   }
-  // The clear on the frame list reads the predicate.
   if (!g_cs_batches[g_cs_batch_cur].in_frame)
     g_cs_chunk_needs_batch = true;
   BumpTextureEpoch();

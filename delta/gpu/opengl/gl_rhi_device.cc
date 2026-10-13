@@ -26,13 +26,13 @@ namespace gpu::opengl {
 
 namespace {
 
-void GLAPIENTRY OnDebugMessage(GLenum /*source*/,
+void GLAPIENTRY OnDebugMessage(GLenum,
                                GLenum type,
-                               GLuint /*id*/,
+                               GLuint,
                                GLenum severity,
-                               GLsizei /*length*/,
+                               GLsizei,
                                const GLchar* message,
-                               const void* /*user*/) {
+                               const void*) {
   if (severity == GL_DEBUG_SEVERITY_NOTIFICATION)
     return;
   BASE_LOGI("gpugl", "{}: {}", type == GL_DEBUG_TYPE_ERROR ? "error" : "debug",
@@ -444,7 +444,6 @@ rhi::Buffer* GlDevice::CreateBuffer(const rhi::BufferDesc& desc) {
   if (!ok)
     return nullptr;
   if (buffer->address) {
-    // Residency is per context; the render thread's is the one that counts.
     render_.Post([name = buffer->name] {
       glMakeNamedBufferResidentNV(name, GL_READ_WRITE);
     });
@@ -463,7 +462,6 @@ rhi::Texture* GlDevice::CreateTexture(const rhi::TextureDesc& desc) {
       texture->target = texture->arrayed ? GL_TEXTURE_1D_ARRAY : GL_TEXTURE_1D;
       break;
     case rhi::TextureDim::k2D:
-      // Cube views need an array original.
       texture->arrayed =
           desc.layers > 1 || (desc.usage & rhi::kTextureCubeCompatible);
       texture->target = texture->arrayed ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
@@ -515,7 +513,6 @@ rhi::TextureView* GlDevice::CreateView(rhi::Texture* texture,
   if (!view->internal)
     return nullptr;
   if (t->target == GL_TEXTURE_3D && desc.dim != rhi::ViewDim::k3D) {
-    // GL cannot view 3D as 2D: address the slices of the texture itself.
     view->name = t->name;
     view->owns_name = false;
     view->internal = t->internal;
@@ -604,7 +601,6 @@ rhi::Sampler* GlDevice::CreateSampler(const rhi::SamplerDesc& desc) {
 rhi::BindGroupLayout* GlDevice::CreateBindGroupLayout(
     const rhi::BindGroupLayoutDesc& desc) {
   auto layout = base::MakeUnique<GlBindGroupLayout>(desc);
-  // Dynamic offsets come in binding-number order.
   base::Vector<base::Pair<u32, size_t>> dynamic;
   for (size_t i = 0; i < desc.bindings.size(); i++) {
     const rhi::BindingType t = desc.bindings[i].type;
@@ -729,7 +725,6 @@ VertexInput* GlDevice::InternVertexInput(const rhi::GraphicsPipelineDesc& desc,
                                          const ProgramInterface& program) {
   auto input = base::MakeUnique<VertexInput>();
   for (const rhi::VertexAttribute& a : desc.vertex_attributes) {
-    // Attributes the shader does not read are left disabled.
     auto it = base::FindIf(
         program.vertex_locations.begin(), program.vertex_locations.end(),
         [&](const auto& m) { return m.first == a.location; });
@@ -959,8 +954,6 @@ void GlDevice::Destroy(rhi::Object* object) {
   Forget(object);
   if (!object)
     return;
-  // After every submission queued so far, and after the render thread
-  // stopped naming the object in its caches.
   render_.Post([this, object] {
     replayer_->Forget(object);
     if (auto* b = dynamic_cast<GlBuffer*>(object)) {

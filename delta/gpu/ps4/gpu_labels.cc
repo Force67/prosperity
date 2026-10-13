@@ -16,12 +16,10 @@
 
 namespace gpu::ps4 {
 namespace {
-// DELTA_GPU_LABELS_AT_GPU=1: hold fences until the GPU ran the work ahead of
-// them. Off by default: Uncharted 2 asserts with it.
 DELTA_OPTION(bool, kLabelsAtGpu, "DELTA_GPU_LABELS_AT_GPU", false);
 
 struct Held {
-  u64 submission = 0;  // 0: the work it waits for is not submitted yet
+  u64 submission = 0;
   u64 address = 0;
   u32 bytes = 0;
   u64 value = 0;
@@ -31,8 +29,8 @@ struct Held {
 base::Mutex g_lock;
 base::ConditionVariable g_wake;
 base::Vector<Held> g_held;
-size_t g_head = 0;       // g_held[g_head..] have not run
-size_t g_unsubmitted = 0;  // g_held[g_unsubmitted..] wait for a submission
+size_t g_head = 0;
+size_t g_unsubmitted = 0;
 bool g_started = false;
 
 void Run() {
@@ -48,7 +46,7 @@ void Run() {
       submission = g_held[g_head].submission;
       write = base::move(g_held[g_head].write);
     }
-    // A lost device still writes: a title waiting on the fence would hang.
+    // A lost device still writes; a title waiting on the fence would hang.
     render::WaitSubmission(submission);
     write();
     base::LockGuard<base::Mutex> lock(g_lock);

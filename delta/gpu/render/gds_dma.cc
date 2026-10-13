@@ -2,9 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// Kept apart from compute.cc so a test that stubs the GDS primitives links
-// this without the rest of the compute backend.
-
 #include "base/arch.h"
 #include "base/containers/vector.h"
 #include "gpu/guest_memory.h"
@@ -43,8 +40,8 @@ bool DmaGds(Renderer& renderer,
     return false;
   return CopyGdsToGuest(static_cast<u32>(src), dst, bytes) ||
          (FlushCsWritesRange(renderer, dst, bytes, "dma") &&
-         ReadGds(renderer, static_cast<u32>(src), reinterpret_cast<void*>(dst),
-                 bytes));
+          ReadGds(renderer, static_cast<u32>(src), reinterpret_cast<void*>(dst),
+                  bytes));
 }
 
 }  // namespace gpu::render

@@ -1,7 +1,5 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * Root signatures, pipeline state objects and the shader cache.
  */
 
 #include <cstring>
@@ -22,7 +20,6 @@ namespace gpu::d3d12::impl {
 
 namespace {
 
-// The root signature budget, in DWORDs.
 constexpr u32 kRootBudget = 64;
 
 D3D12_BLEND ToBlend(rhi::BlendFactor f, bool alpha) {
@@ -47,8 +44,6 @@ D3D12_BLEND ToBlend(rhi::BlendFactor f, bool alpha) {
       return D3D12_BLEND_DEST_ALPHA;
     case rhi::BlendFactor::kOneMinusDstAlpha:
       return D3D12_BLEND_INV_DEST_ALPHA;
-    // D3D12 has one blend factor register for all four channels; a constant
-    // alpha factor reads the constant's own channel, not its alpha.
     case rhi::BlendFactor::kConstantColor:
     case rhi::BlendFactor::kConstantAlpha:
       return D3D12_BLEND_BLEND_FACTOR;
@@ -193,12 +188,8 @@ ID3D12RootSignature* D3D12Device::SerializeRoot(
 rhi::PipelineLayout* D3D12Device::CreatePipelineLayout(
     const rhi::PipelineLayoutDesc& desc) {
   auto layout = base::MakeUnique<D3D12PipelineLayout>(desc);
-  // Whole 16-byte rows: the shader's cbuffer is sized in rows.
   layout->push_dwords = (desc.push_constant_bytes + 15) / 16 * 4;
 
-  // What the root costs with every dynamic uniform buffer as a root CBV and
-  // push constants as root constants; over budget, the buffers move into
-  // their tables first, then push constants move into a root CBV.
   u32 tables = 0, dynamic_ubos = 0;
   for (rhi::BindGroupLayout* g : desc.groups) {
     if (!g)
@@ -449,8 +440,6 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
     pipeline->uses_raster = ginfo.uses_raster;
     outputs = ginfo.outputs;
   }
-  // Without SM 6.1, a fragment shader's barycentrics come from a generated
-  // geometry shader (triangles only).
   constexpr u32 kBaryCoord = 5286, kBaryCoordNoPersp = 5287;
   const bool barycentrics =
       !caps_.fragment_barycentric && desc.geometry.empty() &&
@@ -481,8 +470,6 @@ rhi::Pipeline* D3D12Device::CreateGraphicsPipeline(
   pd.GS = {gs.data(), gs.size()};
   pd.PS = {ps.data(), ps.size()};
   pd.BlendState.IndependentBlendEnable = TRUE;
-  // Culling both faces draws nothing; D3D12 cannot cull both, so the
-  // pipeline keeps its triangles and writes nothing instead.
   const bool cull_all = desc.cull == rhi::CullMode::kFrontAndBack;
   for (u32 i = 0; i < desc.color_count && i < 8; i++) {
     const rhi::BlendAttachment& b = desc.blend[i];
@@ -588,7 +575,6 @@ bool D3D12Device::InitBlit() {
   base::String error;
   auto compile = [&](const char* entry, const char* profile,
                      base::Vector<u8>* out) {
-    // Dxc::Compile always takes "main": rename the entry point in the text.
     const base::String source = kBlitHlsl;
     const base::String decl = base::String(" ") + entry + "(";
     const mem_size at = source.find(decl);

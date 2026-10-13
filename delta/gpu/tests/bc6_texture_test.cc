@@ -2,20 +2,18 @@
 #include <gtest/gtest.h>
 
 #include "base/containers/array.h"
-#include "host_memory/host_memory.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/guest_format.h"
 #include "gpu/render/renderer.h"
 #include "gpu/render/texture_cache.h"
+#include "host_memory/host_memory.h"
 
-// The renderer links the PS4 command processor; this test issues no EOPs.
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe() {}
 
 TEST(Bc6Texture, ObservedHdrBackgroundDescriptorIsValid) {
-  // Astro's actual background texture, previously rejected into white.
   u32 descriptor[8] = {0x8096fe00, 0xcb300000, 0x01ffc3ff, 0x909003ac,
                        0,          0,          0,          0};
   for (u32 format : {179u, 180u}) {
@@ -44,8 +42,6 @@ TEST(Bc6Texture, NativeUploadsSupportSignedUnsignedTiledMipArrays) {
                                             gpu::rhi::kTextureSampled))
     GTEST_SKIP() << "Device does not support BC textures";
   ASSERT_TRUE(gpu::render::CreateTextureDescriptors());
-  // Zero BC6 blocks encode black. Separate allocations avoid cache aliasing.
-  // Guest memory, as every texture is: uploads read it on the GPU.
   constexpr u64 kBytes = 4 * 1048576;
   auto* images = static_cast<u8*>(
       host_memory::AllocMem(reinterpret_cast<void*>(0x1214000000ull), kBytes,

@@ -33,7 +33,6 @@ bool IsRead(D3D12_RESOURCE_STATES s) {
   return s != D3D12_RESOURCE_STATE_COMMON && !(s & kWriteStates);
 }
 
-// A colour for ClearRenderTargetView, which converts floats to the format.
 void ClearFloats(rhi::Format format, const rhi::ClearColor& c, float out[4]) {
   const rhi::FormatInfo& fi = rhi::GetFormatInfo(format);
   const bool sint =
@@ -49,7 +48,6 @@ void ClearFloats(rhi::Format format, const rhi::ClearColor& c, float out[4]) {
                             : static_cast<float>(c.u[i]);
 }
 
-// Bytes per texel (or block) of one plane of a format.
 u32 PlaneBytes(rhi::Format format, u8 aspect) {
   if (format == rhi::Format::kD32FloatS8Uint)
     return aspect == rhi::kAspectStencil ? 1 : 4;
@@ -101,7 +99,6 @@ void D3D12CommandList::ReleaseTransient() {
   for (UploadBlock& b : upload_)
     b.used = 0;
   upload_block_ = 0;
-  // Keep the largest scratch buffer for the next recording.
   base::Sort(scratch_.begin(), scratch_.end(),
              [](const UploadBlock& a, const UploadBlock& b) {
                return a.size > b.size;
@@ -304,8 +301,6 @@ void D3D12CommandList::Barrier(u32 src_access,
                                const rhi::TextureBarrier* textures,
                                u32 num_textures) {
   (void)dst_access;
-  // FillBuffer uses UAV writes even though the RHI classifies it as a copy.
-  // Consecutive fills in the same resource state still need ordering.
   if (src_access & (rhi::kAccessShaderWrite | rhi::kAccessComputeWrite |
                     rhi::kAccessCopyWrite)) {
     D3D12_RESOURCE_BARRIER b{};
@@ -449,8 +444,6 @@ void D3D12CommandList::SetBindGroup(u32 index,
     const u64 offset = w.offset + (d < num_offsets ? dynamic_offsets[d] : 0);
     if (buffer)
       root_cbv[d] = buffer->va + offset;
-    // Also in the table, for a pipeline layout that could not afford it a
-    // root descriptor.
     WriteBufferView({cpu.ptr + size_t(e.slot) * device_.view_increment}, e,
                     buffer, offset, w.range);
   }
@@ -572,8 +565,6 @@ void D3D12CommandList::SetViewport(float x,
                                    float height,
                                    float min_depth,
                                    float max_depth) {
-  // D3D12's viewport is Vulkan's y-up one: a negative Vulkan height needs no
-  // flip, a positive one flips clip-space y in the last vertex stage.
   if (height < 0.0f) {
     viewport_ = {x, y + height, width, -height, min_depth, max_depth};
     y_sign_ = 1.0f;
@@ -774,8 +765,6 @@ void D3D12CommandList::Draw(u32 vertex_count,
                               static_cast<INT>(first_vertex), first_instance);
     return;
   }
-  // SV_VertexID and SV_InstanceID count from zero; gl_VertexIndex and
-  // gl_InstanceIndex count from the first vertex and instance.
   if (!SetDrawParameters(first_vertex, first_instance))
     return;
   cmd->DrawInstanced(vertex_count, instance_count, first_vertex,
@@ -993,7 +982,6 @@ void D3D12CommandList::CopyBufferTexture(D3D12Texture* texture,
                             UINT(r.x) + r.width,
                             UINT(r.y) + r.height,
                             UINT(r.z) + r.depth};
-    // Depth/stencil copies are whole subresources in D3D12.
     const D3D12_BOX* src_box = depth_format ? nullptr : &box;
     const D3D12_BOX* tex_src_box = depth_format ? nullptr : &tex_box;
 
@@ -1021,7 +1009,6 @@ void D3D12CommandList::CopyBufferTexture(D3D12Texture* texture,
       continue;
     }
 
-    // Repack through scratch memory with D3D12's pitch and placement.
     const u64 pitch =
         pitch_ok ? row_pitch
                  : AlignUp(row_bytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
@@ -1311,8 +1298,6 @@ void D3D12CommandList::ClearTexture(rhi::Texture* texture,
 void D3D12CommandList::ClearByCopy(D3D12Texture* texture,
                                    const rhi::TextureRange& range,
                                    const rhi::ClearColor& color) {
-  // Formats that are neither renderable nor storable. Only 32-bit channels
-  // are packed here; the rest have no such texture on D3D12 hardware.
   const rhi::Format format = texture->desc().format;
   const rhi::FormatInfo& fi = rhi::GetFormatInfo(format);
   if (fi.compressed || fi.bytes != fi.channels * 4u) {
@@ -1441,11 +1426,9 @@ void D3D12CommandList::UpdateBuffer(rhi::Buffer* buffer,
 
 void D3D12CommandList::ResetTimestamps(rhi::TimestampPool*, u32, u32) {}
 
-// D3D12 has one kind of timestamp, taken when the preceding work is done;
-// `start` changes nothing.
 void D3D12CommandList::WriteTimestamp(rhi::TimestampPool* pool,
                                       u32 index,
-                                      bool /*start*/) {
+                                      bool) {
   auto* p = static_cast<D3D12TimestampPool*>(pool);
   FlushBarriers();
   cmd->EndQuery(p->heap, D3D12_QUERY_TYPE_TIMESTAMP, index);

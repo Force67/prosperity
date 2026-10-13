@@ -1,24 +1,5 @@
 /*
  * PS4Delta : GCN / Liverpool texture de-tiling (32bpp). See gcn_detile.h.
- *
- * Faithful port of the AMD AddrLib (Liverpool) tiling/de-tiling swizzle for
- * 32bpp, one-sample 2D and 2D-array textures, including mip chains and thick
- * microtile Z interleaving. XThick surfaces are degraded to Thick as AddrLib
- * requires when a 32bpp microtile exceeds Liverpool's 1 KiB row size.
- *
- * Unlike the previous version, every addressing parameter (array mode, micro
- * tile mode, pipe config, num_pipes/banks, bank_width/height, macro aspect,
- * tile split) is DERIVED from the surface's tiling_index via the standard
- * Liverpool GB_TILE_MODE + macro-tile-mode tables, rather than hardcoding one
- * config. That keeps Isaac's surfaces (Display2DThin / 1D micro,
- * P8_32x32_16x16, 16 banks) byte-identical to before while also covering the
- * other tiled modes a title like Doom64 can ask for (e.g. Thin* modes that use
- * P8_32x32_8x16).
- *
- * Tables follow the AMD AddrLib GB_TILE_MODE register decode for the Liverpool
- * (base-PS4) GPU, as documented in the AMD GCN/Sea Islands ISA + register
- * specs. Console reported as base PS4 (non-Neo) so num_pipes is 8, the standard
- * value for these modes.
  */
 
 #include "gpu/gcn/gcn_detile.h"
@@ -50,10 +31,6 @@ DELTA_OPTION(const char*, kDetileThreads, "DELTA_GPU_DETILE_THREADS", nullptr);
 namespace gpu::gcn {
 namespace {
 
-// --- Persistent worker pool. ----------------------------------------------
-// Detile kernels submit independent 8-row microtile bands; format-conversion
-// callers can submit ordinary row ranges. Threads are parked between regions,
-// work is dynamically claimed, and the calling thread participates too.
 class RowPool {
  public:
   static RowPool& Get() {
@@ -64,16 +41,11 @@ class RowPool {
   void Run(u32 units,
            u64 work_items,
            const base::Function<void(u32, u32)>& fn) {
-    // A callback can use another detile operation for one of its units. Running
-    // that nested region inline avoids recursively taking run_mutex_ and keeps
-    // the outer workers useful instead of deadlocking them at a second barrier.
     if (g_running == this) {
       if (units)
         fn(0, units);
       return;
     }
-    // Serialize whole regions: the GPU pipeline is single-threaded, but this
-    // guards the shared state should two callers ever overlap.
     base::LockGuard<base::Mutex> serial(run_mutex_);
     if (!enabled_ || threads_.empty() || units < 2 ||
         work_items < kMinParallelItems) {
@@ -91,14 +63,13 @@ class RowPool {
           {static_cast<u32>(threads_.size()), units - 1,
            static_cast<u32>(base::Min<u64>(useful_lanes - 1,
                                            static_cast<u64>(UINT32_MAX)))});
-      // Aim for several chunks per lane so stealing balances uneven units.
       const u32 lanes = worker_count_ + 1;
       block_ = base::Max(1u, units / (lanes * 4u));
       active_ = 0;
       ++generation_;
       start_cv_.NotifyAll();
     }
-    Drain();  // the caller is a lane too
+    Drain();
     {
       base::UniqueLock<base::Mutex> lk(mtx_);
       done_cv_.Wait(lk, [this] { return active_ == 0; });
@@ -136,7 +107,6 @@ class RowPool {
       t->Join();
   }
 
-  // Claim and process chunks until the range is exhausted.
   void Drain() {
     for (;;) {
       u32 s = cursor_.fetch_add(block_, base::memory_order_relaxed);
@@ -168,8 +138,6 @@ class RowPool {
         if (stop_)
           return;
         local_gen = generation_;
-        // A late worker need not acknowledge a region whose rows are already
-        // claimed. Only workers holding the callback can delay its release.
         participate = index < worker_count_ &&
                       cursor_.load(base::memory_order_relaxed) < total_units_;
         if (participate)
@@ -202,16 +170,6 @@ class RowPool {
   inline static thread_local RowPool* g_running = nullptr;
 };
 
-// Linux defines the CIK array/tiling enums and GB_TILE_MODE fields, but not the
-// Liverpool table contents or the byte-address equations implemented below:
-// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_enum.h
-// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gca/gfx_7_2_sh_mask.h
-// https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/gfx_v7_0.c
-
-// --- GB_TILE_MODE decode (per tiling_index 0..31), Liverpool / base PS4. ----
-// The AddrLib GB_TILE_MODE decode (array mode / micro tile mode / pipe config /
-// sample split / tile split per index). We only need a compact form of each.
-
 enum ArrayMode {
   kAmLinearGeneral = 0,
   kAmLinearAligned = 1,
@@ -239,58 +197,56 @@ enum MicroMode {
   kMmThick = 4
 };
 
-// Two 8-pipe pipe-config equations are used by the colour/depth modes on
-// Liverpool: P8_32x32_16x16 and P8_32x32_8x16. (P2 only for LinearGeneral.)
 enum PipeConfig { kPcP2 = 0, kPcP8_32x32_8x16 = 10, kPcP8_32x32_16x16 = 12 };
 
 ArrayMode ArrayModeOf(u32 idx) {
   switch (idx) {
-    case 5:   // Depth1DThin
-    case 9:   // Display1DThin
-    case 13:  // Thin1DThin
+    case 5:
+    case 9:
+    case 13:
       return kAm1DThin1;
     case 0:
     case 1:
     case 2:
     case 3:
-    case 4:   // Depth2DThin*
-    case 10:  // Display2DThin
-    case 14:  // Thin2DThin
+    case 4:
+    case 10:
+    case 14:
       return kAm2DThin1;
-    case 11:  // DisplayThinPrt
-    case 16:  // ThinThinPrt
+    case 11:
+    case 16:
       return kAmPrtThin1;
-    case 6:   // Depth2DThinPrt256
-    case 7:   // Depth2DThinPrt1K
-    case 12:  // Display2DThinPrt
-    case 17:  // Thin2DThinPrt
+    case 6:
+    case 7:
+    case 12:
+    case 17:
       return kAmPrt2DThin1;
-    case 15:  // Thin3DThin
+    case 15:
       return kAm3DThin1;
-    case 18:  // Thin3DThinPrt
+    case 18:
       return kAmPrt3DThin1;
     case 19:
-      return kAm1DThick;  // Thick1DThick
+      return kAm1DThick;
     case 20:
-      return kAm2DThick;  // Thick2DThick
+      return kAm2DThick;
     case 21:
-      return kAm3DThick;  // Thick3DThick
+      return kAm3DThick;
     case 22:
-      return kAmPrtThick;  // ThickThickPrt
+      return kAmPrtThick;
     case 23:
-      return kAmPrt2DThick;  // Thick2DThickPrt
+      return kAmPrt2DThick;
     case 24:
-      return kAmPrt3DThick;  // Thick3DThickPrt
+      return kAmPrt3DThick;
     case 25:
-      return kAm2DXThick;  // Thick2DXThick
+      return kAm2DXThick;
     case 26:
-      return kAm3DXThick;  // Thick3DXThick
+      return kAm3DXThick;
     case 8:
-      return kAmLinearAligned;  // DisplayLinearAligned
+      return kAmLinearAligned;
     case 31:
-      return kAmLinearGeneral;  // DisplayLinearGeneral
+      return kAmLinearGeneral;
     default:
-      return kAmLinearGeneral;  // reserved; rejected by ValidTileMode()
+      return kAmLinearGeneral;
   }
 }
 
@@ -319,16 +275,13 @@ MicroMode MicroModeOf(u32 idx) {
     case 17:
     case 18:
       return kMmThin;
-    default:  // 19..26
+    default:
       return kMmThick;
   }
 }
 
 PipeConfig PipeConfigOf(u32 idx) {
   switch (idx) {
-    // P8_32x32_8x16: DisplayThinPrt(11), Thin3DThin(15), ThinThinPrt(16),
-    // Thick3DThick(21), ThickThickPrt(22), Thick3DThickPrt(24),
-    // Thick3DXThick(26)
     case 11:
     case 15:
     case 16:
@@ -344,72 +297,49 @@ PipeConfig PipeConfigOf(u32 idx) {
   }
 }
 
-// SAMPLE_SPLIT (sample-split count) per GB_TILE_MODE; 2 for Display2DThin and
-// the 2D/3D thin colour modes, 1 elsewhere. Affects the 32bpp tile_split (->
-// 512).
 u32 SampleSplitOf(u32 idx) {
   switch (idx) {
     case 10:
     case 11:
-    case 12:  // Display2DThin, DisplayThinPrt, Display2DThinPrt
+    case 12:
     case 14:
     case 15:
     case 16:
     case 17:
-    case 18:  // Thin 2D/3D/Prt
+    case 18:
       return 2;
     default:
       return 1;
   }
 }
 
-// TILE_SPLIT (hw field) per GB_TILE_MODE; only the depth modes use the large
-// values. Colour modes use 64 (then color_tile_split overrides for 32bpp).
 u32 TileSplitHwOf(u32 idx) {
   switch (idx) {
     case 1:
-      return 128;  // Depth2DThin128
+      return 128;
     case 2:
     case 6:
-      return 256;  // Depth2DThin256 / Prt256
+      return 256;
     case 3:
-      return 512;  // Depth2DThin512
+      return 512;
     case 4:
     case 7:
-      return 1024;  // Depth2DThin1K / Prt1K
+      return 1024;
     default:
       return 64;
   }
 }
 
-// --- Macro-tile-mode params (AddrLib GetNumBanks/BankWidth/BankHeight/...).
-// --- The macro tile mode index for 32bpp/1-sample is derived from tile_split,
-// then (per AMD AddrLib) yields num_banks/bank_width/bank_height/macro_aspect.
 struct MacroParams {
   u32 num_banks, bank_width, bank_height, macro_aspect;
 };
 
-// AddrLib macro-tile-mode LUTs, indexed by MacroTileMode (0..15). For the
-// non-Neo (base PS4) primary config we use the non-alt tables.
 MacroParams MacroParamsForMode(u32 m) {
-  // {num_banks, bank_width, bank_height, macro_aspect}
   static const MacroParams kTbl[16] = {
-      /*0  Mode_1x4_16     */ {16, 1, 4, 4},
-      /*1  Mode_1x2_16     */ {16, 1, 2, 2},
-      /*2  Mode_1x1_16     */ {16, 1, 1, 2},
-      /*3  Mode_1x1_16_Dup */ {16, 1, 1, 2},
-      /*4  Mode_1x1_8      */ {8, 1, 1, 1},
-      /*5  Mode_1x1_4      */ {4, 1, 1, 1},
-      /*6  Mode_1x1_2      */ {2, 1, 1, 1},
-      /*7  Mode_1x1_2_Dup  */ {2, 1, 1, 1},
-      /*8  Mode_1x8_16     */ {16, 1, 8, 4},
-      /*9  Mode_1x4_16_Dup */ {16, 1, 4, 4},
-      /*10 Mode_1x2_16_Dup */ {16, 1, 2, 2},
-      /*11 Mode_1x1_16_Dup2*/ {16, 1, 1, 2},
-      /*12 Mode_1x1_8_Dup  */ {8, 1, 1, 1},
-      /*13 Mode_1x1_4_Dup  */ {4, 1, 1, 1},
-      /*14 Mode_1x1_2_Dup2 */ {2, 1, 1, 1},
-      /*15 Mode_1x1_2_Dup3 */ {2, 1, 1, 1},
+      {16, 1, 4, 4}, {16, 1, 2, 2}, {16, 1, 1, 2}, {16, 1, 1, 2},
+      {8, 1, 1, 1},  {4, 1, 1, 1},  {2, 1, 1, 1},  {2, 1, 1, 1},
+      {16, 1, 8, 4}, {16, 1, 4, 4}, {16, 1, 2, 2}, {16, 1, 1, 2},
+      {8, 1, 1, 1},  {4, 1, 1, 1},  {2, 1, 1, 1},  {2, 1, 1, 1},
   };
   return kTbl[m & 15];
 }
@@ -418,10 +348,6 @@ constexpr u32 kMicroW = 8, kMicroH = 8;
 constexpr u32 kMicroTilePixels = kMicroW * kMicroH;
 constexpr u32 kPipeInterleaveBits = 8;
 
-// gfx10.3 (RDNA2) "standard" swizzle, encoded as kGfx10StdBase + log2 of the
-// block size in KiB (256 B, 4 KiB, 64 KiB). Prospero titles describe their
-// textures with these, not with Liverpool's GB_TILE_MODE indices, so they get
-// their own id range rather than being squeezed into that table.
 constexpr u32 kGfx10StdBase = 0x50;
 constexpr u32 kGfx10StdModes = 3;
 
@@ -429,7 +355,6 @@ bool TilingIsGfx10Std(u32 idx) {
   return idx >= kGfx10StdBase && idx < kGfx10StdBase + kGfx10StdModes;
 }
 
-// Micro-tiles are always 256 B; their shape follows the element size.
 void Gfx10MicroShape(u32 elem_bytes, u32& mw, u32& mh) {
   switch (elem_bytes) {
     case 1:
@@ -451,11 +376,10 @@ void Gfx10MicroShape(u32 elem_bytes, u32& mw, u32& mh) {
     default:
       mw = 4;
       mh = 4;
-      break;  // 16
+      break;
   }
 }
 
-// Micro-tiles per block edge: 1 (256 B), 4 (4 KiB) or 16 (64 KiB).
 u32 Gfx10BlockTiles(u32 idx) {
   switch (idx - kGfx10StdBase) {
     case 0:
@@ -467,11 +391,6 @@ u32 Gfx10BlockTiles(u32 idx) {
   }
 }
 
-// --- gfx10.3 (RDNA2 / Prospero) swizzle modes. -----------------------------
-// A PS5 T# names a 5-bit gfx10 swizzle mode; it reaches this module as
-// kGfx10TilingBase + sw_mode. Each mode maps to one address equation family
-// ("pattern set"); the modes with no 2D equation are refused outright so a
-// surface is never addressed with a neighbouring mode's pattern.
 constexpr u32 kGfx10Modes = 32;
 
 enum Gfx10Set : u8 {
@@ -505,8 +424,8 @@ bool TilingIsGfx10(u32 idx) {
 
 Gfx10ModeInfo Gfx10ModeOf(u32 sw_mode) {
   switch (sw_mode) {
-    case 0:   // LINEAR
-    case 31:  // LINEAR_GENERAL
+    case 0:
+    case 31:
       return {kG10_Linear, 0};
     case 1:
       return {kG10_256S, 8};
@@ -536,8 +455,6 @@ Gfx10ModeInfo Gfx10ModeOf(u32 sw_mode) {
       return {kG10_64kDX, 16};
     case 27:
       return {kG10_64kRX, 16};
-    // The sub-64-KiB _R variants, the block-variable modes and the reserved
-    // encodings are not part of the gfx10 2D swizzle set and have no equation.
     default:
       return {kG10_None, 0};
   }
@@ -551,9 +468,9 @@ bool ValidTileMode(u32 idx) {
 
 u32 EffectiveTileMode(u32 idx) {
   if (idx == 25)
-    return 20;  // 2D XThick -> 2D Thick at 32bpp
+    return 20;
   if (idx == 26)
-    return 21;  // 3D XThick -> 3D Thick at 32bpp
+    return 21;
   return idx;
 }
 
@@ -591,9 +508,6 @@ bool IsPrt(ArrayMode am) {
          am == kAmPrt2DThick || am == kAmPrt3DThin1 || am == kAmPrt3DThick;
 }
 
-// Effective tile size used to select the macro-tile table. Thick microtiles may
-// exceed the 1 KiB DRAM-row split, but unlike thin multisample tiles they are
-// not split into virtual slices by the address equation.
 u32 TileSizeBytes(u32 idx, MicroMode mm, u32 thickness, u32 elem) {
   const u32 tile_bytes_1x = kMicroTilePixels * elem * thickness;
   const u32 color_split = SampleSplitOf(idx) * tile_bytes_1x;
@@ -606,7 +520,6 @@ u32 TileSizeBytes(u32 idx, MicroMode mm, u32 thickness, u32 elem) {
   return split;
 }
 
-// CalculateMacrotileMode: mtm = log2(tile_split/64); +8 if PRT.
 u32 MacroTileModeIndex(u32 idx,
                        MicroMode mm,
                        ArrayMode am,
@@ -616,13 +529,12 @@ u32 MacroTileModeIndex(u32 idx,
   u32 q = split / 64u;
   u32 mtm = 0;
   while ((1u << (mtm + 1)) <= q)
-    mtm++;  // bit_width(q)-1
+    mtm++;
   if (IsPrt(am))
     mtm += 8;
   return mtm;
 }
 
-// Element index within an 8x8x{1,4,8} microtile.
 inline u32 PixIdx(u32 x, u32 y, u32 z, MicroMode m, u32 thickness, u32 elem) {
   u32 x0 = x & 1, x1 = (x >> 1) & 1, x2 = (x >> 2) & 1;
   u32 y0 = y & 1, y1 = (y >> 1) & 1, y2 = (y >> 2) & 1;
@@ -653,7 +565,6 @@ inline u32 PixIdx(u32 x, u32 y, u32 z, MicroMode m, u32 thickness, u32 elem) {
   return index;
 }
 
-// ComputePipeFromCoord (tiling.comp), 8-pipe configs.
 inline u32 PipeFromCoord(u32 x,
                          u32 y,
                          u32 slice,
@@ -672,7 +583,6 @@ inline u32 PipeFromCoord(u32 x,
     u32 p2 = x5 ^ y5;
     pipe = p0 | (p1 << 1) | (p2 << 2);
   } else {
-    // P8_32x32_16x16
     u32 p0 = x3 ^ y3 ^ x4;
     u32 p1 = x4 ^ y4;
     u32 p2 = x5 ^ y5;
@@ -685,7 +595,6 @@ inline u32 PipeFromCoord(u32 x,
   return pipe;
 }
 
-// ComputeBankFromCoord (tiling.comp), parameterized by num_banks/widths.
 inline u32 BankFromCoord(u32 x,
                          u32 y,
                          u32 slice,
@@ -745,7 +654,7 @@ inline u32 NumBankBitsOf(u32 num_banks) {
   u32 b = 0;
   while ((1u << (b + 1)) <= num_banks)
     b++;
-  return b;  // bit_width(num_banks)-1
+  return b;
 }
 
 inline u64 SwizzleMacroOffset(u64 total_offset,
@@ -775,8 +684,6 @@ bool ConfigureMacro2D(u32 tiling_idx,
   const u32 tile_split_bytes = TileSizeBytes(tiling_idx, mm, c.thickness, elem);
   c.micro_tile_bytes = full_micro_tile_bytes;
   c.slices_per_tile = 1;
-  // AddrLib addresses each split portion as a virtual slice with its own bank
-  // rotation.
   if (full_micro_tile_bytes > tile_split_bytes && c.thickness == 1) {
     c.micro_tile_bytes = tile_split_bytes;
     c.slices_per_tile = full_micro_tile_bytes / tile_split_bytes;
@@ -816,20 +723,7 @@ u32 BitCeil(u32 value) {
   return value + 1;
 }
 
-// gfx10 address equations, one row per (pattern set, bytes-per-element). Bit b
-// of the byte offset inside a block is the XOR of every coordinate bit selected
-// by entry b: lane 0 (bits 0..15) picks x bits, lane 1 (16..31) y bits and
-// lane 2 (32..47) array-slice bits. Only the low blk_log2 entries of a row are
-// used, so the shorter rows end early.
-//
-// This is the AMD address-library gfx10 swizzle pattern data for a 16-pipe,
-// non-RB+ configuration. That is the PS5's: its render-target and depth
-// layouts, read back from the console, reproduce exactly this pipe count and
-// pattern family across all five element sizes, and no other entry in the
-// library's table set matches them. The non-XOR (_S/_D without _X/_T) rows are
-// pipe count independent, so only the XOR rows depend on that choice.
 const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
-    // 256B_S: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000},
         {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8},
@@ -837,7 +731,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0x1, 0x10000, 0x20000, 0x2, 0x4},
         {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2},
     },
-    // 256B_D: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000},
         {0, 0x1, 0x2, 0x4, 0x10000, 0x20000, 0x40000, 0x8},
@@ -845,7 +738,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0x1, 0x10000, 0x2, 0x4, 0x20000},
         {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000},
     },
-    // 4KB_S: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000, 0x100000, 0x10,
          0x200000, 0x20},
@@ -856,7 +748,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0x1, 0x10000, 0x20000, 0x2, 0x4, 0x40000, 0x8, 0x80000, 0x10},
         {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2, 0x40000, 0x4, 0x80000, 0x8},
     },
-    // 4KB_D: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000, 0x100000, 0x10,
          0x200000, 0x20},
@@ -867,7 +758,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0x1, 0x10000, 0x2, 0x4, 0x20000, 0x40000, 0x8, 0x80000, 0x10},
         {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x40000, 0x4, 0x80000, 0x8},
     },
-    // 4KB_S_X: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000, 0x800100080,
          0x400800010, 0x200200040, 0x100400020},
@@ -880,7 +770,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2, 0x800040020, 0x400200004,
          0x200080010, 0x100100008},
     },
-    // 4KB_D_X: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000, 0x800100080,
          0x400800010, 0x200200040, 0x100400020},
@@ -893,7 +782,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x800040020, 0x400200004,
          0x200080010, 0x100100008},
     },
-    // 64KB_S: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000, 0x100000, 0x10,
          0x200000, 0x20, 0x400000, 0x40, 0x800000, 0x80},
@@ -906,7 +794,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2, 0x40000, 0x4, 0x80000, 0x8,
          0x100000, 0x10, 0x200000, 0x20},
     },
-    // 64KB_D: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000, 0x100000, 0x10,
          0x200000, 0x20, 0x400000, 0x40, 0x800000, 0x80},
@@ -919,7 +806,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x40000, 0x4, 0x80000, 0x8,
          0x100000, 0x10, 0x200000, 0x20},
     },
-    // 64KB_S_T: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000, 0x100080,
          0x800010, 0x200040, 0x400020, 0x400000, 0x40, 0x800000, 0x80},
@@ -932,7 +818,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2, 0x40020, 0x200004, 0x80010,
          0x100008, 0x100000, 0x10, 0x200000, 0x20},
     },
-    // 64KB_D_T: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000, 0x100080,
          0x800010, 0x200040, 0x400020, 0x400000, 0x40, 0x800000, 0x80},
@@ -945,7 +830,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x40020, 0x200004, 0x80010,
          0x100008, 0x100000, 0x10, 0x200000, 0x20},
     },
-    // 64KB_S_X: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x8, 0x10000, 0x20000, 0x40000, 0x80000, 0x800100080,
          0x400800010, 0x200200040, 0x100400020, 0x400000, 0x40, 0x800000, 0x80},
@@ -958,7 +842,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0, 0x10000, 0x20000, 0x1, 0x2, 0x800040020, 0x400200004,
          0x200080010, 0x100100008, 0x100000, 0x10, 0x200000, 0x20},
     },
-    // 64KB_D_X: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x80000, 0x800100080,
          0x400800010, 0x200200040, 0x100400020, 0x400000, 0x40, 0x800000, 0x80},
@@ -971,7 +854,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x800040020, 0x400200004,
          0x200080010, 0x100100008, 0x100000, 0x10, 0x200000, 0x20},
     },
-    // 64KB_Z_X: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x10000, 0x2, 0x20000, 0x4, 0x40000, 0x8, 0x100000, 0x800080008,
          0x400100010, 0x200200040, 0x100400020, 0x400000, 0x40, 0x800000, 0x80},
@@ -984,7 +866,6 @@ const u64 kGfx10Patterns[kG10_SetCount][5][16] = {
         {0, 0, 0, 0, 0x1, 0x10000, 0x2, 0x20000, 0x800080008, 0x400100010,
          0x200200040, 0x100400020, 0x40000, 0x4, 0x80000, 0x10},
     },
-    // 64KB_R_X: 1/2/4/8/16 bytes per element
     {
         {0x1, 0x2, 0x4, 0x20000, 0x10000, 0x40000, 0x8, 0x100000, 0x800080008,
          0x400100010, 0x200200040, 0x100400020, 0x400000, 0x40, 0x800000, 0x80},
@@ -1010,12 +891,10 @@ u32 Gfx10ElemLog2(u32 elem_bytes) {
     case 8:
       return 3;
     default:
-      return 4;  // 16
+      return 4;
   }
 }
 
-// A block always holds 2^blk_log2 bytes; its element extent is square, or twice
-// as wide as it is tall when the element count is an odd power of two.
 void Gfx10BlockDim(u32 blk_log2, u32 elem_log2, u32& w, u32& h) {
   const u32 elems_log2 = blk_log2 - elem_log2;
   const u32 w_log2 = (elems_log2 + 1) / 2;
@@ -1027,8 +906,6 @@ u32 ShiftCeil(u32 value, u32 shift) {
   return (value >> shift) + ((value & ((1u << shift) - 1)) ? 1u : 0u);
 }
 
-// The equation XORs independent contributions from x, y and the array slice,
-// so the whole thing collapses to one table lookup per axis.
 class Gfx10Addresser {
  public:
   bool Init(u32 sw_mode, u32 elem_bytes) {
@@ -1066,10 +943,6 @@ class Gfx10Addresser {
   u32 block_h_ = 0;
 };
 
-// gfx10 stores a mip chain smallest-level-first and packs every level that fits
-// into one shared "mip tail" block, where a level is placed by an x/y offset
-// fed into the swizzle rather than by a byte offset. Array slices repeat the
-// whole chain, so a layer is one constant stride away at every level.
 bool BuildGfx10Layout(TextureLayout32& out,
                       u32 width,
                       u32 height,
@@ -1088,8 +961,6 @@ bool BuildGfx10Layout(TextureLayout32& out,
   }
 
   if (mode.set == kG10_Linear) {
-    // LINEAR pads every row to 256 bytes; LINEAR_GENERAL pads nothing. Only a
-    // single-level surface may carry a caller-supplied pitch.
     const u32 pitch_align = sw_mode == 0 ? 256 / elem : 1;
     u64 chain = 0;
     for (u32 mip = mip_levels; mip-- > 0;) {
@@ -1113,8 +984,6 @@ bool BuildGfx10Layout(TextureLayout32& out,
   Gfx10BlockDim(mode.blk_log2, elem_log2, block_w, block_h);
   const u64 block_bytes = 1ull << mode.blk_log2;
 
-  // 256 B blocks are addressed without a mip tail; the macro block sizes hold
-  // 8 (4 KiB) and 12 (64 KiB) levels in theirs.
   const u32 max_in_tail = mode.blk_log2 > 8 ? mode.blk_log2 - 4 : 0;
   u32 first_tail = mip_levels;
   if (mode.blk_log2 > 8 && mip_levels > 1) {
@@ -1150,10 +1019,6 @@ bool BuildGfx10Layout(TextureLayout32& out,
     level.pitch = tail_w;
     level.stored_height = tail_h;
     level.size = static_cast<u64>(tail_w) * tail_h * elem;
-    // Every tail level shares one block at the start of the chain; its
-    // position inside that block is a coordinate bias, interleaved x/y in the
-    // level's own offset. Both supported block sizes are an even power of two,
-    // so the odd-block-size axis swap never applies.
     u32 tail_x = 0, tail_y = 0;
     for (u32 i = 0; i < 6; i++) {
       tail_x |= ((tail_offset >> (9 + 2 * i)) & 1) << i;
@@ -1364,9 +1229,6 @@ void CopyMacroTiledMip(u8* tiled,
       });
 }
 
-// gfx10.3 standard swizzle: 256 B micro-tiles stored row-major internally, the
-// micro-tiles of a block interleaved in Morton order (x bit first), and the
-// blocks themselves row-major across the surface.
 template <u32 Elem, bool Detile>
 void CopyGfx10StdMip(u8* tiled,
                      u8* linear,
@@ -1383,13 +1245,6 @@ void CopyGfx10StdMip(u8* tiled,
   const u64 slice_bytes =
       static_cast<u64>(level.pitch) * level.stored_height * Elem;
   u8* slice = tiled + slice_bytes * layer;
-  // Within a block: the 256 B micro-tile has its own bit pattern, and above it
-  // the micro-tiles interleave Y first. For 32bpp the micro-tile is 8x8 laid
-  // out x0,x1,y0,y1,y2,x2, a 4x4 row-major quadrant with quadrants ordered Y
-  // first. Solved from the surfaces themselves: a 64 KiB block only ever holds
-  // non-zero elements inside the WxH image, and over two dozen differently
-  // shaped Minecraft UI surfaces this is the only bit order that never places a
-  // non-zero element outside one.
   u32 x_bits = 0, y_bits = 0;
   while ((1u << x_bits) < bw)
     x_bits++;
@@ -1437,9 +1292,6 @@ void CopyGfx10StdMip(u8* tiled,
   });
 }
 
-// gfx10 element address: the block index picks the block, the equation picks
-// the byte inside it. Both are separable in x and y, so the per-row and
-// per-column terms are tabulated once and the inner loop is an XOR and an add.
 template <u32 Elem, bool Detile>
 void CopyGfx10Mip(u8* tiled,
                   u8* linear,
@@ -1563,10 +1415,6 @@ bool BuildGfx10AddressTable(const TextureLayout32& layout,
 
 namespace {
 
-// Liverpool has no address equation here, only the detiler. Detile a surface
-// whose every dword holds its own byte offset, then look for the XOR mask
-// under which the texel addresses split into per-x, per-y and per-slice terms,
-// checked against every texel.
 bool BuildLiverpoolAddressTable(const TextureLayout32& layout,
                                 u32 mip,
                                 base::Vector<u32>& terms,
@@ -1581,8 +1429,6 @@ bool BuildLiverpoolAddressTable(const TextureLayout32& layout,
   const u32 w = level.width, h = level.height, layers = layout.layers;
   if (!w || !h || !layers)
     return false;
-  // Each element is tagged with its own byte address and detiled. A narrow
-  // element holds only part of the address, so those take one pass per part.
   const u32 tag_bytes = base::Min<u32>(eb, 4);
   const u32 passes = 4 / tag_bytes;
   base::Vector<u8> tagged(layout.size);
@@ -1659,9 +1505,6 @@ bool BuildSeparableAddressTable(const TextureLayout32& layout,
     return layout.layer_stride &&
            BuildGfx10AddressTable(layout, mip, terms, block_mask);
   }
-  // Linear rows: x and y add their byte offsets, nothing is swizzled. The
-  // conversions widen narrow texels through this (a stencil plane copied out
-  // one byte a texel).
   if (TilingIsLinear(layout.tiling_idx)) {
     if (mip >= layout.mip_levels)
       return false;
@@ -1670,9 +1513,10 @@ bool BuildSeparableAddressTable(const TextureLayout32& layout,
     if (!w || !h || !layers)
       return false;
     const u64 row = static_cast<u64>(level.pitch) * layout.elem_bytes;
-    slice_stride = layers <= 1                          ? 0
-                   : TilingIsGfx10(layout.tiling_idx) ? layout.layer_stride
-                                                      : row * level.stored_height;
+    slice_stride = layers <= 1 ? 0
+                   : TilingIsGfx10(layout.tiling_idx)
+                       ? layout.layer_stride
+                       : row * level.stored_height;
     block_mask = 0;
     terms.assign(size_t(w) + h + layers, 0);
     for (u32 x = 0; x < w; x++)
@@ -1764,10 +1608,6 @@ void CopyImageContents(const TextureLayout32& layout,
       const auto* source = static_cast<const u8*>(src) + base;
       auto* dest = static_cast<u8*>(dst) + base;
       const u32 slice = terms[level.width + level.height + layer];
-      // The bulk is whole block rows, megabytes of contiguous copying for a 4K
-      // surface, and it reads memory the GPU has just DMA'd in, so every line
-      // comes from RAM. One thread moves ~4 GB/s of that; the pool is what
-      // makes it the memory system's problem rather than one core's.
       const u32 block_rows = full_height / addr.block_h();
       const u64 row_bytes =
           u64(full_width / addr.block_w()) * addr.block_bytes();
@@ -1811,10 +1651,6 @@ void DetileParallelWork(u32 units,
 }
 
 bool TilingIsLinear(u32 tiling_idx) {
-  // Per the Liverpool GB_TILE_MODE table only DisplayLinearAligned(8) and
-  // DisplayLinearGeneral(31) are genuinely linear (ArrayLinearAligned/General).
-  // Keep the same set the previous code used so Isaac's linear surfaces and
-  // small UI textures are still straight-copied.
   if (TilingIsGfx10(tiling_idx))
     return Gfx10ModeOf(tiling_idx - kGfx10TilingBase).set == kG10_Linear;
   return tiling_idx == 8 || tiling_idx == 31;
@@ -1873,7 +1709,6 @@ bool BuildTextureLayout32(TextureLayout32& out,
 
     u64 base_align = 1;
     if (TilingIsGfx10Std(tiling_idx)) {
-      // Each mip is padded to whole blocks and starts on a block boundary.
       u32 mw = 0, mh = 0;
       Gfx10MicroShape(elem_bytes, mw, mh);
       const u32 n = Gfx10BlockTiles(tiling_idx);

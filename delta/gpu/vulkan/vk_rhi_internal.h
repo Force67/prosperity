@@ -3,8 +3,6 @@
  */
 #pragma once
 
-// The Vulkan objects behind the rhi classes. Private to vk_rhi_*.cc.
-
 #include <vulkan/vulkan.h>
 
 #include "base/arch.h"
@@ -31,7 +29,6 @@ struct Allocation {
   [[no_unique_address]] memory_debug::Record debug_backing;
 };
 
-// Device-local image memory: small images share 256 MiB blocks.
 class ImageAllocator {
  public:
   bool Allocate(VulkanDevice& device, VkImage image, Allocation& out);
@@ -54,7 +51,6 @@ class VulkanBuffer final : public rhi::Buffer {
   VulkanBuffer(const rhi::BufferDesc& desc) { desc_ = desc; }
   VkBuffer buffer = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
-  // A sparse buffer's committed pages, and the blocks they are carved from.
   base::HashSet<u64> committed;
   base::Vector<VkDeviceMemory> blocks;
   u64 block_used = 0;
@@ -91,7 +87,6 @@ class VulkanBindGroupLayout final : public rhi::BindGroupLayout {
  public:
   VulkanBindGroupLayout(const rhi::BindGroupLayoutDesc& desc) { desc_ = desc; }
   VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-  // Per binding: the descriptor type, in desc().bindings order.
   base::Vector<VkDescriptorType> types;
   u32 dynamic_count = 0;
 };
@@ -130,7 +125,7 @@ class VulkanCommandList final : public rhi::CommandList {
 
   VkCommandBuffer cmd = VK_NULL_HANDLE;
   VkQueryPool prof_pool_ = VK_NULL_HANDLE;
-  u8 prof_pending_ = 0;  // the tag the last recording's stamps belong to
+  u8 prof_pending_ = 0;
   static constexpr u32 kProfSpans = 255;
   u8 span_cat_[kProfSpans] = {};
   u32 spans_ = 0, spans_pending_ = 0;
@@ -251,8 +246,6 @@ class VulkanCommandList final : public rhi::CommandList {
   VulkanDevice& device_;
   VulkanPipeline* pipeline_ = nullptr;
   bool dispatch_based_ = false;
-  // Sets for PushBindGroup on a device without push descriptors; reset at
-  // Begin, which is only legal once the previous submission retired.
   base::Vector<VkDescriptorPool> transient_pools_;
   u32 transient_pool_ = 0;
 };
@@ -308,12 +301,11 @@ class VulkanDevice final : public rhi::Device {
                       u64* out) override;
   void Maintain() override;
   void ReportDeviceLoss() override;
-  // RenderDoc names a Vulkan device by its instance's dispatch pointer.
+  // RenderDoc identifies the device by its instance's dispatch pointer.
   void* CaptureHandle() const override {
     return *reinterpret_cast<void**>(native.instance);
   }
 
-  // Fills `write` for one binding; `info` storage must outlive the update.
   void FillWrite(VkDescriptorType type,
                  const rhi::BindingWrite& in,
                  VkWriteDescriptorSet& write,
@@ -343,28 +335,23 @@ class VulkanDevice final : public rhi::Device {
  private:
   VkDescriptorPool GrowSetPool();
   void SavePipelineCache(bool force);
-  // A build that took a second or more is written out now, off this thread:
-  // waiting for a quiet frame end loses it to a run that never has one.
   void SaveAfterSlowBuild(u64 started);
   void WritePipelineCache(bool force);
-  void PinSubgroupSize(VkPipelineShaderStageCreateInfo& stage,
-                       VkPipelineShaderStageRequiredSubgroupSizeCreateInfo&
-                           required) const;
+  void PinSubgroupSize(
+      VkPipelineShaderStageCreateInfo& stage,
+      VkPipelineShaderStageRequiredSubgroupSizeCreateInfo& required) const;
 
   rhi::Caps caps_;
   base::String device_name_;
   base::String pipeline_cache_path_;
   VkPipelineStageFlags shader_stages_ = 0;
-  // Stages compiled at exactly caps_.subgroup_size lanes. The recompiler
-  // relies on it, and SPIR-V 1.6 otherwise lets the driver pick (RADV runs
-  // small compute groups as wave32).
+  // Pinned to the recompiler's wave size: RADV would pick wave32 for small
+  // groups.
   VkShaderStageFlags pinned_subgroup_stages_ = 0;
   VkSemaphore timeline_ = VK_NULL_HANDLE;
-  // Sparse binds, waited for by the next Submit.
   VkSemaphore sparse_timeline_ = VK_NULL_HANDLE;
   u64 sparse_value_ = 0;
   u64 sparse_waited_ = 0;
-  // CopyAfter's queue, command buffer and fence, guarded by a spin flag.
   VkQueue side_queue_ = VK_NULL_HANDLE;
   VkCommandPool side_pool_ = VK_NULL_HANDLE;
   VkCommandBuffer side_cmd_ = VK_NULL_HANDLE;
@@ -377,7 +364,6 @@ class VulkanDevice final : public rhi::Device {
   base::Atomic<u64> last_pipeline_build_ns_{0};
   u64 last_cache_write_ns_ = 0;
   size_t last_cache_size_ = 0;
-  // A periodic save runs on a thread of its own; a forced one waits for it.
   base::Atomic<bool> cache_saving_{false};
   base::Atomic<bool> save_requested_{false};
   bool fault_reported_ = false;

@@ -2,9 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// CPU staging of image resources: detile into the linear layout a dispatch
-// binds, and retile its writes back.
-
 #include "gpu/render/compute_internal.h"
 
 #include <cstdio>
@@ -56,9 +53,6 @@ float UnpackUnsignedFloat(u32 value, u32 mantissa_bits) {
                               mantissa << (23 - mantissa_bits));
 }
 
-// Bit arithmetic rather than frexp/lround: this packs every texel of a
-// float-staged R11G11B10 target on each writeback. Rounds to nearest, ties
-// away, as lround did.
 u32 PackUnsignedFloat(float value, u32 mantissa_bits) {
   const u32 bits = base::BitCast<u32>(value);
   const u32 inf = 0x1Fu << mantissa_bits;
@@ -74,7 +68,6 @@ u32 PackUnsignedFloat(float value, u32 mantissa_bits) {
         (((exp32 - 112) << 23 | mant23) + (1u << (drop - 1))) >> drop;
     return base::Min(packed, inf);
   }
-  // Denormal in the target: the implicit bit joins the shifted mantissa.
   const u32 shift = drop + 113 - (exp32 ? exp32 : 1);
   const u32 m = exp32 ? mant23 | 0x800000 : mant23;
   return shift < 32 ? (m + (1u << (shift - 1))) >> shift : 0;

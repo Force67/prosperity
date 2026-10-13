@@ -19,17 +19,17 @@
 namespace gpu::ps5 {
 namespace {
 struct Held {
-  u64 batch = 0;  // 0: nothing of its own to wait for
-  u64 lo = 0, hi = 0;     // the guest bytes it writes
-  base::Vector<u8> data;  // what it writes there, when known
+  u64 batch = 0;
+  u64 lo = 0, hi = 0;
+  base::Vector<u8> data;
   base::Function<void()> write;
 };
 
 base::Mutex g_lock;
-base::ConditionVariable g_wake;  // a write was held
-base::ConditionVariable g_done;  // a held write ran
+base::ConditionVariable g_wake;
+base::ConditionVariable g_done;
 base::Vector<Held> g_held;
-size_t g_head = 0;  // g_held[g_head..] have not run
+size_t g_head = 0;
 
 bool g_started = false;
 base::Mutex g_event_lock;
@@ -51,8 +51,6 @@ void Run() {
     item.write();
     {
       base::LockGuard<base::Mutex> lock(g_lock);
-      // Counted as run only now, so a caller that finds the queue empty is
-      // ordered after this write.
       if (++g_head == g_held.size()) {
         g_held.clear();
         g_head = 0;
@@ -87,8 +85,6 @@ void PublishLabel(base::Function<void()> write,
                   u64 base,
                   u64 bytes,
                   const void* data) {
-  // Staged shader outputs must reach guest memory before their completion
-  // labels let the CPU reuse or free those buffers.
   render::FlushCsWrites(render::DefaultRenderer(), "label");
   const u64 point = render::GuestWritePublishBatch();
   {
@@ -148,7 +144,6 @@ bool LabelPending(u64 base, u64 bytes) {
     for (size_t i = g_head; i < g_held.size() && !pending; i++)
       pending = g_held[i].lo < base + bytes && base < g_held[i].hi;
   }
-  // The held write may wait for the batch this thread has not submitted yet.
   if (pending)
     render::SubmitForPublishedLabels();
   return pending;

@@ -14,10 +14,6 @@ namespace gpu::render {
 
 render::BackendState g_backend;
 
-// Transitional aliases: the one place the per-subsystem names bind to the
-// backend state. Everything is initialized within this translation unit
-// (g_backend first, in declaration order), so the references are never read
-// unbound; no other TU touches these during static initialization.
 FrameState& g_frame = g_backend.frame;
 UploadRings& g_ring = g_backend.rings;
 RecompiledPipelineCache& g_recomp_cache = g_backend.recompiled_pipelines;

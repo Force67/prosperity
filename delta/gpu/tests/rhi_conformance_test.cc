@@ -1,7 +1,3 @@
-// Runs the same work through every rhi backend the build has and checks the
-// pixels against fixed expectations, so a difference is a backend bug rather
-// than a difference of opinion between two backends. Needs a GPU; a backend
-// that cannot create a device is skipped.
 
 #include <gtest/gtest.h>
 
@@ -36,9 +32,8 @@ ShaderCode Spv(const u32 (&words)[N]) {
 class RhiConformance : public ::testing::TestWithParam<Backend> {
  protected:
   void SetUp() override {
-    // One device per backend for the whole run, never destroyed: the Vulkan
-    // backend leaves its VkDevice to process exit, and a device per test
-    // exhausts the driver after a few dozen tests.
+    // One device per backend for the whole run: a device per test exhausts the
+    // driver.
     static base::Map<Backend, Device*> devices;
     Device*& shared = devices[GetParam()];
     if (!shared) {
@@ -105,7 +100,6 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
     return b;
   }
 
-  // Copy a kW x kH RGBA8 target (in `state`) to host memory.
   base::Vector<u32> ReadPixels(Texture* t, TextureState state) {
     Buffer* rb = Readback(kW * kH * 4);
     TextureBarrier b{t, state, TextureState::kCopySrc};
@@ -133,7 +127,6 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
     return r | (g << 8) | (b << 16) | (u32(a) << 24);
   }
 
-  // pos.vert: per-vertex position and RGBA8 colour, per-instance offset.
   struct Vertex {
     float x, y, z;
     u32 color;
@@ -163,7 +156,6 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
     list_->SetVertexBuffers(0, 2, buffers, offsets);
   }
 
-  // Offsets in whole clip-space units, two per instance.
   Buffer* Instances(base::Vector<i16> offsets) {
     return Upload(offsets.data(), offsets.size() * 2, kBufferVertex);
   }
@@ -183,7 +175,7 @@ class RhiConformance : public ::testing::TestWithParam<Backend> {
     return rp;
   }
 
-  Device* device_ = nullptr;  // owned by SetUp's table
+  Device* device_ = nullptr;
   CommandList* list_ = nullptr;
   base::Vector<Object*> objects_;
 };
@@ -250,9 +242,6 @@ TEST_P(RhiConformance, ClearByLoadOp) {
   EXPECT_EQ(px[kW * kH - 1], Rgba(255, 0, 255, 255));
 }
 
-// A triangle over the upper half of clip space, through a y-up viewport, must
-// land in the top rows of the target (row 0 = the lowest address), with
-// vertex colour, a dynamic-offset UBO, push constants and MRT all applied.
 TEST_P(RhiConformance, TriangleOrientationMrtUboPush) {
   Texture* t0 = Target();
   Texture* t1 = Target();
@@ -283,11 +272,9 @@ TEST_P(RhiConformance, TriangleOrientationMrtUboPush) {
   Pipeline* pipe = Own(device_->CreateGraphicsPipeline(gp));
   ASSERT_NE(pipe, nullptr);
 
-  // pos.xy, rgba: covers x in [-1,1], y in [0,1] (before the push offset).
   const float verts[] = {-1.0f, 0.0f, 1, 0,     0,    1, 3.0f, 0.0f, 1,
                          0,     0,    1, -1.0f, 2.0f, 1, 0,    0,    1};
   Buffer* vb = Upload(verts, sizeof(verts), kBufferVertex);
-  // Two 256-byte windows; the draw binds the second, a unit tint.
   base::Vector<float> ubo(128, 0.0f);
   ubo[0] = ubo[1] = ubo[2] = ubo[3] = 9.0f;
   ubo[64] = 1.0f;
@@ -462,9 +449,6 @@ TEST_P(RhiConformance, ComputeStorageBufferAndPush) {
   EXPECT_EQ(out[kN - 1], (kN - 1) * 2 + 7);
 }
 
-// Twenty storage buffers in one stage, windows of one buffer: past the
-// per-stage limit of some GL drivers, with an atomic and a runtime length
-// among the ones over it.
 TEST_P(RhiConformance, ManyStorageBuffers) {
   constexpr u32 kBuffers = 20, kWindow = 256;
   BufferDesc bd;
@@ -583,8 +567,6 @@ TEST_P(RhiConformance, MeshArgumentsAreGeneratedWithinDeviceLimits) {
   }
 }
 
-// Workgroup ids start at the base; a plain dispatch of the same pipeline
-// starts at zero again.
 TEST_P(RhiConformance, DispatchBase) {
   if (!device_->caps().dispatch_base)
     GTEST_SKIP() << "no dispatch base";
@@ -847,8 +829,8 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
         list_->FillBuffer(output, 0, bd.size, ~0u);
         for (u64 offset = 0; offset < source.size(); offset += 65536)
           list_->UpdateBuffer(input, offset,
-                               base::Min<u64>(65536, source.size() - offset),
-                               source.data() + offset);
+                              base::Min<u64>(65536, source.size() - offset),
+                              source.data() + offset);
         list_->Barrier(kAccessCopyWrite | kAccessHostWrite,
                        kAccessComputeRead | kAccessComputeWrite);
         list_->SetPipeline(pipe);
@@ -1069,8 +1051,6 @@ TEST_P(RhiConformance, CopyClearAndBlit) {
     EXPECT_EQ(px[50 * kW + 50], Rgba(0, 255, 0, 255));
 }
 
-// Culling follows the winding in framebuffer space, so flipping the viewport
-// flips which of two opposite triangles survives.
 TEST_P(RhiConformance, CullWindingFollowsViewport) {
   PipelineLayout* layout = EmptyLayout();
   GraphicsPipelineDesc gp = PosPipeline(layout);
@@ -1079,7 +1059,6 @@ TEST_P(RhiConformance, CullWindingFollowsViewport) {
   Pipeline* pipe = Own(device_->CreateGraphicsPipeline(gp));
   ASSERT_NE(pipe, nullptr);
   const u32 red = Rgba(255, 0, 0, 255);
-  // Left: counter-clockwise in clip space (y up). Right: clockwise.
   const Vertex verts[] = {{-0.9f, -0.5f, 0, red}, {-0.1f, -0.5f, 0, red},
                           {-0.5f, 0.5f, 0, red},  {0.1f, -0.5f, 0, red},
                           {0.5f, 0.5f, 0, red},   {0.9f, -0.5f, 0, red}};
@@ -1116,8 +1095,6 @@ TEST_P(RhiConformance, CullWindingFollowsViewport) {
   EXPECT_EQ(pd[32 * kW + 48], red) << "y-down: front face culled";
 }
 
-// Depth test and write, stencil replace then equal, additive blending and an
-// indexed draw with a vertex offset, then both depth planes read back.
 TEST_P(RhiConformance, DepthStencilBlendIndexed) {
   constexpr Format kDs = Format::kD32FloatS8Uint;
   if (!device_->SupportsFormat(kDs, kTextureDepthTarget | kTextureCopySrc))
@@ -1162,23 +1139,12 @@ TEST_P(RhiConformance, DepthStencilBlendIndexed) {
 
   const u32 red = Rgba(255, 0, 0, 255), green = Rgba(0, 255, 0, 255),
             blue = Rgba(0, 0, 255, 255);
-  const Vertex verts[] = {// Skipped by the vertex offset.
-                          {9, 9, 0, 0},
-                          {9, 9, 0, 0},
-                          {9, 9, 0, 0},
-                          {9, 9, 0, 0},
-                          // Left half at z 0.5.
-                          {-1, -1, 0.5f, red},
-                          {0, -1, 0.5f, red},
-                          {0, 1, 0.5f, red},
-                          {-1, 1, 0.5f, red},
-                          // Full screen at z 0.8, then at z 0.1.
-                          {-1, -1, 0.8f, green},
-                          {3, -1, 0.8f, green},
-                          {-1, 3, 0.8f, green},
-                          {-1, -1, 0.1f, blue},
-                          {3, -1, 0.1f, blue},
-                          {-1, 3, 0.1f, blue}};
+  const Vertex verts[] = {
+      {9, 9, 0, 0},         {9, 9, 0, 0},         {9, 9, 0, 0},
+      {9, 9, 0, 0},         {-1, -1, 0.5f, red},  {0, -1, 0.5f, red},
+      {0, 1, 0.5f, red},    {-1, 1, 0.5f, red},   {-1, -1, 0.8f, green},
+      {3, -1, 0.8f, green}, {-1, 3, 0.8f, green}, {-1, -1, 0.1f, blue},
+      {3, -1, 0.1f, blue},  {-1, 3, 0.1f, blue}};
   const u16 indices[] = {0, 1, 2, 0, 2, 3};
   Buffer* vb = Upload(verts, sizeof(verts), kBufferVertex);
   Buffer* ib = Upload(indices, sizeof(indices), kBufferIndex);
@@ -1237,8 +1203,6 @@ TEST_P(RhiConformance, DepthStencilBlendIndexed) {
   }
 }
 
-// first_instance selects the per-instance data, and a scaled attribute
-// converts its integers to float without normalizing.
 TEST_P(RhiConformance, InstancingAndScaledAttributes) {
   PipelineLayout* layout = EmptyLayout();
   Pipeline* pipe = Own(device_->CreateGraphicsPipeline(PosPipeline(layout)));
@@ -1266,8 +1230,6 @@ TEST_P(RhiConformance, InstancingAndScaledAttributes) {
   EXPECT_EQ(px[49 * kW + 48], white) << "instance 2";
 }
 
-// Sparse attribute locations beyond 16, and an attribute the shader does not
-// read.
 TEST_P(RhiConformance, HighAttributeLocations) {
   GraphicsPipelineDesc gp = PosPipeline(EmptyLayout());
   gp.vertex = Spv(k_high_locations_vert_spv);
@@ -1297,8 +1259,6 @@ TEST_P(RhiConformance, HighAttributeLocations) {
   EXPECT_EQ(px[32 * kW + 32], cyan);
 }
 
-// A swizzled single-layer view of an array texture, BGRA memory order, and
-// rendering into one slice of a 3D texture through a 2D view.
 TEST_P(RhiConformance, ViewsSwizzleBgraAnd3DSlice) {
   TextureDesc ad;
   ad.format = Format::kRGBA8Unorm;
@@ -1332,7 +1292,7 @@ TEST_P(RhiConformance, ViewsSwizzleBgraAnd3DSlice) {
   EXPECT_NE(Own(device_->CreateView(cube, cv)), nullptr) << "cube view";
 
   u32 texels[8] = {};
-  texels[4] = Rgba(10, 20, 30, 40);  // layer 1, top-left
+  texels[4] = Rgba(10, 20, 30, 40);
   const u8 bgra_bytes[16] = {1, 2, 3, 4};
   Buffer* staging = Upload(texels, sizeof(texels), 0);
   Buffer* bgra_staging = Upload(bgra_bytes, sizeof(bgra_bytes), 0);
@@ -1444,8 +1404,6 @@ TEST_P(RhiConformance, BufferOpsAndTextureCopies) {
   Buffer* rb = Readback(256);
   const u32 update[4] = {1, 2, 3, 4};
 
-  // 3D: 4x4x2 texels valued by index; read back a 2x2 window of slice 1
-  // into rows of 4 texels.
   TextureDesc vd;
   vd.dim = TextureDim::k3D;
   vd.format = Format::kRGBA8Unorm;
@@ -1459,7 +1417,6 @@ TEST_P(RhiConformance, BufferOpsAndTextureCopies) {
   Buffer* vol_staging = Upload(vol_texels, sizeof(vol_texels), 0);
   Buffer* vol_rb = Readback(64);
 
-  // Layer 4 of a cube-compatible array, copied to a plain 2D texture.
   TextureDesc cd;
   cd.format = Format::kRGBA8Unorm;
   cd.layers = 6;
@@ -1474,7 +1431,6 @@ TEST_P(RhiConformance, BufferOpsAndTextureCopies) {
   Buffer* marker_staging = Upload(&marker, 4, 0);
   Buffer* plain_rb = Readback(4);
 
-  // Depth cleared outside a pass.
   TextureDesc dd;
   dd.format = Format::kD32Float;
   dd.width = dd.height = 4;
@@ -1482,7 +1438,6 @@ TEST_P(RhiConformance, BufferOpsAndTextureCopies) {
   Texture* depth = Own(device_->CreateTexture(dd));
   Buffer* depth_rb = Readback(64);
 
-  // BC1 blocks round-trip unchanged.
   Texture* bc = nullptr;
   u8 blocks[32];
   for (u32 i = 0; i < 32; i++)
@@ -1581,8 +1536,6 @@ TEST_P(RhiConformance, BufferOpsAndTextureCopies) {
     EXPECT_EQ(std::memcmp(bc_rb->mapped(), blocks, sizeof(blocks)), 0);
 }
 
-// A geometry shader expanding a point, a clear of part of an attachment
-// inside the pass, and GPU timestamps around the draw.
 TEST_P(RhiConformance, GeometryClearAttachmentTimestamps) {
   if (!device_->caps().geometry_shader)
     GTEST_SKIP() << "no geometry shaders";
@@ -1645,14 +1598,6 @@ INSTANTIATE_TEST_SUITE_P(Backends,
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// Scenarios added with the D3D12 backend: depth, stencil, blending, view
-// swizzles and format aliases, texture arrays / 3D / cubes, buffer fills and
-// updates, timestamps, draw parameters, culling, geometry shaders, unaligned
-// copies, storage bindings with subgroups, varying linkage, scaled vertex
-// formats and triangle fans. Shaders: rhi_shaders/extra/.
-// ---------------------------------------------------------------------------
-
 namespace {
 
 using namespace gpu::rhi;
@@ -1698,7 +1643,6 @@ constexpr float kBlue[4] = {0, 0, 1, 1};
 
 namespace {
 
-// A layout with only push constants, for the quad shaders.
 PipelineLayout* QuadLayout(Device* device) {
   PipelineLayoutDesc pl;
   pl.push_constant_bytes = sizeof(QuadPush);
@@ -1883,8 +1827,6 @@ TEST_P(RhiConformance, BlendAndConstants) {
       << base::Format("{:#x}", px[32 * kW + 56]).c_str();
 }
 
-// Draws a fullscreen triangle sampling `view` with `fragment` into a fresh
-// target and returns its centre texel.
 u32 SampleCenter(Device* device,
                  CommandList* list,
                  base::Vector<Object*>& objects,
@@ -2020,7 +1962,6 @@ TEST_P(RhiConformance, ViewSwizzleAndFormatAlias) {
 }
 
 TEST_P(RhiConformance, TextureArrays3DAndCubes) {
-  // Two layers, two slices, six faces: one texel each.
   TextureDesc ad;
   ad.format = Format::kRGBA8Unorm;
   ad.layers = 2;
@@ -2113,8 +2054,6 @@ TEST_P(RhiConformance, TextureArrays3DAndCubes) {
       << "-Z";
 }
 
-// Sampling an integer texture is a nearest fetch with the sampler's
-// addressing (D3D12 before SM 6.7 emulates it).
 TEST_P(RhiConformance, IntegerTextureSampling) {
   TextureDesc td;
   td.format = Format::kR32Uint;
@@ -2195,8 +2134,6 @@ TEST_P(RhiConformance, Timestamps) {
   EXPECT_LT(double(t[1] - t[0]) * device_->caps().timestamp_period_ns, 1e9);
 }
 
-// gl_VertexIndex counts from the first vertex (or adds the vertex offset of
-// an indexed draw) and gl_InstanceIndex from the first instance.
 TEST_P(RhiConformance, DrawParameters) {
   PipelineLayoutDesc pl;
   PipelineLayout* layout = Own(device_->CreatePipelineLayout(pl));
@@ -2441,8 +2378,6 @@ TEST_P(RhiConformance, IndirectGpuArgumentsPreserveStorageBindings) {
       std::memcmp(readback->mapped(), expected_args, sizeof(expected_args)), 0);
 }
 
-// A counter-clockwise quad in y-up clip space faces front through a y-up
-// viewport and back through a y-down one, which also puts +y at the bottom.
 TEST_P(RhiConformance, CullingAndViewportDirection) {
   PipelineLayout* layout = Own(QuadLayout(device_));
   GraphicsPipelineDesc none = QuadPipeline(layout);
@@ -2559,8 +2494,6 @@ TEST_P(RhiConformance, GeometryShaderOrientation) {
   EXPECT_EQ(px[(kH - 4) * kW + 4], 0u) << "bottom row covered";
 }
 
-// Tightly packed and oddly pitched buffer layouts, at offsets no copy
-// engine aligns for.
 TEST_P(RhiConformance, UnalignedTextureCopies) {
   constexpr u32 kW = 5, kH = 3;
   TextureDesc td;
@@ -2664,7 +2597,7 @@ TEST_P(RhiConformance, StorageBindingsAndSubgroups) {
   list_->CopyBuffer(src, 256, staging, 0, kN * 4);
   list_->Barrier(kAccessCopyWrite, kAccessShaderRead);
   list_->SetPipeline(pipe);
-  const u32 offsets[2] = {256, 0};  // binding 0, binding 1
+  const u32 offsets[2] = {256, 0};
   list_->SetBindGroup(0, group, offsets, 2);
   list_->Dispatch(kN / 64, 1, 1);
   list_->Barrier(kAccessShaderWrite, kAccessCopyRead);
@@ -2681,7 +2614,6 @@ TEST_P(RhiConformance, StorageBindingsAndSubgroups) {
   EXPECT_EQ(out[131], 6u) << "ballot find MSB";
 }
 
-// The fragment shader reads one of three vertex outputs.
 TEST_P(RhiConformance, VaryingSubset) {
   PipelineLayoutDesc pl;
   PipelineLayout* layout = Own(device_->CreatePipelineLayout(pl));
@@ -2763,8 +2695,6 @@ TEST_P(RhiConformance, ScaledVertexFormatAndFan) {
   EXPECT_EQ(px[2 * kW + kW - 3], Rgba(0, 255, 0, 255));
 }
 
-// gl_BaryCoordEXT over a strip: which vertex each weight belongs to, in the
-// even and the odd triangle. D3D12 without SM 6.1 emulates it.
 TEST_P(RhiConformance, FragmentBarycentrics) {
   if (!device_->caps().fragment_barycentric &&
       device_->backend() != Backend::kD3D12)
@@ -2792,8 +2722,6 @@ TEST_P(RhiConformance, FragmentBarycentrics) {
   list_->EndRenderPass();
   base::Vector<u32> px = ReadPixels(t, TextureState::kColorTarget);
   list_->End();
-  // The dominant weight near each corner. The odd triangle of the strip
-  // orders its vertices (1, 3, 2), keeping the winding.
   auto dominant = [&](u32 x, u32 y) {
     const u32 p = px[y * kW + x];
     const u32 r = p & 0xff, g = (p >> 8) & 0xff, bl = (p >> 16) & 0xff;

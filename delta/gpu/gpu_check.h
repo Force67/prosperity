@@ -3,16 +3,6 @@
  */
 #pragma once
 
-// Fail-fast invariant checks for the gpu module, in the spirit of
-// base/check.h's BASE_BUGCHECK but active in every build flavour: the vendored
-// macro is stripped repo-wide (BASE_STRIP_BUGCHECK) and BASE_DCHECK's
-// CHECK_BREAK is a no-op outside CONFIG_DEBUG, so neither ever fires in the
-// Release builds this project runs. A violated invariant means the renderer's
-// own bookkeeping is corrupt; dying at the violation beats debugging the
-// downstream artifact three frames later.
-// Only for programmer invariants. Anything a guest title can trigger with bad
-// packet data must stay an error path, never a check.
-
 #include <cstdlib>
 #include "base/logging.h"
 

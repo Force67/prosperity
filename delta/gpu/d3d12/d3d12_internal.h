@@ -1,22 +1,5 @@
 #pragma once
 
-/*
- * PS4Delta : PS4/PS5 emulation and research project
- *
- * The D3D12 objects behind the rhi classes. Private to d3d12_*.cc.
- *
- * Binding: every PipelineLayout is one root signature,
- *   [push constants (root constants, or a root CBV when they do not fit)]
- *   [raster: y sign] [draw: base vertex/instance] [dispatch: group count]
- *   [group base: first workgroup id]
- *   per group: [CBV/SRV/UAV table] [sampler table] [root CBV per dynamic UBO]
- * A group's descriptors live in a CPU-only heap and are copied into a
- * shader-visible ring at SetBindGroup; the ring is handed out in chunks a
- * command list keeps until it records again (its previous submission has
- * retired by then). Sampler tables are deduplicated by content into the
- * 2048-entry shader-visible sampler heap.
- */
-
 #include "base/arch.h"
 #include "gpu/d3d12/d3d12_rhi.h"
 #include "gpu/d3d12/d3d12_shader.h"
@@ -42,22 +25,18 @@ void SafeRelease(T*& object) {
   }
 }
 
-// Format mapping (d3d12_format.cc).
 struct DxgiInfo {
-  DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;    // views, RTVs, DSVs
-  DXGI_FORMAT typeless = DXGI_FORMAT_UNKNOWN;  // resources that alias views
-  DXGI_FORMAT srv = DXGI_FORMAT_UNKNOWN;       // sampling (depth: the plane)
+  DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+  DXGI_FORMAT typeless = DXGI_FORMAT_UNKNOWN;
+  DXGI_FORMAT srv = DXGI_FORMAT_UNKNOWN;
   DXGI_FORMAT stencil_srv = DXGI_FORMAT_UNKNOWN;
-  // A vertex format DXGI lacks, fed as its integer twin and converted in the
-  // shader (1 = unsigned, 2 = signed), or with red and blue swapped.
   u8 scaled = 0;
   bool swap_rb = false;
-  bool texture = true;  // usable for textures at all
+  bool texture = true;
 };
 const DxgiInfo& Dxgi(rhi::Format format);
 DXGI_FORMAT VertexFormat(rhi::Format format);
 
-// Contiguous ranges of CPU-only descriptors.
 struct CpuRange {
   D3D12_CPU_DESCRIPTOR_HANDLE cpu{};
   u32 page = ~0u;
@@ -83,7 +62,7 @@ class CpuDescriptorPool {
   struct Page {
     ID3D12DescriptorHeap* heap = nullptr;
     D3D12_CPU_DESCRIPTOR_HANDLE start{};
-    base::Map<u32, u32> free;  // offset -> count
+    base::Map<u32, u32> free;
   };
   ID3D12Device* device_ = nullptr;
   D3D12_DESCRIPTOR_HEAP_TYPE type_{};
@@ -100,7 +79,6 @@ class D3D12Buffer final : public rhi::Buffer {
   ID3D12Resource* resource = nullptr;
   D3D12_GPU_VIRTUAL_ADDRESS va = 0;
   u64 alloc_size = 0;
-  // Upload and readback heaps never leave their initial state.
   bool fixed_state = false;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
 };
@@ -117,10 +95,7 @@ class D3D12Texture final : public rhi::Texture {
   ID3D12Resource* resource = nullptr;
   D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
   u32 planes = 1;
-  // The last state each subresource was moved into while recording: only
-  // consulted for a kUndefined "before", the one side the caller cannot name.
   base::Vector<D3D12_RESOURCE_STATES> states;
-  // Per (mip, layer) attachment descriptors for clears and blits.
   base::Mutex view_mutex;
   base::HashMap<u32, CpuRange> rtvs, dsvs;
 };
@@ -132,21 +107,21 @@ class D3D12View final : public rhi::TextureView {
     desc_ = desc;
   }
   CpuRange srv, uav, rtv;
-  CpuRange dsv[4];  // by read-only depth | read-only stencil << 1
+  CpuRange dsv[4];
 };
 
 class D3D12Sampler final : public rhi::Sampler {
  public:
-  u32 id = 0;  // index into the device's deduplicated sampler table
+  u32 id = 0;
 };
 
 struct GroupEntry {
   u32 binding = 0;
   rhi::BindingType type = rhi::BindingType::kSampledTexture;
   bool read_only = false;
-  u32 slot = 0;             // in the CBV/SRV/UAV table
-  u32 sampler_slot = ~0u;   // in the sampler table
-  u32 dynamic_index = ~0u;  // in SetBindGroup's offsets
+  u32 slot = 0;
+  u32 sampler_slot = ~0u;
+  u32 dynamic_index = ~0u;
 };
 
 class D3D12BindGroupLayout final : public rhi::BindGroupLayout {
@@ -155,13 +130,12 @@ class D3D12BindGroupLayout final : public rhi::BindGroupLayout {
     desc_ = desc;
   }
   const GroupEntry* Find(u32 binding) const;
-  base::Vector<GroupEntry> entries;   // desc().bindings order
-  base::Vector<u32> dynamic_entries;  // entry index per dynamic index
+  base::Vector<GroupEntry> entries;
+  base::Vector<u32> dynamic_entries;
   u32 table_size = 0;
   u32 sampler_count = 0;
 };
 
-// What a bound group needs from the buffers it references.
 struct BufferUse {
   class D3D12Buffer* buffer = nullptr;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
@@ -170,12 +144,10 @@ struct BufferUse {
 class D3D12BindGroup final : public rhi::BindGroup {
  public:
   D3D12BindGroupLayout* layout = nullptr;
-  CpuRange table;              // CPU-only copy of every table slot
-  base::Vector<u32> samplers;  // sampler ids by sampler slot
-  // Per dynamic index: the buffer and the write's own offset/range.
+  CpuRange table;
+  base::Vector<u32> samplers;
   base::Vector<rhi::BindingWrite> dynamic;
   base::Vector<BufferUse> uses;
-  // Cached shader-visible sampler table and the cache generation it is from.
   u32 sampler_table = ~0u;
   u64 sampler_generation = 0;
 };
@@ -183,7 +155,7 @@ class D3D12BindGroup final : public rhi::BindGroup {
 struct RootGroup {
   i32 table = -1;
   i32 sampler_table = -1;
-  base::Vector<i32> root_cbv;  // per dynamic index; -1 = in the table
+  base::Vector<i32> root_cbv;
 };
 
 class D3D12PipelineLayout final : public rhi::PipelineLayout {
@@ -196,26 +168,24 @@ class D3D12PipelineLayout final : public rhi::PipelineLayout {
 #if defined(_WIN32)
   static constexpr bool parameter_buffers = false;
 #else
-  // vkd3d's ExecuteIndirect does not consume root-constant arguments.
   static constexpr bool parameter_buffers = true;
 #endif
-  i32 push_constants = -1;  // root constants
-  i32 push_cbv = -1;        // push constants from upload memory
+  i32 push_constants = -1;
+  i32 push_cbv = -1;
   u32 push_dwords = 0;
   i32 raster = -1, draw = -1, dispatch = -1, group_base = -1;
   base::Vector<RootGroup> groups;
-  base::Vector<base::Pair<u32, u32>> read_only_storage;  // (set, binding)
+  base::Vector<base::Pair<u32, u32>> read_only_storage;
 };
 
 class D3D12Pipeline final : public rhi::Pipeline {
  public:
   ID3D12PipelineState* pso = nullptr;
-  // Primitive restart with 32-bit indices (pso takes 16-bit).
   ID3D12PipelineState* pso_restart32 = nullptr;
   D3D12PipelineLayout* layout = nullptr;
   bool compute = false;
   D3D_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-  bool fan = false;  // drawn as an indexed list built at record time
+  bool fan = false;
   u32 strides[16] = {};
   u8 stencil_ref = 0;
   bool uses_raster = false;
@@ -232,7 +202,6 @@ class D3D12TimestampPool final : public rhi::TimestampPool {
   u32 count = 0;
 };
 
-// A chunk of shader-visible descriptors owned by one command list.
 struct RingChunk {
   u32 first = 0;
   u32 used = 0;
@@ -375,20 +344,18 @@ class D3D12CommandList final : public rhi::CommandList {
     u64 validated_epoch = ~0ull;
   };
 
-  // Shader-visible CBV/SRV/UAV slots valid until this list records again.
   bool AllocateDescriptors(u32 count,
                            D3D12_CPU_DESCRIPTOR_HANDLE* cpu,
                            D3D12_GPU_DESCRIPTOR_HANDLE* gpu);
   UploadAlloc AllocateUpload(u64 bytes, u64 alignment);
-  // A DEFAULT-heap region for repacking copies, in COPY_DEST.
   UploadAlloc AllocateScratch(u64 bytes);
-  UploadAlloc PackIndirectArguments(D3D12Buffer* args, u64 offset,
-                                     u32 constant_offset, u32 constants,
-                                     u32 argument_words);
+  UploadAlloc PackIndirectArguments(D3D12Buffer* args,
+                                    u64 offset,
+                                    u32 constant_offset,
+                                    u32 constants,
+                                    u32 argument_words);
   void ReleaseTransient();
 
-  // Buffer states are per list: every buffer decays to COMMON between
-  // ExecuteCommandLists calls, and Submit runs each list in its own.
   void Require(D3D12Buffer* buffer, D3D12_RESOURCE_STATES state);
   void RequireScratch(ID3D12Resource* scratch, D3D12_RESOURCE_STATES state);
   void Transition(ID3D12Resource* resource,
@@ -436,7 +403,7 @@ class D3D12CommandList final : public rhi::CommandList {
   base::Vector<UploadBlock> upload_;
   size_t upload_block_ = 0;
   base::Vector<UploadBlock> scratch_;
-  ID3D12DescriptorHeap* cpu_scratch_ = nullptr;  // for UAV clears
+  ID3D12DescriptorHeap* cpu_scratch_ = nullptr;
   u32 cpu_scratch_next_ = 0;
 
   base::Vector<D3D12_RESOURCE_BARRIER> barriers_;
@@ -445,10 +412,10 @@ class D3D12CommandList final : public rhi::CommandList {
   u64 transition_epoch_ = 0;
 
   D3D12Pipeline* pipeline_ = nullptr;
-  ID3D12RootSignature* root_ = nullptr;  // as last set on the list
+  ID3D12RootSignature* root_ = nullptr;
   bool root_compute_ = false;
   ID3D12PipelineState* pso_ = nullptr;
-  bool state_lost_ = false;  // an internal pass replaced the pipeline state
+  bool state_lost_ = false;
   BoundGroup groups_[8];
   u32 push_[64] = {};
   bool push_dirty_ = false;
@@ -470,7 +437,7 @@ class D3D12CommandList final : public rhi::CommandList {
   u32 pass_color_count_ = 0;
   D3D12_CPU_DESCRIPTOR_HANDLE pass_rtvs_[8]{};
   D3D12_CPU_DESCRIPTOR_HANDLE pass_dsv_{};
-  D3D12_CPU_DESCRIPTOR_HANDLE pass_dsv_clear_{};  // writable, for clears
+  D3D12_CPU_DESCRIPTOR_HANDLE pass_dsv_clear_{};
   bool pass_has_dsv_ = false;
 };
 
@@ -514,7 +481,6 @@ class D3D12Device final : public rhi::Device {
                       u64* out) override;
   void ReportDeviceLoss() override;
 
-  // Buffer views into a CPU descriptor (d3d12_device.cc).
   void WriteCbv(D3D12_CPU_DESCRIPTOR_HANDLE dst,
                 D3D12Buffer* buffer,
                 u64 offset,
@@ -527,10 +493,8 @@ class D3D12Device final : public rhi::Device {
   void WriteNull(D3D12_CPU_DESCRIPTOR_HANDLE dst,
                  rhi::BindingType type,
                  bool read_only);
-  // The view's DSV; variant bit 0 = read-only depth, bit 1 = stencil.
   D3D12_CPU_DESCRIPTOR_HANDLE Dsv(D3D12View* view, u32 variant);
 
-  // Shader-visible descriptor chunks for command lists.
   bool AcquireChunk(RingChunk* out);
   void ReleaseChunk(const RingChunk& chunk);
   D3D12_CPU_DESCRIPTOR_HANDLE RingCpu(u32 index) const {
@@ -539,7 +503,6 @@ class D3D12Device final : public rhi::Device {
   D3D12_GPU_DESCRIPTOR_HANDLE RingGpu(u32 index) const {
     return {ring_gpu_.ptr + static_cast<u64>(index) * view_increment};
   }
-  // A shader-visible sampler table holding these sampler ids.
   D3D12_GPU_DESCRIPTOR_HANDLE SamplerTable(const base::Vector<u32>& ids,
                                            u32* cached,
                                            u64* generation);
@@ -551,7 +514,6 @@ class D3D12Device final : public rhi::Device {
   D3D12_RESOURCE_STATES TextureState(const D3D12Texture* texture,
                                      rhi::TextureState state) const;
 
-  // The internal blit pipeline for one render-target format.
   ID3D12PipelineState* BlitPipeline(DXGI_FORMAT format);
   ID3D12RootSignature* blit_root() const { return blit_root_; }  // NOLINT
 
@@ -559,22 +521,20 @@ class D3D12Device final : public rhi::Device {
   ID3D12CommandQueue* queue = nullptr;
   ID3D12DescriptorHeap* ring_heap = nullptr;
   ID3D12DescriptorHeap* sampler_heap = nullptr;
-  CpuDescriptorPool views;  // CBV/SRV/UAV
+  CpuDescriptorPool views;
   CpuDescriptorPool rtvs;
   CpuDescriptorPool dsvs;
-  CpuDescriptorPool samplers;  // CPU copies of each unique sampler
+  CpuDescriptorPool samplers;
   u32 view_increment = 0;
   u32 sampler_increment = 0;
   bool debug_labels = false;
 
  private:
   ID3D12RootSignature* SerializeRoot(const D3D12_ROOT_SIGNATURE_DESC& desc);
-  // SPIR-V -> DXIL, cached by module and options.
   bool CompileStage(const rhi::ShaderCode& code,
                     const LowerOptions& options,
                     base::Vector<u8>* dxil,
                     LoweredShader* info);
-  // Backend-generated HLSL, cached by text.
   bool CompileHlsl(const base::String& hlsl,
                    const char* profile,
                    base::Vector<u8>* dxil);
@@ -594,8 +554,8 @@ class D3D12Device final : public rhi::Device {
   base::Vector<u32> free_chunks_;
 
   base::Mutex sampler_mutex_;
-  base::Map<base::String, u32> sampler_ids_;  // packed desc -> id
-  base::Vector<CpuRange> sampler_cpu_;        // by id
+  base::Map<base::String, u32> sampler_ids_;
+  base::Vector<CpuRange> sampler_cpu_;
   base::Map<base::Vector<u32>, u32> sampler_tables_;
   u32 sampler_heap_used_ = 0;
   u64 sampler_generation_ = 1;

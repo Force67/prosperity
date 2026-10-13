@@ -1,9 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * GCN shader recompiler entry point. Recompilation goes GCN -> SPIR-V directly
- * (spirv/), with a SPIRV-Tools optimize pass. This file is just the public
- * facade over that backend.
  */
 
 #include "gpu/gcn/gcn_translate.h"
@@ -33,19 +29,10 @@ DELTA_OPTION(bool, kDirectGcn, "DELTA_GPU_DIRECT_GCN", false);
 u64 NowNs() {
   return (base::TickClock::NowNs());
 }
-// Set-2 raw-buffer bindings the planner may use. Starts at the Vulkan floor so
-// a shader planned before the renderer reports the device limit is still valid
-// everywhere. Written exactly once, by vk_upload_ring during device init,
-// before the command processor issues its first recompile.
 u32 g_max_gfx_buffers = kMinGfxBuffers;
 
-// Device push-constant budget. Written once at renderer init (before the
-// command processor issues any recompile), read on the recompile path.
-u32 g_push_budget = 128;  // the Vulkan floor: no room for code addresses
+u32 g_push_budget = 128;
 
-// Host subgroup width, same write-once-at-init discipline. Defaults to a full
-// GCN wave so a shader planned before the renderer reports it assumes the
-// lockstep the guest compiler assumed.
 u32 g_host_subgroup = kGcnWave;
 
 }  // namespace

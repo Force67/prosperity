@@ -71,8 +71,8 @@ bool ConvertGuestIndices(Renderer& renderer,
   if (!g_ring.converted_ib) {
     rhi::BufferDesc desc;
     desc.size = kIbRing;
-    desc.usage = rhi::kBufferStorage | rhi::kBufferIndex | rhi::kBufferIndirect |
-                 rhi::kBufferCopySrc;
+    desc.usage = rhi::kBufferStorage | rhi::kBufferIndex |
+                 rhi::kBufferIndirect | rhi::kBufferCopySrc;
     g_ring.converted_ib = Device().CreateBuffer(desc);
   }
   if (!g_ring.converted_ib)

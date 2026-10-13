@@ -25,24 +25,21 @@ DELTA_OPTION(u32, kBufferCacheMb, "DELTA_GPU_BUFFER_CACHE_MB", 512);
 
 constexpr u64 kBlockBytes = 64ull << 20;
 constexpr u64 kAlign = 256;
-// Frames a released copy may still be read by (the ring's frame slots plus
-// the one being recorded).
 constexpr int kRetireFrames = 3;
-// A copy no draw asked for in this many frames gives its memory back.
 constexpr int kIdleFrames = 120;
-constexpr u32 kIndexShift = 16;  // 64 KiB blocks for invalidation lookups
+constexpr u32 kIndexShift = 16;
 
 struct Block {
   rhi::Buffer* buffer = nullptr;
   u8* map = nullptr;
-  base::Map<u64, u64> free;  // offset -> bytes, coalesced
+  base::Map<u64, u64> free;
 };
 
 struct Entry {
   u64 base = 0;
   u32 block = 0;
   u64 offset = 0;
-  u64 bytes = 0;  // 0 = a free handle
+  u64 bytes = 0;
   int last_used = 0;
 };
 
@@ -54,13 +51,9 @@ struct Retired {
 };
 
 base::Vector<Block> g_blocks;
-// Copies live in a pool addressed by handle: the idle sweep walks one vector,
-// and the index holds handles instead of keys to look up again.
 base::Vector<Entry> g_pool;
 base::Vector<u32> g_free_handles;
 base::HashMap<u64, u32> g_by_base;
-// 64 KiB block -> handles. May hold handles since dropped or reused: every
-// hit is checked against the entry it names now.
 base::HashMap<u64, base::Vector<u32>> g_index;
 base::Vector<Retired> g_retired;
 u64 g_live_bytes = 0;
@@ -122,7 +115,6 @@ bool Allocate(u64 bytes, u32& block_index, u64& offset) {
   return true;
 }
 
-// Releases the copy behind `handle` once no in-flight frame reads it.
 void Drop(u32 handle) {
   Entry& e = g_pool[handle];
   g_retired.push_back(
@@ -192,7 +184,6 @@ void InvalidateCachedBuffers(u64 first, u64 end) {
         Drop(handle);
     }
   };
-  // A remapped reservation can span gigabytes: walk the smaller side.
   const u64 first_block = first >> kIndexShift;
   const u64 last_block = (end - 1) >> kIndexShift;
   if (last_block - first_block + 1 > g_index.size()) {
@@ -207,8 +198,6 @@ void InvalidateCachedBuffers(u64 first, u64 end) {
 }
 
 void BufferCacheEndFrame() {
-  // An idle copy may outstay kIdleFrames by this much: the sweep over every
-  // copy is too costly for every frame.
   constexpr int kSweepFrames = 16;
   if (g_frame.num % kSweepFrames == 0)
     for (u32 handle = 0; handle < g_pool.size(); handle++)
@@ -221,8 +210,6 @@ void BufferCacheEndFrame() {
     Free(g_blocks[r.block], r.offset, r.bytes);
     return true;
   });
-  // The index only grows between rebuilds; rebuild it from the live copies
-  // now and then instead of unindexing each drop.
   if (g_frame.num % 64 == 0) {
     g_index.clear();
     for (u32 handle = 0; handle < g_pool.size(); handle++)

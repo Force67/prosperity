@@ -2,9 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// DELTA_GPU_MIRROR: one sparse device buffer that caches guest memory for
-// the plain buffers a dispatch binds.
-
 #include "gpu/render/compute_internal.h"
 
 #include <sys/mman.h>
@@ -25,11 +22,10 @@
 
 namespace gpu::render {
 
-// Imports in chunks: a device allows only a few thousand allocations.
 constexpr u64 kMirrorImport = 2ull << 20;
 rhi::Buffer* g_mirror = nullptr;
 bool g_mirror_tried = false;
-base::HashMap<u64, rhi::Buffer*> g_mirror_imports;  // chunk -> import
+base::HashMap<u64, rhi::Buffer*> g_mirror_imports;
 
 rhi::Buffer* Mirror() {
   if (!g_mirror_tried) {
@@ -51,8 +47,6 @@ rhi::Buffer* Mirror() {
   return g_mirror;
 }
 
-// Reuse existing imports before establishing a write watch. Other ranges
-// use 2 MiB chunks, or 64 KiB pages when a chunk crosses unmapped memory.
 rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
   u64 offset = 0, bytes = 0;
   if (auto* direct = DirectImportAt(address, &offset, &bytes);
@@ -90,8 +84,6 @@ bool MirrorEligible(const ComputeInfo::Res& r, u64 bytes) {
          MirrorCovers(r.base, bytes) && !(r.base & 3) && Mirror();
 }
 
-// Copies [base, base+bytes) between the guest pages and the mirror, on the
-// batch list, piece by piece along the imports.
 bool MirrorCopy(u64 base,
                 u64 bytes,
                 bool to_guest,
@@ -126,8 +118,6 @@ bool MirrorCopy(u64 base,
   return true;
 }
 
-// Guest bytes copied by the GPU straight out of the host pages into `dst`.
-// False when a page cannot be imported or a block's bytes live in the mirror.
 bool GuestImportable(u64 base, u64 bytes) {
   for (u64 at = base; at < base + bytes;) {
     u64 import_base = 0;
@@ -139,11 +129,6 @@ bool GuestImportable(u64 base, u64 bytes) {
   return true;
 }
 
-// Guest bytes copied by the GPU into `dst` at `dst_off`: out of the mirror
-// where a block is the mirror's, straight out of the imported pages elsewhere,
-// read-only direct memory through its second view. Host pages the device
-// cannot import at all go up through an upload buffer, the one place the CPU
-// touches them. False when the bytes are not readable at all.
 bool RecordGuestRead(rhi::CommandList* list,
                      u64 base,
                      u64 bytes,
@@ -155,7 +140,6 @@ bool RecordGuestRead(rhi::CommandList* list,
   const auto block_end = [&](u64 at) {
     return base::Min(base + bytes, (at & ~(kMirrorBlock - 1)) + kMirrorBlock);
   };
-  // Direct memory the guest maps read-only imports through the second view.
   const auto direct = [](u64 at, u64 end) {
     for (u64 offset, n; at < end; at += n)
       if (!DirectImportAt(at, &offset, &n))
@@ -195,12 +179,8 @@ bool RecordGuestRead(rhi::CommandList* list,
         list->CopyBuffer(dst, dst_off + piece - base, import, offset, len);
       }
     } else {
-      // Host memory the device cannot map at all (a read-only module page):
-      // it goes up through the upload ring. No GPU write reaches such pages.
       if (!gpu::IsReadableRange(at, n))
         return false;
-      // The frame's upload ring, or a buffer of its own where the ring cannot
-      // grow (a host that pins little memory).
       TextureUploadSlice upload;
       if (!AllocateTextureUpload(g_frame.slot_idx, n, 16, upload)) {
         rhi::BufferDesc desc;
@@ -227,12 +207,6 @@ bool RecordGuestRead(rhi::CommandList* list,
 base::HashSet<u64> g_mirror_clean;
 base::Vector<base::Pair<u64, u64>> g_mirror_self;
 
-// GPU-owned blocks (DELTA_GPU_MIRROR_OWN): a block a dispatch wrote stays in
-// the mirror, which the direct table then points at, and nothing is copied
-// back. Once the batch is submitted the guest pages are made inaccessible; the
-// first CPU touch faults, waits for the batch, copies the written span back on
-// a queue of its own and hands the block back to the host. A block the CPU
-// keeps touching is not taken again.
 DELTA_OPTION(bool, kMirrorOwn, "DELTA_GPU_MIRROR_OWN", true);
 constexpr u32 kOwnMaxFaults = 4;
 OwnBlock* g_own = nullptr;
@@ -257,8 +231,6 @@ bool InMirror(u64 address) {
   return MirrorOffset(address) != kNotMirrored;
 }
 
-// Any thread, from the fault handler too: hands every protected block of
-// [first, end) back to the host.
 bool MirrorResolve(u64 first, u64 end) {
   if (!g_own)
     return false;
@@ -321,7 +293,6 @@ bool MirrorUsesImport(rhi::Buffer* buffer) {
   return false;
 }
 
-// Whether a dispatch's output at [base, base+bytes) can stay on the GPU.
 bool MirrorOwnable(u64 base, u64 bytes) {
   if (!kMirrorOwn || !gcn::g_direct_table || !Device().caps().copy_after ||
       !g_mirror->address())
@@ -368,8 +339,6 @@ void MirrorOwn(u64 base, u64 bytes) {
   }
 }
 
-// The batch that wrote them is on the queue: the blocks become inaccessible
-// to the CPU until it asks for them.
 void MirrorProtectSubmitted(u64 submission) {
   if (g_own_unsubmitted.empty())
     return;
@@ -391,8 +360,9 @@ struct MirrorDraw {
   int frame = -1;
   u64 chunk = 0;
 } g_mirror_draw;
-const guest::SessionReset reset_mirror_draw(
-    [] { guest::ResetResource(g_mirror_draw); });
+const guest::SessionReset reset_mirror_draw([] {
+  guest::ResetResource(g_mirror_draw);
+});
 
 bool OrderMirrorAfterFrameRead() {
   if (g_mirror_draw.frame != g_frame.num ||
@@ -417,9 +387,7 @@ void MirrorFrameRead() {
   g_mirror_draw = {g_frame.num, g_frame.chunk_seq};
 }
 
-// Before a dispatch reads it: backed, and holding the guest's bytes.
 bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
-  // A range still owned by the staging path is written back first.
   if (CsRangeDirtyOverlapping(base, bytes) &&
       !FlushCsWritesForGpu(renderer, base, bytes, "mirror"))
     return false;
@@ -432,10 +400,6 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
   CsBatchBeginImpl();
   if (!g_cs_batch_open)
     return false;
-  // Only the blocks the CPU may have changed: runs of them, backed and copied
-  // once each. Whole blocks where they are mapped, as a block may become the
-  // GPU's. A block the GPU owns, or one watched since its copy, holds the
-  // newest bytes already, and was backed then.
   const u64 page = base::Max(Device().caps().sparse_page, kMirrorBlock);
   const u64 end = base + bytes;
   u64 run = 0, run_end = 0;
@@ -445,7 +409,7 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
     const u64 lo = MirrorOffset(run) & ~(page - 1);
     const u64 hi = (MirrorOffset(run_end - 1) + page) & ~(page - 1);
     return Device().CommitSparse(g_mirror, lo, hi - lo) &&
-           MirrorCopy(run, run_end - run, /*to_guest=*/false);
+           MirrorCopy(run, run_end - run, false);
   };
   for (u64 block = base & ~(kMirrorBlock - 1); block < end;
        block += kMirrorBlock) {
@@ -475,8 +439,6 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
   return !in_run || copy_run();
 }
 
-// Before the GPU writes [base, base+bytes) of guest memory: the mirror blocks
-// it touches hold the guest's bytes around it, or the pages import.
 static bool PrepareGuestWrite(u64 base, u64 bytes, bool* mirrored) {
   *mirrored = kMirror && Mirror() && MirrorCovers(base, bytes);
   if (CsTracksGuestWrites())
@@ -487,9 +449,6 @@ static bool PrepareGuestWrite(u64 base, u64 bytes, bool* mirrored) {
                    : GuestImportable(base, bytes);
 }
 
-// `src` copied over guest memory at `base` on the open batch, around the
-// `skip` spans: into the mirror, which owns the bytes or writes them through,
-// or straight into the imported guest pages where the mirror does not reach.
 static void RecordGuestWrite(rhi::CommandList* c,
                              bool mirrored,
                              u64 base,
@@ -531,15 +490,10 @@ static void RecordGuestWrite(rhi::CommandList* c,
   }
 }
 
-// A dirty range written back on the GPU. A label behind it waits for no
-// readback. `kept`: bytes the CPU wrote since staging were left as they are,
-// so the buffer no longer holds what guest memory does.
 bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
   *kept = false;
   if (!e.buf || e.imported || (base & 3))
     return false;
-  // An image staged in the shader's layout is tiled again on the way out.
-  // Block-compressed staging holds decoded texels, which cannot go back.
   const bool retile = e.image_staging && !e.truth;
   gcn::TextureLayout32 tiled, linear;
   const TileTable* table = nullptr;
@@ -547,9 +501,9 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
     if (e.res.dfmt == 35 || e.res.dfmt == 40 ||
         !BuildCsImageLayouts(e.res, tiled, linear))
       return false;
-    table = GetTileTable(tiled, linear,
-                         /*packed=*/tiled.elem_bytes < 4 &&
-                             linear.elem_bytes == tiled.elem_bytes);
+    table = GetTileTable(
+        tiled, linear,
+        tiled.elem_bytes < 4 && linear.elem_bytes == tiled.elem_bytes);
     if (!table)
       return false;
   }
@@ -565,15 +519,13 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
   rhi::CommandList* const c = g_cs_list;
   rhi::Buffer* src = e.buf;
   if (retile) {
-    // Over the guest's bytes, so padding the layout skips keeps them.
     const u64 padded = (n + 3) & ~u64(3);
     src = AcquireScratch(padded);
     if (!src || !RecordGuestRead(c, base, n, src))
       return false;
     RecordImageTiling(c, *table, src, 0, padded, e.buf,
-                      (linear.size + 3) & ~u64(3), /*detile=*/false);
+                      (linear.size + 3) & ~u64(3), false);
   }
-  // Bytes the CPU wrote since staging are newer than the dispatch's.
   base::Vector<base::Pair<u64, u64>> skip;
   for (const auto* spans : {&e.cpu_writes, &e.fill_kept})
     for (const auto& [lo, hi] : *spans)
@@ -583,7 +535,6 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
   *kept = !skip.empty();
   RecordGuestWrite(c, mirrored, base, n, src, skip);
   e.fill_kept.clear();
-  // The buffer is read by the copy: not recycled before the batch is done.
   MarkPending(e);
   return true;
 }
@@ -593,11 +544,9 @@ bool WriteTextureToGuest(rhi::Texture* texture,
                          u64 base,
                          const gcn::TextureLayout32& tiled,
                          const gcn::TextureLayout32& linear) {
-  const TileTable* table =
-      GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4);
+  const TileTable* table = GetTileTable(tiled, linear, tiled.elem_bytes < 4);
   if (!table || !g_frame.recording)
     return false;
-  // On the frame's list, behind the draws that rendered the texture.
   CsBatchBeginImpl();
   if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame) {
     if (!CsBatchSubmit())
@@ -615,7 +564,6 @@ bool WriteTextureToGuest(rhi::Texture* texture,
   if (!pixels || !PrepareGuestWrite(base, tiled.size, &mirrored))
     return false;
   rhi::CommandList* const c = g_cs_list;
-  // Over the guest's bytes, so padding the layout skips keeps them.
   if (!RecordGuestRead(c, base, tiled.size, raw))
     return false;
   const auto& level = linear.mips[0];
@@ -629,7 +577,7 @@ bool WriteTextureToGuest(rhi::Texture* texture,
   c->CopyTextureToBuffer(pixels, texture, &copy, 1);
   TransitionImage(c, texture, state, old_state);
   RecordImageTiling(c, *table, raw, 0, tiled_bytes, pixels, linear_bytes,
-                    /*detile=*/false);
+                    false);
   RecordGuestWrite(c, mirrored, base, tiled.size, raw, {});
   return true;
 }
@@ -637,7 +585,6 @@ bool WriteTextureToGuest(rhi::Texture* texture,
 base::Map<u64, MirrorWrite> g_mirror_writes;
 u64 g_mirror_seq = 0;
 
-// The write that holds [base, base+bytes) whole, if one does.
 const MirrorWrite* MirrorWritten(u64 base, u64 bytes) {
   auto it = g_mirror_writes.upper_bound(base);
   if (it == g_mirror_writes.begin())
@@ -647,7 +594,6 @@ const MirrorWrite* MirrorWritten(u64 base, u64 bytes) {
 }
 
 namespace {
-// A partial write must also invalidate cached views of the wider window.
 void RecordMirrorWrite(u64 first, u64 bytes) {
   u64 end = first + bytes;
   auto it = g_mirror_writes.upper_bound(first);
@@ -669,7 +615,6 @@ void RecordMirrorWrite(u64 first, u64 bytes) {
 }
 }  // namespace
 
-// After a dispatch wrote it: back out to the guest pages, in queue order.
 void MirrorWriteBack(u64 base, u64 bytes) {
   if (MirrorOwnable(base, bytes)) {
     RecordMirrorWrite(base, bytes);
@@ -687,7 +632,7 @@ void MirrorWriteBack(u64 base, u64 bytes) {
     e = base::Max(e, base + bytes);
   }
   RecordMirrorWrite(base, bytes);
-  if (!MirrorCopy(base, bytes, /*to_guest=*/true))
+  if (!MirrorCopy(base, bytes, true))
     return;
   NotePendingGuestWrite(base, base + bytes);
   g_mirror_self.push_back({base, base + bytes});
@@ -695,8 +640,6 @@ void MirrorWriteBack(u64 base, u64 bytes) {
   InvalidateTexRange(base, bytes);
 }
 
-// A fill done by the GPU: into the mirror, then written through like a
-// dispatch's output, with no CPU touching the bytes.
 bool MirrorFillable(u64 base, u64 bytes) {
   return kMirror && Mirror() && !(base & 3) && !(bytes & 3) &&
          MirrorCovers(base, bytes) &&
@@ -706,7 +649,6 @@ bool MirrorFillable(u64 base, u64 bytes) {
 bool MirrorFill(u64 base, u64 bytes, u32 value) {
   if (!MirrorFillable(base, bytes) || !OrderMirrorAfterFrameRead())
     return false;
-  // A block the fill makes the GPU's holds the guest's bytes around it.
   if (MirrorOwnable(base, bytes)) {
     if (!MirrorCopyInGuest(base, bytes))
       return false;
@@ -732,7 +674,6 @@ bool GpuFill(u64 base, u64 bytes, u32 lo, u32 hi) {
     return false;
   if (lo == hi && MirrorFill(base, bytes, lo))
     return true;
-  // Elsewhere the pattern is built in scratch and copied over the pages.
   CsBatchBeginImpl();
   if (!g_cs_batch_open)
     return false;
@@ -774,19 +715,11 @@ bool GpuWriteGuest(u64 dst, u64 bytes, rhi::Buffer* src, u64 src_off) {
   return true;
 }
 
-// Direct reads of guest memory come from VRAM: a block is copied into the
-// mirror on its first read and stays there. What the CPU writes later is copied
-// in again before the next submission: the pages it wrote when they are
-// watched, the whole block when it writes them too often to watch.
-
-// Watches [first, end), however often the CPU writes it: a fault per written
-// page costs less than copying unwritten ones. Pages that cannot be watched
-// are copied in before every submission instead.
 static bool MirrorWatch(u64 first, u64 end) {
-  if (GuestWriteTracker().Arm(first, end - first, /*hot=*/true))
+  if (GuestWriteTracker().Arm(first, end - first, true))
     return true;
   for (u64 page = first; page < end; page += kMirrorHotPage)
-    if (!GuestWriteTracker().Arm(page, kMirrorHotPage, /*hot=*/true))
+    if (!GuestWriteTracker().Arm(page, kMirrorHotPage, true))
       g_mirror_hot.insert(page);
   return false;
 }
@@ -812,7 +745,7 @@ u64 MirrorCacheBlock(u64 block) {
     if (!g_cs_batch_open)
       return 0;
   }
-  if (!MirrorCopy(block, kMirrorBlock, /*to_guest=*/false, list))
+  if (!MirrorCopy(block, kMirrorBlock, false, list))
     return 0;
   if (watched)
     g_mirror_clean.insert(block);
@@ -850,10 +783,6 @@ rhi::Buffer* IndirectArgsBuffer(u64 args, u64* offset) {
   return g_mirror;
 }
 
-// Indirect arguments the mirror does not hold, copied by the GPU out of guest
-// memory, in queue order, into a ring the draw or dispatch reads. At most two
-// frames are in flight, so a quarter of the ring per frame is never reused
-// under a reader.
 constexpr u64 kIndirectRing = 4ull << 20;
 constexpr u64 kIndirectEntry = 32;
 
@@ -898,8 +827,6 @@ rhi::Buffer* StageIndirectArgs(rhi::CommandList* list,
   return StageArgs(list, args, bytes, offset, rhi::kAccessIndirectRead);
 }
 
-// A COND_EXEC flag a GPU write is still on its way to: copied behind it, and
-// every draw until EndGuestPredicate runs only when it is non-zero.
 bool BeginGuestPredicate(u64 flag) {
   if (!Device().caps().conditional || !g_frame.recording || g_predicate ||
       !FlushCsWritesForGpu(DefaultRenderer(), flag, 4, "cond"))
@@ -925,7 +852,6 @@ bool MirrorLive(u64 at) {
   return g_mirror_cached.count(block) && !MirrorOwned(block);
 }
 
-// Where a copy into the mirror goes so the next draw or dispatch sees it.
 rhi::CommandList* MirrorRefreshList() {
   if (g_frame.recording) {
     EndRegion();
@@ -942,21 +868,19 @@ void MirrorRefreshWritten() {
   rhi::CommandList* list = MirrorRefreshList();
   if (!list)
     return;
-  // Earlier draws may still read the bytes about to be replaced.
   list->Barrier(kAccessAll, rhi::kAccessCopyWrite);
   for (const auto& [first, end] : g_mirror_stale) {
     if (!MirrorLive(first))
       continue;
     if (MirrorWatch(first, end))
       g_mirror_clean.insert(first & ~(kMirrorBlock - 1));
-    MirrorCopy(first, end - first, /*to_guest=*/false, list);
+    MirrorCopy(first, end - first, false, list);
   }
   g_mirror_stale.clear();
 }
 
 void MirrorRefreshCached() {
   CollectGuestWrites();
-  // The CPU took these back; its fault waited for their bytes to land.
   base::Vector<u64> released;
   for (u64 block : g_mirror_was_owned)
     if (!MirrorOwned(block))
@@ -982,10 +906,10 @@ void MirrorRefreshCached() {
       end += kMirrorHotPage;
     const bool copy = MirrorLive(first);
     for (u64 page = first; page < end; page += kMirrorHotPage)
-      if (!copy || GuestWriteTracker().Arm(page, kMirrorHotPage, /*hot=*/true))
+      if (!copy || GuestWriteTracker().Arm(page, kMirrorHotPage, true))
         g_mirror_hot.erase(page);
     if (copy)
-      MirrorCopy(first, end - first, /*to_guest=*/false, list);
+      MirrorCopy(first, end - first, false, list);
   }
 }
 
@@ -1016,9 +940,6 @@ bool WatchMirrorHostReads(u64 base, u64 bytes) {
 }
 }  // namespace
 
-// A texture over bytes a dispatch wrote through the mirror: detiled from the
-// mirror on the GPU, where reading the guest copy would wait for the write
-// back.
 bool MirrorSupplyTexture(u64 base,
                          const gcn::TextureLayout32& tiled,
                          const gcn::TextureLayout32& linear,
@@ -1028,8 +949,7 @@ bool MirrorSupplyTexture(u64 base,
   const MirrorWrite* written = MirrorWritten(base, tiled.size);
   if (!written || !g_frame.recording)
     return false;
-  const TileTable* table =
-      GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4);
+  const TileTable* table = GetTileTable(tiled, linear, tiled.elem_bytes < 4);
   if (!table)
     return false;
   if (!img)
@@ -1062,7 +982,7 @@ bool MirrorSupplyTexture(u64 base,
     return false;
   list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessComputeRead);
   RecordImageTiling(list, *table, source, mirrored ? MirrorOffset(base) : 0,
-                    tiled.size, scratch, linear.size, /*detile=*/true);
+                    tiled.size, scratch, linear.size, true);
   MirrorFrameRead();
   rhi::TextureBarrier b;
   b.texture = img;
@@ -1085,8 +1005,6 @@ bool MirrorSupplyTexture(u64 base,
   return true;
 }
 
-// A buffer read on the GPU (a draw's cbuffer or raw window) of bytes a
-// dispatch wrote through the mirror: copied from there.
 u64 MirrorRevision(u64 base, u64 bytes) {
   const MirrorWrite* written = MirrorWritten(base, bytes);
   return written && g_frame.recording ? written->seq : 0;
@@ -1120,8 +1038,6 @@ void MirrorNoteGuestWrites(u64 first, u64 end, bool announced) {
       (first >= kMirrorLowWindow &&
        (end <= kMirrorPs5Base || first >= kMirrorPs5Base + kMirrorWindow)))
     return;
-  // Our own write-through, announced. A CPU write the tracker saw in the
-  // same pages is not, and the mirror misses its bytes.
   if (announced)
     for (const auto& [lo, hi] : g_mirror_self)
       if ((lo & ~u64(0xFFF)) <= first && end <= ((hi + 0xFFF) & ~u64(0xFFF)))
@@ -1133,8 +1049,8 @@ void MirrorNoteGuestWrites(u64 first, u64 end, bool announced) {
       OwnAt(block).cpu_dirty.store(1, base::memory_order_release);
     g_mirror_clean.erase(block);
     if (g_mirror_cached.count(block))
-      g_mirror_stale.push_back({base::Max(first, block),
-                                base::Min(end, block + kMirrorBlock)});
+      g_mirror_stale.push_back(
+          {base::Max(first, block), base::Min(end, block + kMirrorBlock)});
   }
 }
 

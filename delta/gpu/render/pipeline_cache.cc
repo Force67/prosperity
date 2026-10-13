@@ -35,48 +35,15 @@
 namespace {
 DELTA_OPTION(bool, kDoCull, "DELTA_GPU_CULL", false);
 DELTA_OPTION(bool, kDepthClamp, "DELTA_GPU_DEPTHCLAMP", false);
-// DELTA_GPU_PIPETRACE=1 traces the first pipelines built; =<ps addr> traces
-// only that shader's. Pipelines are built in load order, so a flat cap only
-// ever shows the loading screens, so a negative from it says nothing about the
-// draw you care about.
 DELTA_OPTION(u64, kGpuPipetrace, "DELTA_GPU_PIPETRACE", 0);
 DELTA_OPTION(bool, kNoMaskDiag, "DELTA_GPU_NOMASK", false);
 DELTA_OPTION(bool, kNoRectGs, "DELTA_GPU_NORECTGS", false);
-// A depth prepass leaves the shaded pass testing ZFUNC=EQUAL against depth we
-// cannot reproduce bit-exactly; on by default because rejecting the whole scene
-// is never the better failure. DELTA_GPU_ZEQUAL=strict restores the raw op.
 DELTA_OPTION(bool, kRelaxDepthEqual, "DELTA_GPU_RELAX_ZEQUAL", true);
-// DELTA_GPU_NOZTEST=1: build every pipeline with the depth test off. Tells
-// "this pass produced nothing because the depth test rejected it" apart from
-// "its shader computed nothing", which look identical in an empty target.
 DELTA_OPTION(bool, kNoZTest, "DELTA_GPU_NOZTEST", false);
-// DELTA_GPU_NOZTEST_PS=<ps guest addr>: the same, for ONE pass. NOZTEST is a
-// blunt instrument: it disables the depth test on every pipeline, so a frame
-// that improves under it has told you only that SOME depth test was
-// responsible, and every other pass is now drawing over everything at the same
-// time. Naming one shader answers the question the blunt version cannot:
-// whether THIS pass is being rejected by the comparison, or is computing
-// nothing to begin with.
 DELTA_OPTION(const char*, kNoZTestPs, "DELTA_GPU_NOZTEST_PS", nullptr);
-// DELTA_GPU_NOZWRITE_PS=<list>: the twin of the above for depth WRITES. The
-// pair separates the two things a depth-tested, depth-writing pass can get
-// wrong: disabling the TEST asks whether the pass is being rejected by what it
-// reads from the plane; disabling the WRITE asks whether what it puts INTO the
-// plane is what breaks a later pass. Neither question is answerable from the
-// other.
 DELTA_OPTION(const char*, kNoZWritePs, "DELTA_GPU_NOZWRITE_PS", nullptr);
-// DELTA_GPU_ZWRITE_PS=<list>: force depth WRITE ON for named shaders. The point
-// is measurement, not correctness: a pass that only ever READS the depth plane
-// leaves no trace of the z it computed, so there is no way to find out where
-// its geometry actually lands. Force its write, turn its test off with
-// DELTA_GPU_NOZTEST_PS so every fragment gets through, and the depth plane then
-// holds that pass's own z for you to read back. It corrupts the plane for
-// everything downstream, so it is a probe and nothing else.
 DELTA_OPTION(const char*, kZWritePs, "DELTA_GPU_ZWRITE_PS", nullptr);
 
-// Comma-separated list, because a target is routinely written by more than one
-// pass: P.T.'s light buffers take 34 draws from one shader and 28 from another,
-// and disabling the depth test on either alone proves nothing about the pair.
 base::Vector<u64> ParsePsList(const char* e, const char* tag) {
   base::Vector<u64> out;
   if (e)
@@ -164,7 +131,6 @@ rhi::StencilFace StencilState(const DrawInfo& d, bool back) {
   state.fail = StencilOp(d.stencil_control >> shift);
   state.pass = StencilOp(d.stencil_control >> (shift + 4));
   state.depth_fail = StencilOp(d.stencil_control >> (shift + 8));
-  // ZFUNC and STENCILFUNC use the same order as rhi::CompareOp.
   state.compare =
       static_cast<rhi::CompareOp>((d.depth_control >> (back ? 20 : 8)) & 0x7);
   state.compare_mask = (refmask >> 8) & 0xFF;
@@ -183,9 +149,6 @@ RecompPipe* RecompiledPipelineCache::Store(u64 key, RecompPipe pipeline) {
 }
 
 namespace {
-// DELTA_GPU_ASYNC_PIPELINES: compile graphics pipelines on the shader workers
-// and skip the draws that need one until it is ready, instead of stalling the
-// render thread for the driver (up to 2 s for one GTA:SA pixel shader).
 DELTA_OPTION(bool, kAsyncPipelines, "DELTA_GPU_ASYNC_PIPELINES", true);
 
 void AdoptBuilt(RecompPipe& rp) {
@@ -219,16 +182,11 @@ void BuildLater(RecompPipe& rp, const rhi::GraphicsPipelineDesc& pd) {
 }
 }  // namespace
 
-// Build (or fetch) the pipeline for a recompiled draw, keyed by the shader pair
-// + blend state + vertex layout.
 RecompPipe* GetRecompPipe(const DrawInfo& d) {
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
   if (d.recomp->ps_texs.size() > kMaxTex)
     return nullptr;
   u32 mrt_n = base::Min(d.mrt_count, 8u);
-  // Depth + primitive-setup state folded into the pipeline key (mixed through
-  // an FNV prime so it spreads across the whole 64-bit space, away from the
-  // blend/stride bits).
   u32 dstate = (d.depth_base ? 1u : 0u) | (d.depth_test_enable ? 2u : 0u) |
                (d.depth_write_enable ? 4u : 0u) | ((d.depth_func & 7u) << 3) |
                ((d.prim_type & 0x1Fu) << 6) | ((d.cull_mode & 3u) << 11) |
@@ -237,15 +195,6 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
             ((u64)(d.blend_enable ? (d.blend_control & 0x7FFFFFFFu) : 0) << 1) ^
             ((u64)d.vertex_stride << 33) ^ ((u64)mrt_n << 60) ^
             ((u64)dstate * 0x100000001b3ull);
-  // The MODULE, not the code address. A pipeline embeds the shader modules it
-  // was created with, and the recompiler builds a different module for the same
-  // code whenever a descriptor-derived mask differs (tex_3d, tex_1d, tex_uint,
-  // mrt_uint, the PS input mapping). Keying on the addresses and only SOME of
-  // those masks let a draw bind a pipeline holding another draw's module, whose
-  // declarations then disagreed with the descriptor set built for this one (a
-  // binding the executing module reads as integer took the UNORM default,
-  // VUID-vkCmdDrawIndexed-format-07753). The Recompiled is cached per (code,
-  // every mask) and never evicted, so its address IS that identity.
   key = HashWord(key, reinterpret_cast<u64>(d.recomp));
   key = HashWord(key, d.ps4_neo ? 1 : 0);
   key = HashWord(key, d.stencil_enable ? d.depth_control : 0);
@@ -255,8 +204,6 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
                           ? d.stencil_refmask_bf
                           : 0);
   key = HashWord(key, d.num_vattrs);
-  // A sampler reading a volume image translates the same PS address to a
-  // different module, whose image types the pipeline layout has to match.
   u64 tex_3d_mask = 0, tex_1d_mask = 0;
   for (u32 i = 0; i < d.num_texs && i < kMaxTex; i++) {
     if (d.texs[i].is_3d)
@@ -270,10 +217,6 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   key = HashWord(key, d.shader_mask);
   for (u32 i = 0; i < mrt_n; i++)
     key = HashWord(key, static_cast<u64>(ColorTargetFormat(d.mrt_info[i])));
-  // The vertex-input layout (binding count + per-binding strides + per-attr
-  // binding assignment) is baked into the pipeline, so it must be part of the
-  // key or a later multi-stream draw would reuse a single-stream pipeline (or
-  // vice versa) for the same shader pair.
   key = HashWord(key, d.num_vbufs);
   for (u32 j = 0; j < d.num_vbufs; j++)
     key = HashWord(
@@ -300,14 +243,9 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   const bool has_storage =
       base::AnyOf(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
                   [](const gcn::ShaderTex& tex) { return tex.storage; });
-  // A vertex texture fetch takes a binding of its own in set 0, so the exact
-  // per-binding layout below is the only one that can describe the draw.
   const size_t n_tex = d.recomp->ps_texs.size() + d.recomp->vs_texs.size();
   rp.multi_tex = n_tex > 1 || has_storage || !d.recomp->vs_texs.empty();
 
-  // set 0 = texture(s) (or an empty layout when untextured), set 1 = cbuffer
-  // UBO. Multi/storage shaders use an exact per-binding descriptor layout;
-  // single-sampler shaders retain the shared one-binding layout.
   rhi::BindGroupLayout* set0 =
       !rp.textured ? g_ring.empty_layout : g_tex.layout;
   if (rp.multi_tex) {
@@ -346,9 +284,6 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       rp.raw_mask |= 1u << buffer.binding;
     }
   }
-  // A stage that stages through LDS needs the set-3 scratch, and a descriptor
-  // set is positional: taking it means taking set 2 as well, whether or not
-  // the shader reads a raw buffer.
   rp.shared_lds = d.recomp->shared_lds && EnsureLdsScratch();
   rhi::BindGroupLayout* cbuf_layout =
       d.recomp->indirect_cbufs ? g_ring.indirect_cbuf_layout
@@ -367,15 +302,6 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   }
   if (rp.shared_lds || mesh)
     layout.groups.push_back(mesh ? MeshArgsLayout() : g_ring.lds_layout);
-  // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total
-  // (the guaranteed minimum push-constant size), plus each stage's own
-  // code-address words (VS 128..135, PS 136..143) pushed per draw for
-  // s_getpc_b64.
-  // ONE range naming both stages, not one range per stage. The two stages'
-  // windows interleave (VS owns [0,64) and [128,136), PS [64,128) and
-  // [136,144)), so no pair of per-stage ranges can cover that without
-  // overlapping, and Vulkan requires a push to name every stage of every range
-  // it overlaps. Every push names both stages.
   const bool pc_base = gpu::gcn::PushCodeBase();
   layout.push_constant_bytes = mesh ? 160u : pc_base ? 144u : 128u;
   layout.push_constant_stages = vertex_stage | rhi::kStageFragment;
@@ -388,9 +314,6 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   pd.mesh = mesh;
   pd.vertex = rhi::Code(mesh ? d.recomp->mesh_spirv : d.recomp->vs_spirv);
   pd.fragment = rhi::Code(d.recomp->fs_spirv);
-  // RECTLIST is primitive type 17 on GFX7 but 7 on gfx10.3 (PrimitiveType::
-  // kRectList; 17 is kRectListLegacy there). Missing the gfx10 number rendered
-  // every PS5 fullscreen pass as a single triangle covering half the rect.
   const bool is_rect_list = d.prim_type == 17 || d.prim_type == 7;
   bool use_gs = !mesh && is_rect_list && !kNoRectGs && caps.geometry_shader &&
                 !d.recomp->gs_spirv.empty();
@@ -402,8 +325,6 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   if (use_gs)
     pd.geometry = rhi::Code(d.recomp->gs_spirv);
 
-  // One binding per resolved vertex buffer (single-stream draws stay a single
-  // binding, identical to before); attributes reference their binding.
   const u32 nbind = d.num_vattrs ? base::Min(d.num_vbufs, 8u) : 0;
   for (u32 j = 0; j < nbind; j++)
     pd.vertex_buffers.push_back({d.vbufs[j].stride, d.vbufs[j].per_instance});
@@ -413,26 +334,13 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
          (VertexFormat(d.vattrs[i].dfmt, d.vattrs[i].nfmt)),
          d.vattrs[i].offset});
   pd.topology = PrimitiveTopology(d.prim_type);
-  // Face culling from PA_SU_SC_MODE_CNTL (CULL_FRONT[0]/CULL_BACK[1] map 1:1
-  // onto the cull-mode bits). The render region uses a negative-height (y-up)
-  // viewport to match GCN rasterisation, which flips triangle winding in
-  // framebuffer space, so the guest's front-face sense is inverted here to
-  // compensate. Culling is opt-in (DELTA_GPU_CULL=1) until the winding can be
-  // validated against visible 3D geometry; the default stays cull-none so
-  // correctly-drawn faces are never dropped.
   pd.cull = kDoCull ? static_cast<rhi::CullMode>(d.cull_mode & 0x3)
                     : rhi::CullMode::kNone;
   pd.front_ccw = !d.front_ccw;
   pd.depth_clamp = kDepthClamp;
-  // Depth test/write from DB_DEPTH_CONTROL (only when the draw bound a Z
-  // buffer; 2D draws leave depth_base 0 so this stays fully disabled, unchanged
-  // from before).
   if (d.depth_base) {
     const bool per_ps = NoZTestForPs(d.ps_addr);
     const bool skip_ztest = kNoZTest || per_ps;
-    // Say so, once per shader. A knob that silently does not match its target
-    // produces a null result indistinguishable from a real one, and this
-    // title's record is full of exactly that mistake.
     if (per_ps) {
       static base::Vector<u64> said;
       static const guest::SessionReset reset_said(
@@ -471,15 +379,8 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     }
     pd.depth_write = (d.depth_write_enable || force_write) && !no_write;
     pd.depth_compare = static_cast<rhi::CompareOp>(d.depth_func & 0x7);
-    // A depth-prepass title re-draws its geometry with ZFUNC=EQUAL against the
-    // depth the prepass laid down. That only works when both passes compute
-    // gl_Position bit-identically, which a hardware driver guarantees for one
-    // shader but we cannot: the title uses a position-only VS for the prepass
-    // and the full VS for the shaded pass, and our two SPIR-V modules are
-    // optimised independently, so the interpolated depth differs by an ULP and
-    // EQUAL rejects the whole scene. Widen EQUAL to the direction the prepass
-    // wrote, which admits exactly the surface the prepass kept (nothing can be
-    // nearer than the nearest surface), so the visible result matches.
+    // Depth-prepass EQUAL needs bit-identical gl_Position across two optimised
+    // modules.
     if (kRelaxDepthEqual && pd.depth_compare == rhi::CompareOp::kEqual &&
         !d.depth_write_enable)
       pd.depth_compare = d.depth_clear <= 0.5f ? rhi::CompareOp::kGreaterEqual
@@ -491,30 +392,20 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
           d.stencil_backface_enable ? StencilState(d, true) : pd.stencil_front;
     }
   }
-  // One blend attachment per bound MRT target, each from its own
-  // CB_BLENDn_CONTROL (mrt_blend[i] / mrt_blend_mask bit i); target 0 mirrors
-  // blend_control/blend_enable so the single-RT path is unchanged. Targets the
-  // PS does not export to are write-masked off so they keep their loaded
-  // content.
   pd.color_count = mrt_n;
   for (u32 i = 0; i < mrt_n; i++) {
     u32 bc = i == 0 ? d.blend_control : d.mrt_blend[i];
     bool en = i == 0 ? d.blend_enable : ((d.mrt_blend_mask >> i) & 1u);
-    // Blending an integer attachment is invalid, and the hardware agrees:
-    // CB_COLORn_INFO sets BLEND_BYPASS on exactly these targets.
+    // Integer attachments cannot blend; the hardware sets BLEND_BYPASS for
+    // them.
     if (IsIntegerColorFormat(ColorTargetFormat(d.mrt_info[i])))
       en = false;
     pd.blend[i] = BlendAttachment(bc, en);
-    // Only exported targets may write, and CB_TARGET_MASK always gates each
-    // component, including when the frontend omits CB_SHADER_MASK (AGC).
     if (!kNoMaskDiag)
       pd.blend[i].write_mask = ColorWriteMask(d.target_mask, d.shader_mask,
                                               d.recomp->ps_mrt_mask, i);
     pd.color_formats[i] = (ColorTargetFormat(d.mrt_info[i]));
   }
-  // DELTA_GPU_PIPETRACE: the colour-blend state a pipeline is actually built
-  // with, next to the PS's export mask. The two have to agree or an
-  // attachment is silently write-masked off (or written unblended).
   if (kGpuPipetrace && (kGpuPipetrace == 1 || d.ps_addr == kGpuPipetrace)) {
     static int n = 0;
     if (n++ < 24)

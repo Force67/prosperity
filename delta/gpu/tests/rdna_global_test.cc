@@ -10,19 +10,18 @@
 #include "base/containers/pair.h"
 #include "base/containers/vector.h"
 #include "base/math/value_bounds.h"
+#include "gpu/guest_memory.h"
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
-#include "gpu/guest_memory.h"
 #include "gpu/ps5/guest_memory_ranges.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/shader_cache.h"
-#include "gpu/render/device.h"
 #include "gpu/render/compute.h"
+#include "gpu/render/device.h"
 #include "host_memory/host_memory.h"
 
 namespace {
-// Dispatch output written back, and landed in guest memory for the CPU.
 bool FlushCsWritesLanded(gpu::render::Renderer& renderer) {
   return gpu::render::FlushCsWrites(renderer) &&
          gpu::render::SettleGuestWrites(0, ~0ull >> 1, "test");
@@ -41,7 +40,6 @@ class RdnaGlobal : public testing::Test {
     gpu::ps5::NoteGpuPool(reinterpret_cast<u64>(pages.data()), sizeof(pages));
     auto& page = pages.at(next++);
     page.fill(0xa5a5a5a5);
-    // What the write tracker reports in the emulator.
     const u64 at = reinterpret_cast<u64>(page.data());
     gpu::render::CsNoteGuestWrites(at, at + sizeof(page));
     return page;
@@ -58,8 +56,6 @@ class RdnaGlobal : public testing::Test {
     program_.push_back(addr | scalar << 16 | data << (op >= 0x18 ? 8 : 24));
   }
   void Run(u64 src, u64 dst, u32 threads = 1) {
-    // The harness wrote its pages since the last dispatch: what the write
-    // tracker reports in the emulator.
     for (u64 at : {src, dst})
       if (at)
         gpu::render::CsNoteGuestWrites(at, at + sizeof(Page));
@@ -100,12 +96,12 @@ TEST_F(RdnaGlobal, InactiveLaneCannotOverwriteSharedMemory) {
   lds_size_ = 1;
   Mov(0, 0);
   Mov(2, 17);
-  program_.insert(program_.end(), {0xd8340000, 0x00000200});  // LDS[0] = 17
+  program_.insert(program_.end(), {0xd8340000, 0x00000200});
   Mov(2, 0x3f800000);
-  program_.push_back(0xbefe0480);  // s_mov_b64 exec, 0
-  program_.insert(program_.end(), {0xd8340000, 0x00000200});  // inactive store
-  program_.push_back(0xbefe04c1);  // s_mov_b64 exec, -1
-  program_.insert(program_.end(), {0xd8d80000, 0x02000000});  // v2 = LDS[0]
+  program_.push_back(0xbefe0480);
+  program_.insert(program_.end(), {0xd8340000, 0x00000200});
+  program_.push_back(0xbefe04c1);
+  program_.insert(program_.end(), {0xd8d80000, 0x02000000});
   Global(0x1c, 0, 2, 2);
   Run(0, reinterpret_cast<u64>(dest.data()));
   EXPECT_EQ(dest[0], 17u);
@@ -116,10 +112,10 @@ TEST_F(RdnaGlobal, MadAndMacScaleOutputBeforeClamping) {
   for (u32 op : {0x141u, 0x11fu}) {
     for (u32 omod = 0; omod < 4; ++omod) {
       const u32 result = 4 + (op == 0x141 ? 0 : 4) + omod;
-      Mov(result, 0x3f000000);  // MAC accumulator = .5
-      Mov(1, 0x40000000);       // source 0 = 2
-      Mov(2, 0x3f000000);       // source 1 = .5
-      Mov(3, 0x3f000000);       // MAD source 2 = .5
+      Mov(result, 0x3f000000);
+      Mov(1, 0x40000000);
+      Mov(2, 0x3f000000);
+      Mov(3, 0x3f000000);
       program_.push_back(0xd4008000 | (op << 16) | result);
       program_.push_back(257 | (258 << 9) | (259 << 18) | (omod << 27));
     }
@@ -139,15 +135,12 @@ TEST_F(RdnaGlobal, TypedComputeLoadDecodesRdnaFormat) {
   source[1] = 0xbf400000;
   source[2] = 0x3f000000;
   source[3] = 0x3f800000;
-  // Inline V# at s[4:7], byte offsets v1 = lane * 8. R32G32_FLOAT
-  // is GFX10 format 64, not the GCN DFMT/NFMT occupying those bits.
+  // GFX10 format field, not the GCN DFMT/NFMT bits.
   program_ = {0xbe840300, 0xbe850301, 0xbe8603a0,
               0xbe870380, 0x34020083, 0xe8001000 | (64u << 19) | (1u << 16),
               0x80010401};
   Global(0x1d, 1, 4, 2);
   for (u32 format : {64u, 77u}) {
-    // A two-component read is also legal with an RGBA32 format: it does not
-    // require the instruction to request all four stored components.
     program_[5] = 0xe8001000 | (format << 19) | (1u << 16);
     Run(reinterpret_cast<u64>(source.data()),
         reinterpret_cast<u64>(dest.data()), 2);
@@ -162,7 +155,6 @@ TEST_F(RdnaGlobal, GdsCounterUsesM0BaseAndReturnsPreOperationValue) {
   const u32 initial = 17;
   ASSERT_TRUE(gpu::render::WriteGds(renderer, 0xc70, &initial, 4));
   ASSERT_TRUE(gpu::render::FillGds(renderer, 0x10, 4, 99));
-  // M0={base=0xc60,size=32}; append and consume the counter at +0x10.
   program_ = {0xbefc03ff, 0x0c600020, 0xd8fa0010,
               0x02000000, 0xd8f60010, 0x03000000};
   Mov(0, 0);
@@ -181,12 +173,9 @@ TEST_F(RdnaGlobal, GdsCounterUsesM0BaseAndReturnsPreOperationValue) {
 
 TEST_F(RdnaGlobal, MaskBitCountsUseGuestWaveLaneAcrossHostSubgroups) {
   auto& dest = PageForDispatch();
-  program_ = {0xd7650003, 0x000100c1,  // v_mbcnt_lo v3, -1, 0
-              0xd7660003, 0x000206c1,  // v_mbcnt_hi v3, -1, v3
-              0x34000082};             // v0 = local thread ID * 4
+  program_ = {0xd7650003, 0x000100c1, 0xd7660003, 0x000206c1, 0x34000082};
   Global(0x1c, 0, 3, 2);
-  // Reuse identical code and group size; the dispatch flag must distinguish
-  // cached modules when changing wave width and then switching back.
+  // Dispatch flag keeps wave-width variants apart in the module cache.
   for (u32 width : {64u, 32u, 64u}) {
     initiator_ = 1 | (width == 32 ? 1u << 15 : 0);
     Run(0, reinterpret_cast<u64>(dest.data()), 128);
@@ -199,16 +188,14 @@ TEST_F(RdnaGlobal, MaskBitCountsUseGuestWaveLaneAcrossHostSubgroups) {
 TEST_F(RdnaGlobal, GdsCountersBroadcastAcrossBothHalvesOfEachWave) {
   auto& renderer = gpu::render::DefaultRenderer();
   auto& dest = PageForDispatch();
-  const u64 mask = (8ull << 32) | 5u;  // Three active lanes per guest wave.
+  const u64 mask = (8ull << 32) | 5u;
   program_ = {0xbefc03ff, 0x0c600020, 0x34000082};
   Mov(2, 99);
   Mov(3, 99);
-  program_.insert(program_.end(),
-                  {0xbefe0400,  // exec = s[0:1]
-                   0xd8fa0010, 0x02000000, 0xd8f60010, 0x03000000, 0xbefe04c1});
+  program_.insert(program_.end(), {0xbefe0400, 0xd8fa0010, 0x02000000,
+                                   0xd8f60010, 0x03000000, 0xbefe04c1});
   Global(0x1c, 0, 2, 2);
   Global(0x1c, 0, 3, 2, 512);
-  // Include a partially populated final wave, for both dispatch wave sizes.
   for (const auto [width, threads] :
        {base::Pair{64u, 128u}, base::Pair{64u, 70u}, base::Pair{32u, 80u}}) {
     SCOPED_TRACE(testing::Message()
@@ -230,8 +217,6 @@ TEST_F(RdnaGlobal, GdsCountersBroadcastAcrossBothHalvesOfEachWave) {
       consumptions.emplace_back(dest[128 + base], count);
       total += count;
     }
-    // Waves may execute atomics in either order, but their allocations must
-    // form a contiguous range, and consumes must return its pre-op endpoint.
     base::Sort(allocations.begin(), allocations.end());
     base::Sort(consumptions.begin(), consumptions.end(),
                [](const auto& a, const auto& b) { return b < a; });
@@ -253,13 +238,12 @@ TEST_F(RdnaGlobal, GdsCountersBroadcastAcrossBothHalvesOfEachWave) {
 
 TEST_F(RdnaGlobal, LiteralExecMasksSelectBothHalvesOfWave64) {
   auto& dest = PageForDispatch();
-  const u64 mask = (8ull << 32) | 5u;  // lanes 0, 2 and 35
+  const u64 mask = (8ull << 32) | 5u;
   for (bool save : {false, true}) {
     dest.fill(0xa5a5a5a5);
     program_.clear();
-    program_.push_back(0x34000082);  // v0 = local thread ID * 4
+    program_.push_back(0x34000082);
     Mov(2, 17);
-    // s[0:1] contains the literal mask, supplied through user data.
     program_.push_back(save ? 0xbe862400 : 0xbefe0400);
     Global(0x1c, 0, 2, 2);
     Run(mask, reinterpret_cast<u64>(dest.data()), 64);
@@ -273,11 +257,11 @@ TEST_F(RdnaGlobal, CompareMaskControlsUpperWaveLanesAndConditionalMoves) {
   auto& dest = PageForDispatch();
   Mov(2, 1);
   Mov(3, 17);
-  program_.push_back(0x7d8400a3);  // v_cmp_eq_u32 vcc, 35, v0
-  program_.push_back(0x02040702);  // v_cndmask_b32 v2, v2, v3, vcc
-  program_.push_back(0x34000082);  // v0 = thread ID * 4
+  program_.push_back(0x7d8400a3);
+  program_.push_back(0x02040702);
+  program_.push_back(0x34000082);
   Global(0x1c, 0, 2, 2);
-  program_.push_back(0xbefe046a);  // s_mov_b64 exec, vcc
+  program_.push_back(0xbefe046a);
   Global(0x1c, 0, 3, 2, 256);
   Run(0, reinterpret_cast<u64>(dest.data()), 64);
   for (u32 lane = 0; lane < 64; ++lane) {
@@ -288,9 +272,9 @@ TEST_F(RdnaGlobal, CompareMaskControlsUpperWaveLanesAndConditionalMoves) {
 
 TEST_F(RdnaGlobal, DispatchStartsUseExclusiveEndsAndPreserveWorkgroupIds) {
   auto& dest = PageForDispatch();
-  program_.push_back(0x7e000204);  // v_mov_b32 v0, s4 (workgroup ID)
-  program_.push_back(0x34000082);  // v_lshlrev_b32 v0, 2, v0
-  program_.push_back(0x7e040204);  // v_mov_b32 v2, s4
+  program_.push_back(0x7e000204);
+  program_.push_back(0x34000082);
+  program_.push_back(0x7e040204);
   Global(0x1c, 0, 2, 2);
   for (u32 axis = 0; axis < 3; ++axis) {
     tgid_enable_ = 1u << axis;
@@ -304,7 +288,7 @@ TEST_F(RdnaGlobal, DispatchStartsUseExclusiveEndsAndPreserveWorkgroupIds) {
     for (u32 i = 0; i < 8; ++i)
       ASSERT_EQ(dest[i], i >= 3 && i < 6 ? i : 0xa5a5a5a5) << axis << ':' << i;
 
-    initiator_ = 5;  // FORCE_START_AT_000 ignores the START registers.
+    initiator_ = 5;
     Run(0, reinterpret_cast<u64>(dest.data()));
     for (u32 i = 0; i < 8; ++i)
       ASSERT_EQ(dest[i], i < 6 ? i : 0xa5a5a5a5) << axis << ':' << i;
@@ -326,7 +310,7 @@ TEST_F(RdnaGlobal, SignedOffsetsAndOverlappingVectorDestinations) {
   for (u32 i = 0; i < 4; ++i)
     source[i] = 100 + i;
   Mov(3, 0);
-  Global(0x0e, 3, 2, 0, -4);  // overwrites its own VGPR address operand
+  Global(0x0e, 3, 2, 0, -4);
   Global(0x1e, 0, 2, 2);
   Run(reinterpret_cast<u64>(source.data()) + 4,
       reinterpret_cast<u64>(dest.data()));
@@ -354,7 +338,7 @@ TEST_F(RdnaGlobal, FullVectorAddressAndStoreThenLoadAlias) {
   Mov(1, address >> 32);
   Mov(2, 0x12345678);
   Global(0x1c, 0, 2, 125);
-  Global(0x0c, 0, 0, 125);  // destination aliases address low half
+  Global(0x0c, 0, 0, 125);
   Mov(3, 4);
   Global(0x1c, 3, 0, 2);
   Run(0, address);
@@ -378,7 +362,7 @@ TEST_F(RdnaGlobal, InvalidAddressDoesNotClampToAnotherWord) {
   auto& dest = PageForDispatch();
   Mov(1, 0x12345678);
   Mov(3, 0);
-  Global(0x1c, 3, 1, 0);  // store to unmapped low memory must be discarded
+  Global(0x1c, 3, 1, 0);
   Global(0x0c, 3, 2, 0);
   Global(0x1c, 3, 2, 2);
   Run(4, reinterpret_cast<u64>(dest.data()));
@@ -403,7 +387,7 @@ TEST_F(RdnaGlobal, SignedSubwordLoadsAndConcurrentHalfwordStores) {
   EXPECT_EQ(dest[3], 0xffff8001);
   program_.clear();
   auto& half = PageForDispatch();
-  program_.push_back(0x34000081);  // v_lshlrev_b32 v0, 1, v0
+  program_.push_back(0x34000081);
   Mov(1, 0x1234);
   Global(0x1a, 0, 1, 2);
   Run(0, reinterpret_cast<u64>(half.data()), 31);
@@ -415,7 +399,7 @@ TEST_F(RdnaGlobal, SignedSubwordLoadsAndConcurrentHalfwordStores) {
 
 TEST_F(RdnaGlobal, InactiveLanesCannotStore) {
   auto& dest = PageForDispatch();
-  program_.push_back(0xd4d2007e);  // v_cmpx_eq_u32 v0, 0
+  program_.push_back(0xd4d2007e);
   program_.push_back(0x00010100);
   Mov(1, 0x44);
   Global(0x18, 0, 1, 2);
@@ -435,8 +419,6 @@ TEST_F(RdnaGlobal, AddressesBeyondTheOldSixtyFourMiBWindow) {
   Global(0x0c, 3, 2, 2);
   Mov(3, 0);
   Global(0x1c, 3, 2, 2);
-  // The first dispatch reaches past its pointer's window, into memory no
-  // buffer holds yet; the second has one (miss feedback).
   Run(0, reinterpret_cast<u64>(data.data()));
   data[kOffset / 4] = 0xa5a5a5a5;
   Run(0, reinterpret_cast<u64>(data.data()));
@@ -447,7 +429,7 @@ TEST_F(RdnaGlobal, AddressesBeyondTheOldSixtyFourMiBWindow) {
 
 #ifdef OS_LINUX
 TEST_F(RdnaGlobal, ReadOnlyMappingRejectsStoresButAllowsLoads) {
-  // Kept alive until process exit because Vulkan may retain a host import.
+  // Vulkan may keep a host import, so the memory lives until exit.
   static void* memory = mmap(nullptr, 65536, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   ASSERT_NE(memory, MAP_FAILED);
@@ -486,13 +468,12 @@ TEST_F(RdnaGlobal, DecoderXor3PreservesIntegerBitsAndAliasedOperands) {
 TEST_F(RdnaGlobal, DecoderCodeAndHashExtendBeyondSixteenKiB) {
   auto& dest = PageForDispatch();
   program_.assign(5001, 0xbf800000);
-  program_[0] = 0xbf820000 | 5000;  // jump over padding to the tail
+  program_[0] = 0xbf820000 | 5000;
   Mov(1, 123);
   Global(0x1c, 0, 1, 2);
   Run(0, reinterpret_cast<u64>(dest.data()));
   EXPECT_EQ(dest[0], 123);
-  program_[5002] =
-      456;  // changing only the late tail must invalidate the cache
+  program_[5002] = 456;
   Run(0, reinterpret_cast<u64>(dest.data()));
   EXPECT_EQ(dest[0], 456);
 }

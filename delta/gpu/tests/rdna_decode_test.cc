@@ -83,13 +83,8 @@ TEST(RdnaDecode, ReservedVop3pPrefixesRemainUnknown) {
 
 TEST(RdnaDecode, MandatoryImmediateDwordsPreserveInstructionBoundaries) {
   const u32 code[] = {
-      Sopk(0x15), 0x11111111,  // s_setreg_imm32_b32
-      Vop2(0x2C), 0x44444444,  // v_fmamk_f32
-      Vop2(0x2D), 0x55555555,  // v_fmaak_f32
-      Vop2(0x37), 0x66666666,  // v_fmamk_f16
-      Vop2(0x38), 0x77777777,  // v_fmaak_f16
-      Vop2(0x1F),              // ordinary one-dword gfx10 VOP2
-      Sopp(0x01),
+      Sopk(0x15), 0x11111111, Vop2(0x2C), 0x44444444, Vop2(0x2D), 0x55555555,
+      Vop2(0x37), 0x66666666, Vop2(0x38), 0x77777777, Vop2(0x1F), Sopp(0x01),
   };
 
   const gpu::gcn::Program program = gpu::rdna::Decode(code, 12, false);
@@ -105,12 +100,6 @@ TEST(RdnaDecode, MandatoryImmediateDwordsPreserveInstructionBoundaries) {
   EXPECT_EQ(program[6].pc, 11u);
 }
 
-// This asserted the opposite until 2026-08-14, on the reading that gfx10 left
-// the GCN madmk/madak slots reserved. Real PS5 shaders disagree: attaching the
-// literal to 0x20/0x21 is what took Minecraft from 37% to 85% of its draws
-// issued and put its title screen on the display, which it could not have done
-// had those slots been unused. 0x2C/0x2D/0x37/0x38 already carried theirs at
-// the time, so the whole of that change is attributable to these two.
 TEST(RdnaDecode, GcnMadkSlotsCarryTheirLiteral) {
   for (u32 op : {0x20u, 0x21u}) {
     const u32 code[] = {Vop2(op), 0x12345678u, Sopp(0x01)};
@@ -139,9 +128,8 @@ TEST(RdnaDecode, FmacImplicitAccumulatorDoesNotSelectLiteral) {
   EXPECT_EQ(program[1].pc, 2u);
 }
 
-// Anchored on a real gfx1030 encoding rather than on our own field choice:
-// `llvm-mc -arch=amdgcn -mcpu=gfx1030` assembles ds_write_b32 (opcode 13) to
-// 0xd8340000. Reading the gfx9 field [24:17] instead yields 26, i.e. op*2.
+// Field position checked against llvm-mc gfx1030 output; gfx9 places it
+// elsewhere.
 TEST(RdnaDecode, DsOpcodeUsesBits25Through18) {
   const u32 code[] = {0xd8340000u, 0};
   const gpu::gcn::Program program = gpu::rdna::Decode(code, 2, false);
@@ -150,7 +138,6 @@ TEST(RdnaDecode, DsOpcodeUsesBits25Through18) {
   EXPECT_EQ(program[0].opcode, 13u);
 }
 
-// GDS moved to bit 17, so it must not bleed into the opcode.
 TEST(RdnaDecode, DsGdsBitIsNotPartOfTheOpcode) {
   const u32 code[] = {0xd8340000u | (1u << 17), 0};
   const gpu::gcn::Program program = gpu::rdna::Decode(code, 2, false);
@@ -233,10 +220,8 @@ TEST(RdnaDecode, OrderedEndpgmAndCodeEndTerminateAppropriately) {
 
 TEST(RdnaDecode, DisabledDebugBranchesDoNotReachIndirectTrapStubs) {
   for (u32 opcode = 0x17; opcode <= 0x1a; ++opcode) {
-    const u32 code[] = {(0x17fu << 23) | (opcode << 16) | 1u,
-                        0xbf810000,   // normal exit
-                        0xbe802100,   // debug-only s_swappc_b64 s[0:1], s[0:1]
-                        0xdeadbeef};  // non-executable footer
+    const u32 code[] = {(0x17fu << 23) | (opcode << 16) | 1u, 0xbf810000,
+                        0xbe802100, 0xdeadbeef};
     const auto reachable = gpu::rdna::ReachableProgram(
         gpu::rdna::Decode(code, base::ArraySize(code), false));
     ASSERT_EQ(reachable.size(), 2u) << "debug opcode " << opcode;
@@ -250,7 +235,7 @@ TEST(RdnaDecode, EndpgmSavedTerminatesAndCallTargetsRemainReachable) {
   EXPECT_EQ(gpu::rdna::Decode(saved, 2, false).size(), 2u);
 
   const u32 call[] = {
-      Sopk(0x16) | 1u,  // target pc2; pc1 is the return address
+      Sopk(0x16) | 1u,
       Sopp(0x01),
       Vop2(0x03),
       Sopp(0x01),

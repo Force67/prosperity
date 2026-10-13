@@ -82,35 +82,16 @@ DELTA_OPTION(const char*, kSpvDump, "DELTA_GPU_SPVDUMP", nullptr);
 DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
 DELTA_OPTION(bool, kGpuDebugalpha, "DELTA_GPU_DEBUGALPHA", false);
 DELTA_OPTION(bool, kGpuForcecolor, "DELTA_GPU_FORCECOLOR", false);
-// DELTA_GPU_PSVGPR=<n+1>: export VGPR n as greyscale instead of the shader's
-// colour. FORCECOLOR says the pipeline is sound and PSTEX says the samples
-// are black; between those two lies the arithmetic, and this is the only way
-// to see a value in the middle of it.
 DELTA_OPTION(u32, kGpuPsVgpr, "DELTA_GPU_PSVGPR", 0);
-// DELTA_GPU_PSVGPR_BLOCK=<block+1>: sample the probed register at the top
-// of that CFG block rather than at the export, so a value the shader
-// overwrites later can still be seen. Bisect the blocks to find where a
-// value dies.
 DELTA_OPTION(u32, kGpuPsVgprBlock, "DELTA_GPU_PSVGPR_BLOCK", 0);
-// DELTA_GPU_PSVGPR_PS=<ps addr>: probe only that pixel shader. Every other
-// program keeps its real SPIR-V and its warm pipeline cache, so a probed run
-// reaches a late frame as fast as a plain one.
 DELTA_OPTION(u64, kGpuPsVgprPs, "DELTA_GPU_PSVGPR_PS", 0);
-// merged_wave_info (s3): verts-in-wave in [7:0], prims in [15:8]. One
-// invocation is one lane here, so a wave has to be as wide as the invocations
-// the draw actually runs: a shader that masks EXEC with `lane < verts` would
-// otherwise keep only lane 0, and its triangle collapses.
 DELTA_OPTION(u32, kNggWaveInfo, "DELTA_PS5_WAVEINFO", 0x0101);
 DELTA_OPTION(bool, kGpuForcequad, "DELTA_GPU_FORCEQUAD", false);
 DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
 DELTA_OPTION(bool, kGpuPosprobe, "DELTA_GPU_POSPROBE", false);
 DELTA_OPTION(bool, kGpuPosunset, "DELTA_GPU_POSUNSET", false);
 DELTA_OPTION(bool, kLdsMark, "DELTA_GPU_LDSMARK", false);
-// DELTA_GPU_PSTEX=<binding+1>: export the sampled texel instead of the
-// shader's colour (0 = off, 1 = the last sample). Answers whether a black
-// composite read a black source or computed black from a good one.
 DELTA_OPTION(int, kGpuPstex, "DELTA_GPU_PSTEX", 0);
-// EXEC and v_cmp results as real subgroup masks (see Translator::wave_masks).
 DELTA_OPTION(bool, kWaveMasks, "DELTA_PS5_WAVEMASK", true);
 DELTA_OPTION(bool, kGpuPsuv, "DELTA_GPU_PSUV", false);
 DELTA_OPTION(u32, kGpuPsuvAttr, "DELTA_GPU_PSUV_ATTR", 0);
@@ -131,54 +112,26 @@ using gpu::gcn::ShaderCbuf;
 using gpu::gcn::StageContext;
 using gpu::gcn::Translator;
 
-// Bring-up debug: log decoded exports + recovered vertex fetches so the PS5
-// pipeline can be verified against the guest shader. Honors either the shader
-// trace knob (DELTA_GPU_SHTRACE) or the AGC command-stream trace
-// (DELTA_AGC_TRACE).
 bool ShDbg() {
   static const bool kOn = kGpuShtrace || kAgcTrace;
   return kOn;
 }
 
-// MUBUF opcode numbering. gfx10.3 REVERTED to the gfx6/gfx7 assignment, so the
-// GFX7 ranges are correct here and must not be "corrected" to gfx8/gfx9's
-// (verified against LLVM BUFInstructions.td, where every raw form is defined by
-// MUBUF_Real_AllAddr_gfx6_gfx7_gfx10, and gfx8/gfx9 alone use the shifted
-// MUBUF_Real_AllAddr_vi table):
-//   0x00-0x03 buffer_load_format_x/xy/xyz/xyzw
-//   0x04-0x07 buffer_store_format_*
-//   0x08-0x0b buffer_load_ubyte/sbyte/ushort/sshort
-//   0x0c-0x0f buffer_load_dword/x2/x4/x3   (x4 before x3, as on gfx6/gfx7)
-//   0x18/0x1a buffer_store_byte/short   0x1c-0x1f store_dword/x2/x4/x3
-//   0x30-0x60 atomics                   0x80-0x87 the d16 format forms
-// The d16 forms only fit because the gfx10 opcode field is 8 bits ([25:18], vs
-// GFX7's 7); rdna_decode's Classify reads all 8, so they never alias 0x00-0x07.
+// GFX7 ranges are correct here. Do not 'correct' them to gfx8/gfx9.
 bool RdnaMubufStore(u32 op) {
   return (op >= 0x04 && op <= 0x07) || (op >= 0x84 && op <= 0x87) ||
          (op >= 0x18 && op <= 0x1f);
 }
 
-// An atomic without GLC returns nothing, so it is a store as far as a graphics
-// stage can tell.
 bool RdnaMubufAtomicNoReturn(const Inst& inst) {
   return inst.opcode >= 0x30 && inst.opcode <= 0x60 &&
          !((inst.raw[0] >> 14) & 1);
 }
 
-// MTBUF: 0x00-0x03 load, 0x04-0x07 store, 0x08-0x0f the d16 pair (opcode bit 3
-// comes from word1[21], which rdna_decode folds in).
 bool RdnaMtbufStore(u32 op) {
   return (op >= 0x04 && op <= 0x07) || (op >= 0x0c && op <= 0x0f);
 }
 
-// gfx10.3 FLAT/GLOBAL/SCRATCH field layout, from LLVM FLATInstructions.td
-// (class FLAT_Real plus the gfx10 overrides in FLAT_Real_gfx10):
-//   w0[11:0] OFFSET   w0[12] DLC   w0[13] LDS   w0[15:14] SEG
-//   w0[16] GLC        w0[17] SLC   w0[24:18] OP
-//   w1[7:0] ADDR      w1[15:8] DATA  w1[22:16] SADDR  w1[31:24] VDST
-// SEG selects the addressing mode: 0 flat (generic), 1 scratch, 2 global.
-// SADDR reads NULL as 0x7d on gfx10 (0x7f on gfx9; accept both). The immediate
-// is 11-bit UNSIGNED for flat and 12-bit SIGNED for global/scratch.
 struct Flat {
   u32 op;
   u32 seg;
@@ -215,16 +168,13 @@ Flat DecodeFlat(const Inst& inst) {
   };
 }
 
-// Dwords a FLAT-family load moves; 0 = not a load. The opcode numbers are the
-// same in all three segments (LLVM's ENC_FLAT / ENC_FLAT_GLBL /
-// ENC_FLAT_SCRATCH tables agree), and x4 precedes x3 exactly as in MUBUF.
 u32 FlatLoadDwords(u32 op) {
   switch (op) {
-    case 0x08:  // ubyte
-    case 0x09:  // sbyte
-    case 0x0a:  // ushort
-    case 0x0b:  // sshort
-    case 0x0c:  // dword
+    case 0x08:
+    case 0x09:
+    case 0x0a:
+    case 0x0b:
+    case 0x0c:
       return 1;
     case 0x0d:
       return 2;
@@ -241,50 +191,18 @@ bool FlatIsStore(u32 op) {
   return op >= 0x18 && op <= 0x1f;
 }
 
-// The one FLAT-family form the graphics resource model can express: a GLOBAL
-// load whose base is a scalar register pair. Its address is
-// s[SADDR:SADDR+1] + zext(v[ADDR]) + sext(OFFSET), so the pair names a
-// resource and the VGPR is a byte offset into it, which is the shape a set-2
-// window already has. A negative immediate would read below that base with
-// nothing to clamp into, so it stays out.
 bool FlatServableLoad(const Flat& f) {
   return f.seg == 2 && !f.saddr_null && !f.lds && FlatLoadDwords(f.op) &&
          f.offset >= 0;
 }
 
-// ShaderBuffer::srsrc_sgpr for such a load. The descriptor is a 2-dword raw
-// pointer, not a 4-dword V#, so it is tagged out of the SGPR number space: the
-// command processor's V#-decoding fallback indexes user data with this field
-// and its bound check (srsrc_sgpr + 3 < user_sgprs) can never let a tagged
-// entry through, which makes an unresolved base read as zeros instead of as a
-// V# decoded out of an address.
 constexpr u32 kFlatBaseTag = 0x100;
 
-// A buffer_load_format is a real PER-VERTEX fetch when it is IDXEN and its
-// srsrc V# is TABLE-CHAINED (loaded from a user-data descriptor table,
-// `chained`), regardless of which VGPR indexes it. NGG streams index
-// per-vertex data by v0 or a computed register (the composite VS uses v3, the
-// sprite VS's uv/param streams use v4); the Vulkan vertex-input stage supplies
-// per-vertex data by the draw index either way. A NON-chained IDXEN load reads
-// an inline user-data descriptor. Such loads remain in the shader and read
-// a storage buffer with their original addressing. The table-chain heuristic
-// cannot prove that every chained index is a vertex ID; only those recognised
-// fetches are lifted, and the remaining loads keep their per-lane semantics.
 bool BufLoadIsVertexFetch(const Inst& in, bool chained) {
   const bool idxen = (in.raw[0] >> 13) & 1;
   return idxen && chained;
 }
 
-// Which entry of a user-data descriptor TABLE each buffer_load reads.
-//
-// A V# is 4 dwords, so one s_load_dwordx4 per table entry; the entry is
-// selected by that s_load's SGPR soffset, computed at runtime from an index
-// table the game uploads (`s_lshl_b32 soff, sN, 4` + `s_and_b32 soff, soff,
-// 0x1f0`). The compiler emits those s_loads in entry order, but SCHEDULES the
-// buffer_loads that consume them in a different order, so the entry must be
-// taken from the s_load, not from the position of the load. Returns, per
-// buffer_load pc, {table root SGPR pair, entry index}; absent means the V# is
-// inline in user data at srsrc.
 base::HashMap<u32, base::Pair<u32, u32> > MapTableChainedLoads(
     const Program& insts) {
   base::HashMap<u32, base::Pair<u32, u32> > out;
@@ -292,14 +210,13 @@ base::HashMap<u32, base::Pair<u32, u32> > MapTableChainedLoads(
   u32 slot[128] = {};
   for (int i = 0; i < 128; i++)
     root[i] = -1;
-  base::HashMap<u32, u32> next_slot;  // per table root
+  base::HashMap<u32, u32> next_slot;
   for (const Inst& in : insts) {
     if (in.enc == Enc::kSop1 && in.opcode == 0x20)
-      break;  // s_setpc_b64 (return)
+      break;
     if (in.enc == Enc::kSopp && in.opcode == 1)
-      break;  // s_endpgm
-    if (in.enc == Enc::kSmrd &&
-        in.opcode <= 0x04) {  // s_load_dword{,x2,x4,x8,x16}
+      break;
+    if (in.enc == Enc::kSmrd && in.opcode <= 0x04) {
       const u32 sdst = (in.raw[0] >> 6) & 0x7F;
       const u32 sbase = (in.raw[0] & 0x3F) * 2;
       const u32 nreg = in.opcode == 0   ? 1
@@ -366,9 +283,6 @@ const char* EncName(Enc e) {
   }
 }
 
-// Per-instruction decode trace: pc / decoded length / encoding / opcode / raw
-// dword(s). A length that lands the next pc mid-instruction shows up as a
-// garbage "UNKNOWN" op on the following line (a decoder desync).
 void DumpProgram(const Program& prog, const char* tag) {
   BASE_LOGI("gcnspv", "=== {} decode: {} insts ===", tag, prog.size());
   for (const Inst& in : prog) {
@@ -383,16 +297,11 @@ void DumpProgram(const Program& prog, const char* tag) {
   }
 }
 
-// RDNA2 renumbered v_cndmask_b32 from GFX7's VOP2 0x00 to 0x01 (0x01 is
-// v_readlane on GFX7); map it back to the shared emitter's VCC select.
 u32 RemapVop2(u32 op) {
   return op == 0x01 ? 0x00 : op;
 }
 
 bool RdnaSharedVop2(u32 op) {
-  // 0x15/0x17/0x19 are the non-reversed shifts and 0x22-0x24 the bit counts:
-  // gfx10.3 keeps all six at their GFX7 numbers (checked against KytyPS5's
-  // VOP2 table), and rejecting them threw away whole vertex programs.
   return (op >= 0x03 && op <= 0x05) || (op >= 0x08 && op <= 0x0c) ||
          (op >= 0x0f && op <= 0x19) || (op >= 0x1a && op <= 0x1d) ||
          (op >= 0x22 && op <= 0x24) || op == 0x2f;
@@ -463,8 +372,6 @@ Id RdnaF16Bits(Translator& t, u32 field, u32 literal) {
   return t.SrcRaw(field, literal);
 }
 
-// RDNA2 VOP3 integer operations whose gfx10 opcodes or destination layouts do
-// not match the shared GFX7 emitter.
 bool RdnaVop3HasSdst(u32 op) {
   return op == 0x128 || op == 0x129 || op == 0x12A || op == 0x30F ||
          op == 0x310 || op == 0x319 || op == 0x16D || op == 0x16E ||
@@ -494,64 +401,62 @@ bool RdnaEmitVop3Int(Translator& t,
   switch (op) {
     case 0x30F:
       carry(spv::Op::OpIAddCarry, s0, s1);
-      return true;  // v_add_co_u32
+      return true;
     case 0x310:
       carry(spv::Op::OpISubBorrow, s0, s1);
-      return true;  // v_sub_co_u32
+      return true;
     case 0x319:
       carry(spv::Op::OpISubBorrow, s1, s0);
-      return true;  // v_subrev_co_u32
+      return true;
     case 0x128:
       carry(spv::Op::OpIAddCarry, s0, s1, s2);
-      return true;  // v_add_co_ci_u32
+      return true;
     case 0x129:
       carry(spv::Op::OpISubBorrow, s0, s1, s2);
-      return true;  // v_sub_co_ci_u32
+      return true;
     case 0x12A:
       carry(spv::Op::OpISubBorrow, s1, s0, s2);
-      return true;  // v_subrev_co_ci_u32
+      return true;
     case 0x125:
     case 0x37F:
       t.SetVg(vdst, t.Add(s0, s1));
-      return true;  // v_add_nc_{u,i}32
+      return true;
     case 0x126:
     case 0x376:
       t.SetVg(vdst, t.Sub(s0, s1));
-      return true;  // v_sub_nc_{u,i}32
+      return true;
     case 0x127:
       t.SetVg(vdst, t.Sub(s1, s0));
-      return true;  // v_subrev_nc_u32
+      return true;
     case 0x11E:
       t.SetVg(vdst, t.Not(t.Xor(s0, s1)));
-      return true;  // VOP3-form v_xnor_b32
+      return true;
     case 0x345:
       t.SetVg(vdst, t.Add(t.Xor(s0, s1), s2));
-      return true;  // v_xad_u32
+      return true;
     case 0x346:
       t.SetVg(vdst, t.Add(t.Shl(s0, s1), s2));
-      return true;  // v_lshl_add_u32
+      return true;
     case 0x347:
       t.SetVg(vdst, t.Shl(t.Add(s0, s1), s2));
-      return true;  // v_add_lshl_u32
+      return true;
     case 0x36D:
       t.SetVg(vdst, t.Add(t.Add(s0, s1), s2));
-      return true;  // v_add3_u32
+      return true;
     case 0x36F:
       t.SetVg(vdst, t.Or(t.Shl(s0, s1), s2));
-      return true;  // v_lshl_or_b32
+      return true;
     case 0x371:
       t.SetVg(vdst, t.Or(t.And(s0, s1), s2));
-      return true;  // v_and_or_b32
+      return true;
     case 0x372:
       t.SetVg(vdst, t.Or(t.Or(s0, s1), s2));
-      return true;  // v_or3_b32
+      return true;
     default:
       return false;
   }
 }
 
-// VOP3P packed f16: componentwise on the unpacked f32x2. op_sel/neg/clamp and
-// packed-integer ops are not modelled (fall back).
 bool RdnaEmitVop3p(Translator& t,
                    u32 op,
                    u32 vdst,
@@ -570,17 +475,17 @@ bool RdnaEmitVop3p(Translator& t,
   switch (op) {
     case 0x0F:
       t.SetVg(vdst, pack(t.m.Emit(spv::Op::OpFAdd, t.t_v2, {a, b})));
-      return true;  // v_pk_add_f16
+      return true;
     case 0x10:
       t.SetVg(vdst, pack(t.m.Emit(spv::Op::OpFMul, t.t_v2, {a, b})));
-      return true;  // v_pk_mul_f16
+      return true;
     case 0x11:
       t.SetVg(vdst, pack(t.m.ExtInst(t.t_v2, GLSLstd450FMin, {a, b})));
-      return true;  // v_pk_min_f16
+      return true;
     case 0x12:
       t.SetVg(vdst, pack(t.m.ExtInst(t.t_v2, GLSLstd450FMax, {a, b})));
-      return true;  // v_pk_max_f16
-    case 0x0E: {    // v_pk_fma_f16
+      return true;
+    case 0x0E: {
       t.SetVg(vdst,
               pack(t.m.ExtInst(t.t_v2, GLSLstd450Fma, {a, b, unpack(s2)})));
       return true;
@@ -590,11 +495,6 @@ bool RdnaEmitVop3p(Translator& t,
   }
 }
 
-// SOP2 slots gfx10 added above the GFX7 numbering the shared emitter speaks.
-// 0x00-0x2c are identical on both (LLVM SOP2_Real_gfx6_gfx7_gfx10); 0x2b
-// (s_cbranch_g_fork) and 0x2d are gfx6/gfx7-only, and 0x2e-0x36 are new. None
-// of these writes SCC. s_pack_* reach the shared emitter too, but it gates them
-// on the PS4's Neo ISA flag, which an RDNA2 Inst never carries.
 bool RdnaEmitSop2(Translator& t, const Inst& inst) {
   const u32 w = inst.raw[0], op = inst.opcode;
   if (op < 0x32 || op > 0x36)
@@ -606,36 +506,30 @@ bool RdnaEmitSop2(Translator& t, const Inst& inst) {
     return t.m.CompositeExtract(t.t_u, t.m.Emit(wide, t.PairType(), {a, b}), 1);
   };
   switch (op) {
-    case 0x32:  // s_pack_ll_b32_b16: {b[15:0], a[15:0]}
+    case 0x32:
       t.SetSdst(sdst, 0,
                 t.Or(t.And(a, t.U32(0xFFFF)),
                      t.Shl(t.And(b, t.U32(0xFFFF)), t.U32(16))));
       return true;
-    case 0x33:  // s_pack_lh_b32_b16: {b[31:16], a[15:0]}
+    case 0x33:
       t.SetSdst(sdst, 0,
                 t.Or(t.And(a, t.U32(0xFFFF)), t.And(b, t.U32(0xFFFF0000u))));
       return true;
-    case 0x34:  // s_pack_hh_b32_b16: {b[31:16], a[31:16]}
+    case 0x34:
       t.SetSdst(sdst, 0,
                 t.Or(t.Shr(a, t.U32(16)), t.And(b, t.U32(0xFFFF0000u))));
       return true;
     case 0x35:
       t.SetSdst(sdst, 0, mul_hi(spv::Op::OpUMulExtended));
-      return true;  // s_mul_hi_u32
+      return true;
     case 0x36:
       t.SetSdst(sdst, 0, mul_hi(spv::Op::OpSMulExtended));
-      return true;  // s_mul_hi_i32
+      return true;
     default:
       return false;
   }
 }
 
-// ---- SMEM (constant buffers) ------------------------------------------------
-// Walk the s_load pointer chain feeding a descriptor base SGPR back to a
-// user-data root. `loads` maps an s_load's destination SGPR to its {source base
-// SGPR, byte offset}. Fills chain_off[] (root-first resolution order) and
-// returns the root user-data SGPR; *len is the number of dereferences (0 ==
-// already a user-data descriptor). Bounded to 3 levels.
 struct CbufDef {
   u32 source, offset, count;
 };
@@ -655,8 +549,6 @@ void InvalidateCbufDefs(base::HashMap<u32, CbufDef>& loads, ScalarWrite write) {
   }
 }
 
-// Same, for the SGPR quad -> descriptor-source map, whose entries are always
-// four dwords wide.
 void InvalidateDescSrc(base::HashMap<u32, u64>& src, ScalarWrite write) {
   if (!write.count)
     return;
@@ -718,15 +610,11 @@ u32 TraceCbufChain(u32 sbase,
     cur = it->second.source;
   }
   for (u32 i = 0; i < n; i++)
-    chain_off[i] = tmp[n - 1 - i];  // reverse
+    chain_off[i] = tmp[n - 1 - i];
   *len = n;
   return cur;
 }
 
-// SGPRs a VMEM/MIMG op reads as its descriptor (srsrc V#/T#, ssamp S#). An
-// s_load writing one of these fetches a DESCRIPTOR, not constant data, so the
-// cbuf planner must leave it alone: ParseFetchInsts/RdnaPlanGfxBuffers and
-// RdnaPlanMimg resolve those at draw time from user data instead.
 static base::HashSet<u32> VmemDescriptorSgprs(const Program& program) {
   base::HashSet<u32> regs;
   for (const Inst& inst : program) {
@@ -746,32 +634,15 @@ static base::HashSet<u32> VmemDescriptorSgprs(const Program& program) {
   return regs;
 }
 
-// Plan the set-1 UBO bindings a stage's SMEM loads reference. A leaf read is an
-// s_buffer_load* (op 0x08-0x0C, V# in the sbase quad) or an s_load* (op
-// 0x00-0x04, pointer in the sbase pair) whose result is used as data rather
-// than as another SMEM's descriptor base. When the base SGPR was itself
-// s_load'd (a runtime pointer chain, e.g. a 2D VS that loads its transform's V#
-// from a root descriptor table), the chain back to the user-data root is
-// recorded so the renderer can walk it.
 bool RdnaPlanCbufs(const Program& program,
                    u32 first_binding,
                    base::Vector<ShaderCbuf>& cbufs,
                    base::HashMap<u32, u32>& bindings,
                    base::HashMap<u32, u32>& by_pc,
                    u32 binding_limit = kMaxCbufBindings) {
-  // Walk in program order, growing the def map as s_loads appear, so each
-  // SMEM's base traces through the defs live AT that instruction. Shaders
-  // reuse SGPRs (the sprite VS s_buffer_loads its transform from the s[8:11]
-  // user-data V#, then s_loads the vertex V# INTO s[8:11]); a whole-program
-  // last-write map would misroute the transform to the vertex chain.
   base::HashMap<u32, CbufDef> loads;
-  // One descriptor can back several bindings: loads too far apart to share a
-  // window get one each (see below).
   base::HashMap<u64, base::Vector<u32> > bindings_by_descriptor;
-  // binding -> [lowest dword, highest dword) any of its loads touches.
   base::HashMap<u32, base::Pair<u32, u32> > span;
-  // SGPR quad -> which descriptor it currently holds, so a reload of the same
-  // table entry is recognised as the same buffer.
   base::HashMap<u32, u64> desc_src;
   const auto version_keys = BufferVersionKeys(program);
   const auto descriptor_sgprs = VmemDescriptorSgprs(program);
@@ -800,22 +671,11 @@ bool RdnaPlanCbufs(const Program& program,
     const u32 load_count = SmemLoadCount(op);
     const i32 off =
         sbufload ? static_cast<i32>(inst.raw[1] & 0xFFFFF) : smem.offset;
-    // Remember which table entry an s_load'd V# came from. A shader that keeps
-    // one quad and reloads it entry by entry (Astro Bot's composite PS does it
-    // a dozen times) otherwise looks like a dozen different buffers, and each
-    // one costs a binding.
     if (sload && load_count == 4) {
       InvalidateDescSrc(desc_src, {sdst, load_count});
       desc_src[sdst] = version_keys.at(inst.pc) * 0x9E3779B97F4A7C15ull +
                        static_cast<u64>(static_cast<u32>(off));
     }
-    // A descriptor fetch (the V# a vertex fetch or texture op then reads). Its
-    // offset is often a runtime table index (Minecraft's NGG VS computes one
-    // into vcc_hi), which no cbuf binding can express; treating it as a
-    // constant buffer failed the whole shader over a load the cbuf path never
-    // needed to see.
-    // Raw indexed loads also read STRIDE from the descriptor's SGPRs. Keep
-    // their descriptor fetch as a real uniform load, including each reload.
     const bool raw_descriptor =
         base::AnyOf(indexed_raw_descriptors.begin(),
                     indexed_raw_descriptors.end(), [&](u32 descriptor) {
@@ -837,13 +697,6 @@ bool RdnaPlanCbufs(const Program& program,
       loads[sdst] = {sbase, static_cast<u32>(off), load_count};
       continue;
     }
-    // soffset naming an SGPR instead of the inline zero is a byte offset the
-    // shader computes: how one constant buffer holding an array is indexed at
-    // run time. Nothing static bounds what it reads, so the binding takes the
-    // whole window from dword 0: RdnaEmitSmem already adds that offset to the
-    // immediate and CbufDwordId clamps the result into the declared UBO.
-    // Rejecting it dropped every draw that used one, which for Dead Cells is
-    // the shaders that light the scene.
     const bool dynamic = smem.soffset != 125;
     const u32 lo = dynamic ? 0 : static_cast<u32>(off < 0 ? 0 : off) / 4;
     const u32 hi = dynamic ? gpu::gcn::kCbufDwords : lo + SmemLoadCount(op);
@@ -854,10 +707,6 @@ bool RdnaPlanCbufs(const Program& program,
     const u64 key =
         src_it != desc_src.end() ? src_it->second : version_keys.at(inst.pc);
 
-    // Reuse a binding on the same buffer when this load still fits its window.
-    // Only the SPAN has to fit: a shader reading one constant 17 KiB into a
-    // buffer and the rest near its start gets two windows on it, not a
-    // rejection.
     base::Vector<u32>& shared = bindings_by_descriptor[key];
     u32 binding = ~0u;
     for (u32 b : shared) {
@@ -912,11 +761,6 @@ bool RdnaPlanCbufs(const Program& program,
   return true;
 }
 
-// Hand the emitter the window each binding was planned at, once every planner
-// that can widen one has run.
-// Direct graphics: every scalar load, buffer access and global access reads
-// guest memory through the direct table, addressed by the registers the
-// shader itself builds, so nothing is planned into cbuffer or buffer bindings.
 bool DirectGraphics() {
   return gpu::gcn::g_direct_table != 0;
 }
@@ -952,20 +796,6 @@ void NoteCbufWindows(const base::Vector<ShaderCbuf>& cbufs, StageContext& sc) {
       sc.cbuf_first_dword[cb.binding] = cb.first_dword;
 }
 
-// Plan set-1 UBO bindings for CONSTANT buffer_load_format ops (a load whose
-// index is not the vertex index reads a uniform, e.g. the 2D ortho matrix).
-// Each distinct srsrc V# gets one binding; the renderer resolves the live V#
-// from user data at draw time, exactly like the SMEM cbufs
-// (decodeVBuffer(&vud[srsrc])).
-// Raw MUBUF loads (buffer_load_dword{,x2,x3,x4} and the sub-dword forms) the
-// shader indexes itself, plus every buffer_load_format the vertex-input path
-// did not lift (`claimed`). Each live descriptor in an SGPR quad becomes one
-// set-2 storage buffer, which the command processor resolves per draw. A format
-// load belongs here rather than in a 64-byte UBO because its index is per-lane
-// and reaches the whole resource. The shared PlanGfxBuffers cannot be reused:
-// its descriptor-reload versioning reads the SMEM sdst with GCN field
-// positions. global_load through a scalar base pair shares this window model
-// (see FlatServableLoad), keyed by that pair rather than by a V# quad.
 void RdnaPlanGfxBuffers(const Program& program,
                         u32 first_binding,
                         const base::HashSet<u32>* claimed,
@@ -973,9 +803,6 @@ void RdnaPlanGfxBuffers(const Program& program,
                         base::HashMap<u32, u32>& bindings) {
   base::HashMap<u32, u32> by_srsrc;
   for (const Inst& inst : program) {
-    // Reloading any word of a descriptor changes the resource seen by later
-    // loads. Keep earlier bindings for their original instructions, but stop
-    // reusing them after a scalar write overlaps the descriptor or raw pair.
     const auto writes = PossibleScalarWrites(inst);
     for (auto it = by_srsrc.begin(); it != by_srsrc.end();) {
       const bool flat = it->first >= kFlatBaseTag;
@@ -992,8 +819,6 @@ void RdnaPlanGfxBuffers(const Program& program,
     }
     u32 srsrc;
     if (inst.enc == Enc::kFlat) {
-      // A servable global_load takes the same window treatment; RdnaEmitFlat
-      // reports every other FLAT form at emit time, each with its own tag.
       const Flat f = DecodeFlat(inst);
       if (!FlatServableLoad(f))
         continue;
@@ -1024,12 +849,6 @@ void RdnaPlanGfxBuffers(const Program& program,
   }
 }
 
-// Find `s_mov exec, sN` movs whose source SGPR is never written before the mov:
-// sN then holds SPI launch state we do not model (the PS ABI saves the initial
-// coverage mask in the first post-user-data SGPR and reloads EXEC from it).
-// Emitting the mov would read our zero-initialised register file and turn EXEC
-// off, making the CFG path skip every export (the PS then kills all fragments).
-// Those movs are dropped so EXEC keeps its all-on seed.
 base::HashSet<u32> LaunchExecMovPcs(const Program& program) {
   base::HashSet<u32> skip, written;
   for (const Inst& in : program) {
@@ -1073,17 +892,10 @@ base::HashSet<u32> LaunchExecMovPcs(const Program& program) {
 void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
   const Smem smem = DecodeSmem(inst);
   const u32 op = smem.op;
-  // s_load* (op 0x00-0x04, a pointer in the sbase pair) and s_buffer_load* (op
-  // 0x08-0x0C, a V# in the sbase quad) read `off` bytes into sdst.. from the
-  // UBO the renderer bound for this sbase. A 2D VS reads its transform matrix
-  // this way.
   if (op <= 0x04 || (op >= 0x08 && op <= 0x0C)) {
     auto pc_it = sc.smem_cbuf_by_pc.find(inst.pc);
     auto base_it = sc.cbuf_bind.find(smem.sbase);
     if (pc_it == sc.smem_cbuf_by_pc.end() && base_it == sc.cbuf_bind.end()) {
-      // An s_load whose result feeds a later SMEM is a pointer-chain link: the
-      // renderer resolves that descriptor host-side, so it has no UBO and emits
-      // nothing. An unplanned s_buffer_load is a real gap.
       if (op >= 0x08)
         gpu::gcn::WarnUnsupported("smem.cbuf-unplanned", op, inst.raw[0],
                                   inst.raw[1]);
@@ -1096,8 +908,6 @@ void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
     const Id soffset =
         smem.soffset == 125 ? t.U32(0) : t.SrcRaw(smem.soffset, 0);
     const Id byte_offset = t.Add(t.And(soffset, t.U32(~3u)), t.U32(immediate));
-    // The staged window starts at the binding's first dword, not at the guest
-    // buffer's, so a load's index is relative to it.
     const auto first_it = sc.cbuf_first_dword.find(binding);
     const u32 first =
         first_it == sc.cbuf_first_dword.end() ? 0 : first_it->second;
@@ -1112,26 +922,12 @@ void RdnaEmitSmem(Translator& t, const Inst& inst, StageContext& sc) {
   gpu::gcn::WarnUnsupported("smem.rdna", op, inst.raw[0], inst.raw[1]);
 }
 
-// Address of the shader being translated, for shader-specific debug output.
 thread_local u64 g_ps_addr = 0;
 
-// ---- MUBUF buffer_load_format ----------------------------------------------
-// buffer_load_format converts through the FORMAT in the V#, which the
-// instruction does not carry. The V#s the stage's buffer ops read, resolved by
-// replaying the stage's scalar code against the live user data, the same
-// resolution the command processor performs when it binds those buffers. The
-// format is then baked into the module, so a later draw binding a
-// differently-formatted V# to the same shader would be wrong; that is the
-// assumption the lifted vertex-fetch path already makes about r.attrs.
 thread_local base::HashMap<u32, BufferResource> g_stage_bufs;
 
-// One dropped-store report per translated stage.
 thread_local bool g_warned_store = false;
 
-// One channel layout of the gfx10.3 unified buffer format (V# word3[18:12]).
-// The enum runs one layout at a time in the order UNorm, SNorm, UScaled,
-// SScaled, UInt, SInt [, Float]. Names are most-significant channel first, so
-// channel x takes the LAST number's bits at bit offset 0.
 enum class BufNum : u8 {
   kUnorm,
   kSnorm,
@@ -1158,10 +954,10 @@ bool DecodeBufFormat(u32 gfmt, BufFormat& out) {
       {14, 6, 2, {8, 8}},
       {20, 3, 1, {32}},
       {23, 7, 2, {16, 16}},
-      {30, 7, 3, {10, 11, 11}},     // 11_11_10
-      {37, 7, 3, {11, 11, 10}},     // 10_11_11
-      {44, 6, 4, {10, 10, 10, 2}},  // 2_10_10_10
-      {50, 6, 4, {2, 10, 10, 10}},  // 10_10_10_2
+      {30, 7, 3, {10, 11, 11}},
+      {37, 7, 3, {11, 11, 10}},
+      {44, 6, 4, {10, 10, 10, 2}},
+      {50, 6, 4, {2, 10, 10, 10}},
       {56, 6, 4, {8, 8, 8, 8}},
       {62, 3, 2, {32, 32}},
       {65, 7, 4, {16, 16, 16, 16}},
@@ -1175,7 +971,6 @@ bool DecodeBufFormat(u32 gfmt, BufFormat& out) {
     out.comps = r.comps;
     for (u32 c = 0; c < 4; c++)
       out.bits[c] = r.bits[c];
-    // A 3-wide run is UInt, SInt, Float; a wider one appends Float last.
     out.num = r.count == 3 ? (i == 0   ? BufNum::kUint
                               : i == 1 ? BufNum::kSint
                                        : BufNum::kFloat)
@@ -1186,7 +981,6 @@ bool DecodeBufFormat(u32 gfmt, BufFormat& out) {
   return false;
 }
 
-// One channel's stored bits -> the dword the hardware leaves in the VGPR.
 Id ConvertBufChannel(Translator& t, Id raw, u32 bits, BufNum num) {
   const bool is_signed =
       num == BufNum::kSnorm || num == BufNum::kSscaled || num == BufNum::kSint;
@@ -1218,7 +1012,6 @@ Id ConvertBufChannel(Translator& t, Id raw, u32 bits, BufNum num) {
       return as_float(t.FMul(
           to_f(false), t.F32(1.f / static_cast<float>((1ull << bits) - 1))));
     case BufNum::kSnorm:
-      // The most negative code maps below -1 and the hardware clamps it.
       return as_float(t.Ext2(
           GLSLstd450FMax,
           t.FMul(to_f(true),
@@ -1228,9 +1021,6 @@ Id ConvertBufChannel(Translator& t, Id raw, u32 bits, BufNum num) {
   return value;
 }
 
-// buffer_load_format_x/xy/xyz/xyzw against the set-2 window the planner bound.
-// Returns false when the V# (and with it the format, stride and any scalar
-// byte offset) could not be resolved, leaving the caller to decline.
 bool RdnaEmitBufFormatLoad(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const auto bind = sc.gfx_buf_bind.find(inst.pc);
@@ -1244,7 +1034,6 @@ bool RdnaEmitBufFormatLoad(Translator& t, const Inst& inst, StageContext& sc) {
       typed ? (w >> 19) & 0x7F : (res->second.descriptor[3] >> 12) & 0x7F;
   if (!DecodeBufFormat(format, fmt))
     return false;
-  // 11-bit and 10-bit packed floats need their own exponent/mantissa unpack.
   if (fmt.num == BufNum::kFloat && fmt.bits[0] != 16 && fmt.bits[0] != 32)
     return false;
 
@@ -1255,9 +1044,6 @@ bool RdnaEmitBufFormatLoad(Translator& t, const Inst& inst, StageContext& sc) {
       return false;
     soffset = res->second.soffset;
   }
-  // Typed loads carry their format in the instruction, while stride and
-  // scalar offset remain live shader values. Do not bake the first draw's
-  // descriptor into a cached module. RdnaPlanCbufs preserves its SMEM load.
   const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
   const Id stride =
       typed ? t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF))
@@ -1287,7 +1073,6 @@ bool RdnaEmitBufFormatLoad(Translator& t, const Inst& inst, StageContext& sc) {
   u32 channel_bit = 0;
   for (u32 c = 0; c < requested; c++) {
     if (c >= fmt.comps) {
-      // A channel the format does not store reads 0, and alpha reads one.
       const bool integer = fmt.num == BufNum::kUint || fmt.num == BufNum::kSint;
       t.SetVg(vdata + c, t.U32(c != 3 ? 0u : (integer ? 1u : 0x3F800000u)));
       continue;
@@ -1305,21 +1090,10 @@ bool RdnaEmitBufFormatLoad(Translator& t, const Inst& inst, StageContext& sc) {
   return true;
 }
 
-// ---- FLAT / GLOBAL / SCRATCH ------------------------------------------------
-// Only global_load through a scalar base pair is expressible against a bound
-// resource (FlatServableLoad): the scalar pair is the window the planner bound
-// and the VGPR is a byte offset into it. Every other form carries the whole
-// 64-bit pointer per lane (a generic FLAT access, a SADDR-NULL global, or
-// per-thread SCRATCH) with nothing naming a resource, so each keeps its own
-// reject tag rather than reading somewhere plausible. GLC/SLC/DLC only pick
-// which caches a load bypasses, never the data it returns, so they are ignored.
 void RdnaEmitFlat(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const Flat f = DecodeFlat(inst);
   if (FlatIsStore(f.op)) {
-    // Same reasoning as the buffer stores: the set-2 window is a per-draw
-    // staging copy nothing reads back, and dropping the write keeps the draw a
-    // rejected shader would have lost.
     gpu::gcn::AuditNote("flat.store.rdna", f.op);
     if (ShDbg() && !g_warned_store) {
       g_warned_store = true;
@@ -1341,7 +1115,7 @@ void RdnaEmitFlat(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   const u32 n = FlatLoadDwords(f.op);
-  if (!n) {  // atomics and the d16 forms
+  if (!n) {
     gpu::gcn::WarnUnsupported("flat.rdna", f.op, w, w1);
     return;
   }
@@ -1350,7 +1124,7 @@ void RdnaEmitFlat(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   const auto bind = sc.gfx_buf_bind.find(inst.pc);
-  if (bind == sc.gfx_buf_bind.end()) {  // over the binding cap
+  if (bind == sc.gfx_buf_bind.end()) {
     gpu::gcn::WarnUnsupported("flat.unplanned.rdna", f.op, w, w1);
     return;
   }
@@ -1363,11 +1137,6 @@ void RdnaEmitFlat(Translator& t, const Inst& inst, StageContext& sc) {
             p_u, var,
             {t.U32(0), t.UMin(index, t.U32(gpu::gcn::kGfxBufferDwords - 1))}));
   };
-  // The VGPR offset is a 32-bit UNSIGNED byte offset from the scalar base
-  // (LLVM's SelectGlobalSAddr matches "64-bit SGPR base + zext vgpr offset +
-  // sext imm offset"). Clamping mirrors EmitGfxMubuf: only a prefix of the
-  // resource is staged, and hardware reads past a resource return zero, which
-  // the ring's zeroed tail also gives.
   const Id byte_off =
       t.UMin(t.Add(t.Vg(f.addr), t.U32(static_cast<u32>(f.offset))),
              t.U32(gpu::gcn::kGfxBufferDwords * 4 - 4));
@@ -1390,9 +1159,6 @@ void RdnaEmitFlat(Translator& t, const Inst& inst, StageContext& sc) {
     t.SetVg(f.vdst + k, dword(t.Add(dword0, t.U32(k))));
 }
 
-// ---- exports ----------------------------------------------------------------
-// gfx10.3 export targets: MRT0..7 = 0..7, MRTZ = 8, NULL = 9, POS0..4 = 12..16,
-// PRIM = 20 (NGG connectivity), PARAM0..31 = 32..63.
 void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
   const u32 en = w & 0xF, target = (w >> 4) & 0x3F, compr = (w >> 10) & 1;
@@ -1403,7 +1169,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
               "{}-exp target={} en={:#x} compr={} done={} vsrc={:08x}",
               sc.is_ps ? "ps" : "vs", target, en, compr, (w >> 11) & 1, w1);
   if (!en)
-    return;  // architecturally null export
+    return;
   if (sc.is_mesh) {
     const Id active = t.LaneActive(t.Exec());
     const Id body = t.m.NewBlock(), merge = t.m.NewBlock();
@@ -1430,9 +1196,6 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
     return;
   }
   if (sc.is_ps) {
-    // DELTA_GPU_EXPTRACE: the EN mask of each colour export. A component the
-    // shader does not export gets a default here, and defaulting alpha to 1
-    // would make every SRC_ALPHA blend opaque.
     if (kExpTrace && target <= 7) {
       static u32 seen[256] = {};
       const u32 k = ((target & 7) << 5) | ((en & 0xF) << 1) | compr;
@@ -1440,7 +1203,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
         BASE_LOGI("exp", "ps {:#x} mrt{} en={:#x} compr={}",
                   (unsigned long)g_ps_addr, target, en, compr);
     }
-    if (target <= 7) {  // MRT0..7
+    if (target <= 7) {
       sc.wrote_color = true;
       Id col;
       if (t.last_texel_var && t.last_texel) {
@@ -1449,10 +1212,6 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
         return;
       }
       if (compr) {
-        // A compressed export packs two components per VGPR, and EN selects
-        // PAIRS: bit 0 covers components 0-1 in v[0], bit 2 covers 2-3 in v[1].
-        // Reading v[1] when the shader never wrote it produced a garbage alpha,
-        // which with SRC_ALPHA blending draws every blended pass fully opaque.
         Id c[4];
         if (en & 0x1) {
           const Id c01 =
@@ -1478,16 +1237,6 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
           c[i] = (en & (1 << i)) ? t.VgF(v[i]) : t.F32(i == 3 ? 1.f : 0.f);
         col = t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]});
       }
-      // DELTA_GPU_FORCECOLOR: override the PS color output with opaque red, so
-      // a rendered draw is unmistakably visible regardless of
-      // texture/vertex-color math. Combined with FORCEQUAD this isolates
-      // rasterization/scanout from the PS color path. Replace non-finite colour
-      // components with zero and clamp to the half range. A NaN written into an
-      // HDR target poisons every pass that reads it: Skyrim's 2x2 exposure
-      // buffer ends up all-ones (NaN), the tonemap then has no usable exposure,
-      // and the frame swings between near-black and flat green. The NaNs come
-      // from our own approximations, not from the title. DELTA_GPU_ALLOWNAN
-      // keeps whatever the shader produced.
       if (!kAllowNan) {
         const Id v = col;
         Id comps[4];
@@ -1502,7 +1251,6 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
         col = t.m.CompositeConstruct(t.t_v4,
                                      {comps[0], comps[1], comps[2], comps[3]});
       }
-      // DELTA_GPU_DEBUGALPHA: show the alpha the blend will use as greyscale.
       if (kGpuDebugalpha) {
         const Id a = t.m.CompositeExtract(t.t_f, col, 3);
         col = t.m.CompositeConstruct(t.t_v4, {a, a, a, t.F32(1.f)});
@@ -1515,14 +1263,6 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
                                       : t.VgF(kGpuPsVgpr - 1);
         col = t.m.CompositeConstruct(t.t_v4, {g, g, g, t.F32(1.f)});
       }
-      // A pixel export may name any MRT any number of times, and the ISA
-      // accumulates the write masks per target. Storing the whole vec4 let a
-      // later export clobber the channels an earlier one wrote with the
-      // defaults above (RGB 0 and alpha 1), so a shader that exports its
-      // colour and its alpha in two instructions came out opaque black. The
-      // GCN emitter already writes only the components its EN enables; do the
-      // same here. The diagnostics that replace the whole colour still write
-      // every channel, or they would show nothing.
       const Id out_var = gpu::gcn::PsColorOut(t, sc, target);
       const auto live = [&](u32 i) {
         return compr ? (en & (i < 2 ? 0x1u : 0x4u)) != 0
@@ -1550,7 +1290,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
         t.m.Store(sc.color_written_var, t.U32(1));
       return;
     }
-    if (target == 8 && (en & 1)) {  // MRTZ: depth export
+    if (target == 8 && (en & 1)) {
       const Id depth =
           compr
               ? t.m.CompositeExtract(
@@ -1565,7 +1305,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       gpu::gcn::WarnUnsupported("exp.ps-target", target, w, w1);
     return;
   }
-  if (target == 12) {  // POS0 -> gl_Position
+  if (target == 12) {
     if (sc.dbg_pos_in && sc.dbg_pos_cbuf >= 0) {
       Id in[4];
       const Id val = t.m.Load(sc.dbg_pos_comps == 2   ? t.t_v2
@@ -1609,7 +1349,7 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
       c[i] = (en & (1 << i)) ? t.VgF(v[i]) : t.F32(i == 3 ? 1.f : 0.f);
     t.m.Store(sc.pos_out,
               t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]}));
-  } else if (target >= 32 && target <= 63) {  // PARAM0..31
+  } else if (target >= 32 && target <= 63) {
     const u32 p = target - 32;
     if (p + 1 > sc.max_param)
       sc.max_param = p + 1;
@@ -1620,41 +1360,24 @@ void EmitExport(Translator& t, const Inst& inst, StageContext& sc) {
     t.m.Store(out_var,
               t.m.CompositeConstruct(t.t_v4, {c[0], c[1], c[2], c[3]}));
   } else if (target >= 13 && target <= 15) {
-    // POS1..POS3 carry the clip/cull distances and the point-size / edge-flag /
-    // layer / viewport-index quad. The renderer has no user clip planes and no
-    // layered rendering, so there is nothing to store. Rejecting the
-    // shader over it throws the whole draw away. Demon's Souls binds one
-    // fullscreen RECTLIST vertex program that exports POS1 with EN=0x4 (the
-    // render-target array index) and nothing else we cannot translate;
-    // rasterising it into slice 0 beats not rasterising it at all.
     gpu::gcn::NoteApproximated("exp.vs-pos-extra", target);
   } else if (target != 9 && target != 20) {
-    // 20 = the NGG primitive export (connectivity + edge flags). The renderer
-    // draws from the index buffer the command stream binds, so the topology the
-    // shader would emit here is already known; only its position/param exports
-    // matter.
     gpu::gcn::WarnUnsupported("exp.vs-target", target, w, w1);
   }
 }
 
-// SDWA (src0 field == 249) puts the real operands in the extension dword. DPP
-// extensions are rejected before reaching this partial SDWA implementation.
 struct SdwaMod {
-  u32 src0 = 0, src1 = 0;          // resolved operand fields
-  u32 src0_sel = 6, src1_sel = 6;  // 0-3 byte, 4-5 word, 6 whole dword
+  u32 src0 = 0, src1 = 0;
+  u32 src0_sel = 6, src1_sel = 6;
   bool src0_sext = false, src1_sext = false;
   bool src0_neg = false, src0_abs = false;
   bool src1_neg = false, src1_abs = false;
   u32 dst_sel = 6;
-  u32 dst_unused = 0;  // 0 = zero, 1 = sign-extend above, 2 = preserve
+  u32 dst_unused = 0;
   bool clamp = false;
   u32 omod = 0;
 };
 
-// S0/S1 (bits 23/31) choose the SCALAR file for that operand. Reading them as
-// VGPRs instead is silent corruption: a 3D vertex shader multiplies its
-// transform out of SGPRs, so the matrix comes back as zeros and every position
-// collapses. DPP has no scalar-source form (its src0 is always a VGPR).
 SdwaMod DecodeSdwa(const Inst& inst, u32 vsrc1, bool dpp) {
   const u32 m = inst.raw[1];
   SdwaMod s;
@@ -1679,9 +1402,6 @@ SdwaMod DecodeSdwa(const Inst& inst, u32 vsrc1, bool dpp) {
   return s;
 }
 
-// SDWA's per-operand NEG/ABS act on the operand as a float, so they apply after
-// the sub-dword select and before the op sees it. Rejecting them outright cost
-// every shader that scales by a negated or absolute value.
 Id SdwaFloatMod(Translator& t, Id raw, bool neg, bool abs) {
   if (!neg && !abs)
     return raw;
@@ -1693,7 +1413,6 @@ Id SdwaFloatMod(Translator& t, Id raw, bool neg, bool abs) {
   return t.m.Bitcast(t.t_u, f);
 }
 
-// Apply one operand's SDWA sub-dword selection to its raw 32-bit value.
 Id SdwaSelect(Translator& t, Id raw, u32 sel, bool sext) {
   if (sel >= 6)
     return raw;
@@ -1734,23 +1453,16 @@ void ResolveValuSrc0(const Inst& inst, u32 src0, u32& field, u32& literal) {
   }
 }
 
-// ---- DPP -------------------------------------------------------------------
-// A DPP modifier reads src0 from ANOTHER lane of the same row of 16, which the
-// host subgroup answers with a shuffle. Exact when the guest wave's lanes map
-// to consecutive host invocations, which is what an NGG vertex wave does and
-// what ds_swizzle already assumes. Without it the whole shader was rejected:
-// Astro Bot's vertex program uses one `v_add_nc_u32_dpp row_shr:1` and every
-// draw it takes part in was dropped.
 struct DppLane {
-  Id lane = 0;   // which lane to read
-  Id valid = 0;  // 0 = always in range
+  Id lane = 0;
+  Id valid = 0;
   bool known = false;
 };
 
 DppLane RdnaDppLane(Translator& t, Id subid, u32 ctrl) {
   DppLane r;
   r.known = true;
-  if (ctrl <= 0xFF) {  // quad_perm: two bits per lane of the quad
+  if (ctrl <= 0xFF) {
     const Id quad_base = t.And(subid, t.U32(0xFFFFFFFCu));
     const Id lane = t.And(subid, t.U32(3));
     const Id sel = t.And(t.Shr(t.U32(ctrl), t.Shl(lane, t.U32(1))), t.U32(3));
@@ -1760,31 +1472,31 @@ DppLane RdnaDppLane(Translator& t, Id subid, u32 ctrl) {
   const u32 amount = ctrl & 0xF;
   const Id row = t.And(subid, t.U32(0xFFFFFFF0u));
   const Id lane = t.And(subid, t.U32(15));
-  if (ctrl >= 0x101 && ctrl <= 0x10F) {  // row_shl
+  if (ctrl >= 0x101 && ctrl <= 0x10F) {
     r.lane = t.Or(row, t.Add(lane, t.U32(amount)));
     r.valid = t.Ult(lane, t.U32(16u - amount));
     return r;
   }
-  if (ctrl >= 0x111 && ctrl <= 0x11F) {  // row_shr
+  if (ctrl >= 0x111 && ctrl <= 0x11F) {
     r.lane = t.Or(row, t.Sub(lane, t.U32(amount)));
     r.valid = t.Uge(lane, t.U32(amount));
     return r;
   }
-  if (ctrl >= 0x121 && ctrl <= 0x12F) {  // row_ror: wraps, so always in range
+  if (ctrl >= 0x121 && ctrl <= 0x12F) {
     const Id high = t.Uge(lane, t.U32(amount));
     const Id minus = t.Sub(lane, t.U32(amount));
     const Id plus = t.Add(lane, t.U32(16u - amount));
     r.lane = t.Or(row, t.SelectB(high, minus, plus));
     return r;
   }
-  if (ctrl == 0x140 || ctrl == 0x141) {  // row_mirror / row_half_mirror
+  if (ctrl == 0x140 || ctrl == 0x141) {
     const u32 lane_mask = ctrl == 0x141 ? 7u : 15u;
     const Id base = t.And(subid, t.U32(~lane_mask));
     const Id in = t.And(subid, t.U32(lane_mask));
     r.lane = t.Or(base, t.Sub(t.U32(lane_mask), in));
     return r;
   }
-  if (ctrl >= 0x160 && ctrl <= 0x16F) {  // row_xmask
+  if (ctrl >= 0x160 && ctrl <= 0x16F) {
     r.lane = t.Xor(subid, t.U32(amount));
     return r;
   }
@@ -1792,8 +1504,6 @@ DppLane RdnaDppLane(Translator& t, Id subid, u32 ctrl) {
   return r;
 }
 
-// The src0 value a DPP-modified VOP1/VOP2 reads. Returns 0 if this modifier
-// cannot be modelled, so the caller can fall back to rejecting the shader.
 Id RdnaDppSrc0(Translator& t, StageContext& sc, const Inst& inst) {
   if (!sc.subgroup_local_id)
     return 0;
@@ -1820,8 +1530,6 @@ Id RdnaDppSrc0(Translator& t, StageContext& sc, const Inst& inst) {
   return value;
 }
 
-// Does any instruction carry a DPP modifier? Decides whether the stage needs
-// the subgroup channel declared.
 bool RdnaUsesDpp(const Program& program) {
   for (const Inst& inst : program)
     if (inst.extension == gpu::gcn::InstExtension::kDpp)
@@ -1840,14 +1548,6 @@ bool RdnaUsesLaneOps(const Program& program) {
   return false;
 }
 
-// ---- per-instruction dispatch ----------------------------------------------
-// Decodes RDNA2 field layouts and calls the shared GFX7 emitters (which take
-// pre-decoded operands + a GFX7-canonical opcode). The scalar and VOP1/2/C
-// field layouts are identical to GFX7; VOP3 differs only in the opcode-field
-// width and the CLAMP bit position (bit 15, not 11); SMEM replaces SMRD.
-// DELTA_GPU_CSVGPR_CS=<cs> DELTA_GPU_CSVGPR_PC=<pc> DELTA_GPU_CSVGPR=<v>:
-// v..v+3 as they stand after the instruction at pc replace whatever that
-// compute shader's image stores write, so its output image shows them.
 DELTA_OPTION(u64, kCsVgprCs, "DELTA_GPU_CSVGPR_CS", 0);
 DELTA_OPTION(u32, kCsVgprPc, "DELTA_GPU_CSVGPR_PC", 0);
 DELTA_OPTION(u32, kCsVgpr, "DELTA_GPU_CSVGPR", 0);
@@ -1875,8 +1575,6 @@ void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
   const Id write_guard = t.vector_write_guard;
   RdnaEmitInstBody(t, inst, sc);
   t.vector_write_guard = write_guard;
-  // 1000 + n names SGPR n and 2000 + n VGPR n as an integer; both are
-  // stored as floats so a colour target shows them.
   if (probing && inst.pc == kCsVgprPc)
     for (u32 i = 0; i < 4; i++) {
       const Id value = kCsVgpr >= 2000   ? t.Vg(kCsVgpr - 2000 + i)
@@ -1904,14 +1602,10 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
     gpu::gcn::WarnUnsupported("dpp8.rdna", inst.opcode, w, w1);
     return;
   }
-  // A DPP instruction's src0 field is the modifier marker, not a real operand;
-  // the value came from the shuffle above.
   if (!dpp_src0 && UsesUnsupportedRdnaSource(inst)) {
     gpu::gcn::WarnUnsupported("source.special.rdna", inst.opcode, w, w1);
     return;
   }
-  // Compute reaches guest memory through the shared CS resource model (set-0
-  // storage buffers), not through the graphics cbuf/vertex-fetch bindings.
   if (sc.direct && IsDirectMemory(inst) &&
       (gpu::gcn::EmitDirectLoad(t, inst, sc) || EmitCsMemory(t, inst, sc)))
     return;
@@ -1923,8 +1617,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
   }
   if (sc.is_mesh && inst.enc == Enc::kSopp && inst.opcode == 0x10 &&
       (w & 0xf) == 9) {
-    // GS_ALLOC_REQ carries vertex/primitive counts in M0. Retain them until
-    // the whole workgroup has finished, then call SetMeshOutputs uniformly.
     const Id leader = t.InBlock(t.Eq(sc.mesh_local_index, t.U32(0)));
     const Id body = t.m.NewBlock(), merge = t.m.NewBlock();
     t.m.SelectionMerge(merge);
@@ -1981,34 +1673,27 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     case Enc::kSopk:
       if (inst.opcode >= 0x17 && inst.opcode <= 0x1A)
-        break;  // per-counter waits; translated memory operations are ordered
+        break;
       if (inst.opcode == 0x10) {
         const u32 sdst = (w >> 16) & 0x7f;
         const u32 simm =
             static_cast<u32>(static_cast<i32>(static_cast<i16>(w & 0xffff)));
         t.SetSdst(sdst, 0, t.Mul(t.Sdst(sdst), t.U32(simm)));
-        break;  // RDNA s_mulk_i32 does not modify SCC.
+        break;
       }
       gpu::gcn::EmitSopk(t, inst);
       break;
     case Enc::kSopp:
-      if (inst.opcode == 0x0A) {  // s_barrier
+      if (inst.opcode == 0x0A) {
         if (sc.is_cs) {
           t.m.EmitVoid(spv::Op::OpControlBarrier,
                        {t.U32(2), t.U32(2), t.U32(0x108)});
         } else if (sc.lds_wave_base) {
-          // Shared LDS: the wave has to converge here. A control
-          // barrier at SUBGROUP scope is legal in any stage (unlike Workgroup,
-          // which SPIR-V allows only in compute-like ones), and a subgroup is
-          // exactly the set of lanes sharing the block.
-          t.m.EmitVoid(spv::Op::OpControlBarrier,
-                       {t.U32(static_cast<u32>(spv::Scope::Subgroup)),
-                        t.U32(static_cast<u32>(spv::Scope::Subgroup)),
-                        t.U32(0x48)});  // AcquireRelease | UniformMemory
+          t.m.EmitVoid(
+              spv::Op::OpControlBarrier,
+              {t.U32(static_cast<u32>(spv::Scope::Subgroup)),
+               t.U32(static_cast<u32>(spv::Scope::Subgroup)), t.U32(0x48)});
         } else {
-          // A graphics stage's LDS is per-invocation (Private), so there is
-          // nothing for the wave to wait on, and SPIR-V has no control
-          // barrier there to emit anyway.
           gpu::gcn::NoteApproximated("barrier.graphics", inst.opcode);
         }
       } else if (inst.opcode != 0x00 && inst.opcode != 0x01 &&
@@ -2022,12 +1707,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
                  inst.opcode != 0x23) {
         gpu::gcn::WarnUnsupported("sopp.rdna", inst.opcode, w, w1);
       }
-      // Branches are emitted by the CFG; waits/hints are synchronous. 0x10 is
-      // s_sendmsg, whose only use in an NGG stage is GS_ALLOC_REQ (reserving
-      // vertex/primitive slots in the hardware's own export space). 0x17-0x1a
-      // are the s_cbranch_cdbg* debug branches, and BranchKind already reports
-      // them as no branch at all: with no debugger attached the condition is
-      // false, so falling through is what the hardware does.
       break;
     case Enc::kSmrd:
       RdnaEmitSmem(t, inst, sc);
@@ -2041,7 +1720,7 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         gpu::gcn::EmitVop1(t, op, vdst, t.m.Bitcast(t.t_f, dpp_src0));
         break;
       }
-      if (raw0 == 249) {  // SDWA: apply the source's sub-dword selection
+      if (raw0 == 249) {
         const SdwaMod sd = DecodeSdwa(inst, 0, false);
         if (sd.dst_sel > 6 || sd.dst_unused > 2 || sd.src0_sel > 6) {
           gpu::gcn::WarnUnsupported("vop1.sdwa-mod", op, w, w1);
@@ -2065,17 +1744,11 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         StoreSdwaResult(t, vdst, sd, previous);
         break;
       }
-      // The movrel family indexes the register file with M0. Our VGPRs are one
-      // Private array, so that is an access chain on a computed index; the
-      // clamp keeps a stray M0 inside it, because an out-of-bounds access is
-      // undefined in SPIR-V and a fault here takes the whole title down.
-      // 0x42 v_movreld_b32   VGPR[vdst + M0] = src0
-      // 0x43 v_movrels_b32   vdst            = VGPR[src0 + M0]
-      // 0x44 v_movrelsd_b32  VGPR[vdst + M0] = VGPR[src0 + M0]
+      // Clamp M0: an out-of-bounds access is undefined in SPIR-V.
       if (op >= 0x42 && op <= 0x44) {
         const auto reg_at = [&](u32 base) {
-          const Id idx = t.m.Emit(spv::Op::OpIAdd, t.t_u,
-                                  {t.U32(base), t.Sg(124)});  // 124 = M0
+          const Id idx =
+              t.m.Emit(spv::Op::OpIAdd, t.t_u, {t.U32(base), t.Sg(124)});
           return t.m.AccessChain(
               t.p_priv_u, t.vgpr,
               {t.m.ExtInst(t.t_u, GLSLstd450UMin, {idx, t.U32(255)})});
@@ -2121,11 +1794,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         }
         sdwa_dst = sd;
         sdwa_previous = sd.dst_sel < 6 ? t.Vg(vdst) : 0;
-        // CLAMP and OMOD are applied to the RESULT, so they need no operand
-        // rewriting: the shared emitter writes vdst and we scale/saturate it
-        // afterwards. OMOD is a real gfx10 SDWA field: `v_mul_f32_sdwa ...
-        // mul:2` is what Minecraft's world shaders use, and rejecting it
-        // dropped the whole shader.
         sdwa_clamp = sd.clamp;
         sdwa_omod = sd.omod;
         src1 = sd.src1;
@@ -2138,18 +1806,16 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
       }
       const Id s0u = dpp_src0 ? dpp_src0 : sdwa0 ? sdwa0 : t.SrcRaw(src0, lit);
       const Id s1u = sdwa1 ? sdwa1 : t.SrcRaw(src1, lit);
-      // RDNA2-only VOP2 numbers the shared GFX7 emitter would misinterpret: the
-      // no-carry integer add/sub forms must NOT write VCC (a later v_cndmask
-      // reads it), and v_xnor_b32 sits where GFX7 has v_bfm_b32.
+      // The no-carry forms must not write VCC.
       switch (op) {
-        case 0x32:    // v_add_f16
-        case 0x33:    // v_sub_f16
-        case 0x34:    // v_subrev_f16
-        case 0x35:    // v_mul_f16
-        case 0x36:    // v_fmac_f16
-        case 0x39:    // v_max_f16
-        case 0x3a:    // v_min_f16
-        case 0x3b: {  // v_ldexp_f16
+        case 0x32:
+        case 0x33:
+        case 0x34:
+        case 0x35:
+        case 0x36:
+        case 0x39:
+        case 0x3a:
+        case 0x3b: {
           const auto half = [&](Id bits) {
             return t.m.CompositeExtract(
                 t.t_f, t.m.ExtInst(t.t_v2, GLSLstd450UnpackHalf2x16, {bits}),
@@ -2194,30 +1860,27 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
                               t.U32(0xFFFF)));
           break;
         }
-        case 0x02:  // v_dot2c_f32_f16, not GFX7 v_writelane
-        case 0x0D:  // v_dot4c_i32_i8, not GFX7 v_min_legacy_f32
+        case 0x02:
+        case 0x0D:
           gpu::gcn::WarnUnsupported("vop2.rdna", op, w, w1);
           break;
         case 0x1E:
           t.SetVg(vdst, t.Not(t.Xor(s0u, s1u)));
-          break;  // v_xnor_b32
+          break;
         case 0x1F:
-          // v_mac_f32 (D = S0*S1 + D). This slot is gfx1010 numbering, which
-          // gfx1030 dropped; the PS5's ISA keeps some RDNA1 assignments, so
-          // decode it the way llvm-mc -mcpu=gfx1010 does, not gfx1030.
           t.SetVgF(vdst, t.m.ExtInst(t.t_f, GLSLstd450Fma,
                                      {t.m.Bitcast(t.t_f, s0u),
                                       t.m.Bitcast(t.t_f, s1u), t.VgF(vdst)}));
           break;
         case 0x25:
           t.SetVg(vdst, t.Add(s0u, s1u));
-          break;  // v_add_nc_u32
+          break;
         case 0x26:
           t.SetVg(vdst, t.Sub(s0u, s1u));
-          break;  // v_sub_nc_u32
+          break;
         case 0x27:
           t.SetVg(vdst, t.Sub(s1u, s0u));
-          break;  // v_subrev_nc_u32
+          break;
         case 0x28:
         case 0x29:
         case 0x2A: {
@@ -2240,14 +1903,14 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
                                      {t.m.Bitcast(t.t_f, s0u),
                                       t.m.Bitcast(t.t_f, s1u), t.VgF(vdst)}));
           break;
-        case 0x20:  // v_madmk_f32 (gfx10 v_fmamk_f32): D = S0 * K + S1
+        case 0x20:
         case 0x2C:
           t.SetVgF(vdst, t.m.ExtInst(t.t_f, GLSLstd450Fma,
                                      {t.m.Bitcast(t.t_f, s0u),
                                       t.m.Bitcast(t.t_f, t.U32(lit)),
                                       t.m.Bitcast(t.t_f, s1u)}));
           break;
-        case 0x21:  // v_madak_f32 (gfx10 v_fmaak_f32): D = S0 * S1 + K
+        case 0x21:
         case 0x2D:
           t.SetVgF(vdst, t.m.ExtInst(
                              t.t_f, GLSLstd450Fma,
@@ -2265,7 +1928,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
           }
           break;
       }
-      // OMOD scales the result (1 = x2, 2 = x4, 3 = /2) and runs before CLAMP.
       if (sdwa_omod) {
         const float k = sdwa_omod == 1 ? 2.f : sdwa_omod == 2 ? 4.f : 0.5f;
         t.SetVgF(vdst, t.FMul(t.VgF(vdst), t.F32(k)));
@@ -2278,10 +1940,7 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
     }
     case Enc::kVop3p: {
       const u32 op = inst.opcode, vdst = w & 0xFF;
-      if (op >= 0x20 && op <= 0x22) {  // v_fma_mix_{f32,lo_f16,hi_f16}
-        // MIX uses OP_SEL_HI to select f16 versus f32 independently for
-        // each source. OP_SEL selects the half only for an f16 input.
-        // NEG_HI is repurposed as ABS; NEG_LO still negates after ABS.
+      if (op >= 0x20 && op <= 0x22) {
         const u32 half_input = ((w1 >> 27) & 3) | ((w >> 12) & 4);
         const u32 half_select = (w >> 11) & 7;
         const u32 abs = (w >> 8) & 7, neg = (w1 >> 29) & 7;
@@ -2318,8 +1977,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         }
         break;
       }
-      // Componentwise packed operations select each source's low half for the
-      // low result and high half for the high result.
       if ((w & 0x0000FF00u) != 0x00004000u ||
           (w1 & 0xF8000000u) != 0x18000000u) {
         gpu::gcn::WarnUnsupported("vop3p.modifier", op, w, w1);
@@ -2335,13 +1992,8 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
       const u32 rdna_op = inst.opcode;
       u32 op = rdna_op;
       const u32 vdst = w & 0xFF;
-      // VOP3-form v_cndmask is the VOP2 alias 0x101 on RDNA2 (0x01 renumber);
-      // GFX7's explicit-S2 cndmask VOP3 op is 0x100.
       if (op == 0x101)
         op = 0x100;
-      // gfx10 dropped v_readlane_b32 from VOP2 and gave it the VOP3-only slot
-      // 0x360; the shared emitter knows it as GFX7's VOP2 alias 0x101, the slot
-      // RDNA2 handed to v_cndmask above.
       if (rdna_op == 0x360)
         op = 0x101;
       const u32 s0 = w1 & 0x1FF, s1 = (w1 >> 9) & 0x1FF;
@@ -2356,7 +2008,7 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         gpu::gcn::WarnUnsupported("vop3.dot.rdna", op, w, w1);
         break;
       }
-      if (op == 0x377 || op == 0x378) {  // v_permlane16 / v_permlanex16_b32
+      if (op == 0x377 || op == 0x378) {
         if (s0 < 256 || s1 >= 256 || s2 >= 256 || abs || neg || omod || clamp ||
             (op_sel & ~3u) || !sc.subgroup_local_id) {
           gpu::gcn::WarnUnsupported("vop3.permlane", op, w, w1);
@@ -2390,8 +2042,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         t.SetVg(vdst, result);
         break;
       }
-      // f16 three-operand forms. OP_SEL[2:0] pick each source's high half,
-      // OP_SEL[3] writes the result into the destination's high half.
       if (op == 0x351 || op == 0x354 || op == 0x357 || op == 0x34b) {
         if (clamp || omod) {
           gpu::gcn::WarnUnsupported("vop3.f16-modifier", op, w, w1);
@@ -2468,7 +2118,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         break;
       }
       if (rdna_op == 0x11F) {
-        // VOP3 form of v_mac_f32 (D = S0*S1 + D), the alias of VOP2 0x1f.
         Id r = t.m.ExtInst(
             t.t_f, GLSLstd450Fma,
             {t.SrcF(s0, inst.literal, neg & 1, abs & 1),
@@ -2486,8 +2135,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         break;
       }
       if (op == 0x141) {
-        // v_mad_f32 (D = S0*S1 + S2), gfx1010 numbering; see the VOP2 0x1f
-        // note. Minecraft's shaders use it for the classic *2-1 remap.
         Id r = t.m.ExtInst(t.t_f, GLSLstd450Fma,
                            {t.SrcF(s0, inst.literal, neg & 1, abs & 1),
                             t.SrcF(s1, inst.literal, neg & 2, abs & 2),
@@ -2537,7 +2184,7 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
                            t.SrcRaw(s1, inst.literal), 126);
         break;
       }
-      if (op == 0x178) {  // v_xor3_b32, used by the AVC decoder filters
+      if (op == 0x178) {
         if (neg || abs || clamp || omod || op_sel) {
           gpu::gcn::WarnUnsupported("vop3.xor3-modifier", op, w, w1);
           break;
@@ -2573,31 +2220,23 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         if (neg & 1)
           source0 = t.FNeg(source0);
       }
-      // RDNA2 renumbered the lane-count pair; the shared emitter has them at
-      // their GFX7 numbers. A vertex shader that spills to LDS computes its
-      // slot with exactly this pair, so without the remap the whole stage was
-      // rejected.
-      // 0x1xx, not the bare number: EmitVop3 reads an opcode below 0x100 as a
-      // VOPC, so the bare form wrote a predicate to an SGPR and left the
-      // destination VGPR at zero, so every lane computed lane 0's LDS slot.
-      // The pack converts keep their GFX7 VOP2 meaning, just renumbered.
       u32 emit_op = op;
       if (op == 0x368)
-        emit_op = 0x12d;  // v_cvt_pknorm_i16_f32
+        emit_op = 0x12d;
       else if (op == 0x369)
-        emit_op = 0x12e;  // v_cvt_pknorm_u16_f32
+        emit_op = 0x12e;
       else if (op == 0x36a)
-        emit_op = 0x130;  // v_cvt_pk_u16_u32
+        emit_op = 0x130;
       else if (op == 0x36b)
-        emit_op = 0x131;  // v_cvt_pk_i16_i32
+        emit_op = 0x131;
       else if (op == 0x363)
-        emit_op = 0x11e;  // v_bfm_b32
+        emit_op = 0x11e;
       else if (op == 0x364)
-        emit_op = 0x122;  // v_bcnt_u32_b32
+        emit_op = 0x122;
       else if (op == 0x365)
-        emit_op = 0x123;  // v_mbcnt_lo_u32_b32
+        emit_op = 0x123;
       else if (op == 0x366)
-        emit_op = 0x124;  // v_mbcnt_hi_u32_b32
+        emit_op = 0x124;
       gpu::gcn::EmitVop3(
           t, emit_op, vdst, source0, t.SrcRawHi(s0, inst.literal, op == 0x163),
           t.SrcF(s1, inst.literal, neg & 2, abs & 2),
@@ -2617,9 +2256,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
           gpu::gcn::WarnUnsupported("vopc.sdwa-mod", op, w, w1);
           break;
         }
-        // A compare has no VGPR destination, so SDWA reuses those bits (which
-        // carry DST_SEL/CLAMP/OMOD elsewhere) for the scalar one: SD picks
-        // SDST over VCC.
         const u32 dst = ((w1 >> 15) & 1) ? ((w1 >> 8) & 0x7F) : 106u;
         const Id a = SdwaFloatMod(
             t, SdwaSelect(t, t.SrcRaw(sd.src0, 0), sd.src0_sel, sd.src0_sext),
@@ -2634,10 +2270,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
       u32 vopc_src1 = 256 + vsrc1;
       if (raw0 == 249)
         vopc_src1 = DecodeSdwa(inst, vsrc1, false).src1;
-      // RDNA2 f16 compares sit at 0xC8-0xCF, which the GFX7-numbered EmitVopc
-      // would read as u32 integer compares; run the float predicate (op-0xC8)
-      // on the low-half f16 operands instead. u32 compares stay at 0xC0-0xC7.
-      // v_cmpx_*_f16 follow at 0xD8-0xDF; they write EXEC like the f32 cmpx.
       if ((op >= 0xC8 && op <= 0xCF) || (op >= 0xD8 && op <= 0xDF)) {
         auto f16 = [&](u32 f) {
           return t.m.CompositeExtract(
@@ -2670,8 +2302,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         gpu::gcn::WarnUnsupported("vintrp.stage", inst.opcode, w, w1);
         break;
       }
-      // Same encoding as GFX7, including the P10/P20 reads that turn a
-      // Location into a PerVertexKHR array.
       gpu::gcn::EmitVintrp(t, w, sc);
       break;
     case Enc::kExp:
@@ -2679,17 +2309,11 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
       break;
     case Enc::kMtbuf:
     case Enc::kMubuf: {
-      // Raw loads the shader indexes itself go to the set-2 storage buffer the
-      // planner assigned; the MUBUF field layout is the same as GCN's.
       if (inst.enc == Enc::kMubuf && inst.opcode >= 0x08 &&
           inst.opcode <= 0x0f) {
         gpu::gcn::EmitGfxMubuf(t, inst, sc);
         break;
       }
-      // A store has nowhere to land: the set-2 window is a per-draw staging
-      // copy that is never read back, and draws sharing a resource share one
-      // window. Drop it and keep going: a rejected shader drops the whole draw,
-      // while a draw missing a side-effect write still rasterizes its geometry.
       if (inst.enc == Enc::kMubuf
               ? RdnaMubufStore(inst.opcode) || RdnaMubufAtomicNoReturn(inst)
               : RdnaMtbufStore(inst.opcode)) {
@@ -2703,7 +2327,7 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         }
         break;
       }
-      if (inst.opcode > 0x03) {  // atomics and the d16 forms
+      if (inst.opcode > 0x03) {
         gpu::gcn::WarnUnsupported(
             inst.enc == Enc::kMtbuf ? "mtbuf.rdna" : "mubuf.rdna", inst.opcode,
             w, w1);
@@ -2715,11 +2339,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         gpu::gcn::WarnUnsupported("buffer.control.rdna", inst.opcode, w, w1);
         break;
       }
-      // A per-vertex fetch was lifted to a Location vertex input; its pc has a
-      // seed. Re-seed its destination VGPRs from that input HERE (where the
-      // real buffer_load_format runs), overwriting any value the merged-wave
-      // index math clobbered them with (e.g. v0/v3/v4, reused as the fetch
-      // index). Other loads execute against the storage buffer below.
       if (auto sit = sc.vfetch_seed.find(inst.pc);
           sit != sc.vfetch_seed.end()) {
         const auto& vs = sit->second;
@@ -2734,9 +2353,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
                                          : t.m.CompositeExtract(t.t_f, val, c));
         break;
       }
-      // Every remaining formatted load reads its set-2 buffer, including
-      // nonindexed MTBUF loads in pixel shaders. The instruction supplies a
-      // typed load's format; MUBUF takes it from the resolved descriptor.
       if (!RdnaEmitBufFormatLoad(t, inst, sc))
         gpu::gcn::WarnUnsupported(inst.enc == Enc::kMtbuf
                                       ? "mtbuf.format-conversion.rdna"
@@ -2758,11 +2374,7 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
       }
       Inst lowered = inst;
       const u32 dim = (w >> 3) & 0x7;
-      // dim 3 (cube) arrives with the face already selected, so it is the
-      // same (s, t, layer) address the 2D-array path takes.
       const bool arrayed_dim = dim == 3 || dim == 4 || dim == 5;
-      // dim 2 is a volume: three coordinates, no layer. RdnaTexDimMask told the
-      // shared emitter which binding that is, so DA stays clear here.
       if (dim > 5) {
         gpu::gcn::WarnUnsupported("mimg.dim", dim, w, w1);
         break;
@@ -2772,15 +2384,7 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         break;
       }
       lowered.raw[0] = (w & ~0x4000u) | (arrayed_dim ? 0x4000u : 0u);
-      // NSA names every address component explicitly. Load them before emitting
-      // the image operation so aliases cannot overwrite a later source and no
-      // architectural VGPRs are used as scratch storage.
       const u32 nsa = (w >> 1) & 0x3;
-      // A cube sample's s/t reach the hardware biased by +1.5 (the compiler
-      // emits v_madak_f32 s, sc, rcp(|ma|), 1.5); gfx10's cube addressing
-      // consumes that range. The 2D-array lowering wants a plain [0,1], so
-      // take the bias back off. Without this every face samples its clamped
-      // edge texel and comes out one flat colour.
       const bool cube = dim == 3;
       if (nsa || cube) {
         base::Array<Id, 13> address{};
@@ -2808,22 +2412,11 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
     case Enc::kFlat:
       RdnaEmitFlat(t, inst, sc);
       break;
-    // LDS. The shared emitter takes RDNA2 DS unchanged: gfx10 kept both the
-    // opcode numbers and the field layout, and our decoder already reads the
-    // opcode from word0[25:18]. A compute stage gets real Workgroup storage; a
-    // graphics stage cannot have any (SPIR-V allows that class only in
-    // compute-like stages), so it is backed by a Private array, exact when
-    // the address is the lane's own slot, which is what an NGG vertex shader's
-    // spill does. gfx10.3 has no hardware VS: every vertex program is a merged
-    // ES/GS that stages its exports through LDS, so without this the whole
-    // stage was rejected and its draws dropped.
     case Enc::kDs:
       if (sc.is_cs || inst.opcode == 0x35) {
         gpu::gcn::EmitDs(t, inst, sc);
       } else if ((sc.lds_var || sc.lds_wave_base) &&
                  gpu::gcn::DsGraphicsSupported(inst.opcode)) {
-        // Shared LDS answers any address exactly; Private storage only the
-        // lane's own slot.
         if (!sc.lds_wave_base && !sc.ds_own_lane.count(inst.pc))
           gpu::gcn::NoteApproximated("ds.private", inst.opcode);
         gpu::gcn::EmitDs(t, inst, sc);
@@ -2837,17 +2430,14 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
   }
 }
 
-// ---- control flow (self-contained copy of the GFX7 while/switch lowering) ---
-// 0=none, 1=uncond, 2=scc0, 3=scc1, 4=vccz, 5=vccnz, 6=execz, 7=execnz,
-// 8=endpgm.
 int BranchKind(const Inst& inst) {
   if (inst.enc != Enc::kSopp)
     return 0;
   switch (inst.opcode) {
     case 0x01:
-    case 0x1B:  // s_endpgm_saved
-    case 0x1E:  // s_endpgm_ordered_ps_done
-    case 0x1F:  // s_code_end
+    case 0x1B:
+    case 0x1E:
+    case 0x1F:
       return 8;
     case 0x02:
       return 1;
@@ -2868,13 +2458,6 @@ int BranchKind(const Inst& inst) {
   }
 }
 
-// s_call_b64 writes the return address into an SGPR pair and jumps; the
-// matching s_setpc_b64 jumps back through it. The block-index state machine
-// EmitCfg builds can carry that exactly: the call stores its fall-through
-// BLOCK id where the hardware would store the return address, and the return
-// loads the state from the same pair. That models several call sites and
-// nesting, and only breaks on code that does arithmetic on a return address,
-// which no compiler emits.
 bool IsCall(const Inst& inst) {
   return inst.enc == Enc::kSopk && inst.opcode == 0x16;
 }
@@ -2953,36 +2536,22 @@ void EmitBody(Translator& t, const Program& program, StageContext& sc) {
   }
 }
 
-// ---- vertex fetch -----------------------------------------------------------
-// Best-effort parse of a Gnm/AGC fetch sub-shader (RDNA2 encoding):
-// s_load_dwordx4 of a V# table + buffer_load_format into destination VGPRs, one
-// per attribute. PS5 NGG shaders often fetch inline instead; then no attributes
-// are recovered and the VS seeds from VertexIndex/InstanceIndex (procedural
-// path).
 struct FetchAttr {
   u32 semantic, num_comps, dest_vgpr, table_sgpr, dword_off;
-  u32 pc = ~0u;  // inline fetch MUBUF pc (~0 = standalone fetch sub-shader)
-  u32 inst_format = 0;  // typed (MTBUF) fetch format; 0 = take the V#'s
-  u32 inst_offset = 0;  // byte offset immediate: this attr's field offset
+  u32 pc = ~0u;
+  u32 inst_format = 0;
+  u32 inst_offset = 0;
 };
 
-// Scan an instruction stream for the s_load_dwordx4(V# table) +
-// buffer_load_format fetch pattern. Works on both a stand-alone fetch
-// sub-shader and the head of an NGG vertex program that fetches inline (PS5 AGC
-// frequently inlines the fetch), so buffer_load_format never reaches
-// RdnaEmitInst as an unsupported op.
 base::Vector<FetchAttr> ParseFetchInsts(const Program& insts) {
   base::Vector<FetchAttr> out;
-  u32 sem = 0;  // dense vertex-input location (per-vertex fetches only)
+  u32 sem = 0;
   const auto chained_loads = MapTableChainedLoads(insts);
   for (const Inst& in : insts) {
     if (in.enc == Enc::kSop1 && in.opcode == 0x20)
-      break;  // s_setpc_b64 (return)
+      break;
     if (in.enc == Enc::kSopp && in.opcode == 1)
-      break;  // s_endpgm
-    // buffer_load_format_* (untyped, format from the V#) and its typed twin
-    // tbuffer_load_format_* (MTBUF, format in the instruction). Skyrim's world
-    // geometry fetches positions with the typed form.
+      break;
     const bool typed = in.enc == Enc::kMtbuf;
     if ((in.enc != Enc::kMubuf && !typed) || in.opcode > 0x03)
       continue;
@@ -2992,10 +2561,6 @@ base::Vector<FetchAttr> ParseFetchInsts(const Program& insts) {
     const bool idxen = (in.raw[0] >> 13) & 1, offen = (in.raw[0] >> 12) & 1;
     const u32 inst_offset = in.raw[0] & 0xFFF;
     const u32 vaddr = in.raw[1] & 0xFF, soffset = (in.raw[1] >> 24) & 0xFF;
-    // If srsrc's V# was loaded via s_load from a user_data pointer, this fetch
-    // reads a TABLE of V#s at that pointer: table_sgpr = the s_load's sbase and
-    // this attribute is that s_load's 16-byte (4-dword) entry. Otherwise the V#
-    // is inline in user data at srsrc (table_sgpr = srsrc, dword_off = 0).
     const auto chain = chained_loads.find(in.pc);
     const bool chained = chain != chained_loads.end();
     const u32 table_sgpr = chained ? chain->second.first : srsrc;
@@ -3007,7 +2572,6 @@ base::Vector<FetchAttr> ParseFetchInsts(const Program& insts) {
                 "vaddr=v{} soffset=s{} ioff={} -> {} (table_sgpr=s{} doff={})",
                 nc, vdata, srsrc, idxen, offen, vaddr, soffset, inst_offset,
                 vtx ? "vertex-attr" : "storage-buffer", table_sgpr, dword_off);
-    // Other loads retain their addressing through the storage-buffer path.
     if (vtx) {
       out.push_back({sem, nc, vdata, table_sgpr, dword_off, in.pc,
                      typed ? ((in.raw[0] >> 19) & 0x7F) : 0u, inst_offset});
@@ -3031,9 +2595,6 @@ base::Vector<FetchAttr> ParseFetch(u64 fetch_addr) {
 
 }  // namespace
 
-// LDS for a graphics stage: Private (one array per invocation), because SPIR-V
-// forbids Workgroup storage outside compute-like stages. Zero initialised so a
-// read-before-write is reproducible.
 void PlanCrossLane(const Program& program,
                    Translator& t,
                    StageContext& sc,
@@ -3046,16 +2607,10 @@ void PlanCrossLane(const Program& program,
       (addtid || RdnaUsesDpp(program) ||
        gpu::gcn::UsesDsSwizzle(program, nullptr) || RdnaUsesLaneOps(program)))
     gpu::gcn::EnableDsSwizzle(t, sc, iface);
-  // A graphics stage had no lane at all: WaveLane() answered 0, so v_mbcnt
-  // handed every invocation lane zero and an NGG shader's per-lane LDS
-  // addresses all collapsed onto slot zero.
   if (sc.subgroup_local_id && !t.lane_id)
     t.lane_id = t.m.Load(t.t_u, sc.subgroup_local_id);
 }
 
-// Which sampler bindings use the requested DIM encodings. GCN left this to the
-// T# alone, so the shared emitter takes it out of band; gfx10 states it in the
-// instruction's DIM field, which is available here without a descriptor.
 u64 RdnaTexDimMask(const Program& program,
                    const gpu::gcn::MimgBindingPlan& plan,
                    u32 dimensions) {
@@ -3078,12 +2633,6 @@ void PlanGraphicsLds(const Program& program, Translator& t, StageContext& sc) {
   if (!lds_dwords)
     return;
   sc.lds_dwords = lds_dwords;
-  // An NGG vertex program stages its vertices through LDS and reads back slots
-  // its own lane never wrote, so Private storage (one array per invocation)
-  // hands it zeros. Back it with the shared buffer instead: one block per wave,
-  // the block picked by the wave's first vertex index, which is the same for
-  // every lane of the wave and different for the next one. Only the vertex
-  // stage can do this: a fragment shader has no vertex index to key on.
   if (sc.is_vs_shared_lds_capable) {
     sc.lds_storage = spv::StorageClass::StorageBuffer;
     t.EnsureLdsBuffer();
@@ -3091,18 +2640,12 @@ void PlanGraphicsLds(const Program& program, Translator& t, StageContext& sc) {
     const Id first = t.m.Emit(
         spv::Op::OpGroupNonUniformBroadcastFirst, t.t_u,
         {t.U32(static_cast<u32>(spv::Scope::Subgroup)), sc.vertex_index_value});
-    // Vertex indices run consecutively through a subgroup, so dividing by its
-    // width names the subgroup. kLdsWaves is a power of two, so the wrap is a
-    // mask.
     u32 shift = 0;
     while ((1u << shift) < gpu::gcn::HostSubgroupSize())
       shift++;
     const Id wave =
         t.And(t.Shr(first, t.U32(shift)), t.U32(gpu::gcn::kLdsWaves - 1));
     sc.lds_wave_base = t.Mul(wave, t.U32(lds_dwords));
-    // DELTA_GPU_LDSMARK: stamp the wave's block at entry, so a
-    // DELTA_GPU_LDSDUMP that comes back all zero says whether the scratch is
-    // reachable at all or the shader's own writes never ran.
     if (kLdsMark) {
       const Id p = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
       t.m.Store(
@@ -3137,16 +2680,11 @@ u64 FetchPlanHash(u64 fetch_addr) {
 
 namespace {
 
-// Address of the VS being translated, for shader-specific debug knobs.
 thread_local u64 g_vs_addr = 0;
 
-// ---- VS / PS drivers --------------------------------------------------------
 Id DeclareUserData(Translator& t) {
   const Id words = t.m.TypeArray(t.t_u, 16);
   t.m.Decorate(words, spv::Decoration::ArrayStride, {4});
-  // With the push budget for it, this stage's own code address {lo, hi}
-  // follows at 128 + 8 * slot, for s_getpc_b64 (the module is keyed by code
-  // content, so the address cannot live in it).
   const bool code_base = gpu::gcn::PushCodeBase();
   const Id block = code_base ? t.m.TypeStruct({words, t.t_u, t.t_u})
                              : t.m.TypeStruct({words});
@@ -3178,8 +2716,6 @@ void SeedUserData(Translator& t, Id user_data, u32 sgpr_base, u32 count) {
                                   t.user_data_slot * 32 + i)
                 : t.m.Load(t.t_u, t.m.AccessChain(p_u, user_data,
                                                   {t.U32(0), t.U32(i)})));
-  // Merged graphics entries also receive the descriptor-table root in s0:1.
-  // Keep runtime launch state consistent with ScalarEval's resource replay.
   if (sgpr_base == 8 && count >= 2) {
     t.SetSg(0, t.Sg(8));
     t.SetSg(1, t.Sg(9));
@@ -3200,13 +2736,7 @@ bool TranslateVs(const Program& program,
       user_sgprs >= 2
           ? (static_cast<u64>(vs_user_data[1] & 0xFFFF) << 32) | vs_user_data[0]
           : 0;
-  // Prefer a stand-alone fetch sub-shader; otherwise recover the fetch that the
-  // NGG vertex program does inline (buffer_load_format in its own body). Either
-  // way each attribute becomes a Location vertex input (RdnaEmitInst then
-  // treats the inline buffer_load_format as a no-op) and the renderer binds the
-  // real vertex buffers from r.attrs.
   base::Vector<FetchAttr> attrs = ParseFetch(fetch);
-  // Direct: an inline fetch runs as the buffer load it is.
   r.direct_vs = r.direct && attrs.empty();
   base::HashSet<u32> direct_vertex_fetch;
   if (r.direct_vs)
@@ -3218,12 +2748,6 @@ bool TranslateVs(const Program& program,
     for (const FetchAttr& a : attrs)
       BASE_LOGI("gcnspv", "vs attr loc={} nc={} vgpr={} pc={:#x}", a.semantic,
                 a.num_comps, a.dest_vgpr, a.pc);
-  // Real wave masks only where a shader reads one as a NUMBER: an NGG merged
-  // program gates its per-primitive body on `mask > lane` and derives its LDS
-  // slots from mbcnt over a ballot. Every v_cmp then costs a subgroup ballot,
-  // which halved Dead Cells' frame rate when it was on for shaders that only
-  // ever use a mask as this lane's predicate, and those are exactly the
-  // shaders with no LDS.
   t.wave_masks = kWaveMasks && gpu::gcn::GraphicsLdsDwords(program, nullptr);
   t.movrel_m0 = PlanMovrelIndices(program);
   t.InitTypes(&program);
@@ -3235,11 +2759,6 @@ bool TranslateVs(const Program& program,
   t.m.Decorate(pos_out, spv::Decoration::BuiltIn,
                {static_cast<u32>(spv::BuiltIn::Position)});
   iface.push_back(pos_out);
-  // A POINT_LIST pipeline needs the vertex stage to write PointSize (the
-  // validation layer rejects the module otherwise). The ISA carries point
-  // geometry in the POS1-3 export group we do not read yet. The hardware's
-  // default of 1.0 is what keeps the pipeline valid; a wrong size
-  // shows as differently sized dots, not as a fault.
   const Id point_out =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_f),
                    spv::StorageClass::Output);
@@ -3254,23 +2773,16 @@ bool TranslateVs(const Program& program,
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data, 8, user_sgprs);
   t.m.Store(point_out, t.F32(1.f));
-  // DELTA_GPU_POSUNSET: stamp a sentinel w, and at the tail draw an NDC quad
-  // wherever it survived. A target that paints under this says the shader
-  // never reached its position export at all, which no probe reading the
-  // exported value can tell apart from exporting zeros.
   if (kGpuPosunset)
     t.m.Store(pos_out,
               t.m.CompositeConstruct(t.t_v4, {t.F32(0.f), t.F32(0.f),
                                               t.F32(0.f), t.F32(-1234.f)}));
 
-  // NGG merged-wave prologue: the VS derives its EXEC/lane bookkeeping from
-  // merged_wave_info in s3 (verts-in-wave [7:0], prims [15:8]); model a
-  // 1-vert/1-prim wave so that math yields a live lane instead of zeros.
   t.SetSg(3, t.U32(kNggWaveInfo));
 
   base::HashMap<u32, StageContext::VfetchSeed> vfetch_seed;
   Id vertex_index = 0;
-  {  // Vertex/instance IDs are live inputs even when attributes are fetched.
+  {
     const Id p_in_u = t.m.TypePointer(spv::StorageClass::Input, t.t_u);
     vertex_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
     const Id instance_index = t.m.Variable(p_in_u, spv::StorageClass::Input);
@@ -3285,10 +2797,7 @@ bool TranslateVs(const Program& program,
     const Id instance = t.m.Load(t.t_u, instance_index);
     t.SetVg(1, instance);
     t.SetVg(3, instance);
-    // NGG's ES inputs start at v5; v0..v4 belong to the GS half.
-    // Both procedural passes and inline vertex fetches consume v5.
     t.SetVg(5, vertex);
-    // GFX10 merged ES/GS puts the ES instance ID in v8.
     t.SetVg(8, instance);
   }
 
@@ -3312,10 +2821,6 @@ bool TranslateVs(const Program& program,
             a.num_comps == 1 ? val : t.m.CompositeExtract(t.t_f, val, c);
         t.SetVgF(a.dest_vgpr + c, comp);
       }
-    // An inline fetch is a no-op in the body, but the merged-wave index math
-    // can clobber its destination VGPRs (e.g. v0) between here and the
-    // transform, so re-seed them at the fetch's pc where the real
-    // buffer_load_format would run.
     if (a.pc != ~0u)
       vfetch_seed[a.pc] = {in_var, a.dest_vgpr, a.num_comps};
     if (!first_attr_var) {
@@ -3334,16 +2839,10 @@ bool TranslateVs(const Program& program,
   sc.flat_attrs = &flat_attrs;
   sc.vfetch_seed = base::move(vfetch_seed);
   sc.skip_launch_movs = LaunchExecMovPcs(program);
-  // Shared LDS keys its per-wave block on the vertex index.
   if (gpu::gcn::GraphicsLdsDwords(program, nullptr)) {
     sc.is_vs_shared_lds_capable = true;
     sc.vertex_index_value = t.m.Load(t.t_u, vertex_index);
     r.shared_lds = true;
-    // A merged NGG program takes its packed ES vertex offsets in v0 and reads
-    // the launch header at LDS[v0]. Those offsets are LDS byte addresses, not
-    // a vertex index: seeding the index there sends the read off into the
-    // block and the primitive body then works from a junk record index. The
-    // one primitive a fullscreen pass draws lives at offset 0.
     t.SetVg(0, t.U32(0));
   }
   if (r.direct_vs) {
@@ -3352,12 +2851,10 @@ bool TranslateVs(const Program& program,
     sc.direct_vertex_fetch = base::move(direct_vertex_fetch);
     sc.direct_vertex_index = t.m.Load(t.t_u, vertex_index);
   } else {
-    if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind,
-                       sc.smem_cbuf_by_pc,
+    if (!RdnaPlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc,
                        r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
                                         : kMaxCbufBindings))
       return false;
-    // A fetch already lifted to a vertex input needs no buffer of its own.
     base::HashSet<u32> lifted;
     for (const FetchAttr& a : attrs)
       if (a.pc != ~0u)
@@ -3365,12 +2862,6 @@ bool TranslateVs(const Program& program,
     RdnaPlanGfxBuffers(program, 0, &lifted, r.vs_bufs, sc.gfx_buf_bind);
     NoteCbufWindows(r.vs_cbufs, sc);
   }
-  // A vertex program may sample too, and only the PS path used to plan its
-  // MIMG bindings, so every VS that read a texture reached the shared
-  // emitter with no plan, was reported "mimg.unplanned" and took its draws
-  // with it. The renderer expects the PS's textures first in the descriptor
-  // array (see the `declared` lambda in vk_texture_cache), so these start
-  // after them.
   const gpu::gcn::MimgBindingPlan vs_mimg_plan = RdnaPlanMimg(program);
   if (!vs_mimg_plan.binding_srsrc.empty()) {
     if (vs_mimg_plan.binding_srsrc.size() + tex_binding_base >
@@ -3390,23 +2881,16 @@ bool TranslateVs(const Program& program,
                            vs_mimg_plan.binding_storage[i],
                            ((sc.tex_3d_mask >> i) & 1u) != 0});
   }
-  // Cross-lane first: the LDS plan and every DS address the body emits are
-  // built from the lane id.
   PlanCrossLane(program, t, sc, iface);
   PlanGraphicsLds(program, t, sc);
   if (ShDbg())
     BASE_LOGI("gcnspv", "vs planned {} cbufs", r.vs_cbufs.size());
-  // DELTA_GPU_DBGPOS=<vs address>[:<dword offset>]: recompute this one shader's
-  // position export from its position input and a 4x4 transform in its cbuffer
-  // (address 0 = every shader; the offset picks which matrix in the window).
   static const u64 kDbgPosVs =
       kDbgPos ? std::strtoull(kDbgPos, nullptr, 0) : ~0ull;
   static const u32 kDbgPosOff = [] {
     const char* c = kDbgPos ? std::strchr(kDbgPos, ':') : nullptr;
     return c ? (u32)std::strtoul(c + 1, nullptr, 0) : 0u;
   }();
-  // ...:<world binding> applies a 4x3 world matrix from that binding first, so
-  // the probe can reproduce a world-then-view-projection chain.
   static const int kDbgPosWorld = [] {
     const char* c = kDbgPos ? std::strchr(kDbgPos, ':') : nullptr;
     const char* c2 = c ? std::strchr(c + 1, ':') : nullptr;
@@ -3425,9 +2909,6 @@ bool TranslateVs(const Program& program,
   EmitBody(t, program, sc);
   r.num_params = sc.max_param;
 
-  // DELTA_GPU_LDSMARK on a shared-LDS stage: stamp the position this shader
-  // exported into the scratch's trace area, where DELTA_GPU_LDSDUMP can read
-  // it. A degenerate export is otherwise only visible as "the target is black".
   if (kLdsMark && t.lds_buf_var) {
     const Id p = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
     const Id pos = t.m.Load(t.t_v4, pos_out);
@@ -3457,16 +2938,7 @@ bool TranslateVs(const Program& program,
     t.m.Store(pos_out, t.m.CompositeConstruct(t.t_v4, comps));
   }
 
-  // DELTA_GPU_FORCEQUAD: ignore the VS's computed position and emit a
-  // full-screen quad straight from gl_VertexIndex (0..3 -> the four NDC
-  // corners). If this renders (with the PS forced white) the raster/PS pipeline
-  // is sound and the real position math is the culprit (e.g. an unbound MVP ->
-  // degenerate); if it still draws nothing the problem is downstream
-  // (index/vertex_count/render target).
   if (kGpuForcequad) {
-    // A fetch-path VS never created a VertexIndex input, and its v0 is
-    // clobbered by the vertex fetch. Bind a real VertexIndex here so the quad
-    // is valid either way.
     Id vidx_var = vertex_index;
     if (!vidx_var) {
       vidx_var = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_u),
@@ -3484,10 +2956,6 @@ bool TranslateVs(const Program& program,
               t.m.CompositeConstruct(t.t_v4, {fx, fy, t.F32(0.f), t.F32(1.f)}));
   }
 
-  // DELTA_GPU_RAWPOS=<scale>: bypass the shader's transform and emit the raw
-  // location-0 vertex input scaled into NDC. Separates "the vertex inputs never
-  // reach the shader" from "the transform math is wrong": FORCEQUAD proves the
-  // raster path but uses no vertex data at all, this uses the real attribute.
   if (kRawPos != 0.f && first_attr_var && first_attr_comps >= 2) {
     const Id comp_ty = first_attr_comps == 2   ? t.t_v2
                        : first_attr_comps == 3 ? t.t_v3
@@ -3501,10 +2969,6 @@ bool TranslateVs(const Program& program,
                    t.F32(0.f), t.F32(1.f)}));
   }
 
-  // DELTA_GPU_POSPROBE: squash the shader's own clip position into the viewport
-  // (x/(1+|x|) after the perspective divide). Any FINITE position then covers
-  // pixels, so a still-black target means w is zero/NaN rather than the
-  // geometry merely landing off-screen.
   if (kGpuPosprobe) {
     const Id p_out_f0 = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
     const Id px =
@@ -3524,12 +2988,6 @@ bool TranslateVs(const Program& program,
                   t.t_v4, {squash(px), squash(py), t.F32(0.f), t.F32(1.f)}));
   }
 
-  // Clip-space convention, from PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF. In DX mode
-  // the shader already exports z in [0,w], exactly what Vulkan wants; remapping
-  // it there squeezes depth into the far half AND lets geometry behind the near
-  // plane survive clipping (Skyrim drew its world from inside itself). In GL
-  // mode z spans [-w,w] and has to be remapped or everything is clipped away
-  // (Isaac renders nothing without it).
   if (gl_clip_space) {
     const Id p_out_f = t.m.TypePointer(spv::StorageClass::Output, t.t_f);
     const Id z_ptr = t.m.AccessChain(p_out_f, pos_out, {t.U32(2)});
@@ -3560,8 +3018,6 @@ bool TranslateMesh(Program es_program,
       cfg.max_vertices > cfg.threads || cfg.max_primitives > cfg.threads ||
       !cfg.lds_dwords || (cfg.threads % 64) != 0)
     return false;
-  // The ES entry transfers to the separately bound GS entry through s[6:7].
-  // Each half gets its own descriptor plan and original instruction PCs.
   if (cfg.separate_es) {
     const auto transfer_at = base::FindIf(
         es_program.begin(), es_program.end(), [](const Inst& inst) {
@@ -3569,8 +3025,6 @@ bool TranslateMesh(Program es_program,
         });
     if (transfer_at == es_program.end())
       return false;
-    // Generic indirect-branch reachability conservatively includes the shader
-    // footer. Here s6 names the separately bound GS, so it ends the ES body.
     es_program.erase(transfer_at + 1, es_program.end());
     Inst& transfer = es_program.back();
     transfer.enc = Enc::kSopp;
@@ -3624,8 +3078,6 @@ bool TranslateMesh(Program es_program,
       t.m.TypePointer(spv::StorageClass::Workgroup, t.m.TypeArray(t.t_u, 2)),
       spv::StorageClass::Workgroup);
   const Id count_ptr = t.m.TypePointer(spv::StorageClass::Workgroup, t.t_u);
-  // Direct unless a half addresses memory from its own code (s_getpc): this
-  // module has no per-draw code address to give it.
   const auto uses_pc = [](const Program& p) {
     return base::AnyOf(p.begin(), p.end(), [](const Inst& inst) {
       return inst.enc == Enc::kSop1 && inst.opcode == 0x1f;
@@ -3725,7 +3177,7 @@ bool TranslateMesh(Program es_program,
     }
     const auto image_plan = RdnaPlanMimg(program);
     if (!half && !image_plan.binding_srsrc.empty())
-      return false;  // split ES fetches are buffer operations
+      return false;
     if (image_plan.binding_srsrc.size() + tex_binding_base >
         StageContext::kMaxPsSamplers)
       return false;
@@ -3857,11 +3309,6 @@ bool TranslatePs(const Program& program,
   sc.r = &r;
   sc.iface = &iface;
   sc.flat_attrs = &flat_attrs;
-  // A PS names an input SLOT; SPI_PS_INPUT_CNTL_<slot>.OFFSET names which of
-  // the VS's parameter exports that slot reads, and it is not the identity.
-  // Dead Cells' light shaders map slot 3 onto param 4, so reading param 3
-  // handed them the raw light-space position where the falloff coordinate
-  // belongs and every light came out flat.
   sc.ps_in_cntl = ps_in_cntl;
   sc.ps_num_interp = ps_num_interp;
   sc.vs_exported_params = vs_exported_params;
@@ -3878,8 +3325,8 @@ bool TranslatePs(const Program& program,
   if (r.direct) {
     PlanDirect(program, sc);
   } else {
-    if (!RdnaPlanCbufs(program, static_cast<u32>(r.vs_cbufs.size()),
-                       r.ps_cbufs, sc.cbuf_bind, sc.smem_cbuf_by_pc,
+    if (!RdnaPlanCbufs(program, static_cast<u32>(r.vs_cbufs.size()), r.ps_cbufs,
+                       sc.cbuf_bind, sc.smem_cbuf_by_pc,
                        r.indirect_cbufs ? gpu::gcn::kIndirectCbufBindings
                                         : kMaxCbufBindings))
       return false;
@@ -3895,7 +3342,7 @@ bool TranslatePs(const Program& program,
                 mimg_plan.binding_srsrc.size());
     return false;
   }
-  sc.mimg_plan = &mimg_plan;  // borrowed by EmitBody
+  sc.mimg_plan = &mimg_plan;
   sc.tex_3d_mask = RdnaTexDimMask(program, mimg_plan, 1u << 2);
   sc.tex_1d_mask = RdnaTexDimMask(program, mimg_plan, (1u << 0) | (1u << 4));
   for (u32 i = 0; i < mimg_plan.binding_srsrc.size(); i++)
@@ -3926,35 +3373,18 @@ bool TranslatePs(const Program& program,
     sc.color_written_var = t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
                                         t.m.ConstNull(t.t_u));
   }
-  // DELTA_GPU_FORCECOLOR + DELTA_GPU_NOKILL: paint every rasterized fragment
-  // green at entry, before any exec-mask discard can suppress the export. This
-  // separates "draw produced no fragments" from "all fragments were discarded"
-  // (FORCECOLOR alone only recolors fragments that reach the export).
   if (kGpuForcecolor && kGpuNokill)
     t.m.Store(gpu::gcn::PsColorOut(t, sc, 0),
               t.m.ConstComposite(
                   t.t_v4, {t.F32(0.f), t.F32(1.f), t.F32(0.f), t.F32(1.f)}));
-  // DELTA_GPU_NULL_PS=<addr>: run that pixel shader's body as nothing, so a
-  // draw's cost can be split between its pixels and its geometry.
   if (!kNullPs || g_ps_addr != kNullPs)
     EmitBody(t, program, sc);
 
-  // The straight-line alpha kill: v_cmpx_* compares and clears EXEC, and the
-  // export then applies to no lane. Nothing consulted EXEC, so those fragments
-  // were written anyway: Skyrim's menu quads painted their transparent area
-  // over the whole screen. Gate the fragment on EXEC only for shaders that
-  // actually contain a cmpx: our EXEC model is one bit, not a lane mask, and
-  // applying it everywhere discards everything in a shader that merely moves
-  // EXEC around (Isaac's frame goes black). DELTA_GPU_NOKILL disables it.
   bool kills_lanes = false;
   for (const Inst& in : program) {
-    // v_cmpx_* compares and writes EXEC.
     if ((in.enc == Enc::kVopc && (in.opcode & 0x10)) ||
         (in.enc == Enc::kVop3 && in.opcode <= 0xFF && (in.opcode & 0x10)))
       kills_lanes = true;
-    // A scalar EXEC write is NOT a usable signal: every shader with control
-    // flow moves EXEC around, and our model is a single bit, so gating on it
-    // discards Isaac's entire frame. Only the explicit compare-and-kill counts.
   }
   if (sc.wrote_color && kills_lanes && !kGpuNokill) {
     const Id live = t.LaneActive(t.Exec());
@@ -3966,8 +3396,6 @@ bool TranslatePs(const Program& program,
     t.m.OpenBlock(after_kill);
   }
 
-  // Depth-only and buffer-store programs do not export a color. Leave their
-  // MRT mask empty so the backend preserves the loaded color attachments.
   if (sc.color_written_var) {
     if (!kGpuNokill) {
       const Id wrote = t.IsNonZero(t.m.Load(t.t_u, sc.color_written_var));
@@ -3980,9 +3408,6 @@ bool TranslatePs(const Program& program,
     }
   }
 
-  // DELTA_GPU_PSUV: replace MRT0 with the interpolated location-0 varying, to
-  // see the coordinate field a pass actually receives (a pure horizontal ramp
-  // means the vertical component never made it across the VS->PS link).
   if (kGpuPsuv) {
     const Id in0 = gpu::gcn::PsInputVar(t, sc, kGpuPsuvAttr);
     const Id p_in_f = t.m.TypePointer(spv::StorageClass::Input, t.t_f);
@@ -4010,8 +3435,6 @@ bool TranslateDepthOnlyPs(Translator& t) {
 
 }  // namespace
 
-// Shared with the compute stage (rdna_compute.cc), which lowers the same
-// branches through the same per-instruction dispatch.
 bool HasNggTransfer(const u32* code) {
   if (!code || !gpu::IsReadableRangeCached(reinterpret_cast<u64>(code), 1024))
     return false;
@@ -4044,7 +3467,7 @@ u32 LdsAccess(const Inst& inst) {
     return 0;
   const u32 op = inst.opcode;
   if (op == 0x35 || op == 0xb2 || op == 0xb3 || (op >= 0x3d && op <= 0x3f))
-    return 0;  // swizzle, permutes, GDS counters
+    return 0;
   const bool read = (op >= 0x36 && op <= 0x3c) || (op >= 0x76 && op <= 0x78) ||
                     op == 0xfe || op == 0xff || (op >= 0xa1 && op <= 0xa6);
   const bool atomic_rtn =
@@ -4052,16 +3475,7 @@ u32 LdsAccess(const Inst& inst) {
   return atomic_rtn ? 3 : read ? 1 : 2;
 }
 
-// Structured lowering. The guest compiler's control flow is structured
-// already (ifs that join at their immediate post-dominator, loops with one
-// header and one exit), so most programs map onto SPIR-V selections and loops
-// directly. That leaves the driver real control flow to allocate registers
-// across, where the state machine below made every register live around one
-// loop and every branch a store and a switch. Anything that does not fit
-// (calls, irreducible loops, a loop with two exits) keeps the state machine.
-// DELTA_GPU_STRUCTURED_CFG=0 always uses the state machine.
 DELTA_OPTION(bool, kStructuredCfg, "DELTA_GPU_STRUCTURED_CFG", true);
-// DELTA_GPU_CFGTRACE=1: each lowering's outcome, and why a fallback fell back.
 DELTA_OPTION(bool, kCfgTrace, "DELTA_GPU_CFGTRACE", false);
 
 namespace {
@@ -4075,9 +3489,6 @@ class Structurizer {
   bool Run() {
     if (!Build() || !Analyze())
       return false;
-    // Validate and size the emission before writing any of it: a shape that
-    // cannot be expressed, or one that duplicates too many blocks, has to
-    // fall back with the module untouched.
     dry_ = true;
     emitted_ = 0;
     ok_ = true;
@@ -4156,17 +3567,15 @@ class Structurizer {
     return b;
   }
 
-  // Dominators and post-dominators (Cooper/Harvey/Kennedy), natural loops.
   bool Analyze() {
-    const u32 nodes = n_ + 1;  // n_ is the exit
-    base::Vector<base::Vector<u32>> pred(nodes);
+    const u32 nodes = n_ + 1;
+    base::Vector<base::Vector<u32> > pred(nodes);
     for (u32 b = 0; b < n_; b++)
       for (u32 s : succ_[b])
         pred[s].push_back(b);
-    // Reverse postorder from the entry.
     base::Vector<u32> order;
     base::Vector<u8> seen(nodes, 0);
-    base::Vector<base::Pair<u32, u32>> stack{{0u, 0u}};
+    base::Vector<base::Pair<u32, u32> > stack{{0u, 0u}};
     seen[0] = 1;
     while (!stack.empty()) {
       auto& [b, i] = stack.back();
@@ -4190,7 +3599,6 @@ class Structurizer {
     for (u32 i = 0; i < rpo.size(); i++)
       index[rpo[i]] = i;
     idom_ = Dominators(rpo, index, pred, 0);
-    // Post-dominators: the same over the reversed graph from the exit.
     base::Vector<u32> rorder;
     base::Vector<u8> rseen(nodes, 0);
     stack = {{n_, 0u}};
@@ -4215,13 +3623,13 @@ class Structurizer {
     base::Vector<u32> pindex(nodes, ~0u);
     for (u32 i = 0; i < prpo.size(); i++)
       pindex[prpo[i]] = i;
-    base::Vector<base::Vector<u32>> rsucc(nodes);  // preds in the reversed graph
+    base::Vector<base::Vector<u32> > rsucc(nodes);
     for (u32 b = 0; b < n_; b++)
       if (reachable_[b])
         for (u32 s : succ_[b])
           rsucc[b].push_back(s);
     ipdom_ = Dominators(prpo, pindex, rsucc, n_);
-    // Loops: every retreating edge must be a back edge to a dominating header.
+    // Every retreating edge must be a back edge to a dominating header.
     header_of_.assign(nodes, ~0u);
     exit_of_.assign(nodes, ~0u);
     in_loop_.assign(nodes, {});
@@ -4233,7 +3641,6 @@ class Structurizer {
           continue;
         if (!Dominates(s, b))
           return Fail("irreducible");
-        // Natural loop of the back edge b -> s.
         if (in_loop_[s].empty())
           in_loop_[s].assign(nodes, 0);
         base::Vector<u32> work{b};
@@ -4274,7 +3681,7 @@ class Structurizer {
 
   base::Vector<u32> Dominators(const base::Vector<u32>& rpo,
                                const base::Vector<u32>& index,
-                               const base::Vector<base::Vector<u32>>& pred,
+                               const base::Vector<base::Vector<u32> >& pred,
                                u32 root) {
     base::Vector<u32> dom(index.size(), ~0u);
     dom[root] = root;
@@ -4319,12 +3726,10 @@ class Structurizer {
   }
 
   bool InLoop(const Loop& loop, u32 b) const {
-    return loop.header == ~0u || (b < in_loop_[loop.header].size() &&
-                                  in_loop_[loop.header][b]);
+    return loop.header == ~0u ||
+           (b < in_loop_[loop.header].size() && in_loop_[loop.header][b]);
   }
 
-  // Emit from block b until `stop`. True: the open block falls into `stop`.
-  // False: every path left through a loop's continue or break.
   bool Emit(u32 b, u32 stop, const Loop& loop) {
     for (u32 guard = 0; ok_ && b != stop; guard++) {
       if (guard > 4 * n_ + 16) {
@@ -4336,7 +3741,6 @@ class Structurizer {
       if (loop.header != ~0u && b == loop.exit)
         return Leave(loop.brk);
       if (b == n_) {
-        // Only reachable outside every loop, where the exit is `stop`.
         ok_ = false;
         return false;
       }
@@ -4387,17 +3791,14 @@ class Structurizer {
     if (next != ~0u && ok_)
       Emit(next, ~0u, loop);
     if (!dry_) {
-      // The runaway guard, as in the state machine: a mistranslated loop
-      // renders wrong instead of hanging the device.
       t_.m.OpenBlock(loop.cont);
       if (iter_var_) {
         const Id it = t_.m.Load(t_.t_u, iter_var_);
-        t_.m.Store(iter_var_, t_.m.Emit(spv::Op::OpIAdd, t_.t_u,
-                                        {it, t_.U32(1)}));
-        t_.m.BranchConditional(
-            t_.m.Emit(spv::Op::OpUGreaterThan, t_.t_bool,
-                      {it, t_.U32(kCfgMaxIter)}),
-            loop.brk, header);
+        t_.m.Store(iter_var_,
+                   t_.m.Emit(spv::Op::OpIAdd, t_.t_u, {it, t_.U32(1)}));
+        t_.m.BranchConditional(t_.m.Emit(spv::Op::OpUGreaterThan, t_.t_bool,
+                                         {it, t_.U32(kCfgMaxIter)}),
+                               loop.brk, header);
       } else {
         t_.m.Branch(header);
       }
@@ -4406,13 +3807,9 @@ class Structurizer {
     return exit;
   }
 
-  // One block's instructions and its terminator. Returns the block to go on
-  // with, or ~0u when control left through a loop branch.
   u32 EmitBlock(u32 b, u32 stop, const Loop& loop) {
     const u32 end = term_[b] != ~0u ? term_[b] : last_[b];
     emitted_ += end - first_[b] + 1;
-    // What the LDS saw since the last barrier: 1 = a read, 2 = a write. A
-    // block can be entered after either.
     u32 lds_seen = 3;
     if (!dry_)
       for (u32 i = first_[b]; i < end; i++) {
@@ -4433,8 +3830,6 @@ class Structurizer {
     if (succ_[b].size() == 1)
       return succ_[b][0];
     const u32 target = succ_[b][0], fall = succ_[b][1];
-    // Join at the immediate post-dominator when it lies in this construct;
-    // otherwise both arms end in loop branches and the merge is unreachable.
     u32 merge = ipdom_[b];
     const bool joins = merge != ~0u && InLoop(loop, merge) &&
                        merge != loop.header &&
@@ -4475,10 +3870,10 @@ class Structurizer {
   u32 max_pc_ = 0, n_ = 0;
   base::Vector<u32> starts_, term_, first_, last_;
   base::Vector<int> kind_;
-  base::Vector<base::Vector<u32>> succ_;
+  base::Vector<base::Vector<u32> > succ_;
   base::Vector<u8> reachable_;
   base::Vector<u32> idom_, ipdom_, header_of_, exit_of_;
-  base::Vector<base::Vector<u8>> in_loop_;
+  base::Vector<base::Vector<u8> > in_loop_;
   bool dry_ = true, ok_ = true;
   const char* why_ = nullptr;
   u64 emitted_ = 0;
@@ -4491,9 +3886,6 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
       program.empty() ? 0 : program.back().pc + program.back().size;
   base::Vector<u32> starts = BlockStarts(program, max_pc);
   const bool scheduled = sc.is_mesh || sc.wave_lockstep;
-  // A workgroup that is one guest wave takes every branch together (SCC, VCC
-  // and EXEC are the wave's), so it needs no scheduler and its barriers sit
-  // in uniform control flow.
   const bool one_wave = scheduled && t.xchg_lanes && t.xchg_lanes <= 64;
   if ((!scheduled || one_wave) && kStructuredCfg) {
     t.uniform_here = one_wave || (sc.is_cs && starts.size() == 1);
@@ -4502,7 +3894,10 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
     const bool done = structurizer.Run();
     if (kCfgTrace)
       BASE_LOGI("cfgtrace", "{} insts={} lanes={} -> {}{}",
-                sc.is_mesh ? "mesh" : sc.is_cs ? "cs" : sc.is_ps ? "ps" : "vs",
+                sc.is_mesh ? "mesh"
+                : sc.is_cs ? "cs"
+                : sc.is_ps ? "ps"
+                           : "vs",
                 program.size(), t.xchg_lanes,
                 done ? "structured" : "state machine: ",
                 done ? "" : (structurizer.why() ? structurizer.why() : "?"));
@@ -4510,12 +3905,13 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
       return;
   } else if (kCfgTrace) {
     BASE_LOGI("cfgtrace", "{} insts={} lanes={} -> state machine: scheduled",
-              sc.is_mesh ? "mesh" : sc.is_cs ? "cs" : sc.is_ps ? "ps" : "vs",
+              sc.is_mesh ? "mesh"
+              : sc.is_cs ? "cs"
+              : sc.is_ps ? "ps"
+                         : "vs",
               program.size(), t.xchg_lanes);
   }
   if (scheduled) {
-    // A guest barrier is a rendezvous PC. Keep it separate from adjacent
-    // instructions so an early wave can wait while its peers keep running.
     for (const Inst& inst : program) {
       if (inst.enc != Enc::kSopp || inst.opcode != 0x0a)
         continue;
@@ -4528,9 +3924,6 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   }
   const u32 num_blocks = static_cast<u32>(starts.size());
   const u32 kExit = num_blocks;
-  // A single block executes once for every invocation. In the general
-  // dispatch loop, different invocations can visit blocks on different
-  // iterations, so a workgroup barrier inside a case would be unsafe.
   t.uniform_here = scheduled || (sc.is_cs && num_blocks == 1);
   const auto block_of = [&](u32 pc) -> u32 {
     if (pc >= max_pc)
@@ -4552,19 +3945,11 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   for (Id& l : case_labels)
     l = t.m.NewBlock();
 
-  // Runaway guard: one mistranslated branch condition or target leaves the
-  // state machine spinning, and a spinning invocation takes the whole VkDevice
-  // down, on NVIDIA as Xid 109 CTX SWITCH TIMEOUT, reported to us as
-  // VK_ERROR_DEVICE_LOST from whatever submit happened to be waiting. Cap
-  // block-steps per invocation so a bad shader renders wrong instead of
-  // killing the device. DELTA_GPU_CFG_MAXITER=0 disables it.
   const Id iter_var = kCfgMaxIter
                           ? t.m.Variable(t.p_priv_u, spv::StorageClass::Private,
                                          t.m.ConstNull(t.t_u))
                           : 0;
 
-  // DELTA_GPU_LOOPTRACE: name the programs that can loop at all. A shader with
-  // no backward branch cannot be the one spinning, which is most of them.
   if (kLoopTrace) {
     u32 back_edges = 0;
     for (const Inst& inst : program) {
@@ -4590,10 +3975,6 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
   t.m.OpenBlock(dispatch);
   Id state = t.State();
   if (scheduled) {
-    // All invocations execute the selected block, with guest state updates
-    // predicated by their wave's PC. This keeps cross-lane exchanges uniform
-    // even when guest waves take different branches or finish at different
-    // times. A barrier can run only when every wave has reached it.
     t.WavePublish(state);
     t.Barrier();
     const Id leader = t.m.NewBlock(), selected = t.m.NewBlock();
@@ -4646,8 +4027,6 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
     const u32 blk_start = starts[bi];
     const u32 blk_end = (bi + 1 < num_blocks) ? starts[bi + 1] : max_pc;
     bool terminated = false;
-    // What the LDS saw since the last barrier: 1 = a read, 2 = a write. A
-    // block can be entered after either.
     u32 lds_seen = num_blocks > 1 ? 3 : 0;
     for (const Inst& inst : program) {
       if (inst.pc < blk_start || inst.pc >= blk_end)
@@ -4740,16 +4119,12 @@ Recompiled Recompile(const u32* vs_code,
   const Program ps_program =
       ps_code ? ReachableProgram(DecodeShader(ps_code, 4096)) : Program{};
 
-  // V_INTERP_MOV P0 reads a per-primitive (flat) parameter; represent those
-  // locations as flat varyings in both stages.
   base::HashSet<u32> flat_attrs;
   for (const Inst& inst : ps_program)
     if (inst.enc == Enc::kVintrp && inst.opcode == 2 &&
         (inst.raw[0] & 0xFF) == 2)
       flat_attrs.insert((inst.raw[0] >> 10) & 0x3F);
 
-  // The parameter cache packs the VS's exports densely in export order, and
-  // SPI_PS_INPUT_CNTL.OFFSET indexes THAT, not the param number.
   base::Vector<u32> vs_exported_params;
   for (const Inst& inst : ngg ? gs_program : vs_program)
     if (inst.enc == Enc::kExp) {
@@ -4769,14 +4144,9 @@ Recompiled Recompile(const u32* vs_code,
   tv.indirect_cbufs = r.indirect_cbufs;
   gpu::gcn::ResetUnsupported();
   g_vs_addr = reinterpret_cast<uintptr_t>(vs_code);
-  // The merged NGG stage is launched with its user data at s8 (kUdBase in the
-  // command processor, and what SeedUserData assumes here); a PS gets it at s0.
   g_stage_bufs = ResolveBuffers(vs_code, vs_user_data, vs_user_sgprs, 8, 4096,
                                 ngg ? ngg->gs_user_data_addr : 0);
   g_warned_store = false;
-  // The PS's textures occupy the first descriptor slots, so the VS has to know
-  // how many there are before it plans its own. Planning is a pure walk of the
-  // program, so it can be done ahead of translating either stage.
   const u32 ps_tex_count =
       ps_code ? static_cast<u32>(RdnaPlanMimg(ps_program).binding_srsrc.size())
               : 0;
@@ -4818,8 +4188,6 @@ Recompiled Recompile(const u32* vs_code,
 
   const base::Vector<u32> vs = tv.m.Assemble();
   const base::Vector<u32> ps = tp.m.Assemble();
-  // gfx10.3 RECTLIST draws reach us as three corners of a rectangle; Vulkan has
-  // no such topology, so carry the same expansion stage the GFX7 path uses.
   const base::Vector<u32> gs =
       gpu::gcn::EmitRectListGeometry(r.num_params, flat_attrs);
   base::String err;
@@ -4833,8 +4201,6 @@ Recompiled Recompile(const u32* vs_code,
       BASE_LOGI("rdna", "PS invalid: {}", err.c_str());
     return r;
   }
-  // DELTA_GPU_SPVDUMP=<dir>: write each recompiled stage's SPIR-V so it can be
-  // read with spirv-dis (the only way to see what the position math became).
   if (const char* dir = kSpvDump) {
     char path[512];
     std::snprintf(path, sizeof(path), "%s/vs_%lx.spv", dir,
@@ -4850,9 +4216,6 @@ Recompiled Recompile(const u32* vs_code,
       std::fclose(f);
     }
   }
-  // SPIRV-Tools' def-use rewrite takes minutes on some large Skyrim modules.
-  // These binaries were validated above, so submit them without
-  // post-processing.
   if (ngg)
     r.mesh_spirv = vs;
   else
@@ -4869,4 +4232,4 @@ Recompiled Recompile(const u32* vs_code,
 
 }  // namespace gpu::rdna
 
-#endif  // DELTA_HAVE_SPIRV_BACKEND
+#endif

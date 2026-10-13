@@ -21,11 +21,10 @@ namespace gpu::render::timeline {
 #if defined(DELTA_TRACY)
 namespace {
 constexpr u8 kContext = 0;
-constexpr u8 kTypeVulkan = 2;  // tracy::GpuContextType::Vulkan
+constexpr u8 kTypeVulkan = 2;
 bool g_active = false;
 u16 g_next_query = 0;
 
-// A GPU timestamp taken now, to pair with the CPU clock for the new context.
 bool GpuNow(u64* ticks) {
   static rhi::CommandList* list = nullptr;
   static rhi::TimestampPool* pool = nullptr;
@@ -78,9 +77,6 @@ bool Active() {
 }
 
 u16 Begin(const char* name) {
-  // One lasting source location per name: there are only as many as the
-  // title has targets and shaders, and a fresh one per zone makes the viewer
-  // resolve each of them.
   static base::HashMap<base::String, ___tracy_source_location_data*> where;
   auto it = where.find(base::String(name));
   if (it == where.end()) {

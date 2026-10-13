@@ -9,9 +9,9 @@ namespace {
 
 TEST(GcnDecode, SmrdSoffsetLiteralConsumesTrailingDword) {
   const u32 code[] = {
-      0xc0c216ff,  // s_load_dwordx8 s[4:11], s[22:23], 0x1c14
+      0xc0c216ff,
       0x00001c14,
-      0xbf810000,  // s_endpgm
+      0xbf810000,
   };
 
   const gpu::gcn::Program program = gpu::gcn::Decode(code, 3);
@@ -28,8 +28,8 @@ TEST(GcnDecode, SmrdSoffsetLiteralConsumesTrailingDword) {
 
 TEST(GcnDecode, SmrdImmediateOffsetDoesNotConsumeTrailingDword) {
   const u32 code[] = {
-      0xc0c217ff,  // s_load_dwordx8 s[4:11], s[22:23], 0xff
-      0xbf810000,  // s_endpgm
+      0xc0c217ff,
+      0xbf810000,
   };
 
   const gpu::gcn::Program program = gpu::gcn::Decode(code, 2);
@@ -40,13 +40,9 @@ TEST(GcnDecode, SmrdImmediateOffsetDoesNotConsumeTrailingDword) {
   EXPECT_EQ(program[1].pc, 1u);
 }
 
-// All three SMRD offset forms, in the units the hardware uses. Reading the
-// literal as bytes put every descriptor a title loads with a wide offset a
-// quarter of the way into its table, so the T# resolved out of neighbouring
-// constant data (Shadow of the Colossus' menu textures).
 TEST(GcnDecode, SmrdOffsetFormsUseTheirOwnUnits) {
   const u32 literal_form[] = {
-      0xc0c216ff,  // s_load_dwordx8 s[4:11], s[22:23], 0x1c14
+      0xc0c216ff,
       0x00001c14,
   };
   const gpu::gcn::SmrdOffset wide =
@@ -54,13 +50,13 @@ TEST(GcnDecode, SmrdOffsetFormsUseTheirOwnUnits) {
   EXPECT_FALSE(wide.in_sgpr);
   EXPECT_EQ(wide.dwords, 0x1c14u);
 
-  const u32 imm_form[] = {0xc0c217ff};  // ..., 0xff (dword offset)
+  const u32 imm_form[] = {0xc0c217ff};
   const gpu::gcn::SmrdOffset imm =
       gpu::gcn::DecodeSmrdOffset(gpu::gcn::Decode(imm_form, 1, false)[0]);
   EXPECT_FALSE(imm.in_sgpr);
   EXPECT_EQ(imm.dwords, 0xffu);
 
-  const u32 sgpr_form[] = {0xc0c21610};  // ..., s16 (byte offset)
+  const u32 sgpr_form[] = {0xc0c21610};
   const gpu::gcn::SmrdOffset reg =
       gpu::gcn::DecodeSmrdOffset(gpu::gcn::Decode(sgpr_form, 1, false)[0]);
   EXPECT_TRUE(reg.in_sgpr);
@@ -85,7 +81,7 @@ TEST(GcnDecode, SopkSetregImmediateConsumesTrailingDword) {
 }
 
 TEST(GcnDecode, NeoVop3UsesSplitTenthOpcodeBit) {
-  constexpr u32 kOp = 0x36d;  // v_add3_u32
+  constexpr u32 kOp = 0x36d;
   const u32 code[] = {
       (0x34u << 26) | ((kOp & 0x1ff) << 17) | ((kOp >> 9) << 16),
       0,
@@ -104,7 +100,7 @@ TEST(GcnDecode, NeoVop3UsesSplitTenthOpcodeBit) {
 }
 
 TEST(GcnDecode, NeoVop3pIsASeparateEncoding) {
-  constexpr u32 kOp = 0x20;  // v_mad_mix_f32
+  constexpr u32 kOp = 0x20;
   const u32 code[] = {(0x33u << 26) | (kOp << 16), 0};
 
   const gpu::gcn::Program program =
@@ -179,9 +175,9 @@ TEST(GcnDecode, TruncatedMultiwordFormsBecomeUnknown) {
 
 TEST(GcnDecode, NeoSdwaAndDppConsumeControlDwords) {
   const u32 code[] = {
-      (0x3fu << 25) | (1u << 9) | 249u,  // v_mov_b32 v0, sdwa
+      (0x3fu << 25) | (1u << 9) | 249u,
       0x01234567,
-      3u << 25 | 250u,  // v_add_f32 v0, dpp, v0
+      3u << 25 | 250u,
       0x89abcdef,
       0xbf810000,
   };
@@ -212,7 +208,7 @@ TEST(GcnDecode, NeoMtbufReadsFourthOpcodeBitFromSecondWord) {
 
 TEST(GcnDecode, FlatIsASeaIslands64BitEncoding) {
   const u32 code[] = {
-      (0x37u << 26) | (0x0cu << 18),  // flat_load_dword
+      (0x37u << 26) | (0x0cu << 18),
       2u << 24,
       0xbf810000,
   };
@@ -228,15 +224,10 @@ TEST(GcnDecode, FlatIsASeaIslands64BitEncoding) {
 
 TEST(GcnDecode, ReachabilityIncludesDebugBranchTargetAndFallthrough) {
   const u32 code[] = {
-      0xbf970002,  // s_cbranch_cdbgsys pc+3
-      0xbe800380,  // fallthrough
-      0xbf810000,
-      0xbe810380,  // target
-      0xbf810000,
+      0xbf970002, 0xbe800380, 0xbf810000, 0xbe810380, 0xbf810000,
   };
 
-  const gpu::gcn::Program program =
-      gpu::gcn::Decode(code, 5, /*stop_at_endpgm=*/false);
+  const gpu::gcn::Program program = gpu::gcn::Decode(code, 5, false);
   const base::Vector<u8> reachable = gpu::gcn::ComputeReachability(program);
 
   ASSERT_EQ(reachable.size(), 5u);
@@ -249,14 +240,13 @@ TEST(GcnDecode, ReachabilityIncludesDebugBranchTargetAndFallthrough) {
 
 TEST(GcnDecode, IndirectControlFlowDoesNotMarkPotentialTargetsDead) {
   const u32 code[] = {
-      0xbe802002,  // s_setpc_b64 s[2:3]
+      0xbe802002,
       0xbf810000,
       0xbe800380,
       0xbf810000,
   };
 
-  const gpu::gcn::Program program =
-      gpu::gcn::Decode(code, 4, /*stop_at_endpgm=*/false);
+  const gpu::gcn::Program program = gpu::gcn::Decode(code, 4, false);
   const base::Vector<u8> reachable = gpu::gcn::ComputeReachability(program);
 
   ASSERT_EQ(reachable.size(), 4u);
@@ -266,15 +256,10 @@ TEST(GcnDecode, IndirectControlFlowDoesNotMarkPotentialTargetsDead) {
 
 TEST(GcnDecode, ReachabilityExcludesUnconditionalBranchFallthrough) {
   const u32 code[] = {
-      0xbf820003,  // s_branch pc+4
-      0xffffffff, 0xffffffff,
-      0xbf810000,  // s_endpgm in dead fallthrough
-      0xbe800380,  // s_mov_b32 s0, 0
-      0xbf810000,  // reachable s_endpgm
+      0xbf820003, 0xffffffff, 0xffffffff, 0xbf810000, 0xbe800380, 0xbf810000,
   };
 
-  const gpu::gcn::Program program =
-      gpu::gcn::Decode(code, 6, /*stop_at_endpgm=*/false);
+  const gpu::gcn::Program program = gpu::gcn::Decode(code, 6, false);
   const base::Vector<u8> reachable = gpu::gcn::ComputeReachability(program);
 
   ASSERT_EQ(reachable.size(), 6u);

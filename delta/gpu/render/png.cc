@@ -13,16 +13,6 @@
 namespace gpu::render {
 namespace {
 
-// ---------------------------------------------------------------------------
-// deflate (RFC 1951), fixed Huffman + a 32 KiB greedy LZ77 match finder.
-//
-// Fixed Huffman costs at most 9 bits per literal, so the worst case is 1.125x
-// the input, but the images this writes (a mostly-black render target, a
-// flat UI layer) are exactly the input LZ77 collapses, which is the difference
-// between an 8 MB dump and a 40 KiB one. A full dynamic-Huffman encoder would
-// win maybe another 20% and is not worth the code.
-// ---------------------------------------------------------------------------
-
 constexpr u16 kLenBase[29] = {3,  4,  5,  6,   7,   8,   9,   10,  11, 13,
                               15, 17, 19, 23,  27,  31,  35,  43,  51, 59,
                               67, 83, 99, 115, 131, 163, 195, 227, 258};
@@ -40,8 +30,6 @@ class BitWriter {
  public:
   explicit BitWriter(u8* out) : out_(out) {}
 
-  // LSB-first, the packing order deflate uses for everything except a Huffman
-  // code (see Code).
   void Bits(u32 value, u32 n) {
     acc_ |= static_cast<u64>(value & ((1u << n) - 1u)) << nbits_;
     nbits_ += n;
@@ -52,7 +40,6 @@ class BitWriter {
     }
   }
 
-  // A Huffman code is packed starting from its MOST significant bit.
   void Code(u32 code, u32 n) {
     u32 reversed = 0;
     for (u32 i = 0; i < n; i++)
@@ -120,8 +107,8 @@ u64 Deflate(const u8* data, u64 len, u8* out) {
   constexpr u32 kMaxChain = 32;
 
   BitWriter w(out);
-  w.Bits(1, 1);  // BFINAL
-  w.Bits(1, 2);  // BTYPE = 01, fixed Huffman
+  w.Bits(1, 1);
+  w.Bits(1, 2);
 
   base::Vector<i64> head(kHashSize, -1);
   base::Vector<i64> prev(kWindow, -1);
@@ -184,7 +171,7 @@ u64 Deflate(const u8* data, u64 len, u8* out) {
       pos++;
     }
   }
-  FixedLiteral(w, 256);  // end of block
+  FixedLiteral(w, 256);
   w.Flush();
   return w.size();
 }
@@ -204,7 +191,6 @@ void PutChunk(base::Vector<u8>& v, const char tag[4], const u8* data, u64 len) {
   PutBe32(v, Crc32(v.data() + start, len + 4) ^ 0xFFFFFFFFu);
 }
 
-// Encode already-filtered scanlines (each row preceded by its filter byte).
 bool WritePngRaw(const char* path,
                  const base::Vector<u8>& scanlines,
                  u32 width,
@@ -226,7 +212,7 @@ bool WritePngRaw(const char* path,
   ihdr[6] = static_cast<u8>(height >> 8);
   ihdr[7] = static_cast<u8>(height);
   ihdr[8] = bit_depth;
-  ihdr[9] = 6;  // RGBA
+  ihdr[9] = 6;
   ihdr[10] = 0;
   ihdr[11] = 0;
   ihdr[12] = 0;
@@ -249,8 +235,8 @@ u64 DeflateBound(u64 len) {
 }
 
 u64 ZlibCompress(const u8* data, u64 len, u8* out) {
-  out[0] = 0x78;  // CM = deflate, CINFO = 32 KiB window
-  out[1] = 0x01;  // no preset dict, fastest; (0x7801 % 31) == 0
+  out[0] = 0x78;
+  out[1] = 0x01;
   const u64 n = Deflate(data, len, out + 2);
   const u32 adler = Adler32(data, len);
   out[2 + n + 0] = static_cast<u8>(adler >> 24);
@@ -267,7 +253,7 @@ bool WritePngRgba8(const char* path, const u8* rgba, u32 width, u32 height) {
   base::Vector<u8> scanlines(static_cast<u64>(height) * (row + 1));
   for (u32 y = 0; y < height; y++) {
     u8* dst = scanlines.data() + static_cast<u64>(y) * (row + 1);
-    dst[0] = 0;  // filter: none
+    dst[0] = 0;
     std::memcpy(dst + 1, rgba + static_cast<u64>(y) * row, row);
   }
   return WritePngRaw(path, scanlines, width, height, 8);

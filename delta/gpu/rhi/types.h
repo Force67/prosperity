@@ -2,10 +2,6 @@
 
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * The vocabulary of the device abstraction: formats, resource states and the
- * descriptions a Device creates objects from. Nothing here names a graphics
- * API; each backend maps these onto its own types.
  */
 
 #include "base/arch.h"
@@ -17,11 +13,8 @@ enum class Backend : u8 { kVulkan, kOpenGL, kD3D12 };
 
 const char* BackendName(Backend backend);
 
-// Channel order is memory order from the lowest byte, as in Vulkan's names.
-// Packed formats name their fields from the most significant bit.
 enum class Format : u16 {
   kUndefined,
-  // 8-bit channels
   kR8Unorm,
   kR8Snorm,
   kR8Uint,
@@ -43,7 +36,6 @@ enum class Format : u16 {
   kRGBA8Srgb,
   kBGRA8Unorm,
   kBGRA8Srgb,
-  // 16-bit channels
   kR16Unorm,
   kR16Snorm,
   kR16Uint,
@@ -65,7 +57,6 @@ enum class Format : u16 {
   kRGBA16Uscaled,
   kRGBA16Sscaled,
   kRGBA16Float,
-  // 32-bit channels
   kR32Uint,
   kR32Sint,
   kR32Float,
@@ -76,11 +67,9 @@ enum class Format : u16 {
   kRGBA32Uint,
   kRGBA32Sint,
   kRGBA32Float,
-  // Packed
-  kB10G11R11Float,    // R in the low bits (DXGI R11G11B10_FLOAT)
-  kA2B10G10R10Unorm,  // R in the low bits (DXGI R10G10B10A2_UNORM)
-  kA2R10G10B10Unorm,  // B in the low bits
-  // Block compressed
+  kB10G11R11Float,
+  kA2B10G10R10Unorm,
+  kA2R10G10B10Unorm,
   kBC1Unorm,
   kBC1Srgb,
   kBC2Unorm,
@@ -95,7 +84,6 @@ enum class Format : u16 {
   kBC6HSfloat,
   kBC7Unorm,
   kBC7Srgb,
-  // Depth / stencil
   kD32Float,
   kD32FloatS8Uint,
   kS8Uint,
@@ -103,10 +91,10 @@ enum class Format : u16 {
 };
 
 struct FormatInfo {
-  u8 bytes = 0;  // per texel, or per 4x4 block when compressed
+  u8 bytes = 0;
   u8 channels = 0;
   bool compressed = false;
-  bool is_integer = false;  // Uint/Sint: never filtered, never blended
+  bool is_integer = false;
   bool is_depth = false;
   bool is_stencil = false;
   bool is_srgb = false;
@@ -125,13 +113,11 @@ enum ShaderStage : u32 {
       kStageVertex | kStageGeometry | kStageFragment | kStageMesh,
 };
 
-// Where the memory of a buffer lives.
 enum class MemoryKind : u8 {
-  kDevice,  // device-local, no host mapping
-  kUpload,  // host-visible, write-combined; for CPU writes the GPU reads
-  // As kUpload, but in device-local memory where the host can map it.
+  kDevice,
+  kUpload,
   kUploadDevice,
-  kReadback,  // host-visible, cached; for GPU writes the CPU reads
+  kReadback,
 };
 
 enum BufferUsage : u32 {
@@ -142,22 +128,15 @@ enum BufferUsage : u32 {
   kBufferIndirect = 1u << 4,
   kBufferCopySrc = 1u << 5,
   kBufferCopyDst = 1u << 6,
-  // Readable in a shader through a 64-bit address (Caps::buffer_address).
   kBufferAddress = 1u << 7,
-  // Holds CommandList::BeginConditional predicates (Caps::conditional).
   kBufferPredicate = 1u << 8,
 };
 
 struct BufferDesc {
   u64 size = 0;
-  u32 usage = 0;  // BufferUsage bits
+  u32 usage = 0;
   MemoryKind memory = MemoryKind::kDevice;
-  // Back the buffer with this host allocation instead of new memory
-  // (Caps::host_import). Must be aligned to Caps::host_import_alignment in
-  // both address and size, and outlive the buffer.
   void* host_pointer = nullptr;
-  // Reserve `size` of address space only (Caps::sparse_buffer): device memory
-  // backs a page once Device::CommitSparse commits it.
   bool sparse = false;
   const char* name = nullptr;
 };
@@ -171,13 +150,9 @@ enum TextureUsage : u32 {
   kTextureDepthTarget = 1u << 3,
   kTextureCopySrc = 1u << 4,
   kTextureCopyDst = 1u << 5,
-  // Views may use any format of the same texel size, not only this one.
   kTextureMutableFormat = 1u << 6,
-  // 2D: array layers may be viewed as cube faces.
   kTextureCubeCompatible = 1u << 7,
-  // 3D: slices may be viewed (and rendered) as a 2D array.
   kTextureArrayCompatible = 1u << 8,
-  // Memory another device on the same GPU can import (Device::ExportFd).
   kTextureExportable = 1u << 9,
 };
 
@@ -185,10 +160,10 @@ struct TextureDesc {
   TextureDim dim = TextureDim::k2D;
   Format format = Format::kUndefined;
   u32 width = 1, height = 1;
-  u32 depth = 1;   // 3D only
-  u32 layers = 1;  // 1D/2D only
+  u32 depth = 1;
+  u32 layers = 1;
   u32 mips = 1;
-  u32 usage = 0;  // TextureUsage bits
+  u32 usage = 0;
   const char* name = nullptr;
 };
 
@@ -212,8 +187,7 @@ enum class Swizzle : u8 { kIdentity, kZero, kOne, kR, kG, kB, kA };
 
 struct TextureViewDesc {
   ViewDim dim = ViewDim::k2D;
-  Format format = Format::kUndefined;  // kUndefined = the texture's
-  // One bit for a sampled or storage view; depth|stencil for an attachment.
+  Format format = Format::kUndefined;
   u8 aspect = kAspectColor;
   u32 base_mip = 0, mips = 1;
   u32 base_layer = 0, layers = 1;
@@ -253,45 +227,40 @@ struct SamplerDesc {
   AddressMode address_w = AddressMode::kClampToEdge;
   float lod_bias = 0.0f;
   float min_lod = 0.0f, max_lod = 1000.0f;
-  float max_anisotropy = 1.0f;  // > 1 enables anisotropic filtering
+  float max_anisotropy = 1.0f;
   bool compare_enable = false;
   CompareOp compare = CompareOp::kNever;
   BorderColor border = BorderColor::kTransparentBlack;
 };
 
-// Resource states. A texture is in exactly one per subresource at any point
-// of the recording; the caller names both sides of each transition.
 enum class TextureState : u8 {
-  kUndefined,  // contents may be discarded
-  kGeneral,    // storage image reads/writes, or any mixed use
+  kUndefined,
+  kGeneral,
   kColorTarget,
-  kDepthTarget,  // depth/stencil writable
-  kDepthRead,    // depth/stencil bound read-only, and/or sampled
+  kDepthTarget,
+  kDepthRead,
   kShaderRead,
   kCopySrc,
   kCopyDst,
 };
 
-// Memory access classes for buffer and global barriers.
 enum Access : u32 {
   kAccessNone = 0,
   kAccessVertexRead = 1u << 0,
   kAccessIndexRead = 1u << 1,
   kAccessUniformRead = 1u << 2,
   kAccessIndirectRead = 1u << 3,
-  kAccessShaderRead = 1u << 4,   // any stage
-  kAccessShaderWrite = 1u << 5,  // any stage
+  kAccessShaderRead = 1u << 4,
+  kAccessShaderWrite = 1u << 5,
   kAccessCopyRead = 1u << 6,
   kAccessCopyWrite = 1u << 7,
   kAccessHostRead = 1u << 8,
   kAccessHostWrite = 1u << 9,
   kAccessColorWrite = 1u << 10,
   kAccessDepthWrite = 1u << 11,
-  // As kAccessShaderRead/Write, scoped to compute dispatches: a barrier on
-  // these does not wait for (or hold back) graphics shading.
   kAccessComputeRead = 1u << 12,
   kAccessComputeWrite = 1u << 13,
-  kAccessPredicateRead = 1u << 14,  // BeginConditional
+  kAccessPredicateRead = 1u << 14,
   kAccessAllRead = kAccessVertexRead | kAccessIndexRead | kAccessUniformRead |
                    kAccessIndirectRead | kAccessShaderRead | kAccessCopyRead |
                    kAccessHostRead | kAccessComputeRead,
@@ -299,15 +268,11 @@ enum Access : u32 {
                     kAccessColorWrite | kAccessDepthWrite | kAccessComputeWrite,
 };
 
-// Descriptor bindings. Each backend turns a (set, binding) pair into its own
-// slot; shaders are SPIR-V with the same set/binding decorations.
 enum class BindingType : u8 {
-  kSampledTexture,  // combined texture + sampler
+  kSampledTexture,
   kStorageTexture,
   kUniformBuffer,
   kStorageBuffer,
-  // The offset is supplied at SetBindGroup time rather than when the group is
-  // written, so one group serves every window of a ring buffer.
   kUniformBufferDynamic,
   kStorageBufferDynamic,
 };
@@ -315,14 +280,12 @@ enum class BindingType : u8 {
 struct BindingLayout {
   u32 binding = 0;
   BindingType type = BindingType::kSampledTexture;
-  u32 stages = 0;  // ShaderStage bits
-  // Storage buffers the shader never writes: lets D3D12 bind an SRV.
+  u32 stages = 0;
   bool read_only = false;
 };
 
 struct BindGroupLayoutDesc {
   base::Vector<BindingLayout> bindings;
-  // Bound only through CommandList::PushBindGroup, never as a BindGroup.
   bool push = false;
 };
 
@@ -333,14 +296,13 @@ class Sampler;
 class BindGroupLayout;
 class PipelineLayout;
 
-// One written binding of a group. Unused members stay null.
 struct BindingWrite {
   u32 binding = 0;
   TextureView* view = nullptr;
-  Sampler* sampler = nullptr;  // kSampledTexture
+  Sampler* sampler = nullptr;
   TextureState view_state = TextureState::kShaderRead;
   Buffer* buffer = nullptr;
-  u64 offset = 0;  // for dynamic bindings: added to the bind-time offset
+  u64 offset = 0;
   u64 range = 0;
 };
 
@@ -350,7 +312,6 @@ struct BindGroupDesc {
 };
 
 struct PipelineLayoutDesc {
-  // Group index = position; a null entry is an empty group.
   base::Vector<BindGroupLayout*> groups;
   u32 push_constant_bytes = 0;
   u32 push_constant_stages = 0;
@@ -406,7 +367,7 @@ struct BlendAttachment {
   BlendOp color_op = BlendOp::kAdd;
   BlendFactor src_alpha = BlendFactor::kOne, dst_alpha = BlendFactor::kZero;
   BlendOp alpha_op = BlendOp::kAdd;
-  u8 write_mask = 0xF;  // bit 0 = R
+  u8 write_mask = 0xF;
 };
 
 struct StencilFace {
@@ -414,8 +375,6 @@ struct StencilFace {
   StencilOp pass = StencilOp::kKeep;
   StencilOp depth_fail = StencilOp::kKeep;
   CompareOp compare = CompareOp::kAlways;
-  // D3D12 and OpenGL take one compare/write mask for both faces: the front
-  // face's is used there.
   u8 compare_mask = 0xFF, write_mask = 0xFF, reference = 0;
 };
 
@@ -426,16 +385,14 @@ struct VertexBufferLayout {
 
 struct VertexAttribute {
   u32 location = 0;
-  u32 buffer = 0;  // index into GraphicsPipelineDesc::vertex_buffers
+  u32 buffer = 0;
   Format format = Format::kUndefined;
   u32 offset = 0;
 };
 
-// Shaders are SPIR-V. A backend that does not consume SPIR-V lowers it when
-// the pipeline is created, against the pipeline's layout.
 struct ShaderCode {
   const u32* words = nullptr;
-  mem_size count = 0;                        // in words
+  mem_size count = 0;
   bool empty() const { return count == 0; }  // NOLINT: accessor
 };
 
@@ -445,10 +402,10 @@ inline ShaderCode Code(const base::Vector<u32>& spirv) {
 
 struct GraphicsPipelineDesc {
   PipelineLayout* layout = nullptr;
-  ShaderCode vertex;  // or mesh
+  ShaderCode vertex;
   ShaderCode geometry;
   ShaderCode fragment;
-  bool mesh = false;  // `vertex` is a mesh shader; no vertex input
+  bool mesh = false;
   base::Vector<VertexBufferLayout> vertex_buffers;
   base::Vector<VertexAttribute> vertex_attributes;
   Topology topology = Topology::kTriangleList;
@@ -472,7 +429,7 @@ struct GraphicsPipelineDesc {
 struct ComputePipelineDesc {
   PipelineLayout* layout = nullptr;
   ShaderCode code;
-  bool dispatch_base = false;  // dispatched with CommandList::DispatchBase
+  bool dispatch_base = false;
   const char* name = nullptr;
 };
 
@@ -493,19 +450,17 @@ struct ColorAttachment {
 };
 
 struct DepthAttachment {
-  TextureView* view = nullptr;  // null = no depth/stencil
+  TextureView* view = nullptr;
   LoadOp depth_load = LoadOp::kLoad;
   LoadOp stencil_load = LoadOp::kLoad;
   float clear_depth = 1.0f;
   u8 clear_stencil = 0;
-  bool depth = true;       // the view's depth plane is attached
-  bool stencil = false;    // the view's stencil plane is attached
-  bool read_only = false;  // depth plane
+  bool depth = true;
+  bool stencil = false;
+  bool read_only = false;
   bool stencil_read_only = false;
 };
 
-// Attachments must already be in kColorTarget / kDepthTarget (or kDepthRead
-// when read_only); a pass does not transition them.
 struct RenderPassDesc {
   u32 color_count = 0;
   ColorAttachment colors[8];
@@ -525,8 +480,6 @@ struct TextureRegion {
   u32 width = 1, height = 1, depth = 1;
 };
 
-// A buffer <-> texture copy. Row length and image height are in texels (0 =
-// tightly packed), as in Vulkan.
 struct BufferTextureCopy {
   u64 buffer_offset = 0;
   u32 row_length = 0;
@@ -553,12 +506,12 @@ struct Caps {
   bool geometry_shader = false;
   bool mesh_shader = false;
   struct MeshLimits {
-    u32 max_threads = 0;  // invocations per workgroup
+    u32 max_threads = 0;
     u32 max_threads_x = 0;
     u32 max_shared_bytes = 0;
     u32 max_output_vertices = 0;
     u32 max_output_primitives = 0;
-    u32 max_groups[2] = {};  // per dispatch dimension
+    u32 max_groups[2] = {};
     u32 max_total_groups = 0;
   } mesh;
   bool fragment_barycentric = false;
@@ -566,28 +519,24 @@ struct Caps {
   bool sampler_anisotropy = false;
   bool sampler_mirror_clamp = false;
   bool storage_image_write_without_format = false;
-  bool buffer_address = false;  // kBufferAddress + SPIR-V PhysicalStorageBuffer
+  bool buffer_address = false;
   bool host_import = false;
   u64 host_import_alignment = 0;
   bool sparse_buffer = false;
-  u64 sparse_page = 0;  // commit granularity
-  bool copy_after = false;  // Device::CopyAfter
-  bool memory_export = false;  // kTextureExportable
-  bool conditional = false;    // CommandList::BeginConditional
+  u64 sparse_page = 0;
+  bool copy_after = false;
+  bool memory_export = false;
+  bool conditional = false;
   u8 device_uuid[16] = {};
   bool texture_blit = true;
   bool dispatch_base = false;
-  // CommandList::DispatchIndirect: group counts read by the GPU from a buffer.
   bool dispatch_indirect = false;
-  // CommandList::DrawIndirect and DrawIndexedIndirect, with firstInstance.
   bool draw_indirect = false;
-  // One memory type is both device-local and host-cached: a kReadback buffer
-  // is as fast for the GPU as kDevice.
   bool unified_memory = false;
-  bool debug_labels = false;  // labels and names reach a tool
+  bool debug_labels = false;
   bool timestamps = false;
   double timestamp_period_ns = 1.0;
-  u32 timestamp_bits = 64;  // valid bits: tick differences wrap at this width
+  u32 timestamp_bits = 64;
   u32 subgroup_size = 32;
   u32 max_dynamic_uniform_buffers = 8;
   u32 max_dynamic_storage_buffers = 4;

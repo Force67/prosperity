@@ -1,5 +1,3 @@
-// GPU timestamps for resident versus copied input and bounded indirect quad
-// conversion. Usage: index_convert_bench [vulkan|opengl|d3d12]
 
 #include <algorithm>
 #include <cstdio>

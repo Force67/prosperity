@@ -1,7 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * Minimal SPIR-V module builder. See spv_emit.h.
  */
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
@@ -17,8 +15,6 @@
 
 namespace gpu::gcn::spirv {
 
-// Pack a literal string into SPIR-V words (LSB-first, null-terminated, zero
-// padded to a word boundary).
 void Module::PutString(base::Vector<u32>& sec, const base::String& s) {
   u32 w = 0;
   int b = 0;
@@ -32,9 +28,9 @@ void Module::PutString(base::Vector<u32>& sec, const base::String& s) {
   };
   for (char c : s)
     push(static_cast<u8>(c));
-  push(0);  // null terminator
+  push(0);
   if (b != 0)
-    sec.push_back(w);  // flush trailing partial word (incl. padding)
+    sec.push_back(w);
 }
 
 void Module::Instr(base::Vector<u32>& sec,
@@ -57,7 +53,6 @@ Module::Module() {
          static_cast<u32>(spv::MemoryModel::GLSL450)});
 }
 
-// ---- types -----------------------------------------------------------------
 Id Module::TypeVoid() {
   const u64 k = Key(CacheKind::kVoid);
   Id id;
@@ -175,7 +170,6 @@ Id Module::TypeSampledImage(Id image_type) {
   return id;
 }
 
-// ---- constants -------------------------------------------------------------
 Id Module::ConstU32(u32 v) {
   const u64 k = Key(CacheKind::kConstU32, v);
   Id id;
@@ -244,7 +238,6 @@ Id Module::ConstNull(Id type) {
   return Cached(k, id);
 }
 
-// ---- globals / decorations -------------------------------------------------
 Id Module::Variable(Id ptr_type, spv::StorageClass sc, Id init) {
   const Id id = Alloc();
   base::Vector<u32> ops{ptr_type, id, static_cast<u32>(sc)};
@@ -257,10 +250,9 @@ Id Module::Variable(Id ptr_type, spv::StorageClass sc, Id init) {
 void Module::Decorate(Id target,
                       spv::Decoration dec,
                       const base::Vector<u32>& operands) {
-  // A reused result (see Reuse) may be decorated again by its next producer.
   if (operands.empty() &&
-      !decorated_.insert((static_cast<u64>(target) << 32) |
-                         static_cast<u32>(dec))
+      !decorated_
+           .insert((static_cast<u64>(target) << 32) | static_cast<u32>(dec))
            .second)
     return;
   base::Vector<u32> ops{target, static_cast<u32>(dec)};
@@ -304,8 +296,6 @@ void Module::EntryPoint(spv::ExecutionModel model,
                         const base::Vector<Id>& interface) {
   base::Vector<u32> ops{static_cast<u32>(model), fn};
   PutString(ops, n);
-  // SPIR-V 1.4 and later: the interface names every global variable the entry
-  // point uses, not only its stage inputs and outputs.
   (void)interface;
   ops.insert(ops.end(), globals_.begin(), globals_.end());
   Instr(entries_, spv::Op::OpEntryPoint, ops);
@@ -327,7 +317,6 @@ void Module::Extension(const base::String& name) {
   Instr(exts_, spv::Op::OpExtension, ops);
 }
 
-// ---- function / block construction -----------------------------------------
 void Module::PhysicalStorageBuffers() {
   Capability(spv::Capability::Int64);
   Capability(spv::Capability::PhysicalStorageBufferAddresses);
@@ -478,7 +467,6 @@ Id Module::Reuse(const u32 (&head)[2],
 }
 
 void Module::Remember(u64 key, Id id, u32 offset) {
-  // Entries are only ever reused in their own block.
   if (computed_block_ != cur_block_) {
     computed_.clear();
     computed_block_ = cur_block_;
@@ -506,7 +494,7 @@ Id Module::Fold(spv::Op op, Id result_type, const base::Vector<Id>& operands) {
         return ka ? ConstBool(!a->second) : 0;
       const auto b = const_bools_.find(operands[1]);
       const bool kb = b != const_bools_.end();
-      const bool absorbing = op == spv::Op::OpLogicalOr;  // true for or
+      const bool absorbing = op == spv::Op::OpLogicalOr;
       if ((ka && a->second == absorbing) || (kb && b->second == absorbing))
         return ConstBool(absorbing);
       if (ka)
@@ -566,33 +554,53 @@ Id Module::Fold(spv::Op op, Id result_type, const base::Vector<Id>& operands) {
   const i32 sx = static_cast<i32>(x), sy = static_cast<i32>(y);
   if (b) {
     switch (op) {
-      case spv::Op::OpIEqual: return ConstBool(x == y);
-      case spv::Op::OpINotEqual: return ConstBool(x != y);
-      case spv::Op::OpULessThan: return ConstBool(x < y);
-      case spv::Op::OpULessThanEqual: return ConstBool(x <= y);
-      case spv::Op::OpUGreaterThan: return ConstBool(x > y);
-      case spv::Op::OpUGreaterThanEqual: return ConstBool(x >= y);
-      case spv::Op::OpSLessThan: return ConstBool(sx < sy);
-      case spv::Op::OpSLessThanEqual: return ConstBool(sx <= sy);
-      case spv::Op::OpSGreaterThan: return ConstBool(sx > sy);
-      case spv::Op::OpSGreaterThanEqual: return ConstBool(sx >= sy);
-      default: return 0;
+      case spv::Op::OpIEqual:
+        return ConstBool(x == y);
+      case spv::Op::OpINotEqual:
+        return ConstBool(x != y);
+      case spv::Op::OpULessThan:
+        return ConstBool(x < y);
+      case spv::Op::OpULessThanEqual:
+        return ConstBool(x <= y);
+      case spv::Op::OpUGreaterThan:
+        return ConstBool(x > y);
+      case spv::Op::OpUGreaterThanEqual:
+        return ConstBool(x >= y);
+      case spv::Op::OpSLessThan:
+        return ConstBool(sx < sy);
+      case spv::Op::OpSLessThanEqual:
+        return ConstBool(sx <= sy);
+      case spv::Op::OpSGreaterThan:
+        return ConstBool(sx > sy);
+      case spv::Op::OpSGreaterThanEqual:
+        return ConstBool(sx >= sy);
+      default:
+        return 0;
     }
   }
   switch (op) {
-    case spv::Op::OpIAdd: return make(x + y);
-    case spv::Op::OpISub: return make(x - y);
-    case spv::Op::OpIMul: return make(x * y);
-    case spv::Op::OpBitwiseAnd: return make(x & y);
-    case spv::Op::OpBitwiseOr: return make(x | y);
-    case spv::Op::OpBitwiseXor: return make(x ^ y);
-    case spv::Op::OpNot: return make(~x);
-    // A shift by 32 or more is undefined in SPIR-V: leave it to the driver.
-    case spv::Op::OpShiftLeftLogical: return y < 32 ? make(x << y) : 0;
-    case spv::Op::OpShiftRightLogical: return y < 32 ? make(x >> y) : 0;
+    case spv::Op::OpIAdd:
+      return make(x + y);
+    case spv::Op::OpISub:
+      return make(x - y);
+    case spv::Op::OpIMul:
+      return make(x * y);
+    case spv::Op::OpBitwiseAnd:
+      return make(x & y);
+    case spv::Op::OpBitwiseOr:
+      return make(x | y);
+    case spv::Op::OpBitwiseXor:
+      return make(x ^ y);
+    case spv::Op::OpNot:
+      return make(~x);
+    case spv::Op::OpShiftLeftLogical:
+      return y < 32 ? make(x << y) : 0;
+    case spv::Op::OpShiftRightLogical:
+      return y < 32 ? make(x >> y) : 0;
     case spv::Op::OpShiftRightArithmetic:
       return y < 32 ? make(static_cast<u32>(sx >> y)) : 0;
-    default: return 0;
+    default:
+      return 0;
   }
 }
 
@@ -623,9 +631,8 @@ void Module::EmitVoid(spv::Op op, const base::Vector<Id>& operands) {
 Id Module::ExtInst(Id result_type,
                    u32 glsl_op,
                    const base::Vector<Id>& operands) {
-  // Modf/Frexp write through a pointer, the InterpolateAt* read an input.
-  const bool pure = cur_block_ && glsl_op != 35 && glsl_op != 51 &&
-                    glsl_op < 76;
+  const bool pure =
+      cur_block_ && glsl_op != 35 && glsl_op != 51 && glsl_op < 76;
   base::Vector<u32> ops{result_type, 0, glsl_ext_, glsl_op};
   ops.insert(ops.end(), operands.begin(), operands.end());
   u64 key = 0;
@@ -654,9 +661,6 @@ Id Module::AccessChain(Id ptr_type, Id base, const base::Vector<Id>& indices) {
   ops.insert(ops.end(), indices.begin(), indices.end());
   return Emit(spv::Op::OpAccessChain, ptr_type, ops);
 }
-// Registers are untyped bits, so the translator casts at every use and every
-// result; folding the round trips here keeps a third of the module from ever
-// being emitted.
 Id Module::Bitcast(Id type, Id value) {
   if (TypeOf(value) == type)
     return value;
@@ -685,8 +689,9 @@ Id Module::CompositeExtract(Id type, Id composite, u32 index) {
   const u32 rest[2] = {composite, index};
   u64 key = 0;
   if (cur_block_)
-    if (const Id id = Reuse({static_cast<u32>(spv::Op::OpCompositeExtract), type},
-                            rest, 2, &key))
+    if (const Id id =
+            Reuse({static_cast<u32>(spv::Op::OpCompositeExtract), type}, rest,
+                  2, &key))
       return id;
   const Id id = Alloc();
   const u32 offset = static_cast<u32>(fn_body_.size());
@@ -743,14 +748,13 @@ void Module::Kill() {
   EmitVoid(spv::Op::OpKill, {});
 }
 
-// ---- assembly --------------------------------------------------------------
 base::Vector<u32> Module::Assemble() const {
   base::Vector<u32> out;
-  out.push_back(spv::MagicNumber);  // 0x07230203
+  out.push_back(spv::MagicNumber);
   out.push_back(version_);
-  out.push_back(0);       // generator (0 = unknown)
-  out.push_back(bound_);  // id bound
-  out.push_back(0);       // schema
+  out.push_back(0);
+  out.push_back(bound_);
+  out.push_back(0);
   const auto append = [&](const base::Vector<u32>& s) {
     out.insert(out.end(), s.begin(), s.end());
   };
@@ -770,4 +774,4 @@ base::Vector<u32> Module::Assemble() const {
 
 }  // namespace gpu::gcn::spirv
 
-#endif  // DELTA_HAVE_SPIRV_BACKEND
+#endif

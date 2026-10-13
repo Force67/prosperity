@@ -1,8 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * Compute dispatches, from COMPUTE_* registers to the renderer. See
- * compute_dispatch.h.
  */
 
 #include "gpu/ps4/compute_dispatch.h"
@@ -35,21 +32,14 @@
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
-// Record dispatches on the renderer thread, queued behind the draws, instead
-// of draining the queue and recording them on the walk.
 DELTA_OPTION(bool, kCsOnRenderThread, "DELTA_GPU_CS_RENDER_THREAD", false);
 }  // namespace
 
 namespace gpu::ps4 {
 namespace {
 
-// Sanity caps. A storage buffer beyond kMaxResource is a descriptor we misread;
-// a buffer whose declared size is unbounded is windowed down to the mapped
-// prefix instead of being refused.
 constexpr u64 kMaxResource = 256ull * 1024 * 1024;
 constexpr u64 kMaxUnboundedBuffer = 16ull * 1024 * 1024;
-// An all-zero descriptor stands in for a binding the shader guards and never
-// takes; the translator returns zero for it, so a token allocation is enough.
 constexpr u64 kZeroFillBytes = 16;
 
 bool IsMappedGuestRange(u64 address, u64 bytes) {
@@ -71,8 +61,6 @@ u64 ExpandedHtileBase(const render::ComputeInfo& ci,
   u64 hash = 1469598103934665603ull;
   for (u32 i = 0; i < 291; ++i)
     hash = (hash ^ code[i]) * 1099511628211ull;
-  // Both output branches OR 15 into ZMASK. Group zero's first lane stores
-  // word zero regardless of the source HTILE layout or reduction parameters.
   if (hash != 0xe043b9bd71a7d375ull)
     return 0;
   const gcn::VBuffer dst = gcn::DecodeVBuffer(ci.user_data + 8);
@@ -89,27 +77,19 @@ u64 ExpandedHtileBase(const render::ComputeInfo& ci,
   return 0;
 }
 
-// One resource's live guest range and how it has to be staged.
 struct ResourceRange {
   u64 base = 0;
-  u64 size = 0;        // bytes the dispatch reads/writes through it
-  u64 guest_size = 0;  // bytes it occupies in guest memory
+  u64 size = 0;
+  u64 guest_size = 0;
   gcn::TImage image;
-  bool image_staging = false;  // tiled or reformatted: stage, don't alias
-  bool zero_fill = false;      // no live range: hand the shader zeros
+  bool image_staging = false;
+  bool zero_fill = false;
   u32 elem_bytes = 4;
   u32 stage_elem_bytes = 4;
-  u64 write_bytes = 0;  // see ComputeInfo::Res::write_bytes
+  u64 write_bytes = 0;
   bool ok = true;
 };
 
-// A block-compressed surface written by a shader is described as an
-// uncompressed integer image whose texel is one BC block: 64 bpp (32_32 /
-// 16_16_16_16) for BC1/BC4, 128 bpp (32_32_32_32) for BC2/BC3/BC5. P.T.'s
-// texture streamer uploads every streamed surface this way, a compute copy from
-// the linear staging area it inflated texture.qar into to the tiled surface the
-// draws sample. Rejecting the alias zero-filled both bindings, so the copy
-// wrote a 16-byte dummy and every streamed texture stayed empty.
 ResourceRange ResolveImageResource(u64 cs_addr,
                                    const gcn::CsResource& res,
                                    const u32* descriptor,
@@ -142,8 +122,6 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   out.stage_elem_bytes = r11g11b10f ? 16 : base::Max(out.elem_bytes, 4u);
 
   if (!supported_type || !supported_format) {
-    // Invalid/null T# values can be present on paths the guest shader does not
-    // take. The translator guards these descriptors and returns zero.
     if (trace)
       TraceCsZeroFill(cs_addr, res.binding, t, descriptor);
     out.zero_fill = true;
@@ -187,7 +165,7 @@ ResourceRange ResolveBufferResource(u64 cs_addr,
                                     const u32* descriptor,
                                     bool trace) {
   ResourceRange out;
-  if (res.kind == 2) {  // scalar-load pointer into an SRT/descriptor table
+  if (res.kind == 2) {
     out.base = (static_cast<u64>(descriptor[1] & 0xFFFF) << 32) | descriptor[0];
     out.size = res.min_bytes;
     if (!IsMappedGuestRange(out.base, 1)) {
@@ -197,15 +175,11 @@ ResourceRange ResolveBufferResource(u64 cs_addr,
     }
     return out;
   }
-  // Buffer V#: stride*num_records, else the min hint from immediate offsets.
   const gcn::VBuffer v = gcn::DecodeVBuffer(descriptor);
   out.base = v.base;
   out.size = v.stride ? (u64)v.stride * v.num_records : v.num_records;
   if (out.size < res.min_bytes)
     out.size = res.min_bytes;
-  // Unswizzled records written by index alone end where the last record's
-  // furthest store does, often short of stride * num_records: a merged
-  // vertex stream's V# runs up to a component past its data.
   const bool swizzled = (descriptor[1] >> 31) || ((descriptor[3] >> 23) & 1);
   if (res.written && res.store_extent &&
       res.store_extent != gcn::kUnknownStoreExtent && v.stride &&
@@ -242,19 +216,13 @@ ComputeShaderState ComputeStateOf(const Regs& regs) {
   state.thread_y = regs[mmCOMPUTE_NUM_THREAD_Y] & 0xFFFF;
   state.thread_z = regs[mmCOMPUTE_NUM_THREAD_Z] & 0xFFFF;
   const u32 rsrc2 = regs[mmCOMPUTE_PGM_RSRC2];
-  state.user_sgpr = (rsrc2 >> 1) & 0x1F;   // num_user_regs [37:33]
-  state.tgid_enable = (rsrc2 >> 7) & 0x7;  // tgid_enable [41:39]
+  state.user_sgpr = (rsrc2 >> 1) & 0x1F;
+  state.tgid_enable = (rsrc2 >> 7) & 0x7;
   state.lds_dwords = (rsrc2 >> 15) & 0x1FF;
   return state;
 }
 }  // namespace
 
-// The SDK's buffer fill kernel: 64 threads a group, and thread i stores the
-// first dword of the constant buffer at s[4:7] to element i of the V# at
-// s[0:3], bounded by its num_records. UE4 clears CMASK and HTILE with it
-// several times a frame. Recognised, it is a buffer fill instead of a
-// dispatch, for metadata and plain buffers; a fill over a render target runs
-// as the shader.
 constexpr u32 kFillKernel[] = {0xbeeb03ff, 0x00000009, 0xc2020500, 0x8f6a8608,
                                0xd2ba0000, 0x0401006a, 0xbf8c007f, 0x7e020204,
                                0xd1a80004, 0x00020002, 0xe0102000, 0x80000100,
@@ -263,12 +231,12 @@ constexpr u32 kFillKernel[] = {0xbeeb03ff, 0x00000009, 0xc2020500, 0x8f6a8608,
 DELTA_OPTION(bool, kFillKernels, "DELTA_GPU_FILL_KERNELS", true);
 
 bool RunFillKernelAsFill(render::Renderer& renderer,
-                        u64 cs_addr,
-                        const u32 groups[3],
-                        const u32 threads[3],
-                        u32 user_sgpr,
-                        u32 tgid_enable,
-                        const u32* user_data) {
+                         u64 cs_addr,
+                         const u32 groups[3],
+                         const u32 threads[3],
+                         u32 user_sgpr,
+                         u32 tgid_enable,
+                         const u32* user_data) {
   if (!kFillKernels || threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
       groups[1] != 1 || groups[2] != 1 || user_sgpr != 8 ||
       !(tgid_enable & 1) || !IsMappedGuestRange(cs_addr, sizeof(kFillKernel)) ||
@@ -277,20 +245,15 @@ bool RunFillKernelAsFill(render::Renderer& renderer,
     return false;
   const gcn::VBuffer dst = gcn::DecodeVBuffer(user_data);
   const gcn::VBuffer src = gcn::DecodeVBuffer(user_data + 4);
-  // A plain dword array: no swizzle (V# word 1 bit 31), no ADD_TID (word 3
-  // bit 23), 32-bit elements of an integer or float format.
   const bool raw_dwords = !(user_data[1] >> 31) && !(user_data[3] & (1u << 23));
   if (!raw_dwords || dst.stride != 4 || dst.dfmt != 4 ||
       (dst.nfmt != 4 && dst.nfmt != 5 && dst.nfmt != 7))
     return false;
   const u64 bytes = base::Min<u64>(u64(groups[0]) * 64, dst.num_records) * 4;
-  // A surface's image is refreshed from the compute range the GPU path
-  // leaves behind; a CPU fill under a live target would never reach it.
   if (!bytes || !IsMappedGuestRange(dst.base, bytes) ||
       !IsMappedGuestRange(src.base, 4))
     return false;
   OwnRenderer("fill");
-  // A value the GPU is still writing: the kernel runs there instead.
   if (render::OverlapsLiveTarget(dst.base, bytes) ||
       !render::GuestBytesSettled(src.base, 4))
     return false;
@@ -300,7 +263,6 @@ bool RunFillKernelAsFill(render::Renderer& renderer,
   return true;
 }
 
-// One dword fills plain buffers; two dwords can clear a whole 64-bit target.
 constexpr u32 kRepeatFillKernel[] = {
     0xbeeb03ff, 0x0000001c, 0x8f008610, 0x4a000000, 0xc2400d00, 0xbf8c007f,
     0x7d880000, 0xbe82246a, 0x7e020c01, 0xbf88002c, 0x7e025501, 0x100202ff,
@@ -315,12 +277,12 @@ constexpr u32 kRepeatFillKernel[] = {
 };
 
 bool RunRepeatFillKernelAsFill(render::Renderer& renderer,
-                              u64 cs_addr,
-                              const u32 groups[3],
-                              const u32 threads[3],
-                              u32 user_sgpr,
-                              u32 tgid_enable,
-                              const u32* user_data) {
+                               u64 cs_addr,
+                               const u32 groups[3],
+                               const u32 threads[3],
+                               u32 user_sgpr,
+                               u32 tgid_enable,
+                               const u32* user_data) {
   if (!kFillKernels || threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
       groups[1] != 1 || groups[2] != 1 || user_sgpr != 16 || tgid_enable != 1 ||
       !IsMappedGuestRange(cs_addr, sizeof(kRepeatFillKernel)) ||
@@ -401,8 +363,8 @@ void DispatchCompute(render::Renderer& renderer,
                           regs[mmCOMPUTE_NUM_THREAD_Y] & 0xFFFF,
                           regs[mmCOMPUTE_NUM_THREAD_Z] & 0xFFFF};
   const u32 rsrc2 = regs[mmCOMPUTE_PGM_RSRC2];
-  const u32 user_sgpr = (rsrc2 >> 1) & 0x1F;   // num_user_regs [37:33]
-  const u32 tgid_enable = (rsrc2 >> 7) & 0x7;  // tgid_enable [41:39]
+  const u32 user_sgpr = (rsrc2 >> 1) & 0x1F;
+  const u32 tgid_enable = (rsrc2 >> 7) & 0x7;
   const u32 lds_dwords = (rsrc2 >> 15) & 0x1FF;
   TraceComputeShader(regs, cs_addr, groups, threads, user_sgpr, tgid_enable,
                      lds_dwords);
@@ -429,8 +391,6 @@ void DispatchCompute(render::Renderer& renderer,
       GetComputeShader({cs_addr, threads[0], threads[1], threads[2], user_sgpr,
                         tgid_enable, lds_dwords});
   if (!rc.ok) {
-    // Loud, not silently corrupting memory: an unsupported CS is content the
-    // frame is missing, and one report per shader says which.
     static base::HashSet<u64> reported;
     static const guest::SessionReset reset_reported(
         [] { guest::ResetResource(reported); });
@@ -455,13 +415,6 @@ void DispatchCompute(render::Renderer& renderer,
   const auto cs_program = gcn::CachedProgram(cs_addr, 4096);
   thread_local base::Vector<gcn::ResolvedCsResource> resolved;
   gcn::ResolveCsResources(resolved, *cs_program, rc, user_data, cs_addr);
-  // Descriptor chains live in guest memory, which an earlier dispatch may have
-  // written, and writebacks are lazy. The replay already lands pending writes
-  // under every table it reads, so a binding left unresolved is normally one
-  // the replay cannot evaluate (an SGPR set inside a loop), which no
-  // writeback changes. Still, flush everything and re-resolve once per
-  // shader; a shader the retry did not help is not flushed for again. UC2's
-  // skinning CS wrote back ~250 ranges (~59 MB) a frame for nothing.
   const auto count_resolved = [&] {
     u32 n = 0;
     for (const auto& r : rc.resources)
@@ -539,12 +492,6 @@ void DispatchCompute(render::Renderer& renderer,
     out.width = range.image.width;
     out.height = range.image.height;
     out.pitch = range.image.pitch;
-    // A volume's slice count lives in `depth`, not `layers` (which stays 1).
-    // Handing the renderer the raw layer count made it rebuild the staging
-    // layout at 1/depth of the real size and the dispatch failed outright. Both
-    // of P.T.'s volume uploads are its colour-grading LUT, so its tonemap
-    // graded every frame through an all-zero table: a black screen from a
-    // 16 KiB texture.
     out.layers = range.image.is_3d ? range.image.depth : range.image.layers;
     out.mip_levels = range.image.mip_levels;
     out.tiling_idx = range.image.tiling_idx;
@@ -561,15 +508,14 @@ void DispatchCompute(render::Renderer& renderer,
     ci.expanded_htile_base =
         ExpandedHtileBase(ci, threads, user_sgpr, tgid_enable);
 
-  // Queued behind the draws, so the walk moves on while the renderer thread
-  // records. What it writes is announced as pending: a walk read of those
-  // bytes (the next dispatch's descriptor chain) waits for it to run.
+  // Writes are announced as pending so a walk read of those bytes waits for the
+  // dispatch.
   RenderQueue& queue = GuestRenderQueue();
   if (kCsOnRenderThread && queue.running()) {
     for (u32 i = 0; i < ci.num_res; i++)
       if (ci.res[i].written)
         queue.NotePendingWrite(ci.res[i].base,
-                               ci.res[i].write_bytes ? ci.res[i].write_bytes
+                               ci.res[i].write_bytes  ? ci.res[i].write_bytes
                                : ci.res[i].guest_size ? ci.res[i].guest_size
                                                       : ci.res[i].size);
     auto job = base::MakeShared<render::ComputeInfo>(ci);

@@ -49,10 +49,6 @@ bool Replace(std::string& text,
   return any;
 }
 
-// Retypes members of the vertex input struct whose TEXCOORD<n> semantic is in
-// one of the masks. The generated main copies each member into the shader's
-// float variable, and HLSL converts the integer value there, which is what a
-// scaled format means.
 void RetypeInputs(std::string& hlsl, const LowerOptions& o) {
   const u32 all = o.uint_inputs | o.sint_inputs | o.swap_rb_inputs;
   if (!all)
@@ -89,7 +85,6 @@ void RetypeInputs(std::string& hlsl, const LowerOptions& o) {
             "= stage_input." + name + ".zyxw;");
 }
 
-// One member of a generated stage input/output struct.
 struct Element {
   std::string qualifiers, type, name, semantic;
 };
@@ -133,7 +128,6 @@ std::vector<Element> ParseElements(const std::string& body) {
   return out;
 }
 
-// Component count of a scalar or vector type name; 0 for anything else.
 u32 Components(const std::string& type) {
   if (type.empty() || type.find('x') != std::string::npos)
     return 0;
@@ -147,9 +141,6 @@ std::string BaseType(const std::string& type) {
              : type;
 }
 
-// Rewrites the input struct to the producer's element order and widths:
-// D3D12 matches stage signatures by packed register, so an input the
-// consumer skips must still take its row.
 void MatchInputs(std::string& hlsl, const std::string& producer) {
   size_t begin, end;
   if (producer.empty() || !FindStruct(hlsl, "SPIRV_Cross_Input", &begin, &end))
@@ -183,9 +174,6 @@ void MatchInputs(std::string& hlsl, const std::string& producer) {
   hlsl.replace(begin, end - begin, out);
 }
 
-// GLSL's extended integer arithmetic, which SPIRV-Cross emits by name. Bit
-// arithmetic only: DXC folds the obvious 64-bit and compare forms into LLVM
-// overflow intrinsics that DXIL validation rejects.
 std::string ExtendedArithmetic(const std::string& hlsl) {
   std::string out;
   for (const char* n : {"", "2", "3", "4"}) {
@@ -221,8 +209,6 @@ std::string ExtendedArithmetic(const std::string& hlsl) {
   }
   return out;
 }
-// SPIRV-Cross cannot express this block with cbuffer packing rules: returns
-// the variable's id from its message.
 bool PackingFailure(const std::string& message, u32* id) {
   const std::string key = "cbuffer ID ";
   const size_t at = message.find(key);
@@ -234,10 +220,6 @@ bool PackingFailure(const std::string& message, u32* id) {
   return true;
 }
 
-// Integer textures cannot be sampled before SM 6.7, and sampling one is
-// always nearest: a texel fetch with the sampler's addressing. 2D textures
-// and arrays gather the 2x2 footprint at level 0 and pick the texel the
-// coordinate falls in; other levels, and 3D textures, load the clamped texel.
 void IntegerSampling(std::string& hlsl) {
   static const std::regex kDecl(
       R"((Texture(?:2D|2DArray|3D))<((?:u)?int)4> (\w+) : register)");
@@ -302,14 +284,11 @@ void IntegerSampling(std::string& hlsl) {
   hlsl = helpers + "\n" + hlsl;
 }
 
-// Constructs above the target shader model that are lowered with the newer
-// model's syntax and then rewritten.
 struct Emulation {
-  bool integer_sampling = false;  // SM 6.7
-  bool barycentrics = false;      // SM 6.1
+  bool integer_sampling = false;
+  bool barycentrics = false;
 };
 
-// SV_Barycentrics inputs become the varyings BarycentricGeometryShader adds.
 void EmulateBarycentrics(std::string& hlsl) {
   if (hlsl.find("GetAttributeAtVertex") != std::string::npos)
     throw std::runtime_error("per-vertex fragment inputs need SM 6.1");
@@ -327,8 +306,6 @@ void EmulateBarycentrics(std::string& hlsl) {
   hlsl = std::move(out);
 }
 
-// One lowering pass. Blocks in `flatten` become arrays of 16-byte rows,
-// declared inside a cbuffer at the block's register.
 std::string Lower(const u32* words,
                   size_t count,
                   const LowerOptions& options,
@@ -450,7 +427,6 @@ std::string Lower(const u32* words,
   if (model == spv::ExecutionModelVertex)
     RetypeInputs(hlsl, options);
   if (model == spv::ExecutionModelGLCompute && options.dispatch_base) {
-    // D3D12 has no dispatch base: offset the ids the shader reads.
     std::string size = "uint3(";
     for (u32 i = 0; i < 3; i++)
       size += std::to_string(compiler.get_execution_mode_argument(
@@ -468,13 +444,10 @@ std::string Lower(const u32* words,
            ")\n{\n    uint3 delta_group_base;\n};\n\n" + hlsl;
   }
   if (model == spv::ExecutionModelGeometry) {
-    // A geometry shader without inputs or outputs still names both structs.
     for (const char* name : {"SPIRV_Cross_Output", "SPIRV_Cross_Input"})
       if (hlsl.find(std::string("struct ") + name) == std::string::npos)
         hlsl = std::string("struct ") + name +
                "\n{\n    float4 delta_unused : TEXCOORD31;\n};\n\n" + hlsl;
-    // SPIRV-Cross copies gl_in[].gl_Position into gl_PositionIn but still
-    // reads the GLSL name.
     static const std::regex kGlIn(R"(gl_in\[([^\]]+)\]\.gl_Position)");
     hlsl = std::regex_replace(hlsl, kGlIn, "gl_PositionIn[$1]");
   }

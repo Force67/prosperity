@@ -2,8 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// The GDS scratchpad and the guest pages GDS copies land in.
-
 #include "gpu/render/compute_internal.h"
 
 #include <cstring>
@@ -39,14 +37,7 @@ bool ReadGds(Renderer& renderer, u32 offset, void* data, u32 bytes) {
   return true;
 }
 
-// A dword-aligned GDS write rides the open batch, ordered with the dispatches
-// around it, instead of waiting for every one of them to finish so the CPU can
-// write the mapping. UC2 resets its exposure counters this way each frame and
-// paid for the whole skinning pass with it.
-bool RecordGdsWrite(u32 offset,
-                    u32 bytes,
-                    const void* data,
-                    u32 fill_value) {
+bool RecordGdsWrite(u32 offset, u32 bytes, const void* data, u32 fill_value) {
   if ((offset | bytes) & 3u || !bytes || offset > GdsBuffer::kBytes ||
       bytes > GdsBuffer::kBytes - offset || !EnsureGdsBuffer())
     return false;
@@ -71,11 +62,6 @@ bool WriteGds(Renderer& renderer, u32 offset, const void* data, u32 bytes) {
   return true;
 }
 
-// GDS -> guest memory through the GPU, when labels can wait for it
-// (DeferLabelsToGpu): the copy lands in the guest page itself, imported on
-// demand, in queue order ahead of whatever reads it on the GPU. Our own CPU
-// readers of the bytes wait for the batch (WaitPendingGuestWrites); the
-// guest's are held back by the labels that announce them.
 base::HashMap<u64, rhi::Buffer*> g_guest_page_imports;
 bool g_labels_deferrable = false;
 
@@ -96,7 +82,7 @@ rhi::Buffer* ImportGuestPage(u64 page) {
     desc.host_pointer = reinterpret_cast<void*>(page);
     buf = Device().CreateBuffer(desc);
   }
-  g_guest_page_imports[page] = buf;  // a failed import is not retried
+  g_guest_page_imports[page] = buf;
   return buf;
 }
 
@@ -104,10 +90,10 @@ bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes) {
   const u64 page = dst & ~(kGuestPageImport - 1);
   if (!g_labels_deferrable || g_cs_failed || ((offset | bytes | dst) & 3u) ||
       !bytes || offset > GdsBuffer::kBytes ||
-      bytes > GdsBuffer::kBytes - offset || dst + bytes > page + kGuestPageImport ||
-      !EnsureGdsBuffer() || CsRangeDirtyOverlapping(dst, bytes))
+      bytes > GdsBuffer::kBytes - offset ||
+      dst + bytes > page + kGuestPageImport || !EnsureGdsBuffer() ||
+      CsRangeDirtyOverlapping(dst, bytes))
     return false;
-  // A block the GPU owns holds the newest bytes in the mirror: written there.
   if (MirrorOwnsAny(dst, dst + bytes)) {
     if (!GpuWriteGuest(dst, bytes, g_gds.buf, offset))
       return false;

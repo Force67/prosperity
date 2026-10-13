@@ -36,8 +36,6 @@ namespace {
 constexpr VkDeviceSize kImageBlockSize = 256ull * 1024 * 1024;
 constexpr u32 kSetsPerPool = 1024;
 
-// Forwards a validation message with the command label stack that names the
-// guest work which provoked it.
 VKAPI_ATTR VkBool32 VKAPI_CALL
 MessageCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                 VkDebugUtilsMessageTypeFlagsEXT,
@@ -148,7 +146,7 @@ VkImageViewType ToVkViewType(rhi::ViewDim dim) {
 }
 
 VkCompareOp ToVkCompare(rhi::CompareOp op) {
-  return static_cast<VkCompareOp>(op);  // same order as VkCompareOp
+  return static_cast<VkCompareOp>(op);
 }
 
 VkBlendFactor ToVkBlendFactor(rhi::BlendFactor f) {
@@ -212,7 +210,7 @@ VkBlendOp ToVkBlendOp(rhi::BlendOp op) {
 }
 
 VkStencilOp ToVkStencilOp(rhi::StencilOp op) {
-  return static_cast<VkStencilOp>(op);  // same order as VkStencilOp
+  return static_cast<VkStencilOp>(op);
 }
 
 VkStencilOpState ToVkStencil(const rhi::StencilFace& f) {
@@ -537,8 +535,6 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
       create(native.instance, &mi, nullptr, &messenger_);
   }
 
-  // Prefer a real GPU over a software rasteriser: discrete > integrated >
-  // virtual > CPU, unless the filter names one.
   u32 n = 0;
   vkEnumeratePhysicalDevices(native.instance, &n, nullptr);
   base::Vector<VkPhysicalDevice> devs(n);
@@ -704,8 +700,6 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
     }
   }
 
-  // robustBufferAccess: out-of-bounds storage accesses from a miscomputed
-  // guest index read 0 / drop the write instead of faulting the device.
   VkPhysicalDeviceFeatures f{};
   const VkPhysicalDeviceFeatures& a = avail.features;
   f.shaderInt64 = f12.bufferDeviceAddress;
@@ -1005,8 +999,7 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
         get_props(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                   desc.host_pointer, &hp) == VK_SUCCESS)
       bits &= hp.memoryTypeBits;
-    // Nothing maps or flushes these pages explicitly, so only a coherent
-    // type is usable.
+    // Nothing flushes these pages, so only coherent memory types work.
     type = FindMemoryType(bits, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
     import.pHostPointer = desc.host_pointer;
@@ -1029,8 +1022,7 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
           type = FindMemoryType(mr.memoryTypeBits, kHost);
         break;
       case rhi::MemoryKind::kReadback: {
-        // Cached before device-local: the CPU reads these, and an uncached
-        // read is ~30x slower.
+        // The CPU reads these, so host-cached beats device-local.
         int best = -1;
         for (u32 i = 0; i < memory_properties.memoryTypeCount; i++) {
           const VkMemoryPropertyFlags fl =
@@ -1105,7 +1097,6 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
   return gpu::rhi::Release(buffer, this);
 }
 
-// Its own memory, which another device imports whole.
 bool VulkanDevice::AllocateExported(VkImage image, Allocation& out) {
   VkMemoryRequirements mr;
   vkGetImageMemoryRequirements(native.device, image, &mr);
@@ -1750,8 +1741,6 @@ bool VulkanDevice::CommitSparse(rhi::Buffer* buffer, u64 offset, u64 bytes) {
   if (!b || !b->desc().sparse || !page || !bytes ||
       offset + bytes > b->desc().size)
     return false;
-  // Pages are carved out of blocks of this size; a block is never returned
-  // before the buffer is.
   constexpr u64 kBlock = 64ull << 20;
   base::Vector<VkSparseMemoryBind> binds;
   for (u64 at = offset & ~(page - 1); at < offset + bytes; at += page) {
@@ -1786,9 +1775,7 @@ bool VulkanDevice::CommitSparse(rhi::Buffer* buffer, u64 offset, u64 bytes) {
   }
   if (binds.empty())
     return true;
-  // Nothing the GPU already runs touches pages bound only now, so the bind is
-  // not waited for: it is ordered behind the previous bind and ahead of the
-  // next submission by a timeline of its own.
+  // Not waited for: ordered after the last bind, before the next submit.
   DELTA_ZONE("vk.commit_sparse");
   VkSparseBufferMemoryBindInfo buffer_binds{
       b->buffer, static_cast<u32>(binds.size()), binds.data()};
@@ -1897,7 +1884,6 @@ u64 VulkanDevice::Submit(rhi::CommandList* const* lists, u32 count) {
   ti.pSignalSemaphoreValues = &value;
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.pNext = &ti;
-  // Behind the sparse binds made since the last submission.
   const uint64_t sparse = sparse_value_;
   const VkPipelineStageFlags sparse_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
   if (sparse != sparse_waited_) {
@@ -1979,10 +1965,7 @@ void VulkanDevice::SavePipelineCache(bool force) {
   } else if (cache_saving_.load()) {
     return;
   }
-  // A long-lived cache is hundreds of MB (GTA:SA's is 500): wait for a
-  // compile burst to end (or a minute), and serialize and write it off the
-  // thread that ends the frame. Inline, one save stalled a frame 0.7-7 s,
-  // and the title's hang detector fires at 10.
+  // Serialised off-thread: a large save inline would trip the hang detector.
   const u64 now = NowNs();
   const u64 last_build = last_pipeline_build_ns_.load();
   if (!force && last_build <= last_cache_write_ns_)
@@ -2007,7 +1990,6 @@ void VulkanDevice::SaveAfterSlowBuild(u64 started) {
   if (now - started < 1000000000ull || pipeline_cache_path_.empty() ||
       !native.pipeline_cache)
     return;
-  // A build that lands while a save runs is picked up by one more pass.
   save_requested_.store(true);
   if (cache_saving_.exchange(true))
     return;
@@ -2036,8 +2018,7 @@ void VulkanDevice::WritePipelineCache(bool force) {
   if (vkGetPipelineCacheData(native.device, native.pipeline_cache, &size,
                              blob.data()) != VK_SUCCESS)
     return;
-  // Write-then-rename: the runner SIGKILLs the emulator, and a torn blob
-  // would cost the next run its whole cache.
+  // Write then rename: a SIGKILL must not leave a torn cache file.
   const base::String tmp =
       base::Format("{}.{}.tmp", pipeline_cache_path_, ::getpid());
   FILE* f = std::fopen(tmp.c_str(), "wb");

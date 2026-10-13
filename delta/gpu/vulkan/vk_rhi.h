@@ -3,8 +3,6 @@
  */
 #pragma once
 
-// The Vulkan implementation of rhi::Device.
-
 #include <vulkan/vulkan.h>
 
 #include "base/arch.h"
@@ -14,29 +12,23 @@
 namespace gpu::vk {
 
 struct VulkanOptions {
-  // Substring of the adapter name to prefer (DELTA_VK_GPU).
   const char* gpu_filter = nullptr;
-  bool debug_utils = false;                // names + labels for capture tools
-  const char* validation_layer = nullptr;  // enable this layer when present
+  bool debug_utils = false;
+  const char* validation_layer = nullptr;
   bool sync_validation = false;
-  bool checkpoints = false;  // VK_NV_device_diagnostic_checkpoints
-  bool unified_layouts = false;  // VK_KHR_unified_image_layouts when offered
-  // Where the driver's pipeline cache blob persists; empty disables it.
+  bool checkpoints = false;
+  bool unified_layouts = false;
   const char* pipeline_cache_path = nullptr;
-  // Receives validation-layer messages: severity, id, label stack, text.
   void (*on_message)(const char*,
                      const char*,
                      const char*,
                      const char*) = nullptr;
 };
 
-// Null when no usable device exists. Call from a plain host thread: some ICDs
-// misbehave on a guest thread.
+// Call from a host thread: some ICDs misbehave on guest threads.
 base::UniquePointer<rhi::Device> CreateVulkanDevice(
     const VulkanOptions& options);
 
-// The native objects behind the abstraction, for code that has not moved onto
-// it yet. Each takes an object the Vulkan device created.
 struct NativeDevice {
   VkInstance instance = VK_NULL_HANDLE;
   VkPhysicalDevice phys = VK_NULL_HANDLE;
@@ -61,7 +53,6 @@ VkDescriptorSet Native(rhi::BindGroup* group);
 VkPipelineLayout Native(rhi::PipelineLayout* layout);
 VkPipeline Native(rhi::Pipeline* pipeline);
 VkCommandBuffer Native(rhi::CommandList* list);
-// Queue access for code that submits outside Device::Submit.
 void LockQueue(rhi::Device* device);
 void UnlockQueue(rhi::Device* device);
 
@@ -70,7 +61,6 @@ rhi::Format FromVkFormat(VkFormat format);
 VkImageLayout ToVkLayout(rhi::TextureState state,
                          u8 aspect,
                          bool exported = false);
-// `optimal`, or GENERAL under VK_KHR_unified_image_layouts.
 VkImageLayout FixedLayout(rhi::Texture* texture, VkImageLayout optimal);
 extern bool g_unified_layouts;
 inline bool Exported(rhi::Texture* texture) {

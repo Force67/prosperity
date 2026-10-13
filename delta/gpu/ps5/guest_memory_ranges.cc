@@ -17,7 +17,6 @@
 namespace gpu::ps5 {
 namespace {
 base::Atomic<bool> g_mappings_stale{true};
-// A dispatch named an address no parsed mapping holds: parse now.
 base::Atomic<bool> g_mappings_forced{false};
 base::Atomic<bool> g_remaps_reported{false};
 u64 g_mappings_version = 0;
@@ -79,17 +78,11 @@ void MarkHostMappingsStale() {
   g_mappings_stale.store(true, base::memory_order_release);
 }
 
-// Parsing /proc/self/maps for every pointer-chasing dispatch was 6% of the
-// submit thread. With remaps reported it is parsed only after one; without,
-// once a frame, so a mapping created mid-frame is seen from the next frame, as
-// with IsReadableRangeCached.
 const base::Vector<HostMapping>& HostMappings() {
   static u64 generation = ~0ull;
   static base::Vector<HostMapping> mappings;
   static const guest::SessionReset reset_mappings(
       [] { guest::ResetResource(mappings); });
-  // Remap reports alone parse at most twice a frame: a title that remaps
-  // all frame long otherwise has the maps parsed for every dispatch.
   static u64 parsed_generation = ~0ull;
   static u32 parsed_in_frame = 0;
   if (parsed_generation != gpu::MemoryGeneration()) {
@@ -147,16 +140,12 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
     base::LockGuard<base::Mutex> lock(noted.lock);
     pools.assign(noted.ranges, noted.ranges + noted.count.load());
   }
-  // An address the shader names outside every known mapping means the
-  // mappings changed without a report: parse them again.
   const auto known = [](u64 address) {
     for (const HostMapping& m : HostMappings())
       if (address >= m.begin && address < m.end)
         return true;
     return false;
   };
-  // Once per page and frame: a pointer into nothing stays unmapped, and
-  // parsing again for it on every dispatch was 13% of the submit thread.
   static base::HashSet<u64> unmapped;
   static const guest::SessionReset reset_unmapped(
       [] { guest::ResetResource(unmapped); });
@@ -176,8 +165,6 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
                              inode = m.inode;
     const unsigned major = m.major, minor = m.minor;
     const char* perm = m.perm;
-    // Direct memory is mapped read-write and shared; a read-only view of it
-    // here is the write tracker's protection, not the guest's.
     const bool writable = perm[1] == 'w' || (inode && perm[3] == 's');
     u64 identity = inode;
     if (identity) {
@@ -194,8 +181,6 @@ base::Vector<render::GuestMemoryRange> GuestMemoryRanges(
                               ? identity
                               : host_memory::MemoryMappingIdentity(
                                     reinterpret_cast<const void*>(lo), hi - lo);
-      // Separate file-backed and tracked anonymous identity domains, and
-      // invalidate imports if the mapping's write permission changes.
       const u64 key =
           backing ? ((backing ^ (inode ? 1ull : 2ull)) * 1099511628211ull ^
                      u64(writable))

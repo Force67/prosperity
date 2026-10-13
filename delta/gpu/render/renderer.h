@@ -2,150 +2,70 @@
 
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * The renderer as the command processors see it. This header and command.h are
- * the whole surface: a command processor decodes guest packets into a DrawInfo
- * or a ComputeInfo and calls the operations below, and never names a graphics
- * API type. The backend lives entirely behind this seam (gpu/vulkan today).
- *
- * The renderer is a value the caller holds: a Renderer with a few cheap
- * queries, operated on by free functions. All backend state hangs off
- * Renderer::state (opaque here; defined by the backend), so a second backend
- * or a test double is a different BackendState behind the same operations.
- *
- * Rendering is offscreen: each draw renders into the image for its
- * DrawInfo::rt_base (a render target keyed by guest address), and EndFrame
- * reads back the target at the scanout address to present it (or dump it,
- * headless).
  */
 
 #include <cstddef>
 #include "base/arch.h"
 
-// Spelled from the delta root, the one include convention the layering check
-// (tests/check_layering.py) accepts; all modules share that include root, so
-// internal headers are kept private by the check, not by the build.
 #include "base/containers/vector.h"
 #include "base/strings/xstring.h"
 #include "gpu/render/command.h"
 
 namespace gpu::render {
 
-struct BackendState;  // owned by the backend; opaque outside it
+struct BackendState;
 
 struct Renderer {
   BackendState* state = nullptr;
 
-  // True once Init succeeded; every operation below is a no-op (or returns
-  // false) on an unavailable renderer.
-  // Chromium's cheap-accessor spelling. NOLINT: the naming check cannot
-  // distinguish accessors from functions that do work.
+  // NOLINT: cheap accessor
   bool available() const { return state != nullptr; }  // NOLINT
 };
 
-// Bring the backend up. Returns false when no usable device exists (the
-// renderer is then left unavailable and the emulator runs without graphics).
-// Idempotent: calling again on an available renderer is a no-op success.
 bool Init(Renderer& renderer);
 void StopPresentation(bool interrupt_present = true);
 void ResetSession(Renderer& renderer);
 
-// Frame lifecycle. BeginFrame starts recording; EndFrame submits, reads back
-// the render target at `scanout_base` (the flip buffer) and presents/dumps it.
 void BeginFrame(Renderer& renderer);
 void Draw(Renderer& renderer, const DrawInfo& d);
 void EndFrame(Renderer& renderer, u64 scanout_base);
 
-// Run a compute dispatch on the GPU. Returns true if it executed, false if it
-// could not be set up (the caller then skips the dispatch, as before).
 bool Dispatch(Renderer& renderer, const ComputeInfo& ci);
 
-// Compile the pipeline a dispatch of this module over `num_res` resources will
-// need, for that dispatch to pick up (or wait for) instead of compiling it
-// again. Safe from any thread.
 void PrebuildComputePipeline(const base::Vector<u32>& spirv,
                              u32 num_res,
                              int guest_memory_binding);
 
-// Write every GPU-dirty compute range back to guest memory. Must run before
-// anything reads guest memory that a dispatch may have written: draw
-// recording, CP DMA, frame end. No-op when nothing is dirty; returns false when
-// the data could not be made current.
 bool FlushCsWrites(Renderer& renderer, const char* why = "all");
-// False when no compute result still owed to guest memory can overlap the
-// range. Callable from any thread, without owning the renderer; a true may be
-// a false alarm.
 bool CsRangeMaybeDirty(u64 base, u64 bytes);
-// A render target bound for writing takes ownership of its bytes: only the
-// dirty range that is this target (starting at its base) is carried into it;
-// ranges it merely overlaps stay GPU-owned until their own reader asks.
 bool FlushCsWritesAt(Renderer& renderer, u64 base, const char* why);
-// Whether a dispatch recorded now can bind real image views: it records into
-// the frame list, where those views are transitioned and uploaded.
 bool CsBindsImages();
-// Dispatches go into the frame's command list. Only for a command processor
-// that records draws and dispatches on one thread at a time.
 void RecordComputeInFrame();
-// Flush only dirty ranges overlapping [base, base+bytes), with the same result
-// contract as FlushCsWrites.
-// `why` names the reader for the DELTA_GPU_CSSYNC report.
 bool FlushCsWritesRange(Renderer& renderer,
                         u64 base,
                         u64 bytes,
                         const char* why = "cp");
-// The same for a reader on the GPU: it reads in queue order, behind any copy
-// out to the guest pages still on its way, so only dirty ranges are flushed.
 bool FlushCsWritesForGpu(Renderer& renderer,
                          u64 base,
                          u64 bytes,
                          const char* why);
-// Before the CPU reads [base, base+bytes): wait for GPU writes on their way
-// there. False on a lost device.
 bool SettleGuestWrites(u64 base, u64 bytes, const char* why);
-// A descriptor read a GPU write is still on its way to: true when the bytes
-// the last write left may be taken without waiting (checked once it lands).
 bool SpeculateGuestRead(u64 base, u64 bytes);
-// The frame-end flush: FlushCsWrites, except that an image range only the GPU
-// reads stays in VRAM, and the open dispatch batch is submitted so the frame's
-// own command buffer lands behind it. `writeback` false submits only.
 bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback);
-// Compute ranges see guest CPU writes (DELTA_GPU_CS_TRACK and a working write
-// tracker), so a writeback never lands over newer CPU data and a reader need
-// only flush the ranges it touches.
 bool CsTracksGuestWrites();
 
-// CP transfers address the same 64 KiB GDS allocation as shader DS operations.
-// Offsets and lengths are bytes; transfers wait for preceding compute work.
 bool ReadGds(Renderer& renderer, u32 offset, void* data, u32 bytes);
 bool WriteGds(Renderer& renderer, u32 offset, const void* data, u32 bytes);
 bool FillGds(Renderer& renderer, u32 offset, u32 bytes, u32 value);
-// GDS -> guest memory, copied by the GPU into the guest page in queue order;
-// false when the caller must copy on the CPU. Only after DeferLabelsToGpu:
-// the guest must not see a label announcing the bytes before they land.
 bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes);
-// The command processor holds its fence labels back while GPU writes into
-// guest memory are pending (see GuestWritePublishBatch).
 void DeferLabelsToGpu();
-// Our own CPU readers of [base, base+bytes): wait for pending GPU writes.
 bool WaitPendingGuestWrites(u64 base, u64 bytes);
-// The compute batch after which every pending GPU write into guest memory has
-// landed; 0 when none is pending. Does not submit it.
 u64 GuestWritePublishBatch();
-// Submits what the frame and the compute batch recorded so far, without
-// waiting: the submission after which all of it has run, 0 on failure.
 u64 SubmitRecordedWork();
-// End of a command-buffer walk: submit the open batch if a held label waits
-// for it, once, instead of at every label.
 void SubmitForPublishedLabels();
-// The compute batches' state, for a stuck wait's report.
 void ReportBatchState();
-// Thread safe: blocks until compute batch `batch` was submitted and completed.
 bool WaitBatch(u64 batch);
-// Thread safe: blocks until device submission `submission` completed.
 bool WaitSubmission(u64 submission);
-// A CP DMA_DATA whose source or destination selector is GDS (1). `data` is
-// the packet's immediate dword, used when src_sel is 2 (a fill). Returns
-// whether the transfer landed.
 bool DmaGds(Renderer& renderer,
             u32 src_sel,
             u32 dst_sel,
@@ -154,80 +74,34 @@ bool DmaGds(Renderer& renderer,
             u32 bytes,
             u32 data);
 
-// Monotonic count of compute-results-became-visible-in-guest-memory events
-// (a range writeback, or an executed batch of dispatches that write guest
-// memory directly). A cached copy of guest bytes taken at generation G is
-// current iff the generation still reads G and no dirty range overlaps it.
 u64 CsWritebackGeneration();
-// Whether any GPU-dirty compute range overlaps [base, base+bytes). O(1) when
-// nothing is dirty anywhere (the common case on the draw path).
 bool CsRangeDirtyOverlapping(u64 base, u64 bytes);
-// Whether a dispatch can let the GPU read the group counts at `args`
-// (ComputeInfo::indirect_args), resident or staged behind their producer.
 bool CanDispatchIndirect(u64 args);
 
-// A CP DMA immediate fill over guest memory. When the range covers a live
-// render target that is how the title clears it (there is no clear packet on
-// this hardware), so the target takes a pending clear with the filled value.
 void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
 
-// Fill guest memory with one dword on the GPU, in command stream order (a CP
-// DMA fill, or a recognised compute fill kernel): compute output under it is
-// dropped or keeps the filled bytes, every cached copy of it is retired, and
-// NoteMemoryFill sees it.
 void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value);
 void ApplyMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value);
 bool CanClearMemoryFill64(u64 base, u64 bytes);
 void NoteMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value);
-// A CP DMA copy run on the GPU, in command stream order: for bytes a GPU
-// write is still on its way to, which the CPU would have to wait for.
 bool ApplyMemoryCopy(Renderer& renderer, u64 dst, u64 src, u64 bytes);
-// A GPU write may still be on its way to [base, base+bytes). Any thread.
 bool GuestWriteMaybePending(u64 base, u64 bytes);
-// No GPU write is pending under [base, base+bytes): the CPU reads the bytes
-// without waiting.
 bool GuestBytesSettled(u64 base, u64 bytes);
-// The CPU wrote [first, end): the guest mirror copies those blocks in again.
 void MirrorNoteGuestWrites(u64 first, u64 end, bool announced);
-// The mirror's device address for the 64 KiB guest block, copied in and
-// watched; 0 when the block stays in host memory.
 u64 MirrorCacheBlock(u64 block);
-// The cached spans the CPU wrote, collected just now, are copied in again
-// ahead of the next draw or dispatch.
 void MirrorRefreshWritten();
-// Before a submission: what the CPU may have written unwatched is copied in.
 void MirrorRefreshCached();
-// Draw arguments the GPU can read where they are: true when the mirror holds
-// them (written there by a dispatch, or copied in now), so the draw reads
-// them indirectly instead of the CPU waiting for them.
 bool GpuIndirectArgs(u64 args, u64 bytes);
-// The device draws with arguments it reads itself (DrawInfo::indirect_args).
 bool CanDrawIndirect(u32 prim_type, bool indexed);
 bool CanDrawMeshIndirect();
-// COND_EXEC over a block of draws whose flag a GPU write is still on its way
-// to: the draws until EndGuestPredicate run only when the u32 at `flag` is
-// non-zero as the GPU reaches them. False when that cannot be set up; the
-// caller then reads the flag itself.
 bool BeginGuestPredicate(u64 flag);
 void EndGuestPredicate();
 void MirrorWritesCollected();
 
-// Does `addr` fall inside a compute staging range, i.e. guest memory the
-// renderer snapshots and copies back? A guest fault on memory the guest alone
-// should own wants that answered on the spot: the crash handler asks, so a
-// corrupted heap word can be attributed to (or cleared of) the compute
-// writeback without a second run. Returns false if no range covers it;
-// otherwise fills `out` with the range's base, size and staging state.
 bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size);
 
-// The kernel's mapping-changed hook: the guest mapped or unmapped
-// [base, base+bytes), which the guest write tracker must treat as written.
 void NoteGuestRemap(u64 base, u64 bytes);
 
-// The process-wide renderer instance the command processors drive. The
-// composition root (main/main.cc) Init()s it once; the HLE submit paths reach
-// it through this accessor because the guest-called entry points cannot thread
-// a handle. The single point of ambient state at this seam.
 Renderer& DefaultRenderer();
 
 base::Vector<base::String> GraphicsBackends();

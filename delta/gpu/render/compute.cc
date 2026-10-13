@@ -2,11 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// Compute dispatches. Each guest range a CS touches gets a persistent
-// host-visible storage buffer keyed by its base address; dispatches are
-// recorded into one batched command buffer, and their writes land back in guest
-// memory lazily, only when something needs guest memory to be current.
-
 #include "gpu/render/compute_internal.h"
 
 #include <sys/mman.h>
@@ -34,80 +29,31 @@ DELTA_OPTION(bool, kCsList, "DELTA_GPU_CSLIST", false);
 DELTA_OPTION(int, kCsHist, "DELTA_GPU_CSHIST", 0);
 DELTA_OPTION(bool, kCsRtTrace, "DELTA_GPU_CSRT", false);
 DELTA_OPTION(bool, kCsRename, "DELTA_GPU_CSRENAME", false);
-// Re-bridge a render target into its compute staging buffer only when
-// something has rendered into it since the last copy. =0 restores the
-// every-frame copy if a title ever writes a target by a path last_frame does
-// not see.
 DELTA_OPTION(bool, kCsRtCache, "DELTA_GPU_CS_RT_CACHE", true);
-// Reuse a staged plain buffer when a later dispatch binds a smaller window of
-// it instead of restaging the range. =0 restores the exact-size match.
 DELTA_OPTION(bool, kCsSubset, "DELTA_GPU_CS_SUBSET", true);
-// Skip staging in a compute range the shader never reads (see the use in
-// compute_dispatch.cc).
 DELTA_OPTION(bool, kCsSkipUpload, "DELTA_GPU_CS_SKIP_UPLOAD", false);
 u64 g_cs_skip_n = 0;
-// Put compute range buffers in VRAM rather than system RAM, with a host-cached
-// mirror for the staging edges. The GPU reads and writes these every dispatch,
-// and doing that across PCIe was 282 ms of a 457 ms SotC frame. No-op on a UMA
-// part, where one buffer is already both (see SplitVram).
 DELTA_OPTION(bool, kCsVram, "DELTA_GPU_CSVRAM", true);
-// Bind the guest pages of a tiled surface straight into the tiling shader
-// instead of copying them through a staging buffer both ways. =0 restores the
-// copies for A/B.
-// A draw sampling a surface a dispatch wrote copies it VRAM->image on the
-// queue instead of writing it back to guest memory, retiling, hashing and
-// re-uploading it. =0 restores the guest round trip.
 DELTA_OPTION(bool, kCsTexBridge, "DELTA_GPU_CS_TEX_BRIDGE", true);
-// Dispatches are recorded into the frame's own command list, in walk order
-// with the draws, instead of into batches of their own.
 DELTA_OPTION(bool, kCsInFrame, "DELTA_GPU_CS_IN_FRAME", true);
-bool g_cs_in_frame = false;  // RecordComputeInFrame, where the option allows it
-// An image range a draw took straight from VRAM this frame (CsSupplyTexture)
-// stays there at frame end instead of being retiled into guest memory; a
-// guest reader that does turn up (CP DMA, a reshaped dispatch, a vertex
-// fetch) still gets the writeback on demand. Ranges with any other consumer
-// are written back at frame end as before: one batch wait then covers them
-// all, where deferring them costs a wait per reader next frame (measured 24 ->
-// 32 syncs a frame in Demon's Souls). The risk is a guest CPU read through
-// none of those hooks.
+bool g_cs_in_frame = false;
 DELTA_OPTION(bool, kCsImageLazyWb, "DELTA_GPU_CS_IMAGE_LAZY_WB", true);
-// A range holding a gfx10 image footprint keeps the guest bytes as they are
-// (tiled). An image binding reads a detiled scratch the tiling shader fills
-// inside the batch, and what it writes is retiled back the same way; a plain
-// buffer view of the same memory binds the same bytes. No CPU ever tiles, a
-// writeback is a copy, and a descriptor's shape stops mattering. =0 restores
-// per-shape linear staging.
 DELTA_OPTION(bool, kCsTruth, "DELTA_GPU_CS_TRUTH", true);
 DELTA_OPTION(bool, kCsMergeOverlap, "DELTA_GPU_CS_MERGE_OVERLAP", true);
 DELTA_OPTION(bool, kCsKeepOverlap, "DELTA_GPU_CS_KEEP_OVERLAP", true);
-// Dispatches per batch submit. Small batches are what makes the asynchronous
-// ring pay: a reader then waits for a few dispatches' worth of GPU work,
-// usually already done, instead of a frame's worth.
 DELTA_OPTION(u32, kCsBatchCap, "DELTA_GPU_CS_BATCH_CAP", 8);
-// Why a sampled surface a dispatch wrote still takes the guest round trip.
 DELTA_OPTION(bool, kCsTexBridgeTrace, "DELTA_GPU_CS_TEXBRIDGE_TRACE", false);
 DELTA_OPTION(u64, kCsFlushTrace, "DELTA_GPU_CSFLUSHTRACE", 0);
-// DELTA_GPU_CSOVERLAP=<frame>: from that frame on, name the binding and the
-// dirty range behind the next "overlap" writebacks (a dispatch input
-// straddling another's unflushed output).
 DELTA_OPTION(int, kCsOverlapTrace, "DELTA_GPU_CSOVERLAP", 0);
 DELTA_OPTION(bool, kCsSyncReport, "DELTA_GPU_CSSYNC", false);
 DELTA_OPTION(int, kCsSyncFrom, "DELTA_GPU_CSSYNC_FROM", 0);
-// Every guest read that writes dispatch output back, and its cost, from this
-// frame on (a few frames' worth).
 DELTA_OPTION(int, kCsFlushFrom, "DELTA_GPU_CSFLUSH_FROM", 0);
-// Off by default: with the CP DMA flush narrowed, ranges a dispatch rewrites
-// every frame stay dirty indefinitely, and GTA:SA then shows ghosted
-// post-processing (DELTA_GPU_CS_AGED lists those ranges). Some reader of them
-// still misses its flush; the global DMA flush hides it.
 DELTA_OPTION(bool, kCsTrack, "DELTA_GPU_CS_TRACK", false);
 DELTA_OPTION(bool, kCsAged, "DELTA_GPU_CS_AGED", false);
 bool CsSyncReporting() {
   return kCsSyncReport && gpu::render::g_frame.num >= kCsSyncFrom;
 }
 
-// Writeback-half accounting (DELTA_GPU_CSSYNC), counting what the aliased-image
-// bridge (compute_alias.cc) does among others.
 u64 g_tex_bridge_n = 0, g_tex_bridge_bytes = 0, g_cs_chunk_splits = 0;
 u64 g_buf_bridge_n = 0, g_buf_bridge_bytes = 0, g_buf_bridge_declined = 0;
 u64 g_vtx_bridge_n = 0;
@@ -130,22 +76,15 @@ base::HashSet<u64> g_mirror_was_owned;
 base::Map<u64, u64> g_mirror_wb_union;
 DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", true);
 DELTA_OPTION(bool, kCsListProf, "DELTA_GPU_LISTPROF", false);
-// Staging-in halves: hashing guest memory to decide validity, CPU detiling,
-// the render-target bridge (its own submit+wait), and the plain copy.
 u64 g_in_hash_ns = 0, g_in_detile_ns = 0, g_in_rt_ns = 0, g_in_copy_ns = 0;
 u64 g_in_hash_n = 0, g_in_rt_n = 0, g_in_wt_skips = 0;
 u64 g_in_hash_bytes = 0, g_wb_hash_bytes = 0, g_wb_hash_ns = 0;
-// The rest of a stage-in: writebacks forced by an overlapping dirty range or a
-// reshape (each a GPU wait plus a retile), buffer allocation, the plain guest
-// memcpy and its shadow copy. Without these `in=` is mostly unattributed.
 u64 g_in_overlap_ns = 0, g_in_reshape_ns = 0, g_in_alloc_ns = 0;
 u64 g_in_membuf_ns = 0;
 u64 g_in_overlap_n = 0, g_in_reshape_n = 0, g_in_alloc_n = 0;
 u64 g_truth_stage_bytes = 0, g_truth_import_n = 0, g_truth_detile_n = 0,
     g_truth_retile_n = 0, g_truth_parent_n = 0, g_truth_fold_n = 0,
     g_truth_rt_n = 0;
-// Who forced each writeback: the reader tag of FlushCsWritesRange, or one of
-// the internal sites.
 base::Map<base::String, u64> g_wb_why;
 u64 g_wb_why_bytes = 0;
 u64 g_lazy_kept_n = 0, g_lazy_kept_bytes = 0;
@@ -175,9 +114,6 @@ GdsBuffer g_gds;
 
 base::HashMap<u64, CsPipe> g_cs_pipes;
 
-// A buffer the GPU alone touches goes to VRAM, with a separate host mirror,
-// only when the device heap is NOT already cheap for the CPU to read. On a UMA
-// part one host-cached buffer serves both sides.
 bool SplitVram() {
   const bool split = !Device().caps().unified_memory;
   static bool logged = false;
@@ -190,9 +126,6 @@ bool SplitVram() {
   return split;
 }
 
-// kReadback is the host-cached memory the CPU side of compute wants: reading
-// back from a write-combined heap is ~100 MB/s, which is invisible in the code
-// and obvious in the numbers.
 rhi::Buffer* CreateCsBuffer(u64 size, u32 usage, rhi::MemoryKind memory) {
   rhi::BufferDesc desc;
   desc.size = size;
@@ -201,7 +134,6 @@ rhi::Buffer* CreateCsBuffer(u64 size, u32 usage, rhi::MemoryKind memory) {
   return Device().CreateBuffer(desc);
 }
 
-// The set-0 layout every compute pipeline over `num_res` guest ranges uses.
 rhi::BindGroupLayout* CsSetLayout(u32 num_res,
                                   int gds_binding,
                                   int guest_memory_binding,
@@ -215,7 +147,6 @@ rhi::BindGroupLayout* CsSetLayout(u32 num_res,
   for (u32 i = 0; i < num_res; i++)
     desc.bindings.push_back(
         {i, rhi::BindingType::kStorageBuffer, rhi::kStageCompute});
-  // The GDS scratchpad sits past the resources; it is ours, not a guest range.
   if (gds_binding >= 0)
     desc.bindings.push_back({static_cast<u32>(gds_binding),
                              rhi::BindingType::kStorageBuffer,
@@ -227,10 +158,6 @@ rhi::BindGroupLayout* CsSetLayout(u32 num_res,
   return Device().CreateBindGroupLayout(desc);
 }
 
-// 16 user-data dwords, then one bound (in dwords) per SSBO binding. The bound
-// is what the emitted SSBO accesses clamp to; the SPIR-V block for a compute
-// stage declares the same 16 + 48 shape, 256 B total, the driver max this
-// backend runs against.
 rhi::PipelineLayout* CsPipelineLayout(rhi::BindGroupLayout* set_layout) {
   rhi::PipelineLayoutDesc desc;
   desc.groups = {set_layout};
@@ -298,7 +225,7 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   }
   cp.set_layout =
       CsSetLayout(ci.num_res, ci.gds_binding, ci.recomp->guest_memory_binding,
-                              ci.recomp->textures);
+                  ci.recomp->textures);
   if (!cp.set_layout)
     return nullptr;
   cp.layout = CsPipelineLayout(cp.set_layout);
@@ -334,33 +261,17 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
 }
 
 CsStage g_cs_stage[ComputeInfo::kMaxResources];
-// The open batch's command list.
 rhi::CommandList* g_cs_list = nullptr;
 
-// `packed`: narrow texels stay packed on the linear side (a texture upload)
-// instead of being expanded to dwords (a shader view).
-// A scratch that already holds revision `seq` of the bytes at `base`+`off`
-// converted with `table`, or a fresh one (`*fresh` says which).
-// What a scratch holds once the conversion recorded into it has run.
-// Whether the open batch records into a list of its own (between frames).
-// The linear side of a bridge copy for a truth range (its own buffer holds
-// tiled bytes), used only inside the bridge's synchronous submit.
-u64 g_cs_scratch_owner = 0;  // the dispatch or bridge being recorded
+u64 g_cs_scratch_owner = 0;
 u64 g_cs_scratch_bytes = 0;
 
-// Buffers a frame command list reads: destroyed two BeginFrames after
-// retirement, like ReleaseRetiredTextures, once every command list that
-// could reference them has retired.
 base::Vector<rhi::Buffer*> g_cs_frame_retired;
 
 bool CsFrameReferenced(const CsRange& e) {
   return e.frame_ref >= 0 && e.frame_ref + 2 > g_frame.num;
 }
 
-// Evicted range buffers kept by capacity for the next range of that size.
-// The guest hands compute a fresh address for its per-frame data every
-// frame, so without this every frame was ~50 buffer+memory pairs allocated
-// and 20-60 ms of driver time.
 struct CsFreeBuffer {
   rhi::Buffer* buf = nullptr;
   u64 cap = 0;
@@ -369,11 +280,6 @@ struct CsFreeBuffer {
 base::Vector<CsFreeBuffer> g_cs_free;
 u64 g_cs_free_bytes = 0, g_cs_recycled_n = 0;
 
-// Move a split range between its host mirror and its VRAM buffer, bracketed by
-// barriers against the dispatches on either side. Recorded rather than
-// submitted, so the caller decides which command list carries it.
-// The GDS scratchpad, created once. Zeroed at creation; after that it is the
-// title's own counter store, so nothing here resets it.
 bool EnsureGdsBuffer() {
   if (g_gds.buf)
     return true;
@@ -404,9 +310,6 @@ base::HashMap<u64, CsRange>::iterator EraseCsRange(
   return g_cs_ranges.erase(it);
 }
 
-// Device memory ran out: give back the recycled buffers and every range no
-// dispatch has touched for a few frames, instead of dropping the dispatch.
-// `keep` is the range being allocated for. True when anything was released.
 bool CsReleaseMemory(const CsRange& keep) {
   const auto drop_free_list = [] {
     const bool any = !g_cs_free.empty();
@@ -428,8 +331,6 @@ bool CsReleaseMemory(const CsRange& keep) {
     evicted += r.cap;
     it = EraseCsRange(it);
   }
-  // CsRangeDestroy parks what it frees for reuse; that is the opposite of
-  // what is wanted here.
   drop_free_list();
   static int logged = 0;
   if (logged++ < 16)
@@ -468,16 +369,11 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
     g_cs_recycled_n++;
     return true;
   }
-  // CopyDst: RT-backed inputs are staged by an image->buffer copy on the
-  // queue (StageCsRangeFromRtInFrame) instead of a CPU memcpy from guest
-  // memory.
-  // Vertex: a draw may fetch a dispatch's output in place (CsGeometryBuffer).
   u32 usage = rhi::kBufferStorage | rhi::kBufferUniform | rhi::kBufferCopyDst |
               rhi::kBufferVertex | rhi::kBufferIndirect | rhi::kBufferIndex;
-  // A pointer-chasing dispatch may read the range in place (GuestOverrides).
   if (Device().caps().buffer_address)
     usage |= rhi::kBufferAddress;
-  usage |= rhi::kBufferCopySrc;  // the write-back copies out of it
+  usage |= rhi::kBufferCopySrc;
   const bool split = kCsVram && SplitVram();
   const rhi::MemoryKind memory =
       split ? rhi::MemoryKind::kDevice : rhi::MemoryKind::kReadback;
@@ -491,16 +387,6 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
   return true;
 }
 
-// DELTA_GPU_CSRENAME: a CPU write into a range the open batch already reads has
-// to flush that batch and wait on the GPU. SotC's streaming does that 37 times
-// a frame, and staging then costs 272 ms of a 2 fps frame. Giving the range a
-// FRESH buffer and retiring the old one until the batch completes takes that to
-// 24 ms: the recorded descriptors keep reading the contents they were built
-// against, and this dispatch binds the new one. Only safe while nothing is
-// waiting to read results back OUT of the old buffer, hence the caller's
-// gpu_dirty/written check. Default OFF: it moves cost into the writeback rather
-// than removing it (SotC gains ~7% overall), and no title that currently
-// renders through the compute path could be used to gate the change.
 bool CsRangeRename(CsRange& e, u64 size) {
   if (e.buf)
     g_cs_frame_retired.push_back(e.buf);
@@ -533,7 +419,6 @@ void CsRangeDestroy(CsRange& e) {
   e = CsRange{};
 }
 
-// Ensure staging slot i can hold `size` bytes (grow-on-demand, kept mapped).
 bool CsEnsureStage(u32 i, u64 size) {
   GPU_BUGCHECK(i < ComputeInfo::kMaxResources, "stage index %u out of bounds",
                i);
@@ -541,13 +426,10 @@ bool CsEnsureStage(u32 i, u64 size) {
   if (s.buf && s.cap >= size)
     return true;
   s.map = nullptr;
-  // A batch in flight may still bind the old scratch: it outlives the frame.
   if (s.buf)
     g_cs_frame_retired.push_back(s.buf);
   s.buf = nullptr;
-  const u64 cap = (size + 0xFFFFF) & ~u64(0xFFFFF);  // 1 MiB granularity
-  // Scratch is zeroed by FillBuffer and only ever touched by shaders, so it
-  // wants VRAM and no mapping at all.
+  const u64 cap = (size + 0xFFFFF) & ~u64(0xFFFFF);
   const bool vram = kCsVram && SplitVram();
   s.buf = CreateCsBuffer(
       cap, rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferCopySrc,

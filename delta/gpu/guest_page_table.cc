@@ -10,7 +10,6 @@
 namespace gpu {
 
 GuestPageTable& GuestPages() {
-  // Never destroyed: the renderer thread may still ask at exit.
   static GuestPageTable* table = new GuestPageTable;
   return *table;
 }
@@ -45,8 +44,6 @@ GuestPageTable::Chunk* GuestPageTable::ChunkAt(u64 address) {
   Chunk* chunk = chunks_[index].load(base::memory_order_acquire);
   if (chunk)
     return chunk;
-  // Zero pages are default records. Reserved only: a chunk costs what its
-  // written records occupy.
   void* p = mmap(nullptr, sizeof(Chunk), PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (p == MAP_FAILED)
@@ -81,7 +78,7 @@ bool GuestPageTable::CountClear(Count count, u64 first, u64 end) const {
   const u64 last = (end - 1) >> kBlockShift;
   for (u64 block = first >> kBlockShift; block <= last;) {
     const Chunk* chunk = FindChunk(block << kBlockShift);
-    if (!chunk) {  // nothing was ever dirty in this chunk
+    if (!chunk) {
       block = (block | (kBlocksPerChunk - 1)) + 1;
       continue;
     }

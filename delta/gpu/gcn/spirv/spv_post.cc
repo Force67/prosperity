@@ -1,7 +1,5 @@
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * SPIRV-Tools optimize + validate wrapper. See spv_post.h.
  */
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
@@ -55,17 +53,7 @@ namespace gpu::gcn::spirv {
 using gpu::NowNs;
 
 namespace {
-// DELTA_GPU_SPIRV_OPT: 2 = legalize + performance passes, 1 = legalize only,
-// 0 = neither. Legalization (mem2reg over the Private-storage register file) is
-// not a speed choice: without it the module is a load/store stream over 512
-// variables, and whoever compiles it pays. Turning it off moved 22.6 s of
-// Shadow of the Colossus's first minute out of spirv-opt and straight into the
-// driver, at 626 ms a pipeline. The performance passes on top are the part that
-// is optional.
 DELTA_OPTION(u32, kOptLevel, "DELTA_GPU_SPIRV_OPT", 2);
-// Threads that build pipelines for PostShaderWork; 0 = a quarter of the
-// hardware threads. They are not the optimizer's: a driver compile can take
-// seconds, and the submit thread waits on optimizer jobs queued behind it.
 DELTA_OPTION(u32, kCompilerThreads, "DELTA_GPU_COMPILER_THREADS", 0);
 }  // namespace
 
@@ -86,30 +74,22 @@ base::Vector<u32> Optimize(const base::Vector<u32>& spv) {
     if (lvl <= SPV_MSG_WARNING)
       BASE_LOGI("spv-opt", "{}", msg);
   });
-  // The register file is two Private arrays. Scalar replacement only splits
-  // arrays of up to 100 elements by default, and the VGPR file has 256, so
-  // every register access stayed a memory access in the finished shader.
   opt.RegisterPass(spvtools::CreatePrivateToLocalPass());
   opt.RegisterPass(spvtools::CreateScalarReplacementPass(0));
   opt.RegisterPass(spvtools::CreateLocalSingleBlockLoadStoreElimPass());
   opt.RegisterPass(spvtools::CreateLocalSingleStoreElimPass());
   opt.RegisterPass(spvtools::CreateSSARewritePass());
   opt.RegisterPass(spvtools::CreateAggressiveDCEPass());
-  // Not the stock legalization + performance recipes: they run ADCE 13 times
-  // and redundancy elimination twice, and cost twice this for the same output
-  // size. Everything we emit is one function (plus DontInline helpers), so
-  // their inlining and return merging have nothing to do.
   if (kOptLevel >= 2) {
     opt.RegisterPass(spvtools::CreateSimplificationPass());
     opt.RegisterPass(spvtools::CreateRedundancyEliminationPass());
     opt.RegisterPass(spvtools::CreateAggressiveDCEPass());
   }
-  // SPIRV-Tools hands the result back in a std::vector.
   std::vector<u32> out;
   spvtools::OptimizerOptions options;
-  options.set_run_validator(false);  // Finalize validated it already
+  options.set_run_validator(false);
   if (!opt.Run(spv.data(), spv.size(), &out, options) || out.empty())
-    return spv;  // keep the valid-but-unoptimized binary on failure
+    return spv;
   return base::Vector<u32>(out.data(), out.data() + out.size());
 }
 
@@ -118,8 +98,6 @@ bool Validate(const base::Vector<u32>& spv, base::String* err) {
   spv_context ctx = spvContextCreate(env);
   spv_diagnostic diag = nullptr;
   spv_const_binary_t bin{spv.data(), spv.size()};
-  // Friendly names only decorate error messages, but the mapper is built for
-  // every module up front.
   spv_validator_options options = spvValidatorOptionsCreate();
   spvValidatorOptionsSetFriendlyNames(options, false);
   spv_result_t r = spvValidateWithOptions(ctx, options, &bin, &diag);
@@ -138,32 +116,24 @@ DELTA_OPTION(const char*,
              kShaderCacheDir,
              "DELTA_GPU_SHADER_CACHE_DIR",
              nullptr);
-// DELTA_GPU_SPV_RAW_DUMP=<dir>: every module as it reaches the optimizer, for
-// trying pass pipelines offline (spirv-opt) against what we really emit.
 DELTA_OPTION(const char*, kRawDump, "DELTA_GPU_SPV_RAW_DUMP", nullptr);
 
-// Bump when anything that changes the optimizer's OUTPUT changes: the pass
-// list here, or the SPIRV-Tools version the build links. Entries from an older
-// generation are never looked up.
 constexpr u32 kCacheGeneration = 3;
 
 u64 HashWords(const base::Vector<u32>& w) {
-  u64 h = 1469598103934665603ull;  // FNV-1a
+  u64 h = 1469598103934665603ull;
   for (u32 x : w) {
     h ^= x;
     h *= 1099511628211ull;
   }
   h ^= kCacheGeneration;
   h *= 1099511628211ull;
-  // The pass set is part of what produced the entry, so it is part of the key:
-  // otherwise a run at one DELTA_GPU_SPIRV_OPT level silently serves modules
-  // built at another.
+  // Entries built at another opt level must not be served.
   h ^= kOptLevel.get();
   h *= 1099511628211ull;
   return h;
 }
 
-// The cache directory, created on first use. Empty means "no cache".
 const base::String& CacheDir() {
   static const base::String kDir = [] {
     if (!kShaderCache)
@@ -178,7 +148,6 @@ const base::String& CacheDir() {
     } else {
       return base::String();
     }
-    // mkdir -p over the components we own.
     for (size_t i = 1; i <= d.size(); i++)
       if (i == d.size() || d[i] == '/')
         ::mkdir(d.substr(0, i).c_str(), 0755);
@@ -215,8 +184,6 @@ bool ReadEntry(u64 key, base::Vector<u32>* out) {
   return ok;
 }
 
-// Write through a temporary + rename, so a torn file is never observed: two
-// processes recompiling the same shader is normal.
 void WriteEntry(u64 key, const base::Vector<u32>& spv) {
   if (CacheDir().empty() || spv.empty())
     return;
@@ -254,10 +221,6 @@ Finalized RunFinalize(const base::Vector<u32>& spv, u64 key) {
   return f;
 }
 
-// Finalize jobs started ahead of the draw that needs them. A level's first
-// frame can bring hundreds of new shaders, and optimizing them one after the
-// other on the submit thread stalled it for minutes while every other core
-// sat idle.
 class FinalizePool {
  public:
   FinalizePool(u32 threads, const char* name) {
@@ -274,8 +237,6 @@ class FinalizePool {
     pending_.emplace(key, task->get_future().share());
     queue_.push_back([this, task, key] {
       (*task)();
-      // Once the disk cache holds the result a later Finalize reads it there;
-      // a module the prefetch guessed and no draw asked for is not kept.
       if (!CacheDir().empty()) {
         base::LockGuard<base::Mutex> lock(mutex_);
         pending_.erase(key);
@@ -284,7 +245,6 @@ class FinalizePool {
     ready_.NotifyOne();
   }
 
-  // Run `then` on a worker with the optimized module, once there is one.
   void Then(const base::Vector<u32>& spv,
             u64 key,
             base::Function<void(const base::Vector<u32>&)> then) {
@@ -293,8 +253,6 @@ class FinalizePool {
     std::shared_future<Finalized> job;
     if (it != pending_.end())
       job = it->second;
-    // FIFO: the job this waits on was queued earlier, so some worker already
-    // holds it.
     queue_.push_back([spv, key, job, then = base::move(then)] {
       if (job.valid()) {
         if (job.get().valid)
@@ -319,7 +277,6 @@ class FinalizePool {
     ready_.NotifyOne();
   }
 
-  // The job for `key`, handed over once: afterwards the disk cache has it.
   bool Take(u64 key, std::shared_future<Finalized>* out) {
     base::LockGuard<base::Mutex> lock(mutex_);
     const auto it = pending_.find(key);
@@ -381,8 +338,9 @@ FinalizePool& Pool() {
 FinalizePool* g_pipeline_pool = nullptr;
 FinalizePool& PipelinePool() {
   static FinalizePool* pool = [] {
-    const u32 n = kCompilerThreads ? kCompilerThreads.get()
-                                   : base::Max(2u, std::thread::hardware_concurrency() / 4);
+    const u32 n = kCompilerThreads
+                      ? kCompilerThreads.get()
+                      : base::Max(2u, std::thread::hardware_concurrency() / 4);
     auto* pool = new FinalizePool(n, "pipe_build");
     g_pipeline_pool = pool;
     return pool;
@@ -470,7 +428,7 @@ bool Finalize(const base::Vector<u32>& spv,
 
 }  // namespace gpu::gcn::spirv
 
-#endif  // DELTA_HAVE_SPIRV_BACKEND
+#endif
 
 namespace gpu::gcn {
 void ResetShaderWork() {

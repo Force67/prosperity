@@ -1,8 +1,5 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * One draw, from gfx10.3 registers and descriptors to the renderer. See
- * draw_state.h.
  */
 
 #include "gpu/ps5/draw_state.h"
@@ -36,10 +33,6 @@ DELTA_OPTION(bool, kRecompOn, "DELTA_PS5_RECOMP", true);
 DELTA_OPTION(u64, kSkipVs, "DELTA_PS5_SKIPVS", 0);
 DELTA_OPTION(u32, kUdBase, "DELTA_PS5_UDBASE", 8);
 DELTA_OPTION(bool, kGsIsVs, "DELTA_PS5_GSVS", false);
-// DELTA_GPU_CBRESOLVE=1: once per shader, how many of the cbuffer
-// bindings the recompiler planned actually resolved to readable guest
-// memory. A shader whose constants all read zero is indistinguishable
-// in the output from one that computed zero.
 DELTA_OPTION(bool, kCbResolve, "DELTA_GPU_CBRESOLVE", false);
 DELTA_OPTION(bool, kDimTrace, "DELTA_GPU_TEXDIM", false);
 }  // namespace
@@ -52,14 +45,6 @@ constexpr u32 kMaxAttrs = 8;
 
 using ResolvedBuffers = base::HashMap<u32, rdna::BufferResource>;
 
-// --- render-target dimensions ----------------------------------------------
-
-// Derived from the viewport the title programmed: the target spans
-// [center-halfSize, center+halfSize] where halfSize = |VPORT_xSCALE|. The
-// screen scissor is a "no-clip" max (e.g. 16384) and is NOT the target size.
-// Reading the viewport keeps this title-agnostic (no fixed default resolution);
-// a 0 scale (no viewport yet) yields 0 so the draw is skipped until real state
-// is set.
 u32 FbDim(const Regs& regs, u32 scale_reg) {
   float s;
   std::memcpy(&s, regs.At(scale_reg), 4);
@@ -68,11 +53,8 @@ u32 FbDim(const Regs& regs, u32 scale_reg) {
   return static_cast<u32>(s * 2.0f + 0.5f);
 }
 
-// CB_COLOR0_ATTRIB2 carries the bound target's real size (MIP0_WIDTH-1 in
-// [27:14], MIP0_HEIGHT-1 in [13:0]). Titles whose context state arrives as AGC
-// state blocks never program the viewport registers, so the scale-derived size
-// reads 0 and every draw is skipped for a zero-sized target; the target's own
-// dimensions are the authority in that case.
+// AGC state blocks never program the viewport, so the target's own MIP0 size is
+// authoritative.
 u32 SurfaceDim(const Regs& regs, int rt, bool want_width) {
   const u32 a2 = regs[mmCB_COLOR0_ATTRIB2 + rt * kCbColorExtStride];
   if (!a2)
@@ -99,19 +81,12 @@ u32 UserSgprCount(u32 rsrc2) {
   return base::Min(count, 32u);
 }
 
-// The T#'s four DST_SEL channel selects, packed 3 bits each for the renderer's
-// image view. The identity selection (R,G,B,A) packs to 0 so views that need no
-// swizzle keep sharing one cache entry.
 u32 PackDstSel(const gcn::TImage& t) {
   const u32 p = (t.dst_sel[0] & 7) | ((t.dst_sel[1] & 7) << 3) |
                 ((t.dst_sel[2] & 7) << 6) | ((t.dst_sel[3] & 7) << 9);
   return p == (4u | (5u << 3) | (6u << 6) | (7u << 9)) ? 0u : p | (1u << 12);
 }
 
-// --- shader addresses ------------------------------------------------------
-
-// The programs a draw runs, and the user-data window each reads its descriptors
-// out of.
 struct ShaderBinding {
   u64 vs_addr = 0;
   u64 ps_addr = 0;
@@ -121,12 +96,6 @@ struct ShaderBinding {
   const u32* ps_user_data = nullptr;
 };
 
-// Some titles leave the fixed GS/PS PGM_LO/HI registers reading 0. Fallback:
-// scan the SH register block for PGM pairs whose address is a 256-aligned
-// GPU-aperture pointer to plausible RDNA2 ISA. It is proven that for the
-// titles that need this, NO register in the file points at shader code (the
-// AGC binds them outside the PM4 stream), so this stays inert until that path
-// is decoded, and the probes it feeds are what will decode it.
 void RecoverShaderAddresses(const Regs& regs, ShaderBinding& binding) {
   u64 found[16];
   u32 found_reg[16];
@@ -137,7 +106,7 @@ void RecoverShaderAddresses(const Regs& regs, ShaderBinding& binding) {
       return;
     const u32 word0 = *reinterpret_cast<const u32*>(a);
     if ((word0 >> 24) < 0x7e || word0 == 0xffffffffu)
-      return;  // ISA plausibility
+      return;
     for (u32 k = 0; k < nf; k++)
       if (found[k] == a)
         return;
@@ -160,14 +129,7 @@ void RecoverShaderAddresses(const Regs& regs, ShaderBinding& binding) {
 ShaderBinding ResolveShaderBinding(const Regs& regs) {
   ShaderBinding binding;
   // gfx10.3 has no HW VS: the vertex program is the merged NGG shader, whose
-  // address is written to the ES (front half) and/or GS (back half) PGM_LO.
-  // The ES slot is the VERTEX program. Usually both slots hold the same merged
-  // address and the choice does not matter, but a pass whose GS half is a
-  // primitive shader programs them separately, and the GS program then reads
-  // its vertices back out of LDS after the ES half filled it, which as a Vulkan
-  // vertex shader exports a degenerate position (Astro Bot's fullscreen passes
-  // are all of that shape). DELTA_PS5_GSVS=1 restores the old preference for a
-  // bisect.
+  // PGM_LO sits in ES and/or GS.
   const u64 es_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES);
   const u64 gs_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_GS);
   binding.vs_addr = kGsIsVs ? gs_addr : es_addr;
@@ -178,9 +140,6 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
   binding.gs_addr = gs_addr;
   TraceNggState(regs, es_addr, gs_addr);
 
-  // A pipeline that only populates the ES half leaves the GS user-data window
-  // empty, and then every cbuffer and texture the vertex stage names resolves
-  // against zeros. Take the half that actually holds something.
   const u32* gs_user_data = regs.At(mmSPI_SHADER_USER_DATA_GS_0);
   const u32* es_user_data = regs.At(mmSPI_SHADER_USER_DATA_ES_0);
   bool gs_populated = false;
@@ -196,16 +155,6 @@ ShaderBinding ResolveShaderBinding(const Regs& regs) {
   return binding;
 }
 
-// --- packet decode ---------------------------------------------------------
-
-// DRAW_INDEX_2 carries the buffer inline (maxSize, baseLo, baseHi, index_count,
-// initiator); DRAW_INDEX_OFFSET_2 (maxSize, index_offset, index_count,
-// initiator) indexes the buffer INDEX_BASE last set, starting index_offset
-// indices in. Minecraft draws its world geometry almost entirely with the
-// latter (291k packets a run against 33k AUTO), and leaving it undecoded left
-// every one of those draws with no index buffer and a vertex count taken from
-// the V#'s num_records, a shared ~210k-record ring, so they all tripped the
-// vertex-count cap and were dropped.
 void ResolveIndexBuffer(const DrawPacket& packet, render::DrawInfo& d) {
   const u64 index_size = packet.index_type == 1   ? 4
                          : packet.index_type == 2 ? 1
@@ -237,10 +186,8 @@ void ResolveIndexBuffer(const DrawPacket& packet, render::DrawInfo& d) {
   TraceIndexBuffer(packet.op, d, index_size);
 }
 
-// --- register state --------------------------------------------------------
-
-// Bind CB_COLORn only when its write mask and INFO format are valid: a stale
-// base remains programmed during depth-only passes.
+// A stale base stays programmed during depth-only passes, so a target is bound
+// only when its mask and format are valid.
 void ResolveRenderTargets(const Regs& regs, render::DrawInfo& d) {
   d.rt_w = FbWidth(regs);
   d.rt_h = FbHeight(regs);
@@ -253,19 +200,12 @@ void ResolveRenderTargets(const Regs& regs, render::DrawInfo& d) {
       d.mrt_base[rt] = base;
       d.mrt_info[rt] = info;
       d.mrt_count = rt + 1;
-      // Each target carries its own geometry, while rt_w/rt_h come from the
-      // viewport and only say how much of it this pass draws into. Without
-      // this a half-resolution pass into a full-size target reads as a
-      // half-size target, which aliases the address to a second image the
-      // full-size passes never see.
       d.mrt_surf_w[rt] = SurfaceDim(regs, rt, true);
       d.mrt_surf_h[rt] = SurfaceDim(regs, rt, false);
       d.mrt_clear_word[rt][0] =
           regs[mmCB_COLOR0_CLEAR_WORD0 + rt * kCbColorStride];
       d.mrt_clear_word[rt][1] =
           regs[mmCB_COLOR0_CLEAR_WORD1 + rt * kCbColorStride];
-      // INFO.DCC_ENABLE[28]: without it the DCC base is whatever was last
-      // programmed and a write over it means nothing for this target.
       if ((info >> 28) & 1u) {
         const u64 dcc =
             ((static_cast<u64>(regs[mmCB_COLOR0_DCC_BASE_EXT + rt]) << 32) |
@@ -278,12 +218,6 @@ void ResolveRenderTargets(const Regs& regs, render::DrawInfo& d) {
   }
   d.rt_base = d.mrt_count ? d.mrt_base[0] : 0;
 
-  // A draw whose target mask asks for colour but whose CB_COLOR0_INFO reads
-  // zero keeps the last target that was valid. Skyrim's logo and menu passes
-  // are bound through a path we do not see yet (the driver's default-state
-  // block zeroes CB_COLOR0 and only some passes get a re-bind), and dropping
-  // them entirely is certainly wrong where reusing the target is only maybe.
-  // DELTA_GPU_NOSTICKYRT restores the drop.
   static u64 last_base = 0;
   static u32 last_info = 0, last_w = 0, last_h = 0;
   if (d.mrt_count) {
@@ -302,7 +236,6 @@ void ResolveRenderTargets(const Regs& regs, render::DrawInfo& d) {
     TraceNoRenderTarget(regs, target_mask);
 }
 
-// Per-MRT blend (CB_BLENDn_CONTROL, bit 30 = enable).
 void ResolveColorState(const Regs& regs, render::DrawInfo& d) {
   d.blend_control = regs[mmCB_BLEND0_CONTROL];
   d.blend_enable = (d.blend_control >> 30) & 1u;
@@ -320,25 +253,17 @@ void ResolveColorState(const Regs& regs, render::DrawInfo& d) {
     std::memcpy(&d.blend_constants[c], &raw, sizeof(float));
   }
   d.target_mask = regs[mmCB_TARGET_MASK];
-  // CB_SHADER_MASK is deliberately NOT read here. On the AGC path it does not
-  // track the draw: it reads 0xf against a 0x737 target mask (which would mask
-  // two live G-buffer targets off) and 0xff against 0x7 (wider than the targets
-  // exist), i.e. it is whatever the last state block left. The recompiler's own
-  // ps_mrt_mask already masks the targets the shader does not export to.
+  // CB_SHADER_MASK is not read: on the AGC path it reflects the last state
+  // block, not this draw.
   d.color_control = regs[mmCB_COLOR_CONTROL];
 }
 
-// Depth/stencil (gfx10 Z base = (WRITE_BASE | WRITE_BASE_HI<<32) << 8). Mirrors
-// the PS4 path: DELTA_GPU_NODEPTH is the shared kill switch, otherwise the
-// title's own DB_Z_INFO / DB_DEPTH_CONTROL state decides. 2D titles (Isaac)
-// leave DB_Z_INFO's format field invalid, so no depth attachment binds.
 void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
   const u32 control = regs[mmDB_DEPTH_CONTROL];
   d.depth_control = control;
   d.render_control = regs[mmDB_RENDER_CONTROL];
-  // A hardware clear writes DB_DEPTH_CLEAR, not the clear quad's position Z.
-  // Treating Skyrim's clear as geometry filled depth with 0.5 and rejected
-  // the logo and world that followed it.
+  // A hardware clear writes DB_DEPTH_CLEAR, not the clear quad's Z, so it is
+  // not geometry.
   d.depth_clear_draw = (d.render_control & 1u) != 0;
   const u32 z_info = kNoDepth ? 0 : regs[mmDB_Z_INFO];
   const u64 z_base = ((static_cast<u64>(regs[mmDB_Z_WRITE_BASE_HI]) << 32) |
@@ -351,7 +276,6 @@ void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
     return;
   }
   d.depth_base = z_base;
-  // SLICE_START: the array layer this pass renders (shadow cascades).
   d.depth_slice = regs[mmDB_DEPTH_VIEW] & 0x7FF;
   const u64 htile = ((static_cast<u64>(regs[mmDB_HTILE_DATA_BASE_HI]) << 32) |
                      regs[mmDB_HTILE_DATA_BASE])
@@ -390,11 +314,6 @@ void ResolveRasterState(const Regs& regs, render::DrawInfo& d) {
   std::memcpy(&d.viewport_x_offset, regs.At(mmPA_CL_VPORT_XOFFSET), 4);
   std::memcpy(&d.viewport_y_scale, regs.At(mmPA_CL_VPORT_YSCALE), 4);
   std::memcpy(&d.viewport_y_offset, regs.At(mmPA_CL_VPORT_YOFFSET), 4);
-  // Titles whose context state arrives as AGC state blocks never program
-  // PA_CL_VPORT_*, and the renderer rejects a zero scale, so no viewport is
-  // ever set and every draw rasterises nothing. Default to the bound target's
-  // full extent, y-up (negative height) like a programmed one, so RT-as-texture
-  // composites still sample aligned.
   if (!(d.viewport_x_scale > 0.0f) && d.rt_w && d.rt_h) {
     d.viewport_x_scale = d.rt_w * 0.5f;
     d.viewport_x_offset = d.rt_w * 0.5f;
@@ -403,14 +322,6 @@ void ResolveRasterState(const Regs& regs, render::DrawInfo& d) {
   }
 }
 
-// --- the recompiled-shader path --------------------------------------------
-
-// Resolve each attribute's V#, then group the attributes into vertex bindings:
-// same-stride V#s within one stride of each other interleave in one binding,
-// others get their own (a textured sprite VS streams pos/colour and uv/params
-// from two buffers, so a single interleaved binding would feed the PS garbage
-// UVs). Attributes that do not decode to a valid V# are skipped; a partial
-// fetch still rasterises.
 void BindVertexAttributes(const gcn::Recompiled& rc,
                           const ResolvedBuffers& resolved,
                           const u32* vs_user_data,
@@ -433,8 +344,6 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
       vb = rdna::DecodeVBuffer(it->second.descriptor);
       fetch_soffset = it->second.soffset;
     } else {
-      // The V# is either inline in user data at table_sgpr (AGC frequently
-      // passes it directly) or reached through a table pointer there.
       const u32 slot =
           a.table_sgpr >= kUdBase ? a.table_sgpr - kUdBase : a.table_sgpr;
       if (slot + 3 >= vs_user_sgprs)
@@ -454,11 +363,7 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
     }
     TraceAttr(static_cast<u32>(i), a, vb, fetch_soffset, how);
     if (!IsGuestAddress(vb.base) || !rdna::PlausibleVBuffer(vb))
-      continue;  // unresolved: keep the rest
-    // Where this attribute sits inside the vertex. The V# only names the
-    // stream: the fetch adds its own byte offset, either as the immediate or
-    // (Sony's compiler) through the soffset scalar. Fold it into the base so
-    // the grouping below turns it back into a per-attribute offset.
+      continue;
     const u64 field_off = a.inst_offset + fetch_soffset;
     if (field_off < vb.stride)
       vb.base += field_off;
@@ -496,7 +401,6 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
     attr_binding[i] = static_cast<u32>(sel);
   }
 
-  // Offsets are relative to each binding's final (lowest) base.
   for (u32 i = 0; i < attr_n && d.num_vattrs < 8; i++) {
     const rdna::VBuffer& vb = attr_vbs[i];
     const u32 b = attr_binding[i];
@@ -505,8 +409,6 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
     const u64 off = vb.base - reinterpret_cast<u64>(d.vbufs[b].data);
     if (off >= d.vbufs[b].stride)
       continue;
-    // A typed fetch (tbuffer_load_format_*) carries its own format and the
-    // hardware ignores the V#'s; Skyrim's world positions come in that way.
     u32 dfmt = vb.dfmt, nfmt = vb.nfmt;
     if (attr_res[i]->inst_format)
       rdna::DecodeBufferFormat(attr_res[i]->inst_format, dfmt, nfmt);
@@ -517,8 +419,6 @@ void BindVertexAttributes(const gcn::Recompiled& rc,
 
   if (!d.num_vbufs)
     return;
-  // Mirror binding 0 into the legacy single-stream fields; the vertex count is
-  // bounded by the smallest binding's record count.
   d.vertex_data = d.vbufs[0].data;
   d.vertex_stride = d.vbufs[0].stride;
   u32 count = UINT32_MAX;
@@ -543,9 +443,6 @@ void ResolveCbufferBindings(const base::Vector<gcn::ShaderCbuf>& cbufs,
     if (it == resources.end())
       continue;
     replayed++;
-    // The window need not start at the buffer: a shader reading one constant
-    // far into a large buffer is bound at that dword and indexes relative to it
-    // (ShaderCbuf::first_dword).
     const u64 base =
         (it->second.base & ~u64{3}) + static_cast<u64>(cb.first_dword) * 4;
     const u64 bytes = static_cast<u64>(cb.num_dwords) * 4;
@@ -573,8 +470,6 @@ void ResolveCbufferBindings(const base::Vector<gcn::ShaderCbuf>& cbufs,
   }
 }
 
-// Raw MUBUF buffers the shader indexes itself (set 2). Same per-pc descriptor
-// replay as the cbuffers.
 void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
                        const ResolvedBuffers& resolved,
                        const u32* user_data,
@@ -587,11 +482,6 @@ void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
       continue;
     const auto& resources = sb.from_gs && gs_resolved ? *gs_resolved : resolved;
     const auto it = resources.find(sb.use_pc);
-    // A global_load names its window with a raw 64-bit pointer pair rather than
-    // a V#, tagged srsrc_sgpr >= kRawBufTag (rdna_translate.cc kFlatBaseTag) so
-    // it can never be V#-decoded by accident. Its length is not expressed
-    // anywhere, so bind a fixed window and let the mapping check drop it if the
-    // guest does not actually own that much.
     constexpr u32 kRawBufTag = 0x100;
     if (sb.srsrc_sgpr >= kRawBufTag) {
       constexpr u32 kRawBufWindow = 1u << 20;
@@ -633,9 +523,6 @@ void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
 
 void FillDrawTex(u32 slot, const gcn::TImage& s, render::DrawInfo& d);
 
-// Resolve the live gfx10.3 T#/S# each PS sampler reads, in the recompiler's
-// set-0 binding order (rdna::TrackTextures re-derives the same plan), so
-// texs[i] maps to PS sampler binding i.
 void ResolvePsTextures(u64 ps_addr,
                        const u32* ps_user_data,
                        u32 ps_user_sgprs,
@@ -644,8 +531,6 @@ void ResolvePsTextures(u64 ps_addr,
                                         ps_user_data, ps_user_sgprs);
   if (texs.empty())
     return;
-  // The single-texture render path reads the legacy tex* mirror of texs[0], so
-  // populate it too (the PS4 path does the same).
   d.tex_base = texs[0].valid ? texs[0].base : 0;
   d.tex_swizzle = PackDstSel(texs[0]);
   d.tex_w = texs[0].width;
@@ -671,9 +556,6 @@ void ResolvePsTextures(u64 ps_addr,
   d.tex_depth_compare = texs[0].depth_compare;
   d.tex_null_descriptor = texs[0].null_descriptor;
 
-  // The renderer carries kMaxDrawTextures of them; truncating at 16 turned
-  // every binding past that into a default, and a vertex stage's samplers now
-  // sit after the PS's.
   constexpr size_t kMax = render::DrawInfo::kMaxDrawTextures;
   for (size_t i = 0; i < texs.size() && i < kMax; i++)
     FillDrawTex(static_cast<u32>(i), texs[i], d);
@@ -681,7 +563,6 @@ void ResolvePsTextures(u64 ps_addr,
   TraceDrawTextures(d);
 }
 
-// One resolved T# into one descriptor slot.
 void FillDrawTex(u32 slot, const gcn::TImage& s, render::DrawInfo& d) {
   TraceRejectedTexture(slot, s);
   TexFromImage(s, d.texs[slot]);
@@ -719,12 +600,8 @@ void TexFromImage(const gcn::TImage& s, render::DrawInfo::DrawTex& dt) {
 
 namespace {
 
-// The SPIR-V declares each sampled image's dimensionality at compile time, so
-// the descriptor bound to it has to agree or the set is invalid and the sample
-// returns nothing. When the module says a binding is a volume and the T# came
-// back a 2D array (Astro Bot's 240x135x64 froxel volume does exactly this),
-// the module wins: its declaration is the one the pipeline was built against,
-// and a 2D array and a 3D image of the same shape occupy the same memory.
+// A volume binding must match the module's declared dimensionality, or the
+// sample returns nothing.
 void ReconcileTextureDims(const base::Vector<gcn::ShaderTex>& plan,
                           u32 first_slot,
                           render::DrawInfo& d) {
@@ -760,8 +637,6 @@ void ReconcileTextureDims(const base::Vector<gcn::ShaderTex>& plan,
   }
 }
 
-// Append a stage's samplers after whatever is already resolved: the renderer
-// reads the PS's bindings first and the VS's after them.
 void AppendStageTextures(u64 code,
                          const u32* user_data,
                          u32 user_sgprs,
@@ -777,18 +652,10 @@ void AppendStageTextures(u64 code,
   TraceDrawTextures(d);
 }
 
-// Recompile the VS/PS pair (cached) and resolve the live vertex-attribute
-// buffers, constant buffers and textures from the RDNA2 descriptors in user
-// data. Leaves d.recomp null when the draw cannot run, which the caller
-// reports. `shader_attrs` is how many attributes the shader wanted, for that
-// report.
 void ResolveRecompiledShaders(const Regs& regs,
                               const ShaderBinding& binding,
                               render::DrawInfo& d,
                               size_t& shader_attrs) {
-  // An unprogrammed RSRC2 reports no user SGPRs at all, which makes every
-  // cbuffer and vertex descriptor unreachable; the window picked above is the
-  // better evidence that they exist.
   u32 vs_user_sgprs = UserSgprCount(regs[mmSPI_SHADER_PGM_RSRC2_GS]);
   if (!vs_user_sgprs) {
     for (u32 i = 0; i < 16; i++)
@@ -796,8 +663,6 @@ void ResolveRecompiledShaders(const Regs& regs,
         vs_user_sgprs = 16;
   }
   const u32 ps_user_sgprs = UserSgprCount(regs[mmSPI_SHADER_PGM_RSRC2_PS]);
-  // Fetch-shader pointer (a heuristic default: GS user data[0..1]; the AGC
-  // input-usage table is authoritative and a follow-up).
   const u64 fetch =
       vs_user_sgprs >= 2
           ? (static_cast<u64>(binding.vs_user_data[1] & 0xFFFF) << 32) |
@@ -828,22 +693,13 @@ void ResolveRecompiledShaders(const Regs& regs,
   const bool unified_ngg =
       point_ngg && !split_ngg && rdna::HasNggPrimitiveExports(es_code);
   if (split_ngg || unified_ngg) {
-    // In a point-input geometry pipeline each input primitive is one ES
-    // vertex. The register limits bound the expanded vertices and triangles;
-    // guest waves also stage those outputs through LDS before exporting them.
     const u32 vertices_per_input = regs[mmVGT_GS_MAX_VERT_OUT] & 0x7ff;
     const u32 primitives_per_input = regs[mmGE_NGG_SUBGRP_CNTL] & 0x1ff;
-    // Point primitives are independent, and NGG programs already handle a
-    // partial final group. Use smaller input batches to fit Vulkan's guaranteed
-    // 128 mesh invocations; DrawMeshTasks still covers every input primitive.
-    // A batch that fits one 64-lane wave is better still: a one-wave workgroup
-    // takes every branch together and runs as structured code, where two
-    // waves need the block scheduler and its barriers.
     const u32 per_input =
         base::Max({1u, vertices_per_input, primitives_per_input});
     const u32 lanes = per_input <= 64 ? 64u : 128u;
-    const u32 inputs =
-        base::Min((regs[mmVGT_GS_ONCHIP_CNTL] >> 11) & 0x7ff, lanes / per_input);
+    const u32 inputs = base::Min((regs[mmVGT_GS_ONCHIP_CNTL] >> 11) & 0x7ff,
+                                 lanes / per_input);
     const u32 vertices = inputs * vertices_per_input;
     const u32 primitives = inputs * primitives_per_input;
     const u32 lds = ((regs[mmSPI_SHADER_PGM_RSRC2_GS] >> 19) & 0xff) * 128;
@@ -862,56 +718,39 @@ void ResolveRecompiledShaders(const Regs& regs,
           split_ngg};
     }
   }
-  const gcn::Recompiled& rc = GetGraphicsShader(
-      {.vs_addr = binding.vs_addr,
-       .ps_addr = binding.ps_addr,
-       .fetch_addr = fetch,
-       .vs_user_sgprs = vs_user_sgprs,
-       .ps_user_sgprs = ps_user_sgprs,
-       .ps_input_ena = regs[mmSPI_PS_INPUT_ENA],
-       .ps_in_cntl = regs.At(mmSPI_PS_INPUT_CNTL_0),
-       .ps_num_interp = regs[mmSPI_PS_IN_CONTROL] & 0x3F,
-       // DX_CLIP_SPACE_DEF (bit 19) picks the guest's clip-z convention.
-       .gl_clip = !((regs[mmPA_CL_CLIP_CNTL] >> 19) & 1),
-       .vs_user_data = binding.vs_user_data,
-       .ps_user_data = binding.ps_user_data,
-       .ngg = ngg});
+  const gcn::Recompiled& rc =
+      GetGraphicsShader({.vs_addr = binding.vs_addr,
+                         .ps_addr = binding.ps_addr,
+                         .fetch_addr = fetch,
+                         .vs_user_sgprs = vs_user_sgprs,
+                         .ps_user_sgprs = ps_user_sgprs,
+                         .ps_input_ena = regs[mmSPI_PS_INPUT_ENA],
+                         .ps_in_cntl = regs.At(mmSPI_PS_INPUT_CNTL_0),
+                         .ps_num_interp = regs[mmSPI_PS_IN_CONTROL] & 0x3F,
+                         .gl_clip = !((regs[mmPA_CL_CLIP_CNTL] >> 19) & 1),
+                         .vs_user_data = binding.vs_user_data,
+                         .ps_user_data = binding.ps_user_data,
+                         .ngg = ngg});
   if (!rc.ok)
     return;
 
-  // The merged ES/GS NGG vertex shader reads its GS user data starting at wave
-  // SGPR udBase (sgpr 0..udBase-1 are ES/system), but the AGC latches it into
-  // SPI_SHADER_USER_DATA_GS_0 which we index from 0, so shader SGPR N maps to
-  // user_data[N-udBase] for both attributes and cbuffers. Defaults to 8 (the
-  // observed merged-NGG layout); DELTA_PS5_UDBASE overrides.
-  // TODO: derive from RSRC2.
   const ResolvedBuffers vs_resources =
-      rc.direct_vs ? ResolvedBuffers{}
-                   : rdna::ResolveBuffers(
-                         reinterpret_cast<const u32*>(binding.vs_addr),
-                         binding.vs_user_data, vs_user_sgprs, kUdBase, 4096,
-                         ngg.gs_code ? gs_user_data_addr : 0);
+      rc.direct_vs
+          ? ResolvedBuffers{}
+          : rdna::ResolveBuffers(reinterpret_cast<const u32*>(binding.vs_addr),
+                                 binding.vs_user_data, vs_user_sgprs, kUdBase,
+                                 4096, ngg.gs_code ? gs_user_data_addr : 0);
   TraceAttrPlan(rc.attrs.size(), vs_user_sgprs, vs_resources.size(),
                 binding.vs_user_data);
   BindVertexAttributes(rc, vs_resources, binding.vs_user_data, vs_user_sgprs,
                        d);
   shader_attrs = rc.attrs.size();
 
-  // A fetch VS needs at least one attribute resolved; a procedural VS (no
-  // recovered attrs, seeds from VertexIndex) draws without a vertex buffer. A
-  // fullscreen pass binds NO vertex buffer at all even though its shader
-  // contains fetch instructions (the same shader is used both ways), so
-  // demanding a resolved attribute there discarded the whole pass. Let it
-  // through with no vertex inputs declared instead.
   bool good = d.num_vattrs > 0 || rc.attrs.empty();
   if (!good && !d.num_vbufs) {
     d.num_vattrs = 0;
     good = true;
   }
-  // Before the drop below, not after: replaying the PS's scalar ops reads guest
-  // memory a compute dispatch may still own, which lands its pending writes
-  // (gcn::g_flush_guest_range). A dropped draw still owes the next one that
-  // flush.
   const ResolvedBuffers ps_resources =
       binding.ps_addr && !rc.direct
           ? rdna::ResolveBuffers(reinterpret_cast<const u32*>(binding.ps_addr),
@@ -928,8 +767,8 @@ void ResolveRecompiledShaders(const Regs& regs,
                                  vs_user_sgprs, kUdBase, 4096,
                                  gs_user_data_addr);
   if (!rc.direct_vs) {
-    ResolveCbufferBindings(rc.vs_cbufs, vs_resources, true, binding.vs_addr,
-                           d, &gs_resources);
+    ResolveCbufferBindings(rc.vs_cbufs, vs_resources, true, binding.vs_addr, d,
+                           &gs_resources);
     ResolveRawBuffers(rc.vs_bufs, vs_resources, binding.vs_user_data,
                       vs_user_sgprs, d, true, &gs_resources);
   }
@@ -946,9 +785,6 @@ void ResolveRecompiledShaders(const Regs& regs,
     ReconcileTextureDims(rc.ps_texs, 0, d);
   }
   const u32 vs_tex_slot = static_cast<u32>(rc.ps_texs.size());
-  // The VS's samplers follow the PS's in the descriptor array, which is the
-  // order the renderer reads them back in. Its user data starts at s8: the
-  // merged NGG stage is launched there.
   if (!rc.vs_texs.empty()) {
     AppendStageTextures(rc.mesh_spirv.empty()
                             ? binding.vs_addr
@@ -975,8 +811,6 @@ bool BuildDrawInfo(const Regs& regs,
   const ShaderBinding binding = ResolveShaderBinding(regs);
   TraceShaderListing(binding.vs_addr);
   TraceShaderListing(binding.ps_addr);
-  // DELTA_PS5_SKIPVS=<hexaddr>: drop draws using this VS (draw-isolation
-  // bisect).
   if (kSkipVs && binding.vs_addr == kSkipVs)
     return false;
 
@@ -1002,8 +836,6 @@ bool BuildDrawInfo(const Regs& regs,
 
   TraceRtProbe(regs, d);
   if (!d.recomp) {
-    // No usable shader pair: the draw is discarded here, which looks exactly
-    // like the title never issuing it.
     NoteDrawDropped(d, binding.vs_addr, binding.ps_addr, shader_attrs);
     return false;
   }

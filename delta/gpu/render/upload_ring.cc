@@ -21,8 +21,6 @@
 #include "options/options.h"
 
 namespace {
-// DELTA_GPU_LDSDUMP=<dwords>: host-visible shared-LDS scratch, dumped after a
-// frame.
 DELTA_OPTION(u32, kLdsDump, "DELTA_GPU_LDSDUMP", 0);
 DELTA_OPTION(u32, kUboRingMb, "DELTA_GPU_UBORING_MB", 256);
 }  // namespace
@@ -30,8 +28,6 @@ DELTA_OPTION(u32, kUboRingMb, "DELTA_GPU_UBORING_MB", 256);
 namespace gpu::render {
 
 u64 UboRingBytes() {
-  // The first frame fixes the budget before any draw can allocate the ring.
-  // Later option updates must not change the frame slots' offsets.
   if (g_ring.ubo_bytes)
     return g_ring.ubo_bytes;
   const u64 requested =
@@ -53,7 +49,6 @@ u64 VbRingBytes() {
 
 namespace {
 
-// A persistently mapped host buffer, or null.
 rhi::Buffer* HostBuffer(u64 bytes, u32 usage, const char* name, u8** map) {
   rhi::BufferDesc desc;
   desc.size = bytes;
@@ -80,16 +75,12 @@ u32 GraphicsStages() {
 
 bool CreateUploadRings() {
   const rhi::Caps& caps = Device().caps();
-  // Recomp cbuffer ring + dynamic-UBO descriptors (set 1) + empty set-0 layout.
   g_ring.ubo_align = base::Max(caps.uniform_offset_alignment, 1u);
   g_ring.ubo_stride =
       (kCbufWindow + g_ring.ubo_align - 1) & ~(u64)(g_ring.ubo_align - 1);
   g_ring.empty_layout = Device().CreateBindGroupLayout({});
   if (!g_ring.empty_layout)
     return false;
-  // Mesh stages can need more windows than the dynamic UBO limit allows.
-  // Bind the current frame's half of the existing ring as one read-only
-  // storage buffer, plus one dynamic UBO containing the window offsets.
   if (caps.max_storage_buffer_range >= UboRingBytes() / 2) {
     rhi::BindGroupLayoutDesc indirect;
     indirect.bindings.push_back(
@@ -99,14 +90,7 @@ bool CreateUploadRings() {
     g_ring.indirect_cbuf_layout = Device().CreateBindGroupLayout(indirect);
   }
 
-  // Raw-buffer limits (set 2). Layouts follow each shader's plan; the ring
-  // behind them is allocated only when a buffer needs staging.
   g_ring.sbo_align = base::Max(caps.storage_offset_alignment, 4u);
-  // These are DYNAMIC storage buffers, whose device limit has a floor of 4
-  // while real desktop parts report 16+. Take what the device offers (up to
-  // our compile-time ceiling) and tell the recompiler, so a shader
-  // referencing more raw buffers than 4 is planned rather than declined
-  // wherever the hardware can carry it.
   g_ring.sbo_count =
       base::Min<u32>(caps.max_dynamic_storage_buffers, kRawBufBindings);
   if (g_ring.sbo_count < gpu::gcn::kMinGfxBuffers) {
@@ -118,12 +102,7 @@ bool CreateUploadRings() {
     g_ring.sbo_count = gpu::gcn::kMinGfxBuffers;
   }
   gpu::gcn::SetMaxGfxBuffers(g_ring.sbo_count);
-  // Whether the push range can also carry each stage's code address (2x8
-  // bytes after the 128 bytes of user data): with it, no graphics module
-  // ever bakes its own address and the shader cache keys by content.
   gpu::gcn::SetPushBudget(caps.max_push_constant_bytes);
-  // A wave64 shader may rely on lockstep the host only gives us within one
-  // subgroup, so the recompiler has to know how wide this device's is.
   gpu::gcn::SetHostSubgroupSize(caps.subgroup_size);
   BASE_LOGI("gpuvk", "subgroup: {} lanes{}", caps.subgroup_size,
             gpu::gcn::WaveSplitsAcrossSubgroups()
@@ -149,9 +128,6 @@ bool EnsureIndexRing() {
   return g_ring.ib_map != nullptr;
 }
 
-// The device is initialized before guest mappings exist, but the title profile
-// is loaded later. The first frame latches its budget; allocation waits until
-// a draw needs constant staging or draw data.
 bool EnsureCbufRing() {
   if (g_ring.ubo_buf)
     return g_ring.ubo_map != nullptr;
@@ -186,12 +162,6 @@ bool EnsureCbufRing() {
   return true;
 }
 
-// One storage buffer at set 3 binding 0, big enough for kLdsWaves blocks. It is
-// never uploaded to and never read back: the shader writes its wave's block and
-// reads it again within the same draw.
-// DELTA_GPU_LDSDUMP=<dwords> makes it host visible and mapped instead, so what
-// an NGG shader staged through LDS can be read after the frame, the only way
-// to tell "the write never happened" from "the read was at another address".
 bool EnsureLdsScratch() {
   if (g_ring.lds_set)
     return true;
@@ -405,11 +375,6 @@ bool AllocateTextureUpload(u32 slot,
 
 void ResetTextureUploads(u32 slot) {
   GPU_BUGCHECK(slot < 2, "slot %u is not a frame-ring slot", slot);
-  // Reset runs in BeginFrame after this slot's submission retired, so no
-  // in-flight transfer references these blocks, which is the one point where
-  // destroying one is safe. Blocks grow on demand (a loading burst can leave
-  // hundreds of idle megabytes behind), so drop any block that has sat unused
-  // for ~10s of resets; the next burst simply recreates it.
   constexpr u64 kIdleResetsBeforeTrim = 300;
   auto& blocks = g_ring.texture_uploads[slot];
   for (size_t i = 0; i < blocks.size();) {

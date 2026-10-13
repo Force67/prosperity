@@ -3,16 +3,6 @@
  */
 #pragma once
 
-// The GL objects behind the rhi classes. Private to gl_rhi_*.cc.
-//
-// Threads: one render thread owns the context that replays command lists,
-// and the objects GL does not share between contexts (framebuffers, vertex
-// arrays, queries). A resource thread creates textures, buffers and samplers
-// on a shared context, compile threads build programs, and a waiter thread
-// retires fences. A command list records into a CPU-side stream, with every
-// binding already resolved to GL names and slots; the render thread replays
-// it at Submit.
-
 #include <epoxy/gl.h>
 
 #include "base/arch.h"
@@ -42,10 +32,10 @@ constexpr u32 kMaxPointers = 128;
 constexpr u8 kNotDynamic = 0xff;
 
 struct GlFormat {
-  GLenum internal = 0;  // texture storage; 0 when not a texture format
-  GLenum format = 0;    // client format of pixel transfers
+  GLenum internal = 0;
+  GLenum format = 0;
   GLenum type = 0;
-  GLint vertex_size = 0;  // 0 when not a vertex format
+  GLint vertex_size = 0;
   GLenum vertex_type = 0;
   bool vertex_normalized = false;
 };
@@ -59,7 +49,7 @@ class GlBuffer final : public rhi::Buffer {
   explicit GlBuffer(const rhi::BufferDesc& desc) { desc_ = desc; }
   void SetMapped(u8* p) { mapped_ = p; }
   GLuint name = 0;
-  u64 address = 0;  // GPU address of a storage buffer, for pointer slots
+  u64 address = 0;
 };
 
 class GlTexture final : public rhi::Texture {
@@ -68,14 +58,13 @@ class GlTexture final : public rhi::Texture {
   GLuint name = 0;
   GLenum target = 0;
   GLenum internal = 0;
-  // Array layers are the y (1D) or z (2D) coordinate of transfers.
   bool arrayed = false;
 };
 
 struct FboKey {
   const GlView* colors[8] = {};
   const GlView* depth = nullptr;
-  u8 depth_planes = 0;  // rhi::Aspect bits attached from `depth`
+  u8 depth_planes = 0;
   bool operator==(const FboKey& o) const;
 };
 struct FboKeyHash {
@@ -88,23 +77,18 @@ class GlView final : public rhi::TextureView {
     texture_ = texture;
     desc_ = desc;
   }
-  // A glTextureView, or the texture itself where GL cannot view it (a 3D
-  // slice as 2D): then `level` and `layer` select within it.
   GLuint name = 0;
   bool owns_name = true;
   GLint level = 0;
-  GLint layer = -1;  // -1: all layers (a layered attachment)
+  GLint layer = -1;
   GLenum internal = 0;
   rhi::Format format = rhi::Format::kUndefined;
-  // Framebuffers this view is attached to; render thread only.
   mutable base::Vector<FboKey> fbos;
 };
 
 class GlSampler final : public rhi::Sampler {
  public:
   GLuint name = 0;
-  // The same sampler without filtering, for integer textures: GL treats a
-  // filtered integer texture as incomplete.
   GLuint nearest = 0;
 };
 
@@ -113,21 +97,19 @@ class GlBindGroupLayout final : public rhi::BindGroupLayout {
   explicit GlBindGroupLayout(const rhi::BindGroupLayoutDesc& desc) {
     desc_ = desc;
   }
-  // Per binding: its index among the dynamic offsets, or kNotDynamic.
   base::Vector<u8> dynamic_index;
   i32 Position(u32 binding) const;
 };
 
-// One binding with its GL names resolved.
 struct BoundResource {
-  GLuint name = 0;     // buffer or texture
-  GLuint sampler = 0;  // sampled textures
+  GLuint name = 0;
+  GLuint sampler = 0;
   u8 dynamic = kNotDynamic;
   u64 offset = 0;
-  u64 size = 0;         // bytes from offset
-  u64 buffer_size = 0;  // clamps dynamic windows
+  u64 size = 0;
+  u64 buffer_size = 0;
   u64 address = 0;
-  GLint level = 0;  // storage images
+  GLint level = 0;
   GLint layer = 0;
   GLboolean layered = GL_TRUE;
   GLenum format = 0;
@@ -136,7 +118,7 @@ struct BoundResource {
 class GlBindGroup final : public rhi::BindGroup {
  public:
   GlBindGroupLayout* layout = nullptr;
-  base::Vector<BoundResource> entries;  // parallel to layout bindings
+  base::Vector<BoundResource> entries;
 };
 
 class GlPipelineLayout final : public rhi::PipelineLayout {
@@ -146,13 +128,10 @@ class GlPipelineLayout final : public rhi::PipelineLayout {
   }
 };
 
-// Which bindings of each group a program uses, and their GL slots. Interned:
-// pipelines with equal maps share one, so switching between them keeps the
-// bound groups.
 struct SlotMap {
   struct Slot {
     u32 binding = 0;
-    i32 position = -1;  // in the layout the map was built against
+    i32 position = -1;
     SlotKind kind = SlotKind::kUniformBuffer;
     u32 slot = 0;
   };
@@ -163,15 +142,13 @@ struct SlotMap {
   base::Vector<Group> groups;
 };
 
-// Vertex attribute formats and per-binding divisors, i.e. one vertex array
-// object. Interned; the VAO itself is made on the render thread.
 struct VertexInput {
   struct Attribute {
     u32 location = 0;
     u32 binding = 0;
     GLint size = 0;
     GLenum type = 0;
-    u8 kind = 0;  // 0 float, 1 normalized, 2 integer
+    u8 kind = 0;
     u32 offset = 0;
   };
   base::Vector<Attribute> attributes;
@@ -195,7 +172,6 @@ struct StencilState {
   bool operator==(const StencilState& o) const;
 };
 
-// Fixed-function state of a graphics pipeline.
 struct RasterState {
   bool primitive_restart = false;
   bool cull = false;
@@ -230,19 +206,17 @@ class GlPipeline final : public rhi::Pipeline {
   u32 push_bytes = 0;
   GLint pointer_location = -1;
   u32 pointer_count = 0;
-  GLint base_location = -1;  // kDispatchBase
-  u32 base[3] = {};          // its value in the program; render thread
+  GLint base_location = -1;
+  u32 base[3] = {};
 };
 
 class GlTimestampPool final : public rhi::TimestampPool {
  public:
   u32 count = 0;
-  GLuint buffer = 0;  // one u64 result per query; 0 = not written
+  GLuint buffer = 0;
   const u64* results = nullptr;
-  base::Vector<GLuint> queries;  // render thread
+  base::Vector<GLuint> queries;
 };
-
-// ---- the recorded stream ---------------------------------------------------
 
 enum class Op : u8 {
   kBeginPass,
@@ -284,10 +258,9 @@ enum class Op : u8 {
 
 struct Cmd {
   Op op;
-  u32 size;  // of the whole command, a multiple of 8
+  u32 size;
 };
 
-// How a clear value is read for one attachment.
 enum class ClearKind : u8 { kFloat, kUint, kInt };
 
 struct CmdBeginPass {
@@ -295,9 +268,9 @@ struct CmdBeginPass {
   Cmd h;
   FboKey key;
   u8 color_count;
-  u8 clear_mask;    // colours with LoadOp::kClear
-  u8 discard_mask;  // colours with LoadOp::kDontCare
-  u8 depth_clear;   // rhi::Aspect bits
+  u8 clear_mask;
+  u8 discard_mask;
+  u8 depth_clear;
   u8 depth_discard;
   u8 depth_read_only;
   ClearKind kinds[8];
@@ -311,7 +284,7 @@ struct CmdBeginPass {
 struct CmdEndPass {
   static constexpr Op kOp = Op::kEndPass;
   Cmd h;
-  u8 discard_mask;  // colours with StoreOp::kDontCare
+  u8 discard_mask;
   i32 x, y;
   u32 width, height;
 };
@@ -348,13 +321,13 @@ struct CmdBindImage {
   GLenum format;
 };
 
-struct CmdPush {  // followed by `bytes` of data
+struct CmdPush {
   static constexpr Op kOp = Op::kPush;
   Cmd h;
   u32 bytes;
 };
 
-struct CmdPointers {  // followed by `count` uvec4 entries
+struct CmdPointers {
   static constexpr Op kOp = Op::kPointers;
   Cmd h;
   u32 count;
@@ -409,7 +382,7 @@ struct CmdDrawIndexed {
   i32 vertex_offset;
   u32 first_instance;
   GLenum type;
-  u64 offset;  // bytes into the index buffer
+  u64 offset;
 };
 
 struct CmdDrawIndirect {
@@ -444,7 +417,7 @@ struct CmdDispatchIndirect {
 struct CmdClearAttachment {
   static constexpr Op kOp = Op::kClearAttachment;
   Cmd h;
-  u32 attachment;  // ~0u: depth/stencil
+  u32 attachment;
   ClearKind kind;
   u8 aspect;
   rhi::ClearColor color;
@@ -461,7 +434,7 @@ struct CmdCopyBuffer {
   u64 dst_offset, src_offset, bytes;
 };
 
-struct CmdBufferTexture {  // followed by `count` rhi::BufferTextureCopy
+struct CmdBufferTexture {
   Cmd h;
   GlTexture* texture;
   GlBuffer* buffer;
@@ -516,7 +489,7 @@ struct CmdFillBuffer {
   u32 value;
 };
 
-struct CmdUpdateBuffer {  // followed by `bytes` of data
+struct CmdUpdateBuffer {
   static constexpr Op kOp = Op::kUpdateBuffer;
   Cmd h;
   GLuint name;
@@ -541,7 +514,7 @@ struct CmdWriteTimestamp : CmdTimestamps {
   static constexpr Op kOp = Op::kWriteTimestamp;
 };
 
-struct CmdLabel {  // followed by the NUL-terminated text
+struct CmdLabel {
   Cmd h;
 };
 struct CmdPushLabel : CmdLabel {
@@ -560,8 +533,6 @@ class CommandStream {
   const u8* begin() const { return bytes_.data(); }
   const u8* end() const { return bytes_.data() + bytes_.size(); }
 
-  // Appends a zeroed T plus `extra` payload bytes. The pointer is valid
-  // until the next Add.
   template <typename T>
   T* Add(size_t extra = 0) {
     const size_t size = (sizeof(T) + extra + 7) & ~size_t(7);
@@ -576,8 +547,6 @@ class CommandStream {
  private:
   base::Vector<u8> bytes_;
 };
-
-// ---- recording -------------------------------------------------------------
 
 class GlCommandList final : public rhi::CommandList {
  public:
@@ -712,7 +681,6 @@ class GlCommandList final : public rhi::CommandList {
   const SlotMap* flushed_slots_ = nullptr;
   const GlPipeline* flushed_push_ = nullptr;
   BoundGroup groups_[kMaxGroups];
-  // PushBindGroup storage; reset at Begin, once the last replay retired.
   base::Vector<base::Vector<BoundResource>> push_groups_;
   u32 push_groups_used_ = 0;
   u8 push_data_[kMaxPushBytes] = {};
@@ -726,7 +694,6 @@ class GlCommandList final : public rhi::CommandList {
   u64 index_offset_ = 0;
   GLenum index_type_ = GL_UNSIGNED_SHORT;
   bool index_dirty_ = true;
-  // What this list already bound, per GL slot, to drop repeats.
   base::Vector<SlotState> slot_state_[kSlotKinds];
   u32 pointers_[kMaxPointers][4] = {};
   bool pointers_dirty_ = true;
@@ -735,14 +702,11 @@ class GlCommandList final : public rhi::CommandList {
   CmdEndPass pass_end_{};
 };
 
-// ---- replay (render thread) -------------------------------------------------
-
 class Replayer {
  public:
   explicit Replayer(GlDevice& device) : device_(device) {}
   void Init();
   void Execute(const GlCommandList& list);
-  // Drops cached GL objects that name `object`, before it is deleted.
   void Forget(rhi::Object* object);
   void ResetSession();
 
@@ -757,9 +721,7 @@ class Replayer {
   void DrawIndexedIndirect(const CmdDrawIndexedIndirect& c);
   void BindVao(VertexInput* input);
   GLuint Vao(VertexInput* input);
-  // Every colour, depth and stencil write enabled, as clears and blits need.
   void ResetMasks();
-  // Scissor and masks set for a clear of a rectangle.
   void PrepareClear(i32 x, i32 y, u32 width, u32 height);
   void SetScissor(i32 x, i32 y, u32 width, u32 height);
   void SetScissorTest(bool enable);
@@ -789,7 +751,6 @@ class Replayer {
   CmdBindBuffer storage_zero_{};
   GLuint pixel_pack_ = 0, pixel_unpack_ = 0;
 
-  // The pipeline the next draw uses, and what GL currently has.
   GlPipeline* pipeline_ = nullptr;
   GLuint program_ = ~0u;
   GLuint vao_ = ~0u;
@@ -798,14 +759,11 @@ class Replayer {
   GLenum front_face_ = 0;
   bool have_raster_ = false;
   RasterState raster_;
-  i32 scissor_[4] = {};  // wanted by the recording
+  i32 scissor_[4] = {};
   i32 gl_scissor_[4] = {-1, -1, -1, -1};
   bool scissor_test_ = true;
-  u8 pass_read_only_ = 0;  // rhi::Aspect planes the pass must not write
+  u8 pass_read_only_ = 0;
 };
-
-// ---- device
-// ------------------------------------------------------------------
 
 class GlDevice final : public rhi::Device {
  public:
@@ -846,11 +804,9 @@ class GlDevice final : public rhi::Device {
                       u32 count,
                       u64* out) override;
 
-  // Resolves one write into `out`, which is at the binding's position.
   void Resolve(const GlBindGroupLayout& layout,
                const rhi::BindingWrite& write,
                BoundResource* out) const;
-  // Slot counts per SlotKind, for the lists' shadow state.
   u32 SlotLimit(SlotKind kind) const {
     return slot_limits_[static_cast<u32>(kind)];
   }
@@ -859,7 +815,6 @@ class GlDevice final : public rhi::Device {
   friend class Replayer;
 
   bool InitRenderThread();
-  // `graphics` is null for a compute pipeline.
   rhi::Pipeline* BuildPipeline(const rhi::PipelineLayoutDesc& layout,
                                const StageCode* stages,
                                u32 count,

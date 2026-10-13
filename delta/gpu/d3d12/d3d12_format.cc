@@ -19,7 +19,6 @@ DxgiInfo Plain(DXGI_FORMAT f, DXGI_FORMAT typeless) {
   return i;
 }
 
-// A vertex-only format: DXGI has no texture equivalent.
 DxgiInfo Scaled(DXGI_FORMAT integer, u8 kind) {
   DxgiInfo i;
   i.format = integer;
@@ -131,7 +130,7 @@ DxgiInfo Build(Format f) {
       i.stencil_srv = DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
       return i;
     }
-    case Format::kS8Uint:  // DXGI has no stencil-only format
+    case Format::kS8Uint:
     case Format::kUndefined:
     case Format::kCount:
       break;

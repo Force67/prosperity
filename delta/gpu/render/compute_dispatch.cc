@@ -2,8 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// Running a dispatch: resource staging, merging and the Dispatch entry point.
-
 #include "gpu/render/compute_internal.h"
 
 #include <cstdio>
@@ -33,9 +31,6 @@
 
 namespace gpu::render {
 
-// A dispatch the backend could not run, named once per shader and reason.
-// The reason is the number of the `return false` it came from; the file's
-// line is one grep away and a prose reason at each of them would be noise.
 bool CsDeclined(const ComputeInfo& ci, const char* why) {
   static base::HashSet<base::String> reported;
   static const guest::SessionReset reset_reported(
@@ -46,16 +41,6 @@ bool CsDeclined(const ComputeInfo& ci, const char* why) {
   return false;
 }
 
-// Two plain-buffer bindings on one guest base with different extents (a
-// constant block read through a 0x1c-byte window and a 0x24-byte one) share
-// one staging range, so they have to agree on its size: take the larger for
-// both. Image bindings keep their own shapes and still conflict below.
-// Plain bindings of one dispatch that overlap without sharing a base (a
-// skinning job writing two interleaved vertex streams through V#s 8 bytes
-// apart) are one piece of memory: stage them as one range covering both, each
-// bound at its own offset into it. As two ranges, each held the other's words
-// stale, so neither could be read back or fed to a draw without the other
-// flushed.
 bool MergeOverlapping(ComputeInfo& ci) {
   constexpr u64 kAlign = 16;
   const auto plain = [&](u32 i) {
@@ -72,7 +57,6 @@ bool MergeOverlapping(ComputeInfo& ci) {
       continue;
     u64 lo = ci.res[i].base, hi = end_of(ci.res[i]);
     u32 members = 0;
-    // Grow the group until no other plain binding overlaps it.
     for (bool grew = true; grew;) {
       grew = false;
       members = 0;
@@ -182,15 +166,6 @@ void PrebuildComputePipeline(const base::Vector<u32>& spirv,
   slot->built.NotifyAll();
 }
 
-// A pointer-chasing dispatch reads guest memory through the buffers that hold
-// it: every compute range it could reach, as its own buffer (guest-layout
-// bytes) or a GPU-tiled mirror of an image. A byte belongs to one window:
-// GPU-dirty ranges first, newest first, then the rest; a range another covers
-// in part gives the pieces left over. What no range holds, the shader cannot
-// reach. `owners` names each window's range, for the writes it takes.
-// The address of `e`'s image in guest layout on the GPU, tiled from its
-// linear buffer into the batch when the range changed; 0 when the tiling
-// shader does not cover it. `bytes` is the guest footprint it covers.
 u64 GuestMirror(CsRange& e, u64& bytes) {
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(e.res, tiled, linear))
@@ -218,7 +193,7 @@ u64 GuestMirror(CsRange& e, u64& bytes) {
     if (!g_cs_batch_open)
       return 0;
     RecordImageTiling(g_cs_list, *table, e.mirror, 0, tiled.size, e.buf,
-                      e.res.size, /*detile=*/false);
+                      e.res.size, false);
     e.mirror_seq = e.write_seq;
     e.mirror_table = table;
     g_guest_mirror_tiles++;
@@ -232,10 +207,7 @@ struct GuestWindowOwner {
   bool mirror;
 };
 
-// The guest's bytes copied into the range's buffer on the GPU.
 bool RefreshGuestWindow(u64 base, CsRange& e, u64 n) {
-  // Armed before the copy, which runs later: a CPU write from here on is
-  // reported.
   e.wt_clean = GuestWriteTracker().Arm(base, n);
   CsBatchBeginImpl();
   if (!g_cs_batch_open || !RecordGuestRead(g_cs_list, base, n, e.buf))
@@ -247,9 +219,6 @@ bool RefreshGuestWindow(u64 base, CsRange& e, u64 n) {
   return true;
 }
 
-// A buffer for guest memory a pointer-chasing dispatch reached outside every
-// range: the 64 KiB around the address, staged now, a window from the next
-// dispatch on.
 constexpr u64 kMissChunk = 64 * 1024;
 void MaterializeGuestRange(u64 address) {
   const u64 base = address & ~(kMissChunk - 1);
@@ -261,7 +230,7 @@ void MaterializeGuestRange(u64 address) {
       const auto found = g_cs_ranges.find(other);
       if (found != g_cs_ranges.end() && other <= address &&
           address < other + found->second.guest_bytes)
-        return;  // already held
+        return;
     }
   CsRange& e = g_cs_ranges[base];
   if (e.buf || !CsRangeEnsureBuffer(e, kMissChunk)) {
@@ -279,8 +248,6 @@ void MaterializeGuestRange(u64 address) {
   g_guest_misses_n++;
 }
 
-// The ranges behind windows a pointer-chasing shader stored into hold
-// GPU-newer bytes now.
 void MarkWrittenWindows(u64 cs_addr,
                         const base::Vector<GuestWindowOwner>& owners,
                         const base::Vector<u32>& written) {
@@ -312,25 +279,16 @@ void MarkWrittenWindows(u64 cs_addr,
   }
 }
 
-// A pointer-chasing shader that may store through guest pointers is waited
-// for after each dispatch, to learn which windows it wrote. Demon's Souls
-// runs ~5 a frame that have never written one (200 windows each), and those
-// waits were a quarter of the frame. After kQuietAfter dispatches without a
-// write the shader is no longer waited for: its flags are read once its batch
-// has completed, and a write found there marks the ranges late and puts the
-// shader back on the waited path for good.
 constexpr u32 kQuietAfter = 16;
 struct WriterHistory {
   u32 quiet = 0;
   bool writes = false;
 };
 base::HashMap<u64, WriterHistory> g_writer_history;
-// A pointer-chasing dispatch's table set, until its batch has completed.
 struct PendingTable {
   u32 set = 0;
   u64 batch = 0;
   u64 cs_addr = 0;
-  // A quiet writer: its flags are only read here.
   bool check_writes = false;
   base::Vector<GuestWindowOwner> owners;
 };
@@ -342,7 +300,6 @@ const guest::SessionReset g_writers_reset([] {
   guest::ResetResource(g_pending_tables);
 });
 
-// Hands a set back unless the dispatch it was prepared for got recorded.
 struct TableSetGuard {
   u32 set = ~0u;
   ~TableSetGuard() {
@@ -351,9 +308,6 @@ struct TableSetGuard {
   }
 };
 
-// The pointer-chasing dispatches the GPU has finished: addresses they found in
-// no window get a buffer, and a quiet writer that did store marks its ranges
-// late and is waited for from then on. Never waits for the GPU.
 void cs::HarvestGuestTables() {
   CsBatchReap();
   base::EraseIf(g_pending_tables, [](PendingTable& p) {
@@ -382,7 +336,6 @@ bool GuestWindows(const ComputeInfo& ci,
                   base::Vector<GuestWindowOwner>& owners) {
   for (u64 address : ci.guest_memory_seeds)
     MaterializeGuestRange(address);
-  // The part [base + skip, base + skip + n) of a range inside one mapping.
   struct Candidate {
     u64 base, skip, n;
     CsRange* e;
@@ -400,17 +353,16 @@ bool GuestWindows(const ComputeInfo& ci,
         candidates.push_back({base, lo - base, hi - lo, &e, r.writable});
     }
   }
-  base::Sort(candidates.begin(), candidates.end(),
-             [](const Candidate& a, const Candidate& b) {
-               if (a.e->gpu_dirty != b.e->gpu_dirty)
-                 return a.e->gpu_dirty;
-               const u64 ta = a.e->gpu_dirty ? a.e->dirty_stamp
-                                             : a.e->staged_stamp;
-               const u64 tb = b.e->gpu_dirty ? b.e->dirty_stamp
-                                             : b.e->staged_stamp;
-               return ta != tb ? ta > tb : a.n > b.n;
-             });
-  base::Vector<base::Pair<u64, u64>> taken;  // sorted, disjoint
+  base::Sort(
+      candidates.begin(), candidates.end(),
+      [](const Candidate& a, const Candidate& b) {
+        if (a.e->gpu_dirty != b.e->gpu_dirty)
+          return a.e->gpu_dirty;
+        const u64 ta = a.e->gpu_dirty ? a.e->dirty_stamp : a.e->staged_stamp;
+        const u64 tb = b.e->gpu_dirty ? b.e->dirty_stamp : b.e->staged_stamp;
+        return ta != tb ? ta > tb : a.n > b.n;
+      });
+  base::Vector<base::Pair<u64, u64>> taken;
   for (const Candidate& c : candidates) {
     CsRange& e = *c.e;
     u64 address = 0, n = c.skip + c.n;
@@ -418,9 +370,9 @@ bool GuestWindows(const ComputeInfo& ci,
     if (!e.image_staging || e.truth) {
       if (!e.gpu_dirty && !e.wt_clean &&
           e.last_validated_frame != g_frame.num &&
-          !RefreshGuestWindow(c.base, e,
-                              e.guest_bytes ? base::Min(e.size, e.guest_bytes)
-                                            : e.size))
+          !RefreshGuestWindow(
+              c.base, e,
+              e.guest_bytes ? base::Min(e.size, e.guest_bytes) : e.size))
         continue;
       address = e.buf->address();
     } else if (e.gpu_dirty) {
@@ -430,7 +382,6 @@ bool GuestWindows(const ComputeInfo& ci,
     if (!address || n <= c.skip)
       continue;
     MarkPending(e);
-    // The parts of the candidate no earlier window holds.
     u64 at = c.base + c.skip;
     const u64 end = base::Min(c.base + n, c.base + c.skip + c.n);
     size_t i = 0;
@@ -455,7 +406,6 @@ bool GuestWindows(const ComputeInfo& ci,
     }
     g_guest_override_n += !pieces.empty();
   }
-  // The table is searched by address.
   base::Vector<u32> order(out.size());
   for (u32 k = 0; k < order.size(); k++)
     order[k] = k;
@@ -512,9 +462,6 @@ bool CanDispatchIndirect(u64 args) {
          gpu::IsReadableRangeCached(args, 12);
 }
 
-// A dispatch's sampled image, resolved the way a draw resolves one: the live
-// render, depth or stencil target at its address, else the guest texture. The
-// view is left readable on the frame list the dispatch records into.
 void ResolveComputeTexture(const DrawInfo::DrawTex& t,
                            rhi::TextureView** view,
                            rhi::TextureState* state,
@@ -597,8 +544,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   if (!renderer.available() || !ci.recomp || !ci.recomp->ok || !ci.num_res)
     return CsDeclined(ci, "2");
   const bool capture_dispatch = trace::CaptureDispatchInputs(renderer, ci);
-  // The GPU reads resident arguments in place, or from a staged snapshot
-  // recorded behind their producer. Unavailable GPU paths read them here.
   IndirectArgs indirect;
   u32 groups[3] = {ci.groups[0], ci.groups[1], ci.groups[2]};
   if (ci.indirect_args && !FindIndirectArgs(ci.indirect_args, indirect)) {
@@ -619,8 +564,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         return true;
     }
   }
-  // Only a range still holding dispatch output needs the guest's latest
-  // writes before this runs; the rest revalidate against guest memory.
   if (CsTracksGuestWrites()) {
     for (u32 i = 0; i < ci.num_res; i++) {
       const auto found = g_cs_ranges.find(ci.res[i].base);
@@ -630,7 +573,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       }
     }
   } else if (GuestWriteTracker().enabled()) {
-    CollectGuestWritesForSubmission();  // before any wt_clean is trusted
+    CollectGuestWritesForSubmission();
   }
   const bool heavy = g_cs_heavy.contains(ci.cs_addr);
   if (heavy && g_cs_batch_count && (++g_submit_why[3], !CsBatchSubmit())) {
@@ -690,10 +633,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   if (!g_cs_batches[0].list) {
     if (!CsBatchInit())
       return CsDeclined(ci, "8");
-    // What an EMPTY submit+wait costs here. SotC spends over half its frame in
-    // waits while the GPU sits at 18% utilisation, so the question is
-    // whether a round trip is inherently expensive on this system or whether
-    // the GPU is really doing that work. Measured once, at init.
     if (CsSyncReporting()) {
       double total = 0;
       rhi::CommandList* list = g_cs_batches[0].list;
@@ -708,12 +647,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     }
   }
 
-  // DELTA_GPU_CSLIST: per-dispatch resource staging list for the first 200
-  // dispatches: shows what the chain actually round-trips per frame.
-  // DELTA_GPU_CSHIST=<seconds>: every distinct guest range a dispatch WRITES,
-  // for the whole run. The capped per-dispatch list above only ever showed the
-  // first few frames, which cannot answer "does the title ever compute-copy
-  // into its texture heap".
   if (kCsHist) {
     struct Cell {
       u64 size, n;
@@ -752,23 +685,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                 ci.res[i].written ? " written" : "");
   }
 
-  // Bind each resource: zero-fill scratch per binding slot; everything else
-  // uses the persistent range buffer for its guest base, staged only when the
-  // buffer doesn't already hold current content.
   const u64 t_in0 = NowNs();
   rhi::Buffer* bind_buf[ComputeInfo::kMaxResources];
   u64 sz[ComputeInfo::kMaxResources];
   rhi::Buffer* truth_view[ComputeInfo::kMaxResources] = {};
   const TileTable* truth_table[ComputeInfo::kMaxResources] = {};
-  // A binding served from a dirty truth that contains it: that range's base,
-  // and the binding's byte offset into it.
   u64 parent_base[ComputeInfo::kMaxResources] = {};
   u64 parent_off[ComputeInfo::kMaxResources] = {};
   g_cs_scratch_owner++;
-  // The shader's view of a truth: the bytes at `off` in `tiled_buf` detiled
-  // into a scratch on the batch. Bindings of one dispatch that describe the
-  // same surface the same way share the view (a shadow array bound through
-  // several descriptors is one 320 MB conversion, not four).
   auto bind_truth_view = [&](u32 i, rhi::Buffer* tiled_buf, u64 off, u64 span,
                              u64 pbase) -> bool {
     gcn::TextureLayout32 tiled, linear;
@@ -800,7 +724,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (fresh) {
       CsBatchBeginImpl();
       RecordImageTiling(g_cs_list, *table, tiled_buf, off, span, view, sz[i],
-                        /*detile=*/true);
+                        true);
       g_cs_batch_access.erase(view);
       g_truth_detile_n++;
       StampView(view, pbase ? pbase : ci.res[i].base, off, table, seq);
@@ -838,9 +762,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     const bool truth_i = TruthEligible(ci.res[i]);
     u64 folds[ComputeInfo::kMaxResources];
     u32 fold_count = 0;
-    // A binding inside a dirty truth binds that truth's own bytes at an
-    // offset: a surface's layers or mips bound one at a time are its bytes,
-    // not a copy that has to be written back and restaged around it.
     if (kCsTruth && (truth_i || !ci.res[i].image_staging)) {
       CsRange* parent = nullptr;
       u64 pbase = 0;
@@ -862,8 +783,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       }
       auto own = g_cs_ranges.find(base);
       if (parent && own != g_cs_ranges.end() && own->second.gpu_dirty) {
-        // Its own dirty bytes fold into the parent first. A linear-staged
-        // image cannot: those bytes are not guest layout.
         CsRange& s = own->second;
         if (s.image_staging && !s.truth) {
           parent = nullptr;
@@ -909,21 +828,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         continue;
       }
     }
-    // A read overlapping some OTHER dirty range must see that data through
-    // guest memory: flush those first.
-    // A range whose writeback cannot be produced (an image the retiler does not
-    // handle) stays stale whatever happens next; declining THIS dispatch over
-    // it only loses a second result. Only a dead device stops the recording. A
-    // range that is itself dirty keeps a VRAM copy without the sibling's bytes
-    // after this, and one that is clean relies on the sampled hash to notice
-    // them. Both are the pre-existing behaviour; the fix is one VRAM copy per
-    // guest byte (see des-perf-profile).
     {
       const u64 to = NowNs();
-      // A binding that reuses its own dirty range as it stands reads that
-      // buffer, never guest memory, so no sibling's writeback can reach this
-      // dispatch. UC2's skinning reads each vertex stream while the one before
-      // it, bound 0x14 bytes too long, is still dirty: ~20 waits a frame.
       const auto own = g_cs_ranges.find(base);
       const bool own_dirty = own != g_cs_ranges.end() &&
                              own->second.gpu_dirty && own->second.buf &&
@@ -931,15 +837,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                              !own->second.imported;
       const bool reads_own_buffer =
           own_dirty &&
-          (truth_i
-               ? own->second.truth && own->second.guest_bytes >= guest_bytes
-               : !own->second.truth && !own->second.image_staging &&
-                     !ci.res[i].image_staging && own->second.cap >= sz[i] &&
-                     ((own->second.size == sz[i] &&
-                       own->second.guest_bytes == guest_bytes &&
-                       SameCsResourceShape(own->second.res, ci.res[i])) ||
-                      (kCsSubset && own->second.size >= sz[i] &&
-                       own->second.guest_bytes >= guest_bytes)));
+          (truth_i ? own->second.truth && own->second.guest_bytes >= guest_bytes
+                   : !own->second.truth && !own->second.image_staging &&
+                         !ci.res[i].image_staging && own->second.cap >= sz[i] &&
+                         ((own->second.size == sz[i] &&
+                           own->second.guest_bytes == guest_bytes &&
+                           SameCsResourceShape(own->second.res, ci.res[i])) ||
+                          (kCsSubset && own->second.size >= sz[i] &&
+                           own->second.guest_bytes >= guest_bytes)));
       auto siblings = DirtyRangesOverlapping(base, guest_bytes, base);
       SortByDirtyOrder(siblings);
       for (u64 dirty : siblings) {
@@ -947,8 +852,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         if (found == g_cs_ranges.end())
           continue;
         CsRange& s = found->second;
-        // A dirty child inside this binding folds into its buffer once it is
-        // staged, on the batch, instead of a trip through guest memory.
         if (kCsTruth && (truth_i || !ci.res[i].image_staging) && s.gpu_dirty &&
             s.buf && (s.truth || !s.image_staging) && dirty >= base &&
             dirty + s.guest_bytes <= base + guest_bytes &&
@@ -956,14 +859,9 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           folds[fold_count++] = dirty;
           continue;
         }
-        // A plain output this dispatch only writes needs none of the
-        // sibling's bytes: each writeback publishes just the words its own
-        // dispatch changed. A title's skinning jobs write interleaved vertex
-        // streams whose windows overlap their neighbours by a few bytes, and
-        // flushing each neighbour first cost UC2 ~440 GPU waits a frame.
         if (kCsKeepOverlap && s.gpu_dirty && !ci.res[i].read &&
-            !ci.res[i].image_staging &&
-            !truth_i && !s.image_staging && !s.truth) {
+            !ci.res[i].image_staging && !truth_i && !s.image_staging &&
+            !s.truth) {
           g_wb_why["overlap-kept"]++;
           continue;
         }
@@ -971,11 +869,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           g_wb_why["overlap-own"]++;
           continue;
         }
-        // Two tiled footprints that only partly overlap: the title reuses
-        // transient memory, and the bytes one surface holds past the other's
-        // base are not pixels of the other. Neither dispatch reads the
-        // other's through guest memory, so their order there is irrelevant; a
-        // linear reader of the intersection still flushes both.
         if ((truth_i || ci.res[i].image_staging) &&
             (s.truth || s.image_staging) && s.gpu_dirty &&
             !(dirty >= base && dirty + s.guest_bytes <= base + guest_bytes) &&
@@ -983,9 +876,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           g_wb_why["overlap-tiled"]++;
           continue;
         }
-        // A binding the shader only writes owns its bytes from here on: what
-        // an older output left there is never read, and a later writeback of
-        // that output lands first (dirty order), under this one.
         if (s.gpu_dirty && !ci.res[i].read && ci.res[i].written) {
           g_wb_why["overlap-write-only"]++;
           continue;
@@ -996,19 +886,18 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           if (kCsOverlapTrace && g_frame.num >= kCsOverlapTrace) {
             static int shown = 0;
             if (shown++ < 1500)
-              BASE_LOGI("csoverlap",
-                        "cs={:#x} res{} {:#x}+{:#x} {} w={} {}x{}x{} mips={} "
-                        "tile={} dfmt={} | dirty {:#x}+{:#x} truth={} img={} "
-                        "{}x{}x{} mips={} tile={} dfmt={}",
-                        ci.cs_addr, i, base, guest_bytes,
-                        ci.res[i].image_staging ? "img" : "buf",
-                        (int)ci.res[i].shader_writes, ci.res[i].width,
-                        ci.res[i].height, ci.res[i].layers,
-                        ci.res[i].mip_levels, ci.res[i].tiling_idx,
-                        ci.res[i].dfmt, dirty, s.guest_bytes, (int)s.truth,
-                        (int)s.image_staging, s.res.width, s.res.height,
-                        s.res.layers, s.res.mip_levels, s.res.tiling_idx,
-                        s.res.dfmt);
+              BASE_LOGI(
+                  "csoverlap",
+                  "cs={:#x} res{} {:#x}+{:#x} {} w={} {}x{}x{} mips={} "
+                  "tile={} dfmt={} | dirty {:#x}+{:#x} truth={} img={} "
+                  "{}x{}x{} mips={} tile={} dfmt={}",
+                  ci.cs_addr, i, base, guest_bytes,
+                  ci.res[i].image_staging ? "img" : "buf",
+                  (int)ci.res[i].shader_writes, ci.res[i].width,
+                  ci.res[i].height, ci.res[i].layers, ci.res[i].mip_levels,
+                  ci.res[i].tiling_idx, ci.res[i].dfmt, dirty, s.guest_bytes,
+                  (int)s.truth, (int)s.image_staging, s.res.width, s.res.height,
+                  s.res.layers, s.res.mip_levels, s.res.tiling_idx, s.res.dfmt);
           }
         }
         const WaitReaderScope reader("cs-sibling");
@@ -1019,9 +908,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       g_in_overlap_ns += NowNs() - to;
     }
     CsRange& e = g_cs_ranges[base];
-    // The guest CPU wrote the range while it held dispatch output: merge the
-    // two before running on it again, or this dispatch reads around the
-    // CPU's bytes and a later writeback puts old values over them.
     if (e.gpu_dirty && !e.cpu_writes.empty()) {
       g_wb_why["cpu-write"]++;
       g_wb_why_bytes += e.size;
@@ -1029,9 +915,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       if (!CsRangeFlushOne(base, e) && g_cs_failed)
         return CsDeclined(ci, "24");
     }
-    // A truth range is its guest footprint: the same footprint is the same
-    // bytes whatever the descriptor makes of them, and a plain-buffer view
-    // inside it binds those bytes directly.
     const bool truth_same =
         truth_i && e.buf && e.truth && e.guest_bytes == guest_bytes;
     const bool truth_sub =
@@ -1043,14 +926,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         truth_same ||
         (!truth_i && !e.truth && e.buf && e.size == static_cast<u64>(sz[i]) &&
          e.guest_bytes == guest_bytes && SameCsResourceShape(e.res, ci.res[i]));
-    // A plain buffer bound again through a SMALLER window is the same data:
-    // the staged copy already covers it and the descriptor carries its own
-    // range. Treating that as a reshape restages the whole thing: Astro Bot
-    // has two dispatches a frame that size one 39 MB buffer differently, and
-    // each flip cost a full copy and a fence wait.
-    // So is an image bound with fewer of the same layers: each layer is one
-    // slice of the staging after the other. Astro Bot binds a 10240x320
-    // surface as two layers and as one, twice a frame each way.
     const bool layer_prefix = [&] {
       if (exact_shape || truth_i || e.truth || !e.buf || e.imported ||
           !e.image_staging || !ci.res[i].image_staging ||
@@ -1067,8 +942,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
          !ci.res[i].image_staging && !e.image_staging &&
          e.size >= static_cast<u64>(sz[i]) && e.guest_bytes >= guest_bytes);
     const bool same_shape = exact_shape || subset;
-    // What the buffer holds: the footprint for a truth, the linear view
-    // otherwise. `stage_bytes` > 0: staged as raw guest bytes.
     const u64 foot = (raw_view || truth_sub) ? e.cap
                      : truth_i               ? guest_bytes
                                              : sz[i];
@@ -1076,11 +949,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                             : truth_i               ? guest_bytes
                                                     : 0;
     const u64 hash_bytes = stage_bytes ? stage_bytes : guest_bytes;
-    // Reused memory: an image read over the whole range at an address a
-    // target has been rendered into since the dispatch wrote it. The target
-    // holds the newer bytes and the read stages from it; writing the old
-    // ones back first cost UC2 a ~20 ms GPU wait a frame (its stencil lives
-    // where a skinning job's buffer was earlier in the frame).
     if (!same_shape && e.gpu_dirty && ci.res[i].image_staging &&
         guest_bytes >= e.guest_bytes && CsAliasedBase(base) &&
         AliasedImageRenderSerial(base) != UINT64_MAX &&
@@ -1099,7 +967,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       g_in_reshape_ns += NowNs() - trs;
       g_in_reshape_n++;
       if (!ok)
-        return CsDeclined(ci, "12");  // reshaped: keep its data
+        return CsDeclined(ci, "12");
     }
 
     const bool buffer_reused = e.buf && e.cap >= foot;
@@ -1115,33 +983,16 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                     (unsigned long long)base);
       Device().SetName(e.buf, name);
     }
-    // A buffer that was just rebuilt holds nothing, whatever the shape
-    // bookkeeping says about it.
     if (!buffer_reused || !same_shape)
       e.wt_clean = false;
-    bool valid = buffer_reused && same_shape &&
-                 (e.gpu_dirty || e.last_validated_frame == g_frame.num ||
-                  e.wt_clean);
+    bool valid =
+        buffer_reused && same_shape &&
+        (e.gpu_dirty || e.last_validated_frame == g_frame.num || e.wt_clean);
     if (valid && !e.gpu_dirty && e.last_validated_frame != g_frame.num)
       g_in_wt_skips++;
     if (e.imported && same_shape)
-      valid = true;  // the buffer IS the guest pages; nothing to copy
-    // A read whose base is a live render target must be staged from the
-    // image: the guest bytes under an RT are stale (draws never write them
-    // back), and the image content changes every frame regardless of the
-    // guest hash. Attempted at most once per frame per range; a CS-written
-    // buffer (gpu_dirty) stays authoritative.
+      valid = true;
     const bool rt_backed = ci.res[i].image_staging && CsAliasedBase(base);
-    // ... and at most once per frame per range, but a target NOTHING has
-    // rendered into since the last bridge still holds the bytes already
-    // staged. Astro Bot's shadow array (1536x1536 x16 layers = 151 MB) is
-    // re-lit rarely and re-copied every frame without this; that one range is
-    // 40% of a frame's image staging.
-    // The target took this range's pixels in frame and has been rendered
-    // into since: it is the newer copy, and the dispatch output this range
-    // still holds is superseded. Kept dirty it would stay authoritative, and
-    // the dispatch would read last frame's result instead of the target (UC2
-    // blurs a target back into itself: blur of blur, into garbage).
     if (rt_backed && e.gpu_dirty && e.rt_seq == e.write_seq &&
         AliasedImageRenderSerial(base) > e.refreshed_serial) {
       UnindexDirtyRange(base, e.guest_bytes);
@@ -1159,25 +1010,10 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       valid = false;
     else if (rt_backed && !e.gpu_dirty && e.rt_sourced)
       valid = same_shape;
-    // Not known clean: staged again below, from pages armed first, so a CPU
-    // write after this point is reported and until one is the staging stays
-    // good. Pages the tracker cannot watch are staged every time.
     if (!valid && same_shape && !rt_attempt) {
       e.wt_clean = !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
       e.last_validated_frame = g_frame.num;
     }
-    // A range the shader only WRITES needs no content from guest memory: it
-    // supplies every byte it will write back. SotC's material fills are whole
-    // 4 MiB arenas of exactly that shape, and staging them in is ~60 ms a frame
-    // of pure waste (`in=` in the fps line). Opt-in because a shader that
-    // writes only PART of such a range would write back whatever the buffer
-    // happened to hold (the resource plan says "never read", not "writes all
-    // of it").
-    // Direct-memory arenas only. A compute range that aliases module .data
-    // (modules at 0x2xxxxxxxxxxx, the dmem arena at 0x80xxxxxxxx) gets a
-    // partial write + writeback of stale staging over live globals when the
-    // plan's "written" bit is wrong or the write is partial; SotC's menu
-    // transition died exactly that way (SIGSEGV in malloc).
     const bool dmem_arena = base >= 0x8000000000ull && base < 0x9000000000ull;
     if (kCsSkipUpload && !valid && dmem_arena && !ci.res[i].read &&
         ci.res[i].written && !ci.res[i].image_staging && !ci.res[i].zero_fill &&
@@ -1185,9 +1021,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       valid = true;
       g_cs_skip_n++;
     }
-    // The frame's open chunk copies a texture out of this buffer and this
-    // dispatch rewrites it: the chunk goes on the queue first, so the draw
-    // gets the contents it sampled.
     if (e.buf && e.chunk_ref == g_frame.chunk_seq &&
         (!valid || fold_count || ci.res[i].written ||
          ci.res[i].shader_writes) &&
@@ -1196,8 +1029,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       return CsDeclined(ci, "22");
     }
     if (!valid) {
-      // CPU write into a buffer a pending batched dispatch reads/writes.
-      // Renaming avoids the stall when the old contents are read-only.
       if (kCsRename && e.pending_batch && !e.gpu_dirty && !e.res.written) {
         if (!CsRangeRename(e, sz[i])) {
           renderer.state = nullptr;
@@ -1222,7 +1053,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
               !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
         g_in_rt_ns += NowNs() - tr;
         g_in_rt_n++;
-        // DELTA_GPU_CSRT: trace every RT-backed staging decision.
         static int rt_trace_logged = 0;
         if (kCsRtTrace && rt_trace_logged < 200) {
           rt_trace_logged++;
@@ -1230,15 +1060,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                     (unsigned long)base, ci.res[i].width, ci.res[i].height,
                     e.rt_sourced ? "staged-from-RT" : "guest-fallback");
         }
-        // A failed bridge is either "not a live target" (fall back) or a lost
-        // device (stop recording altogether, like every other failed flush).
         if (g_cs_failed) {
           renderer.state = nullptr;
           return CsDeclined(ci, "17");
         }
       }
       if (!rt_attempt || !e.rt_sourced) {
-        // Armed before the copy, so a write racing it is reported.
         if (!same_shape || rt_attempt) {
           e.wt_clean = !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
           e.last_validated_frame = g_frame.num;
@@ -1246,9 +1073,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           GuestWriteTracker().Arm(base, hash_bytes);
         }
         e.cpu_writes.clear();
-        // The GPU copies the bytes out of the guest pages, in queue order
-        // behind any write still on its way there; an image is detiled on the
-        // way into the buffer.
         const u64 copy_bytes = stage_bytes ? stage_bytes : ci.res[i].size;
         CsBatchBeginImpl();
         bool staged = false;
@@ -1267,11 +1091,9 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         }
         if (!staged)
           return CsDeclined(ci, "stage");
-        // Armed once the read is recorded and the release of any page it
-        // imported is collected: the copy runs later, so a write from here on
-        // is reported.
         CollectGuestWrites();
-        e.staged_clean = !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
+        e.staged_clean =
+            !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
         g_cs_list->Barrier(rhi::kAccessCopyWrite | kAccessComputeRW,
                            kAccessComputeRW);
         g_cs_batch_access.erase(e.buf);
@@ -1292,8 +1114,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
           st.first++;
         else if (!same_shape) {
           st.shape++;
-          // Which field flipped is the whole question: two dispatches that
-          // describe the same surface slightly differently restage it in full.
           static base::HashSet<u64> shape_logged, big_logged;
           auto& logged = sz[i] >= (1u << 20) ? big_logged : shape_logged;
           if (logged.size() < 64 && logged.insert(base).second)
@@ -1314,9 +1134,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         else
           st.hash++;
       }
-      // Which staged bytes the CPU only ever WRITES: those could live straight
-      // in host-visible VRAM (ReBAR) with no mirror and no copy, because
-      // nothing ever reads them back across the bus.
       if (ci.res[i].image_staging)
         g_stage_img_bytes += sz[i];
       else if (ci.res[i].shader_writes || ci.res[i].written)
@@ -1324,16 +1141,11 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       else
         g_stage_ro_bytes += sz[i];
     }
-    // A subset bind keeps the entry at the larger footprint it was staged and
-    // hashed at: shrinking it here is what made the next full-size bind look
-    // like a reshape.
     if (!subset) {
       e.size = truth_i ? guest_bytes : sz[i];
       if (e.guest_bytes != guest_bytes) {
         UnindexCsRange(base, e.guest_bytes);
         IndexCsRange(base, guest_bytes);
-        // Still owed to guest memory: its dirty footprint grows with it, or a
-        // reader of the new part would find nothing to flush.
         if (e.gpu_dirty)
           IndexDirtySpan(base, DirtyLo(base), RangeEnd(base, guest_bytes));
       }
@@ -1382,8 +1194,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       MarkPending(e);
     }
   }
-  // Re-resolve handles: a later binding sharing an earlier binding's base may
-  // have grown (destroyed + recreated) that range's buffer.
   for (u32 i = 0; i < ci.num_res; i++)
     if (!ci.res[i].zero_fill && !truth_view[i] && !mirror_res[i])
       bind_buf[i] =
@@ -1392,9 +1202,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
 
   g_ns_cs_in += NowNs() - t_in0;
 
-  // The storage buffers, pushed into the batch's command list.
-  rhi::BindingWrite wr[ComputeInfo::kMaxResources + 2 +
-                      ComputeInfo::kMaxTextures];
+  rhi::BindingWrite
+      wr[ComputeInfo::kMaxResources + 2 + ComputeInfo::kMaxTextures];
   for (u32 i = 0; i < ci.num_res; i++)
     bind_off[i] = ci.res[i].zero_fill ? 0
                   : mirror_res[i]     ? MirrorOffset(ci.res[i].base)
@@ -1402,9 +1211,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
                   : parent_base[i]
                       ? parent_off[i]
                       : g_cs_ranges[ci.res[i].base].imported_offset;
-  // A view that starts off the device's storage alignment binds from the
-  // aligned offset below it; the shader adds the difference (see the bias
-  // bits of the pushed bound in the recompiler).
   u32 bias_dwords[ComputeInfo::kMaxResources] = {};
   const u64 align = base::Max<u64>(caps.storage_offset_alignment, 4);
   for (u32 i = 0; i < ci.num_res; i++) {
@@ -1428,8 +1234,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     nwrite++;
   }
   if (ci.recomp->guest_memory_binding >= 0) {
-    // After this dispatch's own resources are staged: they are windows too.
-    // Pointer-chasing dispatches still in flight keep their own tables.
     if (g_pending_tables.size() >= kMaxPendingTables &&
         !CsBatchWaitId(g_pending_tables.front().batch, kSyncBatchCap))
       return CsDeclined(ci, "guest-address-map");
@@ -1445,12 +1249,8 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     nwrite++;
   }
 
-  // Record the dispatch into the open batch. Submission + the wait happen at
-  // the next flush point, not here.
-  // Real image views are transitioned and uploaded on the frame list, so the
-  // dispatch has to record there too.
-  if (ci.num_tex && g_cs_batch_open &&
-      !g_cs_batches[g_cs_batch_cur].in_frame && !CsBatchSubmit())
+  if (ci.num_tex && g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame &&
+      !CsBatchSubmit())
     return CsDeclined(ci, "tex-batch");
   CsBatchBeginImpl();
   if (ci.num_tex && !g_cs_batches[g_cs_batch_cur].in_frame)
@@ -1461,7 +1261,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     rhi::TextureState state = rhi::TextureState::kShaderRead;
     rhi::Format format = GuestTextureFormat(t.dfmt, t.nfmt);
     ResolveComputeTexture(t, &view, &state, &format);
-    // The resolve may have recorded uploads and opened a region on the list.
     CsBatchBeginImpl();
     if (!view) {
       view = DefaultTexView(t, t.nfmt == 4 || t.nfmt == 5);
@@ -1492,17 +1291,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     g_cs_list->Barrier(rhi::kAccessComputeWrite, kAccessComputeRW);
   g_cs_list->SetPipeline(cp->pipe);
   g_cs_list->PushBindGroup(0, cp->set_layout, wr, nwrite);
-  // The block is 16 user-data dwords plus 48 bounds; its total is the driver's
-  // maxPushConstantsSize (256 B == 64 dwords).
   constexpr u32 kCsPushDwords = 64;
   static_assert(16 + 48 == kCsPushDwords);
   u32 pc[kCsPushDwords];
   std::memcpy(pc, ci.user_data, sizeof(pc[0]) * 16);
-  // Every SSBO access clamps to the bound the dispatch mapped for its
-  // binding; 0 means unbounded (a binding the shader indexes nowhere).
   for (u32 i = 16; i < kCsPushDwords; i++)
     pc[i] = 0;
-  // Bits [31:26] carry the bias, so a bound past them reads as unbounded.
   for (u32 i = 0; i < ci.num_res; i++) {
     if (!bind_buf[i] || ci.res[i].binding >= kCsPushDwords - 16)
       continue;
@@ -1512,7 +1306,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         (bias_dwords[i] << 26);
   }
   g_cs_list->SetPushConstants(0, sizeof(pc), pc);
-  // One barrier covers every hazard the dispatch has against the batch.
   u32 hazard_src = 0, hazard_dst = 0;
   rhi::Buffer* unique_buffers[ComputeInfo::kMaxResources];
   bool unique_writes[ComputeInfo::kMaxResources] = {};
@@ -1585,8 +1378,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   const bool stamp =
       g_cs_timestamps && (CsSyncReporting() || traced || kCsHeavyUs);
   if (stamp)
-    g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2,
-                              /*start=*/true);
+    g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2, true);
   DispatchCheckpoint(g_cs_list, ci.cs_addr, false);
   g_cs_list->ProfileBegin(1);
   if (indirect.buffer) {
@@ -1600,11 +1392,9 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   g_cs_list->ProfileEnd();
   DispatchCheckpoint(g_cs_list, ci.cs_addr, true);
   if (stamp)
-    g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2 + 1,
-                              /*start=*/false);
+    g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2 + 1, false);
   if (traced)
     timeline::End(query);
-  // What the dispatch wrote through a detiled view goes back into the truth.
   for (u32 i = 0; i < ci.num_res; i++) {
     if (!truth_view[i] || !ci.res[i].written)
       continue;
@@ -1622,8 +1412,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
             ? (ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size)
             : it->second.guest_bytes;
     RecordImageTiling(g_cs_list, *truth_table[i], it->second.buf, parent_off[i],
-                      span, truth_view[i], sz[i],
-                      /*detile=*/false);
+                      span, truth_view[i], sz[i], false);
     g_cs_batch_access.erase(it->second.buf);
     g_truth_retile_n++;
   }
@@ -1658,15 +1447,12 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     if (mirror_res[i] && ci.res[i].written) {
       const auto& res = ci.res[i];
       const u64 bytes = res.guest_size ? res.guest_size : res.size;
-      MirrorWriteBack(res.base,
-                      res.write_bytes ? base::Min(res.write_bytes, bytes)
-                                      : bytes);
+      MirrorWriteBack(res.base, res.write_bytes
+                                    ? base::Min(res.write_bytes, bytes)
+                                    : bytes);
     }
   ++g_cs_batch_count;
 
-  // Mark written ranges GPU-dirty. Guest memory catches up lazily at the next
-  // flush point (draw / DMA / frame end). Writing every dispatch's outputs
-  // back immediately (the image retile especially) was ~100ms/frame.
   const u64 t_out0 = NowNs();
   for (u32 i = 0; i < ci.num_res; i++) {
     if (!ci.res[i].written || ci.res[i].zero_fill || mirror_res[i])
@@ -1677,20 +1463,17 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
       continue;
     const auto& res = ci.res[i];
     if (parent_base[i] && !res.image_staging) {
-      // A merged range: only this binding's own window can have changed.
       const u64 child = res.guest_size ? res.guest_size : res.size;
       const u64 lo = dirty_base + parent_off[i];
-      IndexDirtySpan(dirty_base, lo,
-                     RangeEnd(lo, res.write_bytes
-                                      ? base::Min(res.write_bytes, child)
-                                      : child));
+      IndexDirtySpan(
+          dirty_base, lo,
+          RangeEnd(
+              lo, res.write_bytes ? base::Min(res.write_bytes, child) : child));
     } else {
       const u64 written =
           !parent_base[i] && !res.image_staging && res.write_bytes
               ? base::Min(res.write_bytes, it->second.guest_bytes)
               : it->second.guest_bytes;
-      // A binding merged into a wider range (MergeOverlapping) starts at its
-      // view offset; nothing below that was written.
       const u64 lo = !parent_base[i] && !res.image_staging
                          ? dirty_base + base::Min(res.view_offset, written)
                          : dirty_base;
@@ -1724,7 +1507,6 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
         pending.check_writes = true;
         pending.owners = base::move(window_owners);
       } else {
-        // Stores through guest pointers landed in the windows' own buffers.
         CsBatchBeginImpl();
         g_cs_list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
         if (!CsBatchFlush(kSyncBatchCap)) {

@@ -13,23 +13,23 @@ namespace {
 Id InlineHalf(Translator& t, u32 field) {
   switch (field) {
     case 240:
-      return t.U32(0x3800);  // 0.5
+      return t.U32(0x3800);
     case 241:
-      return t.U32(0xb800);  // -0.5
+      return t.U32(0xb800);
     case 242:
-      return t.U32(0x3c00);  // 1.0
+      return t.U32(0x3c00);
     case 243:
-      return t.U32(0xbc00);  // -1.0
+      return t.U32(0xbc00);
     case 244:
-      return t.U32(0x4000);  // 2.0
+      return t.U32(0x4000);
     case 245:
-      return t.U32(0xc000);  // -2.0
+      return t.U32(0xc000);
     case 246:
-      return t.U32(0x4400);  // 4.0
+      return t.U32(0x4400);
     case 247:
-      return t.U32(0xc400);  // -4.0
+      return t.U32(0xc400);
     case 248:
-      return t.U32(0x3118);  // 1 / (2*pi)
+      return t.U32(0x3118);
     default:
       return 0;
   }
@@ -882,8 +882,6 @@ bool EmitNeoVop3p(Translator& t, const Inst& inst) {
       signed16[i] = SignExtend16(t, raw[i]);
       floats[i] = HalfFloat(t, raw[i]);
       if (negations & (1u << i)) {
-        // Integer packed operations consume the two's-complement value above;
-        // floating packed operations negate the original half value instead.
         const Id original =
             Source16(t, fields[i], inst.literal, selections & (1u << i));
         floats[i] = HalfFloat(t, original);
@@ -982,4 +980,4 @@ bool EmitNeoVop3p(Translator& t, const Inst& inst) {
 
 }  // namespace gpu::gcn
 
-#endif  // DELTA_HAVE_SPIRV_BACKEND
+#endif

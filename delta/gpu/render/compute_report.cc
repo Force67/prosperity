@@ -2,9 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// Diagnostics: the DELTA_GPU_CSSYNC report, queue checkpoints and memory
-// statistics.
-
 #include "gpu/render/compute_internal.h"
 
 #include <cstdio>
@@ -51,31 +48,31 @@ void CsSyncReport(double frames) {
             "rt-bridge={:.1f}ms x{:.1f} (in-frame x{:.1f}) copy={:.1f}ms "
             "tracked-clean={:.1f}x",
             g_in_hash_ns / frames / 1e6, g_in_hash_n / frames,
-            g_in_hash_bytes / frames / 1e6,
-            g_wb_hash_ns / frames / 1e6, g_wb_hash_bytes / frames / 1e6,
-            g_in_detile_ns / frames / 1e6, g_in_rt_ns / frames / 1e6,
-            g_in_rt_n / frames, g_in_frame_bridge_n / frames,
-            g_in_copy_ns / frames / 1e6, g_in_wt_skips / frames);
+            g_in_hash_bytes / frames / 1e6, g_wb_hash_ns / frames / 1e6,
+            g_wb_hash_bytes / frames / 1e6, g_in_detile_ns / frames / 1e6,
+            g_in_rt_ns / frames / 1e6, g_in_rt_n / frames,
+            g_in_frame_bridge_n / frames, g_in_copy_ns / frames / 1e6,
+            g_in_wt_skips / frames);
   g_in_hash_ns = g_in_detile_ns = g_in_rt_ns = g_in_copy_ns = 0;
   g_in_hash_n = g_in_rt_n = g_in_frame_bridge_n = g_in_wt_skips = 0;
   g_in_hash_bytes = g_wb_hash_bytes = g_wb_hash_ns = 0;
-  BASE_LOGI(
-      "csin2",
-      "overlap-wb={:.1f}ms x{:.1f} reshape-wb={:.1f}ms x{:.1f} "
-      "alloc={:.1f}ms x{:.1f} recycled={:.1f} ranges={} {:.0f}MB "
-      "membuf={:.1f}ms lazy-kept={:.1f}x {:.1f}MB | truth stage={:.1f}MB "
-      "import={:.1f} detile={:.1f} retile={:.1f} parent={:.1f} "
-      "fold={:.1f} rt={:.1f} view-hits={:.1f} scratch={:.0f}MB",
-      g_in_overlap_ns / frames / 1e6, g_in_overlap_n / frames,
-      g_in_reshape_ns / frames / 1e6, g_in_reshape_n / frames,
-      g_in_alloc_ns / frames / 1e6, g_in_alloc_n / frames,
-      g_cs_recycled_n / frames, g_cs_ranges.size(), g_cs_range_bytes / 1e6,
-      g_in_membuf_ns / frames / 1e6,
-      g_lazy_kept_n / frames, g_lazy_kept_bytes / frames / 1e6,
-      g_truth_stage_bytes / frames / 1e6, g_truth_import_n / frames,
-      g_truth_detile_n / frames, g_truth_retile_n / frames,
-      g_truth_parent_n / frames, g_truth_fold_n / frames, g_truth_rt_n / frames,
-      g_truth_view_hits / frames, g_cs_scratch_bytes / 1e6);
+  BASE_LOGI("csin2",
+            "overlap-wb={:.1f}ms x{:.1f} reshape-wb={:.1f}ms x{:.1f} "
+            "alloc={:.1f}ms x{:.1f} recycled={:.1f} ranges={} {:.0f}MB "
+            "membuf={:.1f}ms lazy-kept={:.1f}x {:.1f}MB | truth stage={:.1f}MB "
+            "import={:.1f} detile={:.1f} retile={:.1f} parent={:.1f} "
+            "fold={:.1f} rt={:.1f} view-hits={:.1f} scratch={:.0f}MB",
+            g_in_overlap_ns / frames / 1e6, g_in_overlap_n / frames,
+            g_in_reshape_ns / frames / 1e6, g_in_reshape_n / frames,
+            g_in_alloc_ns / frames / 1e6, g_in_alloc_n / frames,
+            g_cs_recycled_n / frames, g_cs_ranges.size(),
+            g_cs_range_bytes / 1e6, g_in_membuf_ns / frames / 1e6,
+            g_lazy_kept_n / frames, g_lazy_kept_bytes / frames / 1e6,
+            g_truth_stage_bytes / frames / 1e6, g_truth_import_n / frames,
+            g_truth_detile_n / frames, g_truth_retile_n / frames,
+            g_truth_parent_n / frames, g_truth_fold_n / frames,
+            g_truth_rt_n / frames, g_truth_view_hits / frames,
+            g_cs_scratch_bytes / 1e6);
   g_truth_view_hits = 0;
   {
     base::String why;
@@ -93,8 +90,7 @@ void CsSyncReport(double frames) {
   g_truth_stage_bytes = g_truth_import_n = g_truth_detile_n = 0;
   g_truth_retile_n = g_truth_parent_n = g_truth_fold_n = g_truth_rt_n = 0;
   g_lazy_kept_n = g_lazy_kept_bytes = 0;
-  if (kMirror)
-  {
+  if (kMirror) {
     u64 uni = 0, lo = 0, hi = 0;
     for (const auto& [b0, e0] : g_mirror_wb_union) {
       if (b0 > hi) {
@@ -107,7 +103,8 @@ void CsSyncReport(double frames) {
     }
     uni += hi - lo;
     g_mirror_wb_union.clear();
-    BASE_LOGI("csstage", "mirror write-back {:.1f}MB x{:.1f} per frame, "
+    BASE_LOGI("csstage",
+              "mirror write-back {:.1f}MB x{:.1f} per frame, "
               "{:.1f}MB distinct; kept {:.1f}MB, {:.1f} faults",
               g_mirror_wb_bytes / frames / 1e6, g_mirror_wb_n / frames,
               uni / frames / 1e6, g_mirror_own_bytes / frames / 1e6,
@@ -124,8 +121,6 @@ void CsSyncReport(double frames) {
             g_stage_guest_detile_n / frames);
   g_stage_ro_bytes = g_stage_rw_bytes = g_stage_img_bytes = 0;
   g_stage_guest_detile_bytes = g_stage_guest_detile_n = 0;
-  // The ranges that actually cost the frame, most expensive first: what to fix
-  // is whichever reason column is not "hash" (guest memory genuinely changed).
   base::Vector<base::Pair<u64, StageStat>> top;
   for (const auto& [base, stat] : g_stage_stats)
     top.push_back({base, stat});
@@ -156,14 +151,14 @@ void CsSyncReport(double frames) {
             "guest-override={:.1f}x "
             "mirror-tiles={:.1f}x rt-variants={:.1f}x gds-imported={:.1f}x "
             "guest-misses={:.1f}x gpu-indirect={:.1f}x staged-indirect={:.1f}x",
-            g_out_rt_submits / frames,
-            g_tex_bridge_n / frames, g_tex_bridge_bytes / frames / 1e6,
-            g_buf_bridge_n / frames, g_buf_bridge_bytes / frames / 1e6,
-            g_buf_bridge_declined / frames, g_vtx_bridge_n / frames,
-            g_cs_chunk_splits / frames, g_guest_override_n / frames,
-            g_guest_mirror_tiles / frames, g_cs_rt_variants_made / frames,
-            g_gds_imported_n / frames, g_guest_misses_n / frames,
-            g_cs_indirect_n / frames, g_indirect_staged_n / frames);
+            g_out_rt_submits / frames, g_tex_bridge_n / frames,
+            g_tex_bridge_bytes / frames / 1e6, g_buf_bridge_n / frames,
+            g_buf_bridge_bytes / frames / 1e6, g_buf_bridge_declined / frames,
+            g_vtx_bridge_n / frames, g_cs_chunk_splits / frames,
+            g_guest_override_n / frames, g_guest_mirror_tiles / frames,
+            g_cs_rt_variants_made / frames, g_gds_imported_n / frames,
+            g_guest_misses_n / frames, g_cs_indirect_n / frames,
+            g_indirect_staged_n / frames);
   g_guest_override_n = 0;
   g_indirect_staged_n = 0;
   g_guest_mirror_tiles = g_cs_rt_variants_made = g_gds_imported_n = 0;
@@ -194,7 +189,9 @@ void CsSyncReport(double frames) {
     base::FormatTo(syncs, " {}={:.1f}({:.1f}ms)", reader.c_str(),
                    w.first / frames, w.second / frames / 1e6);
   g_cs_reader_wbs.clear();
-  base::FormatTo(syncs, " | submits: wait={:.1f} chunk={:.1f} label={:.1f} heavy={:.1f} cap={:.1f} end={:.1f}",
+  base::FormatTo(syncs,
+                 " | submits: wait={:.1f} chunk={:.1f} label={:.1f} "
+                 "heavy={:.1f} cap={:.1f} end={:.1f}",
                  g_submit_why[0] / frames, g_submit_why[1] / frames,
                  g_submit_why[2] / frames, g_submit_why[3] / frames,
                  g_submit_why[4] / frames, g_submit_why[5] / frames);
@@ -203,13 +200,6 @@ void CsSyncReport(double frames) {
   BASE_LOGI("cssync", "{}", syncs.c_str());
 }
 
-// DELTA_GPU_QCHECK=1: before every CS batch is submitted, run an EMPTY
-// command list through the same queue and wait for it. The device is lost
-// by whatever ran before the first failing submit, so a checkpoint that
-// fails names PRIOR queue work (graphics draws, an earlier bridge copy) as
-// the fault, and one that succeeds while the batch's own wait fails
-// isolates the batch content. The checkpoint shares the graphics queue, so
-// it runs after everything already recorded there.
 DELTA_OPTION(bool, kQueueCheck, "DELTA_GPU_QCHECK", false);
 
 bool QueueCheckArmed() {
@@ -228,7 +218,6 @@ bool QueueCheck(const char* where) {
   return ok;
 }
 
-// Declared in render/renderer.h for the kernel's crash handler.
 bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
   for (const auto& kv : g_cs_ranges) {
     const u64 base = kv.first;
@@ -249,8 +238,6 @@ bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
   return false;
 }
 
-// DELTA_GPU_MEMSTAT: what the renderer holds in device memory, every 300
-// frames.
 DELTA_OPTION(bool, kMemStat, "DELTA_GPU_MEMSTAT", false);
 
 void ReportGpuMemory() {

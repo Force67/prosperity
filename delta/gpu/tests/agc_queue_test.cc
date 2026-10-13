@@ -13,8 +13,6 @@
 #include "gpu/write_tracker.h"
 #include "guest/session.h"
 
-// Exercise the real packet walker with a backend that records dispatch state.
-// Queue scheduling must work independently of a host graphics device.
 namespace {
 base::Vector<u32> g_dispatch_values;
 base::Vector<u64> g_dispatch_arguments;
@@ -245,7 +243,7 @@ TEST(AgcQueue, IndirectOffsetDispatchReadsCompletedGpuArguments) {
   g_dispatch_groups.clear();
   Words w;
   Packet(w, 0x11, {1, Lo(args.data()), Hi(args.data())});
-  w[0] |= 2;  // SET_BASE shader type: compute
+  w[0] |= 2;
   Packet(w, 0x16, {4, 1});
   EXPECT_EQ(Submit(w, 108), w.size());
   ASSERT_EQ(g_dispatch_groups.size(), 1u);
@@ -298,8 +296,8 @@ TEST(AgcQueue, ZeroInstanceIndirectDrawDoesNotReusePreviousInstanceCount) {
   g_draw_instances.clear();
   Words w;
   Packet(w, 0x11, {1, Lo(args.data()), Hi(args.data())});
-  Packet(w, 0x2f, {7});           // NUM_INSTANCES
-  Packet(w, 0x24, {0, 0, 0, 0});  // DRAW_INDIRECT
+  Packet(w, 0x2f, {7});
+  Packet(w, 0x24, {0, 0, 0, 0});
   EXPECT_EQ(Submit(w, 111), w.size());
   EXPECT_TRUE(g_draw_instances.empty());
   args[1] = 2;
@@ -353,13 +351,13 @@ TEST(AgcQueue, NggPointDrawsKeepArgumentsOnTheGpu) {
 TEST(AgcQueue, IndexTypePacketsAndRegisterWritesShareState) {
   g_draw_index_types.clear();
   Words w;
-  Packet(w, 0x2a, {0});  // INDEX_TYPE: 16-bit
+  Packet(w, 0x2a, {0});
   Packet(w, 0x2d, {3, 0});
-  Packet(w, 0x7a,
-         {0x20000000u | (gpu::ps5::mmVGT_INDEX_TYPE - gpu::kUConfigRegBase),
-          1});  // SET_UCONFIG_REG_INDEX: 32-bit
+  Packet(
+      w, 0x7a,
+      {0x20000000u | (gpu::ps5::mmVGT_INDEX_TYPE - gpu::kUConfigRegBase), 1});
   Packet(w, 0x2d, {3, 0});
-  Packet(w, 0x2a, {2});  // INDEX_TYPE: 8-bit
+  Packet(w, 0x2a, {2});
   Packet(w, 0x2d, {3, 0});
   EXPECT_EQ(Submit(w, 112), w.size());
   EXPECT_EQ(g_draw_index_types, (base::Vector<u32>{0, 1, 2}));

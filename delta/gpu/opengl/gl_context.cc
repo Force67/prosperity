@@ -21,7 +21,6 @@ namespace gpu::opengl {
 
 namespace {
 
-// Scores a display by what it renders on; < 0 when it has no GL 4.6 core.
 int Probe(EGLDisplay display, const char* filter, base::String* renderer) {
   EGLint major = 0, minor = 0;
   if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor))
@@ -74,7 +73,6 @@ bool OpenEglDevice(const char* filter, EglDevice* out) {
       out->display = d;
       out->renderer = renderer;
     }
-    // Probing a display loads its driver: stop at the first good one.
     if (best == 100 || (!filtered && best == 2))
       break;
   }

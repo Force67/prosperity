@@ -1,8 +1,8 @@
 #include "gpu/gcn/gcn_translate.h"
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
-#include <cstdint>
 #include <spirv/unified1/GLSL.std.450.h>
+#include <cstdint>
 #include "base/containers/vector.h"
 #include "base/logging.h"
 #include "base/strings/xstring.h"
@@ -90,8 +90,6 @@ base::Vector<u32> BuildImageTilingShader() {
       op(Op::OpShiftRightLogical, c(UINT32_MAX), op(Op::OpISub, c(32), bits));
   const Id linear_dw = add(add(param(7), mul(z, param(9))),
                            add(mul(y, mul(param(8), words)), xw));
-  // Packed narrow texels on the linear side (param 12): byte addressing with
-  // the offset and stride given in bytes, and a lane shift inside the dword.
   const Id is_packed = m.Emit(Op::OpINotEqual, m.TypeBool(), {param(12), c(0)});
   const Id lin_byte =
       add(add(param(7), mul(z, param(9))), mul(add(mul(y, param(8)), x), elem));
@@ -101,7 +99,6 @@ base::Vector<u32> BuildImageTilingShader() {
   const Id lshift = m.Emit(
       Op::OpSelect, u,
       {is_packed, mul(op(Op::OpBitwiseAnd, lin_byte, c(3)), c(8)), c(0)});
-  // Plain dwords need no packing or depth conversion.
   const Id plain =
       m.Emit(Op::OpLogicalAnd, m.TypeBool(),
              {m.Emit(Op::OpLogicalNot, m.TypeBool(), {narrow}),
@@ -128,13 +125,13 @@ base::Vector<u32> BuildImageTilingShader() {
   m.OpenBlock(copy_done);
   m.ReturnVoid();
   m.OpenBlock(formatted_copy);
-  // R11G11B10F from three floats, rounded to nearest with ties away, as the
-  // host's PackUnsignedFloat: NaN keeps a mantissa bit, negatives are zero.
   const Id t_bool = m.TypeBool();
   const auto sel = [&](Id cond, Id a, Id b) {
     return m.Emit(Op::OpSelect, u, {cond, a, b});
   };
-  const auto eq = [&](Id a, Id b) { return m.Emit(Op::OpIEqual, t_bool, {a, b}); };
+  const auto eq = [&](Id a, Id b) {
+    return m.Emit(Op::OpIEqual, t_bool, {a, b});
+  };
   const auto ult = [&](Id a, Id b) {
     return m.Emit(Op::OpULessThan, t_bool, {a, b});
   };
@@ -144,40 +141,39 @@ base::Vector<u32> BuildImageTilingShader() {
     const Id exp32 =
         op(Op::OpBitwiseAnd, op(Op::OpShiftRightLogical, bits, c(23)), c(0xFF));
     const Id mant23 = op(Op::OpBitwiseAnd, bits, c(0x7FFFFF));
-    const Id negative = m.Emit(Op::OpINotEqual, t_bool,
-                               {op(Op::OpShiftRightLogical, bits, c(31)), c(0)});
+    const Id negative =
+        m.Emit(Op::OpINotEqual, t_bool,
+               {op(Op::OpShiftRightLogical, bits, c(31)), c(0)});
     const Id special =
         sel(m.Emit(Op::OpINotEqual, t_bool, {mant23, c(0)}),
             op(Op::OpBitwiseOr, inf, c(1)), sel(negative, c(0), inf));
-    const Id normal = m.ExtInst(
-        u, GLSLstd450UMin,
-        {op(Op::OpShiftRightLogical,
-            add(op(Op::OpBitwiseOr,
-                   op(Op::OpShiftLeftLogical, op(Op::OpISub, exp32, c(112)),
-                      c(23)),
-                   mant23),
-                c(1u << (drop - 1))),
-            c(drop)),
-         inf});
+    const Id normal =
+        m.ExtInst(u, GLSLstd450UMin,
+                  {op(Op::OpShiftRightLogical,
+                      add(op(Op::OpBitwiseOr,
+                             op(Op::OpShiftLeftLogical,
+                                op(Op::OpISub, exp32, c(112)), c(23)),
+                             mant23),
+                          c(1u << (drop - 1))),
+                      c(drop)),
+                   inf});
     const Id shift = op(Op::OpISub, c(drop + 113),
                         m.ExtInst(u, GLSLstd450UMax, {exp32, c(1)}));
     const Id held = m.ExtInst(u, GLSLstd450UMin, {shift, c(31)});
-    const Id mant = sel(eq(exp32, c(0)), mant23,
-                        op(Op::OpBitwiseOr, mant23, c(0x800000)));
-    const Id denormal = sel(
-        ult(shift, c(32)),
-        op(Op::OpShiftRightLogical,
-           add(mant, op(Op::OpShiftLeftLogical, c(1),
-                        op(Op::OpISub, held, c(1)))),
-           held),
-        c(0));
+    const Id mant =
+        sel(eq(exp32, c(0)), mant23, op(Op::OpBitwiseOr, mant23, c(0x800000)));
+    const Id denormal = sel(ult(shift, c(32)),
+                            op(Op::OpShiftRightLogical,
+                               add(mant, op(Op::OpShiftLeftLogical, c(1),
+                                            op(Op::OpISub, held, c(1)))),
+                               held),
+                            c(0));
     return sel(eq(exp32, c(0xFF)), special,
                sel(negative, c(0),
                    sel(m.Emit(Op::OpUGreaterThan, t_bool, {exp32, c(112)}),
                        normal, denormal)));
   };
   const Id is_pack11 = m.Emit(Op::OpINotEqual, t_bool, {param(14), c(0)});
-  // Every lane loads: a lane not packing reads its own dword three times.
   const Id texel4 = add(add(param(7), mul(z, param(9))),
                         mul(add(mul(y, param(8)), xw), c(4)));
   const Id detile = m.NewBlock(), retile = m.NewBlock(), copied = m.NewBlock();
@@ -200,24 +196,23 @@ base::Vector<u32> BuildImageTilingShader() {
       m.Emit(Op::OpSelect, u, {is_depth16, unorm_to_float, raw_texel});
   const Id pk_store = m.NewBlock(), plain_store = m.NewBlock(),
            det_done = m.NewBlock();
-  // RGBA32F out of R11G11B10F, as the host's UnpackUnsignedFloat.
   const auto unpack_unsigned_float = [&](Id packed, u32 mantissa_bits) {
     const Id mant = op(Op::OpBitwiseAnd, packed, c((1u << mantissa_bits) - 1));
-    const Id exponent = op(Op::OpBitwiseAnd,
-                           op(Op::OpShiftRightLogical, packed, c(mantissa_bits)),
-                           c(0x1F));
-    const Id denormal = m.Emit(
-        Op::OpBitcast, u,
-        {m.Emit(Op::OpFMul, f,
-                {m.Emit(Op::OpConvertUToF, f, {mant}),
-                 m.Emit(Op::OpBitcast, f,
-                        {c((127u - 14u - mantissa_bits) << 23)})})});
+    const Id exponent =
+        op(Op::OpBitwiseAnd,
+           op(Op::OpShiftRightLogical, packed, c(mantissa_bits)), c(0x1F));
+    const Id denormal =
+        m.Emit(Op::OpBitcast, u,
+               {m.Emit(Op::OpFMul, f,
+                       {m.Emit(Op::OpConvertUToF, f, {mant}),
+                        m.Emit(Op::OpBitcast, f,
+                               {c((127u - 14u - mantissa_bits) << 23)})})});
     const Id special = sel(m.Emit(Op::OpINotEqual, t_bool, {mant, c(0)}),
                            c(0x7FC00000), c(0x7F800000));
-    const Id normal = op(
-        Op::OpBitwiseOr,
-        op(Op::OpShiftLeftLogical, add(exponent, c(112)), c(23)),
-        op(Op::OpShiftLeftLogical, mant, c(23 - mantissa_bits)));
+    const Id normal =
+        op(Op::OpBitwiseOr,
+           op(Op::OpShiftLeftLogical, add(exponent, c(112)), c(23)),
+           op(Op::OpShiftLeftLogical, mant, c(23 - mantissa_bits)));
     return sel(eq(exponent, c(0)), denormal,
                sel(eq(exponent, c(0x1F)), special, normal));
   };
@@ -274,17 +269,15 @@ base::Vector<u32> BuildImageTilingShader() {
       op(Op::OpBitwiseOr, pack_unsigned_float(channel(0), 6),
          op(Op::OpShiftLeftLogical, pack_unsigned_float(channel(1), 6), c(11))),
       op(Op::OpShiftLeftLogical, pack_unsigned_float(channel(2), 5), c(22)));
-  const Id value = sel(
-      is_pack11, pack11,
-      op(Op::OpBitwiseAnd,
-         m.Emit(Op::OpSelect, u, {is_depth16, float_to_unorm, raw_value}),
-         value_mask));
+  const Id value =
+      sel(is_pack11, pack11,
+          op(Op::OpBitwiseAnd,
+             m.Emit(Op::OpSelect, u, {is_depth16, float_to_unorm, raw_value}),
+             value_mask));
   const Id packed = m.NewBlock(), direct = m.NewBlock(), stored = m.NewBlock();
   m.SelectionMerge(stored);
   m.BranchConditional(narrow, packed, direct);
   m.OpenBlock(packed);
-  // Neighbouring narrow texels share a dword: clear this texel's lanes, then
-  // set them. Bytes no texel maps to (padding) are never touched.
   m.Emit(
       Op::OpAtomicAnd, u,
       {at(0, tiled), c(1), c(0),
@@ -353,11 +346,10 @@ base::Vector<u32> BuildClearPredicateShader() {
   const Id word = m.Load(u, at(0, param(0)));
   const Id mask = m.Emit(Op::OpBitwiseAnd, u, {word, c(0xF)});
   const Id cleared = m.Emit(Op::OpIEqual, boolean, {mask, c(0)});
-  // HTILE's ZMASK has a second clear state, 13.
   const Id htile = m.Emit(Op::OpINotEqual, boolean, {param(2), c(0)});
-  const Id zclear = m.Emit(
-      Op::OpLogicalAnd, boolean,
-      {htile, m.Emit(Op::OpIEqual, boolean, {mask, c(13)})});
+  const Id zclear =
+      m.Emit(Op::OpLogicalAnd, boolean,
+             {htile, m.Emit(Op::OpIEqual, boolean, {mask, c(13)})});
   const Id clear = m.Emit(Op::OpLogicalOr, boolean, {cleared, zclear});
   m.Store(at(1, param(1)), m.Emit(Op::OpSelect, u, {clear, c(1), c(0)}));
   m.ReturnVoid();

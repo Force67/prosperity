@@ -28,32 +28,22 @@ namespace {
 DELTA_OPTION(bool, kFpsReport, "DELTA_GPU_FPS", true);
 DELTA_OPTION(bool, kOverlay, "DELTA_GPU_OVERLAY", true);
 DELTA_OPTION(bool, kDrawProf, "DELTA_GPU_DRAWPROF", false);
-// A frame longer than this counts as a stutter rather than a slow frame.
 DELTA_OPTION(u32, kHitchMs, "DELTA_GPU_HITCH_MS", 40);
 
-// Hitch census over the report window: the longest presented frame and how
-// many were long enough to be seen as a stutter. An average frame time hides
-// exactly the event this is about: one 400 ms frame vanishes into a 2 s mean.
 float g_frame_worst_ms = 0;
 u32 g_frame_hitch_n = 0;
 
-// Rolling per-frame stage history for the overlay graph (~4s at 60 fps).
 struct StageSample {
-  float rec, sub, gpu, prs, tex, oth, wall;  // ms
+  float rec, sub, gpu, prs, tex, oth, wall;
 };
 
 constexpr int kStageHistN = 240;
 StageSample g_stage_hist[kStageHistN];
 int g_stage_hist_pos = 0, g_stage_hist_count = 0;
 
-// This process only, not the machine: when tuning the emulator the useful
-// number is what it is itself using, and a system-wide gauge mostly reports
-// whatever else happens to be running. CPU is utime+stime from
-// /proc/self/stat, RSS the resident pages from /proc/self/statm.
 struct ProcStats {
-  float cpu_pct =
-      0;        // whole process; exceeds 100 when several threads are busy
-  u64 rss = 0;  // bytes
+  float cpu_pct = 0;
+  u64 rss = 0;
 };
 ProcStats g_proc;
 
@@ -70,8 +60,6 @@ void RefreshProcStats() {
     const size_t n = std::fread(buf, 1, sizeof buf - 1, f);
     std::fclose(f);
     buf[n] = 0;
-    // comm (field 2) can contain spaces and parens, so start after the last
-    // ')'.
     if (const char* p = std::strrchr(buf, ')')) {
       unsigned long ut = 0, st = 0;
       int field = 3;
@@ -102,7 +90,6 @@ void RefreshProcStats() {
   }
 }
 
-// 3x5 bitmap font (rows top-down, bit 2 = left pixel). Uppercase + digits only.
 const u8* OvGlyph(char c) {
   struct Glyph {
     char c;
@@ -124,12 +111,9 @@ const u8* OvGlyph(char c) {
   for (const Glyph& gl : kF)
     if (gl.c == c)
       return gl.rows;
-  return nullptr;  // unknown/space -> blank
+  return nullptr;
 }
 
-// The overlay is written into the presented buffer, which carries the scanout's
-// own component order. Its colours are authored BGRA, so a COMP_SWAP=STD frame
-// wants them the other way round; every colour reaches the buffer through here.
 bool g_overlay_rgba = false;
 
 inline void
@@ -166,11 +150,6 @@ void OvText(u8* b,
   }
 }
 
-// What this process is using, top-right, in the same terse style as the stage
-// legend. Deliberately its own panel: these are resource levels, not a
-// breakdown of the frame, and reading them next to the graph invited the two to
-// be compared. gpuMs/wallMs is our own GPU time as a share of the frame; VRAM
-// is the driver's per-process estimate.
 void DrawResourcePanel(u8* bgra, u32 w, u32 h, float gpu_ms, float wall_ms) {
   RefreshProcStats();
   u64 vram_used = 0, vram_total = 0;
@@ -191,7 +170,7 @@ void DrawResourcePanel(u8* bgra, u32 w, u32 h, float gpu_ms, float wall_ms) {
       {0xFFD2A0F0, "VRAM %4.2f GB", vram_used / kGiB},
   };
   constexpr int kRowH = 14, kSwatch = 8, kTextX = 14;
-  constexpr int kPanelW = 14 + 13 * 8 + 6;  // swatch + widest row + padding
+  constexpr int kPanelW = 14 + 13 * 8 + 6;
   const int x0 = (int)w - kPanelW - 10, y0 = 10;
   const int panel_h = kRowH * 4 + 4;
   for (int yy = y0 - 4; yy < y0 + panel_h && yy < (int)h; yy++) {
@@ -214,16 +193,6 @@ void DrawResourcePanel(u8* bgra, u32 w, u32 h, float gpu_ms, float wall_ms) {
 
 }  // namespace
 
-// Stacked per-stage frame-time columns drawn over the presented image (default
-// on; DELTA_GPU_OVERLAY=0 disables). One column per frame, 2 px per ms:
-//   green  REC  command recording + per-draw analysis (render::Draw)
-//   yellow SUB  command-buffer end + queue submit
-//   red    GPU  fence wait (the rasterizer)
-//   blue   PRS  window present (SDL blit)
-//   purple TEX  synchronous texture uploads
-//   gray   OTH  everything else (guest emulation between frames)
-// Drawn AFTER the PPM capture paths so dumps stay clean.
-
 void PushStageSample() {
   static u64 prev_ns = 0;
   const u64 now = NowNs();
@@ -233,8 +202,7 @@ void PushStageSample() {
   s.rec = g_fr_draw / 1e6f;
   s.sub = g_fr_submit / 1e6f;
   s.gpu = g_fr_wait / 1e6f;
-  s.prs =
-      g_fr_present / 1e6f;  // accrued after last frame's sample (1-frame lag)
+  s.prs = g_fr_present / 1e6f;
   s.tex = g_fr_tex_up / 1e6f;
   const float known = s.rec + s.sub + s.gpu + s.prs + s.tex;
   s.oth = wall > known ? wall - known : 0.0f;
@@ -255,23 +223,16 @@ void DrawPerfOverlay(u8* pixels, u32 w, u32 h, bool rgba) {
     return;
   g_overlay_rgba = rgba;
   u8* const bgra = pixels;
-  // BGRA little-endian constants (0xAARRGGBB written as a uint32).
   static constexpr u32 kCol[6] = {
-      0xFF32C832,  // REC green
-      0xFFC8C828,  // SUB yellow
-      0xFFE63232,  // GPU red
-      0xFF3288E6,  // PRS blue
-      0xFFC832C8,  // TEX purple
-      0xFF828282,  // OTH gray
+      0xFF32C832, 0xFFC8C828, 0xFFE63232, 0xFF3288E6, 0xFFC832C8, 0xFF828282,
   };
   static const char* kLabel[6] = {"REC", "SUB", "GPU", "PRS", "TEX", "OTH"};
   constexpr int kColW = 2, kGraphH = 120;
   constexpr float kPxPerMs = 2.0f;
   const int graph_w = kStageHistN * kColW;
   const int x0 = 10, y1 = (int)h - 10, y0 = y1 - kGraphH;
-  const int legend_h = 7 * 14 + 4;  // fps + 6 stage rows
+  const int legend_h = 7 * 14 + 4;
   const int panel_y0 = y0 - legend_h - 4;
-  // Darken the panel background (keeps the game visible underneath).
   for (int yy = panel_y0 - 4; yy < y1 + 4 && yy < (int)h; yy++) {
     if (yy < 0)
       continue;
@@ -279,11 +240,10 @@ void DrawPerfOverlay(u8* pixels, u32 w, u32 h, bool rgba) {
     for (int xx = x0 - 4; xx < x0 + graph_w + 4 && xx < (int)w; xx++)
       row[xx] = (row[xx] >> 2) & 0x3F3F3F3F;
   }
-  // Columns: oldest left, newest right; stages stacked bottom-up.
   for (int i = 0; i < kStageHistN; i++) {
     int idx = g_stage_hist_pos - kStageHistN + i;
     if (idx < g_stage_hist_pos - g_stage_hist_count)
-      continue;  // no sample yet
+      continue;
     idx = ((idx % kStageHistN) + kStageHistN) % kStageHistN;
     const StageSample& s = g_stage_hist[idx];
     const float vals[6] = {s.rec, s.sub, s.gpu, s.prs, s.tex, s.oth};
@@ -299,12 +259,10 @@ void DrawPerfOverlay(u8* pixels, u32 w, u32 h, bool rgba) {
         break;
     }
   }
-  // 60 / 30 fps reference lines.
   for (int xx = x0; xx < x0 + graph_w; xx += 3) {
     OvFill(bgra, w, h, xx, y1 - (int)(16.7f * kPxPerMs), 1, 1, 0xFFF0F0F0);
     OvFill(bgra, w, h, xx, y1 - (int)(33.3f * kPxPerMs), 1, 1, 0xFFF0F0F0);
   }
-  // Legend: averages over the last second's worth of samples.
   const int n_avg = g_stage_hist_count < 60 ? g_stage_hist_count : 60;
   float avg[6] = {}, avg_wall = 0;
   for (int i = 1; i <= n_avg; i++) {
@@ -337,9 +295,6 @@ void DrawPerfOverlay(u8* pixels, u32 w, u32 h, bool rgba) {
   DrawResourcePanel(bgra, w, h, avg[2], avg_wall);
 }
 
-// Wall-clock FPS report. Always on (cheap): every ~2s of presented frames, log
-// the average FPS over that window so perf changes can be measured empirically
-// (DELTA_GPU_FPS=0 silences it).
 void ReportFps() {
   if (!kFpsReport)
     return;
@@ -359,11 +314,11 @@ void ReportFps() {
                 rhi::g_list_gpu_ns[3] / f / 1e6, rhi::g_list_gpu_n[3] / f);
       for (u32 i = 0; i < 4; i++)
         rhi::g_list_gpu_ns[i] = rhi::g_list_gpu_n[i] = 0;
-      static const char* const kNames[] = {"-",       "dispatch", "pass",
-                                            "mirror",  "tiling",   "rt-bridge",
-                                            "present", "copy",     "fill/clear",
-                                            "barrier",       "buf->tex", "tex->buf",
-                                            "tex->tex", "blit",     "copy-host", "index"};
+      static const char* const kNames[] = {
+          "-",          "dispatch",  "pass",      "mirror",
+          "tiling",     "rt-bridge", "present",   "copy",
+          "fill/clear", "barrier",   "buf->tex",  "tex->buf",
+          "tex->tex",   "blit",      "copy-host", "index"};
       base::String line;
       for (u32 i = 1; i < rhi::kProfCats; i++)
         if (rhi::g_prof_cat_ns[i])
@@ -392,11 +347,7 @@ void ReportFps() {
         g_cs_stage_bytes / f / 1e6, g_cs_flush_n / f,
         gcn::g_ns_recomp / f / 1e6, gcn::g_recomp_n / f,
         render::g_ns_dcb / f / 1e6, render::g_dcb_n / f,
-        render::g_ns_dcb_lock / f / 1e6,
-        g_win_draws / f, g_win_declines / f);
-    // Stutter, said out loud. Always on when it happens: the average above
-    // reports a window that contained a 400 ms frame as merely slow, and the
-    // whole point of the shader work is the frames this line counts.
+        render::g_ns_dcb_lock / f / 1e6, g_win_draws / f, g_win_declines / f);
     if (g_frame_hitch_n || g_pipe_build_n || g_pipe_pending_draws)
       BASE_LOGI(
           "hitch",
@@ -404,21 +355,20 @@ void ReportFps() {
           "recomp={:.0f}ms x{} (val={:.0f}ms opt={:.0f}ms spv {}hit/{}miss)",
           g_frame_worst_ms, (u32)kHitchMs, g_frame_hitch_n,
           g_ns_pipe_build / 1e6, g_pipe_build_n, g_pipe_pending_draws,
-          gcn::g_ns_recomp / 1e6,
-          gcn::g_recomp_n, gcn::g_ns_spv_val / 1e6, gcn::g_ns_spv_opt / 1e6,
-          gcn::g_spv_hit_n, gcn::g_spv_miss_n);
+          gcn::g_ns_recomp / 1e6, gcn::g_recomp_n, gcn::g_ns_spv_val / 1e6,
+          gcn::g_ns_spv_opt / 1e6, gcn::g_spv_hit_n, gcn::g_spv_miss_n);
     if (kDrawProf)
-      BASE_LOGI(
-          "drawprof",
-          "per-frame pre={:.2f}ms pipe={:.2f}ms tex={:.2f}ms "
-          "bind={:.2f}ms | refresh={:.2f}ms x{:.0f} {:.1f}MB "
-          "probe={:.2f}ms x{:.0f} lookup={:.2f}ms x{:.0f}",
-          g_ns_dr_pre / f / 1e6, g_ns_dr_pipe / f / 1e6, g_ns_dr_tex / f / 1e6,
-          g_ns_dr_bind / f / 1e6, g_ns_tex_refresh / f / 1e6, g_tex_refresh_n / f,
-          g_tex_refresh_bytes / f / 1e6, g_ns_tex_probe / f / 1e6,
-          g_tex_probe_n / f, g_ns_tex_lookup / f / 1e6, g_tex_lookup_n / f);
+      BASE_LOGI("drawprof",
+                "per-frame pre={:.2f}ms pipe={:.2f}ms tex={:.2f}ms "
+                "bind={:.2f}ms | refresh={:.2f}ms x{:.0f} {:.1f}MB "
+                "probe={:.2f}ms x{:.0f} lookup={:.2f}ms x{:.0f}",
+                g_ns_dr_pre / f / 1e6, g_ns_dr_pipe / f / 1e6,
+                g_ns_dr_tex / f / 1e6, g_ns_dr_bind / f / 1e6,
+                g_ns_tex_refresh / f / 1e6, g_tex_refresh_n / f,
+                g_tex_refresh_bytes / f / 1e6, g_ns_tex_probe / f / 1e6,
+                g_tex_probe_n / f, g_ns_tex_lookup / f / 1e6,
+                g_tex_lookup_n / f);
     if (kDrawProf) {
-      // The guest write tracker's side of the ring copies it saves.
       const WriteTracker& t = GuestWriteTracker();
       static u64 collects = 0, pages = 0, collect_ns = 0;
       BASE_LOGI(
@@ -454,8 +404,6 @@ void ReportFps() {
                 g_memory_fill_bytes / f / 1e6);
     }
     CsSyncReport(f);
-    // Feed the on-screen overlay gauge (gpuMs = GPU end/present-dominated
-    // cost).
     ui::OverlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
                        float(1000.0 * dt / frames));
     last = now;

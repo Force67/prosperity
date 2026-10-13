@@ -14,7 +14,6 @@
 #include "gpu/ps5/shader_cache.h"
 
 namespace {
-// Dispatch output written back, and landed in guest memory for the CPU.
 bool FlushCsWritesLanded(gpu::render::Renderer& renderer) {
   return gpu::render::FlushCsWrites(renderer) &&
          gpu::render::SettleGuestWrites(0, ~0ull >> 1, "test");
@@ -34,7 +33,6 @@ class RdnaBvh : public testing::Test {
     if (!gpu::render::Init(gpu::render::DefaultRenderer()))
       GTEST_SKIP() << "A Vulkan device is required";
   }
-  // Every dispatch owns distinct guest memory; the renderer can cache inputs.
   base::Array<u32, 4> Run(const base::Array<u32, 48>& nodes,
                           u32 ptr,
                           base::Array<float, 3> origin = {0, 0, 0},
@@ -80,8 +78,6 @@ class RdnaBvh : public testing::Test {
       args[8 + shift + i] = Bits(1.f / direction[i]);
     }
     if (a16) {
-      // A16 is used below with direction (0,0,1); packed inverse is
-      // (inf,inf,1).
       EXPECT_EQ(direction, (base::Array<float, 3>{0, 0, 1}));
       args[5 + shift] = 0;
       args[6 + shift] = 0x7c003c00;
@@ -92,21 +88,21 @@ class RdnaBvh : public testing::Test {
     const u32 count = (a16 ? 8 : 11) + shift;
     u32 pc = 0;
     if (extra_bindings) {
-      code[pc++] = 0xbe880404;  // s_mov_b64 s[8:9], s[4:5]
-      code[pc++] = 0xbe8a0406;  // s_mov_b64 s[10:11], s[6:7]
+      code[pc++] = 0xbe880404;
+      code[pc++] = 0xbe8a0406;
       for (u32 i = 0; i < extra_bindings; i++) {
-        code[pc++] = 0xbe880304;  // new descriptor version in s8
+        code[pc++] = 0xbe880304;
         code[pc++] = 0xe0300000;
-        code[pc++] = 0x80026400;  // buffer_load_dword v100, off, s[8:11], 0
+        code[pc++] = 0x80026400;
       }
     }
     if (changing) {
-      code[pc++] = 0xbe8c0380;  // s12 = output byte offset
-      code[pc++] = 0xbe8e0382;  // s14 = loop count
+      code[pc++] = 0xbe8c0380;
+      code[pc++] = 0xbe8e0382;
     }
     const u32 loop_pc = pc;
     if (indirect) {
-      code[pc++] = 0xf4000004;  // s_load_dword s0, s[8:9], 0
+      code[pc++] = 0xf4000004;
       code[pc++] = 0xfa000000;
     }
     for (u32 i = 0; i < count; i++) {
@@ -114,8 +110,8 @@ class RdnaBvh : public testing::Test {
       code[pc++] = args[i];
     }
     if (runtime) {
-      code[pc++] = 0x7ec80200;  // v_mov_b32 v100, s0
-      code[pc++] = 0x7e000564;  // v_readfirstlane_b32 s0, v100
+      code[pc++] = 0x7ec80200;
+      code[pc++] = 0x7e000564;
     }
     const u32 bvh_pc = pc;
     code[pc++] = (wide ? 0xf19c9f01 : 0xf1989f01) | (nsa ? 6 : 0);
@@ -127,13 +123,13 @@ class RdnaBvh : public testing::Test {
     }
     for (u32 word : epilogue)
       code[pc++] = word;
-    code[pc++] = 0xe0780000;  // buffer_store_dwordx4 v[0:3], off, s[4:7], 0
+    code[pc++] = 0xe0780000;
     code[pc++] = changing ? 0x0c010000 : 0x80010000;
     if (changing) {
-      code[pc++] = indirect ? 0x80088408 : 0x80008100;  // next pointer / BVH
-      code[pc++] = 0x800c900c;                          // output offset += 16
-      code[pc++] = 0x808e810e;                          // --loop count
-      code[pc++] = 0xbf07800e;                          // s_cmp_lg_u32 s14, 0
+      code[pc++] = indirect ? 0x80088408 : 0x80008100;
+      code[pc++] = 0x800c900c;
+      code[pc++] = 0x808e810e;
+      code[pc++] = 0xbf07800e;
       const u32 branch = pc++;
       code[branch] = 0xbf850000 | ((loop_pc - pc) & 0xffff);
     }
@@ -162,7 +158,7 @@ class RdnaBvh : public testing::Test {
     regs[ud + 1] =
         ((base >> 40) & 255) | (sort ? 0x80000000 : 0) | (grow << 23);
     regs[ud + 2] = last_node;
-    regs[ud + 3] = 0x81000000;  // BVH type, barycentric return
+    regs[ud + 3] = 0x81000000;
     const u64 dest = reinterpret_cast<u64>(output.data());
     regs[ud + 4] = dest;
     regs[ud + 5] = (dest >> 32) & 0xffff;
@@ -190,7 +186,6 @@ class RdnaBvh : public testing::Test {
 
   base::Array<u32, 48> Boxes(bool half) {
     base::Array<u32, 48> nodes{};
-    // Node 1: four children, one misses, distances intentionally out of order.
     const float bounds[4][6] = {{-1, -1, 8, 1, 1, 9},
                                 {-1, -1, 2, 1, 1, 3},
                                 {2, 2, 1, 3, 3, 2},
@@ -267,7 +262,7 @@ TEST_F(RdnaBvh, DynamicRawBuffersAndScalarPointersWithoutBvh) {
     code.fill(0);
     u32 pc = 0;
     for (u32 word : {0x7ec80208u, 0x7e000564u, 0x7eca0209u, 0x7e020565u})
-      code[pc++] = word;  // live base comes through lane-dependent SGPR writes
+      code[pc++] = word;
     if (scalar) {
       for (u32 word : {0xf4080000u, 0xfa000000u, 0x7e000200u, 0x7e020201u,
                        0x7e040202u, 0x7e060203u})
@@ -294,7 +289,7 @@ TEST_F(RdnaBvh, DynamicRawBuffersAndScalarPointersWithoutBvh) {
     regs[gpu::ps5::mmCOMPUTE_NUM_THREAD_Z] = 1;
     regs[gpu::ps5::mmCOMPUTE_PGM_RSRC2] = 10 << 1;
     const u32 ud = gpu::ps5::mmCOMPUTE_USER_DATA_0;
-    regs[ud + 2] = 8;  // V# permits only the first two dwords
+    regs[ud + 2] = 8;
     regs[ud + 3] = 0x20000;
     const u64 dst = reinterpret_cast<u64>(output.data());
     regs[ud + 4] = dst;
@@ -333,7 +328,6 @@ TEST_F(RdnaBvh, BoundsInvalidNodesAndParallelSlabBoundary) {
   const auto boxes = Boxes(false);
   for (u32 ptr : {kInvalid, 0xfffffffdu, 29u, 14u, 15u})
     EXPECT_EQ(Run(boxes, ptr), miss);
-  // A 128-byte node must fit completely, including its second 64-byte unit.
   EXPECT_EQ(Run(boxes, 13, {0, 0, 0}, {0, 0, 1}, true, false, false, false, 1),
             miss);
   EXPECT_EQ(
@@ -351,7 +345,7 @@ TEST_F(RdnaBvh, BoundsInvalidNodesAndParallelSlabBoundary) {
 
 TEST_F(RdnaBvh, BoxGrowthAndNaNs) {
   auto boxes = Boxes(false);
-  boxes[22] = Bits(1.f) + 1;  // near just beyond the ray extent
+  boxes[22] = Bits(1.f) + 1;
   const base::Array<u32, 4> miss = {kInvalid, kInvalid, kInvalid, kInvalid};
   EXPECT_EQ(Run(boxes, 13, {0, 0, 0}, {0, 0, 1}, true, false, false, false, 2,
                 0, 1, 0),
@@ -380,19 +374,18 @@ TEST_F(RdnaBvh, BindingsBeyondPushConstantsAndOldResourceLimit) {
 
 TEST_F(RdnaBvh,
        RayShaderWideComparisonsReadBothHalvesAndSignExtendInlineConstants) {
-  base::Vector<u32> tail = {
-      0x7e2802ff, 0,          0x7e2a02ff, 1,  // v[20:21] = 0x100000000
-      0x7e2c02ff, 0xffffffff, 0x7e2e02ff, 0,  // v[22:23] = 0xffffffff
-      0xbf920001};  // trap without a handler is a hardware NOP
+  base::Vector<u32> tail = {0x7e2802ff, 0,          0x7e2a02ff,
+                            1,          0x7e2c02ff, 0xffffffff,
+                            0x7e2e02ff, 0,          0xbf920001};
   const auto compare = [&](u32 op, u32 a, u32 b, u32 dest) {
     tail.push_back(0xd400006a | (op << 16));
     tail.push_back(a | (b << 9));
-    tail.push_back(0x7e00026a | (dest << 17));  // v_mov_b32 vD, vcc_lo
+    tail.push_back(0x7e00026a | (dest << 17));
   };
-  compare(0xe4, 276, 278, 0);  // unsigned A > B: high half decides
-  compare(0xe4, 276, 193, 1);  // unsigned A > -1: inline high half is all ones
-  compare(0xa1, 193, 276, 2);  // signed -1 < A
-  compare(0xe2, 278, 278, 3);  // unsigned B == B
+  compare(0xe4, 276, 278, 0);
+  compare(0xe4, 276, 193, 1);
+  compare(0xa1, 193, 276, 2);
+  compare(0xe2, 278, 278, 3);
   EXPECT_EQ(Run({}, 8, {0, 0, 0}, {0, 0, 1}, true, false, false, false, 2, 0,
                 100, 0, 0, tail),
             (base::Array<u32, 4>{1, 0, 1, 1}));
@@ -406,14 +399,13 @@ TEST(RdnaBvhCompile, RejectsUnsupportedControlFields) {
     EXPECT_FALSE(gpu::rdna::RecompileCompute(code.data(), 1, 1, 1, 8, 0, 0).ok);
   }
   code[0] = 0xf1989f01;
-  code[1] = 1u << 31;  // D16 is not a BVH return encoding
+  code[1] = 1u << 31;
   EXPECT_FALSE(gpu::rdna::RecompileCompute(code.data(), 1, 1, 1, 8, 0, 0).ok);
 }
 
 TEST(RdnaBvhCompile, LaneDependentBvhDescriptorRequiresRuntimeBinding) {
   alignas(256) static base::Array<u32, 4096> code = {
-      0x7e000500,  // v_readfirstlane_b32 s0, v0
-      0xf1989f01, 0, 0xe0780000, 0x80010000, 0xbf810000};
+      0x7e000500, 0xf1989f01, 0, 0xe0780000, 0x80010000, 0xbf810000};
   const auto compiled =
       gpu::rdna::RecompileCompute(code.data(), 1, 1, 1, 8, 0, 0);
   ASSERT_TRUE(compiled.ok);
@@ -447,15 +439,14 @@ TEST_F(RdnaBvh, AllCompressedTrianglesAndBarycentricRotations) {
     for (u32 rotation = 0; rotation < 3; rotation++) {
       const u32 i = (1 + rotation) % 3, j = (2 + rotation) % 3;
       nodes[31] = (i | (j << 2)) << (type * 8);
-      const auto result =
-          Run(nodes, 8 + type, {.5f, .25f, 0}, {0, 0, 1}, true, type & 1, true,
-              type & 2, 2, 0, 1);  // triangles aren't clipped to extent
+      const auto result = Run(nodes, 8 + type, {.5f, .25f, 0}, {0, 0, 1}, true,
+                              type & 1, true, type & 2, 2, 0, 1);
       const float den = Float(result[1]);
       const base::Array<float, 3> bary = {.625f, .25f, .125f};
       EXPECT_FLOAT_EQ(Float(result[0]) / den, 5);
       EXPECT_FLOAT_EQ(Float(result[2]) / den, bary[i]);
       EXPECT_FLOAT_EQ(Float(result[3]) / den, bary[j]);
-      EXPECT_LT(den, 0);  // preserve facing sign in numerator and denominator
+      EXPECT_LT(den, 0);
     }
     const auto outside = Run(nodes, 8 + type, {3, 3, 0});
     EXPECT_EQ(outside[0], Bits(std::numeric_limits<float>::infinity()));

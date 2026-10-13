@@ -33,12 +33,9 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding) {
   t.m.Decorate(sc.cs_guest_table, spv::Decoration::NonWritable);
   t.m.Name(sc.cs_guest_table, "guest_address_map");
   base::Vector<Id> args;
-  // Every memory access calls this. Inlined at each of ~700 call sites, one
-  // Demon's Souls shader took spirv-opt 16 s instead of 4.
-  sc.cs_guest_translate =
-      t.m.BeginFunction(wide, t.m.TypeFunction(wide, {wide, t.t_u, t.t_u}),
-                        {wide, t.t_u, t.t_u}, &args,
-                        spv::FunctionControlMask::DontInline);
+  sc.cs_guest_translate = t.m.BeginFunction(
+      wide, t.m.TypeFunction(wide, {wide, t.t_u, t.t_u}), {wide, t.t_u, t.t_u},
+      &args, spv::FunctionControlMask::DontInline);
   t.m.Name(sc.cs_guest_translate, "translate_guest_address");
   const Id function_ptr = t.m.TypePointer(spv::StorageClass::Function, t.t_u);
   const Id lo = t.m.Emit(spv::Op::OpVariable, function_ptr,
@@ -58,7 +55,6 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding) {
         t.m.AccessChain(ptr, sc.cs_guest_table,
                         {zero, t.Add(t.Mul(record, t.U32(4)), t.U32(member))}));
   };
-  // upper_bound(address) over sorted, disjoint readable guest mappings.
   const Id header = t.m.NewBlock(), body = t.m.NewBlock();
   const Id next = t.m.NewBlock(), done = t.m.NewBlock();
   t.m.Branch(header);
@@ -98,16 +94,15 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding) {
       t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {dirty, zero64});
   valid = t.LAnd(valid, t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
                                  {t.IsZero(args[2]), can_write}));
-  // An address no window holds: report it (count, then up to 63 addresses in
-  // the buffer entry 0 names) so the next dispatch has a buffer for it.
   {
     const Id wide_size = Wide(t, args[1]);
     Id inside = t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool, {base, args[0]});
-    inside = t.LAnd(inside, t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool,
-                                     {args[0], end}));
-    inside = t.LAnd(inside, t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool,
-                                     {wide_size, t.m.Emit(spv::Op::OpISub, wide,
-                                                          {end, args[0]})}));
+    inside = t.LAnd(
+        inside, t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool, {args[0], end}));
+    inside = t.LAnd(
+        inside,
+        t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool,
+                 {wide_size, t.m.Emit(spv::Op::OpISub, wide, {end, args[0]})}));
     const Id misses = field(zero, 2);
     const Id report = t.LAnd(
         t.LAnd(t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {inside}),
@@ -122,12 +117,13 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding) {
     const Id u32_ptr =
         t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
     const auto at = [&](Id byte) {
-      return t.m.Emit(spv::Op::OpConvertUToPtr, u32_ptr,
-                      {t.m.Emit(spv::Op::OpIAdd, wide, {misses, Wide(t, byte)})});
+      return t.m.Emit(
+          spv::Op::OpConvertUToPtr, u32_ptr,
+          {t.m.Emit(spv::Op::OpIAdd, wide, {misses, Wide(t, byte)})});
     };
     const Id device = t.U32(static_cast<u32>(spv::Scope::Device));
-    const Id slot =
-        t.m.Emit(spv::Op::OpAtomicIAdd, t.t_u, {at(zero), device, zero, t.U32(1)});
+    const Id slot = t.m.Emit(spv::Op::OpAtomicIAdd, t.t_u,
+                             {at(zero), device, zero, t.U32(1)});
     const Id has_slot = t.Ult(slot, t.U32(63));
     t.m.SelectionMerge(stored);
     t.m.BranchConditional(has_slot, store_miss, stored);
@@ -151,10 +147,10 @@ void DeclareGuestMemory(Translator& t, StageContext& sc, u32 binding) {
   t.m.SelectionMerge(marked);
   t.m.BranchConditional(mark_valid, mark, marked);
   t.m.OpenBlock(mark);
-  // The window's written flag: its range holds GPU-newer bytes now.
-  const Id flag = t.m.Emit(
-      spv::Op::OpConvertUToPtr,
-      t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u), {dirty});
+  const Id flag =
+      t.m.Emit(spv::Op::OpConvertUToPtr,
+               t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u),
+               {dirty});
   t.m.Emit(spv::Op::OpAtomicOr, t.t_u,
            {flag, t.U32(static_cast<u32>(spv::Scope::Device)), zero, t.U32(1)});
   t.m.Branch(marked);
@@ -299,10 +295,10 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
     const Id u32_ptr =
         t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
     const auto at = [&](Id byte) {
-      return t.m.Emit(spv::Op::OpConvertUToPtr, u32_ptr,
-                      {t.m.Emit(spv::Op::OpIAdd, wide,
-                                {constant(gpu::gcn::g_direct_misses),
-                                 Wide(t, byte)})});
+      return t.m.Emit(
+          spv::Op::OpConvertUToPtr, u32_ptr,
+          {t.m.Emit(spv::Op::OpIAdd, wide,
+                    {constant(gpu::gcn::g_direct_misses), Wide(t, byte)})});
     };
     const Id device = t.U32(static_cast<u32>(spv::Scope::Device));
     const Id zero = t.U32(0);
@@ -364,26 +360,23 @@ Id CsGuestAddress(Translator& t,
 
 Id CsPhysicalLoad(Translator& t, StageContext& sc, Id address) {
   const Id wide = t.m.TypeInt(64, false);
-  const Id valid = t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
-                            {address, t.m.ConstNull(wide)});
-  const Id fallback = sc.direct
-                          ? Pair(t, t.U32(u32(g_direct_misses)),
-                                  t.U32(u32(g_direct_misses >> 32)))
-                          : t.m.Load(
-                                wide, t.m.AccessChain(
-                                          t.m.TypePointer(
-                                              spv::StorageClass::StorageBuffer,
-                                              wide),
-                                          sc.cs_guest_table,
-                                          {t.U32(0), t.U32(2)}));
-  // LLVMpipe can hoist a uniform physical load out of its validity branch.
+  const Id valid =
+      t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {address, t.m.ConstNull(wide)});
+  const Id fallback =
+      sc.direct
+          ? Pair(t, t.U32(u32(g_direct_misses)),
+                 t.U32(u32(g_direct_misses >> 32)))
+          : t.m.Load(wide, t.m.AccessChain(
+                               t.m.TypePointer(spv::StorageClass::StorageBuffer,
+                                               wide),
+                               sc.cs_guest_table, {t.U32(0), t.U32(2)}));
   address = t.m.Emit(spv::Op::OpSelect, wide, {valid, address, fallback});
   const Id pointer =
       t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
   const Id p = t.m.Emit(spv::Op::OpConvertUToPtr, pointer, {address});
-  const Id value = t.m.Emit(
-      spv::Op::OpLoad, t.t_u,
-      {p, static_cast<u32>(spv::MemoryAccessMask::Aligned), 4});
+  const Id value =
+      t.m.Emit(spv::Op::OpLoad, t.t_u,
+               {p, static_cast<u32>(spv::MemoryAccessMask::Aligned), 4});
   return t.SelectB(valid, value, t.U32(0));
 }
 
@@ -512,8 +505,7 @@ void EmitGuestGlobal(Translator& t, const Inst& inst, StageContext& sc) {
     t.m.BranchConditional(active, body, active_done);
     t.m.OpenBlock(body);
   }
-  // Snapshot the full address and every result before assigning overlapping
-  // VGPRs.
+  // Snapshot first: a result may overwrite a source VGPR.
   for (u32 i = 0; i < count; ++i) {
     const Id guest =
         t.m.Emit(spv::Op::OpIAdd, wide, {address, Wide(t, t.U32(i * 4))});
@@ -547,8 +539,6 @@ void EmitGuestGlobal(Translator& t, const Inst& inst, StageContext& sc) {
     } else if (!subword) {
       PhysicalStore(t, phys, values[i]);
     } else {
-      // Multiple lanes may write distinct bytes of one dword. CAS preserves
-      // their neighbours; a non-atomic read/modify/write loses those updates.
       const Id ptr = PhysicalPointer(t, phys);
       const Id scope = t.U32(static_cast<u32>(spv::Scope::Device)),
                zero = t.U32(0);
@@ -579,9 +569,9 @@ void EmitGuestGlobal(Translator& t, const Inst& inst, StageContext& sc) {
     t.m.Branch(done);
     t.m.OpenBlock(done);
     if (!store)
-      values.push_back(
-          t.SelectB(valid, t.m.Emit(spv::Op::OpPhi, t.t_u,
-                                    {result, end, t.U32(0), from}), t.U32(0)));
+      values.push_back(t.SelectB(
+          valid, t.m.Emit(spv::Op::OpPhi, t.t_u, {result, end, t.U32(0), from}),
+          t.U32(0)));
   }
   if (!store)
     for (u32 i = 0; i < count; ++i)
@@ -649,8 +639,8 @@ Id CsLinearImageEligible(Translator& t, const Inst& inst) {
   Id valid =
       im.Any(format, {5, 18, 20, 21, 27, 28, 60, 61, 62, 63, 69, 70, 75, 76});
   valid = t.LAnd(valid, im.Any(type, {8, 9, 12, 13}));
-  valid = t.LAnd(valid, t.IsZero(im.Field(3, 12, 0x1fff)));  // mip 0, SW_LINEAR
-  valid = t.LAnd(valid, t.IsZero(im.Field(5, 4, 15)));       // one physical mip
+  valid = t.LAnd(valid, t.IsZero(im.Field(3, 12, 0x1fff)));
+  valid = t.LAnd(valid, t.IsZero(im.Field(5, 4, 15)));
   valid = t.LAnd(valid, t.IsZero(t.And(t.Sg(im.sgpr + 4), t.U32(0xe000c000))));
   const Id array_ok =
       t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
@@ -700,7 +690,6 @@ void EmitCsLinearImage(Translator& t,
   const Id base =
       t.m.Emit(spv::Op::OpShiftLeftLogical, wide,
                {Pair(t, t.Sg(im.sgpr), im.Field(1, 0, 255)), t.U32(8)});
-  // Compute in 64 bits: an array view can cover several GiB of decoder frames.
   const Id row = t.m.Emit(
       spv::Op::OpIAdd, wide,
       {t.m.Emit(spv::Op::OpIMul, wide, {Wide(t, layer), Wide(t, rows)}),
@@ -713,7 +702,6 @@ void EmitCsLinearImage(Translator& t,
   Id valid =
       t.LAnd(t.Ult(x, width), t.LAnd(t.Ult(y, rows), t.Ult(layer, layers)));
   valid = t.LAnd(valid, t.LaneActive(t.Exec()));
-  // Keep sources intact when VDATA overlaps the coordinates.
   Id source[4] = {}, result[4] = {};
   u32 packed = 0;
   for (u32 c = 0; c < 4; ++c)
@@ -768,8 +756,6 @@ void EmitCsLinearImage(Translator& t,
     t.m.Branch(component_done);
     t.m.OpenBlock(component_done);
     if (!store) {
-      // Phi operands must be defined in their corresponding predecessor.
-      // Use zero here; constant-one selectors are applied after the merge.
       result[c] = t.m.Emit(spv::Op::OpPhi, t.t_u,
                            {value, component_end, t.U32(0), channel_from});
       const Id fallback =

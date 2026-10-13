@@ -1,12 +1,5 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * SPIR-V rewrites for constructs SPIRV-Cross cannot express in HLSL, done on
- * the binary before lowering:
- *   - gl_InvocationID of a geometry shader that runs one invocation becomes a
- *     private constant 0 (HLSL has no instance id without [instance]).
- *   - OpGroupNonUniformBallotFindLSB/MSB become per-component FindILsb /
- *     FindUMsb and selects.
  */
 
 #include "base/containers/vector.h"
@@ -70,7 +63,7 @@ class Patcher {
       const u32* w = &in_[at];
       if (op == kOpMemoryModel && ballot_ && !glsl_) {
         glsl_ = bound_++;
-        const char name[] = "GLSL.std.450";  // 12 chars + NUL: 4 words
+        const char name[] = "GLSL.std.450";
         u32 packed[4] = {};
         for (size_t i = 0; i < sizeof(name); i++)
           packed[i / 4] |= u32(u8(name[i])) << (8 * (i % 4));
@@ -130,7 +123,7 @@ class Patcher {
             glsl_ = w[1];
           break;
         case kOpEntryPoint:
-          geometry = w[1] == 3;  // ExecutionModelGeometry
+          geometry = w[1] == 3;
           break;
         case kOpExecutionMode:
           if (w[2] == kExecutionModeInvocations && n >= 4)
@@ -198,7 +191,6 @@ class Patcher {
     }
   }
 
-  // result = the lowest (highest) set bit of a uvec4 ballot.
   void EmitFind(base::Vector<u32>& out,
                 bool lsb,
                 u32 type,
@@ -218,7 +210,6 @@ class Patcher {
         out.insert(out.end(), {Op(kOpIAdd, 5), type, bit[i], raw, consts_[i]});
       }
     }
-    // LSB: x ? bx : y ? by : z ? bz : bw.  MSB: the same from w down.
     const u32 order[4] = {lsb ? 0u : 3u, lsb ? 1u : 2u, lsb ? 2u : 1u,
                           lsb ? 3u : 0u};
     u32 acc = bit[order[3]];

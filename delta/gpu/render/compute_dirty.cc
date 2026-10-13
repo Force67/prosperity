@@ -2,9 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// The compute range table and its indexes: which ranges are dirty and which
-// cover a given block of guest memory.
-
 #include "gpu/render/compute_internal.h"
 
 #include "base/algorithm.h"
@@ -21,7 +18,6 @@ base::HashMap<u64, CsRange> g_cs_ranges;
 decltype(g_cs_ranges)::iterator g_cs_evict_next;
 u64 g_cs_dirty_stamp = 0;
 
-// Oldest GPU write first: the order overlapping ranges must be written back in.
 void SortByDirtyOrder(base::Vector<u64>& bases) {
   if (bases.size() < 2)
     return;
@@ -35,17 +31,9 @@ void SortByDirtyOrder(base::Vector<u64>& bases) {
   for (size_t i = 0; i < keyed.size(); i++)
     bases[i] = keyed[i].second;
 }
-// Ranges MarkPending flagged, so retiring a batch visits those instead of
-// every range. Map nodes do not move; CsRangeDestroy (which precedes every
-// erase) drops its entry. May hold ranges no longer pending, or twice.
 base::Vector<CsRange*> g_cs_pending;
 u64 g_cs_range_bytes = 0;
 base::HashMap<u64, base::Vector<u64>> g_cs_dirty_pages;
-// How many dirty ranges touch each 64 KiB of guest memory lives in the guest
-// page table: a zero answers "nothing dirty here" without a single hash map
-// lookup, and without the false alarms of a hashed table. Atomic because the
-// command processor's walk reads it without owning the renderer
-// (CsRangeMaybeDirty); only the owner writes it.
 void NoteDirtyFilter(u64 base, u64 end, int delta) {
   GuestPages().AddCsDirty(base, end, delta);
 }
@@ -53,31 +41,19 @@ void NoteDirtyFilter(u64 base, u64 end, int delta) {
 bool DirtyFilterClear(u64 base, u64 end) {
   return GuestPages().CsClear(base, end);
 }
-// The same bases, once each: what the readback staging walks instead of every
-// range (thousands of them against a few dozen dirty ones).
-// Dirty range base -> end of the footprint its index entries cover.
 base::HashMap<u64, u64> g_cs_dirty_bases;
-// Where that footprint starts when it is not the range base: a merged range
-// whose dispatches wrote only one child. UC2's video decoder merges a 2 MiB
-// output into a 16 MiB unbounded window that also holds its descriptor tables,
-// and indexing the whole window made every 4-byte table read write 17 MiB back.
 base::HashMap<u64, u64> g_cs_dirty_lo;
 
 u64 DirtyLo(u64 base) {
   auto it = g_cs_dirty_lo.find(base);
   return it == g_cs_dirty_lo.end() ? base : it->second;
 }
-// Bumped whenever compute results land in guest memory (writeback or an
-// executed batch of importing dispatches). The draw path's per-frame staging
-// caches stamp entries with this and re-copy when it has moved: a cached
-// window of guest bytes is only as fresh as the last compute visibility point.
 u64 g_cs_writeback_gen = 1;
 
 u64 RangeEnd(u64 base, u64 bytes) {
   return bytes > UINT64_MAX - base ? UINT64_MAX : base + bytes;
 }
 
-// Index [lo, end) of the range at `base` as dirty, growing what it covers.
 void IndexDirtySpan(u64 base, u64 lo, u64 end) {
   BumpTextureEpoch();
   if (end <= lo)
@@ -104,7 +80,7 @@ void IndexDirtySpan(u64 base, u64 lo, u64 end) {
     const u64 page_lo = page << kCsDirtyPageShift;
     const u64 page_end = page_lo + (u64(1) << kCsDirtyPageShift);
     if (old_end && page_lo < old_end && old_lo < page_end)
-      continue;  // already listed
+      continue;
     g_cs_dirty_pages[page].push_back(base);
   }
 }
@@ -164,19 +140,13 @@ void UnindexCsRange(u64 base, u64 bytes) {
   }
 }
 
-base::Vector<u64> DirtyRangesOverlapping(u64 base,
-                                         u64 bytes,
-                                         u64 exclude) {
+base::Vector<u64> DirtyRangesOverlapping(u64 base, u64 bytes, u64 exclude) {
   base::Vector<u64> candidates;
   if (!bytes)
     return candidates;
   const u64 end = RangeEnd(base, bytes);
   if (DirtyFilterClear(base, end))
     return candidates;
-  // Walking the QUERY's pages costs a lookup per 64 KB of it, and a texture is
-  // hundreds of pages while the whole dirty index is a handful of entries.
-  // Whichever side is smaller gives the same answer, because the filter below
-  // rechecks every candidate's overlap exactly, so a superset is safe here.
   const u64 first_page = base >> kCsDirtyPageShift;
   const u64 last_page = (end - 1) >> kCsDirtyPageShift;
   if (last_page - first_page + 1 > g_cs_dirty_pages.size()) {
@@ -193,20 +163,20 @@ base::Vector<u64> DirtyRangesOverlapping(u64 base,
   base::Sort(candidates.begin(), candidates.end());
   candidates.erase(base::Unique(candidates.begin(), candidates.end()),
                    candidates.end());
-  candidates.erase(
-      base::RemoveIf(candidates.begin(), candidates.end(),
-                     [&](u64 other) {
-                       if (other == exclude)
-                         return true;
-                       auto indexed = g_cs_dirty_bases.find(other);
-                       if (indexed == g_cs_dirty_bases.end() ||
-                           DirtyLo(other) >= end || base >= indexed->second)
-                         return true;
-                       auto found = g_cs_ranges.find(other);
-                       return found == g_cs_ranges.end() ||
-                              !found->second.gpu_dirty;
-                     }),
-      candidates.end());
+  candidates.erase(base::RemoveIf(candidates.begin(), candidates.end(),
+                                  [&](u64 other) {
+                                    if (other == exclude)
+                                      return true;
+                                    auto indexed = g_cs_dirty_bases.find(other);
+                                    if (indexed == g_cs_dirty_bases.end() ||
+                                        DirtyLo(other) >= end ||
+                                        base >= indexed->second)
+                                      return true;
+                                    auto found = g_cs_ranges.find(other);
+                                    return found == g_cs_ranges.end() ||
+                                           !found->second.gpu_dirty;
+                                  }),
+                   candidates.end());
   return candidates;
 }
 
@@ -245,13 +215,10 @@ bool CsTracksGuestWrites() {
 }
 
 void CsNoteGuestWrites(u64 first, u64 end) {
-  // Untracked, the tracker also reports our own writebacks wherever a draw
-  // cache armed the pages, and acting on those costs more than it saves.
   if (g_cs_range_blocks.empty() || first >= end)
     return;
   thread_local base::Vector<u64> bases;
   bases.clear();
-  // A remapped reservation can span gigabytes: walk the smaller side.
   const u64 first_block = first >> kCsRangeBlockShift;
   const u64 last_block = (end - 1) >> kCsRangeBlockShift;
   if (last_block - first_block + 1 > g_cs_range_blocks.size()) {
@@ -272,8 +239,6 @@ void CsNoteGuestWrites(u64 first, u64 end) {
     const u64 range_end = RangeEnd(range_base, e.guest_bytes);
     if (range_base >= end || first >= range_end)
       continue;
-    // The CPU wrote it: the staging no longer holds what guest memory does,
-    // whatever this frame already checked.
     e.wt_clean = false;
     e.staged_clean = false;
     if (!e.gpu_dirty)
@@ -281,8 +246,6 @@ void CsNoteGuestWrites(u64 first, u64 end) {
     if (!CsTracksGuestWrites())
       continue;
     if (!e.gpu_dirty) {
-      // Hash it again at the next use rather than trusting this frame's
-      // check: the write may be our own writeback, which leaves it current.
       e.last_validated_frame = -1;
       continue;
     }

@@ -17,8 +17,12 @@ bool FlushCsWrites(Renderer&, const char*) {
   g_guest_result = g_staged_result;
   return true;
 }
-u64 GuestWritePublishBatch() { return 0; }
-bool WaitBatch(u64) { return true; }
+u64 GuestWritePublishBatch() {
+  return 0;
+}
+bool WaitBatch(u64) {
+  return true;
+}
 void SubmitForPublishedLabels() {}
 void ReportBatchState() {}
 }  // namespace gpu::render

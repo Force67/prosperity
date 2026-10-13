@@ -2,9 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// The renderer's draw entry point: applies the diagnostic draw knobs and runs
-// the draw through the recompiled guest shaders.
-
 #include "base/arch.h"
 #include "gpu/render/renderer.h"
 
@@ -47,18 +44,12 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   DELTA_ZONE("gpu.draw");
   if (!g_frame.recording)
     return;
-  // DELTA_GPU_SWAPTEX01: bisect a suspected sampler-binding order mismatch by
-  // exchanging the first two textures of every multi-texture draw.
   base::UniquePointer<DrawInfo> swapped;
   if (kSwapTex && d_in.num_texs >= 2) {
     swapped = base::MakeUnique<DrawInfo>(d_in);
     base::Swap(swapped->texs[0], swapped->texs[1]);
   }
   const DrawInfo& d_sw = swapped ? *swapped : d_in;
-  // DELTA_GPU_MAXDRAW=<n> / DELTA_GPU_ONLYDRAW=<n>: build a frame up one draw
-  // at a time, or isolate a single one, to see what each pass contributes.
-  // DELTA_GPU_ONLYIC=<n>: render only draws with this index count. Draw indices
-  // move between frames; an index count names one pass reliably.
   if (kOnlyIc && d_sw.index_count != kOnlyIc) {
     g_frame.draws++;
     return;
@@ -69,15 +60,6 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
     g_frame.draws++;
     return;
   }
-  // Diagnostic kill-switches for bisecting "renders nothing" chains:
-  // DELTA_GPU_NODEPTH disables depth test/write, DELTA_GPU_NOCULL disables
-  // face culling, DELTA_GPU_NOMASK forces full color write masks.
-  // A pass that samples the depth buffer it also has bound is reading it as a
-  // texture, which is legal while depth testing and writes are off. Detaching
-  // the unused attachment lets the draw run instead of being declined as
-  // self-sampling: Skyrim's grading pass does exactly this, and dropping it
-  // left the display buffer showing ungraded content on those frames, so the
-  // frame alternated between graded and raw as the pass came and went.
   bool detach_depth = false;
   if (d_sw.depth_base && !d_sw.depth_test_enable && !d_sw.depth_write_enable) {
     if (d_sw.tex_base == d_sw.depth_base)
@@ -86,7 +68,6 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
       if (d_sw.texs[i].base == d_sw.depth_base)
         detach_depth = true;
   }
-  // Copied only when patched: DrawInfo is ~10 KB and this runs every draw.
   base::UniquePointer<DrawInfo> patched_copy;
   const bool patched = kNoDepth || kNoCull || kNoMask || detach_depth;
   if (patched) {

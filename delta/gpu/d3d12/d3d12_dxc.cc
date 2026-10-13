@@ -1,9 +1,7 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
  *
- * DXC behind a plain interface. This unit sees only DXC's headers: on Linux
- * they bring their own Windows shims (WinAdapter.h), which conflict with
- * vkd3d's, so no D3D12 header may be included here.
+ * No D3D12 header here: DXC's WinAdapter.h shims conflict with vkd3d's.
  */
 
 #include "gpu/d3d12/d3d12_shader.h"
@@ -47,8 +45,8 @@ DxcCreateInstanceProc LoadLibraryEntry() {
   return reinterpret_cast<DxcCreateInstanceProc>(
       GetProcAddress(lib, "DxcCreateInstance"));
 #else
-  // The build's own copy first: on NixOS it is on no default search path.
   void* lib = nullptr;
+  // NixOS: the build's copy is on no default search path.
   if (DELTA_DXCOMPILER_PATH[0])
     lib = dlopen(DELTA_DXCOMPILER_PATH, RTLD_NOW | RTLD_LOCAL);
   if (!lib)
@@ -80,7 +78,6 @@ bool Dxc::Compile(const base::String& hlsl,
   base::StringW wprofile;
   for (char c : profile)
     wprofile += static_cast<wchar_t>(c);
-  // HLSL 2018: SPIRV-Cross relies on its component-wise vector ternary.
   LPCWSTR args[] = {L"-E",   L"main",          L"-T", wprofile.c_str(), L"-HV",
                     L"2018", L"-Qstrip_debug", L"-O3"};
   DxcBuffer source{hlsl.data(), hlsl.size(), DXC_CP_UTF8};

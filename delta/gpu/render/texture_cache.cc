@@ -12,7 +12,6 @@
 #include "gpu/gpu_check.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/guest_memory.h"
-#include "gpu/write_tracker.h"
 #include "gpu/render/capture.h"
 #include "gpu/render/compute.h"
 #include "gpu/render/device.h"
@@ -23,6 +22,7 @@
 #include "gpu/render/render_target.h"
 #include "gpu/render/renderer.h"
 #include "gpu/render/upload_ring.h"
+#include "gpu/write_tracker.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -59,9 +59,6 @@ DELTA_OPTION(bool, kIntegerRt, "DELTA_GPU_INT_RT", true);
 DELTA_OPTION(bool, kTexRaw, "DELTA_GPU_TEXRAW", false);
 DELTA_OPTION(u64, kTexWatch, "DELTA_GPU_TEXWATCH", 0);
 DELTA_OPTION(int, kTexCensus, "DELTA_GPU_TEXCENSUS", 0);
-// DELTA_GPU_FORCELOD=<n>: clamp every sampler to mip n. A streamed title
-// uploads its mip chain progressively, so "this surface is fine" from a
-// close-up view says nothing about the levels a minified one samples.
 DELTA_OPTION(int, kForceLod, "DELTA_GPU_FORCELOD", -1);
 DELTA_OPTION(bool, kTexMemo, "DELTA_GPU_TEXMEMO", true);
 }  // namespace
@@ -77,8 +74,6 @@ struct TexImageKey {
   u32 mip_levels = 1;
   rhi::Format format = rhi::Format::kUndefined;
   bool pow2_pad = false;
-  // A volume and a 2D surface at the same guest address are different image
-  // types, so is_3d has to separate them here.
   bool is_3d = false;
   bool operator==(const TexImageKey& o) const {
     return base == o.base && w == o.w && h == o.h && tiling == o.tiling &&
@@ -112,7 +107,6 @@ struct SamplerKey {
   bool valid = false;
   bool force_lod_zero = false;
   bool depth_compare = false;
-  // Vulkan permits only NEAREST filtering on an integer-format image.
   bool integer = false;
   bool operator==(const SamplerKey& o) const {
     return valid == o.valid && image_min_lod == o.image_min_lod &&
@@ -139,7 +133,7 @@ struct TexKey {
   TexImageKey image;
   u32 base_array = 0, view_layers = 1;
   u32 base_mip = 0, view_mips = 1;
-  u32 swizzle = 0;  // packed T# DST_SEL (0 = identity)
+  u32 swizzle = 0;
   SamplerKey sampler;
   bool arrayed = false;
   bool operator==(const TexKey& o) const {
@@ -167,7 +161,7 @@ struct TexViewKey {
   TexImageKey image;
   u32 base_array = 0, view_layers = 1;
   u32 base_mip = 0, view_mips = 1;
-  u32 swizzle = 0;  // packed T# DST_SEL_X/Y/Z/W
+  u32 swizzle = 0;
   bool arrayed = false;
   bool operator==(const TexViewKey& o) const {
     return swizzle == o.swizzle && image == o.image &&
@@ -195,15 +189,9 @@ struct TexImageEntry {
   u64 allocation_size = 0;
   int last_checked_frame = -1;
   int last_used_frame = -1;
-  // Revision of the compute range the image was last copied from
-  // (CsSupplyTexture); 0 when it holds guest memory.
   u64 cs_seq = 0;
-  // The mips past what a dispatch supplies come from guest memory: the first
-  // of them, and whether the write tracker has seen their pages unchanged.
   u32 tail_first_mip = 0;
   bool tail_clean = false;
-  // The write tracker watches the pages: unchanged while wt_clean. Pages it
-  // cannot watch are uploaded again each frame the image is used.
   bool wt_clean = false;
   gcn::TextureLayout32 layout;
 };
@@ -295,9 +283,6 @@ TexKey TextureKey(u64 base,
   key.sampler.image_min_lod = min_lod;
   key.sampler.force_lod_zero = force_lod_zero;
   key.sampler.depth_compare = depth_compare;
-  // An integer-format view may only be sampled with NEAREST (no format feature
-  // for linear filtering); the multi-binding path already keys this, and the
-  // single-texture path has to agree or the same descriptor is rejected.
   key.sampler.integer = kIntegerRt && (nfmt == 4 || nfmt == 5);
   key.arrayed = arrayed;
   return key;
@@ -317,10 +302,9 @@ bool UploadTexPixelsImmediate(rhi::Texture* img,
                               const gcn::TextureLayout32& layout,
                               u32 texel_w,
                               u32 texel_h,
-                              bool is_3d = false);  // defined below
+                              bool is_3d = false);
 void ClearMultiTexCache();
 
-// Put the 1x1 depth default into kDepthRead holding 1.0.
 void ClearDepthDefaultToFar() {
   rhi::CommandList* list = BeginImmediate();
   if (!list)
@@ -374,8 +358,6 @@ bool CreateTextureDescriptors() {
   if (g_tex.layout)
     return false;
   rhi::Device& device = Device();
-  // Binding 0 = combined image sampler. Both stages see it: a vertex texture
-  // fetch takes its own binding out of the same set.
   rhi::BindGroupLayoutDesc layout;
   layout.bindings.push_back({0, rhi::BindingType::kSampledTexture,
                              rhi::kStageFragment | rhi::kStageVertex});
@@ -387,17 +369,12 @@ bool CreateTextureDescriptors() {
   if (!g_tex.layout || !g_tex.sampler || !g_tex.sampler_nearest)
     return false;
 
-  // 1x1 white default texture (for unresolved sampler bindings). Mutable so
-  // the same texel can also be viewed as RGBA8_UINT: a binding the module
-  // declared as an integer sampler may not take a UNORM view, and an
-  // unresolved one still has to get a default.
   rhi::TextureDesc white;
   white.format = rhi::Format::kRGBA8Unorm;
   white.usage =
       rhi::kTextureSampled | rhi::kTextureCopyDst | rhi::kTextureMutableFormat;
   white.name = "white default";
   g_tex.white_img = device.CreateTexture(white);
-  // Same default for a Dim3D binding, which cannot sample a 2D view.
   white.dim = rhi::TextureDim::k3D;
   white.name = "white default 3d";
   g_tex.white_3d_img = device.CreateTexture(white);
@@ -412,8 +389,6 @@ bool CreateTextureDescriptors() {
                                 reinterpret_cast<u64>(&texel), white_layout, 1,
                                 1, true))
     return false;
-  // 1x1 D32 "far plane" for a compare sample that cannot resolve to a real
-  // depth surface (see TextureBindings::depth_default_view).
   rhi::TextureDesc depth;
   depth.format = rhi::Format::kD32Float;
   depth.usage =
@@ -467,13 +442,6 @@ bool CreateTextureDescriptors() {
 }
 
 rhi::Sampler* SamplerFor(const SamplerKey& key) {
-  // DELTA_GPU_DEFSAMPLER: ignore every guest S# and use the default sampler,
-  // to tell a mis-decoded sampler apart from a mis-bound image.
-  // The default sampler is LINEAR, and an integer-format view may not be
-  // filtered at all, so every exit that hands out a default has to hand out
-  // the NEAREST one for those. An unresolved S# over an integer view taking the
-  // LINEAR default was the overwhelming majority of GTA:SA's magFilter-04553,
-  // 200k messages in a 200 s run.
   const auto fallback = [&] {
     return key.integer ? g_tex.sampler_nearest : g_tex.sampler;
   };
@@ -508,11 +476,6 @@ rhi::Sampler* SamplerFor(const SamplerKey& key) {
   ci.address_u = address_mode(key.raw[0]);
   ci.address_v = address_mode(key.raw[0] >> 3);
   ci.address_w = address_mode(key.raw[0] >> 6);
-  // DELTA_GPU_FORCENEAREST=1: diagnostic only. Force point sampling everywhere,
-  // to separate "this pass reads the texel it addresses" from "its 2x2 bilinear
-  // footprint straddles a neighbour". A pass that thresholds on what it samples
-  // behaves completely differently under the two, and nothing else
-  // distinguishes them from outside the shader.
   u32 mag = kForceNearest ? 0u : (key.raw[2] >> 20) & 3;
   u32 min = kForceNearest ? 0u : (key.raw[2] >> 22) & 3;
   ci.mag =
@@ -547,10 +510,7 @@ rhi::Sampler* SamplerFor(const SamplerKey& key) {
       break;
   }
   ci.compare_enable = key.depth_compare;
-  // DEPTH_COMPARE_FUNC uses the same order as rhi::CompareOp.
   ci.compare = static_cast<rhi::CompareOp>((key.raw[0] >> 12) & 7);
-  // Anisotropy requires LINEAR on both filters, which an integer format has
-  // just been denied.
   if (!key.integer && (mag >= 2 || min >= 2))
     ci.max_anisotropy = static_cast<float>(1u << ((key.raw[0] >> 9) & 7));
   rhi::Sampler* sampler = Device().CreateSampler(ci);
@@ -568,8 +528,6 @@ u64 TextureLinearBytes(const gcn::TextureLayout32& layout, u32 first_mip = 0) {
   return bytes;
 }
 
-// One-time initialization upload of a host texel (the 1x1 defaults) before
-// frame recording starts.
 bool UploadTexPixelsImmediate(rhi::Texture* img,
                               u64 base,
                               const gcn::TextureLayout32& layout,
@@ -620,8 +578,8 @@ bool RecordTexPixels(rhi::Texture* img,
                      u32 first_mip = 0) {
   DELTA_ZONE("gpu.tex_upload");
   const u64 start = NowNs();
-  if (!DetileTextureOnGpu(base, layout, texel_w, texel_h, img, old_state,
-                          is_3d, first_mip)) {
+  if (!DetileTextureOnGpu(base, layout, texel_w, texel_h, img, old_state, is_3d,
+                          first_mip)) {
     static int n = 0;
     if (n++ < 16)
       BASE_LOGW("gpuvk", "texture {:#x} {}x{} tiling={} elem={}: no GPU upload",
@@ -638,8 +596,6 @@ bool RecordTexPixels(rhi::Texture* img,
 
 using TexImageKeySet = base::HashSet<TexImageKey, TexImageKeyHash>;
 
-// One pass over the set and view caches for a whole batch of images: walking
-// both caches once per image was most of what eviction cost.
 void RetireTextureImages(const TexImageKeySet& keys) {
   if (keys.empty())
     return;
@@ -676,10 +632,6 @@ void RetireTextureImages(const TexImageKeySet& keys) {
   ClearMultiTexCache();
 }
 
-// Make room for one more image of `bytes` under `budget`: retire the least
-// recently used images not bound this frame, in one batch, down to 1/16 of
-// the budget and of the image cap below the limit, so the next uploads do not
-// come straight back here. False when nothing can be evicted.
 constexpr size_t kMaxTextureImages = 3000;
 
 bool EvictTextures(u64 bytes, u64 budget) {
@@ -707,8 +659,6 @@ bool EvictTextures(u64 bytes, u64 budget) {
   return true;
 }
 
-// Uploads/validates the image and returns its view for this binding, or null.
-// `key_out` receives the binding's cache key.
 static rhi::TextureView* ResolveTextureView(u64 base,
                                             u32 w,
                                             u32 h,
@@ -737,18 +687,11 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   ScopeNs lookup_timer(&g_ns_tex_lookup);
   g_tex_lookup_n++;
   constexpr u64 kMaxTextureBytes = 512ull * 1024 * 1024;
-  // DELTA_GPU_TEXWATCH=<base>: the head of one texture's guest memory, once per
-  // frame it is bound. A surface the guest fills after our first upload reads
-  // as its initial contents forever, and no other trace distinguishes that from
-  // memory the guest never wrote.
   if (kTexWatch && base == (u64)kTexWatch) {
     static int watched = -1;
     if (watched != g_frame.num && gpu::IsReadableRange(base, 32)) {
       watched = g_frame.num;
       const u8* p = reinterpret_cast<const u8*>(base);
-      // Scan the whole surface, not just its head: a grading LUT legitimately
-      // starts at black, so a zero prefix says nothing about whether the guest
-      // filled it.
       const u64 span = u64(w) * h * depth * 4;
       u64 first_nz = span;
       if (gpu::IsReadableRange(base, span))
@@ -773,8 +716,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   if (format == rhi::Format::kUndefined)
     return nullptr;
   if (is_3d) {
-    // maxImageDimension3D (commonly 2048) applies to every axis of a volume,
-    // well below the 2D limits checked above.
     const u32 max_3d = Device().caps().max_texture_size_3d;
     if (!depth || depth > max_3d || w > max_3d || h > max_3d) {
       if (kTexFail) {
@@ -808,18 +749,12 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   view_mips = base::Min(view_mips, mip_levels - base_mip);
   if (!view_mips)
     return nullptr;
-  // Diagnostic override used to identify incorrectly described guest surfaces.
   tiling = TextureTiling(tiling);
-  // Block-compressed formats lay out and detile in 4x4-block ("element")
-  // space. Mip chains only halve cleanly in block space for power-of-two
-  // texel dimensions; decline others (rare) rather than mis-address them.
   const bool bc = GuestFormatBlockCompressed(dfmt);
   const u32 elem_bytes = GuestFormatElemBytes(dfmt);
   const bool gfx10 = tiling >= gcn::kGfx10TilingBase;
   if (bc && mip_levels > 1 && !gfx10 && ((w & (w - 1)) || (h & (h - 1))))
     return nullptr;
-  // BCn volume images are an optional Vulkan feature; decline rather than
-  // create an image the driver need not support.
   if (bc && is_3d)
     return nullptr;
   const u32 lw = bc ? (w + 3) / 4 : w;
@@ -835,10 +770,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   if (image_it == g_tex_images.end()) {
     new_layout = base::MakeUnique<gcn::TextureLayout32>();
     auto& layout = *new_layout;
-    // DELTA_GPU_TEXFAIL: why a guest texture declines to upload. Skyrim's font
-    // atlas fell out here and every glyph then sampled the white default, which
-    // fills each glyph quad solid instead of masking it.
-    // The layout's layer axis is the volume's slice axis.
     if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch,
                                    is_3d ? depth : layers, mip_levels, tiling,
                                    pow2_pad, elem_bytes)) {
@@ -852,9 +783,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       }
       return nullptr;
     }
-    // gfx10 sizes each level in blocks as ceil(blocks / 2^mip), which is the
-    // hardware's, but a level holds ceil(texels / 4) blocks of real data: a
-    // 1600-wide chain is 13 blocks at 50 texels where halving says 12.
     if (bc && gfx10)
       for (u32 mip = 0; mip < mip_levels; mip++) {
         auto& level = layout.mips[mip];
@@ -875,11 +803,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     }
     return nullptr;
   }
-  // DELTA_GPU_TEXCENSUS=<seconds>: every distinct guest surface the GPU
-  // samples, with its real footprint and whether that footprint holds any
-  // non-zero byte. One watched address answers "is THIS texture empty"; the
-  // census answers "which of the title's surfaces are filled and which are
-  // not", which is what separates a broken upload from a broken descriptor.
   if (kTexCensus && gpu::IsReadableRange(base, footprint)) {
     struct Cell {
       u32 w, h, dfmt, nfmt, tiling, mips;
@@ -915,8 +838,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       std::fflush(stderr);
     }
   }
-  // DELTA_GPU_TEXRAW: write each large texture's raw tiled footprint, with its
-  // layout in the name, so a swizzle can be worked out offline.
   if (kTexRaw && w >= 256 && h >= 128 &&
       gpu::IsReadableRange(base, footprint)) {
     static int rawn = 0;
@@ -936,9 +857,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       }
     }
   }
-  // Diagnostic (DELTA_GPU_TEXDUMP): in deep gameplay, dump the first few large
-  // guest textures sampled, so a non-tutorial room's floor texture can be
-  // inspected (is it loaded/brown or black/zero?). Counts non-zero pixels too.
   if (kTexDump && g_frame.num > 1200 && w >= 128 && h >= 128) {
     if (!gpu::IsReadableRange(base, footprint))
       return nullptr;
@@ -968,9 +886,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       tdn++;
     }
   }
-  // A dispatch's output for this surface still in VRAM is copied straight into
-  // the image; the guest bytes under it are stale and stay that way.
-  // A raw range a dispatch wrote through a V# holds the guest layout itself.
   gcn::TextureLayout32 linear;
   u32 supplied_mips = layout.mip_levels;
   u64* checked_seq = image_it != g_tex_images.end() &&
@@ -998,7 +913,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
           return false;
         state = rhi::TextureState::kShaderRead;
         entry.tail_first_mip = supplied_mips;
-        // Armed behind the upload: a write from here on is reported.
         CollectGuestWrites();
         const u64 offset = layout.mips[supplied_mips].offset;
         entry.tail_clean =
@@ -1025,17 +939,12 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     return nullptr;
   const bool known = image_it != g_tex_images.end();
   if (!known || image_it->second.last_checked_frame != g_frame.num) {
-    // Mapping probes are syscall-heavy: one alongside the once-per-frame
-    // check, and none for a clean watched image.
     const u64 t_probe = NowNs();
     const bool readable = (known && image_it->second.wt_clean) ||
                           gpu::IsReadableRange(base, footprint);
     g_ns_tex_probe += NowNs() - t_probe;
     g_tex_probe_n++;
     if (!readable) {
-      // The commonest way a binding ends up on the white fallback, and until
-      // now the only silent one: the descriptor is fine, the memory behind it
-      // just is not mapped (yet).
       if (kTexFail) {
         static int n = 0;
         if (n++ < 12)
@@ -1065,8 +974,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
         }
         return nullptr;
       }
-      // The GPU reads the pages when the upload runs: armed now, after the
-      // release of any page the upload imported, a later write is reported.
       CollectGuestWrites();
       e.wt_clean = GuestWriteTracker().Arm(base, footprint);
       g_ns_tex_refresh += NowNs() - t_refresh;
@@ -1085,11 +992,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     image_entry.layout = layout;
     image_entry.last_checked_frame = -1;
     image_entry.last_used_frame = g_frame.num;
-    // Budget on LIVE image bytes. Retired images are only destroyed two
-    // BeginFrames later (ReleaseRetiredTextures), so actual allocated memory
-    // can transiently exceed the budget by up to two frames of retirements;
-    // capping allocated bytes instead would make creation fail outright at
-    // the budget edge, since eviction cannot free memory mid-frame.
     const u64 bytes = TextureLinearBytes(layout);
     if (g_tex_image_bytes + bytes > kTextureBudget &&
         (!EvictTextures(bytes, kTextureBudget) ||
@@ -1103,7 +1005,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     td.depth = is_3d ? depth : 1;
     td.layers = layers;
     td.mips = mip_levels;
-    td.usage = rhi::kTextureSampled | rhi::kTextureCopyDst | rhi::kTextureCopySrc;
+    td.usage =
+        rhi::kTextureSampled | rhi::kTextureCopyDst | rhi::kTextureCopySrc;
     image_entry.image = Device().CreateTexture(td);
     if (!image_entry.image)
       return nullptr;
@@ -1153,9 +1056,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     vd.mips = view_mips;
     vd.base_layer = is_3d ? 0u : base_array;
     vd.layers = (arrayed && !is_3d) ? view_layers : 1u;
-    // T# DST_SEL: 0 = zero, 1 = one, 4..7 = R/G/B/A. A single-channel mask (a
-    // font atlas) selects its coverage into the components the shader reads;
-    // without this every glyph samples alpha = 1 and fills solid.
     TextureSwizzle(view_key.swizzle, vd.swizzle);
     view_entry.view = Device().CreateView(image_it->second.image, vd);
     if (!view_entry.view)
@@ -1165,10 +1065,6 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   return view_it->second.view;
 }
 
-// Upload a guest texture (linear 32bpp RGBA) and return a descriptor set bound
-// to it. Cached by guest base; re-uploaded when the guest pixels change (the
-// room art is composed/loaded into the same buffer after the first sample, so a
-// once-only cache would serve a stale black frame).
 rhi::BindGroup* GetTexture(u64 base,
                            u32 w,
                            u32 h,
@@ -1206,9 +1102,6 @@ rhi::BindGroup* GetTexture(u64 base,
   if (g_tex_cache.size() >= 12000)
     return nullptr;
 
-  // See GetMultiTexSet: a guest texture is never a depth format, so a compare
-  // sample of one reads the far-plane default rather than an undefined
-  // comparison against a colour view.
   const bool cmp_default =
       key.sampler.depth_compare && g_tex.depth_default_view;
   TexEntry e;
@@ -1222,11 +1115,7 @@ rhi::BindGroup* GetTexture(u64 base,
   return e.set;
 }
 
-// Image view for a guest texture (ensures it is cached/uploaded via
-// GetTexture).
 bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt) {
-  // The detiler preserves packed 32-bpp texels; Vulkan applies the descriptor's
-  // numeric interpretation when sampling.
   return GuestTextureFormat(dfmt, nfmt) != rhi::Format::kUndefined;
 }
 
@@ -1235,7 +1124,6 @@ static rhi::TextureView* ResolveTexViewUncached(const DrawInfo::DrawTex& t);
 namespace {
 u64 g_tex_epoch = 1;
 
-// The fields of a binding that decide its view; `src` and the rest do not.
 struct TexMemoKey {
   u64 base;
   u32 w, h, dfmt, nfmt, tiling, pitch, layers, base_array, view_layers,
@@ -1261,10 +1149,6 @@ TexMemoKey MemoKeyOf(const DrawInfo::DrawTex& t) {
   return k;
 }
 
-// Consecutive draws rebind the same few textures: ~12k lookups a frame over
-// ~1.4k images in GTA:SA. A hit skips the key build, the layout, three map
-// lookups and the compute checks, which can only change their answer at an
-// epoch bump. New frames bump it too, so validation stays once per frame.
 struct TexMemo {
   TexMemoKey key;
   u64 epoch = 0;
@@ -1303,7 +1187,6 @@ rhi::TextureView* TexViewFor(const DrawInfo::DrawTex& t) {
   if (kTexMemo && memo.epoch == g_tex_epoch && memo.key == memo_key)
     return memo.view;
   rhi::TextureView* view = ResolveTexViewUncached(t);
-  // Failures are not remembered: each exit reports itself when asked to.
   if (view)
     memo = {memo_key, g_tex_epoch, view};
   return view;
@@ -1311,9 +1194,6 @@ rhi::TextureView* TexViewFor(const DrawInfo::DrawTex& t) {
 
 static rhi::TextureView* ResolveTexViewUncached(const DrawInfo::DrawTex& t) {
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
-  // Each exit here leaves the binding on the white fallback, so each one needs
-  // to be able to say so (DELTA_GPU_TEXFAIL): an unsupported format and an
-  // unmapped surface look identical from the draw side.
   const auto fail = [&](const char* why) {
     if (kTexFail) {
       static int n = 0;
@@ -1340,19 +1220,10 @@ static rhi::TextureView* ResolveTexViewUncached(const DrawInfo::DrawTex& t) {
   return view ? view : fail("get-texture");
 }
 
-// An N-sampler descriptor set (set 0, bindings 0..kMaxTex-1) for a recomp PS
-// that samples >1 texture. Cached by the combination of the textures'
-// (base,w,h); any binding we cannot resolve gets the 1x1 white default so a
-// diffuse*lightmap shader with a missing map shows the diffuse instead of going
-// black.
 struct MultiTexSet {
   rhi::BindGroup* set = nullptr;
 };
 
-// Keyed on exactly what the set's descriptors hold: per binding the view (a
-// resolved texture, or the default its declared type calls for), its state and
-// the sampler. Only the first num_texs slots are meaningful; the arrays are
-// left uninitialised so building a key per draw writes only those.
 struct MultiTexKey {
   u32 num_texs = 0;
   rhi::TextureView* view[kMaxTex];
@@ -1393,11 +1264,6 @@ void ClearMultiTexCache() {
 }
 
 void ReleaseRetiredTextures() {
-  // Two-stage aging for the pipelined frame: an object retired while frame N
-  // recorded may still be referenced by BOTH in-flight command buffers (N-1
-  // until N's EndFrame, N until N+1's EndFrame). Objects therefore rest one
-  // extra BeginFrame in the `aged` generation before being destroyed, by
-  // then every command buffer that could reference them has been fence-waited.
   static base::Vector<MultiTexSet> aged_mtex;
   static const guest::SessionReset reset_aged_mtex(
       [] { guest::ResetResource(aged_mtex); });
@@ -1458,16 +1324,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   ScopeNs set_timer(&g_ns_tex_set);
   g_tex_set_n++;
-  // What the draw resolved, and what the layout declares. A shader may declare
-  // more samplers than the draw tracked textures for, and a binding left
-  // unwritten is read as an undefined descriptor. Validation names it
-  // (VUID-vkCmdDrawIndexed-None-08114) and a driver may fault on it. Cover
-  // every declared binding; the ones past what resolved take the default.
   const u32 resolved = base::Min(d.num_texs, kMaxTex);
-  // A binding past what the draw resolved has no T# to describe it, so the
-  // default it takes has to match what the SHADER declared: a 2D default in a
-  // binding the module built as a volume is the same undefined read by another
-  // name, and so is a UNORM one under an integer sampler.
   const auto declared = [&](u32 i) -> const gcn::ShaderTex* {
     if (!d.recomp)
       return nullptr;
@@ -1478,17 +1335,8 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
   };
   MultiTexKey key;
   key.num_texs = base::Min(base::Max(resolved, num_bindings), kMaxTex);
-  // DELTA_GPU_FORCEWHITE: bind the 1x1 white default for every sampler
-  // (diagnostic). Doom64's world textures are built by compute dispatches we
-  // don't execute, so the atlases are all-zero and the alpha-blended world
-  // samples transparent-black (= invisible). Forcing white makes the geometry
-  // render opaque, proving the 3D transform/raster/depth path works and
-  // isolating the blackness to the texture data.
   rhi::TextureView* views[kMaxTex];
   rhi::TextureState layouts[kMaxTex];
-  // DELTA_GPU_TEXMISS: report every sampler binding that falls back to the 1x1
-  // white default (the source of "everything renders white" chains) with the
-  // descriptor state that failed to resolve.
   static int tex_miss_logged = 0;
   for (u32 i = 0; i < key.num_texs; i++) {
     rhi::TextureView* v =
@@ -1497,14 +1345,10 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
     bool is_3d =
         i < resolved ? d.texs[i].is_3d : (declared(i) && declared(i)->is_3d);
     if (i >= resolved && declared(i) && declared(i)->storage)
-      return nullptr;  // as for an unresolved storage binding below
+      return nullptr;
     if (kTexMiss && !v && i < resolved && tex_miss_logged < 64) {
       tex_miss_logged++;
       const auto& t = d.texs[i];
-      // The descriptor's provenance decides what kind of failure this is: a
-      // slot that is zero now was never published, one holding a plausible T#
-      // means the resolver read the wrong place, and src=0 means the shader
-      // took it from inline user data.
       char mem[96] = "";
       if (t.src && gpu::IsReadableRange(t.src, 32)) {
         const auto* w = reinterpret_cast<const u32*>(t.src);
@@ -1523,12 +1367,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
     }
     if (d.texs[i].storage && !v)
       return nullptr;
-    // A binding the module declared with an integer sampled type cannot take
-    // the UNORM default: the numeric types have to match
-    // (VUID-vkCmdDrawIndexed-format-07753).
     const bool want_uint = declared(i) && declared(i)->is_uint;
-    // Shape AND numeric type: a default that matches one but not the other is
-    // the same undefined read the resolved case would have been.
     rhi::TextureView* fallback =
         is_3d ? (want_uint ? g_tex.white_uint_3d_view : g_tex.white_3d_view)
         : arrayed
@@ -1539,9 +1378,6 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
   }
   thread_local rhi::BindingWrite writes[kMaxTex];
   for (u32 i = 0; i < key.num_texs; i++) {
-    // Past `resolved` there is no T#: d.texs[i] holds whatever the previous
-    // draw left there, so nothing about it may be read. Those bindings take a
-    // default sampler over the default view.
     const bool have_tex = i < resolved;
     const bool storage_i = have_tex && d.texs[i].storage;
     SamplerKey sampler;
@@ -1550,28 +1386,13 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
       std::memcpy(sampler.raw, d.texs[i].sampler, sizeof(sampler.raw));
       sampler.image_min_lod = d.texs[i].min_lod;
       sampler.force_lod_zero = d.texs[i].force_lod_zero;
-      // A depth comparison is only defined on a view whose format supports
-      // it. This binding may have resolved to a colour target instead of the
-      // depth surface the guest named, and a compare sampler on that is
-      // undefined (VUID-vkCmdDrawIndexed-None-06479): GCN compares against
-      // the first component of any format, Vulkan does not. Sample it plainly.
       sampler.depth_compare =
           d.texs[i].depth_compare && depth_src && depth_src[i];
-      // The T# says how the SHADER reads the texels; the view says what the
-      // hardware may do with them. A binding that resolved to a render target
-      // takes that target's format, and an integer one is not filterable at
-      // all, because VK_FILTER_LINEAR on it is undefined
-      // (VUID-vkCmdDrawIndexed-magFilter-04553), whatever the T# asked for.
       sampler.integer =
           !d.texs[i].storage &&
           ((kIntegerRt && (d.texs[i].nfmt == 4 || d.texs[i].nfmt == 5)) ||
            (resolved_formats && IsIntegerColorFormat(resolved_formats[i])));
     }
-    // A compare sample that did not resolve to a depth surface has nothing
-    // valid to read: Vulkan defines the comparison only on a format that
-    // supports it, and every colour target and guest texture is the wrong kind.
-    // Bind the 1x1 far-plane depth default and keep the comparison, which reads
-    // as "nothing occludes this" instead of as undefined.
     rhi::BindingWrite& w = writes[i];
     w = {};
     w.binding = i;
@@ -1607,8 +1428,6 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
   return entry.set;
 }
 
-// Mark cached textures overlapping a written range for validation. Their next
-// use refreshes the existing compatible image in place.
 void InvalidateTexRange(u64 base, u64 size) {
   if (!size || base > UINT64_MAX - size)
     return;

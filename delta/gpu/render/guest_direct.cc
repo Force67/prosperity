@@ -80,16 +80,14 @@ u8* g_alias = nullptr;
 u64 g_alias_size = 0;
 rhi::Buffer* g_table = nullptr;
 rhi::Buffer* g_misses = nullptr;
-base::HashMap<u64, rhi::Buffer*> g_chunks;  // memfd offset -> import
-// Whole-chunk imports for binds, keyed by chunk start and span size class.
+base::HashMap<u64, rhi::Buffer*> g_chunks;
 struct BindImport {
   rhi::Buffer* buffer;
   u64 bytes;
 };
 base::HashMap<u64, BindImport> g_binds;
-base::Vector<Mapping> g_maps;               // guest views of the memfd
-base::HashSet<u64> g_filled;                // blocks with a table entry
-// Redirected blocks: the host entry they go back to, and whether they are.
+base::Vector<Mapping> g_maps;
+base::HashSet<u64> g_filled;
 u64* g_saved = nullptr;
 base::Atomic<u8>* g_redirected = nullptr;
 struct HighTable {
@@ -170,8 +168,8 @@ void ReadMaps(bool force = false) {
   while (std::fgets(line, sizeof(line), f)) {
     unsigned long long start, end, offset;
     char perms[8];
-    if (std::sscanf(line, "%llx-%llx %7s %llx", &start, &end, perms,
-                    &offset) != 4)
+    if (std::sscanf(line, "%llx-%llx %7s %llx", &start, &end, perms, &offset) !=
+        4)
       continue;
     if (!std::strstr(line, "memfd:delta_dmem")) {
       if (GuestDirectIndex(start) != ~0ull)
@@ -211,12 +209,10 @@ rhi::Buffer* ChunkAt(u64 offset) {
   if (it != g_chunks.end())
     return it->second;
   rhi::BufferDesc desc;
-  // A block's reads may run past its end: the import overlaps the next
-  // chunk by a block, so they stay inside it.
-  desc.size = base::Min(kChunk + (1ull << kDirectBlockShift),
-                        g_alias_size - chunk);
-  desc.usage = rhi::kBufferStorage | rhi::kBufferAddress |
-               rhi::kBufferCopySrc | rhi::kBufferCopyDst;
+  desc.size =
+      base::Min(kChunk + (1ull << kDirectBlockShift), g_alias_size - chunk);
+  desc.usage = rhi::kBufferStorage | rhi::kBufferAddress | rhi::kBufferCopySrc |
+               rhi::kBufferCopyDst;
   desc.host_pointer = g_alias + chunk;
   rhi::Buffer* buf = Device().CreateBuffer(desc);
   g_chunks.insert_or_assign(chunk, buf);
@@ -502,8 +498,6 @@ u64 HostEntryFor(u64 block) {
   return (slab->address() + offset) | gcn::kDirectLeaf;
 }
 
-// Ordinary direct-memory blocks need one lookup. Other mappings carry a
-// page table so holes and short host spans never become physical GPU reads.
 u64 EntryFor(u64 block) {
   const Mapping* m = FindMapping(block);
   if (!m || block + (1ull << kDirectBlockShift) > m->end)
@@ -512,16 +506,14 @@ u64 EntryFor(u64 block) {
   if (offset >= g_alias_size)
     return 0;
   rhi::Buffer* chunk = ChunkAt(offset);
-  return chunk && chunk->address()
-             ? chunk->address() + (offset & (kChunk - 1))
-             : 0;
+  return chunk && chunk->address() ? chunk->address() + (offset & (kChunk - 1))
+                                   : 0;
 }
 
 void Fill(u64 address) {
   ReadMaps();
   if (GuestDirectIndex(address) == ~0ull)
     return;
-  // The whole 2 MiB around the miss: neighbours are read next.
   const u64 first = address & ~(kChunk - 1);
   for (u64 block = first; block < first + kChunk;
        block += 1ull << kDirectBlockShift) {
@@ -658,9 +650,6 @@ rhi::Buffer* DirectImportAt(u64 address, u64* offset, u64* bytes) {
 }
 
 namespace {
-// Spans round up to a power-of-two chunk count, so neighbouring bindings of
-// a title share imports: starts are chunk-aligned, the class fits the key's
-// free low bits.
 u64 BindClass(u64 chunks) {
   u64 cls = 1;
   while (cls < chunks && cls < 32)
@@ -691,7 +680,6 @@ rhi::Buffer* DirectBindAt(u64 address, u64 bytes, u64* offset) {
     return nullptr;
   ReadMaps();
   const Mapping* m = FindMapping(address);
-  // The fetch reads one contiguous span: it has to stay in this view.
   if (!m || address + bytes > m->end)
     return nullptr;
   const u64 at = m->offset + (address - m->start);
@@ -713,8 +701,6 @@ void SyncGuestDirect() {
   if (!gcn::g_direct_table && !InitGuestDirect())
     return;
   InvalidateCopiedImports();
-  // Refresh imported addresses after a remap, with periodic refreshes for
-  // host mappings that bypass the guest notification.
   const bool periodic = ++g_syncs % 256 == 0;
   AttachDirectAlias(periodic);
   ReadMaps(periodic);

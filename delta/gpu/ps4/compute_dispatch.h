@@ -2,20 +2,6 @@
 
 /*
  * PS4Delta : PS4 emulation and research project
- *
- * How a compute dispatch's registers and descriptors become one renderer
- * dispatch.
- *
- * A dispatch names nothing directly: the COMPUTE_* registers give a program
- * address and a workgroup shape, and every buffer and image it touches is a
- * descriptor the shader loads out of its user data, possibly through an SRT
- * chain in guest memory another dispatch wrote. Recovering those live ranges,
- * deciding which need staging (a tiled image, a format the GPU cannot alias)
- * and refusing the ones that do not add up happens here.
- *
- * Titles build real content this way: Doom64's level texture atlases, P.T.'s
- * streamed texture uploads. Getting one wrong is a black surface, not a crash,
- * so a refused dispatch is loud (DELTA_GPU_CSDROPS / DELTA_GPU_CSRES).
  */
 
 #include "base/arch.h"
@@ -25,22 +11,18 @@
 
 namespace gpu::ps4 {
 
-// Execute a direct dispatch, or let the GPU read `indirect_args`. `body`
-// contains dimensions (placeholders for indirect) and the dispatch initiator.
 void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
                      u32 count,
                      u64 indirect_args = 0);
 
-// ME packets use an offset from SET_BASE(1); MEC packets carry an address.
 void DispatchComputeIndirect(render::Renderer& renderer,
                              const Regs& regs,
                              const u32* body,
                              u32 count,
                              u64 argument_base);
 
-// Start compiling the shader a dispatch with these registers would run.
 void PrefetchComputeDispatch(const Regs& regs);
 
 }  // namespace gpu::ps4

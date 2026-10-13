@@ -62,9 +62,8 @@ void RenderQueue::Start(render::Renderer& renderer) {
   renderer_ = &renderer;
   commands_ = base::MakeUnique<Command[]>(kCommands);
   draws_ = base::MakeUnique<render::DrawInfo[]>(kDrawSlots);
-  thread_ = base::MakeUnique<base::Thread>(
-      "gpu-render", [this] { Run(); },
-      /*start_now=*/true);
+  thread_ =
+      base::MakeUnique<base::Thread>("gpu-render", [this] { Run(); }, true);
   running_ = true;
 }
 
@@ -119,7 +118,6 @@ void RenderQueue::PushCall(base::Function<void()> fn) {
 
 void RenderQueue::Drain(const char* why) {
   DELTA_ZONE("gpuq.drain");
-  // The renderer's own thread already owns it (a replay it runs may ask).
   if (!running_ || base::IsCurrentThread(thread_->handle()))
     return;
   const u64 head = head_.load(base::memory_order_relaxed);
@@ -140,8 +138,8 @@ void RenderQueue::Drain(const char* why) {
 }
 
 void RenderQueue::Wake(base::ConditionVariable& cv) {
-  // Through the lock: a waiter between its check and its sleep holds it, so
-  // the change it missed cannot also miss it.
+  // Changes are made under the lock so a waiter cannot miss one between its
+  // check and its sleep.
   {
     base::LockGuard<base::Mutex> lock(wake_mutex_);
   }
@@ -181,7 +179,7 @@ void RenderQueue::Run() {
         return stop_.load() || head_.load(base::memory_order_acquire) != tail;
       });
       if (head_.load(base::memory_order_acquire) == tail)
-        return;  // stopped
+        return;
     }
     Command& c = commands_[tail % kCommands];
     running_kind_.store(static_cast<u8>(c.kind), base::memory_order_relaxed);
@@ -256,8 +254,6 @@ void FlushForWalkRead(render::Renderer& renderer,
                       u64 base,
                       u64 bytes,
                       const char* why) {
-  // Only dispatches make a range dirty, and they run on the walk's side of
-  // the queue, so a clear filter cannot be contradicted by queued work.
   RenderQueue& queue = GuestRenderQueue();
   if (queue.running() && queue.PendingWriteOverlaps(base, bytes))
     OwnRenderer("pending-write");

@@ -3,14 +3,10 @@
  */
 #pragma once
 
-// Handing a finished frame to the window. host::Present blocks on the window
-// swapchain and, on a software driver, rasterizes the blit on the CPU, so a
-// dedicated thread owns the window and always shows the newest complete frame.
-
 #include "base/arch.h"
 
-#include "base/containers/vector.h"
 #include "base/atomic.h"
+#include "base/containers/vector.h"
 #include "base/memory/unique_pointer.h"
 #include "base/threading/condition_variable.h"
 #include "base/threading/mutex.h"
@@ -35,8 +31,6 @@ class LatestFramePresenter {
                u32 w,
                u32 h,
                host::PixelFormat fmt = host::PixelFormat::kBgra8);
-  // Lend an exported image instead (host::PresentShared): the GPU copies it
-  // to the window. `token` stands for it in WaitForBorrowed.
   void PresentShared(const void* token,
                      u32 id,
                      int fd,
@@ -44,14 +38,10 @@ class LatestFramePresenter {
                      u32 w,
                      u32 h,
                      host::PixelFormat fmt);
-  // False once the window failed to import a shared image.
   bool SharedWorks() const {
     return shared_works_.load(base::memory_order_acquire);
   }
-  // Block until a lent buffer has been copied out, for a caller that is about
-  // to write over the one it lent.
   void WaitForBorrowed();
-  // Keep the window usable when handing presentation to the exit animation.
   void Stop(bool interrupt_present = true);
 
  private:
@@ -61,10 +51,8 @@ class LatestFramePresenter {
   base::UniquePointer<base::Thread> thread_;
   base::Mutex mutex_;
   base::ConditionVariable ready_;
-  base::ConditionVariable released_;  // a lent buffer has been copied out
-  base::Vector<u8> pending_pixels_;   // tight pitch, pending_fmt_; latest wins
-  // Set instead of pending_pixels_ when the caller lends us its buffer: the
-  // presenter thread copies out of it, under the lock, before releasing it.
+  base::ConditionVariable released_;
+  base::Vector<u8> pending_pixels_;
   const u8* pending_src_ = nullptr;
   struct Shared {
     u32 id = 0;

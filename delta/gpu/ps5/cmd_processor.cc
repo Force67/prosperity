@@ -1,8 +1,5 @@
 /*
  * PS4Delta : PS4/PS5 emulation and research project
- *
- * The AGC packet stream: the walk, the state it carries and the fence labels it
- * writes. See cmd_processor.h.
  */
 
 #include "gpu/ps5/cmd_processor.h"
@@ -48,19 +45,8 @@
 
 namespace {
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
-// DELTA_AGC_MEMWATCH=<addr>: report every CP-side write that lands on the
-// 64 KiB page holding that address (WRITE_DATA, DMA copies and fills,
-// ATOMIC_MEM). The frame capture records none of those, so a value that
-// changes between two draws with no dispatch naming it is invisible
-// otherwise.
 DELTA_OPTION(u64, kMemWatch, "DELTA_AGC_MEMWATCH", 0);
-// Report every fence label written into the window after this address. A
-// consumer stuck one count short of its target is the readable half of a
-// missing submit, and the label is the only place that count exists.
 DELTA_OPTION(u64, kLabelWatch, "DELTA_AGC_LABELWATCH", 0);
-// How wide that window is. Narrow it to one object and the throttle below
-// stops aliasing: proving a slot is NEVER written needs every write in the
-// window, not a sample of them.
 DELTA_OPTION(u64, kLabelWatchSize, "DELTA_AGC_LABELWATCH_SIZE", 0x4000000);
 }  // namespace
 
@@ -68,8 +54,6 @@ namespace gpu::ps5 {
 static void FinishGraphicsFlip(u64 scanout_base);
 namespace {
 
-// The register file is the state of one GPU: two submit threads walking it
-// concurrently would interleave one draw's registers with another's.
 base::Mutex g_mutex;
 
 bool MemWatchHit(u64 base, u64 bytes) {
@@ -77,58 +61,39 @@ bool MemWatchHit(u64 base, u64 bytes) {
   return w && base < ((w | 0xFFFF) + 1) && (w & ~0xFFFFull) < base + bytes;
 }
 
-// A waitOnAddress the memory does not satisfy yet stalls the QUEUE it sits
-// in, exactly as the command processor would: the ring walk stops at the
-// packet and resumes there on a later doorbell poll. Graphics waits release
-// the GPU lock while their submission worker polls. Astro Bot clears its
-// scanout composite reads, gated on a label the graphics queue writes after
-// the composite; walked in submission order, the clear ran first and the
-// frame was black.
 struct RingStall {
-  bool ring_walk = false;  // stalls allowed
+  bool ring_walk = false;
   bool stalled = false;
-  // Where inside each nested indirect buffer the walk stopped, so the ring
-  // packet that called it can re-enter at the same place.
-  u64 ib[10] = {};  // kMaxIbDepth + 2, declared below
+  u64 ib[10] = {};
   u32 ib_dw[10] = {};
-  // Retained for diagnostics; elapsed time never satisfies a GPU wait.
   u64 wait_addr = 0;
   u64 wait_ref = 0;
   base::TimeTicks wait_since;
-  // When the title submitted the packets being walked (rang the doorbell).
   u64 visible_ns = 0;
 };
 u64 g_total_submits = 0;
 bool g_renderer_started = false;
 bool g_frame_active = false;
 
-// Latched by the IT_* packets that precede a draw and consumed by it.
 struct IndexState {
-  u64 base = 0;  // IT_INDEX_BASE: DRAW_INDEX_OFFSET_2 has only an offset
-  u32 max = 0;   // IT_INDEX_BUFFER_SIZE
-  u32 num_instances = 1;  // IT_NUM_INSTANCES, for the following draw(s)
+  u64 base = 0;
+  u32 max = 0;
+  u32 num_instances = 1;
 };
 
-// IT_SET_BASE(base_index=1) publishes where the indirect argument buffers live;
-// an indirect draw or dispatch then names an offset into one. The header's
-// shader-type bit picks which of the two it set.
-// Each hardware queue owns its register context and suspended IB stack.
-// A different queue can run while this one waits, without replacing its
-// shader registers or the position at which its nested buffer must resume.
 struct QueueState {
   Regs regs;
   RingStall stall;
   IndexState index;
   u64 draw_indirect_base = 0;
-  u64 indirect_args =
-      0;  // the draw being issued reads its arguments on the GPU
+  u64 indirect_args = 0;
   u64 dispatch_indirect_base = 0;
   base::Array<u32, 0x400> pushed_context{};
   bool context_pushed = false;
 };
 QueueState g_graphics_queue;
 base::Map<u32, QueueState> g_ring_queues;
-QueueState* g_queue = &g_graphics_queue;  // protected by g_mutex
+QueueState* g_queue = &g_graphics_queue;
 
 struct GraphicsJob {
   base::Vector<u32> words;
@@ -147,27 +112,18 @@ bool g_graphics_started = false;
 void RunGraphics();
 u64 EnqueueGraphics(GraphicsJob job);
 
-// A cycle in the IB chain would recurse until the stack overflowed. Real
-// submissions are flat or a couple of levels deep.
 constexpr u32 kMaxIbDepth = 8;
 
-// --- completion labels -----------------------------------------------------
-
-// Labels live in guest memory the title allocated; anything plausibly mapped
-// and non-null will do.
 bool IsLabelAddress(u64 address) {
   return IsGuestAddress(address);
 }
 
-// EOP/RELEASE_MEM DATA_SEL 3 (GPU clock) and 4 (system clock) tell the GPU to
-// write its current 64-bit clock counter into the label, NOT the packet's
-// immediate data (which is 0 for these).
+// DATA_SEL 3/4 write the GPU or system clock counter into the label, not the
+// packet's immediate.
 u64 GpuClockTimestamp() {
   return static_cast<u64>((base::TickClock::NowNs()));
 }
 
-// The last label writes, read only when a wait has hung: logging them as they
-// happen changes the timing enough that the hang goes away.
 struct LabelWrite {
   u64 address, value, old, ns;
 };
@@ -193,20 +149,14 @@ bool Compares(u32 function, u64 value, u64 ref) {
   }
 }
 
-// A queue parked on a wait, as the label writers see it. The CP polls its
-// wait all the time and sees a value the moment it lands, where our walker
-// looks again on the doorbell poller's next tick: Astro Bot's CPU resets a
-// label it saw written, and a queue parked on that label missed it and hung.
-// So a write that satisfies a parked wait is remembered for it.
 struct ParkedWait {
   u64 address, ref, mask;
   u32 function;
   bool wide, hit;
 };
 base::Mutex g_parked_lock;
-base::Map<const void*, ParkedWait> g_parked;  // by QueueState
+base::Map<const void*, ParkedWait> g_parked;
 
-// `old`: what the label held just before, which a waiter could have seen too.
 void RecordLabelWrite(u64 address, u64 value, u64 old) {
   const u32 i =
       g_label_history_n.fetch_add(1) % base::ArraySize(g_label_history);
@@ -223,7 +173,6 @@ void RecordLabelWrite(u64 address, u64 value, u64 old) {
   }
 }
 
-// Called after PublishLabel has waited for the GPU writes the label announces.
 void WriteLabel(u64 address, u64 value, bool is_64bit) {
   if (!IsLabelAddress(address))
     return;
@@ -238,10 +187,6 @@ void WriteLabel(u64 address, u64 value, bool is_64bit) {
   RecordLabelWrite(address, value, old);
 }
 
-// INT_SEL asks the CP to raise an end-of-pipe interrupt once the write lands.
-// libSceAgcDriver turns that into an event on the equeue sceAgcAddEqEvent
-// registered, and a consumer that never polls its label (the video decoder
-// parks in sceKernelWaitEqueue) makes no progress without it.
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_end_of_pipe();
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge
@@ -249,8 +194,6 @@ extern "C" void prosperity_gpu_end_of_pipe_ctx(u64 context_id);
 extern "C" bool prosperity_ps5_begin_eop_flip(u64 context, u64* scanout);
 extern "C" void prosperity_ps5_complete_eop_flip(u64 context);
 
-// The label write shared by EOP and RELEASE_MEM, which encode DATA_SEL the same
-// way: 1 = 32-bit immediate, 2 = 64-bit immediate, 3/4 = a clock counter.
 void WriteEventLabel(u64 address,
                      u32 data_sel,
                      u64 value,
@@ -259,25 +202,18 @@ void WriteEventLabel(u64 address,
   if (kLabelWatch && address >= kLabelWatch &&
       address < kLabelWatch + kLabelWatchSize) {
     static int n = 0;
-    // A window narrow enough to be one object is reported in full: sampling it
-    // cannot show which write was the last one.
     if (kLabelWatchSize <= 0x10000 || n++ < 4096 || n % 256 == 0)
       BASE_LOGI("agclabel", "{:#x} sel={} int={} value={:#x} ctx={:#x}",
                 address, data_sel, int_sel, value, context_id);
   }
-  // A fence packet whose write we skip is a waiter that never wakes, so say so
-  // rather than passing over it: sel 0 asks for no write at all, but an address
-  // we refuse is our own gap.
   if (data_sel && !IsLabelAddress(address)) {
     static int n = 0;
     if (n++ < 16)
       BASE_LOGW("agc", "fence label {:#x} (sel {}) is not writable, skipped",
                 address, data_sel);
   }
-  // 5 stores GDS data, not the packet's own: the immediate words are a GDS
-  // offset and size. A timestamp there puts a huge number where a fence value
-  // belongs and the waiter's `label == expected` never comes true, and the
-  // immediate is not the value either, so write nothing and say so.
+  // DATA_SEL 5 stores GDS data, not the packet's immediate, so nothing is
+  // written.
   if (data_sel == 5) {
     static int n = 0;
     if (n++ < 8)
@@ -303,14 +239,6 @@ void WriteEventLabel(u64 address,
       data_sel >= 1 && data_sel <= 4 ? &written : nullptr);
 }
 
-// --- packet handlers -------------------------------------------------------
-
-// CP DMA. body: ctrl, srcLo/Hi, dstLo/Hi, command(byteCount). Skyrim never
-// issues SET_CONTEXT_REG: it builds its context state (so CB_COLOR, the
-// render target) into a shadow image with CP DMA and then restores it with
-// LOAD_CONTEXT_REG. Without the copy the shadow reads zero, every colour draw
-// runs with no target bound and the frame is black. ctrl: SRC_SEL[30:29],
-// DST_SEL[21:20]; sel 0/3 = memory address, 2 = immediate (a fill).
 void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
   if (count < 6)
     return;
@@ -319,39 +247,28 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
   const u32 dst_sel = (control >> 20) & 0x3;
   const u64 src = (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1];
   const u64 dst = (static_cast<u64>(body[4] & 0xFFFF) << 32) | body[3];
-  const u32 bytes = body[5] & 0x3FFFFFF;  // gfx9+ BYTE_COUNT is 26 bits
+  const u32 bytes = body[5] & 0x3FFFFFF;
   const bool src_is_memory = src_sel == 0 || src_sel == 3;
   const bool dst_is_memory = dst_sel == 0 || dst_sel == 3;
   if (MemWatchHit(dst, bytes))
     BASE_LOGI("memwatch", "DMA_DATA control={:#x} src={:#x} dst={:#x} bytes={}",
               control, (unsigned long)src, (unsigned long)dst, bytes);
-  // The sel bits report "memory" even for GDS/register targets, which are not
-  // mapped in our address space and would segfault; every real guest
-  // allocation sits far above 16 MiB.
   const auto addressable = [](u64 address) {
     return address >= 0x1000000ull && address < 0x20000000000ull;
   };
   bool copied = false;
   if (!kNoCopy && bytes && (src_sel == 1 || dst_sel == 1)) {
-    // Selector 1 addresses GDS by byte offset, rather than guest virtual
-    // memory. These fills reset the append counters used to build indirect
-    // dispatch arguments; dropping them makes those counts grow every frame.
     copied =
         render::DmaGds(renderer, src_sel, dst_sel, src, dst, bytes, body[1]);
     TraceDmaData(control, src, dst, bytes, copied);
     return;
   }
-  // A small write is a label: it lands in order with the label writes
-  // PublishLabel may still hold, or a reset could overtake the release
-  // before it and the waiter would never see its value.
   constexpr u32 kLabelBytes = 64;
   if (!kNoCopy && src_is_memory && dst_is_memory && bytes &&
       bytes <= 0x1000000u && src != dst && addressable(src) &&
       addressable(src + bytes) && addressable(dst) &&
       addressable(dst + bytes)) {
     if (bytes <= kLabelBytes) {
-      // The source may be compute output still in VRAM, and a dirty range
-      // under the destination would land over the copy when written back.
       render::FlushCsWritesRange(renderer, src, bytes, "dma");
       render::FlushCsWritesRange(renderer, dst, bytes, "dma");
       const auto* from = reinterpret_cast<const u8*>(src);
@@ -372,8 +289,6 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       copied = true;
     } else if (render::GuestBytesSettled(src, bytes) &&
                render::GuestBytesSettled(dst, bytes)) {
-      // Bytes the CPU sees as they are are copied here, where the command
-      // processor reads them next (a context shadow for LOAD_CONTEXT_REG).
       std::memcpy(reinterpret_cast<void*>(dst),
                   reinterpret_cast<const void*>(src), bytes);
       copied = true;
@@ -381,9 +296,6 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
       copied = render::ApplyMemoryCopy(renderer, dst, src, bytes);
     }
   }
-  // src_sel 2 = the packet's own dword, repeated: a fill. That is how a title
-  // clears a surface, since there is no clear packet, so apply it to guest
-  // memory and let the renderer clear any target it covers.
   if (!kNoCopy && src_sel == 2 && dst_is_memory && bytes &&
       bytes <= 0x8000000u && addressable(dst) && addressable(dst + bytes)) {
     const u32 fill = body[1];
@@ -410,25 +322,16 @@ void HandleDmaData(render::Renderer& renderer, const u32* body, u32 count) {
   TraceDmaData(control, src, dst, bytes, copied);
 }
 
-// body: control, dstLo, dstHi, data...
-// ATOMIC_MEM: one GL2 atomic on guest memory, issued by the CP. body:
-// [op/command, addrLo, addrHi, srcLo, srcHi, cmpLo, cmpHi, loopInterval].
-// The op numbers are sce::Agc::AtomicMemOp: 1..57 return the pre-op value,
-// 65..121 are the same ops without a return, +32 selects 64-bit. Our submit
-// runs to completion, so the "wait for confirm" commands need nothing, and a
-// kLoop compare-swap that would spin on another agent has already been
-// satisfied. The AGC driver stores a 64-bit 1 into its system block this way
-// once per submit (op 103 kSwap64), which nothing else ever wrote.
 template <typename T>
 T AtomicMemOp(u32 op, T dst, T src, T cmp) {
   using S = base::conditional_t<sizeof(T) == 8, i64, i32>;
   switch (op) {
     case 1:
-    case 9:  // fcmpswap: compare as floats
+    case 9:
       return dst == cmp ? src : dst;
     case 2:
     case 10:
-    case 17:  // fmin, smin (a float compares as a signed int)
+    case 17:
       return static_cast<S>(src) < static_cast<S>(dst) ? src : dst;
     case 3:
     case 11:
@@ -465,7 +368,7 @@ void HandleAtomicMem(const u32* body, u32 count) {
   const u64 src = (static_cast<u64>(body[4]) << 32) | body[3];
   const u64 cmp = (static_cast<u64>(body[6]) << 32) | body[5];
   const bool wide = (op & 0x20) != 0;
-  const u32 base_op = op & ~0x60u;  // strip the no-return and 64-bit bits
+  const u32 base_op = op & ~0x60u;
   if (MemWatchHit(address, wide ? 8 : 4))
     BASE_LOGI("memwatch", "ATOMIC_MEM op={} {:#x} src={:#x}", op,
               (unsigned long)address, (unsigned long)src);
@@ -477,8 +380,6 @@ void HandleAtomicMem(const u32* body, u32 count) {
                 address);
     return;
   }
-  // umin/umax (18/20) compare unsigned, everything else goes through the
-  // table.
   if (wide) {
     auto* p = reinterpret_cast<volatile u64*>(address);
     const u64 dst = *p;
@@ -505,12 +406,6 @@ void HandleAtomicMem(const u32* body, u32 count) {
   }
 }
 
-// CLEAR_STATE carries sce::Agc::ContextStateOperation in body[0]: 0 resets
-// the context registers to their defaults, 1 saves them, 2 restores the saved
-// copy, 3 saves and resets. The driver brackets its own state with a push/pop
-// pair, so without the restore whatever it programmed in between leaked into
-// the title's next draws. The defaults table is not modelled: a clear leaves
-// the file as it is.
 void HandleClearState(const u32* body, u32 count) {
   if (count < 1)
     return;
@@ -533,9 +428,6 @@ void HandleClearState(const u32* body, u32 count) {
   }
 }
 
-// waitOnAddress (0x3c: 32-bit, 6 dwords; 0x93: 64-bit, 8 dwords). body[0]
-// carries the compare function in [2:0] (0 always, 1 <, 2 <=, 3 ==, 4 !=,
-// 5 >=, 6 >), the poll address follows, then reference and mask.
 bool WaitSatisfied(u32 op, const u32* body, u32 count) {
   DELTA_ZONE("ps5.wait_check");
   const bool wide = op == 0x93;
@@ -566,17 +458,11 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
   return Compares(function, value & mask, ref);
 }
 
-// A queue's packets reach us only when the walk holding the processor lets go,
-// which can be after the title has seen the label it waits on come true and
-// recycled it (Astro Bot zeroes a frame slot's sync labels once the graphics
-// queue says the frame is done). The wait counts as met if the label held a
-// satisfying value at any point since the title submitted it.
+// A satisfying write is remembered so a wait the CP resumes late still sees it.
 bool WrittenSinceVisible(u64 address, u64 ref, u64 mask, u32 control) {
   const u64 since = g_queue->stall.visible_ns;
   if (!since)
     return false;
-  // A write since then: the label held both its old and its new value. The
-  // newest write before then is what it held when the title submitted.
   const u32 function = control & 0x7;
   const LabelWrite* before = nullptr;
   for (const LabelWrite& w : g_label_history) {
@@ -651,8 +537,6 @@ bool WaitGraphics(u32 op, const u32* body, u32 count) {
   return true;
 }
 
-// Suspend this queue until the comparison succeeds. Other queues remain
-// runnable and may produce the value this one is waiting for.
 bool StallOnWait(u32 op, const u32* body, u32 count) {
   if (!g_queue->stall.ring_walk) {
     return !WaitGraphics(op, body, count);
@@ -698,11 +582,7 @@ bool StallOnWait(u32 op, const u32* body, u32 count) {
 void HandleWriteData(const u32* body, u32 count) {
   if (count < 4)
     return;
-  // DST_SEL (control[11:8]) picks the destination space. 0 is the
-  // memory-mapped REGISTER file, where dstLo is a register offset and not an
-  // address at all; treating it as one sent the write to a pointer far below
-  // the guest and silently dropped it. Titles stream state through these, so
-  // the registers they carry went missing.
+  // DST_SEL 0 is the register file: dstLo is a register offset, not an address.
   if (((body[0] >> 8) & 0xF) == 0) {
     WriteDataRegs(g_queue->regs, body, count);
     return;
@@ -728,7 +608,6 @@ void HandleWriteData(const u32* body, u32 count) {
         address, static_cast<u64>(dwords) * 4, body + 3);
 }
 
-// body: eventCtrl, addrLo, addrHi+sel, dataLo, dataHi
 void HandleEventWriteEop(const u32* body, u32 count) {
   if (count < 4)
     return;
@@ -736,11 +615,9 @@ void HandleEventWriteEop(const u32* body, u32 count) {
       (static_cast<u64>(body[2] & 0xFFFF) << 32) | (body[1] & ~0x3u);
   const u64 value = static_cast<u64>(body[3]) |
                     (static_cast<u64>(count >= 5 ? body[4] : 0) << 32);
-  // INT_SEL is two bits here; RELEASE_MEM widens it to three, EOP does not.
   WriteEventLabel(address, (body[2] >> 29) & 0x7, value, (body[2] >> 24) & 0x3);
 }
 
-// body: eventCtrl, selBits, addrLo, addrHi, dataLo, dataHi
 void HandleReleaseMem(const u32* body, u32 count) {
   if (count < 5)
     return;
@@ -748,8 +625,6 @@ void HandleReleaseMem(const u32* body, u32 count) {
       (static_cast<u64>(body[3] & 0xFFFF) << 32) | (body[2] & ~0x3u);
   const u64 value = static_cast<u64>(body[4]) |
                     (static_cast<u64>(count >= 6 ? body[5] : 0) << 32);
-  // DW6 is INT_CTXID: the id the title tags its submit with and matches the
-  // interrupt against.
   WriteEventLabel(address, (body[1] >> 29) & 0x7, value, (body[1] >> 24) & 0x7,
                   count >= 7 ? body[6] : 0);
   const u64 context = count >= 7 && body[6] ? body[6] : value;
@@ -763,7 +638,6 @@ void HandleReleaseMem(const u32* body, u32 count) {
   }
 }
 
-// body: eventCtrl, addrLo, addrHi+cmd, data
 void HandleEventWriteEos(const u32* body, u32 count) {
   if (count < 4)
     return;
@@ -774,12 +648,8 @@ void HandleEventWriteEos(const u32* body, u32 count) {
       address, 4, body + 3);
 }
 
-// IT_COPY_DATA: one small copy between memory, a register and the GPU's own
-// clocks. gfx10 widens both selectors by a bit from the header's top, so they
-// are read as (field << 1) | bit30 and the useful values double: 2/4/5 name
-// memory, 3/6/7 a register, 10/11 an immediate in the packet, and src 9 / 18
-// are the GPU and system reference clocks. A title reads the clock through
-// this packet and polls the result, so dropping it is a wait that never ends.
+// gfx10 widens the COPY_DATA selectors by one header bit, hence (field << 1) |
+// bit30.
 void HandleCopyData(const u32* body, u32 count) {
   if (count < 5)
     return;
@@ -796,16 +666,16 @@ void HandleCopyData(const u32* body, u32 count) {
       !IsLabelAddress(dst) || !gpu::IsReadableRangeCached(dst, bytes))
     return;
   u64 value = 0;
-  if (src_sel == 9 || src_sel == 18) {  // GPU clock / system clock
+  if (src_sel == 9 || src_sel == 18) {
     value = GpuClockTimestamp();
-  } else if (src_sel == 10 || src_sel == 11) {  // immediate, in the packet
+  } else if (src_sel == 10 || src_sel == 11) {
     value = src;
   } else if (is_memory(src_sel)) {
     if (!IsLabelAddress(src) || !gpu::IsReadableRangeCached(src, bytes))
       return;
     std::memcpy(&value, reinterpret_cast<const void*>(src), bytes);
   } else {
-    return;  // a register we do not model
+    return;
   }
   if (bytes == 8)
     *reinterpret_cast<volatile u64*>(dst) = value;
@@ -813,14 +683,6 @@ void HandleCopyData(const u32* body, u32 count) {
     *reinterpret_cast<volatile u32*>(dst) = static_cast<u32>(value);
 }
 
-// IT_EVENT_WRITE carrying ZPASS_DONE (event type 0x39, index 1) is an occlusion
-// query: the packet names a result buffer and the hardware writes one
-// begin/end pair per depth block into it, with bit 63 set once a value is
-// ready. We have no host query, and a title that waits for that bit waits
-// forever. Astro Bot's boot stops on the first frame it draws, its main
-// thread parked on a semaphore nothing posts. Publish an always-visible count
-// instead: nothing culls, which is wrong but visible, and the ready bit is
-// what the wait is actually looking for.
 void HandleEventWrite(const u32* body, u32 count) {
   if (count < 3)
     return;
@@ -829,18 +691,12 @@ void HandleEventWrite(const u32* body, u32 count) {
   if (event_type != 0x39 || event_index != 1)
     return;
   const u64 address = body[1] | (static_cast<u64>(body[2]) << 32);
-  constexpr u32 kBlocks = 16;  // one begin/end pair per DB
+  constexpr u32 kBlocks = 16;
   constexpr u64 kBytes = kBlocks * 2 * sizeof(u64);
   if (!address || (address & 7) || !IsLabelAddress(address) ||
       !gpu::IsReadableRangeCached(address, kBytes))
     return;
   constexpr u64 kReady = 1ull << 63;
-  // The packet address selects the column of a one-pair-per-depth-block
-  // record: begin at the base, end at +8, 16 bytes per DB. The title computes
-  // end - begin, so a fixed pair of values reads as zero visible and it culls
-  // everything (fixed end values dropped the world map entirely; contiguous
-  // qwords hung the boot). The counter advances one sample per packet, so
-  // every end exceeds its begin.
   static u64 samples = 0;
   const u64 value = kReady | (samples & (kReady - 1));
   auto* results = reinterpret_cast<volatile u64*>(address);
@@ -850,8 +706,6 @@ void HandleEventWrite(const u32* body, u32 count) {
   TraceOcclusionQuery(address, value);
 }
 
-// A packet whose whole effect is a write to guest memory runs in label order.
-// `base`/`bytes` bound what it writes: a wait elsewhere does not wait for it.
 void PublishPacket(void (*handle)(const u32*, u32),
                    const u32* body,
                    u32 count,
@@ -864,20 +718,16 @@ void PublishPacket(void (*handle)(const u32*, u32),
       base, bytes);
 }
 
-// IT_DISPATCH_INDIRECT keeps group counts on the GPU when the dispatch
-// starts at zero. Nonzero starts need CPU dimensions for DispatchBase.
 void HandleDispatchIndirect(render::Renderer& renderer,
                             const u32* body,
                             u32 count) {
   u64 args = 0;
-  if (count >= 3)  // pointer form: addrLo, addrHi, mode
+  if (count >= 3)
     args = body[0] | (static_cast<u64>(body[1]) << 32);
-  else if (count >= 1)  // offset form: an offset into the SET_BASE buffer
+  else if (count >= 1)
     args = g_queue->dispatch_indirect_base + body[0];
   if (!args || !IsGuestAddress(args) || !gpu::IsReadableRangeCached(args, 12))
     return;
-  // Counts a dispatch produced, or a GPU write is still on its way to, stay
-  // on the GPU, which reads them itself.
   const u32 initiator = count >= 2 ? body[count - 1] : 5;
   const bool starts_at_zero =
       (initiator & 4) ||
@@ -889,8 +739,6 @@ void HandleDispatchIndirect(render::Renderer& renderer,
     DispatchCompute(renderer, g_queue->regs, placeholder, 4, args);
     return;
   }
-  // An earlier compute dispatch can produce the indirect dimensions.
-  // Read its completed result, not the stale guest-side staging copy.
   if (!render::FlushCsWritesRange(renderer, args, 12, "indirect-cs"))
     return;
   const u32* a = reinterpret_cast<const u32*>(args);
@@ -911,8 +759,6 @@ void HandleDispatchIndirect(render::Renderer& renderer,
   DispatchCompute(renderer, g_queue->regs, groups, 4);
 }
 
-// Reuse the direct draw path with GPU arguments, or CPU dimensions when the
-// primitive needs a fallback.
 void HandleDrawIndirect(
     render::Renderer& renderer,
     u32 op,
@@ -927,9 +773,6 @@ void HandleDrawIndirect(
   if (!g_queue->draw_indirect_base || !IsGuestAddress(args) ||
       !gpu::IsReadableRangeCached(args, want))
     return;
-  // Native and point-input NGG draws read resident or staged arguments.
-  // Indexed draws cover the whole index buffer; vertex bindings cover their
-  // descriptor bounds.
   const bool ngg = (g_queue->regs[mmVGT_SHADER_STAGES_EN] >> 7) & 1;
   const u32 primitive = g_queue->regs[mmVGT_PRIMITIVE_TYPE];
   const bool gpu_args =
@@ -1018,8 +861,6 @@ bool IsDraw(u32 op) {
          op == IT_DRAW_INDEX_OFFSET_2 || op == IT_DRAW_INDEX_MULTI_AUTO;
 }
 
-// Whether the `dwords` from `at` are whole packets that only draw: nothing
-// in them changes state the packets after the block see.
 bool OnlyDraws(const u32* p, u32 at, u32 dwords, u32 words) {
   const u32 end = at + dwords;
   if (!dwords || end > words)
@@ -1040,11 +881,6 @@ bool OnlyDraws(const u32* p, u32 at, u32 dwords, u32 words) {
   return at == end;
 }
 
-// --- the walk --------------------------------------------------------------
-
-// Walk one AGC stream, following INDIRECT_BUFFER, latching registers, decoding
-// draws and writing completion labels. `depth` guards a malformed
-// self-reference.
 u32 Walk(render::Renderer& renderer,
          const u32* p,
          u32 words,
@@ -1053,15 +889,9 @@ u32 Walk(render::Renderer& renderer,
   if (!p || depth > kMaxIbDepth)
     return words;
   u32 i = 0;
-  // The last few packet starts, so a desync can name the packet whose size was
-  // wrong instead of the data it eventually ran into. A type-0 header consumes
-  // its run silently, so a walk that is already off can travel a long way
-  // before anything complains.
   u32 trail_pos[32] = {}, trail_hdr[32] = {};
   u32 trail_n = 0;
-  // The opcode walked before the current one, for the unhandled-opcode census.
   u32 last_op = 0;
-  // Where the block a COND_EXEC predicates on the GPU ends; 0 outside one.
   u32 predicate_end = 0;
   while (i < words) {
     if (predicate_end && i >= predicate_end) {
@@ -1074,18 +904,10 @@ u32 Walk(render::Renderer& renderer,
     trail_hdr[trail_n & 31] = hdr;
     trail_n++;
     if (type == Pm4Type::kType2 || hdr == 0) {
-      i += 1;  // filler / alignment
+      i += 1;
       continue;
     }
     if (type == Pm4Type::kType0) {
-      // Type-0 writes a run of consecutive registers directly. The walker used
-      // to SKIP these, but the AGC driver programs shader PGM_LO/HI (and
-      // other SH state) via type-0, which is why no SET_SH_REG carried them.
-      // A type-0 header is only two zero bits, so any data dword looks like
-      // one: a walk that has already lost alignment travels thousands of
-      // dwords through "type-0 runs" without a word of complaint, which is how
-      // a desync stays invisible until it lands on data that happens to be
-      // type-1. Bound it to the register file it claims to write.
       const u32 count = Pm4Count(hdr);
       const u32 first = Pm4Type0Reg(hdr);
       if (first + count > kRegFileSize || i + 1 + count > words) {
@@ -1097,14 +919,8 @@ u32 Walk(render::Renderer& renderer,
       continue;
     }
     if (type != Pm4Type::kType3) {
-      // A type-1 header is a desync, and abandoning the buffer costs the fence
-      // the submission still had to write, which parks whatever waits on it
-      // forever. Skip the dword and resync on the next header, exactly as a
-      // type-3 packet whose count overruns the buffer already does.
       static int n = 0;
       if (n++ < 4) {
-        // The dwords either side of the desync, so the packet that mis-sized
-        // itself can be identified rather than guessed at.
         base::String line;
         base::FormatTo(line,
                        "type-{} header {:#x} at dword {}/{} of {:p}, "
@@ -1115,8 +931,6 @@ u32 Walk(render::Renderer& renderer,
           const u32 s = (trail_n - seen + k) & 31;
           base::FormatTo(line, " [{}]{:08x}", trail_pos[s], trail_hdr[s]);
         }
-        // Plus the stream just before the oldest of those, which is where the
-        // walk was still aligned.
         const u32 oldest = trail_pos[(trail_n - seen) & 31];
         const u32 from = oldest > 24 ? oldest - 24 : 0;
         base::FormatTo(line, " | dwords from {}:", from);
@@ -1129,21 +943,12 @@ u32 Walk(render::Renderer& renderer,
     }
 
     const u32 op = Pm4Opcode(hdr);
-    const u32 count = Pm4Count(hdr);  // body dword count
+    const u32 count = Pm4Count(hdr);
     const u32* body = &p[i + 1];
-    // 0xffff1000: IT_NOP with the count field saturated is the canonical
-    // one-dword pad, and a command buffer is padded with it. Reading it as a
-    // 16385-dword packet skipped 64 KiB of real commands. For Astro Bot's
-    // world map that was the whole tail of the buffer, RELEASE_MEM included,
-    // so its DrawThread waited on a fence nothing was left to write.
     if (op == IT_NOP && ((hdr >> 16) & 0x3FFF) == 0x3FFF) {
       i += 1;
       continue;
     }
-    // Desync recovery: a data dword misread as a huge-count packet would
-    // abandon the rest of the buffer, and with it the shader bind that
-    // follows. Instead of bailing, skip one dword and resync on the next
-    // header.
     if (i + 1 + count > words) {
       TraceResync(i, words, hdr, op, count);
       i += 1;
@@ -1155,29 +960,20 @@ u32 Walk(render::Renderer& renderer,
     if (dump)
       TraceDcbPacket(i, op, body, count);
     switch (op) {
-      case IT_INDIRECT_BUFFER:         // baseLo, baseHi, sizeDwords(+flags)
-      case IT_INDIRECT_BUFFER_CNST: {  // the AGC constant/Cue chain, which
-                                       // carries the pipeline shader setup
+      case IT_INDIRECT_BUFFER:
+      case IT_INDIRECT_BUFFER_CNST: {
         if (count < 3)
           break;
         const u64 ib = (static_cast<u64>(body[1] & 0xFFFF) << 32) | body[0];
         const u32 ib_words = body[2] & 0xFFFFF;
-        // Bounds-guard: a sane size, in the guest map, actually readable. The
-        // GPU aperture is deliberately NOT required, since the video decoder
-        // builds its command buffers in its own allocation (0x6_0000_0000 for
-        // Astro Bot, well under the aperture floor), and skipping those left
-        // its completion fence one submit short forever, so the decode thread
-        // spun holding the lock the whole player waits on.
         const bool follow = ib_words && ib_words <= 0x40000 &&
                             IsGuestAddress(ib) &&
                             gpu::IsReadableRangeCached(
                                 ib, static_cast<u64>(ib_words) * sizeof(u32));
         TraceIndirectBuffer(ib, ib_words, follow);
         if (follow) {
-          // A command buffer a dispatch wrote is read from guest memory.
           render::FlushCsWritesRange(
               renderer, ib, static_cast<u64>(ib_words) * sizeof(u32), "ib");
-          // Re-enter where a stalled walk of this same buffer left off.
           u32 start = 0;
           if (g_queue->stall.ib[depth + 1] == ib) {
             start = base::Min(g_queue->stall.ib_dw[depth + 1], ib_words);
@@ -1189,7 +985,7 @@ u32 Walk(render::Renderer& renderer,
           if (g_queue->stall.stalled) {
             g_queue->stall.ib[depth + 1] = ib;
             g_queue->stall.ib_dw[depth + 1] = start + done;
-            return i;  // the ring packet that called it is walked again
+            return i;
           }
         } else {
           static int n = 0;
@@ -1211,18 +1007,15 @@ u32 Walk(render::Renderer& renderer,
       case IT_SET_CONFIG_REG:
         SetRegs(g_queue->regs, kConfigRegBase, body, count);
         break;
-      // LOAD_*_REG: registers loaded from a shadow image in GPU memory.
-      case 0x61:  // LOAD_CONTEXT_REG
+      case 0x61:
         LoadRegImage(g_queue->regs, kContextRegBase, body, count);
         break;
-      case 0x5f:  // LOAD_SH_REG
+      case 0x5f:
         LoadRegImage(g_queue->regs, kShRegBase, body, count);
         break;
-      case 0x5e:  // LOAD_UCONFIG_REG
+      case 0x5e:
         LoadRegImage(g_queue->regs, kUConfigRegBase, body, count);
         break;
-      // SET_*_REG_INDIRECT: a state block of (offset, value) entries, which is
-      // how the per-draw render target and shaders arrive.
       case 0x9f:
         LoadRegBlock(g_queue->regs, kContextRegBase, body, count);
         break;
@@ -1232,39 +1025,21 @@ u32 Walk(render::Renderer& renderer,
       case 0x63:
         LoadRegBlock(g_queue->regs, kShRegBase, body, count);
         break;
-      // SET_UCONFIG_REG_INDEX: the index lives in the offset dword's top bits
-      // and SetRegs already masks the selector off, so the register write is
-      // the same one. Dropping these lost the index type and primitive type a
-      // title programs through this form.
       case 0x7a:
         SetRegs(g_queue->regs, kUConfigRegBase, body, count);
         break;
-      // Skipped on purpose. The reason is recorded so the census can tell a
-      // packet we chose to ignore from one nothing ever looked at.
-      case 0x10:  // IT_NOP carrying a real count: padding
+      case 0x10:
         NoteSkippedOpcode(op, "NOP padding");
         break;
-      case 0x28:  // CONTEXT_CONTROL: selects which register shadow the CP
-                  // loads and dumps; the flat register file keeps every
-                  // register, so there is no shadow to switch between
+      case 0x28:
         NoteSkippedOpcode(op, "CONTEXT_CONTROL, no shadow to select");
         break;
-      case 0x4a:  // PREAMBLE_CNTL: brackets the state preamble for a context
-                  // save, body[0] bits [31:28] naming which bracket
+      case 0x4a:
         NoteSkippedOpcode(op, "PREAMBLE_CNTL, a bracket not state");
         break;
-      case 0x42:  // PFP_SYNC_ME: stalls the PFP until the ME catches up, and
-                  // we have neither
+      case 0x42:
         NoteSkippedOpcode(op, "PFP_SYNC_ME, one engine here");
         break;
-      // waitOnAddress: stall until a value in memory satisfies a comparison.
-      // 0x3c takes a 32-bit value in 6 dwords, 0x93 a 64-bit one in 8:
-      // [function/mem_space/engine, addrLo, addrHi, ref.., mask.., interval].
-      // 0x93 is NOT a register write, however plausibly one reads: body[0] is
-      // 0x113 (function 3, memory space, engine 1), which taken as an SH offset
-      // aims the following seven dwords (poll address, reference, mask,
-      // interval) straight at SPI_SHADER_USER_DATA_HS_7. Reading it that way
-      // left the draws after it sampling from nothing.
       case 0x3c:
       case 0x93:
         if (StallOnWait(op, body, count)) {
@@ -1273,14 +1048,6 @@ u32 Walk(render::Renderer& renderer,
         }
         NoteSkippedOpcode(op, "waitOnAddress, already satisfied");
         break;
-      // acquireMem (gfx10 ACQUIRE_MEM, 7 dwords): coher_cntl, coher_size{,_hi},
-      // coher_base{,_hi}, poll_interval, GCR_CNTL. GCR_CNTL bits [1:0] are the
-      // instruction-cache invalidate, which is how a title says the shader
-      // memory it just wrote is now code: let the cached programs revalidate.
-      // The cache ops on every other cache need nothing from us.
-      //
-      // The count matters: a six-dword variant would put poll_interval last,
-      // and the usual interval (0x19) has both of those bits set.
       case 0x58:
         if (count >= 7 && (body[6] & 0x3)) {
           rdna::NextProgramGeneration();
@@ -1295,12 +1062,9 @@ u32 Walk(render::Renderer& renderer,
         break;
       case IT_INDEX_TYPE:
         if (count >= 1)
-          // SET_UCONFIG_REG[_INDEX] and shadow-state loads write this same
-          // register. A separate packet latch leaves those draws using a
-          // stale element size (32-bit indices become alternating index/0).
           g_queue->regs[mmVGT_INDEX_TYPE] = body[0];
         break;
-      case IT_INDEX_BASE:  // baseLo, baseHi
+      case IT_INDEX_BASE:
         if (count >= 2)
           g_queue->index.base =
               (static_cast<u64>(body[1] & 0xFFFF) << 32) | (body[0] & ~1u);
@@ -1318,14 +1082,14 @@ u32 Walk(render::Renderer& renderer,
       case IT_DISPATCH_DIRECT:
         DispatchCompute(renderer, g_queue->regs, body, count);
         break;
-      case 0x16:  // DISPATCH_INDIRECT
+      case 0x16:
         HandleDispatchIndirect(renderer, body, count);
         break;
-      case 0x24:  // DRAW_INDIRECT
-      case 0x25:  // DRAW_INDEX_INDIRECT
+      case 0x24:
+      case 0x25:
         HandleDrawIndirect(renderer, op, body, count, HandleDrawPacket);
         break;
-      case 0x11: {  // SET_BASE
+      case 0x11: {
         if (count < 3 || (body[0] & 0xF) != 1)
           break;
         const u64 base =
@@ -1336,7 +1100,7 @@ u32 Walk(render::Renderer& renderer,
           g_queue->draw_indirect_base = base;
         break;
       }
-      case IT_COND_EXEC: {  // skip the following dwords when the flag is zero
+      case IT_COND_EXEC: {
         if (count < 4)
           break;
         const u64 flag = (static_cast<u64>(body[1] & 0xFFFF) << 32) |
@@ -1344,8 +1108,6 @@ u32 Walk(render::Renderer& renderer,
         const u32 skip = body[3] & 0x3FFF;
         if (!IsGuestAddress(flag) || !gpu::IsReadableRangeCached(flag, 4))
           break;
-        // A flag the GPU is still writing over a block of nothing but draws:
-        // the GPU decides each draw itself, and the walk goes on.
         const u32 block = i + 1 + count;
         if (!predicate_end && !render::GuestBytesSettled(flag, 4) &&
             OnlyDraws(p, block, skip, words) &&
@@ -1353,23 +1115,21 @@ u32 Walk(render::Renderer& renderer,
           predicate_end = block + skip;
           break;
         }
-        // The flag may be compute output still in VRAM.
         render::FlushCsWritesRange(renderer, flag, 4, "cond");
         if (*reinterpret_cast<const volatile u32*>(flag) == 0)
-          i += skip;  // the guarded block did not run on the real CP either
+          i += skip;
         break;
       }
-      case 0x1e:  // ATOMIC_MEM
+      case 0x1e:
         if (count >= 3)
           PublishPacket(HandleAtomicMem, body, count,
                         (static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1],
                         8);
         break;
-      case 0x12:  // CLEAR_STATE: context push/pop/clear
+      case 0x12:
         HandleClearState(body, count);
         break;
-      case 0x8e:  // four zero dwords after every acquireMem; no state, no
-                  // memory, no name in any table we have
+      case 0x8e:
         NoteSkippedOpcode(op, "0x8e, an empty packet after acquireMem");
         break;
       case IT_WRITE_DATA:
@@ -1377,7 +1137,6 @@ u32 Walk(render::Renderer& renderer,
         break;
       case IT_COPY_DATA:
         if (count >= 5) {
-          // Memory destinations (2/4/5) only; anything else writes nothing.
           const u32 dst_sel = ((body[0] >> 8) & 0xF) << 1;
           const bool to_memory = dst_sel == 2 || dst_sel == 4 || dst_sel == 5;
           PublishPacket(HandleCopyData, body, count,
@@ -1386,7 +1145,6 @@ u32 Walk(render::Renderer& renderer,
         }
         break;
       case IT_EVENT_WRITE:
-        // Only an occlusion query (ZPASS_DONE) writes memory: 16 pairs.
         if (count >= 3 && (body[0] & 0x3F) == 0x39 &&
             ((body[0] >> 8) & 0x7) == 1)
           PublishPacket(HandleEventWrite, body, count,
@@ -1416,8 +1174,6 @@ u32 Walk(render::Renderer& renderer,
   return words;
 }
 
-// The renderer comes up on the first submission rather than at startup: a title
-// that never submits never needs a device.
 void StartRendererOnce(render::Renderer& renderer) {
   if (g_renderer_started)
     return;
@@ -1427,10 +1183,6 @@ void StartRendererOnce(render::Renderer& renderer) {
   render::RecordComputeInFrame();
   InstallWriteTrackerPolicy();
   GuestWriteTracker().Enable();
-  // The descriptor replay reads SRT tables out of guest memory a previous
-  // dispatch may still own, and it sits below the renderer, so it cannot ask
-  // for the flush itself. The write-back is queued, and the bytes it replaces
-  // are taken where they have not been changing.
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
     render::Renderer& renderer = render::DefaultRenderer();
     if (!render::FlushCsWritesForGpu(renderer, address, bytes, "srt") ||
@@ -1452,8 +1204,6 @@ u32 SubmitDcbRing(const void* dcb, u32 size_bytes, u32 queue, u64 visible_ns) {
   const u64 submission = ++g_total_submits;
   const bool dump = TraceSubmit(dcb, size_bytes, words, submission);
   render::g_submit_queue = queue;
-  // Looked up, not indexed: indexing builds a whole default QueueState (the
-  // register file and a pushed context) on every submit.
   auto found = g_ring_queues.find(queue);
   if (found == g_ring_queues.end())
     found = g_ring_queues.emplace(queue, QueueState{}).first;
@@ -1524,17 +1274,11 @@ void SubmitCcb(const void* ccb, u32 size_bytes) {
 }
 
 static void FinishGraphicsFlip(u64 scanout_base) {
-  // New frame -> shader code may have been rewritten; let the cached programs
-  // revalidate each address once next frame instead of once per draw. Before
-  // the early return, or a frame that ends with nothing active never advances
-  // it and the cache stops revalidating at all.
   rdna::NextProgramGeneration();
   gpu::FrameMemoryGeneration();
   render::Renderer& renderer = render::DefaultRenderer();
   if (!g_frame_active || !renderer.available())
     return;
-  // VideoOut specifies the registered buffer to present. A later draw can
-  // target another display buffer without changing this flip request.
   render::EndFrame(renderer, scanout_base);
   g_frame_active = false;
 }
@@ -1632,15 +1376,12 @@ const guest::SessionReset g_session_reset([] {
 
 }  // namespace gpu::ps5
 
-// LLE submit bridge: the kernel /dev/gc AGC ioctls enqueue the DCB here.
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_agc_submit(u64 dcb_base, u32 size_bytes) {
   gpu::ps5::SubmitDcb(reinterpret_cast<const void*>(dcb_base), size_bytes);
 }
 // NOLINTEND(readability-identifier-naming)
 
-// The same, carrying a tag the frame capture records on every draw and
-// dispatch of the buffer (an ioctl submit's descriptor index and flags).
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
                                              u32 size_bytes,
@@ -1649,9 +1390,6 @@ extern "C" void prosperity_agc_submit_tagged(u64 dcb_base,
 }
 // NOLINTEND(readability-identifier-naming)
 
-// The ring form: returns how many dwords were consumed. Fewer than submitted
-// means the walk stalled on a wait the memory does not satisfy yet; hand the
-// rest in again on a later poll, starting at the returned dword.
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" u32 prosperity_agc_submit_ring(u64 dcb_base,
                                           u32 size_bytes,
@@ -1662,17 +1400,11 @@ extern "C" u32 prosperity_agc_submit_ring(u64 dcb_base,
 }
 // NOLINTEND(readability-identifier-naming)
 
-// PS5 flip bridge: the shared dce/VideoOut flip path calls this when the active
-// process is PS5, so the frame the AGC submit rendered is read back and
-// presented through render::EndFrame (mirrors prosperity_gc_flip on the PS4
-// path). NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_agc_flip(u64 scanout_base) {
   gpu::ps5::EndFrame(scanout_base);
 }
 // NOLINTEND(readability-identifier-naming)
 
-// GPU aperture bridge: the kernel tells us where the title mapped its direct
-// memory, so a packet naming a pool outside the assumed band is still followed.
 // NOLINTBEGIN(readability-identifier-naming): C-linkage bridge
 extern "C" void prosperity_gpu_note_aperture(u64 base, u64 size) {
   gpu::ps5::NoteGpuPool(base, size);

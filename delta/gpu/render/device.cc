@@ -39,9 +39,6 @@ namespace gpu::render {
 
 namespace {
 
-// Where driver pipeline caches live. Same convention as the SPIR-V cache
-// (DELTA_GPU_SHADER_CACHE_DIR, else $XDG_CACHE_HOME/ps4delta, else
-// ~/.cache/ps4delta), and disabled by the same DELTA_GPU_SHADER_CACHE=0.
 base::String PipelineCacheDir() {
   if (!kShaderCacheOn)
     return base::String();
@@ -85,8 +82,6 @@ bool CreateDevice() {
   options.on_message = trace::OnDeviceMessage;
   const base::String cache_dir = PipelineCacheDir();
   options.cache_dir = cache_dir.empty() ? nullptr : cache_dir.c_str();
-  // Lives for the process: tearing a device down during static destruction
-  // races the driver's own exit handlers.
   auto owned = render::CreateBackendDevice(backend, options);
   rhi::Device* device = owned.Get_UseOnlyIfYouKnowWhatYouareDoing();
   owned.ResetUnchecked_UseOnlyIfYouKnowWhatYouareDoing();
@@ -103,7 +98,6 @@ void DrawCheckpoint(rhi::CommandList* list, u32 frame, u32 draw, bool after) {
     list->Checkpoint(((u64(frame) + 1) << 32) | (u64(draw) << 1) | u32(after));
 }
 
-// Bit 63 tells a dispatch marker from a draw marker.
 void DispatchCheckpoint(rhi::CommandList* list, u64 cs_addr, bool after) {
   if (kCheckpoints)
     list->Checkpoint((1ull << 63) | ((cs_addr << 1) & ~(1ull << 63)) |
@@ -117,18 +111,13 @@ namespace gpu::render {
 bool Init(Renderer& renderer) {
   if (renderer.available())
     return true;
-  // A partial creation cannot safely be initialized over: its pools and
-  // caches still contain objects from that attempt.
   if (g_backend.device) {
     if (!CreateFrameSlots() || !CreateUploadRings())
       return false;
     renderer.state = &g_backend;
     return true;
   }
-  // Create the device from a clean host thread: Init() is reached on a FEX
-  // guest thread (guest stack / TLS), where the NVIDIA ICD's
-  // vk_icdGetInstanceProcAddr silently fails and enumeration falls back to
-  // llvmpipe, a ~30ms/frame software rasteriser on a box with a real GPU.
+  // The NVIDIA ICD fails silently on a FEX guest thread.
   bool ok = false;
   base::Thread init_thread("gpu-init", [&ok] { ok = CreateDevice(); }, true);
   init_thread.Join();
@@ -136,8 +125,6 @@ bool Init(Renderer& renderer) {
     BASE_LOGI("gpu", "no usable graphics device; gpu disabled");
     return false;
   }
-  // Registered after all static initialization, so the worker is joined before
-  // BackendState and gfx translation-unit globals begin destruction.
   std::atexit([] { g_backend.presenter.Stop(); });
   renderer.state = &g_backend;
   return true;

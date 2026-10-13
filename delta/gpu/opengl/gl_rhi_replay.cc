@@ -42,7 +42,6 @@ u32 MipExtent(u32 extent, u32 mip) {
   return base::Max(extent >> mip, 1u);
 }
 
-// The attachment point for the planes of a depth/stencil format in `aspect`.
 GLenum DepthAttachment(u8 aspect) {
   const bool depth = aspect & rhi::kAspectDepth;
   const bool stencil = aspect & rhi::kAspectStencil;
@@ -51,7 +50,6 @@ GLenum DepthAttachment(u8 aspect) {
                           : GL_STENCIL_ATTACHMENT;
 }
 
-// Planes of `format` selected by `aspect`.
 u8 Planes(rhi::Format format, u8 aspect) {
   const rhi::FormatInfo& fi = rhi::GetFormatInfo(format);
   u8 planes = 0;
@@ -73,15 +71,12 @@ void Replayer::Init() {
   scissor_test_ = true;
   glPixelStorei(GL_PACK_ALIGNMENT, 1);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-  // Window coordinates are framebuffer rows, so the point sprite's t grows
-  // downwards as in Vulkan.
   glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, GL_LOWER_LEFT);
   glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
   upper_left_ = false;
   glFrontFace(GL_CCW);
   front_face_ = GL_CCW;
 
-  // Bring GL to RasterState's defaults where its own differ.
   raster_ = {};
   glDepthMask(GL_FALSE);
   glDepthFunc(GL_ALWAYS);
@@ -147,7 +142,6 @@ void Replayer::Forget(rhi::Object* object) {
     }
     v->fbos.clear();
   } else if (auto* b = dynamic_cast<GlBuffer*>(object)) {
-    // A deleted buffer is unbound, and its name may come back.
     if (pixel_pack_ == b->name)
       pixel_pack_ = 0;
     if (pixel_unpack_ == b->name)
@@ -416,8 +410,6 @@ void Replayer::ApplyGraphics() {
     glCullFace(r.cull_face);
     raster_.cull_face = r.cull_face;
   }
-  // A lower-left origin mirrors the framebuffer y the winding is measured
-  // in, so GL's notion of counter-clockwise flips with it.
   const GLenum front = r.front_ccw == upper_left_ ? GL_CCW : GL_CW;
   if (front != front_face_) {
     glFrontFace(front);
@@ -431,7 +423,6 @@ void Replayer::ApplyGraphics() {
     Enable(GL_DEPTH_TEST, r.depth_test);
     raster_.depth_test = r.depth_test;
   }
-  // A read-only attachment keeps its contents whatever the pipeline says.
   const bool depth_write =
       r.depth_write && !(pass_read_only_ & rhi::kAspectDepth);
   if (depth_write != raster_.depth_write) {
@@ -525,7 +516,6 @@ void Replayer::BufferToTexture(const CmdBufferTexture& c, bool upload) {
     const rhi::TextureRegion& g = r.region;
     GLenum format = f.format, type = f.type;
     if (fi.is_depth && fi.is_stencil) {
-      // Buffer copies carry one plane.
       if (g.aspect & rhi::kAspectStencil) {
         format = GL_STENCIL_INDEX;
         type = GL_UNSIGNED_BYTE;
@@ -673,7 +663,6 @@ void Replayer::ClearTexture(const CmdClearTexture& c) {
                ? GL_INT
                : GL_UNSIGNED_INT;
   } else if (fi.is_srgb) {
-    // Texture clears store the value as given; Vulkan's are linear.
     for (u32 i = 0; i < 3; i++)
       value.f[i] = EncodeSrgb(value.f[i]);
   }
@@ -718,8 +707,6 @@ void Replayer::DrawIndexedIndirect(const CmdDrawIndexedIndirect& c) {
   GLuint buffer = c.buffer;
   u64 offset = c.offset;
   if (c.index_offset) {
-    // GL's firstIndex addresses the whole element buffer, whereas the rhi's
-    // firstIndex is relative to the currently bound index-buffer offset.
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
     glCopyNamedBufferSubData(buffer, indirect_args_,
                              static_cast<GLintptr>(offset), 0, 20);
@@ -810,8 +797,6 @@ void Replayer::Execute(const GlCommandList& list) {
       }
       case Op::kViewport: {
         const auto& c = As<CmdViewport>(p);
-        // A negative height rasterises y-up: GL takes that as an upper-left
-        // clip origin over the same, positive, rectangle.
         const bool upper = c.height < 0;
         if (upper != upper_left_) {
           glClipControl(upper ? GL_UPPER_LEFT : GL_LOWER_LEFT, GL_ZERO_TO_ONE);
@@ -859,7 +844,7 @@ void Replayer::Execute(const GlCommandList& list) {
         ApplyGraphics();
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, c.buffer);
         glDrawArraysIndirect(pipeline_->mode,
-                              reinterpret_cast<const void*>(c.offset));
+                             reinterpret_cast<const void*>(c.offset));
         break;
       }
       case Op::kDrawIndexedIndirect:

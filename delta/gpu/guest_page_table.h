@@ -8,32 +8,17 @@
 
 namespace gpu {
 
-// What the renderer keeps per 4 KiB page of guest memory, in one directly
-// indexed table: the per-draw paths ask about the same pages thousands of
-// times a frame, and a lookup here costs no hashing and never collides.
-//
-// Two levels over the 47-bit user address space. The first time any page of a
-// 1 GiB chunk is asked about, the chunk's records are reserved; the host then
-// commits them a table page at a time as they are written.
 class GuestPageTable {
  public:
   struct Page {
-    // The MemoryGeneration() the page was proven readable at, or with
-    // kUnreadable set, proven unreadable at. Any thread; a stale answer only
-    // costs a probe.
     base::Atomic<u32> readable{0};
-    // Write-protected by the write tracker. Cleared by whichever thread's
-    // write opens it again (the fault handler); set by the tracker's owner.
     base::Atomic<u8> armed{0};
-    // Was protected at some point: an access fault here that lost the race to
-    // clear `armed` is still ours, and only needs to resume.
     base::Atomic<u8> ever_armed{0};
-    // Write tracker state, owned by the thread that owns the tracker.
-    u16 reports = 0;          // write reports in report_frame
-    u32 report_frame = 0;     // frame of the latest write report
-    u32 previous_report = 0;  // frame of the report before that frame
-    u32 volatile_until = 0;   // frame before which the page is not armed
-    u8 kept = 0;              // armed even when hot (WriteTracker::Arm)
+    u16 reports = 0;
+    u32 report_frame = 0;
+    u32 previous_report = 0;
+    u32 volatile_until = 0;
+    u8 kept = 0;
   };
   static constexpr u32 kUnreadable = 1u << 31;
   static constexpr u32 kPageShift = 12;
@@ -41,23 +26,15 @@ class GuestPageTable {
 
   void Reset();
 
-  // The record for the page holding `address`, created on first use. Null
-  // above user space.
   Page* At(u64 address);
-  // As At, but null where nothing was ever created: a read of a page nobody
-  // wrote has its answer in the default record.
   const Page* Find(u64 address) const;
 
-  // GPU-dirty compute ranges touching each 64 KiB block. Written by the
-  // renderer's owner, read from any thread.
   void AddCsDirty(u64 first, u64 end, int delta) {
     AddCount(kCsDirty, first, end, delta);
   }
-  // No GPU-dirty compute range touches [first, end).
   bool CsClear(u64 first, u64 end) const {
     return CountClear(kCsDirty, first, end);
   }
-  // GPU writes still on their way to the guest pages, the same way.
   void AddPendingWrite(u64 first, u64 end, int delta) {
     AddCount(kPendingWrite, first, end, delta);
   }
@@ -90,9 +67,6 @@ class GuestPageTable {
 
 GuestPageTable& GuestPages();
 
-// Any thread: whether the GPU keeps part of [first, end) inaccessible to the
-// CPU (WriteTracker::SetOwner). Such pages are mapped, and the first CPU
-// access makes them current.
 bool GuestOwnerHolds(u64 first, u64 end);
 void SetGuestOwnerHolds(bool (*holds)(u64 first, u64 end));
 

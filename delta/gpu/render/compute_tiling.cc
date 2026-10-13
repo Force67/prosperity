@@ -2,9 +2,6 @@
  * PS4Delta : PS4/PS5 emulation and research project
  */
 
-// The GPU tiling shader: converts gfx10 images between their tiled guest
-// layout and the linear layout dispatches bind.
-
 #include "gpu/render/compute_internal.h"
 
 #include <cstdio>
@@ -59,26 +56,23 @@ bool InitTiling() {
   return s.pipe != nullptr;
 }
 
-// ---- Tiled-truth ranges (DELTA_GPU_CS_TRUTH) ----
-
 u64 TileTableKey(const gcn::TextureLayout32& t,
                  const gcn::TextureLayout32& l,
                  bool packed,
                  bool pack11) {
   u64 h = 1469598103934665603ull;
-  const u64 words[] = {t.tiling_idx,    t.mips[0].width,
-                       t.mips[0].height, t.mips[0].pitch,
-                       t.layers,        t.mip_levels,
-                       t.elem_bytes,    t.size,
-                       l.elem_bytes,    l.size,
-                       l.mips[0].pitch, (packed ? 1u : 0u) | (pack11 ? 2u : 0u)};
+  const u64 words[] = {
+      t.tiling_idx,     t.mips[0].width,
+      t.mips[0].height, t.mips[0].pitch,
+      t.layers,         t.mip_levels,
+      t.elem_bytes,     t.size,
+      l.elem_bytes,     l.size,
+      l.mips[0].pitch,  (packed ? 1u : 0u) | (pack11 ? 2u : 0u)};
   for (u64 w : words)
     h = (h ^ w) * 1099511628211ull;
   return h;
 }
 
-// The address terms of one surface layout, built once. The shader reads
-// three of them per texel, so they live where it can reach them quickly.
 const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
                               const gcn::TextureLayout32& linear,
                               bool packed,
@@ -86,8 +80,8 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
   const bool expanded = !packed &&
                         (tiled.elem_bytes == 1 || tiled.elem_bytes == 2) &&
                         linear.elem_bytes == 4;
-  // 4-byte texels staged as 16: 11/11/10 floats, unpacked and packed again.
-  pack11 = pack11 || (!packed && tiled.elem_bytes == 4 && linear.elem_bytes == 16);
+  pack11 =
+      pack11 || (!packed && tiled.elem_bytes == 4 && linear.elem_bytes == 16);
   if (pack11 && (packed || tiled.elem_bytes != 4 || linear.elem_bytes != 16))
     return nullptr;
   if (packed &&
@@ -108,7 +102,7 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
     return it->second.buf ? &it->second : nullptr;
   if (g_tile_tables.size() >= 1024)
     return nullptr;
-  TileTable& t = g_tile_tables[key];  // a failed build stays empty: no retry
+  TileTable& t = g_tile_tables[key];
   base::Vector<u32> table, terms;
   for (u32 mip = 0; mip < tiled.mip_levels; mip++) {
     const auto& tm = tiled.mips[mip];
@@ -133,8 +127,6 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
   t.layers = tiled.layers;
   t.expanded = expanded;
   t.bytes = table.size() * 4;
-  // Written once by the host, read by every conversion: device-local
-  // host-visible memory where the heap offers it, plain host memory otherwise.
   t.buf = CreateCsBuffer(t.bytes, rhi::kBufferStorage,
                          rhi::MemoryKind::kUploadDevice);
   if (t.buf && !t.buf->mapped()) {
@@ -142,8 +134,8 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
     t.buf = nullptr;
   }
   if (!t.buf) {
-    t.buf = CreateCsBuffer(t.bytes, rhi::kBufferStorage,
-                           rhi::MemoryKind::kUpload);
+    t.buf =
+        CreateCsBuffer(t.bytes, rhi::kBufferStorage, rhi::MemoryKind::kUpload);
     if (t.buf && t.buf->mapped())
       BASE_LOGI("csgpu", "tiling table {} bytes uses host memory", t.bytes);
   }
@@ -157,10 +149,6 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
   return &t;
 }
 
-// Record one layout conversion between two device buffers: `tiled` holds the
-// guest bytes (a range's truth), `linear` the shader's view of them. `mips`
-// and `layers` limit the pass to the leading levels and slices (a bridge
-// copies mip 0 of layer 0 only); 0 means all of them.
 void RecordImageTiling(rhi::CommandList* c,
                        const TileTable& t,
                        rhi::Buffer* tiled,
@@ -264,8 +252,6 @@ rhi::Buffer* AcquireScratch(u64 bytes) {
     s.view_table = nullptr;
     return s.buf;
   }
-  // One dispatch's views are all that has to coexist; everything colder is
-  // recycled before the ring is allowed to grow past its budget.
   constexpr u64 kScratchBudget = 512ull << 20;
   CsScratch s;
   s.cap = (bytes + 0x3FFFFF) & ~u64(0x3FFFFF);
@@ -344,8 +330,6 @@ bool TruthAvailable() {
 }
 #endif
 
-// The tiling shader handles every gfx10 swizzle, and a Liverpool layout once
-// its address terms are shown to be separable (4-byte and wider texels).
 bool WidensLinear(const ComputeInfo::Res& r) {
   return gcn::TilingIsLinear(r.tiling_idx) &&
          (r.elem_bytes == 1 || r.elem_bytes == 2) && r.stage_elem_bytes == 4;
@@ -383,8 +367,6 @@ bool GpuTileable(const ComputeInfo::Res& r) {
   return true;
 }
 
-// A resource whose range can be a tiled truth: a surface the tiling shader
-// handles, with the shader reading its texels directly or expanded.
 bool TruthEligible(const ComputeInfo::Res& r) {
   return kCsTruth && kCsVram && r.image_staging && !r.zero_fill && r.size &&
          r.guest_size &&
@@ -400,10 +382,6 @@ bool TruthEligible(const ComputeInfo::Res& r) {
 }
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
-// A block-compressed image a dispatch reads as plain texels (BC1 as RGBA8,
-// BC6H as RGBA32F): the texture units decode it. The blocks are detiled into a
-// compressed image, blitted into a plain one, and its texels copied into the
-// buffer in the staged layout.
 bool StageBcImageOnGpu(const ComputeInfo::Res& res,
                        CsRange& e,
                        const gcn::TextureLayout32& tiled,
@@ -461,7 +439,7 @@ bool StageBcImageOnGpu(const ComputeInfo::Res& res,
     return false;
   rhi::CommandList* const c = g_cs_list;
   RecordImageTiling(c, *table, raw, 0, raw_bytes, linear_blocks, block_bytes,
-                    /*detile=*/true);
+                    true);
   rhi::BufferTextureCopy in[16]{}, out[16]{};
   rhi::TextureRegion regions[16];
   for (u32 mip = 0; mip < res.mip_levels; mip++) {
@@ -484,11 +462,10 @@ bool StageBcImageOnGpu(const ComputeInfo::Res& res,
   rhi::TextureRange all;
   all.mips = res.mip_levels;
   all.layers = res.layers;
-  rhi::TextureBarrier b[2] = {
-      {im.block, rhi::TextureState::kUndefined, rhi::TextureState::kCopyDst,
-       all},
-      {im.plain, rhi::TextureState::kUndefined, rhi::TextureState::kCopyDst,
-       all}};
+  rhi::TextureBarrier b[2] = {{im.block, rhi::TextureState::kUndefined,
+                               rhi::TextureState::kCopyDst, all},
+                              {im.plain, rhi::TextureState::kUndefined,
+                               rhi::TextureState::kCopyDst, all}};
   c->Barrier(kAccessComputeRW, rhi::kAccessCopyRead, b, 2);
   c->CopyBufferToTexture(im.block, linear_blocks, in, res.mip_levels);
   b[0].before = rhi::TextureState::kCopyDst;
@@ -514,14 +491,15 @@ bool StageImageOnGpu(const ComputeInfo::Res& res, CsRange& e) {
     return false;
   if (res.dfmt == 35 || res.dfmt == 40)
     return StageBcImageOnGpu(res, e, tiled, linear);
-  const TileTable* table =
-      GetTileTable(tiled, linear, /*packed=*/tiled.elem_bytes < 4 &&
-                                      linear.elem_bytes == tiled.elem_bytes);
-  rhi::Buffer* raw = table ? AcquireScratch((tiled.size + 3) & ~u64(3)) : nullptr;
+  const TileTable* table = GetTileTable(
+      tiled, linear,
+      tiled.elem_bytes < 4 && linear.elem_bytes == tiled.elem_bytes);
+  rhi::Buffer* raw =
+      table ? AcquireScratch((tiled.size + 3) & ~u64(3)) : nullptr;
   if (!raw || !RecordGuestRead(g_cs_list, res.base, tiled.size, raw))
     return false;
   RecordImageTiling(g_cs_list, *table, raw, 0, (tiled.size + 3) & ~u64(3),
-                    e.buf, (linear.size + 3) & ~u64(3), /*detile=*/true);
+                    e.buf, (linear.size + 3) & ~u64(3), true);
   return true;
 #else
   return false;
@@ -557,7 +535,8 @@ bool ConvertGfx10Image(const gcn::TextureLayout32& tiled,
   };
   constexpr u32 kStorage =
       rhi::kBufferStorage | rhi::kBufferCopySrc | rhi::kBufferCopyDst;
-  rhi::Buffer* tiled_buf = make(tiled_bytes, rhi::MemoryKind::kDevice, kStorage);
+  rhi::Buffer* tiled_buf =
+      make(tiled_bytes, rhi::MemoryKind::kDevice, kStorage);
   rhi::Buffer* linear_buf =
       make(linear_bytes, rhi::MemoryKind::kDevice, kStorage);
   rhi::Buffer* upload =

@@ -21,8 +21,6 @@ namespace gpu::render {
 
 namespace {
 
-// One shared formatting buffer per call keeps this allocation-free; the
-// renderer records from a single thread.
 const char* Format(char (&buf)[192], const char* fmt, va_list args) {
   std::vsnprintf(buf, sizeof buf, fmt, args);
   return buf;
@@ -34,8 +32,6 @@ bool WantDebugUtils() {
   static const bool kWant = [] {
     if (kMarkers.overridden())
       return kMarkers.get();
-    // The validation layer consumes labels too: they are what names the guest
-    // draw in a validation message.
     if (trace::WantValidation())
       return true;
     return dlopen("librenderdoc.so", RTLD_NOW | RTLD_NOLOAD) != nullptr;
