@@ -49,7 +49,6 @@
             vulkan-headers
             vulkan-loader
             sdl3
-            ffmpeg-headless # H.264 decoding behind the PS5 video API
             shaderc          # runtime GLSL -> SPIR-V for the shader recompiler
             libepoxy         # GL entry points for the OpenGL backend
             libglvnd         # libEGL / libOpenGL dispatch for the OpenGL backend
@@ -112,7 +111,6 @@
             vulkan-validation-layers
             mesa            # lavapipe: software Vulkan for headless testing
             sdl3
-            ffmpeg-headless
             shaderc         # runtime GLSL -> SPIR-V for the shader recompiler
             libepoxy        # GL entry points for the OpenGL backend (EGL, headless)
             libglvnd        # libEGL / libOpenGL dispatch

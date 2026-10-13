@@ -12,4 +12,3 @@ bind to, and the lifter that rewrites guest code so it can run natively.
 | `vprx/sys_params.h` | the system settings sceSystemServiceParamGetInt answers |
 | `vprx/ps4/lib_sce_*/` | one PS4 HLE module each: `.h` API, `.cc` behaviour, `_exports.cc` NID table |
 | `vprx/ps5/lib_sce_*.cc` | PS5 NID alias tables and the Prospero-only shims |
-| `media/videodec` | H.264 decoding for libSceVideodec/AvPlayer (ffmpeg when present) |
