@@ -2152,6 +2152,15 @@ bool TranslateVs(const Program& program,
   t.m.Decorate(pos_out, spv::Decoration::BuiltIn,
                {static_cast<u32>(spv::BuiltIn::Position)});
   iface.push_back(pos_out);
+  Id point_out = 0;
+  if (!es) {
+    // Point lists require PointSize even without a size export.
+    point_out = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, t.t_f),
+                             spv::StorageClass::Output);
+    t.m.Decorate(point_out, spv::Decoration::BuiltIn,
+                 {static_cast<u32>(spv::BuiltIn::PointSize)});
+    iface.push_back(point_out);
+  }
 
   StageContext sc;
   sc.gcn_tsharp = true;
@@ -2202,6 +2211,8 @@ bool TranslateVs(const Program& program,
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   sc.main_fn = main_fn;
   SeedUserData(t, user_data);
+  if (point_out)
+    t.m.Store(point_out, t.F32(1.f));
 
   Id debug_vertex_index = 0;
   if (kGpuVsfull) {
