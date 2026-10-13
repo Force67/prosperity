@@ -203,7 +203,9 @@ RecompiledCs RecompileCompute(const u32* cs_code,
                               u32 num_thread_z,
                               u32 user_sgpr,
                               u32 tgid_enable,
-                              u32 lds_dwords);
+                              u32 lds_dwords,
+                              u64 native_mask = 0,
+                              u64 uint_mask = 0);
 
 struct ImageTilingParams {
   u32 width, height, words, table, mask;

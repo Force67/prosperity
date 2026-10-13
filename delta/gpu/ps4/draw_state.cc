@@ -102,6 +102,8 @@ u64 UserDataPointer(const u32* user_data, u32 index) {
          user_data[index];
 }
 
+}  // namespace
+
 void FillDrawTex(render::DrawInfo::DrawTex& dt, const gcn::TImage& t) {
   dt.base = t.valid ? t.base : 0;
   dt.w = t.width;
@@ -131,6 +133,8 @@ void FillDrawTex(render::DrawInfo::DrawTex& dt, const gcn::TImage& t) {
   dt.swizzle = gcn::PackDstSel(t.dst_sel);
   dt.src = t.src;
 }
+
+namespace {
 
 void BindTexture(render::DrawInfo& d,
                  const gcn::TImage& t,

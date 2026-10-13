@@ -24,6 +24,7 @@
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/ps4/cmd_trace.h"
+#include "gpu/ps4/draw_state.h"
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/render_queue.h"
 #include "gpu/ps4/shader_cache.h"
@@ -33,6 +34,7 @@
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
 DELTA_OPTION(bool, kCsOnRenderThread, "DELTA_GPU_CS_RENDER_THREAD", false);
+DELTA_OPTION(bool, kCsNativeImages, "DELTA_GPU_CS_NATIVE_IMAGES", true);
 }  // namespace
 
 namespace gpu::ps4 {
@@ -387,9 +389,45 @@ void DispatchCompute(render::Renderer& renderer,
                                  tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0))))
     return;
 
-  const gcn::RecompiledCs& rc =
-      GetComputeShader({cs_addr, threads[0], threads[1], threads[2], user_sgpr,
-                        tgid_enable, lds_dwords});
+  const ComputeShaderState shader{cs_addr,    threads[0], threads[1],
+                                  threads[2], user_sgpr,  tgid_enable,
+                                  lds_dwords};
+  const u32* user_data = regs.At(mmCOMPUTE_USER_DATA_0);
+  const auto cs_program = gcn::CachedProgram(cs_addr, 4096);
+  const gcn::RecompiledCs* module = &GetComputeShader(shader);
+  base::Vector<gcn::TImage> images;
+  u64 native = 0;
+  if (kCsNativeImages && module->ok && module->native_candidates &&
+      render::CsBindsImages()) {
+    gcn::TrackTextures(images, cs_program, user_data, false, cs_addr);
+    const gcn::MimgBindingPlan plan = gcn::PlanMimgBindings(
+        *cs_program, gcn::ComputeReachability(*cs_program).data());
+    const auto plain_2d = [&](u32 b) {
+      return b < images.size() && images[b].valid && !images[b].is_3d &&
+             !images[b].is_1d && !images[b].arrayed && !images[b].storage;
+    };
+    ComputeShaderState native_shader = shader;
+    for (const gcn::CsResource& r : module->resources) {
+      const auto it = plan.binding_by_pc.find(r.use_pc);
+      if (r.binding < 64 && ((module->native_candidates >> r.binding) & 1) &&
+          it != plan.binding_by_pc.end() && plain_2d(it->second))
+        native_shader.native_mask |= 1ull << r.binding;
+    }
+    for (u32 i = 0; i < images.size() && i < 64; i++)
+      if (images[i].nfmt == 4 || images[i].nfmt == 5)
+        native_shader.uint_mask |= 1ull << i;
+    if (native_shader.native_mask) {
+      const gcn::RecompiledCs& candidate = GetComputeShader(native_shader);
+      bool usable = candidate.ok;
+      for (u32 i = 0; usable && i < candidate.textures.size(); i++)
+        usable = candidate.textures[i] < 0 || plain_2d(i);
+      if (usable) {
+        module = &candidate;
+        native = native_shader.native_mask;
+      }
+    }
+  }
+  const gcn::RecompiledCs& rc = *module;
   if (!rc.ok) {
     static base::HashSet<u64> reported;
     static const guest::SessionReset reset_reported(
@@ -400,8 +438,14 @@ void DispatchCompute(render::Renderer& renderer,
     return;
   }
 
-  const u32* user_data = regs.At(mmCOMPUTE_USER_DATA_0);
   render::ComputeInfo ci;
+  for (u32 i = 0; i < rc.textures.size(); i++) {
+    if (rc.textures[i] < 0 || ci.num_tex >= render::ComputeInfo::kMaxTextures)
+      continue;
+    render::ComputeInfo::Tex& tex = ci.tex[ci.num_tex++];
+    tex.binding = static_cast<u32>(rc.textures[i]);
+    FillDrawTex(tex.tex, images[i]);
+  }
   ci.cs_addr = cs_addr;
   ci.indirect_args = indirect_args;
   base::Copy(group_base, group_base + 3, ci.group_base);
@@ -412,7 +456,6 @@ void DispatchCompute(render::Renderer& renderer,
   for (int i = 0; i < 16; i++)
     ci.user_data[i] = user_data[i];
 
-  const auto cs_program = gcn::CachedProgram(cs_addr, 4096);
   thread_local base::Vector<gcn::ResolvedCsResource> resolved;
   gcn::ResolveCsResources(resolved, *cs_program, rc, user_data, cs_addr);
   const auto count_resolved = [&] {
@@ -453,9 +496,15 @@ void DispatchCompute(render::Renderer& renderer,
     }
     const u32* descriptor =
         binding_resolved ? resolved[r.binding].descriptor : kNullDescriptor;
-    ResourceRange range =
-        r.kind == 1 ? ResolveImageResource(cs_addr, r, descriptor, trace)
-                    : ResolveBufferResource(cs_addr, r, descriptor, trace);
+    ResourceRange range;
+    if (r.binding < 64 && ((native >> r.binding) & 1)) {
+      range.zero_fill = true;
+      range.size = 16;
+    } else {
+      range = r.kind == 1
+                  ? ResolveImageResource(cs_addr, r, descriptor, trace)
+                  : ResolveBufferResource(cs_addr, r, descriptor, trace);
+    }
     if (!range.ok)
       return;
     if (!range.guest_size && !range.zero_fill)

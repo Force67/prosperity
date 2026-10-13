@@ -35,6 +35,8 @@ bool RecompileComputeSpirv(const u32*,
                            u32,
                            u32,
                            u32,
+                           u64,
+                           u64,
                            RecompiledCs&) {
   return false;
 }
@@ -2242,6 +2244,49 @@ bool TranslateDepthOnlyPs(Translator& t) {
   return true;
 }
 
+namespace {
+bool NativeMimgForm(u32 op) {
+  switch (op) {
+    case 0x00:
+    case 0x01:
+    case 0x24:
+    case 0x27:
+    case 0x2c:
+    case 0x2f:
+    case 0x34:
+    case 0x37:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Read-only images every access of which the host can sample or fetch
+// through a real image view instead of a staged copy of guest memory.
+u64 NativeImageCandidates(const Program& program,
+                          const RecompiledCs& r,
+                          const base::HashMap<u32, u32>& bind) {
+  u64 ok = 0, bad = 0;
+  for (const Inst& inst : program) {
+    if (inst.enc != Enc::kMimg)
+      continue;
+    const auto it = bind.find(inst.pc);
+    if (it == bind.end() || it->second >= 64)
+      continue;
+    const u32 w = inst.raw[0];
+    const u32 op = (w >> 18) & 0x7F;
+    const bool plain = !((w >> 14) & 0xF);
+    (NativeMimgForm(op) && plain ? ok : bad) |= 1ull << it->second;
+  }
+  u64 out = ok & ~bad;
+  for (const CsResource& res : r.resources)
+    if (res.binding < 64 && (res.kind != 1 || res.written ||
+                             res.runtime_image || res.runtime_address))
+      out &= ~(1ull << res.binding);
+  return out;
+}
+}  // namespace
+
 bool TranslateCs(const Program& program,
                  u32 num_thread_x,
                  u32 num_thread_y,
@@ -2249,6 +2294,8 @@ bool TranslateCs(const Program& program,
                  u32 user_sgpr,
                  u32 tgid_enable,
                  u32 lds_dwords,
+                 u64 native_mask,
+                 u64 uint_mask,
                  RecompiledCs& r,
                  Translator& t) {
   if (program.empty())
@@ -2262,6 +2309,27 @@ bool TranslateCs(const Program& program,
                        sc.cs_bind) ||
       r.resources.empty())
     return false;
+  r.native_candidates = NativeImageCandidates(program, r, sc.cs_bind);
+  const u64 native = native_mask & r.native_candidates;
+  MimgBindingPlan image_plan;
+  if (native) {
+    image_plan = PlanMimgBindings(program, reachable.data());
+    if (image_plan.binding_srsrc.size() > StageContext::kMaxPsSamplers)
+      return false;
+    sc.mimg_plan = &image_plan;
+    sc.tex_binding_base = kCsTexBindingBase;
+    sc.tex_uint_mask = uint_mask;
+    r.textures.assign(image_plan.binding_srsrc.size(), -1);
+    for (const Inst& inst : program) {
+      const auto it = sc.cs_bind.find(inst.pc);
+      if (inst.enc != Enc::kMimg || it == sc.cs_bind.end() ||
+          !((native >> it->second) & 1))
+        continue;
+      sc.cs_native.insert(it->second);
+      const u32 b = image_plan.binding_by_pc[inst.pc];
+      r.textures[b] = static_cast<int>(kCsTexBindingBase + b);
+    }
+  }
   const u32 threads_per_group = (num_thread_x ? num_thread_x : 1) *
                                 (num_thread_y ? num_thread_y : 1) *
                                 (num_thread_z ? num_thread_z : 1);
@@ -2823,6 +2891,8 @@ bool RecompileComputeSpirv(const u32* cs_code,
                            u32 user_sgpr,
                            u32 tgid_enable,
                            u32 lds_dwords,
+                           u64 native_mask,
+                           u64 uint_mask,
                            RecompiledCs& r) {
   if (!cs_code)
     return false;
@@ -2837,7 +2907,7 @@ bool RecompileComputeSpirv(const u32* cs_code,
     AuditBegin("cs", cs_code, program);
   const bool cs_ok =
       TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
-                  tgid_enable, lds_dwords, tmp, t) &&
+                  tgid_enable, lds_dwords, native_mask, uint_mask, tmp, t) &&
       !HadUnsupported();
   base::Vector<u32> spv_bin;
   if (cs_ok)

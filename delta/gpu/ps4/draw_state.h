@@ -6,6 +6,7 @@
 
 #include "base/arch.h"
 
+#include "gpu/gcn/gcn_resource.h"
 #include "gpu/ps4/liverpool.h"
 #include "gpu/render/command.h"
 #include "gpu/render/renderer.h"
@@ -30,5 +31,7 @@ bool BuildDrawInfo(render::Renderer& renderer,
                    render::DrawInfo& d);
 
 void PrefetchDrawShaders(const Regs& regs);
+
+void FillDrawTex(render::DrawInfo::DrawTex& dt, const gcn::TImage& t);
 
 }  // namespace gpu::ps4
