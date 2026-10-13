@@ -390,6 +390,30 @@ u64 StagedOffset(const StageCache::Entry* e) {
 
 DELTA_OPTION(bool, kRingDedup, "DELTA_GPU_RING_DEDUP", true);
 
+bool BindVertexDescriptor(u64 base,
+                          u64 bytes,
+                          CachedBuffer& kept,
+                          CachedBuffer& direct) {
+  if (!bytes)
+    return false;
+  if (CsResidentGeometryBuffer(base, bytes, &kept.buffer, &kept.offset))
+    return true;
+  if (CsHoldsGeometry(base, bytes))
+    return false;
+  if (kRingDedup && TrackingGuestWrites()) {
+    SyncGuestWrites();
+    if (FindCachedBuffer(base, bytes, kept))
+      return true;
+  }
+  if (kDirectBind)
+    direct.buffer = DirectBindAt(base, bytes, &direct.offset);
+  if (!direct.buffer)
+    return false;
+  g_bind_bytes += bytes;
+  g_bind_n++;
+  return true;
+}
+
 bool IsReadableThisFrame(u64 base, u32 size) {
   return gpu::IsReadableRangeCached(base, size);
 }
@@ -734,24 +758,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       (indexed && CsHoldsGeometry(reinterpret_cast<u64>(d.index_data),
                                   u64(d.index_count) *
                                       GuestIndexElementBytes(d.index_type)));
-  if (indexed && d.num_vattrs && !descriptor_bounds) {
-    if (!FlushCsWritesRange(
-            renderer, reinterpret_cast<u64>(d.index_data),
-            u64(d.index_count) * GuestIndexElementBytes(d.index_type), "index"))
-      return vtx_decline("cs-index", d.index_count);
-    const StageCache::Entry* staged =
-        kRingDedup ? g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
-                                      index_bytes, ib_tag)
-                   : nullptr;
-    const u32 max_index =
-        staged && staged->bytes == index_bytes && staged->max_index != ~0u
-            ? staged->max_index
-            : MaxGuestIndex(d.index_data, d.index_count, d.index_type);
-    if (max_index >= 200000u)
-      return vtx_decline("max-index", max_index);
-    nv = max_index + 1;
-  }
-  if ((d.num_vattrs && !descriptor_bounds && nv > 200000u) ||
+  bool index_scanned = false;
+  if ((d.num_vattrs && !indexed && !descriptor_bounds && nv > 200000u) ||
       (d.num_vattrs && !d.vertex_data))
     return vtx_decline(nv > 200000u ? "nv-cap" : "no-vertex-data", nv);
   // GNM's fast clear (see DrawInfo::is_clear_rect): a RECT_LIST draw with no
@@ -980,6 +988,120 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
   }
 
+  // Lay out one contiguous ring range per vertex binding. Binding 0 sits at the
+  // ring offset (single-stream draws are byte-identical to before); additional
+  // bindings are 16-byte aligned so no attribute straddles a coarse boundary.
+  // A binding whose guest range is already staged this frame reuses that copy
+  // (vb_cached[j]) and takes no ring space at all.
+  const u32 nbind = d.num_vattrs ? base::Min(d.num_vbufs, 8u) : 0;
+  u64 bind_off[8] = {}, bind_size[8] = {};
+  u64 vb_cached[8] = {};
+  // Bindings served from the cross-frame buffer cache (buffer set).
+  CachedBuffer vb_kept[8] = {};
+  // Bindings the fetcher reads in place through the direct alias.
+  CachedBuffer vb_bind[8] = {};
+  u64 vneed = 0;
+  for (u32 j = 0; j < nbind; j++) {
+    vb_cached[j] = u64(-1);
+    if (indexed && !descriptor_bounds && d.vbufs[j].stride &&
+        !d.vbufs[j].per_instance) {
+      const u64 bytes = u64(d.vbufs[j].num_records) * d.vbufs[j].stride;
+      if (BindVertexDescriptor(reinterpret_cast<u64>(d.vbufs[j].data), bytes,
+                               vb_kept[j], vb_bind[j])) {
+        bind_size[j] = bytes;
+        continue;
+      }
+      if (!index_scanned) {
+        if (!FlushCsWritesRange(
+                renderer, reinterpret_cast<u64>(d.index_data),
+                u64(d.index_count) * GuestIndexElementBytes(d.index_type),
+                "index"))
+          return vtx_decline("cs-index", d.index_count);
+        const StageCache::Entry* staged =
+            kRingDedup ? g_ib_staged.Find(reinterpret_cast<u64>(d.index_data),
+                                          index_bytes, ib_tag)
+                       : nullptr;
+        u32 max_index;
+        if (staged && staged->bytes == index_bytes &&
+            staged->max_index != ~0u) {
+          max_index = staged->max_index;
+        } else {
+          ScopeNs scan_timer(&g_ns_index_scan);
+          max_index = MaxGuestIndex(d.index_data, d.index_count, d.index_type);
+          g_index_scan_n++;
+          g_index_scan_bytes +=
+              u64(d.index_count) * GuestIndexElementBytes(d.index_type);
+        }
+        if (max_index >= 200000u)
+          return vtx_decline("max-index", max_index);
+        nv = max_index + 1;
+        index_scanned = true;
+      }
+    }
+    if (d.vbufs[j].stride) {
+      // GPU arguments include firstVertex/baseVertex and firstInstance, so
+      // retain the descriptor's full range instead of guessing the count.
+      const u32 records = descriptor_bounds ? d.vbufs[j].num_records
+                          : d.vbufs[j].per_instance
+                              ? base::Max(1u, d.instance_count)
+                              : nv;
+      bind_size[j] = (u64)records * d.vbufs[j].stride;
+    } else {
+      // Stride-0 (constant) binding: upload a single record large enough to
+      // cover every attribute that reads it; the pipeline binds it with stride
+      // 0 so all vertices fetch this one record.
+      u32 rec = 0;
+      for (u32 a = 0; a < d.num_vattrs; a++)
+        if (d.vattrs[a].binding == j)
+          rec = base::Max(
+              rec, d.vattrs[a].offset + VertexFormatBytes(d.vattrs[a].dfmt));
+      bind_size[j] = rec;
+    }
+    // A dispatch's unflushed output (skinning) is fetched from its own buffer.
+    if (bind_size[j] &&
+        CsGeometryBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
+                         &vb_kept[j].buffer, &vb_kept[j].offset))
+      continue;
+    if (bind_size[j] &&
+        CsHoldsGeometry(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j]))
+      return Decline(kRing);
+    if (kRingDedup && bind_size[j] && TrackingGuestWrites()) {
+      SyncGuestWrites();
+      if (FindCachedBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
+                           vb_kept[j]))
+        continue;
+    }
+    vb_cached[j] =
+        kRingDedup && bind_size[j]
+            ? StagedOffset(g_vb_staged.Find(
+                  reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j]))
+            : u64(-1);
+    if (vb_cached[j] != u64(-1))
+      continue;
+    // The alias is the guest's own bytes: binding them skips the ring copy
+    // and the ring space, and later writes reach the fetcher as they would
+    // on hardware. A span no single view holds falls through to the copy.
+    if (bind_size[j] && kDirectBind) {
+      u64 inner = 0;
+      if (rhi::Buffer* b = DirectBindAt(reinterpret_cast<u64>(d.vbufs[j].data),
+                                        bind_size[j], &inner)) {
+        vb_bind[j] = {b, inner};
+        g_bind_bytes += bind_size[j];
+        g_bind_n++;
+        continue;
+      }
+    }
+    // A V# may name more records than are mapped; the GPU only faults on the
+    // ones it fetches, but staging copies them all.
+    if (bind_size[j] &&
+        !IsReadableThisFrame(reinterpret_cast<u64>(d.vbufs[j].data),
+                             static_cast<u32>(bind_size[j])))
+      return Decline(kNoRecomp);
+    if (vneed)
+      vneed = (vneed + 15) & ~u64(15);
+    bind_off[j] = vneed;
+    vneed += bind_size[j];
+  }
   // A fullscreen, untextured, near-black REPLACE draw is the game CLEARING an
   // RT. Don't render it (that wipes the RT immediately); record a LAZY clear
   // instead, realised as loadOp=CLEAR only when content actually redraws this
@@ -1001,7 +1123,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     break;
   }
   if (kNoWipe && float_pos && d.vertex_data && d.num_vattrs &&
-      d.recomp->ps_texs.empty() && nv <= 8) {
+      d.recomp->ps_texs.empty() && (!indexed || index_scanned) && nv <= 8) {
     u32 cdst = (d.blend_control >> 8) & 0x1F, csrc = d.blend_control & 0x1F;
     bool replace = d.blend_enable && csrc == 1 && cdst == 0;
     if (replace) {
@@ -1112,85 +1234,6 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
   }
 
-  // Lay out one contiguous ring range per vertex binding. Binding 0 sits at the
-  // ring offset (single-stream draws are byte-identical to before); additional
-  // bindings are 16-byte aligned so no attribute straddles a coarse boundary.
-  // A binding whose guest range is already staged this frame reuses that copy
-  // (vb_cached[j]) and takes no ring space at all.
-  const u32 nbind = d.num_vattrs ? base::Min(d.num_vbufs, 8u) : 0;
-  u64 bind_off[8] = {}, bind_size[8] = {};
-  u64 vb_cached[8] = {};
-  // Bindings served from the cross-frame buffer cache (buffer set).
-  CachedBuffer vb_kept[8] = {};
-  // Bindings the fetcher reads in place through the direct alias.
-  CachedBuffer vb_bind[8] = {};
-  u64 vneed = 0;
-  for (u32 j = 0; j < nbind; j++) {
-    if (d.vbufs[j].stride) {
-      // GPU arguments include firstVertex/baseVertex and firstInstance, so
-      // retain the descriptor's full range instead of guessing the count.
-      const u32 records = descriptor_bounds ? d.vbufs[j].num_records
-                          : d.vbufs[j].per_instance
-                              ? base::Max(1u, d.instance_count)
-                              : nv;
-      bind_size[j] = (u64)records * d.vbufs[j].stride;
-    } else {
-      // Stride-0 (constant) binding: upload a single record large enough to
-      // cover every attribute that reads it; the pipeline binds it with stride
-      // 0 so all vertices fetch this one record.
-      u32 rec = 0;
-      for (u32 a = 0; a < d.num_vattrs; a++)
-        if (d.vattrs[a].binding == j)
-          rec = base::Max(
-              rec, d.vattrs[a].offset + VertexFormatBytes(d.vattrs[a].dfmt));
-      bind_size[j] = rec;
-    }
-    vb_cached[j] = u64(-1);
-    // A dispatch's unflushed output (skinning) is fetched from its own buffer.
-    if (bind_size[j] &&
-        CsGeometryBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
-                         &vb_kept[j].buffer, &vb_kept[j].offset))
-      continue;
-    if (bind_size[j] &&
-        CsHoldsGeometry(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j]))
-      return Decline(kRing);
-    if (kRingDedup && bind_size[j] && TrackingGuestWrites()) {
-      SyncGuestWrites();
-      if (FindCachedBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
-                           vb_kept[j]))
-        continue;
-    }
-    vb_cached[j] =
-        kRingDedup && bind_size[j]
-            ? StagedOffset(g_vb_staged.Find(
-                  reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j]))
-            : u64(-1);
-    if (vb_cached[j] != u64(-1))
-      continue;
-    // The alias is the guest's own bytes: binding them skips the ring copy
-    // and the ring space, and later writes reach the fetcher as they would
-    // on hardware. A span no single view holds falls through to the copy.
-    if (bind_size[j] && kDirectBind) {
-      u64 inner = 0;
-      if (rhi::Buffer* b = DirectBindAt(reinterpret_cast<u64>(d.vbufs[j].data),
-                                        bind_size[j], &inner)) {
-        vb_bind[j] = {b, inner};
-        g_bind_bytes += bind_size[j];
-        g_bind_n++;
-        continue;
-      }
-    }
-    // A V# may name more records than are mapped; the GPU only faults on the
-    // ones it fetches, but staging copies them all.
-    if (bind_size[j] &&
-        !IsReadableThisFrame(reinterpret_cast<u64>(d.vbufs[j].data),
-                             static_cast<u32>(bind_size[j])))
-      return Decline(kNoRecomp);
-    if (vneed)
-      vneed = (vneed + 15) & ~u64(15);
-    bind_off[j] = vneed;
-    vneed += bind_size[j];
-  }
   if (g_ring.vb_offset + vneed > g_ring.vb_end) {
     if (kGpuDecltrace) {
       static int n = 0;
@@ -2348,7 +2391,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     if (kRingDedup && !indirect_quads)
       g_ib_staged.Insert(
           reinterpret_cast<u64>(d.index_data), index_bytes, ib_tag, ioff,
-          tracked, d.num_vattrs && !descriptor_bounds ? nv - 1 : ~0u,
+          tracked, index_scanned ? nv - 1 : ~0u,
           u64(d.index_count) * GuestIndexElementBytes(d.index_type),
           index_revision);
   }

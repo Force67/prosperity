@@ -90,6 +90,10 @@ using indirect arguments or resident compute output. Direct-memory imports
 also let vertex and index fetch read guest bytes without a ring copy. The
 vertex and index upload rings allocate only when a draw needs host staging,
 so resident geometry and GPU index conversion skip those host allocations.
+Native indexed draws try resident vertex descriptor ranges before scanning
+indices. Only bindings that need a smaller upload require the CPU scan and
+its staging limit; large resident vertex ranges stay on the GPU. Indexed
+resident draws also skip the CPU clear heuristic's vertex reads.
 Raw shader windows can bind compute buffers or direct-memory imports in place,
 skipping the raw-ring copy. Loads past a binding return zero. Resident raw draws
 use one 16 MiB device zero window for unresolved slots and defer the 512 MiB

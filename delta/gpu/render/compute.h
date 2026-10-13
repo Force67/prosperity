@@ -89,6 +89,11 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off);
 // through guest memory. Mixed CPU/GPU windows gather into immutable buffers
 // on the GPU, retained until the active frame slot retires.
 bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset);
+// Bind an existing compute or mirror buffer without allocating a gathered view.
+bool CsResidentGeometryBuffer(u64 base,
+                              u64 bytes,
+                              rhi::Buffer** buffer,
+                              u64* offset);
 // Bind a raw shader or constant window, gathering mixed CPU/GPU data into
 // device buffers with the same lifetime and ordering as geometry. Offsets
 // satisfy `alignment`; unaligned output is copied on the GPU. Short windows

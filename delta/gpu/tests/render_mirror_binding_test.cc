@@ -157,7 +157,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       gpu::gcn::spirv::Finalize(module.Assemble(), &geometry.vs_spirv, &error))
       << error.c_str();
   ASSERT_TRUE(gpu::render::InitGuestDirect());
-  alignas(65536) static base::Array<u8, 65536> targets[23]{};
+  alignas(65536) static base::Array<u8, 65536> targets[24]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
   imported.recomp = &constants;
@@ -755,6 +755,54 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       EXPECT_EQ(pixel[3], 255);
     }
     EXPECT_EQ(pixels, 2u);
+  }
+  auto* native_vertices = reinterpret_cast<float*>(base + (6ull << 20));
+  std::fill_n(native_vertices, 262144, .25f);
+  gpu::render::CollectGuestWrites();
+  alignas(65536) static u32 native_indices[16384] = {200001};
+  gpu::render::BeginFrame(renderer);
+  gpu::render::DrawInfo native;
+  native.recomp = &geometry;
+  native.prim_type = native.vertex_count = native.index_count = 1;
+  native.vertex_data = native_vertices;
+  native.vertex_stride = 4;
+  native.num_vbufs = native.num_vattrs = 1;
+  native.vbufs[0] = {native_vertices, 4, 262144};
+  native.vattrs[0] = {0, 0, 0, 1, 4, 7};
+  native.index_data = native_indices;
+  native.index_type = 1;
+  native.rt_base = native.mrt_base[0] =
+      reinterpret_cast<u64>(targets[23].data());
+  native.rt_w = native.rt_h = 16;
+  native.viewport_x_scale = native.viewport_y_scale = 8;
+  native.viewport_x_offset = 2.5f;
+  native.viewport_y_offset = 8.5f;
+  native.mrt_count = native.mrt_bound_mask = 1;
+  native.mrt_info[0] = 10u << 2;
+  const u64 native_scans = gpu::g_index_scan_n;
+  const u64 native_copies = gpu::g_ring_vb_bytes;
+  const u64 native_bound = gpu::g_bind_bytes;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, native));
+  ASSERT_TRUE(gpu::render::SubmitFrameChunk());
+  const auto& native_slot =
+      gpu::render::g_frame.slots[gpu::render::g_frame.slot_idx];
+  ASSERT_TRUE(gpu::render::Device().Wait(native_slot.submission));
+  native_vertices[200001] = -.25f;
+  gpu::render::CollectGuestWrites();
+  native.viewport_x_offset = 12.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, native));
+  EXPECT_EQ(gpu::g_index_scan_n, native_scans);
+  EXPECT_EQ(gpu::g_ring_vb_bytes, native_copies);
+  EXPECT_EQ(gpu::g_bind_bytes, native_bound + 2 * 262144 * sizeof(float));
+  gpu::render::EndFrame(renderer, native.rt_base);
+  ASSERT_TRUE(gpu::render::Device().Wait(native_slot.submission));
+  ASSERT_TRUE(native_slot.presentable);
+  for (u32 x : {4u, 10u}) {
+    const auto* pixel = native_slot.readback->mapped() + (8 * 16 + x) * 4;
+    EXPECT_EQ(pixel[0], 255);
+    EXPECT_EQ(pixel[1], 0);
+    EXPECT_EQ(pixel[2], 0);
+    EXPECT_EQ(pixel[3], 255);
   }
 }
 

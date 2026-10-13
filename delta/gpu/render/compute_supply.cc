@@ -833,14 +833,25 @@ bool GatherDrawBuffer(u64 base,
 }
 }  // namespace
 
-bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
+bool CsResidentGeometryBuffer(u64 base,
+                              u64 bytes,
+                              rhi::Buffer** buffer,
+                              u64* offset) {
   if (!kCsVtxBridge)
     return false;
   u64 range_base = 0;
   CsRange* found = VertexSource(base, bytes, &range_base);
   const bool bound =
-      BindComputeBuffer(base, bytes, found, range_base, buffer, offset) ||
-      GatherDrawBuffer(base, bytes, buffer, offset);
+      BindComputeBuffer(base, bytes, found, range_base, buffer, offset);
+  g_vtx_bridge_n += bound;
+  return bound;
+}
+
+bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
+  if (CsResidentGeometryBuffer(base, bytes, buffer, offset))
+    return true;
+  const bool bound =
+      kCsVtxBridge && GatherDrawBuffer(base, bytes, buffer, offset);
   g_vtx_bridge_n += bound;
   return bound;
 }

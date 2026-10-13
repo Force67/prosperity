@@ -22,6 +22,7 @@
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/rdna/rdna_translate.h"
 #include "gpu/ps5/shader_cache.h"
+#include "gpu/render/buffer_cache.h"
 #include "gpu/render/compute.h"
 #include "gpu/render/compute_internal.h"
 #include "gpu/render/device.h"
@@ -512,10 +513,13 @@ TEST(VkDraw, ResidentGeometryDefersUploadRingsUntilCpuStaging) {
       << error.c_str();
   alignas(256) static const u32 cs[4096] = {0x7e020204, 0xe0702000, 0x80000100,
                                             0xbf810000};
-  alignas(65536) static u32 vertices[16384]{}, indices[16384]{};
-  alignas(65536) static float cpu_vertices[16384] = {-.25f};
+  alignas(65536) static u32 vertices[262144]{}, indices[16384]{};
+  alignas(65536) static float cpu_vertices[262144] = {-.25f};
   alignas(65536) static u16 cpu_indices[32768]{};
+  alignas(65536) static u32 high_indices[16384] = {200001};
   alignas(65536) static base::Array<u8, 65536> target{};
+  vertices[200001] = 0x3e800000;
+  cpu_vertices[200001] = -.25f;
   const auto previous_isa = gpu::gcn::DefaultIsaMode();
   gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
   static const auto compute = gpu::gcn::RecompileCompute(cs, 64, 1, 1, 5, 0, 0);
@@ -530,12 +534,13 @@ TEST(VkDraw, ResidentGeometryDefersUploadRingsUntilCpuStaging) {
   ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
   ci.num_res = 1;
   auto& resource = ci.res[0];
-  resource.size = resource.guest_size = sizeof(vertices);
   resource.binding = compute.resources[0].binding;
   resource.written = resource.shader_writes = true;
-  ci.user_data[2] = sizeof(vertices) / 4;
   ci.user_data[3] = (4u << 15) | (4u << 12);
   for (u32 i = 0; i < 2; ++i) {
+    resource.size = resource.guest_size =
+        i ? sizeof(indices) : sizeof(vertices);
+    ci.user_data[2] = resource.size / 4;
     resource.base = reinterpret_cast<u64>(i ? indices : vertices);
     ci.user_data[0] = u32(resource.base);
     ci.user_data[1] = (resource.base >> 32) | (4u << 16);
@@ -565,6 +570,7 @@ TEST(VkDraw, ResidentGeometryDefersUploadRingsUntilCpuStaging) {
   const u64 ib_start = gpu::render::g_ring.ib_offset;
   const u64 vb_copies = gpu::g_ring_vb_bytes;
   const u64 ib_copies = gpu::g_ring_ib_bytes;
+  const u64 index_scans = gpu::g_index_scan_n;
   const u64 writeback = gpu::render::g_wb_why_bytes;
   ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
   EXPECT_EQ(gpu::render::g_ring.vb, nullptr);
@@ -602,13 +608,48 @@ TEST(VkDraw, ResidentGeometryDefersUploadRingsUntilCpuStaging) {
   EXPECT_EQ(gpu::render::g_ring.vb_offset, vb_start + 256);
   EXPECT_EQ(gpu::g_ring_vb_bytes, vb_copies + 256);
   EXPECT_EQ(gpu::g_ring_ib_bytes, ib_copies + sizeof(u16));
+  draw.vbufs[0].num_records = 262144;
+  draw.index_data = high_indices;
+  draw.index_type = 1;
+  draw.viewport_x_offset = 2.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.vb_offset, vb_start + 256);
+  EXPECT_EQ(gpu::g_ring_vb_bytes, vb_copies + 256);
+  EXPECT_EQ(gpu::g_ring_ib_bytes, ib_copies + sizeof(u16) + sizeof(u32));
+  restore.options[1]->set(true);
+  const u64 cpu_base = reinterpret_cast<u64>(cpu_vertices);
+  ASSERT_TRUE(gpu::GuestWriteTracker().Arm(cpu_base, sizeof(cpu_vertices)));
+  gpu::render::CachedBuffer cached;
+  ASSERT_TRUE(
+      gpu::render::CacheGuestBuffer(cpu_base, sizeof(cpu_vertices), cached));
+  draw.vertex_data = cpu_vertices;
+  draw.vbufs[0].data = cpu_vertices;
+  draw.viewport_x_offset = 4.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.vb_offset, vb_start + 256);
+  EXPECT_EQ(gpu::g_ring_vb_bytes, vb_copies + 256);
+  *reinterpret_cast<volatile float*>(cpu_vertices + 1) = -.5f;
+  gpu::render::CollectGuestWrites();
+  EXPECT_FALSE(
+      gpu::render::FindCachedBuffer(cpu_base, sizeof(cpu_vertices), cached));
+  EXPECT_EQ(gpu::g_index_scan_n, index_scans);
+  restore.options[1]->set(false);
+  draw.index_data = cpu_indices;
+  draw.index_type = 0;
+  cpu_indices[0] = 1;
+  draw.vbufs[0].num_records = 0x3fffffffu;
+  draw.viewport_x_offset = 4.5f;
+  ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+  EXPECT_EQ(gpu::render::g_ring.vb_offset, vb_start + 256 + 2 * sizeof(float));
+  EXPECT_EQ(gpu::g_ring_vb_bytes, vb_copies + 256 + 2 * sizeof(float));
+  EXPECT_EQ(gpu::g_index_scan_n, index_scans + 1);
   EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
   const u32 slot_index = gpu::render::g_frame.slot_idx;
   gpu::render::EndFrame(renderer, draw.rt_base);
   const auto& slot = gpu::render::g_frame.slots[slot_index];
   ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
   ASSERT_TRUE(slot.presentable);
-  for (u32 x : {6u, 10u, 12u, 14u}) {
+  for (u32 x : {0u, 2u, 4u, 6u, 10u, 12u, 14u}) {
     SCOPED_TRACE(x);
     const auto* pixel = slot.readback->mapped() + (8 * 16 + x) * 4;
     EXPECT_EQ(pixel[0], 255);
