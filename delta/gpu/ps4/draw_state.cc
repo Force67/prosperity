@@ -230,8 +230,8 @@ void ResolveIndexBuffer(render::Renderer& renderer,
 
   // DRAW_INDIRECT / DRAW_INDEX_INDIRECT take their counts from a struct in
   // guest memory at IT_SET_BASE(1) + dataOffset, not from the packet.
-  // Arguments a GPU write is still on its way to stay on the GPU, which reads
-  // them when the draw runs: an indexed draw covers the whole index buffer.
+  // The GPU reads resident or staged arguments when the draw runs. Indexed
+  // draws cover the whole index buffer until those arguments select a range.
   if ((op == IT_DRAW_INDIRECT || op == IT_DRAW_INDEX_INDIRECT) && count >= 1 &&
       packet.indirect_base) {
     const u64 args = packet.indirect_base + body[0];
@@ -245,9 +245,9 @@ void ResolveIndexBuffer(render::Renderer& renderer,
         host_memory::IsMemoryRangeMapped(
             reinterpret_cast<const void*>(packet.index_base),
             static_cast<u64>(packet.index_max) * index_bytes);
-    if (render::CanDrawIndirect(d.prim_type, indexed) &&
-        (!indexed || whole_buffer) &&
-        WalkReadWouldWait(args, indexed ? 20 : 16)) {
+    if (!(args & 3) && gpu::IsReadableRangeCached(args, indexed ? 20 : 16) &&
+        render::CanDrawIndirect(d.prim_type, indexed) &&
+        (!indexed || whole_buffer)) {
       d.indirect_args = args;
       if (indexed) {
         d.index_data = reinterpret_cast<const void*>(packet.index_base);

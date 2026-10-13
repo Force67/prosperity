@@ -911,9 +911,8 @@ void HandleDispatchIndirect(render::Renderer& renderer,
   DispatchCompute(renderer, g_queue->regs, groups, 4);
 }
 
-// IT_DRAW_INDIRECT / IT_DRAW_INDEX_INDIRECT: same as the direct forms with the
-// counts read from the argument buffer. Rebuilding the direct packet keeps one
-// draw path rather than a second one that would drift from it.
+// Reuse the direct draw path with GPU arguments, or CPU dimensions when the
+// primitive needs a fallback.
 void HandleDrawIndirect(
     render::Renderer& renderer,
     u32 op,
@@ -928,16 +927,12 @@ void HandleDrawIndirect(
   if (!g_queue->draw_indirect_base || !IsGuestAddress(args) ||
       !gpu::IsReadableRangeCached(args, want))
     return;
-  // Not NGG: the GPU reads the arguments where a dispatch left them, or once
-  // a GPU write still on its way lands, and nothing waits for them here. An
-  // indexed draw covers the whole index buffer; vertex bindings cover their
-  // descriptor bounds.
+  // Not NGG: the GPU reads resident or staged arguments. Indexed draws cover
+  // the whole index buffer; vertex bindings cover their descriptor bounds.
   const bool ngg = (g_queue->regs[mmVGT_SHADER_STAGES_EN] >> 7) & 1;
   const bool gpu_args =
-      !ngg &&
-      render::CanDrawIndirect(g_queue->regs[mmVGT_PRIMITIVE_TYPE], indexed) &&
-      (render::GpuIndirectArgs(args, want) ||
-       !render::GuestBytesSettled(args, want));
+      !ngg && !(args & 3) &&
+      render::CanDrawIndirect(g_queue->regs[mmVGT_PRIMITIVE_TYPE], indexed);
   const u32 initiator = count >= 4 ? body[3] : 0;
   if (gpu_args && indexed && g_queue->index.max && g_queue->index.base) {
     const u64 base = g_queue->index.base;

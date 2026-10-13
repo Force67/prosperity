@@ -85,12 +85,13 @@ that cannot share images.
 Compute output stays resident for subsequent draws and dispatches.
 PS4 indirect dispatches accept SET_BASE offsets and compute-ring addresses.
 Both PS4 and PS5 let the GPU read resident or staged indirect dimensions,
-including CPU-provided dimensions. Nonzero starts retain the DispatchBase
-fallback. Resident arguments are revalidated against tracked CPU writes. Mirror
-argument reads order later GPU writes after their draws. Vertex and native index
-streams can bind the compute buffer directly, and indirect draws
-retain the full vertex descriptor bounds so their counts, first vertex and
-first instance remain GPU inputs. Native index streams need no CPU scan when
+including CPU-provided dimensions. Supported indirect draws also stage
+CPU-provided counts and offsets for GPU consumption. Nonzero dispatch starts
+retain the DispatchBase fallback. Resident arguments are revalidated against
+tracked CPU writes. Mirror argument reads order later GPU writes after their
+draws. Vertex and native index streams can bind the compute buffer directly,
+and indirect draws retain the full vertex descriptor bounds so their counts,
+first vertex and first instance remain GPU inputs. Native index streams need no CPU scan when
 using indirect arguments or resident compute output. Direct-memory imports
 also let vertex and index fetch read guest bytes without a ring copy. The
 vertex and index upload rings allocate only when a draw needs host staging,

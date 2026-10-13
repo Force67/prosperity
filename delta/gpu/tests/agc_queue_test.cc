@@ -21,6 +21,8 @@ base::Vector<u64> g_dispatch_arguments;
 bool g_gpu_dispatch_args = false;
 base::Vector<base::Array<u32, 3>> g_dispatch_groups;
 base::Vector<u32> g_draw_instances;
+base::Vector<u64> g_draw_arguments;
+bool g_gpu_draw_args = false;
 base::Vector<u32> g_draw_index_types;
 base::Array<u8, 65536> g_gds{};
 u64 g_pending_address = 0;
@@ -304,6 +306,30 @@ TEST(AgcQueue, ZeroInstanceIndirectDrawDoesNotReusePreviousInstanceCount) {
   EXPECT_EQ(g_draw_instances, (base::Vector<u32>{2}));
 }
 
+TEST(AgcQueue, SettledIndirectDrawArgumentsRemainGpuInputs) {
+  base::Array<u32, 5> args{0, 0, 7, 0, 9};
+  base::Array<u32, 8> indices{};
+  for (bool indexed : {false, true}) {
+    g_draw_arguments.clear();
+    g_draw_instances.clear();
+    g_gpu_draw_args = true;
+    g_flush_succeeds = false;
+    Words w;
+    Packet(w, 0x11, {1, Lo(args.data()), Hi(args.data())});
+    Packet(w, 0x26, {Lo(indices.data()), Hi(indices.data())});
+    Packet(w, 0x13, {8});
+    Packet(w, 0x2f, {7});
+    Packet(w, indexed ? 0x25 : 0x24, {0, 0, 0, 0});
+    Packet(w, 0x2d, {3, 0});
+    EXPECT_EQ(Submit(w, 121 + indexed), w.size());
+    g_gpu_draw_args = false;
+    g_flush_succeeds = true;
+    EXPECT_EQ(g_draw_arguments,
+              (base::Vector<u64>{reinterpret_cast<u64>(args.data()), 0}));
+    EXPECT_EQ(g_draw_instances, (base::Vector<u32>{7, 7}));
+  }
+}
+
 TEST(AgcQueue, IndexTypePacketsAndRegisterWritesShareState) {
   g_draw_index_types.clear();
   Words w;
@@ -341,6 +367,7 @@ void InstallWriteTrackerPolicy() {}
 bool BuildDrawInfo(const Regs&,
                    const DrawPacket& packet,
                    render::DrawInfo& draw) {
+  g_draw_arguments.push_back(packet.indirect_args);
   g_draw_instances.push_back(packet.num_instances);
   g_draw_index_types.push_back(packet.index_type);
   draw.rt_base = kDrawTarget;
@@ -433,7 +460,7 @@ bool GuestBytesSettled(u64, u64) {
   return true;
 }
 bool CanDrawIndirect(u32, bool) {
-  return false;
+  return g_gpu_draw_args;
 }
 bool BeginGuestPredicate(u64) {
   return false;

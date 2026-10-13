@@ -15,6 +15,7 @@
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/ps4/cmd_processor.h"
 #include "gpu/ps4/compute_dispatch.h"
+#include "gpu/ps4/draw_state.h"
 #include "gpu/ps4/pm4.h"
 #include "gpu/ps4/render_queue.h"
 #include "gpu/ps5/compute_dispatch.h"
@@ -2513,6 +2514,92 @@ TEST(VkDraw, FetchedVerticesKeepNggVertexAndInstanceIds) {
       if (pixels[(y * 16 + x) * 4] == 255)
         ++quadrants[(y / 8) * 2 + x / 8];
   EXPECT_EQ(quadrants, (base::Array<u32, 4>{1, 1, 1, 1}));
+}
+
+TEST(VkDraw, Ps4SettledIndirectDrawsConsumeUpdatedArgumentsOnTheGpu) {
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) ||
+      !gpu::render::Device().caps().draw_indirect)
+    GTEST_SKIP() << "Indirect draws are required";
+  auto* memory = static_cast<u32*>(
+      host_memory::AllocMem(reinterpret_cast<void*>(0x1250000000ull), 1048576,
+                            host_memory::PageProtection::kW,
+                            host_memory::AllocationType::kReservecommit));
+  ASSERT_NE(memory, nullptr);
+  const u32 vs[] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000, 0xbf810000};
+  const u32 ps[] = {0x7e0002f2, 0x7e020280, 0xf800080f, 0x00010100, 0xbf810000};
+  std::memcpy(memory, vs, sizeof(vs));
+  std::memcpy(memory + 1024, ps, sizeof(ps));
+  auto* arguments = memory + 16384;
+  auto* indices = memory + 32768;
+  std::fill_n(indices, 8, 0u);
+  using namespace gpu::ps4;
+  gpu::Regs regs;
+  const u64 shader = reinterpret_cast<u64>(memory);
+  regs[gpu::mmSPI_SHADER_PGM_LO_VS] = shader >> 8;
+  regs[gpu::mmSPI_SHADER_PGM_HI_VS] = shader >> 40;
+  regs[gpu::mmSPI_SHADER_PGM_LO_PS] = (shader + 4096) >> 8;
+  regs[gpu::mmSPI_SHADER_PGM_HI_PS] = (shader + 4096) >> 40;
+  regs[gpu::mmVGT_PRIMITIVE_TYPE] = 1;
+  regs[gpu::mmCB_TARGET_MASK] = 15;
+  regs[gpu::mmCB_SHADER_MASK] = 15;
+  regs[gpu::mmCB_COLOR0_INFO] = 10u << 2;
+  regs[gpu::mmCB_COLOR0_PITCH] = 1;
+  regs[gpu::mmCB_COLOR0_SLICE] = 3;
+  regs[gpu::mmPA_SC_SCREEN_SCISSOR_BR] = (16u << 16) | 16;
+  regs[gpu::mmPA_CL_CLIP_CNTL] = 1u << 19;
+  regs[gpu::mmPA_CL_VPORT_XSCALE] = regs[gpu::mmPA_CL_VPORT_XOFFSET] =
+      base::BitCast<u32>(8.f);
+  regs[gpu::mmPA_CL_VPORT_YSCALE] = base::BitCast<u32>(-8.f);
+  regs[gpu::mmPA_CL_VPORT_YOFFSET] = base::BitCast<u32>(8.f);
+  const u32 body[] = {0, 0, 0, 0};
+  for (u32 trial = 0; trial < 8; ++trial) {
+    SCOPED_TRACE(trial);
+    const bool indexed = trial >= 4;
+    const u64 target = shader + 196608 + trial * 65536;
+    regs[gpu::mmCB_COLOR0_BASE] = target >> 8;
+    arguments[0] = 7;
+    arguments[1] = 3;
+    arguments[2] = 2;
+    arguments[3] = 0;
+    arguments[4] = 1;
+    DrawPacket packet;
+    packet.op = indexed ? gpu::IT_DRAW_INDEX_INDIRECT : gpu::IT_DRAW_INDIRECT;
+    packet.body = body;
+    packet.count = 4;
+    packet.indirect_base = reinterpret_cast<u64>(arguments);
+    packet.index_base = reinterpret_cast<u64>(indices);
+    packet.index_type = 1;
+    packet.index_max = 8;
+    gpu::render::DrawInfo draw;
+    ASSERT_TRUE(BuildDrawInfo(renderer, regs, packet, draw));
+    EXPECT_EQ(draw.indirect_args, reinterpret_cast<u64>(arguments));
+    if (indexed) {
+      EXPECT_EQ(draw.index_data, indices);
+      EXPECT_EQ(draw.index_count, 8u);
+    }
+    arguments[0] = (trial & 3) == 1 ? 0 : 1;
+    arguments[1] = (trial & 3) == 2 ? 0 : 1;
+    arguments[2] = indexed ? 3 : 5;
+    arguments[3] = indexed ? 0 : 7;
+    arguments[4] = 7;
+    gpu::render::BeginFrame(renderer);
+    const u64 staged = gpu::render::cs::g_indirect_staged_n;
+    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+    EXPECT_EQ(gpu::render::cs::g_indirect_staged_n, staged + 1);
+    const u32 slot_index = gpu::render::g_frame.slot_idx;
+    gpu::render::EndFrame(renderer, draw.rt_base);
+    const auto& slot = gpu::render::g_frame.slots[slot_index];
+    ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+    ASSERT_TRUE(slot.presentable);
+    const auto* pixels = slot.readback->mapped();
+    u32 red = 0;
+    for (u32 i = 0; i < 16 * 16; ++i)
+      red += pixels[i * 4] == 255;
+    EXPECT_EQ(red, (trial & 3) == 1 || (trial & 3) == 2 ? 0u : 1u);
+  }
+  host_memory::FreeMem(memory, 1048576);
 }
 
 TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
