@@ -15,6 +15,7 @@
 #include "base/logging.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
+#include "base/time/time.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/guest_memory.h"
 #include "gpu/render/compute.h"
@@ -75,6 +76,7 @@ struct Remap {
 };
 base::Mutex g_remap_lock;
 base::Vector<Remap> g_remaps;
+base::Vector<Remap> g_maps_dirty;
 
 u8* g_alias = nullptr;
 u64 g_alias_size = 0;
@@ -101,7 +103,7 @@ struct Block {
   u64* saved = nullptr;
   base::Atomic<u8>* redirected = nullptr;
 };
-u32 g_syncs = 0;
+u64 g_periodic_at = 0;
 int g_init_state = -1;
 
 int FindDmemFd() {
@@ -151,11 +153,29 @@ void AttachDirectAlias(bool force = false) {
   g_maps_read_at = ~0ull;
 }
 
-void ReadMaps(bool force = false) {
+bool MapsDirtyIn(u64 lo, u64 hi) {
+  base::LockGuard lock(g_remap_lock);
+  if (g_maps_dirty.size() > 4096)
+    return true;
+  for (const Remap& r : g_maps_dirty)
+    if (r.base < hi && lo < r.end)
+      return true;
+  return false;
+}
+
+// Parsing /proc/self/maps costs milliseconds with tens of thousands of
+// mappings, so a lookup only rereads it when a remap touched [lo, hi).
+void ReadMaps(bool force = false, u64 lo = 0, u64 hi = ~0ull) {
   const u64 generation =
       gpu::GuestMappingGeneration().load(base::memory_order_acquire);
   if (!force && g_maps_read_at == generation)
     return;
+  if (!force && g_maps_read_at != ~0ull && hi != ~0ull && !MapsDirtyIn(lo, hi))
+    return;
+  {
+    base::LockGuard lock(g_remap_lock);
+    g_maps_dirty.clear();
+  }
   FILE* f = std::fopen("/proc/self/maps", "r");
   if (!f)
     return;
@@ -185,6 +205,38 @@ void ReadMaps(bool force = false) {
     g_maps.push_back({start, end, offset});
   }
   std::fclose(f);
+}
+
+// Whether a remap since the last read moved memory the GPU has in its table.
+bool DirtyTouchesGpu() {
+  base::Vector<Remap> dirty;
+  {
+    base::LockGuard lock(g_remap_lock);
+    if (g_maps_dirty.size() > 4096)
+      return true;
+    dirty = g_maps_dirty;
+  }
+  for (const Remap& r : dirty) {
+    const u64 first = r.base & ~((1ull << kDirectBlockShift) - 1);
+    if (((r.end - first) >> kDirectBlockShift) < g_filled.size()) {
+      for (u64 b = first; b < r.end; b += 1ull << kDirectBlockShift)
+        if (g_filled.count(b))
+          return true;
+    } else {
+      for (u64 b : g_filled)
+        if (b < r.end && r.base < b + (1ull << kDirectBlockShift))
+          return true;
+    }
+    auto it = g_host_imports.upper_bound(r.base);
+    if (it != g_host_imports.begin())
+      --it;
+    if (it != g_host_imports.end() && it->first < r.end &&
+        r.base < it->second.end)
+      return true;
+    if (++it != g_host_imports.end() && it->first < r.end)
+      return true;
+  }
+  return false;
 }
 
 const Mapping* FindMappingIn(const base::Vector<Mapping>& maps, u64 address) {
@@ -291,7 +343,6 @@ void InvalidateCopiedImports() {
   }
   if (remaps.empty())
     return;
-  ReadMaps();
   for (const auto& remap : remaps) {
     auto it = g_host_imports.upper_bound(remap.base);
     if (it != g_host_imports.begin())
@@ -511,7 +562,7 @@ u64 EntryFor(u64 block) {
 }
 
 void Fill(u64 address) {
-  ReadMaps();
+  ReadMaps(false, address & ~(kChunk - 1), (address & ~(kChunk - 1)) + kChunk);
   if (GuestDirectIndex(address) == ~0ull)
     return;
   const u64 first = address & ~(kChunk - 1);
@@ -590,6 +641,7 @@ void NoteGuestDirectRemap(u64 base, u64 bytes) {
     return;
   base::LockGuard lock(g_remap_lock);
   g_remaps.push_back({base, base + bytes});
+  g_maps_dirty.push_back({base, base + bytes});
 }
 
 bool InDirectAlias(u64 va) {
@@ -605,7 +657,7 @@ void DirectRedirect(u64 block, u64 device_address) {
   if (!target.entry)
     return;
   if (!target.redirected->load(base::memory_order_acquire)) {
-    ReadMaps();
+    ReadMaps(false, block, block + (1ull << kDirectBlockShift));
     *target.saved = EntryFor(block);
     g_filled.insert(block);
   }
@@ -627,7 +679,8 @@ void DirectRestore(u64 block) {
 rhi::Buffer* DirectImportAt(u64 address, u64* offset, u64* bytes) {
   if (!g_alias && !InitGuestDirect())
     return nullptr;
-  ReadMaps();
+  ReadMaps(false, address & ~(kChunk - 1),
+           (address & ~(kChunk - 1)) + 2 * kChunk);
   const Mapping* m = FindMapping(address);
   if (!m) {
     u64 base = 0;
@@ -678,7 +731,7 @@ BindImport BindSpan(u64 start, u64 cls) {
 rhi::Buffer* DirectBindAt(u64 address, u64 bytes, u64* offset) {
   if (!bytes || (!g_alias && !InitGuestDirect()))
     return nullptr;
-  ReadMaps();
+  ReadMaps(false, address, address + bytes);
   const Mapping* m = FindMapping(address);
   if (!m || address + bytes > m->end)
     return nullptr;
@@ -701,9 +754,13 @@ void SyncGuestDirect() {
   if (!gcn::g_direct_table && !InitGuestDirect())
     return;
   InvalidateCopiedImports();
-  const bool periodic = ++g_syncs % 256 == 0;
+  const u64 now = base::TickClock::NowNs();
+  const bool periodic = now - g_periodic_at >= 1000000000ull;
+  if (periodic)
+    g_periodic_at = now;
   AttachDirectAlias(periodic);
-  ReadMaps(periodic);
+  if (periodic || DirtyTouchesGpu())
+    ReadMaps(true);
   if (g_maps_changed) {
     PruneImports();
     g_maps_changed = false;
@@ -758,7 +815,7 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_filled);
   guest::ResetResource(g_saved);
   guest::ResetResource(g_redirected);
-  guest::ResetResource(g_syncs);
+  guest::ResetResource(g_periodic_at);
   guest::ResetResource(g_host_maps);
   guest::ResetResource(g_host_imports);
   guest::ResetResource(g_leaves);
@@ -768,6 +825,7 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_next_leaf);
   guest::ResetResource(g_map_snapshot);
   guest::ResetResource(g_remaps);
+  guest::ResetResource(g_maps_dirty);
 });
 }  // namespace
 
