@@ -16,6 +16,7 @@
 #include "host_memory/host_memory.h"
 #include "options/options.h"
 
+#include "base/algorithm.h"
 #include "base/containers/hash_map.h"
 #include "base/containers/set.h"
 #include "base/containers/vector.h"
@@ -379,10 +380,20 @@ void PrefetchComputeDispatch(const Regs& regs) {
 void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
-                     u32 count) {
+                     u32 count,
+                     u64 indirect_args) {
   DELTA_ZONE("ps4.dispatch");
-  const u32 groups[3] = {count >= 1 ? body[0] : 0, count >= 2 ? body[1] : 0,
-                         count >= 3 ? body[2] : 0};
+  u32 groups[3] = {count >= 1 ? body[0] : 0, count >= 2 ? body[1] : 0,
+                   count >= 3 ? body[2] : 0};
+  const u32 initiator = count >= 4 ? body[3] : 5;
+  u32 group_base[3]{};
+  if (!(initiator & 4))
+    for (u32 axis = 0; axis < 3; ++axis) {
+      group_base[axis] = regs[mmCOMPUTE_START_X + axis];
+      if (groups[axis] <= group_base[axis])
+        return;
+      groups[axis] -= group_base[axis];
+    }
   const u64 cs_addr = (static_cast<u64>(regs[mmCOMPUTE_PGM_HI] & 0xFF) << 32 |
                        regs[mmCOMPUTE_PGM_LO])
                       << 8;
@@ -407,10 +418,11 @@ void DispatchCompute(render::Renderer& renderer,
   }
   if (kNoCs || !renderer.available())
     return;
-  if (RunFillKernelAsFill(renderer, cs_addr, groups, threads, user_sgpr,
-                         tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0)) ||
-      RunRepeatFillKernelAsFill(renderer, cs_addr, groups, threads, user_sgpr,
-                               tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0)))
+  if (!indirect_args && !group_base[0] && !group_base[1] && !group_base[2] &&
+      (RunFillKernelAsFill(renderer, cs_addr, groups, threads, user_sgpr,
+                           tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0)) ||
+       RunRepeatFillKernelAsFill(renderer, cs_addr, groups, threads, user_sgpr,
+                                 tgid_enable, regs.At(mmCOMPUTE_USER_DATA_0))))
     return;
 
   const gcn::RecompiledCs& rc =
@@ -431,6 +443,8 @@ void DispatchCompute(render::Renderer& renderer,
   const u32* user_data = regs.At(mmCOMPUTE_USER_DATA_0);
   render::ComputeInfo ci;
   ci.cs_addr = cs_addr;
+  ci.indirect_args = indirect_args;
+  base::Copy(group_base, group_base + 3, ci.group_base);
   ci.groups[0] = groups[0];
   ci.groups[1] = groups[1];
   ci.groups[2] = groups[2];
@@ -543,8 +557,9 @@ void DispatchCompute(render::Renderer& renderer,
   ci.gds_binding = rc.gds_binding;
   if (!ci.num_res)
     return;
-  ci.expanded_htile_base =
-      ExpandedHtileBase(ci, threads, user_sgpr, tgid_enable);
+  if (!indirect_args && !group_base[0] && !group_base[1] && !group_base[2])
+    ci.expanded_htile_base =
+        ExpandedHtileBase(ci, threads, user_sgpr, tgid_enable);
 
   // Queued behind the draws, so the walk moves on while the renderer thread
   // records. What it writes is announced as pending: a walk read of those
@@ -569,6 +584,37 @@ void DispatchCompute(render::Renderer& renderer,
   const bool executed = render::Dispatch(renderer, ci);
   if (trace)
     TraceCsDispatch(cs_addr, executed, ci.num_res);
+}
+
+void DispatchComputeIndirect(render::Renderer& renderer,
+                             const Regs& regs,
+                             const u32* body,
+                             u32 count,
+                             u64 argument_base) {
+  if (count < 2 || (count == 2 && !argument_base))
+    return;
+  const u64 args = count >= 3 ? body[0] | (u64(body[1] & 0xff) << 32)
+                              : argument_base + body[0];
+  if ((args & 3) || !IsGuestAddress(args) ||
+      !gpu::IsReadableRangeCached(args, 12))
+    return;
+  const u32 initiator = body[count >= 3 ? 2 : 1];
+  const bool starts_at_zero =
+      (initiator & 4) || (!regs[mmCOMPUTE_START_X] &&
+                          !regs[mmCOMPUTE_START_Y] && !regs[mmCOMPUTE_START_Z]);
+  if (starts_at_zero &&
+      (render::CanDispatchIndirect(args) || WalkReadWouldWait(args, 12))) {
+    const u32 placeholder[] = {1, 1, 1, initiator};
+    DispatchCompute(renderer, regs, placeholder, 4, args);
+    return;
+  }
+  FlushForWalkRead(renderer, args, 12, "indirect-cs");
+  if (!render::GuestBytesSettled(args, 12))
+    return;
+  u32 dimensions[4];
+  std::memcpy(dimensions, reinterpret_cast<const void*>(args), 12);
+  dimensions[3] = initiator;
+  DispatchCompute(renderer, regs, dimensions, 4);
 }
 
 }  // namespace gpu::ps4

@@ -78,7 +78,8 @@ u32 g_presented_frames = 0;
 struct IndexState {
   u32 type = 0;           // VGT_DMA_INDEX_TYPE[1:0]: 0 = 16-bit, 1 = 32-bit
   u64 base = 0;           // IT_INDEX_BASE (DRAW_INDEX_2 carries its own)
-  u64 indirect_base = 0;  // IT_SET_BASE(1): where indirect args live
+  u64 indirect_base = 0;
+  u64 dispatch_indirect_base = 0;
   u32 num_instances = 1;  // IT_NUM_INSTANCES, for the following draw(s)
   u32 max = 0;            // IT_INDEX_BUFFER_SIZE: indices the buffer holds
 };
@@ -1010,6 +1011,10 @@ u32 WalkDcb(render::Renderer& renderer,
       case IT_DISPATCH_DIRECT:
         DispatchCompute(renderer, g_regs, body, count);
         break;
+      case IT_DISPATCH_INDIRECT:
+        DispatchComputeIndirect(renderer, g_regs, body, count,
+                                g_index.dispatch_indirect_base);
+        break;
       case IT_SET_CONTEXT_REG:
         SetRegs(kContextRegBase, body, count);
         break;
@@ -1032,11 +1037,14 @@ u32 WalkDcb(render::Renderer& renderer,
           g_index.base = (static_cast<u64>(body[1] & 0xFF) << 32) | body[0];
         break;
       case IT_SET_BASE:
-        // base_index 1 = DRAW_INDIRECT_BASE: where the indirect draws read
-        // their argument structs from. body: baseIndex, addrLo, addrHi.
-        if (count >= 3 && (body[0] & 0xF) == 1)
-          g_index.indirect_base =
+        if (count >= 3 && (body[0] & 0xF) == 1) {
+          const u64 base =
               (static_cast<u64>(body[2] & 0xFF) << 32) | (body[1] & ~0x3u);
+          if (hdr & 2)
+            g_index.dispatch_indirect_base = base;
+          else
+            g_index.indirect_base = base;
+        }
         break;
       case IT_INDEX_BUFFER_SIZE:
         if (count >= 1)
@@ -1227,6 +1235,7 @@ void PrefetchWalk(Regs& regs, const u32* p, u32 words, u32 depth) {
         break;
       }
       case IT_DISPATCH_DIRECT:
+      case IT_DISPATCH_INDIRECT:
         PrefetchComputeDispatch(regs);
         break;
       case IT_WAIT_REG_MEM:

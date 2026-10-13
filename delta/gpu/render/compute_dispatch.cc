@@ -489,13 +489,16 @@ bool FindIndirectArgs(u64 args, IndirectArgs& out) {
     range_base = other;
     return false;
   });
-  if (!several && !found && kMirror && MirrorWritten(args, 12)) {
+  if (found || (kMirror && MirrorWritten(args, 12)))
+    CollectGuestWrites();
+  if (!several && !found && kMirror && MirrorHoldsNewest(args, 12)) {
     out = {g_mirror, MirrorOffset(args)};
     g_cs_indirect_n++;
     return true;
   }
   if (several || !found || !found->buf || found->imported ||
-      (found->image_staging && !found->truth) || args < range_base ||
+      !found->staged_clean || (found->image_staging && !found->truth) ||
+      args < range_base ||
       args + 12 > range_base + base::Min(found->size, found->guest_bytes))
     return false;
   MarkPending(*found);
@@ -505,9 +508,8 @@ bool FindIndirectArgs(u64 args, IndirectArgs& out) {
 }
 
 bool CanDispatchIndirect(u64 args) {
-  return Device().caps().dispatch_indirect &&
-         (CsRangeDirtyOverlapping(args, 12) ||
-          (kMirror && MirrorWritten(args, 12)));
+  return Device().caps().dispatch_indirect && !(args & 3) &&
+         gpu::IsReadableRangeCached(args, 12);
 }
 
 // A dispatch's sampled image, resolved the way a draw resolves one: the live
@@ -595,17 +597,14 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
   if (!renderer.available() || !ci.recomp || !ci.recomp->ok || !ci.num_res)
     return CsDeclined(ci, "2");
   const bool capture_dispatch = trace::CaptureDispatchInputs(renderer, ci);
-  // The group counts of an indirect dispatch stay on the GPU while a dispatch
-  // output holds them: the GPU reads them when this one runs.
-  // Elsewhere they are read here when no GPU write is on its way to them,
-  // and copied on the GPU, behind that write, when one is.
+  // The GPU reads resident arguments in place, or from a staged snapshot
+  // recorded behind their producer. Unavailable GPU paths read them here.
   IndirectArgs indirect;
   u32 groups[3] = {ci.groups[0], ci.groups[1], ci.groups[2]};
   if (ci.indirect_args && !FindIndirectArgs(ci.indirect_args, indirect)) {
     if (!gpu::IsReadableRange(ci.indirect_args, 12))
       return CsDeclined(ci, "indirect");
     if (Device().caps().dispatch_indirect &&
-        !GuestBytesSettled(ci.indirect_args, 12) &&
         FlushCsWritesForGpu(renderer, ci.indirect_args, 12, "indirect-cs")) {
       CsBatchBeginImpl();
       if (g_cs_batch_open)

@@ -13,7 +13,9 @@
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gcn/spirv/spv_emit.h"
 #include "gpu/gcn/spirv/spv_post.h"
+#include "gpu/ps4/cmd_processor.h"
 #include "gpu/ps4/compute_dispatch.h"
+#include "gpu/ps4/pm4.h"
 #include "gpu/ps4/render_queue.h"
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/draw_state.h"
@@ -1114,6 +1116,133 @@ TEST(VkDraw, LdsBindingsDoNotRequireRawBufferDescriptors) {
   EXPECT_EQ(pixel[1], 0);
   EXPECT_EQ(pixel[2], 0);
   EXPECT_EQ(pixel[3], 255);
+}
+
+TEST(GcnCompute, Ps4IndirectPacketsKeepGroupCountsOnTheGpu) {
+  const StagedComputeOnly staged;
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer) ||
+      !gpu::render::Device().caps().dispatch_indirect ||
+      !gpu::render::Device().caps().dispatch_base ||
+      !gpu::render::Device().caps().host_import)
+    GTEST_SKIP()
+        << "Indirect dispatch, dispatch base and host imports are required";
+  EnableWriteTracking();
+  auto* memory = static_cast<u32*>(
+      host_memory::AllocMem(reinterpret_cast<void*>(0x1240000000ull), 1048576,
+                            host_memory::PageProtection::kW,
+                            host_memory::AllocationType::kReservecommit));
+  ASSERT_NE(memory, nullptr);
+  const u32 consumer[] = {0x7e000204, 0x7e0202ff, 0x12345678,
+                          0xe0702000, 0x80000100, 0xbf810000};
+  auto* producer = memory + 1024;
+  std::memcpy(memory, consumer, sizeof(consumer));
+  std::memcpy(producer, consumer, sizeof(consumer));
+  producer[2] = 2;
+  const bool previous_tracking = gpu::render::cs::kCsTrack;
+  const auto previous_isa = gpu::gcn::DefaultIsaMode();
+  gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+  for (u32 trial = 0; trial < 10; ++trial) {
+    SCOPED_TRACE(trial);
+    gpu::render::cs::kCsTrack.set(trial == 9 || previous_tracking);
+    auto* arguments = memory + 16384 + trial * 1024;
+    auto* output = memory + 32768 + trial * 16384;
+    const bool gpu_counts = trial < 2 || trial == 5 || trial == 6 || trial == 9;
+    arguments[0] = gpu_counts ? 0 : trial == 3 ? 0 : 3;
+    arguments[1] = 1;
+    arguments[2] = trial == 4 ? 0 : 1;
+    std::fill_n(output, 16, 0u);
+    gpu::render::CollectGuestWrites();
+    const auto regs_for = [&](const u32* code, u32* buffer, u32 records) {
+      gpu::Regs regs;
+      const u64 pc = reinterpret_cast<u64>(code);
+      const u64 base = reinterpret_cast<u64>(buffer);
+      regs[gpu::mmCOMPUTE_PGM_LO] = pc >> 8;
+      regs[gpu::mmCOMPUTE_PGM_HI] = pc >> 40;
+      regs[gpu::mmCOMPUTE_NUM_THREAD_X] = 1;
+      regs[gpu::mmCOMPUTE_NUM_THREAD_Y] = 1;
+      regs[gpu::mmCOMPUTE_NUM_THREAD_Z] = 1;
+      regs[gpu::mmCOMPUTE_PGM_RSRC2] = (4 << 1) | (1 << 7);
+      regs[gpu::mmCOMPUTE_USER_DATA_0] = u32(base);
+      regs[gpu::mmCOMPUTE_USER_DATA_0 + 1] = u32(base >> 32) | (4u << 16);
+      regs[gpu::mmCOMPUTE_USER_DATA_0 + 2] = records;
+      regs[gpu::mmCOMPUTE_USER_DATA_0 + 3] = (4u << 15) | (4u << 12);
+      if (code == memory && (trial == 5 || trial == 6))
+        regs[gpu::mmCOMPUTE_START_X] = 1;
+      return regs;
+    };
+    gpu::render::BeginFrame(renderer);
+    if (gpu_counts) {
+      const u32 groups[] = {1, 1, 1, 5};
+      gpu::ps4::DispatchCompute(renderer, regs_for(producer, arguments, 3),
+                                groups, 4);
+      ASSERT_TRUE(gpu::render::CsRangeDirtyOverlapping(
+          reinterpret_cast<u64>(arguments), 12));
+    }
+    if (trial == 9)
+      *reinterpret_cast<volatile u32*>(arguments) = 1;
+    const u64 writeback = gpu::render::g_wb_why_bytes;
+    const u64 indirect = gpu::render::cs::g_cs_indirect_n;
+    const u64 staged_args = gpu::render::cs::g_indirect_staged_n;
+    base::Vector<u32> packets;
+    const auto packet = [&](u32 opcode, std::initializer_list<u32> body,
+                            bool compute = false) {
+      packets.push_back(0xc0000000u | ((body.size() - 1) << 16) |
+                        (opcode << 8) | (compute ? 2u : 0));
+      packets.insert(packets.end(), body);
+    };
+    const auto regs = regs_for(memory, output, 16);
+    packet(gpu::IT_SET_SH_REG, {gpu::mmCOMPUTE_START_X - gpu::kShRegBase,
+                                regs[gpu::mmCOMPUTE_START_X], 0, 0, 1, 1, 1});
+    packet(gpu::IT_SET_SH_REG,
+           {gpu::mmCOMPUTE_PGM_LO - gpu::kShRegBase,
+            regs[gpu::mmCOMPUTE_PGM_LO], regs[gpu::mmCOMPUTE_PGM_HI]});
+    packet(gpu::IT_SET_SH_REG, {gpu::mmCOMPUTE_PGM_RSRC2 - gpu::kShRegBase,
+                                regs[gpu::mmCOMPUTE_PGM_RSRC2]});
+    packet(gpu::IT_SET_SH_REG, {gpu::mmCOMPUTE_USER_DATA_0 - gpu::kShRegBase,
+                                regs[gpu::mmCOMPUTE_USER_DATA_0],
+                                regs[gpu::mmCOMPUTE_USER_DATA_0 + 1],
+                                regs[gpu::mmCOMPUTE_USER_DATA_0 + 2],
+                                regs[gpu::mmCOMPUTE_USER_DATA_0 + 3]});
+    const u64 argument_base = reinterpret_cast<u64>(arguments) - 16;
+    const u32 initiator = trial == 5 ? 1 : 5;
+    if (trial == 1 || trial == 3 || trial == 7) {
+      packet(gpu::IT_SET_BASE,
+             {1, u32(argument_base), u32(argument_base >> 32)}, true);
+      packet(gpu::IT_SET_BASE, {1, 0, 0});
+      packet(gpu::IT_DISPATCH_INDIRECT, {trial == 7 ? 18u : 16u, initiator},
+             true);
+    } else if (trial == 8) {
+      packet(gpu::IT_DISPATCH_INDIRECT,
+             {u32(reinterpret_cast<u64>(arguments))});
+    } else {
+      const u64 args = reinterpret_cast<u64>(arguments);
+      packet(gpu::IT_DISPATCH_INDIRECT,
+             {u32(args), u32(args >> 32), initiator});
+    }
+    gpu::ps4::SubmitRingDcb(packets.data(), packets.size() * sizeof(u32));
+    gpu::ps4::StopRenderQueue();
+    if (gpu_counts && trial != 5 && trial != 9)
+      EXPECT_EQ(gpu::render::cs::g_cs_indirect_n, indirect + 1);
+    if (!gpu_counts && trial < 7)
+      EXPECT_EQ(gpu::render::cs::g_indirect_staged_n, staged_args + 1);
+    if (trial != 5 && trial != 9)
+      EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
+    gpu::render::EndFrame(renderer, 0);
+    ASSERT_TRUE(FlushCsWritesLanded(renderer));
+    for (u32 i = 0; i < 16; ++i) {
+      const bool written = trial < 2 || trial == 6 ? i < 2
+                           : trial == 2            ? i < 3
+                           : trial == 5            ? i == 1
+                           : trial == 9            ? i == 0
+                                                   : false;
+      EXPECT_EQ(output[i], written ? 0x12345678u : 0u) << i;
+    }
+  }
+  gpu::gcn::SetDefaultIsaMode(previous_isa);
+  gpu::render::cs::kCsTrack.set(previous_tracking);
+  host_memory::FreeMem(memory, 1048576);
 }
 
 TEST(GcnCompute, BlockImageWritesSupplyCompressedTexturesWithoutWriteback) {

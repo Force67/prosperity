@@ -17,6 +17,8 @@
 // Queue scheduling must work independently of a host graphics device.
 namespace {
 base::Vector<u32> g_dispatch_values;
+base::Vector<u64> g_dispatch_arguments;
+bool g_gpu_dispatch_args = false;
 base::Vector<base::Array<u32, 3>> g_dispatch_groups;
 base::Vector<u32> g_draw_instances;
 base::Vector<u32> g_draw_index_types;
@@ -248,6 +250,23 @@ TEST(AgcQueue, IndirectOffsetDispatchReadsCompletedGpuArguments) {
   EXPECT_EQ(g_pending_address, 0u);
 }
 
+TEST(AgcQueue,
+     IndirectDispatchDoesNotReadCpuDimensionsWhenGpuConsumptionIsAvailable) {
+  base::Array<u32, 3> args{0, 0, 0};
+  g_dispatch_groups.clear();
+  g_dispatch_arguments.clear();
+  g_gpu_dispatch_args = true;
+  g_flush_succeeds = false;
+  Words w;
+  Packet(w, 0x16, {Lo(args.data()), Hi(args.data()), 5});
+  EXPECT_EQ(Submit(w, 112), w.size());
+  g_gpu_dispatch_args = false;
+  g_flush_succeeds = true;
+  EXPECT_EQ(g_dispatch_groups, (base::Vector<base::Array<u32, 3>>{{1, 1, 1}}));
+  EXPECT_EQ(g_dispatch_arguments,
+            (base::Vector<u64>{reinterpret_cast<u64>(args.data())}));
+}
+
 TEST(AgcQueue, FailedArgumentWritebackDoesNotDispatchStaleDimensions) {
   base::Array<u32, 3> args{1, 1, 1};
   g_dispatch_groups.clear();
@@ -331,7 +350,8 @@ void DispatchCompute(render::Renderer&,
                      const Regs& regs,
                      const u32* body,
                      u32,
-                     u64) {
+                     u64 arguments) {
+  g_dispatch_arguments.push_back(arguments);
   g_dispatch_values.push_back(regs[mmCOMPUTE_USER_DATA_0]);
   g_dispatch_groups.push_back({body[0], body[1], body[2]});
 }
@@ -355,7 +375,7 @@ void DeferLabelsToGpu() {}
 void RecordComputeInFrame() {}
 void SyncGuestDirect() {}
 bool CanDispatchIndirect(u64) {
-  return false;
+  return g_gpu_dispatch_args;
 }
 bool GpuIndirectArgs(u64, u64) {
   return false;

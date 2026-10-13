@@ -864,9 +864,8 @@ void PublishPacket(void (*handle)(const u32*, u32),
       base, bytes);
 }
 
-// IT_DISPATCH_INDIRECT: the workgroup counts live in memory rather than in the
-// packet. Our submits run synchronously, so whatever wrote them has already
-// run and the counts are readable now.
+// IT_DISPATCH_INDIRECT keeps group counts on the GPU when the dispatch
+// starts at zero. Nonzero starts need CPU dimensions for DispatchBase.
 void HandleDispatchIndirect(render::Renderer& renderer,
                             const u32* body,
                             u32 count) {

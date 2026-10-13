@@ -157,8 +157,8 @@ u64 CsWritebackGeneration();
 // Whether any GPU-dirty compute range overlaps [base, base+bytes). O(1) when
 // nothing is dirty anywhere (the common case on the draw path).
 bool CsRangeDirtyOverlapping(u64 base, u64 bytes);
-// Whether a dispatch can take its group counts at `args` from the GPU
-// (ComputeInfo::indirect_args): a dispatch output holds them, still unflushed.
+// Whether a dispatch can let the GPU read the group counts at `args`
+// (ComputeInfo::indirect_args), resident or staged behind their producer.
 bool CanDispatchIndirect(u64 args);
 
 // A CP DMA immediate fill over guest memory. When the range covers a live

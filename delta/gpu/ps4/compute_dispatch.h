@@ -25,12 +25,20 @@
 
 namespace gpu::ps4 {
 
-// Execute one IT_DISPATCH_DIRECT. `body` is the packet body: workgroup counts
-// in x, y, z followed by the dispatch initiator.
+// Execute a direct dispatch, or let the GPU read `indirect_args`. `body`
+// contains dimensions (placeholders for indirect) and the dispatch initiator.
 void DispatchCompute(render::Renderer& renderer,
                      const Regs& regs,
                      const u32* body,
-                     u32 count);
+                     u32 count,
+                     u64 indirect_args = 0);
+
+// ME packets use an offset from SET_BASE(1); MEC packets carry an address.
+void DispatchComputeIndirect(render::Renderer& renderer,
+                             const Regs& regs,
+                             const u32* body,
+                             u32 count,
+                             u64 argument_base);
 
 // Start compiling the shader a dispatch with these registers would run.
 void PrefetchComputeDispatch(const Regs& regs);
