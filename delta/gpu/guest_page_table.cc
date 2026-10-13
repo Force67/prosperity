@@ -15,6 +15,19 @@ GuestPageTable& GuestPages() {
   return *table;
 }
 
+namespace {
+base::Atomic<bool (*)(u64, u64)> g_owner_holds{nullptr};
+}  // namespace
+
+bool GuestOwnerHolds(u64 first, u64 end) {
+  const auto holds = g_owner_holds.load(base::memory_order_acquire);
+  return holds && holds(first, end);
+}
+
+void SetGuestOwnerHolds(bool (*holds)(u64, u64)) {
+  g_owner_holds.store(holds, base::memory_order_release);
+}
+
 void GuestPageTable::Reset() {
   for (auto& entry : chunks_)
     if (auto* chunk = entry.exchange(nullptr))

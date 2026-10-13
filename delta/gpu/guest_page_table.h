@@ -89,6 +89,12 @@ class GuestPageTable {
 
 GuestPageTable& GuestPages();
 
+// Any thread: whether the GPU keeps part of [first, end) inaccessible to the
+// CPU (WriteTracker::SetOwner). Such pages are mapped, and the first CPU
+// access makes them current.
+bool GuestOwnerHolds(u64 first, u64 end);
+void SetGuestOwnerHolds(bool (*holds)(u64 first, u64 end));
+
 inline const GuestPageTable::Page* GuestPageTable::Find(u64 address) const {
   const Chunk* chunk = FindChunk(address);
   return chunk ? &chunk->pages[(address >> kPageShift) & (kPagesPerChunk - 1)]

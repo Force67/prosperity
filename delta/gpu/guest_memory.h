@@ -78,7 +78,9 @@ inline bool IsReadableRange(u64 address, u64 bytes) {
   // A short read or EFAULT is the answer, not a reason to ask again: parsing
   // the map costs milliseconds, and a replay chasing garbage pointers asks
   // often.
-  if (read != static_cast<ssize_t>(count))
+  // GPU-owned pages are protected until the CPU touches them, and readable
+  // as long as they are still mapped.
+  if (read != static_cast<ssize_t>(count) && !GuestOwnerHolds(address, end))
     return read < 0 && errno != EFAULT && IsReadableMapping(address, bytes);
 
   // Everything in between: mincore fails with ENOMEM when any page of the span

@@ -240,6 +240,7 @@ void WriteTracker::SetOwner(bool (*resolve)(u64, u64),
                             bool (*owns)(u64, u64)) {
   g_owner_owns.store(owns, base::memory_order_release);
   g_owner_resolve.store(resolve, base::memory_order_release);
+  SetGuestOwnerHolds(owns);
 }
 
 void WriteTracker::OpenedByOwner(u64 first, u64 end) {
