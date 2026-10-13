@@ -24,17 +24,17 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type,
   m.Decorate(block, spv::Decoration::Block);
   m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
   const Id ptr = m.TypePointer(StorageClass::StorageBuffer, u);
-  Id buffers[2];
-  for (u32 i = 0; i < 2; i++) {
+  Id buffers[3];
+  for (u32 i = 0; i < (indirect ? 3u : 2u); i++) {
     buffers[i] = m.Variable(m.TypePointer(StorageClass::StorageBuffer, block),
                             StorageClass::StorageBuffer);
     m.Decorate(buffers[i], spv::Decoration::DescriptorSet, {0});
     m.Decorate(buffers[i], spv::Decoration::Binding, {i});
   }
   const Id pc_type =
-      indirect ? m.TypeStruct({u, u, u, u}) : m.TypeStruct({u, u});
+      indirect ? m.TypeStruct({u, u, u, u, u}) : m.TypeStruct({u, u, u});
   m.Decorate(pc_type, spv::Decoration::Block);
-  for (u32 i = 0; i < (indirect ? 4u : 2u); i++)
+  for (u32 i = 0; i < (indirect ? 5u : 3u); i++)
     m.MemberDecorate(pc_type, i, spv::Decoration::Offset, {i * 4});
   const Id pc = m.Variable(m.TypePointer(StorageClass::PushConstant, pc_type),
                            StorageClass::PushConstant);
@@ -71,7 +71,7 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type,
   Id count = param(0), first = c(0);
   if (indirect) {
     const auto argument = [&](u32 i) {
-      return m.Load(u, at(0, op(Op::OpIAdd, param(2), c(i))));
+      return m.Load(u, at(2, op(Op::OpIAdd, param(3), c(i))));
     };
     first = argument(2);
     const Id available =
@@ -91,7 +91,7 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type,
     m.BranchConditional(first_invocation, write_args, args_done);
     m.OpenBlock(write_args);
     for (u32 i = 0; i < 5; i++)
-      m.Store(at(1, op(Op::OpIAdd, param(3), c(i))), i == 0   ? count
+      m.Store(at(1, op(Op::OpIAdd, param(4), c(i))), i == 0   ? count
                                                      : i == 2 ? c(0)
                                                               : argument(i));
     m.Branch(args_done);
@@ -132,7 +132,7 @@ base::Vector<u32> BuildIndexConversionShader(u32 index_type,
   }
   source = op(Op::OpIAdd, source, first);
   const u32 bytes = index_type == 1 ? 4 : index_type == 2 ? 1 : 2;
-  const Id address = op(Op::OpIMul, source, c(bytes));
+  const Id address = op(Op::OpIAdd, op(Op::OpIMul, source, c(bytes)), param(2));
   Id value = m.Load(u, at(0, op(Op::OpShiftRightLogical, address, c(2))));
   if (bytes != 4) {
     const Id shift = op(Op::OpIMul, op(Op::OpBitwiseAnd, address, c(3)), c(8));

@@ -723,13 +723,16 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
         SCOPED_TRACE(type);
         SCOPED_TRACE(quads);
         const u32 bytes = type == 1 ? 4 : type == 2 ? 1 : 2;
-        base::Vector<u8> source((source_count * bytes + 3) & ~3u, 0xa5);
+        const u32 source_byte = type == 1 ? 12 : type == 0 ? 6 : 3;
+        base::Vector<u8> source((source_byte + source_count * bytes + 3) & ~3u,
+                                0xa5);
         base::Vector<u32> indices(source_count);
         for (u32 i = 0; i < source_count; i++) {
           indices[i] = type == 1   ? 0x12340000u + i
                        : type == 0 ? (0x3400u + i) & 0xffffu
                                    : i & 0xffu;
-          std::memcpy(source.data() + i * bytes, &indices[i], bytes);
+          std::memcpy(source.data() + source_byte + i * bytes, &indices[i],
+                      bytes);
         }
         const u32 argument_at = source.size() / 4;
         const u32 arguments[] = {requested, 2, first, u32(-3), 5};
@@ -749,15 +752,17 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
         Buffer* output = Own(device_->CreateBuffer(bd));
         Buffer* readback = Readback(bd.size);
         BindGroupLayoutDesc ld;
-        for (u32 i = 0; i < 2; i++)
+        for (u32 i = 0; i < (indirect ? 3u : 2u); i++)
           ld.bindings.push_back(
               {i, BindingType::kStorageBuffer, kStageCompute});
         ld.bindings[0].read_only = true;
+        if (indirect)
+          ld.bindings[2].read_only = true;
         ld.push = true;
         BindGroupLayout* set = Own(device_->CreateBindGroupLayout(ld));
         PipelineLayoutDesc pl;
         pl.groups = {set};
-        pl.push_constant_bytes = indirect ? 16 : 8;
+        pl.push_constant_bytes = indirect ? 20 : 12;
         pl.push_constant_stages = kStageCompute;
         ComputePipelineDesc cp;
         cp.layout = Own(device_->CreatePipelineLayout(pl));
@@ -779,20 +784,25 @@ TEST_P(RhiConformance, IndexConversionHandlesPackedInputsAndQuadTails) {
         list_->Barrier(kAccessCopyWrite | kAccessHostWrite,
                        kAccessComputeRead | kAccessComputeWrite);
         list_->SetPipeline(pipe);
-        BindingWrite writes[2];
+        BindingWrite writes[3];
         writes[0].buffer = input;
         writes[0].range = source.size();
         writes[1].binding = 1;
         writes[1].buffer = output;
         writes[1].range = bd.size;
-        list_->PushBindGroup(0, set, writes, 2);
+        if (indirect) {
+          writes[2].binding = 2;
+          writes[2].buffer = input;
+          writes[2].range = source.size();
+        }
+        list_->PushBindGroup(0, set, writes, indirect ? 3 : 2);
         const u32 available = first < capacity ? capacity - first : 0;
         const u32 count =
             indirect ? base::Min(requested, available) / 4 * 6 : maximum;
         const u32 output_args = kOffset + maximum;
         const u32 params[] = {indirect ? capacity : maximum, kOffset,
-                              argument_at, output_args};
-        list_->SetPushConstants(0, indirect ? sizeof(params) : 8, params);
+                              source_byte, argument_at, output_args};
+        list_->SetPushConstants(0, indirect ? sizeof(params) : 12, params);
         list_->Dispatch(strided ? 3 : base::Max(1u, (maximum + 63) / 64), 1, 1);
         list_->Barrier(kAccessComputeWrite, kAccessCopyRead);
         list_->CopyBuffer(readback, 0, output, 0, bd.size);
@@ -829,12 +839,13 @@ TEST_P(RhiConformance, IndirectQuadConversionFeedsDrawWithoutReadback) {
     GTEST_SKIP() << "no indirect drawing";
   BindGroupLayoutDesc ld;
   ld.bindings = {{0, BindingType::kStorageBuffer, kStageCompute, true},
-                 {1, BindingType::kStorageBuffer, kStageCompute}};
+                 {1, BindingType::kStorageBuffer, kStageCompute},
+                 {2, BindingType::kStorageBuffer, kStageCompute, true}};
   ld.push = true;
   BindGroupLayout* set = Own(device_->CreateBindGroupLayout(ld));
   PipelineLayoutDesc pl;
   pl.groups = {set};
-  pl.push_constant_bytes = 16;
+  pl.push_constant_bytes = 20;
   pl.push_constant_stages = kStageCompute;
   ComputePipelineDesc cp;
   cp.layout = Own(device_->CreatePipelineLayout(pl));
@@ -850,6 +861,7 @@ TEST_P(RhiConformance, IndirectQuadConversionFeedsDrawWithoutReadback) {
   bd.size = 64;
   bd.usage = kBufferStorage | kBufferCopyDst;
   Buffer* input = Own(device_->CreateBuffer(bd));
+  Buffer* argument_input = Own(device_->CreateBuffer(bd));
   bd.size = 96;
   bd.usage = kBufferStorage | kBufferIndex | kBufferIndirect;
   Buffer* output = Own(device_->CreateBuffer(bd));
@@ -865,20 +877,23 @@ TEST_P(RhiConformance, IndirectQuadConversionFeedsDrawWithoutReadback) {
   TextureView* view = View(target);
   list_->Begin();
   list_->UpdateBuffer(input, 0, sizeof(indices), indices);
-  list_->UpdateBuffer(input, 32, sizeof(arguments), arguments);
+  list_->UpdateBuffer(argument_input, 32, sizeof(arguments), arguments);
   list_->Barrier(kAccessCopyWrite, kAccessCopyWrite);
-  list_->FillBuffer(input, 32, 4, 7);
+  list_->FillBuffer(argument_input, 32, 4, 7);
   list_->Barrier(kAccessCopyWrite | kAccessHostWrite,
                  kAccessComputeRead | kAccessComputeWrite | kAccessVertexRead);
   list_->SetPipeline(compute);
-  BindingWrite writes[2];
+  BindingWrite writes[3];
   writes[0].buffer = input;
   writes[0].range = input->desc().size;
   writes[1].binding = 1;
   writes[1].buffer = output;
   writes[1].range = output->desc().size;
-  list_->PushBindGroup(0, set, writes, 2);
-  const u32 params[] = {11, 4, 8, 16};
+  writes[2].binding = 2;
+  writes[2].buffer = argument_input;
+  writes[2].range = argument_input->desc().size;
+  list_->PushBindGroup(0, set, writes, 3);
+  const u32 params[] = {11, 4, 0, 8, 16};
   list_->SetPushConstants(0, sizeof(params), params);
   list_->Dispatch(1, 1, 1);
   TextureBarrier barrier{target, TextureState::kUndefined,

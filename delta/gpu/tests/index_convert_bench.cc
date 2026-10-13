@@ -1,5 +1,5 @@
-// GPU timestamps for capacity-sized versus bounded indirect quad conversion.
-// Usage: index_convert_bench [vulkan|opengl|d3d12]
+// GPU timestamps for resident versus copied input and bounded indirect quad
+// conversion. Usage: index_convert_bench [vulkan|opengl|d3d12]
 
 #include <algorithm>
 #include <cstdio>
@@ -35,12 +35,13 @@ int main(int argc, char** argv) {
   };
   BindGroupLayoutDesc ld;
   ld.bindings = {{0, BindingType::kStorageBuffer, kStageCompute, true},
-                 {1, BindingType::kStorageBuffer, kStageCompute}};
+                 {1, BindingType::kStorageBuffer, kStageCompute},
+                 {2, BindingType::kStorageBuffer, kStageCompute, true}};
   ld.push = true;
   auto* set = own(device->CreateBindGroupLayout(ld));
   PipelineLayoutDesc pl;
   pl.groups = {set};
-  pl.push_constant_bytes = 16;
+  pl.push_constant_bytes = 20;
   pl.push_constant_stages = kStageCompute;
   ComputePipelineDesc cp;
   cp.layout = own(device->CreatePipelineLayout(pl));
@@ -57,41 +58,51 @@ int main(int argc, char** argv) {
   auto* list = own(device->CreateCommandList());
   if (!set || !cp.layout || !convert || !strided || !timestamps || !list)
     return 1;
-  std::puts("capacity,requested,capacity_us,bounded_us");
+  std::puts("capacity,requested,capacity_us,bounded_us,copied_us");
   for (u32 capacity : {64u, 1024u, 16384u, 65536u, 262144u, 1048576u}) {
     const u32 maximum = capacity / 4 * 6;
     BufferDesc bd;
     bd.size = u64(capacity) * 4 + 20;
-    bd.usage = kBufferStorage | kBufferCopyDst;
+    bd.usage = kBufferStorage | kBufferCopyDst | kBufferCopySrc;
     auto* input = own(device->CreateBuffer(bd));
+    auto* staged = own(device->CreateBuffer(bd));
     bd.size = u64(maximum) * 4 + 32;
     bd.usage = kBufferStorage | kBufferIndirect;
     auto* output = own(device->CreateBuffer(bd));
-    if (!input || !output)
+    if (!input || !staged || !output)
       return 1;
     for (u32 requested : {0u, 4u, capacity / 8, capacity}) {
-      double elapsed[2]{};
-      for (u32 strategy = 0; strategy < 2; strategy++) {
+      double elapsed[3]{};
+      for (u32 strategy = 0; strategy < 3; strategy++) {
         list->Begin();
         list->ResetTimestamps(timestamps, 0, kSamples * 2);
         list->FillBuffer(input, 0, u64(capacity) * 4, 1);
         const u32 arguments[] = {requested, 1, 0, 0, 0};
         list->UpdateBuffer(input, u64(capacity) * 4, sizeof(arguments),
                            arguments);
-        list->Barrier(kAccessCopyWrite,
-                      kAccessComputeRead | kAccessComputeWrite);
-        BindingWrite writes[2];
-        writes[0].buffer = input;
+        list->Barrier(kAccessCopyWrite, kAccessComputeRead |
+                                            kAccessComputeWrite |
+                                            kAccessCopyRead);
+        BindingWrite writes[3];
+        writes[0].buffer = strategy == 2 ? staged : input;
         writes[0].range = input->desc().size;
         writes[1].binding = 1;
         writes[1].buffer = output;
         writes[1].range = output->desc().size;
-        const u32 params[] = {capacity, 0, capacity, maximum};
+        writes[2].binding = 2;
+        writes[2].buffer = writes[0].buffer;
+        writes[2].range = input->desc().size;
+        const u32 params[] = {capacity, 0, 0, capacity, maximum};
         for (u32 sample = 0; sample < kSamples; sample++) {
           list->WriteTimestamp(timestamps, sample * 2, true);
           for (u32 repeat = 0; repeat < kRepeats; repeat++) {
+            if (strategy == 2) {
+              list->Barrier(kAccessComputeRead, kAccessCopyWrite);
+              list->CopyBuffer(staged, 0, input, 0, input->desc().size);
+              list->Barrier(kAccessCopyWrite, kAccessComputeRead);
+            }
             list->SetPipeline(strategy ? strided : convert);
-            list->PushBindGroup(0, set, writes, 2);
+            list->PushBindGroup(0, set, writes, 3);
             list->SetPushConstants(0, sizeof(params), params);
             list->Dispatch(
                 strategy ? gcn::kIndexConversionGroups : (maximum + 63) / 64, 1,

@@ -28,6 +28,8 @@
 #include "gpu/render/device.h"
 #include "gpu/render/draw_recomp.h"
 #include "gpu/render/frame.h"
+#include "gpu/render/index_convert.h"
+#include "gpu/render/index_upload.h"
 #include "gpu/render/pipeline_cache.h"
 #include "gpu/render/render_target.h"
 #include "gpu/render/renderer.h"
@@ -2525,12 +2527,17 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
     const u64 writeback = gpu::render::g_wb_why_bytes;
     const u32 draws = gpu::render::g_frame.draws;
     const u64 conversions = gpu::g_index_convert_n;
+    const u64 copied_indices = gpu::g_index_convert_copy_bytes;
     const u64 cpu_indices = gpu::g_ring_ib_bytes;
     gpu::render::Draw(renderer, draw);
     EXPECT_EQ(gpu::render::g_frame.draws, draws + 1);
     if (narrow || quads) {
       EXPECT_EQ(gpu::g_index_convert_n, conversions + 1);
       EXPECT_EQ(gpu::g_ring_ib_bytes, cpu_indices);
+      if (cpu_source)
+        EXPECT_GT(gpu::g_index_convert_copy_bytes, copied_indices);
+      else
+        EXPECT_EQ(gpu::g_index_convert_copy_bytes, copied_indices);
       gpu::render::Draw(renderer, draw);
       EXPECT_EQ(gpu::render::g_frame.draws, draws + 2);
       EXPECT_EQ(gpu::g_index_convert_n, conversions + (indirect_quads ? 2 : 1));
@@ -2572,6 +2579,87 @@ TEST(VkDraw, IndirectGeometryKeepsDescriptorBoundsAndGpuIndices) {
     } else
       EXPECT_EQ(quadrants, (base::Array<u32, 4>{1, 1, 1, 1}));
   }
+}
+
+TEST(VkDraw, IndexConversionReadsResidentSubrangesAndStagesMisalignedInputs) {
+  options::Init();
+  auto& renderer = gpu::render::DefaultRenderer();
+  if (!gpu::render::Init(renderer))
+    GTEST_SKIP() << "A graphics device is required";
+  EnableWriteTracking();
+  alignas(65536) static u32 source[16384]{};
+  const u64 base = reinterpret_cast<u64>(source);
+  const u32 cs[4096] = {0x7e0202ff, 0x03020100, 0xe0702000, 0x80000100,
+                        0xbf810000};
+  const auto previous_isa = gpu::gcn::DefaultIsaMode();
+  gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+  static gpu::gcn::RecompiledCs compiled;
+  compiled = gpu::gcn::RecompileCompute(cs, 128, 1, 1, 4, 0, 0);
+  gpu::gcn::SetDefaultIsaMode(previous_isa);
+  ASSERT_TRUE(compiled.ok);
+  ASSERT_EQ(compiled.resources.size(), 1u);
+  gpu::render::BeginFrame(renderer);
+  gpu::render::ComputeInfo ci;
+  ci.cs_addr = reinterpret_cast<u64>(cs);
+  ci.recomp = &compiled;
+  ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
+  ci.num_res = 1;
+  ci.res[0].base = base;
+  ci.res[0].size = ci.res[0].guest_size = 512;
+  ci.res[0].binding = compiled.resources[0].binding;
+  ci.res[0].written = ci.res[0].shader_writes = true;
+  ci.user_data[0] = u32(base);
+  ci.user_data[1] = u32(base >> 32) | (4u << 16);
+  ci.user_data[2] = 128;
+  ci.user_data[3] = (4u << 15) | (4u << 12);
+  ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+  constexpr u32 types[] = {2, 0, 1, 0, 1};
+  constexpr u32 offsets[] = {259, 258, 260, 257, 257};
+  constexpr u32 count = 7, stride = 64;
+  const u64 output_base = gpu::render::g_ring.ib_offset;
+  const u64 writeback = gpu::render::g_wb_why_bytes;
+  const u64 copied = gpu::g_index_convert_copy_bytes;
+  u64 expected_copies = copied;
+  for (u32 trial = 0; trial < base::ArraySize(types); ++trial) {
+    SCOPED_TRACE(trial);
+    ASSERT_TRUE(gpu::render::ConvertGuestIndices(
+        renderer, base + offsets[trial], count, types[trial], false,
+        output_base + trial * stride));
+    if (trial >= 3)
+      expected_copies +=
+          count * gpu::render::GuestIndexElementBytes(types[trial]);
+    EXPECT_EQ(gpu::g_index_convert_copy_bytes, expected_copies);
+  }
+  EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
+  gpu::rhi::BufferDesc desc;
+  desc.size = base::ArraySize(types) * stride;
+  desc.usage = gpu::rhi::kBufferCopyDst;
+  desc.memory = gpu::rhi::MemoryKind::kReadback;
+  auto* readback = gpu::render::Device().CreateBuffer(desc);
+  ASSERT_NE(readback, nullptr);
+  auto* list = gpu::render::g_frame.list;
+  list->Barrier(gpu::rhi::kAccessComputeWrite, gpu::rhi::kAccessCopyRead);
+  list->CopyBuffer(readback, 0, gpu::render::g_ring.converted_ib, output_base,
+                   desc.size);
+  list->Barrier(gpu::rhi::kAccessCopyWrite, gpu::rhi::kAccessHostRead);
+  const u32 slot_index = gpu::render::g_frame.slot_idx;
+  gpu::render::EndFrame(renderer, 0);
+  ASSERT_TRUE(gpu::render::Device().Wait(
+      gpu::render::g_frame.slots[slot_index].submission));
+  for (u32 trial = 0; trial < base::ArraySize(types); ++trial) {
+    SCOPED_TRACE(trial);
+    const u32 bytes = gpu::render::GuestIndexElementBytes(types[trial]);
+    const auto* result =
+        reinterpret_cast<const u32*>(readback->mapped() + trial * stride);
+    for (u32 i = 0; i < count; ++i) {
+      u32 expected = 0;
+      for (u32 byte = 0; byte < bytes; ++byte)
+        expected |= ((offsets[trial] + i * bytes + byte) & 3) << (byte * 8);
+      EXPECT_EQ(result[i], expected) << i;
+    }
+  }
+  gpu::render::Device().Destroy(readback);
+  gpu::render::Device().WaitIdle();
 }
 
 TEST(VkDraw, IndexedRawVerticesUseLoadedDescriptorStride) {

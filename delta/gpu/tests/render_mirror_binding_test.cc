@@ -16,6 +16,7 @@
 #include "gpu/render/draw_recomp.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/guest_direct.h"
+#include "gpu/render/index_convert.h"
 #include "gpu/render/render_target.h"
 #include "gpu/render/renderer.h"
 #include "gpu/render/upload_ring.h"
@@ -804,6 +805,48 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     EXPECT_EQ(pixel[2], 0);
     EXPECT_EQ(pixel[3], 255);
   }
+  const u64 conversion_base = base + (7ull << 20);
+  gpu::render::BeginFrame(renderer);
+  const u64 conversion_offset = gpu::render::g_ring.ib_offset;
+  const u64 conversion_copies = gpu::g_index_convert_copy_bytes;
+  const u64 conversion_resolves = gpu::render::cs::g_mirror_resolves.load();
+  for (u32 trial = 0; trial < 2; ++trial) {
+    const u32 pattern = trial ? 0x07060504 : 0x03020100;
+    ASSERT_TRUE(gpu::render::GpuFill(conversion_base, gpu::render::kMirrorBlock,
+                                     pattern, pattern));
+    ASSERT_TRUE(gpu::render::ConvertGuestIndices(
+        renderer, conversion_base, 4, 2, true, conversion_offset + trial * 64));
+  }
+  EXPECT_EQ(gpu::g_index_convert_copy_bytes, conversion_copies);
+  EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), conversion_resolves);
+  gpu::rhi::BufferDesc conversion_desc;
+  conversion_desc.size = 128;
+  conversion_desc.usage = gpu::rhi::kBufferCopyDst;
+  conversion_desc.memory = gpu::rhi::MemoryKind::kReadback;
+  auto* conversion_readback =
+      gpu::render::Device().CreateBuffer(conversion_desc);
+  ASSERT_NE(conversion_readback, nullptr);
+  auto* conversion_list = gpu::render::g_frame.list;
+  conversion_list->Barrier(gpu::rhi::kAccessComputeWrite,
+                           gpu::rhi::kAccessCopyRead);
+  conversion_list->CopyBuffer(conversion_readback, 0,
+                              gpu::render::g_ring.converted_ib,
+                              conversion_offset, conversion_desc.size);
+  conversion_list->Barrier(gpu::rhi::kAccessCopyWrite,
+                           gpu::rhi::kAccessHostRead);
+  const auto& conversion_slot =
+      gpu::render::g_frame.slots[gpu::render::g_frame.slot_idx];
+  gpu::render::EndFrame(renderer, 0);
+  ASSERT_TRUE(gpu::render::Device().Wait(conversion_slot.submission));
+  constexpr u32 corners[] = {0, 1, 2, 0, 2, 3};
+  for (u32 trial = 0; trial < 2; ++trial) {
+    const auto* result = reinterpret_cast<const u32*>(
+        conversion_readback->mapped() + trial * 64);
+    for (u32 i = 0; i < base::ArraySize(corners); ++i)
+      EXPECT_EQ(result[i], corners[i] + trial * 4);
+  }
+  gpu::render::Device().Destroy(conversion_readback);
+  gpu::render::Device().WaitIdle();
 }
 
 }  // namespace

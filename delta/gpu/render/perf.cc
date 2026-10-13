@@ -443,11 +443,12 @@ void ReportFps() {
       pages = t.written_pages();
       collect_ns = t.collect_ns();
       BASE_LOGI("indexprof",
-                "per-frame GPU conversion x{:.0f} {:.1f}MB | CPU scan={:.2f}ms "
+                "per-frame GPU conversion x{:.0f} {:.1f}MB (copied {:.1f}MB) | "
+                "CPU scan={:.2f}ms "
                 "x{:.0f} {:.1f}MB",
                 g_index_convert_n / f, g_index_convert_bytes / f / 1e6,
-                g_ns_index_scan / f / 1e6, g_index_scan_n / f,
-                g_index_scan_bytes / f / 1e6);
+                g_index_convert_copy_bytes / f / 1e6, g_ns_index_scan / f / 1e6,
+                g_index_scan_n / f, g_index_scan_bytes / f / 1e6);
       BASE_LOGI("fillprof", "per-frame fill={:.2f}ms x{:.0f} {:.1f}MB",
                 g_ns_memory_fill / f / 1e6, g_memory_fill_n / f,
                 g_memory_fill_bytes / f / 1e6);
@@ -479,7 +480,7 @@ void ReportFps() {
     g_frame_hitch_n = 0;
     g_ns_gfx_present = g_ns_borrow_wait = 0;
     g_ring_vb_bytes = g_ring_ib_bytes = g_ring_cb_bytes = g_ring_raw_bytes = 0;
-    g_index_convert_n = g_index_convert_bytes = 0;
+    g_index_convert_n = g_index_convert_bytes = g_index_convert_copy_bytes = 0;
     g_index_scan_n = g_index_scan_bytes = g_ns_index_scan = 0;
     g_vb_kept_bytes = 0;
     g_bind_bytes = 0;

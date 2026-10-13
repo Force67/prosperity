@@ -48,15 +48,17 @@ bool ConvertGuestIndices(Renderer& renderer,
     const base::Vector<u32> code;
 #endif
     rhi::BindGroupLayoutDesc set;
-    for (u32 i = 0; i < 2; i++)
+    for (u32 i = 0; i < (indirect ? 3u : 2u); i++)
       set.bindings.push_back(
           {i, rhi::BindingType::kStorageBuffer, rhi::kStageCompute});
     set.bindings[0].read_only = true;
+    if (indirect)
+      set.bindings[2].read_only = true;
     set.push = true;
     p.set = code.empty() ? nullptr : Device().CreateBindGroupLayout(set);
     rhi::PipelineLayoutDesc layout;
     layout.groups = {p.set};
-    layout.push_constant_bytes = indirect ? 16 : 8;
+    layout.push_constant_bytes = indirect ? 20 : 12;
     layout.push_constant_stages = rhi::kStageCompute;
     p.layout = p.set ? Device().CreatePipelineLayout(layout) : nullptr;
     rhi::ComputePipelineDesc pipe;
@@ -69,7 +71,8 @@ bool ConvertGuestIndices(Renderer& renderer,
   if (!g_ring.converted_ib) {
     rhi::BufferDesc desc;
     desc.size = kIbRing;
-    desc.usage = rhi::kBufferStorage | rhi::kBufferIndex | rhi::kBufferIndirect;
+    desc.usage = rhi::kBufferStorage | rhi::kBufferIndex | rhi::kBufferIndirect |
+                 rhi::kBufferCopySrc;
     g_ring.converted_ib = Device().CreateBuffer(desc);
   }
   if (!g_ring.converted_ib)
@@ -78,52 +81,72 @@ bool ConvertGuestIndices(Renderer& renderer,
     return true;
   const u64 bytes = u64(count) * GuestIndexElementBytes(index_type);
   const u64 padded = (bytes + 3) & ~u64(3);
-  const u64 source_bytes = padded + (indirect ? 20 : 0);
-  if (!g_ring.index_convert_src ||
-      g_ring.index_convert_src->desc().size < source_bytes) {
-    rhi::BufferDesc desc;
-    desc.size = (source_bytes + 0x3fffff) & ~u64(0x3fffff);
-    desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
-    auto* replacement = Device().CreateBuffer(desc);
-    if (!replacement)
-      return false;
-    if (g_ring.index_convert_src)
-      g_cs_frame_retired.push_back(g_ring.index_convert_src);
-    g_ring.index_convert_src = replacement;
-  }
-  rhi::Buffer* raw = g_ring.index_convert_src;
+  rhi::Buffer* raw = nullptr;
+  u64 source_offset = 0;
+  const u64 source_base = base & ~u64(3);
+  const u64 source_bytes = (bytes + (base - source_base) + 3) & ~u64(3);
+  const bool resident = !(base & (GuestIndexElementBytes(index_type) - 1)) &&
+                        CsResidentGeometryBuffer(source_base, source_bytes,
+                                                 &raw, &source_offset) &&
+                        !(source_offset & 3);
   EndRegion();
+  if (resident) {
+    source_offset += base - source_base;
+  } else {
+    source_offset = 0;
+    if (!g_ring.index_convert_src ||
+        g_ring.index_convert_src->desc().size < padded) {
+      rhi::BufferDesc desc;
+      desc.size = (padded + 0x3fffff) & ~u64(0x3fffff);
+      desc.usage = rhi::kBufferStorage | rhi::kBufferCopyDst;
+      auto* replacement = Device().CreateBuffer(desc);
+      if (!replacement)
+        return false;
+      if (g_ring.index_convert_src)
+        g_cs_frame_retired.push_back(g_ring.index_convert_src);
+      g_ring.index_convert_src = replacement;
+    }
+    raw = g_ring.index_convert_src;
+    g_frame.list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+    if (!CsSupplyBuffer(base, bytes, raw, 0)) {
+      if (!FlushCsWritesForGpu(renderer, base, bytes, "index") ||
+          !RecordGuestRead(g_frame.list, base, bytes, raw))
+        return false;
+    }
+    g_index_convert_copy_bytes += bytes;
+  }
   auto* list = g_frame.list;
-  list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
-  if (!CsSupplyBuffer(base, bytes, raw, 0)) {
-    if (!FlushCsWritesForGpu(renderer, base, bytes, "index") ||
-        !RecordGuestRead(g_frame.list, base, bytes, raw))
-      return false;
-  }
-  list = g_frame.list;
-  if (indirect) {
-    list->Barrier(rhi::kAccessAllWrite, kAccessCopyRW);
-    list->CopyBuffer(raw, padded, *indirect_buffer, *indirect_offset, 20);
-  }
   list->Barrier(rhi::kAccessAllWrite, kAccessComputeRW);
   list->ProfileBegin(15);
   list->SetPipeline(p.pipe);
-  const u64 window =
-      offset & ~(u64(Device().caps().storage_offset_alignment) - 1);
-  rhi::BindingWrite writes[2];
+  const u64 alignment = base::Max(Device().caps().storage_offset_alignment, 1u);
+  const u64 window = offset & ~(alignment - 1);
+  const u64 source_window = source_offset & ~(alignment - 1);
+  const u64 source_byte = source_offset - source_window;
+  rhi::BindingWrite writes[3];
   writes[0].buffer = raw;
-  writes[0].range = source_bytes;
+  writes[0].offset = source_window;
+  writes[0].range = (source_byte + bytes + 3) & ~u64(3);
   writes[1].binding = 1;
   writes[1].buffer = g_ring.converted_ib;
   writes[1].offset = window;
   writes[1].range =
       offset + u64(output_count) * 4 - window + (indirect ? 20 : 0);
-  list->PushBindGroup(0, p.set, writes, 2);
-  const u32 params[] = {indirect ? count : output_count,
-                        static_cast<u32>((offset - window) / 4),
-                        static_cast<u32>(padded / 4),
-                        static_cast<u32>((offset - window) / 4 + output_count)};
-  list->SetPushConstants(0, indirect ? sizeof(params) : 8, params);
+  u64 argument_word = 0;
+  if (indirect) {
+    const u64 argument_window = *indirect_offset & ~(alignment - 1);
+    argument_word = (*indirect_offset - argument_window) / 4;
+    writes[2].binding = 2;
+    writes[2].buffer = *indirect_buffer;
+    writes[2].offset = argument_window;
+    writes[2].range = *indirect_offset - argument_window + 20;
+  }
+  list->PushBindGroup(0, p.set, writes, indirect ? 3 : 2);
+  const u32 params[] = {
+      indirect ? count : output_count, static_cast<u32>((offset - window) / 4),
+      static_cast<u32>(source_byte), static_cast<u32>(argument_word),
+      static_cast<u32>((offset - window) / 4 + output_count)};
+  list->SetPushConstants(0, indirect ? sizeof(params) : 12, params);
   list->Dispatch(strided ? gcn::kIndexConversionGroups
                          : base::Max(1u, (output_count + 63) / 64),
                  1, 1);

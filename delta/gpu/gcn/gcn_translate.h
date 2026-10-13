@@ -288,10 +288,11 @@ struct ImageTilingParams {
 
 base::Vector<u32> BuildImageTilingShader();
 
-// Packed guest indices to 32-bit indices. Push constants: output count and
-// destination dword offset. QUADLIST emits (a, b, c), (a, c, d).
-// Indirect QUADLIST: source capacity, destination dword offset, source
-// argument dword offset and destination argument dword offset.
+// Packed guest indices to 32-bit indices. Push constants: output count,
+// destination dword offset and source byte offset (aligned to the index width).
+// QUADLIST emits (a, b, c), (a, c, d). Indirect QUADLIST uses source capacity
+// instead of output count, followed by the argument dword offset in binding 2
+// and destination argument dword offset.
 enum class IndexConversionMode {
   kDirect,
   kIndirect,

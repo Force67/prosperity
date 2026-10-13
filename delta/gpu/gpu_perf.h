@@ -47,7 +47,7 @@ extern u64 g_pipe_pending_draws;
 // waits for it before reusing the scanout buffer it lent.
 extern u64 g_ns_gfx_present, g_ns_borrow_wait;
 extern u64 g_ring_vb_bytes, g_ring_ib_bytes, g_ring_cb_bytes, g_ring_raw_bytes;
-extern u64 g_index_convert_n, g_index_convert_bytes;
+extern u64 g_index_convert_n, g_index_convert_bytes, g_index_convert_copy_bytes;
 extern u64 g_index_scan_n, g_index_scan_bytes, g_ns_index_scan;
 // Vertex bytes copied into the cross-frame buffer cache instead of the ring.
 extern u64 g_vb_kept_bytes;
