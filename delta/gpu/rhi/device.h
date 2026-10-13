@@ -166,6 +166,7 @@ class CommandList : public Object {
                            i32 vertex_offset,
                            u32 first_instance) = 0;
   virtual void DrawMeshTasks(u32 x, u32 y, u32 z) = 0;
+  virtual void DrawMeshTasksIndirect(Buffer* /*args*/, u64 /*offset*/) {}
   virtual void Dispatch(u32 x, u32 y, u32 z) = 0;
   // Workgroup ids start at (bx, by, bz) (Caps::dispatch_base; the pipeline
   // needs ComputePipelineDesc::dispatch_base).

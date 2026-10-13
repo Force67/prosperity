@@ -23,6 +23,7 @@ base::Vector<base::Array<u32, 3>> g_dispatch_groups;
 base::Vector<u32> g_draw_instances;
 base::Vector<u64> g_draw_arguments;
 bool g_gpu_draw_args = false;
+bool g_gpu_mesh_args = false;
 base::Vector<u32> g_draw_index_types;
 base::Array<u8, 65536> g_gds{};
 u64 g_pending_address = 0;
@@ -330,6 +331,25 @@ TEST(AgcQueue, SettledIndirectDrawArgumentsRemainGpuInputs) {
   }
 }
 
+TEST(AgcQueue, NggPointDrawsKeepArgumentsOnTheGpu) {
+  base::Array<u32, 4> args{0, 0, 5, 7};
+  g_draw_arguments.clear();
+  g_gpu_mesh_args = true;
+  g_flush_succeeds = false;
+  Words w;
+  Packet(w, 0x69,
+         {gpu::ps5::mmVGT_SHADER_STAGES_EN - gpu::kContextRegBase, 1u << 7});
+  Packet(w, 0x79, {gpu::ps5::mmVGT_PRIMITIVE_TYPE - gpu::kUConfigRegBase, 1});
+  Packet(w, 0x11, {1, Lo(args.data()), Hi(args.data())});
+  Packet(w, 0x24, {0, 0, 0, 0});
+  Packet(w, 0x2d, {3, 0});
+  EXPECT_EQ(Submit(w, 123), w.size());
+  g_gpu_mesh_args = false;
+  g_flush_succeeds = true;
+  EXPECT_EQ(g_draw_arguments,
+            (base::Vector<u64>{reinterpret_cast<u64>(args.data()), 0}));
+}
+
 TEST(AgcQueue, IndexTypePacketsAndRegisterWritesShareState) {
   g_draw_index_types.clear();
   Words w;
@@ -461,6 +481,9 @@ bool GuestBytesSettled(u64, u64) {
 }
 bool CanDrawIndirect(u32, bool) {
   return g_gpu_draw_args;
+}
+bool CanDrawMeshIndirect() {
+  return g_gpu_mesh_args;
 }
 bool BeginGuestPredicate(u64) {
   return false;

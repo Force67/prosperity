@@ -33,6 +33,7 @@
 #include "gpu/render/frame.h"
 #include "gpu/render/index_convert.h"
 #include "gpu/render/index_upload.h"
+#include "gpu/render/mesh_args.h"
 #include "gpu/render/pipeline_cache.h"
 #include "gpu/render/render_target.h"
 #include "gpu/render/renderer.h"
@@ -1985,6 +1986,8 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
     GTEST_SKIP() << "Mesh shading is required";
   if (std::strstr(gpu::render::Device().caps().device_name, "llvmpipe"))
     GTEST_SKIP() << "LLVMpipe crashes compiling NGG mesh shaders";
+  const StagedComputeOnly staged;
+  EnableWriteTracking();
   base::Array<u32, 4096> code{};
   u32 pc = 0;
   const auto v1 = [&](u32 op, u32 dst, u32 src) {
@@ -2015,6 +2018,9 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
   v1(6, 11, 261);
   v2(8, 11, 240, 11);  // quad height .5
   literal(3, 11, 0xbe800000, 11);
+  v1(6, 14, 264);
+  literal(8, 14, 0x3e000000, 14);
+  v2(3, 11, 270, 11);
   v1(1, 12, 128);
   v1(1, 13, 242);
   code[pc++] = 0xf80008cf;
@@ -2048,7 +2054,16 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
   const u32 batches[] = {6, 2,
                          4};  // one group, three groups, partial final group
   static base::Array<gpu::gcn::Recompiled, 3> programs;
-  alignas(65536) static base::Array<base::Array<u8, 65536>, 3> targets{};
+  alignas(65536) static base::Array<base::Array<u8, 65536>, 27> targets{};
+  alignas(65536) static u32 args[27][16384]{};
+  alignas(256) static const u32 producer[4096] = {0x7e020204, 0xe0702000,
+                                                  0x80000100, 0xbf810000};
+  const auto previous_isa = gpu::gcn::DefaultIsaMode();
+  gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+  static const auto compiled =
+      gpu::gcn::RecompileCompute(producer, 1, 1, 1, 5, 0, 0);
+  gpu::gcn::SetDefaultIsaMode(previous_isa);
+  ASSERT_TRUE(compiled.ok);
   base::Array<u8, 64 * 16 * 4> reference{};
   for (u32 i = 0; i < 3; ++i) {
     SCOPED_TRACE(batches[i]);
@@ -2058,31 +2073,83 @@ TEST(VkDraw, NggPointBatchesPreserveEveryExpandedQuad) {
     programs[i] = gpu::rdna::Recompile(code.data(), ps, user_data, user_data, 0,
                                        false, 0, 0, nullptr, 0, &cfg);
     ASSERT_TRUE(programs[i].ok);
-    gpu::render::DrawInfo draw;
-    draw.recomp = &programs[i];
-    draw.prim_type = 1;
-    draw.vertex_count = 6;
-    draw.rt_base = draw.mrt_base[0] = reinterpret_cast<u64>(targets[i].data());
-    draw.rt_w = 64;
-    draw.rt_h = 16;
-    draw.mrt_count = draw.mrt_bound_mask = 1;
-    draw.mrt_info[0] = 10u << 2;
-    gpu::render::BeginFrame(renderer);
-    ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
-    const u32 slot_index = gpu::render::g_frame.slot_idx;
-    gpu::render::EndFrame(renderer, draw.rt_base);
-    const auto& slot = gpu::render::g_frame.slots[slot_index];
-    ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
-    ASSERT_TRUE(slot.presentable);
-    const auto* pixels = slot.readback->mapped();
-    for (u32 q = 0; q < 6; ++q) {
-      EXPECT_EQ(pixels[(8 * 64 + 10 + q * 8) * 4], 255);
-      EXPECT_EQ(pixels[(8 * 64 + 14 + q * 8) * 4], 0);
+    for (u32 mode = 0; mode < 9; ++mode) {
+      SCOPED_TRACE(mode);
+      const u32 target = i * 9 + mode;
+      const u64 argument_base = reinterpret_cast<u64>(args[target]);
+      args[target][0] = mode == 2 || mode == 5 ? 0
+                        : mode == 3            ? 2
+                        : mode == 8            ? ~0u
+                                               : 6;
+      args[target][1] = mode == 4 ? 0 : mode == 7 ? 2 : 1;
+      args[target][2] = mode == 3 ? 2 : 0;
+      args[target][3] = mode == 6 ? 2 : 0;
+      gpu::render::CollectGuestWrites();
+      gpu::render::DrawInfo draw;
+      draw.recomp = &programs[i];
+      draw.prim_type = 1;
+      draw.vertex_count = mode ? 1 : 6;
+      draw.indirect_args = mode ? argument_base : 0;
+      draw.rt_base = draw.mrt_base[0] =
+          reinterpret_cast<u64>(targets[target].data());
+      draw.rt_w = 64;
+      draw.rt_h = 16;
+      draw.mrt_count = draw.mrt_bound_mask = 1;
+      draw.mrt_info[0] = 10u << 2;
+      gpu::render::BeginFrame(renderer);
+      gpu::render::ComputeInfo ci;
+      if (mode == 2) {
+        ci.cs_addr = reinterpret_cast<u64>(producer);
+        ci.recomp = &compiled;
+        ci.groups[0] = ci.groups[1] = ci.groups[2] = 1;
+        ci.num_res = 1;
+        ci.res[0].base = argument_base;
+        ci.res[0].size = ci.res[0].guest_size = 16;
+        ci.res[0].binding = compiled.resources[0].binding;
+        ci.res[0].written = ci.res[0].shader_writes = true;
+        ci.user_data[0] = u32(argument_base);
+        ci.user_data[1] = u32(argument_base >> 32) | (4u << 16);
+        ci.user_data[2] = 4;
+        ci.user_data[3] = (4u << 15) | (4u << 12);
+        ci.user_data[4] = 6;
+        ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+        EXPECT_EQ(args[target][0], 0u);
+      }
+      const u64 writeback = gpu::render::g_wb_why_bytes;
+      const u64 indirect = gpu::render::g_mesh_indirect_n;
+      ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+      EXPECT_EQ(gpu::render::g_mesh_indirect_n, indirect + (mode != 0));
+      if (mode == 2) {
+        ci.user_data[4] = 0;
+        ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+        ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
+        EXPECT_EQ(gpu::render::g_mesh_indirect_n, indirect + 2);
+      }
+      EXPECT_EQ(gpu::render::g_wb_why_bytes, writeback);
+      const u32 slot_index = gpu::render::g_frame.slot_idx;
+      gpu::render::EndFrame(renderer, draw.rt_base);
+      const auto& slot = gpu::render::g_frame.slots[slot_index];
+      ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+      ASSERT_TRUE(slot.presentable);
+      const auto* pixels = slot.readback->mapped();
+      if (mode == 4 || mode == 5 || mode == 8) {
+        for (u32 pixel = 0; pixel < 64 * 16; ++pixel)
+          EXPECT_EQ(pixels[pixel * 4], 0);
+        continue;
+      }
+      for (u32 q = 0; q < 6; ++q) {
+        const bool visible = mode != 3 || (q >= 2 && q < 4);
+        const u32 row = mode == 6 ? 6 : mode == 7 ? 5 : 8;
+        EXPECT_EQ(pixels[(row * 64 + 10 + q * 8) * 4], visible ? 255 : 0);
+        EXPECT_EQ(pixels[(row * 64 + 14 + q * 8) * 4], 0);
+        if (mode == 6)
+          EXPECT_EQ(pixels[(9 * 64 + 10 + q * 8) * 4], 0);
+      }
+      if (!i && !mode)
+        base::CopyN(pixels, reference.size(), reference.begin());
+      else if (mode < 3)
+        EXPECT_TRUE(std::equal(reference.begin(), reference.end(), pixels));
     }
-    if (!i)
-      base::CopyN(pixels, reference.size(), reference.begin());
-    else
-      EXPECT_TRUE(std::equal(reference.begin(), reference.end(), pixels));
   }
 }
 

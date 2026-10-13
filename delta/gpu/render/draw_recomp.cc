@@ -16,9 +16,10 @@
 #include "gpu/render/frame.h"
 #include "gpu/render/guest_direct.h"
 #include "gpu/render/guest_format.h"
-#include "gpu/render/index_upload.h"
 #include "gpu/render/index_convert.h"
+#include "gpu/render/index_upload.h"
 #include "gpu/render/labels.h"
+#include "gpu/render/mesh_args.h"
 #include "gpu/render/pipeline_cache.h"
 #include "gpu/render/render_target.h"
 #include "gpu/render/renderer.h"
@@ -626,8 +627,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       return Decline(kNoRecomp);
     const u32 groups = (draw_count - 1) / d.recomp->mesh_input_primitives + 1;
     const u32 instances = base::Max(d.instance_count, 1u);
-    if (groups > limits.max_groups[0] || instances > limits.max_groups[1] ||
-        u64(groups) * instances > limits.max_total_groups)
+    if (!d.indirect_args &&
+        (groups > limits.max_groups[0] || instances > limits.max_groups[1] ||
+         u64(groups) * instances > limits.max_total_groups))
       return Decline(kNoRecomp);
   }
   const bool has_storage_image =
@@ -1711,15 +1713,29 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   if (d.indirect_args) {
     const u64 bytes = indexed ? 20 : 16;
     EndRegion();
-    if (GpuIndirectArgs(d.indirect_args, bytes))
-      indirect_buf = IndirectArgsBuffer(d.indirect_args, &indirect_off);
-    else if (FlushCsWritesForGpu(renderer, d.indirect_args, bytes, "indirect"))
-      indirect_buf = StageIndirectArgs(g_frame.list, d.indirect_args, bytes,
-                                       &indirect_off);
+    if (!CsResidentGeometryBuffer(d.indirect_args, bytes, &indirect_buf,
+                                  &indirect_off) ||
+        (indirect_off & 3)) {
+      indirect_buf = nullptr;
+      if (GpuIndirectArgs(d.indirect_args, bytes))
+        indirect_buf = IndirectArgsBuffer(d.indirect_args, &indirect_off);
+      else if (FlushCsWritesForGpu(renderer, d.indirect_args, bytes,
+                                   "indirect"))
+        indirect_buf = StageIndirectArgs(g_frame.list, d.indirect_args, bytes,
+                                         &indirect_off);
+    }
     if (!indirect_buf)
       return Decline(kNoRecomp);
-    g_frame.list->Barrier(rhi::kAccessAllWrite, rhi::kAccessIndirectRead);
+    if (!mesh)
+      g_frame.list->Barrier(rhi::kAccessAllWrite, rhi::kAccessIndirectRead);
   }
+  rhi::Buffer* mesh_tasks = nullptr;
+  u64 mesh_tasks_offset = 0;
+  u32 mesh_argument_word = 0;
+  if (mesh && !PrepareMeshArgs(indirect_buf, indirect_off,
+                               d.recomp->mesh_input_primitives, &mesh_tasks,
+                               &mesh_tasks_offset, &mesh_argument_word))
+    return Decline(kNoRecomp);
   if (convert_indices && ib_cached == u64(-1) &&
       !ConvertGuestIndices(renderer, reinterpret_cast<u64>(d.index_data),
                            d.index_count, d.index_type, quads, aligned_ioff,
@@ -2083,8 +2099,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   list->SetPushConstants(0, 64, d.vs_user_data);
   list->SetPushConstants(64, 64, d.ps_user_data);
   if (mesh) {
-    const u32 mesh_draw[4] = {draw_count, base::Max(d.instance_count, 1u), 0,
-                              0};
+    const u32 mesh_draw[4] = {draw_count, base::Max(d.instance_count, 1u),
+                              mesh_argument_word, indirect_buf ? 1u : 0u};
     list->SetPushConstants(144, 16, mesh_draw);
   }
   if (gpu::gcn::PushCodeBase()) {
@@ -2352,7 +2368,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     list->SetBindGroup(0, tex_set);
   // The shared-LDS scratch never changes: one set, bound whenever the pipeline
   // declares it.
-  if (rp->shared_lds)
+  if (mesh)
+    list->SetBindGroup(3, MeshArgsSet());
+  else if (rp->shared_lds)
     list->SetBindGroup(3, g_ring.lds_set);
   // Commit ring uploads only after every fallible pipeline, texture, region and
   // cbuffer decision has succeeded. Bindings served by the per-frame cache
@@ -2450,7 +2468,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   rhi::Buffer* const predicate = GuestPredicate(&predicate_off);
   if (predicate)
     list->BeginConditional(predicate, predicate_off, false);
-  if (mesh)
+  if (mesh && mesh_tasks)
+    list->DrawMeshTasksIndirect(mesh_tasks, mesh_tasks_offset);
+  else if (mesh)
     list->DrawMeshTasks((draw_count - 1) / d.recomp->mesh_input_primitives + 1,
                         d.instance_count ? d.instance_count : 1, 1);
   else if (indexed && indirect_buf)

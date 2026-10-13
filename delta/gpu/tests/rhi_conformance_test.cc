@@ -515,6 +515,74 @@ TEST_P(RhiConformance, ManyStorageBuffers) {
   EXPECT_EQ(words[17 * kPerWindow + 1], 17u) << "untouched";
 }
 
+TEST_P(RhiConformance, MeshArgumentsAreGeneratedWithinDeviceLimits) {
+  const auto code = gpu::gcn::BuildMeshIndirectShader();
+  ASSERT_FALSE(code.empty());
+  BindGroupLayoutDesc ld;
+  ld.bindings = {{0, BindingType::kStorageBuffer, kStageCompute},
+                 {1, BindingType::kStorageBuffer, kStageCompute}};
+  ld.bindings[0].read_only = true;
+  ld.push = true;
+  auto* set = Own(device_->CreateBindGroupLayout(ld));
+  PipelineLayoutDesc pl;
+  pl.groups = {set};
+  pl.push_constant_bytes = 24;
+  pl.push_constant_stages = kStageCompute;
+  ComputePipelineDesc cp;
+  cp.layout = Own(device_->CreatePipelineLayout(pl));
+  cp.code = Code(code);
+  auto* pipeline = Own(device_->CreateComputePipeline(cp));
+  ASSERT_NE(pipeline, nullptr);
+  const u32 cases[][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}, {3, 2},   {5, 2},
+                          {7, 2}, {8, 1}, {9, 1}, {1, 4}, {~0u, 1}, {1, ~0u}};
+  BufferDesc bd;
+  bd.size = sizeof(cases) / sizeof(cases[0]) * 32 + 64;
+  bd.usage = kBufferStorage | kBufferCopySrc | kBufferCopyDst;
+  auto* input = Own(device_->CreateBuffer(bd));
+  auto* output = Own(device_->CreateBuffer(bd));
+  auto* readback = Readback(bd.size);
+  list_->Begin();
+  list_->FillBuffer(output, 0, bd.size, ~0u);
+  for (u32 i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+    list_->FillBuffer(input, 32 + i * 32, 4, cases[i][0]);
+    list_->FillBuffer(input, 36 + i * 32, 4, cases[i][1]);
+    list_->FillBuffer(input, 40 + i * 32, 4, 5);
+    list_->FillBuffer(input, 44 + i * 32, 4, 7);
+  }
+  list_->Barrier(kAccessCopyWrite, kAccessComputeRead | kAccessComputeWrite);
+  list_->SetPipeline(pipeline);
+  BindingWrite writes[2];
+  writes[0].buffer = input;
+  writes[0].range = bd.size;
+  writes[1].binding = 1;
+  writes[1].buffer = output;
+  writes[1].range = bd.size;
+  list_->PushBindGroup(0, set, writes, 2);
+  for (u32 i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+    const u32 params[] = {8 + i * 8, 4 + i * 8, 2, 4, 3, 6};
+    list_->SetPushConstants(0, sizeof(params), params);
+    list_->Dispatch(1, 1, 1);
+    list_->Barrier(kAccessComputeWrite, kAccessComputeWrite);
+  }
+  list_->Barrier(kAccessComputeWrite, kAccessCopyRead);
+  list_->CopyBuffer(readback, 0, output, 0, bd.size);
+  list_->Barrier(kAccessCopyWrite, kAccessHostRead);
+  Submit();
+  list_->End();
+  const auto* result = reinterpret_cast<const u32*>(readback->mapped());
+  for (u32 i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+    SCOPED_TRACE(i);
+    const u32 x = cases[i][0] / 2 + cases[i][0] % 2;
+    const u32 y = cases[i][1];
+    const bool valid = x <= 4 && y <= 3 && u64(x) * y <= 6;
+    const u32 expected[] = {
+        cases[i][0],     y,  5, 7, valid ? x : 0, valid ? y : 0,
+        valid ? 1u : 0u, ~0u};
+    for (u32 j = 0; j < 8; ++j)
+      EXPECT_EQ(result[4 + i * 8 + j], expected[j]) << j;
+  }
+}
+
 // Workgroup ids start at the base; a plain dispatch of the same pipeline
 // starts at zero again.
 TEST_P(RhiConformance, DispatchBase) {

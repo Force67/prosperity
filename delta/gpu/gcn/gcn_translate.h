@@ -288,6 +288,8 @@ struct ImageTilingParams {
 
 base::Vector<u32> BuildImageTilingShader();
 
+base::Vector<u32> BuildMeshIndirectShader();
+
 // Packed guest indices to 32-bit indices. Push constants: output count,
 // destination dword offset and source byte offset (aligned to the index width).
 // QUADLIST emits (a, b, c), (a, c, d). Indirect QUADLIST uses source capacity

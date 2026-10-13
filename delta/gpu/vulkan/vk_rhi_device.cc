@@ -798,7 +798,10 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   if (caps_.mesh_shader) {
     cmd_draw_mesh_tasks = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
         vkGetDeviceProcAddr(dev, "vkCmdDrawMeshTasksEXT"));
-    caps_.mesh_shader = cmd_draw_mesh_tasks != nullptr;
+    cmd_draw_mesh_tasks_indirect =
+        reinterpret_cast<PFN_vkCmdDrawMeshTasksIndirectEXT>(
+            vkGetDeviceProcAddr(dev, "vkCmdDrawMeshTasksIndirectEXT"));
+    caps_.mesh_shader = cmd_draw_mesh_tasks && cmd_draw_mesh_tasks_indirect;
   }
   if (native.checkpoints)
     cmd_set_checkpoint = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(

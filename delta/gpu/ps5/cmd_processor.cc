@@ -927,12 +927,15 @@ void HandleDrawIndirect(
   if (!g_queue->draw_indirect_base || !IsGuestAddress(args) ||
       !gpu::IsReadableRangeCached(args, want))
     return;
-  // Not NGG: the GPU reads resident or staged arguments. Indexed draws cover
-  // the whole index buffer; vertex bindings cover their descriptor bounds.
+  // Native and point-input NGG draws read resident or staged arguments.
+  // Indexed draws cover the whole index buffer; vertex bindings cover their
+  // descriptor bounds.
   const bool ngg = (g_queue->regs[mmVGT_SHADER_STAGES_EN] >> 7) & 1;
+  const u32 primitive = g_queue->regs[mmVGT_PRIMITIVE_TYPE];
   const bool gpu_args =
-      !ngg && !(args & 3) &&
-      render::CanDrawIndirect(g_queue->regs[mmVGT_PRIMITIVE_TYPE], indexed);
+      !(args & 3) &&
+      (ngg ? !indexed && primitive == 1 && render::CanDrawMeshIndirect()
+           : render::CanDrawIndirect(primitive, indexed));
   const u32 initiator = count >= 4 ? body[3] : 0;
   if (gpu_args && indexed && g_queue->index.max && g_queue->index.base) {
     const u64 base = g_queue->index.base;

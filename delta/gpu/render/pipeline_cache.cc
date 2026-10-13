@@ -14,6 +14,7 @@
 #include "gpu/render/guest_format.h"
 #include "gpu/render/hash.h"
 #include "gpu/render/labels.h"
+#include "gpu/render/mesh_args.h"
 #include "gpu/render/render_target.h"
 #include "gpu/render/texture_cache.h"
 #include "gpu/render/upload_ring.h"
@@ -357,15 +358,15 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     return nullptr;
   rhi::PipelineLayoutDesc layout;
   layout.groups = {set0, cbuf_layout};
-  if (rp.raw_count || rp.shared_lds) {
+  if (rp.raw_count || rp.shared_lds || mesh) {
     auto* raw_layout =
         rp.raw_count ? GetRawBufferLayout(rp.raw_count) : g_ring.empty_layout;
     if (!raw_layout)
       return nullptr;
     layout.groups.push_back(raw_layout);
   }
-  if (rp.shared_lds)
-    layout.groups.push_back(g_ring.lds_layout);
+  if (rp.shared_lds || mesh)
+    layout.groups.push_back(mesh ? MeshArgsLayout() : g_ring.lds_layout);
   // One 64-byte window per stage: 16 user-data dwords each, 128 bytes total
   // (the guaranteed minimum push-constant size), plus each stage's own
   // code-address words (VS 128..135, PS 136..143) pushed per draw for

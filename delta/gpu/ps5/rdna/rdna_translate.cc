@@ -3610,6 +3610,12 @@ bool TranslateMesh(Program es_program,
   const Id push =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::PushConstant, push_type),
                    spv::StorageClass::PushConstant);
+  const Id arguments = t.m.Variable(
+      t.m.TypePointer(spv::StorageClass::StorageBuffer, t.EnsureRawBlockType()),
+      spv::StorageClass::StorageBuffer);
+  t.m.Decorate(arguments, spv::Decoration::DescriptorSet, {3});
+  t.m.Decorate(arguments, spv::Decoration::Binding, {0});
+  t.m.Decorate(arguments, spv::Decoration::NonWritable);
   const Id lds =
       t.m.Variable(t.m.TypePointer(spv::StorageClass::Workgroup,
                                    t.m.TypeArray(t.t_u, cfg.lds_dwords)),
@@ -3635,12 +3641,25 @@ bool TranslateMesh(Program es_program,
   const Id groups = t.m.Load(uv3, group);
   const Id base = t.Mul(t.m.CompositeExtract(t.t_u, groups, 0),
                         t.U32(cfg.input_primitives));
-  const Id input_count = t.m.Load(
-      t.t_u,
-      t.m.AccessChain(t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u),
-                      push, {t.U32(1), t.U32(0)}));
-  const Id group_count =
-      t.UMin(t.Sub(input_count, base), t.U32(cfg.input_primitives));
+  const auto draw_param = [&](u32 i) {
+    return t.m.Load(
+        t.t_u,
+        t.m.AccessChain(t.m.TypePointer(spv::StorageClass::PushConstant, t.t_u),
+                        push, {t.U32(1), t.U32(i)}));
+  };
+  const Id indirect = t.IsNonZero(draw_param(3));
+  const auto argument = [&](u32 i) {
+    return t.m.Load(
+        t.t_u, t.m.AccessChain(
+                   t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u),
+                   arguments, {t.U32(0), t.Add(draw_param(2), t.U32(i))}));
+  };
+  const Id input_count = t.SelectB(indirect, argument(0), draw_param(0));
+  const Id first_vertex = t.SelectB(indirect, argument(2), t.U32(0));
+  const Id first_instance = t.SelectB(indirect, argument(3), t.U32(0));
+  const Id group_count = t.UMin(
+      t.SelectB(t.Ult(base, input_count), t.Sub(input_count, base), t.U32(0)),
+      t.U32(cfg.input_primitives));
   const Id wave_base = t.And(index, t.U32(~63u));
   const Id wave_count =
       t.UMin(t.SelectB(t.Ult(wave_base, group_count),
@@ -3729,8 +3748,8 @@ bool TranslateMesh(Program es_program,
     t.SetSg(1, t.SelectB(has_root, root_hi, t.Sg(1)));
     t.SetSg(3, wave_info);
     t.SetVg(0, t.Mul(index, t.U32(4)));
-    t.SetVg(5, t.Add(base, index));
-    t.SetVg(8, t.m.CompositeExtract(t.t_u, groups, 1));
+    t.SetVg(5, t.Add(t.Add(base, index), first_vertex));
+    t.SetVg(8, t.Add(t.m.CompositeExtract(t.t_u, groups, 1), first_instance));
     PlanCrossLane(program, t, sc, iface);
     subgroup_local_id = sc.subgroup_local_id;
     EmitBody(t, program, sc);

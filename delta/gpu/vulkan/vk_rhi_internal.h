@@ -178,6 +178,7 @@ class VulkanCommandList final : public rhi::CommandList {
                    i32 vertex_offset,
                    u32 first_instance) override;
   void DrawMeshTasks(u32 x, u32 y, u32 z) override;
+  void DrawMeshTasksIndirect(rhi::Buffer* args, u64 offset) override;
   void Dispatch(u32 x, u32 y, u32 z) override;
   void DispatchBase(u32 bx, u32 by, u32 bz, u32 x, u32 y, u32 z) override;
   void DispatchIndirect(rhi::Buffer* args, u64 offset) override;
@@ -330,6 +331,7 @@ class VulkanDevice final : public rhi::Device {
   PFN_vkCmdBeginConditionalRenderingEXT cmd_begin_conditional = nullptr;
   PFN_vkCmdEndConditionalRenderingEXT cmd_end_conditional = nullptr;
   PFN_vkCmdDrawMeshTasksEXT cmd_draw_mesh_tasks = nullptr;
+  PFN_vkCmdDrawMeshTasksIndirectEXT cmd_draw_mesh_tasks_indirect = nullptr;
   PFN_vkCmdSetCheckpointNV cmd_set_checkpoint = nullptr;
   PFN_vkSetDebugUtilsObjectNameEXT set_object_name = nullptr;
   PFN_vkCmdBeginDebugUtilsLabelEXT cmd_begin_label = nullptr;

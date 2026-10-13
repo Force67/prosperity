@@ -64,6 +64,7 @@ Behind it, one unit per decision, roughly in dependency order:
 | `hash` | key mixing and the guest-memory content fingerprint |
 | `guest_memory_table` | which guest pages are imported as GPU memory |
 | `index_upload`, `index_convert` | native index uploads and GPU index widening / quad expansion |
+| `mesh_args` | GPU draw metadata snapshots and mesh workgroup counts |
 | `upload_ring` | how per-draw vertices, indices and constants reach the GPU each frame |
 | `texture_cache` | guest textures: descriptors, upload, revalidation, retirement |
 | `render_target` | render targets keyed by guest address, the address -> image page table, the rendering region |
@@ -142,7 +143,12 @@ streams are reused within the frame until their source revision changes.
 Vulkan, OpenGL and D3D12 support indirect drawing and compute dispatch. OpenGL
 adjusts indexed arguments on the GPU when the bound index buffer has an offset.
 D3D12 supplies shader draw parameters and workgroup counts from GPU argument
-copies when needed. Indexed indirect quad lists expand their selected indices
+copies when needed. Vulkan point-input NGG draws derive mesh workgroup counts
+from resident or staged draw arguments on the GPU. The same GPU snapshot supplies
+vertex counts and start offsets to the mesh shader, including partial groups
+and multiple instances. Counts beyond mesh dispatch limits skip the draw.
+Indexed NGG draws retain the CPU argument fallback.
+Indexed indirect quad lists expand their selected indices
 and generate triangle draw arguments in the same compute pass. Large indirect
 streams use a bounded set of workers that follow the GPU count, so a small draw
 does not launch one invocation for every possible output index.

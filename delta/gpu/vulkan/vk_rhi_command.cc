@@ -466,6 +466,12 @@ void VulkanCommandList::DrawMeshTasks(u32 x, u32 y, u32 z) {
   device_.cmd_draw_mesh_tasks(cmd, x, y, z);
 }
 
+void VulkanCommandList::DrawMeshTasksIndirect(rhi::Buffer* args, u64 offset) {
+  device_.cmd_draw_mesh_tasks_indirect(
+      cmd, Buf(args)->buffer, offset, 1,
+      sizeof(VkDrawMeshTasksIndirectCommandEXT));
+}
+
 void VulkanCommandList::Dispatch(u32 x, u32 y, u32 z) {
   dispatch_based_ = false;
   vkCmdDispatch(cmd, x, y, z);
