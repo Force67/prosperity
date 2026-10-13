@@ -2151,7 +2151,9 @@ void ResolveDirectVertexBuffers(
     const u32* user_data,
     u64 code_base) {
   result.assign(attrs.size(), VBuffer{});
-  if (!program || !user_data || attrs.empty())
+  if (!program || !user_data ||
+      base::NoneOf(attrs.begin(), attrs.end(),
+                   [](const ShaderAttr& attr) { return attr.direct_fetch; }))
     return;
 
   const auto consume = [&](const Inst& inst, auto& eval, u32) {

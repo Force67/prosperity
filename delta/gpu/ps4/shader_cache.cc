@@ -15,6 +15,7 @@
 #include "base/containers/vector.h"
 #include "base/hashing/hash.h"
 #include "gpu/gcn/gcn_decode.h"
+#include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/spirv/spv_post.h"
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/render/renderer.h"
@@ -31,7 +32,7 @@ void MixHash(u64& hash, u64 value) {
 // Two draws share a module iff their keys match. `vs`/`ps` are code content
 // hashes rather than addresses (see GraphicsKeyOf).
 struct GraphicsKey {
-  u64 vs = 0, ps = 0, fetch = 0;
+  u64 vs = 0, ps = 0, fetch = 0, direct_table = 0;
   u32 ps_input_ena = 0;
   u32 ps_in_cntl_hash = 0;
   u32 tex_3d_mask = 0;
@@ -55,6 +56,7 @@ struct GraphicsKeyHash {
   size_t operator()(const GraphicsKey& k) const {
     u64 h = k.vs ^ (k.ps + kGoldenRatio64 + (k.vs << 6) + (k.vs >> 2));
     MixHash(h, k.fetch);
+    MixHash(h, k.direct_table);
     MixHash(h, k.ps_input_ena);
     MixHash(h, k.ps_in_cntl_hash);
     MixHash(h, k.tex_3d_mask);
@@ -116,6 +118,7 @@ u32 PsInputCntlHash(const u32* ps_in_cntl, u32 num_interp) {
 
 GraphicsKey GraphicsKeyOf(const GraphicsShaderState& state) {
   GraphicsKey key;
+  key.direct_table = gcn::DirectGcnEnabled() ? gcn::g_direct_table : 0;
   // The VS/PS by CONTENT, like the fetch shader: SotC streams shader code to
   // fresh guest addresses as the title progresses, so an address key misses
   // forever and the frame drowns in recompiles. s_getpc_b64 stays sound because

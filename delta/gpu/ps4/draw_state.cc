@@ -742,6 +742,8 @@ void ResolveCbufferBindings(
     bool vertex_stage,
     render::DrawInfo& d,
     bool& resolved_vs_cbuf) {
+  if (cbufs.empty())
+    return;
   thread_local gcn::CbufList resolved;
   gcn::ResolveCbuffers(resolved, program, user_data, code_base);
   for (const auto& cb : cbufs) {

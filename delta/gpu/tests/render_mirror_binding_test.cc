@@ -168,7 +168,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       gpu::gcn::spirv::Finalize(module.Assemble(), &geometry.vs_spirv, &error))
       << error.c_str();
   ASSERT_TRUE(gpu::render::InitGuestDirect());
-  alignas(65536) static base::Array<u8, 65536> targets[34]{};
+  alignas(65536) static base::Array<u8, 65536> targets[44]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
   imported.recomp = &constants;
@@ -1054,6 +1054,94 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     EXPECT_EQ(pixel_count, 2u);
     EXPECT_EQ(pixels[(8 * 16 + (vertex ? 5 : 4)) * 4], vertex ? 255 : 64);
     EXPECT_EQ(pixels[(8 * 16 + (vertex ? 15 : 12)) * 4], vertex ? 255 : 191);
+  }
+  const u32 gcn_scalar_ps[4096] = {0xc0020100, 0x7e000204, 0x7e020280,
+                                   0x7e040280, 0x7e0602f2, 0xf800080f,
+                                   0x03020100, 0xbf810000};
+  const u32 gcn_offset_ps[4096] = {0xc0020008, 0x7e000204, 0x7e020280,
+                                   0x7e040280, 0x7e0602f2, 0xf800080f,
+                                   0x03020100, 0xbf810000};
+  const u32 gcn_descriptor_ps[4096] = {
+      0xc0820100, 0x7e000280, 0xe0301000, 0x80010000, 0x7e020280,
+      0x7e040280, 0x7e0602f2, 0xf800080f, 0x03020100, 0xbf810000};
+  const u32 gcn_typed_ps[4096] = {0x7e000280, 0xeba01000, 0x80000000,
+                                  0x7e020280, 0x7e040280, 0x7e0602f2,
+                                  0xf800080f, 0x03020100, 0xbf810000};
+  const u32 gcn_typed_vs[4096] = {0xeba02000, 0x80000000, 0x7e020280,
+                                  0x7e0402f2, 0xf80008cf, 0x02010100,
+                                  0xbf810000};
+  const u32* gcn_pixels[] = {gcn_scalar_ps, gcn_offset_ps, gcn_descriptor_ps,
+                             gcn_typed_ps, literal_ps};
+  gpu::gcn::Recompiled gcn_programs[base::ArraySize(gcn_pixels)];
+  for (u32 shader = 0; shader < base::ArraySize(gcn_pixels); ++shader) {
+    SCOPED_TRACE(shader);
+    const bool vertex = shader == 4;
+    const bool descriptor = shader == 2;
+    gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
+    auto& gcn_program = gcn_programs[shader];
+    gcn_program = gpu::gcn::Recompile(vertex ? gcn_typed_vs : vs,
+                                      gcn_pixels[shader], user_data, user_data);
+    gpu::gcn::SetDefaultIsaMode(previous_isa);
+    ASSERT_TRUE(gcn_program.ok);
+    ASSERT_TRUE(gcn_program.direct);
+    ASSERT_TRUE(gcn_program.direct_reads);
+    ASSERT_TRUE(gcn_program.vs_cbufs.empty());
+    ASSERT_TRUE(gcn_program.ps_cbufs.empty());
+    ASSERT_TRUE(gcn_program.vs_bufs.empty());
+    ASSERT_TRUE(gcn_program.ps_bufs.empty());
+    ASSERT_TRUE(gcn_program.attrs.empty());
+    for (u32 mode = 0; mode < 2; ++mode) {
+      SCOPED_TRACE(mode);
+      gpu::render::cs::g_cs_in_frame = mode != 0;
+      gpu::render::BeginFrame(renderer);
+      const u64 source = descriptor ? descriptor_base : direct_base;
+      ci.recomp = &descriptor_compute;
+      ci.res[0].base = source;
+      ci.user_data[0] = u32(source);
+      ci.user_data[1] = u32(source >> 32) | (4u << 16);
+      direct_draw.recomp = &gcn_program;
+      std::memcpy(direct_draw.vs_user_data, ci.user_data, sizeof(ci.user_data));
+      std::memcpy(direct_draw.ps_user_data, ci.user_data, sizeof(ci.user_data));
+      direct_draw.ps_user_data[8] = 0;
+      direct_draw.rt_base = direct_draw.mrt_base[0] =
+          reinterpret_cast<u64>(targets[34 + shader * 2 + mode].data());
+      direct_draw.viewport_x_offset = 4.5f;
+      direct_draw.viewport_x_scale = vertex ? 4 : 8;
+      ASSERT_TRUE(
+          gpu::render::GpuFill(direct_base, gpu::render::kMirrorBlock, 0, 0));
+      if (descriptor) {
+        ASSERT_TRUE(
+            gpu::render::GpuFill(direct_base, 4, 0x3e800000, 0x3e800000));
+        ASSERT_TRUE(
+            gpu::render::GpuFill(direct_base + 4, 4, 0x3f400000, 0x3f400000));
+        ASSERT_TRUE(gpu::render::GpuFill(descriptor_base, 8, u32(direct_base),
+                                         u32(direct_base >> 32) | (4u << 16)));
+        ASSERT_TRUE(gpu::render::GpuFill(descriptor_base + 8, 8, 64, 0));
+      }
+      ci.user_data[4] = descriptor ? u32(direct_base) : 0x3e800000;
+      ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+      const u64 resolves = gpu::render::cs::g_mirror_resolves.load();
+      const u64 copies = gpu::g_ring_cb_bytes;
+      ASSERT_TRUE(gpu::render::DrawRecomp(renderer, direct_draw));
+      ci.user_data[4] = descriptor ? u32(direct_base + 4) : 0x3f400000;
+      ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
+      direct_draw.viewport_x_offset = 12.5f;
+      ASSERT_TRUE(gpu::render::DrawRecomp(renderer, direct_draw));
+      EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), resolves);
+      EXPECT_EQ(gpu::g_ring_cb_bytes, copies);
+      const u32 slot_index = gpu::render::g_frame.slot_idx;
+      gpu::render::EndFrame(renderer, direct_draw.rt_base);
+      const auto& slot = gpu::render::g_frame.slots[slot_index];
+      ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
+      ASSERT_TRUE(slot.presentable);
+      const auto* pixels = slot.readback->mapped();
+      u32 pixel_count = 0;
+      for (u32 i = 0; i < 256; ++i)
+        pixel_count += pixels[i * 4 + 3] != 0;
+      EXPECT_EQ(pixel_count, 2u);
+      EXPECT_EQ(pixels[(8 * 16 + (vertex ? 5 : 4)) * 4], vertex ? 255 : 64);
+      EXPECT_EQ(pixels[(8 * 16 + (vertex ? 15 : 12)) * 4], vertex ? 255 : 191);
+    }
   }
 }
 

@@ -20,15 +20,16 @@
 #include "base/atomic.h"
 #include "base/containers/hash_map.h"
 #include "base/containers/set.h"
-#include "base/memory/move.h"
 #include "base/containers/vector.h"
 #include "base/math/value_bounds.h"
+#include "base/memory/move.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
 #include "base/time/time.h"
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_resource.h"
+#include "gpu/gcn/gcn_translate.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/ps4/compute_dispatch.h"
@@ -36,6 +37,7 @@
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/liverpool.h"
 #include "gpu/ps4/pm4.h"
+#include "gpu/render/guest_direct.h"
 #include "gpu/render/renderer.h"
 #include "profile/profile.h"
 
@@ -1354,6 +1356,17 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
 
   render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);
+
+  if (gcn::DirectGcnEnabled() && renderer.available()) {
+    if (!gcn::g_direct_table) {
+      OwnRenderer("direct-init");
+      render::InitGuestDirect();
+    }
+    if (GuestRenderQueue().running())
+      GuestRenderQueue().PushCall(&render::SyncGuestDirect);
+    else
+      render::SyncGuestDirect();
+  }
 
   const auto* p = static_cast<const u32*>(dcb);
   const u32 words = size_bytes / 4;

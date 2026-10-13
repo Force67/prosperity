@@ -1656,12 +1656,23 @@ bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
         inst.opcode <= 0x04 ? 1u << inst.opcode : SmrdLoadCount(inst.opcode);
     if (!n)
       return false;
-    const u32 sbase = (w & 0x3F) * 2, sdst = (w >> 6) & 0x7F;
-    const u32 soffset = (w1 >> 25) & 0x7F;
-    const i32 imm = static_cast<i32>(w1 << 11) >> 11;
-    Id byte_off = t.U32(static_cast<u32>(imm));
-    if (soffset != 125)
-      byte_off = t.Add(t.SrcRaw(soffset, 0), byte_off);
+    u32 sbase, sdst;
+    Id byte_off;
+    if (t.rdna_sources) {
+      sbase = (w & 0x3F) * 2;
+      sdst = (w >> 6) & 0x7F;
+      const u32 soffset = (w1 >> 25) & 0x7F;
+      const i32 imm = static_cast<i32>(w1 << 11) >> 11;
+      byte_off = t.U32(static_cast<u32>(imm));
+      if (soffset != 125)
+        byte_off = t.Add(t.SrcRaw(soffset, 0), byte_off);
+    } else {
+      sbase = ((w >> 9) & 0x3F) * 2;
+      sdst = (w >> 15) & 0x7F;
+      const SmrdOffset offset = DecodeSmrdOffset(inst);
+      byte_off = offset.in_sgpr ? t.SrcRaw(offset.sgpr, inst.literal)
+                                : t.U32(offset.dwords * 4);
+    }
     byte_off = t.And(byte_off, t.U32(~3u));
     const Id ptr = translate(add64(base_of(sbase), to64(byte_off)), n * 4);
     const Id held = t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {ptr, null64});
@@ -1741,8 +1752,12 @@ bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
   }
   BufferFormat f;
   if (typed) {
-    const u8 fmt = Gfx10FormatPair((w >> 19) & 0x7F);
-    f = DecodeBufferFormat(t, t.U32(fmt & 0xF), t.U32(fmt >> 4));
+    if (t.rdna_sources) {
+      const u8 fmt = Gfx10FormatPair((w >> 19) & 0x7F);
+      f = DecodeBufferFormat(t, t.U32(fmt & 0xF), t.U32(fmt >> 4));
+    } else {
+      f = DecodeBufferFormat(t, t.U32((w >> 19) & 0xF), t.U32((w >> 23) & 0x7));
+    }
   } else {
     f = DecodeBufferDescriptor(t, sc, t.Sg(srsrc + 3));
   }

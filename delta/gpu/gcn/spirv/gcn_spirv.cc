@@ -860,6 +860,11 @@ base::Vector<FetchAttr> ParseFetch(u64 fetch_addr) {
 // Emit one non-terminator instruction (branches are handled by the CFG driver).
 void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
   const u32 w = inst.raw[0], w1 = inst.raw[1];
+  if (sc.direct &&
+      (inst.enc == Enc::kSmrd || inst.enc == Enc::kMubuf ||
+       inst.enc == Enc::kMtbuf) &&
+      EmitDirectLoad(t, inst, sc))
+    return;
   if (inst.extension == InstExtension::kSdwa ||
       inst.extension == InstExtension::kDpp) {
     WarnUnsupported(inst.extension == InstExtension::kSdwa ? "sdwa" : "dpp",
@@ -2141,8 +2146,9 @@ bool TranslateVs(const Program& program,
   base::Vector<FetchAttr> attrs;
   if (CallsFetchShader(program))
     attrs = ParseFetch(fetch);
-  if (attrs.empty())
+  if (attrs.empty() && !r.direct)
     attrs = base::move(direct_attrs);
+  r.direct_vs = r.direct && attrs.empty();
   t.InitTypes(&program);
 
   base::Vector<Id> iface;
@@ -2165,6 +2171,7 @@ bool TranslateVs(const Program& program,
   StageContext sc;
   sc.gcn_tsharp = true;
   sc.r = &r;
+  sc.direct = r.direct;
   sc.iface = &iface;
   sc.pos_out = pos_out;
   sc.flat_attrs = &flat_attrs;
@@ -2207,6 +2214,8 @@ bool TranslateVs(const Program& program,
     iface.push_back(sc.es_ring);
   }
   const Id user_data = DeclareUserData(t, 0);
+  if (sc.direct)
+    DeclareDirectMemory(t, sc);
 
   const Id main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   sc.main_fn = main_fn;
@@ -2289,14 +2298,15 @@ bool TranslateVs(const Program& program,
                        a.index_vgpr >= 1 && a.index_vgpr <= 3});
   }
 
-  if (!PlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind, reachable.data(),
-                 CbufBindingLimit(t)))
+  if (!sc.direct && !PlanCbufs(program, 0, r.vs_cbufs, sc.cbuf_bind,
+                               reachable.data(), CbufBindingLimit(t)))
     return false;
   // Raw buffer reads left over once the vertex-input state has claimed the
   // direct fetches: the shader indexes them itself, so they become storage
   // buffers the renderer resolves per draw.
-  PlanGfxBuffers(program, 0, &sc.direct_vfetch, r.vs_bufs, sc.gfx_buf_bind,
-                 reachable.data());
+  if (!sc.direct)
+    PlanGfxBuffers(program, 0, &sc.direct_vfetch, r.vs_bufs, sc.gfx_buf_bind,
+                   reachable.data());
 
   if (!kGpuVsfull)
     EmitBody(t, program, sc, reachable.data());
@@ -2480,15 +2490,18 @@ bool TranslatePs(const Program& program,
   sc.is_ps = true;
   sc.gcn_tsharp = true;
   sc.r = &r;
+  sc.direct = r.direct;
   sc.iface = &iface;
   sc.flat_attrs = &flat_attrs;
   sc.pervertex_attrs = PlanPerVertexAttrs(program, reachable.data());
-  if (!PlanCbufs(program, r.vs_cbufs.size() + r.gs_cbufs.size(), r.ps_cbufs,
+  if (!sc.direct &&
+      !PlanCbufs(program, r.vs_cbufs.size() + r.gs_cbufs.size(), r.ps_cbufs,
                  sc.cbuf_bind, reachable.data(), CbufBindingLimit(t)))
     return false;
   // Set 2 is shared with the VS, so PS bindings continue after the VS's.
-  PlanGfxBuffers(program, r.vs_bufs.size(), nullptr, r.ps_bufs, sc.gfx_buf_bind,
-                 reachable.data());
+  if (!sc.direct)
+    PlanGfxBuffers(program, r.vs_bufs.size(), nullptr, r.ps_bufs,
+                   sc.gfx_buf_bind, reachable.data());
 
   // LDS, when the shader spills to it. Private (one array per invocation), not
   // Workgroup, which SPIR-V forbids in a fragment shader. Zero-initialised:
@@ -2531,6 +2544,8 @@ bool TranslatePs(const Program& program,
   if (UsesDsSwizzle(program, reachable.data()))
     EnableDsSwizzle(t, sc, iface);
   const Id user_data = DeclareUserData(t, kPsUserDataOffset);
+  if (sc.direct)
+    DeclareDirectMemory(t, sc);
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data);
   sc.ps_in_cntl = ps_in_cntl;
@@ -3159,7 +3174,9 @@ bool RecompileSpirv(const u32* vs_code,
   // VS and PS are separate SPIR-V modules.
   const bool dbg = ShaderDebugEnabled();
   const Program gs_program = gs ? DecodeShader(gs->gs_code, 4096) : Program{};
+  r.direct = DirectGcnEnabled() && g_direct_table && !gs;
   r.indirect_cbufs =
+      !r.direct &&
       NeedsIndirectCbufs({&vertex_program, &gs_program, &ps_program});
   Translator tv;
   tv.program_base = reinterpret_cast<u64>(vertex_code);

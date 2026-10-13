@@ -15,6 +15,8 @@
 
 namespace gpu::gcn {
 
+bool DirectGcnEnabled();
+
 // Waits for every queued shader job, PostShaderWork's included.
 void ResetShaderWork();
 // Run `job` on the shader worker pool, behind the jobs already queued.

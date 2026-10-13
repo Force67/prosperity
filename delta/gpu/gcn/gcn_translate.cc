@@ -17,6 +17,7 @@
 
 #include "base/algorithm.h"
 #include "base/time/time.h"
+#include "options/options.h"
 #include "profile/profile.h"
 
 namespace gpu::gcn {
@@ -27,6 +28,8 @@ u64 g_ns_spv_val = 0, g_ns_spv_opt = 0;
 u32 g_spv_hit_n = 0, g_spv_miss_n = 0;
 
 namespace {
+DELTA_OPTION(bool, kDirectGcn, "DELTA_GPU_DIRECT_GCN", false);
+
 u64 NowNs() {
   return (base::TickClock::NowNs());
 }
@@ -46,6 +49,10 @@ u32 g_push_budget = 128;  // the Vulkan floor: no room for code addresses
 u32 g_host_subgroup = kGcnWave;
 
 }  // namespace
+
+bool DirectGcnEnabled() {
+  return kDirectGcn;
+}
 
 u32 MaxGfxBuffers() {
   return g_max_gfx_buffers;
