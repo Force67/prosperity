@@ -833,6 +833,14 @@ bool GatherDrawBuffer(u64 base,
 }
 }  // namespace
 
+void PrepareDirectGuestRead() {
+  MakeComputeBufferReadable(
+      g_cs_batch_open ? g_cs_batch_id : g_cs_batch_next_id - 1, g_mirror_seq);
+  if (CsBatchOpenOutOfFrame())
+    g_cs_chunk_needs_batch = true;
+  MirrorFrameRead();
+}
+
 bool CsResidentGeometryBuffer(u64 base,
                               u64 bytes,
                               rhi::Buffer** buffer,

@@ -107,6 +107,10 @@ bool CsStorageBuffer(u64 base,
 // Whether CsGeometryBuffer can serve the window, without binding anything.
 bool CsHoldsGeometry(u64 base, u64 bytes);
 
+// Direct shaders choose their guest addresses on the GPU, so their reads
+// depend on every pending batch and mirror write.
+void PrepareDirectGuestRead();
+
 // The frame's list while one records, else the compute batch, which goes on
 // the queue ahead of the next frame. Null when neither can open.
 rhi::CommandList* FrameOrBatchList();

@@ -279,6 +279,8 @@ Id CsGuestAddress(Translator& t,
                   Id address,
                   Id bytes,
                   bool write) {
+  if (sc.direct && !write)
+    sc.r->direct_reads = true;
   return t.m.Emit(spv::Op::OpFunctionCall, t.m.TypeInt(64, false),
                   {sc.cs_guest_translate, address, bytes, t.U32(write)});
 }

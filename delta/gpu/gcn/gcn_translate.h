@@ -169,6 +169,7 @@ struct Recompiled {
   bool direct = false;
   // The same for the vertex stage: no vertex buffers, cbuffers or buffers.
   bool direct_vs = false;
+  bool direct_reads = false;
   base::Vector<u32> gs_spirv;  // fixed RECTLIST expansion stage
   base::Vector<u32> fs_spirv;
   base::Vector<ShaderAttr> attrs;      // vertex inputs

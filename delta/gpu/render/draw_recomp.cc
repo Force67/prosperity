@@ -1801,6 +1801,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
   u64 voff = g_ring.vb_offset, ioff = aligned_ioff;
 
+  if (d.recomp->direct_reads)
+    PrepareDirectGuestRead();
+
   // Switch render target. Re-begin when the primary target or the MRT count
   // changes (the open region's attachment count must match the pipeline's), or
   // when a new RT-as-texture source still needs a read transition. Barriers

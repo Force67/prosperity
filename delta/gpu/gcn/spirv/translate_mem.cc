@@ -1635,8 +1635,7 @@ bool EmitDirectLoad(Translator& t, const Inst& inst, StageContext& sc) {
   const Id u32_ptr =
       t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
   const auto translate = [&](Id address, u32 bytes) {
-    return t.m.Emit(spv::Op::OpFunctionCall, wide,
-                    {sc.cs_guest_translate, address, t.U32(bytes), t.U32(0)});
+    return CsGuestAddress(t, sc, address, t.U32(bytes));
   };
   const auto load = [&](Id ptr, Id valid, Id byte) {
     const Id at = t.m.Emit(spv::Op::OpSelect, wide,
