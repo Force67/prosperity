@@ -10,6 +10,7 @@
 #include "guest/session.h"
 #include "ui/shader_activity.h"
 
+#include "gpu/gcn/gcn_resource.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/ps5/cmd_trace.h"
 #include "gpu/ps5/rdna/rdna_compute.h"
@@ -47,6 +48,7 @@ struct GraphicsKey {
   bool gl_clip = false;
   u64 gs = 0;
   base::Array<u32, 6> ngg{};
+  u64 direct_table = 0;
 
   bool operator==(const GraphicsKey& other) const = default;
 };
@@ -56,6 +58,7 @@ struct GraphicsKeyHash {
     u64 h = k.vs ^ (k.ps + kGoldenRatio64 + (k.vs << 6) + (k.vs >> 2));
     MixHash(h, k.fetch);
     MixHash(h, k.gs);
+    MixHash(h, k.direct_table);
     for (u32 value : k.ngg)
       MixHash(h, value);
     MixHash(h, k.vs_user_sgprs);
@@ -164,6 +167,7 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
                   state.ps_input_ena,
                   state.ps_num_interp};
   key.gl_clip = state.gl_clip;
+  key.direct_table = gcn::g_direct_table;
   if (state.ngg.gs_code) {
     key.gs = CodeHash(reinterpret_cast<u64>(state.ngg.gs_code), 4096);
     key.ngg = {state.ngg.threads,      state.ngg.input_primitives,

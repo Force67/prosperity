@@ -7,6 +7,7 @@
 #include "base/containers/array.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/ps5/shader_cache.h"
 #include "gpu/render/compute_internal.h"
 #include "gpu/render/device.h"
 #include "gpu/render/draw_recomp.h"
@@ -90,14 +91,31 @@ TEST(VkGuestDirect, AttachesLatePoolWithoutChangingShaderTable) {
   GuestMemory host(0x2200000000ull, false);
   ASSERT_NE(host.memory, MAP_FAILED);
   *static_cast<float*>(host.memory) = .25f;
-  ASSERT_TRUE(gpu::render::InitGuestDirect());
-  const u64 table = gpu::gcn::g_direct_table;
-  ASSERT_NE(table, 0u);
   const u32 vs[4096] = {0x7e000280, 0x7e0202f2, 0xf80008cf, 0x01000000,
                         0xbf810000};
   const u32 ps[4096] = {0xc0020100, 0x7e000204, 0x7e020280, 0x7e040280,
                         0x7e0602f2, 0xf800080f, 0x03020100, 0xbf810000};
   const u32 user_data[32]{};
+  const u32 rdna_ps[4096] = {0xf4000100, 0xfa000000, 0x7e000204,
+                             0x7e020280, 0x7e040280, 0x7e0602f2,
+                             0xf800080f, 0x03020100, 0xbf810000};
+  gpu::ps5::GraphicsShaderState shader;
+  shader.vs_addr = reinterpret_cast<u64>(vs);
+  shader.ps_addr = reinterpret_cast<u64>(rdna_ps);
+  shader.vs_user_data = shader.ps_user_data = user_data;
+  shader.vs_user_sgprs = shader.ps_user_sgprs = 8;
+  const auto& staged_shader = gpu::ps5::GetGraphicsShader(shader);
+  ASSERT_TRUE(staged_shader.ok);
+  ASSERT_FALSE(staged_shader.direct);
+  ASSERT_EQ(staged_shader.ps_cbufs.size(), 1u);
+  ASSERT_TRUE(gpu::render::InitGuestDirect());
+  const u64 table = gpu::gcn::g_direct_table;
+  ASSERT_NE(table, 0u);
+  const auto& direct_shader = gpu::ps5::GetGraphicsShader(shader);
+  ASSERT_NE(&staged_shader, &direct_shader);
+  ASSERT_TRUE(direct_shader.direct_reads);
+  ASSERT_TRUE(direct_shader.ps_cbufs.empty());
+  EXPECT_EQ(&direct_shader, &gpu::ps5::GetGraphicsShader(shader));
   const auto previous_isa = gpu::gcn::DefaultIsaMode();
   gpu::gcn::SetDefaultIsaMode(gpu::gcn::IsaMode::kBase);
   const auto program = gpu::gcn::Recompile(vs, ps, user_data, user_data);
@@ -105,7 +123,7 @@ TEST(VkGuestDirect, AttachesLatePoolWithoutChangingShaderTable) {
   ASSERT_TRUE(program.ok);
   ASSERT_TRUE(program.direct_reads);
   ASSERT_TRUE(program.ps_cbufs.empty());
-  alignas(65536) static base::Array<u8, 65536> targets[10]{};
+  alignas(65536) static base::Array<u8, 65536> targets[11]{};
   gpu::render::DrawInfo draw;
   draw.recomp = &program;
   draw.vs_addr = reinterpret_cast<u64>(vs);
@@ -196,5 +214,9 @@ TEST(VkGuestDirect, AttachesLatePoolWithoutChangingShaderTable) {
   ASSERT_NO_FATAL_FAILURE(read(pool.address, 191));
   ASSERT_NO_FATAL_FAILURE(read(host.address, 191));
   EXPECT_EQ(gpu::gcn::g_direct_table, table);
+  EXPECT_EQ(&direct_shader, &gpu::ps5::GetGraphicsShader(shader));
+  draw.recomp = &direct_shader;
+  draw.ps_addr = reinterpret_cast<u64>(rdna_ps);
+  ASSERT_NO_FATAL_FAILURE(read(host.address, 191));
 }
 }  // namespace
