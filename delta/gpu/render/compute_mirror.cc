@@ -51,9 +51,16 @@ rhi::Buffer* Mirror() {
   return g_mirror;
 }
 
-// The import that holds the guest bytes at `address`, and its base: a 2 MiB
-// chunk, or the 64 KiB page when the chunk spans unmapped memory.
+// Reuse existing imports before establishing a write watch. Other ranges
+// use 2 MiB chunks, or 64 KiB pages when a chunk crosses unmapped memory.
 rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
+  u64 offset = 0, bytes = 0;
+  if (auto* direct = DirectImportAt(address, &offset, &bytes);
+      direct && direct->desc().host_pointer &&
+      bytes == direct->desc().size - offset) {
+    *import_base = address - offset;
+    return direct;
+  }
   const u64 chunk = address & ~(kMirrorImport - 1);
   auto found = g_mirror_imports.find(chunk);
   if (found == g_mirror_imports.end()) {
@@ -766,7 +773,8 @@ u64 MirrorCacheBlock(u64 block) {
     return address;
   if (!Device().CommitSparse(g_mirror, MirrorOffset(block), kMirrorBlock))
     return 0;
-  if (!GuestWriteTracker().Arm(block, kMirrorBlock))
+  if (!GuestImportable(block, kMirrorBlock) ||
+      !GuestWriteTracker().Arm(block, kMirrorBlock))
     return 0;
   rhi::CommandList* list = nullptr;
   if (g_frame.recording) {

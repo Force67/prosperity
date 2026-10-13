@@ -10,13 +10,18 @@
 
 #include "base/atomic.h"
 #include "base/containers/hash_map.h"
+#include "base/containers/map.h"
 #include "base/containers/vector.h"
 #include "base/logging.h"
+#include "base/threading/lock_guard.h"
+#include "base/threading/mutex.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/guest_memory.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/renderer.h"
+#include "gpu/write_tracker.h"
+#include "host_memory/host_memory.h"
 #include "options/options.h"
 
 namespace gpu::render {
@@ -28,7 +33,43 @@ constexpr u64 kChunk = 2ull << 20;
 
 struct Mapping {
   u64 start, end, offset;
+  bool readable = true, writable = true;
 };
+constexpr u64 kPage = 1ull << gcn::kDirectPageShift;
+constexpr u32 kLeafPages = 1u << (kDirectBlockShift - gcn::kDirectPageShift);
+struct PageEntry {
+  u64 address = 0, end = 0;
+};
+constexpr u32 kLeafBytes = kLeafPages * sizeof(PageEntry);
+constexpr u32 kLeavesPerSlab = 256;
+struct Leaf {
+  u32 slot;
+  PageEntry pages[kLeafPages];
+};
+struct HostImport {
+  u64 end, identity, snapshot;
+  rhi::Buffer* buffer;
+  bool readonly;
+};
+struct Retired {
+  rhi::Buffer* buffer;
+  u32 slot;
+  int frame;
+  u64 submission;
+};
+base::Vector<Mapping> g_host_maps;
+base::Map<u64, HostImport> g_host_imports;
+base::HashMap<u64, Leaf> g_leaves;
+base::Vector<rhi::Buffer*> g_leaf_slabs;
+base::Vector<u32> g_free_leaves;
+base::Vector<Retired> g_retired;
+u32 g_next_leaf = 0;
+u64 g_map_snapshot = 0;
+struct Remap {
+  u64 base, end;
+};
+base::Mutex g_remap_lock;
+base::Vector<Remap> g_remaps;
 
 u8* g_alias = nullptr;
 u64 g_alias_size = 0;
@@ -70,9 +111,6 @@ int FindDmemFd() {
   return found;
 }
 
-// Blocks a miss found in no view since the views were last read: missed
-// again, they are not looked up again until the views change.
-base::HashSet<u64> g_unmapped;
 u64 g_maps_read_at = ~0ull;
 bool g_maps_changed = false;
 
@@ -86,17 +124,22 @@ void ReadMaps(bool force = false) {
     return;
   g_maps_read_at = generation;
   g_maps_changed = true;
-  g_unmapped.clear();
+  ++g_map_snapshot;
+  g_host_maps.clear();
   g_maps.clear();
   char line[512];
   while (std::fgets(line, sizeof(line), f)) {
-    if (!std::strstr(line, "memfd:delta_dmem"))
-      continue;
     unsigned long long start, end, offset;
     char perms[8];
     if (std::sscanf(line, "%llx-%llx %7s %llx", &start, &end, perms,
                     &offset) != 4)
       continue;
+    if (!std::strstr(line, "memfd:delta_dmem")) {
+      if (GuestDirectIndex(start) != ~0ull)
+        g_host_maps.push_back(
+            {start, end, offset, perms[0] == 'r', perms[1] == 'w'});
+      continue;
+    }
     if (!g_maps.empty() && g_maps.back().end == start &&
         g_maps.back().offset + (start - g_maps.back().start) == offset) {
       g_maps.back().end = end;
@@ -107,17 +150,20 @@ void ReadMaps(bool force = false) {
   std::fclose(f);
 }
 
-const Mapping* FindMapping(u64 address) {
-  u32 lo = 0, hi = g_maps.size();
+const Mapping* FindMappingIn(const base::Vector<Mapping>& maps, u64 address) {
+  u32 lo = 0, hi = maps.size();
   while (lo < hi) {
     const u32 mid = (lo + hi) / 2;
-    if (g_maps[mid].end <= address)
+    if (maps[mid].end <= address)
       lo = mid + 1;
     else
       hi = mid;
   }
-  return lo < g_maps.size() && g_maps[lo].start <= address ? &g_maps[lo]
-                                                           : nullptr;
+  return lo < maps.size() && maps[lo].start <= address ? &maps[lo] : nullptr;
+}
+
+const Mapping* FindMapping(u64 address) {
+  return FindMappingIn(g_maps, address);
 }
 
 rhi::Buffer* ChunkAt(u64 offset) {
@@ -142,12 +188,223 @@ u64* Table() {
   return reinterpret_cast<u64*>(g_table->mapped());
 }
 
-// The entry for the 64 KiB block at `block` (a guest address): the device
-// address of its first byte, or 0 where no memfd view holds it.
+void Retire(rhi::Buffer* buffer, u32 slot = ~0u) {
+  g_retired.push_back({buffer, slot, g_frame.num, Device().LastSubmission()});
+}
+
+void ReapImports() {
+  for (size_t i = 0; i < g_retired.size();) {
+    const auto& retired = g_retired[i];
+    if (retired.frame + 2 > g_frame.num ||
+        !Device().IsComplete(retired.submission)) {
+      ++i;
+      continue;
+    }
+    if (retired.buffer)
+      Device().Destroy(retired.buffer);
+    else
+      g_free_leaves.push_back(retired.slot);
+    g_retired.erase(g_retired.begin() + i);
+  }
+}
+
+void InvalidateCopiedImports() {
+  base::Vector<Remap> remaps;
+  {
+    base::LockGuard lock(g_remap_lock);
+    remaps.swap(g_remaps);
+  }
+  if (remaps.empty())
+    return;
+  ReadMaps();
+  for (const auto& remap : remaps) {
+    auto it = g_host_imports.upper_bound(remap.base);
+    if (it != g_host_imports.begin())
+      --it;
+    while (it != g_host_imports.end() && it->first < remap.end) {
+      if (it->second.readonly && remap.base < it->second.end) {
+        Retire(it->second.buffer);
+        it = g_host_imports.erase(it);
+        g_maps_changed = true;
+      } else {
+        ++it;
+      }
+    }
+  }
+}
+
+bool WritableMapping(const Mapping& map, u64 start, u64 end) {
+  if (map.writable)
+    return true;
+  for (u64 page = start; page < end; page += kPage) {
+    const auto* state = gpu::GuestPages().Find(page);
+    if (!state || !state->armed.load(base::memory_order_acquire))
+      return false;
+  }
+  return true;
+}
+
+HostImport* HostImportAt(u64 address, u64* base, bool retry = true) {
+  const Mapping* map = FindMappingIn(g_host_maps, address);
+  if (!map)
+    return nullptr;
+  auto prior = g_host_imports.upper_bound(address);
+  if (prior != g_host_imports.begin()) {
+    --prior;
+    auto& imported = prior->second;
+    if (address < imported.end) {
+      if (imported.snapshot == g_map_snapshot) {
+        *base = prior->first;
+        return &imported;
+      }
+      const u64 identity = host_memory::MemoryMappingIdentity(
+          reinterpret_cast<void*>(prior->first), imported.end - prior->first);
+      if (identity && identity == imported.identity &&
+          (!imported.readonly ||
+           !WritableMapping(*map, address & ~(kPage - 1),
+                            base::Min(imported.end, map->end)))) {
+        imported.snapshot = g_map_snapshot;
+        *base = prior->first;
+        return &imported;
+      }
+      Retire(imported.buffer);
+      g_maps_changed = true;
+      g_host_imports.erase(prior);
+    }
+  }
+  if (!map->readable)
+    return nullptr;
+  const u64 chunk = address & ~(kChunk - 1);
+  const u64 start = base::Max(chunk, map->start);
+  const u64 end =
+      base::Min(chunk + kChunk + (1ull << kDirectBlockShift), map->end);
+  const u64 identity = host_memory::MemoryMappingIdentity(
+      reinterpret_cast<void*>(start), end - start);
+  if (!identity)
+    return nullptr;
+  const bool writable = WritableMapping(*map, start, end);
+  rhi::BufferDesc desc;
+  desc.size = end - start;
+  desc.usage = rhi::kBufferStorage | rhi::kBufferAddress | rhi::kBufferCopySrc |
+               rhi::kBufferCopyDst;
+  desc.name = "guest host read";
+  if (writable) {
+    const u64 alignment = Device().caps().host_import_alignment;
+    if (!alignment || (start % alignment) || (desc.size % alignment))
+      return nullptr;
+    gpu::GuestWriteTracker().Release(start, desc.size);
+    desc.host_pointer = reinterpret_cast<void*>(start);
+  } else {
+    desc.memory = rhi::MemoryKind::kUploadDevice;
+  }
+  auto* buffer = Device().CreateBuffer(desc);
+  if (!buffer || !buffer->address() || (!writable && !buffer->mapped())) {
+    if (buffer)
+      Device().Destroy(buffer);
+    if (writable && retry) {
+      ReadMaps(true);
+      return HostImportAt(address, base, false);
+    }
+    return nullptr;
+  }
+  if (!writable)
+    std::memcpy(buffer->mapped(), reinterpret_cast<const void*>(start),
+                desc.size);
+  *base = start;
+  if (auto previous = g_host_imports.find(start);
+      previous != g_host_imports.end()) {
+    Retire(previous->second.buffer);
+    g_maps_changed = true;
+  }
+  auto& imported = g_host_imports[start];
+  imported = {end, identity, g_map_snapshot, buffer, !writable};
+  return &imported;
+}
+
+u64 HostEntryFor(u64 block) {
+  PageEntry pages[kLeafPages]{};
+  bool held = false, failed = false;
+  for (u32 page = 0; page < kLeafPages; ++page) {
+    const u64 address = block + page * kPage;
+    if (const Mapping* direct = FindMapping(address)) {
+      const u64 offset = direct->offset + address - direct->start;
+      if (offset < g_alias_size) {
+        if (auto* chunk = ChunkAt(offset)) {
+          const u64 inner = offset & (kChunk - 1);
+          pages[page] = {
+              chunk->address() + inner,
+              base::Min(direct->end, address + chunk->desc().size - inner)};
+          held |= chunk->address() != 0;
+          failed |= chunk->address() == 0;
+        } else {
+          failed = true;
+        }
+      }
+      continue;
+    }
+    u64 base = 0;
+    if (auto* imported = HostImportAt(address, &base)) {
+      pages[page] = {imported->buffer->address() + address - base,
+                     imported->end};
+      held = true;
+    } else if (const auto* map = FindMappingIn(g_host_maps, address);
+               map && map->readable) {
+      failed = true;
+    }
+  }
+  auto previous = g_leaves.find(block);
+  if (!failed && previous != g_leaves.end() &&
+      std::memcmp(previous->second.pages, pages, sizeof(pages)) == 0) {
+    const u32 slot = previous->second.slot;
+    return (g_leaf_slabs[slot / kLeavesPerSlab]->address() +
+            (slot % kLeavesPerSlab) * kLeafBytes) |
+           gcn::kDirectLeaf;
+  }
+  if (previous != g_leaves.end()) {
+    Retire(nullptr, previous->second.slot);
+    g_leaves.erase(previous);
+  }
+  if (failed)
+    return 0;
+  if (!held)
+    return gcn::kDirectUnmapped;
+  u32 slot;
+  if (!g_free_leaves.empty()) {
+    slot = g_free_leaves.back();
+    g_free_leaves.pop_back();
+  } else {
+    slot = g_next_leaf;
+    if (slot % kLeavesPerSlab == 0) {
+      rhi::BufferDesc desc;
+      desc.size = kLeavesPerSlab * kLeafBytes;
+      desc.usage = rhi::kBufferStorage | rhi::kBufferAddress;
+      desc.memory = rhi::MemoryKind::kUploadDevice;
+      desc.name = "guest page table";
+      auto* slab = Device().CreateBuffer(desc);
+      if (!slab || !slab->mapped() || !slab->address()) {
+        if (slab)
+          Device().Destroy(slab);
+        return 0;
+      }
+      g_leaf_slabs.push_back(slab);
+    }
+    ++g_next_leaf;
+  }
+  auto* slab = g_leaf_slabs[slot / kLeavesPerSlab];
+  const u64 offset = (slot % kLeavesPerSlab) * kLeafBytes;
+  std::memcpy(slab->mapped() + offset, pages, sizeof(pages));
+  Leaf leaf{slot, {}};
+  std::memcpy(leaf.pages, pages, sizeof(pages));
+  g_leaves.insert_or_assign(block, leaf);
+  return (slab->address() + offset) | gcn::kDirectLeaf;
+}
+
+// Ordinary direct-memory blocks need one lookup. Other mappings carry a
+// page table so holes and short host spans never become physical GPU reads.
 u64 EntryFor(u64 block) {
   const Mapping* m = FindMapping(block);
-  if (!m)
-    return 0;
+  if (!m || block + (1ull << kDirectBlockShift) > m->end)
+    return HostEntryFor(block);
   const u64 offset = m->offset + (block - m->start);
   if (offset >= g_alias_size)
     return 0;
@@ -159,13 +416,8 @@ u64 EntryFor(u64 block) {
 
 void Fill(u64 address) {
   ReadMaps();
-  if (GuestDirectIndex(address) == ~0ull ||
-      g_unmapped.count(address & ~((1ull << kDirectBlockShift) - 1)))
+  if (GuestDirectIndex(address) == ~0ull)
     return;
-  if (!FindMapping(address)) {
-    g_unmapped.insert(address & ~((1ull << kDirectBlockShift) - 1));
-    return;
-  }
   // The whole 2 MiB around the miss: neighbours are read next.
   const u64 first = address & ~(kChunk - 1);
   for (u64 block = first; block < first + kChunk;
@@ -173,12 +425,20 @@ void Fill(u64 address) {
     const u64 index = GuestDirectIndex(block);
     if (index >= kBlocks)
       break;
+    const u64 entry = EntryFor(block);
     if (g_redirected[index].load(base::memory_order_acquire)) {
-      g_saved[index] = EntryFor(block);
-    } else if (const u64 cached = MirrorCacheBlock(block)) {
-      DirectRedirect(block, cached);
+      g_saved[index] = entry;
     } else {
-      Table()[index] = EntryFor(block);
+      const Mapping* host = FindMappingIn(g_host_maps, block);
+      const bool cacheable =
+          FindMapping(block) ||
+          (host &&
+           WritableMapping(*host, block, block + (1ull << kDirectBlockShift)));
+      const u64 cached = cacheable ? MirrorCacheBlock(block) : 0;
+      if (cached)
+        DirectRedirect(block, cached);
+      else
+        Table()[index] = entry;
     }
     g_filled.insert(block);
   }
@@ -236,6 +496,13 @@ bool InitGuestDirect() {
   return true;
 }
 
+void NoteGuestDirectRemap(u64 base, u64 bytes) {
+  if (!bytes || bytes > ~0ull - base)
+    return;
+  base::LockGuard lock(g_remap_lock);
+  g_remaps.push_back({base, base + bytes});
+}
+
 bool InDirectAlias(u64 va) {
   return g_alias && va >= reinterpret_cast<u64>(g_alias) &&
          va < reinterpret_cast<u64>(g_alias) + g_alias_size;
@@ -268,8 +535,15 @@ rhi::Buffer* DirectImportAt(u64 address, u64* offset, u64* bytes) {
     return nullptr;
   ReadMaps();
   const Mapping* m = FindMapping(address);
-  if (!m)
-    return nullptr;
+  if (!m) {
+    u64 base = 0;
+    auto* imported = HostImportAt(address, &base);
+    if (!imported)
+      return nullptr;
+    *offset = address - base;
+    *bytes = imported->end - address;
+    return imported->buffer;
+  }
   const u64 at = m->offset + (address - m->start);
   if (at >= g_alias_size)
     return nullptr;
@@ -336,6 +610,7 @@ rhi::Buffer* DirectBindAt(u64 address, u64 bytes, u64* offset) {
 void SyncGuestDirect() {
   if (!gcn::g_direct_table && !InitGuestDirect())
     return;
+  InvalidateCopiedImports();
   // Refresh imported addresses after a remap, with periodic refreshes for
   // host mappings that bypass the guest notification.
   ReadMaps(++g_syncs % 256 == 0);
@@ -349,6 +624,7 @@ void SyncGuestDirect() {
         Table()[index] = EntryFor(block);
     }
   }
+  ReapImports();
   MirrorRecache();
   auto* misses = reinterpret_cast<volatile u32*>(g_misses->mapped());
   const u32 count = base::Min<u32>(misses[0], kDirectMissSlots);
@@ -382,7 +658,15 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_saved);
   guest::ResetResource(g_redirected);
   guest::ResetResource(g_syncs);
-  guest::ResetResource(g_unmapped);
+  guest::ResetResource(g_host_maps);
+  guest::ResetResource(g_host_imports);
+  guest::ResetResource(g_leaves);
+  guest::ResetResource(g_leaf_slabs);
+  guest::ResetResource(g_free_leaves);
+  guest::ResetResource(g_retired);
+  guest::ResetResource(g_next_leaf);
+  guest::ResetResource(g_map_snapshot);
+  guest::ResetResource(g_remaps);
 });
 }  // namespace
 

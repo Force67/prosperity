@@ -213,7 +213,56 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
   const Id held =
       t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {entry, constant(0)});
   const Id reading = t.IsZero(args[2]);
-  const Id valid = t.LAnd(t.LAnd(inside, held), reading);
+  const Id within = t.m.Emit(spv::Op::OpBitwiseAnd, wide,
+                             {args[0], constant((1ull << kShift) - 1)});
+  const Id leaf = t.m.Emit(
+      spv::Op::OpINotEqual, t.t_bool,
+      {t.m.Emit(spv::Op::OpBitwiseAnd, wide, {entry, constant(kDirectLeaf)}),
+       constant(0)});
+  const Id paged = t.m.NewBlock(), direct = t.m.NewBlock(),
+           translated = t.m.NewBlock();
+  t.m.SelectionMerge(translated);
+  t.m.BranchConditional(leaf, paged, direct);
+  t.m.OpenBlock(paged);
+  const Id page = t.m.Emit(spv::Op::OpShiftRightLogical, wide,
+                           {within, t.U32(kDirectPageShift)});
+  const Id record = t.m.Emit(
+      spv::Op::OpIAdd, wide,
+      {t.m.Emit(spv::Op::OpBitwiseAnd, wide, {entry, constant(~kDirectLeaf)}),
+       t.m.Emit(spv::Op::OpShiftLeftLogical, wide, {page, t.U32(4)})});
+  const auto field = [&](u64 offset) {
+    const Id pointer =
+        t.m.Emit(spv::Op::OpConvertUToPtr, u64_ptr,
+                 {t.m.Emit(spv::Op::OpIAdd, wide, {record, constant(offset)})});
+    return t.m.Emit(
+        spv::Op::OpLoad, wide,
+        {pointer, static_cast<u32>(spv::MemoryAccessMask::Aligned), 8});
+  };
+  const Id physical = field(0), end = field(8);
+  Id paged_valid =
+      t.LAnd(t.m.Emit(spv::Op::OpINotEqual, t.t_bool, {physical, constant(0)}),
+             t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool, {args[0], end}));
+  paged_valid = t.LAnd(
+      paged_valid, t.m.Emit(spv::Op::OpULessThanEqual, t.t_bool,
+                            {Wide(t, args[1]),
+                             t.m.Emit(spv::Op::OpISub, wide, {end, args[0]})}));
+  const Id paged_address =
+      t.m.Emit(spv::Op::OpIAdd, wide,
+               {physical,
+                t.m.Emit(spv::Op::OpBitwiseAnd, wide,
+                         {args[0], constant((1ull << kDirectPageShift) - 1)})});
+  t.m.Branch(translated);
+  t.m.OpenBlock(direct);
+  const Id direct_valid = t.m.Emit(spv::Op::OpUGreaterThan, t.t_bool,
+                                   {entry, constant(kDirectUnmapped)});
+  const Id direct_address = t.m.Emit(spv::Op::OpIAdd, wide, {entry, within});
+  t.m.Branch(translated);
+  t.m.OpenBlock(translated);
+  const Id mapped = t.m.Emit(spv::Op::OpPhi, t.t_bool,
+                             {paged_valid, paged, direct_valid, direct});
+  const Id address = t.m.Emit(spv::Op::OpPhi, wide,
+                              {paged_address, paged, direct_address, direct});
+  const Id valid = t.LAnd(t.LAnd(inside, mapped), reading);
   {
     const Id report = t.LAnd(
         t.LAnd(inside, t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {held})),
@@ -263,14 +312,9 @@ void DeclareDirectMemory(Translator& t, StageContext& sc) {
     t.m.Branch(reported);
     t.m.OpenBlock(reported);
   }
-  const Id within = t.m.Emit(
-      spv::Op::OpBitwiseAnd, wide,
-      {args[0], constant((1ull << kShift) - 1)});
   t.m.EmitVoid(
       spv::Op::OpReturnValue,
-      {t.m.Emit(spv::Op::OpSelect, wide,
-                {valid, t.m.Emit(spv::Op::OpIAdd, wide, {entry, within}),
-                 constant(0)})});
+      {t.m.Emit(spv::Op::OpSelect, wide, {valid, address, constant(0)})});
   t.m.EndFunction();
 }
 
