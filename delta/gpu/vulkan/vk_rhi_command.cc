@@ -703,8 +703,11 @@ void VulkanCommandList::Barrier(u32 src_access,
     ib[i].srcQueueFamilyIndex = ib[i].dstQueueFamilyIndex =
         VK_QUEUE_FAMILY_IGNORED;
     ib[i].image = Tex(t.texture)->image;
+    const u32 layers = t.texture->desc().dim == rhi::TextureDim::k3D
+                           ? VK_REMAINING_ARRAY_LAYERS
+                           : t.range.layers;
     ib[i].subresourceRange = {ToVkAspect(t.range.aspect), t.range.base_mip,
-                              t.range.mips, t.range.base_layer, t.range.layers};
+                              t.range.mips, t.range.base_layer, layers};
   }
   if (!src_stages)
     src_stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
