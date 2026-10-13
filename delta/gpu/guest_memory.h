@@ -145,6 +145,13 @@ inline base::Atomic<bool>& MemoryRemapped() {
   return remapped;
 }
 
+// Mapping snapshots share this revision without consuming the frame's
+// pending-remap flag.
+inline base::Atomic<u64>& GuestMappingGeneration() {
+  static base::Atomic<u64> generation{1};
+  return generation;
+}
+
 // At a frame boundary. Every guest map and unmap is reported, so what was
 // readable stays so until one: probing the pages again every frame was a
 // thousand mincore and process_vm_readv calls a frame. Once a second

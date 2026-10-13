@@ -13,6 +13,7 @@
 #include "base/containers/vector.h"
 #include "base/logging.h"
 #include "gpu/gcn/gcn_resource.h"
+#include "gpu/guest_memory.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/renderer.h"
@@ -72,18 +73,21 @@ int FindDmemFd() {
 // Blocks a miss found in no view since the views were last read: missed
 // again, they are not looked up again until the views change.
 base::HashSet<u64> g_unmapped;
-u32 g_maps_read_at = ~0u;
+u64 g_maps_read_at = ~0ull;
+bool g_maps_changed = false;
 
-void ReadMaps() {
-  // Once a submit at most: a shader reading unmapped memory misses every frame.
-  if (g_maps_read_at == g_syncs)
+void ReadMaps(bool force = false) {
+  const u64 generation =
+      gpu::GuestMappingGeneration().load(base::memory_order_acquire);
+  if (!force && g_maps_read_at == generation)
     return;
-  g_maps_read_at = g_syncs;
-  g_unmapped.clear();
-  g_maps.clear();
   FILE* f = std::fopen("/proc/self/maps", "r");
   if (!f)
     return;
+  g_maps_read_at = generation;
+  g_maps_changed = true;
+  g_unmapped.clear();
+  g_maps.clear();
   char line[512];
   while (std::fgets(line, sizeof(line), f)) {
     if (!std::strstr(line, "memfd:delta_dmem"))
@@ -154,11 +158,10 @@ u64 EntryFor(u64 block) {
 }
 
 void Fill(u64 address) {
+  ReadMaps();
   if (GuestDirectIndex(address) == ~0ull ||
       g_unmapped.count(address & ~((1ull << kDirectBlockShift) - 1)))
     return;
-  if (!FindMapping(address))
-    ReadMaps();
   if (!FindMapping(address)) {
     g_unmapped.insert(address & ~((1ull << kDirectBlockShift) - 1));
     return;
@@ -243,8 +246,7 @@ void DirectRedirect(u64 block, u64 device_address) {
   if (!gcn::g_direct_table || index == ~0ull)
     return;
   if (!g_redirected[index].load(base::memory_order_acquire)) {
-    if (!FindMapping(block))
-      ReadMaps();
+    ReadMaps();
     g_saved[index] = EntryFor(block);
     g_filled.insert(block);
   }
@@ -264,8 +266,7 @@ void DirectRestore(u64 block) {
 rhi::Buffer* DirectImportAt(u64 address, u64* offset, u64* bytes) {
   if (!g_alias && !InitGuestDirect())
     return nullptr;
-  if (!FindMapping(address))
-    ReadMaps();
+  ReadMaps();
   const Mapping* m = FindMapping(address);
   if (!m)
     return nullptr;
@@ -312,8 +313,7 @@ BindImport BindSpan(u64 start, u64 cls) {
 rhi::Buffer* DirectBindAt(u64 address, u64 bytes, u64* offset) {
   if (!bytes || (!g_alias && !InitGuestDirect()))
     return nullptr;
-  if (!FindMapping(address))
-    ReadMaps();
+  ReadMaps();
   const Mapping* m = FindMapping(address);
   // The fetch reads one contiguous span: it has to stay in this view.
   if (!m || address + bytes > m->end)
@@ -336,10 +336,11 @@ rhi::Buffer* DirectBindAt(u64 address, u64 bytes, u64* offset) {
 void SyncGuestDirect() {
   if (!gcn::g_direct_table && !InitGuestDirect())
     return;
-  // A view can move to other bytes: re-read the views now and then and
-  // refresh what the table already holds.
-  if (++g_syncs % 256 == 0) {
-    ReadMaps();
+  // Refresh imported addresses after a remap, with periodic refreshes for
+  // host mappings that bypass the guest notification.
+  ReadMaps(++g_syncs % 256 == 0);
+  if (g_maps_changed) {
+    g_maps_changed = false;
     for (u64 block : g_filled) {
       const u64 index = GuestDirectIndex(block);
       if (g_redirected[index].load(base::memory_order_acquire))
@@ -367,7 +368,8 @@ const guest::SessionReset g_session_reset([] {
   if (g_saved)
     munmap(g_saved, kBlocks * 9);
   g_init_state = -1;
-  g_maps_read_at = ~0u;
+  g_maps_read_at = ~0ull;
+  g_maps_changed = false;
   gcn::g_direct_table = gcn::g_direct_misses = 0;
   guest::ResetResource(g_alias);
   guest::ResetResource(g_alias_size);

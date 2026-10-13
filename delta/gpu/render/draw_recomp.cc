@@ -453,6 +453,7 @@ void CollectGuestWrites() {
 void NoteGuestRemap(u64 base, u64 bytes) {
   gpu::MemoryRemapped().store(true, base::memory_order_release);
   gpu::NoteGuestRemap(base, bytes);
+  gpu::GuestMappingGeneration().fetch_add(1, base::memory_order_release);
 }
 
 void CollectGuestWritesForSubmission() {

@@ -31,12 +31,14 @@ namespace {
 
 struct DirectMemory {
   static constexpr u64 kBase = 0x2001000000ull;
+  static constexpr u64 kLateBase = kBase + (32ull << 20);
   static constexpr u64 kHighBase = gpu::gcn::kDirectPs5Base + (16ull << 20);
   static constexpr u64 kBytes = 4ull << 20;
   static constexpr u64 kMappedBytes = 2 * kBytes;
   int fd = memfd_create("delta_dmem_test", 0);
   void* memory = MAP_FAILED;
   void* high_memory = MAP_FAILED;
+  void* late_memory = MAP_FAILED;
 
   DirectMemory() {
     if (fd >= 0 && !ftruncate(fd, kMappedBytes))
@@ -50,22 +52,25 @@ struct DirectMemory {
   }
 
   ~DirectMemory() {
-    for (const u64 base : {kBase, kHighBase}) {
-      void* mapping = base == kBase ? memory : high_memory;
+    for (const u64 base : {kBase, kHighBase, kLateBase}) {
+      void* mapping = base == kBase       ? memory
+                      : base == kHighBase ? high_memory
+                                          : late_memory;
+      const u64 bytes =
+          base == kLateBase ? gpu::render::kMirrorBlock : kMappedBytes;
       if (mapping == MAP_FAILED)
         continue;
       if (gpu::render::g_mirror) {
         gpu::render::cs::CsBatchSubmit();
-        for (u64 at = base; at < base + kMappedBytes;
-             at += gpu::render::kMirrorBlock)
+        for (u64 at = base; at < base + bytes; at += gpu::render::kMirrorBlock)
           if (gpu::render::MirrorOwned(at)) {
             const u32 value = *reinterpret_cast<volatile const u32*>(at);
             (void)value;
           }
       }
-      gpu::GuestWriteTracker().Release(base, kMappedBytes);
-      munmap(mapping, kMappedBytes);
-      gpu::render::NoteGuestRemap(base, kMappedBytes);
+      gpu::GuestWriteTracker().Release(base, bytes);
+      munmap(mapping, bytes);
+      gpu::render::NoteGuestRemap(base, bytes);
     }
     if (fd >= 0)
       close(fd);
@@ -168,6 +173,29 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       gpu::gcn::spirv::Finalize(module.Assemble(), &geometry.vs_spirv, &error))
       << error.c_str();
   ASSERT_TRUE(gpu::render::InitGuestDirect());
+  u64 late_offset = 0, first_offset = 0;
+  ASSERT_EQ(gpu::render::DirectBindAt(DirectMemory::kLateBase, 4, &late_offset),
+            nullptr);
+  memory.late_memory = mmap(reinterpret_cast<void*>(DirectMemory::kLateBase),
+                            gpu::render::kMirrorBlock, PROT_READ | PROT_WRITE,
+                            MAP_SHARED | MAP_FIXED_NOREPLACE, memory.fd, 0);
+  ASSERT_NE(memory.late_memory, MAP_FAILED);
+  gpu::render::NoteGuestRemap(DirectMemory::kLateBase,
+                              gpu::render::kMirrorBlock);
+  auto* late_import =
+      gpu::render::DirectBindAt(DirectMemory::kLateBase, 4, &late_offset);
+  ASSERT_NE(late_import, nullptr);
+  EXPECT_EQ(late_import, gpu::render::DirectBindAt(base, 4, &first_offset));
+  EXPECT_EQ(late_offset, first_offset);
+  ASSERT_EQ(mmap(memory.late_memory, gpu::render::kMirrorBlock,
+                 PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, memory.fd,
+                 gpu::render::kMirrorBlock),
+            memory.late_memory);
+  gpu::render::NoteGuestRemap(DirectMemory::kLateBase,
+                              gpu::render::kMirrorBlock);
+  EXPECT_EQ(late_import, gpu::render::DirectBindAt(DirectMemory::kLateBase, 4,
+                                                   &late_offset));
+  EXPECT_EQ(late_offset, first_offset + gpu::render::kMirrorBlock);
   alignas(65536) static base::Array<u8, 65536> targets[47]{};
   *static_cast<u32*>(memory.memory) = 0x3e800000;
   gpu::render::DrawInfo imported;
