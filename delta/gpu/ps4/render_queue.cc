@@ -15,6 +15,7 @@
 #include "base/functional/function.h"
 #include "base/logging.h"
 #include "base/memory/move.h"
+#include "base/time/time.h"
 #include "base/memory/unique_pointer.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
@@ -122,17 +123,21 @@ void RenderQueue::Drain(const char* why) {
     return;
   const u64 head = head_.load(base::memory_order_relaxed);
   if (kDrainTrace && done_.load(base::memory_order_acquire) != head) {
-    static base::Map<const char*, u64> counts;
+    static base::Map<const char*, u64> counts, nanos;
     static const guest::SessionReset reset_counts(
         [] { guest::ResetResource(counts); });
     static u64 n = 0;
     counts[why]++;
+    const u64 t0 = base::TickClock::NowNs();
+    WaitDone(done_, head, why);
+    nanos[why] += base::TickClock::NowNs() - t0;
     if (++n % 2000 == 0) {
       base::String line;
       for (const auto& [k, v] : counts)
-        base::FormatTo(line, " {}={}", k, v);
+        base::FormatTo(line, " {}={}/{}ms", k, v, nanos[k] / 1000000);
       BASE_LOGI("drain", "waited{}", line.c_str());
     }
+    return;
   }
   WaitDone(done_, head, why);
 }
@@ -215,12 +220,57 @@ void RenderQueue::NotePendingWrite(u64 base, u64 bytes) {
         {head_.load(base::memory_order_relaxed), base, base + bytes});
 }
 
-bool RenderQueue::PendingWriteOverlaps(u64 base, u64 bytes) {
-  if (pending_writes_.empty())
-    return false;
+void RenderQueue::NotePendingValue(u64 base, u32 bytes, u64 value) {
+  if (running_ && bytes)
+    pending_writes_.push_back({head_.load(base::memory_order_relaxed), base,
+                               base + bytes, value, bytes});
+}
+
+void RenderQueue::ErasePendingWritesDone() {
   const u64 done = done_.load(base::memory_order_acquire);
   base::EraseIf(pending_writes_,
                 [done](const PendingWrite& w) { return w.command < done; });
+}
+
+bool RenderQueue::PendingWriteValue(u64 address, u32* value) {
+  if (pending_writes_.empty())
+    return false;
+  ErasePendingWritesDone();
+  for (size_t i = pending_writes_.size(); i-- > 0;) {
+    const PendingWrite& w = pending_writes_[i];
+    if (w.first >= address + 4 || address >= w.end)
+      continue;
+    if (address < w.first || address + 4 > w.first + w.value_bytes)
+      return false;
+    *value = static_cast<u32>(w.value >> ((address - w.first) * 8));
+    return true;
+  }
+  return false;
+}
+
+bool RenderQueue::PendingWritesKnown(u64 base, u64 bytes) {
+  ErasePendingWritesDone();
+  for (const PendingWrite& w : pending_writes_)
+    if (w.first < base + bytes && base < w.end &&
+        w.value_bytes != w.end - w.first)
+      return false;
+  return true;
+}
+
+void RenderQueue::OverlayPendingValues(u64 base, u64 bytes, u8* out) {
+  for (const PendingWrite& w : pending_writes_) {
+    if (!w.value_bytes || w.first >= base + bytes || base >= w.end)
+      continue;
+    for (u64 at = base::Max(base, w.first); at < base::Min(base + bytes, w.end);
+         at++)
+      out[at - base] = static_cast<u8>(w.value >> ((at - w.first) * 8));
+  }
+}
+
+bool RenderQueue::PendingWriteOverlaps(u64 base, u64 bytes) {
+  if (pending_writes_.empty())
+    return false;
+  ErasePendingWritesDone();
   const u64 end = base + bytes;
   for (const PendingWrite& w : pending_writes_)
     if (w.first < end && base < w.end) {
@@ -266,7 +316,8 @@ void FlushForWalkRead(render::Renderer& renderer,
 
 void SpeculateWalkRead(render::Renderer& renderer, u64 base, u64 bytes) {
   RenderQueue& queue = GuestRenderQueue();
-  if (queue.running() && queue.PendingWriteOverlaps(base, bytes))
+  if (queue.running() && queue.PendingWriteOverlaps(base, bytes) &&
+      !queue.PendingWritesKnown(base, bytes))
     OwnRenderer("pending-write");
   if (queue.running() && !render::CsRangeMaybeDirty(base, bytes) &&
       !render::GuestWriteMaybePending(base, bytes))

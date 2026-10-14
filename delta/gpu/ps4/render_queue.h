@@ -41,7 +41,11 @@ class RenderQueue {
   void Drain(const char* why = "other");
 
   void NotePendingWrite(u64 base, u64 bytes);
+  void NotePendingValue(u64 base, u32 bytes, u64 value);
   bool PendingWriteOverlaps(u64 base, u64 bytes);
+  bool PendingWriteValue(u64 address, u32* value);
+  bool PendingWritesKnown(u64 base, u64 bytes);
+  void OverlayPendingValues(u64 base, u64 bytes, u8* out);
 
  private:
   enum class Kind : u8 { kDraw, kBeginFrame, kEndFrame, kCall };
@@ -67,7 +71,10 @@ class RenderQueue {
   u64 last_end_frame_ = 0;
   struct PendingWrite {
     u64 command, first, end;
+    u64 value = 0;
+    u32 value_bytes = 0;
   };
+  void ErasePendingWritesDone();
   base::Vector<PendingWrite> pending_writes_;
   base::Atomic<u64> head_{0};
   base::Atomic<u64> done_{0};

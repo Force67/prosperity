@@ -521,7 +521,24 @@ void InOrder(void (*handle)(const u32*, u32),
   }
   if (label && IsLabelAddress(label)) {
     g_fence_labels.Note(label);
-    queue.NotePendingWrite(label, label_bytes);
+    const u32 sel = handle == HandleEventWriteEop && count >= 4
+                        ? (body[2] >> 29) & 0x7
+                    : handle == HandleReleaseMem && count >= 5
+                        ? (body[1] >> 29) & 0x7
+                        : 0;
+    const u32 at = handle == HandleEventWriteEop ? 3 : 4;
+    if (handle == HandleEventWriteEos && count >= 4)
+      queue.NotePendingValue(label, 4, body[3]);
+    else if (handle == HandleWriteData && (count == 4 || count == 5))
+      queue.NotePendingValue(
+          label, (count - 3) * 4,
+          body[3] | (count == 5 ? static_cast<u64>(body[4]) << 32 : 0));
+    else if (sel == 1 || (sel == 2 && count > at + 1))
+      queue.NotePendingValue(
+          label, sel * 4,
+          body[at] | (sel == 2 ? static_cast<u64>(body[at + 1]) << 32 : 0));
+    else
+      queue.NotePendingWrite(label, label_bytes);
   }
   queue.PushCall([handle, words = base::Vector<u32>(body, body + count)] {
     handle(words.data(), static_cast<u32>(words.size()));
@@ -887,6 +904,15 @@ u32 WalkDcb(render::Renderer& renderer,
         break;
       case IT_WAIT_REG_MEM:
         do {
+          if (count >= 5 && GuestRenderQueue().running()) {
+            const volatile u32* polled = WaitRegMemTarget(body);
+            u32 queued = 0;
+            if (polled &&
+                GuestRenderQueue().PendingWriteValue(
+                    reinterpret_cast<u64>(polled), &queued) &&
+                WaitRegMemPasses(body, queued))
+              break;
+          }
           if (count >= 5 && ((body[0] >> 4) & 1)) {
             const u64 address =
                 ((static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1]) & ~3ull;
@@ -917,7 +943,11 @@ u32 WalkDcb(render::Renderer& renderer,
         QueueDmaData(renderer, body, count);
         break;
       case IT_WRITE_DATA:
-        if (count >= 4)
+        if (count == 4 || count == 5)
+          GuestRenderQueue().NotePendingValue(
+              PacketAddress(body, 1), (count - 3) * 4,
+              body[3] | (count == 5 ? static_cast<u64>(body[4]) << 32 : 0));
+        else if (count > 5)
           GuestRenderQueue().NotePendingWrite(PacketAddress(body, 1),
                                               (count - 3) * 4ull);
         InOrder(HandleWriteData, body, count,
@@ -1098,6 +1128,11 @@ void StartRendererOnce(render::Renderer& renderer) {
   GuestWriteTracker().Enable();
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
     SpeculateWalkRead(render::DefaultRenderer(), address, bytes);
+  };
+  gcn::g_overlay_guest_range = [](u64 address, u32 dwords, u32* values) {
+    if (GuestRenderQueue().running())
+      GuestRenderQueue().OverlayPendingValues(address, dwords * 4ull,
+                                              reinterpret_cast<u8*>(values));
   };
   if (kRenderThread && renderer.available())
     GuestRenderQueue().Start(renderer);

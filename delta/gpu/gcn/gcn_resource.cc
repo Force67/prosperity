@@ -49,6 +49,7 @@ DELTA_OPTION(int, kArenaProbe, "DELTA_GPU_ARENA_PROBE", 0);
 namespace gpu::gcn {
 
 void (*g_flush_guest_range)(u64 address, u64 bytes) = nullptr;
+void (*g_overlay_guest_range)(u64 address, u32 dwords, u32* values) = nullptr;
 u64 g_direct_table = 0, g_direct_misses = 0;
 
 namespace {
@@ -848,6 +849,12 @@ struct ScalarEval {
     if (g_flush_guest_range)
       g_flush_guest_range(address, static_cast<u64>(dwords) * 4);
     const u32* mem = reinterpret_cast<const u32*>(address);
+    u32 overlaid[16];
+    if (g_overlay_guest_range && dwords <= 16) {
+      std::memcpy(overlaid, mem, dwords * 4);
+      g_overlay_guest_range(address, dwords, overlaid);
+      mem = overlaid;
+    }
     for (u32 i = 0; i < dwords; i++) {
       Set(s.sdst + i, mem[i]);
       if (s.sdst + i < kRegs)

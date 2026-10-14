@@ -131,6 +131,7 @@ void TrackVertexBuffers(base::Vector<VBuffer>& out,
                         const u32* vs_user_data);
 
 extern void (*g_flush_guest_range)(u64 address, u64 bytes);
+extern void (*g_overlay_guest_range)(u64 address, u32 dwords, u32* values);
 
 extern u64 g_direct_table, g_direct_misses;
 
