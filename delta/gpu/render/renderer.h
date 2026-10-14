@@ -30,7 +30,7 @@ void BeginFrame(Renderer& renderer);
 void Draw(Renderer& renderer, const DrawInfo& d);
 void EndFrame(Renderer& renderer, u64 scanout_base);
 
-bool Dispatch(Renderer& renderer, const ComputeInfo& ci);
+bool Dispatch(Renderer& renderer, ComputeInfo& ci);
 
 void PrebuildComputePipeline(const base::Vector<u32>& spirv,
                              u32 num_res,

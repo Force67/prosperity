@@ -16,7 +16,9 @@
 
 namespace gpu::ps4 {
 namespace {
-DELTA_OPTION(bool, kLabelsAtGpu, "DELTA_GPU_LABELS_AT_GPU", false);
+DELTA_OPTION(bool, kLabelsAtGpu, "DELTA_GPU_LABELS_AT_GPU", true);
+
+constexpr u64 kNothingSubmitted = ~0ull;
 
 struct Held {
   u64 submission = 0;
@@ -47,7 +49,8 @@ void Run() {
       write = base::move(g_held[g_head].write);
     }
     // A lost device still writes; a title waiting on the fence would hang.
-    render::WaitSubmission(submission);
+    if (submission != kNothingSubmitted)
+      render::WaitSubmission(submission);
     write();
     base::LockGuard<base::Mutex> lock(g_lock);
     if (++g_head == g_held.size()) {
@@ -78,6 +81,10 @@ void WriteAfterGpu(base::Function<void()> write,
   }
 }
 
+bool LabelsAtGpu() {
+  return kLabelsAtGpu;
+}
+
 void SubmitHeldWrites() {
   {
     base::LockGuard<base::Mutex> lock(g_lock);
@@ -88,7 +95,8 @@ void SubmitHeldWrites() {
   {
     base::LockGuard<base::Mutex> lock(g_lock);
     for (; g_unsubmitted < g_held.size(); g_unsubmitted++)
-      g_held[g_unsubmitted].submission = submission ? submission : 1;
+      g_held[g_unsubmitted].submission =
+          submission ? submission : kNothingSubmitted;
   }
   g_wake.NotifyAll();
 }

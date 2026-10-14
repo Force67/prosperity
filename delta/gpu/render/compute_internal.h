@@ -465,7 +465,7 @@ bool StageImageOnGpu(const ComputeInfo::Res& res, CsRange& e);
 extern bool g_cs_batch_open;
 extern u32 g_cs_batch_count;
 
-constexpr u32 kCsBatchRing = 32;
+constexpr u32 kCsBatchRing = 128;
 
 extern u64 g_cs_batch_id;
 extern u64 g_cs_batch_next_id;

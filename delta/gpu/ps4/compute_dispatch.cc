@@ -438,7 +438,8 @@ void DispatchCompute(render::Renderer& renderer,
     return;
   }
 
-  render::ComputeInfo ci;
+  const auto job = base::MakeShared<render::ComputeInfo>();
+  render::ComputeInfo& ci = *job;
   for (u32 i = 0; i < rc.textures.size(); i++) {
     if (rc.textures[i] < 0 || ci.num_tex >= render::ComputeInfo::kMaxTextures)
       continue;
@@ -567,7 +568,6 @@ void DispatchCompute(render::Renderer& renderer,
                                ci.res[i].write_bytes  ? ci.res[i].write_bytes
                                : ci.res[i].guest_size ? ci.res[i].guest_size
                                                       : ci.res[i].size);
-    auto job = base::MakeShared<render::ComputeInfo>(ci);
     queue.PushCall([&renderer, job, trace, num_res = ci.num_res] {
       const bool executed = render::Dispatch(renderer, *job);
       if (trace)

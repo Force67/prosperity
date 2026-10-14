@@ -144,9 +144,7 @@ void NoteMetadataBase(u64 base);
 void NoteDccWrite(u64 base, u64 bytes, const u32* fill);
 void NoteExpandedHtile(u64 base);
 
-void NoteSurfaceWrite(u64 base, u64 bytes);
-
-void NoteRawWrite(u64 base, u64 bytes);
+void NoteSurfaceWrite(u64 base, u64 bytes, bool raw);
 bool OverlapsLiveTarget(u64 base, u64 bytes);
 
 bool ActivateWrittenRtVariant(u64 base, u32 w, u32 h);

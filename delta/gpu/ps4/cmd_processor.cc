@@ -1125,6 +1125,8 @@ void StartRendererOnce(render::Renderer& renderer) {
   g_renderer_started = true;
   render::Init(renderer);
   render::RecordComputeInFrame();
+  if (LabelsAtGpu())
+    render::DeferLabelsToGpu();
   GuestWriteTracker().Enable();
   gcn::g_flush_guest_range = [](u64 address, u64 bytes) {
     SpeculateWalkRead(render::DefaultRenderer(), address, bytes);

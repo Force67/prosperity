@@ -43,59 +43,58 @@ bool CsDeclined(const ComputeInfo& ci, const char* why) {
 
 bool MergeOverlapping(ComputeInfo& ci) {
   constexpr u64 kAlign = 16;
-  const auto plain = [&](u32 i) {
+  bool plain[ComputeInfo::kMaxResources];
+  u64 ends[ComputeInfo::kMaxResources];
+  for (u32 i = 0; i < ci.num_res; i++) {
     const auto& r = ci.res[i];
-    return !r.zero_fill && !r.image_staging && r.binding < 48 &&
-           !TruthEligible(r);
-  };
-  const auto end_of = [](const ComputeInfo::Res& r) {
-    return r.base + base::Max(r.size, r.guest_size);
-  };
+    plain[i] = !r.zero_fill && !r.image_staging && r.binding < 48;
+    ends[i] = r.base + base::Max(r.size, r.guest_size);
+  }
   bool changed = false;
   for (u32 i = 0; i < ci.num_res; i++) {
-    if (!plain(i))
+    if (!plain[i])
       continue;
-    u64 lo = ci.res[i].base, hi = end_of(ci.res[i]);
+    u64 lo = ci.res[i].base, hi = ends[i];
     u32 members = 0;
     for (bool grew = true; grew;) {
       grew = false;
       members = 0;
       for (u32 j = 0; j < ci.num_res; j++) {
-        if (!plain(j) || ci.res[j].base >= hi || end_of(ci.res[j]) <= lo)
+        if (!plain[j] || ci.res[j].base >= hi || ends[j] <= lo)
           continue;
         members++;
-        if (ci.res[j].base < lo || end_of(ci.res[j]) > hi) {
+        if (ci.res[j].base < lo || ends[j] > hi) {
           lo = base::Min(lo, ci.res[j].base);
-          hi = base::Max(hi, end_of(ci.res[j]));
+          hi = base::Max(hi, ends[j]);
           grew = true;
         }
       }
     }
     bool distinct = false;
-    for (u32 j = 0; j < ci.num_res; j++)
-      distinct |= plain(j) && ci.res[j].base < hi && end_of(ci.res[j]) > lo &&
-                  ci.res[j].base != ci.res[i].base;
+    for (u32 j = 0; j < ci.num_res && !distinct; j++)
+      distinct = plain[j] && ci.res[j].base < hi && ends[j] > lo &&
+                 ci.res[j].base != ci.res[i].base;
     if (members < 2 || !distinct)
       continue;
     lo &= ~(kAlign - 1);
     hi = (hi + 3) & ~u64(3);
     for (u32 j = 0; j < ci.num_res; j++) {
       auto& r = ci.res[j];
-      if (!plain(j) || r.base < lo || end_of(r) > hi)
+      if (!plain[j] || r.base < lo || ends[j] > hi)
         continue;
       r.view_offset = r.base - lo;
       if (r.write_bytes)
         r.write_bytes += r.view_offset;
       r.base = lo;
       r.size = r.guest_size = hi - lo;
+      ends[j] = hi;
     }
     changed = true;
   }
   return changed;
 }
 
-const ComputeInfo& MergeSameBase(const ComputeInfo& ci, ComputeInfo& merged) {
-  const ComputeInfo* src = &ci;
+void MergeSameBase(ComputeInfo& ci) {
   if (kCsMergeOverlap) {
     bool overlap = false;
     for (u32 i = 0; i < ci.num_res && !overlap; i++)
@@ -107,36 +106,19 @@ const ComputeInfo& MergeSameBase(const ComputeInfo& ci, ComputeInfo& merged) {
                   a.base < b.base + base::Max(b.size, b.guest_size) &&
                   b.base < a.base + base::Max(a.size, a.guest_size);
       }
-    if (overlap) {
-      merged = ci;
-      if (MergeOverlapping(merged))
-        src = &merged;
-    }
+    if (overlap)
+      MergeOverlapping(ci);
   }
-  const ComputeInfo& in = *src;
-  bool need = false;
-  for (u32 i = 0; i < in.num_res && !need; i++)
-    for (u32 j = 0; j < i && !need; j++)
-      need = in.res[i].base == in.res[j].base && !in.res[i].zero_fill &&
-             !in.res[j].zero_fill && !in.res[i].image_staging &&
-             !in.res[j].image_staging &&
-             (in.res[i].size != in.res[j].size ||
-              in.res[i].guest_size != in.res[j].guest_size);
-  if (!need)
-    return in;
-  if (src != &merged)
-    merged = ci;
-  for (u32 i = 0; i < merged.num_res; i++)
+  for (u32 i = 0; i < ci.num_res; i++)
     for (u32 j = 0; j < i; j++) {
-      auto& a = merged.res[i];
-      auto& b = merged.res[j];
+      auto& a = ci.res[i];
+      auto& b = ci.res[j];
       if (a.base != b.base || a.zero_fill || b.zero_fill || a.image_staging ||
           b.image_staging)
         continue;
       a.size = b.size = base::Max(a.size, b.size);
       a.guest_size = b.guest_size = base::Max(a.guest_size, b.guest_size);
     }
-  return merged;
 }
 
 void PrebuildComputePipeline(const base::Vector<u32>& spirv,
@@ -532,11 +514,10 @@ void ResolveComputeTexture(const DrawInfo::DrawTex& t,
   *state = rhi::TextureState::kShaderRead;
 }
 
-bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
+bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   DELTA_ZONE("gpu.cs_dispatch");
   BumpTextureEpoch();
-  ComputeInfo ci_merged;
-  const ComputeInfo& ci = MergeSameBase(ci_in, ci_merged);
+  MergeSameBase(ci);
   if (g_cs_failed) {
     renderer.state = nullptr;
     return CsDeclined(ci, "1");
@@ -622,9 +603,7 @@ bool Dispatch(Renderer& renderer, const ComputeInfo& ci_in) {
     const u64 bytes =
         ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
     NoteDccWrite(ci.res[i].base, bytes, nullptr);
-    NoteSurfaceWrite(ci.res[i].base, bytes);
-    if (!ci.res[i].image_staging)
-      NoteRawWrite(ci.res[i].base, bytes);
+    NoteSurfaceWrite(ci.res[i].base, bytes, !ci.res[i].image_staging);
   }
   CsPipe* cp = GetCsPipe(ci);
   if (!cp)

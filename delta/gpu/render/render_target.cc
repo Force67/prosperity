@@ -929,7 +929,7 @@ void ResolveHtileClear(DepthTarget& dt, u64 base, float depth_clear) {
   }
 }
 
-void NoteSurfaceWrite(u64 base, u64 bytes) {
+void NoteSurfaceWrite(u64 base, u64 bytes, bool raw) {
   if (!base || !bytes)
     return;
   const auto note = [&](RTarget& rt, u64 rt_base) {
@@ -939,35 +939,14 @@ void NoteSurfaceWrite(u64 base, u64 bytes) {
     if (rt.clear_pending && rt.clear_src &&
         !std::strcmp(rt.clear_src, "dcc-clear"))
       rt.clear_pending = false;
-  };
-  for (auto& kv : g_rts) {
-    note(kv.second, kv.first);
-    auto v = g_rt_variants.find(kv.first);
-    if (v == g_rt_variants.end())
-      continue;
-    for (RTarget& alt : v->second)
-      note(alt, kv.first);
-  }
-}
-
-void NoteRawWrite(u64 base, u64 bytes) {
-  if (!base || !bytes)
-    return;
-  const auto note = [&](RTarget& rt, u64 rt_base) {
-    if (rt.last_frame == g_frame.num || !rt.ever_rendered)
-      return;
-    const u64 end = rt_base + RtByteSize(rt);
-    if (base < end && rt_base < base + bytes)
+    if (raw && rt.last_frame != g_frame.num)
       rt.ever_rendered = false;
   };
-  for (auto& kv : g_rts) {
-    note(kv.second, kv.first);
-    auto v = g_rt_variants.find(kv.first);
-    if (v == g_rt_variants.end())
-      continue;
-    for (RTarget& alt : v->second)
-      note(alt, kv.first);
-  }
+  for (auto& [at, rt] : g_rts)
+    note(rt, at);
+  for (auto& [at, variants] : g_rt_variants)
+    for (RTarget& alt : variants)
+      note(alt, at);
 }
 
 bool OverlapsLiveTarget(u64 base, u64 bytes) {
