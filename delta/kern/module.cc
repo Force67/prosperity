@@ -50,7 +50,12 @@ DELTA_OPTION(bool, kRelocTrace, "DELTA_RELOC_TRACE", false);
 namespace kern {
 namespace {
 uintptr_t s_next_base = kModuleRegionBase;
+MainImageHook g_main_image_hook = nullptr;
 }  // namespace
+
+void SetMainImageHook(MainImageHook hook) {
+  g_main_image_hook = hook;
+}
 
 Module::Module(Process* process) : process_(process) {
   /*-1 = no tls used*/
@@ -687,6 +692,18 @@ bool Module::MapImage() {
 
       std::memcpy(target, GetOffset<void>(s->offset), s->filesz);
     }
+  }
+
+  if (g_main_image_hook && info_.handle == 0 && !IsDynlib()) {
+    MainImage image{reinterpret_cast<uintptr_t>(info_.base), code_size, {}};
+    for (u16 i = 0; i < elf_->phnum; i++) {
+      const auto* s = &segments_[i];
+      if (s->type == PT_LOAD || s->type == PT_SCE_RELRO)
+        image.segments.push_back(
+            {GetAddress<u8>(elf_->type == ET_SCE_EXEC ? s->vaddr : s->paddr),
+             static_cast<u32>(s->filesz)});
+    }
+    g_main_image_hook(image);
   }
 
   // PS5 (Prospero) marks its code segments PF_X only (no PF_R), unlike PS4's

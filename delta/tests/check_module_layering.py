@@ -21,7 +21,8 @@ import sys
 ROOT = sys.argv[1] if len(sys.argv) > 1 else '.'
 DELTA = os.path.join(ROOT, 'delta')
 
-MODULES = ('cpu', 'formats', 'host', 'ui', 'gpu', 'kern', 'main', 'runtime')
+MODULES = ('cpu', 'formats', 'host', 'ui', 'gpu', 'kern', 'main', 'patch',
+           'runtime')
 
 # The one-way design. Read down: a module may only include modules below it.
 #
@@ -32,6 +33,7 @@ MODULES = ('cpu', 'formats', 'host', 'ui', 'gpu', 'kern', 'main', 'runtime')
 #   host        the host platform shell (window, input, audio)
 #   ui          menus, overlays, and their rendering backend
 #   formats     container parsers (pkg, pup, ufs2, archive, fself); depends on nothing
+#   patch       game patch files applied to the main module; depends on nothing
 ALLOWED = {
     'formats': (),
     'ui': (),
@@ -39,6 +41,7 @@ ALLOWED = {
     'gpu': ('host', 'ui'),
     'kern': ('formats', 'gpu', 'host'),
     'cpu': (),
+    'patch': (),
     'runtime': ('kern', 'cpu', 'gpu', 'host', 'formats'),
     'main': MODULES,
 }

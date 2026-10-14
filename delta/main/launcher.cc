@@ -34,6 +34,7 @@
 #include "host/window.h"
 #include "io/file.h"
 #include "kern/crash.h"
+#include "kern/module.h"
 #include "kern/probe/probe_arm.h"
 #include "kern/ps4/audio_sink.h"
 #include "kern/ps4/controller_ports.h"
@@ -44,6 +45,7 @@
 #include "logger/logger.h"
 #include "main/game_directory.h"
 #include "options/options.h"
+#include "patch/game_patches.h"
 #include "ui/pause_menu.h"
 #if defined(__linux__) && !defined(__ANDROID__)
 #include "main/home_screen.h"
@@ -266,6 +268,13 @@ bool Launcher::Init() {
   gpu::ps4::SetWriteWatchCallback(&kern::probe::StartWriteWatch);
   kern::SetCsRangeDescriber(&gpu::render::DescribeCsRangeCovering);
   kern::SetMappingChangedHook(&gpu::render::NoteGuestRemap);
+  kern::SetMainImageHook([](const kern::MainImage& image) {
+    base::Vector<patch::Segment> segments;
+    for (const kern::ModuleSeg& s : image.segments)
+      segments.push_back({s.addr, s.size});
+    patch::PatchMainImage(image.base, image.end, segments.data(),
+                          segments.size());
+  });
   kern::ps4::SetAudioSink({host::OpenAudioPort, host::QueueAudio,
                            host::SetAudioPortVolume, host::CloseAudioPort});
   kern::SetControllerSource(host::PollControllerInput);

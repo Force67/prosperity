@@ -11,7 +11,7 @@ set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc)
 
 set(MAIN_LIBS delta_deps delta_kern delta_runtime delta_formats
-              delta_host delta_ui delta_cpu)
+              delta_host delta_ui delta_cpu delta_patch)
 
 if(DELTA_ANDROID_APP)
   # NativeActivity shared lib loaded by android.app.NativeActivity. android_main

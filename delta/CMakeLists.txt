@@ -25,6 +25,7 @@ add_subdirectory(ui)
 add_subdirectory(host)
 add_subdirectory(gpu)
 add_subdirectory(kern)
+add_subdirectory(patch)
 add_subdirectory(runtime)
 add_subdirectory(main)
 

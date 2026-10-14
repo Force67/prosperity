@@ -87,6 +87,18 @@ struct ModuleInfo {
   u8 fingerprint[20];
 };
 
+// The main module right after its segments are copied in, before the lifter
+// rewrites any code. `base` is the host address of ELF vaddr 0 and `end` the
+// highest mapped vaddr; `segments` hold the file bytes of each loaded segment.
+struct MainImage {
+  uintptr_t base;
+  u64 end;
+  base::Vector<ModuleSeg> segments;
+};
+// Installed by the composition root (game patches).
+using MainImageHook = void (*)(const MainImage& image);
+void SetMainImageHook(MainImageHook hook);
+
 class Module {
   friend class Process;
 
