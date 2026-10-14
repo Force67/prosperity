@@ -262,8 +262,13 @@ bool CsSupplyTexture(u64 base,
     return declined("no blit");
   if (LiveTargetOfSize(base, w, h))
     return declined("live target");
-  if (!DirtyRangesOverlapping(base, layout.size, base).empty())
-    return declined("dirty sibling");
+  for (u64 other : DirtyRangesOverlapping(base, layout.size, base)) {
+    const CsRange& o = g_cs_ranges.find(other)->second;
+    if (o.dirty_stamp > e.dirty_stamp || o.guest_bytes != e.guest_bytes ||
+        o.res.width != r.width || o.res.height != r.height ||
+        o.res.elem_bytes != r.elem_bytes || o.res.tiling_idx != r.tiling_idx)
+      return declined("dirty sibling");
+  }
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(r, tiled, linear) || linear.layer_stride)
     return declined("layout");
@@ -513,7 +518,8 @@ bool CsSupplyTextureFromBuffer(u64 base,
       (img && img->desc().dim == rhi::TextureDim::k3D))
     return false;
   if (!found)
-    return MirrorSupplyTexture(base, tiled, linear, img, state, seq);
+    return !CsRangeDirtyOverlapping(base, tiled.size) &&
+           MirrorSupplyTexture(base, tiled, linear, img, state, seq);
   CsRange& e = *found;
   const TileTable* table = GetTileTable(tiled, linear, tiled.elem_bytes < 4);
   if (!table)

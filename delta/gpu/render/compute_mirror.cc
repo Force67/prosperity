@@ -881,10 +881,14 @@ void MirrorRefreshWritten() {
 
 void MirrorRefreshCached() {
   CollectGuestWrites();
+  static int scanned_frame = -1;
   base::Vector<u64> released;
-  for (u64 block : g_mirror_was_owned)
-    if (!MirrorOwned(block))
-      released.push_back(block);
+  if (scanned_frame != g_frame.num) {
+    scanned_frame = g_frame.num;
+    for (u64 block : g_mirror_was_owned)
+      if (!MirrorOwned(block))
+        released.push_back(block);
+  }
   for (u64 block : released) {
     g_mirror_was_owned.erase(block);
     g_mirror_cached.erase(block);
