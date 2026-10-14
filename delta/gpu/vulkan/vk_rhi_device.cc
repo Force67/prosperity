@@ -287,6 +287,10 @@ VkDescriptorType ToVkDescriptorType(rhi::BindingType type) {
       return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     case rhi::BindingType::kStorageBufferDynamic:
       return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+    case rhi::BindingType::kTexture:
+      return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    case rhi::BindingType::kSampler:
+      return VK_DESCRIPTOR_TYPE_SAMPLER;
   }
   return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 }
@@ -607,6 +611,20 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   f12.timelineSemaphore = VK_TRUE;
   f12.bufferDeviceAddress =
       avail12.bufferDeviceAddress && avail.features.shaderInt64;
+  const bool bindless = avail12.descriptorIndexing &&
+                        avail12.runtimeDescriptorArray &&
+                        avail12.descriptorBindingPartiallyBound &&
+                        avail12.descriptorBindingSampledImageUpdateAfterBind &&
+                        avail12.descriptorBindingUpdateUnusedWhilePending &&
+                        avail12.shaderSampledImageArrayNonUniformIndexing;
+  if (bindless) {
+    f12.descriptorIndexing = VK_TRUE;
+    f12.runtimeDescriptorArray = VK_TRUE;
+    f12.descriptorBindingPartiallyBound = VK_TRUE;
+    f12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+    f12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+    f12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+  }
   VkPhysicalDeviceVulkan13Features f13{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
   f13.pNext = &f12;
@@ -863,6 +881,10 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   caps_.storage_image_write_without_format =
       f.shaderStorageImageWriteWithoutFormat;
   caps_.buffer_address = f12.bufferDeviceAddress;
+  caps_.bindless = bindless;
+  caps_.max_bindless_textures =
+      bindless ? base::Min<u32>(lim.maxPerStageDescriptorSampledImages, 65536)
+               : 0;
   caps_.host_import_alignment = host.minImportedHostPointerAlignment;
   caps_.texture_blit = true;
   caps_.dispatch_base = true;
@@ -1291,18 +1313,34 @@ rhi::BindGroupLayout* VulkanDevice::CreateBindGroupLayout(
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
   auto layout = base::MakeUnique<VulkanBindGroupLayout>(desc);
   base::Vector<VkDescriptorSetLayoutBinding> bindings;
+  base::Vector<VkDescriptorBindingFlags> binding_flags;
   for (const auto& b : desc.bindings) {
     VkDescriptorType type = ToVkDescriptorType(b.type);
     layout->types.push_back(type);
     if (type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
         type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
       layout->dynamic_count++;
-    bindings.push_back({b.binding, type, 1, ToVkStages(b.stages), nullptr});
+    bindings.push_back(
+        {b.binding, type, b.count, ToVkStages(b.stages), nullptr});
+    binding_flags.push_back(
+        b.bindless ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+                         VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                         VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
+                   : 0);
+    layout->bindless |= b.bindless;
   }
+  VkDescriptorSetLayoutBindingFlagsCreateInfo flags_info{
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
+  flags_info.bindingCount = static_cast<u32>(binding_flags.size());
+  flags_info.pBindingFlags = binding_flags.data();
   VkDescriptorSetLayoutCreateInfo li{
       VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   li.bindingCount = static_cast<u32>(bindings.size());
   li.pBindings = bindings.data();
+  if (layout->bindless) {
+    li.pNext = &flags_info;
+    li.flags |= VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+  }
   if (desc.push && native.push_descriptor)
     li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
   if (vkCreateDescriptorSetLayout(native.device, &li, nullptr,
@@ -1339,9 +1377,17 @@ void VulkanDevice::FillWrite(VkDescriptorType type,
                              VkDescriptorBufferInfo& buffer) const {
   write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
   write.dstBinding = in.binding;
+  write.dstArrayElement = in.array_index;
   write.descriptorCount = 1;
   write.descriptorType = type;
   switch (type) {
+    case VK_DESCRIPTOR_TYPE_SAMPLER:
+      image.sampler = in.sampler
+                          ? static_cast<VulkanSampler*>(in.sampler)->sampler
+                          : VK_NULL_HANDLE;
+      write.pImageInfo = &image;
+      break;
+    case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
     case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
     case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: {
       auto* view = static_cast<VulkanView*>(in.view);
@@ -1373,7 +1419,28 @@ rhi::BindGroup* VulkanDevice::CreateBindGroup(const rhi::BindGroupDesc& desc) {
   auto* layout = static_cast<VulkanBindGroupLayout*>(desc.layout);
   auto group = base::MakeUnique<VulkanBindGroup>();
   group->layout = layout;
-  {
+  if (layout->bindless) {
+    base::Vector<VkDescriptorPoolSize> sizes;
+    for (size_t b = 0; b < layout->types.size(); b++)
+      sizes.push_back({layout->types[b], layout->desc().bindings[b].count});
+    VkDescriptorPoolCreateInfo pi{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pi.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+    pi.maxSets = 1;
+    pi.poolSizeCount = static_cast<u32>(sizes.size());
+    pi.pPoolSizes = sizes.data();
+    if (vkCreateDescriptorPool(native.device, &pi, nullptr, &group->pool) !=
+        VK_SUCCESS)
+      return nullptr;
+    group->owns_pool = true;
+    VkDescriptorSetAllocateInfo ai{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = group->pool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &layout->layout;
+    if (vkAllocateDescriptorSets(native.device, &ai, &group->set) != VK_SUCCESS)
+      return nullptr;
+  } else {
     base::LockGuard<base::Mutex> lock(set_pool_mutex_);
     VkDescriptorSetAllocateInfo ai{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -1677,8 +1744,12 @@ void VulkanDevice::Destroy(rhi::Object* object) {
   } else if (auto* l = dynamic_cast<VulkanBindGroupLayout*>(object)) {
     vkDestroyDescriptorSetLayout(dev, l->layout, nullptr);
   } else if (auto* g = dynamic_cast<VulkanBindGroup*>(object)) {
-    base::LockGuard<base::Mutex> lock(set_pool_mutex_);
-    vkFreeDescriptorSets(dev, g->pool, 1, &g->set);
+    if (g->owns_pool) {
+      vkDestroyDescriptorPool(dev, g->pool, nullptr);
+    } else {
+      base::LockGuard<base::Mutex> lock(set_pool_mutex_);
+      vkFreeDescriptorSets(dev, g->pool, 1, &g->set);
+    }
   } else if (auto* pl = dynamic_cast<VulkanPipelineLayout*>(object)) {
     vkDestroyPipelineLayout(dev, pl->layout, nullptr);
   } else if (auto* p = dynamic_cast<VulkanPipeline*>(object)) {

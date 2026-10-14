@@ -89,6 +89,7 @@ class VulkanBindGroupLayout final : public rhi::BindGroupLayout {
   VkDescriptorSetLayout layout = VK_NULL_HANDLE;
   base::Vector<VkDescriptorType> types;
   u32 dynamic_count = 0;
+  bool bindless = false;
 };
 
 class VulkanBindGroup final : public rhi::BindGroup {
@@ -96,6 +97,7 @@ class VulkanBindGroup final : public rhi::BindGroup {
   VulkanBindGroupLayout* layout = nullptr;
   VkDescriptorSet set = VK_NULL_HANDLE;
   VkDescriptorPool pool = VK_NULL_HANDLE;
+  bool owns_pool = false;
 };
 
 class VulkanPipelineLayout final : public rhi::PipelineLayout {

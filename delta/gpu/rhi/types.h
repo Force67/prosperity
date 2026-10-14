@@ -275,6 +275,8 @@ enum class BindingType : u8 {
   kStorageBuffer,
   kUniformBufferDynamic,
   kStorageBufferDynamic,
+  kTexture,
+  kSampler,
 };
 
 struct BindingLayout {
@@ -282,6 +284,8 @@ struct BindingLayout {
   BindingType type = BindingType::kSampledTexture;
   u32 stages = 0;
   bool read_only = false;
+  u32 count = 1;
+  bool bindless = false;
 };
 
 struct BindGroupLayoutDesc {
@@ -298,6 +302,7 @@ class PipelineLayout;
 
 struct BindingWrite {
   u32 binding = 0;
+  u32 array_index = 0;
   TextureView* view = nullptr;
   Sampler* sampler = nullptr;
   TextureState view_state = TextureState::kShaderRead;
@@ -520,6 +525,8 @@ struct Caps {
   bool sampler_mirror_clamp = false;
   bool storage_image_write_without_format = false;
   bool buffer_address = false;
+  bool bindless = false;
+  u32 max_bindless_textures = 0;
   bool host_import = false;
   u64 host_import_alignment = 0;
   bool sparse_buffer = false;
