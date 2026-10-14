@@ -211,7 +211,7 @@ int PS4ABI sys_osem_wait(int id, int need, u32* timeout_us) {
   // answer an idle channel gives: wait a beat, then time out, so the caller
   // polls on instead of blocking, without spinning a core.
   if (IsAbsentServiceChannel(s->fname().c_str())) {
-    u32 idle_us = 100 * 1000;
+    u32 idle_us = 1000;
     if (timeout_us && *timeout_us < idle_us)
       idle_us = *timeout_us;
     const int r = s->Wait(need, &idle_us);
