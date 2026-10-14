@@ -247,16 +247,16 @@ bool MirrorResolve(u64 first, u64 end) {
       if ((s & kOwnBusy) || !o.state.compare_exchange_weak(
                                 s, s | kOwnBusy, base::memory_order_acq_rel))
         continue;
-      if (o.hi > o.lo)
-        Device().CopyAfter(g_mirror, MirrorOffset(block) + o.lo, o.import,
-                           o.import_offset + o.lo, o.hi - o.lo,
+      for (u32 i = 0; i < o.spans; i++)
+        Device().CopyAfter(g_mirror, MirrorOffset(block) + o.lo[i], o.import,
+                           o.import_offset + o.lo[i], o.hi[i] - o.lo[i],
                            s & kOwnSubmission);
       ::mprotect(reinterpret_cast<void*>(block), kMirrorBlock,
                  PROT_READ | PROT_WRITE | PROT_EXEC);
       WriteTracker::OpenedByOwner(block, block + kMirrorBlock);
       if (!(s & kOwnPending)) {
         DirectRestore(block);
-        o.lo = o.hi = 0;
+        o.spans = 0;
       }
       o.cpu_dirty.store(1, base::memory_order_relaxed);
       o.faults.fetch_add(1, base::memory_order_relaxed);
@@ -293,15 +293,53 @@ bool MirrorUsesImport(rhi::Buffer* buffer) {
   return false;
 }
 
+namespace {
+base::Pair<u32, u32> SpanIn(u64 block, u64 base, u64 end) {
+  return {static_cast<u32>(base::Max(block, base) - block),
+          static_cast<u32>(base::Min(end, block + kMirrorBlock) - block)};
+}
+
+bool SpanFits(const OwnBlock& o, u32 lo, u32 hi) {
+  if (!o.state.load(base::memory_order_acquire) || o.spans < kOwnSpans)
+    return true;
+  for (u32 i = 0; i < o.spans; i++)
+    if (lo <= o.hi[i] && o.lo[i] <= hi)
+      return true;
+  return false;
+}
+
+// Spans stay disjoint: copying a gap back would overwrite bytes the CPU wrote
+// after the mirror last saw them.
+void AddSpan(OwnBlock& o, u32 lo, u32 hi) {
+  u32 n = 0;
+  for (u32 i = 0; i < o.spans; i++) {
+    if (lo <= o.hi[i] && o.lo[i] <= hi) {
+      lo = base::Min(lo, o.lo[i]);
+      hi = base::Max(hi, o.hi[i]);
+      continue;
+    }
+    o.lo[n] = o.lo[i];
+    o.hi[n++] = o.hi[i];
+  }
+  o.lo[n] = lo;
+  o.hi[n++] = hi;
+  o.spans = n;
+}
+}  // namespace
+
 bool MirrorOwnable(u64 base, u64 bytes) {
   if (!kMirrorOwn || !gcn::g_direct_table || !Device().caps().copy_after ||
       !g_mirror->address())
     return false;
   for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
-       block += kMirrorBlock)
+       block += kMirrorBlock) {
+    const OwnBlock& o = OwnAt(block);
+    const auto [lo, hi] = SpanIn(block, base, base + bytes);
     if (!gpu::IsReadableRangeCached(block, kMirrorBlock) ||
-        OwnAt(block).faults.load(base::memory_order_relaxed) >= kOwnMaxFaults)
+        o.faults.load(base::memory_order_relaxed) >= kOwnMaxFaults ||
+        !SpanFits(o, lo, hi))
       return false;
+  }
   return true;
 }
 
@@ -317,22 +355,16 @@ void MirrorOwn(u64 base, u64 bytes) {
   for (u64 block = base & ~(kMirrorBlock - 1); block < end;
        block += kMirrorBlock) {
     OwnBlock& o = OwnAt(block);
-    const u32 lo = static_cast<u32>(base::Max(block, base) - block);
-    const u32 hi =
-        static_cast<u32>(base::Min(end, block + kMirrorBlock) - block);
-    const u64 s = o.state.load(base::memory_order_acquire);
-    if (!s) {
+    const auto [lo, hi] = SpanIn(block, base, end);
+    if (!o.state.load(base::memory_order_acquire)) {
       u64 import_base = 0;
       o.import = MirrorImport(block, &import_base);
       o.import_offset = block - import_base;
-      o.lo = lo;
-      o.hi = hi;
+      o.spans = 0;
       DirectRedirect(block, g_mirror->address() + MirrorOffset(block));
       g_mirror_was_owned.insert(block);
-    } else {
-      o.lo = base::Min(o.lo, lo);
-      o.hi = base::Max(o.hi, hi);
     }
+    AddSpan(o, lo, hi);
     if (!(o.state.fetch_or(kOwnPending, base::memory_order_acq_rel) &
           kOwnPending))
       g_own_unsubmitted.push_back(block);

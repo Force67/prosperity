@@ -33,7 +33,7 @@
 
 namespace {
 DELTA_OPTION(bool, kNoCs, "DELTA_GPU_NOCS", false);
-DELTA_OPTION(bool, kCsOnRenderThread, "DELTA_GPU_CS_RENDER_THREAD", false);
+DELTA_OPTION(bool, kCsOnRenderThread, "DELTA_GPU_CS_RENDER_THREAD", true);
 DELTA_OPTION(bool, kCsNativeImages, "DELTA_GPU_CS_NATIVE_IMAGES", true);
 }  // namespace
 

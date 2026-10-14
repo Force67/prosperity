@@ -646,11 +646,14 @@ constexpr u64 kOwnBlocks = kMirrorSize / kMirrorBlock;
 constexpr u64 kOwnProtected = 1ull << 63, kOwnPending = 1ull << 62,
               kOwnBusy = 1ull << 61, kOwnSubmission = kOwnBusy - 1;
 
+constexpr u32 kOwnSpans = 8;
+
 struct OwnBlock {
   base::Atomic<u64> state;
   rhi::Buffer* import;
   u64 import_offset;
-  u32 lo, hi;
+  u32 spans;
+  u32 lo[kOwnSpans], hi[kOwnSpans];
   base::Atomic<u32> faults;
   base::Atomic<u8> cpu_dirty;
 };
