@@ -50,8 +50,17 @@ class GuestPageTable {
   enum Count { kCsDirty, kPendingWrite, kCounts };
   struct Chunk {
     Page pages[kPagesPerChunk];
-    base::Atomic<u16> counts[kCounts][kBlocksPerChunk];
+    base::Atomic<u16> cs_dirty[kBlocksPerChunk];
+    base::Atomic<u16> pending_write[kPagesPerChunk];
   };
+  static u32 UnitShift(Count count) {
+    return count == kPendingWrite ? kPageShift : kBlockShift;
+  }
+  static base::Atomic<u16>& Slot(Chunk& chunk, Count count, u64 unit) {
+    return count == kPendingWrite
+               ? chunk.pending_write[unit & (kPagesPerChunk - 1)]
+               : chunk.cs_dirty[unit & (kBlocksPerChunk - 1)];
+  }
   void AddCount(Count count, u64 first, u64 end, int delta);
   bool CountClear(Count count, u64 first, u64 end) const;
 

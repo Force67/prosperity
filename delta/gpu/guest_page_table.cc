@@ -60,13 +60,13 @@ void GuestPageTable::AddCount(Count count, u64 first, u64 end, int delta) {
   end = base::Min<u64>(end, kChunks << kChunkShift);
   if (first >= end)
     return;
-  for (u64 block = first >> kBlockShift; block <= (end - 1) >> kBlockShift;
-       block++) {
-    Chunk* chunk = ChunkAt(block << kBlockShift);
+  const u32 shift = UnitShift(count);
+  for (u64 unit = first >> shift; unit <= (end - 1) >> shift; unit++) {
+    Chunk* chunk = ChunkAt(unit << shift);
     if (!chunk)
       return;
-    chunk->counts[count][block & (kBlocksPerChunk - 1)].fetch_add(
-        static_cast<u16>(delta), base::memory_order_relaxed);
+    Slot(*chunk, count, unit)
+        .fetch_add(static_cast<u16>(delta), base::memory_order_relaxed);
   }
 }
 
@@ -75,17 +75,19 @@ bool GuestPageTable::CountClear(Count count, u64 first, u64 end) const {
     return true;
   if ((end - 1) >> kChunkShift >= kChunks)
     return false;
-  const u64 last = (end - 1) >> kBlockShift;
-  for (u64 block = first >> kBlockShift; block <= last;) {
-    const Chunk* chunk = FindChunk(block << kBlockShift);
+  const u32 shift = UnitShift(count);
+  const u64 per_chunk = 1ull << (kChunkShift - shift);
+  const u64 last = (end - 1) >> shift;
+  for (u64 unit = first >> shift; unit <= last;) {
+    const Chunk* chunk = FindChunk(unit << shift);
     if (!chunk) {
-      block = (block | (kBlocksPerChunk - 1)) + 1;
+      unit = (unit | (per_chunk - 1)) + 1;
       continue;
     }
-    if (chunk->counts[count][block & (kBlocksPerChunk - 1)].load(
-            base::memory_order_relaxed))
+    if (Slot(const_cast<Chunk&>(*chunk), count, unit)
+            .load(base::memory_order_relaxed))
       return false;
-    block++;
+    unit++;
   }
   return true;
 }

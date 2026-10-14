@@ -8,6 +8,7 @@
 #include "gpu/render/command.h"
 
 #include "base/atomic.h"
+#include "base/containers/hash_map.h"
 #include "base/containers/vector.h"
 #include "base/functional/function.h"
 #include "base/memory/unique_pointer.h"
@@ -74,8 +75,13 @@ class RenderQueue {
     u64 value = 0;
     u32 value_bytes = 0;
   };
+  void AddPendingWrite(const PendingWrite& w);
   void ErasePendingWritesDone();
+  bool PendingMayOverlap(u64 base, u64 bytes) const;
   base::Vector<PendingWrite> pending_writes_;
+  size_t pending_head_ = 0;
+  base::HashMap<u64, u32> pending_pages_;
+  u32 pending_big_ = 0;
   base::Atomic<u64> head_{0};
   base::Atomic<u64> done_{0};
   base::Atomic<u64> draws_done_{0};

@@ -49,6 +49,9 @@ void RenderQueue::Stop() {
   commands_ = {};
   draws_ = {};
   pending_writes_ = {};
+  pending_head_ = 0;
+  pending_pages_ = {};
+  pending_big_ = 0;
   renderer_ = nullptr;
   head_.store(0);
   done_.store(0);
@@ -214,29 +217,81 @@ void RenderQueue::Run() {
   }
 }
 
+namespace {
+constexpr u32 kPendingPageShift = 12;
+constexpr u64 kMaxIndexedPages = 16;
+
+u64 PageCount(u64 first, u64 end) {
+  return ((end - 1) >> kPendingPageShift) - (first >> kPendingPageShift) + 1;
+}
+}  // namespace
+
+void RenderQueue::AddPendingWrite(const PendingWrite& w) {
+  pending_writes_.push_back(w);
+  if (PageCount(w.first, w.end) > kMaxIndexedPages) {
+    pending_big_++;
+    return;
+  }
+  for (u64 page = w.first >> kPendingPageShift;
+       page <= (w.end - 1) >> kPendingPageShift; page++)
+    pending_pages_[page]++;
+}
+
 void RenderQueue::NotePendingWrite(u64 base, u64 bytes) {
   if (running_ && bytes)
-    pending_writes_.push_back(
+    AddPendingWrite(
         {head_.load(base::memory_order_relaxed), base, base + bytes});
 }
 
 void RenderQueue::NotePendingValue(u64 base, u32 bytes, u64 value) {
   if (running_ && bytes)
-    pending_writes_.push_back({head_.load(base::memory_order_relaxed), base,
-                               base + bytes, value, bytes});
+    AddPendingWrite({head_.load(base::memory_order_relaxed), base, base + bytes,
+                     value, bytes});
 }
 
 void RenderQueue::ErasePendingWritesDone() {
   const u64 done = done_.load(base::memory_order_acquire);
-  base::EraseIf(pending_writes_,
-                [done](const PendingWrite& w) { return w.command < done; });
+  while (pending_head_ < pending_writes_.size() &&
+         pending_writes_[pending_head_].command < done) {
+    const PendingWrite& w = pending_writes_[pending_head_++];
+    if (PageCount(w.first, w.end) > kMaxIndexedPages) {
+      pending_big_--;
+      continue;
+    }
+    for (u64 page = w.first >> kPendingPageShift;
+         page <= (w.end - 1) >> kPendingPageShift; page++) {
+      auto it = pending_pages_.find(page);
+      if (it != pending_pages_.end() && --it->second == 0)
+        pending_pages_.erase(it);
+    }
+  }
+  if (pending_head_ == pending_writes_.size()) {
+    pending_writes_.clear();
+    pending_head_ = 0;
+  } else if (pending_head_ > 4096) {
+    pending_writes_.erase(pending_writes_.begin(),
+                          pending_writes_.begin() + pending_head_);
+    pending_head_ = 0;
+  }
+}
+
+bool RenderQueue::PendingMayOverlap(u64 base, u64 bytes) const {
+  if (pending_head_ == pending_writes_.size())
+    return false;
+  if (pending_big_ || PageCount(base, base + bytes) > kMaxIndexedPages)
+    return true;
+  for (u64 page = base >> kPendingPageShift;
+       page <= (base + bytes - 1) >> kPendingPageShift; page++)
+    if (pending_pages_.contains(page))
+      return true;
+  return false;
 }
 
 bool RenderQueue::PendingWriteValue(u64 address, u32* value) {
-  if (pending_writes_.empty())
-    return false;
   ErasePendingWritesDone();
-  for (size_t i = pending_writes_.size(); i-- > 0;) {
+  if (!PendingMayOverlap(address, 4))
+    return false;
+  for (size_t i = pending_writes_.size(); i-- > pending_head_;) {
     const PendingWrite& w = pending_writes_[i];
     if (w.first >= address + 4 || address >= w.end)
       continue;
@@ -250,15 +305,23 @@ bool RenderQueue::PendingWriteValue(u64 address, u32* value) {
 
 bool RenderQueue::PendingWritesKnown(u64 base, u64 bytes) {
   ErasePendingWritesDone();
-  for (const PendingWrite& w : pending_writes_)
+  if (!PendingMayOverlap(base, bytes))
+    return true;
+  for (size_t i = pending_head_; i < pending_writes_.size(); i++) {
+    const PendingWrite& w = pending_writes_[i];
     if (w.first < base + bytes && base < w.end &&
         w.value_bytes != w.end - w.first)
       return false;
+  }
   return true;
 }
 
 void RenderQueue::OverlayPendingValues(u64 base, u64 bytes, u8* out) {
-  for (const PendingWrite& w : pending_writes_) {
+  ErasePendingWritesDone();
+  if (!PendingMayOverlap(base, bytes))
+    return;
+  for (size_t i = pending_head_; i < pending_writes_.size(); i++) {
+    const PendingWrite& w = pending_writes_[i];
     if (!w.value_bytes || w.first >= base + bytes || base >= w.end)
       continue;
     for (u64 at = base::Max(base, w.first); at < base::Min(base + bytes, w.end);
@@ -268,11 +331,12 @@ void RenderQueue::OverlayPendingValues(u64 base, u64 bytes, u8* out) {
 }
 
 bool RenderQueue::PendingWriteOverlaps(u64 base, u64 bytes) {
-  if (pending_writes_.empty())
-    return false;
   ErasePendingWritesDone();
+  if (!bytes || !PendingMayOverlap(base, bytes))
+    return false;
   const u64 end = base + bytes;
-  for (const PendingWrite& w : pending_writes_)
+  for (size_t i = pending_head_; i < pending_writes_.size(); i++) {
+    const PendingWrite& w = pending_writes_[i];
     if (w.first < end && base < w.end) {
       if (kDrainTrace) {
         static int shown = 0;
@@ -282,6 +346,7 @@ bool RenderQueue::PendingWriteOverlaps(u64 base, u64 bytes) {
       }
       return true;
     }
+  }
   return false;
 }
 
