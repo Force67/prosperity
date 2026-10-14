@@ -138,7 +138,8 @@ static void StartVblankPump() {
   bool expected = false;
   if (!g_vblank_started.compare_exchange_strong(expected, true))
     return;
-  BASE_LOGI("vblank", "pump started (60 Hz, EVFILT_DISPLAY/VIDEOOUT)");
+  BASE_LOGI("vblank", "pump started ({} Hz, EVFILT_DISPLAY/VIDEOOUT)",
+            (u32)guest::display::kVblankHz);
   guest::SpawnThread("sys_event", [] {
     u64 count = 0;
     while (!guest::Stopping()) {
@@ -146,7 +147,7 @@ static void StartVblankPump() {
         guest::display::WaitVblank();
         count = guest::display::VblankCount();
       } else {
-        guest::SleepForMicroseconds(16667);
+        guest::SleepForMicroseconds(1'000'000 / guest::display::kVblankHz);
         ++count;
       }
       TriggerAllEqueues(1, -15, static_cast<i64>(count));

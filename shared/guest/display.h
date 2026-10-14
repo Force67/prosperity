@@ -7,6 +7,7 @@
 namespace guest::display {
 
 DELTA_OPTION_INLINE(bool, kEmulateTiming, "DELTA_DISPLAY_TIMING", true);
+DELTA_OPTION_INLINE(u32, kVblankHz, "DELTA_VBLANK_HZ", 60);
 
 u64 VblankCount();
 u64 VblankTimeNs();

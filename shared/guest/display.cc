@@ -31,7 +31,8 @@ State& Display() {
 }
 
 u64 TickTime(u64 tick) {
-  return Display().epoch + (tick * 1'000'000'000 + 59) / 60;
+  const u64 hz = kVblankHz;
+  return Display().epoch + (tick * 1'000'000'000 + hz - 1) / hz;
 }
 
 void WaitUntil(u64 deadline) {
@@ -66,8 +67,8 @@ const SessionReset g_reset([] { ResetResource(Display()); });
 }  // namespace
 
 u64 VblankCount() {
-  return (static_cast<u64>(base::TickClock::NowNs()) - Display().epoch) * 60 /
-         1'000'000'000;
+  return (static_cast<u64>(base::TickClock::NowNs()) - Display().epoch) *
+         kVblankHz / 1'000'000'000;
 }
 
 u64 VblankTimeNs() {
