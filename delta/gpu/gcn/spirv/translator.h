@@ -56,6 +56,32 @@ inline u32 RelativeVgprFloor(
   return lo;
 }
 
+// A dynamic index into the register array keeps it out of registers for the
+// whole shader, so unplanned v_movrel sites select over every reachable VGPR.
+inline void BoundMovrels(const Program& program,
+                         base::HashMap<u32, base::Vector<u32>>& known) {
+  u32 lo = 256;
+  for (const Inst& inst : program) {
+    if (inst.enc != Enc::kVop1 || inst.opcode < 0x42 || inst.opcode > 0x44 ||
+        known.count(inst.pc))
+      continue;
+    const u32 w = inst.raw[0];
+    if (inst.opcode != 0x43)
+      lo = base::Min(lo, (w >> 17) & 0xFF);
+    if (inst.opcode != 0x42 && (w & 0x1FF) >= 256)
+      lo = base::Min(lo, (w & 0x1FF) - 256);
+  }
+  if (lo == 256)
+    return;
+  base::Vector<u32> values;
+  for (u32 v = 0; lo + v < 256; v++)
+    values.push_back(v);
+  for (const Inst& inst : program)
+    if (inst.enc == Enc::kVop1 && inst.opcode >= 0x42 && inst.opcode <= 0x44 &&
+        !known.count(inst.pc))
+      known[inst.pc] = values;
+}
+
 struct Translator {
   spirv::Module m;
   Id t_void = 0, t_fn = 0, t_u = 0, t_i = 0, t_f = 0, t_bool = 0;
@@ -95,6 +121,8 @@ struct Translator {
 
   void InitTypes(const Program* program = nullptr,
                  const Program* second = nullptr) {
+    if (program && !second)
+      BoundMovrels(*program, movrel_m0);
     vgpr_dyn_lo = program ? RelativeVgprFloor(*program, movrel_m0) : 0u;
     if (second)
       vgpr_dyn_lo = base::Min(vgpr_dyn_lo, RelativeVgprFloor(*second));
