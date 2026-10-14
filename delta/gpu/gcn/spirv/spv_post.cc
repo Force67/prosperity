@@ -128,7 +128,6 @@ u64 HashWords(const base::Vector<u32>& w) {
   }
   h ^= kCacheGeneration;
   h *= 1099511628211ull;
-  // Entries built at another opt level must not be served.
   h ^= kOptLevel.get();
   h *= 1099511628211ull;
   return h;

@@ -60,8 +60,6 @@ struct ResourceRange {
   bool ok = true;
 };
 
-// Only formats whose texels survive a linear SSBO round trip can be staged in
-// and out.
 ResourceRange ResolveImageResource(u64 cs_addr,
                                    const gcn::CsResource& res,
                                    const u32* descriptor) {

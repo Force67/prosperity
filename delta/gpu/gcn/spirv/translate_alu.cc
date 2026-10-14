@@ -1170,7 +1170,6 @@ void EmitVop2(Translator& t,
       set_u(mul24_hi(spv::Op::OpUMulExtended, t.Low24(u0), t.Low24(u1)));
       break;
     case 0x0d:
-      // Legacy min/max return vsrc1 on NaN, unlike FMin/FMax.
       set_f(t.SelectF(t.FLt(s0, s1), s0, s1));
       break;
     case 0x0f:

@@ -15,7 +15,6 @@
 #include "base/functional/function.h"
 #include "base/logging.h"
 #include "base/memory/move.h"
-#include "base/time/time.h"
 #include "base/memory/unique_pointer.h"
 #include "base/strings/format.h"
 #include "base/strings/xstring.h"
@@ -146,11 +145,7 @@ void RenderQueue::Drain(const char* why) {
 }
 
 void RenderQueue::Wake(base::ConditionVariable& cv) {
-  // Changes are made under the lock so a waiter cannot miss one between its
-  // check and its sleep.
-  {
-    base::LockGuard<base::Mutex> lock(wake_mutex_);
-  }
+  { base::LockGuard<base::Mutex> lock(wake_mutex_); }
   cv.NotifyAll();
 }
 

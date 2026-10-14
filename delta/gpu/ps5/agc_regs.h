@@ -88,8 +88,6 @@ constexpr u32 mmSPI_SHADER_PGM_RSRC1_PS = 0x2C0A;
 constexpr u32 mmSPI_SHADER_PGM_RSRC2_PS = 0x2C0B;
 constexpr u32 mmSPI_SHADER_USER_DATA_PS_0 = 0x2C0C;
 
-// gfx10.3 has no HW VS: AGC writes the vertex program to both ES and GS, so it
-// is read from the GS block.
 constexpr u32 mmSPI_SHADER_PGM_LO_GS = 0x2C88;
 constexpr u32 mmSPI_SHADER_USER_DATA_ADDR_LO_GS = 0x2C82;
 constexpr u32 mmSPI_SHADER_USER_DATA_ADDR_HI_GS = 0x2C83;

@@ -46,7 +46,6 @@ DxcCreateInstanceProc LoadLibraryEntry() {
       GetProcAddress(lib, "DxcCreateInstance"));
 #else
   void* lib = nullptr;
-  // NixOS: the build's copy is on no default search path.
   if (DELTA_DXCOMPILER_PATH[0])
     lib = dlopen(DELTA_DXCOMPILER_PATH, RTLD_NOW | RTLD_LOCAL);
   if (!lib)

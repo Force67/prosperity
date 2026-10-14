@@ -77,18 +77,13 @@ void RecordVariantSwap(u64 base,
                        u32 to_w,
                        u32 to_h);
 
-void RecordBridge(const char* dir, u64 base, u64 image, u32 w, u32 h);
-
 bool WantValidation();
 bool WantSyncValidation();
-const char* ValidationLayerName();
 void OnDeviceMessage(const char* level,
                      const char* id,
                      const char* labels,
                      const char* message);
 
-bool NamesWanted();
-void RegisterObjectName(u64 handle, const char* name);
 const char* ObjectName(u64 handle);
 
 }  // namespace gpu::render::trace

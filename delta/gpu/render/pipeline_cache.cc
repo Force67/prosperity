@@ -379,8 +379,6 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
     }
     pd.depth_write = (d.depth_write_enable || force_write) && !no_write;
     pd.depth_compare = static_cast<rhi::CompareOp>(d.depth_func & 0x7);
-    // Depth-prepass EQUAL needs bit-identical gl_Position across two optimised
-    // modules.
     if (kRelaxDepthEqual && pd.depth_compare == rhi::CompareOp::kEqual &&
         !d.depth_write_enable)
       pd.depth_compare = d.depth_clear <= 0.5f ? rhi::CompareOp::kGreaterEqual
@@ -396,8 +394,6 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
   for (u32 i = 0; i < mrt_n; i++) {
     u32 bc = i == 0 ? d.blend_control : d.mrt_blend[i];
     bool en = i == 0 ? d.blend_enable : ((d.mrt_blend_mask >> i) & 1u);
-    // Integer attachments cannot blend; the hardware sets BLEND_BYPASS for
-    // them.
     if (IsIntegerColorFormat(ColorTargetFormat(d.mrt_info[i])))
       en = false;
     pd.blend[i] = BlendAttachment(bc, en);

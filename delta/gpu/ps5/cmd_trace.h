@@ -65,7 +65,6 @@ void TraceVsUserData(u64 vs_addr,
                      const u32* gs_user_data,
                      const u32* es_user_data,
                      bool chose_gs);
-void TraceShRegs(const Regs& regs);
 void TraceShaderScan(const u32* found_reg, const u64* found, u32 count);
 void TraceUserDataPointers(const u32* vs_user_data, const u32* ps_user_data);
 

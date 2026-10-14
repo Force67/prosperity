@@ -1295,10 +1295,6 @@ bool WantSyncValidation() {
   return kWant;
 }
 
-const char* ValidationLayerName() {
-  return "VK_LAYER_KHRONOS_validation";
-}
-
 void OnDeviceMessage(const char* level,
                      const char* id,
                      const char* labels,
@@ -1317,17 +1313,6 @@ void OnDeviceMessage(const char* level,
         .Str("message", message);
     l.Emit();
   }
-}
-
-bool NamesWanted() {
-  static const bool kWant = Armed() || WantValidation();
-  return kWant;
-}
-
-void RegisterObjectName(u64 handle, const char* name) {
-  if (!handle || !name)
-    return;
-  NameTable()[handle] = name;
 }
 
 const char* ObjectName(u64 handle) {
@@ -1851,20 +1836,6 @@ void RecordVariantSwap(u64 base,
       .Hex("to_image", to)
       .U("to_w", to_w)
       .U("to_h", to_h);
-  l.Emit();
-}
-
-void RecordBridge(const char* dir, u64 base, u64 image, u32 w, u32 h) {
-  if (!g_recording)
-    return;
-  Line l("bridge");
-  l.U("seq", g_seq++)
-      .Int("after_draw", int(g_draw_seq))
-      .Str("dir", dir)
-      .Hex("base", base)
-      .Hex("image", image)
-      .U("w", w)
-      .U("h", h);
   l.Emit();
 }
 

@@ -558,8 +558,6 @@ void DispatchCompute(render::Renderer& renderer,
     ci.expanded_htile_base =
         ExpandedHtileBase(ci, threads, user_sgpr, tgid_enable);
 
-  // Writes are announced as pending so a walk read of those bytes waits for the
-  // dispatch.
   RenderQueue& queue = GuestRenderQueue();
   if (kCsOnRenderThread && queue.running()) {
     for (u32 i = 0; i < ci.num_res; i++)

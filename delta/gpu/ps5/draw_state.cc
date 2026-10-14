@@ -53,8 +53,6 @@ u32 FbDim(const Regs& regs, u32 scale_reg) {
   return static_cast<u32>(s * 2.0f + 0.5f);
 }
 
-// AGC state blocks never program the viewport, so the target's own MIP0 size is
-// authoritative.
 u32 SurfaceDim(const Regs& regs, int rt, bool want_width) {
   const u32 a2 = regs[mmCB_COLOR0_ATTRIB2 + rt * kCbColorExtStride];
   if (!a2)
@@ -128,8 +126,6 @@ void RecoverShaderAddresses(const Regs& regs, ShaderBinding& binding) {
 
 ShaderBinding ResolveShaderBinding(const Regs& regs) {
   ShaderBinding binding;
-  // gfx10.3 has no HW VS: the vertex program is the merged NGG shader, whose
-  // PGM_LO sits in ES and/or GS.
   const u64 es_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_ES);
   const u64 gs_addr = regs.ShaderAddr(mmSPI_SHADER_PGM_LO_GS);
   binding.vs_addr = kGsIsVs ? gs_addr : es_addr;
@@ -186,8 +182,6 @@ void ResolveIndexBuffer(const DrawPacket& packet, render::DrawInfo& d) {
   TraceIndexBuffer(packet.op, d, index_size);
 }
 
-// A stale base stays programmed during depth-only passes, so a target is bound
-// only when its mask and format are valid.
 void ResolveRenderTargets(const Regs& regs, render::DrawInfo& d) {
   d.rt_w = FbWidth(regs);
   d.rt_h = FbHeight(regs);
@@ -253,8 +247,6 @@ void ResolveColorState(const Regs& regs, render::DrawInfo& d) {
     std::memcpy(&d.blend_constants[c], &raw, sizeof(float));
   }
   d.target_mask = regs[mmCB_TARGET_MASK];
-  // CB_SHADER_MASK is not read: on the AGC path it reflects the last state
-  // block, not this draw.
   d.color_control = regs[mmCB_COLOR_CONTROL];
 }
 
@@ -262,8 +254,6 @@ void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
   const u32 control = regs[mmDB_DEPTH_CONTROL];
   d.depth_control = control;
   d.render_control = regs[mmDB_RENDER_CONTROL];
-  // A hardware clear writes DB_DEPTH_CLEAR, not the clear quad's Z, so it is
-  // not geometry.
   d.depth_clear_draw = (d.render_control & 1u) != 0;
   const u32 z_info = kNoDepth ? 0 : regs[mmDB_Z_INFO];
   const u64 z_base = ((static_cast<u64>(regs[mmDB_Z_WRITE_BASE_HI]) << 32) |
@@ -600,8 +590,6 @@ void TexFromImage(const gcn::TImage& s, render::DrawInfo::DrawTex& dt) {
 
 namespace {
 
-// A volume binding must match the module's declared dimensionality, or the
-// sample returns nothing.
 void ReconcileTextureDims(const base::Vector<gcn::ShaderTex>& plan,
                           u32 first_slot,
                           render::DrawInfo& d) {

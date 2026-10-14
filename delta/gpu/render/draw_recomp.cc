@@ -1790,9 +1790,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   }
 
   g_ns_dr_tex += NowNs() - t_tex;
-  const u64 t_bind = NowNs();
   ScopeNs bind_timer(&g_ns_dr_bind);
-  (void)t_bind;
   SetGuestViewport(d);
   rhi::CommandList* list = g_frame.list;
   list->SetPipeline(rp->pipe);

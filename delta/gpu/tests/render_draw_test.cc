@@ -321,7 +321,7 @@ static void EnableWriteTracking() {
   stack.ss_sp = fault_stack;
   stack.ss_size = sizeof(fault_stack);
   sigaltstack(&stack, nullptr);
-  struct sigaction fault{};
+  struct sigaction fault {};
   fault.sa_flags = SA_SIGINFO | SA_ONSTACK;
   fault.sa_sigaction = [](int, siginfo_t* si, void*) {
     if (!host_memory::HandleWriteFault(
@@ -1769,9 +1769,6 @@ TEST(RdnaResources, RepeatedDescriptorLoadsReuseTextureBindings) {
   EXPECT_EQ(changed.binding_srsrc.size(), 33u);
 }
 
-// Pipelines key on recompiled addresses, so programs live for the renderer
-// lifetime.
-
 TEST(VkDraw, MeshWorkgroupsExpandInputPointsIntoTriangles) {
   options::Init();
   auto& renderer = gpu::render::DefaultRenderer();
@@ -2310,7 +2307,6 @@ TEST(VkDraw, VertexAndPixelUserDataPastSixteenDoNotOverlap) {
     ASSERT_TRUE(gpu::render::Device().Wait(slot.submission));
     ASSERT_TRUE(slot.presentable);
     const auto* pixels = slot.readback->mapped();
-    // Pixel centre avoids rasterisation edge ties.
     const u32 x = frame ? 4 : 12;
     EXPECT_NEAR(pixels[(7 * 16 + x) * 4], frame ? 128 : 255, 1);
     EXPECT_EQ(pixels[(7 * 16 + (16 - x)) * 4], 0);

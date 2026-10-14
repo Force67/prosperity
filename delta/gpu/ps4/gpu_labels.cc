@@ -48,7 +48,6 @@ void Run() {
       submission = g_held[g_head].submission;
       write = base::move(g_held[g_head].write);
     }
-    // A lost device still writes; a title waiting on the fence would hang.
     if (submission != kNothingSubmitted)
       render::WaitSubmission(submission);
     write();

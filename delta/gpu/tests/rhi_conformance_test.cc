@@ -32,8 +32,6 @@ ShaderCode Spv(const u32 (&words)[N]) {
 class RhiConformance : public ::testing::TestWithParam<Backend> {
  protected:
   void SetUp() override {
-    // One device per backend for the whole run: a device per test exhausts the
-    // driver.
     static base::Map<Backend, Device*> devices;
     Device*& shared = devices[GetParam()];
     if (!shared) {
@@ -2030,7 +2028,7 @@ TEST_P(RhiConformance, TextureArrays3DAndCubes) {
   TextureView* cube_view = Own(device_->CreateView(cube, vcube));
   const TextureState s = TextureState::kShaderRead;
   auto sample = [&](const ShaderCode& fs, TextureView* v,
-                    const float (&coord)[4]) {
+                    const float(&coord)[4]) {
     return SampleCenter(device_, list_, objects_, fs, v, s, coord);
   };
   EXPECT_EQ(sample(Spv(k_tex_frag_spv), layer1_view, {0, 0, 0, 0}), texels[1])

@@ -11,9 +11,6 @@
 
 namespace gpu {
 
-// Guest pages written since a cache copied them. Fault mode by default,
-// DELTA_GPU_WT_SCAN=1 selects scan mode. Writes through another mapping or by a
-// device need NoteWrite. Host-kernel writes need host_memory::BeforeHostWrite.
 class WriteTracker {
  public:
   using Range = base::Pair<u64, u64>;
@@ -39,7 +36,6 @@ class WriteTracker {
   void SetPolicy(const Policy& policy) { policy_ = policy; }
   static void SetOwner(bool (*resolve)(u64 first, u64 end),
                        bool (*owns)(u64 first, u64 end));
-  // Async-signal-safe.
   static void OpenedByOwner(u64 first, u64 end);
 
   u64 armed_bytes() const { return armed_bytes_; }

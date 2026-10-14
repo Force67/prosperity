@@ -82,9 +82,4 @@ constexpr u32 Pm4SetRegAddress(u32 base, u32 offset_and_index) {
   return base + (offset_and_index & 0xffff);
 }
 
-// The DCB and CNST variants both carry count-field 2 on the wire.
-inline u32 Pm4IbHeader(u32 op) {
-  return (3u << 30) | (2u << 16) | (op << 8);
-}
-
 }  // namespace gpu

@@ -53,11 +53,8 @@ VkDescriptorSet Native(rhi::BindGroup* group);
 VkPipelineLayout Native(rhi::PipelineLayout* layout);
 VkPipeline Native(rhi::Pipeline* pipeline);
 VkCommandBuffer Native(rhi::CommandList* list);
-void LockQueue(rhi::Device* device);
-void UnlockQueue(rhi::Device* device);
 
 VkFormat ToVkFormat(rhi::Format format);
-rhi::Format FromVkFormat(VkFormat format);
 VkImageLayout ToVkLayout(rhi::TextureState state,
                          u8 aspect,
                          bool exported = false);
@@ -66,6 +63,5 @@ extern bool g_unified_layouts;
 inline bool Exported(rhi::Texture* texture) {
   return texture->desc().usage & rhi::kTextureExportable;
 }
-rhi::TextureState FromVkLayout(VkImageLayout layout);
 
 }  // namespace gpu::vk

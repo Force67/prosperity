@@ -65,7 +65,6 @@ struct StageCode {
   bool strip_order = false;
 };
 
-// The driver's compiler (NVIDIA's at least) fails on large modules.
 inline constexpr size_t kMaxModuleBytes = 640 * 1024;
 
 bool LowerProgram(const StageCode* stages,

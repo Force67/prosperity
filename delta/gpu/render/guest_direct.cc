@@ -163,8 +163,6 @@ bool MapsDirtyIn(u64 lo, u64 hi) {
   return false;
 }
 
-// Parsing /proc/self/maps costs milliseconds with tens of thousands of
-// mappings, so a lookup only rereads it when a remap touched [lo, hi).
 void ReadMaps(bool force = false, u64 lo = 0, u64 hi = ~0ull) {
   const u64 generation =
       gpu::GuestMappingGeneration().load(base::memory_order_acquire);
@@ -207,7 +205,6 @@ void ReadMaps(bool force = false, u64 lo = 0, u64 hi = ~0ull) {
   std::fclose(f);
 }
 
-// Whether a remap since the last read moved memory the GPU has in its table.
 bool DirtyTouchesGpu() {
   base::Vector<Remap> dirty;
   {

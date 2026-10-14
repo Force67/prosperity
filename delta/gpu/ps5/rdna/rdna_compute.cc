@@ -263,8 +263,6 @@ bool PlanResources(const Program& program,
                            op == 0x1a || (op >= 0x1c && op <= 0x1f);
         const bool atomic =
             (op >= 0x30 && op <= 0x3f) || (op >= 0x50 && op <= 0x5f);
-        // GFX10 keeps the format in 7 bits, so the 0x80+ variants would alias a
-        // plain load.
         if ((!load && !store && !atomic) || ((w >> 16) & 1) ||
             ((w1 >> 23) & 1)) {
           gpu::gcn::WarnUnsupported("mubuf.cs.rdna", op, w, w1);
@@ -287,7 +285,6 @@ bool PlanResources(const Program& program,
         break;
       }
       case Enc::kDs: {
-        // ds_swizzle is the one DS op that runs without an LDS allocation.
         const bool gds = ((w >> 17) & 1) != 0;
         const bool counter = inst.opcode == 0x3d || inst.opcode == 0x3e;
         if (gds && counter) {
@@ -929,7 +926,6 @@ static bool EmitCsMemoryUnpredicated(Translator& t,
 bool EmitCsMemory(Translator& t, const Inst& inst, StageContext& sc) {
   if (inst.enc == Enc::kDs && ((inst.raw[0] >> 17) & 1) &&
       (inst.opcode == 0x3d || inst.opcode == 0x3e) && t.CanExchange()) {
-    // All lanes must reach the broadcast barriers, even with EXEC disabled.
     return EmitCsMemoryUnpredicated(t, inst, sc);
   }
   const u32 op = inst.opcode;
@@ -980,7 +976,6 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
     gpu::gcn::WarnUnsupported("cs.truncated.rdna", last.pc);
     return r;
   }
-  // RDNA2 STATUS.TRAP_EN=0 makes S_TRAP a hardware NOP.
   if (!trap_present)
     for (Inst& inst : program)
       if (inst.enc == Enc::kSopp && inst.opcode == 0x12) {

@@ -257,7 +257,6 @@ void ReplaceAll(std::string& s, const char* from, const char* to) {
     s.replace(at, n, to);
 }
 
-// GL and Vulkan order the vertices of odd strip triangles differently.
 void ReorderStripVertices(std::string& s) {
   static const std::regex kDecl(
       R"((layout\(location = \d+\) (?:flat )?pervertexEXT in )(\w+) (\w+)\[3\];)");

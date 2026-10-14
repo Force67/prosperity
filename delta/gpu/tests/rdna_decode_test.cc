@@ -128,8 +128,6 @@ TEST(RdnaDecode, FmacImplicitAccumulatorDoesNotSelectLiteral) {
   EXPECT_EQ(program[1].pc, 2u);
 }
 
-// Field position checked against llvm-mc gfx1030 output; gfx9 places it
-// elsewhere.
 TEST(RdnaDecode, DsOpcodeUsesBits25Through18) {
   const u32 code[] = {0xd8340000u, 0};
   const gpu::gcn::Program program = gpu::rdna::Decode(code, 2, false);

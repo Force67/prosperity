@@ -272,11 +272,6 @@ void Module::Name(Id target, const base::String& n) {
   PutString(ops, n);
   Instr(debug_, spv::Op::OpName, ops);
 }
-void Module::MemberName(Id struct_type, u32 member, const base::String& n) {
-  base::Vector<u32> ops{struct_type, member};
-  PutString(ops, n);
-  Instr(debug_, spv::Op::OpMemberName, ops);
-}
 
 Id Module::String(const base::String& s) {
   const Id id = Alloc();
@@ -703,13 +698,6 @@ Id Module::CompositeExtract(Id type, Id composite, u32 index) {
 }
 Id Module::CompositeConstruct(Id type, const base::Vector<Id>& parts) {
   return Emit(spv::Op::OpCompositeConstruct, type, parts);
-}
-Id Module::VectorShuffle(Id type, Id a, Id b, const base::Vector<u32>& comps) {
-  const Id id = Alloc();
-  base::Vector<u32> ops{type, id, a, b};
-  ops.insert(ops.end(), comps.begin(), comps.end());
-  Instr(fn_body_, spv::Op::OpVectorShuffle, ops);
-  return id;
 }
 
 void Module::SelectionMerge(Id merge_block) {

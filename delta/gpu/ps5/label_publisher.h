@@ -5,8 +5,6 @@
 #include "base/functional/function.h"
 
 namespace gpu::ps5 {
-// The guest must not see a label before the GPU is past the work that writes
-// it.
 void PublishLabel(base::Function<void()> write,
                   u64 base = 0,
                   u64 bytes = ~0ull,

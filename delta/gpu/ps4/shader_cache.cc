@@ -112,8 +112,6 @@ u32 PsInputCntlHash(const u32* ps_in_cntl, u32 num_interp) {
 GraphicsKey GraphicsKeyOf(const GraphicsShaderState& state) {
   GraphicsKey key;
   key.direct_table = gcn::DirectGcnEnabled() ? gcn::g_direct_table : 0;
-  // Content keys stay sound with s_getpc_b64 only because the module reads its
-  // address from the push range.
   key.vs = gcn::CachedCodeHash(state.vs_addr, 4096);
   key.ps = state.ps_addr ? gcn::CachedCodeHash(state.ps_addr, 4096) : 0;
   if (!gcn::PushCodeBase() &&

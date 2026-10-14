@@ -110,15 +110,12 @@ base::Vector<base::Pair<u64, u64>> Gaps(const base::Map<u64, u64>& runs,
 }
 
 #if defined(__linux__)
-// Page states: open, protected (owner arms it), queued (writer took it).
 constexpr u8 kOpen = 0, kProtected = 1, kQueued = 2;
-// Protected pages are at most half the queue, so it can never fill.
 constexpr u64 kQueueSize = 1u << 20;
 u64* g_queue = nullptr;
 base::Atomic<u64> g_queue_head{0};
 u64 g_queue_tail = 0;
 
-// Protected pages stay executable: they may hold code.
 constexpr int kOpenProt = PROT_READ | PROT_WRITE | PROT_EXEC;
 
 void Enqueue(u64 page) {
@@ -129,7 +126,6 @@ void Enqueue(u64 page) {
 base::Atomic<bool (*)(u64, u64)> g_owner_resolve{nullptr};
 base::Atomic<bool (*)(u64, u64)> g_owner_owns{nullptr};
 
-// Async-signal-safe: atomics, the page table and one mprotect.
 bool OnWriteFault(uintptr_t addr) {
   const u64 page = addr & ~(kPage - 1);
   if (const auto resolve = g_owner_resolve.load(base::memory_order_acquire);
@@ -255,8 +251,6 @@ bool WriteTracker::ArmFault(u64 first, u64 end, bool hot) {
               p->armed.load(base::memory_order_acquire) == kQueued))
       return false;
   }
-  // Mark before protecting, so a write in between is one the fault handler
-  // takes.
   u64 run = 0;
   const auto protect = [&](u64 at) {
     if (!run)
@@ -380,8 +374,6 @@ bool WriteTracker::EnableScan() {
 bool WriteTracker::Register(u64 first, u64 end) {
   DELTA_ZONE("wt.register");
   for (const auto& [lo, hi] : Gaps(registered_, first, end)) {
-    // Rounded to coarser bounds so neighbouring buffers do not re-split the
-    // mapping.
     const u64 wide_lo = lo & ~(kRegisterAlign - 1);
     const u64 wide_hi = (hi + kRegisterAlign - 1) & ~(kRegisterAlign - 1);
     bool registered = false;
@@ -435,7 +427,6 @@ bool WriteTracker::Arm(u64 base, u64 bytes, bool hot) {
     return false;
   if (AllArmed(first, end))
     return true;
-  // Protects only what is asked: a gap page may be code or a guard page.
   if (mode_ == Mode::kFault)
     return ArmRange(first, end, hot);
   u64 wide_first = first, wide_end = end;
@@ -454,7 +445,6 @@ bool WriteTracker::Arm(u64 base, u64 bytes, bool hot) {
   return ArmRange(first, end);
 }
 
-// Unregistered too, or the span scan would arm it again.
 void WriteTracker::Disarm(u64 first, u64 end) {
   if (mode_ == Mode::kFault) {
     DisarmFault(first, end);
@@ -584,7 +574,6 @@ size_t WriteTracker::Collect(base::Vector<Range>& out) {
   const size_t first_new = out.size();
   if (mode_ == Mode::kFault)
     TakeFaulted(out);
-  // No minor fault since the last scan means no armed page was written.
   const long faults = mode_ == Mode::kScan ? MinorFaults() : faults_at_scan_;
   if (faults != faults_at_scan_) {
     for (auto it = armed_.begin(); it != armed_.end();) {

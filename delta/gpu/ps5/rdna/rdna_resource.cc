@@ -925,8 +925,6 @@ bool Vop3HasSdst(u32 op) {
          op == 0x176 || op == 0x177;
 }
 
-// SOP1 sets SCC on most ops and ScalarEval does not model it, so a later
-// s_cselect would read a stale flag.
 bool WritesSccUnmodelled(const Inst& inst) {
   return inst.enc == Enc::kSop1 && inst.opcode != 0x03 && inst.opcode != 0x04;
 }
@@ -1450,16 +1448,6 @@ TImage DecodeTImage(const u32* d, bool r128) {
             valid_mips && valid_word4 && valid_compression &&
             valid_compact_type;
   return t;
-}
-
-bool CanAccessLinearIntegerImage(const TImage& t) {
-  return t.valid && t.tiling_idx == gcn::kGfx10TilingBase &&
-         t.mip_levels == 1 &&
-         (t.type == 8 || t.type == 9 || t.type == 12 || t.type == 13) &&
-         (t.nfmt == 4 || t.nfmt == 5) &&
-         (t.dfmt == 1 || t.dfmt == 3 || t.dfmt == 4 || t.dfmt == 5 ||
-          t.dfmt == 10 || t.dfmt == 11 || t.dfmt == 12 || t.dfmt == 14) &&
-         !((t.dfmt == 1 || t.dfmt == 3) && t.nfmt == 5);
 }
 
 namespace {

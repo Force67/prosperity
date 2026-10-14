@@ -1021,7 +1021,6 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
         get_props(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                   desc.host_pointer, &hp) == VK_SUCCESS)
       bits &= hp.memoryTypeBits;
-    // Nothing flushes these pages, so only coherent memory types work.
     type = FindMemoryType(bits, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
     import.pHostPointer = desc.host_pointer;
@@ -1044,7 +1043,6 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
           type = FindMemoryType(mr.memoryTypeBits, kHost);
         break;
       case rhi::MemoryKind::kReadback: {
-        // The CPU reads these, so host-cached beats device-local.
         int best = -1;
         for (u32 i = 0; i < memory_properties.memoryTypeCount; i++) {
           const VkMemoryPropertyFlags fl =
@@ -1846,7 +1844,6 @@ bool VulkanDevice::CommitSparse(rhi::Buffer* buffer, u64 offset, u64 bytes) {
   }
   if (binds.empty())
     return true;
-  // Not waited for: ordered after the last bind, before the next submit.
   DELTA_ZONE("vk.commit_sparse");
   VkSparseBufferMemoryBindInfo buffer_binds{
       b->buffer, static_cast<u32>(binds.size()), binds.data()};
@@ -2036,7 +2033,6 @@ void VulkanDevice::SavePipelineCache(bool force) {
   } else if (cache_saving_.load()) {
     return;
   }
-  // Serialised off-thread: a large save inline would trip the hang detector.
   const u64 now = NowNs();
   const u64 last_build = last_pipeline_build_ns_.load();
   if (!force && last_build <= last_cache_write_ns_)
@@ -2195,12 +2191,6 @@ VkPipeline Native(rhi::Pipeline* p) {
 }
 VkCommandBuffer Native(rhi::CommandList* c) {
   return c ? static_cast<VulkanCommandList*>(c)->cmd : VK_NULL_HANDLE;
-}
-void LockQueue(rhi::Device* device) {
-  Impl(device).queue_mutex.lock();
-}
-void UnlockQueue(rhi::Device* device) {
-  Impl(device).queue_mutex.unlock();
 }
 
 }  // namespace gpu::vk

@@ -36,8 +36,6 @@ const gcn::Recompiled& GetGraphicsShader(const Regs& regs,
 
 void PrefetchGraphicsShader(const Regs& regs, const GraphicsShaderState& state);
 
-// The same CS can be dispatched with another workgroup size, so the code
-// address alone does not identify it.
 struct ComputeShaderState {
   u64 cs_addr = 0;
   u32 thread_x = 0, thread_y = 0, thread_z = 0;

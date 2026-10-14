@@ -118,8 +118,6 @@ bool IsLabelAddress(u64 address) {
   return IsGuestAddress(address);
 }
 
-// DATA_SEL 3/4 write the GPU or system clock counter into the label, not the
-// packet's immediate.
 u64 GpuClockTimestamp() {
   return static_cast<u64>((base::TickClock::NowNs()));
 }
@@ -212,8 +210,6 @@ void WriteEventLabel(u64 address,
       BASE_LOGW("agc", "fence label {:#x} (sel {}) is not writable, skipped",
                 address, data_sel);
   }
-  // DATA_SEL 5 stores GDS data, not the packet's immediate, so nothing is
-  // written.
   if (data_sel == 5) {
     static int n = 0;
     if (n++ < 8)
@@ -458,7 +454,6 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
   return Compares(function, value & mask, ref);
 }
 
-// A satisfying write is remembered so a wait the CP resumes late still sees it.
 bool WrittenSinceVisible(u64 address, u64 ref, u64 mask, u32 control) {
   const u64 since = g_queue->stall.visible_ns;
   if (!since)
@@ -582,7 +577,6 @@ bool StallOnWait(u32 op, const u32* body, u32 count) {
 void HandleWriteData(const u32* body, u32 count) {
   if (count < 4)
     return;
-  // DST_SEL 0 is the register file: dstLo is a register offset, not an address.
   if (((body[0] >> 8) & 0xF) == 0) {
     WriteDataRegs(g_queue->regs, body, count);
     return;
@@ -648,8 +642,6 @@ void HandleEventWriteEos(const u32* body, u32 count) {
       address, 4, body + 3);
 }
 
-// gfx10 widens the COPY_DATA selectors by one header bit, hence (field << 1) |
-// bit30.
 void HandleCopyData(const u32* body, u32 count) {
   if (count < 5)
     return;

@@ -103,10 +103,6 @@ extern u64 g_wb_why_bytes;
 extern u64 g_lazy_kept_n, g_lazy_kept_bytes;
 extern u64 g_out_rt_submits;
 
-constexpr u64 kParallelCopyMin = 512 * 1024;
-
-void ParallelCopy(void* dst, const void* src, u64 bytes);
-
 struct StageStat {
   u64 bytes = 0;
   u32 n = 0, first = 0, shape = 0, hash = 0, rt = 0, wait = 0;
@@ -203,7 +199,6 @@ struct CsRange {
   u64 batch_id = 0;
   bool image_staging = false;
   bool imported = false;
-  u64 imported_base = 0;
   u64 imported_offset = 0;
   bool rt_sourced = false;
   int last_rt_frame = -1;

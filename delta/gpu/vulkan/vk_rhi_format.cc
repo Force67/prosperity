@@ -97,18 +97,10 @@ VkFormat ToVkFormat(rhi::Format format) {
                                                  : VK_FORMAT_UNDEFINED;
 }
 
-rhi::Format FromVkFormat(VkFormat format) {
-  for (size_t i = 0; i < static_cast<size_t>(Format::kCount); ++i)
-    if (kVkFormats[i] == format)
-      return static_cast<Format>(i);
-  return Format::kUndefined;
-}
-
 bool g_unified_layouts = false;
 
 VkImageLayout ToVkLayout(rhi::TextureState state, u8 aspect, bool exported) {
   using rhi::TextureState;
-  // Exported images keep the layouts the importing device assumes.
   if (g_unified_layouts && !exported && state != TextureState::kUndefined)
     return VK_IMAGE_LAYOUT_GENERAL;
   const bool depth = aspect & rhi::kAspectDepth;
@@ -145,32 +137,6 @@ VkImageLayout ToVkLayout(rhi::TextureState state, u8 aspect, bool exported) {
 VkImageLayout FixedLayout(rhi::Texture* texture, VkImageLayout optimal) {
   return g_unified_layouts && !Exported(texture) ? VK_IMAGE_LAYOUT_GENERAL
                                                  : optimal;
-}
-
-rhi::TextureState FromVkLayout(VkImageLayout layout) {
-  using rhi::TextureState;
-  switch (layout) {
-    case VK_IMAGE_LAYOUT_UNDEFINED:
-      return TextureState::kUndefined;
-    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
-      return TextureState::kColorTarget;
-    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
-    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
-    case VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL:
-      return TextureState::kDepthTarget;
-    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
-    case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
-    case VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL:
-      return TextureState::kDepthRead;
-    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-      return TextureState::kShaderRead;
-    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
-      return TextureState::kCopySrc;
-    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-      return TextureState::kCopyDst;
-    default:
-      return TextureState::kGeneral;
-  }
 }
 
 }  // namespace gpu::vk

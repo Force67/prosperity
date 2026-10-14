@@ -90,22 +90,6 @@ u64 g_wb_why_bytes = 0;
 u64 g_lazy_kept_n = 0, g_lazy_kept_bytes = 0;
 u64 g_out_rt_submits = 0;
 
-void ParallelCopy(void* dst, const void* src, u64 bytes) {
-  if (bytes < kParallelCopyMin) {
-    std::memcpy(dst, src, bytes);
-    return;
-  }
-  constexpr u64 kChunk = 256 * 1024;
-  const u32 chunks = static_cast<u32>((bytes + kChunk - 1) / kChunk);
-  auto* d = static_cast<u8*>(dst);
-  const auto* s = static_cast<const u8*>(src);
-  gcn::DetileParallelWork(chunks, bytes, [&](u32 c0, u32 c1) {
-    const u64 off = u64(c0) * kChunk;
-    std::memcpy(d + off, s + off,
-                base::Min<u64>(u64(c1 - c0) * kChunk, bytes - off));
-  });
-}
-
 base::HashMap<u64, StageStat> g_stage_stats;
 
 static_assert(ComputeInfo::kMaxResources == gcn::kMaxCsResources);

@@ -55,7 +55,6 @@ inline bool IsReadableRange(u64 address, u64 bytes) {
   const u64 page = static_cast<u64>(kPageSize);
   const u64 end = address + bytes;
 
-  // mincore cannot see mapped-but-unreadable pages.
   unsigned char probe[2];
   iovec remote[2];
   size_t count = 0;

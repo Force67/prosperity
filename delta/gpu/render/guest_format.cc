@@ -281,7 +281,6 @@ rhi::Format ColorTargetFormat(u32 info) {
       case 5:
         return rhi::Format::kRG16Unorm;
       case 10:
-        // COMP_SWAP sets the byte order the hardware writes components in.
         return ((info >> 11) & 3) == 1 ? rhi::Format::kBGRA8Unorm
                                        : rhi::Format::kRGBA8Unorm;
       case 8:
@@ -473,7 +472,6 @@ rhi::BlendFactor BlendFactor(u32 f) {
       return rhi::BlendFactor::kSrcAlpha;
     case 5:
       return rhi::BlendFactor::kOneMinusSrcAlpha;
-    // Blend enums 0x0f..0x12 are the dual-source factors, not the D3D order.
     case 6:
       return rhi::BlendFactor::kDstAlpha;
     case 7:
@@ -560,7 +558,6 @@ rhi::BlendAttachment BlendAttachment(u32 bc, bool en) {
 }
 
 rhi::Format VertexFormat(u32 dfmt, u32 nfmt) {
-  // Integer attributes are bitcast into the VGPR; the SFLOAT twin is bit-exact.
   switch (dfmt) {
     case 1:
       switch (nfmt) {

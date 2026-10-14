@@ -208,7 +208,6 @@ ScalarReplayPlan PlanScalarReplay(const Program& program);
 gpu::gcn::MimgBindingPlan RdnaPlanMimg(const Program& program);
 
 gpu::gcn::TImage DecodeTImage(const u32* dwords, bool r128 = false);
-bool CanAccessLinearIntegerImage(const gpu::gcn::TImage& image);
 
 struct VBuffer {
   u64 base = 0;

@@ -1130,7 +1130,6 @@ void SetGuestViewport(const DrawInfo& d) {
       !std::isfinite(d.viewport_y_offset) || d.viewport_x_scale <= 0.0f ||
       d.viewport_y_scale == 0.0f)
     return;
-  // window_z = ndc_z * ZSCALE + ZOFFSET matches Vulkan's depth range transform.
   const float min_depth = 0.0f, max_depth = 1.0f;
   g_frame.list->SetViewport(d.viewport_x_offset - d.viewport_x_scale,
                             d.viewport_y_offset - d.viewport_y_scale,

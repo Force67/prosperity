@@ -57,7 +57,6 @@ void MemorySpanAllocator::Free(u64 offset, u64 size) {
              });
   size_t out = 0;
   for (const MemorySpan& span : free_) {
-    // Overlapping free spans mean the allocator map is corrupt.
     GPU_BUGCHECK(
         !out || free_[out - 1].offset + free_[out - 1].size <= span.offset,
         "double free: span overlaps an already-free span");

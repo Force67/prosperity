@@ -1744,7 +1744,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
         StoreSdwaResult(t, vdst, sd, previous);
         break;
       }
-      // Clamp M0: an out-of-bounds access is undefined in SPIR-V.
       if (op >= 0x42 && op <= 0x44) {
         const auto reg_at = [&](u32 base) {
           const Id idx =
@@ -1806,7 +1805,6 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
       }
       const Id s0u = dpp_src0 ? dpp_src0 : sdwa0 ? sdwa0 : t.SrcRaw(src0, lit);
       const Id s1u = sdwa1 ? sdwa1 : t.SrcRaw(src1, lit);
-      // The no-carry forms must not write VCC.
       switch (op) {
         case 0x32:
         case 0x33:
@@ -3629,7 +3627,6 @@ class Structurizer {
         for (u32 s : succ_[b])
           rsucc[b].push_back(s);
     ipdom_ = Dominators(prpo, pindex, rsucc, n_);
-    // Every retreating edge must be a back edge to a dominating header.
     header_of_.assign(nodes, ~0u);
     exit_of_.assign(nodes, ~0u);
     in_loop_.assign(nodes, {});

@@ -264,7 +264,6 @@ void EmitGsMessage(Translator& t, const Inst& inst, StageContext& sc) {
   }
   if (stream != 0 || op == 0)
     return;
-  // The hardware counts a vertex per EXEC lane active at the message.
   const Id emitted = t.m.Load(t.t_u, sc.gs_emitted);
   Id go = t.LaneActive(t.Exec());
   if (op & 2)

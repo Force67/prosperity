@@ -56,8 +56,6 @@ inline u32 RelativeVgprFloor(
   return lo;
 }
 
-// A dynamic index into the register array keeps it out of registers for the
-// whole shader, so unplanned v_movrel sites select over every reachable VGPR.
 inline void BoundMovrels(const Program& program,
                          base::HashMap<u32, base::Vector<u32>>& known) {
   u32 lo = 256;
@@ -459,7 +457,6 @@ struct Translator {
     m.Decorate(value, spv::Decoration::NoContraction);
     return value;
   }
-  // Zero times anything is zero, even inf or NaN.
   Id LegacyMul(Id a, Id b) {
     const Id zero = F32(0.f);
     const Id any_zero =
@@ -480,12 +477,10 @@ struct Translator {
   }
   Id FDiv(Id a, Id b) { return m.Emit(spv::Op::OpFDiv, t_f, {a, b}); }
   Id FNeg(Id a) { return m.Emit(spv::Op::OpFNegate, t_f, {a}); }
-  // NClamp, not FClamp: GCN maps NaN to 0.
   Id FClamp01(Id f) {
     return m.ExtInst(t_f, GLSLstd450NClamp, {f, F32(0.0f), F32(1.0f)});
   }
 
-  // Select on OpIsInf: GLSL min/max fold NaN away.
   Id IsInf(Id f) { return m.Emit(spv::Op::OpIsInf, t_bool, {f}); }
   Id FLt(Id a, Id b) { return m.Emit(spv::Op::OpFOrdLessThan, t_bool, {a, b}); }
   Id FGt(Id a, Id b) {
@@ -803,7 +798,6 @@ struct StageContext {
   u32 ps_num_interp = 0;
   const base::Vector<u32>* vs_exported_params = nullptr;
   bool is_cs = false;
-  // A 64-lane wave spans two host subgroups, so LDS turns need barriers.
   bool wave_lockstep = false;
   bool lds_sync = false;
   Id cs_probe_var = 0;
@@ -851,7 +845,6 @@ struct StageContext {
 
   base::HashMap<u32, u32> cbuf_bind;
   base::HashMap<u32, u32> gfx_buf_bind;
-  base::HashMap<u32, u32> mubuf_cbuf_by_pc;
   base::HashMap<u32, u32> smem_cbuf_by_pc;
   base::HashMap<u32, u32> cbuf_first_dword;
   base::HashSet<u32> skip_launch_movs;

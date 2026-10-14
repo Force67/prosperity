@@ -308,8 +308,6 @@ bool SpanFits(const OwnBlock& o, u32 lo, u32 hi) {
   return false;
 }
 
-// Spans stay disjoint: copying a gap back would overwrite bytes the CPU wrote
-// after the mirror last saw them.
 void AddSpan(OwnBlock& o, u32 lo, u32 hi) {
   u32 n = 0;
   for (u32 i = 0; i < o.spans; i++) {

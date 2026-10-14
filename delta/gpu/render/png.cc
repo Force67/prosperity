@@ -259,21 +259,4 @@ bool WritePngRgba8(const char* path, const u8* rgba, u32 width, u32 height) {
   return WritePngRaw(path, scanlines, width, height, 8);
 }
 
-bool WritePngRgba16(const char* path, const u16* rgba, u32 width, u32 height) {
-  if (!width || !height)
-    return false;
-  const u64 row = static_cast<u64>(width) * 8;
-  base::Vector<u8> scanlines(static_cast<u64>(height) * (row + 1));
-  for (u32 y = 0; y < height; y++) {
-    u8* dst = scanlines.data() + static_cast<u64>(y) * (row + 1);
-    dst[0] = 0;
-    const u16* src = rgba + static_cast<u64>(y) * width * 4;
-    for (u32 i = 0; i < width * 4u; i++) {
-      dst[1 + i * 2 + 0] = static_cast<u8>(src[i] >> 8);
-      dst[1 + i * 2 + 1] = static_cast<u8>(src[i]);
-    }
-  }
-  return WritePngRaw(path, scanlines, width, height, 16);
-}
-
 }  // namespace gpu::render

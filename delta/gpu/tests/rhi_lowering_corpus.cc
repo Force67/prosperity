@@ -63,7 +63,6 @@ base::Vector<u32> ReadWords(const base::String& path) {
   return words;
 }
 
-// Vulkan never gets these on such a device, so skip rather than fail.
 const char* Unsupported(const base::Vector<u32>& words) {
   constexpr u32 kOpCapability = 17;
   constexpr u32 kPhysicalStorageBufferAddresses = 5347;
@@ -196,7 +195,6 @@ Result Process(const base::String& path,
     r.outcome = Outcome::kCompile;
     log = InfoLog(shader, false);
   } else if (r.stage != rhi::kStageGeometry) {
-    // Geometry shaders cannot link without a vertex shader.
     const GLuint prog = glCreateProgram();
     glAttachShader(prog, shader);
     glLinkProgram(prog);

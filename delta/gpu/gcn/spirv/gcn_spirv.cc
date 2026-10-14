@@ -2261,8 +2261,6 @@ bool NativeMimgForm(u32 op) {
   }
 }
 
-// Read-only images every access of which the host can sample or fetch
-// through a real image view instead of a staged copy of guest memory.
 u64 NativeImageCandidates(const Program& program,
                           const RecompiledCs& r,
                           const base::HashMap<u32, u32>& bind) {

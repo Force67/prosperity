@@ -45,7 +45,6 @@ constexpr u32 kCbBlendStride = 0x1;
 constexpr u32 mmCB_BLEND_RED = 0xA105;
 constexpr u32 mmSPI_PS_INPUT_CNTL_0 = 0xA191;
 constexpr u32 mmSPI_PS_INPUT_ENA = 0xA1B3;
-// Slots at or above NUM_INTERP are don't-care, so their zero says nothing.
 constexpr u32 mmSPI_PS_IN_CONTROL = 0xA1B6;
 constexpr u32 mmCB_COLOR_CONTROL = 0xA202;
 constexpr u32 mmVGT_SHADER_STAGES_EN = 0xA2D5;

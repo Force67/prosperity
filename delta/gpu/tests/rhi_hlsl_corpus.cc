@@ -144,7 +144,6 @@ bool Reflect(const base::Vector<u32>& words, Module* m, base::String* error) {
       add(res, rhi::BindingType::kSampledTexture, false);
     for (const sc::Resource& res : r.storage_images)
       add(res, rhi::BindingType::kStorageTexture, false);
-    // Separate images and samplers have no rhi binding type.
     for (const sc::Resource& res : r.separate_images) {
       add(res, rhi::BindingType::kSampledTexture, false);
       m->separate++;

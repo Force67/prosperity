@@ -149,7 +149,6 @@ void WriteEventLabel(const char* packet,
                      u32 int_sel = 0) {
   if (data_sel && kFenceFlush && render::CsTracksGuestWrites())
     render::FlushCsWrites(render::DefaultRenderer(), "fence");
-  // Clock selects write the GPU clock, so pollers see a value that advances.
   const u64 written = data_sel >= 3 ? GpuClockTimestamp() : value;
   WriteAfterGpu(
       [=] {
@@ -293,7 +292,6 @@ void HandleWaitRegMem(const u32* body, u32 count) {
     return;
   }
 
-  // Bounded: a dropped producer must not hang the title.
   const auto deadline = base::TimeTicks::Now() + base::Microseconds(200);
   bool timed_out = false;
   while (!passes(*polled)) {
@@ -521,11 +519,10 @@ void InOrder(void (*handle)(const u32*, u32),
   }
   if (label && IsLabelAddress(label)) {
     g_fence_labels.Note(label);
-    const u32 sel = handle == HandleEventWriteEop && count >= 4
-                        ? (body[2] >> 29) & 0x7
-                    : handle == HandleReleaseMem && count >= 5
-                        ? (body[1] >> 29) & 0x7
-                        : 0;
+    const u32 sel =
+        handle == HandleEventWriteEop && count >= 4 ? (body[2] >> 29) & 0x7
+        : handle == HandleReleaseMem && count >= 5  ? (body[1] >> 29) & 0x7
+                                                    : 0;
     const u32 at = handle == HandleEventWriteEop ? 3 : 4;
     if (handle == HandleEventWriteEos && count >= 4)
       queue.NotePendingValue(label, 4, body[3]);

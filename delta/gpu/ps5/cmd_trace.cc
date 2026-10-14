@@ -475,21 +475,6 @@ void TraceVsUserData(u64 vs_addr,
             es_user_data[2], es_user_data[3]);
 }
 
-void TraceShRegs(const Regs& regs) {
-  if (!kTrace)
-    return;
-  static int n = 0;
-  if (n++ >= 120)
-    return;
-  base::String line;
-  for (u32 off = 0; off < 0x200; off++) {
-    const u32 v = regs[kShRegBase + off];
-    if (v)
-      base::FormatTo(line, " {:03x}={:08x}", off, v);
-  }
-  BASE_LOGI("agc", "  SH regs:{}", line.c_str());
-}
-
 void TraceShaderScan(const u32* found_reg, const u64* found, u32 count) {
   if (!kTrace)
     return;

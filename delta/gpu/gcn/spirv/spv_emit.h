@@ -60,7 +60,6 @@ class Module {
                       spv::Decoration dec,
                       const base::Vector<u32>& operands = {});
   void Name(Id target, const base::String& n);
-  void MemberName(Id struct_type, u32 member, const base::String& n);
 
   Id String(const base::String& s);
   void Line(Id file, u32 line);
@@ -76,8 +75,6 @@ class Module {
   void Capability(spv::Capability cap);
   void Extension(const base::String& name);
   void PhysicalStorageBuffers();
-
-  Id GlslExt() const { return glsl_ext_; }
 
   Id BeginFunction(
       Id ret_type,
@@ -100,7 +97,6 @@ class Module {
   Id Bitcast(Id type, Id value);
   Id CompositeExtract(Id type, Id composite, u32 index);
   Id CompositeConstruct(Id type, const base::Vector<Id>& parts);
-  Id VectorShuffle(Id type, Id a, Id b, const base::Vector<u32>& comps);
 
   void SelectionMerge(Id merge_block);
   void LoopMerge(Id merge_block, Id continue_block);
@@ -144,7 +140,6 @@ class Module {
     return true;
   }
 
-  void PutWord(base::Vector<u32>& sec, u32 w) { sec.push_back(w); }
   void Instr(base::Vector<u32>& sec, spv::Op op, const base::Vector<u32>& ops);
   void PutString(base::Vector<u32>& sec, const base::String& s);
 

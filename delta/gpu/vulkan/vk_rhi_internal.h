@@ -303,7 +303,6 @@ class VulkanDevice final : public rhi::Device {
                       u64* out) override;
   void Maintain() override;
   void ReportDeviceLoss() override;
-  // RenderDoc identifies the device by its instance's dispatch pointer.
   void* CaptureHandle() const override {
     return *reinterpret_cast<void**>(native.instance);
   }
@@ -347,8 +346,6 @@ class VulkanDevice final : public rhi::Device {
   base::String device_name_;
   base::String pipeline_cache_path_;
   VkPipelineStageFlags shader_stages_ = 0;
-  // Pinned to the recompiler's wave size: RADV would pick wave32 for small
-  // groups.
   VkShaderStageFlags pinned_subgroup_stages_ = 0;
   VkSemaphore timeline_ = VK_NULL_HANDLE;
   VkSemaphore sparse_timeline_ = VK_NULL_HANDLE;

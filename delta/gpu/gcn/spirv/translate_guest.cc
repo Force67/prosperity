@@ -505,7 +505,6 @@ void EmitGuestGlobal(Translator& t, const Inst& inst, StageContext& sc) {
     t.m.BranchConditional(active, body, active_done);
     t.m.OpenBlock(body);
   }
-  // Snapshot first: a result may overwrite a source VGPR.
   for (u32 i = 0; i < count; ++i) {
     const Id guest =
         t.m.Emit(spv::Op::OpIAdd, wide, {address, Wide(t, t.U32(i * 4))});

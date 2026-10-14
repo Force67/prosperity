@@ -15,7 +15,6 @@ inline bool IsGuestAddress(u64 address) {
   return address >= kGuestBase && address < kGuestEnd;
 }
 
-// Test address < kGuestEnd first: kGuestEnd - address wraps above the window.
 inline bool IsGuestRange(u64 address, u64 bytes) {
   return bytes && address >= kGuestBase && address < kGuestEnd &&
          bytes <= kGuestEnd - address;

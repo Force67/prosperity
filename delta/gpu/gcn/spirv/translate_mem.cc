@@ -524,7 +524,6 @@ void EmitMimg(Translator& t,
   const u32 w0 = inst.raw[0], w1 = inst.raw[1], op = inst.opcode;
   const u32 dmask = (w0 >> 8) & 0xF, vaddr = w1 & 0xFF;
   const u32 vdata = (w1 >> 8) & 0xFF;
-  // Only _lz gathers: OpImageGather is fixed at level zero.
   const bool gather = op >= 0x40 && op <= 0x5f && (op & 0x7) == 7;
   const bool dref = op == 0x28 || op == 0x2f || (gather && (op & 0x08));
   const bool offset = op == 0x37 || (gather && (op & 0x10));

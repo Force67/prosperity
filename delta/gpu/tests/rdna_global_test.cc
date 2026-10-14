@@ -135,7 +135,6 @@ TEST_F(RdnaGlobal, TypedComputeLoadDecodesRdnaFormat) {
   source[1] = 0xbf400000;
   source[2] = 0x3f000000;
   source[3] = 0x3f800000;
-  // GFX10 format field, not the GCN DFMT/NFMT bits.
   program_ = {0xbe840300, 0xbe850301, 0xbe8603a0,
               0xbe870380, 0x34020083, 0xe8001000 | (64u << 19) | (1u << 16),
               0x80010401};
@@ -175,7 +174,6 @@ TEST_F(RdnaGlobal, MaskBitCountsUseGuestWaveLaneAcrossHostSubgroups) {
   auto& dest = PageForDispatch();
   program_ = {0xd7650003, 0x000100c1, 0xd7660003, 0x000206c1, 0x34000082};
   Global(0x1c, 0, 3, 2);
-  // Dispatch flag keeps wave-width variants apart in the module cache.
   for (u32 width : {64u, 32u, 64u}) {
     initiator_ = 1 | (width == 32 ? 1u << 15 : 0);
     Run(0, reinterpret_cast<u64>(dest.data()), 128);
@@ -429,7 +427,6 @@ TEST_F(RdnaGlobal, AddressesBeyondTheOldSixtyFourMiBWindow) {
 
 #ifdef OS_LINUX
 TEST_F(RdnaGlobal, ReadOnlyMappingRejectsStoresButAllowsLoads) {
-  // Vulkan may keep a host import, so the memory lives until exit.
   static void* memory = mmap(nullptr, 65536, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   ASSERT_NE(memory, MAP_FAILED);

@@ -157,8 +157,6 @@ void ReadIndirectArgs(render::Renderer& renderer,
                       render::DrawInfo& d) {
   const u32 op = packet.op;
   const u32 need = op == IT_DRAW_INDIRECT ? 16u : 20u;
-  // Compute results are written back lazily, so guest memory is read only after
-  // its range is flushed.
   FlushForWalkRead(renderer, args, need, "indirect");
   const bool mapped = host_memory::IsMemoryRangeMapped(
       reinterpret_cast<const void*>(args), need);
@@ -256,8 +254,6 @@ void ResolveIndexBuffer(render::Renderer& renderer,
   }
 }
 
-// A stale CB_COLORn_BASE stays programmed in depth-only passes, so a target is
-// bound only with a live mask and format.
 u32 ResolveRenderTargets(const Regs& regs,
                          render::DrawInfo& d,
                          u64 vs_addr,
@@ -470,8 +466,6 @@ base::SharedPointer<const gcn::Program> ResolvePsTextures(
   if (texs.empty())
     return ps_prog;
 
-  // Keep every valid T# address: a format may alias a live renderer RT and must
-  // still resolve to it.
   const gcn::TImage& first = texs[0];
   d.tex_base = first.valid ? first.base : 0;
   d.tex_w = first.width;
