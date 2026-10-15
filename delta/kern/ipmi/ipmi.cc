@@ -488,7 +488,7 @@ int ManagerCall(u32 op, u32 kid, void* out, void* in, u64 insize) {
             (request.result &&
              !host_memory::IsMemoryRangeMapped(request.result, sizeof(i32))))
           return -static_cast<i32>(SysError::eFAULT);
-        const i32 result = c.impl->Connect(request.data, request.size);
+        const i32 result = c.impl->Connect(kid, request.data, request.size);
         if (request.result)
           std::memcpy(request.result, &result, sizeof(result));
         if (result < 0)

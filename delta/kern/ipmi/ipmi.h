@@ -68,7 +68,7 @@ struct Service {
   virtual ~Service() = default;
   virtual const char* Name() const = 0;
   // A rejected handshake is returned through Connect's service-result slot.
-  virtual i32 Connect(const void*, u64) { return 0; }
+  virtual i32 Connect(u32 /*client*/, const void*, u64) { return 0; }
   // Default: the daemon accepted the call and had nothing to return.
   virtual void Invoke(Invocation& inv) { inv.ReplyEmpty(); }
   virtual i32 InvokeAsync(Invocation&, u32&) {

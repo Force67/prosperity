@@ -13,7 +13,7 @@ constexpr i32 kInternal = static_cast<i32>(0x80bc00ffu);
 struct Ime : Service {
   const char* Name() const override { return "SceImeService"; }
 
-  i32 Connect(const void* data, u64 size) override {
+  i32 Connect(u32, const void* data, u64 size) override {
     if (!data || size != 24)
       return kInvalidParameter;
     u32 type, user;

@@ -456,17 +456,17 @@ class SaveDataTest : public testing::Test {
              u32 key = 0,
              u32 order = 0,
              u32 offset = 0) {
-    const u64 input_size = 192, output_size = 0x11308;
+    const u64 input_size = 192, output_size = search_output;
     std::array<u8, 192> payload{};
     const u32 user = 1;
     std::memcpy(payload.data(), &user, 4);
+    std::memcpy(payload.data() + 4, search_title, std::strlen(search_title) + 1);
     std::memcpy(payload.data() + 20, filter, std::strlen(filter) + 1);
     std::memcpy(payload.data() + 52, &key, 4);
     std::memcpy(payload.data() + 56, &order, 4);
     std::memcpy(payload.data() + 60, &offset, 4);
     std::array<u8, 132> search_header{};
-    const u32 command = 6;
-    std::memcpy(search_header.data() + 4, &command, 4);
+    std::memcpy(search_header.data() + 4, &search_command, 4);
     u32 submitted = ~0u;
     const auto result = Invoke(0x12340000,
                                {{&input_size, 8},
@@ -511,6 +511,54 @@ class SaveDataTest : public testing::Test {
     return collected;
   }
   std::filesystem::path root;
+  i32 Ps5Connect() {
+    struct ConnectRequest {
+      const void* data;
+      u64 size;
+      i32* result;
+      const void* timeout;
+    };
+    std::array<u8, 44> handshake{};
+    i32 result = -1;
+    ConnectRequest request{handshake.data(), handshake.size(), &result,
+                           nullptr};
+    u32 manager_result = ~0u;
+    EXPECT_EQ(kern::ipmi::ManagerCall(1024, kid, &manager_result, &request,
+                                      sizeof(request)),
+              0);
+    return result;
+  }
+  i32 Ps5Mount(const char* dir, u64 blocks, u32 mode) {
+    std::array<u8, 200> payload{};
+    const u32 user = 1;
+    std::memcpy(payload.data(), &user, 4);
+    std::memcpy(payload.data() + 4, dir, std::strlen(dir) + 1);
+    std::memcpy(payload.data() + 0x28, &blocks, 8);
+    std::memcpy(payload.data() + 0x38, &mode, 4);
+    std::array<u8, 132> mount_header{};
+    const u32 command = 90;
+    std::memcpy(mount_header.data() + 4, &command, 4);
+    const u64 input_size = payload.size(), output_size = 32;
+    u32 submitted = ~0u;
+    if (const auto result = Invoke(0x12340000,
+                                   {{&input_size, 8},
+                                    {mount_header.data(), 128},
+                                    {payload.data(), input_size}},
+                                   {{&submitted, 4}}))
+      return result;
+    std::array<u8, 32> output{};
+    u64 received = 0;
+    return Invoke(0x12340001,
+                  {{&output_size, 8}, {mount_header.data(), 132}},
+                  {{output.data(), output_size}, {&received, 8}});
+  }
+  u64 Quota(const char* dir) {
+    u64 blocks = 0;
+    std::ifstream quota(root / "CUSA00792" / dir / ".sce_quota.bin",
+                        std::ios::binary);
+    quota.read(reinterpret_cast<char*>(&blocks), sizeof(blocks));
+    return blocks;
+  }
   i32 SmallMount() {
     const u64 blocks = 96;
     std::memcpy(data.data() + 0x488, &blocks, 8);
@@ -600,6 +648,9 @@ class SaveDataTest : public testing::Test {
   }
   kern::Process process;
   u32 kid = 0;
+  u32 search_command = 6;
+  const char* search_title = "";
+  u64 search_output = 0x11308;
   std::array<u8, 132> header{};
   std::array<u8, 0x4a0> data{};
   std::array<u8, 148> reply{};
@@ -2773,6 +2824,56 @@ TEST_F(SaveDataTest, UnsupportedCommandsAndUninitializedClientsReturnErrors) {
   EXPECT_EQ(Invoke(0x1234ffff), -static_cast<i32>(kern::SysError::eNOSYS));
   ASSERT_EQ(Initialize(63), 0);
   EXPECT_EQ(static_cast<u32>(Submit()), 0x809f0001u);
+}
+
+TEST_F(SaveDataTest, Ps5NativeConnectInitializesClient) {
+  ASSERT_EQ(Initialize(63), 0);
+  ASSERT_EQ(static_cast<u32>(Submit()), 0x809f0001u);
+  ASSERT_EQ(Ps5Connect(), 0);
+  EXPECT_EQ(Submit(), 0);
+}
+
+TEST_F(SaveDataTest, Ps5WritableMountCreatesMissingSave) {
+  ASSERT_EQ(Ps5Connect(), 0);
+  EXPECT_EQ(static_cast<u32>(Ps5Mount("World@P1", 480, 0x9)), 0x809f0008u);
+  ASSERT_EQ(Ps5Mount("World@P1", 480, 0xa), 0);
+  EXPECT_TRUE(std::filesystem::is_directory(root / "CUSA00792" / "World@P1"));
+  EXPECT_EQ(Quota("World@P1"), 480u);
+}
+
+TEST_F(SaveDataTest, Ps5SearchesOwnAndOtherTitlesWithLongerReply) {
+  ASSERT_EQ(Ps5Connect(), 0);
+  ASSERT_EQ(Ps5Mount("World@P1", 480, 0xa), 0);
+  std::vector<u8> output;
+  search_output = 0x11310;
+  ASSERT_EQ(Search(output, "World%"), 0);
+  u32 total;
+  std::memcpy(&total, output.data(), 4);
+  EXPECT_EQ(total, 1u);
+  EXPECT_STREQ(reinterpret_cast<const char*>(output.data() + 8), "World@P1");
+  search_command = 118;
+  search_title = "CUSA00744";
+  ASSERT_EQ(Search(output, "World%"), 0);
+  std::memcpy(&total, output.data(), 4);
+  EXPECT_EQ(total, 0u);
+}
+
+TEST_F(SaveDataTest, Ps5SearchReportsLegacySaveByUse) {
+  std::filesystem::create_directories(root / "CUSA00792" / "LEGACY");
+  ASSERT_EQ(Ps5Connect(), 0);
+  std::vector<u8> output;
+  search_output = 0x11310;
+  ASSERT_EQ(Search(output, "LEGACY"), 0);
+  u64 blocks;
+  std::memcpy(&blocks, output.data() + 0x109a8, 8);
+  EXPECT_EQ(blocks, 96u);
+}
+
+TEST_F(SaveDataTest, Ps5MountRecordsQuotaOfLegacySave) {
+  std::filesystem::create_directories(root / "CUSA00792" / "LEGACY");
+  ASSERT_EQ(Ps5Connect(), 0);
+  ASSERT_EQ(Ps5Mount("LEGACY", 80, 0xa), 0);
+  EXPECT_EQ(Quota("LEGACY"), 96u);
 }
 TEST_F(SaveDataTest, ParamFieldsPersistWithoutOverwritingOtherFields) {
   ASSERT_EQ(Submit(), 0);

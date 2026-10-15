@@ -85,6 +85,7 @@ struct MemoryJob {
   base::String host, directory;
 };
 struct ClientState {
+  bool ps5 = false;
   std::vector<Pending> pending;
   std::vector<Mounted> mounts;
   std::vector<u32> transaction_resources;
@@ -130,12 +131,13 @@ T Read(const u8* data, size_t offset) {
   std::memcpy(&value, data + offset, sizeof(value));
   return value;
 }
+// Minecraft names its worlds BedrockWorld<id>@P1.
 bool Component(const base::String& name) {
   if (name.empty())
     return false;
   for (char c : name)
     if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-          (c >= '0' && c <= '9') || c == '_' || c == '-'))
+          (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '@'))
       return false;
   return true;
 }
@@ -763,10 +765,27 @@ i32 MountPs5(ClientState& state,
   if (const auto result = SaveHost(dir, host, exists))
     return result;
   u32 mode = Read<u32>(data, 0x38);
+  // Minecraft mounts every save, new ones included, as RDWR with 0x8 and
+  // never sends a create, so a writable 0x8 means create-if-missing.
+  if ((mode & 0xa) == 0xa)
+    mode = (mode & ~0x8u) | 0x20;
   if (mode & 0x20)
     mode &= ~4u;
-  return MountHost(state, host, exists, mode & 0x2f, mode & 0x27,
-                   std::max<u64>(Read<u64>(data, 0x28), 96), reply);
+  const u64 blocks = std::max<u64>(Read<u64>(data, 0x28), 96);
+  // A save written before quotas were recorded reports the 60000-block
+  // default; Minecraft sums those over its saves and refuses to create a
+  // world. Record the size the title asks for, or what is already used.
+  const auto quota = host + "/.sce_quota.bin";
+  std::error_code error;
+  u64 total, free;
+  if (exists && !std::filesystem::exists(quota.c_str(), error) && !error &&
+      !save_storage::Info(host, total, free)) {
+    const u64 size = std::max(blocks, total - free);
+    if (const auto result = Store(quota, &size, 8))
+      return result;
+  }
+  return MountHost(state, host, exists, mode & 0x2f, mode & 0x27, blocks,
+                   reply);
 }
 
 i32 UnmountPoint(ClientState& state,
@@ -861,6 +880,7 @@ CommandSizes Sizes(u32 command) {
     case 4:
       return {0x434, 128};
     case 6:
+    case 118:
       return {192, 0x11308};
     case 7:
       return {0x1c814, 128};
@@ -989,15 +1009,21 @@ i32 MountInfo(ClientState& state,
   return 0;
 }
 
-i32 Search(const Pending& pending, std::vector<u8>& reply) {
+// `other_title` is the PS5 library's search of another title's saves (command
+// 118), which names that title; command 6 searches the caller's own.
+i32 Search(const Pending& pending,
+           std::vector<u8>& reply,
+           bool other_title,
+           bool ps5) {
   const auto* data = pending.data.data();
   base::String title, filter;
   if (Read<i32>(data, 0) != 1 || !String(data + 4, 16, title) ||
       !String(data + 20, 32, filter))
     return kParameter;
-  if (!title.empty())
-    return kUnsupported;
-  title = vfs::TitleId();
+  if (title.empty() == other_title)
+    return other_title ? kParameter : kUnsupported;
+  if (title.empty())
+    title = vfs::TitleId();
   if (title.empty())
     title = "SAVEDATA";
   if (!Component(title))
@@ -1043,6 +1069,16 @@ i32 Search(const Pending& pending, std::vector<u8>& reply) {
       return result;
     if (const auto result = StorageInfo(path, entry.blocks, entry.free_blocks))
       return result;
+    // A save written before quotas were recorded would report the 60000-block
+    // default, and Minecraft refuses to open any world once those add up.
+    // Report what it uses until its first mount records a size.
+    std::error_code quota_error;
+    if (ps5 && !std::filesystem::exists((path + "/.sce_quota.bin").c_str(),
+                                        quota_error)) {
+      const u64 used = entry.blocks - entry.free_blocks;
+      entry.blocks = std::max<u64>(used, 96);
+      entry.free_blocks = entry.blocks - used;
+    }
     entries.push_back(std::move(entry));
   }
   if (error)
@@ -1284,10 +1320,17 @@ i32 RestoreNotification(ClientState& state, const Pending& pending) {
 
 struct SaveData : Service {
   const char* Name() const override { return "SceSaveData"; }
-  // PS4 clients connect with their 4-byte SDK version, PS5 native ones with a
-  // 44-byte block.
-  i32 Connect(const void* data, u64 size) override {
-    return data && (size == 4 || size == 44) ? 0 : kParameter;
+  // PS4 clients connect with their 4-byte SDK version and then initialize with
+  // command 56. PS5 native ones connect with a 44-byte block and send no
+  // initialize: the handshake is the whole of sceSaveDataInitialize.
+  i32 Connect(u32 client, const void* data, u64 size) override {
+    if (!data || (size != 4 && size != 44))
+      return kParameter;
+    if (size == 44) {
+      std::lock_guard lock(g_mutex);
+      g_clients.try_emplace(client).first->second.ps5 = true;
+    }
+    return 0;
   }
   void DestroyClient(u32 client) override {
     std::lock_guard lock(g_mutex);
@@ -1494,7 +1537,11 @@ struct SaveData : Service {
         return;
       }
       const u32 command = Read<u32>(it->header.data(), 4);
-      const u64 reply_size = Sizes(command).output;
+      u64 reply_size = Sizes(command).output;
+      // The PS5 library's search reply carries one more u64 after the PS4
+      // layout; it is added to each entry's block count when sorting by size.
+      if (state.ps5 && (command == 6 || command == 118))
+        reply_size += 8;
       if (Read<u64>(size, 0) != reply_size || !inv.CanReply(0, reply_size)) {
         inv.SetResult(kParameter);
         return;
@@ -1563,7 +1610,8 @@ struct SaveData : Service {
           result = Delete(*it);
           break;
         case 6:
-          result = Search(*it, reply);
+        case 118:
+          result = Search(*it, reply, command == 118, state.ps5);
           break;
         case 7:
           result = Icon(state, *it, reply, true);
