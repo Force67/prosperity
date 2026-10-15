@@ -287,6 +287,10 @@ void DestroyRt(RTarget& t) {
   device.Destroy(t.texture);
 }
 
+bool PaddedFit(const RTarget& rt, u32 w, u32 h) {
+  return rt.w == w && (rt.h == h || (w >= 256 && rt.h > h && rt.h - h < 64));
+}
+
 RTarget* ActivateRtVariant(RTarget& live,
                            u64 base,
                            u32 w,
@@ -417,7 +421,7 @@ RTarget* GetRT(u64 base, u32 w, u32 h, rhi::Format fmt, u32 depth) {
   auto it = g_rts.find(base);
   if (it != g_rts.end()) {
     RTarget& live = it->second;
-    if (live.w != w || live.h != h || live.fmt != fmt || live.depth != depth)
+    if (live.fmt != fmt || live.depth != depth || !PaddedFit(live, w, h))
       return ActivateRtVariant(live, base, w, h, fmt, depth);
     return &live;
   }
@@ -689,7 +693,7 @@ bool ActivateSampledRtVariant(u64 base, u32 w, u32 h) {
   if (it == g_rts.end())
     return false;
   RTarget& live = it->second;
-  if (live.w == w && live.h == h && live.ever_rendered)
+  if (PaddedFit(live, w, h) && live.ever_rendered)
     return true;
   auto parked = g_rt_variants.find(base);
   if (parked == g_rt_variants.end())
