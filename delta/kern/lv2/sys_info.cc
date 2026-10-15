@@ -419,13 +419,16 @@ int PS4ABI sys_sysctl(int* name,
     return 0;
   }
 
-  // kern.rng_pseudo (synthetic {0x1337,12}): libSceRandom polls until non-zero;
-  // answering 0 cost 30M name2oid resolutions in 80s and hung Minecraft's
-  // OpenSSL.
+  // kern.rng_pseudo (synthetic {0x1337,12}): sceRandomGetRandomNumber reads up
+  // to 64 bytes here and returns them as its random number. A constant answer
+  // made Minecraft generate the same world id every run, reopening an old world
+  // instead of creating one; all zeros hung its OpenSSL.
   else if (name[0] == 0x1337 && name[1] == 12 && namelen == 2) {
-    if (oldp && oldlenp && *oldlenp >= sizeof(u32)) {
-      *static_cast<u32*>(oldp) = 1;
-      *oldlenp = sizeof(u32);
+    if (oldp && oldlenp && *oldlenp) {
+      const size_t length = base::Min<size_t>(*oldlenp, 64);
+      if (getrandom(oldp, length, 0) != static_cast<ssize_t>(length))
+        return -SysError::eIO;
+      *oldlenp = length;
     }
     return 0;
   }
