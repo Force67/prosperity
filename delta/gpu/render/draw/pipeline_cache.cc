@@ -9,6 +9,7 @@
 
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gpu_perf.h"
+#include "gpu/render/image/bindless.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
 #include "gpu/render/image/guest_format.h"
@@ -244,11 +245,17 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
       base::AnyOf(d.recomp->ps_texs.begin(), d.recomp->ps_texs.end(),
                   [](const gcn::ShaderTex& tex) { return tex.storage; });
   const size_t n_tex = d.recomp->ps_texs.size() + d.recomp->vs_texs.size();
-  rp.multi_tex = n_tex > 1 || has_storage || !d.recomp->vs_texs.empty();
+  rp.bindless = d.recomp->bindless;
+  rp.multi_tex = rp.bindless || n_tex > 1 || has_storage ||
+                 !d.recomp->vs_texs.empty();
 
   rhi::BindGroupLayout* set0 =
       !rp.textured ? g_ring.empty_layout : g_tex.layout;
-  if (rp.multi_tex) {
+  if (rp.bindless) {
+    set0 = bindless::Layout();
+    if (!set0)
+      return nullptr;
+  } else if (rp.multi_tex) {
     rhi::BindGroupLayoutDesc desc;
     const u32 n_bind = static_cast<u32>(base::Min(n_tex, size_t(kMaxTex)));
     for (u32 i = 0; i < n_bind; i++) {

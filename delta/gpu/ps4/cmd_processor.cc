@@ -32,6 +32,9 @@
 #include "gpu/ps4/compute_dispatch.h"
 #include "gpu/ps4/draw_state.h"
 #include "gpu/ps4/gpu_labels.h"
+#include "gpu/render/image/texture_cache.h"
+#include "gpu/render/draw/draw_recomp.h"
+#include "gpu/render/image/bindless.h"
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/liverpool.h"
 #include "gpu/ps4/pm4.h"
@@ -1116,11 +1119,30 @@ struct ScopedWalkTimer {
   }
 };
 
+rhi::TextureView* BindlessTexture(u32 kind,
+                                  const u32* words,
+                                  rhi::TextureState* state) {
+  render::DrawInfo::DrawTex t;
+  FillDrawTex(t, gcn::DecodeTImage(words));
+  t.arrayed = (kind & 1) != 0;
+  return render::BindlessTextureView(t, state);
+}
+
+rhi::Sampler* BindlessSampler(u32 kind, const u32* words) {
+  render::DrawInfo::DrawTex t;
+  std::memcpy(t.sampler, words, sizeof(t.sampler));
+  t.sampler_valid = true;
+  t.depth_compare = (kind & 1) != 0;
+  return render::SamplerForTex(t, rhi::Format::kRGBA8Unorm);
+}
+
 void StartRendererOnce(render::Renderer& renderer) {
   if (g_renderer_started)
     return;
   g_renderer_started = true;
   render::Init(renderer);
+  render::bindless::SetResolvers(&BindlessTexture, &BindlessSampler);
+  gcn::g_bindless = render::bindless::Supported();
   render::RecordComputeInFrame();
   if (LabelsAtGpu())
     render::DeferLabelsToGpu();

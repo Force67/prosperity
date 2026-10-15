@@ -5,6 +5,7 @@
 
 #include "gpu/render/command.h"
 #include "gpu/render/renderer.h"
+#include "gpu/rhi/device.h"
 
 namespace gpu::render {
 
@@ -15,5 +16,8 @@ bool ShaderFilterDrops(u64 ps_addr);
 void ReleaseDrawBufferBindings();
 
 void ReportDeclines();
+
+rhi::TextureView* BindlessTextureView(const DrawInfo::DrawTex& t,
+                                      rhi::TextureState* state);
 
 }  // namespace gpu::render

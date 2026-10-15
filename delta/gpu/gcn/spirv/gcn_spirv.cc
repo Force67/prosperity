@@ -2102,6 +2102,11 @@ bool TranslatePs(const Program& program,
     return false;
   }
   sc.mimg_plan = &mimg_plan;
+  sc.bindless = r.bindless = g_bindless && !mimg_plan.binding_srsrc.empty() &&
+                             r.vs_texs.empty() &&
+                             base::NoneOf(mimg_plan.binding_storage.begin(),
+                                          mimg_plan.binding_storage.end(),
+                                          [](bool storage) { return storage; });
   sc.tex_3d_mask = tex_3d_mask;
   sc.tex_1d_mask = tex_1d_mask;
   sc.tex_uint_mask = tex_uint_mask;
@@ -2119,6 +2124,10 @@ bool TranslatePs(const Program& program,
   const Id user_data = DeclareUserData(t, kPsUserDataOffset);
   if (sc.direct)
     DeclareDirectMemory(t, sc);
+  if (sc.bindless) {
+    BindlessLookup(t, sc, 0);
+    BindlessLookup(t, sc, 1);
+  }
   sc.main_fn = t.m.BeginFunction(t.t_void, t.t_fn);
   SeedUserData(t, user_data);
   sc.ps_in_cntl = ps_in_cntl;

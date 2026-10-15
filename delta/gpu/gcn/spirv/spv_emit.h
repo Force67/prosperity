@@ -43,6 +43,7 @@ class Module {
                u32 sampled,
                spv::ImageFormat fmt);
   Id TypeSampledImage(Id image_type);
+  Id TypeSampler();
 
   Id ConstU32(u32 v);
   Id ConstI32(i32 v);
@@ -168,6 +169,7 @@ class Module {
 
   u32 bound_ = 1;
   u32 version_ = 0x00010600u;
+  Id sampler_type_ = 0;
   base::Vector<Id> globals_;
   Id glsl_ext_ = 0;
 

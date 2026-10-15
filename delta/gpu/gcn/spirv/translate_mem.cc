@@ -508,6 +508,196 @@ bool PlanCbufs(const Program& program,
   return true;
 }
 
+Id BindlessTable(Translator& t, StageContext& sc, u32 which) {
+  Id& var = sc.bindless_tables[which];
+  if (!var) {
+    var = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::StorageBuffer, t.EnsureRawBlockType()),
+        spv::StorageClass::StorageBuffer);
+    t.m.Decorate(var, spv::Decoration::DescriptorSet, {0});
+    t.m.Decorate(var, spv::Decoration::Binding,
+                 {kBindlessTableBinding + which});
+    t.m.Name(var, which ? "bindless_sampler_table" : "bindless_texture_table");
+    if (sc.iface)
+      sc.iface->push_back(var);
+  }
+  return var;
+}
+
+Id BindlessLookup(Translator& t, StageContext& sc, u32 which) {
+  Id& fn = sc.bindless_lookup[which];
+  if (fn)
+    return fn;
+  const u32 words = kBindlessKeyWords[which];
+  const Id table = BindlessTable(t, sc, which);
+  base::Vector<Id> params(words + 1, t.t_u);
+  base::Vector<Id> args;
+  fn = t.m.BeginFunction(t.t_u, t.m.TypeFunction(t.t_u, params), params,
+                         &args);
+  t.m.Name(fn, which ? "bindless_sampler" : "bindless_texture");
+  const Id fptr = t.m.TypePointer(spv::StorageClass::Function, t.t_u);
+  const auto local = [&] {
+    return t.m.Emit(spv::Op::OpVariable, fptr,
+                    {static_cast<u32>(spv::StorageClass::Function)});
+  };
+  const Id probe = local(), seen = local();
+  const Id kind = t.Add(args[0], t.U32(1));
+  Id h = t.Mul(kind, t.U32(0x9E3779B1u));
+  for (u32 i = 0; i < words; i++)
+    h = t.Mul(t.m.Emit(spv::Op::OpBitwiseXor, t.t_u, {h, args[1 + i]}),
+              t.U32(0x01000193u));
+  h = t.m.Emit(spv::Op::OpBitwiseXor, t.t_u, {h, t.Shr(h, t.U32(15))});
+  t.m.Store(probe, t.U32(0));
+  const Id p_u = t.m.TypePointer(spv::StorageClass::StorageBuffer, t.t_u);
+  const auto at = [&](Id word) {
+    return t.m.AccessChain(p_u, table, {t.U32(0), word});
+  };
+  const Id header = t.m.NewBlock(), body = t.m.NewBlock(),
+           cont = t.m.NewBlock(), merge = t.m.NewBlock();
+  t.m.Branch(header);
+  t.m.OpenBlock(header);
+  const Id p = t.m.Load(t.t_u, probe);
+  const Id more = t.Ult(p, t.U32(kBindlessProbes));
+  t.m.LoopMerge(merge, cont);
+  t.m.BranchConditional(more, body, merge);
+  t.m.OpenBlock(body);
+  const Id slot = t.And(t.Add(h, p), t.U32(kBindlessSlots[which] - 1));
+  const Id base = t.Mul(slot, t.U32(kBindlessStride[which]));
+  const Id k0 = t.m.Load(t.t_u, at(base));
+  t.m.Store(seen, k0);
+  const Id claim = t.m.NewBlock(), claimed = t.m.NewBlock(),
+           won = t.m.NewBlock(), check = t.m.NewBlock();
+  const Id empty = t.IsZero(k0);
+  t.m.SelectionMerge(check);
+  t.m.BranchConditional(empty, claim, check);
+  t.m.OpenBlock(claim);
+  const Id device = t.U32(static_cast<u32>(spv::Scope::Device));
+  const Id old = t.m.Emit(
+      spv::Op::OpAtomicCompareExchange, t.t_u,
+      {at(base), device, t.U32(0), t.U32(0),
+       t.m.Emit(spv::Op::OpBitwiseOr, t.t_u, {kind, t.U32(kBindlessPending)}),
+       t.U32(0)});
+  t.m.Store(seen, old);
+  const Id took = t.IsZero(old);
+  t.m.SelectionMerge(claimed);
+  t.m.BranchConditional(took, won, claimed);
+  t.m.OpenBlock(won);
+  for (u32 i = 0; i < words; i++)
+    t.m.Store(at(t.Add(base, t.U32(1 + i))), args[1 + i]);
+  t.m.EmitVoid(spv::Op::OpReturnValue, {t.U32(0)});
+  t.m.OpenBlock(claimed);
+  t.m.Branch(check);
+  t.m.OpenBlock(check);
+  const Id k = t.m.Load(t.t_u, seen);
+  Id match = t.m.Emit(
+      spv::Op::OpIEqual, t.t_bool,
+      {t.And(k, t.U32(~kBindlessPending)), kind});
+  for (u32 i = 0; i < words; i++)
+    match = t.LAnd(match, t.m.Emit(spv::Op::OpIEqual, t.t_bool,
+                                   {t.m.Load(t.t_u,
+                                             at(t.Add(base, t.U32(1 + i)))),
+                                    args[1 + i]}));
+  match = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
+                   {match, t.m.Emit(spv::Op::OpIEqual, t.t_bool,
+                                    {k, t.m.Emit(spv::Op::OpBitwiseOr, t.t_u,
+                                                 {kind, t.U32(kBindlessPending)})})});
+  const Id found = t.m.NewBlock(), next = t.m.NewBlock();
+  t.m.SelectionMerge(next);
+  t.m.BranchConditional(match, found, next);
+  t.m.OpenBlock(found);
+  const Id index = t.m.Load(t.t_u, at(t.Add(base, t.U32(words + 1))));
+  const Id now = t.m.Load(
+      t.t_u, at(t.U32(kBindlessSlots[which] * kBindlessStride[which])));
+  const Id stamp = at(t.Add(base, t.U32(words + 2)));
+  const Id stale = t.m.Emit(spv::Op::OpINotEqual, t.t_bool,
+                            {t.m.Load(t.t_u, stamp), now});
+  const Id touch = t.m.NewBlock(), touched = t.m.NewBlock();
+  t.m.SelectionMerge(touched);
+  t.m.BranchConditional(stale, touch, touched);
+  t.m.OpenBlock(touch);
+  t.m.Store(stamp, now);
+  t.m.Branch(touched);
+  t.m.OpenBlock(touched);
+  t.m.EmitVoid(spv::Op::OpReturnValue,
+               {t.SelectB(t.IsNonZero(t.And(k, t.U32(kBindlessPending))),
+                          t.U32(0), index)});
+  t.m.OpenBlock(next);
+  t.m.Branch(cont);
+  t.m.OpenBlock(cont);
+  t.m.Store(probe, t.Add(p, t.U32(1)));
+  t.m.Branch(header);
+  t.m.OpenBlock(merge);
+  t.m.EmitVoid(spv::Op::OpReturnValue, {t.U32(0)});
+  t.m.EndFunction();
+  return fn;
+}
+
+Id BindlessSampledImage(Translator& t,
+                        StageContext& sc,
+                        u32 type_idx,
+                        u32 srsrc,
+                        u32 ssamp,
+                        bool dref) {
+  const u32 kind = (type_idx & 1u) | ((type_idx & 4u) ? 2u : 0u) |
+                   ((type_idx & 8u) ? 4u : 0u);
+  t.m.Capability(spv::Capability::ShaderNonUniform);
+  t.m.Capability(spv::Capability::SampledImageArrayNonUniformIndexing);
+  t.m.Capability(spv::Capability::RuntimeDescriptorArray);
+  const Id image_ty = t.img_types[type_idx];
+  Id& images = sc.bindless_images[kind];
+  if (!images) {
+    images = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::UniformConstant,
+                        t.m.TypeRuntimeArray(image_ty)),
+        spv::StorageClass::UniformConstant);
+    t.m.Decorate(images, spv::Decoration::DescriptorSet, {0});
+    t.m.Decorate(images, spv::Decoration::Binding, {kind});
+    t.m.Name(images, "bindless_images" + base::ToString(kind));
+  }
+  if (!sc.bindless_samplers) {
+    sc.bindless_samplers = t.m.Variable(
+        t.m.TypePointer(spv::StorageClass::UniformConstant,
+                        t.m.TypeRuntimeArray(t.m.TypeSampler())),
+        spv::StorageClass::UniformConstant);
+    t.m.Decorate(sc.bindless_samplers, spv::Decoration::DescriptorSet, {0});
+    t.m.Decorate(sc.bindless_samplers, spv::Decoration::Binding,
+                 {kBindlessSamplerBinding});
+    t.m.Name(sc.bindless_samplers, "bindless_samplers");
+  }
+  base::Vector<Id> targs{t.U32(kind)};
+  for (u32 i = 0; i < kBindlessKeyWords[0]; i++)
+    targs.push_back(t.Sg(srsrc + i));
+  base::Vector<Id> sargs{t.U32(dref ? 1u : 0u)};
+  for (u32 i = 0; i < kBindlessKeyWords[1]; i++)
+    sargs.push_back(t.Sg(ssamp + i));
+  const Id tfn = BindlessLookup(t, sc, 0), sfn = BindlessLookup(t, sc, 1);
+  base::Vector<Id> tcall{tfn};
+  tcall.insert(tcall.end(), targs.begin(), targs.end());
+  base::Vector<Id> scall{sfn};
+  scall.insert(scall.end(), sargs.begin(), sargs.end());
+  const Id ti = t.m.Emit(spv::Op::OpFunctionCall, t.t_u, tcall);
+  const Id si = t.m.Emit(spv::Op::OpFunctionCall, t.t_u, scall);
+  t.m.Decorate(ti, spv::Decoration::NonUniform);
+  t.m.Decorate(si, spv::Decoration::NonUniform);
+  const Id image_ptr =
+      t.m.AccessChain(t.m.TypePointer(spv::StorageClass::UniformConstant,
+                                      image_ty),
+                      images, {ti});
+  t.m.Decorate(image_ptr, spv::Decoration::NonUniform);
+  const Id image = t.m.Load(image_ty, image_ptr);
+  t.m.Decorate(image, spv::Decoration::NonUniform);
+  const Id sampler_ptr = t.m.AccessChain(
+      t.m.TypePointer(spv::StorageClass::UniformConstant, t.m.TypeSampler()),
+      sc.bindless_samplers, {si});
+  t.m.Decorate(sampler_ptr, spv::Decoration::NonUniform);
+  const Id sampler = t.m.Load(t.m.TypeSampler(), sampler_ptr);
+  t.m.Decorate(sampler, spv::Decoration::NonUniform);
+  const Id sampled = t.m.Emit(spv::Op::OpSampledImage,
+                              t.sampled_types[type_idx], {image, sampler});
+  t.m.Decorate(sampled, spv::Decoration::NonUniform);
+  return sampled;
+}
+
 bool MimgNamesItsLod(u32 op) {
   if (op == 0x00 || op == 0x01)
     return true;
@@ -610,7 +800,7 @@ void EmitMimg(Translator& t,
     return;
   }
 
-  if (!sc.tex_vars[bind]) {
+  if (!sc.tex_vars[bind] && !(sc.bindless && sc.tex_types[bind])) {
     const bool int_img = !dref && ((sc.tex_uint_mask >> bind) & 1u) != 0;
     const u32 type_idx = (arrayed ? 1u : 0u) | (dref ? 2u : 0u) |
                          (is_3d ? 4u : 0u) | (int_img ? 8u : 0u);
@@ -622,17 +812,24 @@ void EmitMimg(Translator& t,
       t.sampled_ptrs[type_idx] = t.m.TypePointer(
           spv::StorageClass::UniformConstant, t.sampled_types[type_idx]);
     }
-    const Id var = t.m.Variable(t.sampled_ptrs[type_idx],
-                                spv::StorageClass::UniformConstant);
-    t.m.Decorate(var, spv::Decoration::DescriptorSet, {0});
-    t.m.Decorate(var, spv::Decoration::Binding, {bind + sc.tex_binding_base});
-    t.m.Name(var, "tex" + base::ToString(bind + sc.tex_binding_base));
-    sc.tex_vars[bind] = var;
-    sc.tex_types[bind] = type_idx;
+    if (!sc.bindless) {
+      const Id var = t.m.Variable(t.sampled_ptrs[type_idx],
+                                  spv::StorageClass::UniformConstant);
+      t.m.Decorate(var, spv::Decoration::DescriptorSet, {0});
+      t.m.Decorate(var, spv::Decoration::Binding,
+                   {bind + sc.tex_binding_base});
+      t.m.Name(var, "tex" + base::ToString(bind + sc.tex_binding_base));
+      sc.tex_vars[bind] = var;
+    }
+    sc.tex_types[bind] = type_idx | 0x100u;
   }
-  const u32 type_idx = sc.tex_types[bind];
+  const u32 type_idx = sc.tex_types[bind] & 0xFFu;
   const Id img_ty = t.img_types[type_idx];
-  const Id si = t.m.Load(t.sampled_types[type_idx], sc.tex_vars[bind]);
+  const Id si =
+      sc.bindless
+          ? BindlessSampledImage(t, sc, type_idx, ((w1 >> 16) & 0x1F) * 4,
+                                 ((w1 >> 21) & 0x1F) * 4, dref)
+          : t.m.Load(t.sampled_types[type_idx], sc.tex_vars[bind]);
   const bool int_img = (type_idx & 8u) != 0;
   const Id texel_ty = int_img ? t.m.TypeVec(t.t_u, 4) : t.t_v4;
 

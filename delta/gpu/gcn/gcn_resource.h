@@ -134,6 +134,17 @@ extern void (*g_flush_guest_range)(u64 address, u64 bytes);
 extern void (*g_overlay_guest_range)(u64 address, u32 dwords, u32* values);
 
 extern u64 g_direct_table, g_direct_misses;
+extern bool g_bindless;
+
+constexpr u32 kBindlessSlots[2] = {16384, 4096};
+constexpr u32 kBindlessKeyWords[2] = {8, 4};
+constexpr u32 kBindlessStride[2] = {kBindlessKeyWords[0] + 3,
+                                    kBindlessKeyWords[1] + 3};
+constexpr u32 kBindlessPending = 1u << 31;
+constexpr u32 kBindlessProbes = 16;
+constexpr u32 kBindlessKinds = 8;
+constexpr u32 kBindlessSamplerBinding = kBindlessKinds;
+constexpr u32 kBindlessTableBinding = kBindlessKinds + 1;
 
 constexpr u64 kDirectBase = 0;
 constexpr u64 kDirectSize = 0x1000000000000ull;

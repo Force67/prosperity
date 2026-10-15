@@ -164,6 +164,14 @@ Id Module::TypeImage(Id sampled_type,
          static_cast<u32>(fmt)});
   return id;
 }
+Id Module::TypeSampler() {
+  if (!sampler_type_) {
+    sampler_type_ = Alloc();
+    Instr(types_consts_, spv::Op::OpTypeSampler, {sampler_type_});
+  }
+  return sampler_type_;
+}
+
 Id Module::TypeSampledImage(Id image_type) {
   const Id id = Alloc();
   Instr(types_consts_, spv::Op::OpTypeSampledImage, {id, image_type});

@@ -124,6 +124,7 @@ struct Recompiled {
   bool indirect_cbufs = false;
   bool direct = false;
   bool direct_vs = false;
+  bool bindless = false;
   bool direct_reads = false;
   base::Vector<u32> gs_spirv;
   base::Vector<u32> fs_spirv;

@@ -4,6 +4,7 @@
 
 #include "gpu/render/frame.h"
 #include "base/arch.h"
+#include "gpu/render/image/bindless.h"
 #include "gpu/render/memory/buffer_cache.h"
 #include "gpu/write_tracker.h"
 #include "guest/session.h"
@@ -1019,6 +1020,7 @@ void BeginFrame(Renderer& renderer) {
     slot.pass_marks.clear();
   }
   g_frame.recording = true;
+  bindless::FrameBegin(g_frame.list);
 }
 
 void WatchGuestMem() {
@@ -1201,6 +1203,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     ScopeNs submit_timer(&g_ns_submit);
     ScopeNs frame_submit_timer(&g_fr_submit);
     g_frame.list->ProfileEnd();
+    bindless::FrameEnd(g_frame.list, g_frame.slot_idx);
     if (cur.timestamps)
       g_frame.list->WriteTimestamp(cur.timestamps, 1, false);
     CmdEndLabel(g_frame.list);
@@ -1263,6 +1266,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
       }
     }
     phases.Mark(4);
+    bindless::FrameFinished(finish_idx);
     CollectPassTimes(fin);
     for (rhi::CommandList* c : fin.chunks)
       g_free_lists.push_back(c);

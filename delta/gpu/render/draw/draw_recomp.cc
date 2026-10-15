@@ -4,6 +4,7 @@
 
 #include "gpu/render/draw/draw_recomp.h"
 #include "base/arch.h"
+#include "gpu/render/image/bindless.h"
 #include "gpu/render/memory/buffer_cache.h"
 #include "guest/session.h"
 
@@ -467,6 +468,41 @@ bool ShaderFilterDrops(u64 ps_addr) {
     if (v == ps_addr)
       return false;
   return true;
+}
+
+rhi::TextureView* BindlessTextureView(const DrawInfo::DrawTex& t,
+                                      rhi::TextureState* state) {
+  *state = rhi::TextureState::kShaderRead;
+  if (t.null_descriptor)
+    return t.is_3d     ? g_tex.zero_3d_view
+           : t.arrayed ? g_tex.zero_array_view
+                       : g_tex.zero_view;
+  u64 base = t.base;
+  const bool rt_eligible =
+      (!t.arrayed ||
+       (t.layers == 1 && t.base_array == 0 && t.view_layers == 1)) &&
+      !t.is_3d && t.mip_levels == 1 && !GuestFormatBlockCompressed(t.dfmt);
+  if (base && rt_eligible && !g_rts.count(base) && !g_depths.count(base)) {
+    const bool depth_format = t.dfmt == 4 && t.nfmt == 7;
+    u64 resolved = depth_format ? ResolveSampledDepth(base, t.w, t.h) : 0;
+    if (!resolved)
+      resolved = ResolveSampledRT(base, t.w, t.h);
+    if (!resolved && !depth_format)
+      resolved = ResolveSampledDepth(base, t.w, t.h);
+    if (resolved)
+      base = resolved;
+  }
+  if (base && rt_eligible && g_rts.count(base) && g_rts[base].ever_rendered) {
+    rhi::Format format = rhi::Format::kUndefined;
+    return SampledViewAs(g_rts[base], t.swizzle,
+                         GuestTextureFormat(t.dfmt, t.nfmt), &format,
+                         t.arrayed);
+  }
+  if (base && rt_eligible && !t.arrayed && g_depths.count(base)) {
+    *state = rhi::TextureState::kDepthRead;
+    return SampledView(g_depths[base], t.swizzle);
+  }
+  return TexViewFor(t);
 }
 
 bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
@@ -1689,9 +1725,11 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           multi_layouts[i] = rhi::TextureState::kDepthRead;
         }
       }
-      tex_set =
-          GetMultiTexSet(d, rp->tex_set_layout, rp->tex_bindings, multi_views,
-                         multi_layouts, multi_formats, multi_depth);
+      tex_set = rp->bindless ? bindless::Group()
+                             : GetMultiTexSet(d, rp->tex_set_layout,
+                                              rp->tex_bindings, multi_views,
+                                              multi_layouts, multi_formats,
+                                              multi_depth);
       if (!tex_set)
         return Decline(kGuestTex);
     }
@@ -1714,6 +1752,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   if (reads_synced)
     g_region.reads_synced = g_region.open;
   if (rp->multi_tex) {
+    if (!tex_set && rp->bindless)
+      tex_set = bindless::Group();
     if (!tex_set) {
       rhi::Format multi_formats[kMaxTex] = {};
       for (u32 i = 0; i < multi_n; i++) {

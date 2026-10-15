@@ -33,6 +33,7 @@ struct RecompPipe {
   u32 tex_bindings = 0;
   bool textured = false;
   bool multi_tex = false;
+  bool bindless = false;
   u32 cbuf_count = 0;
   u64 cbuf_mask = 0;
   u32 raw_count = 0;

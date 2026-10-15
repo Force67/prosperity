@@ -839,6 +839,11 @@ struct StageContext {
   u32 tex_binding_base = 0;
   static constexpr u32 kMaxPsSamplers = 64;
   Id tex_vars[kMaxPsSamplers] = {};
+  bool bindless = false;
+  Id bindless_images[kBindlessKinds] = {};
+  Id bindless_samplers = 0;
+  Id bindless_tables[2] = {};
+  Id bindless_lookup[2] = {};
   u32 tex_types[kMaxPsSamplers] = {};
   u64 tex_3d_mask = 0;
   u64 tex_1d_mask = 0;
@@ -993,6 +998,7 @@ u32 GraphicsLdsDwords(const Program& program, const u8* reachable);
 base::HashSet<u32> PlanDsOwnLane(const Program& program, const u8* reachable);
 void EnableDsSwizzle(Translator& t, StageContext& sc, base::Vector<Id>& iface);
 bool UsesDsSwizzle(const Program& program, const u8* reachable);
+Id BindlessLookup(Translator& t, StageContext& sc, u32 which);
 void EmitMimg(Translator& t,
               const Inst& inst,
               StageContext& sc,
