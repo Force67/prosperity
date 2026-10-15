@@ -52,7 +52,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
   UploadCsRangeToRt(base, e);
   InvalidateTexRange(base, e.guest_bytes);
   UnindexDirtyRange(base, e.guest_bytes);
-  g_cs_writeback_gen++;
+  g_cs.writeback_gen++;
   CollectGuestWrites();
   CsForgetGuestRange(base, e.guest_bytes);
   e.gpu_dirty = false;
@@ -72,7 +72,7 @@ namespace gpu::render {
 
 bool FlushCsWrites(Renderer& renderer, const char* why) {
   DELTA_ZONE("gpu.cs_flush_all");
-  if (g_cs_failed) {
+  if (g_cs.failed) {
     renderer.state = nullptr;
     return false;
   }
@@ -81,13 +81,13 @@ bool FlushCsWrites(Renderer& renderer, const char* why) {
   const WaitReaderScope reader(why);
   g_cs_stats.wb_why[base::String("all-call/") + why]++;
   for (u64 base : DirtyBases(/*ordered=*/true)) {
-    auto it = g_cs_ranges.find(base);
-    if (it == g_cs_ranges.end() || !it->second.gpu_dirty)
+    auto it = g_cs.ranges.find(base);
+    if (it == g_cs.ranges.end() || !it->second.gpu_dirty)
       continue;
     g_cs_stats.wb_why[base::String("all/") + why]++;
     g_cs_stats.wb_why_bytes += it->second.size;
     if (!CsRangeFlushOne(it->first, it->second)) {
-      if (g_cs_failed) {
+      if (g_cs.failed) {
         renderer.state = nullptr;
         return false;
       }
@@ -103,7 +103,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
   ReportGpuMemory();
   const WaitReaderScope reader("frame-end");
   HarvestGuestTables();
-  if (g_cs_failed) {
+  if (g_cs.failed) {
     renderer.state = nullptr;
     return false;
   }
@@ -117,8 +117,8 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
              (e.rt_seq == e.write_seq || CsRefreshRtInFrame(base, e));
     };
     for (u64 base : DirtyBases(/*ordered=*/true)) {
-      auto it = g_cs_ranges.find(base);
-      if (it == g_cs_ranges.end() || !it->second.gpu_dirty)
+      auto it = g_cs.ranges.find(base);
+      if (it == g_cs.ranges.end() || !it->second.gpu_dirty)
         continue;
       if (stays(it->first, it->second)) {
         g_cs_stats.lazy_kept_n++;
@@ -132,7 +132,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
                                                                   : "/buf")]++;
       g_cs_stats.wb_why_bytes += fe.size;
       if (!CsRangeFlushOne(it->first, it->second)) {
-        if (g_cs_failed) {
+        if (g_cs.failed) {
           renderer.state = nullptr;
           return false;
         }
@@ -142,7 +142,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
   }
   if (kCsAged && g_frame.num % 120 == 0) {
     u32 logged = 0;
-    for (const auto& [base, e] : g_cs_ranges) {
+    for (const auto& [base, e] : g_cs.ranges) {
       if (!e.gpu_dirty || e.dirty_frame >= g_frame.num - 2 || logged++ >= 24)
         continue;
       BASE_LOGI("csaged",
@@ -158,11 +158,11 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
   }
   {
     DELTA_ZONE("gpu.cs_evict");
-    const size_t budget = (g_cs_ranges.size() + 15) / 16;
-    for (size_t n = 0; n < budget && !g_cs_ranges.empty(); n++) {
-      if (g_cs_evict_next == g_cs_ranges.end())
-        g_cs_evict_next = g_cs_ranges.begin();
-      auto it = g_cs_evict_next++;
+    const size_t budget = (g_cs.ranges.size() + 15) / 16;
+    for (size_t n = 0; n < budget && !g_cs.ranges.empty(); n++) {
+      if (g_cs.evict_next == g_cs.ranges.end())
+        g_cs.evict_next = g_cs.ranges.begin();
+      auto it = g_cs.evict_next++;
       CsRange& e = it->second;
       if (e.pending_batch || CsFrameReferenced(e) ||
           e.last_used_frame + 60 >= g_frame.num || (writeback && e.gpu_dirty)) {
@@ -172,7 +172,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
         g_cs_stats.wb_why["idle"]++;
         g_cs_stats.wb_why_bytes += e.size;
         if (!CsRangeFlushOne(it->first, e)) {
-          if (g_cs_failed) {
+          if (g_cs.failed) {
             renderer.state = nullptr;
             return false;
           }
@@ -182,7 +182,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
       EraseCsRange(it);
     }
   }
-  if (g_cs_batch_open && (++g_cs_stats.submit_why[5], !CsBatchSubmit())) {
+  if (g_cs.batch_open && (++g_cs_stats.submit_why[5], !CsBatchSubmit())) {
     renderer.state = nullptr;
     return false;
   }
@@ -191,8 +191,8 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
 }
 
 bool FlushCsWritesAt(Renderer& renderer, u64 base, const char* why) {
-  auto found = g_cs_ranges.find(base);
-  if (found == g_cs_ranges.end() || !found->second.gpu_dirty)
+  auto found = g_cs.ranges.find(base);
+  if (found == g_cs.ranges.end() || !found->second.gpu_dirty)
     return true;
   const CsRange& e = found->second;
   return FlushCsWritesRange(renderer, base,
@@ -200,7 +200,7 @@ bool FlushCsWritesAt(Renderer& renderer, u64 base, const char* why) {
 }
 
 bool SettleGuestWrites(u64 base, u64 bytes, const char* why) {
-  if (g_pending_guest_writes.empty())
+  if (g_cs.pending_guest_writes.empty())
     return true;
   const WaitReaderScope reader(why);
   return WaitPendingGuestWrites(base, bytes);
@@ -260,7 +260,7 @@ bool SpeculateGuestRead(u64 base, u64 bytes) {
 
 void CheckSpeculatedReads() {
   base::EraseIf(g_speculated, [](const SpeculatedRead& r) {
-    if (r.batch > g_cs_batch_done)
+    if (r.batch > g_cs.batch_done)
       return false;
     if (std::memcmp(r.seen, reinterpret_cast<const void*>(r.base), r.bytes)) {
       SpecChanges& c = g_spec_changes[r.base];
@@ -287,7 +287,7 @@ bool FlushCsWritesRange(Renderer& renderer,
                         u64 base,
                         u64 bytes,
                         const char* why) {
-  if (!g_own_unsubmitted.empty() && bytes) {
+  if (!g_cs.own_unsubmitted.empty() && bytes) {
     for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
          block += kMirrorBlock)
       if (InMirror(block) &&
@@ -305,13 +305,13 @@ static bool FlushDirtyRanges(Renderer& renderer,
                              u64 base,
                              u64 bytes,
                              const char* why) {
-  if (g_cs_dirty_pages.empty())
+  if (g_cs.dirty_pages.empty())
     return true;
-  if (g_cs_failed) {
+  if (g_cs.failed) {
     renderer.state = nullptr;
     return false;
   }
-  if (!base || !bytes || g_cs_ranges.empty() ||
+  if (!base || !bytes || g_cs.ranges.empty() ||
       (!CsRangeDirtyOverlapping(base, bytes) &&
        !(kCsFlushTrace && base == (u64)kCsFlushTrace)))
     return true;
@@ -326,14 +326,14 @@ static bool FlushDirtyRanges(Renderer& renderer,
       base::FormatTo(line, "base={:#x} bytes={:#x} dirty={}",
                      (unsigned long)base, (unsigned long)bytes, ranges.size());
       for (u64 r : ranges) {
-        auto f = g_cs_ranges.find(r);
+        auto f = g_cs.ranges.find(r);
         base::FormatTo(
             line, " [{:#x} img={} gpu_dirty={} sz={:#x}]", (unsigned long)r,
-            f != g_cs_ranges.end() ? (int)f->second.image_staging : -1,
-            f != g_cs_ranges.end() ? (int)f->second.gpu_dirty : -1,
-            f != g_cs_ranges.end() ? (unsigned long)f->second.size : 0);
+            f != g_cs.ranges.end() ? (int)f->second.image_staging : -1,
+            f != g_cs.ranges.end() ? (int)f->second.gpu_dirty : -1,
+            f != g_cs.ranges.end() ? (unsigned long)f->second.size : 0);
       }
-      for (auto& kv : g_cs_ranges) {
+      for (auto& kv : g_cs.ranges) {
         const u64 e0 = kv.first, e1 = e0 + kv.second.guest_bytes;
         if (e0 < base + bytes && base < e1)
           base::FormatTo(
@@ -349,8 +349,8 @@ static bool FlushDirtyRanges(Renderer& renderer,
   if (CsSyncReporting()) {
     static int shown = 0;
     for (u64 d : overlapping) {
-      auto f = g_cs_ranges.find(d);
-      if (f == g_cs_ranges.end() || !f->second.gpu_dirty || shown >= 24)
+      auto f = g_cs.ranges.find(d);
+      if (f == g_cs.ranges.end() || !f->second.gpu_dirty || shown >= 24)
         continue;
       shown++;
       const CsRange& o = f->second;
@@ -376,8 +376,8 @@ static bool FlushDirtyRanges(Renderer& renderer,
       shown++;
       base::String line;
       for (u64 r : ranges) {
-        auto f = g_cs_ranges.find(r);
-        if (f != g_cs_ranges.end())
+        auto f = g_cs.ranges.find(r);
+        if (f != g_cs.ranges.end())
           base::FormatTo(line, " {:#x}+{:#x}{}", r, f->second.guest_bytes,
                          f->second.truth           ? "/img"
                          : f->second.image_staging ? "/lin"
@@ -388,21 +388,21 @@ static bool FlushDirtyRanges(Renderer& renderer,
     }
   } flush_log{base, bytes, NowNs(), why, overlapping};
   for (u64 dirty : overlapping) {
-    auto found = g_cs_ranges.find(dirty);
-    if (found != g_cs_ranges.end() && found->second.truth &&
+    auto found = g_cs.ranges.find(dirty);
+    if (found != g_cs.ranges.end() && found->second.truth &&
         !std::strcmp(why, "srt"))
       continue;
-    if (found != g_cs_ranges.end() && found->second.gpu_dirty) {
+    if (found != g_cs.ranges.end() && found->second.gpu_dirty) {
       const CsRange& e = found->second;
       g_cs_stats.wb_why[base::String(why) + (e.truth           ? "/img"
                                              : e.image_staging ? "/lin"
                                                                : "/buf")]++;
       g_cs_stats.wb_why_bytes += e.size;
     }
-    if (found != g_cs_ranges.end())
+    if (found != g_cs.ranges.end())
       found->second.cpu_reader = true;
-    if (found != g_cs_ranges.end() && !CsRangeFlushOne(dirty, found->second)) {
-      if (g_cs_failed) {
+    if (found != g_cs.ranges.end() && !CsRangeFlushOne(dirty, found->second)) {
+      if (g_cs.failed) {
         renderer.state = nullptr;
         return false;
       }
@@ -419,11 +419,11 @@ namespace gpu::render::cs {
 
 void FillOverDirtyRanges(u64 base, u64 bytes) {
   const u64 end = base + bytes;
-  if (g_cs_dirty_pages.empty())
+  if (g_cs.dirty_pages.empty())
     return;
   for (u64 d : DirtyRangesOverlapping(base, bytes)) {
-    auto found = g_cs_ranges.find(d);
-    if (found == g_cs_ranges.end() || !found->second.gpu_dirty)
+    auto found = g_cs.ranges.find(d);
+    if (found == g_cs.ranges.end() || !found->second.gpu_dirty)
       continue;
     CsRange& e = found->second;
     if (e.imported)
@@ -468,7 +468,7 @@ static bool ApplyGpuFill(u64 base, u64 bytes, u32 lo, u32 hi) {
   }
   CsForgetGuestRange(base, bytes);
   InvalidateTexRange(base, bytes);
-  g_cs_writeback_gen++;
+  g_cs.writeback_gen++;
   return true;
 }
 
@@ -497,7 +497,7 @@ bool ApplyMemoryCopy(Renderer& renderer, u64 dst, u64 src, u64 bytes) {
     return false;
   CsForgetGuestRange(dst, bytes);
   InvalidateTexRange(dst, bytes);
-  g_cs_writeback_gen++;
+  g_cs.writeback_gen++;
   return true;
 }
 

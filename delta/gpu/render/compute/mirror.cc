@@ -23,13 +23,10 @@
 namespace gpu::render {
 
 constexpr u64 kMirrorImport = 2ull << 20;
-rhi::Buffer* g_mirror = nullptr;
-bool g_mirror_tried = false;
-base::HashMap<u64, rhi::Buffer*> g_mirror_imports;
 
 rhi::Buffer* Mirror() {
-  if (!g_mirror_tried) {
-    g_mirror_tried = true;
+  if (!g_cs.mirror_tried) {
+    g_cs.mirror_tried = true;
     rhi::BufferDesc desc;
     desc.size = kMirrorSize;
     desc.sparse = true;
@@ -39,12 +36,12 @@ rhi::Buffer* Mirror() {
                  rhi::kBufferVertex | rhi::kBufferIndex;
     desc.name = "guest mirror";
     if (Device().caps().sparse_buffer)
-      g_mirror = Device().CreateBuffer(desc);
+      g_cs.mirror = Device().CreateBuffer(desc);
     BASE_LOGI("mirror", "guest mirror {:#x}+{:#x}, {:#x}+{:#x}: {}",
               kMirrorPs4Base, kMirrorLowWindow, kMirrorPs5Base, kMirrorWindow,
-              g_mirror ? "up" : "unavailable");
+              g_cs.mirror ? "up" : "unavailable");
   }
-  return g_mirror;
+  return g_cs.mirror;
 }
 
 rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
@@ -56,8 +53,8 @@ rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
     return direct;
   }
   const u64 chunk = address & ~(kMirrorImport - 1);
-  auto found = g_mirror_imports.find(chunk);
-  if (found == g_mirror_imports.end()) {
+  auto found = g_cs.mirror_imports.find(chunk);
+  if (found == g_cs.mirror_imports.end()) {
     rhi::Buffer* buf = nullptr;
     const rhi::Caps& caps = Device().caps();
     if (caps.host_import && gpu::IsWritableRange(chunk, kMirrorImport)) {
@@ -69,7 +66,7 @@ rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
       desc.host_pointer = reinterpret_cast<void*>(chunk);
       buf = Device().CreateBuffer(desc);
     }
-    found = g_mirror_imports.insert_or_assign(chunk, buf).first;
+    found = g_cs.mirror_imports.insert_or_assign(chunk, buf).first;
   }
   if (found->second) {
     *import_base = chunk;
@@ -99,7 +96,7 @@ bool MirrorCopy(u64 base,
     at = end;
   }
   if (!list)
-    list = g_cs_list;
+    list = g_cs.list;
   list->ProfileBegin(3);
   list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
   for (const auto& [import, span] : pieces) {
@@ -107,10 +104,10 @@ bool MirrorCopy(u64 base,
     MirrorImport(span.first, &import_base);
     const u64 n = span.second - span.first;
     if (to_guest)
-      list->CopyBuffer(import, span.first - import_base, g_mirror,
+      list->CopyBuffer(import, span.first - import_base, g_cs.mirror,
                        MirrorOffset(span.first), n);
     else
-      list->CopyBuffer(g_mirror, MirrorOffset(span.first), import,
+      list->CopyBuffer(g_cs.mirror, MirrorOffset(span.first), import,
                        span.first - import_base, n);
   }
   list->Barrier(rhi::kAccessCopyWrite, kAccessAll | rhi::kAccessHostRead);
@@ -162,7 +159,8 @@ bool RecordGuestRead(rhi::CommandList* list,
       end = block_end(end);
     const u64 n = end - at;
     if (from == kMirrorSource) {
-      list->CopyBuffer(dst, dst_off + at - base, g_mirror, MirrorOffset(at), n);
+      list->CopyBuffer(dst, dst_off + at - base, g_cs.mirror, MirrorOffset(at),
+                       n);
     } else if (from == kImport) {
       for (u64 piece = at; piece < end;) {
         u64 import_base = 0;
@@ -190,7 +188,7 @@ bool RecordGuestRead(rhi::CommandList* list,
         rhi::Buffer* own = Device().CreateBuffer(desc);
         if (!own || !own->mapped())
           return false;
-        g_cs_frame_retired.push_back(own);
+        g_cs.frame_retired.push_back(own);
         upload = {own, 0, static_cast<u8*>(own->mapped())};
       }
       std::memcpy(upload.map, reinterpret_cast<const void*>(at), n);
@@ -199,31 +197,27 @@ bool RecordGuestRead(rhi::CommandList* list,
     }
     at = end;
   }
-  if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
-    g_cs_chunk_needs_batch = true;
+  if (g_cs.batch_open && !g_cs.batches[g_cs.batch_cur].in_frame)
+    g_cs.chunk_needs_batch = true;
   return true;
 }
 
-base::HashSet<u64> g_mirror_clean;
-base::Vector<base::Pair<u64, u64>> g_mirror_self;
 
 DELTA_OPTION(bool, kMirrorOwn, "DELTA_GPU_MIRROR_OWN", true);
 constexpr u32 kOwnMaxFaults = 4;
-OwnBlock* g_own = nullptr;
-base::Vector<u64> g_own_unsubmitted;
 
 OwnBlock& OwnAt(u64 block) {
-  if (!g_own) {
+  if (!g_cs.own) {
     void* p =
         mmap(nullptr, kOwnBlocks * sizeof(OwnBlock), PROT_READ | PROT_WRITE,
              MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    g_own = static_cast<OwnBlock*>(p);
+    g_cs.own = static_cast<OwnBlock*>(p);
   }
-  return g_own[MirrorOffset(block) / kMirrorBlock];
+  return g_cs.own[MirrorOffset(block) / kMirrorBlock];
 }
 
 bool MirrorOwned(u64 block) {
-  return g_own && InMirror(block) &&
+  return g_cs.own && InMirror(block) &&
          OwnAt(block).state.load(base::memory_order_acquire) != 0;
 }
 
@@ -232,7 +226,7 @@ bool InMirror(u64 address) {
 }
 
 bool MirrorResolve(u64 first, u64 end) {
-  if (!g_own)
+  if (!g_cs.own)
     return false;
   bool resolved = false;
   for (u64 block = first & ~(kMirrorBlock - 1); block < end;
@@ -248,7 +242,7 @@ bool MirrorResolve(u64 first, u64 end) {
                                 s, s | kOwnBusy, base::memory_order_acq_rel))
         continue;
       for (u32 i = 0; i < o.spans; i++)
-        Device().CopyAfter(g_mirror, MirrorOffset(block) + o.lo[i], o.import,
+        Device().CopyAfter(g_cs.mirror, MirrorOffset(block) + o.lo[i], o.import,
                            o.import_offset + o.lo[i], o.hi[i] - o.lo[i],
                            s & kOwnSubmission);
       ::mprotect(reinterpret_cast<void*>(block), kMirrorBlock,
@@ -270,7 +264,7 @@ bool MirrorResolve(u64 first, u64 end) {
 }
 
 bool MirrorOwnsAny(u64 first, u64 end) {
-  if (!g_own || first >= end ||
+  if (!g_cs.own || first >= end ||
       (first >= kMirrorLowWindow &&
        (end <= kMirrorPs5Base || first >= kMirrorPs5Base + kMirrorWindow)))
     return false;
@@ -327,7 +321,7 @@ void AddSpan(OwnBlock& o, u32 lo, u32 hi) {
 
 bool MirrorOwnable(u64 base, u64 bytes) {
   if (!kMirrorOwn || !gcn::g_direct_table || !Device().caps().copy_after ||
-      !g_mirror->address())
+      !g_cs.mirror->address())
     return false;
   for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
        block += kMirrorBlock) {
@@ -359,21 +353,21 @@ void MirrorOwn(u64 base, u64 bytes) {
       o.import = MirrorImport(block, &import_base);
       o.import_offset = block - import_base;
       o.spans = 0;
-      DirectRedirect(block, g_mirror->address() + MirrorOffset(block));
-      g_mirror_was_owned.insert(block);
+      DirectRedirect(block, g_cs.mirror->address() + MirrorOffset(block));
+      g_cs.mirror_was_owned.insert(block);
     }
     AddSpan(o, lo, hi);
     if (!(o.state.fetch_or(kOwnPending, base::memory_order_acq_rel) &
           kOwnPending))
-      g_own_unsubmitted.push_back(block);
+      g_cs.own_unsubmitted.push_back(block);
   }
 }
 
 void MirrorProtectSubmitted(u64 submission) {
-  if (g_own_unsubmitted.empty())
+  if (g_cs.own_unsubmitted.empty())
     return;
   DELTA_ZONE("mirror.protect");
-  for (u64 block : g_own_unsubmitted) {
+  for (u64 block : g_cs.own_unsubmitted) {
     OwnBlock& o = OwnAt(block);
     u64 s = o.state.load(base::memory_order_acquire);
     while ((s & kOwnBusy) || !o.state.compare_exchange_weak(
@@ -382,7 +376,7 @@ void MirrorProtectSubmitted(u64 submission) {
     ::mprotect(reinterpret_cast<void*>(block), kMirrorBlock, PROT_NONE);
     o.state.store(submission | kOwnProtected, base::memory_order_release);
   }
-  g_own_unsubmitted.clear();
+  g_cs.own_unsubmitted.clear();
 }
 
 namespace {
@@ -401,9 +395,9 @@ bool OrderMirrorAfterFrameRead() {
   if (!CsSplitFrameChunk())
     return false;
   CsBatchBeginImpl();
-  if (!g_cs_batch_open)
+  if (!g_cs.batch_open)
     return false;
-  g_cs_list->Barrier(rhi::kAccessVertexRead | rhi::kAccessIndexRead |
+  g_cs.list->Barrier(rhi::kAccessVertexRead | rhi::kAccessIndexRead |
                          rhi::kAccessShaderRead | rhi::kAccessUniformRead |
                          rhi::kAccessCopyRead | rhi::kAccessComputeRead |
                          rhi::kAccessIndirectRead,
@@ -428,7 +422,7 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
   if (!OrderMirrorAfterFrameRead())
     return false;
   CsBatchBeginImpl();
-  if (!g_cs_batch_open)
+  if (!g_cs.batch_open)
     return false;
   const u64 page = base::Max(Device().caps().sparse_page, kMirrorBlock);
   const u64 end = base + bytes;
@@ -438,7 +432,7 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
     in_run = false;
     const u64 lo = MirrorOffset(run) & ~(page - 1);
     const u64 hi = (MirrorOffset(run_end - 1) + page) & ~(page - 1);
-    return Device().CommitSparse(g_mirror, lo, hi - lo) &&
+    return Device().CommitSparse(g_cs.mirror, lo, hi - lo) &&
            MirrorCopy(run, run_end - run, false);
   };
   for (u64 block = base & ~(kMirrorBlock - 1); block < end;
@@ -446,7 +440,7 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
     bool fresh = MirrorOwned(block);
     if (!fresh) {
       const bool cpu_dirty = OwnAt(block).cpu_dirty.exchange(0);
-      fresh = g_mirror_clean.count(block) && !cpu_dirty;
+      fresh = g_cs.mirror_clean.count(block) && !cpu_dirty;
     }
     if (fresh) {
       if (in_run && !copy_run())
@@ -464,7 +458,7 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
     in_run = true;
     run_end = to;
     if (whole && GuestWriteTracker().Arm(block, kMirrorBlock))
-      g_mirror_clean.insert(block);
+      g_cs.mirror_clean.insert(block);
   }
   return !in_run || copy_run();
 }
@@ -489,7 +483,7 @@ static void RecordGuestWrite(rhi::CommandList* c,
   c->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
   const auto copy = [&](u64 lo, u64 hi) {
     if (mirrored) {
-      c->CopyBuffer(g_mirror, MirrorOffset(lo), src, src_off + lo - base,
+      c->CopyBuffer(g_cs.mirror, MirrorOffset(lo), src, src_off + lo - base,
                     hi - lo);
       return;
     }
@@ -544,9 +538,9 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
   if (!PrepareGuestWrite(base, n, &mirrored))
     return false;
   CsBatchBeginImpl();
-  if (!g_cs_batch_open)
+  if (!g_cs.batch_open)
     return false;
-  rhi::CommandList* const c = g_cs_list;
+  rhi::CommandList* const c = g_cs.list;
   rhi::Buffer* src = e.buf;
   if (retile) {
     const u64 padded = (n + 3) & ~u64(3);
@@ -578,14 +572,14 @@ bool WriteTextureToGuest(rhi::Texture* texture,
   if (!table || !g_frame.recording)
     return false;
   CsBatchBeginImpl();
-  if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame) {
+  if (g_cs.batch_open && !g_cs.batches[g_cs.batch_cur].in_frame) {
     if (!CsBatchSubmit())
       return false;
     CsBatchBeginImpl();
   }
-  if (!g_cs_batch_open || !g_cs_batches[g_cs_batch_cur].in_frame)
+  if (!g_cs.batch_open || !g_cs.batches[g_cs.batch_cur].in_frame)
     return false;
-  g_cs_scratch_owner++;
+  g_cs.scratch_owner++;
   const u64 tiled_bytes = (tiled.size + 3) & ~u64(3);
   const u64 linear_bytes = (linear.size + 3) & ~u64(3);
   rhi::Buffer* raw = AcquireScratch(tiled_bytes);
@@ -593,7 +587,7 @@ bool WriteTextureToGuest(rhi::Texture* texture,
   bool mirrored = false;
   if (!pixels || !PrepareGuestWrite(base, tiled.size, &mirrored))
     return false;
-  rhi::CommandList* const c = g_cs_list;
+  rhi::CommandList* const c = g_cs.list;
   if (!RecordGuestRead(c, base, tiled.size, raw))
     return false;
   const auto& level = linear.mips[0];
@@ -612,12 +606,10 @@ bool WriteTextureToGuest(rhi::Texture* texture,
   return true;
 }
 
-base::Map<u64, MirrorWrite> g_mirror_writes;
-u64 g_mirror_seq = 0;
 
 const MirrorWrite* MirrorWritten(u64 base, u64 bytes) {
-  auto it = g_mirror_writes.upper_bound(base);
-  if (it == g_mirror_writes.begin())
+  auto it = g_cs.mirror_writes.upper_bound(base);
+  if (it == g_cs.mirror_writes.begin())
     return nullptr;
   --it;
   return base + bytes <= it->second.end ? &it->second : nullptr;
@@ -626,22 +618,22 @@ const MirrorWrite* MirrorWritten(u64 base, u64 bytes) {
 namespace {
 void RecordMirrorWrite(u64 first, u64 bytes) {
   u64 end = first + bytes;
-  auto it = g_mirror_writes.upper_bound(first);
-  if (it != g_mirror_writes.begin()) {
+  auto it = g_cs.mirror_writes.upper_bound(first);
+  if (it != g_cs.mirror_writes.begin()) {
     --it;
     if (end <= it->second.end) {
-      it->second.seq = ++g_mirror_seq;
+      it->second.seq = ++g_cs.mirror_seq;
       return;
     }
     if (it->second.end < first)
       ++it;
   }
-  while (it != g_mirror_writes.end() && it->first <= end) {
+  while (it != g_cs.mirror_writes.end() && it->first <= end) {
     first = base::Min(first, it->first);
     end = base::Max(end, it->second.end);
-    it = g_mirror_writes.erase(it);
+    it = g_cs.mirror_writes.erase(it);
   }
-  g_mirror_writes[first] = {end, ++g_mirror_seq};
+  g_cs.mirror_writes[first] = {end, ++g_cs.mirror_seq};
 }
 }  // namespace
 
@@ -650,7 +642,7 @@ void MirrorWriteBack(u64 base, u64 bytes) {
     RecordMirrorWrite(base, bytes);
     MirrorOwn(base, bytes);
     g_cs_stats.mirror_own_bytes += bytes;
-    g_mirror_self.push_back({base, base + bytes});
+    g_cs.mirror_self.push_back({base, base + bytes});
     NoteGuestWrite(base, bytes);
     InvalidateTexRange(base, bytes);
     return;
@@ -665,7 +657,7 @@ void MirrorWriteBack(u64 base, u64 bytes) {
   if (!MirrorCopy(base, bytes, true))
     return;
   NotePendingGuestWrite(base, base + bytes);
-  g_mirror_self.push_back({base, base + bytes});
+  g_cs.mirror_self.push_back({base, base + bytes});
   NoteGuestWrite(base, bytes);
   InvalidateTexRange(base, bytes);
 }
@@ -686,15 +678,15 @@ bool MirrorFill(u64 base, u64 bytes, u32 value) {
     const u64 page = base::Max(Device().caps().sparse_page, kMirrorBlock);
     const u64 lo = MirrorOffset(base) & ~(page - 1);
     const u64 hi = (MirrorOffset(base) + bytes + page - 1) & ~(page - 1);
-    if (!Device().CommitSparse(g_mirror, lo, hi - lo))
+    if (!Device().CommitSparse(g_cs.mirror, lo, hi - lo))
       return false;
   }
   CsBatchBeginImpl();
-  if (!g_cs_batch_open)
+  if (!g_cs.batch_open)
     return false;
-  g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
-  g_cs_list->FillBuffer(g_mirror, MirrorOffset(base), bytes, value);
-  g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
+  g_cs.list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
+  g_cs.list->FillBuffer(g_cs.mirror, MirrorOffset(base), bytes, value);
+  g_cs.list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
   MirrorWriteBack(base, bytes);
   return true;
 }
@@ -705,13 +697,13 @@ bool GpuFill(u64 base, u64 bytes, u32 lo, u32 hi) {
   if (lo == hi && MirrorFill(base, bytes, lo))
     return true;
   CsBatchBeginImpl();
-  if (!g_cs_batch_open)
+  if (!g_cs.batch_open)
     return false;
-  g_cs_scratch_owner++;
+  g_cs.scratch_owner++;
   rhi::Buffer* src = AcquireScratch(bytes);
   if (!src)
     return false;
-  rhi::CommandList* const c = g_cs_list;
+  rhi::CommandList* const c = g_cs.list;
   c->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
   if (lo == hi) {
     c->FillBuffer(src, 0, bytes, lo);
@@ -728,20 +720,20 @@ bool GpuFill(u64 base, u64 bytes, u32 lo, u32 hi) {
 
 bool GpuCopy(u64 dst, u64 src, u64 bytes) {
   CsBatchBeginImpl();
-  if (!bytes || !g_cs_batch_open)
+  if (!bytes || !g_cs.batch_open)
     return false;
-  g_cs_scratch_owner++;
+  g_cs.scratch_owner++;
   rhi::Buffer* tmp = AcquireScratch(bytes);
-  return tmp && RecordGuestRead(g_cs_list, src, bytes, tmp) &&
+  return tmp && RecordGuestRead(g_cs.list, src, bytes, tmp) &&
          GpuWriteGuest(dst, bytes, tmp, 0);
 }
 
 bool GpuWriteGuest(u64 dst, u64 bytes, rhi::Buffer* src, u64 src_off) {
   CsBatchBeginImpl();
   bool mirrored = false;
-  if (!g_cs_batch_open || !PrepareGuestWrite(dst, bytes, &mirrored))
+  if (!g_cs.batch_open || !PrepareGuestWrite(dst, bytes, &mirrored))
     return false;
-  RecordGuestWrite(g_cs_list, mirrored, dst, bytes, src, {}, src_off);
+  RecordGuestWrite(g_cs.list, mirrored, dst, bytes, src, {}, src_off);
   return true;
 }
 
@@ -750,18 +742,18 @@ static bool MirrorWatch(u64 first, u64 end) {
     return true;
   for (u64 page = first; page < end; page += kMirrorHotPage)
     if (!GuestWriteTracker().Arm(page, kMirrorHotPage, true))
-      g_mirror_hot.insert(page);
+      g_cs.mirror_hot.insert(page);
   return false;
 }
 
 u64 MirrorCacheBlock(u64 block) {
-  if (!kMirror || !Mirror() || !g_mirror->address() || !InMirror(block) ||
+  if (!kMirror || !Mirror() || !g_cs.mirror->address() || !InMirror(block) ||
       MirrorOwned(block) || !gpu::IsReadableRangeCached(block, kMirrorBlock))
     return 0;
-  const u64 address = g_mirror->address() + MirrorOffset(block);
-  if (g_mirror_cached.count(block))
+  const u64 address = g_cs.mirror->address() + MirrorOffset(block);
+  if (g_cs.mirror_cached.count(block))
     return address;
-  if (!Device().CommitSparse(g_mirror, MirrorOffset(block), kMirrorBlock))
+  if (!Device().CommitSparse(g_cs.mirror, MirrorOffset(block), kMirrorBlock))
     return 0;
   if (!GuestImportable(block, kMirrorBlock))
     return 0;
@@ -772,20 +764,20 @@ u64 MirrorCacheBlock(u64 block) {
     list = g_frame.list;
   } else {
     CsBatchBeginImpl();
-    if (!g_cs_batch_open)
+    if (!g_cs.batch_open)
       return 0;
   }
   if (!MirrorCopy(block, kMirrorBlock, false, list))
     return 0;
   if (watched)
-    g_mirror_clean.insert(block);
-  g_mirror_cached.insert(block);
+    g_cs.mirror_clean.insert(block);
+  g_cs.mirror_cached.insert(block);
   return address;
 }
 
 bool GpuIndirectArgs(u64 args, u64 bytes) {
-  if (!kMirror || !gcn::g_direct_table || !Mirror() || !g_mirror->address() ||
-      (args & 3) || !InMirror(args) ||
+  if (!kMirror || !gcn::g_direct_table || !Mirror() ||
+      !g_cs.mirror->address() || (args & 3) || !InMirror(args) ||
       (args & ~(kMirrorBlock - 1)) !=
           ((args + bytes - 1) & ~(kMirrorBlock - 1)))
     return false;
@@ -810,7 +802,7 @@ bool CanDrawMeshIndirect() {
 rhi::Buffer* IndirectArgsBuffer(u64 args, u64* offset) {
   MirrorFrameRead();
   *offset = MirrorOffset(args);
-  return g_mirror;
+  return g_cs.mirror;
 }
 
 constexpr u64 kIndirectRing = 4ull << 20;
@@ -823,7 +815,7 @@ static rhi::Buffer* StageArgs(rhi::CommandList* list,
                               u32 dst_access) {
   if (bytes > kIndirectEntry || !gpu::IsReadableRangeCached(args, bytes))
     return nullptr;
-  if (!g_indirect_ring) {
+  if (!g_cs.indirect_ring) {
     rhi::BufferDesc desc;
     desc.size = kIndirectRing;
     desc.usage = rhi::kBufferIndirect | rhi::kBufferCopySrc |
@@ -831,23 +823,23 @@ static rhi::Buffer* StageArgs(rhi::CommandList* list,
     if (Device().caps().conditional)
       desc.usage |= rhi::kBufferPredicate;
     desc.name = "indirect args";
-    g_indirect_ring = Device().CreateBuffer(desc);
-    if (!g_indirect_ring)
+    g_cs.indirect_ring = Device().CreateBuffer(desc);
+    if (!g_cs.indirect_ring)
       return nullptr;
   }
-  if (g_indirect_frame != g_frame.num) {
-    g_indirect_frame = g_frame.num;
-    g_indirect_frame_n = 0;
+  if (g_cs.indirect_frame != g_frame.num) {
+    g_cs.indirect_frame = g_frame.num;
+    g_cs.indirect_frame_n = 0;
   }
-  if (++g_indirect_frame_n > kIndirectRing / kIndirectEntry / 4)
+  if (++g_cs.indirect_frame_n > kIndirectRing / kIndirectEntry / 4)
     return nullptr;
-  *offset = g_indirect_head;
-  g_indirect_head = (g_indirect_head + kIndirectEntry) % kIndirectRing;
-  if (!RecordGuestRead(list, args, bytes, g_indirect_ring, *offset))
+  *offset = g_cs.indirect_head;
+  g_cs.indirect_head = (g_cs.indirect_head + kIndirectEntry) % kIndirectRing;
+  if (!RecordGuestRead(list, args, bytes, g_cs.indirect_ring, *offset))
     return nullptr;
   list->Barrier(rhi::kAccessCopyWrite, dst_access);
   g_cs_stats.indirect_staged_n++;
-  return g_indirect_ring;
+  return g_cs.indirect_ring;
 }
 
 rhi::Buffer* StageIndirectArgs(rhi::CommandList* list,
@@ -858,28 +850,28 @@ rhi::Buffer* StageIndirectArgs(rhi::CommandList* list,
 }
 
 bool BeginGuestPredicate(u64 flag) {
-  if (!Device().caps().conditional || !g_frame.recording || g_predicate ||
+  if (!Device().caps().conditional || !g_frame.recording || g_cs.predicate ||
       !FlushCsWritesForGpu(DefaultRenderer(), flag, 4, "cond"))
     return false;
   EndRegion();
-  g_predicate = StageArgs(g_frame.list, flag, 4, &g_predicate_offset,
-                          rhi::kAccessPredicateRead);
-  return g_predicate != nullptr;
+  g_cs.predicate = StageArgs(g_frame.list, flag, 4, &g_predicate_offset,
+                             rhi::kAccessPredicateRead);
+  return g_cs.predicate != nullptr;
 }
 
 void EndGuestPredicate() {
-  g_predicate = nullptr;
+  g_cs.predicate = nullptr;
 }
 
 rhi::Buffer* GuestPredicate(u64* offset) {
   *offset = g_predicate_offset;
-  return g_predicate;
+  return g_cs.predicate;
 }
 
 namespace {
 bool MirrorLive(u64 at) {
   const u64 block = at & ~(kMirrorBlock - 1);
-  return g_mirror_cached.count(block) && !MirrorOwned(block);
+  return g_cs.mirror_cached.count(block) && !MirrorOwned(block);
 }
 
 rhi::CommandList* MirrorRefreshList() {
@@ -888,25 +880,25 @@ rhi::CommandList* MirrorRefreshList() {
     return g_frame.list;
   }
   CsBatchBeginImpl();
-  return g_cs_batch_open ? g_cs_list : nullptr;
+  return g_cs.batch_open ? g_cs.list : nullptr;
 }
 }  // namespace
 
 void MirrorRefreshWritten() {
-  if (g_mirror_stale.empty())
+  if (g_cs.mirror_stale.empty())
     return;
   rhi::CommandList* list = MirrorRefreshList();
   if (!list)
     return;
   list->Barrier(kAccessAll, rhi::kAccessCopyWrite);
-  for (const auto& [first, end] : g_mirror_stale) {
+  for (const auto& [first, end] : g_cs.mirror_stale) {
     if (!MirrorLive(first))
       continue;
     if (MirrorWatch(first, end))
-      g_mirror_clean.insert(first & ~(kMirrorBlock - 1));
+      g_cs.mirror_clean.insert(first & ~(kMirrorBlock - 1));
     MirrorCopy(first, end - first, false, list);
   }
-  g_mirror_stale.clear();
+  g_cs.mirror_stale.clear();
 }
 
 void MirrorRefreshCached() {
@@ -915,23 +907,23 @@ void MirrorRefreshCached() {
   base::Vector<u64> released;
   if (scanned_frame != g_frame.num) {
     scanned_frame = g_frame.num;
-    for (u64 block : g_mirror_was_owned)
+    for (u64 block : g_cs.mirror_was_owned)
       if (!MirrorOwned(block))
         released.push_back(block);
   }
   for (u64 block : released) {
-    g_mirror_was_owned.erase(block);
-    g_mirror_cached.erase(block);
+    g_cs.mirror_was_owned.erase(block);
+    g_cs.mirror_cached.erase(block);
     if (const u64 address = MirrorCacheBlock(block))
       DirectRedirect(block, address);
   }
-  if (g_mirror_hot.empty())
+  if (g_cs.mirror_hot.empty())
     return;
   rhi::CommandList* list = MirrorRefreshList();
   if (!list)
     return;
   list->Barrier(kAccessAll, rhi::kAccessCopyWrite);
-  base::Vector<u64> pages(g_mirror_hot.begin(), g_mirror_hot.end());
+  base::Vector<u64> pages(g_cs.mirror_hot.begin(), g_cs.mirror_hot.end());
   base::Sort(pages.begin(), pages.end());
   for (size_t i = 0; i < pages.size();) {
     const u64 first = pages[i];
@@ -941,7 +933,7 @@ void MirrorRefreshCached() {
     const bool copy = MirrorLive(first);
     for (u64 page = first; page < end; page += kMirrorHotPage)
       if (!copy || GuestWriteTracker().Arm(page, kMirrorHotPage, true))
-        g_mirror_hot.erase(page);
+        g_cs.mirror_hot.erase(page);
     if (copy)
       MirrorCopy(first, end - first, false, list);
   }
@@ -949,14 +941,14 @@ void MirrorRefreshCached() {
 
 namespace {
 void AdvanceMirrorWindows(u64 first, u64 end) {
-  auto it = g_mirror_writes.upper_bound(first);
-  if (it != g_mirror_writes.begin())
+  auto it = g_cs.mirror_writes.upper_bound(first);
+  if (it != g_cs.mirror_writes.begin())
     --it;
   u64 revision = 0;
-  for (; it != g_mirror_writes.end() && it->first < end; ++it)
+  for (; it != g_cs.mirror_writes.end() && it->first < end; ++it)
     if (first < it->second.end) {
       if (!revision)
-        revision = ++g_mirror_seq;
+        revision = ++g_cs.mirror_seq;
       it->second.seq = revision;
     }
 }
@@ -991,10 +983,10 @@ bool MirrorSupplyTexture(u64 base,
   if (*seq == written->seq)
     return true;
   const u64 revision = written->seq;
-  g_cs_scratch_owner++;
+  g_cs.scratch_owner++;
   rhi::Buffer* scratch = AcquireScratch(linear.size);
   const bool mirrored = MirrorHoldsNewest(base, tiled.size);
-  rhi::Buffer* source = mirrored ? g_mirror : AcquireScratch(tiled.size);
+  rhi::Buffer* source = mirrored ? g_cs.mirror : AcquireScratch(tiled.size);
   if (!scratch || !source)
     return false;
   rhi::BufferTextureCopy copies[16];
@@ -1032,8 +1024,8 @@ bool MirrorSupplyTexture(u64 base,
   *seq = revision;
   if (!mirrored && !WatchMirrorHostReads(base, tiled.size))
     AdvanceMirrorWindows(base, base + tiled.size);
-  if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
-    g_cs_chunk_needs_batch = true;
+  if (g_cs.batch_open && !g_cs.batches[g_cs.batch_cur].in_frame)
+    g_cs.chunk_needs_batch = true;
   g_cs_stats.tex_bridge_n++;
   g_cs_stats.tex_bridge_bytes += tiled.size;
   return true;
@@ -1051,45 +1043,45 @@ bool MirrorSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
                 rhi::kAccessCopyRead);
   const bool mirrored = MirrorHoldsNewest(base, bytes);
   if (mirrored)
-    list->CopyBuffer(dst, dst_off, g_mirror, MirrorOffset(base), bytes);
+    list->CopyBuffer(dst, dst_off, g_cs.mirror, MirrorOffset(base), bytes);
   else if (!RecordGuestRead(list, base, bytes, dst, dst_off))
     return false;
   MirrorFrameRead();
   list->Barrier(rhi::kAccessCopyWrite, kAccessAll);
   if (!mirrored && !WatchMirrorHostReads(base, bytes))
     AdvanceMirrorWindows(base, base + bytes);
-  if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
-    g_cs_chunk_needs_batch = true;
+  if (g_cs.batch_open && !g_cs.batches[g_cs.batch_cur].in_frame)
+    g_cs.chunk_needs_batch = true;
   g_cs_stats.buf_bridge_n++;
   g_cs_stats.buf_bridge_bytes += bytes;
   return true;
 }
 
 void MirrorNoteGuestWrites(u64 first, u64 end, bool announced) {
-  if (g_mirror_clean.empty() && g_mirror_writes.empty())
+  if (g_cs.mirror_clean.empty() && g_cs.mirror_writes.empty())
     return;
   if (first >= end ||
       (first >= kMirrorLowWindow &&
        (end <= kMirrorPs5Base || first >= kMirrorPs5Base + kMirrorWindow)))
     return;
   if (announced)
-    for (const auto& [lo, hi] : g_mirror_self)
+    for (const auto& [lo, hi] : g_cs.mirror_self)
       if ((lo & ~u64(0xFFF)) <= first && end <= ((hi + 0xFFF) & ~u64(0xFFF)))
         return;
   AdvanceMirrorWindows(first, end);
   for (u64 block = first & ~(kMirrorBlock - 1); block < end;
        block += kMirrorBlock) {
-    if (g_own && InMirror(block) && !MirrorOwned(block))
+    if (g_cs.own && InMirror(block) && !MirrorOwned(block))
       OwnAt(block).cpu_dirty.store(1, base::memory_order_release);
-    g_mirror_clean.erase(block);
-    if (g_mirror_cached.count(block))
-      g_mirror_stale.push_back(
+    g_cs.mirror_clean.erase(block);
+    if (g_cs.mirror_cached.count(block))
+      g_cs.mirror_stale.push_back(
           {base::Max(first, block), base::Min(end, block + kMirrorBlock)});
   }
 }
 
 void MirrorWritesCollected() {
-  g_mirror_self.clear();
+  g_cs.mirror_self.clear();
 }
 
 }  // namespace gpu::render

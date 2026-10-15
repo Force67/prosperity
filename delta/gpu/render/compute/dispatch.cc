@@ -130,9 +130,9 @@ void PrebuildComputePipeline(const base::Vector<u32>& spirv,
   {
     base::LockGuard<base::Mutex> lock(g_prebuilt_mutex);
     const u64 key = PrebuiltKey(spirv, num_res, guest_memory_binding);
-    if (g_prebuilt.count(key))
+    if (g_cs.prebuilt.count(key))
       return;
-    g_prebuilt.emplace(key, slot);
+    g_cs.prebuilt.emplace(key, slot);
   }
   PrebuiltCs built;
   built.set_layout = CsSetLayout(num_res, -1, guest_memory_binding, {});
@@ -157,7 +157,7 @@ u64 GuestMirror(CsRange& e, u64& bytes) {
     return 0;
   if (!e.mirror || e.mirror_cap < tiled.size) {
     if (e.mirror)
-      g_cs_frame_retired.push_back(e.mirror);
+      g_cs.frame_retired.push_back(e.mirror);
     e.mirror_cap = (tiled.size + 0xFFFF) & ~u64(0xFFFF);
     e.mirror = CreateCsBuffer(
         e.mirror_cap, rhi::kBufferStorage | rhi::kBufferAddress,
@@ -172,9 +172,9 @@ u64 GuestMirror(CsRange& e, u64& bytes) {
   }
   if (e.mirror_seq != e.write_seq || e.mirror_table != table) {
     CsBatchBeginImpl();
-    if (!g_cs_batch_open)
+    if (!g_cs.batch_open)
       return 0;
-    RecordImageTiling(g_cs_list, *table, e.mirror, 0, tiled.size, e.buf,
+    RecordImageTiling(g_cs.list, *table, e.mirror, 0, tiled.size, e.buf,
                       e.res.size, false);
     e.mirror_seq = e.write_seq;
     e.mirror_table = table;
@@ -192,12 +192,12 @@ struct GuestWindowOwner {
 bool RefreshGuestWindow(u64 base, CsRange& e, u64 n) {
   e.wt_clean = GuestWriteTracker().Arm(base, n);
   CsBatchBeginImpl();
-  if (!g_cs_batch_open || !RecordGuestRead(g_cs_list, base, n, e.buf))
+  if (!g_cs.batch_open || !RecordGuestRead(g_cs.list, base, n, e.buf))
     return false;
-  g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW);
+  g_cs.list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW);
   MarkPending(e);
   e.last_validated_frame = g_frame.num;
-  e.staged_stamp = ++g_cs_dirty_stamp;
+  e.staged_stamp = ++g_cs.dirty_stamp;
   return true;
 }
 
@@ -206,25 +206,25 @@ void MaterializeGuestRange(u64 address) {
   const u64 base = address & ~(kMissChunk - 1);
   if (!gpu::IsReadableRange(base, kMissChunk))
     return;
-  if (const auto blocks = g_cs_range_blocks.find(base >> kCsRangeBlockShift);
-      blocks != g_cs_range_blocks.end())
+  if (const auto blocks = g_cs.range_blocks.find(base >> kCsRangeBlockShift);
+      blocks != g_cs.range_blocks.end())
     for (u64 other : blocks->second) {
-      const auto found = g_cs_ranges.find(other);
-      if (found != g_cs_ranges.end() && other <= address &&
+      const auto found = g_cs.ranges.find(other);
+      if (found != g_cs.ranges.end() && other <= address &&
           address < other + found->second.guest_bytes)
         return;
     }
-  CsRange& e = g_cs_ranges[base];
+  CsRange& e = g_cs.ranges[base];
   if (e.buf || !CsRangeEnsureBuffer(e, kMissChunk)) {
     if (!e.buf)
-      g_cs_ranges.erase(base);
+      g_cs.ranges.erase(base);
     return;
   }
   e.size = e.guest_bytes = kMissChunk;
   e.last_used_frame = g_frame.num;
   IndexCsRange(base, kMissChunk);
   if (!RefreshGuestWindow(base, e, kMissChunk)) {
-    EraseCsRange(g_cs_ranges.find(base));
+    EraseCsRange(g_cs.ranges.find(base));
     return;
   }
   g_cs_stats.guest_misses_n++;
@@ -237,8 +237,8 @@ void MarkWrittenWindows(u64 cs_addr,
     if (w >= owners.size())
       continue;
     const GuestWindowOwner& owner = owners[w];
-    auto found = g_cs_ranges.find(owner.range);
-    if (found == g_cs_ranges.end())
+    auto found = g_cs.ranges.find(owner.range);
+    if (found == g_cs.ranges.end())
       continue;
     if (owner.mirror) {
       static int shown = 0;
@@ -255,7 +255,7 @@ void MarkWrittenWindows(u64 cs_addr,
     e.gpu_dirty = true;
     e.fill_kept.clear();
     e.write_seq++;
-    e.dirty_stamp = ++g_cs_dirty_stamp;
+    e.dirty_stamp = ++g_cs.dirty_stamp;
     e.dirty_render_serial = g_render_serial;
     BumpTextureEpoch();
   }
@@ -293,7 +293,7 @@ struct TableSetGuard {
 void cs::HarvestGuestTables() {
   CsBatchReap();
   base::EraseIf(g_pending_tables, [](PendingTable& p) {
-    if (p.batch > g_cs_batch_done)
+    if (p.batch > g_cs.batch_done)
       return false;
     for (u64 address : TakeGuestMisses(p.set))
       MaterializeGuestRange(address);
@@ -324,7 +324,7 @@ bool GuestWindows(const ComputeInfo& ci,
     bool writable;
   };
   base::Vector<Candidate> candidates;
-  for (auto& [base, e] : g_cs_ranges) {
+  for (auto& [base, e] : g_cs.ranges) {
     const u64 n = e.guest_bytes ? base::Min(e.size, e.guest_bytes) : e.size;
     if (!n || !e.buf || e.imported)
       continue;
@@ -417,14 +417,14 @@ bool FindIndirectArgs(u64 args, IndirectArgs& out) {
   const bool several = AnyDirtyOverlapping(args, 12, [&](u64 other) {
     if (found)
       return true;
-    found = &g_cs_ranges.find(other)->second;
+    found = &g_cs.ranges.find(other)->second;
     range_base = other;
     return false;
   });
   if (found || (kMirror && MirrorWritten(args, 12)))
     CollectGuestWrites();
   if (!several && !found && kMirror && MirrorHoldsNewest(args, 12)) {
-    out = {g_mirror, MirrorOffset(args)};
+    out = {g_cs.mirror, MirrorOffset(args)};
     g_cs_stats.indirect_n++;
     return true;
   }
@@ -518,7 +518,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   DELTA_ZONE("gpu.cs_dispatch");
   BumpTextureEpoch();
   MergeSameBase(ci);
-  if (g_cs_failed) {
+  if (g_cs.failed) {
     renderer.state = nullptr;
     return CsDeclined(ci, "1");
   }
@@ -533,8 +533,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     if (Device().caps().dispatch_indirect &&
         FlushCsWritesForGpu(renderer, ci.indirect_args, 12, "indirect-cs")) {
       CsBatchBeginImpl();
-      if (g_cs_batch_open)
-        indirect.buffer = StageIndirectArgs(g_cs_list, ci.indirect_args, 12,
+      if (g_cs.batch_open)
+        indirect.buffer = StageIndirectArgs(g_cs.list, ci.indirect_args, 12,
                                             &indirect.offset);
     }
     if (!indirect.buffer) {
@@ -547,8 +547,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   }
   if (CsTracksGuestWrites()) {
     for (u32 i = 0; i < ci.num_res; i++) {
-      const auto found = g_cs_ranges.find(ci.res[i].base);
-      if (found != g_cs_ranges.end() && found->second.gpu_dirty) {
+      const auto found = g_cs.ranges.find(ci.res[i].base);
+      if (found != g_cs.ranges.end() && found->second.gpu_dirty) {
         CollectGuestWritesForSubmission();
         break;
       }
@@ -556,8 +556,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   } else if (GuestWriteTracker().enabled()) {
     CollectGuestWritesForSubmission();
   }
-  const bool heavy = g_cs_heavy.contains(ci.cs_addr);
-  if (heavy && g_cs_batch_count &&
+  const bool heavy = g_cs.heavy.contains(ci.cs_addr);
+  if (heavy && g_cs.batch_count &&
       (++g_cs_stats.submit_why[3], !CsBatchSubmit())) {
     renderer.state = nullptr;
     return CsDeclined(ci, "heavy");
@@ -610,12 +610,12 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   if (!cp)
     return CsDeclined(ci, "5");
 
-  if (!g_cs_batches[0].list) {
+  if (!g_cs.batches[0].list) {
     if (!CsBatchInit())
       return CsDeclined(ci, "8");
     if (CsSyncReporting()) {
       double total = 0;
-      rhi::CommandList* list = g_cs_batches[0].list;
+      rhi::CommandList* list = g_cs.batches[0].list;
       for (int i = 0; i < 100; i++) {
         list->Begin();
         list->End();
@@ -672,7 +672,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   const TileTable* truth_table[ComputeInfo::kMaxResources] = {};
   u64 parent_base[ComputeInfo::kMaxResources] = {};
   u64 parent_off[ComputeInfo::kMaxResources] = {};
-  g_cs_scratch_owner++;
+  g_cs.scratch_owner++;
   auto bind_truth_view = [&](u32 i, rhi::Buffer* tiled_buf, u64 off, u64 span,
                              u64 pbase) -> bool {
     gcn::TextureLayout32 tiled, linear;
@@ -693,9 +693,9 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         return true;
       }
     }
-    auto owner_it = g_cs_ranges.find(pbase ? pbase : ci.res[i].base);
+    auto owner_it = g_cs.ranges.find(pbase ? pbase : ci.res[i].base);
     const u64 seq =
-        owner_it != g_cs_ranges.end() ? owner_it->second.write_seq : 0;
+        owner_it != g_cs.ranges.end() ? owner_it->second.write_seq : 0;
     bool fresh = true;
     rhi::Buffer* const view = AcquireView(sz[i], pbase ? pbase : ci.res[i].base,
                                           off, table, seq, &fresh);
@@ -703,9 +703,9 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       return false;
     if (fresh) {
       CsBatchBeginImpl();
-      RecordImageTiling(g_cs_list, *table, tiled_buf, off, span, view, sz[i],
+      RecordImageTiling(g_cs.list, *table, tiled_buf, off, span, view, sz[i],
                         true);
-      g_cs_batch_access.erase(view);
+      g_cs.batch_access.erase(view);
       g_cs_stats.truth_detile_n++;
       StampView(view, pbase ? pbase : ci.res[i].base, off, table, seq);
     }
@@ -727,13 +727,13 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   for (u32 i = 0; i < ci.num_res; i++) {
     sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~u64(3)) : 4;
     if (mirror_res[i]) {
-      bind_buf[i] = g_mirror;
+      bind_buf[i] = g_cs.mirror;
       continue;
     }
     if (ci.res[i].zero_fill) {
       if (!CsEnsureStage(i, sz[i]))
         return CsDeclined(ci, "10");
-      bind_buf[i] = g_cs_stage[i].buf;
+      bind_buf[i] = g_cs.stage[i].buf;
       continue;
     }
     const u64 base = ci.res[i].base;
@@ -746,8 +746,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       CsRange* parent = nullptr;
       u64 pbase = 0;
       for (u64 cand : DirtyRangesOverlapping(base, guest_bytes, base)) {
-        auto f = g_cs_ranges.find(cand);
-        if (f == g_cs_ranges.end())
+        auto f = g_cs.ranges.find(cand);
+        if (f == g_cs.ranges.end())
           continue;
         CsRange& r = f->second;
         const bool offset_ok =
@@ -761,19 +761,19 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         pbase = cand;
         break;
       }
-      auto own = g_cs_ranges.find(base);
-      if (parent && own != g_cs_ranges.end() && own->second.gpu_dirty) {
+      auto own = g_cs.ranges.find(base);
+      if (parent && own != g_cs.ranges.end() && own->second.gpu_dirty) {
         CsRange& s = own->second;
         if (s.image_staging && !s.truth) {
           parent = nullptr;
         } else if (s.buf) {
           const u64 n = base::Min<u64>(s.size ? s.size : s.cap, guest_bytes);
           CsBatchBeginImpl();
-          g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
-          g_cs_list->CopyBuffer(parent->buf, base - pbase, s.buf, 0, n);
-          g_cs_list->Barrier(rhi::kAccessCopyWrite,
+          g_cs.list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+          g_cs.list->CopyBuffer(parent->buf, base - pbase, s.buf, 0, n);
+          g_cs.list->Barrier(rhi::kAccessCopyWrite,
                              kAccessComputeRW | kAccessCopyRW);
-          g_cs_batch_access.erase(parent->buf);
+          g_cs.batch_access.erase(parent->buf);
           UnindexDirtyRange(base, s.guest_bytes);
           s.gpu_dirty = false;
           s.last_validated_frame = -1;
@@ -781,7 +781,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
           MarkPending(s);
           IndexDirtySpan(pbase, base, RangeEnd(base, n));
           parent->write_seq++;
-          parent->dirty_stamp = ++g_cs_dirty_stamp;
+          parent->dirty_stamp = ++g_cs.dirty_stamp;
           parent->dirty_render_serial = g_render_serial;
           BumpTextureEpoch();
         }
@@ -810,8 +810,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     }
     {
       const u64 to = NowNs();
-      const auto own = g_cs_ranges.find(base);
-      const bool own_dirty = own != g_cs_ranges.end() &&
+      const auto own = g_cs.ranges.find(base);
+      const bool own_dirty = own != g_cs.ranges.end() &&
                              own->second.gpu_dirty && own->second.buf &&
                              own->second.cpu_writes.empty() &&
                              !own->second.imported;
@@ -828,8 +828,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       auto siblings = DirtyRangesOverlapping(base, guest_bytes, base);
       SortByDirtyOrder(siblings);
       for (u64 dirty : siblings) {
-        auto found = g_cs_ranges.find(dirty);
-        if (found == g_cs_ranges.end())
+        auto found = g_cs.ranges.find(dirty);
+        if (found == g_cs.ranges.end())
           continue;
         CsRange& s = found->second;
         if (kCsTruth && (truth_i || !ci.res[i].image_staging) && s.gpu_dirty &&
@@ -881,18 +881,18 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
           }
         }
         const WaitReaderScope reader("cs-sibling");
-        if (!CsRangeFlushOne(dirty, s) && g_cs_failed)
+        if (!CsRangeFlushOne(dirty, s) && g_cs.failed)
           return CsDeclined(ci, "11");
       }
       g_cs_stats.in_overlap_n += !siblings.empty();
       g_cs_stats.in_overlap_ns += NowNs() - to;
     }
-    CsRange& e = g_cs_ranges[base];
+    CsRange& e = g_cs.ranges[base];
     if (e.gpu_dirty && !e.cpu_writes.empty()) {
       g_cs_stats.wb_why["cpu-write"]++;
       g_cs_stats.wb_why_bytes += e.size;
       const WaitReaderScope reader("cpu-write");
-      if (!CsRangeFlushOne(base, e) && g_cs_failed)
+      if (!CsRangeFlushOne(base, e) && g_cs.failed)
         return CsDeclined(ci, "24");
     }
     const bool truth_same =
@@ -985,7 +985,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     const bool rt_stale = kCsRtCache && e.rt_sourced && e.last_rt_frame >= 0 &&
                           AliasedImageRenderSerial(base) <= e.rt_serial;
     const bool rt_attempt = rt_backed && !e.gpu_dirty && !rt_stale &&
-                            !g_rt_unbridgeable.count(RtShapeKey(ci.res[i]));
+                            !g_cs.rt_unbridgeable.count(RtShapeKey(ci.res[i]));
     if (rt_attempt)
       valid = false;
     else if (rt_backed && !e.gpu_dirty && e.rt_sourced)
@@ -1015,9 +1015,9 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
           return CsDeclined(ci, "15");
         }
         e.pending_batch = false;
-      } else if (rt_attempt && e.pending_batch && g_cs_batch_open &&
-                 e.batch_id >= g_cs_batch_id) {
-        g_cs_chunk_needs_batch = true;
+      } else if (rt_attempt && e.pending_batch && g_cs.batch_open &&
+                 e.batch_id >= g_cs.batch_id) {
+        g_cs.chunk_needs_batch = true;
       }
       bool staged_in_frame = false;
       if (rt_attempt) {
@@ -1040,7 +1040,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
                     (unsigned long)base, ci.res[i].width, ci.res[i].height,
                     e.rt_sourced ? "staged-from-RT" : "guest-fallback");
         }
-        if (g_cs_failed) {
+        if (g_cs.failed) {
           renderer.state = nullptr;
           return CsDeclined(ci, "17");
         }
@@ -1056,13 +1056,13 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         const u64 copy_bytes = stage_bytes ? stage_bytes : ci.res[i].size;
         CsBatchBeginImpl();
         bool staged = false;
-        if (g_cs_batch_open && e.buf) {
+        if (g_cs.batch_open && e.buf) {
           if (stage_bytes || !ci.res[i].image_staging) {
             const u64 tail = copy_bytes & ~u64(3);
             if (!stage_bytes && sz[i] > tail)
-              g_cs_list->FillBuffer(e.buf, tail, ((sz[i] + 3) & ~u64(3)) - tail,
+              g_cs.list->FillBuffer(e.buf, tail, ((sz[i] + 3) & ~u64(3)) - tail,
                                     0);
-            staged = RecordGuestRead(g_cs_list, base, copy_bytes, e.buf);
+            staged = RecordGuestRead(g_cs.list, base, copy_bytes, e.buf);
           } else {
             g_cs_stats.stage_guest_detile_bytes += sz[i];
             g_cs_stats.stage_guest_detile_n++;
@@ -1074,12 +1074,12 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         CollectGuestWrites();
         e.staged_clean =
             !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
-        g_cs_list->Barrier(rhi::kAccessCopyWrite | kAccessComputeRW,
+        g_cs.list->Barrier(rhi::kAccessCopyWrite | kAccessComputeRW,
                            kAccessComputeRW);
-        g_cs_batch_access.erase(e.buf);
+        g_cs.batch_access.erase(e.buf);
         MarkPending(e);
         e.rt_sourced = false;
-        e.staged_stamp = ++g_cs_dirty_stamp;
+        e.staged_stamp = ++g_cs.dirty_stamp;
       }
       e.gpu_dirty = false;
       e.write_seq++;
@@ -1136,19 +1136,19 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     }
     e.last_used_frame = g_frame.num;
     for (u32 k = 0; k < fold_count && e.buf; k++) {
-      auto f = g_cs_ranges.find(folds[k]);
-      if (f == g_cs_ranges.end())
+      auto f = g_cs.ranges.find(folds[k]);
+      if (f == g_cs.ranges.end())
         continue;
       CsRange& s = f->second;
       if (!s.gpu_dirty || !s.buf)
         continue;
       const u64 n = base::Min<u64>(s.size ? s.size : s.cap, s.guest_bytes);
       CsBatchBeginImpl();
-      g_cs_list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
-      g_cs_list->CopyBuffer(e.buf, folds[k] - base, s.buf, 0, n);
-      g_cs_list->Barrier(rhi::kAccessCopyWrite,
+      g_cs.list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+      g_cs.list->CopyBuffer(e.buf, folds[k] - base, s.buf, 0, n);
+      g_cs.list->Barrier(rhi::kAccessCopyWrite,
                          kAccessComputeRW | kAccessCopyRW);
-      g_cs_batch_access.erase(e.buf);
+      g_cs.batch_access.erase(e.buf);
       UnindexDirtyRange(folds[k], s.guest_bytes);
       s.gpu_dirty = false;
       s.last_validated_frame = -1;
@@ -1161,7 +1161,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       }
       e.fill_kept.clear();
       e.write_seq++;
-      e.dirty_stamp = ++g_cs_dirty_stamp;
+      e.dirty_stamp = ++g_cs.dirty_stamp;
       e.dirty_render_serial = g_render_serial;
       BumpTextureEpoch();
       MarkPending(e);
@@ -1177,7 +1177,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   for (u32 i = 0; i < ci.num_res; i++)
     if (!ci.res[i].zero_fill && !truth_view[i] && !mirror_res[i])
       bind_buf[i] =
-          g_cs_ranges[parent_base[i] ? parent_base[i] : ci.res[i].base].buf;
+          g_cs.ranges[parent_base[i] ? parent_base[i] : ci.res[i].base].buf;
   u64 bind_off[ComputeInfo::kMaxResources] = {};
 
   g_stats.ns_cs_in += NowNs() - t_in0;
@@ -1190,7 +1190,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
                   : truth_view[i]     ? 0
                   : parent_base[i]
                       ? parent_off[i]
-                      : g_cs_ranges[ci.res[i].base].imported_offset;
+                      : g_cs.ranges[ci.res[i].base].imported_offset;
   u32 bias_dwords[ComputeInfo::kMaxResources] = {};
   const u64 align = base::Max<u64>(caps.storage_offset_alignment, 4);
   for (u32 i = 0; i < ci.num_res; i++) {
@@ -1209,7 +1209,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   u32 nwrite = ci.num_res;
   if (ci.gds_binding >= 0 && EnsureGdsBuffer()) {
     wr[nwrite].binding = static_cast<u32>(ci.gds_binding);
-    wr[nwrite].buffer = g_gds.buf;
+    wr[nwrite].buffer = g_cs.gds.buf;
     wr[nwrite].range = GdsBuffer::kBytes;
     nwrite++;
   }
@@ -1229,11 +1229,11 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     nwrite++;
   }
 
-  if (ci.num_tex && g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame &&
+  if (ci.num_tex && g_cs.batch_open && !g_cs.batches[g_cs.batch_cur].in_frame &&
       !CsBatchSubmit())
     return CsDeclined(ci, "tex-batch");
   CsBatchBeginImpl();
-  if (ci.num_tex && !g_cs_batches[g_cs_batch_cur].in_frame)
+  if (ci.num_tex && !g_cs.batches[g_cs.batch_cur].in_frame)
     return CsDeclined(ci, "tex-out-of-frame");
   for (u32 i = 0; i < ci.num_tex; i++) {
     const DrawInfo::DrawTex& t = ci.tex[i].tex;
@@ -1258,19 +1258,19 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     if (!ci.res[i].zero_fill)
       continue;
     zero_count++;
-    g_cs_batch_access.erase(bind_buf[i]);
+    g_cs.batch_access.erase(bind_buf[i]);
   }
   if (zero_count) {
-    g_cs_list->Barrier(kAccessComputeRW, rhi::kAccessCopyWrite);
+    g_cs.list->Barrier(kAccessComputeRW, rhi::kAccessCopyWrite);
     for (u32 i = 0; i < ci.num_res; i++)
       if (ci.res[i].zero_fill)
-        g_cs_list->FillBuffer(bind_buf[i], 0, sz[i], 0);
-    g_cs_list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW);
+        g_cs.list->FillBuffer(bind_buf[i], 0, sz[i], 0);
+    g_cs.list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW);
   }
   if (ci.gds_binding >= 0)
-    g_cs_list->Barrier(rhi::kAccessComputeWrite, kAccessComputeRW);
-  g_cs_list->SetPipeline(cp->pipe);
-  g_cs_list->PushBindGroup(0, cp->set_layout, wr, nwrite);
+    g_cs.list->Barrier(rhi::kAccessComputeWrite, kAccessComputeRW);
+  g_cs.list->SetPipeline(cp->pipe);
+  g_cs.list->PushBindGroup(0, cp->set_layout, wr, nwrite);
   constexpr u32 kCsPushDwords = 64;
   static_assert(16 + 48 == kCsPushDwords);
   u32 pc[kCsPushDwords];
@@ -1285,7 +1285,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         (dwords < (1u << 26) ? static_cast<u32>(dwords) : 0) |
         (bias_dwords[i] << 26);
   }
-  g_cs_list->SetPushConstants(0, sizeof(pc), pc);
+  g_cs.list->SetPushConstants(0, sizeof(pc), pc);
   u32 hazard_src = 0, hazard_dst = 0;
   rhi::Buffer* unique_buffers[ComputeInfo::kMaxResources];
   bool unique_writes[ComputeInfo::kMaxResources] = {};
@@ -1303,7 +1303,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     }
   }
   for (u32 i = 0; i < unique_count; i++) {
-    ComputeBufferAccess& prior = g_cs_batch_access[unique_buffers[i]];
+    ComputeBufferAccess& prior = g_cs.batch_access[unique_buffers[i]];
     const ComputeBufferAccess current{true, unique_writes[i]};
     const bool hazard = NeedsComputeBarrier(prior, current);
     if (hazard) {
@@ -1317,11 +1317,11 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     prior.write |= unique_writes[i];
   }
   if (hazard_src)
-    g_cs_list->Barrier(hazard_src, hazard_dst);
+    g_cs.list->Barrier(hazard_src, hazard_dst);
   base::Vector<rhi::Buffer*> capture_buffers;
   if (capture_dispatch) {
     capture_buffers.resize(ci.num_res, nullptr);
-    g_cs_list->Barrier(rhi::kAccessAllWrite, rhi::kAccessCopyRead);
+    g_cs.list->Barrier(rhi::kAccessAllWrite, rhi::kAccessCopyRead);
     for (u32 i = 0; i < ci.num_res; i++) {
       rhi::Buffer* snapshot = CreateCsBuffer(wr[i].range, rhi::kBufferCopyDst,
                                              rhi::MemoryKind::kReadback);
@@ -1331,11 +1331,11 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         continue;
       }
       capture_buffers[i] = snapshot;
-      g_cs_frame_retired.push_back(snapshot);
-      g_cs_list->CopyBuffer(snapshot, 0, wr[i].buffer, wr[i].offset,
+      g_cs.frame_retired.push_back(snapshot);
+      g_cs.list->CopyBuffer(snapshot, 0, wr[i].buffer, wr[i].offset,
                             wr[i].range);
     }
-    g_cs_list->Barrier(rhi::kAccessCopyRead | rhi::kAccessCopyWrite,
+    g_cs.list->Barrier(rhi::kAccessCopyRead | rhi::kAccessCopyWrite,
                        kAccessComputeRW | rhi::kAccessHostRead);
   }
   if (caps.debug_labels) {
@@ -1343,11 +1343,11 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     std::snprintf(label, sizeof(label), "dispatch cs=%#llx %ux%ux%u res=%u",
                   (unsigned long long)ci.cs_addr, ci.groups[0], ci.groups[1],
                   ci.groups[2], ci.num_res);
-    g_cs_list->InsertLabel(label);
+    g_cs.list->InsertLabel(label);
   }
   if (ci.recomp->guest_memory_binding >= 0)
-    g_cs_list->Barrier(rhi::kAccessHostWrite, rhi::kAccessComputeRead);
-  const bool traced = g_cs_timestamps && timeline::Active();
+    g_cs.list->Barrier(rhi::kAccessHostWrite, rhi::kAccessComputeRead);
+  const bool traced = g_cs.timestamps && timeline::Active();
   u16 query = 0;
   if (traced) {
     char name[48];
@@ -1357,28 +1357,28 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   }
   bool sample = false;
   if (kCsHeavyUs) {
-    int& last = g_cs_heavy_sampled[ci.cs_addr];
+    int& last = g_cs.heavy_sampled[ci.cs_addr];
     sample = last == 0 || last + 60 <= g_frame.num;
     if (sample)
       last = g_frame.num ? g_frame.num : 1;
   }
-  const bool stamp = g_cs_timestamps && (CsSyncReporting() || traced || sample);
+  const bool stamp = g_cs.timestamps && (CsSyncReporting() || traced || sample);
   if (stamp)
-    g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2, true);
-  DispatchCheckpoint(g_cs_list, ci.cs_addr, false);
-  g_cs_list->ProfileBegin(1);
+    g_cs.list->WriteTimestamp(g_cs.timestamps, g_cs.batch_count * 2, true);
+  DispatchCheckpoint(g_cs.list, ci.cs_addr, false);
+  g_cs.list->ProfileBegin(1);
   if (indirect.buffer) {
-    g_cs_list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+    g_cs.list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                        rhi::kAccessIndirectRead);
-    g_cs_list->DispatchIndirect(indirect.buffer, indirect.offset);
+    g_cs.list->DispatchIndirect(indirect.buffer, indirect.offset);
   } else {
-    g_cs_list->DispatchBase(ci.group_base[0], ci.group_base[1],
+    g_cs.list->DispatchBase(ci.group_base[0], ci.group_base[1],
                             ci.group_base[2], groups[0], groups[1], groups[2]);
   }
-  g_cs_list->ProfileEnd();
-  DispatchCheckpoint(g_cs_list, ci.cs_addr, true);
+  g_cs.list->ProfileEnd();
+  DispatchCheckpoint(g_cs.list, ci.cs_addr, true);
   if (stamp)
-    g_cs_list->WriteTimestamp(g_cs_timestamps, g_cs_batch_count * 2 + 1, false);
+    g_cs.list->WriteTimestamp(g_cs.timestamps, g_cs.batch_count * 2 + 1, false);
   if (traced)
     timeline::End(query);
   for (u32 i = 0; i < ci.num_res; i++) {
@@ -1390,16 +1390,16 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     if (done)
       continue;
     auto it =
-        g_cs_ranges.find(parent_base[i] ? parent_base[i] : ci.res[i].base);
-    if (it == g_cs_ranges.end() || !it->second.buf)
+        g_cs.ranges.find(parent_base[i] ? parent_base[i] : ci.res[i].base);
+    if (it == g_cs.ranges.end() || !it->second.buf)
       continue;
     const u64 span =
         parent_base[i]
             ? (ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size)
             : it->second.guest_bytes;
-    RecordImageTiling(g_cs_list, *truth_table[i], it->second.buf, parent_off[i],
+    RecordImageTiling(g_cs.list, *truth_table[i], it->second.buf, parent_off[i],
                       span, truth_view[i], sz[i], false);
-    g_cs_batch_access.erase(it->second.buf);
+    g_cs.batch_access.erase(it->second.buf);
     g_cs_stats.truth_retile_n++;
   }
   {
@@ -1418,7 +1418,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     bd.traced = traced;
     bd.stamped = stamp;
     bd.query = query;
-    g_cs_batch_log.push_back(bd);
+    g_cs.batch_log.push_back(bd);
   }
   if (trace::Recording())
     trace::RecordDispatch(ci);
@@ -1426,8 +1426,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     if (ci.res[i].zero_fill || mirror_res[i])
       continue;
     auto it =
-        g_cs_ranges.find(parent_base[i] ? parent_base[i] : ci.res[i].base);
-    if (it != g_cs_ranges.end())
+        g_cs.ranges.find(parent_base[i] ? parent_base[i] : ci.res[i].base);
+    if (it != g_cs.ranges.end())
       MarkPending(it->second);
   }
   for (u32 i = 0; i < ci.num_res; i++)
@@ -1438,15 +1438,15 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
                                     ? base::Min(res.write_bytes, bytes)
                                     : bytes);
     }
-  ++g_cs_batch_count;
+  ++g_cs.batch_count;
 
   const u64 t_out0 = NowNs();
   for (u32 i = 0; i < ci.num_res; i++) {
     if (!ci.res[i].written || ci.res[i].zero_fill || mirror_res[i])
       continue;
     const u64 dirty_base = parent_base[i] ? parent_base[i] : ci.res[i].base;
-    auto it = g_cs_ranges.find(dirty_base);
-    if (it == g_cs_ranges.end())
+    auto it = g_cs.ranges.find(dirty_base);
+    if (it == g_cs.ranges.end())
       continue;
     const auto& res = ci.res[i];
     if (parent_base[i] && !res.image_staging) {
@@ -1471,23 +1471,23 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     it->second.gpu_dirty = true;
     it->second.fill_kept.clear();
     it->second.write_seq++;
-    it->second.dirty_stamp = ++g_cs_dirty_stamp;
+    it->second.dirty_stamp = ++g_cs.dirty_stamp;
     it->second.dirty_render_serial = g_render_serial;
     BumpTextureEpoch();
     if (truth_view[i])
       StampView(truth_view[i], dirty_base, parent_off[i], truth_table[i],
                 it->second.write_seq);
   }
-  if ((g_cs_batch_count >= base::Max<u32>(1, kCsBatchCap) || heavy) &&
+  if ((g_cs.batch_count >= base::Max<u32>(1, kCsBatchCap) || heavy) &&
       (++g_cs_stats.submit_why[4], !CsBatchSubmit())) {
     renderer.state = nullptr;
     return CsDeclined(ci, "21");
   }
   if (guest_table) {
-    PendingTable pending{guest_set.set, g_cs_batch_id, ci.cs_addr};
+    PendingTable pending{guest_set.set, g_cs.batch_id, ci.cs_addr};
     guest_set.set = ~0u;
-    if (g_cs_batch_open)
-      g_cs_list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
+    if (g_cs.batch_open)
+      g_cs.list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
     if (ci.recomp->guest_memory_written) {
       WriterHistory& history = g_writer_history[ci.cs_addr];
       if (!history.writes && history.quiet >= kQuietAfter) {
@@ -1495,7 +1495,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         pending.owners = base::move(window_owners);
       } else {
         CsBatchBeginImpl();
-        g_cs_list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
+        g_cs.list->Barrier(rhi::kAccessComputeWrite, rhi::kAccessHostRead);
         if (!CsBatchFlush(kSyncBatchCap)) {
           ReleaseGuestMemory(pending.set);
           return CsDeclined(ci, "guest-writeback");

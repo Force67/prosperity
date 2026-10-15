@@ -72,7 +72,7 @@ struct DirectMemory {
           base == kLateBase ? gpu::render::kMirrorBlock : kMappedBytes;
       if (mapping == MAP_FAILED)
         continue;
-      if (gpu::render::g_mirror) {
+      if (gpu::render::g_cs.mirror) {
         gpu::render::cs::CsBatchSubmit();
         for (u64 at = base; at < base + bytes; at += gpu::render::kMirrorBlock)
           if (gpu::render::MirrorOwned(at)) {
@@ -314,13 +314,13 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     ci.user_data[4] = 0xffff8040;
     ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
     ASSERT_TRUE(gpu::render::MirrorOwned(base));
-    ASSERT_TRUE(gpu::render::cs::g_pending_guest_writes.empty());
+    ASSERT_TRUE(gpu::render::cs::g_cs.pending_guest_writes.empty());
     ASSERT_TRUE(gpu::render::CsHoldsGeometry(base, DirectMemory::kBytes));
     gpu::rhi::Buffer* buffer = nullptr;
     u64 offset = 0;
     ASSERT_TRUE(gpu::render::CsGeometryBuffer(base, DirectMemory::kBytes,
                                               &buffer, &offset));
-    EXPECT_EQ(buffer, gpu::render::g_mirror);
+    EXPECT_EQ(buffer, gpu::render::g_cs.mirror);
     EXPECT_EQ(offset, gpu::render::MirrorOffset(base));
     gpu::render::DrawInfo draw;
     draw.recomp = &program;

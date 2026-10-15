@@ -19,7 +19,6 @@
 namespace gpu::render::cs {
 
 #ifdef DELTA_HAVE_SPIRV_BACKEND
-base::HashMap<u64, TileTable> g_tile_tables;
 
 TilingState g_tiling;
 
@@ -97,12 +96,12 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
       linear.size > UINT32_MAX)
     return nullptr;
   const u64 key = TileTableKey(tiled, linear, packed, pack11);
-  auto it = g_tile_tables.find(key);
-  if (it != g_tile_tables.end())
+  auto it = g_cs.tile_tables.find(key);
+  if (it != g_cs.tile_tables.end())
     return it->second.buf ? &it->second : nullptr;
-  if (g_tile_tables.size() >= 1024)
+  if (g_cs.tile_tables.size() >= 1024)
     return nullptr;
-  TileTable& t = g_tile_tables[key];
+  TileTable& t = g_cs.tile_tables[key];
   base::Vector<u32> table, terms;
   for (u32 mip = 0; mip < tiled.mip_levels; mip++) {
     const auto& tm = tiled.mips[mip];
@@ -195,7 +194,6 @@ void RecordImageTiling(rhi::CommandList* c,
              kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostRead);
 }
 
-base::Vector<CsScratch> g_cs_scratch;
 
 rhi::Buffer* AcquireView(u64 bytes,
                          u64 base,
@@ -203,10 +201,10 @@ rhi::Buffer* AcquireView(u64 bytes,
                          const TileTable* table,
                          u64 seq,
                          bool* fresh) {
-  for (auto& s : g_cs_scratch) {
+  for (auto& s : g_cs.scratch) {
     if (s.view_base == base && s.view_off == off && s.view_table == table &&
         s.view_seq == seq && s.cap >= bytes) {
-      s.owner = g_cs_scratch_owner;
+      s.owner = g_cs.scratch_owner;
       s.last_frame = g_frame.num;
       g_cs_stats.truth_view_hits++;
       *fresh = false;
@@ -222,7 +220,7 @@ void StampView(rhi::Buffer* view,
                u64 off,
                const TileTable* table,
                u64 seq) {
-  for (auto& s : g_cs_scratch)
+  for (auto& s : g_cs.scratch)
     if (s.buf == view) {
       s.view_base = base;
       s.view_off = off;
@@ -234,18 +232,18 @@ void StampView(rhi::Buffer* view,
 
 rhi::Buffer* AcquireScratch(u64 bytes) {
   int best = -1;
-  for (size_t i = 0; i < g_cs_scratch.size(); i++) {
-    const auto& s = g_cs_scratch[i];
-    if (s.owner == g_cs_scratch_owner || s.cap < bytes)
+  for (size_t i = 0; i < g_cs.scratch.size(); i++) {
+    const auto& s = g_cs.scratch[i];
+    if (s.owner == g_cs.scratch_owner || s.cap < bytes)
       continue;
-    if (best < 0 || s.cap < g_cs_scratch[best].cap ||
-        (s.cap == g_cs_scratch[best].cap &&
-         s.last_frame < g_cs_scratch[best].last_frame))
+    if (best < 0 || s.cap < g_cs.scratch[best].cap ||
+        (s.cap == g_cs.scratch[best].cap &&
+         s.last_frame < g_cs.scratch[best].last_frame))
       best = static_cast<int>(i);
   }
   if (best >= 0) {
-    auto& s = g_cs_scratch[best];
-    s.owner = g_cs_scratch_owner;
+    auto& s = g_cs.scratch[best];
+    s.owner = g_cs.scratch_owner;
     s.last_frame = g_frame.num;
     s.view_base = 0;
     s.view_table = nullptr;
@@ -254,27 +252,27 @@ rhi::Buffer* AcquireScratch(u64 bytes) {
   constexpr u64 kScratchBudget = 512ull << 20;
   CsScratch s;
   s.cap = (bytes + 0x3FFFFF) & ~u64(0x3FFFFF);
-  while (!g_cs_scratch.empty() &&
-         (g_cs_scratch.size() >= 24 ||
-          g_cs_scratch_bytes + s.cap > kScratchBudget)) {
+  while (!g_cs.scratch.empty() &&
+         (g_cs.scratch.size() >= 24 ||
+          g_cs.scratch_bytes + s.cap > kScratchBudget)) {
     size_t coldest = SIZE_MAX;
-    for (size_t i = 0; i < g_cs_scratch.size(); i++)
-      if (g_cs_scratch[i].owner != g_cs_scratch_owner &&
+    for (size_t i = 0; i < g_cs.scratch.size(); i++)
+      if (g_cs.scratch[i].owner != g_cs.scratch_owner &&
           (coldest == SIZE_MAX ||
-           g_cs_scratch[i].last_frame < g_cs_scratch[coldest].last_frame))
+           g_cs.scratch[i].last_frame < g_cs.scratch[coldest].last_frame))
         coldest = i;
     if (coldest == SIZE_MAX)
       break;
-    g_cs_frame_retired.push_back(g_cs_scratch[coldest].buf);
-    g_cs_scratch_bytes -= g_cs_scratch[coldest].cap;
-    g_cs_scratch.erase(g_cs_scratch.begin() + coldest);
+    g_cs.frame_retired.push_back(g_cs.scratch[coldest].buf);
+    g_cs.scratch_bytes -= g_cs.scratch[coldest].cap;
+    g_cs.scratch.erase(g_cs.scratch.begin() + coldest);
   }
   s.buf = CreateCsBuffer(
       s.cap, rhi::kBufferStorage | rhi::kBufferCopySrc | rhi::kBufferCopyDst,
       SplitVram() ? rhi::MemoryKind::kDevice : rhi::MemoryKind::kReadback);
   if (!s.buf)
     return nullptr;
-  s.owner = g_cs_scratch_owner;
+  s.owner = g_cs.scratch_owner;
   s.last_frame = g_frame.num;
   if (Device().caps().debug_labels) {
     char name[48];
@@ -287,11 +285,11 @@ rhi::Buffer* AcquireScratch(u64 bytes) {
     if (n++ < 32)
       BASE_LOGI("csgpu", "scratch {} MB for a {} MB view (ring {} x {} MB)",
                 (unsigned long long)(s.cap >> 20),
-                (unsigned long long)(bytes >> 20), g_cs_scratch.size(),
-                (unsigned long long)(g_cs_scratch_bytes >> 20));
+                (unsigned long long)(bytes >> 20), g_cs.scratch.size(),
+                (unsigned long long)(g_cs.scratch_bytes >> 20));
   }
-  g_cs_scratch_bytes += s.cap;
-  g_cs_scratch.push_back(s);
+  g_cs.scratch_bytes += s.cap;
+  g_cs.scratch.push_back(s);
   return s.buf;
 }
 
@@ -434,9 +432,9 @@ bool StageBcImageOnGpu(const ComputeInfo::Res& res,
   const u64 block_bytes = (blocks.size + 3) & ~u64(3);
   rhi::Buffer* raw = AcquireScratch(raw_bytes);
   rhi::Buffer* linear_blocks = raw ? AcquireScratch(block_bytes) : nullptr;
-  if (!linear_blocks || !RecordGuestRead(g_cs_list, res.base, tiled.size, raw))
+  if (!linear_blocks || !RecordGuestRead(g_cs.list, res.base, tiled.size, raw))
     return false;
-  rhi::CommandList* const c = g_cs_list;
+  rhi::CommandList* const c = g_cs.list;
   RecordImageTiling(c, *table, raw, 0, raw_bytes, linear_blocks, block_bytes,
                     true);
   rhi::BufferTextureCopy in[16]{}, out[16]{};
@@ -495,9 +493,9 @@ bool StageImageOnGpu(const ComputeInfo::Res& res, CsRange& e) {
       tiled.elem_bytes < 4 && linear.elem_bytes == tiled.elem_bytes);
   rhi::Buffer* raw =
       table ? AcquireScratch((tiled.size + 3) & ~u64(3)) : nullptr;
-  if (!raw || !RecordGuestRead(g_cs_list, res.base, tiled.size, raw))
+  if (!raw || !RecordGuestRead(g_cs.list, res.base, tiled.size, raw))
     return false;
-  RecordImageTiling(g_cs_list, *table, raw, 0, (tiled.size + 3) & ~u64(3),
+  RecordImageTiling(g_cs.list, *table, raw, 0, (tiled.size + 3) & ~u64(3),
                     e.buf, (linear.size + 3) & ~u64(3), true);
   return true;
 #else
@@ -516,7 +514,7 @@ bool ConvertGfx10Image(const gcn::TextureLayout32& tiled,
                        bool detile,
                        bool pack11) {
 #ifdef DELTA_HAVE_SPIRV_BACKEND
-  if (!g_backend.device || g_cs_failed)
+  if (!g_backend.device || g_cs.failed)
     return false;
   const TileTable* table = GetTileTable(tiled, linear, false, pack11);
   if (!table)

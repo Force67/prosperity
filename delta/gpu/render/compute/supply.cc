@@ -22,9 +22,9 @@ namespace gpu::render {
 
 bool PreserveCsDepthBeforeClear(u64 base) {
   auto depth_it = g_depths.find(base);
-  auto range_it = g_cs_ranges.find(base);
+  auto range_it = g_cs.ranges.find(base);
   if (!g_frame.recording || depth_it == g_depths.end() ||
-      range_it == g_cs_ranges.end())
+      range_it == g_cs.ranges.end())
     return false;
 
   DepthTarget& depth = depth_it->second;
@@ -109,7 +109,7 @@ bool CsSupplyTextureParts(u64 base,
   u64 revision = 14695981039346656037ull;
   CollectGuestWrites();
   for (u64 part : parts) {
-    const auto& e = g_cs_ranges.find(part)->second;
+    const auto& e = g_cs.ranges.find(part)->second;
     const u64 lo = base::Max(base, part);
     const u64 hi = base::Min(base + tiled.size, part + e.guest_bytes);
     if (lo != cursor || !e.buf || e.imported || (e.image_staging && !e.truth) ||
@@ -149,7 +149,7 @@ bool CsSupplyTextureParts(u64 base,
     return true;
   if (!img)
     return true;
-  g_cs_scratch_owner++;
+  g_cs.scratch_owner++;
   bool fresh = true;
   rhi::Buffer* pixels =
       AcquireView(linear.size, base, 0, table, revision, &fresh);
@@ -161,7 +161,7 @@ bool CsSupplyTextureParts(u64 base,
   list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
   if (fresh) {
     for (u64 part : parts) {
-      const auto& e = g_cs_ranges.find(part)->second;
+      const auto& e = g_cs.ranges.find(part)->second;
       const u64 lo = base::Max(base, part);
       const u64 hi = base::Min(base + tiled.size, part + e.guest_bytes);
       list->CopyBuffer(assembled, lo - base, e.buf, lo - part, hi - lo);
@@ -180,11 +180,11 @@ bool CsSupplyTextureParts(u64 base,
   barrier.after = rhi::TextureState::kShaderRead;
   list->Barrier(0, 0, &barrier, 1);
   for (u64 part : parts) {
-    auto& e = g_cs_ranges.find(part)->second;
+    auto& e = g_cs.ranges.find(part)->second;
     e.last_used_frame = e.frame_ref = g_frame.num;
     e.chunk_ref = g_frame.chunk_seq;
     if (e.pending_batch)
-      g_cs_chunk_needs_batch = true;
+      g_cs.chunk_needs_batch = true;
   }
   if (kCsTexBridgeTrace)
     BASE_LOGI("texbridge", "{:#x}: composed {} ranges, {} mips, {} bytes", base,
@@ -205,15 +205,15 @@ bool CsSupplyTexture(u64 base,
                      u64* seq,
                      bool compressed,
                      u32* supplied_mips) {
-  if (!kCsTexBridge || !kCsVram || g_cs_failed)
+  if (!kCsTexBridge || !kCsVram || g_cs.failed)
     return false;
   if (compressed && CsSupplyTextureParts(base, layout, w, h, img, state, seq)) {
     if (supplied_mips)
       *supplied_mips = layout.mip_levels;
     return true;
   }
-  auto it = g_cs_ranges.find(base);
-  if (it == g_cs_ranges.end())
+  auto it = g_cs.ranges.find(base);
+  if (it == g_cs.ranges.end())
     return false;
   CsRange& e = it->second;
   const ComputeInfo::Res& r = e.res;
@@ -263,7 +263,7 @@ bool CsSupplyTexture(u64 base,
   if (LiveTargetOfSize(base, w, h))
     return declined("live target");
   for (u64 other : DirtyRangesOverlapping(base, layout.size, base)) {
-    const CsRange& o = g_cs_ranges.find(other)->second;
+    const CsRange& o = g_cs.ranges.find(other)->second;
     if (o.dirty_stamp > e.dirty_stamp || o.guest_bytes != e.guest_bytes ||
         o.res.width != r.width || o.res.height != r.height ||
         o.res.elem_bytes != r.elem_bytes || o.res.tiling_idx != r.tiling_idx)
@@ -325,7 +325,7 @@ bool CsSupplyTexture(u64 base,
                 rhi::kAccessCopyRead);
   rhi::Buffer* src = e.buf;
   if (e.truth) {
-    g_cs_scratch_owner++;
+    g_cs.scratch_owner++;
     bool fresh = true;
     src = AcquireView(linear.size, base, 0, table, e.write_seq, &fresh);
     if (!src)
@@ -368,7 +368,7 @@ bool CsSupplyTexture(u64 base,
   e.frame_ref = g_frame.num;
   e.chunk_ref = g_frame.chunk_seq;
   if (e.pending_batch)
-    g_cs_chunk_needs_batch = true;
+    g_cs.chunk_needs_batch = true;
   g_cs_stats.tex_bridge_n++;
   g_cs_stats.tex_bridge_bytes += e.size;
   return true;
@@ -385,7 +385,7 @@ namespace gpu::render::cs {
 CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base);
 
 CsRange* BufferSource(u64 base, u64 bytes, u64* range_base) {
-  if (!kCsBufBridge || !kCsVram || g_cs_failed || !bytes || !g_frame.recording)
+  if (!kCsBufBridge || !kCsVram || g_cs.failed || !bytes || !g_frame.recording)
     return nullptr;
   struct Memo {
     u64 base = 0, bytes = 0, epoch = 0, range_base = 0;
@@ -416,7 +416,7 @@ CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base) {
     if (shown++ < 30) {
       base::String line;
       for (u64 r : DirtyRangesOverlapping(base, bytes, base)) {
-        const CsRange& o = g_cs_ranges.find(r)->second;
+        const CsRange& o = g_cs.ranges.find(r)->second;
         base::FormatTo(line, " [{:#x}+{:#x} size={:#x} truth={} img={}]", r,
                        o.guest_bytes, o.size, (int)o.truth,
                        (int)o.image_staging);
@@ -426,7 +426,7 @@ CsRange* BufferSourceUncached(u64 base, u64 bytes, u64* range_base) {
   }
   if (several || !only)
     return nullptr;
-  CsRange& e = g_cs_ranges.find(only)->second;
+  CsRange& e = g_cs.ranges.find(only)->second;
   const u64 valid = base::Min<u64>(e.size, e.guest_bytes);
   if (!e.buf || e.image_staging || e.truth || e.imported || base < only ||
       base + bytes > only + valid)
@@ -443,7 +443,7 @@ u64 PendingGuestWriteBatch(u64 base, u64 bytes) {
   if (GuestPages().PendingWriteClear(base, base + bytes))
     return 0;
   u64 batch = 0;
-  for (const PendingGuestWrite& w : g_pending_guest_writes)
+  for (const PendingGuestWrite& w : g_cs.pending_guest_writes)
     if (w.base < base + bytes && base < w.end)
       batch = base::Max(batch, w.batch);
   return batch;
@@ -497,7 +497,7 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   e.frame_ref = g_frame.num;
   e.chunk_ref = g_frame.chunk_seq;
   if (e.pending_batch)
-    g_cs_chunk_needs_batch = true;
+    g_cs.chunk_needs_batch = true;
   g_cs_stats.buf_bridge_n++;
   g_cs_stats.buf_bridge_bytes += bytes;
   return true;
@@ -550,7 +550,7 @@ bool CsSupplyTextureFromBuffer(u64 base,
   rhi::CommandList* const list = g_frame.list;
   list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                 rhi::kAccessCopyRead);
-  g_cs_scratch_owner++;
+  g_cs.scratch_owner++;
   bool fresh = true;
   rhi::Buffer* src =
       AcquireView(linear.size, range_base, off, table, e.write_seq, &fresh);
@@ -576,20 +576,20 @@ bool CsSupplyTextureFromBuffer(u64 base,
   e.frame_ref = g_frame.num;
   e.chunk_ref = g_frame.chunk_seq;
   if (e.pending_batch)
-    g_cs_chunk_needs_batch = true;
+    g_cs.chunk_needs_batch = true;
   g_cs_stats.tex_bridge_n++;
   g_cs_stats.tex_bridge_bytes += tiled.size;
   return true;
 }
 
 CsRange* VertexSource(u64 base, u64 bytes, u64* range_base) {
-  if (!kCsBufBridge || !kCsVram || g_cs_failed || !bytes || !g_frame.recording)
+  if (!kCsBufBridge || !kCsVram || g_cs.failed || !bytes || !g_frame.recording)
     return nullptr;
   constexpr u64 kSlack = 64;
   CsRange* found = nullptr;
   bool bad = false;
   AnyDirtyOverlapping(base, bytes, [&](u64 other) {
-    CsRange& e = g_cs_ranges.find(other)->second;
+    CsRange& e = g_cs.ranges.find(other)->second;
     const u64 valid = base::Min<u64>(e.size, e.guest_bytes);
     if (other <= base && base + bytes <= other + valid) {
       if ((found && found != &e) || !e.buf || e.image_staging || e.truth ||
@@ -613,7 +613,7 @@ bool MirrorHoldsNewest(u64 base, u64 bytes) {
   bool owned = true;
   for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
        block += kMirrorBlock) {
-    if (g_own && OwnAt(block).cpu_dirty.load(base::memory_order_acquire))
+    if (g_cs.own && OwnAt(block).cpu_dirty.load(base::memory_order_acquire))
       return false;
     owned &= MirrorOwned(block);
   }
@@ -621,7 +621,7 @@ bool MirrorHoldsNewest(u64 base, u64 bytes) {
     return true;
   if (GuestPages().PendingWriteClear(base, base + bytes))
     return false;
-  for (const PendingGuestWrite& w : g_pending_guest_writes)
+  for (const PendingGuestWrite& w : g_cs.pending_guest_writes)
     if (w.base < base + bytes && base < w.end)
       return true;
   return false;
@@ -650,8 +650,8 @@ void MakeComputeBufferReadable(u64 batch, u64 mirror_seq = 0) {
     EndRegion();
     g_frame.list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
                           kAccessAll);
-    covered_batch = g_cs_batch_open ? g_cs_batch_id : g_cs_batch_next_id - 1;
-    covered_mirror = g_mirror_seq;
+    covered_batch = g_cs.batch_open ? g_cs.batch_id : g_cs.batch_next_id - 1;
+    covered_mirror = g_cs.mirror_seq;
   }
 }
 
@@ -664,9 +664,9 @@ bool BindComputeBuffer(u64 base,
   if (!found && MirrorHoldsNewest(base, bytes)) {
     MakeComputeBufferReadable(PendingGuestWriteBatch(base, bytes),
                               MirrorWritten(base, bytes)->seq);
-    if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
-      g_cs_chunk_needs_batch = true;
-    *buffer = g_mirror;
+    if (g_cs.batch_open && !g_cs.batches[g_cs.batch_cur].in_frame)
+      g_cs.chunk_needs_batch = true;
+    *buffer = g_cs.mirror;
     *offset = MirrorOffset(base);
     MirrorFrameRead();
     return true;
@@ -685,7 +685,7 @@ bool BindComputeBuffer(u64 base,
   e.frame_ref = g_frame.num;
   e.chunk_ref = g_frame.chunk_seq;
   if (e.pending_batch)
-    g_cs_chunk_needs_batch = true;
+    g_cs.chunk_needs_batch = true;
   *buffer = e.buf;
   *offset = off;
   return true;
@@ -796,9 +796,10 @@ bool GatherDrawBuffer(u64 base,
 
 void PrepareDirectGuestRead() {
   MakeComputeBufferReadable(
-      g_cs_batch_open ? g_cs_batch_id : g_cs_batch_next_id - 1, g_mirror_seq);
+      g_cs.batch_open ? g_cs.batch_id : g_cs.batch_next_id - 1,
+      g_cs.mirror_seq);
   if (CsBatchOpenOutOfFrame())
-    g_cs_chunk_needs_batch = true;
+    g_cs.chunk_needs_batch = true;
   MirrorFrameRead();
 }
 
@@ -931,7 +932,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   } else if (e.truth) {
     if (!(table = GetTileTable(tiled, linear)))
       return RtRefreshMiss("table");
-    g_cs_scratch_owner++;
+    g_cs.scratch_owner++;
     fresh = true;
     if (!(src = AcquireView(linear.size, base, 0, table, e.write_seq, &fresh)))
       return false;
@@ -992,14 +993,14 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   e.chunk_ref = g_frame.chunk_seq;
   e.last_used_frame = g_frame.num;
   if (e.pending_batch)
-    g_cs_chunk_needs_batch = true;
+    g_cs.chunk_needs_batch = true;
   g_cs_stats.truth_rt_n++;
   return true;
 }
 
 bool CsRefreshRtFromTruth(u64 base) {
-  auto it = g_cs_ranges.find(base);
-  if (it == g_cs_ranges.end())
+  auto it = g_cs.ranges.find(base);
+  if (it == g_cs.ranges.end())
     return RtRefreshMiss("no-range-at-base");
   CsRange& e = it->second;
   if ((!e.truth && !e.image_staging) || !e.gpu_dirty)
@@ -1048,7 +1049,7 @@ bool DetileTextureOnGpu(u64 base,
       linear_in ? nullptr : GetTileTable(tiled, linear, elem < 4);
   if (!linear_in && !table)
     return false;
-  g_cs_scratch_owner++;
+  g_cs.scratch_owner++;
   const u64 raw_bytes = (tiled.size + 3) & ~u64(3);
   rhi::Buffer* raw = AcquireScratch(raw_bytes);
   rhi::Buffer* pixels =
@@ -1099,7 +1100,7 @@ bool CsClearPredicate(u64 address,
   CsRange* const e = BufferSource(address, expand, &range_base);
   bool pending = false;
   if (!GuestPages().PendingWriteClear(address, address + 4))
-    for (const PendingGuestWrite& w : g_pending_guest_writes)
+    for (const PendingGuestWrite& w : g_cs.pending_guest_writes)
       pending |= w.base < address + 4 && address < w.end;
   if (!e && !(pending && MirrorWritten(address, 4) &&
               MirrorFillable(address, expand)))
@@ -1158,14 +1159,14 @@ bool CsClearPredicate(u64 address,
   if (!p.buf || used == kPredicates)
     return false;
   const u32 index = g_frame.slot_idx * kPredicates + used++;
-  rhi::Buffer* const src = e ? e->buf : g_mirror;
+  rhi::Buffer* const src = e ? e->buf : g_cs.mirror;
   const u64 at = e ? address - range_base : MirrorOffset(address);
   const u64 window = at & ~(u64(Device().caps().storage_offset_alignment) - 1);
   EndRegion();
   CsBatchBeginImpl();
-  if (!g_cs_batch_open)
+  if (!g_cs.batch_open)
     return false;
-  rhi::CommandList* const list = g_cs_list;
+  rhi::CommandList* const list = g_cs.list;
   list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessComputeRead);
   list->SetPipeline(p.pipe);
   rhi::BindingWrite writes[2];
@@ -1191,15 +1192,15 @@ bool CsClearPredicate(u64 address,
     e->frame_ref = g_frame.num;
     e->chunk_ref = g_frame.chunk_seq;
     if (e->pending_batch)
-      g_cs_chunk_needs_batch = true;
+      g_cs.chunk_needs_batch = true;
     expanded[address] = revision();
   } else {
     MirrorFill(address, expand, ~0u);
     if (revision().seq)
       expanded[address] = revision();
   }
-  if (!g_cs_batches[g_cs_batch_cur].in_frame)
-    g_cs_chunk_needs_batch = true;
+  if (!g_cs.batches[g_cs.batch_cur].in_frame)
+    g_cs.chunk_needs_batch = true;
   BumpTextureEpoch();
   *predicate = p.buf;
   *offset = u64(index) * 4;

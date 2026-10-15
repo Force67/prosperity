@@ -103,7 +103,7 @@ bool ConvertGuestIndices(Renderer& renderer,
       if (!replacement)
         return false;
       if (g_ring.index_convert_src)
-        g_cs_frame_retired.push_back(g_ring.index_convert_src);
+        g_cs.frame_retired.push_back(g_ring.index_convert_src);
       g_ring.index_convert_src = replacement;
     }
     raw = g_ring.index_convert_src;

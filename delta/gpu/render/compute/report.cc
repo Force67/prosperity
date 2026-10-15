@@ -66,15 +66,15 @@ void CsSyncReport(double frames) {
       g_cs_stats.in_overlap_ns / frames / 1e6, g_cs_stats.in_overlap_n / frames,
       g_cs_stats.in_reshape_ns / frames / 1e6, g_cs_stats.in_reshape_n / frames,
       g_cs_stats.in_alloc_ns / frames / 1e6, g_cs_stats.in_alloc_n / frames,
-      g_cs_stats.recycled_n / frames, g_cs_ranges.size(),
-      g_cs_range_bytes / 1e6, g_cs_stats.in_membuf_ns / frames / 1e6,
+      g_cs_stats.recycled_n / frames, g_cs.ranges.size(),
+      g_cs.range_bytes / 1e6, g_cs_stats.in_membuf_ns / frames / 1e6,
       g_cs_stats.lazy_kept_n / frames,
       g_cs_stats.lazy_kept_bytes / frames / 1e6,
       g_cs_stats.truth_stage_bytes / frames / 1e6,
       g_cs_stats.truth_import_n / frames, g_cs_stats.truth_detile_n / frames,
       g_cs_stats.truth_retile_n / frames, g_cs_stats.truth_parent_n / frames,
       g_cs_stats.truth_fold_n / frames, g_cs_stats.truth_rt_n / frames,
-      g_cs_stats.truth_view_hits / frames, g_cs_scratch_bytes / 1e6);
+      g_cs_stats.truth_view_hits / frames, g_cs.scratch_bytes / 1e6);
   {
     base::String why;
     base::FormatTo(why, "writebacks/frame ({:.1f}MB):",
@@ -120,9 +120,9 @@ void CsSyncReport(double frames) {
   });
   for (size_t i = 0; i < top.size() && i < 8; i++) {
     const StageStat& s = top[i].second;
-    const auto found = g_cs_ranges.find(top[i].first);
+    const auto found = g_cs.ranges.find(top[i].first);
     const ComputeInfo::Res* r =
-        found == g_cs_ranges.end() ? nullptr : &found->second.res;
+        found == g_cs.ranges.end() ? nullptr : &found->second.res;
     BASE_LOGI("cstop",
               "{:#x} {:.1f}MB/f x{:.1f} (first={:.1f} shape={:.1f} hash={:.1f} "
               "rt={:.1f}) wait={:.1f}x {:.1f}ms | {}x{} l={} m={} e={} t={}",
@@ -199,7 +199,7 @@ bool QueueCheck(const char* where) {
 }
 
 bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
-  for (const auto& kv : g_cs_ranges) {
+  for (const auto& kv : g_cs.ranges) {
     const u64 base = kv.first;
     const CsRange& e = kv.second;
     const u64 n = e.guest_bytes ? e.guest_bytes : e.size;
@@ -224,7 +224,7 @@ void ReportGpuMemory() {
   if (!kMemStat || g_frame.num % 300)
     return;
   u64 dirty = 0, truth = 0, cold = 0;
-  for (const auto& [base, e] : g_cs_ranges) {
+  for (const auto& [base, e] : g_cs.ranges) {
     (void)base;
     if (e.gpu_dirty)
       dirty += e.cap;
@@ -253,7 +253,7 @@ void ReportGpuMemory() {
       depth += u64(d.w) * d.h * 5 * d.layers;
   }
   u64 scratch = 0;
-  for (const CsScratch& c : g_cs_scratch)
+  for (const CsScratch& c : g_cs.scratch)
     scratch += c.cap;
   u64 heap_used = 0, heap_budget = 0;
   Device().QueryMemoryBudget(&heap_used, &heap_budget);
@@ -266,8 +266,8 @@ void ReportGpuMemory() {
   BASE_LOGI("memstat",
             "f{} cs ranges={} {:.0f}MB (dirty {:.0f} truth {:.0f} cold {:.0f}) "
             "free {:.0f}MB | rt {} {:.0f}MB parked {:.0f}MB | depth {:.0f}MB",
-            g_frame.num, g_cs_ranges.size(), g_cs_range_bytes / kMb,
-            dirty / kMb, truth / kMb, cold / kMb, g_cs_free_bytes / kMb,
+            g_frame.num, g_cs.ranges.size(), g_cs.range_bytes / kMb,
+            dirty / kMb, truth / kMb, cold / kMb, g_cs.free_bytes / kMb,
             g_rts.size(), rt / kMb, rt_parked / kMb, depth / kMb);
 }
 
