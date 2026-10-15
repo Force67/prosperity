@@ -54,45 +54,22 @@ bool CsSyncReporting() {
   return kCsSyncReport && gpu::render::g_frame.num >= kCsSyncFrom;
 }
 
-u64 g_tex_bridge_n = 0, g_tex_bridge_bytes = 0, g_cs_chunk_splits = 0;
-u64 g_buf_bridge_n = 0, g_buf_bridge_bytes = 0, g_buf_bridge_declined = 0;
-u64 g_vtx_bridge_n = 0;
-u64 g_guest_override_n = 0, g_guest_mirror_tiles = 0, g_cs_rt_variants_made = 0;
-u64 g_gds_imported_n = 0, g_guest_misses_n = 0, g_cs_indirect_n = 0;
-u64 g_indirect_staged_n = 0;
 rhi::Buffer* g_indirect_ring = nullptr;
 u64 g_indirect_head = 0, g_indirect_frame_n = 0;
 int g_indirect_frame = -1;
 rhi::Buffer* g_predicate = nullptr;
 u64 g_predicate_offset = 0;
-u64 g_stage_ro_bytes = 0, g_stage_rw_bytes = 0, g_stage_img_bytes = 0;
-u64 g_stage_guest_detile_bytes = 0, g_stage_guest_detile_n = 0;
-u64 g_mirror_wb_bytes = 0, g_mirror_wb_n = 0, g_mirror_own_bytes = 0;
 base::Atomic<u64> g_mirror_resolves{0};
 base::HashSet<u64> g_mirror_cached;
 base::Vector<base::Pair<u64, u64>> g_mirror_stale;
 base::HashSet<u64> g_mirror_hot;
 base::HashSet<u64> g_mirror_was_owned;
-base::Map<u64, u64> g_mirror_wb_union;
 DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", true);
 DELTA_OPTION(bool, kCsListProf, "DELTA_GPU_LISTPROF", false);
-u64 g_in_hash_ns = 0, g_in_detile_ns = 0, g_in_rt_ns = 0, g_in_copy_ns = 0;
-u64 g_in_hash_n = 0, g_in_rt_n = 0, g_in_wt_skips = 0;
-u64 g_in_hash_bytes = 0, g_wb_hash_bytes = 0, g_wb_hash_ns = 0;
-u64 g_in_overlap_ns = 0, g_in_reshape_ns = 0, g_in_alloc_ns = 0;
-u64 g_in_membuf_ns = 0;
-u64 g_in_overlap_n = 0, g_in_reshape_n = 0, g_in_alloc_n = 0;
-u64 g_truth_stage_bytes = 0, g_truth_import_n = 0, g_truth_detile_n = 0,
-    g_truth_retile_n = 0, g_truth_parent_n = 0, g_truth_fold_n = 0,
-    g_truth_rt_n = 0;
-base::Map<base::String, u64> g_wb_why;
-u64 g_wb_why_bytes = 0;
-u64 g_lazy_kept_n = 0, g_lazy_kept_bytes = 0;
-u64 g_out_rt_submits = 0;
-
-base::HashMap<u64, StageStat> g_stage_stats;
 
 static_assert(ComputeInfo::kMaxResources == gcn::kMaxCsResources);
+
+CsStats g_cs_stats;
 
 GdsBuffer g_gds;
 
@@ -262,7 +239,7 @@ struct CsFreeBuffer {
   bool device_local = false;
 };
 base::Vector<CsFreeBuffer> g_cs_free;
-u64 g_cs_free_bytes = 0, g_cs_recycled_n = 0;
+u64 g_cs_free_bytes = 0;
 
 bool EnsureGdsBuffer() {
   if (g_gds.buf)
@@ -350,7 +327,7 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
     g_cs_free_bytes -= cap;
     g_cs_free.erase(g_cs_free.begin() + i);
     g_cs_range_bytes += cap;
-    g_cs_recycled_n++;
+    g_cs_stats.recycled_n++;
     return true;
   }
   u32 usage = rhi::kBufferStorage | rhi::kBufferUniform | rhi::kBufferCopyDst |
@@ -455,9 +432,7 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_mirror_stale);
   guest::ResetResource(g_mirror_hot);
   guest::ResetResource(g_mirror_was_owned);
-  guest::ResetResource(g_mirror_wb_union);
-  guest::ResetResource(g_wb_why);
-  guest::ResetResource(g_stage_stats);
+  guest::ResetResource(g_cs_stats);
   guest::ResetResource(g_gds);
   guest::ResetResource(g_cs_pipes);
   guest::ResetResource(g_prebuilt);
@@ -491,14 +466,11 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_cs_batch_cur);
   guest::ResetResource(g_cs_batch_log);
   guest::ResetResource(g_cs_timestamps);
-  guest::ResetResource(g_cs_gpu_times);
   guest::ResetResource(g_cs_heavy);
   guest::ResetResource(g_cs_heavy_sampled);
   guest::ResetResource(g_cs_batch_access);
   guest::ResetResource(g_cs_batches);
   guest::ResetResource(g_cs_chunk_needs_batch);
-  guest::ResetResource(g_cs_reader_waits);
-  guest::ResetResource(g_cs_reader_wbs);
   guest::ResetResource(g_submitted);
   guest::ResetResource(g_last_submitted_id);
   guest::ResetResource(g_guest_page_imports);

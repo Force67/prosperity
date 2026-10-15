@@ -191,8 +191,8 @@ bool CsSupplyTextureParts(u64 base,
               parts.size(), tiled.mip_levels, tiled.size);
   checked = {base, key, epoch, revision, g_frame.num};
   *seq = revision;
-  g_tex_bridge_n++;
-  g_tex_bridge_bytes += tiled.size;
+  g_cs_stats.tex_bridge_n++;
+  g_cs_stats.tex_bridge_bytes += tiled.size;
   return true;
 }
 
@@ -369,8 +369,8 @@ bool CsSupplyTexture(u64 base,
   e.chunk_ref = g_frame.chunk_seq;
   if (e.pending_batch)
     g_cs_chunk_needs_batch = true;
-  g_tex_bridge_n++;
-  g_tex_bridge_bytes += e.size;
+  g_cs_stats.tex_bridge_n++;
+  g_cs_stats.tex_bridge_bytes += e.size;
   return true;
 }
 
@@ -474,8 +474,8 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
     if (!RecordGuestRead(list, base, bytes, dst, dst_off))
       return false;
     list->Barrier(rhi::kAccessCopyWrite, kAccessAll);
-    g_buf_bridge_n++;
-    g_buf_bridge_bytes += bytes;
+    g_cs_stats.buf_bridge_n++;
+    g_cs_stats.buf_bridge_bytes += bytes;
     return true;
   }
   if (!found || !dst)
@@ -484,7 +484,7 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   const u64 off = base - range_base;
   CollectGuestWrites();
   if (!e.staged_clean) {
-    g_buf_bridge_declined++;
+    g_cs_stats.buf_bridge_declined++;
     return false;
   }
   e.last_used_frame = g_frame.num;
@@ -498,8 +498,8 @@ bool CsSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
   e.chunk_ref = g_frame.chunk_seq;
   if (e.pending_batch)
     g_cs_chunk_needs_batch = true;
-  g_buf_bridge_n++;
-  g_buf_bridge_bytes += bytes;
+  g_cs_stats.buf_bridge_n++;
+  g_cs_stats.buf_bridge_bytes += bytes;
   return true;
 }
 
@@ -532,7 +532,7 @@ bool CsSupplyTextureFromBuffer(u64 base,
   const u64 off = base - range_base;
   CollectGuestWrites();
   if (!e.staged_clean) {
-    g_buf_bridge_declined++;
+    g_cs_stats.buf_bridge_declined++;
     return false;
   }
   rhi::BufferTextureCopy copies[16];
@@ -577,8 +577,8 @@ bool CsSupplyTextureFromBuffer(u64 base,
   e.chunk_ref = g_frame.chunk_seq;
   if (e.pending_batch)
     g_cs_chunk_needs_batch = true;
-  g_tex_bridge_n++;
-  g_tex_bridge_bytes += tiled.size;
+  g_cs_stats.tex_bridge_n++;
+  g_cs_stats.tex_bridge_bytes += tiled.size;
   return true;
 }
 
@@ -677,7 +677,7 @@ bool BindComputeBuffer(u64 base,
   const u64 off = base - range_base;
   CollectGuestWrites();
   if (!e.staged_clean) {
-    g_buf_bridge_declined++;
+    g_cs_stats.buf_bridge_declined++;
     return false;
   }
   MakeComputeBufferReadable(e.batch_id);
@@ -812,7 +812,7 @@ bool CsResidentGeometryBuffer(u64 base,
   CsRange* found = VertexSource(base, bytes, &range_base);
   const bool bound =
       BindComputeBuffer(base, bytes, found, range_base, buffer, offset);
-  g_vtx_bridge_n += bound;
+  g_cs_stats.vtx_bridge_n += bound;
   return bound;
 }
 
@@ -821,7 +821,7 @@ bool CsGeometryBuffer(u64 base, u64 bytes, rhi::Buffer** buffer, u64* offset) {
     return true;
   const bool bound =
       kCsVtxBridge && GatherDrawBuffer(base, bytes, buffer, offset);
-  g_vtx_bridge_n += bound;
+  g_cs_stats.vtx_bridge_n += bound;
   return bound;
 }
 
@@ -888,7 +888,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
     if (FormatBytes(fmt) == r.elem_bytes &&
         ActivateRtVariantAs(base, r.width, r.height, fmt)) {
       rt_it = g_rts.find(base);
-      g_cs_rt_variants_made++;
+      g_cs_stats.rt_variants_made++;
     }
   }
   RTarget& rt = rt_it->second;
@@ -993,7 +993,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   e.last_used_frame = g_frame.num;
   if (e.pending_batch)
     g_cs_chunk_needs_batch = true;
-  g_truth_rt_n++;
+  g_cs_stats.truth_rt_n++;
   return true;
 }
 

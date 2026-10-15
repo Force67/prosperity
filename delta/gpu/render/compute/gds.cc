@@ -99,14 +99,14 @@ bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes) {
     if (!GpuWriteGuest(dst, bytes, g_gds.buf, offset) || !CsBatchSubmit())
       return false;
     InvalidateTexRange(dst, bytes);
-    g_gds_imported_n++;
+    g_cs_stats.gds_imported_n++;
     return true;
   }
   if (MirrorOwnsAny(dst, dst + bytes)) {
     if (!GpuWriteGuest(dst, bytes, g_gds.buf, offset))
       return false;
     InvalidateTexRange(dst, bytes);
-    g_gds_imported_n++;
+    g_cs_stats.gds_imported_n++;
     return true;
   }
   rhi::Buffer* target = ImportGuestPage(page);
@@ -123,7 +123,7 @@ bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes) {
   NotePendingGuestWrite(dst, dst + bytes);
   NoteGuestWrite(dst, bytes);
   InvalidateTexRange(dst, bytes);
-  g_gds_imported_n++;
+  g_cs_stats.gds_imported_n++;
   return true;
 }
 

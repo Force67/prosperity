@@ -196,7 +196,6 @@ void RecordImageTiling(rhi::CommandList* c,
 }
 
 base::Vector<CsScratch> g_cs_scratch;
-u64 g_truth_view_hits = 0;
 
 rhi::Buffer* AcquireView(u64 bytes,
                          u64 base,
@@ -209,7 +208,7 @@ rhi::Buffer* AcquireView(u64 bytes,
         s.view_seq == seq && s.cap >= bytes) {
       s.owner = g_cs_scratch_owner;
       s.last_frame = g_frame.num;
-      g_truth_view_hits++;
+      g_cs_stats.truth_view_hits++;
       *fresh = false;
       return s.buf;
     }

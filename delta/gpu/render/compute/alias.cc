@@ -146,7 +146,6 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
 bool g_cs_failed = false;
 
 base::Vector<BridgeFloatImage> g_bridge_float_images;
-u64 g_in_frame_bridge_n = 0;
 
 bool BlitsBetween(rhi::Format a, rhi::Format b) {
   static base::HashMap<u64, bool> known;
@@ -316,7 +315,7 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   AliasedImageBarrier(c, img, kSrc, t.layout);
   c->Barrier(rhi::kAccessCopyWrite, kAccessAll);
   e.frame_ref = g_frame.num;
-  g_in_frame_bridge_n++;
+  g_cs_stats.in_frame_bridge_n++;
   return CsSplitFrameChunk();
 }
 
@@ -411,7 +410,7 @@ bool RecordRtUploadInFrame(const InFrameTarget& t,
   e.frame_ref = g_frame.num;
   if (e.pending_batch && g_frame.recording)
     g_cs_chunk_needs_batch = true;
-  g_in_frame_bridge_n++;
+  g_cs_stats.in_frame_bridge_n++;
   return true;
 }
 

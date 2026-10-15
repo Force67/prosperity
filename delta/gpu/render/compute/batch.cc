@@ -37,10 +37,8 @@ void NotePendingGuestWrite(u64 base, u64 end) {
 }
 u64 g_publish_batch = 0;
 u32 g_cs_batch_cur = 0;
-u64 g_cs_submit_n = 0;
 base::Vector<BatchedDispatch> g_cs_batch_log;
 rhi::TimestampPool* g_cs_timestamps = nullptr;
-base::HashMap<u64, CsGpuTime> g_cs_gpu_times;
 DELTA_OPTION(u32, kCsHeavyUs, "DELTA_GPU_CS_ISOLATE_HEAVY", 4000);
 base::HashSet<u64> g_cs_heavy;
 base::HashMap<u64, int> g_cs_heavy_sampled;
@@ -123,7 +121,7 @@ void CsBatchFinalize(CsBatch& b) {
           g_cs_heavy.erase(b.log[i].cs_addr);
       }
       if (CsSyncReporting()) {
-        auto& time = g_cs_gpu_times[b.log[i].cs_addr];
+        auto& time = g_cs_stats.gpu_times[b.log[i].cs_addr];
         time.ns += elapsed_ns(i);
         ++time.count;
       }
@@ -165,11 +163,7 @@ void CsBatchReap() {
 }
 
 bool g_cs_chunk_needs_batch = false;
-u64 g_cs_sync_n[kSyncCount] = {};
-u64 g_cs_sync_ns[kSyncCount] = {};
 const char* g_cs_wait_reader = "other";
-base::Map<base::String, base::Pair<u64, u64>> g_cs_reader_waits;
-base::Map<base::String, base::Pair<u64, u64>> g_cs_reader_wbs;
 
 void CsBatchBeginImpl() {
   if (g_cs_batch_open) {
@@ -188,8 +182,8 @@ void CsBatchBeginImpl() {
       CsBatchLogFault(b, "wait");
     CsBatchFinalize(b);
     g_stats.ns_cs_gpu += NowNs() - t0;
-    g_cs_sync_n[kSyncRingFull]++;
-    g_cs_sync_ns[kSyncRingFull] += NowNs() - t0;
+    g_cs_stats.sync_n[kSyncRingFull]++;
+    g_cs_stats.sync_ns[kSyncRingFull] += NowNs() - t0;
   }
   g_cs_timestamps = b.timestamps;
   b.id = g_cs_batch_next_id++;
@@ -220,7 +214,6 @@ void CsBatchBeginImpl() {
   g_cs_batch_open = true;
 }
 
-u64 g_submit_why[6] = {};
 base::Mutex g_batch_ids_lock;
 base::ConditionVariable g_batch_ids_wake;
 SubmittedBatch g_submitted[64];
@@ -270,7 +263,7 @@ bool CsBatchSubmit() {
   g_cs_chunk_needs_batch = false;
   g_cs_batch_count = 0;
   g_cs_batch_access.clear();
-  g_cs_submit_n++;
+  g_cs_stats.submit_n++;
   if (b.submission <= before) {
     CsBatchLogFault(b, "submit");
     return false;
@@ -289,7 +282,7 @@ bool CsBatchWaitId(u64 id, CsSyncWhy why) {
   if (!id || id <= g_cs_batch_done)
     return true;
   if (g_cs_batch_open && id >= g_cs_batch_id &&
-      (++g_submit_why[0], !CsBatchSubmit()))
+      (++g_cs_stats.submit_why[0], !CsBatchSubmit()))
     return false;
   const u64 t0 = NowNs();
   for (;;) {
@@ -306,10 +299,10 @@ bool CsBatchWaitId(u64 id, CsSyncWhy why) {
     CsBatchFinalize(*oldest);
   }
   g_stats.ns_cs_gpu += NowNs() - t0;
-  g_cs_sync_n[why]++;
-  g_cs_sync_ns[why] += NowNs() - t0;
+  g_cs_stats.sync_n[why]++;
+  g_cs_stats.sync_ns[why] += NowNs() - t0;
   if (CsSyncReporting()) {
-    auto& waits = g_cs_reader_waits[g_cs_wait_reader];
+    auto& waits = g_cs_stats.reader_waits[g_cs_wait_reader];
     waits.first++;
     waits.second += NowNs() - t0;
   }
@@ -345,11 +338,11 @@ base::Vector<u64> DirtyBases(bool ordered) {
 bool CsSplitFrameChunk() {
   if (g_cs_in_frame && g_frame.recording)
     return true;
-  if (g_cs_chunk_needs_batch && (++g_submit_why[1], !CsBatchSubmit()))
+  if (g_cs_chunk_needs_batch && (++g_cs_stats.submit_why[1], !CsBatchSubmit()))
     return false;
   if (!SubmitFrameChunk())
     return false;
-  g_cs_chunk_splits++;
+  g_cs_stats.chunk_splits++;
   return true;
 }
 
@@ -423,7 +416,7 @@ u64 SubmitRecordedWork() {
 
 void SubmitForPublishedLabels() {
   if (g_cs_batch_open && g_publish_batch >= g_cs_batch_id) {
-    ++g_submit_why[2];
+    ++g_cs_stats.submit_why[2];
     CsBatchSubmit();
   }
 }

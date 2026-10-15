@@ -23,7 +23,7 @@ extern u64 g_tex_image_bytes;
 void CsSyncReport(double frames) {
   if (CsSyncReporting() && frames > 0) {
     base::Vector<base::Pair<u64, CsGpuTime>> times;
-    for (const auto& [base, time] : g_cs_gpu_times)
+    for (const auto& [base, time] : g_cs_stats.gpu_times)
       times.push_back({base, time});
     base::Sort(times.begin(), times.end(), [](const auto& a, const auto& b) {
       return a.second.ns > b.second.ns;
@@ -32,14 +32,14 @@ void CsSyncReport(double frames) {
       BASE_LOGI("cstime", "CS {:#x} {:.2f}ms/f x{:.1f}", times[i].first,
                 times[i].second.ns / frames / 1e6,
                 double(times[i].second.count) / frames);
-    g_cs_gpu_times.clear();
+    g_cs_stats.gpu_times.clear();
   }
   u64 total = 0;
   for (int i = 0; i < kSyncCount; i++)
-    total += g_cs_sync_n[i];
+    total += g_cs_stats.sync_n[i];
   if (!CsSyncReporting() || !total) {
     for (int i = 0; i < kSyncCount; i++)
-      g_cs_sync_n[i] = g_cs_sync_ns[i] = 0;
+      g_cs_stats.sync_n[i] = g_cs_stats.sync_ns[i] = 0;
     return;
   }
   BASE_LOGI("csin",
@@ -47,52 +47,45 @@ void CsSyncReport(double frames) {
             "wb-hash={:.1f}ms {:.1f}MB detile={:.1f}ms "
             "rt-bridge={:.1f}ms x{:.1f} (in-frame x{:.1f}) copy={:.1f}ms "
             "tracked-clean={:.1f}x",
-            g_in_hash_ns / frames / 1e6, g_in_hash_n / frames,
-            g_in_hash_bytes / frames / 1e6, g_wb_hash_ns / frames / 1e6,
-            g_wb_hash_bytes / frames / 1e6, g_in_detile_ns / frames / 1e6,
-            g_in_rt_ns / frames / 1e6, g_in_rt_n / frames,
-            g_in_frame_bridge_n / frames, g_in_copy_ns / frames / 1e6,
-            g_in_wt_skips / frames);
-  g_in_hash_ns = g_in_detile_ns = g_in_rt_ns = g_in_copy_ns = 0;
-  g_in_hash_n = g_in_rt_n = g_in_frame_bridge_n = g_in_wt_skips = 0;
-  g_in_hash_bytes = g_wb_hash_bytes = g_wb_hash_ns = 0;
-  BASE_LOGI("csin2",
-            "overlap-wb={:.1f}ms x{:.1f} reshape-wb={:.1f}ms x{:.1f} "
-            "alloc={:.1f}ms x{:.1f} recycled={:.1f} ranges={} {:.0f}MB "
-            "membuf={:.1f}ms lazy-kept={:.1f}x {:.1f}MB | truth stage={:.1f}MB "
-            "import={:.1f} detile={:.1f} retile={:.1f} parent={:.1f} "
-            "fold={:.1f} rt={:.1f} view-hits={:.1f} scratch={:.0f}MB",
-            g_in_overlap_ns / frames / 1e6, g_in_overlap_n / frames,
-            g_in_reshape_ns / frames / 1e6, g_in_reshape_n / frames,
-            g_in_alloc_ns / frames / 1e6, g_in_alloc_n / frames,
-            g_cs_recycled_n / frames, g_cs_ranges.size(),
-            g_cs_range_bytes / 1e6, g_in_membuf_ns / frames / 1e6,
-            g_lazy_kept_n / frames, g_lazy_kept_bytes / frames / 1e6,
-            g_truth_stage_bytes / frames / 1e6, g_truth_import_n / frames,
-            g_truth_detile_n / frames, g_truth_retile_n / frames,
-            g_truth_parent_n / frames, g_truth_fold_n / frames,
-            g_truth_rt_n / frames, g_truth_view_hits / frames,
-            g_cs_scratch_bytes / 1e6);
-  g_truth_view_hits = 0;
+            g_cs_stats.in_hash_ns / frames / 1e6, g_cs_stats.in_hash_n / frames,
+            g_cs_stats.in_hash_bytes / frames / 1e6,
+            g_cs_stats.wb_hash_ns / frames / 1e6,
+            g_cs_stats.wb_hash_bytes / frames / 1e6,
+            g_cs_stats.in_detile_ns / frames / 1e6,
+            g_cs_stats.in_rt_ns / frames / 1e6, g_cs_stats.in_rt_n / frames,
+            g_cs_stats.in_frame_bridge_n / frames,
+            g_cs_stats.in_copy_ns / frames / 1e6,
+            g_cs_stats.in_wt_skips / frames);
+  BASE_LOGI(
+      "csin2",
+      "overlap-wb={:.1f}ms x{:.1f} reshape-wb={:.1f}ms x{:.1f} "
+      "alloc={:.1f}ms x{:.1f} recycled={:.1f} ranges={} {:.0f}MB "
+      "membuf={:.1f}ms lazy-kept={:.1f}x {:.1f}MB | truth stage={:.1f}MB "
+      "import={:.1f} detile={:.1f} retile={:.1f} parent={:.1f} "
+      "fold={:.1f} rt={:.1f} view-hits={:.1f} scratch={:.0f}MB",
+      g_cs_stats.in_overlap_ns / frames / 1e6, g_cs_stats.in_overlap_n / frames,
+      g_cs_stats.in_reshape_ns / frames / 1e6, g_cs_stats.in_reshape_n / frames,
+      g_cs_stats.in_alloc_ns / frames / 1e6, g_cs_stats.in_alloc_n / frames,
+      g_cs_stats.recycled_n / frames, g_cs_ranges.size(),
+      g_cs_range_bytes / 1e6, g_cs_stats.in_membuf_ns / frames / 1e6,
+      g_cs_stats.lazy_kept_n / frames,
+      g_cs_stats.lazy_kept_bytes / frames / 1e6,
+      g_cs_stats.truth_stage_bytes / frames / 1e6,
+      g_cs_stats.truth_import_n / frames, g_cs_stats.truth_detile_n / frames,
+      g_cs_stats.truth_retile_n / frames, g_cs_stats.truth_parent_n / frames,
+      g_cs_stats.truth_fold_n / frames, g_cs_stats.truth_rt_n / frames,
+      g_cs_stats.truth_view_hits / frames, g_cs_scratch_bytes / 1e6);
   {
     base::String why;
-    base::FormatTo(
-        why, "writebacks/frame ({:.1f}MB):", g_wb_why_bytes / frames / 1e6);
-    for (const auto& kv : g_wb_why)
+    base::FormatTo(why, "writebacks/frame ({:.1f}MB):",
+                   g_cs_stats.wb_why_bytes / frames / 1e6);
+    for (const auto& kv : g_cs_stats.wb_why)
       base::FormatTo(why, " {}={:.1f}", kv.first.c_str(), kv.second / frames);
     BASE_LOGI("cswb", "{}", why.c_str());
-    g_wb_why.clear();
-    g_wb_why_bytes = 0;
   }
-  g_in_overlap_ns = g_in_reshape_ns = g_in_alloc_ns = 0;
-  g_in_membuf_ns = 0;
-  g_in_overlap_n = g_in_reshape_n = g_in_alloc_n = g_cs_recycled_n = 0;
-  g_truth_stage_bytes = g_truth_import_n = g_truth_detile_n = 0;
-  g_truth_retile_n = g_truth_parent_n = g_truth_fold_n = g_truth_rt_n = 0;
-  g_lazy_kept_n = g_lazy_kept_bytes = 0;
   if (kMirror) {
     u64 uni = 0, lo = 0, hi = 0;
-    for (const auto& [b0, e0] : g_mirror_wb_union) {
+    for (const auto& [b0, e0] : g_cs_stats.mirror_wb_union) {
       if (b0 > hi) {
         uni += hi - lo;
         lo = b0;
@@ -102,27 +95,24 @@ void CsSyncReport(double frames) {
       }
     }
     uni += hi - lo;
-    g_mirror_wb_union.clear();
     BASE_LOGI("csstage",
               "mirror write-back {:.1f}MB x{:.1f} per frame, "
               "{:.1f}MB distinct; kept {:.1f}MB, {:.1f} faults",
-              g_mirror_wb_bytes / frames / 1e6, g_mirror_wb_n / frames,
-              uni / frames / 1e6, g_mirror_own_bytes / frames / 1e6,
+              g_cs_stats.mirror_wb_bytes / frames / 1e6,
+              g_cs_stats.mirror_wb_n / frames, uni / frames / 1e6,
+              g_cs_stats.mirror_own_bytes / frames / 1e6,
               g_mirror_resolves.exchange(0) / frames);
-    g_mirror_own_bytes = 0;
   }
-  g_mirror_wb_bytes = g_mirror_wb_n = 0;
   BASE_LOGI("csstage",
             "per frame ro={:.1f}MB rw={:.1f}MB img={:.1f}MB (guest-detile "
             "{:.1f}MB x{:.1f})",
-            g_stage_ro_bytes / frames / 1e6, g_stage_rw_bytes / frames / 1e6,
-            g_stage_img_bytes / frames / 1e6,
-            g_stage_guest_detile_bytes / frames / 1e6,
-            g_stage_guest_detile_n / frames);
-  g_stage_ro_bytes = g_stage_rw_bytes = g_stage_img_bytes = 0;
-  g_stage_guest_detile_bytes = g_stage_guest_detile_n = 0;
+            g_cs_stats.stage_ro_bytes / frames / 1e6,
+            g_cs_stats.stage_rw_bytes / frames / 1e6,
+            g_cs_stats.stage_img_bytes / frames / 1e6,
+            g_cs_stats.stage_guest_detile_bytes / frames / 1e6,
+            g_cs_stats.stage_guest_detile_n / frames);
   base::Vector<base::Pair<u64, StageStat>> top;
-  for (const auto& [base, stat] : g_stage_stats)
+  for (const auto& [base, stat] : g_cs_stats.stage_stats)
     top.push_back({base, stat});
   base::Sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
     return a.second.bytes + a.second.wait_ns / 8 >
@@ -143,61 +133,51 @@ void CsSyncReport(double frames) {
               r ? r->mip_levels : 0, r ? r->elem_bytes : 0,
               r ? r->tiling_idx : 0);
   }
-  g_stage_stats.clear();
-  BASE_LOGI("csout",
-            "rt-upload={:.1f}x "
-            "texbridge={:.1f}x {:.1f}MB bufbridge={:.1f}x {:.1f}MB "
-            "(declined {:.1f}) vtxbridge={:.1f}x chunks={:.1f} "
-            "guest-override={:.1f}x "
-            "mirror-tiles={:.1f}x rt-variants={:.1f}x gds-imported={:.1f}x "
-            "guest-misses={:.1f}x gpu-indirect={:.1f}x staged-indirect={:.1f}x",
-            g_out_rt_submits / frames, g_tex_bridge_n / frames,
-            g_tex_bridge_bytes / frames / 1e6, g_buf_bridge_n / frames,
-            g_buf_bridge_bytes / frames / 1e6, g_buf_bridge_declined / frames,
-            g_vtx_bridge_n / frames, g_cs_chunk_splits / frames,
-            g_guest_override_n / frames, g_guest_mirror_tiles / frames,
-            g_cs_rt_variants_made / frames, g_gds_imported_n / frames,
-            g_guest_misses_n / frames, g_cs_indirect_n / frames,
-            g_indirect_staged_n / frames);
-  g_guest_override_n = 0;
-  g_indirect_staged_n = 0;
-  g_guest_mirror_tiles = g_cs_rt_variants_made = g_gds_imported_n = 0;
-  g_guest_misses_n = g_cs_indirect_n = 0;
-  g_buf_bridge_n = g_buf_bridge_bytes = g_buf_bridge_declined = 0;
-  g_vtx_bridge_n = 0;
-  g_tex_bridge_n = g_tex_bridge_bytes = g_cs_chunk_splits = 0;
-  g_out_rt_submits = 0;
+  BASE_LOGI(
+      "csout",
+      "rt-upload={:.1f}x "
+      "texbridge={:.1f}x {:.1f}MB bufbridge={:.1f}x {:.1f}MB "
+      "(declined {:.1f}) vtxbridge={:.1f}x chunks={:.1f} "
+      "guest-override={:.1f}x "
+      "mirror-tiles={:.1f}x rt-variants={:.1f}x gds-imported={:.1f}x "
+      "guest-misses={:.1f}x gpu-indirect={:.1f}x staged-indirect={:.1f}x",
+      g_cs_stats.out_rt_submits / frames, g_cs_stats.tex_bridge_n / frames,
+      g_cs_stats.tex_bridge_bytes / frames / 1e6,
+      g_cs_stats.buf_bridge_n / frames,
+      g_cs_stats.buf_bridge_bytes / frames / 1e6,
+      g_cs_stats.buf_bridge_declined / frames, g_cs_stats.vtx_bridge_n / frames,
+      g_cs_stats.chunk_splits / frames, g_cs_stats.guest_override_n / frames,
+      g_cs_stats.guest_mirror_tiles / frames,
+      g_cs_stats.rt_variants_made / frames, g_cs_stats.gds_imported_n / frames,
+      g_cs_stats.guest_misses_n / frames, g_cs_stats.indirect_n / frames,
+      g_cs_stats.indirect_staged_n / frames);
   base::String syncs;
   base::FormatTo(syncs, "{:.1f} syncs/frame ({:.1f} submits):", total / frames,
-                 g_cs_submit_n / frames);
-  g_cs_submit_n = 0;
+                 g_cs_stats.submit_n / frames);
   for (int i = 0; i < kSyncCount; i++) {
-    if (!g_cs_sync_n[i])
+    if (!g_cs_stats.sync_n[i])
       continue;
     base::FormatTo(syncs, " {}={:.1f}({:.1f}ms)", kCsSyncName[i],
-                   g_cs_sync_n[i] / frames, g_cs_sync_ns[i] / frames / 1e6);
-    g_cs_sync_n[i] = 0;
-    g_cs_sync_ns[i] = 0;
+                   g_cs_stats.sync_n[i] / frames,
+                   g_cs_stats.sync_ns[i] / frames / 1e6);
   }
   base::FormatTo(syncs, " | by reader:");
-  for (const auto& [reader, w] : g_cs_reader_waits)
+  for (const auto& [reader, w] : g_cs_stats.reader_waits)
     base::FormatTo(syncs, " {}={:.1f}({:.1f}ms)", reader.c_str(),
                    w.first / frames, w.second / frames / 1e6);
-  g_cs_reader_waits.clear();
   base::FormatTo(syncs, " | writebacks:");
-  for (const auto& [reader, w] : g_cs_reader_wbs)
+  for (const auto& [reader, w] : g_cs_stats.reader_wbs)
     base::FormatTo(syncs, " {}={:.1f}({:.1f}ms)", reader.c_str(),
                    w.first / frames, w.second / frames / 1e6);
-  g_cs_reader_wbs.clear();
-  base::FormatTo(syncs,
-                 " | submits: wait={:.1f} chunk={:.1f} label={:.1f} "
-                 "heavy={:.1f} cap={:.1f} end={:.1f}",
-                 g_submit_why[0] / frames, g_submit_why[1] / frames,
-                 g_submit_why[2] / frames, g_submit_why[3] / frames,
-                 g_submit_why[4] / frames, g_submit_why[5] / frames);
-  for (u64& n : g_submit_why)
-    n = 0;
+  base::FormatTo(
+      syncs,
+      " | submits: wait={:.1f} chunk={:.1f} label={:.1f} "
+      "heavy={:.1f} cap={:.1f} end={:.1f}",
+      g_cs_stats.submit_why[0] / frames, g_cs_stats.submit_why[1] / frames,
+      g_cs_stats.submit_why[2] / frames, g_cs_stats.submit_why[3] / frames,
+      g_cs_stats.submit_why[4] / frames, g_cs_stats.submit_why[5] / frames);
   BASE_LOGI("cssync", "{}", syncs.c_str());
+  g_cs_stats = {};
 }
 
 DELTA_OPTION(bool, kQueueCheck, "DELTA_GPU_QCHECK", false);

@@ -339,7 +339,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
     const u64 resolves = gpu::render::cs::g_mirror_resolves.load();
-    const u64 copies = gpu::render::cs::g_buf_bridge_bytes;
+    const u64 copies = gpu::render::cs::g_cs_stats.buf_bridge_bytes;
     const u64 cpu_copies = gpu::g_stats.ring_raw_bytes;
     const u64 cpu_constants = gpu::g_stats.ring_cb_bytes;
     const u64 bound = gpu::g_stats.bind_bytes;
@@ -371,7 +371,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
       ASSERT_TRUE(gpu::render::Dispatch(renderer, ci));
     cb_draw.viewport_x_offset = 12;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, cb_draw));
-    EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, copies);
+    EXPECT_EQ(gpu::render::cs::g_cs_stats.buf_bridge_bytes, copies);
     EXPECT_EQ(gpu::g_stats.ring_raw_bytes, cpu_copies);
     EXPECT_EQ(gpu::g_stats.ring_cb_bytes, cpu_constants);
     EXPECT_EQ(gpu::g_stats.bind_bytes,
@@ -417,7 +417,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
               latest_revision);
     ASSERT_TRUE(gpu::render::MirrorOwned(base + gpu::render::kMirrorBlock));
     const u64 mixed_resolves = gpu::render::cs::g_mirror_resolves.load();
-    const u64 mixed_copies = gpu::render::cs::g_buf_bridge_bytes;
+    const u64 mixed_copies = gpu::render::cs::g_cs_stats.buf_bridge_bytes;
     const u64 mixed_cpu_raw = gpu::g_stats.ring_raw_bytes;
     const u64 mixed_cpu_cb = gpu::g_stats.ring_cb_bytes;
     gpu::render::DrawInfo mixed = imported;
@@ -459,7 +459,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     ASSERT_NE(readback, nullptr);
     u64 texture_revision = 0;
     auto texture_state = gpu::rhi::TextureState::kUndefined;
-    const u64 texture_copies = gpu::render::cs::g_tex_bridge_bytes;
+    const u64 texture_copies = gpu::render::cs::g_cs_stats.tex_bridge_bytes;
     const auto supply_texture = [&](u32 pass) {
       if (!gpu::render::MirrorSupplyTexture(base, layout, layout, texture,
                                             texture_state, &texture_revision))
@@ -514,10 +514,10 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     EXPECT_EQ(gpu::g_stats.ring_raw_bytes, mixed_cpu_raw);
     EXPECT_EQ(gpu::g_stats.ring_cb_bytes, mixed_cpu_cb);
     EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), mixed_resolves);
-    EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes,
+    EXPECT_EQ(gpu::render::cs::g_cs_stats.buf_bridge_bytes,
               mixed_copies + (tracked ? 1 : 2) * DirectMemory::kBytes +
                   2 * gpu::render::kCbufWindow);
-    EXPECT_EQ(gpu::render::cs::g_tex_bridge_bytes,
+    EXPECT_EQ(gpu::render::cs::g_cs_stats.tex_bridge_bytes,
               texture_copies + 2 * layout.size);
     gpu::render::EndFrame(renderer, mixed.rt_base);
     ASSERT_TRUE(gpu::render::Device().Wait(mixed_slot.submission));
@@ -603,7 +603,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     const u64 resolves = gpu::render::cs::g_mirror_resolves.load();
     const u64 cpu_vertices = gpu::g_stats.ring_vb_bytes;
     const u64 cpu_indices = gpu::g_stats.ring_ib_bytes;
-    const u64 copies = gpu::render::cs::g_buf_bridge_bytes;
+    const u64 copies = gpu::render::cs::g_cs_stats.buf_bridge_bytes;
     gpu::render::DrawInfo draw;
     draw.recomp = &geometry;
     draw.prim_type = 1;
@@ -628,13 +628,13 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     draw.mrt_count = draw.mrt_bound_mask = 1;
     draw.mrt_info[0] = 10u << 2;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
-    const u64 repeat_copies = gpu::render::cs::g_buf_bridge_bytes;
+    const u64 repeat_copies = gpu::render::cs::g_cs_stats.buf_bridge_bytes;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
     if (trial == 6)
-      EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, repeat_copies);
+      EXPECT_EQ(gpu::render::cs::g_cs_stats.buf_bridge_bytes, repeat_copies);
     if (partial)
-      EXPECT_GT(gpu::render::cs::g_buf_bridge_bytes, repeat_copies);
-    EXPECT_GT(gpu::render::cs::g_buf_bridge_bytes, copies);
+      EXPECT_GT(gpu::render::cs::g_cs_stats.buf_bridge_bytes, repeat_copies);
+    EXPECT_GT(gpu::render::cs::g_cs_stats.buf_bridge_bytes, copies);
     const u32 updated = vertices ? 0xbe800000 : element == 2 ? 0x00020002 : 2;
     ASSERT_TRUE(gpu::render::GpuFill(geometry_base + gpu::render::kMirrorBlock,
                                      gpu::render::kMirrorBlock, updated,
@@ -806,7 +806,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     gpu::render::BeginFrame(renderer);
     const u64 resolves = gpu::render::cs::g_mirror_resolves.load();
     const u64 cpu_copies = gpu::g_stats.ring_cb_bytes;
-    const u64 copies = gpu::render::cs::g_buf_bridge_bytes;
+    const u64 copies = gpu::render::cs::g_cs_stats.buf_bridge_bytes;
     const u64 ring = gpu::render::g_ring.ubo_offset;
     const u64 bound = gpu::g_stats.bind_bytes;
     gpu::render::DrawInfo draw = imported;
@@ -817,9 +817,9 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
         reinterpret_cast<u64>(targets[19 + mode].data());
     draw.viewport_x_offset = 4;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
-    const u64 repeat_copies = gpu::render::cs::g_buf_bridge_bytes;
+    const u64 repeat_copies = gpu::render::cs::g_cs_stats.buf_bridge_bytes;
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
-    EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes, repeat_copies);
+    EXPECT_EQ(gpu::render::cs::g_cs_stats.buf_bridge_bytes, repeat_copies);
     ASSERT_TRUE(gpu::render::GpuFill(owned, gpu::render::kMirrorBlock,
                                      0x3f400000, 0x3f400000));
     draw.viewport_x_offset = 12;
@@ -829,7 +829,7 @@ TEST(VkMirrorBinding, OwnedOutputStaysResidentAcrossDrawsAndCpuWrites) {
     EXPECT_EQ(gpu::render::g_ring.ubo_offset, ring);
     const bool direct = bytes == gpu::render::kCbufWindow &&
                         constants_base % gpu::render::g_ring.ubo_align == 0;
-    EXPECT_EQ(gpu::render::cs::g_buf_bridge_bytes,
+    EXPECT_EQ(gpu::render::cs::g_cs_stats.buf_bridge_bytes,
               copies + (direct ? 0 : 2 * bytes));
     EXPECT_EQ(gpu::g_stats.bind_bytes, bound + 3 * gpu::render::kCbufWindow);
     const u32 slot_index = gpu::render::g_frame.slot_idx;

@@ -184,7 +184,7 @@ TEST(VkGuestDirect, AttachesLatePoolWithoutChangingShaderTable) {
     words[3] = 0;
     draw.rt_base = draw.mrt_base[0] =
         reinterpret_cast<u64>(targets[frame++].data());
-    const u64 staged = gpu::render::cs::g_indirect_staged_n;
+    const u64 staged = gpu::render::cs::g_cs_stats.indirect_staged_n;
     const u64 resolves = gpu::render::cs::g_mirror_resolves.load();
     gpu::render::BeginFrame(renderer);
     ASSERT_TRUE(gpu::render::DrawRecomp(renderer, draw));
@@ -195,9 +195,9 @@ TEST(VkGuestDirect, AttachesLatePoolWithoutChangingShaderTable) {
     ASSERT_TRUE(slot.presentable);
     EXPECT_EQ(slot.readback->mapped()[(8 * 16 + 4) * 4],
               trial == 1 || trial == 2 ? 0 : 255);
-    EXPECT_LE(gpu::render::cs::g_indirect_staged_n, staged + 1);
+    EXPECT_LE(gpu::render::cs::g_cs_stats.indirect_staged_n, staged + 1);
     if (!trial)
-      EXPECT_EQ(gpu::render::cs::g_indirect_staged_n, staged);
+      EXPECT_EQ(gpu::render::cs::g_cs_stats.indirect_staged_n, staged);
     EXPECT_EQ(gpu::render::cs::g_mirror_resolves.load(), resolves);
   }
   draw.recomp = &program;

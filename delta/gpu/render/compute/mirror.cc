@@ -649,16 +649,16 @@ void MirrorWriteBack(u64 base, u64 bytes) {
   if (MirrorOwnable(base, bytes)) {
     RecordMirrorWrite(base, bytes);
     MirrorOwn(base, bytes);
-    g_mirror_own_bytes += bytes;
+    g_cs_stats.mirror_own_bytes += bytes;
     g_mirror_self.push_back({base, base + bytes});
     NoteGuestWrite(base, bytes);
     InvalidateTexRange(base, bytes);
     return;
   }
-  g_mirror_wb_bytes += bytes;
-  g_mirror_wb_n++;
+  g_cs_stats.mirror_wb_bytes += bytes;
+  g_cs_stats.mirror_wb_n++;
   {
-    u64& e = g_mirror_wb_union[base];
+    u64& e = g_cs_stats.mirror_wb_union[base];
     e = base::Max(e, base + bytes);
   }
   RecordMirrorWrite(base, bytes);
@@ -846,7 +846,7 @@ static rhi::Buffer* StageArgs(rhi::CommandList* list,
   if (!RecordGuestRead(list, args, bytes, g_indirect_ring, *offset))
     return nullptr;
   list->Barrier(rhi::kAccessCopyWrite, dst_access);
-  g_indirect_staged_n++;
+  g_cs_stats.indirect_staged_n++;
   return g_indirect_ring;
 }
 
@@ -1034,8 +1034,8 @@ bool MirrorSupplyTexture(u64 base,
     AdvanceMirrorWindows(base, base + tiled.size);
   if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
     g_cs_chunk_needs_batch = true;
-  g_tex_bridge_n++;
-  g_tex_bridge_bytes += tiled.size;
+  g_cs_stats.tex_bridge_n++;
+  g_cs_stats.tex_bridge_bytes += tiled.size;
   return true;
 }
 
@@ -1060,8 +1060,8 @@ bool MirrorSupplyBuffer(u64 base, u64 bytes, rhi::Buffer* dst, u64 dst_off) {
     AdvanceMirrorWindows(base, base + bytes);
   if (g_cs_batch_open && !g_cs_batches[g_cs_batch_cur].in_frame)
     g_cs_chunk_needs_batch = true;
-  g_buf_bridge_n++;
-  g_buf_bridge_bytes += bytes;
+  g_cs_stats.buf_bridge_n++;
+  g_cs_stats.buf_bridge_bytes += bytes;
   return true;
 }
 

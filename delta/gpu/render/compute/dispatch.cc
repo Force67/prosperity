@@ -178,7 +178,7 @@ u64 GuestMirror(CsRange& e, u64& bytes) {
                       e.res.size, false);
     e.mirror_seq = e.write_seq;
     e.mirror_table = table;
-    g_guest_mirror_tiles++;
+    g_cs_stats.guest_mirror_tiles++;
   }
   bytes = tiled.size;
   return e.mirror->address();
@@ -227,7 +227,7 @@ void MaterializeGuestRange(u64 address) {
     EraseCsRange(g_cs_ranges.find(base));
     return;
   }
-  g_guest_misses_n++;
+  g_cs_stats.guest_misses_n++;
 }
 
 void MarkWrittenWindows(u64 cs_addr,
@@ -386,7 +386,7 @@ bool GuestWindows(const ComputeInfo& ci,
         ++pos;
       taken.insert(pos, base::Pair<u64, u64>{lo, hi});
     }
-    g_guest_override_n += !pieces.empty();
+    g_cs_stats.guest_override_n += !pieces.empty();
   }
   base::Vector<u32> order(out.size());
   for (u32 k = 0; k < order.size(); k++)
@@ -425,7 +425,7 @@ bool FindIndirectArgs(u64 args, IndirectArgs& out) {
     CollectGuestWrites();
   if (!several && !found && kMirror && MirrorHoldsNewest(args, 12)) {
     out = {g_mirror, MirrorOffset(args)};
-    g_cs_indirect_n++;
+    g_cs_stats.indirect_n++;
     return true;
   }
   if (several || !found || !found->buf || found->imported ||
@@ -435,7 +435,7 @@ bool FindIndirectArgs(u64 args, IndirectArgs& out) {
     return false;
   MarkPending(*found);
   out = {found->buf, args - range_base};
-  g_cs_indirect_n++;
+  g_cs_stats.indirect_n++;
   return true;
 }
 
@@ -557,7 +557,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     CollectGuestWritesForSubmission();
   }
   const bool heavy = g_cs_heavy.contains(ci.cs_addr);
-  if (heavy && g_cs_batch_count && (++g_submit_why[3], !CsBatchSubmit())) {
+  if (heavy && g_cs_batch_count &&
+      (++g_cs_stats.submit_why[3], !CsBatchSubmit())) {
     renderer.state = nullptr;
     return CsDeclined(ci, "heavy");
   }
@@ -705,7 +706,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       RecordImageTiling(g_cs_list, *table, tiled_buf, off, span, view, sz[i],
                         true);
       g_cs_batch_access.erase(view);
-      g_truth_detile_n++;
+      g_cs_stats.truth_detile_n++;
       StampView(view, pbase ? pbase : ci.res[i].base, off, table, seq);
     }
     truth_view[i] = view;
@@ -803,7 +804,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
           parent_off[i] = off;
           bind_buf[i] = parent->buf;
         }
-        g_truth_parent_n++;
+        g_cs_stats.truth_parent_n++;
         continue;
       }
     }
@@ -841,27 +842,27 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         if (kCsKeepOverlap && s.gpu_dirty && !ci.res[i].read &&
             !ci.res[i].image_staging && !truth_i && !s.image_staging &&
             !s.truth) {
-          g_wb_why["overlap-kept"]++;
+          g_cs_stats.wb_why["overlap-kept"]++;
           continue;
         }
         if (reads_own_buffer && s.gpu_dirty) {
-          g_wb_why["overlap-own"]++;
+          g_cs_stats.wb_why["overlap-own"]++;
           continue;
         }
         if ((truth_i || ci.res[i].image_staging) &&
             (s.truth || s.image_staging) && s.gpu_dirty &&
             !(dirty >= base && dirty + s.guest_bytes <= base + guest_bytes) &&
             !(base >= dirty && base + guest_bytes <= dirty + s.guest_bytes)) {
-          g_wb_why["overlap-tiled"]++;
+          g_cs_stats.wb_why["overlap-tiled"]++;
           continue;
         }
         if (s.gpu_dirty && !ci.res[i].read && ci.res[i].written) {
-          g_wb_why["overlap-write-only"]++;
+          g_cs_stats.wb_why["overlap-write-only"]++;
           continue;
         }
         if (s.gpu_dirty) {
-          g_wb_why["overlap"]++;
-          g_wb_why_bytes += s.size;
+          g_cs_stats.wb_why["overlap"]++;
+          g_cs_stats.wb_why_bytes += s.size;
           if (kCsOverlapTrace && g_frame.num >= kCsOverlapTrace) {
             static int shown = 0;
             if (shown++ < 1500)
@@ -883,13 +884,13 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         if (!CsRangeFlushOne(dirty, s) && g_cs_failed)
           return CsDeclined(ci, "11");
       }
-      g_in_overlap_n += !siblings.empty();
-      g_in_overlap_ns += NowNs() - to;
+      g_cs_stats.in_overlap_n += !siblings.empty();
+      g_cs_stats.in_overlap_ns += NowNs() - to;
     }
     CsRange& e = g_cs_ranges[base];
     if (e.gpu_dirty && !e.cpu_writes.empty()) {
-      g_wb_why["cpu-write"]++;
-      g_wb_why_bytes += e.size;
+      g_cs_stats.wb_why["cpu-write"]++;
+      g_cs_stats.wb_why_bytes += e.size;
       const WaitReaderScope reader("cpu-write");
       if (!CsRangeFlushOne(base, e) && g_cs_failed)
         return CsDeclined(ci, "24");
@@ -935,16 +936,16 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       UnindexDirtyRange(base, e.guest_bytes);
       e.gpu_dirty = false;
       e.cpu_writes.clear();
-      g_wb_why["reshape-superseded"]++;
+      g_cs_stats.wb_why["reshape-superseded"]++;
     }
     if (!same_shape && e.gpu_dirty) {
       const u64 trs = NowNs();
-      g_wb_why["reshape"]++;
-      g_wb_why_bytes += e.size;
+      g_cs_stats.wb_why["reshape"]++;
+      g_cs_stats.wb_why_bytes += e.size;
       const WaitReaderScope reader("reshape");
       const bool ok = CsRangeFlushOne(base, e);
-      g_in_reshape_ns += NowNs() - trs;
-      g_in_reshape_n++;
+      g_cs_stats.in_reshape_ns += NowNs() - trs;
+      g_cs_stats.in_reshape_n++;
       if (!ok)
         return CsDeclined(ci, "12");
     }
@@ -952,8 +953,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     const bool buffer_reused = e.buf && e.cap >= foot;
     const u64 ta = NowNs();
     const bool ensured = CsRangeEnsureBuffer(e, foot);
-    g_in_alloc_ns += NowNs() - ta;
-    g_in_alloc_n += !buffer_reused;
+    g_cs_stats.in_alloc_ns += NowNs() - ta;
+    g_cs_stats.in_alloc_n += !buffer_reused;
     if (!ensured)
       return CsDeclined(ci, "14");
     if (!buffer_reused && caps.debug_labels) {
@@ -968,7 +969,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         buffer_reused && same_shape &&
         (e.gpu_dirty || e.last_validated_frame == g_frame.num || e.wt_clean);
     if (valid && !e.gpu_dirty && e.last_validated_frame != g_frame.num)
-      g_in_wt_skips++;
+      g_cs_stats.in_wt_skips++;
     if (e.imported && same_shape)
       valid = true;
     const bool rt_backed = ci.res[i].image_staging && CsAliasedBase(base);
@@ -979,7 +980,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       e.cpu_writes.clear();
       e.hash = 0;
       e.last_validated_frame = -1;
-      g_wb_why["rt-superseded"]++;
+      g_cs_stats.wb_why["rt-superseded"]++;
     }
     const bool rt_stale = kCsRtCache && e.rt_sourced && e.last_rt_frame >= 0 &&
                           AliasedImageRenderSerial(base) <= e.rt_serial;
@@ -1030,8 +1031,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         if (e.rt_sourced)
           e.staged_clean =
               !e.imported && GuestWriteTracker().Arm(base, hash_bytes);
-        g_in_rt_ns += NowNs() - tr;
-        g_in_rt_n++;
+        g_cs_stats.in_rt_ns += NowNs() - tr;
+        g_cs_stats.in_rt_n++;
         static int rt_trace_logged = 0;
         if (kCsRtTrace && rt_trace_logged < 200) {
           rt_trace_logged++;
@@ -1063,8 +1064,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
                                     0);
             staged = RecordGuestRead(g_cs_list, base, copy_bytes, e.buf);
           } else {
-            g_stage_guest_detile_bytes += sz[i];
-            g_stage_guest_detile_n++;
+            g_cs_stats.stage_guest_detile_bytes += sz[i];
+            g_cs_stats.stage_guest_detile_n++;
             staged = StageImageOnGpu(ci.res[i], e);
           }
         }
@@ -1086,7 +1087,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       g_stats.cs_stage_n++;
       g_stats.cs_stage_bytes += sz[i];
       if (CsSyncReporting()) {
-        StageStat& st = g_stage_stats[base];
+        StageStat& st = g_cs_stats.stage_stats[base];
         st.bytes += sz[i];
         st.n++;
         if (!buffer_reused)
@@ -1114,11 +1115,11 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
           st.hash++;
       }
       if (ci.res[i].image_staging)
-        g_stage_img_bytes += sz[i];
+        g_cs_stats.stage_img_bytes += sz[i];
       else if (ci.res[i].shader_writes || ci.res[i].written)
-        g_stage_rw_bytes += sz[i];
+        g_cs_stats.stage_rw_bytes += sz[i];
       else
-        g_stage_ro_bytes += sz[i];
+        g_cs_stats.stage_ro_bytes += sz[i];
     }
     if (!subset) {
       e.size = truth_i ? guest_bytes : sz[i];
@@ -1164,7 +1165,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       e.dirty_render_serial = g_render_serial;
       BumpTextureEpoch();
       MarkPending(e);
-      g_truth_fold_n++;
+      g_cs_stats.truth_fold_n++;
     }
     bind_buf[i] = e.buf;
     if (truth_i) {
@@ -1399,7 +1400,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     RecordImageTiling(g_cs_list, *truth_table[i], it->second.buf, parent_off[i],
                       span, truth_view[i], sz[i], false);
     g_cs_batch_access.erase(it->second.buf);
-    g_truth_retile_n++;
+    g_cs_stats.truth_retile_n++;
   }
   {
     BatchedDispatch bd{ci.cs_addr, {ci.groups[0], ci.groups[1], ci.groups[2]},
@@ -1478,7 +1479,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
                 it->second.write_seq);
   }
   if ((g_cs_batch_count >= base::Max<u32>(1, kCsBatchCap) || heavy) &&
-      (++g_submit_why[4], !CsBatchSubmit())) {
+      (++g_cs_stats.submit_why[4], !CsBatchSubmit())) {
     renderer.state = nullptr;
     return CsDeclined(ci, "21");
   }
