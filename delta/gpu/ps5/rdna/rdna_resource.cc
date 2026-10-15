@@ -874,6 +874,40 @@ u32 BranchTargetIndex(const Program& program, u32 i) {
   return static_cast<u32>(program.size());
 }
 
+// Instructions on some path into `use`. An uber-shader reloads the same SGPRs
+// in sibling branch arms; replaying those in program order hands a sample in
+// one arm the descriptor another arm loaded.
+base::Vector<u8> InstsReaching(const Program& program, u32 use) {
+  const u32 n = static_cast<u32>(program.size());
+  base::Vector<base::Vector<u32>> preds(n);
+  for (u32 i = 0; i < n; i++) {
+    const int kind = BranchKind(program[i]);
+    if (kind == 4)
+      return base::Vector<u8>(n, 1);
+    if (kind == 1 || kind == 2) {
+      const u32 target = BranchTargetIndex(program, i);
+      if (target < n)
+        preds[target].push_back(i);
+    }
+    if ((kind == 0 || kind == 2) && i + 1 < n)
+      preds[i + 1].push_back(i);
+  }
+  base::Vector<u8> reach(n, 0);
+  base::Vector<u32> work;
+  if (use < n)
+    work.push_back(use);
+  while (!work.empty()) {
+    const u32 i = work.back();
+    work.pop_back();
+    for (u32 pred : preds[i])
+      if (!reach[pred]) {
+        reach[pred] = 1;
+        work.push_back(pred);
+      }
+  }
+  return reach;
+}
+
 u32 Sop2WriteDwords(u32 op) {
   if (op <= 0x0A || op == 0x26 || op == 0x27 || op == 0x28 || op == 0x2c ||
       (op >= 0x2f && op <= 0x37))
@@ -1773,6 +1807,7 @@ class ReplayMemo {
 struct SliceInst {
   Inst inst;
   bool step = false;
+  u32 index = 0;
 };
 
 const base::Vector<SliceInst>& ScalarSlice(
@@ -1789,8 +1824,8 @@ const base::Vector<SliceInst>& ScalarSlice(
     if (it != slices.end() && it->second.first == program)
       return it->second.second;
     base::Vector<SliceInst> all;
-    for (const Inst& inst : *program)
-      all.push_back({inst, true});
+    for (u32 i = 0; i < program->size(); i++)
+      all.push_back({(*program)[i], true, i});
     return slices
         .insert_or_assign(program.get(), Slice(program, base::move(all)))
         .first->second.second;
@@ -1824,17 +1859,17 @@ const base::Vector<SliceInst>& ScalarSlice(
       case Enc::kMimg:
         use(((w1 >> 16) & 0x1F) * 4, ((w0 >> 15) & 1) ? 4 : 8);
         use(((w1 >> 21) & 0x1F) * 4, 4);
-        kept.push_back({inst, false});
+        kept.push_back({inst, false, i});
         continue;
       case Enc::kMubuf:
       case Enc::kMtbuf:
         use(((w1 >> 16) & 0x1F) * 4, 4);
         use_src((w1 >> 24) & 0xFF);
-        kept.push_back({inst, false});
+        kept.push_back({inst, false, i});
         continue;
       case Enc::kFlat:
         use((w1 >> 16) & 0x7F, 2);
-        kept.push_back({inst, false});
+        kept.push_back({inst, false, i});
         continue;
       case Enc::kSmrd: {
         const Smem smem = DecodeSmem(inst);
@@ -1845,7 +1880,7 @@ const base::Vector<SliceInst>& ScalarSlice(
             live[smem.sdst + k] = false;
         use(smem.sbase, smem.op >= 0x08 ? 4 : 2);
         use_src(smem.soffset);
-        kept.push_back({inst, step});
+        kept.push_back({inst, step, i});
         continue;
       }
       case Enc::kSop1:
@@ -1879,7 +1914,7 @@ const base::Vector<SliceInst>& ScalarSlice(
                inst.opcode == 0x0A || inst.opcode == 0x0B))
             live[kScc] = true;
         }
-        kept.push_back({inst, true});
+        kept.push_back({inst, true, i});
         continue;
       }
       default:
@@ -1936,20 +1971,23 @@ base::Vector<TImage> TrackTextures(const u32* ps_code,
   out.resize(plan.binding_srsrc.size());
   base::Vector<bool> filled(out.size(), false);
   base::Vector<ReplayLoad> loads;
-  ScalarEval eval(pud, user_sgprs, ud_base, system_user_data_addr);
-  eval.code_addr = code_addr;
-  eval.loads = &loads;
 
-  for (const SliceInst& si : ScalarSlice(prog_ref)) {
-    const Inst& in = si.inst;
-    if (si.step)
-      eval.Step(in);
+  const base::Vector<SliceInst>& slice = ScalarSlice(prog_ref);
+  for (u32 s = 0; s < slice.size(); s++) {
+    const Inst& in = slice[s].inst;
     if (in.enc != Enc::kMimg)
       continue;
     auto it = plan.binding_by_pc.find(in.pc);
     if (it == plan.binding_by_pc.end() || filled[it->second])
       continue;
     const u32 b = it->second;
+    ScalarEval eval(pud, user_sgprs, ud_base, system_user_data_addr);
+    eval.code_addr = code_addr;
+    eval.loads = &loads;
+    const base::Vector<u8> reach = InstsReaching(prog, slice[s].index);
+    for (u32 k = 0; k < s; k++)
+      if (slice[k].step && reach[slice[k].index])
+        eval.Step(slice[k].inst);
     const u32 w0 = in.raw[0], w1 = in.raw[1], op = in.opcode;
     const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
     const bool r128 = (w0 >> 15) & 1;
