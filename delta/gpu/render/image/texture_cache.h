@@ -41,6 +41,8 @@ struct TextureBindings {
 
 extern TextureBindings& g_tex;
 
+u64 TextureImageBytes();
+
 bool CreateTextureDescriptors();
 
 rhi::BindGroup* SampledTextureGroup(

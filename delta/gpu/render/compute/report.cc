@@ -14,11 +14,10 @@
 #include "gpu/render/frame.h"
 #include "gpu/render/debug/perf.h"
 #include "gpu/render/image/render_target.h"
+#include "gpu/render/image/texture_cache.h"
 #include "guest/session.h"
 
 namespace gpu::render {
-
-extern u64 g_tex_image_bytes;
 
 void CsSyncReport(double frames) {
   if (CsSyncReporting() && frames > 0) {
@@ -262,7 +261,7 @@ void ReportGpuMemory() {
             "f{} device heaps {:.0f}/{:.0f}MB | tex {:.0f}MB "
             "scratch {:.0f}MB",
             g_frame.num, heap_used / kMb, heap_budget / kMb,
-            gpu::render::g_tex_image_bytes / kMb, scratch / kMb);
+            TextureImageBytes() / kMb, scratch / kMb);
   BASE_LOGI("memstat",
             "f{} cs ranges={} {:.0f}MB (dirty {:.0f} truth {:.0f} cold {:.0f}) "
             "free {:.0f}MB | rt {} {:.0f}MB parked {:.0f}MB | depth {:.0f}MB",

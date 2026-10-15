@@ -203,35 +203,101 @@ struct TexEntry {
   rhi::BindGroup* set = nullptr;
 };
 
-base::HashMap<TexImageKey, TexImageEntry, TexImageKeyHash> g_tex_images;
-base::HashMap<TexViewKey, TexViewEntry, TexViewKeyHash> g_tex_views;
-base::HashMap<TexKey, TexEntry, TexKeyHash> g_tex_cache;
-base::HashMap<SamplerKey, rhi::Sampler*, SamplerKeyHash> g_sampler_cache;
+namespace {
+
+struct TexMemoKey {
+  u64 base;
+  u32 w, h, dfmt, nfmt, tiling, pitch, layers, base_array, view_layers,
+      mip_levels, base_mip, view_mips, min_lod, swizzle, depth;
+  u32 sampler[4];
+  u8 flags;
+  bool operator==(const TexMemoKey&) const = default;
+};
+
+struct TexMemo {
+  TexMemoKey key;
+  u64 epoch = 0;
+  rhi::TextureView* view = nullptr;
+};
+constexpr u32 kTexMemoSlots = 1024;
+
+struct MultiTexSet {
+  rhi::BindGroup* set = nullptr;
+};
+
+struct MultiTexKey {
+  u32 num_texs = 0;
+  rhi::TextureView* view[kMaxTex];
+  rhi::Sampler* sampler[kMaxTex];
+  rhi::TextureState state[kMaxTex];
+  bool operator==(const MultiTexKey& o) const {
+    if (num_texs != o.num_texs)
+      return false;
+    for (u32 i = 0; i < num_texs; i++)
+      if (view[i] != o.view[i] || sampler[i] != o.sampler[i] ||
+          state[i] != o.state[i])
+        return false;
+    return true;
+  }
+};
+
+struct MultiTexKeyHash {
+  size_t operator()(const MultiTexKey& k) const {
+    u64 h = HashWord(1469598103934665603ull, k.num_texs);
+    for (u32 i = 0; i < k.num_texs; i++) {
+      h = HashWord(h, reinterpret_cast<u64>(k.view[i]));
+      h = HashWord(h, reinterpret_cast<u64>(k.sampler[i]));
+      h = HashWord(h, static_cast<u64>(k.state[i]));
+    }
+    return static_cast<size_t>(h);
+  }
+};
+
+}  // namespace
+
 constexpr u32 kTexturePageShift = 16;
-base::HashMap<u64, base::Vector<TexImageKey>> g_texture_pages;
-u64 g_tex_image_bytes = 0;
-base::Vector<TexImageEntry> g_retired_tex_images;
-base::Vector<TexViewEntry> g_retired_tex_views;
-base::Vector<TexEntry> g_retired_tex_sets;
+
+// Texture cache state of one guest session; the session reset clears all of it.
+struct TextureCacheState {
+  base::HashMap<TexImageKey, TexImageEntry, TexImageKeyHash> images;
+  base::HashMap<TexViewKey, TexViewEntry, TexViewKeyHash> views;
+  base::HashMap<TexKey, TexEntry, TexKeyHash> sets;
+  base::HashMap<SamplerKey, rhi::Sampler*, SamplerKeyHash> samplers;
+  base::HashMap<u64, base::Vector<TexImageKey>> pages;
+  u64 image_bytes = 0;
+  base::Vector<TexImageEntry> retired_images;
+  base::Vector<TexViewEntry> retired_views;
+  base::Vector<TexEntry> retired_sets;
+  u64 epoch = 1;
+  TexMemo memo[kTexMemoSlots];
+  int memo_frame = -1;
+  base::HashMap<MultiTexKey, MultiTexSet, MultiTexKeyHash> multi_sets;
+  base::Vector<MultiTexSet> retired_multi_sets;
+};
+TextureCacheState g_texture_cache;
+
+u64 TextureImageBytes() {
+  return g_texture_cache.image_bytes;
+}
 
 void RegisterTexturePages(const TexImageKey& key, u64 bytes) {
   const u64 end = key.base + bytes;
   for (u64 page = key.base >> kTexturePageShift;
        page <= (end - 1) >> kTexturePageShift; page++)
-    g_texture_pages[page].push_back(key);
+    g_texture_cache.pages[page].push_back(key);
 }
 
 void UnregisterTexturePages(const TexImageKey& key, u64 bytes) {
   const u64 end = key.base + bytes;
   for (u64 page = key.base >> kTexturePageShift;
        page <= (end - 1) >> kTexturePageShift; page++) {
-    auto found = g_texture_pages.find(page);
-    if (found == g_texture_pages.end())
+    auto found = g_texture_cache.pages.find(page);
+    if (found == g_texture_cache.pages.end())
       continue;
     auto& keys = found->second;
     base::EraseIf(keys, [&](const auto& k) { return k == key; });
     if (keys.empty())
-      g_texture_pages.erase(found);
+      g_texture_cache.pages.erase(found);
   }
 }
 TexKey TextureKey(u64 base,
@@ -449,10 +515,10 @@ rhi::Sampler* SamplerFor(const SamplerKey& key) {
     return fallback();
   if (!key.valid && !key.force_lod_zero && !key.depth_compare)
     return fallback();
-  auto found = g_sampler_cache.find(key);
-  if (found != g_sampler_cache.end())
+  auto found = g_texture_cache.samplers.find(key);
+  if (found != g_texture_cache.samplers.end())
     return found->second;
-  if (g_sampler_cache.size() >= 4096)
+  if (g_texture_cache.samplers.size() >= 4096)
     return fallback();
 
   auto address_mode = [](u32 mode) {
@@ -516,7 +582,7 @@ rhi::Sampler* SamplerFor(const SamplerKey& key) {
   rhi::Sampler* sampler = Device().CreateSampler(ci);
   if (!sampler)
     return fallback();
-  g_sampler_cache.emplace(key, sampler);
+  g_texture_cache.samplers.emplace(key, sampler);
   return sampler;
 }
 
@@ -600,34 +666,36 @@ void RetireTextureImages(const TexImageKeySet& keys) {
   if (keys.empty())
     return;
   BumpTextureEpoch();
-  for (auto set = g_tex_cache.begin(); set != g_tex_cache.end();) {
+  for (auto set = g_texture_cache.sets.begin();
+       set != g_texture_cache.sets.end();) {
     if (keys.count(set->first.image)) {
-      g_retired_tex_sets.push_back(set->second);
-      set = g_tex_cache.erase(set);
+      g_texture_cache.retired_sets.push_back(set->second);
+      set = g_texture_cache.sets.erase(set);
     } else {
       ++set;
     }
   }
-  for (auto view = g_tex_views.begin(); view != g_tex_views.end();) {
+  for (auto view = g_texture_cache.views.begin();
+       view != g_texture_cache.views.end();) {
     if (keys.count(view->first.image)) {
-      g_retired_tex_views.push_back(view->second);
-      view = g_tex_views.erase(view);
+      g_texture_cache.retired_views.push_back(view->second);
+      view = g_texture_cache.views.erase(view);
     } else {
       ++view;
     }
   }
   for (const TexImageKey& key : keys) {
-    auto image = g_tex_images.find(key);
-    if (image == g_tex_images.end())
+    auto image = g_texture_cache.images.find(key);
+    if (image == g_texture_cache.images.end())
       continue;
     UnregisterTexturePages(key, image->second.footprint);
-    GPU_BUGCHECK(g_tex_image_bytes >= image->second.allocation_size,
+    GPU_BUGCHECK(g_texture_cache.image_bytes >= image->second.allocation_size,
                  "texture budget underflow: %llu live < %llu retiring",
-                 (unsigned long long)g_tex_image_bytes,
+                 (unsigned long long)g_texture_cache.image_bytes,
                  (unsigned long long)image->second.allocation_size);
-    g_tex_image_bytes -= image->second.allocation_size;
-    g_retired_tex_images.push_back(image->second);
-    g_tex_images.erase(image);
+    g_texture_cache.image_bytes -= image->second.allocation_size;
+    g_texture_cache.retired_images.push_back(image->second);
+    g_texture_cache.images.erase(image);
   }
   ClearMultiTexCache();
 }
@@ -636,7 +704,7 @@ constexpr size_t kMaxTextureImages = 3000;
 
 bool EvictTextures(u64 bytes, u64 budget) {
   base::Vector<base::Pair<int, TexImageKey>> old;
-  for (const auto& [key, entry] : g_tex_images)
+  for (const auto& [key, entry] : g_texture_cache.images)
     if (entry.last_used_frame != g_frame.num)
       old.push_back({entry.last_used_frame, key});
   if (old.empty())
@@ -645,13 +713,13 @@ bool EvictTextures(u64 bytes, u64 budget) {
              [](const auto& a, const auto& b) { return a.first < b.first; });
   const u64 want_bytes = budget - base::Min(budget, budget / 16 + bytes);
   const size_t want_count = kMaxTextureImages - kMaxTextureImages / 16;
-  u64 live_bytes = g_tex_image_bytes;
-  size_t live_count = g_tex_images.size();
+  u64 live_bytes = g_texture_cache.image_bytes;
+  size_t live_count = g_texture_cache.images.size();
   TexImageKeySet retire;
   for (const auto& [frame, key] : old) {
     if (live_bytes <= want_bytes && live_count <= want_count)
       break;
-    live_bytes -= g_tex_images[key].allocation_size;
+    live_bytes -= g_texture_cache.images[key].allocation_size;
     live_count--;
     retire.insert(key);
   }
@@ -765,9 +833,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
                    view_layers, mip_levels, base_mip, view_mips, min_lod,
                    pow2_pad, sampler, sampler_valid, arrayed, force_lod_zero,
                    depth_compare, swizzle, depth, is_3d);
-  auto image_it = g_tex_images.find(key.image);
+  auto image_it = g_texture_cache.images.find(key.image);
   base::UniquePointer<gcn::TextureLayout32> new_layout;
-  if (image_it == g_tex_images.end()) {
+  if (image_it == g_texture_cache.images.end()) {
     new_layout = base::MakeUnique<gcn::TextureLayout32>();
     auto& layout = *new_layout;
     if (!gcn::BuildTextureLayout32(layout, lw, lh, lpitch,
@@ -790,8 +858,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
         level.height = (base::Max(h >> mip, 1u) + 3) / 4;
       }
   }
-  const auto& layout =
-      image_it == g_tex_images.end() ? *new_layout : image_it->second.layout;
+  const auto& layout = image_it == g_texture_cache.images.end()
+                           ? *new_layout
+                           : image_it->second.layout;
   u64 footprint = layout.size;
   if (footprint > kMaxTextureBytes) {
     if (kTexFail) {
@@ -888,7 +957,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   }
   gcn::TextureLayout32 linear;
   u32 supplied_mips = layout.mip_levels;
-  u64* checked_seq = image_it != g_tex_images.end() &&
+  u64* checked_seq = image_it != g_texture_cache.images.end() &&
                              image_it->second.last_checked_frame == g_frame.num
                          ? &image_it->second.cs_seq
                          : nullptr;
@@ -928,7 +997,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     return CsSupplyTextureFromBuffer(base, layout, linear, w, h, entry.image,
                                      state, &entry.cs_seq);
   };
-  if (cs_supplies && image_it != g_tex_images.end()) {
+  if (cs_supplies && image_it != g_texture_cache.images.end()) {
     if (!cs_supply(image_it->second, rhi::TextureState::kShaderRead))
       return nullptr;
     image_it->second.last_checked_frame = g_frame.num;
@@ -937,7 +1006,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   if (!cs_supplies && !render::FlushCsWritesForGpu(render::DefaultRenderer(),
                                                    base, footprint, "tex"))
     return nullptr;
-  const bool known = image_it != g_tex_images.end();
+  const bool known = image_it != g_texture_cache.images.end();
   if (!known || image_it->second.last_checked_frame != g_frame.num) {
     const u64 t_probe = NowNs();
     const bool readable = (known && image_it->second.wt_clean) ||
@@ -981,10 +1050,10 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       g_stats.tex_refresh_bytes += footprint;
     }
   }
-  if (image_it == g_tex_images.end()) {
+  if (image_it == g_texture_cache.images.end()) {
     static const u64 kTextureBudget =
         base::Max<u64>(kTextureMb, 64) * 1024 * 1024;
-    if (g_tex_images.size() >= kMaxTextureImages &&
+    if (g_texture_cache.images.size() >= kMaxTextureImages &&
         !EvictTextures(0, kTextureBudget))
       return nullptr;
     TexImageEntry image_entry;
@@ -993,9 +1062,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     image_entry.last_checked_frame = -1;
     image_entry.last_used_frame = g_frame.num;
     const u64 bytes = TextureLinearBytes(layout);
-    if (g_tex_image_bytes + bytes > kTextureBudget &&
+    if (g_texture_cache.image_bytes + bytes > kTextureBudget &&
         (!EvictTextures(bytes, kTextureBudget) ||
-         g_tex_image_bytes + bytes > kTextureBudget))
+         g_texture_cache.image_bytes + bytes > kTextureBudget))
       return nullptr;
     rhi::TextureDesc td;
     td.dim = is_3d ? rhi::TextureDim::k3D : rhi::TextureDim::k2D;
@@ -1036,16 +1105,16 @@ static rhi::TextureView* ResolveTextureView(u64 base,
                     (unsigned long long)base, w, h, mip_levels, layers);
       Device().SetName(image_entry.image, name);
     }
-    image_it = g_tex_images.emplace(key.image, image_entry).first;
-    g_tex_image_bytes += bytes;
+    image_it = g_texture_cache.images.emplace(key.image, image_entry).first;
+    g_texture_cache.image_bytes += bytes;
     RegisterTexturePages(key.image, footprint);
   }
   image_it->second.last_used_frame = g_frame.num;
 
   TexViewKey view_key = TextureViewKey(key);
-  auto view_it = g_tex_views.find(view_key);
-  if (view_it == g_tex_views.end()) {
-    if (g_tex_views.size() >= 12000)
+  auto view_it = g_texture_cache.views.find(view_key);
+  if (view_it == g_texture_cache.views.end()) {
+    if (g_texture_cache.views.size() >= 12000)
       return nullptr;
     TexViewEntry view_entry;
     rhi::TextureViewDesc vd;
@@ -1060,7 +1129,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     view_entry.view = Device().CreateView(image_it->second.image, vd);
     if (!view_entry.view)
       return nullptr;
-    view_it = g_tex_views.emplace(view_key, view_entry).first;
+    view_it = g_texture_cache.views.emplace(view_key, view_entry).first;
   }
   return view_it->second.view;
 }
@@ -1096,10 +1165,10 @@ rhi::BindGroup* GetTexture(u64 base,
       is_3d, key);
   if (!view)
     return nullptr;
-  auto it = g_tex_cache.find(key);
-  if (it != g_tex_cache.end())
+  auto it = g_texture_cache.sets.find(key);
+  if (it != g_texture_cache.sets.end())
     return it->second.set;
-  if (g_tex_cache.size() >= 12000)
+  if (g_texture_cache.sets.size() >= 12000)
     return nullptr;
 
   const bool cmp_default =
@@ -1111,7 +1180,7 @@ rhi::BindGroup* GetTexture(u64 base,
                                           : rhi::TextureState::kShaderRead);
   if (!e.set)
     return nullptr;
-  g_tex_cache.emplace(key, e);
+  g_texture_cache.sets.emplace(key, e);
   return e.set;
 }
 
@@ -1122,17 +1191,6 @@ bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt) {
 static rhi::TextureView* ResolveTexViewUncached(const DrawInfo::DrawTex& t);
 
 namespace {
-u64 g_tex_epoch = 1;
-
-struct TexMemoKey {
-  u64 base;
-  u32 w, h, dfmt, nfmt, tiling, pitch, layers, base_array, view_layers,
-      mip_levels, base_mip, view_mips, min_lod, swizzle, depth;
-  u32 sampler[4];
-  u8 flags;
-  bool operator==(const TexMemoKey&) const = default;
-};
-
 TexMemoKey MemoKeyOf(const DrawInfo::DrawTex& t) {
   TexMemoKey k;
   std::memset(&k, 0, sizeof(k));
@@ -1149,14 +1207,6 @@ TexMemoKey MemoKeyOf(const DrawInfo::DrawTex& t) {
   return k;
 }
 
-struct TexMemo {
-  TexMemoKey key;
-  u64 epoch = 0;
-  rhi::TextureView* view = nullptr;
-};
-constexpr u32 kTexMemoSlots = 1024;
-TexMemo g_tex_memo[kTexMemoSlots];
-int g_tex_memo_frame = -1;
 
 u32 TexMemoSlot(const TexMemoKey& k) {
   u64 h = k.base * 0x9E3779B97F4A7C15ull;
@@ -1170,25 +1220,25 @@ u32 TexMemoSlot(const TexMemoKey& k) {
 }  // namespace
 
 void BumpTextureEpoch() {
-  g_tex_epoch++;
+  g_texture_cache.epoch++;
 }
 
 u64 TextureEpoch() {
-  return g_tex_epoch;
+  return g_texture_cache.epoch;
 }
 
 rhi::TextureView* TexViewFor(const DrawInfo::DrawTex& t) {
-  if (g_tex_memo_frame != g_frame.num) {
-    g_tex_memo_frame = g_frame.num;
-    g_tex_epoch++;
+  if (g_texture_cache.memo_frame != g_frame.num) {
+    g_texture_cache.memo_frame = g_frame.num;
+    g_texture_cache.epoch++;
   }
   const TexMemoKey memo_key = MemoKeyOf(t);
-  TexMemo& memo = g_tex_memo[TexMemoSlot(memo_key)];
-  if (kTexMemo && memo.epoch == g_tex_epoch && memo.key == memo_key)
+  TexMemo& memo = g_texture_cache.memo[TexMemoSlot(memo_key)];
+  if (kTexMemo && memo.epoch == g_texture_cache.epoch && memo.key == memo_key)
     return memo.view;
   rhi::TextureView* view = ResolveTexViewUncached(t);
   if (view)
-    memo = {memo_key, g_tex_epoch, view};
+    memo = {memo_key, g_texture_cache.epoch, view};
   return view;
 }
 
@@ -1220,47 +1270,13 @@ static rhi::TextureView* ResolveTexViewUncached(const DrawInfo::DrawTex& t) {
   return view ? view : fail("get-texture");
 }
 
-struct MultiTexSet {
-  rhi::BindGroup* set = nullptr;
-};
-
-struct MultiTexKey {
-  u32 num_texs = 0;
-  rhi::TextureView* view[kMaxTex];
-  rhi::Sampler* sampler[kMaxTex];
-  rhi::TextureState state[kMaxTex];
-  bool operator==(const MultiTexKey& o) const {
-    if (num_texs != o.num_texs)
-      return false;
-    for (u32 i = 0; i < num_texs; i++)
-      if (view[i] != o.view[i] || sampler[i] != o.sampler[i] ||
-          state[i] != o.state[i])
-        return false;
-    return true;
-  }
-};
-
-struct MultiTexKeyHash {
-  size_t operator()(const MultiTexKey& k) const {
-    u64 h = HashWord(1469598103934665603ull, k.num_texs);
-    for (u32 i = 0; i < k.num_texs; i++) {
-      h = HashWord(h, reinterpret_cast<u64>(k.view[i]));
-      h = HashWord(h, reinterpret_cast<u64>(k.sampler[i]));
-      h = HashWord(h, static_cast<u64>(k.state[i]));
-    }
-    return static_cast<size_t>(h);
-  }
-};
-
-base::HashMap<MultiTexKey, MultiTexSet, MultiTexKeyHash> g_mtex_cache;
-base::Vector<MultiTexSet> g_retired_mtex;
 void ClearMultiTexCache() {
-  for (const auto& [key, entry] : g_mtex_cache) {
+  for (const auto& [key, entry] : g_texture_cache.multi_sets) {
     (void)key;
     if (entry.set)
-      g_retired_mtex.push_back(entry);
+      g_texture_cache.retired_multi_sets.push_back(entry);
   }
-  g_mtex_cache.clear();
+  g_texture_cache.multi_sets.clear();
 }
 
 void ReleaseRetiredTextures() {
@@ -1284,14 +1300,14 @@ void ReleaseRetiredTextures() {
     Device().Destroy(e.view);
   for (const TexImageEntry& e : aged_tex_images)
     Device().Destroy(e.image);
-  aged_mtex = base::move(g_retired_mtex);
-  aged_tex_sets = base::move(g_retired_tex_sets);
-  aged_tex_views = base::move(g_retired_tex_views);
-  aged_tex_images = base::move(g_retired_tex_images);
-  g_retired_mtex.clear();
-  g_retired_tex_sets.clear();
-  g_retired_tex_views.clear();
-  g_retired_tex_images.clear();
+  aged_mtex = base::move(g_texture_cache.retired_multi_sets);
+  aged_tex_sets = base::move(g_texture_cache.retired_sets);
+  aged_tex_views = base::move(g_texture_cache.retired_views);
+  aged_tex_images = base::move(g_texture_cache.retired_images);
+  g_texture_cache.retired_multi_sets.clear();
+  g_texture_cache.retired_sets.clear();
+  g_texture_cache.retired_views.clear();
+  g_texture_cache.retired_images.clear();
 }
 
 rhi::Sampler* SamplerForTex(const DrawInfo::DrawTex& t,
@@ -1412,10 +1428,10 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
     key.sampler[i] = w.sampler;
     key.state[i] = w.view_state;
   }
-  auto ci = g_mtex_cache.find(key);
-  if (ci != g_mtex_cache.end())
+  auto ci = g_texture_cache.multi_sets.find(key);
+  if (ci != g_texture_cache.multi_sets.end())
     return ci->second.set;
-  if (g_mtex_cache.size() > 3500)
+  if (g_texture_cache.multi_sets.size() > 3500)
     return nullptr;
   rhi::BindGroupDesc group;
   group.layout = set_layout;
@@ -1424,7 +1440,7 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
   entry.set = Device().CreateBindGroup(group);
   if (!entry.set)
     return nullptr;
-  g_mtex_cache[key] = entry;
+  g_texture_cache.multi_sets[key] = entry;
   return entry.set;
 }
 
@@ -1436,8 +1452,8 @@ void InvalidateTexRange(u64 base, u64 size) {
   base::Vector<TexImageKey> overlap;
   for (u64 page = base >> kTexturePageShift;
        page <= (end - 1) >> kTexturePageShift; page++) {
-    auto found = g_texture_pages.find(page);
-    if (found == g_texture_pages.end())
+    auto found = g_texture_cache.pages.find(page);
+    if (found == g_texture_cache.pages.end())
       continue;
     for (const TexImageKey& key : found->second) {
       if (base::Find(overlap.begin(), overlap.end(), key) == overlap.end())
@@ -1445,8 +1461,8 @@ void InvalidateTexRange(u64 base, u64 size) {
     }
   }
   for (const TexImageKey& key : overlap) {
-    auto found = g_tex_images.find(key);
-    if (found != g_tex_images.end() && key.base < end &&
+    auto found = g_texture_cache.images.find(key);
+    if (found != g_texture_cache.images.end() && key.base < end &&
         base < key.base + found->second.footprint) {
       found->second.last_checked_frame = -1;
       found->second.wt_clean = false;
@@ -1457,20 +1473,7 @@ void InvalidateTexRange(u64 base, u64 size) {
 
 namespace {
 const guest::SessionReset g_session_reset([] {
-  g_tex_epoch = 1;
-  g_tex_memo_frame = -1;
-  guest::ResetResource(g_tex_images);
-  guest::ResetResource(g_tex_views);
-  guest::ResetResource(g_tex_cache);
-  guest::ResetResource(g_sampler_cache);
-  guest::ResetResource(g_texture_pages);
-  guest::ResetResource(g_tex_image_bytes);
-  guest::ResetResource(g_retired_tex_images);
-  guest::ResetResource(g_retired_tex_views);
-  guest::ResetResource(g_retired_tex_sets);
-  guest::ResetResource(g_tex_memo);
-  guest::ResetResource(g_mtex_cache);
-  guest::ResetResource(g_retired_mtex);
+  guest::ResetResource(g_texture_cache);
 });
 }  // namespace
 
