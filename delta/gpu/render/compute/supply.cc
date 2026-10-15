@@ -66,7 +66,7 @@ bool PreserveCsDepthBeforeClear(u64 base) {
 
   range.rt_sourced = true;
   range.last_rt_frame = static_cast<int>(g_frame.num) + 1;
-  range.rt_serial = g_render_serial + 1;
+  range.rt_serial = g_targets.render_serial + 1;
   if (kCsRtTrace) {
     static int logged = 0;
     if (logged++ < 16)

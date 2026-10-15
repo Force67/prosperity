@@ -256,7 +256,7 @@ void MarkWrittenWindows(u64 cs_addr,
     e.fill_kept.clear();
     e.write_seq++;
     e.dirty_stamp = ++g_cs.dirty_stamp;
-    e.dirty_render_serial = g_render_serial;
+    e.dirty_render_serial = g_targets.render_serial;
     BumpTextureEpoch();
   }
 }
@@ -782,7 +782,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
           IndexDirtySpan(pbase, base, RangeEnd(base, n));
           parent->write_seq++;
           parent->dirty_stamp = ++g_cs.dirty_stamp;
-          parent->dirty_render_serial = g_render_serial;
+          parent->dirty_render_serial = g_targets.render_serial;
           BumpTextureEpoch();
         }
       }
@@ -1162,7 +1162,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       e.fill_kept.clear();
       e.write_seq++;
       e.dirty_stamp = ++g_cs.dirty_stamp;
-      e.dirty_render_serial = g_render_serial;
+      e.dirty_render_serial = g_targets.render_serial;
       BumpTextureEpoch();
       MarkPending(e);
       g_cs_stats.truth_fold_n++;
@@ -1472,7 +1472,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     it->second.fill_kept.clear();
     it->second.write_seq++;
     it->second.dirty_stamp = ++g_cs.dirty_stamp;
-    it->second.dirty_render_serial = g_render_serial;
+    it->second.dirty_render_serial = g_targets.render_serial;
     BumpTextureEpoch();
     if (truth_view[i])
       StampView(truth_view[i], dirty_base, parent_off[i], truth_table[i],

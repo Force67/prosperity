@@ -237,7 +237,7 @@ void ReportGpuMemory() {
     (void)base;
     rt += RtByteSize(t);
   }
-  for (const auto& [base, v] : g_rt_variants) {
+  for (const auto& [base, v] : g_targets.rt_variants) {
     (void)base;
     for (const RTarget& t : v)
       rt_parked += RtByteSize(t);
@@ -246,7 +246,7 @@ void ReportGpuMemory() {
     (void)base;
     depth += u64(d.w) * d.h * 5 * d.layers;
   }
-  for (const auto& [base, v] : g_depth_variants) {
+  for (const auto& [base, v] : g_targets.depth_variants) {
     (void)base;
     for (const DepthTarget& d : v)
       depth += u64(d.w) * d.h * 5 * d.layers;

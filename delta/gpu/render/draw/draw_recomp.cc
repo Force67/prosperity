@@ -2270,12 +2270,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         if (resolved_guest && !rc[i] && !rf[i] && !rd[i] &&
             g_rts.count(t.base)) {
           const auto& rt = g_rts[t.base];
-          BASE_LOGI(
-              "drawrt",
-              " tex{} GUEST-OVER-RT: live={}x{} "
-              "ever_rendered={} variants={}",
-              i, rt.w, rt.h, (int)rt.ever_rendered,
-              g_rt_variants.count(t.base) ? g_rt_variants[t.base].size() : 0);
+          BASE_LOGI("drawrt",
+                    " tex{} GUEST-OVER-RT: live={}x{} "
+                    "ever_rendered={} variants={}",
+                    i, rt.w, rt.h, (int)rt.ever_rendered,
+                    g_targets.rt_variants.count(t.base)
+                        ? g_targets.rt_variants[t.base].size()
+                        : 0);
         }
         if (!rc[i] && !rf[i] && !rd[i] && !resolved_guest) {
           auto rt = g_rts.find(t.base);

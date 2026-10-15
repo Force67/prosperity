@@ -50,6 +50,8 @@ DELTA_OPTION(u64, kFrameClearRt, "DELTA_GPU_FRAMECLEAR", 0);
 
 namespace gpu::render {
 
+RenderTargetState g_targets;
+
 using render::DrawInfo;
 
 namespace {
@@ -263,14 +265,11 @@ bool CreateRtImage(RTarget& t,
   return true;
 }
 
-base::HashMap<u64, base::Vector<RTarget>> g_rt_variants;
 constexpr u64 kMaxRtVariantBytes = 32ull << 20;
 constexpr size_t kMaxRtVariants = 256;
 
-base::Vector<RTarget> g_retired_rts;
-
 void RetireRt(RTarget& t) {
-  g_retired_rts.push_back(base::move(t));
+  g_targets.retired_rts.push_back(base::move(t));
   ClearMultiTexCache();
 }
 
@@ -299,7 +298,7 @@ RTarget* ActivateRtVariant(RTarget& live,
                            u32 depth = 1) {
   if (kNoVariant)
     return &live;
-  auto& parked = g_rt_variants[base];
+  auto& parked = g_targets.rt_variants[base];
   RTarget* alt = nullptr;
   for (RTarget& v : parked)
     if (v.w == w && v.h == h && v.fmt == fmt && v.depth == depth) {
@@ -400,8 +399,8 @@ bool ActivateVolumeRt(u64 base, u32 w, u32 h, u32 depth) {
     return t.w == w && t.h == h && t.depth == depth;
   };
   if (!matches(live)) {
-    const auto parked = g_rt_variants.find(base);
-    if (parked == g_rt_variants.end())
+    const auto parked = g_targets.rt_variants.find(base);
+    if (parked == g_targets.rt_variants.end())
       return false;
     const auto alt =
         base::FindIf(parked->second.begin(), parked->second.end(), matches);
@@ -488,7 +487,6 @@ rhi::BindGroup* SnapshotRT(RTarget& rt) {
 u64 RtByteSize(const RTarget& rt) {
   return RtByteSizeWH(rt.w, rt.h, rt.fmt);
 }
-base::HashMap<u64, base::Vector<DepthTarget>> g_depth_variants;
 constexpr size_t kMaxDepthVariants = 3;
 
 bool CreateDepthImage(DepthTarget& t,
@@ -553,7 +551,7 @@ DepthTarget* ActivateDepthVariant(DepthTarget& live,
   };
   if (!kDepthVariants)
     return covers(&live);
-  auto& parked = g_depth_variants[base];
+  auto& parked = g_targets.depth_variants[base];
   DepthTarget* alt = nullptr;
   for (DepthTarget& v : parked)
     if (v.w == w && v.h == h && v.layers >= layers) {
@@ -591,8 +589,8 @@ bool ActivateSampledDepthVariant(u64 base, u32 w, u32 h) {
   DepthTarget& live = it->second;
   if (live.w == w && live.h == h)
     return true;
-  auto parked = g_depth_variants.find(base);
-  if (parked == g_depth_variants.end())
+  auto parked = g_targets.depth_variants.find(base);
+  if (parked == g_targets.depth_variants.end())
     return false;
   for (const DepthTarget& v : parked->second)
     if (v.w == w && v.h == h)
@@ -601,11 +599,9 @@ bool ActivateSampledDepthVariant(u64 base, u32 w, u32 h) {
   return false;
 }
 
-u64 g_render_serial = 0;
-base::Vector<DepthTarget> g_retired_depths;
 
 void RetireDepthTarget(const DepthTarget& t) {
-  g_retired_depths.push_back(t);
+  g_targets.retired_depths.push_back(t);
   ClearMultiTexCache();
 }
 
@@ -615,8 +611,8 @@ void ReleaseRetiredTargets() {
       [] { guest::ResetResource(aged_rts); });
   for (RTarget& t : aged_rts)
     DestroyRt(t);
-  aged_rts = base::move(g_retired_rts);
-  g_retired_rts.clear();
+  aged_rts = base::move(g_targets.retired_rts);
+  g_targets.retired_rts.clear();
   static base::Vector<DepthTarget> aged;
   static const guest::SessionReset reset_aged(
       [] { guest::ResetResource(aged); });
@@ -630,8 +626,8 @@ void ReleaseRetiredTargets() {
       Device().Destroy(v);
     Device().Destroy(t.texture);
   }
-  aged = base::move(g_retired_depths);
-  g_retired_depths.clear();
+  aged = base::move(g_targets.retired_depths);
+  g_targets.retired_depths.clear();
 }
 
 rhi::TextureView* DepthLayerView(DepthTarget& t, u32 layer) {
@@ -695,8 +691,8 @@ bool ActivateSampledRtVariant(u64 base, u32 w, u32 h) {
   RTarget& live = it->second;
   if (PaddedFit(live, w, h) && live.ever_rendered)
     return true;
-  auto parked = g_rt_variants.find(base);
-  if (parked == g_rt_variants.end())
+  auto parked = g_targets.rt_variants.find(base);
+  if (parked == g_targets.rt_variants.end())
     return false;
   for (const RTarget& v : parked->second) {
     if (v.w != w || v.h != h || !v.ever_rendered)
@@ -801,8 +797,8 @@ u64 ResolveSampledDepth(u64 addr, u32 w, u32 h) {
                    ? (u64)depth.guest_w * depth.guest_h * 4
                    : RtByteSizeWH(depth.w, depth.h, kDepthFormat);
     bool dim_match = (!w || !h) || (depth.w == w && depth.h == h);
-    const auto parked = g_depth_variants.find(base);
-    if (parked != g_depth_variants.end())
+    const auto parked = g_targets.depth_variants.find(base);
+    if (parked != g_targets.depth_variants.end())
       for (const DepthTarget& v : parked->second) {
         span = base::Max(span, v.guest_w && v.guest_h
                                    ? (u64)v.guest_w * v.guest_h * 4
@@ -869,8 +865,8 @@ void NoteDccWrite(u64 base, u64 bytes, const u32* fill) {
   };
   for (auto& kv : g_rts) {
     note(kv.second);
-    auto v = g_rt_variants.find(kv.first);
-    if (v == g_rt_variants.end())
+    auto v = g_targets.rt_variants.find(kv.first);
+    if (v == g_targets.rt_variants.end())
       continue;
     for (RTarget& alt : v->second)
       note(alt);
@@ -884,8 +880,8 @@ void NoteDccWrite(u64 base, u64 bytes, const u32* fill) {
   };
   for (auto& kv : g_depths) {
     note_depth(kv.second);
-    auto v = g_depth_variants.find(kv.first);
-    if (v == g_depth_variants.end())
+    auto v = g_targets.depth_variants.find(kv.first);
+    if (v == g_targets.depth_variants.end())
       continue;
     for (DepthTarget& alt : v->second)
       note_depth(alt);
@@ -899,8 +895,8 @@ void NoteExpandedHtile(u64 base) {
   };
   for (auto& kv : g_depths) {
     note(kv.second);
-    auto v = g_depth_variants.find(kv.first);
-    if (v != g_depth_variants.end())
+    auto v = g_targets.depth_variants.find(kv.first);
+    if (v != g_targets.depth_variants.end())
       for (DepthTarget& alt : v->second)
         note(alt);
   }
@@ -948,7 +944,7 @@ void NoteSurfaceWrite(u64 base, u64 bytes, bool raw) {
   };
   for (auto& [at, rt] : g_rts)
     note(rt, at);
-  for (auto& [at, variants] : g_rt_variants)
+  for (auto& [at, variants] : g_targets.rt_variants)
     for (RTarget& alt : variants)
       note(alt, at);
 }
@@ -962,14 +958,14 @@ bool OverlapsLiveTarget(u64 base, u64 bytes) {
   for (const auto& [at, rt] : g_rts)
     if (hits(at, RtByteSize(rt)))
       return true;
-  for (const auto& [at, variants] : g_rt_variants)
+  for (const auto& [at, variants] : g_targets.rt_variants)
     for (const RTarget& rt : variants)
       if (hits(at, RtByteSize(rt)))
         return true;
   for (const auto& [at, d] : g_depths)
     if (hits(at, depth_bytes(d)))
       return true;
-  for (const auto& [at, variants] : g_depth_variants)
+  for (const auto& [at, variants] : g_targets.depth_variants)
     for (const DepthTarget& d : variants)
       if (hits(at, depth_bytes(d)))
         return true;
@@ -995,8 +991,8 @@ bool ActivateWrittenRtVariant(u64 base, u32 w, u32 h) {
   RTarget& live = it->second;
   if (live.w == w && live.h == h)
     return true;
-  auto parked = g_rt_variants.find(base);
-  if (parked == g_rt_variants.end())
+  auto parked = g_targets.rt_variants.find(base);
+  if (parked == g_targets.rt_variants.end())
     return false;
   for (const RTarget& v : parked->second)
     if (v.w == w && v.h == h)
@@ -1262,7 +1258,7 @@ bool BeginRegion(const u64* mrt_base,
     }
     rt.used_this_frame = true;
     rt.last_frame = g_frame.num;
-    rt.render_serial = ++g_render_serial;
+    rt.render_serial = ++g_targets.render_serial;
     g_region.cur_mrt[i] = mrt_base[i];
   }
   g_region.cur_mrt_count = mrt_count;
@@ -1328,7 +1324,7 @@ bool BeginRegion(const u64* mrt_base,
     dt->used_this_frame = true;
     dt->last_frame = g_frame.num;
     if (!read_only)
-      dt->render_serial = ++g_render_serial;
+      dt->render_serial = ++g_targets.render_serial;
     g_region.cur_depth = depth_base;
     g_region.cur_depth_slice = depth_slice;
     if (stencil_base) {
@@ -1481,7 +1477,7 @@ bool CanClearMemoryFill64(u64 base, u64 bytes) {
   for (const auto& [at, d] : g_depths)
     if (hits(at, u64(d.w) * d.h * 4 * base::Max(1u, d.layers)))
       return false;
-  for (const auto& [at, variants] : g_depth_variants)
+  for (const auto& [at, variants] : g_targets.depth_variants)
     for (const auto& d : variants)
       if (hits(at, u64(d.w) * d.h * 4 * base::Max(1u, d.layers)))
         return false;
@@ -1498,7 +1494,7 @@ bool CanClearMemoryFill64(u64 base, u64 bytes) {
   for (const auto& [at, rt] : g_rts)
     if (!supported(at, rt))
       return false;
-  for (const auto& [at, variants] : g_rt_variants)
+  for (const auto& [at, variants] : g_targets.rt_variants)
     for (const auto& rt : variants)
       if (!supported(at, rt))
         return false;
@@ -1527,11 +1523,11 @@ void NoteMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value) {
     rt.ever_rendered = true;
     rt.dirty_for_read = true;
     rt.last_frame = g_frame.num;
-    rt.render_serial = ++g_render_serial;
+    rt.render_serial = ++g_targets.render_serial;
   };
   for (auto& [at, rt] : g_rts)
     clear(at, rt);
-  for (auto& [at, variants] : g_rt_variants)
+  for (auto& [at, variants] : g_targets.rt_variants)
     for (auto& rt : variants)
       clear(at, rt);
 }
@@ -1569,8 +1565,8 @@ void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
   };
   for (auto& kv : g_rts) {
     note(kv.second, kv.first);
-    auto v = g_rt_variants.find(kv.first);
-    if (v == g_rt_variants.end())
+    auto v = g_targets.rt_variants.find(kv.first);
+    if (v == g_targets.rt_variants.end())
       continue;
     for (RTarget& alt : v->second)
       note(alt, kv.first);
@@ -1579,11 +1575,7 @@ void NoteMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
 
 namespace {
 const guest::SessionReset g_session_reset([] {
-  guest::ResetResource(g_rt_variants);
-  guest::ResetResource(g_retired_rts);
-  guest::ResetResource(g_depth_variants);
-  guest::ResetResource(g_render_serial);
-  guest::ResetResource(g_retired_depths);
+  guest::ResetResource(g_targets);
 });
 }  // namespace
 

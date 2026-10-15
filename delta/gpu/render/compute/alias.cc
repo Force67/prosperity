@@ -49,8 +49,8 @@ bool LiveTargetOfSize(u64 base, u32 w, u32 h) {
   if (rt != g_rts.end()) {
     if (rt->second.w == w && rt->second.h == h)
       return true;
-    const auto v = g_rt_variants.find(base);
-    if (v != g_rt_variants.end())
+    const auto v = g_targets.rt_variants.find(base);
+    if (v != g_targets.rt_variants.end())
       for (const RTarget& t : v->second)
         if (t.w == w && t.h == h)
           return true;

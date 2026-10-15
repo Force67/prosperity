@@ -90,9 +90,16 @@ struct DepthTarget {
 };
 
 extern base::HashMap<u64, DepthTarget>& g_depths;
-extern u64 g_render_serial;
-extern base::HashMap<u64, base::Vector<DepthTarget>> g_depth_variants;
-extern base::HashMap<u64, base::Vector<RTarget>> g_rt_variants;
+// Render target state of one guest session besides the live targets; the
+// session reset clears all of it.
+struct RenderTargetState {
+  base::HashMap<u64, base::Vector<RTarget>> rt_variants;
+  base::HashMap<u64, base::Vector<DepthTarget>> depth_variants;
+  base::Vector<RTarget> retired_rts;
+  base::Vector<DepthTarget> retired_depths;
+  u64 render_serial = 0;
+};
+extern RenderTargetState g_targets;
 
 constexpr u32 kRtPageShift = 16;
 extern base::HashMap<u64, base::Vector<u64>>& g_rt_pages;
