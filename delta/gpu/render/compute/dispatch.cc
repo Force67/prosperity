@@ -575,7 +575,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   TableSetGuard guest_set;
   ScopeCs cs;
   for (u32 i = 0; i < ci.num_res; i++)
-    g_cs_bytes += ci.res[i].size;
+    g_stats.cs_bytes += ci.res[i].size;
   for (u32 i = 0; i < ci.num_res; i++)
     if (ci.res[i].size > caps.max_storage_buffer_range)
       return CsDeclined(ci, "3");
@@ -1083,8 +1083,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       e.gpu_dirty = false;
       e.write_seq++;
       BumpTextureEpoch();
-      g_cs_stage_n++;
-      g_cs_stage_bytes += sz[i];
+      g_stats.cs_stage_n++;
+      g_stats.cs_stage_bytes += sz[i];
       if (CsSyncReporting()) {
         StageStat& st = g_stage_stats[base];
         st.bytes += sz[i];
@@ -1179,7 +1179,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
           g_cs_ranges[parent_base[i] ? parent_base[i] : ci.res[i].base].buf;
   u64 bind_off[ComputeInfo::kMaxResources] = {};
 
-  g_ns_cs_in += NowNs() - t_in0;
+  g_stats.ns_cs_in += NowNs() - t_in0;
 
   rhi::BindingWrite
       wr[ComputeInfo::kMaxResources + 2 + ComputeInfo::kMaxTextures];
@@ -1510,7 +1510,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     }
     g_pending_tables.push_back(base::move(pending));
   }
-  g_ns_cs_out += NowNs() - t_out0;
+  g_stats.ns_cs_out += NowNs() - t_out0;
   if (ci.expanded_htile_base)
     NoteExpandedHtile(ci.expanded_htile_base);
   if (capture_dispatch) {

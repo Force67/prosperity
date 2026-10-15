@@ -64,7 +64,7 @@ void LatestFramePresenter::Run() {
       else if (!host::PresentShared(frame.id, frame.fd, frame.bytes, w, h, fmt))
         shared_works_.store(false, base::memory_order_release);
     }
-    g_ns_gfx_present += NowNs() - tp;
+    g_stats.ns_gfx_present += NowNs() - tp;
     last_frame_ns = NowNs();
     lock.lock();
     if (pending_src_ == src) {
@@ -135,7 +135,7 @@ void LatestFramePresenter::WaitForBorrowed() {
   const u64 t0 = NowNs();
   base::UniqueLock<base::Mutex> lock(mutex_);
   released_.Wait(lock, [this] { return !pending_src_ || stopping_; });
-  g_ns_borrow_wait += NowNs() - t0;
+  g_stats.ns_borrow_wait += NowNs() - t0;
 }
 
 void LatestFramePresenter::Stop(bool interrupt_present) {

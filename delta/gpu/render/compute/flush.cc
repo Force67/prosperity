@@ -48,7 +48,7 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
                 (int)e.truth, e.res.dfmt);
     return false;
   }
-  g_cs_flush_n++;
+  g_stats.cs_flush_n++;
   UploadCsRangeToRt(base, e);
   InvalidateTexRange(base, e.guest_bytes);
   UnindexDirtyRange(base, e.guest_bytes);
@@ -92,7 +92,7 @@ bool FlushCsWrites(Renderer& renderer, const char* why) {
       all_current = false;
     }
   }
-  g_ns_cs_out += NowNs() - t0;
+  g_stats.ns_cs_out += NowNs() - t0;
   return all_current;
 }
 
@@ -183,7 +183,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
     renderer.state = nullptr;
     return false;
   }
-  g_ns_cs_out += NowNs() - t0;
+  g_stats.ns_cs_out += NowNs() - t0;
   return all_current;
 }
 
@@ -312,7 +312,7 @@ static bool FlushDirtyRanges(Renderer& renderer,
       (!CsRangeDirtyOverlapping(base, bytes) &&
        !(kCsFlushTrace && base == (u64)kCsFlushTrace)))
     return true;
-  ScopeNs flush_timer(&g_ns_cs_flush);
+  ScopeNs flush_timer(&g_stats.ns_cs_flush);
   const u64 t0 = NowNs();
   bool all_current = true;
   if (kCsFlushTrace && base == (u64)kCsFlushTrace) {
@@ -406,7 +406,7 @@ static bool FlushDirtyRanges(Renderer& renderer,
       all_current = false;
     }
   }
-  g_ns_cs_out += NowNs() - t0;
+  g_stats.ns_cs_out += NowNs() - t0;
   return all_current;
 }
 
@@ -470,17 +470,17 @@ static bool ApplyGpuFill(u64 base, u64 bytes, u32 lo, u32 hi) {
 }
 
 void ApplyMemoryFill(Renderer& renderer, u64 base, u64 bytes, u32 value) {
-  ScopeNs fill_timer(&g_ns_memory_fill);
-  g_memory_fill_bytes += bytes;
-  g_memory_fill_n++;
+  ScopeNs fill_timer(&g_stats.ns_memory_fill);
+  g_stats.memory_fill_bytes += bytes;
+  g_stats.memory_fill_n++;
   if (ApplyGpuFill(base, bytes & ~u64(3), value, value))
     NoteMemoryFill(renderer, base, bytes, value);
 }
 
 void ApplyMemoryFill64(Renderer& renderer, u64 base, u64 bytes, u64 value) {
-  ScopeNs fill_timer(&g_ns_memory_fill);
-  g_memory_fill_bytes += bytes;
-  g_memory_fill_n++;
+  ScopeNs fill_timer(&g_stats.ns_memory_fill);
+  g_stats.memory_fill_bytes += bytes;
+  g_stats.memory_fill_n++;
   if (ApplyGpuFill(base, bytes & ~u64(7), u32(value), u32(value >> 32)))
     NoteMemoryFill64(renderer, base, bytes, value);
 }

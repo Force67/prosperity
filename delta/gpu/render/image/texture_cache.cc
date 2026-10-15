@@ -588,9 +588,9 @@ bool RecordTexPixels(rhi::Texture* img,
     return false;
   }
   const u64 elapsed = NowNs() - start;
-  g_ns_tex_up += elapsed;
-  g_fr_tex_up += elapsed;
-  g_tex_ups++;
+  g_stats.ns_tex_up += elapsed;
+  g_frame_ns.tex_up += elapsed;
+  g_stats.tex_ups++;
   return true;
 }
 
@@ -684,8 +684,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
                                             bool is_3d,
                                             TexKey& key_out) {
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
-  ScopeNs lookup_timer(&g_ns_tex_lookup);
-  g_tex_lookup_n++;
+  ScopeNs lookup_timer(&g_stats.ns_tex_lookup);
+  g_stats.tex_lookup_n++;
   constexpr u64 kMaxTextureBytes = 512ull * 1024 * 1024;
   if (kTexWatch && base == (u64)kTexWatch) {
     static int watched = -1;
@@ -917,8 +917,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
         const u64 offset = layout.mips[supplied_mips].offset;
         entry.tail_clean =
             GuestWriteTracker().Arm(base + offset, footprint - offset);
-        g_tex_refresh_n++;
-        g_tex_refresh_bytes += footprint - offset;
+        g_stats.tex_refresh_n++;
+        g_stats.tex_refresh_bytes += footprint - offset;
       } else if (supplied_mips == layout.mip_levels) {
         entry.tail_first_mip = 0;
       }
@@ -942,8 +942,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     const u64 t_probe = NowNs();
     const bool readable = (known && image_it->second.wt_clean) ||
                           gpu::IsReadableRange(base, footprint);
-    g_ns_tex_probe += NowNs() - t_probe;
-    g_tex_probe_n++;
+    g_stats.ns_tex_probe += NowNs() - t_probe;
+    g_stats.tex_probe_n++;
     if (!readable) {
       if (kTexFail) {
         static int n = 0;
@@ -976,9 +976,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       }
       CollectGuestWrites();
       e.wt_clean = GuestWriteTracker().Arm(base, footprint);
-      g_ns_tex_refresh += NowNs() - t_refresh;
-      g_tex_refresh_n++;
-      g_tex_refresh_bytes += footprint;
+      g_stats.ns_tex_refresh += NowNs() - t_refresh;
+      g_stats.tex_refresh_n++;
+      g_stats.tex_refresh_bytes += footprint;
     }
   }
   if (image_it == g_tex_images.end()) {
@@ -1322,8 +1322,8 @@ rhi::BindGroup* GetMultiTexSet(const DrawInfo& d,
                                const rhi::Format* resolved_formats,
                                const u64* depth_src) {
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
-  ScopeNs set_timer(&g_ns_tex_set);
-  g_tex_set_n++;
+  ScopeNs set_timer(&g_stats.ns_tex_set);
+  g_stats.tex_set_n++;
   const u32 resolved = base::Min(d.num_texs, kMaxTex);
   const auto declared = [&](u32 i) -> const gcn::ShaderTex* {
     if (!d.recomp)

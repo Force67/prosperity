@@ -27,6 +27,7 @@
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
+#include "gpu/gpu_perf.h"
 #include "gpu/guest_memory.h"
 #include "gpu/ps4/cmd_trace.h"
 #include "gpu/ps4/compute_dispatch.h"
@@ -52,9 +53,7 @@ DELTA_OPTION(bool, kPrefetchShaders, "DELTA_GPU_PREFETCH_SHADERS", true);
 }  // namespace
 
 namespace gpu::render {
-u64 g_ns_dcb = 0;
 u32 g_submit_queue = 0;
-u64 g_ns_dcb_lock = 0;
 u32 g_dcb_n = 0;
 }  // namespace gpu::render
 
@@ -1113,7 +1112,7 @@ void PrefetchWalk(Regs& regs, const u32* p, u32 words, u32 depth) {
 struct ScopedWalkTimer {
   base::TimeTicks start = base::TimeTicks::Now();
   ~ScopedWalkTimer() {
-    render::g_ns_dcb +=
+    g_stats.ns_dcb +=
         ((base::TimeTicks::Now() - start).InMicroseconds() * 1000);
     render::g_dcb_n++;
   }
@@ -1204,7 +1203,7 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
   ScopedWalkTimer timer;
   const auto lock_start = base::TimeTicks::Now();
   base::LockGuard<base::Mutex> lock(g_mutex);
-  render::g_ns_dcb_lock +=
+  g_stats.ns_dcb_lock +=
       ((base::TimeTicks::Now() - lock_start).InMicroseconds() * 1000);
 
   render::Renderer& renderer = render::DefaultRenderer();

@@ -2252,7 +2252,6 @@ TEST(RdnaComputeImageConversion, PlainStoresValidateOnlyTheAccessedMip) {
 }  // namespace
 
 namespace gpu::render {
-u64 g_ns_dcb = 0, g_ns_dcb_lock = 0;
 u32 g_submit_queue = 0, g_dcb_n = 0;
 }  // namespace gpu::render
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge

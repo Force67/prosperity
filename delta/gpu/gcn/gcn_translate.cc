@@ -9,6 +9,7 @@
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_disasm.h"
 #include "gpu/gcn/spirv/gcn_spirv.h"
+#include "gpu/gpu_perf.h"
 #include "ui/shader_activity.h"
 
 #include "base/algorithm.h"
@@ -17,11 +18,6 @@
 #include "profile/profile.h"
 
 namespace gpu::gcn {
-
-u64 g_ns_recomp = 0;
-u32 g_recomp_n = 0;
-u64 g_ns_spv_val = 0, g_ns_spv_opt = 0;
-u32 g_spv_hit_n = 0, g_spv_miss_n = 0;
 
 namespace {
 DELTA_OPTION(bool, kDirectGcn, "DELTA_GPU_DIRECT_GCN", false);
@@ -93,8 +89,8 @@ Recompiled Recompile(const u32* vs_code,
                  ps_in_cntl, ps_num_interp, tex_3d_mask, tex_1d_mask,
                  tex_uint_mask, mrt_uint_mask, mrt_bound_mask, gl_clip_space,
                  gs, int_attr_mask, col_format, tex_cube_mask, r);
-  g_ns_recomp += NowNs() - t0;
-  g_recomp_n++;
+  g_stats.ns_recomp += NowNs() - t0;
+  g_stats.recomp_n++;
   return r;
 }
 
@@ -117,8 +113,8 @@ RecompiledCs RecompileCompute(const u32* cs_code,
   RecompileComputeSpirv(cs_code, num_thread_x, num_thread_y, num_thread_z,
                         user_sgpr, tgid_enable, lds_dwords, native_mask,
                         uint_mask, r);
-  g_ns_recomp += NowNs() - t0;
-  g_recomp_n++;
+  g_stats.ns_recomp += NowNs() - t0;
+  g_stats.recomp_n++;
   return r;
 }
 

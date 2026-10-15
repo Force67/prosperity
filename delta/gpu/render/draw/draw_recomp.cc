@@ -108,7 +108,7 @@ static const char* kDeclineName[kMaxDeclineReason] = {
 u32 g_decline[kMaxDeclineReason] = {0};
 inline bool Decline(DeclineReason r) {
   g_decline[r]++;
-  g_win_declines++;
+  g_stats.win_declines++;
   if (trace::Recording())
     trace::RecordDecline(kDeclineName[r]);
   return false;
@@ -352,8 +352,8 @@ bool BindVertexDescriptor(u64 base,
     direct.buffer = DirectBindAt(base, bytes, &direct.offset);
   if (!direct.buffer)
     return false;
-  g_bind_bytes += bytes;
-  g_bind_n++;
+  g_stats.bind_bytes += bytes;
+  g_stats.bind_n++;
   return true;
 }
 
@@ -881,10 +881,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
             staged->max_index != ~0u) {
           max_index = staged->max_index;
         } else {
-          ScopeNs scan_timer(&g_ns_index_scan);
+          ScopeNs scan_timer(&g_stats.ns_index_scan);
           max_index = MaxGuestIndex(d.index_data, d.index_count, d.index_type);
-          g_index_scan_n++;
-          g_index_scan_bytes +=
+          g_stats.index_scan_n++;
+          g_stats.index_scan_bytes +=
               u64(d.index_count) * GuestIndexElementBytes(d.index_type);
         }
         if (max_index >= 200000u)
@@ -932,8 +932,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       if (rhi::Buffer* b = DirectBindAt(reinterpret_cast<u64>(d.vbufs[j].data),
                                         bind_size[j], &inner)) {
         vb_bind[j] = {b, inner};
-        g_bind_bytes += bind_size[j];
-        g_bind_n++;
+        g_stats.bind_bytes += bind_size[j];
+        g_stats.bind_n++;
         continue;
       }
     }
@@ -1082,8 +1082,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       ib_gpu = false;
     }
     if (ib_bind.buffer) {
-      g_bind_bytes += index_bytes;
-      g_bind_n++;
+      g_stats.bind_bytes += index_bytes;
+      g_stats.bind_n++;
     }
   }
   const u64 ib_cached =
@@ -1112,14 +1112,14 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     return Decline(kRing);
   }
 
-  g_ns_dr_pre += NowNs() - t_draw_start;
+  g_stats.ns_dr_pre += NowNs() - t_draw_start;
   const u64 t_pipe = NowNs();
   RecompPipe* rp = GetRecompPipe(d);
-  g_ns_dr_pipe += NowNs() - t_pipe;
+  g_stats.ns_dr_pipe += NowNs() - t_pipe;
   if (!rp || rp->failed)
     return Decline(kNoPipe);
   if (!rp->pipe) {
-    g_pipe_pending_draws++;
+    g_stats.pipe_pending_draws++;
     return true;
   }
   const u64 t_tex = NowNs();
@@ -1829,8 +1829,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       return Decline(kMidRegion);
   }
 
-  g_ns_dr_tex += NowNs() - t_tex;
-  ScopeNs bind_timer(&g_ns_dr_bind);
+  g_stats.ns_dr_tex += NowNs() - t_tex;
+  ScopeNs bind_timer(&g_stats.ns_dr_bind);
   SetGuestViewport(d);
   rhi::CommandList* list = g_frame.list;
   list->SetPipeline(rp->pipe);
@@ -1882,8 +1882,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     if (have_cbuf)
       cbuf_mask |= i < 32 ? 1u << i : 0;
     if (!indirect_cbufs && cb_direct[i].buffer) {
-      g_bind_bytes += kCbufWindow;
-      g_bind_n++;
+      g_stats.bind_bytes += kCbufWindow;
+      g_stats.bind_n++;
       continue;
     }
     if (cb_gpu_off[i] != u64(-1)) {
@@ -1913,7 +1913,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     if (have_cbuf) {
       n = cache_n;
       std::memcpy(cb_dst, reinterpret_cast<const void*>(cb.base), n);
-      g_ring_cb_bytes += n;
+      g_stats.ring_cb_bytes += n;
     } else {
       n = sizeof(d.mvp);
       std::memcpy(cb_dst, d.mvp, n);
@@ -1986,8 +1986,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       if (raw_direct[i].buffer) {
         sbo_dyn[i] = 0;
         rawbuf_mask |= 1u << i;
-        g_bind_bytes += want;
-        g_bind_n++;
+        g_stats.bind_bytes += want;
+        g_stats.bind_n++;
         continue;
       }
       if (raw_gpu_off[i] != u64(-1)) {
@@ -2020,7 +2020,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       u8* dst = g_ring.sbo_map + off;
       const bool tracked = ArmForCache(rb.base, want);
       std::memcpy(dst, reinterpret_cast<const void*>(rb.base), want);
-      g_ring_raw_bytes += want;
+      g_stats.ring_raw_bytes += want;
       if (want < reserve)
         std::memset(dst + want, 0, static_cast<size_t>(reserve - want));
       g_ring.sbo_offset = off + reserve;
@@ -2066,14 +2066,14 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     if (tracked && kRingDedup &&
         CacheGuestBuffer(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
                          vb_kept[j])) {
-      g_vb_kept_bytes += bind_size[j];
+      g_stats.vb_kept_bytes += bind_size[j];
       continue;
     }
     if (!EnsureVertexRing())
       return Decline(kRing);
     std::memcpy(g_ring.vb_map + voff + bind_off[j], d.vbufs[j].data,
                 (size_t)bind_size[j]);
-    g_ring_vb_bytes += bind_size[j];
+    g_stats.ring_vb_bytes += bind_size[j];
     if (kRingDedup)
       g_vb_staged.Insert(reinterpret_cast<u64>(d.vbufs[j].data), bind_size[j],
                          0, voff + bind_off[j], tracked);
@@ -2088,7 +2088,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         return Decline(kRing);
       CopyGuestIndices(g_ring.ib_map + ioff, d.index_data, d.index_count,
                        d.index_type);
-      g_ring_ib_bytes += index_bytes;
+      g_stats.ring_ib_bytes += index_bytes;
     }
     if (kRingDedup && !indirect_quads)
       g_ib_staged.Insert(

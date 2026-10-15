@@ -101,8 +101,8 @@ struct RecompTimer {
   ui::ShaderCompilation compilation;
   u64 t0 = NowNs();
   ~RecompTimer() {
-    gcn::g_ns_recomp += NowNs() - t0;
-    gcn::g_recomp_n++;
+    g_stats.ns_recomp += NowNs() - t0;
+    g_stats.recomp_n++;
   }
 };
 

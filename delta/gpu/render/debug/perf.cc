@@ -199,11 +199,11 @@ void PushStageSample() {
   const float wall = prev_ns ? (now - prev_ns) / 1e6f : 0.0f;
   prev_ns = now;
   StageSample s;
-  s.rec = g_fr_draw / 1e6f;
-  s.sub = g_fr_submit / 1e6f;
-  s.gpu = g_fr_wait / 1e6f;
-  s.prs = g_fr_present / 1e6f;
-  s.tex = g_fr_tex_up / 1e6f;
+  s.rec = g_frame_ns.draw / 1e6f;
+  s.sub = g_frame_ns.submit / 1e6f;
+  s.gpu = g_frame_ns.wait / 1e6f;
+  s.prs = g_frame_ns.present / 1e6f;
+  s.tex = g_frame_ns.tex_up / 1e6f;
   const float known = s.rec + s.sub + s.gpu + s.prs + s.tex;
   s.oth = wall > known ? wall - known : 0.0f;
   s.wall = wall;
@@ -211,7 +211,7 @@ void PushStageSample() {
     g_frame_worst_ms = wall;
   if (wall > kHitchMs)
     g_frame_hitch_n++;
-  g_fr_draw = g_fr_submit = g_fr_wait = g_fr_present = g_fr_tex_up = 0;
+  g_frame_ns = {};
   g_stage_hist[g_stage_hist_pos] = s;
   g_stage_hist_pos = (g_stage_hist_pos + 1) % kStageHistN;
   if (g_stage_hist_count < kStageHistN)
@@ -300,11 +300,14 @@ void ReportFps() {
     return;
   static auto last = base::TimeTicks::Now();
   static int frames = 0;
+  static u32 last_dcb = 0;
   frames++;
   auto now = base::TimeTicks::Now();
   double dt = (now - last).InSecondsF();
   if (dt >= 2.0) {
     double f = frames ? frames : 1;
+    const u32 dcbs = render::g_dcb_n - last_dcb;
+    last_dcb = render::g_dcb_n;
     if (rhi::g_list_gpu_n[1] | rhi::g_list_gpu_n[2] | rhi::g_list_gpu_n[3]) {
       BASE_LOGI("listprof",
                 "GPU ms/frame: frame lists {:.2f} (x{:.1f}) batches {:.2f} "
@@ -328,46 +331,51 @@ void ReportFps() {
       for (u64& v : rhi::g_prof_cat_ns)
         v = 0;
     }
-    BASE_LOGI(
-        "fps",
-        "{:.1f} fps | per-frame gpu-code: draw={:.2f}ms end={:.2f}ms "
-        "(wait={:.2f}ms exec={:.2f}ms "
-        "submit={:.2f}ms present={:.2f}ms) texup={:.2f}ms x{:.1f} "
-        "cs={:.2f}ms x{:.1f} "
-        "(in={:.2f} gpu={:.2f} out={:.2f} stage={:.1f}x{:.1f}MB "
-        "flush={:.1f}) "
-        "sh={:.2f}ms x{:.1f} dcb={:.2f}ms x{:.1f} (lock={:.2f}ms) "
-        "draws={:.0f} (decl={:.0f})",
-        frames / dt, g_ns_draw / f / 1e6, g_ns_end / f / 1e6,
-        g_ns_readback / f / 1e6,
-        g_gpu_exec_samples ? g_ns_gpu_exec / g_gpu_exec_samples / 1e6 : 0.0,
-        g_ns_submit / f / 1e6, g_ns_present / f / 1e6, g_ns_tex_up / f / 1e6,
-        g_tex_ups / f, g_ns_cs / f / 1e6, g_cs_count / f, g_ns_cs_in / f / 1e6,
-        g_ns_cs_gpu / f / 1e6, g_ns_cs_out / f / 1e6, g_cs_stage_n / f,
-        g_cs_stage_bytes / f / 1e6, g_cs_flush_n / f,
-        gcn::g_ns_recomp / f / 1e6, gcn::g_recomp_n / f,
-        render::g_ns_dcb / f / 1e6, render::g_dcb_n / f,
-        render::g_ns_dcb_lock / f / 1e6, g_win_draws / f, g_win_declines / f);
-    if (g_frame_hitch_n || g_pipe_build_n || g_pipe_pending_draws)
+    BASE_LOGI("fps",
+              "{:.1f} fps | per-frame gpu-code: draw={:.2f}ms end={:.2f}ms "
+              "(wait={:.2f}ms exec={:.2f}ms "
+              "submit={:.2f}ms present={:.2f}ms) texup={:.2f}ms x{:.1f} "
+              "cs={:.2f}ms x{:.1f} "
+              "(in={:.2f} gpu={:.2f} out={:.2f} stage={:.1f}x{:.1f}MB "
+              "flush={:.1f}) "
+              "sh={:.2f}ms x{:.1f} dcb={:.2f}ms x{:.1f} (lock={:.2f}ms) "
+              "draws={:.0f} (decl={:.0f})",
+              frames / dt, g_stats.ns_draw / f / 1e6, g_stats.ns_end / f / 1e6,
+              g_stats.ns_readback / f / 1e6,
+              g_stats.gpu_exec_samples
+                  ? g_stats.ns_gpu_exec / g_stats.gpu_exec_samples / 1e6
+                  : 0.0,
+              g_stats.ns_submit / f / 1e6, g_stats.ns_present / f / 1e6,
+              g_stats.ns_tex_up / f / 1e6, g_stats.tex_ups / f,
+              g_stats.ns_cs / f / 1e6, g_stats.cs_count / f,
+              g_stats.ns_cs_in / f / 1e6, g_stats.ns_cs_gpu / f / 1e6,
+              g_stats.ns_cs_out / f / 1e6, g_stats.cs_stage_n / f,
+              g_stats.cs_stage_bytes / f / 1e6, g_stats.cs_flush_n / f,
+              g_stats.ns_recomp / f / 1e6, g_stats.recomp_n / f,
+              g_stats.ns_dcb / f / 1e6, dcbs / f,
+              g_stats.ns_dcb_lock / f / 1e6, g_stats.win_draws / f,
+              g_stats.win_declines / f);
+    if (g_frame_hitch_n || g_stats.pipe_build_n || g_stats.pipe_pending_draws)
       BASE_LOGI(
           "hitch",
           "worst={:.0f}ms over{}ms={} | pipe={:.0f}ms x{} skipped={} "
           "recomp={:.0f}ms x{} (val={:.0f}ms opt={:.0f}ms spv {}hit/{}miss)",
           g_frame_worst_ms, (u32)kHitchMs, g_frame_hitch_n,
-          g_ns_pipe_build / 1e6, g_pipe_build_n, g_pipe_pending_draws,
-          gcn::g_ns_recomp / 1e6, gcn::g_recomp_n, gcn::g_ns_spv_val / 1e6,
-          gcn::g_ns_spv_opt / 1e6, gcn::g_spv_hit_n, gcn::g_spv_miss_n);
+          g_stats.ns_pipe_build / 1e6, g_stats.pipe_build_n,
+          g_stats.pipe_pending_draws, g_stats.ns_recomp / 1e6, g_stats.recomp_n,
+          g_stats.ns_spv_val / 1e6, g_stats.ns_spv_opt / 1e6, g_stats.spv_hit_n,
+          g_stats.spv_miss_n);
     if (kDrawProf)
       BASE_LOGI("drawprof",
                 "per-frame pre={:.2f}ms pipe={:.2f}ms tex={:.2f}ms "
                 "bind={:.2f}ms | refresh={:.2f}ms x{:.0f} {:.1f}MB "
                 "probe={:.2f}ms x{:.0f} lookup={:.2f}ms x{:.0f}",
-                g_ns_dr_pre / f / 1e6, g_ns_dr_pipe / f / 1e6,
-                g_ns_dr_tex / f / 1e6, g_ns_dr_bind / f / 1e6,
-                g_ns_tex_refresh / f / 1e6, g_tex_refresh_n / f,
-                g_tex_refresh_bytes / f / 1e6, g_ns_tex_probe / f / 1e6,
-                g_tex_probe_n / f, g_ns_tex_lookup / f / 1e6,
-                g_tex_lookup_n / f);
+                g_stats.ns_dr_pre / f / 1e6, g_stats.ns_dr_pipe / f / 1e6,
+                g_stats.ns_dr_tex / f / 1e6, g_stats.ns_dr_bind / f / 1e6,
+                g_stats.ns_tex_refresh / f / 1e6, g_stats.tex_refresh_n / f,
+                g_stats.tex_refresh_bytes / f / 1e6,
+                g_stats.ns_tex_probe / f / 1e6, g_stats.tex_probe_n / f,
+                g_stats.ns_tex_lookup / f / 1e6, g_stats.tex_lookup_n / f);
     if (kDrawProf) {
       const WriteTracker& t = GuestWriteTracker();
       static u64 collects = 0, pages = 0, collect_ns = 0;
@@ -379,16 +387,17 @@ void ReportFps() {
           "ib={:.1f}MB cb={:.1f}MB raw={:.1f}MB | track armed={:.0f}MB "
           "runs={} collect={:.2f}ms x{:.0f} written={:.0f}p | kept={:.0f}MB "
           "+{:.1f}MB/f | bind={:.1f}MB x{:.0f}",
-          g_ns_tex_set / f / 1e6, g_tex_set_n / f, g_ns_region / f / 1e6,
-          g_ns_cs_flush / f / 1e6, g_ns_build_draw / f / 1e6,
-          g_build_draw_n / f, g_ns_gfx_present / f / 1e6,
-          g_ns_borrow_wait / f / 1e6, g_ring_vb_bytes / f / 1e6,
-          g_ring_ib_bytes / f / 1e6, g_ring_cb_bytes / f / 1e6,
-          g_ring_raw_bytes / f / 1e6, t.armed_bytes() / 1e6, t.runs(),
+          g_stats.ns_tex_set / f / 1e6, g_stats.tex_set_n / f,
+          g_stats.ns_region / f / 1e6, g_stats.ns_cs_flush / f / 1e6,
+          g_stats.ns_build_draw / f / 1e6, g_stats.build_draw_n / f,
+          g_stats.ns_gfx_present / f / 1e6, g_stats.ns_borrow_wait / f / 1e6,
+          g_stats.ring_vb_bytes / f / 1e6, g_stats.ring_ib_bytes / f / 1e6,
+          g_stats.ring_cb_bytes / f / 1e6, g_stats.ring_raw_bytes / f / 1e6,
+          t.armed_bytes() / 1e6, t.runs(),
           (t.collect_ns() - collect_ns) / f / 1e6,
           (t.collects() - collects) / f, (t.written_pages() - pages) / f,
-          CachedBufferBytes() / 1e6, g_vb_kept_bytes / f / 1e6,
-          g_bind_bytes / f / 1e6, g_bind_n / f);
+          CachedBufferBytes() / 1e6, g_stats.vb_kept_bytes / f / 1e6,
+          g_stats.bind_bytes / f / 1e6, g_stats.bind_n / f);
       collects = t.collects();
       pages = t.written_pages();
       collect_ns = t.collect_ns();
@@ -396,51 +405,23 @@ void ReportFps() {
                 "per-frame GPU conversion x{:.0f} {:.1f}MB (copied {:.1f}MB) | "
                 "CPU scan={:.2f}ms "
                 "x{:.0f} {:.1f}MB",
-                g_index_convert_n / f, g_index_convert_bytes / f / 1e6,
-                g_index_convert_copy_bytes / f / 1e6, g_ns_index_scan / f / 1e6,
-                g_index_scan_n / f, g_index_scan_bytes / f / 1e6);
+                g_stats.index_convert_n / f,
+                g_stats.index_convert_bytes / f / 1e6,
+                g_stats.index_convert_copy_bytes / f / 1e6,
+                g_stats.ns_index_scan / f / 1e6, g_stats.index_scan_n / f,
+                g_stats.index_scan_bytes / f / 1e6);
       BASE_LOGI("fillprof", "per-frame fill={:.2f}ms x{:.0f} {:.1f}MB",
-                g_ns_memory_fill / f / 1e6, g_memory_fill_n / f,
-                g_memory_fill_bytes / f / 1e6);
+                g_stats.ns_memory_fill / f / 1e6, g_stats.memory_fill_n / f,
+                g_stats.memory_fill_bytes / f / 1e6);
     }
     CsSyncReport(f);
-    ui::OverlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
+    ui::OverlaySetPerf(float(frames / dt), float(g_stats.ns_end / f / 1e6),
                        float(1000.0 * dt / frames));
     last = now;
     frames = 0;
-    g_ns_draw = g_ns_end = g_ns_readback = g_ns_tex_up = 0;
-    g_ns_submit = g_ns_present = 0;
-    g_ns_gpu_exec = 0;
-    g_gpu_exec_samples = 0;
-    g_tex_ups = 0;
-    g_ns_cs = g_cs_bytes = 0;
-    g_ns_cs_in = g_ns_cs_gpu = g_ns_cs_out = 0;
-    g_cs_count = g_cs_stage_n = g_cs_flush_n = 0;
-    g_win_draws = g_win_declines = 0;
-    g_ns_dr_pre = g_ns_dr_pipe = g_ns_dr_tex = g_ns_dr_bind = 0;
-    g_ns_tex_refresh = g_tex_refresh_bytes = g_ns_tex_probe = 0;
-    g_tex_refresh_n = g_tex_probe_n = g_ns_tex_lookup = g_tex_lookup_n = 0;
-    g_ns_tex_set = g_tex_set_n = g_ns_region = g_ns_cs_flush = 0;
-    g_ns_build_draw = g_build_draw_n = 0;
-    g_ns_memory_fill = g_memory_fill_bytes = g_memory_fill_n = 0;
-    g_ns_pipe_build = g_pipe_build_n = g_pipe_pending_draws = 0;
+    g_stats = {};
     g_frame_worst_ms = 0;
     g_frame_hitch_n = 0;
-    g_ns_gfx_present = g_ns_borrow_wait = 0;
-    g_ring_vb_bytes = g_ring_ib_bytes = g_ring_cb_bytes = g_ring_raw_bytes = 0;
-    g_index_convert_n = g_index_convert_bytes = g_index_convert_copy_bytes = 0;
-    g_index_scan_n = g_index_scan_bytes = g_ns_index_scan = 0;
-    g_vb_kept_bytes = 0;
-    g_bind_bytes = 0;
-    g_bind_n = 0;
-    g_cs_stage_bytes = 0;
-    gcn::g_ns_recomp = 0;
-    gcn::g_recomp_n = 0;
-    gcn::g_ns_spv_val = gcn::g_ns_spv_opt = 0;
-    gcn::g_spv_hit_n = gcn::g_spv_miss_n = 0;
-    render::g_ns_dcb = 0;
-    render::g_ns_dcb_lock = 0;
-    render::g_dcb_n = 0;
   }
 }
 

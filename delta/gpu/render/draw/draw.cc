@@ -91,9 +91,9 @@ void Draw(Renderer& renderer, const DrawInfo& d_in) {
   const DrawInfo& d = patched ? *patched_copy : d_sw;
   if (d.index_count > g_frame.max_idx)
     g_frame.max_idx = d.index_count;
-  ScopeNs draw_timer(&g_ns_draw);
-  ScopeNs frame_draw_timer(&g_fr_draw);
-  g_win_draws++;
+  ScopeNs draw_timer(&g_stats.ns_draw);
+  ScopeNs frame_draw_timer(&g_frame_ns.draw);
+  g_stats.win_draws++;
   if (ShaderFilterDrops(d.ps_addr)) {
     g_frame.draws++;
     return;

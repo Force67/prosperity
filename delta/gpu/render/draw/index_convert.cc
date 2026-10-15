@@ -113,7 +113,7 @@ bool ConvertGuestIndices(Renderer& renderer,
           !RecordGuestRead(g_frame.list, base, bytes, raw))
         return false;
     }
-    g_index_convert_copy_bytes += bytes;
+    g_stats.index_convert_copy_bytes += bytes;
   }
   auto* list = g_frame.list;
   list->Barrier(rhi::kAccessAllWrite, kAccessComputeRW);
@@ -151,8 +151,8 @@ bool ConvertGuestIndices(Renderer& renderer,
                          : base::Max(1u, (output_count + 63) / 64),
                  1, 1);
   list->ProfileEnd();
-  g_index_convert_n++;
-  g_index_convert_bytes += u64(output_count) * 4;
+  g_stats.index_convert_n++;
+  g_stats.index_convert_bytes += u64(output_count) * 4;
   list->Barrier(rhi::kAccessComputeWrite,
                 rhi::kAccessIndexRead | rhi::kAccessIndirectRead);
   if (indirect) {

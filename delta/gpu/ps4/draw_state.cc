@@ -855,8 +855,8 @@ bool BuildDrawInfo(render::Renderer& renderer,
                    const DrawPacket& packet,
                    render::DrawInfo& d) {
   DELTA_ZONE("ps4.build_draw_info");
-  ScopeNs build_timer(&g_ns_build_draw);
-  g_build_draw_n++;
+  ScopeNs build_timer(&g_stats.ns_build_draw);
+  g_stats.build_draw_n++;
   const gcn::ScalarReplayScope replays;
   d.prim_type = regs[mmVGT_PRIMITIVE_TYPE];
   gcn::GsPipeline gs;

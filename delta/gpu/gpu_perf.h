@@ -8,33 +8,46 @@
 
 namespace gpu {
 
-extern u64 g_ns_draw, g_ns_end, g_ns_readback, g_ns_tex_up;
-extern u64 g_ns_cs, g_cs_bytes;
-extern u64 g_ns_cs_in, g_ns_cs_gpu, g_ns_cs_out;
-extern u64 g_ns_submit, g_ns_present;
-extern u64 g_ns_gpu_exec;
-extern u32 g_cs_count, g_tex_ups;
-extern u64 g_win_draws, g_win_declines;
-extern u64 g_ns_dr_pre, g_ns_dr_pipe, g_ns_dr_tex, g_ns_dr_bind;
-extern u64 g_ns_tex_refresh, g_tex_refresh_bytes, g_ns_tex_probe;
-extern u64 g_tex_refresh_n, g_tex_probe_n, g_ns_tex_lookup, g_tex_lookup_n;
-extern u64 g_ns_tex_set, g_tex_set_n, g_ns_region, g_ns_cs_flush;
-extern u64 g_ns_build_draw, g_build_draw_n;
-extern u64 g_ns_memory_fill, g_memory_fill_bytes, g_memory_fill_n;
-extern u64 g_ns_pipe_build, g_pipe_build_n;
-extern u64 g_pipe_pending_draws;
-extern u64 g_ns_gfx_present, g_ns_borrow_wait;
-extern u64 g_ring_vb_bytes, g_ring_ib_bytes, g_ring_cb_bytes, g_ring_raw_bytes;
-extern u64 g_index_convert_n, g_index_convert_bytes, g_index_convert_copy_bytes;
-extern u64 g_index_scan_n, g_index_scan_bytes, g_ns_index_scan;
-extern u64 g_vb_kept_bytes;
-extern u64 g_bind_bytes;
-extern u32 g_bind_n;
-extern u32 g_gpu_exec_samples;
-extern u32 g_cs_stage_n, g_cs_flush_n;
-extern u64 g_cs_stage_bytes;
+// Counters for one fps report interval; ReportFps prints and clears them.
+struct GpuStats {
+  u64 ns_draw, ns_end, ns_readback, ns_tex_up;
+  u64 ns_cs, cs_bytes;
+  u64 ns_cs_in, ns_cs_gpu, ns_cs_out;
+  u64 ns_submit, ns_present;
+  u64 ns_gpu_exec;
+  u32 gpu_exec_samples;
+  u32 cs_count, tex_ups;
+  u64 win_draws, win_declines;
+  u64 ns_dr_pre, ns_dr_pipe, ns_dr_tex, ns_dr_bind;
+  u64 ns_tex_refresh, tex_refresh_bytes, ns_tex_probe;
+  u64 tex_refresh_n, tex_probe_n, ns_tex_lookup, tex_lookup_n;
+  u64 ns_tex_set, tex_set_n, ns_region, ns_cs_flush;
+  u64 ns_build_draw, build_draw_n;
+  u64 ns_memory_fill, memory_fill_bytes, memory_fill_n;
+  u64 ns_pipe_build, pipe_build_n;
+  u64 pipe_pending_draws;
+  u64 ns_gfx_present, ns_borrow_wait;
+  u64 ring_vb_bytes, ring_ib_bytes, ring_cb_bytes, ring_raw_bytes;
+  u64 index_convert_n, index_convert_bytes, index_convert_copy_bytes;
+  u64 index_scan_n, index_scan_bytes, ns_index_scan;
+  u64 vb_kept_bytes;
+  u64 bind_bytes;
+  u32 bind_n;
+  u32 cs_stage_n, cs_flush_n;
+  u64 cs_stage_bytes;
+  u64 ns_recomp;
+  u32 recomp_n;
+  u64 ns_spv_val, ns_spv_opt;
+  u32 spv_hit_n, spv_miss_n;
+  u64 ns_dcb, ns_dcb_lock;
+};
+extern GpuStats g_stats;
 
-extern u64 g_fr_draw, g_fr_submit, g_fr_wait, g_fr_present, g_fr_tex_up;
+// Where one frame's wall time went; the perf overlay samples and clears it.
+struct FrameStageNs {
+  u64 draw, submit, wait, present, tex_up;
+};
+extern FrameStageNs g_frame_ns;
 
 inline u64 NowNs() {
   return (base::TickClock::NowNs());

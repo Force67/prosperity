@@ -582,8 +582,8 @@ bool CsEnsureStage(u32 i, u64 size);
 struct ScopeCs {
   u64 t0 = NowNs();
   ~ScopeCs() {
-    g_ns_cs += NowNs() - t0;
-    g_cs_count++;
+    g_stats.ns_cs += NowNs() - t0;
+    g_stats.cs_count++;
   }
 };
 

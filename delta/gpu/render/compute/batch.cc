@@ -187,7 +187,7 @@ void CsBatchBeginImpl() {
     if (!Device().Wait(b.submission))
       CsBatchLogFault(b, "wait");
     CsBatchFinalize(b);
-    g_ns_cs_gpu += NowNs() - t0;
+    g_stats.ns_cs_gpu += NowNs() - t0;
     g_cs_sync_n[kSyncRingFull]++;
     g_cs_sync_ns[kSyncRingFull] += NowNs() - t0;
   }
@@ -305,7 +305,7 @@ bool CsBatchWaitId(u64 id, CsSyncWhy why) {
     }
     CsBatchFinalize(*oldest);
   }
-  g_ns_cs_gpu += NowNs() - t0;
+  g_stats.ns_cs_gpu += NowNs() - t0;
   g_cs_sync_n[why]++;
   g_cs_sync_ns[why] += NowNs() - t0;
   if (CsSyncReporting()) {

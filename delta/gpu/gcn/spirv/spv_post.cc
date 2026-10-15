@@ -398,29 +398,29 @@ bool Finalize(const base::Vector<u32>& spv,
   }
   std::shared_future<Finalized> job;
   if (Pool().Take(key, &job)) {
-    g_spv_miss_n++;
+    g_stats.spv_miss_n++;
     const u64 t0 = NowNs();
     const Finalized& f = job.get();
-    g_ns_spv_opt += NowNs() - t0;
+    g_stats.ns_spv_opt += NowNs() - t0;
     if (!f.valid && err)
       *err = f.err;
     *out = f.spv;
     return f.valid;
   }
   if (ReadEntry(key, out)) {
-    g_spv_hit_n++;
+    g_stats.spv_hit_n++;
     return true;
   }
-  g_spv_miss_n++;
+  g_stats.spv_miss_n++;
   u64 t0 = NowNs();
   const bool valid = Validate(spv, err);
-  g_ns_spv_val += NowNs() - t0;
+  g_stats.ns_spv_val += NowNs() - t0;
   if (!valid)
     return false;
   t0 = NowNs();
   const ui::ShaderCompilation compilation;
   *out = Optimize(spv);
-  g_ns_spv_opt += NowNs() - t0;
+  g_stats.ns_spv_opt += NowNs() - t0;
   WriteEntry(key, *out);
   return true;
 }

@@ -141,12 +141,6 @@ struct Recompiled {
   bool shared_lds = false;
 };
 
-extern u64 g_ns_recomp;
-extern u32 g_recomp_n;
-
-extern u64 g_ns_spv_val, g_ns_spv_opt;
-extern u32 g_spv_hit_n, g_spv_miss_n;
-
 constexpr u32 kColFormatUnknown = 0xFFFFFFFFu;
 
 Recompiled Recompile(const u32* vs_code,

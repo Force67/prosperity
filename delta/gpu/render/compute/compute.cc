@@ -201,8 +201,8 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
       cp.set_layout = prebuilt.set_layout;
       cp.layout = prebuilt.layout;
       cp.pipe = prebuilt.pipe;
-      g_ns_pipe_build += NowNs() - started;
-      g_pipe_build_n++;
+      g_stats.ns_pipe_build += NowNs() - started;
+      g_stats.pipe_build_n++;
       g_cs_pipes[key] = cp;
       return &g_cs_pipes[key];
     }
@@ -222,12 +222,12 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
               ci.recomp->spirv.size());
   const u64 started = NowNs();
   cp.pipe = CreateCsPipeline(cp.layout, ci.recomp->spirv);
-  g_ns_pipe_build += NowNs() - started;
+  g_stats.ns_pipe_build += NowNs() - started;
   if (CsSyncReporting())
     BASE_LOGI("cspipe", "compiled cs={:#x} ms={:.3f}", ci.cs_addr,
               double(NowNs() - started) / 1e6);
 
-  g_pipe_build_n++;
+  g_stats.pipe_build_n++;
   if (!cp.pipe) {
     BASE_LOGI("gpuvk", "compute pipeline failed");
     Device().Destroy(cp.layout);

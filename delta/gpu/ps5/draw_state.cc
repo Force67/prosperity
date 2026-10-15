@@ -794,8 +794,8 @@ void ResolveRecompiledShaders(const Regs& regs,
 bool BuildDrawInfo(const Regs& regs,
                    const DrawPacket& packet,
                    render::DrawInfo& d) {
-  ScopeNs build_timer(&g_ns_build_draw);
-  g_build_draw_n++;
+  ScopeNs build_timer(&g_stats.ns_build_draw);
+  g_stats.build_draw_n++;
   const ShaderBinding binding = ResolveShaderBinding(regs);
   TraceShaderListing(binding.vs_addr);
   TraceShaderListing(binding.ps_addr);

@@ -1161,7 +1161,7 @@ bool BeginRegion(const u64* mrt_base,
                  u32 depth_slice,
                  u32 layers,
                  bool meta_cmask) {
-  ScopeNs region_timer(&g_ns_region);
+  ScopeNs region_timer(&g_stats.ns_region);
   if (QueueCheckArmed()) {
     char where[64];
     std::snprintf(

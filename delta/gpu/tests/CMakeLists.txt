@@ -54,6 +54,7 @@ add_delta_test(agc_queue_test
     agc_queue_test.cc
     ../ps5/cmd_processor.cc
     ../ps5/cmd_trace.cc
+    ../gpu_perf.cc
     ../ps5/reg_state.cc
     ../ps5/label_publisher.cc
     ../ps5/rdna/rdna_decode.cc

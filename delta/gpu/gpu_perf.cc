@@ -6,37 +6,7 @@
 
 namespace gpu {
 
-u64 g_ns_gpu_exec = 0;
-u32 g_gpu_exec_samples = 0;
-
-u64 g_ns_draw = 0, g_ns_end = 0, g_ns_readback = 0, g_ns_tex_up = 0;
-u64 g_ns_cs = 0, g_cs_bytes = 0;
-u64 g_ns_cs_in = 0, g_ns_cs_gpu = 0, g_ns_cs_out = 0;
-u32 g_cs_count = 0;
-u64 g_win_draws = 0, g_win_declines = 0;
-u64 g_ns_dr_pre = 0, g_ns_dr_pipe = 0, g_ns_dr_tex = 0, g_ns_dr_bind = 0;
-u64 g_ns_tex_refresh = 0, g_tex_refresh_bytes = 0, g_ns_tex_probe = 0;
-u64 g_tex_refresh_n = 0, g_tex_probe_n = 0, g_ns_tex_lookup = 0,
-    g_tex_lookup_n = 0;
-u64 g_ns_tex_set = 0, g_tex_set_n = 0, g_ns_region = 0, g_ns_cs_flush = 0;
-u64 g_ns_build_draw = 0, g_build_draw_n = 0;
-u64 g_ns_memory_fill = 0, g_memory_fill_bytes = 0, g_memory_fill_n = 0;
-u64 g_ns_pipe_build = 0, g_pipe_build_n = 0;
-u64 g_pipe_pending_draws = 0;
-u64 g_ns_gfx_present = 0, g_ns_borrow_wait = 0;
-u64 g_index_convert_n = 0, g_index_convert_bytes = 0,
-    g_index_convert_copy_bytes = 0;
-u64 g_index_scan_n = 0, g_index_scan_bytes = 0, g_ns_index_scan = 0;
-u64 g_ring_vb_bytes = 0, g_ring_ib_bytes = 0, g_ring_cb_bytes = 0,
-    g_ring_raw_bytes = 0;
-u64 g_vb_kept_bytes = 0;
-u64 g_bind_bytes = 0;
-u32 g_bind_n = 0;
-u64 g_ns_submit = 0, g_ns_present = 0;
-u32 g_tex_ups = 0;
-u32 g_cs_stage_n = 0, g_cs_flush_n = 0;
-u64 g_cs_stage_bytes = 0;
-u64 g_fr_draw = 0, g_fr_submit = 0, g_fr_wait = 0, g_fr_present = 0,
-    g_fr_tex_up = 0;
+GpuStats g_stats;
+FrameStageNs g_frame_ns;
 
 }  // namespace gpu

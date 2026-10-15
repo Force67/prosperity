@@ -1228,7 +1228,7 @@ static void ProcessGraphicsDcb(const void* dcb,
   const u64 t_enter = NowNs();
   base::LockGuard<base::Mutex> lock(g_mutex);
   const u64 t_held = NowNs();
-  render::g_ns_dcb_lock += t_held - t_enter;
+  g_stats.ns_dcb_lock += t_held - t_enter;
   g_queue = &g_graphics_queue;
   g_queue->stall.stalled = false;
   g_queue->stall.visible_ns = visible_ns;
@@ -1246,7 +1246,7 @@ static void ProcessGraphicsDcb(const void* dcb,
   TraceOpcodeCensus(dcb, words, submission);
   if (dump)
     TraceWalkDone();
-  render::g_ns_dcb += NowNs() - t_held;
+  g_stats.ns_dcb += NowNs() - t_held;
   render::g_dcb_n++;
   render::g_submit_queue = 0;
 }

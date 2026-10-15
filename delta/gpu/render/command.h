@@ -239,8 +239,9 @@ struct ComputeInfo {
   u32 num_tex = 0;
 };
 
-extern u64 g_ns_dcb, g_ns_dcb_lock;
 extern u32 g_submit_queue;
+// Command buffers walked so far. Caches key on (frame, g_dcb_n), so it must
+// never go back.
 extern u32 g_dcb_n;
 
 }  // namespace gpu::render

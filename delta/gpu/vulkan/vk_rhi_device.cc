@@ -1637,10 +1637,10 @@ rhi::Pipeline* VulkanDevice::CreateGraphicsPipeline(
   VkResult r = VK_ERROR_UNKNOWN;
   const u64 started = NowNs();
   if (ok) {
-    ScopeNs t(&g_ns_pipe_build);
+    ScopeNs t(&g_stats.ns_pipe_build);
     r = vkCreateGraphicsPipelines(dev, native.pipeline_cache, 1, &pi, nullptr,
                                   &pipeline->pipeline);
-    g_pipe_build_n++;
+    g_stats.pipe_build_n++;
   }
   for (u32 i = 0; i < stage_count; i++)
     vkDestroyShaderModule(dev, modules[i], nullptr);
