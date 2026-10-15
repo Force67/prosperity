@@ -50,13 +50,17 @@ struct Retired {
   int frame;
 };
 
-base::Vector<Block> g_blocks;
-base::Vector<Entry> g_pool;
-base::Vector<u32> g_free_handles;
-base::HashMap<u64, u32> g_by_base;
-base::HashMap<u64, base::Vector<u32>> g_index;
-base::Vector<Retired> g_retired;
-u64 g_live_bytes = 0;
+// Buffer cache state of one guest session; the session reset clears all of it.
+struct BufferCacheState {
+  base::Vector<Block> blocks;
+  base::Vector<Entry> pool;
+  base::Vector<u32> free_handles;
+  base::HashMap<u64, u32> by_base;
+  base::HashMap<u64, base::Vector<u32>> index;
+  base::Vector<Retired> retired;
+  u64 live_bytes = 0;
+};
+BufferCacheState g_buffers;
 
 void Free(Block& block, u64 offset, u64 bytes) {
   auto next = block.free.lower_bound(offset);
@@ -79,21 +83,21 @@ bool Allocate(u64 bytes, u32& block_index, u64& offset) {
   bytes = (bytes + kAlign - 1) & ~(kAlign - 1);
   if (bytes > kBlockBytes)
     return false;
-  for (u32 i = 0; i < g_blocks.size(); i++) {
-    for (auto it = g_blocks[i].free.begin(); it != g_blocks[i].free.end();
-         ++it) {
+  for (u32 i = 0; i < g_buffers.blocks.size(); i++) {
+    for (auto it = g_buffers.blocks[i].free.begin();
+         it != g_buffers.blocks[i].free.end(); ++it) {
       if (it->second < bytes)
         continue;
       const u64 at = it->first, left = it->second - bytes;
-      g_blocks[i].free.erase(it);
+      g_buffers.blocks[i].free.erase(it);
       if (left)
-        g_blocks[i].free.emplace(at + bytes, left);
+        g_buffers.blocks[i].free.emplace(at + bytes, left);
       block_index = i;
       offset = at;
       return true;
     }
   }
-  if ((g_blocks.size() + 1) * kBlockBytes > u64(kBufferCacheMb) << 20)
+  if ((g_buffers.blocks.size() + 1) * kBlockBytes > u64(kBufferCacheMb) << 20)
     return false;
   rhi::BufferDesc desc;
   desc.size = kBlockBytes;
@@ -109,40 +113,40 @@ bool Allocate(u64 bytes, u32& block_index, u64& offset) {
     return false;
   }
   block.free.emplace(bytes, kBlockBytes - bytes);
-  g_blocks.push_back(base::move(block));
-  block_index = static_cast<u32>(g_blocks.size() - 1);
+  g_buffers.blocks.push_back(base::move(block));
+  block_index = static_cast<u32>(g_buffers.blocks.size() - 1);
   offset = 0;
   return true;
 }
 
 void Drop(u32 handle) {
-  Entry& e = g_pool[handle];
-  g_retired.push_back(
+  Entry& e = g_buffers.pool[handle];
+  g_buffers.retired.push_back(
       {e.block, e.offset, (e.bytes + kAlign - 1) & ~(kAlign - 1), g_frame.num});
-  g_live_bytes -= e.bytes;
-  g_by_base.erase(e.base);
+  g_buffers.live_bytes -= e.bytes;
+  g_buffers.by_base.erase(e.base);
   e.bytes = 0;
-  g_free_handles.push_back(handle);
+  g_buffers.free_handles.push_back(handle);
 }
 
 void Index(u32 handle) {
-  const Entry& e = g_pool[handle];
+  const Entry& e = g_buffers.pool[handle];
   for (u64 b = e.base >> kIndexShift;
        b <= (e.base + e.bytes - 1) >> kIndexShift; b++)
-    g_index[b].push_back(handle);
+    g_buffers.index[b].push_back(handle);
 }
 
 }  // namespace
 
 bool FindCachedBuffer(u64 base, u64 bytes, CachedBuffer& out) {
-  auto it = g_by_base.find(base);
-  if (it == g_by_base.end())
+  auto it = g_buffers.by_base.find(base);
+  if (it == g_buffers.by_base.end())
     return false;
-  Entry& e = g_pool[it->second];
+  Entry& e = g_buffers.pool[it->second];
   if (e.bytes < bytes || CsRangeDirtyOverlapping(base, bytes))
     return false;
   e.last_used = g_frame.num;
-  out = {g_blocks[e.block].buffer, e.offset};
+  out = {g_buffers.blocks[e.block].buffer, e.offset};
   return true;
 }
 
@@ -154,83 +158,77 @@ bool CacheGuestBuffer(u64 base, u64 bytes, CachedBuffer& out) {
   u64 offset;
   if (!Allocate(bytes, block, offset))
     return false;
-  if (auto old = g_by_base.find(base); old != g_by_base.end())
+  if (auto old = g_buffers.by_base.find(base); old != g_buffers.by_base.end())
     Drop(old->second);
-  std::memcpy(g_blocks[block].map + offset, reinterpret_cast<const void*>(base),
-              bytes);
+  std::memcpy(g_buffers.blocks[block].map + offset,
+              reinterpret_cast<const void*>(base), bytes);
   u32 handle;
-  if (!g_free_handles.empty()) {
-    handle = g_free_handles.back();
-    g_free_handles.pop_back();
+  if (!g_buffers.free_handles.empty()) {
+    handle = g_buffers.free_handles.back();
+    g_buffers.free_handles.pop_back();
   } else {
-    handle = static_cast<u32>(g_pool.size());
-    g_pool.emplace_back();
+    handle = static_cast<u32>(g_buffers.pool.size());
+    g_buffers.pool.emplace_back();
   }
-  g_pool[handle] = {base, block, offset, bytes, g_frame.num};
-  g_by_base[base] = handle;
-  g_live_bytes += bytes;
+  g_buffers.pool[handle] = {base, block, offset, bytes, g_frame.num};
+  g_buffers.by_base[base] = handle;
+  g_buffers.live_bytes += bytes;
   Index(handle);
-  out = {g_blocks[block].buffer, offset};
+  out = {g_buffers.blocks[block].buffer, offset};
   return true;
 }
 
 void InvalidateCachedBuffers(u64 first, u64 end) {
-  if (g_by_base.empty() || end <= first)
+  if (g_buffers.by_base.empty() || end <= first)
     return;
   const auto drop = [&](const base::Vector<u32>& handles) {
     for (u32 handle : handles) {
-      const Entry& e = g_pool[handle];
+      const Entry& e = g_buffers.pool[handle];
       if (e.bytes && e.base < end && first < e.base + e.bytes)
         Drop(handle);
     }
   };
   const u64 first_block = first >> kIndexShift;
   const u64 last_block = (end - 1) >> kIndexShift;
-  if (last_block - first_block + 1 > g_index.size()) {
-    for (const auto& [block, bases] : g_index)
+  if (last_block - first_block + 1 > g_buffers.index.size()) {
+    for (const auto& [block, bases] : g_buffers.index)
       if (block >= first_block && block <= last_block)
         drop(bases);
     return;
   }
   for (u64 b = first_block; b <= last_block; b++)
-    if (auto found = g_index.find(b); found != g_index.end())
+    if (auto found = g_buffers.index.find(b); found != g_buffers.index.end())
       drop(found->second);
 }
 
 void BufferCacheEndFrame() {
   constexpr int kSweepFrames = 16;
   if (g_frame.num % kSweepFrames == 0)
-    for (u32 handle = 0; handle < g_pool.size(); handle++)
-      if (g_pool[handle].bytes &&
-          g_pool[handle].last_used + kIdleFrames < g_frame.num)
+    for (u32 handle = 0; handle < g_buffers.pool.size(); handle++)
+      if (g_buffers.pool[handle].bytes &&
+          g_buffers.pool[handle].last_used + kIdleFrames < g_frame.num)
         Drop(handle);
-  base::EraseIf(g_retired, [](const Retired& r) {
+  base::EraseIf(g_buffers.retired, [](const Retired& r) {
     if (r.frame + kRetireFrames > g_frame.num)
       return false;
-    Free(g_blocks[r.block], r.offset, r.bytes);
+    Free(g_buffers.blocks[r.block], r.offset, r.bytes);
     return true;
   });
   if (g_frame.num % 64 == 0) {
-    g_index.clear();
-    for (u32 handle = 0; handle < g_pool.size(); handle++)
-      if (g_pool[handle].bytes)
+    g_buffers.index.clear();
+    for (u32 handle = 0; handle < g_buffers.pool.size(); handle++)
+      if (g_buffers.pool[handle].bytes)
         Index(handle);
   }
 }
 
 u64 CachedBufferBytes() {
-  return g_live_bytes;
+  return g_buffers.live_bytes;
 }
 
 namespace {
 const guest::SessionReset g_session_reset([] {
-  guest::ResetResource(g_blocks);
-  guest::ResetResource(g_pool);
-  guest::ResetResource(g_free_handles);
-  guest::ResetResource(g_by_base);
-  guest::ResetResource(g_index);
-  guest::ResetResource(g_retired);
-  guest::ResetResource(g_live_bytes);
+  guest::ResetResource(g_buffers);
 });
 }  // namespace
 
