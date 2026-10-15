@@ -63,13 +63,11 @@ sys_regmgr_call(u32 op, u32 id, void* result, void* value, u64 type) {
     // For unsupported keys, let the guest use defaults. Clear the output so
     // readers that ignore the error do not consume garbage.
     int_value->value = 0;
-    BASE_LOGI("regmgr", "get-int unknown encoded_id={:#x}",
-              (unsigned long long)int_value->encoded_id);
-    // Name the guest code that asked, once. A key a title reads ONCE at boot
-    // and one it polls every frame want different answers, and only the caller
-    // says which this is.
+    // Log each id once and name the guest code that asked. A key a title reads
+    // ONCE at boot and one it polls every frame want different answers, and
+    // only the caller says which this is.
     static base::Mutex seen_mtx;
-    static u64 seen[24]{};
+    static u64 seen[64]{};
     static int seen_n = 0;
     bool fresh = false;
     {
@@ -78,13 +76,16 @@ sys_regmgr_call(u32 op, u32 id, void* result, void* value, u64 type) {
       for (int i = 0; i < seen_n; i++)
         if (seen[i] == int_value->encoded_id)
           fresh = false;
-      if (fresh && seen_n < 24)
+      if (fresh && seen_n < 64)
         seen[seen_n++] = int_value->encoded_id;
       else
         fresh = false;
     }
-    if (fresh)
+    if (fresh) {
+      BASE_LOGI("regmgr", "get-int unknown encoded_id={:#x}",
+                (unsigned long long)int_value->encoded_id);
       GuestStackTrace("regmgr", 8);
+    }
     *static_cast<u32*>(result) = 0x800d0203;
     return 0;
   }
