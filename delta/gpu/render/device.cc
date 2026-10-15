@@ -18,11 +18,11 @@
 #include "base/strings/xstring.h"
 #include "gpu/render/backend.h"
 #include "gpu/render/frame.h"
-#include "gpu/render/labels.h"
+#include "gpu/render/debug/labels.h"
 #include "gpu/render/renderer.h"
 #include "gpu/render/renderer_state.h"
-#include "gpu/render/trace.h"
-#include "gpu/render/upload_ring.h"
+#include "gpu/render/debug/trace.h"
+#include "gpu/render/memory/upload_ring.h"
 
 namespace {
 DELTA_OPTION(const char*, kBackend, "DELTA_GPU_BACKEND", "vulkan");

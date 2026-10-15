@@ -9,7 +9,7 @@
 #include "base/math/value_bounds.h"
 #include "base/memory/move.h"
 #include "gpu/ps5/guest_memory_ranges.h"
-#include "gpu/render/guest_direct.h"
+#include "gpu/render/memory/guest_direct.h"
 #include "gpu/write_tracker.h"
 
 namespace gpu::ps5 {

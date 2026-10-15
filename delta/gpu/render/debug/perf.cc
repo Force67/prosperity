@@ -1,0 +1,447 @@
+/*
+ * PS4Delta : PS4/PS5 emulation and research project
+ */
+
+#include "gpu/render/debug/perf.h"
+#include "base/arch.h"
+#include "gpu/gpu_perf.h"
+#include "gpu/render/memory/buffer_cache.h"
+#include "gpu/render/command.h"
+#include "gpu/rhi/device.h"
+#include "gpu/write_tracker.h"
+
+#include "gpu/gcn/gcn_translate.h"
+#include "host/window.h"
+#include "ui/overlay.h"
+
+#include <unistd.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include "base/logging.h"
+#include "base/time/time.h"
+#include "options/options.h"
+
+namespace gpu::render {
+
+namespace {
+DELTA_OPTION(bool, kFpsReport, "DELTA_GPU_FPS", true);
+DELTA_OPTION(bool, kOverlay, "DELTA_GPU_OVERLAY", true);
+DELTA_OPTION(bool, kDrawProf, "DELTA_GPU_DRAWPROF", false);
+DELTA_OPTION(u32, kHitchMs, "DELTA_GPU_HITCH_MS", 40);
+
+float g_frame_worst_ms = 0;
+u32 g_frame_hitch_n = 0;
+
+struct StageSample {
+  float rec, sub, gpu, prs, tex, oth, wall;
+};
+
+constexpr int kStageHistN = 240;
+StageSample g_stage_hist[kStageHistN];
+int g_stage_hist_pos = 0, g_stage_hist_count = 0;
+
+struct ProcStats {
+  float cpu_pct = 0;
+  u64 rss = 0;
+};
+ProcStats g_proc;
+
+void RefreshProcStats() {
+  static u64 last_ns = 0;
+  static u64 last_jiffies = 0;
+  const u64 now = NowNs();
+  if (last_ns && now - last_ns < 500000000ull)
+    return;
+
+  u64 jiffies = 0;
+  if (FILE* f = std::fopen("/proc/self/stat", "r")) {
+    char buf[1024];
+    const size_t n = std::fread(buf, 1, sizeof buf - 1, f);
+    std::fclose(f);
+    buf[n] = 0;
+    if (const char* p = std::strrchr(buf, ')')) {
+      unsigned long ut = 0, st = 0;
+      int field = 3;
+      p += 2;
+      while (*p && field < 14) {
+        if (*p == ' ')
+          field++;
+        p++;
+      }
+      if (std::sscanf(p, "%lu %lu", &ut, &st) == 2)
+        jiffies = ut + st;
+    }
+  }
+  const long hz = sysconf(_SC_CLK_TCK);
+  if (last_ns && hz > 0 && jiffies >= last_jiffies) {
+    const double dt = (now - last_ns) / 1e9;
+    const double busy = double(jiffies - last_jiffies) / hz;
+    g_proc.cpu_pct = dt > 0 ? float(busy / dt * 100.0) : 0.0f;
+  }
+  last_jiffies = jiffies;
+  last_ns = now;
+
+  if (FILE* f = std::fopen("/proc/self/statm", "r")) {
+    unsigned long total = 0, resident = 0;
+    if (std::fscanf(f, "%lu %lu", &total, &resident) == 2)
+      g_proc.rss = u64(resident) * u64(sysconf(_SC_PAGESIZE));
+    std::fclose(f);
+  }
+}
+
+const u8* OvGlyph(char c) {
+  struct Glyph {
+    char c;
+    u8 rows[5];
+  };
+  static const Glyph kF[] = {
+      {'0', {7, 5, 5, 5, 7}}, {'1', {2, 6, 2, 2, 7}}, {'2', {7, 1, 7, 4, 7}},
+      {'3', {7, 1, 7, 1, 7}}, {'4', {5, 5, 7, 1, 1}}, {'5', {7, 4, 7, 1, 7}},
+      {'6', {7, 4, 7, 5, 7}}, {'7', {7, 1, 1, 2, 2}}, {'8', {7, 5, 7, 5, 7}},
+      {'9', {7, 5, 7, 1, 7}}, {'.', {0, 0, 0, 0, 2}}, {'%', {5, 1, 2, 4, 5}},
+      {'A', {7, 5, 7, 5, 5}}, {'B', {6, 5, 6, 5, 6}}, {'C', {7, 4, 4, 4, 7}},
+      {'D', {6, 5, 5, 5, 6}}, {'E', {7, 4, 7, 4, 7}}, {'F', {7, 4, 7, 4, 4}},
+      {'G', {7, 4, 5, 5, 7}}, {'H', {5, 5, 7, 5, 5}}, {'I', {7, 2, 2, 2, 7}},
+      {'L', {4, 4, 4, 4, 7}}, {'M', {5, 7, 7, 5, 5}}, {'N', {5, 7, 7, 7, 5}},
+      {'O', {7, 5, 5, 5, 7}}, {'P', {7, 5, 7, 4, 4}}, {'R', {7, 5, 6, 5, 5}},
+      {'S', {7, 4, 7, 1, 7}}, {'T', {7, 2, 2, 2, 2}}, {'U', {5, 5, 5, 5, 7}},
+      {'V', {5, 5, 5, 5, 2}}, {'W', {5, 5, 7, 7, 5}}, {'X', {5, 5, 2, 5, 5}},
+  };
+  for (const Glyph& gl : kF)
+    if (gl.c == c)
+      return gl.rows;
+  return nullptr;
+}
+
+bool g_overlay_rgba = false;
+
+inline void
+OvFill(u8* b, u32 w, u32 h, int x, int y, int fw, int fh, u32 bgra) {
+  if (x < 0 || y < 0)
+    return;
+  const u32 col = g_overlay_rgba
+                      ? ((bgra & 0xFF00FF00u) | ((bgra & 0xFFu) << 16) |
+                         ((bgra >> 16) & 0xFFu))
+                      : bgra;
+  for (int yy = y; yy < y + fh && yy < (int)h; yy++) {
+    u32* row = reinterpret_cast<u32*>(b + (size_t)yy * w * 4);
+    for (int xx = x; xx < x + fw && xx < (int)w; xx++)
+      row[xx] = col;
+  }
+}
+
+void OvText(u8* b,
+            u32 w,
+            u32 h,
+            int x,
+            int y,
+            int scale,
+            u32 bgra,
+            const char* s) {
+  for (; *s; s++, x += 4 * scale) {
+    const u8* rows = OvGlyph(*s);
+    if (!rows)
+      continue;
+    for (int ry = 0; ry < 5; ry++)
+      for (int rx = 0; rx < 3; rx++)
+        if (rows[ry] & (4 >> rx))
+          OvFill(b, w, h, x + rx * scale, y + ry * scale, scale, scale, bgra);
+  }
+}
+
+void DrawResourcePanel(u8* bgra, u32 w, u32 h, float gpu_ms, float wall_ms) {
+  RefreshProcStats();
+  u64 vram_used = 0, vram_total = 0;
+  host::QueryVram(vram_used, vram_total);
+  constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+  const float gpu_pct = wall_ms > 0.01f ? (gpu_ms / wall_ms * 100.0f > 100.0f
+                                               ? 100.0f
+                                               : gpu_ms / wall_ms * 100.0f)
+                                        : 0.0f;
+  const struct {
+    u32 col;
+    const char* fmt;
+    double val;
+  } kUse[4] = {
+      {0xFF5AC8B4, "CPU %5.0f%%", g_proc.cpu_pct},
+      {0xFFE69632, "GPU %5.0f%%", gpu_pct},
+      {0xFF5AA0E6, "RAM %5.2f GB", g_proc.rss / kGiB},
+      {0xFFD2A0F0, "VRAM %4.2f GB", vram_used / kGiB},
+  };
+  constexpr int kRowH = 14, kSwatch = 8, kTextX = 14;
+  constexpr int kPanelW = 14 + 13 * 8 + 6;
+  const int x0 = (int)w - kPanelW - 10, y0 = 10;
+  const int panel_h = kRowH * 4 + 4;
+  for (int yy = y0 - 4; yy < y0 + panel_h && yy < (int)h; yy++) {
+    if (yy < 0)
+      continue;
+    u32* row = reinterpret_cast<u32*>(bgra + (size_t)yy * w * 4);
+    for (int xx = x0 - 4; xx < x0 + kPanelW && xx < (int)w; xx++)
+      if (xx >= 0)
+        row[xx] = (row[xx] >> 2) & 0x3F3F3F3F;
+  }
+  char buf[64];
+  int ty = y0;
+  for (const auto& u : kUse) {
+    OvFill(bgra, w, h, x0, ty + 1, kSwatch, kSwatch, u.col);
+    std::snprintf(buf, sizeof buf, u.fmt, u.val);
+    OvText(bgra, w, h, x0 + kTextX, ty, 2, 0xFFE6E6E6, buf);
+    ty += kRowH;
+  }
+}
+
+}  // namespace
+
+void PushStageSample() {
+  static u64 prev_ns = 0;
+  const u64 now = NowNs();
+  const float wall = prev_ns ? (now - prev_ns) / 1e6f : 0.0f;
+  prev_ns = now;
+  StageSample s;
+  s.rec = g_fr_draw / 1e6f;
+  s.sub = g_fr_submit / 1e6f;
+  s.gpu = g_fr_wait / 1e6f;
+  s.prs = g_fr_present / 1e6f;
+  s.tex = g_fr_tex_up / 1e6f;
+  const float known = s.rec + s.sub + s.gpu + s.prs + s.tex;
+  s.oth = wall > known ? wall - known : 0.0f;
+  s.wall = wall;
+  if (wall > g_frame_worst_ms)
+    g_frame_worst_ms = wall;
+  if (wall > kHitchMs)
+    g_frame_hitch_n++;
+  g_fr_draw = g_fr_submit = g_fr_wait = g_fr_present = g_fr_tex_up = 0;
+  g_stage_hist[g_stage_hist_pos] = s;
+  g_stage_hist_pos = (g_stage_hist_pos + 1) % kStageHistN;
+  if (g_stage_hist_count < kStageHistN)
+    g_stage_hist_count++;
+}
+
+void DrawPerfOverlay(u8* pixels, u32 w, u32 h, bool rgba) {
+  if (!kOverlay || !g_stage_hist_count || w < 560 || h < 280)
+    return;
+  g_overlay_rgba = rgba;
+  u8* const bgra = pixels;
+  static constexpr u32 kCol[6] = {
+      0xFF32C832, 0xFFC8C828, 0xFFE63232, 0xFF3288E6, 0xFFC832C8, 0xFF828282,
+  };
+  static const char* kLabel[6] = {"REC", "SUB", "GPU", "PRS", "TEX", "OTH"};
+  constexpr int kColW = 2, kGraphH = 120;
+  constexpr float kPxPerMs = 2.0f;
+  const int graph_w = kStageHistN * kColW;
+  const int x0 = 10, y1 = (int)h - 10, y0 = y1 - kGraphH;
+  const int legend_h = 7 * 14 + 4;
+  const int panel_y0 = y0 - legend_h - 4;
+  for (int yy = panel_y0 - 4; yy < y1 + 4 && yy < (int)h; yy++) {
+    if (yy < 0)
+      continue;
+    u32* row = reinterpret_cast<u32*>(bgra + (size_t)yy * w * 4);
+    for (int xx = x0 - 4; xx < x0 + graph_w + 4 && xx < (int)w; xx++)
+      row[xx] = (row[xx] >> 2) & 0x3F3F3F3F;
+  }
+  for (int i = 0; i < kStageHistN; i++) {
+    int idx = g_stage_hist_pos - kStageHistN + i;
+    if (idx < g_stage_hist_pos - g_stage_hist_count)
+      continue;
+    idx = ((idx % kStageHistN) + kStageHistN) % kStageHistN;
+    const StageSample& s = g_stage_hist[idx];
+    const float vals[6] = {s.rec, s.sub, s.gpu, s.prs, s.tex, s.oth};
+    int x = x0 + i * kColW, y_base = y1;
+    for (int st = 0; st < 6; st++) {
+      int hpx = (int)(vals[st] * kPxPerMs + 0.5f);
+      if (y_base - hpx < y0)
+        hpx = y_base - y0;
+      if (hpx > 0)
+        OvFill(bgra, w, h, x, y_base - hpx, kColW, hpx, kCol[st]);
+      y_base -= hpx;
+      if (y_base <= y0)
+        break;
+    }
+  }
+  for (int xx = x0; xx < x0 + graph_w; xx += 3) {
+    OvFill(bgra, w, h, xx, y1 - (int)(16.7f * kPxPerMs), 1, 1, 0xFFF0F0F0);
+    OvFill(bgra, w, h, xx, y1 - (int)(33.3f * kPxPerMs), 1, 1, 0xFFF0F0F0);
+  }
+  const int n_avg = g_stage_hist_count < 60 ? g_stage_hist_count : 60;
+  float avg[6] = {}, avg_wall = 0;
+  for (int i = 1; i <= n_avg; i++) {
+    const StageSample& s =
+        g_stage_hist[((g_stage_hist_pos - i) % kStageHistN + kStageHistN) %
+                     kStageHistN];
+    avg[0] += s.rec;
+    avg[1] += s.sub;
+    avg[2] += s.gpu;
+    avg[3] += s.prs;
+    avg[4] += s.tex;
+    avg[5] += s.oth;
+    avg_wall += s.wall;
+  }
+  for (float& v : avg)
+    v /= n_avg;
+  avg_wall /= n_avg;
+  char buf[64];
+  int ty = panel_y0;
+  std::snprintf(buf, sizeof buf, "FPS %.1f  %.1f MS",
+                avg_wall > 0.01f ? 1000.0f / avg_wall : 0.0f, avg_wall);
+  OvText(bgra, w, h, x0, ty, 2, 0xFFFFFFFF, buf);
+  ty += 14;
+  for (int st = 0; st < 6; st++, ty += 14) {
+    OvFill(bgra, w, h, x0, ty + 1, 8, 8, kCol[st]);
+    std::snprintf(buf, sizeof buf, "%s %5.1f", kLabel[st], avg[st]);
+    OvText(bgra, w, h, x0 + 14, ty, 2, 0xFFE6E6E6, buf);
+  }
+
+  DrawResourcePanel(bgra, w, h, avg[2], avg_wall);
+}
+
+void ReportFps() {
+  if (!kFpsReport)
+    return;
+  static auto last = base::TimeTicks::Now();
+  static int frames = 0;
+  frames++;
+  auto now = base::TimeTicks::Now();
+  double dt = (now - last).InSecondsF();
+  if (dt >= 2.0) {
+    double f = frames ? frames : 1;
+    if (rhi::g_list_gpu_n[1] | rhi::g_list_gpu_n[2] | rhi::g_list_gpu_n[3]) {
+      BASE_LOGI("listprof",
+                "GPU ms/frame: frame lists {:.2f} (x{:.1f}) batches {:.2f} "
+                "(x{:.1f}) immediate {:.2f} (x{:.1f})",
+                rhi::g_list_gpu_ns[1] / f / 1e6, rhi::g_list_gpu_n[1] / f,
+                rhi::g_list_gpu_ns[2] / f / 1e6, rhi::g_list_gpu_n[2] / f,
+                rhi::g_list_gpu_ns[3] / f / 1e6, rhi::g_list_gpu_n[3] / f);
+      for (u32 i = 0; i < 4; i++)
+        rhi::g_list_gpu_ns[i] = rhi::g_list_gpu_n[i] = 0;
+      static const char* const kNames[] = {
+          "-",          "dispatch",  "pass",      "mirror",
+          "tiling",     "rt-bridge", "present",   "copy",
+          "fill/clear", "barrier",   "buf->tex",  "tex->buf",
+          "tex->tex",   "blit",      "copy-host", "index"};
+      base::String line;
+      for (u32 i = 1; i < rhi::kProfCats; i++)
+        if (rhi::g_prof_cat_ns[i])
+          base::FormatTo(line, " {}={:.2f}", kNames[i],
+                         rhi::g_prof_cat_ns[i] / f / 1e6);
+      BASE_LOGI("listprof", "spans ms/frame:{}", line.c_str());
+      for (u64& v : rhi::g_prof_cat_ns)
+        v = 0;
+    }
+    BASE_LOGI(
+        "fps",
+        "{:.1f} fps | per-frame gpu-code: draw={:.2f}ms end={:.2f}ms "
+        "(wait={:.2f}ms exec={:.2f}ms "
+        "submit={:.2f}ms present={:.2f}ms) texup={:.2f}ms x{:.1f} "
+        "cs={:.2f}ms x{:.1f} "
+        "(in={:.2f} gpu={:.2f} out={:.2f} stage={:.1f}x{:.1f}MB "
+        "flush={:.1f}) "
+        "sh={:.2f}ms x{:.1f} dcb={:.2f}ms x{:.1f} (lock={:.2f}ms) "
+        "draws={:.0f} (decl={:.0f})",
+        frames / dt, g_ns_draw / f / 1e6, g_ns_end / f / 1e6,
+        g_ns_readback / f / 1e6,
+        g_gpu_exec_samples ? g_ns_gpu_exec / g_gpu_exec_samples / 1e6 : 0.0,
+        g_ns_submit / f / 1e6, g_ns_present / f / 1e6, g_ns_tex_up / f / 1e6,
+        g_tex_ups / f, g_ns_cs / f / 1e6, g_cs_count / f, g_ns_cs_in / f / 1e6,
+        g_ns_cs_gpu / f / 1e6, g_ns_cs_out / f / 1e6, g_cs_stage_n / f,
+        g_cs_stage_bytes / f / 1e6, g_cs_flush_n / f,
+        gcn::g_ns_recomp / f / 1e6, gcn::g_recomp_n / f,
+        render::g_ns_dcb / f / 1e6, render::g_dcb_n / f,
+        render::g_ns_dcb_lock / f / 1e6, g_win_draws / f, g_win_declines / f);
+    if (g_frame_hitch_n || g_pipe_build_n || g_pipe_pending_draws)
+      BASE_LOGI(
+          "hitch",
+          "worst={:.0f}ms over{}ms={} | pipe={:.0f}ms x{} skipped={} "
+          "recomp={:.0f}ms x{} (val={:.0f}ms opt={:.0f}ms spv {}hit/{}miss)",
+          g_frame_worst_ms, (u32)kHitchMs, g_frame_hitch_n,
+          g_ns_pipe_build / 1e6, g_pipe_build_n, g_pipe_pending_draws,
+          gcn::g_ns_recomp / 1e6, gcn::g_recomp_n, gcn::g_ns_spv_val / 1e6,
+          gcn::g_ns_spv_opt / 1e6, gcn::g_spv_hit_n, gcn::g_spv_miss_n);
+    if (kDrawProf)
+      BASE_LOGI("drawprof",
+                "per-frame pre={:.2f}ms pipe={:.2f}ms tex={:.2f}ms "
+                "bind={:.2f}ms | refresh={:.2f}ms x{:.0f} {:.1f}MB "
+                "probe={:.2f}ms x{:.0f} lookup={:.2f}ms x{:.0f}",
+                g_ns_dr_pre / f / 1e6, g_ns_dr_pipe / f / 1e6,
+                g_ns_dr_tex / f / 1e6, g_ns_dr_bind / f / 1e6,
+                g_ns_tex_refresh / f / 1e6, g_tex_refresh_n / f,
+                g_tex_refresh_bytes / f / 1e6, g_ns_tex_probe / f / 1e6,
+                g_tex_probe_n / f, g_ns_tex_lookup / f / 1e6,
+                g_tex_lookup_n / f);
+    if (kDrawProf) {
+      const WriteTracker& t = GuestWriteTracker();
+      static u64 collects = 0, pages = 0, collect_ns = 0;
+      BASE_LOGI(
+          "drawprof2",
+          "per-frame texset={:.2f}ms x{:.0f} region={:.2f}ms "
+          "csflush={:.2f}ms builddraw={:.2f}ms x{:.0f} "
+          "gfxpres={:.2f}ms borrowwait={:.2f}ms | ring vb={:.1f}MB "
+          "ib={:.1f}MB cb={:.1f}MB raw={:.1f}MB | track armed={:.0f}MB "
+          "runs={} collect={:.2f}ms x{:.0f} written={:.0f}p | kept={:.0f}MB "
+          "+{:.1f}MB/f | bind={:.1f}MB x{:.0f}",
+          g_ns_tex_set / f / 1e6, g_tex_set_n / f, g_ns_region / f / 1e6,
+          g_ns_cs_flush / f / 1e6, g_ns_build_draw / f / 1e6,
+          g_build_draw_n / f, g_ns_gfx_present / f / 1e6,
+          g_ns_borrow_wait / f / 1e6, g_ring_vb_bytes / f / 1e6,
+          g_ring_ib_bytes / f / 1e6, g_ring_cb_bytes / f / 1e6,
+          g_ring_raw_bytes / f / 1e6, t.armed_bytes() / 1e6, t.runs(),
+          (t.collect_ns() - collect_ns) / f / 1e6,
+          (t.collects() - collects) / f, (t.written_pages() - pages) / f,
+          CachedBufferBytes() / 1e6, g_vb_kept_bytes / f / 1e6,
+          g_bind_bytes / f / 1e6, g_bind_n / f);
+      collects = t.collects();
+      pages = t.written_pages();
+      collect_ns = t.collect_ns();
+      BASE_LOGI("indexprof",
+                "per-frame GPU conversion x{:.0f} {:.1f}MB (copied {:.1f}MB) | "
+                "CPU scan={:.2f}ms "
+                "x{:.0f} {:.1f}MB",
+                g_index_convert_n / f, g_index_convert_bytes / f / 1e6,
+                g_index_convert_copy_bytes / f / 1e6, g_ns_index_scan / f / 1e6,
+                g_index_scan_n / f, g_index_scan_bytes / f / 1e6);
+      BASE_LOGI("fillprof", "per-frame fill={:.2f}ms x{:.0f} {:.1f}MB",
+                g_ns_memory_fill / f / 1e6, g_memory_fill_n / f,
+                g_memory_fill_bytes / f / 1e6);
+    }
+    CsSyncReport(f);
+    ui::OverlaySetPerf(float(frames / dt), float(g_ns_end / f / 1e6),
+                       float(1000.0 * dt / frames));
+    last = now;
+    frames = 0;
+    g_ns_draw = g_ns_end = g_ns_readback = g_ns_tex_up = 0;
+    g_ns_submit = g_ns_present = 0;
+    g_ns_gpu_exec = 0;
+    g_gpu_exec_samples = 0;
+    g_tex_ups = 0;
+    g_ns_cs = g_cs_bytes = 0;
+    g_ns_cs_in = g_ns_cs_gpu = g_ns_cs_out = 0;
+    g_cs_count = g_cs_stage_n = g_cs_flush_n = 0;
+    g_win_draws = g_win_declines = 0;
+    g_ns_dr_pre = g_ns_dr_pipe = g_ns_dr_tex = g_ns_dr_bind = 0;
+    g_ns_tex_refresh = g_tex_refresh_bytes = g_ns_tex_probe = 0;
+    g_tex_refresh_n = g_tex_probe_n = g_ns_tex_lookup = g_tex_lookup_n = 0;
+    g_ns_tex_set = g_tex_set_n = g_ns_region = g_ns_cs_flush = 0;
+    g_ns_build_draw = g_build_draw_n = 0;
+    g_ns_memory_fill = g_memory_fill_bytes = g_memory_fill_n = 0;
+    g_ns_pipe_build = g_pipe_build_n = g_pipe_pending_draws = 0;
+    g_frame_worst_ms = 0;
+    g_frame_hitch_n = 0;
+    g_ns_gfx_present = g_ns_borrow_wait = 0;
+    g_ring_vb_bytes = g_ring_ib_bytes = g_ring_cb_bytes = g_ring_raw_bytes = 0;
+    g_index_convert_n = g_index_convert_bytes = g_index_convert_copy_bytes = 0;
+    g_index_scan_n = g_index_scan_bytes = g_ns_index_scan = 0;
+    g_vb_kept_bytes = 0;
+    g_bind_bytes = 0;
+    g_bind_n = 0;
+    g_cs_stage_bytes = 0;
+    gcn::g_ns_recomp = 0;
+    gcn::g_recomp_n = 0;
+    gcn::g_ns_spv_val = gcn::g_ns_spv_opt = 0;
+    gcn::g_spv_hit_n = gcn::g_spv_miss_n = 0;
+    render::g_ns_dcb = 0;
+    render::g_ns_dcb_lock = 0;
+    render::g_dcb_n = 0;
+  }
+}
+
+}  // namespace gpu::render

@@ -35,7 +35,7 @@
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/liverpool.h"
 #include "gpu/ps4/pm4.h"
-#include "gpu/render/guest_direct.h"
+#include "gpu/render/memory/guest_direct.h"
 #include "gpu/render/renderer.h"
 #include "profile/profile.h"
 

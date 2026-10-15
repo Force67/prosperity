@@ -5,9 +5,9 @@
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
-#include "gpu/render/guest_format.h"
+#include "gpu/render/image/guest_format.h"
 #include "gpu/render/renderer.h"
-#include "gpu/render/texture_cache.h"
+#include "gpu/render/image/texture_cache.h"
 #include "host_memory/host_memory.h"
 
 // NOLINTNEXTLINE(readability-identifier-naming): C-linkage bridge

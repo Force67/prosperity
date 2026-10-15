@@ -9,11 +9,11 @@
 #include "base/containers/vector.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
-#include "gpu/render/pipeline_cache.h"
+#include "gpu/render/draw/pipeline_cache.h"
 #include "gpu/render/present.h"
-#include "gpu/render/render_target.h"
-#include "gpu/render/texture_cache.h"
-#include "gpu/render/upload_ring.h"
+#include "gpu/render/image/render_target.h"
+#include "gpu/render/image/texture_cache.h"
+#include "gpu/render/memory/upload_ring.h"
 #include "gpu/rhi/device.h"
 
 namespace gpu::render {

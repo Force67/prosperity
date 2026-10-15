@@ -28,7 +28,7 @@
 #include "gpu/ps4/guest_address.h"
 #include "gpu/ps4/render_queue.h"
 #include "gpu/ps4/shader_cache.h"
-#include "gpu/render/render_target.h"
+#include "gpu/render/image/render_target.h"
 #include "profile/profile.h"
 
 namespace {

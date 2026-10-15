@@ -38,7 +38,7 @@
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/reg_state.h"
 #include "gpu/render/command.h"
-#include "gpu/render/guest_direct.h"
+#include "gpu/render/memory/guest_direct.h"
 #include "gpu/render/renderer.h"
 #include "gpu/write_tracker.h"
 #include "profile/profile.h"

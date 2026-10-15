@@ -1,0 +1,237 @@
+/*
+ * PS4Delta : PS4/PS5 emulation and research project
+ */
+#include "gpu/render/memory/buffer_cache.h"
+#include "guest/session.h"
+#include "memory_debug/memory_debug.h"
+
+#include <cstring>
+
+#include "options/options.h"
+
+#include "base/algorithm.h"
+#include "base/containers/hash_map.h"
+#include "base/containers/map.h"
+#include "base/containers/vector.h"
+#include "base/memory/move.h"
+#include "gpu/render/device.h"
+#include "gpu/render/frame.h"
+#include "gpu/render/renderer.h"
+
+namespace gpu::render {
+namespace {
+
+DELTA_OPTION(u32, kBufferCacheMb, "DELTA_GPU_BUFFER_CACHE_MB", 512);
+
+constexpr u64 kBlockBytes = 64ull << 20;
+constexpr u64 kAlign = 256;
+constexpr int kRetireFrames = 3;
+constexpr int kIdleFrames = 120;
+constexpr u32 kIndexShift = 16;
+
+struct Block {
+  rhi::Buffer* buffer = nullptr;
+  u8* map = nullptr;
+  base::Map<u64, u64> free;
+};
+
+struct Entry {
+  u64 base = 0;
+  u32 block = 0;
+  u64 offset = 0;
+  u64 bytes = 0;
+  int last_used = 0;
+};
+
+struct Retired {
+  u32 block;
+  u64 offset;
+  u64 bytes;
+  int frame;
+};
+
+base::Vector<Block> g_blocks;
+base::Vector<Entry> g_pool;
+base::Vector<u32> g_free_handles;
+base::HashMap<u64, u32> g_by_base;
+base::HashMap<u64, base::Vector<u32>> g_index;
+base::Vector<Retired> g_retired;
+u64 g_live_bytes = 0;
+
+void Free(Block& block, u64 offset, u64 bytes) {
+  auto next = block.free.lower_bound(offset);
+  if (next != block.free.begin()) {
+    auto prev = base::Prev(next);
+    if (prev->first + prev->second == offset) {
+      offset = prev->first;
+      bytes += prev->second;
+      block.free.erase(prev);
+    }
+  }
+  if (next != block.free.end() && offset + bytes == next->first) {
+    bytes += next->second;
+    block.free.erase(next);
+  }
+  block.free.emplace(offset, bytes);
+}
+
+bool Allocate(u64 bytes, u32& block_index, u64& offset) {
+  bytes = (bytes + kAlign - 1) & ~(kAlign - 1);
+  if (bytes > kBlockBytes)
+    return false;
+  for (u32 i = 0; i < g_blocks.size(); i++) {
+    for (auto it = g_blocks[i].free.begin(); it != g_blocks[i].free.end();
+         ++it) {
+      if (it->second < bytes)
+        continue;
+      const u64 at = it->first, left = it->second - bytes;
+      g_blocks[i].free.erase(it);
+      if (left)
+        g_blocks[i].free.emplace(at + bytes, left);
+      block_index = i;
+      offset = at;
+      return true;
+    }
+  }
+  if ((g_blocks.size() + 1) * kBlockBytes > u64(kBufferCacheMb) << 20)
+    return false;
+  rhi::BufferDesc desc;
+  desc.size = kBlockBytes;
+  desc.usage = rhi::kBufferVertex;
+  desc.memory = rhi::MemoryKind::kUpload;
+  desc.name = "guest buffer cache";
+  Block block;
+  block.buffer = Device().CreateBuffer(desc);
+  block.map = block.buffer ? static_cast<u8*>(block.buffer->mapped()) : nullptr;
+  if (!block.map) {
+    if (block.buffer)
+      Device().Destroy(block.buffer);
+    return false;
+  }
+  block.free.emplace(bytes, kBlockBytes - bytes);
+  g_blocks.push_back(base::move(block));
+  block_index = static_cast<u32>(g_blocks.size() - 1);
+  offset = 0;
+  return true;
+}
+
+void Drop(u32 handle) {
+  Entry& e = g_pool[handle];
+  g_retired.push_back(
+      {e.block, e.offset, (e.bytes + kAlign - 1) & ~(kAlign - 1), g_frame.num});
+  g_live_bytes -= e.bytes;
+  g_by_base.erase(e.base);
+  e.bytes = 0;
+  g_free_handles.push_back(handle);
+}
+
+void Index(u32 handle) {
+  const Entry& e = g_pool[handle];
+  for (u64 b = e.base >> kIndexShift;
+       b <= (e.base + e.bytes - 1) >> kIndexShift; b++)
+    g_index[b].push_back(handle);
+}
+
+}  // namespace
+
+bool FindCachedBuffer(u64 base, u64 bytes, CachedBuffer& out) {
+  auto it = g_by_base.find(base);
+  if (it == g_by_base.end())
+    return false;
+  Entry& e = g_pool[it->second];
+  if (e.bytes < bytes || CsRangeDirtyOverlapping(base, bytes))
+    return false;
+  e.last_used = g_frame.num;
+  out = {g_blocks[e.block].buffer, e.offset};
+  return true;
+}
+
+bool CacheGuestBuffer(u64 base, u64 bytes, CachedBuffer& out) {
+  const memory_debug::Scope memory_scope(memory_debug::Bucket::kMetadata);
+  if (!bytes)
+    return false;
+  u32 block;
+  u64 offset;
+  if (!Allocate(bytes, block, offset))
+    return false;
+  if (auto old = g_by_base.find(base); old != g_by_base.end())
+    Drop(old->second);
+  std::memcpy(g_blocks[block].map + offset, reinterpret_cast<const void*>(base),
+              bytes);
+  u32 handle;
+  if (!g_free_handles.empty()) {
+    handle = g_free_handles.back();
+    g_free_handles.pop_back();
+  } else {
+    handle = static_cast<u32>(g_pool.size());
+    g_pool.emplace_back();
+  }
+  g_pool[handle] = {base, block, offset, bytes, g_frame.num};
+  g_by_base[base] = handle;
+  g_live_bytes += bytes;
+  Index(handle);
+  out = {g_blocks[block].buffer, offset};
+  return true;
+}
+
+void InvalidateCachedBuffers(u64 first, u64 end) {
+  if (g_by_base.empty() || end <= first)
+    return;
+  const auto drop = [&](const base::Vector<u32>& handles) {
+    for (u32 handle : handles) {
+      const Entry& e = g_pool[handle];
+      if (e.bytes && e.base < end && first < e.base + e.bytes)
+        Drop(handle);
+    }
+  };
+  const u64 first_block = first >> kIndexShift;
+  const u64 last_block = (end - 1) >> kIndexShift;
+  if (last_block - first_block + 1 > g_index.size()) {
+    for (const auto& [block, bases] : g_index)
+      if (block >= first_block && block <= last_block)
+        drop(bases);
+    return;
+  }
+  for (u64 b = first_block; b <= last_block; b++)
+    if (auto found = g_index.find(b); found != g_index.end())
+      drop(found->second);
+}
+
+void BufferCacheEndFrame() {
+  constexpr int kSweepFrames = 16;
+  if (g_frame.num % kSweepFrames == 0)
+    for (u32 handle = 0; handle < g_pool.size(); handle++)
+      if (g_pool[handle].bytes &&
+          g_pool[handle].last_used + kIdleFrames < g_frame.num)
+        Drop(handle);
+  base::EraseIf(g_retired, [](const Retired& r) {
+    if (r.frame + kRetireFrames > g_frame.num)
+      return false;
+    Free(g_blocks[r.block], r.offset, r.bytes);
+    return true;
+  });
+  if (g_frame.num % 64 == 0) {
+    g_index.clear();
+    for (u32 handle = 0; handle < g_pool.size(); handle++)
+      if (g_pool[handle].bytes)
+        Index(handle);
+  }
+}
+
+u64 CachedBufferBytes() {
+  return g_live_bytes;
+}
+
+namespace {
+const guest::SessionReset g_session_reset([] {
+  guest::ResetResource(g_blocks);
+  guest::ResetResource(g_pool);
+  guest::ResetResource(g_free_handles);
+  guest::ResetResource(g_by_base);
+  guest::ResetResource(g_index);
+  guest::ResetResource(g_retired);
+  guest::ResetResource(g_live_bytes);
+});
+}  // namespace
+
+}  // namespace gpu::render

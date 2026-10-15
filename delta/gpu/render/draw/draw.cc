@@ -1,0 +1,119 @@
+/*
+ * PS4Delta : PS4/PS5 emulation and research project
+ */
+
+#include "base/arch.h"
+#include "gpu/render/renderer.h"
+
+#include "gpu/gpu_perf.h"
+#include "gpu/guest_memory.h"
+#include "gpu/render/device.h"
+#include "gpu/render/draw/draw_recomp.h"
+#include "gpu/render/frame.h"
+#include "gpu/render/image/guest_format.h"
+#include "gpu/render/debug/labels.h"
+#include "gpu/render/draw/pipeline_cache.h"
+#include "gpu/render/image/render_target.h"
+#include "gpu/render/image/texture_cache.h"
+#include "gpu/render/debug/trace.h"
+#include "gpu/render/memory/upload_ring.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include "base/algorithm.h"
+#include "base/logging.h"
+#include "base/memory/unique_pointer.h"
+#include "options/options.h"
+#include "profile/profile.h"
+
+namespace {
+DELTA_OPTION(int, kMaxDraw, "DELTA_GPU_MAXDRAW", -1);
+DELTA_OPTION(int, kOnlyDraw, "DELTA_GPU_ONLYDRAW", -1);
+DELTA_OPTION(u32, kOnlyIc, "DELTA_GPU_ONLYIC", 0);
+DELTA_OPTION(bool, kDrawTraceAll, "DELTA_GPU_DRAWTRACE", false);
+DELTA_OPTION(bool, kNoCull, "DELTA_GPU_NOCULL", false);
+DELTA_OPTION(bool, kNoDepth, "DELTA_GPU_NODEPTH", false);
+DELTA_OPTION(bool, kNoMask, "DELTA_GPU_NOMASK", false);
+DELTA_OPTION(bool, kSwapTex, "DELTA_GPU_SWAPTEX01", false);
+}  // namespace
+
+namespace gpu::render {
+
+void Draw(Renderer& renderer, const DrawInfo& d_in) {
+  DELTA_ZONE("gpu.draw");
+  if (!g_frame.recording)
+    return;
+  base::UniquePointer<DrawInfo> swapped;
+  if (kSwapTex && d_in.num_texs >= 2) {
+    swapped = base::MakeUnique<DrawInfo>(d_in);
+    base::Swap(swapped->texs[0], swapped->texs[1]);
+  }
+  const DrawInfo& d_sw = swapped ? *swapped : d_in;
+  if (kOnlyIc && d_sw.index_count != kOnlyIc) {
+    g_frame.draws++;
+    return;
+  }
+  if (kMaxDraw >= 0 && (int)g_frame.draws >= kMaxDraw)
+    return;
+  if (kOnlyDraw >= 0 && (int)g_frame.draws != kOnlyDraw) {
+    g_frame.draws++;
+    return;
+  }
+  bool detach_depth = false;
+  if (d_sw.depth_base && !d_sw.depth_test_enable && !d_sw.depth_write_enable) {
+    if (d_sw.tex_base == d_sw.depth_base)
+      detach_depth = true;
+    for (u32 i = 0; i < d_sw.num_texs && !detach_depth; i++)
+      if (d_sw.texs[i].base == d_sw.depth_base)
+        detach_depth = true;
+  }
+  base::UniquePointer<DrawInfo> patched_copy;
+  const bool patched = kNoDepth || kNoCull || kNoMask || detach_depth;
+  if (patched) {
+    patched_copy = base::MakeUnique<DrawInfo>(d_sw);
+    DrawInfo& dd = *patched_copy;
+    if (kNoDepth) {
+      dd.depth_test_enable = false;
+      dd.depth_write_enable = false;
+    }
+    if (kNoCull)
+      dd.cull_mode = 0;
+    if (kNoMask) {
+      dd.target_mask = 0xFFFFFFFFu;
+      dd.color_control = 0x10;
+    }
+    if (detach_depth) {
+      dd.depth_base = 0;
+      dd.depth_test_enable = false;
+    }
+  }
+  const DrawInfo& d = patched ? *patched_copy : d_sw;
+  if (d.index_count > g_frame.max_idx)
+    g_frame.max_idx = d.index_count;
+  ScopeNs draw_timer(&g_ns_draw);
+  ScopeNs frame_draw_timer(&g_fr_draw);
+  g_win_draws++;
+  if (ShaderFilterDrops(d.ps_addr)) {
+    g_frame.draws++;
+    return;
+  }
+  const bool recompiled = d.recomp && DrawRecomp(renderer, d);
+  if (!renderer.available())
+    return;
+  if (kDrawTraceAll) {
+    static u32 traced = 0;
+    if (traced++ < 100)
+      BASE_LOGI("dt",
+                "f{} rt={:#x} count={} indexed={} nv={} mrt={} mask={:#x} "
+                "psmask={:#x} prim={} vp=[{:.1f} {:.1f} {:.1f} {:.1f}] "
+                "depth={:#x} handled={:d}",
+                g_frame.num, (unsigned long)d.rt_base, d.vertex_count,
+                d.index_count, d.num_vattrs, d.mrt_count, d.target_mask,
+                d.recomp ? d.recomp->ps_mrt_mask : 0, d.prim_type,
+                d.viewport_x_scale, d.viewport_x_offset, d.viewport_y_scale,
+                d.viewport_y_offset, (unsigned long)d.depth_base, recompiled);
+  }
+}
+
+}  // namespace gpu::render

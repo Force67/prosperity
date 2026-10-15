@@ -1,5 +1,5 @@
 #include "gpu/ps5/guest_memory_ranges.h"
-#include "gpu/render/guest_direct.h"
+#include "gpu/render/memory/guest_direct.h"
 
 #include <string>
 

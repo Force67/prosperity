@@ -59,7 +59,7 @@ add_delta_test(agc_queue_test
     ../ps5/rdna/rdna_decode.cc
     ../gcn/gcn_detile.cc
     ../guest_page_table.cc
-    ../render/gds_dma.cc
+    ../render/compute/gds_dma.cc
   DEPS delta_deps)
 
 add_delta_test(guest_memory_ranges_test
@@ -124,7 +124,7 @@ add_delta_test(render_compute_hazard_test
 add_delta_test(render_index_upload_test
   SOURCES
     render_index_upload_test.cc
-    ../render/index_upload.cc
+    ../render/draw/index_upload.cc
   DEPS delta_deps)
 
 # Needs a GPU: every backend without a usable device is skipped.

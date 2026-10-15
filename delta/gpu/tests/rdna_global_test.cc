@@ -17,7 +17,7 @@
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
 #include "gpu/ps5/shader_cache.h"
-#include "gpu/render/compute.h"
+#include "gpu/render/compute/compute.h"
 #include "gpu/render/device.h"
 #include "host_memory/host_memory.h"
 

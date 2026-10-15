@@ -12,9 +12,9 @@
 #include "gpu/ps5/compute_dispatch.h"
 #include "gpu/ps5/guest_address.h"
 #include "gpu/ps5/rdna/rdna_decode.h"
-#include "gpu/render/compute.h"
+#include "gpu/render/compute/compute.h"
 #include "gpu/render/frame.h"
-#include "gpu/render/tiling.h"
+#include "gpu/render/image/tiling.h"
 
 namespace {
 bool FlushCsWritesLanded(gpu::render::Renderer& renderer) {

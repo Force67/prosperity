@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "gpu/render/guest_format.h"
+#include "gpu/render/image/guest_format.h"
 
 TEST(VkColorMask, TargetMaskAppliesWithoutFrontendShaderMask) {
   EXPECT_EQ(gpu::render::ColorWriteMask(0x737, 0, 7, 0), 7u);

@@ -1,4 +1,4 @@
-#include "gpu/render/compute_hazard.h"
+#include "gpu/render/compute/hazard.h"
 
 #include <gtest/gtest.h>
 

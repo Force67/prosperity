@@ -30,7 +30,7 @@
 #include "gpu/ps5/rdna/rdna_compute.h"
 #include "gpu/ps5/rdna/rdna_resource.h"
 #include "gpu/ps5/shader_cache.h"
-#include "gpu/render/render_target.h"
+#include "gpu/render/image/render_target.h"
 #include "gpu/render/renderer.h"
 #include "profile/profile.h"
 

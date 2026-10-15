@@ -54,6 +54,12 @@ place of a clear packet. `DefaultRenderer()` hands out the process-wide
 instance the command processors drive (the guest-called HLE entry points
 cannot thread a handle); it is the one piece of ambient state at this seam.
 
+The core (`renderer`, `frame`, `device`, `backend`, `present`) sits at the
+root of `render/`; the rest is grouped by concern: `draw/` (graphics draws and
+pipelines), `compute/` (dispatch and compute/guest-memory coherency), `image/`
+(textures, render targets, formats, bindless descriptors), `memory/` (guest
+memory import and buffer uploads) and `debug/` (traces, captures, labels, perf).
+
 Behind it, one unit per decision, roughly in dependency order:
 
 | unit | hides |
@@ -301,7 +307,7 @@ is what the `DELTA_GPU_*` printf switches were standing in for.
 Launch the emulator under RenderDoc with `DELTA_RDOC_FRAME=N`: rendering is
 offscreen (no swapchain on the device), so `render/frame` brackets guest
 frame N with an explicit capture instead of relying on a present boundary.
-With a capture tool attached debug labels light up (`render/labels`) and the
+With a capture tool attached debug labels light up (`render/debug/labels`) and the
 capture is self-describing, everything keyed by guest addresses so it lines up
 with the `DELTA_GPU_*` logs:
 
