@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "base/arch.h"
+#include "base/atomic.h"
 #include "base/logging.h"
 #include "guest/session.h"
 
@@ -42,12 +43,12 @@ DmaDevice::DmaDevice(ObjectTable& objects) : Device(objects) {}
 // GetDirectMemorySize (0x4008800A) is the ceiling the title passes back, so a
 // tiny stub kills all allocs.
 namespace {
-// PS4 user dmem is ~4.5-5 GiB; report a flat large pool, bump from a non-zero
-// base so "offset 0 means invalid" holds.
-constexpr u64 kDmemTotal = 0x300000000ull;  // 12 GiB (SOTTR working set)
-// A title that SIZES SOMETHING from this sees a 3x pool: SotC maps it all once
-// and sub-allocates 4 MiB arenas downstream of the value. Overridable per run
-// rather than lowered; 12 GiB is load-bearing for SOTTR.
+// PS4 user dmem is ~4.5-5 GiB. Tomb Raider DE peaks at 4.4 GiB and UC2 at
+// 4.5 GiB; the 12 GiB this once was only covered a bump allocator that never
+// reused freed ranges. A title that sizes something from the pool sees all of
+// it (SotC maps it once and sub-allocates arenas), so it stays close to the
+// console's.
+constexpr u64 kDmemTotal = 0x180000000ull;  // 6 GiB
 DELTA_OPTION(u64, kDmemTotalOverride, "DELTA_DMEM_TOTAL", 0);
 // A PS5 hands a game 12.5 GiB of 16; Astro Bot reserves ~7.6 GiB then asks for
 // one 4.5 GiB block anywhere, missing 12 GiB by 72 MiB (its allocator asserts,
@@ -155,8 +156,19 @@ int DmemAllocate(u64 lo, u64 hi, u64 len, u64 align, u32 mem_type, u64* out) {
     }
     if (cand == UINT64_MAX) {
       u64 base = (top - len) & ~(align - 1);
-      if (top < len || base < kDmemBase)
+      if (top < len || base < kDmemBase) {
+        static base::Atomic<bool> logged{false};
+        if (!logged.exchange(true)) {
+          u64 used = 0;
+          for (const auto& r : g_dmem_regions)
+            used += r.end - r.start;
+          BASE_LOGW("dmem",
+                    "direct memory exhausted: {} MiB requested with {} of {} "
+                    "MiB allocated",
+                    len >> 20, used >> 20, DmemTotal() >> 20);
+        }
         return -12 /*ENOMEM*/;
+      }
       cand = base;
     }
   }
