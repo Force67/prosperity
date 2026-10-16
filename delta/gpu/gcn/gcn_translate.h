@@ -2,6 +2,7 @@
 
 #include "base/arch.h"
 
+#include "base/containers/hash_map.h"
 #include "base/containers/vector.h"
 #include "base/functional/function.h"
 #include "base/strings/xstring.h"
@@ -75,10 +76,14 @@ inline bool WaveSplitsAcrossSubgroups() {
 struct LdsBarrierPlan {
   base::Vector<u32> at;
   bool lockstep = false;
+  bool orders_memory = false;
 };
 LdsBarrierPlan PlanLdsBarriers(const Program& program,
                                const u8* reachable,
-                               u32 threads_per_group);
+                               u32 threads_per_group,
+                               const base::HashMap<u32, u32>* bindings =
+                                   nullptr,
+                               u64 shared_mask = 0);
 
 base::Vector<u8> UniformPoints(const Program& program);
 
@@ -188,6 +193,9 @@ struct RecompiledCs {
   int guest_memory_binding = -1;
   bool guest_memory_written = false;
   u64 native_candidates = 0;
+  // One wave split over host subgroups, so a dispatch whose bindings alias
+  // needs the variant compiled with those bindings as shared_mask.
+  bool orders_shared_memory = false;
   base::Vector<int> textures;
   u64 textures_3d = 0;
 };
@@ -200,7 +208,8 @@ RecompiledCs RecompileCompute(const u32* cs_code,
                               u32 tgid_enable,
                               u32 lds_dwords,
                               u64 native_mask = 0,
-                              u64 uint_mask = 0);
+                              u64 uint_mask = 0,
+                              u64 shared_mask = 0);
 
 struct ImageTilingParams {
   u32 width, height, words, table, mask;

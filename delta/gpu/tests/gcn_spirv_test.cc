@@ -258,6 +258,46 @@ TEST(GcnSpirv, Wave64LdsBarriersAreReinsertedOnlyWhereNeeded) {
   EXPECT_TRUE(NoBarriers(PlanBarriers(raw, 64)));
 }
 
+TEST(GcnSpirv, PartialWaveGroupsGetLdsBarriers) {
+  const WaveScope split(32);
+  const base::Vector<u32> raw{kDsWrite0, kDsWrite1, kDsRead0, kDsRead1,
+                              kEndPgm};
+  for (u32 threads : {33u, 60u, 63u}) {
+    const gpu::gcn::LdsBarrierPlan plan = PlanBarriers(raw, threads);
+    ASSERT_EQ(plan.at.size(), 1u) << threads;
+    EXPECT_EQ(plan.at[0], 1u);
+  }
+  EXPECT_TRUE(NoBarriers(PlanBarriers(raw, 32)));
+}
+
+TEST(GcnSpirv, AliasedImageAccessesAreOrderedOnlyWhenShared) {
+  const WaveScope split(32);
+  constexpr u32 kImageLoad0 = 0xf0000f00, kImageLoad1 = 0x00020000;
+  constexpr u32 kImageStore0 = 0xf0200f00, kImageStore1 = 0x00080004;
+  const base::Vector<u32> code{kImageLoad0, kImageLoad1, kImageStore0,
+                               kImageStore1, kImageLoad0, kImageLoad1,
+                               kEndPgm};
+  const gpu::gcn::Program p =
+      gpu::gcn::Decode(code.data(), (u32)code.size(), false);
+  const base::Vector<u8> reach = gpu::gcn::ComputeReachability(p);
+  base::HashMap<u32, u32> bindings;
+  bindings[0] = 0;
+  bindings[2] = 0;
+  bindings[4] = 0;
+
+  const gpu::gcn::LdsBarrierPlan shared =
+      gpu::gcn::PlanLdsBarriers(p, reach.data(), 64, &bindings, 1);
+  ASSERT_EQ(shared.at.size(), 2u);
+  EXPECT_EQ(shared.at[0], 1u);
+  EXPECT_EQ(shared.at[1], 2u);
+  EXPECT_TRUE(shared.orders_memory);
+
+  const gpu::gcn::LdsBarrierPlan apart =
+      gpu::gcn::PlanLdsBarriers(p, reach.data(), 64, &bindings, 0);
+  EXPECT_TRUE(NoBarriers(apart));
+  EXPECT_FALSE(apart.orders_memory);
+}
+
 TEST(GcnSpirv, BranchyWave64LdsSyncsPerDispatchIteration) {
   const WaveScope split(32);
   const base::Vector<u32> code{

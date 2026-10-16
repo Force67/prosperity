@@ -40,7 +40,7 @@ struct ComputeShaderState {
   u64 cs_addr = 0;
   u32 thread_x = 0, thread_y = 0, thread_z = 0;
   u32 user_sgpr = 0, tgid_enable = 0, lds_dwords = 0;
-  u64 native_mask = 0, uint_mask = 0;
+  u64 native_mask = 0, uint_mask = 0, shared_mask = 0;
 };
 
 const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state);

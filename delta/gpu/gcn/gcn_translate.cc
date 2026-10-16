@@ -102,7 +102,8 @@ RecompiledCs RecompileCompute(const u32* cs_code,
                               u32 tgid_enable,
                               u32 lds_dwords,
                               u64 native_mask,
-                              u64 uint_mask) {
+                              u64 uint_mask,
+                              u64 shared_mask) {
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);
   DELTA_ZONE("gcn.recompile_cs");
   const ui::ShaderCompilation compilation;
@@ -112,7 +113,7 @@ RecompiledCs RecompileCompute(const u32* cs_code,
   const u64 t0 = NowNs();
   RecompileComputeSpirv(cs_code, num_thread_x, num_thread_y, num_thread_z,
                         user_sgpr, tgid_enable, lds_dwords, native_mask,
-                        uint_mask, r);
+                        uint_mask, shared_mask, r);
   g_stats.ns_recomp += NowNs() - t0;
   g_stats.recomp_n++;
   return r;

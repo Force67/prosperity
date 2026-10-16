@@ -34,6 +34,7 @@ bool RecompileComputeSpirv(const u32* cs_code,
                            u32 lds_dwords,
                            u64 native_mask,
                            u64 uint_mask,
+                           u64 shared_mask,
                            RecompiledCs& r);
 
 }  // namespace gpu::gcn

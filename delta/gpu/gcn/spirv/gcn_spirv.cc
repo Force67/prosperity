@@ -37,6 +37,7 @@ bool RecompileComputeSpirv(const u32*,
                            u32,
                            u64,
                            u64,
+                           u64,
                            RecompiledCs&) {
   return false;
 }
@@ -1065,7 +1066,7 @@ void EmitInstAudited(Translator& t,
   t.readfirstlane_uniform = index < sc.uniform_readfirstlane.size() &&
                             sc.uniform_readfirstlane[index];
   if (!sc.lds_barrier_at.empty() && SortedContains(sc.lds_barrier_at, index))
-    t.m.EmitVoid(spv::Op::OpControlBarrier, {t.U32(2), t.U32(2), t.U32(0x108)});
+    t.Barrier();
   if (!ShaderDebugEnabled()) {
     EmitInstGuarded(t, inst, sc);
     CapturePsVgprs(t, inst);
@@ -1176,18 +1177,24 @@ base::Vector<u32> BlockStarts(const Program& program, u32 max_pc) {
   return starts;
 }
 
+bool IsLdsReturningAtomic(u32 op) {
+  return (op >= 0x20 && op <= 0x34) || (op >= 0x60 && op <= 0x73);
+}
+
 bool IsLdsRead(const Inst& inst) {
   if (inst.enc != Enc::kDs)
     return false;
   const u32 op = inst.opcode;
-  return op == 0x20 || (op >= 54 && op <= 56) || op == 118 || op == 119;
+  return IsLdsReturningAtomic(op) || (op >= 0x36 && op <= 0x3c) ||
+         (op >= 0x76 && op <= 0x78);
 }
 
 bool IsLdsWrite(const Inst& inst) {
   if (inst.enc != Enc::kDs)
     return false;
   const u32 op = inst.opcode;
-  return op == 0x20 || (op >= 13 && op <= 15) || op == 77;
+  return IsLdsReturningAtomic(op) || op <= 0x13 || op == 0x1e || op == 0x1f ||
+         (op >= 0x40 && op <= 0x53);
 }
 
 enum class VccState : u8 {
@@ -1430,39 +1437,101 @@ base::Vector<u8> UniformPoints(const Program& program) {
   return at;
 }
 
+namespace {
+
+struct WaveAccess {
+  bool read = false, write = false;
+};
+
+WaveAccess LdsAccess(const Inst& inst) {
+  return {IsLdsRead(inst), IsLdsWrite(inst)};
+}
+
+WaveAccess MemoryAccess(const Inst& inst) {
+  const u32 w = inst.raw[0];
+  switch (inst.enc) {
+    case Enc::kMubuf: {
+      const u32 op = (w >> 18) & 0x7F;
+      const bool load = op <= 0x03 || (op >= 0x08 && op <= 0x0f);
+      const bool store =
+          (op >= 0x04 && op <= 0x07) || (op >= 0x18 && op <= 0x1f);
+      return {!store, !load};
+    }
+    case Enc::kMtbuf: {
+      const u32 op = (w >> 16) & 0x7;
+      return {op < 4, op >= 4};
+    }
+    case Enc::kMimg: {
+      const u32 op = (w >> 18) & 0x7F;
+      if (op == 0x0e)
+        return {};
+      const bool store = op == 0x08 || op == 0x09;
+      return {!store, store};
+    }
+    default:
+      return {};
+  }
+}
+
+}  // namespace
+
 LdsBarrierPlan PlanLdsBarriers(const Program& program,
                                const u8* reachable,
-                               u32 threads_per_group) {
+                               u32 threads_per_group,
+                               const base::HashMap<u32, u32>* bindings,
+                               u64 shared_mask) {
   LdsBarrierPlan plan;
-  if (!WaveSplitsAcrossSubgroups() || threads_per_group != kGcnWave)
+  if (!WaveSplitsAcrossSubgroups() || threads_per_group > kGcnWave ||
+      threads_per_group <= HostSubgroupSize())
     return plan;
-  bool any_read = false, any_write = false, has_barrier = false;
-  for (u32 i = 0; i < program.size(); i++) {
-    if (reachable && !reachable[i])
-      continue;
-    any_read |= IsLdsRead(program[i]);
-    any_write |= IsLdsWrite(program[i]);
-    has_barrier |= program[i].enc == Enc::kSopp && program[i].opcode == 0x0a;
-  }
-  if (!any_read || !any_write || has_barrier)
-    return plan;
+  const auto live = [&](u32 i) { return !reachable || reachable[i]; };
+  for (u32 i = 0; i < program.size(); i++)
+    if (live(i) && program[i].enc == Enc::kSopp && program[i].opcode == 0x0a)
+      return plan;
 
+  const auto shared = [&](const Inst& inst) {
+    if (!bindings)
+      return WaveAccess{};
+    const auto it = bindings->find(inst.pc);
+    if (it == bindings->end() || it->second >= 64 ||
+        !((shared_mask >> it->second) & 1))
+      return WaveAccess{};
+    return MemoryAccess(inst);
+  };
   const bool branchy = HasControlFlow(program);
-
-  int action = 0;
-  for (u32 i = 0; i < program.size(); i++) {
-    if (reachable && !reachable[i])
-      continue;
-    const bool r = IsLdsRead(program[i]), w = IsLdsWrite(program[i]);
-    if (!r && !w)
-      continue;
-    if ((r && action == 2) || (w && action == 1)) {
-      plan.lockstep = branchy;
-      if (plan.at.empty() || plan.at.back() != i)
-        plan.at.push_back(i);
+  base::Vector<u8> at(program.size(), 0);
+  for (u32 domain = 0; domain < 2; domain++) {
+    const auto access = [&](const Inst& inst) {
+      return domain == 0 ? LdsAccess(inst) : shared(inst);
+    };
+    bool any_read = false, any_write = false;
+    for (u32 i = 0; i < program.size(); i++) {
+      if (!live(i))
+        continue;
+      const WaveAccess a = access(program[i]);
+      any_read |= a.read;
+      any_write |= a.write;
     }
-    action = r ? 1 : 2;
+    if (!any_read || !any_write)
+      continue;
+    u32 last = 0;
+    for (u32 i = 0; i < program.size(); i++) {
+      if (!live(i))
+        continue;
+      const WaveAccess a = access(program[i]);
+      if (!a.read && !a.write)
+        continue;
+      if ((a.read && (last & 2)) || (a.write && (last & 1))) {
+        plan.lockstep = branchy;
+        plan.orders_memory |= domain == 1;
+        at[i] = 1;
+      }
+      last = (a.read ? 1 : 0) | (a.write ? 2 : 0);
+    }
   }
+  for (u32 i = 0; i < program.size(); i++)
+    if (at[i])
+      plan.at.push_back(i);
   return plan;
 }
 
@@ -2303,6 +2372,7 @@ bool TranslateCs(const Program& program,
                  u32 lds_dwords,
                  u64 native_mask,
                  u64 uint_mask,
+                 u64 shared_mask,
                  RecompiledCs& r,
                  Translator& t) {
   if (program.empty())
@@ -2340,10 +2410,16 @@ bool TranslateCs(const Program& program,
   const u32 threads_per_group = (num_thread_x ? num_thread_x : 1) *
                                 (num_thread_y ? num_thread_y : 1) *
                                 (num_thread_z ? num_thread_z : 1);
-  const LdsBarrierPlan lds_bar =
-      PlanLdsBarriers(program, reachable.data(), threads_per_group);
+  const LdsBarrierPlan lds_bar = PlanLdsBarriers(
+      program, reachable.data(), threads_per_group, &sc.cs_bind, shared_mask);
   sc.lds_barrier_at = lds_bar.at;
   sc.lockstep_loop = lds_bar.lockstep;
+  if (lds_bar.orders_memory)
+    t.barrier_semantics = Translator::kBarrierWithMemory;
+  r.orders_shared_memory =
+      PlanLdsBarriers(program, reachable.data(), threads_per_group,
+                      &sc.cs_bind, ~0ull)
+          .orders_memory;
 
   bool uses_ds_swizzle = false, uses_cross_lane = false;
   for (u32 i = 0; i < program.size(); i++) {
@@ -2417,8 +2493,8 @@ bool TranslateCs(const Program& program,
                {static_cast<u32>(spv::BuiltIn::WorkgroupId)});
   base::Vector<Id> iface{local_id, group_id};
   const u32 threads = threads_per_group;
-  if (uses_cross_lane && HasControlFlow(program) && threads == kGcnWave &&
-      WaveSplitsAcrossSubgroups())
+  if (uses_cross_lane && HasControlFlow(program) && threads <= kGcnWave &&
+      threads > HostSubgroupSize())
     sc.lockstep_loop = true;
   if (sc.lockstep_loop) {
     t.m.Capability(spv::Capability::GroupNonUniform);
@@ -2900,6 +2976,7 @@ bool RecompileComputeSpirv(const u32* cs_code,
                            u32 lds_dwords,
                            u64 native_mask,
                            u64 uint_mask,
+                           u64 shared_mask,
                            RecompiledCs& r) {
   if (!cs_code)
     return false;
@@ -2914,7 +2991,8 @@ bool RecompileComputeSpirv(const u32* cs_code,
     AuditBegin("cs", cs_code, program);
   const bool cs_ok =
       TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
-                  tgid_enable, lds_dwords, native_mask, uint_mask, tmp, t) &&
+                  tgid_enable, lds_dwords, native_mask, uint_mask, shared_mask,
+                  tmp, t) &&
       !HadUnsupported();
   base::Vector<u32> spv_bin;
   if (cs_ok)
