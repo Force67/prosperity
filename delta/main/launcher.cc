@@ -7,6 +7,7 @@
  */
 
 #include "main/launcher.h"
+#include "main/memory_report.h"
 
 #if defined(__GLIBC__)
 #include <malloc.h>
@@ -336,6 +337,7 @@ void Launcher::Boot(const base::String& game_path) {
   proc_->SetSdkVersion(title.sdk_version);
   if (!argv.empty())
     proc_->SetArgs(argv);
+  cli::StartMemoryReport(title.is_ps5);
   if (!guest::SpawnThread("guest-main",
                           [this, main_module = base::move(title.main_module),
                            mounted = title.mounted] {

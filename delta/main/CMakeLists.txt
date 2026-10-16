@@ -8,7 +8,8 @@ set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/main.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/game_firmware.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/recent_games.cc
                  ${CMAKE_CURRENT_SOURCE_DIR}/home_screen.cc
-                 ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc)
+                 ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc
+                 ${CMAKE_CURRENT_SOURCE_DIR}/memory_report.cc)
 
 set(MAIN_LIBS delta_deps delta_kern delta_runtime delta_formats
               delta_host delta_ui delta_cpu delta_patch)
@@ -21,6 +22,7 @@ if(DELTA_ANDROID_APP)
     ${CMAKE_CURRENT_SOURCE_DIR}/android_main.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/android_jni.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/launcher.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/memory_report.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/game_directory.cc
     ${_glue}/android_native_app_glue.c)
   target_include_directories(ps4delta_app PRIVATE ${_glue}
