@@ -2307,6 +2307,38 @@ static void EmitCsMimgStaged(Translator& t,
                               logical_or(is_block2, is_rgba32_raw));
   const Id wide4 = logical_or(is_r11g11b10f, is_rgba32_raw);
 
+  // A read-only single-mip linear 8/16-bit image is bound as the guest bytes
+  // instead of a copy widened to one dword per texel.
+  const bool may_pack = !t.rdna_sources && !sc.cs_written.count(binding);
+  Id packed = 0, packed_bytes = 0;
+  if (may_pack) {
+    const Id tiling = field(3, 20, 0x1F);
+    const Id narrow = logical_or(t.Eq(dfmt, t.U32(1)),
+                                 logical_or(t.Eq(dfmt, t.U32(2)),
+                                            t.Eq(dfmt, t.U32(3))));
+    packed = t.LAnd(
+        t.LAnd(logical_or(t.Eq(tiling, t.U32(8)), t.Eq(tiling, t.U32(31))),
+               t.IsZero(last_mip)),
+        narrow);
+    packed_bytes = t.SelectB(t.Eq(dfmt, t.U32(1)), t.U32(1), t.U32(2));
+  }
+  const auto packed_word = [&](Id texel, Id word) {
+    return may_pack ? t.SelectB(packed,
+                                t.Shr(t.Mul(texel, packed_bytes), t.U32(2)),
+                                word)
+                    : word;
+  };
+  const auto packed_value = [&](Id texel, Id raw) {
+    if (!may_pack)
+      return raw;
+    const Id shift =
+        t.Shl(t.And(t.Mul(texel, packed_bytes), t.U32(3)), t.U32(3));
+    const Id mask = t.SelectB(t.Eq(packed_bytes, t.U32(1)), t.U32(0xFF),
+                              t.U32(0xFFFF));
+    return t.SelectB(packed, t.And(t.Shr(raw, shift), mask), raw);
+  };
+  dword_idx = packed_word(texel_idx, dword_idx);
+
   const auto swizzle = [&](const Id values[4], u32 component) {
     const Id selector = field(3, component * 3, 7);
     const Id one = t.SelectB(is_int, t.U32(1), t.U32(0x3f800000));
@@ -2319,7 +2351,8 @@ static void EmitCsMimgStaged(Translator& t,
   };
 
   if (load) {
-    const Id raw = CsSsboLoad(t, sc, binding, dword_idx);
+    const Id raw =
+        packed_value(texel_idx, CsSsboLoad(t, sc, binding, dword_idx));
     const Id has_second = wide2;
     const Id raw_hi = CsSsboLoad(
         t, sc, binding,
@@ -2379,15 +2412,15 @@ static void EmitCsMimgStaged(Translator& t,
   } else if (sample || gather) {
     const Id has_second = wide2;
     const auto texel_at = [&](Id xx, Id yy) {
-      Id ti = t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(yy, pitch), xx)));
-      ti = t.SelectB(is_rgba16, t.Mul(ti, t.U32(2)), ti);
-      ti = t.SelectB(is_r11g11b10f, t.Mul(ti, t.U32(4)), ti);
-      ti = t.SelectB(is_block2, t.Mul(ti, t.U32(2)), ti);
-      ti = t.SelectB(is_rgba32_raw, t.Mul(ti, t.U32(4)), ti);
-      return ti;
+      return t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(yy, pitch), xx)));
     };
-    const auto decode = [&](Id idx, Id out[4]) {
-      const Id raw = CsSsboLoad(t, sc, binding, idx);
+    const auto decode = [&](Id texel, Id out[4]) {
+      Id idx = t.SelectB(is_rgba16, t.Mul(texel, t.U32(2)), texel);
+      idx = t.SelectB(is_r11g11b10f, t.Mul(texel, t.U32(4)), idx);
+      idx = t.SelectB(is_block2, t.Mul(texel, t.U32(2)), idx);
+      idx = t.SelectB(is_rgba32_raw, t.Mul(texel, t.U32(4)), idx);
+      idx = packed_word(texel, idx);
+      const Id raw = packed_value(texel, CsSsboLoad(t, sc, binding, idx));
       const Id raw_hi = CsSsboLoad(
           t, sc, binding, t.SelectB(has_second, t.Add(idx, t.U32(1)), idx));
       const Id raw_2 = CsSsboLoad(t, sc, binding,

@@ -2387,6 +2387,9 @@ bool TranslateCs(const Program& program,
       r.resources.empty())
     return false;
   r.native_candidates = NativeImageCandidates(program, r, sc.cs_bind);
+  for (const CsResource& res : r.resources)
+    if (res.written)
+      sc.cs_written.insert(res.binding);
   const u64 native = native_mask & r.native_candidates;
   MimgBindingPlan image_plan;
   if (native) {

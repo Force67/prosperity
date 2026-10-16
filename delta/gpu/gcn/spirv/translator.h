@@ -871,6 +871,7 @@ struct StageContext {
   Id direct_vertex_index = 0;
   base::HashSet<u32> cs_runtime_images;
   base::HashSet<u32> cs_native;
+  base::HashSet<u32> cs_written;
 
   base::HashSet<u32> pervertex_attrs;
   base::HashMap<u32, Id> pervertex_vars;

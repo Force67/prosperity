@@ -143,8 +143,12 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   }
   out.base = t.base;
   out.guest_size = layout.size;
+  // The shader reads these packed straight from guest memory (see
+  // EmitCsMimgStaged), so there is nothing to widen.
+  const bool packed = !res.written && out.elem_bytes < 4 &&
+                      !((descriptor[3] >> 16) & 0xF);
   out.image_staging = !gcn::TilingIsLinear(t.tiling_idx) ||
-                      out.elem_bytes != out.stage_elem_bytes;
+                      (out.elem_bytes != out.stage_elem_bytes && !packed);
   if (!out.image_staging) {
     out.size = out.guest_size;
     return out;
