@@ -1,5 +1,6 @@
 // Loads one module (a decrypted SCE-dynamic ELF) through kern::Module and
-// prints what came out. Usage: modload <module.sprx>
+// prints what came out. Usage: modload <module.sprx> [nid...]; each NID given
+// prints the export's offset in the module.
 #include <cstdio>
 
 #include "kern/object_ref.h"
@@ -36,6 +37,15 @@ int main(int argc, char** argv) {
     std::printf("  base:     %p\n", reinterpret_cast<void*>(info.base));
     std::printf("  entry:    %p\n", reinterpret_cast<void*>(info.entry));
     std::printf("  codeSize: %u bytes\n", info.code_size);
+    for (int i = 2; i < argc; i++) {
+      const auto address = mod->GetSymbolByNid(argv[i]);
+      if (address)
+        std::printf("  %s: +%#llx\n", argv[i],
+                    static_cast<unsigned long long>(
+                        address - reinterpret_cast<uintptr_t>(info.base)));
+      else
+        std::printf("  %s: not exported\n", argv[i]);
+    }
   }
   return ok ? 0 : 2;
 }

@@ -656,21 +656,7 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
     if (size >= min_b) {
       BASE_LOGI("mmap-caller", "size={:#x} prot={:#x} flags={:#x} fd={}:", size,
                 prot, flags, fd);
-      auto* sp = reinterpret_cast<uintptr_t*>(__builtin_frame_address(0));
-      int shown = 0;
-      for (int i = 0; i < 8192 && shown < 12; i++) {
-        uintptr_t v = sp[i];
-        for (auto& m : proc->GetModuleList()) {
-          auto& mi = m->GetInfo();
-          auto* t = mi.text_seg.addr;
-          if (t && v >= (uintptr_t)t && v < (uintptr_t)t + mi.text_seg.size) {
-            BASE_LOGI("mmap-caller", "  sp+{:<4x} {}+{:#x}", i * 8,
-                      mi.name.c_str(), v - (uintptr_t)t);
-            shown++;
-            break;
-          }
-        }
-      }
+      GuestStackTrace("mmap-caller", 12);
     }
   }
 
