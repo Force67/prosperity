@@ -447,8 +447,10 @@ bool WaitSatisfied(u32 op, const u32* body, u32 count) {
     return false;
   u64 value = wide ? *reinterpret_cast<const volatile u64*>(address)
                    : *reinterpret_cast<const volatile u32*>(address);
-  if (!OverlayHeld(address, wide ? 8 : 4, reinterpret_cast<u8*>(&value))) {
-    LabelPending(address, wide ? 8 : 4);
+  const bool ring = g_queue->stall.ring_walk;
+  if (!OverlayHeld(address, wide ? 8 : 4, reinterpret_cast<u8*>(&value),
+                   ring)) {
+    LabelPending(address, wide ? 8 : 4, ring);
     return false;
   }
   return Compares(function, value & mask, ref);
@@ -621,13 +623,20 @@ void HandleReleaseMem(const u32* body, u32 count) {
                     (static_cast<u64>(count >= 6 ? body[5] : 0) << 32);
   WriteEventLabel(address, (body[1] >> 29) & 0x7, value, (body[1] >> 24) & 0x7,
                   count >= 7 ? body[6] : 0);
-  const u64 context = count >= 7 && body[6] ? body[6] : value;
+  // Only the packet's context field names a flip. Taking the value instead
+  // let any interrupting fence whose count equals a pending flip's context
+  // complete that flip early, leaving its buffer marked busy for good.
+  const u64 context = count >= 7 ? body[6] : 0;
   u64 scanout = 0;
-  if (((body[1] >> 24) & 0x7) &&
+  if (context && ((body[1] >> 24) & 0x7) &&
       prosperity_ps5_begin_eop_flip(context, &scanout)) {
     if (scanout)
       FinishGraphicsFlip(scanout);
-    PublishLabel([context] { prosperity_ps5_complete_eop_flip(context); });
+    // Only the graphics queue waits behind a flip; the ring queues are other
+    // hardware queues, and holding them made each video decode step wait for
+    // a whole frame.
+    PublishLabel([context] { prosperity_ps5_complete_eop_flip(context); }, 0,
+                 ~0ull, nullptr, true);
     render::SubmitForPublishedLabels();
   }
 }

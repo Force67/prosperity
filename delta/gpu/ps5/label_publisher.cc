@@ -23,6 +23,7 @@ struct Held {
   u64 lo = 0, hi = 0;
   base::Vector<u8> data;
   base::Function<void()> write;
+  bool graphics_only = false;
 };
 
 base::Mutex g_lock;
@@ -84,7 +85,8 @@ void WaitLabelWritten(u64 seen, base::TimeDelta timeout) {
 void PublishLabel(base::Function<void()> write,
                   u64 base,
                   u64 bytes,
-                  const void* data) {
+                  const void* data,
+                  bool graphics_only) {
   render::FlushCsWrites(render::DefaultRenderer(), "label");
   const u64 point = render::GuestWritePublishBatch();
   {
@@ -98,6 +100,7 @@ void PublishLabel(base::Function<void()> write,
         held.data.assign(static_cast<const u8*>(data),
                          static_cast<const u8*>(data) + bytes);
       held.write = base::move(write);
+      held.graphics_only = graphics_only;
       if (!g_started) {
         g_started = true;
         guest::SpawnThread("agc-labels", [] { Run(); });
@@ -123,11 +126,11 @@ void ReportHeldLabels() {
   render::ReportBatchState();
 }
 
-bool OverlayHeld(u64 base, u32 bytes, u8* out) {
+bool OverlayHeld(u64 base, u32 bytes, u8* out, bool ring) {
   base::LockGuard<base::Mutex> lock(g_lock);
   for (size_t i = g_head; i < g_held.size(); i++) {
     const Held& h = g_held[i];
-    if (h.hi <= base || base + bytes <= h.lo)
+    if (h.hi <= base || base + bytes <= h.lo || (ring && h.graphics_only))
       continue;
     if (h.data.empty())
       return false;
@@ -137,12 +140,13 @@ bool OverlayHeld(u64 base, u32 bytes, u8* out) {
   return true;
 }
 
-bool LabelPending(u64 base, u64 bytes) {
+bool LabelPending(u64 base, u64 bytes, bool ring) {
   bool pending = false;
   {
     base::LockGuard<base::Mutex> lock(g_lock);
     for (size_t i = g_head; i < g_held.size() && !pending; i++)
-      pending = g_held[i].lo < base + bytes && base < g_held[i].hi;
+      pending = g_held[i].lo < base + bytes && base < g_held[i].hi &&
+                !(ring && g_held[i].graphics_only);
   }
   if (pending)
     render::SubmitForPublishedLabels();

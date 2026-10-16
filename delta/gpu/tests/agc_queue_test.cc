@@ -91,6 +91,22 @@ TEST_F(AgcGraphics, EopFlipPresentsBeforeReleasingBufferForLaterPackets) {
   g_accept_draw = false;
 }
 
+TEST_F(AgcGraphics, FenceValueMatchingAFlipContextDoesNotFlip) {
+  u64 label = 1, fence = 0;
+  g_presented = 0;
+  g_eop_context = 5;
+  g_eop_label = &label;
+  Words words;
+  Packet(words, 0x49,
+         {0, (2u << 29) | (2u << 24), Lo(&fence), Hi(&fence), 5, 0, 0});
+  EXPECT_EQ(Submit(words, 203), words.size());
+  EXPECT_EQ(g_presented, 0u);
+  EXPECT_EQ(g_eop_context, 5u);
+  EXPECT_EQ(label, 1u);
+  g_eop_label = nullptr;
+  g_eop_context = 0;
+}
+
 TEST_F(AgcGraphics, WaitsForComputeBeforeLaterSubmitsAndFlip) {
   u32 ready = 0, count = 0;
   Words first, second, check;
