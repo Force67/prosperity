@@ -61,6 +61,7 @@ void VmMap::PunchHoleLocked(u8* p, size_t s) {
                     e.reserved);
       tail.name = e.name;
       tail.has_phys = e.has_phys;
+      tail.flexible = e.flexible;
       tail.phys_offset = e.phys_offset + static_cast<size_t>(end - e.ptr);
       e.size = static_cast<size_t>(p - e.ptr);
       rt_pages_.emplace_back(tail);  // append; disjointness keeps get() correct
@@ -91,12 +92,33 @@ void SetMappingChangedHook(MappingChangedHook hook) {
   g_mapping_changed = hook;
 }
 
-void VmMap::Add(u8* ptr, size_t size, Mprot prot, u32 sce_prot, bool reserved) {
+void VmMap::Add(u8* ptr,
+                size_t size,
+                Mprot prot,
+                u32 sce_prot,
+                bool reserved,
+                bool flexible) {
   base::LockGuard lock(vmlock_);
   host_memory::TrackMemoryMapping(ptr, size);
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
   rt_pages_.emplace_back(ptr, size, prot, sce_prot, reserved);
+  rt_pages_.back().flexible = flexible;
+}
+
+u64 VmMap::FlexibleBytes(u8* skip, size_t skip_size) const {
+  base::LockGuard lock(vmlock_);
+  u64 bytes = 0;
+  for (const auto& page : rt_pages_) {
+    if (!page.flexible)
+      continue;
+    bytes += page.size;
+    u8* first = base::Max(skip, page.ptr);
+    u8* end = base::Min(skip + skip_size, page.ptr + page.size);
+    if (skip && first < end)
+      bytes -= end - first;
+  }
+  return bytes;
 }
 
 void VmMap::AddDirect(u8* ptr,

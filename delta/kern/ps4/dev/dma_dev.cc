@@ -262,6 +262,13 @@ int DmemBackingFd() {
 u64 DmemBackingSize() {
   return DmemTotal();
 }
+u64 DmemAllocatedBytes() {
+  base::LockGuard<base::Mutex> lk(g_dmem_mutex);
+  u64 bytes = 0;
+  for (const auto& r : g_dmem_regions)
+    bytes += r.end - r.start;
+  return bytes;
+}
 
 /* dmem_ioctl */
 i32 DmaDevice::Ioctl(u32 cmd, void* data) {

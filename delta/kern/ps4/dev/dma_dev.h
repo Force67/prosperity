@@ -39,4 +39,6 @@ int DmemBackingFd();
 // reservation covering a physical offset, or -1 when none does.
 int DmemTypeForOffset(u64 off);
 u64 DmemBackingSize();
+// Bytes of direct memory the title has allocated (reserved physical ranges).
+u64 DmemAllocatedBytes();
 }  // namespace kern

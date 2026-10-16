@@ -23,6 +23,7 @@
 #include <cstring>
 #include "kern/crash.h"
 #include "kern/lv2/error_table.h"
+#include "kern/memory_budget.h"
 #include "kern/process.h"
 #include "kern/ps4/hardware_mode.h"
 
@@ -390,12 +391,11 @@ int PS4ABI sys_sysctl(int* name,
     return 0;
   }
 
-  // vm.budgets.mlock_total (synthetic {0x1337,8}): total wired-memory budget in
-  // bytes. Report a large pool (6 GiB) so heap-sizing consumers get a sane
-  // value instead of 0; matches the order of the reported direct-memory pool.
+  // vm.budgets.mlock_total (synthetic {0x1337,8}): the flexible-memory budget
+  // in bytes (sceKernelConfiguredFlexibleMemorySize).
   else if (name[0] == 0x1337 && name[1] == 8 && namelen == 2) {
     if (oldp && oldlenp) {
-      u64 v = 0x180000000ull;
+      u64 v = FlexibleMemoryBudget();
       size_t n = *oldlenp < sizeof(v) ? *oldlenp : sizeof(v);
       std::memcpy(oldp, &v, n);
       *oldlenp = n;
@@ -403,15 +403,16 @@ int PS4ABI sys_sysctl(int* name,
     return 0;
   }
 
-  // vm.budgets.mlock_avail (synthetic {0x1337,11}): wired-memory budget still
-  // AVAILABLE. Left ENOENT, libkernel's internal allocator sizes the
-  // SceKernelInternalMemory arena minimally, then "Internal Memory is running
-  // out" + std::bad_alloc terminates the process (only bites once a real
-  // firmware module allocates from the arena).
-  // Report 6 GiB.
+  // vm.budgets.mlock_avail (synthetic {0x1337,11}): flexible budget still
+  // AVAILABLE (sceKernelAvailableFlexibleMemorySize). Left ENOENT, libkernel's
+  // internal allocator sizes the SceKernelInternalMemory arena minimally, then
+  // "Internal Memory is running out" + std::bad_alloc terminates the process.
   else if (name[0] == 0x1337 && name[1] == 11 && namelen == 2) {
     if (oldp && oldlenp) {
-      u64 v = 0x180000000ull;
+      const GuestMemoryUsage usage = ReadGuestMemoryUsage();
+      u64 v = usage.flexible_budget > usage.flexible_used
+                  ? usage.flexible_budget - usage.flexible_used
+                  : 0;
       size_t n = *oldlenp < sizeof(v) ? *oldlenp : sizeof(v);
       std::memcpy(oldp, &v, n);
       *oldlenp = n;

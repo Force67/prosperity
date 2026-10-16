@@ -203,9 +203,19 @@ int PS4ABI sys_dynlib_get_proc_param(void** data, size_t* size) {
 
     *data = reinterpret_cast<void*>(info.proc_param);
     *size = info.proc_param_size;
-    if (kProcparamTrace)
+    if (kProcparamTrace) {
       BASE_LOGI("procparam", "get_proc_param -> data={:p} size={:#x}", *data,
                 *size);
+      const auto* q = reinterpret_cast<const u64*>(info.proc_param);
+      for (u32 i = 0; q && i < info.proc_param_size / 8; i++)
+        BASE_LOGI("procparam", "  +{:#04x} {:#018x}", i * 8, q[i]);
+      if (q && info.proc_param_size >= 0x48 && q[8]) {
+        const auto* mp = reinterpret_cast<const u64*>(q[8]);
+        for (u32 i = 0; i < mp[0] / 8 && i < 8; i++)
+          BASE_LOGI("procparam", "  mem +{:#04x} {:#018x} -> {:#x}", i * 8,
+                    mp[i], i && mp[i] ? *reinterpret_cast<const u64*>(mp[i]) : 0);
+      }
+    }
     return 0;
   }
 

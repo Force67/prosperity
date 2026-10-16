@@ -36,6 +36,7 @@
 #include "kern/lv2/stub_log.h"
 #include "kern/lv2/sys_mem.h"
 #include "kern/module.h"
+#include "kern/memory_budget.h"
 #include "kern/process.h"
 #include "kern/ps4/audio_daemon.h"
 #include "kern/ps4/dev/dma_dev.h"  // DmemBackingFd/Size (shared physical dmem store)
@@ -762,6 +763,13 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
       reinterpret_cast<uintptr_t>(addr) < kGuestArenaFloor)
     addr = nullptr;
 
+  const bool flexible = fd == static_cast<u32>(-1) && !void_reserve && prot;
+  if (flexible &&
+      !AdmitFlexible(proc->GetVma(),
+                     (flags & MFlags::kFixed) ? static_cast<u8*>(addr) : nullptr,
+                     size))
+    return reinterpret_cast<u8*>(-SysError::eNOMEM);
+
   void* ptr = nullptr;
   if (addr) {
     if (flags & MFlags::kFixed) {
@@ -824,7 +832,8 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
   if (dmem_map)
     proc->GetVma().AddDirect(static_cast<u8*>(ptr), size, gprot, prot, offset);
   else
-    proc->GetVma().Add(static_cast<u8*>(ptr), size, gprot, prot, void_reserve);
+    proc->GetVma().Add(static_cast<u8*>(ptr), size, gprot, prot, void_reserve,
+                       flexible);
 
   host_memory::ProtectMem(static_cast<void*>(ptr), size, Ppt::kRwx);
 

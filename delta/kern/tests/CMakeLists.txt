@@ -136,3 +136,6 @@ add_delta_test(system_settings_test
 add_delta_test(mapped_prefix_test
   SOURCES mapped_prefix_test.cc
   DEPS delta_kern)
+add_delta_test(memory_budget_test
+  SOURCES memory_budget_test.cc
+  DEPS delta_kern)

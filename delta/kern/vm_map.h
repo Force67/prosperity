@@ -43,6 +43,8 @@ struct PageInfo {
   // heap map, so a VA substituted here lands nowhere near the right block.
   u64 phys_offset = 0;
   bool has_phys = false;
+  // Committed anonymous memory: what the title's flexible budget pays for.
+  bool flexible = false;
 
   PageInfo(u8* p, size_t s, Mprot mp, u32 sp = 0, bool rsv = false)
       : ptr(p), size(s), prot(mp), sce_prot(sp), reserved(rsv) {}
@@ -64,7 +66,8 @@ class VmMap {
            size_t size,
            Mprot,
            u32 sce_prot = 0,
-           bool reserved = false);
+           bool reserved = false,
+           bool flexible = false);
   // Same, for a range backed by direct memory at `physOffset`.
   void AddDirect(u8* ptr, size_t size, Mprot, u32 sce_prot, u64 phys_offset);
   // Drop bookkeeping for [ptr, ptr+size): entries fully inside vanish,
@@ -85,6 +88,10 @@ class VmMap {
 
   // true if [ptr, ptr+size) hits a tracked mapping
   bool Overlaps(u8* ptr, size_t size) const;
+
+  // Bytes of flexible memory mapped, not counting [skip, skip+skip_size)
+  // (a MAP_FIXED mapping replaces what was there).
+  u64 FlexibleBytes(u8* skip = nullptr, size_t skip_size = 0) const;
 
   // Diagnostic: invoke `fn(ctx, ptr, size)` for every tracked mapping in the
   // GPU aperture [0x8000_0000_00, 0x8100_0000_00) that is small enough to sweep
