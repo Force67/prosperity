@@ -851,6 +851,23 @@ TEST_F(SaveDataTest, MemorySlotsHaveIndependentNativeBuffersAndSemaphores) {
   }
 }
 
+TEST_F(SaveDataTest, Ps5MemorySlotNamesCarryTheSetupId) {
+  auto payload = SlotPayload("sdmemory", 0);
+  std::memcpy(payload.data() + 0x571, "J05xhmx8Ht7ZS6sYwP45vq", 22);
+  ASSERT_EQ(SlotSetup(payload), 0);
+  for (const char* name :
+       {"/SceSaveData0000000000000001_0_0_J05xhmx8Ht7ZS6sYwP45vq",
+        "/SceSaveData0000000000000001_0_1_J05xhmx8Ht7ZS6sYwP45vq",
+        "/SceSaveDataI0000000000000001_0_J05xhmx8Ht7ZS6sYwP45vq"}) {
+    u8 value = 0xa5;
+    EXPECT_EQ(kern::ShmRead(name, 0, &value, 1), 0) << name;
+  }
+  u8 value = 0;
+  EXPECT_EQ(kern::ShmRead("/SceSaveData0000000000000001_0_0", 0, &value, 1),
+            -kern::SysError::eNOENT);
+  ASSERT_EQ(SlotClear("sdmemory"), 0);
+}
+
 TEST_F(SaveDataTest, MemorySlotClearPreservesLiveViewsAndReusesPhysicalIndex) {
   ASSERT_EQ(SlotSetup(SlotPayload("sdmemory3", 0)), 0);
   const char* name = "/SceSaveData0000000000000001_0_0";
