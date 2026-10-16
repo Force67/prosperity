@@ -298,6 +298,23 @@ TEST(GcnSpirv, AliasedImageAccessesAreOrderedOnlyWhenShared) {
   EXPECT_FALSE(apart.orders_memory);
 }
 
+TEST(GcnSpirv, DescriptorRebuiltInPlaceIsANewResource) {
+  constexpr u32 kLoadVsharp = 0xc08c0310;   // s_load_dwordx4 s[24:27], s[2:3]
+  constexpr u32 kBufferLoad0 = 0xe0301000;  // buffer_load_dword v1, v0,
+  constexpr u32 kBufferLoad1 = 0x80060100;  //   s[24:27], 0 offen
+  constexpr u32 kMovS24 = 0xbe980300;       // s_mov_b32 s24, s0
+  const base::Vector<u32> code{kLoadVsharp,  kBufferLoad0, kBufferLoad1,
+                               kMovS24,      kBufferLoad0, kBufferLoad1,
+                               kEndPgm};
+  const gpu::gcn::RecompiledCs cs =
+      gpu::gcn::RecompileCompute(code.data(), 64, 1, 1, 4, 0, 0);
+  ASSERT_TRUE(cs.ok);
+  u32 buffers = 0;
+  for (const gpu::gcn::CsResource& res : cs.resources)
+    buffers += res.kind == 0;
+  EXPECT_EQ(buffers, 2u);
+}
+
 TEST(GcnSpirv, BranchyWave64LdsSyncsPerDispatchIteration) {
   const WaveScope split(32);
   const base::Vector<u32> code{

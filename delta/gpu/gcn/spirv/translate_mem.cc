@@ -1199,6 +1199,57 @@ void EmitGfxMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
                                           t.U32(kGfxBufferDwords - 1))));
 }
 
+namespace {
+
+// The SGPRs an instruction other than an SMRD load writes. A shader can
+// rebuild a descriptor in place (s_getpc + s_add for a table in its own code,
+// s_mov for the format words), and a use after that is a different resource.
+bool ScalarWrites(const Inst& inst, u32& first, u32& count) {
+  const u32 w = inst.raw[0], op = inst.opcode;
+  count = 1;
+  switch (inst.enc) {
+    case Enc::kSop1:
+      first = (w >> 16) & 0x7F;
+      if (op == 0x04 || op == 0x06 || op == 0x08 || op == 0x0a || op == 0x0c ||
+          op == 0x1f || op == 0x21 || (op >= 0x24 && op <= 0x2b) || op == 0x2d)
+        count = 2;
+      return true;
+    case Enc::kSop2:
+      first = (w >> 16) & 0x7F;
+      if ((op >= 0x0b && op <= 0x1f && (op & 1)) || op == 0x21 || op == 0x23 ||
+          op == 0x25 || op == 0x29 || op == 0x2a)
+        count = 2;
+      return true;
+    case Enc::kSopk:
+      first = (w >> 16) & 0x7F;
+      return op == 0x00 || op == 0x02 || op == 0x0f || op == 0x10 ||
+             op == 0x12;
+    case Enc::kVop1:
+      first = (w >> 17) & 0xFF;
+      return op == 0x02;
+    case Enc::kVop2:
+      first = (w >> 17) & 0xFF;
+      return op == 0x01;
+    case Enc::kVop3:
+      if (op == 0x101 || op == 0x182) {
+        first = w & 0xFF;
+        return true;
+      }
+      count = 2;
+      if (op < 0x100) {
+        first = w & 0xFF;
+        return true;
+      }
+      first = (w >> 8) & 0x7F;
+      return (op >= 0x125 && op <= 0x12a) || op == 0x16d || op == 0x16e ||
+             op == 0x176 || op == 0x177;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
 bool PlanCsResources(const Program& program,
                      const u8* reachable,
                      u32 lds_dwords,
@@ -1211,10 +1262,12 @@ bool PlanCsResources(const Program& program,
   };
   base::Vector<ScalarLoad> loads;
   const auto descriptor_version = [&](u32 sgpr, u32 dwords) {
-    for (auto it = loads.rbegin(); it != loads.rend(); ++it)
-      if (sgpr >= it->sgpr && sgpr + dwords <= it->sgpr + it->dwords)
-        return it->version;
-    return UINT32_MAX;
+    u32 version = UINT32_MAX;
+    for (const ScalarLoad& ld : loads)
+      if (sgpr < ld.sgpr + ld.dwords && ld.sgpr < sgpr + dwords)
+        version = version == UINT32_MAX ? ld.version
+                                        : base::Max(version, ld.version);
+    return version;
   };
   base::HashMap<u64, u32> resource_by_version;
   const auto resource = [&](u32 pc, u32 base_sgpr, u32 dwords, u8 kind,
@@ -1251,6 +1304,16 @@ bool PlanCsResources(const Program& program,
     return offen || soffset != 0x80 ? kUnknownStoreExtent : (w & 0xFFF) + bytes;
   };
 
+  const auto overwrite = [&](u32 first, u32 n, u32 version) {
+    loads.erase(base::RemoveIf(loads.begin(), loads.end(),
+                               [&](const auto& ld) {
+                                 return first < ld.sgpr + ld.dwords &&
+                                        ld.sgpr < first + n;
+                               }),
+                loads.end());
+    loads.push_back({first, n, version});
+  };
+
   bool uses_gds = false;
   u32 idx = 0;
   for (const Inst& inst : program) {
@@ -1277,14 +1340,7 @@ bool PlanCsResources(const Program& program,
         if (!resource(inst.pc, base_sgpr, kind == 2 ? 2 : 4, kind, false, bytes,
                       true))
           return false;
-        const u32 sdst = (w >> 15) & 0x7F;
-        loads.erase(base::RemoveIf(loads.begin(), loads.end(),
-                                   [&](const auto& ld) {
-                                     return sdst < ld.sgpr + ld.dwords &&
-                                            ld.sgpr < sdst + n;
-                                   }),
-                    loads.end());
-        loads.push_back({sdst, n, inst_idx});
+        overwrite((w >> 15) & 0x7F, n, inst_idx);
         break;
       }
       case Enc::kMubuf: {
@@ -1350,8 +1406,12 @@ bool PlanCsResources(const Program& program,
         if (!lds_dwords && inst.opcode != 0x35)
           return reject("cs.plan.ds-without-lds");
         break;
-      default:
+      default: {
+        u32 first = 0, n = 0;
+        if (ScalarWrites(inst, first, n))
+          overwrite(first, n, inst_idx);
         break;
+      }
     }
   }
   if (uses_gds)
