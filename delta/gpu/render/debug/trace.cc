@@ -42,6 +42,7 @@ DELTA_OPTION(float, kCaptureAfter, "DELTA_GPU_CAPTURE_AFTER", 0.f);
 DELTA_OPTION(int, kCaptureBusy, "DELTA_GPU_CAPTURE_BUSY", 0);
 DELTA_OPTION(u64, kCaptureCs, "DELTA_GPU_CAPTURE_CS", 0);
 DELTA_OPTION(u64, kCaptureCsEnd, "DELTA_GPU_CAPTURE_CS_END", 0);
+DELTA_OPTION(u32, kCaptureCsSkip, "DELTA_GPU_CAPTURE_CS_SKIP", 0);
 DELTA_OPTION(int, kCaptureCount, "DELTA_GPU_CAPTURE_COUNT", 1);
 DELTA_OPTION(const char*, kCaptureDir, "DELTA_GPU_CAPTURE_DIR", nullptr);
 DELTA_OPTION(u64, kRtWatch, "DELTA_GPU_RTWATCH", 0);
@@ -1700,11 +1701,18 @@ void DumpDispatchBytes(const char* phase,
   std::snprintf(path, sizeof path, "%s_cs_%llx_%s_%s_%u_%llx.bin",
                 g_prefix.c_str(), (unsigned long long)cs, phase, kind, binding,
                 (unsigned long long)base);
+  // Guest pages the GPU owns are PROT_NONE: write(2) would fail on them with
+  // EFAULT, while a copy in user space faults them back in.
+  base::Vector<u8> copy;
+  if (!data) {
+    copy.resize(bytes);
+    std::memcpy(copy.data(), reinterpret_cast<const void*>(base), bytes);
+    data = copy.data();
+  }
   std::FILE* f = std::fopen(path, "wb");
   if (!f)
     return;
-  const bool ok = std::fwrite(data ? data : reinterpret_cast<const void*>(base),
-                              1, bytes, f) == bytes;
+  const bool ok = std::fwrite(data, 1, bytes, f) == bytes;
   std::fclose(f);
   Line l("dispatch_dump");
   l.U("seq", g_seq++)
@@ -1725,6 +1733,11 @@ bool CaptureDispatchInputs(Renderer& renderer, const render::ComputeInfo& ci) {
   if (!kCaptureCs || ci.cs_addr < kCaptureCs || ci.cs_addr > end ||
       g_finished || g_cs_captured.count(ci.cs_addr))
     return false;
+  static u32 skipped = 0;
+  if (skipped < kCaptureCsSkip) {
+    skipped++;
+    return false;
+  }
   g_cs_trigger = true;
   if (!g_recording)
     FrameBegin(g_frame.num);

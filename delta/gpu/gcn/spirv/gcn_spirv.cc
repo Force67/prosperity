@@ -82,6 +82,9 @@ DELTA_OPTION(bool, kGpuPsreach, "DELTA_GPU_PSREACH", false);
 DELTA_OPTION(int, kGpuPsvgpr, "DELTA_GPU_PSVGPR", 0);
 DELTA_OPTION(u32, kGpuPsvgprAt, "DELTA_GPU_PSVGPR_AT", 0);
 DELTA_OPTION(bool, kGpuShdis, "DELTA_GPU_SHDIS", false);
+DELTA_OPTION(u64, kGcnCsVgprCs, "DELTA_GPU_GCN_CSVGPR_CS", 0);
+DELTA_OPTION(u32, kGcnCsVgprPc, "DELTA_GPU_GCN_CSVGPR_PC", 0);
+DELTA_OPTION(u32, kGcnCsVgpr, "DELTA_GPU_GCN_CSVGPR", 0);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
 DELTA_OPTION(bool, kGpuSpirv, "DELTA_GPU_SPIRV", false);
 DELTA_OPTION(u64, kSpvDumpAddr, "DELTA_GPU_SPVDUMP_ADDR", 0);
@@ -1058,6 +1061,35 @@ void EmitInstGuarded(Translator& t, const Inst& inst, StageContext& sc) {
   t.m.OpenBlock(merge);
 }
 
+// DELTA_GPU_GCN_CSVGPR_*: in the compute shader at _CS, remember the four
+// registers starting at DELTA_GPU_GCN_CSVGPR (v<n>, or s<n - 1000>) after the
+// instruction at _PC in every lane that has EXEC set, and make every later
+// image_store write those values instead of its data. The output image then
+// holds the register at the lane's own store address, which
+// tools/gcn_interp.py --probe reproduces on the CPU for a lane-exact diff.
+void ProbeCsStore(Translator& t, const Inst& inst, StageContext& sc) {
+  if (!sc.cs_probe_var || inst.enc != Enc::kMimg || inst.opcode != 0x08)
+    return;
+  const u32 vdata = (inst.raw[1] >> 8) & 0xFF;
+  const u32 n = __builtin_popcount((inst.raw[0] >> 8) & 0xF);
+  for (u32 i = 0; i < n; i++)
+    t.SetVg(vdata + i,
+            t.m.Load(t.t_u, t.m.AccessChain(t.p_priv_u, sc.cs_probe_var,
+                                            {t.U32(i)})));
+}
+
+void ProbeCsCapture(Translator& t, const Inst& inst, StageContext& sc) {
+  if (!sc.cs_probe_var || inst.pc != kGcnCsVgprPc)
+    return;
+  const Id active = t.LaneActive(t.Exec());
+  for (u32 i = 0; i < 4; i++) {
+    const Id slot = t.m.AccessChain(t.p_priv_u, sc.cs_probe_var, {t.U32(i)});
+    const Id value = kGcnCsVgpr >= 1000 ? t.Sg(kGcnCsVgpr - 1000 + i)
+                                        : t.Vg(kGcnCsVgpr + i);
+    t.StorePrivate(slot, t.SelectB(active, value, t.m.Load(t.t_u, slot)));
+  }
+}
+
 void EmitInstAudited(Translator& t,
                      const Inst& inst,
                      u32 index,
@@ -1067,9 +1099,11 @@ void EmitInstAudited(Translator& t,
                             sc.uniform_readfirstlane[index];
   if (!sc.lds_barrier_at.empty() && SortedContains(sc.lds_barrier_at, index))
     t.Barrier();
+  ProbeCsStore(t, inst, sc);
   if (!ShaderDebugEnabled()) {
     EmitInstGuarded(t, inst, sc);
     CapturePsVgprs(t, inst);
+    ProbeCsCapture(t, inst, sc);
     return;
   }
   AuditInstBegin(index, inst.pc);
@@ -1081,6 +1115,7 @@ void EmitInstAudited(Translator& t,
   const size_t before = t.m.BodyWords();
   EmitInstGuarded(t, inst, sc);
   CapturePsVgprs(t, inst);
+  ProbeCsCapture(t, inst, sc);
   AuditInstEnd(index, static_cast<u32>(t.m.BodyWords() - before));
 }
 
@@ -2563,6 +2598,12 @@ bool TranslateCs(const Program& program,
                                        : UniformPoints(program);
   sc.uniform_readfirstlane =
       ProvenUniformReadFirstLane(program, reachable.data());
+  if (kGcnCsVgprCs && t.program_base == kGcnCsVgprCs) {
+    const Id arr = t.m.TypeArray(t.t_u, 4);
+    sc.cs_probe_var =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, arr),
+                     spv::StorageClass::Private, t.m.ConstNull(arr));
+  }
   t.SeedExec();
   t.predicate_vector = true;
   EmitCfg(t, program, sc, reachable.data());
