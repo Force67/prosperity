@@ -60,4 +60,29 @@ TEST(GuestMemoryBudget, FlexibleMappingsAreCountedAndCapped) {
   guest::ResetSessionResources();
   guest::BeginSession();
 }
+TEST(GuestMemoryBudget, PoolCommitBacksTheReservationInPlace) {
+  options::Init();
+  guest::BeginSession();
+  guest::ResetSessionResources();
+  kern::Process process;
+  ASSERT_TRUE(process.GetVma().Init());
+
+  // A pool reservation, then commit / write / decommit inside it.
+  u8* pool = kern::sys_mmap(nullptr, 0x400000, 3, kAnonPrivate, kNoFd, 0);
+  ASSERT_FALSE(kern::IsErrnoPtr(pool));
+  const u64 before = Flexible();
+  ASSERT_EQ(kern::sys_blockpool_map(pool + 0x200000, 0x10000, 0, 3), 0);
+  EXPECT_EQ(Flexible(), before);
+  pool[0x200000] = 0x5a;
+  ASSERT_EQ(kern::sys_blockpool_unmap(pool + 0x200000, 0x10000), 0);
+  EXPECT_EQ(pool[0x200000], 0);
+  EXPECT_EQ(kern::sys_blockpool_map(pool + 1, 0x10000, 0, 3),
+            -kern::SysError::eINVAL);
+  ASSERT_EQ(kern::sys_munmap(pool, 0x400000), 0);
+
+  guest::RequestStop();
+  guest::JoinThreads();
+  guest::ResetSessionResources();
+  guest::BeginSession();
+}
 }  // namespace

@@ -248,6 +248,10 @@ bool ProtectMem(void* addr, size_t len, PageProtection prot) {
   return ::mprotect(addr, len, ProtectionToPosix(prot)) == 0;
 }
 
+bool DiscardMem(void* addr, size_t len) {
+  return ::madvise(addr, len, MADV_DONTNEED) == 0;
+}
+
 bool IsMemoryRangeMapped(const void* addr, size_t len) {
   DELTA_ZONE("mem.mapping_check");
   if (!addr || !len)

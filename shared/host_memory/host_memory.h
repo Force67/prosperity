@@ -48,6 +48,9 @@ void BeginMemorySession();
 size_t EndMemorySession();
 size_t SessionMappedBytes();
 bool ProtectMem(void* addr, size_t len, PageProtection);
+// Drop the pages' contents and their host backing; the range stays mapped and
+// reads as zero until written again.
+bool DiscardMem(void* addr, size_t len);
 bool IsMemoryRangeMapped(const void* addr, size_t len);
 
 // Identity of backing pages allocated through the guest memory helpers. A

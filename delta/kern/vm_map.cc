@@ -106,6 +106,13 @@ void VmMap::Add(u8* ptr,
   rt_pages_.back().flexible = flexible;
 }
 
+void VmMap::Discard(u8* ptr, size_t size) {
+  base::LockGuard lock(vmlock_);
+  host_memory::BeforeHostWrite(ptr, size);
+  host_memory::DiscardMem(ptr, size);
+  MappingChanged(ptr, size);
+}
+
 u64 VmMap::FlexibleBytes(u8* skip, size_t skip_size) const {
   base::LockGuard lock(vmlock_);
   u64 bytes = 0;

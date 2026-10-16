@@ -77,6 +77,10 @@ class VmMap {
   void RemoveDirect(u64 phys_offset, size_t size);
   std::optional<PageInfo> Get(u8* ptr);
 
+  // Give back the host pages of a committed range whose contents the guest no
+  // longer needs (memory-pool decommit); caches of it forget it.
+  void Discard(u8* ptr, size_t size);
+
   // Apply a protection to every tracked mapping intersecting [ptr, ptr+size)
   // (kernel vm_map_protect: a range with no tracked mapping is fine, not an
   // error). Updates both the host r/w/x prot and the full SCE prot so
