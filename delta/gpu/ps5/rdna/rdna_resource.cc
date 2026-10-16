@@ -874,40 +874,6 @@ u32 BranchTargetIndex(const Program& program, u32 i) {
   return static_cast<u32>(program.size());
 }
 
-// Instructions on some path into `use`. An uber-shader reloads the same SGPRs
-// in sibling branch arms; replaying those in program order hands a sample in
-// one arm the descriptor another arm loaded.
-base::Vector<u8> InstsReaching(const Program& program, u32 use) {
-  const u32 n = static_cast<u32>(program.size());
-  base::Vector<base::Vector<u32>> preds(n);
-  for (u32 i = 0; i < n; i++) {
-    const int kind = BranchKind(program[i]);
-    if (kind == 4)
-      return base::Vector<u8>(n, 1);
-    if (kind == 1 || kind == 2) {
-      const u32 target = BranchTargetIndex(program, i);
-      if (target < n)
-        preds[target].push_back(i);
-    }
-    if ((kind == 0 || kind == 2) && i + 1 < n)
-      preds[i + 1].push_back(i);
-  }
-  base::Vector<u8> reach(n, 0);
-  base::Vector<u32> work;
-  if (use < n)
-    work.push_back(use);
-  while (!work.empty()) {
-    const u32 i = work.back();
-    work.pop_back();
-    for (u32 pred : preds[i])
-      if (!reach[pred]) {
-        reach[pred] = 1;
-        work.push_back(pred);
-      }
-  }
-  return reach;
-}
-
 u32 Sop2WriteDwords(u32 op) {
   if (op <= 0x0A || op == 0x26 || op == 0x27 || op == 0x28 || op == 0x2c ||
       (op >= 0x2f && op <= 0x37))
@@ -1930,6 +1896,62 @@ const base::Vector<SliceInst>& ScalarSlice(
       .first->second.second;
 }
 
+struct TexturePlan {
+  MimgBindingPlan mimg;
+  // Slice positions to replay before each binding's first sample, keyed by
+  // the sample's slice position.
+  base::HashMap<u32, base::Vector<u32>> steps;
+};
+
+// Only the slice steps on some path into a sample are replayed for it. An
+// uber-shader reloads the same SGPRs in sibling branch arms; replaying those
+// in program order hands a sample in one arm the descriptor another arm
+// loaded.
+TexturePlan PlanTextures(const Program& program,
+                         const base::Vector<SliceInst>& slice) {
+  TexturePlan plan{RdnaPlanMimg(program), {}};
+  const u32 n = static_cast<u32>(program.size());
+  base::Vector<base::Vector<u32>> preds(n);
+  bool all = false;
+  for (u32 i = 0; i < n && !all; i++) {
+    const int kind = BranchKind(program[i]);
+    all = kind == 4;
+    if (kind == 1 || kind == 2) {
+      const u32 target = BranchTargetIndex(program, i);
+      if (target < n)
+        preds[target].push_back(i);
+    }
+    if ((kind == 0 || kind == 2) && i + 1 < n)
+      preds[i + 1].push_back(i);
+  }
+  base::Vector<bool> seen(plan.mimg.binding_srsrc.size(), false);
+  base::Vector<u32> work;
+  for (u32 s = 0; s < slice.size(); s++) {
+    if (slice[s].inst.enc != Enc::kMimg)
+      continue;
+    const auto it = plan.mimg.binding_by_pc.find(slice[s].inst.pc);
+    if (it == plan.mimg.binding_by_pc.end() || seen[it->second])
+      continue;
+    seen[it->second] = true;
+    base::Vector<u8> reach(n, all ? 1 : 0);
+    work.push_back(slice[s].index);
+    while (!work.empty()) {
+      const u32 i = work.back();
+      work.pop_back();
+      for (u32 pred : preds[i])
+        if (!reach[pred]) {
+          reach[pred] = 1;
+          work.push_back(pred);
+        }
+    }
+    base::Vector<u32>& steps = plan.steps[s];
+    for (u32 k = 0; k < s; k++)
+      if (slice[k].step && reach[slice[k].index])
+        steps.push_back(k);
+  }
+  return plan;
+}
+
 base::Vector<TImage> TrackTextures(const u32* ps_code,
                                    const u32* pud,
                                    u32 user_sgprs,
@@ -1942,7 +1964,7 @@ base::Vector<TImage> TrackTextures(const u32* ps_code,
   const auto prog_ref = CachedReachableProgram(ps_code, max_dwords);
   const Program& prog = *prog_ref;
   static base::HashMap<
-      u64, base::Pair<base::SharedPointer<const Program>, MimgBindingPlan>>
+      u64, base::Pair<base::SharedPointer<const Program>, TexturePlan>>
       plan_cache;
   const u64 code_addr = reinterpret_cast<u64>(ps_code);
   auto plan_it = plan_cache.find(code_addr);
@@ -1953,8 +1975,8 @@ base::Vector<TImage> TrackTextures(const u32* ps_code,
         plan_cache
             .insert_or_assign(
                 code_addr,
-                base::Pair<base::SharedPointer<const Program>, MimgBindingPlan>{
-                    prog_ref, RdnaPlanMimg(prog)})
+                base::Pair<base::SharedPointer<const Program>, TexturePlan>{
+                    prog_ref, PlanTextures(prog, ScalarSlice(prog_ref))})
             .first;
   }
   static ReplayMemo<base::Vector<TImage>> memo;
@@ -1967,7 +1989,8 @@ base::Vector<TImage> TrackTextures(const u32* ps_code,
                             system_user_data_addr};
   if (const auto* hit = kGpuTexresolve ? nullptr : memo.Find(inputs))
     return *hit;
-  const MimgBindingPlan& plan = plan_it->second.second;
+  const TexturePlan& textures = plan_it->second.second;
+  const MimgBindingPlan& plan = textures.mimg;
   out.resize(plan.binding_srsrc.size());
   base::Vector<bool> filled(out.size(), false);
   base::Vector<ReplayLoad> loads;
@@ -1984,10 +2007,8 @@ base::Vector<TImage> TrackTextures(const u32* ps_code,
     ScalarEval eval(pud, user_sgprs, ud_base, system_user_data_addr);
     eval.code_addr = code_addr;
     eval.loads = &loads;
-    const base::Vector<u8> reach = InstsReaching(prog, slice[s].index);
-    for (u32 k = 0; k < s; k++)
-      if (slice[k].step && reach[slice[k].index])
-        eval.Step(slice[k].inst);
+    for (u32 k : textures.steps.find(s)->second)
+      eval.Step(slice[k].inst);
     const u32 w0 = in.raw[0], w1 = in.raw[1], op = in.opcode;
     const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
     const bool r128 = (w0 >> 15) & 1;
