@@ -66,7 +66,8 @@ bool BuildTextureLayout32(TextureLayout32& out,
                           u32 mip_levels,
                           u32 tiling_idx,
                           bool pow2_pad,
-                          u32 elem_bytes = 4);
+                          u32 elem_bytes = 4,
+                          const TextureLayout32* mip_extents = nullptr);
 
 bool DetileTextureMip32(const void* src,
                         void* dst,

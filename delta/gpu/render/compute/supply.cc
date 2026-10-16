@@ -1025,7 +1025,7 @@ bool DetileTextureOnGpu(u64 base,
       (!linear_in && !gcn::BuildTextureLayout32(
                          linear, tiled.mips[0].width, tiled.mips[0].height,
                          tiled.mips[0].pitch, tiled.layers, tiled.mip_levels, 8,
-                         false, elem)))
+                         false, elem, &tiled)))
     return false;
   if (first_mip >= linear.mip_levels)
     return false;

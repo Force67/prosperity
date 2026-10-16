@@ -1668,7 +1668,8 @@ bool BuildTextureLayout32(TextureLayout32& out,
                           u32 mip_levels,
                           u32 tiling_idx,
                           bool pow2_pad,
-                          u32 elem_bytes) {
+                          u32 elem_bytes,
+                          const TextureLayout32* mip_extents) {
   out = {};
   if (!width || !height || !layers || !mip_levels ||
       mip_levels > out.mips.size() || width > 16384 || height > 16384 ||
@@ -1697,8 +1698,10 @@ bool BuildTextureLayout32(TextureLayout32& out,
   u64 end = 0;
   for (u32 mip = 0; mip < mip_levels; mip++) {
     TextureMipLayout32& level = out.mips[mip];
-    level.width = base::Max(width >> mip, 1u);
-    level.height = base::Max(height >> mip, 1u);
+    level.width = mip_extents ? mip_extents->mips[mip].width
+                              : base::Max(width >> mip, 1u);
+    level.height = mip_extents ? mip_extents->mips[mip].height
+                               : base::Max(height >> mip, 1u);
     u32 raw_pitch = base::Max(base::Max(pitch >> mip, 1u), level.width);
     u32 storage_height = level.height;
     if (pow2_pad) {
