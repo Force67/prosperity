@@ -470,6 +470,9 @@ bool CopyGdsToGuest(u32 offset, u64 address, u32 bytes) {
   std::memcpy(reinterpret_cast<void*>(address), g_gds.data() + offset, bytes);
   return true;
 }
+bool CopyGuestToGds(Renderer&, u64, u32, u32) {
+  return false;
+}
 bool WriteGds(Renderer&, u32 offset, const void* data, u32 bytes) {
   std::memcpy(g_gds.data() + offset, data, bytes);
   return true;

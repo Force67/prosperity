@@ -26,9 +26,10 @@ bool DmaGds(Renderer& renderer,
       return FillGds(renderer, static_cast<u32>(dst), bytes, data);
     if (src_is_memory)
       return gpu::IsReadableRange(src, bytes) &&
-             FlushCsWritesRange(renderer, src, bytes, "dma") &&
-             WriteGds(renderer, static_cast<u32>(dst),
-                      reinterpret_cast<const void*>(src), bytes);
+             (CopyGuestToGds(renderer, src, static_cast<u32>(dst), bytes) ||
+              (FlushCsWritesRange(renderer, src, bytes, "dma") &&
+               WriteGds(renderer, static_cast<u32>(dst),
+                        reinterpret_cast<const void*>(src), bytes)));
     if (src_sel != 1 || src >= kGdsBytes || bytes > kGdsBytes - src)
       return false;
     base::Vector<u8> copy(bytes);

@@ -58,6 +58,7 @@ bool ReadGds(Renderer& renderer, u32 offset, void* data, u32 bytes);
 bool WriteGds(Renderer& renderer, u32 offset, const void* data, u32 bytes);
 bool FillGds(Renderer& renderer, u32 offset, u32 bytes, u32 value);
 bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes);
+bool CopyGuestToGds(Renderer& renderer, u64 src, u32 offset, u32 bytes);
 void DeferLabelsToGpu();
 bool WaitPendingGuestWrites(u64 base, u64 bytes);
 u64 GuestWritePublishBatch();

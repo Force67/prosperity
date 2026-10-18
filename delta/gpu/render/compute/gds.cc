@@ -125,6 +125,21 @@ bool CopyGdsToGuest(u32 offset, u64 dst, u32 bytes) {
   return true;
 }
 
+// A GPU-written source goes to GDS on the GPU; copying it here would wait for
+// its writeback and everything recorded before it.
+bool CopyGuestToGds(Renderer& renderer, u64 src, u32 offset, u32 bytes) {
+  if (!renderer.available() || !bytes || offset > GdsBuffer::kBytes ||
+      bytes > GdsBuffer::kBytes - offset || !EnsureGdsBuffer() ||
+      (!CsRangeDirtyOverlapping(src, bytes) &&
+       !PendingGuestWriteBatch(src, bytes)))
+    return false;
+  CsBatchBeginImpl();
+  if (!g_cs.batch_open || g_cs.list != g_frame.list)
+    return false;
+  g_cs.list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
+  return CsSupplyBuffer(src, bytes, g_cs.gds.buf, offset);
+}
+
 bool FillGds(Renderer& renderer, u32 offset, u32 bytes, u32 value) {
   if (renderer.available() && RecordGdsWrite(offset, bytes, nullptr, value))
     return true;
