@@ -71,7 +71,7 @@ class TimestampPool : public Object {};
 
 inline u64 g_list_gpu_ns[4];
 inline u64 g_list_gpu_n[4];
-constexpr u32 kProfCats = 16;
+constexpr u32 kProfCats = 17;
 inline u64 g_prof_cat_ns[kProfCats];
 
 class CommandList : public Object {

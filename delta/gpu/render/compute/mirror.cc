@@ -97,7 +97,7 @@ bool MirrorCopy(u64 base,
   }
   if (!list)
     list = g_cs.list;
-  list->ProfileBegin(3);
+  list->ProfileBegin(to_guest ? 3 : 16);
   list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
   for (const auto& [import, span] : pieces) {
     u64 import_base = 0;
@@ -204,7 +204,11 @@ bool RecordGuestRead(rhi::CommandList* list,
 
 
 DELTA_OPTION(bool, kMirrorOwn, "DELTA_GPU_MIRROR_OWN", true);
+DELTA_OPTION(bool, kMirrorOwnSplit, "DELTA_GPU_MIRROR_OWN_SPLIT", true);
 constexpr u32 kOwnMaxFaults = 4;
+u64 g_capped_block[512];
+int g_capped_frame[512];
+base::Atomic<u32> g_capped_n{0};
 
 OwnBlock& OwnAt(u64 block) {
   if (!g_cs.own) {
@@ -214,6 +218,16 @@ OwnBlock& OwnAt(u64 block) {
     g_cs.own = static_cast<OwnBlock*>(p);
   }
   return g_cs.own[MirrorOffset(block) / kMirrorBlock];
+}
+
+void MirrorReportCapped() {
+  static u32 printed = 0;
+  const u32 n =
+      base::Min<u32>(g_capped_n.load(base::memory_order_relaxed), 512);
+  for (; printed < n; printed++)
+    BASE_LOGI("csmirror", "block {:#x} unownable after {} faults at frame {}",
+              (unsigned long)g_capped_block[printed], kOwnMaxFaults,
+              g_capped_frame[printed]);
 }
 
 bool MirrorOwned(u64 block) {
@@ -253,7 +267,14 @@ bool MirrorResolve(u64 first, u64 end) {
         o.spans = 0;
       }
       o.cpu_dirty.store(1, base::memory_order_relaxed);
-      o.faults.fetch_add(1, base::memory_order_relaxed);
+      if (o.faults.fetch_add(1, base::memory_order_relaxed) + 1 ==
+          kOwnMaxFaults) {
+        const u32 i = g_capped_n.fetch_add(1, base::memory_order_relaxed);
+        if (i < 512) {
+          g_capped_block[i] = block;
+          g_capped_frame[i] = g_frame.num;
+        }
+      }
       g_mirror_resolves.fetch_add(1, base::memory_order_relaxed);
       o.state.store(s & kOwnPending, base::memory_order_release);
       resolved = true;
@@ -321,7 +342,7 @@ void AddSpan(OwnBlock& o, u32 lo, u32 hi) {
 
 bool MirrorOwnable(u64 base, u64 bytes) {
   if (!kMirrorOwn || !gcn::g_direct_table || !Device().caps().copy_after ||
-      !g_cs.mirror->address())
+      !g_cs.mirror || !g_cs.mirror->address())
     return false;
   for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
        block += kMirrorBlock) {
@@ -367,16 +388,27 @@ void MirrorProtectSubmitted(u64 submission) {
   if (g_cs.own_unsubmitted.empty())
     return;
   DELTA_ZONE("mirror.protect");
-  for (u64 block : g_cs.own_unsubmitted) {
+  base::Vector<u64>& blocks = g_cs.own_unsubmitted;
+  base::Sort(blocks.begin(), blocks.end());
+  for (u64 block : blocks) {
     OwnBlock& o = OwnAt(block);
     u64 s = o.state.load(base::memory_order_acquire);
     while ((s & kOwnBusy) || !o.state.compare_exchange_weak(
                                  s, kOwnBusy, base::memory_order_acq_rel))
       s = o.state.load(base::memory_order_acquire);
-    ::mprotect(reinterpret_cast<void*>(block), kMirrorBlock, PROT_NONE);
-    o.state.store(submission | kOwnProtected, base::memory_order_release);
   }
-  g_cs.own_unsubmitted.clear();
+  for (size_t i = 0; i < blocks.size();) {
+    size_t j = i + 1;
+    while (j < blocks.size() && blocks[j] == blocks[j - 1] + kMirrorBlock)
+      j++;
+    ::mprotect(reinterpret_cast<void*>(blocks[i]), (j - i) * kMirrorBlock,
+               PROT_NONE);
+    i = j;
+  }
+  for (u64 block : blocks)
+    OwnAt(block).state.store(submission | kOwnProtected,
+                             base::memory_order_release);
+  blocks.clear();
 }
 
 namespace {
@@ -432,6 +464,15 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
     in_run = false;
     const u64 lo = MirrorOffset(run) & ~(page - 1);
     const u64 hi = (MirrorOffset(run_end - 1) + page) & ~(page - 1);
+    g_cs_stats.mirror_in_bytes += run_end - run;
+    g_cs_stats.mirror_in_n++;
+    {
+      u64& e = g_cs_stats.mirror_in_union[run];
+      e = base::Max(e, run_end);
+      auto& t = g_cs_stats.mirror_in_top[run];
+      t.first += run_end - run;
+      t.second++;
+    }
     return Device().CommitSparse(g_cs.mirror, lo, hi - lo) &&
            MirrorCopy(run, run_end - run, false);
   };
@@ -637,27 +678,40 @@ void RecordMirrorWrite(u64 first, u64 bytes) {
 }
 }  // namespace
 
-void MirrorWriteBack(u64 base, u64 bytes) {
-  if (MirrorOwnable(base, bytes)) {
-    RecordMirrorWrite(base, bytes);
-    MirrorOwn(base, bytes);
-    g_cs_stats.mirror_own_bytes += bytes;
-    g_cs.mirror_self.push_back({base, base + bytes});
-    NoteGuestWrite(base, bytes);
-    InvalidateTexRange(base, bytes);
-    return;
-  }
-  g_cs_stats.mirror_wb_bytes += bytes;
-  g_cs_stats.mirror_wb_n++;
-  {
-    u64& e = g_cs_stats.mirror_wb_union[base];
-    e = base::Max(e, base + bytes);
-  }
+void MirrorWriteBack(u64 base, u64 bytes, bool may_own) {
   RecordMirrorWrite(base, bytes);
-  if (!MirrorCopy(base, bytes, true))
-    return;
-  NotePendingGuestWrite(base, base + bytes);
   g_cs.mirror_self.push_back({base, base + bytes});
+  const u64 end = base + bytes;
+  may_own = may_own && (kMirrorOwnSplit || MirrorOwnable(base, bytes));
+  const auto finish = [](u64 run, u64 to, bool owned) {
+    if (owned) {
+      MirrorOwn(run, to - run);
+      g_cs_stats.mirror_own_bytes += to - run;
+      return;
+    }
+    g_cs_stats.mirror_wb_bytes += to - run;
+    g_cs_stats.mirror_wb_n++;
+    u64& e = g_cs_stats.mirror_wb_union[run];
+    e = base::Max(e, to);
+    auto& t = g_cs_stats.mirror_wb_top[run];
+    t.first += to - run;
+    t.second++;
+    if (MirrorCopy(run, to - run, true))
+      NotePendingGuestWrite(run, to);
+  };
+  u64 run = base;
+  bool run_owned = false;
+  for (u64 at = base; at < end;) {
+    const u64 to = base::Min(end, (at & ~(kMirrorBlock - 1)) + kMirrorBlock);
+    const bool owned = may_own && MirrorOwnable(at, to - at);
+    if (at != base && owned != run_owned) {
+      finish(run, at, run_owned);
+      run = at;
+    }
+    run_owned = owned;
+    at = to;
+  }
+  finish(run, end, run_owned);
   NoteGuestWrite(base, bytes);
   InvalidateTexRange(base, bytes);
 }
@@ -671,7 +725,8 @@ bool MirrorFillable(u64 base, u64 bytes) {
 bool MirrorFill(u64 base, u64 bytes, u32 value) {
   if (!MirrorFillable(base, bytes) || !OrderMirrorAfterFrameRead())
     return false;
-  if (MirrorOwnable(base, bytes)) {
+  const bool own = MirrorOwnable(base, bytes);
+  if (own) {
     if (!MirrorCopyInGuest(base, bytes))
       return false;
   } else {
@@ -687,7 +742,7 @@ bool MirrorFill(u64 base, u64 bytes, u32 value) {
   g_cs.list->Barrier(kAccessComputeRW | kAccessCopyRW, rhi::kAccessCopyWrite);
   g_cs.list->FillBuffer(g_cs.mirror, MirrorOffset(base), bytes, value);
   g_cs.list->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
-  MirrorWriteBack(base, bytes);
+  MirrorWriteBack(base, bytes, own);
   return true;
 }
 

@@ -19,6 +19,8 @@
 
 namespace gpu::render {
 
+void MirrorReportCapped();
+
 void CsSyncReport(double frames) {
   if (CsSyncReporting() && frames > 0) {
     base::Vector<base::Pair<u64, CsGpuTime>> times;
@@ -36,7 +38,7 @@ void CsSyncReport(double frames) {
   u64 total = 0;
   for (int i = 0; i < kSyncCount; i++)
     total += g_cs_stats.sync_n[i];
-  if (!CsSyncReporting() || !total) {
+  if (!CsSyncReporting()) {
     for (int i = 0; i < kSyncCount; i++)
       g_cs_stats.sync_n[i] = g_cs_stats.sync_ns[i] = 0;
     return;
@@ -83,22 +85,47 @@ void CsSyncReport(double frames) {
     BASE_LOGI("cswb", "{}", why.c_str());
   }
   if (kMirror) {
-    u64 uni = 0, lo = 0, hi = 0;
-    for (const auto& [b0, e0] : g_cs_stats.mirror_wb_union) {
-      if (b0 > hi) {
-        uni += hi - lo;
-        lo = b0;
-        hi = e0;
-      } else {
-        hi = base::Max(hi, e0);
+    const auto union_bytes = [](const base::Map<u64, u64>& m) {
+      u64 uni = 0, lo = 0, hi = 0;
+      for (const auto& [b0, e0] : m) {
+        if (b0 > hi) {
+          uni += hi - lo;
+          lo = b0;
+          hi = e0;
+        } else {
+          hi = base::Max(hi, e0);
+        }
       }
-    }
-    uni += hi - lo;
+      return uni + hi - lo;
+    };
+    const auto top = [&](const char* what, const auto& m) {
+      base::Vector<base::Pair<u64, base::Pair<u64, u64>>> v;
+      for (const auto& kv : m)
+        v.push_back({kv.first, kv.second});
+      base::Sort(v.begin(), v.end(), [](const auto& a, const auto& b) {
+        return a.second.first > b.second.first;
+      });
+      for (size_t i = 0; i < v.size() && i < 10; i++)
+        BASE_LOGI("csmirror", "{} {:#x} {:.2f}MB/f x{:.1f} ({:.0f}KB each)",
+                  what, (unsigned long)v[i].first,
+                  v[i].second.first / frames / 1e6, v[i].second.second / frames,
+                  v[i].second.first / 1e3 / v[i].second.second);
+    };
+    MirrorReportCapped();
+    BASE_LOGI("csmirror",
+              "copy-in {:.1f}MB x{:.1f} per frame, {:.1f}MB distinct per "
+              "report",
+              g_cs_stats.mirror_in_bytes / frames / 1e6,
+              g_cs_stats.mirror_in_n / frames,
+              union_bytes(g_cs_stats.mirror_in_union) / 1e6);
+    top("in", g_cs_stats.mirror_in_top);
+    top("wb", g_cs_stats.mirror_wb_top);
+    const u64 uni = union_bytes(g_cs_stats.mirror_wb_union);
     BASE_LOGI("csstage",
               "mirror write-back {:.1f}MB x{:.1f} per frame, "
-              "{:.1f}MB distinct; kept {:.1f}MB, {:.1f} faults",
+              "{:.1f}MB distinct per report; kept {:.1f}MB, {:.1f} faults",
               g_cs_stats.mirror_wb_bytes / frames / 1e6,
-              g_cs_stats.mirror_wb_n / frames, uni / frames / 1e6,
+              g_cs_stats.mirror_wb_n / frames, uni / 1e6,
               g_cs_stats.mirror_own_bytes / frames / 1e6,
               g_mirror_resolves.exchange(0) / frames);
   }

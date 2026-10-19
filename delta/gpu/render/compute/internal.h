@@ -442,8 +442,10 @@ struct CsStats {
       truth_parent_n, truth_fold_n, truth_rt_n, truth_view_hits;
   base::Map<base::String, u64> wb_why;
   u64 wb_why_bytes;
-  base::Map<u64, u64> mirror_wb_union;
+  base::Map<u64, u64> mirror_wb_union, mirror_in_union;
+  base::HashMap<u64, base::Pair<u64, u64>> mirror_wb_top, mirror_in_top;
   u64 mirror_wb_bytes, mirror_wb_n, mirror_own_bytes;
+  u64 mirror_in_bytes, mirror_in_n;
   u64 stage_ro_bytes, stage_rw_bytes, stage_img_bytes;
   u64 stage_guest_detile_bytes, stage_guest_detile_n;
   base::HashMap<u64, StageStat> stage_stats;
@@ -576,7 +578,7 @@ struct MirrorWrite {
 
 const MirrorWrite* MirrorWritten(u64 base, u64 bytes);
 
-void MirrorWriteBack(u64 base, u64 bytes);
+void MirrorWriteBack(u64 base, u64 bytes, bool may_own = true);
 
 u64 MirrorRevision(u64 base, u64 bytes);
 bool MirrorHoldsNewest(u64 base, u64 bytes);

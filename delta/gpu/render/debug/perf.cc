@@ -321,7 +321,7 @@ void ReportFps() {
           "-",          "dispatch",  "pass",      "mirror",
           "tiling",     "rt-bridge", "present",   "copy",
           "fill/clear", "barrier",   "buf->tex",  "tex->buf",
-          "tex->tex",   "blit",      "copy-host", "index"};
+          "tex->tex",   "blit",      "copy-host", "index",     "mirror-in"};
       base::String line;
       for (u32 i = 1; i < rhi::kProfCats; i++)
         if (rhi::g_prof_cat_ns[i])
