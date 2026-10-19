@@ -88,6 +88,7 @@ DELTA_OPTION(u64, kGpuPsVgprPs, "DELTA_GPU_PSVGPR_PS", 0);
 DELTA_OPTION(u32, kNggWaveInfo, "DELTA_PS5_WAVEINFO", 0x0101);
 DELTA_OPTION(bool, kGpuForcequad, "DELTA_GPU_FORCEQUAD", false);
 DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
+DELTA_OPTION(bool, kDirectGraphics, "DELTA_GPU_DIRECT_GRAPHICS", true);
 DELTA_OPTION(bool, kGpuPosprobe, "DELTA_GPU_POSPROBE", false);
 DELTA_OPTION(bool, kGpuPosunset, "DELTA_GPU_POSUNSET", false);
 DELTA_OPTION(bool, kLdsMark, "DELTA_GPU_LDSMARK", false);
@@ -762,7 +763,7 @@ bool RdnaPlanCbufs(const Program& program,
 }
 
 bool DirectGraphics() {
-  return gpu::gcn::g_direct_table != 0;
+  return kDirectGraphics && gpu::gcn::g_direct_table != 0;
 }
 
 void PlanDirect(const Program& program, StageContext& sc) {
