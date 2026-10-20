@@ -89,7 +89,8 @@ int main(int argc, char** argv) {
   }
   std::printf("%zu modules x%d: finalize %.3f s, %zu -> %zu "
               "words, output %016llx\n",
-              modules.size(), rounds, finalize, in_words, out_words,
+              static_cast<size_t>(modules.size()), rounds, finalize,
+              static_cast<size_t>(in_words), static_cast<size_t>(out_words),
               static_cast<unsigned long long>(hash));
   return 0;
 }

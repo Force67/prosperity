@@ -238,27 +238,34 @@ const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
 void PrefetchComputeShader(
     const ComputeShaderState& state,
     base::Function<ComputeShaderState(const gcn::RecompiledCs&)> variant) {
+  // Each dispatch picks its own variant from the shader's plan; only the
+  // variant is deduplicated, so a later dispatch needing another one still
+  // gets it built ahead.
   static base::HashSet<ComputeKey, ComputeKeyHash> started;
-  static const guest::SessionReset reset_started(
-      [] { guest::ResetResource(started); });
+  static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash> plans;
+  static const guest::SessionReset reset_started([] {
+    guest::ResetResource(started);
+    guest::ResetResource(plans);
+  });
   const ComputeKey key = ComputeKeyOf(state);
-  if (ComputeCache().count(key) || !started.insert(key).second)
-    return;
 #ifdef DELTA_HAVE_SPIRV_BACKEND
-  gcn::RecompiledCs rc;
-  {
+  auto it = plans.find(key);
+  if (it == plans.end()) {
     gcn::spirv::PrefetchScope prefetch;
-    rc = RecompileCompute(state);
-    if (!rc.ok)
-      return;
-    const ComputeShaderState chosen = variant(rc);
-    const ComputeKey chosen_key = ComputeKeyOf(chosen);
-    if (!(chosen_key == key)) {
-      if (ComputeCache().count(chosen_key) ||
-          !started.insert(chosen_key).second)
-        return;
-      rc = RecompileCompute(chosen);
-    }
+    it = plans.emplace(key, RecompileCompute(state)).first;
+  }
+  if (!it->second.ok)
+    return;
+  const ComputeShaderState chosen = variant(it->second);
+  const ComputeKey chosen_key = ComputeKeyOf(chosen);
+  if (ComputeCache().count(chosen_key) || !started.insert(chosen_key).second)
+    return;
+  gcn::RecompiledCs rc;
+  if (chosen_key == key) {
+    rc = it->second;
+  } else {
+    gcn::spirv::PrefetchScope prefetch;
+    rc = RecompileCompute(chosen);
   }
   if (rc.ok)
     gcn::spirv::PrefetchThen(

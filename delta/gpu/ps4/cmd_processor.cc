@@ -1083,18 +1083,6 @@ void PrefetchWalk(Regs& regs, const u32* p, u32 words, u32 depth) {
       case IT_DISPATCH_INDIRECT:
         PrefetchComputeDispatch(regs);
         break;
-      case IT_WAIT_REG_MEM:
-        if (count >= 5 && ((body[0] >> 4) & 1)) {
-          const u64 address =
-              ((static_cast<u64>(body[2] & 0xFFFF) << 32) | body[1]) & ~3ull;
-          if (!IsGuestAddress(address) ||
-              !host_memory::IsMemoryRangeMapped(
-                  reinterpret_cast<const void*>(address), 4) ||
-              !WaitRegMemPasses(
-                  body, *reinterpret_cast<const volatile u32*>(address)))
-            return;
-        }
-        break;
       default:
         if (IsDraw(op))
           PrefetchDrawShaders(regs);

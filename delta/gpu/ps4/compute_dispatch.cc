@@ -392,6 +392,42 @@ ComputeShaderState NativeVariant(const ComputeShaderState& shader,
   return native_shader;
 }
 
+// The shared-memory mask the dispatch will compute for these descriptors.
+u64 PredictSharedMask(u64 cs_addr,
+                      const gcn::RecompiledCs& rc,
+                      u64 native,
+                      const base::Vector<gcn::ResolvedCsResource>& resolved) {
+  static constexpr u32 kNullDescriptor[8] = {};
+  render::ComputeInfo ci;
+  for (const gcn::CsResource& r : rc.resources) {
+    if (ci.num_res >= gcn::kMaxCsResources)
+      return 0;
+    const bool valid = r.binding < resolved.size() && resolved[r.binding].valid;
+    const u32* descriptor =
+        valid ? resolved[r.binding].descriptor : kNullDescriptor;
+    ResourceRange range;
+    if (r.binding < 64 && ((native >> r.binding) & 1)) {
+      range.zero_fill = true;
+      range.size = 16;
+    } else {
+      range = r.kind == 1
+                  ? ResolveImageResource(cs_addr, r, descriptor, false)
+                  : ResolveBufferResource(cs_addr, r, descriptor, false);
+    }
+    if (!range.ok)
+      return 0;
+    render::ComputeInfo::Res& out = ci.res[ci.num_res++];
+    out.base = range.base;
+    out.guest_size = range.guest_size || range.zero_fill ? range.guest_size
+                                                         : range.size;
+    out.binding = r.binding;
+    out.read = r.read;
+    out.written = r.written && !range.zero_fill;
+    out.zero_fill = range.zero_fill;
+  }
+  return SharedBindings(ci);
+}
+
 // `binding << 16 | T# dword1 bits 20..29` for each image `rc` stages.
 base::Vector<u32> StagedFormats(
     const gcn::RecompiledCs& rc,
@@ -406,12 +442,27 @@ base::Vector<u32> StagedFormats(
   return formats;
 }
 
+base::HashMap<u64, u32>& DispatchCounts() {
+  static base::HashMap<u64, u32> counts;
+  static const guest::SessionReset reset(
+      [] { guest::ResetResource(counts); });
+  return counts;
+}
+
+u32 DispatchCount(u64 cs_addr) {
+  const auto it = DispatchCounts().find(cs_addr);
+  return it == DispatchCounts().end() ? 0 : it->second;
+}
+
 }  // namespace
 
 void PrefetchComputeDispatch(const Regs& regs) {
   const ComputeShaderState state = ComputeStateOf(regs);
   if (kNoCs || !IsGuestAddress(state.cs_addr) || !state.thread_x ||
       !state.thread_y)
+    return;
+  // Shaders dispatched often already have the variants they use.
+  if (DispatchCount(state.cs_addr) >= 16)
     return;
   const u32* user_data = regs.At(mmCOMPUTE_USER_DATA_0);
   PrefetchComputeShader(state, [&](const gcn::RecompiledCs& module) {
@@ -421,6 +472,9 @@ void PrefetchComputeDispatch(const Regs& regs) {
     gcn::ResolveCsResources(resolved, *gcn::CachedProgram(state.cs_addr, 4096),
                             module, user_data, state.cs_addr);
     chosen.formats = StagedFormats(module, chosen.native_mask, resolved);
+    if (module.orders_shared_memory)
+      chosen.shared_mask =
+          PredictSharedMask(state.cs_addr, module, chosen.native_mask, resolved);
     return chosen;
   });
 }
@@ -534,6 +588,7 @@ void DispatchCompute(render::Renderer& renderer,
       }
     }
   }
+  DispatchCounts()[cs_addr]++;
   const gcn::RecompiledCs& rc = *module;
   if (!rc.ok) {
     static base::HashSet<u64> reported;
