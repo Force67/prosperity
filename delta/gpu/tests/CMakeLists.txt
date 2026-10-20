@@ -74,6 +74,10 @@ add_delta_test(agc_label_publish_test
 add_delta_test(gcn_spirv_test
   SOURCES gcn_spirv_test.cc
   DEPS delta_gpu)
+add_delta_test(spv_opt_test
+  SOURCES spv_opt_test.cc
+  DEPS delta_gpu)
+target_link_libraries(spv_opt_test PRIVATE spirv_headers_iface)
 add_delta_test(rdna_compute_image_test
   SOURCES rdna_compute_image_test.cc
   DEPS delta_gpu)
@@ -86,7 +90,7 @@ add_delta_test(rdna_bvh_test
 add_delta_test(render_draw_test
   SOURCES render_draw_test.cc
   DEPS delta_gpu)
-target_link_libraries(render_draw_test PRIVATE spirv_tools_iface)
+target_link_libraries(render_draw_test PRIVATE spirv_headers_iface)
 # This suite checks staged bindings; direct reads have separate native fixtures.
 set_tests_properties(render_draw_test PROPERTIES
   ENVIRONMENT "SDL_VIDEODRIVER=offscreen;DELTA_GPU_NOPRESENT=1;DELTA_GPU_SNAPEVERY=1000000;DELTA_GPU_SNAPEVERY_MAX=0;DELTA_GPU_ASYNC_PIPELINES=0;DELTA_GPU_DIRECT=0")
@@ -94,7 +98,7 @@ set_tests_properties(render_draw_test PROPERTIES
 add_delta_test(render_mirror_binding_test
   SOURCES render_mirror_binding_test.cc
   DEPS delta_gpu)
-target_link_libraries(render_mirror_binding_test PRIVATE spirv_tools_iface)
+target_link_libraries(render_mirror_binding_test PRIVATE spirv_headers_iface)
 set_tests_properties(render_mirror_binding_test PROPERTIES
   ENVIRONMENT "SDL_VIDEODRIVER=offscreen;DELTA_GPU_NOPRESENT=1;DELTA_GPU_SNAPEVERY=1000000;DELTA_GPU_SNAPEVERY_MAX=0;DELTA_GPU_ASYNC_PIPELINES=0;DELTA_GPU_DIRECT_GCN=1")
 
@@ -133,7 +137,7 @@ add_delta_test(render_index_upload_test
 add_delta_test(rhi_conformance_test
   SOURCES rhi_conformance_test.cc
   DEPS delta_gpu)
-target_link_libraries(rhi_conformance_test PRIVATE spirv_tools_iface)
+target_link_libraries(rhi_conformance_test PRIVATE spirv_headers_iface)
 
 # Developer benchmark: GPU index conversion for sparse and dense draws.
 add_executable(index_convert_bench index_convert_bench.cc)

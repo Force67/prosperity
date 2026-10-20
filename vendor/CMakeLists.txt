@@ -246,21 +246,10 @@ if(NOT ANDROID)
 endif()
 
 # --------------------------------------------------------------------------
-# SPIRV-Tools + SPIRV-Headers (vulkan-sdk-1.4.341.0): the recompiler's
-# optimizer and validator. SPIRV-Tools is our fork (Force67/SPIRV-Tools,
-# branch `prosperity`): upstream's tag plus optimizer speedups as commits.
-# Code generation needs Python 3 at build time.
+# SPIRV-Headers (vulkan-sdk-1.4.341.0): header-only, for the recompiler's
+# SPIR-V emitter and optimizer.
 # --------------------------------------------------------------------------
-set(SPIRV-Headers_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SPIRV-Headers)
-set(SPIRV_SKIP_EXECUTABLES ON CACHE BOOL "" FORCE)
-set(SPIRV_SKIP_TESTS ON CACHE BOOL "" FORCE)
-set(SPIRV_WERROR OFF CACHE BOOL "" FORCE)
-set(SKIP_SPIRV_TOOLS_INSTALL ON CACHE BOOL "" FORCE)
-set(SPIRV_TOOLS_BUILD_STATIC ON CACHE BOOL "" FORCE)
-add_subdirectory(SPIRV-Tools EXCLUDE_FROM_ALL)
-add_library(spirv_tools_iface INTERFACE)
-target_include_directories(spirv_tools_iface SYSTEM INTERFACE
-  ${CMAKE_CURRENT_SOURCE_DIR}/SPIRV-Tools/include
+add_library(spirv_headers_iface INTERFACE)
+target_include_directories(spirv_headers_iface SYSTEM INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/SPIRV-Headers/include
 )
-target_link_libraries(spirv_tools_iface INTERFACE SPIRV-Tools-opt SPIRV-Tools-static)

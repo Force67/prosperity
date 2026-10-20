@@ -1,18 +1,17 @@
 // Standalone validation harness for the SPIR-V builder (spv_emit). Builds a
-// passthrough VS and FS and validates the emitted binary with SPIRV-Tools.
+// passthrough VS and FS and checks the emitted binary (spirv::Validate).
 // Not part of the emulator build; from the repo root, against a build tree B:
 //
 //   nix develop --command bash -c 'c++ -std=c++20 -Idelta -Ishared \
-//     -Ivendor/equilibrium $(pkg-config --cflags SPIRV-Headers SPIRV-Tools) \
+//     -Ivendor/equilibrium -Ivendor/SPIRV-Headers/include \
 //     tools/spv_selftest.cc $B/delta/gpu/libdelta_gpu.a \
 //     $B/shared/libshared.a $B/vendor/libeq_base.a -lpthread \
-//     $(pkg-config --libs SPIRV-Tools) -o /tmp/t && /tmp/t'
+//     -o /tmp/t && /tmp/t'
 
 #include "base/arch.h"
 #include "gpu/gcn/spirv/spv_emit.h"
 #include "gpu/gcn/spirv/spv_post.h"
 
-#include <spirv-tools/libspirv.h>
 #include <spirv/unified1/GLSL.std.450.h>
 #include <cstdio>
 #include "base/containers/vector.h"
@@ -20,17 +19,12 @@
 using namespace gpu::gcn::spirv;
 
 static bool validate(const base::Vector<u32>& spv, const char* tag) {
-  spv_context ctx = spvContextCreate(SPV_ENV_VULKAN_1_1);
-  spv_diagnostic diag = nullptr;
-  spv_const_binary_t bin{spv.data(), spv.size()};
-  spv_result_t r = spvValidate(ctx, &bin, &diag);
-  bool ok = r == SPV_SUCCESS;
+  base::String err;
+  const bool ok = Validate(spv, &err);
   std::printf("[%s] %u words -> %s\n", tag, (unsigned)spv.size(),
               ok ? "VALID" : "INVALID");
-  if (!ok && diag)
-    std::printf("    %s\n", diag->error);
-  spvDiagnosticDestroy(diag);
-  spvContextDestroy(ctx);
+  if (!ok)
+    std::printf("    %s\n", err.c_str());
   return ok;
 }
 

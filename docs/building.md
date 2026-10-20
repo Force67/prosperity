@@ -26,8 +26,8 @@ Keep the Nix shell open when running the binary.
 CI builds natively on Ubuntu 24.04 with GCC 14 and Ubuntu's development packages.
 GCC 13 miscompiles the packed buffer format conversion at release optimization.
 SDL3 3.4.2 is built from a pinned commit and linked statically. Vulkan and OpenGL
-are enabled; D3D12 is disabled. The shader recompiler and FFmpeg video decoder
-use Ubuntu's SPIRV-Tools and FFmpeg packages.
+are enabled; D3D12 is disabled. The FFmpeg video decoder uses Ubuntu's FFmpeg
+packages.
 
 Every successful build produces a `prosperity-ubuntu-24.04-amd64` artifact with a
 `.deb` package. CI installs it in a clean Ubuntu 24.04 container and checks the
@@ -39,7 +39,7 @@ Nix remains available for local development.
 ## Linux without Nix
 
 Install a C++20 compiler, CMake 3.20+, Ninja, pkg-config, and development
-packages for Vulkan, SDL3, shaderc, SPIRV-Tools, SPIRV-Headers, and FFmpeg.
+packages for Vulkan, SDL3, shaderc, and FFmpeg.
 OpenGL/EGL + libepoxy and vkd3d + DXC enable optional graphics backends.
 
 Use the same CMake commands above. If a dependency is hard to obtain on your

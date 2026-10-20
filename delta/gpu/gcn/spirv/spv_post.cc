@@ -5,6 +5,7 @@
 #ifdef DELTA_HAVE_SPIRV_BACKEND
 
 #include "gpu/gcn/spirv/spv_post.h"
+#include "gpu/gcn/spirv/spv_opt.h"
 #include "base/arch.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/gpu_perf.h"
@@ -13,21 +14,9 @@
 
 #include "base/logging.h"
 
-#include <algorithm>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
-#include <functional>
-#include <future>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <unordered_map>
-
-#include <spirv-tools/libspirv.h>
-#include <spirv-tools/optimizer.hpp>
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -57,58 +46,33 @@ DELTA_OPTION(u32, kOptLevel, "DELTA_GPU_SPIRV_OPT", 2);
 DELTA_OPTION(u32, kCompilerThreads, "DELTA_GPU_COMPILER_THREADS", 0);
 }  // namespace
 
-static spv_target_env TargetEnv(const base::Vector<u32>& spv) {
-  const u32 version = spv.size() > 1 ? spv[1] : 0;
-  return version >= 0x00010600u   ? SPV_ENV_VULKAN_1_3
-         : version >= 0x00010400u ? SPV_ENV_VULKAN_1_2
-                                  : SPV_ENV_VULKAN_1_1;
-}
-
 base::Vector<u32> Optimize(const base::Vector<u32>& spv) {
-  if (kOptLevel == 0)
+  base::Vector<u32> out;
+  if (kOptLevel == 0 || !OptimizeModule(spv, &out, kOptLevel))
     return spv;
-  const auto env = TargetEnv(spv);
-  spvtools::Optimizer opt(env);
-  opt.SetMessageConsumer([](spv_message_level_t lvl, const char*,
-                            const spv_position_t&, const char* msg) {
-    if (lvl <= SPV_MSG_WARNING)
-      BASE_LOGI("spv-opt", "{}", msg);
-  });
-  opt.RegisterPass(spvtools::CreatePrivateToLocalPass());
-  opt.RegisterPass(spvtools::CreateScalarReplacementPass(0));
-  opt.RegisterPass(spvtools::CreateLocalSingleBlockLoadStoreElimPass());
-  opt.RegisterPass(spvtools::CreateLocalSingleStoreElimPass());
-  opt.RegisterPass(spvtools::CreateSSARewritePass());
-  opt.RegisterPass(spvtools::CreateAggressiveDCEPass());
-  if (kOptLevel >= 2) {
-    opt.RegisterPass(spvtools::CreateSimplificationPass());
-    opt.RegisterPass(spvtools::CreateRedundancyEliminationPass());
-    opt.RegisterPass(spvtools::CreateAggressiveDCEPass());
-  }
-  std::vector<u32> out;
-  spvtools::OptimizerOptions options;
-  options.set_run_validator(false);
-  if (!opt.Run(spv.data(), spv.size(), &out, options) || out.empty())
-    return spv;
-  return base::Vector<u32>(out.data(), out.data() + out.size());
+  return out;
 }
 
 bool Validate(const base::Vector<u32>& spv, base::String* err) {
-  const auto env = TargetEnv(spv);
-  spv_context ctx = spvContextCreate(env);
-  spv_diagnostic diag = nullptr;
-  spv_const_binary_t bin{spv.data(), spv.size()};
-  spv_validator_options options = spvValidatorOptionsCreate();
-  spvValidatorOptionsSetFriendlyNames(options, false);
-  spv_result_t r = spvValidateWithOptions(ctx, options, &bin, &diag);
-  spvValidatorOptionsDestroy(options);
-  bool ok = r == SPV_SUCCESS;
-  if (!ok && err && diag)
-    *err = diag->error;
-  spvDiagnosticDestroy(diag);
-  spvContextDestroy(ctx);
-  return ok;
+  return CheckModule(spv, err);
 }
+
+namespace {
+// Validate + Optimize over one parse.
+bool CheckAndOptimize(const base::Vector<u32>& spv,
+                      base::Vector<u32>* out,
+                      base::String* err) {
+  if (kOptLevel != 0) {
+    base::String why;
+    const bool ok = OptimizeModule(spv, out, kOptLevel, &why);
+    if (!ok && err)
+      *err = why;
+    return ok;
+  }
+  *out = spv;
+  return Validate(spv, err);
+}
+}  // namespace
 
 namespace {
 DELTA_OPTION(bool, kShaderCache, "DELTA_GPU_SHADER_CACHE", true);
@@ -118,7 +82,7 @@ DELTA_OPTION(const char*,
              nullptr);
 DELTA_OPTION(const char*, kRawDump, "DELTA_GPU_SPV_RAW_DUMP", nullptr);
 
-constexpr u32 kCacheGeneration = 3;
+constexpr u32 kCacheGeneration = 5;
 
 u64 HashWords(const base::Vector<u32>& w) {
   u64 h = 1469598103934665603ull;
@@ -212,13 +176,36 @@ struct Finalized {
 Finalized RunFinalize(const base::Vector<u32>& spv, u64 key) {
   const ui::ShaderCompilation compilation;
   Finalized f;
-  f.valid = Validate(spv, &f.err);
-  if (f.valid) {
-    f.spv = Optimize(spv);
+  f.valid = CheckAndOptimize(spv, &f.spv, &f.err);
+  if (f.valid)
     WriteEntry(key, f.spv);
-  }
   return f;
 }
+
+// A Finalize result several threads may wait on.
+class Job {
+ public:
+  void Set(Finalized f) {
+    {
+      base::LockGuard<base::Mutex> lock(mutex_);
+      result_ = base::move(f);
+      done_ = true;
+    }
+    finished_.NotifyAll();
+  }
+  const Finalized& Get() {
+    base::UniqueLock<base::Mutex> lock(mutex_);
+    finished_.Wait(lock, [this] { return done_; });
+    return result_;
+  }
+
+ private:
+  base::Mutex mutex_;
+  base::ConditionVariable finished_;
+  bool done_ = false;
+  Finalized result_;
+};
+using JobRef = base::SharedPointer<Job>;
 
 class FinalizePool {
  public:
@@ -231,11 +218,10 @@ class FinalizePool {
     base::LockGuard<base::Mutex> lock(mutex_);
     if (pending_.count(key))
       return;
-    auto task = base::MakeShared<std::packaged_task<Finalized()>>(
-        [spv, key] { return RunFinalize(spv, key); });
-    pending_.emplace(key, task->get_future().share());
-    queue_.push_back([this, task, key] {
-      (*task)();
+    JobRef job = base::MakeShared<Job>();
+    pending_.emplace(key, job);
+    queue_.push_back([this, job, spv, key] {
+      job->Set(RunFinalize(spv, key));
       if (!CacheDir().empty()) {
         base::LockGuard<base::Mutex> lock(mutex_);
         pending_.erase(key);
@@ -249,13 +235,14 @@ class FinalizePool {
             base::Function<void(const base::Vector<u32>&)> then) {
     base::LockGuard<base::Mutex> lock(mutex_);
     const auto it = pending_.find(key);
-    std::shared_future<Finalized> job;
+    JobRef job;
     if (it != pending_.end())
       job = it->second;
     queue_.push_back([spv, key, job, then = base::move(then)] {
-      if (job.valid()) {
-        if (job.get().valid)
-          then(job.get().spv);
+      if (job) {
+        const Finalized& f = job->Get();
+        if (f.valid)
+          then(f.spv);
         return;
       }
       base::Vector<u32> out;
@@ -276,7 +263,7 @@ class FinalizePool {
     ready_.NotifyOne();
   }
 
-  bool Take(u64 key, std::shared_future<Finalized>* out) {
+  bool Take(u64 key, JobRef* out) {
     base::LockGuard<base::Mutex> lock(mutex_);
     const auto it = pending_.find(key);
     if (it == pending_.end())
@@ -320,14 +307,14 @@ class FinalizePool {
   base::ConditionVariable idle_;
   size_t active_ = 0;
   base::SimpleDeque<base::Function<void()>> queue_;
-  base::HashMap<u64, std::shared_future<Finalized>> pending_;
+  base::HashMap<u64, JobRef> pending_;
 };
 
 FinalizePool* g_pool = nullptr;
 FinalizePool& Pool() {
   static FinalizePool* pool = [] {
     auto* pool = new FinalizePool(
-        base::Max(2u, std::thread::hardware_concurrency() / 2), "spv_post");
+        base::Max(2u, base::GetProcessorCount() / 2), "spv_post");
     g_pool = pool;
     return pool;
   }();
@@ -339,7 +326,7 @@ FinalizePool& PipelinePool() {
   static FinalizePool* pool = [] {
     const u32 n = kCompilerThreads
                       ? kCompilerThreads.get()
-                      : base::Max(2u, std::thread::hardware_concurrency() / 4);
+                      : base::Max(2u, base::GetProcessorCount() / 4);
     auto* pool = new FinalizePool(n, "pipe_build");
     g_pipeline_pool = pool;
     return pool;
@@ -396,11 +383,11 @@ bool Finalize(const base::Vector<u32>& spv,
       std::fclose(f);
     }
   }
-  std::shared_future<Finalized> job;
+  JobRef job;
   if (Pool().Take(key, &job)) {
     g_stats.spv_miss_n++;
     const u64 t0 = NowNs();
-    const Finalized& f = job.get();
+    const Finalized& f = job->Get();
     g_stats.ns_spv_opt += NowNs() - t0;
     if (!f.valid && err)
       *err = f.err;
@@ -412,17 +399,13 @@ bool Finalize(const base::Vector<u32>& spv,
     return true;
   }
   g_stats.spv_miss_n++;
-  u64 t0 = NowNs();
-  const bool valid = Validate(spv, err);
-  g_stats.ns_spv_val += NowNs() - t0;
-  if (!valid)
-    return false;
-  t0 = NowNs();
+  const u64 t0 = NowNs();
   const ui::ShaderCompilation compilation;
-  *out = Optimize(spv);
+  const bool valid = CheckAndOptimize(spv, out, err);
   g_stats.ns_spv_opt += NowNs() - t0;
-  WriteEntry(key, *out);
-  return true;
+  if (valid)
+    WriteEntry(key, *out);
+  return valid;
 }
 
 }  // namespace gpu::gcn::spirv

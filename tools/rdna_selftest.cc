@@ -2,7 +2,7 @@
  * Standalone validation harness for the PS5 RDNA2 (gfx10.3) shader recompiler.
  * Hand-assembles minimal RDNA2 VS/PS programs, decodes them (rdna_decode),
  * recompiles them to SPIR-V (rdna_translate, reusing the shared gpu::gcn
- * backend), and validates the emitted binaries with SPIRV-Tools. Not part of
+ * backend), and checks the emitted binaries (spirv::Validate). Not part of
  * the emulator build; compiled directly (from the repo root), e.g.:
  *
  *   nix develop -c bash tools/build_rdna_selftest.sh

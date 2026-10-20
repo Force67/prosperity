@@ -37,7 +37,7 @@ struct GpuStats {
   u64 cs_stage_bytes;
   u64 ns_recomp;
   u32 recomp_n;
-  u64 ns_spv_val, ns_spv_opt;
+  u64 ns_spv_opt;
   u32 spv_hit_n, spv_miss_n;
   u64 ns_dcb, ns_dcb_lock;
 };

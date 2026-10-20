@@ -5,7 +5,7 @@ licenses and copyright notices, reproduced below. Inclusion depends on
 the platform and build options; test dependencies are also listed.
 
 Libraries supplied separately by the operating system or package manager
-(including SDL, Vulkan, OpenGL/EGL, FFmpeg, SPIRV-Tools, shaderc, vkd3d,
+(including SDL, Vulkan, OpenGL/EGL, FFmpeg, shaderc, vkd3d,
 and DXC) retain the notices supplied with their packages. If distributing
 those libraries with Prosperity, include their version-specific notices
 and any required source alongside this file.

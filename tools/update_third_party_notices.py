@@ -52,7 +52,7 @@ def main():
         'licenses and copyright notices, reproduced below. Inclusion depends on\n'
         'the platform and build options; test dependencies are also listed.\n\n'
         'Libraries supplied separately by the operating system or package manager\n'
-        '(including SDL, Vulkan, OpenGL/EGL, FFmpeg, SPIRV-Tools, shaderc, vkd3d,\n'
+        '(including SDL, Vulkan, OpenGL/EGL, FFmpeg, shaderc, vkd3d,\n'
         'and DXC) retain the notices supplied with their packages. If distributing\n'
         'those libraries with Prosperity, include their version-specific notices\n'
         'and any required source alongside this file.\n\n'

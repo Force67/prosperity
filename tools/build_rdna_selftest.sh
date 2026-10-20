@@ -9,12 +9,11 @@ cd "$(dirname "$0")/.."
 B=${BUILD:-build}
 OUT=/tmp/rdna_selftest
 c++ -std=c++20 -DDELTA_HAVE_SPIRV_BACKEND=1 \
-  $(pkg-config --cflags SPIRV-Headers SPIRV-Tools) \
+  -Ivendor/SPIRV-Headers/include \
   -Idelta -Ishared -Ivendor/equilibrium \
   tools/rdna_selftest.cc \
   "$B/delta/gpu/libdelta_gpu.a" "$B/shared/libshared.a" \
   "$B/vendor/libeq_base.a" -lpthread \
-  $(pkg-config --libs SPIRV-Tools) \
   -o "$OUT"
 echo "built $OUT"
 exec "$OUT"

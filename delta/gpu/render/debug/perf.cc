@@ -359,11 +359,11 @@ void ReportFps() {
       BASE_LOGI(
           "hitch",
           "worst={:.0f}ms over{}ms={} | pipe={:.0f}ms x{} skipped={} "
-          "recomp={:.0f}ms x{} (val={:.0f}ms opt={:.0f}ms spv {}hit/{}miss)",
+          "recomp={:.0f}ms x{} (opt={:.0f}ms spv {}hit/{}miss)",
           g_frame_worst_ms, (u32)kHitchMs, g_frame_hitch_n,
           g_stats.ns_pipe_build / 1e6, g_stats.pipe_build_n,
           g_stats.pipe_pending_draws, g_stats.ns_recomp / 1e6, g_stats.recomp_n,
-          g_stats.ns_spv_val / 1e6, g_stats.ns_spv_opt / 1e6, g_stats.spv_hit_n,
+          g_stats.ns_spv_opt / 1e6, g_stats.spv_hit_n,
           g_stats.spv_miss_n);
     if (kDrawProf)
       BASE_LOGI("drawprof",

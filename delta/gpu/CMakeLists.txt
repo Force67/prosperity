@@ -1,7 +1,7 @@
 # GPU module: PM4/AGC command processing -> the guest renderer -> an rhi
 # backend (Vulkan, OpenGL or D3D12). Driven by the Gnm/AGC HLE (delta_runtime).
 # The GCN shader recompiler emits SPIR-V directly from the GCN bytecode
-# (gcn/spirv) and runs a SPIRV-Tools optimize pass; there is no GLSL/shaderc step.
+# (gcn/spirv) and runs its own SPIR-V optimizer; there is no GLSL/shaderc step.
 #
 # On Android the NDK sysroot provides <vulkan/vulkan.h> and libvulkan.so on the
 # default include/link paths (CMake's FindVulkan doesn't locate them), so link
@@ -64,9 +64,8 @@ target_include_directories(delta_gpu PRIVATE ${CMAKE_SOURCE_DIR}/vendor/bcdec)
 # the shared DELTA_ROOT include dir already resolves -- no extra include roots.
 
 # Direct GCN->SPIR-V backend (gcn/spirv): emits SPIR-V from the GCN bytecode then
-# runs a SPIRV-Tools optimize/validate pass, built from vendor/SPIRV-Tools.
-# PRIVATE: SPIRV-Tools is an implementation detail of the recompiler.
-target_link_libraries(delta_gpu PRIVATE spirv_tools_iface)
+# optimizes and checks it (gcn/spirv/spv_opt).
+target_link_libraries(delta_gpu PRIVATE spirv_headers_iface)
 target_compile_definitions(delta_gpu PRIVATE DELTA_HAVE_SPIRV_BACKEND=1)
 
 file(GLOB _delta_gl_srcs ${CMAKE_CURRENT_SOURCE_DIR}/opengl/*.cc)

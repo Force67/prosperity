@@ -4189,12 +4189,14 @@ Recompiled Recompile(const u32* vs_code,
   const base::Vector<u32> gs =
       gpu::gcn::EmitRectListGeometry(r.num_params, flat_attrs);
   base::String err;
-  if (!gpu::gcn::spirv::Validate(vs, &err)) {
+  base::Vector<u32> vs_spirv, fs_spirv;
+  gpu::gcn::spirv::Prefetch(ps);
+  if (!gpu::gcn::spirv::Finalize(vs, &vs_spirv, &err)) {
     if (gpu::gcn::TraceEnabled() || kDrawCensus)
       BASE_LOGI("rdna", "VS invalid: {}", err.c_str());
     return r;
   }
-  if (!gpu::gcn::spirv::Validate(ps, &err)) {
+  if (!gpu::gcn::spirv::Finalize(ps, &fs_spirv, &err)) {
     if (gpu::gcn::TraceEnabled() || kDrawCensus)
       BASE_LOGI("rdna", "PS invalid: {}", err.c_str());
     return r;
@@ -4215,10 +4217,10 @@ Recompiled Recompile(const u32* vs_code,
     }
   }
   if (ngg)
-    r.mesh_spirv = vs;
+    r.mesh_spirv = base::move(vs_spirv);
   else
-    r.vs_spirv = vs;
-  r.fs_spirv = ps;
+    r.vs_spirv = base::move(vs_spirv);
+  r.fs_spirv = base::move(fs_spirv);
   base::String gs_err;
   if (!gs.empty() && gpu::gcn::spirv::Validate(gs, &gs_err))
     r.gs_spirv = gs;
