@@ -75,6 +75,7 @@ struct ComputeKey {
   bool wave32 = false;
   u64 native_mask = 0, uint_mask = 0;
   bool plan_only = false;
+  base::Vector<u32> formats;
 
   bool operator==(const ComputeKey& other) const = default;
 };
@@ -93,6 +94,8 @@ struct ComputeKeyHash {
     MixHash(h, key.native_mask);
     MixHash(h, key.uint_mask);
     MixHash(h, key.plan_only);
+    for (u32 f : key.formats)
+      MixHash(h, f);
     return static_cast<size_t>(h);
   }
 };
@@ -187,7 +190,8 @@ const gcn::Recompiled& GetGraphicsShader(const GraphicsShaderState& state) {
 const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state,
                                           u64 native_mask,
                                           u64 uint_mask,
-                                          bool plan_only) {
+                                          bool plan_only,
+                                          const base::Vector<u32>& formats) {
   static base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash> cache;
   static const guest::SessionReset reset_cache(
       [] { guest::ResetResource(cache); });
@@ -204,7 +208,8 @@ const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state,
       state.wave32,
       native_mask,
       uint_mask,
-      plan_only};
+      plan_only,
+      formats};
   auto it = cache.find(key);
   if (it != cache.end())
     return it->second;
@@ -215,7 +220,7 @@ const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state,
                    reinterpret_cast<const u32*>(state.cs_addr), state.thread_x,
                    state.thread_y, state.thread_z, state.user_sgpr,
                    state.tgid_enable, state.lds_dwords, state.trap_present,
-                   state.wave32, native_mask, uint_mask, plan_only))
+                   state.wave32, native_mask, uint_mask, plan_only, formats))
       .first->second;
 }
 

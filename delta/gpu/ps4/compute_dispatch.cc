@@ -392,6 +392,20 @@ ComputeShaderState NativeVariant(const ComputeShaderState& shader,
   return native_shader;
 }
 
+// `binding << 16 | T# dword1 bits 20..29` for each image `rc` stages.
+base::Vector<u32> StagedFormats(
+    const gcn::RecompiledCs& rc,
+    u64 native,
+    const base::Vector<gcn::ResolvedCsResource>& resolved) {
+  base::Vector<u32> formats;
+  for (const gcn::CsResource& r : rc.resources)
+    if (r.kind == 1 && !(r.binding < 64 && ((native >> r.binding) & 1)) &&
+        r.binding < resolved.size() && resolved[r.binding].valid)
+      formats.push_back(r.binding << 16 |
+                        ((resolved[r.binding].descriptor[1] >> 20) & 0x3FF));
+  return formats;
+}
+
 }  // namespace
 
 void PrefetchComputeDispatch(const Regs& regs) {
@@ -402,7 +416,12 @@ void PrefetchComputeDispatch(const Regs& regs) {
   const u32* user_data = regs.At(mmCOMPUTE_USER_DATA_0);
   PrefetchComputeShader(state, [&](const gcn::RecompiledCs& module) {
     base::Vector<gcn::TImage> images;
-    return NativeVariant(state, module, user_data, images);
+    ComputeShaderState chosen = NativeVariant(state, module, user_data, images);
+    thread_local base::Vector<gcn::ResolvedCsResource> resolved;
+    gcn::ResolveCsResources(resolved, *gcn::CachedProgram(state.cs_addr, 4096),
+                            module, user_data, state.cs_addr);
+    chosen.formats = StagedFormats(module, chosen.native_mask, resolved);
+    return chosen;
   });
 }
 
@@ -475,6 +494,46 @@ void DispatchCompute(render::Renderer& renderer,
     }
   }
   const u64 native = chosen.native_mask;
+  thread_local base::Vector<gcn::ResolvedCsResource> resolved;
+  if (module->ok) {
+    gcn::ResolveCsResources(resolved, *cs_program, *module, user_data, cs_addr);
+    const auto count_resolved = [&] {
+      u32 n = 0;
+      for (const auto& r : module->resources)
+        n += r.binding < resolved.size() && resolved[r.binding].valid;
+      return n;
+    };
+    const u32 resolved_n = count_resolved();
+    static base::HashSet<u64> retry_useless;
+    static const guest::SessionReset reset_retry_useless(
+        [] { guest::ResetResource(retry_useless); });
+    if (resolved_n < module->resources.size() &&
+        !retry_useless.contains(cs_addr)) {
+      OwnRenderer("cs-unresolved");
+      if (!render::FlushCsWrites(renderer, "cs-unresolved") &&
+          !renderer.available())
+        return;
+      gcn::ResolveCsResources(resolved, *cs_program, *module, user_data,
+                              cs_addr);
+      if (count_resolved() > resolved_n) {
+        static u32 helped = 0;
+        if (helped++ < 8)
+          BASE_LOGI("csgpu", "cs @{:#x}: the unresolved-binding retry helped",
+                    cs_addr);
+      } else {
+        retry_useless.insert(cs_addr);
+      }
+    }
+    ComputeShaderState pinned_state = chosen;
+    pinned_state.formats = StagedFormats(*module, native, resolved);
+    if (!pinned_state.formats.empty()) {
+      const gcn::RecompiledCs& pinned = GetComputeShader(pinned_state);
+      if (pinned.ok && pinned.resources.size() == module->resources.size()) {
+        module = &pinned;
+        chosen = pinned_state;
+      }
+    }
+  }
   const gcn::RecompiledCs& rc = *module;
   if (!rc.ok) {
     static base::HashSet<u64> reported;
@@ -505,33 +564,6 @@ void DispatchCompute(render::Renderer& renderer,
   for (int i = 0; i < 16; i++)
     ci.user_data[i] = user_data[i];
 
-  thread_local base::Vector<gcn::ResolvedCsResource> resolved;
-  gcn::ResolveCsResources(resolved, *cs_program, rc, user_data, cs_addr);
-  const auto count_resolved = [&] {
-    u32 n = 0;
-    for (const auto& r : rc.resources)
-      n += r.binding < resolved.size() && resolved[r.binding].valid;
-    return n;
-  };
-  const u32 resolved_n = count_resolved();
-  static base::HashSet<u64> retry_useless;
-  static const guest::SessionReset reset_retry_useless(
-      [] { guest::ResetResource(retry_useless); });
-  if (resolved_n < rc.resources.size() && !retry_useless.contains(cs_addr)) {
-    OwnRenderer("cs-unresolved");
-    if (!render::FlushCsWrites(renderer, "cs-unresolved") &&
-        !renderer.available())
-      return;
-    gcn::ResolveCsResources(resolved, *cs_program, rc, user_data, cs_addr);
-    if (count_resolved() > resolved_n) {
-      static u32 helped = 0;
-      if (helped++ < 8)
-        BASE_LOGI("csgpu", "cs @{:#x}: the unresolved-binding retry helped",
-                  cs_addr);
-    } else {
-      retry_useless.insert(cs_addr);
-    }
-  }
 
   const bool trace = ShouldTraceCsResources(cs_addr);
   static constexpr u32 kNullDescriptor[8] = {};

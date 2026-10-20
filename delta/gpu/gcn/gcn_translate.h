@@ -209,7 +209,8 @@ RecompiledCs RecompileCompute(const u32* cs_code,
                               u32 lds_dwords,
                               u64 native_mask = 0,
                               u64 uint_mask = 0,
-                              u64 shared_mask = 0);
+                              u64 shared_mask = 0,
+                              const base::Vector<u32>& formats = {});
 
 struct ImageTilingParams {
   u32 width, height, words, table, mask;

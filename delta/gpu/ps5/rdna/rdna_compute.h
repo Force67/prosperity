@@ -23,6 +23,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
                                         bool wave32 = false,
                                         u64 native_mask = 0,
                                         u64 uint_mask = 0,
-                                        bool plan_only = false);
+                                        bool plan_only = false,
+                                        const base::Vector<u32>& formats = {});
 
 }  // namespace gpu::rdna

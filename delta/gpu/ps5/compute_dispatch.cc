@@ -326,11 +326,22 @@ void DispatchCompute(render::Renderer& renderer,
       if (images[i].nfmt == 4 || images[i].nfmt == 5)
         uint_mask |= 1ull << i;
   }
+  base::Vector<u32> formats;
+  if (plan.ok)
+    for (const gcn::CsResource& r : plan.resources) {
+      const auto it = resolved.find(r.use_pc);
+      if (r.kind == 1 && !r.runtime_image && r.binding < 0x10000 &&
+          !(r.binding < 64 && ((native >> r.binding) & 1)) &&
+          it != resolved.end() && it->second.descriptor_valid &&
+          it->second.descriptor_dwords >= 8)
+        formats.push_back(r.binding << 16 |
+                          ((it->second.descriptor[1] >> 20) & 0x3FF));
+    }
   const gcn::RecompiledCs* module =
-      &GetComputeShader(shader, native, uint_mask);
+      &GetComputeShader(shader, native, uint_mask, false, formats);
   if (!module->ok && native) {
     native = 0;
-    module = &GetComputeShader(shader);
+    module = &GetComputeShader(shader, 0, 0, false, formats);
   }
   const gcn::RecompiledCs& rc = *module;
   if (!rc.ok) {

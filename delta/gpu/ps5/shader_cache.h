@@ -32,9 +32,14 @@ struct ComputeShaderState {
   bool wave32 = false;
 };
 
-const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state,
-                                          u64 native_mask = 0,
-                                          u64 uint_mask = 0,
-                                          bool plan_only = false);
+// `formats` holds `binding << 16 | T# dword1 bits 20..29` for staged images
+// whose descriptor the dispatch resolved; their decode is built for that
+// format.
+const gcn::RecompiledCs& GetComputeShader(
+    const ComputeShaderState& state,
+    u64 native_mask = 0,
+    u64 uint_mask = 0,
+    bool plan_only = false,
+    const base::Vector<u32>& formats = {});
 
 }  // namespace gpu::ps5

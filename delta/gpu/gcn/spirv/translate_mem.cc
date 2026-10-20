@@ -2122,8 +2122,11 @@ static void EmitCsMimgStaged(Translator& t,
 
   const Id base_pitch =
       t.rdna_sources ? base_width : t.Add(field(4, 13, 0x3FFF), t.U32(1));
-  const Id gfmt = field(1, 20, 0x1FF);
-  const Id dfmt = field(1, 20, 0x3F), nfmt = field(1, 26, 0xF);
+  const auto pinned = sc.staged_formats.find(binding);
+  const bool known = pinned != sc.staged_formats.end();
+  const Id gfmt = known ? t.U32(pinned->second & 0x1FF) : field(1, 20, 0x1FF);
+  const Id dfmt = known ? t.U32(pinned->second & 0x3F) : field(1, 20, 0x3F);
+  const Id nfmt = known ? t.U32((pinned->second >> 6) & 0xF) : field(1, 26, 0xF);
   const auto is_gfmt = [&](std::initializer_list<u32> values) {
     Id any = t.m.ConstBool(false);
     for (u32 v : values)

@@ -41,7 +41,8 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32*,
                                         bool,
                                         u64,
                                         u64,
-                                        bool) {
+                                        bool,
+                                        const base::Vector<u32>&) {
   return {};
 }
 
@@ -663,12 +664,15 @@ bool TranslateCs(const Program& program,
                  u64 native_mask,
                  u64 uint_mask,
                  bool plan_only,
+                 const base::Vector<u32>& formats,
                  RecompiledCs& r,
                  Translator& t) {
   if (program.empty())
     return false;
   DumpCsProgram(program);
   StageContext sc;
+  for (u32 f : formats)
+    sc.staged_formats[f >> 16] = f & 0xFFFF;
   sc.is_cs = true;
   sc.lds_dwords = lds_dwords * 128;
   if (!PlanResources(program, sc.lds_dwords, user_sgpr, r, sc.cs_bind) ||
@@ -1023,7 +1027,8 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
                                         bool wave32,
                                         u64 native_mask,
                                         u64 uint_mask,
-                                        bool plan_only) {
+                                        bool plan_only,
+                                        const base::Vector<u32>& formats) {
   RecompiledCs r;
   const u32 code_dwords = ComputeCodeDwords(cs_code);
   if (!code_dwords)
@@ -1050,7 +1055,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32* cs_code,
   gpu::gcn::ResetUnsupported();
   if (!TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
                    tgid_enable, lds_dwords, wave32, native_mask, uint_mask,
-                   plan_only, tmp, t) ||
+                   plan_only, formats, tmp, t) ||
       gpu::gcn::HadUnsupported()) {
     ReportDecline(cs_code, program.size());
     return r;

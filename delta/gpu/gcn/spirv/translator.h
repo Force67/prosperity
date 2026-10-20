@@ -944,6 +944,8 @@ struct StageContext {
   base::HashSet<u32> direct_vertex_fetch;
   Id direct_vertex_index = 0;
   base::HashSet<u32> cs_runtime_images;
+  // Staged image binding -> T# dword1 bits 20..29 (format) at dispatch.
+  base::HashMap<u32, u32> staged_formats;
   base::HashSet<u32> cs_native;
   base::HashSet<u32> cs_written;
 

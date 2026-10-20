@@ -42,6 +42,9 @@ struct ComputeShaderState {
   u32 thread_x = 0, thread_y = 0, thread_z = 0;
   u32 user_sgpr = 0, tgid_enable = 0, lds_dwords = 0;
   u64 native_mask = 0, uint_mask = 0, shared_mask = 0;
+  // `binding << 16 | T# dword1 bits 20..29` per staged image whose
+  // descriptor the dispatch resolved; their decode is built for it.
+  base::Vector<u32> formats;
 };
 
 const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state);

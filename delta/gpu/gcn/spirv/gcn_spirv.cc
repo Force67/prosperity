@@ -38,6 +38,7 @@ bool RecompileComputeSpirv(const u32*,
                            u64,
                            u64,
                            u64,
+                           const base::Vector<u32>&,
                            RecompiledCs&) {
   return false;
 }
@@ -2996,12 +2997,15 @@ bool TranslateCs(const Program& program,
                  u64 native_mask,
                  u64 uint_mask,
                  u64 shared_mask,
+                 const base::Vector<u32>& formats,
                  RecompiledCs& r,
                  Translator& t) {
   if (program.empty())
     return false;
   StageContext sc;
   sc.is_cs = true;
+  for (u32 f : formats)
+    sc.staged_formats[f >> 16] = f & 0xFFFF;
   sc.lds_dwords = lds_dwords * 128;
   const base::Vector<u8> reachable = ComputeReachability(program);
   t.spill_vgprs = PlanLaneSpills(program, reachable.data());
@@ -3609,6 +3613,7 @@ bool RecompileComputeSpirv(const u32* cs_code,
                            u64 native_mask,
                            u64 uint_mask,
                            u64 shared_mask,
+                           const base::Vector<u32>& formats,
                            RecompiledCs& r) {
   if (!cs_code)
     return false;
@@ -3624,7 +3629,7 @@ bool RecompileComputeSpirv(const u32* cs_code,
   const bool cs_ok =
       TranslateCs(program, num_thread_x, num_thread_y, num_thread_z, user_sgpr,
                   tgid_enable, lds_dwords, native_mask, uint_mask, shared_mask,
-                  tmp, t) &&
+                  formats, tmp, t) &&
       !HadUnsupported();
   base::Vector<u32> spv_bin;
   if (cs_ok)
