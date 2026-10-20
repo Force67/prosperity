@@ -34,7 +34,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci);
 
 void PrebuildComputePipeline(const base::Vector<u32>& spirv,
                              u32 num_res,
-                             int guest_memory_binding);
+                             int guest_memory_binding,
+                             const base::Vector<int>& textures);
 
 bool FlushCsWrites(Renderer& renderer, const char* why = "all");
 bool CsRangeMaybeDirty(u64 base, u64 bytes);

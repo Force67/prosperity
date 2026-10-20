@@ -359,13 +359,51 @@ u64 SharedBindings(const render::ComputeInfo& ci) {
   return mask;
 }
 
+bool Plain2d(const base::Vector<gcn::TImage>& images, u32 b) {
+  return b < images.size() && images[b].valid && !images[b].is_3d &&
+         !images[b].is_1d && !images[b].arrayed && !images[b].storage;
+}
+
+// `shader` with native image bindings wherever the bound texture is a plain
+// 2D image, or `shader` itself when there is none. Fills `images`.
+ComputeShaderState NativeVariant(const ComputeShaderState& shader,
+                                 const gcn::RecompiledCs& module,
+                                 const u32* user_data,
+                                 base::Vector<gcn::TImage>& images) {
+  if (!kCsNativeImages || !module.ok || !module.native_candidates ||
+      !render::CsBindsImages())
+    return shader;
+  const auto cs_program = gcn::CachedProgram(shader.cs_addr, 4096);
+  gcn::TrackTextures(images, cs_program, user_data, false, shader.cs_addr);
+  const gcn::MimgBindingPlan plan = gcn::PlanMimgBindings(
+      *cs_program, gcn::ComputeReachability(*cs_program).data());
+  ComputeShaderState native_shader = shader;
+  for (const gcn::CsResource& r : module.resources) {
+    const auto it = plan.binding_by_pc.find(r.use_pc);
+    if (r.binding < 64 && ((module.native_candidates >> r.binding) & 1) &&
+        it != plan.binding_by_pc.end() && Plain2d(images, it->second))
+      native_shader.native_mask |= 1ull << r.binding;
+  }
+  if (!native_shader.native_mask)
+    return shader;
+  for (u32 i = 0; i < images.size() && i < 64; i++)
+    if (images[i].nfmt == 4 || images[i].nfmt == 5)
+      native_shader.uint_mask |= 1ull << i;
+  return native_shader;
+}
+
 }  // namespace
 
 void PrefetchComputeDispatch(const Regs& regs) {
   const ComputeShaderState state = ComputeStateOf(regs);
-  if (!kNoCs && IsGuestAddress(state.cs_addr) && state.thread_x &&
-      state.thread_y)
-    PrefetchComputeShader(state);
+  if (kNoCs || !IsGuestAddress(state.cs_addr) || !state.thread_x ||
+      !state.thread_y)
+    return;
+  const u32* user_data = regs.At(mmCOMPUTE_USER_DATA_0);
+  PrefetchComputeShader(state, [&](const gcn::RecompiledCs& module) {
+    base::Vector<gcn::TImage> images;
+    return NativeVariant(state, module, user_data, images);
+  });
 }
 
 void DispatchCompute(render::Renderer& renderer,
@@ -424,38 +462,19 @@ void DispatchCompute(render::Renderer& renderer,
   const gcn::RecompiledCs* module = &GetComputeShader(shader);
   ComputeShaderState chosen = shader;
   base::Vector<gcn::TImage> images;
-  u64 native = 0;
-  if (kCsNativeImages && module->ok && module->native_candidates &&
-      render::CsBindsImages()) {
-    gcn::TrackTextures(images, cs_program, user_data, false, cs_addr);
-    const gcn::MimgBindingPlan plan = gcn::PlanMimgBindings(
-        *cs_program, gcn::ComputeReachability(*cs_program).data());
-    const auto plain_2d = [&](u32 b) {
-      return b < images.size() && images[b].valid && !images[b].is_3d &&
-             !images[b].is_1d && !images[b].arrayed && !images[b].storage;
-    };
-    ComputeShaderState native_shader = shader;
-    for (const gcn::CsResource& r : module->resources) {
-      const auto it = plan.binding_by_pc.find(r.use_pc);
-      if (r.binding < 64 && ((module->native_candidates >> r.binding) & 1) &&
-          it != plan.binding_by_pc.end() && plain_2d(it->second))
-        native_shader.native_mask |= 1ull << r.binding;
-    }
-    for (u32 i = 0; i < images.size() && i < 64; i++)
-      if (images[i].nfmt == 4 || images[i].nfmt == 5)
-        native_shader.uint_mask |= 1ull << i;
-    if (native_shader.native_mask) {
-      const gcn::RecompiledCs& candidate = GetComputeShader(native_shader);
-      bool usable = candidate.ok;
-      for (u32 i = 0; usable && i < candidate.textures.size(); i++)
-        usable = candidate.textures[i] < 0 || plain_2d(i);
-      if (usable) {
-        module = &candidate;
-        native = native_shader.native_mask;
-        chosen = native_shader;
-      }
+  const ComputeShaderState native_shader =
+      NativeVariant(shader, *module, user_data, images);
+  if (native_shader.native_mask) {
+    const gcn::RecompiledCs& candidate = GetComputeShader(native_shader);
+    bool usable = candidate.ok;
+    for (u32 i = 0; usable && i < candidate.textures.size(); i++)
+      usable = candidate.textures[i] < 0 || Plain2d(images, i);
+    if (usable) {
+      module = &candidate;
+      chosen = native_shader;
     }
   }
+  const u64 native = chosen.native_mask;
   const gcn::RecompiledCs& rc = *module;
   if (!rc.ok) {
     static base::HashSet<u64> reported;

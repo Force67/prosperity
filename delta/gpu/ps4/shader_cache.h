@@ -5,6 +5,7 @@
  */
 
 #include "base/arch.h"
+#include "base/functional/function.h"
 
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/ps4/liverpool.h"
@@ -45,6 +46,10 @@ struct ComputeShaderState {
 
 const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state);
 
-void PrefetchComputeShader(const ComputeShaderState& state);
+// `variant` picks, from the recompiled `state`, the state the dispatch will
+// run, so only that one gets a pipeline.
+void PrefetchComputeShader(
+    const ComputeShaderState& state,
+    base::Function<ComputeShaderState(const gcn::RecompiledCs&)> variant);
 
 }  // namespace gpu::ps4

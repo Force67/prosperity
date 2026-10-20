@@ -144,7 +144,7 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
   CsPipe cp;
   cp.num_res = ci.num_res;
   cp.gds_binding = ci.gds_binding;
-  if (ci.gds_binding < 0 && ci.recomp->textures.empty()) {
+  if (ci.gds_binding < 0) {
     base::SharedPointer<PrebuiltSlot> slot;
     {
       base::LockGuard<base::Mutex> lock(g_prebuilt_mutex);

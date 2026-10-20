@@ -124,7 +124,8 @@ void MergeSameBase(ComputeInfo& ci) {
 
 void PrebuildComputePipeline(const base::Vector<u32>& spirv,
                              u32 num_res,
-                             int guest_memory_binding) {
+                             int guest_memory_binding,
+                             const base::Vector<int>& textures) {
   if (!g_backend.device || spirv.empty())
     return;
   const auto slot = base::MakeShared<PrebuiltSlot>();
@@ -136,7 +137,7 @@ void PrebuildComputePipeline(const base::Vector<u32>& spirv,
     g_cs.prebuilt.emplace(key, slot);
   }
   PrebuiltCs built;
-  built.set_layout = CsSetLayout(num_res, -1, guest_memory_binding, {});
+  built.set_layout = CsSetLayout(num_res, -1, guest_memory_binding, textures);
   if (built.set_layout)
     built.layout = CsPipelineLayout(built.set_layout);
   if (built.layout)

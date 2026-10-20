@@ -230,7 +230,9 @@ const gcn::RecompiledCs& GetComputeShader(const ComputeShaderState& state) {
   return cache.emplace(key, RecompileCompute(state)).first->second;
 }
 
-void PrefetchComputeShader(const ComputeShaderState& state) {
+void PrefetchComputeShader(
+    const ComputeShaderState& state,
+    base::Function<ComputeShaderState(const gcn::RecompiledCs&)> variant) {
   static base::HashSet<ComputeKey, ComputeKeyHash> started;
   static const guest::SessionReset reset_started(
       [] { guest::ResetResource(started); });
@@ -242,13 +244,24 @@ void PrefetchComputeShader(const ComputeShaderState& state) {
   {
     gcn::spirv::PrefetchScope prefetch;
     rc = RecompileCompute(state);
+    if (!rc.ok)
+      return;
+    const ComputeShaderState chosen = variant(rc);
+    const ComputeKey chosen_key = ComputeKeyOf(chosen);
+    if (!(chosen_key == key)) {
+      if (ComputeCache().count(chosen_key) ||
+          !started.insert(chosen_key).second)
+        return;
+      rc = RecompileCompute(chosen);
+    }
   }
   if (rc.ok)
     gcn::spirv::PrefetchThen(
         rc.spirv,
         [n = static_cast<u32>(rc.resources.size()),
-         guest = rc.guest_memory_binding](const base::Vector<u32>& spv) {
-          render::PrebuildComputePipeline(spv, n, guest);
+         guest = rc.guest_memory_binding,
+         textures = rc.textures](const base::Vector<u32>& spv) {
+          render::PrebuildComputePipeline(spv, n, guest, textures);
         });
 #endif
 }
