@@ -771,6 +771,7 @@ class Ir {
 
   void SimplifyFunction(Function& f);
   bool Pure(Inst& in);
+  void FoldBranches(Function& f);
   void Hoist(Function& f,
              const base::Vector<u32>& order,
              const base::Vector<u32>& rpo,
@@ -2185,6 +2186,146 @@ void Ir::SimplifyFunction(Function& f) {
     walk.pop_back();
   }
   Hoist(f, order, rpo, idom);
+  FoldBranches(f);
+}
+
+// A conditional branch on a constant goes straight to the taken target.
+// Blocks no longer reachable are dropped, except merge and continue targets
+// a live construct still names: those keep a stub. Phis lose the incoming
+// values of predecessors that are gone.
+void Ir::FoldBranches(Function& f) {
+  using enum Op;
+  bool folded = false;
+  for (Block& blk : f.blocks) {
+    Inst& term = insts_[blk.body.back()];
+    if (term.op != OpBranchConditional)
+      continue;
+    u32* o = Ops(term);
+    const u32 cond = Find(o[0]);
+    const u32 d = cond < def_.size() ? def_[cond] : kNone;
+    u32 target;
+    if (o[1] == o[2])
+      target = o[1];
+    else if (d != kNone && insts_[d].op == OpConstantTrue)
+      target = o[1];
+    else if (d != kNone && insts_[d].op == OpConstantFalse)
+      target = o[2];
+    else
+      continue;
+    term.op = OpBranch;
+    term.count = 1;
+    o[0] = target;
+    const u32 n = static_cast<u32>(blk.body.size());
+    if (n >= 2 && insts_[blk.body[n - 2]].op == OpSelectionMerge) {
+      dead_[blk.body[n - 2]] = 1;
+      blk.body.erase(blk.body.begin() + (n - 2));
+    }
+    folded = true;
+  }
+  if (!folded)
+    return;
+
+  base::Vector<u8> reach(f.blocks.size(), 0);
+  base::Vector<u32> work{0};
+  reach[0] = 1;
+  while (!work.empty()) {
+    const Inst& t = insts_[f.blocks[work.back()].body.back()];
+    work.pop_back();
+    const u32* o = Ops(t);
+    const auto visit = [&](u32 label) {
+      const u32 s = block_of_[label];
+      if (!reach[s]) {
+        reach[s] = 1;
+        work.push_back(s);
+      }
+    };
+    if (t.op == OpBranch)
+      visit(o[0]);
+    else if (t.op == OpBranchConditional) {
+      visit(o[1]);
+      visit(o[2]);
+    } else if (t.op == OpSwitch) {
+      visit(o[1]);
+      for (u32 i = 3; i < t.count; i += 2)
+        visit(o[i]);
+    }
+  }
+  // Merge and continue targets named by reachable headers survive as stubs.
+  base::Vector<u32> stub(f.blocks.size(), kNone);
+  for (u32 b = 0; b < f.blocks.size(); b++) {
+    if (!reach[b] || f.blocks[b].body.size() < 2)
+      continue;
+    const Inst& m = insts_[f.blocks[b].body[f.blocks[b].body.size() - 2]];
+    if (m.op != OpSelectionMerge && m.op != OpLoopMerge)
+      continue;
+    const u32 merge = block_of_[Ops(m)[0]];
+    if (!reach[merge])
+      stub[merge] = kNone - 1;
+    if (m.op == OpLoopMerge && !reach[block_of_[Ops(m)[1]]])
+      stub[block_of_[Ops(m)[1]]] = b;
+  }
+  base::Vector<Block> kept;
+  for (u32 b = 0; b < f.blocks.size(); b++) {
+    Block& blk = f.blocks[b];
+    if (!reach[b] && stub[b] == kNone) {
+      for (const u32 idx : blk.body)
+        dead_[idx] = 1;
+      for (const u32 idx : blk.phis)
+        dead_[idx] = 1;
+      continue;
+    }
+    if (!reach[b]) {
+      for (const u32 idx : blk.body)
+        dead_[idx] = 1;
+      for (const u32 idx : blk.phis)
+        dead_[idx] = 1;
+      blk.phis.clear();
+      blk.body.clear();
+      if (stub[b] == kNone - 1) {
+        blk.body.push_back(AddInst(OpUnreachable, 0, 0, nullptr, 0));
+      } else {
+        const u32 header = f.blocks[stub[b]].label;
+        blk.body.push_back(AddInst(OpBranch, 0, 0, &header, 1));
+      }
+    }
+    kept.push_back(base::move(blk));
+  }
+  f.blocks = base::move(kept);
+  for (Block& blk : f.blocks) {
+    blk.preds.clear();
+    blk.succs.clear();
+  }
+  BuildCfg(f);
+
+  const auto trim = [&](u32 idx, const Block& blk) {
+    Inst& in = insts_[idx];
+    if (dead_[idx] || in.op != OpPhi)
+      return;
+    u32* o = Ops(in);
+    u32 n = 0;
+    for (u32 k = 0; k + 1 < in.count; k += 2) {
+      const u32 from = block_of_[o[k + 1]];
+      bool pred = false;
+      for (const u32 p : blk.preds)
+        pred |= p == from && f.blocks[p].label == o[k + 1];
+      if (pred) {
+        o[n] = o[k];
+        o[n + 1] = o[k + 1];
+        n += 2;
+      }
+    }
+    in.count = n;
+    if (n == 2) {
+      repl_[in.result] = Find(o[0]);
+      dead_[idx] = 1;
+    }
+  };
+  for (Block& blk : f.blocks) {
+    for (const u32 idx : blk.phis)
+      trim(idx, blk);
+    for (const u32 idx : blk.body)
+      trim(idx, blk);
+  }
 }
 
 // Code hoisting: an expression computed again where the first computation

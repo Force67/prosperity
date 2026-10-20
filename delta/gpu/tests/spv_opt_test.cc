@@ -260,6 +260,37 @@ TEST(SpvOpt, ExpressionInBothArmsMovesToTheirDominator) {
   EXPECT_TRUE(gpu::gcn::spirv::CheckModule(spv, nullptr));
 }
 
+TEST(SpvOpt, ConstantBranchDropsTheDeadArm) {
+  Shader s;
+  const Id r = s.Register();
+  const Id x = s.Input();
+  s.m.Store(r, x);
+  const Id then = s.m.NewBlock(), other = s.m.NewBlock(),
+           merge = s.m.NewBlock();
+  s.m.SelectionMerge(merge);
+  s.m.BranchConditional(
+      s.m.Emit(Op::OpIEqual, s.t_bool, {s.m.ConstU32(1), s.m.ConstU32(1)}),
+      then, other);
+  s.m.OpenBlock(then);
+  s.m.Store(r, s.m.Emit(Op::OpIMul, s.t_u, {x, x}));
+  s.m.Branch(merge);
+  s.m.OpenBlock(other);
+  s.m.Store(r, s.m.Emit(Op::OpBitwiseXor, s.t_u, {x, s.m.ConstU32(7)}));
+  s.m.Branch(merge);
+  s.m.OpenBlock(merge);
+  s.m.Store(s.out, s.m.Load(s.t_u, r));
+  const auto spv = s.Finish();
+
+  EXPECT_EQ(Count(spv, Op::OpBranchConditional), 0u);
+  EXPECT_EQ(Count(spv, Op::OpSelectionMerge), 0u);
+  EXPECT_EQ(Count(spv, Op::OpBitwiseXor), 0u);
+  EXPECT_EQ(Count(spv, Op::OpPhi), 0u);
+  const auto mul = Find(spv, StoredValue(spv, s.out));
+  ASSERT_FALSE(mul.empty());
+  EXPECT_EQ(mul[0] & 0xffff, static_cast<u32>(Op::OpIMul));
+  EXPECT_TRUE(gpu::gcn::spirv::CheckModule(spv, nullptr));
+}
+
 TEST(SpvOpt, CheckRejectsUndefinedIds) {
   Shader s;
   s.m.Store(s.out, s.m.Alloc());

@@ -82,7 +82,7 @@ DELTA_OPTION(const char*,
              nullptr);
 DELTA_OPTION(const char*, kRawDump, "DELTA_GPU_SPV_RAW_DUMP", nullptr);
 
-constexpr u32 kCacheGeneration = 5;
+constexpr u32 kCacheGeneration = 6;
 
 u64 HashWords(const base::Vector<u32>& w) {
   u64 h = 1469598103934665603ull;
