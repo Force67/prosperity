@@ -15,20 +15,24 @@ intermediate).
 | `gcn_detile.{h,cpp}` | 32bpp texture de-tiling (AddrLib-faithful micro/macro swizzle, mips, arrays). |
 | `gcn_translate.{h,cpp}` | Public recompiler facade: `Recompile` (VS+PS) / `RecompileCompute` (CS) + the binding-plan structs the renderer consumes. |
 | `spirv/spv_emit.{h,cpp}` | Minimal SPIR-V module builder (types/constants de-duped via packed-integer cache). |
-| `spirv/spv_post.{h,cpp}` | SPIRV-Tools optimize (legalize + performance passes) and validation. |
+| `spirv/spv_opt.{h,cc}` | The SPIR-V optimizer: promotes the register file to SSA, folds, value-numbers, drops dead code; plus a structural module check. |
+| `spirv/spv_post.{h,cpp}` | Finalize: check + optimize with an on-disk cache and a worker pool. |
 | `spirv/translator.h` | Internal shared translator context (`Translator`, `StageContext`) + emitter declarations. |
 | `spirv/translate_alu.cc` | Scalar + vector ALU (SOP1/SOP2/SOPC/SOPK, VOP1/VOP2/VOP3, full VOPC predicate set incl. `cmpx` -> EXEC). |
 | `spirv/translate_mem.cc` | Memory ops: graphics cbuffers (SMRD) + MIMG (sample/load/gather/resinfo); compute SSBO model (SMRD/MUBUF/MTBUF/MIMG), LDS (DS). |
-| `spirv/gcn_spirv.{h,cpp}` | Per-instruction dispatch, control-flow lowering (while/switch state machine), stage drivers (VS/PS/CS), RECTLIST geometry expansion, entry points. |
+| `spirv/gcn_spirv.{h,cpp}` | Per-instruction dispatch, control-flow lowering (structured, with a while/switch fallback), stage drivers (VS/PS/CS), RECTLIST geometry expansion, entry points. |
 
 ## Execution model
 
 One wave lane == one SPIR-V invocation. The register file is modelled as
 Private-storage `uint` arrays (`sgpr[128]`, `vgpr[256]`); EXEC is a single
-"this lane active" bit, VCC (`sgpr[106]`) a 0/1 scalar. spirv-opt's SSA
-rewrite (mem2reg) promotes it all out of memory. Branchy shaders are lowered
-to a `while/switch` state machine over basic blocks (handles reducible and
-irreducible CFGs); single-basic-block shaders emit straight-line.
+"this lane active" bit, VCC (`sgpr[106]`) a 0/1 scalar. The optimizer's SSA
+promotion (`spv_opt`) takes it all out of memory. Branchy shaders are lowered
+to structured control flow (if/else merging at the immediate post-dominator,
+natural loops with break/continue; lock-step shaders vote each branch across
+the group). A CFG that does not fit falls back to a `while/switch` state
+machine over basic blocks, which drivers compile several times slower.
+Single-basic-block shaders emit straight-line.
 
 Compute models guest memory as one storage buffer per descriptor (the buffer
 aliases `[base, base+size)`), the 16 `COMPUTE_USER_DATA` dwords as push

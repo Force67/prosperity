@@ -1574,10 +1574,596 @@ LdsBarrierPlan PlanLdsBarriers(const Program& program,
 
 namespace {
 
+DELTA_OPTION(bool, kStructuredCfg, "DELTA_GPU_STRUCTURED_CFG", true);
+
+// Lowers a branchy program to structured SPIR-V: if/else at each conditional
+// branch, merging at its immediate post-dominator, and natural loops with
+// break and continue. Drivers compile this several times faster than the
+// dispatch loop, which carries every register around one loop. Plan() walks
+// exactly what Emit() will, so a graph that does not fit (irreducible flow, a
+// loop with more than one exit or an exit to the end) is refused before
+// anything is emitted. A block two paths reach before their merge is emitted
+// once per path, within a size budget.
+class Structurizer {
+ public:
+  Structurizer(Translator& t,
+               const Program& program,
+               StageContext& sc,
+               const u8* reachable)
+      : t_(t), program_(program), sc_(sc), reachable_(reachable) {}
+
+  bool Plan();
+  void Emit();
+
+ private:
+  static constexpr u32 kNone = ~0u;
+  struct Block {
+    u32 lo = 0, hi = 0;   // pc range
+    int kind = 0;         // BranchKind of the terminator, 0 when it falls
+    u32 succ[2] = {kNone, kNone};  // taken, fallthrough
+    u32 nsucc = 0;
+    u32 loop = kNone;     // innermost loop header
+    bool header = false;
+    u32 exit = kNone;     // loop exit, for headers
+    u32 size = 0;         // instructions
+  };
+  struct Region {
+    base::Vector<base::Vector<u64>> pd;  // post-dominator sets per node
+  };
+  struct Loop {
+    u32 header;
+    Id cont, merge;
+  };
+
+  u32 Exit() const { return n_; }
+  u32 Cont() const { return n_ + 1; }
+  u32 Brk() const { return n_ + 2; }
+  u32 Sink() const { return n_ + 3; }
+  bool InBody(u32 header, u32 b) const;
+  bool RegionSuccs(u32 b, u32 g, u32* out, u32* count) const;
+  bool BuildRegion(u32 g);
+  u32 IPostDom(u32 b, u32 g);
+  bool Walk(u32 b, u32 stop, u32 g, bool header_first);
+  bool Seq(u32 b, u32 stop, u32 g, bool header_first);
+  bool Select(u32 b, u32 g);
+  void EmitLoop(u32 h);
+  void EmitCode(u32 b);
+  Id Taken(u32 b);
+  void Open(Id label) {
+    t_.m.OpenBlock(label);
+    open_ = true;
+  }
+  void Jump(Id label) {
+    t_.m.Branch(label);
+    open_ = false;
+  }
+
+  Translator& t_;
+  const Program& program_;
+  StageContext& sc_;
+  const u8* reachable_;
+  u32 n_ = 0;
+  base::Vector<Block> blocks_;
+  base::Vector<u32> idom_;
+  base::Vector<base::Vector<u64>> body_;  // per header, bitset of blocks
+  base::HashMap<u32, Region> regions_;
+  base::Vector<u8> visited_;
+  base::Vector<Loop> loops_;  // emission stack
+  bool emit_ = false, lockstep_ = false, fresh_barrier_ = false;
+  bool open_ = true;  // the current SPIR-V block still needs a terminator
+  u64 emitted_ = 0;
+  Id iter_var_ = 0;
+};
+
+bool Structurizer::InBody(u32 h, u32 b) const {
+  return b < n_ && (body_[h][b >> 6] >> (b & 63)) & 1;
+}
+
+bool Structurizer::Plan() {
+  const u32 max_pc =
+      program_.empty() ? 0 : program_.back().pc + program_.back().size;
+  const base::Vector<u32> starts = BlockStarts(program_, max_pc);
+  n_ = static_cast<u32>(starts.size());
+  if (n_ == 0 || n_ > 4096)
+    return false;
+  const auto block_of = [&](u32 pc) -> u32 {
+    if (pc >= max_pc)
+      return n_;
+    u32 b = 0;
+    for (u32 i = 0; i < n_; i++)
+      if (starts[i] <= pc)
+        b = i;
+      else
+        break;
+    return b;
+  };
+  blocks_.resize(n_);
+  for (u32 b = 0; b < n_; b++) {
+    Block& blk = blocks_[b];
+    blk.lo = starts[b];
+    blk.hi = b + 1 < n_ ? starts[b + 1] : max_pc;
+    const u32 fall = b + 1 < n_ ? b + 1 : n_;
+    u32 idx = 0;
+    for (const Inst& inst : program_) {
+      const u32 i = idx++;
+      if (inst.pc < blk.lo || inst.pc >= blk.hi ||
+          (reachable_ && !reachable_[i]))
+        continue;
+      blk.size++;
+      const int k = BranchKind(inst);
+      if (!k)
+        continue;
+      blk.kind = k;
+      const i32 simm = static_cast<i16>(inst.raw[0] & 0xFFFF);
+      const u32 target = block_of(static_cast<u32>(
+          static_cast<i32>(inst.pc) + static_cast<i32>(inst.size) + simm));
+      if (k == 8) {
+        blk.succ[0] = n_;
+      } else if (k == 1) {
+        blk.succ[0] = target;
+      } else {
+        blk.succ[0] = target;
+        blk.succ[1] = fall;
+      }
+      break;
+    }
+    if (!blk.kind)
+      blk.succ[0] = fall;
+    blk.nsucc = blk.succ[1] == kNone || blk.succ[1] == blk.succ[0] ? 1 : 2;
+  }
+
+  // Dominators over the blocks reachable from the entry.
+  base::Vector<u32> order, rpo(n_ + 1, kNone), stack, cursor(n_ + 1, 0);
+  base::Vector<u8> seen(n_ + 1, 0);
+  stack.push_back(0);
+  seen[0] = 1;
+  while (!stack.empty()) {
+    const u32 b = stack.back();
+    if (b < n_ && cursor[b] < blocks_[b].nsucc) {
+      const u32 s = blocks_[b].succ[cursor[b]++];
+      if (!seen[s]) {
+        seen[s] = 1;
+        stack.push_back(s);
+      }
+      continue;
+    }
+    order.push_back(b);
+    stack.pop_back();
+  }
+  for (u32 i = 0; i < order.size(); i++)
+    rpo[order[i]] = static_cast<u32>(order.size() - 1 - i);
+  base::Vector<base::Vector<u32>> preds(n_ + 1);
+  for (u32 b = 0; b < n_; b++)
+    if (seen[b])
+      for (u32 k = 0; k < blocks_[b].nsucc; k++)
+        preds[blocks_[b].succ[k]].push_back(b);
+  idom_.assign(n_ + 1, kNone);
+  idom_[0] = 0;
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (u32 i = order.size(); i-- > 0;) {
+      const u32 b = order[i];
+      if (b == 0)
+        continue;
+      u32 d = kNone;
+      for (const u32 p : preds[b]) {
+        if (idom_[p] == kNone)
+          continue;
+        if (d == kNone) {
+          d = p;
+          continue;
+        }
+        u32 x = p, y = d;
+        while (x != y) {
+          while (rpo[x] > rpo[y])
+            x = idom_[x];
+          while (rpo[y] > rpo[x])
+            y = idom_[y];
+        }
+        d = x;
+      }
+      if (idom_[b] != d) {
+        idom_[b] = d;
+        changed = true;
+      }
+    }
+  }
+  const auto dominates = [&](u32 a, u32 b) {
+    for (;;) {
+      if (a == b)
+        return true;
+      if (b == 0 || idom_[b] == kNone)
+        return false;
+      b = idom_[b];
+    }
+  };
+
+  // Natural loops; any other edge against the reverse postorder is
+  // irreducible.
+  const u32 words = (n_ + 63) / 64;
+  body_.resize(n_);
+  for (u32 b = 0; b < n_; b++) {
+    if (!seen[b])
+      continue;
+    for (u32 k = 0; k < blocks_[b].nsucc; k++) {
+      const u32 h = blocks_[b].succ[k];
+      if (h == n_ || rpo[h] > rpo[b])
+        continue;
+      if (!dominates(h, b))
+        return false;
+      if (body_[h].empty())
+        body_[h].assign(words, 0);
+      blocks_[h].header = true;
+      stack.clear();
+      stack.push_back(b);
+      body_[h][h >> 6] |= 1ull << (h & 63);
+      while (!stack.empty()) {
+        const u32 x = stack.back();
+        stack.pop_back();
+        if (InBody(h, x))
+          continue;
+        body_[h][x >> 6] |= 1ull << (x & 63);
+        for (const u32 p : preds[x])
+          stack.push_back(p);
+      }
+    }
+  }
+  // Innermost loop per block: the header with the smallest body.
+  base::Vector<u32> size(n_, 0);
+  for (u32 h = 0; h < n_; h++)
+    if (blocks_[h].header)
+      for (u32 b = 0; b < n_; b++)
+        size[h] += InBody(h, b);
+  for (u32 b = 0; b < n_; b++)
+    for (u32 h = 0; h < n_; h++)
+      if (blocks_[h].header && InBody(h, b) &&
+          (blocks_[b].loop == kNone || size[h] < size[blocks_[b].loop]))
+        blocks_[b].loop = h;
+  for (u32 h = 0; h < n_; h++) {
+    if (!blocks_[h].header)
+      continue;
+    for (u32 b = 0; b < n_; b++) {
+      if (!InBody(h, b))
+        continue;
+      for (u32 k = 0; k < blocks_[b].nsucc; k++) {
+        const u32 s = blocks_[b].succ[k];
+        if (InBody(h, s))
+          continue;
+        if (s == n_ || (blocks_[h].exit != kNone && blocks_[h].exit != s))
+          return false;
+        blocks_[h].exit = s;
+      }
+    }
+    if (blocks_[h].exit == kNone)
+      return false;
+  }
+
+  visited_.assign(n_, 0);
+  emit_ = false;
+  if (!Seq(0, Exit(), kNone, false))
+    return false;
+  for (u32 b = 0; b < n_; b++)
+    if (seen[b] && !visited_[b])
+      return false;
+  return true;
+}
+
+// The successors of b in loop g's region (kNone: the top level), with inner
+// loops collapsed to their exit and edges leaving g mapped to continue/break.
+bool Structurizer::RegionSuccs(u32 b, u32 g, u32* out, u32* count) const {
+  u32 raw[2];
+  u32 n = 0;
+  if (b < n_ && blocks_[b].header && b != g) {
+    raw[n++] = blocks_[b].exit;
+  } else if (b < n_) {
+    for (u32 k = 0; k < blocks_[b].nsucc; k++)
+      raw[n++] = blocks_[b].succ[k];
+  }
+  *count = 0;
+  for (u32 k = 0; k < n; k++) {
+    u32 s = raw[k];
+    if (g != kNone) {
+      if (s == g)
+        s = Cont();
+      else if (s == n_ || !InBody(g, s)) {
+        if (s != blocks_[g].exit)
+          return false;
+        s = Brk();
+      }
+    }
+    out[(*count)++] = s;
+  }
+  return true;
+}
+
+bool Structurizer::BuildRegion(u32 g) {
+  if (regions_.find(g) != regions_.end())
+    return true;
+  const u32 m = n_ + 4, words = (m + 63) / 64;
+  Region region;
+  region.pd.resize(m);
+  // Nodes reachable from the region entry.
+  base::Vector<u32> nodes, stack{g == kNone ? 0u : g};
+  base::Vector<u8> seen(m, 0);
+  seen[stack[0]] = 1;
+  while (!stack.empty()) {
+    const u32 x = stack.back();
+    stack.pop_back();
+    nodes.push_back(x);
+    u32 succ[2], count = 0;
+    if (x < n_) {
+      if (!RegionSuccs(x, g, succ, &count))
+        return false;
+    } else if (x != Sink()) {
+      succ[0] = Sink();
+      count = 1;
+    }
+    for (u32 k = 0; k < count; k++)
+      if (!seen[succ[k]]) {
+        seen[succ[k]] = 1;
+        stack.push_back(succ[k]);
+      }
+  }
+  if (!seen[Sink()])
+    return false;
+  for (const u32 x : nodes) {
+    region.pd[x].assign(words, ~0ull);
+  }
+  region.pd[Sink()].assign(words, 0);
+  region.pd[Sink()][Sink() >> 6] |= 1ull << (Sink() & 63);
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (u32 i = nodes.size(); i-- > 0;) {
+      const u32 x = nodes[i];
+      if (x == Sink())
+        continue;
+      u32 succ[2], count = 0;
+      if (x < n_)
+        RegionSuccs(x, g, succ, &count);
+      else {
+        succ[0] = Sink();
+        count = 1;
+      }
+      base::Vector<u64> next(words, ~0ull);
+      for (u32 k = 0; k < count; k++)
+        for (u32 w = 0; w < words; w++)
+          next[w] &= region.pd[succ[k]][w];
+      next[x >> 6] |= 1ull << (x & 63);
+      bool same = true;
+      for (u32 w = 0; w < words; w++)
+        same = same && next[w] == region.pd[x][w];
+      if (!same) {
+        region.pd[x] = base::move(next);
+        changed = true;
+      }
+    }
+  }
+  regions_.emplace(g, base::move(region));
+  return true;
+}
+
+u32 Structurizer::IPostDom(u32 b, u32 g) {
+  const Region& r = regions_.find(g)->second;
+  const base::Vector<u64>& set = r.pd[b];
+  u32 best = kNone, best_n = 0;
+  for (u32 w = 0; w < set.size(); w++)
+    for (u64 bits = set[w]; bits; bits &= bits - 1) {
+      const u32 c = w * 64 + static_cast<u32>(__builtin_ctzll(bits));
+      if (c == b)
+        continue;
+      u32 n = 0;
+      for (const u64 x : r.pd[c])
+        n += static_cast<u32>(__builtin_popcountll(x));
+      if (best == kNone || n > best_n) {
+        best = c;
+        best_n = n;
+      }
+    }
+  return best;
+}
+
+Id Structurizer::Taken(u32 b) {
+  const int kind = blocks_[b].kind;
+  if (!lockstep_)
+    return BranchTaken(t_, kind);
+  // Lock-step: the whole group takes the branch when any lane does.
+  const Id raw = BranchRaw(t_, kind);
+  const Id vote = t_.m.Emit(spv::Op::OpGroupNonUniformAny, t_.t_bool,
+                            {t_.U32(3), t_.IsNonZero(raw)});
+  const Id elected =
+      t_.m.Emit(spv::Op::OpGroupNonUniformElect, t_.t_bool, {t_.U32(3)});
+  const Id publish = t_.m.NewBlock(), published = t_.m.NewBlock();
+  t_.m.SelectionMerge(published);
+  t_.m.BranchConditional(elected, publish, published);
+  Open(publish);
+  t_.m.Store(t_.XchgAt(t_.m.Load(t_.t_u, sc_.subgroup_id)),
+             t_.SelectB(vote, t_.U32(1), t_.U32(0)));
+  Jump(published);
+  Open(published);
+  t_.Barrier();
+  Id bits = t_.U32(0);
+  const u32 subgroups =
+      (t_.xchg_lanes + HostSubgroupSize() - 1) / HostSubgroupSize();
+  for (u32 group = 0; group < subgroups; group++)
+    bits = t_.Or(bits, t_.m.Load(t_.t_u, t_.XchgAt(t_.U32(group))));
+  t_.Barrier();
+  fresh_barrier_ = true;
+  return t_.m.Emit(spv::Op::OpLogicalNotEqual, t_.t_bool,
+                   {t_.IsNonZero(bits), t_.m.ConstBool(BranchInverts(kind))});
+}
+
+void Structurizer::EmitCode(u32 b) {
+  // Lock-step keeps the dispatch loop's guarantee that LDS accesses in
+  // different blocks have a barrier between them.
+  if (lockstep_ && !fresh_barrier_ && (b != 0 || blocks_[0].header))
+    t_.Barrier();
+  fresh_barrier_ = false;
+  const Block& blk = blocks_[b];
+  u32 idx = 0;
+  for (const Inst& inst : program_) {
+    const u32 i = idx++;
+    if (inst.pc < blk.lo || inst.pc >= blk.hi ||
+        (reachable_ && !reachable_[i]))
+      continue;
+    if (BranchKind(inst))
+      break;
+    EmitInstAudited(t_, inst, i, sc_);
+  }
+}
+
+bool Structurizer::Select(u32 b, u32 g) {
+  if (!BuildRegion(g))
+    return false;
+  const u32 m = IPostDom(b, g);
+  if (m == kNone)
+    return false;
+  const Block& blk = blocks_[b];
+  u32 arms[2], count = 0;
+  if (!RegionSuccs(b, g, arms, &count) || count != 2)
+    return false;
+  Id merge = 0, labels[2] = {0, 0};
+  if (emit_) {
+    const Id cond = Taken(b);
+    merge = t_.m.NewBlock();
+    for (u32 k = 0; k < 2; k++)
+      labels[k] = arms[k] == m ? merge : t_.m.NewBlock();
+    t_.m.SelectionMerge(merge);
+    t_.m.BranchConditional(cond, labels[0], labels[1]);
+  }
+  for (u32 k = 0; k < 2; k++) {
+    if (arms[k] == m)
+      continue;
+    if (emit_)
+      Open(labels[k]);
+    if (!Seq(blk.succ[k], m, g, false))
+      return false;
+    if (emit_ && open_)
+      Jump(merge);
+  }
+  if (emit_) {
+    Open(merge);
+    fresh_barrier_ = false;
+    if (m == Cont()) {
+      Jump(loops_.back().cont);
+    } else if (m == Brk()) {
+      Jump(loops_.back().merge);
+    } else if (m == Sink()) {
+      t_.m.Unreachable();
+      open_ = false;
+    }
+  }
+  return true;
+}
+
+// Emits from block b until control reaches `stop`; with header_first, b is
+// loop g's header and is emitted rather than taken as a continue. False when
+// the graph does not fit; during Emit() the result is always true.
+bool Structurizer::Seq(u32 b, u32 stop, u32 g, bool header_first) {
+  for (bool first = header_first;; first = false) {
+    if (b == stop)
+      return true;
+    if (g != kNone && b == g && !first) {
+      if (emit_)
+        Jump(loops_.back().cont);
+      return true;
+    }
+    if (g != kNone && (b == n_ || !InBody(g, b))) {
+      if (b != blocks_[g].exit)
+        return false;
+      if (emit_)
+        Jump(loops_.back().merge);
+      return true;
+    }
+    if (b == n_)
+      return stop == Exit() || stop == Sink();
+    if (blocks_[b].header && !(b == g && first)) {
+      if (!emit_) {
+        if (visited_[b])
+          return false;
+        if (!Seq(b, Sink(), b, true))
+          return false;
+      } else {
+        EmitLoop(b);
+      }
+      b = blocks_[b].exit;
+      continue;
+    }
+    if (!emit_) {
+      visited_[b] = 1;
+      emitted_ += blocks_[b].size;
+      if (emitted_ > 2 * program_.size() + 64)
+        return false;
+    } else {
+      EmitCode(b);
+    }
+    if (blocks_[b].nsucc == 1) {
+      b = blocks_[b].succ[0];
+      continue;
+    }
+    if (!Select(b, g))
+      return false;
+    const u32 m = IPostDom(b, g);
+    if (m >= n_ && m != Exit())
+      return true;  // merge already branched to continue/break
+    b = m;
+  }
+}
+
+void Structurizer::EmitLoop(u32 h) {
+  const Id header = t_.m.NewBlock(), body = t_.m.NewBlock();
+  const Id cont = t_.m.NewBlock(), merge = t_.m.NewBlock();
+  Jump(header);
+  Open(header);
+  t_.m.LoopMerge(merge, cont);
+  Jump(body);
+  Open(body);
+  fresh_barrier_ = false;
+  if (iter_var_) {
+    // The dispatch loop's runaway guard, per loop iteration here.
+    const Id it = t_.m.Load(t_.t_u, iter_var_);
+    t_.m.Store(iter_var_, t_.m.Emit(spv::Op::OpIAdd, t_.t_u, {it, t_.U32(1)}));
+    const Id over =
+        t_.m.Emit(spv::Op::OpUGreaterThan, t_.t_bool, {it, t_.U32(kCfgMaxIter)});
+    const Id stop = t_.m.NewBlock(), go = t_.m.NewBlock();
+    t_.m.SelectionMerge(go);
+    t_.m.BranchConditional(over, stop, go);
+    Open(stop);
+    Jump(merge);
+    Open(go);
+  }
+  loops_.push_back({h, cont, merge});
+  Seq(h, Sink(), h, true);
+  if (open_)
+    Jump(cont);
+  loops_.pop_back();
+  Open(cont);
+  Jump(header);
+  Open(merge);
+  fresh_barrier_ = false;
+}
+
+void Structurizer::Emit() {
+  emit_ = true;
+  lockstep_ = sc_.lockstep_loop && t_.xchg_var;
+  if (kCfgMaxIter)
+    iter_var_ = t_.m.Variable(t_.p_priv_u, spv::StorageClass::Private,
+                              t_.m.ConstNull(t_.t_u));
+  if (lockstep_)
+    t_.RequireSubgroup(spv::Capability::GroupNonUniformVote);
+  Seq(0, Exit(), kNone, false);
+}
+
 void EmitCfg(Translator& t,
              const Program& program,
              StageContext& sc,
              const u8* reachable = nullptr) {
+  if (kStructuredCfg) {
+    Structurizer structured(t, program, sc, reachable);
+    if (structured.Plan()) {
+      structured.Emit();
+      return;
+    }
+  }
   const u32 max_pc =
       program.empty() ? 0 : program.back().pc + program.back().size;
   const base::Vector<u32> starts = BlockStarts(program, max_pc);

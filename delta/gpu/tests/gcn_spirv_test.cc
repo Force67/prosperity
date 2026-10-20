@@ -76,6 +76,51 @@ bool Recompile(base::Vector<u32> code) {
   return gpu::gcn::Recompile(code.data(), nullptr, user_data, user_data).ok;
 }
 
+size_t CountOp(const base::Vector<u32>& spirv, u32 op) {
+  size_t n = 0;
+  for (size_t i = 5; i < spirv.size();) {
+    const u32 word_count = spirv[i] >> 16;
+    if (!word_count)
+      break;
+    n += (spirv[i] & 0xFFFF) == op;
+    i += word_count;
+  }
+  return n;
+}
+
+base::Vector<u32> RecompileVs(base::Vector<u32> code) {
+  code.push_back(kEndPgm);
+  code.resize(4096);
+  const u32 user_data[16] = {};
+  const gpu::gcn::Recompiled r =
+      gpu::gcn::Recompile(code.data(), nullptr, user_data, user_data);
+  EXPECT_TRUE(r.ok);
+  return r.vs_spirv;
+}
+
+constexpr u32 kOpLoopMerge = 246, kOpSelectionMerge = 247, kOpSwitch = 251;
+
+TEST(GcnSpirv, ForwardBranchBecomesASelection) {
+  const base::Vector<u32> spirv = RecompileVs({
+      0xBF060100,  // s_cmp_eq_u32 s0, s1
+      0xBF840001,  // s_cbranch_scc0 over the next instruction
+      Vop1(0x01, 257),
+  });
+  EXPECT_EQ(CountOp(spirv, kOpSwitch), 0u);
+  EXPECT_EQ(CountOp(spirv, kOpLoopMerge), 0u);
+  EXPECT_GE(CountOp(spirv, kOpSelectionMerge), 1u);
+}
+
+TEST(GcnSpirv, BackwardBranchBecomesALoop) {
+  const base::Vector<u32> spirv = RecompileVs({
+      0x80028102,  // s_add_u32 s2, s2, 1
+      0xBF0A0302,  // s_cmp_lt_u32 s2, s3
+      0xBF85FFFD,  // s_cbranch_scc1 back to the add
+  });
+  EXPECT_EQ(CountOp(spirv, kOpSwitch), 0u);
+  EXPECT_EQ(CountOp(spirv, kOpLoopMerge), 1u);
+}
+
 TEST(RdnaScalarReplay, CompareWritesOnlyItsSelectedMaskRegister) {
   const u32 code[] = {0x7c041ef9, 0x86860080, kEndPgm};
   auto program = gpu::rdna::DecodeShader(code, base::ArraySize(code));
