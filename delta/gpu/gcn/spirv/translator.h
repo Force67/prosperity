@@ -161,7 +161,70 @@ struct Translator {
   Id mask_lane_id = 0;
   Id MaskLaneHigh() { return IsNonZero(And(mask_lane_id, U32(32))); }
   Id MaskWord(Id lo, Id hi) {
+    if (dual)
+      return half ? hi : lo;
     return lane_masks ? SelectB(MaskLaneHigh(), hi, lo) : lo;
+  }
+  // Whole-wave view of a mask register, for scalar tests such as EXECZ.
+  Id WaveMask(u32 sgpr) {
+    return full_wave_masks || dual ? Or(Sg(sgpr), Sg(sgpr + 1)) : SgMask(sgpr);
+  }
+
+  // Dual-lane mode: an invocation runs lanes `sid` and `sid + 32` of a wave64
+  // and one subgroup holds the wave, so SGPRs and masks stay wave-uniform.
+  // Vector instructions are emitted once per half, each half with its own
+  // VGPRs and mask word; the SGPRs they write are held until both are done.
+  bool dual = false;
+  u32 half = 0;
+  Id half_lane[2] = {};
+  Id other_vgpr = 0;
+  Id other_vgpr_regs[256] = {};
+  bool hold_scalar_writes = false;
+  struct HeldWrite {
+    u32 sgpr;
+    Id value;
+  };
+  base::Vector<HeldWrite> held_writes;
+  Id first_half_pick = 0;
+  void SetHalf(u32 h) {
+    if (h == half)
+      return;
+    const Id v = vgpr;
+    vgpr = other_vgpr;
+    other_vgpr = v;
+    for (u32 i = 0; i < 256; i++) {
+      const Id r = vgpr_regs[i];
+      vgpr_regs[i] = other_vgpr_regs[i];
+      other_vgpr_regs[i] = r;
+    }
+    for (u32 i = kRegVgpr; i < kRegScc; i++)
+      known_regs[i] = {};
+    exec_memo = {};
+    lane_active_memo = {};
+    half = h;
+    lane_id = mask_lane_id = half_lane[h];
+  }
+  Id VgHalf(u32 i, u32 h) {
+    const u32 was = half;
+    SetHalf(h);
+    const Id v = Vg(i);
+    SetHalf(was);
+    return v;
+  }
+  // `candidate` is this half's reading of `lane`; returns the reading from
+  // the half that owns the lane. Called once per half, low half first.
+  Id PickHalf(Id candidate, Id lane) {
+    if (half == 0) {
+      first_half_pick = candidate;
+      return candidate;
+    }
+    return SelectB(Uge(lane, U32(32)), candidate, first_half_pick);
+  }
+  void FlushHeldWrites() {
+    hold_scalar_writes = false;
+    for (const HeldWrite& w : held_writes)
+      SetSg(w.sgpr, w.value);
+    held_writes.clear();
   }
   Id SgMask(u32 sgpr) { return MaskWord(Sg(sgpr), Sg(sgpr + 1)); }
 
@@ -207,6 +270,11 @@ struct Translator {
   }
   Memo exec_memo, lane_active_memo;
   void SetMask(u32 sgpr, Id value) {
+    if (dual) {
+      if (!rdna_sources || sgpr != 125)
+        SetSg(sgpr + half, value);
+      return;
+    }
     if (full_wave_masks) {
       WavePublish(value);
       Barrier();
@@ -334,8 +402,10 @@ struct Translator {
   static constexpr u32 kBarrierLdsOnly = 0x108, kBarrierWithMemory = 0x948;
   u32 barrier_semantics = kBarrierLdsOnly;
   void Barrier() {
+    const u32 scope = static_cast<u32>(dual ? spv::Scope::Subgroup
+                                            : spv::Scope::Workgroup);
     m.EmitVoid(spv::Op::OpControlBarrier,
-               {U32(2), U32(2), U32(barrier_semantics)});
+               {U32(scope), U32(scope), U32(barrier_semantics)});
   }
 
   void RequireSubgroup(spv::Capability extra) {
@@ -390,6 +460,10 @@ struct Translator {
     return LoadReg(kRegVgpr + i, VgPtr(i));
   }
   void SetSg(u32 i, Id v) {
+    if (hold_scalar_writes) {
+      held_writes.push_back({i, v});
+      return;
+    }
     if (!rdna_sources || i != 125)
       StoreReg(i, SgPtr(i), v);
   }
@@ -703,10 +777,10 @@ struct Translator {
         return U32(0x3e22f983u);
       case 251:
         return SelectB(
-            IsZero(full_wave_masks ? Or(Sg(106), Sg(107)) : SgMask(106)),
+            IsZero(WaveMask(106)),
             U32(1), U32(0));
       case 252:
-        return SelectB(IsZero(full_wave_masks ? Or(Sg(126), Sg(127)) : Exec()),
+        return SelectB(IsZero(WaveMask(126)),
                        U32(1), U32(0));
       case 253:
         return Scc();

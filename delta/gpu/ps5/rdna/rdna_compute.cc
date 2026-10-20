@@ -75,6 +75,7 @@ gpu::gcn::RecompiledCs RecompileCompute(const u32*,
 
 namespace {
 DELTA_OPTION(bool, kGpuSpirvNoopt, "DELTA_GPU_SPIRV_NOOPT", false);
+DELTA_OPTION(bool, kDualLanes, "DELTA_GPU_DUAL_LANES", true);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
 DELTA_OPTION(bool, kAgcTrace, "DELTA_AGC_TRACE", false);
 }  // namespace
@@ -717,6 +718,17 @@ bool TranslateCs(const Program& program,
   sc.wave_lockstep = sc.lds_sync = !wave32 &&
                                    gpu::gcn::WaveSplitsAcrossSubgroups() &&
                                    NeedsWaveLockstep(program);
+  const u32 threads = base::Max(num_thread_x, 1u) *
+                      base::Max(num_thread_y, 1u) *
+                      base::Max(num_thread_z, 1u);
+  // Two lanes per invocation instead of lock-stepping every wave of the
+  // workgroup; GDS counters still want the lock-step exchange.
+  t.dual = kDualLanes && sc.wave_lockstep && threads > 64 &&
+           r.gds_binding < 0;
+  if (t.dual) {
+    sc.wave_lockstep = false;
+    uses_lane_id = true;
+  }
   t.wave_size = wave32 ? 32 : 64;
   t.full_wave_masks = sc.wave_lockstep;
   t.movrel_m0 = PlanMovrelIndices(program);
@@ -791,6 +803,14 @@ bool TranslateCs(const Program& program,
   t.m.Decorate(group_id, spv::Decoration::BuiltIn,
                {static_cast<u32>(spv::BuiltIn::WorkgroupId)});
   base::Vector<Id> iface{local_id, group_id};
+  Id subgroup_id = 0;
+  if (t.dual) {
+    subgroup_id = t.m.Variable(t.m.TypePointer(spv::StorageClass::Input, t.t_u),
+                               spv::StorageClass::Input);
+    t.m.Decorate(subgroup_id, spv::Decoration::BuiltIn,
+                 {static_cast<u32>(spv::BuiltIn::SubgroupId)});
+    iface.push_back(subgroup_id);
+  }
   if (uses_lane_id) {
     t.m.Capability(spv::Capability::GroupNonUniform);
     t.m.Capability(spv::Capability::GroupNonUniformShuffle);
@@ -821,6 +841,47 @@ bool TranslateCs(const Program& program,
     t.SetSg(sg++, group_comp(1));
   if ((tgid_enable & 4) && sg < 106)
     t.SetSg(sg++, group_comp(2));
+  if (t.dual) {
+    const u32 nx = base::Max(num_thread_x, 1u), ny = base::Max(num_thread_y, 1u);
+    const Id arr_vg = t.m.TypeArray(t.t_u, 256);
+    t.other_vgpr =
+        t.m.Variable(t.m.TypePointer(spv::StorageClass::Private, arr_vg),
+                     spv::StorageClass::Private, t.m.ConstNull(arr_vg));
+    t.lane_masks = t.wave_masks = true;
+    const Id sid = t.m.Load(t.t_u, sc.subgroup_local_id);
+    const Id wave_first = t.Mul(t.m.Load(t.t_u, subgroup_id), t.U32(64));
+    Id live[2];
+    for (u32 h = 0; h < 2; h++) {
+      t.half_lane[h] = t.Add(sid, t.U32(h * 32));
+      t.SetHalf(h);
+      const Id thread = t.Add(wave_first, t.half_lane[h]);
+      const auto div = [&](Id a, u32 b) {
+        return t.m.Emit(spv::Op::OpUDiv, t.t_u, {a, t.U32(b)});
+      };
+      const auto mod = [&](Id a, u32 b) {
+        return t.m.Emit(spv::Op::OpUMod, t.t_u, {a, t.U32(b)});
+      };
+      t.SetVg(0, mod(thread, nx));
+      t.SetVg(1, mod(div(thread, nx), ny));
+      t.SetVg(2, div(thread, nx * ny));
+      live[h] = t.Ult(thread, t.U32(threads));
+    }
+    t.SetHalf(0);
+    t.lane_id = t.mask_lane_id = t.half_lane[0];
+    t.SetSg(126, t.BallotLow(live[0]));
+    t.SetSg(127, t.BallotLow(live[1]));
+    t.predicate_vector = true;
+    EmitCfg(t, program, sc);
+    if (sc.cs_unsupported)
+      return false;
+    t.m.ReturnVoid();
+    t.m.EndFunction();
+    t.m.EntryPoint(spv::ExecutionModel::GLCompute, main_fn, "main", iface);
+    const u32 invocations = (threads + 63) / 64 * 32;
+    t.m.ExecMode(main_fn, spv::ExecutionMode::LocalSize, {invocations, 1, 1});
+    r.local_size[0] = invocations;
+    return true;
+  }
   for (u32 c = 0; c < 3; c++)
     t.SetVg(c, t.m.Load(t.t_u, t.m.AccessChain(p_in_u, local_id, {t.U32(c)})));
   t.lane_masks = true;

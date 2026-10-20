@@ -912,6 +912,8 @@ Id ReadLane(Translator& t, Id value, Id lane) {
   if (!t.lane_id)
     return value;
   lane = t.And(lane, t.U32(t.wave_size - 1));
+  if (t.dual)
+    return t.PickHalf(t.SubgroupShuffle(value, lane), lane);
   if (t.CanExchange())
     return t.WaveExchange(value, lane);
   if (t.wave_size == 64 && WaveSplitsAcrossSubgroups())
@@ -922,6 +924,16 @@ Id ReadLane(Translator& t, Id value, Id lane) {
 Id ReadFirstLane(Translator& t, Id value) {
   if (t.readfirstlane_uniform)
     return value;
+  if (t.dual) {
+    const Id lo = t.Sg(126), hi = t.Sg(127);
+    const Id first = t.SelectB(
+        t.IsNonZero(lo), t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {lo}),
+        t.SelectB(t.IsNonZero(hi),
+                  t.Add(t.m.ExtInst(t.t_u, GLSLstd450FindILsb, {hi}),
+                        t.U32(32)),
+                  t.U32(0)));
+    return t.PickHalf(t.SubgroupShuffle(value, first), first);
+  }
   if (!t.xchg_lanes)
     return value;
   if (t.full_wave_masks) {
@@ -1869,7 +1881,10 @@ void EmitVop3(Translator& t,
       if (sgn)
         bit64 = t.Xor(bit64,
                       t.Xor(t.Shr(p_hi, t.U32(31)), t.Shr(s2_hi, t.U32(31))));
-      t.SetSdst(sdst, 0, t.And(bit64, t.U32(1)));
+      if (t.dual)
+        t.SetLaneFlag(sdst, bit64);
+      else
+        t.SetSdst(sdst, 0, t.And(bit64, t.U32(1)));
       break;
     }
     case 0x360:

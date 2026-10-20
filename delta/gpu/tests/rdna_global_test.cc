@@ -252,7 +252,6 @@ TEST_F(RdnaGlobal, LiteralExecMasksSelectBothHalvesOfWave64) {
 }
 
 TEST_F(RdnaGlobal, CompareMaskControlsUpperWaveLanesAndConditionalMoves) {
-  auto& dest = PageForDispatch();
   Mov(2, 1);
   Mov(3, 17);
   program_.push_back(0x7d8400a3);
@@ -260,12 +259,58 @@ TEST_F(RdnaGlobal, CompareMaskControlsUpperWaveLanesAndConditionalMoves) {
   program_.push_back(0x34000082);
   Global(0x1c, 0, 2, 2);
   program_.push_back(0xbefe046a);
-  Global(0x1c, 0, 3, 2, 256);
-  Run(0, reinterpret_cast<u64>(dest.data()), 64);
-  for (u32 lane = 0; lane < 64; ++lane) {
-    EXPECT_EQ(dest[lane], lane == 35 ? 17u : 1u) << lane;
-    EXPECT_EQ(dest[64 + lane], lane == 35 ? 17u : 0xa5a5a5a5) << lane;
+  Global(0x1c, 0, 3, 2, 512);
+  for (u32 threads : {64u, 128u}) {
+    auto& dest = PageForDispatch();
+    Run(0, reinterpret_cast<u64>(dest.data()), threads);
+    for (u32 lane = 0; lane < threads; ++lane) {
+      EXPECT_EQ(dest[lane], lane == 35 ? 17u : 1u) << lane;
+      EXPECT_EQ(dest[128 + lane], lane == 35 ? 17u : 0xa5a5a5a5) << lane;
+    }
   }
+}
+
+// Two waves, so each wave64 runs as two halves of one host subgroup.
+TEST_F(RdnaGlobal, ReadLaneReachesTheUpperHalfOfEachWave) {
+  auto& dest = PageForDispatch();
+  program_ = {0xd7600004, 0x00015100, 0x7e060204, 0x34000082};
+  Global(0x1c, 0, 3, 2);
+  Run(0, reinterpret_cast<u64>(dest.data()), 128);
+  for (u32 lane = 0; lane < 128; ++lane)
+    EXPECT_EQ(dest[lane], lane / 64 * 64 + 40) << lane;
+}
+
+TEST_F(RdnaGlobal, ReadFirstLaneFindsTheFirstUpperLane) {
+  auto& dest = PageForDispatch();
+  const u64 mask = (1ull << 40) | (1ull << 50);
+  // The mask count only makes the wave need its lanes in step.
+  program_ = {0xd7650005, 0x000100c1, 0xbefe0400, 0x7e080500,
+              0xbefe04c1, 0x7e060204, 0x34000082};
+  Global(0x1c, 0, 3, 2);
+  Run(mask, reinterpret_cast<u64>(dest.data()), 128);
+  for (u32 lane = 0; lane < 128; ++lane)
+    EXPECT_EQ(dest[lane], lane / 64 * 64 + 40) << lane;
+}
+
+TEST_F(RdnaGlobal, RowShiftStaysInsideEachRowOfBothHalves) {
+  auto& dest = PageForDispatch();
+  Mov(3, 999);
+  program_.insert(program_.end(), {0x7e0602fa, 0xff011100, 0x34000082});
+  Global(0x1c, 0, 3, 2);
+  Run(0, reinterpret_cast<u64>(dest.data()), 128);
+  for (u32 lane = 0; lane < 128; ++lane)
+    EXPECT_EQ(dest[lane], lane % 16 ? lane - 1 : 999u) << lane;
+}
+
+TEST_F(RdnaGlobal, SharedMemoryIsOrderedAcrossLanesOfAWave) {
+  auto& dest = PageForDispatch();
+  lds_size_ = 1;
+  program_ = {0x34020082, 0xd8340000, 0x00000001, 0x3a0400a1,
+              0x34040482, 0xd8d80000, 0x03000002, 0x34000082};
+  Global(0x1c, 0, 3, 2);
+  Run(0, reinterpret_cast<u64>(dest.data()), 128);
+  for (u32 lane = 0; lane < 128; ++lane)
+    EXPECT_EQ(dest[lane], lane ^ 33) << lane;
 }
 
 TEST_F(RdnaGlobal, DispatchStartsUseExclusiveEndsAndPreserveWorkgroupIds) {

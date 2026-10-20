@@ -1556,7 +1556,37 @@ thread_local u64 g_cs_addr = 0;
 
 void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc);
 
+bool IsVectorInst(const Inst& inst) {
+  switch (inst.enc) {
+    case Enc::kVop1:
+    case Enc::kVop2:
+    case Enc::kVop3:
+    case Enc::kVop3p:
+    case Enc::kVopc:
+    case Enc::kVintrp:
+    case Enc::kDs:
+    case Enc::kMubuf:
+    case Enc::kMtbuf:
+    case Enc::kMimg:
+    case Enc::kExp:
+    case Enc::kFlat:
+      return true;
+    default:
+      return false;
+  }
+}
+
 void RdnaEmitInst(Translator& t, const Inst& inst, StageContext& sc) {
+  if (t.dual && !t.hold_scalar_writes && IsVectorInst(inst)) {
+    t.hold_scalar_writes = true;
+    for (u32 h = 0; h < 2; h++) {
+      t.SetHalf(h);
+      RdnaEmitInst(t, inst, sc);
+    }
+    t.SetHalf(0);
+    t.FlushHeldWrites();
+    return;
+  }
   const bool probing = sc.is_cs && kCsVgprCs && g_cs_addr == kCsVgprCs;
   if (probing && !sc.cs_probe_var) {
     const Id arr = t.m.TypeArray(t.t_u, 4);
@@ -2013,7 +2043,8 @@ void RdnaEmitInstBody(Translator& t, const Inst& inst, StageContext& sc) {
           gpu::gcn::WarnUnsupported("vop3.permlane", op, w, w1);
           break;
         }
-        const Id lane = t.WaveLane();
+        const Id lane =
+            t.dual ? t.m.Load(t.t_u, sc.subgroup_local_id) : t.WaveLane();
         const Id selectors =
             t.SelectB(t.IsZero(t.And(lane, t.U32(8))),
                       t.SrcRaw(s1, inst.literal), t.SrcRaw(s2, inst.literal));
@@ -2472,9 +2503,7 @@ bool HasControlFlow(const Program& program) {
 }
 
 Id BranchTaken(Translator& t, int kind) {
-  const auto mask = [&](u32 sg) {
-    return t.full_wave_masks ? t.Or(t.Sg(sg), t.Sg(sg + 1)) : t.SgMask(sg);
-  };
+  const auto mask = [&](u32 sg) { return t.WaveMask(sg); };
   switch (kind) {
     case 2:
       return t.IsZero(t.Scc());
@@ -3506,8 +3535,8 @@ class Structurizer {
 
  private:
   struct Loop {
-    u32 header = ~0u, exit = ~0u;
-    Id cont = 0, brk = 0;
+    u32 header = ~0u;
+    Id cont = 0, brk = 0, exit_var = 0;
   };
 
   bool Build() {
@@ -3655,26 +3684,46 @@ class Structurizer {
         }
       }
     }
+    exits_of_.assign(nodes, {});
     for (u32 h = 0; h < n_; h++) {
       if (in_loop_[h].empty())
         continue;
-      u32 exit = ~0u;
+      base::Vector<u32>& exits = exits_of_[h];
       for (u32 x = 0; x < n_; x++) {
         if (!in_loop_[h][x])
           continue;
-        for (u32 s : succ_[x]) {
-          if (s < nodes && in_loop_[h][s])
-            continue;
-          if (exit != ~0u && exit != s)
-            return Fail("two-exits");
-          exit = s;
-        }
+        for (u32 s : succ_[x])
+          if (!(s < nodes && in_loop_[h][s]) &&
+              base::Find(exits.begin(), exits.end(), s) == exits.end())
+            exits.push_back(s);
       }
-      if (exit == ~0u)
+      if (exits.empty())
         return Fail("no-loop-exit");
-      exit_of_[h] = exit;
+      base::Sort(exits.begin(), exits.end());
+      // Several exits are routed after the loop and rejoin where all of
+      // them meet.
+      u32 meet = exits[0];
+      for (u32 e : exits) {
+        base::Vector<u8> above(nodes, 0);
+        for (u32 x = meet; x != ~0u; x = x == n_ ? ~0u : ipdom_[x])
+          above[x] = 1;
+        u32 y = e;
+        while (y != ~0u && !above[y])
+          y = y == n_ ? ~0u : ipdom_[y];
+        if (y == ~0u)
+          return Fail("loop-exits-never-meet");
+        meet = y;
+      }
+      exit_of_[h] = meet;
     }
     return true;
+  }
+
+  bool IsExit(const Loop& loop, u32 b) const {
+    if (loop.header == ~0u)
+      return false;
+    const base::Vector<u32>& exits = exits_of_[loop.header];
+    return base::Find(exits.begin(), exits.end(), b) != exits.end();
   }
 
   base::Vector<u32> Dominators(const base::Vector<u32>& rpo,
@@ -3736,14 +3785,23 @@ class Structurizer {
       }
       if (loop.header != ~0u && b == loop.header)
         return Leave(loop.cont);
-      if (loop.header != ~0u && b == loop.exit)
+      if (IsExit(loop, b)) {
+        const base::Vector<u32>& exits = exits_of_[loop.header];
+        if (!dry_ && loop.exit_var)
+          t_.m.Store(loop.exit_var,
+                     t_.U32(static_cast<u32>(
+                         base::Find(exits.begin(), exits.end(), b) -
+                         exits.begin())));
         return Leave(loop.brk);
+      }
       if (b == n_) {
         ok_ = false;
         return false;
       }
       if (!in_loop_[b].empty() && b != loop.header) {
-        b = EmitLoop(b, loop);
+        b = EmitLoop(b, stop, loop);
+        if (b == ~0u)
+          return false;
         continue;
       }
       b = EmitBlock(b, stop, loop);
@@ -3765,14 +3823,18 @@ class Structurizer {
     return false;
   }
 
-  u32 EmitLoop(u32 h, const Loop& outer) {
-    const u32 exit = exit_of_[h];
-    if (outer.header != ~0u && exit != outer.exit && exit != outer.header &&
-        !InLoop(outer, exit)) {
-      ok_ = false;
-      return n_;
-    }
-    Loop loop{h, exit, 0, 0};
+  u32 EmitLoop(u32 h, u32 stop, const Loop& outer) {
+    const base::Vector<u32>& exits = exits_of_[h];
+    for (u32 e : exits)
+      if (outer.header != ~0u && !IsExit(outer, e) && e != outer.header &&
+          !InLoop(outer, e)) {
+        ok_ = false;
+        return n_;
+      }
+    Loop loop{h};
+    if (!dry_ && exits.size() > 1)
+      loop.exit_var = t_.m.Variable(t_.p_priv_u, spv::StorageClass::Private,
+                                    t_.m.ConstNull(t_.t_u));
     Id header = 0, body = 0;
     if (!dry_) {
       header = t_.m.NewBlock();
@@ -3802,7 +3864,41 @@ class Structurizer {
       }
       t_.m.OpenBlock(loop.brk);
     }
-    return exit;
+    if (exits.size() == 1)
+      return exits[0];
+    u32 merge = exit_of_[h];
+    if (!InLoop(outer, merge) || merge == outer.header || IsExit(outer, merge))
+      merge = stop;
+    Id merge_label = 0;
+    base::Vector<Id> arms(exits.size(), 0);
+    if (!dry_) {
+      merge_label = t_.m.NewBlock();
+      base::Vector<base::Pair<u32, Id> > cases;
+      for (u32 k = 0; k < exits.size(); k++) {
+        arms[k] = t_.m.NewBlock();
+        if (k + 1 < exits.size())
+          cases.push_back({k, arms[k]});
+      }
+      t_.m.SelectionMerge(merge_label);
+      t_.m.Switch(t_.m.Load(t_.t_u, loop.exit_var), arms.back(), cases);
+    }
+    bool joins = false;
+    for (u32 k = 0; k < exits.size(); k++) {
+      if (!dry_)
+        t_.m.OpenBlock(arms[k]);
+      const bool arm_joins = Emit(exits[k], merge, outer);
+      if (arm_joins && !dry_)
+        t_.m.Branch(merge_label);
+      joins |= arm_joins;
+    }
+    if (!dry_)
+      t_.m.OpenBlock(merge_label);
+    if (!joins) {
+      if (!dry_)
+        t_.m.Unreachable();
+      return ~0u;
+    }
+    return merge;
   }
 
   u32 EmitBlock(u32 b, u32 stop, const Loop& loop) {
@@ -3830,8 +3926,7 @@ class Structurizer {
     const u32 target = succ_[b][0], fall = succ_[b][1];
     u32 merge = ipdom_[b];
     const bool joins = merge != ~0u && InLoop(loop, merge) &&
-                       merge != loop.header &&
-                       (loop.header == ~0u || merge != loop.exit);
+                       merge != loop.header && !IsExit(loop, merge);
     if (!joins)
       merge = stop;
     Id merge_label = 0, then_label = 0, else_label = 0;
@@ -3871,6 +3966,7 @@ class Structurizer {
   base::Vector<base::Vector<u32> > succ_;
   base::Vector<u8> reachable_;
   base::Vector<u32> idom_, ipdom_, header_of_, exit_of_;
+  base::Vector<base::Vector<u32> > exits_of_;
   base::Vector<base::Vector<u8> > in_loop_;
   bool dry_ = true, ok_ = true;
   const char* why_ = nullptr;
@@ -3891,12 +3987,12 @@ void EmitCfg(Translator& t, const Program& program, StageContext& sc) {
     Structurizer structurizer(t, program, sc);
     const bool done = structurizer.Run();
     if (kCfgTrace)
-      BASE_LOGI("cfgtrace", "{} insts={} lanes={} -> {}{}",
+      BASE_LOGI("cfgtrace", "{}{} insts={} lanes={} -> {}{}",
                 sc.is_mesh ? "mesh"
                 : sc.is_cs ? "cs"
                 : sc.is_ps ? "ps"
                            : "vs",
-                program.size(), t.xchg_lanes,
+                t.dual ? " dual" : "", program.size(), t.xchg_lanes,
                 done ? "structured" : "state machine: ",
                 done ? "" : (structurizer.why() ? structurizer.why() : "?"));
     if (done)
