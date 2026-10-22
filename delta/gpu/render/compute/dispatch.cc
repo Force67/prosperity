@@ -470,10 +470,13 @@ void ResolveComputeTexture(const DrawInfo::DrawTex& t,
       }
     }
   }
+  if (rt_eligible && g_rts.count(base) && !CsRefreshRtFromTruth(base))
+    FlushCsWritesAt(DefaultRenderer(), base, "cs-tex");
+  // Read only now: the flush above may submit the frame chunk and swap lists.
   rhi::CommandList* const list = g_frame.list;
+  if (!list)
+    return;
   if (rt_eligible && g_rts.count(base)) {
-    if (!CsRefreshRtFromTruth(base))
-      FlushCsWritesAt(DefaultRenderer(), base, "cs-tex");
     RTarget& rt = g_rts[base];
     if (rt.ever_rendered) {
       if (rt.layout != rhi::TextureState::kShaderRead || rt.dirty_for_read) {

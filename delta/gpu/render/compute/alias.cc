@@ -496,20 +496,23 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
   const CsAliasedImage& img = live.img;
   AliasedCopyPlan plan;
   if (!PlanAliasedCopy(img, e.res, "writes", plan)) {
-    if (!img.is_depth) {
+    // The live image may be a variant or alias kept under another base;
+    // only an RT under this one is marked, never a new empty entry.
+    if (const auto rt = g_rts.find(base); !img.is_depth && rt != g_rts.end()) {
       if (kCsRtTrace)
         BASE_LOGI("csrt", "shape mismatch on {:#x} -> ever_rendered=false",
                   (unsigned long)base);
-      g_rts[base].ever_rendered = false;
+      rt->second.ever_rendered = false;
     }
     return true;
   }
   if (!RecordRtUploadInFrame(live, e.res, e, plan))
     return false;
   if (!img.is_depth) {
-    RTarget& rt = g_rts[base];
-    rt.ever_rendered = true;
-    rt.last_frame = g_frame.num;
+    if (const auto rt = g_rts.find(base); rt != g_rts.end()) {
+      rt->second.ever_rendered = true;
+      rt->second.last_frame = g_frame.num;
+    }
   } else if (!img.is_stencil) {
     auto it = g_depths.find(base);
     if (it != g_depths.end()) {
