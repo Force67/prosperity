@@ -279,7 +279,11 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
                                u64 arg4,
                                const void* opt,
                                i64* p_res) {
-  if (p_res)
+  // The PS4 syscall takes four arguments; r9 is whatever the caller left
+  // there (sceKernelLoadStartModule's int* result), so an 8-byte store
+  // clobbers the stack canary next to it.
+  if (p_res && Process::GetActive()->GetPlatform() ==
+                   kern::Process::Platform::kPs5)
     *p_res = 0;
   if (!path)
     return -SysError::eINVAL;

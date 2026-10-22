@@ -111,8 +111,9 @@ bool Process::Create(const base::String& path, bool from_vfs) {
 }
 ModulePtr Process::GetModule(base::StringRef name) {
   for (auto& mod : modules_) {
-    // module name is base::String, compare via c_str.
-    if (name == base::StringRef(mod->GetInfo().name))
+    const auto& info = mod->GetInfo();
+    if (name == base::StringRef(info.name) ||
+        name == base::StringRef(info.load_name))
       return mod;
   }
   return {nullptr};
@@ -153,6 +154,7 @@ ModulePtr Process::LoadModule(base::StringRef name) {
 
   base::String sname;
   sname.append(name.data(), name.length());
+  lib->GetInfo().load_name = sname;
 
   // PS5 titles use a coherent Prospero module set: system modules from a
   // firmware dump (DELTA_PS5_MODULES, a ':'-separated list of dirs holding

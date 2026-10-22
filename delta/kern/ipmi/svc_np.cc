@@ -23,10 +23,14 @@ enum {
   // becomes SCE_NP_STATE_SIGNED_IN, everything else SCE_NP_STATE_UNKNOWN.
   // Verified identical in PS4 and PS5 (fw 01.14.00) libSceNpManager.
   kMgrGetState = 0xe,
+  // in: {u32 userId, u8 flag} -> out: SceNpId (0x24 bytes). sceNpGetNpId
+  // returns the method result as is.
+  kMgrGetNpId = 0x17,
 };
 
 // The internal state that maps to SCE_NP_STATE_SIGNED_OUT.
 constexpr u32 kInternalSignedOut = 1;
+constexpr i32 kSignedOut = static_cast<i32>(0x80550006u);
 
 struct NpManager : Service {
   const char* Name() const override { return "SceNpMgrIpc"; }
@@ -35,6 +39,11 @@ struct NpManager : Service {
     switch (inv.Method()) {
       case kMgrGetState:
         inv.ReplyU32(0, kInternalSignedOut);
+        break;
+      case kMgrGetNpId:
+        // An all-zero id with SCE_OK reads as a signed-in user.
+        inv.ReplyEmpty();
+        inv.SetResult(kSignedOut);
         break;
       default:
         // The rest of this daemon's getters share one shape (inputs, then a

@@ -177,13 +177,9 @@ static Device* MakeDevice(const char* device_name) {
               : static_cast<Device*>(new DceDevice(proc->GetObjTable()));
   if (xname == "dipsw")
     dev = new DipswDevice(proc->GetObjTable());
-  if (xname == "random" || xname == "urandom")
-    dev = new RandomDevice(proc->GetObjTable());
-  // PS5 only. /dev/rng lets libSceSsl's DT_INIT seed itself; on Orbis that
-  // reaches libSceNpMatching2's init, which derefs an NpManager context we
-  // leave null (Tomb Raider faults). Widen once PS4 Np bring-up follows.
-  if (xname == "rng" && proc &&
-      proc->GetPlatform() == kern::Process::Platform::kPs5)
+  // /dev/rng seeds libSceSsl's module start; without it NpManager never
+  // initializes and every NP query answers "not initialized".
+  if (xname == "random" || xname == "urandom" || xname == "rng")
     dev = new RandomDevice(proc->GetObjTable());
   if (xname == "ajm")
     dev = new AjmDevice(proc->GetObjTable());

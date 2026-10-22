@@ -49,6 +49,9 @@ struct ModuleSeg {
 
 struct ModuleInfo {
   base::String name;
+  // The name the module was loaded under; libSceSsl2.sprx registers as
+  // "libSceSsl", so its importers would otherwise each load a fresh copy.
+  base::String load_name;
   u32 handle;
   u8* base;
   u8* entry;
