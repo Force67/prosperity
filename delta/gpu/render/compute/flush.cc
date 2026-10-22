@@ -60,9 +60,9 @@ bool CsRangeFlushOne(u64 base, CsRange& e) {
   e.last_validated_frame = kept ? -1 : g_frame.num;
   if (!kept && !(InMirror(base) && MirrorOwned(base & ~(kMirrorBlock - 1))))
     e.wt_clean = GuestWriteTracker().Arm(base, e.guest_bytes);
-  g_cs_stats.wb_why[e.truth           ? "gpu/img"
-                    : e.image_staging ? "gpu/lin"
-                                      : "gpu/buf"]++;
+  g_cs_stats.NoteWriteback(e.truth           ? "gpu/img"
+                           : e.image_staging ? "gpu/lin"
+                                             : "gpu/buf");
   return true;
 }
 
@@ -79,12 +79,12 @@ bool FlushCsWrites(Renderer& renderer, const char* why) {
   const u64 t0 = NowNs();
   bool all_current = true;
   const WaitReaderScope reader(why);
-  g_cs_stats.wb_why[base::String("all-call/") + why]++;
+  g_cs_stats.NoteWriteback("all-call/", why);
   for (u64 base : DirtyBases(/*ordered=*/true)) {
     auto it = g_cs.ranges.find(base);
     if (it == g_cs.ranges.end() || !it->second.gpu_dirty)
       continue;
-    g_cs_stats.wb_why[base::String("all/") + why]++;
+    g_cs_stats.NoteWriteback("all/", why);
     g_cs_stats.wb_why_bytes += it->second.size;
     if (!CsRangeFlushOne(it->first, it->second)) {
       if (g_cs.failed) {
@@ -126,10 +126,9 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
         continue;
       }
       const CsRange& fe = it->second;
-      g_cs_stats
-          .wb_why[base::String("frame-end") + (fe.truth           ? "/img"
-                                               : fe.image_staging ? "/lin"
-                                                                  : "/buf")]++;
+      g_cs_stats.NoteWriteback("frame-end", (fe.truth           ? "/img"
+                                             : fe.image_staging ? "/lin"
+                                                                : "/buf"));
       g_cs_stats.wb_why_bytes += fe.size;
       if (!CsRangeFlushOne(it->first, it->second)) {
         if (g_cs.failed) {
@@ -169,7 +168,7 @@ bool FlushCsWritesFrameEnd(Renderer& renderer, bool writeback) {
         continue;
       }
       if (e.gpu_dirty) {
-        g_cs_stats.wb_why["idle"]++;
+        g_cs_stats.NoteWriteback("idle");
         g_cs_stats.wb_why_bytes += e.size;
         if (!CsRangeFlushOne(it->first, e)) {
           if (g_cs.failed) {
@@ -394,9 +393,9 @@ static bool FlushDirtyRanges(Renderer& renderer,
       continue;
     if (found != g_cs.ranges.end() && found->second.gpu_dirty) {
       const CsRange& e = found->second;
-      g_cs_stats.wb_why[base::String(why) + (e.truth           ? "/img"
-                                             : e.image_staging ? "/lin"
-                                                               : "/buf")]++;
+      g_cs_stats.NoteWriteback(why, (e.truth           ? "/img"
+                                     : e.image_staging ? "/lin"
+                                                       : "/buf"));
       g_cs_stats.wb_why_bytes += e.size;
     }
     if (found != g_cs.ranges.end())
@@ -434,7 +433,7 @@ void FillOverDirtyRanges(u64 base, u64 bytes) {
       e.cpu_writes.clear();
       e.hash = 0;
       e.last_validated_frame = -1;
-      g_cs_stats.wb_why["fill-covered"]++;
+      g_cs_stats.NoteWriteback("fill-covered");
       continue;
     }
     u64 lo = base::Max(base, d), hi = base::Min(end, d + e.guest_bytes);
@@ -446,7 +445,7 @@ void FillOverDirtyRanges(u64 base, u64 bytes) {
       return true;
     });
     e.fill_kept.emplace_back(lo, hi);
-    g_cs_stats.wb_why["fill-kept"]++;
+    g_cs_stats.NoteWriteback("fill-kept");
   }
 }
 

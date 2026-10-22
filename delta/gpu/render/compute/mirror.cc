@@ -462,6 +462,19 @@ void AddSpan(OwnBlock& o, u32 lo, u32 hi) {
 }
 }  // namespace
 
+// IsReadableRangeCached over a whole block walks its 16 pages; the answer
+// only changes with the memory generation, so it is kept per block.
+bool BlockReadable(u64 block) {
+  base::Atomic<u64>& memo = OwnAt(block).readable;
+  const u64 gen = gpu::MemoryGeneration();
+  const u64 seen = memo.load(base::memory_order_relaxed);
+  if (seen >> 1 == gen)
+    return seen & 1;
+  const bool readable = gpu::IsReadableRangeCached(block, kMirrorBlock);
+  memo.store(gen << 1 | readable, base::memory_order_relaxed);
+  return readable;
+}
+
 bool MirrorOwnable(u64 base, u64 bytes) {
   if (!kMirrorOwn || !gcn::g_direct_table || !Device().caps().copy_after ||
       !g_cs.mirror || !g_cs.mirror->address())
@@ -470,7 +483,7 @@ bool MirrorOwnable(u64 base, u64 bytes) {
        block += kMirrorBlock) {
     const OwnBlock& o = OwnAt(block);
     const auto [lo, hi] = SpanIn(block, base, base + bytes);
-    if (!gpu::IsReadableRangeCached(block, kMirrorBlock) ||
+    if (!BlockReadable(block) ||
         o.faults.load(base::memory_order_relaxed) >= kOwnMaxFaults ||
         !SpanFits(o, lo, hi))
       return false;
@@ -616,7 +629,9 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
 
 DELTA_OPTION(bool, kMirrorBypass, "DELTA_GPU_MIRROR_BYPASS", true);
 
-rhi::Buffer* MirrorBypass(Renderer& renderer, u64 base, u64 bytes,
+rhi::Buffer* MirrorBypass(Renderer& renderer,
+                          u64 base,
+                          u64 bytes,
                           u64* offset) {
   if (!kMirrorBypass || !Device().caps().unified_memory)
     return nullptr;
@@ -648,7 +663,7 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
     const u64 hi = (MirrorOffset(run_end - 1) + page) & ~(page - 1);
     g_cs_stats.mirror_in_bytes += run_end - run;
     g_cs_stats.mirror_in_n++;
-    {
+    if (CsSyncReporting()) {
       u64& e = g_cs_stats.mirror_in_union[run];
       e = base::Max(e, run_end);
       auto& t = g_cs_stats.mirror_in_top[run];
@@ -670,7 +685,7 @@ bool MirrorCopyInGuest(u64 base, u64 bytes) {
         return false;
       continue;
     }
-    const bool whole = gpu::IsReadableRangeCached(block, kMirrorBlock);
+    const bool whole = BlockReadable(block);
     const u64 at = whole ? block : base::Max(block, base);
     const u64 to =
         whole ? block + kMirrorBlock : base::Min(end, block + kMirrorBlock);
@@ -814,7 +829,8 @@ static void RecordGuestWrite(rhi::CommandList* c,
                              u64 src_off = 0,
                              const MergeOperand* shadow = nullptr) {
   const WordMergePipe* merge = shadow ? WordMerge() : nullptr;
-  c->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessComputeRW | kAccessCopyRW);
+  c->Barrier(kAccessComputeRW | kAccessCopyRW,
+             kAccessComputeRW | kAccessCopyRW);
   const auto copy = [&](u64 lo, u64 hi) {
     if (merge && !((lo | hi) & 3)) {
       const MergeOperand result{src, src_off + lo - base};
@@ -987,7 +1003,6 @@ bool WriteTextureToGuest(rhi::Texture* texture,
   return true;
 }
 
-
 const MirrorWrite* MirrorWritten(u64 base, u64 bytes) {
   auto it = g_cs.mirror_writes.upper_bound(base);
   if (it == g_cs.mirror_writes.begin())
@@ -1017,7 +1032,6 @@ void RecordMirrorWrite(u64 first, u64 bytes) {
   g_cs.mirror_writes[first] = {end, ++g_cs.mirror_seq};
 }
 }  // namespace
-
 
 bool CaptureMirrorShadows(const u64* bases,
                           const u64* sizes,
@@ -1112,11 +1126,13 @@ void MirrorWriteBack(u64 base,
     }
     g_cs_stats.mirror_wb_bytes += to - run;
     g_cs_stats.mirror_wb_n++;
-    u64& e = g_cs_stats.mirror_wb_union[run];
-    e = base::Max(e, to);
-    auto& t = g_cs_stats.mirror_wb_top[run];
-    t.first += to - run;
-    t.second++;
+    if (CsSyncReporting()) {
+      u64& e = g_cs_stats.mirror_wb_union[run];
+      e = base::Max(e, to);
+      auto& t = g_cs_stats.mirror_wb_top[run];
+      t.first += to - run;
+      t.second++;
+    }
     if (publish(run, to))
       NotePendingGuestWrite(run, to);
   };
@@ -1234,7 +1250,7 @@ static bool MirrorWatch(u64 first, u64 end) {
 
 u64 MirrorCacheBlock(u64 block) {
   if (!kMirror || !Mirror() || !g_cs.mirror->address() || !InMirror(block) ||
-      MirrorOwned(block) || !gpu::IsReadableRangeCached(block, kMirrorBlock))
+      MirrorOwned(block) || !BlockReadable(block))
     return 0;
   const u64 address = g_cs.mirror->address() + MirrorOffset(block);
   if (g_cs.mirror_cached.count(block))

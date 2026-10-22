@@ -446,6 +446,11 @@ struct CsStats {
       truth_parent_n, truth_fold_n, truth_rt_n, truth_view_hits;
   base::Map<base::String, u64> wb_why;
   u64 wb_why_bytes;
+  // Counts a write-back by reason for the CSSYNC report; free while it's off.
+  void NoteWriteback(const char* why, const char* detail = "") {
+    if (CsSyncReporting())
+      wb_why[base::String(why) + detail]++;
+  }
   base::Map<u64, u64> mirror_wb_union, mirror_in_union;
   base::HashMap<u64, base::Pair<u64, u64>> mirror_wb_top, mirror_in_top;
   u64 mirror_wb_bytes, mirror_wb_n, mirror_own_bytes;
@@ -547,6 +552,8 @@ struct OwnBlock {
   u32 lo[kOwnSpans], hi[kOwnSpans];
   base::Atomic<u32> faults;
   base::Atomic<u8> cpu_dirty;
+  // Whether the whole block was readable, as (memory generation << 1) | bit.
+  base::Atomic<u64> readable;
   // While queued: the list whose submit runs the latest dispatch owning it.
   rhi::CommandList* owner_list;
   // Opened for the CPU while dispatches were queued on it: their list must
@@ -613,7 +620,9 @@ struct MirrorShadow {
   rhi::Buffer* buffer = nullptr;
   u64 base = 0, offset = 0, bytes = 0;
 };
-bool CaptureMirrorShadows(const u64* bases, const u64* sizes, u32 count,
+bool CaptureMirrorShadows(const u64* bases,
+                          const u64* sizes,
+                          u32 count,
                           MirrorShadow* out);
 
 void MirrorWriteBack(u64 base,

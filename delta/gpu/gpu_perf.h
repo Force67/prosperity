@@ -49,9 +49,38 @@ struct FrameStageNs {
 };
 extern FrameStageNs g_frame_ns;
 
+#if defined(__aarch64__)
+// The render thread times thousands of spans a frame; a vDSO clock_gettime
+// per call cost ~5% of it. CLOCK_MONOTONIC on arm64 is derived from the same
+// virtual counter, so reading the counter directly and adding the offset
+// measured once keeps both clocks comparable.
+struct CounterClock {
+  u64 mul = 0, offset = 0;
+  CounterClock() {
+    u64 freq, count;
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    mul = (u64(1000000000) << 32) / freq;
+    const u64 now = base::TickClock::NowNs();
+    asm volatile("isb; mrs %0, cntvct_el0" : "=r"(count));
+    offset = now - Scale(count);
+  }
+  u64 Scale(u64 count) const {
+    return static_cast<u64>((static_cast<unsigned __int128>(count) * mul) >>
+                            32);
+  }
+};
+
+inline u64 NowNs() {
+  static const CounterClock clock;
+  u64 count;
+  asm volatile("isb; mrs %0, cntvct_el0" : "=r"(count));
+  return clock.Scale(count) + clock.offset;
+}
+#else
 inline u64 NowNs() {
   return (base::TickClock::NowNs());
 }
+#endif
 
 struct ScopeNs {
   u64 t0;

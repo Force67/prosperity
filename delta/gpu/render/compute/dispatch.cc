@@ -16,15 +16,15 @@
 #include "base/time/time.h"
 #include "gpu/gcn/gcn_resource.h"
 #include "gpu/guest_memory.h"
+#include "gpu/render/debug/gpu_timeline.h"
+#include "gpu/render/debug/trace.h"
 #include "gpu/render/device.h"
 #include "gpu/render/frame.h"
-#include "gpu/render/debug/gpu_timeline.h"
 #include "gpu/render/image/guest_format.h"
-#include "gpu/render/memory/guest_memory_table.h"
 #include "gpu/render/image/render_target.h"
-#include "gpu/render/renderer_state.h"
 #include "gpu/render/image/texture_cache.h"
-#include "gpu/render/debug/trace.h"
+#include "gpu/render/memory/guest_memory_table.h"
+#include "gpu/render/renderer_state.h"
 #include "gpu/rhi/write_journal.h"
 #include "gpu/write_tracker.h"
 #include "guest/session.h"
@@ -857,26 +857,26 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         if (kCsKeepOverlap && s.gpu_dirty && !ci.res[i].read &&
             !ci.res[i].image_staging && !truth_i && !s.image_staging &&
             !s.truth) {
-          g_cs_stats.wb_why["overlap-kept"]++;
+          g_cs_stats.NoteWriteback("overlap-kept");
           continue;
         }
         if (reads_own_buffer && s.gpu_dirty) {
-          g_cs_stats.wb_why["overlap-own"]++;
+          g_cs_stats.NoteWriteback("overlap-own");
           continue;
         }
         if ((truth_i || ci.res[i].image_staging) &&
             (s.truth || s.image_staging) && s.gpu_dirty &&
             !(dirty >= base && dirty + s.guest_bytes <= base + guest_bytes) &&
             !(base >= dirty && base + guest_bytes <= dirty + s.guest_bytes)) {
-          g_cs_stats.wb_why["overlap-tiled"]++;
+          g_cs_stats.NoteWriteback("overlap-tiled");
           continue;
         }
         if (s.gpu_dirty && !ci.res[i].read && ci.res[i].written) {
-          g_cs_stats.wb_why["overlap-write-only"]++;
+          g_cs_stats.NoteWriteback("overlap-write-only");
           continue;
         }
         if (s.gpu_dirty) {
-          g_cs_stats.wb_why["overlap"]++;
+          g_cs_stats.NoteWriteback("overlap");
           g_cs_stats.wb_why_bytes += s.size;
           if (kCsOverlapTrace && g_frame.num >= kCsOverlapTrace) {
             static int shown = 0;
@@ -904,7 +904,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     }
     CsRange& e = g_cs.ranges[base];
     if (e.gpu_dirty && !e.cpu_writes.empty()) {
-      g_cs_stats.wb_why["cpu-write"]++;
+      g_cs_stats.NoteWriteback("cpu-write");
       g_cs_stats.wb_why_bytes += e.size;
       const WaitReaderScope reader("cpu-write");
       if (!CsRangeFlushOne(base, e) && g_cs.failed)
@@ -951,11 +951,11 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       UnindexDirtyRange(base, e.guest_bytes);
       e.gpu_dirty = false;
       e.cpu_writes.clear();
-      g_cs_stats.wb_why["reshape-superseded"]++;
+      g_cs_stats.NoteWriteback("reshape-superseded");
     }
     if (!same_shape && e.gpu_dirty) {
       const u64 trs = NowNs();
-      g_cs_stats.wb_why["reshape"]++;
+      g_cs_stats.NoteWriteback("reshape");
       g_cs_stats.wb_why_bytes += e.size;
       const WaitReaderScope reader("reshape");
       const bool ok = CsRangeFlushOne(base, e);
@@ -995,7 +995,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       e.cpu_writes.clear();
       e.hash = 0;
       e.last_validated_frame = -1;
-      g_cs_stats.wb_why["rt-superseded"]++;
+      g_cs_stats.NoteWriteback("rt-superseded");
     }
     const bool rt_stale = kCsRtCache && e.rt_sourced && e.last_rt_frame >= 0 &&
                           AliasedImageRenderSerial(base) <= e.rt_serial;
@@ -1351,7 +1351,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   };
   MirrorShadow shadows[ComputeInfo::kMaxResources] = {};
   {
-    u64 bases[ComputeInfo::kMaxResources] = {}, sizes[ComputeInfo::kMaxResources] = {};
+    u64 bases[ComputeInfo::kMaxResources] = {},
+        sizes[ComputeInfo::kMaxResources] = {};
     for (u32 i = 0; i < ci.num_res; i++)
       if (mirror_res[i] && ci.res[i].written) {
         bases[i] = ci.res[i].base;
