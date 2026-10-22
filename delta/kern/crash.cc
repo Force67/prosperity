@@ -486,8 +486,11 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
   if (int sc = cpu::FaultingSyscall(); sc >= 0)
     BASE_LOGI("crashHandler", "  in syscall {} ({})", sc,
               SyscallGetname((u32)sc));
-  BASE_LOGI("crashHandler", "  fault = {:016x}  {}",
-            (unsigned long long)si->si_addr, fault);
+  BASE_LOGI("crashHandler", "  fault = {:016x}  {}  ({})",
+            (unsigned long long)si->si_addr, fault,
+            si->si_code == SEGV_MAPERR   ? "not mapped"
+            : si->si_code == SEGV_ACCERR ? "no access"
+                                         : "other");
   // A fault inside the host-thunk pool is a call through a bound-but-unserviced
   // HLE import slot; name it (the raw address looks like unrelated garbage).
   {
