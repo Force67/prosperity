@@ -110,7 +110,7 @@ base::Vector<base::Pair<u64, u64>> Gaps(const base::Map<u64, u64>& runs,
 
 #if defined(__linux__)
 constexpr u8 kOpen = 0, kProtected = 1, kQueued = 2;
-constexpr u64 kQueueSize = 1u << 20;
+constexpr u64 kQueueSize = 1u << 22;
 u64* g_queue = nullptr;
 base::Atomic<u64> g_queue_head{0};
 u64 g_queue_tail = 0;
@@ -228,7 +228,7 @@ bool WriteTracker::Enable() {
 #if defined(__linux__)
 bool WriteTracker::EnableFault() {
   void* queue = mmap(nullptr, kQueueSize * sizeof(u64), PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (queue == MAP_FAILED)
     return false;
   g_queue = static_cast<u64*>(queue);

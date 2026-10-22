@@ -1961,6 +1961,33 @@ void ResolveShaderBuffers(base::Vector<VBuffer>& result,
 
 namespace {
 
+u32 CsResourceDwords(const CsResource& resource) {
+  return resource.kind == 1 ? 8 : resource.kind == 2 ? 2 : 4;
+}
+
+// Which instructions the straight-line resolve must step: those that feed a
+// resource descriptor, by backward liveness from each use. A scalar load of
+// plain constants is skipped, so it neither reads guest memory nor waits for
+// a GPU write to it to land.
+void CsResourceSteps(const Program& program,
+                     const RecompiledCs& plan,
+                     base::Vector<bool>& steps) {
+  steps.assign(program.size(), false);
+  SgprSet live;
+  for (u32 i = static_cast<u32>(program.size()); i-- > 0;) {
+    const Inst& inst = program[i];
+    const StepEffects e = EffectsOf(inst);
+    if (e.keep || e.writes.Intersects(live)) {
+      steps[i] = true;
+      live.Kill(e.writes);
+      live.Add(e.reads);
+    }
+    for (const CsResource& resource : plan.resources)
+      if (resource.use_pc == inst.pc)
+        AddRange(live, resource.base_sgpr, CsResourceDwords(resource));
+  }
+}
+
 void ResolveAlongCfg(base::Vector<ResolvedCsResource>& result,
                      const Program& program,
                      const RecompiledCs& plan,
@@ -2088,12 +2115,15 @@ void ResolveCsResources(base::Vector<ResolvedCsResource>& result,
   if (!user_data)
     return;
 
+  thread_local base::Vector<bool> steps;
+  CsResourceSteps(program, plan, steps);
   ScalarEval eval(user_data, code_base);
-  for (const Inst& inst : program) {
+  for (u32 i = 0; i < program.size(); i++) {
+    const Inst& inst = program[i];
     for (const CsResource& resource : plan.resources) {
       if (resource.use_pc != inst.pc || resource.binding >= result.size())
         continue;
-      const u32 dwords = resource.kind == 1 ? 8 : resource.kind == 2 ? 2 : 4;
+      const u32 dwords = CsResourceDwords(resource);
       if (!eval.AllKnown(resource.base_sgpr, dwords))
         continue;
       ResolvedCsResource& resolved = result[resource.binding];
@@ -2101,7 +2131,14 @@ void ResolveCsResources(base::Vector<ResolvedCsResource>& result,
                   dwords * sizeof(u32));
       resolved.valid = true;
     }
-    eval.Step(inst);
+    if (steps[i]) {
+      eval.Step(inst);
+      continue;
+    }
+    const StepEffects e = EffectsOf(inst);
+    for (u32 r = 0; r < ScalarEval::kRegs; r++)
+      if (e.writes.words[r / 64] >> (r % 64) & 1)
+        eval.Clear(r);
   }
   for (const ResolvedCsResource& resolved : result) {
     if (!resolved.valid) {
