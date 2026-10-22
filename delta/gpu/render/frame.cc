@@ -871,7 +871,9 @@ bool SubmitFrameChunk() {
   EndRegion();
   CmdEndLabel(g_frame.list);
   g_frame.list->End();
+  CsProtectBeforeSubmit(g_frame.list);
   slot.submission = Device().Submit(g_frame.list);
+  CsProtectSubmitted(slot.submission);
   slot.chunks.push_back(g_frame.list);
   rhi::CommandList* next = AcquireList();
   if (!next)
@@ -1209,8 +1211,10 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     CmdEndLabel(g_frame.list);
     g_frame.list->End();
     const u64 before = Device().LastSubmission();
+    CsProtectBeforeSubmit(g_frame.list);
     cur.submission = Device().Submit(g_frame.list);
     cur.submitted = cur.submission != before;
+    CsProtectSubmitted(cur.submitted ? cur.submission : before);
     if (!cur.submitted)
       BASE_LOGI("gpuvk", "frame submit failed");
   }

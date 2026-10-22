@@ -213,13 +213,19 @@ int g_capped_frame[512];
 base::Atomic<u32> g_capped_n{0};
 
 OwnBlock& OwnAt(u64 block) {
-  if (!g_cs.own) {
+  // Fault handlers on any thread can get here first; exactly one table wins.
+  OwnBlock* own = __atomic_load_n(&g_cs.own, __ATOMIC_ACQUIRE);
+  if (!own) {
     void* p =
         mmap(nullptr, kOwnBlocks * sizeof(OwnBlock), PROT_READ | PROT_WRITE,
              MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    g_cs.own = static_cast<OwnBlock*>(p);
+    if (__atomic_compare_exchange_n(&g_cs.own, &own, static_cast<OwnBlock*>(p),
+                                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+      own = static_cast<OwnBlock*>(p);
+    else
+      munmap(p, kOwnBlocks * sizeof(OwnBlock));
   }
-  return g_cs.own[MirrorOffset(block) / kMirrorBlock];
+  return own[MirrorOffset(block) / kMirrorBlock];
 }
 
 void MirrorReportCapped() {
@@ -242,6 +248,11 @@ bool InMirror(u64 address) {
 }
 
 namespace {
+void NoteProt(OwnBlock& o, u8 op) {
+  o.last_prot.store(op, base::memory_order_relaxed);
+  o.last_prot_frame.store(g_frame.num, base::memory_order_relaxed);
+}
+
 // Signal-safe: the kernel reports EFAULT for a page this process can't read.
 bool PageReadable(u64 address) {
   u8 byte;
@@ -256,11 +267,39 @@ bool PageReadable(u64 address) {
 bool MirrorFaultRaced(u64 page) {
   static thread_local u64 last = 0;
   static thread_local u32 repeats = 0;
-  if (!InMirror(page))
-    return false;
   repeats = page == last ? repeats + 1 : 0;
   last = page;
-  return repeats < 64 && PageReadable(page);
+  if (!InMirror(page))
+    return repeats < 4096 && PageReadable(page);
+  const u64 block = page & ~(kMirrorBlock - 1);
+  // Reopened, or already owned again by the next protect: either way the
+  // retried access reaches a resolvable state. A protect takes Busy before
+  // its mprotect, so the state is read after the page: an unreadable page
+  // with the block neither Busy nor Protected is reopened by then.
+  const bool readable = PageReadable(page);
+  const u64 s = OwnAt(block).state.load(base::memory_order_acquire);
+  if (repeats < 4096 &&
+      (readable || (s & (kOwnBusy | kOwnProtected)) || PageReadable(page)))
+    return true;
+  // About to become a crash: say what the mirror believed about the block.
+  bool queued = false;
+  for (u64 b : g_cs.own_unsubmitted)
+    queued = queued || b == block;
+  BASE_LOGW("csmirror",
+            "unresolved fault in block {:#x}: state={:#x} (protected={} "
+            "pending={} busy={} submission={}) queued={} protecting={}/{} "
+            "resolves={} retries={} last-prot={} at frame {} (now {})",
+            (unsigned long)block, (unsigned long)s, (s & kOwnProtected) != 0,
+            (s & kOwnPending) != 0, (s & kOwnBusy) != 0,
+            (unsigned long)(s & kOwnSubmission), queued,
+            g_cs.own_protecting.size(), g_cs.own_unsubmitted.size(),
+            g_mirror_resolves.load(base::memory_order_relaxed), repeats,
+            OwnAt(block).last_prot.load() == 1   ? "protect"
+            : OwnAt(block).last_prot.load() == 2 ? "resolve"
+            : OwnAt(block).last_prot.load() == 3 ? "forget"
+                                                 : "none",
+            OwnAt(block).last_prot_frame.load(), g_frame.num);
+  return false;
 }
 }  // namespace
 
@@ -290,6 +329,7 @@ bool MirrorResolve(u64 first, u64 end) {
                            s & kOwnSubmission);
       ::mprotect(reinterpret_cast<void*>(block), kMirrorBlock,
                  PROT_READ | PROT_WRITE | PROT_EXEC);
+      NoteProt(o, 2);
       WriteTracker::OpenedByOwner(block, block + kMirrorBlock);
       if (!(o.state.load(base::memory_order_acquire) & kOwnPending)) {
         DirectRestore(block);
@@ -307,12 +347,61 @@ bool MirrorResolve(u64 first, u64 end) {
       g_mirror_resolves.fetch_add(1, base::memory_order_relaxed);
       // MirrorOwn may have queued the block since `s` was read; dropping its
       // pending bit would queue it twice and spin MirrorProtectSubmitted.
-      o.state.fetch_and(kOwnPending, base::memory_order_acq_rel);
+      if (o.state.fetch_and(kOwnPending, base::memory_order_acq_rel) &
+          kOwnPending)
+        o.reopened.store(1, base::memory_order_release);
       resolved = true;
       break;
     }
   }
   return resolved;
+}
+
+void MirrorForget(u64 base, u64 bytes) {
+  if (!g_cs.own || !bytes)
+    return;
+  const u64 end = base + bytes;
+  for (u64 block = base & ~(kMirrorBlock - 1); block < end;
+       block += kMirrorBlock) {
+    if (!InMirror(block))
+      continue;
+    OwnBlock& o = OwnAt(block);
+    u64 s;
+    for (;;) {
+      s = o.state.load(base::memory_order_acquire);
+      if (!s)
+        break;
+      if (!(s & kOwnBusy) && o.state.compare_exchange_weak(
+                                 s, s | kOwnBusy, base::memory_order_acq_rel))
+        break;
+    }
+    if (!s)
+      continue;
+    // Offsets of the remapped part within the block; the rest is untouched.
+    const u32 cut_lo = static_cast<u32>(base::Max(block, base) - block);
+    const u32 cut_hi =
+        static_cast<u32>(base::Min(block + kMirrorBlock, end) - block);
+    if (s & kOwnProtected) {
+      const auto copy_back = [&](u32 lo, u32 hi) {
+        if (lo < hi)
+          Device().CopyAfter(g_cs.mirror, MirrorOffset(block) + lo, o.import,
+                             o.import_offset + lo, hi - lo, s & kOwnSubmission);
+      };
+      for (u32 i = 0; i < o.spans; i++) {
+        copy_back(o.lo[i], base::Min(o.hi[i], cut_lo));
+        copy_back(base::Max(o.lo[i], cut_hi), o.hi[i]);
+      }
+      if (cut_lo)
+        ::mprotect(reinterpret_cast<void*>(block), cut_lo,
+                   PROT_READ | PROT_WRITE | PROT_EXEC);
+      if (cut_hi < kMirrorBlock)
+        ::mprotect(reinterpret_cast<void*>(block + cut_hi),
+                   kMirrorBlock - cut_hi, PROT_READ | PROT_WRITE | PROT_EXEC);
+    }
+    NoteProt(o, 3);
+    DirectRestore(block);
+    o.state.store(0, base::memory_order_release);
+  }
 }
 
 bool MirrorOwnsAny(u64 first, u64 end) {
@@ -409,18 +498,32 @@ void MirrorOwn(u64 base, u64 bytes) {
       g_cs.mirror_was_owned.insert(block);
     }
     AddSpan(o, lo, hi);
+    // Publish it with the latest list that writes it.
+    o.owner_list = g_cs.list;
     if (!(o.state.fetch_or(kOwnPending, base::memory_order_acq_rel) &
           kOwnPending))
       g_cs.own_unsubmitted.push_back(block);
   }
 }
 
-void MirrorProtectSubmitted(u64 submission) {
-  if (g_cs.own_unsubmitted.empty())
+void MirrorProtectBegin(rhi::CommandList* list) {
+  base::Vector<u64>& blocks = g_cs.own_protecting;
+  if (!blocks.empty())
     return;
+  // A block MirrorForget dropped is no longer pending; one re-owned since
+  // may be queued twice.
+  for (u64 block : g_cs.own_unsubmitted) {
+    const OwnBlock& o = OwnAt(block);
+    if (o.owner_list == list &&
+        (o.state.load(base::memory_order_acquire) & kOwnPending))
+      blocks.push_back(block);
+  }
+  if (blocks.empty())
+    return;
+  g_cs.own_protect_list = list;
   DELTA_ZONE("mirror.protect");
-  base::Vector<u64>& blocks = g_cs.own_unsubmitted;
   base::Sort(blocks.begin(), blocks.end());
+  blocks.erase(base::Unique(blocks.begin(), blocks.end()), blocks.end());
   for (u64 block : blocks) {
     OwnBlock& o = OwnAt(block);
     u64 s = o.state.load(base::memory_order_acquire);
@@ -434,12 +537,40 @@ void MirrorProtectSubmitted(u64 submission) {
       j++;
     ::mprotect(reinterpret_cast<void*>(blocks[i]), (j - i) * kMirrorBlock,
                PROT_NONE);
+    for (size_t k = i; k < j; k++)
+      NoteProt(OwnAt(blocks[k]), 1);
     i = j;
   }
-  for (u64 block : blocks)
+  // Shut again, so guest memory is stable: give the mirror the CPU writes made
+  // while it was open, ahead of the queued dispatches in submission order.
+  rhi::CommandList* refresh = nullptr;
+  for (u64 block : blocks) {
+    OwnBlock& o = OwnAt(block);
+    if (!o.reopened.exchange(0, base::memory_order_acq_rel) || !o.import)
+      continue;
+    if (!refresh && !(refresh = BeginImmediate()))
+      break;
+    refresh->CopyBuffer(g_cs.mirror, MirrorOffset(block), o.import,
+                        o.import_offset, kMirrorBlock);
+  }
+  if (refresh)
+    EndImmediate(refresh, "mirror.refresh");
+}
+
+void MirrorProtectSubmitted(u64 submission) {
+  if (g_cs.own_protecting.empty())
+    return;
+  for (u64 block : g_cs.own_protecting)
     OwnAt(block).state.store(submission | kOwnProtected,
                              base::memory_order_release);
-  blocks.clear();
+  auto& queued = g_cs.own_unsubmitted;
+  size_t kept = 0;
+  for (u64 block : queued)
+    if (OwnAt(block).owner_list != g_cs.own_protect_list)
+      queued[kept++] = block;
+  queued.resize(kept);
+  g_cs.own_protecting.clear();
+  g_cs.own_protect_list = nullptr;
 }
 
 namespace {

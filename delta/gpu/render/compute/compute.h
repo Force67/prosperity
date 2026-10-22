@@ -74,6 +74,11 @@ void ReleaseRetiredCsBuffers();
 
 bool CsRefreshRtFromTruth(u64 base);
 void CsFrameListChanged();
+// Bracket every submit of a list that may run mirror-owning dispatches.
+void CsProtectBeforeSubmit(rhi::CommandList* list);
+void CsProtectSubmitted(u64 submission);
+// The guest remapped [base, base+bytes); any thread.
+void CsGuestRemapped(u64 base, u64 bytes);
 void CsSubmitBatchBeforeFrame();
 
 void CsForgetGuestRange(u64 base, u64 bytes);

@@ -393,6 +393,7 @@ void CollectGuestWrites() {
 }
 
 void NoteGuestRemap(u64 base, u64 bytes) {
+  CsGuestRemapped(base, bytes);
   gpu::MemoryRemapped().store(true, base::memory_order_release);
   gpu::NoteGuestRemap(base, bytes);
   NoteGuestDirectRemap(base, bytes);

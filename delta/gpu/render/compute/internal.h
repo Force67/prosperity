@@ -543,13 +543,28 @@ struct OwnBlock {
   u32 lo[kOwnSpans], hi[kOwnSpans];
   base::Atomic<u32> faults;
   base::Atomic<u8> cpu_dirty;
+  // While queued: the list whose submit runs the latest dispatch owning it.
+  rhi::CommandList* owner_list;
+  // Opened for the CPU while dispatches were queued on it: their list must
+  // see the CPU's writes, so the mirror is refreshed before it runs.
+  base::Atomic<u8> reopened;
+  // Diagnostics: the last mprotect the mirror made here, and on which frame.
+  base::Atomic<u8> last_prot;
+  base::Atomic<i32> last_prot_frame;
 };
 
 OwnBlock& OwnAt(u64 block);
 
 bool InMirror(u64 address);
 
+// Protect the blocks queued work owns BEFORE submitting it, so no CPU write
+// can land between the GPU reading a block and the protection; then publish
+// the submission the resolve copy waits for.
+void MirrorProtectBegin(rhi::CommandList* list);
 void MirrorProtectSubmitted(u64 submission);
+// The guest remapped [base, base+bytes): mirror state for those addresses
+// describes memory that is gone. Any thread.
+void MirrorForget(u64 base, u64 bytes);
 
 bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes);
 bool MirrorCopyInGuest(u64 base, u64 bytes);
@@ -660,7 +675,11 @@ struct ComputeState {
   base::HashSet<u64> mirror_clean;
   base::Vector<base::Pair<u64, u64>> mirror_self;
   OwnBlock* own = nullptr;
+  // Blocks a recorded dispatch owns, until their owner_list is submitted.
   base::Vector<u64> own_unsubmitted;
+  // The blocks MirrorProtectBegin protected for the submit in flight.
+  base::Vector<u64> own_protecting;
+  rhi::CommandList* own_protect_list = nullptr;
   base::Map<u64, MirrorWrite> mirror_writes;
   u64 mirror_seq = 0;
 };

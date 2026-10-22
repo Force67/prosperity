@@ -126,23 +126,39 @@ base::Atomic<bool (*)(u64, u64)> g_owner_resolve{nullptr};
 base::Atomic<bool (*)(u64, u64)> g_owner_owns{nullptr};
 base::Atomic<bool (*)(u64)> g_owner_raced{nullptr};
 
+// A fault no protection of ours explains: the owner says whether the page was
+// reopened (or reclaimed) since, so the access can retry.
+bool RetryUnclaimed(u64 page) {
+  const auto raced = g_owner_raced.load(base::memory_order_acquire);
+  return raced && raced(page);
+}
+
+// Armed but not ours to open: a disarm or another fault's open is mid-flight,
+// so retry; bounded so a page someone else shut for good still dies.
+bool RetryArmed(u64 page) {
+  static thread_local u64 last = 0;
+  static thread_local u32 repeats = 0;
+  repeats = page == last ? repeats + 1 : 0;
+  last = page;
+  return repeats < 100000 || RetryUnclaimed(page);
+}
+
 bool OnWriteFault(uintptr_t addr) {
   const u64 page = addr & ~(kPage - 1);
   if (const auto resolve = g_owner_resolve.load(base::memory_order_acquire);
       resolve && resolve(page, page + kPage))
     return true;
   auto* p = const_cast<GuestPageTable::Page*>(GuestPages().Find(page));
-  if (!p || !p->ever_armed.load(base::memory_order_relaxed)) {
-    const auto raced = g_owner_raced.load(base::memory_order_acquire);
-    return raced && raced(page);
-  }
+  if (!p || !p->ever_armed.load(base::memory_order_relaxed))
+    return RetryUnclaimed(page);
   u8 armed = kProtected;
   if (p->armed.compare_exchange_strong(armed, kQueued,
                                        base::memory_order_acq_rel)) {
     ::mprotect(reinterpret_cast<void*>(page), kPage, kOpenProt);
     Enqueue(page);
+    return true;
   }
-  return true;
+  return RetryUnclaimed(page) || RetryArmed(page);
 }
 
 void OnHostWrite(void* addr, size_t len) {

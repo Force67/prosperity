@@ -240,6 +240,7 @@ bool CsBatchSubmit() {
     b.submission = g_frame.slots[g_frame.slot_idx].submission;
   } else {
     g_cs.list->End();
+    MirrorProtectBegin(g_cs.list);
     b.submission = Device().Submit(g_cs.list);
   }
   g_cs.batch_open = false;
@@ -248,6 +249,7 @@ bool CsBatchSubmit() {
   g_cs.batch_access.clear();
   g_cs_stats.submit_n++;
   if (b.submission <= before) {
+    MirrorProtectSubmitted(before);
     CsBatchLogFault(b, "submit");
     return false;
   }
@@ -410,6 +412,18 @@ void RecordComputeInFrame() {
 
 bool CsBindsImages() {
   return g_cs_in_frame && g_frame.recording && !g_cs.failed;
+}
+
+void CsProtectBeforeSubmit(rhi::CommandList* list) {
+  MirrorProtectBegin(list);
+}
+
+void CsProtectSubmitted(u64 submission) {
+  MirrorProtectSubmitted(submission);
+}
+
+void CsGuestRemapped(u64 base, u64 bytes) {
+  MirrorForget(base, bytes);
 }
 
 void CsFrameListChanged() {
