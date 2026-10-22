@@ -750,6 +750,8 @@ void EmitInst(Translator& t, const Inst& inst, StageContext& sc) {
         EmitGsMessage(t, inst, sc);
       } else if (inst.opcode >= 0x16 && inst.opcode <= 0x19 &&
                  static_cast<i16>(w & 0xffff) == 0) {
+      } else if (inst.opcode == 0x12) {
+        // s_trap: no trap handler is installed, so it never stops the wave.
       } else if (inst.opcode != 0x00 && inst.opcode != 0x01 &&
                  inst.opcode != 0x02 &&
                  !(inst.opcode >= 0x04 && inst.opcode <= 0x0a) &&

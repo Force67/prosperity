@@ -2044,10 +2044,12 @@ static void EmitCsMimgStaged(Translator& t,
   const bool mip_op = op == 0x01 || op == 0x09;
   const bool store = op == 0x08 || op == 0x09;
   const bool load = op == 0x00 || op == 0x01;
-  const bool offset = op == 0x37;
+  const bool offset = op == 0x37 || op == 0x5f;
   const bool gradients = op == 0x22;
-  const bool sample = op == 0x24 || op == 0x27 || offset || gradients;
-  const bool gather = op == 0x47;
+  const bool compare = op == 0x2f || op == 0x5f;
+  const bool gather = op == 0x47 || op == 0x5f;
+  const bool sample = !gather && (op == 0x24 || op == 0x27 || offset ||
+                                  gradients || compare);
   const bool resinfo = op == 0x0e;
   const bool atomic = op >= 0x0f && op <= 0x1a;
   if (!store && !load && !sample && !gather && !resinfo && !atomic) {
@@ -2058,7 +2060,9 @@ static void EmitCsMimgStaged(Translator& t,
   const bool da = (w & 0x4000) != 0;
   const u32 dim = (w >> 3) & 7;
   const u32 derivative_dims = dim == 0 || dim == 4 ? 1u : dim == 2 ? 3u : 2u;
-  const u32 addr_shift = gradients ? derivative_dims * 2 : offset ? 1u : 0u;
+  // The offset, then the depth reference, precede the coordinates.
+  const u32 addr_shift = gradients ? derivative_dims * 2
+                                   : (offset ? 1u : 0u) + (compare ? 1u : 0u);
   const auto addr_vg = [&](u32 i) {
     return address ? address[i + addr_shift] : t.Vg(vaddr + i + addr_shift);
   };
@@ -2534,6 +2538,42 @@ static void EmitCsMimgStaged(Translator& t,
     decode(texel_at(x1, y), c10);
     decode(texel_at(x, y1), c01);
     decode(texel_at(x1, y1), c11);
+    if (compare) {
+      // Percentage-closer: each texel passes `ref FUNC texel`, then filters.
+      const u32 ref_at = offset ? 1 : 0;
+      const Id ref = t.m.Bitcast(
+          t.t_f, address ? address[ref_at] : t.Vg(vaddr + ref_at));
+      const u32 ssamp = ((w1 >> 21) & 0x1F) * 4;
+      const Id func = t.And(t.Shr(t.Sg(ssamp), t.U32(12)), t.U32(7));
+      const auto passes = [&](Id texel) {
+        const Id lt =
+            t.m.Emit(spv::Op::OpFOrdLessThan, t.t_bool, {ref, texel});
+        const Id eq = t.m.Emit(spv::Op::OpFOrdEqual, t.t_bool, {ref, texel});
+        const Id gt =
+            t.m.Emit(spv::Op::OpFOrdGreaterThan, t.t_bool, {ref, texel});
+        const Id by_func[8] = {
+            t.m.ConstBool(false),
+            lt,
+            eq,
+            logical_or(lt, eq),
+            gt,
+            t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {eq}),
+            logical_or(gt, eq),
+            t.m.ConstBool(true),
+        };
+        Id pass = by_func[0];
+        for (u32 f = 1; f < 8; f++)
+          pass = t.m.Emit(spv::Op::OpSelect, t.t_bool,
+                          {t.Eq(func, t.U32(f)), by_func[f], pass});
+        return t.SelectF(pass, t.F32(1.f), t.F32(0.f));
+      };
+      Id* corners[4] = {c00, c10, c01, c11};
+      for (Id* c : corners) {
+        c[0] = passes(c[0]);
+        for (u32 i = 1; i < 4; i++)
+          c[i] = c[0];
+      }
+    }
     if (gather) {
       u32 comp = 0;
       for (u32 i = 0; i < 4; i++)
