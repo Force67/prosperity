@@ -719,15 +719,25 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     return true;
   };
   bool mirror_res[ComputeInfo::kMaxResources] = {};
+  rhi::Buffer* bypass_buf[ComputeInfo::kMaxResources] = {};
+  u64 bypass_off[ComputeInfo::kMaxResources] = {};
   for (u32 i = 0; i < ci.num_res; i++) {
     const u64 bytes =
         ci.res[i].guest_size ? ci.res[i].guest_size : ci.res[i].size;
     const u64 span = base::Max<u64>(bytes, (ci.res[i].size + 3) & ~u64(3));
-    mirror_res[i] = MirrorEligible(ci.res[i], span) &&
-                    MirrorCopyIn(renderer, ci.res[i].base, bytes);
+    if (!MirrorEligible(ci.res[i], span))
+      continue;
+    bypass_buf[i] =
+        MirrorBypass(renderer, ci.res[i].base, span, &bypass_off[i]);
+    mirror_res[i] =
+        !bypass_buf[i] && MirrorCopyIn(renderer, ci.res[i].base, bytes);
   }
   for (u32 i = 0; i < ci.num_res; i++) {
     sz[i] = ci.res[i].size ? ((ci.res[i].size + 3) & ~u64(3)) : 4;
+    if (bypass_buf[i]) {
+      bind_buf[i] = bypass_buf[i];
+      continue;
+    }
     if (mirror_res[i]) {
       bind_buf[i] = g_cs.mirror;
       continue;
@@ -1179,7 +1189,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
     }
   }
   for (u32 i = 0; i < ci.num_res; i++)
-    if (!ci.res[i].zero_fill && !truth_view[i] && !mirror_res[i])
+    if (!ci.res[i].zero_fill && !truth_view[i] && !mirror_res[i] &&
+        !bypass_buf[i])
       bind_buf[i] =
           g_cs.ranges[parent_base[i] ? parent_base[i] : ci.res[i].base].buf;
   u64 bind_off[ComputeInfo::kMaxResources] = {};
@@ -1190,6 +1201,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       wr[ComputeInfo::kMaxResources + 2 + ComputeInfo::kMaxTextures];
   for (u32 i = 0; i < ci.num_res; i++)
     bind_off[i] = ci.res[i].zero_fill ? 0
+                  : bypass_buf[i]     ? bypass_off[i]
                   : mirror_res[i]     ? MirrorOffset(ci.res[i].base)
                   : truth_view[i]     ? 0
                   : parent_base[i]
@@ -1322,6 +1334,13 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   }
   if (hazard_src)
     g_cs.list->Barrier(hazard_src, hazard_dst);
+  // Guest memory written in place can alias other bindings of it that the
+  // per-buffer hazard tracking can't see.
+  bool bypass_written = false;
+  for (u32 i = 0; i < ci.num_res; i++)
+    bypass_written |= bypass_buf[i] && ci.res[i].written;
+  if (bypass_written)
+    g_cs.list->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessComputeRW);
   const auto mirror_write_bytes = [&](u32 i) {
     const auto& res = ci.res[i];
     const u64 bytes = res.guest_size ? res.guest_size : res.size;
@@ -1444,16 +1463,24 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   if (trace::Recording())
     trace::RecordDispatch(ci);
   for (u32 i = 0; i < ci.num_res; i++) {
-    if (ci.res[i].zero_fill || mirror_res[i])
+    if (ci.res[i].zero_fill || mirror_res[i] || bypass_buf[i])
       continue;
     auto it =
         g_cs.ranges.find(parent_base[i] ? parent_base[i] : ci.res[i].base);
     if (it != g_cs.ranges.end())
       MarkPending(it->second);
   }
-  for (u32 i = 0; i < ci.num_res; i++)
-    if (mirror_res[i] && ci.res[i].written)
+  if (bypass_written)
+    g_cs.list->Barrier(rhi::kAccessComputeWrite,
+                       kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostRead);
+  for (u32 i = 0; i < ci.num_res; i++) {
+    if (!ci.res[i].written)
+      continue;
+    if (bypass_buf[i])
+      MirrorBypassWritten(ci.res[i].base, mirror_write_bytes(i));
+    else if (mirror_res[i])
       MirrorWriteBack(ci.res[i].base, mirror_write_bytes(i), true, &shadows[i]);
+  }
   ++g_cs.batch_count;
 
   const u64 t_out0 = NowNs();

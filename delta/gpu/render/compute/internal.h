@@ -575,6 +575,11 @@ void MirrorProtectSubmitted(u64 submission);
 void MirrorForget(u64 base, u64 bytes);
 
 bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes);
+// On unified memory, a dispatch binds guest memory itself for a resource
+// when the mirror holds nothing newer for it: no copy in, and what it writes
+// lands in place. MirrorBypassWritten then accounts for that write.
+rhi::Buffer* MirrorBypass(Renderer& renderer, u64 base, u64 bytes, u64* offset);
+void MirrorBypassWritten(u64 base, u64 bytes);
 bool MirrorCopyInGuest(u64 base, u64 bytes);
 bool GpuWriteBack(u64 base, CsRange& e, bool* kept);
 void CaptureStageShadow(CsRange& e, u64 bytes);

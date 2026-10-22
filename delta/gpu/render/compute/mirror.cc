@@ -614,6 +614,24 @@ bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes) {
   return MirrorCopyInGuest(base, bytes);
 }
 
+DELTA_OPTION(bool, kMirrorBypass, "DELTA_GPU_MIRROR_BYPASS", true);
+
+rhi::Buffer* MirrorBypass(Renderer& renderer, u64 base, u64 bytes,
+                          u64* offset) {
+  if (!kMirrorBypass || !Device().caps().unified_memory)
+    return nullptr;
+  if (CsRangeDirtyOverlapping(base, bytes) &&
+      !FlushCsWritesForGpu(renderer, base, bytes, "mirror"))
+    return nullptr;
+  for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
+       block += kMirrorBlock)
+    if (MirrorOwned(block))
+      return nullptr;
+  if (MirrorHoldsNewest(base, bytes))
+    return nullptr;
+  return DirectBindAt(base, bytes, offset);
+}
+
 bool MirrorCopyInGuest(u64 base, u64 bytes) {
   if (!OrderMirrorAfterFrameRead())
     return false;
@@ -1115,6 +1133,16 @@ void MirrorWriteBack(u64 base,
     at = to;
   }
   finish(run, end, run_owned);
+  NoteGuestWrite(base, bytes);
+  InvalidateTexRange(base, bytes);
+}
+
+void MirrorBypassWritten(u64 base, u64 bytes) {
+  // A new revision readers must take from guest memory: the mirror's copy of
+  // these blocks is stale until the next copy-in.
+  RecordMirrorWrite(base, bytes);
+  MirrorNoteGuestWrites(base, base + bytes, false);
+  NotePendingGuestWrite(base, base + bytes);
   NoteGuestWrite(base, bytes);
   InvalidateTexRange(base, bytes);
 }
