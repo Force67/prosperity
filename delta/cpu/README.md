@@ -8,7 +8,7 @@ The build picks one implementation by host architecture:
 
 - `native_backend.cc` (x86-64): guest code runs directly; the lifter has
   already rewritten syscalls and fs accesses, so entering the guest is a call.
-- `fex_backend.cc` (aarch64): guest code runs through the embedded FEXCore JIT;
+- `aarch64/` (aarch64): guest code runs through the embedded FEXCore JIT;
   HLE calls cross over through magic syscalls.
 
 Linux pause state lives in `shared/guest/pause.h`. Registered guest threads

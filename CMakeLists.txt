@@ -78,7 +78,7 @@ include(AddDeltaModule)
 # x86-64 host: guest PS4 x86-64 code runs natively (the existing path; only
 #   syscalls and fs:-relative TLS are rewritten in-place by runtime/code_lift).
 # aarch64 host: guest code runs through an embedded FEXCore JIT and syscalls
-#   arrive via a FEXCore callback dispatched to lv2 (delta/cpu/fex_backend).
+#   arrive via a FEXCore callback dispatched to lv2 (delta/cpu/aarch64).
 # Everything else (loader, lv2 HLE, devices) stays host-native either way.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
   set(DELTA_BACKEND "FEX" CACHE STRING "CPU execution backend (FEX|NATIVE)")

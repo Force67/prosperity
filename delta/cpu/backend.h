@@ -112,7 +112,7 @@ uintptr_t MakeGuestReturnHook(void* real_target,
 
 // Callable copy of an internal guest function whose prologue an entry detour
 // will overwrite (realTarget for MakeGuestReturnHook; native returns the entry
-// unchanged; constraints in fex_backend.cc). Also: wrap a guest function so a
+// unchanged; constraints in aarch64/host_thunks.cc). Also: wrap a guest function so a
 // native lock is held across the call, serialising a guest critical section
 // from the host; a failed try_lock deterministically names a second thread
 // inside.

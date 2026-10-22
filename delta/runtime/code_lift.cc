@@ -9,7 +9,7 @@
 
 // The lifter rewrites guest x86-64 in place (Xbyak codegen) so it runs natively
 // on an x86-64 host. It is meaningless (and won't compile) on aarch64, where
-// guest code runs through the FEXCore JIT instead (see delta/cpu/fex_backend).
+// guest code runs through the FEXCore JIT instead (see delta/cpu/aarch64).
 #if defined(DELTA_BACKEND_NATIVE)
 
 #include <xbyak.h>

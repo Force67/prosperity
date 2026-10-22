@@ -1,5 +1,6 @@
 # delta/cpu: CPU execution backend, chosen at build time by the host arch:
-# NativeBackend on x86-64, FexBackend (the embedded FEXCore JIT) on aarch64.
+# NativeBackend on x86-64, FexBackend (the embedded FEXCore JIT, aarch64/) on
+# aarch64.
 if(DELTA_BACKEND STREQUAL "FEX")
   add_delta_module(cpu DEPS fex::core)
   set_source_files_properties(native_backend.cc PROPERTIES HEADER_FILE_ONLY ON)
@@ -9,5 +10,7 @@ if(DELTA_BACKEND STREQUAL "FEX")
   target_compile_options(delta_cpu PRIVATE -fpermissive)
 else()
   add_delta_module(cpu)
-  set_source_files_properties(fex_backend.cc PROPERTIES HEADER_FILE_ONLY ON)
+  file(GLOB_RECURSE _fex_srcs CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/aarch64/*.cc)
+  set_source_files_properties(${_fex_srcs} PROPERTIES HEADER_FILE_ONLY ON)
 endif()
