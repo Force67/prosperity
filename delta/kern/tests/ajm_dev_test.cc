@@ -106,7 +106,7 @@ TEST(AjmDevice, InitializeAndInstanceCreate) {
   ASSERT_EQ(device.Ioctl(0xC0288905, create.data()), 0);
   EXPECT_EQ(IoctlResult(create), 0u);
   u32 instance;
-  std::memcpy(&instance, create.data() + 4, 4);
+  std::memcpy(&instance, create.data() + 0x14, 4);
   EXPECT_NE(instance, 0u);
 
   std::array<u8, 40> bad{};
@@ -136,7 +136,7 @@ TEST(AjmDevice, BatchStartDecodesAt9Frame) {
   std::memcpy(create.data() + 0x10, &codec, 4);
   ASSERT_EQ(device.Ioctl(0xC0288905, create.data()), 0);
   u32 instance;
-  std::memcpy(&instance, create.data() + 4, 4);
+  std::memcpy(&instance, create.data() + 0x14, 4);
   ASSERT_EQ(instance, (kCodecAt9 << 14) | 1);
 
   // Stereo 48 kHz-class config (valid: 2 ch, 4-byte superframes, 4 frames,

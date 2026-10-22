@@ -21,7 +21,7 @@ DELTA_OPTION(bool, kAjmTrace, "DELTA_AJM_TRACE", false);
 
 // Control-block field offsets (all blocks are 40 bytes, size in the ioctl cmd).
 constexpr size_t kResultOff = 0x00;  // i32, out
-constexpr size_t kIdOff = 0x04;      // u32, out (instance/batch id)
+constexpr size_t kIdOff = 0x14;      // u32, out (instance create)
 constexpr size_t kAOff = 0x08;       // u64 in/out, command specific
 constexpr size_t kBOff = 0x10;       // u64 in/out
 constexpr size_t kCOff = 0x18;       // u64 in/out
@@ -304,6 +304,11 @@ bool AjmDevice::ExecuteBatch(void* pBuffer, size_t offset) {
         p += 16;
         break;
       }
+      case 6:  // return address: {type, 0, u64 addr}; batches finish inline
+        if (p + 16 > end)
+          return false;
+        p += 16;
+        break;
       case 3:  // control
       case 4:  // run module
         job.flags = ((u64)((word0 >> 6) & 0xffff) << 32) | word1;

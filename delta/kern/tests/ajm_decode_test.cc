@@ -37,7 +37,7 @@ class AjmDecodeTest : public testing::Test {
     std::memcpy(command.data() + 8, &flags, 8);
     std::memcpy(command.data() + 16, &codec, 4);
     Ioctl(0xc0288905, command);
-    std::memcpy(&instance, command.data() + 4, 4);
+    std::memcpy(&instance, command.data() + 0x14, 4);
     ASSERT_NE(instance, 0u);
   }
   void Ioctl(u32 code, std::array<u8, 40>& command) {
