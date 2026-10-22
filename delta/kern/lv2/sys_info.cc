@@ -75,8 +75,16 @@ static u64 GuestTscFreq() {
     return f;
   }();
   return kHz;
+#elif defined(__aarch64__)
+  // FEX's rdtsc reads CNTVCT_EL0 unscaled, so it advances at CNTFRQ.
+  static const u64 kHz = [] {
+    u64 f;
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return f;
+  }();
+  return kHz;
 #else
-  return u64(1600000000);  // FEX emulates rdtsc; PS4 invariant TSC rate
+  return u64(1600000000);
 #endif
 }
 
