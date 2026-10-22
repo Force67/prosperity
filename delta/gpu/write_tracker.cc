@@ -124,6 +124,7 @@ void Enqueue(u64 page) {
 
 base::Atomic<bool (*)(u64, u64)> g_owner_resolve{nullptr};
 base::Atomic<bool (*)(u64, u64)> g_owner_owns{nullptr};
+base::Atomic<bool (*)(u64)> g_owner_raced{nullptr};
 
 bool OnWriteFault(uintptr_t addr) {
   const u64 page = addr & ~(kPage - 1);
@@ -131,8 +132,10 @@ bool OnWriteFault(uintptr_t addr) {
       resolve && resolve(page, page + kPage))
     return true;
   auto* p = const_cast<GuestPageTable::Page*>(GuestPages().Find(page));
-  if (!p || !p->ever_armed.load(base::memory_order_relaxed))
-    return false;
+  if (!p || !p->ever_armed.load(base::memory_order_relaxed)) {
+    const auto raced = g_owner_raced.load(base::memory_order_acquire);
+    return raced && raced(page);
+  }
   u8 armed = kProtected;
   if (p->armed.compare_exchange_strong(armed, kQueued,
                                        base::memory_order_acq_rel)) {
@@ -219,7 +222,10 @@ bool WriteTracker::EnableFault() {
   return true;
 }
 
-void WriteTracker::SetOwner(bool (*resolve)(u64, u64), bool (*owns)(u64, u64)) {
+void WriteTracker::SetOwner(bool (*resolve)(u64, u64),
+                            bool (*owns)(u64, u64),
+                            bool (*raced)(u64)) {
+  g_owner_raced.store(raced, base::memory_order_release);
   g_owner_owns.store(owns, base::memory_order_release);
   g_owner_resolve.store(resolve, base::memory_order_release);
   SetGuestOwnerHolds(owns);
@@ -336,7 +342,9 @@ void WriteTracker::TakeFaulted(base::Vector<Range>& out) {
 bool WriteTracker::EnableFault() {
   return false;
 }
-void WriteTracker::SetOwner(bool (*)(u64, u64), bool (*)(u64, u64)) {}
+void WriteTracker::SetOwner(bool (*)(u64, u64),
+                            bool (*)(u64, u64),
+                            bool (*)(u64)) {}
 void WriteTracker::OpenedByOwner(u64, u64) {}
 bool WriteTracker::ArmFault(u64, u64, bool) {
   return false;

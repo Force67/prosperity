@@ -34,8 +34,11 @@ class WriteTracker {
     void (*before_collect)() = nullptr;
   };
   void SetPolicy(const Policy& policy) { policy_ = policy; }
+  // `raced` answers, for a fault nobody claimed, whether the owner opened the
+  // page after it faulted, so the access can simply retry.
   static void SetOwner(bool (*resolve)(u64 first, u64 end),
-                       bool (*owns)(u64 first, u64 end));
+                       bool (*owns)(u64 first, u64 end),
+                       bool (*raced)(u64 page) = nullptr);
   static void OpenedByOwner(u64 first, u64 end);
 
   u64 armed_bytes() const { return armed_bytes_; }

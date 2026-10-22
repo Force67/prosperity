@@ -5,6 +5,8 @@
 #include "gpu/render/compute/internal.h"
 
 #include <sys/mman.h>
+#include <sys/uio.h>
+#include <unistd.h>
 
 #include "base/algorithm.h"
 #include "base/logging.h"
@@ -239,6 +241,29 @@ bool InMirror(u64 address) {
   return MirrorOffset(address) != kNotMirrored;
 }
 
+namespace {
+// Signal-safe: the kernel reports EFAULT for a page this process can't read.
+bool PageReadable(u64 address) {
+  u8 byte;
+  iovec local{&byte, 1};
+  iovec remote{reinterpret_cast<void*>(address), 1};
+  return ::process_vm_readv(::getpid(), &local, 1, &remote, 1, 0) == 1;
+}
+
+// Two threads fault on one protected block: the second can reach its handler
+// after the first reopened it, find nothing to resolve, and must just retry.
+// Bounded, so a fault the mirror can't explain still dies.
+bool MirrorFaultRaced(u64 page) {
+  static thread_local u64 last = 0;
+  static thread_local u32 repeats = 0;
+  if (!InMirror(page))
+    return false;
+  repeats = page == last ? repeats + 1 : 0;
+  last = page;
+  return repeats < 64 && PageReadable(page);
+}
+}  // namespace
+
 bool MirrorResolve(u64 first, u64 end) {
   if (!g_cs.own)
     return false;
@@ -250,10 +275,14 @@ bool MirrorResolve(u64 first, u64 end) {
     OwnBlock& o = OwnAt(block);
     for (;;) {
       u64 s = o.state.load(base::memory_order_acquire);
+      // MirrorProtectSubmitted holds Busy across its mprotect and sets
+      // Protected only after, so a fault in that window must wait for it.
+      if (s & kOwnBusy)
+        continue;
       if (!(s & kOwnProtected))
         break;
-      if ((s & kOwnBusy) || !o.state.compare_exchange_weak(
-                                s, s | kOwnBusy, base::memory_order_acq_rel))
+      if (!o.state.compare_exchange_weak(s, s | kOwnBusy,
+                                         base::memory_order_acq_rel))
         continue;
       for (u32 i = 0; i < o.spans; i++)
         Device().CopyAfter(g_cs.mirror, MirrorOffset(block) + o.lo[i], o.import,
@@ -262,7 +291,7 @@ bool MirrorResolve(u64 first, u64 end) {
       ::mprotect(reinterpret_cast<void*>(block), kMirrorBlock,
                  PROT_READ | PROT_WRITE | PROT_EXEC);
       WriteTracker::OpenedByOwner(block, block + kMirrorBlock);
-      if (!(s & kOwnPending)) {
+      if (!(o.state.load(base::memory_order_acquire) & kOwnPending)) {
         DirectRestore(block);
         o.spans = 0;
       }
@@ -276,7 +305,9 @@ bool MirrorResolve(u64 first, u64 end) {
         }
       }
       g_mirror_resolves.fetch_add(1, base::memory_order_relaxed);
-      o.state.store(s & kOwnPending, base::memory_order_release);
+      // MirrorOwn may have queued the block since `s` was read; dropping its
+      // pending bit would queue it twice and spin MirrorProtectSubmitted.
+      o.state.fetch_and(kOwnPending, base::memory_order_acq_rel);
       resolved = true;
       break;
     }
@@ -362,7 +393,7 @@ void MirrorOwn(u64 base, u64 bytes) {
   static bool hooked = false;
   if (!hooked) {
     hooked = true;
-    WriteTracker::SetOwner(&MirrorResolve, &MirrorOwnsAny);
+    WriteTracker::SetOwner(&MirrorResolve, &MirrorOwnsAny, &MirrorFaultRaced);
   }
   const u64 end = base + bytes;
   for (u64 block = base & ~(kMirrorBlock - 1); block < end;
