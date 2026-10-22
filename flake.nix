@@ -173,9 +173,12 @@
               # prune only links whose target is gone -- never a resolving one.
               nvdir="/tmp/ps4delta-nvlibs-$(id -u)"
               mkdir -p "$nvdir"
+              # Without an X display the ICD goes through libEGL_nvidia.
               for l in /usr/lib/aarch64-linux-gnu/libGLX_nvidia.so* \
+                       /usr/lib/aarch64-linux-gnu/libEGL_nvidia.so* \
                        /usr/lib/aarch64-linux-gnu/libnvidia*.so* \
                        /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so* \
+                       /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so* \
                        /usr/lib/x86_64-linux-gnu/libnvidia*.so*; do
                 [ -e "$l" ] && ln -sf "$l" "$nvdir/"
               done
