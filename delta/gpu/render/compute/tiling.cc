@@ -231,16 +231,31 @@ void StampView(rhi::Buffer* view,
 }
 
 rhi::Buffer* AcquireScratch(u64 bytes) {
-  int best = -1;
-  for (size_t i = 0; i < g_cs.scratch.size(); i++) {
-    const auto& s = g_cs.scratch[i];
-    if (s.owner == g_cs.scratch_owner || s.cap < bytes)
-      continue;
-    if (best < 0 || s.cap < g_cs.scratch[best].cap ||
-        (s.cap == g_cs.scratch[best].cap &&
-         s.last_frame < g_cs.scratch[best].last_frame))
-      best = static_cast<int>(i);
-  }
+  // Unified memory affords a pool that keeps the frame's image views alive;
+  // VRAM on a discrete GPU is scarcer.
+  const bool roomy = !SplitVram();
+  const u64 budget = roomy ? 2048ull << 20 : 512ull << 20;
+  const size_t max_count = roomy ? 96 : 24;
+  const auto pick = [&](bool views) {
+    int best = -1;
+    for (size_t i = 0; i < g_cs.scratch.size(); i++) {
+      const auto& s = g_cs.scratch[i];
+      if (s.owner == g_cs.scratch_owner || s.cap < bytes ||
+          (s.view_table != nullptr) != views)
+        continue;
+      if (best < 0 || s.cap < g_cs.scratch[best].cap ||
+          (s.cap == g_cs.scratch[best].cap &&
+           s.last_frame < g_cs.scratch[best].last_frame))
+        best = static_cast<int>(i);
+    }
+    return best;
+  };
+  const u64 cap = (bytes + 0x3FFFFF) & ~u64(0x3FFFFF);
+  int best = pick(false);
+  // A cached image view is only given up when no new buffer fits.
+  if (best < 0 && (g_cs.scratch.size() >= max_count ||
+                   g_cs.scratch_bytes + cap > budget))
+    best = pick(true);
   if (best >= 0) {
     auto& s = g_cs.scratch[best];
     s.owner = g_cs.scratch_owner;
@@ -249,12 +264,11 @@ rhi::Buffer* AcquireScratch(u64 bytes) {
     s.view_table = nullptr;
     return s.buf;
   }
-  constexpr u64 kScratchBudget = 512ull << 20;
   CsScratch s;
-  s.cap = (bytes + 0x3FFFFF) & ~u64(0x3FFFFF);
+  s.cap = cap;
   while (!g_cs.scratch.empty() &&
-         (g_cs.scratch.size() >= 24 ||
-          g_cs.scratch_bytes + s.cap > kScratchBudget)) {
+         (g_cs.scratch.size() >= max_count ||
+          g_cs.scratch_bytes + s.cap > budget)) {
     size_t coldest = SIZE_MAX;
     for (size_t i = 0; i < g_cs.scratch.size(); i++)
       if (g_cs.scratch[i].owner != g_cs.scratch_owner &&
