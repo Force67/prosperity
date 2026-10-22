@@ -128,7 +128,7 @@ class VulkanCommandList final : public rhi::CommandList {
   VkCommandBuffer cmd = VK_NULL_HANDLE;
   VkQueryPool prof_pool_ = VK_NULL_HANDLE;
   u8 prof_pending_ = 0;
-  static constexpr u32 kProfSpans = 255;
+  static constexpr u32 kProfSpans = 4096;
   u8 span_cat_[kProfSpans] = {};
   u32 spans_ = 0, spans_pending_ = 0;
   bool span_open_ = false;
