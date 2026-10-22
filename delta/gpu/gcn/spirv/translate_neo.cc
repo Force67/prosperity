@@ -616,19 +616,10 @@ bool EmitNeoVop3(Translator& t, const Inst& inst) {
     return true;
   }
 
-  const bool has_float_inputs = (op >= 0x311 && op <= 0x313) || op == 0x341 ||
-                                op == 0x34b || op == 0x351 || op == 0x354 ||
-                                op == 0x357 || op == 0x35f;
-  const bool has_float_output = op == 0x341 || op == 0x34b || op == 0x351 ||
-                                op == 0x354 || op == 0x357 || op == 0x35f;
-  if ((neg || abs) && !has_float_inputs) {
-    WarnUnsupported("vop3.i16-modifier", op, w, w1);
-    return true;
-  }
-  if (omod && !has_float_output) {
-    WarnUnsupported("vop3.integer-omod", op, w, w1);
-    return true;
-  }
+  // Ops not handled below fall back to the base VOP3 path, which applies
+  // omod and neg itself (most are float ops). The integer 16-bit ops here
+  // carry the float-only fields set too (omod = 3, neg); with no float
+  // operand or result they have nothing to apply to and are ignored.
   const bool writes_32 = (op >= 0x344 && op <= 0x347) || op == 0x36d ||
                          op == 0x36f || op == 0x371 || op == 0x372 ||
                          op == 0x373 || op == 0x375;
