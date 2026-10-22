@@ -327,6 +327,7 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
 bool CsRangeRename(CsRange& e, u64 size) {
   if (e.buf)
     g_cs.frame_retired.push_back(e.buf);
+  e.shadow_stamp = 0;
   e.frame_ref = -1;
   e.pending_batch = false;
   g_cs.range_bytes -= e.cap;
@@ -340,6 +341,8 @@ void CsRangeDestroy(CsRange& e) {
   base::EraseIf(g_cs.pending, [&e](CsRange* r) { return r == &e; });
   if (e.mirror)
     g_cs.frame_retired.push_back(e.mirror);
+  if (e.shadow)
+    g_cs.frame_retired.push_back(e.shadow);
   if (!e.imported && !CsFrameReferenced(e) && !e.pending_batch && e.buf &&
       e.cap && g_cs.free_bytes + e.cap <= (256ull << 20)) {
     g_cs.free_list.push_back({e.buf, e.cap, e.device_local});

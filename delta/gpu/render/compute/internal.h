@@ -181,6 +181,10 @@ struct CsRange {
   u64 staged_stamp = 0;
   rhi::Buffer* mirror = nullptr;
   u64 mirror_cap = 0, mirror_seq = 0;
+  // The guest bytes as staged, for write-backs that publish only what the
+  // dispatches changed; current while shadow_stamp == staged_stamp.
+  rhi::Buffer* shadow = nullptr;
+  u64 shadow_bytes = 0, shadow_stamp = 0;
   const struct TileTable* mirror_table = nullptr;
   u64 dirty_stamp = 0;
   u64 dirty_render_serial = 0;
@@ -569,6 +573,7 @@ void MirrorForget(u64 base, u64 bytes);
 bool MirrorCopyIn(Renderer& renderer, u64 base, u64 bytes);
 bool MirrorCopyInGuest(u64 base, u64 bytes);
 bool GpuWriteBack(u64 base, CsRange& e, bool* kept);
+void CaptureStageShadow(CsRange& e, u64 bytes);
 void MirrorFrameRead();
 bool MirrorOwned(u64 block);
 bool MirrorOwnable(u64 base, u64 bytes);
@@ -593,7 +598,19 @@ struct MirrorWrite {
 
 const MirrorWrite* MirrorWritten(u64 base, u64 bytes);
 
-void MirrorWriteBack(u64 base, u64 bytes, bool may_own = true);
+// The mirror's bytes as a dispatch found them, so its write-back can publish
+// only the words the dispatch changed.
+struct MirrorShadow {
+  rhi::Buffer* buffer = nullptr;
+  u64 base = 0, offset = 0, bytes = 0;
+};
+bool CaptureMirrorShadows(const u64* bases, const u64* sizes, u32 count,
+                          MirrorShadow* out);
+
+void MirrorWriteBack(u64 base,
+                     u64 bytes,
+                     bool may_own = true,
+                     const MirrorShadow* shadow = nullptr);
 
 u64 MirrorRevision(u64 base, u64 bytes);
 bool MirrorHoldsNewest(u64 base, u64 bytes);

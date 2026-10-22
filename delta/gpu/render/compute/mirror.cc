@@ -64,7 +64,8 @@ rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
       GuestWriteTracker().Release(chunk, kMirrorImport);
       rhi::BufferDesc desc;
       desc.size = kMirrorImport;
-      desc.usage = rhi::kBufferCopyDst | rhi::kBufferCopySrc;
+      desc.usage =
+          rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferCopySrc;
       desc.host_pointer = reinterpret_cast<void*>(chunk);
       buf = Device().CreateBuffer(desc);
     }
@@ -676,15 +677,144 @@ static bool PrepareGuestWrite(u64 base, u64 bytes, bool* mirrored) {
                    : GuestImportable(base, bytes);
 }
 
+namespace {
+struct WordMergePipe {
+  rhi::BindGroupLayout* set = nullptr;
+  rhi::PipelineLayout* layout = nullptr;
+  rhi::Pipeline* pipe = nullptr;
+  bool tried = false;
+};
+
+const WordMergePipe* WordMerge() {
+  static WordMergePipe p;
+  if (!p.tried) {
+    p.tried = true;
+#ifdef DELTA_HAVE_SPIRV_BACKEND
+    const auto code = gcn::BuildWordMergeShader();
+#else
+    const base::Vector<u32> code;
+#endif
+    rhi::BindGroupLayoutDesc set;
+    for (u32 i = 0; i < 3; i++)
+      set.bindings.push_back(
+          {i, rhi::BindingType::kStorageBuffer, rhi::kStageCompute});
+    set.push = true;
+    p.set = code.empty() ? nullptr : Device().CreateBindGroupLayout(set);
+    rhi::PipelineLayoutDesc layout;
+    layout.groups = {p.set};
+    layout.push_constant_bytes = 16;
+    layout.push_constant_stages = rhi::kStageCompute;
+    p.layout = p.set ? Device().CreatePipelineLayout(layout) : nullptr;
+    rhi::ComputePipelineDesc pipe;
+    pipe.layout = p.layout;
+    pipe.code = rhi::Code(code);
+    p.pipe = p.layout ? Device().CreateComputePipeline(pipe) : nullptr;
+  }
+  return p.pipe ? &p : nullptr;
+}
+
+struct MergeOperand {
+  rhi::Buffer* buffer;
+  u64 offset;
+};
+
+// Records the merge of `bytes` of `result` against `shadow` into `dst`.
+void RecordMergePass(rhi::CommandList* c,
+                     const WordMergePipe& p,
+                     MergeOperand result,
+                     MergeOperand shadow,
+                     MergeOperand dst,
+                     u64 bytes) {
+  const u64 align = Device().caps().storage_offset_alignment;
+  const u64 max_words =
+      base::Min<u64>(u64(65535) * gcn::kWordMergeGroup,
+                     (Device().caps().max_storage_buffer_range - align) / 4);
+  c->SetPipeline(p.pipe);
+  for (u64 done = 0; done < bytes;) {
+    const u64 words = base::Min((bytes - done) / 4, max_words);
+    const MergeOperand ops[3] = {result, shadow, dst};
+    rhi::BindingWrite writes[3];
+    u32 params[4];
+    for (u32 i = 0; i < 3; i++) {
+      const u64 offset = ops[i].offset + done;
+      const u64 window = offset & ~(align - 1);
+      writes[i].binding = i;
+      writes[i].buffer = ops[i].buffer;
+      writes[i].offset = window;
+      writes[i].range = offset + words * 4 - window;
+      params[i] = static_cast<u32>((offset - window) / 4);
+    }
+    params[3] = static_cast<u32>(words);
+    c->PushBindGroup(0, p.set, writes, 3);
+    c->SetPushConstants(0, sizeof(params), params);
+    c->Dispatch(static_cast<u32>((words + gcn::kWordMergeGroup - 1) /
+                                 gcn::kWordMergeGroup),
+                1, 1);
+    done += words * 4;
+  }
+}
+
+// Merges mirror [run, to) into guest memory against `shadow`.
+bool RecordWordMerge(u64 run, u64 to, const MirrorShadow& shadow) {
+  const WordMergePipe* p = WordMerge();
+  if (!p || ((run | to) & 3))
+    return false;
+  base::Vector<base::Pair<rhi::Buffer*, u64>> imports;
+  for (u64 at = run; at < to;) {
+    u64 import_base = 0;
+    rhi::Buffer* import = MirrorImport(at, &import_base);
+    if (!import)
+      return false;
+    imports.push_back({import, import_base});
+    at = base::Min(to, import_base + import->desc().size);
+  }
+  rhi::CommandList* const c = g_cs.list;
+  c->ProfileBegin(3);
+  c->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessComputeRW);
+  u64 at = run;
+  for (const auto& [import, import_base] : imports) {
+    const u64 end = base::Min(to, import_base + import->desc().size);
+    RecordMergePass(c, *p, {g_cs.mirror, MirrorOffset(at)},
+                    {shadow.buffer, shadow.offset + (at - shadow.base)},
+                    {import, at - import_base}, end - at);
+    at = end;
+  }
+  c->Barrier(rhi::kAccessComputeWrite, kAccessAll | rhi::kAccessHostRead);
+  c->ProfileEnd();
+  return true;
+}
+}  // namespace
+
 static void RecordGuestWrite(rhi::CommandList* c,
                              bool mirrored,
                              u64 base,
                              u64 n,
                              rhi::Buffer* src,
                              const base::Vector<base::Pair<u64, u64>>& skip,
-                             u64 src_off = 0) {
-  c->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+                             u64 src_off = 0,
+                             const MergeOperand* shadow = nullptr) {
+  const WordMergePipe* merge = shadow ? WordMerge() : nullptr;
+  c->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessComputeRW | kAccessCopyRW);
   const auto copy = [&](u64 lo, u64 hi) {
+    if (merge && !((lo | hi) & 3)) {
+      const MergeOperand result{src, src_off + lo - base};
+      const MergeOperand before{shadow->buffer, shadow->offset + lo - base};
+      if (mirrored) {
+        RecordMergePass(c, *merge, result, before,
+                        {g_cs.mirror, MirrorOffset(lo)}, hi - lo);
+        return;
+      }
+      for (u64 at = lo; at < hi;) {
+        u64 import_base = 0;
+        rhi::Buffer* import = MirrorImport(at, &import_base);
+        const u64 to = base::Min(hi, import_base + import->desc().size);
+        RecordMergePass(c, *merge, {src, result.offset + at - lo},
+                        {before.buffer, before.offset + at - lo},
+                        {import, at - import_base}, to - at);
+        at = to;
+      }
+      return;
+    }
     if (mirrored) {
       c->CopyBuffer(g_cs.mirror, MirrorOffset(lo), src, src_off + lo - base,
                     hi - lo);
@@ -707,7 +837,7 @@ static void RecordGuestWrite(rhi::CommandList* c,
   }
   if (at < base + n)
     copy(at, base + n);
-  c->Barrier(rhi::kAccessCopyWrite,
+  c->Barrier(rhi::kAccessCopyWrite | rhi::kAccessComputeWrite,
              kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostRead);
   if (mirrored) {
     MirrorWriteBack(base, n);
@@ -715,6 +845,29 @@ static void RecordGuestWrite(rhi::CommandList* c,
     NotePendingGuestWrite(base, base + n);
     NoteGuestWrite(base, n);
   }
+}
+
+DELTA_OPTION(bool, kStageShadow, "DELTA_GPU_STAGE_SHADOW", true);
+
+void CaptureStageShadow(CsRange& e, u64 bytes) {
+  bytes &= ~u64(3);
+  if (!kStageShadow || !bytes || !e.buf || e.imported || !WordMerge())
+    return;
+  if (!e.shadow || e.shadow->desc().size < bytes) {
+    if (e.shadow)
+      g_cs.frame_retired.push_back(e.shadow);
+    e.shadow = CreateCsBuffer((bytes + 0xFFFF) & ~u64(0xFFFF),
+                              rhi::kBufferStorage | rhi::kBufferCopyDst,
+                              rhi::MemoryKind::kDevice);
+    if (!e.shadow)
+      return;
+  }
+  rhi::CommandList* const c = g_cs.list;
+  c->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+  c->CopyBuffer(e.shadow, 0, e.buf, 0, bytes);
+  c->Barrier(kAccessCopyRW, kAccessComputeRW | kAccessCopyRW);
+  e.shadow_bytes = bytes;
+  e.shadow_stamp = e.staged_stamp;
 }
 
 bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
@@ -760,7 +913,12 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
         skip.emplace_back(base::Max(lo, base), base::Min(hi, base + n));
   base::Sort(skip.begin(), skip.end());
   *kept = !skip.empty();
-  RecordGuestWrite(c, mirrored, base, n, src, skip);
+  const bool shadowed = !retile && e.shadow && e.staged_stamp &&
+                        e.shadow_stamp == e.staged_stamp &&
+                        e.shadow_bytes >= (n & ~u64(3));
+  const MergeOperand shadow{e.shadow, 0};
+  RecordGuestWrite(c, mirrored, base, n, src, skip, 0,
+                   shadowed ? &shadow : nullptr);
   e.fill_kept.clear();
   MarkPending(e);
   return true;
@@ -840,13 +998,90 @@ void RecordMirrorWrite(u64 first, u64 bytes) {
 }
 }  // namespace
 
-void MirrorWriteBack(u64 base, u64 bytes, bool may_own) {
+
+bool CaptureMirrorShadows(const u64* bases,
+                          const u64* sizes,
+                          u32 count,
+                          MirrorShadow* out) {
+  static rhi::Buffer* pool = nullptr;
+  static const guest::SessionReset reset_pool([] {
+    if (pool)
+      Device().Destroy(pool);
+    pool = nullptr;
+  });
+  if (!WordMerge())
+    return false;
+  const u64 align = Device().caps().storage_offset_alignment;
+  u64 total = 0;
+  for (u32 i = 0; i < count; i++)
+    total += (sizes[i] + align - 1) & ~(align - 1);
+  if (!total)
+    return true;
+  if (!pool || pool->desc().size < total) {
+    if (pool)
+      g_cs.frame_retired.push_back(pool);
+    pool = CreateCsBuffer((total + 0xFFFFF) & ~u64(0xFFFFF),
+                          rhi::kBufferStorage | rhi::kBufferCopyDst,
+                          rhi::MemoryKind::kDevice);
+    if (!pool)
+      return false;
+  }
+  rhi::CommandList* const c = g_cs.list;
+  c->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+  u64 offset = 0;
+  for (u32 i = 0; i < count; i++) {
+    out[i] = {pool, bases[i], offset, sizes[i]};
+    const u64 end = bases[i] + sizes[i];
+    for (u64 at = bases[i]; at < end;) {
+      const bool owned = MirrorOwned(at & ~(kMirrorBlock - 1));
+      u64 to = at;
+      while (to < end && MirrorOwned(to & ~(kMirrorBlock - 1)) == owned)
+        to = base::Min(end, (to & ~(kMirrorBlock - 1)) + kMirrorBlock);
+      if (!owned)
+        c->CopyBuffer(pool, offset + (at - bases[i]), g_cs.mirror,
+                      MirrorOffset(at), to - at);
+      at = to;
+    }
+    offset += (sizes[i] + align - 1) & ~(align - 1);
+  }
+  c->Barrier(kAccessCopyRW, kAccessComputeRW);
+  return true;
+}
+
+void MirrorWriteBack(u64 base,
+                     u64 bytes,
+                     bool may_own,
+                     const MirrorShadow* shadow) {
   RecordMirrorWrite(base, bytes);
   g_cs.mirror_self.push_back({base, base + bytes});
   const u64 end = base + bytes;
   may_own = may_own && (kMirrorOwnSplit || MirrorOwnable(base, bytes));
-  const auto finish = [](u64 run, u64 to, bool owned) {
+  const auto publish = [&](u64 run, u64 to) {
+    if (!shadow || !shadow->buffer)
+      return MirrorCopy(run, to - run, true);
+    for (u64 at = run; at < to;) {
+      const bool owned = MirrorOwned(at & ~(kMirrorBlock - 1));
+      u64 end = at;
+      while (end < to && MirrorOwned(end & ~(kMirrorBlock - 1)) == owned)
+        end = base::Min(to, (end & ~(kMirrorBlock - 1)) + kMirrorBlock);
+      if (owned ? !MirrorCopy(at, end - at, true)
+                : !RecordWordMerge(at, end, *shadow) &&
+                      !MirrorCopy(at, end - at, true))
+        return false;
+      at = end;
+    }
+    return true;
+  };
+  const auto finish = [&](u64 run, u64 to, bool owned) {
     if (owned) {
+      if (shadow && shadow->buffer)
+        for (u64 at = run; at < to;) {
+          const u64 end =
+              base::Min(to, (at & ~(kMirrorBlock - 1)) + kMirrorBlock);
+          if (!MirrorOwned(at & ~(kMirrorBlock - 1)))
+            RecordWordMerge(at, end, *shadow);
+          at = end;
+        }
       MirrorOwn(run, to - run);
       g_cs_stats.mirror_own_bytes += to - run;
       return;
@@ -858,7 +1093,7 @@ void MirrorWriteBack(u64 base, u64 bytes, bool may_own) {
     auto& t = g_cs_stats.mirror_wb_top[run];
     t.first += to - run;
     t.second++;
-    if (MirrorCopy(run, to - run, true))
+    if (publish(run, to))
       NotePendingGuestWrite(run, to);
   };
   u64 run = base;

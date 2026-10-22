@@ -233,6 +233,14 @@ base::Vector<u32> BuildIndexConversionShader(
 
 base::Vector<u32> BuildClearPredicateShader();
 
+// Publishes a dispatch's result word by word: where result != shadow (the
+// staged bytes before the dispatch) the word goes to guest, elsewhere the
+// result adopts the guest's word; the shadow then holds what guest holds.
+// Push constants: the word offsets of result, shadow and guest, then the
+// word count.
+constexpr u32 kWordMergeGroup = 64;
+base::Vector<u32> BuildWordMergeShader();
+
 void DisassembleAt(u64 code_address, const char* tag);
 base::String ListingAt(u64 code_address, u32 max_dwords);
 

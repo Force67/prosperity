@@ -363,5 +363,84 @@ base::Vector<u32> BuildClearPredicateShader() {
   return code;
 }
 
+base::Vector<u32> BuildWordMergeShader() {
+  using namespace spirv;
+  using spv::Op;
+  using spv::StorageClass;
+  Module m;
+  const Id u = m.TypeInt();
+  const Id boolean = m.TypeBool();
+  const Id array = m.TypeRuntimeArray(u);
+  m.Decorate(array, spv::Decoration::ArrayStride, {4});
+  const Id block = m.TypeStruct({array});
+  m.Decorate(block, spv::Decoration::Block);
+  m.MemberDecorate(block, 0, spv::Decoration::Offset, {0});
+  const Id ptr = m.TypePointer(StorageClass::StorageBuffer, u);
+  Id buffers[3];
+  for (u32 i = 0; i < 3; i++) {
+    buffers[i] = m.Variable(m.TypePointer(StorageClass::StorageBuffer, block),
+                            StorageClass::StorageBuffer);
+    m.Decorate(buffers[i], spv::Decoration::DescriptorSet, {0});
+    m.Decorate(buffers[i], spv::Decoration::Binding, {i});
+  }
+  const Id pc_type = m.TypeStruct({u, u, u, u});
+  m.Decorate(pc_type, spv::Decoration::Block);
+  for (u32 i = 0; i < 4; i++)
+    m.MemberDecorate(pc_type, i, spv::Decoration::Offset, {i * 4});
+  const Id pc = m.Variable(m.TypePointer(StorageClass::PushConstant, pc_type),
+                           StorageClass::PushConstant);
+  const Id vec = m.TypeVec(u, 3);
+  const Id gid =
+      m.Variable(m.TypePointer(StorageClass::Input, vec), StorageClass::Input);
+  m.Decorate(gid, spv::Decoration::BuiltIn,
+             {static_cast<u32>(spv::BuiltIn::GlobalInvocationId)});
+  const Id fn = m.BeginFunction(m.TypeVoid(), m.TypeFunction(m.TypeVoid()));
+  m.EntryPoint(spv::ExecutionModel::GLCompute, fn, "main", {gid});
+  m.ExecMode(fn, spv::ExecutionMode::LocalSize, {kWordMergeGroup, 1, 1});
+  const auto c = [&](u32 v) { return m.ConstU32(v); };
+  const auto param = [&](u32 i) {
+    return m.Load(u, m.AccessChain(m.TypePointer(StorageClass::PushConstant, u),
+                                   pc, {c(i)}));
+  };
+  const auto at = [&](u32 binding, Id index) {
+    return m.AccessChain(
+        ptr, buffers[binding],
+        {c(0), m.Emit(Op::OpIAdd, u, {param(binding), index})});
+  };
+  const Id i = m.CompositeExtract(u, m.Load(vec, gid), 0);
+  const Id valid = m.Emit(Op::OpULessThan, boolean, {i, param(3)});
+  const Id body = m.NewBlock(), done = m.NewBlock();
+  m.SelectionMerge(done);
+  m.BranchConditional(valid, body, done);
+  m.OpenBlock(body);
+  const Id result = m.Load(u, at(0, i));
+  const Id changed =
+      m.Emit(Op::OpINotEqual, boolean, {result, m.Load(u, at(1, i))});
+  const Id publish = m.NewBlock(), adopt = m.NewBlock(), merged = m.NewBlock();
+  m.SelectionMerge(merged);
+  m.BranchConditional(changed, publish, adopt);
+  m.OpenBlock(publish);
+  m.Store(at(2, i), result);
+  m.Store(at(1, i), result);
+  m.Branch(merged);
+  m.OpenBlock(adopt);
+  const Id guest = m.Load(u, at(2, i));
+  m.Store(at(0, i), guest);
+  m.Store(at(1, i), guest);
+  m.Branch(merged);
+  m.OpenBlock(merged);
+  m.Branch(done);
+  m.OpenBlock(done);
+  m.ReturnVoid();
+  m.EndFunction();
+  auto code = m.Assemble();
+  base::String error;
+  if (!Validate(code, &error)) {
+    BASE_LOGI("gpuvk", "word merge shader invalid: {}", error.c_str());
+    return {};
+  }
+  return code;
+}
+
 }  // namespace gpu::gcn
 #endif

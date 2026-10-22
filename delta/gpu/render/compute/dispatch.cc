@@ -1080,6 +1080,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         MarkPending(e);
         e.rt_sourced = false;
         e.staged_stamp = ++g_cs.dirty_stamp;
+        if (ci.res[i].written && (stage_bytes || !ci.res[i].image_staging))
+          CaptureStageShadow(e, copy_bytes);
       }
       e.gpu_dirty = false;
       e.write_seq++;
@@ -1318,6 +1320,23 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   }
   if (hazard_src)
     g_cs.list->Barrier(hazard_src, hazard_dst);
+  const auto mirror_write_bytes = [&](u32 i) {
+    const auto& res = ci.res[i];
+    const u64 bytes = res.guest_size ? res.guest_size : res.size;
+    return res.write_bytes ? base::Min(res.write_bytes, bytes) : bytes;
+  };
+  MirrorShadow shadows[ComputeInfo::kMaxResources] = {};
+  {
+    u64 bases[ComputeInfo::kMaxResources] = {}, sizes[ComputeInfo::kMaxResources] = {};
+    for (u32 i = 0; i < ci.num_res; i++)
+      if (mirror_res[i] && ci.res[i].written) {
+        bases[i] = ci.res[i].base;
+        sizes[i] = mirror_write_bytes(i);
+      }
+    if (!CaptureMirrorShadows(bases, sizes, ci.num_res, shadows))
+      for (auto& shadow : shadows)
+        shadow = {};
+  }
   base::Vector<rhi::Buffer*> capture_buffers;
   if (capture_dispatch) {
     capture_buffers.resize(ci.num_res, nullptr);
@@ -1431,13 +1450,8 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       MarkPending(it->second);
   }
   for (u32 i = 0; i < ci.num_res; i++)
-    if (mirror_res[i] && ci.res[i].written) {
-      const auto& res = ci.res[i];
-      const u64 bytes = res.guest_size ? res.guest_size : res.size;
-      MirrorWriteBack(res.base, res.write_bytes
-                                    ? base::Min(res.write_bytes, bytes)
-                                    : bytes);
-    }
+    if (mirror_res[i] && ci.res[i].written)
+      MirrorWriteBack(ci.res[i].base, mirror_write_bytes(i), true, &shadows[i]);
   ++g_cs.batch_count;
 
   const u64 t_out0 = NowNs();
