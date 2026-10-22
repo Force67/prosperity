@@ -1501,8 +1501,8 @@ void ApplyBootPatches(Process& p) {
   // FEX path: a host jump is invalid inside the x86 JIT, so patch the export to
   // a tiny `mov eax, <magic>; syscall; ret` stub that the FEX syscall handler
   // bridges to kern::GuestTlsGetAddr (tls_index ptr arrives in rdi).
-  if (auto k = p.getModule(base::StringRef("libkernel"))) {
-    if (uintptr_t a = k->getSymbolByNid("vNe1w4diLCs")) {
+  if (auto k = p.GetModule(base::StringRef("libkernel"))) {
+    if (uintptr_t a = k->GetSymbolByNid("vNe1w4diLCs")) {
       auto* c = reinterpret_cast<u8*>(a);
       host_memory::ProtectMem(reinterpret_cast<void*>(a & ~0xFFFull), 0x2000,
                               host_memory::PageProtection::kRwx);

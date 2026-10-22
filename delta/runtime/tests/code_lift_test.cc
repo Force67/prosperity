@@ -3,6 +3,8 @@
 
 #include "runtime/code_lift.h"
 
+// CodeLift is native-x86 only; the FEX backend lifts nothing.
+#if defined(DELTA_BACKEND_NATIVE)
 // CodeLift wraps the vendored capstone disassembler. init() opening the handle
 // proves the runtime module's disassembler wiring works end to end against the
 // capstone we link, and the destructor tears it down without leaking.
@@ -12,7 +14,6 @@ TEST(CodeLift, InitOpensDisassembler) {
   EXPECT_TRUE(lift.Init());
 }
 
-#if defined(DELTA_BACKEND_NATIVE)
 TEST(CodeLift, FsLoadUsesStacklessStub) {
   u8 code[] = {0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0xc3};
   u8 stubs[64]{};

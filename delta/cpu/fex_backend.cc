@@ -529,8 +529,8 @@ class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
  public:
   FexSyscallHandler() { OSABI = FEXCore::HLE::SyscallOSABI::OS_LINUX64; }
 
-  u64 HandleSyscall(FEXCore::Core::CpuStateFrame* frame,
-                    FEXCore::HLE::SyscallArguments* args) override {
+  uint64_t HandleSyscall(FEXCore::Core::CpuStateFrame* frame,
+                         FEXCore::HLE::SyscallArguments* args) override {
     const memory_debug::Scope memory_scope(memory_debug::Bucket::kRuntime);
     guest::PausePoint();
     const u64 result = DispatchSyscall(frame, args);
@@ -682,7 +682,7 @@ class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
 
   FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(
       FEXCore::Core::InternalThreadState*,
-      u64 address) override {
+      uint64_t address) override {
     base::LockGuard lk(g_range_mutex);
     for (auto& r : g_ranges)
       if (address >= r.base && address < r.base + r.size)
@@ -690,10 +690,10 @@ class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
     return {0, 0, false};
   }
 
-  base::Optional<FEXCore::ExecutableFileSectionInfo>
+  std::optional<FEXCore::ExecutableFileSectionInfo>
   LookupExecutableFileSection(FEXCore::Core::InternalThreadState*,
-                              u64) override {
-    return base::nullopt;
+                              uint64_t) override {
+    return std::nullopt;
   }
 };
 
@@ -1022,14 +1022,14 @@ class FexBackend final : public Backend {
               base::LockGuard<base::Mutex> wl(init_worker_m);
               init_worker_done = true;
             }
-            init_worker_cv.notify_all();
+            init_worker_cv.NotifyAll();
           }
         });  // process-lifetime worker; its TCB/TLS stay mapped
       }
       init_worker_done = false;
       init_worker_job = [this, h] { RunGuestThread(h); };
-      init_worker_cv.notify_all();
-      init_worker_cv.wait(lk, [this] { return init_worker_done; });
+      init_worker_cv.NotifyAll();
+      init_worker_cv.Wait(lk, [this] { return init_worker_done; });
     }
     return 0;
   }
@@ -1572,7 +1572,7 @@ bool TryHandleJitSignal(int sig, void* infop, void* ucv) {
   auto result = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
       t_cur_thread,
       FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, pc,
-      reinterpret_cast<u64*>(&uc->uc_mcontext.regs[0]));
+      reinterpret_cast<uint64_t*>(&uc->uc_mcontext.regs[0]));
   // A backpatched atomic stops being atomic (HalfBarrier); log each site once.
   static base::Mutex log_m;
   static base::Set<u64> seen_rips;

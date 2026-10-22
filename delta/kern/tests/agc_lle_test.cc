@@ -47,6 +47,9 @@ class AgcLleTest : public testing::Test {
 };
 
 TEST_F(AgcLleTest, NativePacketEncodingCallbacksAndDriverErrors) {
+#if !defined(DELTA_BACKEND_NATIVE)
+  GTEST_SKIP() << "Xbyak emits x86-64 thunks only on an x86-64 host";
+#else
   auto emit = agc->GetSymbolByNid("-KRzWekV120");
   ASSERT_NE(emit, 0u);
   for (const char* nid : {"T6xuVw0KUJo", "AAeX-U5-P3M", "fd5Bp5tGTgo"})
@@ -146,5 +149,6 @@ TEST_F(AgcLleTest, NativePacketEncodingCallbacksAndDriverErrors) {
               0x8a6c9018u);
     EXPECT_EQ(output, 0xa5a5a5a5u);
   }
+#endif
 }
 }  // namespace

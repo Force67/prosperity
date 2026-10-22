@@ -450,18 +450,18 @@ static uintptr_t WatchFaultGuestRsp(void* ucv) {
 }
 
 #if defined(__aarch64__)
-static void probeHandler(int, siginfo_t*, void* ucv) {
+static void ProbeHandler(int, siginfo_t*, void* ucv) {
   uintptr_t rip = 0;
-  const bool attributed = watchFaultGuestRip(ucv, rip);
+  const bool attributed = WatchFaultGuestRip(ucv, rip);
   char sym[256];
   if (attributed)
-    symbolize(rip, sym, sizeof(sym));
+    Symbolize(rip, sym, sizeof(sym));
   else
     std::snprintf(sym, sizeof(sym), "<unattributed FEX host pc>");
   const auto host_pc = static_cast<ucontext_t*>(ucv)->uc_mcontext.pc;
   BASE_LOGI("probe", "tid={} host_pc={:#x} guest_pc={:#x} {}", (long)gettid(),
             (unsigned long long)host_pc, (unsigned long)rip, sym);
-  if (const uintptr_t sp = watchFaultGuestRsp(ucv))
+  if (const uintptr_t sp = WatchFaultGuestRsp(ucv))
     GuestStackTraceFrom(sp, "probe", 8, (long)syscall(SYS_gettid));
   std::fflush(stderr);
 }
@@ -597,7 +597,7 @@ bool OnSignal(int sig, siginfo_t* si, void* ucv) {
               ? "write"
               : "read";
 #else
-      const char* kind = g_wprotRegs.load() ? "access" : "write";
+      const char* kind = g_wprot_regs.load() ? "access" : "write";
 #endif
       if (const uintptr_t probe = write_watch::ValueProbe();
           probe &&
@@ -1252,8 +1252,8 @@ void SetCallSkip(uintptr_t addr, long rax_val, int insn_len) {
   g_call_skip_count++;
 #else
   (void)addr;
-  (void)raxVal;
-  (void)insnLen;
+  (void)rax_val;
+  (void)insn_len;
 #endif
 }
 void SetOrderTrace(uintptr_t addr, const char* label) {
@@ -1315,7 +1315,7 @@ void StartWriteWatch(uintptr_t addr,
   if (!addr || !bytes)
     return;
 #if !defined(__x86_64__)
-  singleStep = false;
+  single_step = false;
 #endif
   const size_t pgsz = (size_t)sysconf(_SC_PAGESIZE);
   const uintptr_t base = addr & ~((uintptr_t)pgsz - 1);

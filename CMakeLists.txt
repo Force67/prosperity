@@ -130,7 +130,10 @@ add_subdirectory(delta)
 # just the ps4delta executable, run headless via adb.
 if(NOT ANDROID)
   add_subdirectory(tools/modload)
-  add_subdirectory(tools/modexec)
+  # modexec patches guest code with host jumps and enters it directly.
+  if(DELTA_BACKEND STREQUAL "NATIVE")
+    add_subdirectory(tools/modexec)
+  endif()
   add_subdirectory(tools/pkg_check)
   add_subdirectory(tools/pup_extract)
   add_subdirectory(tools/ffpkg_extract)

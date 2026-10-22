@@ -55,6 +55,8 @@
             # The D3D12 rhi backend: vkd3d implements D3D12 over Vulkan, DXC
             # compiles the lowered HLSL to DXIL.
             directx-shader-compiler
+          ] ++ lib.optionals stdenv.hostPlatform.isx86 [
+            # nixpkgs builds vkd3d with Wine's i686 set, so x86 hosts only.
             vkd3d           # the 2.0 override above (let outranks with)
           ];
 
@@ -119,6 +121,8 @@
             perf            # tools/drun.py --perf: where guest threads spend time
             # D3D12 rhi backend: D3D12 over Vulkan, and HLSL -> DXIL.
             directx-shader-compiler
+          ] ++ lib.optionals stdenv.hostPlatform.isx86 [
+            # nixpkgs builds vkd3d with Wine's i686 set, so x86 hosts only.
             vkd3d           # the 2.0 override above (let outranks with)
           ];
 

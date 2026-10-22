@@ -13,6 +13,9 @@
 
 namespace {
 TEST(AudioInLle, FirmwareValidatesCaptureParameters) {
+#if !defined(DELTA_BACKEND_NATIVE)
+  GTEST_SKIP() << "Xbyak emits x86-64 thunks only on an x86-64 host";
+#else
   const char* modules = std::getenv("DELTA_TEST_PS4_MODULES");
   if (!modules)
     GTEST_SKIP()
@@ -49,5 +52,6 @@ TEST(AudioInLle, FirmwareValidatesCaptureParameters) {
   guest::JoinThreads();
   guest::ResetSessionResources();
   guest::BeginSession();
+#endif
 }
 }  // namespace

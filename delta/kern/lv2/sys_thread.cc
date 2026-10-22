@@ -859,6 +859,25 @@ struct UmtxWallScope {
   }
 };
 
+// A CPU "relax" hint for a spin-wait: no syscall, no context switch. The guest
+// scheduler (e.g. Doom64's KEX parallel-job manager) busy-waits for a worker by
+// calling scePthreadYield in a tight loop, millions of times per frame. Mapping
+// that to the host sched_yield forced a context-switch each call; with ~35
+// guest threads runnable the host scheduler kept parking the waiter, so the
+// worker's result was only seen after tens of microseconds of scheduling
+// latency PER spin, summing to ~1s/frame (~1fps). On our many-core host the
+// workers run on their own cores regardless, so a `pause` (the worker's write
+// is seen within microseconds) is both correct and ~100x faster here.
+static inline void CpuRelax() {
+#if defined(__x86_64__) || defined(__i386__)
+  __builtin_ia32_pause();
+#elif defined(__aarch64__)
+  asm volatile("yield" ::: "memory");
+#else
+  base::YieldCurrentThread();
+#endif
+}
+
 int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
   UmtxWallScope uw(op);
   WaitProbe wp("umtx_op", (long)(long)ptr, (long)op);
@@ -900,7 +919,7 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
         const auto until =
             base::TimeTicks::Now() + base::Microseconds((kUmtxInjectNs) / 1000);
         while (base::TimeTicks::Now() < until)
-          __builtin_ia32_pause();
+          CpuRelax();
       }
       // The word is usually already free by the time we get here (libthr calls
       // this only after its userland CAS lost, and the winner often releases
@@ -1430,25 +1449,6 @@ int PS4ABI sys_thr_get_name(u32 tid, char* buf) {
   if (buf)
     std::strcpy(buf, "thr");
   return 0;
-}
-
-// A CPU "relax" hint for a spin-wait: no syscall, no context switch. The guest
-// scheduler (e.g. Doom64's KEX parallel-job manager) busy-waits for a worker by
-// calling scePthreadYield in a tight loop, millions of times per frame. Mapping
-// that to the host sched_yield forced a context-switch each call; with ~35
-// guest threads runnable the host scheduler kept parking the waiter, so the
-// worker's result was only seen after tens of microseconds of scheduling
-// latency PER spin, summing to ~1s/frame (~1fps). On our many-core host the
-// workers run on their own cores regardless, so a `pause` (the worker's write
-// is seen within microseconds) is both correct and ~100x faster here.
-static inline void CpuRelax() {
-#if defined(__x86_64__) || defined(__i386__)
-  __builtin_ia32_pause();
-#elif defined(__aarch64__)
-  asm volatile("yield" ::: "memory");
-#else
-  base::YieldCurrentThread();
-#endif
 }
 
 int PS4ABI sys_yield() {

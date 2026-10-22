@@ -16,6 +16,9 @@
 
 namespace {
 TEST(FlexibleMemoryLle, NativeNamedMappingsProvideWritablePages) {
+#if !defined(DELTA_BACKEND_NATIVE)
+  GTEST_SKIP() << "Xbyak emits x86-64 thunks only on an x86-64 host";
+#else
   const char* modules = std::getenv("DELTA_TEST_PS5_MODULES");
   if (!modules)
     GTEST_SKIP() << "Set DELTA_TEST_PS5_MODULES to native PS5 firmware";
@@ -57,5 +60,6 @@ TEST(FlexibleMemoryLle, NativeNamedMappingsProvideWritablePages) {
   guest::JoinThreads();
   guest::ResetSessionResources();
   guest::BeginSession();
+#endif
 }
 }  // namespace

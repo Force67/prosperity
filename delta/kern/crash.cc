@@ -855,7 +855,7 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
   BASE_LOGI("crashHandler", "  host pc in JIT: {}",
             recon ? "yes" : "no (FEX/HLE C++)");
   char ripsym[256];
-  symbolize(grip, ripsym, sizeof(ripsym));
+  Symbolize(grip, ripsym, sizeof(ripsym));
   BASE_LOGI("crashHandler", "  host pc   = {:016x}",
             (unsigned long long)hostpc);
   BASE_LOGI("crashHandler", "  guest rip = {:016x}  {}",
@@ -949,12 +949,12 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
     // live.
     {
       u64 ebase2 = 0;
-      if (auto* proc = proc::GetActive()) {
-        for (auto& mod : proc->getModuleList()) {
-          auto& mi = mod->getInfo();
-          auto* t = mi.textSeg.addr;
+      if (auto* proc = Process::GetActive()) {
+        for (auto& mod : proc->GetModuleList()) {
+          auto& mi = mod->GetInfo();
+          auto* t = mi.text_seg.addr;
           if (t && grip >= (uintptr_t)t &&
-              grip < (uintptr_t)t + mi.textSeg.size) {
+              grip < (uintptr_t)t + mi.text_seg.size) {
             ebase2 = (u64)t;
             break;
           }
@@ -962,20 +962,20 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
       }
       const u64 off2 = ebase2 ? grip - ebase2 : 0;
       if (gexact && ebase2 && off2 >= 0x48a70 && off2 < 0x48b64)
-        sotcWalkFreeTree(g[R15], g[RDX] & ~7ull);
+        SotcWalkFreeTree(g[R15], g[RDX] & ~7ull);
     }
 
     // ---- SOTC AllocationTracker walk (diagnostic; see helper above) ----
     // Fire only inside the eboot's untrack-on-free fns (+0x18920 CPU / +0x8d930
-    GPU);
-    resolve the eboot base from the module containing grip.{
+    // GPU); resolve the eboot base from the module containing grip.
+    {
       u64 ebase = 0;
-      if (auto* proc = proc::GetActive()) {
-        for (auto& mod : proc->getModuleList()) {
-          auto& mi = mod->getInfo();
-          auto* t = mi.textSeg.addr;
+      if (auto* proc = Process::GetActive()) {
+        for (auto& mod : proc->GetModuleList()) {
+          auto& mi = mod->GetInfo();
+          auto* t = mi.text_seg.addr;
           if (t && grip >= (uintptr_t)t &&
-              grip < (uintptr_t)t + mi.textSeg.size) {
+              grip < (uintptr_t)t + mi.text_seg.size) {
             ebase = (u64)t;
             break;
           }
@@ -996,7 +996,7 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
         u64 rsp = g[RSP];
         u64 trkStk = 0, keyStk = 0;
         bool haveStk =
-            trkRd64(rsp + 0x18, trkStk) && trkRd64(rsp + 0x20, keyStk);
+            TrkRd64(rsp + 0x18, trkStk) && TrkRd64(rsp + 0x20, keyStk);
         BASE_LOGI("trkwalk",
                   " from-stack: tracker={:#x} key={:#x} (ok={}) | "
                   "from-reg: r13={:#x} r14={:#x}",
@@ -1006,12 +1006,12 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
         // Prefer the stack-recovered tracker/key; fall back to the regs if the
         // stack slot doesn't look like a mapped module-space pointer.
         auto plausible = [](u64 t) {
-          return InModuleRegion(t) && trkMincore(t);
+          return InModuleRegion(t) && TrkMincore(t);
         };
         u64 tracker = plausible(trkStk) ? trkStk : g[R13];
         u64 key = (haveStk && keyStk) ? keyStk : g[R14];
         // Raw tracker header window (fallback context: +0x00..0xa0).
-        if (trkMincore(tracker)) {
+        if (TrkMincore(tracker)) {
           auto* q = reinterpret_cast<const u64*>(tracker);
           base::String trkwords;
           for (int i = 0; i < 20; i++) {
@@ -1023,19 +1023,19 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
           BASE_LOGI("trkwalk", "{}", trkwords.c_str());
         }
         // 1) Walk the tracker the fault came from.
-        bool inThis = sotcWalkTracker(tracker, key, "fault");
+        bool inThis = SotcWalkTracker(tracker, key, "fault");
         // 2) Cross-check the other known tracker instances (the two
         // GPU/renderer
         //    tracker globals @ base+0x2ed3350 / +0x2ed33b0) for the same key.
         u64 gpuA = ebase + 0x2ed3350, gpuB = ebase + 0x2ed33b0;
         bool inA = false, inB = false;
         if (gpuA != tracker)
-          inA = sotcWalkTracker(gpuA, key, "gpuA");
+          inA = SotcWalkTracker(gpuA, key, "gpuA");
         if (gpuB != tracker)
-          inB = sotcWalkTracker(gpuB, key, "gpuB");
+          inB = SotcWalkTracker(gpuB, key, "gpuB");
         // 3) Emulator-side VMA view of the key.
-        if (auto* proc = proc::GetActive()) {
-          auto* pi = proc->getVma().get(reinterpret_cast<u8*>(key));
+        if (auto* proc = Process::GetActive()) {
+          auto pi = proc->GetVma().Get(reinterpret_cast<u8*>(key));
           if (pi) {
             u64 vb = (u64)pi->ptr, ve = vb + pi->size;
             BASE_LOGI("trkwalk",
@@ -1044,7 +1044,7 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
                       "key-regionbase={:+}",
                       (unsigned long long)key, (unsigned long long)vb,
                       (unsigned long long)ve, (unsigned long long)pi->size,
-                      pi->sceProt, pi->reserved, pi->name ? pi->name : "(null)",
+                      pi->sce_prot, pi->reserved, pi->name ? pi->name : "(null)",
                       (long long)(key - vb));
           } else {
             BASE_LOGI("trkwalk", " emu VMA: key {:#x} is in NO tracked region",
@@ -1154,7 +1154,7 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
         const uintptr_t base = g[r.idx];
         // A register holding a non-pointer must not take the handler down with
         // it: "all" is the mode used when the interesting register is unknown.
-        if (base < 0x10000 || !trkMincore(base))
+        if (base < 0x10000 || !TrkMincore(base))
           continue;
         base::String qw;
         base::FormatTo(qw, "  --- {} = {:#x} ---\n", r.name,
@@ -1215,7 +1215,7 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
     // out-of-bounds) stack scan so it survives even if the scan faults.
     cpu::DumpThreadTrace(stderr);
     std::fflush(stderr);
-    backtrace(g[RBP]);
+    Backtrace(g[RBP]);
     // Raw stack scan: optimised guest code omits frame pointers, so scan for
     // any value landing in a loaded module's .text (the real call chain).
     BASE_LOGI("crashHandler", "  --- stack scan ---");
@@ -1224,7 +1224,7 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
       for (int i = 0; i < 256; i++) {
         uintptr_t v = sp[i];
         char sym[256];
-        symbolize(v, sym, sizeof(sym));
+        Symbolize(v, sym, sizeof(sym));
         if (std::strstr(sym, "(.text)"))
           BASE_LOGI("crashHandler", "  sp+{:<4x} {:016x}  {}", i * 8, v, sym);
       }
@@ -1246,7 +1246,7 @@ void SetNullGuard(uintptr_t addr, GuardReg reg, int insn_len) {
 #else
   (void)addr;
   (void)reg;
-  (void)insnLen;
+  (void)insn_len;
 #endif
 }
 

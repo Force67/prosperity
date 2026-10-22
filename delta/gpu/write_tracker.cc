@@ -11,7 +11,6 @@
 
 #if defined(__linux__)
 #include <fcntl.h>
-#include <immintrin.h>
 #include <linux/fs.h>
 #include <linux/userfaultfd.h>
 #include <sys/ioctl.h>
@@ -306,8 +305,13 @@ void WriteTracker::TakeFaulted(base::Vector<Range>& out) {
   for (u64 at = g_queue_tail; at < head; at++) {
     u64* slot = &g_queue[at % kQueueSize];
     u64 page;
-    while (!(page = __atomic_exchange_n(slot, 0, __ATOMIC_ACQUIRE)))
-      _mm_pause();
+    while (!(page = __atomic_exchange_n(slot, 0, __ATOMIC_ACQUIRE))) {
+#if defined(__x86_64__)
+      __builtin_ia32_pause();
+#elif defined(__aarch64__)
+      asm volatile("yield" ::: "memory");
+#endif
+    }
     pages.push_back(page);
   }
   g_queue_tail = head;
