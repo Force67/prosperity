@@ -267,7 +267,7 @@ DEF_OP(LoadContextIndexed) {
           ldr(Dst.Q(), TMP1, Op->BaseOffset);
         } else {
           add(ARMEmitter::Size::i64Bit, TMP1, TMP1, Op->BaseOffset);
-          ldur(Dst.Q(), TMP1, Op->BaseOffset);
+          ldur(Dst.Q(), TMP1);
         }
         break;
       case IR::OpSize::i256Bit:
@@ -333,7 +333,7 @@ DEF_OP(StoreContextIndexed) {
           str(Value.Q(), TMP1, Op->BaseOffset);
         } else {
           add(ARMEmitter::Size::i64Bit, TMP1, TMP1, Op->BaseOffset);
-          stur(Value.Q(), TMP1, Op->BaseOffset);
+          stur(Value.Q(), TMP1);
         }
         break;
       case IR::OpSize::i256Bit:
@@ -563,7 +563,25 @@ DEF_OP(LoadDF) {
   auto Flag = X86State::RFLAG_DF_RAW_LOC;
 
   // DF needs sign extension to turn 0x1/0xFF into 1/-1
-  ldrsb(Dst.X(), STATE, offsetof(FEXCore::Core::CPUState, flags[Flag]));
+  ldrsb(Dst.X(), STATE, ARRAY_OFFSETOF(FEXCore::Core::CPUState, flags, Flag));
+}
+
+DEF_OP(ContextClear) {
+  auto Op = IROp->C<IR::IROp_ContextClear>();
+  if (CTX->HostFeatures.PreferZVAForVZero) {
+    // We can use CLZero directly when hardware supports it.
+    // Provides a fairly generous speed-up on Ampere1A hardware.
+    // TODO: When FEAT_MOPS hardware ships, test memset using MOPS.
+    for (size_t i = 0; i < Op->Size; i += 64) {
+      add(ARMEmitter::Size::i64Bit, TMP1, STATE.R(), Op->Offset + i);
+      dc(ARMEmitter::DataCacheOperation::ZVA, TMP1);
+    }
+  } else {
+    movi(ARMEmitter::SubRegSize::i64Bit, VTMP1.Q(), 0);
+    for (size_t i = 0; i < Op->Size; i += 32) {
+      stp<ARMEmitter::IndexType::OFFSET>(VTMP1.Q(), VTMP1.Q(), STATE.R(), Op->Offset + i);
+    }
+  }
 }
 
 ARMEmitter::ExtendedMemOperand Arm64JITCore::GenerateMemOperand(
@@ -1040,7 +1058,7 @@ void Arm64JITCore::Emulate128BitGather(IR::OpSize Size, IR::OpSize ElementSize, 
                                        ARMEmitter::VRegister IncomingDst, std::optional<ARMEmitter::Register> BaseAddr,
                                        ARMEmitter::VRegister VectorIndexLow, std::optional<ARMEmitter::VRegister> VectorIndexHigh,
                                        ARMEmitter::VRegister MaskReg, IR::OpSize VectorIndexSize, size_t DataElementOffsetStart,
-                                       size_t IndexElementOffsetStart, uint8_t OffsetScale, IR::OpSize AddrSize) {
+                                       size_t IndexElementOffsetStart, uint8_t OffsetScale, IR::OpSize AddrSize, bool MaskAllOnes) {
   LOGMAN_THROW_A_FMT(ElementSize >= IR::OpSize::i8Bit && ElementSize <= IR::OpSize::i64Bit, "Invalid element size");
 
   const auto PerformSMove = [this](IR::OpSize ElementSize, const ARMEmitter::Register Dst, const ARMEmitter::VRegister Vector, int index) {
@@ -1098,11 +1116,13 @@ void Arm64JITCore::Emulate128BitGather(IR::OpSize Size, IR::OpSize ElementSize, 
 
   for (size_t i = DataElementOffsetStart, IndexElement = IndexElementOffsetStart; i < NumDataElements; ++i, ++IndexElement) {
     ARMEmitter::ForwardLabel Skip {};
-    // Extract mask element
-    PerformMove(ElementSize, WorkingReg, MaskReg, i);
+    if (!MaskAllOnes) {
+      // Extract mask element
+      PerformMove(ElementSize, WorkingReg, MaskReg, i);
 
-    // Skip if the mask's sign bit isn't set
-    (void)tbz(WorkingReg, ElementSizeInBits - 1, &Skip);
+      // Skip if the mask's sign bit isn't set
+      (void)tbz(WorkingReg, ElementSizeInBits - 1, &Skip);
+    }
 
     // Extract Index Element
     if ((IndexElement * IR::OpSizeToSize(VectorIndexSize)) >= 16) {
@@ -1198,12 +1218,15 @@ DEF_OP(VLoadVectorGatherMasked) {
 
     const auto SubRegSize = ConvertSubRegSize8(IROp);
 
-    const auto CMPPredicate = ARMEmitter::PReg::p0;
     const auto GoverningPredicate = Is256Bit ? PRED_TMP_32B : PRED_TMP_16B;
 
-    // Check if the sign bit is set for the given element size.
-    cmplt(SubRegSize, CMPPredicate, GoverningPredicate.Zeroing(), MaskReg.Z(), 0);
-    auto TempDst = VTMP1;
+    // A mask known to be all-ones loads every element straight into the destination under the governing predicate.
+    const ARMEmitter::PRegister CMPPredicate = Op->MaskAllOnes ? GoverningPredicate : ARMEmitter::PReg::p0;
+    auto TempDst = Op->MaskAllOnes ? Dst : VTMP1;
+    if (!Op->MaskAllOnes) {
+      // Check if the sign bit is set for the given element size.
+      cmplt(SubRegSize, CMPPredicate, GoverningPredicate.Zeroing(), MaskReg.Z(), 0);
+    }
 
     // No need to load a temporary register in the case that we weren't provided a base address and there is no scaling.
     ARMEmitter::SVEMemOperand MemDst {ARMEmitter::SVEMemOperand(VectorIndexLow.Z(), 0)};
@@ -1238,12 +1261,14 @@ DEF_OP(VLoadVectorGatherMasked) {
     default: break;
     }
 
-    ///< Merge elements based on predicate.
-    sel(SubRegSize, Dst.Z(), CMPPredicate, TempDst.Z(), IncomingDst.Z());
+    if (!Op->MaskAllOnes) {
+      ///< Merge elements based on predicate.
+      sel(SubRegSize, Dst.Z(), CMPPredicate, TempDst.Z(), IncomingDst.Z());
+    }
   } else {
     LOGMAN_THROW_A_FMT(!Is256Bit, "Can't emulate this gather load in the backend! Programming error!");
     Emulate128BitGather(IROp->Size, IROp->ElementSize, Dst, IncomingDst, BaseAddr, VectorIndexLow, VectorIndexHigh, MaskReg,
-                        VectorIndexSize, DataElementOffsetStart, IndexElementOffsetStart, OffsetScale, Op->AddrSize);
+                        VectorIndexSize, DataElementOffsetStart, IndexElementOffsetStart, OffsetScale, Op->AddrSize, Op->MaskAllOnes);
   }
 }
 
@@ -1277,16 +1302,20 @@ DEF_OP(VLoadVectorGatherMaskedQPS) {
     }
 
     const auto CMPPredicate = ARMEmitter::PReg::p0;
-    const auto CMPPredicate2 = ARMEmitter::PReg::p1;
+    // A mask known to be all-ones loads every element under the governing predicate and narrows straight into the destination.
+    const ARMEmitter::PRegister CMPPredicate2 = Op->MaskAllOnes ? PRED_TMP_16B : ARMEmitter::PReg::p1;
 
     const auto GoverningPredicate = PRED_TMP_16B;
 
-    // Check if the sign bit is set for the given element size.
-    // This will set the predicate bits for elements [0, 1, 2, 3]
-    // We then use punpklo to extend the low results to be for 64-bit elements.
-    cmplt(ARMEmitter::SubRegSize::i32Bit, CMPPredicate, GoverningPredicate.Zeroing(), MaskReg.Z(), 0);
-    punpklo(CMPPredicate2, CMPPredicate);
+    if (!Op->MaskAllOnes) {
+      // Check if the sign bit is set for the given element size.
+      // This will set the predicate bits for elements [0, 1, 2, 3]
+      // We then use punpklo to extend the low results to be for 64-bit elements.
+      cmplt(ARMEmitter::SubRegSize::i32Bit, CMPPredicate, GoverningPredicate.Zeroing(), MaskReg.Z(), 0);
+      punpklo(CMPPredicate2, CMPPredicate);
+    }
     auto TempDst = VTMP1;
+    const auto NarrowDst = Op->MaskAllOnes ? Dst : TempDst;
 
     auto GatherExtend = [this](ARMEmitter::VRegister Dst, std::optional<ARMEmitter::Register> BaseAddr, ARMEmitter::VRegister VectorIndex,
                                ARMEmitter::PRegister CMPPredicate, ARMEmitter::SVEModType ModType, uint8_t OffsetScale) {
@@ -1310,21 +1339,23 @@ DEF_OP(VLoadVectorGatherMaskedQPS) {
     GatherExtend(TempDst, BaseAddr, VectorIndexLow, CMPPredicate2, ModType, OffsetScale);
 
     if (VectorIndexHigh.has_value()) {
-      punpkhi(CMPPredicate2, CMPPredicate);
+      if (!Op->MaskAllOnes) {
+        punpkhi(CMPPredicate2, CMPPredicate);
+      }
       GatherExtend(VTMP2, BaseAddr, *VectorIndexHigh, CMPPredicate2, ModType, OffsetScale);
       // Move elements to the lower half.
-      uzp1(ARMEmitter::SubRegSize::i32Bit, TempDst.Q(), TempDst.Q(), VTMP2.Q());
-      ///< Merge elements based on predicate.
-      sel(ARMEmitter::SubRegSize::i32Bit, Dst.Z(), CMPPredicate, TempDst.Z(), IncomingDst.Z());
+      uzp1(ARMEmitter::SubRegSize::i32Bit, NarrowDst.Q(), TempDst.Q(), VTMP2.Q());
     } else {
       // Move elements to the lower half.
-      xtn(ARMEmitter::SubRegSize::i32Bit, TempDst.Q(), TempDst.Q());
+      xtn(ARMEmitter::SubRegSize::i32Bit, NarrowDst.Q(), TempDst.Q());
+    }
+    if (!Op->MaskAllOnes) {
       ///< Merge elements based on predicate.
       sel(ARMEmitter::SubRegSize::i32Bit, Dst.Z(), CMPPredicate, TempDst.Z(), IncomingDst.Z());
     }
   } else {
     Emulate128BitGather(IR::OpSize::i128Bit, IR::OpSize::i32Bit, Dst, IncomingDst, BaseAddr, VectorIndexLow, VectorIndexHigh, MaskReg,
-                        IR::OpSize::i64Bit, 0, 0, OffsetScale, Op->AddrSize);
+                        IR::OpSize::i64Bit, 0, 0, OffsetScale, Op->AddrSize, Op->MaskAllOnes);
   }
 }
 
@@ -1831,13 +1862,6 @@ DEF_OP(StoreMemTSO) {
 }
 
 DEF_OP(MemSet) {
-  // TODO: A future looking task would be to support this with ARM's MOPS instructions.
-  // The 8-bit non-atomic forward path directly matches ARM's SETP/SETM/SETE instruction,
-  // while the backward version needs some fixup to convert it to a forward direction.
-  //
-  // Assuming non-atomicity and non-faulting behaviour, this can accelerate this implementation.
-  // Additionally: This is commonly used as a memset to zero. If we know up-front with an inline constant
-  // that the value is zero, we can optimize any operation larger than 8-bit down to 8-bit to use the MOPS implementation.
   const auto Op = IROp->C<IR::IROp_MemSet>();
 
   const bool IsAtomic = CTX->IsMemcpyAtomicTSOEnabled();
@@ -1915,8 +1939,30 @@ DEF_OP(MemSet) {
                                       ARMEmitter::SubRegSize::i8Bit;
 
   auto EmitMemset = [&](int32_t Direction) {
-    const int32_t OpSize = Size;
     const int32_t SizeDirection = Size * Direction;
+    const bool IsBackwards = Direction == -1;
+
+    // Sets the result to the final address written depending on
+    // whether or not the memset is forwards or backwards.
+    const auto MakeFinalAddress = [&] {
+      if (IsBackwards) {
+        switch (Size) {
+        case 1: sub(Dst.X(), MemReg.X(), Length.X()); break;
+        case 2:
+        case 4:
+        case 8: sub(Dst.X(), MemReg.X(), Length.X(), ARMEmitter::ShiftType::LSL, FEXCore::ilog2(Size)); break;
+        default: LOGMAN_MSG_A_FMT("Unhandled MemSet size: {}", Size); break;
+        }
+      } else {
+        switch (Size) {
+        case 1: add(Dst.X(), MemReg.X(), Length.X()); break;
+        case 2:
+        case 4:
+        case 8: add(Dst.X(), MemReg.X(), Length.X(), ARMEmitter::ShiftType::LSL, FEXCore::ilog2(Size)); break;
+        default: LOGMAN_MSG_A_FMT("Unhandled MemSet size: {}", Size); break;
+        }
+      }
+    };
 
     ARMEmitter::BiDirectionalLabel AgainInternal {};
     ARMEmitter::ForwardLabel DoneInternal {};
@@ -1925,12 +1971,56 @@ DEF_OP(MemSet) {
     (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &DoneInternal);
 
     if (!IsAtomic) {
+      if (CTX->HostFeatures.SupportsMOPS) {
+        const bool Is8Bit = SubRegSize == ARMEmitter::SubRegSize::i8Bit;
+
+        // We can handle 8-bit memsets and any other size that happens
+        // to be using an inlined zero value (resulting in the use of ZR).
+        //
+        // NOTE:
+        // Strictly speaking, this can also be trivially expanded to handle other sizes
+        // that happen to use any value that could fit inside a byte if the need
+        // arises. This does increase branching and code generation, however, since
+        // we'd still need to emit the fallback in the event a value for a larger size
+        // falls outside the range of a byte instead of only generating the MOPS code.
+        if (Is8Bit || Value == ARMEmitter::Reg::zr) {
+          // If we're performing a non-byte-sized zeroing operation then we need to
+          // scale the counter accordingly. (e.g. a 64-bit memset of size 2 needs to
+          // be turned into an 8-bit memset of size 16)
+          if (!Is8Bit) {
+            lsl(ARMEmitter::Size::i64Bit, TMP1, TMP1, FEXCore::ToUnderlying(SubRegSize));
+          }
+
+          // If backwards, then we need to adjust the starting address because
+          // set{p, m, e} memset forwards, so we need to slide this bad boy
+          // back like: (address - count) + 1.
+          //
+          // This lets us offset the address such that we can treat a backwards
+          // memset as if it were a forwards one.
+          if (IsBackwards) {
+            sub(TMP2, TMP2, TMP1);
+            add(ARMEmitter::Size::i64Bit, TMP2, TMP2, 1);
+          }
+
+          // Unfortunately set operations fiddle with NZCV, so we need to preserve it.
+          mrs(TMP3, ARMEmitter::SystemRegister::NZCV);
+          setp(TMP2, TMP1, Value.X());
+          setm(TMP2, TMP1, Value.X());
+          sete(TMP2, TMP1, Value.X());
+          msr(ARMEmitter::SystemRegister::NZCV, TMP3);
+
+          MakeFinalAddress();
+          (void)Bind(&DoneInternal);
+          return;
+        }
+      }
+
       ARMEmitter::ForwardLabel AgainInternal256Exit {};
       ARMEmitter::BackwardLabel AgainInternal256 {};
       ARMEmitter::ForwardLabel AgainInternal128Exit {};
       ARMEmitter::BackwardLabel AgainInternal128 {};
 
-      if (Direction == -1) {
+      if (IsBackwards) {
         sub(ARMEmitter::Size::i64Bit, TMP2, TMP2, 32 - Size);
       }
 
@@ -1968,39 +2058,23 @@ DEF_OP(MemSet) {
       add(ARMEmitter::Size::i64Bit, TMP1, TMP1, 32 / Size);
       (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &DoneInternal);
 
-      if (Direction == -1) {
+      if (IsBackwards) {
         add(ARMEmitter::Size::i64Bit, TMP2, TMP2, 32 - Size);
       }
     }
 
     (void)Bind(&AgainInternal);
     if (IsAtomic) {
-      MemStoreTSO(Value, OpSize, SizeDirection);
+      MemStoreTSO(Value, Size, SizeDirection);
     } else {
-      MemStore(Value, OpSize, SizeDirection);
+      MemStore(Value, Size, SizeDirection);
     }
     sub(ARMEmitter::Size::i64Bit, TMP1, TMP1, 1);
     (void)cbnz(ARMEmitter::Size::i64Bit, TMP1, &AgainInternal);
 
     (void)Bind(&DoneInternal);
 
-    if (SizeDirection >= 0) {
-      switch (OpSize) {
-      case 1: add(Dst.X(), MemReg.X(), Length.X()); break;
-      case 2: add(Dst.X(), MemReg.X(), Length.X(), ARMEmitter::ShiftType::LSL, 1); break;
-      case 4: add(Dst.X(), MemReg.X(), Length.X(), ARMEmitter::ShiftType::LSL, 2); break;
-      case 8: add(Dst.X(), MemReg.X(), Length.X(), ARMEmitter::ShiftType::LSL, 3); break;
-      default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, OpSize); break;
-      }
-    } else {
-      switch (OpSize) {
-      case 1: sub(Dst.X(), MemReg.X(), Length.X()); break;
-      case 2: sub(Dst.X(), MemReg.X(), Length.X(), ARMEmitter::ShiftType::LSL, 1); break;
-      case 4: sub(Dst.X(), MemReg.X(), Length.X(), ARMEmitter::ShiftType::LSL, 2); break;
-      case 8: sub(Dst.X(), MemReg.X(), Length.X(), ARMEmitter::ShiftType::LSL, 3); break;
-      default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, OpSize); break;
-      }
-    }
+    MakeFinalAddress();
   };
 
   if (DirectionIsInline) {
@@ -2023,10 +2097,6 @@ DEF_OP(MemSet) {
 }
 
 DEF_OP(MemCpy) {
-  // TODO: A future looking task would be to support this with ARM's MOPS instructions.
-  // The 8-bit non-atomic path directly matches ARM's CPYP/CPYM/CPYE instruction,
-  //
-  // Assuming non-atomicity and non-faulting behaviour, this can accelerate this implementation.
   const auto Op = IROp->C<IR::IROp_MemCpy>();
 
   const bool IsAtomic = CTX->IsMemcpyAtomicTSOEnabled();
@@ -2157,8 +2227,40 @@ DEF_OP(MemCpy) {
   };
 
   auto EmitMemcpy = [&](int32_t Direction) {
-    const int32_t OpSize = Size;
     const int32_t SizeDirection = Size * Direction;
+    const bool IsBackwards = Direction == -1;
+
+    const auto FinalizeAddresses = [&] {
+      if (IsBackwards) {
+        switch (Size) {
+        case 1:
+          sub(Dst0.X(), TMP1, TMP3);
+          sub(Dst1.X(), TMP2, TMP3);
+          break;
+        case 2:
+        case 4:
+        case 8:
+          sub(Dst0.X(), TMP1, TMP3, ARMEmitter::ShiftType::LSL, FEXCore::ilog2(Size));
+          sub(Dst1.X(), TMP2, TMP3, ARMEmitter::ShiftType::LSL, FEXCore::ilog2(Size));
+          break;
+        default: LOGMAN_MSG_A_FMT("Unhandled MemCpy size: {}", Size); break;
+        }
+      } else {
+        switch (Size) {
+        case 1:
+          add(Dst0.X(), TMP1, TMP3);
+          add(Dst1.X(), TMP2, TMP3);
+          break;
+        case 2:
+        case 4:
+        case 8:
+          add(Dst0.X(), TMP1, TMP3, ARMEmitter::ShiftType::LSL, FEXCore::ilog2(Size));
+          add(Dst1.X(), TMP2, TMP3, ARMEmitter::ShiftType::LSL, FEXCore::ilog2(Size));
+          break;
+        default: LOGMAN_MSG_A_FMT("Unhandled MemCpy size: {}", Size); break;
+        }
+      }
+    };
 
     ARMEmitter::BiDirectionalLabel AgainInternal {};
     ARMEmitter::ForwardLabel DoneInternal {};
@@ -2167,6 +2269,48 @@ DEF_OP(MemCpy) {
     (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &DoneInternal);
 
     if (!IsAtomic) {
+      if (CTX->HostFeatures.SupportsMOPS) {
+        // In the event we have an overlap (gross), we need to fall back
+        // to the non-mops copy handler. Since the overlap check needs to
+        // make use of NZCV, we need to save it. This can be avoided with
+        // ARMv9.6+'s FEAT_CMPBR, but alas, we don't have access to that right now.
+        //
+        // NOTE: That we need to temporarily trash TMP1 and restore it after the
+        //       comparison.
+        ARMEmitter::ForwardLabel OverlapCase;
+        mrs(TMP4, ARMEmitter::SystemRegister::NZCV);
+        sub(ARMEmitter::Size::i64Bit, TMP1, TMP2, TMP3);
+        cmp(ARMEmitter::Size::i64Bit, TMP1, Length.X());
+        mov(TMP1, Length.X());
+        (void)bc(ARMEmitter::Condition::CC_LT, &OverlapCase);
+
+        // If doing something larger than a byte copy, then we need to scale
+        // the counter value accordingly to convert it to bytes.
+        if (Size > 1) {
+          lsl(ARMEmitter::Size::i64Bit, TMP1, TMP1, FEXCore::ilog2(Size));
+        }
+
+        // Adjust addresses so that we treat the backward copy as a forward copy
+        if (IsBackwards) {
+          sub(ARMEmitter::Size::i64Bit, TMP2, TMP2, TMP1);
+          sub(ARMEmitter::Size::i64Bit, TMP3, TMP3, TMP1);
+          add(ARMEmitter::Size::i64Bit, TMP2, TMP2, Size);
+          add(ARMEmitter::Size::i64Bit, TMP3, TMP3, Size);
+        }
+
+        // Unfortunately copy operations fiddle with NZCV, so we need to preserve it.
+        cpyfp(TMP2, TMP3, TMP1);
+        cpyfm(TMP2, TMP3, TMP1);
+        cpyfe(TMP2, TMP3, TMP1);
+        msr(ARMEmitter::SystemRegister::NZCV, TMP4);
+
+        (void)b(&DoneInternal);
+
+        // Turns out we overlap and need to fall back. Make sure to restore NZCV.
+        (void)Bind(&OverlapCase);
+        msr(ARMEmitter::SystemRegister::NZCV, TMP4);
+      }
+
       ARMEmitter::ForwardLabel AbsPos {};
       ARMEmitter::ForwardLabel AgainInternal256Exit {};
       ARMEmitter::ForwardLabel AgainInternal128Exit {};
@@ -2180,7 +2324,7 @@ DEF_OP(MemCpy) {
       sub(ARMEmitter::Size::i64Bit, TMP4, TMP4, 32);
       (void)tbnz(TMP4, 63, &AgainInternal);
 
-      if (Direction == -1) {
+      if (IsBackwards) {
         sub(ARMEmitter::Size::i64Bit, TMP2, TMP2, 32 - Size);
         sub(ARMEmitter::Size::i64Bit, TMP3, TMP3, 32 - Size);
       }
@@ -2215,7 +2359,7 @@ DEF_OP(MemCpy) {
       add(ARMEmitter::Size::i64Bit, TMP1, TMP1, 32 / Size);
       (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &DoneInternal);
 
-      if (Direction == -1) {
+      if (IsBackwards) {
         add(ARMEmitter::Size::i64Bit, TMP2, TMP2, 32 - Size);
         add(ARMEmitter::Size::i64Bit, TMP3, TMP3, 32 - Size);
       }
@@ -2223,9 +2367,9 @@ DEF_OP(MemCpy) {
 
     (void)Bind(&AgainInternal);
     if (IsAtomic) {
-      MemCpyTSO(OpSize, SizeDirection);
+      MemCpyTSO(Size, SizeDirection);
     } else {
-      MemCpy(OpSize, SizeDirection);
+      MemCpy(Size, SizeDirection);
     }
     sub(ARMEmitter::Size::i64Bit, TMP1, TMP1, 1);
     (void)cbnz(ARMEmitter::Size::i64Bit, TMP1, &AgainInternal);
@@ -2237,54 +2381,14 @@ DEF_OP(MemCpy) {
     mov(TMP2, MemRegSrc.X());
     mov(TMP3, Length.X());
 
-    if (SizeDirection >= 0) {
-      switch (OpSize) {
-      case 1:
-        add(Dst0.X(), TMP1, TMP3);
-        add(Dst1.X(), TMP2, TMP3);
-        break;
-      case 2:
-        add(Dst0.X(), TMP1, TMP3, ARMEmitter::ShiftType::LSL, 1);
-        add(Dst1.X(), TMP2, TMP3, ARMEmitter::ShiftType::LSL, 1);
-        break;
-      case 4:
-        add(Dst0.X(), TMP1, TMP3, ARMEmitter::ShiftType::LSL, 2);
-        add(Dst1.X(), TMP2, TMP3, ARMEmitter::ShiftType::LSL, 2);
-        break;
-      case 8:
-        add(Dst0.X(), TMP1, TMP3, ARMEmitter::ShiftType::LSL, 3);
-        add(Dst1.X(), TMP2, TMP3, ARMEmitter::ShiftType::LSL, 3);
-        break;
-      default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, OpSize); break;
-      }
-    } else {
-      switch (OpSize) {
-      case 1:
-        sub(Dst0.X(), TMP1, TMP3);
-        sub(Dst1.X(), TMP2, TMP3);
-        break;
-      case 2:
-        sub(Dst0.X(), TMP1, TMP3, ARMEmitter::ShiftType::LSL, 1);
-        sub(Dst1.X(), TMP2, TMP3, ARMEmitter::ShiftType::LSL, 1);
-        break;
-      case 4:
-        sub(Dst0.X(), TMP1, TMP3, ARMEmitter::ShiftType::LSL, 2);
-        sub(Dst1.X(), TMP2, TMP3, ARMEmitter::ShiftType::LSL, 2);
-        break;
-      case 8:
-        sub(Dst0.X(), TMP1, TMP3, ARMEmitter::ShiftType::LSL, 3);
-        sub(Dst1.X(), TMP2, TMP3, ARMEmitter::ShiftType::LSL, 3);
-        break;
-      default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, OpSize); break;
-      }
-    }
+    FinalizeAddresses();
   };
 
   if (DirectionIsInline) {
     LOGMAN_THROW_A_FMT(DirectionConstant == 1 || DirectionConstant == -1, "unexpected direction");
     EmitMemcpy(DirectionConstant);
   } else {
-    // Emit forward direction memset then backward direction memset.
+    // Emit forward direction memcpy then backward direction memcpy.
     for (int32_t Direction : {1, -1}) {
       EmitMemcpy(Direction);
       if (Direction == 1) {
@@ -2309,13 +2413,14 @@ DEF_OP(CacheLineClear) {
 
   // Clear dcache only
   // icache doesn't matter here since the guest application shouldn't be calling clflush on JIT code.
-  if (CTX->HostFeatures.DCacheLineSize >= 64U) {
+  // check host cacheline size again x86_64 size to ensure at least 64 bytes are cleaned
+  if (CTX->HostFeatures.DCacheSize() >= 64U) {
     dc(ARMEmitter::DataCacheOperation::CIVAC, MemReg);
   } else {
     auto CurrentWorkingReg = MemReg.X();
-    for (size_t i = 0; i < std::max(1U, CTX->HostFeatures.DCacheLineSize / 64U); ++i) {
-      dc(ARMEmitter::DataCacheOperation::CIVAC, TMP1);
-      add(ARMEmitter::Size::i64Bit, TMP1, CurrentWorkingReg, CTX->HostFeatures.DCacheLineSize);
+    for (size_t i = 0; i < std::max(1U, 64U / CTX->HostFeatures.DCacheSize()); ++i) {
+      dc(ARMEmitter::DataCacheOperation::CIVAC, CurrentWorkingReg);
+      add(ARMEmitter::Size::i64Bit, TMP1, CurrentWorkingReg, CTX->HostFeatures.DCacheSize());
       CurrentWorkingReg = TMP1;
     }
   }
@@ -2337,13 +2442,14 @@ DEF_OP(CacheLineClean) {
   auto MemReg = GetReg(Op->Addr);
 
   // Clean dcache only
-  if (CTX->HostFeatures.DCacheLineSize >= 64U) {
+  // check host cacheline size again x86_64 size to ensure at least 64 bytes are cleaned
+  if (CTX->HostFeatures.DCacheSize() >= 64U) {
     dc(ARMEmitter::DataCacheOperation::CVAC, MemReg);
   } else {
     auto CurrentWorkingReg = MemReg.X();
-    for (size_t i = 0; i < std::max(1U, CTX->HostFeatures.DCacheLineSize / 64U); ++i) {
-      dc(ARMEmitter::DataCacheOperation::CVAC, TMP1);
-      add(ARMEmitter::Size::i64Bit, TMP1, CurrentWorkingReg, CTX->HostFeatures.DCacheLineSize);
+    for (size_t i = 0; i < std::max(1U, 64U / CTX->HostFeatures.DCacheSize()); ++i) {
+      dc(ARMEmitter::DataCacheOperation::CVAC, CurrentWorkingReg);
+      add(ARMEmitter::Size::i64Bit, TMP1, CurrentWorkingReg, CTX->HostFeatures.DCacheSize());
       CurrentWorkingReg = TMP1;
     }
   }

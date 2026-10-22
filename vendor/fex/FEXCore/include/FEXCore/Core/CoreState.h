@@ -71,7 +71,7 @@ static_assert(std::is_standard_layout_v<NonAtomicRefCounter<uint64_t>>, "Needs t
 static_assert(std::is_trivially_copyable_v<NonAtomicRefCounter<uint64_t>>, "needs to be trivially copyable");
 static_assert(sizeof(NonAtomicRefCounter<uint64_t>) == sizeof(uint64_t), "Needs to be correct size");
 
-struct CPUState {
+struct alignas(64) CPUState {
   // Allows more efficient handling of the register
   // file in the event AVX is not supported.
   union XMMRegs {
@@ -87,6 +87,7 @@ struct CPUState {
     SSE sse;
   };
 
+  // Cacheline: 0
   uint64_t InlineJITBlockHeader {};
   // Reference counter for FEX's per-thread deferred signals.
   // Counts the nesting depth of program sections that cause signals to be deferred.
@@ -95,21 +96,27 @@ struct CPUState {
   // PF/AF raw values. Really only a byte of each matters, but this layout
   // (32-bits and in the first 256 bytes) is necessary to use ldp/stp to
   // spill/fill these togethers efficiently.
-  uint32_t pf_raw {};
+  // pf_raw must be initialized to 1 so that reconstructed PF = 0 (matching x86 reset state).
+  // PF reconstruction: popcount(pf_raw ^ 1) & 1, so pf_raw=1 gives PF=0.
+  uint32_t pf_raw {1};
   uint32_t af_raw {};
 
   uint64_t rip {}; ///< Current core's RIP. May not be entirely accurate while JIT is active
-
-  // The high 128-bits of AVX registers when not being emulated by SVE256.
-  uint64_t avx_high[16][2];
 
   uint64_t gregs[16] {};
   uint64_t L1Pointer {};
   uint64_t L1Mask {};
   uint64_t callret_sp {};
   uint64_t _pad1 {};
+
+  // Cacheline: 1,2,3,4
+  // The high 128-bits of AVX registers when not being emulated by SVE256.
+  uint64_t avx_high[16][2];
+
+  // Cacheline: 5-12
   XMMRegs xmm {};
 
+  // Cacheline: 13 and onwards.
   // Raw segment register indexes
   uint16_t es_idx {}, cs_idx {}, ss_idx {}, ds_idx {};
   uint16_t gs_idx {}, fs_idx {};
@@ -244,13 +251,20 @@ struct CPUState {
 };
 static_assert(std::is_trivially_copyable_v<CPUState>, "Needs to be trivial");
 static_assert(std::is_standard_layout_v<CPUState>, "This needs to be standard layout");
-static_assert(offsetof(CPUState, avx_high) % 16 == 0, "avx_high needs to be 128-bit aligned!");
+static_assert(alignof(CPUState) == 64, "CPUState needs to be 64-byte aligned!");
+static_assert(offsetof(CPUState, avx_high) % 64 == 0, "avx_high needs to be 64-byte aligned!");
 static_assert(offsetof(CPUState, xmm) % 32 == 0, "xmm needs to be 256-bit aligned!");
 static_assert(offsetof(CPUState, mm) % 16 == 0, "mm needs to be 128-bit aligned!");
 static_assert(offsetof(CPUState, gregs[15]) <= 504, "gregs maximum offset must be <= 504 for ldp/stp to work");
 static_assert(offsetof(CPUState, DeferredSignalRefCount) % 8 == 0, "Needs to be 8-byte aligned");
 static_assert(offsetof(CPUState, L1Pointer) <= 504, "This needs to be <= 504 for ldp");
 static_assert(offsetof(CPUState, L1Mask) == (offsetof(CPUState, L1Pointer) + 8), "These two variables are paired");
+static_assert(offsetof(CPUState, pf_raw) <= 252, "pf_raw must be within ldp imm offset range");
+static_assert((offsetof(CPUState, pf_raw) + 4) == offsetof(CPUState, af_raw), "pf_raw and af_raw must be sequential");
+
+// Some CPU architectures have a penalty for alignment of ldp/stp not being 2 * <element_size>.
+static_assert(offsetof(CPUState, gregs[0]) % 16 == 0, "gregs should be 16-byte aligned");
+static_assert(offsetof(CPUState, pf_raw) % 8 == 0, "pf_raw must be 8-byte aligned.");
 
 struct InternalThreadState;
 
@@ -288,6 +302,7 @@ enum FallbackHandlerIndex {
   OPINDEX_F80MUL,
   OPINDEX_F80DIV,
   OPINDEX_F80FYL2X,
+  OPINDEX_F80FYL2XP1,
   OPINDEX_F80ATAN,
   OPINDEX_F80FPREM1,
   OPINDEX_F80FPREM,
@@ -301,6 +316,7 @@ enum FallbackHandlerIndex {
   OPINDEX_F64ATAN,
   OPINDEX_F64F2XM1,
   OPINDEX_F64FYL2X,
+  OPINDEX_F64FYL2XP1,
   OPINDEX_F64FPREM,
   OPINDEX_F64FPREM1,
   OPINDEX_F64SCALE,
@@ -323,6 +339,7 @@ struct JITPointers {
   // Process specific
   uint64_t PrintValue {};
   uint64_t PrintVectorValue {};
+  uint64_t PrintMsgValue {};
   uint64_t ThreadRemoveCodeEntryFromJIT {};
   uint64_t CPUIDObj {};
   uint64_t CPUIDFunction {};
@@ -333,6 +350,7 @@ struct JITPointers {
   uint64_t MonoBackpatcherWrite {};
   uint64_t LUDIV {};
   uint64_t LDIV {};
+  uint64_t RDRANDFallback {};
   uint64_t ThunkCallbackRet {};
 
   // Handles returning/calling ARM64EC code from the JIT, expects the target PC in TMP3
@@ -353,6 +371,8 @@ struct JITPointers {
   uint64_t ExitFunctionLinker {};
   uint64_t ThreadStopHandlerSpillSRA {};
   uint64_t ThreadPauseHandlerSpillSRA {};
+  uint64_t ThreadDispatchSyscallHandler {};
+  uint64_t ThreadDispatchRemoveCodeEntry {};
   uint64_t GuestSignal_SIGILL {};
   uint64_t GuestSignal_SIGTRAP {};
   uint64_t GuestSignal_SIGSEGV {};
@@ -361,6 +381,16 @@ struct JITPointers {
   uint64_t L2Pointer {};
   uint64_t LUDIVHandler {};
   uint64_t LDIVHandler {};
+  uint64_t F64SinHandler {};
+  uint64_t F64CosHandler {};
+  uint64_t F64TanHandler {};
+  uint64_t F64F2XM1Handler {};
+  uint64_t F64ScaleHandler {};
+  uint64_t F64AtanHandler {};
+  uint64_t F64FYL2XHandler {};
+  uint64_t F64FYL2XP1Handler {};
+  uint64_t F64FPREMHandler {};
+  uint64_t F64FPREM1Handler {};
   /**  @} */
 
   // Copy of process-wide named vector constants data.
@@ -400,7 +430,7 @@ struct CpuStateFrame {
 
   InternalThreadState* Thread;
 
-#ifdef ARCHITECTURE_arm64ec
+#ifdef _WIN32
   // Set by the kernel on ARM64EC whenever the JIT should cooperatively suspend running guest code.
   uint32_t SuspendDoorbell {};
 #endif

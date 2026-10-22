@@ -8,6 +8,7 @@ $end_info$
 
 #include "Interface/Context/Context.h"
 #include "Interface/Core/Frontend.h"
+#include "Interface/Core/OpcodeDispatcher.h"
 #include "Interface/Core/X86Tables/X86Tables.h"
 #include "Interface/Core/LookupCache.h"
 
@@ -69,7 +70,6 @@ static uint32_t MapVEXToReg(uint8_t vvvv, bool HasXMM) {
 Decoder::Decoder(FEXCore::Core::InternalThreadState* Thread)
   : Thread {Thread}
   , CTX {static_cast<FEXCore::Context::ContextImpl*>(Thread->CTX)}
-  , OSABI {CTX->SyscallHandler ? CTX->SyscallHandler->GetOSABI() : FEXCore::HLE::SyscallOSABI::OS_UNKNOWN}
   , PoolObject {CTX->FrontendAllocator, sizeof(FEXCore::X86Tables::DecodedInst) * DefaultDecodedBufferSize} {
 
   FEX_CONFIG_OPT(ReducedPrecision, X87REDUCEDPRECISION);
@@ -89,6 +89,11 @@ Decoder::Decoder(FEXCore::Core::InternalThreadState* Thread)
 }
 
 bool Decoder::CheckRangeExecutable(uint64_t Address, uint64_t Size) {
+  // Check for wraparound
+  if (Address + Size < Address) {
+    return false;
+  }
+
   while (Address < ExecutableRangeBase || Address + Size > ExecutableRangeEnd) {
     auto RangeInfo = CTX->SyscallHandler->QueryGuestExecutableRange(Thread, Address);
     ExecutableRangeBase = RangeInfo.Base;
@@ -110,9 +115,8 @@ bool Decoder::CheckRangeExecutable(uint64_t Address, uint64_t Size) {
 }
 
 uint8_t Decoder::ReadByte() {
-  LOGMAN_THROW_A_FMT(InstructionSize < MAX_INST_SIZE, "Max instruction size exceeded!");
   std::optional<uint8_t> Byte = PeekByte(0);
-  if (!Byte) {
+  if (!Byte || InstructionSize == MAX_INST_SIZE) {
     HitNonExecutableRange = true;
     // Pretend we read 0, the main decode loop will see HitNonExecutableRange and rollback the instruction.
     return 0;
@@ -124,9 +128,9 @@ uint8_t Decoder::ReadByte() {
 }
 
 std::optional<uint8_t> Decoder::PeekByte(uint8_t Offset) {
-  uint64_t ByteAddress = reinterpret_cast<uint64_t>(InstStream + InstructionSize + Offset);
+  uint64_t ByteAddress = reinterpret_cast<uint64_t>(InstStream.InstStream + InstructionSize + Offset);
   if (CheckRangeExecutable(ByteAddress, 1)) {
-    return InstStream[InstructionSize + Offset];
+    return InstStream.AdjustedInstStream[InstructionSize + Offset];
   } else {
     return std::nullopt;
   }
@@ -136,9 +140,11 @@ std::pair<uint64_t, bool> Decoder::ReadData(uint8_t Size) {
   LOGMAN_THROW_A_FMT(Size != 0 && Size <= sizeof(uint64_t), "Unknown data size to read");
 
   uint64_t Res = 0;
-  uint64_t Address = reinterpret_cast<uint64_t>(InstStream + InstructionSize);
+  uint64_t Address = reinterpret_cast<uint64_t>(InstStream.InstStream + InstructionSize);
+  LastFieldReadOffset = (uint8_t)InstructionSize;
+  LastFieldReadSize = Size;
   if (CheckRangeExecutable(Address, Size)) {
-    std::memcpy(&Res, &InstStream[InstructionSize], Size);
+    std::memcpy(&Res, &InstStream.AdjustedInstStream[InstructionSize], Size);
   } else {
     HitNonExecutableRange = true;
     // See PeekByte, this specific case may cause some executable memory to read as 0 but it doesn't matter as the entire instruction will be rolled back anyway.
@@ -211,6 +217,7 @@ void Decoder::DecodeModRM_16(X86Tables::DecodedOperand* Operand, X86Tables::ModR
   Operand->Type = DecodedOperand::OpType::SIB;
   Operand->Data.SIB.Scale = 1;
   Operand->Data.SIB.Offset = Literal;
+  Operand->Data.SIB.PatchableDisp = false;
 
   // Only called when ModRM.mod != 0b11
   struct Encodings {
@@ -286,6 +293,7 @@ void Decoder::DecodeModRM_64(X86Tables::DecodedOperand* Operand, X86Tables::ModR
     // SIB
     Operand->Type = DecodedOperand::OpType::SIB;
     Operand->Data.SIB.Scale = 1 << SIB.scale;
+    Operand->Data.SIB.PatchableDisp = false;
 
     // The invalid encoding types are described at Table 1-12. "promoted nsigned is always non-zero"
     {
@@ -324,6 +332,7 @@ void Decoder::DecodeModRM_64(X86Tables::DecodedOperand* Operand, X86Tables::ModR
       auto [Literal, IsRelocation] = ReadData(4);
       Operand->Type = IsRelocation ? DecodedOperand::OpType::RIPRelativeRelocation : DecodedOperand::OpType::RIPRelative;
       Operand->Data.RIPLiteral.Value = Literal;
+      Operand->Data.RIPLiteral.PatchableDisp = false;
     } else {
       // Register-direct addressing
       Operand->Type = DecodedOperand::OpType::GPRDirect;
@@ -339,10 +348,11 @@ void Decoder::DecodeModRM_64(X86Tables::DecodedOperand* Operand, X86Tables::ModR
     Operand->Type = IsRelocation ? DecodedOperand::OpType::GPRIndirectRelocation : DecodedOperand::OpType::GPRIndirect;
     Operand->Data.GPRIndirect.GPR = MapModRMToReg(DecodeInst->Flags & DecodeFlags::FLAG_REX_XGPR_B ? 1 : 0, ModRM.rm, false, false, false, false);
     Operand->Data.GPRIndirect.Displacement = Literal;
+    Operand->Data.GPRIndirect.PatchableDisp = false;
   }
 }
 
-bool Decoder::NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op, DecodedHeader Options) {
+Decoder::DecodedBlockStatus Decoder::NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op, DecodedHeader Options) {
   if (Info->Type == FEXCore::X86Tables::TYPE_ARCH_DISPATCHER) [[unlikely]] {
     // Dispatcher Op.
     // TODO: Move this in to `NormalOpHeader`, Dispatch tables have a bug currently where some subtables don't inherit flags correctly.
@@ -354,11 +364,16 @@ bool Decoder::NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op,
   DecodeInst->TableInfo = Info;
 
   if (Info->Type == FEXCore::X86Tables::TYPE_UNKNOWN) {
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
   }
 
   if (Info->Type == FEXCore::X86Tables::TYPE_INVALID) {
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
+  }
+
+  if (!(Info->Flags & FEXCore::X86Tables::InstFlags::FLAGS_SUPPORTS_LOCK) && (DecodeInst->Flags & DecodeFlags::FLAG_LOCK)) {
+    // Instruction has lock prefix but doesn't support lock.
+    return DecodedBlockStatus::UNIMPLEMENTED_INST;
   }
 
   LOGMAN_THROW_A_FMT(!(Info->Type >= FEXCore::X86Tables::TYPE_GROUP_1 && Info->Type <= FEXCore::X86Tables::TYPE_GROUP_P), "Group Ops "
@@ -390,15 +405,15 @@ bool Decoder::NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op,
   const bool Has16BitAddressing = !BlockInfo.Is64BitMode && DecodeInst->Flags & DecodeFlags::FLAG_ADDRESS_SIZE;
 
   if (Options.w && (Info->Flags & InstFlags::FLAGS_REX_W_0)) {
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
   } else if (!Options.w && (Info->Flags & InstFlags::FLAGS_REX_W_1)) {
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
   }
 
   if (Options.L && (Info->Flags & InstFlags::FLAGS_VEX_L_0)) {
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
   } else if (!Options.L && (Info->Flags & InstFlags::FLAGS_VEX_L_1)) {
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
   }
 
   const bool UseVEXL = Options.L && !(Info->Flags & InstFlags::FLAGS_VEX_L_IGNORE);
@@ -486,15 +501,7 @@ bool Decoder::NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op,
 
   auto* CurrentDest = &DecodeInst->Dest;
 
-  if (HAS_NON_XMM_SUBFLAG(Info->Flags, FEXCore::X86Tables::InstFlags::FLAGS_SF_DST_RAX) ||
-      HAS_NON_XMM_SUBFLAG(Info->Flags, FEXCore::X86Tables::InstFlags::FLAGS_SF_DST_RDX)) {
-    // Some instructions hardcode their destination as RAX
-    CurrentDest->Type = DecodedOperand::OpType::GPR;
-    CurrentDest->Data.GPR.HighBits = false;
-    CurrentDest->Data.GPR.GPR =
-      HAS_NON_XMM_SUBFLAG(Info->Flags, FEXCore::X86Tables::InstFlags::FLAGS_SF_DST_RAX) ? FEXCore::X86State::REG_RAX : FEXCore::X86State::REG_RDX;
-    CurrentDest = &DecodeInst->Src[0];
-  } else if (HAS_NON_XMM_SUBFLAG(Info->Flags, FEXCore::X86Tables::InstFlags::FLAGS_SF_REX_IN_BYTE)) {
+  if (HAS_NON_XMM_SUBFLAG(Info->Flags, FEXCore::X86Tables::InstFlags::FLAGS_SF_REX_IN_BYTE)) {
     LOGMAN_THROW_A_FMT(!HasMODRM, "This instruction shouldn't have ModRM!");
 
     // If the REX is in the byte that means the lower nibble of the OP contains the destination GPR
@@ -507,7 +514,7 @@ bool Decoder::NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op,
       MapModRMToReg(DecodeInst->Flags & DecodeFlags::FLAG_REX_XGPR_B ? 1 : 0, Op & 0b111, Is8BitDest, HasREX, false, false);
 
     if (CurrentDest->Data.GPR.GPR == FEXCore::X86State::REG_INVALID) {
-      return false;
+      return DecodedBlockStatus::INVALID_INST;
     }
   }
 
@@ -576,7 +583,7 @@ bool Decoder::NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op,
 
   const auto VEXOperand = Info->Flags & FEXCore::X86Tables::InstFlags::FLAGS_VEX_SRC_MASK;
   if (VEXOperand == FEXCore::X86Tables::InstFlags::FLAGS_VEX_NO_OPERAND && Options.vvvv) {
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
   }
 
   if (VEXOperand == FEXCore::X86Tables::InstFlags::FLAGS_VEX_1ST_SRC) {
@@ -594,11 +601,11 @@ bool Decoder::NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op,
   if (Info->Flags & FEXCore::X86Tables::InstFlags::FLAGS_MODRM) {
     if (Info->Flags & FEXCore::X86Tables::InstFlags::FLAGS_SF_MOD_DST) {
       if (!ModRMOperand(DecodeInst->Src[CurrentSrc], DecodeInst->Dest, HasXMMSrc, HasXMMDst, HasMMSrc, HasMMDst, Is8BitSrc, Is8BitDest)) {
-        return false;
+        return DecodedBlockStatus::INVALID_INST;
       }
     } else {
       if (!ModRMOperand(DecodeInst->Dest, DecodeInst->Src[CurrentSrc], HasXMMDst, HasXMMSrc, HasMMDst, HasMMSrc, Is8BitDest, Is8BitSrc)) {
-        return false;
+        return DecodedBlockStatus::INVALID_INST;
       }
     }
     ++CurrentSrc;
@@ -611,28 +618,13 @@ bool Decoder::NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op,
     ++CurrentSrc;
   }
 
-  if (HAS_NON_XMM_SUBFLAG(Info->Flags, FEXCore::X86Tables::InstFlags::FLAGS_SF_SRC_RAX)) {
-    DecodeInst->Src[CurrentSrc].Type = DecodedOperand::OpType::GPR;
-    DecodeInst->Src[CurrentSrc].Data.GPR.HighBits = false;
-    DecodeInst->Src[CurrentSrc].Data.GPR.GPR = FEXCore::X86State::REG_RAX;
-    ++CurrentSrc;
-  } else if (HAS_NON_XMM_SUBFLAG(Info->Flags, FEXCore::X86Tables::InstFlags::FLAGS_SF_SRC_RCX)) {
-    DecodeInst->Src[CurrentSrc].Type = DecodedOperand::OpType::GPR;
-    DecodeInst->Src[CurrentSrc].Data.GPR.HighBits = false;
-    DecodeInst->Src[CurrentSrc].Data.GPR.GPR = FEXCore::X86State::REG_RCX;
-    ++CurrentSrc;
-  }
-
   if (VEXOperand == FEXCore::X86Tables::InstFlags::FLAGS_VEX_DST) {
     CurrentDest->Type = DecodedOperand::OpType::GPR;
     CurrentDest->Data.GPR.HighBits = false;
     CurrentDest->Data.GPR.GPR = MapVEXToReg(Options.vvvv, HasXMMDst);
   }
 
-  if (Bytes != 0) {
-    LOGMAN_THROW_A_FMT(Bytes <= 8, "Number of bytes should be <= 8 for literal src");
-
-
+  if (Bytes <= 8 && Bytes > 0) {
     auto [Literal, IsRelocation] = ReadData(Bytes);
     if (IsRelocation) {
       DecodeInst->Src[CurrentSrc].Type = DecodedOperand::OpType::LiteralRelocation;
@@ -658,24 +650,34 @@ bool Decoder::NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op,
     }
 
     Bytes = 0;
+  } else {
+    // All real x86 instructions have byte sizes that are 8-bytes or less.
+    // Thunk instruction has an additional 32-byte SHA256 payload that needs to be accounted for.
+    InstructionSize += Bytes;
+    Bytes = 0;
+  }
+
+  if ((DecodeInst->Flags & DecodeFlags::FLAG_LOCK) && DecodeInst->Dest.IsGPR()) {
+    // Instruction has lock prefix, but the destination isn't memory, this is invalid.
+    return DecodedBlockStatus::UNIMPLEMENTED_INST;
   }
 
   LOGMAN_THROW_A_FMT(Bytes == 0, "Inst at 0x{:x}: 0x{:04x} '{}' Had an instruction of size {} with {} remaining", DecodeInst->PC,
                      DecodeInst->OP, DecodeInst->TableInfo->Name ?: "UND", InstructionSize, Bytes);
   DecodeInst->InstSize = InstructionSize;
-  return true;
+  return DecodedBlockStatus::SUCCESS;
 }
 
-bool Decoder::NormalOpHeader(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op) {
+Decoder::DecodedBlockStatus Decoder::NormalOpHeader(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op) {
   DecodeInst->OPRaw = DecodeInst->OP = Op;
   DecodeInst->TableInfo = Info;
 
   if (Info->Type == FEXCore::X86Tables::TYPE_UNKNOWN) {
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
   }
 
   if (Info->Type == FEXCore::X86Tables::TYPE_INVALID) {
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
   }
 
   LOGMAN_THROW_A_FMT(Info->Type != FEXCore::X86Tables::TYPE_REX_PREFIX, "REX PREFIX should have been decoded before this!");
@@ -732,7 +734,7 @@ bool Decoder::NormalOpHeader(const FEXCore::X86Tables::X86InstInfo* Info, uint16
       };
       uint8_t Field = RegToField[ModRM.reg];
       if (Field == 255) {
-        return false;
+        return DecodedBlockStatus::INVALID_INST;
       }
 
       LocalOp = (Field << 3) | ModRM.rm;
@@ -751,7 +753,7 @@ bool Decoder::NormalOpHeader(const FEXCore::X86Tables::X86InstInfo* Info, uint16
   } else if (Info->Type == FEXCore::X86Tables::TYPE_VEX_TABLE_PREFIX) {
     if (!VEXTable) {
       // AVX not enabled.
-      return false;
+      return DecodedBlockStatus::INVALID_INST;
     }
 
     uint16_t map_select = 1;
@@ -761,7 +763,7 @@ bool Decoder::NormalOpHeader(const FEXCore::X86Tables::X86InstInfo* Info, uint16
 
     if ((Byte1 & 0b10000000) == 0) {
       if (!BlockInfo.Is64BitMode) {
-        return false;
+        return DecodedBlockStatus::INVALID_INST;
       }
 
       DecodeInst->Flags |= DecodeFlags::FLAG_REX_XGPR_R;
@@ -769,18 +771,28 @@ bool Decoder::NormalOpHeader(const FEXCore::X86Tables::X86InstInfo* Info, uint16
 
     if (Op == 0xC5) { // Two byte VEX
       pp = Byte1 & 0b11;
-      options.vvvv = 15 - ((Byte1 & 0b01111000) >> 3);
+      const uint8_t vvvv = ((Byte1 & 0b01111000) >> 3);
+      if (!BlockInfo.Is64BitMode && vvvv <= 0b0111) {
+        // Invalid on 32-bit, can't use the high registers.
+        return DecodedBlockStatus::INVALID_INST;
+      }
+      options.vvvv = 15 - vvvv;
       options.L = (Byte1 & 0b100) != 0;
     } else { // 0xC4 = Three byte VEX
       const uint8_t Byte2 = ReadByte();
       pp = Byte2 & 0b11;
       map_select = Byte1 & 0b11111;
-      options.vvvv = 15 - ((Byte2 & 0b01111000) >> 3);
+      const uint8_t vvvv = ((Byte2 & 0b01111000) >> 3);
+      if (!BlockInfo.Is64BitMode && vvvv <= 0b0111) {
+        // Invalid on 32-bit, can't use the high registers.
+        return DecodedBlockStatus::INVALID_INST;
+      }
+      options.vvvv = 15 - vvvv;
       options.w = (Byte2 & 0b10000000) != 0;
       options.L = (Byte2 & 0b100) != 0;
       if ((Byte1 & 0b01000000) == 0) {
         if (!BlockInfo.Is64BitMode) {
-          return false;
+          return DecodedBlockStatus::INVALID_INST;
         }
         DecodeInst->Flags |= DecodeFlags::FLAG_REX_XGPR_X;
       }
@@ -791,7 +803,7 @@ bool Decoder::NormalOpHeader(const FEXCore::X86Tables::X86InstInfo* Info, uint16
         DecodeInst->Flags |= DecodeFlags::FLAG_OPTION_AVX_W;
       }
       if (!(map_select >= 1 && map_select <= 3)) {
-        return false;
+        return DecodedBlockStatus::INVALID_INST;
       }
     }
 
@@ -821,14 +833,14 @@ bool Decoder::NormalOpHeader(const FEXCore::X86Tables::X86InstInfo* Info, uint16
   } else if (Info->Type == FEXCore::X86Tables::TYPE_GROUP_EVEX) {
     FEXCORE_TELEMETRY_SET(TYPE_USES_EVEX_OPS, 1);
     // EVEX unsupported
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
   }
 
   LOGMAN_MSG_A_FMT("Invalid instruction decoding type");
   FEX_UNREACHABLE;
 }
 
-bool Decoder::DecodeInstructionImpl(uint64_t PC) {
+Decoder::DecodedBlockStatus Decoder::DecodeInstructionImpl(uint64_t PC) {
   InstructionSize = 0;
   LastEscapePrefix = 0;
   Instruction.fill(0);
@@ -839,7 +851,7 @@ bool Decoder::DecodeInstructionImpl(uint64_t PC) {
 
   for (;;) {
     if (InstructionSize >= MAX_INST_SIZE) {
-      return false;
+      return DecodedBlockStatus::INVALID_INST;
     }
     uint8_t Op = ReadByte();
     switch (Op) {
@@ -1025,10 +1037,10 @@ bool Decoder::DecodeInstructionImpl(uint64_t PC) {
   }
 
   if (DecodeInst->Dest.IsGPR()) {
-    return false;
+    return DecodedBlockStatus::INVALID_INST;
   }
 
-  return true;
+  return DecodedBlockStatus::SUCCESS;
 }
 
 void Decoder::DecodeREXIfValid(int8_t ExpectedOffset) {
@@ -1066,18 +1078,26 @@ Decoder::DecodedBlockStatus Decoder::DecodeInstruction(uint64_t PC) {
   // Will be set if DecodeInstructionImpl tries to read non-executable memory
   HitNonExecutableRange = false;
   HitBadRelocation = false;
-  bool ErrorDuringDecoding = !DecodeInstructionImpl(PC);
+  auto ErrorDuringDecoding = DecodeInstructionImpl(PC);
 
-  if (ErrorDuringDecoding || HitNonExecutableRange || HitBadRelocation) [[unlikely]] {
+  if (ErrorDuringDecoding != DecodedBlockStatus::SUCCESS || HitNonExecutableRange || HitBadRelocation) [[unlikely]] {
     // Put an invalid instruction in the stream so the core can raise SIGILL if hit
     // Error while decoding instruction. We don't know the table or instruction size
+    const auto InstSize = DecodeInst->InstSize;
     DecodeInst->TableInfo = nullptr;
-    auto Result = ErrorDuringDecoding   ? DecodedBlockStatus::INVALID_INST :
-                  DecodeInst->InstSize  ? DecodedBlockStatus::PARTIAL_DECODE_INST :
-                  HitNonExecutableRange ? DecodedBlockStatus::NOEXEC_INST :
-                                          DecodedBlockStatus::BAD_RELOCATION;
     DecodeInst->InstSize = 0;
-    return Result;
+
+    // A decode error can be caused by substituting zero for an inaccessible
+    // instruction byte, so the instruction fetch fault takes priority.
+    if (HitNonExecutableRange) {
+      return InstSize ? DecodedBlockStatus::PARTIAL_DECODE_INST : DecodedBlockStatus::NOEXEC_INST;
+    }
+
+    if (HitBadRelocation) {
+      return DecodedBlockStatus::BAD_RELOCATION;
+    }
+
+    return ErrorDuringDecoding;
   } else if (!DecodeInst->TableInfo || (DecodeInst->TableInfo->Type == TYPE_INST && !DecodeInst->TableInfo->OpcodeDispatcher.OpDispatch)) {
     // If there wasn't an error during decoding but we have no dispatcher for the instruction then claim invalid instruction.
     return DecodedBlockStatus::INVALID_INST;
@@ -1301,6 +1321,13 @@ void Decoder::AddBranchTarget(uint64_t Target) {
           .BlockStatus = BlockIt->BlockStatus,
         };
 
+        if (BlockIt->DataMasks.size()) {
+          auto MaskIt = std::lower_bound(BlockIt->DataMasks.begin(), BlockIt->DataMasks.end(), SplitAddr,
+                                         [](const DataMask& Mask, uint64_t Addr) { return Mask.FieldAddress < Addr; });
+          SplitBlock.DataMasks.assign(MaskIt, BlockIt->DataMasks.end());
+          BlockIt->DataMasks.erase(MaskIt, BlockIt->DataMasks.end());
+        }
+
         BlockIt->Size = SplitOffset;
         BlockIt->NumInstructions = SplitIdx;
 
@@ -1321,118 +1348,242 @@ void Decoder::AddBranchTarget(uint64_t Target) {
   }
 }
 
-const uint8_t* Decoder::AdjustAddrForSpecialRegion(const uint8_t* _InstStream, uint64_t EntryPoint, uint64_t RIP) {
+const Decoder::DecodeStream Decoder::AdjustAddrForSpecialRegion(const uint8_t* _InstStream, uint64_t EntryPoint, uint64_t RIP) {
   constexpr uint64_t VSyscall_Base = 0xFFFF'FFFF'FF60'0000ULL;
   constexpr uint64_t VSyscall_End = VSyscall_Base + 0x1000;
 
-  if (OSABI == FEXCore::HLE::SyscallOSABI::OS_LINUX64 && RIP >= VSyscall_Base && RIP < VSyscall_End) {
+  if (BlockInfo.Is64BitMode && CTX->HostFeatures.HostType == FEXCore::HostFeatures::HostTypeEnum::Linux && RIP >= VSyscall_Base &&
+      RIP < VSyscall_End) {
     // VSyscall
     // This doesn't exist on AArch64 and on x86_64 hosts this is emulated with faults to a region mapped with --xp permissions
     // Offset     0: vgettimeofday
     // Offset 0x400: vtime
     // Offset 0x800: vgetcpu
     uint64_t Offset = RIP - VSyscall_Base;
-    return VSyscallData + Offset;
+    return DecodeStream {
+      .InstStream = _InstStream - EntryPoint + RIP,
+      .AdjustedInstStream = VSyscallData + Offset,
+    };
   }
 
-  return _InstStream - EntryPoint + RIP;
+  return DecodeStream {
+    .InstStream = _InstStream - EntryPoint + RIP,
+    .AdjustedInstStream = _InstStream - EntryPoint + RIP,
+  };
 }
 
-void Decoder::DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thread, const uint8_t* _InstStream, uint64_t PC, uint64_t MaxInst) {
-  FEXCORE_PROFILE_SCOPED("DecodeInstructions");
-  BlockInfo.TotalInstructionCount = 0;
-  BlockInfo.Blocks.clear();
-  VisitedBlocks.clear();
-  // Reset internal state management
-  DecodedSize = 0;
-  MaxCondBranchForward = 0;
-  MaxCondBranchBackwards = ~0ULL;
-  DecodedBuffer = PoolObject.ReownOrClaimBuffer();
+bool Decoder::CheckIfCacheable(FEXCore::Core::InternalThreadState& Thread, const uint8_t* InstStream, uint64_t PC, uint64_t MaxInst) {
+  SetupDecodeInstructionsAtEntry(&Thread, PC, MaxInst);
+  DecodeLoop(InstStream);
+  bool Uncacheable = HitBadRelocation;
+  DelayedDisownBuffer();
+  return !Uncacheable;
+}
 
-  // Decode operating mode from thread's CS segment.
-  const auto CSSegment = Core::CPUState::GetSegmentFromIndex(Thread->CurrentFrame->State, Thread->CurrentFrame->State.cs_idx);
-  BlockInfo.Is64BitMode = CSSegment->L == 1;
-  LOGMAN_THROW_A_FMT(BlockInfo.Is64BitMode == CTX->Config.Is64BitMode, "Expected operating mode to not change at runtime!");
+void Decoder::DetectDataMasks(uint64_t OpAddress, DecodedBlocks& Block) {
+  FEXCore::X86Tables::DecodedOperand* LiteralToPatch = nullptr;
 
-  EntryPoint = PC;
-  BlockInfo.EntryPoints = {PC};
-  InstStream = _InstStream;
+  // cmp *, imm8 - seen varying in mono jitted code
+  {
+    FEXCore::X86Tables::ModRMDecoded ModRM;
+    ModRM.Hex = DecodeInst->ModRM;
+    if ((DecodeInst->OPRaw == 0x80 || DecodeInst->OPRaw == 0x83) && ModRM.reg == 7 && LastFieldReadSize == 1) {
+      for (auto& Src : DecodeInst->Src) {
+        if (Src.IsLiteral()) {
+          LiteralToPatch = &Src;
+          break;
+        }
+      }
+      if (LiteralToPatch && LiteralToPatch->Literal() != 0) {
+        Block.DataMasks.push_back({OpAddress + LastFieldReadOffset, DataMaskType::MOV, LastFieldReadSize});
 
-  uint64_t TotalInstructions {};
-
-  SectionMinAddress = 0;
-  SectionMaxAddress = ~0ULL;
-  Relocations = nullptr;
-
-  if (CTX->GetCodeCache().IsGeneratingCache || EnableCodeCacheValidation) {
-    // If generating cache, attempt to load section bounds and relocations
-    if (auto SectionInfo = CTX->SyscallHandler->LookupExecutableFileSection(Thread, EntryPoint)) {
-      SectionMinAddress = SectionInfo->FileStartVA;
-      SectionMaxAddress = SectionInfo->EndVA;
-      Relocations = &SectionInfo->FileInfo.Relocations;
+        LiteralToPatch->Type = X86Tables::DecodedOperand::OpType::LiteralPatchable;
+        LiteralToPatch->Data.LiteralPatchable.FieldOffset = LastFieldReadOffset;
+        LiteralToPatch->Data.LiteralPatchable.Width = LastFieldReadSize;
+      }
     }
   }
 
-  DecodedMinAddress = EntryPoint;
-  DecodedMaxAddress = EntryPoint;
-
-  // Entry is a jump target
-  BlocksToDecode = {PC};
-
-  uint64_t CurrentCodePage = PC & FEXCore::Utils::FEX_PAGE_MASK;
-
-  BlockInfo.CodePages = {CurrentCodePage};
-
-  if (MaxInst == 0) {
-    MaxInst = CTX->Config.MaxInstPerBlock;
+  if (LastFieldReadSize < 4) {
+    return;
   }
 
-  bool EntryBlock {true};
-  bool FinalInstruction {false};
+  DataMaskType Type = DataMaskType::NONE;
 
-  while (!FinalInstruction && !BlocksToDecode.empty()) {
-    auto BlockDecodeIt = BlocksToDecode.begin();
-    uint64_t RIPToDecode = *BlockDecodeIt;
-    BlocksToDecode.erase(BlockDecodeIt);
-    VisitedBlocks.emplace(RIPToDecode);
-
-    auto BlockSuccIt = std::lower_bound(BlockInfo.Blocks.begin(), BlockInfo.Blocks.end(), RIPToDecode,
-                                        [](const auto& a, uint64_t Address) { return a.Entry < Address; });
-
-    LOGMAN_THROW_A_FMT(BlockSuccIt == BlockInfo.Blocks.end() || BlockSuccIt->Entry != RIPToDecode, "unexpected");
-
-    NextBlockStartAddress = ~0ULL;
-    if (!BlocksToDecode.empty()) {
-      // We just erased the lowest, the front is then the second lowest
-      NextBlockStartAddress = *BlocksToDecode.begin();
+  // imm32 or imm64 at the end type instructions
+  if (DecodeInst->TableInfo->Flags & X86Tables::InstFlags::FLAGS_LITERAL_PATCHABLE) {
+    for (auto& Src : DecodeInst->Src) {
+      if (Src.IsLiteral()) {
+        LiteralToPatch = &Src;
+        break;
+      }
     }
-    if (BlockSuccIt != BlockInfo.Blocks.end() && BlockSuccIt->Entry < NextBlockStartAddress) {
-      NextBlockStartAddress = BlockSuccIt->Entry;
+    if (DecodeInst->Dest.IsLiteral()) {
+      LiteralToPatch = &DecodeInst->Dest;
     }
-    LOGMAN_THROW_A_FMT(NextBlockStartAddress > RIPToDecode, "unexpected");
 
-    // Insert the block now so it can be looked up and split if necessary on a backward edge
-    auto BlockIt = BlockInfo.Blocks.emplace(BlockSuccIt);
+    // heuristic: if it's a small value, assume it's more likely to be part of the code around it
+    bool IsMOV = (DecodeInst->OPRaw >= 0xB8 && DecodeInst->OPRaw <= 0xBF) || DecodeInst->OPRaw == 0xC7;
+    if (LiteralToPatch && IsMOV && LiteralToPatch->Literal() < 0x10000ULL) {
+      LiteralToPatch = nullptr;
+    }
+    if (LiteralToPatch && LiteralToPatch->Literal() != 0) {
+      Type = DataMaskType::MOV;
+    }
+  }
 
-    BlockIt->Entry = RIPToDecode;
-    BlockIt->Size = 0;
-    BlockIt->IsEntryPoint = EntryBlock;
+  // anything that has a patchable disp32
+  bool TryDisp = DecodeInst->Flags & X86Tables::DecodeFlags::FLAG_DECODED_MODRM;
+  if (TryDisp) {
+    FEXCore::X86Tables::ModRMDecoded ModRM;
+    ModRM.Hex = DecodeInst->ModRM;
+    {
+      // todo we could handle both imm + disp with more load tracking
+      bool FoundLiteral = false;
+      FEXCore::X86Tables::DecodedOperand* OpToPatch = nullptr;
+      for (auto& Src : DecodeInst->Src) {
+        if (Src.IsLiteral()) {
+          FoundLiteral = true;
+          break;
+        }
+        if (Src.IsRIPRelative() || Src.IsGPRIndirect() || Src.IsSIB()) {
+          OpToPatch = &Src;
+        }
+      }
+      if (DecodeInst->Dest.IsLiteral()) {
+        FoundLiteral = true;
+      }
+      if (DecodeInst->Dest.IsRIPRelative() || DecodeInst->Dest.IsGPRIndirect() || DecodeInst->Dest.IsSIB()) {
+        OpToPatch = &DecodeInst->Dest;
+      }
+      if (!FoundLiteral && OpToPatch) {
+        if (DecodeInst->TableInfo->OpcodeDispatcher.OpDispatch == &IR::OpDispatchBuilder::NOPOp) {
+          // if it's a nop disp, only mask data out, no other action required
+          Type = DataMaskType::NOP;
+        } else if (OpToPatch->IsRIPRelative()) {
+          Type = DataMaskType::DISP;
+          OpToPatch->Data.RIPLiteral.PatchableDisp = true;
+          OpToPatch->Data.RIPLiteral.DispOffset = LastFieldReadOffset;
+        } else if (OpToPatch->IsGPRIndirect()) {
+          // filter out disp8
+          if (!(ModRM.mod == 1)) {
+            Type = DataMaskType::DISP;
+            OpToPatch->Data.GPRIndirect.PatchableDisp = true;
+            OpToPatch->Data.GPRIndirect.DispOffset = LastFieldReadOffset;
+          }
+        } else if (OpToPatch->IsSIB()) {
+          FEXCore::X86Tables::SIBDecoded SIB;
+          SIB.Hex = DecodeInst->SIB;
+          // two disp32 cases here
+          if (ModRM.mod == 0b10 || (ModRM.mod == 0 && SIB.base == 0b101)) {
+            Type = DataMaskType::DISP;
+            OpToPatch->Data.SIB.PatchableDisp = true;
+            OpToPatch->Data.SIB.DispOffset = LastFieldReadOffset;
+          }
+        }
+      }
+    }
+  }
+  // jmp/call branches that use a literal rip-relative offset
+  // some of those may be inlined by multiblock and will be cleaned up at decode end
+  if (DecodeInst->TableInfo->Flags & X86Tables::InstFlags::FLAGS_SETS_RIP && DecodeInst->Src[0].IsLiteral() && DecodeInst->Src[0].Literal() != 0) {
+    LiteralToPatch = &DecodeInst->Src[0];
+    Type = DataMaskType::BRANCH;
+  }
 
-    uint64_t PCOffset = 0;
-    uint64_t BlockStartOffset = DecodedSize;
-    bool EraseBlock = true; // Unset once the block contains an instruction
+  // todo add a bunch more
 
-    BlockIt->DecodedInstructions = &DecodedBuffer[BlockStartOffset];
-    BlockIt->NumInstructions = 0;
+  if (Type != DataMaskType::NONE) {
+    Block.DataMasks.push_back({OpAddress + LastFieldReadOffset, Type, LastFieldReadSize});
 
-    // Do a bit of pointer math to figure out where we are in code
-    InstStream = AdjustAddrForSpecialRegion(_InstStream, EntryPoint, RIPToDecode);
+    if (LiteralToPatch) {
+      LiteralToPatch->Type = X86Tables::DecodedOperand::OpType::LiteralPatchable;
+      LiteralToPatch->Data.LiteralPatchable.FieldOffset = LastFieldReadOffset;
+      LiteralToPatch->Data.LiteralPatchable.Width = LastFieldReadSize;
+    }
+  }
+}
+
+void Decoder::PruneInlinedBranchDataMasks() {
+  for (auto& Block : BlockInfo.Blocks) {
+    if (!Block.DataMasks.size()) {
+      continue;
+    }
+    const auto& LastInst = Block.DecodedInstructions[Block.NumInstructions - 1];
+    const auto& LastMask = Block.DataMasks.back();
+
+    if (LastMask.Type != DataMaskType::BRANCH) {
+      continue;
+    }
+
+    const uint64_t NextInst = LastInst.PC + LastInst.InstSize;
+    if (LastMask.FieldAddress < LastInst.PC || LastMask.FieldAddress + LastMask.ValueSize > NextInst) {
+      continue;
+    }
+
+    if (std::ranges::binary_search(BlockInfo.Blocks, NextInst + LastInst.Src[0].Data.LiteralPatchable.Value, std::less {}, &DecodedBlocks::Entry)) {
+      Block.DataMasks.pop_back();
+    }
+  }
+}
+
+void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
+  // counter-intuitively, the masks are also needed for lookup on anon prefix decodes, not just stores
+  bool WantsDataMasks = CTX->DiskCache.IsReadingDiskCache() || CTX->DiskCache.IsWritingDiskCache();
+
+  while (!FinalInstruction && (Paused || !BlocksToDecode.empty())) {
+    bool Pausing = false;
+    fextl::vector<DecodedBlocks>::iterator BlockIt;
+    if (!Paused || BlockResume == -1) {
+      auto BlockDecodeIt = BlocksToDecode.begin();
+      uint64_t RIPToDecode = *BlockDecodeIt;
+      BlocksToDecode.erase(BlockDecodeIt);
+      VisitedBlocks.emplace(RIPToDecode);
+
+      auto BlockSuccIt = std::lower_bound(BlockInfo.Blocks.begin(), BlockInfo.Blocks.end(), RIPToDecode,
+                                          [](const auto& a, uint64_t Address) { return a.Entry < Address; });
+
+      LOGMAN_THROW_A_FMT(BlockSuccIt == BlockInfo.Blocks.end() || BlockSuccIt->Entry != RIPToDecode, "unexpected");
+
+      NextBlockStartAddress = ~0ULL;
+      if (!BlocksToDecode.empty()) {
+        // We just erased the lowest, the front is then the second lowest
+        NextBlockStartAddress = *BlocksToDecode.begin();
+      }
+      if (BlockSuccIt != BlockInfo.Blocks.end() && BlockSuccIt->Entry < NextBlockStartAddress) {
+        NextBlockStartAddress = BlockSuccIt->Entry;
+      }
+
+      LOGMAN_THROW_A_FMT(NextBlockStartAddress == ~0ULL || NextBlockStartAddress > RIPToDecode, "unexpected");
+
+      // Insert the block now so it can be looked up and split if necessary on a backward edge
+      BlockIt = BlockInfo.Blocks.emplace(BlockSuccIt);
+
+      BlockIt->Entry = RIPToDecode;
+      BlockIt->Size = 0;
+      BlockIt->IsEntryPoint = EntryBlock;
+
+      PCOffset = 0;
+      BlockStartOffset = DecodedSize;
+      EraseBlock = true; // Unset once the block contains an instruction
+
+      BlockIt->DecodedInstructions = &DecodedBuffer[BlockStartOffset];
+      BlockIt->NumInstructions = 0;
+
+      // Do a bit of pointer math to figure out where we are in code
+      InstStream = AdjustAddrForSpecialRegion(_InstStream, EntryPoint, RIPToDecode);
+    } else if (BlockResume != -1) {
+      BlockIt = BlockInfo.Blocks.begin() + BlockResume;
+      BlockResume = -1;
+    }
+
+    Paused = false;
 
     while (1) {
       InstructionSize = 0;
 
       // MAX_INST_SIZE assumes worst case
-      auto OpAddress = RIPToDecode + PCOffset;
+      auto OpAddress = BlockIt->Entry + PCOffset;
       auto OpMaxAddress = OpAddress + MAX_INST_SIZE;
 
       auto OpMinPage = OpAddress & FEXCore::Utils::FEX_PAGE_MASK;
@@ -1454,7 +1605,15 @@ void Decoder::DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thre
         BlockInfo.CodePages.insert(CurrentCodePage);
       }
 
+      LastFieldReadSize = 0;
       BlockIt->BlockStatus = DecodeInstruction(OpAddress);
+      if (HitBadRelocation) {
+        BlockInfo.TotalInstructionCount = 0;
+        BlockInfo.Blocks = {*BlockIt};
+        BlockInfo.EntryPoints.clear();
+        BlockInfo.CodePages.clear();
+        return;
+      }
       uint64_t OpEndAddress = OpAddress + DecodeInst->InstSize;
 
       DecodedMinAddress = std::min(DecodedMinAddress, OpAddress);
@@ -1471,25 +1630,43 @@ void Decoder::DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thre
       ++BlockIt->NumInstructions;
       BlockIt->Size += DecodeInst->InstSize;
 
+      // if we weren't provided relocations (guest JIT), try to detect what we can
+      if (WantsDataMasks && BlockIt->BlockStatus == DecodedBlockStatus::SUCCESS && BlockInfo.Is64BitMode && !Relocations) {
+        DetectDataMasks(OpAddress, *BlockIt);
+      }
+
       // Can not continue this block at all on invalid instruction
       if (BlockIt->BlockStatus != DecodedBlockStatus::SUCCESS) [[unlikely]] {
-        if (!EntryBlock) {
+        if (!EntryBlock && BlockIt->BlockStatus != DecodedBlockStatus::BAD_RELOCATION) {
           // In multiblock configurations, we can early terminate any non-entrypoint blocks with the expectation that this won't get hit.
           // Improves compile-times.
           // Just need to undo additions that this block decoding has caused.
           TotalInstructions -= BlockIt->NumInstructions;
           DecodedSize = BlockStartOffset;
           InstStream -= PCOffset;
+          if (DecodedMaxAddress == OpEndAddress) {
+            DecodedMaxAddress -= PCOffset;
+          }
           EraseBlock = true;
         } else {
           LogMan::Msg::EFmt("{} instruction in entry block: {:X}",
-                            BlockIt->BlockStatus == DecodedBlockStatus::INVALID_INST   ? "Invalid" :
-                            BlockIt->BlockStatus == DecodedBlockStatus::NOEXEC_INST    ? "NoExec" :
-                            BlockIt->BlockStatus == DecodedBlockStatus::BAD_RELOCATION ? "BadRelocation" :
-                                                                                         "PartialDecode",
+                            BlockIt->BlockStatus == DecodedBlockStatus::INVALID_INST       ? "Invalid" :
+                            BlockIt->BlockStatus == DecodedBlockStatus::NOEXEC_INST        ? "NoExec" :
+                            BlockIt->BlockStatus == DecodedBlockStatus::BAD_RELOCATION     ? "BadRelocation" :
+                            BlockIt->BlockStatus == DecodedBlockStatus::UNIMPLEMENTED_INST ? "Unimplemented" :
+                                                                                             "PartialDecode",
                             OpAddress);
         }
         break;
+      }
+
+      if (GuestSizePause) {
+        if (GuestSizePause > DecodeInst->InstSize) {
+          GuestSizePause -= DecodeInst->InstSize;
+        } else {
+          GuestSizePause = 0;
+          Pausing = true;
+        }
       }
 
       // Check if we need to end the entire multiblock
@@ -1504,7 +1681,9 @@ void Decoder::DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thre
           // If the branch target is within our multiblock range then we can keep going on
           // We don't want to short circuit this since we want to calculate our ranges still
           // NOTE: This will invalidate BlockIt, this is fine as we immediately break from the loop and EraseBlock cannot be true
-          BlockIt->ForceFullSMCDetection = CTX->AreMonoHacksActive() && IsBranchMonoTailcall(BlockIt->NumInstructions);
+          if (CTX->AreMonoHacksActive() && IsBranchMonoTailcall(BlockIt->NumInstructions)) {
+            BlockIt->ForceFullSMCDetection = true;
+          }
           BranchTargetInMultiblockRange();
         }
 
@@ -1513,6 +1692,17 @@ void Decoder::DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thre
 
       PCOffset += DecodeInst->InstSize;
       InstStream += DecodeInst->InstSize;
+
+      if (Pausing) {
+        Pausing = false;
+        Paused = true;
+        BlockResume = BlockIt - BlockInfo.Blocks.begin();
+        break;
+      }
+    }
+
+    if (Paused) {
+      break;
     }
 
     // NOTE: BlockIt is only valid here in the EraseBlock case
@@ -1524,6 +1714,16 @@ void Decoder::DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thre
 
     CurrentBlockTargets.clear();
     EntryBlock = false;
+
+    if (Pausing && !BlocksToDecode.empty() && !FinalInstruction) {
+      Paused = true;
+      BlockResume = -1;
+      break;
+    }
+  }
+
+  if (Paused) {
+    return;
   }
 
   BlockInfo.TotalInstructionCount = TotalInstructions;
@@ -1531,6 +1731,65 @@ void Decoder::DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thre
   for (auto& Block : BlockInfo.Blocks) {
     Block.IsEntryPoint = BlockInfo.EntryPoints.contains(Block.Entry);
   }
+
+  // now that multiblock has settled down, remove any branch masks we put down that didn't end the block
+  if (WantsDataMasks) {
+    PruneInlinedBranchDataMasks();
+  }
+}
+
+void Decoder::SetupDecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t PC, uint64_t MaxInst) {
+  FEXCORE_PROFILE_SCOPED("DecodeInstructions");
+  BlockInfo.TotalInstructionCount = 0;
+  BlockInfo.Blocks.clear();
+  VisitedBlocks.clear();
+  // Reset internal state management
+  Paused = false;
+  BlockResume = -1;
+  DecodedSize = 0;
+  if (MaxInst == 0) {
+    MaxInst = CTX->Config.MaxInstPerBlock;
+  }
+  this->MaxInst = MaxInst;
+  MaxCondBranchForward = 0;
+  MaxCondBranchBackwards = ~0ULL;
+  DecodedBuffer = PoolObject.ReownOrClaimBuffer();
+
+  // Decode operating mode from thread's CS segment.
+  const auto CSSegment = Core::CPUState::GetSegmentFromIndex(Thread->CurrentFrame->State, Thread->CurrentFrame->State.cs_idx);
+  BlockInfo.Is64BitMode = CSSegment->L == 1;
+  LOGMAN_THROW_A_FMT(BlockInfo.Is64BitMode == CTX->Config.Is64BitMode, "Expected operating mode to not change at runtime!");
+
+  EntryPoint = PC;
+  BlockInfo.EntryPoints = {PC};
+
+  TotalInstructions = 0;
+
+  SectionMinAddress = 0;
+  SectionMaxAddress = ~0ULL;
+  Relocations = nullptr;
+
+  if (CTX->GetCodeCache().IsGeneratingCache || EnableCodeCacheValidation) {
+    // If generating cache, attempt to load section bounds and relocations
+    if (auto SectionInfo = CTX->SyscallHandler->LookupExecutableFileSection(Thread, EntryPoint)) {
+      SectionMinAddress = SectionInfo->FileStartVA;
+      SectionMaxAddress = SectionInfo->EndVA;
+      Relocations = &SectionInfo->FileInfo.Relocations;
+    }
+  }
+
+  DecodedMinAddress = EntryPoint;
+  DecodedMaxAddress = EntryPoint;
+
+  // Entry is a jump target
+  BlocksToDecode = {PC};
+
+  CurrentCodePage = PC & FEXCore::Utils::FEX_PAGE_MASK;
+
+  BlockInfo.CodePages = {CurrentCodePage};
+
+  EntryBlock = true;
+  FinalInstruction = false;
 }
 
 } // namespace FEXCore::Frontend

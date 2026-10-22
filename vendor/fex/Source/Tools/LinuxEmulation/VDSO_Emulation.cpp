@@ -7,6 +7,7 @@
 #include <FEXCore/Config/Config.h>
 #include <FEXCore/Core/Context.h>
 #include <FEXCore/IR/IR.h>
+#include <FEXCore/Utils/Allocator.h>
 #include <FEXCore/Utils/LogManager.h>
 #include <FEXCore/Utils/MathUtils.h>
 #include <FEXCore/Utils/SignalScopeGuards.h>
@@ -26,7 +27,8 @@
 #include <unistd.h>
 
 namespace FEX::VDSO {
-VDSOEntrypoints VDSOPointers {};
+static VDSOEntrypoints VDSOPointers {};
+
 namespace VDSOHandlers {
   using TimeType = decltype(::time)*;
   using GetTimeOfDayType = decltype(::gettimeofday)*;
@@ -35,12 +37,12 @@ namespace VDSOHandlers {
   using GetCPUType = decltype(FHU::Syscalls::getcpu)*;
   using GetRandomType = ssize_t (*)(void*, size_t, uint32_t, void*, size_t);
 
-  TimeType TimePtr;
-  GetTimeOfDayType GetTimeOfDayPtr;
-  ClockGetTimeType ClockGetTimePtr;
-  ClockGetResType ClockGetResPtr;
-  GetCPUType GetCPUPtr;
-  GetRandomType GetRandomPtr;
+  static TimeType TimePtr;
+  static GetTimeOfDayType GetTimeOfDayPtr;
+  static ClockGetTimeType ClockGetTimePtr;
+  static ClockGetResType ClockGetResPtr;
+  static GetCPUType GetCPUPtr;
+  static GetRandomType GetRandomPtr;
 } // namespace VDSOHandlers
 
 using HandlerPtr = void (*)(void*);
@@ -206,12 +208,12 @@ namespace x64 {
     }
   } // namespace VDSO
 
-  HandlerPtr Handler_time = FEX::VDSO::x64::glibc::time;
-  HandlerPtr Handler_gettimeofday = FEX::VDSO::x64::glibc::gettimeofday;
-  HandlerPtr Handler_clock_gettime = FEX::VDSO::x64::glibc::clock_gettime;
-  HandlerPtr Handler_clock_getres = FEX::VDSO::x64::glibc::clock_getres;
-  HandlerPtr Handler_getcpu = FEX::VDSO::x64::glibc::getcpu;
-  HandlerPtr Handler_getrandom = FEX::VDSO::x64::glibc::getrandom;
+  static HandlerPtr Handler_time = FEX::VDSO::x64::glibc::time;
+  static HandlerPtr Handler_gettimeofday = FEX::VDSO::x64::glibc::gettimeofday;
+  static HandlerPtr Handler_clock_gettime = FEX::VDSO::x64::glibc::clock_gettime;
+  static HandlerPtr Handler_clock_getres = FEX::VDSO::x64::glibc::clock_getres;
+  static HandlerPtr Handler_getcpu = FEX::VDSO::x64::glibc::getcpu;
+  static HandlerPtr Handler_getrandom = FEX::VDSO::x64::glibc::getrandom;
 } // namespace x64
 namespace x32 {
   namespace glibc {
@@ -409,12 +411,12 @@ namespace x32 {
     }
   } // namespace VDSO
 
-  HandlerPtr Handler_time = FEX::VDSO::x32::glibc::time;
-  HandlerPtr Handler_gettimeofday = FEX::VDSO::x32::glibc::gettimeofday;
-  HandlerPtr Handler_clock_gettime = FEX::VDSO::x32::glibc::clock_gettime;
-  HandlerPtr Handler_clock_gettime64 = FEX::VDSO::x32::glibc::clock_gettime64;
-  HandlerPtr Handler_clock_getres = FEX::VDSO::x32::glibc::clock_getres;
-  HandlerPtr Handler_getcpu = FEX::VDSO::x32::glibc::getcpu;
+  static HandlerPtr Handler_time = FEX::VDSO::x32::glibc::time;
+  static HandlerPtr Handler_gettimeofday = FEX::VDSO::x32::glibc::gettimeofday;
+  static HandlerPtr Handler_clock_gettime = FEX::VDSO::x32::glibc::clock_gettime;
+  static HandlerPtr Handler_clock_gettime64 = FEX::VDSO::x32::glibc::clock_gettime64;
+  static HandlerPtr Handler_clock_getres = FEX::VDSO::x32::glibc::clock_getres;
+  static HandlerPtr Handler_getcpu = FEX::VDSO::x32::glibc::getcpu;
 } // namespace x32
 
 class VDSOParser final {
@@ -481,7 +483,7 @@ VDSOParser::VDSOParser(const uint8_t* HeaderBase) {
   }
 }
 
-void LoadHostVDSO() {
+static void LoadHostVDSO() {
   // Linux gives the VDSO ELF header base in the auxv value AT_SYSINFO_EHDR.
   auto VDSOHeader = ::getauxval(AT_SYSINFO_EHDR);
 
@@ -608,13 +610,26 @@ static std::array<FEXCore::IR::ThunkDefinition, 7> VDSODefinitions = {{
 }};
 
 template<bool Is64Bit>
-void LoadGuestVDSOSymbols(char* VDSOBase) {
+static void LoadGuestVDSOSymbols(char* VDSOBase) {
   using ELFHeaderType = std::conditional_t<Is64Bit, Elf64_Ehdr, Elf32_Ehdr>;
   using ELFSHeaderType = std::conditional_t<Is64Bit, Elf64_Shdr, Elf32_Shdr>;
   using ELFSymbolType = std::conditional_t<Is64Bit, Elf64_Sym, Elf32_Sym>;
+  constexpr auto ELFClass = Is64Bit ? ELFCLASS64 : ELFCLASS32;
+  constexpr auto ELFMachine = Is64Bit ? EM_X86_64 : EM_386;
 
   // We need to load symbols we care about.
   auto Header = reinterpret_cast<const ELFHeaderType*>(VDSOBase);
+
+  // Check ELF magic.
+  if (Header->e_ident[EI_MAG0] != ELFMAG0 || Header->e_ident[EI_MAG1] != ELFMAG1 || Header->e_ident[EI_MAG2] != ELFMAG2 ||
+      Header->e_ident[EI_MAG3] != ELFMAG3) {
+    return;
+  }
+
+  // Check ELF class and Machine.
+  if (Header->e_ident[EI_CLASS] != ELFClass || Header->e_machine != ELFMachine) {
+    return;
+  }
 
   // First walk the section headers to find the symbol table.
   auto RawShdrs = reinterpret_cast<const ELFSHeaderType*>(VDSOBase + Header->e_shoff);
@@ -669,7 +684,8 @@ void LoadGuestVDSOSymbols(char* VDSOBase) {
   }
 }
 
-void LoadFEXGeneratedCode(FEXCore::Core::InternalThreadState* Thread, bool Is64Bit, VDSOMapping* Mapping, FEX::HLE::SyscallHandler* const Handler) {
+static void LoadFEXGeneratedCode(FEXCore::Core::InternalThreadState* Thread, bool Is64Bit, VDSOMapping* Mapping,
+                                 FEX::HLE::SyscallHandler* const Handler) {
   if (VDSOPointers.VDSO_FEX_CallbackRET && (!Is64Bit || (VDSOPointers.VDSO_kernel_sigreturn && VDSOPointers.VDSO_kernel_rt_sigreturn))) {
     // Unnecessary if all VDSO paths have already been loaded.
     return;
@@ -689,22 +705,11 @@ void LoadFEXGeneratedCode(FEXCore::Core::InternalThreadState* Thread, bool Is64B
       Mapping->X86GeneratedCodePtr = Result;
     }
   } else {
-    // First 64bit page
-    constexpr uintptr_t LOCATION_MAX = 0x1'0000'0000;
-
     // We need to have the sigret handler in the lower 32bits of memory space
     // Scan top down and try to allocate a location
     for (size_t Location = 0xFFFF'E000; Location != 0x0; Location -= PageSize) {
       auto Ptr = Handler->GuestMmap(Is64Bit, Thread, reinterpret_cast<void*>(Location), PageSize, PROT_READ | PROT_WRITE,
                                     MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-      if (!FEX::HLE::HasSyscallError(Ptr) && reinterpret_cast<uintptr_t>(Ptr) >= LOCATION_MAX) {
-        // Failed to map in the lower 32bits
-        // Try again
-        // Can happen in the case that host kernel ignores MAP_FIXED_NOREPLACE
-        Handler->GuestMunmap(Thread, Ptr, PageSize);
-        continue;
-      }
 
       if (!FEX::HLE::HasSyscallError(Ptr)) {
         Mapping->X86GeneratedCodePtr = Ptr;
@@ -795,18 +800,54 @@ VDSOMapping LoadVDSOThunks(FEXCore::Core::InternalThreadState* Thread, bool Is64
     // Get file size
     Mapping.VDSOSize = lseek(VDSOFD, 0, SEEK_END);
 
-    if (Mapping.VDSOSize >= 4) {
+    if (Mapping.VDSOSize >= std::min(sizeof(Elf32_Ehdr), sizeof(Elf64_Ehdr))) {
       // Reset to beginning
       lseek(VDSOFD, 0, SEEK_SET);
       Mapping.VDSOSize = FEXCore::AlignUp(Mapping.VDSOSize, FEXCore::Utils::FEX_PAGE_SIZE);
 
-      // Map the VDSO file to memory
-      Mapping.VDSOBase = Handler->GuestMmap(Thread, nullptr, Mapping.VDSOSize, PROT_READ | PROT_EXEC, MAP_SHARED, VDSOFD, 0);
+      auto VABits = FEXCore::Allocator::GetHostVABits();
+      uint64_t VDSOHint {};
+      if (Is64Bit) {
+        if (VABits > 47) {
+          // If VA size is at least as large as minimum x86 specification, then set to max.
+          VABits = 47;
+        }
+
+        // Calculate the highest point the vdso could go.
+        VDSOHint = (1ULL << VABits) - Mapping.VDSOSize;
+      } else {
+        VDSOHint = 0x1'0000'0000ULL - Mapping.VDSOSize;
+      }
+
+      auto PageSize = sysconf(_SC_PAGESIZE);
+      PageSize = PageSize > 0 ? PageSize : FEXCore::Utils::FEX_PAGE_SIZE;
+
+      // Scan top down and try to allocate a location
+      void* VDSOPointerBase {};
+      do {
+        VDSOPointerBase = Handler->GuestMmap(Is64Bit, Thread, reinterpret_cast<void*>(VDSOHint), Mapping.VDSOSize, PROT_READ | PROT_EXEC,
+                                             MAP_FIXED_NOREPLACE | MAP_SHARED, VDSOFD, 0);
+        // Scan-downward until we fit.
+        VDSOHint -= PageSize;
+      } while (FEX::HLE::HasSyscallError(VDSOPointerBase) && static_cast<int64_t>(VDSOHint) > 0);
+
+      if (FEX::HLE::HasSyscallError(VDSOPointerBase)) {
+        LogMan::Msg::EFmt("Couldn't Map VDSO");
+        close(VDSOFD);
+        return {};
+      }
+
+      Mapping.VDSOBase = VDSOPointerBase;
 
       // Since we found our VDSO thunk library, find our host VDSO function implementations.
       LoadHostVDSO();
     }
     close(VDSOFD);
+
+    if (!Mapping.VDSOBase) {
+      return {};
+    }
+
     if (Is64Bit) {
       LoadGuestVDSOSymbols<true>(reinterpret_cast<char*>(Mapping.VDSOBase));
     } else {

@@ -10,8 +10,8 @@
 #include <array>
 #include <list>
 #include <map>
-#include <numeric>
 #include <queue>
+#include <set>
 #include <stack>
 #include <string>
 #include <utility>
@@ -128,7 +128,7 @@ TEST(ranges_test, format_set) {
 
 // Models std::flat_set close enough to test if no ambiguous lookup of a
 // formatter happens due to the flat_set type matching is_set and
-// is_container_adaptor_like.
+// is_container_adaptor.
 template <typename T> class flat_set {
  public:
   using key_type = T;
@@ -168,6 +168,40 @@ auto end(const box& b) -> const int* { return &b.value + 1; }
 TEST(ranges_test, format_adl_begin_end) {
   auto b = adl::box{42};
   EXPECT_EQ(fmt::format("{}", b), "[42]");
+}
+
+TEST(ranges_test, format_width) {
+  auto v = std::vector<int>{1, 2, 3};
+  EXPECT_EQ(fmt::format("{:20}", v), "[1, 2, 3]           ");
+  EXPECT_EQ(fmt::format("{:<20}", v), "[1, 2, 3]           ");
+  EXPECT_EQ(fmt::format("{:>20}", v), "           [1, 2, 3]");
+  EXPECT_EQ(fmt::format("{:^20}", v), "     [1, 2, 3]      ");
+  EXPECT_EQ(fmt::format("{:*>20}", v), "***********[1, 2, 3]");
+  EXPECT_EQ(fmt::format("{:*>{}}", v, 20), "***********[1, 2, 3]");
+  // The width applies to the composed output, not to the elements.
+  EXPECT_EQ(fmt::format("{:*>20n}", v), "*************1, 2, 3");
+  EXPECT_EQ(fmt::format("{:*>20:03}", v), "*****[001, 002, 003]");
+  // A leading ':' introduces the underlying spec and is not a fill character.
+  EXPECT_EQ(fmt::format("{::>5}", v), "[    1,     2,     3]");
+  // Output longer than the width is not truncated.
+  EXPECT_EQ(fmt::format("{:*>3}", v), "[1, 2, 3]");
+
+  auto s = std::set<int>{1, 2};
+  EXPECT_EQ(fmt::format("{:*>20}", s), "**************{1, 2}");
+
+  auto m = std::map<int, int>{{1, 2}};
+  EXPECT_EQ(fmt::format("{:*>20}", m), "**************{1: 2}");
+  EXPECT_EQ(fmt::format("{:*>10n}", m), "******1: 2");
+
+  auto vs = std::vector<std::string>{"a", "b"};
+  EXPECT_EQ(fmt::format("{:*>20}", vs), "**********[\"a\", \"b\"]");
+
+  EXPECT_EQ(fmt::format("{:*>20}", std::tuple<int, int>(1, 2)),
+            "**************(1, 2)");
+  EXPECT_EQ(fmt::format("{:*>20}", std::pair<int, int>(1, 2)),
+            "**************(1, 2)");
+  EXPECT_EQ(fmt::format("{:*>{}}", std::pair<int, int>(1, 2), 20),
+            "**************(1, 2)");
 }
 
 TEST(ranges_test, format_pair) {
@@ -269,6 +303,23 @@ TEST(ranges_test, disabled_range_formatting_of_path) {
   EXPECT_EQ((fmt::range_format_kind<path_like<char>, char>::value),
             fmt::range_format::disabled);
   EXPECT_EQ((fmt::range_format_kind<path_like<wchar_t>, char>::value),
+            fmt::range_format::disabled);
+}
+
+template <typename T> struct optional_like {
+  auto begin() const -> const T*;
+  auto end() const -> const T*;
+
+  bool has_value() const noexcept;
+  T& value() &;
+  const T& value() const&;
+  T&& value() &&;
+  const T&& value() const&&;
+};
+
+TEST(ranges_test, disabled_range_formatting_of_optional) {
+  // (C++26) Has a range support for std::optional.
+  EXPECT_EQ((fmt::range_format_kind<optional_like<int>, char>::value),
             fmt::range_format::disabled);
 }
 
@@ -395,13 +446,6 @@ TEST(ranges_test, join) {
   EXPECT_EQ(fmt::format("{}", join(v4, " ")), "0 1 0");
 }
 
-#ifdef __cpp_lib_byte
-TEST(ranges_test, join_bytes) {
-  auto v = std::vector<std::byte>{std::byte(1), std::byte(2), std::byte(3)};
-  EXPECT_EQ(fmt::format("{}", fmt::join(v, ", ")), "1, 2, 3");
-}
-#endif
-
 TEST(ranges_test, join_tuple) {
   // Value tuple args.
   auto t1 = std::tuple<char, int, float>('a', 1, 2.0f);
@@ -438,12 +482,6 @@ TEST(ranges_test, join_tuple) {
   auto t7 = std::tuple<int, int&, const int&>(3, y, y);
   EXPECT_EQ(fmt::format("{:03}", fmt::join(t7, ", ")), "003, -01, -01");
 #endif
-}
-
-TEST(ranges_test, join_initializer_list) {
-  EXPECT_EQ(fmt::format("{}", fmt::join({1, 2, 3}, ", ")), "1, 2, 3");
-  EXPECT_EQ(fmt::format("{}", fmt::join({"fmt", "rocks", "!"}, " ")),
-            "fmt rocks !");
 }
 
 struct zstring_sentinel {};
@@ -608,12 +646,11 @@ TEST(ranges_test, vector_char) {
 
 TEST(ranges_test, container_adaptor) {
   {
-    using fmt::detail::is_container_adaptor_like;
     using T = std::nullptr_t;
-    static_assert(is_container_adaptor_like<std::stack<T>>::value, "");
-    static_assert(is_container_adaptor_like<std::queue<T>>::value, "");
-    static_assert(is_container_adaptor_like<std::priority_queue<T>>::value, "");
-    static_assert(!is_container_adaptor_like<std::vector<T>>::value, "");
+    static_assert(fmt::is_container_adaptor<std::stack<T>>::value, "");
+    static_assert(fmt::is_container_adaptor<std::queue<T>>::value, "");
+    static_assert(fmt::is_container_adaptor<std::priority_queue<T>>::value, "");
+    static_assert(!fmt::is_container_adaptor<std::vector<T>>::value, "");
   }
 
   {
@@ -724,10 +761,17 @@ struct codec_mask {
   int except = 0;
 };
 
+// A named functor instead of a lambda to avoid -Wsubobject-linkage: a lambda
+// gives the filter_view type internal linkage, which propagates to the
+// formatter base class via format_as.
+struct not_equal {
+  int value;
+  bool operator()(int c) const { return c != value; }
+};
+
 auto format_as(codec_mask mask) {
-  // Careful not to capture param by reference here, it will dangle.
   return codec_mask::codecs |
-         std::views::filter([mask](auto c) { return c != mask.except; });
+         std::views::filter(not_equal{mask.except});
 }
 }  // namespace views_filter_view_test
 
@@ -797,3 +841,23 @@ struct not_range {
   void end() const {}
 };
 static_assert(!fmt::is_formattable<not_range>{}, "");
+
+struct test_adaptor {
+  using container_type = std::vector<int>;
+  std::vector<int> c = {1, 2, 3};
+};
+
+namespace fmt {
+template <> struct is_container_adaptor<test_adaptor> : std::false_type {};
+
+template <> struct formatter<test_adaptor> : formatter<string_view> {
+  auto format(const test_adaptor&, format_context& ctx) const
+      -> format_context::iterator {
+    return formatter<string_view>::format("test", ctx);
+  }
+};
+}  // namespace fmt
+
+TEST(ranges_test, container_adaptor_opt_out) {
+  EXPECT_EQ(fmt::format("{}", test_adaptor()), "test");
+}

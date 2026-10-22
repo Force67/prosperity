@@ -24,7 +24,7 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from distutils.version import LooseVersion
+from packaging.version import Version
 import config
 import fnmatch
 import glob
@@ -107,7 +107,7 @@ def GetHostArch(env):
     return "i386"
   elif "__arm__" in directives:
     return "aarch32"
-  elif "__aarch64__" in directives or "__arm64ec__" in directives:
+  elif "__aarch64__" in directives:
     return "aarch64"
   else:
     raise Exception("Unsupported architecture")
@@ -190,7 +190,7 @@ class CompilerInformation(object):
     # The result is false if the compilers are different, otherwise compare the
     # version numbers.
     return self.compiler == compiler and \
-           operator(LooseVersion(self.version), LooseVersion(version))
+           operator(Version(self.version), Version(version))
 
 class ReturnCode:
   def __init__(self, exit_on_error, printer_fn):

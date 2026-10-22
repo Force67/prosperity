@@ -54,7 +54,7 @@ public:
 
   // Returns true if the host handled the signal
   // Arguments are the same as sigaction handler
-  SignalDelegator(FEXCore::Context::Context* _CTX, const std::string_view ApplicationName, bool SupportsAVX);
+  SignalDelegator(FEXCore::Context::Context* _CTX, const std::string_view ApplicationName, bool SupportsAVX, bool SupportsSVE256);
   ~SignalDelegator() override;
 
   // Called from the signal trampoline function.
@@ -106,8 +106,6 @@ public:
   void UninstallHostHandler(int Signal);
   void QueueSignal(pid_t tgid, pid_t tid, int Signal, siginfo_t* info, bool IgnoreMask);
 
-  FEXCore::Context::Context* CTX;
-
   void SetVDSOSymbols() {
     // Get symbols from VDSO.
     VDSOPointers = FEX::VDSO::GetVDSOSymbols();
@@ -149,32 +147,7 @@ public:
   void SpillSRA(FEXCore::Core::InternalThreadState* Thread, void* ucontext, uint32_t IgnoreMask);
 
 private:
-  // Called from the thunk handler to handle the signal
-  void HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObject, int Signal, void* Info, void* UContext);
-  bool HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState* Thread, int Signal, void* Info, void* UContext);
-
-  /**
-   * @brief Registers a signal handler for the host to handle a signal
-   *
-   * It's a process level signal handler so one must be careful
-   */
-  void FrontendRegisterHostSignalHandler(int Signal, bool Required);
-  void FrontendRegisterFrontendHostSignalHandler(int Signal, bool Required);
-
-  void SetHostSignalHandler(int Signal, HostSignalDelegatorFunction Func, bool Required) {
-    HostHandlers[Signal].Handlers.push_back(std::move(Func));
-  }
-  void SetFrontendHostSignalHandler(int Signal, HostSignalDelegatorFunction Func, bool Required) {
-    HostHandlers[Signal].FrontendHandler = std::move(Func);
-  }
-
-  FEX_CONFIG_OPT(Is64BitMode, IS64BIT_MODE);
-  const fextl::string ApplicationName;
-  FEX_CONFIG_OPT(HalfBarrierTSOEnabled, HALFBARRIERTSOENABLED);
-
-  FEXCore::ArchHelpers::Arm64::UnalignedHandlerType UnalignedHandlerType {FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier};
-
-  enum DefaultBehaviour {
+  enum DefaultBehaviourType {
     DEFAULT_TERM,
     // Core dump based signals are supposed to have a coredump appear
     // For FEX's behaviour we don't really care right now
@@ -201,18 +174,51 @@ private:
     kernel_sigaction OldAction {};
     FEX::HLE::HostSignalDelegatorFunctionForGuest GuestHandler {};
     GuestSigAction GuestAction {};
-    DefaultBehaviour DefaultBehaviour {DEFAULT_TERM};
+    DefaultBehaviourType DefaultBehaviour {DEFAULT_TERM};
 
     // Callbacks
     fextl::vector<HostSignalDelegatorFunction> Handlers {};
     HostSignalDelegatorFunction FrontendHandler {};
   };
 
+  FEXCore::Context::Context* CTX;
+
+  FEX_CONFIG_OPT(Is64BitMode, IS64BIT_MODE);
+  const fextl::string ApplicationName;
+  FEX_CONFIG_OPT(HalfBarrierTSOEnabled, HALFBARRIERTSOENABLED);
+
+  FEXCore::ArchHelpers::Arm64::UnalignedHandlerType UnalignedHandlerType {FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier};
+
   std::array<SignalHandler, MAX_SIGNALS + 1> HostHandlers {};
-  bool InstallHostThunk(int Signal);
-  bool UpdateHostThunk(int Signal);
 
   FEX::VDSO::VDSOEntrypoints VDSOPointers {};
+
+  std::mutex HostDelegatorMutex;
+  std::mutex GuestDelegatorMutex;
+  bool SupportsAVX;
+  bool SupportsSVE256;
+
+  // Called from the thunk handler to handle the signal
+  void HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObject, int Signal, void* Info, void* UContext);
+  bool HandleFrontendSIGSEGV(FEXCore::Core::InternalThreadState* Thread, int Signal, void* Info, void* UContext);
+
+  /**
+   * @brief Registers a signal handler for the host to handle a signal
+   *
+   * It's a process level signal handler so one must be careful
+   */
+  void FrontendRegisterHostSignalHandler(int Signal, bool Required);
+  void FrontendRegisterFrontendHostSignalHandler(int Signal, bool Required);
+
+  void SetHostSignalHandler(int Signal, HostSignalDelegatorFunction Func) {
+    HostHandlers[Signal].Handlers.push_back(std::move(Func));
+  }
+  void SetFrontendHostSignalHandler(int Signal, HostSignalDelegatorFunction Func) {
+    HostHandlers[Signal].FrontendHandler = std::move(Func);
+  }
+
+  bool InstallHostThunk(int Signal);
+  bool UpdateHostThunk(int Signal);
 
   bool IsAddressInDispatcher(uint64_t Address) const {
     return Address >= Config.DispatcherBegin && Address < Config.DispatcherEnd;
@@ -286,12 +292,8 @@ private:
   bool HandleSIGILL(FEXCore::Core::InternalThreadState* Thread, int Signal, void* info, void* ucontext);
 
   uint64_t GetNewSigMask(int Signal) const;
-
-  std::mutex HostDelegatorMutex;
-  std::mutex GuestDelegatorMutex;
-  bool SupportsAVX;
 };
 
 fextl::unique_ptr<FEX::HLE::SignalDelegator>
-CreateSignalDelegator(FEXCore::Context::Context* CTX, const std::string_view ApplicationName, bool SupportsAVX);
+CreateSignalDelegator(FEXCore::Context::Context* CTX, const std::string_view ApplicationName, bool SupportsAVX, bool SupportsSVE256);
 } // namespace FEX::HLE

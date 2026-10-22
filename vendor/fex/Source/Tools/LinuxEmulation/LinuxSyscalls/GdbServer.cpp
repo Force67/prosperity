@@ -35,6 +35,7 @@ $end_info$
 #include <FEXCore/fextl/string.h>
 #include <FEXCore/fextl/vector.h>
 #include <FEXHeaderUtils/Filesystem.h>
+#include <FEXHeaderUtils/Syscalls.h>
 
 #include <atomic>
 #include <cstring>
@@ -1171,7 +1172,7 @@ GdbServer::HandledPacketType GdbServer::CommandMultiLetterV(const fextl::string&
   }
 
   if (packet.starts_with("vKill")) {
-    tgkill(::getpid(), ::getpid(), SIGKILL);
+    FHU::Syscalls::tgkill(::getpid(), ::getpid(), SIGKILL);
   }
 
   // TODO: vRun
@@ -1440,9 +1441,11 @@ void GdbServer::GdbServerLoop() {
   Acceptor->async_accept([this](fasio::error ec, std::optional<fasio::tcp_socket> Socket) {
     if (ec != fasio::error::success) {
       // Listen socket error or shutting down
-      LogMan::Msg::EFmt("[GdbServer] gdbserver shutting down: {}");
-      close(CommsSocket->FD);
-      CommsSocket.reset();
+      if (CommsSocket) {
+        LogMan::Msg::EFmt("[GdbServer] gdbserver shutting down: {}", CommsSocket->FD);
+        close(CommsSocket->FD);
+        CommsSocket.reset();
+      }
       // Repeat to wait for another connection
       return fasio::post_callback::repeat;
     }
@@ -1472,16 +1475,14 @@ void GdbServer::GdbServerLoop() {
   CloseListenSocket();
 }
 static void* ThreadHandler(void* Arg) {
-  FEXCore::Threads::SetThreadName("FEX:gdbserver");
+  HLE::ThreadManager::SetThreadName("FEX:gdbserver");
   auto This = reinterpret_cast<FEX::GdbServer*>(Arg);
   This->GdbServerLoop();
   return nullptr;
 }
 
 void GdbServer::StartThread() {
-  uint64_t OldMask = FEXCore::Threads::SetSignalMask(~0ULL);
-  gdbServerThread = FEXCore::Threads::Thread::Create(ThreadHandler, this);
-  FEXCore::Threads::SetSignalMask(OldMask);
+  gdbServerThread = FEXCore::Threads::Thread::Create(ThreadHandler, this, {.Internal = true});
 }
 
 void GdbServer::OpenListenSocket() {

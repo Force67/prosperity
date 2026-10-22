@@ -19,6 +19,8 @@ namespace FEXCore::IR {
 
 static bool IsFragmentExit(FEXCore::IR::IROps Op) {
   switch (Op) {
+  case OP_THREADREMOVECODEENTRY:
+  case OP_SYSCALL:
   case OP_EXITFUNCTION:
   case OP_BREAK: return true;
   default: return false;
@@ -33,7 +35,7 @@ bool IsBlockExit(FEXCore::IR::IROps Op) {
   }
 }
 
-RegClass IREmitter::WalkFindRegClass(Ref Node) {
+RegClass IREmitter::WalkFindRegClass(Ref Node) const {
   auto Class = GetOpRegClass(Node);
   switch (Class) {
   case RegClass::GPR:
@@ -45,9 +47,8 @@ RegClass IREmitter::WalkFindRegClass(Ref Node) {
   }
 
   // Complex case, needs to be handled on an op by op basis
-  uintptr_t DataBegin = DualListData.DataBegin();
-
-  FEXCore::IR::IROp_Header* IROp = Node->Op(DataBegin);
+  const uintptr_t DataBegin = DualListData.DataBegin();
+  const auto* IROp = Node->Op(DataBegin);
 
   switch (IROp->Op) {
   case IROps::OP_LOADREGISTER: {

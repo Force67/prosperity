@@ -32,7 +32,6 @@ extern "C" {
 
 #define STATUS_EMULATION_SYSCALL ((NTSTATUS)0x40000039)
 
-#ifdef ARCHITECTURE_arm64ec
 typedef struct _CHPE_V2_CPU_AREA_INFO {
   BOOLEAN InSimulation;             /* 000 */
   BOOLEAN InSyscallCallback;        /* 001 */
@@ -44,7 +43,6 @@ typedef struct _CHPE_V2_CPU_AREA_INFO {
   void* EmulatorData[4];            /* 030 */
   ULONG64 EmulatorDataInline;       /* 050 */
 } CHPE_V2_CPU_AREA_INFO, *PCHPE_V2_CPU_AREA_INFO;
-#endif
 
 typedef struct {
   ULONG version;
@@ -340,10 +338,8 @@ typedef struct __TEB {                          /* win32/win64 */
   PVOID* TlsExpansionSlots;          /* f94/1780 */
 #ifdef _WIN64
   union {
-    PVOID DeallocationBStore; /*    /1788 */
-#ifdef ARCHITECTURE_arm64ec
+    PVOID DeallocationBStore;                 /*    /1788 */
     CHPE_V2_CPU_AREA_INFO* ChpeV2CpuAreaInfo; /*    /1788 */
-#endif
   } DUMMYUNIONNAME;
   PVOID BStoreLimit; /*    /1790 */
 #endif
@@ -407,6 +403,23 @@ typedef enum _SECTION_INHERIT {
   ViewUnmap = 2,
 } SECTION_INHERIT;
 
+typedef NTSTATUS(WINAPI* PRTL_THREAD_START_ROUTINE)(void* Parameter);
+
+typedef struct _PS_ATTRIBUTE {
+  ULONG_PTR Attribute;
+  SIZE_T Size;
+  union {
+    ULONG_PTR Value;
+    void* ValuePtr;
+  };
+  PSIZE_T ReturnLength;
+} PS_ATTRIBUTE, *PPS_ATTRIBUTE;
+
+typedef struct _PS_ATTRIBUTE_LIST {
+  SIZE_T TotalLength;
+  PS_ATTRIBUTE Attributes[1];
+} PS_ATTRIBUTE_LIST, *PPS_ATTRIBUTE_LIST;
+
 /* definitions of bits in the Feature set for the x86 processors */
 #define CPU_FEATURE_VME 0x00000005    /* Virtual 86 Mode Extensions */
 #define CPU_FEATURE_TSC 0x00000002    /* Time Stamp Counter available */
@@ -458,21 +471,29 @@ typedef enum _MEMORY_INFORMATION_CLASS {
   MemoryBadInformation,
   MemoryBadInformationAllProcesses,
 #ifdef __WINESRC__
+  // Older Wine behaviour
   MemoryWineUnixFuncs = 1000,
   MemoryWineUnixWow64Funcs,
+
+  // Newer Wine behaviour
+  MemoryWineLoadUnixLib = 1000,
+  MemoryWineLoadUnixLibWow64,
+  MemoryWineLoadUnixLibByName,
+  MemoryWineLoadUnixLibByNameWow64,
+  MemoryWineUnloadUnixLib,
 #endif
   MemoryFexStatsShm = 2000,
 } MEMORY_INFORMATION_CLASS;
 
 #define SystemEmulationBasicInformation (SYSTEM_INFORMATION_CLASS)62
 
+#define MEM_EXECUTE_OPTION_DISABLE 0x01
+#define MEM_EXECUTE_OPTION_ENABLE 0x02
+#define MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION 0x04
+#define MEM_EXECUTE_OPTION_PERMANENT 0x08
+
 #define ProcessFexHardwareTso (PROCESSINFOCLASS)2000
 #define ProcessFexUnalignAtomic (PROCESSINFOCLASS)2001
-
-// These match the prctl flag values
-#define FEX_UNALIGN_ATOMIC_EMULATE (1ULL << 0)
-#define FEX_UNALIGN_ATOMIC_BACKPATCH (1ULL << 1)
-#define FEX_UNALIGN_ATOMIC_STRICT_SPLIT_LOCKS (1ULL << 2)
 
 typedef enum _KEY_VALUE_INFORMATION_CLASS {
   KeyValueBasicInformation,
@@ -505,17 +526,26 @@ NTSTATUS WINAPI LdrDisableThreadCalloutsForDll(HMODULE);
 NTSTATUS WINAPI LdrGetDllFullName(HMODULE, UNICODE_STRING*);
 NTSTATUS WINAPI LdrGetDllHandle(LPCWSTR, ULONG, const UNICODE_STRING*, HMODULE*);
 NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE, const ANSI_STRING*, ULONG, void**);
+IMAGE_BASE_RELOCATION* WINAPI LdrProcessRelocationBlock(ULONG_PTR, ULONG, USHORT*, INT_PTR);
 NTSTATUS WINAPI NtAllocateVirtualMemoryEx(HANDLE, PVOID*, SIZE_T*, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG);
 NTSTATUS WINAPI NtAllocateVirtualMemory(HANDLE, PVOID*, ULONG_PTR, SIZE_T*, ULONG, ULONG);
 NTSTATUS WINAPI NtContinue(PCONTEXT, BOOLEAN);
 NTSTATUS WINAPI NtCreateSection(HANDLE*, ACCESS_MASK, const OBJECT_ATTRIBUTES*, const LARGE_INTEGER*, ULONG, ULONG, HANDLE);
+#define THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH 0x00000002
+#define THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER 0x00000004
+#define THREAD_CREATE_FLAGS_SKIP_LOADER_INIT 0x00000020
+#define THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE 0x00000040
+NTSTATUS WINAPI NtCreateThreadEx(HANDLE*, ACCESS_MASK, OBJECT_ATTRIBUTES*, HANDLE, PRTL_THREAD_START_ROUTINE, void*, ULONG, ULONG_PTR,
+                                 SIZE_T, SIZE_T, PPS_ATTRIBUTE_LIST);
 NTSTATUS WINAPI NtDelayExecution(BOOLEAN, const LARGE_INTEGER*);
 NTSTATUS WINAPI NtDuplicateObject(HANDLE, HANDLE, HANDLE, PHANDLE, ACCESS_MASK, ULONG, ULONG);
 NTSTATUS WINAPI NtFlushInstructionCache(HANDLE, LPCVOID, SIZE_T);
 NTSTATUS WINAPI NtFreeVirtualMemory(HANDLE, PVOID*, SIZE_T*, ULONG);
 NTSTATUS WINAPI NtGetContextThread(HANDLE, CONTEXT*);
 ULONG WINAPI NtGetCurrentProcessorNumber(void);
+NTSTATUS WINAPI NtLockFile(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PLARGE_INTEGER, PLARGE_INTEGER, ULONG, BOOLEAN, BOOLEAN);
 NTSYSAPI NTSTATUS WINAPI NtMapViewOfSection(HANDLE, HANDLE, PVOID*, ULONG_PTR, SIZE_T, const LARGE_INTEGER*, SIZE_T*, SECTION_INHERIT, ULONG, ULONG);
+NTSYSAPI NTSTATUS WINAPI NtUnmapViewOfSection(HANDLE, PVOID);
 NTSTATUS WINAPI NtOpenKeyEx(PHANDLE, ACCESS_MASK, const OBJECT_ATTRIBUTES*, ULONG);
 NTSTATUS WINAPI NtProtectVirtualMemory(HANDLE, PVOID*, SIZE_T*, ULONG, ULONG*);
 NTSTATUS WINAPI NtQueryAttributesFile(const OBJECT_ATTRIBUTES*, FILE_BASIC_INFORMATION*);
@@ -523,10 +553,13 @@ NTSTATUS WINAPI NtQueryDirectoryFile(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO
                                      BOOLEAN, PUNICODE_STRING, BOOLEAN);
 NTSTATUS WINAPI NtQueryValueKey(HANDLE, const UNICODE_STRING*, KEY_VALUE_INFORMATION_CLASS, void*, DWORD, DWORD*);
 NTSTATUS WINAPI NtQueryVirtualMemory(HANDLE, LPCVOID, MEMORY_INFORMATION_CLASS, PVOID, SIZE_T, SIZE_T*);
+NTSTATUS WINAPI NtRaiseException(EXCEPTION_RECORD*, CONTEXT*, BOOL);
 NTSTATUS WINAPI NtReadFile(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG, PLARGE_INTEGER, PULONG);
 NTSTATUS WINAPI NtSetContextThread(HANDLE, const CONTEXT*);
 NTSTATUS WINAPI NtSuspendThread(HANDLE, PULONG);
 NTSTATUS WINAPI NtTerminateProcess(HANDLE, LONG);
+NTSTATUS WINAPI NtTerminateThread(HANDLE, LONG);
+NTSTATUS WINAPI NtUnlockFile(HANDLE, PIO_STATUS_BLOCK, PLARGE_INTEGER, PLARGE_INTEGER, ULONG);
 NTSTATUS WINAPI NtWriteFile(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, const void*, ULONG, PLARGE_INTEGER, PULONG);
 void WINAPI ProcessPendingCrossProcessEmulatorWork();
 void WINAPI RtlAcquirePebLock(void);
@@ -538,6 +571,7 @@ ULONG WINAPI RtlFindClearBitsAndSet(PRTL_BITMAP, ULONG, ULONG);
 ULONG WINAPI RtlGetCurrentDirectory_U(ULONG, LPWSTR);
 PIMAGE_NT_HEADERS WINAPI RtlImageNtHeader(HMODULE);
 PVOID WINAPI RtlImageDirectoryEntryToData(HMODULE, BOOL, WORD, ULONG*);
+PIMAGE_SECTION_HEADER WINAPI RtlImageRvaToSection(const IMAGE_NT_HEADERS*, HMODULE, DWORD);
 void WINAPI RtlInitializeConditionVariable(RTL_CONDITION_VARIABLE*);
 NTSTATUS WINAPI RtlInitializeCriticalSection(RTL_CRITICAL_SECTION*);
 void WINAPI RtlInitializeSRWLock(RTL_SRWLOCK*);

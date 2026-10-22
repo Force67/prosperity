@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "FEXCore/Config/Config.h"
 #include "Interface/Context/Context.h"
 #include "Interface/Core/CPUBackend.h"
 #include "Interface/Core/LookupCache.h"
@@ -10,21 +11,12 @@
 
 #include <cstdint>
 
-#ifndef _WIN32
-#include <linux/prctl.h>
-#include <sys/prctl.h>
-#endif
-
 namespace FEXCore {
 namespace CPU {
-
-  static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 16;
-  // We don't want to move above 128MB atm because that means we will have to encode longer jumps
-  static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 128;
-
   constexpr static uint64_t NamedVectorConstants[FEXCore::IR::NamedVectorConstant::NAMED_VECTOR_CONST_POOL_MAX][2] = {
     {0x0003'0002'0001'0000ULL, 0x0007'0006'0005'0004ULL}, // NAMED_VECTOR_INCREMENTAL_U16_INDEX
     {0x000B'000A'0009'0008ULL, 0x000F'000E'000D'000CULL}, // NAMED_VECTOR_INCREMENTAL_U16_INDEX_UPPER
+    {0x0706'0504'0302'0100ULL, 0x0F0E'0D0C'0B0A'0908ULL}, // NAMED_VECTOR_INCREMENTAL_U8_INDEX
     {0x0000'0000'8000'0000ULL, 0x0000'0000'8000'0000ULL}, // NAMED_VECTOR_PADDSUBPS_INVERT
     {0x0000'0000'8000'0000ULL, 0x0000'0000'8000'0000ULL}, // NAMED_VECTOR_PADDSUBPS_INVERT_UPPER
     {0x8000'0000'0000'0000ULL, 0x0000'0000'0000'0000ULL}, // NAMED_VECTOR_PADDSUBPD_INVERT
@@ -43,6 +35,8 @@ namespace CPU {
     {0x0706'0504'FFFF'FFFFULL, 0x0F0E'0D0C'0B0A'0908ULL}, // NAMED_VECTOR_BLENDPS_1110B
     {0x8040'2010'0804'0201ULL, 0x8040'2010'0804'0201ULL}, // NAMED_VECTOR_MOVMASKB
     {0x8040'2010'0804'0201ULL, 0x8040'2010'0804'0201ULL}, // NAMED_VECTOR_MOVMASKB_UPPER
+    {0x0706'0504'0302'0100ULL, 0x1716'1514'1312'1110ULL}, // NAMED_VECTOR_256_MID_ELEMENT_SWAP
+    {0x0F0E'0D0C'0B0A'0908ULL, 0x1F1E'1D1C'1B1A'1918ULL}, // NAMED_VECTOR_256_MID_ELEMENT_SWAP_UPPER
     {0x8000'0000'0000'0000ULL, 0x0000'0000'0000'3FFFULL}, // NAMED_VECTOR_X87_ONE
     {0xD49A'784B'CD1B'8AFEULL, 0x0000'0000'0000'4000ULL}, // NAMED_VECTOR_X87_LOG2_10
     {0xB8AA'3B29'5C17'F0BCULL, 0x0000'0000'0000'3FFFULL}, // NAMED_VECTOR_X87_LOG2_E
@@ -273,9 +267,9 @@ namespace CPU {
     return TotalLUT;
   }()};
 
-  CPUBackend::CPUBackend(CodeBufferManager& CodeBuffers, FEXCore::Core::InternalThreadState* ThreadState)
+  CPUBackend::CPUBackend(SharedCodeBufferManager& SharedCodeBuffers, FEXCore::Core::InternalThreadState* ThreadState)
     : ThreadState(ThreadState)
-    , CodeBuffers(CodeBuffers) {
+    , SharedCodeBuffers(SharedCodeBuffers) {
 
     auto& Ptrs = ThreadState->CurrentFrame->Pointers;
 
@@ -314,11 +308,11 @@ namespace CPU {
 
   CPUBackend::~CPUBackend() = default;
 
-  auto CPUBackend::GetEmptyCodeBuffer() -> CodeBuffer* {
+  auto CPUBackend::AcquireNewSharedCodeBuffer() -> CodeBuffer* {
     auto PrevCodeBuffer = CurrentCodeBuffer;
 
     // Resize the code buffer and reallocate our code size
-    CurrentCodeBuffer = CodeBuffers.StartLargerCodeBuffer();
+    CurrentCodeBuffer = SharedCodeBuffers.StartLargerCodeBuffer();
 
     RegisterForSignalHandler(std::move(PrevCodeBuffer));
     return CurrentCodeBuffer.get();
@@ -336,7 +330,7 @@ namespace CPU {
   }
 
   fextl::shared_ptr<CodeBuffer> CPUBackend::CheckCodeBufferUpdate() {
-    auto NewCodeBuffer = CodeBuffers.GetLatest();
+    auto NewCodeBuffer = SharedCodeBuffers.GetLatest();
     if (CurrentCodeBuffer != NewCodeBuffer) {
       RegisterForSignalHandler(CurrentCodeBuffer);
       return std::exchange(CurrentCodeBuffer, NewCodeBuffer);
@@ -344,98 +338,17 @@ namespace CPU {
     return nullptr;
   }
 
-  GuestToHostMap& GetLookupCache(const CodeBuffer& Buffer) {
-    return *Buffer.LookupCache;
-  }
-
-  CodeBuffer::CodeBuffer(size_t Size)
-    : Size(Size) {
-    Ptr = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(Size, true));
-    LOGMAN_THROW_A_FMT(!!Ptr, "Couldn't allocate code buffer");
-
-    // Protect the last page of the allocated buffer to trigger SIGSEGV on write access
-    uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Ptr) + Size - 1, FEXCore::Utils::FEX_PAGE_SIZE);
-    if (!FEXCore::Allocator::VirtualProtect(reinterpret_cast<void*>(LastPageAddr), FEXCore::Utils::FEX_PAGE_SIZE,
-                                            FEXCore::Allocator::ProtectOptions::None)) {
-      LogMan::Msg::EFmt("Failed to mprotect last page of code buffer.");
-    }
-
-    FEXCore::Allocator::VirtualName("FEXMemJIT", reinterpret_cast<void*>(Ptr), Size);
-
-    LookupCache = fextl::make_unique<GuestToHostMap>();
-  }
-
-  CodeBuffer::~CodeBuffer() {
-    FEXCore::Allocator::VirtualFree(Ptr, Size);
-  }
-
-  auto CodeBufferManager::AllocateNew(size_t Size) -> fextl::shared_ptr<CodeBuffer> {
-#ifndef _WIN32
-// MDWE (Memory-Deny-Write-Execute) is a new Linux 6.3 feature.
-// It's equivalent to systemd's `MemoryDenyWriteExecute` but implemented entirely in the kernel.
-//
-// MDWE prevents applications from creating RWX memory mappings.
-// This prevents FEX from doing anything JIT related, as FEX uses RWX for JIT memory mappings.
-//
-// A potential workaround to make FEX work with MDWE is to call mprotect every time we need to write or modify code.
-// Alternatively, FEX could use a memory mirror where one half is mapped as RW and the other is RX.
-//
-// Once MDWE is enabled with the prctl, the feature is sealed and it can /NOT/ be turned off.
-//
-// Status of MDWE is queried through prctl using `PR_GET_MDWE`:
-// -1: The kernel doesn't support MDWE
-// 0: MDWE is supported but disabled
-// >0: MDWE is enabled, hence prohibiting RWX mappings
-#ifndef PR_GET_MDWE
-#define PR_GET_MDWE 66
-#endif
-    int MDWE = ::prctl(PR_GET_MDWE, 0, 0, 0, 0);
-    if (MDWE != -1 && MDWE != 0) {
-      LogMan::Msg::EFmt("MDWE was set to 0x{:x} which means FEX can't allocate executable memory", MDWE);
-    }
-#endif
-
-    auto Buffer = fextl::make_shared<CodeBuffer>(Size);
-
-    Latest = Buffer;
-    LatestOffset = 0;
-
-    OnCodeBufferAllocated(Buffer);
-
-    return Buffer;
-  }
-
-  fextl::shared_ptr<CodeBuffer> CodeBufferManager::GetLatest() {
-    if (!Latest) {
-      AllocateNew(INITIAL_CODE_SIZE);
-    }
-    return Latest;
-  }
-
-  fextl::shared_ptr<CodeBuffer> CodeBufferManager::StartLargerCodeBuffer() {
-    if (!Latest) {
-      // Allocate initial CodeBuffer and return it
-      return GetLatest();
-    }
-
-    auto NewCodeBufferSize = GetLatest()->Size;
-    NewCodeBufferSize = std::min<size_t>(NewCodeBufferSize * 2, MAX_CODE_SIZE);
-    return AllocateNew(NewCodeBufferSize);
-  }
-
-
   bool CPUBackend::IsAddressInCodeBuffer(uintptr_t Address) const {
-    auto CheckCodeBuffer = [](CodeBuffer& Buffer, uintptr_t Address) {
-      // The last page of the code buffer is protected, so we need to exclude it from the valid range
-      // when checking if the address is in the code buffer.
-      uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Buffer.Ptr) + Buffer.Size - 1, FEXCore::Utils::FEX_PAGE_SIZE);
-      return (Address >= reinterpret_cast<uintptr_t>(Buffer.Ptr) && Address < LastPageAddr);
+    const auto CheckCodeBuffer = [](const CodeBuffer& Buffer, uintptr_t Address) {
+      const auto BufferPtr = reinterpret_cast<uintptr_t>(Buffer.GetBufferBase());
+      const uintptr_t LastPageAddr = BufferPtr + Buffer.UsableSize();
+      return (Address >= BufferPtr && Address < LastPageAddr);
     };
 
     if (CheckCodeBuffer(*CurrentCodeBuffer, Address)) {
       return true;
     }
-    for (auto& Buffer : SignalHandlerCodeBuffers) {
+    for (const auto& Buffer : SignalHandlerCodeBuffers) {
       if (CheckCodeBuffer(*Buffer, Address)) {
         return true;
       }

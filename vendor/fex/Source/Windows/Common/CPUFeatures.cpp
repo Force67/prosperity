@@ -31,6 +31,14 @@ uint64_t ReadRegU64(HKEY Key, const char* Name) {
 } // namespace
 
 namespace FEX::Windows {
+#define GetSysReg(name, reg)                         \
+  static uint64_t Get_##name() {                     \
+    uint64_t Result {};                              \
+    __asm("mrs %[Res], " #reg : [Res] "=r"(Result)); \
+    return Result;                                   \
+  }
+GetSysReg(DCZID_EL0, DCZID_EL0);
+
 class CPUFeaturesFromRegistry final : public FEX::CPUFeatures {
 public:
   explicit CPUFeaturesFromRegistry(HKEY Key) {
@@ -43,11 +51,12 @@ public:
     ZFR0.SetReg(ReadRegU64(Key, "CP 4024"));
     MMFR1.SetReg(ReadRegU64(Key, "CP 4039"));
     ISAR2.SetReg(ReadRegU64(Key, "CP 4032"));
+    DCZID.SetReg(Get_DCZID_EL0());
     FillFeatureFlags();
   }
 };
 
-FEXCore::HostFeatures CPUFeatures::FetchHostFeatures(bool IsWine) {
+FEXCore::HostFeatures CPUFeatures::FetchHostFeatures(bool IsWine, FEXCore::HostFeatures::HostTypeEnum HostType, uint32_t ProcessPID) {
   HKEY Key = OpenProcessorKey(0);
   if (!Key) {
     ERROR_AND_DIE_FMT("Couldn't detect CPU features");
@@ -73,6 +82,14 @@ FEXCore::HostFeatures CPUFeatures::FetchHostFeatures(bool IsWine) {
   HostFeatures.SupportsSVE256 = false;
 
   HostFeatures.SupportsCPUIndexInTPIDRRO = !IsWine;
+
+  HostFeatures.HostType = HostType;
+  HostFeatures.ProcessPID = ProcessPID;
+
+  if (HostType == FEXCore::HostFeatures::HostTypeEnum::Wow64) {
+    // AVX is unsupported for WOW64
+    HostFeatures.SupportsAVX = false;
+  }
   return HostFeatures;
 }
 

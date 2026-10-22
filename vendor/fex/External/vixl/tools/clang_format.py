@@ -88,6 +88,7 @@ def is_supported(tool):
   _, major = m.groups()
 
   if int(major) in CLANG_TOOL_SUPPORTED_VERSIONS:
+    print("Using '" + version + "'");
     return True
 
   return False

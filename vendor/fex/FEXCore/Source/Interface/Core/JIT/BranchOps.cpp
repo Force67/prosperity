@@ -55,12 +55,40 @@ DEF_OP(ExitFunction) {
 
   uint64_t NewRIP;
 
+  if constexpr (Context::BLOCK_DEBUGGING) {
+    // Skip block linking when BLOCK_DEBUGGING as it adds overhead and is unncessary.
+    // This is a debug only feature and doesn't need caching help.
+    bool IsInlineRIP = IsInlineConstant(Op->NewRIP, &NewRIP) || IsInlineEntrypointOffset(Op->NewRIP, &NewRIP);
+    ARMEmitter::ForwardLabel l_ExitLink;
+    if (IsInlineRIP) {
+      ldr(TMP1, &l_ExitLink);
+      str(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
+    } else {
+      auto RipReg = GetReg(Op->NewRIP);
+      str(RipReg.X(), STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
+    }
+    ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.DispatcherLoopTop));
+    br(TMP2);
+
+    if (IsInlineRIP) {
+      BindOrRestart(&l_ExitLink);
+      dc64(NewRIP);
+    }
+
+    return;
+  }
+
   if (IsInlineConstant(Op->NewRIP, &NewRIP) || IsInlineEntrypointOffset(Op->NewRIP, &NewRIP)) {
 #ifdef ARCHITECTURE_arm64ec
     if (NewRIP < EC_CODE_BITMAP_MAX_ADDRESS && RtlIsEcCode(NewRIP)) {
       str(REG_CALLRET_SP, STATE_PTR(CpuStateFrame, State.callret_sp));
       add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::rsp, StaticRegisters[X86State::REG_RSP], 0);
-      InsertGuestRIPMove(EC_CALL_CHECKER_PC_REG, NewRIP);
+      if (Op->PatchSiteAddress) {
+        InsertGuestPatchableMove(RelocationTypes::RELOC_GUEST_PATCHABLE_RIP_MOVE, EC_CALL_CHECKER_PC_REG, NewRIP, Op->PatchSiteAddress,
+                                 Op->PatchSiteSize);
+      } else {
+        InsertGuestRIPMove(EC_CALL_CHECKER_PC_REG, NewRIP);
+      }
       ldr(TMP2, STATE_PTR(CpuStateFrame, Pointers.ExitFunctionEC));
       br(TMP2);
     } else {
@@ -150,6 +178,7 @@ DEF_OP(ExitFunction) {
         ARMEmitter::ForwardLabel TFUnset;
         ldrb(TMP1, STATE_PTR(CpuStateFrame, State.flags[X86State::RFLAG_TF_RAW_LOC]));
         (void)cbz(ARMEmitter::Size::i32Bit, TMP1, &TFUnset);
+        // todo do we need to account for cache patching here?
         InsertGuestRIPMove(TMP1, NewRIP);
         str(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
         ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.DispatcherLoopTop));
@@ -157,7 +186,7 @@ DEF_OP(ExitFunction) {
         (void)Bind(&TFUnset);
       }
 
-      EmitLinkedBranch(NewRIP, Op->Hint == IR::BranchHint::Call);
+      EmitLinkedBranch(NewRIP, Op->Hint == IR::BranchHint::Call, Op->PatchSiteAddress, Op->PatchSiteSize);
       (void)Bind(&l_CallReturn);
 #ifdef ARCHITECTURE_arm64ec
     }
@@ -254,66 +283,11 @@ DEF_OP(CondJump) {
 }
 
 DEF_OP(Syscall) {
-  auto Op = IROp->C<IR::IROp_Syscall>();
-  // Arguments are passed as follows:
-  // X0: SyscallHandler
-  // X1: ThreadState
-  // X2: Pointer to SyscallArguments
+  SpillStaticRegs(TMP1);
 
-  PushDynamicRegs(TMP1);
-
-  uint32_t GPRSpillMask = ~0U;
-  uint32_t FPRSpillMask = ~0U;
-
-  SpillStaticRegs(TMP1, true, GPRSpillMask, FPRSpillMask);
-
-  // Now that we are spilled, store in the state that we are in a syscall
-  // Still without overwriting registers that matter
-  // 16bit LoadConstant to be a single instruction
-  // This gives the signal handler a value to check to see if we are in a syscall at all
-  LoadConstant(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, GPRSpillMask & 0xFFFF);
-  str(ARMEmitter::XReg::x0, STATE, offsetof(FEXCore::Core::CpuStateFrame, InSyscallInfo));
-
-  uint64_t SPOffset = AlignUp(FEXCore::HLE::SyscallArguments::MAX_ARGS * 8, 16);
-  sub(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::rsp, ARMEmitter::Reg::rsp, SPOffset);
-  for (uint32_t i = 0; i < FEXCore::HLE::SyscallArguments::MAX_ARGS; ++i) {
-    if (Op->Header.Args[i].IsInvalid()) {
-      continue;
-    }
-    str(GetReg(Op->Header.Args[i]).X(), ARMEmitter::Reg::rsp, i * 8);
-  }
-
-  ldr(ARMEmitter::XReg::x0, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.SyscallHandlerObj));
-  ldr(ARMEmitter::XReg::x3, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.SyscallHandlerFunc));
-  mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r1, STATE.R());
-
-  // SP supporting move
-  add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r2, ARMEmitter::Reg::rsp, 0);
-  if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
-    GenerateIndirectRuntimeCall<uint64_t, void*, void*, void*>(ARMEmitter::Reg::r3);
-  } else {
-    blr(ARMEmitter::Reg::r3);
-  }
-
-  add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::rsp, ARMEmitter::Reg::rsp, SPOffset);
-
-  // Result is now in x0
-  // Fix the stack and any values that were stepped on
-  FillStaticRegs(true, GPRSpillMask, FPRSpillMask, ARMEmitter::Reg::r1, ARMEmitter::Reg::r2);
-
-  // Now the registers we've spilled are back in their original host registers
-  // We can safely claim we are no longer in a syscall
-  str(ARMEmitter::XReg::zr, STATE, offsetof(FEXCore::Core::CpuStateFrame, InSyscallInfo));
-
-  PopDynamicRegs();
-
-  const auto OSABI = CTX->SyscallHandler->GetOSABI();
-
-  if (OSABI != FEXCore::HLE::SyscallOSABI::OS_GENERIC) {
-    // Move result to its destination register.
-    // Only if `NORETURNEDRESULT` wasn't set, otherwise we might overwrite the CPUState refilled with `FillStaticRegs`
-    mov(ARMEmitter::Size::i64Bit, GetReg(Node), ARMEmitter::Reg::r0);
-  }
+  // Jump to the syscall dispatch handler. We won't return after this.
+  ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.ThreadDispatchSyscallHandler));
+  br(TMP1);
 }
 
 DEF_OP(Thunk) {
@@ -322,7 +296,10 @@ DEF_OP(Thunk) {
   // X0: CTX
   // X1: Args (from guest stack)
 
-  SpillStaticRegs(TMP1); // spill to ctx before ra64 spill
+  // spill to ctx before ra64 spill
+  SpillStaticRegs(TMP1, {
+                          .NZCV = false,
+                        });
 
   PushDynamicRegs(TMP1);
 
@@ -337,79 +314,82 @@ DEF_OP(Thunk) {
 
   PopDynamicRegs();
 
-  FillStaticRegs(); // load from ctx after ra64 refill
+  // load from ctx after ra64 refill
+  FillStaticRegs({
+    .NZCV = false,
+  });
 }
 
 DEF_OP(ValidateCode) {
   auto Op = IROp->C<IR::IROp_ValidateCode>();
-  auto OldCode = Op->CodeOriginal.data();
-  auto Base = GetReg(Op->Header.Args[0]).X();
+  auto Base = GetReg(Op->Address).X();
   int len = Op->CodeLength;
-  int Offset = 0;
-  ARMEmitter::ForwardLabel Fail;
 
   const auto Dst = GetReg(Node);
+  const auto CRC32Reg = GetReg(Op->crc);
 
-  auto EmitCheck = [&](size_t Size, auto&& LoadData) {
-    while (len >= Size) {
-      LoadData();
-      sub(ARMEmitter::Size::i64Bit, TMP1, TMP1, TMP2);
-      cbnz_OrRestart(ARMEmitter::Size::i64Bit, TMP1, &Fail);
-      len -= Size;
-      Offset += Size;
-    }
-  };
+  // Changes to TMP1
+  auto WorkingReg = ARMEmitter::XReg::zr;
+  auto BaseReg = TMP2;
+  auto TmpDataReg = TMP3;
+  mov(ARMEmitter::Size::i64Bit, BaseReg, Base);
 
-  EmitCheck(8, [&]() {
-    ldr(TMP1, Base, Offset);
-    LoadConstant(ARMEmitter::Size::i64Bit, TMP2, *(const uint64_t*)(OldCode + Offset));
-  });
+  while (len >= 8) {
+    ldr<ARMEmitter::IndexType::POST>(TmpDataReg, BaseReg, 8);
+    crc32x(TMP1, WorkingReg, TmpDataReg);
+    len -= 8;
+    WorkingReg = TMP1;
+  }
 
-  EmitCheck(4, [&]() {
-    ldr(TMP1.W(), Base, Offset);
-    LoadConstant(ARMEmitter::Size::i32Bit, TMP2, *(const uint32_t*)(OldCode + Offset));
-  });
+  while (len >= 4) {
+    ldr<ARMEmitter::IndexType::POST>(TmpDataReg.W(), BaseReg, 4);
+    crc32w(TMP1.W(), WorkingReg.W(), TmpDataReg.W());
+    len -= 4;
+    WorkingReg = TMP1;
+  }
 
-  EmitCheck(2, [&]() {
-    ldrh(TMP1.W(), Base, Offset);
-    LoadConstant(ARMEmitter::Size::i32Bit, TMP2, *(const uint16_t*)(OldCode + Offset));
-  });
+  while (len >= 2) {
+    ldrh<ARMEmitter::IndexType::POST>(TmpDataReg.W(), BaseReg, 2);
+    crc32h(TMP1.W(), WorkingReg.W(), TmpDataReg.W());
+    len -= 2;
+    WorkingReg = TMP1;
+  }
 
-  EmitCheck(1, [&]() {
-    ldrb(TMP1.W(), Base, Offset);
-    LoadConstant(ARMEmitter::Size::i32Bit, TMP2, *(const uint8_t*)(OldCode + Offset));
-  });
+  while (len >= 1) {
+    ldrb<ARMEmitter::IndexType::POST>(TmpDataReg.W(), BaseReg, 1);
+    crc32b(TMP1.W(), WorkingReg.W(), TmpDataReg.W());
+    len -= 1;
+    WorkingReg = TMP1;
+  }
+
+  sub(ARMEmitter::Size::i32Bit, Dst, TMP1, CRC32Reg);
 
   ARMEmitter::ForwardLabel End;
-  LoadConstant(ARMEmitter::Size::i32Bit, Dst, 0);
-  b_OrRestart(&End);
-  BindOrRestart(&Fail);
+  cbz_OrRestart(ARMEmitter::Size::i32Bit, Dst, &End);
+
   LoadConstant(ARMEmitter::Size::i32Bit, Dst, 1);
   BindOrRestart(&End);
 }
 
 DEF_OP(ThreadRemoveCodeEntry) {
-  PushDynamicRegs(TMP4);
-  SpillStaticRegs(TMP4);
+  auto Op = IROp->C<IR::IROp_ThreadRemoveCodeEntry>();
+
+  SpillStaticRegs(TMP1);
+
+  // Store the new RIP to go to.
+  str(GetReg(Op->NewRIP).X(), STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
+
+  // Move the entry to ABI before saving state.
+  mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r1, GetReg(Op->EntryToInvalidate));
 
   // Arguments are passed as follows:
   // X0: Thread
-  // X1: RIP
+  // X1: RIPToInvalidate
   mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, STATE.R());
 
-  // TODO: Relocations don't seem to be wired up to this...?
-  LoadConstant(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r1, Entry, CPU::Arm64Emitter::PadType::AUTOPAD);
-
-  ldr(ARMEmitter::XReg::x2, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.ThreadRemoveCodeEntryFromJIT));
-  if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
-    GenerateIndirectRuntimeCall<void, void*, void*>(ARMEmitter::Reg::r2);
-  } else {
-    blr(ARMEmitter::Reg::r2);
-  }
-  FillStaticRegs();
-
-  // Fix the stack and any values that were stepped on
-  PopDynamicRegs();
+  // Jump to the invalidate dispatch handler. We won't return after this.
+  ldr(ARMEmitter::XReg::x2, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.ThreadDispatchRemoveCodeEntry));
+  br(ARMEmitter::XReg::x2);
 }
 
 DEF_OP(CPUID) {

@@ -19,9 +19,6 @@
 namespace FEXCore::Context {
 class ContextImpl;
 }
-namespace FEXCore::HLE {
-enum class SyscallOSABI;
-}
 
 namespace FEXCore::Frontend {
 class Decoder final {
@@ -32,6 +29,15 @@ public:
     NOEXEC_INST,
     PARTIAL_DECODE_INST,
     BAD_RELOCATION,
+    UNIMPLEMENTED_INST,
+  };
+
+  enum class DataMaskType : uint8_t { NONE, MOV, BRANCH, DISP, NOP };
+
+  struct DataMask final {
+    uint64_t FieldAddress;
+    DataMaskType Type;
+    uint8_t ValueSize;
   };
 
   // New Frontend decoding
@@ -43,6 +49,7 @@ public:
     DecodedBlockStatus BlockStatus;
     bool IsEntryPoint {};
     bool ForceFullSMCDetection {};
+    fextl::vector<DataMask> DataMasks;
   };
 
   struct DecodedBlockInformation final {
@@ -54,7 +61,10 @@ public:
   };
 
   Decoder(FEXCore::Core::InternalThreadState* Thread);
-  void DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thread, const uint8_t* InstStream, uint64_t PC, uint64_t MaxInst);
+  bool CheckIfCacheable(FEXCore::Core::InternalThreadState&, const uint8_t* InstStream, uint64_t PC, uint64_t MaxInst);
+
+  void SetupDecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t PC, uint64_t MaxInst);
+  void DecodeLoop(const uint8_t* InstStream, uint64_t GuestPause = 0);
 
   const DecodedBlockInformation* GetDecodedBlockInfo() const {
     return &BlockInfo;
@@ -69,6 +79,10 @@ public:
 
   void DelayedDisownBuffer() {
     PoolObject.DelayedDisownBuffer();
+  }
+
+  void ValidateDisownedOrFree() const {
+    PoolObject.ValidateDisownedOrFree();
   }
 
   void ResetExecutableRangeCache() {
@@ -86,11 +100,10 @@ private:
 
   FEXCore::Core::InternalThreadState* Thread;
   FEXCore::Context::ContextImpl* CTX;
-  const FEXCore::HLE::SyscallOSABI OSABI {};
 
   FEX_CONFIG_OPT(EnableCodeCacheValidation, ENABLECODECACHEVALIDATION);
 
-  bool DecodeInstructionImpl(uint64_t PC);
+  DecodedBlockStatus DecodeInstructionImpl(uint64_t PC);
   DecodedBlockStatus DecodeInstruction(uint64_t PC);
 
   void BranchTargetInMultiblockRange();
@@ -98,6 +111,9 @@ private:
   bool InstCanContinue() const;
 
   void AddBranchTarget(uint64_t Target);
+
+  void DetectDataMasks(uint64_t OpAddress, DecodedBlocks& Block);
+  void PruneInlinedBranchDataMasks();
 
   bool CheckRangeExecutable(uint64_t Address, uint64_t Size);
 
@@ -109,8 +125,8 @@ private:
     InstructionSize += Size;
   }
 
-  bool NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op, DecodedHeader Options = {});
-  bool NormalOpHeader(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op);
+  DecodedBlockStatus NormalOp(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op, DecodedHeader Options = {});
+  DecodedBlockStatus NormalOpHeader(const FEXCore::X86Tables::X86InstInfo* Info, uint16_t Op);
 
   void DecodeREXIfValid(int8_t ExpectedOffset = -1);
 
@@ -118,6 +134,19 @@ private:
   FEXCore::X86Tables::DecodedInst* DecodedBuffer {};
   Utils::PoolBufferWithTimedRetirement<FEXCore::X86Tables::DecodedInst*, 5000, 500> PoolObject;
   size_t DecodedSize {};
+  uint64_t TotalInstructions {};
+  uint64_t CurrentCodePage {};
+  bool EntryBlock {};
+  bool FinalInstruction {};
+  uint64_t MaxInst {};
+  bool Paused {};
+  int64_t BlockResume = -1;
+  uint64_t PCOffset {};
+  uint64_t BlockStartOffset {};
+  bool EraseBlock {};
+
+  uint8_t LastFieldReadOffset;
+  uint8_t LastFieldReadSize;
 
   uint64_t ExecutableRangeBase {};
   uint64_t ExecutableRangeEnd {};
@@ -125,13 +154,34 @@ private:
   bool HitNonExecutableRange {};
   bool HitBadRelocation {};
 
-  const uint8_t* InstStream {};
+  struct DecodeStream {
+    // Original instruction stream RIP location.
+    const uint8_t* InstStream;
+
+    // Adjusted location for FEX actually decodes from.
+    const uint8_t* AdjustedInstStream;
+
+    DecodeStream& operator-=(size_t offset) noexcept {
+      InstStream -= offset;
+      AdjustedInstStream -= offset;
+      return *this;
+    }
+
+    DecodeStream& operator+=(size_t offset) noexcept {
+      InstStream += offset;
+      AdjustedInstStream += offset;
+      return *this;
+    }
+  };
+
+  DecodeStream InstStream;
   IR::OpSize GetGPROpSize() const {
     return BlockInfo.Is64BitMode ? IR::OpSize::i64Bit : IR::OpSize::i32Bit;
   }
 
   static constexpr size_t MAX_INST_SIZE = 15;
   uint8_t InstructionSize {};
+  // Contains the full decoded instruction, unless it is a `Thunk` instruction.
   std::array<uint8_t, MAX_INST_SIZE> Instruction;
   uint8_t LastEscapePrefix {};
   FEXCore::X86Tables::DecodedInst* DecodeInst;
@@ -167,6 +217,6 @@ private:
   const std::array<X86Tables::X86InstInfo, X86Tables::MAX_VEX_TABLE_SIZE>* VEXTable {};
   const std::array<X86Tables::X86InstInfo, X86Tables::MAX_VEX_GROUP_TABLE_SIZE>* VEXTableGroup {};
 
-  const uint8_t* AdjustAddrForSpecialRegion(const uint8_t* _InstStream, uint64_t EntryPoint, uint64_t RIP);
+  const DecodeStream AdjustAddrForSpecialRegion(const uint8_t* _InstStream, uint64_t EntryPoint, uint64_t RIP);
 };
 } // namespace FEXCore::Frontend

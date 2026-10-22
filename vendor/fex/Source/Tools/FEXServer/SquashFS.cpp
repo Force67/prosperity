@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+#include "SquashFS.h"
+
 #include "Common/FEXServerClient.h"
 #include "Common/FileFormatCheck.h"
 
@@ -9,7 +11,7 @@
 
 #include <fcntl.h>
 #include <filesystem>
-#include <sys/poll.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <thread>
@@ -17,17 +19,17 @@
 namespace SquashFS {
 
 constexpr int USER_PERMS = S_IRWXU | S_IRWXG | S_IRWXO;
-int ServerRootFSLockFD {-1};
-int FuseMountPID {};
-fextl::string MountFolder {};
+static int ServerRootFSLockFD {-1};
+static int FuseMountPID {};
+static fextl::string MountFolder {};
 
-void ShutdownImagePID() {
+static void ShutdownImagePID() {
   if (FuseMountPID) {
     FHU::Syscalls::tgkill(FuseMountPID, FuseMountPID, SIGINT);
   }
 }
 
-bool InitializeSquashFSPipe() {
+static bool InitializeSquashFSPipe() {
   auto RootFSLockFile = FEXServerClient::GetServerRootFSLockFile();
 
   int Ret = open(RootFSLockFile.c_str(), O_CREAT | O_RDWR | O_TRUNC | O_EXCL | O_CLOEXEC, USER_PERMS);
@@ -38,7 +40,7 @@ bool InitializeSquashFSPipe() {
     ServerRootFSLockFD = open(RootFSLockFile.c_str(), O_RDWR | O_CLOEXEC, USER_PERMS);
     if (ServerRootFSLockFD != -1) {
       // Now that we have opened the file, try to get a write lock.
-      flock lk {
+      struct flock lk {
         .l_type = F_WRLCK,
         .l_whence = SEEK_SET,
         .l_start = 0,
@@ -65,7 +67,7 @@ bool InitializeSquashFSPipe() {
     return false;
   } else {
     // FIFO file was created. Try to get a write lock
-    flock lk {
+    struct flock lk {
       .l_type = F_WRLCK,
       .l_whence = SEEK_SET,
       .l_start = 0,
@@ -84,8 +86,8 @@ bool InitializeSquashFSPipe() {
   return true;
 }
 
-bool DowngradeRootFSPipeToReadLock() {
-  flock lk {
+static bool DowngradeRootFSPipeToReadLock() {
+  struct flock lk {
     .l_type = F_RDLCK,
     .l_whence = SEEK_SET,
     .l_start = 0,
@@ -104,7 +106,7 @@ bool DowngradeRootFSPipeToReadLock() {
   return true;
 }
 
-bool MountRootFSImagePath(const fextl::string& SquashFS, bool EroFS) {
+static bool MountRootFSImagePath(const fextl::string& SquashFS, bool EroFS) {
   pid_t ParentTID = ::getpid();
   MountFolder = fmt::format("{}/.FEXMount{}-XXXXXX", FEXServerClient::GetServerMountFolder(), ParentTID);
   char* MountFolderStr = MountFolder.data();
@@ -202,16 +204,20 @@ void UnmountRootFS() {
 
   if (pid == 0) {
     const char* argv[5];
-    argv[0] = "fusermount";
+    argv[0] = "fusermount3";
     argv[1] = "-u";
     argv[2] = "-q";
     argv[3] = MountFolder.c_str();
     argv[4] = nullptr;
 
     if (execvp(argv[0], (char* const*)argv) == -1) {
-      fprintf(stderr, "fusermount failed to execute. You may have an mount living at '%s' to clean up now\n", MountFolder.c_str());
-      fprintf(stderr, "Try `%s %s %s %s`\n", argv[0], argv[1], argv[2], argv[3]);
-      exit(1);
+      // Try again with `fusermount`
+      argv[0] = "fusermount";
+      if (execvp(argv[0], (char* const*)argv) == -1) {
+        fprintf(stderr, "fusermount{3,} failed to execute. You may have an mount living at '%s' to clean up now\n", MountFolder.c_str());
+        fprintf(stderr, "Try `%s %s %s %s`\n", argv[0], argv[1], argv[2], argv[3]);
+        exit(1);
+      }
     }
   } else {
     // Wait for fusermount to leave

@@ -2455,8 +2455,8 @@ LogicVRegister Simulator::rev64(VectorFormat vform,
 LogicVRegister Simulator::addlp(VectorFormat vform,
                                 LogicVRegister dst,
                                 const LogicVRegister& src,
-                                bool is_signed,
-                                bool do_accumulate) {
+                                const LogicVRegister& acc,
+                                bool is_signed) {
   VectorFormat vformsrc = VectorFormatHalfWidthDoubleLanes(vform);
   VIXL_ASSERT(LaneSizeInBitsFromFormat(vformsrc) <= kSRegSize);
 
@@ -2465,17 +2465,16 @@ LogicVRegister Simulator::addlp(VectorFormat vform,
   for (int i = 0; i < lane_count; i++) {
     if (is_signed) {
       result[i] = static_cast<uint64_t>(src.Int(vformsrc, 2 * i) +
-                                        src.Int(vformsrc, 2 * i + 1));
+                                        src.Int(vformsrc, 2 * i + 1) +
+                                        acc.Int(vform, i));
     } else {
-      result[i] = src.Uint(vformsrc, 2 * i) + src.Uint(vformsrc, 2 * i + 1);
+      result[i] = src.Uint(vformsrc, 2 * i) + src.Uint(vformsrc, 2 * i + 1) +
+                  acc.Uint(vform, i);
     }
   }
 
   dst.ClearForWrite(vform);
   for (int i = 0; i < lane_count; ++i) {
-    if (do_accumulate) {
-      result[i] += dst.Uint(vform, i);
-    }
     dst.SetUint(vform, i, result[i]);
   }
 
@@ -2486,28 +2485,36 @@ LogicVRegister Simulator::addlp(VectorFormat vform,
 LogicVRegister Simulator::saddlp(VectorFormat vform,
                                  LogicVRegister dst,
                                  const LogicVRegister& src) {
-  return addlp(vform, dst, src, true, false);
+  bool is_signed = true;
+  SimVRegister zero;
+  return addlp(vform, dst, src, zero, is_signed);
 }
 
 
 LogicVRegister Simulator::uaddlp(VectorFormat vform,
                                  LogicVRegister dst,
                                  const LogicVRegister& src) {
-  return addlp(vform, dst, src, false, false);
+  bool is_signed = false;
+  SimVRegister zero;
+  return addlp(vform, dst, src, zero, is_signed);
 }
 
 
 LogicVRegister Simulator::sadalp(VectorFormat vform,
                                  LogicVRegister dst,
-                                 const LogicVRegister& src) {
-  return addlp(vform, dst, src, true, true);
+                                 const LogicVRegister& src,
+                                 const LogicVRegister& acc) {
+  bool is_signed = true;
+  return addlp(vform, dst, src, acc, is_signed);
 }
 
 
 LogicVRegister Simulator::uadalp(VectorFormat vform,
                                  LogicVRegister dst,
-                                 const LogicVRegister& src) {
-  return addlp(vform, dst, src, false, true);
+                                 const LogicVRegister& src,
+                                 const LogicVRegister& acc) {
+  bool is_signed = false;
+  return addlp(vform, dst, src, acc, is_signed);
 }
 
 LogicVRegister Simulator::ror(VectorFormat vform,
@@ -2757,7 +2764,6 @@ LogicVRegister Simulator::cadd(VectorFormat vform,
   SimVRegister src1_r, src1_i;
   SimVRegister src2_r, src2_i;
   SimVRegister zero;
-  zero.Clear();
   uzp1(vform, src1_r, src1, zero);
   uzp2(vform, src1_i, src1, zero);
   uzp1(vform, src2_r, src2, zero);
@@ -2796,7 +2802,6 @@ LogicVRegister Simulator::cmla(VectorFormat vform,
   SimVRegister src2_a, src2_b;
   SimVRegister srca_i, srca_r;
   SimVRegister zero, temp;
-  zero.Clear();
 
   if ((rot == 0) || (rot == 180)) {
     uzp1(vform, src1_a, src1, zero);
@@ -3079,7 +3084,6 @@ LogicVRegister Simulator::mov_zeroing(VectorFormat vform,
                                       const SimPRegister& pg,
                                       const LogicVRegister& src) {
   SimVRegister zero;
-  dup_immediate(vform, zero, 0);
   return sel(vform, dst, pg, src, zero);
 }
 
@@ -4108,7 +4112,6 @@ LogicVRegister Simulator::sqrdcmlah(VectorFormat vform,
   SimVRegister src2_a, src2_b;
   SimVRegister srca_i, srca_r;
   SimVRegister zero, temp;
-  zero.Clear();
 
   if ((rot == 0) || (rot == 180)) {
     uzp1(vform, src1_a, src1, zero);
@@ -5209,18 +5212,14 @@ LogicVRegister Simulator::fcmp_zero(VectorFormat vform,
                                     LogicVRegister dst,
                                     const LogicVRegister& src,
                                     Condition cond) {
-  SimVRegister temp;
+  SimVRegister temp, zero;
   if (LaneSizeInBitsFromFormat(vform) == kHRegSize) {
-    LogicVRegister zero_reg =
-        dup_immediate(vform, temp, Float16ToRawbits(SimFloat16(0.0)));
-    fcmp<SimFloat16>(vform, dst, src, zero_reg, cond);
+    fcmp<SimFloat16>(vform, dst, src, zero, cond);
   } else if (LaneSizeInBitsFromFormat(vform) == kSRegSize) {
-    LogicVRegister zero_reg = dup_immediate(vform, temp, FloatToRawbits(0.0));
-    fcmp<float>(vform, dst, src, zero_reg, cond);
+    fcmp<float>(vform, dst, src, zero, cond);
   } else {
     VIXL_ASSERT(LaneSizeInBitsFromFormat(vform) == kDRegSize);
-    LogicVRegister zero_reg = dup_immediate(vform, temp, DoubleToRawbits(0.0));
-    fcmp<double>(vform, dst, src, zero_reg, cond);
+    fcmp<double>(vform, dst, src, zero, cond);
   }
   return dst;
 }
@@ -6118,6 +6117,42 @@ LogicVRegister Simulator::fcvtxn2(VectorFormat vform,
   return dst;
 }
 
+LogicVRegister Simulator::bfcvtn(VectorFormat vform,
+                                 LogicVRegister dst,
+                                 const LogicVRegister& src) {
+  SimVRegister tmp;
+  LogicVRegister srctmp = mov(kFormatVnD, tmp, src);
+  int input_lane_count = LaneCountFromFormat(vform);
+  if (IsSVEFormat(vform)) {
+    input_lane_count /= 2;
+  }
+
+  dst.ClearForWrite(vform);
+  VIXL_ASSERT(LaneSizeInBitsFromFormat(vform) == kHRegSize);
+
+  for (int i = 0; i < input_lane_count; i++) {
+    dst.SetFloat(i,
+                 BFloat16ToRawbits(FPToBFloat16(srctmp.Float<float>(i),
+                                                FPTieEven,
+                                                ReadDN())));
+  }
+  return dst;
+}
+
+LogicVRegister Simulator::bfcvtn2(VectorFormat vform,
+                                  LogicVRegister dst,
+                                  const LogicVRegister& src) {
+  VIXL_ASSERT(LaneSizeInBitsFromFormat(vform) == kHRegSize);
+  dst.ClearForWrite(vform);
+  int lane_count = LaneCountFromFormat(vform) / 2;
+  for (int i = lane_count - 1; i >= 0; i--) {
+    dst.SetFloat(i + lane_count,
+                 BFloat16ToRawbits(
+                     FPToBFloat16(src.Float<float>(i), FPTieEven, ReadDN())));
+  }
+  return dst;
+}
+
 
 // Based on reference C function recip_sqrt_estimate from ARM ARM.
 double Simulator::recip_sqrt_estimate(double a) {
@@ -6639,7 +6674,6 @@ LogicVRegister Simulator::FTMaddHelper(VectorFormat vform,
                                        uint64_t coeff_pos,
                                        uint64_t coeff_neg) {
   SimVRegister zero;
-  dup_immediate(kFormatVnB, zero, 0);
 
   SimVRegister cf;
   SimVRegister cfn;
@@ -7750,7 +7784,6 @@ LogicVRegister Simulator::pack_odd_elements(VectorFormat vform,
                                             LogicVRegister dst,
                                             const LogicVRegister& src) {
   SimVRegister zero;
-  zero.Clear();
   return uzp2(vform, dst, src, zero);
 }
 
@@ -7758,7 +7791,6 @@ LogicVRegister Simulator::pack_even_elements(VectorFormat vform,
                                              LogicVRegister dst,
                                              const LogicVRegister& src) {
   SimVRegister zero;
-  zero.Clear();
   return uzp1(vform, dst, src, zero);
 }
 
@@ -7853,16 +7885,26 @@ LogicVRegister Simulator::matmul(VectorFormat vform_dst,
 //
 // Are stored in the input vector registers as:
 //
-//           3   2   1   0
-//  src1 = [ d | c | b | a ]
-//  src2 = [ D | B | C | A ]
+//             3   2   1   0
+//    src1 = [ d | c | b | a ]
+//    src2 = [ D | B | C | A ]  nb. transposition
 //
+// Giving:
+//             3   2   1   0
+//  result = [ w | z | y | x ]
+//
+// Where:
+//
+//       x = (a * A) + (b * C) + a
+//       y = (a * B) + (b * D) + b
+//       z = (c * A) + (d * C) + c
+//       w = (c * B) + (d * D) + d
 template <typename T>
 LogicVRegister Simulator::fmatmul(VectorFormat vform,
                                   LogicVRegister srcdst,
                                   const LogicVRegister& src1,
                                   const LogicVRegister& src2) {
-  T result[kZRegMaxSizeInBytes / sizeof(T)];
+  T result[kZRegMaxSizeInBytes / sizeof(T)] = {};
   int T_per_segment = 4;
   int segment_count = GetVectorLengthInBytes() / (T_per_segment * sizeof(T));
   for (int seg = 0; seg < segment_count; seg++) {
@@ -7879,12 +7921,9 @@ LogicVRegister Simulator::fmatmul(VectorFormat vform,
     }
   }
   for (int i = 0; i < LaneCountFromFormat(vform); i++) {
-    // Elements outside a multiple of 4T are set to zero. This happens only
-    // for double precision operations, when the VL is a multiple of 128 bits,
-    // but not a multiple of 256 bits.
-    T value = (i < (T_per_segment * segment_count)) ? result[i] : 0;
-    srcdst.SetFloat<T>(vform, i, value);
+    srcdst.SetFloat<T>(vform, i, result[i]);
   }
+
   return srcdst;
 }
 

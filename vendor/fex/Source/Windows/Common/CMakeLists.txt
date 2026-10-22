@@ -7,11 +7,15 @@ target_compile_options(CommonWindowsRuntime PRIVATE -Wno-inconsistent-dllimport)
 target_include_directories(CommonWindowsRuntime PRIVATE "${CMAKE_SOURCE_DIR}/Source/Windows/include/")
 
 add_library(CommonWindows STATIC
+  Allocator.cpp
   CPUFeatures.cpp
+  EnvironmentVariablesHandling.cpp
+  FEXUnixLib.cpp
   SHMStats.cpp
   InvalidationTracker.cpp
   ImageTracker.cpp
-  Logging.cpp)
+  Logging.cpp
+  Threads.cpp)
 
 target_link_libraries(CommonWindows FEXCore_Base)
 target_include_directories(CommonWindows PRIVATE "${CMAKE_SOURCE_DIR}/Source/Windows/include/")

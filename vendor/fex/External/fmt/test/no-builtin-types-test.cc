@@ -1,15 +1,16 @@
 // Formatting library for C++ - formatting library tests
 //
-// Copyright (c) 2012 - present, Victor Zverovich
+// Copyright (c) 2012 - present, Victor Zverovich and {fmt} contributors
 // All rights reserved.
 //
 // For the license information refer to format.h.
 
 #include "gtest/gtest.h"
 
-#if !defined(__GNUC__) || __GNUC__ >= 5
+#if !defined(__GNUC__) || (__GNUC__ >= 5 || defined(__clang__))
+
 #  define FMT_BUILTIN_TYPES 0
-#  include "fmt/format.h"
+#  include "fmt/compile.h"
 
 TEST(no_builtin_types_test, format) {
   EXPECT_EQ(fmt::format("{}", 42), "42");
@@ -21,5 +22,10 @@ TEST(no_builtin_types_test, double_is_custom_type) {
   auto args = fmt::make_format_args(d);
   EXPECT_EQ(fmt::format_args(args).get(0).type(),
             fmt::detail::type::custom_type);
+}
+
+TEST(no_builtin_types_test, format_pointer_compiled) {
+  const void* p = nullptr;
+  fmt::format(FMT_COMPILE("{:} {}"), 42, p);
 }
 #endif

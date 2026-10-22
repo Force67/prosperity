@@ -93,12 +93,33 @@ def RunTest(test):
 
   printer.__print_lock__.release()
 
+def MoveListedTestsFirst(tests, tests_first):
+  if not tests_first:
+    return tests
+  tests_set = set(tests)
+  seen = set()
+  reordered = []
+  for test in tests_first:
+    if (test in tests_set) and (test not in seen):
+      reordered.append(test)
+      seen.add(test)
+  reordered += [test for test in tests if test not in seen]
+  return reordered
+
 class TestQueue(threaded_tests.TestQueue):
   def __init__(self):
     super(TestQueue, self).__init__('test_runner: ')
 
-  def AddTests(self, test_runner_command, filters, runtime_options, under_valgrind):
+  def AddTests(self,
+               test_runner_command,
+               filters,
+               runtime_options,
+               under_valgrind,
+               tests_first = None):
     tests = GetTests(test_runner_command, filters)
+    if tests_first is None:
+      tests_first = []
+    tests = MoveListedTestsFirst(tests, tests_first)
     n_tests_total = len(tests)
     tests, skipped  = FilterKnownTestFailures(tests, under_valgrind = under_valgrind)
     for n_tests, reason in skipped:
@@ -117,5 +138,9 @@ class TestQueue(threaded_tests.TestQueue):
       command = base_command + [test] + runtime_options
       self.AddTest(test, command = command)
 
-  def Run(self, jobs, verbose):
-    return super(TestQueue, self).Run(jobs, verbose, RunTest)
+  def Run(self, jobs, verbose, head_count=0, tail_chunksize=None):
+    return super(TestQueue, self).Run(jobs,
+                                      verbose,
+                                      RunTest,
+                                      head_count=head_count,
+                                      tail_chunksize=tail_chunksize)

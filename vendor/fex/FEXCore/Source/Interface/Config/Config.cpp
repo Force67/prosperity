@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 #include "Common/StringConv.h"
-#include "FEXCore/Utils/EnumUtils.h"
+#include "Utils/Config.h"
 
 #include <FEXCore/Config/Config.h>
 #include <FEXCore/Utils/Allocator.h>
+#include <FEXCore/Utils/EnumUtils.h>
 #include <FEXCore/Utils/FileLoading.h>
 #include <FEXCore/Utils/LogManager.h>
 #include <FEXCore/Utils/StringUtils.h>
@@ -37,7 +38,15 @@ namespace detail {
 #define OPT_STRARRAY(group, enum, json, default) OPT_STR(group, enum, json, default)
 #define OPT_STRENUM(group, enum, json, default) const uint64_t P(enum) = FEXCore::ToUnderlying(P(default));
 #include <FEXCore/Config/ConfigValues.inl>
+  constexpr static std::array<std::string_view, FEXCore::Config::ConfigOption::CONFIG_MAX> option_names = {
+#define OPT_BASE(type, group, enum, json, default) #json,
+#include <FEXCore/Config/ConfigValues.inl>
+  };
 } // namespace detail
+
+std::string_view GetConfigJSONName(FEXCore::Config::ConfigOption option) {
+  return FEXCore::Config::detail::option_names[option];
+}
 
 enum Paths {
   PATH_DATA_DIR_LOCAL = 0,
@@ -47,6 +56,7 @@ enum Paths {
   PATH_CONFIG_FILE_LOCAL,
   PATH_CONFIG_FILE_GLOBAL,
   PATH_CONFIG_TELEMETRY_FOLDER,
+  PATH_CACHE_DIR,
   PATH_LAST,
 };
 static std::array<fextl::string, Paths::PATH_LAST> Paths;
@@ -61,6 +71,10 @@ void SetConfigDirectory(const std::string_view Path, bool Global) {
 
 void SetConfigFileLocation(const std::string_view Path, bool Global) {
   Paths[PATH_CONFIG_FILE_LOCAL + Global] = Path;
+}
+
+void SetCacheDirectory(const std::string_view Path) {
+  Paths[PATH_CACHE_DIR] = Path;
 }
 
 const fextl::string& GetTelemetryDirectory() {
@@ -88,6 +102,10 @@ const fextl::string& GetConfigDirectory(bool Global) {
 
 const fextl::string& GetConfigFileLocation(bool Global) {
   return Paths[PATH_CONFIG_FILE_LOCAL + Global];
+}
+
+const fextl::string& GetCacheDirectory() {
+  return Paths[PATH_CACHE_DIR];
 }
 
 fextl::string GetApplicationConfig(const std::string_view Program, bool Global) {
@@ -252,7 +270,7 @@ void Load() {
   }
 }
 
-fextl::string ExpandPath(const fextl::string& ContainerPrefix, const fextl::string& PathName) {
+static fextl::string ExpandPath(const fextl::string& ContainerPrefix, const fextl::string& PathName) {
   if (PathName.empty()) {
     return {};
   }
@@ -307,12 +325,10 @@ constexpr char ContainerManager[] = "/run/host/container-manager";
 fextl::string FindContainer() {
   // We only support pressure-vessel at the moment
   if (FHU::Filesystem::Exists(ContainerManager)) {
-    fextl::vector<char> Manager {};
+    fextl::string Manager {};
     if (FEXCore::FileLoading::LoadFile(Manager, ContainerManager)) {
       // Trim the whitespace, may contain a newline
-      fextl::string ManagerStr = Manager.data();
-      ManagerStr = FEXCore::StringUtils::Trim(ManagerStr);
-      return ManagerStr;
+      return FEXCore::StringUtils::Trim(Manager);
     }
   }
   return {};
@@ -321,12 +337,10 @@ fextl::string FindContainer() {
 fextl::string FindContainerPrefix() {
   // We only support pressure-vessel at the moment
   if (FHU::Filesystem::Exists(ContainerManager)) {
-    fextl::vector<char> Manager {};
+    fextl::string Manager {};
     if (FEXCore::FileLoading::LoadFile(Manager, ContainerManager)) {
       // Trim the whitespace, may contain a newline
-      fextl::string ManagerStr = Manager.data();
-      ManagerStr = FEXCore::StringUtils::Trim(ManagerStr);
-      if (strncmp(ManagerStr.data(), "pressure-vessel", Manager.size()) == 0) {
+      if (FEXCore::StringUtils::Trim(Manager) == "pressure-vessel") {
         // We are running inside of pressure vessel
         // Our $CMAKE_INSTALL_PREFIX paths are now inside of /run/host/$CMAKE_INSTALL_PREFIX
         return "/run/host/";
@@ -505,4 +519,43 @@ void Value<T>::GetListIfExists(FEXCore::Config::ConfigOption Option, StringArray
   }
 }
 template void Value<StringArrayType>::GetListIfExists(FEXCore::Config::ConfigOption Option, StringArrayType* List);
+
+#define CONFIG_AFFECTSCODEGEN
+#include <FEXCore/Config/ConfigOptions.inl>
+
+fextl::string SerializeForCache() {
+  fextl::string Config {};
+
+  auto append_string_triple = [](fextl::string& Config, std::string_view Key, ConfigOption Option, auto Value) {
+    Config.append(Key);
+    Config.append(1, '\0');
+    Config.append(fextl::fmt::format("{}", FEXCore::ToUnderlying(Option)));
+    Config.append(1, '\0');
+    Config.append(fextl::fmt::format("{}", Value));
+    Config.append(1, '\0');
+  };
+
+  const auto SerializeValue = [&Config, append_string_triple]<typename T, ConfigOption Option>(auto ConfigVal, const auto Default) {
+    if (!Config_AffectsCodeGen[FEXCore::ToUnderlying(Option)]) {
+      // Skip everything that the config says doesn't affect codegen.
+      return;
+    }
+    append_string_triple(Config, FEXCore::Config::GetConfigJSONName(Option), Option, ConfigVal());
+  };
+
+#define OPT_BASE(type, group, enum, json, default) \
+  SerializeValue.template operator()<type, CONFIG_##enum>(FEXCore::Config::Get_##enum(), default);
+#define OPT_STR(group, enum, json, default) \
+  SerializeValue.template operator()<fextl::string, CONFIG_##enum>(FEXCore::Config::Get_##enum(), default);
+#define OPT_STRARRAY(group, enum, json, default) // Unsupported.
+#define OPT_STRENUM(group, enum, json, default)  // Unsupported.
+#include <FEXCore/Config/ConfigValues.inl>
+  return Config;
+}
+
+FEX_DEFAULT_VISIBILITY bool CheckConfigMatches(std::string_view Config) {
+  // Serialize current config and just check if it matches.
+  return SerializeForCache() == Config;
+}
+
 } // namespace FEXCore::Config

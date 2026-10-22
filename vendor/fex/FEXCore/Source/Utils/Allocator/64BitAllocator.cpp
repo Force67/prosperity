@@ -7,11 +7,9 @@
 #include <FEXCore/Utils/MathUtils.h>
 #include <FEXCore/Utils/SignalScopeGuards.h>
 #include <FEXCore/Utils/TypeDefines.h>
-#include <FEXCore/Utils/LogManager.h>
-#include <FEXCore/Utils/MathUtils.h>
-#include <FEXCore/fextl/sstream.h>
 #include <FEXHeaderUtils/Syscalls.h>
 #include <FEXCore/fextl/memory.h>
+#include <FEXCore/fextl/sstream.h>
 #include <FEXCore/fextl/vector.h>
 
 #include <algorithm>
@@ -114,24 +112,24 @@ private:
       return sizeof(LiveVMARegion) + FEXCore::FlexBitSet<FlexBitElementType>::SizeInBytes(NumElements);
     }
 
-    static void InitializeVMARegionUsed(LiveVMARegion* Region, size_t AdditionalSize) {
-      size_t SizeOfLiveRegion =
+    static void InitializeVMARegionUsed(LiveVMARegion* Region) {
+      const size_t SizeOfLiveRegion =
         FEXCore::AlignUp(LiveVMARegion::GetFEXManagedVMARegionSize(Region->SlabInfo->RegionSize), FEXCore::Utils::FEX_PAGE_SIZE);
-      size_t SizePlusManagedData = SizeOfLiveRegion + AdditionalSize;
 
-      Region->FreeSpace = Region->SlabInfo->RegionSize - SizePlusManagedData;
+      Region->FreeSpace = Region->SlabInfo->RegionSize - SizeOfLiveRegion;
 
-      size_t NumManagedPages = SizePlusManagedData >> FEXCore::Utils::FEX_PAGE_SHIFT;
+      size_t NumManagedPages = SizeOfLiveRegion >> FEXCore::Utils::FEX_PAGE_SHIFT;
       size_t ManagedSize = NumManagedPages << FEXCore::Utils::FEX_PAGE_SHIFT;
 
       // Use madvise to set the full tracking region to zero.
       // This ensures unused pages are zero, while not having the backing pages consuming memory.
-      ::madvise(Region->UsedPages.Memory + ManagedSize, (Region->SlabInfo->RegionSize >> FEXCore::Utils::FEX_PAGE_SHIFT) - ManagedSize,
-                MADV_DONTNEED);
+      auto* MemoryAsBytes = reinterpret_cast<uint8_t*>(Region->UsedPages.Memory);
+      const auto TrackingRegionSize = Region->SlabInfo->RegionSize - ManagedSize;
+      ::madvise(MemoryAsBytes + ManagedSize, TrackingRegionSize, MADV_DONTNEED);
 
       // Use madvise to claim WILLNEED on the beginning pages for initial state tracking.
       // Improves performance of the following MemClear by not doing a page level fault dance for data necessary to track >170TB of used pages.
-      ::madvise(Region->UsedPages.Memory, ManagedSize, MADV_WILLNEED);
+      ::madvise(MemoryAsBytes, ManagedSize, MADV_WILLNEED);
 
       // Set our reserved pages
       Region->UsedPages.MemSet(NumManagedPages);
@@ -154,28 +152,27 @@ private:
   FEXCore::ForkableUniqueMutex AllocationMutex;
   void DetermineVASize();
 
-  LiveVMARegion* MakeRegionActive(ReservedRegionListType::iterator ReservedIterator, uint64_t UsedSize) {
+  LiveVMARegion* MakeRegionActive(ReservedRegionListType::iterator ReservedIterator) {
     ReservedVMARegion* ReservedRegion = *ReservedIterator;
 
     ReservedRegions->erase(ReservedIterator);
 
     // mprotect the new region we've allocated
-    size_t SizeOfLiveRegion =
+    const size_t SizeOfLiveRegion =
       FEXCore::AlignUp(LiveVMARegion::GetFEXManagedVMARegionSize(ReservedRegion->RegionSize), FEXCore::Utils::FEX_PAGE_SIZE);
-    size_t SizePlusManagedData = UsedSize + SizeOfLiveRegion;
 
-    auto Res = mprotect(reinterpret_cast<void*>(ReservedRegion->Base), SizePlusManagedData, PROT_READ | PROT_WRITE);
+    auto Res = mprotect(reinterpret_cast<void*>(ReservedRegion->Base), SizeOfLiveRegion, PROT_READ | PROT_WRITE);
     LOGMAN_THROW_A_FMT(Res != -1, "Couldn't mprotect region: {} '{}' Likely occurs when running out of memory or Maximum VMAs", errno,
                        strerror(errno));
 
-    FEXCore::Allocator::VirtualName("FEXMem_Misc", reinterpret_cast<void*>(ReservedRegion->Base), SizePlusManagedData);
+    FEXCore::Allocator::VirtualName("FEXMem_Misc", reinterpret_cast<void*>(ReservedRegion->Base), SizeOfLiveRegion);
     LiveVMARegion* LiveRange = new (reinterpret_cast<void*>(ReservedRegion->Base)) LiveVMARegion();
 
     // Copy over the reserved data
     LiveRange->SlabInfo = ReservedRegion;
 
     // Initialize VMA
-    LiveVMARegion::InitializeVMARegionUsed(LiveRange, UsedSize);
+    LiveVMARegion::InitializeVMARegionUsed(LiveRange);
 
     // Add to our active tracked ranges
     auto LiveIter = LiveRegions->emplace_back(LiveRange);
@@ -187,7 +184,7 @@ private:
 };
 
 void OSAllocator_64Bit::DetermineVASize() {
-  size_t Bits = FEXCore::Allocator::DetermineVASize();
+  size_t Bits = FEXCore::Allocator::GetHostVABits();
   uintptr_t Size = 1ULL << Bits;
 
   UPPER_BOUND = Size;
@@ -224,7 +221,7 @@ OSAllocator_64Bit::LiveVMARegion* OSAllocator_64Bit::FindLiveRegionForAddress(ui
       uintptr_t RegionEnd = ReservedRegion->Base + ReservedRegion->RegionSize;
       if (Addr >= ReservedRegion->Base && AddrEnd < RegionEnd) {
         // Found one, let's make it active
-        LiveRegion = MakeRegionActive(it, 0);
+        LiveRegion = MakeRegionActive(it);
         break;
       }
     }
@@ -394,7 +391,7 @@ again:
       size_t lengthPlusManagedData = length + lengthOfLiveRegion;
       for (auto it = ReservedRegions->begin(); it != ReservedRegions->end(); ++it) {
         if ((*it)->RegionSize >= lengthPlusManagedData) {
-          MakeRegionActive(it, 0);
+          MakeRegionActive(it);
           goto again;
         }
       }
@@ -623,14 +620,14 @@ fextl::unique_ptr<T> make_alloc_unique(FEXCore::Allocator::MemoryRegion& Base, A
 fextl::unique_ptr<Alloc::HostAllocator> Create64BitAllocatorWithRegions(fextl::vector<FEXCore::Allocator::MemoryRegion>& Regions) {
   // This is a bit tricky as we can't allocate memory safely except from the Regions provided. Otherwise we might overwrite memory pages we
   // don't own. Scan the memory regions and find the smallest one.
-  FEXCore::Allocator::MemoryRegion& Smallest = Regions[0];
-  for (auto& it : Regions) {
-    if (it.Size <= Smallest.Size) {
-      Smallest = it;
+  FEXCore::Allocator::MemoryRegion* Smallest = &Regions[0];
+  for (auto& Region : Regions) {
+    if (Region.Size <= Smallest->Size) {
+      Smallest = &Region;
     }
   }
 
-  return make_alloc_unique<OSAllocator_64Bit>(Smallest, Regions);
+  return make_alloc_unique<OSAllocator_64Bit>(*Smallest, Regions);
 }
 
 } // namespace Alloc::OSAllocator

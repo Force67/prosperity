@@ -329,7 +329,7 @@ DEF_OP(TelemetrySetValue) {
   auto Op = IROp->C<IR::IROp_TelemetrySetValue>();
   auto Src = GetReg(Op->Value);
 
-  ldr(TMP2, STATE_PTR(CpuStateFrame, Pointers.TelemetryValueAddresses[Op->TelemetryValueIndex]));
+  ldr(TMP2, STATE_PTR_IDX(CpuStateFrame, Pointers.TelemetryValueAddresses, Op->TelemetryValueIndex));
 
   // Cortex fuses cmp+cset.
   cmp(ARMEmitter::Size::i32Bit, Src, 0);
@@ -342,8 +342,8 @@ DEF_OP(TelemetrySetValue) {
     (void)Bind(&LoopTop);
     ldaxr(ARMEmitter::SubRegSize::i64Bit, TMP3, TMP2);
     orr(ARMEmitter::Size::i32Bit, TMP3, TMP3, Src);
-    stlxr(ARMEmitter::SubRegSize::i64Bit, TMP3, TMP3, TMP2);
-    (void)cbnz(ARMEmitter::Size::i32Bit, TMP3, &LoopTop);
+    stlxr(ARMEmitter::SubRegSize::i64Bit, TMP4, TMP3, TMP2);
+    (void)cbnz(ARMEmitter::Size::i32Bit, TMP4, &LoopTop);
   }
 #endif
 }

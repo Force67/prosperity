@@ -28,6 +28,10 @@ class ContextImpl;
 namespace FEXCore::CPU {
 
 #define STATE_PTR(STATE_TYPE, FIELD) STATE.R(), offsetof(FEXCore::Core::STATE_TYPE, FIELD)
+#define STATE_PTR_IDX(STATE_TYPE, FIELD, INDEX) STATE.R(), ARRAY_OFFSETOF(FEXCore::Core::STATE_TYPE, FIELD, INDEX)
+#define FALLBACK_HANDLER_OFFSET(INDEX, FIELD) \
+  STATE.R(),                                  \
+    (ARRAY_OFFSETOF(FEXCore::Core::CpuStateFrame, Pointers.FallbackHandlerPointers, INDEX) + offsetof(FEXCore::Core::FallbackABIInfo, FIELD))
 
 class Dispatcher final : public Arm64Emitter {
 public:
@@ -77,6 +81,8 @@ private:
   uint64_t AbsoluteLoopTopAddressEnterECFillSRA {};
   uint64_t ThreadPauseHandlerAddress {};
   uint64_t ThreadPauseHandlerAddressSpillSRA {};
+  uint64_t ThreadDispatchSyscallHandler {};
+  uint64_t ThreadDispatchRemoveCodeEntry {};
   uint64_t ExitFunctionLinkerAddress {};
   uint64_t SignalHandlerReturnAddress {};
   uint64_t SignalHandlerReturnAddressRT {};
@@ -95,8 +101,47 @@ private:
   uint64_t LUDIVHandlerAddress {};
   uint64_t LDIVHandlerAddress {};
 
+  // F64 reduced-precision shared handlers
+  uint64_t F64SinHandlerAddress {};
+  uint64_t F64CosHandlerAddress {};
+  uint64_t F64TanHandlerAddress {};
+  uint64_t F64F2XM1HandlerAddress {};
+  uint64_t F64ScaleHandlerAddress {};
+  uint64_t F64AtanHandlerAddress {};
+  uint64_t F64FYL2XHandlerAddress {};
+  uint64_t F64FYL2XP1HandlerAddress {};
+  uint64_t F64FPREMHandlerAddress {};
+  uint64_t F64FPREM1HandlerAddress {};
+
   void EmitDispatcher();
   uint64_t GenerateABICall(FallbackABI ABI);
+
+  // Inline softfloat conversion emitters - avoid FPCR save/restore overhead
+  // These emit ARM64 code that performs the conversion using only integer ops
+  void EmitI16ToExtF80();
+  void EmitI32ToExtF80();
+  void EmitF32ToExtF80();
+  void EmitF64ToExtF80();
+
+  // Shared label set for the LUT-based F64 log2 path used by both FYL2X and
+  // FYL2XP1. The pool is emitted once via EmitF64Log2Constants.
+  struct F64Log2Constants {
+    ARMEmitter::ForwardLabel One;
+    ARMEmitter::ForwardLabel A0, A1, A2, A3, A4, A5, A6, A7;
+    ARMEmitter::ForwardLabel Table;
+  };
+
+  void EmitF64Sin();
+  void EmitF64Cos();
+  void EmitF64Tan();
+  void EmitF64F2XM1();
+  void EmitF64Scale();
+  void EmitF64Atan();
+  void EmitF64FYL2X(F64Log2Constants& C);
+  void EmitF64FYL2XP1(F64Log2Constants& C);
+  void EmitF64Log2Constants(F64Log2Constants& C);
+  void EmitF64FPREM();
+  void EmitF64FPREM1();
 
   FEX_CONFIG_OPT(DisableL2Cache, DISABLEL2CACHE);
 };

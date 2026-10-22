@@ -13,10 +13,10 @@
 #include <FEXCore/fextl/set.h>
 #include <FEXCore/fextl/string.h>
 #include <FEXCore/fextl/vector.h>
+#include <FEXCore/Utils/WritePriorityMutex.h>
 
 namespace FEXCore {
 struct HostFeatures;
-class ForkableSharedMutex;
 class ThunkHandler;
 } // namespace FEXCore
 
@@ -73,6 +73,7 @@ public:
    */
   FEX_DEFAULT_VISIBILITY virtual void ExecuteThread(FEXCore::Core::InternalThreadState* Thread) = 0;
 
+  FEX_DEFAULT_VISIBILITY virtual bool CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Thread, uint64_t GuestRIP, uint64_t MaxInst) = 0;
   FEX_DEFAULT_VISIBILITY virtual void CompileRIP(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP) = 0;
   FEX_DEFAULT_VISIBILITY virtual void CompileRIPCount(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, uint64_t MaxInst) = 0;
 
@@ -112,15 +113,12 @@ public:
    * @brief Create a new thread object that doesn't inherit any state.
    * Used to create FEX thread objects in preparation for creating a true OS thread.
    *
-   * @param InitialRIP The starting RIP of this thread
-   * @param StackPointer The starting RSP of this thread
    * @param NewThreadState The thread state to inherit from if not nullptr.
    *
    * @return A new InternalThreadState object for using with a new guest thread.
    */
 
-  FEX_DEFAULT_VISIBILITY virtual FEXCore::Core::InternalThreadState*
-  CreateThread(uint64_t InitialRIP, uint64_t StackPointer, const FEXCore::Core::CPUState* NewThreadState = nullptr) = 0;
+  FEX_DEFAULT_VISIBILITY virtual FEXCore::Core::InternalThreadState* CreateThread(const FEXCore::Core::CPUState* NewThreadState = nullptr) = 0;
 
   FEX_DEFAULT_VISIBILITY virtual void DestroyThread(FEXCore::Core::InternalThreadState* Thread) = 0;
 #ifndef _WIN32
@@ -135,6 +133,8 @@ public:
   FEX_DEFAULT_VISIBILITY virtual FEXCore::CPUID::XCRResults RunXCRFunction(uint32_t Function) = 0;
   FEX_DEFAULT_VISIBILITY virtual FEXCore::CPUID::FunctionResults RunCPUIDFunctionName(uint32_t Function, uint32_t Leaf, uint32_t CPU) = 0;
 
+  virtual void InitDiskCache() = 0;
+
   virtual AbstractCodeCache& GetCodeCache() = 0;
   virtual void SetCodeMapWriter(fextl::unique_ptr<CodeMapWriter>) = 0;
   virtual void FlushAndCloseCodeMap() = 0;
@@ -143,7 +143,7 @@ public:
   FEX_DEFAULT_VISIBILITY virtual void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) = 0;
   FEX_DEFAULT_VISIBILITY virtual void
   InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) = 0;
-  FEX_DEFAULT_VISIBILITY virtual FEXCore::ForkableSharedMutex& GetCodeInvalidationMutex() = 0;
+  FEX_DEFAULT_VISIBILITY virtual FEXCore::Utils::WritePriorityMutex::Mutex& GetCodeInvalidationMutex() = 0;
 
   FEX_DEFAULT_VISIBILITY virtual void
   ConfigureAOTGen(FEXCore::Core::InternalThreadState* Thread, fextl::set<uint64_t>* ExternalBranches, uint64_t SectionMaxAddress) = 0;

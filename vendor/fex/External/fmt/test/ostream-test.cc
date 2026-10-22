@@ -1,6 +1,6 @@
 // Formatting library for C++ - std::ostream support tests
 //
-// Copyright (c) 2012 - present, Victor Zverovich
+// Copyright (c) 2012 - present, Victor Zverovich and {fmt} contributors
 // All rights reserved.
 //
 // For the license information refer to format.h.
@@ -265,7 +265,7 @@ template <> struct formatter<abstract> : ostream_formatter {};
 }  // namespace fmt
 
 void format_abstract_compiles(const abstract& a) {
-  fmt::format(FMT_COMPILE("{}"), a);
+  (void)fmt::format(FMT_COMPILE("{}"), a);
 }
 
 TEST(ostream_test, is_formattable) {

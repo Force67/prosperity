@@ -57,9 +57,9 @@ ApplicationNames GetApplicationNames(const fextl::vector<fextl::string>& Args, b
  */
 void LoadConfig(fextl::string ProgramName = {}, char** const envp = nullptr, const PortableInformation& PortableInfo = {});
 
-const char* GetHomeDirectory();
+fextl::string GetHomeDirectory();
 
-fextl::string GetDataDirectory(const PortableInformation& PortableInfo);
+fextl::string GetDataDirectory(bool Global, const PortableInformation& PortableInfo);
 fextl::string GetConfigDirectory(bool Global, const PortableInformation& PortableInfo);
 fextl::string GetConfigFileLocation(bool Global, const PortableInformation& PortableInfo);
 fextl::string GetCacheDirectory();
@@ -81,8 +81,8 @@ fextl::unique_ptr<FEXCore::Config::Layer> CreateGlobalMainLayer();
  *
  * @return unique_ptr for that layer
  */
-fextl::unique_ptr<FEXCore::Config::Layer> CreateMainLayer(const fextl::string* File = nullptr);
-fextl::unique_ptr<FEXCore::Config::Layer> CreateUserOverrideLayer(std::string_view AppConfig);
+fextl::unique_ptr<FEXCore::Config::Layer> CreateMainLayer(const fextl::string* File = nullptr, std::optional<fextl::string> AppName = std::nullopt);
+fextl::unique_ptr<FEXCore::Config::Layer> CreateUserOverrideLayer(std::string_view AppConfig, std::optional<fextl::string> AppName);
 
 /**
  * @brief Create an application configuration loader

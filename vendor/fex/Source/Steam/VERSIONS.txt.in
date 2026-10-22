@@ -1,0 +1,2 @@
+FEX describe	@GIT_DESCRIBE_STRING@
+FEX bash	@GIT_HASH@

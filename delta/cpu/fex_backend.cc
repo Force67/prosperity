@@ -525,22 +525,36 @@ size_t g_thunk_pool_used = 0;
 constexpr size_t kThunkPoolSize = 0x100000;  // 1 MiB -> ~95k trampolines
 constexpr size_t kThunkStride = 16;
 
+// Argument[0] = syscall number (RAX); [1..6] = RDI,RSI,RDX,R10,R8,R9.
+struct SyscallArguments {
+  u64 Argument[7];
+};
+
 class FexSyscallHandler final : public FEXCore::HLE::SyscallHandler {
  public:
-  FexSyscallHandler() { OSABI = FEXCore::HLE::SyscallOSABI::OS_LINUX64; }
-
-  uint64_t HandleSyscall(FEXCore::Core::CpuStateFrame* frame,
-                         FEXCore::HLE::SyscallArguments* args) override {
+  // FEX ends the block at `syscall` and leaves the guest registers in State:
+  // the handler reads its arguments there, stores RAX and steps rip past the
+  // 2-byte instruction itself.
+  void HandleSyscall(FEXCore::Core::CpuStateFrame* frame) override {
     const memory_debug::Scope memory_scope(memory_debug::Bucket::kRuntime);
     guest::PausePoint();
-    const u64 result = DispatchSyscall(frame, args);
+    auto& state = frame->State;
+    SyscallArguments args = {{
+        state.gregs[FEXCore::X86State::REG_RAX],
+        state.gregs[FEXCore::X86State::REG_RDI],
+        state.gregs[FEXCore::X86State::REG_RSI],
+        state.gregs[FEXCore::X86State::REG_RDX],
+        state.gregs[FEXCore::X86State::REG_R10],
+        state.gregs[FEXCore::X86State::REG_R8],
+        state.gregs[FEXCore::X86State::REG_R9],
+    }};
+    state.gregs[FEXCore::X86State::REG_RAX] = DispatchSyscall(frame, &args);
+    state.rip += 2;
     guest::PausePoint();
-    return result;
   }
 
   u64 DispatchSyscall(FEXCore::Core::CpuStateFrame* frame,
-                      FEXCore::HLE::SyscallArguments* args) {
-    // Args->Argument[0] = syscall number (RAX); [1..6] = RDI,RSI,RDX,R10,R8,R9.
+                      SyscallArguments* args) {
     const u32 num = static_cast<u32>(args->Argument[0]);
 
     // Dynamic-TLS bridge: patched __tls_get_addr issues this magic syscall.
@@ -776,9 +790,11 @@ class FexBackend final : public Backend {
         (reinterpret_cast<u64>(h->stack) + h->stack_size - 0x200) & ~0xFULL;
 
     // Create on the calling thread, as FEX's ThreadManager does.
-    auto* thread = ctx_->CreateThread(entry, rsp, nullptr);
+    auto* thread = ctx_->CreateThread();
     h->thread = thread;
     auto& s = thread->CurrentFrame->State;
+    s.rip = entry;
+    s.gregs[FEXCore::X86State::REG_RSP] = rsp;
 
     // FEX call/return prediction stack (guard-paged), seeded to Base + SIZE/4.
     {

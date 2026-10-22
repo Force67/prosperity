@@ -26,6 +26,8 @@
 
 #include "cpu-features-auditor-aarch64.h"
 
+#include <map>
+
 #include "cpu-features.h"
 #include "globals-vixl.h"
 #include "utils-vixl.h"
@@ -41,6 +43,111 @@ CPUFeaturesAuditor::GetFormToVisitorFnMap() {
   static const FormToVisitorFnMap form_to_visitor = {
       DEFAULT_FORM_TO_VISITOR_MAP(CPUFeaturesAuditor),
       SIM_AUD_VISITOR_MAP(CPUFeaturesAuditor),
+      {"fcvt_dh_floatdp1"_h, &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"fcvt_ds_floatdp1"_h, &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"fcvt_hd_floatdp1"_h, &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"fcvt_hs_floatdp1"_h, &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"fcvt_sd_floatdp1"_h, &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"fcvt_sh_floatdp1"_h, &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"fmov_d_floatdp1"_h, &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"fmov_h_floatdp1"_h, &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"fmov_s_floatdp1"_h, &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frint32x_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frint32x_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frint32z_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frint32z_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frint64x_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frint64x_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frint64z_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frint64z_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frinta_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frinta_h_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frinta_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frinti_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frinti_h_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frinti_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintm_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintm_h_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintm_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintn_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintn_h_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintn_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintp_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintp_h_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintp_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintx_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintx_h_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintx_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintz_d_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintz_h_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frintz_s_floatdp1"_h,
+       &CPUFeaturesAuditor::VisitFPDataProcessing1Source},
+      {"frint32x_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frint32z_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frint64x_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frint64z_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frinta_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frinti_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frintm_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frintn_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frintp_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frintx_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frintz_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtas_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtau_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtl_asimdmisc_l"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtms_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtmu_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtns_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtnu_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtn_asimdmisc_n"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtps_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtpu_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtxn_asimdmisc_n"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtzs_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcvtzu_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fabs_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcmeq_asimdmisc_fz"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcmge_asimdmisc_fz"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcmgt_asimdmisc_fz"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcmle_asimdmisc_fz"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fcmlt_asimdmisc_fz"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fneg_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frecpe_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"frsqrte_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"fsqrt_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"scvtf_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"ucvtf_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"urecpe_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
+      {"ursqrte_asimdmisc_r"_h, &CPUFeaturesAuditor::VisitNEON2RegMisc},
       {"fcmla_asimdelem_c_h"_h, &CPUFeaturesAuditor::VisitNEONByIndexedElement},
       {"fcmla_asimdelem_c_s"_h, &CPUFeaturesAuditor::VisitNEONByIndexedElement},
       {"fmlal2_asimdelem_lh"_h, &CPUFeaturesAuditor::VisitNEONByIndexedElement},
@@ -226,6 +333,9 @@ void CPUFeaturesAuditor::VisitCompareBranch(const Instruction* instr) {
 void CPUFeaturesAuditor::VisitConditionalBranch(const Instruction* instr) {
   RecordInstructionFeaturesScope scope(this);
   USE(instr);
+  if (form_hash_ == "bc_only_condbranch"_h) {
+    scope.Record(CPUFeatures::kHBC);
+  }
 }
 
 void CPUFeaturesAuditor::VisitConditionalCompareImmediate(
@@ -1445,8 +1555,8 @@ void CPUFeaturesAuditor::VisitUnimplemented(const Instruction* instr) {
 }
 
 void CPUFeaturesAuditor::Visit(Metadata* metadata, const Instruction* instr) {
-  VIXL_ASSERT(metadata->count("form") > 0);
-  const std::string& form = (*metadata)["form"];
+  VIXL_ASSERT(!metadata->form.empty());
+  const std::string& form = metadata->form;
   form_hash_ = Hash(form.c_str());
   const FormToVisitorFnMap* fv = CPUFeaturesAuditor::GetFormToVisitorFnMap();
   FormToVisitorFnMap::const_iterator it = fv->find(form_hash_);
@@ -1886,6 +1996,14 @@ void CPUFeaturesAuditor::Visit(Metadata* metadata, const Instruction* instr) {
          CPUFeatures(CPUFeatures::kSVE2, CPUFeatures::kSVEPmull128)},
         {"pmullt_z_zz_q"_h,
          CPUFeatures(CPUFeatures::kSVE2, CPUFeatures::kSVEPmull128)},
+        {"bfcvt_bs_floatdp1"_h,
+         CPUFeatures(CPUFeatures::kFP, CPUFeatures::kBF16)},
+        {"bfcvtn_asimdmisc_4s"_h,
+         CPUFeatures(CPUFeatures::kNEON, CPUFeatures::kBF16)},
+        {"bfcvt_z_p_z_s2bf"_h,
+         CPUFeatures(CPUFeatures::kSVE, CPUFeatures::kBF16)},
+        {"bfcvtnt_z_p_z_s2bf"_h,
+         CPUFeatures(CPUFeatures::kSVE, CPUFeatures::kBF16)},
     };
 
     if (features.count(form_hash_) > 0) {

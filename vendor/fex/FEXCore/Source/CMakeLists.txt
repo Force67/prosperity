@@ -4,9 +4,11 @@ set(FEXCORE_BASE_SRCS
   Interface/Config/Config.cpp
   Utils/Allocator.cpp
   Utils/FileLoading.cpp
+  Utils/FileUtils.cpp
   Utils/ForcedAssert.cpp
   Utils/LogManager.cpp
-  Utils/SpinWaitLock.cpp)
+  Utils/SpinWaitLock.cpp
+  Utils/WildcardMatcher.cpp)
 
 if (NOT MINGW)
   list(APPEND FEXCORE_BASE_SRCS
@@ -17,12 +19,14 @@ set(SRCS
   Common/JitSymbols.cpp
   Interface/Context/Context.cpp
   Interface/Core/LookupCache.cpp
+  Interface/Core/DiskCache.cpp
   Interface/Core/CodeCache.cpp
   Interface/Core/Core.cpp
   Interface/Core/CPUBackend.cpp
   Interface/Core/Addressing.cpp
   Interface/Core/CPUID.cpp
   Interface/Core/Frontend.cpp
+  Interface/Core/SharedCodeBufferManager.cpp
   Interface/Core/OpcodeDispatcher/AVX_128.cpp
   Interface/Core/OpcodeDispatcher/Crypto.cpp
   Interface/Core/OpcodeDispatcher/Flags.cpp
@@ -67,6 +71,7 @@ set(SRCS
   Utils/LongJump.cpp
   Utils/Telemetry.cpp
   Utils/Threads.cpp
+  Utils/WorkQueueThread.cpp
   Utils/Profiler.cpp)
 
 if (ARCHITECTURE_arm64)
@@ -94,6 +99,10 @@ if (ENABLE_VIXL_DISASSEMBLER)
   list(APPEND DEFINES -DVIXL_DISASSEMBLER=1)
 endif()
 
+if (ENABLE_ZYDIS)
+  list(APPEND DEFINES -DZYDIS_DISASSEMBLER=1)
+endif()
+
 if (ARCHITECTURE_arm64 AND HAS_CLANG_PRESERVE_ALL)
   list(APPEND DEFINES "-DFEXCORE_PRESERVE_ALL_ATTR=__attribute__((preserve_all));-DFEXCORE_HAS_PRESERVE_ALL_ATTR=1")
 else()
@@ -103,7 +112,11 @@ endif()
 set(LIBS fmt::fmt xxHash::xxhash FEXHeaderUtils CodeEmitter cephes_128bit)
 
 if (ENABLE_VIXL_DISASSEMBLER OR ENABLE_VIXL_SIMULATOR)
-  list(APPEND LIBS vixl)
+  list(APPEND LIBS vixl::vixl)
+endif()
+
+if (ENABLE_ZYDIS)
+  list(APPEND LIBS Zydis::Zydis)
 endif()
 
 if (NOT MINGW)
@@ -113,6 +126,11 @@ else()
   if (ARCHITECTURE_arm64ec)
     list(APPEND LIBS mincore)
   endif()
+endif()
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  # GCC requires libatomic to use 128-bit atomics
+  list(APPEND LIBS atomic)
 endif()
 
 # Generate config
@@ -238,15 +256,20 @@ function(AddDefaultOptionsToTarget Name)
   endif()
 
   LinkerGC(${Name})
+  target_link_libraries(${Name} PUBLIC unordered_dense::unordered_dense)
 endfunction()
 
 # Build FEXCore_Base static library
 add_library(FEXCore_Base STATIC ${FEXCORE_BASE_SRCS})
-target_link_libraries(FEXCore_Base ${LIBS})
+target_link_libraries(FEXCore_Base PUBLIC ${LIBS})
+if (MINGW)
+  target_link_libraries(FEXCore_Base PUBLIC ntdll)
+endif()
+
 AddDefaultOptionsToTarget(FEXCore_Base)
 
 if (ENABLE_FEXCORE_PROFILER AND FEXCORE_PROFILER_BACKEND STREQUAL "TRACY")
-  target_link_libraries(FEXCore_Base TracyClient)
+  target_link_libraries(FEXCore_Base PUBLIC TracyClient)
 endif()
 
 function(AddObject Name)
@@ -264,7 +287,7 @@ function(AddLibrary Name Type)
   # During generation of the import library (dll.a), MinGW needs some extra symbols from libraries
   # such as fmt, which are propagated by FEXCore_Base. Wonderful.
   if (MINGW)
-    target_link_libraries(${Name} FEXCore_Base)
+    target_link_libraries(${Name} PRIVATE FEXCore_Base)
   endif()
   AddDefaultOptionsToTarget(${Name})
 endfunction()
@@ -282,9 +305,10 @@ endif()
 # Meta-library to link jemalloc libraries enabled in the build configuration.
 # Only needed for targets that run emulation. For others, use JemallocDummy.
 add_library(JemallocLibs STATIC Utils/AllocatorHooks.cpp)
-if (ENABLE_JEMALLOC)
-  target_compile_definitions(JemallocLibs PRIVATE ENABLE_JEMALLOC=1 JEMALLOC_NO_RENAME=1)
-  target_link_libraries(JemallocLibs PUBLIC FEX_jemalloc)
+if (ENABLE_FEX_ALLOCATOR)
+  target_compile_definitions(JemallocLibs PRIVATE ENABLE_FEX_ALLOCATOR=1)
+  target_link_libraries(JemallocLibs PUBLIC rpmalloc)
+  target_include_directories(JemallocLibs PRIVATE "${PROJECT_SOURCE_DIR}/include/")
 endif()
 if (ENABLE_JEMALLOC_GLIBC_ALLOC)
   set_source_files_properties(Interface/HLE/Thunks/Thunks.cpp PROPERTIES COMPILE_DEFINITIONS ENABLE_JEMALLOC_GLIBC=1)
@@ -299,4 +323,4 @@ if (NOT MINGW)
 endif()
 
 # The shared library should always link enabled jemalloc libraries
-target_link_libraries(${PROJECT_NAME}_shared JemallocLibs)
+target_link_libraries(${PROJECT_NAME}_shared PRIVATE JemallocLibs)

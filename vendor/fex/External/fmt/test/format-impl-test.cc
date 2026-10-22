@@ -1,11 +1,10 @@
 // Formatting library for C++ - formatting library implementation tests
 //
-// Copyright (c) 2012 - present, Victor Zverovich
+// Copyright (c) 2012 - present, Victor Zverovich and {fmt} contributors
 // All rights reserved.
 //
 // For the license information refer to format.h.
 
-#include <algorithm>
 #include <cstring>
 
 // clang-format off
@@ -14,7 +13,6 @@
 
 #include "fmt/format.h"
 #include "gmock/gmock.h"
-#include "util.h"
 
 using fmt::detail::bigint;
 using fmt::detail::fp;
@@ -200,12 +198,12 @@ TEST(fp_test, dragonbox_max_k) {
   using fmt::detail::dragonbox::floor_log10_pow2;
   using float_info = fmt::detail::dragonbox::float_info<float>;
   EXPECT_EQ(
-      fmt::detail::const_check(float_info::max_k),
+      float_info::max_k,
       float_info::kappa -
           floor_log10_pow2(std::numeric_limits<float>::min_exponent -
                            fmt::detail::num_significand_bits<float>() - 1));
   using double_info = fmt::detail::dragonbox::float_info<double>;
-  EXPECT_EQ(fmt::detail::const_check(double_info::max_k),
+  EXPECT_EQ(double_info::max_k,
             double_info::kappa -
                 floor_log10_pow2(
                     std::numeric_limits<double>::min_exponent -

@@ -60,6 +60,7 @@ $end_info$
 #include <syscall.h>
 #include <sys/mman.h>
 #include <sys/utsname.h>
+#include <thread>
 #include <unistd.h>
 
 namespace FEX::HLE {
@@ -290,10 +291,35 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
   // If the user ran FEX through FEXLoader then we must go down the emulated path
   uint64_t Result {};
 
+  // In some cases the FD passed in to execveat needs to be copied.
+  const bool NeedsFDCopy = [&]() {
+    // No need for FD copy when not using FD.
+    if (!IsFDExec) {
+      return false;
+    }
+
+    if (SyscallHandler->IsHostKernelVersionAtLeast(999, 0, 0)) {
+      // Older kernel versions have a bug with the combination of binfmt_misc and anonymous file FDs that set CLOEXEC.
+      return false;
+    }
+
+    int Flags = fcntl(Args.dirfd, F_GETFD);
+    if (!(Flags & FD_CLOEXEC)) {
+      // No need for FD copy if FD_CLOEXEC isn't set.
+      return false;
+    }
+
+    return true;
+  }();
+
   // If the FEX interpreter is installed then just execve the ELF file
   // This will stay inside of our emulated environment since binfmt_misc will capture it
-  const bool IsBinfmtCompatible = SyscallHandler->IsInterpreterInstalled() && (Type == ELFLoader::ELFContainer::ELFType::TYPE_X86_32 ||
-                                                                               Type == ELFLoader::ELFContainer::ELFType::TYPE_X86_64);
+  const bool IsBinfmtCompatible = SyscallHandler->IsInterpreterInstalled() && !NeedsFDCopy &&
+                                  (Type == ELFLoader::ELFContainer::ELFType::TYPE_X86_32 || Type == ELFLoader::ELFContainer::ELFType::TYPE_X86_64);
+  // Without a visible binfmt interpreter, the next FEX process resolves guest paths through RootFS.
+  // Keep the already resolved host ELF open so a binary outside that RootFS can still be executed.
+  const bool NeedsLoaderFD = !IsFDExec && !SyscallHandler->IsInterpreterInstalled() &&
+                             (Type == ELFLoader::ELFContainer::ELFType::TYPE_X86_32 || Type == ELFLoader::ELFContainer::ELFType::TYPE_X86_64);
 
   // We are trying to execute an ELF of a different architecture
   // We can't know if we can support this without architecture specific checks and binfmt_misc parsing
@@ -302,10 +328,11 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
 
   // Need to copy over envp variables if we are appending data.
   // Only situation in which an envp copy needs to occur is if we are doing an FD execveat and binfmt_misc can't handle it.
-  // TODO: Additional future tasks that require envp copying in the future:
+  // Additional tasks that require envp copying in the future:
   // - seccomp inheritance
   // - FEXServer FD inheritance (unshare(CLONE_NEWNET))
-  const bool NeedsEnvpCopy = (IsFDExec && !(IsBinfmtCompatible || IsOtherELF)) || HasSeccomp;
+  // - FD_CLOEXEC set on FD on anonymous file FD.
+  const bool NeedsEnvpCopy = (IsFDExec && !(IsBinfmtCompatible || IsOtherELF)) || HasSeccomp || NeedsFDCopy || NeedsLoaderFD;
 
   // We are trying to execute a shebang handled by a different architecture interpreter (e.g. /usr/bin/python from the host FS).
   // In this case we just defer to the kernel.
@@ -321,12 +348,18 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
       }
     }
 
-    if (IsFDExec && !IsBinfmtCompatible) {
-      int Flags = fcntl(Args.dirfd, F_GETFD);
-      if (Flags & FD_CLOEXEC) {
+    if (!IsBinfmtCompatible || NeedsFDCopy) {
+      if (NeedsFDCopy) {
         // FEX needs the FD to live past execve when binfmt_misc isn't used,
-        // so duplicate the FD if FD_CLOEXEC is set
+        // so duplicate the FD if FD_CLOEXEC is set, which removes the FD_CLOEXEC flag.
         Args.dirfd = dup(Args.dirfd);
+        FDExecCopy = true;
+      } else if (NeedsLoaderFD) {
+        Args.dirfd = open(Filename.c_str(), O_RDONLY);
+        if (Args.dirfd == -1) {
+          CloseSeccompFD();
+          return -errno;
+        }
         FDExecCopy = true;
       }
 
@@ -341,6 +374,10 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
 
       // Insert the FD for FEX to track.
       EnvpArgs.emplace_back(FDExecEnv.data());
+      if (NeedsLoaderFD) {
+        // Distinguish this path-backed FD from an anonymous memfd exec.
+        EnvpArgs.emplace_back("FEX_EXECVEFD_PATH=1");
+      }
     }
 
     if (HasSeccomp) {
@@ -402,8 +439,11 @@ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname
 
     // It is valid to provide nullptr first argument.
     if (*OldArgv) {
-      // Skip filename argument
-      ++OldArgv;
+      // The direct fallback uses the executable path as argv[0]. An FD-backed load uses the
+      // binfmt preserve-argv0 layout, so the caller-supplied argv[0] has to stay in the vector.
+      if (!NeedsLoaderFD) {
+        ++OldArgv;
+      }
       while (*OldArgv) {
         // Append the arguments together
         ExecveArgs.emplace_back(*OldArgv);
@@ -768,7 +808,7 @@ SyscallHandler::SyscallHandler(FEXCore::Context::Context* _CTX, FEX::HLE::Signal
   , SignalDelegation {_SignalDelegation}
   , ThunkHandler {ThunkHandler} {
   FEX::HLE::_SyscallHandler = this;
-  HostKernelVersion = CalculateHostKernelVersion();
+  HostKernelVersion = LinuxVersion::CalculateHostKernelVersion();
   GuestKernelVersion = CalculateGuestKernelVersion();
   Alloc32Handler = FEX::HLE::Create32BitAllocator();
 
@@ -781,87 +821,118 @@ SyscallHandler::~SyscallHandler() {
   FEXCore::Allocator::munmap(reinterpret_cast<void*>(DataSpace), DataSpaceMappedSize);
 }
 
-uint32_t SyscallHandler::CalculateHostKernelVersion() {
-  struct utsname buf {};
-  if (uname(&buf) == -1) {
-    return 0;
-  }
-
-  uint32_t Major {};
-  uint32_t Minor {};
-  uint32_t Patch {};
-
-  // Parse kernel version in the form of `<Major>.<Minor>.<Patch>[Optional Data]`
-  const auto End = buf.release + sizeof(buf.release);
-  auto Results = std::from_chars(buf.release, End, Major, 10);
-  Results = std::from_chars(Results.ptr + 1, End, Minor, 10);
-  Results = std::from_chars(Results.ptr + 1, End, Patch, 10);
-
-  return (Major << 24) | (Minor << 16) | Patch;
-}
-
 uint32_t SyscallHandler::CalculateGuestKernelVersion() {
   // We currently only emulate a kernel between the ranges of Kernel 5.15.0 and 6.11.0
-  return std::max(KernelVersion(5, 15), std::min(KernelVersion(6, 11), GetHostKernelVersion()));
+  return std::max(LinuxVersion::KernelVersion(5, 15), std::min(LinuxVersion::KernelVersion(6, 11), GetHostKernelVersion()));
 }
 
-uint64_t SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame, FEXCore::HLE::SyscallArguments* Args) {
-  // Grab the return address which will be inside the JIT.
-  const uint64_t JITPC = reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
+template<bool Is64Bit>
+void SyscallHandler::HandleSyscallImpl(FEXCore::Core::CpuStateFrame* Frame, uint64_t JITPC) {
+  auto SetResult = [](FEXCore::Core::CpuStateFrame* Frame, uint64_t Result) {
+    const auto Mask = Is64Bit ? ~0ULL : ~0U;
+    auto Thread = FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame);
 
-  const auto SeccompResult = SeccompEmulator.ExecuteFilter(Frame, JITPC, Args);
+    Thread->Thread->CurrentFrame->State.gregs[FEXCore::X86State::REG_RAX] = Result & Mask;
+  };
 
-  if (SeccompResult.EarlyReturn) {
-    return SeccompResult.Result;
+  if (SeccompEmulator.HasFilter(Frame)) {
+    FEX::HLE::SyscallArguments Args {
+      .Argument =
+        {
+          GetArg(Is64Bit, Frame, 0),
+          GetArg(Is64Bit, Frame, 1),
+          GetArg(Is64Bit, Frame, 2),
+          GetArg(Is64Bit, Frame, 3),
+          GetArg(Is64Bit, Frame, 4),
+          GetArg(Is64Bit, Frame, 5),
+          GetArg(Is64Bit, Frame, 6),
+        },
+    };
+    const auto SeccompResult = SeccompEmulator.ExecuteFilter(Frame, JITPC, &Args);
+
+    if (SeccompResult.EarlyReturn) {
+      SetResult(Frame, SeccompResult.Result);
+      return;
+    }
   }
 
-  if (Args->Argument[0] >= Definitions.size()) {
-    return -ENOSYS;
+  const auto SyscallNum = GetArg(Is64Bit, Frame, 0);
+  if (SyscallNum >= Definitions.size()) {
+    SetResult(Frame, -ENOSYS);
+    return;
   }
 
-  auto& Def = Definitions[Args->Argument[0]];
+  auto& Def = Definitions[SyscallNum];
   uint64_t Result {};
   switch (Def.NumArgs) {
   case 0: Result = std::invoke(Def.Ptr0, Frame); break;
-  case 1: Result = std::invoke(Def.Ptr1, Frame, Args->Argument[1]); break;
-  case 2: Result = std::invoke(Def.Ptr2, Frame, Args->Argument[1], Args->Argument[2]); break;
-  case 3: Result = std::invoke(Def.Ptr3, Frame, Args->Argument[1], Args->Argument[2], Args->Argument[3]); break;
-  case 4: Result = std::invoke(Def.Ptr4, Frame, Args->Argument[1], Args->Argument[2], Args->Argument[3], Args->Argument[4]); break;
+  case 1: Result = std::invoke(Def.Ptr1, Frame, GetArg(Is64Bit, Frame, 1)); break;
+  case 2: Result = std::invoke(Def.Ptr2, Frame, GetArg(Is64Bit, Frame, 1), GetArg(Is64Bit, Frame, 2)); break;
+  case 3: Result = std::invoke(Def.Ptr3, Frame, GetArg(Is64Bit, Frame, 1), GetArg(Is64Bit, Frame, 2), GetArg(Is64Bit, Frame, 3)); break;
+  case 4:
+    Result =
+      std::invoke(Def.Ptr4, Frame, GetArg(Is64Bit, Frame, 1), GetArg(Is64Bit, Frame, 2), GetArg(Is64Bit, Frame, 3), GetArg(Is64Bit, Frame, 4));
+    break;
   case 5:
-    Result = std::invoke(Def.Ptr5, Frame, Args->Argument[1], Args->Argument[2], Args->Argument[3], Args->Argument[4], Args->Argument[5]);
+    Result = std::invoke(Def.Ptr5, Frame, GetArg(Is64Bit, Frame, 1), GetArg(Is64Bit, Frame, 2), GetArg(Is64Bit, Frame, 3),
+                         GetArg(Is64Bit, Frame, 4), GetArg(Is64Bit, Frame, 5));
     break;
   case 6:
-    Result = std::invoke(Def.Ptr6, Frame, Args->Argument[1], Args->Argument[2], Args->Argument[3], Args->Argument[4], Args->Argument[5],
-                         Args->Argument[6]);
+    Result = std::invoke(Def.Ptr6, Frame, GetArg(Is64Bit, Frame, 1), GetArg(Is64Bit, Frame, 2), GetArg(Is64Bit, Frame, 3),
+                         GetArg(Is64Bit, Frame, 4), GetArg(Is64Bit, Frame, 5), GetArg(Is64Bit, Frame, 6));
     break;
   // for missing syscalls
-  case 255: return std::invoke(Def.Ptr1, Frame, Args->Argument[0]);
+  case 255: Result = std::invoke(Def.Ptr1, Frame, GetArg(Is64Bit, Frame, 0)); break;
   default:
-    LOGMAN_MSG_A_FMT("Unhandled syscall: {}", Args->Argument[0]);
-    return -1;
+    LOGMAN_MSG_A_FMT("Unhandled syscall: {}", GetArg(Is64Bit, Frame, 0));
+    Result = -ENOSYS;
     break;
   }
 #ifdef DEBUG_STRACE
-  Strace(Args, Result);
+  Strace(Frame, Result);
 #endif
-  return Result;
+  SetResult(Frame, Result);
+}
+
+void SyscallHandler::HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) {
+  // Grab the return address which will be inside the JIT.
+  const uint64_t JITPC = reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
+  const auto Is64Bit = Is64BitMode();
+
+  // TODO: At some point these will be runtime selectable based on `syscall` versus `int 0x80` entrypoint.
+  if (Is64Bit) {
+    HandleSyscallImpl<true>(Frame, JITPC);
+  } else {
+    HandleSyscallImpl<false>(Frame, JITPC);
+  }
+
+  // Skip past the `syscall` or `int 0x80` instruction. Both of which are 2-bytes.
+  auto Thread = FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame);
+  Thread->Thread->CurrentFrame->State.rip += 2;
 }
 
 #ifdef DEBUG_STRACE
-void SyscallHandler::Strace(FEXCore::HLE::SyscallArguments* Args, uint64_t Ret) {
-  auto& Def = Definitions[Args->Argument[0]];
+void SyscallHandler::Strace(FEXCore::Core::CpuStateFrame* Frame, uint64_t Ret) {
+  const auto Is64Bit = Is64BitMode();
+  auto& Def = Definitions[GetArg(Is64Bit, Frame, 0)];
   switch (Def.NumArgs) {
   case 0: LogMan::Msg::DFmt(Def.StraceFmt.c_str(), Ret); break;
-  case 1: LogMan::Msg::DFmt(Def.StraceFmt.c_str(), Args->Argument[1], Ret); break;
-  case 2: LogMan::Msg::DFmt(Def.StraceFmt.c_str(), Args->Argument[1], Args->Argument[2], Ret); break;
-  case 3: LogMan::Msg::DFmt(Def.StraceFmt.c_str(), Args->Argument[1], Args->Argument[2], Args->Argument[3], Ret); break;
-  case 4: LogMan::Msg::DFmt(Def.StraceFmt.c_str(), Args->Argument[1], Args->Argument[2], Args->Argument[3], Args->Argument[4], Ret); break;
+  case 1: LogMan::Msg::DFmt(Def.StraceFmt.c_str(), GetArg(Is64Bit, Frame, 1), Ret); break;
+  case 2: LogMan::Msg::DFmt(Def.StraceFmt.c_str(), GetArg(Is64Bit, Frame, 1), GetArg(Is64Bit, Frame, 2), Ret); break;
+  case 3:
+    LogMan::Msg::DFmt(Def.StraceFmt.c_str(), GetArg(Is64Bit, Frame, 1), GetArg(Is64Bit, Frame, 2), GetArg(Is64Bit, Frame, 3), Ret);
+    break;
+  case 4:
+    LogMan::Msg::DFmt(Def.StraceFmt.c_str(), GetArg(Is64Bit, Frame, 1), GetArg(Is64Bit, Frame, 2), GetArg(Is64Bit, Frame, 3),
+                      GetArg(Is64Bit, Frame, 4), Ret);
+    break;
   case 5:
-    LogMan::Msg::DFmt(Def.StraceFmt.c_str(), Args->Argument[1], Args->Argument[2], Args->Argument[3], Args->Argument[4], Args->Argument[5], Ret);
+    LogMan::Msg::DFmt(Def.StraceFmt.c_str(), GetArg(Is64Bit, Frame, 1), GetArg(Is64Bit, Frame, 2), GetArg(Is64Bit, Frame, 3),
+                      GetArg(Is64Bit, Frame, 4), GetArg(Is64Bit, Frame, 5), Ret);
     break;
   case 6:
-    LogMan::Msg::DFmt(Def.StraceFmt.c_str(), Args->Argument[1], Args->Argument[2], Args->Argument[3], Args->Argument[4], Args->Argument[5],
-                      Args->Argument[6], Ret);
+    LogMan::Msg::DFmt(Def.StraceFmt.c_str(), GetArg(Is64Bit, Frame, 1), GetArg(Is64Bit, Frame, 2), GetArg(Is64Bit, Frame, 3),
+                      GetArg(Is64Bit, Frame, 4), GetArg(Is64Bit, Frame, 5), GetArg(Is64Bit, Frame, 6), Ret);
     break;
   default: break;
   }
@@ -878,9 +949,19 @@ uint64_t UnimplementedSyscallSafe(FEXCore::Core::CpuStateFrame* Frame, uint64_t 
 }
 
 void SyscallHandler::LockBeforeFork(FEXCore::Core::InternalThreadState* Thread) {
-  TM.LockBeforeFork();
-  Thread->CTX->LockBeforeFork(Thread);
-  VMATracking.Mutex.lock();
+  while (true) {
+    TM.LockBeforeFork();
+    Thread->CTX->LockBeforeFork(Thread);
+    if (std::try_lock(CodeCachePatchingMutex, VMATracking.Mutex) == -1) {
+      break;
+    }
+
+    // Lock failed: Another thread has temporarily acquired these mutexes.
+    // Release them to a void a deadlock and retry later
+    CTX->UnlockAfterFork(Thread, false);
+    TM.UnlockAfterFork(Thread, false);
+    std::this_thread::sleep_for(std::chrono::milliseconds {10});
+  };
 }
 
 void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThread, bool Child) {
@@ -889,8 +970,10 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
     FM.SetProtectedCodeMapFD(-1);
 
     VMATracking.Mutex.StealAndDropActiveLocks();
+    CodeCachePatchingMutex.StealAndDropActiveLocks();
   } else {
     VMATracking.Mutex.unlock();
+    CodeCachePatchingMutex.unlock();
   }
 
   CTX->UnlockAfterFork(LiveThread, Child);

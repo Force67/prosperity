@@ -26,24 +26,24 @@ enum Secondary_LUT {
 
 constexpr std::array<X86InstInfo[2], ENTRY_MAX> Secondary_ArchSelect_LUT = {{
   {
-    {"SYSCALL", TYPE_INST, DEFAULT_SYSCALL_FLAGS, 0, { .OpDispatch = &IR::OpDispatchBuilder::NOPOp } },
-    {"SYSCALL", TYPE_INST, DEFAULT_SYSCALL_FLAGS, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::SyscallOp, true> } },
+    {"SYSCALL", TYPE_INST, FLAGS_NO_OVERLAY | FLAGS_BLOCK_END, 0, { .OpDispatch = &IR::OpDispatchBuilder::NOPOp } },
+    {"SYSCALL", TYPE_INST, FLAGS_NO_OVERLAY | FLAGS_BLOCK_END, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::SyscallOp, true> } },
   },
   {
     {"PUSH FS", TYPE_INST, GenFlagsSrcSize(SIZE_16BIT) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::PUSHSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX> } },
-    {"PUSH FS", TYPE_INST, GenFlagsSameSize(SIZE_64BIT) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::PUSHSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX> } },
+    {"PUSH FS", TYPE_INST, GenFlagsSameSize(SIZE_64BITDEF) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::PUSHSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX> } },
   },
   {
     {"POP FS",  TYPE_INST, GenFlagsSizes(SIZE_16BIT, SIZE_DEF) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::POPSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX> } },
-    {"POP FS",  TYPE_INST, GenFlagsSizes(SIZE_16BIT, SIZE_64BIT) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::POPSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX> } },
+    {"POP FS",  TYPE_INST, GenFlagsSizes(SIZE_16BIT, SIZE_64BITDEF) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::POPSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX> } },
   },
   {
     {"PUSH GS", TYPE_INST, GenFlagsSrcSize(SIZE_16BIT) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::PUSHSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX> } },
-    {"PUSH GS", TYPE_INST, GenFlagsSameSize(SIZE_64BIT) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::PUSHSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX> } },
+    {"PUSH GS", TYPE_INST, GenFlagsSameSize(SIZE_64BITDEF) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::PUSHSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX> } },
   },
   {
     {"POP GS",  TYPE_INST, GenFlagsSizes(SIZE_16BIT, SIZE_DEF) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::POPSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX> } },
-    {"POP GS",  TYPE_INST, GenFlagsSizes(SIZE_16BIT, SIZE_64BIT) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::POPSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX> } },
+    {"POP GS",  TYPE_INST, GenFlagsSizes(SIZE_16BIT, SIZE_64BITDEF) | FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .OpDispatch = &IR::OpDispatchBuilder::Bind<&IR::OpDispatchBuilder::POPSegmentOp, FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX> } },
   },
 }};
 
@@ -61,8 +61,8 @@ constexpr std::array<X86InstInfo, MAX_SECOND_TABLE_SIZE> SecondBaseOps = []() co
     {0x05, 1, X86InstInfo{"",           TYPE_ARCH_DISPATCHER, FLAGS_NONE, 0, { .Indirect = Secondary_ArchSelect_LUT[ENTRY_05] }}},
     {0x06, 1, X86InstInfo{"CLTS",       TYPE_INST, FLAGS_NO_OVERLAY,                                                                                    0}},
     {0x07, 1, X86InstInfo{"SYSRET",     TYPE_INST, FLAGS_NO_OVERLAY,                                                                                    0}},
-    {0x08, 1, X86InstInfo{"INVD",       TYPE_PRIV, FLAGS_NO_OVERLAY,                                                                                    0}},
-    {0x09, 1, X86InstInfo{"WBINVD",     TYPE_PRIV, FLAGS_NO_OVERLAY,                                                                                    0}},
+    {0x08, 1, X86InstInfo{"INVD",       TYPE_INST, FLAGS_NO_OVERLAY,                                                                                    0}},
+    {0x09, 1, X86InstInfo{"WBINVD",     TYPE_INST, FLAGS_NO_OVERLAY,                                                                                    0}},
     {0x0A, 1, X86InstInfo{"",           TYPE_INVALID, FLAGS_NO_OVERLAY,                                                                                 0}},
     {0x0B, 1, X86InstInfo{"UD2",        TYPE_INST, FLAGS_BLOCK_END | FLAGS_NO_OVERLAY,                                                    0}},
     {0x0C, 1, X86InstInfo{"",           TYPE_INVALID, FLAGS_NO_OVERLAY,                                                                                 0}},
@@ -204,24 +204,24 @@ constexpr std::array<X86InstInfo, MAX_SECOND_TABLE_SIZE> SecondBaseOps = []() co
 
     {0xA0, 1, X86InstInfo{"",        TYPE_ARCH_DISPATCHER, FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .Indirect = Secondary_ArchSelect_LUT[ENTRY_A0] }}},
     {0xA1, 1, X86InstInfo{"",        TYPE_ARCH_DISPATCHER, FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .Indirect = Secondary_ArchSelect_LUT[ENTRY_A1] }}},
-    {0xA2, 1, X86InstInfo{"CPUID",   TYPE_INST,     FLAGS_SF_SRC_RAX | FLAGS_NO_OVERLAY,                                              0}},
-    {0xA3, 1, X86InstInfo{"BT",      TYPE_INST,     FLAGS_DEBUG_MEM_ACCESS | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                     0}},
+    {0xA2, 1, X86InstInfo{"CPUID",   TYPE_INST,     FLAGS_NO_OVERLAY,                                              0}},
+    {0xA3, 1, X86InstInfo{"BT",      TYPE_INST,     FLAGS_DEBUG_MEM_ACCESS | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY | FLAGS_SUPPORTS_LOCK, 0}},
     {0xA4, 1, X86InstInfo{"SHLD",    TYPE_INST,     FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                                              1}},
-    {0xA5, 1, X86InstInfo{"SHLD",    TYPE_INST,     FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_SF_SRC_RCX | FLAGS_NO_OVERLAY,                           0}},
+    {0xA5, 1, X86InstInfo{"SHLD",    TYPE_INST,     FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                           0}},
     {0xA6, 2, X86InstInfo{"",        TYPE_INVALID,  FLAGS_NO_OVERLAY,                                                                               0}},
     {0xA8, 1, X86InstInfo{"",        TYPE_ARCH_DISPATCHER, FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .Indirect = Secondary_ArchSelect_LUT[ENTRY_A8] }}},
     {0xA9, 1, X86InstInfo{"",        TYPE_ARCH_DISPATCHER, FLAGS_DEBUG_MEM_ACCESS | FLAGS_NO_OVERLAY, 0, { .Indirect = Secondary_ArchSelect_LUT[ENTRY_A9] }}},
     {0xAA, 1, X86InstInfo{"RSM",     TYPE_PRIV,     FLAGS_NO_OVERLAY,                                                                               0}},
-    {0xAB, 1, X86InstInfo{"BTS",     TYPE_INST,     FLAGS_DEBUG_MEM_ACCESS | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                     0}},
+    {0xAB, 1, X86InstInfo{"BTS",     TYPE_INST,     FLAGS_DEBUG_MEM_ACCESS | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY | FLAGS_SUPPORTS_LOCK, 0}},
     {0xAC, 1, X86InstInfo{"SHRD",    TYPE_INST,     FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                                              1}},
-    {0xAD, 1, X86InstInfo{"SHRD",    TYPE_INST,     FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_SF_SRC_RCX | FLAGS_NO_OVERLAY,                           0}},
+    {0xAD, 1, X86InstInfo{"SHRD",    TYPE_INST,     FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                           0}},
     {0xAE, 1, X86InstInfo{"",        TYPE_GROUP_15, FLAGS_NO_OVERLAY,                                                                               0}},
     {0xAF, 1, X86InstInfo{"IMUL",    TYPE_INST,     FLAGS_MODRM | FLAGS_NO_OVERLAY,                                                                 0}},
 
-    {0xB0, 1, X86InstInfo{"CMPXCHG", TYPE_INST, GenFlagsSameSize(SIZE_8BIT) | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                    0}},
-    {0xB1, 1, X86InstInfo{"CMPXCHG", TYPE_INST, FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                                                  0}},
+    {0xB0, 1, X86InstInfo{"CMPXCHG", TYPE_INST, GenFlagsSameSize(SIZE_8BIT) | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY | FLAGS_SUPPORTS_LOCK, 0}},
+    {0xB1, 1, X86InstInfo{"CMPXCHG", TYPE_INST, FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY | FLAGS_SUPPORTS_LOCK,                               0}},
     {0xB2, 1, X86InstInfo{"LSS",     TYPE_INVALID, FLAGS_NO_OVERLAY,                                                                                0}},
-    {0xB3, 1, X86InstInfo{"BTR",     TYPE_INST, FLAGS_DEBUG_MEM_ACCESS | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                         0}},
+    {0xB3, 1, X86InstInfo{"BTR",     TYPE_INST, FLAGS_DEBUG_MEM_ACCESS | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY | FLAGS_SUPPORTS_LOCK,   0}},
     {0xB4, 1, X86InstInfo{"LFS",     TYPE_INVALID, FLAGS_NO_OVERLAY,                                                                                0}},
     {0xB5, 1, X86InstInfo{"LGS",     TYPE_INVALID, FLAGS_NO_OVERLAY,                                                                                0}},
     {0xB6, 1, X86InstInfo{"MOVZX",   TYPE_INST, GenFlagsSrcSize(SIZE_8BIT) | FLAGS_MODRM | FLAGS_NO_OVERLAY,                                        0}},
@@ -229,14 +229,14 @@ constexpr std::array<X86InstInfo, MAX_SECOND_TABLE_SIZE> SecondBaseOps = []() co
     {0xB8, 1, X86InstInfo{"",        TYPE_INVALID, FLAGS_NONE,                                                                                      0}},
     {0xB9, 1, X86InstInfo{"",        TYPE_GROUP_10, FLAGS_NO_OVERLAY,                                                                               0}},
     {0xBA, 1, X86InstInfo{"",        TYPE_GROUP_8, FLAGS_NO_OVERLAY,                                                                                0}},
-    {0xBB, 1, X86InstInfo{"BTC",     TYPE_INST, FLAGS_DEBUG_MEM_ACCESS | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                         0}},
+    {0xBB, 1, X86InstInfo{"BTC",     TYPE_INST, FLAGS_DEBUG_MEM_ACCESS | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY | FLAGS_SUPPORTS_LOCK,   0}},
     {0xBC, 1, X86InstInfo{"BSF",     TYPE_INST, FLAGS_MODRM | FLAGS_NO_OVERLAY66,                                                                   0}},
     {0xBD, 1, X86InstInfo{"BSR",     TYPE_INST, FLAGS_MODRM | FLAGS_NO_OVERLAY66,                                                                   0}},
     {0xBE, 1, X86InstInfo{"MOVSX",   TYPE_INST, GenFlagsSrcSize(SIZE_8BIT) | FLAGS_MODRM | FLAGS_NO_OVERLAY,                                        0}},
     {0xBF, 1, X86InstInfo{"MOVSX",   TYPE_INST, GenFlagsSrcSize(SIZE_16BIT) | FLAGS_MODRM | FLAGS_NO_OVERLAY,                                       0}},
 
-    {0xC0, 1, X86InstInfo{"XADD",    TYPE_INST, GenFlagsSameSize(SIZE_8BIT) | FLAGS_MODRM | FLAGS_SF_MOD_DST,                                                       0}},
-    {0xC1, 1, X86InstInfo{"XADD",    TYPE_INST, FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY,                                                                 0}},
+    {0xC0, 1, X86InstInfo{"XADD",    TYPE_INST, GenFlagsSameSize(SIZE_8BIT) | FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_SUPPORTS_LOCK,                                0}},
+    {0xC1, 1, X86InstInfo{"XADD",    TYPE_INST, FLAGS_MODRM | FLAGS_SF_MOD_DST | FLAGS_NO_OVERLAY | FLAGS_SUPPORTS_LOCK,                                           0}},
     {0xC2, 1, X86InstInfo{"CMPPS",   TYPE_INST, GenFlagsSameSize(SIZE_128BIT) | FLAGS_MODRM | FLAGS_XMM_FLAGS,                                                     1}},
     {0xC3, 1, X86InstInfo{"MOVNTI",  TYPE_INST, FLAGS_MODRM | FLAGS_SF_MOD_MEM_ONLY | FLAGS_SF_MOD_DST,                                                            0}},
     {0xC4, 1, X86InstInfo{"PINSRW",  TYPE_INST, GenFlagsSizes(SIZE_64BIT, SIZE_16BIT) | FLAGS_MODRM | FLAGS_XMM_FLAGS | FLAGS_SF_MMX | FLAGS_SF_SRC_GPR,           1}},
@@ -303,7 +303,7 @@ constexpr std::array<X86InstInfo, MAX_SECOND_TABLE_SIZE> SecondBaseOps = []() co
     {0x3E, 1, X86InstInfo{"CALLBACKRET",  TYPE_INST, FLAGS_BLOCK_END | FLAGS_NO_OVERLAY | FLAGS_SETS_RIP,                                                                          0}},
 
     // This was originally used by VIA to jump to its alternative instruction set. Used for OP_THUNK
-    {0x3F, 1, X86InstInfo{"ALTINST",      TYPE_INST, FLAGS_BLOCK_END | FLAGS_NO_OVERLAY | FLAGS_SETS_RIP,                                                            0}},
+    {0x3F, 1, X86InstInfo{"ALTINST",      TYPE_INST, FLAGS_BLOCK_END | FLAGS_NO_OVERLAY | FLAGS_SETS_RIP,                                                            sizeof(IR::SHA256Sum)}},
 #endif
   };
 

@@ -32,7 +32,6 @@
 #include <sys/personality.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
-#include <linux/prctl.h>
 
 #define PAGE_START(x) ((x) & ~(uintptr_t)(4095))
 #define PAGE_OFFSET(x) ((x) & 4095)
@@ -44,6 +43,8 @@ class ELFCodeLoader final : public FEX::CodeLoader {
 
   bool ElfValid {false};
   bool ExecutableStack {false};
+  bool ExecuteAll {false};
+  bool HasStackHeader {false};
   uintptr_t MainElfBase {};
   uintptr_t InterpeterElfBase {};
   uintptr_t MainElfEntrypoint {};
@@ -296,15 +297,15 @@ public:
 #ifndef AT_FLAGS_PRESERVE_ARGV0
 #define AT_FLAGS_PRESERVE_ARGV0 1
 #endif
-    uint32_t HostKernel = FEX::HLE::SyscallHandler::CalculateHostKernelVersion();
-    if ((HostKernel >= FEX::HLE::SyscallHandler::KernelVersion(5, 12, 0) && (AtFlags & AT_FLAGS_PRESERVE_ARGV0)) || LoadedWithFD) {
+    uint32_t HostKernel = FEX::LinuxVersion::CalculateHostKernelVersion();
+    if ((HostKernel >= FEX::LinuxVersion::KernelVersion(5, 12, 0) && (AtFlags & AT_FLAGS_PRESERVE_ARGV0)) || LoadedWithFD) {
 
       // Erase the initial argument from the list in this case
       ApplicationArgs.erase(ApplicationArgs.begin());
     }
 
     // Append any additional arguments from config
-    const auto AdditionalArgs = AdditionalArguments.All();
+    const auto& AdditionalArgs = AdditionalArguments.All();
     ApplicationArgs.insert(ApplicationArgs.end(), AdditionalArgs.begin(), AdditionalArgs.end());
 
     if (!MainElf.InterpreterElf.empty() && !SkipInterpreter) {
@@ -334,7 +335,7 @@ public:
     }
 
     if (AdditionalEnvp) {
-      const auto EnvpList = AdditionalEnvp->All();
+      const auto& EnvpList = AdditionalEnvp->All();
       EnvironmentVariables.insert(EnvironmentVariables.end(), EnvpList.begin(), EnvpList.end());
     }
 
@@ -391,6 +392,7 @@ public:
   bool MapMemory(FEX::HLE::SyscallMmapInterface* const Handler, FEXCore::Core::InternalThreadState* Thread) {
     for (const auto& Header : MainElf.phdrs) {
       if (Header.p_type == PT_GNU_STACK) {
+        HasStackHeader = true;
         if (Header.p_flags & PF_X) {
           ExecutableStack = true;
         }
@@ -400,11 +402,17 @@ public:
       // Both for the main and the interpreter elf
     }
 
+    if (!HasStackHeader && !Is64BitMode()) {
+      // 32-bit behavior
+      ExecutableStack = true;
+      ExecuteAll = true;
+    }
+
     // Set the process personality here
-    // This needs some more investigation
-    // READ_IMPLIES_EXEC might be default for 32-bit elfs
     // Also, what about ADDR_LIMIT_3GB & co ?
-    if (-1 == personality(PER_LINUX | (ExecutableStack ? READ_IMPLIES_EXEC : 0))) {
+    uint32_t Personality = personality(~0U);
+    Personality |= ExecuteAll ? READ_IMPLIES_EXEC : 0;
+    if (-1 == personality(Personality)) {
       LogMan::Msg::EFmt("Setting personality failed");
       return false;
     }
@@ -412,7 +420,7 @@ public:
     if (Thread) {
       // Update the thread persona.
       auto ThreadObject = static_cast<FEX::HLE::ThreadStateObject*>(Thread->FrontendPtr);
-      ThreadObject->persona = ::personality(0xffffffff);
+      ThreadObject->persona = Personality;
     }
 
     // What about ASLR and such ?
@@ -446,12 +454,31 @@ public:
     // On the upside, this more accurately emulates how the kernel allocates stack space for the application when hinting at the location.
     //
     void* StackPointerBase {};
-    uint64_t StackHint = Is64BitMode() ? STACK_HINT_64 : STACK_HINT_32;
+    auto VABits = FEXCore::Allocator::GetHostVABits();
+    uint64_t StackHint {};
+    if (Is64BitMode()) {
+      if (VABits > 47) {
+        // If VA size is at least as large as minimum x86 specification, then set to max.
+        VABits = 47;
+      }
 
-    // Allocate the base of the full 128MB stack range.
-    StackPointerBase = Handler->GuestMmap(Thread, reinterpret_cast<void*>(StackHint), FULL_STACK_SIZE, PROT_NONE,
-                                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_GROWSDOWN | MAP_NORESERVE, -1, 0);
+      // Calculate the highest point the stack could go.
+      StackHint = (1ULL << VABits) - FULL_STACK_SIZE;
+    } else {
+      // Needs to be under the 4GB VA space.
+      StackHint = 0x1'0000'0000ULL - FULL_STACK_SIZE;
+    }
 
+    auto PageSize = sysconf(_SC_PAGESIZE);
+    PageSize = PageSize > 0 ? PageSize : FEXCore::Utils::FEX_PAGE_SIZE;
+
+    do {
+      // Allocate the base of the full 128MB stack range.
+      StackPointerBase = Handler->GuestMmap(Thread, reinterpret_cast<void*>(StackHint), FULL_STACK_SIZE, PROT_NONE,
+                                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_GROWSDOWN | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+      // Scan-downward until we fit.
+      StackHint -= PageSize;
+    } while (FEX::HLE::HasSyscallError(StackPointerBase) && static_cast<int64_t>(StackHint) > 0);
 
     if (FEX::HLE::HasSyscallError(StackPointerBase)) {
       LogMan::Msg::EFmt("Allocating stack failed");
@@ -459,9 +486,9 @@ public:
     }
 
     // Allocate with permissions the 8MB of regular stack size.
-    StackPointer = reinterpret_cast<uintptr_t>(
-      Handler->GuestMmap(Thread, reinterpret_cast<void*>(reinterpret_cast<uint64_t>(StackPointerBase) + FULL_STACK_SIZE - StackSize()),
-                         StackSize(), PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_GROWSDOWN, -1, 0));
+    StackPointer = reinterpret_cast<uintptr_t>(Handler->GuestMmap(
+      Thread, reinterpret_cast<void*>(reinterpret_cast<uint64_t>(StackPointerBase) + FULL_STACK_SIZE - StackSize()), StackSize(),
+      PROT_READ | PROT_WRITE | (ExecutableStack ? PROT_EXEC : 0), MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_GROWSDOWN, -1, 0));
 
     if (FEX::HLE::HasSyscallError(StackPointer)) {
       LogMan::Msg::EFmt("Allocating stack failed");
@@ -530,15 +557,14 @@ public:
       if (Is64BitMode()) {
         // Ensure that if we are running on a 36-bit VA system, we don't try hinting that an ELF should
         // live way outside the VA space.
-        uint64_t HostVASize = 1ULL << FEXCore::Allocator::DetermineVASize();
-        ELFLoadHint = std::min(HostVASize, TASK_SIZE_64) / 3 * 2;
+        uint64_t HostVABits = 1ULL << FEXCore::Allocator::GetHostVABits();
+        ELFLoadHint = std::min(HostVABits, TASK_SIZE_64) / 3 * 2;
       } else {
         ELFLoadHint = TASK_SIZE_32 / 3 * 2;
       }
 #define ASLR_LOAD
 #ifdef ASLR_LOAD
       // Only enable ASLR randomization if the personality has it enabled.
-      uint32_t Personality = personality(~0ULL);
       bool NoRandomize = (Personality & ADDR_NO_RANDOMIZE) == ADDR_NO_RANDOMIZE;
 
       if (!NoRandomize) {
@@ -619,6 +645,11 @@ public:
 
     if (Is64BitMode()) {
       AuxVariables.emplace_back(auxv_t {4, 0x38}); // AT_PHENT
+
+      // 64-bit vsyscall entry points are hardcoded to a single page at 0xffffffffff600000.
+      // FEX can't actually map anything there so it is a hardcoded quirk, similar to how the kernel traps these executions.
+      // Just track it as a mapped anonymous executable page.
+      Handler->AddVirtualPage(Thread, 0xFFFFFFFFFF600000ULL, FEXCore::Utils::FEX_PAGE_SIZE, PROT_READ | PROT_EXEC);
     } else {
       AuxVariables.emplace_back(auxv_t {4, 0x20}); // AT_PHENT
 
@@ -740,25 +771,37 @@ public:
     // Ensure we don't read past the end into garbage data
     stat_buffer[std::clamp(bytes_read, 0L, static_cast<ssize_t>(sizeof(stat_buffer)) - 1)] = '\0';
 
+    uint64_t start_code, end_code, start_stack, start_data, end_data, start_brk, arg_start, arg_end, env_start, env_end;
+
     // See man proc_pid_stat
     int items_read = sscanf(stat_buffer,
-                            "%*d %*s %*c %*d %*d "      // 1 to 5
-                            "%*d %*d %*d %*u %*u "      // 6 to 10
-                            "%*u %*u %*u %*u %*u "      // 11 to 15
-                            "%*d %*d %*d %*d %*d "      // 16 to 20
-                            "%*d %*u %*u %*d %*u "      // 21 to 25
-                            "%llu %llu %llu %*u %*u "   // 26 to 30
-                            "%*u %*u %*u %*u %*u "      // 31 to 35
-                            "%*u %*u %*d %*d %*u "      // 36 to 40
-                            "%*u %*u %*u %*d %llu "     // 40 to 45
-                            "%llu %llu %llu %llu %llu " // 46 to 50
-                            "%llu",                     // 51
-                            &map.start_code, &map.end_code, &map.start_stack, &map.start_data, &map.end_data, &map.start_brk,
-                            &map.arg_start, &map.arg_end, &map.env_start, &map.env_end);
+                            "%*d %*s %*c %*d %*d " // 1 to 5
+                            "%*d %*d %*d %*u %*u " // 6 to 10
+                            "%*u %*u %*u %*u %*u " // 11 to 15
+                            "%*d %*d %*d %*d %*d " // 16 to 20
+                            "%*d %*u %*u %*d %*u " // 21 to 25
+                            "%lu %lu %lu %*u %*u " // 26 to 30
+                            "%*u %*u %*u %*u %*u " // 31 to 35
+                            "%*u %*u %*d %*d %*u " // 36 to 40
+                            "%*u %*u %*u %*d %lu " // 40 to 45
+                            "%lu %lu %lu %lu %lu " // 46 to 50
+                            "%lu",                 // 51
+                            &start_code, &end_code, &start_stack, &start_data, &end_data, &start_brk, &arg_start, &arg_end, &env_start, &env_end);
 
     if (items_read != 10) {
       return false;
     }
+
+    map.start_code = start_code;
+    map.end_code = end_code;
+    map.start_stack = start_stack;
+    map.start_data = start_data;
+    map.end_data = end_data;
+    map.start_brk = start_brk;
+    map.arg_start = arg_start;
+    map.arg_end = arg_end;
+    map.env_start = env_start;
+    map.env_end = env_end;
 
     map.brk = reinterpret_cast<uint64_t>(sbrk(0));
 
@@ -859,7 +902,8 @@ public:
 
     // Setup ExecFN aux
     AuxExecFN->val = StackPointer + ExecFNLocation;
-    strncpy(reinterpret_cast<char*>(AuxExecFN->val), ApplicationArgs[0].c_str(), ApplicationArgs[0].size() + 1);
+    const auto InvocationName = reinterpret_cast<char*>(AuxExecFN->val);
+    strncpy(InvocationName, ApplicationArgs[0].c_str(), ApplicationArgs[0].size() + 1);
 
     // Stack setup
     // [0, 8):   Argument Count
@@ -884,6 +928,21 @@ public:
     }
 
     RemapArgumentData(StackPointer + ArgumentOffset, ArgumentBackingSize);
+#if defined(HAS_PROGRAM_INVOCATION_NAME) && HAS_PROGRAM_INVOCATION_NAME
+    // Set the glibc invocation names to the process name.
+    // Mesa uses this to determine application profiles.
+    // Necessary when thunking is enabled otherwise mesa would only see FEX.
+
+    std::string_view INV = std::string_view(InvocationName, ApplicationArgs[0].size());
+    auto short_name = InvocationName;
+    auto iter = INV.rfind('/');
+    if (iter != INV.npos) {
+      short_name = &InvocationName[iter + 1];
+    }
+
+    program_invocation_name = InvocationName;
+    program_invocation_short_name = short_name;
+#endif
   }
 
   fextl::vector<const char*> GetExecveArguments() const override {
@@ -986,8 +1045,6 @@ public:
   constexpr static uint64_t BRK_SIZE = 8 * 1024 * 1024;
   constexpr static uint64_t STACK_SIZE = 8 * 1024 * 1024;
   constexpr static uint64_t FULL_STACK_SIZE = 128 * 1024 * 1024;
-  constexpr static uint64_t STACK_HINT_32 = 0xFFFFE000 - FULL_STACK_SIZE;
-  constexpr static uint64_t STACK_HINT_64 = 0x7FFFFFFFF000 - FULL_STACK_SIZE;
 
   fextl::vector<fextl::string> EnvironmentVariables;
   fextl::vector<const char*> LoaderArgs;

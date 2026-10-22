@@ -106,6 +106,84 @@ const Simulator::FormToVisitorFnMap* Simulator::GetFormToVisitorFnMap() {
   static const FormToVisitorFnMap form_to_visitor = {
       DEFAULT_FORM_TO_VISITOR_MAP(Simulator),
       SIM_AUD_VISITOR_MAP(Simulator),
+      {"fmov_h_floatdp1"_h, &Simulator::SimulateFPConvert},
+      {"fmov_s_floatdp1"_h, &Simulator::SimulateFPConvert},
+      {"fmov_d_floatdp1"_h, &Simulator::SimulateFPConvert},
+      {"fcvt_ds_floatdp1"_h, &Simulator::SimulateFPConvert},
+      {"fcvt_sd_floatdp1"_h, &Simulator::SimulateFPConvert},
+      {"fcvt_hs_floatdp1"_h, &Simulator::SimulateFPConvert},
+      {"fcvt_sh_floatdp1"_h, &Simulator::SimulateFPConvert},
+      {"fcvt_dh_floatdp1"_h, &Simulator::SimulateFPConvert},
+      {"fcvt_hd_floatdp1"_h, &Simulator::SimulateFPConvert},
+      {"bfcvt_bs_floatdp1"_h, &Simulator::SimulateFPConvert},
+      {"frint32x_d_floatdp1"_h, &Simulator::SimulateFPRoundIntToSize},
+      {"frint32x_s_floatdp1"_h, &Simulator::SimulateFPRoundIntToSize},
+      {"frint32z_d_floatdp1"_h, &Simulator::SimulateFPRoundIntToSize},
+      {"frint32z_s_floatdp1"_h, &Simulator::SimulateFPRoundIntToSize},
+      {"frint64x_d_floatdp1"_h, &Simulator::SimulateFPRoundIntToSize},
+      {"frint64x_s_floatdp1"_h, &Simulator::SimulateFPRoundIntToSize},
+      {"frint64z_d_floatdp1"_h, &Simulator::SimulateFPRoundIntToSize},
+      {"frint64z_s_floatdp1"_h, &Simulator::SimulateFPRoundIntToSize},
+      {"frinta_d_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frinta_h_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frinta_s_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frinti_d_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frinti_h_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frinti_s_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintm_d_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintm_h_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintm_s_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintn_d_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintn_h_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintn_s_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintp_d_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintp_h_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintp_s_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintx_d_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintx_h_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintx_s_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintz_d_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintz_h_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"frintz_s_floatdp1"_h, &Simulator::SimulateFPRoundInt},
+      {"fcvtas_asimdmisc_r"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtau_asimdmisc_r"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtl_asimdmisc_l"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtms_asimdmisc_r"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtmu_asimdmisc_r"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtns_asimdmisc_r"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtnu_asimdmisc_r"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtn_asimdmisc_n"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtps_asimdmisc_r"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtpu_asimdmisc_r"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtxn_asimdmisc_n"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtzs_asimdmisc_r"_h, &Simulator::SimulateNEONFPConvert},
+      {"fcvtzu_asimdmisc_r"_h, &Simulator::SimulateNEONFPConvert},
+      {"bfcvtn_asimdmisc_4s"_h, &Simulator::SimulateNEONFPConvert},
+      {"frint32x_asimdmisc_r"_h, &Simulator::SimulateNEONRoundIntToSize},
+      {"frint32z_asimdmisc_r"_h, &Simulator::SimulateNEONRoundIntToSize},
+      {"frint64x_asimdmisc_r"_h, &Simulator::SimulateNEONRoundIntToSize},
+      {"frint64z_asimdmisc_r"_h, &Simulator::SimulateNEONRoundIntToSize},
+      {"frinta_asimdmisc_r"_h, &Simulator::SimulateNEONRoundInt},
+      {"frinti_asimdmisc_r"_h, &Simulator::SimulateNEONRoundInt},
+      {"frintm_asimdmisc_r"_h, &Simulator::SimulateNEONRoundInt},
+      {"frintn_asimdmisc_r"_h, &Simulator::SimulateNEONRoundInt},
+      {"frintp_asimdmisc_r"_h, &Simulator::SimulateNEONRoundInt},
+      {"frintx_asimdmisc_r"_h, &Simulator::SimulateNEONRoundInt},
+      {"frintz_asimdmisc_r"_h, &Simulator::SimulateNEONRoundInt},
+      {"fabs_asimdmisc_r"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"fcmeq_asimdmisc_fz"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"fcmge_asimdmisc_fz"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"fcmgt_asimdmisc_fz"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"fcmle_asimdmisc_fz"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"fcmlt_asimdmisc_fz"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"fneg_asimdmisc_r"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"frecpe_asimdmisc_r"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"frsqrte_asimdmisc_r"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"fsqrt_asimdmisc_r"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"scvtf_asimdmisc_r"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"ucvtf_asimdmisc_r"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"urecpe_asimdmisc_r"_h, &Simulator::SimulateNEONFP2RegMisc},
+      {"ursqrte_asimdmisc_r"_h, &Simulator::SimulateNEONFP2RegMisc},
       {"smlal_asimdelem_l"_h, &Simulator::SimulateNEONMulByElementLong},
       {"smlsl_asimdelem_l"_h, &Simulator::SimulateNEONMulByElementLong},
       {"smull_asimdelem_l"_h, &Simulator::SimulateNEONMulByElementLong},
@@ -158,6 +236,8 @@ const Simulator::FormToVisitorFnMap* Simulator::GetFormToVisitorFnMap() {
       {"fcvtlt_z_p_z_h2s"_h, &Simulator::SimulateSVEFPConvertLong},
       {"fcvtlt_z_p_z_s2d"_h, &Simulator::SimulateSVEFPConvertLong},
       {"fcvtnt_z_p_z_d2s"_h, &Simulator::Simulate_ZdS_PgM_ZnD},
+      {"bfcvt_z_p_z_s2bf"_h, &Simulator::Simulate_ZdH_PgM_ZnS},
+      {"bfcvtnt_z_p_z_s2bf"_h, &Simulator::Simulate_ZdH_PgM_ZnS},
       {"fcvtnt_z_p_z_s2h"_h, &Simulator::Simulate_ZdH_PgM_ZnS},
       {"fcvtx_z_p_z_d2s"_h, &Simulator::Simulate_ZdS_PgM_ZnD},
       {"fcvtxnt_z_p_z_d2s"_h, &Simulator::Simulate_ZdS_PgM_ZnD},
@@ -566,7 +646,7 @@ Simulator::Simulator(Decoder* decoder, FILE* stream, SimStack::Allocated stack)
     : memory_(std::move(stack)),
       last_instr_(NULL),
       cpu_features_auditor_(decoder, CPUFeatures::All()),
-      gcs_(kGCSNoStack),
+      gcs_({nullptr, kGCSNoStack}),
       gcs_enabled_(false) {
   // Ensure that shift operations act as the simulator expects.
   VIXL_ASSERT((static_cast<int32_t>(-1) >> 1) == -1);
@@ -704,7 +784,7 @@ void Simulator::ResetState() {
 void Simulator::SetVectorLengthInBits(unsigned vector_length) {
   VIXL_ASSERT((vector_length >= kZRegMinSize) &&
               (vector_length <= kZRegMaxSize));
-  VIXL_ASSERT((vector_length % kZRegMinSize) == 0);
+  VIXL_ASSERT(IsPowerOf2(vector_length));
   vector_length_ = vector_length;
 
   for (unsigned i = 0; i < kNumberOfZRegisters; i++) {
@@ -729,9 +809,7 @@ Simulator::~Simulator() {
   close(placeholder_pipe_fd_[0]);
   close(placeholder_pipe_fd_[1]);
 #endif
-  if (IsAllocatedGCS(gcs_)) {
-    GetGCSManager().FreeStack(gcs_);
-  }
+  GetGCSManager().FreeStack(GetGCSToken());
 }
 
 
@@ -902,7 +980,6 @@ void Simulator::ExtractFromSimVRegister(VectorFormat vform,
                                         SimPRegister& pd,
                                         SimVRegister vreg) {
   SimVRegister zero;
-  dup_immediate(kFormatVnB, zero, 0);
   SVEIntCompareVectorsHelper(ne,
                              vform,
                              pd,
@@ -1836,9 +1913,9 @@ void Simulator::PrintSystemRegister(SystemRegister id) {
 void Simulator::PrintGCS(bool is_push, uint64_t addr, size_t entry) {
   const char* arrow = is_push ? "<-" : "->";
   fprintf(stream_,
-          "# %sgcs0x%04" PRIx64 "[%" PRIu64 "]: %s %s 0x%016" PRIxPTR "\n",
+          "# %sgcs0x%04" PRIu64 "[%zx]: %s %s 0x%016" PRIx64 "\n",
           clr_flag_name,
-          gcs_,
+          GCSManager::GetGCSIndexFromToken(GetGCSToken()),
           entry,
           clr_normal,
           arrow,
@@ -2226,8 +2303,14 @@ void Simulator::PrintTakenBranch(const Instruction* target) {
 
 
 void Simulator::Visit(Metadata* metadata, const Instruction* instr) {
-  VIXL_ASSERT(metadata->count("form") > 0);
-  std::string form = (*metadata)["form"];
+  VIXL_ASSERT(!metadata->form.empty());
+  // Check for unallocated encodings.
+  if (metadata->unallocated) {
+    VisitUnallocated(instr);
+    return;
+  }
+
+  std::string form = metadata->form;
   form_hash_ = Hash(form.c_str());
   const FormToVisitorFnMap* fv = Simulator::GetFormToVisitorFnMap();
   FormToVisitorFnMap::const_iterator it = fv->find(form_hash_);
@@ -2490,7 +2573,7 @@ void Simulator::Simulate_ZdH_PgM_ZnS(const Instruction* instr) {
   SimPRegister& pg = ReadPRegister(instr->GetPgLow8());
   SimVRegister& zd = ReadVRegister(instr->GetRd());
   SimVRegister& zn = ReadVRegister(instr->GetRn());
-  SimVRegister result, zd_b;
+  SimVRegister result, zd_b, zero;
 
   pack_even_elements(kFormatVnH, zd_b, zd);
 
@@ -2498,6 +2581,14 @@ void Simulator::Simulate_ZdH_PgM_ZnS(const Instruction* instr) {
     case "fcvtnt_z_p_z_s2h"_h:
       fcvt(kFormatVnH, kFormatVnS, result, pg, zn);
       pack_even_elements(kFormatVnH, result, result);
+      zip1(kFormatVnH, result, zd_b, result);
+      break;
+    case "bfcvt_z_p_z_s2bf"_h:
+      bfcvtn(kFormatVnH, result, zn);
+      zip1(kFormatVnH, result, result, zero);
+      break;
+    case "bfcvtnt_z_p_z_s2bf"_h:
+      bfcvtn(kFormatVnH, result, zn);
       zip1(kFormatVnH, result, zd_b, result);
       break;
     default:
@@ -2512,7 +2603,6 @@ void Simulator::Simulate_ZdS_PgM_ZnD(const Instruction* instr) {
   SimVRegister& zn = ReadVRegister(instr->GetRn());
   SimVRegister result, zero, zd_b;
 
-  zero.Clear();
   pack_even_elements(kFormatVnS, zd_b, zd);
 
   switch (form_hash_) {
@@ -2828,7 +2918,6 @@ void Simulator::SimulateSVENarrow(const Instruction* instr) {
   } else {
     // Zero odd elements, replace even elements with the results.
     SimVRegister zero;
-    zero.Clear();
     zip1(vform, zd, result, zero);
   }
 }
@@ -3027,7 +3116,6 @@ void Simulator::SimulateSVEAddSubHigh(const Instruction* instr) {
   } else {
     // Zero odd elements, replace even elements with the results.
     SimVRegister zero;
-    zero.Clear();
     zip1(vform, zd, result, zero);
   }
 }
@@ -3236,10 +3324,10 @@ void Simulator::Simulate_ZdaT_PgM_ZnTb(const Instruction* instr) {
 
   switch (form_hash_) {
     case "sadalp_z_p_z"_h:
-      sadalp(vform, result, zn);
+      sadalp(vform, result, zn, zda);
       break;
     case "uadalp_z_p_z"_h:
-      uadalp(vform, result, zn);
+      uadalp(vform, result, zn, zda);
       break;
     default:
       VIXL_UNIMPLEMENTED();
@@ -3367,7 +3455,6 @@ void Simulator::Simulate_ZdaT_ZnTb_ZmTb(const Instruction* instr) {
   SimVRegister& zn = ReadVRegister(instr->GetRn());
 
   SimVRegister zero, zn_b, zm_b, zn_t, zm_t;
-  zero.Clear();
 
   VectorFormat vform_half = VectorFormatHalfWidth(vform);
   uzp1(vform_half, zn_b, zn, zero);
@@ -3851,7 +3938,8 @@ void Simulator::VisitUnconditionalBranch(const Instruction* instr) {
 
 
 void Simulator::VisitConditionalBranch(const Instruction* instr) {
-  VIXL_ASSERT(instr->Mask(ConditionalBranchMask) == B_cond);
+  VIXL_ASSERT((form_hash_ == "b_only_condbranch"_h) ||
+              (form_hash_ == "bc_only_condbranch"_h));
   if (ConditionPassed(instr->GetConditionBranch())) {
     WritePc(instr->GetImmPCOffsetTarget());
   }
@@ -4131,6 +4219,7 @@ void Simulator::VisitRotateRightIntoFlags(const Instruction* instr) {
       uint64_t rotated = RotateRight(value, shift, kXRegSize);
 
       ReadNzcv().SetFlags((rotated & mask) | (ReadNzcv().GetFlags() & ~mask));
+      LogSystemRegister(NZCV);
       break;
     }
   }
@@ -4146,6 +4235,7 @@ void Simulator::VisitEvaluateIntoFlags(const Instruction* instr) {
   ReadNzcv().SetN(sign_bit);
   ReadNzcv().SetZ((value << (31 - msb)) == 0);
   ReadNzcv().SetV(sign_bit ^ overflow_bit);
+  LogSystemRegister(NZCV);
 }
 
 
@@ -5969,14 +6059,6 @@ void Simulator::VisitBitfield(const Instruction* instr) {
   int R = instr->GetImmR();
   int S = instr->GetImmS();
 
-  if (instr->GetSixtyFourBits() != instr->GetBitN()) {
-    VisitUnallocated(instr);
-  }
-
-  if ((instr->GetSixtyFourBits() == 0) && ((S > 31) || (R > 31))) {
-    VisitUnallocated(instr);
-  }
-
   int diff = S - R;
   uint64_t mask;
   if (diff >= 0) {
@@ -6587,151 +6669,171 @@ void Simulator::VisitFPConditionalSelect(const Instruction* instr) {
   }
 }
 
+void Simulator::SimulateFPRoundIntToSize(const Instruction* instr) {
+  AssertSupportedFPCR();
+
+  struct FPRoundInfo {
+    VectorFormat vform;
+    bool use_fpcr;
+    FrintMode frint_mode;
+  };
+
+  std::unordered_map<uint32_t, FPRoundInfo> modes = {
+      {"frint32x_d_floatdp1"_h, {kFormatD, true, kFrintToInt32}},
+      {"frint32x_s_floatdp1"_h, {kFormatS, true, kFrintToInt32}},
+      {"frint64x_d_floatdp1"_h, {kFormatD, true, kFrintToInt64}},
+      {"frint64x_s_floatdp1"_h, {kFormatS, true, kFrintToInt64}},
+      {"frint32z_d_floatdp1"_h, {kFormatD, false, kFrintToInt32}},
+      {"frint32z_s_floatdp1"_h, {kFormatS, false, kFrintToInt32}},
+      {"frint64z_d_floatdp1"_h, {kFormatD, false, kFrintToInt64}},
+      {"frint64z_s_floatdp1"_h, {kFormatS, false, kFrintToInt64}},
+  };
+  VIXL_ASSERT(modes.count(form_hash_) == 1);
+
+  auto [vform, use_fpcr, frint_mode] = modes[form_hash_];
+  FPRounding rounding_mode =
+      use_fpcr ? static_cast<FPRounding>(ReadFpcr().GetRMode()) : FPZero;
+  bool inexact_exception = true;
+
+  unsigned fd = instr->GetRd();
+  SimVRegister& rd = ReadVRegister(fd);
+  SimVRegister& rn = ReadVRegister(instr->GetRn());
+
+  frint(vform, rd, rn, rounding_mode, inexact_exception, frint_mode);
+  // Explicitly log the register update whilst we have type information.
+  LogVRegister(fd, GetPrintRegisterFormatFP(vform));
+}
+
+void Simulator::SimulateFPRoundInt(const Instruction* instr) {
+  AssertSupportedFPCR();
+
+  struct FPRoundInfo {
+    VectorFormat vform;
+    bool use_fpcr;
+    FPRounding rounding_mode;
+    bool inexact_exception;
+  };
+
+  std::unordered_map<uint32_t, FPRoundInfo> modes =
+      {{"frinta_d_floatdp1"_h, {kFormatD, false, FPTieAway, false}},
+       {"frinta_h_floatdp1"_h, {kFormatH, false, FPTieAway, false}},
+       {"frinta_s_floatdp1"_h, {kFormatS, false, FPTieAway, false}},
+       {"frinti_d_floatdp1"_h, {kFormatD, true, FPZero, false}},
+       {"frinti_h_floatdp1"_h, {kFormatH, true, FPZero, false}},
+       {"frinti_s_floatdp1"_h, {kFormatS, true, FPZero, false}},
+       {"frintm_d_floatdp1"_h, {kFormatD, false, FPNegativeInfinity, false}},
+       {"frintm_h_floatdp1"_h, {kFormatH, false, FPNegativeInfinity, false}},
+       {"frintm_s_floatdp1"_h, {kFormatS, false, FPNegativeInfinity, false}},
+       {"frintn_d_floatdp1"_h, {kFormatD, false, FPTieEven, false}},
+       {"frintn_h_floatdp1"_h, {kFormatH, false, FPTieEven, false}},
+       {"frintn_s_floatdp1"_h, {kFormatS, false, FPTieEven, false}},
+       {"frintp_d_floatdp1"_h, {kFormatD, false, FPPositiveInfinity, false}},
+       {"frintp_h_floatdp1"_h, {kFormatH, false, FPPositiveInfinity, false}},
+       {"frintp_s_floatdp1"_h, {kFormatS, false, FPPositiveInfinity, false}},
+       {"frintx_d_floatdp1"_h, {kFormatD, true, FPZero, true}},
+       {"frintx_h_floatdp1"_h, {kFormatH, true, FPZero, true}},
+       {"frintx_s_floatdp1"_h, {kFormatS, true, FPZero, true}},
+       {"frintz_d_floatdp1"_h, {kFormatD, false, FPZero, false}},
+       {"frintz_h_floatdp1"_h, {kFormatH, false, FPZero, false}},
+       {"frintz_s_floatdp1"_h, {kFormatS, false, FPZero, false}}};
+  VIXL_ASSERT(modes.count(form_hash_) == 1);
+
+  auto [vform, use_fpcr, rounding_mode, inexact_exception] = modes[form_hash_];
+
+  rounding_mode =
+      use_fpcr ? static_cast<FPRounding>(ReadFpcr().GetRMode()) : rounding_mode;
+
+  unsigned fd = instr->GetRd();
+  SimVRegister& rd = ReadVRegister(fd);
+  SimVRegister& rn = ReadVRegister(instr->GetRn());
+
+  frint(vform, rd, rn, rounding_mode, inexact_exception);
+  // Explicitly log the register update whilst we have type information.
+  LogVRegister(fd, GetPrintRegisterFormatFP(vform));
+}
+
+void Simulator::SimulateFPConvert(const Instruction* instr) {
+  AssertSupportedFPCR();
+  unsigned fd = instr->GetRd();
+  unsigned fn = instr->GetRn();
+  UseDefaultNaN nan = ReadDN();
+
+  Float16 hn = ReadHRegister(fn);
+  float sn = ReadSRegister(fn);
+  double dn = ReadDRegister(fn);
+
+  switch (form_hash_) {
+    case "fmov_h_floatdp1"_h:
+      WriteHRegister(fd, hn);
+      break;
+    case "fmov_s_floatdp1"_h:
+      WriteSRegister(fd, sn);
+      break;
+    case "fmov_d_floatdp1"_h:
+      WriteDRegister(fd, dn);
+      break;
+    case "fcvt_ds_floatdp1"_h:
+      WriteDRegister(fd, FPToDouble(sn, nan));
+      break;
+    case "fcvt_sd_floatdp1"_h:
+      WriteSRegister(fd, FPToFloat(dn, FPTieEven, nan));
+      break;
+    case "fcvt_hs_floatdp1"_h:
+      WriteHRegister(fd, Float16ToRawbits(FPToFloat16(sn, FPTieEven, nan)));
+      break;
+    case "fcvt_sh_floatdp1"_h:
+      WriteSRegister(fd, FPToFloat(hn, nan));
+      break;
+    case "fcvt_dh_floatdp1"_h:
+      WriteDRegister(fd, FPToDouble(hn, nan));
+      break;
+    case "fcvt_hd_floatdp1"_h:
+      WriteHRegister(fd, Float16ToRawbits(FPToFloat16(dn, FPTieEven, nan)));
+      break;
+    case "bfcvt_bs_floatdp1"_h:
+      WriteHRegister(fd, BFloat16ToRawbits(FPToBFloat16(sn, FPTieEven, nan)));
+      break;
+  }
+}
 
 void Simulator::VisitFPDataProcessing1Source(const Instruction* instr) {
   AssertSupportedFPCR();
 
-  FPRounding fpcr_rounding = static_cast<FPRounding>(ReadFpcr().GetRMode());
-  VectorFormat vform;
-  switch (instr->Mask(FPTypeMask)) {
-    default:
-      VIXL_UNREACHABLE_OR_FALLTHROUGH();
-    case FP64:
-      vform = kFormatD;
-      break;
-    case FP32:
-      vform = kFormatS;
-      break;
-    case FP16:
-      vform = kFormatH;
-      break;
-  }
-
+  VectorFormat vform = kFormatD;
   SimVRegister& rd = ReadVRegister(instr->GetRd());
   SimVRegister& rn = ReadVRegister(instr->GetRn());
-  bool inexact_exception = false;
-  FrintMode frint_mode = kFrintToInteger;
 
-  unsigned fd = instr->GetRd();
-  unsigned fn = instr->GetRn();
-
-  switch (instr->Mask(FPDataProcessing1SourceMask)) {
-    case FMOV_h:
-      WriteHRegister(fd, ReadHRegister(fn));
-      return;
-    case FMOV_s:
-      WriteSRegister(fd, ReadSRegister(fn));
-      return;
-    case FMOV_d:
-      WriteDRegister(fd, ReadDRegister(fn));
-      return;
-    case FABS_h:
-    case FABS_s:
-    case FABS_d:
-      fabs_(vform, ReadVRegister(fd), ReadVRegister(fn));
-      // Explicitly log the register update whilst we have type information.
-      LogVRegister(fd, GetPrintRegisterFormatFP(vform));
-      return;
-    case FNEG_h:
-    case FNEG_s:
-    case FNEG_d:
-      fneg(vform, ReadVRegister(fd), ReadVRegister(fn));
-      // Explicitly log the register update whilst we have type information.
-      LogVRegister(fd, GetPrintRegisterFormatFP(vform));
-      return;
-    case FCVT_ds:
-      WriteDRegister(fd, FPToDouble(ReadSRegister(fn), ReadDN()));
-      return;
-    case FCVT_sd:
-      WriteSRegister(fd, FPToFloat(ReadDRegister(fn), FPTieEven, ReadDN()));
-      return;
-    case FCVT_hs:
-      WriteHRegister(fd,
-                     Float16ToRawbits(
-                         FPToFloat16(ReadSRegister(fn), FPTieEven, ReadDN())));
-      return;
-    case FCVT_sh:
-      WriteSRegister(fd, FPToFloat(ReadHRegister(fn), ReadDN()));
-      return;
-    case FCVT_dh:
-      WriteDRegister(fd, FPToDouble(ReadHRegister(fn), ReadDN()));
-      return;
-    case FCVT_hd:
-      WriteHRegister(fd,
-                     Float16ToRawbits(
-                         FPToFloat16(ReadDRegister(fn), FPTieEven, ReadDN())));
-      return;
-    case FSQRT_h:
-    case FSQRT_s:
-    case FSQRT_d:
-      fsqrt(vform, rd, rn);
-      // Explicitly log the register update whilst we have type information.
-      LogVRegister(fd, GetPrintRegisterFormatFP(vform));
-      return;
-    case FRINT32X_s:
-    case FRINT32X_d:
-      inexact_exception = true;
-      frint_mode = kFrintToInt32;
-      break;  // Use FPCR rounding mode.
-    case FRINT64X_s:
-    case FRINT64X_d:
-      inexact_exception = true;
-      frint_mode = kFrintToInt64;
-      break;  // Use FPCR rounding mode.
-    case FRINT32Z_s:
-    case FRINT32Z_d:
-      inexact_exception = true;
-      frint_mode = kFrintToInt32;
-      fpcr_rounding = FPZero;
+  switch (form_hash_) {
+    case "fabs_d_floatdp1"_h:
+      fabs_(vform = kFormatD, rd, rn);
       break;
-    case FRINT64Z_s:
-    case FRINT64Z_d:
-      inexact_exception = true;
-      frint_mode = kFrintToInt64;
-      fpcr_rounding = FPZero;
+    case "fabs_h_floatdp1"_h:
+      fabs_(vform = kFormatH, rd, rn);
       break;
-    case FRINTI_h:
-    case FRINTI_s:
-    case FRINTI_d:
-      break;  // Use FPCR rounding mode.
-    case FRINTX_h:
-    case FRINTX_s:
-    case FRINTX_d:
-      inexact_exception = true;
+    case "fabs_s_floatdp1"_h:
+      fabs_(vform = kFormatS, rd, rn);
       break;
-    case FRINTA_h:
-    case FRINTA_s:
-    case FRINTA_d:
-      fpcr_rounding = FPTieAway;
+    case "fneg_d_floatdp1"_h:
+      fneg(vform = kFormatD, rd, rn);
       break;
-    case FRINTM_h:
-    case FRINTM_s:
-    case FRINTM_d:
-      fpcr_rounding = FPNegativeInfinity;
+    case "fneg_h_floatdp1"_h:
+      fneg(vform = kFormatH, rd, rn);
       break;
-    case FRINTN_h:
-    case FRINTN_s:
-    case FRINTN_d:
-      fpcr_rounding = FPTieEven;
+    case "fneg_s_floatdp1"_h:
+      fneg(vform = kFormatS, rd, rn);
       break;
-    case FRINTP_h:
-    case FRINTP_s:
-    case FRINTP_d:
-      fpcr_rounding = FPPositiveInfinity;
+    case "fsqrt_d_floatdp1"_h:
+      fsqrt(vform = kFormatD, rd, rn);
       break;
-    case FRINTZ_h:
-    case FRINTZ_s:
-    case FRINTZ_d:
-      fpcr_rounding = FPZero;
+    case "fsqrt_h_floatdp1"_h:
+      fsqrt(vform = kFormatH, rd, rn);
       break;
-    default:
-      VIXL_UNIMPLEMENTED();
+    case "fsqrt_s_floatdp1"_h:
+      fsqrt(vform = kFormatS, rd, rn);
+      break;
   }
-
-  // Only FRINT* instructions fall through the switch above.
-  frint(vform, rd, rn, fpcr_rounding, inexact_exception, frint_mode);
   // Explicitly log the register update whilst we have type information.
-  LogVRegister(fd, GetPrintRegisterFormatFP(vform));
+  LogVRegister(instr->GetRd(), GetPrintRegisterFormatFP(vform));
 }
 
 
@@ -6990,12 +7092,14 @@ void Simulator::VisitSystem(const Instruction* instr) {
   switch (form_hash_) {
     case "cfinv_m_pstate"_h:
       ReadNzcv().SetC(!ReadC());
+      LogSystemRegister(NZCV);
       break;
     case "axflag_m_pstate"_h:
       ReadNzcv().SetN(0);
       ReadNzcv().SetZ(ReadNzcv().GetZ() | ReadNzcv().GetV());
       ReadNzcv().SetC(ReadNzcv().GetC() & ~ReadNzcv().GetV());
       ReadNzcv().SetV(0);
+      LogSystemRegister(NZCV);
       break;
     case "xaflag_m_pstate"_h: {
       // Can't set the flags in place due to the logical dependencies.
@@ -7007,6 +7111,7 @@ void Simulator::VisitSystem(const Instruction* instr) {
       ReadNzcv().SetZ(z);
       ReadNzcv().SetC(c);
       ReadNzcv().SetV(v);
+      LogSystemRegister(NZCV);
       break;
     }
     case "xpaclri_hi_hints"_h:
@@ -7157,10 +7262,10 @@ void Simulator::VisitSystem(const Instruction* instr) {
         uint64_t incoming_size = rt >> 32;
         // Drop upper 32 bits to get GCS index.
         uint64_t incoming_gcs = rt & 0xffffffff;
-        uint64_t outgoing_gcs = ActivateGCS(incoming_gcs);
+        GuardedControlStack outgoing_gcs = ActivateGCS(incoming_gcs);
         uint64_t incoming_seal = GCSPop();
         if (((incoming_seal ^ rt) != 1) ||
-            (GetActiveGCSPtr()->size() != incoming_size)) {
+            (GetGCSStorage()->size() != incoming_size)) {
           char msg[128];
           snprintf(msg,
                    sizeof(msg),
@@ -7168,7 +7273,7 @@ void Simulator::VisitSystem(const Instruction* instr) {
                    incoming_seal);
           ReportGCSFailure(msg);
         }
-        GCSPush(outgoing_gcs + 5);
+        GCSPush(outgoing_gcs.token + 5);
       } else if (sysop == GCSPUSHM) {
         GCSPush(ReadXRegister(instr->GetRt()));
       } else {
@@ -7194,11 +7299,11 @@ void Simulator::VisitSystem(const Instruction* instr) {
                    outgoing_gcs);
           ReportGCSFailure(msg);
         }
-        uint64_t incoming_gcs = ActivateGCS(outgoing_gcs);
         outgoing_gcs &= ~UINT64_C(0x3ff);
+        GuardedControlStack incoming_gcs = ActivateGCS(outgoing_gcs);
 
         // Encode the size into the outgoing stack seal, to check later.
-        uint64_t size = GetActiveGCSPtr()->size();
+        uint64_t size = GetGCSStorage()->size();
         VIXL_ASSERT(IsUint32(size));
         VIXL_ASSERT(IsUint32(outgoing_gcs + 1));
         uint64_t outgoing_seal = (size << 32) | (outgoing_gcs + 1);
@@ -7433,14 +7538,71 @@ void Simulator::SimulateSHA512(const Instruction* instr) {
   }
 }
 
-void Simulator::VisitNEON2RegMisc(const Instruction* instr) {
+void Simulator::SimulateNEONRoundIntToSize(const Instruction* instr) {
   NEONFormatDecoder nfd(instr);
-  VectorFormat vf = nfd.GetVectorFormat();
+  VectorFormat vform = nfd.GetVectorFormat(nfd.FPFormatMap());
+  FPRounding rounding_mode = static_cast<FPRounding>(ReadFpcr().GetRMode());
+  FrintMode frint_mode = kFrintToInt32;
+  SimVRegister& rd = ReadVRegister(instr->GetRd());
+  SimVRegister& rn = ReadVRegister(instr->GetRn());
 
-  static const NEONFormatMap map_lp =
-      {{23, 22, 30}, {NF_4H, NF_8H, NF_2S, NF_4S, NF_1D, NF_2D}};
-  VectorFormat vf_lp = nfd.GetVectorFormat(&map_lp);
+  frint_mode = kFrintToInt32;
+  switch (form_hash_) {
+    case "frint32z_asimdmisc_r"_h:
+      rounding_mode = FPZero;
+      break;
+    case "frint64z_asimdmisc_r"_h:
+      rounding_mode = FPZero;
+      VIXL_FALLTHROUGH();
+    case "frint64x_asimdmisc_r"_h:
+      frint_mode = kFrintToInt64;
+      break;
+  }
+  frint(vform,
+        rd,
+        rn,
+        rounding_mode,
+        /* inexact_exception = */ true,
+        frint_mode);
+}
 
+void Simulator::SimulateNEONRoundInt(const Instruction* instr) {
+  NEONFormatDecoder nfd(instr);
+  VectorFormat vform = nfd.GetVectorFormat(nfd.FPFormatMap());
+  FPRounding rounding_mode = static_cast<FPRounding>(ReadFpcr().GetRMode());
+  bool inexact_exception = false;
+  SimVRegister& rd = ReadVRegister(instr->GetRd());
+  SimVRegister& rn = ReadVRegister(instr->GetRn());
+
+  switch (form_hash_) {
+    case "frinta_asimdmisc_r"_h:
+      rounding_mode = FPTieAway;
+      break;
+    case "frintm_asimdmisc_r"_h:
+      rounding_mode = FPNegativeInfinity;
+      break;
+    case "frintn_asimdmisc_r"_h:
+      rounding_mode = FPTieEven;
+      break;
+    case "frintp_asimdmisc_r"_h:
+      rounding_mode = FPPositiveInfinity;
+      break;
+    case "frintx_asimdmisc_r"_h:
+      inexact_exception = true;
+      break;
+    case "frintz_asimdmisc_r"_h:
+      rounding_mode = FPZero;
+      break;
+    case "frinti_asimdmisc_r"_h:
+      // Uses FPCR - nothing to do.
+      break;
+  }
+  frint(vform, rd, rn, rounding_mode, inexact_exception);
+}
+
+void Simulator::SimulateNEONFPConvert(const Instruction* instr) {
+  NEONFormatDecoder nfd(instr);
+  VectorFormat vform = nfd.GetVectorFormat(nfd.FPFormatMap());
   static const NEONFormatMap map_fcvtl = {{22}, {NF_4S, NF_2D}};
   VectorFormat vf_fcvtl = nfd.GetVectorFormat(&map_fcvtl);
 
@@ -7450,266 +7612,214 @@ void Simulator::VisitNEON2RegMisc(const Instruction* instr) {
 
   SimVRegister& rd = ReadVRegister(instr->GetRd());
   SimVRegister& rn = ReadVRegister(instr->GetRn());
+  bool is_q = instr->Mask(NEON_Q) != 0;
+  std::function<LogicVRegister(
+      Simulator*, VectorFormat, LogicVRegister, const LogicVRegister&)>
+      handler = nullptr;
 
-  if (instr->Mask(NEON2RegMiscOpcode) <= NEON_NEG_opcode) {
-    // These instructions all use a two bit size field, except NOT and RBIT,
-    // which use the field to encode the operation.
-    switch (instr->Mask(NEON2RegMiscMask)) {
-      case NEON_REV64:
-        rev64(vf, rd, rn);
-        break;
-      case NEON_REV32:
-        rev32(vf, rd, rn);
-        break;
-      case NEON_REV16:
-        rev16(vf, rd, rn);
-        break;
-      case NEON_SUQADD:
-        suqadd(vf, rd, rd, rn);
-        break;
-      case NEON_USQADD:
-        usqadd(vf, rd, rd, rn);
-        break;
-      case NEON_CLS:
-        cls(vf, rd, rn);
-        break;
-      case NEON_CLZ:
-        clz(vf, rd, rn);
-        break;
-      case NEON_CNT:
-        cnt(vf, rd, rn);
-        break;
-      case NEON_SQABS:
-        abs(vf, rd, rn).SignedSaturate(vf);
-        break;
-      case NEON_SQNEG:
-        neg(vf, rd, rn).SignedSaturate(vf);
-        break;
-      case NEON_CMGT_zero:
-        cmp(vf, rd, rn, 0, gt);
-        break;
-      case NEON_CMGE_zero:
-        cmp(vf, rd, rn, 0, ge);
-        break;
-      case NEON_CMEQ_zero:
-        cmp(vf, rd, rn, 0, eq);
-        break;
-      case NEON_CMLE_zero:
-        cmp(vf, rd, rn, 0, le);
-        break;
-      case NEON_CMLT_zero:
-        cmp(vf, rd, rn, 0, lt);
-        break;
-      case NEON_ABS:
-        abs(vf, rd, rn);
-        break;
-      case NEON_NEG:
-        neg(vf, rd, rn);
-        break;
-      case NEON_SADDLP:
-        saddlp(vf_lp, rd, rn);
-        break;
-      case NEON_UADDLP:
-        uaddlp(vf_lp, rd, rn);
-        break;
-      case NEON_SADALP:
-        sadalp(vf_lp, rd, rn);
-        break;
-      case NEON_UADALP:
-        uadalp(vf_lp, rd, rn);
-        break;
-      case NEON_RBIT_NOT:
-        vf = nfd.GetVectorFormat(nfd.LogicalFormatMap());
-        switch (instr->GetFPType()) {
-          case 0:
-            not_(vf, rd, rn);
-            break;
-          case 1:
-            rbit(vf, rd, rn);
-            break;
-          default:
-            VIXL_UNIMPLEMENTED();
-        }
-        break;
-    }
-  } else {
-    VectorFormat fpf = nfd.GetVectorFormat(nfd.FPFormatMap());
-    FPRounding fpcr_rounding = static_cast<FPRounding>(ReadFpcr().GetRMode());
-    bool inexact_exception = false;
-    FrintMode frint_mode = kFrintToInteger;
+  switch (form_hash_) {
+    case "fcvtas_asimdmisc_r"_h:
+      fcvts(vform, rd, rn, FPTieAway);
+      break;
+    case "fcvtau_asimdmisc_r"_h:
+      fcvtu(vform, rd, rn, FPTieAway);
+      break;
+    case "fcvtms_asimdmisc_r"_h:
+      fcvts(vform, rd, rn, FPNegativeInfinity);
+      break;
+    case "fcvtmu_asimdmisc_r"_h:
+      fcvtu(vform, rd, rn, FPNegativeInfinity);
+      break;
+    case "fcvtns_asimdmisc_r"_h:
+      fcvts(vform, rd, rn, FPTieEven);
+      break;
+    case "fcvtnu_asimdmisc_r"_h:
+      fcvtu(vform, rd, rn, FPTieEven);
+      break;
+    case "fcvtps_asimdmisc_r"_h:
+      fcvts(vform, rd, rn, FPPositiveInfinity);
+      break;
+    case "fcvtpu_asimdmisc_r"_h:
+      fcvtu(vform, rd, rn, FPPositiveInfinity);
+      break;
+    case "fcvtzs_asimdmisc_r"_h:
+      fcvts(vform, rd, rn, FPZero);
+      break;
+    case "fcvtzu_asimdmisc_r"_h:
+      fcvtu(vform, rd, rn, FPZero);
+      break;
+    case "fcvtl_asimdmisc_l"_h:
+      handler = is_q ? &Simulator::fcvtl2 : &Simulator::fcvtl;
+      handler(this, vf_fcvtl, rd, rn);
+      break;
+    case "fcvtn_asimdmisc_n"_h:
+      handler = is_q ? &Simulator::fcvtn2 : &Simulator::fcvtn;
+      handler(this, vf_fcvtn, rd, rn);
+      break;
+    case "fcvtxn_asimdmisc_n"_h:
+      handler = is_q ? &Simulator::fcvtxn2 : &Simulator::fcvtxn;
+      handler(this, vf_fcvtn, rd, rn);
+      break;
+    case "bfcvtn_asimdmisc_4s"_h:
+      handler = is_q ? &Simulator::bfcvtn2 : &Simulator::bfcvtn;
+      handler(this, is_q ? kFormat8H : kFormat4H, rd, rn);
+      break;
+  }
+}
 
-    // These instructions all use a one bit size field, except XTN, SQXTUN,
-    // SHLL, SQXTN and UQXTN, which use a two bit size field.
-    switch (instr->Mask(NEON2RegMiscFPMask)) {
-      case NEON_FABS:
-        fabs_(fpf, rd, rn);
-        return;
-      case NEON_FNEG:
-        fneg(fpf, rd, rn);
-        return;
-      case NEON_FSQRT:
-        fsqrt(fpf, rd, rn);
-        return;
-      case NEON_FCVTL:
-        if (instr->Mask(NEON_Q)) {
-          fcvtl2(vf_fcvtl, rd, rn);
-        } else {
-          fcvtl(vf_fcvtl, rd, rn);
-        }
-        return;
-      case NEON_FCVTN:
-        if (instr->Mask(NEON_Q)) {
-          fcvtn2(vf_fcvtn, rd, rn);
-        } else {
-          fcvtn(vf_fcvtn, rd, rn);
-        }
-        return;
-      case NEON_FCVTXN:
-        if (instr->Mask(NEON_Q)) {
-          fcvtxn2(vf_fcvtn, rd, rn);
-        } else {
-          fcvtxn(vf_fcvtn, rd, rn);
-        }
-        return;
+void Simulator::SimulateNEONFP2RegMisc(const Instruction* instr) {
+  NEONFormatDecoder nfd(instr);
+  VectorFormat vform = nfd.GetVectorFormat(nfd.FPFormatMap());
+  FPRounding rounding_mode = static_cast<FPRounding>(ReadFpcr().GetRMode());
 
-      // The following instructions break from the switch statement, rather
-      // than return.
-      case NEON_FRINT32X:
-        inexact_exception = true;
-        frint_mode = kFrintToInt32;
-        break;  // Use FPCR rounding mode.
-      case NEON_FRINT32Z:
-        inexact_exception = true;
-        frint_mode = kFrintToInt32;
-        fpcr_rounding = FPZero;
-        break;
-      case NEON_FRINT64X:
-        inexact_exception = true;
-        frint_mode = kFrintToInt64;
-        break;  // Use FPCR rounding mode.
-      case NEON_FRINT64Z:
-        inexact_exception = true;
-        frint_mode = kFrintToInt64;
-        fpcr_rounding = FPZero;
-        break;
-      case NEON_FRINTI:
-        break;  // Use FPCR rounding mode.
-      case NEON_FRINTX:
-        inexact_exception = true;
-        break;
-      case NEON_FRINTA:
-        fpcr_rounding = FPTieAway;
-        break;
-      case NEON_FRINTM:
-        fpcr_rounding = FPNegativeInfinity;
-        break;
-      case NEON_FRINTN:
-        fpcr_rounding = FPTieEven;
-        break;
-      case NEON_FRINTP:
-        fpcr_rounding = FPPositiveInfinity;
-        break;
-      case NEON_FRINTZ:
-        fpcr_rounding = FPZero;
-        break;
+  SimVRegister& rd = ReadVRegister(instr->GetRd());
+  SimVRegister& rn = ReadVRegister(instr->GetRn());
 
-      case NEON_FCVTNS:
-        fcvts(fpf, rd, rn, FPTieEven);
-        return;
-      case NEON_FCVTNU:
-        fcvtu(fpf, rd, rn, FPTieEven);
-        return;
-      case NEON_FCVTPS:
-        fcvts(fpf, rd, rn, FPPositiveInfinity);
-        return;
-      case NEON_FCVTPU:
-        fcvtu(fpf, rd, rn, FPPositiveInfinity);
-        return;
-      case NEON_FCVTMS:
-        fcvts(fpf, rd, rn, FPNegativeInfinity);
-        return;
-      case NEON_FCVTMU:
-        fcvtu(fpf, rd, rn, FPNegativeInfinity);
-        return;
-      case NEON_FCVTZS:
-        fcvts(fpf, rd, rn, FPZero);
-        return;
-      case NEON_FCVTZU:
-        fcvtu(fpf, rd, rn, FPZero);
-        return;
-      case NEON_FCVTAS:
-        fcvts(fpf, rd, rn, FPTieAway);
-        return;
-      case NEON_FCVTAU:
-        fcvtu(fpf, rd, rn, FPTieAway);
-        return;
-      case NEON_SCVTF:
-        scvtf(fpf, rd, rn, 0, fpcr_rounding);
-        return;
-      case NEON_UCVTF:
-        ucvtf(fpf, rd, rn, 0, fpcr_rounding);
-        return;
-      case NEON_URSQRTE:
-        ursqrte(fpf, rd, rn);
-        return;
-      case NEON_URECPE:
-        urecpe(fpf, rd, rn);
-        return;
-      case NEON_FRSQRTE:
-        frsqrte(fpf, rd, rn);
-        return;
-      case NEON_FRECPE:
-        frecpe(fpf, rd, rn, fpcr_rounding);
-        return;
-      case NEON_FCMGT_zero:
-        fcmp_zero(fpf, rd, rn, gt);
-        return;
-      case NEON_FCMGE_zero:
-        fcmp_zero(fpf, rd, rn, ge);
-        return;
-      case NEON_FCMEQ_zero:
-        fcmp_zero(fpf, rd, rn, eq);
-        return;
-      case NEON_FCMLE_zero:
-        fcmp_zero(fpf, rd, rn, le);
-        return;
-      case NEON_FCMLT_zero:
-        fcmp_zero(fpf, rd, rn, lt);
-        return;
-      default:
-        if ((NEON_XTN_opcode <= instr->Mask(NEON2RegMiscOpcode)) &&
-            (instr->Mask(NEON2RegMiscOpcode) <= NEON_UQXTN_opcode)) {
-          switch (instr->Mask(NEON2RegMiscMask)) {
-            case NEON_XTN:
-              xtn(vf, rd, rn);
-              return;
-            case NEON_SQXTN:
-              sqxtn(vf, rd, rn);
-              return;
-            case NEON_UQXTN:
-              uqxtn(vf, rd, rn);
-              return;
-            case NEON_SQXTUN:
-              sqxtun(vf, rd, rn);
-              return;
-            case NEON_SHLL:
-              vf = nfd.GetVectorFormat(nfd.LongIntegerFormatMap());
-              if (instr->Mask(NEON_Q)) {
-                shll2(vf, rd, rn);
-              } else {
-                shll(vf, rd, rn);
-              }
-              return;
-            default:
-              VIXL_UNIMPLEMENTED();
-          }
-        } else {
-          VIXL_UNIMPLEMENTED();
-        }
-    }
+  switch (form_hash_) {
+    case "fabs_asimdmisc_r"_h:
+      fabs_(vform, rd, rn);
+      break;
+    case "fneg_asimdmisc_r"_h:
+      fneg(vform, rd, rn);
+      break;
+    case "fsqrt_asimdmisc_r"_h:
+      fsqrt(vform, rd, rn);
+      break;
+    case "scvtf_asimdmisc_r"_h:
+      scvtf(vform, rd, rn, 0, rounding_mode);
+      break;
+    case "ucvtf_asimdmisc_r"_h:
+      ucvtf(vform, rd, rn, 0, rounding_mode);
+      break;
+    case "ursqrte_asimdmisc_r"_h:
+      ursqrte(vform, rd, rn);
+      break;
+    case "urecpe_asimdmisc_r"_h:
+      urecpe(vform, rd, rn);
+      break;
+    case "frsqrte_asimdmisc_r"_h:
+      frsqrte(vform, rd, rn);
+      break;
+    case "frecpe_asimdmisc_r"_h:
+      frecpe(vform, rd, rn, rounding_mode);
+      break;
+    case "fcmgt_asimdmisc_fz"_h:
+      fcmp_zero(vform, rd, rn, gt);
+      break;
+    case "fcmge_asimdmisc_fz"_h:
+      fcmp_zero(vform, rd, rn, ge);
+      break;
+    case "fcmeq_asimdmisc_fz"_h:
+      fcmp_zero(vform, rd, rn, eq);
+      break;
+    case "fcmle_asimdmisc_fz"_h:
+      fcmp_zero(vform, rd, rn, le);
+      break;
+    case "fcmlt_asimdmisc_fz"_h:
+      fcmp_zero(vform, rd, rn, lt);
+      break;
+  }
+}
 
-    // Only FRINT* instructions fall through the switch above.
-    frint(fpf, rd, rn, fpcr_rounding, inexact_exception, frint_mode);
+void Simulator::VisitNEON2RegMisc(const Instruction* instr) {
+  NEONFormatDecoder nfd(instr);
+  VectorFormat vf = nfd.GetVectorFormat();
+  VectorFormat vf_log = nfd.GetVectorFormat(nfd.LogicalFormatMap());
+
+  static const NEONFormatMap map_lp =
+      {{23, 22, 30}, {NF_4H, NF_8H, NF_2S, NF_4S, NF_1D, NF_2D}};
+  VectorFormat vf_lp = nfd.GetVectorFormat(&map_lp);
+
+  SimVRegister& rd = ReadVRegister(instr->GetRd());
+  SimVRegister& rn = ReadVRegister(instr->GetRn());
+  bool is_q = instr->Mask(NEON_Q) != 0;
+
+  switch (form_hash_) {
+    case "rev64_asimdmisc_r"_h:
+      rev64(vf, rd, rn);
+      break;
+    case "rev32_asimdmisc_r"_h:
+      rev32(vf, rd, rn);
+      break;
+    case "rev16_asimdmisc_r"_h:
+      rev16(vf, rd, rn);
+      break;
+    case "suqadd_asimdmisc_r"_h:
+      suqadd(vf, rd, rd, rn);
+      break;
+    case "usqadd_asimdmisc_r"_h:
+      usqadd(vf, rd, rd, rn);
+      break;
+    case "cls_asimdmisc_r"_h:
+      cls(vf, rd, rn);
+      break;
+    case "clz_asimdmisc_r"_h:
+      clz(vf, rd, rn);
+      break;
+    case "cnt_asimdmisc_r"_h:
+      cnt(vf, rd, rn);
+      break;
+    case "sqabs_asimdmisc_r"_h:
+      abs(vf, rd, rn).SignedSaturate(vf);
+      break;
+    case "sqneg_asimdmisc_r"_h:
+      neg(vf, rd, rn).SignedSaturate(vf);
+      break;
+    case "cmgt_asimdmisc_z"_h:
+      cmp(vf, rd, rn, 0, gt);
+      break;
+    case "cmge_asimdmisc_z"_h:
+      cmp(vf, rd, rn, 0, ge);
+      break;
+    case "cmeq_asimdmisc_z"_h:
+      cmp(vf, rd, rn, 0, eq);
+      break;
+    case "cmle_asimdmisc_z"_h:
+      cmp(vf, rd, rn, 0, le);
+      break;
+    case "cmlt_asimdmisc_z"_h:
+      cmp(vf, rd, rn, 0, lt);
+      break;
+    case "abs_asimdmisc_r"_h:
+      abs(vf, rd, rn);
+      break;
+    case "neg_asimdmisc_r"_h:
+      neg(vf, rd, rn);
+      break;
+    case "xtn_asimdmisc_n"_h:
+      xtn(vf, rd, rn);
+      break;
+    case "sqxtn_asimdmisc_n"_h:
+      sqxtn(vf, rd, rn);
+      break;
+    case "uqxtn_asimdmisc_n"_h:
+      uqxtn(vf, rd, rn);
+      break;
+    case "sqxtun_asimdmisc_n"_h:
+      sqxtun(vf, rd, rn);
+      break;
+    case "saddlp_asimdmisc_p"_h:
+      saddlp(vf_lp, rd, rn);
+      break;
+    case "uaddlp_asimdmisc_p"_h:
+      uaddlp(vf_lp, rd, rn);
+      break;
+    case "sadalp_asimdmisc_p"_h:
+      sadalp(vf_lp, rd, rn, rd);
+      break;
+    case "uadalp_asimdmisc_p"_h:
+      uadalp(vf_lp, rd, rn, rd);
+      break;
+    case "not_asimdmisc_r"_h:
+      not_(vf_log, rd, rn);
+      break;
+    case "rbit_asimdmisc_r"_h:
+      rbit(vf_log, rd, rn);
+      break;
+    case "shll_asimdmisc_s"_h:
+      vf = nfd.GetVectorFormat(nfd.LongIntegerFormatMap());
+      is_q ? shll2(vf, rd, rn) : shll(vf, rd, rn);
+      break;
   }
 }
 
@@ -8199,20 +8309,12 @@ void Simulator::VisitNEON3Different(const Instruction* instr) {
 
   switch (instr->Mask(NEON3DifferentMask)) {
     case NEON_PMULL:
-      if ((size == 1) || (size == 2)) {  // S/D reserved.
-        VisitUnallocated(instr);
-      } else {
-        if (size == 3) vf_l = kFormat1Q;
-        pmull(vf_l, rd, rn, rm);
-      }
+      if (size == 3) vf_l = kFormat1Q;
+      pmull(vf_l, rd, rn, rm);
       break;
     case NEON_PMULL2:
-      if ((size == 1) || (size == 2)) {  // S/D reserved.
-        VisitUnallocated(instr);
-      } else {
-        if (size == 3) vf_l = kFormat1Q;
-        pmull2(vf_l, rd, rn, rm);
-      }
+      if (size == 3) vf_l = kFormat1Q;
+      pmull2(vf_l, rd, rn, rm);
       break;
     case NEON_UADDL:
       uaddl(vf_l, rd, rn, rm);
@@ -9208,9 +9310,6 @@ void Simulator::VisitNEONModifiedImmediate(const Instruction* instr) {
         } else if (q == 1) {
           vform = kFormat2D;
           imm = DoubleToRawbits(instr->GetImmNEONFP64());
-        } else {
-          VIXL_ASSERT((q == 0) && (op_bit == 1) && (cmode == 0xf));
-          VisitUnallocated(instr);
         }
       }
       break;
@@ -9707,23 +9806,11 @@ void Simulator::VisitNEONScalarByIndexedElement(const Instruction* instr) {
   }
 
   switch (form_hash_) {
-    case "sqdmull_asisdelem_l"_h:
-    case "sqdmlal_asisdelem_l"_h:
-    case "sqdmlsl_asisdelem_l"_h:
-      if ((vf == kFormatB) || (vf == kFormatH)) {
-        VisitUnallocated(instr);
-        return;
-      }
-      break;
     case "sqdmulh_asisdelem_r"_h:
     case "sqrdmulh_asisdelem_r"_h:
     case "sqrdmlah_asisdelem_r"_h:
     case "sqrdmlsh_asisdelem_r"_h:
       vf = nfd.GetVectorFormat(nfd.ScalarFormatMap());
-      if ((vf == kFormatB) || (vf == kFormatD)) {
-        VisitUnallocated(instr);
-        return;
-      }
       break;
     case "fmul_asisdelem_r_sd"_h:
     case "fmla_asisdelem_r_sd"_h:
@@ -10939,7 +11026,6 @@ void Simulator::VisitSVEFPCompareWithZero(const Instruction* instr) {
 
   SimVRegister result;
   SimVRegister zeros;
-  dup_immediate(kFormatVnD, zeros, 0);
 
   switch (instr->Mask(SVEFPCompareWithZeroMask)) {
     case FCMEQ_p_p_z0:
@@ -13685,8 +13771,10 @@ void Simulator::SimulateSVEFPMatrixMul(const Instruction* instr) {
   SimVRegister& zm = ReadVRegister(instr->GetRm());
 
   switch (form_hash_) {
-    case "fmmla_z_zzz_s"_h:
     case "fmmla_z_zzz_d"_h:
+      if (GetVectorLengthInBits() < 256) VisitUnimplemented(instr);
+      VIXL_FALLTHROUGH();
+    case "fmmla_z_zzz_s"_h:
       fmatmul(vform, zdn, zn, zm);
       break;
     default:
@@ -13756,7 +13844,6 @@ void Simulator::VisitSVEUnpackPredicateElements(const Instruction* instr) {
 
   SimVRegister temp = Simulator::ExpandToSimVRegister(pn);
   SimVRegister zero;
-  dup_immediate(kFormatVnB, zero, 0);
 
   switch (instr->Mask(SVEUnpackPredicateElementsMask)) {
     case PUNPKHI_p_p:
@@ -15140,7 +15227,6 @@ void Simulator::DoPrintf(const Instruction* instr) {
 }
 
 
-#ifdef VIXL_HAS_SIMULATED_RUNTIME_CALL_SUPPORT
 void Simulator::DoRuntimeCall(const Instruction* instr) {
   VIXL_STATIC_ASSERT(kRuntimeCallAddressSize == sizeof(uintptr_t));
   // The appropriate `Simulator::SimulateRuntimeCall()` wrapper and the function
@@ -15217,19 +15303,6 @@ void Simulator::DoIndirectRuntimeCall(const Instruction* instr) {
   // Read the return address from `lr` and write it into `pc`.
   WritePc(ReadRegister<Instruction*>(kLinkRegCode));
 }
-
-#else
-void Simulator::DoRuntimeCall(const Instruction* instr) {
-  USE(instr);
-  VIXL_UNREACHABLE();
-}
-
-void Simulator::DoIndirectRuntimeCall(const Instruction* instr) {
-  USE(instr);
-  VIXL_UNREACHABLE();
-}
-#endif
-
 
 void Simulator::DoConfigureCPUFeatures(const Instruction* instr) {
   VIXL_ASSERT(instr->Mask(ExceptionMask) == HLT);

@@ -1,0 +1,71 @@
+spec:
+  inputs:
+    PROMOTE_BRANCH:
+      description: "Branch to promote the build to. Empty means no promotion."
+      default: "bleeding-edge"
+
+---
+
+workflow:
+  rules:
+    - when: always
+      variables:
+        PROMOTE_BRANCH: $[[ inputs.PROMOTE_BRANCH ]]
+
+variables:
+    DEBIAN_FRONTEND: noninteractive
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_DEPTH: 0
+    CC: clang
+    CXX: clang++
+
+build:
+  stage: build
+  image: registry.gitlab.steamos.cloud/steamrt/steamrt4/sdk/arm64:4.0.20251117.183306
+  tags:
+    - docker
+    - linux
+    - arm64
+    - aarch64
+  script:
+    - apt-get -y update
+    - apt-get install -y
+        git cmake ninja-build ccache
+        lld clang clang-tools
+        libclang-dev llvm-dev
+        libstdc++-14-dev-i386-cross libgcc-14-dev-i386-cross
+        libstdc++-14-dev-amd64-cross libgcc-14-dev-amd64-cross
+    - cmake -E make_directory build/
+    - cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -DBUILD_STEAM_SUPPORT=True -DENABLE_LTO=True -DENABLE_ASSERTIONS=False -DBUILD_THUNKS=True -DBUILD_FEXCONFIG=False -DBUILD_TESTING=False -DENABLE_CLANG_THUNKS=True -DUSE_LINKER=lld -DCMAKE_INSTALL_PREFIX=/usr -DTUNE_ARCH=armv8.2-a -DTUNE_CPU=none -DRANGES_NATIVE=OFF . -B build/
+    - cmake --build build/ --config Release
+    - DESTDIR=$(pwd)/install/ cmake --build build/ --config Release -t install
+
+  artifacts:
+    name: "steamrt artifacts"
+    untracked: false
+    paths:
+      - install/
+
+promote:
+  stage: deploy
+  variables:
+    GIT_STRATEGY: none
+  image: registry.gitlab.steamos.cloud/steamrt/steamrt4/sdk/arm64:4.0.20251117.183306
+  tags:
+    - docker
+    - linux
+    - arm64
+    - aarch64
+  rules:
+    - if: $PROMOTE_BRANCH && $CI_COMMIT_BRANCH == 'main'
+  before_script:
+    - apt-get -y update
+    - apt-get install -y tmux curl
+  script:
+    # comment out to debug: SSH in via GCP, go down the container and attach to the session (with `tmux attach -t debug`)
+#    - tmux new-session -d -s debug
+#    - while tmux has-session -t debug 2>/dev/null; do sleep 1; done
+
+    # ref controls which fex-depot code runs the pipeline, while VERSION_PARAM controls which fex branch's artifacts that pipeline downloads.
+    - >
+      curl --fail --location --request POST --form token=${FEX_DEPOT_TRIGGER_TOKEN} --form ref=master --form "variables[PROMOTE_BRANCH]=${PROMOTE_BRANCH}" --form "variables[VERSION_PARAM]=${CI_COMMIT_REF_NAME}" "${CI_API_V4_URL}/projects/fex%2Ffex-depot/trigger/pipeline"

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+#include "HostRunner.h"
+
 #include "ArchHelpers/UContext.h"
 #include "LinuxSyscalls/SignalDelegator.h"
 #include <FEXCore/Config/Config.h>
@@ -16,12 +18,12 @@
 #include <asm/ldt.h>
 #include <sys/syscall.h>
 #endif
-#include <stddef.h>
-#include <stdint.h>
-#include <string.h>
-#include <ucontext.h>
 
-#include <signal.h>
+#include <csignal>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <ucontext.h>
 
 #ifdef ARCHITECTURE_x86_64
 static inline int modify_ldt(int func, void* ldt) {
@@ -79,8 +81,10 @@ __attribute__((naked)) void Dispatcher(uintptr_t BranchTarget, void* ReturningSt
     jnz .32_bit;
 
     .64_bit:
-      // Clear rdx and also set flags to a sane state.
-      xor rdx, rdx;
+      // Set flags to x86 reset state (0x202: IF=1, reserved bit 1=1).
+      push 0x202;
+      popfq;
+      mov rdx, 0;
       mov rsp, 0;
 
       // Tail-call
@@ -97,8 +101,10 @@ __attribute__((naked)) void Dispatcher(uintptr_t BranchTarget, void* ReturningSt
       mov [rsp], edi;
       mov [rsp+4], dx
 
-      // Clear rdx and also set flags to a sane state.
-      xor rdx, rdx;
+      // Set flags to x86 reset state (0x202: IF=1, reserved bit 1=1).
+      push 0x202;
+      popfq;
+      mov rdx, 0;
 
       GetCodeSegmentEntryLocation:
       hlt;
@@ -294,7 +300,7 @@ private:
   }
 };
 
-void RunAsHost(fextl::unique_ptr<FEX::HLE::SignalDelegator>& SignalDelegation, uintptr_t InitialRip, FEXCore::Core::CPUState* OutputState) {
+void RunAsHost(FEX::HLE::SignalDelegator* SignalDelegation, uintptr_t InitialRip, FEXCore::Core::CPUState* OutputState) {
   x86HostRunner runner;
   SignalDelegation->RegisterHostSignalHandler(
     SIGSEGV,
@@ -306,7 +312,7 @@ void RunAsHost(fextl::unique_ptr<FEX::HLE::SignalDelegator>& SignalDelegation, u
   runner.Dispatch(InitialRip);
 }
 #else
-void RunAsHost(fextl::unique_ptr<FEX::HLE::SignalDelegator>& SignalDelegation, uintptr_t InitialRip, FEXCore::Core::CPUState* OutputState) {
+void RunAsHost(FEX::HLE::SignalDelegator* SignalDelegation, uintptr_t InitialRip, FEXCore::Core::CPUState* OutputState) {
   LOGMAN_MSG_A_FMT("RunAsHost doesn't exist for this host");
 }
 #endif

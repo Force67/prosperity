@@ -18,9 +18,8 @@ check_target_ec:
   // Check if target is in fact x86 code
   ldr x16, [x18, #0x60] // TEB->PEB
   ldr x16, [x16, #0x368] // PEB->EcCodeBitMap
-  lsr x17, x9, #15
-  and x17, x17, #0x1fffffffffff8
-  ldr x16, [x16, x17]
+  lsr x17, x9, #18
+  ldr x16, [x16, x17, lsl #3]
   lsr x17, x9, #12
   lsr x16, x16, x17
   tbnz x16, #0, ExitFunctionEC
@@ -64,12 +63,10 @@ ExitFunctionEC:
   strb wzr, [x17, #0x0] // ChpeV2CpuAreaInfo->InSimulation
   ldr x17, [x17, #0x20] // ChpeV2CpuAreaInfo->SuspendDoorbell
   ldr w17, [x17]
-  cbz w17, no_suspend
-.global ExitFunctionSuspendPoint
-ExitFunctionSuspendPoint:
-  brk #0xCAFE
-  // Will resume here
-no_suspend:
+  cbnz w17, ExitFunctionSuspendPoint
+
+.global ExitFunctionSuspendResumePoint
+ExitFunctionSuspendResumePoint:
   // Either return to an exit thunk (return to ARM64EC function) or call an entry thunk (call to ARM64EC function).
   // It is assumed that a 'blr x16' instruction is only ever used to call into x86 code from an exit thunk, and that all
   // exported ARM64EC functions have a 4-byte offset to their entry thunk immediately before their first instruction.
@@ -99,9 +96,29 @@ ret_sp_misaligned:
   ldr lr, [lr, #:lo12:X64ReturnInstr]
   br x17
 
+.global ExitFunctionSuspendPoint
+ExitFunctionSuspendPoint:
+  brk #0xCAFE
+  // Resume will jump back to `ExitFunctionSuspendResumePoint`
+
+  // This table will contain all of the possible SVC #x instructions that we might need.
+  // We index into this table in DIRECT_SYSCALL_WRAPPER based on the syscall number we find
+  // by parsing the table __arm64ec_syscall_ffs from NTDLL.
+#define SYSCALL_TABLE_ENTRIES 512
+.global SyscallTable
+SyscallTable:
+  .set SyscallId, 0
+  .rept SYSCALL_TABLE_ENTRIES
+    svc #SyscallId
+    ret
+    .set SyscallId, SyscallId + 1
+  .endr
+.global SyscallTableEnd
+SyscallTableEnd:
+
   // Makes a wrapper for calling a system call directly, skipping the usual ntdll thunks
 #define HASH #
-#define DIRECT_SYSCALL_WRAPPER(Name, WineIdName, WindowsId) \
+#define DIRECT_SYSCALL_WRAPPER(Name, WineIdName) \
   .global Name; \
   Name:; \
     adrp x16, WineSyscallDispatcher; \
@@ -113,18 +130,23 @@ ret_sp_misaligned:
     blr x16; \
     ret; \
   1:; \
-    svc HASH WindowsId; \
-    ret
+    adrp x16, SyscallTable; \
+    add x16, x16, HASH:lo12:SyscallTable; \
+    adrp x17, WineIdName; \
+    ldr x17, [x17, HASH:lo12:WineIdName]; \
+    add x16, x16, x17, lsl HASH 3; \
+    br x16
 
   // Allows for continuing from a full native context, as the NTDLL NtContinue export takes in an x64 context with EC and
   // the conversion to that loses the ARM64EC ABI-disallowed registers that FEX uses.
-DIRECT_SYSCALL_WRAPPER("#NtContinueNative", WineNtContinueSyscallId, 0x43)
+DIRECT_SYSCALL_WRAPPER("#NtContinueNative", WineNtContinueSyscallId)
+DIRECT_SYSCALL_WRAPPER("#NtRaiseExceptionNative", WineNtRaiseExceptionSyscallId)
 
   // Both of these are wrapped as FEX needs them to setup its call checker at startup time and their NTDLL thunks could
   // already be patched by then (and because the call checker isn't installed, their patched x86 versions would be invoked
   // when called by FEX).
-DIRECT_SYSCALL_WRAPPER("#NtAllocateVirtualMemoryNative", WineNtAllocateVirtualMemorySyscallId, 0x18)
-DIRECT_SYSCALL_WRAPPER("#NtProtectVirtualMemoryNative", WineNtProtectVirtualMemorySyscallId, 0x50)
+DIRECT_SYSCALL_WRAPPER("#NtAllocateVirtualMemoryNative", WineNtAllocateVirtualMemorySyscallId)
+DIRECT_SYSCALL_WRAPPER("#NtProtectVirtualMemoryNative", WineNtProtectVirtualMemorySyscallId)
 
   // A replacement for the standard ARM64EC call checker that ignores any FFS patches and always redirects to a function's
   // native implementation. As the only library FEX calls into is NTDLL, this is done using a LUT generated at init time.

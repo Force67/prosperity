@@ -7,7 +7,7 @@ operations to the precision required by AArch64 - please check the simulator
 source code for details.
 
 #### AAch64 integer instructions ####
-[a](#integer-a) [b](#integer-b) [c](#integer-c) [d](#integer-d) [e](#integer-e) [h](#integer-h) [i](#integer-i) [l](#integer-l) [m](#integer-m) [n](#integer-n) [o](#integer-o) [p](#integer-p) [r](#integer-r) [s](#integer-s) [t](#integer-t) [u](#integer-u) [x](#integer-x)
+[a](#integer-a) [b](#integer-b) [c](#integer-c) [d](#integer-d) [e](#integer-e) [g](#integer-g) [h](#integer-h) [i](#integer-i) [l](#integer-l) [m](#integer-m) [n](#integer-n) [o](#integer-o) [p](#integer-p) [r](#integer-r) [s](#integer-s) [t](#integer-t) [u](#integer-u) [x](#integer-x) [y](#integer-y)
 
 #### AArch64 floating point and NEON instructions ####
 [a](#float-a) [b](#float-b) [c](#float-c) [d](#float-d) [e](#float-e) [f](#float-f) [i](#float-i) [l](#float-l) [m](#float-m) [n](#float-n) [o](#float-o) [p](#float-p) [r](#float-r) [s](#float-s) [t](#float-t) [u](#float-u) [x](#float-x) [z](#float-z)
@@ -24,6 +24,13 @@ AArch64 integer instructions
 ----------------------------
 
 <a id="integer-a">
+
+### ABS ###
+
+Absolute value.
+
+    void abs(const Register& rd, const Register& rn)
+
 
 ### ADC ###
 
@@ -44,6 +51,13 @@ Add with carry bit and update status flags.
 Add.
 
     void add(const Register& rd, const Register& rn, const Operand& operand)
+
+
+### ADDG ###
+
+Add with Tag.
+
+    void addg(const Register& xd, const Register& xn, int offset, int tag_offset)
 
 
 ### ADDS ###
@@ -578,6 +592,13 @@ Invert carry flag _(Armv8.4)_.
     void cfinv()
 
 
+### CHKFEAT ###
+
+Check feature status.
+
+    void chkfeat(const Register& rd)
+
+
 ### CINC ###
 
 Conditional increment: rd = cond ? rn + 1 : rn.
@@ -627,11 +648,193 @@ Compare.
     void cmp(const Register& rn, const Operand& operand)
 
 
+### CMPP ###
+
+Compare with Tag.
+
+    void cmpp(const Register& xn, const Register& xm)
+
+
 ### CNEG ###
 
 Conditional negate: rd = cond ? -rn : rn.
 
     void cneg(const Register& rd, const Register& rn, Condition cond)
+
+
+### CNT ###
+
+Count bits.
+
+    void cnt(const Register& rd, const Register& rn)
+
+
+### CPYE ###
+
+Memory Copy.
+
+    void cpye(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYEN ###
+
+Memory Copy, reads and writes non-temporal.
+
+    void cpyen(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYERN ###
+
+Memory Copy, reads non-temporal.
+
+    void cpyern(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYEWN ###
+
+Memory Copy, writes non-temporal.
+
+    void cpyewn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFE ###
+
+Memory Copy Forward-only.
+
+    void cpyfe(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFEN ###
+
+Memory Copy Forward-only, reads and writes non-temporal.
+
+    void cpyfen(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFERN ###
+
+Memory Copy Forward-only, reads non-temporal.
+
+    void cpyfern(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFEWN ###
+
+Memory Copy Forward-only, writes non-temporal.
+
+    void cpyfewn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFM ###
+
+Memory Copy Forward-only.
+
+    void cpyfm(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFMN ###
+
+Memory Copy Forward-only, reads and writes non-temporal.
+
+    void cpyfmn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFMRN ###
+
+Memory Copy Forward-only, reads non-temporal.
+
+    void cpyfmrn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFMWN ###
+
+Memory Copy Forward-only, writes non-temporal.
+
+    void cpyfmwn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFP ###
+
+Memory Copy Forward-only.
+
+    void cpyfp(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFPN ###
+
+Memory Copy Forward-only, reads and writes non-temporal.
+
+    void cpyfpn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFPRN ###
+
+Memory Copy Forward-only, reads non-temporal.
+
+    void cpyfprn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYFPWN ###
+
+Memory Copy Forward-only, writes non-temporal.
+
+    void cpyfpwn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYM ###
+
+Memory Copy.
+
+    void cpym(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYMN ###
+
+Memory Copy, reads and writes non-temporal.
+
+    void cpymn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYMRN ###
+
+Memory Copy, reads non-temporal.
+
+    void cpymrn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYMWN ###
+
+Memory Copy, writes non-temporal.
+
+    void cpymwn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYP ###
+
+Memory Copy.
+
+    void cpyp(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYPN ###
+
+Memory Copy, reads and writes non-temporal.
+
+    void cpypn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYPRN ###
+
+Memory Copy, reads non-temporal.
+
+    void cpyprn(const Register& rd, const Register& rs, const Register& rn)
+
+
+### CPYPWN ###
+
+Memory Copy, writes non-temporal.
+
+    void cpypwn(const Register& rd, const Register& rs, const Register& rn)
 
 
 ### CRC32B ###
@@ -751,6 +954,13 @@ Conditional select negation: rd = cond ? rn : -rm.
                Condition cond)
 
 
+### CTZ ###
+
+Count Trailing Zeros.
+
+    void ctz(const Register& rd, const Register& rn)
+
+
 <a id="integer-d">
 
 ### DC ###
@@ -807,6 +1017,43 @@ Extract.
               unsigned lsb)
 
 
+<a id="integer-g">
+
+### GCSPOPM ###
+
+Guarded Control Stack Pop.
+
+    void gcspopm(const Register& rt)
+
+
+### GCSPUSHM ###
+
+Guarded Control Stack Push.
+
+    void gcspushm(const Register& rt)
+
+
+### GCSSS1 ###
+
+Guarded Control Stack Switch Stack 1.
+
+    void gcsss1(const Register& rt)
+
+
+### GCSSS2 ###
+
+Guarded Control Stack Switch Stack 2.
+
+    void gcsss2(const Register& rt)
+
+
+### GMI ###
+
+Tag Mask Insert.
+
+    void gmi(const Register& xd, const Register& xn, const Register& xm)
+
+
 <a id="integer-h">
 
 ### HINT ###
@@ -837,6 +1084,13 @@ Halting debug-mode breakpoint.
 System instruction cache operation.
 
     void ic(InstructionCacheOp op, const Register& rt)
+
+
+### IRG ###
+
+Insert Random Tag.
+
+    void irg(const Register& xd, const Register& xn, const Register& xm = xzr)
 
 
 ### ISB ###
@@ -1210,6 +1464,13 @@ Atomic exclusive OR on byte in memory, with Store-release semantics _(Armv8.1)_
 Atomic exclusive OR on halfword in memory, with Store-release semantics _(Armv8.1)_
 
     void ldeorlh(const Register& rs, const Register& rt, const MemOperand& src)
+
+
+### LDG ###
+
+Load Allocation Tag.
+
+    void ldg(const Register& xt, const MemOperand& addr)
 
 
 ### LDLAR ###
@@ -2332,6 +2593,20 @@ Signed integer divide.
     void sdiv(const Register& rd, const Register& rn, const Register& rm)
 
 
+### SETE ###
+
+Memory Set.
+
+    void sete(const Register& rd, const Register& rn, const Register& rs)
+
+
+### SETEN ###
+
+Memory Set, non-temporal.
+
+    void seten(const Register& rd, const Register& rn, const Register& rs)
+
+
 ### SETF16 ###
 
 Set NZCV flags from register, treated as an 16-bit value _(Armv8.4)_.
@@ -2346,6 +2621,76 @@ Set NZCV flags from register, treated as an 8-bit value _(Armv8.4)_.
     void setf8(const Register& rn)
 
 
+### SETGE ###
+
+Memory Set with tag setting.
+
+    void setge(const Register& rd, const Register& rn, const Register& rs)
+
+
+### SETGEN ###
+
+Memory Set with tag setting, non-temporal.
+
+    void setgen(const Register& rd, const Register& rn, const Register& rs)
+
+
+### SETGM ###
+
+Memory Set with tag setting.
+
+    void setgm(const Register& rd, const Register& rn, const Register& rs)
+
+
+### SETGMN ###
+
+Memory Set with tag setting, non-temporal.
+
+    void setgmn(const Register& rd, const Register& rn, const Register& rs)
+
+
+### SETGP ###
+
+Memory Set with tag setting.
+
+    void setgp(const Register& rd, const Register& rn, const Register& rs)
+
+
+### SETGPN ###
+
+Memory Set with tag setting, non-temporal.
+
+    void setgpn(const Register& rd, const Register& rn, const Register& rs)
+
+
+### SETM ###
+
+Memory Set.
+
+    void setm(const Register& rd, const Register& rn, const Register& rs)
+
+
+### SETMN ###
+
+Memory Set, non-temporal.
+
+    void setmn(const Register& rd, const Register& rn, const Register& rs)
+
+
+### SETP ###
+
+Memory Set.
+
+    void setp(const Register& rd, const Register& rn, const Register& rs)
+
+
+### SETPN ###
+
+Memory Set, non-temporal.
+
+    void setpn(const Register& rd, const Register& rn, const Register& rs)
+
+
 ### SMADDL ###
 
 Signed long multiply and accumulate: 32 x 32 + 64 -> 64-bit.
@@ -2354,6 +2699,20 @@ Signed long multiply and accumulate: 32 x 32 + 64 -> 64-bit.
                 const Register& wn,
                 const Register& wm,
                 const Register& xa)
+
+
+### SMAX ###
+
+Signed Maximum.
+
+    void smax(const Register& rd, const Register& rn, const Operand& op)
+
+
+### SMIN ###
+
+Signed Minimum.
+
+    void smin(const Register& rd, const Register& rn, const Operand& op)
 
 
 ### SMSUBL ###
@@ -2378,6 +2737,13 @@ Signed multiply high: 64 x 64 -> 64-bit <127:64>.
 Signed long multiply: 32 x 32 -> 64-bit.
 
     void smull(const Register& xd, const Register& wn, const Register& wm)
+
+
+### ST2G ###
+
+Store Allocation Tags.
+
+    void st2g(const Register& xt, const MemOperand& addr)
 
 
 ### STADD ###
@@ -2504,6 +2870,20 @@ Atomic exclusive OR on byte in memory, with Store-release semantics and without 
 Atomic exclusive OR on halfword in memory, with Store-release semantics and without return. _(Armv8.1)_
 
     void steorlh(const Register& rs, const MemOperand& src)
+
+
+### STG ###
+
+Store Allocation Tag.
+
+    void stg(const Register& xt, const MemOperand& addr)
+
+
+### STGP ###
+
+Store Allocation Tag and Pair of registers.
+
+    void stgp(const Register& xt1, const Register& xt2, const MemOperand& addr)
 
 
 ### STLLR ###
@@ -2913,11 +3293,46 @@ Store exclusive half-word.
     void stxrh(const Register& rs, const Register& rt, const MemOperand& dst)
 
 
+### STZ2G ###
+
+Store Allocation Tags, Zeroing.
+
+    void stz2g(const Register& xt, const MemOperand& addr)
+
+
+### STZG ###
+
+Store Allocation Tag, Zeroing.
+
+    void stzg(const Register& xt, const MemOperand& addr)
+
+
 ### SUB ###
 
 Subtract.
 
     void sub(const Register& rd, const Register& rn, const Operand& operand)
+
+
+### SUBG ###
+
+Subtract with Tag.
+
+    void subg(const Register& xd, const Register& xn, int offset, int tag_offset)
+
+
+### SUBP ###
+
+Subtract Pointer.
+
+    void subp(const Register& xd, const Register& xn, const Register& xm)
+
+
+### SUBPS ###
+
+Subtract Pointer, setting Flags.
+
+    void subps(const Register& xd, const Register& xn, const Register& xm)
 
 
 ### SUBS ###
@@ -3053,6 +3468,13 @@ System instruction.
     void sys(int op1, int crn, int crm, int op2, const Register& xt = xzr)
 
 
+### SYSL ###
+
+System instruction with result.
+
+    void sysl(int op, const Register& xt = xzr)
+
+
 <a id="integer-t">
 
 ### TBNZ ###
@@ -3146,6 +3568,20 @@ Unsigned long multiply and accumulate: 32 x 32 + 64 -> 64-bit.
                 const Register& xa)
 
 
+### UMAX ###
+
+Unsigned Maximum.
+
+    void umax(const Register& rd, const Register& rn, const Operand& op)
+
+
+### UMIN ###
+
+Unsigned Minimum.
+
+    void umin(const Register& rd, const Register& rn, const Operand& op)
+
+
 ### UMSUBL ###
 
 Unsigned long multiply and subtract: 64 - (32 x 32) -> 64-bit.
@@ -3221,6 +3657,15 @@ Strip Pointer Authentication Code of Instruction address in LR _(Armv8.3)_.
     void xpaclri()
 
 
+<a id="integer-y">
+
+### YIELD ###
+
+Yield.
+
+    void yield()
+
+
 
 AArch64 floating point and NEON instructions
 --------------------------------------------
@@ -3276,6 +3721,34 @@ Add across vector.
     void addv(const VRegister& vd, const VRegister& vn)
 
 
+### AESD ###
+
+AES single round decryption.
+
+    void aesd(const VRegister& vd, const VRegister& vn)
+
+
+### AESE ###
+
+AES single round encryption.
+
+    void aese(const VRegister& vd, const VRegister& vn)
+
+
+### AESIMC ###
+
+AES inverse mix columns.
+
+    void aesimc(const VRegister& vd, const VRegister& vn)
+
+
+### AESMC ###
+
+AES mix columns.
+
+    void aesmc(const VRegister& vd, const VRegister& vn)
+
+
 ### AND ###
 
 Bitwise and.
@@ -3284,6 +3757,16 @@ Bitwise and.
 
 
 <a id="float-b">
+
+### BCAX ###
+
+Bit Clear and exclusive-OR.
+
+    void bcax(const VRegister& vd,
+              const VRegister& vn,
+              const VRegister& vm,
+              const VRegister& va)
+
 
 ### BIC ###
 
@@ -3443,6 +3926,16 @@ Duplicate vector element to vector or scalar.
 Bitwise eor.
 
     void eor(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### EOR3 ###
+
+Three-way Exclusive-OR.
+
+    void eor3(const VRegister& vd,
+              const VRegister& vn,
+              const VRegister& vm,
+              const VRegister& va)
 
 
 ### EXT ###
@@ -4693,6 +5186,13 @@ Rounding add narrow returning high half (second part).
     void raddhn2(const VRegister& vd, const VRegister& vn, const VRegister& vm)
 
 
+### RAX1 ###
+
+Rotate and Exclusive-OR
+
+    void rax1(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
 ### RBIT ###
 
 Reverse bit order.
@@ -4873,6 +5373,104 @@ Signed dot product by element _(Armv8.2)_.
               int vm_index)
 
 
+### SHA1C ###
+
+SHA1 hash update (choose).
+
+    void sha1c(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SHA1H ###
+
+SHA1 fixed rotate.
+
+    void sha1h(const VRegister& sd, const VRegister& sn)
+
+
+### SHA1M ###
+
+SHA1 hash update (majority).
+
+    void sha1m(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SHA1P ###
+
+SHA1 hash update (parity).
+
+    void sha1p(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SHA1SU0 ###
+
+SHA1 schedule update 0.
+
+    void sha1su0(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SHA1SU1 ###
+
+SHA1 schedule update 1.
+
+    void sha1su1(const VRegister& vd, const VRegister& vn)
+
+
+### SHA256H ###
+
+SHA256 hash update (part 1).
+
+    void sha256h(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SHA256H2 ###
+
+SHA256 hash update (part 2).
+
+    void sha256h2(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SHA256SU0 ###
+
+SHA256 schedule update 0.
+
+    void sha256su0(const VRegister& vd, const VRegister& vn)
+
+
+### SHA256SU1 ###
+
+SHA256 schedule update 1.
+
+    void sha256su1(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SHA512H ###
+
+SHA512 hash update part 1.
+
+    void sha512h(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SHA512H2 ###
+
+SHA512 hash update part 2.
+
+    void sha512h2(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SHA512SU0 ###
+
+SHA512 schedule Update 0.
+
+    void sha512su0(const VRegister& vd, const VRegister& vn)
+
+
+### SHA512SU1 ###
+
+SHA512 schedule Update 1.
+
+    void sha512su1(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
 ### SHADD ###
 
 Signed halving add.
@@ -4927,6 +5525,84 @@ Signed halving sub.
 Shift left by immediate and insert.
 
     void sli(const VRegister& vd, const VRegister& vn, int shift)
+
+
+### SM3PARTW1 ###
+
+SM3PARTW1.
+
+    void sm3partw1(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SM3PARTW2 ###
+
+SM3PARTW2.
+
+    void sm3partw2(const VRegister& vd, const VRegister& vn, const VRegister& vm)
+
+
+### SM3SS1 ###
+
+SM3SS1.
+
+    void sm3ss1(const VRegister& vd,
+                const VRegister& vn,
+                const VRegister& vm,
+                const VRegister& va)
+
+
+### SM3TT1A ###
+
+SM3TT1A.
+
+    void sm3tt1a(const VRegister& vd,
+                 const VRegister& vn,
+                 const VRegister& vm,
+                 int index)
+
+
+### SM3TT1B ###
+
+SM3TT1B.
+
+    void sm3tt1b(const VRegister& vd,
+                 const VRegister& vn,
+                 const VRegister& vm,
+                 int index)
+
+
+### SM3TT2A ###
+
+SM3TT2A.
+
+    void sm3tt2a(const VRegister& vd,
+                 const VRegister& vn,
+                 const VRegister& vm,
+                 int index)
+
+
+### SM3TT2B ###
+
+SM3TT2B.
+
+    void sm3tt2b(const VRegister& vd,
+                 const VRegister& vn,
+                 const VRegister& vm,
+                 int index)
+
+
+### SM4E ###
+
+SM4 Encode.
+
+    void sm4e(const VRegister& vd, const VRegister& vn)
+
+
+### SM4EKEY ###
+
+SM4 Key.
+
+    void sm4ekey(const VRegister& vd, const VRegister& vn, const VRegister& vm)
 
 
 ### SMAX ###
@@ -6284,6 +6960,16 @@ Unzip vectors (secondary).
 
 
 <a id="float-x">
+
+### XAR ###
+
+Exclusive-OR and Rotate.
+
+    void xar(const VRegister& vd,
+             const VRegister& vn,
+             const VRegister& vm,
+             int rotate)
+
 
 ### XTN ###
 

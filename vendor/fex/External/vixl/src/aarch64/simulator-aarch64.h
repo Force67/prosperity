@@ -30,7 +30,9 @@
 #include <memory>
 #include <mutex>
 #include <random>
+#include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "../cpu-features.h"
@@ -53,16 +55,6 @@ using uint8x16_t = __attribute__((neon_vector_type(16))) uint8_t;
 #endif
 
 #ifdef VIXL_INCLUDE_SIMULATOR_AARCH64
-
-// These are only used for the ABI feature, and depend on checks performed for
-// it.
-#ifdef VIXL_HAS_ABI_SUPPORT
-#include <tuple>
-#if __cplusplus >= 201402L
-// Required for `std::index_sequence`
-#include <utility>
-#endif
-#endif
 
 // The hosts that Simulator running on may not have these flags defined.
 #ifndef PROT_BTI
@@ -651,7 +643,7 @@ class SimVRegister : public SimRegisterBase<kZRegMaxSize> {
 class LogicPRegister {
  public:
   inline LogicPRegister(
-      SimPRegister& other)  // NOLINT(runtime/references)(runtime/explicit)
+      SimPRegister& other)  // NOLINT(google-runtime-references)
       : register_(other) {}
 
   // Set a conveniently-sized block to 16 bits as the minimum predicate length
@@ -752,7 +744,7 @@ using vixl_uint128_t = std::pair<uint64_t, uint64_t>;
 class LogicVRegister {
  public:
   inline LogicVRegister(
-      SimVRegister& other)  // NOLINT(runtime/references)(runtime/explicit)
+      SimVRegister& other)  // NOLINT(google-runtime-references)
       : register_(other) {
     for (size_t i = 0; i < ArrayLength(saturated_); i++) {
       saturated_[i] = kNotSaturated;
@@ -1307,8 +1299,6 @@ class Simulator : public DecoderVisitor {
   void RunFrom(const Instruction* first);
 
 
-#if defined(VIXL_HAS_ABI_SUPPORT) && __cplusplus >= 201103L && \
-    (defined(_MSC_VER) || defined(__clang__) || GCC_VERSION_OR_NEWER(4, 9, 1))
   // Templated `RunFrom` version taking care of passing arguments and returning
   // the result value.
   // This allows code like:
@@ -1361,7 +1351,6 @@ class Simulator : public DecoderVisitor {
       simulator->RunFrom(code);
     }
   };
-#endif
 
   // Execution ends when the PC hits this address.
   static const Instruction* kEndOfSimAddress;
@@ -1454,6 +1443,7 @@ class Simulator : public DecoderVisitor {
 
 #define DECLARE(A) virtual void Visit##A(const Instruction* instr);
   VISITOR_LIST_THAT_RETURN(DECLARE)
+  SIM_AUD_VISITOR_LIST_THAT_RETURN(DECLARE)
 #undef DECLARE
 #define DECLARE(A) \
   VIXL_NO_RETURN virtual void Visit##A(const Instruction* instr);
@@ -1540,6 +1530,13 @@ class Simulator : public DecoderVisitor {
   void SimulateSignedMinMax(const Instruction* instr);
   void SimulateUnsignedMinMax(const Instruction* instr);
   void SimulateSHA512(const Instruction* instr);
+  void SimulateFPConvert(const Instruction* instr);
+  void SimulateFPRoundInt(const Instruction* instr);
+  void SimulateFPRoundIntToSize(const Instruction* instr);
+  void SimulateNEONRoundInt(const Instruction* instr);
+  void SimulateNEONRoundIntToSize(const Instruction* instr);
+  void SimulateNEONFPConvert(const Instruction* instr);
+  void SimulateNEONFP2RegMisc(const Instruction* instr);
 
   void VisitCryptoSM3(const Instruction* instr);
   void VisitCryptoSM4(const Instruction* instr);
@@ -2585,7 +2582,7 @@ class Simulator : public DecoderVisitor {
   }
   void PrintWriteU64(uint64_t x, uintptr_t address) {
     fprintf(stream_,
-            "#      0x%016lx -> %s0x%016" PRIxPTR "%s\n",
+            "#      0x%016" PRIx64 " -> %s0x%016" PRIxPTR "%s\n",
             x,
             clr_memory_address,
             address,
@@ -2972,51 +2969,11 @@ class Simulator : public DecoderVisitor {
   }
   void ResetSeenFeatures() { cpu_features_auditor_.ResetSeenFeatures(); }
 
-// Runtime call emulation support.
-// It requires VIXL's ABI features, and C++11 or greater.
-// Also, the initialisation of the tuples in RuntimeCall(Non)Void is incorrect
-// in GCC before 4.9.1: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=51253
-#if defined(VIXL_HAS_ABI_SUPPORT) && __cplusplus >= 201103L && \
-    (defined(_MSC_VER) || defined(__clang__) || GCC_VERSION_OR_NEWER(4, 9, 1))
-
-#define VIXL_HAS_SIMULATED_RUNTIME_CALL_SUPPORT
-
-// The implementation of the runtime call helpers require the functionality
-// provided by `std::index_sequence`. It is only available from C++14, but
-// we want runtime call simulation to work from C++11, so we emulate if
-// necessary.
-#if __cplusplus >= 201402L
+  // Runtime call emulation support.
   template <std::size_t... I>
   using local_index_sequence = std::index_sequence<I...>;
   template <typename... P>
   using __local_index_sequence_for = std::index_sequence_for<P...>;
-#else
-  // Emulate the behaviour of `std::index_sequence` and
-  // `std::index_sequence_for`.
-  // Naming follow the `std` names, prefixed with `emulated_`.
-  template <size_t... I>
-  struct emulated_index_sequence {};
-
-  // A recursive template to create a sequence of indexes.
-  // The base case (for `N == 0`) is declared outside of the class scope, as
-  // required by C++.
-  template <std::size_t N, size_t... I>
-  struct emulated_make_index_sequence_helper
-      : emulated_make_index_sequence_helper<N - 1, N - 1, I...> {};
-
-  template <std::size_t N>
-  struct emulated_make_index_sequence : emulated_make_index_sequence_helper<N> {
-  };
-
-  template <typename... P>
-  struct emulated_index_sequence_for
-      : emulated_make_index_sequence<sizeof...(P)> {};
-
-  template <std::size_t... I>
-  using local_index_sequence = emulated_index_sequence<I...>;
-  template <typename... P>
-  using __local_index_sequence_for = emulated_index_sequence_for<P...>;
-#endif
 
   // Expand the argument tuple and perform the call.
   template <typename R, typename... P, std::size_t... I>
@@ -3108,7 +3065,6 @@ class Simulator : public DecoderVisitor {
       simulator->RuntimeCallVoid(function);
     }
   };
-#endif
 
   // Configure the simulated value of 'VL', which is the size of a Z register.
   // Because this cannot occur during a program's lifetime, this function also
@@ -3816,8 +3772,8 @@ class Simulator : public DecoderVisitor {
   LogicVRegister addlp(VectorFormat vform,
                        LogicVRegister dst,
                        const LogicVRegister& src,
-                       bool is_signed,
-                       bool do_accumulate);
+                       const LogicVRegister& acc,
+                       bool is_signed);
   LogicVRegister saddlp(VectorFormat vform,
                         LogicVRegister dst,
                         const LogicVRegister& src);
@@ -3826,10 +3782,12 @@ class Simulator : public DecoderVisitor {
                         const LogicVRegister& src);
   LogicVRegister sadalp(VectorFormat vform,
                         LogicVRegister dst,
-                        const LogicVRegister& src);
+                        const LogicVRegister& src,
+                        const LogicVRegister& acc);
   LogicVRegister uadalp(VectorFormat vform,
                         LogicVRegister dst,
-                        const LogicVRegister& src);
+                        const LogicVRegister& src,
+                        const LogicVRegister& acc);
   LogicVRegister ror(VectorFormat vform,
                      LogicVRegister dst,
                      const LogicVRegister& src,
@@ -4947,6 +4905,12 @@ class Simulator : public DecoderVisitor {
   LogicVRegister fcvtxn2(VectorFormat vform,
                          LogicVRegister dst,
                          const LogicVRegister& src);
+  LogicVRegister bfcvtn(VectorFormat vform,
+                        LogicVRegister dst,
+                        const LogicVRegister& src);
+  LogicVRegister bfcvtn2(VectorFormat vform,
+                         LogicVRegister dst,
+                         const LogicVRegister& src);
   LogicVRegister fsqrt(VectorFormat vform,
                        LogicVRegister dst,
                        const LogicVRegister& src);
@@ -5488,9 +5452,10 @@ class Simulator : public DecoderVisitor {
   // in vreg is non-zero. Clear the flag, otherwise. This is almost the opposite
   // operation to ExpandToSimVRegister(), except that any non-zero lane is
   // interpreted as true.
-  void ExtractFromSimVRegister(VectorFormat vform,
-                               SimPRegister& pd,  // NOLINT(runtime/references)
-                               SimVRegister vreg);
+  void ExtractFromSimVRegister(
+      VectorFormat vform,
+      SimPRegister& pd,  // NOLINT(google-runtime-references)
+      SimVRegister vreg);
 
   bool coloured_trace_;
 
@@ -5532,19 +5497,54 @@ class Simulator : public DecoderVisitor {
 
   // The Guarded Control Stack is represented using a vector, where the more
   // recently stored addresses are at higher-numbered indices.
-  using GuardedControlStack = std::vector<uint64_t>;
+  using GuardedControlStackStorage = std::vector<uint64_t>;
 
+ public:
+  struct GuardedControlStack {
+    GuardedControlStackStorage* ptr;
+    uint64_t token;
+  };
+
+ private:
   // The GCSManager handles the synchronisation of GCS across multiple
   // Simulator instances. Each Simulator has its own stack, but all share
   // a GCSManager instance. This allows exchanging stacks between Simulators
   // in a threaded application.
   class GCSManager {
    public:
-    // Allocate a new Guarded Control Stack and add it to the vector of stacks.
+    // Interface for users outside the Simulator.
+
+    // Allocate a new Guarded Control Stack. This method returns a token, which
+    // uniquely identifies the GCS, and can be passed *once* to the stack
+    // switching instructions (GSSS*), when the stack has not been used yet.
+    // Later arguments to the stack switching instructions must either be
+    // fresh tokens, or return values from the stack switching instructions.
     uint64_t AllocateStack() {
+      GuardedControlStack gcs = AllocateStackInternal();
+      return gcs.token;
+    }
+
+    // Free a Guarded Control Stack based on its token.
+    void FreeStack(uint64_t token) {
+      const std::lock_guard<std::mutex> lock(stacks_mtx_);
+      uint64_t gcs_index = GetGCSIndexFromToken(token);
+      GuardedControlStackStorage* gcsptr = stacks_[gcs_index];
+      if (gcsptr == nullptr) {
+        VIXL_ABORT_WITH_MSG("Tried to double free GCS ");
+      } else {
+        delete gcsptr;
+        // To ensure other tokens remain valid, we do not remove this element
+        // but set it to nullptr instead.
+        stacks_[gcs_index] = nullptr;
+      }
+    }
+
+   private:
+    // Allocate a new Guarded Control Stack and add it to the vector of stacks.
+    GuardedControlStack AllocateStackInternal() {
       const std::lock_guard<std::mutex> lock(stacks_mtx_);
 
-      GuardedControlStack* new_stack = new GuardedControlStack;
+      GuardedControlStackStorage* new_stack = new GuardedControlStackStorage;
       uint64_t result;
 
       // Put the new stack into the first available slot.
@@ -5560,42 +5560,46 @@ class Simulator : public DecoderVisitor {
         stacks_.push_back(new_stack);
       }
 
-      // Shift the index to look like a stack pointer aligned to a page.
-      result <<= kPageSizeLog2;
+      result = GetGCSTokenFromIndex(result);
 
       // Push the tagged index onto the new stack as a seal.
       new_stack->push_back(result + 1);
-      return result;
+
+      return {new_stack, result};
     }
 
-    // Free a Guarded Control Stack and set the stacks_ slot to null.
-    void FreeStack(uint64_t gcs) {
+    // Get a pointer to the GCS storage using a GCS index.
+    GuardedControlStackStorage* GetGCSPtr(uint64_t gcs_index) {
       const std::lock_guard<std::mutex> lock(stacks_mtx_);
-      uint64_t gcs_index = GetGCSIndex(gcs);
-      GuardedControlStack* gcsptr = stacks_[gcs_index];
-      if (gcsptr == nullptr) {
-        VIXL_ABORT_WITH_MSG("Tried to free unallocated GCS ");
-      } else {
-        delete gcsptr;
-        stacks_[gcs_index] = nullptr;
-      }
+      return stacks_.at(GetGCSIndexFromToken(gcs_index));
     }
 
-    // Get a pointer to the GCS vector using a GCS id.
-    GuardedControlStack* GetGCSPtr(uint64_t gcs) const {
-      return stacks_[GetGCSIndex(gcs)];
+    // Get an index into stacks_ given a GCS token.
+    static uint64_t GetGCSIndexFromToken(uint64_t token) {
+      return token >> kPageSizeLog2;
     }
 
-   private:
-    uint64_t GetGCSIndex(uint64_t gcs) const { return gcs >> 12; }
+    // Get a GCS token from an index into stacks_.
+    static uint64_t GetGCSTokenFromIndex(uint64_t index) {
+      // Shift the index to look like a stack pointer aligned to a page.
+      return index << kPageSizeLog2;
+    }
 
-    std::vector<GuardedControlStack*> stacks_;
+    std::vector<GuardedControlStackStorage*> stacks_;
     std::mutex stacks_mtx_;
+
+    friend class Simulator;
   };
+
+  GuardedControlStackStorage* GetGCSStorage() { return gcs_.ptr; }
+  uint64_t GetGCSToken() { return gcs_.token; }
 
   // A GCS id indicating no GCS has been allocated.
   static const uint64_t kGCSNoStack = kPageSize - 1;
-  uint64_t gcs_;
+  // We cache both the GCS token, and the pointer to the GCS underlying
+  // storage, which allows us to avoid calls into GCSManager that
+  // would require synchronisation.
+  GuardedControlStack gcs_;
   bool gcs_enabled_;
 
  public:
@@ -5609,37 +5613,45 @@ class Simulator : public DecoderVisitor {
   bool IsGCSCheckEnabled() const { return gcs_enabled_; }
 
  private:
-  bool IsAllocatedGCS(uint64_t gcs) const { return gcs != kGCSNoStack; }
   void ResetGCSState() {
     GCSManager& m = GetGCSManager();
-    if (IsAllocatedGCS(gcs_)) {
-      m.FreeStack(gcs_);
+    // This method is also called in the constructor, before we have set up the
+    // GCS, so the call to FreeStack must be conditional.
+    if (GetGCSStorage() != nullptr) {
+      m.FreeStack(GetGCSToken());
     }
-    ActivateGCS(m.AllocateStack());
+    ActivateGCS(m.AllocateStackInternal());
     GCSPop();  // Remove seal.
   }
 
-  GuardedControlStack* GetGCSPtr(uint64_t gcs) {
+  GuardedControlStackStorage* GetGCSPtr(uint64_t gcs) {
     GCSManager& m = GetGCSManager();
-    GuardedControlStack* result = m.GetGCSPtr(gcs);
+    GuardedControlStackStorage* result = m.GetGCSPtr(gcs);
     return result;
   }
-  GuardedControlStack* GetActiveGCSPtr() { return GetGCSPtr(gcs_); }
 
-  uint64_t ActivateGCS(uint64_t gcs) {
-    uint64_t outgoing_gcs = gcs_;
-    gcs_ = gcs;
-    return outgoing_gcs;
+  GuardedControlStack ActivateGCS(GuardedControlStack incoming) {
+    GuardedControlStack outgoing = gcs_;
+    gcs_ = incoming;
+    return outgoing;
+  }
+
+  GuardedControlStack ActivateGCS(uint64_t token) {
+    GuardedControlStack incoming = {GetGCSPtr(token), token};
+    GuardedControlStack outgoing = gcs_;
+    gcs_ = incoming;
+    return outgoing;
   }
 
   void GCSPush(uint64_t addr) {
-    GetActiveGCSPtr()->push_back(addr);
-    size_t entry = GetActiveGCSPtr()->size() - 1;
+    GuardedControlStackStorage* gcs = GetGCSStorage();
+    gcs->push_back(addr);
+    size_t entry = gcs->size() - 1;
     LogGCS(/* is_push = */ true, addr, entry);
   }
 
   uint64_t GCSPop() {
-    GuardedControlStack* gcs = GetActiveGCSPtr();
+    GuardedControlStackStorage* gcs = GetGCSStorage();
     if (gcs->empty()) {
       return 0;
     }
@@ -5651,7 +5663,7 @@ class Simulator : public DecoderVisitor {
   }
 
   uint64_t GCSPeek() {
-    GuardedControlStack* gcs = GetActiveGCSPtr();
+    GuardedControlStackStorage* gcs = GetGCSStorage();
     if (gcs->empty()) {
       return 0;
     }
@@ -5660,8 +5672,8 @@ class Simulator : public DecoderVisitor {
   }
 
   void ReportGCSFailure(const char* msg) {
+    GuardedControlStackStorage* gcs = GetGCSStorage();
     if (IsGCSCheckEnabled()) {
-      GuardedControlStack* gcs = GetActiveGCSPtr();
       printf("%s", msg);
       if (gcs == nullptr) {
         printf("GCS pointer is null\n");
@@ -5674,7 +5686,7 @@ class Simulator : public DecoderVisitor {
             gcs->pop_back();
             int index = most_recent_index - i;
             printf(" gcs%" PRIu64 "[%d]: 0x%016" PRIx64 "\n",
-                   gcs_,
+                   GCSManager::GetGCSIndexFromToken(GetGCSToken()),
                    index,
                    entry);
           }
@@ -5685,14 +5697,6 @@ class Simulator : public DecoderVisitor {
     }
   }
 };
-
-#if defined(VIXL_HAS_SIMULATED_RUNTIME_CALL_SUPPORT) && __cplusplus < 201402L
-// Base case of the recursive template used to emulate C++14
-// `std::index_sequence`.
-template <size_t... I>
-struct Simulator::emulated_make_index_sequence_helper<0, I...>
-    : Simulator::emulated_index_sequence<I...> {};
-#endif
 
 template <typename R, typename... P>
 void MetaDataDepot::BranchInterception<R, P...>::operator()(

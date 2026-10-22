@@ -68,8 +68,11 @@ ExternalProject_Add(fexcore_ep
     -DCMAKE_BUILD_TYPE=Release
     ${_fex_toolchain_args}
     -DENABLE_LTO=False
-    -DENABLE_JEMALLOC=False
+    -DENABLE_FEX_ALLOCATOR=False
     -DENABLE_JEMALLOC_GLIBC_ALLOC=False
+    # Always build the bundled fmt/xxhash: their archives are linked by path.
+    -DCMAKE_DISABLE_FIND_PACKAGE_fmt=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_xxhash=ON
     -DBUILD_THUNKS=False
     -DBUILD_FEX_TOOLS=False
     -DBUILD_FEXCONFIG=False
@@ -93,7 +96,7 @@ set(_fex_includes
   ${FEX_SRC}/FEXHeaderUtils
   ${FEX_SRC}/CodeEmitter
   ${FEX_SRC}/External/fmt/include
-  ${FEX_SRC}/External/robin-map/include
+  ${FEX_SRC}/External/unordered_dense/include
   ${FEX_SRC}/External/xxhash
   ${FEX_SRC}/External/cephes/include
   ${FEX_SRC}/External/SoftFloat-3e/include

@@ -8,6 +8,8 @@ $end_info$
 
 #pragma once
 
+#include "Interface/Core/SharedCodeBufferManager.h"
+
 #include <FEXCore/Utils/CompilerDefs.h>
 #include <FEXCore/Utils/SignalScopeGuards.h>
 #include <FEXCore/fextl/memory.h>
@@ -16,6 +18,7 @@ $end_info$
 #include <FEXCore/fextl/map.h>
 
 #include <cstdint>
+#include <span>
 
 namespace FEXCore::CPU {
 union Relocation;
@@ -41,58 +44,10 @@ namespace CodeSerialize {
 struct GuestToHostMap;
 
 namespace CPU {
-  struct CodeBuffer {
-    uint8_t* Ptr;
-    size_t Size;
-
-    fextl::unique_ptr<GuestToHostMap> LookupCache;
-
-    CodeBuffer(size_t Size);
-    CodeBuffer(const CodeBuffer&) = delete;
-    CodeBuffer& operator=(const CodeBuffer&) = delete;
-    CodeBuffer(CodeBuffer&& oth) = delete;
-    CodeBuffer& operator=(CodeBuffer&&) = delete;
-
-    ~CodeBuffer();
-  };
-
-  /**
-   * A manager that coordinates access to the CodeBuffer used for compiling new code across threads.
-   *
-   * The CodeBuffer is managed as a partially persistent data structure:
-   * - Exactly one CodeBuffer is now designated as "active", which means data can be appended to it
-   * - Lossy modifications to the active CodeBuffer will not invalidate any data in use by other threads (which is what enables save CodeBuffer sharing across threads)
-   * - Instead, such lossy modifications trigger a new "version" of the data in the modifying thread. Old versions of the CodeBuffer persist as read-only data for use by the other threads.
-   * - The other threads can update their version of the CodeBuffer. This will decrease the reference count and eventually trigger deallocation of the old version
-   */
-  class CodeBufferManager {
-  public:
-    // Get the CodeBuffer that was most recently allocated.
-    // This is the only CodeBuffer that data may be written to.
-    fextl::shared_ptr<CodeBuffer> GetLatest();
-
-    // Allocate a new CodeBuffer with geometric growth up to an internal maximum.
-    // Subsequent calls to GetLatest will point to the returned buffer.
-    fextl::shared_ptr<CodeBuffer> StartLargerCodeBuffer();
-
-    // Write offset into the latest CodeBuffer
-    std::size_t LatestOffset {};
-
-    // Protects writes to the latest CodeBuffer and changes to LatestOffset
-    FEXCore::ForkableUniqueMutex CodeBufferWriteMutex;
-
-    virtual void OnCodeBufferAllocated(const std::shared_ptr<CodeBuffer>&) {};
-
-  private:
-    fextl::shared_ptr<CodeBuffer> Latest;
-
-    fextl::shared_ptr<CodeBuffer> AllocateNew(size_t Size);
-  };
-
   class CPUBackend {
   public:
 
-    CPUBackend(CodeBufferManager&, FEXCore::Core::InternalThreadState*);
+    CPUBackend(SharedCodeBufferManager&, FEXCore::Core::InternalThreadState*);
 
     virtual ~CPUBackend();
 
@@ -102,6 +57,8 @@ namespace CPU {
       fextl::map<uint64_t, uint8_t*> EntryPoints;
       // The total size of the codeblock from [BlockBegin, BlockBegin+Size).
       size_t Size;
+      // Offset of BlockBegin from the start of the CodeBuffer it lives in
+      uint64_t HostCodeOffset;
     };
 
     // Header that can live at the start of a JIT block.
@@ -161,6 +118,10 @@ namespace CPU {
     virtual CompiledCode CompileCode(uint64_t Entry, uint64_t Size, bool SingleInst, const FEXCore::IR::IRListView* IR,
                                      FEXCore::Core::DebugData* DebugData, bool CheckTF) = 0;
 
+    virtual CompiledCode LoadCachedCode(std::span<const uint8_t> HostBytes) {
+      return {};
+    }
+
     virtual fextl::vector<FEXCore::CPU::Relocation> TakeRelocations(uint64_t GuestBaseAddress) = 0;
 
     virtual void ClearCache() {}
@@ -184,8 +145,9 @@ namespace CPU {
 
     FEXCore::Core::InternalThreadState* ThreadState;
 
+    // Acquires a new shared code buffer, setting `CurrentCodeBuffer` and returning a pointer to it.
     [[nodiscard]]
-    CodeBuffer* GetEmptyCodeBuffer();
+    CodeBuffer* AcquireNewSharedCodeBuffer();
 
     // This is the code buffer containing the main code under execution by this thread.
     // CheckCodeBufferUpdate must be used before compiling new code.
@@ -194,7 +156,7 @@ namespace CPU {
     // Old CodeBuffer generations required to be valid until returning from signal handlers
     fextl::vector<fextl::shared_ptr<CodeBuffer>> SignalHandlerCodeBuffers;
 
-    CodeBufferManager& CodeBuffers;
+    SharedCodeBufferManager& SharedCodeBuffers;
 
   private:
     void RegisterForSignalHandler(fextl::shared_ptr<CodeBuffer>);

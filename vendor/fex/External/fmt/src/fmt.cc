@@ -1,3 +1,10 @@
+// Formatting library for C++ - C++20 module
+//
+// Copyright (c) 2012 - present, Victor Zverovich and {fmt} contributors
+// All rights reserved.
+//
+// For the license information refer to format.h.
+
 module;
 
 #define FMT_MODULE
@@ -12,6 +19,7 @@ module;
 // to prevent attachment to this module.
 #ifndef FMT_IMPORT_STD
 #  include <algorithm>
+#  include <atomic>
 #  include <bitset>
 #  include <chrono>
 #  include <cmath>
@@ -57,6 +65,12 @@ module;
 #include <cerrno>
 #include <climits>
 #include <version>
+
+// fmt/enum.h uses C++26 reflection if it is available.
+#if defined(__cpp_impl_reflection) && __has_include(<meta>)
+#  include <array>
+#  include <meta>
+#endif
 
 #if __has_include(<cxxabi.h>)
 #  include <cxxabi.h>
@@ -120,6 +134,7 @@ extern "C++" {
 #include "fmt/chrono.h"
 #include "fmt/color.h"
 #include "fmt/compile.h"
+#include "fmt/enum.h"
 #include "fmt/format.h"
 #if FMT_OS
 #  include "fmt/os.h"
@@ -132,11 +147,6 @@ extern "C++" {
 
 #ifdef FMT_ATTACH_TO_GLOBAL_MODULE
 }
-#endif
-
-// gcc doesn't yet implement private module fragments
-#if !FMT_GCC_VERSION
-module :private;
 #endif
 
 #ifdef FMT_ATTACH_TO_GLOBAL_MODULE

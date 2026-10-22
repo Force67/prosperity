@@ -45,6 +45,37 @@ FILE_INFORMATION_CLASS FileInfoClassToNT(FILE_INFO_BY_HANDLE_CLASS InformationCl
 }
 } // namespace
 
+DLLEXPORT_FUNC(BOOL, RemoveDirectoryA, (LPCSTR lpFileName)) {
+  ScopedUnicodeString FileName {lpFileName};
+  return RemoveDirectoryW(FileName->Buffer);
+}
+
+DLLEXPORT_FUNC(BOOL, RemoveDirectoryW, (LPCWSTR lpFileName)) {
+  UNICODE_STRING PathW;
+  RtlInitUnicodeString(&PathW, lpFileName);
+
+  ScopedUnicodeString NTPath;
+  if (!RtlDosPathNameToNtPathName_U(PathW.Buffer, &*NTPath, nullptr, nullptr)) {
+    SetLastError(ERROR_PATH_NOT_FOUND);
+    return false;
+  }
+
+  OBJECT_ATTRIBUTES ObjAttributes;
+  InitializeObjectAttributes(&ObjAttributes, &*NTPath, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+
+  HANDLE Handle;
+  IO_STATUS_BLOCK IOSB;
+
+  NTSTATUS Status =
+    NtCreateFile(&Handle, SYNCHRONIZE | DELETE, &ObjAttributes, &IOSB, nullptr, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                 FILE_OPEN, FILE_DELETE_ON_CLOSE | FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT, nullptr, 0);
+  if (WinAPIReturn(Status)) {
+    Status = NtClose(Handle);
+  }
+
+  return WinAPIReturn(Status);
+}
+
 DLLEXPORT_FUNC(BOOL, DeleteFileA, (LPCSTR lpFileName)) {
   ScopedUnicodeString FileName {lpFileName};
   return DeleteFileW(FileName->Buffer);
@@ -111,10 +142,16 @@ DLLEXPORT_FUNC(HANDLE, CreateFileW,
 DLLEXPORT_FUNC(WINBOOL, WriteFile,
                (HANDLE hFile, const void* lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten, LPOVERLAPPED lpOverlapped)) {
   IO_STATUS_BLOCK IOSB;
+  LARGE_INTEGER ByteOffset;
+  PLARGE_INTEGER ByteOffsetPtr = nullptr;
   if (lpOverlapped) {
-    UNIMPLEMENTED();
+    if (lpOverlapped->hEvent) {
+      UNIMPLEMENTED();
+    }
+    ByteOffset.QuadPart = (static_cast<LONGLONG>(lpOverlapped->OffsetHigh) << 32) | lpOverlapped->Offset;
+    ByteOffsetPtr = &ByteOffset;
   }
-  NTSTATUS Status = NtWriteFile(hFile, nullptr, nullptr, nullptr, &IOSB, lpBuffer, nNumberOfBytesToWrite, nullptr, nullptr);
+  NTSTATUS Status = NtWriteFile(hFile, nullptr, nullptr, nullptr, &IOSB, lpBuffer, nNumberOfBytesToWrite, ByteOffsetPtr, nullptr);
   if (lpNumberOfBytesWritten) {
     *lpNumberOfBytesWritten = static_cast<DWORD>(IOSB.Information);
   }
@@ -135,6 +172,18 @@ DLLEXPORT_FUNC(WINBOOL, WriteConsoleW,
   UNIMPLEMENTED();
 }
 
+DLLEXPORT_FUNC(WINBOOL, GetFileSizeEx, (HANDLE hFile, PLARGE_INTEGER lpFileSize)) {
+  IO_STATUS_BLOCK IOSB;
+  FILE_STANDARD_INFORMATION StandardInfo;
+  if (NTSTATUS Status = NtQueryInformationFile(hFile, &IOSB, &StandardInfo, sizeof(StandardInfo), FileStandardInformation); Status) {
+    return WinAPIReturn(Status);
+  }
+  if (lpFileSize) {
+    *lpFileSize = StandardInfo.EndOfFile;
+  }
+  return true;
+}
+
 DLLEXPORT_FUNC(WINBOOL, SetFilePointerEx, (HANDLE hFile, LARGE_INTEGER liDistanceToMove, PLARGE_INTEGER lpNewFilePointer, DWORD dwMoveMethod)) {
   IO_STATUS_BLOCK IOSB;
   FILE_POSITION_INFORMATION PositionInfo;
@@ -147,9 +196,18 @@ DLLEXPORT_FUNC(WINBOOL, SetFilePointerEx, (HANDLE hFile, LARGE_INTEGER liDistanc
   }
 
   switch (dwMoveMethod) {
-  case FILE_BEGIN: PositionInfo.CurrentByteOffset = liDistanceToMove; break;
-  case FILE_CURRENT: PositionInfo.CurrentByteOffset.QuadPart += liDistanceToMove.QuadPart; break;
-  case FILE_END: PositionInfo.CurrentByteOffset = StandardInfo.EndOfFile; break;
+  case FILE_BEGIN: {
+    PositionInfo.CurrentByteOffset = liDistanceToMove;
+    break;
+  }
+  case FILE_CURRENT: {
+    PositionInfo.CurrentByteOffset.QuadPart += liDistanceToMove.QuadPart;
+    break;
+  }
+  case FILE_END: {
+    PositionInfo.CurrentByteOffset.QuadPart = StandardInfo.EndOfFile.QuadPart + liDistanceToMove.QuadPart;
+    break;
+  }
   default: UNIMPLEMENTED();
   }
   if (NTSTATUS Status = NtSetInformationFile(hFile, &IOSB, &PositionInfo, sizeof(PositionInfo), FilePositionInformation); Status) {
@@ -164,10 +222,17 @@ DLLEXPORT_FUNC(WINBOOL, SetFilePointerEx, (HANDLE hFile, LARGE_INTEGER liDistanc
 DLLEXPORT_FUNC(WINBOOL, ReadFile,
                (HANDLE hFile, void* lpBuffer, DWORD nNumberOfBytesToRead, LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverlapped)) {
   IO_STATUS_BLOCK IOSB;
+  LARGE_INTEGER ByteOffset;
+  PLARGE_INTEGER ByteOffsetPtr = nullptr;
   if (lpOverlapped) {
-    UNIMPLEMENTED();
+    if (lpOverlapped->hEvent) {
+      // no actual async-overlapped, just enough for PRead
+      UNIMPLEMENTED();
+    }
+    ByteOffset.QuadPart = (static_cast<LONGLONG>(lpOverlapped->OffsetHigh) << 32) | lpOverlapped->Offset;
+    ByteOffsetPtr = &ByteOffset;
   }
-  NTSTATUS Status = NtReadFile(hFile, nullptr, nullptr, nullptr, &IOSB, lpBuffer, nNumberOfBytesToRead, nullptr, nullptr);
+  NTSTATUS Status = NtReadFile(hFile, nullptr, nullptr, nullptr, &IOSB, lpBuffer, nNumberOfBytesToRead, ByteOffsetPtr, nullptr);
   if (lpNumberOfBytesRead) {
     *lpNumberOfBytesRead = static_cast<DWORD>(IOSB.Information);
   }
@@ -176,6 +241,37 @@ DLLEXPORT_FUNC(WINBOOL, ReadFile,
 
 DLLEXPORT_FUNC(WINBOOL, FlushFileBuffers, (HANDLE hFile)) {
   UNIMPLEMENTED();
+}
+
+DLLEXPORT_FUNC(
+  WINBOOL, LockFileEx,
+  (HANDLE hFile, DWORD dwFlags, DWORD dwReserved, DWORD nNumberOfBytesToLockLow, DWORD nNumberOfBytesToLockHigh, LPOVERLAPPED lpOverlapped)) {
+  if (!lpOverlapped || lpOverlapped->hEvent) {
+    UNIMPLEMENTED();
+  }
+  LARGE_INTEGER ByteOffset;
+  ByteOffset.QuadPart = (static_cast<LONGLONG>(lpOverlapped->OffsetHigh) << 32) | lpOverlapped->Offset;
+  LARGE_INTEGER Length;
+  Length.QuadPart = (static_cast<LONGLONG>(nNumberOfBytesToLockHigh) << 32) | nNumberOfBytesToLockLow;
+  // IoStatusBlock must be null on Wine :harold:
+  NTSTATUS Status = NtLockFile(hFile, nullptr, nullptr, nullptr, nullptr, &ByteOffset, &Length, 0, !!(dwFlags & LOCKFILE_FAIL_IMMEDIATELY),
+                               !!(dwFlags & LOCKFILE_EXCLUSIVE_LOCK));
+  return WinAPIReturn(Status);
+}
+
+DLLEXPORT_FUNC(WINBOOL, UnlockFileEx,
+               (HANDLE hFile, DWORD dwReserved, DWORD nNumberOfBytesToUnlockLow, DWORD nNumberOfBytesToUnlockHigh, LPOVERLAPPED lpOverlapped)) {
+  if (!lpOverlapped || lpOverlapped->hEvent) {
+    UNIMPLEMENTED();
+  }
+  LARGE_INTEGER ByteOffset;
+  ByteOffset.QuadPart = (static_cast<LONGLONG>(lpOverlapped->OffsetHigh) << 32) | lpOverlapped->Offset;
+  LARGE_INTEGER Length;
+  Length.QuadPart = (static_cast<LONGLONG>(nNumberOfBytesToUnlockHigh) << 32) | nNumberOfBytesToUnlockLow;
+  // IoStatusBlock must be non-null on Wine :harold:
+  IO_STATUS_BLOCK IoStatusBlock;
+  NTSTATUS Status = NtUnlockFile(hFile, &IoStatusBlock, &ByteOffset, &Length, 0);
+  return WinAPIReturn(Status);
 }
 
 DLLEXPORT_FUNC(DWORD, GetFinalPathNameByHandleA, (HANDLE hFile, LPSTR lpszFilePath, DWORD cchFilePath, DWORD dwFlags)) {

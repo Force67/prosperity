@@ -64,7 +64,18 @@ class TestQueue(object):
     self.queue.append(Test(name, self, **kwargs))
 
   # Run the specified tests.
-  def Run(self, jobs, verbose, run_function):
+  def Run(self,
+          jobs,
+          verbose,
+          run_function,
+          head_count=0,
+          tail_chunksize=None):
+
+    # If there are no tests to run, return 0 as "success"
+    if (len(self.queue) == 0):
+      printer.Print("No tests to run")
+      return 0
+
     with multiprocessing.Manager() as manager:
       def InitGlobals():
         # Initialisation.
@@ -79,7 +90,12 @@ class TestQueue(object):
         self.tests_skipped = manager.dict()
         return True
 
-      thread_pool.Multithread(run_function, self.queue, jobs, InitGlobals)
+      thread_pool.Multithread(run_function,
+                              self.queue,
+                              jobs,
+                              InitGlobals,
+                              head_count=head_count,
+                              tail_chunksize=tail_chunksize)
 
       printer.UpdateProgress(self.start_time,
                              Test.n_tests_passed.value,
@@ -117,4 +133,3 @@ class TestQueue(object):
       self.queue = []
       # `0` indicates success
       return Test.n_tests_failed.value
-

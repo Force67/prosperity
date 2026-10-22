@@ -61,8 +61,8 @@ void RegisterInfo(FEX::HLE::SyscallHandler* Handler) {
     }
     strncpy(buf->sysname, "Linux", __OLD_UTS_LEN);
     uint32_t GuestVersion = FEX::HLE::_SyscallHandler->GetGuestKernelVersion();
-    snprintf(buf->release, __OLD_UTS_LEN, "%d.%d.%d", FEX::HLE::SyscallHandler::KernelMajor(GuestVersion),
-             FEX::HLE::SyscallHandler::KernelMinor(GuestVersion), FEX::HLE::SyscallHandler::KernelPatch(GuestVersion));
+    snprintf(buf->release, __OLD_UTS_LEN, "%d.%d.%d", FEX::LinuxVersion::KernelMajor(GuestVersion),
+             FEX::LinuxVersion::KernelMinor(GuestVersion), FEX::LinuxVersion::KernelPatch(GuestVersion));
 
     const char version[] = "#" GIT_DESCRIBE_STRING " SMP " __DATE__ " " __TIME__;
     strncpy(buf->version, version, __OLD_UTS_LEN);
@@ -85,8 +85,8 @@ void RegisterInfo(FEX::HLE::SyscallHandler* Handler) {
     }
     strncpy(buf->sysname, "Linux", __NEW_UTS_LEN);
     uint32_t GuestVersion = FEX::HLE::_SyscallHandler->GetGuestKernelVersion();
-    snprintf(buf->release, __NEW_UTS_LEN, "%d.%d.%d", FEX::HLE::SyscallHandler::KernelMajor(GuestVersion),
-             FEX::HLE::SyscallHandler::KernelMinor(GuestVersion), FEX::HLE::SyscallHandler::KernelPatch(GuestVersion));
+    snprintf(buf->release, __NEW_UTS_LEN, "%d.%d.%d", FEX::LinuxVersion::KernelMajor(GuestVersion),
+             FEX::LinuxVersion::KernelMinor(GuestVersion), FEX::LinuxVersion::KernelPatch(GuestVersion));
 
     const char version[] = "#" GIT_DESCRIBE_STRING " SMP " __DATE__ " " __TIME__;
     strncpy(buf->version, version, __NEW_UTS_LEN);
@@ -99,8 +99,10 @@ void RegisterInfo(FEX::HLE::SyscallHandler* Handler) {
     getrlimit, [](FEXCore::Core::CpuStateFrame* Frame, int resource, compat_ptr<FEX::HLE::x32::rlimit32<true>> rlim) -> uint64_t {
       struct rlimit rlim64 {};
       uint64_t Result = ::getrlimit(resource, &rlim64);
-      FaultSafeUserMemAccess::VerifyIsWritable(rlim, sizeof(*rlim));
-      *rlim = rlim64;
+      if (Result != -1) {
+        FaultSafeUserMemAccess::VerifyIsWritable(rlim, sizeof(*rlim));
+        *rlim = rlim64;
+      }
       SYSCALL_ERRNO();
     });
 
@@ -108,8 +110,10 @@ void RegisterInfo(FEX::HLE::SyscallHandler* Handler) {
     ugetrlimit, [](FEXCore::Core::CpuStateFrame* Frame, int resource, compat_ptr<FEX::HLE::x32::rlimit32<false>> rlim) -> uint64_t {
       struct rlimit rlim64 {};
       uint64_t Result = ::getrlimit(resource, &rlim64);
-      FaultSafeUserMemAccess::VerifyIsWritable(rlim, sizeof(*rlim));
-      *rlim = rlim64;
+      if (Result != -1) {
+        FaultSafeUserMemAccess::VerifyIsWritable(rlim, sizeof(*rlim));
+        *rlim = rlim64;
+      }
       SYSCALL_ERRNO();
     });
 
@@ -162,10 +166,12 @@ void RegisterInfo(FEX::HLE::SyscallHandler* Handler) {
   });
 
   REGISTER_SYSCALL_IMPL_X32(getrusage, [](FEXCore::Core::CpuStateFrame* Frame, int who, rusage_32* usage) -> uint64_t {
-    struct rusage usage64 = *usage;
-    uint64_t Result = ::getrusage(who, &usage64);
-    FaultSafeUserMemAccess::VerifyIsWritable(usage, sizeof(*usage));
-    *usage = usage64;
+    struct rusage usage64 {};
+    uint64_t Result = ::syscall(SYSCALL_DEF(getrusage), who, &usage64);
+    if (Result != -1) {
+      FaultSafeUserMemAccess::VerifyIsWritable(usage, sizeof(*usage));
+      *usage = usage64;
+    }
     SYSCALL_ERRNO();
   });
 

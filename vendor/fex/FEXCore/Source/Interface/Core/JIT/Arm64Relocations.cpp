@@ -29,7 +29,8 @@ void Arm64JITCore::InsertNamedThunkRelocation(ARMEmitter::Register Reg, const IR
   uint64_t Pointer = reinterpret_cast<uint64_t>(EmitterCTX->ThunkHandler->LookupThunk(Sum));
 
   // Pointers are required to fit within 48-bit VA space.
-  LoadConstant(ARMEmitter::Size::i64Bit, Reg, Pointer, FEXCore::CPU::Arm64Emitter::PadType::AUTOPAD, 6);
+  // TODO: Force 6-byte `MaxSize`, with zext extension to 64-bit. Current code not smart enough to handle negatives.
+  LoadConstant(ARMEmitter::Size::i64Bit, Reg, Pointer, FEXCore::CPU::Arm64Emitter::PadType::AUTOPAD);
   Relocations.emplace_back(MoveABI);
 }
 
@@ -57,7 +58,8 @@ Arm64JITCore::NamedSymbolLiteralPair Arm64JITCore::InsertNamedSymbolLiteral(FEXC
 void Arm64JITCore::PlaceNamedSymbolLiteral(NamedSymbolLiteralPair Lit) {
   switch (Lit.MoveABI.Header.Type) {
   case RelocationTypes::RELOC_NAMED_SYMBOL_LITERAL:
-  case RelocationTypes::RELOC_GUEST_RIP_LITERAL: {
+  case RelocationTypes::RELOC_GUEST_RIP_LITERAL:
+  case RelocationTypes::RELOC_GUEST_PATCHABLE_RIP_LITERAL: {
     Lit.MoveABI.Header.Offset = GetCursorOffset();
     break;
   }
@@ -98,6 +100,37 @@ void Arm64JITCore::InsertGuestRIPMove(ARMEmitter::Register Reg, uint64_t Constan
   // 48-bit sign extension works because x86-64 guests only receive 47-bit VA space, with 48-bit being reserved for kernel.
   // Additional quirk, "canonical" 48-bit pointers on x86-64, sign extend the 48-bit as well (Which is why kernel pointers are negative).
   LoadConstant(ARMEmitter::Size::i64Bit, Reg, Constant, FEXCore::CPU::Arm64Emitter::PadType::AUTOPAD);
+  Relocations.emplace_back(MoveABI);
+}
+
+auto Arm64JITCore::InsertGuestPatchableRIPLiteral(uint64_t GuestRIP, uint64_t SiteAddress, uint8_t ValueSize) -> NamedSymbolLiteralPair {
+  return {
+    .Lit = GuestRIP,
+    .MoveABI =
+      {
+        .GuestPatchableData = {.Header =
+                                 {
+                                   .Offset = 0, // Set by PlaceNamedSymbolLiteral
+                                   .Type = FEXCore::CPU::RelocationTypes::RELOC_GUEST_PATCHABLE_RIP_LITERAL,
+                                 },
+                               .RegisterIndex = 0, // unused
+                               .ValueSize = ValueSize,
+                               // NOTE: Cache serialization will subtract the unit entry address later
+                               .SiteAddress = SiteAddress},
+      },
+  };
+}
+
+void Arm64JITCore::InsertGuestPatchableMove(FEXCore::CPU::RelocationTypes Type, ARMEmitter::Register Reg, uint64_t Value,
+                                            uint64_t SiteAddress, uint8_t ValueSize) {
+  Relocation MoveABI = Relocation::Default();
+  MoveABI.GuestPatchableData.Header = {.Offset = GetCursorOffset(), .Type = Type};
+  MoveABI.GuestPatchableData.RegisterIndex = Reg.Idx();
+  MoveABI.GuestPatchableData.ValueSize = ValueSize;
+  MoveABI.GuestPatchableData.SiteAddress = SiteAddress;
+
+  // this might get patched on disk cache load
+  LoadConstant(ARMEmitter::Size::i64Bit, Reg, Value, FEXCore::CPU::Arm64Emitter::PadType::DOPAD);
   Relocations.emplace_back(MoveABI);
 }
 

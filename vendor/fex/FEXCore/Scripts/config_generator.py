@@ -156,7 +156,7 @@ def print_man_environment_tail():
     "APP_CONFIG_LOCATION",
     [
     "Allows the user to override where FEX looks for configuration files",
-    "By default FEX will look in {$HOME, $XDG_CONFIG_HOME}/.fex-emu/",
+    "By default FEX will look in ${XDG_CONFIG_HOME, $HOME/.config}/fex-emu/",
     "This will override the full path",
     "If FEX_PORTABLE is declared then relative paths are also supported",
     "For FEX: Relative to the FEX binary",
@@ -168,7 +168,7 @@ def print_man_environment_tail():
     "APP_CONFIG",
     [
     "Allows the user to override where FEX looks for only the application config file",
-    "By default FEX will look in {$HOME, $XDG_CONFIG_HOME}/.fex-emu/Config.json",
+    "By default FEX will look in ${XDG_CONFIG_HOME, $HOME/.config}/fex-emu/Config.json",
     "This will override this file location",
     "One must be careful with this option as it will override any applications that load with execve as well"
     "If you need to support applications that execve then use FEX_APP_CONFIG_LOCATION instead"
@@ -182,7 +182,7 @@ def print_man_environment_tail():
     "APP_DATA_LOCATION",
     [
     "Allows the user to override where FEX looks for data files",
-    "By default FEX will look in {$HOME, $XDG_DATA_HOME}/.fex-emu/",
+    "By default FEX will look in {$XDG_DATA_HOME, $HOME/.local/share}/fex-emu/",
     "This will override the full path",
     "This is the folder where FEX stores generated files like IR cache"
     ],
@@ -204,7 +204,7 @@ def print_man_environment_tail():
     "APP_CACHE_LOCATION",
     [
     "Allows the user to override where FEX stores and loads cache files",
-    "By default FEX will look in $XDG_CACHE_HOME/fex-emu/ or $HOME/.cache/fex-emu/",
+    "By default FEX will look in ${XDG_CACHE_HOME, $HOME/.cache}/fex-emu/",
     "This will override the full path, trailing forward-slash is expected to exist",
     ],
     "''", True)
@@ -234,7 +234,7 @@ FEX is very much work in progress, so expect things to change.
 def print_man_tail():
     tail ='''.Sh FILES
 .Bl -tag -width "$prefix/share/fex-emu/GuestThunks" -compact
-.It Pa $XDG_HOME_DIR/.fex-emu
+.It Pa $XDG_CONFIG_DIR/fex-emu
 Default FEX user configuration directory
 .It Pa $prefix/share/fex-emu/AppConfig
 System level application configuration files
@@ -407,6 +407,32 @@ def print_parse_enum_options(options):
 
     output_argloader.write("#endif\n")
 
+def print_affects_codegen_options(options, unnamed_options):
+    output_argloader.write("#ifdef CONFIG_AFFECTSCODEGEN\n")
+    output_argloader.write("#undef CONFIG_AFFECTSCODEGEN\n")
+
+    TotalConfigOptions = 0
+    for op_group, group_vals in options.items():
+        for op_key, op_vals in group_vals.items():
+            TotalConfigOptions += 1
+    for op_group, group_vals in unnamed_options.items():
+        for op_key, op_vals in group_vals.items():
+            TotalConfigOptions += 1
+
+    output_argloader.write("constexpr static std::array<bool, {}> Config_AffectsCodeGen = {{{{\n".format(TotalConfigOptions))
+    for op_group, group_vals in options.items():
+        for op_key, op_vals in group_vals.items():
+            assert "AffectsCodeGen" in op_vals, "All config options must be marked if they affect codegen."
+            output_argloader.write("\t{}, // {}\n".format(op_vals["AffectsCodeGen"], op_key))
+
+    for op_group, group_vals in unnamed_options.items():
+        for op_key, op_vals in group_vals.items():
+            assert "AffectsCodeGen" in op_vals, "All config options must be marked if they affect codegen."
+            output_argloader.write("\t{}, // {}\n".format(op_vals["AffectsCodeGen"], op_key))
+    output_argloader.write("}};\n")
+
+    output_argloader.write("#endif\n")
+
 if (len(sys.argv) < 5):
     sys.exit()
 
@@ -450,5 +476,7 @@ print_parse_jsonloader_options(options);
 
 # Generate enum variable options
 print_parse_enum_options(options);
+
+print_affects_codegen_options(options, unnamed_options);
 
 output_argloader.close()

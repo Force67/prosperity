@@ -1,0 +1,51 @@
+workflow:
+  rules:
+    - if: '$CI_PROJECT_PATH != "runtimes/vixl"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+stages:
+  - test
+
+# Cache pip downloads
+cache:
+  key: pip-cache
+  paths:
+    - .cache/pip
+
+# Shared script for setting up virtualenv
+.install-venv: &install_venv_script
+  - echo "Installing Python tools in a virtualenv..."
+  - apt-get update -y
+  - apt-get install -y software-properties-common
+  - add-apt-repository ppa:deadsnakes/ppa -y
+  - apt-get install -y python3.8 python3-pip python3.8-venv python3-packaging 
+  - apt-get install -y clang git scons clang-format-14 clang-tidy-14
+  - python3.8 -m venv .venv
+  - source .venv/bin/activate
+  - pip install --upgrade pip
+  - pip install packaging
+  - python --version
+
+run-vixl-tests:
+  stage: test
+  parallel:
+    matrix:
+      - ARCH: amd64
+        TAG: amd64
+        OPTIONS: "--noclang-format --noclang-tidy --nocheck-code-coverage"
+      - ARCH: arm64
+        TAG: arm64
+        OPTIONS: "--noclang-format --noclang-tidy --nocheck-code-coverage"
+      - ARCH: arm64
+        TAG: arm64
+        OPTIONS: "--notest --nobench"
+  script:
+    - *install_venv_script
+    - echo "Running VIXL tests"
+    - source .venv/bin/activate
+    - chmod +x tools/test.py
+    - python tools/test.py ${OPTIONS}
+  tags:
+    - ${TAG}

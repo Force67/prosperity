@@ -21,32 +21,35 @@ class IREmitter {
 public:
   IREmitter(FEXCore::Utils::IntrusivePooledAllocator& ThreadAllocator, bool SupportsTSOImm9)
     : DualListData {ThreadAllocator, 8 * 1024 * 1024}
-    , SupportsTSOImm9(SupportsTSOImm9) {
-    ReownOrClaimBuffer();
-    ResetWorkingList();
-  }
+    , SupportsTSOImm9(SupportsTSOImm9) {}
 
   virtual ~IREmitter() = default;
 
   void ReownOrClaimBuffer() {
     DualListData.ReownOrClaimBuffer();
+
+    // Reset the working list on new buffer.
+    ResetWorkingList();
   }
 
   void DelayedDisownBuffer() {
     DualListData.DelayedDisownBuffer();
   }
 
+  void ValidateDisownedOrFree() const {
+    DualListData.ValidateDisownedOrFree();
+  }
+
   IRListView ViewIR() {
     return IRListView(&DualListData);
   }
-  void ResetWorkingList();
 
   /**
    * @name IR allocation routines
    *
    * @{ */
 
-  RegClass WalkFindRegClass(Ref Node);
+  RegClass WalkFindRegClass(Ref Node) const;
 
   // These inlining helpers are used by IRDefines.inc so define first.
   Ref InlineMem(OpSize Size, Ref Offset, MemOffsetType OffsetType, uint8_t& OffsetScale, bool TSO = false) {
@@ -311,14 +314,14 @@ public:
   }
 
   /**  @} */
-  RegClass WalkFindRegClass(OrderedNodeWrapper ssa) {
-    Ref RealNode = ssa.GetNode(DualListData.ListBegin());
+  RegClass WalkFindRegClass(OrderedNodeWrapper ssa) const {
+    auto RealNode = ssa.GetNode(DualListData.ListBegin());
     return WalkFindRegClass(RealNode);
   }
 
-  bool IsValueConstant(OrderedNodeWrapper ssa, uint64_t* Constant = nullptr) {
-    Ref RealNode = ssa.GetNode(DualListData.ListBegin());
-    FEXCore::IR::IROp_Header* IROp = RealNode->Op(DualListData.DataBegin());
+  bool IsValueConstant(OrderedNodeWrapper ssa, uint64_t* Constant = nullptr) const {
+    auto RealNode = ssa.GetNode(DualListData.ListBegin());
+    const auto* IROp = RealNode->Op(DualListData.DataBegin());
     if (IROp->Op == OP_CONSTANT) {
       auto Op = IROp->C<IR::IROp_Constant>();
       if (Constant) {
@@ -329,13 +332,22 @@ public:
     return false;
   }
 
-  bool IsValueInlineConstant(OrderedNodeWrapper ssa) {
-    Ref RealNode = ssa.GetNode(DualListData.ListBegin());
-    FEXCore::IR::IROp_Header* IROp = RealNode->Op(DualListData.DataBegin());
+  bool IsValueInlineConstant(OrderedNodeWrapper ssa) const {
+    auto RealNode = ssa.GetNode(DualListData.ListBegin());
+    const auto* IROp = RealNode->Op(DualListData.DataBegin());
     if (IROp->Op == OP_INLINECONSTANT) {
       return true;
     }
     return false;
+  }
+
+  // Returns true if every bit of the vector value is set.
+  // Currently this only recognizes the self compare equal idiom.
+  // TODO: Should this recognize other patterns?
+  bool IsValueVectorAllOnes(OrderedNodeWrapper ssa) const {
+    auto RealNode = ssa.GetNode(DualListData.ListBegin());
+    const auto* IROp = RealNode->Op(DualListData.DataBegin());
+    return IROp->Op == OP_VCMPEQ && IROp->Args[0].ID() == IROp->Args[1].ID();
   }
 
   FEXCore::IR::IROp_Header* GetOpHeader(OrderedNodeWrapper ssa) {
@@ -512,6 +524,9 @@ protected:
   fextl::vector<Ref> CodeBlocks;
   uint64_t Entry {};
   bool SupportsTSOImm9 {};
+
+private:
+  void ResetWorkingList();
 };
 
 } // namespace FEXCore::IR

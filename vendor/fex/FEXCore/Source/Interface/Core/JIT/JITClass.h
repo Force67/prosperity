@@ -54,6 +54,9 @@ public:
   CPUBackend::CompiledCode CompileCode(uint64_t Entry, uint64_t Size, bool SingleInst, const FEXCore::IR::IRListView* IR,
                                        FEXCore::Core::DebugData* DebugData, bool CheckTF) override;
 
+  [[nodiscard]]
+  CPUBackend::CompiledCode LoadCachedCode(std::span<const uint8_t> HostBytes) override;
+
   void ClearCache() override;
 
   void ClearRelocations() override {
@@ -102,10 +105,12 @@ private:
     uint64_t CallerAddress;
     uint64_t GuestRIP;
     ARMEmitter::ForwardLabel Label;
+    uint64_t PatchSiteAddress = 0;
+    uint8_t PatchSiteSize = 0;
   };
   fextl::vector<PendingJumpThunk> PendingJumpThunks;
 
-  Utils::PoolBufferWithTimedRetirement<uint8_t*, 5000, 500> TempAllocator;
+  Utils::PoolBufferWithTimedRetirement<uint8_t*, 5000, 500> TempCodeBufferAllocator;
 
   static uint64_t ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEXCore::Context::ExitFunctionLinkData* Record);
 
@@ -342,8 +347,8 @@ private:
     uint32_t End;
   };
 
-  void EmitLinkedBranch(uint64_t GuestRIP, bool Call) {
-    PendingJumpThunks.push_back({GetCursorAddress<uint64_t>(), GuestRIP, {}});
+  void EmitLinkedBranch(uint64_t GuestRIP, bool Call, uint64_t PatchSiteAddress = 0, uint8_t PatchSiteSize = 0) {
+    PendingJumpThunks.push_back({GetCursorAddress<uint64_t>(), GuestRIP, {}, PatchSiteAddress, PatchSiteSize});
     auto& Thunk = PendingJumpThunks.back();
     BindOrRestart(&Thunk.Label);
     if (Call) {
@@ -526,8 +531,6 @@ private:
     FEXCore::UncheckedLongJump::LongJump(ThreadState->RestartJump, FEXCore::ToUnderlying(RestartOptions::Control::EnableFarARM64Jumps));
   }
 
-  // This is purely a debugging aid for developers to see if they are in JIT code space when inspecting raw memory
-  void EmitDetectionString();
   IR::RegisterAllocationPass* RAPass {};
   FEXCore::Core::DebugData* DebugData {};
 
@@ -561,6 +564,9 @@ private:
    */
   void InsertGuestRIPMove(ARMEmitter::Register Reg, uint64_t Constant);
 
+  void InsertGuestPatchableMove(FEXCore::CPU::RelocationTypes Type, ARMEmitter::Register Reg, uint64_t Value, uint64_t SiteAddress,
+                                uint8_t ValueSize);
+
   /**
    * @brief Inserts a named symbol as a literal in memory
    *
@@ -579,6 +585,11 @@ private:
    * @param Constant - The guest RIP that will be relocated
    */
   NamedSymbolLiteralPair InsertGuestRIPLiteral(uint64_t GuestRIP);
+
+  /**
+   * @brief Like InsertGuestRIPLiteral, but with patch information to recompute value from live guest bytes at cache load time
+   */
+  NamedSymbolLiteralPair InsertGuestPatchableRIPLiteral(uint64_t GuestRIP, uint64_t SiteAddress, uint8_t ValueSize);
 
   /**
    * @brief Place the named symbol literal relocation in memory
@@ -618,13 +629,16 @@ private:
   void Emulate128BitGather(IR::OpSize Size, IR::OpSize ElementSize, ARMEmitter::VRegister Dst, ARMEmitter::VRegister IncomingDst,
                            std::optional<ARMEmitter::Register> BaseAddr, ARMEmitter::VRegister VectorIndexLow,
                            std::optional<ARMEmitter::VRegister> VectorIndexHigh, ARMEmitter::VRegister MaskReg, IR::OpSize VectorIndexSize,
-                           size_t DataElementOffsetStart, size_t IndexElementOffsetStart, uint8_t OffsetScale, IR::OpSize AddrSize);
+                           size_t DataElementOffsetStart, size_t IndexElementOffsetStart, uint8_t OffsetScale, IR::OpSize AddrSize,
+                           bool MaskAllOnes);
 
   void EmitTFCheck();
 
   void EmitSuspendInterruptCheck();
 
   void EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF);
+
+  [[nodiscard]] CodeBuffer::CodeBufferAllocation AllocateCodeBufferInSharedCache(size_t Size);
 
 #define DEF_OP(x) void Op_##x(IR::IROp_Header const* IROp, IR::Ref Node)
 

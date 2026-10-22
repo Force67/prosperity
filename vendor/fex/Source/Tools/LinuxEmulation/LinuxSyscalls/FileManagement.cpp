@@ -94,6 +94,15 @@ void FileManager::LoadThunkDatabase(fextl::unordered_map<fextl::string, ThunkDBO
       }
     }
 
+#ifdef FEX_STEAM_SUPPORT
+    // Always add pressure-vessel libraries.
+    const auto ArchPrefix = Is64BitMode() ? "x86_64-linux-gnu" : "i386-linux-gnu";
+    PathPrefixes.emplace_back(fextl::fmt::format("/run/gfx/main/usr/lib/{}", ArchPrefix));
+    if (!RootFSIsMultiarch) {
+      PathPrefixes.emplace_back(fextl::fmt::format("/usr/lib/pressure-vessel/overrides/lib/{}", ArchPrefix));
+    }
+#endif
+
     FEX::JSON::JsonAllocator Pool {};
     const json_t* json = FEX::JSON::CreateJSON(FileData, Pool);
 
@@ -106,7 +115,7 @@ void FileManager::LoadThunkDatabase(fextl::unordered_map<fextl::string, ThunkDBO
       return;
     }
 
-    std::string_view HomeDirectory = FEX::Config::GetHomeDirectory();
+    auto HomeDirectory = FEX::Config::GetHomeDirectory();
 
     for (const json_t* Library = json_getChild(DB); Library != nullptr; Library = json_getSibling(Library)) {
       // Get the user defined name for the library
@@ -279,7 +288,7 @@ FileManager::FileManager(FEXCore::Context::Context* ctx)
     // Using a local struct for this is slightly less ugly than using self-capturing lambdas
     struct {
       decltype(FileManager::ThunkOverlays)& ThunkOverlays;
-      decltype(ThunkDB)& ThunkDB;
+      decltype(ThunkDB)& DB;
       const fextl::string& ThunkGuestPath;
       bool Is64BitMode;
 
@@ -301,7 +310,7 @@ FileManager::FileManager(FEXCore::Context::Context* ctx)
 
       void InsertDependencies(const fextl::unordered_set<fextl::string>& Depends) {
         for (const auto& Depend : Depends) {
-          auto& DBDepend = ThunkDB.at(Depend);
+          auto& DBDepend = DB.at(Depend);
           if (DBDepend.Enabled) {
             continue;
           }

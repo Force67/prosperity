@@ -9895,5 +9895,113 @@ void Assembler::sudot(const ZRegister& zda,
   Emit(0x44a01c00 | Rx<18, 16>(zm) | (index << 19) | Rd(zda) | Rn(zn));
 }
 
+void Assembler::bfcvt(const ZRegister& zd,
+                      const PRegisterM& pg,
+                      const ZRegister& zn) {
+  VIXL_ASSERT(CPUHas(CPUFeatures::kSVE));
+  VIXL_ASSERT(CPUHas(CPUFeatures::kBF16));
+  VIXL_ASSERT(zd.IsLaneSizeH() && zn.IsLaneSizeS());
+
+  Emit(0x658aa000 | Rd(zd) | PgLow8(pg) | Rn(zn));
+}
+
+void Assembler::bfcvtnt(const ZRegister& zd,
+                        const PRegisterM& pg,
+                        const ZRegister& zn) {
+  VIXL_ASSERT(CPUHas(CPUFeatures::kSVE));
+  VIXL_ASSERT(CPUHas(CPUFeatures::kBF16));
+  VIXL_ASSERT(zd.IsLaneSizeH() && zn.IsLaneSizeS());
+
+  Emit(0x648aa000 | Rd(zd) | PgLow8(pg) | Rn(zn));
+}
+
+void Assembler::bfdot(const ZRegister& zda,
+                      const ZRegister& zn,
+                      const ZRegister& zm) {
+  VIXL_ASSERT(CPUHas(CPUFeatures::kSVE));
+  VIXL_ASSERT(CPUHas(CPUFeatures::kBF16));
+  VIXL_ASSERT(zda.IsLaneSizeS());
+  VIXL_ASSERT(zn.IsLaneSizeH() && zm.IsLaneSizeH());
+
+  Emit(0x64608000 | Rd(zda) | Rn(zn) | Rm(zm));
+}
+
+void Assembler::bfdot(const ZRegister& zda,
+                      const ZRegister& zn,
+                      const ZRegister& zm,
+                      int index) {
+  VIXL_ASSERT(CPUHas(CPUFeatures::kSVE));
+  VIXL_ASSERT(CPUHas(CPUFeatures::kBF16));
+  VIXL_ASSERT(zda.IsLaneSizeS());
+  VIXL_ASSERT(zn.IsLaneSizeH() && zm.IsLaneSizeH());
+  VIXL_ASSERT(zm.GetCode() <= 7);
+  VIXL_ASSERT(IsUint2(index));
+
+  Emit(0x64604000 | Rx<18, 16>(zm) | (index << 19) | Rd(zda) | Rn(zn));
+}
+
+void Assembler::bfmlalb(const ZRegister& zda,
+                        const ZRegister& zn,
+                        const ZRegister& zm) {
+  VIXL_ASSERT(CPUHas(CPUFeatures::kSVE));
+  VIXL_ASSERT(CPUHas(CPUFeatures::kBF16));
+  VIXL_ASSERT(zda.IsLaneSizeS());
+  VIXL_ASSERT(zn.IsLaneSizeH() && zm.IsLaneSizeH());
+
+  Emit(0x64e08000 | Rd(zda) | Rn(zn) | Rm(zm));
+}
+
+void Assembler::bfmlalb(const ZRegister& zda,
+                        const ZRegister& zn,
+                        const ZRegister& zm,
+                        int index) {
+  VIXL_ASSERT(CPUHas(CPUFeatures::kSVE));
+  VIXL_ASSERT(CPUHas(CPUFeatures::kBF16));
+  VIXL_ASSERT(zda.IsLaneSizeS());
+  VIXL_ASSERT(zn.IsLaneSizeH() && zm.IsLaneSizeH());
+  VIXL_ASSERT((zm.GetCode() <= 7) && (index <= 7));
+  Instr zm_and_idx = (ExtractUnsignedBitfield32(2, 1, index) << 19) |
+                     (ExtractBit(index, 0) << 11) | Rx<18, 16>(zm);
+
+  Emit(0x64e04000 | Rd(zda) | Rn(zn) | zm_and_idx);
+}
+
+void Assembler::bfmlalt(const ZRegister& zda,
+                        const ZRegister& zn,
+                        const ZRegister& zm) {
+  VIXL_ASSERT(CPUHas(CPUFeatures::kSVE));
+  VIXL_ASSERT(CPUHas(CPUFeatures::kBF16));
+  VIXL_ASSERT(zda.IsLaneSizeS());
+  VIXL_ASSERT(zn.IsLaneSizeH() && zm.IsLaneSizeH());
+
+  Emit(0x64e08400 | Rd(zda) | Rn(zn) | Rm(zm));
+}
+
+void Assembler::bfmlalt(const ZRegister& zda,
+                        const ZRegister& zn,
+                        const ZRegister& zm,
+                        int index) {
+  VIXL_ASSERT(CPUHas(CPUFeatures::kSVE));
+  VIXL_ASSERT(CPUHas(CPUFeatures::kBF16));
+  VIXL_ASSERT(zda.IsLaneSizeS());
+  VIXL_ASSERT(zn.IsLaneSizeH() && zm.IsLaneSizeH());
+  VIXL_ASSERT((zm.GetCode() <= 7) && (index <= 7));
+  Instr zm_and_idx = (ExtractUnsignedBitfield32(2, 1, index) << 19) |
+                     (ExtractBit(index, 0) << 11) | Rx<18, 16>(zm);
+
+  Emit(0x64e04400 | Rd(zda) | Rn(zn) | zm_and_idx);
+}
+
+void Assembler::bfmmla(const ZRegister& zda,
+                       const ZRegister& zn,
+                       const ZRegister& zm) {
+  VIXL_ASSERT(CPUHas(CPUFeatures::kSVE));
+  VIXL_ASSERT(CPUHas(CPUFeatures::kBF16));
+  VIXL_ASSERT(zda.IsLaneSizeS());
+  VIXL_ASSERT(zn.IsLaneSizeH() && zm.IsLaneSizeH());
+
+  Emit(0x6460e400 | Rd(zda) | Rn(zn) | Rm(zm));
+}
+
 }  // namespace aarch64
 }  // namespace vixl

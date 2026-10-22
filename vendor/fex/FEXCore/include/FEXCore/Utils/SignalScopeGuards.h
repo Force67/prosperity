@@ -35,6 +35,9 @@ public:
     const auto Result = pthread_mutex_lock(&Mutex);
     LOGMAN_THROW_A_FMT(Result == 0, "{} failed to lock with {}", __func__, Result);
   }
+  bool try_lock() {
+    return pthread_mutex_trylock(&Mutex) == 0;
+  }
   void unlock() {
     const auto Result = pthread_mutex_unlock(&Mutex);
     LOGMAN_THROW_A_FMT(Result == 0, "{} failed to unlock with {}", __func__, Result);
@@ -247,19 +250,19 @@ public:
 
 template<template<typename> class LockType = std::unique_lock, typename MutexType>
 [[nodiscard]]
-static auto MaskSignalsAndLockMutex(MutexType& mutex, uint64_t Mask = ~0ULL) {
+static inline auto MaskSignalsAndLockMutex(MutexType& mutex, uint64_t Mask = ~0ULL) {
   return LockType<MutexType> {mutex};
 }
 
 template<template<typename> class LockType = std::unique_lock, typename MutexType>
 [[nodiscard]]
-static auto GuardSignalDeferringSection(MutexType& mutex, FEXCore::Core::InternalThreadState* Thread, uint64_t Mask = ~0ULL) {
+static inline auto GuardSignalDeferringSection(MutexType& mutex, FEXCore::Core::InternalThreadState* Thread, uint64_t Mask = ~0ULL) {
   return LockType<MutexType> {mutex};
 }
 
 template<template<typename> class LockType = std::unique_lock, typename MutexType>
 [[nodiscard]]
-static auto GuardSignalDeferringSectionWithFallback(MutexType& mutex, FEXCore::Core::InternalThreadState* Thread, uint64_t Mask = ~0ULL) {
+static inline auto GuardSignalDeferringSectionWithFallback(MutexType& mutex, FEXCore::Core::InternalThreadState* Thread, uint64_t Mask = ~0ULL) {
   return LockType<MutexType> {mutex};
 }
 

@@ -22,8 +22,13 @@ CallRetStackInfo GetInfoThread(FEXCore::Core::InternalThreadState* Thread) {
 
 void InitializeThread(FEXCore::Core::InternalThreadState* Thread) {
   // Allocate the call-ret stack with guard pages on both sides
-  const void* CallRetStackAlloc = ::VirtualAlloc(
-    nullptr, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE, MEM_RESERVE, PAGE_NOACCESS);
+  const void* CallRetStackAlloc = ::VirtualAlloc(nullptr, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE,
+                                                 MEM_RESERVE | MEM_TOP_DOWN, PAGE_NOACCESS);
+
+  FEXCore::Allocator::VirtualName("FEXMem_CallRetStacks", CallRetStackAlloc,
+                                  FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE);
+  FEXCore::Allocator::VirtualTHPControl(CallRetStackAlloc, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE,
+                                        FEXCore::Allocator::THPControl::Disable);
 
   Thread->CallRetStackBase = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CallRetStackAlloc) + FEXCore::Utils::FEX_PAGE_SIZE);
   ::VirtualAlloc(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE, MEM_COMMIT, PAGE_READWRITE);

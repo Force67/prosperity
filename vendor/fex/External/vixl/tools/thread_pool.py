@@ -39,7 +39,12 @@ signal.signal(signal.SIGINT, SigIntHandler)
 # This function can't run in parallel due to constraints from the
 # multiprocessing module.
 __run_tests_lock__ = multiprocessing.Lock()
-def Multithread(function, list_of_args, num_threads=1, init_function=None):
+def Multithread(function,
+                list_of_args,
+                num_threads=1,
+                init_function=None,
+                head_count=0,
+                tail_chunksize=None):
   with __run_tests_lock__:
     if init_function:
       if not init_function():
@@ -50,6 +55,15 @@ def Multithread(function, list_of_args, num_threads=1, init_function=None):
     # The '.get(9999999)' is a workaround to allow killing the test script with
     # ctrl+C from the shell. This bug is documented at
     # http://bugs.python.org/issue8296.
-    pool.map_async(function, list_of_args).get(9999999)
+    if head_count > 0:
+      head = list_of_args[:head_count]
+      pool.map_async(function, head, chunksize=1).get(9999999)
+
+    tail = list_of_args[head_count:]
+    if len(tail) > 0:
+      if tail_chunksize is None:
+        pool.map_async(function, tail).get(9999999)
+      else:
+        pool.map_async(function, tail, chunksize=tail_chunksize).get(9999999)
     pool.close()
     pool.join()

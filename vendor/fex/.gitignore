@@ -11,3 +11,5 @@ out/
 .vs/
 *.pyc
 .cache
+.idea/
+CMakeLists.txt.user

@@ -4,6 +4,20 @@ include(${FEX_PROJECT_SOURCE_DIR}/Data/CMake/version_to_variables.cmake)
 
 option(ENABLE_CLANG_THUNKS "Enable building thunks with clang" FALSE)
 
+find_package(PkgConfig REQUIRED)
+
+# Use include directories from pkg-config and fall back to global defaults if not available.
+# /usr/include is dropped to avoid mixing foreign-architecture standard library headers.
+function(target_include_directories_from_pkgconfig target pkg)
+  pkg_check_modules(PKG QUIET ${pkg})
+  if (PKG_FOUND)
+    list(REMOVE_ITEM PKG_INCLUDE_DIRS /usr/include)
+    target_include_directories(${target} INTERFACE ${PKG_INCLUDE_DIRS})
+  elseif (ARGN)
+    target_include_directories(${target} INTERFACE ${ARGN})
+  endif()
+endfunction()
+
 if (ENABLE_CLANG_THUNKS)
   set(LD_OVERRIDE "-fuse-ld=lld")
   add_link_options(${LD_OVERRIDE})
@@ -14,7 +28,7 @@ if (NOT X86_DEV_ROOTFS)
 endif()
 
 find_program(CCACHE_PROGRAM ccache)
-if(CCACHE_PROGRAM)
+if (CCACHE_PROGRAM)
   message(STATUS "CCache enabled for guest thunks")
   set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
 endif()
@@ -73,11 +87,12 @@ function(generate NAME SOURCE_FILE)
 
   if (BITNESS EQUAL 32)
     set(BITNESS_FLAGS "-for-32bit-guest")
-    set(BITNESS_FLAGS2 "-m32" "--target=i686-linux-gnu" "-isystem" "/usr/i686-linux-gnu/include/")
+    set(BITNESS_FLAGS2 "-m32" "--target=i686-linux-gnu")
   else()
     set(BITNESS_FLAGS "")
-    set(BITNESS_FLAGS2 "--target=x86_64-linux-gnu" "-isystem" "/usr/x86_64-linux-gnu/include/")
+    set(BITNESS_FLAGS2 "--target=x86_64-linux-gnu")
   endif()
+  list(APPEND BITNESS_FLAGS2 "--sysroot" "${X86_DEV_ROOTFS}")
 
   add_custom_command(
     OUTPUT "${OUTFILE}"
@@ -178,6 +193,7 @@ if (BITNESS EQUAL 64)
   #add_guest_lib(fex_malloc)
 
   generate(libasound ${CMAKE_CURRENT_SOURCE_DIR}/../libasound/libasound_interface.cpp)
+  target_include_directories_from_pkgconfig(libasound-guest-deps alsa)
   add_guest_lib(asound "libasound.so.2")
 
   # disabled for now, headers are platform specific
@@ -190,17 +206,17 @@ if (BITNESS EQUAL 64)
 
   generate(libvulkan ${CMAKE_CURRENT_SOURCE_DIR}/../libvulkan/libvulkan_interface.cpp)
   target_include_directories(libvulkan-guest-deps INTERFACE ${FEX_PROJECT_SOURCE_DIR}/External/Vulkan-Headers/include/)
+  target_include_directories_from_pkgconfig(libvulkan-guest-deps "xcb;x11;xrandr;xrender")
   add_guest_lib(vulkan "libvulkan.so.1")
 
   generate(libdrm ${CMAKE_CURRENT_SOURCE_DIR}/../libdrm/libdrm_interface.cpp)
-  target_include_directories(libdrm-guest-deps INTERFACE /usr/include/drm/)
-  target_include_directories(libdrm-guest-deps INTERFACE /usr/include/libdrm/)
+  target_include_directories_from_pkgconfig(libdrm-guest-deps libdrm /usr/include/drm /usr/include/libdrm)
   add_guest_lib(drm "libdrm.so.2")
 endif()
 
 generate(libwayland-client ${CMAKE_CURRENT_SOURCE_DIR}/../libwayland-client/libwayland-client_interface.cpp)
 add_guest_lib(wayland-client "libwayland-client.so.0.20.0")
-target_include_directories(libwayland-client-guest-deps INTERFACE /usr/include/wayland)
+target_include_directories_from_pkgconfig(libwayland-client-guest-deps wayland-client /usr/include/wayland)
 
 generate(libVDSO ${CMAKE_CURRENT_SOURCE_DIR}/../libVDSO/libVDSO_interface.cpp)
 add_guest_lib(VDSO "linux-vdso.so.1")
@@ -236,9 +252,12 @@ if (BUILD_FEX_LINUX_TESTS)
 endif()
 
 generate(libGL ${CMAKE_CURRENT_SOURCE_DIR}/../libGL/libGL_interface.cpp)
+target_include_directories_from_pkgconfig(libGL-guest-deps gl)
+target_include_directories_from_pkgconfig(libGL-guest-deps "xcb;x11;xrandr;xrender")
 add_guest_lib(GL "libGL.so.1")
 
 generate(libEGL ${CMAKE_CURRENT_SOURCE_DIR}/../libEGL/libEGL_interface.cpp)
+target_include_directories_from_pkgconfig(libEGL-guest-deps egl)
 add_guest_lib(EGL "libEGL.so.1")
 target_link_libraries(EGL-guest PRIVATE GL-guest)
 
@@ -247,3 +266,6 @@ add_library(PlaceholderX11 SHARED ../libX11/libX11_NativeGuest.cpp)
 target_link_options(PlaceholderX11 PRIVATE "LINKER:-soname,libX11.so.6")
 set_target_properties(PlaceholderX11 PROPERTIES NO_SONAME ON)
 target_link_libraries(GL-guest PRIVATE PlaceholderX11)
+
+generate(libcuda ${CMAKE_CURRENT_SOURCE_DIR}/../libcuda/libcuda_interface.cpp)
+add_guest_lib(cuda "libcuda.so.1")

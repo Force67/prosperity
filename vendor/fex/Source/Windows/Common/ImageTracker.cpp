@@ -164,15 +164,21 @@ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view
         ActiveCodeMapPath = fmt::format("{}{}.{}.bin", CodeMapDir, ID, Time.QuadPart);
 
         auto Writer = fextl::make_unique<FEXCore::CodeMapWriter>(*this, false);
-        Writer->AppendSetMainExecutable(ImageInfo->Info);
+#ifdef _M_ARM64EC
+        Writer->AppendSetMainExecutable(ImageInfo->Info, true);
+#else
+        Writer->AppendSetMainExecutable(ImageInfo->Info, false);
+#endif
         CTX.SetCodeMapWriter(std::move(Writer));
       }
+    }
+    if (!ActiveCodeMapPath.empty()) {
       LoadAOTImages(*ImageInfo);
     }
 
     auto AOTImage = AOTImages.find(ID);
-    if (AOTImage != AOTImages.end()) {
-      CTX.GetCodeCache().LoadData(nullptr, AOTImage->second.Data, ImageInfo->SectionInfo);
+    if (AOTImage != AOTImages.end() && AOTImage->second.CacheFile) {
+      CTX.GetCodeCache().EnableLoadedSection(nullptr, *AOTImage->second.CacheFile, ImageInfo->SectionInfo);
     }
   }
 
@@ -180,7 +186,10 @@ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view
   fextl::set<uint64_t> VolatileInstructions {};
   FEXCore::IntervalList<uint64_t> VolatileValidRanges {};
   LoadImageVolatileMetadata(VolatileInstructions, VolatileValidRanges, Module, Nt, Address, EndAddress);
-  if (auto It = ExtendedMetaData.find(ModuleName); It != ExtendedMetaData.end()) {
+  if (auto It = ExtendedMetaData.find(ID); It != ExtendedMetaData.end()) {
+    FEX::VolatileMetadata::ApplyFEXExtendedVolatileMetadata(It->second, VolatileInstructions, VolatileValidRanges, Address, EndAddress);
+  }
+  if (auto It = ExtendedMetaData.find(fextl::string {ModuleName}); It != ExtendedMetaData.end()) {
     FEX::VolatileMetadata::ApplyFEXExtendedVolatileMetadata(It->second, VolatileInstructions, VolatileValidRanges, Address, EndAddress);
   }
 
@@ -217,76 +226,49 @@ int ImageTracker::OpenCodeMapFile() {
 }
 
 void ImageTracker::LoadAOTImages(MappedImageInfo& ImageInfo) {
-  const auto AnsiPath =
-    fmt::format("\\??\\{}cache\\{}", FEX::Config::GetCacheDirectory(), FEXCore::CodeMap::GetBaseFilename(ImageInfo.Info, false));
-
-  // Iterate over all files in the given executable's cache directory, mapping them into memory for future use.
-  // Each cache file name matches the unique ID (as returned by FEXCore::CodeMap::GetBaseFilename) of the image it corresponds to.
-  ScopedUnicodeString NtPath(AnsiPath.c_str());
-
-  OBJECT_ATTRIBUTES DirAttr;
-  InitializeObjectAttributes(&DirAttr, &*NtPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
-
-  ScopedHandle DirHandle;
-  IO_STATUS_BLOCK IOSB;
-  if (!NT_SUCCESS(NtOpenFile(&*DirHandle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &DirAttr, &IOSB, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                             FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT))) {
+  // Don't attempt cache loading for FEXOfflineCompiler itself
+  static bool IsFOC32 = ImageInfo.Info.Filename.ends_with("fexofflinecompiler32.exe");
+  static bool IsFOC64 = ImageInfo.Info.Filename.ends_with("fexofflinecompiler64.exe");
+  if (IsFOC32 || IsFOC64) {
     return;
   }
 
-  std::array<uint8_t, 0x1000> DirBuffer;
-  bool FirstScan = true;
-  auto QueryDir = [&]() {
-    NTSTATUS Status = NtQueryDirectoryFile(*DirHandle, nullptr, nullptr, nullptr, &IOSB, DirBuffer.data(), DirBuffer.size(),
-                                           FileBothDirectoryInformation, FALSE, nullptr, FirstScan);
-    if (FirstScan) {
-      FirstScan = false;
-    }
-    return NT_SUCCESS(Status);
-  };
+  auto ID = FEXCore::CodeMap::GetBaseFilename(ImageInfo.Info, false);
+  const uint64_t CodeCacheConfigId = 0; // TODO
+  const auto AnsiPath = fmt::format("\\??\\{}cache\\{}-{:016x}", FEX::Config::GetCacheDirectory(), ID, CodeCacheConfigId);
 
-  while (QueryDir()) {
-    auto* Info = reinterpret_cast<PFILE_BOTH_DIRECTORY_INFORMATION>(DirBuffer.data());
+  IO_STATUS_BLOCK IOSB;
+  ScopedUnicodeString CurrentFileName(AnsiPath.c_str());
 
-    while (true) {
-      UNICODE_STRING CurrentFileName;
-      CurrentFileName.Buffer = Info->FileName;
-      CurrentFileName.Length = static_cast<USHORT>(Info->FileNameLength);
-      CurrentFileName.MaximumLength = CurrentFileName.Length;
+  OBJECT_ATTRIBUTES FileAttr;
+  InitializeObjectAttributes(&FileAttr, &*CurrentFileName, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
 
-      bool Skip = (Info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (Info->FileNameLength == 2 && Info->FileName[0] == '.') ||
-                  (Info->FileNameLength == 4 && Info->FileName[0] == '.' && Info->FileName[1] == '.');
+  ScopedHandle FileHandle;
+  if (NT_SUCCESS(NtOpenFile(&*FileHandle, GENERIC_READ | SYNCHRONIZE, &FileAttr, &IOSB, FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT))) {
+    ScopedHandle SectionHandle;
+    if (NT_SUCCESS(NtCreateSection(&*SectionHandle, SECTION_MAP_EXECUTE | SECTION_MAP_READ, nullptr, nullptr, PAGE_EXECUTE_READ, SEC_COMMIT,
+                                   *FileHandle))) {
+      void* LoadAddress = nullptr;
+      SIZE_T MappedSize = 0;
+      // TODO: Consider NtMapViewOfSectionEx with MEM_EXTENDED_PARAMETER_EC_CODE;
+      //       instead, we're eagerly copying all cache data to a dedicated buffer currently
+      // MEM_EXTENDED_PARAMETER ECParam {};
+      // ECParam.Type = MemExtendedParameterAttributeFlags;
+      // ECParam.ULong64 = MEM_EXTENDED_PARAMETER_EC_CODE;
+      if (NT_SUCCESS(NtMapViewOfSection(*SectionHandle, NtCurrentProcess(), &LoadAddress, 0, 0, nullptr, &MappedSize, ViewUnmap,
+                                        MEM_RESERVE | MEM_TOP_DOWN, PAGE_EXECUTE_READ))) {
 
-      if (!Skip) {
-        OBJECT_ATTRIBUTES FileAttr;
-        InitializeObjectAttributes(&FileAttr, &CurrentFileName, OBJ_CASE_INSENSITIVE, *DirHandle, nullptr);
-
-        ScopedHandle FileHandle;
-        if (NT_SUCCESS(NtOpenFile(&*FileHandle, GENERIC_READ | SYNCHRONIZE, &FileAttr, &IOSB, FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT))) {
-          ScopedHandle SectionHandle;
-          if (NT_SUCCESS(NtCreateSection(&*SectionHandle, SECTION_MAP_EXECUTE | SECTION_MAP_READ, nullptr, nullptr, PAGE_EXECUTE_READ,
-                                         SEC_COMMIT, *FileHandle))) {
-            void* LoadAddress = nullptr;
-            SIZE_T MappedSize = 0;
-            if (NT_SUCCESS(NtMapViewOfSection(*SectionHandle, NtCurrentProcess(), &LoadAddress, 0, 0, nullptr, &MappedSize, ViewUnmap,
-                                              MEM_RESERVE | MEM_TOP_DOWN, PAGE_EXECUTE_READ))) {
-              fextl::string UniqueId;
-              ULONG AnsiLength = 0;
-              RtlUnicodeToMultiByteSize(&AnsiLength, Info->FileName, Info->FileNameLength);
-              UniqueId.resize(AnsiLength);
-              RtlUnicodeToMultiByteN(UniqueId.data(), AnsiLength, NULL, Info->FileName, Info->FileNameLength);
-
-              AOTImages[UniqueId] = {.Data = static_cast<std::byte*>(LoadAddress)};
-              LogMan::Msg::IFmt("Loaded cache: {}", UniqueId);
-            }
-          }
+        auto CacheSpan = std::span {static_cast<std::byte*>(LoadAddress), MappedSize};
+        auto MappedCache = CTX.GetCodeCache().LoadCache(CacheSpan, ImageInfo.Info, ImageInfo.SectionInfo.FileStartVA);
+        if (MappedCache) {
+          CTX.GetCodeCache().RegisterMappedCodeBuffer(*MappedCache);
+          AOTImages[ID] = {.CacheFile = std::move(MappedCache)};
+          LogMan::Msg::IFmt("Loaded cache: {}", ID);
+        } else {
+          NtUnmapViewOfSection(NtCurrentProcess(), LoadAddress);
+          LogMan::Msg::EFmt("Failed to load cache: {}", ID);
         }
       }
-
-      if (Info->NextEntryOffset == 0) {
-        break;
-      }
-      Info = reinterpret_cast<PFILE_BOTH_DIRECTORY_INFORMATION>(reinterpret_cast<uint8_t*>(Info) + Info->NextEntryOffset);
     }
   }
 }

@@ -3,6 +3,7 @@
 #include "Interface/Core/Interpreter/Fallbacks/FallbackOpHandler.h"
 #include "Interface/IR/IR.h"
 #include "Interface/IR/IREmitter.h"
+#include "Interface/IR/Passes.h"
 #include "Interface/IR/PassManager.h"
 #include "FEXCore/IR/IR.h"
 #include "FEXCore/Utils/Profiler.h"
@@ -32,14 +33,14 @@
 namespace FEXCore::IR {
 
 // FIXME(pmatos): copy from OpcodeDispatcher.h
-inline uint32_t MMBaseOffset() {
+static uint32_t MMBaseOffset() {
   return static_cast<uint32_t>(offsetof(Core::CPUState, mm[0][0]));
 }
 
 // Similar helper to the one in OpcodeDispatcher.h except we do not
 // need to handle flags, etc.
 template<typename T>
-void DeriveOp(Ref& RefV, IROps NewOp, IREmitter::IRPair<T> Expr) {
+static void DeriveOp(Ref& RefV, IROps NewOp, IREmitter::IRPair<T> Expr) {
   Expr.first->Header.Op = NewOp;
   RefV = Expr;
 }
@@ -52,8 +53,8 @@ template<typename T>
 class FixedSizeStack {
 public:
   struct StackSlotEntry final {
-    StackSlot Type;
-    T Value;
+    StackSlot Type = StackSlot::UNUSED;
+    T Value = T::Invalid;
   };
 
   static constexpr uint8_t size = 8;
@@ -64,8 +65,7 @@ public:
   // If SlowPath is true, then TopOffset is always zero.
   int8_t TopOffset = 0;
 
-  FixedSizeStack()
-    : buffer(FixedSizeStack::size, {StackSlot::UNUSED, T::Invalid}) {}
+  FixedSizeStack() = default;
 
   void push(const T& Value) {
     rotate();
@@ -92,25 +92,23 @@ public:
     return buffer[Offset];
   }
 
-  void setTop(T Value, size_t Offset = 0) {
+  void setTop(const T& Value, size_t Offset = 0) {
     buffer[Offset] = {StackSlot::VALID, Value};
   }
 
   bool isValid(size_t Offset) const {
-    return buffer[Offset].first;
+    return buffer[Offset].Type == StackSlot::VALID;
   }
 
   void clear() {
-    for (auto& Elem : buffer) {
-      Elem = {StackSlot::UNUSED, T::Invalid};
-    }
+    buffer.fill({StackSlot::UNUSED, T::Invalid});
     TopOffset = 0;
   }
 
   void dump() const {
     LogMan::Msg::DFmt("-- Stack");
 
-    for (size_t i = 0; i < 8; i++) {
+    for (size_t i = 0; i < buffer.size(); i++) {
       const auto& [Valid, Element] = buffer[i];
       if (Valid == StackSlot::VALID) {
         LogMan::Msg::DFmt("| ST{}: 0x{:x}", i, (uintptr_t)(Element.StackDataNode));
@@ -126,7 +124,7 @@ public:
   }
 
   // Returns a mask to set in AbridgedTagWord
-  uint8_t getValidMask() {
+  uint8_t getValidMask() const {
     uint8_t Mask = 0;
     for (size_t i = 0; i < buffer.size(); i++) {
       if (buffer[i].Type == StackSlot::VALID) {
@@ -137,7 +135,7 @@ public:
   }
 
   // Returns a mask to set in AbridgedTagWord
-  uint8_t getInvalidMask() {
+  uint8_t getInvalidMask() const {
     uint8_t Mask = 0;
     for (size_t i = 0; i < buffer.size(); i++) {
       if (buffer[i].Type == StackSlot::INVALID) {
@@ -148,7 +146,7 @@ public:
   }
 
 private:
-  fextl::vector<StackSlotEntry> buffer;
+  std::array<StackSlotEntry, size> buffer {};
 };
 
 class X87StackOptimization final : public Pass {
@@ -188,7 +186,7 @@ private:
 
   void Store80BitToMem(const IROp_StoreStackMem* Op, Ref StackNode, Ref AddrNode, Ref Offset, OpSize Align, MemOffsetType OffsetType,
                        uint8_t OffsetScale) {
-    if (Features.SupportsSVE128 || Features.SupportsSVE256) {
+    if (Features.SupportsSVE()) {
       AddressMode A {.Base = AddrNode,
                      .Index = Op->Offset.IsInvalid() ? nullptr : Offset,
                      .IndexType = MemOffsetType::SXTX,
@@ -201,11 +199,11 @@ private:
     }
   }
 
-  void StoreStackMem_Helper(const IROp_StoreStackMem* Op, Ref StackNode) {
+  void StoreStackMem_Helper(const IRListView& IR, const IROp_StoreStackMem* Op, Ref StackNode) {
     LOGMAN_THROW_A_FMT(!ReducedPrecisionMode, "Full precision mode expected.");
 
-    Ref AddrNode = IR->GetNode(Op->Addr);
-    Ref Offset = IR->GetNode(Op->Offset);
+    Ref AddrNode = IR.GetNode(Op->Addr);
+    Ref Offset = IR.GetNode(Op->Offset);
     OpSize Align = Op->Align;
     MemOffsetType OffsetType = Op->OffsetType;
     uint8_t OffsetScale = Op->OffsetScale;
@@ -229,11 +227,11 @@ private:
 
   // Performs a store to memory from a value the stack passed in as StackNode.
   // This is the version dealing with the reduced precision case.
-  void StoreStackMem_Reduced_Helper(const IROp_StoreStackMem* Op, Ref StackNode) {
+  void StoreStackMem_Reduced_Helper(const IRListView& IR, const IROp_StoreStackMem* Op, Ref StackNode) {
     LOGMAN_THROW_A_FMT(ReducedPrecisionMode, "Reduced precision mode expected.");
 
-    Ref AddrNode = IR->GetNode(Op->Addr);
-    Ref Offset = IR->GetNode(Op->Offset);
+    Ref AddrNode = IR.GetNode(Op->Addr);
+    Ref Offset = IR.GetNode(Op->Offset);
     OpSize Align = Op->Align;
     MemOffsetType OffsetType = Op->OffsetType;
     uint8_t OffsetScale = Op->OffsetScale;
@@ -274,7 +272,7 @@ private:
   Ref LoadStackValueAtOffset_Slow(uint8_t Offset = 0);
   void StoreStackValueAtOffset_Slow(Ref Value, uint8_t Offset = 0, bool SetValid = true);
   // Update Top value in slow path for a pop
-  void UpdateTopForPop_Slow();
+  void UpdateTopForPop_Slow(bool InvalidateTag = true);
   void UpdateTopForPush_Slow();
   // Synchronizes the current simulated stack with the actual values.
   // Returns a new value for Top, that's synchronized between the simulated stack
@@ -292,10 +290,10 @@ private:
   void Reset();
 
   struct StackMemberInfo {
-    StackMemberInfo() = delete;
-    StackMemberInfo(Ref Data)
+    constexpr StackMemberInfo() = default;
+    constexpr StackMemberInfo(Ref Data)
       : StackDataNode(Data) {}
-    StackMemberInfo(Ref Data, Ref Source, OpSize Size)
+    constexpr StackMemberInfo(Ref Data, Ref Source, OpSize Size)
       : StackDataNode(Data)
       , Source({Size, Source}) {}
     Ref StackDataNode {}; // Reference to the data in the Stack.
@@ -357,9 +355,9 @@ private:
   // On the slow path TopCache is always the last obtained version of top.
   // TopOffset is ignored
   bool SlowPath = false;
+
   // Keeping IREmitter not to pass arguments around
   IREmitter* IREmit = nullptr;
-  IRListView* IR = nullptr;
 };
 
 inline const X87StackOptimization::StackMemberInfo X87StackOptimization::StackMemberInfo::Invalid {nullptr};
@@ -575,25 +573,39 @@ void X87StackOptimization::HandleBinopStack(IROps Op64, bool VFOp64, IROps Op80,
   HandleBinopValue(Op64, VFOp64, Op80, DestStackOffset, StackOffset2 != DestStackOffset, StackOffset1, StackNode, Reverse);
 }
 
-inline void X87StackOptimization::UpdateTopForPop_Slow() {
+inline void X87StackOptimization::UpdateTopForPop_Slow(bool InvalidateTag) {
+  const auto PopContainer = [](auto& container) {
+    const auto begin = std::begin(container);
+    std::rotate(begin, std::next(begin), std::end(container));
+  };
+
+  if (InvalidateTag) {
+    SetX87ValidTag(0, false);
+  }
+
   // Pop the top of the x87 stack
   GetOffsetTopWithCache_Slow(1);
-  std::rotate(TopOffsetCache.begin(), std::next(TopOffsetCache.begin()), TopOffsetCache.end());
-  std::rotate(TopOffsetAddressCache.begin(), std::next(TopOffsetAddressCache.begin()), TopOffsetAddressCache.end());
-  std::rotate(TopValueCache.begin(), std::next(TopValueCache.begin()), TopValueCache.end());
-  std::rotate(FlushValuesPending.begin(), std::next(FlushValuesPending.begin()), FlushValuesPending.end());
-  std::rotate(TopValidCache.begin(), std::next(TopValidCache.begin()), TopValidCache.end());
+  PopContainer(TopOffsetCache);
+  PopContainer(TopOffsetAddressCache);
+  PopContainer(TopValueCache);
+  PopContainer(FlushValuesPending);
+  PopContainer(TopValidCache);
   FlushTopPending = true;
 }
 
 inline void X87StackOptimization::UpdateTopForPush_Slow() {
-  // Pop the top of the x87 stack
+  const auto PushContainer = [](auto& container) {
+    const auto end = std::end(container);
+    std::rotate(std::begin(container), std::prev(end), end);
+  };
+
+  // Push the top of the x87 stack
   GetOffsetTopWithCache_Slow(1, true);
-  std::rotate(TopOffsetCache.begin(), std::prev(TopOffsetCache.end()), TopOffsetCache.end());
-  std::rotate(TopOffsetAddressCache.begin(), std::prev(TopOffsetAddressCache.end()), TopOffsetAddressCache.end());
-  std::rotate(TopValueCache.begin(), std::prev(TopValueCache.end()), TopValueCache.end());
-  std::rotate(FlushValuesPending.begin(), std::prev(FlushValuesPending.end()), FlushValuesPending.end());
-  std::rotate(TopValidCache.begin(), std::prev(TopValidCache.end()), TopValidCache.end());
+  PushContainer(TopOffsetCache);
+  PushContainer(TopOffsetAddressCache);
+  PushContainer(TopValueCache);
+  PushContainer(FlushValuesPending);
+  PushContainer(TopValidCache);
   FlushTopPending = true;
 }
 
@@ -724,7 +736,6 @@ void X87StackOptimization::Run(IREmitter* Emit) {
 
   // Initialize IREmit member
   IREmit = Emit;
-  IR = &CurrentIR;
 
   // Run optimization proper
   for (auto [BlockNode, BlockHeader] : CurrentIR.GetBlocks()) {
@@ -781,6 +792,12 @@ void X87StackOptimization::Run(IREmitter* Emit) {
 
       case OP_F80FYL2XSTACK: {
         HandleBinopStack(OP_F64FYL2X, false, OP_F80FYL2X, 1, 0, 1);
+        StackPop();
+        break;
+      }
+
+      case OP_F80FYL2XP1STACK: {
+        HandleBinopStack(OP_F64FYL2XP1, false, OP_F80FYL2XP1, 1, 0, 1);
         StackPop();
         break;
       }
@@ -862,25 +879,20 @@ void X87StackOptimization::Run(IREmitter* Emit) {
         Ref SinValue {};
         Ref CosValue {};
 
+        if (ReducedPrecisionMode) {
+          SinValue = IREmit->_F64SIN(St0);
+          CosValue = IREmit->_F64COS(St0);
+        }
 #ifdef VIXL_SIMULATOR
-        if (DisableVixlIndirectCalls() == 0) {
-          if (ReducedPrecisionMode) {
-            SinValue = IREmit->_F64SIN(St0);
-            CosValue = IREmit->_F64COS(St0);
-          } else {
-            SinValue = IREmit->_F80SIN(St0);
-            CosValue = IREmit->_F80COS(St0);
-          }
-        } else
+        else if (DisableVixlIndirectCalls() == 0) {
+          SinValue = IREmit->_F80SIN(St0);
+          CosValue = IREmit->_F80COS(St0);
+        }
 #endif
-        {
+        else {
           SinValue = IREmit->_AllocateFPR(OpSize::i128Bit, OpSize::i128Bit);
           CosValue = IREmit->_AllocateFPR(OpSize::i128Bit, OpSize::i128Bit);
-          if (ReducedPrecisionMode) {
-            IREmit->_F64SINCOS(St0, SinValue, CosValue);
-          } else {
-            IREmit->_F80SINCOS(St0, SinValue, CosValue);
-          }
+          IREmit->_F80SINCOS(St0, SinValue, CosValue);
         }
 
         // Push values
@@ -932,7 +944,6 @@ void X87StackOptimization::Run(IREmitter* Emit) {
           UpdateTopForPush_Slow();
           StoreStackValueAtOffset_Slow(SourceNode);
         } else {
-          auto* SourceNode = CurrentIR.GetNode(Op->X80Src);
           if (Op->OriginalValue.IsInvalid()) {
             // No original value to track - just push the converted data
             StackData.push(StackMemberInfo {SourceNode});
@@ -1018,11 +1029,11 @@ void X87StackOptimization::Run(IREmitter* Emit) {
         }
 
         if (ReducedPrecisionMode) {
-          StoreStackMem_Reduced_Helper(Op, StackNode);
+          StoreStackMem_Reduced_Helper(CurrentIR, Op, StackNode);
           break;
         }
 
-        StoreStackMem_Helper(Op, StackNode);
+        StoreStackMem_Helper(CurrentIR, Op, StackNode);
         break;
       }
 
@@ -1030,22 +1041,17 @@ void X87StackOptimization::Run(IREmitter* Emit) {
         const auto* Op = IROp->C<IROp_StoreStackToStack>();
         auto Offset = Op->StackLocation;
 
-        if (Offset != 0) {
-          auto Value = MigrateToSlowPath_IfInvalid();
+        auto Value = MigrateToSlowPath_IfInvalid();
 
-          // Need to store st0 to stack location - basically a copy.
-          if (SlowPath) {
-            StoreStackValueAtOffset_Slow(LoadStackValueAtOffset_Slow(), Offset);
-          } else {
-            StackData.setTop(*Value, Offset);
-          }
+        // Need to store st0 to stack location - basically a copy.
+        if (SlowPath) {
+          StoreStackValueAtOffset_Slow(LoadStackValueAtOffset_Slow(), Offset);
+        } else {
+          StackData.setTop(*Value, Offset);
         }
         break;
       }
       case OP_POPSTACKDESTROY: {
-        if (SlowPath) {
-          SetX87ValidTag(0, false);
-        }
         StackPop();
         break;
       }
@@ -1066,8 +1072,8 @@ void X87StackOptimization::Run(IREmitter* Emit) {
           // Slow path: do actual memory operations
           Ref ValueTop = LoadStackValue();
           Ref ValueOffset = LoadStackValue(Offset);
-          StoreStackValue(ValueOffset);
-          StoreStackValue(ValueTop, Offset);
+          StoreStackValue(ValueOffset, 0, true);
+          StoreStackValue(ValueTop, Offset, true);
         } else {
           // Fast path: swap complete StackMemberInfo preserving Source metadata
           StackData.setTop(StackMemberOffset, 0);
@@ -1086,7 +1092,7 @@ void X87StackOptimization::Run(IREmitter* Emit) {
           ResultNode = IREmit->_VFNeg(OpSize::i64Bit, OpSize::i64Bit, Value);
         } else {
           Ref HelperNode = IREmit->_LoadNamedVectorConstant(OpSize::i128Bit, IR::NamedVectorConstant::NAMED_VECTOR_F80_SIGN_MASK);
-          ResultNode = IREmit->_VXor(OpSize::i128Bit, OpSize::i8Bit, Value, HelperNode);
+          ResultNode = IREmit->_VXor(OpSize::i128Bit, Value, HelperNode);
         }
         StoreStackValue(ResultNode);
         break;
@@ -1101,7 +1107,7 @@ void X87StackOptimization::Run(IREmitter* Emit) {
         } else {
           // Intermediate insts
           Ref HelperNode = IREmit->_LoadNamedVectorConstant(OpSize::i128Bit, IR::NamedVectorConstant::NAMED_VECTOR_F80_SIGN_MASK);
-          ResultNode = IREmit->_VAndn(OpSize::i128Bit, OpSize::i8Bit, Value, HelperNode);
+          ResultNode = IREmit->_VAndn(OpSize::i128Bit, Value, HelperNode);
         }
         StoreStackValue(ResultNode);
         break;
@@ -1171,7 +1177,7 @@ void X87StackOptimization::Run(IREmitter* Emit) {
 
       case OP_INCSTACKTOP: {
         if (SlowPath) {
-          UpdateTopForPop_Slow();
+          UpdateTopForPop_Slow(false);
         } else {
           StackData.rotate(false);
         }
@@ -1226,11 +1232,9 @@ void X87StackOptimization::Run(IREmitter* Emit) {
     SynchronizeStackValues();
     FlushCachedRegs();
   }
-
-  return;
 }
 
-fextl::unique_ptr<Pass> CreateX87StackOptimizationPass(const FEXCore::HostFeatures& Features, OpSize GPROpSize) {
+fextl::unique_ptr<Pass> CreateX87StackOptimizationPass(const HostFeatures& Features, OpSize GPROpSize) {
   return fextl::make_unique<X87StackOptimization>(Features, GPROpSize);
 }
 } // namespace FEXCore::IR

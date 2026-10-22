@@ -43,6 +43,7 @@ if(CMAKE_BUILD_TYPE MATCHES DEBUG)
 endif()
 
 target_compile_options(vixl PRIVATE -ffunction-sections)
+target_include_directories(vixl PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 set_target_properties(vixl PROPERTIES C_VISIBILITY_PRESET hidden)
 set_target_properties(vixl PROPERTIES CXX_VISIBILITY_PRESET hidden)
 set_target_properties(vixl PROPERTIES VISIBILITY_INLINES_HIDDEN TRUE)
@@ -56,3 +57,4 @@ if (CMAKE_BUILD_TYPE MATCHES "RELEASE")
   )
 endif()
 
+add_library(vixl::vixl ALIAS vixl)

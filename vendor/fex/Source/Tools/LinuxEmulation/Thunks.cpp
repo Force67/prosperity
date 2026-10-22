@@ -259,6 +259,8 @@ void ThunkHandler_impl::LoadLib(std::string_view Name) {
 
     LogMan::Msg::DFmt("Loaded {} syms", i);
   }
+
+  _SyscallHandler->TriggerGuestLibWrapperCodeCacheLoad(*ThreadObject->Thread, ThreadObject->Thread->CurrentFrame->State.rip);
 }
 
 /**
@@ -325,7 +327,7 @@ MakeHostTrampolineForGuestFunction(void* HostPacker, uintptr_t GuestTarget, uint
     LOGMAN_THROW_A_FMT(ThunkHandler->HostTrampolineInstanceDataPtr != MAP_FAILED, "Failed to mmap HostTrampolineInstanceDataPtr");
   }
 
-  auto HostTrampoline = reinterpret_cast<HostToGuestTrampolinePtr* const>(ThunkHandler->HostTrampolineInstanceDataPtr);
+  auto HostTrampoline = reinterpret_cast<HostToGuestTrampolinePtr*>(ThunkHandler->HostTrampolineInstanceDataPtr);
   ThunkHandler->HostTrampolineInstanceDataAvailable -= HostToGuestTrampolineSize;
   ThunkHandler->HostTrampolineInstanceDataPtr += HostToGuestTrampolineSize;
   memcpy(HostTrampoline, (void*)&HostToGuestTrampolineTemplate, HostToGuestTrampolineSize);

@@ -24,16 +24,6 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// The ABI features are only supported with C++11 or later.
-#if __cplusplus >= 201103L
-// This should not be defined manually.
-#define VIXL_HAS_ABI_SUPPORT
-#elif defined(VIXL_HAS_ABI_SUPPORT)
-#error "The ABI support requires C++11 or later."
-#endif
-
-#ifdef VIXL_HAS_ABI_SUPPORT
-
 #ifndef VIXL_AARCH64_ABI_AARCH64_H_
 #define VIXL_AARCH64_ABI_AARCH64_H_
 
@@ -182,5 +172,3 @@ inline GenericOperand ABI::GetReturnGenericOperand<void>() const {
 }  // namespace vixl
 
 #endif  // VIXL_AARCH64_ABI_AARCH64_H_
-
-#endif  // VIXL_HAS_ABI_SUPPORT

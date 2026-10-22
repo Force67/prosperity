@@ -18,7 +18,7 @@ struct BitSet final {
   constexpr static size_t MinimumSize = sizeof(ElementType);
   constexpr static size_t MinimumSizeBits = sizeof(ElementType) * 8;
 
-  ElementType* Memory;
+  ElementType* Memory {};
   void Allocate(size_t Elements) {
     size_t AllocateSize = ToBytes(Elements);
     LOGMAN_THROW_A_FMT((AllocateSize * MinimumSize) >= Elements, "Fail");
@@ -33,14 +33,15 @@ struct BitSet final {
     FEXCore::Allocator::free(Memory);
     Memory = nullptr;
   }
-  bool Get(T Element) {
+  [[nodiscard]]
+  bool Get(T Element) const {
     return (Memory[Element / MinimumSizeBits] & (1ULL << (Element % MinimumSizeBits))) != 0;
   }
   void Set(T Element) {
     Memory[Element / MinimumSizeBits] |= (1ULL << (Element % MinimumSizeBits));
   }
   void Clear(T Element) {
-    Memory[Element / MinimumSizeBits] &= (1ULL << (Element % MinimumSizeBits));
+    Memory[Element / MinimumSizeBits] &= ~(1ULL << (Element % MinimumSizeBits));
   }
   void MemClear(size_t Elements) {
     memset(Memory, 0, ToBytes(Elements));
@@ -48,13 +49,15 @@ struct BitSet final {
   void MemSet(size_t Elements) {
     memset(Memory, 0xFF, ToBytes(Elements));
   }
-  uint32_t ToBytes(size_t Elements) {
-    return AlignUp(Elements, MinimumSizeBits) / MinimumSize;
+  [[nodiscard]]
+  static size_t ToBytes(size_t Elements) {
+    return AlignUp(Elements, MinimumSizeBits) / 8;
   }
 
   // This very explicitly doesn't let you take an address
   // Is only a getter
-  bool operator[](T Element) {
+  [[nodiscard]]
+  bool operator[](T Element) const {
     return Get(Element);
   }
 };
@@ -62,35 +65,37 @@ struct BitSet final {
 template<typename T>
 struct BitSetView final {
   using ElementType = T;
-  constexpr static size_t MinimumSize = sizeof(ElementType);
-  constexpr static size_t MinimumSizeBits = sizeof(ElementType) * 8;
+  constexpr static size_t MinimumSize = BitSet<T>::MinimumSize;
+  constexpr static size_t MinimumSizeBits = BitSet<T>::MinimumSizeBits;
 
-  ElementType* Memory;
+  ElementType* Memory {};
 
   void GetView(BitSet<T>& Set, uint64_t ElementOffset) {
     LOGMAN_THROW_A_FMT((ElementOffset % MinimumSize) == 0, "Bitset view offset needs to be aligned to size of backing element");
     Memory = &Set.Memory[ElementOffset / MinimumSizeBits];
   }
 
-  bool Get(T Element) {
+  [[nodiscard]]
+  bool Get(T Element) const {
     return (Memory[Element / MinimumSizeBits] & (1ULL << (Element % MinimumSizeBits))) != 0;
   }
   void Set(T Element) {
     Memory[Element / MinimumSizeBits] |= (1ULL << (Element % MinimumSizeBits));
   }
   void Clear(T Element) {
-    Memory[Element / MinimumSizeBits] &= (1ULL << (Element % MinimumSizeBits));
+    Memory[Element / MinimumSizeBits] &= ~(1ULL << (Element % MinimumSizeBits));
   }
   void MemClear(size_t Elements) {
-    memset(Memory, 0, AlignUp(Elements / MinimumSizeBits, MinimumSizeBits));
+    memset(Memory, 0, BitSet<T>::ToBytes(Elements));
   }
   void MemSet(size_t Elements) {
-    memset(Memory, 0xFF, AlignUp(Elements / MinimumSizeBits, MinimumSizeBits));
+    memset(Memory, 0xFF, BitSet<T>::ToBytes(Elements));
   }
 
   // This very explicitly doesn't let you take an address
   // Is only a getter
-  bool operator[](T Element) {
+  [[nodiscard]]
+  bool operator[](T Element) const {
     return Get(Element);
   }
 };

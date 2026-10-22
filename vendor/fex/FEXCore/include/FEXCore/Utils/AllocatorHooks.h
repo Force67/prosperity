@@ -27,6 +27,24 @@ enum class ProtectOptions : uint32_t {
 };
 FEX_DEF_NUM_OPS(ProtectOptions)
 
+enum class THPControl {
+  Enable,
+  Disable,
+};
+
+#ifndef _WIN32
+FEX_DEFAULT_VISIBILITY void SetupHooks(size_t PageSize);
+#else
+using VirtualNamePtr = void (*)(const char*, const void*, size_t);
+using VirtualTHPPtr = void (*)(const void*, size_t, THPControl);
+struct HookPtrs {
+  VirtualNamePtr VirtualName;
+  VirtualTHPPtr VirtualTHPControl;
+};
+FEX_DEFAULT_VISIBILITY void SetupHooks(size_t PageSize, HookPtrs Ptrs);
+#endif
+FEX_DEFAULT_VISIBILITY void ClearHooks();
+
 #ifdef _WIN32
 inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Commit = true) {
   // Allocate top-down to avoid polluting the lower VA space, as even on 64-bit some programs (i.e. LuaJIT) require allocations below 4GB.
@@ -79,11 +97,12 @@ inline bool VirtualProtect(void* Ptr, size_t Size, ProtectOptions options) {
     LOGMAN_MSG_A_FMT("Unknown VirtualProtect options combination");
   }
 
-  return ::VirtualProtect(Ptr, Size, prot, nullptr) == 0;
+  DWORD OldProt {};
+  return ::VirtualProtect(Ptr, Size, prot, &OldProt) != 0;
 }
 
-inline void VirtualName(const char*, void*, size_t) {}
-
+FEX_DEFAULT_VISIBILITY extern VirtualNamePtr VirtualName;
+FEX_DEFAULT_VISIBILITY extern VirtualTHPPtr VirtualTHPControl;
 #else
 using MMAP_Hook = void* (*)(void*, size_t, int, int, int, off_t);
 using MUNMAP_Hook = int (*)(void*, size_t);
@@ -123,6 +142,10 @@ inline bool VirtualProtect(void* Ptr, size_t Size, ProtectOptions options) {
   return ::mprotect(Ptr, Size, prot) == 0;
 }
 
+inline void VirtualTHPControl(const void* Ptr, size_t Size, THPControl Control) {
+  ::madvise(const_cast<void*>(Ptr), Size, Control == THPControl::Enable ? MADV_HUGEPAGE : MADV_NOHUGEPAGE);
+}
+
 #endif
 
 // Memory allocation routines to be defined externally.
@@ -139,9 +162,12 @@ size_t malloc_usable_size(void* ptr);
 void* aligned_alloc(size_t a, size_t s);
 void aligned_free(void* ptr);
 
+FEX_DEFAULT_VISIBILITY extern void InitializeThread();
+
 #ifndef _WIN32
-void SetJemallocMmapHook(void* (*)(void* addr, size_t length, int prot, int flags, int fd, off_t offset));
-void SetJemallocMunmapHook(int (*)(void* addr, size_t length));
+void SetupAllocatorHooks(void* (*)(void* addr, size_t length, int prot, int flags, int fd, off_t offset), int (*)(void* addr, size_t length));
+#else
+void SetupAllocatorHooks(void (*)(const char* name, const void* address, size_t size));
 #endif
 
 struct FEXAllocOperators {

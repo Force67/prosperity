@@ -15,7 +15,6 @@
 
 namespace FEXCore {
 class LookupCache;
-class CompileService;
 struct JITSymbolBuffer;
 } // namespace FEXCore
 
@@ -102,10 +101,6 @@ struct alignas(FEXCore::Utils::FEX_PAGE_SIZE) InternalThreadState : public FEXCo
   NonMovableUniquePtr<FEXCore::IR::PassManager> PassManager;
   NonMovableUniquePtr<JITSymbolBuffer> SymbolBuffer;
 
-  std::shared_ptr<FEXCore::CompileService> CompileService;
-
-  std::shared_mutex ObjectCacheRefCounter {};
-
   // This pointer is owned by the frontend.
   FEXCore::SHMStats::ThreadStats* ThreadStats {};
 
@@ -124,15 +119,15 @@ struct alignas(FEXCore::Utils::FEX_PAGE_SIZE) InternalThreadState : public FEXCo
   FEXCore::UncheckedLongJump::JumpBuf RestartJump;
 
   // BaseFrameState should always be at the end, directly before the interrupt fault page
-  alignas(16) FEXCore::Core::CpuStateFrame BaseFrameState {};
+  FEXCore::Core::CpuStateFrame BaseFrameState {};
 
   // Can be reprotected as RO to trigger an interrupt at generated code block entrypoints
   alignas(FEXCore::Utils::FEX_PAGE_SIZE) uint8_t InterruptFaultPage[FEXCore::Utils::FEX_PAGE_SIZE];
 };
 static_assert(std::is_standard_layout_v<FEXCore::Core::InternalThreadState>);
-static_assert((offsetof(FEXCore::Core::InternalThreadState, InterruptFaultPage) - offsetof(FEXCore::Core::InternalThreadState, BaseFrameState)) <
-                FEXCore::Utils::FEX_PAGE_SIZE,
-              "Fault page is outside of immediate range from CPU state");
-static_assert(sizeof(FEXCore::Core::InternalThreadState) == (FEXCore::Utils::FEX_PAGE_SIZE * 2));
+// Maximum unsigned-offset store range for fault page.
+static_assert(
+  (offsetof(FEXCore::Core::InternalThreadState, InterruptFaultPage) - offsetof(FEXCore::Core::InternalThreadState, BaseFrameState)) <= 65520,
+  "Fault page is outside of immediate range from CPU state");
 
 } // namespace FEXCore::Core

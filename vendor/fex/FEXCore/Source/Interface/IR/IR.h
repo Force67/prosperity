@@ -643,7 +643,7 @@ public:
     auto IROp = Node.GetNode(BaseList)->Op(IRList);
 
     if (IROp->Op == OP_BEGINBLOCK) {
-      auto BeginBlock = IROp->C<IROp_EndBlock>();
+      auto BeginBlock = IROp->C<IROp_BeginBlock>();
 
       Node = BeginBlock->BlockHeader;
     } else if (IROp->Op == OP_CODEBLOCK) {
@@ -675,7 +675,7 @@ inline NodeID NodeWrapperBase<Type>::ID() const {
 [[nodiscard]]
 bool IsBlockExit(FEXCore::IR::IROps Op);
 
-void Dump(fextl::stringstream* out, const IRListView* IR);
+void Dump(fextl::ostringstream* out, const IRListView* IR);
 
 constexpr auto format_as(FEXCore::IR::NodeID ID) {
   return ID.Value;

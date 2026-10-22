@@ -76,7 +76,7 @@ hide:
 <p>
   The default is <b>locale-independent</b>, but you can opt into localized
   formatting and {fmt} makes it work with Unicode, addressing issues in the
-  standard libary.
+  standard library.
 </p>
 </div>
 
@@ -129,7 +129,6 @@ hide:
 <p>
   Where possible, the output of formatting functions is <b>consistent across
   platforms</b>.
-</p>
 </p>
 </div>
 

@@ -14,6 +14,7 @@ struct FILE;
 #include <cerrno>
 #include <io.h>
 #include <ctype.h>
+#include <stdarg.h>
 #include <wchar.h>
 #include <windef.h>
 #include <winternl.h>
@@ -272,6 +273,18 @@ int write(int FileHandle, const void* Buf, unsigned int MaxCharCount) {
   return _write(FileHandle, Buf, MaxCharCount);
 }
 
+DLLEXPORT_FUNC(int, ftruncate, (int FileHandle, off_t Length)) {
+  FILE_END_OF_FILE_INFO Info {.EndOfFile = {.QuadPart = Length}};
+  if (!SetFileInformationByHandle(GetFile(FileHandle)->Handle, FileEndOfFileInfo, &Info, sizeof(Info))) {
+    return ErrnoReturn(EINVAL);
+  }
+  return 0;
+}
+
+int _chsize(int FileHandle, long Length) {
+  return ftruncate(FileHandle, Length);
+}
+
 DLLEXPORT_FUNC(int, _isatty, (int _FileHandle)) {
   return 0;
 }
@@ -456,5 +469,13 @@ int access(const char* Path, int AccessMode) {
 }
 
 int rename(const char* _OldFilename, const char* _NewFilename) {
+  UNIMPLEMENTED();
+}
+
+int printf(const char* Format, ...) {
+  UNIMPLEMENTED();
+}
+
+int puts(const char* Str) {
   UNIMPLEMENTED();
 }

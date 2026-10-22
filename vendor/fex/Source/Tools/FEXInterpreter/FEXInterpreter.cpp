@@ -10,6 +10,8 @@ $end_info$
 #include "Common/FEXServerClient.h"
 #include "Common/Config.h"
 #include "Common/HostFeatures.h"
+#include "Common/Linux/LinuxVersion.h"
+#include "Common/Linux/SBRKAllocations.h"
 #include "PortabilityInfo.h"
 #include "ELFCodeLoader.h"
 #include "VDSO_Emulation.h"
@@ -26,6 +28,7 @@ $end_info$
 #include <FEXCore/Config/Config.h>
 #include <FEXCore/Core/Context.h>
 #include <FEXCore/Core/CoreState.h>
+#include <FEXCore/Core/DiskCacheFileMapper.h>
 #include <FEXCore/Utils/Allocator.h>
 #include <FEXCore/Utils/FileLoading.h>
 #include <FEXCore/Utils/LogManager.h>
@@ -62,7 +65,7 @@ $end_info$
 #include <utility>
 
 #include <sys/sysinfo.h>
-#include <sys/signal.h>
+#include <signal.h>
 
 namespace FEX::Logging {
 static bool SilentLog {};
@@ -79,7 +82,9 @@ void MsgHandler(LogMan::DebugLevels Level, const char* Message) {
   const auto Style = DisableOutputColors ? fmt::text_style {} : LogMan::DebugLevelStyle(Level);
   const auto Output = fextl::fmt::format("{} {}\n", fmt::styled(LogMan::DebugLevelStr(Level), Style), Message);
   write(OutputFD, Output.c_str(), Output.size());
-  fsync(OutputFD);
+  if (Level == LogMan::DebugLevels::ASSERT) {
+    fsync(OutputFD);
+  }
 }
 
 void AssertHandler(const char* Message) {
@@ -142,42 +147,61 @@ void Init() {
 } // namespace FEX::Logging
 
 namespace FEX::Allocator {
-static fextl::unique_ptr<FEX::HLE::MemAllocator> Allocator;
-static fextl::vector<FEXCore::Allocator::MemoryRegion> Base48Bit;
-static fextl::vector<FEXCore::Allocator::MemoryRegion> Low4GB;
 
-void Init(bool Is64Bit) {
+fextl::vector<FEXCore::Allocator::MemoryRegion> InitMemoryRegions(bool Is64Bit) {
+  const auto PageSize = sysconf(_SC_PAGESIZE);
   if (Is64Bit) {
     // Destroy the 48th bit if it exists
-    Base48Bit = FEXCore::Allocator::Setup48BitAllocatorIfExists();
-  } else {
-    // Reserve [0x1_0000_0000, 0x2_0000_0000).
-    // Safety net if 32-bit address calculation overflows in to 64-bit range.
-    constexpr uint64_t First64BitAddr = 0x1'0000'0000ULL;
-    Low4GB = FEXCore::Allocator::StealMemoryRegion(First64BitAddr, First64BitAddr + First64BitAddr);
-
-    // Setup our userspace allocator
-    FEXCore::Allocator::SetupHooks();
-    Allocator = FEX::HLE::CreatePassthroughAllocator();
-
-    // Now that the upper 32-bit address space is blocked for future allocations,
-    // exhaust all of jemalloc's remaining internal allocations that it reserved before.
-    // TODO: It's unclear how reliably this exhausts those reserves
-    FEXCore::Allocator::YesIKnowImNotSupposedToUseTheGlibcAllocator glibc;
-    void* data;
-    do {
-      data = malloc(0x1);
-    } while (reinterpret_cast<uintptr_t>(data) >> 32 != 0);
-    free(data);
+    return FEXCore::Allocator::Setup48BitAllocatorIfExists(PageSize > 0 ? PageSize : FEXCore::Utils::FEX_PAGE_SIZE);
   }
+
+  // Reserve [0x1_0000_0000, 0x2_0000_0000).
+  // Safety net if 32-bit address calculation overflows in to 64-bit range.
+  constexpr uint64_t First64BitAddr = 0x1'0000'0000ULL;
+  return FEXCore::Allocator::StealMemoryRegion(First64BitAddr, First64BitAddr + First64BitAddr);
 }
 
-void Shutdown() {
+fextl::unique_ptr<FEX::HLE::MemAllocator> InitAllocator(bool Is64Bit) {
+  if (Is64Bit) {
+    return {};
+  }
+
+  const auto PageSize = sysconf(_SC_PAGESIZE);
+
+  // Setup our userspace allocator
+  FEXCore::Allocator::SetupHooks(PageSize > 0 ? PageSize : FEXCore::Utils::FEX_PAGE_SIZE);
+  auto Allocator = FEX::HLE::CreatePassthroughAllocator();
+
+  // Now that the upper 32-bit address space is blocked for future allocations,
+  // exhaust all of jemalloc's remaining internal allocations that it reserved before.
+  // TODO: It's unclear how reliably this exhausts those reserves
+  // TODO: This will likely consume one arena inside the 32-bit VA space.
+  //   - (HdkR): I've noticed jemalloc consuming an 8MB arena commonly.
+  FEXCore::Allocator::YesIKnowImNotSupposedToUseTheGlibcAllocator glibc;
+  void* data;
+  do {
+    data = malloc(0x1);
+  } while (reinterpret_cast<uintptr_t>(data) >> 32 != 0);
+  free(data);
+
+  return Allocator;
+}
+
+void Shutdown(fextl::vector<FEXCore::Allocator::MemoryRegion>&& MemoryRegions) {
   FEXCore::Allocator::ClearHooks();
-  FEXCore::Allocator::ReclaimMemoryRegion(Base48Bit);
-  FEXCore::Allocator::ReclaimMemoryRegion(Low4GB);
+  FEXCore::Allocator::ReclaimMemoryRegion(MemoryRegions);
 }
 } // namespace FEX::Allocator
+
+static void* DiskCacheFilemapper(FEXCore::File::File::FileHandleType Handle, uint64_t MapSize) {
+  int mapFD = dup(Handle);
+  void* Result = FEXCore::Allocator::mmap(nullptr, MapSize, PROT_READ, MAP_SHARED | MAP_NORESERVE, mapFD, 0);
+  close(mapFD);
+  if (Result == (void*)-1) {
+    return nullptr;
+  }
+  return Result;
+}
 
 bool InterpreterHandler(fextl::string* Filename, const fextl::string& RootFS, fextl::vector<fextl::string>* args) {
   int FD {-1};
@@ -360,7 +384,7 @@ static int StealFEXFDFromEnv(const char* Env) {
 }
 
 int main(int argc, char** argv, char** const envp) {
-  auto SBRKPointer = FEXCore::Allocator::DisableSBRKAllocations();
+  auto SBRKPointer = FEX::SBRKAllocations::DisableSBRKAllocations();
   FEXCore::Allocator::GLIBCScopedFault GLIBFaultScope;
 
   const bool ExecutedWithFD = getauxval(AT_EXECFD) != 0;
@@ -369,6 +393,8 @@ int main(int argc, char** argv, char** const envp) {
 
   int FEXFD {StealFEXFDFromEnv("FEX_EXECVEFD")};
   int FEXSeccompFD {StealFEXFDFromEnv("FEX_SECCOMPFD")};
+  const bool FEXFDPathBacked = getenv("FEX_EXECVEFD_PATH") != nullptr;
+  unsetenv("FEX_EXECVEFD_PATH");
 
   // Early init trivial handlers.
   LogMan::Throw::InstallHandler(FEX::Logging::AssertHandler);
@@ -394,6 +420,11 @@ int main(int argc, char** argv, char** const envp) {
   // If running under the vixl simulator, ensure that indirect runtime calls are enabled.
   FEXCore::Config::Set(FEXCore::Config::CONFIG_DISABLE_VIXL_INDIRECT_RUNTIME_CALLS, "0");
 #endif
+
+  if (FEXSeccompFD != -1) {
+    // seccomp inheritance happens unconditionally.
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_NEEDSSECCOMP, "1");
+  }
 
   // Early check for process stall
   // Doesn't use CONFIG_ROOTFS and we don't want it to spin up a squashfs instance
@@ -448,8 +479,8 @@ int main(int argc, char** argv, char** const envp) {
     return -ENOEXEC;
   }
 
-  uint32_t KernelVersion = FEX::HLE::SyscallHandler::CalculateHostKernelVersion();
-  if (KernelVersion < FEX::HLE::SyscallHandler::KernelVersion(5, 15)) {
+  uint32_t KernelVersion = FEX::LinuxVersion::CalculateHostKernelVersion();
+  if (KernelVersion < FEX::LinuxVersion::KernelVersion(5, 15)) {
     LogMan::Msg::EFmt("FEX requires kernel 5.15 minimum. Expect problems.");
   }
 
@@ -482,9 +513,14 @@ int main(int argc, char** argv, char** const envp) {
     FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_FILENAME, Program.ProgramPath);
     FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, Program.ProgramName);
   } else if (FEXFD != -1) {
-    // Anonymous program.
-    FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_FILENAME, "<Anonymous>");
-    FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, "<Anonymous>");
+    if (FEXFDPathBacked) {
+      FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_FILENAME, Program.ProgramPath);
+      FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, Program.ProgramName);
+    } else {
+      // Anonymous program.
+      FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_FILENAME, "<Anonymous>");
+      FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, "<Anonymous>");
+    }
   } else {
     {
       char ExistsTempPath[PATH_MAX];
@@ -503,26 +539,31 @@ int main(int argc, char** argv, char** const envp) {
   // Setup Thread handlers, so FEXCore can create threads.
   auto StackTracker = FEX::LinuxEmulation::Threads::SetupThreadHandlers();
 
-  FEX::Allocator::Init(Loader.Is64BitMode());
+  FEXCore::DiskCache::SetFileMapper(DiskCacheFilemapper);
+
+  auto MemoryRegions = FEX::Allocator::InitMemoryRegions(Loader.Is64BitMode());
+  auto Allocator = FEX::Allocator::InitAllocator(Loader.Is64BitMode());
 
   FEXCore::Profiler::Init(Program.ProgramName, Program.ProgramPath);
 
   bool SupportsAVX {};
+  bool SupportsSVE256 {};
   fextl::unique_ptr<FEXCore::Context::Context> CTX;
   {
     auto HostFeatures = FEX::FetchHostFeatures();
     CTX = FEXCore::Context::Context::CreateNewContext(HostFeatures);
     SupportsAVX = HostFeatures.SupportsAVX;
+    SupportsSVE256 = HostFeatures.SupportsSVE256;
   }
 
   FEX::Kernel::Init(Loader.Is64BitMode(), CTX.get());
 
-  auto SignalDelegation = FEX::HLE::CreateSignalDelegator(CTX.get(), Program.ProgramName, SupportsAVX);
+  auto SignalDelegation = FEX::HLE::CreateSignalDelegator(CTX.get(), Program.ProgramName, SupportsAVX, SupportsSVE256);
   auto ThunkHandler = FEX::HLE::CreateThunkHandler();
 
-  auto SyscallHandler = Loader.Is64BitMode() ? FEX::HLE::x64::CreateHandler(CTX.get(), SignalDelegation.get(), ThunkHandler.get()) :
-                                               FEX::HLE::x32::CreateHandler(CTX.get(), SignalDelegation.get(), ThunkHandler.get(),
-                                                                            std::move(FEX::Allocator::Allocator));
+  auto SyscallHandler = Loader.Is64BitMode() ?
+                          FEX::HLE::x64::CreateHandler(CTX.get(), SignalDelegation.get(), ThunkHandler.get()) :
+                          FEX::HLE::x32::CreateHandler(CTX.get(), SignalDelegation.get(), ThunkHandler.get(), std::move(Allocator));
   SyscallHandler->SetCodeLoader(&Loader);
   CTX->SetSignalDelegator(SignalDelegation.get());
   CTX->SetSyscallHandler(SyscallHandler.get());
@@ -552,7 +593,7 @@ int main(int argc, char** argv, char** const envp) {
   }
 
   // Create a thread without a RIP or stack pointer setup initially.
-  auto ParentThread = SyscallHandler->TM.CreateThread(0, 0);
+  auto ParentThread = SyscallHandler->TM.CreateThread();
   SyscallHandler->TM.TrackThread(ParentThread);
   SignalDelegation->RegisterTLSState(ParentThread);
   ThunkHandler->RegisterTLSState(ParentThread);
@@ -581,9 +622,14 @@ int main(int argc, char** argv, char** const envp) {
 
   SyscallHandler->DefaultProgramBreak(BRKInfo.Base, BRKInfo.Size);
 
-  // Request code cache generation
   if (FEXCore::Config::Get_ENABLECODECACHINGWIP()) {
+    // Request code cache generation
     FEXServerClient::PopulateCodeCache(FEXServerClient::GetServerFD(), Loader.GetMainElfFD(), FEXCore::Config::Get_MULTIBLOCK());
+
+    if (VDSOMapping) {
+      // Finalize code cache for libVDSO-guest.so. This needs to be done explicitly since VDSO doesn't use LoadLib.
+      SyscallHandler->TriggerGuestLibWrapperCodeCacheLoad(*ParentThread->Thread, reinterpret_cast<uintptr_t>(VDSOMapping.VDSOBase));
+    }
   }
 
   // Pull RIP and stack pointer from loader and set the thread data to it.
@@ -618,13 +664,13 @@ int main(int argc, char** argv, char** const envp) {
   LogMan::Throw::UnInstallHandler();
   LogMan::Msg::UnInstallHandler();
 
-  FEX::Allocator::Shutdown();
+  FEX::Allocator::Shutdown(std::move(MemoryRegions));
 
   // Allocator is now original system allocator
   FEXCore::Telemetry::Shutdown(Program.ProgramName);
   FEXCore::Profiler::Shutdown();
 
-  FEXCore::Allocator::ReenableSBRKAllocations(SBRKPointer);
+  FEX::SBRKAllocations::ReenableSBRKAllocations(SBRKPointer);
 
   return ProgramStatus;
 }

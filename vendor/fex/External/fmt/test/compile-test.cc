@@ -1,19 +1,22 @@
 // Formatting library for C++ - formatting library tests
 //
-// Copyright (c) 2012 - present, Victor Zverovich
+// Copyright (c) 2012 - present, Victor Zverovich and {fmt} contributors
 // All rights reserved.
 //
 // For the license information refer to format.h.
 
 #include "fmt/compile.h"
 
+#include <array>
 #include <iterator>
 #include <list>
 #include <type_traits>
 #include <vector>
 
 #include "fmt/chrono.h"
+#include "fmt/color.h"
 #include "fmt/ranges.h"
+#include "fmt/std.h"
 #include "gmock/gmock.h"
 #include "gtest-extra.h"
 
@@ -75,9 +78,6 @@ TEST(compile_test, format_default) {
   EXPECT_EQ("foo", fmt::format(FMT_COMPILE("{}"), test_formattable()));
   auto t = std::chrono::system_clock::now();
   EXPECT_EQ(fmt::format("{}", t), fmt::format(FMT_COMPILE("{}"), t));
-#  ifdef __cpp_lib_byte
-  EXPECT_EQ("42", fmt::format(FMT_COMPILE("{}"), std::byte{42}));
-#  endif
 }
 
 TEST(compile_test, format_escape) {
@@ -88,10 +88,6 @@ TEST(compile_test, format_escape) {
             fmt::format(FMT_COMPILE("{:?} suffix"), "string"));
   EXPECT_EQ("\"abc\"", fmt::format(FMT_COMPILE("{0:<5?}"), "abc"));
   EXPECT_EQ("\"abc\"  ", fmt::format(FMT_COMPILE("{0:<7?}"), "abc"));
-}
-
-TEST(compile_test, format_wide_string) {
-  EXPECT_EQ(L"42", fmt::format(FMT_COMPILE(L"{}"), 42));
 }
 
 TEST(compile_test, format_specs) {
@@ -124,7 +120,6 @@ TEST(compile_test, manual_ordering) {
       "true 42 42 foo 0x1234 foo",
       fmt::format(FMT_COMPILE("{0} {1} {2} {3} {4} {5}"), true, 42, 42.0f,
                   "foo", reinterpret_cast<void*>(0x1234), test_formattable()));
-  EXPECT_EQ(L"42", fmt::format(FMT_COMPILE(L"{0}"), 42));
 }
 
 TEST(compile_test, named) {
@@ -132,10 +127,6 @@ TEST(compile_test, named) {
       fmt::detail::compile<decltype(fmt::arg("arg", 42))>(FMT_COMPILE("{arg}"));
   static_assert(std::is_same_v<decltype(runtime_named_field_compiled),
                                fmt::detail::runtime_named_field<char>>);
-
-  EXPECT_EQ("42", fmt::format(FMT_COMPILE("{}"), fmt::arg("arg", 42)));
-  EXPECT_EQ("41 43", fmt::format(FMT_COMPILE("{} {}"), fmt::arg("arg", 41),
-                                 fmt::arg("arg", 43)));
 
   EXPECT_EQ("foobar",
             fmt::format(FMT_COMPILE("{a0}{a1}"), fmt::arg("a0", "foo"),
@@ -172,6 +163,10 @@ TEST(compile_test, named) {
             fmt::format(FMT_COMPILE("{a0} {a1}"), "a0"_a = 41, "a1"_a = 43));
   EXPECT_EQ("41 43",
             fmt::format(FMT_COMPILE("{a1} {a0}"), "a0"_a = 43, "a1"_a = 41));
+
+  // A statically-named argument with a format spec compiles to spec_field,
+  // which passes the argument to make_format_args as const (#4866).
+  EXPECT_EQ("4.2", fmt::format(FMT_COMPILE("{arg:3.1f}"), "arg"_a = 4.2));
 #  endif
 }
 
@@ -235,6 +230,19 @@ TEST(compile_test, constexpr_formatted_size) {
   FMT_CONSTEXPR20 size_t str_size =
       fmt::formatted_size(FMT_COMPILE("{:s}"), "abc");
   EXPECT_EQ(str_size, 3);
+  FMT_CONSTEXPR20 size_t tuple_size = fmt::formatted_size(
+      FMT_COMPILE("{}"), fmt::join(std::tuple(1, 2, 3), ","));
+  EXPECT_EQ(tuple_size, 5);
+  FMT_CONSTEXPR20 size_t array_size = fmt::formatted_size(
+      FMT_COMPILE("{}"), fmt::join(std::array<int, 3>{1, 2, 3}, ","));
+  EXPECT_EQ(array_size, 5);
+  FMT_CONSTEXPR20 size_t styled_size = fmt::formatted_size(
+      FMT_COMPILE("{}"),
+      fmt::styled(std::array{1, 2, 3}, fmt::bg(fmt::color::green)));
+  EXPECT_EQ(styled_size, 32);
+  FMT_CONSTEXPR20 size_t variant_size = fmt::formatted_size(
+      FMT_COMPILE("{}"), std::variant<std::monostate, char>{});
+  EXPECT_EQ(variant_size, 18);
 }
 
 TEST(compile_test, static_format) {
@@ -318,7 +326,6 @@ TEST(compile_test, compile_format_string_literal) {
   using namespace fmt::literals;
   EXPECT_EQ("", fmt::format(""_cf));
   EXPECT_EQ("42", fmt::format("{}"_cf, 42));
-  EXPECT_EQ(L"42", fmt::format(L"{}"_cf, 42));
 }
 #endif
 
@@ -426,6 +433,40 @@ TEST(compile_time_formatting_test, custom_type) {
 TEST(compile_time_formatting_test, multibyte_fill) {
   EXPECT_EQ("жж42", test_format<8>(FMT_COMPILE("{:ж>4}"), 42));
 }
+
+TEST(compile_time_formatting_test, floating_point) {
+  EXPECT_EQ("0", test_format<2>(FMT_COMPILE("{}"), 0.0f));
+  EXPECT_EQ("392.500000", test_format<11>(FMT_COMPILE("{0:f}"), 392.5f));
+
+  EXPECT_EQ("0", test_format<2>(FMT_COMPILE("{:}"), 0.0));
+  EXPECT_EQ("0.000000", test_format<9>(FMT_COMPILE("{:f}"), 0.0));
+  EXPECT_EQ("0", test_format<2>(FMT_COMPILE("{:g}"), 0.0));
+  EXPECT_EQ("392.65", test_format<7>(FMT_COMPILE("{:}"), 392.65));
+  EXPECT_EQ("392.65", test_format<7>(FMT_COMPILE("{:g}"), 392.65));
+  EXPECT_EQ("392.65", test_format<7>(FMT_COMPILE("{:G}"), 392.65));
+  EXPECT_EQ("4.9014e+06", test_format<11>(FMT_COMPILE("{:g}"), 4.9014e6));
+  EXPECT_EQ("-392.650000", test_format<12>(FMT_COMPILE("{:f}"), -392.65));
+  EXPECT_EQ("-392.650000", test_format<12>(FMT_COMPILE("{:F}"), -392.65));
+
+  EXPECT_EQ("3.926500e+02", test_format<13>(FMT_COMPILE("{0:e}"), 392.65));
+  EXPECT_EQ("3.926500E+02", test_format<13>(FMT_COMPILE("{0:E}"), 392.65));
+  EXPECT_EQ("+0000392.6", test_format<11>(FMT_COMPILE("{0:+010.4g}"), 392.65));
+  EXPECT_EQ("9223372036854775808.000000",
+            test_format<27>(FMT_COMPILE("{:f}"), 9223372036854775807.0));
+
+  constexpr double nan = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ("nan", test_format<4>(FMT_COMPILE("{}"), nan));
+  EXPECT_EQ("+nan", test_format<5>(FMT_COMPILE("{:+}"), nan));
+  if (std::signbit(-nan))
+    EXPECT_EQ("-nan", test_format<5>(FMT_COMPILE("{}"), -nan));
+  else
+    fmt::print("Warning: compiler doesn't handle negative NaN correctly");
+
+  constexpr double inf = std::numeric_limits<double>::infinity();
+  EXPECT_EQ("inf", test_format<4>(FMT_COMPILE("{}"), inf));
+  EXPECT_EQ("+inf", test_format<5>(FMT_COMPILE("{:+}"), inf));
+  EXPECT_EQ("-inf", test_format<5>(FMT_COMPILE("{}"), -inf));
+}
 #endif
 
 #if FMT_USE_CONSTEXPR_STRING
@@ -442,3 +483,14 @@ TEST(compile_test, constexpr_string_format) {
   EXPECT_TRUE(big);
 }
 #endif  // FMT_USE_CONSTEXPR_STRING
+
+struct type_with_format_as {
+  int value;
+};
+int format_as(type_with_format_as v) { return v.value; }
+
+TEST(compile_test, format_as) {
+  // Use a format string other than "{}" so that formatting goes through the
+  // compiled field path rather than the to_string fast path.
+  EXPECT_EQ("[42]", fmt::format(FMT_COMPILE("[{}]"), type_with_format_as{42}));
+}

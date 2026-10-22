@@ -246,8 +246,8 @@ static uint64_t RecvMsg(int sockfd, struct msghdr32* msg, int flags) {
   SYSCALL_ERRNO();
 }
 
-void ConvertHeaderToHost(fextl::vector<iovec>& iovec, struct msghdr* Host, const struct msghdr32* Guest, fextl::vector<uint8_t>& ControlLen,
-                         size_t& ControlLenOffset) {
+static void ConvertHeaderToHost(fextl::vector<iovec>& iovec, struct msghdr* Host, const struct msghdr32* Guest,
+                                fextl::vector<uint8_t>& ControlLen, size_t& ControlLenOffset) {
   size_t CurrentIOVecSize = iovec.size();
   iovec.resize(CurrentIOVecSize + Guest->msg_iovlen);
   for (size_t i = 0; i < Guest->msg_iovlen; ++i) {
@@ -267,7 +267,7 @@ void ConvertHeaderToHost(fextl::vector<iovec>& iovec, struct msghdr* Host, const
   Host->msg_flags = Guest->msg_flags;
 }
 
-void ConvertHeaderToGuest(struct msghdr32* Guest, struct msghdr* Host) {
+static void ConvertHeaderToGuest(struct msghdr32* Guest, struct msghdr* Host) {
   for (size_t i = 0; i < Guest->msg_iovlen; ++i) {
     Guest->msg_iov[i] = Host->msg_iov[i];
   }
@@ -552,14 +552,16 @@ static uint64_t GetSockOpt(int sockfd, int level, int optname, auto_compat_ptr<v
     case SO_RCVTIMEO_OLD: {
       // _OLD uses old_timeval32. Needs to be converted
       struct timeval tv64 {};
-      Result = ::syscall(SYSCALL_DEF(getsockopt), sockfd, level, SO_RCVTIMEO_NEW, &tv64, sizeof(tv64));
+      socklen_t tv64size = sizeof(tv64);
+      Result = ::syscall(SYSCALL_DEF(getsockopt), sockfd, level, SO_RCVTIMEO_NEW, &tv64, &tv64size);
       *reinterpret_cast<timeval32*>(optval.Ptr) = tv64;
       break;
     }
     case SO_SNDTIMEO_OLD: {
       // _OLD uses old_timeval32. Needs to be converted
       struct timeval tv64 {};
-      Result = ::syscall(SYSCALL_DEF(getsockopt), sockfd, level, SO_SNDTIMEO_NEW, &tv64, sizeof(tv64));
+      socklen_t tv64size = sizeof(tv64);
+      Result = ::syscall(SYSCALL_DEF(getsockopt), sockfd, level, SO_SNDTIMEO_NEW, &tv64, &tv64size);
       *reinterpret_cast<timeval32*>(optval.Ptr) = tv64;
       break;
     }

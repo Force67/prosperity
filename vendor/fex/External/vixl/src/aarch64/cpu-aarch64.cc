@@ -82,6 +82,7 @@ const IDRegister::Field AA64ISAR1::kI8MM(52);
 const IDRegister::Field AA64ISAR2::kWFXT(0);
 const IDRegister::Field AA64ISAR2::kRPRES(4);
 const IDRegister::Field AA64ISAR2::kMOPS(16);
+const IDRegister::Field AA64ISAR2::kHBC(20);
 const IDRegister::Field AA64ISAR2::kCSSC(52);
 
 const IDRegister::Field AA64MMFR0::kECV(60);
@@ -198,6 +199,7 @@ CPUFeatures AA64ISAR2::GetCPUFeatures() const {
   if (Get(kWFXT) >= 2) f.Combine(CPUFeatures::kWFXT);
   if (Get(kRPRES) >= 1) f.Combine(CPUFeatures::kRPRES);
   if (Get(kMOPS) >= 1) f.Combine(CPUFeatures::kMOPS);
+  if (Get(kHBC) >= 1) f.Combine(CPUFeatures::kHBC);
   if (Get(kCSSC) >= 1) f.Combine(CPUFeatures::kCSSC);
   return f;
 }
@@ -419,20 +421,20 @@ unsigned CPU::icache_line_size_ = 1;
 
 // Currently computes I and D cache line size.
 void CPU::SetUp() {
-  uint32_t cache_type_register = GetCacheType();
+  uint64_t cache_type_register = GetCacheType();
 
   // The cache type register holds information about the caches, including I
   // D caches line size.
   static const int kDCacheLineSizeShift = 16;
   static const int kICacheLineSizeShift = 0;
-  static const uint32_t kDCacheLineSizeMask = 0xf << kDCacheLineSizeShift;
-  static const uint32_t kICacheLineSizeMask = 0xf << kICacheLineSizeShift;
+  static const uint64_t kDCacheLineSizeMask = 0xf << kDCacheLineSizeShift;
+  static const uint64_t kICacheLineSizeMask = 0xf << kICacheLineSizeShift;
 
   // The cache type register holds the size of the I and D caches in words as
   // a power of two.
-  uint32_t dcache_line_size_power_of_two =
+  uint64_t dcache_line_size_power_of_two =
       (cache_type_register & kDCacheLineSizeMask) >> kDCacheLineSizeShift;
-  uint32_t icache_line_size_power_of_two =
+  uint64_t icache_line_size_power_of_two =
       (cache_type_register & kICacheLineSizeMask) >> kICacheLineSizeShift;
 
   dcache_line_size_ = 4 << dcache_line_size_power_of_two;
@@ -440,13 +442,13 @@ void CPU::SetUp() {
 }
 
 
-uint32_t CPU::GetCacheType() {
+uint64_t CPU::GetCacheType() {
 #if defined(__aarch64__) || defined(__arm64ec__)
   uint64_t cache_type_register;
   // Copy the content of the cache type register to a core register.
   __asm__ __volatile__("mrs %[ctr], ctr_el0"  // NOLINT(runtime/references)
                        : [ctr] "=r"(cache_type_register));
-  return static_cast<uint32_t>(cache_type_register);
+  return cache_type_register;
 #else
   // This will lead to a cache with 1 byte long lines, which is fine since
   // neither EnsureIAndDCacheCoherency nor the simulator will need this

@@ -111,7 +111,7 @@ class CPUFeaturesAuditor : public DecoderVisitor {
   class RecordInstructionFeaturesScope;
 
 #define DECLARE(A) virtual void Visit##A(const Instruction* instr);
-  VISITOR_LIST(DECLARE)
+  SIM_AUD_VISITOR_LIST(DECLARE)
 #undef DECLARE
   void VisitCryptoSM3(const Instruction* instr);
   void VisitCryptoSM4(const Instruction* instr);

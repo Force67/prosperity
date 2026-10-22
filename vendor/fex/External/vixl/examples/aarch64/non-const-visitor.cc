@@ -38,7 +38,7 @@ using namespace vixl::aarch64;
 
 void SwitchAddSubRegisterSources::Visit(Metadata* metadata,
                                         const Instruction* instr) {
-  const std::string& form = (*metadata)["form"];
+  const std::string& form = metadata->form;
 
   // Match the forms for 32/64-bit add/subtract with shift, with optional flag
   // setting.

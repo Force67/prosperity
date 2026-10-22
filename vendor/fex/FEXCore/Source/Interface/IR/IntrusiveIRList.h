@@ -119,11 +119,7 @@ class DualIntrusiveAllocatorThreadPool final : public DualIntrusiveAllocator {
 public:
   DualIntrusiveAllocatorThreadPool(FEXCore::Utils::IntrusivePooledAllocator& ThreadAllocator, size_t Size)
     : DualIntrusiveAllocator {Size}
-    , PoolObject {ThreadAllocator, Size * 2} {
-    // Claim a buffer on allocation
-    PoolObject.ReownOrClaimBuffer();
-  }
-
+    , PoolObject {ThreadAllocator, Size * 2} {}
   void ReownOrClaimBuffer() {
     Data = PoolObject.ReownOrClaimBuffer();
     List = Data + MemorySize;
@@ -131,6 +127,10 @@ public:
 
   void DelayedDisownBuffer() {
     PoolObject.DelayedDisownBuffer();
+  }
+
+  void ValidateDisownedOrFree() const {
+    PoolObject.ValidateDisownedOrFree();
   }
 
 private:
@@ -190,12 +190,12 @@ public:
   }
 
   [[nodiscard]]
-  unsigned PostRA() const {
+  bool PostRA() const {
     return GetHeader()->PostRA;
   }
 
   [[nodiscard]]
-  unsigned SpillSlots() const {
+  uint32_t SpillSlots() const {
     return GetHeader()->SpillSlots;
   }
 

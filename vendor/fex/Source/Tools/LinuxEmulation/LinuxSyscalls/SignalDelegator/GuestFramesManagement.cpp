@@ -106,7 +106,7 @@ template<typename T>
 static void SetXStateInfo(T* xstate, bool is_avx_enabled) {
   auto* fpstate = &xstate->fpstate;
 
-  fpstate->sw_reserved.magic1 = is_avx_enabled ? FEXCore::x86_64::fpx_sw_bytes::FP_XSTATE_MAGIC : 0;
+  fpstate->sw_reserved.magic1 = is_avx_enabled ? FEXCore::x86_64::fpx_sw_bytes::FP_XSTATE_MAGIC_1 : 0;
   fpstate->sw_reserved.extended_size = is_avx_enabled ? sizeof(T) : 0;
 
   fpstate->sw_reserved.xfeatures |= FEXCore::x86_64::fpx_sw_bytes::FEATURE_FP | FEXCore::x86_64::fpx_sw_bytes::FEATURE_SSE;
@@ -118,6 +118,7 @@ static void SetXStateInfo(T* xstate, bool is_avx_enabled) {
 
   if (is_avx_enabled) {
     xstate->xstate_hdr.xfeatures = 0;
+    xstate->magic2.magic = FEXCore::x86_64::fpx_sw_bytes::FP_XSTATE_MAGIC_2;
   }
 }
 
@@ -178,6 +179,10 @@ void SignalDelegator::RestoreFrame_x64(FEXCore::Core::InternalThreadState* Threa
     } else {
       CTX->SetXMMRegistersFromState(Thread, fpstate->_xmm, nullptr);
     }
+
+    // Technically if mxcsr contains invalid bits then rt_sigreturn should return -EINVAL.
+    // TODO: FEX doesn't support this today.
+    Frame->State.mxcsr = fpstate->mxcsr & 0xFFC0;
 
     // FCW store default
     Frame->State.FCW = fpstate->fcw;
@@ -252,6 +257,9 @@ void SignalDelegator::RestoreFrame_ia32(FEXCore::Core::InternalThreadState* Thre
     } else {
       CTX->SetXMMRegistersFromState(Thread, fpstate->_xmm, nullptr);
     }
+
+    // Invalid bits are silently masked off in 32-bit.
+    Frame->State.mxcsr = fpstate->mxcsr & 0xFFC0;
 
     // FCW store default
     Frame->State.FCW = fpstate->fcw;
@@ -328,6 +336,9 @@ void SignalDelegator::RestoreRTFrame_ia32(FEXCore::Core::InternalThreadState* Th
     } else {
       CTX->SetXMMRegistersFromState(Thread, fpstate->_xmm, nullptr);
     }
+
+    // Invalid bits are silently masked off in 32-bit.
+    Frame->State.mxcsr = fpstate->mxcsr & 0xFFC0;
 
     // FCW store default
     Frame->State.FCW = fpstate->fcw;
@@ -470,6 +481,10 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
     CTX->ReconstructXMMRegisters(Thread, fpstate->_xmm, nullptr);
   }
 
+  // Save mxcsr and the default mask.
+  fpstate->mxcsr = Frame->State.mxcsr;
+  fpstate->mxcsr_mask = 0xFFC0;
+
   // FCW store default
   fpstate->fcw = Frame->State.FCW;
   fpstate->ftw = Frame->State.AbridgedFTW;
@@ -592,6 +607,8 @@ uint64_t SignalDelegator::SetupFrame_ia32(FEXCore::Core::InternalThreadState* Th
   } else {
     CTX->ReconstructXMMRegisters(Thread, fpstate->_xmm, nullptr);
   }
+
+  fpstate->mxcsr = Frame->State.mxcsr;
 
   // FCW store default
   fpstate->fcw = Frame->State.FCW;
@@ -727,6 +744,8 @@ uint64_t SignalDelegator::SetupRTFrame_ia32(FEXCore::Core::InternalThreadState* 
   } else {
     CTX->ReconstructXMMRegisters(Thread, fpstate->_xmm, nullptr);
   }
+
+  fpstate->mxcsr = Frame->State.mxcsr;
 
   // FCW store default
   fpstate->fcw = Frame->State.FCW;

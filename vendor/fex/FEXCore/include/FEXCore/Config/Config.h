@@ -31,21 +31,12 @@ namespace Handler {
     }
     return "0";
   }
-  static inline std::optional<fextl::string> CacheObjectCodeHandler(std::string_view Value) {
-    if (Value == "none") {
-      return "0";
-    } else if (Value == "read") {
-      return "1";
-    } else if (Value == "write") {
-      return "2";
-    }
-    return "0";
-  }
 } // namespace Handler
 
 enum ConfigOption {
 #define OPT_BASE(type, group, enum, json, default) CONFIG_##enum,
 #include <FEXCore/Config/ConfigValues.inl>
+  CONFIG_MAX,
 };
 
 #define ENUMDEFINES
@@ -126,11 +117,13 @@ namespace detail {
 FEX_DEFAULT_VISIBILITY void SetDataDirectory(std::string_view Path, bool Global);
 FEX_DEFAULT_VISIBILITY void SetConfigDirectory(const std::string_view Path, bool Global);
 FEX_DEFAULT_VISIBILITY void SetConfigFileLocation(std::string_view Path, bool Global);
+FEX_DEFAULT_VISIBILITY void SetCacheDirectory(const std::string_view Path);
 
 FEX_DEFAULT_VISIBILITY const fextl::string& GetDataDirectory(bool Global = false);
 FEX_DEFAULT_VISIBILITY const fextl::string& GetConfigDirectory(bool Global);
 FEX_DEFAULT_VISIBILITY const fextl::string& GetConfigFileLocation(bool Global = false);
 FEX_DEFAULT_VISIBILITY fextl::string GetApplicationConfig(const std::string_view Program, bool Global);
+FEX_DEFAULT_VISIBILITY const fextl::string& GetCacheDirectory();
 
 using LayerValue = std::variant< fextl::string, StringArrayType, uint8_t, int8_t, uint16_t, int16_t, uint32_t, int32_t, uint64_t, int64_t, bool >;
 
@@ -238,6 +231,8 @@ FEX_DEFAULT_VISIBILITY std::optional<T> GetConv(ConfigOption Option);
 FEX_DEFAULT_VISIBILITY std::optional<fextl::string*> Get(ConfigOption Option);
 FEX_DEFAULT_VISIBILITY void Set(ConfigOption Option, std::string_view Data);
 FEX_DEFAULT_VISIBILITY void Erase(ConfigOption Option);
+FEX_DEFAULT_VISIBILITY fextl::string SerializeForCache();
+FEX_DEFAULT_VISIBILITY bool CheckConfigMatches(std::string_view Config);
 
 template<typename T>
 class FEX_DEFAULT_VISIBILITY Value {
@@ -302,6 +297,16 @@ struct FEX_DEFAULT_VISIBILITY Getter : public Value<typename detail::ConfigOptio
   using OptionInfo = detail::ConfigOptionInfo<Option>;
   Getter()
     : Value<typename OptionInfo::Type> {Option, OptionInfo::Default()} {}
+
+  // Check if the config option is actually the default.
+  bool IsDefault() const {
+    auto Value = FEXCore::Config::GetConv<typename detail::ConfigOptionInfo<Option>::Type>(Option);
+    if (!Value) {
+      return true;
+    }
+
+    return *Value == OptionInfo::Default();
+  }
 };
 
 /**

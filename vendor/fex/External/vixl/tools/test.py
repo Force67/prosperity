@@ -28,11 +28,12 @@
 
 import argparse
 import fcntl
-import itertools
+import collections
+import hashlib
 import multiprocessing
 import os
 from os.path import join
-import platform
+import random
 import subprocess
 import sys
 import time
@@ -40,14 +41,13 @@ import time
 import config
 import clang_format
 import clang_tidy
-import lint
 import printer
-import test
 import test_runner
 import util
 
 
 dir_root = config.dir_root
+default_tests_first_file = join(dir_root, 'tools', 'tests_first.txt')
 
 
 # Remove duplicates from a list
@@ -159,8 +159,6 @@ def BuildOptions():
                                  help='Path to clang-tidy.')
   general_arguments.add_argument('--nobench', action='store_true',
                                  help='Do not run benchmarks.')
-  general_arguments.add_argument('--nolint', action='store_true',
-                                 help='Do not run the linter.')
   general_arguments.add_argument('--noclang-format', action='store_true',
                                  help='Do not run clang-format.')
   general_arguments.add_argument('--noclang-tidy', action='store_true',
@@ -171,6 +169,11 @@ def BuildOptions():
                                  help='Do not check code coverage results log.')
   general_arguments.add_argument('--fail-early', action='store_true',
                                  help='Exit as soon as a test fails.')
+  general_arguments.add_argument(
+      '--tests-first-file',
+      default=default_tests_first_file,
+      help=('Path to a text file listing test-runner tests that should run '
+            'first.'))
   general_arguments.add_argument(
     '--under_valgrind', action='store_true',
     help='''Run the test-runner commands under Valgrind.
@@ -254,11 +257,6 @@ def RunCommand(command, environment_options = None):
     printer.Print(printer.COLOUR_RED + printable_command + printer.NO_COLOUR)
     printer.Print(process_output.decode())
   return rc
-
-
-def RunLinter(jobs):
-  return lint.RunLinter([join(dir_root, x) for x in util.get_source_files()],
-                        jobs = args.jobs, progress_prefix = 'cpp lint: ')
 
 
 def RunClangFormat(clang_path, jobs):
@@ -352,11 +350,74 @@ def DictToString(options):
   return " ".join(
       ["{}={}".format(option, value) for option, value in options.items()])
 
+def ReadTestsFirstFile(path, fail_silently):
+  tests = []
+  try:
+    with open(path) as file_obj:
+      for line in file_obj:
+        line = line.split('#', 1)[0].strip()
+        if line:
+          tests.append(line)
+  except OSError as error:
+    if fail_silently:
+      return []
+    util.abort("Failed to read tests-first file %s: %s" % (path, error))
+  return tests
+
+
+def SeedFromTests(tests):
+  digest = hashlib.sha256()
+  for test in tests:
+    digest.update(test.encode('utf-8'))
+    digest.update(b'\0')
+  return int.from_bytes(digest.digest(), byteorder='big')
+
+
+def CollectTestsForConfig(test_commands_by_name,
+                          tests,
+                          test_runner_command,
+                          filters,
+                          runtime_options,
+                          under_valgrind,
+                          tests_first,
+                          all_tests_for_configs,
+                          listed_tests_for_seed):
+  all_tests = test_runner.GetTests(test_runner_command)
+  if all_tests_for_configs is not None:
+    all_tests_for_configs.update(all_tests)
+  if listed_tests_for_seed is not None:
+    listed_tests_for_seed += all_tests
+  runnable_tests = test_runner.GetTests(test_runner_command, filters)
+  runnable_tests = test_runner.MoveListedTestsFirst(runnable_tests, tests_first)
+  runnable_tests, skipped = test_runner.FilterKnownTestFailures(
+      runnable_tests,
+      under_valgrind = under_valgrind)
+  for n_tests, reason in skipped:
+    if n_tests > 0:
+      tests.AddKnownFailures(reason, n_tests)
+
+  if len(runnable_tests) == 0:
+    printer.Print('No tests to run.')
+    return
+
+  base_command = []
+  if under_valgrind:
+    base_command += ['valgrind']
+  base_command += [test_runner_command]
+  for test_name in runnable_tests:
+    command = base_command + [test_name] + runtime_options
+    test_commands_by_name.setdefault(test_name, []).append(command)
+
 
 if __name__ == '__main__':
   util.require_program('scons')
 
   args = BuildOptions()
+  tests_first = []
+  if args.tests_first_file:
+    tests_first = ReadTestsFirstFile(
+        args.tests_first_file,
+        fail_silently=(args.tests_first_file == default_tests_first_file))
 
   rc = util.ReturnCode(args.fail_early, printer.Print)
 
@@ -367,8 +428,9 @@ if __name__ == '__main__':
     rc.Combine(CheckCodeCoverage())
 
   tests = test_runner.TestQueue()
-  if not args.nolint and not args.dry_run:
-    rc.Combine(RunLinter(args.jobs))
+  test_commands_by_name = collections.OrderedDict()
+  all_tests_for_configs = set()
+  listed_tests_for_seed = []
 
   if not args.noclang_format and not args.dry_run:
     rc.Combine(RunClangFormat(args.clang_format, args.jobs))
@@ -435,16 +497,62 @@ if __name__ == '__main__':
 
       if not args.notest:
         printer.Print(test_executable)
-        tests.AddTests(
+        CollectTestsForConfig(
+            test_commands_by_name,
+            tests,
             test_executable,
             args.filters,
             list(),
-            args.under_valgrind)
+            args.under_valgrind,
+            tests_first,
+            all_tests_for_configs,
+            listed_tests_for_seed)
 
       if not args.nobench:
         rc.Combine(RunBenchmarks(options, args))
 
-  rc.Combine(tests.Run(args.jobs, args.verbose))
+  if not args.notest:
+    unknown_tests_first = []
+    for test_name in tests_first:
+      if (test_name not in all_tests_for_configs and
+          test_name not in unknown_tests_first):
+        unknown_tests_first.append(test_name)
+    if unknown_tests_first:
+      printer.Print("Ignoring unknown tests in tests-first file for selected "
+                    "build configuration(s): %s"
+                    % ", ".join(unknown_tests_first))
+      tests_first = [
+          test_name for test_name in tests_first
+          if test_name not in unknown_tests_first
+      ]
+
+  tests_first_set = set(tests_first)
+  n_tests_first_commands = 0
+
+  for test_name in tests_first:
+    commands = test_commands_by_name.get(test_name)
+    if commands is None:
+      continue
+    for command in commands:
+      tests.AddTest(test_name, command = command)
+      n_tests_first_commands += 1
+
+  tail_tests = []
+  for test_name, commands in test_commands_by_name.items():
+    if test_name in tests_first_set:
+      continue
+    for command in commands:
+      tail_tests.append((test_name, command))
+
+  tail_random = random.Random(SeedFromTests(listed_tests_for_seed))
+  tail_random.shuffle(tail_tests)
+  for test_name, command in tail_tests:
+    tests.AddTest(test_name, command = command)
+
+  rc.Combine(tests.Run(args.jobs,
+                       args.verbose,
+                       head_count=n_tests_first_commands,
+                       tail_chunksize=128))
   if not args.dry_run:
     rc.PrintStatus()
 

@@ -106,12 +106,24 @@ void OpDispatchBuilder::FISTF64(OpcodeArgs, bool Truncate) {
   const auto Size = OpSizeFromSrc(Op);
 
   Ref data = _ReadStackValue(0);
-  if (Truncate) {
-    data = _Float_ToGPR_ZS(Size == OpSize::i32Bit ? OpSize::i32Bit : OpSize::i64Bit, OpSize::i64Bit, data);
+  bool CanUseFloatReg = Size == OpSize::i64Bit;
+  if (CanUseFloatReg) {
+    // If possible, it's faster to keep the data in an FPR than doing a GPR transfer.
+    if (Truncate) {
+      data = _Vector_FToZS(OpSize::i128Bit, OpSize::i64Bit, data);
+    } else {
+      data = _Vector_FToS(OpSize::i128Bit, OpSize::i64Bit, data);
+    }
+    StoreResultFPR_WithOpSize(Op, Op->Dest, data, OpSize::i64Bit, OpSize::i8Bit);
   } else {
-    data = _Float_ToGPR_S(Size == OpSize::i32Bit ? OpSize::i32Bit : OpSize::i64Bit, OpSize::i64Bit, data);
+    if (Truncate) {
+      data = _Float_ToGPR_ZS(Size == OpSize::i32Bit ? OpSize::i32Bit : OpSize::i64Bit, OpSize::i64Bit, data);
+    } else {
+      data = _Float_ToGPR_S(Size == OpSize::i32Bit ? OpSize::i32Bit : OpSize::i64Bit, OpSize::i64Bit, data);
+    }
+    StoreResultGPR_WithOpSize(Op, Op->Dest, data, Size, OpSize::i8Bit,
+                              CTX->IsVectorAtomicTSOEnabled() ? MemoryAccessType::DEFAULT : MemoryAccessType::NONTSO);
   }
-  StoreResultGPR_WithOpSize(Op, Op->Dest, data, Size, OpSize::i8Bit);
 
   if ((Op->TableInfo->Flags & X86Tables::InstFlags::FLAGS_POP) != 0) {
     _PopStackDestroy();
@@ -355,7 +367,7 @@ void OpDispatchBuilder::FCOMIF64(OpcodeArgs, IR::OpSize Width, bool Integer, OpD
   } else {
     HandleNZCVWrite();
     _F80CmpValue(b);
-    ComissFlags(true /* InvalidateAF */);
+    ComissFlags();
   }
 
   if (PopTwice) {
@@ -370,6 +382,8 @@ void OpDispatchBuilder::X87FXTRACTF64(OpcodeArgs) {
   // Split node into SIG and EXP while handling the special zero case.
   // i.e. if val == 0.0, then sig = 0.0, exp = -inf
   // if val == -0.0, then sig = -0.0, exp = -inf
+  // if val is +/-Inf, then sig = val, exp = +inf
+  // if val is NaN, then sig = val, exp = val
   // otherwise we just extract the 64-bit sig and exp as normal.
   Ref Node = _ReadStackValue(0);
 
@@ -378,6 +392,11 @@ void OpDispatchBuilder::X87FXTRACTF64(OpcodeArgs) {
   // zero case
   Ref ExpZV = _VCastFromGPR(OpSize::i64Bit, OpSize::i64Bit, Constant(0xfff0'0000'0000'0000UL));
   Ref SigZV = Node;
+
+  // Inf/NaN case
+  Ref ExpInfOnlyV = _VCastFromGPR(OpSize::i64Bit, OpSize::i64Bit, Constant(0x7ff0'0000'0000'0000UL));
+  Ref ExpNanV = Node;
+  Ref SigInfV = Node;
 
   // non zero case
   Ref ExpNZ = _Bfe(OpSize::i64Bit, 11, 52, Gpr);
@@ -388,12 +407,24 @@ void OpDispatchBuilder::X87FXTRACTF64(OpcodeArgs) {
   SigNZ = _Or(OpSize::i64Bit, SigNZ, Constant(0x3ff0'0000'0000'0000LL));
   Ref SigNZV = _VCastFromGPR(OpSize::i64Bit, OpSize::i64Bit, SigNZ);
 
-  // Comparison and select to push onto stack
   SaveNZCV();
+
+  // Mantissa non-zero => NaN (exp result = input); else Inf (exp result = +Inf)
+  Ref Mantissa = _And(OpSize::i64Bit, Gpr, Constant(0x000f'ffff'ffff'ffffULL));
+  _TestNZ(OpSize::i64Bit, Mantissa, Constant(~0ULL));
+  Ref ExpInfV = _NZCVSelectV(OpSize::i64Bit, CondClass::EQ, ExpInfOnlyV, ExpNanV);
+
+  // Biased exponent == 0x7ff => Inf/NaN path, else non-zero-case.
+  Ref BiasedExp = _Bfe(OpSize::i64Bit, 11, 52, Gpr);
+  SubWithFlags(OpSize::i64Bit, BiasedExp, 0x7ff);
+  Ref ExpNZOrInf = _NZCVSelectV(OpSize::i64Bit, CondClass::EQ, ExpInfV, ExpNZV);
+  Ref SigNZOrInf = _NZCVSelectV(OpSize::i64Bit, CondClass::EQ, SigInfV, SigNZV);
+
+  // Zero folds on top.
   _TestNZ(OpSize::i64Bit, Gpr, Constant(0x7fff'ffff'ffff'ffffUL));
 
-  Ref Sig = _NZCVSelectV(OpSize::i64Bit, CondClass::EQ, SigZV, SigNZV);
-  Ref Exp = _NZCVSelectV(OpSize::i64Bit, CondClass::EQ, ExpZV, ExpNZV);
+  Ref Sig = _NZCVSelectV(OpSize::i64Bit, CondClass::EQ, SigZV, SigNZOrInf);
+  Ref Exp = _NZCVSelectV(OpSize::i64Bit, CondClass::EQ, ExpZV, ExpNZOrInf);
 
   _PopStackDestroy();
   _PushStack(Exp, Invalid(), OpSize::iInvalid);

@@ -173,6 +173,7 @@ class AA64ISAR2 : public IDRegister {
   static const Field kRPRES;
   static const Field kMOPS;
   static const Field kCSSC;
+  static const Field kHBC;
 };
 
 class AA64MMFR0 : public IDRegister {
@@ -319,7 +320,7 @@ class CPU {
 #undef VIXL_READ_ID_REG
 
   // Return the content of the cache type register.
-  static uint32_t GetCacheType();
+  static uint64_t GetCacheType();
 
   // I and D cache line size in bytes.
   static unsigned icache_line_size_;

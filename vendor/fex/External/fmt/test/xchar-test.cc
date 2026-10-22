@@ -1,15 +1,13 @@
 // Formatting library for C++ - formatting library tests
 //
-// Copyright (c) 2012 - present, Victor Zverovich
+// Copyright (c) 2012 - present, Victor Zverovich and {fmt} contributors
 // All rights reserved.
 //
 // For the license information refer to format.h.
 
 #include "fmt/xchar.h"
 
-#include <algorithm>
 #include <complex>
-#include <cwchar>
 #include <vector>
 
 #include "fmt/chrono.h"
@@ -146,6 +144,26 @@ TEST(format_test, wide_format_to_n) {
   EXPECT_EQ(L"BC x", fmt::wstring_view(buffer, 4));
 }
 
+TEST(format_test, wide_format_to_n_runtime) {
+  wchar_t buffer[4];
+  buffer[3] = L'x';
+  auto result = fmt::format_to_n(buffer, 3, fmt::runtime(L"{}"), 12345);
+  EXPECT_EQ(5u, result.size);
+  EXPECT_EQ(buffer + 3, result.out);
+  EXPECT_EQ(L"123x", fmt::wstring_view(buffer, 4));
+  buffer[0] = L'x';
+  buffer[1] = L'x';
+  buffer[2] = L'x';
+  result = fmt::format_to_n(buffer, 3, fmt::runtime(L"{}"), L'A');
+  EXPECT_EQ(1u, result.size);
+  EXPECT_EQ(buffer + 1, result.out);
+  EXPECT_EQ(L"Axxx", fmt::wstring_view(buffer, 4));
+  result = fmt::format_to_n(buffer, 3, fmt::runtime(L"{}{} "), L'B', L'C');
+  EXPECT_EQ(3u, result.size);
+  EXPECT_EQ(buffer + 3, result.out);
+  EXPECT_EQ(L"BC x", fmt::wstring_view(buffer, 4));
+}
+
 TEST(xchar_test, named_arg_udl) {
   using namespace fmt::literals;
   auto udl_a =
@@ -159,7 +177,7 @@ TEST(xchar_test, named_arg_udl) {
 
 TEST(xchar_test, print) {
   // Check that the wide print overload compiles.
-  if (fmt::detail::const_check(false)) {
+  if (false) {
     fmt::print(L"test");
     fmt::println(L"test");
   }
@@ -167,9 +185,19 @@ TEST(xchar_test, print) {
 
 TEST(xchar_test, join) {
   int v[3] = {1, 2, 3};
+  EXPECT_EQ(fmt::format(u"({})", fmt::join(v, v + 3, u", ")), u"(1, 2, 3)");
+  EXPECT_EQ(fmt::format(U"({})", fmt::join(v, v + 3, U", ")), U"(1, 2, 3)");
   EXPECT_EQ(fmt::format(L"({})", fmt::join(v, v + 3, L", ")), L"(1, 2, 3)");
-  auto t = std::tuple<wchar_t, int, float>('a', 1, 2.0f);
-  EXPECT_EQ(fmt::format(L"({})", fmt::join(t, L", ")), L"(a, 1, 2)");
+  auto vector = std::vector<int>{1, 2, 3};
+  EXPECT_EQ(fmt::format(u"({})", fmt::join(vector, u", ")), u"(1, 2, 3)");
+  EXPECT_EQ(fmt::format(U"({})", fmt::join(vector, U", ")), U"(1, 2, 3)");
+  EXPECT_EQ(fmt::format(L"({})", fmt::join(vector, L", ")), L"(1, 2, 3)");
+  auto tuple_char16 = std::tuple<char16_t, int, float>(u'a', 1, 2.0f);
+  EXPECT_EQ(fmt::format(u"({})", fmt::join(tuple_char16, u", ")), u"(a, 1, 2)");
+  auto tuple_char32 = std::tuple<char32_t, int, float>(U'a', 1, 2.0f);
+  EXPECT_EQ(fmt::format(U"({})", fmt::join(tuple_char32, U", ")), U"(a, 1, 2)");
+  auto tuple_wchar = std::tuple<wchar_t, int, float>(L'a', 1, 2.0f);
+  EXPECT_EQ(fmt::format(L"({})", fmt::join(tuple_wchar, L", ")), L"(a, 1, 2)");
 }
 
 #ifdef __cpp_lib_byte

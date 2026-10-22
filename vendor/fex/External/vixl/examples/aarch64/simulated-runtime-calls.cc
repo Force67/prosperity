@@ -33,8 +33,6 @@
 using namespace vixl;
 using namespace vixl::aarch64;
 
-#ifdef VIXL_HAS_SIMULATED_RUNTIME_CALL_SUPPORT
-
 #define __ masm->
 
 int32_t add_int32s(int32_t a, int32_t b) {
@@ -119,8 +117,3 @@ int main(void) {
 int main(void) { return 0; }
 #endif  // VIXL_INCLUDE_SIMULATOR_AARCH64
 #endif  // TEST_EXAMPLES
-#else
-#ifndef TEST_EXAMPLES
-int main(void) { return 0; }
-#endif  // TEST_EXAMPLES
-#endif  // VIXL_HAS_SIMULATED_RUNTIME_CALL_SUPPORT

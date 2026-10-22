@@ -26,17 +26,25 @@ void OpDispatchBuilder::SHA1NEXTEOp(OpcodeArgs) {
   Ref Dest = LoadSourceFPR(Op, Op->Dest, Op->Flags);
   Ref Src = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
 
-  // ARMv8 SHA1 extension provides a `SHA1H` instruction which does a fixed rotate by 30.
-  // This only operates on element 0 rather than element 3. We don't have the luxury of rewriting the x86 SHA algorithm to take advantage of this.
-  // Move the element to zero, rotate, and then move back (Using duplicates).
-  // Saves one instruction versus that path that doesn't support SHA extension.
-  auto Duplicated = _VDupElement(OpSize::i128Bit, OpSize::i32Bit, Dest, 3);
-  auto Sha1HRotated = _VSha1H(Duplicated);
-  auto RotatedNode = _VDupElement(OpSize::i128Bit, OpSize::i32Bit, Sha1HRotated, 0);
-  auto Tmp = _VAdd(OpSize::i128Bit, OpSize::i32Bit, Src, RotatedNode);
-  auto Result = _VInsElement(OpSize::i128Bit, OpSize::i32Bit, 3, 3, Src, Tmp);
+  Ref Result {};
+  if (CTX->HostFeatures.SupportsSVE128) {
+    auto ZeroVec = LoadZeroVector(OpSize::i128Bit);
+    auto Tmp = _VInsElement(OpSize::i128Bit, OpSize::i32Bit, 3, 3, ZeroVec, Dest);
+    auto Xar = _VXar(OpSize::i128Bit, OpSize::i32Bit, ZeroVec, Tmp, 2);
+    Result = _VAdd(OpSize::i128Bit, OpSize::i32Bit, Src, Xar);
+  } else {
+    // ARMv8 SHA1 extension provides a `SHA1H` instruction which does a fixed rotate by 30.
+    // This only operates on element 0 rather than element 3. We don't have the luxury of rewriting the x86 SHA algorithm to take advantage of this.
+    // Move the element to zero, rotate, and then move back (Using duplicates).
+    // Saves one instruction versus that path that doesn't support SHA extension.
+    auto Duplicated = _VDupElement(OpSize::i128Bit, OpSize::i32Bit, Dest, 3);
+    auto Sha1HRotated = _VSha1H(Duplicated);
+    auto RotatedNode = _VDupElement(OpSize::i128Bit, OpSize::i32Bit, Sha1HRotated, 0);
+    auto Tmp = _VAdd(OpSize::i128Bit, OpSize::i32Bit, Src, RotatedNode);
+    Result = _VInsElement(OpSize::i128Bit, OpSize::i32Bit, 3, 3, Src, Tmp);
+  }
 
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::SHA1MSG1Op(OpcodeArgs) {
@@ -50,9 +58,9 @@ void OpDispatchBuilder::SHA1MSG1Op(OpcodeArgs) {
   Ref NewVec = _VExtr(OpSize::i128Bit, OpSize::i64Bit, Dest, Src, 1);
 
   // [W0, W1, W2, W3] ^ [W2, W3, W4, W5]
-  Ref Result = _VXor(OpSize::i128Bit, OpSize::i8Bit, Dest, NewVec);
+  Ref Result = _VXor(OpSize::i128Bit, Dest, NewVec);
 
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::SHA1MSG2Op(OpcodeArgs) {
@@ -70,7 +78,7 @@ void OpDispatchBuilder::SHA1MSG2Op(OpcodeArgs) {
   // The result is swizzled differently than expected
   auto Result = SHADataShuffle(_VSha1SU1(Src1, Src2));
 
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::SHA1RNDS4Op(OpcodeArgs) {
@@ -99,7 +107,7 @@ void OpDispatchBuilder::SHA1RNDS4Op(OpcodeArgs) {
     break;
   }
 
-  const auto ZeroRegister = LoadZeroVector(OpSize::i32Bit);
+  const auto ZeroRegister = LoadZeroVector(OpSize::i128Bit);
 
   Ref Src1 = SHADataShuffle(Dest);
   Ref Src2 = SHADataShuffle(Src);
@@ -112,7 +120,7 @@ void OpDispatchBuilder::SHA1RNDS4Op(OpcodeArgs) {
   case 3: Result = SHADataShuffle(_VSha1P(Src1, ZeroRegister, Src2)); break;
   }
 
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::SHA256MSG1Op(OpcodeArgs) {
@@ -125,7 +133,7 @@ void OpDispatchBuilder::SHA256MSG1Op(OpcodeArgs) {
 
   auto Result = _VSha256U0(Dest, Src);
 
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::SHA256MSG2Op(OpcodeArgs) {
@@ -142,7 +150,7 @@ void OpDispatchBuilder::SHA256MSG2Op(OpcodeArgs) {
 
   auto Result = _VSha256U1(Src1, Src2);
 
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::SHA256RNDS2Op(OpcodeArgs) {
@@ -177,17 +185,22 @@ void OpDispatchBuilder::SHA256RNDS2Op(OpcodeArgs) {
   auto B = _VSha256H2(EFGH, ABCD, Key);
   auto Result = shuffle_abcd(A, B);
 
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
-void OpDispatchBuilder::AESImcOp(OpcodeArgs) {
+void OpDispatchBuilder::AESImcOp(OpcodeArgs, bool IsAVX) {
   if (!CTX->HostFeatures.SupportsAES) {
     UnimplementedOp(Op);
     return;
   }
   Ref Src = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
   Ref Result = _VAESImc(Src);
-  StoreResultFPR(Op, Result);
+
+  if (IsAVX) {
+    StoreResultFPR(Op, Result);
+  } else {
+    StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
+  }
 }
 
 void OpDispatchBuilder::AESEncOp(OpcodeArgs) {
@@ -198,19 +211,30 @@ void OpDispatchBuilder::AESEncOp(OpcodeArgs) {
   Ref Dest = LoadSourceFPR(Op, Op->Dest, Op->Flags);
   Ref Src = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
   Ref Result = _VAESEnc(OpSize::i128Bit, Dest, Src, LoadZeroVector(OpSize::i128Bit));
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::VAESEncOp(OpcodeArgs) {
   const auto DstSize = OpSizeFromDst(Op);
-  const auto Is128Bit = DstSize == OpSize::i128Bit;
-
-  // TODO: Handle 256-bit VAESENC.
-  LOGMAN_THROW_A_FMT(Is128Bit, "256-bit VAESENC unimplemented");
+  const auto Is256Bit = DstSize == OpSize::i256Bit;
 
   Ref State = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
   Ref Key = LoadSourceFPR(Op, Op->Src[1], Op->Flags);
-  Ref Result = _VAESEnc(DstSize, State, Key, LoadZeroVector(DstSize));
+  Ref ZeroVec = LoadZeroVector(DstSize);
+
+  Ref Result {};
+  if (Is256Bit) {
+    // TODO: Handle as one operation once vixl supports it.
+    auto UpperState = _VDupElement(DstSize, OpSize::i128Bit, State, 1);
+    auto UpperKey = _VDupElement(DstSize, OpSize::i128Bit, Key, 1);
+
+    auto Lower = _VAESEnc(OpSize::i128Bit, State, Key, ZeroVec);
+    auto Upper = _VAESEnc(OpSize::i128Bit, UpperState, UpperKey, ZeroVec);
+
+    Result = _VInsElement(DstSize, OpSize::i128Bit, 1, 0, Lower, Upper);
+  } else {
+    Result = _VAESEnc(DstSize, State, Key, ZeroVec);
+  }
 
   StoreResultFPR(Op, Result);
 }
@@ -223,19 +247,30 @@ void OpDispatchBuilder::AESEncLastOp(OpcodeArgs) {
   Ref Dest = LoadSourceFPR(Op, Op->Dest, Op->Flags);
   Ref Src = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
   Ref Result = _VAESEncLast(OpSize::i128Bit, Dest, Src, LoadZeroVector(OpSize::i128Bit));
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::VAESEncLastOp(OpcodeArgs) {
   const auto DstSize = OpSizeFromDst(Op);
-  const auto Is128Bit = DstSize == OpSize::i128Bit;
-
-  // TODO: Handle 256-bit VAESENCLAST.
-  LOGMAN_THROW_A_FMT(Is128Bit, "256-bit VAESENCLAST unimplemented");
+  const auto Is256Bit = DstSize == OpSize::i256Bit;
 
   Ref State = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
   Ref Key = LoadSourceFPR(Op, Op->Src[1], Op->Flags);
-  Ref Result = _VAESEncLast(DstSize, State, Key, LoadZeroVector(DstSize));
+  Ref ZeroVec = LoadZeroVector(DstSize);
+
+  Ref Result {};
+  if (Is256Bit) {
+    // TODO: Handle as one operation once vixl supports it.
+    auto UpperState = _VDupElement(DstSize, OpSize::i128Bit, State, 1);
+    auto UpperKey = _VDupElement(DstSize, OpSize::i128Bit, Key, 1);
+
+    auto Lower = _VAESEncLast(OpSize::i128Bit, State, Key, ZeroVec);
+    auto Upper = _VAESEncLast(OpSize::i128Bit, UpperState, UpperKey, ZeroVec);
+
+    Result = _VInsElement(DstSize, OpSize::i128Bit, 1, 0, Lower, Upper);
+  } else {
+    Result = _VAESEncLast(DstSize, State, Key, ZeroVec);
+  }
 
   StoreResultFPR(Op, Result);
 }
@@ -248,19 +283,30 @@ void OpDispatchBuilder::AESDecOp(OpcodeArgs) {
   Ref Dest = LoadSourceFPR(Op, Op->Dest, Op->Flags);
   Ref Src = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
   Ref Result = _VAESDec(OpSize::i128Bit, Dest, Src, LoadZeroVector(OpSize::i128Bit));
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::VAESDecOp(OpcodeArgs) {
   const auto DstSize = OpSizeFromDst(Op);
-  const auto Is128Bit = DstSize == OpSize::i128Bit;
-
-  // TODO: Handle 256-bit VAESDEC.
-  LOGMAN_THROW_A_FMT(Is128Bit, "256-bit VAESDEC unimplemented");
+  const auto Is256Bit = DstSize == OpSize::i256Bit;
 
   Ref State = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
   Ref Key = LoadSourceFPR(Op, Op->Src[1], Op->Flags);
-  Ref Result = _VAESDec(DstSize, State, Key, LoadZeroVector(DstSize));
+  Ref ZeroVec = LoadZeroVector(DstSize);
+
+  Ref Result {};
+  if (Is256Bit) {
+    // TODO: Handle as one operation once vixl supports it.
+    auto UpperState = _VDupElement(DstSize, OpSize::i128Bit, State, 1);
+    auto UpperKey = _VDupElement(DstSize, OpSize::i128Bit, Key, 1);
+
+    auto Lower = _VAESDec(OpSize::i128Bit, State, Key, ZeroVec);
+    auto Upper = _VAESDec(OpSize::i128Bit, UpperState, UpperKey, ZeroVec);
+
+    Result = _VInsElement(DstSize, OpSize::i128Bit, 1, 0, Lower, Upper);
+  } else {
+    Result = _VAESDec(DstSize, State, Key, ZeroVec);
+  }
 
   StoreResultFPR(Op, Result);
 }
@@ -273,19 +319,30 @@ void OpDispatchBuilder::AESDecLastOp(OpcodeArgs) {
   Ref Dest = LoadSourceFPR(Op, Op->Dest, Op->Flags);
   Ref Src = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
   Ref Result = _VAESDecLast(OpSize::i128Bit, Dest, Src, LoadZeroVector(OpSize::i128Bit));
-  StoreResultFPR(Op, Result);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::VAESDecLastOp(OpcodeArgs) {
   const auto DstSize = OpSizeFromDst(Op);
-  const auto Is128Bit = DstSize == OpSize::i128Bit;
-
-  // TODO: Handle 256-bit VAESDECLAST.
-  LOGMAN_THROW_A_FMT(Is128Bit, "256-bit VAESDECLAST unimplemented");
+  const auto Is256Bit = DstSize == OpSize::i256Bit;
 
   Ref State = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
   Ref Key = LoadSourceFPR(Op, Op->Src[1], Op->Flags);
-  Ref Result = _VAESDecLast(DstSize, State, Key, LoadZeroVector(DstSize));
+  Ref ZeroVec = LoadZeroVector(DstSize);
+
+  Ref Result {};
+  if (Is256Bit) {
+    // TODO: Handle as one operation once vixl supports it.
+    auto UpperState = _VDupElement(DstSize, OpSize::i128Bit, State, 1);
+    auto UpperKey = _VDupElement(DstSize, OpSize::i128Bit, Key, 1);
+
+    auto Lower = _VAESDecLast(OpSize::i128Bit, State, Key, ZeroVec);
+    auto Upper = _VAESDecLast(OpSize::i128Bit, UpperState, UpperKey, ZeroVec);
+
+    Result = _VInsElement(DstSize, OpSize::i128Bit, 1, 0, Lower, Upper);
+  } else {
+    Result = _VAESDecLast(DstSize, State, Key, ZeroVec);
+  }
 
   StoreResultFPR(Op, Result);
 }
@@ -298,14 +355,19 @@ Ref OpDispatchBuilder::AESKeyGenAssistImpl(OpcodeArgs) {
   return _VAESKeyGenAssist(Src, KeyGenSwizzle, LoadZeroVector(OpSize::i128Bit), RCON);
 }
 
-void OpDispatchBuilder::AESKeyGenAssist(OpcodeArgs) {
+void OpDispatchBuilder::AESKeyGenAssist(OpcodeArgs, bool IsAVX) {
   if (!CTX->HostFeatures.SupportsAES) {
     UnimplementedOp(Op);
     return;
   }
 
   Ref Result = AESKeyGenAssistImpl(Op);
-  StoreResultFPR(Op, Result);
+
+  if (IsAVX) {
+    StoreResultFPR(Op, Result);
+  } else {
+    StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
+  }
 }
 
 void OpDispatchBuilder::PCLMULQDQOp(OpcodeArgs) {
@@ -317,8 +379,8 @@ void OpDispatchBuilder::PCLMULQDQOp(OpcodeArgs) {
   Ref Src = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
   const auto Selector = static_cast<uint8_t>(Op->Src[1].Literal());
 
-  auto Res = _PCLMUL(OpSize::i128Bit, Dest, Src, Selector & 0b1'0001);
-  StoreResultFPR(Op, Res);
+  auto Result = _PCLMUL(OpSize::i128Bit, Dest, Src, Selector & 0b1'0001);
+  StoreResult_WithAVXInsert(VectorOpType::SSE, RegClass::FPR, Op, Result);
 }
 
 void OpDispatchBuilder::VPCLMULQDQOp(OpcodeArgs) {

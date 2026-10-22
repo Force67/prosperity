@@ -6,6 +6,8 @@
 #include <FEXCore/Utils/Allocator.h>
 #include <FEXCore/Utils/LongJump.h>
 #include <FEXCore/Utils/Threads.h>
+#include <FEXHeaderUtils/Syscalls.h>
+#include <sys/resource.h>
 
 namespace FEX::LinuxEmulation::Threads {
 void* StackTracker::AllocateStackObject() {
@@ -138,7 +140,7 @@ void StackTracker::DeallocateStackObjectAndExit(void* Ptr, int Status) {
 }
 
 #ifdef ARCHITECTURE_arm64
-__attribute__((naked)) void StackPivotAndCall(void* Arg, FEXCore::Threads::ThreadFunc Func, uint64_t StackPivot) {
+__attribute__((naked)) static void StackPivotAndCall(void* Arg, FEXCore::Threads::ThreadFunc Func, uint64_t StackPivot) {
   // x0: Arg
   // x1: Function to call
   // x2: StackPivot
@@ -164,7 +166,7 @@ __attribute__((naked)) void StackPivotAndCall(void* Arg, FEXCore::Threads::Threa
                    : "memory");
 }
 #else
-__attribute__((naked)) void StackPivotAndCall(void* Arg, FEXCore::Threads::ThreadFunc Func, uint64_t StackPivot) {
+__attribute__((naked)) static void StackPivotAndCall(void* Arg, FEXCore::Threads::ThreadFunc Func, uint64_t StackPivot) {
   // rdi: Arg
   // rsi: Function to call
   // rdx: StackPivot
@@ -195,10 +197,11 @@ namespace PThreads {
 
   class PThread final : public FEXCore::Threads::Thread {
   public:
-    PThread(StackTracker* STracker, FEXCore::Threads::ThreadFunc Func, void* Arg)
+    PThread(StackTracker* STracker, FEXCore::Threads::ThreadFunc Func, void* Arg, FEXCore::Threads::Flags Flags, const char* ThreadName)
       : STracker {STracker}
       , UserFunc {Func}
-      , UserArg {Arg} {
+      , UserArg {Arg}
+      , Flags {Flags} {
       pthread_attr_t Attr {};
       Stack = STracker->AllocateStackObject();
       // pthreads allocates its dtv region behind our back and there is nothing we can do about it.
@@ -213,8 +216,19 @@ namespace PThreads {
       // `set_tid_address` address construct. If the stack is reused before the address is set to zero, then glibc won't initialize the new thread's
       // DTV/TLS region, resulting in TLS usage crashing.
       pthread_attr_setstacksize(&Attr, PTHREAD_STACK_MIN);
+      uint64_t OldMask;
+      bool BlockingSignals = Flags.Internal;
+      if (BlockingSignals) {
+        OldMask = HLE::ThreadManager::SetSignalMask(~0ULL);
+      }
       pthread_create(&Thread, &Attr, InitializeThread, this);
+      if (BlockingSignals) {
+        HLE::ThreadManager::SetSignalMask(OldMask);
+      }
       pthread_attr_destroy(&Attr);
+      if (ThreadName) {
+        pthread_setname_np(Thread, ThreadName);
+      }
     }
 
     bool joinable() override {
@@ -257,6 +271,10 @@ namespace PThreads {
       return Stack;
     }
 
+    FEXCore::Threads::Flags GetFlags() const {
+      return Flags;
+    }
+
     StackTracker* GetStackTracker() const {
       return STracker;
     }
@@ -287,6 +305,7 @@ namespace PThreads {
     FEXCore::Threads::ThreadFunc UserFunc;
     void* UserArg;
     void* Stack {};
+    FEXCore::Threads::Flags Flags {};
 
     // Use FEXCore's UncheckedLongJump to avoid fortification checks.
     // This avoids a false positive since glibc does not understand stack pivots.
@@ -304,6 +323,10 @@ namespace PThreads {
     FEXCore::UncheckedLongJump::JumpBuf exit_resolver {};
 
     bool LongJumpExit {};
+
+    if (Thread->GetFlags().LowPriority) {
+      setpriority(PRIO_PROCESS, FHU::Syscalls::gettid(), 19);
+    }
 
     if (FEXCore::UncheckedLongJump::SetJump(exit_resolver) == 0) {
       Thread->SetupLongJump(&exit_resolver);
@@ -352,13 +375,14 @@ namespace PThreads {
     return (void*)(uint64_t)Status;
   }
 
-  StackTracker* STracker {};
+  static StackTracker* STracker {};
 
-  fextl::unique_ptr<FEXCore::Threads::Thread> CreateThread_PThread(FEXCore::Threads::ThreadFunc Func, void* Arg) {
-    return fextl::make_unique<PThread>(STracker, Func, Arg);
+  static fextl::unique_ptr<FEXCore::Threads::Thread>
+  CreateThread_PThread(FEXCore::Threads::ThreadFunc Func, void* Arg, FEXCore::Threads::Flags Flags, const char* ThreadName) {
+    return fextl::make_unique<PThread>(STracker, Func, Arg, Flags, ThreadName);
   }
 
-  void CleanupAfterFork_PThread() {
+  static void CleanupAfterFork_PThread() {
     STracker->CleanupAfterFork_PThread();
   }
 

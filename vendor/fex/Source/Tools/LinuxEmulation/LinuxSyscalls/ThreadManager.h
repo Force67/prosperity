@@ -11,6 +11,7 @@ $end_info$
 #include "Common/SHMStats.h"
 
 #include "LinuxSyscalls/Types.h"
+#include "LinuxSyscalls/x32/IoctlEmulation.h"
 
 #include <FEXCore/Config/Config.h>
 #include <FEXCore/Core/Context.h>
@@ -29,7 +30,7 @@ $end_info$
 #include <optional>
 #include <sys/stat.h>
 
-#include <bits/types/sigset_t.h>
+#include <signal.h>
 #include <linux/seccomp.h>
 
 namespace FEX::HLE {
@@ -125,6 +126,9 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
   FEXCore::Core::CPUState::gdt_segment gdt[32] {};
   size_t ldt_entry_count {};
   FEXCore::Core::CPUState::gdt_segment* ldt_entries {};
+
+  // 32-bit FD cache for DRM handlers.
+  fextl::unique_ptr<x32::DRMLRUCacheFDCache> DRMLRUCache {};
 };
 
 class ThreadManager final {
@@ -163,6 +167,16 @@ public:
     Stat.CleanupForExit();
   }
 
+  /**
+   * @brief Sets the calling thread's signal mask to the one provided
+   *
+   * @param Mask The new 64-bit signal mask to set
+   *
+   * @return The previous signal mask
+   */
+  static uint64_t SetSignalMask(uint64_t Mask);
+  static void SetThreadName(const char* name);
+
   ///< Returns the ThreadStateObject from a CpuStateFrame object.
   static inline FEX::HLE::ThreadStateObject* GetStateObjectFromCPUState(FEXCore::Core::CpuStateFrame* Frame) {
     return static_cast<FEX::HLE::ThreadStateObject*>(Frame->Thread->FrontendPtr);
@@ -172,8 +186,8 @@ public:
     return static_cast<FEX::HLE::ThreadStateObject*>(Thread->FrontendPtr);
   }
 
-  FEX::HLE::ThreadStateObject* CreateThread(uint64_t InitialRIP, uint64_t StackPointer, const FEXCore::Core::CPUState* NewThreadState = nullptr,
-                                            uint64_t ParentTID = 0, FEX::HLE::ThreadStateObject* InheritThread = nullptr);
+  FEX::HLE::ThreadStateObject* CreateThread(const FEXCore::Core::CPUState* NewThreadState = nullptr, uint64_t ParentTID = 0,
+                                            FEX::HLE::ThreadStateObject* InheritThread = nullptr);
   void TrackThread(FEX::HLE::ThreadStateObject* Thread) {
     std::lock_guard lk(ThreadCreationMutex);
     Threads.emplace_back(Thread);
@@ -207,7 +221,7 @@ public:
     // Potential deferred since Thread might not be valid.
     // Thread object isn't valid very early in frontend's initialization.
     // To be more optimal the frontend should provide this code with a valid Thread object earlier.
-    auto CodeInvalidationlk = GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), CallingThread);
+    auto CodeInvalidationlk = FEXCore::GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), CallingThread);
     CTX->InvalidateCodeBuffersCodeRange(Start, Length);
     for (auto& Thread : Threads) {
       CTX->InvalidateThreadCachedCodeRange(Thread->Thread, Start, Length);
@@ -221,7 +235,7 @@ public:
     // Potential deferred since Thread might not be valid.
     // Thread object isn't valid very early in frontend's initialization.
     // To be more optimal the frontend should provide this code with a valid Thread object earlier.
-    auto CodeInvalidationlk = GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), CallingThread);
+    auto CodeInvalidationlk = FEXCore::GuardSignalDeferringSectionWithFallback(CTX->GetCodeInvalidationMutex(), CallingThread);
     CTX->InvalidateCodeBuffersCodeRange(Start, Length);
     for (auto& Thread : Threads) {
       CTX->InvalidateThreadCachedCodeRange(Thread->Thread, Start, Length);

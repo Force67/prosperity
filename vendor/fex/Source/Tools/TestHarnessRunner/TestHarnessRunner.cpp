@@ -18,6 +18,7 @@ $end_info$
 #endif
 
 #include "Common/HostFeatures.h"
+#include "Common/Linux/SBRKAllocations.h"
 #include "HarnessHelpers.h"
 #include "TestHarnessRunner/HostRunner.h"
 
@@ -189,7 +190,7 @@ void RegisterLongJumpHandler(FEX::DummyHandlers::DummySignalDelegator* Handler) 
 
 int main(int argc, char** argv, char** const envp) {
 #ifndef _WIN32
-  auto SBRKPointer = FEXCore::Allocator::DisableSBRKAllocations();
+  auto SBRKPointer = FEX::SBRKAllocations::DisableSBRKAllocations();
 #endif
   FEXCore::Allocator::GLIBCScopedFault GLIBFaultScope;
   LogMan::Throw::InstallHandler(AssertHandler);
@@ -235,7 +236,8 @@ int main(int argc, char** argv, char** const envp) {
 
   if (!Loader.Is64BitMode()) {
     // Setup our userspace allocator
-    FEXCore::Allocator::SetupHooks();
+    const auto PageSize = sysconf(_SC_PAGESIZE);
+    FEXCore::Allocator::SetupHooks(PageSize > 0 ? PageSize : FEXCore::Utils::FEX_PAGE_SIZE);
     Allocator = FEX::HLE::CreatePassthroughAllocator();
   }
 #endif
@@ -247,7 +249,7 @@ int main(int argc, char** argv, char** const envp) {
   auto CTX = FEXCore::Context::Context::CreateNewContext(HostFeatures);
 
 #ifndef _WIN32
-  auto SignalDelegation = FEX::HLE::CreateSignalDelegator(CTX.get(), {}, HostFeatures.SupportsAVX);
+  auto SignalDelegation = FEX::HLE::CreateSignalDelegator(CTX.get(), {}, HostFeatures.SupportsAVX, HostFeatures.SupportsSVE256);
 #else
   // Enable exit on HLT while Wine's longjump is broken.
   //
@@ -285,6 +287,7 @@ int main(int argc, char** argv, char** const envp) {
   const bool SupportsRDPID = Feature.Feat_rdpid;
   const bool SupportsCLFLOPT = Feature.Feat_clflopt;
   const bool SupportsFSGSBase = Feature.Feat_fsgsbase;
+  const bool SupportsAVXVNNI = Feature.Feat_avx_vnni;
 
   TestUnsupported |=
     (!Supports3DNow && Loader.Requires3DNow()) || (!SupportsSSE4A && Loader.RequiresSSE4A()) || (!SupportsBMI1 && Loader.RequiresBMI1()) ||
@@ -293,6 +296,7 @@ int main(int argc, char** argv, char** const envp) {
     (!SupportsAES && Loader.RequiresAES()) || (!SupportsPCLMUL && Loader.RequiresPCLMUL()) || (!SupportsMOVBE && Loader.RequiresMOVBE()) ||
     (!SupportsADX && Loader.RequiresADX()) || (!SupportsXSAVE && Loader.RequiresXSAVE()) || (!SupportsRDPID && Loader.RequiresRDPID()) ||
     (!SupportsCLFLOPT && Loader.RequiresCLFLOPT()) || (!SupportsFSGSBase && Loader.RequiresFSGSBase()) || Loader.RequiresEMMI();
+  TestUnsupported |= !SupportsAVXVNNI && Loader.RequiresAVXVNNI();
 #endif
 
 #ifdef _WIN32
@@ -341,7 +345,8 @@ int main(int argc, char** argv, char** const envp) {
       return -ENOEXEC;
     }
 
-    auto ParentThread = SyscallHandler->TM.CreateThread(Loader.DefaultRIP(), 0);
+    auto ParentThread = SyscallHandler->TM.CreateThread();
+    ParentThread->Thread->CurrentFrame->State.rip = Loader.DefaultRIP();
     SyscallHandler->TM.TrackThread(ParentThread);
     SignalDelegation->RegisterTLSState(ParentThread);
 
@@ -377,7 +382,7 @@ int main(int argc, char** argv, char** const envp) {
   else {
     // Run as host
     SupportsAVX = true;
-    auto ParentThread = SyscallHandler->TM.CreateThread(Loader.DefaultRIP(), 0);
+    auto ParentThread = SyscallHandler->TM.CreateThread();
     SyscallHandler->TM.TrackThread(ParentThread);
     SignalDelegation->RegisterTLSState(ParentThread);
 
@@ -392,7 +397,7 @@ int main(int argc, char** argv, char** const envp) {
       return -ENOEXEC;
     }
 
-    RunAsHost(SignalDelegation, Loader.DefaultRIP(), &State);
+    RunAsHost(SignalDelegation.get(), Loader.DefaultRIP(), &State);
     SignalDelegation->UninstallTLSState(ParentThread);
     FEX::HLE::_SyscallHandler->TM.DestroyThread(ParentThread, true);
   }
@@ -416,7 +421,7 @@ int main(int argc, char** argv, char** const envp) {
 #ifndef _WIN32
   FEXCore::Allocator::ClearHooks();
 
-  FEXCore::Allocator::ReenableSBRKAllocations(SBRKPointer);
+  FEX::SBRKAllocations::ReenableSBRKAllocations(SBRKPointer);
 #endif
 
   return Passed ? 0 : -1;

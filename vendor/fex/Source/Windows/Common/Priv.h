@@ -55,15 +55,19 @@ public:
   }
 };
 
+namespace FEX::Windows::Logging {
+void UnimplementedLog(const char* Func);
+}
 
-#define UNIMPLEMENTED()                        \
-  do {                                         \
-    NtTerminateProcess(NtCurrentProcess(), 0); \
-    __fastfail(0);                             \
+#define UNIMPLEMENTED()                                \
+  do {                                                 \
+    FEX::Windows::Logging::UnimplementedLog(__func__); \
+    NtTerminateProcess(NtCurrentProcess(), 0);         \
+    __fastfail(0);                                     \
   } while (0)
 
 #define DLLEXPORT_FUNC(Ret, Name, Args) \
-  Ret Name Args;                        \
+  extern "C" Ret Name Args;             \
   Ret(*__imp_##Name) Args = Name;       \
   Ret(*__imp_aux_##Name) Args = Name;   \
   Ret Name Args

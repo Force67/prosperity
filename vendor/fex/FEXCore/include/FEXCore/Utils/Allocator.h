@@ -12,10 +12,7 @@ struct InternalThreadState;
 }
 
 namespace FEXCore::Allocator {
-FEX_DEFAULT_VISIBILITY void SetupHooks();
-FEX_DEFAULT_VISIBILITY void ClearHooks();
-
-FEX_DEFAULT_VISIBILITY size_t DetermineVASize();
+FEX_DEFAULT_VISIBILITY size_t GetHostVABits();
 
 #ifdef GLIBC_ALLOCATOR_FAULT
 // Glibc hooks should only fault once we are in main.
@@ -63,13 +60,6 @@ public:
 };
 #endif
 
-// Disable allocations through glibc's sbrk allocation method.
-// Returns a pointer at the end of the sbrk region.
-FEX_DEFAULT_VISIBILITY void* DisableSBRKAllocations();
-
-// Allow sbrk again. Pass in the pointer returned by `DisableSBRKAllocations`
-FEX_DEFAULT_VISIBILITY void ReenableSBRKAllocations(void* Ptr);
-
 struct MemoryRegion {
   void* Ptr;
   size_t Size;
@@ -84,7 +74,7 @@ FEX_DEFAULT_VISIBILITY void ReclaimMemoryRegion(const fextl::vector<MemoryRegion
 // AArch64 canonical addresses are only up to bits 48/52 with the remainder being other things
 // Use this to reserve the top 128TB of VA so the guest never see it
 // Returns nullptr on host VA < 48bits
-FEX_DEFAULT_VISIBILITY fextl::vector<MemoryRegion> Setup48BitAllocatorIfExists();
+FEX_DEFAULT_VISIBILITY fextl::vector<MemoryRegion> Setup48BitAllocatorIfExists(size_t PageSize);
 
 #ifndef _WIN32
 FEX_DEFAULT_VISIBILITY void RegisterTLSData(FEXCore::Core::InternalThreadState* Thread);

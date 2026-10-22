@@ -1099,11 +1099,24 @@ class MacroAssembler : public Assembler, public MacroAssemblerInterface {
     }
   }
 
+  void B(Label* label);
   void B(Label* label, BranchType type, Register reg = NoReg, int bit = -1);
 
-  void B(Label* label);
-  void B(Label* label, Condition cond);
+  void B(Label* label, Condition cond) {
+    Bcommon(label, cond, /* use_bc = */ false);
+  }
+  void Bc(Label* label, Condition cond) {
+    Bcommon(label, cond, /* use_bc = */ true);
+  }
+  // Aliases that match the instruction set ordering.
   void B(Condition cond, Label* label) { B(label, cond); }
+  void Bc(Condition cond, Label* label) { Bc(label, cond); }
+
+ private:
+  // Common method for B and Bc.
+  void Bcommon(Label* label, Condition cond, bool use_bc);
+
+ public:
   void Bfm(const Register& rd,
            const Register& rn,
            unsigned immr,
@@ -1189,6 +1202,123 @@ class MacroAssembler : public Assembler, public MacroAssemblerInterface {
     VIXL_ASSERT(allow_macro_instructions_);
     SingleEmissionCheckScope guard(this);
     retab();
+  }
+  void Bfcvt(const VRegister& vd, const VRegister& vn) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfcvt(vd, vn);
+  }
+  void Bfcvtn(const VRegister& vd, const VRegister& vn) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfcvtn(vd, vn);
+  }
+  void Bfcvtn2(const VRegister& vd, const VRegister& vn) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfcvtn2(vd, vn);
+  }
+  void Bfcvt(const ZRegister& zd, const PRegisterM& pg, const ZRegister& zn) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfcvt(zd, pg, zn);
+  }
+  void Bfcvtnt(const ZRegister& zd, const PRegisterM& pg, const ZRegister& zn) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfcvtnt(zd, pg, zn);
+  }
+  void Bfdot(const VRegister& vd, const VRegister& vn, const VRegister& vm) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfdot(vd, vn, vm);
+  }
+  void Bfdot(const VRegister& vd,
+             const VRegister& vn,
+             const VRegister& vm,
+             int vm_index) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfdot(vd, vn, vm, vm_index);
+  }
+  void Bfdot(const ZRegister& zda, const ZRegister& zn, const ZRegister& zm) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfdot(zda, zn, zm);
+  }
+  void Bfdot(const ZRegister& zda,
+             const ZRegister& zn,
+             const ZRegister& zm,
+             int index) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfdot(zda, zn, zm, index);
+  }
+  void Bfmlalb(const VRegister& vd, const VRegister& vn, const VRegister& vm) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfmlalb(vd, vn, vm);
+  }
+  void Bfmlalt(const VRegister& vd, const VRegister& vn, const VRegister& vm) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfmlalt(vd, vn, vm);
+  }
+  void Bfmlalb(const VRegister& vd,
+               const VRegister& vn,
+               const VRegister& vm,
+               int vm_index) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    VIXL_CHECK(vm.GetCode() < 16);
+    bfmlalb(vd, vn, vm, vm_index);
+  }
+  void Bfmlalt(const VRegister& vd,
+               const VRegister& vn,
+               const VRegister& vm,
+               int vm_index) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    VIXL_CHECK(vm.GetCode() < 16);
+    bfmlalt(vd, vn, vm, vm_index);
+  }
+  void Bfmlalb(const ZRegister& zda, const ZRegister& zn, const ZRegister& zm) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfmlalb(zda, zn, zm);
+  }
+  void Bfmlalt(const ZRegister& zda, const ZRegister& zn, const ZRegister& zm) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfmlalt(zda, zn, zm);
+  }
+  void Bfmlalb(const ZRegister& zda,
+               const ZRegister& zn,
+               const ZRegister& zm,
+               int index) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    VIXL_CHECK(zm.GetCode() < 16);
+    bfmlalb(zda, zn, zm, index);
+  }
+  void Bfmlalt(const ZRegister& zda,
+               const ZRegister& zn,
+               const ZRegister& zm,
+               int index) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    VIXL_CHECK(zm.GetCode() < 16);
+    bfmlalt(zda, zn, zm, index);
+  }
+  void Bfmmla(const VRegister& vd, const VRegister& vn, const VRegister& vm) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfmmla(vd, vn, vm);
+  }
+  void Bfmmla(const ZRegister& zda, const ZRegister& zn, const ZRegister& zm) {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    bfmmla(zda, zn, zm);
   }
   void Braa(const Register& xn, const Register& xm) {
     VIXL_ASSERT(allow_macro_instructions_);
@@ -2101,13 +2231,13 @@ class MacroAssembler : public Assembler, public MacroAssemblerInterface {
   }
   void Mrs(const Register& rt, SystemRegister sysreg) {
     VIXL_ASSERT(allow_macro_instructions_);
-    VIXL_ASSERT(!rt.IsZero());
+    VIXL_ASSERT(!rt.IsSP());
     SingleEmissionCheckScope guard(this);
     mrs(rt, sysreg);
   }
   void Msr(SystemRegister sysreg, const Register& rt) {
     VIXL_ASSERT(allow_macro_instructions_);
-    VIXL_ASSERT(!rt.IsZero());
+    VIXL_ASSERT(!rt.IsSP());
     SingleEmissionCheckScope guard(this);
     msr(sysreg, rt);
   }
@@ -7880,6 +8010,12 @@ class MacroAssembler : public Assembler, public MacroAssemblerInterface {
   void Umax(const Register& rd, const Register& rn, const Operand& op);
   void Umin(const Register& rd, const Register& rn, const Operand& op);
 
+  void Yield() {
+    VIXL_ASSERT(allow_macro_instructions_);
+    SingleEmissionCheckScope guard(this);
+    yield();
+  }
+
   template <typename T>
   Literal<T>* CreateLiteralDestroyedWithPool(T value) {
     return new Literal<T>(value,
@@ -8083,15 +8219,8 @@ class MacroAssembler : public Assembler, public MacroAssemblerInterface {
 
   LiteralPool* GetLiteralPool() { return &literal_pool_; }
 
-// Support for simulated runtime calls.
+  // Support for simulated runtime calls.
 
-// `CallRuntime` requires variadic templating, that is only available from
-// C++11.
-#if __cplusplus >= 201103L
-#define VIXL_HAS_MACROASSEMBLER_RUNTIME_CALL_SUPPORT
-#endif  // #if __cplusplus >= 201103L
-
-#ifdef VIXL_HAS_MACROASSEMBLER_RUNTIME_CALL_SUPPORT
   template <typename R, typename... P>
   void CallRuntimeHelper(R (*function)(P...), RuntimeCallType call_type);
 
@@ -8104,7 +8233,6 @@ class MacroAssembler : public Assembler, public MacroAssemblerInterface {
   void TailCallRuntime(R (*function)(P...)) {
     CallRuntimeHelper(function, kTailCallRuntime);
   }
-#endif  // #ifdef VIXL_HAS_MACROASSEMBLER_RUNTIME_CALL_SUPPORT
 
  protected:
   void BlockLiteralPool() { literal_pool_.Block(); }
@@ -8823,15 +8951,12 @@ class SimulationCPUFeaturesScope {
 };
 
 
-// Variadic templating is only available from C++11.
-#ifdef VIXL_HAS_MACROASSEMBLER_RUNTIME_CALL_SUPPORT
-
 // `R` stands for 'return type', and `P` for 'parameter types'.
 template <typename R, typename... P>
 void MacroAssembler::CallRuntimeHelper(R (*function)(P...),
                                        RuntimeCallType call_type) {
   if (generate_simulator_code_) {
-#ifdef VIXL_HAS_SIMULATED_RUNTIME_CALL_SUPPORT
+#ifdef VIXL_INCLUDE_SIMULATOR_AARCH64
     uintptr_t runtime_call_wrapper_address = reinterpret_cast<uintptr_t>(
         &(Simulator::RuntimeCallStructHelper<R, P...>::Wrapper));
     uintptr_t function_address = reinterpret_cast<uintptr_t>(function);
@@ -8856,7 +8981,7 @@ void MacroAssembler::CallRuntimeHelper(R (*function)(P...),
     VIXL_ASSERT(GetSizeOfCodeGeneratedSince(&start) == kRuntimeCallLength);
 #else
     VIXL_UNREACHABLE();
-#endif  // #ifdef VIXL_HAS_SIMULATED_RUNTIME_CALL_SUPPORT
+#endif
   } else {
     UseScratchRegisterScope temps(this);
     Register temp = temps.AcquireX();
@@ -8869,8 +8994,6 @@ void MacroAssembler::CallRuntimeHelper(R (*function)(P...),
     }
   }
 }
-
-#endif  // #ifdef VIXL_HAS_MACROASSEMBLER_RUNTIME_CALL_SUPPORT
 
 }  // namespace aarch64
 

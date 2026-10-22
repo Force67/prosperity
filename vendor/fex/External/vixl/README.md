@@ -1,15 +1,16 @@
-VIXL: ARMv8 Runtime Code Generation Library
-===========================================
+VIXL: Arm Runtime Code Generation Library
+=========================================
 
 Contents:
 
- * Overview
- * Licence
- * Requirements
- * Known limitations
- * Bug reports
- * Usage
-
+ * [Overview](#overview)
+ * [Licence](#licence)
+ * [Requirements](#requirements)
+ * [Versioning](#versioning)
+ * [Supported Arm Architecture Features](#supported-arm-architecture-features)
+ * [Known limitations](#known-limitations)
+ * [Bug reports](#bug-reports)
+ * [Usage](#usage)
 
 Overview
 ========
@@ -17,21 +18,16 @@ Overview
 VIXL contains three components.
 
  1. Programmatic **assemblers** to generate A64, A32 or T32 code at runtime. The
-    assemblers abstract some of the constraints of each ISA; for example, most
+    assemblers abstract some of the constraints of each ISA; for example, some
     instructions support any immediate.
  2. **Disassemblers** that can print any instruction emitted by the assemblers.
- 3. A **simulator** that can simulate any instruction emitted by the A64
+ 3. An **A64 simulator** that can simulate any instruction emitted by the A64
     assembler. The simulator allows generated code to be run on another
     architecture without the need for a full ISA model.
 
-The VIXL git repository can be found [on GitHub][vixl].
+The VIXL git repository can be found [on GitLab][vixl].
 
-Build and Test Status
----------------------
-
-  * [![Build Status](https://ci.linaro.org/buildStatus/icon?job=linaro-art-vixlpresubmit)](https://ci.linaro.org/job/linaro-art-vixlpresubmit/) Simulator
-  * [![Build Status](https://ci.linaro.org/buildStatus/icon?job=linaro-art-vixlpresubmit-native-armv8)](https://ci.linaro.org/job/linaro-art-vixlpresubmit-native-armv8/) Native
-  * [![Build Status](https://ci.linaro.org/buildStatus/icon?job=linaro-art-vixlpresubmit-macos)](https://ci.linaro.org/job/linaro-art-vixlpresubmit-macos/) MacOS
+ Build status: [![Build Status](https://gitlab.arm.com/runtimes/vixl/badges/main/pipeline.svg)](https://gitlab.arm.com/runtimes/vixl/-/pipelines)
 
 
 Licence
@@ -40,63 +36,74 @@ Licence
 This software is covered by the licence described in the [LICENCE](LICENCE)
 file.
 
-Contributions, as pull requests or via other means, are accepted under the terms
-of the same [LICENCE](LICENCE).
+
+Contributions
+=============
+
+Contributions are accepted as merge requests for this repository, but fork
+creation is disabled by default. You can request that they are enabled for your
+account - see [this user guide][contrib-guide].
+
+Contributions are accepted under the terms of the [LICENCE](LICENCE) mentioned
+above.
+
 
 Requirements
 ============
 
 To build VIXL the following software is required:
 
- 1. Python 3.5+
- 2. SCons 2.0
- 3. GCC 4.8+ or Clang 4.0+
+ 1. Python 3.8+
+ 2. SCons 3.1+
+ 3. GCC 9.4+ or Clang 10.0+
 
 A 64-bit host machine is required, implementing an LP64 data model. VIXL has
 been tested using GCC on AArch64 Debian, GCC and Clang on amd64 Ubuntu
 systems.
 
-To run the linter and code formatting stages of the tests, the following
-software is also required:
+To run the code formatting stages of the tests, the following software is also required:
 
- 1. Git
- 2. [Google's `cpplint.py`][cpplint]
- 3. clang-format 11+
- 4. clang-tidy 11+
+ 1. clang-format 11+
+ 2. clang-tidy 11+
 
 Refer to the 'Usage' section for details.
 
-Note that in Ubuntu 18.04, clang-tidy-4.0 will only work if the clang-4.0
-package is also installed.
+Versioning
+==========
+
+VIXL uses [Semantic Versioning 2.0.0][semver] - see [VERSIONS](VERSIONS.md) for details.
 
 Supported Arm Architecture Features
 ===================================
 
-| Feature    | VIXL CPUFeatures Flag | Notes                           |
-|------------|-----------------------|---------------------------------|
-| BTI        | kBTI                  | Per-page enabling not supported |
-| DotProd    | kDotProduct           |                                 |
-| FCMA       | kFcma                 |                                 |
-| FHM        | kFHM                  |                                 |
-| FP16       | kFPHalf, kNEONHalf    |                                 |
-| FRINTTS    | kFrintToFixedSizedInt |                                 |
-| FlagM      | kFlagM                |                                 |
-| FlagM2     | kAXFlag               |                                 |
-| I8MM       | kI8MM                 |                                 |
-| JSCVT      | kJSCVT                |                                 |
-| LOR        | kLORegions            |                                 |
-| LRCPC      | kRCpc                 |                                 |
-| LRCPC2     | kRCpcImm              |                                 |
-| LSE        | kAtomics              |                                 |
-| PAuth      | kPAuth, kPAuthGeneric | Not ERETAA, ERETAB              |
-| RAS        | kRAS                  |                                 |
-| RDM        | kRDM                  |                                 |
-| SVE        | kSVE                  |                                 |
-| SVE2       | kSVE2                 |                                 |
-| SVEBitPerm | kSVEBitPerm           |                                 |
-| SVEF32MM   | kSVEF32MM             |                                 |
-| SVEF64MM   | kSVEF64MM             |                                 |
-| SVEI8MM    | kSVEI8MM              |                                 |
+| Feature    | VIXL CPUFeatures Flag         | Notes                           |
+|------------|-------------------------------|---------------------------------|
+| BTI        | kBTI                          | Per-page enabling not supported |
+| CSSC       | kCSSC                         |                                 |
+| DotProd    | kDotProduct                   |                                 |
+| FCMA       | kFcma                         |                                 |
+| FHM        | kFHM                          |                                 |
+| FP16       | kFPHalf, kNEONHalf            |                                 |
+| FRINTTS    | kFrintToFixedSizedInt         |                                 |
+| FlagM      | kFlagM                        |                                 |
+| FlagM2     | kAXFlag                       |                                 |
+| I8MM       | kI8MM                         |                                 |
+| JSCVT      | kJSCVT                        |                                 |
+| LOR        | kLORegions                    |                                 |
+| LRCPC      | kRCpc                         |                                 |
+| LRCPC2     | kRCpcImm                      |                                 |
+| LSE        | kAtomics                      |                                 |
+| MOPS       | kMOPS                         |                                 |
+| MTE        | kMTEInstructions, kMTE, kMTE3 |                                 |
+| PAuth      | kPAuth, kPAuthGeneric         | Not ERETAA, ERETAB              |
+| RAS        | kRAS                          |                                 |
+| RDM        | kRDM                          |                                 |
+| SVE        | kSVE                          |                                 |
+| SVE2       | kSVE2                         |                                 |
+| SVEBitPerm | kSVEBitPerm                   |                                 |
+| SVEF32MM   | kSVEF32MM                     |                                 |
+| SVEF64MM   | kSVEF64MM                     |                                 |
+| SVEI8MM    | kSVEI8MM                      |                                 |
 
 Enable generating code for an architecture feature by combining a flag with
 the MacroAssembler's defaults. For example, to generate code for SVE, use
@@ -202,7 +209,7 @@ selection.
 Bug reports
 ===========
 
-Bug reports may be made in the Issues section of GitHub, or sent to
+Bug reports may be made in the Issues section of GitLab, or sent to
 vixl@arm.com. Please provide any steps required to recreate a bug, along with
 build environment and host system information.
 
@@ -217,24 +224,9 @@ with VIXL, in both release and debug mode. It is a useful script for verifying
 that all of VIXL's dependencies are in place and that VIXL is working as it
 should.
 
-By default, the `tools/test.py` script runs a linter to check that the source
-code conforms with the code style guide, and to detect several common errors
-that the compiler may not warn about. This is most useful for VIXL developers.
-The linter has the following dependencies:
-
- 1. Git must be installed, and the VIXL project must be in a valid Git
-    repository, such as one produced using `git clone`.
- 2. `cpplint.py`, [as provided by Google][cpplint], must be available (and
-    executable) on the `PATH`.
-
-It is possible to tell `tools/test.py` to skip the linter stage by passing
-`--nolint`. This removes the dependency on `cpplint.py` and Git. The `--nolint`
-option is implied if the VIXL project is a snapshot (with no `.git` directory).
-
-Additionally, `tools/test.py` tests code formatting using `clang-format-4.0`,
-and performs static analysis using `clang-tidy-4.0`. If you don't have these
-tools, disable the test using `--noclang-format` or `--noclang-tidy`,
-respectively.
+By default, `tools/test.py` tests code formatting using `clang-format`, and
+performs static analysis using `clang-tidy`. If you don't have these tools,
+disable the test using `--noclang-format` or `--noclang-tidy`, respectively.
 
 Also note that the tests for the tracing features depend upon external `diff`
 and `sed` tools. If these tools are not available in `PATH`, these tests will
@@ -254,14 +246,17 @@ aarch32_examples` or `scons aarch64_examples` from the root directory, or use
 
 
 
-[cpplint]: https://github.com/google/styleguide/tree/gh-pages/cpplint
-           "Google's cpplint.py script."
+[vixl]: https://gitlab.arm.com/runtimes/vixl
+        "The VIXL repository on GitLab."
 
-[vixl]: https://github.com/Linaro/vixl
-        "The VIXL repository on GitHub."
+[semver]: https://semver.org/spec/v2.0.0.html
+          "Semantic Versioning 2.0.0 Specification"
 
 [getting-started-aarch32]: doc/aarch32/getting-started-aarch32.md
                            "Introduction to VIXL for AArch32."
 
 [getting-started-aarch64]: doc/aarch64/getting-started-aarch64.md
                            "Introduction to VIXL for AArch64."
+
+[contrib-guide]: https://gitlab.arm.com/groups/documentation/-/wikis/user-guide#requesting-fork-permissions
+                 "Requesting Fork Permissions."

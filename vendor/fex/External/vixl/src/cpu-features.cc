@@ -31,7 +31,8 @@
 #include "globals-vixl.h"
 #include "utils-vixl.h"
 
-#if (defined(__aarch64__) || defined(__arm64ec__)) && defined(VIXL_INCLUDE_TARGET_AARCH64)
+#if (defined(__aarch64__) || defined(__arm64ec__)) && \
+    defined(VIXL_INCLUDE_TARGET_AARCH64)
 #include "aarch64/cpu-aarch64.h"
 #define VIXL_USE_AARCH64_CPU_HELPERS
 #endif

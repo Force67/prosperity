@@ -59,6 +59,9 @@ class HostFeatures(Flag) :
     FEATURE_LRCPC  = (1 << 14)
     FEATURE_LRCPC2 = (1 << 15)
     FEATURE_FRINTTS = (1 << 16)
+    FEATURE_MOPS   = (1 << 17)
+    FEATURE_I8MM   = (1 << 18)
+    FEATURE_DOTPROD = (1 << 19)
 
 HostFeaturesLookup = {
     "SVE128"  : HostFeatures.FEATURE_SVE128,
@@ -78,6 +81,9 @@ HostFeaturesLookup = {
     "LRCPC" : HostFeatures.FEATURE_LRCPC,
     "LRCPC2" : HostFeatures.FEATURE_LRCPC2,
     "FRINTTS" : HostFeatures.FEATURE_FRINTTS,
+    "MOPS"    : HostFeatures.FEATURE_MOPS,
+    "I8MM"    : HostFeatures.FEATURE_I8MM,
+    "DOTPROD" : HostFeatures.FEATURE_DOTPROD,
 }
 
 def GetHostFeatures(data):
@@ -94,6 +100,7 @@ def GetHostFeatures(data):
     return HostFeaturesData
 
 def parse_json_data(json_filepath, json_filename, json_data, output_binary_path):
+    BinaryCacheVersion = 0
     Bitness = 64
     EnabledHostFeatures = HostFeatures.FEATURE_ANY
     DisabledHostFeatures = HostFeatures.FEATURE_ANY
@@ -103,6 +110,9 @@ def parse_json_data(json_filepath, json_filename, json_data, output_binary_path)
         items = json_data["Features"]
         if ("Bitness" in items):
             Bitness = int(items["Bitness"])
+
+        if ("BinaryCacheVersion" in items):
+            BinaryCacheVersion = int(items["BinaryCacheVersion"])
 
         if ("EnabledHostFeatures" in items):
             EnabledHostFeatures = GetHostFeatures(items["EnabledHostFeatures"])
@@ -175,6 +185,7 @@ def parse_json_data(json_filepath, json_filename, json_data, output_binary_path)
         # struct TestInfo;
         # struct DataHeader {
         #   uint64_t Bitness;
+        #   uint64_t BinaryCacheVersion;
         #   uint64_t NumTests;
         #   uint64_t EnabledHostFeatures;
         #   uint64_t DisabledHostFeatures;
@@ -195,6 +206,7 @@ def parse_json_data(json_filepath, json_filename, json_data, output_binary_path)
 
     # Add the header
     MemData += struct.pack('Q', Bitness)
+    MemData += struct.pack('Q', BinaryCacheVersion)
     MemData += struct.pack('Q', len(TestDataMap))
     MemData += struct.pack('Q', EnabledHostFeatures.value)
     MemData += struct.pack('Q', DisabledHostFeatures.value)

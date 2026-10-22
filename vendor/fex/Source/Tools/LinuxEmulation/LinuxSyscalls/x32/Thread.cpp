@@ -138,8 +138,8 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
     }));
 
   REGISTER_SYSCALL_IMPL_X32(waitpid, [](FEXCore::Core::CpuStateFrame* Frame, pid_t pid, int32_t* status, int32_t options) -> uint64_t {
-    uint64_t Result = ::waitpid(pid, status, options);
     FaultSafeUserMemAccess::VerifyIsWritableOrNull(status, sizeof(*status));
+    uint64_t Result = ::waitpid(pid, status, options);
     SYSCALL_ERRNO();
   });
 
@@ -154,7 +154,7 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
   REGISTER_SYSCALL_IMPL_X32(get_thread_area, [](FEXCore::Core::CpuStateFrame* Frame, struct user_desc* u_info) -> uint64_t {
     // Index to fetch comes from the user_desc
     uint32_t Entry = u_info->entry_number;
-    if (Entry < TLS_NextEntry || Entry > TLS_MaxEntry) {
+    if (Entry < TLS_NextEntry || Entry >= TLS_MaxEntry) {
       return -EINVAL;
     }
 
@@ -208,7 +208,7 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
 
   REGISTER_SYSCALL_IMPL_X32(
     futex, [](FEXCore::Core::CpuStateFrame* Frame, int* uaddr, int futex_op, int val, const timespec32* timeout, int* uaddr2, uint32_t val3) -> uint64_t {
-      void* timeout_ptr = (void*)timeout;
+      const void* timeout_ptr = (const void*)timeout;
       struct timespec tp64 {};
       int cmd = futex_op & FUTEX_CMD_MASK;
       if (timeout && (cmd == FUTEX_WAIT || cmd == FUTEX_LOCK_PI || cmd == FUTEX_WAIT_BITSET || cmd == FUTEX_WAIT_REQUEUE_PI)) {
@@ -253,7 +253,7 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
     });
 
   // launch a new process under fex
-  // currently does not propagate argv[0] correctly
+  // the ELF self-reexec fallback preserves the caller-supplied argv[0]
   REGISTER_SYSCALL_IMPL_X32(execve, [](FEXCore::Core::CpuStateFrame* Frame, const char* pathname, uint32_t* argv, uint32_t* envp) -> uint64_t {
     fextl::vector<const char*> Args;
     fextl::vector<const char*> Envp;

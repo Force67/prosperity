@@ -1,4 +1,4 @@
-# FEX-2601
+# FEX-2610
 
 ## FEXCore
 See [FEXCore/Readme.md](../FEXCore/Readme.md) for more details
@@ -31,6 +31,7 @@ IR to host code generation
 
 #### shared
 - [CPUBackend.h](../FEXCore/Source/Interface/Core/CPUBackend.h)
+- [SharedCodeBufferManager.h](../FEXCore/Source/Interface/Core/SharedCodeBufferManager.h)
 
 
 
@@ -143,14 +144,6 @@ These are generated + glue logic 1:1 thunks unless noted otherwise
 #### Vulkan
 - [Guest.cpp](../ThunkLibs/libvulkan/Guest.cpp)
 - [Host.cpp](../ThunkLibs/libvulkan/Host.cpp)
-
-#### X11
-- [libXext_Guest.cpp](../ThunkLibs/libXext/libXext_Guest.cpp)
-- [libXext_Host.cpp](../ThunkLibs/libXext/libXext_Host.cpp)
-- [libXfixes_Guest.cpp](../ThunkLibs/libXfixes/libXfixes_Guest.cpp)
-- [libXfixes_Host.cpp](../ThunkLibs/libXfixes/libXfixes_Host.cpp)
-- [libXrender_Guest.cpp](../ThunkLibs/libXrender/libXrender_Guest.cpp)
-- [libXrender_Host.cpp](../ThunkLibs/libXrender/libXrender_Host.cpp)
 
 #### asound
 - [libasound_Guest.cpp](../ThunkLibs/libasound/libasound_Guest.cpp)
