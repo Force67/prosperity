@@ -22,6 +22,7 @@
 #include "gpu/gpu_check.h"
 #include "gpu/gpu_perf.h"
 #include "gpu/vulkan/vk_rhi_internal.h"
+#include "gpu/rhi/write_journal.h"
 #include "profile/profile.h"
 #include "ui/shader_activity.h"
 
@@ -1766,6 +1767,7 @@ bool VulkanDevice::CopyAfter(rhi::Buffer* src,
                              u64 after) {
   if (!side_queue_ || !src || !dst || !bytes)
     return false;
+  rhi::write_journal::Record(dst, dst_offset, bytes, 'a');
   while (side_busy_.exchange(true, base::memory_order_acquire)) {
   }
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};

@@ -25,6 +25,7 @@
 #include "gpu/render/renderer_state.h"
 #include "gpu/render/image/texture_cache.h"
 #include "gpu/render/debug/trace.h"
+#include "gpu/rhi/write_journal.h"
 #include "gpu/write_tracker.h"
 #include "guest/session.h"
 #include "profile/profile.h"
@@ -515,6 +516,7 @@ void ResolveComputeTexture(const DrawInfo::DrawTex& t,
 }
 
 bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
+  rhi::write_journal::SetContext(g_frame.num, ci.cs_addr);
   DELTA_ZONE("gpu.cs_dispatch");
   BumpTextureEpoch();
   MergeSameBase(ci);

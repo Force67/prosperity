@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "gpu/vulkan/vk_rhi_internal.h"
+#include "gpu/rhi/write_journal.h"
 
 namespace gpu::vk::rhi_impl {
 
@@ -541,6 +542,7 @@ void VulkanCommandList::CopyBuffer(rhi::Buffer* dst,
                                    u64 src_offset,
                                    u64 bytes) {
   AutoSpan span(this, src->mapped() || dst->mapped() ? 14 : 7);
+  rhi::write_journal::Record(dst, dst_offset, bytes, 'c');
   const VkBufferCopy region{src_offset, dst_offset, bytes};
   vkCmdCopyBuffer(cmd, Buf(src)->buffer, Buf(dst)->buffer, 1, &region);
 }
@@ -569,6 +571,16 @@ void VulkanCommandList::CopyTextureToBuffer(
     const rhi::BufferTextureCopy* regions,
     u32 count) {
   AutoSpan span(this, 11);
+  const u32 texel = rhi::GetFormatInfo(src->desc().format).bytes;
+  for (u32 i = 0; i < count; i++) {
+    const rhi::BufferTextureCopy& r = regions[i];
+    const u64 row = r.row_length ? r.row_length : r.region.width;
+    const u64 rows = r.image_height ? r.image_height : r.region.height;
+    rhi::write_journal::Record(
+        dst, r.buffer_offset,
+        row * rows * r.region.depth * r.region.layers * (texel ? texel : 4),
+        't');
+  }
   VkBufferImageCopy vk[16];
   for (u32 done = 0; done < count;) {
     const u32 n = count - done > 16 ? 16 : count - done;
@@ -654,6 +666,7 @@ void VulkanCommandList::FillBuffer(rhi::Buffer* buffer,
                                    u64 bytes,
                                    u32 value) {
   AutoSpan span(this, 8);
+  rhi::write_journal::Record(buffer, offset, bytes, 'f');
   vkCmdFillBuffer(cmd, Buf(buffer)->buffer, offset, bytes, value);
 }
 
@@ -662,6 +675,7 @@ void VulkanCommandList::UpdateBuffer(rhi::Buffer* buffer,
                                      u64 bytes,
                                      const void* data) {
   AutoSpan span(this, 8);
+  rhi::write_journal::Record(buffer, offset, bytes, 'u');
   vkCmdUpdateBuffer(cmd, Buf(buffer)->buffer, offset, bytes, data);
 }
 

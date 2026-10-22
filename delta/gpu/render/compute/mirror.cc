@@ -18,6 +18,7 @@
 #include "gpu/render/image/render_target.h"
 #include "gpu/render/image/texture_cache.h"
 #include "gpu/render/memory/upload_ring.h"
+#include "gpu/rhi/write_journal.h"
 #include "gpu/write_tracker.h"
 #include "guest/session.h"
 #include "profile/profile.h"
@@ -750,6 +751,7 @@ void RecordMergePass(rhi::CommandList* c,
     c->Dispatch(static_cast<u32>((words + gcn::kWordMergeGroup - 1) /
                                  gcn::kWordMergeGroup),
                 1, 1);
+    rhi::write_journal::Record(dst.buffer, dst.offset + done, words * 4, 'm');
     done += words * 4;
   }
 }
@@ -1052,6 +1054,7 @@ void MirrorWriteBack(u64 base,
                      u64 bytes,
                      bool may_own,
                      const MirrorShadow* shadow) {
+  const void* const site = __builtin_return_address(0);
   RecordMirrorWrite(base, bytes);
   g_cs.mirror_self.push_back({base, base + bytes});
   const u64 end = base + bytes;
@@ -1074,14 +1077,17 @@ void MirrorWriteBack(u64 base,
   };
   const auto finish = [&](u64 run, u64 to, bool owned) {
     if (owned) {
-      if (shadow && shadow->buffer)
-        for (u64 at = run; at < to;) {
-          const u64 end =
-              base::Min(to, (at & ~(kMirrorBlock - 1)) + kMirrorBlock);
-          if (!MirrorOwned(at & ~(kMirrorBlock - 1)))
-            RecordWordMerge(at, end, *shadow);
-          at = end;
-        }
+      for (u64 at = run; at < to;) {
+        const u64 end =
+            base::Min(to, (at & ~(kMirrorBlock - 1)) + kMirrorBlock);
+        OwnBlock& o = OwnAt(at & ~(kMirrorBlock - 1));
+        const bool merged = shadow && shadow->buffer &&
+                            !MirrorOwned(at & ~(kMirrorBlock - 1)) &&
+                            RecordWordMerge(at, end, *shadow);
+        o.owned_by = site;
+        o.owned_merged = merged;
+        at = end;
+      }
       MirrorOwn(run, to - run);
       g_cs_stats.mirror_own_bytes += to - run;
       return;

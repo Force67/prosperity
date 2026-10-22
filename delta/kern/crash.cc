@@ -8,6 +8,7 @@
 
 #define _GNU_SOURCE  // NOLINT(readability-identifier-naming)
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/mman.h>
@@ -861,6 +862,23 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
   Symbolize(grip, ripsym, sizeof(ripsym));
   BASE_LOGI("crashHandler", "  host pc   = {:016x}",
             (unsigned long long)hostpc);
+  if (!recon) {
+    // Emulator code faulted: its own call chain is what explains it.
+    void* frames[32];
+    const int n = backtrace(frames, 32);
+    for (int i = 0; i < n; i++) {
+      Dl_info info{};
+      const bool named = dladdr(frames[i], &info) && info.dli_fbase;
+      const char* file = named && info.dli_fname ? info.dli_fname : "?";
+      if (const char* slash = std::strrchr(file, '/'))
+        file = slash + 1;
+      BASE_LOGI("crashHandler", "  host #{:<2} {}+{:#x} {}", i, file,
+                named ? reinterpret_cast<u64>(frames[i]) -
+                            reinterpret_cast<u64>(info.dli_fbase)
+                      : reinterpret_cast<u64>(frames[i]),
+                named && info.dli_sname ? info.dli_sname : "");
+    }
+  }
   BASE_LOGI("crashHandler", "  guest rip = {:016x}  {}",
             (unsigned long long)grip, ripsym);
   if (grip) {
@@ -919,6 +937,17 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
               "  r12={:016x} r13={:016x} r14={:016x} r15={:016x}",
               (unsigned long long)g[R12], (unsigned long long)g[R13],
               (unsigned long long)g[R14], (unsigned long long)g[R15]);
+    // Corrupted guest data near GPU-touched memory points at the GPU path.
+    {
+      static const char* kRegName[16] = {"rax", "rcx", "rdx", "rbx",
+                                         "rsp", "rbp", "rsi", "rdi",
+                                         "r8",  "r9",  "r10", "r11",
+                                         "r12", "r13", "r14", "r15"};
+      char cs[256];
+      for (int i = 0; i < 16; i++)
+        if (DescribeCsRange(g[i], cs, sizeof(cs)))
+          BASE_LOGI("crashHandler", "  [gpu] {} in {}", kRegName[i], cs);
+    }
 
     // Corroborate against si_addr: some GPR should sit within a small
     // displacement of the faulting address; if none does, say so instead of

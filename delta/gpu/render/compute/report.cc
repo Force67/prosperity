@@ -4,7 +4,10 @@
 
 #include "gpu/render/compute/internal.h"
 
+#include <dlfcn.h>
+
 #include <cstdio>
+#include <cstring>
 
 #include "base/algorithm.h"
 #include "base/logging.h"
@@ -15,6 +18,7 @@
 #include "gpu/render/debug/perf.h"
 #include "gpu/render/image/render_target.h"
 #include "gpu/render/image/texture_cache.h"
+#include "gpu/rhi/write_journal.h"
 #include "guest/session.h"
 
 namespace gpu::render {
@@ -224,7 +228,8 @@ bool QueueCheck(const char* where) {
   return ok;
 }
 
-bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
+namespace {
+bool DescribeStagedRange(u64 addr, char* out, size_t out_size) {
   for (const auto& kv : g_cs.ranges) {
     const u64 base = kv.first;
     const CsRange& e = kv.second;
@@ -242,6 +247,63 @@ bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
     return true;
   }
   return false;
+}
+
+bool DescribeMirrorBlock(u64 addr, char* out, size_t out_size) {
+  if (!InMirror(addr))
+    return false;
+  const u64 block = addr & ~(kMirrorBlock - 1);
+  const MirrorWrite* written = MirrorWritten(addr, 1);
+  const u64 state = g_cs.own ? OwnAt(block).state.load() : 0;
+  if (!written && !state)
+    return false;
+  u64 written_first = 0;
+  if (written) {
+    auto it = g_cs.mirror_writes.upper_bound(addr);
+    written_first = (--it)->first;
+  }
+  const OwnBlock& o = OwnAt(block);
+  Dl_info site{};
+  const u64 owned_by =
+      o.owned_by && dladdr(o.owned_by, &site) && site.dli_fbase
+          ? reinterpret_cast<u64>(o.owned_by) -
+                reinterpret_cast<u64>(site.dli_fbase)
+          : 0;
+  std::snprintf(out, out_size,
+                "mirror block %#llx state=%#llx gpu-written=[%#llx,%#llx) "
+                "(seq %llu) owned-by=+%#llx merged=%d",
+                (unsigned long long)block, (unsigned long long)state,
+                (unsigned long long)written_first,
+                (unsigned long long)(written ? written->end : 0),
+                (unsigned long long)(written ? written->seq : 0),
+                (unsigned long long)owned_by, (int)o.owned_merged);
+  return true;
+}
+
+// The GPU commands that last wrote near `addr`, appended to `out`.
+bool AppendJournal(u64 addr, char* out, size_t out_size) {
+  rhi::write_journal::Entry hits[3];
+  const u32 n = rhi::write_journal::Find(addr, 64, hits, 3);
+  for (u32 i = 0; i < n; i++) {
+    const size_t used = std::strlen(out);
+    if (used + 1 >= out_size)
+      break;
+    std::snprintf(out + used, out_size - used,
+                  "%s%c [%#llx,%#llx) frame %u ctx %#llx",
+                  used ? " | " : "written by ", hits[i].kind,
+                  (unsigned long long)hits[i].first,
+                  (unsigned long long)hits[i].end, hits[i].frame,
+                  (unsigned long long)hits[i].context);
+  }
+  return n != 0;
+}
+}  // namespace
+
+bool DescribeCsRangeCovering(u64 addr, char* out, size_t out_size) {
+  out[0] = 0;
+  const bool known = DescribeStagedRange(addr, out, out_size) ||
+                     DescribeMirrorBlock(addr, out, out_size);
+  return AppendJournal(addr, out, out_size) || known;
 }
 
 DELTA_OPTION(bool, kMemStat, "DELTA_GPU_MEMSTAT", false);

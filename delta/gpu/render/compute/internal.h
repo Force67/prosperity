@@ -555,6 +555,10 @@ struct OwnBlock {
   // Diagnostics: the last mprotect the mirror made here, and on which frame.
   base::Atomic<u8> last_prot;
   base::Atomic<i32> last_prot_frame;
+  // Diagnostics: the write-back that last took ownership, and whether it
+  // merged against a shadow first.
+  const void* owned_by;
+  u8 owned_merged;
 };
 
 OwnBlock& OwnAt(u64 block);
