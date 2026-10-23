@@ -13,11 +13,9 @@
 // codecs). ATRAC9 decoding uses LibAtrac9 (vendor/libatrac9).
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <vector>
-
-#include "base/logging.h"
-#include "base/strings/format.h"
 
 extern "C" {
 #include <libatrac9.h>
@@ -391,12 +389,6 @@ class Decoder {
     num_frames_ = 0;
     total_decoded_ = 0;
     superframe_remain_ = (uint32_t)codec_info_.superframeSize;
-
-    base::String text;
-    base::FormatTo(text, "ajm: at9 decoder {} Hz, {} ch, frame_samples={}, superframe={}/{}",
-                   codec_info_.samplingRate, codec_info_.channels, codec_info_.frameSamples,
-                   codec_info_.superframeSize, codec_info_.framesInSuperframe);
-    BASE_LOGI("ajm", "{}", text.c_str());
     return true;
   }
 

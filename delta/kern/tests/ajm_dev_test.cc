@@ -54,6 +54,15 @@ class BatchWriter {
     U32((u32)flags);
   }
 
+  // A chunk as libSceAjm writes it: header word, payload word, then `tail`
+  // bytes of address.
+  void Raw(u32 word0, u32 word1, bool address) {
+    U32(word0);
+    U32(word1);
+    if (address)
+      U64(0x000000d9800180aaull);
+  }
+
  private:
   void U32(u32 v) {
     const auto* p = reinterpret_cast<const u8*>(&v);
@@ -119,6 +128,32 @@ TEST(AjmDevice, InitializeAndInstanceCreate) {
   std::memcpy(destroy.data() + 8, &instance, 4);
   ASSERT_EQ(device.Ioctl(0xC0288906, destroy.data()), 0);
   EXPECT_EQ(IoctlResult(destroy), 0u);
+}
+
+TEST(AjmDevice, InstanceIdsReuseOnlyFreedSlots) {
+  kern::ObjectTable table;
+  auto& device = *new kern::AjmDevice(table);
+  auto create = [&] {
+    std::array<u8, 40> args{};
+    const u64 flags = kInstanceFlag2ChS16;
+    std::memcpy(args.data() + 8, &flags, 8);
+    const u32 codec = kCodecAt9;
+    std::memcpy(args.data() + 0x10, &codec, 4);
+    EXPECT_EQ(device.Ioctl(0xC0288905, args.data()), 0);
+    u32 id;
+    std::memcpy(&id, args.data() + 0x14, 4);
+    return id;
+  };
+  const u32 first = create();
+  const u32 second = create();
+  EXPECT_EQ(first, (kCodecAt9 << 14) | 1);
+  EXPECT_EQ(second, (kCodecAt9 << 14) | 2);
+
+  std::array<u8, 40> destroy{};
+  std::memcpy(destroy.data() + 8, &first, 4);
+  ASSERT_EQ(device.Ioctl(0xC0288906, destroy.data()), 0);
+  EXPECT_EQ(create(), first);
+  EXPECT_EQ(create(), (kCodecAt9 << 14) | 3);
 }
 
 // Two jobs in one batch: a control job that initializes the AT9 decoder from
@@ -212,6 +247,94 @@ TEST(AjmDevice, MalformedBatchIsRejected) {
   std::memcpy(start.data() + 0x10, &offset, 4);
   ASSERT_EQ(device.Ioctl(0xC0288907, start.data()), 0);
   EXPECT_EQ(IoctlResult(start), 0x80930011u);
+}
+
+// libSceVoice's CELP8 decoder: initialize succeeds and a run decodes to
+// silence, consuming its input.
+TEST(AjmDevice, Celp8DecodesToSilence) {
+  kern::ObjectTable table;
+  auto& device = *new kern::AjmDevice(table);
+
+  std::array<u8, 40> create{};
+  const u64 flags = 9;
+  std::memcpy(create.data() + 8, &flags, 8);
+  u32 codec = 3;
+  std::memcpy(create.data() + 0x10, &codec, 4);
+  ASSERT_EQ(device.Ioctl(0xC0288905, create.data()), 0);
+  u32 instance;
+  std::memcpy(&instance, create.data() + 0x14, 4);
+
+  u8 init_params[40]{};
+  u8 init_result[8]{0xff};
+  u8 frame[20]{1, 2, 3};
+  std::vector<u8> pcm(320, 0xAA);
+  u8 run_result[24]{0xff};
+  std::vector<u8> bitstream;
+  BatchWriter writer(bitstream);
+  writer.JobHeader(instance, 8 + 16 + 8 + 16);
+  writer.SidebandIn(init_params, sizeof(init_params));
+  writer.Control(kFlagControlInitialize);
+  writer.SidebandOut(init_result, sizeof(init_result));
+  writer.JobHeader(instance, 8 + 16 + 8 + 16 + 16);
+  writer.Input(frame, sizeof(frame));
+  writer.Run(kFlagStream);
+  writer.Output(pcm.data(), (u32)pcm.size());
+  writer.SidebandOut(run_result, sizeof(run_result));
+
+  std::array<u8, 40> start{};
+  const u64 buffer_ptr = (u64)bitstream.data();
+  std::memcpy(start.data() + 8, &buffer_ptr, 8);
+  const u64 offset = bitstream.size();
+  std::memcpy(start.data() + 0x10, &offset, 4);
+  ASSERT_EQ(device.Ioctl(0xC0288907, start.data()), 0);
+  EXPECT_EQ(IoctlResult(start), 0u);
+
+  u32 result;
+  std::memcpy(&result, init_result, 4);
+  EXPECT_EQ(result, 0u);
+  std::memcpy(&result, run_result, 4);
+  EXPECT_EQ(result, 0u);
+  int32_t consumed, produced;
+  std::memcpy(&consumed, run_result + 8, 4);
+  std::memcpy(&produced, run_result + 12, 4);
+  EXPECT_EQ(consumed, (int32_t)sizeof(frame));
+  EXPECT_EQ(produced, (int32_t)pcm.size());
+  EXPECT_EQ(pcm, std::vector<u8>(pcm.size(), 0));
+}
+
+// libSceAjm sets bit 4 on control flags and return addresses (0x13, 0x16) and
+// leaves junk in a return address header's upper bits; both are accepted.
+TEST(AjmDevice, FlaggedControlAndReturnAddressChunksParse) {
+  kern::ObjectTable table;
+  auto& device = *new kern::AjmDevice(table);
+
+  std::array<u8, 40> create{};
+  const u64 flags = 9;
+  std::memcpy(create.data() + 8, &flags, 8);
+  u32 codec = 3;
+  std::memcpy(create.data() + 0x10, &codec, 4);
+  ASSERT_EQ(device.Ioctl(0xC0288905, create.data()), 0);
+  u32 instance;
+  std::memcpy(&instance, create.data() + 0x14, 4);
+
+  u8 init_result[8]{0xff};
+  std::vector<u8> bitstream;
+  BatchWriter writer(bitstream);
+  writer.JobHeader(instance, 8 + 16 + 8 + 16);
+  writer.Raw(0xed957016, 0, true);
+  writer.Raw(0x13, (u32)kFlagControlInitialize, false);
+  writer.SidebandOut(init_result, sizeof(init_result));
+
+  std::array<u8, 40> start{};
+  const u64 buffer_ptr = (u64)bitstream.data();
+  std::memcpy(start.data() + 8, &buffer_ptr, 8);
+  const u64 offset = bitstream.size();
+  std::memcpy(start.data() + 0x10, &offset, 4);
+  ASSERT_EQ(device.Ioctl(0xC0288907, start.data()), 0);
+  EXPECT_EQ(IoctlResult(start), 0u);
+  u32 result;
+  std::memcpy(&result, init_result, 4);
+  EXPECT_EQ(result, 0u);
 }
 
 }  // namespace

@@ -48,7 +48,6 @@ class AjmDevice : public Device {
   InstanceState* FindInstance(u32 id);
 
   std::mutex mutex_;
-  u32 next_instance_ = 1;
   u32 next_batch_ = 1;
   // Codecs registered in this context (module register is per context).
   u32 registered_ = 0;

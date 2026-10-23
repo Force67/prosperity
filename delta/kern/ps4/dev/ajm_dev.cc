@@ -44,6 +44,7 @@ u64 Rd64(const void* data, size_t off) {
 // AJM errors (ajm/error.h) the ioctls report through the result field.
 constexpr u32 kErrInvalidInstance = 0x80930003;
 constexpr u32 kErrInvalidParameter = 0x80930005;
+constexpr u32 kErrOutOfResources = 0x80930007;
 constexpr u32 kErrCodecNotSupported = 0x80930008;
 constexpr u32 kErrMalformedBatch = 0x80930011;
 
@@ -78,6 +79,14 @@ bool CodecKnown(u32 codec) {
     default:
       return false;
   }
+}
+
+// Voice chat codecs. With no peers there is never voice to carry, so these
+// run as silence: initialize succeeds, a run consumes its input and zeroes
+// its output.
+bool IsVoiceCodec(u32 codec) {
+  return codec == kDecCelp8 || codec == kEncCelp8 || codec == kDecCelp ||
+         codec == kEncCelp;
 }
 
 const char* CodecName(u32 codec) {
@@ -133,6 +142,7 @@ bool AjmDevice::ExecuteBatch(void* pBuffer, size_t offset) {
 
   Job job{};
   InstanceState* inst = nullptr;
+  u32 inst_id = 0;
   auto make_result = [&](InstanceState* state) {
     ajm::DecodeResult r{};
     if (state && state->decoder) {
@@ -177,9 +187,15 @@ bool AjmDevice::ExecuteBatch(void* pBuffer, size_t offset) {
         gapless.Reset();
         if (inst->decoder)
           r = inst->decoder->Initialize(job.sideband_in, job.sideband_in_size);
-        else
+        else if (!IsVoiceCodec(inst->codec))
           r.result = ajm::kResultInvalidParameter;
       }
+    } else if (IsVoiceCodec(inst->codec)) {
+      if (job.output && job.output_size)
+        std::memset(job.output, 0, job.output_size);
+      r.input_consumed = job.input_size;
+      r.output_written = job.output_size;
+      r.frames = job.input_size || job.output_size ? 1 : 0;
     } else {
       if (job.input && job.input_size) {
         if (inst->decoder) {
@@ -190,6 +206,16 @@ bool AjmDevice::ExecuteBatch(void* pBuffer, size_t offset) {
           r.result = ajm::kResultCodecError;
         }
       }
+    }
+
+    if (r.result) {
+      static u32 logged = 0;
+      if (logged++ < 32)
+        BASE_LOGW("ajm", "job on instance {} ({}) failed: result={:#x} "
+                  "internal={:#x} flags={:#x} in={} out={}",
+                  inst_id, CodecName(inst->codec), (u32)r.result,
+                  (u32)r.internal_result, (unsigned long long)job.flags,
+                  job.input_size, job.output_size);
     }
 
     // Sideband output: result first, then every structure a requested flag
@@ -262,14 +288,23 @@ bool AjmDevice::ExecuteBatch(void* pBuffer, size_t offset) {
   while (p + 8 <= end) {
     const u32 word0 = Rd32(p, 0);
     const u32 word1 = Rd32(p, 4);
-    const u32 type = word0 & 0x1f;
+    // Bit 4 marks the output side of a data or sideband buffer (0x11, 0x12).
+    // libSceAjm sets it on control flags, run flags and return addresses too
+    // (0x13, 0x14, 0x16), where it changes nothing.
+    u32 type = word0 & 0x1f;
+    if ((type & 0x10) && (type & 0xf) != 1 && (type & 0xf) != 2)
+      type &= 0xf;
     switch (type) {
       case 0: {  // job header: instance in bits 6-25, size in word1
         flush();
         const u32 instance = (word0 >> 6) & 0xfffff;
         const u64 job_size = 8ull + word1;
-        if (job_size > (u64)(end - p))
+        if (job_size > (u64)(end - p)) {
+          BASE_LOGW("ajm", "batch: job of {:#x} bytes at +{:#x} overruns the {:#x} batch",
+                    job_size, (u64)(p - static_cast<u8*>(pBuffer)), offset);
           return false;
+        }
+        inst_id = instance;
         auto it = instances_.find(instance);
         inst = it != instances_.end() ? &it->second : nullptr;
         p += 8;
@@ -317,6 +352,8 @@ bool AjmDevice::ExecuteBatch(void* pBuffer, size_t offset) {
         p += 8;
         break;
       default:
+        BASE_LOGW("ajm", "batch: unknown chunk type {:#x} at +{:#x} ({:08x} {:08x})",
+                  type, (u64)(p - static_cast<u8*>(pBuffer)), word0, word1);
         return false;
     }
   }
@@ -371,7 +408,13 @@ i32 AjmDevice::Ioctl(u32 cmd, void* data) {
           BASE_LOGI("ajm", "instance create: codec {} not registered, allowing anyway",
                     codec);
 
-        const u32 slot = next_instance_++ & 0x3fff;
+        // Lowest free slot: libSceVoice recreates its instances four times a
+        // second, and a wrapping counter would hand out ids still in use.
+        u32 slot = 1;
+        while (slot < 0x4000 && instances_.count((codec << 14) | slot))
+          slot++;
+        if (slot == 0x4000)
+          return kErrOutOfResources;
         const u32 id = (codec << 14) | slot;
         auto& state = instances_[id];
         state.codec = codec;
@@ -383,8 +426,9 @@ i32 AjmDevice::Ioctl(u32 cmd, void* data) {
               (u32)(flags & ajm::kFlagMaxChannelMask), encoding, flags);
         }
         Wr32(data, kIdOff, id);
-        BASE_LOGI("ajm", "instance create: {} ({}) flags={:#x} -> id={:#x}", codec,
-                  CodecName(codec), flags, id);
+        if (kAjmTrace)
+          BASE_LOGI("ajm", "instance create: {} ({}) flags={:#x} -> id={:#x}",
+                    codec, CodecName(codec), flags, id);
         return 0;
       }
       case 0xC0288906: {  // instance destroy {instance}
