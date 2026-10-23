@@ -287,6 +287,15 @@ void RegisterTexturePages(const TexImageKey& key, u64 bytes) {
     g_texture_cache.pages[page].push_back(key);
 }
 
+bool Repacked111110(u32 dfmt, u32 nfmt) {
+  return dfmt == 7 && nfmt == 7;
+}
+
+rhi::Format SampledFormat(u32 dfmt, u32 nfmt) {
+  return Repacked111110(dfmt, nfmt) ? rhi::Format::kB10G11R11Float
+                                    : GuestTextureFormat(dfmt, nfmt);
+}
+
 void UnregisterTexturePages(const TexImageKey& key, u64 bytes) {
   const u64 end = key.base + bytes;
   for (u64 page = key.base >> kTexturePageShift;
@@ -336,7 +345,7 @@ TexKey TextureKey(u64 base,
   TexKey key;
   key.image = {base,     w,          h,
                tiling,   pitch,      layers,
-               depth,    mip_levels, GuestTextureFormat(dfmt, nfmt),
+               depth,    mip_levels, SampledFormat(dfmt, nfmt),
                pow2_pad, is_3d};
   key.base_array = base_array;
   key.view_layers = view_layers;
@@ -361,6 +370,70 @@ TexViewKey TextureViewKey(const TexKey& key) {
 
 u32 TextureTiling(u32 tiling) {
   return kForceTile >= 0 ? static_cast<u32>(kForceTile.get()) : tiling;
+}
+
+// IMG_DATA_FORMAT_11_11_10 (R in the low 10 bits, G and B 11 bits above it)
+// has no host format. It is uploaded as B10G11R11: R gains a zero mantissa bit,
+// B loses its lowest one. Mip 0 only, detiled on the CPU.
+bool UploadRepacked111110(rhi::Texture* img,
+                          u64 base,
+                          const gcn::TextureLayout32& layout,
+                          u32 texel_w,
+                          u32 texel_h,
+                          bool is_3d) {
+  const auto& level = layout.mips[0];
+  if (layout.elem_bytes != 4 || level.width < texel_w ||
+      level.height < texel_h)
+    return false;
+  const u64 slice = u64(level.width) * level.height * 4;
+  rhi::BufferDesc desc;
+  desc.size = slice * layout.layers;
+  desc.usage = rhi::kBufferCopySrc;
+  desc.memory = rhi::MemoryKind::kUpload;
+  rhi::Buffer* staging = Device().CreateBuffer(desc);
+  if (!staging)
+    return false;
+  u8* const pixels = staging->mapped();
+  for (u32 layer = 0; layer < layout.layers; layer++) {
+    u8* const dst = pixels + slice * layer;
+    if (!gcn::DetileTextureMip32(reinterpret_cast<const void*>(base), dst,
+                                 layout, 0, layer)) {
+      Device().Destroy(staging);
+      return false;
+    }
+    for (u64 at = 0; at < slice; at += 4) {
+      u32 w;
+      std::memcpy(&w, dst + at, 4);
+      const u32 r = (w & 0x3FFu) << 1, g = (w >> 10) & 0x7FFu,
+                b = (w >> 22) & 0x3FFu;
+      w = r | g << 11 | b << 22;
+      std::memcpy(dst + at, &w, 4);
+    }
+  }
+  rhi::CommandList* list = BeginImmediate();
+  if (!list) {
+    Device().Destroy(staging);
+    return false;
+  }
+  rhi::BufferTextureCopy copy;
+  copy.row_length = level.width;
+  copy.image_height = level.height;
+  copy.region.width = texel_w;
+  copy.region.height = texel_h;
+  copy.region.layers = is_3d ? 1 : layout.layers;
+  copy.region.depth = is_3d ? layout.layers : 1;
+  rhi::TextureRange range;
+  range.layers = is_3d ? 1 : layout.layers;
+  rhi::TextureBarrier b{img, rhi::TextureState::kUndefined,
+                        rhi::TextureState::kCopyDst, range};
+  list->Barrier(rhi::kAccessHostWrite, rhi::kAccessCopyRead, &b, 1);
+  list->CopyBufferToTexture(img, staging, &copy, 1);
+  b.before = rhi::TextureState::kCopyDst;
+  b.after = rhi::TextureState::kShaderRead;
+  list->Barrier(0, 0, &b, 1);
+  const bool ok = EndImmediate(list, "imm.tex_repack");
+  Device().Destroy(staging);
+  return ok;
 }
 
 bool UploadTexPixelsImmediate(rhi::Texture* img,
@@ -780,7 +853,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   }
   if (!w || !h || w > 8192 || h > 8192)
     return nullptr;
-  rhi::Format format = GuestTextureFormat(dfmt, nfmt);
+  const rhi::Format format = SampledFormat(dfmt, nfmt);
+  const bool repack = Repacked111110(dfmt, nfmt);
   if (format == rhi::Format::kUndefined)
     return nullptr;
   if (is_3d) {
@@ -1032,8 +1106,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     e.last_checked_frame = g_frame.num;
     if (!e.wt_clean) {
       const u64 t_refresh = NowNs();
-      if (!RecordTexPixels(e.image, rhi::TextureState::kShaderRead, base,
-                           layout, w, h, is_3d)) {
+      if (repack ? !UploadRepacked111110(e.image, base, layout, w, h, is_3d)
+                 : !RecordTexPixels(e.image, rhi::TextureState::kShaderRead,
+                                    base, layout, w, h, is_3d)) {
         if (kTexFail) {
           static int n = 0;
           if (n++ < 12)
@@ -1082,8 +1157,11 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     const bool cs_uploaded =
         cs_supplies && cs_supply(image_entry, rhi::TextureState::kUndefined);
     if (!cs_uploaded &&
-        !RecordTexPixels(image_entry.image, rhi::TextureState::kUndefined, base,
-                         layout, w, h, is_3d)) {
+        (repack ? !UploadRepacked111110(image_entry.image, base, layout, w, h,
+                                        is_3d)
+                : !RecordTexPixels(image_entry.image,
+                                   rhi::TextureState::kUndefined, base, layout,
+                                   w, h, is_3d))) {
       if (kTexFail) {
         static int n = 0;
         if (n++ < 12)
@@ -1185,7 +1263,7 @@ rhi::BindGroup* GetTexture(u64 base,
 }
 
 bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt) {
-  return GuestTextureFormat(dfmt, nfmt) != rhi::Format::kUndefined;
+  return SampledFormat(dfmt, nfmt) != rhi::Format::kUndefined;
 }
 
 static rhi::TextureView* ResolveTexViewUncached(const DrawInfo::DrawTex& t);
