@@ -664,15 +664,21 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   };
   u32 nv = d.vertex_count;
   const bool quads = indexed && d.prim_type == 19;
+  // A non-indexed quad list draws through two triangles per quad indexed here.
+  const bool auto_quads =
+      !indexed && !d.indirect_args && d.prim_type == 19 && nv >= 4;
   const bool indirect_quads = quads && d.indirect_args;
-  const u32 upload_indices = quads ? d.index_count / 4 * 6 : d.index_count;
+  const u32 upload_indices = quads        ? d.index_count / 4 * 6
+                             : auto_quads ? nv / 4 * 6
+                                          : d.index_count;
   const bool convert_indices = indexed && (quads || d.index_type == 2);
   const u32 ib_tag = 1u + d.index_type + (quads ? 4u : 0u);
   const u64 index_bytes =
-      indexed
-          ? static_cast<u64>(upload_indices) *
-                (convert_indices ? 4 : UploadedIndexElementBytes(d.index_type))
-          : 0;
+      indexed ? static_cast<u64>(upload_indices) *
+                    (convert_indices ? 4
+                                     : UploadedIndexElementBytes(d.index_type))
+      : auto_quads ? static_cast<u64>(upload_indices) * 4
+                   : 0;
   const bool descriptor_bounds =
       d.indirect_args ||
       (indexed && CsHoldsGeometry(reinterpret_cast<u64>(d.index_data),
@@ -1066,7 +1072,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
     return Decline(kRing);
   }
-  const u64 index_align = convert_indices || d.index_type == 1 ? 4 : 2;
+  const u64 index_align =
+      convert_indices || auto_quads || d.index_type == 1 ? 4 : 2;
   CachedBuffer ib_bind{};
   bool ib_gpu = false;
   if (indexed && !quads && d.index_type != 2) {
@@ -1100,7 +1107,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           : 0;
   const u64 aligned_ioff =
       (g_ring.ib_offset + index_align - 1) & ~(index_align - 1);
-  if (indexed && ib_cached == u64(-1) && !ib_bind.buffer &&
+  const bool ring_indices =
+      (indexed && ib_cached == u64(-1) && !ib_bind.buffer) || auto_quads;
+  if (ring_indices &&
       aligned_ioff + index_bytes + (indirect_quads ? 20 : 0) > g_ring.ib_end) {
     if (kGpuDecltrace) {
       static int n = 0;
@@ -2098,6 +2107,19 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
           u64(d.index_count) * GuestIndexElementBytes(d.index_type),
           index_revision);
   }
+  if (auto_quads) {
+    if (!EnsureIndexRing())
+      return Decline(kRing);
+    auto* out = reinterpret_cast<u32*>(g_ring.ib_map + ioff);
+    for (u32 v = 0; v + 4 <= nv; v += 4, out += 6) {
+      out[0] = v;
+      out[1] = v + 1;
+      out[2] = v + 2;
+      out[3] = v;
+      out[4] = v + 2;
+      out[5] = v + 3;
+    }
+  }
   if (nbind) {
     rhi::Buffer* bufs[8];
     u64 offs[8];
@@ -2117,15 +2139,16 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     }
     list->SetVertexBuffers(0, nbind, bufs, offs);
   }
-  if (indexed)
+  if (indexed || auto_quads)
     list->SetIndexBuffer(
         ib_bind.buffer    ? ib_bind.buffer
         : convert_indices ? g_ring.converted_ib
                           : g_ring.ib,
         ib_bind.buffer ? ib_bind.offset
                        : (ib_cached != u64(-1) ? ib_cached : ioff),
-        (convert_indices || d.index_type == 1) ? rhi::IndexType::kUint32
-                                               : rhi::IndexType::kUint16);
+        (convert_indices || auto_quads || d.index_type == 1)
+            ? rhi::IndexType::kUint32
+            : rhi::IndexType::kUint16);
   if (kDrawTrace && draw_count >= 300) {
     static int n = 0;
     if (n++ < 40)
@@ -2155,7 +2178,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     list->DrawIndexedIndirect(indirect_buf, indirect_off);
   else if (indirect_buf)
     list->DrawIndirect(indirect_buf, indirect_off);
-  else if (indexed)
+  else if (indexed || auto_quads)
     list->DrawIndexed(upload_indices, d.instance_count ? d.instance_count : 1,
                       0, 0, 0);
   else
@@ -2426,7 +2449,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     target.last_frame = g_frame.num;
   }
   g_ring.vb_offset += vneed;
-  if (indexed && ib_cached == u64(-1) && !ib_bind.buffer)
+  if (ring_indices)
     g_ring.ib_offset = ioff + index_bytes + (indirect_quads ? 20 : 0);
   g_frame.draws++;
   for (u32 i = 0; i < g_region.cur_mrt_count; i++) {
