@@ -147,6 +147,7 @@ struct StageCache {
     u32 dcb;
     bool tracked;
     u32 max_index;
+    u64 digest;
   };
   static constexpr u32 kBlockShift = 16;
   base::UnorderedMap<StageCacheKey, Entry, StageCacheKeyHash> map;
@@ -178,16 +179,18 @@ struct StageCache {
               bool tracked = false,
               u32 max_index = ~0u,
               u64 source_bytes = 0,
-              u64 revision = 0) {
+              u64 revision = 0,
+              u64 digest = 0) {
     RollFrame();
     const StageCacheKey key{base, salt};
     auto& e = map[key];
-    if (e.bytes >= bytes && Live(e) && e.revision == revision)
+    if (e.bytes >= bytes && Live(e) && e.revision == revision &&
+        e.digest == digest)
       return;
     if (!source_bytes)
       source_bytes = bytes;
     e = {off, bytes,   source_bytes, revision, render::CsWritebackGeneration(),
-         dcb, tracked, max_index};
+         dcb, tracked, max_index,    digest};
     if (tracked)
       for (u64 b = base >> kBlockShift;
            b <= (base + source_bytes - 1) >> kBlockShift; b++)
@@ -331,16 +334,31 @@ u64 StagedOffset(const StageCache::Entry* e) {
   return e ? e->off : u64(-1);
 }
 
+// Four independent multiply chains, so hashing runs near memory speed.
+u64 GuestDigest(u64 base, u64 bytes) {
+  const auto* p = reinterpret_cast<const u8*>(base);
+  constexpr u64 kMul = 0x9E3779B97F4A7C15ull;
+  u64 h[4] = {bytes, kMul, ~bytes, kMul >> 1};
+  u64 i = 0;
+  for (; i + 32 <= bytes; i += 32)
+    for (u32 k = 0; k < 4; k++) {
+      u64 w;
+      std::memcpy(&w, p + i + k * 8, 8);
+      h[k] = (h[k] ^ w) * kMul;
+      h[k] ^= h[k] >> 29;
+    }
+  for (; i < bytes; i++)
+    h[0] = (h[0] ^ p[i]) * kMul;
+  return (h[0] ^ (h[1] * 3) ^ (h[2] * 5) ^ (h[3] * 7)) * kMul;
+}
+
 // A staged copy of constants or a raw buffer is reused only while the guest
-// bytes still match it. Write tracking cannot vouch for these: titles rewrite
-// descriptor tables through a second mapping of the same memory (DRIVECLUB's
-// CPU view of its GPU heap), which no protection of ours sees.
-u64 MatchingStagedOffset(const StageCache::Entry* e,
-                         const u8* ring,
-                         u64 base,
-                         u64 bytes) {
-  if (!e || std::memcmp(ring + e->off, reinterpret_cast<const void*>(base),
-                        bytes) != 0)
+// bytes still hash the same. Write tracking cannot vouch for these: titles
+// rewrite descriptor tables through a second mapping of the same memory
+// (DRIVECLUB's CPU view of its GPU heap), which no protection of ours sees.
+// The ring itself is write-combined, so the check never reads it.
+u64 MatchingStagedOffset(const StageCache::Entry* e, u64 base) {
+  if (!e || GuestDigest(base, e->bytes) != e->digest)
     return u64(-1);
   return e->off;
 }
@@ -1922,9 +1940,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     if (have_cbuf) {
       cache_n = CbufCopyBytes(cb.base, cb.size);
       if (kRingDedup) {
-        const u64 cached = MatchingStagedOffset(
-            g_ubo_staged.Find(cb.base, cache_n), g_ring.ubo_map, cb.base,
-            cache_n);
+        const u64 cached =
+            MatchingStagedOffset(g_ubo_staged.Find(cb.base, cache_n), cb.base);
         if (cached != u64(-1)) {
           dyn_off[i] = static_cast<u32>(cached);
           continue;
@@ -1964,7 +1981,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
     }
     if (have_cbuf && kRingDedup)
-      g_ubo_staged.Insert(cb.base, cache_n, 0, next);
+      g_ubo_staged.Insert(cb.base, cache_n, 0, next, false, ~0u, 0, 0,
+                          GuestDigest(cb.base, cache_n));
     dyn_off[i] = static_cast<u32>(next);
     next = (next + n + g_ring.ubo_align - 1) & ~(u64)(g_ring.ubo_align - 1);
   }
@@ -2023,8 +2041,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
       if (!IsReadableThisFrame(rb.base, want))
         continue;
-      const u64 cached = MatchingStagedOffset(g_sbo_staged.Find(rb.base, want),
-                                              g_ring.sbo_map, rb.base, want);
+      const u64 cached =
+          MatchingStagedOffset(g_sbo_staged.Find(rb.base, want), rb.base);
       if (cached != u64(-1)) {
         sbo_dyn[i] = static_cast<u32>(cached);
         rawbuf_mask |= 1u << i;
@@ -2052,7 +2070,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
         std::memset(dst + want, 0, static_cast<size_t>(reserve - want));
       g_ring.sbo_offset = off + reserve;
       sbo_dyn[i] = static_cast<u32>(off);
-      g_sbo_staged.Insert(rb.base, want, 0, off, tracked);
+      g_sbo_staged.Insert(rb.base, want, 0, off, tracked, ~0u, 0, 0,
+                          GuestDigest(rb.base, want));
       rawbuf_mask |= 1u << i;
     }
     rhi::BindGroup* raw_set =
