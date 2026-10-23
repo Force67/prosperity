@@ -331,6 +331,20 @@ u64 StagedOffset(const StageCache::Entry* e) {
   return e ? e->off : u64(-1);
 }
 
+// A staged copy of constants or a raw buffer is reused only while the guest
+// bytes still match it. Write tracking cannot vouch for these: titles rewrite
+// descriptor tables through a second mapping of the same memory (DRIVECLUB's
+// CPU view of its GPU heap), which no protection of ours sees.
+u64 MatchingStagedOffset(const StageCache::Entry* e,
+                         const u8* ring,
+                         u64 base,
+                         u64 bytes) {
+  if (!e || std::memcmp(ring + e->off, reinterpret_cast<const void*>(base),
+                        bytes) != 0)
+    return u64(-1);
+  return e->off;
+}
+
 DELTA_OPTION(bool, kRingDedup, "DELTA_GPU_RING_DEDUP", true);
 
 bool BindVertexDescriptor(u64 base,
@@ -1908,7 +1922,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     if (have_cbuf) {
       cache_n = CbufCopyBytes(cb.base, cb.size);
       if (kRingDedup) {
-        const u64 cached = StagedOffset(g_ubo_staged.Find(cb.base, cache_n));
+        const u64 cached = MatchingStagedOffset(
+            g_ubo_staged.Find(cb.base, cache_n), g_ring.ubo_map, cb.base,
+            cache_n);
         if (cached != u64(-1)) {
           dyn_off[i] = static_cast<u32>(cached);
           continue;
@@ -2007,7 +2023,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       }
       if (!IsReadableThisFrame(rb.base, want))
         continue;
-      const u64 cached = StagedOffset(g_sbo_staged.Find(rb.base, want));
+      const u64 cached = MatchingStagedOffset(g_sbo_staged.Find(rb.base, want),
+                                              g_ring.sbo_map, rb.base, want);
       if (cached != u64(-1)) {
         sbo_dyn[i] = static_cast<u32>(cached);
         rawbuf_mask |= 1u << i;
