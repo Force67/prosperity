@@ -44,6 +44,10 @@ constexpr Setting kDefaults[] = {
     {0x123d6328eff5667b, 0},                           // time zone
     {0x3a73688d92700623, 0},  // time zone offset, seconds
     {0x03d261027dfff0a4, 0},  // daylight saving
+    // Display area width in pixels; the safe-area ratio is this over 1920.
+    // Unanswered, sceSystemServiceGetDisplaySafeAreaInfo fails, and DRIVECLUB
+    // then reads a ratio of 0 and shrinks its whole UI to a dot.
+    {0x03da610276ffffa4, 1920},
     {kEnterButton, 1},       {0x0cae671adf3aeb34, 0}, {0x338660835bde7cb1, 0},
     // Devkit Target Settings shader instrumentation, re-read by libSceAgc on
     // every suspend point once /dev/dipsw reports a devkit. Both off.
