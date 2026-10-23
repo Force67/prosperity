@@ -18,6 +18,10 @@ namespace gpu::rhi {
 class Object {
  public:
   virtual ~Object() = default;
+
+ private:
+  friend class Device;
+  size_t tracked_slot_ = ~size_t(0);
 };
 
 class Buffer : public Object {
@@ -197,15 +201,19 @@ class Device {
  public:
   void Track(Object* object) {
     base::LockGuard lock(objects_mutex_);
+    object->tracked_slot_ = objects_.size();
     objects_.push_back(object);
   }
   void Forget(Object* object) {
     base::LockGuard lock(objects_mutex_);
-    for (auto it = objects_.begin(); it != objects_.end(); ++it)
-      if (*it == object) {
-        objects_.erase(it);
-        return;
-      }
+    if (!object || object->tracked_slot_ >= objects_.size() ||
+        objects_[object->tracked_slot_] != object)
+      return;
+    Object* last = objects_.back();
+    objects_[object->tracked_slot_] = last;
+    last->tracked_slot_ = object->tracked_slot_;
+    objects_.pop_back();
+    object->tracked_slot_ = ~size_t(0);
   }
   void ReleaseObjects() {
     for (;;) {
