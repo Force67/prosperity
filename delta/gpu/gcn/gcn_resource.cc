@@ -55,7 +55,7 @@ bool g_bindless = false;
 
 namespace {
 
-constexpr u64 kGuestLo = 0x1000000000ull;
+constexpr u64 kGuestLo = 0x100000000ull;
 constexpr u64 kGuestHi = 0x20000000000ull;
 
 bool GuestRange(u64 address, u64 size) {

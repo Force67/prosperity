@@ -25,7 +25,7 @@ namespace gpu::gcn {
 
 using spirv::Id;
 
-constexpr u64 kGuestLo = 0x1000000000ull;
+constexpr u64 kGuestLo = 0x100000000ull;
 constexpr u64 kGuestHi = 0x20000000000ull;
 inline bool InGuest(u64 a) {
   return a >= kGuestLo && a < kGuestHi;
