@@ -1,0 +1,21 @@
+// DRIVECLUB (CUSA00093, PS4)
+// The render thread records a draw after the walk resolved it, and by then the
+// title has already refilled the descriptor tables and instance rings that draw
+// points at: instanced props and skinned meshes read other objects' transforms
+// and smear across the screen. Recording on the walk thread reads them in time
+// (2026-10-23).
++DELTA_GPU_RENDER_THREAD=0
+
+// Status 2026-10-23, with the v1.28 update (--update): menus, loading screens
+// and the race HUD render; the race G-buffer is geometrically correct. The lit
+// frame still presents white (lighting/tonemap not yet investigated) and UI
+// text glyphs are partly missing.
+
+// Boot to the race: --pad "20:cross,24:cross,28:cross,32:cross,36:cross,45:cross,55:cross"
+// Who drew a pixel of the G-buffer albedo, and a VS replayed against the GPU:
+// +DELTA_GPU_CAPTURE_AT=all
+// +DELTA_GPU_RTWATCH=0x500cdd0000
+// +DELTA_GPU_RTWATCH_ONLY=1
+// +DELTA_GPU_RTWATCH_WIDTH=1920
+// +DELTA_GPU_GCN_VSVGPR_VS=0x500313fb00
+// +DELTA_GPU_GCN_VSVGPR_PC=0xffff

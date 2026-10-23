@@ -189,6 +189,8 @@ class Run:
                 lines.append(f"[peek] {spec} ({addr:#x}) = {v:#x} ({v})")
             except (OSError, ValueError, TypeError) as e:
                 lines.append(f"[peek] {spec}: {e}")
+        if self.a.scan:
+            lines += scan_guest(pid, bytes.fromhex(self.a.scan))
         try:
             tids = os.listdir(f"/proc/{pid}/task")
         except OSError:
@@ -281,7 +283,7 @@ class Run:
                 if h:
                     print(f"     host:  {h}")
             for l in lines:
-                if l.startswith("[peek]"):
+                if l.startswith(("[peek]", "[scan]")):
                     print("  " + l)
             waits = [l for l in lines if "[waitprobe]" in l]
             if waits:
@@ -692,6 +694,38 @@ def report_capture(cap_dir):
           f"more: tools/gpu_capture.py draws|draw N|graph {cap_dir}")
 
 
+def scan_guest(pid, needle, limit=24):
+    """[scan] lines for each hit of `needle` in the guest's writable memory."""
+    out = []
+    try:
+        with open(f"/proc/{pid}/maps") as f:
+            maps = f.read().splitlines()
+        mem = open(f"/proc/{pid}/mem", "rb")
+    except OSError as e:
+        return [f"[scan] {e}"]
+    with mem:
+        for l in maps:
+            r, perms = l.split()[:2]
+            lo, hi = (int(x, 16) for x in r.split("-"))
+            # Guest memory only: host heaps and libraries sit far above it.
+            if "w" not in perms or hi > 0x10000000000 or hi - lo > 1 << 34:
+                continue
+            for at in range(lo, hi, 1 << 24):
+                try:
+                    mem.seek(at)
+                    buf = mem.read(min(hi - at, (1 << 24) + len(needle)))
+                except (OSError, ValueError):
+                    break
+                i = buf.find(needle)
+                while i >= 0:
+                    if i < 1 << 24:
+                        out.append(f"[scan] hit at {at + i:#x}")
+                        if len(out) >= limit:
+                            return out
+                    i = buf.find(needle, i + 1)
+    return out or ["[scan] no hits"]
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -700,6 +734,9 @@ def main():
     p.add_argument("--peek", default="",
                    help="comma list of addresses (hex, or module+0xoff) whose "
                         "u64 is read at every probe")
+    p.add_argument("--scan", default="",
+                   help="hex byte pattern searched for in guest memory at "
+                        "every probe")
     p.add_argument("-t", "--time", type=float, default=90, help="seconds to run")
     p.add_argument("-o", "--opt", action="append", default=[],
                    help="Name=Value option (repeatable)")
@@ -715,7 +752,7 @@ def main():
                    help="snapshot every N frames into a filmstrip")
     p.add_argument("--capture", default="",
                    help="GPU frame capture into OUT/cap, then exit and "
-                        "summarize: t=SECS, busy=DRAWS or f=FRAME")
+                        "summarize: t=SECS, busy=DRAWS, f=FRAME, or t=SECS,busy=DRAWS")
     p.add_argument("--tracy", default="",
                    help="START[:SECS]: record a Tracy trace from START s into "
                         "OUT/trace.tracy and print where the time went")
@@ -760,15 +797,19 @@ def main():
                  f"DELTA_GPU_DUMP_DIR={film_dir}"]
     cap_dir = os.path.join(a.out, "cap")
     if a.capture:
-        kind, _, val = a.capture.partition("=")
-        knob = {"t": "DELTA_GPU_CAPTURE_AFTER", "busy": "DELTA_GPU_CAPTURE_BUSY",
-                "f": "DELTA_GPU_CAPTURE"}.get(kind)
-        if not knob or not val:
-            p.error("--capture takes t=SECS, busy=DRAWS or f=FRAME")
+        # t=SECS,busy=DRAWS together: the first busy frame after SECS.
+        for part in a.capture.split(","):
+            kind, _, val = part.partition("=")
+            knob = {"t": "DELTA_GPU_CAPTURE_AFTER",
+                    "busy": "DELTA_GPU_CAPTURE_BUSY",
+                    "f": "DELTA_GPU_CAPTURE"}.get(kind)
+            if not knob or not val:
+                p.error("--capture takes t=SECS, busy=DRAWS, f=FRAME "
+                        "or t=SECS,busy=DRAWS")
+            opts.append(f"{knob}={val}")
         shutil.rmtree(cap_dir, ignore_errors=True)
         os.makedirs(cap_dir)
-        opts += [f"{knob}={val}", f"DELTA_GPU_CAPTURE_DIR={cap_dir}",
-                 "DELTA_GPU_CAPTURE_EXIT=1"]
+        opts += [f"DELTA_GPU_CAPTURE_DIR={cap_dir}", "DELTA_GPU_CAPTURE_EXIT=1"]
     env = dict(os.environ)
     if not a.window:
         env["SDL_VIDEODRIVER"] = "offscreen"

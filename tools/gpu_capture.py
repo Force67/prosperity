@@ -19,6 +19,8 @@ debugging a renderer, as plain greppable text.
   gpu_capture.py validation <capture>
   gpu_capture.py zero       <capture>           everything silently reading 0
   gpu_capture.py timeline   <capture>           the raw event stream, one line each
+  gpu_capture.py firstdraw  <capture> RT X Y    which draws last changed a pixel
+                                                (needs DELTA_GPU_CAPTURE_AT snapshots)
   gpu_capture.py diff       <capture-a> <capture-b>
 
 <capture> is a .jsonl file, or a directory (the newest frame_*.jsonl in it).
@@ -29,6 +31,7 @@ import collections
 import glob
 import json
 import os
+import re
 import sys
 
 
@@ -118,6 +121,103 @@ def fmt_draw_line(d):
             f"mrt={len(d.get('color_targets', []))} "
             f"vs={d.get('vs', {}).get('addr')} ps={d.get('ps', {}).get('addr')} "
             f"tex={len(tex)}{(' [' + how + ']') if how else ''}")
+
+
+def read_png(path, rows_needed=None):
+    """(width, height, channels, rows) of an 8-bit RGB/RGBA PNG, stdlib only.
+    With rows_needed only that many rows are decoded."""
+    import struct
+    import zlib
+    data = open(path, 'rb').read()
+    pos, idat = 8, b''
+    while pos < len(data):
+        n, kind = struct.unpack('>I4s', data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if kind == b'IHDR':
+            w, h, depth, ctype = struct.unpack('>IIBB', body[:10])
+        elif kind == b'IDAT':
+            idat += body
+        pos += 12 + n
+    if depth != 8 or ctype not in (2, 6):
+        raise ValueError(f'{path}: unsupported PNG (depth {depth}, type {ctype})')
+    bpp = 4 if ctype == 6 else 3
+    stride = w * bpp
+    n = h if rows_needed is None else min(h, rows_needed)
+    raw = zlib.decompressobj().decompress(idat, n * (stride + 1))
+    rows, prev = [], bytearray(stride)
+    for y in range(n):
+        f = raw[y * (stride + 1)]
+        if f == 0:  # what our own PNG writer emits: no per-byte work
+            line = raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)]
+            rows.append(line)
+            prev = line
+            continue
+        line = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if f == 1:
+                line[i] = (line[i] + a) & 255
+            elif f == 2:
+                line[i] = (line[i] + b) & 255
+            elif f == 3:
+                line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pr = a if pa <= pb and pa <= pc else b if pb <= pc else c
+                line[i] = (line[i] + pr) & 255
+        rows.append(bytes(line))
+        prev = line
+    return w, h, bpp, rows
+
+
+def cmd_firstdraw(args):
+    """Which draws changed one pixel of a target: scans the per-draw snapshots
+    (DELTA_GPU_CAPTURE_AT=every:N or a list) and lists the draws inside the
+    snapshot interval where the pixel last changed."""
+    jsonl = resolve(args.capture)
+    prefix = jsonl[:-len('.jsonl')]
+    rt = addr(args.rt)
+    shots = []
+    for path in glob.glob(f'{prefix}_d*_rt_{rt}_*.png'):
+        m = re.search(r'_d(\d+)_rt_', path)
+        shots.append((int(m.group(1)), path))
+    final = glob.glob(f'{prefix}_end_rt_{rt}_*.png')
+    shots.sort()
+    if final:
+        shots.append((10 ** 9, final[0]))
+    if not shots:
+        sys.exit(f'no snapshots of {rt}: capture with DELTA_GPU_CAPTURE_AT')
+    # The target can be aliased at other sizes mid-frame: keep the snapshots
+    # the size of the last one.
+    size = re.search(r'_(\d+x\d+)\.png$', shots[-1][1]).group(1)
+    values = []
+    for d, path in shots:
+        if not path.endswith(f'_{size}.png'):
+            continue
+        w, h, bpp, rows = read_png(path, args.y + 1)
+        if not (0 <= args.x < w and 0 <= args.y < h):
+            sys.exit(f'pixel outside {w}x{h}')
+        values.append((d, tuple(rows[args.y][args.x * bpp:(args.x + 1) * bpp])))
+    if args.history:
+        for d, v in values:
+            print(f'  {"end" if d == 10 ** 9 else f"d{d}"}: {v}')
+    key = (lambda v: v[:3]) if args.rgb else (lambda v: v)
+    changes = [(prev[0], cur[0], cur[1]) for prev, cur in zip(values, values[1:])
+               if key(cur[1]) != key(prev[1])]
+    print(f'{rt} pixel {args.x},{args.y}: first snapshot d{values[0][0]} '
+          f'{values[0][1]}, final {values[-1][1]}')
+    if not changes:
+        print('never changed between snapshots')
+        return
+    draws = {d.get('draw'): d for d in of(load(jsonl), 'draw')}
+    for lo, hi, value in changes[-args.last:]:
+        span = 'end' if hi == 10 ** 9 else f'd{hi}'
+        print(f'changed to {value} in (d{lo}, {span}]:')
+        for n in sorted(k for k in draws if lo < k <= hi):
+            if any(same(t, rt) for t in draw_targets(draws[n])):
+                print('  ' + fmt_draw_line(draws[n]))
 
 
 # --- commands --------------------------------------------------------------
@@ -517,6 +617,16 @@ def main():
     add('validation', cmd_validation)
     add('zero', cmd_zero)
     add('timeline', cmd_timeline)
+    s = add('firstdraw', cmd_firstdraw)
+    s.add_argument('rt')
+    s.add_argument('x', type=int)
+    s.add_argument('y', type=int)
+    s.add_argument('--last', type=int, default=3,
+                   help='changes to list, newest last')
+    s.add_argument('--rgb', action='store_true',
+                   help='ignore changes to alpha alone')
+    s.add_argument('--history', action='store_true',
+                   help='print the pixel at every snapshot')
     sd = sub.add_parser('diff')
     sd.add_argument('a')
     sd.add_argument('b')
