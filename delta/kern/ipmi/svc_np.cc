@@ -26,6 +26,10 @@ enum {
   // in: {u32 userId, u8 flag} -> out: SceNpId (0x24 bytes). sceNpGetNpId
   // returns the method result as is.
   kMgrGetNpId = 0x17,
+  // in: {u32 userId, u32} -> out[0] payload, out[1] u32 payload length. The
+  // 0x800 capacity libSceNpManager declares is a cap, not the caller's buffer
+  // (NpMessageInit passes 0x100 of stack), so only the length may be written.
+  kMgrGetPayload = 0x24,
 };
 
 // The internal state that maps to SCE_NP_STATE_SIGNED_OUT.
@@ -39,6 +43,9 @@ struct NpManager : Service {
     switch (inv.Method()) {
       case kMgrGetState:
         inv.ReplyU32(0, kInternalSignedOut);
+        break;
+      case kMgrGetPayload:
+        inv.ReplyU32(1, 0);
         break;
       case kMgrGetNpId:
         // An all-zero id with SCE_OK reads as a signed-in user.
