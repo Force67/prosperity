@@ -195,7 +195,8 @@ struct TileTable;
 const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
                               const gcn::TextureLayout32& linear,
                               bool packed = false,
-                              bool pack11 = false);
+                              bool pack11 = false,
+                              bool repack111110 = false);
 void RecordImageTiling(rhi::CommandList* c,
                        const TileTable& t,
                        rhi::Buffer* tiled,
@@ -334,7 +335,8 @@ extern TilingState g_tiling;
 u64 TileTableKey(const gcn::TextureLayout32& t,
                  const gcn::TextureLayout32& l,
                  bool packed,
-                 bool pack11);
+                 bool pack11,
+                 bool repack111110 = false);
 
 struct CsScratch {
   rhi::Buffer* buf = nullptr;

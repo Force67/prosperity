@@ -58,7 +58,8 @@ bool InitTiling() {
 u64 TileTableKey(const gcn::TextureLayout32& t,
                  const gcn::TextureLayout32& l,
                  bool packed,
-                 bool pack11) {
+                 bool pack11,
+                 bool repack111110) {
   u64 h = 1469598103934665603ull;
   const u64 words[] = {
       t.tiling_idx,     t.mips[0].width,
@@ -66,7 +67,8 @@ u64 TileTableKey(const gcn::TextureLayout32& t,
       t.layers,         t.mip_levels,
       t.elem_bytes,     t.size,
       l.elem_bytes,     l.size,
-      l.mips[0].pitch,  (packed ? 1u : 0u) | (pack11 ? 2u : 0u)};
+      l.mips[0].pitch,
+      (packed ? 1u : 0u) | (pack11 ? 2u : 0u) | (repack111110 ? 4u : 0u)};
   for (u64 w : words)
     h = (h ^ w) * 1099511628211ull;
   return h;
@@ -75,13 +77,17 @@ u64 TileTableKey(const gcn::TextureLayout32& t,
 const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
                               const gcn::TextureLayout32& linear,
                               bool packed,
-                              bool pack11) {
+                              bool pack11,
+                              bool repack111110) {
   const bool expanded = !packed &&
                         (tiled.elem_bytes == 1 || tiled.elem_bytes == 2) &&
                         linear.elem_bytes == 4;
   pack11 =
       pack11 || (!packed && tiled.elem_bytes == 4 && linear.elem_bytes == 16);
   if (pack11 && (packed || tiled.elem_bytes != 4 || linear.elem_bytes != 16))
+    return nullptr;
+  if (repack111110 && (packed || pack11 || tiled.elem_bytes != 4 ||
+                       linear.elem_bytes != 4))
     return nullptr;
   if (packed &&
       (tiled.elem_bytes >= 4 || tiled.elem_bytes != linear.elem_bytes))
@@ -95,7 +101,7 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
       linear.size > max_range || tiled.size > UINT32_MAX ||
       linear.size > UINT32_MAX)
     return nullptr;
-  const u64 key = TileTableKey(tiled, linear, packed, pack11);
+  const u64 key = TileTableKey(tiled, linear, packed, pack11, repack111110);
   auto it = g_cs.tile_tables.find(key);
   if (it != g_cs.tile_tables.end())
     return it->second.buf ? &it->second : nullptr;
@@ -118,7 +124,8 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
          static_cast<u32>(packed ? lm.offset : lm.offset / 4), lm.pitch,
          packed ? lm.pitch * lm.stored_height * linear.elem_bytes
                 : lm.pitch * lm.stored_height * (linear.elem_bytes / 4),
-         1u, tiled.elem_bytes, packed ? 1u : 0u, 0u, pack11 ? 1u : 0u});
+         1u, tiled.elem_bytes, packed ? 1u : 0u, 0u,
+         pack11 ? 1u : repack111110 ? 2u : 0u});
     table.insert(table.end(), terms.begin(), terms.end());
   }
   if (table.empty())
@@ -313,6 +320,7 @@ bool TruthAvailable() {
 #else
 const TileTable* GetTileTable(const gcn::TextureLayout32&,
                               const gcn::TextureLayout32&,
+                              bool,
                               bool,
                               bool) {
   return nullptr;

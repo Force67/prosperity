@@ -714,11 +714,19 @@ bool RecordTexPixels(rhi::Texture* img,
                      u32 texel_w,
                      u32 texel_h,
                      bool is_3d,
-                     u32 first_mip = 0) {
+                     u32 first_mip = 0,
+                     bool repack111110 = false) {
   DELTA_ZONE("gpu.tex_upload");
   const u64 start = NowNs();
   if (!DetileTextureOnGpu(base, layout, texel_w, texel_h, img, old_state, is_3d,
-                          first_mip)) {
+                          first_mip, repack111110)) {
+    if (repack111110) {
+      static int n = 0;
+      if (n++ < 4)
+        BASE_LOGW("gpuvk", "texture {:#x} tiling={}: 11_11_10 repacked on the CPU",
+                  (unsigned long)base, layout.tiling_idx);
+      return UploadRepacked111110(img, base, layout, texel_w, texel_h, is_3d);
+    }
     static int n = 0;
     if (n++ < 16)
       BASE_LOGW("gpuvk", "texture {:#x} {}x{} tiling={} elem={}: no GPU upload",
@@ -1106,9 +1114,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     e.last_checked_frame = g_frame.num;
     if (!e.wt_clean) {
       const u64 t_refresh = NowNs();
-      if (repack ? !UploadRepacked111110(e.image, base, layout, w, h, is_3d)
-                 : !RecordTexPixels(e.image, rhi::TextureState::kShaderRead,
-                                    base, layout, w, h, is_3d)) {
+      if (!RecordTexPixels(e.image, rhi::TextureState::kShaderRead, base,
+                           layout, w, h, is_3d, 0, repack)) {
         if (kTexFail) {
           static int n = 0;
           if (n++ < 12)
@@ -1157,11 +1164,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     const bool cs_uploaded =
         cs_supplies && cs_supply(image_entry, rhi::TextureState::kUndefined);
     if (!cs_uploaded &&
-        (repack ? !UploadRepacked111110(image_entry.image, base, layout, w, h,
-                                        is_3d)
-                : !RecordTexPixels(image_entry.image,
-                                   rhi::TextureState::kUndefined, base, layout,
-                                   w, h, is_3d))) {
+        !RecordTexPixels(image_entry.image, rhi::TextureState::kUndefined,
+                         base, layout, w, h, is_3d, 0, repack)) {
       if (kTexFail) {
         static int n = 0;
         if (n++ < 12)

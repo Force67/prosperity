@@ -1015,9 +1015,12 @@ bool DetileTextureOnGpu(u64 base,
                         rhi::Texture* img,
                         rhi::TextureState state,
                         bool is_3d,
-                        u32 first_mip) {
+                        u32 first_mip,
+                        bool repack111110) {
   const u32 elem = tiled.elem_bytes;
   const bool linear_in = gcn::TilingIsLinear(tiled.tiling_idx);
+  if (repack111110 && linear_in)
+    return false;
   const u32 block =
       (elem == 8 || elem == 16) && texel_w > tiled.mips[0].width ? 4u : 1u;
   gcn::TextureLayout32 linear = tiled;
@@ -1046,7 +1049,8 @@ bool DetileTextureOnGpu(u64 base,
       return false;
   }
   const TileTable* table =
-      linear_in ? nullptr : GetTileTable(tiled, linear, elem < 4);
+      linear_in ? nullptr
+                : GetTileTable(tiled, linear, elem < 4, false, repack111110);
   if (!linear_in && !table)
     return false;
   g_cs.scratch_owner++;

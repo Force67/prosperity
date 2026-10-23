@@ -173,7 +173,10 @@ base::Vector<u32> BuildImageTilingShader() {
                    sel(m.Emit(Op::OpUGreaterThan, t_bool, {exp32, c(112)}),
                        normal, denormal)));
   };
-  const Id is_pack11 = m.Emit(Op::OpINotEqual, t_bool, {param(14), c(0)});
+  // param 14: 1 expands 10_11_11 to RGBA32F, 2 moves 11_11_10 (R10 G11 B11)
+  // into the host's R11 G11 B10, dropping B's lowest mantissa bit.
+  const Id is_pack11 = eq(param(14), c(1));
+  const Id is_repack = eq(param(14), c(2));
   const Id texel4 = add(add(param(7), mul(z, param(9))),
                         mul(add(mul(y, param(8)), xw), c(4)));
   const Id detile = m.NewBlock(), retile = m.NewBlock(), copied = m.NewBlock();
@@ -244,7 +247,18 @@ base::Vector<u32> BuildImageTilingShader() {
       {at(1, linear), c(1), c(0), op(Op::OpShiftLeftLogical, texel, lshift)});
   m.Branch(narrow_done);
   m.OpenBlock(plain_store);
-  m.Store(at(1, linear), texel);
+  const Id repacked = op(
+      Op::OpBitwiseOr,
+      op(Op::OpBitwiseOr,
+         op(Op::OpShiftLeftLogical, op(Op::OpBitwiseAnd, texel, c(0x3FF)),
+            c(1)),
+         op(Op::OpShiftLeftLogical,
+            op(Op::OpBitwiseAnd, op(Op::OpShiftRightLogical, texel, c(10)),
+               c(0x7FF)),
+            c(11))),
+      op(Op::OpShiftLeftLogical, op(Op::OpShiftRightLogical, texel, c(22)),
+         c(22)));
+  m.Store(at(1, linear), sel(is_repack, repacked, texel));
   m.Branch(narrow_done);
   m.OpenBlock(narrow_done);
   m.Branch(det_done);

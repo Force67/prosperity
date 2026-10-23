@@ -37,7 +37,8 @@ bool DetileTextureOnGpu(u64 base,
                         rhi::Texture* img,
                         rhi::TextureState state,
                         bool is_3d = false,
-                        u32 first_mip = 0);
+                        u32 first_mip = 0,
+                        bool repack111110 = false);
 
 bool WriteTextureToGuest(rhi::Texture* texture,
                          rhi::TextureState& state,
