@@ -650,6 +650,14 @@ void NoteGuestDirectRemap(u64 base, u64 bytes) {
     return;
   base::LockGuard lock(g_remap_lock);
   g_direct.remaps.push_back({base, base + bytes});
+  // Every draw scans this list, and thread stacks come and go back to back:
+  // merge touching ranges so it stays short.
+  for (Remap& r : g_direct.maps_dirty)
+    if (base <= r.end && r.base <= base + bytes) {
+      r.base = base::Min(r.base, base);
+      r.end = base::Max(r.end, base + bytes);
+      return;
+    }
   g_direct.maps_dirty.push_back({base, base + bytes});
 }
 
