@@ -48,5 +48,8 @@ struct TitleMount {
 TitleMount MountPkg(const base::String& path, bool want_icon);
 TitleMount MountFfpkg(const base::String& path, bool want_icon);
 TitleMount MountArchive(const base::String& path, bool want_icon);
+// Layer an update (patch) over its base title; metadata comes from the update.
+// Returns `base` unchanged when either is empty.
+TitleMount MountUpdate(TitleMount base, TitleMount update);
 
 }  // namespace kern::vfs

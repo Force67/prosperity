@@ -43,6 +43,7 @@ Game: .pkg, .ffpkg, .zip, .rar, app directory, or eboot.bin
   --configure-ps5-fw DIRS   Import or replace stored PS5 firmware modules
   --ps4-modules DIR         Override the PS4 module folder for this run
   --ps5-modules DIRS        PS5 module directories, separated by ':'
+  --update PKG              Layer an update package over the game
   --headless                Render without presenting to a window
   --dump-frames DIR         Write captured frames to this directory
   --profile FILE|off        Use a game profile, or disable profiles
@@ -104,7 +105,8 @@ CommandLine Parse(int argc, char** argv) {
       const char* flags[] = {"--data-dir",         "--ps5-modules",
                              "--profile",          "--options",
                              "--dump-frames",      "--configure-ps4-fw",
-                             "--configure-ps5-fw", "--ps4-modules"};
+                             "--configure-ps5-fw", "--ps4-modules",
+                             "--update"};
       const char* names[] = {"+DELTA_DATA_DIR=",
                              "+DELTA_PS5_MODULES=",
                              "+DELTA_PROFILE=",
@@ -112,9 +114,10 @@ CommandLine Parse(int argc, char** argv) {
                              "+DELTA_GPU_DUMP_DIR=",
                              nullptr,
                              nullptr,
-                             "+DELTA_PS4_MODULES="};
+                             "+DELTA_PS4_MODULES=",
+                             "+DELTA_UPDATE="};
       bool matched = false;
-      for (size_t f = 0; f < 8; ++f) {
+      for (size_t f = 0; f < 9; ++f) {
         const size_t len = base::CountStringLength(flags[f]);
         if (arg != flags[f] &&
             arg.compare(0, len + 1, base::String(flags[f]) + "=") != 0)

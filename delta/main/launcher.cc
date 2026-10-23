@@ -56,6 +56,8 @@
 namespace {
 
 DELTA_OPTION(bool, kHdrFill, "DELTA_HDR_FILL", false);
+// An update (patch) container layered over the booted base title.
+DELTA_OPTION(const char*, kUpdate, "DELTA_UPDATE", nullptr);
 
 #if defined(__linux__) && !defined(__ANDROID__)
 constexpr bool kWantIcon = true;
@@ -166,13 +168,31 @@ bool MountContainer(kern::vfs::TitleMount mount, BootTitle* title) {
   return true;
 }
 
-bool LoadTitle(base::String& path, BootTitle* title) {
+bool IsContainer(const base::String& path) {
+  return EndsWithIgnoreCase(path, ".pkg") ||
+         EndsWithIgnoreCase(path, ".ffpkg") ||
+         formats::IsArchivePath(path.c_str());
+}
+
+kern::vfs::TitleMount MountContainerPath(const base::String& path) {
   if (EndsWithIgnoreCase(path, ".pkg"))
-    return MountContainer(kern::vfs::MountPkg(path, kWantIcon), title);
+    return kern::vfs::MountPkg(path, kWantIcon);
   if (EndsWithIgnoreCase(path, ".ffpkg"))
-    return MountContainer(kern::vfs::MountFfpkg(path, kWantIcon), title);
-  if (formats::IsArchivePath(path.c_str()))
-    return MountContainer(kern::vfs::MountArchive(path, kWantIcon), title);
+    return kern::vfs::MountFfpkg(path, kWantIcon);
+  return kern::vfs::MountArchive(path, kWantIcon);
+}
+
+bool LoadTitle(base::String& path, BootTitle* title) {
+  if (IsContainer(path)) {
+    auto mount = MountContainerPath(path);
+    if (const char* update = kUpdate; mount && update && *update) {
+      auto patch = MountContainerPath(base::String(update));
+      if (patch)
+        LOG_INFO("update {} layered over the base title", update);
+      mount = kern::vfs::MountUpdate(base::move(mount), base::move(patch));
+    }
+    return MountContainer(base::move(mount), title);
+  }
 
   const auto directory = cli::FindGameDirectory(path);
   if (directory.root.empty()) {

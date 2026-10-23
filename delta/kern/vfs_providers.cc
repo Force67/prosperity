@@ -462,7 +462,55 @@ TitleMount Mount(const base::String& path, bool want_icon, const char* what) {
   m.provider = p;
   return m;
 }
+// /app0 of a patched title: the update's files win, the base supplies the rest
+// (the update ships only changed files and new archives).
+class LayeredProvider : public kern::vfs::VirtualProvider {
+ public:
+  LayeredProvider(base::SharedPointer<VirtualProvider> top,
+                  base::SharedPointer<VirtualProvider> bottom)
+      : top_(base::move(top)), bottom_(base::move(bottom)) {}
+
+  base::UniquePointer<kern::vfs::VirtualFile> Open(const char* rel) override {
+    if (auto f = top_->Open(rel))
+      return f;
+    return bottom_->Open(rel);
+  }
+  bool Stat(const char* rel, i64& size) override {
+    return top_->Stat(rel, size) || bottom_->Stat(rel, size);
+  }
+  bool List(const char* rel, base::Vector<kern::vfs::DirEntry>& out) override {
+    const bool top = top_->List(rel, out);
+    base::Vector<kern::vfs::DirEntry> below;
+    if (!bottom_->List(rel, below))
+      return top;
+    for (auto& e : below) {
+      bool dup = false;
+      for (const auto& have : out)
+        dup = dup || have.name == e.name;
+      if (!dup)
+        out.push_back(base::move(e));
+    }
+    return true;
+  }
+  bool IsDir(const char* rel) override {
+    return top_->IsDir(rel) || bottom_->IsDir(rel);
+  }
+
+ private:
+  base::SharedPointer<VirtualProvider> top_;
+  base::SharedPointer<VirtualProvider> bottom_;
+};
 }  // namespace
+
+TitleMount MountUpdate(TitleMount base, TitleMount update) {
+  if (!base || !update)
+    return base;
+  update.provider = base::MakeShared<LayeredProvider>(update.provider,
+                                                      base.provider);
+  if (update.icon.empty())
+    update.icon = base::move(base.icon);
+  return update;
+}
 
 TitleMount MountPkg(const base::String& path, bool want_icon) {
   TitleMount m = Mount<PkgProvider>(path, want_icon, "pkg");
