@@ -134,6 +134,36 @@ extern void (*g_flush_guest_range)(u64 address, u64 bytes);
 extern void (*g_overlay_guest_range)(u64 address, u32 dwords, u32* values);
 
 extern u64 g_direct_table, g_direct_misses;
+
+// A 2_10_10_10 vertex attribute in anything but UNORM: no portable host vertex
+// format decodes it, so it is fetched as a raw R32_UINT and unpacked by the
+// vertex shader. In the recompiler's int_attr_mask such an attribute sets bit
+// 32 + location; the scaled number formats also set bit 48 + location, and the
+// signed ones and the integer ones the usual sint (16 + location) and uint
+// (location) bits.
+inline bool PackedAttrFormat(u32 dfmt, u32 nfmt) {
+  return dfmt == 9 && nfmt >= 1 && nfmt <= 6;
+}
+inline u64 PackedAttrBits(u32 location, u32 nfmt) {
+  u64 bits = 1ull << (32 + location);
+  if (nfmt == 2 || nfmt == 3)
+    bits |= 1ull << (48 + location);
+  if (nfmt == 3 || nfmt == 5)
+    bits |= 1ull << (16 + location);
+  if (nfmt == 4)
+    bits |= 1ull << location;
+  return bits;
+}
+
+// Vertex-shader register probe (DELTA_GPU_GCN_VSVGPR*): device address of a
+// readback buffer of kVsProbeSlots slots, one per (instance, vertex). The
+// low VsProbeVertexBits() of a slot index are the vertex.
+// Slot words: draw tag 0, draw tag 1, kVsProbeMark | instance, the four probed
+// registers, checksum (see ProbeVsCapture). The slot index gives the vertex.
+extern u64 g_vs_probe;
+constexpr u32 kVsProbeSlotWords = 8;
+constexpr u32 kVsProbeSlots = 1u << 19;
+constexpr u32 kVsProbeMark = 0xA5000000u;
 extern bool g_bindless;
 
 constexpr u32 kBindlessSlots[2] = {16384, 4096};

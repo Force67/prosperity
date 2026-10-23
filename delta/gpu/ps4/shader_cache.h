@@ -28,7 +28,7 @@ struct GraphicsShaderState {
   u32 mrt_bound_mask = 0xFF;
   bool gl_clip = false;
   const gcn::GsPipeline* gs = nullptr;
-  u32 int_attr_mask = 0;
+  u64 int_attr_mask = 0;
   u32 col_format = gcn::kColFormatUnknown;
 };
 

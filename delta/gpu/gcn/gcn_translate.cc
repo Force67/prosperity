@@ -21,6 +21,10 @@ namespace gpu::gcn {
 
 namespace {
 DELTA_OPTION(bool, kDirectGcn, "DELTA_GPU_DIRECT_GCN", false);
+// DELTA_GPU_GCN_VSVGPR_VS=<vs address>: probe this vertex shader; see
+// ProbeVsCapture in gcn_spirv.cc.
+DELTA_OPTION(u64, kVsProbeVs, "DELTA_GPU_GCN_VSVGPR_VS", 0);
+DELTA_OPTION(u32, kVsProbeVbits, "DELTA_GPU_GCN_VSVGPR_VBITS", 16);
 
 u64 NowNs() {
   return (base::TickClock::NowNs());
@@ -35,6 +39,14 @@ u32 g_host_subgroup = kGcnWave;
 
 bool DirectGcnEnabled() {
   return kDirectGcn;
+}
+
+u64 VsProbeShader() {
+  return kVsProbeVs;
+}
+
+u32 VsProbeVertexBits() {
+  return base::Min<u32>(kVsProbeVbits, 19);
 }
 
 u32 MaxGfxBuffers() {
@@ -75,7 +87,7 @@ Recompiled Recompile(const u32* vs_code,
                      u32 mrt_bound_mask,
                      bool gl_clip_space,
                      const GsPipeline* gs,
-                     u32 int_attr_mask,
+                     u64 int_attr_mask,
                      u32 col_format,
                      u32 tex_cube_mask) {
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kShaderCache);

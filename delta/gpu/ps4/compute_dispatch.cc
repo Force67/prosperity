@@ -701,6 +701,20 @@ void DispatchCompute(render::Renderer& renderer,
     ci.expanded_htile_base =
         ExpandedHtileBase(ci, threads, user_sgpr, tgid_enable);
 
+  for (u32 i = 0; i < ci.num_tex; i++)
+    if (ci.tex[i].tex.storage)
+      TraceAddrWatch("DISPATCH_IMAGE_STORE", ci.tex[i].tex.base,
+                     u64(ci.tex[i].tex.pitch ? ci.tex[i].tex.pitch
+                                             : ci.tex[i].tex.w) *
+                         ci.tex[i].tex.h * ci.tex[i].tex.depth *
+                         ci.tex[i].tex.layers * 16,
+                     static_cast<u32>(cs_addr), 8);
+  for (u32 i = 0; i < ci.num_res; i++)
+    if (ci.res[i].written)
+      TraceAddrWatch("DISPATCH_WRITE", ci.res[i].base,
+                     ci.res[i].write_bytes ? ci.res[i].write_bytes
+                                           : ci.res[i].size,
+                     static_cast<u32>(cs_addr), 8);
   RenderQueue& queue = GuestRenderQueue();
   if (kCsOnRenderThread && queue.running()) {
     for (u32 i = 0; i < ci.num_res; i++)
@@ -720,6 +734,28 @@ void DispatchCompute(render::Renderer& renderer,
   const bool executed = render::Dispatch(renderer, ci);
   if (trace)
     TraceCsDispatch(cs_addr, executed, ci.num_res);
+}
+
+void DispatchComputeDirect(render::Renderer& renderer,
+                           const Regs& regs,
+                           const u32* body,
+                           u32 count) {
+  // An earlier DMA_DATA in the stream can patch the group counts in place
+  // (DRIVECLUB copies GPU-computed counts over placeholders), so they are only
+  // valid when the GPU reaches the packet: read them there.
+  const u64 args = reinterpret_cast<uintptr_t>(body);
+  if (count >= 4 && WalkReadWouldWait(args, 12) &&
+      render::CanDispatchIndirect(args)) {
+    const u32 initiator = body[3];
+    if ((initiator & 4) || (!regs[mmCOMPUTE_START_X] &&
+                            !regs[mmCOMPUTE_START_Y] &&
+                            !regs[mmCOMPUTE_START_Z])) {
+      const u32 placeholder[] = {1, 1, 1, initiator};
+      DispatchCompute(renderer, regs, placeholder, 4, args);
+      return;
+    }
+  }
+  DispatchCompute(renderer, regs, body, count);
 }
 
 void DispatchComputeIndirect(render::Renderer& renderer,

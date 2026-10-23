@@ -34,6 +34,7 @@
 #include "gpu/ps4/draw_state.h"
 #include "gpu/ps4/gpu_labels.h"
 #include "gpu/render/image/texture_cache.h"
+#include "gpu/render/debug/trace.h"
 #include "gpu/render/draw/draw_recomp.h"
 #include "gpu/render/image/bindless.h"
 #include "gpu/ps4/guest_address.h"
@@ -857,7 +858,7 @@ u32 WalkDcb(render::Renderer& renderer,
       break;
     switch (op) {
       case IT_DISPATCH_DIRECT:
-        DispatchCompute(renderer, g_regs, body, count);
+        DispatchComputeDirect(renderer, g_regs, body, count);
         break;
       case IT_DISPATCH_INDIRECT:
         DispatchComputeIndirect(renderer, g_regs, body, count,
@@ -1196,6 +1197,10 @@ void SubmitDcb(const void* dcb, u32 size_bytes) {
 
   render::Renderer& renderer = render::DefaultRenderer();
   StartRendererOnce(renderer);
+  if (gcn::VsProbeShader() && !gcn::g_vs_probe && renderer.available()) {
+    OwnRenderer("vs-probe");
+    render::trace::InitVsProbe();
+  }
 
   if (gcn::DirectGcnEnabled() && renderer.available()) {
     if (!gcn::g_direct_table) {

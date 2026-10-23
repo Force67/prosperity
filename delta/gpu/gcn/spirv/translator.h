@@ -880,6 +880,11 @@ struct StageContext {
   bool wave_lockstep = false;
   bool lds_sync = false;
   Id cs_probe_var = 0;
+  // DELTA_GPU_GCN_VSVGPR*: the probed invocation's vertex, instance and draw
+  // tags, captured at entry.
+  Id vs_probe_vertex = 0;
+  Id vs_probe_instance = 0;
+  Id vs_probe_tag[2] = {};
   Recompiled* r = nullptr;
   base::Vector<Id>* iface = nullptr;
   Id main_fn = 0;

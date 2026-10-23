@@ -17,6 +17,12 @@ void DispatchCompute(render::Renderer& renderer,
                      u32 count,
                      u64 indirect_args = 0);
 
+// DISPATCH_DIRECT straight from the command stream.
+void DispatchComputeDirect(render::Renderer& renderer,
+                           const Regs& regs,
+                           const u32* body,
+                           u32 count);
+
 void DispatchComputeIndirect(render::Renderer& renderer,
                              const Regs& regs,
                              const u32* body,

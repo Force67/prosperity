@@ -11,6 +11,11 @@
 namespace gpu::gcn {
 
 bool DirectGcnEnabled();
+// Address of the vertex shader DELTA_GPU_GCN_VSVGPR_VS probes, or 0.
+u64 VsProbeShader();
+// Vertex index bits of a probe slot (DELTA_GPU_GCN_VSVGPR_VBITS); the rest of
+// the 19 slot bits are the instance.
+u32 VsProbeVertexBits();
 
 void ResetShaderWork();
 void PostShaderWork(base::Function<void()> job);
@@ -162,7 +167,7 @@ Recompiled Recompile(const u32* vs_code,
                      u32 mrt_bound_mask = 0xFF,
                      bool gl_clip_space = false,
                      const GsPipeline* gs = nullptr,
-                     u32 int_attr_mask = 0,
+                     u64 int_attr_mask = 0,
                      u32 col_format = kColFormatUnknown,
                      u32 tex_cube_mask = 0);
 

@@ -12,6 +12,7 @@
 #include "base/algorithm.h"
 #include "base/logging.h"
 #include "base/math/value_bounds.h"
+#include "gpu/gcn/gcn_resource.h"
 #include "options/options.h"
 
 namespace {
@@ -628,7 +629,8 @@ rhi::Format VertexFormat(u32 dfmt, u32 nfmt) {
     case 8:
       return rhi::Format::kA2R10G10B10Unorm;
     case 9:
-      return rhi::Format::kA2B10G10R10Unorm;
+      return gcn::PackedAttrFormat(dfmt, nfmt) ? rhi::Format::kR32Uint
+                                               : rhi::Format::kA2B10G10R10Unorm;
     case 10:
       switch (nfmt) {
         case 1:

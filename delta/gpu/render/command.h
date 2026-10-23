@@ -53,6 +53,7 @@ struct DrawInfo {
   struct DrawBuffer {
     u64 base = 0;
     u32 size = 0;
+    u32 stride = 0;
   };
   DrawBuffer bufs[kMaxBuffers];
   u32 num_bufs = 0;

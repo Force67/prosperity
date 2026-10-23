@@ -7,6 +7,7 @@
 #include "guest/session.h"
 
 #include "gpu/gcn/gcn_detile.h"
+#include "gpu/gcn/gcn_resource.h"
 #include "gpu/gcn/gcn_translate.h"
 #include "gpu/guest_memory.h"
 #include "gpu/render/debug/capture.h"
@@ -47,6 +48,9 @@ DELTA_OPTION(int, kCaptureCount, "DELTA_GPU_CAPTURE_COUNT", 1);
 DELTA_OPTION(const char*, kCaptureDir, "DELTA_GPU_CAPTURE_DIR", nullptr);
 DELTA_OPTION(u64, kRtWatch, "DELTA_GPU_RTWATCH", 0);
 DELTA_OPTION(bool, kRtWatchOnly, "DELTA_GPU_RTWATCH_ONLY", false);
+// With _ONLY: snapshot the watched target only after draws that write it while
+// it is this wide (it can be aliased at other sizes by other passes).
+DELTA_OPTION(u32, kRtWatchWidth, "DELTA_GPU_RTWATCH_WIDTH", 0);
 DELTA_OPTION(const char*, kCaptureDump, "DELTA_GPU_CAPTURE_DUMP", "rt,depth");
 DELTA_OPTION(float, kR32Scale, "DELTA_GPU_CAPTURE_R32_SCALE", 8.f);
 DELTA_OPTION(const char*, kCaptureAt, "DELTA_GPU_CAPTURE_AT", nullptr);
@@ -149,12 +153,21 @@ const SnapshotPlan& Plan() {
       p.every = static_cast<u32>(std::strtoul(spec + 6, nullptr, 0));
       return p;
     }
+    // A comma list of draw indices and A-B ranges.
     for (const char* c = spec; *c;) {
       char* end = nullptr;
       const unsigned long v = std::strtoul(c, &end, 0);
       if (end == c)
         break;
-      p.at.push_back(static_cast<u32>(v));
+      unsigned long last = v;
+      if (*end == '-') {
+        const char* hi = end + 1;
+        last = std::strtoul(hi, &end, 0);
+        if (end == hi)
+          last = v;
+      }
+      for (unsigned long i = v; i <= last && p.at.size() < 100000; i++)
+        p.at.push_back(static_cast<u32>(i));
       c = *end ? end + 1 : end;
     }
     return p;
@@ -341,6 +354,10 @@ MemStat StatGuest(u64 base, u64 bytes) {
 }
 
 base::String HexBytes(u64 base, u32 bytes);
+
+u32 ProbeBytes(u64 bytes) {
+  return static_cast<u32>(base::Min<u64>(bytes, 16u << 20));
+}
 
 base::String GuestObj(u64 base, u64 bytes) {
   const MemStat s = StatGuest(base, bytes);
@@ -1146,6 +1163,10 @@ void SnapshotOpenRegion(u32 draw_index) {
   const u64 watch = kRtWatch.get();
   if (watch && (watch_only || base::Find(mrt, mrt + n, watch) == mrt + n)) {
     auto wit = g_rts.find(watch);
+    const bool written = base::Find(mrt, mrt + n, watch) != mrt + n;
+    if (wit != g_rts.end() && watch_only && kRtWatchWidth.get() &&
+        (!written || wit->second.w != kRtWatchWidth.get()))
+      return;
     if (wit != g_rts.end())
       QueueSnapshot(wit->second.texture, rhi::kAspectColor, wit->second.w,
                     wit->second.h, wit->second.fmt, watch, false, draw_index,
@@ -1321,6 +1342,70 @@ const char* ObjectName(u64 handle) {
   return it == NameTable().end() ? "" : it->second.c_str();
 }
 
+namespace {
+rhi::Buffer* g_vs_probe_buffer = nullptr;
+
+void ClearVsProbe() {
+  if (!g_vs_probe_buffer)
+    return;
+  // Earlier frames still in flight would write their slots after the clear.
+  Device().WaitIdle();
+  std::memset(g_vs_probe_buffer->mapped(), 0,
+                size_t(gcn::kVsProbeSlots) * gcn::kVsProbeSlotWords * 4);
+}
+
+// One line per written slot: instance vertex tag0 tag1 r0 r1 r2 r3 (hex).
+void DumpVsProbe() {
+  if (!g_vs_probe_buffer)
+    return;
+  const base::String path = g_prefix + "_vsprobe.txt";
+  FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f)
+    return;
+  const auto* w = reinterpret_cast<const u32*>(g_vs_probe_buffer->mapped());
+  u32 written = 0, torn = 0;
+  for (u32 s = 0; s < gcn::kVsProbeSlots; s++) {
+    const u32* e = w + size_t(s) * gcn::kVsProbeSlotWords;
+    if ((e[2] & 0xFF000000u) != gcn::kVsProbeMark)
+      continue;
+    const u32 vmask = (1u << gcn::VsProbeVertexBits()) - 1;
+    u32 check = s & vmask;
+    for (u32 i = 0; i < 7; i++)
+      check = check * 0x9E3779B1u + e[i];
+    if (check != e[7]) {
+      torn++;
+      continue;
+    }
+    std::fprintf(f, "%u %u %08x %08x %08x %08x %08x %08x\n", e[2] & 0xFFFFFF,
+                 s & vmask, e[0], e[1], e[3],
+                 e[4], e[5], e[6]);
+    written++;
+  }
+  std::fclose(f);
+  BASE_LOGI("gpucap", "vs probe: {} invocations, {} torn slots dropped -> {}",
+            written, torn, path.c_str());
+}
+}  // namespace
+
+void InitVsProbe() {
+  if (gcn::g_vs_probe || !gcn::VsProbeShader() ||
+      !Device().caps().buffer_address)
+    return;
+  rhi::BufferDesc desc;
+  desc.size = u64(gcn::kVsProbeSlots) * gcn::kVsProbeSlotWords * 4;
+  desc.usage = rhi::kBufferStorage | rhi::kBufferAddress;
+  desc.memory = rhi::MemoryKind::kReadback;
+  desc.name = "vs register probe";
+  g_vs_probe_buffer = Device().CreateBuffer(desc);
+  if (!g_vs_probe_buffer || !g_vs_probe_buffer->mapped() ||
+      !g_vs_probe_buffer->address())
+    return;
+  ClearVsProbe();
+  gcn::g_vs_probe = g_vs_probe_buffer->address();
+  BASE_LOGI("gpucap", "vs probe armed for vs {:#x}",
+            (unsigned long long)gcn::VsProbeShader());
+}
+
 void FrameBegin(int frame_num) {
   if (!Armed() || g_finished)
     return;
@@ -1330,14 +1415,20 @@ void FrameBegin(int frame_num) {
     bool trigger = g_cs_trigger;
     if (kCaptureFrame.get() > 0 && frame_num == kCaptureFrame.get())
       trigger = true;
-    if (kCaptureAfter.get() > 0.f &&
-        double(NowNs() - g_start_ns) / 1e9 >= double(kCaptureAfter.get()))
-      trigger = true;
-    if (kCaptureBusy.get() > 0 && g_frame.draws >= u32(kCaptureBusy.get()))
-      trigger = true;
+    // _AFTER and _BUSY together want a busy frame after that time.
+    const bool late =
+        kCaptureAfter.get() > 0.f &&
+        double(NowNs() - g_start_ns) / 1e9 >= double(kCaptureAfter.get());
+    const bool busy =
+        kCaptureBusy.get() > 0 && g_frame.draws >= u32(kCaptureBusy.get());
+    if (kCaptureAfter.get() > 0.f && kCaptureBusy.get() > 0)
+      trigger = trigger || (late && busy);
+    else
+      trigger = trigger || late || busy;
     if (!trigger)
       return;
     g_frames_left = base::Max(1, kCaptureCount.get());
+    ClearVsProbe();
     g_armed_frame = frame_num;
     const char* dir = kCaptureDir;
     g_dir = (dir && *dir) ? dir : (base::String(DumpDir()) + "/gpucap");
@@ -1385,6 +1476,7 @@ void FrameEnd(u64 scanout_base) {
     return;
   DrainSnapshots();
   DumpFrameResources();
+  DumpVsProbe();
   Line l("frame_end");
   l.U("seq", g_seq++)
       .Int("frame", g_frame_num)
@@ -1453,6 +1545,12 @@ void RecordDraw(const render::DrawInfo& d,
   if (!g_recording)
     return;
   const u32 index = g_draw_seq++;
+  // Draws of the DELTA_GPU_GCN_VSVGPR_VS shader carry everything a CPU replay
+  // needs: full buffer contents and the fetch shader listing.
+  const bool probed = d.vs_addr && d.vs_addr == gcn::VsProbeShader();
+  if (probed)
+    DumpShaderListing(
+        d.vs_user_data[0] | u64(d.vs_user_data[1] & 0xFFFF) << 32, 64);
 
   Arr rts;
   for (u32 i = 0; i < d.mrt_count && i < 8; i++) {
@@ -1480,6 +1578,10 @@ void RecordDraw(const render::DrawInfo& d,
     o.U("records", d.vbufs[i].num_records);
     o.Raw("guest", GuestObj(reinterpret_cast<u64>(d.vbufs[i].data),
                             u64(d.vbufs[i].stride) * d.vbufs[i].num_records));
+    if (probed)
+      o.Raw("data", HexBytes(reinterpret_cast<u64>(d.vbufs[i].data),
+                             ProbeBytes(u64(d.vbufs[i].stride) *
+                                        d.vbufs[i].num_records)));
     vbufs.Add(o);
   }
   Arr vattrs;
@@ -1505,7 +1607,7 @@ void RecordDraw(const render::DrawInfo& d,
 
   Arr cbufs;
   const u32 cbuf_cap =
-      kCaptureCbufBytes.get() < 0 ? 0 : u32(kCaptureCbufBytes.get());
+      probed || kCaptureCbufBytes.get() < 0 ? 0 : u32(kCaptureCbufBytes.get());
   for (u32 i = 0; i < d.num_cbufs && i < base::ArraySize(d.cbufs); i++) {
     if (!d.cbufs[i].base && !d.cbufs[i].size)
       continue;
@@ -1528,8 +1630,11 @@ void RecordDraw(const render::DrawInfo& d,
     o.U("i", i);
     o.Hex("base", d.bufs[i].base);
     o.U("size", d.bufs[i].size);
+    o.U("stride", d.bufs[i].stride);
     o.Bool("staged", b ? ((b->rawbuf_mask >> i) & 1) != 0 : false);
     o.Raw("guest", GuestObj(d.bufs[i].base, d.bufs[i].size));
+    if (probed)
+      o.Raw("data", HexBytes(d.bufs[i].base, ProbeBytes(d.bufs[i].size)));
     bufs.Add(o);
   }
 

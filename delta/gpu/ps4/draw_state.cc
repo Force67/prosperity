@@ -41,6 +41,8 @@ DELTA_OPTION(bool, kNoStencil, "DELTA_GPU_NOSTENCIL", false);
 DELTA_OPTION(bool, kPreflushResources, "DELTA_GPU_PREFLUSHRES", false);
 DELTA_OPTION(bool, kSkipStale, "DELTA_GPU_SKIPSTALE", false);
 DELTA_OPTION(const char*, kSkipShList, "DELTA_GPU_SKIPSH", nullptr);
+// Hex VS addresses: draw only these (isolates what one shader renders).
+DELTA_OPTION(const char*, kOnlyVsList, "DELTA_GPU_ONLYVS", nullptr);
 
 }  // namespace
 
@@ -289,6 +291,11 @@ u32 ResolveRenderTargets(const Regs& regs,
         64u;
     d.mrt_surf_w[rt] = rt_pitch;
     d.mrt_surf_h[rt] = rt_pitch ? static_cast<u32>(rt_slice / rt_pitch) : 0u;
+    TraceAddrWatch("DRAW_COLOR_TARGET", base,
+                   rt_slice * CbFormatBytes((info >> 2) & 0x1Fu) *
+                       (((regs[mmCB_COLOR0_VIEW + rt * kCbColorStride] >> 13) &
+                         0x7FFu) + 1u),
+                   regs.ShaderAddr(mmSPI_SHADER_PGM_LO_PS) & 0xFFFFFFFFu, 8);
     if (rt == 0) {
       d.rt_tile_mode = regs[mmCB_COLOR0_ATTRIB] & 0x1Fu;
       const u32 view = regs[mmCB_COLOR0_VIEW];
@@ -517,20 +524,25 @@ void ResolveVsTextures(const u32* vud,
   }
 }
 
+base::Vector<u64> ParseShaderList(const char* spec) {
+  base::Vector<u64> list;
+  for (const char* p = spec ? spec : ""; *p;) {
+    char* end;
+    const u64 addr = std::strtoull(p, &end, 16);
+    if (end == p)
+      break;
+    list.push_back(addr);
+    p = *end == ',' ? end + 1 : end;
+  }
+  return list;
+}
+
 bool ShaderSkipped(u64 vs_addr, u64 ps_addr) {
-  static const base::Vector<u64> kSkipped = [] {
-    base::Vector<u64> list;
-    if (const char* spec = kSkipShList)
-      for (const char* p = spec; *p;) {
-        char* end;
-        const u64 addr = std::strtoull(p, &end, 16);
-        if (end == p)
-          break;
-        list.push_back(addr);
-        p = *end == ',' ? end + 1 : end;
-      }
-    return list;
-  }();
+  static const base::Vector<u64> kSkipped = ParseShaderList(kSkipShList);
+  static const base::Vector<u64> kOnly = ParseShaderList(kOnlyVsList);
+  if (!kOnly.empty() &&
+      base::Find(kOnly.begin(), kOnly.end(), vs_addr) == kOnly.end())
+    return true;
   return !kSkipped.empty() && (base::Find(kSkipped.begin(), kSkipped.end(),
                                           vs_addr) != kSkipped.end() ||
                                base::Find(kSkipped.begin(), kSkipped.end(),
@@ -599,10 +611,10 @@ RecompStatus BindVertexAttributes(const gcn::Recompiled& rc,
   return RecompStatus::kOk;
 }
 
-u32 IntAttrMask(const gcn::Recompiled& rc,
+u64 IntAttrMask(const gcn::Recompiled& rc,
                 const gcn::VBuffer* attr_vbs,
                 u32 attr_count) {
-  u32 mask = 0;
+  u64 mask = 0;
   for (u32 i = 0; i < attr_count; i++) {
     const gcn::ShaderAttr& a = rc.attrs[i];
     const u32 dfmt = a.inst_dfmt ? a.inst_dfmt : attr_vbs[i].dfmt;
@@ -611,6 +623,8 @@ u32 IntAttrMask(const gcn::Recompiled& rc,
                         dfmt == 10 || dfmt == 12;
     if (narrow && a.location < 16 && (nfmt == 4 || nfmt == 5))
       mask |= 1u << (a.location + (nfmt == 5 ? 16 : 0));
+    if (gcn::PackedAttrFormat(dfmt, nfmt) && a.location < 16)
+      mask |= gcn::PackedAttrBits(a.location, nfmt);
   }
   return mask;
 }
@@ -683,7 +697,7 @@ void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
     TraceRawBuffer(stage, vs_addr, sb, vb, bytes, ok, d);
     if (!ok)
       continue;
-    d.bufs[sb.binding] = {vb.base, static_cast<u32>(bytes)};
+    d.bufs[sb.binding] = {vb.base, static_cast<u32>(bytes), vb.stride};
     d.num_bufs = base::Max(d.num_bufs, sb.binding + 1);
   }
 }

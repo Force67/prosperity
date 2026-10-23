@@ -20,6 +20,8 @@ inline bool Recording() {
 }
 
 void FrameBegin(int frame_num);
+// Allocates the DELTA_GPU_GCN_VSVGPR probe buffer before shaders translate.
+void InitVsProbe();
 void FrameEnd(u64 scanout_base);
 
 struct RegionInfo {

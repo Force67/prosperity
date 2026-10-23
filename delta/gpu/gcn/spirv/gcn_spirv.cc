@@ -86,6 +86,8 @@ DELTA_OPTION(bool, kGpuShdis, "DELTA_GPU_SHDIS", false);
 DELTA_OPTION(u64, kGcnCsVgprCs, "DELTA_GPU_GCN_CSVGPR_CS", 0);
 DELTA_OPTION(u32, kGcnCsVgprPc, "DELTA_GPU_GCN_CSVGPR_PC", 0);
 DELTA_OPTION(u32, kGcnCsVgpr, "DELTA_GPU_GCN_CSVGPR", 0);
+DELTA_OPTION(u32, kGcnVsVgprPc, "DELTA_GPU_GCN_VSVGPR_PC", 0);
+DELTA_OPTION(u32, kGcnVsVgpr, "DELTA_GPU_GCN_VSVGPR", 0);
 DELTA_OPTION(bool, kGpuShtrace, "DELTA_GPU_SHTRACE", false);
 DELTA_OPTION(bool, kGpuSpirv, "DELTA_GPU_SPIRV", false);
 DELTA_OPTION(u64, kSpvDumpAddr, "DELTA_GPU_SPVDUMP_ADDR", 0);
@@ -1093,6 +1095,71 @@ void ProbeCsCapture(Translator& t, const Inst& inst, StageContext& sc) {
   }
 }
 
+// DELTA_GPU_GCN_VSVGPR_*: in the vertex shader at DELTA_GPU_GCN_VSVGPR_VS,
+// write the four registers starting at DELTA_GPU_GCN_VSVGPR (v<n>, or
+// s<n - 1000>) after the instruction at _PC, or with _PC=0xffff the exported
+// position, into the g_vs_probe slot of the
+// invocation's (instance, vertex). A capture dumps the written slots next to
+// the frame, where tools/gcn_vs_oracle.py compares them with a CPU replay.
+void ProbeVsCapture(Translator& t, const Inst& inst, StageContext& sc) {
+  if (!sc.vs_probe_vertex)
+    return;
+  // _PC=0xffff probes the exported position: the four sources of exp pos0.
+  constexpr u32 kProbePosition = 0xFFFF;
+  const bool position = kGcnVsVgprPc == kProbePosition &&
+                        inst.enc == Enc::kExp &&
+                        ((inst.raw[0] >> 4) & 0x3F) == 12;
+  if (!position && inst.pc != kGcnVsVgprPc)
+    return;
+  const Id wide = t.m.TypeInt(64, false);
+  const auto to_wide = [&](Id v) {
+    return t.m.Emit(spv::Op::OpUConvert, wide, {v});
+  };
+  const Id write = t.m.NewBlock(), done = t.m.NewBlock();
+  t.m.SelectionMerge(done);
+  t.m.BranchConditional(t.LaneActive(t.Exec()), write, done);
+  t.m.OpenBlock(write);
+  const u32 vbits = VsProbeVertexBits();
+  const Id instance = t.UMin(sc.vs_probe_instance,
+                             t.U32((kVsProbeSlots >> vbits) - 1));
+  const Id slot = t.Or(t.Shl(instance, t.U32(vbits)),
+                       t.And(sc.vs_probe_vertex, t.U32((1u << vbits) - 1)));
+  const Id base = t.m.Emit(
+      spv::Op::OpIAdd, wide,
+      {t.m.Emit(spv::Op::OpBitwiseOr, wide,
+                {to_wide(t.U32(static_cast<u32>(g_vs_probe))),
+                 t.m.Emit(spv::Op::OpShiftLeftLogical, wide,
+                          {to_wide(t.U32(static_cast<u32>(g_vs_probe >> 32))),
+                           t.U32(32)})}),
+       to_wide(t.Mul(slot, t.U32(kVsProbeSlotWords * 4)))});
+  const Id u32_ptr =
+      t.m.TypePointer(spv::StorageClass::PhysicalStorageBuffer, t.t_u);
+  const Id device = t.U32(static_cast<u32>(spv::Scope::Device));
+  const Id zero = t.U32(0);
+  const auto put = [&](u32 word, Id value) {
+    const Id at = t.m.Emit(
+        spv::Op::OpConvertUToPtr, u32_ptr,
+        {t.m.Emit(spv::Op::OpIAdd, wide, {base, to_wide(t.U32(word * 4))})});
+    t.m.Emit(spv::Op::OpAtomicExchange, t.t_u, {at, device, zero, value});
+  };
+  // Concurrent draws can interleave their writes to one slot; the last word
+  // is a checksum over the others so a torn slot is detectable.
+  Id words[7] = {sc.vs_probe_tag[0], sc.vs_probe_tag[1],
+                 t.Or(t.U32(kVsProbeMark), sc.vs_probe_instance)};
+  for (u32 i = 0; i < 4; i++)
+    words[3 + i] = position ? t.Vg((inst.raw[1] >> (8 * i)) & 0xFF)
+                   : kGcnVsVgpr >= 1000 ? t.Sg(kGcnVsVgpr - 1000 + i)
+                                        : t.Vg(kGcnVsVgpr + i);
+  Id check = t.And(sc.vs_probe_vertex, t.U32((1u << vbits) - 1));
+  for (u32 i = 0; i < 7; i++) {
+    put(i, words[i]);
+    check = t.Add(t.Mul(check, t.U32(0x9E3779B1u)), words[i]);
+  }
+  put(7, check);
+  t.m.Branch(done);
+  t.m.OpenBlock(done);
+}
+
 void EmitInstAudited(Translator& t,
                      const Inst& inst,
                      u32 index,
@@ -1107,6 +1174,7 @@ void EmitInstAudited(Translator& t,
     EmitInstGuarded(t, inst, sc);
     CapturePsVgprs(t, inst);
     ProbeCsCapture(t, inst, sc);
+    ProbeVsCapture(t, inst, sc);
     return;
   }
   AuditInstBegin(index, inst.pc);
@@ -1119,6 +1187,7 @@ void EmitInstAudited(Translator& t,
   EmitInstGuarded(t, inst, sc);
   CapturePsVgprs(t, inst);
   ProbeCsCapture(t, inst, sc);
+  ProbeVsCapture(t, inst, sc);
   AuditInstEnd(index, static_cast<u32>(t.m.BodyWords() - before));
 }
 
@@ -2427,6 +2496,42 @@ void SeedUserData(Translator& t, Id user_data) {
                         t.m.AccessChain(p_u, user_data, {t.U32(0), t.U32(i)})));
 }
 
+// A packed 2_10_10_10 attribute arrives as its raw dword (see
+// PackedAttrFormat); split it into x, y, z (10 bits) and w (2 bits) and apply
+// the number format.
+void EmitPackedAttr(Translator& t,
+                    const FetchAttr& a,
+                    u64 int_attr_mask,
+                    base::Vector<Id>& iface) {
+  const Id in_var = t.m.Variable(
+      t.m.TypePointer(spv::StorageClass::Input, t.t_u), spv::StorageClass::Input);
+  t.m.Decorate(in_var, spv::Decoration::Location, {a.semantic});
+  t.m.Name(in_var, "v_attr" + base::ToString(a.semantic));
+  iface.push_back(in_var);
+  const Id raw = t.m.Load(t.t_u, in_var);
+  const bool scaled = (int_attr_mask >> (48 + a.semantic)) & 1;
+  const bool sint = (int_attr_mask >> (16 + a.semantic)) & 1;
+  const bool uint = (int_attr_mask >> a.semantic) & 1;
+  const bool is_signed = !uint && (sint || !scaled);
+  for (u32 c = 0; c < a.num_comps && c < 4; c++) {
+    const u32 bits = c < 3 ? 10 : 2;
+    const Id v = t.m.Emit(
+        is_signed ? spv::Op::OpBitFieldSExtract : spv::Op::OpBitFieldUExtract,
+        t.t_u, {raw, t.U32(10 * c), t.U32(bits)});
+    if (uint || (sint && !scaled)) {
+      t.SetVg(a.dest_vgpr + c, v);
+      continue;
+    }
+    Id f = t.m.Emit(is_signed ? spv::Op::OpConvertSToF : spv::Op::OpConvertUToF,
+                    t.t_f, {is_signed ? t.m.Bitcast(t.t_i, v) : v});
+    if (!scaled)
+      f = t.Ext2(GLSLstd450FMax,
+                 t.FMul(f, t.F32(1.f / float((1u << (bits - 1)) - 1))),
+                 t.F32(-1.f));
+    t.SetVgF(a.dest_vgpr + c, f);
+  }
+}
+
 bool TranslateVs(const Program& program,
                  const u32* vs_user_data,
                  const base::HashSet<u32>& flat_attrs,
@@ -2435,7 +2540,7 @@ bool TranslateVs(const Program& program,
                  u32 tex_1d_mask,
                  bool gl_clip_space,
                  const GsPipeline* es,
-                 u32 int_attr_mask,
+                 u64 int_attr_mask,
                  Recompiled& r,
                  Translator& t) {
   const u64 fetch =
@@ -2556,13 +2661,28 @@ bool TranslateVs(const Program& program,
     t.m.Decorate(instance_index, spv::Decoration::BuiltIn,
                  {static_cast<u32>(spv::BuiltIn::InstanceIndex)});
     iface.push_back(instance_index);
-    t.SetVg(0, t.m.Load(t.t_u, vertex_index));
+    const Id vertex = t.m.Load(t.t_u, vertex_index);
+    t.SetVg(0, vertex);
     const Id instance = t.m.Load(t.t_u, instance_index);
     t.SetVg(1, instance);
     t.SetVg(3, instance);
+    if (g_vs_probe && t.program_base == VsProbeShader()) {
+      t.m.PhysicalStorageBuffers();
+      sc.vs_probe_vertex = vertex;
+      sc.vs_probe_instance = instance;
+      sc.vs_probe_tag[0] = t.Sg(2);
+      sc.vs_probe_tag[1] = t.Sg(12);
+    }
   }
 
   for (const FetchAttr& a : attrs) {
+    if (a.semantic < 16 && ((int_attr_mask >> (32 + a.semantic)) & 1)) {
+      EmitPackedAttr(t, a, int_attr_mask, iface);
+      r.attrs.push_back({a.semantic, a.num_comps, a.table_sgpr, a.dword_off,
+                         a.direct_fetch, 0, a.pc, 0, a.dfmt, a.nfmt,
+                         a.index_vgpr >= 1 && a.index_vgpr <= 3});
+      continue;
+    }
     const Id comp_ty = a.num_comps == 1   ? t.t_f
                        : a.num_comps == 2 ? t.t_v2
                        : a.num_comps == 3 ? t.t_v3
@@ -3375,7 +3495,7 @@ bool RecompileSpirv(const u32* vs_code,
                     u32 mrt_bound_mask,
                     bool gl_clip_space,
                     const GsPipeline* gs,
-                    u32 int_attr_mask,
+                    u64 int_attr_mask,
                     u32 col_format,
                     u32 tex_cube_mask,
                     Recompiled& r) {

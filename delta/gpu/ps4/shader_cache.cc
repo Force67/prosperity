@@ -39,7 +39,7 @@ struct GraphicsKey {
   bool gl_clip = false;
   bool neo = false;
   u64 es = 0, gs = 0, gs_shape = 0;
-  u32 int_attr_mask = 0;
+  u64 int_attr_mask = 0;
   u32 col_format = 0;
 
   bool operator==(const GraphicsKey& other) const = default;

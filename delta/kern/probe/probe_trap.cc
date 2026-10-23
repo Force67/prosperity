@@ -1306,7 +1306,8 @@ void SetFnArgs(uintptr_t addr,
 // range. Waits until mapped, makes it read-only, and the SIGSEGV path reports
 // the faulting instruction and reopens the page. The trap RE-ARMS every `ms`: a
 // single report cannot tell a one-time initialiser from a per-frame producer,
-// and re-arming costs about one fault per page per interval.
+// and re-arming costs about one fault per page per interval. An `ms` of 0
+// single-steps the faulting stores instead and reports only the asked range.
 void StartWriteWatch(uintptr_t addr,
                      size_t bytes,
                      unsigned every_ms,
@@ -1334,6 +1335,17 @@ void StartWriteWatch(uintptr_t addr,
                 (unsigned long)base, (unsigned long)span, (unsigned long)addr,
                 (unsigned long)bytes, trap_reads ? "reads+writes" : "writes");
     }
+    return;
+  }
+  if (!every_ms) {
+    // Single-step every write once the range is mapped: catches each store,
+    // not just the first one per re-arm interval.
+    guest::SpawnThread("probe_trap", [addr, bytes, trap_reads, base] {
+      unsigned char vec = 0;
+      while (mincore(reinterpret_cast<void*>(base), 1, &vec) != 0)
+        guest::SleepForMilliseconds(1);
+      StartWriteWatch(addr, bytes, 1, trap_reads, true);
+    });
     return;
   }
   guest::SpawnThread("probe_trap", [addr, bytes, every_ms, trap_reads] {
