@@ -912,6 +912,33 @@ int PS4ABI sys_sigpending(void* set) {
 
 // Runs under `mask` until a signal is taken; the handler runs at this
 // syscall's exit and its frame keeps the caller's mask.
+int BeginWaitMask(const void* mask) {
+  if (!mask)
+    return 0;
+  GuestSigset in;
+  if (const int err = ReadSet(mask, &in))
+    return err;
+  base::LockGuard<base::Mutex> lk(g_mutex);
+  Thread& t = *CurrentLocked();
+  t.saved_mask = t.mask;
+  t.suspended = true;
+  t.mask = Maskable(in);
+  RecomputeDue();
+  return 0;
+}
+
+void EndWaitMask(const void* mask) {
+  if (!mask)
+    return;
+  base::LockGuard<base::Mutex> lk(g_mutex);
+  Thread& t = *CurrentLocked();
+  if (!t.suspended || NextDeliverable(t))
+    return;  // the syscall exit delivers under the wait's mask
+  t.mask = t.saved_mask;
+  t.suspended = false;
+  RecomputeDue();
+}
+
 int PS4ABI sys_sigsuspend(const void* mask) {
   GuestSigset in;
   if (const int err = ReadSet(mask, &in))

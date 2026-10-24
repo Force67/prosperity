@@ -347,4 +347,23 @@ int PS4ABI sys_getpid() {
   return 0x1337;
 }
 
+int PS4ABI sys_setreuid(u32 ruid, u32 euid) {
+  const u32 uid = sys_getuid();
+  return KeepsId(ruid, uid) && KeepsId(euid, uid) ? 0 : -SysError::ePERM;
+}
+
+int PS4ABI sys_setregid(u32 rgid, u32 egid) {
+  const u32 gid = sys_getgid();
+  return KeepsId(rgid, gid) && KeepsId(egid, gid) ? 0 : -SysError::ePERM;
+}
+
+// Profiling arms a tick-driven histogram; nothing ever samples, so only the
+// argument check is real.
+int PS4ABI sys_profil(void* /*samples*/,
+                      size_t /*size*/,
+                      size_t /*offset*/,
+                      u32 scale) {
+  return scale > 0x10000 ? -SysError::eINVAL : 0;
+}
+
 }  // namespace kern

@@ -14,6 +14,7 @@
 #include "guest_abi.h"
 
 #include "kern/lv2/dispatch.h"
+#include "kern/lv2/ps4/handlers.h"
 #include "kern/lv2/sys_aio.h"
 #include "kern/lv2/sys_budget.h"
 #include "kern/lv2/sys_context.h"
@@ -43,189 +44,189 @@ struct SyscallReg {
 };
 
 static const SyscallReg kSyscallDpt[] = {
-    {0, (void*)&Lv2StubSyscall},  // sys_nosys
+    {0, (void*)&Ps4Nosys},  // sys_nosys
     {1, (void*)&sys_exit},
-    {2, (void*)&Lv2StubSyscall},  // sys_fork
+    {2, (void*)&Ps4Eperm},  // sys_fork
     {3, (void*)&sys_read},
     {4, (void*)&sys_write},
     {5, (void*)&sys_open},
     {6, (void*)&sys_close},
     {7, (void*)&sys_wait4},        // sys_wait4
-    {8, (void*)&Lv2StubSyscall},   // sys_creat
+    {8, (void*)&Ps4Nosys},         // sys_creat
     {9, (void*)&Lv2StubSyscall},   // sys_link
     {10, (void*)&sys_unlink},      // sys_unlink
-    {11, (void*)&Lv2StubSyscall},  // sys_execv
+    {11, (void*)&Ps4Nosys},        // sys_execv
     {12, (void*)&sys_chdir},       // sys_chdir
     {13, (void*)&sys_fchdir},      // sys_fchdir
     {14, (void*)&Lv2StubSyscall},  // sys_mkd
-    {15, (void*)&Lv2StubSyscall},  // sys_chmod
+    {15, (void*)&sys_chmod},       // sys_chmod
     {16, (void*)&Lv2StubSyscall},  // sys_chown
     {17, (void*)&sys_obreak},      // sys_obreak
-    {18, (void*)&Lv2StubSyscall},  // sys_getfsstat
+    {18, (void*)&Ps4Nosys},        // sys_getfsstat
     {19, (void*)&sys_lseek},
     {20, (void*)&sys_getpid},
-    {21, (void*)&Lv2StubSyscall},  // sys_mount
-    {22, (void*)&Lv2StubSyscall},  // sys_unmount
-    {23, (void*)&sys_setuid},      // sys_setuid
-    {24, (void*)&sys_getuid},      // sys_getuid
-    {25, (void*)&sys_geteuid},     // sys_geteuid
-    {26, (void*)&Lv2StubSyscall},  // sys_ptrace
+    {21, (void*)&Ps4Eperm},     // sys_mount
+    {22, (void*)&Ps4Eperm},     // sys_unmount
+    {23, (void*)&sys_setuid},   // sys_setuid
+    {24, (void*)&sys_getuid},   // sys_getuid
+    {25, (void*)&sys_geteuid},  // sys_geteuid
+    {26, (void*)&Ps4Eperm},     // sys_ptrace
     {27, (void*)&sys_recvmsg},
-    {28, (void*)&Lv2StubSyscall},  // sys_sendmsg
+    {28, (void*)&sys_sendmsg},  // sys_sendmsg
     {29, (void*)&sys_recvfrom},
-    {30, (void*)&Lv2StubSyscall},  // sys_accept
-    {31, (void*)&Lv2StubSyscall},  // sys_getpeername
+    {30, (void*)&Ps4Accept},        // sys_accept
+    {31, (void*)&sys_getpeername},  // sys_getpeername
     {32, (void*)&sys_getsockname},
-    {33, (void*)&sys_access},      // sys_access
-    {34, (void*)&Lv2StubSyscall},  // sys_chflags
-    {35, (void*)&Lv2StubSyscall},  // sys_fchflags
-    {36, (void*)&sys_sync},        // sys_sync
-    {37, (void*)&sys_kill},        // sys_kill
+    {33, (void*)&sys_access},    // sys_access
+    {34, (void*)&sys_chflags},   // sys_chflags
+    {35, (void*)&sys_fchflags},  // sys_fchflags
+    {36, (void*)&sys_sync},      // sys_sync
+    {37, (void*)&sys_kill},      // sys_kill
     {38, (void*)&sys_stat},
-    {39, (void*)&sys_getppid},     // sys_getppid
-    {40, (void*)&sys_lstat},       // sys_lstat
-    {41, (void*)&sys_dup},         // sys_dup
+    {39, (void*)&sys_getppid},  // sys_getppid
+    {40, (void*)&sys_lstat},    // sys_lstat
+    {41, (void*)&sys_dup},      // sys_dup
     {42, (void*)&sys_pipe},
     {43, (void*)&sys_getegid},     // sys_getegid
-    {44, (void*)&Lv2StubSyscall},  // sys_profil
+    {44, (void*)&sys_profil},      // sys_profil
     {45, (void*)&Lv2StubSyscall},  // sys_ktrace
     {46, (void*)&sys_sigaction},
     {47, (void*)&sys_getgid},  // sys_getgid
     {48, (void*)&sys_sigprocmask},
     {49, (void*)&sys_getlogin},     // sys_getlogin
     {50, (void*)&sys_setlogin},     // sys_setlogin
-    {51, (void*)&Lv2StubSyscall},   // sys_acct
+    {51, (void*)&Ps4Nosys},         // sys_acct
     {52, (void*)&sys_sigpending},   // sys_sigpending
     {53, (void*)&sys_sigaltstack},  // sys_sigaltstack
     {54, (void*)&sys_ioctl},
-    {55, (void*)&Lv2StubSyscall},  // sys_reboot
-    {56, (void*)&Lv2StubSyscall},  // sys_revoke
+    {55, (void*)&Ps4Eperm},        // sys_reboot
+    {56, (void*)&Ps4Eperm},        // sys_revoke
     {57, (void*)&Lv2StubSyscall},  // sys_symlink
     {58, (void*)&sys_readlink},    // sys_readlink
     {59, (void*)&sys_execve},
-    {60, (void*)&sys_umask},       // sys_umask
-    {61, (void*)&Lv2StubSyscall},  // sys_chroot
+    {60, (void*)&sys_umask},  // sys_umask
+    {61, (void*)&Ps4Eperm},   // sys_chroot
     {62, (void*)&sys_fstat},
-    {63, (void*)&Lv2StubSyscall},   // sys_getkerninfo
+    {63, (void*)&Ps4Nosys},         // sys_getkerninfo
     {64, (void*)&sys_getpagesize},  // sys_getpagesize
     {65, (void*)&sys_msync},        // sys_msync
-    {66, (void*)&Lv2StubSyscall},   // sys_vfork
-    {67, (void*)&Lv2StubSyscall},   // sys_vread
-    {68, (void*)&Lv2StubSyscall},   // sys_vwrite
-    {69, (void*)&sys_sbrk},         // sys_sbrk
-    {70, (void*)&Lv2StubSyscall},   // sys_sstk
+    {66, (void*)&Ps4Eperm},         // sys_vfork
+    {67, (void*)&Ps4Nosys},         // sys_vread
+    {68, (void*)&Ps4Nosys},         // sys_vwrite
+    {69, (void*)&Ps4Eopnotsupp},    // sys_sbrk
+    {70, (void*)&Ps4Eopnotsupp},    // sys_sstk
     {71, (void*)&sys_mmap},
-    {72, (void*)&Lv2StubSyscall},  // sys_ovadvise
-    {73, (void*)&sys_munmap},      // sys_munmap
+    {72, (void*)&Ps4Nosys},    // sys_ovadvise
+    {73, (void*)&sys_munmap},  // sys_munmap
     {74, (void*)&sys_mprotect},
     {75, (void*)&sys_madvise},        // sys_madvise
-    {76, (void*)&Lv2StubSyscall},     // sys_vhangup
-    {77, (void*)&Lv2StubSyscall},     // sys_vlimit
+    {76, (void*)&Ps4Nosys},           // sys_vhangup
+    {77, (void*)&Ps4Nosys},           // sys_vlimit
     {78, (void*)&sys_mincore},        // sys_mincore
     {79, (void*)&sys_getgroups},      // sys_getgroups
     {80, (void*)&sys_setgroups},      // sys_setgroups
     {81, (void*)&sys_getpgrp},        // sys_getpgrp
     {82, (void*)&sys_setpgid},        // sys_setpgid
     {83, (void*)&sys_setitimer},      // sys_setitimer
-    {84, (void*)&Lv2StubSyscall},     // sys_wait
-    {85, (void*)&Lv2StubSyscall},     // sys_swapon
+    {84, (void*)&Ps4Nosys},           // sys_wait
+    {85, (void*)&Ps4Eperm},           // sys_swapon
     {86, (void*)&sys_getitimer},      // sys_getitimer
     {87, (void*)&sys_gethostname},    // sys_gethostname
     {88, (void*)&sys_sethostname},    // sys_sethostname
     {89, (void*)&sys_getdtablesize},  // sys_getdtablesize
     {90, (void*)&sys_dup2},           // sys_dup2
-    {91, (void*)&Lv2StubSyscall},     // sys_getdopt
+    {91, (void*)&Ps4Nosys},           // sys_getdopt
     {92, (void*)&sys_fcntl},          // sys_fcntl
     {93, (void*)&sys_select},         // sys_select
-    {94, (void*)&Lv2StubSyscall},     // sys_setdopt
+    {94, (void*)&Ps4Nosys},           // sys_setdopt
     {95, (void*)&sys_fsync},          // sys_fsync
     {96, (void*)&sys_setpriority},    // sys_setpriority
     {97, (void*)&sys_socket},
     {98, (void*)&sys_connect},
     {99, (void*)&sys_netcontrol},
     {100, (void*)&sys_getpriority},  // sys_getpriority
-    {101, (void*)&Lv2StubSyscall},   // sys_netabort
+    {101, (void*)&Ps4Netabort},      // sys_netabort
     {102, (void*)&sys_netgetsockinfo},
-    {103, (void*)&Lv2StubSyscall},  // sys_sigreturn
+    {103, (void*)&Ps4Nosys},  // sys_sigreturn
     {104, (void*)&sys_bind},
     {105, (void*)&sys_setsockopt},  // sys_setsockopt
-    {106, (void*)&Lv2StubSyscall},  // sys_listen
-    {107, (void*)&Lv2StubSyscall},  // sys_vtimes
-    {108, (void*)&Lv2StubSyscall},  // sys_sigvec
-    {109, (void*)&Lv2StubSyscall},  // sys_sigblock
-    {110, (void*)&Lv2StubSyscall},  // sys_sigsetmask
+    {106, (void*)&sys_listen},      // sys_listen
+    {107, (void*)&Ps4Nosys},        // sys_vtimes
+    {108, (void*)&Ps4Nosys},        // sys_sigvec
+    {109, (void*)&Ps4Nosys},        // sys_sigblock
+    {110, (void*)&Ps4Nosys},        // sys_sigsetmask
     {111, (void*)&sys_sigsuspend},  // sys_sigsuspend
-    {112, (void*)&Lv2StubSyscall},  // sys_sigstack
+    {112, (void*)&Ps4Nosys},        // sys_sigstack
     {113, (void*)&sys_socketex},
     {114, (void*)&sys_socketclose},
-    {115, (void*)&Lv2StubSyscall},    // sys_vtrace
+    {115, (void*)&Ps4Nosys},          // sys_vtrace
     {116, (void*)&sys_gettimeofday},  // sys_gettimeofday
     {117, (void*)&sys_getrusage},     // sys_getrusage
     {118, (void*)&sys_getsockopt},    // sys_getsockopt
-    {119, (void*)&Lv2StubSyscall},    // sys_resuba
+    {119, (void*)&Ps4Nosys},          // sys_resuba
     {120, (void*)&sys_readv},         // sys_readv
     {121, (void*)&sys_writev},        // sys_writev
     {122, (void*)&sys_settimeofday},  // sys_settimeofday
     {123, (void*)&Lv2StubSyscall},    // sys_fchown
-    {124, (void*)&Lv2StubSyscall},    // sys_fchmod
-    {125, (void*)&Lv2StubSyscall},    // sys_netgetiflist
-    {126, (void*)&Lv2StubSyscall},    // sys_setreuid
-    {127, (void*)&Lv2StubSyscall},    // sys_setregid
+    {124, (void*)&sys_fchmod},        // sys_fchmod
+    {125, (void*)&Ps4Ok},             // sys_netgetiflist
+    {126, (void*)&sys_setreuid},      // sys_setreuid
+    {127, (void*)&sys_setregid},      // sys_setregid
     {128, (void*)&sys_rename},        // sys_rename
-    {129, (void*)&Lv2StubSyscall},    // sys_truncate
-    {130, (void*)&Lv2StubSyscall},    // sys_ftruncate
+    {129, (void*)&Ps4Nosys},          // sys_truncate
+    {130, (void*)&Ps4Nosys},          // sys_ftruncate
     {131, (void*)&sys_flock},         // sys_flock
     {132, (void*)&Lv2StubSyscall},    // sys_mkfifo
     {133, (void*)&sys_sendto},
-    {134, (void*)&Lv2StubSyscall},  // sys_shutdown
-    {135, (void*)&Lv2StubSyscall},  // sys_socketpair
+    {134, (void*)&sys_shutdown},    // sys_shutdown
+    {135, (void*)&sys_socketpair},  // sys_socketpair
     {136, (void*)&sys_mkdir},       // sys_mkdir
     {137, (void*)&sys_rmdir},       // sys_rmdir
     {138, (void*)&sys_utimes},      // sys_utimes
-    {139, (void*)&Lv2StubSyscall},  // sys_sigreturn
-    {140, (void*)&Lv2StubSyscall},  // sys_adjtime
+    {139, (void*)&Ps4Nosys},        // sys_sigreturn
+    {140, (void*)&sys_adjtime},     // sys_adjtime
     {141, (void*)&sys_kqueueex},
-    {142, (void*)&Lv2StubSyscall},  // sys_gethostid
-    {143, (void*)&Lv2StubSyscall},  // sys_sethostid
-    {144, (void*)&sys_getrlimit},   // sys_getrlimit
-    {145, (void*)&sys_setrlimit},   // sys_setrlimit
-    {146, (void*)&Lv2StubSyscall},  // sys_killpg
-    {147, (void*)&sys_setsid},      // sys_setsid
-    {148, (void*)&Lv2StubSyscall},  // sys_quotactl
-    {149, (void*)&Lv2StubSyscall},  // sys_quota
+    {142, (void*)&Ps4Nosys},       // sys_gethostid
+    {143, (void*)&Ps4Nosys},       // sys_sethostid
+    {144, (void*)&sys_getrlimit},  // sys_getrlimit
+    {145, (void*)&sys_setrlimit},  // sys_setrlimit
+    {146, (void*)&Ps4Nosys},       // sys_killpg
+    {147, (void*)&sys_setsid},     // sys_setsid
+    {148, (void*)&Ps4Nosys},       // sys_quotactl
+    {149, (void*)&Ps4Nosys},       // sys_quota
     {150, (void*)&sys_getsockname},
-    {151, (void*)&Lv2StubSyscall},     // sys_sem_lock
-    {152, (void*)&Lv2StubSyscall},     // sys_sem_wakeup
-    {153, (void*)&Lv2StubSyscall},     // sys_asyncdaemon
-    {154, (void*)&Lv2StubSyscall},     // sys_nlm_syscall
-    {155, (void*)&Lv2StubSyscall},     // sys_nfssvc
+    {151, (void*)&Ps4Nosys},           // sys_sem_lock
+    {152, (void*)&Ps4Nosys},           // sys_sem_wakeup
+    {153, (void*)&Ps4Nosys},           // sys_asyncdaemon
+    {154, (void*)&Ps4Nosys},           // sys_nlm_syscall
+    {155, (void*)&Ps4Nosys},           // sys_nfssvc
     {156, (void*)&sys_getdirentries},  // sys_getdirentries
     {157, (void*)&sys_statfs},
     {158, (void*)&sys_fstatfs},
-    {160, (void*)&Lv2StubSyscall},  // sys_lgetfh
-    {161, (void*)&Lv2StubSyscall},  // sys_getfh
-    {162, (void*)&Lv2StubSyscall},  // sys_getdomainname
-    {163, (void*)&Lv2StubSyscall},  // sys_setdomainname
-    {164, (void*)&sys_uname},       // sys_uname
+    {160, (void*)&Ps4Nosys},   // sys_lgetfh
+    {161, (void*)&Ps4Nosys},   // sys_getfh
+    {162, (void*)&Ps4Nosys},   // sys_getdomainname
+    {163, (void*)&Ps4Nosys},   // sys_setdomainname
+    {164, (void*)&sys_uname},  // sys_uname
     {165, (void*)&sys_sysarch},
-    {166, (void*)&sys_rtprio},      // sys_rtprio
-    {169, (void*)&Lv2StubSyscall},  // sys_semsys
-    {170, (void*)&Lv2StubSyscall},  // sys_msgsys
-    {171, (void*)&Lv2StubSyscall},  // sys_shmsys
-    {173, (void*)&sys_pread},       // sys_pread
-    {174, (void*)&sys_pwrite},      // sys_pwrite
-    {175, (void*)&Lv2StubSyscall},  // sys_setfib
-    {176, (void*)&Lv2StubSyscall},  // sys_ntp_adjtime
-    {177, (void*)&Lv2StubSyscall},  // sys_sfork
-    {178, (void*)&Lv2StubSyscall},  // sys_getdescriptor
-    {179, (void*)&Lv2StubSyscall},  // sys_setdescriptor
-    {181, (void*)&sys_setgid},      // sys_setgid
-    {182, (void*)&sys_setegid},     // sys_setegid
-    {183, (void*)&sys_seteuid},     // sys_seteuid
-    {184, (void*)&Lv2StubSyscall},  // sys_lfs_bmapv
-    {185, (void*)&Lv2StubSyscall},  // sys_lfs_markv
-    {186, (void*)&Lv2StubSyscall},  // sys_lfs_segclean
-    {187, (void*)&Lv2StubSyscall},  // sys_lfs_segwait
+    {166, (void*)&sys_rtprio},   // sys_rtprio
+    {169, (void*)&Ps4Nosys},     // sys_semsys
+    {170, (void*)&Ps4Nosys},     // sys_msgsys
+    {171, (void*)&Ps4Nosys},     // sys_shmsys
+    {173, (void*)&sys_pread},    // sys_pread
+    {174, (void*)&sys_pwrite},   // sys_pwrite
+    {175, (void*)&Ps4Nosys},     // sys_setfib
+    {176, (void*)&Ps4Nosys},     // sys_ntp_adjtime
+    {177, (void*)&Ps4Nosys},     // sys_sfork
+    {178, (void*)&Ps4Nosys},     // sys_getdescriptor
+    {179, (void*)&Ps4Nosys},     // sys_setdescriptor
+    {181, (void*)&sys_setgid},   // sys_setgid
+    {182, (void*)&sys_setegid},  // sys_setegid
+    {183, (void*)&sys_seteuid},  // sys_seteuid
+    {184, (void*)&Ps4Nosys},     // sys_lfs_bmapv
+    {185, (void*)&Ps4Nosys},     // sys_lfs_markv
+    {186, (void*)&Ps4Nosys},     // sys_lfs_segclean
+    {187, (void*)&Ps4Nosys},     // sys_lfs_segwait
     {188, (void*)&sys_stat},
     {189, (void*)&sys_fstat},
     {190, (void*)&sys_lstat},          // sys_lstat
@@ -235,30 +236,30 @@ static const SyscallReg kSyscallDpt[] = {
     {195, (void*)&sys_setrlimit},      // sys_setrlimit
     {196, (void*)&sys_getdirentries},  // sys_getdirentries
     {197, (void*)&sys_mmap},
-    {198, (void*)&Lv2StubSyscall},  // sys_nosys
+    {198, (void*)&Ps4Nosys},  // sys_nosys
     {199, (void*)&sys_lseek},
-    {200, (void*)&Lv2StubSyscall},  // sys_truncate
-    {201, (void*)&Lv2StubSyscall},  // sys_ftruncate
+    {200, (void*)&Ps4Nosys},  // sys_truncate
+    {201, (void*)&Ps4Nosys},  // sys_ftruncate
     {202, (void*)&sys_sysctl},
-    {203, (void*)&sys_mlock},       // sys_mlock
-    {204, (void*)&sys_munlock},     // sys_munlock
-    {205, (void*)&Lv2StubSyscall},  // sys_undelete
-    {206, (void*)&sys_futimes},     // sys_futimes
-    {207, (void*)&sys_getpgid},     // sys_getpgid
-    {208, (void*)&Lv2StubSyscall},  // sys_newreboot
-    {209, (void*)&sys_poll},        // sys_poll
-    {220, (void*)&Lv2StubSyscall},  // sys_semctl
-    {221, (void*)&Lv2StubSyscall},  // sys_semget
-    {222, (void*)&Lv2StubSyscall},  // sys_semop
-    {223, (void*)&Lv2StubSyscall},  // sys_semconfig
-    {224, (void*)&Lv2StubSyscall},  // sys_msgctl
-    {225, (void*)&Lv2StubSyscall},  // sys_msgget
-    {226, (void*)&Lv2StubSyscall},  // sys_msgsnd
-    {227, (void*)&Lv2StubSyscall},  // sys_msgrcv
-    {228, (void*)&Lv2StubSyscall},  // sys_shmat
-    {229, (void*)&Lv2StubSyscall},  // sys_shmctl
-    {230, (void*)&Lv2StubSyscall},  // sys_shmdt
-    {231, (void*)&Lv2StubSyscall},  // sys_shmget
+    {203, (void*)&sys_mlock},    // sys_mlock
+    {204, (void*)&sys_munlock},  // sys_munlock
+    {205, (void*)&Ps4Nosys},     // sys_undelete
+    {206, (void*)&sys_futimes},  // sys_futimes
+    {207, (void*)&sys_getpgid},  // sys_getpgid
+    {208, (void*)&Ps4Nosys},     // sys_newreboot
+    {209, (void*)&sys_poll},     // sys_poll
+    {220, (void*)&Ps4Nosys},     // sys_semctl
+    {221, (void*)&Ps4Nosys},     // sys_semget
+    {222, (void*)&Ps4Nosys},     // sys_semop
+    {223, (void*)&Ps4Nosys},     // sys_semconfig
+    {224, (void*)&Ps4Nosys},     // sys_msgctl
+    {225, (void*)&Ps4Nosys},     // sys_msgget
+    {226, (void*)&Ps4Nosys},     // sys_msgsnd
+    {227, (void*)&Ps4Nosys},     // sys_msgrcv
+    {228, (void*)&Ps4Nosys},     // sys_shmat
+    {229, (void*)&Ps4Nosys},     // sys_shmctl
+    {230, (void*)&Ps4Nosys},     // sys_shmdt
+    {231, (void*)&Ps4Nosys},     // sys_shmget
     {232, (void*)&sys_clock_gettime},
     {233, (void*)&sys_clock_settime},      // sys_clock_settime
     {234, (void*)&sys_clock_getres},       // sys_clock_getres
@@ -275,7 +276,7 @@ static const SyscallReg kSyscallDpt[] = {
     {248, (void*)&sys_ntp_gettime},           // sys_ntp_gettime
     {250, (void*)&sys_minherit},              // sys_minherit
     {251, (void*)&sys_rfork},
-    {252, (void*)&Lv2StubSyscall},       // sys_openbsd_poll
+    {252, (void*)&Ps4Nosys},             // sys_openbsd_poll
     {253, (void*)&sys_issetugid},        // sys_issetugid
     {254, (void*)&Lv2StubSyscall},       // sys_lchown
     {255, (void*)&sys_aio_unsupported},  // sys_aio_read
@@ -286,28 +287,28 @@ static const SyscallReg kSyscallDpt[] = {
     {275, (void*)&Lv2StubSyscall},              // sys_lchown
     {276, (void*)&Lv2StubSyscall},              // sys_lutimes
     {277, (void*)&sys_msync},                   // sys_msync
-    {278, (void*)&Lv2StubSyscall},              // sys_nstat
-    {279, (void*)&Lv2StubSyscall},              // sys_nfstat
-    {280, (void*)&Lv2StubSyscall},              // sys_nlstat
+    {278, (void*)&Ps4Nosys},                    // sys_nstat
+    {279, (void*)&Ps4Nosys},                    // sys_nfstat
+    {280, (void*)&Ps4Nosys},                    // sys_nlstat
     {289, (void*)&sys_preadv},                  // sys_preadv
     {290, (void*)&sys_pwritev},                 // sys_pwritev
-    {297, (void*)&Lv2StubSyscall},              // sys_fhstatfs
-    {298, (void*)&Lv2StubSyscall},              // sys_fhopen
-    {299, (void*)&Lv2StubSyscall},              // sys_fhstat
-    {300, (void*)&Lv2StubSyscall},              // sys_modnext
-    {301, (void*)&Lv2StubSyscall},              // sys_modstat
-    {302, (void*)&Lv2StubSyscall},              // sys_modfnext
-    {303, (void*)&Lv2StubSyscall},              // sys_modfind
-    {304, (void*)&Lv2StubSyscall},              // sys_kldload
-    {305, (void*)&Lv2StubSyscall},              // sys_kldunload
-    {306, (void*)&Lv2StubSyscall},              // sys_kldfind
-    {307, (void*)&Lv2StubSyscall},              // sys_kldnext
-    {308, (void*)&Lv2StubSyscall},              // sys_kldstat
-    {309, (void*)&Lv2StubSyscall},              // sys_kldfirstmod
+    {297, (void*)&Ps4Nosys},                    // sys_fhstatfs
+    {298, (void*)&Ps4Nosys},                    // sys_fhopen
+    {299, (void*)&Ps4Nosys},                    // sys_fhstat
+    {300, (void*)&Ps4Nosys},                    // sys_modnext
+    {301, (void*)&Ps4Nosys},                    // sys_modstat
+    {302, (void*)&Ps4Nosys},                    // sys_modfnext
+    {303, (void*)&Ps4Nosys},                    // sys_modfind
+    {304, (void*)&Ps4Nosys},                    // sys_kldload
+    {305, (void*)&Ps4Nosys},                    // sys_kldunload
+    {306, (void*)&Ps4Nosys},                    // sys_kldfind
+    {307, (void*)&Ps4Nosys},                    // sys_kldnext
+    {308, (void*)&Ps4Nosys},                    // sys_kldstat
+    {309, (void*)&Ps4Nosys},                    // sys_kldfirstmod
     {310, (void*)&sys_getsid},                  // sys_getsid
     {311, (void*)&sys_setresuid},               // sys_setresuid
     {312, (void*)&sys_setresgid},               // sys_setresgid
-    {313, (void*)&Lv2StubSyscall},              // sys_signasleep
+    {313, (void*)&Ps4Nosys},                    // sys_signasleep
     {314, (void*)&sys_aio_unsupported},         // sys_aio_return
     {315, (void*)&sys_aio_unsupported},         // sys_aio_suspend
     {316, (void*)&sys_aio_unsupported},         // sys_aio_cancel
@@ -330,68 +331,68 @@ static const SyscallReg kSyscallDpt[] = {
     {333, (void*)&sys_sched_get_priority_min},  // sys_sched_get_priority_min
     {334, (void*)&sys_sched_rr_get_interval},   // sys_sched_rr_get_interval
     {335, (void*)&Lv2StubSyscall},              // sys_utrace
-    {336, (void*)&Lv2StubSyscall},              // sys_sendfile
-    {337, (void*)&Lv2StubSyscall},              // sys_kldsym
-    {338, (void*)&Lv2StubSyscall},              // sys_jail
-    {339, (void*)&Lv2StubSyscall},              // sys_nnpfs_syscall
+    {336, (void*)&Ps4Nosys},                    // sys_sendfile
+    {337, (void*)&Ps4Nosys},                    // sys_kldsym
+    {338, (void*)&Ps4Nosys},                    // sys_jail
+    {339, (void*)&Ps4Nosys},                    // sys_nnpfs_syscall
     {340, (void*)&sys_sigprocmask},
     {341, (void*)&sys_sigsuspend},  // sys_sigsuspend
     {342, (void*)&sys_sigaction},
     {343, (void*)&sys_sigpending},       // sys_sigpending
-    {344, (void*)&Lv2StubSyscall},       // sys_sigreturn
+    {344, (void*)&Ps4Nosys},             // sys_sigreturn
     {345, (void*)&sys_sigtimedwait},     // sys_sigtimedwait
     {346, (void*)&sys_sigwaitinfo},      // sys_sigwaitinfo
-    {347, (void*)&Lv2StubSyscall},       // sys_acl_get_file
-    {348, (void*)&Lv2StubSyscall},       // sys_acl_set_file
-    {349, (void*)&Lv2StubSyscall},       // sys_acl_get_fd
-    {350, (void*)&Lv2StubSyscall},       // sys_acl_set_fd
-    {351, (void*)&Lv2StubSyscall},       // sys_acl_delete_file
-    {352, (void*)&Lv2StubSyscall},       // sys_acl_delete_fd
-    {353, (void*)&Lv2StubSyscall},       // sys_acl_aclcheck_file
-    {354, (void*)&Lv2StubSyscall},       // sys_acl_aclcheck_fd
-    {355, (void*)&Lv2StubSyscall},       // sys_extattrctl
-    {356, (void*)&Lv2StubSyscall},       // sys_extattr_set_file
-    {357, (void*)&Lv2StubSyscall},       // sys_extattr_get_file
-    {358, (void*)&Lv2StubSyscall},       // sys_extattr_delete_file
+    {347, (void*)&Ps4Nosys},             // sys_acl_get_file
+    {348, (void*)&Ps4Nosys},             // sys_acl_set_file
+    {349, (void*)&Ps4Nosys},             // sys_acl_get_fd
+    {350, (void*)&Ps4Nosys},             // sys_acl_set_fd
+    {351, (void*)&Ps4Nosys},             // sys_acl_delete_file
+    {352, (void*)&Ps4Nosys},             // sys_acl_delete_fd
+    {353, (void*)&Ps4Nosys},             // sys_acl_aclcheck_file
+    {354, (void*)&Ps4Nosys},             // sys_acl_aclcheck_fd
+    {355, (void*)&Ps4Nosys},             // sys_extattrctl
+    {356, (void*)&Ps4Nosys},             // sys_extattr_set_file
+    {357, (void*)&Ps4Nosys},             // sys_extattr_get_file
+    {358, (void*)&Ps4Nosys},             // sys_extattr_delete_file
     {359, (void*)&sys_aio_unsupported},  // sys_aio_waitcomplete
     {360, (void*)&sys_getresuid},        // sys_getresuid
     {361, (void*)&sys_getresgid},        // sys_getresgid
     {362, (void*)&sys_kqueue},
     {363, (void*)&sys_kevent},
-    {364, (void*)&Lv2StubSyscall},  // sys_cap_get_proc
-    {365, (void*)&Lv2StubSyscall},  // sys_cap_set_proc
-    {366, (void*)&Lv2StubSyscall},  // sys_cap_get_fd
-    {367, (void*)&Lv2StubSyscall},  // sys_cap_get_file
-    {368, (void*)&Lv2StubSyscall},  // sys_cap_set_fd
-    {369, (void*)&Lv2StubSyscall},  // sys_cap_set_file
-    {371, (void*)&Lv2StubSyscall},  // sys_extattr_set_fd
-    {372, (void*)&Lv2StubSyscall},  // sys_extattr_get_fd
-    {373, (void*)&Lv2StubSyscall},  // sys_extattr_delete_fd
-    {374, (void*)&Lv2StubSyscall},  // sys_setugid
-    {375, (void*)&Lv2StubSyscall},  // sys_nfsclnt
-    {376, (void*)&Lv2StubSyscall},  // sys_eaccess
-    {377, (void*)&Lv2StubSyscall},  // sys_afs3_syscall
-    {378, (void*)&Lv2StubSyscall},  // sys_nmount
-    {379, (void*)&Lv2StubSyscall},  // sys_mtypeprotect
-    {380, (void*)&Lv2StubSyscall},  // sys_kse_wakeup
-    {381, (void*)&Lv2StubSyscall},  // sys_kse_create
-    {382, (void*)&Lv2StubSyscall},  // sys_kse_thr_interrupt
-    {383, (void*)&Lv2StubSyscall},  // sys_kse_release
-    {384, (void*)&Lv2StubSyscall},  // sys_mac_get_proc
-    {385, (void*)&Lv2StubSyscall},  // sys_mac_set_proc
-    {386, (void*)&Lv2StubSyscall},  // sys_mac_get_fd
-    {387, (void*)&Lv2StubSyscall},  // sys_mac_get_file
-    {388, (void*)&Lv2StubSyscall},  // sys_mac_set_fd
-    {389, (void*)&Lv2StubSyscall},  // sys_mac_set_file
-    {390, (void*)&Lv2StubSyscall},  // sys_kenv
-    {391, (void*)&Lv2StubSyscall},  // sys_lchflags
+    {364, (void*)&Ps4Nosys},         // sys_cap_get_proc
+    {365, (void*)&Ps4Nosys},         // sys_cap_set_proc
+    {366, (void*)&Ps4Nosys},         // sys_cap_get_fd
+    {367, (void*)&Ps4Nosys},         // sys_cap_get_file
+    {368, (void*)&Ps4Nosys},         // sys_cap_set_fd
+    {369, (void*)&Ps4Nosys},         // sys_cap_set_file
+    {371, (void*)&Ps4Nosys},         // sys_extattr_set_fd
+    {372, (void*)&Ps4Nosys},         // sys_extattr_get_fd
+    {373, (void*)&Ps4Nosys},         // sys_extattr_delete_fd
+    {374, (void*)&Ps4Nosys},         // sys_setugid
+    {375, (void*)&Ps4Nosys},         // sys_nfsclnt
+    {376, (void*)&Ps4Nosys},         // sys_eaccess
+    {377, (void*)&Ps4Nosys},         // sys_afs3_syscall
+    {378, (void*)&Ps4Eperm},         // sys_nmount
+    {379, (void*)&Ps4Mtypeprotect},  // sys_mtypeprotect
+    {380, (void*)&Ps4Nosys},         // sys_kse_wakeup
+    {381, (void*)&Ps4Nosys},         // sys_kse_create
+    {382, (void*)&Ps4Nosys},         // sys_kse_thr_interrupt
+    {383, (void*)&Ps4Nosys},         // sys_kse_release
+    {384, (void*)&Ps4Nosys},         // sys_mac_get_proc
+    {385, (void*)&Ps4Nosys},         // sys_mac_set_proc
+    {386, (void*)&Ps4Nosys},         // sys_mac_get_fd
+    {387, (void*)&Ps4Nosys},         // sys_mac_get_file
+    {388, (void*)&Ps4Nosys},         // sys_mac_set_fd
+    {389, (void*)&Ps4Nosys},         // sys_mac_set_file
+    {390, (void*)&Ps4Eperm},         // sys_kenv
+    {391, (void*)&Lv2StubSyscall},   // sys_lchflags
     {392, (void*)&sys_uuidgen},
-    {393, (void*)&Lv2StubSyscall},  // sys_sendfile
-    {394, (void*)&Lv2StubSyscall},  // sys_mac_syscall
+    {393, (void*)&sys_sendfile},    // sys_sendfile
+    {394, (void*)&Ps4Nosys},        // sys_mac_syscall
     {395, (void*)&Lv2StubSyscall},  // sys_getfsstat
     {396, (void*)&sys_statfs},
     {397, (void*)&sys_fstatfs},
-    {398, (void*)&Lv2StubSyscall},     // sys_fhstatfs
+    {398, (void*)&Ps4Nosys},           // sys_fhstatfs
     {400, (void*)&sys_ksem_close},     // sys_ksem_close
     {401, (void*)&sys_ksem_post},      // sys_ksem_post
     {402, (void*)&sys_ksem_wait},      // sys_ksem_wait
@@ -401,70 +402,70 @@ static const SyscallReg kSyscallDpt[] = {
     {406, (void*)&sys_ksem_unlink},    // sys_ksem_unlink
     {407, (void*)&sys_ksem_getvalue},  // sys_ksem_getvalue
     {408, (void*)&sys_ksem_destroy},   // sys_ksem_destroy
-    {409, (void*)&Lv2StubSyscall},     // sys_mac_get_pid
-    {410, (void*)&Lv2StubSyscall},     // sys_mac_get_link
-    {411, (void*)&Lv2StubSyscall},     // sys_mac_set_link
-    {412, (void*)&Lv2StubSyscall},     // sys_extattr_set_link
-    {413, (void*)&Lv2StubSyscall},     // sys_extattr_get_link
-    {414, (void*)&Lv2StubSyscall},     // sys_extattr_delete_link
-    {415, (void*)&Lv2StubSyscall},     // sys_mac_execve
+    {409, (void*)&Ps4Nosys},           // sys_mac_get_pid
+    {410, (void*)&Ps4Nosys},           // sys_mac_get_link
+    {411, (void*)&Ps4Nosys},           // sys_mac_set_link
+    {412, (void*)&Ps4Nosys},           // sys_extattr_set_link
+    {413, (void*)&Ps4Nosys},           // sys_extattr_get_link
+    {414, (void*)&Ps4Nosys},           // sys_extattr_delete_link
+    {415, (void*)&Ps4Nosys},           // sys_mac_execve
     {416, (void*)&sys_sigaction},
-    {417, (void*)&Lv2StubSyscall},  // sys_sigreturn
-    {418, (void*)&Lv2StubSyscall},  // sys_xstat
-    {419, (void*)&Lv2StubSyscall},  // sys_xfstat
-    {420, (void*)&Lv2StubSyscall},  // sys_xlstat
-    {421, (void*)&Lv2StubSyscall},  // sys_getcontext
-    {422, (void*)&Lv2StubSyscall},  // sys_setcontext
-    {423, (void*)&Lv2StubSyscall},  // sys_swapcontext
-    {424, (void*)&Lv2StubSyscall},  // sys_swapoff
-    {425, (void*)&Lv2StubSyscall},  // sys_acl_get_link
-    {426, (void*)&Lv2StubSyscall},  // sys_acl_set_link
-    {427, (void*)&Lv2StubSyscall},  // sys_acl_delete_link
-    {428, (void*)&Lv2StubSyscall},  // sys_acl_aclcheck_link
+    {417, (void*)&Ps4Einval},       // sys_sigreturn (context trampoline)
+    {418, (void*)&Ps4Nosys},        // sys_xstat
+    {419, (void*)&Ps4Nosys},        // sys_xfstat
+    {420, (void*)&Ps4Nosys},        // sys_xlstat
+    {421, (void*)&Ps4Nosys},        // sys_getcontext
+    {422, (void*)&Ps4Nosys},        // sys_setcontext
+    {423, (void*)&Ps4Nosys},        // sys_swapcontext
+    {424, (void*)&Ps4Nosys},        // sys_swapoff
+    {425, (void*)&Ps4Nosys},        // sys_acl_get_link
+    {426, (void*)&Ps4Nosys},        // sys_acl_set_link
+    {427, (void*)&Ps4Nosys},        // sys_acl_delete_link
+    {428, (void*)&Ps4Nosys},        // sys_acl_aclcheck_link
     {429, (void*)&sys_sigwait},     // sys_sigwait
     {430, (void*)&sys_thr_create},  // sys_thr_create
     {431, (void*)&sys_thr_exit},    // sys_thr_exit
     {432, (void*)&sys_thr_self},
     {433, (void*)&sys_thr_kill},        // sys_thr_kill
-    {436, (void*)&Lv2StubSyscall},      // sys_jail_attach
-    {437, (void*)&Lv2StubSyscall},      // sys_extattr_list_fd
-    {438, (void*)&Lv2StubSyscall},      // sys_extattr_list_file
-    {439, (void*)&Lv2StubSyscall},      // sys_extattr_list_link
-    {440, (void*)&Lv2StubSyscall},      // sys_kse_switchin
+    {436, (void*)&Ps4Nosys},            // sys_jail_attach
+    {437, (void*)&Ps4Nosys},            // sys_extattr_list_fd
+    {438, (void*)&Ps4Nosys},            // sys_extattr_list_file
+    {439, (void*)&Ps4Nosys},            // sys_extattr_list_link
+    {440, (void*)&Ps4Nosys},            // sys_kse_switchin
     {441, (void*)&sys_ksem_timedwait},  // sys_ksem_timedwait
     {442, (void*)&sys_thr_suspend},     // sys_thr_suspend
     {443, (void*)&sys_thr_wake},        // sys_thr_wake
-    {444, (void*)&Lv2StubSyscall},      // sys_kldunloadf
-    {445, (void*)&Lv2StubSyscall},      // sys_audit
-    {446, (void*)&Lv2StubSyscall},      // sys_auditon
-    {447, (void*)&Lv2StubSyscall},      // sys_getauid
-    {448, (void*)&Lv2StubSyscall},      // sys_setauid
-    {449, (void*)&Lv2StubSyscall},      // sys_getaudit
-    {450, (void*)&Lv2StubSyscall},      // sys_setaudit
-    {451, (void*)&Lv2StubSyscall},      // sys_getaudit_addr
-    {452, (void*)&Lv2StubSyscall},      // sys_setaudit_addr
-    {453, (void*)&Lv2StubSyscall},      // sys_auditctl
+    {444, (void*)&Ps4Nosys},            // sys_kldunloadf
+    {445, (void*)&Ps4Nosys},            // sys_audit
+    {446, (void*)&Ps4Nosys},            // sys_auditon
+    {447, (void*)&Ps4Nosys},            // sys_getauid
+    {448, (void*)&Ps4Nosys},            // sys_setauid
+    {449, (void*)&Ps4Nosys},            // sys_getaudit
+    {450, (void*)&Ps4Nosys},            // sys_setaudit
+    {451, (void*)&Ps4Nosys},            // sys_getaudit_addr
+    {452, (void*)&Ps4Nosys},            // sys_setaudit_addr
+    {453, (void*)&Ps4Nosys},            // sys_auditctl
     {454, (void*)&sys_umtx_op},
     {455, (void*)&sys_thr_new},
     {456, (void*)&sys_sigqueue},         // sys_sigqueue
-    {457, (void*)&Lv2StubSyscall},       // sys_kmq_open
-    {458, (void*)&Lv2StubSyscall},       // sys_kmq_setattr
-    {459, (void*)&Lv2StubSyscall},       // sys_kmq_timedreceive
-    {460, (void*)&Lv2StubSyscall},       // sys_kmq_timedsend
-    {461, (void*)&Lv2StubSyscall},       // sys_kmq_tify
-    {462, (void*)&Lv2StubSyscall},       // sys_kmq_unlink
+    {457, (void*)&Ps4Nosys},             // sys_kmq_open
+    {458, (void*)&Ps4Nosys},             // sys_kmq_setattr
+    {459, (void*)&Ps4Nosys},             // sys_kmq_timedreceive
+    {460, (void*)&Ps4Nosys},             // sys_kmq_timedsend
+    {461, (void*)&Ps4Nosys},             // sys_kmq_tify
+    {462, (void*)&Ps4Nosys},             // sys_kmq_unlink
     {463, (void*)&sys_abort2},           // sys_abort2
     {464, (void*)&sys_thr_set_name},     // sys_thr_set_name
     {465, (void*)&sys_aio_unsupported},  // sys_aio_fsync
     {466, (void*)&sys_rtprio_thread},
-    {469, (void*)&Lv2StubSyscall},  // sys_getpath_fromfd
-    {470, (void*)&Lv2StubSyscall},  // sys_getpath_fromaddr
-    {471, (void*)&Lv2StubSyscall},  // sys_sctp_peeloff
-    {472, (void*)&Lv2StubSyscall},  // sys_sctp_generic_sendmsg
-    {473, (void*)&Lv2StubSyscall},  // sys_sctp_generic_sendmsg_iov
-    {474, (void*)&Lv2StubSyscall},  // sys_sctp_generic_recvmsg
-    {475, (void*)&sys_pread},       // sys_pread
-    {476, (void*)&sys_pwrite},      // sys_pwrite
+    {469, (void*)&Ps4Nosys},    // sys_getpath_fromfd
+    {470, (void*)&Ps4Nosys},    // sys_getpath_fromaddr
+    {471, (void*)&Ps4Nosys},    // sys_sctp_peeloff
+    {472, (void*)&Ps4Nosys},    // sys_sctp_generic_sendmsg
+    {473, (void*)&Ps4Nosys},    // sys_sctp_generic_sendmsg_iov
+    {474, (void*)&Ps4Nosys},    // sys_sctp_generic_recvmsg
+    {475, (void*)&sys_pread},   // sys_pread
+    {476, (void*)&sys_pwrite},  // sys_pwrite
     {477, (void*)&sys_mmap},
     {478,
      (void*)&sys_lseek},  // modern lseek (the game uses 478, not the old 19)
@@ -481,7 +482,7 @@ static const SyscallReg kSyscallDpt[] = {
     {489, (void*)&sys_faccessat},           // sys_faccessat
     {490, (void*)&Lv2StubSyscall},          // sys_fchmodat
     {491, (void*)&Lv2StubSyscall},          // sys_fchownat
-    {492, (void*)&Lv2StubSyscall},          // sys_fexecve
+    {492, (void*)&Ps4Nosys},                // sys_fexecve
     {493, (void*)&sys_fstatat},             // sys_fstatat
     {494, (void*)&Lv2StubSyscall},          // sys_futimesat
     {495, (void*)&Lv2StubSyscall},          // sys_linkat
@@ -493,32 +494,32 @@ static const SyscallReg kSyscallDpt[] = {
     {501, (void*)&sys_renameat},            // sys_renameat
     {502, (void*)&Lv2StubSyscall},          // sys_symlinkat
     {503, (void*)&sys_unlinkat},            // sys_unlinkat
-    {504, (void*)&Lv2StubSyscall},          // sys_posix_openpt
-    {505, (void*)&Lv2StubSyscall},          // sys_gssd_syscall
-    {506, (void*)&Lv2StubSyscall},          // sys_jail_get
-    {507, (void*)&Lv2StubSyscall},          // sys_jail_set
-    {508, (void*)&Lv2StubSyscall},          // sys_jail_remove
+    {504, (void*)&Ps4Nosys},                // sys_posix_openpt
+    {505, (void*)&Ps4Nosys},                // sys_gssd_syscall
+    {506, (void*)&Ps4Nosys},                // sys_jail_get
+    {507, (void*)&Ps4Nosys},                // sys_jail_set
+    {508, (void*)&Ps4Nosys},                // sys_jail_remove
     {509, (void*)&sys_closefrom},           // sys_closefrom
-    {510, (void*)&Lv2StubSyscall},          // sys_semctl
-    {511, (void*)&Lv2StubSyscall},          // sys_msgctl
-    {512, (void*)&Lv2StubSyscall},          // sys_shmctl
+    {510, (void*)&Ps4Nosys},                // sys_semctl
+    {511, (void*)&Ps4Nosys},                // sys_msgctl
+    {512, (void*)&Ps4Nosys},                // sys_shmctl
     {513, (void*)&sys_lpathconf},           // sys_lpathconf
-    {514, (void*)&Lv2StubSyscall},          // sys_cap_new
-    {515, (void*)&Lv2StubSyscall},          // sys_cap_rights_get
-    {516, (void*)&Lv2StubSyscall},          // sys_cap_enter
-    {517, (void*)&Lv2StubSyscall},          // sys_cap_getmode
-    {518, (void*)&Lv2StubSyscall},          // sys_pdfork
+    {514, (void*)&Ps4Nosys},                // sys_cap_new
+    {515, (void*)&Ps4Nosys},                // sys_cap_rights_get
+    {516, (void*)&Ps4Nosys},                // sys_cap_enter
+    {517, (void*)&Ps4Nosys},                // sys_cap_getmode
+    {518, (void*)&Ps4Nosys},                // sys_pdfork
     {519, (void*)&Lv2StubSyscall},          // sys_pdkill
     {520, (void*)&Lv2StubSyscall},          // sys_pdgetpid
-    {521, (void*)&Lv2StubSyscall},          // sys_pdwait4
-    {522, (void*)&Lv2StubSyscall},          // sys_pselect
-    {523, (void*)&Lv2StubSyscall},          // sys_getloginclass
-    {524, (void*)&Lv2StubSyscall},          // sys_setloginclass
-    {525, (void*)&Lv2StubSyscall},          // sys_rctl_get_racct
-    {526, (void*)&Lv2StubSyscall},          // sys_rctl_get_rules
-    {527, (void*)&Lv2StubSyscall},          // sys_rctl_get_limits
-    {528, (void*)&Lv2StubSyscall},          // sys_rctl_add_rule
-    {529, (void*)&Lv2StubSyscall},          // sys_rctl_remove_rule
+    {521, (void*)&Ps4Nosys},                // sys_pdwait4
+    {522, (void*)&sys_pselect},             // sys_pselect
+    {523, (void*)&Ps4Nosys},                // sys_getloginclass
+    {524, (void*)&Ps4Nosys},                // sys_setloginclass
+    {525, (void*)&Ps4Nosys},                // sys_rctl_get_racct
+    {526, (void*)&Ps4Nosys},                // sys_rctl_get_rules
+    {527, (void*)&Ps4Nosys},                // sys_rctl_get_limits
+    {528, (void*)&Ps4Nosys},                // sys_rctl_add_rule
+    {529, (void*)&Ps4Nosys},                // sys_rctl_remove_rule
     {530, (void*)&sys_posix_fallocate},     // sys_posix_fallocate
     {531, (void*)&sys_posix_fadvise},       // sys_posix_fadvise
     {532, (void*)&sys_regmgr_call},
@@ -671,7 +672,98 @@ static const SyscallReg kSyscallDpt[] = {
     {671, (void*)&sys_get_page_table_stats},   // sys_get_page_table_stats
     {672,
      (void*)&sys_dynlib_get_list_for_libdbg},  // sys_dynlib_get_list_for_libdbg
+    {159, (void*)&Ps4Nosys},
+    {167, (void*)&Ps4Nosys},
+    {168, (void*)&Ps4Nosys},
+    {172, (void*)&Ps4Nosys},
+    {180, (void*)&Ps4Nosys},
+    {193, (void*)&Ps4Nosys},
+    {210, (void*)&Ps4Nosys},
+    {211, (void*)&Ps4Nosys},
+    {212, (void*)&Ps4Nosys},
+    {213, (void*)&Ps4Nosys},
+    {214, (void*)&Ps4Nosys},
+    {215, (void*)&Ps4Nosys},
+    {216, (void*)&Ps4Nosys},
+    {217, (void*)&Ps4Nosys},
+    {218, (void*)&Ps4Nosys},
+    {219, (void*)&Ps4Nosys},
+    {244, (void*)&Ps4Nosys},
+    {245, (void*)&Ps4Nosys},
+    {246, (void*)&Ps4Nosys},
+    {249, (void*)&Ps4Nosys},
+    {258, (void*)&Ps4Nosys},
+    {259, (void*)&Ps4Nosys},
+    {260, (void*)&Ps4Nosys},
+    {261, (void*)&Ps4Nosys},
+    {262, (void*)&Ps4Nosys},
+    {263, (void*)&Ps4Nosys},
+    {264, (void*)&Ps4Nosys},
+    {265, (void*)&Ps4Nosys},
+    {266, (void*)&Ps4Nosys},
+    {267, (void*)&Ps4Nosys},
+    {268, (void*)&Ps4Nosys},
+    {269, (void*)&Ps4Nosys},
+    {270, (void*)&Ps4Nosys},
+    {271, (void*)&Ps4Nosys},
+    {273, (void*)&Ps4Nosys},
+    {281, (void*)&Ps4Nosys},
+    {282, (void*)&Ps4Nosys},
+    {283, (void*)&Ps4Nosys},
+    {284, (void*)&Ps4Nosys},
+    {285, (void*)&Ps4Nosys},
+    {286, (void*)&Ps4Nosys},
+    {287, (void*)&Ps4Nosys},
+    {288, (void*)&Ps4Nosys},
+    {291, (void*)&Ps4Nosys},
+    {292, (void*)&Ps4Nosys},
+    {293, (void*)&Ps4Nosys},
+    {294, (void*)&Ps4Nosys},
+    {295, (void*)&Ps4Nosys},
+    {296, (void*)&Ps4Nosys},
+    {370, (void*)&Ps4Nosys},
+    {399, (void*)&Ps4Nosys},
+    {434, (void*)&Ps4Nosys},
+    {435, (void*)&Ps4Nosys},
+    {467, (void*)&Ps4Nosys},
+    {468, (void*)&Ps4Nosys},
+    {673, (void*)&sys_blockpool_move},
+    {674, (void*)&Ps4Einval},
+    {675, (void*)&Ps4Ok},
+    {676, (void*)&Ps4Ok},
+    {677, (void*)&Ps4Nosys},
 };
+
+// Ids the 1.00 kernel's sysent routes to nosys or lkmnosys: those raise
+// SIGSYS besides failing.
+static const u16 kOrbisNosys[] = {
+    0,   8,   11,  17,  18,  19,  38,  40,  46,  48,  51,  52,  62,  63,  64,
+    67,  68,  71,  72,  76,  77,  84,  87,  88,  91,  94,  103, 107, 108, 109,
+    110, 111, 112, 115, 119, 129, 130, 139, 142, 143, 144, 145, 146, 148, 149,
+    150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164,
+    167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 184,
+    185, 186, 187, 193, 197, 198, 199, 200, 201, 205, 208, 210, 211, 212, 213,
+    214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228,
+    229, 230, 231, 241, 242, 243, 244, 245, 246, 247, 248, 249, 252, 255, 256,
+    257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271,
+    273, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 291, 292, 293,
+    294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 313, 314, 315, 316, 317,
+    318, 319, 320, 322, 323, 336, 338, 339, 342, 344, 347, 348, 349, 350, 351,
+    352, 353, 354, 355, 356, 357, 358, 359, 364, 365, 366, 367, 368, 369, 370,
+    371, 372, 373, 375, 376, 377, 379, 380, 381, 382, 383, 398, 399, 400, 401,
+    402, 403, 404, 405, 406, 407, 408, 412, 413, 414, 418, 419, 420, 424, 425,
+    426, 427, 428, 436, 437, 438, 439, 440, 441, 445, 446, 447, 448, 449, 450,
+    451, 452, 453, 457, 458, 459, 460, 461, 462, 463, 465, 467, 468, 469, 470,
+    471, 472, 473, 474, 489, 492, 500, 504, 505, 506, 507, 508, 509, 510, 511,
+    512, 513, 521, 523, 524, 530, 531, 532,
+};
+
+static bool IsOrbisNosys(u32 sid) {
+  for (u16 id : kOrbisNosys)
+    if (id == sid)
+      return true;
+  return false;
+}
 
 uintptr_t Lv2Get(u32 sid) {
   const void* handler = reinterpret_cast<const void*>(&Lv2UnmappedSyscall);
@@ -681,6 +773,8 @@ uintptr_t Lv2Get(u32 sid) {
       break;
     }
   }
+  if (handler == reinterpret_cast<const void*>(&Ps4Nosys) && IsOrbisNosys(sid))
+    handler = reinterpret_cast<const void*>(&sys_nosys);
   return Lv2Trampoline(handler, sid);
 }
 }  // namespace kern

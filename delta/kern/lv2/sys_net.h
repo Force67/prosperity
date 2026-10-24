@@ -30,5 +30,20 @@ i64 PS4ABI sys_recvfrom(i32 fd,
 
 int PS4ABI sys_setsockopt();
 int PS4ABI sys_getsockopt(int fd, int level, int name, void* val, u32* len);
+int PS4ABI sys_sendmsg(int fd, const void* msg, int flags);
+int PS4ABI sys_getpeername(int fd, void* addr, u32* addrlen);
+int PS4ABI sys_listen(int fd, int backlog);
+int PS4ABI sys_shutdown(int fd, int how);
+int PS4ABI sys_socketpair(int domain, int type, int protocol, int* sv);
+int PS4ABI sys_sendfile(int fd,
+                        int s,
+                        i64 offset,
+                        size_t nbytes,
+                        const void* hdtr,
+                        i64* sbytes);
+
+// The errno for an fd that is not one of our sockets: ENOTSOCK for another
+// object, EBADF for none.
+int NotSocket(int fd);
 
 }  // namespace kern

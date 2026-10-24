@@ -82,6 +82,21 @@ i64 PS4ABI sys_writev(u32 fd, const void* iov, int iovcnt);
 i64 PS4ABI sys_readv(u32 fd, const void* iov, int iovcnt);
 
 int PS4ABI sys_poll(void* fds, u32 nfds, int timeout);
+int PS4ABI sys_pselect(int nfds,
+                       void* readfds,
+                       void* writefds,
+                       void* exceptfds,
+                       const void* ts,
+                       const void* sigmask);
+int PS4ABI sys_chmod(const char* path, u32 mode);
+int PS4ABI sys_fchmod(int fd, u32 mode);
+int PS4ABI sys_chflags(const char* path, u64 flags);
+int PS4ABI sys_fchflags(int fd, u64 flags);
+
+// 0 when `path` names something (ENOENT, or EFAULT for none); 0 when `fd` is
+// open (EBADF).
+int GuestPathError(const char* path);
+int GuestFdError(int fd);
 int PS4ABI sys_select(int nfds,
                       void* readfds,
                       void* writefds,

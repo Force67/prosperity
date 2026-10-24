@@ -19,6 +19,7 @@
 #include "kern/crash.h"
 #include "kern/lv2/sys_mem.h"
 #include "kern/lv2/sys_signal.h"
+#include "kern/lv2/sys_time.h"
 #include "kern/lv2/sys_vfs.h"
 #include "kern/probe/probe_arm.h"
 #include "kern/process.h"
@@ -1454,5 +1455,59 @@ const guest::SessionReset g_session_reset([] {
   guest::ResetResource(g_qar_fd);
 });
 }  // namespace
+
+int GuestPathError(const char* path) {
+  if (!path)
+    return -SysError::eFAULT;
+  i64 size = 0;
+  bool is_dir = false;
+  return vfs::Stat(path, size, is_dir) ? 0 : -SysError::eNOENT;
+}
+
+int GuestFdError(int fd) {
+  auto* proc = Process::GetActive();
+  return fd >= 0 && proc && proc->GetObjTable().Get(static_cast<u32>(fd))
+             ? 0
+             : -SysError::eBADF;
+}
+
+// Modes and flags are not modelled, so an attribute change succeeds on
+// anything that exists.
+int PS4ABI sys_chmod(const char* path, u32 /*mode*/) {
+  return GuestPathError(path);
+}
+
+int PS4ABI sys_fchmod(int fd, u32 /*mode*/) {
+  return GuestFdError(fd);
+}
+
+int PS4ABI sys_chflags(const char* path, u64 /*flags*/) {
+  return GuestPathError(path);
+}
+
+int PS4ABI sys_fchflags(int fd, u64 /*flags*/) {
+  return GuestFdError(fd);
+}
+
+int PS4ABI sys_pselect(int nfds,
+                       void* readfds,
+                       void* writefds,
+                       void* exceptfds,
+                       const void* ts,
+                       const void* sigmask) {
+  sce_timeval tv{};
+  if (const auto* t = static_cast<const sce_timespec*>(ts)) {
+    if (t->tv_sec < 0 || t->tv_nsec < 0 || t->tv_nsec >= 1'000'000'000)
+      return -SysError::eINVAL;
+    tv.tv_sec = t->tv_sec;
+    tv.tv_usec = (t->tv_nsec + 999) / 1000;
+  }
+  if (const int err = BeginWaitMask(sigmask))
+    return err;
+  const int r =
+      sys_select(nfds, readfds, writefds, exceptfds, ts ? &tv : nullptr);
+  EndWaitMask(sigmask);
+  return r;
+}
 
 }  // namespace kern

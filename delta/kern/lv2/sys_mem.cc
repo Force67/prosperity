@@ -1866,4 +1866,29 @@ const guest::SessionReset g_session_reset([] {
 });
 }  // namespace
 
+// Moves committed blocks inside one pool reservation: the destination gets the
+// source's contents and the source is decommitted. A zero length or a move
+// onto itself does nothing.
+int PS4ABI sys_blockpool_move(u8* src, u8* dst, size_t len, int flags) {
+  constexpr uintptr_t kBlockpoolBlockMask = 0xffff;  // 64 KiB blocks
+  const uintptr_t s = reinterpret_cast<uintptr_t>(src);
+  const uintptr_t d = reinterpret_cast<uintptr_t>(dst);
+  if ((s | d | len) & kBlockpoolBlockMask || flags)
+    return -SysError::eINVAL;
+  if (!len || s == d)
+    return 0;
+  if (!host_memory::IsMemoryRangeMapped(src, len))
+    return -SysError::eINVAL;
+  if (const int err = static_cast<int>(sys_blockpool_map(dst, len, 0, 3)))
+    return err;
+  std::memmove(dst, src, len);
+  const uintptr_t s_end = s + len, d_end = d + len;
+  if (s < d)
+    sys_blockpool_unmap(src, base::Min(s_end, d) - s);
+  if (s_end > d_end)
+    sys_blockpool_unmap(reinterpret_cast<u8*>(base::Max(s, d_end)),
+                        s_end - base::Max(s, d_end));
+  return 0;
+}
+
 }  // namespace kern

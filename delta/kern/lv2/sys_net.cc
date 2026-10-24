@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "base/arch.h"
+#include "base/containers/vector.h"
 #include "base/logging.h"
 #include "guest_abi.h"
 
@@ -214,6 +215,104 @@ int PS4ABI sys_getsockopt(int fd, int level, int name, void* val, u32* len) {
   if (val && len && *len >= 4)
     *reinterpret_cast<int*>(val) = 0;
   return 0;
+}
+
+namespace {
+// FreeBSD struct msghdr / iovec (LP64).
+struct BsdIovec {
+  void* base;
+  size_t len;
+};
+struct BsdMsghdr {
+  void* name;
+  u32 namelen;
+  BsdIovec* iov;
+  int iovlen;
+  void* control;
+  u32 controllen;
+  int flags;
+};
+
+constexpr int kBsdAfLocal = 1;
+constexpr int kSockCloexec = 0x10000000;
+constexpr int kSockNonblock = 0x20000000;
+}  // namespace
+
+int NotSocket(int fd) {
+  auto* proc = Process::GetActive();
+  return fd >= 0 && proc && proc->GetObjTable().Get(static_cast<u32>(fd))
+             ? -SysError::eNOTSOCK
+             : -SysError::eBADF;
+}
+
+int PS4ABI sys_sendmsg(int fd, const void* msg, int flags) {
+  auto s = FdToSocket(static_cast<u32>(fd));
+  if (!s)
+    return NotSocket(fd);
+  const auto* m = static_cast<const BsdMsghdr*>(msg);
+  if (!m)
+    return -SysError::eFAULT;
+  if (m->iovlen < 0 || m->iovlen > 1024)
+    return -SysError::eMSGSIZE;
+  base::Vector<u8> data;
+  for (int i = 0; i < m->iovlen; i++) {
+    const size_t at = data.size();
+    data.resize(at + m->iov[i].len);
+    std::memcpy(data.data() + at, m->iov[i].base, m->iov[i].len);
+  }
+  return static_cast<int>(
+      s->Sendto(data.data(), data.size(), flags, m->name, m->namelen));
+}
+
+int PS4ABI sys_getpeername(int fd, void* /*addr*/, u32* /*addrlen*/) {
+  if (!FdToSocket(static_cast<u32>(fd)))
+    return NotSocket(fd);
+  return -SysError::eNOTCONN;  // sys_connect never connects one
+}
+
+int PS4ABI sys_listen(int fd, int /*backlog*/) {
+  if (!FdToSocket(static_cast<u32>(fd)))
+    return NotSocket(fd);
+  return -SysError::eOPNOTSUPP;
+}
+
+int PS4ABI sys_shutdown(int fd, int how) {
+  if (!FdToSocket(static_cast<u32>(fd)))
+    return NotSocket(fd);
+  return how < 0 || how > 2 ? -SysError::eINVAL : 0;
+}
+
+// Local socket pairs are real host socketpairs, so the two ends talk.
+int PS4ABI sys_socketpair(int domain, int type, int protocol, int* sv) {
+  if (domain != kBsdAfLocal)
+    return -SysError::eOPNOTSUPP;
+  if (protocol)
+    return -SysError::ePROTONOSUPPORT;
+  if (!sv)
+    return -SysError::eFAULT;
+  int host[2];
+  if (::socketpair(AF_UNIX, type & ~(kSockCloexec | kSockNonblock), 0, host))
+    return -SysError::ePROTOTYPE;
+  auto& objects = Process::GetActive()->GetObjTable();
+  for (int i = 0; i < 2; i++) {
+    auto* dev = new SocketDevice(objects, host[i], kBsdAfLocal);
+    dev->SetName("socketpair");
+    sv[i] = static_cast<int>(dev->handle());
+  }
+  return 0;
+}
+
+int PS4ABI sys_sendfile(int /*fd*/,
+                        int s,
+                        i64 /*offset*/,
+                        size_t /*nbytes*/,
+                        const void* /*hdtr*/,
+                        i64* sbytes) {
+  if (sbytes)
+    *sbytes = 0;
+  if (!FdToSocket(static_cast<u32>(s)))
+    return NotSocket(s);
+  return -SysError::eINVAL;  // needs a stream socket
 }
 
 }  // namespace kern

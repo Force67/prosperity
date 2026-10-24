@@ -71,6 +71,7 @@ int PS4ABI sys_ffclock_getestimate(void* cest);
 int PS4ABI sys_ntp_gettime(void* ntv);
 
 int PS4ABI sys_set_timezone_info(void* info);
+int PS4ABI sys_adjtime(const void* delta, void* olddelta);
 int PS4ABI sys_utc_to_localtime(i64 utc, i64* local, void* tz, int* dst);
 int PS4ABI
 sys_localtime_to_utc(i64 local, int type, i64* utc, void* tz, int* dst);

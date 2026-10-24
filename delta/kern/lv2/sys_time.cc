@@ -280,4 +280,17 @@ sys_localtime_to_utc(i64 local, int /*type*/, i64* utc, void* tz, int* dst) {
   return sys_utc_to_localtime(local, utc, tz, dst);
 }
 
+// Setting the clock needs PRIV_ADJTIME; reading the pending adjustment does
+// not, and there never is one.
+int PS4ABI sys_adjtime(const void* delta, void* olddelta) {
+  if (delta)
+    return -SysError::ePERM;
+  if (olddelta) {
+    auto* out = static_cast<sce_timeval*>(olddelta);
+    out->tv_sec = 0;
+    out->tv_usec = 0;
+  }
+  return 0;
+}
+
 }  // namespace kern

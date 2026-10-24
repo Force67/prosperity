@@ -58,6 +58,13 @@ void SetCurrentSigmask(const GuestSigset& mask);
 // syscall returns EINTR then.
 bool SignalInterrupts();
 
+// pselect and ppoll: `mask` (a guest sigset, or null for none) replaces the
+// caller's for the wait, as sigsuspend's does. A signal it admits runs its
+// handler under it and the old mask comes back at sigreturn; otherwise
+// EndWaitMask restores it.
+int BeginWaitMask(const void* mask);
+void EndWaitMask(const void* mask);
+
 // Rewrites a frame the context trampoline captured so the thread resumes in
 // its signal handler, when one is due. Returns whether it did.
 bool DeliverSignalToFrame(GuestFrame* frame, u8* xsave);

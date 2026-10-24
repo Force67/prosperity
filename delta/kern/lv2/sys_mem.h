@@ -129,6 +129,7 @@ int PS4ABI sys_set_phys_fmem_limit();
 int PS4ABI sys_get_kernel_mem_statistics(void* out);
 i64 PS4ABI sys_blockpool_map(u8* addr, size_t len, u32 type, u32 prot);
 int PS4ABI sys_blockpool_unmap(u8* addr, size_t len);
+int PS4ABI sys_blockpool_move(u8* src, u8* dst, size_t len, int flags);
 i64 PS4ABI sys_blockpool_batch(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
 int PS4ABI sys_get_page_table_stats();
 int PS4ABI sys_getpagesize();
