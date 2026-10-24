@@ -69,6 +69,10 @@ class Process {
   u32 GetSdkVersion() const { return sdk_version_; }
   void SetSdkVersion(u32 v) { sdk_version_ = v; }
 
+  // The application category SysCore launches the process under. A game is 0;
+  // system applications carry 0xf000-family values.
+  u32 GetAppCategory() const { return app_category_; }
+
   void SetArgs(base::Vector<base::String> a) { args_ = base::move(a); }
 
  private:
@@ -76,6 +80,7 @@ class Process {
   ProcessInfo env_;
   Platform plat_ = Platform::kPs4;
   u32 sdk_version_ = 0;
+  u32 app_category_ = 0;
   ModuleList modules_;
   ObjectTable objects_;
   u32 handle_counter_ = 1;

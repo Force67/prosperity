@@ -12,6 +12,7 @@
 #include "guest_abi.h"
 #include "kern/lv2/ps5/handlers.h"
 #include "kern/lv2/sys_signal.h"
+#include "kern/process.h"
 #include "kern/vfs.h"
 
 namespace {
@@ -119,6 +120,7 @@ class Apr : public ::testing::Test {
   }
 
   base::String dir_;
+  kern::Process process_;
 };
 
 TEST_F(Apr, ResolveReportsEachPath) {
@@ -198,3 +200,22 @@ TEST_F(Apr, ReportsTheFailingCommand) {
 }
 }  // namespace
 
+namespace {
+// aio_init: SceKernelAioParam is checked, applied once, and a second start of
+// a game's scheduler is EBUSY.
+TEST(AioInit, ChecksParamsAndStartsOnce) {
+  kern::Process process;
+  u32 param[15] = {32, 32, 1, 0x100000, 0x100000,  //
+                   32, 32, 1, 0x100000, 0x100000,  //
+                   32, 32, 2, 0,        0};        // enableSplit 2
+  EXPECT_EQ(kern::Ps5AioInit(param, sizeof(param), 1, 0), -22);
+  EXPECT_EQ(kern::Ps5AioInit(param, sizeof(param) - 4, 0, 0), -22);
+  EXPECT_EQ(kern::Ps5AioInit(param, sizeof(param), 0, 0), -22);
+  param[12] = 0;
+  param[0] = 129;  // over SCE_KERNEL_AIO_SCHED_WINDOW_MAX
+  EXPECT_EQ(kern::Ps5AioInit(param, sizeof(param), 0, 0), -22);
+  param[0] = 32;
+  EXPECT_EQ(kern::Ps5AioInit(param, sizeof(param), 0, 0), 0);
+  EXPECT_EQ(kern::Ps5AioInit(nullptr, 0, 0, 0), -16);  // EBUSY
+}
+}  // namespace

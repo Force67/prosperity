@@ -77,6 +77,10 @@ int PS4ABI Ps5SetPhysFmemLimit(int pid, i64 limit);
 int PS4ABI Ps5Workaround8849(u32 key);
 int PS4ABI Ps5AmprCtrlDebug(int op, void* arg, size_t size);
 int PS4ABI Ps5Streamwrite(int op, int fd, size_t size, const void* arg);
+int PS4ABI Ps5AioInit(const void* param,
+                      int size,
+                      u64 reserved0,
+                      u32 reserved1);
 
 // APR. Resolve takes eight arguments; Lv2ContextHandler serves 701 with
 // Ps5AprResolveContext, which reads the last two off the guest stack.

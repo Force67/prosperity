@@ -537,6 +537,16 @@ void Worker(u32 prio) {
   g_workers[prio] = false;
 }
 
+// Every APR call: only games (category below 0x1000) and category 0x10300 may
+// use APR.
+int CategoryGate() {
+  const Process* proc = Process::GetActive();
+  if (!proc)
+    return -SysError::eOPNOTSUPP;
+  const u32 category = proc->GetAppCategory();
+  return category >= 0x1000 && category != 0x10300 ? -SysError::eOPNOTSUPP : 0;
+}
+
 bool ValidGuest(const void* p, size_t n) {
   return p && host_memory::IsMemoryRangeMapped(p, n);
 }
@@ -572,6 +582,8 @@ int PS4ABI Ps5AprResolve(const char* prefix,
                          u32* error_index,
                          int* results,
                          u32* count) {
+  if (const int err = CategoryGate())
+    return err;
   if (num - 1 >= kResolveMax)
     return -SysError::eINVAL;
   base::String pre;
@@ -655,6 +667,8 @@ int PS4ABI Ps5AprSubmit(const u32* cmd,
                         u32 flag,
                         u32* result,
                         u32* id) {
+  if (const int err = CategoryGate())
+    return err;
   if (prio < 1 || prio > 6 || flag > 2 ||
       (reinterpret_cast<uintptr_t>(cmd) & 3))
     return -SysError::eINVAL;
@@ -700,6 +714,8 @@ int PS4ABI Ps5AprSubmit(const u32* cmd,
 }
 
 int PS4ABI Ps5AprStat(const u32* ids, u64 num, void* st) {
+  if (const int err = CategoryGate())
+    return err;
   if (num != 1)
     return -SysError::eINVAL;
   if (!ValidGuest(ids, 4))
@@ -715,6 +731,8 @@ int PS4ABI Ps5AprStat(const u32* ids, u64 num, void* st) {
 }
 
 int PS4ABI Ps5AprWait(const u32* ids, u64 num) {
+  if (const int err = CategoryGate())
+    return err;
   if (num != 1)
     return -SysError::eINVAL;
   if (!ValidGuest(ids, 4))

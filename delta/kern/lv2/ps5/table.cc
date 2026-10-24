@@ -251,6 +251,7 @@ static const Ps5Row kPs5Rows[] = {
     {659, "dynlib_get_list2", H(&sys_dynlib_get_list)},
     {660, "dynlib_get_info2", H(&sys_dynlib_get_info)},
     {667, "get_bio_usage_all", H(&Ps5Nosys)},
+    {670, "aio_init", H(&Ps5AioInit)},
     {671, "get_page_table_stats", H(&Ps5Eperm)},
     {672, "dynlib_get_list_for_libdbg", H(&Ps5Eperm)},
     {674, "virtual_query_all", H(&Ps5Einval)},

@@ -6,6 +6,7 @@
 #include "base/containers/vector.h"
 #include "guest_abi.h"
 #include "kern/lv2/ps5/handlers.h"
+#include "kern/process.h"
 
 namespace {
 constexpr int kEinval = 22;
@@ -16,6 +17,7 @@ int Call(int op, int fd, const void* arg, size_t size) {
 }
 
 TEST(Streamwrite, RoundTripAndWrap) {
+  kern::Process process;  // a game: the category gate lets it through
   u32 handle = 0;
   const u64 create[3] = {2 * kBlock, reinterpret_cast<u64>(&handle), 0};
   ASSERT_EQ(Call(1, -1, create, sizeof(create)), 0);

@@ -19,6 +19,7 @@
 
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/ps5/handlers.h"
+#include "kern/process.h"
 
 namespace kern {
 namespace {
@@ -156,6 +157,13 @@ int Read(const u8* a) {
 }  // namespace
 
 int PS4ABI Ps5Streamwrite(int op, int fd, size_t size, const void* arg) {
+  // Categories 0x10000..0xffffff are refused unless they are 0x01xxxx.
+  const Process* proc = Process::GetActive();
+  if (!proc)
+    return -SysError::eNOENT;
+  const u32 category = proc->GetAppCategory();
+  if (category - 0x1000000 >= 0xff010000 && (category & 0xff0000) != 0x10000)
+    return -SysError::eINVAL;
   if (size < 1 || size > 64)
     return -SysError::eINVAL;
   if (!Mapped(arg, size))
