@@ -77,7 +77,8 @@ i32 SignExtend(u32 value, u32 bits) {
 }  // namespace
 
 rhi::Format GuestTextureFormat(u32 dfmt, u32 nfmt) {
-  if (dfmt == 1 && nfmt == 0)
+  // No R8 sRGB host format renders everywhere: keep the encoded value.
+  if (dfmt == 1 && (nfmt == 0 || nfmt == 9))
     return rhi::Format::kR8Unorm;
   if (dfmt == 1 && nfmt == 1)
     return rhi::Format::kR8Snorm;
@@ -269,9 +270,30 @@ rhi::Format ColorTargetFormat(u32 info) {
         break;
     }
   }
+  if (nfmt == 1) {
+    // No BGRA snorm target renders everywhere: a swapped 8_8_8_8 keeps RGBA.
+    switch (dfmt) {
+      case 1:
+        return rhi::Format::kR8Snorm;
+      case 2:
+        return rhi::Format::kR16Snorm;
+      case 3:
+        return rhi::Format::kRG8Snorm;
+      case 5:
+        return rhi::Format::kRG16Snorm;
+      case 10:
+        return rhi::Format::kRGBA8Snorm;
+      case 12:
+        return rhi::Format::kRGBA16Snorm;
+      default:
+        break;
+    }
+  }
   if (nfmt == 6 && dfmt == 10)
     return ((info >> 11) & 3) == 1 ? rhi::Format::kBGRA8Srgb
                                    : rhi::Format::kRGBA8Srgb;
+  if (nfmt == 6 && dfmt == 1)
+    return rhi::Format::kR8Unorm;
   if (nfmt == 0) {
     switch (dfmt) {
       case 1:
