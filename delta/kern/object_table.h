@@ -7,6 +7,7 @@
 #include "kern/object_ref.h"
 #include "logger/logger.h"
 
+#include "base/containers/hash_map.h"
 #include "base/threading/recursive_mutex.h"
 #include "kern/object.h"
 
@@ -26,6 +27,16 @@ class ObjectTable {
   bool Keep(u32);
   ObjectRef<Object> Get(u32);
 
+  // Another handle for `handle`'s object: the lowest free one >= `min` (dup,
+  // F_DUPFD). Both share the object, so they share its file offset.
+  bool Dup(u32 handle, u32 min, u32& out);
+  // Makes `target` name `handle`'s object, closing whatever it named (dup2).
+  // A target that is not a slot handle (0..3, or not a multiple of 4: the
+  // stdio numbers) becomes an alias.
+  bool Dup2(u32 handle, u32 target);
+  // True when `handle` is an alias dup2 made.
+  bool IsAlias(u32 handle);
+
  private:
   bool Resize(u32 new_cap);
   bool FindSlot(u32& out);
@@ -39,6 +50,10 @@ class ObjectTable {
   };
 
   Entry* FindEntry(u32);
+  static bool IsSlotHandle(u32 h) { return h && !(h & 3); }
+  bool PlaceAt(Object* obj, u32 slot);
+
+  base::HashMap<u32, Entry> aliases_;
 
   u32 table_cap_ = 0;
   u32 last_free_entry_ = 0;

@@ -18,6 +18,10 @@ ObjectTable::~ObjectTable() {
 void ObjectTable::Reset() {
   base::LockGuard lock(omutex_);
 
+  for (auto& [h, entry] : aliases_)
+    entry.obj->Release();
+  aliases_.clear();
+
   // Release all objects.
   for (u32 n = 0; n < table_cap_; n++) {
     auto& entry = table_[n];
@@ -36,6 +40,10 @@ void ObjectTable::Reset() {
 
 void ObjectTable::Purge() {
   base::LockGuard lock(omutex_);
+
+  for (auto& [h, entry] : aliases_)
+    entry.obj->Release();
+  aliases_.clear();
 
   for (u32 slot = 0; slot < table_cap_; slot++) {
     auto& entry = table_[slot];
@@ -111,6 +119,11 @@ ObjectTable::Entry* ObjectTable::FindEntry(u32 handle) {
 bool ObjectTable::Keep(u32 handle) {
   base::LockGuard lock(omutex_);
 
+  if (auto it = aliases_.find(handle); it != aliases_.end()) {
+    it->second.ref_count++;
+    return true;
+  }
+
   auto* e = FindEntry(handle);
   if (e) {
     e->ref_count++;
@@ -149,6 +162,17 @@ bool ObjectTable::Add(Object* obj, u32& handle_out) {
 bool ObjectTable::Remove(u32 handle) {
   base::LockGuard lock(omutex_);
 
+  if (auto it = aliases_.find(handle); it != aliases_.end()) {
+    auto* object = it->second.obj;
+    aliases_.erase(it);
+    auto& handles = object->handles();
+    if (auto h = base::Find(handles.begin(), handles.end(), handle);
+        h != handles.end())
+      handles.erase(h);
+    object->Release();
+    return true;
+  }
+
   auto* e = FindEntry(handle);
   if (e && e->obj) {
     auto* object = e->obj;
@@ -171,6 +195,12 @@ bool ObjectTable::Remove(u32 handle) {
 bool ObjectTable::Release(u32 handle) {
   base::LockGuard lock(omutex_);
 
+  if (auto it = aliases_.find(handle); it != aliases_.end()) {
+    if (--it->second.ref_count == 0)
+      return Remove(handle);
+    return true;
+  }
+
   auto* e = FindEntry(handle);
   if (!e) {
     return false;
@@ -184,6 +214,14 @@ bool ObjectTable::Release(u32 handle) {
 
 ObjectRef<Object> ObjectTable::Get(u32 handle) {
   base::LockGuard lock(omutex_);
+
+  if (!IsSlotHandle(handle)) {
+    auto it = aliases_.find(handle);
+    if (it == aliases_.end())
+      return nullptr;
+    it->second.obj->Retain();
+    return ObjectRef<Object>(it->second.obj);
+  }
 
   // Lower 2 bits are ignored.
   u32 slot = handle >> 2;
@@ -203,5 +241,52 @@ ObjectRef<Object> ObjectTable::Get(u32 handle) {
   }
 
   return nullptr;
+}
+
+bool ObjectTable::IsAlias(u32 handle) {
+  base::LockGuard lock(omutex_);
+  return aliases_.find(handle) != aliases_.end();
+}
+
+bool ObjectTable::PlaceAt(Object* obj, u32 slot) {
+  if (slot >= table_cap_ && !Resize(base::Max(slot + 1, table_cap_ * 2)))
+    return false;
+  auto& entry = table_[slot];
+  entry.obj = obj;
+  entry.ref_count = 1;
+  obj->handles().push_back(slot << 2);
+  obj->Retain();
+  return true;
+}
+
+bool ObjectTable::Dup(u32 handle, u32 min, u32& out) {
+  base::LockGuard lock(omutex_);
+  auto source = Get(handle);
+  if (!source)
+    return false;
+  u32 slot = base::Max<u32>((min + 3) >> 2, 1);
+  while (slot < table_cap_ && table_[slot].obj)
+    slot++;
+  if (!PlaceAt(source.get(), slot))
+    return false;
+  out = slot << 2;
+  return true;
+}
+
+bool ObjectTable::Dup2(u32 handle, u32 target) {
+  base::LockGuard lock(omutex_);
+  auto source = Get(handle);
+  if (!source)
+    return false;
+  if (handle == target)
+    return true;
+  Remove(target);  // dup2 closes what the target named
+  if (IsSlotHandle(target))
+    return PlaceAt(source.get(), target >> 2);
+  auto* obj = source.get();
+  aliases_[target] = Entry{1, obj};
+  obj->handles().push_back(target);
+  obj->Retain();
+  return true;
 }
 }  // namespace kern

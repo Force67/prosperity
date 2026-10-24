@@ -321,6 +321,12 @@ int PS4ABI sys_open(const char* path, u32 flags, u32 mode) {
   return file->handle();
 }
 
+// stdout/stderr go to the log unless dup2 pointed them elsewhere.
+static bool IsGuestConsole(u32 fd) {
+  return (fd == 1 || fd == 2) &&
+         !Process::GetActive()->GetObjTable().IsAlias(fd);
+}
+
 // Resolve an fd (object-table handle) back to the device that backs it.
 static kern::ObjectRef<Device> FdToDevice(u32 fd) {
   auto obj = Process::GetActive()->GetObjTable().Get(fd);
@@ -701,6 +707,9 @@ int PS4ABI sys_fcntl(u32 fd, int cmd, i64 arg) {
     F_GETLK = 11,
     F_SETLK = 12,
     F_SETLKW = 13,
+    F_DUP2FD = 10,
+    F_DUPFD_CLOEXEC = 17,
+    F_DUP2FD_CLOEXEC = 18,
     // NOLINTEND(readability-identifier-naming)
   };
   // Normalize legacy OGETLK/OSETLK/OSETLKW (7/8/9) to their modern equivalents.
@@ -726,21 +735,32 @@ int PS4ABI sys_fcntl(u32 fd, int cmd, i64 arg) {
     case F_SETFD:
       return 0;
     case F_GETLK:
-      // No locks held: return F_UNLCK (type 2) in the caller's flock struct.
+      // No locks held: F_UNLCK (2) in l_type, after start, len and pid.
       if (arg) {
-        auto* fl = reinterpret_cast<i32*>(arg);
-        fl[0] = 2;  // l_type = F_UNLCK
+        const i16 unlocked = 2;
+        std::memcpy(reinterpret_cast<u8*>(arg) + 0x14, &unlocked,
+                    sizeof(unlocked));
       }
       return 0;
     case F_SETLK:
     case F_SETLKW:
       return 0;  // advisory lock accepted, not enforced
     case F_DUPFD:
-      return -SysError::eOPNOTSUPP;  // no descriptor duplication in the object
-                                     // table
+    case F_DUPFD_CLOEXEC: {
+      if (arg < 0)
+        return -SysError::eINVAL;
+      u32 out;
+      if (!Process::GetActive()->GetObjTable().Dup(fd, static_cast<u32>(arg),
+                                                   out))
+        return -SysError::eBADF;
+      return static_cast<int>(out);
+    }
+    case F_DUP2FD:
+    case F_DUP2FD_CLOEXEC:
+      return sys_dup2(fd, static_cast<u32>(arg));
     case F_GETOWN:
     case F_SETOWN:
-      return 0;  // no signal delivery so ownership is inert
+      return 0;  // nothing raises SIGIO, so ownership is inert
     default:
       LOG_WARNING("sys_fcntl: unhandled cmd {} on fd {} -> 0", cmd, fd);
       return 0;
@@ -748,13 +768,18 @@ int PS4ABI sys_fcntl(u32 fd, int cmd, i64 arg) {
 }
 
 int PS4ABI sys_dup(u32 fd) {
-  LOG_WARNING("sys_dup({}) unsupported", fd);
-  return -SysError::eOPNOTSUPP;
+  u32 out;
+  if (!Process::GetActive()->GetObjTable().Dup(fd, 0, out))
+    return -SysError::eBADF;
+  return static_cast<int>(out);
 }
 
 int PS4ABI sys_dup2(u32 oldfd, u32 newfd) {
-  LOG_WARNING("sys_dup2({}, {}) unsupported", oldfd, newfd);
-  return -SysError::eOPNOTSUPP;
+  if (static_cast<i32>(newfd) < 0)
+    return -SysError::eBADF;
+  if (!Process::GetActive()->GetObjTable().Dup2(oldfd, newfd))
+    return -SysError::eBADF;
+  return static_cast<int>(newfd);
 }
 
 int PS4ABI sys_fsync(u32 fd) {
@@ -896,7 +921,7 @@ i64 PS4ABI sys_writev(u32 fd, const void* iov, int iovcnt) {
   if (!segs || iovcnt < 0)
     return -SysError::eINVAL;
 
-  if (fd == 1 || fd == 2) {  // stdout / stderr, like sys_write
+  if (IsGuestConsole(fd)) {  // stdout / stderr, like sys_write
     // Through the logger rather than printf: a title's own diagnostics are the
     // most direct account of what it is doing, and interleaving them with ours
     // by timestamp is what makes them usable.
@@ -1378,7 +1403,7 @@ int PS4ABI sys_randomized_path(const char* set_path,
 }
 
 int PS4ABI sys_write(u32 fd, const void* buf, size_t nbytes) {
-  if (fd == 1 || fd == 2)  // stdout, stderr
+  if (IsGuestConsole(fd))  // stdout, stderr
   {
     // DELTA_QUIET_GUEST: the game's debug prints (per-frame message-pump
     // chatter) flood stdout char-by-char and corrupt our diagnostic logs via
