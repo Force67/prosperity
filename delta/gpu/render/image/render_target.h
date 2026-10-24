@@ -52,6 +52,11 @@ struct RTarget {
   bool dcc_code_known = false;
   u32 dcc_clear_code = 0;
   u32 cb_info = 0;
+  // The guest surface the last draw described, for writing pixels back.
+  int tile_mode = -1;
+  u32 pitch = 0;
+  // render_serial when guest memory last received this target's pixels.
+  u64 guest_serial = 0;
 };
 
 extern base::HashMap<u64, RTarget>& g_rts;
@@ -219,6 +224,7 @@ void EndRegion();
 void SetGuestViewport(const render::DrawInfo& d);
 
 bool WriteRtToGuest(u64 base, u32 tile_mode);
+void WriteRtSlicesToGuest(u64 base, u64 bytes, u32 w, u32 h);
 // Titles copy or read a depth surface's memory directly (DRIVECLUB copies it
 // with a compute memcpy and samples the copy), so write each depth target
 // overlapping [base, base + bytes) back to guest memory, tiled, once per

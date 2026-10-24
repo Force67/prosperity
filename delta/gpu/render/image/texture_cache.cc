@@ -1102,6 +1102,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
                                                    base, footprint, "tex"))
     return nullptr;
   const bool known = image_it != g_texture_cache.images.end();
+  if (layers > 1 &&
+      (!known || image_it->second.last_checked_frame != g_frame.num))
+    WriteRtSlicesToGuest(base, footprint, w, h);
   if (!known || image_it->second.last_checked_frame != g_frame.num) {
     const u64 t_probe = NowNs();
     const bool readable = (known && image_it->second.wt_clean) ||

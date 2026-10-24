@@ -2200,6 +2200,10 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                  indexed ? d.index_count : d.vertex_count,
                  indexed ? " indexed" : "");
   DrawCheckpoint(g_frame.list, g_frame.num, g_frame.draws, false);
+  if (const auto rt = g_rts.find(d.rt_base); rt != g_rts.end()) {
+    rt->second.tile_mode = static_cast<int>(d.rt_tile_mode);
+    rt->second.pitch = d.rt_surf_w;
+  }
   if (d.rt_array_base) {
     g_region.write_through = d.rt_base;
     g_region.write_through_tile = d.rt_tile_mode;

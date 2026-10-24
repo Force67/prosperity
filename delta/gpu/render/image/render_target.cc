@@ -1107,9 +1107,10 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
     return false;
   RTarget& rt = it->second;
   const u32 elem = FormatBytes(rt.fmt);
+  const u32 pitch = base::Max(rt.pitch, rt.w);
   gcn::TextureLayout32 tiled, linear;
   if (!elem ||
-      !gcn::BuildTextureLayout32(tiled, rt.w, rt.h, rt.w, 1, 1, tile_mode,
+      !gcn::BuildTextureLayout32(tiled, rt.w, rt.h, pitch, 1, 1, tile_mode,
                                  false, elem) ||
       !gcn::BuildTextureLayout32(linear, rt.w, rt.h, rt.w, 1, 1, 8, false,
                                  elem) ||
@@ -1121,7 +1122,35 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
     return false;
   InvalidateTexRange(base, tiled.size);
   CsForgetGuestRange(base, tiled.size);
+  if (const auto rt = g_rts.find(base); rt != g_rts.end())
+    rt->second.guest_serial = rt->second.render_serial;
   return true;
+}
+
+// Targets drawn as whole w x h slices of an array that is about to be
+// sampled: the texture upload reads them from guest memory.
+void WriteRtSlicesToGuest(u64 base, u64 bytes, u32 w, u32 h) {
+  base::Vector<base::Pair<u64, u32>> stale;
+  for (u64 p = base >> kRtPageShift; p <= (base + bytes - 1) >> kRtPageShift;
+       p++) {
+    const auto page = g_rt_pages.find(p);
+    if (page == g_rt_pages.end())
+      continue;
+    for (u64 at : page->second) {
+      const auto it = g_rts.find(at);
+      if (it == g_rts.end())
+        continue;
+      const RTarget& rt = it->second;
+      const base::Pair<u64, u32> entry{at, u32(rt.tile_mode)};
+      if (at >= base && at + RtByteSize(rt) <= base + bytes && rt.w == w &&
+          rt.h == h && rt.depth == 1 && rt.ever_rendered &&
+          rt.tile_mode >= 0 && rt.guest_serial != rt.render_serial &&
+          base::Find(stale.begin(), stale.end(), entry) == stale.end())
+        stale.push_back(entry);
+    }
+  }
+  for (const auto& [at, tile_mode] : stale)
+    WriteRtToGuest(at, tile_mode);
 }
 
 void WriteDepthsToGuest(u64 base, u64 bytes) {
