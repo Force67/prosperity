@@ -95,6 +95,47 @@ bool MergeOverlapping(ComputeInfo& ci) {
   return changed;
 }
 
+// Titles view one mip chain through a T# per mip (a downsample writes mip
+// k + 1 from mip k), so each view has its own mip count. Mip offsets do not
+// depend on the count, so every view is staged with the longest chain seen at
+// that image, which keeps one staging buffer instead of re-staging it per mip.
+void WidenMipChains(ComputeInfo& ci) {
+  struct Chain {
+    ComputeInfo::Res res;
+  };
+  static base::HashMap<u64, Chain> chains;
+  static const guest::SessionReset reset_chains(
+      [] { guest::ResetResource(chains); });
+  const auto same_image = [](const ComputeInfo::Res& a,
+                             const ComputeInfo::Res& b) {
+    return a.width == b.width && a.height == b.height && a.pitch == b.pitch &&
+           a.layers == b.layers && a.tiling_idx == b.tiling_idx &&
+           a.elem_bytes == b.elem_bytes &&
+           a.stage_elem_bytes == b.stage_elem_bytes && a.dfmt == b.dfmt &&
+           a.pow2_pad == b.pow2_pad;
+  };
+  for (u32 i = 0; i < ci.num_res; i++) {
+    ComputeInfo::Res& r = ci.res[i];
+    if (!r.image_staging || r.zero_fill)
+      continue;
+    auto [it, inserted] = chains.try_emplace(r.base);
+    Chain& c = it->second;
+    if (inserted || !same_image(c.res, r) ||
+        r.mip_levels >= c.res.mip_levels) {
+      c.res = r;
+      continue;
+    }
+    const u32 binding = r.binding;
+    const bool shader_writes = r.shader_writes, written = r.written,
+               read = r.read;
+    r = c.res;
+    r.binding = binding;
+    r.shader_writes = shader_writes;
+    r.written = written;
+    r.read = read;
+  }
+}
+
 void MergeSameBase(ComputeInfo& ci) {
   if (kCsMergeOverlap) {
     bool overlap = false;
@@ -523,6 +564,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
   rhi::write_journal::SetContext(g_frame.num, ci.cs_addr);
   DELTA_ZONE("gpu.cs_dispatch");
   BumpTextureEpoch();
+  WidenMipChains(ci);
   MergeSameBase(ci);
   if (g_cs.failed) {
     renderer.state = nullptr;
@@ -990,7 +1032,13 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       valid = true;
     const bool rt_backed = ci.res[i].image_staging && CsAliasedBase(base);
     if (rt_backed && e.gpu_dirty && e.rt_seq == e.write_seq &&
-        AliasedImageRenderSerial(base) > e.refreshed_serial) {
+        AliasedImageRenderSerial(base) > e.refreshed_serial &&
+        ci.res[i].mip_levels > 1) {
+      // Rendering replaced only the first mip: keep the rest in guest memory.
+      if (!CsRangeFlushOne(base, e))
+        return CsDeclined(ci, "chain");
+    } else if (rt_backed && e.gpu_dirty && e.rt_seq == e.write_seq &&
+               AliasedImageRenderSerial(base) > e.refreshed_serial) {
       UnindexDirtyRange(base, e.guest_bytes);
       e.gpu_dirty = false;
       e.cpu_writes.clear();

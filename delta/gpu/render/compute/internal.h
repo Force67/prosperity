@@ -366,6 +366,10 @@ namespace gpu::render::cs {
 bool TruthEligible(const ComputeInfo::Res& r);
 
 bool StageImageOnGpu(const ComputeInfo::Res& res, CsRange& e);
+// Reads every mip of a staged image from guest memory into `e.buf`.
+bool RecordGuestImageStage(rhi::CommandList* c,
+                           const ComputeInfo::Res& res,
+                           CsRange& e);
 
 constexpr u32 kCsBatchRing = 128;
 

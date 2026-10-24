@@ -514,7 +514,7 @@ rhi::TextureView* BindlessTextureView(const DrawInfo::DrawTex& t,
   const bool rt_eligible =
       (!t.arrayed ||
        (t.layers == 1 && t.base_array == 0 && t.view_layers == 1)) &&
-      !t.is_3d && t.mip_levels == 1 && !GuestFormatBlockCompressed(t.dfmt);
+      !t.is_3d && t.base_mip == 0 && !GuestFormatBlockCompressed(t.dfmt);
   if (base && rt_eligible && !g_rts.count(base) && !g_depths.count(base)) {
     const bool depth_format = t.dfmt == 4 && t.nfmt == 7;
     u64 resolved = depth_format ? ResolveSampledDepth(base, t.w, t.h) : 0;
@@ -638,7 +638,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
   const bool tex_rt_eligible =
       (!d.tex_arrayed || (d.tex_layers == 1 && d.tex_base_array == 0 &&
                           d.tex_view_layers == 1)) &&
-      !d.tex_is_3d && d.tex_mip_levels == 1 &&
+      !d.tex_is_3d && d.tex_base_mip == 0 &&
       !GuestFormatBlockCompressed(d.tex_dfmt);
   if (tex_base && tex_rt_eligible && !g_rts.count(tex_base) &&
       !g_depths.count(tex_base)) {
@@ -1229,7 +1229,7 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       const bool rt_eligible =
           (!t.arrayed ||
            (t.layers == 1 && t.base_array == 0 && t.view_layers == 1)) &&
-          !t.is_3d && t.mip_levels == 1 && !GuestFormatBlockCompressed(t.dfmt);
+          !t.is_3d && t.base_mip == 0 && !GuestFormatBlockCompressed(t.dfmt);
       if (base && rt_eligible && !is_bound_target(base)) {
         ActivateSampledRtVariant(base, t.w, t.h);
         if (base != d.depth_base)

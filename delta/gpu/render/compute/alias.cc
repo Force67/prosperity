@@ -114,7 +114,8 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
   constexpr u32 kExtentSlack = 8;
   const bool layered = res.layers > 1 || img.layers > 1;
   const bool depth16 = img.is_depth && res.elem_bytes == 2 && want_elem == 4;
-  if (res.mip_levels == 1 && (!layered || img.is_depth) &&
+  // A mip chain whose first mip is the target copies only that mip.
+  if ((!layered || (res.mip_levels == 1 && img.is_depth)) &&
       img.w + kExtentSlack >= res.width && img.h + kExtentSlack >= res.height &&
       (img.elem_bytes == want_elem || unpack || widen)) {
     plan.w = base::Min(img.w, res.width);
@@ -265,7 +266,11 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   c->Barrier(kAccessAll, kAccessCopyRW);
   constexpr rhi::TextureState kSrc = rhi::TextureState::kCopySrc;
   AliasedImageBarrier(c, img, t.layout, kSrc);
-  if (widen_packed) {
+  if (res.mip_levels > 1) {
+    if (!RecordGuestImageStage(c, res, e))
+      return false;
+    c->Barrier(kAccessComputeRW | kAccessCopyRW, kAccessCopyRW);
+  } else if (widen_packed) {
     c->FillBuffer(e.buf, 0, res.size & ~u64(3), 0);
     c->Barrier(rhi::kAccessCopyWrite, kAccessComputeRW | kAccessCopyRW);
   } else if (level.offset || copy_bytes < res.size || plan.w < level.pitch) {

@@ -504,27 +504,41 @@ bool StageBcImageOnGpu(const ComputeInfo::Res& res,
 }
 #endif
 
-bool StageImageOnGpu(const ComputeInfo::Res& res, CsRange& e) {
+bool RecordGuestImageStage(rhi::CommandList* c,
+                           const ComputeInfo::Res& res,
+                           CsRange& e) {
 #ifdef DELTA_HAVE_SPIRV_BACKEND
+  if (e.truth)
+    return RecordGuestRead(c, res.base, e.guest_bytes, e.buf);
   gcn::TextureLayout32 tiled, linear;
-  if (!BuildCsImageLayouts(res, tiled, linear))
+  if (!BuildCsImageLayouts(res, tiled, linear) || res.dfmt == 35 ||
+      res.dfmt == 40)
     return false;
-  if (res.dfmt == 35 || res.dfmt == 40)
-    return StageBcImageOnGpu(res, e, tiled, linear);
   const TileTable* table = GetTileTable(
       tiled, linear,
       tiled.elem_bytes < 4 && linear.elem_bytes == tiled.elem_bytes, false,
       res.dfmt == 7);
   rhi::Buffer* raw =
       table ? AcquireScratch((tiled.size + 3) & ~u64(3)) : nullptr;
-  if (!raw || !RecordGuestRead(g_cs.list, res.base, tiled.size, raw))
+  if (!raw || !RecordGuestRead(c, res.base, tiled.size, raw))
     return false;
-  RecordImageTiling(g_cs.list, *table, raw, 0, (tiled.size + 3) & ~u64(3),
-                    e.buf, (linear.size + 3) & ~u64(3), true);
+  RecordImageTiling(c, *table, raw, 0, (tiled.size + 3) & ~u64(3), e.buf,
+                    (linear.size + 3) & ~u64(3), true);
   return true;
 #else
   return false;
 #endif
+}
+
+bool StageImageOnGpu(const ComputeInfo::Res& res, CsRange& e) {
+#ifdef DELTA_HAVE_SPIRV_BACKEND
+  if (res.dfmt == 35 || res.dfmt == 40) {
+    gcn::TextureLayout32 tiled, linear;
+    return BuildCsImageLayouts(res, tiled, linear) &&
+           StageBcImageOnGpu(res, e, tiled, linear);
+  }
+#endif
+  return RecordGuestImageStage(g_cs.list, res, e);
 }
 
 }  // namespace gpu::render::cs

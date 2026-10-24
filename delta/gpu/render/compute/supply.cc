@@ -875,11 +875,9 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   const bool unpacked = (r.dfmt == 6 || r.dfmt == 7) && r.stage_elem_bytes == 16;
   const bool widened =
       (r.elem_bytes == 1 || r.elem_bytes == 2) && r.stage_elem_bytes == 4;
-  if (r.mip_levels != 1 || r.layers != 1 ||
+  if (r.layers != 1 ||
       (!unpacked && !widened && r.elem_bytes != r.stage_elem_bytes))
-    return RtRefreshMiss(r.mip_levels != 1 ? "mips"
-                         : r.layers != 1   ? "layers"
-                                           : "elem");
+    return RtRefreshMiss(r.layers != 1 ? "layers" : "elem");
   ActivateWrittenRtVariant(base, r.width, r.height);
   auto rt_it = g_rts.find(base);
   if (rt_it == g_rts.end() || !rt_it->second.texture || rt_it->second.is_depth)
