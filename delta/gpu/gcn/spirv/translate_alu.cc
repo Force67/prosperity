@@ -1313,9 +1313,21 @@ void EmitVop2(Translator& t,
     case 0x2f:
       if (clamp || omod)
         WarnUnsupported("vop2.cvt_pkrtz-output-modifier", op);
-      t.SetVg(vdst, t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
-                                {t.m.CompositeConstruct(t.t_v2, {s0, s1})}));
+    {
+      // Round toward zero: a value past the half range packs as the largest
+      // half. Infinity does too, and NaN packs as 0: the targets these feed
+      // blend with CB SIMPLE_FLOAT, where such a colour times a zero factor
+      // is 0, and a host blend would keep a NaN in the target for good.
+      const auto rtz = [&](Id v) {
+        return t.SelectF(t.m.Emit(spv::Op::OpIsNan, t.t_bool, {v}), t.F32(0.f),
+                         t.m.ExtInst(t.t_f, GLSLstd450FClamp,
+                                     {v, t.F32(-65504.f), t.F32(65504.f)}));
+      };
+      t.SetVg(vdst,
+              t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16,
+                          {t.m.CompositeConstruct(t.t_v2, {rtz(s0), rtz(s1)})}));
       break;
+    }
     case 0x30: {
       const Id lo = t.m.ExtInst(t.t_u, GLSLstd450UMin, {u0, t.U32(0xFFFFu)});
       const Id hi = t.m.ExtInst(t.t_u, GLSLstd450UMin, {u1, t.U32(0xFFFFu)});
