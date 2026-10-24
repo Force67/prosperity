@@ -74,7 +74,7 @@ int PS4ABI sys_getgroups(int gidsetlen, u32* gidset);
 int PS4ABI sys_setgroups();
 int PS4ABI sys_abort2(const char* msg, int nargs, void** args);
 
-int PS4ABI sys_exit();
+int PS4ABI sys_exit(int code);
 int PS4ABI sys_rfork();
 int PS4ABI sys_execve();
 int PS4ABI sys_getpid();

@@ -327,7 +327,8 @@ int PS4ABI sys_abort2(const char* msg, int nargs, void** args) {
   return nargs < 0 || nargs > 16 ? -SysError::eINVAL : 0;
 }
 
-int PS4ABI sys_exit() {
+int PS4ABI sys_exit(int code) {
+  BASE_LOGI("exit", "guest exit({})", code);
   guest::RequestStop();
   cpu::ExitGuestThread();
   return 0;
