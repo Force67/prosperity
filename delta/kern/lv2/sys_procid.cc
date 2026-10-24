@@ -48,23 +48,35 @@ int PS4ABI sys_getegid() {
   return 1;
 }
 
+// A title's identity is fixed: naming the current id (or -1 where the call
+// allows it) changes nothing, any other needs a privilege it does not have.
+static bool KeepsId(u32 id, u32 current) {
+  return id == current || id == static_cast<u32>(-1);
+}
+
 int PS4ABI sys_setuid(u32 uid) {
-  return 0;
+  return uid == sys_getuid() ? 0 : -SysError::ePERM;
 }
 int PS4ABI sys_seteuid(u32 uid) {
-  return 0;
+  return uid == sys_getuid() ? 0 : -SysError::ePERM;
 }
 int PS4ABI sys_setgid(u32 gid) {
-  return 0;
+  return gid == sys_getgid() ? 0 : -SysError::ePERM;
 }
 int PS4ABI sys_setegid(u32 gid) {
-  return 0;
+  return gid == sys_getgid() ? 0 : -SysError::ePERM;
 }
 int PS4ABI sys_setresuid(u32 ruid, u32 euid, u32 suid) {
-  return 0;
+  const u32 uid = sys_getuid();
+  return KeepsId(ruid, uid) && KeepsId(euid, uid) && KeepsId(suid, uid)
+             ? 0
+             : -SysError::ePERM;
 }
 int PS4ABI sys_setresgid(u32 rgid, u32 egid, u32 sgid) {
-  return 0;
+  const u32 gid = sys_getgid();
+  return KeepsId(rgid, gid) && KeepsId(egid, gid) && KeepsId(sgid, gid)
+             ? 0
+             : -SysError::ePERM;
 }
 
 int PS4ABI sys_getresuid(u32* ruid, u32* euid, u32* suid) {
@@ -104,7 +116,7 @@ int PS4ABI sys_getlogin(char* buf, u32 namelen) {
 }
 
 int PS4ABI sys_setlogin(const char* name) {
-  return 0;
+  return -SysError::ePERM;
 }
 
 // Track the mask so the set/get-previous round trip stays consistent.
@@ -268,9 +280,9 @@ int PS4ABI sys_rtprio(int function, u32 pid, void* rtprio) {
   return 0;
 }
 
-// Single process, no children.
+// Reaping children is for system processes; the kernel refuses a title.
 int PS4ABI sys_wait4(u32 pid, int* status, int options, void* rusage) {
-  return -SysError::eCHILD;
+  return -SysError::ePERM;
 }
 
 // We run a single process and never freeze it.
@@ -363,14 +375,14 @@ int PS4ABI sys_exit() {
   return 0;
 }
 
+// Creating and replacing processes is for system processes; the kernel refuses
+// a title.
 int PS4ABI sys_rfork() {
-  __builtin_trap();
-  return 0;
+  return -SysError::ePERM;
 }
 
 int PS4ABI sys_execve() {
-  __builtin_trap();
-  return 0;
+  return -SysError::ePERM;
 }
 
 // We deliver no signals, so the mask is inert; still, a caller that saves the

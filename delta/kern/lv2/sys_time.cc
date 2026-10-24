@@ -195,14 +195,14 @@ int PS4ABI sys_gettimeofday(sce_timeval* tv, sce_timezone* tz) {
   return 0;
 }
 
-// We can't (and shouldn't) reprogram the host wall clock from the guest, so the
-// time-setting syscalls are accepted and ignored.
+// Setting the clock needs a privilege (PRIV_SETTIMEOFDAY, PRIV_CLOCK_SETTIME)
+// a title does not have, and the host clock is not the guest's to move.
 int PS4ABI sys_settimeofday(const sce_timeval* tv, const sce_timezone* tz) {
-  return 0;
+  return -SysError::ePERM;
 }
 
 int PS4ABI sys_clock_settime(u32 clock_id, const sce_timespec* tp) {
-  return 0;
+  return -SysError::ePERM;
 }
 
 // Report a 1ns clock resolution. The host clocks we back these with are far
@@ -307,9 +307,9 @@ int PS4ABI sys_ntp_gettime(void* ntv) {
   return 0;
 }
 
-// Sony timezone-info setter; we keep a single UTC=local view, so ignore it.
-int PS4ABI sys_set_timezone_info(void* info) {
-  return 0;
+// Sony timezone-info setter: system processes only, a title is refused.
+int PS4ABI sys_set_timezone_info(void* /*info*/) {
+  return -SysError::ePERM;
 }
 
 // Sony UTC<->local conversion helpers. We treat the guest as running in UTC
