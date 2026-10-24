@@ -30,8 +30,8 @@ Object::Object(ObjectTable& objects, Type type)
   // of times a second (Minecraft: ~14k in 40s), which buried every other line
   // in the log. Off unless asked for.
   if (kObjTrace) {
-    static const char* tn[] = {"file",      "device",    "equeue",
-                               "eventflag", "semaphore", "shm"};
+    static const char* tn[] = {"file",      "device", "equeue",  "eventflag",
+                               "semaphore", "shm",    "namedobj"};
     LOG_INFO("assigned handle {} type={}", temp, tn[static_cast<int>(type)]);
   }
 }

@@ -3,8 +3,12 @@
 
 #include "kern/lv2/sys_debug.h"
 
+#include <cstring>
 #include "base/atomic.h"
+#include "host_memory/host_memory.h"
 #include "kern/lv2/error_table.h"
+#include "kern/object.h"
+#include "kern/process.h"
 
 namespace kern {
 
@@ -77,17 +81,45 @@ int PS4ABI sys_unk645() {
   return 0;
 }
 
-// sys_namedobj_create (557): registers name -> data pointer in the process id
-// table (24-byte object {name@0, data@8, flags@16}, name max 32 chars, flags OR
-// 0x1000, id in rax). We return 0; the only known caller ignores the id.
-int PS4ABI sys_namedobj_create(const char* name, void* arg2, u32 arg3) {
-  (void)name;
-  (void)arg2;
-  (void)arg3;
-  return 0;
+namespace {
+// A name -> data pointer entry in the process id table, the table event flags
+// and semaphores also live in. The kernel tags the type with 0x1000.
+class NamedObject : public Object {
+ public:
+  NamedObject(ObjectTable& objects, const char* name, void* data, u32 type)
+      : Object(objects, Type::kNamedObject), data_(data), type_(type) {
+    SetName(name);
+  }
+  u32 tag() const { return type_; }
+
+ private:
+  void* data_;
+  u32 type_;
+};
+constexpr u32 kNamedObjectTag = 0x1000;
+constexpr size_t kNamedObjectNameMax = 32;
+}  // namespace
+
+int PS4ABI sys_namedobj_create(const char* name, void* data, u32 type) {
+  if (!name)
+    return -SysError::eINVAL;
+  if (!host_memory::IsMemoryRangeMapped(name, 1))
+    return -SysError::eFAULT;
+  if (strnlen(name, kNamedObjectNameMax) == kNamedObjectNameMax)
+    return -SysError::eNAMETOOLONG;
+  auto* obj = new NamedObject(Process::GetActive()->GetObjTable(), name, data,
+                              type | kNamedObjectTag);
+  return static_cast<int>(obj->handle());
 }
 
-int PS4ABI sys_namedobj_delete() {
+int PS4ABI sys_namedobj_delete(u32 id, u32 type) {
+  auto& objects = Process::GetActive()->GetObjTable();
+  auto obj = objects.Get(id);
+  if (!obj || obj->type() != Object::Type::kNamedObject ||
+      static_cast<NamedObject*>(obj.get())->tag() !=
+          ((type & 0xffff) | kNamedObjectTag))
+    return -SysError::eSRCH;
+  obj->ReleaseHandle();
   return 0;
 }
 

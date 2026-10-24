@@ -23,8 +23,8 @@ int PS4ABI sys_set_uevt();
 int PS4ABI sys_set_chicken_switches();
 int PS4ABI sys_unk645();
 
-int PS4ABI sys_namedobj_create(const char* name, void* arg2, u32 arg3);
-int PS4ABI sys_namedobj_delete();
+int PS4ABI sys_namedobj_create(const char* name, void* data, u32 type);
+int PS4ABI sys_namedobj_delete(u32 id, u32 type);
 int PS4ABI sys_workaround8849();
 
 }  // namespace kern

@@ -31,6 +31,7 @@ class Object {
     kEventflag,
     kSemaphore,
     kShm,
+    kNamedObject,
   };
 
   explicit Object(ObjectTable&, Type);
