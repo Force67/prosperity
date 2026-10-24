@@ -15,6 +15,7 @@
 #include "base/logging.h"
 #include "guest/session.h"
 
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -88,6 +89,14 @@ base::Vector<DmemRegion> g_dmem_regions;
 // pages only.
 int g_dmem_backing_fd = -1;
 
+// A fresh allocation reads as zero, not as whatever an earlier one left in
+// the shared backing.
+void ZeroDmem(u64 offset, u64 len) {
+  if (g_dmem_backing_fd >= 0)
+    fallocate(g_dmem_backing_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+              static_cast<off_t>(offset), static_cast<off_t>(len));
+}
+
 // First-fit hole search in [lo, hi); the window is contract, not hint: SotC
 // carves fixed windows up front (0x220000 tail scratch ending at pool end, a 1
 // GiB CPU heap, the ~11 GiB streaming/GPU heap) and identifies heap partitions
@@ -134,6 +143,7 @@ int DmemAllocate(u64 lo, u64 hi, u64 len, u64 align, u32 mem_type, u64* out) {
       while (it2 != g_dmem_regions.end() && it2->start < cand)
         ++it2;
       g_dmem_regions.insert(it2, {cand, cand + len, mem_type});
+      ZeroDmem(cand, len);
       *out = cand;
       return 0;
     }
@@ -176,6 +186,7 @@ int DmemAllocate(u64 lo, u64 hi, u64 len, u64 align, u32 mem_type, u64* out) {
   while (it != g_dmem_regions.end() && it->start < cand)
     ++it;
   g_dmem_regions.insert(it, {cand, cand + len, mem_type});
+  ZeroDmem(cand, len);
   *out = cand;
   return 0;
 }
