@@ -227,58 +227,6 @@ int PS4ABI sys_clock_getcpuclockid2(u64 id, int which, int* out) {
   return 0;
 }
 
-// We don't run real interval timers; report "disarmed" (all zero) and accept
-// arming requests as no-ops so guest code that merely sets/clears an itimer
-// during init keeps going.
-int PS4ABI sys_getitimer(int which, sce_itimerval* val) {
-  if (val)
-    std::memset(val, 0, sizeof(sce_itimerval));
-  return 0;
-}
-
-int PS4ABI sys_setitimer(int which,
-                         const sce_itimerval* val,
-                         sce_itimerval* oval) {
-  if (oval)
-    std::memset(oval, 0, sizeof(sce_itimerval));
-  return 0;
-}
-
-// POSIX per-process timers. We hand out unique ids but never actually fire the
-// associated signals/events; this keeps create/delete/arm bookkeeping in the
-// guest happy without us needing a timer thread.
-int PS4ABI sys_ktimer_create(u32 clock_id, void* evp, int* timerid) {
-  static base::Atomic<int> next{1};
-  if (timerid)
-    *timerid = next.fetch_add(1, base::memory_order_relaxed);
-  return 0;
-}
-
-int PS4ABI sys_ktimer_delete(int timerid) {
-  return 0;
-}
-
-int PS4ABI sys_ktimer_settime(int timerid,
-                              int flags,
-                              const sce_itimerspec* newval,
-                              sce_itimerspec* oldval) {
-  // Report the previous setting as disarmed; we never armed anything.
-  if (oldval)
-    std::memset(oldval, 0, sizeof(sce_itimerspec));
-  return 0;
-}
-
-int PS4ABI sys_ktimer_gettime(int timerid, sce_itimerspec* cur) {
-  if (cur)
-    std::memset(cur, 0, sizeof(sce_itimerspec));
-  return 0;
-}
-
-// No timer ever fires, so it can never overrun.
-int PS4ABI sys_ktimer_getoverrun(int timerid) {
-  return 0;
-}
-
 // Feed-forward clock counter. We don't model an ffclock, so just expose a
 // monotonically increasing nanosecond count, which is all the counter is used
 // for in practice.

@@ -162,6 +162,44 @@ TEST_F(Signals, SigwaitTakesABlockedSignal) {
 }  // namespace
 
 namespace {
+TEST_F(Signals, KtimerFiresIntoSigwait) {
+  u32 set[4] = {1u << (kSigusr1 - 1), 0, 0, 0};
+  ASSERT_EQ(kern::sys_sigprocmask(1, set, nullptr), 0);
+  struct {
+    int notify, signo;
+    u64 value;
+    int tid;
+  } ev{1, kSigusr1, 77, 0};
+  int id = -1;
+  ASSERT_EQ(kern::sys_ktimer_create(4, &ev, &id), 0);
+  EXPECT_GE(id, 3);
+  kern::sce_itimerspec spec{{0, 0}, {0, 5'000'000}};
+  ASSERT_EQ(kern::sys_ktimer_settime(id, 0, &spec, nullptr), 0);
+  u8 info[0x50] = {};
+  EXPECT_EQ(kern::sys_sigwaitinfo(set, info), kSigusr1);
+  u64 value = 0;
+  std::memcpy(&value, info + 0x20, 8);
+  EXPECT_EQ(value, 77u);
+  kern::sce_itimerspec left{};
+  ASSERT_EQ(kern::sys_ktimer_gettime(id, &left), 0);
+  EXPECT_EQ(left.it_value.tv_nsec, 0);  // one-shot: disarmed
+  EXPECT_EQ(kern::sys_ktimer_delete(id), 0);
+  EXPECT_EQ(kern::sys_ktimer_delete(id), -22);
+}
+
+TEST_F(Signals, ItimerRealRaisesSigalrm) {
+  constexpr int kSigalrm = 14;
+  u32 set[4] = {1u << (kSigalrm - 1), 0, 0, 0};
+  ASSERT_EQ(kern::sys_sigprocmask(1, set, nullptr), 0);
+  kern::sce_itimerval it{{0, 0}, {0, 10'000}};
+  ASSERT_EQ(kern::sys_setitimer(0, &it, nullptr), 0);
+  int sig = 0;
+  EXPECT_EQ(kern::sys_sigwait(set, &sig), 0);
+  EXPECT_EQ(sig, kSigalrm);
+}
+}  // namespace
+
+namespace {
 volatile u64 g_spin_stop = 0;
 
 // Spins with r13 = 0xc0ffee until g_spin_stop is set.
