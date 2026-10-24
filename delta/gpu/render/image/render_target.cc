@@ -1234,6 +1234,12 @@ bool BeginRegion(const u64* mrt_base,
   }
   g_region.cur_area_w = w;
   g_region.cur_area_h = h;
+  // Refreshing a target from compute writes can swap in a variant of the
+  // compute view's size, so every refresh runs before any target is picked.
+  for (u32 i = 0; i < mrt_count; i++)
+    if (!CsRefreshRtFromTruth(mrt_base[i]))
+      render::FlushCsWritesAt(render::DefaultRenderer(), mrt_base[i],
+                              "rt-bind");
   for (u32 i = 0; i < mrt_count; i++) {
     const u32 iw = RtSurfaceExtent(mrt_surf_w ? mrt_surf_w[i] : 0, w, 256);
     const u32 ih = RtSurfaceExtent(mrt_surf_h ? mrt_surf_h[i] : 0, h, 64);
@@ -1241,9 +1247,6 @@ bool BeginRegion(const u64* mrt_base,
         GetRT(mrt_base[i], iw, ih, ColorTargetFormat(mrt_info[i]), layers);
     if (!targets[i])
       return false;
-    if (!CsRefreshRtFromTruth(mrt_base[i]))
-      render::FlushCsWritesAt(render::DefaultRenderer(), mrt_base[i],
-                              "rt-bind");
     targets[i]->cb_info = mrt_info[i];
     if (mrt_dcc_base && mrt_dcc_base[i]) {
       targets[i]->dcc_base = mrt_dcc_base[i];
