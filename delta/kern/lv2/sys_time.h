@@ -13,6 +13,8 @@ struct sce_timespec {  // NOLINT(readability-identifier-naming): guest ABI name
 };
 
 int PS4ABI sys_clock_gettime(u32 clock_id, sce_timespec* tp);
+// The guest submitted a flip (see DELTA_PROCTIME_FRAME_CAP_MS).
+void NoteProcTimeFlip();
 int PS4ABI sys_nanosleep(const sce_timespec* rqtp, sce_timespec* rmtp);
 }  // namespace kern
 

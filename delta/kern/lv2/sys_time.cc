@@ -23,9 +23,45 @@
 
 namespace {
 DELTA_OPTION(long, kTimeScale, "DELTA_TIMESCALE", 1);
+// Process time advances at most this much from one flip to the next, so a
+// title that steps its simulation by it runs slower instead of taking steps
+// longer than it was made for.
+DELTA_OPTION(u32, kProcTimeFrameCapMs, "DELTA_PROCTIME_FRAME_CAP_MS", 0);
+
+base::Atomic<u64> g_proc_dropped{0};
+base::Atomic<u64> g_proc_at_flip{0};
+
+u64 MonotonicNs() {
+  timespec ts{};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (u64)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+
+u64 RealProcNs() {
+  static const u64 kStart = MonotonicNs();
+  return MonotonicNs() - kStart;
+}
+
+// Wall time since the process started, less what the frame cap dropped.
+u64 ProcNs(u64 real) {
+  const u64 t = real - g_proc_dropped.load(base::memory_order_relaxed);
+  if (!kProcTimeFrameCapMs)
+    return t;
+  return base::Min(t, g_proc_at_flip.load(base::memory_order_relaxed) +
+                          u64{kProcTimeFrameCapMs} * 1000000);
+}
 }  // namespace
 
 namespace kern {
+void NoteProcTimeFlip() {
+  if (!kProcTimeFrameCapMs)
+    return;
+  const u64 real = RealProcNs();
+  const u64 t = ProcNs(real);
+  g_proc_dropped.store(real - t, base::memory_order_relaxed);
+  g_proc_at_flip.store(t, base::memory_order_relaxed);
+}
+
 // PS4 timespec is {int64 tv_sec; int64 tv_nsec}, same layout as the host's on
 // x86-64. Map the guest clock id onto a host clock; unknown ids fall back to
 // monotonic (good enough for the deltas most callers want).
@@ -35,8 +71,11 @@ int PS4ABI sys_clock_gettime(u32 clock_id, sce_timespec* tp) {
 
   // Map the guest clock id onto the closest host clock. The ids follow
   // FreeBSD's (kern_clock_gettime): 0/9/10 realtime, 13 second (coarse
-  // realtime), 14/15 thread/process cpu time, the rest monotonic/uptime.
+  // realtime), 14 thread cpu time, the rest monotonic/uptime. 15 is the PS4's
+  // CLOCK_PROCTIME (sceKernelGetProcessTime): wall time since the process
+  // started, not cpu time.
   clockid_t host;
+  bool proctime = false;
   switch (clock_id) {
     case 0:   // CLOCK_REALTIME
     case 9:   // CLOCK_REALTIME_PRECISE
@@ -46,8 +85,11 @@ int PS4ABI sys_clock_gettime(u32 clock_id, sce_timespec* tp) {
       break;
     case 1:   // CLOCK_VIRTUAL (user cpu time) -> process cpu time
     case 2:   // CLOCK_PROF (user+sys cpu time)
-    case 15:  // CLOCK_PROCESS_CPUTIME_ID
       host = CLOCK_PROCESS_CPUTIME_ID;
+      break;
+    case 15:  // CLOCK_PROCTIME
+      host = CLOCK_MONOTONIC;
+      proctime = true;
       break;
     case 14:  // CLOCK_THREAD_CPUTIME_ID
       host = CLOCK_THREAD_CPUTIME_ID;
@@ -73,6 +115,11 @@ int PS4ABI sys_clock_gettime(u32 clock_id, sce_timespec* tp) {
     u64 scaled = kBase + (now - kBase) * (u64)scale;
     ts.tv_sec = scaled / 1000000000ull;
     ts.tv_nsec = scaled % 1000000000ull;
+  }
+  if (proctime) {
+    const u64 since = ProcNs(RealProcNs());
+    ts.tv_sec = since / 1000000000ull;
+    ts.tv_nsec = since % 1000000000ull;
   }
   tp->tv_sec = ts.tv_sec;
   tp->tv_nsec = ts.tv_nsec;

@@ -21,6 +21,7 @@
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_event.h"
 #include "kern/lv2/sys_mem.h"
+#include "kern/lv2/sys_time.h"
 #include "kern/process.h"
 #include "kern/ps4/dev/dce_dev.h"
 #include "options/options.h"
@@ -112,6 +113,7 @@ static bool QueueFlip(PendingFlip flip) {
 bool DceSubmitFlip(int index, int mode, i64 arg, bool wait_for_gpu) {
   if (index < -1 || index >= 16 || mode < 0 || mode > 2)
     return false;
+  NoteProcTimeFlip();
   g_dce_submitted_buffer.store(index);
   g_dce_submitted_arg.store(arg);
   g_dce_submit_tsc.store(GuestTsc());
