@@ -202,6 +202,8 @@ struct RecompiledCs {
   int guest_memory_binding = -1;
   bool guest_memory_written = false;
   u64 native_candidates = 0;
+  // The candidates sampled as arrays (MIMG DA), which need an arrayed view.
+  u64 native_arrayed = 0;
   // One wave split over host subgroups, so a dispatch whose bindings alias
   // needs the variant compiled with those bindings as shared_mask.
   bool orders_shared_memory = false;
@@ -219,6 +221,7 @@ RecompiledCs RecompileCompute(const u32* cs_code,
                               u64 native_mask = 0,
                               u64 uint_mask = 0,
                               u64 shared_mask = 0,
+                              u64 cube_mask = 0,
                               const base::Vector<u32>& formats = {});
 
 struct ImageTilingParams {

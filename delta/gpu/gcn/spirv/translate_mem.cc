@@ -861,11 +861,23 @@ void EmitMimg(Translator& t,
   const u32 deriv_index = dref_index + (dref ? 1u : 0u);
   const u32 body_addr = vaddr + deriv_index + deriv_words;
   const u32 body_index = body_addr - vaddr;
-  Id x = addr_f(body_index);
-  Id y = is_1d ? t.F32(0.5f) : addr_f(body_index + 1);
-  if (is_cube) {
-    x = t.FSub(x, t.F32(1.f));
-    y = t.FSub(y, t.F32(1.f));
+  // The texture unit addresses with 0 where a coordinate is NaN.
+  const auto not_nan = [&](Id v) {
+    return t.SelectF(t.m.Emit(spv::Op::OpIsNan, t.t_bool, {v}), t.F32(0.f), v);
+  };
+  Id x = not_nan(addr_f(body_index));
+  Id y = is_1d ? t.F32(0.5f) : not_nan(addr_f(body_index + 1));
+  // A GCN cube is sampled as the 2D array of its faces: the shader's
+  // coordinates are face coordinates + 1 and its slice is face + 8 * cube.
+  // The T# names a cube even where the bind-time mask could not.
+  Id cube = t.m.ConstBool(is_cube);
+  if (!is_cube && arrayed && !t.rdna_sources) {
+    const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
+    cube = t.Eq(t.Shr(t.Sg(srsrc + 3), t.U32(28)), t.U32(11));
+  }
+  if (is_cube || (arrayed && !t.rdna_sources)) {
+    x = t.SelectF(cube, t.FSub(x, t.F32(1.f)), x);
+    y = t.SelectF(cube, t.FSub(y, t.F32(1.f)), y);
   }
   Id scale_x = 0, scale_y = 0;
   if (sc.gcn_tsharp && !is_3d && op != 0x00 && op != 0x01) {
@@ -913,9 +925,21 @@ void EmitMimg(Translator& t,
     if (!is_1d)
       y = t.FAdd(y, t.FDiv(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {oy}), sy));
   }
+  Id slice = coord_components == 3
+                 ? not_nan(addr_f(body_index + (is_1d ? 1 : 2)))
+                 : 0;
+  if (slice && !is_3d && !t.rdna_sources) {
+    const Id index = t.m.Emit(
+        spv::Op::OpConvertFToU, t.t_u,
+        {t.Ext1(GLSLstd450Floor,
+                t.Ext2(GLSLstd450FMax, t.FAdd(slice, t.F32(.5f)), t.F32(0.f)))});
+    const Id layer = t.Add(t.Mul(t.Shr(index, t.U32(3)), t.U32(6)),
+                           t.And(index, t.U32(7)));
+    slice = t.SelectF(cube, t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {layer}),
+                      slice);
+  }
   const Id uv = coord_components == 3
-                    ? t.m.CompositeConstruct(
-                          t.t_v3, {x, y, addr_f(body_index + (is_1d ? 1 : 2))})
+                    ? t.m.CompositeConstruct(t.t_v3, {x, y, slice})
                     : t.m.CompositeConstruct(t.t_v2, {x, y});
   const u32 lod_operand = static_cast<u32>(spv::ImageOperandsMask::Lod);
   const bool known = op == 0x00 || op == 0x01 || op == 0x20 || op == 0x21 ||

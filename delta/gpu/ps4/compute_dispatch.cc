@@ -361,13 +361,29 @@ u64 SharedBindings(const render::ComputeInfo& ci) {
   return mask;
 }
 
-bool Plain2d(const base::Vector<gcn::TImage>& images, u32 b) {
-  return b < images.size() && images[b].valid && !images[b].is_3d &&
-         !images[b].is_1d && !images[b].arrayed && !images[b].storage;
+// An array binds natively only as a view of a few of its first layers (one
+// cube): a whole array can be hundreds of megabytes the texture cache would
+// upload.
+bool Plain2d(const base::Vector<gcn::TImage>& images, u32 b, bool arrayed) {
+  if (b >= images.size())
+    return false;
+  const gcn::TImage& t = images[b];
+  return t.valid && !t.is_3d && !t.is_1d && t.arrayed == arrayed &&
+         !t.storage &&
+         (!arrayed || (t.view_layers <= 6 && t.base_array + t.view_layers <= 32));
 }
 
-// `shader` with native image bindings wherever the bound texture is a plain
-// 2D image, or `shader` itself when there is none. Fills `images`.
+// A cube array too large to stage, even at 4 bytes a texel, is one no dispatch
+// of ours ever wrote, so its layers hold whatever the memory held before.
+bool CubeStageable(const gcn::TImage& t) {
+  gcn::TextureLayout32 layout;
+  return gcn::BuildTextureLayout32(layout, t.width, t.height, t.pitch, t.layers,
+                                   t.mip_levels, t.tiling_idx, t.pow2_pad, 4) &&
+         layout.size <= kMaxResource;
+}
+
+// `shader` with native image bindings wherever the bound texture is a 2D
+// image or array, or `shader` itself when there is none. Fills `images`.
 ComputeShaderState NativeVariant(const ComputeShaderState& shader,
                                  const gcn::RecompiledCs& module,
                                  const u32* user_data,
@@ -382,9 +398,18 @@ ComputeShaderState NativeVariant(const ComputeShaderState& shader,
   ComputeShaderState native_shader = shader;
   for (const gcn::CsResource& r : module.resources) {
     const auto it = plan.binding_by_pc.find(r.use_pc);
-    if (r.binding < 64 && ((module.native_candidates >> r.binding) & 1) &&
-        it != plan.binding_by_pc.end() && Plain2d(images, it->second))
+    if (r.binding >= 64 || !((module.native_candidates >> r.binding) & 1) ||
+        it == plan.binding_by_pc.end())
+      continue;
+    const u32 b = it->second;
+    const bool cube = b < images.size() && images[b].type == 11 && b < 32;
+    if (cube && !CubeStageable(images[b]))
+      continue;
+    if (Plain2d(images, b,
+                cube || ((module.native_arrayed >> r.binding) & 1))) {
       native_shader.native_mask |= 1ull << r.binding;
+      native_shader.cube_mask |= u64(cube) << b;
+    }
   }
   if (!native_shader.native_mask)
     return shader;
@@ -543,7 +568,8 @@ void DispatchCompute(render::Renderer& renderer,
     const gcn::RecompiledCs& candidate = GetComputeShader(native_shader);
     bool usable = candidate.ok;
     for (u32 i = 0; usable && i < candidate.textures.size(); i++)
-      usable = candidate.textures[i] < 0 || Plain2d(images, i);
+      usable = candidate.textures[i] < 0 ||
+               (i < images.size() && Plain2d(images, i, images[i].arrayed));
     if (usable) {
       module = &candidate;
       chosen = native_shader;

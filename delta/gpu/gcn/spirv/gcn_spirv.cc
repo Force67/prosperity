@@ -38,6 +38,7 @@ bool RecompileComputeSpirv(const u32*,
                            u64,
                            u64,
                            u64,
+                           u64,
                            const base::Vector<u32>&,
                            RecompiledCs&) {
   return false;
@@ -3091,8 +3092,9 @@ bool NativeMimgForm(u32 op) {
 
 u64 NativeImageCandidates(const Program& program,
                           const RecompiledCs& r,
-                          const base::HashMap<u32, u32>& bind) {
-  u64 ok = 0, bad = 0;
+                          const base::HashMap<u32, u32>& bind,
+                          u64* arrayed) {
+  u64 ok = 0, bad = 0, da = 0, flat = 0;
   for (const Inst& inst : program) {
     if (inst.enc != Enc::kMimg)
       continue;
@@ -3101,14 +3103,16 @@ u64 NativeImageCandidates(const Program& program,
       continue;
     const u32 w = inst.raw[0];
     const u32 op = (w >> 18) & 0x7F;
-    const bool plain = !((w >> 14) & 0xF);
+    const bool plain = !((w >> 15) & 0x7);
     (NativeMimgForm(op) && plain ? ok : bad) |= 1ull << it->second;
+    (((w >> 14) & 1) ? da : flat) |= 1ull << it->second;
   }
-  u64 out = ok & ~bad;
+  u64 out = ok & ~bad & ~(da & flat);
   for (const CsResource& res : r.resources)
     if (res.binding < 64 && (res.kind != 1 || res.written ||
                              res.runtime_image || res.runtime_address))
       out &= ~(1ull << res.binding);
+  *arrayed = out & da;
   return out;
 }
 }  // namespace
@@ -3130,6 +3134,7 @@ bool TranslateCs(const Program& program,
     return false;
   StageContext sc;
   sc.is_cs = true;
+  sc.gcn_tsharp = true;
   for (u32 f : formats)
     sc.staged_formats[f >> 16] = f & 0xFFFF;
   sc.lds_dwords = lds_dwords * 128;
@@ -3139,7 +3144,8 @@ bool TranslateCs(const Program& program,
                        sc.cs_bind) ||
       r.resources.empty())
     return false;
-  r.native_candidates = NativeImageCandidates(program, r, sc.cs_bind);
+  r.native_candidates =
+      NativeImageCandidates(program, r, sc.cs_bind, &r.native_arrayed);
   for (const CsResource& res : r.resources)
     if (res.written)
       sc.cs_written.insert(res.binding);
@@ -3771,6 +3777,7 @@ bool RecompileComputeSpirv(const u32* cs_code,
                            u64 native_mask,
                            u64 uint_mask,
                            u64 shared_mask,
+                           u64 cube_mask,
                            const base::Vector<u32>& formats,
                            RecompiledCs& r) {
   if (!cs_code)
@@ -3780,6 +3787,7 @@ bool RecompileComputeSpirv(const u32* cs_code,
   const bool dbg = ShaderDebugEnabled();
   Translator t;
   t.program_base = reinterpret_cast<u64>(cs_code);
+  t.tex_cube_mask = static_cast<u32>(cube_mask);
   RecompiledCs tmp;
   ResetUnsupported();
   if (dbg)

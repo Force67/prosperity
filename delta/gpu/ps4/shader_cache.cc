@@ -74,7 +74,7 @@ struct ComputeKey {
   u32 thread_x = 0, thread_y = 0, thread_z = 0;
   u32 user_sgpr = 0, tgid_enable = 0, lds_dwords = 0;
   bool neo = false;
-  u64 native_mask = 0, uint_mask = 0, shared_mask = 0;
+  u64 native_mask = 0, uint_mask = 0, shared_mask = 0, cube_mask = 0;
   base::Vector<u32> formats;
 
   bool operator==(const ComputeKey& other) const = default;
@@ -93,6 +93,7 @@ struct ComputeKeyHash {
     MixHash(h, key.native_mask);
     MixHash(h, key.uint_mask);
     MixHash(h, key.shared_mask);
+    MixHash(h, key.cube_mask);
     for (u32 f : key.formats)
       MixHash(h, f);
     return static_cast<size_t>(h);
@@ -207,7 +208,7 @@ ComputeKey ComputeKeyOf(const ComputeShaderState& state) {
           state.user_sgpr,   state.tgid_enable,
           state.lds_dwords,  gcn::DefaultIsaMode() == gcn::IsaMode::kNeo,
           state.native_mask, state.uint_mask, state.shared_mask,
-          state.formats};
+          state.cube_mask,   state.formats};
 }
 
 base::HashMap<ComputeKey, gcn::RecompiledCs, ComputeKeyHash>& ComputeCache() {
@@ -222,7 +223,7 @@ gcn::RecompiledCs RecompileCompute(const ComputeShaderState& state) {
       reinterpret_cast<const u32*>(state.cs_addr), state.thread_x,
       state.thread_y, state.thread_z, state.user_sgpr, state.tgid_enable,
       state.lds_dwords, state.native_mask, state.uint_mask, state.shared_mask,
-      state.formats);
+      state.cube_mask, state.formats);
 }
 }  // namespace
 
