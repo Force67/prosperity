@@ -1427,8 +1427,14 @@ int PS4ABI sys_thr_wake(u32 tid) {
   return 0;
 }
 
+// The names thr_set_name stored per guest thread (31 characters and a NUL, as
+// the kernel keeps), for thr_get_name to give back.
+static char g_thr_name[4096][32];
+
 int PS4ABI sys_thr_set_name(u32 tid, const char* name) {
   BASE_LOGI("thr_set_name", "tid={} name={}", tid, name ? name : "(null)");
+  if (name && tid != 0 && tid < 4096)
+    std::snprintf(g_thr_name[tid], sizeof(g_thr_name[tid]), "%s", name);
   // Mirror the name onto the host thread so ps/gdb and the SIGUSR1 probe can
   // tell a title's threads apart. This names the CALLER, not `tid`: we have no
   // guest
@@ -1445,9 +1451,18 @@ int PS4ABI sys_thr_set_name(u32 tid, const char* name) {
   return 0;
 }
 
+// A thread never renamed reads back the name thr_new gave it. The main thread
+// (tid 1) never passes through thr_new, so it has no host map entry.
 int PS4ABI sys_thr_get_name(u32 tid, char* buf) {
-  if (buf)
-    std::strcpy(buf, "thr");
+  if (tid == 0 || tid >= 4096 ||
+      (tid != 1 && tid != t_tid && !HostTidForGuest(tid)))
+    return -SysError::eSRCH;
+  if (!buf)
+    return -SysError::eFAULT;
+  const char* name = g_thr_name[tid][0] ? g_thr_name[tid] : g_guest_name[tid];
+  const size_t n = strnlen(name, 31);
+  std::memcpy(buf, name, n);
+  buf[n] = '\0';
   return 0;
 }
 
@@ -1643,6 +1658,7 @@ const guest::SessionReset g_session_reset([] {
     guest::ResetResource(bucket.chan);
   guest::ResetResource(g_host_by_guest);
   guest::ResetResource(g_guest_name);
+  guest::ResetResource(g_thr_name);
 });
 }  // namespace
 
