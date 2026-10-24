@@ -137,7 +137,7 @@ int PS4ABI sys_dynlib_get_info_ex(u32 handle,
 int PS4ABI sys_dynlib_dlsym(u32 handle, const char* sym_name, void** sym) {
   auto mod = Process::GetActive()->GetModule(handle);
   if (!mod)
-    return -1;
+    return -SysError::eSRCH;
 
   char nameenc[12]{};
   runtime::nid::Encode(sym_name, reinterpret_cast<u8*>(&nameenc));
@@ -157,8 +157,7 @@ int PS4ABI sys_dynlib_dlsym(u32 handle, const char* sym_name, void** sym) {
 
   if (!addr_out) {
     BASE_LOGI("dlsym", "{}!{} -> UNRESOLVED", mod_name.c_str(), sym_name);
-    *sym = nullptr;
-    return -1;
+    return -SysError::eSRCH;
   }
 
   BASE_LOGI("dlsym", "{}!{} -> {:p} (+{:#x})", mod_name.c_str(), sym_name,

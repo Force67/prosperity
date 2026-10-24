@@ -312,20 +312,22 @@ int PS4ABI sys_set_timezone_info(void* /*info*/) {
   return -SysError::ePERM;
 }
 
-// Sony UTC<->local conversion helpers. We treat the guest as running in UTC
-// (zero offset, no DST), so the conversion is the identity: copy the input
-// time_t straight to the output if one was supplied. This keeps timestamps
-// self-consistent rather than introducing a spurious offset.
-int PS4ABI sys_utc_to_localtime(i64 utc, void* out, void* tzinfo, void* dst) {
-  if (out)
-    *reinterpret_cast<i64*>(out) = utc;
+// Sony UTC<->local conversion helpers. The guest runs in UTC (zero offset, no
+// DST), so the conversion is the identity, the 16-byte zone record is zero and
+// the dst flag is clear.
+int PS4ABI sys_utc_to_localtime(i64 utc, i64* local, void* tz, int* dst) {
+  if (local)
+    *local = utc;
+  if (tz)
+    std::memset(tz, 0, 16);
+  if (dst)
+    *dst = 0;
   return 0;
 }
 
 int PS4ABI
-sys_localtime_to_utc(i64 local, void* out, void* a, void* b, void* c) {
-  if (out)
-    *reinterpret_cast<i64*>(out) = local;
-  return 0;
+sys_localtime_to_utc(i64 local, int /*type*/, i64* utc, void* tz, int* dst) {
+  return sys_utc_to_localtime(local, utc, tz, dst);
 }
+
 }  // namespace kern

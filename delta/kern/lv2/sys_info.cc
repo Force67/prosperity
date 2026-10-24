@@ -144,14 +144,15 @@ int PS4ABI sys_get_authinfo(int pid, void* info_out) {
 
 /*maybe should be moved to a proc file*/
 int PS4ABI sys_get_proc_type_info(void* oinfo) {
-  // Fixed 16-byte block: +0x00 reserved, +0x08 int32 ptype (0..3), +0x0c uint8
+  // Fixed 16-byte block: +0x00 size (the caller passes 0x10, the kernel writes
+  // it back), +0x08 int32 ptype (0..3), +0x0c uint8
   // cptype, +0x0d pad. cptype bits: 0x01 JIT compiler, 0x02 JIT application,
   // 0x04 video player, 0x08 disk-player UI, 0x10 video-service capability,
   // 0x20 webcore, 0x40 has sce program attribute. A game SELF is a JIT
   // application with the sce attribute, so cptype = 0x42; without the JIT-app
   // bit libkernel's process-init skips the JIT shm setup it expects later.
   struct ProcTypeInfo {
-    u64 reserved;
+    u64 size;
     i32 ptype;
     u8 cptype;
     u8 pad[3];
@@ -159,7 +160,7 @@ int PS4ABI sys_get_proc_type_info(void* oinfo) {
   static_assert(sizeof(ProcTypeInfo) == 16);
 
   auto* out = reinterpret_cast<ProcTypeInfo*>(oinfo);
-  out->reserved = 0;
+  out->size = sizeof(ProcTypeInfo);
   out->ptype = sys_budget_get_ptype();
   out->cptype = 0x42;  // JIT application | sce program attribute
   out->pad[0] = out->pad[1] = out->pad[2] = 0;
