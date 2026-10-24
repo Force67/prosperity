@@ -1437,6 +1437,26 @@ bool BeginRegion(const u64* mrt_base,
       clear_aspect(depth_att.stencil_load, dt->stencil_layout,
                    rhi::kAspectStencil);
   }
+  // An attachment smaller than the area faults the GPU (NVIDIA Xid 13, "CT
+  // violation") instead of clipping, so the area never exceeds one.
+  for (u32 i = 0; i < g_region.cur_mrt_count; i++)
+    if (targets[i]->w < w || targets[i]->h < h) {
+      static int n = 0;
+      if (n++ < 8)
+        BASE_LOGW("gpuvk", "region {:#x} {}x{} exceeds target {} {}x{}",
+                  (unsigned long)mrt_base[i], w, h, i, targets[i]->w,
+                  targets[i]->h);
+      w = base::Min(w, targets[i]->w);
+      h = base::Min(h, targets[i]->h);
+    }
+  if (dt && (dt->w < w || dt->h < h)) {
+    static int n = 0;
+    if (n++ < 8)
+      BASE_LOGW("gpuvk", "region {:#x} {}x{} exceeds depth {}x{}",
+                (unsigned long)depth_base, w, h, dt->w, dt->h);
+    w = base::Min(w, dt->w);
+    h = base::Min(h, dt->h);
+  }
   pass.width = w;
   pass.height = h;
   pass.layers = layers;
