@@ -171,6 +171,10 @@ Recompiled Recompile(const u32* vs_code,
                      u32 col_format = kColFormatUnknown,
                      u32 tex_cube_mask = 0);
 
+// In `mrt_bound_mask`: target 0 blends with a second source, so the MRT1
+// export is that source (location 0, index 1) instead of a target of its own.
+constexpr u32 kMrtDualSource = 1u << 8;
+
 constexpr u32 kUnknownStoreExtent = ~0u;
 
 struct CsResource {

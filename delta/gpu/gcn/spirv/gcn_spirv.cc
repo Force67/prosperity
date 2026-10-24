@@ -535,11 +535,16 @@ Id PsColorOut(Translator& t, StageContext& sc, u32 target) {
                 type, {t.F32(0.f), t.F32(0.f), t.F32(0.f), t.F32(1.f)});
   const Id v = t.m.Variable(t.m.TypePointer(spv::StorageClass::Output, type),
                             spv::StorageClass::Output, init);
-  t.m.Decorate(v, spv::Decoration::Location, {target});
+  const bool second_source =
+      target == 1 && (sc.mrt_bound_mask & kMrtDualSource);
+  t.m.Decorate(v, spv::Decoration::Location, {second_source ? 0u : target});
+  if (second_source)
+    t.m.Decorate(v, spv::Decoration::Index, {1});
   t.m.Name(v, "mrt" + base::ToString(target));
   sc.iface->push_back(v);
   sc.color_outs[target] = v;
-  sc.r->ps_mrt_mask |= static_cast<u8>(1u << target);
+  if (!second_source)
+    sc.r->ps_mrt_mask |= static_cast<u8>(1u << target);
   return v;
 }
 

@@ -320,6 +320,15 @@ u32 ResolveRenderTargets(const Regs& regs,
       mrt_uint_mask |= 1u << rt;
   }
   d.rt_base = d.mrt_count ? d.mrt_base[0] : 0;
+  const u32 blend = regs[mmCB_BLEND0_CONTROL];
+  const auto second_source = [](u32 factor) {
+    return factor >= 15 && factor <= 18;
+  };
+  if ((d.mrt_bound_mask & 1u) && ((blend >> 30) & 1u) &&
+      (second_source(blend & 0x1F) || second_source((blend >> 8) & 0x1F) ||
+       second_source((blend >> 16) & 0x1F) ||
+       second_source((blend >> 24) & 0x1F)))
+    d.mrt_bound_mask |= gcn::kMrtDualSource | 2u;
   TraceMrtSlotZeroGap(d, target_mask, vs_addr, ps_addr);
   TraceNoMrtBound(regs, d, target_mask, vs_addr, ps_addr);
   return mrt_uint_mask;
