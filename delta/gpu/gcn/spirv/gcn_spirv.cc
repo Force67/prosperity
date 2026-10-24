@@ -53,6 +53,7 @@ bool RecompileComputeSpirv(const u32*,
 #include "base/strings/to_string.h"
 
 #include "base/algorithm.h"
+#include "base/containers/array.h"
 #include "base/containers/hash_map.h"
 #include "base/containers/map.h"
 #include "base/containers/pair.h"
@@ -3448,26 +3449,58 @@ base::Vector<u32> EmitRectListGeometry(u32 num_params,
   const auto load_input = [&](Id input, u32 vertex) {
     return m.Load(t_v4, m.AccessChain(p_in_v4, input, {m.ConstU32(vertex)}));
   };
-  const auto fourth_corner = [&](Id input) {
-    const Id v0 = load_input(input, 0), v1 = load_input(input, 1);
-    const Id v2 = load_input(input, 2);
-    return m.Emit(spv::Op::OpFSub, t_v4,
-                  {m.Emit(spv::Op::OpFAdd, t_v4, {v1, v2}), v0});
+  // The rectangle's corner with the right angle may be any of the three
+  // vertices; the fourth corner lies opposite it.
+  const Id t_bool = m.TypeBool(), t_bv4 = m.TypeVec(t_bool, 4);
+  Id x[3], y[3];
+  for (u32 v = 0; v < 3; v++) {
+    const Id pos = load_input(in_pos, v);
+    const Id w = m.CompositeExtract(t_f, pos, 3);
+    x[v] = m.Emit(spv::Op::OpFDiv, t_f, {m.CompositeExtract(t_f, pos, 0), w});
+    y[v] = m.Emit(spv::Op::OpFDiv, t_f, {m.CompositeExtract(t_f, pos, 1), w});
+  }
+  const auto near = [&](Id a, Id b) {
+    const Id diff = m.ExtInst(t_f, GLSLstd450FAbs,
+                              {m.Emit(spv::Op::OpFSub, t_f, {a, b})});
+    return m.Emit(spv::Op::OpFOrdLessThanEqual, t_bool,
+                  {diff, m.ConstF32(1e-4f)});
   };
-  const Id pos3 = fourth_corner(in_pos);
-  base::Vector<Id> param3(num_params);
+  const auto both = [&](Id a, Id b) {
+    return m.Emit(spv::Op::OpLogicalAnd, t_bool, {a, b});
+  };
+  const auto right_angle_at = [&](u32 r, u32 a, u32 b) {
+    return m.Emit(spv::Op::OpLogicalOr, t_bool,
+                  {both(near(x[r], x[a]), near(y[r], y[b])),
+                   both(near(x[r], x[b]), near(y[r], y[a]))});
+  };
+  const Id at1 = right_angle_at(1, 2, 0), at2 = right_angle_at(2, 0, 1);
+  const Id at1v = m.CompositeConstruct(t_bv4, {at1, at1, at1, at1});
+  const Id at2v = m.CompositeConstruct(t_bv4, {at2, at2, at2, at2});
+  // Corners in strip order: the right angle, the next two cyclically, the
+  // opposite corner.
+  const auto corners = [&](Id input, Id out[4]) {
+    const Id v[3] = {load_input(input, 0), load_input(input, 1),
+                     load_input(input, 2)};
+    for (u32 k = 0; k < 3; k++)
+      out[k] = m.Emit(
+          spv::Op::OpSelect, t_v4,
+          {at1v, v[(1 + k) % 3],
+           m.Emit(spv::Op::OpSelect, t_v4, {at2v, v[(2 + k) % 3], v[k]})});
+    out[3] = m.Emit(spv::Op::OpFSub, t_v4,
+                    {m.Emit(spv::Op::OpFAdd, t_v4, {out[1], out[2]}), out[0]});
+  };
+  Id pos[4];
+  corners(in_pos, pos);
+  base::Vector<base::Array<Id, 4>> params(num_params);
   for (u32 p = 0; p < num_params; p++)
     if (!flat_attrs.count(p))
-      param3[p] = fourth_corner(inputs[p]);
+      corners(inputs[p], params[p].data());
 
   for (u32 vertex = 0; vertex < 4; vertex++) {
-    m.Store(out_pos, vertex < 3 ? load_input(in_pos, vertex) : pos3);
-    for (u32 p = 0; p < num_params; p++) {
-      const Id value = flat_attrs.count(p) ? load_input(inputs[p], 0)
-                       : vertex < 3        ? load_input(inputs[p], vertex)
-                                           : param3[p];
-      m.Store(outputs[p], value);
-    }
+    m.Store(out_pos, pos[vertex]);
+    for (u32 p = 0; p < num_params; p++)
+      m.Store(outputs[p], flat_attrs.count(p) ? load_input(inputs[p], 0)
+                                              : params[p][vertex]);
     m.EmitVoid(spv::Op::OpEmitVertex, {});
   }
   m.EmitVoid(spv::Op::OpEndPrimitive, {});
