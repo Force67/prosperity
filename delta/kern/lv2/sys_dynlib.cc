@@ -272,18 +272,11 @@ int PS4ABI sys_dynlib_get_list(u32* handles, size_t max_count, size_t* count) {
 // syscall 594. libkernel's _sceKernelLoadStartModule path calls this with
 // rdi=path, rsi=flags, rdx=&handle. It expects the loaded module's handle
 // written to *pHandle and 0 returned on success.
+// Both kernels take four arguments; r8 and r9 are whatever the caller left.
 int PS4ABI sys_dynlib_load_prx(const char* path,
                                u64 flags,
                                int* p_handle,
-                               u64 arg4,
-                               const void* opt,
-                               i64* p_res) {
-  // The PS4 syscall takes four arguments; r9 is whatever the caller left
-  // there (sceKernelLoadStartModule's int* result), so an 8-byte store
-  // clobbers the stack canary next to it.
-  if (p_res && Process::GetActive()->GetPlatform() ==
-                   kern::Process::Platform::kPs5)
-    *p_res = 0;
+                               u64 arg4) {
   if (!path)
     return -SysError::eINVAL;
 
