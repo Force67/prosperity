@@ -75,5 +75,6 @@ int PS4ABI Ps5BudgetGetPtype(int pid);
 int PS4ABI Ps5SetPhysFmemLimit(int pid, i64 limit);
 int PS4ABI Ps5Workaround8849(u32 key);
 int PS4ABI Ps5AmprCtrlDebug(int op, void* arg, size_t size);
+int PS4ABI Ps5Streamwrite(int op, int fd, size_t size, const void* arg);
 
 }  // namespace kern

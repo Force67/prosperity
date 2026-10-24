@@ -283,7 +283,7 @@ static const Ps5Row kPs5Rows[] = {
     {706, "begin_app_mount", H(&Ps5Eperm)},
     {707, "end_app_mount", H(&Ps5Eperm)},
     {708, "fsc2h_ctrl", H(&Ps5Eperm)},
-    {709, "streamwrite", H(&Ps5Ok)},
+    {709, "streamwrite", H(&Ps5Streamwrite)},
     {710, "app_save", H(&Ps5Eperm)},
     {711, "app_restore", H(&Ps5Eperm)},
     {712, "saved_app_delete", H(&Ps5Eperm)},
