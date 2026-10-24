@@ -274,10 +274,10 @@ static const Ps5Row kPs5Rows[] = {
     {692, "utimensat", H(&Ps5Utimensat)},
     {693, "numa_getaffinity", H(&Ps5NumaGetaffinity)},
     {694, "numa_setaffinity", H(&Ps5NumaSetaffinity)},
-    {700, "apr_submit", H(&Ps5Nosys)},
+    {700, "apr_submit", H(&Ps5AprSubmit)},
     {701, "apr_resolve", H(&Ps5Nosys)},
-    {702, "apr_stat", H(&Ps5Nosys)},
-    {703, "apr_wait", H(&Ps5Nosys)},
+    {702, "apr_stat", H(&Ps5AprStat)},
+    {703, "apr_wait", H(&Ps5AprWait)},
     {704, "apr_ctrl", H(&Ps5Eperm)},
     {705, "get_phys_page_size", H(&Ps5Eperm)},  // devkit debug setting only
     {706, "begin_app_mount", H(&Ps5Eperm)},

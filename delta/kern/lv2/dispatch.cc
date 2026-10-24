@@ -29,6 +29,7 @@
 #include "cpu/backend.h"
 #include "kern/crash.h"
 #include "kern/lv2/dispatch.h"
+#include "kern/lv2/ps5/handlers.h"
 #include "kern/lv2/sys_context.h"
 #include "kern/lv2/sys_signal.h"
 #include "kern/module.h"
@@ -552,6 +553,18 @@ uintptr_t Lv2ContextEntry() {
 }
 #endif  // DELTA_BACKEND_NATIVE
 
+ContextHandler Lv2ContextHandler(u32 sid) {
+  constexpr u32 kSysAprResolve = 701;
+  // Both platforms share the context calls and their ucontext layout.
+  if (IsContextSyscall(sid))
+    return &sys_context;
+  auto* pr = Process::GetActive();
+  if (pr && pr->GetPlatform() == Process::Platform::kPs5 &&
+      sid == kSysAprResolve)
+    return &Ps5AprResolveContext;
+  return nullptr;
+}
+
 uintptr_t Lv2Trampoline(const void* handler, u32 sid) {
 #if defined(DELTA_BACKEND_NATIVE)
   // Wrap each handler once. Cache by handler so syscall ids that share a
@@ -589,9 +602,8 @@ uintptr_t Lv2Trampoline(const void* handler, u32 sid) {
 }
 
 uintptr_t Lv2Lookup(u32 sid) {
-  // Both platforms share the context calls and their ucontext layout.
-  if (IsContextSyscall(sid))
-    if (const uintptr_t trampoline = Lv2ContextTrampoline(&sys_context, sid))
+  if (const ContextHandler handler = Lv2ContextHandler(sid))
+    if (const uintptr_t trampoline = Lv2ContextTrampoline(handler, sid))
       return trampoline;
   // PS5 titles route to the Prospero table (FreeBSD 11 ABI); never the Orbis
   // one.

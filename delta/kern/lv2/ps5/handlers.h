@@ -11,6 +11,7 @@
 #include <cstddef>
 #include "base/arch.h"
 #include "guest_abi.h"
+#include "kern/lv2/dispatch.h"
 
 namespace kern {
 
@@ -76,5 +77,21 @@ int PS4ABI Ps5SetPhysFmemLimit(int pid, i64 limit);
 int PS4ABI Ps5Workaround8849(u32 key);
 int PS4ABI Ps5AmprCtrlDebug(int op, void* arg, size_t size);
 int PS4ABI Ps5Streamwrite(int op, int fd, size_t size, const void* arg);
+
+// APR. Resolve takes eight arguments; Lv2ContextHandler serves 701 with
+// Ps5AprResolveContext, which reads the last two off the guest stack.
+int PS4ABI Ps5AprResolve(const char* prefix,
+                         const char* const* paths,
+                         u64 num,
+                         u32* ids,
+                         u64* sizes,
+                         u32* error_index,
+                         int* results,
+                         u32* count);
+void PS4ABI Ps5AprResolveContext(u32 sid, GuestFrame* frame, u8* xsave);
+int PS4ABI
+Ps5AprSubmit(const u32* cmd, u64 ndw, u32 prio, u32 flag, u32* result, u32* id);
+int PS4ABI Ps5AprStat(const u32* ids, u64 num, void* stat);
+int PS4ABI Ps5AprWait(const u32* ids, u64 num);
 
 }  // namespace kern

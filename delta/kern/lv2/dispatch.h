@@ -60,6 +60,11 @@ uintptr_t Lv2ContextTrampoline(ContextHandler handler, u32 sid);
 // argument (and frees it), or 0 when the backend has none.
 uintptr_t Lv2ContextEntry();
 
+// The handler that needs the full register state for `sid` on the active
+// process's platform, or null for an ordinary syscall. Backends without the
+// context trampoline call it around their own capture of the state.
+ContextHandler Lv2ContextHandler(u32 sid);
+
 // A syscall a table names but does not implement.
 int PS4ABI Lv2StubSyscall();
 

@@ -155,3 +155,7 @@ add_delta_test(signal_test
 add_delta_test(pmc_test
   SOURCES pmc_test.cc
   DEPS delta_kern)
+
+add_delta_test(apr_test
+  SOURCES apr_test.cc
+  DEPS delta_kern)
