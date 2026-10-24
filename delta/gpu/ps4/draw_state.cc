@@ -700,8 +700,13 @@ void ResolveRawBuffers(const base::Vector<gcn::ShaderBuffer>& buffers,
     gcn::VBuffer vb = resolved[i];
     if (!vb.base && sb.srsrc_sgpr + 3 < 16)
       vb = gcn::DecodeVBuffer(&user_data[sb.srsrc_sgpr]);
-    const u64 bytes =
-        vb.stride ? (u64)vb.stride * vb.num_records : vb.num_records;
+    u64 bytes = vb.stride ? (u64)vb.stride * vb.num_records : vb.num_records;
+    // Tables in shader code come with an "unbounded" record count (vertex
+    // positions of a fullscreen pass, a few records); bind a window of them.
+    constexpr u64 kUnboundedTable = 64 * 1024;
+    if (bytes > 0xFFFFFFFFull && IsGuestAddress(vb.base))
+      bytes = host_memory::MappedMemoryPrefix(
+          reinterpret_cast<const void*>(vb.base), kUnboundedTable);
     const bool ok = IsGuestRange(vb.base, bytes) && bytes <= 0xFFFFFFFFull;
     TraceRawBuffer(stage, vs_addr, sb, vb, bytes, ok, d);
     if (!ok)
