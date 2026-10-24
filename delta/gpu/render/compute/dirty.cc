@@ -139,9 +139,10 @@ base::Vector<u64> DirtyRangesOverlapping(u64 base, u64 bytes, u64 exclude) {
     return candidates;
   const u64 first_page = base >> kCsDirtyPageShift;
   const u64 last_page = (end - 1) >> kCsDirtyPageShift;
-  if (last_page - first_page + 1 > g_cs.dirty_pages.size()) {
-    for (const auto& [page, bases] : g_cs.dirty_pages)
-      candidates.insert(candidates.end(), bases.begin(), bases.end());
+  if (last_page - first_page + 1 > g_cs.dirty_bases.size()) {
+    // A range listed on every page it spans would repeat once per page.
+    for (const auto& [dirty, dirty_end] : g_cs.dirty_bases)
+      candidates.push_back(dirty);
   } else {
     for (u64 page = first_page; page <= last_page; page++) {
       auto found = g_cs.dirty_pages.find(page);
