@@ -197,6 +197,12 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
                               bool packed = false,
                               bool pack11 = false,
                               bool repack111110 = false);
+// A staged CS image's table: 11_11_10 (dfmt 7) orders its channels R10 G11 B11.
+inline const TileTable* CsTileTable(const ComputeInfo::Res& res,
+                                    const gcn::TextureLayout32& tiled,
+                                    const gcn::TextureLayout32& linear) {
+  return GetTileTable(tiled, linear, false, false, res.dfmt == 7);
+}
 void RecordImageTiling(rhi::CommandList* c,
                        const TileTable& t,
                        rhi::Buffer* tiled,

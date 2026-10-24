@@ -1116,7 +1116,8 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
       !gpu::IsReadableRange(base, tiled.size) ||
       !render::FlushCsWritesForGpu(render::DefaultRenderer(), base, tiled.size,
                                    "rt-write-through") ||
-      !WriteTextureToGuest(rt.texture, rt.layout, base, tiled, linear))
+      !WriteTextureToGuest(rt.texture, rt.layout, base, tiled, linear,
+                           ((rt.cb_info >> 2) & 0x1F) == 7))
     return false;
   InvalidateTexRange(base, tiled.size);
   CsForgetGuestRange(base, tiled.size);

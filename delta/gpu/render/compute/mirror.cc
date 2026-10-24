@@ -919,7 +919,8 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
       return false;
     table = GetTileTable(
         tiled, linear,
-        tiled.elem_bytes < 4 && linear.elem_bytes == tiled.elem_bytes);
+        tiled.elem_bytes < 4 && linear.elem_bytes == tiled.elem_bytes, false,
+        e.res.dfmt == 7);
     if (!table)
       return false;
   }
@@ -964,8 +965,10 @@ bool WriteTextureToGuest(rhi::Texture* texture,
                          rhi::TextureState& state,
                          u64 base,
                          const gcn::TextureLayout32& tiled,
-                         const gcn::TextureLayout32& linear) {
-  const TileTable* table = GetTileTable(tiled, linear, tiled.elem_bytes < 4);
+                         const gcn::TextureLayout32& linear,
+                         bool repack111110) {
+  const TileTable* table = GetTileTable(tiled, linear, tiled.elem_bytes < 4,
+                                        false, repack111110);
   if (!table || !g_frame.recording)
     return false;
   CsBatchBeginImpl();

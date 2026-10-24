@@ -86,8 +86,8 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
       pack11 || (!packed && tiled.elem_bytes == 4 && linear.elem_bytes == 16);
   if (pack11 && (packed || tiled.elem_bytes != 4 || linear.elem_bytes != 16))
     return nullptr;
-  if (repack111110 && (packed || pack11 || tiled.elem_bytes != 4 ||
-                       linear.elem_bytes != 4))
+  if (repack111110 && !pack11 &&
+      (packed || tiled.elem_bytes != 4 || linear.elem_bytes != 4))
     return nullptr;
   if (packed &&
       (tiled.elem_bytes >= 4 || tiled.elem_bytes != linear.elem_bytes))
@@ -125,7 +125,7 @@ const TileTable* GetTileTable(const gcn::TextureLayout32& tiled,
          packed ? lm.pitch * lm.stored_height * linear.elem_bytes
                 : lm.pitch * lm.stored_height * (linear.elem_bytes / 4),
          1u, tiled.elem_bytes, packed ? 1u : 0u, 0u,
-         pack11 ? 1u : repack111110 ? 2u : 0u});
+         pack11 ? (repack111110 ? 3u : 1u) : repack111110 ? 2u : 0u});
     table.insert(table.end(), terms.begin(), terms.end());
   }
   if (table.empty())
@@ -392,7 +392,8 @@ bool TruthEligible(const ComputeInfo::Res& r) {
          ((r.elem_bytes >= 4 && r.elem_bytes == r.stage_elem_bytes) ||
           ((r.elem_bytes == 1 || r.elem_bytes == 2) &&
            r.stage_elem_bytes == 4) ||
-          (r.dfmt == 6 && r.elem_bytes == 4 && r.stage_elem_bytes == 16)) &&
+          ((r.dfmt == 6 || r.dfmt == 7) && r.elem_bytes == 4 &&
+           r.stage_elem_bytes == 16)) &&
          r.dfmt != 35 && r.dfmt != 40 && !gcn::TilingIsLinear(r.tiling_idx) &&
          r.guest_size <= Device().caps().max_storage_buffer_range &&
          r.size <= Device().caps().max_storage_buffer_range &&
@@ -512,7 +513,8 @@ bool StageImageOnGpu(const ComputeInfo::Res& res, CsRange& e) {
     return StageBcImageOnGpu(res, e, tiled, linear);
   const TileTable* table = GetTileTable(
       tiled, linear,
-      tiled.elem_bytes < 4 && linear.elem_bytes == tiled.elem_bytes);
+      tiled.elem_bytes < 4 && linear.elem_bytes == tiled.elem_bytes, false,
+      res.dfmt == 7);
   rhi::Buffer* raw =
       table ? AcquireScratch((tiled.size + 3) & ~u64(3)) : nullptr;
   if (!raw || !RecordGuestRead(g_cs.list, res.base, tiled.size, raw))

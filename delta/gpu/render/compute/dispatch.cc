@@ -154,7 +154,7 @@ u64 GuestMirror(CsRange& e, u64& bytes) {
   gcn::TextureLayout32 tiled, linear;
   if (!BuildCsImageLayouts(e.res, tiled, linear))
     return 0;
-  const TileTable* table = GetTileTable(tiled, linear);
+  const TileTable* table = CsTileTable(e.res, tiled, linear);
   if (!table || !tiled.size || tiled.size > e.guest_bytes)
     return 0;
   if (!e.mirror || e.mirror_cap < tiled.size) {
@@ -683,7 +683,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
                              u64 pbase) -> bool {
     gcn::TextureLayout32 tiled, linear;
     const TileTable* table = BuildCsImageLayouts(ci.res[i], tiled, linear)
-                                 ? GetTileTable(tiled, linear)
+                                 ? CsTileTable(ci.res[i], tiled, linear)
                                  : nullptr;
     if (!table)
       return false;

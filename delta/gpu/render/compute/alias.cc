@@ -31,7 +31,8 @@ bool SameCsResourceShape(const ComputeInfo::Res& a, const ComputeInfo::Res& b) {
                            (a.nfmt == 0 || a.nfmt == 9) &&
                            (b.nfmt == 0 || b.nfmt == 9);
   auto raw = [](const ComputeInfo::Res& r) {
-    return r.elem_bytes == r.stage_elem_bytes && r.dfmt != 6 && r.dfmt != 35 &&
+    return r.elem_bytes == r.stage_elem_bytes && r.dfmt != 6 && r.dfmt != 7 &&
+           r.dfmt != 35 &&
            r.dfmt != 40;
   };
   const bool raw_views = raw(a) && raw(b);
@@ -104,7 +105,8 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
                      const char* dir,
                      AliasedCopyPlan& plan) {
   const u32 want_elem = img.is_stencil ? res.elem_bytes : res.stage_elem_bytes;
-  const bool unpack = res.dfmt == 6 && !img.is_depth && !img.is_stencil &&
+  const bool unpack = (res.dfmt == 6 || res.dfmt == 7) && !img.is_depth &&
+                      !img.is_stencil &&
                       img.elem_bytes == 4 && want_elem == 16;
   const bool widen =
       !img.is_depth && !img.is_stencil && img.elem_bytes == res.elem_bytes &&
@@ -242,7 +244,7 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
        !(linear_buf = AcquireScratch(packed.size)) || res.size > e.cap))
     return false;
   if (e.truth && !packed_truth) {
-    if (!(table = GetTileTable(tiled, linear)) ||
+    if (!(table = CsTileTable(res, tiled, linear)) ||
         !(linear_buf = AcquireScratch(res.size)))
       return false;
   } else if (!widen_packed && !packed_truth &&
@@ -343,7 +345,7 @@ bool RecordRtUploadInFrame(const InFrameTarget& t,
         !(src = AcquireScratch((packed.size + 3) & ~u64(3))))
       return false;
   } else if (e.truth) {
-    if (!(table = GetTileTable(tiled, linear)) ||
+    if (!(table = CsTileTable(res, tiled, linear)) ||
         !(src = AcquireScratch(res.size)))
       return false;
   } else if (linear.mips[0].offset +

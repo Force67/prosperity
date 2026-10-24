@@ -249,9 +249,10 @@ bool CsSupplyTexture(u64 base,
       (!supplied_mips && r.mip_levels != layout.mip_levels))
     return declined("layers/mips");
   const bool narrow = e.truth && r.elem_bytes < 4 && r.stage_elem_bytes == 4;
-  const bool unpacked = r.dfmt == 6 && !e.truth && r.stage_elem_bytes == 16 &&
+  const bool float11 = r.dfmt == 6 || r.dfmt == 7;
+  const bool unpacked = float11 && !e.truth && r.stage_elem_bytes == 16 &&
                         r.mip_levels == 1 && r.layers == 1;
-  if ((r.dfmt == 6 && !unpacked) || r.dfmt == 35 || r.dfmt == 40 ||
+  if ((float11 && !unpacked) || r.dfmt == 35 || r.dfmt == 40 ||
       (!narrow && !unpacked && r.elem_bytes != r.stage_elem_bytes))
     return declined("converted staging");
   if (r.elem_bytes != layout.elem_bytes)
@@ -871,7 +872,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
       e.rt_seq == e.write_seq || !g_frame.recording)
     return RtRefreshMiss("state");
   const ComputeInfo::Res& r = e.res;
-  const bool unpacked = r.dfmt == 6 && r.stage_elem_bytes == 16;
+  const bool unpacked = (r.dfmt == 6 || r.dfmt == 7) && r.stage_elem_bytes == 16;
   const bool widened =
       (r.elem_bytes == 1 || r.elem_bytes == 2) && r.stage_elem_bytes == 4;
   if (r.mip_levels != 1 || r.layers != 1 ||
@@ -922,7 +923,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   static CsRange guest_scratch, packed_scratch;
   if (widened) {
     if (!(narrow = GetTileTable(tiled, packed, true)) ||
-        (!e.truth && !(table = GetTileTable(tiled, linear))))
+        (!e.truth && !(table = CsTileTable(r, tiled, linear))))
       return RtRefreshMiss("table");
     if ((!e.truth && !CsRangeEnsureBuffer(guest_scratch, tiled.size)) ||
         !CsRangeEnsureBuffer(packed_scratch, packed.size))
@@ -930,7 +931,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
     guest_scratch.frame_ref = packed_scratch.frame_ref = g_frame.num;
     src = packed_scratch.buf;
   } else if (e.truth) {
-    if (!(table = GetTileTable(tiled, linear)))
+    if (!(table = CsTileTable(r, tiled, linear)))
       return RtRefreshMiss("table");
     g_cs.scratch_owner++;
     fresh = true;

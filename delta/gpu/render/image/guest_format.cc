@@ -119,7 +119,7 @@ rhi::Format GuestTextureFormat(u32 dfmt, u32 nfmt) {
     return rhi::Format::kRGBA32Float;
   if (dfmt == 5 && nfmt == 7)
     return rhi::Format::kRG16Float;
-  if (dfmt == 6 && nfmt == 7)
+  if ((dfmt == 6 || dfmt == 7) && nfmt == 7)
     return rhi::Format::kB10G11R11Float;
   if (dfmt == 12 && nfmt == 7)
     return rhi::Format::kRGBA16Float;
@@ -230,6 +230,7 @@ rhi::Format ColorTargetFormat(u32 info) {
       case 5:
         return rhi::Format::kRG16Float;
       case 6:
+      case 7:
         return rhi::Format::kB10G11R11Float;
       case 11:
         return rhi::Format::kRG32Float;
@@ -329,6 +330,10 @@ rhi::ClearColor ColorTargetClearValue(u32 info, u32 word0, u32 word1) {
     case 6:
       width[0] = width[1] = 11;
       width[2] = 10;
+      break;
+    case 7:
+      width[0] = 10;
+      width[1] = width[2] = 11;
       break;
     case 9:
       width[0] = width[1] = width[2] = 10;

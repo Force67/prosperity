@@ -291,11 +291,6 @@ bool Repacked111110(u32 dfmt, u32 nfmt) {
   return dfmt == 7 && nfmt == 7;
 }
 
-rhi::Format SampledFormat(u32 dfmt, u32 nfmt) {
-  return Repacked111110(dfmt, nfmt) ? rhi::Format::kB10G11R11Float
-                                    : GuestTextureFormat(dfmt, nfmt);
-}
-
 void UnregisterTexturePages(const TexImageKey& key, u64 bytes) {
   const u64 end = key.base + bytes;
   for (u64 page = key.base >> kTexturePageShift;
@@ -345,7 +340,7 @@ TexKey TextureKey(u64 base,
   TexKey key;
   key.image = {base,     w,          h,
                tiling,   pitch,      layers,
-               depth,    mip_levels, SampledFormat(dfmt, nfmt),
+               depth,    mip_levels, GuestTextureFormat(dfmt, nfmt),
                pow2_pad, is_3d};
   key.base_array = base_array;
   key.view_layers = view_layers;
@@ -862,7 +857,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   const u32 max_size = base::Min(Device().caps().max_texture_size, 16384u);
   if (!w || !h || w > max_size || h > max_size)
     return nullptr;
-  const rhi::Format format = SampledFormat(dfmt, nfmt);
+  const rhi::Format format = GuestTextureFormat(dfmt, nfmt);
   const bool repack = Repacked111110(dfmt, nfmt);
   if (format == rhi::Format::kUndefined)
     return nullptr;
@@ -1268,7 +1263,7 @@ rhi::BindGroup* GetTexture(u64 base,
 }
 
 bool GuestTextureUploadSupported(u32 dfmt, u32 nfmt) {
-  return SampledFormat(dfmt, nfmt) != rhi::Format::kUndefined;
+  return GuestTextureFormat(dfmt, nfmt) != rhi::Format::kUndefined;
 }
 
 static rhi::TextureView* ResolveTexViewUncached(const DrawInfo::DrawTex& t);

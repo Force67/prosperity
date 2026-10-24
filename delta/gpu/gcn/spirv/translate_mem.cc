@@ -2204,8 +2204,10 @@ static void EmitCsMimgStaged(Translator& t,
                      t.m.ExtInst(t.t_u, GLSLstd450PackHalf2x16, {pair}));
   };
   const Id is_r11g11b10f =
-      t.rdna_sources ? is_gfmt({36})
-                     : t.LAnd(t.Eq(dfmt, t.U32(6)), t.Eq(nfmt, t.U32(7)));
+      t.rdna_sources
+          ? is_gfmt({36})
+          : t.LAnd(logical_or(t.Eq(dfmt, t.U32(6)), t.Eq(dfmt, t.U32(7))),
+                   t.Eq(nfmt, t.U32(7)));
   const Id is_int =
       t.rdna_sources
           ? is_gfmt({5, 18, 20, 21, 27, 28, 60, 61, 62, 63, 69, 70, 75, 76})

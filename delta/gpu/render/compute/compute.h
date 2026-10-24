@@ -44,7 +44,8 @@ bool WriteTextureToGuest(rhi::Texture* texture,
                          rhi::TextureState& state,
                          u64 base,
                          const gcn::TextureLayout32& tiled,
-                         const gcn::TextureLayout32& linear);
+                         const gcn::TextureLayout32& linear,
+                         bool repack111110 = false);
 
 bool CsClearPredicate(u64 address,
                       u64 expand,

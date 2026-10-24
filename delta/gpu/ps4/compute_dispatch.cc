@@ -107,7 +107,7 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   const bool r16f = t.dfmt == 2 && t.nfmt == 7;
   const bool rg8 = t.dfmt == 3 && (t.nfmt == 0 || t.nfmt == 4);
   const bool rgba16f = t.dfmt == 12 && t.nfmt == 7;
-  const bool r11g11b10f = t.dfmt == 6 && t.nfmt == 7;
+  const bool r11g11b10f = (t.dfmt == 6 || t.dfmt == 7) && t.nfmt == 7;
   const bool block64 =
       (t.dfmt == 11 || t.dfmt == 12) && (t.nfmt == 4 || t.nfmt == 5);
   const bool block128 = t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5);
