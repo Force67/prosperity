@@ -391,6 +391,7 @@ void ResolveDepthState(const Regs& regs, render::DrawInfo& d) {
     d.depth_valid = false;
   } else {
     d.depth_base = z_base;
+    d.depth_tile_mode = (z_info >> 20) & 7;
     d.depth_test_enable = (depth_control >> 1) & 1u;
     d.depth_write_enable = (depth_control >> 2) & 1u;
     d.depth_func = (depth_control >> 4) & 0x7;

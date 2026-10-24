@@ -593,6 +593,11 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         return true;
     }
   }
+  for (u32 i = 0; i < ci.num_res; i++)
+    if (ci.res[i].read && !ci.res[i].image_staging && !ci.res[i].zero_fill)
+      WriteDepthsToGuest(ci.res[i].base, ci.res[i].guest_size
+                                             ? ci.res[i].guest_size
+                                             : ci.res[i].size);
   if (CsTracksGuestWrites()) {
     for (u32 i = 0; i < ci.num_res; i++) {
       const auto found = g_cs.ranges.find(ci.res[i].base);

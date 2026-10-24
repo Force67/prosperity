@@ -1117,11 +1117,38 @@ bool WriteRtToGuest(u64 base, u32 tile_mode) {
       !render::FlushCsWritesForGpu(render::DefaultRenderer(), base, tiled.size,
                                    "rt-write-through") ||
       !WriteTextureToGuest(rt.texture, rt.layout, base, tiled, linear,
-                           ((rt.cb_info >> 2) & 0x1F) == 7))
+                           rhi::kAspectColor, ((rt.cb_info >> 2) & 0x1F) == 7))
     return false;
   InvalidateTexRange(base, tiled.size);
   CsForgetGuestRange(base, tiled.size);
   return true;
+}
+
+void WriteDepthsToGuest(u64 base, u64 bytes) {
+  for (auto& [depth_base, dt] : g_depths) {
+    if (!dt.texture || dt.layers > 1 || !dt.guest_w || !dt.guest_h ||
+        dt.guest_serial == dt.render_serial ||
+        base >= depth_base + u64(dt.guest_w) * dt.guest_h * 4 ||
+        depth_base >= base + bytes)
+      continue;
+    const u32 w = base::Min(dt.w, dt.guest_w), h = base::Min(dt.h, dt.guest_h);
+    gcn::TextureLayout32 tiled, linear;
+    if (!gcn::BuildTextureLayout32(tiled, w, h, dt.guest_w, 1, 1, dt.tile_mode,
+                                   false, 4) ||
+        !gcn::BuildTextureLayout32(linear, w, h, w, 1, 1, 8, false, 4) ||
+        !gpu::IsReadableRange(depth_base, tiled.size))
+      continue;
+    if (g_region.cur_depth == depth_base)
+      EndRegion();
+    if (!render::FlushCsWritesForGpu(render::DefaultRenderer(), depth_base,
+                                     tiled.size, "depth-to-guest") ||
+        !WriteTextureToGuest(dt.texture, dt.layout, depth_base, tiled, linear,
+                             rhi::kAspectDepth))
+      continue;
+    InvalidateTexRange(depth_base, tiled.size);
+    CsForgetGuestRange(depth_base, tiled.size);
+    dt.guest_serial = dt.render_serial;
+  }
 }
 
 void SetGuestViewport(const DrawInfo& d) {
@@ -1278,6 +1305,7 @@ bool BeginRegion(const u64* mrt_base,
                 "this region is dropped",
                 (unsigned long)depth_base);
   }
+  const bool cs_depth = dt && render::CsRefreshDepthFromCs(depth_base);
   if (dt) {
     if (depth_htile_base) {
       dt->htile_base = depth_htile_base;
@@ -1294,8 +1322,9 @@ bool BeginRegion(const u64* mrt_base,
       dt->clear_pending = false;
     }
     const bool layer_clear = (dt->clear_layers >> depth_slice) & 1;
-    const bool clear_depth = dt->clear_pending || layer_clear ||
-                             (!dt->used_this_frame && !dt->htile_base);
+    const bool clear_depth =
+        dt->clear_pending || layer_clear ||
+        (!dt->used_this_frame && !dt->htile_base && !cs_depth);
     if ((clear_depth || dt->clear_pred) && dt->used_this_frame)
       PreserveCsDepthBeforeClear(depth_base);
     const bool read_only = depth_read_only && !clear_depth;

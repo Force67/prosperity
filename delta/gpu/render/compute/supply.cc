@@ -997,6 +997,71 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   return true;
 }
 
+// A depth target a compute pass wrote (a downsampled depth the next passes
+// test against and sample) takes the pixels the dispatch left.
+bool CsRefreshDepthFromCs(u64 base) {
+  const auto depth_it = g_depths.find(base);
+  const auto it = g_cs.ranges.find(base);
+  if (!g_frame.recording || depth_it == g_depths.end() ||
+      it == g_cs.ranges.end())
+    return false;
+  DepthTarget& dt = depth_it->second;
+  CsRange& e = it->second;
+  const ComputeInfo::Res& r = e.res;
+  if (!dt.texture || dt.layers != 1 || !(e.gpu_dirty || e.staged_clean) ||
+      !e.buf ||
+      !e.image_staging || e.rt_seq == e.write_seq || r.layers != 1 ||
+      r.dfmt != 4 || r.elem_bytes != 4 || r.stage_elem_bytes != 4)
+    return false;
+  gcn::TextureLayout32 tiled, linear;
+  if (!BuildCsImageLayouts(r, tiled, linear))
+    return false;
+  rhi::Buffer* src = e.buf;
+  bool fresh = false;
+  const TileTable* table = nullptr;
+  if (e.truth) {
+    if (!(table = CsTileTable(r, tiled, linear)))
+      return false;
+    g_cs.scratch_owner++;
+    fresh = true;
+    if (!(src = AcquireView(linear.size, base, 0, table, e.write_seq, &fresh)))
+      return false;
+  }
+  EndRegion();
+  rhi::CommandList* const list = g_frame.list;
+  list->Barrier(rhi::kAccessComputeWrite | rhi::kAccessCopyWrite,
+                rhi::kAccessCopyRead);
+  if (fresh)
+    RecordImageTiling(list, *table, e.buf, 0, e.guest_bytes, src, linear.size,
+                      true, 1, 1);
+  // Every size this address was bound or sampled at holds the same pixels.
+  const auto load = [&](DepthTarget& target) {
+    if (!target.texture || target.layers != 1)
+      return;
+    TransitionImage(list, target.texture, target.layout,
+                    rhi::TextureState::kCopyDst, rhi::kAspectDepth, 1);
+    rhi::BufferTextureCopy copy;
+    copy.buffer_offset = linear.mips[0].offset;
+    copy.row_length = linear.mips[0].pitch;
+    copy.region.aspect = rhi::kAspectDepth;
+    copy.region.width = base::Min(target.w, r.width);
+    copy.region.height = base::Min(target.h, r.height);
+    list->CopyBufferToTexture(target.texture, src, &copy, 1);
+    target.dirty_for_read = true;
+  };
+  load(dt);
+  if (const auto parked = g_targets.depth_variants.find(base);
+      parked != g_targets.depth_variants.end())
+    for (DepthTarget& variant : parked->second)
+      load(variant);
+  e.rt_seq = e.write_seq;
+  e.frame_ref = g_frame.num;
+  e.chunk_ref = g_frame.chunk_seq;
+  if (e.pending_batch)
+    g_cs.chunk_needs_batch = true;
+  return true;
+}
+
 bool CsRefreshRtFromTruth(u64 base) {
   auto it = g_cs.ranges.find(base);
   if (it == g_cs.ranges.end())

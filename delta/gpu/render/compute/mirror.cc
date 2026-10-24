@@ -974,6 +974,7 @@ bool WriteTextureToGuest(rhi::Texture* texture,
                          u64 base,
                          const gcn::TextureLayout32& tiled,
                          const gcn::TextureLayout32& linear,
+                         u8 aspect,
                          bool repack111110) {
   const TileTable* table = GetTileTable(tiled, linear, tiled.elem_bytes < 4,
                                         false, repack111110);
@@ -1004,10 +1005,11 @@ bool WriteTextureToGuest(rhi::Texture* texture,
   copy.image_height = level.stored_height;
   copy.region.width = level.width;
   copy.region.height = level.height;
+  copy.region.aspect = aspect;
   const rhi::TextureState old_state = state;
-  TransitionImage(c, texture, state, rhi::TextureState::kCopySrc);
+  TransitionImage(c, texture, state, rhi::TextureState::kCopySrc, aspect);
   c->CopyTextureToBuffer(pixels, texture, &copy, 1);
-  TransitionImage(c, texture, state, old_state);
+  TransitionImage(c, texture, state, old_state, aspect);
   RecordImageTiling(c, *table, raw, 0, tiled_bytes, pixels, linear_bytes,
                     false);
   RecordGuestWrite(c, mirrored, base, tiled.size, raw, {});

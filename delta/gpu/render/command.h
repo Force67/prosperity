@@ -128,6 +128,7 @@ struct DrawInfo {
 
   u64 depth_base = 0;
   u64 depth_htile_base = 0;
+  u32 depth_tile_mode = 0;
   u32 depth_slice = 0;
   bool depth_valid = false;
   bool depth_test_enable = false;

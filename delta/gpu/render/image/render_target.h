@@ -87,6 +87,9 @@ struct DepthTarget {
   u64 clear_pred_offset = 0;
   bool htile_code_known = false;
   u32 htile_clear_code = 0;
+  u32 tile_mode = 0;
+  // render_serial when guest memory last received this target's depth.
+  u64 guest_serial = 0;
 };
 
 extern base::HashMap<u64, DepthTarget>& g_depths;
@@ -216,5 +219,10 @@ void EndRegion();
 void SetGuestViewport(const render::DrawInfo& d);
 
 bool WriteRtToGuest(u64 base, u32 tile_mode);
+// Titles copy or read a depth surface's memory directly (DRIVECLUB copies it
+// with a compute memcpy and samples the copy), so write each depth target
+// overlapping [base, base + bytes) back to guest memory, tiled, once per
+// change.
+void WriteDepthsToGuest(u64 base, u64 bytes);
 
 }  // namespace gpu::render

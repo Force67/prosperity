@@ -1268,6 +1268,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
             g_rts[base].dirty_for_read;
         continue;
       }
+      if (base && g_depths.count(base))
+        CsRefreshDepthFromCs(base);
       const bool samples_target = base && g_rts.count(base);
       if (samples_target && !CsRefreshRtFromTruth(base))
         render::FlushCsWritesAt(renderer, base, "rt-tex");
@@ -1790,6 +1792,8 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
                      d.mrt_clear_word, d.depth_htile_base, d.depth_slice,
                      d.rt_layers, d.mrt_meta_cmask))
       return true;
+    if (const auto it = g_depths.find(d.depth_base); it != g_depths.end())
+      it->second.tile_mode = d.depth_tile_mode;
   }
   if (reads_synced)
     g_region.reads_synced = g_region.open;

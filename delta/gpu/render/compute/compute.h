@@ -45,6 +45,7 @@ bool WriteTextureToGuest(rhi::Texture* texture,
                          u64 base,
                          const gcn::TextureLayout32& tiled,
                          const gcn::TextureLayout32& linear,
+                         u8 aspect = rhi::kAspectColor,
                          bool repack111110 = false);
 
 bool CsClearPredicate(u64 address,
@@ -75,6 +76,7 @@ rhi::CommandList* FrameOrBatchList();
 void ReleaseRetiredCsBuffers();
 
 bool CsRefreshRtFromTruth(u64 base);
+bool CsRefreshDepthFromCs(u64 base);
 void CsFrameListChanged();
 // Bracket every submit of a list that may run mirror-owning dispatches.
 void CsProtectBeforeSubmit(rhi::CommandList* list);
