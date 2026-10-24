@@ -222,6 +222,7 @@ TEST(RdnaComputeImageConversion, ReadsDescriptorChannelsAndConstants) {
     regs[ud + 9] = (dst >> 32) & 0xffff;
     regs[ud + 10] = 16;
     regs[ud + 11] = 0x20000;
+    regs[ud + 12] = 0x92;  // sampler: clamp to the last texel on every axis
     const u32 dispatch[] = {1, 1, 1, 1};
     gpu::ps5::DispatchCompute(renderer, regs, dispatch, 4);
     ASSERT_TRUE(FlushCsWritesLanded(renderer));

@@ -2090,7 +2090,11 @@ static void EmitCsMimgStaged(Translator& t,
   const auto addr_vg = [&](u32 i) {
     return address ? address[i + addr_shift] : t.Vg(vaddr + i + addr_shift);
   };
-  const auto addr_vgf = [&](u32 i) { return t.m.Bitcast(t.t_f, addr_vg(i)); };
+  // The texture unit addresses with 0 where a coordinate is NaN.
+  const auto addr_vgf = [&](u32 i) {
+    const Id v = t.m.Bitcast(t.t_f, addr_vg(i));
+    return t.SelectF(t.m.Emit(spv::Op::OpIsNan, t.t_bool, {v}), t.F32(0.f), v);
+  };
 
   const auto field = [&](u32 dword, u32 shift, u32 mask) {
     return t.And(t.Shr(t.Sg(srsrc + dword), t.U32(shift)), t.U32(mask));
@@ -2115,11 +2119,14 @@ static void EmitCsMimgStaged(Translator& t,
       t.Eq(image_type, t.U32(11)));
   const Id is_3d_img = t.Eq(image_type, t.U32(10));
   const Id has_slices = logical_or(is_array, is_3d_img);
-  const Id is_rdna_cube =
-      t.rdna_sources ? t.Eq(image_type, t.U32(11)) : t.m.ConstBool(false);
+  const Id is_cube = t.Eq(image_type, t.U32(11));
+  const Id is_rdna_cube = t.rdna_sources ? is_cube : t.m.ConstBool(false);
+  const Id is_gcn_cube = t.rdna_sources ? t.m.ConstBool(false) : is_cube;
   const Id raw_layers = t.Add(field(4, 0, 0x1FFF), t.U32(1));
-  const Id descriptor_layers =
-      t.SelectB(is_rdna_cube, t.UMax(raw_layers, t.U32(6)), raw_layers);
+  // A GCN cube counts cubes, six faces each.
+  const Id descriptor_layers = t.SelectB(
+      is_rdna_cube, t.UMax(raw_layers, t.U32(6)),
+      t.SelectB(is_gcn_cube, t.Mul(raw_layers, t.U32(6)), raw_layers));
 
   if (resinfo) {
     const Id mip = t.UMin(addr_vg(0), t.Sub(safe_last_mip, base_mip));
@@ -2312,42 +2319,61 @@ static void EmitCsMimgStaged(Translator& t,
   const Id height = Max1(t, t.Shr(base_height, physical_mip));
   Id x = addr_vg(0);
   Id y = t.SelectB(is_1d_img, t.U32(0), addr_vg(1));
-  Id sample_fx = t.F32(0.f), sample_fy = t.F32(0.f);
+  Id x1 = 0, y1 = 0, wx = 0, wy = 0;
+  // Texel addressing per the sampler's CLAMP_X/Y/Z: wrap, mirror, or clamp.
+  const u32 ssamp = ((w1 >> 21) & 0x1F) * 4;
+  const auto texel_address = [&](Id i, Id size, u32 axis) {
+    const Id mode = t.And(t.Shr(t.Sg(ssamp), t.U32(axis * 3)), t.U32(7));
+    const Id si = t.m.Bitcast(t.t_i, i);
+    const Id ssize = t.m.Bitcast(t.t_i, size);
+    const Id wrapped = t.m.Emit(spv::Op::OpSMod, t.t_i, {si, ssize});
+    const Id two = t.m.Bitcast(t.t_i, t.Shl(size, t.U32(1)));
+    const Id m = t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpSMod, t.t_i, {si, two}));
+    const Id mirrored =
+        t.SelectB(t.Ult(m, size), m, t.Sub(t.Sub(t.Shl(size, t.U32(1)), m),
+                                           t.U32(1)));
+    const Id clamped = t.m.Bitcast(
+        t.t_u, t.m.ExtInst(t.t_i, GLSLstd450SClamp,
+                           {si, t.m.Bitcast(t.t_i, t.U32(0)),
+                            t.m.Bitcast(t.t_i, t.Sub(size, t.U32(1)))}));
+    const Id plain = t.LAnd(t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {is_cube}),
+                            t.Eq(mode, t.U32(0)));
+    const Id mirror = t.LAnd(t.m.Emit(spv::Op::OpLogicalNot, t.t_bool, {is_cube}),
+                             t.Eq(mode, t.U32(1)));
+    return t.SelectB(plain, t.m.Bitcast(t.t_u, wrapped),
+                     t.SelectB(mirror, mirrored, clamped));
+  };
   if (sample || gather) {
     const Id width_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {width});
     const Id height_f = t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {height});
-    const Id cube_bias = t.SelectF(is_rdna_cube, t.F32(1.f), t.F32(0.f));
-    sample_fx =
-        t.FSub(t.FMul(t.FClamp01(t.FSub(addr_vgf(0), cube_bias)), width_f),
-               t.F32(0.5f));
-    sample_fy =
-        t.FSub(t.FMul(t.FClamp01(t.FSub(addr_vgf(1), cube_bias)), height_f),
-               t.F32(0.5f));
+    const Id cube_bias = t.SelectF(is_cube, t.F32(1.f), t.F32(0.f));
+    Id sample_fx = t.FSub(t.FMul(t.FSub(addr_vgf(0), cube_bias), width_f),
+                          t.F32(0.5f));
+    Id sample_fy = t.FSub(t.FMul(t.FSub(addr_vgf(1), cube_bias), height_f),
+                          t.F32(0.5f));
     if (sample) {
       sample_fx = t.SelectF(is_int, t.FAdd(sample_fx, t.F32(.5f)), sample_fx);
       sample_fy = t.SelectF(is_int, t.FAdd(sample_fy, t.F32(.5f)), sample_fy);
     }
-    const Id fx0 =
-        t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fx, t.F32(0.f)));
-    const Id fy0 =
-        t.Ext1(GLSLstd450Floor, t.Ext2(GLSLstd450FMax, sample_fy, t.F32(0.f)));
-    x = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {fx0}),
-               t.Sub(width, t.U32(1)));
-    y = t.UMin(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {fy0}),
-               t.Sub(height, t.U32(1)));
+    const Id fx0 = t.Ext1(GLSLstd450Floor, sample_fx);
+    const Id fy0 = t.Ext1(GLSLstd450Floor, sample_fy);
+    wx = t.FSub(sample_fx, fx0);
+    wy = t.FSub(sample_fy, fy0);
+    Id ix = t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpConvertFToS, t.t_i, {fx0}));
+    Id iy = t.m.Bitcast(t.t_u, t.m.Emit(spv::Op::OpConvertFToS, t.t_i, {fy0}));
     if (offset) {
       const Id packed = address ? address[0] : t.Vg(vaddr);
-      const auto shifted = [&](Id c, u32 bit, Id limit) {
+      const auto signed_offset = [&](u32 bit) {
         const Id raw = t.And(t.Shr(packed, t.U32(bit)), t.U32(0x3F));
-        const Id signed_off = t.Sub(t.Xor(raw, t.U32(0x20)), t.U32(0x20));
-        const Id sum = t.Add(c, signed_off);
-        return t.SelectB(t.Uge(sum, t.U32(0x80000000u)), t.U32(0),
-                         t.UMin(sum, t.Sub(limit, t.U32(1))));
+        return t.Sub(t.Xor(raw, t.U32(0x20)), t.U32(0x20));
       };
-      x = shifted(x, 0, width);
-      y = shifted(y, 8, height);
+      ix = t.Add(ix, signed_offset(0));
+      iy = t.Add(iy, signed_offset(8));
     }
-    y = t.SelectB(is_1d_img, t.U32(0), y);
+    x = texel_address(ix, width, 0);
+    x1 = texel_address(t.Add(ix, t.U32(1)), width, 0);
+    y = t.SelectB(is_1d_img, t.U32(0), texel_address(iy, height, 1));
+    y1 = t.SelectB(is_1d_img, t.U32(0), texel_address(t.Add(iy, t.U32(1)), height, 1));
   }
   const Id linear_general = t.rdna_sources
                                 ? t.m.ConstBool(false)
@@ -2367,9 +2393,30 @@ static void EmitCsMimgStaged(Translator& t,
       is_3d_img, t.Add(descriptor_layers, t.U32(~0u)), raw_last_array);
   Id addr_slice = t.SelectB(is_1d_img, addr_vg(1), addr_vg(2));
   if (sample || gather) {
-    const Id face = t.m.Emit(spv::Op::OpConvertFToU, t.t_u,
-                             {t.m.Bitcast(t.t_f, addr_slice)});
-    addr_slice = t.SelectB(is_rdna_cube, face, addr_slice);
+    // Sampled slices are floats: a 3D image's is normalized, an array's
+    // rounds to the nearest layer, and a GCN cube's is face + 8 * cube.
+    const Id raw_f = t.m.Bitcast(t.t_f, addr_slice);
+    const Id f = t.SelectF(t.m.Emit(spv::Op::OpIsNan, t.t_bool, {raw_f}),
+                           t.F32(0.f), raw_f);
+    const auto to_u = [&](Id v) {
+      return t.m.Emit(spv::Op::OpConvertFToU, t.t_u,
+                      {t.Ext2(GLSLstd450FMax, v, t.F32(0.f))});
+    };
+    const Id rounded = to_u(t.Ext1(GLSLstd450Floor, t.FAdd(f, t.F32(.5f))));
+    const Id depth_f =
+        t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {descriptor_layers});
+    const Id depth_slice = texel_address(
+        t.m.Bitcast(t.t_u,
+                    t.m.Emit(spv::Op::OpConvertFToS, t.t_i,
+                             {t.Ext1(GLSLstd450Floor, t.FMul(f, depth_f))})),
+        descriptor_layers, 2);
+    const Id gcn_face = t.Add(t.Mul(t.Shr(rounded, t.U32(3)), t.U32(6)),
+                              t.And(rounded, t.U32(7)));
+    addr_slice = t.SelectB(
+        is_3d_img, depth_slice,
+        t.SelectB(is_rdna_cube,
+                  t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {f}),
+                  t.SelectB(is_gcn_cube, gcn_face, rounded)));
   }
   const Id view_layer =
       da ? addr_slice : t.SelectB(is_3d_img, addr_slice, t.U32(0));
@@ -2577,12 +2624,6 @@ static void EmitCsMimgStaged(Translator& t,
       for (u32 i = 0; i < 4; i++)
         out[i] = t.m.Bitcast(t.t_f, swizzle(values, i));
     };
-    const Id x1 = t.UMin(t.Add(x, t.U32(1)), t.Sub(width, t.U32(1)));
-    const Id y1 = t.UMin(t.Add(y, t.U32(1)), t.Sub(height, t.U32(1)));
-    const Id wx = t.FClamp01(
-        t.FSub(sample_fx, t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {x})));
-    const Id wy = t.FClamp01(
-        t.FSub(sample_fy, t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {y})));
     Id c00[4], c10[4], c01[4], c11[4];
     decode(texel_at(x, y), c00);
     decode(texel_at(x1, y), c10);
