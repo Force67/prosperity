@@ -588,14 +588,6 @@ uintptr_t Lv2Trampoline(const void* handler, u32 sid) {
 #endif
 }
 
-// APR (0x2bc..0x2c0, PS5 async-package-read) must FAIL, not empty-succeed: the
-// Prospero stub's success-with-garbage made Demon's Souls trust bogus resolve
-// results (every asset FileNotFound) instead of its plain-open fallback. ENOSYS
-// sends the wrapper negative and the engine falls back to VFS open/read.
-static int PS4ABI sys_apr_unavailable() {
-  return -SysError::eNOSYS;
-}
-
 uintptr_t Lv2Lookup(u32 sid) {
   // Both platforms share the context calls and their ucontext layout.
   if (IsContextSyscall(sid))
@@ -604,12 +596,8 @@ uintptr_t Lv2Lookup(u32 sid) {
   // PS5 titles route to the Prospero table (FreeBSD 11 ABI); never the Orbis
   // one.
   auto* pr = Process::GetActive();
-  if (pr && pr->GetPlatform() == Process::Platform::kPs5) {
-    if (sid >= 0x2bc && sid <= 0x2c0)  // apr_submit..apr_ctrl
-      return Lv2Trampoline(reinterpret_cast<const void*>(&sys_apr_unavailable),
-                           sid);
+  if (pr && pr->GetPlatform() == Process::Platform::kPs5)
     return Lv2GetPs5(sid);
-  }
   return Lv2Get(sid);
 }
 }  // namespace kern

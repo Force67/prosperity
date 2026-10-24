@@ -52,6 +52,8 @@ void NoteGuestTaken(u8* ptr, size_t size);
 u8* PS4ABI
 sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset);
 int PS4ABI sys_mname(u8*, size_t len, const char* name, void*);
+// mname's body; `va_end` is the end of the caller's user address space.
+int NameMemoryRange(u8* ptr, size_t len, const char* name, uintptr_t va_end);
 int PS4ABI sys_mprotect(u8*, size_t len, int prot);
 int PS4ABI sys_mdbg_service(u32 op, void*, void*, void*);
 

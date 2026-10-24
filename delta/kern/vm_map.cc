@@ -99,6 +99,7 @@ void VmMap::Add(u8* ptr,
                 bool reserved,
                 bool flexible) {
   base::LockGuard lock(vmlock_);
+  timestamp_++;
   host_memory::TrackMemoryMapping(ptr, size);
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
@@ -108,6 +109,7 @@ void VmMap::Add(u8* ptr,
 
 void VmMap::Discard(u8* ptr, size_t size) {
   base::LockGuard lock(vmlock_);
+  timestamp_++;
   host_memory::BeforeHostWrite(ptr, size);
   host_memory::DiscardMem(ptr, size);
   MappingChanged(ptr, size);
@@ -134,6 +136,7 @@ void VmMap::AddDirect(u8* ptr,
                       u32 sce_prot,
                       u64 phys_offset) {
   base::LockGuard lock(vmlock_);
+  timestamp_++;
   host_memory::TrackMemoryMapping(ptr, size);
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
@@ -144,6 +147,7 @@ void VmMap::AddDirect(u8* ptr,
 
 void VmMap::Remove(u8* ptr, size_t size) {
   base::LockGuard lock(vmlock_);
+  timestamp_++;
   for (const auto& page : rt_pages_) {
     if (!page.has_phys)
       continue;
@@ -159,6 +163,7 @@ void VmMap::Remove(u8* ptr, size_t size) {
 
 void VmMap::RemoveDirect(u64 phys_offset, size_t size) {
   base::LockGuard lock(vmlock_);
+  timestamp_++;
   base::Vector<PageInfo> removed;
   for (const auto& page : rt_pages_) {
     if (!page.has_phys)
@@ -207,6 +212,7 @@ bool VmMap::Overlaps(u8* ptr, size_t size) const {
 
 void VmMap::ProtectRange(u8* ptr, size_t size, Mprot prot, u32 sce_prot) {
   base::LockGuard lock(vmlock_);
+  timestamp_++;
   u8* end = ptr + size;
   for (auto& page : rt_pages_)
     if (ptr < page.ptr + page.size && page.ptr < end) {
@@ -217,6 +223,7 @@ void VmMap::ProtectRange(u8* ptr, size_t size, Mprot prot, u32 sce_prot) {
 
 void VmMap::SetRangeName(u8* ptr, size_t size, const char* name) {
   base::LockGuard lock(vmlock_);
+  timestamp_++;
   u8* end = ptr + size;
   // The kernel (vm_map_set_name) allocates the name storage per entry; mirror
   // that with a strdup'd copy so the field outlives the caller's buffer. The

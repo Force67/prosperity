@@ -47,6 +47,13 @@ struct ModuleSeg {
   u32 size;
 };
 
+// A loaded segment with its SCE protection (1 read, 2 write, 4 execute).
+struct ModuleLoadSeg {
+  u8* addr;
+  u32 size;
+  u32 prot;
+};
+
 struct ModuleInfo {
   base::String name;
   // The name the module was loaded under; libSceSsl2.sprx registers as
@@ -76,6 +83,11 @@ struct ModuleInfo {
 
   ModuleSeg text_seg;
   ModuleSeg data_seg;
+  // The first four loaded segments in program-header order, as a PS5 kernel
+  // reports them.
+  ModuleLoadSeg load_segs[4]{};
+  u32 load_seg_count = 0;
+
   // The relocatable image's reserved slot, and the handles dynlib_load_prx
   // gave out for it; one it loaded itself (not preloaded, not a dependency)
   // goes away with its last unload.

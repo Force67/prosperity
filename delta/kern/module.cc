@@ -690,6 +690,12 @@ bool Module::MapImage() {
       auto* seg = s->flags & PF_X ? &info_.text_seg : &info_.data_seg;
       seg->addr = static_cast<u8*>(target);
       seg->size = s->memsz;
+      if (info_.load_seg_count < 4) {
+        const u32 prot = (s->flags & (PF_R | PF_X) ? 1 : 0) |
+                         (s->flags & PF_W ? 2 : 0) | (s->flags & PF_X ? 4 : 0);
+        info_.load_segs[info_.load_seg_count++] = {
+            static_cast<u8*>(target), static_cast<u32>(s->memsz), prot};
+      }
 
       std::memcpy(target, GetOffset<void>(s->offset), s->filesz);
     }

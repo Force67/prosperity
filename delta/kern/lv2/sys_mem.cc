@@ -1099,7 +1099,7 @@ int PS4ABI sys_ftruncate(u32 fd, i64 length) {
   return 0;
 }
 
-int PS4ABI sys_mname(u8* ptr, size_t len, const char* name, void*) {
+int NameMemoryRange(u8* ptr, size_t len, const char* name, uintptr_t va_end) {
   auto* proc = Process::GetActive();
   if (!proc)
     return -SysError::eINVAL;
@@ -1107,7 +1107,7 @@ int PS4ABI sys_mname(u8* ptr, size_t len, const char* name, void*) {
   // Kernel guards: the range lives inside user VA space and the name fits the
   // 32-byte tag buffer.
   const uintptr_t a = reinterpret_cast<uintptr_t>(ptr);
-  if (a >= 0x10000000000ull || len > 0x10000000000ull - a)
+  if (a >= va_end || len > va_end - a)
     return -SysError::eINVAL;
   char tag[32];
   const size_t n = strnlen(name, sizeof(tag));
@@ -1122,6 +1122,10 @@ int PS4ABI sys_mname(u8* ptr, size_t len, const char* name, void*) {
   // running on that stack (attribution).
   NameThreadsForRange(ptr, len, tag);
   return 0;
+}
+
+int PS4ABI sys_mname(u8* ptr, size_t len, const char* name, void*) {
+  return NameMemoryRange(ptr, len, name, 0x10000000000ull);
 }
 
 struct mdbg_property {  // NOLINT(readability-identifier-naming): guest ABI name
@@ -1720,7 +1724,8 @@ int PS4ABI sys_extend_page_table_pool() {
 }
 
 i64 PS4ABI sys_get_vm_map_timestamp() {
-  return 0;
+  auto* proc = Process::GetActive();
+  return proc ? proc->GetVma().Timestamp() : 0;
 }
 
 int PS4ABI sys_get_map_statistics(void* info) {

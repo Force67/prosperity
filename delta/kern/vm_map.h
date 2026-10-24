@@ -9,6 +9,7 @@
  */
 
 #include "base/arch.h"
+#include "base/atomic.h"
 
 #include <optional>
 
@@ -103,6 +104,9 @@ class VmMap {
   // multi-GB scan of the big dmem pools.
   void ForEachGpuAperturePage(void (*fn)(void*, u8*, size_t), void* ctx) const;
 
+  // Bumped by every change to the map, as the kernel's vm_map timestamp.
+  u32 Timestamp() const { return timestamp_.load(base::memory_order_relaxed); }
+
   u8* MapMemory(u8* preference, size_t size, host_memory::PageProtection);
   void UnmapRtMemory(u8*);
 
@@ -113,6 +117,7 @@ class VmMap {
 
   // guards the page lists against concurrent sys_mmap from guest threads.
   mutable base::Mutex vmlock_;
+  base::Atomic<u32> timestamp_{0};
 
   size_t code_mem_total_{0};
   size_t rt_mem_total_{0};
