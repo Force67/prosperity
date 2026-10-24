@@ -147,3 +147,7 @@ add_delta_test(context_test
 add_delta_test(signal_test
   SOURCES signal_test.cc
   DEPS delta_kern xbyak)
+
+add_delta_test(pmc_test
+  SOURCES pmc_test.cc
+  DEPS delta_kern)

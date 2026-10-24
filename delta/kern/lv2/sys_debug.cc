@@ -22,30 +22,6 @@ int PS4ABI sys_debug_init(const int* version) {
   return 0;
 }
 
-// Hardware performance counters: no PMU, so every op is a silent success and
-// readers see idle counters.
-int PS4ABI sys_opmc_enable() {
-  return 0;
-}
-int PS4ABI sys_opmc_disable() {
-  return 0;
-}
-int PS4ABI sys_opmc_set_ctl() {
-  return 0;
-}
-int PS4ABI sys_opmc_set_ctr() {
-  return 0;
-}
-int PS4ABI sys_opmc_get_ctr() {
-  return 0;
-}
-int PS4ABI sys_opmc_set_hw() {
-  return 0;
-}
-int PS4ABI sys_opmc_get_hw() {
-  return 0;
-}
-
 int PS4ABI sys_mdbg_call() {
   return 0;
 }

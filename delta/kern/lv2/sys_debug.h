@@ -6,13 +6,13 @@
 namespace kern {
 
 int PS4ABI sys_debug_init(const int* version);
-int PS4ABI sys_opmc_enable();
-int PS4ABI sys_opmc_disable();
-int PS4ABI sys_opmc_set_ctl();
-int PS4ABI sys_opmc_set_ctr();
-int PS4ABI sys_opmc_get_ctr();
-int PS4ABI sys_opmc_set_hw();
-int PS4ABI sys_opmc_get_hw();
+int PS4ABI sys_opmc_enable(u32 id);
+int PS4ABI sys_opmc_disable(u32 id);
+int PS4ABI sys_opmc_set_ctl(u32 id, u32 index, u64 ctl);
+int PS4ABI sys_opmc_set_ctr(u32 id, u32 index, u64 value);
+int PS4ABI sys_opmc_get_ctr(u32 id, u32 index, u64* value);
+int PS4ABI sys_opmc_set_hw(u32 op, u64 a, u32 b, u64 c);
+int PS4ABI sys_opmc_get_hw(u32 op, u64 a, u32 index, u64* out);
 int PS4ABI sys_mdbg_call();
 int PS4ABI sys_set_gpo();
 int PS4ABI sys_get_gpo();

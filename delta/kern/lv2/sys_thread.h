@@ -83,4 +83,10 @@ int PS4ABI sys_sysarch(int num, void* args);
 // The calling guest thread's tid slot in host TLS.
 const u32* CurrentGuestTidPtr();
 
+// The host (Linux) tid running guest thread `gtid`, or 0 if none has.
+long HostTidForGuest(u32 gtid);
+
+// The name thr_new gave each guest thread, by tid.
+extern char g_guest_name[4096][16];
+
 }  // namespace kern
