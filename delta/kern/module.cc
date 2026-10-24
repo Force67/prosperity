@@ -656,6 +656,7 @@ bool Module::MapImage() {
                               host_memory::PageProtection::kW,
                               host_memory::AllocationType::kReserve));
     s_next_base += kModuleSlot;
+    info_.slot_size = kModuleSlot;
 
     if (!info_.base)
       return false;

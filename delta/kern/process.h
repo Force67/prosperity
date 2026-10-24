@@ -56,6 +56,8 @@ class Process {
   ModulePtr LoadModule(base::StringRef);
   ModulePtr GetModule(base::StringRef);
   ModulePtr GetModule(u32);
+  // Drops a module from the process and frees its image.
+  void RemoveModule(u32 handle);
 
   inline VmMap& GetVma() { return vmem_; }
   inline ProcessInfo& GetEnv() { return env_; }

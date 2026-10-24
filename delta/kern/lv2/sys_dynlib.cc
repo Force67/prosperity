@@ -346,6 +346,7 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
       LOG_ERROR("load_prx: unable to load {}", name.c_str());
       return -SysError::eNOENT;
     }
+    mod->GetInfo().loaded_on_demand = true;
   }
 
   // Always relocate: a DT_NEEDED dep added by LoadModule is never relocated, so
@@ -430,16 +431,34 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
     }
   }
 
+  mod->GetInfo().load_refs++;
   if (p_handle)
     *p_handle = mod->GetInfo().handle;
   return 0;
 }
 
-// We never reclaim a loaded module (its code/data stay mapped for the process
-// lifetime), so unload is a success no-op: the guest's module_stop has already
-// run and it just wants the bookkeeping to succeed.
+// Drops one handle load_prx gave out. A module goes with its last one only
+// when load_prx loaded it and no other module needs it; preloaded system
+// modules stay, held by their dependents, as the kernel's reference counts
+// keep them. The main image is not a dynlib and never unloads.
 int PS4ABI sys_dynlib_unload_prx(u32 handle) {
-  BASE_LOGI("unload_prx", "handle={:#x} (no-op)", handle);
+  auto* proc = Process::GetActive();
+  auto mod = proc->GetModule(handle);
+  if (!mod)
+    return -SysError::eSRCH;
+  if (!mod->IsDynlib())
+    return -SysError::eINVAL;
+  auto& info = mod->GetInfo();
+  if (!info.load_refs || --info.load_refs || !info.loaded_on_demand)
+    return 0;
+  for (auto& other : proc->GetModuleList())
+    for (const auto& need : other->NeededObjects())
+      if (need == info.name || need == info.load_name)
+        return 0;
+  BASE_LOGI("unload_prx", "unloading {} (handle {:#x})", info.name.c_str(),
+            handle);
+  mod = nullptr;
+  proc->RemoveModule(handle);
   return 0;
 }
 

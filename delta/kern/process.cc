@@ -127,6 +127,18 @@ ModulePtr Process::GetModule(u32 handle) {
   return {nullptr};
 }
 
+void Process::RemoveModule(u32 handle) {
+  for (size_t i = 0; i < modules_.size(); i++) {
+    auto& info = modules_[i]->GetInfo();
+    if (info.handle != handle)
+      continue;
+    if (info.base && info.slot_size)
+      host_memory::FreeMem(info.base, info.slot_size);
+    modules_.erase(modules_.begin() + i);
+    return;
+  }
+}
+
 /*does not expect an extension*/
 // Isaac-specific surface setup. The game's global surface-name registry, a
 // fixed-bucket hash map<string,surface> at rebirth+0x687a90, is constructed

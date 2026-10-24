@@ -76,6 +76,12 @@ struct ModuleInfo {
 
   ModuleSeg text_seg;
   ModuleSeg data_seg;
+  // The relocatable image's reserved slot, and the handles dynlib_load_prx
+  // gave out for it; one it loaded itself (not preloaded, not a dependency)
+  // goes away with its last unload.
+  size_t slot_size = 0;
+  u32 load_refs = 0;
+  bool loaded_on_demand = false;
 
   u8* tls_addr;
   size_t tls_size_mem;
