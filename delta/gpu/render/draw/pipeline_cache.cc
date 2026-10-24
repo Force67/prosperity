@@ -341,9 +341,11 @@ RecompPipe* GetRecompPipe(const DrawInfo& d) {
          (VertexFormat(d.vattrs[i].dfmt, d.vattrs[i].nfmt)),
          d.vattrs[i].offset});
   pd.topology = PrimitiveTopology(d.prim_type);
-  pd.cull = kDoCull ? static_cast<rhi::CullMode>(d.cull_mode & 0x3)
-                    : rhi::CullMode::kNone;
-  pd.front_ccw = !d.front_ccw;
+  // A rectangle is screen aligned and has no facing to cull by.
+  pd.cull = kDoCull && !is_rect_list
+                ? static_cast<rhi::CullMode>(d.cull_mode & 0x3)
+                : rhi::CullMode::kNone;
+  pd.front_ccw = d.front_ccw;
   pd.depth_clamp = kDepthClamp;
   if (d.depth_base) {
     const bool per_ps = NoZTestForPs(d.ps_addr);
