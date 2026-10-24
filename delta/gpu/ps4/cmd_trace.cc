@@ -1190,6 +1190,13 @@ void TraceCsCode(u64 cs_addr) {
               code[k + 5], code[k + 6], code[k + 7]);
 }
 
+bool FirstCsZeroFill(u64 cs_addr, u32 binding) {
+  static base::HashSet<u64> seen;
+  static const guest::SessionReset reset_seen(
+      [] { guest::ResetResource(seen); });
+  return seen.size() < 256 && seen.insert(cs_addr * 64 + binding).second;
+}
+
 void TraceCsZeroFill(u64 cs_addr,
                      u32 binding,
                      const gcn::TImage& image,

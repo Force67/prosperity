@@ -86,11 +86,29 @@ struct ResourceRange {
   gcn::TImage image;
   bool image_staging = false;
   bool zero_fill = false;
+  // Only partly mapped: unmapped pages stage as zero.
+  bool sparse = false;
   u32 elem_bytes = 4;
   u32 stage_elem_bytes = 4;
   u64 write_bytes = 0;
   bool ok = true;
 };
+
+// An 11_11_10 image whose RGBA32F staging would not fit, or that the title
+// mapped only in part (a sparse cube array), stages in its own 4 bytes a texel;
+// unmapped pages read as zero.
+bool StagePacked11(const gcn::TImage& t) {
+  if ((t.dfmt != 6 && t.dfmt != 7) || t.nfmt != 7 || !t.valid)
+    return false;
+  gcn::TextureLayout32 layout;
+  if (!gcn::BuildTextureLayout32(layout, t.width, t.height, t.pitch,
+                                 t.is_3d ? t.depth : t.layers, t.mip_levels,
+                                 t.tiling_idx, t.pow2_pad, 4) ||
+      layout.size > kMaxResource || !IsGuestRange(t.base, layout.size))
+    return false;
+  return layout.size * 4 > kMaxResource ||
+         !IsMappedGuestRange(t.base, layout.size);
+}
 
 ResourceRange ResolveImageResource(u64 cs_addr,
                                    const gcn::CsResource& res,
@@ -123,10 +141,13 @@ ResourceRange ResolveImageResource(u64 cs_addr,
                    : (r16f || rg8)      ? 2
                    : r8                 ? 1
                                         : 4;
-  out.stage_elem_bytes = r11g11b10f ? 16 : base::Max(out.elem_bytes, 4u);
+  const bool packed11 = StagePacked11(t);
+  out.stage_elem_bytes =
+      r11g11b10f && !packed11 ? 16 : base::Max(out.elem_bytes, 4u);
+  out.sparse = packed11 && gpu::IsReadableRangeCached(t.base, 1);
 
   if (!supported_type || !supported_format) {
-    if (trace)
+    if (trace || (t.valid && FirstCsZeroFill(cs_addr, res.binding)))
       TraceCsZeroFill(cs_addr, res.binding, t, descriptor);
     out.zero_fill = true;
     out.size = kZeroFillBytes;
@@ -141,6 +162,17 @@ ResourceRange ResolveImageResource(u64 cs_addr,
     if (trace)
       TraceCsUnsupportedImage(cs_addr, res.binding, t, descriptor);
     out.ok = false;
+    return out;
+  }
+  // A read-only view into a partly mapped (sparse) or oversized image reads
+  // zero instead of dropping the whole dispatch.
+  if (!res.written && !out.sparse &&
+      (layout.size > kMaxResource ||
+       !IsMappedGuestRange(t.base, layout.size))) {
+    if (trace || FirstCsZeroFill(cs_addr, res.binding))
+      TraceCsUnsupportedImage(cs_addr, res.binding, t, descriptor);
+    out.zero_fill = true;
+    out.size = kZeroFillBytes;
     return out;
   }
   out.base = t.base;
@@ -463,9 +495,12 @@ base::Vector<u32> StagedFormats(
   base::Vector<u32> formats;
   for (const gcn::CsResource& r : rc.resources)
     if (r.kind == 1 && !(r.binding < 64 && ((native >> r.binding) & 1)) &&
-        r.binding < resolved.size() && resolved[r.binding].valid)
-      formats.push_back(r.binding << 16 |
-                        ((resolved[r.binding].descriptor[1] >> 20) & 0x3FF));
+        r.binding < resolved.size() && resolved[r.binding].valid) {
+      const u32* d = resolved[r.binding].descriptor;
+      formats.push_back(
+          r.binding << 16 | ((d[1] >> 20) & 0x3FF) |
+          (StagePacked11(gcn::DecodeTImage(d)) ? gcn::kStagedPacked11 : 0));
+    }
   return formats;
 }
 
@@ -681,7 +716,7 @@ void DispatchCompute(render::Renderer& renderer,
 
     if (range.size < r.min_bytes || range.size > kMaxResource ||
         range.guest_size > kMaxResource ||
-        (!range.zero_fill &&
+        (!range.zero_fill && !range.sparse &&
          !IsMappedGuestRange(range.base, range.guest_size)) ||
         ci.num_res >= gcn::kMaxCsResources) {
       if (trace)

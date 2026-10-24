@@ -720,7 +720,8 @@ bool RecordTexPixels(rhi::Texture* img,
       if (n++ < 4)
         BASE_LOGW("gpuvk", "texture {:#x} tiling={}: 11_11_10 repacked on the CPU",
                   (unsigned long)base, layout.tiling_idx);
-      return UploadRepacked111110(img, base, layout, texel_w, texel_h, is_3d);
+      return gpu::IsReadableRange(base, layout.size) &&
+             UploadRepacked111110(img, base, layout, texel_w, texel_h, is_3d);
     }
     static int n = 0;
     if (n++ < 16)
@@ -936,6 +937,22 @@ static rhi::TextureView* ResolveTextureView(u64 base,
         level.height = (base::Max(h >> mip, 1u) + 3) / 4;
       }
   }
+  // A partly resident (sparse) array, of which a view samples only some
+  // layers, uploads the layers up to the view's last; pages the title left
+  // unmapped read as zero.
+  bool partial = false;
+  if (new_layout && arrayed && !is_3d && base_array + view_layers < layers &&
+      !gpu::IsReadableRangeCached(base, new_layout->size) &&
+      gpu::IsReadableRangeCached(base, 1)) {
+    partial = true;
+    layers = base_array + view_layers;
+    new_layout->layers = layers;
+    key = TextureKey(base, w, h, dfmt, nfmt, tiling, pitch, layers, base_array,
+                     view_layers, mip_levels, base_mip, view_mips, min_lod,
+                     pow2_pad, sampler, sampler_valid, arrayed, force_lod_zero,
+                     depth_compare, swizzle, depth, is_3d);
+    image_it = g_texture_cache.images.find(key.image);
+  }
   const auto& layout = image_it == g_texture_cache.images.end()
                            ? *new_layout
                            : image_it->second.layout;
@@ -1088,7 +1105,7 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   if (!known || image_it->second.last_checked_frame != g_frame.num) {
     const u64 t_probe = NowNs();
     const bool readable = (known && image_it->second.wt_clean) ||
-                          gpu::IsReadableRange(base, footprint);
+                          partial || gpu::IsReadableRange(base, footprint);
     g_stats.ns_tex_probe += NowNs() - t_probe;
     g_stats.tex_probe_n++;
     if (!readable) {

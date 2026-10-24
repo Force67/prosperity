@@ -147,10 +147,13 @@ bool RecordGuestRead(rhi::CommandList* list,
         return false;
     return true;
   };
-  enum Source { kMirrorSource, kImport, kDirect, kUpload };
+  // kHole: an unmapped block of a partly resident (sparse) resource.
+  enum Source { kMirrorSource, kImport, kDirect, kUpload, kHole };
   const auto source = [&](u64 at) {
     if (owned(at))
       return kMirrorSource;
+    if (!gpu::IsReadableRangeCached(at, block_end(at) - at))
+      return kHole;
     if (GuestImportable(at, block_end(at) - at))
       return kImport;
     return direct(at, block_end(at)) ? kDirect : kUpload;
@@ -162,7 +165,12 @@ bool RecordGuestRead(rhi::CommandList* list,
     while (end < base + bytes && source(end) == from)
       end = block_end(end);
     const u64 n = end - at;
-    if (from == kMirrorSource) {
+    if (from == kHole) {
+      const u64 lo = (dst_off + at - base + 3) & ~u64(3);
+      const u64 hi = (dst_off + end - base) & ~u64(3);
+      if (hi > lo)
+        list->FillBuffer(dst, lo, hi - lo, 0);
+    } else if (from == kMirrorSource) {
       list->CopyBuffer(dst, dst_off + at - base, g_cs.mirror, MirrorOffset(at),
                        n);
     } else if (from == kImport) {

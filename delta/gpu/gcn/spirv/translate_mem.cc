@@ -2155,6 +2155,9 @@ static void EmitCsMimgStaged(Translator& t,
       t.rdna_sources ? base_width : t.Add(field(4, 13, 0x3FFF), t.U32(1));
   const auto pinned = sc.staged_formats.find(binding);
   const bool known = pinned != sc.staged_formats.end();
+  // An 11_11_10 image too large to widen is staged one host R11G11B10 word
+  // per texel.
+  const bool packed11 = known && (pinned->second & kStagedPacked11);
   const Id gfmt = known ? t.U32(pinned->second & 0x1FF) : field(1, 20, 0x1FF);
   const Id dfmt = known ? t.U32(pinned->second & 0x3F) : field(1, 20, 0x3F);
   const Id nfmt = known ? t.U32((pinned->second >> 6) & 0xF) : field(1, 26, 0xF);
@@ -2256,6 +2259,44 @@ static void EmitCsMimgStaged(Translator& t,
           ? is_gfmt({36})
           : t.LAnd(logical_or(t.Eq(dfmt, t.U32(6)), t.Eq(dfmt, t.U32(7))),
                    t.Eq(nfmt, t.U32(7)));
+  const Id f11_wide = packed11 ? t.m.ConstBool(false) : is_r11g11b10f;
+  // Unsigned small floats: 5 exponent bits over `m` mantissa bits.
+  const auto uf_unpack = [&](Id word, u32 shift, u32 m) {
+    const Id v = t.Shr(word, t.U32(shift));
+    const Id mant = t.And(v, t.U32((1u << m) - 1));
+    const Id expo = t.And(t.Shr(v, t.U32(m)), t.U32(31));
+    const Id normal = t.m.Bitcast(
+        t.t_f, t.Or(t.Shl(t.Add(expo, t.U32(112)), t.U32(23)),
+                    t.Shl(mant, t.U32(23 - m))));
+    const Id denormal =
+        t.FMul(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {mant}),
+               t.m.Bitcast(t.t_f, t.U32((127u - 14u - m) << 23)));
+    const Id special = t.SelectF(t.IsZero(mant),
+                                 t.m.Bitcast(t.t_f, t.U32(0x7F800000)),
+                                 t.m.Bitcast(t.t_f, t.U32(0x7FC00000)));
+    return t.SelectF(t.Eq(expo, t.U32(0)), denormal,
+                     t.SelectF(t.Eq(expo, t.U32(31)), special, normal));
+  };
+  const auto uf_pack = [&](Id f, u32 m) {
+    const Id bits = t.m.Bitcast(t.t_u, f);
+    const Id e32 = t.And(t.Shr(bits, t.U32(23)), t.U32(0xFF));
+    const Id normal = t.Or(t.Shl(t.Sub(e32, t.U32(112)), t.U32(m)),
+                           t.Shr(t.And(bits, t.U32(0x7FFFFF)), t.U32(23 - m)));
+    const Id denormal = t.m.Emit(
+        spv::Op::OpConvertFToU, t.t_u,
+        {t.FMul(f, t.m.Bitcast(t.t_f, t.U32((127u + 14u + m) << 23)))});
+    const Id largest = t.U32((30u << m) | ((1u << m) - 1));
+    const Id value = t.SelectB(t.Ult(e32, t.U32(113)), denormal,
+                               t.SelectB(t.Ult(t.U32(142), e32), largest,
+                                         normal));
+    return t.SelectB(t.FLt(t.F32(0.f), f), value, t.U32(0));
+  };
+  const auto unpack11 = [&](Id word, int channel) {
+    return channel == 0   ? uf_unpack(word, 0, 6)
+           : channel == 1 ? uf_unpack(word, 11, 6)
+           : channel == 2 ? uf_unpack(word, 22, 5)
+                          : t.F32(1.f);
+  };
   const Id is_int =
       t.rdna_sources
           ? is_gfmt({5, 18, 20, 21, 27, 28, 60, 61, 62, 63, 69, 70, 75, 76})
@@ -2459,12 +2500,12 @@ static void EmitCsMimgStaged(Translator& t,
   const Id texel_idx =
       t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(y, pitch), x)));
   Id dword_idx = t.SelectB(is_rgba16, t.Mul(texel_idx, t.U32(2)), texel_idx);
-  dword_idx = t.SelectB(is_r11g11b10f, t.Mul(texel_idx, t.U32(4)), dword_idx);
+  dword_idx = t.SelectB(f11_wide, t.Mul(texel_idx, t.U32(4)), dword_idx);
   dword_idx = t.SelectB(is_block2, t.Mul(texel_idx, t.U32(2)), dword_idx);
   dword_idx = t.SelectB(is_rgba32_raw, t.Mul(texel_idx, t.U32(4)), dword_idx);
-  const Id wide2 = logical_or(logical_or(is_rgba16, is_r11g11b10f),
+  const Id wide2 = logical_or(logical_or(is_rgba16, f11_wide),
                               logical_or(is_block2, is_rgba32_raw));
-  const Id wide4 = logical_or(is_r11g11b10f, is_rgba32_raw);
+  const Id wide4 = logical_or(f11_wide, is_rgba32_raw);
 
   // A read-only single-mip linear 8/16-bit image is bound as the guest bytes
   // instead of a copy widened to one dword per texel.
@@ -2553,7 +2594,10 @@ static void EmitCsMimgStaged(Translator& t,
           t.t_u, t.m.CompositeExtract(t.t_f, i < 2 ? halfs : halfs_hi,
                                       i < 2 ? i : i - 2));
       value = t.SelectB(is_rgba16, wide_half, value);
-      value = t.SelectB(is_r11g11b10f, float_component[i], value);
+      value = t.SelectB(
+          is_r11g11b10f,
+          packed11 ? t.m.Bitcast(t.t_u, unpack11(raw, i)) : float_component[i],
+          value);
       value = t.SelectB(is_r32, i == 0 ? raw : t.U32(0), value);
       Id raw_half = t.And(t.Shr(i < 2 ? raw : raw_hi, t.U32((i & 1) * 16u)),
                           t.U32(0xFFFF));
@@ -2576,7 +2620,7 @@ static void EmitCsMimgStaged(Translator& t,
     };
     const auto decode = [&](Id texel, Id out[4]) {
       Id idx = t.SelectB(is_rgba16, t.Mul(texel, t.U32(2)), texel);
-      idx = t.SelectB(is_r11g11b10f, t.Mul(texel, t.U32(4)), idx);
+      idx = t.SelectB(f11_wide, t.Mul(texel, t.U32(4)), idx);
       idx = t.SelectB(is_block2, t.Mul(texel, t.U32(2)), idx);
       idx = t.SelectB(is_rgba32_raw, t.Mul(texel, t.U32(4)), idx);
       idx = packed_word(texel, idx);
@@ -2612,7 +2656,9 @@ static void EmitCsMimgStaged(Translator& t,
         const Id wide = t.m.CompositeExtract(t.t_f, i < 2 ? halfs : halfs_hi,
                                              i < 2 ? i : i - 2);
         v = t.SelectF(is_rgba16, wide, v);
-        v = t.SelectF(is_r11g11b10f, t.m.Bitcast(t.t_f, fcomp[i]), v);
+        v = t.SelectF(
+            is_r11g11b10f,
+            packed11 ? unpack11(raw, i) : t.m.Bitcast(t.t_f, fcomp[i]), v);
         v = t.SelectF(is_rg32_raw,
                       i < 2 ? t.m.Bitcast(t.t_f, fcomp[i]) : t.F32(0.f), v);
         v = t.SelectF(is_rgba32_raw, t.m.Bitcast(t.t_f, fcomp[i]), v);
@@ -2889,7 +2935,19 @@ static void EmitCsMimgStaged(Translator& t,
     packed = t.SelectB(is_r16, packed_r16, packed);
     packed = t.SelectB(is_rg8, packed_rg8, packed);
     packed = t.SelectB(is_rgba16, packed_rgba16_lo, packed);
-    packed = t.SelectB(is_r11g11b10f, packed_float[0], packed);
+    Id packed11_word = packed_float[0];
+    if (packed11) {
+      Id comp[3] = {unpack11(old_raw, 0), unpack11(old_raw, 1),
+                    unpack11(old_raw, 2)};
+      u32 reg = 0;
+      for (u32 i = 0; i < 3; i++)
+        if (dmask & (1u << i))
+          comp[i] = t.VgF(vdata + reg++);
+      packed11_word = t.Or(t.Or(uf_pack(comp[0], 6),
+                                t.Shl(uf_pack(comp[1], 6), t.U32(11))),
+                           t.Shl(uf_pack(comp[2], 5), t.U32(22)));
+    }
+    packed = t.SelectB(is_r11g11b10f, packed11_word, packed);
     packed = t.SelectB(is_raw_block, blk[0], packed);
     CsSsboStore(t, sc, binding, dword_idx,
                 t.SelectB(is_r32, t.Vg(vdata), packed));

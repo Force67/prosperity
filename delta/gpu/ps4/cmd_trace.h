@@ -140,6 +140,8 @@ bool CsWatchCovers(u64 base, u64 size);
 
 void TraceCsUnresolved(u64 cs_addr, const gcn::CsResource& res);
 void TraceCsCode(u64 cs_addr);
+// True the first time an unsupported image zero-fills this binding.
+bool FirstCsZeroFill(u64 cs_addr, u32 binding);
 void TraceCsZeroFill(u64 cs_addr,
                      u32 binding,
                      const gcn::TImage& image,
