@@ -265,6 +265,8 @@ int PS4ABI sys_evf_create(const char* name, u32 attr, u64 init_pattern) {
     BASE_LOGI("evf", "create rejected: null name (attr={:#x})", attr);
     return -SysError::eINVAL;
   }
+  if ((attr & 0xfffffecc) || (attr & 3) == 3 || (attr & 0x30) == 0x30)
+    return -SysError::eINVAL;
   auto* ef =
       new EventFlag(Process::GetActive()->GetObjTable(), name, init_pattern);
   BASE_LOGI("evf", "create '{}' attr={:#x} init={:#x} -> id={}",

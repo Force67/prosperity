@@ -85,13 +85,24 @@ int Semaphore::Wait(int need, u32* timeout_us) {
   if (!enough()) {
     waiters_++;
     bool ok = true;
+    // The timeout is an in/out parameter: the kernel writes back the remaining
+    // microseconds after the wait (zero on exhaustion).
+    const auto start = base::TimeTicks::Now();
     if (timeout_us)
       ok = guest::WaitFor(cv_, lk, base::Microseconds(*timeout_us), enough);
     else
       ok = guest::Wait(cv_, lk, enough);
     waiters_--;
-    if (!ok)
+    if (!ok) {
+      if (timeout_us)
+        *timeout_us = 0;
       return -SysError::eTIMEDOUT;
+    }
+    if (timeout_us) {
+      const i64 elapsed = (base::TimeTicks::Now() - start).InMicroseconds();
+      *timeout_us =
+          elapsed < *timeout_us ? static_cast<u32>(*timeout_us - elapsed) : 0;
+    }
   }
   count_ -= need;
   return 0;
@@ -149,6 +160,11 @@ static kern::ObjectRef<Semaphore> FromId(int id) {
 }
 
 int PS4ABI sys_osem_create(const char* name, u32 attr, int init, int max) {
+  // Kernel validation: a name, attr bits in 0x103 with at most one of the two
+  // queue orders, and 0 <= init <= max with max > 0.
+  if (!name || (attr & 0xfffffefc) || (attr & 3) == 3 || init < 0 || max <= 0 ||
+      init > max)
+    return -SysError::eINVAL;
   auto* s = new Semaphore(Process::GetActive()->GetObjTable(), name, init, max);
   BASE_LOGI("osem", "create '{}' attr={:#x} init={} max={} -> id={}",
             name ? name : "", attr, init, max, s->handle());
@@ -197,6 +213,8 @@ int PS4ABI sys_osem_close(int id) {
 }
 
 int PS4ABI sys_osem_wait(int id, int need, u32* timeout_us) {
+  if (need <= 0)
+    return -SysError::eINVAL;
   WaitProbe wp("osem_wait", (long)id, (long)need);
   auto s = FromId(id);
   if (!s)
@@ -221,6 +239,8 @@ int PS4ABI sys_osem_wait(int id, int need, u32* timeout_us) {
 }
 
 int PS4ABI sys_osem_trywait(int id, int need) {
+  if (need <= 0)
+    return -SysError::eINVAL;
   auto s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
@@ -228,6 +248,8 @@ int PS4ABI sys_osem_trywait(int id, int need) {
 }
 
 int PS4ABI sys_osem_post(int id, int count) {
+  if (count <= 0)
+    return -SysError::eINVAL;
   auto s = FromId(id);
   if (!s)
     return -SysError::eSRCH;
