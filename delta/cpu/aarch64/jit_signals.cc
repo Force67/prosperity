@@ -11,6 +11,7 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "cpu/aarch64/fex_context.h"
+#include "cpu/aarch64/syscall_handler.h"
 #include "cpu/backend.h"
 
 namespace cpu {
@@ -44,6 +45,9 @@ bool TryHandleJitSignal(int sig, void* infop, void* ucv) {
   if (!g_context || !t_thread || !ucv || !infop)
     return false;
   auto* uc = static_cast<ucontext_t*>(ucv);
+
+  if (sig == SIGSEGV && fex::RetryDeferredInterrupt(infop, ucv))
+    return true;
 
   // Unpaired call/ret (fiber switches) run FEX's call-ret predictor into its
   // guard pages; upstream FEX resets x25.

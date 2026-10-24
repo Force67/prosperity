@@ -194,6 +194,10 @@ int FaultingSyscall() {
 u64 ReconstructGuestRip(u64) {
   return 0;
 }
+bool InterruptGuest(void*, GuestInterruptHandler) {
+  return false;
+}
+
 bool TryHandleJitSignal(int, void*, void*) {
   return false;
 }

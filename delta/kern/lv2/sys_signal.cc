@@ -178,10 +178,7 @@ Thread* FindThread(u32 tid) {
 
 void HostSignalHandler(int, siginfo_t*, void* context);
 
-// Only the native backend interrupts running guest code; elsewhere a signal
-// waits for the next syscall exit.
 void InstallHostSignal() {
-#if defined(DELTA_BACKEND_NATIVE)
   static const bool installed = [] {
     g_host_signal = SIGRTMIN + 6;
     struct sigaction sa{};
@@ -191,7 +188,6 @@ void InstallHostSignal() {
     return ::sigaction(g_host_signal, &sa, nullptr) == 0;
   }();
   (void)installed;
-#endif
 }
 
 // Under g_mutex.
@@ -519,7 +515,24 @@ void HostSignalHandler(int, siginfo_t*, void* context) {
   errno = saved_errno;
 }
 #else
-void HostSignalHandler(int, siginfo_t*, void*) {}
+// What the native handler does, on the state the JIT stopped the thread with.
+void PS4ABI SignalAtInterrupt(u32, GuestFrame* f, u8* xsave) {
+  f->rsp += 8;  // the context-call layout: rsp one slot below the guest's
+  Thread* t = t_thread;
+  if (!t)
+    return;
+  Park(*t, f, xsave);
+  bool frame_failed = false;
+  Deliver(*t, f, xsave, false, &frame_failed);
+}
+
+void HostSignalHandler(int, siginfo_t*, void* context) {
+  if (!t_thread)
+    return;
+  const int saved_errno = errno;
+  cpu::InterruptGuest(context, &SignalAtInterrupt);
+  errno = saved_errno;
+}
 #endif  // DELTA_BACKEND_NATIVE
 
 #if defined(DELTA_BACKEND_NATIVE)
@@ -545,8 +558,15 @@ uintptr_t SigcodeAddress() {
   return reinterpret_cast<uintptr_t>(code->getCode());
 }
 #else
+// call [rsp]; lea rdi, [rsp + kFrameUc]; mov eax, SYS_sigreturn; syscall; ud2
 uintptr_t SigcodeAddress() {
-  return 0;
+  static const uintptr_t code = [] {
+    const u8 bytes[] = {0xff, 0x14,     0x24, 0x48, 0x8d, 0x7c,
+                        0x24, kFrameUc, 0xb8, 0xa1, 0x01, 0x00,
+                        0x00, 0x0f,     0x05, 0x0f, 0x0b};
+    return cpu::MakeGuestTrampoline(bytes, sizeof(bytes), bytes);
+  }();
+  return code;
 }
 #endif
 

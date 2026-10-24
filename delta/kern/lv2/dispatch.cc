@@ -545,11 +545,27 @@ uintptr_t Lv2ContextEntry() {
   return reinterpret_cast<uintptr_t>(code->getCode());
 }
 #else
+namespace {
+void PS4ABI TakeContextEntry(u32, GuestFrame* frame, u8* xsave) {
+  auto* image = reinterpret_cast<GuestContextImage*>(frame->rdi);
+  *frame = image->frame;
+  std::memcpy(xsave, image->xsave, kGuestXsaveSize);
+  delete image;
+}
+}  // namespace
+
 uintptr_t Lv2ContextTrampoline(ContextHandler, u32) {
   return 0;
 }
+
+// mov eax, kContextEntrySyscall; syscall; ud2
 uintptr_t Lv2ContextEntry() {
-  return 0;
+  static const uintptr_t entry = [] {
+    u8 code[] = {0xb8, 0, 0, 0, 0, 0x0f, 0x05, 0x0f, 0x0b};
+    std::memcpy(code + 1, &kContextEntrySyscall, 4);
+    return cpu::MakeGuestTrampoline(code, sizeof(code), code);
+  }();
+  return entry;
 }
 #endif  // DELTA_BACKEND_NATIVE
 
@@ -558,6 +574,10 @@ ContextHandler Lv2ContextHandler(u32 sid) {
   // Both platforms share the context calls and their ucontext layout.
   if (IsContextSyscall(sid))
     return &sys_context;
+#if !defined(DELTA_BACKEND_NATIVE)
+  if (sid == kContextEntrySyscall)
+    return &TakeContextEntry;
+#endif
   auto* pr = Process::GetActive();
   if (pr && pr->GetPlatform() == Process::Platform::kPs5 &&
       sid == kSysAprResolve)

@@ -278,6 +278,7 @@ class FexBackend final : public Backend {
     ctx_ = FEXCore::Context::Context::CreateNewContext(host_features);
     g_context = ctx_.get();
     ctx_->SetSignalDelegator(&sig_delegator_);
+    fex::g_signal_delegator = &sig_delegator_;
     ctx_->SetSyscallHandler(&syscall_handler_);
     ctx_->EnableExitOnHLT();
     if (!ctx_->InitCore())

@@ -52,18 +52,21 @@ struct GuestContextImage {
 
 using ContextHandler = void(PS4ABI*)(u32 sid, GuestFrame* frame, u8* xsave);
 
-// The trampoline that hands `handler` the full register state, or 0 when the
-// backend cannot (the handler's table row answers then).
+// The trampoline that hands `handler` the full register state, or 0 on a
+// backend that captures that state itself.
 uintptr_t Lv2ContextTrampoline(ContextHandler handler, u32 sid);
 
 // A guest thread entry that starts from a heap GuestContextImage passed as its
-// argument (and frees it), or 0 when the backend has none.
+// argument (and frees it).
 uintptr_t Lv2ContextEntry();
 
 // The handler that needs the full register state for `sid` on the active
 // process's platform, or null for an ordinary syscall. Backends without the
 // context trampoline call it around their own capture of the state.
 ContextHandler Lv2ContextHandler(u32 sid);
+
+// The private id the FEX context-entry stub issues with the image in rdi.
+inline constexpr u32 kContextEntrySyscall = 0x40000002u;
 
 // A syscall a table names but does not implement.
 int PS4ABI Lv2StubSyscall();

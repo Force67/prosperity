@@ -25,9 +25,11 @@
 #include <cstdint>
 #include "base/arch.h"
 #include "base/containers/vector.h"
+#include "guest_abi.h"
 
 namespace kern {
 struct ModuleInfo;
+struct GuestFrame;
 }
 
 namespace cpu {
@@ -180,6 +182,16 @@ u64 ReconstructGuestRip(u64 host_pc);
 // atomics, which the ARM JIT raises and FEX backpatches). True = handled,
 // resume the adjusted context.
 bool TryHandleJitSignal(int sig, void* info, void* ucontext);
+
+// From a host signal handler on a guest thread: when the thread was in
+// translated guest code, stops it at the guest instruction it reached, hands
+// `handler` its state (the layout a context syscall gets) and resumes it from
+// whatever the handler leaves. A thread in a section that must not be
+// interrupted is stopped at that section's end instead. False when the thread
+// was not in translated code (it takes its signal at its next syscall exit).
+// The native backend interrupts guest code itself and always answers false.
+using GuestInterruptHandler = void(PS4ABI*)(u32, kern::GuestFrame*, u8*);
+bool InterruptGuest(void* ucontext, GuestInterruptHandler handler);
 
 // Set the calling host thread's guest fs base (guest TLS pointer). Called for
 // the main thread (sysarch 129) and for each guest thread we spawn.
