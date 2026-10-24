@@ -859,7 +859,8 @@ static rhi::TextureView* ResolveTextureView(u64 base,
       BASE_LOGI("texwatch", "{}", line.c_str());
     }
   }
-  if (!w || !h || w > 8192 || h > 8192)
+  const u32 max_size = base::Min(Device().caps().max_texture_size, 16384u);
+  if (!w || !h || w > max_size || h > max_size)
     return nullptr;
   const rhi::Format format = SampledFormat(dfmt, nfmt);
   const bool repack = Repacked111110(dfmt, nfmt);

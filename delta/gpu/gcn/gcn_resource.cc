@@ -1496,8 +1496,8 @@ TImage DecodeTImage(const u32* p) {
     max_levels++;
   const bool valid_mips = t.view_mips && t.mip_levels <= max_levels;
   const bool valid_3d = !t.is_3d || (t.depth <= 2048 && t.mip_levels == 1);
-  t.valid = GuestRange(t.base, 1) && supported_type && t.width <= 8192 &&
-            t.height <= 8192 && t.layers <= 8192 && valid_view && valid_mips &&
+  t.valid = GuestRange(t.base, 1) && supported_type && t.width <= 16384 &&
+            t.height <= 16384 && t.layers <= 8192 && valid_view && valid_mips &&
             valid_3d;
   return t;
 }
