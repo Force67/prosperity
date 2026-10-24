@@ -6,12 +6,25 @@
 // (2026-10-23).
 +DELTA_GPU_RENDER_THREAD=0
 
-// Status 2026-10-23, with the v1.28 update (--update): menus, loading screens
-// and the race HUD render; the race G-buffer is geometrically correct. The lit
-// frame still presents white (lighting/tonemap not yet investigated) and UI
-// text glyphs are partly missing.
+// The cockpit glass is one sided: drawn from inside without culling, its outer
+// faces cover the windshield in opaque grey (fresnel of a back face).
++DELTA_GPU_CULL=1
+
+// The v1.28 (60 fps) cockpit camera flips between two poses every frame once
+// a frame takes more than ~0.06 s of game time, and motion blur smears the
+// interior across them. Below 20 fps the race runs in slow motion instead.
++DELTA_PROCTIME_FRAME_CAP_MS=50
+
+// Status 2026-10-24: v1.28 renders the race complete (world, ambient from the
+// probe cubes, fog, sky, cars, HUD) at ~8 fps. The Alps event starts at dawn
+// and brightens over its first minute (CPU-set sky colours), so early frames
+// are a bright scene under a navy sky.
+// Base 1.00 still has no ambient: its probe array (342 MB) is too large to
+// stage and stays zero.
 
 // Boot to the race: --pad "20:cross,24:cross,28:cross,32:cross,36:cross,45:cross,55:cross"
+// (v1.28: add ",100:cross,104:cross,108:cross"; the save shared with base
+// also wants these). Change camera with r1.
 // Who drew a pixel of the G-buffer albedo, and a VS replayed against the GPU:
 // +DELTA_GPU_CAPTURE_AT=all
 // +DELTA_GPU_RTWATCH=0x500cdd0000
