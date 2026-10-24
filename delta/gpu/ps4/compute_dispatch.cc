@@ -98,19 +98,21 @@ ResourceRange ResolveImageResource(u64 cs_addr,
                                    bool trace) {
   ResourceRange out;
   const gcn::TImage t = gcn::DecodeTImage(descriptor);
-  const bool r8 = t.dfmt == 1 && (t.nfmt == 0 || t.nfmt == 4);
-  const bool rgba8 =
-      t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 4 || t.nfmt == 5);
+  const bool r8 = t.dfmt == 1 && (t.nfmt == 0 || t.nfmt == 1 || t.nfmt == 4);
+  const bool rgba8 = t.dfmt == 10 && (t.nfmt == 0 || t.nfmt == 1 ||
+                                      t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 9);
   const bool r32 = t.dfmt == 4 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   const bool rg16f = t.dfmt == 5 && t.nfmt == 7;
   const bool rg16i = t.dfmt == 5 && (t.nfmt == 4 || t.nfmt == 5);
-  const bool r16f = t.dfmt == 2 && t.nfmt == 7;
-  const bool rg8 = t.dfmt == 3 && (t.nfmt == 0 || t.nfmt == 4);
+  const bool r16f = t.dfmt == 2 && (t.nfmt == 0 || t.nfmt == 7);
+  const bool rg8 = t.dfmt == 3 && (t.nfmt == 0 || t.nfmt == 1 || t.nfmt == 4);
   const bool rgba16f = t.dfmt == 12 && t.nfmt == 7;
   const bool r11g11b10f = (t.dfmt == 6 || t.dfmt == 7) && t.nfmt == 7;
-  const bool block64 =
-      (t.dfmt == 11 || t.dfmt == 12) && (t.nfmt == 4 || t.nfmt == 5);
-  const bool block128 = t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5);
+  const bool block64 = (t.dfmt == 11 && (t.nfmt == 4 || t.nfmt == 5 ||
+                                         t.nfmt == 7)) ||
+                       (t.dfmt == 12 && (t.nfmt == 4 || t.nfmt == 5));
+  const bool block128 =
+      t.dfmt == 14 && (t.nfmt == 4 || t.nfmt == 5 || t.nfmt == 7);
   const bool supported_type = t.type == 8 || t.type == 9 || t.type == 10 ||
                               t.type == 11 || t.type == 12 || t.type == 13;
   const bool supported_format = r8 || rgba8 || r32 || rg16f || rg16i || r16f ||

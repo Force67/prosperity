@@ -2140,6 +2140,20 @@ static void EmitCsMimgStaged(Translator& t,
                      : t.LAnd(t.Eq(dfmt, t.U32(10)), t.Eq(nfmt, t.U32(5)));
   const Id is_srgb =
       t.rdna_sources ? is_gfmt({130, 170}) : t.Eq(nfmt, t.U32(9));
+  const Id is_snorm8 =
+      t.rdna_sources
+          ? t.m.ConstBool(false)
+          : t.LAnd(logical_or(logical_or(t.Eq(dfmt, t.U32(10)),
+                                         t.Eq(dfmt, t.U32(1))),
+                              t.Eq(dfmt, t.U32(3))),
+                   t.Eq(nfmt, t.U32(1)));
+  const auto snorm8 = [&](Id byte) {
+    const Id sext = t.Sar(t.Shl(byte, t.U32(24)), t.U32(24));
+    return t.Ext2(GLSLstd450FMax,
+                  t.FMul(t.m.Emit(spv::Op::OpConvertSToF, t.t_f, {sext}),
+                         t.F32(1.0f / 127.0f)),
+                  t.F32(-1.f));
+  };
   const auto srgb_decode = [&](Id value) {
     const Id linear = t.FMul(value, t.F32(1.f / 12.92f));
     const Id curved =
@@ -2154,8 +2168,9 @@ static void EmitCsMimgStaged(Translator& t,
       t.rdna_sources
           ? is_gfmt({56, 60, 61, 130, 1, 5, 169, 170})
           : t.LAnd(logical_or(t.Eq(dfmt, t.U32(10)), t.Eq(dfmt, t.U32(1))),
-                   logical_or(logical_or(is_unorm, is_signed8),
-                              t.Eq(nfmt, t.U32(4))));
+                   logical_or(logical_or(logical_or(is_unorm, is_signed8),
+                                         t.Eq(nfmt, t.U32(4))),
+                              logical_or(is_snorm8, is_srgb)));
   const Id is_r32 = t.rdna_sources
                         ? is_gfmt({20, 21, 22})
                         : t.LAnd(t.Eq(dfmt, t.U32(4)),
@@ -2178,10 +2193,12 @@ static void EmitCsMimgStaged(Translator& t,
       is_r16_unorm, t.rdna_sources
                         ? is_gfmt({13})
                         : t.LAnd(t.Eq(dfmt, t.U32(2)), t.Eq(nfmt, t.U32(7))));
-  const Id is_rg8 = t.rdna_sources
-                        ? is_gfmt({14, 18})
-                        : t.LAnd(t.Eq(dfmt, t.U32(3)),
-                                 logical_or(is_unorm, t.Eq(nfmt, t.U32(4))));
+  const Id is_rg8 =
+      t.rdna_sources
+          ? is_gfmt({14, 18})
+          : t.LAnd(t.Eq(dfmt, t.U32(3)),
+                   logical_or(logical_or(is_unorm, t.Eq(nfmt, t.U32(4))),
+                              is_snorm8));
   const Id is_rgba16_unorm =
       t.rdna_sources ? is_gfmt({65}) : t.LAnd(t.Eq(dfmt, t.U32(12)), is_unorm);
   const Id is_rgba16 = logical_or(
@@ -2215,11 +2232,13 @@ static void EmitCsMimgStaged(Translator& t,
   const Id is_rgba16u = t.rdna_sources ? is_gfmt({69, 70})
                                        : t.LAnd(t.Eq(dfmt, t.U32(12)), is_int);
   const Id is_signed16 = t.rdna_sources ? is_gfmt({70}) : t.Eq(nfmt, t.U32(5));
-  const Id is_rg32_raw = t.rdna_sources ? is_gfmt({62, 63, 64})
-                                        : t.LAnd(t.Eq(dfmt, t.U32(11)), is_int);
-  const Id is_rgba32_raw = t.rdna_sources
-                               ? is_gfmt({75, 76, 77, 179, 180})
-                               : t.LAnd(t.Eq(dfmt, t.U32(14)), is_int);
+  const Id is_int_or_float = logical_or(is_int, t.Eq(nfmt, t.U32(7)));
+  const Id is_rg32_raw =
+      t.rdna_sources ? is_gfmt({62, 63, 64})
+                     : t.LAnd(t.Eq(dfmt, t.U32(11)), is_int_or_float);
+  const Id is_rgba32_raw =
+      t.rdna_sources ? is_gfmt({75, 76, 77, 179, 180})
+                     : t.LAnd(t.Eq(dfmt, t.U32(14)), is_int_or_float);
   const Id is_block2 = logical_or(is_rgba16u, is_rg32_raw);
   const Id is_raw_block = logical_or(is_block2, is_rgba32_raw);
   Id supported_format = logical_or(is_rgba8, is_r32);
@@ -2446,6 +2465,7 @@ static void EmitCsMimgStaged(Translator& t,
                            t.m.Bitcast(t.t_u, normalized), byte);
       value = t.SelectB(is_signed8, t.Sar(t.Shl(byte, t.U32(24)), t.U32(24)),
                         value);
+      value = t.SelectB(is_snorm8, t.m.Bitcast(t.t_u, snorm8(byte)), value);
       const Id half =
           i < 2 ? t.m.Bitcast(t.t_u, t.m.CompositeExtract(t.t_f, halfs, i))
                 : t.U32(0);
@@ -2517,6 +2537,7 @@ static void EmitCsMimgStaged(Translator& t,
         v = t.SelectF(is_rg8, i < 2 ? byte_f : t.F32(0.f), v);
         v = t.SelectF(t.LAnd(is_int, logical_or(is_rgba8, is_rg8)),
                       t.m.Bitcast(t.t_f, byte), v);
+        v = t.SelectF(is_snorm8, snorm8(byte), v);
         const Id wide = t.m.CompositeExtract(t.t_f, i < 2 ? halfs : halfs_hi,
                                              i < 2 ? i : i - 2);
         v = t.SelectF(is_rgba16, wide, v);
@@ -2659,13 +2680,35 @@ static void EmitCsMimgStaged(Translator& t,
     if (glc && old_value)
       t.SetVg(vdata, old_value);
   } else {
-    const auto store_byte = [&](u32 reg) {
+    const auto store_byte = [&](u32 reg, u32 channel) {
       const Id value = t.Vg(reg);
-      Id normalized = t.FClamp01(t.m.Bitcast(t.t_f, value));
+      const Id f = t.m.Bitcast(t.t_f, value);
+      Id normalized = t.FClamp01(f);
+      const Id curved = t.FSub(
+          t.FMul(t.m.ExtInst(t.t_f, GLSLstd450Pow,
+                             {normalized, t.F32(1.f / 2.4f)}),
+                 t.F32(1.055f)),
+          t.F32(.055f));
+      const Id encoded = t.SelectF(
+          t.m.Emit(spv::Op::OpFOrdLessThanEqual, t.t_bool,
+                   {normalized, t.F32(.0031308f)}),
+          t.FMul(normalized, t.F32(12.92f)), curved);
+      if (channel < 3)
+        normalized = t.SelectF(is_srgb, encoded, normalized);
       normalized = t.m.ExtInst(t.t_f, GLSLstd450RoundEven,
                                {t.FMul(normalized, t.F32(255.0f))});
       const Id unorm = t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {normalized});
-      return t.And(t.SelectB(is_unorm, unorm, value), t.U32(0xFF));
+      const Id snorm = t.m.Emit(
+          spv::Op::OpConvertFToS, t.t_u,
+          {t.m.ExtInst(t.t_f, GLSLstd450RoundEven,
+                       {t.FMul(t.Ext2(GLSLstd450FMax,
+                                      t.Ext2(GLSLstd450FMin, f, t.F32(1.f)),
+                                      t.F32(-1.f)),
+                               t.F32(127.0f))})});
+      return t.And(
+          t.SelectB(is_snorm8, snorm,
+                    t.SelectB(logical_or(is_unorm, is_srgb), unorm, value)),
+          t.U32(0xFF));
     };
     const Id old_raw = CsSsboLoad(t, sc, binding, dword_idx);
     const Id has_second = wide2;
@@ -2680,10 +2723,10 @@ static void EmitCsMimgStaged(Translator& t,
                    t.SelectB(wide4, t.Add(dword_idx, t.U32(3)), dword_idx));
     Id packed;
     if (dmask == 0xF) {
-      packed = store_byte(vdata);
-      packed = t.Or(packed, t.Shl(store_byte(vdata + 1), t.U32(8)));
-      packed = t.Or(packed, t.Shl(store_byte(vdata + 2), t.U32(16)));
-      packed = t.Or(packed, t.Shl(store_byte(vdata + 3), t.U32(24)));
+      packed = store_byte(vdata, 0);
+      packed = t.Or(packed, t.Shl(store_byte(vdata + 1, 1), t.U32(8)));
+      packed = t.Or(packed, t.Shl(store_byte(vdata + 2, 2), t.U32(16)));
+      packed = t.Or(packed, t.Shl(store_byte(vdata + 3, 3), t.U32(24)));
     } else {
       packed = old_raw;
       u32 comp = 0;
@@ -2691,7 +2734,8 @@ static void EmitCsMimgStaged(Translator& t,
         if (!(dmask & (1 << i)))
           continue;
         const Id keep = t.And(packed, t.U32(~(0xFFu << (i * 8))));
-        packed = t.Or(keep, t.Shl(store_byte(vdata + comp++), t.U32(i * 8u)));
+        packed =
+            t.Or(keep, t.Shl(store_byte(vdata + comp++, i), t.U32(i * 8u)));
       }
     }
     const Id old_halfs = unpack16(old_raw);
@@ -2750,7 +2794,7 @@ static void EmitCsMimgStaged(Translator& t,
       if (i < 2) {
         const Id keep = t.And(packed_rg8, t.U32(~(0xFFu << (i * 8))));
         packed_rg8 =
-            t.Or(keep, t.Shl(store_byte(vdata + rg8_reg), t.U32(i * 8)));
+            t.Or(keep, t.Shl(store_byte(vdata + rg8_reg, i), t.U32(i * 8)));
       }
       rg8_reg++;
     }
