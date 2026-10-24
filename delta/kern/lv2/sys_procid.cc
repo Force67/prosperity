@@ -15,6 +15,7 @@
 #include "base/arch.h"
 #include "base/logging.h"
 #include "guest_abi.h"
+#include "host_memory/host_memory.h"
 
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_procid.h"
@@ -227,49 +228,6 @@ int PS4ABI sys_getdtablesize() {
   return static_cast<int>(kMaxFiles);
 }
 
-// We deliver no real signals; log the attempt and pretend it landed.
-int PS4ABI sys_kill(u32 pid, int sig) {
-  BASE_LOGI("procid", "kill(pid={}, sig={}) ignored", pid, sig);
-  return 0;
-}
-
-// FreeBSD sigset_t is 16 bytes (4x uint32). Nothing is ever pending.
-int PS4ABI sys_sigpending(void* set) {
-  if (set)
-    std::memset(set, 0, 16);
-  return 0;
-}
-
-// stack_t{void* ss_sp; size_t ss_size; int ss_flags} is ~24 bytes. We model no
-// alternate signal stack, so report "none installed" via a zeroed old.
-int PS4ABI sys_sigaltstack(const void* ss, void* oss) {
-  if (oss)
-    std::memset(oss, 0, 24);
-  return 0;
-}
-
-// No signal ever arrives, so the timed/blocking waits report "nothing pending"
-// rather than hanging forever.
-int PS4ABI sys_sigtimedwait(const void* set, void* info, const void* timeout) {
-  BASE_LOGI("procid", "sigtimedwait -> EAGAIN (no signals)");
-  return -SysError::eAGAIN;
-}
-int PS4ABI sys_sigwaitinfo(const void* set, void* info) {
-  BASE_LOGI("procid", "sigwaitinfo -> EAGAIN (no signals)");
-  return -SysError::eAGAIN;
-}
-
-int PS4ABI sys_sigwait(const void* set, int* sig) {
-  if (sig)
-    *sig = 0;
-  return 0;
-}
-
-// BSD sigsuspend always returns EINTR once a handler would have run.
-int PS4ABI sys_sigsuspend(const void* sigmask) {
-  return -SysError::eINTR;
-}
-
 // struct rtprio{uint16 type; uint16 prio}: report RTP_PRIO_NORMAL/prio 0.
 int PS4ABI sys_rtprio(int function, u32 pid, void* rtprio) {
   if (rtprio) {
@@ -356,17 +314,17 @@ int PS4ABI sys_setgroups() {
   return 0;
 }
 
-int PS4ABI sys_sigqueue() {
-  return 0;
-}
-
-// The real syscall terminates the process with a diagnostic. We log the message
-// and continue rather than killing boot.
+// Logs why and ends the process with SIGABRT, which no handler sees.
 int PS4ABI sys_abort2(const char* msg, int nargs, void** args) {
-  (void)nargs;
-  (void)args;
-  BASE_LOGI("abort2", "{}", msg ? msg : "(null)");
-  return 0;
+  constexpr int kSigAbrt = 6;
+  const bool readable = msg && host_memory::IsMemoryRangeMapped(msg, 1);
+  BASE_LOGI("abort2", "{}", readable ? msg : "(null)");
+  if (nargs > 0 && nargs <= 16 && args &&
+      host_memory::IsMemoryRangeMapped(args, sizeof(void*) * nargs))
+    for (int i = 0; i < nargs; i++)
+      BASE_LOGI("abort2", "  arg{} = {:p}", i, args[i]);
+  TerminateBySignal(kSigAbrt);
+  return nargs < 0 || nargs > 16 ? -SysError::eINVAL : 0;
 }
 
 int PS4ABI sys_exit() {
@@ -383,28 +341,6 @@ int PS4ABI sys_rfork() {
 
 int PS4ABI sys_execve() {
   return -SysError::ePERM;
-}
-
-// We deliver no signals, so the mask is inert; still, a caller that saves the
-// old mask here to restore it later must not read uninitialised memory. The
-// FreeBSD sigset_t is 16 bytes (4x uint32). Report an empty old mask.
-int PS4ABI sys_sigprocmask(int how, const int* set, int* oset) {
-  (void)how;
-  (void)set;
-  if (oset)
-    std::memset(oset, 0, 16);
-  return 0;
-}
-
-// Likewise report "no previous handler" rather than leaving the caller's oldact
-// buffer uninitialised. struct sigaction on amd64 is 32 bytes (handler pointer
-// + flags + 16-byte sa_mask, padded).
-int PS4ABI sys_sigaction(int sig, const void* act, void* oact) {
-  (void)sig;
-  (void)act;
-  if (oact)
-    std::memset(oact, 0, 32);
-  return 0;
 }
 
 int PS4ABI sys_getpid() {

@@ -17,6 +17,7 @@
 #include "io/path.h"
 
 #include "kern/crash.h"
+#include "kern/lv2/sys_signal.h"
 #include "kern/module.h"
 #include "kern/process.h"
 
@@ -337,7 +338,9 @@ void Process::Start() {
   // PS5 starts with the TCB its kernel would have installed; libkernel reads
   // fs:0x10 before it gets around to setting up its own (see MakeInitialTcb).
   const u64 fsbase = plat_ == Platform::kPs5 ? ps5::MakeInitialTcb() : 0;
+  SignalThreadStart(1);  // the main thread's guest tid
   cpu::GetBackend().EnterGuest(reinterpret_cast<uintptr_t>(kinfo.entry), stack,
                                fsbase);
+  SignalThreadExit();
 }
 }  // namespace kern

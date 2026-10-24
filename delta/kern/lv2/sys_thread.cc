@@ -43,6 +43,7 @@
 #include "kern/crash.h"
 #include "kern/lv2/dispatch.h"
 #include "kern/lv2/error_table.h"
+#include "kern/lv2/sys_signal.h"
 #include "kern/lv2/sys_thread.h"
 #include "kern/module.h"
 #include "kern/process.h"
@@ -122,24 +123,6 @@ static void MarkThreadStarted() {
     g_start_cv.NotifyAll();
   }
 }
-
-// FreeBSD thr_param (rdi layout, 0x68 bytes); +40 tls_size / +64 flags exist
-// for the user-mode libthr wrapper, untouched by the kernel path.
-struct thr_param {  // NOLINT(readability-identifier-naming): guest ABI name
-  void(PS4ABI* start_func)(void*);  // +0x00
-  void* arg;                        // +0x08
-  u8* stack_base;                   // +0x10
-  size_t stack_size;                // +0x18
-  u8* tls_base;                     // +0x20
-  size_t tls_size;                  // +0x28  (not read by kern_thr_new)
-  i64* child_tid;                   // +0x30
-  i64* parent_tid;                  // +0x38
-  i32 flags;                        // +0x40  (not read by kern_thr_new)
-  i32 pad;
-  void* rtp;         // +0x48  rtprio (4-byte struct copied in)
-  const char* name;  // +0x50  thread name (max 32 chars)
-  void* spare[2];    // +0x58
-};
 
 int PS4ABI sys_thr_new(thr_param* p, int size) {
   // The kernel rejects an oversized param block; param_size == 0x68 for every
@@ -240,10 +223,12 @@ int PS4ABI sys_thr_new(thr_param* p, int size) {
           [gthread, tid, started, gsb, gss] {
             t_tid = tid;
             NoteGuestThreadHost(t_tid);
+            SignalThreadStart(tid);
             t_started = started.get();
             RegisterGuestThreadStack(gsb, gss);
             cpu::GetBackend().RunGuestThread(gthread);
             UnregisterGuestThreadStack();
+            SignalThreadExit();
           },
           host_stack)) {
     cpu::GetBackend().DiscardGuestThread(gthread);
@@ -908,6 +893,10 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
           ch.RemoveSimple(waiter);
           return -SysError::eTIMEDOUT;
         }
+        if (SignalInterrupts()) {  // libthr takes it as a spurious wakeup
+          ch.RemoveSimple(waiter);
+          return -SysError::eINTR;
+        }
         bk.cv.WaitFor(lk, UmtxTimeout());
       }
       ch.RemoveSimple(waiter);
@@ -1155,6 +1144,10 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
           r = -SysError::eTIMEDOUT;
           break;
         }
+        if (SignalInterrupts()) {  // a handler may change the condition
+          r = -SysError::eINTR;
+          break;
+        }
         cbk.cv.WaitFor(clk, UmtxTimeout());
         if (watch && __builtin_memcmp(snap, ptr, sizeof(snap)) != 0) {
           __builtin_memcpy(snap, ptr, sizeof(snap));
@@ -1297,6 +1290,9 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       while (!guest::Stopping() && *count == 0 && ch.gen == g0) {
         if (dl && base::TimeTicks::Now() >= *dl)
           return -SysError::eTIMEDOUT;
+        // A timed wait gives up for a signal; an untimed one restarts.
+        if (dl && SignalInterrupts())
+          return -SysError::eINTR;
         bk.cv.WaitFor(lk, UmtxTimeout());
       }
       return 0;
@@ -1395,35 +1391,6 @@ int PS4ABI sys_thr_exit(i64* state) {
   // returned") if it does. Leave the JIT now (FEX longjmps out of
   // ExecuteThread; native is a no-op and the entry returns naturally).
   cpu::ExitGuestThread();
-  return 0;
-}
-
-// No guest signal machinery, so inter-thread kills are accepted and logged.
-int PS4ABI sys_thr_kill(u32 tid, int sig) {
-  BASE_LOGI("thr_kill", "tid={} sig={} (ignored)", tid, sig);
-  return 0;
-}
-
-int PS4ABI sys_thr_kill2(u32 pid, u32 tid, int sig) {
-  BASE_LOGI("thr_kill2", "pid={} tid={} sig={} (ignored)", pid, tid, sig);
-  return 0;
-}
-
-// We can't freeze another host thread without a suspension protocol, so sleep
-// the caller briefly (honouring the timeout if given, capped) and return. Most
-// callers poll, so a short delay is enough.
-int PS4ABI sys_thr_suspend(const void* timeout) {
-  i64 us = 1000;
-  if (timeout) {
-    auto* ts = static_cast<const ts64*>(timeout);
-    const i64 req = i64(ts->tv_sec) * 1000000 + i64(ts->tv_nsec) / 1000;
-    us = base::Clamp<i64>(req, 0, 50000);
-  }
-  guest::SleepForMicroseconds(u64(us));
-  return 0;
-}
-
-int PS4ABI sys_thr_wake(u32 tid) {
   return 0;
 }
 
@@ -1556,24 +1523,6 @@ int PS4ABI sys_cpuset_setaffinity(int level,
                                   size_t cpusetsize,
                                   const void* mask) {
   return 0;
-}
-
-// We can't safely snapshot a JITed guest thread's registers, so suspend/resume
-// no-op and the get/set context calls report "not supported".
-int PS4ABI sys_thr_suspend_ucontext(u32 tid) {
-  return 0;
-}
-int PS4ABI sys_thr_resume_ucontext(u32 tid) {
-  return 0;
-}
-
-int PS4ABI sys_thr_get_ucontext(u32 tid, void* ucontext) {
-  BASE_LOGI("thr_get_ucontext", "tid={} (unsupported)", tid);
-  return -SysError::eOPNOTSUPP;
-}
-int PS4ABI sys_thr_set_ucontext(u32 tid, void* ucontext) {
-  BASE_LOGI("thr_set_ucontext", "tid={} (unsupported)", tid);
-  return -SysError::eOPNOTSUPP;
 }
 
 // Sony "system block" critical sections. We don't arbitrate them, so enter/exit

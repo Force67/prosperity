@@ -8,6 +8,7 @@
 
 #include <sys/mman.h>
 #include <cstdlib>
+#include <cstring>
 #include "base/arch.h"
 #include "base/logging.h"
 #include "guest/session.h"
@@ -28,6 +29,8 @@
 #include "cpu/backend.h"
 #include "kern/crash.h"
 #include "kern/lv2/dispatch.h"
+#include "kern/lv2/sys_context.h"
+#include "kern/lv2/sys_signal.h"
 #include "kern/module.h"
 #include "kern/process.h"
 
@@ -257,7 +260,8 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
            bool trace,
            bool count,
            bool own_stack,
-           const void* zone) {
+           const void* zone,
+           uintptr_t signal_exit) {
       if (count) {  // DELTA_SCHIST: ++g_sys_hist[sid] (rax is caller-saved)
         mov(rax, reinterpret_cast<uintptr_t>(&g_sys_hist[sid & 1023]));
         inc(qword[rax]);
@@ -345,7 +349,14 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
         add(rsp, 8);
         pop(rdi);
       }
+      // A due signal leaves through the frame-capturing path, which enters
+      // the handler; stc/clc keep the ZF the test sets. r11 is free here, as
+      // a syscall clobbers it.
+      Xbyak::Label signal;
+      mov(r11, reinterpret_cast<uintptr_t>(&g_signal_due));
+      cmp(dword[r11], 0);
       stc();  // error: rax already = positive errno
+      jnz(signal);
       ret();
       L(ok);
       mov(rax, r11);  // success: restore the raw result
@@ -359,8 +370,14 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
         add(rsp, 8);
         pop(rdi);
       }
+      mov(r11, reinterpret_cast<uintptr_t>(&g_signal_due));
+      cmp(dword[r11], 0);
       clc();
+      jnz(signal);
       ret();
+      L(signal);
+      mov(r11, signal_exit);
+      jmp(r11);
     }
   };
   static base::Vector<Xbyak::CodeGenerator*> generators;
@@ -370,9 +387,168 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
     guest::ResetResource(generators);
   });
   auto* gen = new BsdRet(cpu::MakeSyscallPauseThunk(handler), sid, trace, count,
-                         own_stack, zone);
+                         own_stack, zone,
+                         Lv2ContextTrampoline(&SignalAtSyscallExit, 0));
   generators.push_back(gen);
   return reinterpret_cast<uintptr_t>(gen->getCode());
+}
+
+// Context syscalls. Everything below the guest rsp is dead at the lifted call,
+// so the frame and the XSAVE image are built right there on the guest stack;
+// the handler still runs on the kernel stack. Every exit resumes from the
+// frame: an unchanged frame is a plain return, a rewritten one a context
+// switch or a signal handler. All registers come back, r11 too (an
+// asynchronous signal may have interrupted any instruction), so the jump goes
+// through a per-thread TLS slot.
+namespace {
+static_assert(sizeof(GuestFrame) == 18 * 8);
+constexpr int kFrameRflags = 15 * 8, kFrameRsp = 16 * 8, kFrameRip = 17 * 8;
+
+__attribute__((tls_model("initial-exec"))) thread_local u64 t_resume_rip = 0;
+
+i32 ResumeSlotOffset() {
+  uintptr_t thread_pointer;
+  asm("mov %%fs:0, %0" : "=r"(thread_pointer));
+  return static_cast<i32>(reinterpret_cast<uintptr_t>(&t_resume_rip) -
+                          thread_pointer);
+}
+
+// xsave64/xrstor64 [r12] (xbyak has no mnemonic for them).
+void EmitXsave(Xbyak::CodeGenerator& g) {
+  g.db(0x49), g.db(0x0f), g.db(0xae), g.db(0x24), g.db(0x24);
+}
+void EmitXrstor(Xbyak::CodeGenerator& g) {
+  g.db(0x49), g.db(0x0f), g.db(0xae), g.db(0x2c), g.db(0x24);
+}
+void EmitDword(Xbyak::CodeGenerator& g, i32 v) {
+  for (int i = 0; i < 4; i++)
+    g.db(static_cast<u8>(static_cast<u32>(v) >> (i * 8)));
+}
+
+// rbx = frame, r12 = XSAVE image; never returns.
+struct ResumeFromFrame : Xbyak::CodeGenerator {
+  ResumeFromFrame() {
+    const i32 slot = ResumeSlotOffset();
+    mov(eax, 7);  // x87 | SSE | AVX
+    xor_(edx, edx);
+    EmitXrstor(*this);
+    mov(rsp, rbx);
+    push(qword[rbx + kFrameRflags]);
+    popfq();
+    mov(r11, qword[rbx + kFrameRip]);
+    db(0x64), db(0x4c), db(0x89), db(0x1c), db(0x25);  // mov fs:[slot], r11
+    EmitDword(*this, slot);
+    const Xbyak::Reg64 regs[] = {r15, r14, r13, r12, r11, r10, r9, r8,
+                                 rdi, rsi, rbp, rdx, rcx, rbx, rax};
+    for (int i = 0; i < 15; i++)
+      if (regs[i] != rbx)
+        mov(regs[i], qword[rbx + i * 8]);
+    mov(rsp, qword[rbx + kFrameRsp]);
+    mov(rbx, qword[rbx + 13 * 8]);
+    db(0x64), db(0xff), db(0x24), db(0x25);  // jmp fs:[slot]
+    EmitDword(*this, slot);
+  }
+};
+
+uintptr_t ResumeCode() {
+  static ResumeFromFrame* code = new ResumeFromFrame();
+  return reinterpret_cast<uintptr_t>(code->getCode());
+}
+
+struct ContextTrampoline : Xbyak::CodeGenerator {
+  ContextTrampoline(uintptr_t handler, u32 sid) {
+    push(rsp);
+    pushfq();
+    const Xbyak::Reg64 regs[] = {rax, rbx, rcx, rdx, rbp, rsi, rdi, r8,
+                                 r9,  r10, r11, r12, r13, r14, r15};
+    for (const auto& r : regs)
+      push(r);
+    mov(rbx, rsp);
+    lea(r12, ptr[rsp - kGuestXsaveSize]);
+    and_(r12, -64);
+    mov(rsp, r12);
+    xor_(eax, eax);  // XRSTOR faults on a header with stray bytes
+    for (int i = 0; i < 8; i++)
+      mov(qword[r12 + 512 + i * 8], rax);
+    mov(eax, 7);
+    xor_(edx, edx);
+    EmitXsave(*this);
+    mov(rax, reinterpret_cast<uintptr_t>(&KernelStackTop));
+    call(rax);
+    Xbyak::Label keep;
+    test(rax, rax);
+    jz(keep);
+    mov(rsp, rax);
+    L(keep);
+    and_(rsp, -16);
+    mov(edi, sid);
+    mov(rsi, rbx);
+    mov(rdx, r12);
+    mov(rax, handler);
+    call(rax);
+    mov(rax, ResumeCode());
+    jmp(rax);
+  }
+};
+
+// Copies the heap image onto the new thread's host stack and frees it.
+void PS4ABI TakeContextImage(GuestFrame* frame,
+                             GuestContextImage* image,
+                             u8* xsave) {
+  *frame = image->frame;
+  std::memcpy(xsave, image->xsave, kGuestXsaveSize);
+  delete image;
+}
+
+// entry(GuestContextImage*), called on the host stack like any thread entry.
+struct ContextEntry : Xbyak::CodeGenerator {
+  ContextEntry() {
+    sub(rsp, kGuestXsaveSize + sizeof(GuestFrame) + 128);
+    and_(rsp, -64);
+    mov(r12, rsp);
+    lea(rbx, ptr[rsp + kGuestXsaveSize]);
+    mov(rsi, rdi);
+    mov(rdi, rbx);
+    mov(rdx, r12);
+    mov(rax, reinterpret_cast<uintptr_t>(&TakeContextImage));
+    call(rax);
+    mov(rax, ResumeCode());
+    jmp(rax);
+  }
+};
+}  // namespace
+
+uintptr_t Lv2ContextTrampoline(ContextHandler handler, u32 sid) {
+  static base::Mutex mutex;
+  static base::HashMap<u32, ContextTrampoline*> cache;
+  // The pause thunks go with the session, so the trampolines calling them do.
+  static const guest::SessionReset reset_cache([] {
+    for (auto& [sid, code] : cache)
+      delete code;
+    guest::ResetResource(cache);
+  });
+  base::LockGuard<base::Mutex> lk(mutex);
+  auto it = cache.find(sid);
+  if (it == cache.end())
+    it = cache
+             .emplace(sid, new ContextTrampoline(
+                               cpu::MakeSyscallPauseThunk(
+                                   reinterpret_cast<const void*>(handler)),
+                               sid))
+             .first;
+  return reinterpret_cast<uintptr_t>(it->second->getCode());
+}
+
+uintptr_t Lv2ContextEntry() {
+  static ContextEntry* code = new ContextEntry();
+  return reinterpret_cast<uintptr_t>(code->getCode());
+}
+#else
+uintptr_t Lv2ContextTrampoline(ContextHandler, u32) {
+  return 0;
+}
+uintptr_t Lv2ContextEntry() {
+  return 0;
 }
 #endif  // DELTA_BACKEND_NATIVE
 
@@ -421,6 +597,10 @@ static int PS4ABI sys_apr_unavailable() {
 }
 
 uintptr_t Lv2Lookup(u32 sid) {
+  // Both platforms share the context calls and their ucontext layout.
+  if (IsContextSyscall(sid))
+    if (const uintptr_t trampoline = Lv2ContextTrampoline(&sys_context, sid))
+      return trampoline;
   // PS5 titles route to the Prospero table (FreeBSD 11 ABI); never the Orbis
   // one.
   auto* pr = Process::GetActive();

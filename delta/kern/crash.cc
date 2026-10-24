@@ -31,6 +31,7 @@
 
 #include "kern/crash.h"
 #include "kern/lv2/dispatch.h"
+#include "kern/lv2/sys_signal.h"
 #include "kern/probe/probe_arm.h"
 
 #include "base/atomic.h"
@@ -446,6 +447,11 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
     }
   }
 #endif
+
+  // A fault in guest code the guest installed a handler for is the guest's,
+  // as on the console.
+  if (sig != SIGABRT && DeliverGuestFault(sig, si, ucv))
+    return;
 
   // Async-signal-safe entry marker: proves the handler ran even if a later
   // step re-faults (otherwise indistinguishable from never being entered).

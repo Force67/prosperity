@@ -18,6 +18,7 @@
 
 #include "kern/crash.h"
 #include "kern/lv2/sys_mem.h"
+#include "kern/lv2/sys_signal.h"
 #include "kern/lv2/sys_vfs.h"
 #include "kern/probe/probe_arm.h"
 #include "kern/process.h"
@@ -1060,7 +1061,7 @@ int PS4ABI sys_poll(void* fds, u32 nfds, int timeout) {
         (timeout > 0 &&
          (base::TimeTicks::Now() - start).InMilliseconds() >= timeout))
       return ready;
-    if (guest::Stopping())
+    if (guest::Stopping() || SignalInterrupts())
       return -SysError::eINTR;
     guest::SleepForMilliseconds(1);
   }

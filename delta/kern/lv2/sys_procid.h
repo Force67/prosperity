@@ -10,6 +10,7 @@
 
 #include "base/arch.h"
 #include "guest_abi.h"
+#include "kern/lv2/sys_signal.h"
 
 namespace kern {
 // Process / credential identity.
@@ -49,15 +50,6 @@ int PS4ABI sys_gethostname(char* buf, u32 len);
 int PS4ABI sys_sethostname(const char* name, u32 len);
 int PS4ABI sys_getdtablesize();
 
-// Signals.
-int PS4ABI sys_kill(u32 pid, int sig);
-int PS4ABI sys_sigpending(void* set);
-int PS4ABI sys_sigaltstack(const void* ss, void* oss);
-int PS4ABI sys_sigtimedwait(const void* set, void* info, const void* timeout);
-int PS4ABI sys_sigwaitinfo(const void* set, void* info);
-int PS4ABI sys_sigwait(const void* set, int* sig);
-int PS4ABI sys_sigsuspend(const void* sigmask);
-
 // Realtime priority.
 int PS4ABI sys_rtprio(int function, u32 pid, void* rtprio);
 
@@ -77,14 +69,11 @@ int PS4ABI sys_get_sdk_compiled_version();
 int PS4ABI sys_app_state_change();
 int PS4ABI sys_getgroups(int gidsetlen, u32* gidset);
 int PS4ABI sys_setgroups();
-int PS4ABI sys_sigqueue();
 int PS4ABI sys_abort2(const char* msg, int nargs, void** args);
 
 int PS4ABI sys_exit();
 int PS4ABI sys_rfork();
 int PS4ABI sys_execve();
-int PS4ABI sys_sigprocmask(int how, const int* set, int* oset);
-int PS4ABI sys_sigaction(int sig, const void* act, void* oact);
 int PS4ABI sys_getpid();
 
 }  // namespace kern

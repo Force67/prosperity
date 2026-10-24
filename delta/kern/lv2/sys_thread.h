@@ -8,6 +8,7 @@
  * in the root of the source tree.
  */
 
+#include <cstddef>
 #include "base/arch.h"
 #include "guest_abi.h"
 
@@ -17,7 +18,23 @@ struct thread_prio {  // NOLINT(readability-identifier-naming): guest ABI name
   u16 prio;
 };
 
-struct thr_param;  // NOLINT(readability-identifier-naming): guest ABI name
+// FreeBSD thr_param (rdi layout, 0x68 bytes); +40 tls_size / +64 flags exist
+// for the user-mode libthr wrapper, untouched by the kernel path.
+struct thr_param {  // NOLINT(readability-identifier-naming): guest ABI name
+  void(PS4ABI* start_func)(void*);  // +0x00
+  void* arg;                        // +0x08
+  u8* stack_base;                   // +0x10
+  size_t stack_size;                // +0x18
+  u8* tls_base;                     // +0x20
+  size_t tls_size;                  // +0x28  (not read by kern_thr_new)
+  i64* child_tid;                   // +0x30
+  i64* parent_tid;                  // +0x38
+  i32 flags;                        // +0x40  (not read by kern_thr_new)
+  i32 pad;
+  void* rtp;         // +0x48  rtprio (4-byte struct copied in)
+  const char* name;  // +0x50  thread name (max 32 chars)
+  void* spare[2];    // +0x58
+};
 int PS4ABI sys_thr_new(thr_param* p, int size);
 int PS4ABI sys_thr_self(i64* tid);
 int PS4ABI sys_rtprio_thread(int, u64, thread_prio*);
@@ -27,10 +44,6 @@ int PS4ABI sys_umtx_op(void*, int, u64, void*, void*);
 namespace kern {
 // Thread lifecycle / signalling.
 int PS4ABI sys_thr_exit(i64* state);
-int PS4ABI sys_thr_kill(u32 tid, int sig);
-int PS4ABI sys_thr_kill2(u32 pid, u32 tid, int sig);
-int PS4ABI sys_thr_suspend(const void* timeout);
-int PS4ABI sys_thr_wake(u32 tid);
 int PS4ABI sys_thr_set_name(u32 tid, const char* name);
 int PS4ABI sys_thr_get_name(u32 tid, char* buf);
 
@@ -53,12 +66,6 @@ int PS4ABI sys_cpuset_setaffinity(int level,
                                   i64 id,
                                   size_t cpusetsize,
                                   const void* mask);
-
-// ucontext-based suspend/resume (not exposed).
-int PS4ABI sys_thr_suspend_ucontext(u32 tid);
-int PS4ABI sys_thr_resume_ucontext(u32 tid);
-int PS4ABI sys_thr_get_ucontext(u32 tid, void* ucontext);
-int PS4ABI sys_thr_set_ucontext(u32 tid, void* ucontext);
 
 int PS4ABI sys_sblock_create();
 int PS4ABI sys_sblock_delete();

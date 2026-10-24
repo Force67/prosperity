@@ -16,6 +16,7 @@
 #include "kern/lv2/dispatch.h"
 #include "kern/lv2/sys_aio.h"
 #include "kern/lv2/sys_budget.h"
+#include "kern/lv2/sys_context.h"
 #include "kern/lv2/sys_debug.h"
 #include "kern/lv2/sys_dynlib.h"
 #include "kern/lv2/sys_event.h"
@@ -29,6 +30,7 @@
 #include "kern/lv2/sys_procid.h"
 #include "kern/lv2/sys_regmgr.h"
 #include "kern/lv2/sys_semaphore.h"
+#include "kern/lv2/sys_signal.h"
 #include "kern/lv2/sys_thread.h"
 #include "kern/lv2/sys_time.h"
 #include "kern/lv2/sys_vfs.h"
@@ -420,7 +422,7 @@ static const SyscallReg kSyscallDpt[] = {
     {427, (void*)&Lv2StubSyscall},  // sys_acl_delete_link
     {428, (void*)&Lv2StubSyscall},  // sys_acl_aclcheck_link
     {429, (void*)&sys_sigwait},     // sys_sigwait
-    {430, (void*)&Lv2StubSyscall},  // sys_thr_create
+    {430, (void*)&sys_thr_create},  // sys_thr_create
     {431, (void*)&sys_thr_exit},    // sys_thr_exit
     {432, (void*)&sys_thr_self},
     {433, (void*)&sys_thr_kill},        // sys_thr_kill

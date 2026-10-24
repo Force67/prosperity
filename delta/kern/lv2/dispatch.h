@@ -8,6 +8,7 @@
  * in the root of the source tree.
  */
 
+#include <cstddef>
 #include <cstdint>  // uintptr_t
 #include "base/arch.h"
 #include "guest_abi.h"
@@ -31,6 +32,33 @@ uintptr_t Lv2GetPs5(u32 sid);  // Prospero
 // convention. Cached per handler, or per id while tracing or counting so each
 // id reports under its own number.
 uintptr_t Lv2Trampoline(const void* handler, u32 sid);
+
+// The guest's registers at a context syscall (getcontext and friends), in the
+// order the context trampoline pushes them. `rsp` arrives pointing at `rip`
+// (the return address of the lifted call); the trampoline resumes the guest
+// from whatever the frame and the XSAVE image hold once the handler returns,
+// so a handler that rewrites them switches context.
+struct GuestFrame {
+  u64 r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rdx, rcx, rbx, rax;
+  u64 rflags, rsp, rip;
+};
+// x87 + SSE + AVX, the layout the kernel's mcontext embeds.
+inline constexpr size_t kGuestXsaveSize = 0x340;
+
+struct GuestContextImage {
+  GuestFrame frame;
+  alignas(64) u8 xsave[kGuestXsaveSize];
+};
+
+using ContextHandler = void(PS4ABI*)(u32 sid, GuestFrame* frame, u8* xsave);
+
+// The trampoline that hands `handler` the full register state, or 0 when the
+// backend cannot (the handler's table row answers then).
+uintptr_t Lv2ContextTrampoline(ContextHandler handler, u32 sid);
+
+// A guest thread entry that starts from a heap GuestContextImage passed as its
+// argument (and frees it), or 0 when the backend has none.
+uintptr_t Lv2ContextEntry();
 
 // A syscall a table names but does not implement.
 int PS4ABI Lv2StubSyscall();

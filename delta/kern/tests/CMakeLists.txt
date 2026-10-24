@@ -139,3 +139,11 @@ add_delta_test(mapped_prefix_test
 add_delta_test(memory_budget_test
   SOURCES memory_budget_test.cc
   DEPS delta_kern)
+
+add_delta_test(context_test
+  SOURCES context_test.cc
+  DEPS delta_kern xbyak)
+
+add_delta_test(signal_test
+  SOURCES signal_test.cc
+  DEPS delta_kern xbyak)

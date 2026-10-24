@@ -52,18 +52,9 @@ void PauseSignal(int, siginfo_t*, void* context) {
 #else
   return;
 #endif
-  if (t_is_guest_pc && t_is_guest_pc(pc)) {
-    PausePoint();
-    return;
-  }
   // Host calls finish and park at their return gate, outside emulator locks.
-  const u32 count = g_code_count.load(base::memory_order_acquire);
-  for (u32 i = 0; i < count; ++i) {
-    if (pc >= g_code[i].begin && pc < g_code[i].end) {
-      PausePoint();
-      return;
-    }
-  }
+  if (IsGuestCode(pc))
+    PausePoint();
 }
 #endif
 }  // namespace
@@ -116,6 +107,16 @@ void SetPaused(bool paused) {
 #endif
   if (paused)
     PollPause();
+}
+
+bool IsGuestCode(uintptr_t pc) {
+  if (t_is_guest_pc && t_is_guest_pc(pc))
+    return true;
+  const u32 count = g_code_count.load(base::memory_order_acquire);
+  for (u32 i = 0; i < count; ++i)
+    if (pc >= g_code[i].begin && pc < g_code[i].end)
+      return true;
+  return false;
 }
 
 bool OnGuestThread() {

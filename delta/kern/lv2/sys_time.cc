@@ -18,6 +18,7 @@
 #include <cstring>
 #include "base/atomic.h"
 #include "kern/lv2/error_table.h"
+#include "kern/lv2/sys_signal.h"
 #include "kern/lv2/sys_time.h"
 #include "options/options.h"
 
@@ -146,7 +147,8 @@ int PS4ABI sys_nanosleep(const sce_timespec* rqtp, sce_timespec* rmtp) {
       return 0;
     const i64 ns = base::Min<i64>(left.InMicroseconds() * 1000, 20'000'000);
     timespec req{0, static_cast<long>(ns)};
-    if (guest::Stopping() || ::nanosleep(&req, nullptr) != 0) {
+    if (guest::Stopping() || SignalInterrupts() ||
+        ::nanosleep(&req, nullptr) != 0) {
       if (rmtp) {
         const i64 remaining = base::Max<i64>(
             0, (deadline - base::TimeTicks::Now()).InMicroseconds() * 1000);

@@ -13,6 +13,8 @@ void PausePoint();
 bool OnGuestThread();
 const i32* PauseFlagAddress();
 void RegisterCode(uintptr_t address, mem_size size);
+// True when `pc` lies in guest code (or in this thread's JIT, under FEX).
+bool IsGuestCode(uintptr_t pc);
 void SetThreadExitHandler(void (*exit)());
 void ResetCodeRanges();
 
