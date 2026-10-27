@@ -1160,10 +1160,19 @@ static rhi::TextureView* ResolveTextureView(u64 base,
     image_entry.last_checked_frame = -1;
     image_entry.last_used_frame = g_frame.num;
     const u64 bytes = TextureLinearBytes(layout);
+    // Everything left is sampled this frame: binding the 1x1 default instead
+    // draws the frame wrong, so the budget gives way and the allocation
+    // itself is the limit.
     if (g_texture_cache.image_bytes + bytes > kTextureBudget &&
         (!EvictTextures(bytes, kTextureBudget) ||
-         g_texture_cache.image_bytes + bytes > kTextureBudget))
-      return nullptr;
+         g_texture_cache.image_bytes + bytes > kTextureBudget)) {
+      static int warned = 0;
+      if (!warned++)
+        BASE_LOGW("texcache",
+                  "this frame samples more than the {} MiB texture budget "
+                  "(DELTA_GPU_TEX_MB); going over it",
+                  (unsigned long long)(kTextureBudget >> 20));
+    }
     rhi::TextureDesc td;
     td.dim = is_3d ? rhi::TextureDim::k3D : rhi::TextureDim::k2D;
     td.format = (format);
