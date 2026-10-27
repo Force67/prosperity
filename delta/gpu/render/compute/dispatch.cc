@@ -1149,7 +1149,7 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
         MarkPending(e);
         e.rt_sourced = false;
         e.staged_stamp = ++g_cs.dirty_stamp;
-        if (ci.res[i].written && (stage_bytes || !ci.res[i].image_staging))
+        if (ci.res[i].written)
           CaptureStageShadow(e, copy_bytes);
       }
       e.gpu_dirty = false;

@@ -943,13 +943,30 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
     return false;
   rhi::CommandList* const c = g_cs.list;
   rhi::Buffer* src = e.buf;
+  const u64 staged_bytes = retile ? linear.size & ~u64(3) : n & ~u64(3);
+  const bool shadowed = e.shadow && e.staged_stamp &&
+                        e.shadow_stamp == e.staged_stamp &&
+                        e.shadow_bytes >= staged_bytes;
+  MergeOperand shadow{e.shadow, 0};
   if (retile) {
+    // Both sides are tiled over the same guest read, so a texel the dispatches
+    // left alone, and every byte between texels, compares equal and keeps the
+    // CPU's word: the title reuses an image's memory for its own heap.
     const u64 padded = (n + 3) & ~u64(3);
+    const u64 linear_bytes = (linear.size + 3) & ~u64(3);
     src = AcquireScratch(padded);
     if (!src || !RecordGuestRead(c, base, n, src))
       return false;
-    RecordImageTiling(c, *table, src, 0, padded, e.buf,
-                      (linear.size + 3) & ~u64(3), false);
+    RecordImageTiling(c, *table, src, 0, padded, e.buf, linear_bytes, false);
+    shadow.buffer = nullptr;
+    if (shadowed) {
+      rhi::Buffer* before = AcquireScratch(padded);
+      if (before && RecordGuestRead(c, base, n, before)) {
+        RecordImageTiling(c, *table, before, 0, padded, e.shadow, linear_bytes,
+                          false);
+        shadow.buffer = before;
+      }
+    }
   }
   base::Vector<base::Pair<u64, u64>> skip;
   for (const auto* spans : {&e.cpu_writes, &e.fill_kept})
@@ -958,12 +975,8 @@ bool GpuWriteBack(u64 base, CsRange& e, bool* kept) {
         skip.emplace_back(base::Max(lo, base), base::Min(hi, base + n));
   base::Sort(skip.begin(), skip.end());
   *kept = !skip.empty();
-  const bool shadowed = !retile && e.shadow && e.staged_stamp &&
-                        e.shadow_stamp == e.staged_stamp &&
-                        e.shadow_bytes >= (n & ~u64(3));
-  const MergeOperand shadow{e.shadow, 0};
   RecordGuestWrite(c, mirrored, base, n, src, skip, 0,
-                   shadowed ? &shadow : nullptr);
+                   shadowed && shadow.buffer ? &shadow : nullptr);
   e.fill_kept.clear();
   MarkPending(e);
   return true;
