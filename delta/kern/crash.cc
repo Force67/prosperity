@@ -73,7 +73,7 @@ CsRangeDescriber g_cs_range_describer = nullptr;
 void SetCsRangeDescriber(CsRangeDescriber fn) {
   g_cs_range_describer = fn;
 }
-static bool DescribeCsRange(u64 addr, char* out, size_t n) {
+bool DescribeCsRange(u64 addr, char* out, size_t n) {
   return g_cs_range_describer && g_cs_range_describer(addr, out, n);
 }
 

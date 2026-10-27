@@ -18,6 +18,9 @@ namespace kern {
 // the composition root: the answer lives in delta_gpu and kern may not name it.
 using CsRangeDescriber = bool (*)(u64 addr, char* out, size_t out_size);
 void SetCsRangeDescriber(CsRangeDescriber fn);
+// Asks the registered describer; false when none is registered or nothing
+// covers `addr`.
+bool DescribeCsRange(u64 addr, char* out, size_t out_size);
 
 // Install signal handlers that symbolize a guest fault (rip + frame-pointer
 // backtrace) to <module>+offset using the loaded module table, then exit.

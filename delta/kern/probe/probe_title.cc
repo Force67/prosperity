@@ -888,6 +888,13 @@ static void TreeWalkPeriodic() {
                 (unsigned long long)g_alloc_call_seq.load(), visited,
                 (unsigned long long)field, (unsigned long long)cur,
                 (unsigned long long)sz);
+      // A GPU write over the allocator's words is the emulator's doing.
+      char gpu[512];
+      for (const u64 at : {field, cur - 8})
+        BASE_LOGI("treewalk", "  {:#x}: {}", (unsigned long long)at,
+                  DescribeCsRange(at, gpu, sizeof(gpu))
+                      ? gpu
+                      : "no GPU range or write covers it");
       const u64 pos = g_alloc_ring_pos.load(base::memory_order_relaxed);
       const int have = (int)(pos < kAllocRing ? pos : kAllocRing);
       BASE_LOGI("treewalk",
