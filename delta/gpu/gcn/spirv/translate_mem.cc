@@ -2260,6 +2260,32 @@ static void EmitCsMimgStaged(Translator& t,
           : t.LAnd(logical_or(t.Eq(dfmt, t.U32(6)), t.Eq(dfmt, t.U32(7))),
                    t.Eq(nfmt, t.U32(7)));
   const Id f11_wide = packed11 ? t.m.ConstBool(false) : is_r11g11b10f;
+  // 2_10_10_10 UNORM: R in the low ten bits, alpha in the top two.
+  const Id is_rgb10a2 = t.rdna_sources
+                            ? t.m.ConstBool(false)
+                            : t.LAnd(t.Eq(dfmt, t.U32(9)), is_unorm);
+  const auto unpack10 = [&](Id word, int channel) {
+    const u32 bits = channel < 3 ? 10 : 2;
+    const Id field_value =
+        t.And(t.Shr(word, t.U32(channel * 10u)), t.U32((1u << bits) - 1));
+    return t.FMul(t.m.Emit(spv::Op::OpConvertUToF, t.t_f, {field_value}),
+                  t.F32(1.0f / float((1u << bits) - 1)));
+  };
+  const auto pack10 = [&](const Id comp[4]) {
+    Id word = t.U32(0);
+    for (int i = 0; i < 4; i++) {
+      const u32 max = i < 3 ? 1023 : 3;
+      const Id clamped = t.Ext2(GLSLstd450FMin,
+                                t.Ext2(GLSLstd450FMax, comp[i], t.F32(0.f)),
+                                t.F32(1.f));
+      const Id scaled = t.m.ExtInst(t.t_f, GLSLstd450RoundEven,
+                                    {t.FMul(clamped, t.F32(float(max)))});
+      word = t.Or(word,
+                  t.Shl(t.m.Emit(spv::Op::OpConvertFToU, t.t_u, {scaled}),
+                        t.U32(i * 10u)));
+    }
+    return word;
+  };
   // Unsigned small floats: 5 exponent bits over `m` mantissa bits.
   const auto uf_unpack = [&](Id word, u32 shift, u32 m) {
     const Id v = t.Shr(word, t.U32(shift));
@@ -2321,6 +2347,7 @@ static void EmitCsMimgStaged(Translator& t,
   supported_format = logical_or(supported_format, is_rg8);
   supported_format = logical_or(supported_format, is_rgba16);
   supported_format = logical_or(supported_format, is_r11g11b10f);
+  supported_format = logical_or(supported_format, is_rgb10a2);
   supported_format = logical_or(supported_format, is_raw_block);
   const Id supported_type = logical_or(
       logical_or(t.Eq(image_type, t.U32(9)), t.Eq(image_type, t.U32(8))),
@@ -2599,6 +2626,8 @@ static void EmitCsMimgStaged(Translator& t,
           packed11 ? t.m.Bitcast(t.t_u, unpack11(raw, i)) : float_component[i],
           value);
       value = t.SelectB(is_r32, i == 0 ? raw : t.U32(0), value);
+      value = t.SelectB(is_rgb10a2, t.m.Bitcast(t.t_u, unpack10(raw, i)),
+                        value);
       Id raw_half = t.And(t.Shr(i < 2 ? raw : raw_hi, t.U32((i & 1) * 16u)),
                           t.U32(0xFFFF));
       raw_half = t.SelectB(
@@ -2662,6 +2691,7 @@ static void EmitCsMimgStaged(Translator& t,
         v = t.SelectF(is_rg32_raw,
                       i < 2 ? t.m.Bitcast(t.t_f, fcomp[i]) : t.F32(0.f), v);
         v = t.SelectF(is_rgba32_raw, t.m.Bitcast(t.t_f, fcomp[i]), v);
+        v = t.SelectF(is_rgb10a2, unpack10(raw, i), v);
         out[i] = v;
       }
       Id values[4];
@@ -2948,6 +2978,16 @@ static void EmitCsMimgStaged(Translator& t,
                            t.Shl(uf_pack(comp[2], 5), t.U32(22)));
     }
     packed = t.SelectB(is_r11g11b10f, packed11_word, packed);
+    {
+      Id comp[4];
+      for (int i = 0; i < 4; i++)
+        comp[i] = unpack10(old_raw, i);
+      u32 reg = 0;
+      for (u32 i = 0; i < 4; i++)
+        if (dmask & (1u << i))
+          comp[i] = t.VgF(vdata + reg++);
+      packed = t.SelectB(is_rgb10a2, pack10(comp), packed);
+    }
     packed = t.SelectB(is_raw_block, blk[0], packed);
     CsSsboStore(t, sc, binding, dword_idx,
                 t.SelectB(is_r32, t.Vg(vdata), packed));
