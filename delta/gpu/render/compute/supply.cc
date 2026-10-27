@@ -871,7 +871,7 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e) {
   if ((!e.truth && !e.image_staging) || !e.gpu_dirty || !e.buf ||
       e.rt_seq == e.write_seq || !g_frame.recording)
     return RtRefreshMiss("state");
-  const ComputeInfo::Res& r = e.res;
+  const ComputeInfo::Res& r = RtShapeOf(e);
   const bool unpacked = (r.dfmt == 6 || r.dfmt == 7) && r.stage_elem_bytes == 16;
   const bool widened =
       (r.elem_bytes == 1 || r.elem_bytes == 2) && r.stage_elem_bytes == 4;
@@ -1007,7 +1007,7 @@ bool CsRefreshDepthFromCs(u64 base) {
     return false;
   DepthTarget& dt = depth_it->second;
   CsRange& e = it->second;
-  const ComputeInfo::Res& r = e.res;
+  const ComputeInfo::Res& r = RtShapeOf(e);
   if (!dt.texture || dt.layers != 1 || !(e.gpu_dirty || e.staged_clean) ||
       !e.buf ||
       !e.image_staging || e.rt_seq == e.write_seq || r.layers != 1 ||

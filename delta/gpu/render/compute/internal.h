@@ -185,10 +185,18 @@ struct CsRange {
   // dispatches changed; current while shadow_stamp == staged_stamp.
   rhi::Buffer* shadow = nullptr;
   u64 shadow_bytes = 0, shadow_stamp = 0;
+  // A truth range holds one guest span that dispatches view at different
+  // shapes; this is the image the last writing dispatch stored.
+  ComputeInfo::Res written_res;
+  bool has_written_res = false;
   const struct TileTable* mirror_table = nullptr;
   u64 dirty_stamp = 0;
   u64 dirty_render_serial = 0;
 };
+
+inline const ComputeInfo::Res& RtShapeOf(const CsRange& e) {
+  return e.truth && e.has_written_res ? e.written_res : e.res;
+}
 
 struct TileTable;
 

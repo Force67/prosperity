@@ -1567,6 +1567,10 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
                          : dirty_base;
       IndexDirtySpan(dirty_base, lo, RangeEnd(dirty_base, written));
     }
+    if (it->second.truth && res.image_staging && !parent_base[i]) {
+      it->second.written_res = res;
+      it->second.has_written_res = true;
+    }
     if (!it->second.gpu_dirty)
       it->second.dirty_frame = g_frame.num;
     it->second.gpu_dirty = true;

@@ -496,13 +496,14 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
     return true;
   if (g_frame.recording && CsRefreshRtInFrame(base, e))
     return true;
-  ActivateWrittenRtVariant(base, e.res.width, e.res.height);
+  const ComputeInfo::Res& res = RtShapeOf(e);
+  ActivateWrittenRtVariant(base, res.width, res.height);
   InFrameTarget live;
-  if (!LiveInFrameTarget(base, e.res.dfmt == 4, live))
+  if (!LiveInFrameTarget(base, res.dfmt == 4, live))
     return true;
   const CsAliasedImage& img = live.img;
   AliasedCopyPlan plan;
-  if (!PlanAliasedCopy(img, e.res, "writes", plan)) {
+  if (!PlanAliasedCopy(img, res, "writes", plan)) {
     // The live image may be a variant or alias kept under another base;
     // only an RT under this one is marked, never a new empty entry.
     if (const auto rt = g_rts.find(base); !img.is_depth && rt != g_rts.end()) {
@@ -513,7 +514,7 @@ bool UploadCsRangeToRt(u64 base, CsRange& e) {
     }
     return true;
   }
-  if (!RecordRtUploadInFrame(live, e.res, e, plan))
+  if (!RecordRtUploadInFrame(live, res, e, plan))
     return false;
   if (!img.is_depth) {
     if (const auto rt = g_rts.find(base); rt != g_rts.end()) {
