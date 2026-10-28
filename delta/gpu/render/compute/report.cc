@@ -264,6 +264,12 @@ bool DescribeMirrorBlock(u64 addr, char* out, size_t out_size) {
   }
   const OwnBlock& o = OwnAt(block);
   Dl_info site{};
+  const u64 written_by =
+      written && written->site && dladdr(written->site, &site) &&
+              site.dli_fbase
+          ? reinterpret_cast<u64>(written->site) -
+                reinterpret_cast<u64>(site.dli_fbase)
+          : 0;
   const u64 owned_by =
       o.owned_by && dladdr(o.owned_by, &site) && site.dli_fbase
           ? reinterpret_cast<u64>(o.owned_by) -
@@ -271,12 +277,13 @@ bool DescribeMirrorBlock(u64 addr, char* out, size_t out_size) {
           : 0;
   std::snprintf(out, out_size,
                 "mirror block %#llx state=%#llx gpu-written=[%#llx,%#llx) "
-                "(seq %llu) owned-by=+%#llx merged=%d",
+                "(seq %llu, by +%#llx) owned-by=+%#llx merged=%d",
                 (unsigned long long)block, (unsigned long long)state,
                 (unsigned long long)written_first,
                 (unsigned long long)(written ? written->end : 0),
                 (unsigned long long)(written ? written->seq : 0),
-                (unsigned long long)owned_by, (int)o.owned_merged);
+                (unsigned long long)written_by, (unsigned long long)owned_by,
+                (int)o.owned_merged);
   return true;
 }
 

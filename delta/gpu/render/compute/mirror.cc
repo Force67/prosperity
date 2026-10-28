@@ -835,7 +835,9 @@ bool RecordWordMerge(u64 run, u64 to, const MirrorShadow& shadow) {
 }
 }  // namespace
 
-static void RecordGuestWrite(rhi::CommandList* c,
+// Inlined so the mirror records each caller as the writer.
+[[gnu::always_inline]] static inline void RecordGuestWrite(
+    rhi::CommandList* c,
                              bool mirrored,
                              u64 base,
                              u64 n,
@@ -1050,13 +1052,14 @@ const MirrorWrite* MirrorWritten(u64 base, u64 bytes) {
 }
 
 namespace {
-void RecordMirrorWrite(u64 first, u64 bytes) {
+void RecordMirrorWrite(u64 first, u64 bytes, const void* site) {
   u64 end = first + bytes;
   auto it = g_cs.mirror_writes.upper_bound(first);
   if (it != g_cs.mirror_writes.begin()) {
     --it;
     if (end <= it->second.end) {
       it->second.seq = ++g_cs.mirror_seq;
+      it->second.site = site;
       return;
     }
     if (it->second.end < first)
@@ -1067,7 +1070,7 @@ void RecordMirrorWrite(u64 first, u64 bytes) {
     end = base::Max(end, it->second.end);
     it = g_cs.mirror_writes.erase(it);
   }
-  g_cs.mirror_writes[first] = {end, ++g_cs.mirror_seq};
+  g_cs.mirror_writes[first] = {end, ++g_cs.mirror_seq, site};
 }
 }  // namespace
 
@@ -1125,7 +1128,7 @@ void MirrorWriteBack(u64 base,
                      bool may_own,
                      const MirrorShadow* shadow) {
   const void* const site = __builtin_return_address(0);
-  RecordMirrorWrite(base, bytes);
+  RecordMirrorWrite(base, bytes, site);
   g_cs.mirror_self.push_back({base, base + bytes});
   const u64 end = base + bytes;
   may_own = may_own && (kMirrorOwnSplit || MirrorOwnable(base, bytes));
@@ -1200,7 +1203,7 @@ void MirrorWriteBack(u64 base,
 void MirrorBypassWritten(u64 base, u64 bytes) {
   // A new revision readers must take from guest memory: the mirror's copy of
   // these blocks is stale until the next copy-in.
-  RecordMirrorWrite(base, bytes);
+  RecordMirrorWrite(base, bytes, __builtin_return_address(0));
   MirrorNoteGuestWrites(base, base + bytes, false);
   NotePendingGuestWrite(base, base + bytes);
   NoteGuestWrite(base, bytes);

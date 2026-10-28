@@ -630,6 +630,8 @@ void CheckSpeculatedReads();
 
 struct MirrorWrite {
   u64 end = 0, seq = 0;
+  // The code that last wrote into the range, for a crash dump to name.
+  const void* site = nullptr;
 };
 
 const MirrorWrite* MirrorWritten(u64 base, u64 bytes);
