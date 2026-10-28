@@ -158,6 +158,55 @@ inline bool TrkRd64(u64 va, u64& out) {
 // and sentinel, a node points at chunk+0x10 (size word at node-8), children are
 // node[0]/node[1], branch is `newsz < cursz ? 0 : 1`, exact match ends the
 // walk.
+// The whole tree, depth first, for a fault elsewhere in the allocator (the
+// insert replay above needs the insert's live size): names the first link
+// that points at something that is no longer a free chunk, and its writer.
+void SotcScanFreeTree(u64 state) {
+  const u64 sentinel = state + 0x80;
+  u64 head = 0;
+  if (!TrkRd64(sentinel, head)) {
+    BASE_LOGI("freetree", "  scan: state {:#x} not mapped", state);
+    return;
+  }
+  u64 stack[512], fields[512];
+  int sp = 0, visited = 0;
+  stack[sp] = head;
+  fields[sp++] = sentinel;
+  while (sp > 0) {
+    --sp;
+    const u64 cur = stack[sp], field = fields[sp];
+    if (cur == sentinel || cur == 0)
+      continue;
+    if (++visited > 1 << 16) {
+      BASE_LOGI("freetree", "  scan: over {} nodes, stopped", visited);
+      return;
+    }
+    u64 sz = 0;
+    if (!TrkRd64(cur - 8, sz) || !(sz & ~7ull) || (sz & ~7ull) >= 0x8000000) {
+      BASE_LOGI("freetree",
+                "  scan: the link at {:#x} points at {:#x} (size word {:#x}), "
+                "not a free chunk; {} nodes visited",
+                field, cur, sz, visited);
+      char csr[512];
+      for (const u64 at : {field, cur})
+        BASE_LOGI("freetree", "    {:#x}: {}", at,
+                  DescribeCsRange(at, csr, sizeof(csr))
+                      ? csr
+                      : "no GPU range or write covers it");
+      return;
+    }
+    for (int c = 0; c < 2 && sp < 510; c++) {
+      u64 child = 0;
+      if (!TrkRd64(cur + c * 8, child))
+        continue;
+      stack[sp] = child;
+      fields[sp++] = cur + c * 8;
+    }
+  }
+  BASE_LOGI("freetree", "  scan: {} nodes, every link is a free chunk",
+            visited);
+}
+
 void SotcWalkFreeTree(u64 state, u64 newsz) {
   const u64 sentinel = state + 0x80;
   BASE_LOGI("freetree", "  state={:#x} sentinel={:#x} newsz={:#x}",
@@ -1001,6 +1050,9 @@ static void CrashHandler(int sig, siginfo_t* si, void* ucv) {
       const u64 off2 = ebase2 ? grip - ebase2 : 0;
       if (gexact && ebase2 && off2 >= 0x48a70 && off2 < 0x48b64)
         SotcWalkFreeTree(g[R15], g[RDX] & ~7ull);
+      else if (gexact && ebase2 && off2 >= 0x47000 && off2 < 0x4b000 &&
+               g[RDI] >= 0x8000000000ull && g[RDI] < 0x8700000000ull)
+        SotcScanFreeTree(g[RDI]);
     }
 
     // ---- SOTC AllocationTracker walk (diagnostic; see helper above) ----
