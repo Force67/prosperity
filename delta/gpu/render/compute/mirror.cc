@@ -891,7 +891,12 @@ static void RecordGuestWrite(rhi::CommandList* c,
   c->Barrier(rhi::kAccessCopyWrite | rhi::kAccessComputeWrite,
              kAccessComputeRW | kAccessCopyRW | rhi::kAccessHostRead);
   if (mirrored) {
-    MirrorWriteBack(base, n);
+    // Publish from the mirror against the same staged shadow, or every word
+    // the dispatch left alone goes out as the mirror's own copy of the guest,
+    // which can predate the CPU's stores (SotC's freed heap chunks).
+    const MirrorShadow staged{merge ? shadow->buffer : nullptr, base,
+                              merge ? shadow->offset : 0, n};
+    MirrorWriteBack(base, n, true, merge ? &staged : nullptr);
   } else {
     NotePendingGuestWrite(base, base + n);
     NoteGuestWrite(base, n);
