@@ -102,5 +102,10 @@ rhi::Buffer* StageIndirectArgs(rhi::CommandList* list,
                                u64 args,
                                u64 bytes,
                                u64* offset);
+rhi::Buffer* ZeroIndirectBases(rhi::CommandList* list,
+                               rhi::Buffer* args,
+                               u64 args_offset,
+                               bool indexed,
+                               u64* offset);
 
 }  // namespace gpu::render

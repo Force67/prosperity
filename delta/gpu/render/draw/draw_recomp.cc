@@ -1571,6 +1571,9 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
     if (!indirect_buf)
       return Decline(kNoRecomp);
     if (!mesh)
+      indirect_buf = ZeroIndirectBases(g_frame.list, indirect_buf,
+                                       indirect_off, indexed, &indirect_off);
+    if (!mesh)
       g_frame.list->Barrier(rhi::kAccessAllWrite, rhi::kAccessIndirectRead);
   }
   rhi::Buffer* mesh_tasks = nullptr;

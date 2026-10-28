@@ -1405,13 +1405,8 @@ rhi::Buffer* IndirectArgsBuffer(u64 args, u64* offset) {
 constexpr u64 kIndirectRing = 4ull << 20;
 constexpr u64 kIndirectEntry = 32;
 
-static rhi::Buffer* StageArgs(rhi::CommandList* list,
-                              u64 args,
-                              u64 bytes,
-                              u64* offset,
-                              u32 dst_access) {
-  if (bytes > kIndirectEntry || !gpu::IsReadableRangeCached(args, bytes))
-    return nullptr;
+// A slot in the indirect ring, or false when the ring is full this frame.
+static bool IndirectRingSlot(u64* offset) {
   if (!g_cs.indirect_ring) {
     rhi::BufferDesc desc;
     desc.size = kIndirectRing;
@@ -1422,16 +1417,27 @@ static rhi::Buffer* StageArgs(rhi::CommandList* list,
     desc.name = "indirect args";
     g_cs.indirect_ring = Device().CreateBuffer(desc);
     if (!g_cs.indirect_ring)
-      return nullptr;
+      return false;
   }
   if (g_cs.indirect_frame != g_frame.num) {
     g_cs.indirect_frame = g_frame.num;
     g_cs.indirect_frame_n = 0;
   }
   if (++g_cs.indirect_frame_n > kIndirectRing / kIndirectEntry / 4)
-    return nullptr;
+    return false;
   *offset = g_cs.indirect_head;
   g_cs.indirect_head = (g_cs.indirect_head + kIndirectEntry) % kIndirectRing;
+  return true;
+}
+
+static rhi::Buffer* StageArgs(rhi::CommandList* list,
+                              u64 args,
+                              u64 bytes,
+                              u64* offset,
+                              u32 dst_access) {
+  if (bytes > kIndirectEntry || !gpu::IsReadableRangeCached(args, bytes) ||
+      !IndirectRingSlot(offset))
+    return nullptr;
   if (!RecordGuestRead(list, args, bytes, g_cs.indirect_ring, *offset))
     return nullptr;
   list->Barrier(rhi::kAccessCopyWrite, dst_access);
@@ -1444,6 +1450,34 @@ rhi::Buffer* StageIndirectArgs(rhi::CommandList* list,
                                u64 bytes,
                                u64* offset) {
   return StageArgs(list, args, bytes, offset, rhi::kAccessIndirectRead);
+}
+
+DELTA_OPTION(bool, kIndirectZeroBase, "DELTA_GPU_INDIRECT_ZERO_BASE", true);
+
+// GCN never adds an indirect draw's start vertex or start instance to the
+// vertex and instance ids a shader sees: the CP writes them into user SGPRs
+// and the shader adds them if it wants them. Vulkan folds firstVertex,
+// vertexOffset and firstInstance into VertexIndex and InstanceIndex, so a
+// shader indexing by instance id would read another element. Draw from a
+// copy of the arguments with those fields zeroed.
+rhi::Buffer* ZeroIndirectBases(rhi::CommandList* list,
+                               rhi::Buffer* args,
+                               u64 args_offset,
+                               bool indexed,
+                               u64* offset) {
+  if (!kIndirectZeroBase)
+    return args;
+  u64 slot;
+  if (!IndirectRingSlot(&slot))
+    return args;
+  const u64 bytes = indexed ? 20 : 16;
+  list->Barrier(rhi::kAccessAllWrite, rhi::kAccessCopyRead);
+  list->CopyBuffer(g_cs.indirect_ring, slot, args, args_offset, bytes);
+  list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessCopyWrite);
+  list->FillBuffer(g_cs.indirect_ring, slot + (indexed ? 12 : 8), 8, 0);
+  list->Barrier(rhi::kAccessCopyWrite, rhi::kAccessIndirectRead);
+  *offset = slot;
+  return g_cs.indirect_ring;
 }
 
 bool BeginGuestPredicate(u64 flag) {
