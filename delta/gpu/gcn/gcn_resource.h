@@ -166,6 +166,16 @@ constexpr u32 kVsProbeSlots = 1u << 19;
 constexpr u32 kVsProbeMark = 0xA5000000u;
 extern bool g_bindless;
 
+// GCN's vertex and instance ids never include an indirect draw's base vertex
+// or start instance; the CP writes those into the user SGPRs the packet names.
+// With g_draw_parameters a vertex shader takes v0/v3 as VertexIndex -
+// BaseVertex and InstanceIndex - BaseInstance, and a user-data word holding
+// one of these sentinels reads as BaseVertex or BaseInstance instead, the
+// value the CP would have written.
+extern bool g_draw_parameters;
+constexpr u32 kBaseVertexSentinel = 0xB5E7E47Eu;
+constexpr u32 kStartInstanceSentinel = 0xB5E715E7u;
+
 constexpr u32 kBindlessSlots[2] = {16384, 4096};
 constexpr u32 kBindlessKeyWords[2] = {8, 4};
 constexpr u32 kBindlessStride[2] = {kBindlessKeyWords[0] + 3,

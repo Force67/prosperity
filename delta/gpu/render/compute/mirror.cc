@@ -1392,6 +1392,10 @@ bool CanDrawIndirect(u32 prim_type, bool indexed) {
          !(Device().caps().backend == rhi::Backend::kD3D12 && prim_type == 5);
 }
 
+bool DrawParametersSupported() {
+  return Device().caps().draw_parameters;
+}
+
 bool CanDrawMeshIndirect() {
   return Device().caps().mesh_shader;
 }
@@ -1465,7 +1469,7 @@ rhi::Buffer* ZeroIndirectBases(rhi::CommandList* list,
                                u64 args_offset,
                                bool indexed,
                                u64* offset) {
-  if (!kIndirectZeroBase)
+  if (!kIndirectZeroBase || gcn::g_draw_parameters)
     return args;
   u64 slot;
   if (!IndirectRingSlot(&slot))

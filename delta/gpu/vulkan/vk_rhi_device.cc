@@ -594,9 +594,12 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
 
   VkPhysicalDeviceVulkan13Features avail13{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+  VkPhysicalDeviceVulkan11Features avail11{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+  avail11.pNext = &avail13;
   VkPhysicalDeviceVulkan12Features avail12{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-  avail12.pNext = &avail13;
+  avail12.pNext = &avail11;
   VkPhysicalDeviceFeatures2 avail{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
   avail.pNext = &avail12;
   vkGetPhysicalDeviceFeatures2(phys, &avail);
@@ -627,6 +630,10 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
     f12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
     f12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
   }
+  VkPhysicalDeviceVulkan11Features f11{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+  f11.shaderDrawParameters = avail11.shaderDrawParameters;
+  f12.pNext = &f11;
   VkPhysicalDeviceVulkan13Features f13{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
   f13.pNext = &f12;
@@ -901,6 +908,7 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   caps_.dispatch_base = true;
   caps_.dispatch_indirect = true;
   caps_.draw_indirect = f.drawIndirectFirstInstance;
+  caps_.draw_parameters = f11.shaderDrawParameters;
   caps_.timestamps =
       lim.timestampComputeAndGraphics && native.timestamp_valid_bits != 0;
   caps_.timestamp_period_ns = lim.timestampPeriod;

@@ -153,6 +153,24 @@ void BindTexture(render::DrawInfo& d,
     masks.tex_uint |= 1u << slot;
 }
 
+// An indirect draw names the VS user SGPRs the CP fills with the arguments'
+// base vertex and start instance (SH register offsets, 0 for none). Writes
+// `values` there: the arguments themselves when the CPU read them, or the
+// sentinels for which the shader substitutes its draw parameters when they
+// stay in GPU memory.
+void WriteIndirectBaseSgprs(const DrawPacket& packet,
+                            const u32 values[2],
+                            render::DrawInfo& d) {
+  constexpr u32 kVsUserData0 = mmSPI_SHADER_USER_DATA_VS_0 - 0x2C00;
+  if (packet.count < 3)
+    return;
+  const u32 locs[2] = {packet.body[1] & 0xFFFF, packet.body[2] & 0xFFFF};
+  for (u32 k = 0; k < 2; k++)
+    if (locs[k] >= kVsUserData0 && locs[k] < kVsUserData0 + 16)
+      d.vs_user_data[locs[k] - kVsUserData0] = values[k];
+}
+
+
 void ReadIndirectArgs(render::Renderer& renderer,
                       const DrawPacket& packet,
                       u64 args,
@@ -185,6 +203,9 @@ void ReadIndirectArgs(render::Renderer& renderer,
   }
   if (a[1])
     d.instance_count = a[1];
+  const bool indexed = op != IT_DRAW_INDIRECT;
+  const u32 bases[2] = {indexed ? a[3] : a[2], indexed ? a[4] : a[3]};
+  WriteIndirectBaseSgprs(packet, bases, d);
 }
 
 void ResolveIndexBuffer(render::Renderer& renderer,
@@ -924,6 +945,12 @@ bool BuildDrawInfo(render::Renderer& renderer,
     d.vertex_count = auto_vertex_count;
   if (status == RecompStatus::kOk && d.recomp->writes_layer)
     d.rt_layers = ((regs[mmCB_COLOR0_VIEW] >> 13) & 0x7FF) + 1;
+
+  if (d.indirect_args && gcn::g_draw_parameters && !has_gs) {
+    const u32 sentinels[2] = {gcn::kBaseVertexSentinel,
+                              gcn::kStartInstanceSentinel};
+    WriteIndirectBaseSgprs(packet, sentinels, d);
+  }
 
   TraceBlitDraw(regs, d, vs_addr, ps_addr);
   TraceDrawList(regs, d, vs_addr, ps_addr, fetch_addr, status);

@@ -539,6 +539,8 @@ struct Caps {
   bool dispatch_base = false;
   bool dispatch_indirect = false;
   bool draw_indirect = false;
+  // BaseVertex/BaseInstance in vertex shaders (shaderDrawParameters).
+  bool draw_parameters = false;
   bool unified_memory = false;
   bool debug_labels = false;
   bool timestamps = false;

@@ -2668,9 +2668,31 @@ bool TranslateVs(const Program& program,
     t.m.Decorate(instance_index, spv::Decoration::BuiltIn,
                  {static_cast<u32>(spv::BuiltIn::InstanceIndex)});
     iface.push_back(instance_index);
-    const Id vertex = t.m.Load(t.t_u, vertex_index);
+    Id vertex = t.m.Load(t.t_u, vertex_index);
+    Id instance = t.m.Load(t.t_u, instance_index);
+    if (g_draw_parameters) {
+      t.m.Capability(spv::Capability::DrawParameters);
+      const auto builtin = [&](spv::BuiltIn which) {
+        const Id v = t.m.Variable(p_in_u, spv::StorageClass::Input);
+        t.m.Decorate(v, spv::Decoration::BuiltIn, {static_cast<u32>(which)});
+        iface.push_back(v);
+        return t.m.Load(t.t_u, v);
+      };
+      const Id base_vertex = builtin(spv::BuiltIn::BaseVertex);
+      const Id base_instance = builtin(spv::BuiltIn::BaseInstance);
+      vertex = t.Sub(vertex, base_vertex);
+      instance = t.Sub(instance, base_instance);
+      for (u32 i = 0; i < 16; i++) {
+        const Id sg = t.Sg(i);
+        const auto pick = [&](u32 sentinel, Id value, Id other) {
+          return t.m.Emit(spv::Op::OpSelect, t.t_u,
+                          {t.Eq(sg, t.U32(sentinel)), value, other});
+        };
+        t.SetSg(i, pick(kStartInstanceSentinel, base_instance,
+                        pick(kBaseVertexSentinel, base_vertex, sg)));
+      }
+    }
     t.SetVg(0, vertex);
-    const Id instance = t.m.Load(t.t_u, instance_index);
     t.SetVg(1, instance);
     t.SetVg(3, instance);
     if (g_vs_probe && t.program_base == VsProbeShader()) {

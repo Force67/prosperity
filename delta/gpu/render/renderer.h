@@ -99,6 +99,7 @@ void MirrorRefreshWritten();
 void MirrorRefreshCached();
 bool GpuIndirectArgs(u64 args, u64 bytes);
 bool CanDrawIndirect(u32 prim_type, bool indexed);
+bool DrawParametersSupported();
 bool CanDrawMeshIndirect();
 bool BeginGuestPredicate(u64 flag);
 void EndGuestPredicate();

@@ -46,6 +46,7 @@
 
 namespace {
 DELTA_OPTION(bool, kCeOn, "DELTA_GPU_CE", true);
+DELTA_OPTION(bool, kDrawParameters, "DELTA_GPU_DRAW_PARAMETERS", true);
 DELTA_OPTION(u32, kWaitTraceFrom, "DELTA_GPU_WAITTRACE", 0);
 DELTA_OPTION(bool, kRenderThread, "DELTA_GPU_RENDER_THREAD", true);
 DELTA_OPTION(bool, kNoCopy, "DELTA_GPU_NODMACOPY", false);
@@ -1136,6 +1137,8 @@ void StartRendererOnce(render::Renderer& renderer) {
   render::Init(renderer);
   render::bindless::SetResolvers(&BindlessTexture, &BindlessSampler);
   gcn::g_bindless = renderer.available() && render::bindless::Supported();
+  gcn::g_draw_parameters = kDrawParameters && renderer.available() &&
+                           render::DrawParametersSupported();
   render::RecordComputeInFrame();
   if (LabelsAtGpu())
     render::DeferLabelsToGpu();

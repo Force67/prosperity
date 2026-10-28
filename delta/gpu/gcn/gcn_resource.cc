@@ -53,6 +53,7 @@ void (*g_overlay_guest_range)(u64 address, u32 dwords, u32* values) = nullptr;
 u64 g_direct_table = 0, g_direct_misses = 0;
 u64 g_vs_probe = 0;
 bool g_bindless = false;
+bool g_draw_parameters = false;
 
 namespace {
 
