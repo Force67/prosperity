@@ -6,7 +6,8 @@
  * goes through a stub that records (import, caller) in a ring and jumps on;
  * a reporter thread prints the first calls of each import and, every few
  * seconds, which ones are hot. Answers "what does the title do after this
- * input" without a debugger. x86-64 native backend only.
+ * input" without a debugger. Under FEX each traced import is wrapped with a
+ * return hook instead, and its first calls are logged with their result.
  */
 
 #include "guest/session.h"
@@ -32,6 +33,8 @@
 
 #if defined(DELTA_BACKEND_NATIVE)
 #include <xbyak.h>
+#else
+#include "cpu/backend.h"
 #endif
 
 namespace {
@@ -142,8 +145,26 @@ void Reporter(double start_s) {
 
 }  // namespace
 
+#if !defined(DELTA_BACKEND_NATIVE)
+// Called by the FEX return hook after the import returns.
+void FexImportLogger(u64 index, u64 a0, u64 a1, u64 a2, u64 a3, u64 ret) {
+  Traced& t = g_traced[index];
+  t.calls.fetch_add(1, base::memory_order_relaxed);
+  if (!g_armed.load(base::memory_order_relaxed) ||
+      t.named.fetch_add(1, base::memory_order_relaxed) >= kNamedCalls)
+    return;
+  char args[4][72];
+  const u64 values[4] = {a0, a1, a2, a3};
+  for (int i = 0; i < 4; i++)
+    FormatArg(values[i], args[i], sizeof(args[i]));
+  BASE_LOGI("imptrace", "{} -> {} ({}, {}, {}, {}) = {:#x} tid={}", t.name,
+            t.target, args[0], args[1], args[2], args[3],
+            static_cast<unsigned long long>(ret),
+            static_cast<long>(::syscall(SYS_gettid)));
+}
+#endif
+
 uintptr_t MaybeTraceImport(const char* nid_name, uintptr_t real_addr) {
-#if defined(DELTA_BACKEND_NATIVE)
   const char* spec = kImportTrace;
   if (!spec || !real_addr)
     return real_addr;
@@ -183,6 +204,12 @@ uintptr_t MaybeTraceImport(const char* nid_name, uintptr_t real_addr) {
     return true;
   }();
   (void)started;
+#if !defined(DELTA_BACKEND_NATIVE)
+  const uintptr_t wrapped = cpu::MakeGuestReturnHook(
+      reinterpret_cast<void*>(real_addr), index,
+      reinterpret_cast<void*>(&FexImportLogger), t.name);
+  return wrapped ? wrapped : real_addr;
+#else
 
   // Entered by the PLT's jump, so [rsp] is the guest's return address and rsp
   // is 8 mod 16. Keep every argument register, rax (a variadic call's vector
@@ -216,9 +243,6 @@ uintptr_t MaybeTraceImport(const char* nid_name, uintptr_t real_addr) {
   auto* stub = new Stub(index, real_addr);
   g_stubs.push_back(stub);
   return reinterpret_cast<uintptr_t>(stub->getCode());
-#else
-  (void)nid_name;
-  return real_addr;
 #endif
 }
 
