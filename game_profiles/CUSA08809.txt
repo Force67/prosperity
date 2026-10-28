@@ -1,4 +1,48 @@
 // SHADOW OF THE COLOSSUS (CUSA08809, PS4)
+//
+// STATUS (2026-10-28, aarch64/FEX on a GB10): boots, plays the logos, the
+// attract demo, the title and menus, and the whole New Game opening into
+// gameplay with no profile options set. A 25-minute scripted run
+// (DELTA_PAD_SCRIPT pressing Cross every 10 s) gets through without the
+// allocator crash. Cutscenes run 10-30 fps against the title's 30.
+//
+// THE NEW-GAME ALLOCATOR CRASH, CLOSED (2026-10-28). Every "stale free-tree
+// link" was the GPU publishing a dispatch's write over heap memory the title
+// had already freed. The crash dump and DELTA_SOTC_TREEWALK now name the
+// writer of the stale link, and that is how each route below was found:
+//  - staged images were retiled back whole instead of merged per texel;
+//  - a staged buffer was merged into the mirror, then the mirror was COPIED
+//    to the guest, unchanged words included (the 32 KiB compute buffers this
+//    title mallocs from the same dmem heap as its tree);
+//  - WRITE_DATA labels were published before the dispatch's write landed,
+//    and the title frees the buffer once that label lands;
+//  - mirror ownership of blocks the write only partly covers, and of blocks
+//    whose copy-in was skipped as fresh before CPU stores were collected.
+// The concurrency/JIT/ALLOCLOCK investigation below is history: the cause
+// was emulator-side all along, as the "nine guest writers" census could not
+// see (the GPU's writes go through the host import, not the guest's stores).
+//
+// RENDERING FIXED THE SAME DAY: the deferred lighting resolve writes a
+// 2_10_10_10 target from compute (was zero-filled: black scene); the 960x540
+// history buffer aliased with a 1024x1024 shadow map took its compute
+// result in the shadow map's shape and accumulated to white; cutscenes
+// sampling more than the 1 GiB texture budget fell back to the default
+// texture. OPEN: characters (Wander, Dormin's light) show white speckles and
+// solid white shapes; some cutscene skies posterize.
+//
+// PERFORMANCE (2026-10-28, GB10). Attract demo 60-200 s: median 23.5 fps
+// (p75 26), the title's cap is 30. Neither side is saturated: GPU 40-50%
+// util at 30 W, the render thread ~56% busy, the four BPE job threads
+// 60-78%. GPU spans (DELTA_GPU_LISTPROF): barriers 7-9 ms, tiling 6.5,
+// the title's own compute 6.3, draws 2.8, host copies 2.4, mirror-in 1.7;
+// ~57 command lists a frame. The serialising cost is 4-6 CPU<-GPU round
+// trips a frame (DELTA_GPU_CSSYNC: "writeback ... by reader: desc", 9-11
+// ms): draws whose T#/V# live in tables async compute rewrites every frame.
+// SpeculateGuestRead declines them as volatile (their values change each
+// frame). Removing that wait means resolving those descriptors on the GPU.
+// DELTA_SOTC_7CORE=1 (a 7th job worker) measured no gain.
+//
+// Older notes follow.
 // Boots, loads its modules, returns from LoadInitialWorld and runs the main
 // loop with the renderer live, and RENDERS ITS INTRO: the "Sony Interactive
 // Entertainment presents" card and the JAPAN Studio logo both come up with
@@ -610,3 +654,76 @@
 // was refuted by the 850ns mean itself: one cv.wait_for tick is 2ms, so if even
 // 1% of calls slept the mean would be ~20us. Nothing blocks, so there is no
 // herd. Do not re-derive this.
+
+// DESCRIPTOR WAITS GONE; GAMEPLAY GPU-BOUND (2026-10-28). Gameplay in the
+// shrine went 12.7 -> 15.3 fps and the attract demo holds the 30 fps cap once
+// two kinds of descriptor-walk wait were removed (DELTA_GPU_CSSYNC: 6.1 -> 0.0
+// syncs/frame): compute texture walks now run inside a ScalarReplayScope, and
+// the wrap-copy kernel at 0x805380fc00 (dst[i] = src[i % n], 13x a frame into
+// the constants slot at 0x8052e10110) has its output worked out on the CPU
+// (DELTA_GPU_KNOWN_WRITES, verify with DELTA_GPU_KNOWN_VERIFY=1).
+// What is left is GPU time: ~63-75 ms/frame in ~170 lists, 1430 dispatches.
+// DELTA_GPU_LISTPROF spans: barrier 17.8, dispatch 14.1, tiling 8.0, mirror
+// 5.8 + mirror-in 4.0, copy-host 5.1. Halving submits with
+// DELTA_GPU_CS_BATCH_CAP=16 (200 -> 110/frame) gave 14.8 vs 15.3 fps: the
+// submit count is not the limit, keep the cap at 8.
+//
+// RENDER BUGS, WHAT IS ESTABLISHED. Textures are not the cause: BC textures
+// decode correctly (Wander's hair dumps fine) and "all zero" 2048^2 maps in
+// gpu_capture.py zero are streamed ones bound at base_mip 3, whose top mips are
+// legitimately empty. The motion-vector target (RG16Float at 0x8068838000)
+// is garbage: long screen-wide streaks and nonzero motion on still characters.
+// Bad motion vectors make TAA drop its history, which leaves the dithered
+// hair/cloth stipple visible as the black/white stripes on Wander and Mono.
+// The magenta wedge is already stretched geometry in the G-buffer, and
+// cutscene shrine geometry shows exploded spikes, so the root is vertex data.
+// The streaks come from draws 268-297: vs 0x8052ee3600, no vertex buffers,
+// geometry fetched in the shader from 1.9-9.6 MB buffers whose first 64 KB of
+// guest memory read zero (GPU-written), constants from 0x8052e10110.
+// Turning off DELTA_GPU_CBUF_BIND/DIRECT_BIND/RING_DEDUP does not remove the
+// spikes, so constant-buffer binding is ruled out.
+// FIXED (41ae2325): those draws are DRAW_INDIRECT, and the shader indexes its
+// element by v3 = instance id. GCN never adds the args' start vertex/instance
+// to v0/v3 (the CP writes them into user SGPRs); Vulkan folds them into
+// VertexIndex/InstanceIndex. Zeroing them in a copy of the args
+// (DELTA_GPU_INDIRECT_ZERO_BASE) fixed the striped Wander/Mono, the sword and
+// most of the spikes. Not yet done: the CP's writes of those values into the
+// user SGPRs named by the packet (body[1]/body[2]), for shaders that add them.
+// FIXED (a4b97aaf): DRAW_INDEX_INDIRECT names start_inst_loc 0x4e (VS user
+// SGPR 2); SotC packs a per-draw id there (low half: instance matrix, high
+// half: block of a shared packed vertex stream). Shaders now read BaseVertex/
+// BaseInstance for sentinel user-data words (DELTA_GPU_DRAW_PARAMETERS). The
+// magenta wedge and green line are gone in the shrine and birds render.
+// FIXED (e87880f3): the wedge kept coming back in about half the runs, plus
+// a green line, a long diagonal line and dark triangles across the moon in
+// the intro. TranslateVs made every idxen buffer_load in a VS a vertex input
+// at VertexIndex; the distant terrain (vs 0x80e019c000) pulls corner vertices
+// at indices it loads from memory. Only loads indexed by an untouched v0 are
+// vertex inputs now (DELTA_GPU_VERTEX_INPUT_BY_V0). Three gameplay runs and the
+// intro moon shot are clean.
+// The shrine view still varies run to run (sometimes a flat fog wall instead
+// of the mountains); not yet known whether that is weather or a bug.
+// TRIED AND DROPPED: replacing the wrap-copy dispatch with a queued
+// UpdateBuffer write of its known output (via GpuWriteGuest). Correct per
+// DELTA_GPU_KNOWN_VERIFY, dispatches 1444 -> 1182/frame, but 14.9 -> 15.0 fps,
+// and the one run with it showed the wedge. When the slot is not
+// mirror-owned, the write's revision is the batch id, which all 13 writes in
+// a batch share, so the per-frame staged-cbuf cache may reuse stale constants.
+// Per-draw snapshots: +DELTA_GPU_CAPTURE_AT=<lo>-<hi> +DELTA_GPU_CAPTURE_EXIT=1
+// with a long timeout (snapshots are slow; a 450 s run was cut off mid-frame).
+
+// WHERE THE GAMEPLAY FRAME GOES (2026-10-28, after e87880f3). ~15 fps, GPU
+// ~63 ms in ~170 frame-list submissions plus ~35 compute batches. The G-buffer
+// pass is broken into a render pass per draw: 445 regions for 482 draws, each
+// break re-barriering 7 color targets plus depth and stencil. EndRegion's
+// callers per frame: MirrorSupplyBuffer ~70% (a draw's cbuf/raw data copied
+// out of the mirror into the staging ring; copies are illegal in a pass),
+// GatherDrawBuffer ~12%, SubmitFrameChunk ~8%, MakeComputeBufferReadable ~4%.
+// The hot cbuf is the wrap-copy slot 0x8052e10110, rewritten by a compute
+// dispatch between draws ~120x a frame, so those draws break the pass anyway.
+// Binding the mirror directly as the UBO (instead of copying) does not apply:
+// the slot is 16-byte aligned and NVIDIA needs 64 for UBO offsets; tried,
+// no change in breaks or fps, reverted. Real fix needs one of: cbufs read as
+// SSBOs with a dword bias (16-byte alignment), or the draw's known cbuf
+// contents (DELTA_GPU_KNOWN_WRITES has them) written into the host-mapped ring
+// so the draw no longer depends on the GPU copy at all.
