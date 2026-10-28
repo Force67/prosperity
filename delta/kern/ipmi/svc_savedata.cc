@@ -17,6 +17,7 @@
 #include "base/environment_variables.h"
 #include "guest/session.h"
 #include "kern/ipmi/savedata.h"
+#include "base/logging.h"
 #include "kern/ipmi/services.h"
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_event_flag.h"
@@ -31,6 +32,7 @@
 
 namespace {
 DELTA_OPTION(const char*, kSavedataDir, "DELTA_SAVEDATA_DIR", nullptr);
+DELTA_OPTION(bool, kSavedataTrace, "DELTA_SAVEDATA_TRACE", false);
 }
 
 namespace kern::ipmi {
@@ -1638,6 +1640,9 @@ struct SaveData : Service {
           break;
       }
       state.pending.erase(it);
+      if (kSavedataTrace)
+        BASE_LOGI("savedata", "command {} -> {:#x}", command,
+                  static_cast<u32>(result));
       if (result) {
         inv.SetResult(result);
         return;

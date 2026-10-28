@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "base/logging.h"
 #include "guest/session.h"
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_event_flag.h"
@@ -231,9 +232,13 @@ bool InvokeCommonDialog(Invocation& inv) {
       fail(SysError::eNOENT);
     return true;
   }
-  if (inv.Method() == 0x30033)
-    inv.SetResult(Launch(it->second));
-  else
+  if (inv.Method() == 0x30033) {
+    const i32 result = Launch(it->second);
+    if (result)
+      BASE_LOGW("cdlg", "save data dialog {} refused: {}", it->second.name.c_str(),
+                result);
+    inv.SetResult(result);
+  } else
     it->second.active = false;
   return true;
 }
