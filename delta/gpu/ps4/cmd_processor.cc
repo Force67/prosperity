@@ -374,7 +374,11 @@ void HandleWriteData(const u32* body, u32 count) {
       std::memcpy(reinterpret_cast<void*>(address), words.data(),
                   words.size() * 4);
     };
-    if (HeldWriteOverlaps(address, (u64)dwords * 4))
+    // Shadow of the Colossus frees a compute buffer once the WRITE_DATA after
+    // its dispatch lands; published early, the dispatch's writes landed on
+    // the heap's free-tree links instead.
+    if (HeldWriteOverlaps(address, (u64)dwords * 4) ||
+        render::GuestWritesPending())
       WriteAfterGpu(write);
     else
       write();

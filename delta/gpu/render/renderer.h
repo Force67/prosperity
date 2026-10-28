@@ -64,6 +64,10 @@ void DeferLabelsToGpu();
 bool WaitPendingGuestWrites(u64 base, u64 bytes);
 u64 GuestWritePublishBatch();
 u64 SubmitRecordedWork();
+// Whether a dispatch's guest-memory writes are still to land (published by a
+// batch not yet finished, or owned and not yet protected): a label the guest
+// sees now would let it touch that memory first.
+bool GuestWritesPending();
 void SubmitForPublishedLabels();
 void ReportBatchState();
 bool WaitBatch(u64 batch);

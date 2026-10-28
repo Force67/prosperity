@@ -390,6 +390,10 @@ void ReportBatchState() {
             writes.c_str());
 }
 
+bool GuestWritesPending() {
+  return !g_cs.pending_guest_writes.empty() || !g_cs.own_unsubmitted.empty();
+}
+
 u64 SubmitRecordedWork() {
   if (g_cs.batch_open && !CsBatchSubmit())
     return 0;
