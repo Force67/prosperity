@@ -751,6 +751,21 @@ i32 MountHost(ClientState& state,
   return 0;
 }
 
+// A save written before quotas were recorded reports the 60000-block
+// default; titles that sum their saves (Minecraft, Shadow of the Colossus)
+// then refuse to create another. Record the size the title asks for, or
+// what is already used.
+i32 RecordMissingQuota(const base::String& host, bool exists, u64 blocks) {
+  const auto quota = host + "/.sce_quota.bin";
+  std::error_code error;
+  u64 total, free;
+  if (!exists || std::filesystem::exists(quota.c_str(), error) || error ||
+      save_storage::Info(host, total, free))
+    return 0;
+  const u64 size = std::max<u64>({blocks, total - free, 96});
+  return Store(quota, &size, 8);
+}
+
 i32 Mount(ClientState& state, const Pending& pending, std::vector<u8>& reply) {
   const auto* data = pending.data.data();
   base::String host;
@@ -759,8 +774,11 @@ i32 Mount(ClientState& state, const Pending& pending, std::vector<u8>& reply) {
     return result;
   if (data[0x434])
     return kUnsupported;
+  const u64 blocks = Read<u64>(data, 0x488);
+  if (const auto result = RecordMissingQuota(host, exists, blocks))
+    return result;
   return MountHost(state, host, exists, Read<u32>(data, 0x490),
-                   Read<u32>(data, 0x494), Read<u64>(data, 0x488), reply);
+                   Read<u32>(data, 0x494), blocks, reply);
 }
 
 // The PS5 library's mount: user at 0, directory at 4, blocks at 0x28 and the
@@ -785,18 +803,8 @@ i32 MountPs5(ClientState& state,
   if (mode & 0x20)
     mode &= ~4u;
   const u64 blocks = std::max<u64>(Read<u64>(data, 0x28), 96);
-  // A save written before quotas were recorded reports the 60000-block
-  // default; Minecraft sums those over its saves and refuses to create a
-  // world. Record the size the title asks for, or what is already used.
-  const auto quota = host + "/.sce_quota.bin";
-  std::error_code error;
-  u64 total, free;
-  if (exists && !std::filesystem::exists(quota.c_str(), error) && !error &&
-      !save_storage::Info(host, total, free)) {
-    const u64 size = std::max(blocks, total - free);
-    if (const auto result = Store(quota, &size, 8))
-      return result;
-  }
+  if (const auto result = RecordMissingQuota(host, exists, blocks))
+    return result;
   return MountHost(state, host, exists, mode & 0x2f, mode & 0x27, blocks,
                    reply);
 }
@@ -1083,11 +1091,12 @@ i32 Search(const Pending& pending,
     if (const auto result = StorageInfo(path, entry.blocks, entry.free_blocks))
       return result;
     // A save written before quotas were recorded would report the 60000-block
-    // default, and Minecraft refuses to open any world once those add up.
-    // Report what it uses until its first mount records a size.
+    // default, and Minecraft refuses to open any world once those add up;
+    // Shadow of the Colossus sums its saves against 1 GiB and refuses to
+    // create a new game. Report what it uses until a mount records a size.
     std::error_code quota_error;
-    if (ps5 && !std::filesystem::exists((path + "/.sce_quota.bin").c_str(),
-                                        quota_error)) {
+    if (!std::filesystem::exists((path + "/.sce_quota.bin").c_str(),
+                                 quota_error)) {
       const u64 used = entry.blocks - entry.free_blocks;
       entry.blocks = std::max<u64>(used, 96);
       entry.free_blocks = entry.blocks - used;
