@@ -73,6 +73,7 @@ bool RecompileComputeSpirv(const u32*,
 
 namespace {
 DELTA_OPTION(u32, kCfgMaxIter, "DELTA_GPU_CFG_MAXITER", 16384);
+DELTA_OPTION(bool, kVertexInputByV0, "DELTA_GPU_VERTEX_INPUT_BY_V0", true);
 DELTA_OPTION(const char*, kShDisAddr, "DELTA_GPU_SHDIS_ADDR", nullptr);
 DELTA_OPTION(bool, kGpuNokill, "DELTA_GPU_NOKILL", false);
 DELTA_OPTION(const char*, kProbePs, "DELTA_GPU_PROBE_PS", nullptr);
@@ -2539,6 +2540,38 @@ void EmitPackedAttr(Translator& t,
   }
 }
 
+// Whether `inst` may write v0, the vertex id, read conservatively: a VGPR
+// destination of any width is taken to span four registers.
+bool MayWriteV0(const Inst& inst) {
+  const u32 w = inst.raw[0], w1 = inst.raw[1];
+  u32 first;
+  switch (inst.enc) {
+    case Enc::kVop1:
+    case Enc::kVop2:
+      first = (w >> 17) & 0xFF;
+      break;
+    case Enc::kVop3:
+    case Enc::kVop3p:
+      first = w & 0xFF;
+      break;
+    case Enc::kVintrp:
+      first = (w >> 18) & 0xFF;
+      break;
+    case Enc::kMubuf:
+    case Enc::kMtbuf:
+    case Enc::kMimg:
+      first = (w1 >> 8) & 0xFF;
+      break;
+    case Enc::kDs:
+    case Enc::kFlat:
+      first = (w1 >> 24) & 0xFF;
+      break;
+    default:
+      return false;
+  }
+  return first == 0;
+}
+
 bool TranslateVs(const Program& program,
                  const u32* vs_user_data,
                  const base::HashSet<u32>& flat_attrs,
@@ -2555,8 +2588,15 @@ bool TranslateVs(const Program& program,
   const base::Vector<u8> reachable = ComputeReachability(program);
   t.spill_vgprs = PlanLaneSpills(program, reachable.data());
   base::Vector<FetchAttr> direct_attrs;
+  // A load becomes a vertex input only when it indexes by the vertex id
+  // itself; one indexed by anything else (a vertex-pulling shader's loaded
+  // indices, v0 plus a per-draw offset) stays a buffer load.
+  bool v0_written = false;
   for (u32 i = 0; i < program.size(); i++) {
     const Inst& inst = program[i];
+    const bool v0_was_written = v0_written;
+    if (reachable[i] && MayWriteV0(inst))
+      v0_written = true;
     if (!reachable[i] || (inst.enc != Enc::kMubuf && inst.enc != Enc::kMtbuf) ||
         inst.opcode > 0x03)
       continue;
@@ -2564,7 +2604,8 @@ bool TranslateVs(const Program& program,
     const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
     const u32 srsrc = ((w1 >> 16) & 0x1F) * 4;
     const u32 soffset = (w1 >> 24) & 0xFF;
-    if (!idxen || offen || soffset != 128)
+    if (!idxen || offen || soffset != 128 ||
+        (kVertexInputByV0 && ((w1 & 0xFF) != 0 || v0_was_written)))
       continue;
     const bool typed = inst.enc == Enc::kMtbuf;
     direct_attrs.push_back({static_cast<u32>(direct_attrs.size()),
