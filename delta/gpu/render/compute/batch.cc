@@ -19,6 +19,7 @@
 #include "gpu/render/frame.h"
 #include "gpu/render/debug/gpu_timeline.h"
 #include "gpu/render/image/render_target.h"
+#include "gpu/render/renderer_state.h"
 #include "guest/session.h"
 #include "profile/profile.h"
 
@@ -395,6 +396,8 @@ bool GuestWritesPending() {
 }
 
 u64 SubmitRecordedWork() {
+  if (!g_backend.device)
+    return 0;
   if (g_cs.batch_open && !CsBatchSubmit())
     return 0;
   if (g_frame.recording && g_frame.draws != g_frame.draws_at_chunk &&

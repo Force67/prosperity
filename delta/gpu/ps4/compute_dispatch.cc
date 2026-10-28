@@ -883,6 +883,8 @@ void DispatchComputeDirect(render::Renderer& renderer,
   // An earlier DMA_DATA in the stream can patch the group counts in place
   // (DRIVECLUB copies GPU-computed counts over placeholders), so they are only
   // valid when the GPU reaches the packet: read them there.
+  if (!renderer.available())
+    return;
   const u64 args = reinterpret_cast<uintptr_t>(body);
   if (count >= 4 && WalkReadWouldWait(args, 12) &&
       render::CanDispatchIndirect(args)) {
@@ -903,7 +905,7 @@ void DispatchComputeIndirect(render::Renderer& renderer,
                              const u32* body,
                              u32 count,
                              u64 argument_base) {
-  if (count < 2 || (count == 2 && !argument_base))
+  if (!renderer.available() || count < 2 || (count == 2 && !argument_base))
     return;
   const u64 args = count >= 3 ? body[0] | (u64(body[1] & 0xff) << 32)
                               : argument_base + body[0];

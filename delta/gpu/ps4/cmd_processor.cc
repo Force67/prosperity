@@ -1135,7 +1135,7 @@ void StartRendererOnce(render::Renderer& renderer) {
   g_renderer_started = true;
   render::Init(renderer);
   render::bindless::SetResolvers(&BindlessTexture, &BindlessSampler);
-  gcn::g_bindless = render::bindless::Supported();
+  gcn::g_bindless = renderer.available() && render::bindless::Supported();
   render::RecordComputeInFrame();
   if (LabelsAtGpu())
     render::DeferLabelsToGpu();
