@@ -1608,14 +1608,29 @@ void EmitCsGlobal(Translator& t, const Inst& inst, StageContext& sc) {
   }
 }
 
+// Hardware drops a buffer store outside the V#; the staged binding can be
+// larger (a windowed or minimum-sized range), and an index clamped into it
+// lands on whatever memory follows the buffer.
 static Id BeginCsIndexedStore(Translator& t, const Inst& inst) {
-  if (t.rdna_sources || !(inst.raw[0] & (1u << 13)))
+  if (t.rdna_sources)
     return 0;
+  const bool offen = (inst.raw[0] >> 12) & 1, idxen = (inst.raw[0] >> 13) & 1;
   const u32 srsrc = ((inst.raw[1] >> 16) & 0x1F) * 4;
+  const u32 vaddr = inst.raw[1] & 0xFF;
   const Id stride = t.And(t.Shr(t.Sg(srsrc + 1), t.U32(16)), t.U32(0x3FFF));
-  const Id valid = t.m.Emit(
-      spv::Op::OpLogicalOr, t.t_bool,
-      {t.IsZero(stride), t.Ult(t.Vg(inst.raw[1] & 0xFF), t.Sg(srsrc + 2))});
+  const Id records = t.Sg(srsrc + 2);
+  Id valid = 0;
+  if (idxen) {
+    valid = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
+                     {t.IsZero(stride), t.Ult(t.Vg(vaddr), records)});
+  } else {
+    // A raw buffer: the byte offset, without soffset, against num_records.
+    Id offset = t.U32(inst.raw[0] & 0xFFF);
+    if (offen)
+      offset = t.Add(offset, t.Vg(vaddr));
+    valid = t.m.Emit(spv::Op::OpLogicalOr, t.t_bool,
+                     {t.IsNonZero(stride), t.Ult(offset, records)});
+  }
   const Id write = t.m.NewBlock(), merge = t.m.NewBlock();
   t.m.SelectionMerge(merge);
   t.m.BranchConditional(valid, write, merge);
