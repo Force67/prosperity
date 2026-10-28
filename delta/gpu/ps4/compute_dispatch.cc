@@ -425,6 +425,9 @@ ComputeShaderState NativeVariant(const ComputeShaderState& shader,
       !render::CsBindsImages())
     return shader;
   const auto cs_program = gcn::CachedProgram(shader.cs_addr, 4096);
+  // The replay steps only what feeds a T#: a scalar load of plain constants
+  // the GPU just wrote would otherwise wait for the GPU to land it.
+  const gcn::ScalarReplayScope replays;
   gcn::TrackTextures(images, cs_program, user_data, false, shader.cs_addr);
   const gcn::MimgBindingPlan plan = gcn::PlanMimgBindings(
       *cs_program, gcn::ComputeReachability(*cs_program).data());
