@@ -1399,6 +1399,9 @@ bool BeginRegion(const u64* mrt_base,
           clear_stencil ? rhi::LoadOp::kClear : rhi::LoadOp::kLoad;
       depth_att.clear_stencil = stencil_clear;
       dt->stencil_used_this_frame = true;
+      // Stencil-only passes (depth tested EQUAL, not written) still write
+      // the stencil a later pass samples.
+      dt->render_serial = ++g_targets.render_serial;
       g_region.cur_stencil = stencil_base;
     }
   }

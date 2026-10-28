@@ -503,6 +503,20 @@ bool ShaderFilterDrops(u64 ps_addr) {
   return true;
 }
 
+// The depth target whose stencil the draws wrote at `base` since a colour
+// target at that address last changed, or 0. SotC's deferred lighting reads
+// its material ids from the stencil, and the colour target there is only a
+// compute clear.
+u64 FresherStencil(u64 base, const DrawInfo::DrawTex& t, bool rt_eligible) {
+  if (!base || !rt_eligible || t.arrayed || !g_rts.count(base))
+    return 0;
+  const u64 stencil = ResolveSampledStencil(base);
+  return stencil &&
+                 g_depths[stencil].render_serial >= g_rts[base].render_serial
+             ? stencil
+             : 0;
+}
+
 rhi::TextureView* BindlessTextureView(const DrawInfo::DrawTex& t,
                                       rhi::TextureState* state) {
   *state = rhi::TextureState::kShaderRead;
@@ -524,6 +538,10 @@ rhi::TextureView* BindlessTextureView(const DrawInfo::DrawTex& t,
       resolved = ResolveSampledDepth(base, t.w, t.h);
     if (resolved)
       base = resolved;
+  }
+  if (const u64 stencil = FresherStencil(base, t, rt_eligible)) {
+    *state = rhi::TextureState::kDepthRead;
+    return StencilSampledView(g_depths[stencil]);
   }
   if (base && rt_eligible && g_rts.count(base) && g_rts[base].ever_rendered) {
     rhi::Format format = rhi::Format::kUndefined;
@@ -1273,8 +1291,13 @@ bool DrawRecomp(render::Renderer& renderer, const DrawInfo& d) {
       const bool samples_target = base && g_rts.count(base);
       if (samples_target && !CsRefreshRtFromTruth(base))
         render::FlushCsWritesAt(renderer, base, "rt-tex");
-      if (base && rt_eligible && is_bound_target(base) && g_rts.count(base) &&
-          g_rts[base].ever_rendered) {
+      const u64 stencil_src = FresherStencil(base, t, rt_eligible);
+      if (stencil_src) {
+        multi_stencil_src[i] = stencil_src;
+        multi_transition_source |= g_depths[stencil_src].stencil_layout !=
+                                    rhi::TextureState::kDepthRead;
+      } else if (base && rt_eligible && is_bound_target(base) &&
+                 g_rts.count(base) && g_rts[base].ever_rendered) {
         multi_feedback[i] = base;
         multi_transition_source = true;
       } else if (base && rt_eligible && g_rts.count(base) &&
