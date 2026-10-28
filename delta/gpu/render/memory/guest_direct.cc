@@ -2,6 +2,7 @@
 #include "guest/session.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -180,36 +181,69 @@ void ReadMaps(bool force = false, u64 lo = 0, u64 hi = ~0ull) {
     base::LockGuard lock(g_remap_lock);
     g_direct.maps_dirty.clear();
   }
-  FILE* f = std::fopen("/proc/self/maps", "r");
-  if (!f)
+  // Parsed by hand from big reads: the title remaps while it streams and the
+  // mirror's mprotects split the map into thousands of lines, so stdio and
+  // sscanf here were a measurable share of the render thread.
+  const int fd = ::open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
     return;
   g_direct.maps_read_at = generation;
   g_direct.maps_changed = true;
   ++g_direct.map_snapshot;
   g_direct.host_maps.clear();
   g_direct.maps.clear();
-  char line[512];
-  while (std::fgets(line, sizeof(line), f)) {
-    unsigned long long start, end, offset;
-    char perms[8];
-    if (std::sscanf(line, "%llx-%llx %7s %llx", &start, &end, perms, &offset) !=
-        4)
+  static base::Vector<char> text;
+  text.resize(1 << 20);
+  size_t used = 0;
+  for (;;) {
+    if (text.size() - used < 65536)
+      text.resize(text.size() * 2);
+    const ssize_t n = ::read(fd, text.data() + used, text.size() - used);
+    if (n <= 0)
+      break;
+    used += static_cast<size_t>(n);
+  }
+  ::close(fd);
+  const char* p = text.data();
+  const char* const end = p + used;
+  const auto hex = [&](char stop) {
+    u64 v = 0;
+    for (; p < end && *p != stop; p++)
+      v = v * 16 + static_cast<u64>(*p <= '9' ? *p - '0' : (*p | 0x20) - 'a' + 10);
+    if (p < end)
+      p++;
+    return v;
+  };
+  static constexpr char kDmem[] = "memfd:delta_dmem";
+  while (p < end) {
+    const char* const line = p;
+    const char* eol = static_cast<const char*>(std::memchr(p, '\n', end - p));
+    if (!eol)
+      eol = end;
+    const u64 start = hex('-');
+    const u64 stop = hex(' ');
+    const bool readable = p < eol && p[0] == 'r';
+    const bool writable = p + 1 < eol && p[1] == 'w';
+    p += 5;
+    const u64 offset = p < eol ? hex(' ') : 0;
+    p = eol + 1;
+    if (stop <= start)
       continue;
-    if (!std::strstr(line, "memfd:delta_dmem")) {
+    const char* name = static_cast<const char*>(
+        memmem(line, eol - line, kDmem, sizeof(kDmem) - 1));
+    if (!name) {
       if (GuestDirectIndex(start) != ~0ull)
-        g_direct.host_maps.push_back(
-            {start, end, offset, perms[0] == 'r', perms[1] == 'w'});
+        g_direct.host_maps.push_back({start, stop, offset, readable, writable});
       continue;
     }
     if (!g_direct.maps.empty() && g_direct.maps.back().end == start &&
         g_direct.maps.back().offset + (start - g_direct.maps.back().start) ==
             offset) {
-      g_direct.maps.back().end = end;
+      g_direct.maps.back().end = stop;
       continue;
     }
-    g_direct.maps.push_back({start, end, offset});
+    g_direct.maps.push_back({start, stop, offset});
   }
-  std::fclose(f);
 }
 
 bool DirtyTouchesGpu() {
