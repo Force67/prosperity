@@ -768,8 +768,17 @@ bool VulkanDevice::Init(const VulkanOptions& options) {
   dc.enabledExtensionCount = static_cast<u32>(dev_exts.size());
   dc.ppEnabledExtensionNames = dev_exts.data();
   dc.pEnabledFeatures = &f;
-  if (vkCreateDevice(phys, &dc, nullptr, &native.device) != VK_SUCCESS) {
-    BASE_LOGI("gpuvk", "vkCreateDevice failed");
+  // The driver refuses with INITIALIZATION_FAILED while other processes are
+  // claiming the GPU; it succeeds a moment later.
+  VkResult r = VK_ERROR_INITIALIZATION_FAILED;
+  for (int attempt = 0; attempt < 5; attempt++) {
+    r = vkCreateDevice(phys, &dc, nullptr, &native.device);
+    if (r != VK_ERROR_INITIALIZATION_FAILED)
+      break;
+    base::SleepForMilliseconds(200 << attempt);
+  }
+  if (r != VK_SUCCESS) {
+    BASE_LOGI("gpuvk", "vkCreateDevice failed: VkResult {}", (int)r);
     return false;
   }
   VkDevice dev = native.device;
