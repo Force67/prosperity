@@ -51,6 +51,17 @@ bool ProtectMem(void* addr, size_t len, PageProtection);
 // Drop the pages' contents and their host backing; the range stays mapped and
 // reads as zero until written again.
 bool DiscardMem(void* addr, size_t len);
+// Host pages another component holds by address (a GPU import of guest
+// memory). Discarding them would leave that holder on the old pages.
+void NotePinned(const void* addr, size_t len);
+void ForgetPinned(const void* addr, size_t len);
+// Discards [addr, addr+len) except the parts NotePinned covers; those are
+// discarded when their last pin goes, unless CancelDiscard maps them again.
+void DiscardUnpinned(void* addr, size_t len);
+// DiscardUnpinned, and again whenever a pin over the range goes later, until
+// CancelDiscard: for ranges the guest gave up, which imports may still span.
+void DiscardWhenUnpinned(void* addr, size_t len);
+void CancelDiscard(const void* addr, size_t len);
 bool IsMemoryRangeMapped(const void* addr, size_t len);
 
 // Identity of backing pages allocated through the guest memory helpers. A

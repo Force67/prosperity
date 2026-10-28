@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include "host_memory/host_memory.h"
 #include "guest/session.h"
 
 #include <unistd.h>
@@ -1101,6 +1102,7 @@ rhi::Buffer* VulkanDevice::CreateBuffer(const rhi::BufferDesc& desc) {
   }
   if (desc.host_pointer) {
     buffer->SetMapped(static_cast<u8*>(desc.host_pointer));
+    host_memory::NotePinned(desc.host_pointer, desc.size);
   } else if (desc.memory != rhi::MemoryKind::kDevice) {
     void* p = nullptr;
     if (vkMapMemory(dev, buffer->memory, 0, VK_WHOLE_SIZE, 0, &p) == VK_SUCCESS)
@@ -1736,8 +1738,10 @@ void VulkanDevice::Destroy(rhi::Object* object) {
     return;
   VkDevice dev = native.device;
   if (auto* b = dynamic_cast<VulkanBuffer*>(object)) {
-    if (b->desc().host_pointer)
+    if (b->desc().host_pointer) {
       memory_debug::ChangeImported(-static_cast<i64>(b->desc().size));
+      host_memory::ForgetPinned(b->desc().host_pointer, b->desc().size);
+    }
     vkDestroyBuffer(dev, b->buffer, nullptr);
     vkFreeMemory(dev, b->memory, nullptr);
     for (VkDeviceMemory block : b->blocks)

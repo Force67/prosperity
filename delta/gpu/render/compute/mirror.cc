@@ -47,7 +47,55 @@ rhi::Buffer* Mirror() {
   return g_cs.mirror;
 }
 
+namespace {
+// Ranges the guest remapped, queued by its threads for the render thread.
+base::Mutex g_remapped_lock;
+base::Vector<base::Pair<u64, u64>> g_remapped;
+base::Atomic<bool> g_remapped_any{false};
+
+// A cached import still pins the pages the range had when it was created: a
+// remap gives the guest new pages (and an unmap's discard waits on the pin),
+// so the import is dropped and the next use imports what is there now. A
+// chunk an owned block still copies through keeps its import.
+void RetireRemappedImports() {
+  if (!g_remapped_any.exchange(false, base::memory_order_acq_rel))
+    return;
+  base::Vector<base::Pair<u64, u64>> remapped;
+  {
+    base::LockGuard<base::Mutex> lock(g_remapped_lock);
+    remapped.swap(g_remapped);
+  }
+  for (const auto& [base, end] : remapped) {
+    for (u64 chunk = base & ~(kMirrorImport - 1); chunk < end;
+         chunk += kMirrorImport) {
+      const auto found = g_cs.mirror_imports.find(chunk);
+      if (found == g_cs.mirror_imports.end())
+        continue;
+      bool owned = false;
+      for (u64 block = chunk; block < chunk + kMirrorImport && !owned;
+           block += kMirrorBlock)
+        owned = InMirror(block) && OwnAt(block).state.load() != 0;
+      if (owned)
+        continue;
+      if (found->second)
+        g_cs.frame_retired.push_back(found->second);
+      g_cs.mirror_imports.erase(found);
+    }
+  }
+}
+}  // namespace
+
+void MirrorNoteRemapped(u64 base, u64 bytes) {
+  if (!bytes)
+    return;
+  base::LockGuard<base::Mutex> lock(g_remapped_lock);
+  if (g_remapped.size() < 65536)
+    g_remapped.push_back({base, base + bytes});
+  g_remapped_any.store(true, base::memory_order_release);
+}
+
 rhi::Buffer* MirrorImport(u64 address, u64* import_base) {
+  RetireRemappedImports();
   u64 offset = 0, bytes = 0;
   if (auto* direct = DirectImportAt(address, &offset, &bytes);
       direct && direct->desc().host_pointer &&

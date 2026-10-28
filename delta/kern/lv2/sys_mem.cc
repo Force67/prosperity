@@ -64,6 +64,9 @@ DELTA_OPTION(bool, kShmNoAuto, "DELTA_SHM_NOAUTO", false);
 DELTA_OPTION(bool, kAllocTrace, "DELTA_ALLOC_TRACE", false);
 DELTA_OPTION(bool, kGnmapTrace, "DELTA_GNMAP_TRACE", false);
 DELTA_OPTION(bool, kMmapLog, "DELTA_MMAP_LOG", false);
+// PS4 batch MAP_DIRECT through the shared dmem backing, as the hardware
+// aliases it. DELTA_BATCHMAP_SHARED=0 restores private copies per mapping.
+DELTA_OPTION(bool, kBatchMapShared, "DELTA_BATCHMAP_SHARED", true);
 DELTA_OPTION(bool, kMmapfdTrace, "DELTA_MMAPFD_TRACE", false);
 DELTA_OPTION(bool, kShmAudioDumpDelta, "DELTA_SHM_AUDIO_DUMP_DELTA", false);
 DELTA_OPTION(bool, kShmAudioTrace, "DELTA_SHM_AUDIO_TRACE", false);
@@ -1233,8 +1236,8 @@ int PS4ABI sys_munmap(void* addr, size_t len) {
   static base::Atomic<bool> warned{false};
   if (!warned.exchange(true))
     LOG_WARNING(
-        "sys_munmap: host pages are retained (first was {} +{:#x}); "
-        "only the VMA bookkeeping is released",
+        "sys_munmap: the range stays mapped and its unpinned pages are "
+        "discarded (first was {} +{:#x})",
         static_cast<const void*>(addr), len);
   if (auto* proc = Process::GetActive(); proc && addr && len) {
     UnmapShm(static_cast<u8*>(addr), len);
@@ -1248,6 +1251,11 @@ int PS4ABI sys_munmap(void* addr, size_t len) {
         region->sce_prot == 0 && region->prot == Ppt::kPriv)
       host_memory::FreeMem(addr, len);
     proc->GetVma().Remove(static_cast<u8*>(addr), len);
+    // The range stays mapped, but its pages go back to the host: SotC maps
+    // and unmaps streaming buffers all game and kept every page resident
+    // (12 GiB in seven minutes). Pages a GPU import holds are kept, or the
+    // import would go on reading the old ones after a reuse.
+    host_memory::DiscardWhenUnpinned(addr, len);
     NoteGuestReleased(static_cast<u8*>(addr), len);
     ForgetDmemVa(static_cast<u8*>(addr), len);
   }
@@ -1601,14 +1609,15 @@ int PS4ABI sys_batch_map(u32 /*handle*/,
           return -SysError::eINVAL;
         }
         auto* pr = Process::GetActive();
-        // Sharing the dmem backing is NOT safe for PS4 yet: SotC maps one
-        // physical offset at 1664 successive VAs and never releases, so a
-        // shared store aliases every historical mapping at once and the title's
-        // memory dissolves (measured twice, both times SotC stopped rendering
-        // even its intro). Needs understanding of what the guest does with that
-        // offset first.
+        // SotC maps one physical offset at 1664 successive VAs and never
+        // releases them; the hardware aliases them all to the same bytes. As
+        // private copies each mapping cost fresh host memory (6.6 GB every
+        // two and a half minutes). Sharing once made SotC stop rendering its
+        // intro; it renders through gameplay with the coherence fixes since.
         const bool ps5 = pr && pr->GetPlatform() == Process::Platform::kPs5;
-        const int fd = (op.operation == 0 && ps5) ? DmemBackingFd() : -1;
+        const int fd =
+            (op.operation == 0 && (ps5 || kBatchMapShared)) ? DmemBackingFd()
+                                                            : -1;
         if (fd >= 0 && op.offset + op.length <= DmemBackingSize()) {
           void* p = ::mmap(reinterpret_cast<void*>(op.start), op.length,
                            PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd,
@@ -1631,10 +1640,15 @@ int PS4ABI sys_batch_map(u32 /*handle*/,
         }
         break;
       }
-      case 1:  // UNMAP: host pages retained, bookkeeping released (see
-               // sys_munmap)
-        if (auto* pr = Process::GetActive(); pr && op.start && op.length)
+      case 1:  // UNMAP: the range stays mapped, as in sys_munmap, but its
+               // pages go back to the host. SotC streams through batch maps
+               // of anonymous memory and kept every page it ever unmapped:
+               // 12 GiB in seven minutes.
+        if (auto* pr = Process::GetActive(); pr && op.start && op.length) {
           pr->GetVma().Remove(reinterpret_cast<u8*>(op.start), op.length);
+          host_memory::DiscardWhenUnpinned(reinterpret_cast<u8*>(op.start),
+                                           op.length);
+        }
         break;
       case 2:  // PROTECT / TYPE_PROTECT: our flat arena stays permissive; the
       case 4:  // title only narrows protections it already owns

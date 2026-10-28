@@ -100,6 +100,7 @@ void VmMap::Add(u8* ptr,
                 bool flexible) {
   base::LockGuard lock(vmlock_);
   timestamp_++;
+  host_memory::CancelDiscard(ptr, size);
   host_memory::TrackMemoryMapping(ptr, size);
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
@@ -137,6 +138,7 @@ void VmMap::AddDirect(u8* ptr,
                       u64 phys_offset) {
   base::LockGuard lock(vmlock_);
   timestamp_++;
+  host_memory::CancelDiscard(ptr, size);
   host_memory::TrackMemoryMapping(ptr, size);
   PunchHoleLocked(ptr, size);
   MappingChanged(ptr, size);
@@ -178,6 +180,8 @@ void VmMap::RemoveDirect(u64 phys_offset, size_t size) {
   for (const auto& page : removed) {
     host_memory::AllocMem(page.ptr, page.size, Mprot::kW,
                           Alloct::kReservecommit);
+    // A GPU import over a neighbouring mapping faults these pages in.
+    host_memory::DiscardWhenUnpinned(page.ptr, page.size);
     ForgetDmemVa(page.ptr, page.size);
     PunchHoleLocked(page.ptr, page.size);
     MappingChanged(page.ptr, page.size);

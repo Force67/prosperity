@@ -428,6 +428,7 @@ void CsProtectSubmitted(u64 submission) {
 
 void CsGuestRemapped(u64 base, u64 bytes) {
   MirrorForget(base, bytes);
+  MirrorNoteRemapped(base, bytes);
 }
 
 void CsFrameListChanged() {

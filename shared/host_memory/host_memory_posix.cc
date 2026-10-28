@@ -13,6 +13,7 @@
 #include "base/algorithm.h"
 #include "base/atomic.h"
 #include "base/containers/map.h"
+#include "base/containers/pair.h"
 #include "base/containers/vector.h"
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
@@ -250,6 +251,121 @@ bool ProtectMem(void* addr, size_t len, PageProtection prot) {
 
 bool DiscardMem(void* addr, size_t len) {
   return ::madvise(addr, len, MADV_DONTNEED) == 0;
+}
+
+namespace {
+base::Mutex g_pinned_lock;
+// start -> (end, holders): imports of one range may be created repeatedly.
+base::Map<uintptr_t, base::Pair<uintptr_t, u32>> g_pinned;
+// Released ranges a pin kept resident, discarded once the pin goes.
+base::Map<uintptr_t, uintptr_t> g_deferred;
+
+uintptr_t PageSize() {
+  const long size = ::sysconf(_SC_PAGESIZE);
+  return size > 0 ? static_cast<uintptr_t>(size) : 4096;
+}
+
+// Removes [lo, hi) from g_deferred, keeping the parts outside it.
+void TrimDeferredLocked(uintptr_t lo, uintptr_t hi) {
+  auto it = g_deferred.upper_bound(lo);
+  if (it != g_deferred.begin())
+    --it;
+  while (it != g_deferred.end() && it->first < hi) {
+    const uintptr_t first = it->first, last = it->second;
+    if (last <= lo) {
+      ++it;
+      continue;
+    }
+    it = g_deferred.erase(it);
+    if (first < lo)
+      g_deferred[first] = lo;
+    if (last > hi)
+      g_deferred[hi] = last;
+  }
+}
+
+void DiscardUnpinnedLocked(uintptr_t at, uintptr_t end) {
+  const uintptr_t page = PageSize();
+  base::Vector<base::Pair<uintptr_t, uintptr_t>> pinned;
+  // Imports are at most a few MiB, so one that overlaps starts close by.
+  auto it = g_pinned.lower_bound(at > (64u << 20) ? at - (64u << 20) : 0);
+  for (; it != g_pinned.end() && it->first < end; ++it)
+    if (it->second.first > at)
+      pinned.push_back({it->first, it->second.first});
+  base::Sort(pinned.begin(), pinned.end());
+  const auto discard = [&](uintptr_t lo, uintptr_t hi) {
+    lo = (lo + page - 1) & ~(page - 1);
+    hi &= ~(page - 1);
+    if (lo < hi)
+      DiscardMem(reinterpret_cast<void*>(lo), hi - lo);
+  };
+  for (const auto& [lo, hi] : pinned) {
+    if (lo > at)
+      discard(at, base::Min(lo, end));
+    const uintptr_t kept_hi = base::Min(hi, end);
+    if (base::Max(lo, at) < kept_hi && g_deferred.size() < (1u << 16))
+      g_deferred[base::Max(lo, at)] = kept_hi;
+    at = base::Max(at, hi);
+    if (at >= end)
+      return;
+  }
+  discard(at, end);
+}
+}  // namespace
+
+void NotePinned(const void* addr, size_t len) {
+  const auto start = reinterpret_cast<uintptr_t>(addr);
+  base::LockGuard<base::Mutex> lock(g_pinned_lock);
+  auto& entry = g_pinned[start];
+  entry.first = base::Max(entry.first, start + len);
+  entry.second++;
+}
+
+void ForgetPinned(const void* addr, size_t len) {
+  const auto start = reinterpret_cast<uintptr_t>(addr);
+  const uintptr_t end = start + len;
+  base::LockGuard<base::Mutex> lock(g_pinned_lock);
+  const auto it = g_pinned.find(start);
+  if (it == g_pinned.end() || --it->second.second)
+    return;
+  g_pinned.erase(it);
+  // Released ranges this pin kept: discard what no other pin still holds.
+  base::Vector<base::Pair<uintptr_t, uintptr_t>> released;
+  auto d = g_deferred.upper_bound(start);
+  if (d != g_deferred.begin())
+    --d;
+  for (; d != g_deferred.end() && d->first < end; ++d)
+    if (d->second > start)
+      released.push_back({base::Max(d->first, start), base::Min(d->second, end)});
+  for (const auto& [lo, hi] : released) {
+    TrimDeferredLocked(lo, hi);
+    DiscardUnpinnedLocked(lo, hi);
+  }
+}
+
+void DiscardUnpinned(void* addr, size_t len) {
+  const auto at = reinterpret_cast<uintptr_t>(addr);
+  base::LockGuard<base::Mutex> lock(g_pinned_lock);
+  DiscardUnpinnedLocked(at, at + len);
+}
+
+void DiscardWhenUnpinned(void* addr, size_t len) {
+  const auto at = reinterpret_cast<uintptr_t>(addr);
+  base::LockGuard<base::Mutex> lock(g_pinned_lock);
+  DiscardUnpinnedLocked(at, at + len);
+  // A pin made later still populates the range (an import faults every page
+  // in); discard it again when that pin goes.
+  if (g_deferred.size() < (1u << 16)) {
+    TrimDeferredLocked(at, at + len);
+    g_deferred[at] = at + len;
+  }
+}
+
+void CancelDiscard(const void* addr, size_t len) {
+  const auto at = reinterpret_cast<uintptr_t>(addr);
+  base::LockGuard<base::Mutex> lock(g_pinned_lock);
+  if (!g_deferred.empty())
+    TrimDeferredLocked(at, at + len);
 }
 
 bool IsMemoryRangeMapped(const void* addr, size_t len) {

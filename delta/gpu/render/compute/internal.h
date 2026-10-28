@@ -534,6 +534,8 @@ bool CsRefreshRtInFrame(u64 base, CsRange& e);
 constexpr u64 kGuestPageImport = 64 * 1024;
 
 rhi::Buffer* ImportGuestPage(u64 page);
+// Queues a guest remap for the cached imports over it (any thread).
+void MirrorNoteRemapped(u64 base, u64 bytes);
 
 constexpr u64 kMirrorPs4Base = 0, kMirrorPs5Base = 0x8000000000ull;
 constexpr u64 kMirrorLowWindow = 0x4000000000ull;
