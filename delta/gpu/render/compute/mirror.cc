@@ -547,12 +547,15 @@ void MirrorProtectBegin(rhi::CommandList* list) {
   DELTA_ZONE("mirror.protect");
   base::Sort(blocks.begin(), blocks.end());
   blocks.erase(base::Unique(blocks.begin(), blocks.end()), blocks.end());
+  base::Vector<u64> opened;
   for (u64 block : blocks) {
     OwnBlock& o = OwnAt(block);
     u64 s = o.state.load(base::memory_order_acquire);
     while ((s & kOwnBusy) || !o.state.compare_exchange_weak(
                                  s, kOwnBusy, base::memory_order_acq_rel))
       s = o.state.load(base::memory_order_acquire);
+    if (!(s & kOwnProtected))
+      opened.push_back(block);
   }
   for (size_t i = 0; i < blocks.size();) {
     size_t j = i + 1;
@@ -565,11 +568,15 @@ void MirrorProtectBegin(rhi::CommandList* list) {
     i = j;
   }
   // Shut again, so guest memory is stable: give the mirror the CPU writes made
-  // while it was open, ahead of the queued dispatches in submission order.
+  // while it was open, ahead of the queued dispatches in submission order. A
+  // block that was open until now counts too: its copy-in can have been
+  // skipped as fresh before CPU writes since were collected, and a resolve
+  // would copy those stale words back over the guest's (SotC's heap).
   rhi::CommandList* refresh = nullptr;
   for (u64 block : blocks) {
     OwnBlock& o = OwnAt(block);
-    if (!o.reopened.exchange(0, base::memory_order_acq_rel) || !o.import)
+    const bool reopened = o.reopened.exchange(0, base::memory_order_acq_rel);
+    if ((!reopened && !opened.Contains(block)) || !o.import)
       continue;
     if (!refresh && !(refresh = BeginImmediate()))
       break;
@@ -1166,7 +1173,13 @@ void MirrorWriteBack(u64 base,
   bool run_owned = false;
   for (u64 at = base; at < end;) {
     const u64 to = base::Min(end, (at & ~(kMirrorBlock - 1)) + kMirrorBlock);
-    const bool owned = may_own && MirrorOwnable(at, to - at);
+    // Only a block the write covers whole is the GPU's alone. A partial one
+    // shares its pages with CPU data (SotC keeps its heap tree next to its
+    // compute buffers), and a later resolve would copy the span's stale words
+    // back over the CPU's: publish it now, merged, instead.
+    const bool whole = to - at == kMirrorBlock ||
+                       MirrorOwned(at & ~(kMirrorBlock - 1));
+    const bool owned = may_own && whole && MirrorOwnable(at, to - at);
     if (at != base && owned != run_owned) {
       finish(run, at, run_owned);
       run = at;
