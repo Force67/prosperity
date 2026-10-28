@@ -126,20 +126,57 @@ inline base::Atomic<u64>& GuestMappingGeneration() {
   return generation;
 }
 
+// Readability answers outlive a remap elsewhere: a remap clears its own pages
+// (InvalidateReadable), and this only moves for a remap too large to clear
+// page by page, or every 60 frames. A title that streams by remapping every
+// frame otherwise sent every check back to a syscall.
+inline base::Atomic<u64>& ReadableSpanGeneration() {
+  static base::Atomic<u64> generation{0};
+  return generation;
+}
+
+inline base::Atomic<u64>& ReadableGeneration() {
+  static base::Atomic<u64> generation{1};
+  return generation;
+}
+
 inline void FrameMemoryGeneration() {
   static u32 frames = 0;
-  if (MemoryRemapped().exchange(false, base::memory_order_acq_rel) ||
-      ++frames >= 60) {
+  const bool remapped =
+      MemoryRemapped().exchange(false, base::memory_order_acq_rel);
+  const bool periodic = ++frames >= 60;
+  if (periodic) {
     frames = 0;
-    NextMemoryGeneration();
+    ReadableGeneration().fetch_add(1, base::memory_order_acq_rel);
   }
+  if (remapped || periodic)
+    NextMemoryGeneration();
+}
+
+inline void InvalidateReadable(u64 address, u64 bytes) {
+  constexpr u64 kPageShift = GuestPageTable::kPageShift;
+  constexpr u64 kMaxPages = 1u << 16;
+  if (!bytes)
+    return;
+  const u64 first = address >> kPageShift;
+  const u64 last = (address + bytes - 1) >> kPageShift;
+  if (last - first >= kMaxPages) {
+    ReadableGeneration().fetch_add(1, base::memory_order_acq_rel);
+    return;
+  }
+  for (u64 page = first; page <= last; page++)
+    if (const GuestPageTable::Page* p = GuestPages().Find(page << kPageShift))
+      p->readable.store(0, base::memory_order_relaxed);
+  // Spans too large for the page entries are cached per call.
+  ReadableSpanGeneration().fetch_add(1, base::memory_order_acq_rel);
 }
 
 inline bool IsReadableRangeCached(u64 address, u64 bytes) {
   constexpr u64 kPageShift = GuestPageTable::kPageShift;
   constexpr u64 kMaxPagedSpan = 64;
-  const u32 gen =
-      static_cast<u32>(MemoryGeneration()) & ~GuestPageTable::kUnreadable;
+  const u64 readable_gen =
+      ReadableGeneration().load(base::memory_order_acquire);
+  const u32 gen = static_cast<u32>(readable_gen) & ~GuestPageTable::kUnreadable;
   const bool paged =
       bytes && address <= std::numeric_limits<u64>::max() - bytes &&
       ((address + bytes - 1) >> kPageShift) - (address >> kPageShift) <
@@ -166,8 +203,11 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
   };
   static thread_local base::HashMap<u64, Entry> cache;
   static thread_local u64 seen_generation = 0;
-  if (seen_generation != MemoryGeneration()) {
-    seen_generation = MemoryGeneration();
+  const u64 span_gen =
+      readable_gen ^ (ReadableSpanGeneration().load(base::memory_order_acquire)
+                      << 32);
+  if (seen_generation != span_gen) {
+    seen_generation = span_gen;
     cache.clear();
   }
   auto it = cache.find(address);
@@ -184,7 +224,7 @@ inline bool IsReadableRangeCached(u64 address, u64 bytes) {
     if (GuestPageTable::Page* p = table.At(first << kPageShift))
       p->readable.store(gen | GuestPageTable::kUnreadable,
                         base::memory_order_relaxed);
-  cache[address] = {bytes, MemoryGeneration(), readable};
+  cache[address] = {bytes, span_gen, readable};
   return readable;
 }
 

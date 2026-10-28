@@ -11,7 +11,9 @@ namespace gpu {
 class GuestPageTable {
  public:
   struct Page {
-    base::Atomic<u32> readable{0};
+    // The readability generation this page was last found readable in (a
+    // cache: cleared through a const lookup when the guest remaps it).
+    mutable base::Atomic<u32> readable{0};
     base::Atomic<u8> armed{0};
     base::Atomic<u8> ever_armed{0};
     u16 reports = 0;

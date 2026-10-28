@@ -427,6 +427,11 @@ void CsProtectSubmitted(u64 submission) {
 }
 
 void CsGuestRemapped(u64 base, u64 bytes) {
+  if (g_cs.own && bytes)
+    for (u64 block = base & ~(kMirrorBlock - 1); block < base + bytes;
+         block += kMirrorBlock)
+      if (InMirror(block))
+        OwnAt(block).readable.store(0, base::memory_order_relaxed);
   MirrorForget(base, bytes);
   MirrorNoteRemapped(base, bytes);
 }

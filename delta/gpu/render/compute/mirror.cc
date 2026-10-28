@@ -522,7 +522,7 @@ void AddSpan(OwnBlock& o, u32 lo, u32 hi) {
 // only changes with the memory generation, so it is kept per block.
 bool BlockReadable(u64 block) {
   base::Atomic<u64>& memo = OwnAt(block).readable;
-  const u64 gen = gpu::MemoryGeneration();
+  const u64 gen = gpu::ReadableGeneration().load(base::memory_order_acquire);
   const u64 seen = memo.load(base::memory_order_relaxed);
   if (seen >> 1 == gen)
     return seen & 1;
