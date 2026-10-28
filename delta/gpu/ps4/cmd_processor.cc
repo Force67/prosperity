@@ -114,6 +114,7 @@ bool IsLabelAddress(u64 address) {
 }
 
 bool GpuWriteMapped(const char* packet, u64 address, u64 bytes) {
+  ForgetKnownGpuWrites(address, bytes);
   if (host_memory::IsMemoryRangeMapped(reinterpret_cast<void*>(address), bytes))
     return true;
   static base::Atomic<u32> reported{0};
@@ -1143,6 +1144,9 @@ void StartRendererOnce(render::Renderer& renderer) {
     SpeculateWalkRead(render::DefaultRenderer(), address, bytes);
   };
   gcn::g_overlay_guest_range = [](u64 address, u32 dwords, u32* values) {
+    if (OverlayKnownGpuWrite(address, dwords * 4ull,
+                             reinterpret_cast<u8*>(values)))
+      return;
     if (GuestRenderQueue().running())
       GuestRenderQueue().OverlayPendingValues(address, dwords * 4ull,
                                               reinterpret_cast<u8*>(values));

@@ -8,6 +8,7 @@
 #include "gpu/render/renderer.h"
 
 #include <pthread.h>
+#include <cstring>
 
 #include "base/algorithm.h"
 #include "base/atomic.h"
@@ -30,7 +31,29 @@ namespace gpu::ps4 {
 
 namespace {
 DELTA_OPTION(bool, kDrainTrace, "DELTA_GPU_DRAINTRACE", false);
+DELTA_OPTION(bool, kKnownWrites, "DELTA_GPU_KNOWN_WRITES", true);
+// Flush anyway and compare the known values with what the GPU wrote.
+DELTA_OPTION(bool, kKnownVerify, "DELTA_GPU_KNOWN_VERIFY", false);
+
+struct KnownWrite {
+  u64 first, end;
+  base::Vector<u32> dwords;
+};
+// Touched only by the thread that walks and queues guest commands.
+base::Vector<KnownWrite> g_known;
+u64 g_known_hit_first = 0, g_known_hit_end = 0;
+const guest::SessionReset g_known_reset([] {
+  guest::ResetResource(g_known);
+  g_known_hit_first = g_known_hit_end = 0;
+});
+
+const KnownWrite* KnownCovering(u64 base, u64 bytes) {
+  for (const KnownWrite& k : g_known)
+    if (base >= k.first && base + bytes <= k.end)
+      return &k;
+  return nullptr;
 }
+}  // namespace
 
 RenderQueue::~RenderQueue() {
   Stop();
@@ -222,6 +245,7 @@ u64 PageCount(u64 first, u64 end) {
 }  // namespace
 
 void RenderQueue::AddPendingWrite(const PendingWrite& w) {
+  ForgetKnownGpuWrites(w.first, w.end - w.first);
   pending_writes_.push_back(w);
   if (PageCount(w.first, w.end) > kMaxIndexedPages) {
     pending_big_++;
@@ -374,8 +398,46 @@ void FlushForWalkRead(render::Renderer& renderer,
   render::FlushCsWritesRange(renderer, base, bytes, why);
 }
 
+void NoteKnownGpuWrite(u64 base, base::Vector<u32> dwords) {
+  if (!kKnownWrites || dwords.empty())
+    return;
+  const u64 bytes = dwords.size() * 4ull;
+  ForgetKnownGpuWrites(base, bytes);
+  if (g_known.size() >= 16)
+    g_known.erase(g_known.begin());
+  g_known.push_back({base, base + bytes, base::move(dwords)});
+}
+
+void ForgetKnownGpuWrites(u64 base, u64 bytes) {
+  if (g_known.empty() || !bytes)
+    return;
+  base::EraseIf(g_known, [&](const KnownWrite& k) {
+    return k.first < base + bytes && base < k.end;
+  });
+}
+
+bool OverlayKnownGpuWrite(u64 base, u64 bytes, u8* out) {
+  if (base != g_known_hit_first || base + bytes != g_known_hit_end)
+    return false;
+  g_known_hit_first = g_known_hit_end = 0;
+  const KnownWrite* k = KnownCovering(base, bytes);
+  if (!k)
+    return false;
+  std::memcpy(out, reinterpret_cast<const u8*>(k->dwords.data()) + (base - k->first),
+              bytes);
+  return true;
+}
+
 void SpeculateWalkRead(render::Renderer& renderer, u64 base, u64 bytes) {
   RenderQueue& queue = GuestRenderQueue();
+  g_known_hit_first = g_known_hit_end = 0;
+  const KnownWrite* known =
+      queue.running() ? KnownCovering(base, bytes) : nullptr;
+  if (known && !kKnownVerify && WalkReadWouldWait(base, bytes)) {
+    g_known_hit_first = base;
+    g_known_hit_end = base + bytes;
+    return;
+  }
   if (queue.running() && queue.PendingWriteOverlaps(base, bytes) &&
       !queue.PendingWritesKnown(base, bytes))
     OwnRenderer("pending-write");
@@ -386,6 +448,22 @@ void SpeculateWalkRead(render::Renderer& renderer, u64 base, u64 bytes) {
   if (!render::FlushCsWritesForGpu(renderer, base, bytes, "desc") ||
       !render::SpeculateGuestRead(base, bytes))
     render::FlushCsWritesRange(renderer, base, bytes, "desc");
+  if (known && kKnownVerify) {
+    render::FlushCsWritesRange(renderer, base, bytes, "desc");
+    const u32* landed = reinterpret_cast<const u32*>(base);
+    const u32* want = known->dwords.data() + (base - known->first) / 4;
+    for (u64 i = 0; i < bytes / 4; i++) {
+      if (landed[i] == want[i])
+        continue;
+      static int shown = 0;
+      if (shown++ < 16)
+        BASE_LOGW("gpu",
+                  "known GPU write {:#x}+{}: dword {} is {:#x}, landed {:#x}",
+                  (unsigned long long)base, (unsigned long long)bytes, i,
+                  want[i], landed[i]);
+      break;
+    }
+  }
 }
 
 }  // namespace gpu::ps4

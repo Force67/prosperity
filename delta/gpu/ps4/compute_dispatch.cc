@@ -18,6 +18,7 @@
 #include "base/containers/set.h"
 #include "base/containers/vector.h"
 #include "base/math/value_bounds.h"
+#include "base/memory/move.h"
 #include "base/memory/shared_pointer.h"
 #include "gpu/gcn/gcn_decode.h"
 #include "gpu/gcn/gcn_detile.h"
@@ -300,6 +301,7 @@ bool RunFillKernelAsFill(render::Renderer& renderer,
     return false;
   u32 value;
   std::memcpy(&value, reinterpret_cast<const void*>(src.base), 4);
+  ForgetKnownGpuWrites(dst.base, bytes);
   render::ApplyMemoryFill(renderer, dst.base, bytes, value);
   return true;
 }
@@ -355,6 +357,7 @@ bool RunRepeatFillKernelAsFill(render::Renderer& renderer,
                      dst.num_records) *
       4;
   const bool wide = config[1] == 2;
+  ForgetKnownGpuWrites(dst.base, bytes);
   if (!bytes || !IsMappedGuestRange(dst.base, bytes) ||
       (wide ? !render::CanClearMemoryFill64(dst.base, bytes)
             : render::OverlapsLiveTarget(dst.base, bytes)) ||
@@ -371,6 +374,69 @@ bool RunRepeatFillKernelAsFill(render::Renderer& renderer,
   std::memcpy(&value, reinterpret_cast<const void*>(src.base), 4);
   render::ApplyMemoryFill(renderer, dst.base, bytes, value);
   return true;
+}
+
+// dst[i] = src[i % params[1]] for i < params[0], dword by dword: a game stages
+// a pass's constants, descriptors among them, into a fixed slot with it.
+constexpr u32 kWrapCopyKernel[] = {
+    0xbeeb03ff, 0x00000020, 0xbefc03ff, 0x50784801, 0xbf960000, 0x936ac00c,
+    0xc2060900, 0x4a04006a, 0xbf8c007f, 0x7da8040c, 0xbf88002d, 0xc2050901,
+    0xbf8c007f, 0x7e000c0a, 0x7e005700, 0x100000ff, 0x4f800000, 0x7e060f00,
+    0xd2ec6a00, 0x0202060a, 0xd10a0008, 0x00020280, 0x4c020080, 0xd2000000,
+    0x00220101, 0xd2d40001, 0x00020700, 0x4c000303, 0x4a020303, 0xd2000000,
+    0x00220101, 0xd2d40000, 0x00020500, 0xd2d20001, 0x0002000a, 0x4c060302,
+    0x7d86060a, 0xd18c0008, 0x00020302, 0x87ea6a08, 0x50000080, 0xd2506a00,
+    0x002200c1, 0xbf010a80, 0x85ea807e, 0x000000c1, 0xd2d60000, 0x0002000a,
+    0x4c000102, 0xe0002000, 0x80000000, 0xd1a80000, 0x00020406, 0xbf8c0f70,
+    0xe0102000, 0x80010002, 0xbf810000,
+};
+
+// The wrap copy's output, worked out from source memory nothing still writes,
+// so a descriptor walk reading the slot need not wait for the GPU.
+void NoteWrapCopyKernel(u64 cs_addr,
+                        const u32 groups[3],
+                        const u32 threads[3],
+                        u32 user_sgpr,
+                        u32 tgid_enable,
+                        const u32* user_data) {
+  if (threads[0] != 64 || threads[1] != 1 || threads[2] != 1 ||
+      groups[1] != 1 || groups[2] != 1 || user_sgpr != 12 ||
+      !(tgid_enable & 1) ||
+      !IsMappedGuestRange(cs_addr, sizeof(kWrapCopyKernel)) ||
+      std::memcmp(reinterpret_cast<const void*>(cs_addr), kWrapCopyKernel,
+                  sizeof(kWrapCopyKernel)))
+    return;
+  const gcn::VBuffer src = gcn::DecodeVBuffer(user_data);
+  const gcn::VBuffer dst = gcn::DecodeVBuffer(user_data + 4);
+  const gcn::VBuffer params = gcn::DecodeVBuffer(user_data + 8);
+  const auto raw_dwords = [](const gcn::VBuffer& v, const u32* d) {
+    return v.stride == 4 && v.dfmt == 4 &&
+           (v.nfmt == 4 || v.nfmt == 5 || v.nfmt == 7) && !(d[1] >> 31) &&
+           !(d[3] & (1u << 23));
+  };
+  if (!raw_dwords(src, user_data) || !raw_dwords(dst, user_data + 4) ||
+      src.nfmt != dst.nfmt || (dst.base & 3) ||
+      !IsMappedGuestRange(params.base, 8) ||
+      WalkReadWouldWait(params.base, 8))
+    return;
+  u32 config[2];
+  std::memcpy(config, reinterpret_cast<const void*>(params.base),
+              sizeof(config));
+  const u32 n = static_cast<u32>(base::Min<u64>(
+      base::Min<u64>(u64(groups[0]) * 64, config[0]), dst.num_records));
+  const u32 period = config[1] ? config[1] : n;
+  const u32 readable = base::Min(period, src.num_records);
+  if (!n || n > 16384 ||
+      (readable && (!IsMappedGuestRange(src.base, readable * 4ull) ||
+                    WalkReadWouldWait(src.base, readable * 4ull))))
+    return;
+  const u32* in = reinterpret_cast<const u32*>(src.base);
+  base::Vector<u32> out(n);
+  for (u32 i = 0; i < n; i++) {
+    const u32 at = i % period;
+    out[i] = at < src.num_records ? in[at] : 0;
+  }
+  NoteKnownGpuWrite(dst.base, base::move(out));
 }
 
 namespace {
@@ -790,6 +856,8 @@ void DispatchCompute(render::Renderer& renderer,
                                ci.res[i].write_bytes  ? ci.res[i].write_bytes
                                : ci.res[i].guest_size ? ci.res[i].guest_size
                                                       : ci.res[i].size);
+    NoteWrapCopyKernel(cs_addr, groups, threads, user_sgpr, tgid_enable,
+                       user_data);
     queue.PushCall([&renderer, job, trace, num_res = ci.num_res] {
       const bool executed = render::Dispatch(renderer, *job);
       if (trace)
@@ -797,6 +865,11 @@ void DispatchCompute(render::Renderer& renderer,
     });
     return;
   }
+  for (u32 i = 0; i < ci.num_res; i++)
+    if (ci.res[i].written)
+      ForgetKnownGpuWrites(ci.res[i].base, ci.res[i].guest_size
+                                               ? ci.res[i].guest_size
+                                               : ci.res[i].size);
   OwnRenderer("dispatch");
   const bool executed = render::Dispatch(renderer, ci);
   if (trace)

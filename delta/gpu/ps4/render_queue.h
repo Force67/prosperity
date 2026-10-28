@@ -106,4 +106,13 @@ void FlushForWalkRead(render::Renderer& renderer,
 void SpeculateWalkRead(render::Renderer& renderer, u64 base, u64 bytes);
 bool WalkReadWouldWait(u64 base, u64 bytes);
 
+// A GPU write whose result the CPU worked out when it queued it. A descriptor
+// walk that reads it uses these values instead of waiting for the GPU to land
+// them; any later write to the range forgets them.
+void NoteKnownGpuWrite(u64 base, base::Vector<u32> dwords);
+void ForgetKnownGpuWrites(u64 base, u64 bytes);
+// Overwrites `out` with the known write SpeculateWalkRead just let through
+// unflushed, if it was this read.
+bool OverlayKnownGpuWrite(u64 base, u64 bytes, u8* out);
+
 }  // namespace gpu::ps4
