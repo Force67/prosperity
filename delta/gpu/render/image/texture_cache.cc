@@ -48,7 +48,10 @@
 
 namespace {
 DELTA_OPTION(int, kForceTile, "DELTA_GPU_FORCETILE", -1);
-DELTA_OPTION(u64, kTextureMb, "DELTA_GPU_TEX_MB", 1024);
+// 0 picks by device: 4 GiB where textures share the host's memory, 1 GiB in
+// dedicated VRAM. Shadow of the Colossus samples more than 1 GiB in a
+// gameplay frame and re-uploaded a few hundred textures a frame under it.
+DELTA_OPTION(u64, kTextureMb, "DELTA_GPU_TEX_MB", 0);
 DELTA_OPTION(bool, kDefaultSampler, "DELTA_GPU_DEFSAMPLER", false);
 DELTA_OPTION(bool, kForceWhite, "DELTA_GPU_FORCEWHITE", false);
 DELTA_OPTION(bool, kTexDump, "DELTA_GPU_TEXDUMP", false);
@@ -1150,7 +1153,11 @@ static rhi::TextureView* ResolveTextureView(u64 base,
   }
   if (image_it == g_texture_cache.images.end()) {
     static const u64 kTextureBudget =
-        base::Max<u64>(kTextureMb, 64) * 1024 * 1024;
+        base::Max<u64>(kTextureMb ? kTextureMb.get()
+                       : Device().caps().unified_memory ? 4096
+                                                        : 1024,
+                       64)
+        << 20;
     if (g_texture_cache.images.size() >= kMaxTextureImages &&
         !EvictTextures(0, kTextureBudget))
       return nullptr;
